@@ -79,9 +79,9 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/macos_metal_render_log_compa
    `MACOS_METAL_RENDER_LOG_REQUIRE_GPU_CAPTURE=1`.
    Strict capture mode requires `macos_metal_gpu_capture_tool` to be
    `xcode-gpu-frame-capture`, `macos_metal_gpu_capture_artifact`, and a capture
-   artifact whose first bytes are `XCODE-GPUTRACE`; a status-only row,
-   browser-metadata row, or env-only claimed magic is diagnostic, not native
-   GPU-capture proof.
+   artifact whose first bytes are `XCODE-GPUTRACE`; the capture env must also
+   claim the same native artifact marker. A status-only row, browser-metadata
+   row, or env-only claimed magic is diagnostic, not native GPU-capture proof.
 5. Run `scripts/check/check-macos-metal-render-log-compare.shs` and consume the
    normalized `macos_metal_render_log_compare_*` keys from the output env.
 
@@ -177,8 +177,8 @@ macos_metal_render_log_compare_pairwise_status=pass
 9. Reject missing Xcode GPU capture when strict capture mode is enabled.
 10. Reject Xcode GPU capture rows whose artifact bytes do not match the native
    marker, even if the env row claims `XCODE-GPUTRACE`.
-11. Reject status-only Xcode GPU capture rows that omit the capture artifact or
-    native artifact marker.
+11. Reject Xcode GPU capture rows that omit the capture artifact or native
+    artifact marker.
 12. Reject strict Metal capture rows that use browser metadata as the capture
     tool even when the `.gputrace` artifact bytes are valid.
 
@@ -191,7 +191,7 @@ macos_metal_render_log_compare_pairwise_status=pass
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 70 lines folded for reproduction.
+Runnable source: 83 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -215,6 +215,7 @@ expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_artifact
 expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_artifact_file_status=pass")
 expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_artifact_magic=XCODE-GPUTRACE")
 expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_artifact_claimed_magic=XCODE-GPUTRACE")
+expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_artifact_claimed_magic_reason=pass")
 expect(evidence).to_contain("macos_metal_render_log_compare_blocked_gate_count=0")
 expect(evidence).to_contain("macos_metal_render_log_compare_blocked_gates=")
 expect(evidence).to_contain("macos_metal_render_log_compare_generated_readback_gate_status=pass")
@@ -264,6 +265,18 @@ expect(missing_source_evidence).to_contain("electron-metal-source-missing")
 expect(missing_source_evidence).to_contain("chrome-metal-source-missing")
 expect(missing_source_evidence).to_contain("macos_metal_render_log_compare_electron_browser_backing_source_file_status=missing")
 expect(missing_source_evidence).to_contain("macos_metal_render_log_compare_chrome_browser_backing_source_file_status=missing")
+
+val missing_claimed_magic_command = command.replace("macos_metal_gpu_capture_artifact_magic=XCODE-GPUTRACE\\n", "") + " || true"
+val (_missing_magic_stdout, _missing_magic_stderr, missing_magic_code) = process_run("/bin/sh", ["-c", missing_claimed_magic_command])
+expect(missing_magic_code).to_equal(0)
+
+val missing_magic_evidence = file_read("build/test-macos-metal-render-log-pass/out/evidence.env")
+expect(missing_magic_evidence).to_contain("macos_metal_render_log_compare_status=fail")
+expect(missing_magic_evidence).to_contain("macos-metal-gpu-capture-claimed-magic-missing")
+expect(missing_magic_evidence).to_contain("macos_metal_render_log_compare_gpu_capture_artifact_magic=XCODE-GPUTRACE")
+expect(missing_magic_evidence).to_contain("macos_metal_render_log_compare_gpu_capture_artifact_claimed_magic=")
+expect(missing_magic_evidence).to_contain("macos_metal_render_log_compare_gpu_capture_artifact_claimed_magic_reason=macos-metal-gpu-capture-claimed-magic-missing")
+expect(missing_magic_evidence).to_contain("macos_metal_render_log_compare_gpu_capture_gate_status=fail")
 expect(missing_source_evidence).to_contain("macos_metal_render_log_compare_browser_backing_gate_status=fail")
 ```
 
@@ -475,7 +488,7 @@ expect(evidence).to_contain("macos_metal_render_log_compare_blocked_gates=argb-s
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -493,7 +506,9 @@ expect(evidence).to_contain("macos_metal_render_log_compare_status=fail")
 expect(evidence).to_contain("macos-metal-gpu-capture-artifact-missing")
 expect(evidence).to_contain("macos-metal-gpu-capture-artifact-file-missing")
 expect(evidence).to_contain("macos-metal-gpu-capture-magic-missing")
+expect(evidence).to_contain("macos-metal-gpu-capture-claimed-magic-missing")
 expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_artifact_file_status=missing")
+expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_artifact_claimed_magic_reason=macos-metal-gpu-capture-claimed-magic-missing")
 expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_gate_status=fail")
 expect(evidence).to_contain("macos_metal_render_log_compare_blocked_gates=xcode-gpu-capture")
 ```
@@ -505,7 +520,7 @@ expect(evidence).to_contain("macos_metal_render_log_compare_blocked_gates=xcode-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -525,6 +540,7 @@ expect(evidence).to_contain("macos-metal-gpu-capture-magic-NOPE")
 expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_artifact_file_status=pass")
 expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_artifact_magic=NOPE")
 expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_artifact_claimed_magic=XCODE-GPUTRACE")
+expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_artifact_claimed_magic_reason=pass")
 expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_gate_status=fail")
 ```
 
