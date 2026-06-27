@@ -27,7 +27,7 @@ tauri_simple_web_layout_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 12 | 12 | 0 | 0 |
+| 13 | 13 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -82,6 +82,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_simple_web_layout_proo
   on `captured_argb_written=true` alone.
 - ARGB capture file-status rows distinguish `missing`, `empty`, and `pass` so
   diagnostics cannot treat a zero-byte artifact as a valid capture file.
+- ARGB capture proof paths must not resolve back to the top-level proof JSON
+  even if the proof contains artifact-shaped fields.
 - ARGB capture files must parse as `argb-u32` artifacts from the Tauri window
   screenshot converter, match the requested viewport, contain the exact pixel
   count, and include nonzero pixels.
@@ -275,6 +277,38 @@ expect(empty).to_contain("tauri_simple_web_layout_validation_status=fail")
 expect(empty).to_contain("tauri_simple_web_layout_validation_reason=empty-captured-argb-file")
 expect(empty).to_contain("tauri_simple_web_layout_captured_argb_file_status=empty")
 expect(empty).to_contain("tauri_simple_web_layout_captured_argb_size_bytes=0")
+```
+
+</details>
+
+#### rejects captured ARGB paths that point back at the proof JSON
+
+-  proof command
+   - Expected: code equals `1`
+- Confirm the proof JSON cannot be reused as its own Tauri ARGB artifact
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-tauri-layout-validator-self-artifact"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_command(root + "/proof.json", "p.captured_argb_path=path.basename(process.argv[1]);p.format=\"argb-u32\";p.producer=\"tauri-x11-window-screenshot\";p.pixels=Array(96*64).fill(4294967295)") +
+    " && node scripts/check/validate-tauri-simple-web-layout-proof.js " + root + "/proof.json > " + root + "/evidence.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read(root + "/evidence.env")
+step("Confirm the proof JSON cannot be reused as its own Tauri ARGB artifact")
+expect(evidence).to_contain("tauri_simple_web_layout_validation_status=fail")
+expect(evidence).to_contain("tauri_simple_web_layout_validation_reason=missing-captured-argb-file")
+expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_path=proof.json")
+expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_file_status=missing")
+expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_size_bytes=")
 ```
 
 </details>
@@ -525,11 +559,12 @@ expect(pixel).to_contain("tauri_simple_web_layout_mismatch_count=4")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val script = file_read("scripts/check/check-tauri-simple-web-layout-bitmap-evidence.shs")
+val validator = file_read("scripts/check/validate-tauri-simple-web-layout-proof.js")
 expect(script).to_contain("validate-tauri-simple-web-layout-proof.js")
 expect(script).to_contain("tauri_simple_web_layout_validation_status")
 expect(script).to_contain("tauri_simple_web_layout_captured_argb_file_status")
@@ -539,6 +574,7 @@ expect(script).to_contain("tauri_simple_web_layout_captured_argb_nonzero_pixel_c
 expect(script).to_contain("tauri_simple_web_layout_requested_width")
 expect(script).to_contain("checksum-mismatch|weighted-checksum-mismatch|pixel-mismatch")
 expect(script).to_contain("status=divergent")
+expect(validator).to_contain("path.resolve(candidate) === path.resolve(proofPath)")
 val converter = file_read("tools/tauri-live-bitmap/raw_rgba_to_argb.js")
 expect(converter).to_contain("captured_argb_path: outputPath")
 ```
@@ -549,8 +585,8 @@ expect(converter).to_contain("captured_argb_path: outputPath")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 12 |
-| Active scenarios | 12 |
+| Total scenarios | 13 |
+| Active scenarios | 13 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
