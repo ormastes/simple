@@ -16,6 +16,7 @@ let missingSourceCount = 0;
 let emptySourceCount = 0;
 let symlinkSourceCount = 0;
 let hardlinkSourceCount = 0;
+let duplicateSourceCount = 0;
 let sourceCount = 0;
 let text = '';
 let coherentSource = false;
@@ -29,6 +30,7 @@ const validRenderMarkerPattern = /\[tauri-shell\]\s+render,\s+html_len=([1-9][0-
 const anyRenderMarkerPattern = /\[tauri-shell\]\s+render,\s+html_len=/;
 const vulkanMarkerPattern = /(Vulkan|vulkan|VK_|ANGLE.*Vulkan|Renderer.*Vulkan|HWUI.*Vulkan|skiavk)/i;
 const failureMarkerPattern = /(F\/DEBUG|Fatal signal|F\/libc|F\/VulkanManager|Simple subprocess stdout closed before a valid render arrived|Headless UI completed|parse error: expected value|Requested GL implementation .*angle=vulkan.* not found|Exiting GPU process due to errors during initialization)/i;
+const seenSourceRealpaths = new Set();
 
 function renderHtmlLen(content) {
   const match = content.match(validRenderMarkerPattern);
@@ -59,6 +61,18 @@ for (const file of files) {
     hardlinkSourceCount += 1;
     continue;
   }
+  let realpath = '';
+  try {
+    realpath = fs.realpathSync(file);
+  } catch (_err) {
+    missingSourceCount += 1;
+    continue;
+  }
+  if (seenSourceRealpaths.has(realpath)) {
+    duplicateSourceCount += 1;
+    continue;
+  }
+  seenSourceRealpaths.add(realpath);
   const content = fs.readFileSync(file, 'utf8');
   if (content.length === 0) {
     emptySourceCount += 1;
@@ -96,6 +110,8 @@ if (requestedSourceCount === 0 || sourceCount === 0) {
   reason = 'android-render-log-source-symlink';
 } else if (hardlinkSourceCount > 0) {
   reason = 'android-render-log-source-hardlink';
+} else if (duplicateSourceCount > 0) {
+  reason = 'android-render-log-source-duplicate';
 } else if (emptySourceCount > 0) {
   reason = 'android-render-log-source-empty';
 } else if (failureMarker) {
@@ -118,6 +134,7 @@ emit('android_render_log_missing_source_count', missingSourceCount);
 emit('android_render_log_empty_source_count', emptySourceCount);
 emit('android_render_log_symlink_source_count', symlinkSourceCount);
 emit('android_render_log_hardlink_source_count', hardlinkSourceCount);
+emit('android_render_log_duplicate_source_count', duplicateSourceCount);
 emit('android_render_log_html_len', htmlLen);
 emit('android_render_log_source_coherence_status', coherentSource ? 'pass' : 'fail');
 emit('android_render_log_coherent_source_path', coherentSourcePath);
