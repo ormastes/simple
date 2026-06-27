@@ -6,7 +6,41 @@ cd "$ROOT_DIR"
 
 BUILD_DIR="${BUILD_DIR:-build/wm-launch-capture-evidence}"
 REPORT_PATH="${REPORT_PATH:-$BUILD_DIR/report.md}"
-SIMPLE_BIN="${SIMPLE_BIN:-src/compiler_rust/target/release/simple}"
+SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
+SIMPLE_BIN_STATUS=pass
+is_rust_seed_simple() {
+    case "$1" in
+        src/compiler_rust/*|*/src/compiler_rust/*|./src/compiler_rust/*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+if [ "${SIMPLE_BIN:-}" = "" ]; then
+    SIMPLE_BIN_SOURCE="missing-self-hosted"
+    for candidate in "release"/*/simple "bin/release"/*/simple "build/bootstrap/stage3/simple" "bin/simple" "./bin/simple"; do
+        if [ -x "$candidate" ]; then
+            SIMPLE_BIN="$candidate"
+            SIMPLE_BIN_SOURCE="repo-self-hosted-fallback"
+            break
+        fi
+    done
+    if [ "${SIMPLE_BIN:-}" = "" ] && [ "${ALLOW_PATH_SIMPLE_BIN:-0}" = "1" ] && command -v simple >/dev/null 2>&1; then
+        SIMPLE_BIN="$(command -v simple)"
+        SIMPLE_BIN_SOURCE="path-opt-in"
+    fi
+else
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
+fi
+SIMPLE_BIN="${SIMPLE_BIN:-}"
+if [ "$SIMPLE_BIN" = "" ]; then
+    SIMPLE_BIN_STATUS=missing
+elif is_rust_seed_simple "$SIMPLE_BIN"; then
+    SIMPLE_BIN_STATUS=forbidden
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-rust-seed-forbidden"
+elif [ ! -x "$SIMPLE_BIN" ]; then
+    SIMPLE_BIN_STATUS=missing
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-missing"
+fi
+export SIMPLE_BIN SIMPLE_BIN_SOURCE SIMPLE_BIN_STATUS
 TIMEOUT_SECS="${WM_CAPTURE_EVIDENCE_TIMEOUT_SECS:-180}"
 KILL_SECS="${WM_CAPTURE_EVIDENCE_TIMEOUT_KILL_SECS:-10}"
 RUN_ELECTRON_LIVE_SMOKE="${RUN_ELECTRON_LIVE_SMOKE:-1}"
@@ -47,10 +81,35 @@ rm -f "$CONTRACT_LOG" "$SPEC_LOG" "$ELECTRON_LOG" "$ELECTRON_MDI_LOG" "$QEMU_LOG
 echo "check=wm_launch_capture_evidence"
 echo "strict_live_capture=$STRICT_LIVE_CAPTURE"
 echo "strict_qemu_capture=$STRICT_QEMU_CAPTURE"
+echo "simple_bin=$SIMPLE_BIN"
+echo "simple_bin_source=$SIMPLE_BIN_SOURCE"
+echo "simple_bin_status=$SIMPLE_BIN_STATUS"
 
-if [ ! -x "$SIMPLE_BIN" ]; then
+emit_fail() {
+    reason="$1"
+    {
+        echo "# WM Launch Capture Evidence"
+        echo
+        echo "- status: fail"
+        echo "- reason: $reason"
+        echo "- simple_bin: $SIMPLE_BIN"
+        echo "- simple_bin_source: $SIMPLE_BIN_SOURCE"
+        echo "- simple_bin_status: $SIMPLE_BIN_STATUS"
+    } >"$REPORT_PATH"
     echo "wm_launch_capture_evidence_status=fail"
-    echo "wm_launch_capture_evidence_reason=missing-simple-bin"
+    echo "wm_launch_capture_evidence_reason=$reason"
+    echo "wm_launch_capture_simple_bin=$SIMPLE_BIN"
+    echo "wm_launch_capture_simple_bin_source=$SIMPLE_BIN_SOURCE"
+    echo "wm_launch_capture_simple_bin_status=$SIMPLE_BIN_STATUS"
+    echo "wm_launch_capture_report_path=$REPORT_PATH"
+}
+
+if [ "$SIMPLE_BIN_STATUS" = "forbidden" ]; then
+    emit_fail "simple-bin-forbidden"
+    exit 1
+fi
+if [ "$SIMPLE_BIN_STATUS" != "pass" ] || [ ! -x "$SIMPLE_BIN" ]; then
+    emit_fail "missing-simple-bin"
     exit 1
 fi
 
@@ -218,7 +277,7 @@ electron_mdi_status=unavailable
 electron_mdi_reason=not-run
 if [ "$RUN_ELECTRON_MDI_EVIDENCE" = "1" ]; then
     set +e
-    run_with_timeout sh scripts/check/check-electron-mdi-evidence.shs >"$ELECTRON_MDI_LOG" 2>&1
+    SIMPLE_BIN="$SIMPLE_BIN" SIMPLE_BIN_SOURCE="$SIMPLE_BIN_SOURCE" run_with_timeout sh scripts/check/check-electron-mdi-evidence.shs >"$ELECTRON_MDI_LOG" 2>&1
     electron_mdi_code=$?
     set -e
     cat "$ELECTRON_MDI_LOG"
@@ -331,6 +390,9 @@ fi
     echo
     echo "- status: $status"
     echo "- reason: $reason"
+    echo "- simple_bin: $SIMPLE_BIN"
+    echo "- simple_bin_source: $SIMPLE_BIN_SOURCE"
+    echo "- simple_bin_status: $SIMPLE_BIN_STATUS"
     echo "- contract_status: $contract_status"
     echo "- contract_reason: $contract_reason"
     echo "- spec_status: $spec_status"
@@ -359,6 +421,9 @@ fi
 
 echo "wm_launch_capture_evidence_status=$status"
 echo "wm_launch_capture_evidence_reason=$reason"
+echo "wm_launch_capture_simple_bin=$SIMPLE_BIN"
+echo "wm_launch_capture_simple_bin_source=$SIMPLE_BIN_SOURCE"
+echo "wm_launch_capture_simple_bin_status=$SIMPLE_BIN_STATUS"
 echo "wm_launch_capture_contract_status=$contract_status"
 echo "wm_launch_capture_spec_status=$spec_status"
 echo "wm_launch_capture_electron_live_status=$electron_live_status"
