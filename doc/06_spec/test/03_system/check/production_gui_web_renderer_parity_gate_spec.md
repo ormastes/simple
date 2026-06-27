@@ -92,7 +92,8 @@ sh scripts/check/check-production-gui-web-renderer-parity-gate.shs || true
 - The Electron event-routing contract also requires Chromium timing and
   animation evidence: `performance.now()`, at least two animation frames, and a
   CSS animation probe. The `performance.now()` delta must be numeric and
-  positive, not merely present or zero. The gate also requires the event-routing
+  positive, not merely present or zero, and both timing rows must remain within
+  a one-second responsiveness budget. The gate also requires the event-routing
   validator pass row, exact event sequence, and native move/title/text payload
   rows promoted by the production parity wrapper. It also requires titlebar/UI
   readback rows for the visible browser event target.
@@ -373,7 +374,7 @@ expect(evidence).to_contain("production_gui_web_renderer_parity_gate_matrix_time
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 106 lines folded for reproduction.
+Runnable source: 118 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -435,6 +436,8 @@ expect(evidence).to_contain("production_gui_web_renderer_parity_gate_event_routi
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_event_routing_pointer_up_count=1")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_event_routing_performance_now_available=true")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_event_routing_input_to_paint_ms=18.4")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_event_routing_performance_now_delta_ms_lte=1000")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_event_routing_input_to_paint_ms_lte=1000")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_event_routing_animation_frame_count=2")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_event_routing_css_animation_probe=true")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_event_routing_event_sequence=host_wm_pointer:down,window_cmd:focus,window_cmd:move,window_cmd:title_command,window_cmd:maximize,input_event:text_input,input_event:pointer_down,input_event:pointer_up")
@@ -475,6 +478,16 @@ expect(bad_latency_evidence).to_contain("production_gui_web_renderer_parity_gate
 expect(bad_latency_evidence).to_contain("production_gui_web_renderer_parity_gate_reason=event-routing-interaction-latency-contract-missing")
 expect(bad_latency_evidence).to_contain("production_gui_web_renderer_parity_gate_event_routing_input_to_paint_ms=0")
 
+val slow_latency_command = command.replace("production_gui_web_renderer_parity_event_routing_input_to_paint_ms=18.4", "production_gui_web_renderer_parity_event_routing_input_to_paint_ms=1001") + " || true"
+val (_slow_latency_stdout, _slow_latency_stderr, slow_latency_code) = process_run("/bin/sh", ["-c", slow_latency_command])
+expect(slow_latency_code).to_equal(0)
+
+val slow_latency_evidence = file_read("build/test-production-gui-web-renderer-parity-gate-pass/out/evidence.env")
+expect(slow_latency_evidence).to_contain("production_gui_web_renderer_parity_gate_status=fail")
+expect(slow_latency_evidence).to_contain("production_gui_web_renderer_parity_gate_reason=event-routing-interaction-latency-contract-missing")
+expect(slow_latency_evidence).to_contain("production_gui_web_renderer_parity_gate_event_routing_input_to_paint_ms=1001")
+expect(slow_latency_evidence).to_contain("production_gui_web_renderer_parity_gate_required_event_routing_input_to_paint_ms_lte=1000")
+
 val bad_backend_command = command.replace("production_gui_web_renderer_parity_backend_metal_gpu_frame_complete=true", "production_gui_web_renderer_parity_backend_metal_gpu_frame_complete=false") + " || true"
 val (_bad_backend_stdout, _bad_backend_stderr, bad_backend_code) = process_run("/bin/sh", ["-c", bad_backend_command])
 expect(bad_backend_code).to_equal(0)
@@ -514,7 +527,7 @@ expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_ev
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 29 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -537,6 +550,16 @@ expect(zero_evidence).to_contain("production_gui_web_renderer_parity_gate_status
 expect(zero_evidence).to_contain("production_gui_web_renderer_parity_gate_reason=event-routing-performance-animation-contract-missing")
 expect(zero_evidence).to_contain("production_gui_web_renderer_parity_gate_event_routing_performance_now_delta_ms=0")
 expect(zero_evidence).to_contain("production_gui_web_renderer_parity_gate_required_event_routing_performance_now_delta_ms_gt=0")
+
+val slow_command = command.replace("not-a-number", "1001")
+val (_slow_stdout, _slow_stderr, slow_code) = process_run("/bin/sh", ["-c", slow_command])
+expect(slow_code).to_equal(0)
+
+val slow_evidence = file_read("build/test-production-gui-web-renderer-parity-gate-event-bad-delta/out/evidence.env")
+expect(slow_evidence).to_contain("production_gui_web_renderer_parity_gate_status=fail")
+expect(slow_evidence).to_contain("production_gui_web_renderer_parity_gate_reason=event-routing-performance-animation-contract-missing")
+expect(slow_evidence).to_contain("production_gui_web_renderer_parity_gate_event_routing_performance_now_delta_ms=1001")
+expect(slow_evidence).to_contain("production_gui_web_renderer_parity_gate_required_event_routing_performance_now_delta_ms_lte=1000")
 ```
 
 </details>

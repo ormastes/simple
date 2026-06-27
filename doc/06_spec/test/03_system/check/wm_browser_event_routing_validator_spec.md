@@ -78,9 +78,11 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/wm_browser_event_routing_val
   drag move, title command, maximize, text input, pointer down, and pointer up;
   counts alone are not enough event-routing proof.
 - Chromium timing must include an explicit positive `performance.now()` delta;
-  `0` does not prove distinct timing samples.
+  `0` does not prove distinct timing samples, and multi-second timing does not
+  prove responsive event-loop progress.
 - Input handling must include an explicit positive input-to-paint measurement
-  sampled after a dispatched DOM interaction and a following animation frame.
+  sampled after a dispatched DOM interaction and a following animation frame;
+  multi-second latency fails the event contract.
 - Boolean readiness, timing, animation, and CSS probe fields must be real JSON
   booleans; string values like `"true"` are not structured event proof.
 - Event counts, animation frame counts, traffic button counts, timing deltas,
@@ -267,8 +269,9 @@ expect(evidence).to_contain("wm_browser_event_routing_animation_frame_count=1")
 
 </details>
 
-#### rejects pass true proof when Chromium timing does not advance
+#### rejects pass true proof when Chromium timing does not advance or exceeds budget
 
+-  fixture command
 -  fixture command
    - Expected: code equals `1`
 
@@ -276,27 +279,34 @@ expect(evidence).to_contain("wm_browser_event_routing_animation_frame_count=1")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val command = "rm -rf build/test-wm-browser-event-validator-zero-timing && mkdir -p build/test-wm-browser-event-validator-zero-timing && " +
     _fixture_command("build/test-wm-browser-event-validator-zero-timing/proof.json", "p.performance_now_delta_ms=0") +
-    " && node scripts/check/validate-wm-browser-event-routing-proof.js build/test-wm-browser-event-validator-zero-timing/proof.json > build/test-wm-browser-event-validator-zero-timing/evidence.env"
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js build/test-wm-browser-event-validator-zero-timing/proof.json > build/test-wm-browser-event-validator-zero-timing/evidence.env; " +
+    _fixture_command("build/test-wm-browser-event-validator-zero-timing/slow.json", "p.performance_now_delta_ms=1001") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js build/test-wm-browser-event-validator-zero-timing/slow.json > build/test-wm-browser-event-validator-zero-timing/slow.env"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(1)
 
 val evidence = file_read("build/test-wm-browser-event-validator-zero-timing/evidence.env")
+val slow = file_read("build/test-wm-browser-event-validator-zero-timing/slow.env")
 expect(evidence).to_contain("wm_browser_event_routing_validation_status=fail")
 expect(evidence).to_contain("wm_browser_event_routing_validation_reason=event-routing-performance-animation-contract-missing")
 expect(evidence).to_contain("wm_browser_event_routing_performance_now_available=true")
 expect(evidence).to_contain("wm_browser_event_routing_performance_now_delta_ms=0")
+expect(slow).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(slow).to_contain("wm_browser_event_routing_validation_reason=event-routing-performance-animation-contract-missing")
+expect(slow).to_contain("wm_browser_event_routing_performance_now_delta_ms=1001")
 ```
 
 </details>
 
 #### rejects pass true proof when input-to-paint latency is missing or malformed
 
+-  fixture command
 -  fixture command
 -  fixture command
 -  fixture command
@@ -307,7 +317,7 @@ expect(evidence).to_contain("wm_browser_event_routing_performance_now_delta_ms=0
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 23 lines folded for reproduction.
+Runnable source: 29 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -317,13 +327,16 @@ val command = "rm -rf build/test-wm-browser-event-validator-input-latency && mkd
     _fixture_command("build/test-wm-browser-event-validator-input-latency/zero.json", "p.input_to_paint_ms=0") +
     " && node scripts/check/validate-wm-browser-event-routing-proof.js build/test-wm-browser-event-validator-input-latency/zero.json > build/test-wm-browser-event-validator-input-latency/zero.env; " +
     _fixture_command("build/test-wm-browser-event-validator-input-latency/string.json", "p.input_to_paint_ms=\"18.4\"") +
-    " && node scripts/check/validate-wm-browser-event-routing-proof.js build/test-wm-browser-event-validator-input-latency/string.json > build/test-wm-browser-event-validator-input-latency/string.env"
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js build/test-wm-browser-event-validator-input-latency/string.json > build/test-wm-browser-event-validator-input-latency/string.env; " +
+    _fixture_command("build/test-wm-browser-event-validator-input-latency/slow.json", "p.input_to_paint_ms=1001") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js build/test-wm-browser-event-validator-input-latency/slow.json > build/test-wm-browser-event-validator-input-latency/slow.env"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(1)
 
 val missing = file_read("build/test-wm-browser-event-validator-input-latency/missing.env")
 val zero = file_read("build/test-wm-browser-event-validator-input-latency/zero.env")
 val string_latency = file_read("build/test-wm-browser-event-validator-input-latency/string.env")
+val slow = file_read("build/test-wm-browser-event-validator-input-latency/slow.env")
 step("Confirm event routing proof requires structured input-to-paint timing")
 expect(missing).to_contain("wm_browser_event_routing_validation_status=fail")
 expect(missing).to_contain("wm_browser_event_routing_validation_reason=event-routing-interaction-latency-contract-missing")
@@ -334,6 +347,9 @@ expect(zero).to_contain("wm_browser_event_routing_input_to_paint_ms=0")
 expect(string_latency).to_contain("wm_browser_event_routing_validation_status=fail")
 expect(string_latency).to_contain("wm_browser_event_routing_validation_reason=event-routing-interaction-latency-contract-missing")
 expect(string_latency).to_contain("wm_browser_event_routing_input_to_paint_ms=18.4")
+expect(slow).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(slow).to_contain("wm_browser_event_routing_validation_reason=event-routing-interaction-latency-contract-missing")
+expect(slow).to_contain("wm_browser_event_routing_input_to_paint_ms=1001")
 ```
 
 </details>

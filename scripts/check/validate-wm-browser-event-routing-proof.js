@@ -38,6 +38,12 @@ function jsonDecimalAtLeast(value, required) {
   return Number(text) >= required;
 }
 
+function jsonDecimalAtMost(value, required) {
+  const text = jsonNumberText(value);
+  if (text === null) return false;
+  return Number(text) <= required;
+}
+
 function sameJsonInteger(actual, expected) {
   const a = jsonIntegerText(actual);
   const e = jsonIntegerText(expected);
@@ -75,6 +81,7 @@ const expectedEventSequence = [
   'input_event:pointer_up',
 ];
 const expectedProofSource = 'tools/web-render-backend/wm_event_check.js';
+const maxEventTimingMs = 1000;
 
 function eventSequenceText(value) {
   if (!Array.isArray(value)) return '';
@@ -178,12 +185,16 @@ if (!boolTrue(proof.pass)) {
 } else if (
   !boolTrue(proof.performance_now_available) ||
   !jsonDecimalGreaterThan(proof.performance_now_delta_ms, 0) ||
+  !jsonDecimalAtMost(proof.performance_now_delta_ms, maxEventTimingMs) ||
   !boolTrue(proof.animation_frame_available) ||
   !jsonIntegerAtLeast(proof.animation_frame_count, 2) ||
   !boolTrue(proof.css_animation_probe)
 ) {
   reason = 'event-routing-performance-animation-contract-missing';
-} else if (!jsonDecimalGreaterThan(proof.input_to_paint_ms, 0)) {
+} else if (
+  !jsonDecimalGreaterThan(proof.input_to_paint_ms, 0) ||
+  !jsonDecimalAtMost(proof.input_to_paint_ms, maxEventTimingMs)
+) {
   reason = 'event-routing-interaction-latency-contract-missing';
 } else if (
   move.window_id_hint !== 'win1' ||
