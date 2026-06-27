@@ -100,11 +100,16 @@ function artifactStat(value, proofPath) {
     return null;
   }
   const raw = value.trim();
+  const proofDir = path.resolve(path.dirname(proofPath));
   const candidates = path.isAbsolute(raw)
     ? [raw]
     : [raw, path.join(path.dirname(proofPath), raw)];
   for (const candidate of candidates) {
-    if (path.resolve(candidate) === path.resolve(proofPath)) {
+    const resolvedCandidate = path.resolve(candidate);
+    if (
+      resolvedCandidate === path.resolve(proofPath) ||
+      !(resolvedCandidate === proofDir || resolvedCandidate.startsWith(`${proofDir}${path.sep}`))
+    ) {
       continue;
     }
     try {

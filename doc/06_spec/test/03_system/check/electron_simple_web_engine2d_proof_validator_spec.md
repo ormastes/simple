@@ -27,7 +27,7 @@ electron_simple_web_engine2d_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 15 | 15 | 0 | 0 |
+| 16 | 16 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -86,6 +86,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_simple_web_engine2d
   diagnostics cannot treat a zero-byte artifact as a valid capture file.
 - ARGB capture proof paths must not resolve back to the top-level proof JSON
   even if the proof contains artifact-shaped fields.
+- Relative ARGB capture proof paths must not escape the proof directory and
+  borrow a stale artifact from the validator working directory.
 - Captured ARGB files must parse as `argb-u32` Electron live-capture artifacts,
   match the proof viewport, include the expected pixel count, and contain
   nonzero pixels with numeric uint32 JSON pixel values.
@@ -473,6 +475,41 @@ expect(evidence).to_contain("electron_simple_web_engine2d_captured_argb_size_byt
 
 </details>
 
+#### rejects stale working-directory ARGB artifacts for relative capture paths
+
+-  proof command
+- "node -e 'const fs=require
+   - Expected: code equals `1`
+- Confirm Engine2D relative captures cannot borrow stale cwd artifacts
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 16 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-electron-engine2d-validator-stale-cwd-artifact"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && rm -f captured.json && " +
+    _proof_command(root + "/proof.json", "") +
+    " && rm -f " + root + "/captured.json && " +
+    "node -e 'const fs=require(\"fs\");const argb={width:96,height:64,format:\"argb-u32\",producer:\"electron-live-capture-page\",pixels:Array(96*64).fill(4294967295)};fs.writeFileSync(\"captured.json\",JSON.stringify(argb));' && " +
+    "node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/proof.json > " + root + "/evidence.env; code=$?; rm -f captured.json; exit $code"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read(root + "/evidence.env")
+step("Confirm Engine2D relative captures cannot borrow stale cwd artifacts")
+expect(evidence).to_contain("electron_simple_web_engine2d_validation_status=fail")
+expect(evidence).to_contain("electron_simple_web_engine2d_validation_reason=missing-captured-argb-file")
+expect(evidence).to_contain("electron_simple_web_engine2d_captured_argb_path=captured.json")
+expect(evidence).to_contain("electron_simple_web_engine2d_captured_argb_file_status=missing")
+expect(evidence).to_contain("electron_simple_web_engine2d_captured_argb_size_bytes=")
+```
+
+</details>
+
 #### rejects malformed captured ARGB shape and pixel data
 
 -  proof command
@@ -720,7 +757,7 @@ expect(pixel).to_contain("electron_simple_web_engine2d_mismatch_count=4")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 28 lines folded for reproduction.
+Runnable source: 31 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -747,7 +784,10 @@ expect(script).to_contain("electron_simple_web_engine2d_captured_argb_format")
 expect(script).to_contain("electron_simple_web_engine2d_captured_argb_nonzero_pixel_count")
 expect(script).to_contain("electron_simple_web_engine2d_proof_renderer")
 expect(script).to_contain("electron-proof.validation.env")
-expect(validator).to_contain("path.resolve(candidate) === path.resolve(proofPath)")
+expect(validator).to_contain("startsWith")
+expect(validator).to_contain("proofDir")
+expect(validator).to_contain("path.sep")
+expect(validator).to_contain("resolvedCandidate === path.resolve(proofPath)")
 val fixture = file_read("tools/electron-live-bitmap/exact_fixture.js")
 expect(fixture).to_contain("electron_user_agent")
 expect(fixture).to_contain("electron_process_version")
@@ -760,8 +800,8 @@ expect(fixture).to_contain("chrome_process_version")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 15 |
-| Active scenarios | 15 |
+| Total scenarios | 16 |
+| Active scenarios | 16 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
