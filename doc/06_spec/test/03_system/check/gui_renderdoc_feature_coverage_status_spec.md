@@ -390,7 +390,7 @@ checksum, and exact geometry is downgraded to `fail`.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 958 lines folded for reproduction.
+Runnable source: 960 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -483,10 +483,12 @@ expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_simple_ar
 expect(evidence).to_contain("linux_vulkan_render_log_compare_pairwise_status=missing")
 expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_simple_artifact_magic=missing")
 expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_chrome_status=unavailable")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_chrome_reason=")
 expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_chrome_env_file_status=missing")
 expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_chrome_artifact_file_status=missing")
 expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_chrome_artifact_magic=missing")
 expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_electron_status=unavailable")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_electron_reason=")
 expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_electron_env_file_status=missing")
 expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_electron_artifact_file_status=missing")
 expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_electron_artifact_magic=missing")
@@ -2411,6 +2413,8 @@ expect(evidence).to_contain("gui_renderdoc_feature_coverage_reason=missing-elect
 
 - Create controlled RenderDoc evidence but point production parity at a missing env
 - Assert browser-backing setup producer requires Chrome hardware and Vulkan details
+   - Expected: symlink_macos_code equals `0`
+- Reject symlinked macOS Metal render-log aggregate env
    - Expected: summary_code equals `0`
 - Reject browser-backing rollup pass without per-browser Vulkan proof
    - Expected: stale_code equals `0`
@@ -2423,6 +2427,8 @@ expect(evidence).to_contain("gui_renderdoc_feature_coverage_reason=missing-elect
 - Reject Simple Vulkan evidence when Engine2D readback mismatches are present
    - Expected: bad_chrome_proof_code equals `0`
 - Reject existing Chrome ARGB proof files that do not prove Vulkan-backed Chrome
+   - Expected: symlink_argb_code equals `0`
+- Reject symlinked GUI/web/2D ARGB proof and pairwise diff artifacts
    - Expected: code equals `0`
 - Assert the aggregate audit stays incomplete until production parity evidence passes
 
@@ -2430,7 +2436,7 @@ expect(evidence).to_contain("gui_renderdoc_feature_coverage_reason=missing-elect
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 296 lines folded for reproduction.
+Runnable source: 327 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple

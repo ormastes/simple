@@ -27,7 +27,7 @@ linux_vulkan_render_log_compare_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 10 | 10 | 0 | 0 |
+| 11 | 11 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -532,13 +532,13 @@ expect(evidence).to_contain("linux_vulkan_render_log_compare_require_renderdoc=1
 expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_gate_status=fail")
 expect(evidence).to_contain("linux_vulkan_render_log_compare_blocked_gates=renderdoc-chrome-rdc")
 expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_chrome_status=fail")
-expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_chrome_reason=gate-command-failed")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_chrome_reason=chromium-gpu-process-crashed-under-renderdoc")
 expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_chrome_env_file_status=pass")
 expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_chrome_artifact_file_status=missing")
 expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_chrome_artifact_magic=missing")
 val chrome_log = file_read("build/test-linux-vulkan-render-log-rdoc-reason/out/chrome.srl.env")
 expect(chrome_log).to_contain("simple_render_log_status=fail")
-expect(chrome_log).to_contain("simple_render_log_reason=gate-command-failed")
+expect(chrome_log).to_contain("simple_render_log_reason=chromium-gpu-process-crashed-under-renderdoc")
 ```
 
 </details>
