@@ -27,7 +27,7 @@ tauri_mobile_renderer_parity_artifact_gate_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 22 | 22 | 0 | 0 |
+| 23 | 23 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -111,6 +111,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_mobile_renderer_parity
 - The aggregate emits explicit mobile screenshot and MDI proof file status rows.
 - The aggregate preserves iOS and Android render-log validator env rows before
   deriving mobile parity status.
+- The aggregate requires iOS render-log validator rows to identify the coherent
+  Metal-backed WKWebView render-log source path and byte size.
 
 ## Scenarios
 
@@ -124,7 +126,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_mobile_renderer_parity
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 54 lines folded for reproduction.
+Runnable source: 56 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -154,6 +156,8 @@ expect(evidence).to_contain("tauri_mobile_renderer_parity_production_backend_tim
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_html_len=347702")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_tauri_context_status=pass")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_metal_context_status=pass")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_coherent_source_path=" + root + "/artifacts/ios.log")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_coherent_source_size_bytes=223")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_android_render_log_validation_status=pass")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_android_render_log_html_len=347702")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_file_status=pass")
@@ -206,6 +210,37 @@ expect(evidence).to_contain("tauri_mobile_renderer_parity_reason=ios-tauri-wkweb
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_validation_status=fail")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_tauri_context_status=fail")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_metal_marker_status=pass")
+```
+
+</details>
+
+#### rejects iOS render-log validator pass claims without coherent source artifact rows
+
+- Confirm iOS render-log pass claims are bound to a coherent source artifact
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 15 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-tauri-mobile-artifact-gate-missing-ios-coherent-source"
+val validator = root + "/fake-ios-render-validator.sh"
+val inject_validator = "printf '#!/bin/sh\\nprintf \"ios_render_log_validation_status=pass\\\\nios_render_log_validation_reason=pass\\\\nios_render_log_requested_source_count=2\\\\nios_render_log_source_count=2\\\\nios_render_log_missing_source_count=0\\\\nios_render_log_empty_source_count=0\\\\nios_render_log_symlink_source_count=0\\\\nios_render_log_source_coherence_status=pass\\\\nios_render_log_coherent_source_path=\\\\nios_render_log_coherent_source_size_bytes=\\\\nios_render_log_marker_status=pass\\\\nios_render_log_html_len=347702\\\\nios_render_log_metal_marker_status=pass\\\\nios_render_log_fallback_marker_status=pass\\\\nios_render_log_tauri_context_status=pass\\\\nios_render_log_metal_context_status=pass\\\\nios_render_log_failure_marker_status=pass\\\\n\"\\n' > " + validator + " && chmod +x " + validator
+val command = _run_aggregate_command(root, "present", "present", "png", "png").replace("PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=", inject_validator + " && TAURI_MOBILE_RENDERER_IOS_RENDER_LOG_VALIDATOR=" + validator + " PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=")
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read(root + "/stdout.env")
+step("Confirm iOS render-log pass claims are bound to a coherent source artifact")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_status=fail")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_reason=ios-render-log-coherent-source-missing")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_validation_status=pass")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_source_coherence_status=pass")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_coherent_source_path=")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_coherent_source_size_bytes=")
 ```
 
 </details>
@@ -819,7 +854,7 @@ expect(android).to_contain("tauri_mobile_renderer_parity_android_screenshot_file
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 45 lines folded for reproduction.
+Runnable source: 48 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -841,6 +876,9 @@ expect(script).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_marker_sou
 expect(script).to_contain("ios-mdi-proof-marker-source-missing")
 expect(script).to_contain("cat \"$ios_render_log_validation_env\"")
 expect(script).to_contain("tauri_mobile_renderer_parity_ios_render_log_html_len")
+expect(script).to_contain("tauri_mobile_renderer_parity_ios_render_log_coherent_source_path")
+expect(script).to_contain("tauri_mobile_renderer_parity_ios_render_log_coherent_source_size_bytes")
+expect(script).to_contain("ios-render-log-coherent-source-missing")
 expect(script).to_contain("tauri_mobile_renderer_parity_ios_render_log_fallback_marker_status")
 expect(script).to_contain("tauri_mobile_renderer_parity_android_render_log_html_len")
 expect(script).to_contain("tauri_mobile_renderer_parity_android_render_log_source_coherence_status")
@@ -876,8 +914,8 @@ expect(script).to_contain("tauri_mobile_renderer_parity_production_backend_timin
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 22 |
-| Active scenarios | 22 |
+| Total scenarios | 23 |
+| Active scenarios | 23 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

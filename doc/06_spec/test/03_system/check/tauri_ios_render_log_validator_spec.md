@@ -83,6 +83,9 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_ios_render_log_validat
 - The CAMetalLayer context binding alone is not enough; a separate CAMetalLayer
   or native Metal runtime readiness marker must be present in the same coherent
   source log, and generic Metal readiness text is not enough.
+- Passing validation emits the exact coherent iOS render-log source path and
+  byte size so aggregate evidence can bind Metal-backed rendering to a real log
+  artifact.
 - Fallback GPU markers such as SwiftShader, software rendering, or OpenGL
   renderer fallback text fail even when the log also contains WKWebView,
   CAMetalLayer, and Metal markers.
@@ -118,7 +121,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_ios_render_log_validat
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 26 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -139,6 +142,8 @@ expect(evidence).to_contain("ios_render_log_missing_source_count=0")
 expect(evidence).to_contain("ios_render_log_empty_source_count=0")
 expect(evidence).to_contain("ios_render_log_symlink_source_count=0")
 expect(evidence).to_contain("ios_render_log_source_coherence_status=pass")
+expect(evidence).to_contain("ios_render_log_coherent_source_path=" + root + "/ios.log")
+expect(evidence).to_contain("ios_render_log_coherent_source_size_bytes=223")
 expect(evidence).to_contain("ios_render_log_marker_status=pass")
 expect(evidence).to_contain("ios_render_log_html_len=347702")
 expect(evidence).to_contain("ios_render_log_metal_marker_status=pass")
@@ -606,7 +611,7 @@ expect(evidence).to_contain("ios_render_log_failure_marker_status=fail")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 45 lines folded for reproduction.
+Runnable source: 47 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -630,6 +635,8 @@ expect(evidence).to_contain("ios_render_log_missing_source_count=0")
 expect(evidence).to_contain("ios_render_log_empty_source_count=0")
 expect(evidence).to_contain("ios_render_log_symlink_source_count=0")
 expect(evidence).to_contain("ios_render_log_source_coherence_status=")
+expect(evidence).to_contain("ios_render_log_coherent_source_path=")
+expect(evidence).to_contain("ios_render_log_coherent_source_size_bytes=")
 expect(evidence).to_contain("ios_render_log_marker_status=")
 expect(evidence).to_contain("ios_render_log_html_len=")
 expect(evidence).to_contain("ios_render_log_metal_marker_status=")
@@ -667,7 +674,7 @@ expect(evidence).to_contain("ios_mdi_css_animation_probe=")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -677,6 +684,8 @@ expect(direct).to_contain("emit_existing_or_default")
 expect(direct).to_contain("emit_existing_or_default ios_render_log_validation_status \"$diagnostic_status\" \"$IOS_RENDER_LOG_VALIDATION_ENV\"")
 expect(direct).to_contain("emit_existing_or_default ios_render_log_validation_reason \"$diagnostic_reason\" \"$IOS_RENDER_LOG_VALIDATION_ENV\"")
 expect(direct).to_contain("emit_existing_or_default ios_render_log_source_coherence_status \"$diagnostic_status\" \"$IOS_RENDER_LOG_VALIDATION_ENV\"")
+expect(direct).to_contain("emit_existing_or_default ios_render_log_coherent_source_path \"\" \"$IOS_RENDER_LOG_VALIDATION_ENV\"")
+expect(direct).to_contain("emit_existing_or_default ios_render_log_coherent_source_size_bytes \"\" \"$IOS_RENDER_LOG_VALIDATION_ENV\"")
 expect(direct).to_contain("emit_existing_or_default ios_render_log_symlink_source_count 0 \"$IOS_RENDER_LOG_VALIDATION_ENV\"")
 expect(direct).to_contain("emit_existing_or_default ios_render_log_tauri_context_status \"$diagnostic_status\" \"$IOS_RENDER_LOG_VALIDATION_ENV\"")
 expect(direct).to_contain("emit_existing_or_default ios_render_log_metal_context_status \"$diagnostic_status\" \"$IOS_RENDER_LOG_VALIDATION_ENV\"")
@@ -695,7 +704,7 @@ expect(direct).to_contain("emit_existing_or_default ios_mdi_animation_status \"$
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 48 lines folded for reproduction.
+Runnable source: 53 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -713,6 +722,8 @@ expect(direct).to_contain("value_of ios_render_log_validation_status")
 expect(direct).to_contain("ios_render_log_empty_source_count=$ios_render_log_empty_source_count")
 expect(direct).to_contain("ios_render_log_symlink_source_count=$ios_render_log_symlink_source_count")
 expect(direct).to_contain("ios_render_log_source_coherence_status=$ios_render_log_source_coherence_status")
+expect(direct).to_contain("ios_render_log_coherent_source_path=$ios_render_log_coherent_source_path")
+expect(direct).to_contain("ios_render_log_coherent_source_size_bytes=$ios_render_log_coherent_source_size_bytes")
 expect(direct).to_contain("ios_render_log_tauri_context_status=$ios_render_log_tauri_context_status")
 expect(direct).to_contain("ios_render_log_metal_context_status=$ios_render_log_metal_context_status")
 expect(direct).to_contain("ios_render_log_fallback_marker_status=$ios_render_log_fallback_marker_status")
@@ -732,6 +743,9 @@ expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_render_log_empty_
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_render_log_symlink_source_count")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_render_log_html_len")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_render_log_source_coherence_status")
+expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_render_log_coherent_source_path")
+expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_render_log_coherent_source_size_bytes")
+expect(aggregate).to_contain("ios-render-log-coherent-source-missing")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_render_log_tauri_context_status")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_render_log_metal_context_status")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_render_log_fallback_marker_status")

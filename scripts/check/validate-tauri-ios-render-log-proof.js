@@ -18,6 +18,8 @@ let symlinkSourceCount = 0;
 let sourceCount = 0;
 let text = '';
 let coherentSource = false;
+let coherentSourcePath = '';
+let coherentSourceSizeBytes = '';
 let htmlLen = '';
 const maxRenderHtmlLen = 10000000;
 
@@ -66,6 +68,10 @@ for (const file of files) {
   const sourceMetalContext = /\[tauri-shell\]\s+ios renderer context:(?=.*WKWebView)(?=.*metal_expected=true)(?=.*metal_layer=CAMetalLayer)/i.test(content);
   if (sourceRenderMarker && sourceMetalMarker && sourceTauriIosContext && sourceMetalContext) {
     coherentSource = true;
+    if (coherentSourcePath === '') {
+      coherentSourcePath = file;
+      coherentSourceSizeBytes = String(stat.size);
+    }
   }
 }
 
@@ -112,6 +118,8 @@ emit('ios_render_log_missing_source_count', missingSourceCount);
 emit('ios_render_log_empty_source_count', emptySourceCount);
 emit('ios_render_log_symlink_source_count', symlinkSourceCount);
 emit('ios_render_log_source_coherence_status', coherentSource ? 'pass' : 'fail');
+emit('ios_render_log_coherent_source_path', coherentSourcePath);
+emit('ios_render_log_coherent_source_size_bytes', coherentSourceSizeBytes);
 emit('ios_render_log_marker_status', renderMarker ? 'pass' : 'fail');
 emit('ios_render_log_html_len', htmlLen);
 emit('ios_render_log_metal_marker_status', metalMarker ? 'pass' : 'fail');
