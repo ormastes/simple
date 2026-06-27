@@ -23,6 +23,9 @@ Rust seed, and child wrappers must receive the same selected Simple binary.
   source, and status fields.
 - REQ-WM-LAUNCH-CAPTURE-BIN-004: Electron MDI child evidence receives the
   selected Simple binary and source provenance.
+- REQ-WM-LAUNCH-CAPTURE-BIN-005: Electron live smoke pass markers are accepted
+  only when validator-derived proof provenance, performance, animation, and
+  event-dispatch rows also pass.
 
 ## Plan
 
@@ -76,6 +79,18 @@ describe "WM launch capture Simple binary contract":
         expect(script).to_contain("wm_launch_capture_simple_bin_status=")
         expect(script).to_contain("SIMPLE_BIN=")
         expect(script).to_contain("SIMPLE_BIN_SOURCE=")
+        expect(script).to_contain("WM_LAUNCH_CAPTURE_ELECTRON_LIVE_SMOKE_SCRIPT")
+        expect(script).to_contain("electron_live_smoke_validation_status")
+        expect(script).to_contain("electron_live_smoke_proof_hardlink_status")
+        expect(script).to_contain("electron_live_smoke_proof_source_file_status")
+        expect(script).to_contain("electron_live_smoke_animation_frame_count")
+        expect(script).to_contain("electron_live_smoke_event_dispatch_type")
+        expect(script).to_contain("electron_live_smoke_event_dispatch_detail")
+        expect(script).to_contain("electron_live_smoke_event_dispatch_to_paint_ms")
+        expect(script).to_contain("wm_launch_capture_electron_live_validation_status")
+        expect(script).to_contain("wm_launch_capture_electron_live_proof_hardlink_status")
+        expect(script).to_contain("wm_launch_capture_electron_live_event_dispatch_type")
+        expect(script).to_contain("wm_launch_capture_electron_live_event_dispatch_to_paint_ms")
         expect(script).to_contain("run_with_timeout sh scripts/check/check-electron-mdi-evidence.shs")
 
     it "rejects explicit Rust seed before contract specs or child evidence":
@@ -99,3 +114,25 @@ describe "WM launch capture Simple binary contract":
         expect(spec_code).to_equal(0)
         val (_electron_out, _electron_err, electron_code) = process_run("/bin/sh", ["-c", "test ! -f " + root + "/out/electron-mdi.log"])
         expect(electron_code).to_equal(0)
+
+    it "rejects Electron live smoke pass markers when validator proof provenance fails":
+        val root = "build/test-wm-launch-capture-electron-live-hardlink"
+        val command = "rm -rf " + root + " && mkdir -p " + root + "/fixture && " +
+            "printf '#!/bin/sh\\nif [ \"$1\" = run ]; then printf \"host_wm_package_ready=true\\\\nsimpleos_wm_package_ready=true\\\\nhost_wm_focused_window=win1\\\\nsimpleos_wm_drag_surface=surf2\\\\nhost_wm_loop_marker=command=window_drag_begin\\\\nsimpleos_wm_loop_marker=command=command_lane_icon\\\\nqemu_inprocess_success=true\\\\nqemu_inprocess_backend=browser_compositor\\\\nqemu_inprocess_pixels=4\\\\nelectron_scene_backend=browser_compositor\\\\nelectron_scene_width=2\\\\nelectron_scene_height=2\\\\nelectron_scene_pixels=4\\\\n\"; exit 0; fi\\nif [ \"$1\" = test ]; then exit 0; fi\\nexit 1\\n' > " + root + "/fixture/simple && chmod +x " + root + "/fixture/simple && " +
+            "printf '#!/bin/sh\\nprintf \"electron_live_smoke_validation_status=fail\\\\nelectron_live_smoke_validation_reason=proof-json-hardlink\\\\nelectron_live_smoke_proof_symlink_status=pass\\\\nelectron_live_smoke_proof_hardlink_status=fail\\\\nelectron_live_smoke_proof_source=src/app/ui.electron/bridge.js:electronLiveSmokeProofScript\\\\nelectron_live_smoke_proof_source_file_status=pass\\\\nelectron_live_smoke_proof_source_size_bytes=42\\\\nelectron_live_smoke_browser_engine=chromium\\\\nelectron_live_smoke_electron_user_agent=Mozilla/5.0 Chrome/142.0.0.0 Electron/42.5.0 Safari/537.36\\\\nelectron_live_smoke_performance_now_available=true\\\\nelectron_live_smoke_performance_now_delta_ms=16.7\\\\nelectron_live_smoke_animation_frame_available=true\\\\nelectron_live_smoke_animation_frame_count=2\\\\nelectron_live_smoke_css_animation_probe=true\\\\nelectron_live_smoke_event_dispatch_available=true\\\\nelectron_live_smoke_event_dispatch_count=1\\\\nelectron_live_smoke_event_dispatch_type=simple-electron-live-smoke-event\\\\nelectron_live_smoke_event_dispatch_detail=live-smoke-input\\\\nelectron_live_smoke_event_dispatch_error=\\\\nelectron_live_smoke_event_dispatch_to_paint_ms=18.4\\\\nelectron_live_smoke_blur_or_tolerance_used=false\\\\nelectron_live_smoke=pass proof=fake validation=fake\\\\n\"\\nexit 0\\n' > " + root + "/fixture/live-smoke.sh && " +
+            "SIMPLE_BIN=" + root + "/fixture/simple WM_LAUNCH_CAPTURE_ELECTRON_LIVE_SMOKE_SCRIPT=" + root + "/fixture/live-smoke.sh RUN_ELECTRON_MDI_EVIDENCE=0 RUN_QEMU_LIVE_CAPTURE=0 STRICT_QEMU_CAPTURE=0 BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-wm-launch-capture-evidence.shs > " + root + "/stdout.txt 2> " + root + "/stderr.txt || true"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(0)
+
+        val output = file_read(root + "/stdout.txt")
+        expect(output).to_contain("electron_live_smoke=pass proof=fake validation=fake")
+        expect(output).to_contain("wm_launch_capture_evidence_status=fail")
+        expect(output).to_contain("wm_launch_capture_evidence_reason=electron-live-capture-failed")
+        expect(output).to_contain("wm_launch_capture_electron_live_status=fail")
+        expect(output).to_contain("wm_launch_capture_electron_live_reason=proof-json-hardlink")
+        expect(output).to_contain("wm_launch_capture_electron_live_validation_status=fail")
+        expect(output).to_contain("wm_launch_capture_electron_live_proof_hardlink_status=fail")
+        expect(output).to_contain("wm_launch_capture_electron_live_proof_source_file_status=pass")
+        expect(output).to_contain("wm_launch_capture_electron_live_animation_frame_count=2")
+        expect(output).to_contain("wm_launch_capture_electron_live_event_dispatch_type=simple-electron-live-smoke-event")
+        expect(output).to_contain("wm_launch_capture_electron_live_event_dispatch_to_paint_ms=18.4")

@@ -44,6 +44,7 @@ export SIMPLE_BIN SIMPLE_BIN_SOURCE SIMPLE_BIN_STATUS
 TIMEOUT_SECS="${WM_CAPTURE_EVIDENCE_TIMEOUT_SECS:-180}"
 KILL_SECS="${WM_CAPTURE_EVIDENCE_TIMEOUT_KILL_SECS:-10}"
 RUN_ELECTRON_LIVE_SMOKE="${RUN_ELECTRON_LIVE_SMOKE:-1}"
+ELECTRON_LIVE_SMOKE_SCRIPT="${WM_LAUNCH_CAPTURE_ELECTRON_LIVE_SMOKE_SCRIPT:-scripts/check/check-electron-live-smoke.shs}"
 RUN_ELECTRON_MDI_EVIDENCE="${RUN_ELECTRON_MDI_EVIDENCE:-1}"
 RUN_QEMU_LIVE_CAPTURE="${RUN_QEMU_LIVE_CAPTURE:-1}"
 STRICT_LIVE_CAPTURE="${STRICT_LIVE_CAPTURE:-1}"
@@ -73,6 +74,30 @@ run_with_timeout() {
 field_of() {
     key="$1"
     sed -n "s/^${key}=//p" "$CONTRACT_LOG" | tail -n 1
+}
+
+field_from() {
+    key="$1"
+    file="$2"
+    sed -n "s/^${key}=//p" "$file" 2>/dev/null | tail -n 1
+}
+
+num_at_least() {
+    value="$1"
+    min="$2"
+    case "$value" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    [ "$value" -ge "$min" ]
+}
+
+num_positive_at_most() {
+    value="$1"
+    max="$2"
+    awk -v value="$value" -v max="$max" 'BEGIN {
+        if (value ~ /^[0-9]+([.][0-9]+)?$/ && value + 0 > 0 && value + 0 <= max + 0) exit 0
+        exit 1
+    }'
 }
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
@@ -252,15 +277,73 @@ fi
 
 electron_live_status=unavailable
 electron_live_reason=not-run
+electron_live_validation_status=""
+electron_live_validation_reason=""
+electron_live_proof_symlink_status=""
+electron_live_proof_hardlink_status=""
+electron_live_proof_source=""
+electron_live_proof_source_file_status=""
+electron_live_proof_source_size_bytes=""
+electron_live_browser_engine=""
+electron_live_electron_user_agent=""
+electron_live_performance_now_available=""
+electron_live_performance_now_delta_ms=""
+electron_live_animation_frame_available=""
+electron_live_animation_frame_count=""
+electron_live_css_animation_probe=""
+electron_live_event_dispatch_available=""
+electron_live_event_dispatch_count=""
+electron_live_event_dispatch_type=""
+electron_live_event_dispatch_detail=""
+electron_live_event_dispatch_error=""
+electron_live_event_dispatch_to_paint_ms=""
+electron_live_blur_or_tolerance_used=""
 if [ "$RUN_ELECTRON_LIVE_SMOKE" = "1" ]; then
     set +e
-    run_with_timeout sh scripts/check/check-electron-live-smoke.shs >"$ELECTRON_LOG" 2>&1
+    run_with_timeout sh "$ELECTRON_LIVE_SMOKE_SCRIPT" >"$ELECTRON_LOG" 2>&1
     electron_code=$?
     set -e
     cat "$ELECTRON_LOG"
-    if [ "$electron_code" -eq 0 ] && grep -q "electron_live_smoke=pass" "$ELECTRON_LOG"; then
+    electron_live_validation_status="$(field_from electron_live_smoke_validation_status "$ELECTRON_LOG")"
+    electron_live_validation_reason="$(field_from electron_live_smoke_validation_reason "$ELECTRON_LOG")"
+    electron_live_proof_symlink_status="$(field_from electron_live_smoke_proof_symlink_status "$ELECTRON_LOG")"
+    electron_live_proof_hardlink_status="$(field_from electron_live_smoke_proof_hardlink_status "$ELECTRON_LOG")"
+    electron_live_proof_source="$(field_from electron_live_smoke_proof_source "$ELECTRON_LOG")"
+    electron_live_proof_source_file_status="$(field_from electron_live_smoke_proof_source_file_status "$ELECTRON_LOG")"
+    electron_live_proof_source_size_bytes="$(field_from electron_live_smoke_proof_source_size_bytes "$ELECTRON_LOG")"
+    electron_live_browser_engine="$(field_from electron_live_smoke_browser_engine "$ELECTRON_LOG")"
+    electron_live_electron_user_agent="$(field_from electron_live_smoke_electron_user_agent "$ELECTRON_LOG")"
+    electron_live_performance_now_available="$(field_from electron_live_smoke_performance_now_available "$ELECTRON_LOG")"
+    electron_live_performance_now_delta_ms="$(field_from electron_live_smoke_performance_now_delta_ms "$ELECTRON_LOG")"
+    electron_live_animation_frame_available="$(field_from electron_live_smoke_animation_frame_available "$ELECTRON_LOG")"
+    electron_live_animation_frame_count="$(field_from electron_live_smoke_animation_frame_count "$ELECTRON_LOG")"
+    electron_live_css_animation_probe="$(field_from electron_live_smoke_css_animation_probe "$ELECTRON_LOG")"
+    electron_live_event_dispatch_available="$(field_from electron_live_smoke_event_dispatch_available "$ELECTRON_LOG")"
+    electron_live_event_dispatch_count="$(field_from electron_live_smoke_event_dispatch_count "$ELECTRON_LOG")"
+    electron_live_event_dispatch_type="$(field_from electron_live_smoke_event_dispatch_type "$ELECTRON_LOG")"
+    electron_live_event_dispatch_detail="$(field_from electron_live_smoke_event_dispatch_detail "$ELECTRON_LOG")"
+    electron_live_event_dispatch_error="$(field_from electron_live_smoke_event_dispatch_error "$ELECTRON_LOG")"
+    electron_live_event_dispatch_to_paint_ms="$(field_from electron_live_smoke_event_dispatch_to_paint_ms "$ELECTRON_LOG")"
+    electron_live_blur_or_tolerance_used="$(field_from electron_live_smoke_blur_or_tolerance_used "$ELECTRON_LOG")"
+    if [ "$electron_code" -eq 0 ] && grep -q "electron_live_smoke=pass" "$ELECTRON_LOG" && \
+        [ "$electron_live_validation_status" = "pass" ] && [ "$electron_live_proof_symlink_status" = "pass" ] && \
+        [ "$electron_live_proof_hardlink_status" = "pass" ] && \
+        [ "$electron_live_proof_source" = "src/app/ui.electron/bridge.js:electronLiveSmokeProofScript" ] && \
+        [ "$electron_live_proof_source_file_status" = "pass" ] && num_at_least "$electron_live_proof_source_size_bytes" 1 && \
+        [ "$electron_live_browser_engine" = "chromium" ] && \
+        [ "$electron_live_performance_now_available" = "true" ] && num_positive_at_most "$electron_live_performance_now_delta_ms" 1000 && \
+        [ "$electron_live_animation_frame_available" = "true" ] && num_at_least "$electron_live_animation_frame_count" 2 && \
+        [ "$electron_live_css_animation_probe" = "true" ] && \
+        [ "$electron_live_event_dispatch_available" = "true" ] && num_at_least "$electron_live_event_dispatch_count" 1 && \
+        [ "$electron_live_event_dispatch_type" = "simple-electron-live-smoke-event" ] && \
+        [ "$electron_live_event_dispatch_detail" = "live-smoke-input" ] && \
+        [ "$electron_live_event_dispatch_error" = "" ] && num_positive_at_most "$electron_live_event_dispatch_to_paint_ms" 1000 && \
+        [ "$electron_live_blur_or_tolerance_used" = "false" ]; then
         electron_live_status=pass
         electron_live_reason=live-smoke-pass
+    elif [ "$electron_live_validation_status" = "fail" ]; then
+        electron_live_status=fail
+        electron_live_reason="${electron_live_validation_reason:-live-smoke-validation-failed}"
     else
         electron_live_status=unavailable
         electron_live_reason="$(sed -n 's/^error=//p; s/^reason=//p' "$ELECTRON_LOG" | tail -n 1)"
@@ -376,7 +459,11 @@ elif [ "$spec_status" != "pass" ]; then
     reason="$spec_reason"
 elif [ "$STRICT_LIVE_CAPTURE" = "1" ] && [ "$RUN_ELECTRON_LIVE_SMOKE" = "1" ] && [ "$electron_live_status" != "pass" ]; then
     status=fail
-    reason=electron-live-capture-unavailable
+    if [ "$electron_live_status" = "fail" ]; then
+        reason=electron-live-capture-failed
+    else
+        reason=electron-live-capture-unavailable
+    fi
 elif [ "$STRICT_LIVE_CAPTURE" = "1" ] && [ "$RUN_ELECTRON_MDI_EVIDENCE" = "1" ] && [ "$electron_mdi_status" != "pass" ]; then
     status=fail
     reason=electron-mdi-evidence-unavailable
@@ -399,6 +486,11 @@ fi
     echo "- spec_reason: $spec_reason"
     echo "- electron_live_status: $electron_live_status"
     echo "- electron_live_reason: $electron_live_reason"
+    echo "- electron_live_validation_status: $electron_live_validation_status"
+    echo "- electron_live_proof_hardlink_status: $electron_live_proof_hardlink_status"
+    echo "- electron_live_proof_source_file_status: $electron_live_proof_source_file_status"
+    echo "- electron_live_animation_frame_count: $electron_live_animation_frame_count"
+    echo "- electron_live_event_dispatch_to_paint_ms: $electron_live_event_dispatch_to_paint_ms"
     echo "- electron_mdi_status: $electron_mdi_status"
     echo "- electron_mdi_reason: $electron_mdi_reason"
     echo "- qemu_live_status: $qemu_live_status"
@@ -428,6 +520,27 @@ echo "wm_launch_capture_contract_status=$contract_status"
 echo "wm_launch_capture_spec_status=$spec_status"
 echo "wm_launch_capture_electron_live_status=$electron_live_status"
 echo "wm_launch_capture_electron_live_reason=$electron_live_reason"
+echo "wm_launch_capture_electron_live_validation_status=$electron_live_validation_status"
+echo "wm_launch_capture_electron_live_validation_reason=$electron_live_validation_reason"
+echo "wm_launch_capture_electron_live_proof_symlink_status=$electron_live_proof_symlink_status"
+echo "wm_launch_capture_electron_live_proof_hardlink_status=$electron_live_proof_hardlink_status"
+echo "wm_launch_capture_electron_live_proof_source=$electron_live_proof_source"
+echo "wm_launch_capture_electron_live_proof_source_file_status=$electron_live_proof_source_file_status"
+echo "wm_launch_capture_electron_live_proof_source_size_bytes=$electron_live_proof_source_size_bytes"
+echo "wm_launch_capture_electron_live_browser_engine=$electron_live_browser_engine"
+echo "wm_launch_capture_electron_live_electron_user_agent=$electron_live_electron_user_agent"
+echo "wm_launch_capture_electron_live_performance_now_available=$electron_live_performance_now_available"
+echo "wm_launch_capture_electron_live_performance_now_delta_ms=$electron_live_performance_now_delta_ms"
+echo "wm_launch_capture_electron_live_animation_frame_available=$electron_live_animation_frame_available"
+echo "wm_launch_capture_electron_live_animation_frame_count=$electron_live_animation_frame_count"
+echo "wm_launch_capture_electron_live_css_animation_probe=$electron_live_css_animation_probe"
+echo "wm_launch_capture_electron_live_event_dispatch_available=$electron_live_event_dispatch_available"
+echo "wm_launch_capture_electron_live_event_dispatch_count=$electron_live_event_dispatch_count"
+echo "wm_launch_capture_electron_live_event_dispatch_type=$electron_live_event_dispatch_type"
+echo "wm_launch_capture_electron_live_event_dispatch_detail=$electron_live_event_dispatch_detail"
+echo "wm_launch_capture_electron_live_event_dispatch_error=$electron_live_event_dispatch_error"
+echo "wm_launch_capture_electron_live_event_dispatch_to_paint_ms=$electron_live_event_dispatch_to_paint_ms"
+echo "wm_launch_capture_electron_live_blur_or_tolerance_used=$electron_live_blur_or_tolerance_used"
 echo "wm_launch_capture_electron_mdi_status=$electron_mdi_status"
 echo "wm_launch_capture_electron_mdi_reason=$electron_mdi_reason"
 echo "wm_launch_capture_qemu_live_status=$qemu_live_status"
