@@ -432,6 +432,9 @@ absent, the aggregate reports each Simple/Chrome/Electron RenderDoc source as
 `LINUX_VULKAN_RENDER_LOG_REQUIRE_RDOC=0` only for diagnostic
 partial-log inspection, and never use that mode to claim Linux platform-matrix
 completion.
+Bare relative `.rdc` artifact names resolve beside their evidence env file, so
+a stale working-directory `frame.rdc` cannot satisfy Simple, Chrome, or Electron
+RenderDoc proof.
 The Linux row also emits structured blocker fields for parallel platform
 agents:
 `linux_vulkan_render_log_compare_blocked_gate_count`,

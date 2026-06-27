@@ -63,7 +63,8 @@ Chrome, or Electron RenderDoc rows are reported through
 `linux_vulkan_render_log_compare_status=fail`. RenderDoc pass rows must point
 at regular capture artifacts whose first four bytes are `RDOC`; metadata-only
 `pass` rows plus symlinked or hardlinked `.rdc` artifacts are diagnostics, not
-completion proof. Set
+completion proof. Bare relative `.rdc` artifact names resolve beside their
+evidence env so stale working-directory files cannot satisfy the proof. Set
 `LINUX_VULKAN_RENDER_LOG_REQUIRE_RDOC=0` only for diagnostic partial-log runs.
 Structured blockers are emitted through
 `linux_vulkan_render_log_compare_blocked_gate_count` and
@@ -123,10 +124,12 @@ The spec covers thirteen cases:
     with `RDOC`.
 11. A hardlinked RenderDoc capture row fails even when the linked file starts
     with `RDOC`.
-12. A missing RenderDoc source env is surfaced in the top-level Linux evidence
+12. A bare relative RenderDoc capture file resolves beside the evidence env,
+    not from the working directory.
+13. A missing RenderDoc source env is surfaced in the top-level Linux evidence
     so parallel platform agents do not need to open side logs to classify the
     blocker.
-13. A live-blocker-shaped fixture where browser Vulkan backing, pairwise ARGB
+14. A live-blocker-shaped fixture where browser Vulkan backing, pairwise ARGB
     diff, and Simple `.rdc` proof pass, but Chrome/Electron `.rdc` artifacts are
     missing. This proves fallback browser evidence cannot satisfy strict
     RenderDoc completion.
@@ -582,6 +585,47 @@ describe "Linux Vulkan render-log compare gate":
         expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_chrome_status=pass")
         expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_chrome_artifact_file_status=hardlink")
         expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_chrome_artifact_magic=RDOC")
+
+    it "resolves bare relative RenderDoc artifacts beside the evidence env":
+        step("Create a stale working-directory RDOC and a bare relative Chrome artifact row")
+        val command = "rm -rf build/test-linux-vulkan-render-log-rdoc-relative && mkdir -p build/test-linux-vulkan-render-log-rdoc-relative/rdoc/simple build/test-linux-vulkan-render-log-rdoc-relative/rdoc/html build/test-linux-vulkan-render-log-rdoc-relative/rdoc/electron && printf 'RDOC stale repo-root capture\\n' > chrome.rdc && cat > build/test-linux-vulkan-render-log-rdoc-relative/gui.env <<'EOF'\n" +
+            "gui_web_2d_vulkan_simple_status=pass\n" +
+            "gui_web_2d_vulkan_simple_backend_name=vulkan\n" +
+            "gui_web_2d_vulkan_simple_argb_backend=vulkan\n" +
+            "gui_web_2d_vulkan_electron_browser_backing_status=pass\n" +
+            "gui_web_2d_vulkan_chrome_browser_backing_status=pass\n" +
+            "gui_web_2d_vulkan_browser_backing_status=pass\n" +
+            "gui_web_2d_vulkan_pixel_comparison_status=pass\n" +
+            "gui_web_2d_vulkan_pixel_comparison_mode=pairwise-argb-diff\n" +
+            "gui_web_2d_vulkan_electron_chrome_pairwise_diff_status=pass\n" +
+            "gui_web_2d_vulkan_electron_simple_pairwise_diff_status=pass\n" +
+            "gui_web_2d_vulkan_chrome_simple_pairwise_diff_status=pass\n" +
+            "gui_web_2d_vulkan_simple_argb_width=3840\n" +
+            "gui_web_2d_vulkan_simple_argb_height=2160\n" +
+            "gui_web_2d_vulkan_simple_argb_nonblank_pixel_count=42\n" +
+            "gui_web_2d_vulkan_chrome_argb_width=3840\n" +
+            "gui_web_2d_vulkan_chrome_argb_height=2160\n" +
+            "gui_web_2d_vulkan_chrome_argb_nonblank_pixel_count=42\n" +
+            "gui_web_2d_vulkan_electron_argb_width=3840\n" +
+            "gui_web_2d_vulkan_electron_argb_height=2160\n" +
+            "gui_web_2d_vulkan_electron_argb_nonblank_pixel_count=42\n" +
+            "EOF\n" +
+            "printf 'RDOCsynthetic simple capture\\n' > build/test-linux-vulkan-render-log-rdoc-relative/rdoc/simple/simple.rdc\n" +
+            "printf 'RDOCsynthetic electron capture\\n' > build/test-linux-vulkan-render-log-rdoc-relative/rdoc/electron/electron.rdc\n" +
+            "printf 'rdoc_simple_gate_status=pass\\nrdoc_simple_gate_reason=pass\\nrdoc_capture_status=pass\\nrdoc_capture_magic=RDOC\\nrdoc_capture_file=build/test-linux-vulkan-render-log-rdoc-relative/rdoc/simple/simple.rdc\\n' > build/test-linux-vulkan-render-log-rdoc-relative/rdoc/simple/evidence.env\n" +
+            "printf 'rdoc_external_host_capture_gate_status=pass\\nrdoc_external_host_gate_reason=pass\\nrdoc_capture_status=pass\\nrdoc_capture_magic=RDOC\\nrdoc_capture_file=chrome.rdc\\n' > build/test-linux-vulkan-render-log-rdoc-relative/rdoc/html/evidence.env\n" +
+            "printf 'rdoc_electron_html_gate_status=pass\\nrdoc_electron_html_gate_reason=pass\\nrdoc_capture_status=pass\\nrdoc_capture_magic=RDOC\\nrdoc_capture_file=build/test-linux-vulkan-render-log-rdoc-relative/rdoc/electron/electron.rdc\\n' > build/test-linux-vulkan-render-log-rdoc-relative/rdoc/electron/evidence.env\n" +
+            "BUILD_DIR=build/test-linux-vulkan-render-log-rdoc-relative/out GUI_WEB_2D_VULKAN_ENV=build/test-linux-vulkan-render-log-rdoc-relative/gui.env RDOC_SIMPLE_EVIDENCE_ENV=build/test-linux-vulkan-render-log-rdoc-relative/rdoc/simple/evidence.env RDOC_HTML_EVIDENCE_ENV=build/test-linux-vulkan-render-log-rdoc-relative/rdoc/html/evidence.env RDOC_ELECTRON_HTML_EVIDENCE_ENV=build/test-linux-vulkan-render-log-rdoc-relative/rdoc/electron/evidence.env sh scripts/check/check-linux-vulkan-render-log-compare.shs || true; rm -f chrome.rdc"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(0)
+
+        step("Assert the stale repo-root RDOC file is ignored")
+        val evidence = file_read("build/test-linux-vulkan-render-log-rdoc-relative/out/evidence.env")
+        expect(evidence).to_contain("linux_vulkan_render_log_compare_status=fail")
+        expect(evidence).to_contain("renderdoc-chrome-fail")
+        expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_chrome_artifact=chrome.rdc")
+        expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_chrome_artifact_file_status=missing")
+        expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_chrome_artifact_magic=missing")
 
     it "reports missing RenderDoc source envs and artifacts in top-level evidence":
         step("Create passing pixel evidence while omitting the Electron RenderDoc env")
