@@ -130,7 +130,9 @@ macos_metal_render_log_compare_pairwise_status=pass
    marker, even if the env row claims `XCODE-GPUTRACE`.
 11. Reject Xcode GPU capture rows that omit the capture artifact or native
     artifact marker.
-12. Reject strict Metal capture rows that use browser metadata as the capture
+12. Preserve typed unavailable evidence when required Metal input env files are
+    missing.
+13. Reject strict Metal capture rows that use browser metadata as the capture
     tool even when the `.gputrace` artifact bytes are valid.
 """
 
@@ -390,6 +392,38 @@ describe "macOS Metal render-log compare gate":
         expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_artifact_claimed_magic=XCODE-GPUTRACE")
         expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_artifact_claimed_magic_reason=pass")
         expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_gate_status=fail")
+
+    it "preserves typed unavailable evidence when Metal input env files are missing":
+        val command = "rm -rf build/test-macos-metal-render-log-missing-inputs && " +
+            "BUILD_DIR=build/test-macos-metal-render-log-missing-inputs/out " +
+            "METAL_GENERATED_2D_READBACK_ENV=build/test-macos-metal-render-log-missing-inputs/missing-generated.env " +
+            "METAL_ENGINE2D_FRAMEBUFFER_READBACK_ENV=build/test-macos-metal-render-log-missing-inputs/missing-framebuffer.env " +
+            "MACOS_METAL_BROWSER_ENV=build/test-macos-metal-render-log-missing-inputs/missing-browser.env " +
+            "MACOS_METAL_CAPTURE_ENV=build/test-macos-metal-render-log-missing-inputs/missing-capture.env " +
+            "sh scripts/check/check-macos-metal-render-log-compare.shs || true"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(0)
+
+        val evidence = file_read("build/test-macos-metal-render-log-missing-inputs/out/evidence.env")
+        expect(evidence).to_contain("macos_metal_render_log_compare_status=unavailable")
+        expect(evidence).to_contain("missing-metal-generated-2d-readback-env")
+        expect(evidence).to_contain("missing-metal-engine2d-framebuffer-env")
+        expect(evidence).to_contain("missing-macos-metal-browser-env")
+        expect(evidence).to_contain("macos_metal_render_log_compare_generated_readback_env_file_status=missing")
+        expect(evidence).to_contain("macos_metal_render_log_compare_framebuffer_readback_env_file_status=missing")
+        expect(evidence).to_contain("macos_metal_render_log_compare_browser_env_file_status=missing")
+        expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_env_file_status=missing")
+        expect(evidence).to_contain("macos_metal_render_log_compare_blocked_gate_count=8")
+        expect(evidence).to_contain("macos_metal_render_log_compare_blocked_gates=metal-generated-readback-env,metal-framebuffer-readback-env,macos-metal-browser-env,metal-generated-readback,metal-framebuffer-readback,browser-metal-backing,pairwise-argb-diff,argb-source-evidence")
+        expect(evidence).to_contain("macos_metal_render_log_compare_generated_readback_gate_status=fail")
+        expect(evidence).to_contain("macos_metal_render_log_compare_framebuffer_readback_gate_status=fail")
+        expect(evidence).to_contain("macos_metal_render_log_compare_browser_backing_gate_status=fail")
+        expect(evidence).to_contain("macos_metal_render_log_compare_pairwise_gate_status=fail")
+        expect(evidence).to_contain("macos_metal_render_log_compare_argb_source_gate_status=fail")
+        expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_gate_status=not-required")
+        expect(evidence).to_contain("macos_metal_render_log_compare_required_api=metal")
+        expect(evidence).to_contain("macos_metal_render_log_compare_pairwise_status=fail")
+        expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_status=unavailable")
 
     it "rejects strict Metal capture rows that use browser metadata as the capture tool":
         val command = "rm -rf build/test-macos-metal-render-log-browser-capture-tool && mkdir -p build/test-macos-metal-render-log-browser-capture-tool && " +
