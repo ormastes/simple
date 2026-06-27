@@ -522,6 +522,12 @@ macos_metal_render_log_compare_pairwise_status=pass
 macos_metal_render_log_compare_gpu_capture_status=pass
 ```
 
+`check-gui-renderdoc-feature-coverage-status.shs` preserves those macOS detail
+rows in the aggregate evidence and report. A passing aggregate macOS row must
+also carry `XCODE-GPUTRACE`, passing Electron/Chrome/browser Metal backing,
+`pairwise-argb-diff`, all three pairwise diff lanes, passing ARGB source
+reasons, and a passing ARGB viewport reason.
+
 The gate rejects missing Metal submit/readback, missing raw framebuffer
 download, checksum mismatch, browser fallback, and non-pairwise comparisons.
 The macOS row also emits structured blockers:
