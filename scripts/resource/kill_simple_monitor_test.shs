@@ -12,7 +12,7 @@ ROWS=$(mktemp)
 trap 'rm -f "$TMP" "$ROWS"' EXIT
 
 # Neutralize real kills + side effects, source mock rows, run a single pass.
-sed -e 's#ps -eo pid,pcpu,rss,etimes,args --no-headers 2>/dev/null#cat "$MOCK_PS_FILE"#' \
+sed -e 's#ps -eo uid,pid,pcpu,rss,etimes,args --no-headers 2>/dev/null#cat "$MOCK_PS_FILE"#' \
     -e 's#^while true; do#for _one in 1; do#' \
     -e '/sleep "\$CHECK_INTERVAL"/d' \
     -e '/^[[:space:]]*sleep 1$/d' \
@@ -23,23 +23,28 @@ sed -e 's#ps -eo pid,pcpu,rss,etimes,args --no-headers 2>/dev/null#cat "$MOCK_PS
     -e 's#trap cleanup INT TERM HUP EXIT#:#' \
     "$SRC" > "$TMP"
 
-# pid pcpu rss(KB) etimes args  (threshold 24576MB = 25165824KB; 30GB row trips it)
+# uid pid pcpu rss(KB) etimes args
+# simple threshold 24576MB = 25165824KB; generic threshold 64000MB = 67108864KB.
+UID_VAL=$(id -u)
 cat > "$ROWS" <<'EOF'
-1001 5.0 31457280 5 bin/simple test mem_runaway
-1002 99.0 1048576 120 bin/simple run cpu_spin
-1003 10.0 524288 300 bin/simple test healthy
-1004 99.0 31457280 300 bin/simple test claude session
-2002 99.0 1048576 5 bin/simple run cpu_young
-3003 99.0 1048576 120 some_other_program busy
+__UID__ 1001 5.0 31457280 5 bin/simple test mem_runaway
+__UID__ 1002 99.0 1048576 120 bin/simple run cpu_spin
+__UID__ 1003 10.0 524288 300 bin/simple test healthy
+__UID__ 1004 99.0 31457280 300 bin/simple test claude session
+__UID__ 2002 99.0 1048576 5 bin/simple run cpu_young
+__UID__ 3003 99.0 1048576 120 some_other_program busy
+__UID__ 3004 1.0 73400320 120 python3 rogue_mem
+0 4004 1.0 73400320 120 python3 root_owned
 EOF
+sed -i "s/__UID__/$UID_VAL/g" "$ROWS"
 
 OUT=$(MOCK_PS_FILE="$ROWS" sh "$TMP" 2>&1 || true)
 KILLED=$(printf '%s\n' "$OUT" | sed -n 's/.*Killing.*pid=\([0-9]*\).*/\1/p' | sort -u | tr '\n' ' ')
 KILLED=$(echo $KILLED)  # trim
 
-EXPECT="1001 1002"
+EXPECT="1001 1002 3004"
 if [ "$KILLED" = "$EXPECT" ]; then
-    echo "PASS kill_simple_monitor: killed [$KILLED] (mem-runaway + cpu-spin), spared healthy/protected/young/non-simple"
+    echo "PASS kill_simple_monitor: killed [$KILLED] (simple mem, simple cpu, generic mem), spared healthy/protected/young/root-owned"
     exit 0
 fi
 echo "FAIL kill_simple_monitor: killed [$KILLED], expected [$EXPECT]" >&2
