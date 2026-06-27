@@ -53,6 +53,11 @@ function jsonDecimalTextOrBlank(value) {
   return text === null ? "" : text;
 }
 
+function orientationText(value) {
+  if (value === "portrait" || value === "landscape") return value;
+  return "";
+}
+
 function boolText(value) {
   return value === true ? "true" : "false";
 }
@@ -166,7 +171,9 @@ const renderPass =
 
 const capturePass =
   jsonIntegerAtLeast(proof.viewportWidth, 300) &&
-  jsonIntegerAtLeast(proof.viewportHeight, 300);
+  jsonIntegerAtLeast(proof.viewportHeight, 300) &&
+  jsonDecimalGreaterThan(proof.devicePixelRatio, 0) &&
+  orientationText(proof.screenOrientation) !== "";
 const performancePass =
   proof.performanceNowAvailable === true &&
   jsonDecimalGreaterThan(proof.performanceNowDeltaMs, 0) &&
@@ -213,6 +220,8 @@ emit("mdi_event_status", eventPass ? "pass" : "fail");
 emit("mdi_capture_status", capturePass ? "pass" : "fail");
 emit("mdi_capture_viewport_width", jsonIntegerTextOrBlank(proof.viewportWidth));
 emit("mdi_capture_viewport_height", jsonIntegerTextOrBlank(proof.viewportHeight));
+emit("mdi_capture_device_pixel_ratio", jsonDecimalTextOrBlank(proof.devicePixelRatio));
+emit("mdi_capture_screen_orientation", orientationText(proof.screenOrientation));
 emit("mdi_performance_status", performancePass ? "pass" : "fail");
 emit("mdi_performance_now_available", proof.performanceNowAvailable === true ? "true" : "false");
 emit("mdi_performance_now_delta_ms", jsonDecimalTextOrBlank(proof.performanceNowDeltaMs));

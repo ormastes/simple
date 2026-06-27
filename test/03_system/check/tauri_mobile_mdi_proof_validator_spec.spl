@@ -35,16 +35,16 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_mobile_mdi_proof_valid
 - Mobile interaction latency must include an explicit positive
   `inputToPaintMs` sample after routed MDI input and a following paint; an
   over-budget multi-second latency sample fails the contract.
-- Capture viewport and animation-frame details must also be explicit finite
-  numeric proof values, not defaulted placeholder values.
+- Capture viewport, device pixel ratio, orientation, and animation-frame details
+  must also be explicit structured proof values, not defaulted placeholders.
 - Render proof must include an explicit rendered image count and HTML render
   marker; event routing alone is not enough to prove the mobile MDI surface
   actually rendered.
 - Event proof emits individual routed click/input/key, drag, window-runtime,
   control-discovery, and taskbar-visibility rows rather than only a coarse
   event status.
-- Render counts, event counts, viewport dimensions, performance timing deltas,
-  and animation-frame counts must be real JSON numbers; stringified or
+- Render counts, event counts, viewport dimensions, device pixel ratio,
+  performance timing deltas, and animation-frame counts must be real JSON numbers; stringified or
   fractional values do not prove routed events, capture, performance, or full
   animation frames.
 - Runtime failure markers in any requested device log fail the MDI proof even
@@ -58,7 +58,7 @@ use std.io_runtime.{file_read, process_run}
 use std.spec.*
 
 fn _proof_log_command(path: text, mutation: text) -> text:
-    "node -e 'const fs=require(\"fs\");const p={count:4,imageCount:1,taskbarItemCount:4,taskbarIconCount:4,viewportWidth:390,viewportHeight:844,performanceNowAvailable:true,performanceNowDeltaMs:1.25,inputToPaintMs:2.5,animationFrameAvailable:true,animationFrameCount:2,cssAnimationProbe:true,hasDesktop:true,hasDragRuntime:true,hasDragEvents:true,dragMoved:true,hasWindowEventRuntime:true,appActionControlFound:true,appInputControlFound:true,bodyClickRouted:true,bodyInputRouted:true,bodyKeyRouted:true,taskbarIconsVisible:true,taskbarLabelsVisible:true,htmlRenderable:true};" + mutation + ";fs.writeFileSync(process.argv[1],\"[tauri-shell] mdi proof: \"+JSON.stringify(p)+\"\\n\");' " + path
+    "node -e 'const fs=require(\"fs\");const p={count:4,imageCount:1,taskbarItemCount:4,taskbarIconCount:4,viewportWidth:390,viewportHeight:844,devicePixelRatio:3,screenOrientation:\"portrait\",performanceNowAvailable:true,performanceNowDeltaMs:1.25,inputToPaintMs:2.5,animationFrameAvailable:true,animationFrameCount:2,cssAnimationProbe:true,hasDesktop:true,hasDragRuntime:true,hasDragEvents:true,dragMoved:true,hasWindowEventRuntime:true,appActionControlFound:true,appInputControlFound:true,bodyClickRouted:true,bodyInputRouted:true,bodyKeyRouted:true,taskbarIconsVisible:true,taskbarLabelsVisible:true,htmlRenderable:true};" + mutation + ";fs.writeFileSync(process.argv[1],\"[tauri-shell] mdi proof: \"+JSON.stringify(p)+\"\\n\");' " + path
 
 describe "Tauri mobile MDI proof validator":
 
@@ -100,6 +100,8 @@ describe "Tauri mobile MDI proof validator":
         expect(evidence).to_contain("ios_mdi_capture_status=pass")
         expect(evidence).to_contain("ios_mdi_capture_viewport_width=390")
         expect(evidence).to_contain("ios_mdi_capture_viewport_height=844")
+        expect(evidence).to_contain("ios_mdi_capture_device_pixel_ratio=3")
+        expect(evidence).to_contain("ios_mdi_capture_screen_orientation=portrait")
         expect(evidence).to_contain("ios_mdi_performance_status=pass")
         expect(evidence).to_contain("ios_mdi_performance_now_available=true")
         expect(evidence).to_contain("ios_mdi_performance_now_delta_ms=1.25")
@@ -261,19 +263,31 @@ describe "Tauri mobile MDI proof validator":
         expect(slow).to_contain("android_mdi_interaction_latency_status=fail")
         expect(slow).to_contain("android_mdi_input_to_paint_ms=1001")
 
-    it "rejects missing viewport capture dimensions":
-        val root = "build/test-tauri-mobile-mdi-validator-missing-viewport"
+    it "rejects missing viewport pixel-ratio or orientation capture proof":
+        val root = "build/test-tauri-mobile-mdi-validator-missing-capture"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-            _proof_log_command(root + "/device.log", "delete p.viewportWidth") +
-            " && node scripts/check/validate-tauri-mobile-mdi-proof.js ios " + root + "/proof.json " + root + "/device.log > " + root + "/evidence.env"
+            _proof_log_command(root + "/viewport.log", "delete p.viewportWidth") +
+            " && node scripts/check/validate-tauri-mobile-mdi-proof.js ios " + root + "/viewport.json " + root + "/viewport.log > " + root + "/viewport.env; " +
+            _proof_log_command(root + "/dpr.log", "delete p.devicePixelRatio") +
+            " && node scripts/check/validate-tauri-mobile-mdi-proof.js ios " + root + "/dpr.json " + root + "/dpr.log > " + root + "/dpr.env; " +
+            _proof_log_command(root + "/orientation.log", "delete p.screenOrientation") +
+            " && node scripts/check/validate-tauri-mobile-mdi-proof.js android " + root + "/orientation.json " + root + "/orientation.log > " + root + "/orientation.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
         expect(code).to_equal(1)
 
-        val evidence = file_read(root + "/evidence.env")
-        expect(evidence).to_contain("ios_mdi_proof_status=fail")
-        expect(evidence).to_contain("ios_mdi_capture_status=fail")
-        expect(evidence).to_contain("ios_mdi_capture_viewport_width=")
-        expect(evidence.contains("ios_mdi_capture_viewport_width=0")).to_equal(false)
+        val viewport = file_read(root + "/viewport.env")
+        val dpr = file_read(root + "/dpr.env")
+        val orientation = file_read(root + "/orientation.env")
+        expect(viewport).to_contain("ios_mdi_proof_status=fail")
+        expect(viewport).to_contain("ios_mdi_capture_status=fail")
+        expect(viewport).to_contain("ios_mdi_capture_viewport_width=")
+        expect(viewport.contains("ios_mdi_capture_viewport_width=0")).to_equal(false)
+        expect(dpr).to_contain("ios_mdi_proof_status=fail")
+        expect(dpr).to_contain("ios_mdi_capture_status=fail")
+        expect(dpr).to_contain("ios_mdi_capture_device_pixel_ratio=")
+        expect(orientation).to_contain("android_mdi_proof_status=fail")
+        expect(orientation).to_contain("android_mdi_capture_status=fail")
+        expect(orientation).to_contain("android_mdi_capture_screen_orientation=")
 
     it "rejects fractional event and taskbar count proof values":
         val root = "build/test-tauri-mobile-mdi-validator-fractional-events"
@@ -324,18 +338,24 @@ describe "Tauri mobile MDI proof validator":
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
             _proof_log_command(root + "/viewport.log", "p.viewportWidth=390.5") +
             " && node scripts/check/validate-tauri-mobile-mdi-proof.js ios " + root + "/viewport.json " + root + "/viewport.log > " + root + "/viewport.env; " +
+            _proof_log_command(root + "/dpr.log", "p.devicePixelRatio=0") +
+            " && node scripts/check/validate-tauri-mobile-mdi-proof.js ios " + root + "/dpr.json " + root + "/dpr.log > " + root + "/dpr.env; " +
             _proof_log_command(root + "/animation.log", "p.animationFrameCount=2.5") +
             " && node scripts/check/validate-tauri-mobile-mdi-proof.js android " + root + "/animation.json " + root + "/animation.log > " + root + "/animation.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
         expect(code).to_equal(1)
 
         val viewport = file_read(root + "/viewport.env")
+        val dpr = file_read(root + "/dpr.env")
         val animation = file_read(root + "/animation.env")
         step("Confirm fractional capture and animation values are not accepted as proof")
         expect(viewport).to_contain("ios_mdi_proof_status=fail")
         expect(viewport).to_contain("ios_mdi_capture_status=fail")
         expect(viewport).to_contain("ios_mdi_capture_viewport_width=")
         expect(viewport.contains("ios_mdi_capture_viewport_width=390.5")).to_equal(false)
+        expect(dpr).to_contain("ios_mdi_proof_status=fail")
+        expect(dpr).to_contain("ios_mdi_capture_status=fail")
+        expect(dpr).to_contain("ios_mdi_capture_device_pixel_ratio=0")
         expect(animation).to_contain("android_mdi_proof_status=fail")
         expect(animation).to_contain("android_mdi_animation_status=fail")
         expect(animation).to_contain("android_mdi_animation_frame_count=")
@@ -352,6 +372,10 @@ describe "Tauri mobile MDI proof validator":
             " && node scripts/check/validate-tauri-mobile-mdi-proof.js android " + root + "/taskbar.json " + root + "/taskbar.log > " + root + "/taskbar.env; " +
             _proof_log_command(root + "/viewport.log", "p.viewportWidth=\"390\"") +
             " && node scripts/check/validate-tauri-mobile-mdi-proof.js android " + root + "/viewport.json " + root + "/viewport.log > " + root + "/viewport.env; " +
+            _proof_log_command(root + "/dpr.log", "p.devicePixelRatio=\"3\"") +
+            " && node scripts/check/validate-tauri-mobile-mdi-proof.js android " + root + "/dpr.json " + root + "/dpr.log > " + root + "/dpr.env; " +
+            _proof_log_command(root + "/orientation.log", "p.screenOrientation=\"square\"") +
+            " && node scripts/check/validate-tauri-mobile-mdi-proof.js ios " + root + "/orientation.json " + root + "/orientation.log > " + root + "/orientation.env; " +
             _proof_log_command(root + "/performance.log", "p.performanceNowDeltaMs=\"1.25\"") +
             " && node scripts/check/validate-tauri-mobile-mdi-proof.js ios " + root + "/performance.json " + root + "/performance.log > " + root + "/performance.env; " +
             _proof_log_command(root + "/latency.log", "p.inputToPaintMs=\"2.5\"") +
@@ -365,6 +389,8 @@ describe "Tauri mobile MDI proof validator":
         val windows = file_read(root + "/windows.env")
         val taskbar = file_read(root + "/taskbar.env")
         val viewport = file_read(root + "/viewport.env")
+        val dpr = file_read(root + "/dpr.env")
+        val orientation = file_read(root + "/orientation.env")
         val performance = file_read(root + "/performance.env")
         val latency = file_read(root + "/latency.env")
         val animation = file_read(root + "/animation.env")
@@ -385,6 +411,13 @@ describe "Tauri mobile MDI proof validator":
         expect(viewport).to_contain("android_mdi_capture_status=fail")
         expect(viewport).to_contain("android_mdi_capture_viewport_width=")
         expect(viewport.contains("android_mdi_capture_viewport_width=390")).to_equal(false)
+        expect(dpr).to_contain("android_mdi_proof_status=fail")
+        expect(dpr).to_contain("android_mdi_capture_status=fail")
+        expect(dpr).to_contain("android_mdi_capture_device_pixel_ratio=")
+        expect(dpr.contains("android_mdi_capture_device_pixel_ratio=3")).to_equal(false)
+        expect(orientation).to_contain("ios_mdi_proof_status=fail")
+        expect(orientation).to_contain("ios_mdi_capture_status=fail")
+        expect(orientation).to_contain("ios_mdi_capture_screen_orientation=")
         expect(performance).to_contain("ios_mdi_proof_status=fail")
         expect(performance).to_contain("ios_mdi_performance_status=fail")
         expect(performance).to_contain("ios_mdi_performance_now_delta_ms=")
@@ -458,9 +491,16 @@ describe "Tauri mobile MDI proof validator":
         val ios = file_read("scripts/check/check-tauri-ios-mobile-renderer-evidence.shs")
         val android = file_read("scripts/check/check-tauri-android-mobile-renderer-evidence.shs")
         val aggregate = file_read("scripts/check/check-tauri-mobile-renderer-parity-evidence.shs")
+        val shell = file_read("tools/tauri-shell/src-tauri/src/lib.rs")
         expect(ios).to_contain("ios_mdi_proof_empty_source_count")
         expect(android).to_contain("android_mdi_proof_empty_source_count")
+        expect(ios).to_contain("ios_mdi_capture_device_pixel_ratio")
+        expect(android).to_contain("android_mdi_capture_device_pixel_ratio")
+        expect(shell).to_contain("devicePixelRatio")
+        expect(shell).to_contain("screenOrientation")
         expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_empty_source_count")
         expect(aggregate).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_empty_source_count")
+        expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_mdi_capture_device_pixel_ratio")
+        expect(aggregate).to_contain("tauri_mobile_renderer_parity_android_mdi_capture_screen_orientation")
         expect(aggregate).to_contain("ios-mdi-proof-source-empty")
         expect(aggregate).to_contain("android-mdi-proof-source-empty")

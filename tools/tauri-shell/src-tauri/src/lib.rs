@@ -591,6 +591,8 @@ fn maybe_write_tauri_mdi_proof(app: &AppHandle) {
                 var cssAnimationProbe = false;
                 var viewportWidth = Math.max(document.documentElement ? document.documentElement.clientWidth : 0, window.innerWidth || 0);
                 var viewportHeight = Math.max(document.documentElement ? document.documentElement.clientHeight : 0, window.innerHeight || 0);
+                var devicePixelRatio = typeof window.devicePixelRatio === 'number' ? window.devicePixelRatio : 0;
+                var screenOrientation = viewportWidth >= viewportHeight ? 'landscape' : 'portrait';
                 try {
                     var styleProbe = document.createElement('style');
                     styleProbe.textContent = '@keyframes simple-proof-pulse { from { opacity: 0.65; } to { opacity: 1; } }';
@@ -701,6 +703,8 @@ fn maybe_write_tauri_mdi_proof(app: &AppHandle) {
                             htmlRenderable: document.body.innerHTML.indexOf('simple-app-window') >= 0 && document.body.innerHTML.indexOf('<pre class="simple-app-pre">') >= 0,
                             viewportWidth: viewportWidth,
                             viewportHeight: viewportHeight,
+                            devicePixelRatio: devicePixelRatio,
+                            screenOrientation: screenOrientation,
                             performanceNowAvailable: performanceNowAvailable,
                             performanceNowDeltaMs: performanceNowDeltaMs,
                             inputToPaintMs: inputToPaintMs,
@@ -2108,6 +2112,8 @@ mod tests {
         assert!(include_str!("lib.rs").contains("animationFrameCount"));
         assert!(include_str!("lib.rs").contains("cssAnimationProbe"));
         assert!(include_str!("lib.rs").contains("viewportWidth"));
+        assert!(include_str!("lib.rs").contains("devicePixelRatio"));
+        assert!(include_str!("lib.rs").contains("screenOrientation"));
         assert!(js.contains("body.tabIndex = 0"));
         assert!(js.contains("bindDrag"));
         assert!(js.contains("notifyMove"));
