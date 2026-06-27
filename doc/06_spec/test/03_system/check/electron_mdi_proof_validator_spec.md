@@ -27,7 +27,7 @@ electron_mdi_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 17 | 17 | 0 | 0 |
+| 18 | 18 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -83,6 +83,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_mdi_proof_validator
   are not accepted as Electron screenshot proof.
 - Proof JSON and screenshot artifacts must be regular files, not symlinks to
   other proof or capture files.
+- Proof JSON and screenshot artifacts must not be hard-linked aliases of other
+  proof or capture files.
 - Performance, interaction latency, and animation pass require
   `performance.now()`, an explicit positive timing delta, a positive
   `inputToPaintMs` sample after routed MDI input, at least two animation
@@ -111,7 +113,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_mdi_proof_validator
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 53 lines folded for reproduction.
+Runnable source: 55 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -127,10 +129,12 @@ val evidence = file_read(root + "/evidence.env")
 step("Inspect normalized proof rows")
 expect(evidence).to_contain("electron_mdi_json_proof=pass")
 expect(evidence).to_contain("electron_mdi_proof_symlink_status=pass")
+expect(evidence).to_contain("electron_mdi_proof_hardlink_status=pass")
 expect(evidence).to_contain("electron_mdi_event_status=pass")
 expect(evidence).to_contain("electron_mdi_capture_status=pass")
 expect(evidence).to_contain("electron_mdi_screenshot_file_status=pass")
 expect(evidence).to_contain("electron_mdi_screenshot_symlink_status=pass")
+expect(evidence).to_contain("electron_mdi_screenshot_hardlink_status=pass")
 expect(evidence).to_contain("electron_mdi_screenshot_size_bytes=68")
 expect(evidence).to_contain("electron_mdi_screenshot_png_magic_status=pass")
 expect(evidence).to_contain("electron_mdi_screenshot_png_structure_status=pass")
@@ -372,6 +376,55 @@ expect(screenshot).to_contain("electron_mdi_proof_symlink_status=pass")
 expect(screenshot).to_contain("electron_mdi_screenshot_symlink_status=fail")
 expect(screenshot).to_contain("electron_mdi_screenshot_file_status=pass")
 expect(screenshot).to_contain("electron_mdi_screenshot_size_bytes=68")
+```
+
+</details>
+
+#### rejects hardlinked Electron MDI proof and screenshot artifacts
+
+-  png capture command
+-  proof command
+-  proof command
+   - Expected: code equals `1`
+- Confirm hardlinked proof JSON and screenshot capture artifacts cannot satisfy Electron MDI proof
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 34 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-electron-mdi-validator-hardlink-artifacts"
+val command = "rm -rf " + root + " build/electron-proof && mkdir -p " + root + " build/electron-proof && " +
+    _png_capture_command().replace("build/electron-proof/screen.png", "build/electron-proof/real.png") +
+    " && ln build/electron-proof/real.png build/electron-proof/screen.png && " +
+    _proof_command(root + "/proof.json", "") +
+    " && ln " + root + "/proof.json " + root + "/proof-alias.json && " +
+    _proof_command(root + "/screenshot-proof.json", "") +
+    " && " +
+    "node scripts/check/validate-electron-mdi-proof.js " + root + "/proof.json build/electron-proof/real.png > " + root + "/proof.env; " +
+    "node scripts/check/validate-electron-mdi-proof.js " + root + "/screenshot-proof.json build/electron-proof/screen.png > " + root + "/screenshot.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val proof = file_read(root + "/proof.env")
+val screenshot = file_read(root + "/screenshot.env")
+step("Confirm hardlinked proof JSON and screenshot capture artifacts cannot satisfy Electron MDI proof")
+expect(proof).to_contain("electron_mdi_json_proof=fail")
+expect(proof).to_contain("electron_mdi_json_proof_reason=proof-json-hardlink")
+expect(proof).to_contain("electron_mdi_proof_symlink_status=pass")
+expect(proof).to_contain("electron_mdi_proof_hardlink_status=fail")
+expect(screenshot).to_contain("electron_mdi_json_proof=fail")
+expect(screenshot).to_contain("electron_mdi_json_proof_reason=capture-contract-missing:screenshotNotHardlink")
+expect(screenshot).to_contain("electron_mdi_capture_status=fail")
+expect(screenshot).to_contain("electron_mdi_proof_hardlink_status=pass")
+expect(screenshot).to_contain("electron_mdi_screenshot_symlink_status=pass")
+expect(screenshot).to_contain("electron_mdi_screenshot_hardlink_status=fail")
+expect(screenshot).to_contain("electron_mdi_screenshot_file_status=pass")
+expect(screenshot).to_contain("electron_mdi_screenshot_png_magic_status=pass")
+expect(screenshot).to_contain("electron_mdi_screenshot_png_structure_status=pass")
 ```
 
 </details>
@@ -817,6 +870,9 @@ expect(validator).to_contain("pngHasStructuredImageChunks")
 expect(validator).to_contain("lstatSync")
 expect(validator).to_contain("electron_mdi_proof_symlink_status")
 expect(validator).to_contain("electron_mdi_screenshot_symlink_status")
+expect(validator).to_contain("electron_mdi_proof_hardlink_status")
+expect(validator).to_contain("electron_mdi_screenshot_hardlink_status")
+expect(validator).to_contain("screenshotNotHardlink")
 expect(validator).to_contain("electron_mdi_event_body_click_routed")
 expect(validator).to_contain("electron_mdi_bridge_mouse_up_frame_routed")
 expect(validator).to_contain("electron_mdi_event_taskbar_labels_visible")
@@ -828,8 +884,8 @@ expect(validator).to_contain("electron_mdi_event_taskbar_labels_visible")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 17 |
-| Active scenarios | 17 |
+| Total scenarios | 18 |
+| Active scenarios | 18 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

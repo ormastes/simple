@@ -103,6 +103,7 @@ function pathInfo(filePath) {
     stat,
     isSymlink: lstat !== null && lstat.isSymbolicLink(),
     isRegularFile: lstat !== null && lstat.isFile(),
+    hasMultipleLinks: lstat !== null && lstat.isFile() && lstat.nlink > 1,
   };
 }
 
@@ -111,7 +112,16 @@ if (proofInfo.isSymlink) {
   emit('electron_mdi_json_proof', 'fail');
   emit('electron_mdi_json_proof_reason', 'proof-json-symlink');
   emit('electron_mdi_proof_symlink_status', 'fail');
+  emit('electron_mdi_proof_hardlink_status', 'pass');
   emit('reason', 'proof-json-symlink');
+  process.exit(1);
+}
+if (proofInfo.hasMultipleLinks) {
+  emit('electron_mdi_json_proof', 'fail');
+  emit('electron_mdi_json_proof_reason', 'proof-json-hardlink');
+  emit('electron_mdi_proof_symlink_status', 'pass');
+  emit('electron_mdi_proof_hardlink_status', 'fail');
+  emit('reason', 'proof-json-hardlink');
   process.exit(1);
 }
 
@@ -183,6 +193,7 @@ const captureChecks = {
   screenshotFileExists: screenshotStat !== null && screenshotStat.isFile(),
   screenshotFileNonempty: screenshotStat !== null && screenshotStat.isFile() && screenshotStat.size > 0,
   screenshotNotSymlink: !screenshotInfo.isSymlink,
+  screenshotNotHardlink: !screenshotInfo.hasMultipleLinks,
   screenshotPngMagic: screenshotMagicOk,
   screenshotPngStructure: screenshotStructureOk,
 };
@@ -231,6 +242,7 @@ if (eventFailed.length) {
 emit('electron_mdi_json_proof', reason === 'pass' ? 'pass' : 'fail');
 emit('electron_mdi_json_proof_reason', reason);
 emit('electron_mdi_proof_symlink_status', proofInfo.isSymlink ? 'fail' : 'pass');
+emit('electron_mdi_proof_hardlink_status', proofInfo.hasMultipleLinks ? 'fail' : 'pass');
 emit('electron_mdi_event_status', eventFailed.length ? 'fail' : 'pass');
 emit('electron_mdi_capture_status', captureFailed.length ? 'fail' : 'pass');
 emit('electron_mdi_performance_status', performanceFailed.length ? 'fail' : 'pass');
@@ -273,6 +285,7 @@ emit('electron_mdi_animation_frame_count', jsonIntegerTextOrBlank(proof.animatio
 emit('electron_mdi_css_animation_probe', jsonBoolTextOrBlank(proof.cssAnimationProbe));
 emit('electron_mdi_screenshot_path_matches', proof.screenshotPath === screenshotPath ? 'true' : 'false');
 emit('electron_mdi_screenshot_symlink_status', screenshotInfo.isSymlink ? 'fail' : 'pass');
+emit('electron_mdi_screenshot_hardlink_status', screenshotInfo.hasMultipleLinks ? 'fail' : 'pass');
 emit('electron_mdi_screenshot_file_status', screenshotStat !== null && screenshotStat.isFile() ? 'pass' : 'fail');
 emit('electron_mdi_screenshot_size_bytes', screenshotStat !== null && screenshotStat.isFile() ? String(screenshotStat.size) : '');
 emit('electron_mdi_screenshot_png_magic_status', screenshotMagicOk ? 'pass' : 'fail');
