@@ -27,7 +27,7 @@ gui_web_2d_vulkan_setup_simple_bin_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 1 | 1 | 0 | 0 |
+| 2 | 2 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -47,7 +47,7 @@ Validates the Simple binary discovery contract for `scripts/setup/setup-gui-web-
 | Design | doc/07_guide/app/ui/gui_web_2d_vulkan_setup.md |
 | Research | doc/09_report/gui_renderdoc_web_wm_path_fallback_evidence_2026-06-27.md |
 | Source | `test/03_system/check/gui_web_2d_vulkan_setup_simple_bin_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-06-27 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -74,6 +74,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/gui_web_2d_vulkan_setup_simp
 - The opt-in path records `default-missing-path-opt-in`.
 - Existing same-repo PATH fallback remains available when git metadata can
   prove the binary belongs to the checkout.
+- Default discovery prefers release self-hosted binaries before the `bin/simple`
+  shim when a release binary exists.
 
 ## Scenarios
 
@@ -87,7 +89,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/gui_web_2d_vulkan_setup_simp
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -99,6 +101,30 @@ expect(script).to_contain("default-missing-same-repo-path-fallback")
 expect(script).to_contain("ALLOW_PATH_SIMPLE_BIN")
 expect(script).to_contain("default-missing-path-opt-in")
 expect(script).to_contain("gui_web_2d_vulkan_simple_bin_selection_reason")
+expect(script).to_contain("release/x86_64-unknown-linux-gnu/simple")
+expect(script).to_contain("simple_bin=\"bin/simple\"")
+```
+
+</details>
+
+#### prefers release Simple for default Vulkan evidence setup
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-gui-web-2d-vulkan-setup-simple-bin-release"
+val command = "rm -rf " + root + " && BUILD_DIR=" + root + " sh scripts/setup/setup-gui-web-2d-vulkan-env.shs --check > " + root + ".out 2>&1"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val evidence = file_read(root + "/evidence.env")
+expect(evidence).to_contain("gui_web_2d_vulkan_simple_bin=release/x86_64-unknown-linux-gnu/simple")
+expect(evidence).to_contain("gui_web_2d_vulkan_simple_bin_selection_reason=self-hosted-release")
+expect(evidence).to_contain("gui_web_2d_vulkan_simple_bin_status=pass")
 ```
 
 </details>
@@ -107,8 +133,8 @@ expect(script).to_contain("gui_web_2d_vulkan_simple_bin_selection_reason")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 1 |
-| Active scenarios | 1 |
+| Total scenarios | 2 |
+| Active scenarios | 2 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
