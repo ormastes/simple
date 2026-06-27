@@ -62,3 +62,30 @@ visible progress if a per-case Simple run stalls.
 - Open: fix the underlying Electron/Simple paint or text raster divergence. The
   text-free `position_z_index_matrix` case should classify residual color-only
   differences as `paint-color-mismatch`, not text glyph raster drift.
+
+## 2026-06-27 Gradient Quantization Attempt
+
+Bounded follow-up on `simple-web-layout-position-z-index-matrix` confirmed the
+residual failure is still paint-only:
+
+```text
+electron_simple_web_layout_status=divergent
+electron_simple_web_layout_reason=paint-color-mismatch
+electron_simple_web_layout_mismatch_count=1708
+electron_simple_web_layout_same_pixels=4436
+electron_simple_web_layout_surface_geometry_pixels=0
+electron_simple_web_layout_simple_expected_timed_out=false
+```
+
+Two renderer experiments were rejected and reverted:
+
+- Per-pixel default-gradient quantization matched the likely Chrome sampling
+  direction but made the expected-frame path exceed
+  `ELECTRON_BITMAP_TIMEOUT_SECS=20`, reproducing the resource/crash risk.
+- Row-batched center sampling avoided the timeout but worsened this fixture to
+  `electron_simple_web_layout_mismatch_count=1761`.
+
+Keep the current endpoint-exact row path until a Chrome-derived gradient oracle
+or faster mutable framebuffer pixel writer is available. Do not reintroduce the
+per-pixel repeated-gradient loop through `fb_rounded_rect_corners_opacity_clip`;
+it is too slow in the self-hosted interpreter evidence path.
