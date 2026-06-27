@@ -80,6 +80,19 @@ function plainObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
+function pathInfo(filePath) {
+  let lstat = null;
+  try {
+    lstat = fs.lstatSync(filePath);
+  } catch (_err) {
+    lstat = null;
+  }
+  return {
+    lstat,
+    isSymlink: lstat !== null && lstat.isSymbolicLink(),
+  };
+}
+
 function artifactStat(value, proofPath) {
   if (typeof value !== 'string' || value.trim() === '') {
     return null;
@@ -250,6 +263,19 @@ const capturedArgbNonzeroPixels = nonzeroPixelCount(capturedArgbPixels);
 const capturedArgbChecksum = checksum(capturedArgbPixels);
 const capturedArgbWeightedChecksum = weightedChecksum(capturedArgbPixels);
 const expectedProofSource = 'tools/electron-live-bitmap/exact_fixture.js';
+const proofSourceStat = pathInfo(expectedProofSource);
+const proofSourceFileStatus = proofSourceStat.isSymlink
+  ? 'symlink'
+  : proofSourceStat.lstat === null || !proofSourceStat.lstat.isFile()
+    ? 'missing'
+    : proofSourceStat.lstat.size <= 0
+      ? 'empty'
+      : 'pass';
+const proofSourceSizeBytes = proofSourceFileStatus === 'empty'
+  ? '0'
+  : proofSourceFileStatus === 'pass'
+    ? String(proofSourceStat.lstat.size)
+    : '';
 const expectedCaptureBackend = 'electron-offscreen-capture-page';
 const expectedCompositorMode = 'offscreen-osr-exact-srgb';
 const browserEngine = textField(proof.browser_engine);
@@ -271,6 +297,8 @@ if (proof.blur_or_tolerance_used !== false) {
   reason = 'unexpected-electron-renderer';
 } else if (proof.proof_source !== expectedProofSource) {
   reason = 'unexpected-electron-proof-source';
+} else if (proofSourceFileStatus !== 'pass') {
+  reason = `unexpected-electron-proof-source-file-${proofSourceFileStatus}`;
 } else if (proof.scene !== 'generated-gui-widget-html') {
   reason = 'unexpected-electron-scene';
 } else if (proof.capture_backend !== expectedCaptureBackend) {
@@ -346,6 +374,8 @@ emit('electron_generated_gui_web_validation_reason', reason);
 emit('electron_generated_gui_web_proof_symlink_status', 'pass');
 emit('electron_generated_gui_web_renderer', proof.renderer);
 emit('electron_generated_gui_web_proof_source', proof.proof_source);
+emit('electron_generated_gui_web_proof_source_file_status', proofSourceFileStatus);
+emit('electron_generated_gui_web_proof_source_size_bytes', proofSourceSizeBytes);
 emit('electron_generated_gui_web_capture_backend', proof.capture_backend);
 emit('electron_generated_gui_web_compositor_mode', proof.compositor_mode);
 emit('electron_generated_gui_web_browser_engine', browserEngine);

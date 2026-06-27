@@ -27,7 +27,7 @@ electron_simple_web_engine2d_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 19 | 19 | 0 | 0 |
+| 20 | 20 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -47,7 +47,7 @@ Validates the Electron Simple Web Engine2D bitmap proof validator. The wrapper c
 | Design | doc/07_guide/tooling/renderdoc_capture_infra.md |
 | Research | N/A |
 | Source | `test/03_system/check/electron_simple_web_engine2d_proof_validator_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-06-27 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -108,6 +108,9 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_simple_web_engine2d
   within the Simple Web Engine2D scene family.
 - Proof source must identify the live exact fixture producer, not a generic
   hand-authored JSON file.
+- The proof source marker must resolve to a regular nonempty exact fixture
+  producer source file so stale JSON cannot be paired with a missing Electron
+  capture script.
 - The proof JSON and captured ARGB artifact must be regular files, not
   symlinks to mutable or substituted evidence.
 - The live Electron wrapper consumes the validator instead of raw shell JSON
@@ -145,6 +148,8 @@ expect(evidence).to_contain("electron_simple_web_engine2d_validation_reason=pass
 expect(evidence).to_contain("electron_simple_web_engine2d_proof_symlink_status=pass")
 expect(evidence).to_contain("electron_simple_web_engine2d_renderer=electron-live-capture-page")
 expect(evidence).to_contain("electron_simple_web_engine2d_proof_source=tools/electron-live-bitmap/exact_fixture.js")
+expect(evidence).to_contain("electron_simple_web_engine2d_proof_source_file_status=pass")
+expect(evidence).to_contain("electron_simple_web_engine2d_proof_source_size_bytes=")
 expect(evidence).to_contain("electron_simple_web_engine2d_capture_backend=electron-offscreen-capture-page")
 expect(evidence).to_contain("electron_simple_web_engine2d_compositor_mode=offscreen-osr-exact-srgb")
 expect(evidence).to_contain("electron_simple_web_engine2d_browser_engine=chromium")
@@ -216,6 +221,36 @@ expect(renderer).to_contain("electron_simple_web_engine2d_validation_reason=unex
 expect(source).to_contain("electron_simple_web_engine2d_validation_reason=unexpected-proof-source")
 expect(source).to_contain("electron_simple_web_engine2d_proof_source=tools/manual/proof.json")
 expect(scene).to_contain("electron_simple_web_engine2d_validation_reason=unexpected-electron-scene")
+```
+
+</details>
+
+#### rejects proof when the live Electron Engine2D capture source artifact is missing
+
+- Confirm Engine2D proof source marker is bound to the producer source file
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-electron-engine2d-validator-source-artifact"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_command(root + "/proof.json", "") +
+    " && cd " + root + " && node ../../scripts/check/validate-electron-simple-web-engine2d-proof.js proof.json > evidence.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read(root + "/evidence.env")
+step("Confirm Engine2D proof source marker is bound to the producer source file")
+expect(evidence).to_contain("electron_simple_web_engine2d_validation_status=fail")
+expect(evidence).to_contain("electron_simple_web_engine2d_validation_reason=unexpected-proof-source-file-missing")
+expect(evidence).to_contain("electron_simple_web_engine2d_proof_source=tools/electron-live-bitmap/exact_fixture.js")
+expect(evidence).to_contain("electron_simple_web_engine2d_proof_source_file_status=missing")
+expect(evidence).to_contain("electron_simple_web_engine2d_proof_source_size_bytes=")
 ```
 
 </details>
@@ -922,6 +957,8 @@ expect(script).to_contain("electron_simple_web_engine2d_chrome_process_version")
 expect(script).to_contain("electron_simple_web_engine2d_gpu_compositing")
 expect(script).to_contain("electron_simple_web_engine2d_gpu_rasterization")
 expect(script).to_contain("electron_simple_web_engine2d_proof_source")
+expect(script).to_contain("electron_simple_web_engine2d_proof_source_file_status")
+expect(script).to_contain("electron_simple_web_engine2d_proof_source_size_bytes")
 expect(script).to_contain("electron_simple_web_engine2d_proof_iterations")
 expect(script).to_contain("electron_simple_web_engine2d_estimated_fps_floor")
 expect(script).to_contain("electron_simple_web_engine2d_captured_argb_file_status")
@@ -956,8 +993,8 @@ expect(fixture).to_contain("chrome_process_version")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 19 |
-| Active scenarios | 19 |
+| Total scenarios | 20 |
+| Active scenarios | 20 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

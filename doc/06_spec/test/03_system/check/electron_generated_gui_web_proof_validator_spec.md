@@ -27,7 +27,7 @@ electron_generated_gui_web_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 20 | 20 | 0 | 0 |
+| 21 | 21 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -47,7 +47,7 @@ Validates the Electron generated-GUI Web parity proof validator. The Electron wr
 | Design | doc/07_guide/tooling/renderdoc_capture_infra.md |
 | Research | N/A |
 | Source | `test/03_system/check/electron_generated_gui_web_proof_validator_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-06-27 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -103,6 +103,9 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_generated_gui_web_p
   wrapper status, preserving exact failure diagnostics in check output.
 - Proof renderer, source marker, and scene identity must match the live
   generated-GUI Electron capture path.
+- The source marker must resolve to a regular nonempty exact fixture producer
+  source file so stale generated-GUI JSON cannot be paired with a missing
+  Electron capture script.
 - Complete proofs must identify Chromium as the Electron browser engine and
   include Electron/Chrome runtime version evidence from the live process.
 - Complete proofs must identify the Electron offscreen capture backend,
@@ -142,6 +145,8 @@ expect(evidence).to_contain("electron_generated_gui_web_validation_status=pass")
 expect(evidence).to_contain("electron_generated_gui_web_validation_reason=pass")
 expect(evidence).to_contain("electron_generated_gui_web_renderer=electron-live-capture-page")
 expect(evidence).to_contain("electron_generated_gui_web_proof_source=tools/electron-live-bitmap/exact_fixture.js")
+expect(evidence).to_contain("electron_generated_gui_web_proof_source_file_status=pass")
+expect(evidence).to_contain("electron_generated_gui_web_proof_source_size_bytes=")
 expect(evidence).to_contain("electron_generated_gui_web_capture_backend=electron-offscreen-capture-page")
 expect(evidence).to_contain("electron_generated_gui_web_compositor_mode=offscreen-osr-exact-srgb")
 expect(evidence).to_contain("electron_generated_gui_web_browser_engine=chromium")
@@ -249,6 +254,36 @@ expect(missing).to_contain("electron_generated_gui_web_proof_source=")
 expect(wrong).to_contain("electron_generated_gui_web_validation_status=fail")
 expect(wrong).to_contain("electron_generated_gui_web_validation_reason=unexpected-electron-proof-source")
 expect(wrong).to_contain("electron_generated_gui_web_proof_source=tools/manual/generated-gui-proof.json")
+```
+
+</details>
+
+#### rejects proof when the live generated GUI capture source artifact is missing
+
+- Confirm generated GUI proof source marker is bound to the producer source file
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-electron-generated-gui-validator-source-artifact"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_command(root + "/proof.json", "") +
+    " && cd " + root + " && node ../../scripts/check/validate-electron-generated-gui-web-proof.js proof.json > evidence.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read(root + "/evidence.env")
+step("Confirm generated GUI proof source marker is bound to the producer source file")
+expect(evidence).to_contain("electron_generated_gui_web_validation_status=fail")
+expect(evidence).to_contain("electron_generated_gui_web_validation_reason=unexpected-electron-proof-source-file-missing")
+expect(evidence).to_contain("electron_generated_gui_web_proof_source=tools/electron-live-bitmap/exact_fixture.js")
+expect(evidence).to_contain("electron_generated_gui_web_proof_source_file_status=missing")
+expect(evidence).to_contain("electron_generated_gui_web_proof_source_size_bytes=")
 ```
 
 </details>
@@ -968,6 +1003,8 @@ expect(validator).to_contain("captured-argb-checksum-mismatch")
 expect(validator).to_contain("captured-argb-weighted-checksum-mismatch")
 expect(script).to_contain("electron_generated_gui_web_proof_renderer")
 expect(script).to_contain("electron_generated_gui_web_proof_source")
+expect(script).to_contain("electron_generated_gui_web_proof_source_file_status")
+expect(script).to_contain("electron_generated_gui_web_proof_source_size_bytes")
 expect(script).to_contain("captured-argb-checksum-mismatch")
 expect(script).to_contain("captured-argb-weighted-checksum-mismatch")
 expect(script).to_contain("status=divergent")
@@ -987,8 +1024,8 @@ expect(fixture).to_contain("chrome_process_version")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 20 |
-| Active scenarios | 20 |
+| Total scenarios | 21 |
+| Active scenarios | 21 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
