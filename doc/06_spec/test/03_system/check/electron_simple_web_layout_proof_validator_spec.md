@@ -27,7 +27,7 @@ electron_simple_web_layout_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 22 | 22 | 0 | 0 |
+| 23 | 23 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -111,8 +111,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_simple_web_layout_p
 - Complete proofs must identify the Electron offscreen capture backend,
   compositor mode, Electron/Chromium runtime identity, Chromium GPU
   feature-status diagnostics, and at least two measured capture iterations.
-- The proof JSON, captured ARGB artifact, and geometry artifact must be regular
-  files, not symlinks to mutable or substituted evidence.
+- The proof JSON, captured ARGB artifact, and geometry artifact must be single
+  regular files, not symlinks or hardlinks to mutable or substituted evidence.
 - The live Electron layout wrapper consumes the validator and still maps real
   pixel mismatches to `divergent` evidence.
 
@@ -146,6 +146,7 @@ step("Inspect normalized Electron layout proof rows")
 expect(evidence).to_contain("electron_simple_web_layout_validation_status=pass")
 expect(evidence).to_contain("electron_simple_web_layout_validation_reason=pass")
 expect(evidence).to_contain("electron_simple_web_layout_proof_symlink_status=pass")
+expect(evidence).to_contain("electron_simple_web_layout_proof_hardlink_status=pass")
 expect(evidence).to_contain("electron_simple_web_layout_renderer=electron-live-capture-page")
 expect(evidence).to_contain("electron_simple_web_layout_proof_source=tools/electron-live-bitmap/exact_fixture.js")
 expect(evidence).to_contain("electron_simple_web_layout_proof_source_file_status=pass")
@@ -174,6 +175,7 @@ expect(evidence).to_contain("electron_simple_web_layout_geometry_path=geometry.j
 expect(evidence).to_contain("electron_simple_web_layout_geometry_written=true")
 expect(evidence).to_contain("electron_simple_web_layout_geometry_file_status=pass")
 expect(evidence).to_contain("electron_simple_web_layout_geometry_symlink_status=pass")
+expect(evidence).to_contain("electron_simple_web_layout_geometry_hardlink_status=pass")
 expect(evidence).to_contain("electron_simple_web_layout_geometry_producer=electron-offscreen-geometry")
 expect(evidence).to_contain("electron_simple_web_layout_geometry_viewport_width=96")
 expect(evidence).to_contain("electron_simple_web_layout_geometry_viewport_height=64")
@@ -183,6 +185,7 @@ expect(evidence).to_contain("electron_simple_web_layout_captured_argb_path=captu
 expect(evidence).to_contain("electron_simple_web_layout_captured_argb_written=true")
 expect(evidence).to_contain("electron_simple_web_layout_captured_argb_file_status=pass")
 expect(evidence).to_contain("electron_simple_web_layout_captured_argb_symlink_status=pass")
+expect(evidence).to_contain("electron_simple_web_layout_captured_argb_hardlink_status=pass")
 expect(evidence).to_contain("electron_simple_web_layout_captured_argb_format=argb-u32")
 expect(evidence).to_contain("electron_simple_web_layout_captured_argb_producer=electron-live-capture-page")
 expect(evidence).to_contain("electron_simple_web_layout_captured_argb_width=96")
@@ -420,7 +423,7 @@ val iterations = file_read(root + "/iterations.env")
 expect(evidence).to_contain("electron_simple_web_layout_validation_status=fail")
 expect(evidence).to_contain("electron_simple_web_layout_validation_reason=missing-electron-timing")
 expect(evidence).to_contain("electron_simple_web_layout_electron_frame_us=")
-expect(evidence.contains("electron_simple_web_layout_electron_frame_us=not-a-number")).to_equal(false)
+expect_not(evidence.contains("electron_simple_web_layout_electron_frame_us=not-a-number"))
 expect(iterations).to_contain("electron_simple_web_layout_validation_reason=missing-performance-iterations")
 expect(iterations).to_contain("electron_simple_web_layout_proof_iterations=1")
 ```
@@ -594,16 +597,75 @@ step("Confirm Electron layout evidence cannot be substituted through symlinks")
 expect(proof).to_contain("electron_simple_web_layout_validation_status=fail")
 expect(proof).to_contain("electron_simple_web_layout_validation_reason=proof-json-symlink")
 expect(proof).to_contain("electron_simple_web_layout_proof_symlink_status=fail")
+expect(proof).to_contain("electron_simple_web_layout_proof_hardlink_status=unknown")
 expect(argb).to_contain("electron_simple_web_layout_validation_status=fail")
 expect(argb).to_contain("electron_simple_web_layout_validation_reason=captured-argb-symlink")
 expect(argb).to_contain("electron_simple_web_layout_proof_symlink_status=pass")
+expect(argb).to_contain("electron_simple_web_layout_proof_hardlink_status=pass")
 expect(argb).to_contain("electron_simple_web_layout_captured_argb_file_status=symlink")
 expect(argb).to_contain("electron_simple_web_layout_captured_argb_symlink_status=fail")
+expect(argb).to_contain("electron_simple_web_layout_captured_argb_hardlink_status=pass")
 expect(geometry).to_contain("electron_simple_web_layout_validation_status=fail")
 expect(geometry).to_contain("electron_simple_web_layout_validation_reason=electron-geometry-symlink")
 expect(geometry).to_contain("electron_simple_web_layout_proof_symlink_status=pass")
+expect(geometry).to_contain("electron_simple_web_layout_proof_hardlink_status=pass")
 expect(geometry).to_contain("electron_simple_web_layout_geometry_file_status=symlink")
 expect(geometry).to_contain("electron_simple_web_layout_geometry_symlink_status=fail")
+expect(geometry).to_contain("electron_simple_web_layout_geometry_hardlink_status=pass")
+```
+
+</details>
+
+#### rejects hardlinked Electron layout proof and artifact files
+
+-  proof command
+-  proof command
+-  proof command
+   - Expected: code equals `1`
+- Confirm Electron layout evidence cannot be substituted through hardlinks
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 50 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-electron-layout-validator-hardlinks"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_command(root + "/proof-real.json", "") +
+    " && ln " + root + "/proof-real.json " + root + "/proof.json" +
+    " && node scripts/check/validate-electron-simple-web-layout-proof.js " + root + "/proof.json > " + root + "/proof.env; " +
+    _proof_command(root + "/argb.json", "fs.renameSync(path.join(dir,\"captured.json\"),path.join(dir,\"captured-real.json\"));fs.linkSync(path.join(dir,\"captured-real.json\"),path.join(dir,\"captured.json\"))") +
+    " && node scripts/check/validate-electron-simple-web-layout-proof.js " + root + "/argb.json > " + root + "/argb.env; " +
+    _proof_command(root + "/geometry-proof.json", "fs.renameSync(path.join(dir,\"geometry.json\"),path.join(dir,\"geometry-real.json\"));fs.linkSync(path.join(dir,\"geometry-real.json\"),path.join(dir,\"geometry.json\"))") +
+    " && node scripts/check/validate-electron-simple-web-layout-proof.js " + root + "/geometry-proof.json > " + root + "/geometry.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val proof = file_read(root + "/proof.env")
+val argb = file_read(root + "/argb.env")
+val geometry = file_read(root + "/geometry.env")
+step("Confirm Electron layout evidence cannot be substituted through hardlinks")
+expect(proof).to_contain("electron_simple_web_layout_validation_status=fail")
+expect(proof).to_contain("electron_simple_web_layout_validation_reason=proof-json-hardlink")
+expect(proof).to_contain("electron_simple_web_layout_proof_symlink_status=pass")
+expect(proof).to_contain("electron_simple_web_layout_proof_hardlink_status=fail")
+expect(argb).to_contain("electron_simple_web_layout_validation_status=fail")
+expect(argb).to_contain("electron_simple_web_layout_validation_reason=captured-argb-hardlink")
+expect(argb).to_contain("electron_simple_web_layout_proof_hardlink_status=pass")
+expect(argb).to_contain("electron_simple_web_layout_captured_argb_file_status=hardlink")
+expect(argb).to_contain("electron_simple_web_layout_captured_argb_symlink_status=pass")
+expect(argb).to_contain("electron_simple_web_layout_captured_argb_hardlink_status=fail")
+expect(argb).to_contain("electron_simple_web_layout_captured_argb_size_bytes=")
+expect(geometry).to_contain("electron_simple_web_layout_validation_status=fail")
+expect(geometry).to_contain("electron_simple_web_layout_validation_reason=electron-geometry-hardlink")
+expect(geometry).to_contain("electron_simple_web_layout_proof_hardlink_status=pass")
+expect(geometry).to_contain("electron_simple_web_layout_geometry_file_status=hardlink")
+expect(geometry).to_contain("electron_simple_web_layout_geometry_symlink_status=pass")
+expect(geometry).to_contain("electron_simple_web_layout_geometry_hardlink_status=fail")
+expect(geometry).to_contain("electron_simple_web_layout_geometry_size_bytes=")
 ```
 
 </details>
@@ -804,19 +866,19 @@ step("Confirm live Electron layout numeric proof cannot be stringified")
 expect(requested).to_contain("electron_simple_web_layout_validation_status=fail")
 expect(requested).to_contain("electron_simple_web_layout_validation_reason=missing-viewport-proof")
 expect(requested).to_contain("electron_simple_web_layout_requested_width=")
-expect(requested.contains("electron_simple_web_layout_requested_width=96")).to_equal(false)
+expect_not(requested.contains("electron_simple_web_layout_requested_width=96"))
 expect(argb).to_contain("electron_simple_web_layout_validation_status=fail")
 expect(argb).to_contain("electron_simple_web_layout_validation_reason=captured-argb-viewport-mismatch")
 expect(argb).to_contain("electron_simple_web_layout_captured_argb_width=")
-expect(argb.contains("electron_simple_web_layout_captured_argb_width=96")).to_equal(false)
+expect_not(argb.contains("electron_simple_web_layout_captured_argb_width=96"))
 expect(native).to_contain("electron_simple_web_layout_validation_status=fail")
 expect(native).to_contain("electron_simple_web_layout_validation_reason=missing-capture-provenance")
 expect(native).to_contain("electron_simple_web_layout_capture_native_width=")
-expect(native.contains("electron_simple_web_layout_capture_native_width=96")).to_equal(false)
+expect_not(native.contains("electron_simple_web_layout_capture_native_width=96"))
 expect(timing).to_contain("electron_simple_web_layout_validation_status=fail")
 expect(timing).to_contain("electron_simple_web_layout_validation_reason=missing-electron-timing")
 expect(timing).to_contain("electron_simple_web_layout_electron_frame_us=")
-expect(timing.contains("electron_simple_web_layout_electron_frame_us=1250")).to_equal(false)
+expect_not(timing.contains("electron_simple_web_layout_electron_frame_us=1250"))
 ```
 
 </details>
@@ -865,21 +927,21 @@ step("Confirm string booleans remain malformed Electron layout diagnostics")
 expect(capture).to_contain("electron_simple_web_layout_validation_status=fail")
 expect(capture).to_contain("electron_simple_web_layout_validation_reason=missing-captured-argb")
 expect(capture).to_contain("electron_simple_web_layout_captured_argb_written=")
-expect(capture.contains("electron_simple_web_layout_captured_argb_written=true")).to_equal(false)
-expect(capture.contains("electron_simple_web_layout_captured_argb_written=false")).to_equal(false)
+expect_not(capture.contains("electron_simple_web_layout_captured_argb_written=true"))
+expect_not(capture.contains("electron_simple_web_layout_captured_argb_written=false"))
 expect(downsampled).to_contain("electron_simple_web_layout_validation_status=fail")
 expect(downsampled).to_contain("electron_simple_web_layout_validation_reason=missing-capture-provenance")
 expect(downsampled).to_contain("electron_simple_web_layout_capture_downsampled=")
-expect(downsampled.contains("electron_simple_web_layout_capture_downsampled=false")).to_equal(false)
+expect_not(downsampled.contains("electron_simple_web_layout_capture_downsampled=false"))
 expect(geometry).to_contain("electron_simple_web_layout_validation_status=fail")
 expect(geometry).to_contain("electron_simple_web_layout_validation_reason=missing-electron-geometry")
 expect(geometry).to_contain("electron_simple_web_layout_geometry_written=")
-expect(geometry.contains("electron_simple_web_layout_geometry_written=true")).to_equal(false)
-expect(geometry.contains("electron_simple_web_layout_geometry_written=false")).to_equal(false)
+expect_not(geometry.contains("electron_simple_web_layout_geometry_written=true"))
+expect_not(geometry.contains("electron_simple_web_layout_geometry_written=false"))
 expect(blur).to_contain("electron_simple_web_layout_validation_status=fail")
 expect(blur).to_contain("electron_simple_web_layout_validation_reason=blur-or-tolerance-not-allowed")
 expect(blur).to_contain("electron_simple_web_layout_blur_or_tolerance_used=")
-expect(blur.contains("electron_simple_web_layout_blur_or_tolerance_used=false")).to_equal(false)
+expect_not(blur.contains("electron_simple_web_layout_blur_or_tolerance_used=false"))
 ```
 
 </details>
@@ -919,10 +981,10 @@ expect(blur).to_contain("electron_simple_web_layout_validation_reason=blur-or-to
 expect(blur).to_contain("electron_simple_web_layout_blur_or_tolerance_used=true")
 expect(mismatch).to_contain("electron_simple_web_layout_validation_reason=malformed-mismatch-count")
 expect(mismatch).to_contain("electron_simple_web_layout_mismatch_count=")
-expect(mismatch.contains("electron_simple_web_layout_mismatch_count=bad")).to_equal(false)
+expect_not(mismatch.contains("electron_simple_web_layout_mismatch_count=bad"))
 expect(string_zero).to_contain("electron_simple_web_layout_validation_reason=malformed-mismatch-count")
 expect(string_zero).to_contain("electron_simple_web_layout_mismatch_count=")
-expect(string_zero.contains("electron_simple_web_layout_mismatch_count=0")).to_equal(false)
+expect_not(string_zero.contains("electron_simple_web_layout_mismatch_count=0"))
 ```
 
 </details>
@@ -1021,13 +1083,22 @@ expect(validator).to_contain("measuredGeometryItemCount")
 expect(validator).to_contain("missing-electron-geometry-measured-items")
 expect(validator).to_contain("electron_simple_web_layout_geometry_measured_item_count")
 expect(validator).to_contain("electron_simple_web_layout_proof_symlink_status")
+expect(validator).to_contain("electron_simple_web_layout_proof_hardlink_status")
 expect(validator).to_contain("electron_simple_web_layout_captured_argb_symlink_status")
+expect(validator).to_contain("electron_simple_web_layout_captured_argb_hardlink_status")
 expect(validator).to_contain("electron_simple_web_layout_geometry_symlink_status")
+expect(validator).to_contain("electron_simple_web_layout_geometry_hardlink_status")
+expect(validator).to_contain("proof-json-hardlink")
+expect(validator).to_contain("captured-argb-hardlink")
+expect(validator).to_contain("electron-geometry-hardlink")
 
 val script = file_read("scripts/check/check-electron-simple-web-layout-bitmap-evidence.shs")
 expect(script).to_contain("validate-electron-simple-web-layout-proof.js")
 expect(script).to_contain("cat \"$VALIDATED_ENV\"")
 expect(script).to_contain("electron_simple_web_layout_validation_status")
+expect(script).to_contain("proof-json-hardlink-status-not-pass")
+expect(script).to_contain("electron-geometry-hardlink-status-not-pass")
+expect(script).to_contain("captured-argb-hardlink-status-not-pass")
 expect(script).to_contain("electron_simple_web_layout_capture_backend")
 expect(script).to_contain("electron_simple_web_layout_browser_engine")
 expect(script).to_contain("electron_simple_web_layout_electron_user_agent")
@@ -1103,8 +1174,8 @@ expect(evidence).to_contain("electron_simple_web_layout_simple_bin_status=forbid
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 22 |
-| Active scenarios | 22 |
+| Total scenarios | 23 |
+| Active scenarios | 23 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
