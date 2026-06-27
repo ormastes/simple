@@ -27,7 +27,7 @@ electron_generated_gui_web_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 16 | 16 | 0 | 0 |
+| 17 | 17 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -96,6 +96,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_generated_gui_web_p
   wrapper status, preserving exact failure diagnostics in check output.
 - Proof renderer, source marker, and scene identity must match the live
   generated-GUI Electron capture path.
+- Complete proofs must identify Chromium as the Electron browser engine and
+  include Electron/Chrome runtime version evidence from the live process.
 - Complete proofs must identify the Electron offscreen capture backend,
   compositor mode, Chromium GPU feature-status diagnostics, and at least two
   measured capture iterations.
@@ -116,7 +118,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_generated_gui_web_p
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 38 lines folded for reproduction.
+Runnable source: 42 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -135,6 +137,10 @@ expect(evidence).to_contain("electron_generated_gui_web_renderer=electron-live-c
 expect(evidence).to_contain("electron_generated_gui_web_proof_source=tools/electron-live-bitmap/exact_fixture.js")
 expect(evidence).to_contain("electron_generated_gui_web_capture_backend=electron-offscreen-capture-page")
 expect(evidence).to_contain("electron_generated_gui_web_compositor_mode=offscreen-osr-exact-srgb")
+expect(evidence).to_contain("electron_generated_gui_web_browser_engine=chromium")
+expect(evidence).to_contain("electron_generated_gui_web_electron_user_agent=Mozilla/5.0 Chrome/142.0.0.0 Electron/42.5.0 Safari/537.36")
+expect(evidence).to_contain("electron_generated_gui_web_electron_process_version=42.5.0")
+expect(evidence).to_contain("electron_generated_gui_web_chrome_process_version=142.0.0.0")
 expect(evidence).to_contain("electron_generated_gui_web_gpu_compositing=disabled_software")
 expect(evidence).to_contain("electron_generated_gui_web_gpu_rasterization=disabled_software")
 expect(evidence).to_contain("electron_generated_gui_web_scene=generated-gui-widget-html")
@@ -277,6 +283,53 @@ expect(gpu_env).to_contain("electron_generated_gui_web_validation_reason=missing
 expect(gpu_env).to_contain("electron_generated_gui_web_gpu_compositing=disabled_software")
 expect(gpu_mismatch).to_contain("electron_generated_gui_web_validation_reason=missing-gpu-feature-status")
 expect(gpu_mismatch).to_contain("electron_generated_gui_web_gpu_rasterization=disabled_software")
+```
+
+</details>
+
+#### rejects missing Electron Chromium runtime identity
+
+-  proof command
+-  proof command
+-  proof command
+-  proof command
+   - Expected: code equals `1`
+- Confirm generated GUI proof is tied to Electron Chromium runtime evidence
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 26 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-electron-generated-gui-web-validator-runtime-identity"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_command(root + "/engine.json", "p.browser_engine=\"webkit\"") +
+    " && node scripts/check/validate-electron-generated-gui-web-proof.js " + root + "/engine.json > " + root + "/engine.env; " +
+    _proof_command(root + "/ua.json", "p.electron_user_agent=\"Mozilla/5.0 Chrome/142.0.0.0 Safari/537.36\"") +
+    " && node scripts/check/validate-electron-generated-gui-web-proof.js " + root + "/ua.json > " + root + "/ua.env; " +
+    _proof_command(root + "/electron-version.json", "p.electron_process_version=\"\"") +
+    " && node scripts/check/validate-electron-generated-gui-web-proof.js " + root + "/electron-version.json > " + root + "/electron-version.env; " +
+    _proof_command(root + "/chrome-version.json", "p.chrome_process_version=\"dev\"") +
+    " && node scripts/check/validate-electron-generated-gui-web-proof.js " + root + "/chrome-version.json > " + root + "/chrome-version.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val engine = file_read(root + "/engine.env")
+val ua = file_read(root + "/ua.env")
+val electron_version = file_read(root + "/electron-version.env")
+val chrome_version = file_read(root + "/chrome-version.env")
+step("Confirm generated GUI proof is tied to Electron Chromium runtime evidence")
+expect(engine).to_contain("electron_generated_gui_web_validation_reason=missing-electron-runtime-identity")
+expect(engine).to_contain("electron_generated_gui_web_browser_engine=webkit")
+expect(ua).to_contain("electron_generated_gui_web_validation_reason=missing-electron-runtime-identity")
+expect(ua).to_contain("electron_generated_gui_web_electron_user_agent=Mozilla/5.0 Chrome/142.0.0.0 Safari/537.36")
+expect(electron_version).to_contain("electron_generated_gui_web_validation_reason=missing-electron-runtime-identity")
+expect(electron_version).to_contain("electron_generated_gui_web_electron_process_version=")
+expect(chrome_version).to_contain("electron_generated_gui_web_validation_reason=missing-electron-runtime-identity")
+expect(chrome_version).to_contain("electron_generated_gui_web_chrome_process_version=dev")
 ```
 
 </details>
@@ -724,7 +777,7 @@ expect(pixel).to_contain("electron_generated_gui_web_mismatch_count=4")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 28 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -736,6 +789,10 @@ expect(script).to_contain("validate-electron-generated-gui-web-proof.js")
 expect(script).to_contain("cat \"$VALIDATED_ENV\"")
 expect(script).to_contain("electron_generated_gui_web_validation_status")
 expect(script).to_contain("electron_generated_gui_web_capture_backend")
+expect(script).to_contain("electron_generated_gui_web_browser_engine")
+expect(script).to_contain("electron_generated_gui_web_electron_user_agent")
+expect(script).to_contain("electron_generated_gui_web_electron_process_version")
+expect(script).to_contain("electron_generated_gui_web_chrome_process_version")
 expect(script).to_contain("electron_generated_gui_web_gpu_compositing")
 expect(script).to_contain("electron_generated_gui_web_estimated_fps_floor")
 expect(script).to_contain("electron_generated_gui_web_captured_argb_file_status")
@@ -746,6 +803,12 @@ expect(script).to_contain("electron_generated_gui_web_proof_renderer")
 expect(script).to_contain("electron_generated_gui_web_proof_source")
 expect(script).to_contain("checksum-mismatch|weighted-checksum-mismatch|pixel-mismatch")
 expect(script).to_contain("status=divergent")
+
+val fixture = file_read("tools/electron-live-bitmap/exact_fixture.js")
+expect(fixture).to_contain("browser_engine")
+expect(fixture).to_contain("electron_user_agent")
+expect(fixture).to_contain("electron_process_version")
+expect(fixture).to_contain("chrome_process_version")
 ```
 
 </details>
@@ -754,8 +817,8 @@ expect(script).to_contain("status=divergent")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 16 |
-| Active scenarios | 16 |
+| Total scenarios | 17 |
+| Active scenarios | 17 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
