@@ -27,7 +27,7 @@ renderdoc_chrome_target_control_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 3 | 3 | 0 | 0 |
+| 5 | 5 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -93,6 +93,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/renderdoc_chrome_target_cont
 
 - Missing Chrome writes deterministic non-pass evidence with the target-control
   schema.
+- Symlinked `.rdc` capture artifacts fail with a typed `capture-symlink`
+  reason, even when the symlink target begins with `RDOC`.
 - The script emits GPU-process environment and map fields:
   `gpu_env_has_layer`, `gpu_maps_has_renderdoc`, and `gpu_maps_has_vulkan`.
 - The script fails closed with `no-gpu-process` before invoking qrenderdoc
@@ -117,18 +119,23 @@ The probe writes `evidence.env` under `BUILD_DIR`, defaulting to
 - `rdoc_chrome_target_control_target_pid`
 - `rdoc_chrome_target_control_target_api`
 - `rdoc_chrome_target_control_capture_file`
+- `rdoc_chrome_target_control_capture_file_status`
+- `rdoc_chrome_target_control_capture_file_reason`
 - `rdoc_chrome_target_control_capture_magic`
 
 Passing evidence requires:
 
 - `rdoc_chrome_target_control_status=pass`
 - `rdoc_chrome_target_control_reason=pass`
+- `rdoc_chrome_target_control_capture_file_status=pass`
+- `rdoc_chrome_target_control_capture_file_reason=pass`
 - `rdoc_chrome_target_control_capture_magic=RDOC`
 - `rdoc_chrome_target_control_target_api` identifying a Vulkan target
 
-Any missing or non-`RDOC` capture magic is non-pass. The target-control probe is
-not allowed to infer browser capture success from Chrome ARGB, browser backing,
-Vulkan logs, or RenderDoc library mapping alone.
+Any missing, non-regular, symlinked, empty, or non-`RDOC` capture is non-pass.
+The target-control probe is not allowed to infer browser capture success from
+Chrome ARGB, browser backing, Vulkan logs, RenderDoc library mapping, or magic
+bytes read through a symlink.
 
 ## Failure Matrix
 
@@ -138,6 +145,9 @@ Vulkan logs, or RenderDoc library mapping alone.
 | `missing-qrenderdoc` | RenderDoc target-control UI binary is unavailable | Install RenderDoc or set `RDOC_HOME` |
 | `missing-renderdoc-vulkan-layer` | RenderDoc Vulkan layer manifest is unavailable | Register/fix RenderDoc layer |
 | `no-gpu-process` | Chrome did not spawn a GPU process | Check display, Vulkan flags, and Chrome GPU logs |
+| `capture-symlink` | qrenderdoc reported a symlinked `.rdc` capture path | Preserve the original capture file; do not validate through aliases |
+| `capture-empty` | qrenderdoc reported an empty `.rdc` capture path | Inspect target-control copy/output path |
+| `capture-not-regular` | qrenderdoc reported a non-file capture path | Inspect target-control copy/output path |
 | `target-control-no-evidence` | qrenderdoc did not write target-control env | Inspect `qrenderdoc.log` and UI Python availability |
 | `no-new-capture-message` | target-control attached but no capture arrived | Inspect target API and frame/present activity |
 | `missing-rdc` | target-control ran but no valid `.rdc` exists | Continue Chrome/RenderDoc capture debugging |
@@ -148,14 +158,20 @@ The executable spec covers:
 
 1. Missing Chrome evidence remains deterministic and includes all target-control
    schema keys.
-2. The shell script contains an explicit `no-gpu-process` fail-closed guard
+2. A fake Chrome/qrenderdoc lane proves symlinked `.rdc` captures fail before
+   magic bytes are read through the link.
+3. The shell script contains an explicit `no-gpu-process` fail-closed guard
    before qrenderdoc receives `RDOC_TARGET_CONTROL_PID`.
-3. The shell script records GPU-process environment and map diagnostics for the
+4. The shell script records GPU-process environment and map diagnostics for the
    RenderDoc Vulkan layer, `librenderdoc`, and `libvulkan`.
+5. The shell script emits capture file status/reason rows and reads magic only
+   after regular-file validation passes.
 
-The spec deliberately does not launch real Chrome. Real capture attempts remain
-host-dependent and belong in `doc/09_report` evidence rows plus the active
-blocker document.
+The spec deliberately does not launch real Chrome. Its symlink scenario uses a
+fake Chrome process and fake qrenderdoc writer to exercise the shell contract
+without requiring GUI, Vulkan, or RenderDoc host setup. Real capture attempts
+remain host-dependent and belong in `doc/09_report` evidence rows plus the
+active blocker document.
 
 ## Scenarios
 
@@ -192,6 +208,40 @@ expect(evidence).to_contain("rdoc_chrome_target_control_gpu_maps_has_renderdoc="
 expect(evidence).to_contain("rdoc_chrome_target_control_gpu_maps_has_vulkan=")
 expect(evidence).to_contain("rdoc_chrome_target_control_discovery_log=build/test-renderdoc-chrome-target-control-missing/discovery.log")
 expect(evidence).to_contain("rdoc_chrome_target_control_gpu_maps=build/test-renderdoc-chrome-target-control-missing/gpu.maps")
+```
+
+</details>
+
+#### rejects symlinked target-control capture artifacts
+
+- Run target-control with fake Chrome and qrenderdoc producing a symlinked RDOC
+  file
+   - Expected: code equals `0`
+- Confirm target-control capture magic is not read through symlinked RDC paths
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 18 lines folded for reproduction.
+Reproduction: this block summarizes the executable scenario source.
+
+```simple
+val root = "build/test-renderdoc-chrome-target-control-symlink-rdc"
+val command = "rm -rf " + root + " && mkdir -p fake RenderDoc/Chrome fixtures && " +
+    "write a fake Chrome process with a child command containing --type=gpu-process && " +
+    "write fake qrenderdoc output whose capture path is a symlink to an RDOC file && " +
+    "RDOC_CHROME=" + root + "/chrome RDOC_HOME=" + root + "/renderdoc BUILD_DIR=" + root + "/out sh scripts/check/check-renderdoc-chrome-target-control.shs || true"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val evidence = file_read(root + "/out/evidence.env")
+expect(evidence).to_contain("rdoc_chrome_target_control_status=fail")
+expect(evidence).to_contain("rdoc_chrome_target_control_reason=capture-symlink")
+expect(evidence).to_contain("rdoc_chrome_target_control_capture_file_status=fail")
+expect(evidence).to_contain("rdoc_chrome_target_control_capture_file_reason=symlink")
+expect(evidence).to_contain("rdoc_chrome_target_control_capture_magic=")
+expect(evidence.contains("rdoc_chrome_target_control_capture_magic=RDOC")).to_equal(false)
 ```
 
 </details>
@@ -241,12 +291,37 @@ expect(script).to_contain("cp \"/proc/$gpu_pid/maps\" \"$BUILD_DIR/gpu.maps\"")
 
 </details>
 
+#### keeps capture artifact validation wired to regular RDC files
+
+- Inspect target-control source for capture artifact diagnostics
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Inspect target-control source for capture artifact diagnostics")
+val script = file_read("scripts/check/check-renderdoc-chrome-target-control.shs")
+expect(script).to_contain("capture_artifact_reason()")
+expect(script).to_contain("[ -L \"$path\" ]")
+expect(script).to_contain("rdoc_chrome_target_control_capture_file_status=$capture_file_status")
+expect(script).to_contain("rdoc_chrome_target_control_capture_file_reason=$capture_file_reason")
+expect(script).to_contain("capture_file_reason=\"$(capture_artifact_reason \"$capture_file\")\"")
+expect(script).to_contain("if [ \"$capture_file_reason\" = \"pass\" ]; then")
+expect(script).to_contain("reason=\"capture-symlink\"")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 3 |
-| Active scenarios | 3 |
+| Total scenarios | 5 |
+| Active scenarios | 5 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
