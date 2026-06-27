@@ -27,7 +27,7 @@ tauri_android_render_log_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 10 | 10 | 0 | 0 |
+| 11 | 11 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -79,8 +79,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_android_render_log_val
   source instead of an unrelated companion render marker.
 - Explicitly requested Android log source paths must exist and be nonempty; a
   valid companion log cannot hide a missing or empty render-log source artifact.
-- Explicitly requested Android log source paths must not be symlinks to stale
-  or attacker-controlled render-log artifacts.
+- Explicitly requested Android log source paths must not be symlinks or
+  hardlinks to stale or attacker-controlled render-log artifacts.
 - Failure markers fail closed even when render and Vulkan markers are present.
 - The Android renderer wrapper and mobile aggregate are wired to the validator
   contract.
@@ -120,6 +120,7 @@ expect(evidence).to_contain("android_render_log_source_count=1")
 expect(evidence).to_contain("android_render_log_missing_source_count=0")
 expect(evidence).to_contain("android_render_log_empty_source_count=0")
 expect(evidence).to_contain("android_render_log_symlink_source_count=0")
+expect(evidence).to_contain("android_render_log_hardlink_source_count=0")
 expect(evidence).to_contain("android_render_log_html_len=4096")
 expect(evidence).to_contain("android_render_log_source_coherence_status=pass")
 expect(evidence).to_contain("android_render_log_coherent_source_path=" + root + "/android.log")
@@ -308,6 +309,7 @@ expect(evidence).to_contain("android_render_log_source_count=1")
 expect(evidence).to_contain("android_render_log_missing_source_count=0")
 expect(evidence).to_contain("android_render_log_empty_source_count=1")
 expect(evidence).to_contain("android_render_log_symlink_source_count=0")
+expect(evidence).to_contain("android_render_log_hardlink_source_count=0")
 expect(evidence).to_contain("android_render_log_marker_status=pass")
 expect(evidence).to_contain("android_render_log_vulkan_marker_status=pass")
 ```
@@ -341,6 +343,40 @@ expect(evidence).to_contain("android_render_log_source_count=1")
 expect(evidence).to_contain("android_render_log_missing_source_count=0")
 expect(evidence).to_contain("android_render_log_empty_source_count=0")
 expect(evidence).to_contain("android_render_log_symlink_source_count=1")
+expect(evidence).to_contain("android_render_log_hardlink_source_count=0")
+expect(evidence).to_contain("android_render_log_marker_status=pass")
+expect(evidence).to_contain("android_render_log_vulkan_marker_status=pass")
+```
+
+</details>
+
+#### rejects hardlinked requested Android log source paths
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 20 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-tauri-android-render-log-validator-hardlink-source"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    "printf '[tauri-shell] render, html_len=4096\\nHWUI Vulkan renderer ready VK_ANDROID_native_buffer\\n' > " + root + "/android.log && " +
+    "printf '[tauri-shell] render, html_len=4096\\nHWUI Vulkan renderer ready VK_ANDROID_native_buffer\\n' > " + root + "/original.log && " +
+    "ln " + root + "/original.log " + root + "/linked.log && " +
+    "node scripts/check/validate-tauri-android-render-log-proof.js " + root + "/android.log " + root + "/linked.log > " + root + "/evidence.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read(root + "/evidence.env")
+expect(evidence).to_contain("android_render_log_validation_status=fail")
+expect(evidence).to_contain("android_render_log_validation_reason=android-render-log-source-hardlink")
+expect(evidence).to_contain("android_render_log_requested_source_count=2")
+expect(evidence).to_contain("android_render_log_source_count=1")
+expect(evidence).to_contain("android_render_log_missing_source_count=0")
+expect(evidence).to_contain("android_render_log_empty_source_count=0")
+expect(evidence).to_contain("android_render_log_symlink_source_count=0")
+expect(evidence).to_contain("android_render_log_hardlink_source_count=1")
 expect(evidence).to_contain("android_render_log_marker_status=pass")
 expect(evidence).to_contain("android_render_log_vulkan_marker_status=pass")
 ```
@@ -395,6 +431,7 @@ expect(direct).to_contain("android_render_log_coherent_source_size_bytes")
 expect(direct).to_contain("android_render_log_missing_source_count")
 expect(direct).to_contain("android_render_log_empty_source_count")
 expect(direct).to_contain("android_render_log_symlink_source_count")
+expect(direct).to_contain("android_render_log_hardlink_source_count")
 expect(direct).to_contain("value_of android_mdi_proof_status")
 expect(direct).to_contain("android_mdi_interaction_latency_status")
 expect(direct).to_contain("android_mdi_input_to_paint_ms")
@@ -407,6 +444,7 @@ expect(aggregate).to_contain("tauri_mobile_renderer_parity_android_render_log_re
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_android_render_log_missing_source_count")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_android_render_log_empty_source_count")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_android_render_log_symlink_source_count")
+expect(aggregate).to_contain("tauri_mobile_renderer_parity_android_render_log_hardlink_source_count")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_android_render_log_html_len")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_android_render_log_source_coherence_status")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_android_render_log_coherent_source_path")
@@ -423,6 +461,7 @@ expect(aggregate).to_contain("android-render-log-coherent-source-missing")
 expect(aggregate).to_contain("android-render-log-source-mismatch")
 expect(aggregate).to_contain("android-render-log-source-missing")
 expect(aggregate).to_contain("android-render-log-source-symlink")
+expect(aggregate).to_contain("android-render-log-source-hardlink")
 expect(aggregate).to_contain("android-render-log-source-empty")
 ```
 
@@ -432,8 +471,8 @@ expect(aggregate).to_contain("android-render-log-source-empty")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 10 |
-| Active scenarios | 10 |
+| Total scenarios | 11 |
+| Active scenarios | 11 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
