@@ -95,8 +95,13 @@ let proofMarkerParseError = "";
 let failureMarker = false;
 let proofMarkerSourcePath = "";
 let proofMarkerSourceSizeBytes = "";
+const sourceFileIdentities = new Set();
 const failureMarkerPattern =
   /(eval FAIL|inline shell eval FAIL|delayed inline shell eval FAIL|Fatal signal|F\/DEBUG|F\/libc|NSURLErrorDomain|failed provisional load|Headless UI completed|subprocess exited with code|Simple subprocess stdout closed before a valid render arrived|parse error|Requested GL implementation .* not found|Exiting GPU process due to errors during initialization)/i;
+function fileIdentity(stat) {
+  if (!stat || stat.dev === undefined || stat.ino === undefined) return "";
+  return `${stat.dev}:${stat.ino}`;
+}
 for (const file of files) {
   let stat = null;
   if (file) {
@@ -117,6 +122,10 @@ for (const file of files) {
   if (!stat.isFile()) {
     nonregularSourceCount += 1;
     continue;
+  }
+  const identity = fileIdentity(stat);
+  if (identity) {
+    sourceFileIdentities.add(identity);
   }
   const text = fs.readFileSync(file, "utf8");
   if (text.length === 0) {
@@ -223,6 +232,14 @@ if (jsonPathStat && !jsonPathStat.isFile()) {
   emit("mdi_proof_json", jsonPath);
   emit("mdi_proof_status", "fail");
   emit("mdi_proof_reason", "mdi-proof-json-path-not-regular");
+  emitSourceRows();
+  process.exit(1);
+}
+
+if (jsonPathStat && sourceFileIdentities.has(fileIdentity(jsonPathStat))) {
+  emit("mdi_proof_json", jsonPath);
+  emit("mdi_proof_status", "fail");
+  emit("mdi_proof_reason", "mdi-proof-json-path-overlaps-source");
   emitSourceRows();
   process.exit(1);
 }

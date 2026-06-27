@@ -27,7 +27,7 @@ tauri_mobile_mdi_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 24 | 24 | 0 | 0 |
+| 26 | 26 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -80,8 +80,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_mobile_mdi_proof_valid
   animation proof payloads fail closed instead of letting one log shadow
   another.
 - The extracted proof JSON output path must not overlap any requested device
-  log source path, so validation cannot overwrite the source evidence it just
-  consumed.
+  log source path, including hard-linked aliases, so validation cannot overwrite
+  the source evidence it just consumed.
 - The extracted proof JSON output path must also be a regular destination, not
   a symlink to another artifact outside the requested device logs.
 - Existing extracted proof JSON output paths must not be directories or other
@@ -403,6 +403,46 @@ expect(evidence).to_contain("ios_mdi_proof_source_count=1")
 expect(evidence).to_contain("ios_mdi_proof_missing_source_count=0")
 expect(evidence).to_contain("ios_mdi_proof_symlink_source_count=0")
 expect(evidence).to_contain("ios_mdi_proof_empty_source_count=0")
+expect(device_log).to_contain("[tauri-shell] mdi proof:")
+```
+
+</details>
+
+#### rejects hard-linked proof JSON output paths that alias requested mobile MDI logs
+
+-  proof log command
+   - Expected: code equals `1`
+- Confirm extracted proof JSON cannot overwrite a hard-linked source device log
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 22 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-tauri-mobile-mdi-validator-hardlink-output"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_log_command(root + "/device.log", "") +
+    " && ln " + root + "/device.log " + root + "/proof.json && " +
+    "node scripts/check/validate-tauri-mobile-mdi-proof.js ios " + root + "/proof.json " + root + "/device.log > " + root + "/evidence.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read(root + "/evidence.env")
+val device_log = file_read(root + "/device.log")
+step("Confirm extracted proof JSON cannot overwrite a hard-linked source device log")
+expect(evidence).to_contain("ios_mdi_proof_status=fail")
+expect(evidence).to_contain("ios_mdi_proof_reason=mdi-proof-json-path-overlaps-source")
+expect(evidence).to_contain("ios_mdi_proof_json=" + root + "/proof.json")
+expect(evidence).to_contain("ios_mdi_proof_requested_source_count=1")
+expect(evidence).to_contain("ios_mdi_proof_source_count=1")
+expect(evidence).to_contain("ios_mdi_proof_marker_source_count=1")
+expect(evidence).to_contain("ios_mdi_proof_missing_source_count=0")
+expect(evidence).to_contain("ios_mdi_proof_symlink_source_count=0")
+expect(evidence).to_contain("ios_mdi_proof_empty_source_count=0")
+expect(evidence).to_contain("ios_mdi_proof_nonregular_source_count=0")
 expect(device_log).to_contain("[tauri-shell] mdi proof:")
 ```
 
@@ -1239,8 +1279,8 @@ expect(aggregate).to_contain("android-mdi-proof-marker-source-artifact-missing")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 25 |
-| Active scenarios | 25 |
+| Total scenarios | 26 |
+| Active scenarios | 26 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
