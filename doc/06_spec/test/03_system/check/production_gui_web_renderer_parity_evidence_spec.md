@@ -183,7 +183,7 @@ the produced `evidence.env` to validate the final release-blocking contract.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 68 lines folded for reproduction.
+Runnable source: 70 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -191,6 +191,8 @@ val script = file_read("scripts/check/check-production-gui-web-renderer-parity-e
 expect(script).to_contain("SIMPLE_BIN_SOURCE=")
 expect(script).to_contain("for candidate in")
 expect(script).to_contain("\"bin/simple\"")
+expect(script).to_contain("\"src/compiler_rust/target/release/simple\"")
+expect(script.index_of("\"bin/simple\"")).to_be_less_than(script.index_of("\"src/compiler_rust/target/release/simple\""))
 expect(script).to_contain("command -v simple")
 expect(script).to_contain("export SIMPLE_BIN SIMPLE_BIN_SOURCE")
 expect(script).to_contain("production_gui_web_renderer_parity_simple_bin=$SIMPLE_BIN")
