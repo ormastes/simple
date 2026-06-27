@@ -83,7 +83,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/macos_metal_render_log_compa
    claim the same native artifact marker. Relative capture artifact names
    resolve beside the capture env so stale repo-root files cannot satisfy the
    proof, even when the relative name contains directories. Capture artifacts
-   must be regular files, not symlinks. A status-only
+   must be regular files, not live or broken symlinks. A status-only
    row, browser-metadata row, or env-only claimed magic is diagnostic, not
    native GPU-capture proof.
 5. Run `scripts/check/check-macos-metal-render-log-compare.shs` and consume the
@@ -796,12 +796,14 @@ expect(evidence).to_contain("macos_metal_render_log_compare_blocked_gates=xcode-
    - Expected: stale_root_code equals `0`
 -  argb artifacts command
    - Expected: symlink_capture_code equals `0`
+-  argb artifacts command
+   - Expected: broken_symlink_capture_code equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 58 lines folded for reproduction.
+Runnable source: 78 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -863,6 +865,24 @@ expect(symlink_capture_evidence).to_contain("macos-metal-gpu-capture-artifact-fi
 expect(symlink_capture_evidence).to_contain("macos_metal_render_log_compare_gpu_capture_artifact_file_status=symlink")
 expect(symlink_capture_evidence).to_contain("macos_metal_render_log_compare_gpu_capture_artifact_magic=XCODE-GPUTRACE")
 expect(symlink_capture_evidence).to_contain("macos_metal_render_log_compare_gpu_capture_gate_status=fail")
+
+val broken_symlink_capture_command = "rm -rf build/test-macos-metal-render-log-broken-symlink-capture && mkdir -p build/test-macos-metal-render-log-broken-symlink-capture && " +
+    _argb_artifacts_command("build/test-macos-metal-render-log-broken-symlink-capture") + " && " +
+    "printf 'metal_generated_2d_readback_status=pass\\nmetal_generated_2d_readback_module_verified=true\\nmetal_generated_2d_readback_submit_attempted=true\\nmetal_generated_2d_readback_readback_available=true\\nmetal_generated_2d_readback_expected_checksum=7\\nmetal_generated_2d_readback_actual_checksum=7\\n' > build/test-macos-metal-render-log-broken-symlink-capture/generated.env && " +
+    "printf 'metal_engine2d_framebuffer_readback_status=pass\\nmetal_engine2d_framebuffer_gpu_readback_available=true\\nmetal_engine2d_framebuffer_blur_or_tolerance_used=false\\n' > build/test-macos-metal-render-log-broken-symlink-capture/framebuffer.env && " +
+    "printf 'macos_metal_electron_browser_backing_status=pass\\nmacos_metal_chrome_browser_backing_status=pass\\nmacos_metal_browser_backing_status=pass\\nmacos_metal_electron_browser_backing_reason=electron-metal-backed\\nmacos_metal_electron_browser_backing_gpu_compositing=enabled\\nmacos_metal_electron_browser_backing_display_type=Metal\\nmacos_metal_electron_browser_backing_gl_implementation_parts=metal\\nmacos_metal_electron_browser_backing_skia_backend_type=Metal\\nmacos_metal_electron_browser_backing_gl_renderer=Apple GPU\\nmacos_metal_electron_browser_backing_source=test/fixtures/render_log/macos_metal_browser_backing_source.env\\nmacos_metal_chrome_browser_backing_reason=chrome-metal-backed\\nmacos_metal_chrome_browser_backing_gpu_compositing=enabled\\nmacos_metal_chrome_browser_backing_display_type=Metal\\nmacos_metal_chrome_browser_backing_gl_implementation_parts=metal\\nmacos_metal_chrome_browser_backing_skia_backend_type=Metal\\nmacos_metal_chrome_browser_backing_gl_renderer=Apple GPU\\nmacos_metal_chrome_browser_backing_source=test/fixtures/render_log/macos_metal_browser_backing_source.env\\nmacos_metal_pixel_comparison_status=pass\\nmacos_metal_pixel_comparison_mode=pairwise-argb-diff\\nmacos_metal_electron_chrome_pairwise_diff_status=pass\\nmacos_metal_electron_simple_pairwise_diff_status=pass\\nmacos_metal_chrome_simple_pairwise_diff_status=pass\\nmacos_metal_simple_argb_width=4\\nmacos_metal_simple_argb_height=3\\nmacos_metal_simple_argb_nonblank_pixel_count=12\\nmacos_metal_simple_argb_checksum=12\\nmacos_metal_chrome_argb_width=4\\nmacos_metal_chrome_argb_height=3\\nmacos_metal_chrome_argb_nonblank_pixel_count=12\\nmacos_metal_chrome_argb_checksum=12\\nmacos_metal_electron_argb_width=4\\nmacos_metal_electron_argb_height=3\\nmacos_metal_electron_argb_nonblank_pixel_count=12\\nmacos_metal_electron_argb_checksum=12\\n' > build/test-macos-metal-render-log-broken-symlink-capture/browser.env && " +
+    "ln -s missing-external-frame.gputrace build/test-macos-metal-render-log-broken-symlink-capture/frame.gputrace && " +
+    "printf 'macos_metal_gpu_capture_status=pass\\nmacos_metal_gpu_capture_tool=xcode-gpu-frame-capture\\nmacos_metal_gpu_capture_artifact=build/test-macos-metal-render-log-broken-symlink-capture/frame.gputrace\\nmacos_metal_gpu_capture_artifact_magic=XCODE-GPUTRACE\\n' > build/test-macos-metal-render-log-broken-symlink-capture/capture.env && " +
+    "BUILD_DIR=build/test-macos-metal-render-log-broken-symlink-capture/out METAL_GENERATED_2D_READBACK_ENV=build/test-macos-metal-render-log-broken-symlink-capture/generated.env METAL_ENGINE2D_FRAMEBUFFER_READBACK_ENV=build/test-macos-metal-render-log-broken-symlink-capture/framebuffer.env MACOS_METAL_BROWSER_ENV=build/test-macos-metal-render-log-broken-symlink-capture/browser.env MACOS_METAL_CAPTURE_ENV=build/test-macos-metal-render-log-broken-symlink-capture/capture.env MACOS_METAL_RENDER_LOG_REQUIRE_GPU_CAPTURE=1 sh scripts/check/check-macos-metal-render-log-compare.shs || true"
+val (_broken_symlink_capture_stdout, _broken_symlink_capture_stderr, broken_symlink_capture_code) = process_run("/bin/sh", ["-c", broken_symlink_capture_command])
+expect(broken_symlink_capture_code).to_equal(0)
+
+val broken_symlink_capture_evidence = file_read("build/test-macos-metal-render-log-broken-symlink-capture/out/evidence.env")
+expect(broken_symlink_capture_evidence).to_contain("macos_metal_render_log_compare_status=fail")
+expect(broken_symlink_capture_evidence).to_contain("macos-metal-gpu-capture-artifact-file-symlink")
+expect(broken_symlink_capture_evidence).to_contain("macos_metal_render_log_compare_gpu_capture_artifact_file_status=symlink")
+expect(broken_symlink_capture_evidence).to_contain("macos_metal_render_log_compare_gpu_capture_artifact_magic=")
+expect(broken_symlink_capture_evidence).to_contain("macos_metal_render_log_compare_gpu_capture_gate_status=fail")
 ```
 
 </details>
