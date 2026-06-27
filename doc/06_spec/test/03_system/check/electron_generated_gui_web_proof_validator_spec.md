@@ -27,7 +27,7 @@ electron_generated_gui_web_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 21 | 21 | 0 | 0 |
+| 23 | 23 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -47,7 +47,7 @@ Validates the Electron generated-GUI Web parity proof validator. The Electron wr
 | Design | doc/07_guide/tooling/renderdoc_capture_infra.md |
 | Research | N/A |
 | Source | `test/03_system/check/electron_generated_gui_web_proof_validator_spec.spl` |
-| Updated | 2026-06-27 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -113,10 +113,110 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_generated_gui_web_p
   measured capture iterations.
 - The live Electron wrapper consumes the validator and still maps real pixel
   mismatches to `divergent` evidence.
+- The live Electron wrapper resolves only self-hosted Simple drivers by
+  default and rejects Rust seed drivers before launching Simple or Electron.
+
+## Operator Notes
+
+The proof validator is intentionally stricter than the shell wrapper. It checks
+the captured ARGB artifact, the Electron proof JSON, and the exact fixture
+source marker before the shell wrapper derives pass/divergent/fail status. A
+valid proof must come from the live Electron generated-GUI capture path, must
+name Chromium and Electron runtime versions, and must keep the requested
+viewport, native capture viewport, and ARGB artifact dimensions aligned.
+
+The shell wrapper is the production matrix entry used by the broader GUI/web
+renderer parity evidence. It first resolves a self-hosted Simple driver, then
+generates the Simple-side expected HTML/ARGB artifact, launches Electron, and
+normalizes the proof through this validator. If the Simple driver is missing or
+points into `src/compiler_rust/`, the wrapper must emit unavailable evidence
+with a typed `simple-bin-*` reason and stop before any Simple or Electron work.
+
+## Coverage Matrix
+
+Self-hosted driver selection:
+
+- Source-level check: the wrapper searches repo self-hosted Simple candidates.
+- Forbidden path: `src/compiler_rust/**` is detected by `is_rust_seed_simple`.
+- Evidence rows: `electron_generated_gui_web_simple_bin`,
+  `electron_generated_gui_web_simple_bin_source`, and
+  `electron_generated_gui_web_simple_bin_status`.
+
+Explicit Rust seed override:
+
+- Input: `SIMPLE_BIN=src/compiler_rust/target/release/simple`.
+- Expected status: `electron_generated_gui_web_status=unavailable`.
+- Expected reason: `electron_generated_gui_web_reason=simple-bin-forbidden`.
+- Expected source: `explicit-env-rust-seed-forbidden`.
+- Expected behavior: no Simple render, no Electron launch, no proof validator
+  run is required.
+
+Complete proof row:
+
+- Renderer: `electron-live-capture-page`.
+- Proof source: `tools/electron-live-bitmap/exact_fixture.js`.
+- Capture backend: `electron-offscreen-capture-page`.
+- Browser engine: Chromium through Electron.
+- ARGB artifact: regular nonempty `argb-u32` JSON with the expected viewport,
+  pixel count, nonzero pixels, checksum, and weighted checksum.
+
+Failure modes protected:
+
+- Wrong renderer, wrong scene, wrong proof source, or missing source file.
+- Mismatched checksum or weighted checksum.
+- Missing, empty, symlinked, malformed, or self-referential ARGB artifacts.
+- String booleans or stringified numeric rows masquerading as live telemetry.
+- Viewport mismatch, downsampled capture, blur/tolerance use, malformed
+  mismatch counts, or implausible frame timing.
 
 ## Scenarios
 
 ### Electron generated GUI Web proof validator
+
+#### selects only self hosted Simple driver candidates in live wrapper
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val script = file_read("scripts/check/check-electron-generated-gui-web-parity-evidence.shs")
+expect(script).to_contain("repo-self-hosted-fallback")
+expect(script).to_contain("\"bin/simple\"")
+expect(script).to_contain("\"bin/release\"/*/simple")
+expect(script).to_contain("is_rust_seed_simple")
+expect(script).to_contain("SIMPLE_BIN_STATUS=forbidden")
+expect(script).to_contain("export SIMPLE_BIN SIMPLE_BIN_SOURCE SIMPLE_BIN_STATUS")
+expect(script).to_contain("electron_generated_gui_web_simple_bin_status=$SIMPLE_BIN_STATUS")
+```
+
+</details>
+
+#### rejects explicit Rust seed Simple driver in live wrapper
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-electron-generated-gui-web-seed-forbidden"
+val command = "rm -rf " + root + " && SIMPLE_BIN=src/compiler_rust/target/release/simple BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-electron-generated-gui-web-parity-evidence.shs || true"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val evidence = file_read(root + "/out/evidence.env")
+expect(evidence).to_contain("electron_generated_gui_web_status=unavailable")
+expect(evidence).to_contain("electron_generated_gui_web_reason=simple-bin-forbidden")
+expect(evidence).to_contain("electron_generated_gui_web_simple_bin=src/compiler_rust/target/release/simple")
+expect(evidence).to_contain("electron_generated_gui_web_simple_bin_source=explicit-env-rust-seed-forbidden")
+expect(evidence).to_contain("electron_generated_gui_web_simple_bin_status=forbidden")
+```
+
+</details>
 
 #### accepts complete Electron timing capture and checksum proof
 
@@ -128,7 +228,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_generated_gui_web_p
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 48 lines folded for reproduction.
+Runnable source: 50 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -260,6 +360,8 @@ expect(wrong).to_contain("electron_generated_gui_web_proof_source=tools/manual/g
 
 #### rejects proof when the live generated GUI capture source artifact is missing
 
+-  proof command
+   - Expected: code equals `1`
 - Confirm generated GUI proof source marker is bound to the producer source file
 
 
@@ -967,7 +1069,7 @@ expect(weighted).to_contain("electron_generated_gui_web_captured_argb_weighted_c
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 43 lines folded for reproduction.
+Runnable source: 45 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1024,8 +1126,8 @@ expect(fixture).to_contain("chrome_process_version")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 21 |
-| Active scenarios | 21 |
+| Total scenarios | 23 |
+| Active scenarios | 23 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

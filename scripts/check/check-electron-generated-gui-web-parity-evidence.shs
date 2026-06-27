@@ -6,20 +6,49 @@ cd "$ROOT_DIR"
 
 BUILD_DIR="${BUILD_DIR:-build/electron_generated_gui_web_parity_evidence}"
 REPORT_PATH="${REPORT_PATH:-doc/09_report/electron_generated_gui_web_parity_evidence_$(date -u +%F).md}"
+SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
+SIMPLE_BIN_STATUS=pass
+
+is_rust_seed_simple() {
+    case "$1" in
+        src/compiler_rust/*|*/src/compiler_rust/*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 if [ -z "${SIMPLE_BIN+x}" ]; then
-    if [ -x "src/compiler_rust/target/release/simple" ]; then
-        SIMPLE_BIN="src/compiler_rust/target/release/simple"
-        SIMPLE_BIN_SOURCE="in-tree-release"
-    elif [ "${ALLOW_PATH_SIMPLE_BIN:-0}" = "1" ] && command -v simple >/dev/null 2>&1; then
+    SIMPLE_BIN_SOURCE="missing-self-hosted"
+    for candidate in \
+        "bin/simple" \
+        "./bin/simple" \
+        "release"/*/simple \
+        "bin/release"/*/simple \
+        "build/bootstrap/stage3/simple"
+    do
+        if [ -x "$candidate" ]; then
+            SIMPLE_BIN="$candidate"
+            SIMPLE_BIN_SOURCE="repo-self-hosted-fallback"
+            break
+        fi
+    done
+    if [ "${SIMPLE_BIN:-}" = "" ] && [ "${ALLOW_PATH_SIMPLE_BIN:-0}" = "1" ] && command -v simple >/dev/null 2>&1; then
         SIMPLE_BIN="$(command -v simple)"
         SIMPLE_BIN_SOURCE="path-opt-in"
-    else
-        SIMPLE_BIN="src/compiler_rust/target/release/simple"
-        SIMPLE_BIN_SOURCE="default-missing"
     fi
 else
-    SIMPLE_BIN_SOURCE="explicit-env"
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
 fi
+SIMPLE_BIN="${SIMPLE_BIN:-}"
+if [ "$SIMPLE_BIN" = "" ]; then
+    SIMPLE_BIN_STATUS=missing
+elif is_rust_seed_simple "$SIMPLE_BIN"; then
+    SIMPLE_BIN_STATUS=forbidden
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-rust-seed-forbidden"
+elif [ ! -x "$SIMPLE_BIN" ]; then
+    SIMPLE_BIN_STATUS=missing
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-missing"
+fi
+export SIMPLE_BIN SIMPLE_BIN_SOURCE SIMPLE_BIN_STATUS
 WIDTH="${ELECTRON_BITMAP_WIDTH:-96}"
 HEIGHT="${ELECTRON_BITMAP_HEIGHT:-72}"
 ITERATIONS="${ELECTRON_BITMAP_ITERATIONS:-3}"
@@ -64,6 +93,7 @@ emit_unavailable() {
         echo "electron_generated_gui_web_scene=$SCENE"
         echo "electron_generated_gui_web_simple_bin=$SIMPLE_BIN"
         echo "electron_generated_gui_web_simple_bin_source=$SIMPLE_BIN_SOURCE"
+        echo "electron_generated_gui_web_simple_bin_status=$SIMPLE_BIN_STATUS"
         echo "electron_generated_gui_web_proof_source="
         echo "electron_generated_gui_web_proof_source_file_status="
         echo "electron_generated_gui_web_proof_source_size_bytes="
@@ -80,8 +110,8 @@ for required in node npm; do
     fi
 done
 
-if [ ! -x "$SIMPLE_BIN" ]; then
-    emit_unavailable "missing-simple-bin"
+if [ "$SIMPLE_BIN_STATUS" != "pass" ]; then
+    emit_unavailable "simple-bin-$SIMPLE_BIN_STATUS"
     exit 1
 fi
 
@@ -342,6 +372,7 @@ fi
     echo "electron_generated_gui_web_gpu_rasterization=${gpu_rasterization:-}"
     echo "electron_generated_gui_web_simple_bin=$SIMPLE_BIN"
     echo "electron_generated_gui_web_simple_bin_source=$SIMPLE_BIN_SOURCE"
+    echo "electron_generated_gui_web_simple_bin_status=$SIMPLE_BIN_STATUS"
     echo "electron_generated_gui_web_width=$WIDTH"
     echo "electron_generated_gui_web_height=$HEIGHT"
     echo "electron_generated_gui_web_iterations=$ITERATIONS"

@@ -7,7 +7,7 @@
 - **Total Features:** 1
 - **Complete Documentation:** 1 (100%)
 - **Stubs Remaining:** 0
-- **Total Lines:** 132
+- **Total Lines:** 120
 
 ---
 
@@ -15,5 +15,5 @@
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Production GUI/web renderer parity evidence](test/03_system/check/production_gui_web_renderer_parity_evidence_spec.md) | Partial | N/A | 15 | 60% | 132 lines |
+| [Electron generated GUI Web proof validator](test/03_system/check/electron_generated_gui_web_proof_validator_spec.md) | Partial | N/A | 23 | 60% | 120 lines |
 
