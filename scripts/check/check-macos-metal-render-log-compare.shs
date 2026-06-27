@@ -27,6 +27,9 @@ compare_status="pass"
 simple_argb_reason=""
 chrome_argb_reason=""
 electron_argb_reason=""
+simple_argb_artifact_reason=""
+chrome_argb_artifact_reason=""
+electron_argb_artifact_reason=""
 argb_viewport_reason=""
 argb_checksum_reason=""
 metal_generated_checksum_reason="pass"
@@ -53,6 +56,164 @@ file_magic_prefix() {
     if [ -n "$path" ] && [ -s "$path" ]; then
         dd if="$path" bs="$bytes" count=1 2>/dev/null || true
     fi
+}
+
+argb_artifact_probe() {
+    prefix="$1"
+    source_name="$2"
+    source_env="$3"
+    if ! command -v node >/dev/null 2>&1; then
+        {
+            render_log_append_kv "reason" "${source_name}-argb-artifact-reader-missing"
+            render_log_append_kv "path" ""
+            render_log_append_kv "resolved_path" ""
+            render_log_append_kv "file_status" "unavailable"
+            render_log_append_kv "format" ""
+            render_log_append_kv "producer" ""
+            render_log_append_kv "width" ""
+            render_log_append_kv "height" ""
+            render_log_append_kv "pixel_count" "0"
+            render_log_append_kv "nonblank_pixel_count" "0"
+            render_log_append_kv "checksum" ""
+        }
+        return 0
+    fi
+    node - "$prefix" "$source_name" "$source_env" <<'NODE'
+const fs = require("fs");
+const path = require("path");
+
+const prefix = process.argv[2] || "";
+const sourceName = process.argv[3] || "";
+const sourceEnv = process.argv[4] || "";
+
+function emit(key, value) {
+  const clean = value === undefined || value === null ? "" : String(value).replace(/[\r\n]/g, " ");
+  console.log(`${key}=${clean}`);
+}
+
+function readEnv(file) {
+  const rows = new Map();
+  try {
+    const text = fs.readFileSync(file, "utf8");
+    for (const line of text.split(/\r?\n/)) {
+      if (!line || !line.includes("=")) continue;
+      const index = line.indexOf("=");
+      rows.set(line.slice(0, index), line.slice(index + 1));
+    }
+  } catch (_err) {
+    // Missing source env is reported as a missing artifact below.
+  }
+  return rows;
+}
+
+function unsignedIntegerText(value) {
+  return typeof value === "string" && /^[0-9]+$/.test(value) ? value : "";
+}
+
+function resolveArtifact(rawPath, envPath, fallbackName) {
+  const raw = rawPath || fallbackName;
+  if (!raw) return { raw: "", resolved: "" };
+  if (path.isAbsolute(raw)) return { raw, resolved: raw };
+  const envDir = envPath ? path.dirname(envPath) : ".";
+  if (fs.existsSync(raw)) return { raw, resolved: raw };
+  return { raw, resolved: path.join(envDir, raw) };
+}
+
+function finish(reason, artifact, fileStatus, payload = {}, pixels = []) {
+  emit("reason", reason);
+  emit("path", artifact.raw);
+  emit("resolved_path", artifact.resolved);
+  emit("file_status", fileStatus);
+  emit("format", payload.format || "");
+  emit("producer", payload.producer || "");
+  emit("width", Number.isInteger(payload.width) ? payload.width : "");
+  emit("height", Number.isInteger(payload.height) ? payload.height : "");
+  emit("pixel_count", Array.isArray(pixels) ? pixels.length : 0);
+  let nonblank = 0;
+  let checksum = 0n;
+  if (Array.isArray(pixels)) {
+    for (const pixel of pixels) {
+      if (typeof pixel !== "number" || !Number.isInteger(pixel) || pixel < 0 || pixel > 0xffffffff) {
+        continue;
+      }
+      const value = BigInt(pixel >>> 0);
+      if (value !== 0n) nonblank += 1;
+      checksum += value;
+    }
+  }
+  emit("nonblank_pixel_count", nonblank);
+  emit("checksum", Array.isArray(pixels) ? checksum.toString() : "");
+}
+
+const rows = readEnv(sourceEnv);
+const keyBase = `${prefix}_${sourceName}_argb`;
+const artifact = resolveArtifact(rows.get(`${keyBase}_path`) || "", sourceEnv, `${sourceName}.argb.json`);
+let stat = null;
+try {
+  stat = fs.statSync(artifact.resolved);
+} catch (_err) {
+  finish(`${sourceName}-argb-artifact-missing`, artifact, "missing");
+  process.exit(0);
+}
+if (!stat.isFile()) {
+  finish(`${sourceName}-argb-artifact-missing`, artifact, "missing");
+  process.exit(0);
+}
+if (stat.size <= 0) {
+  finish(`${sourceName}-argb-artifact-empty`, artifact, "empty");
+  process.exit(0);
+}
+
+let payload;
+try {
+  payload = JSON.parse(fs.readFileSync(artifact.resolved, "utf8"));
+} catch (_err) {
+  finish(`${sourceName}-argb-artifact-invalid-json`, artifact, "pass");
+  process.exit(0);
+}
+
+const pixels = Array.isArray(payload.pixels) ? payload.pixels : [];
+const width = Number.isInteger(payload.width) ? payload.width : 0;
+const height = Number.isInteger(payload.height) ? payload.height : 0;
+const expectedWidth = unsignedIntegerText(rows.get(`${keyBase}_width`) || "");
+const expectedHeight = unsignedIntegerText(rows.get(`${keyBase}_height`) || "");
+const expectedNonblank = unsignedIntegerText(rows.get(`${keyBase}_nonblank_pixel_count`) || "");
+const expectedChecksum = unsignedIntegerText(rows.get(`${keyBase}_checksum`) || "");
+
+let reason = "pass";
+if (payload.format !== "argb-u32") {
+  reason = `${sourceName}-argb-artifact-format-mismatch`;
+} else if (width <= 0 || height <= 0) {
+  reason = `${sourceName}-argb-artifact-missing-viewport`;
+} else if (pixels.length !== width * height) {
+  reason = `${sourceName}-argb-artifact-pixel-count-mismatch`;
+} else if (!pixels.every((pixel) => typeof pixel === "number" && Number.isInteger(pixel) && pixel >= 0 && pixel <= 0xffffffff)) {
+  reason = `${sourceName}-argb-artifact-pixel-type-mismatch`;
+}
+
+let nonblank = 0;
+let checksum = 0n;
+if (reason === "pass") {
+  for (const pixel of pixels) {
+    const value = BigInt(pixel >>> 0);
+    if (value !== 0n) nonblank += 1;
+    checksum += value;
+  }
+  if (nonblank <= 0) {
+    reason = `${sourceName}-argb-artifact-blank`;
+  } else if (expectedWidth && String(width) !== expectedWidth) {
+    reason = `${sourceName}-argb-artifact-width-mismatch`;
+  } else if (expectedHeight && String(height) !== expectedHeight) {
+    reason = `${sourceName}-argb-artifact-height-mismatch`;
+  } else if (expectedNonblank && String(nonblank) !== expectedNonblank) {
+    reason = `${sourceName}-argb-artifact-nonblank-mismatch`;
+  } else if (expectedChecksum && checksum.toString() !== expectedChecksum) {
+    reason = `${sourceName}-argb-artifact-checksum-mismatch`;
+  }
+}
+
+finish(reason, artifact, "pass", payload, pixels);
+NODE
 }
 
 if [ ! -s "$METAL_GENERATED_2D_READBACK_ENV" ]; then
@@ -173,10 +334,25 @@ if [ "$ec_diff" != "pass" ] || [ "$es_diff" != "pass" ] || [ "$cs_diff" != "pass
 simple_argb_reason="$(render_log_argb_source_reason macos_metal simple "$MACOS_METAL_BROWSER_ENV")"
 chrome_argb_reason="$(render_log_argb_source_reason macos_metal chrome "$MACOS_METAL_BROWSER_ENV")"
 electron_argb_reason="$(render_log_argb_source_reason macos_metal electron "$MACOS_METAL_BROWSER_ENV")"
+SIMPLE_ARGB_ARTIFACT_ENV="$BUILD_DIR/simple-argb-artifact.env"
+CHROME_ARGB_ARTIFACT_ENV="$BUILD_DIR/chrome-argb-artifact.env"
+ELECTRON_ARGB_ARTIFACT_ENV="$BUILD_DIR/electron-argb-artifact.env"
+argb_artifact_probe macos_metal simple "$MACOS_METAL_BROWSER_ENV" >"$SIMPLE_ARGB_ARTIFACT_ENV"
+argb_artifact_probe macos_metal chrome "$MACOS_METAL_BROWSER_ENV" >"$CHROME_ARGB_ARTIFACT_ENV"
+argb_artifact_probe macos_metal electron "$MACOS_METAL_BROWSER_ENV" >"$ELECTRON_ARGB_ARTIFACT_ENV"
+simple_argb_artifact_reason="$(render_log_value_of reason "$SIMPLE_ARGB_ARTIFACT_ENV")"
+chrome_argb_artifact_reason="$(render_log_value_of reason "$CHROME_ARGB_ARTIFACT_ENV")"
+electron_argb_artifact_reason="$(render_log_value_of reason "$ELECTRON_ARGB_ARTIFACT_ENV")"
 for argb_reason in "$simple_argb_reason" "$chrome_argb_reason" "$electron_argb_reason"; do
     if [ "$argb_reason" != "pass" ]; then
         [ "$compare_status" = "unavailable" ] || compare_status="fail"
         add_reason "$argb_reason"
+    fi
+done
+for argb_artifact_reason in "$simple_argb_artifact_reason" "$chrome_argb_artifact_reason" "$electron_argb_artifact_reason"; do
+    if [ "$argb_artifact_reason" != "pass" ]; then
+        [ "$compare_status" = "unavailable" ] || compare_status="fail"
+        add_reason "$argb_artifact_reason"
     fi
 done
 argb_viewport_reason="$(render_log_argb_viewport_match_reason macos_metal "$MACOS_METAL_BROWSER_ENV")"
@@ -261,7 +437,10 @@ fi
 argb_source_gate_status="pass"
 if [ "$simple_argb_reason" != "pass" ] || [ "$chrome_argb_reason" != "pass" ] ||
     [ "$electron_argb_reason" != "pass" ] || [ "$argb_viewport_reason" != "pass" ] ||
-    [ "$argb_checksum_reason" != "pass" ]; then
+    [ "$argb_checksum_reason" != "pass" ] ||
+    [ "$simple_argb_artifact_reason" != "pass" ] ||
+    [ "$chrome_argb_artifact_reason" != "pass" ] ||
+    [ "$electron_argb_artifact_reason" != "pass" ]; then
     argb_source_gate_status="fail"
 fi
 
@@ -377,6 +556,33 @@ render_log_write_native_log "$ELECTRON_LOG" "macos" "metal" "electron" "browser-
     render_log_append_kv "macos_metal_render_log_compare_simple_argb_reason" "$simple_argb_reason"
     render_log_append_kv "macos_metal_render_log_compare_chrome_argb_reason" "$chrome_argb_reason"
     render_log_append_kv "macos_metal_render_log_compare_electron_argb_reason" "$electron_argb_reason"
+    render_log_append_kv "macos_metal_render_log_compare_simple_argb_artifact_reason" "$simple_argb_artifact_reason"
+    render_log_append_kv "macos_metal_render_log_compare_simple_argb_artifact_path" "$(render_log_value_of path "$SIMPLE_ARGB_ARTIFACT_ENV")"
+    render_log_append_kv "macos_metal_render_log_compare_simple_argb_artifact_file_status" "$(render_log_value_of file_status "$SIMPLE_ARGB_ARTIFACT_ENV")"
+    render_log_append_kv "macos_metal_render_log_compare_simple_argb_artifact_format" "$(render_log_value_of format "$SIMPLE_ARGB_ARTIFACT_ENV")"
+    render_log_append_kv "macos_metal_render_log_compare_simple_argb_artifact_width" "$(render_log_value_of width "$SIMPLE_ARGB_ARTIFACT_ENV")"
+    render_log_append_kv "macos_metal_render_log_compare_simple_argb_artifact_height" "$(render_log_value_of height "$SIMPLE_ARGB_ARTIFACT_ENV")"
+    render_log_append_kv "macos_metal_render_log_compare_simple_argb_artifact_pixel_count" "$(render_log_value_of pixel_count "$SIMPLE_ARGB_ARTIFACT_ENV")"
+    render_log_append_kv "macos_metal_render_log_compare_simple_argb_artifact_nonblank_pixel_count" "$(render_log_value_of nonblank_pixel_count "$SIMPLE_ARGB_ARTIFACT_ENV")"
+    render_log_append_kv "macos_metal_render_log_compare_simple_argb_artifact_checksum" "$(render_log_value_of checksum "$SIMPLE_ARGB_ARTIFACT_ENV")"
+    render_log_append_kv "macos_metal_render_log_compare_chrome_argb_artifact_reason" "$chrome_argb_artifact_reason"
+    render_log_append_kv "macos_metal_render_log_compare_chrome_argb_artifact_path" "$(render_log_value_of path "$CHROME_ARGB_ARTIFACT_ENV")"
+    render_log_append_kv "macos_metal_render_log_compare_chrome_argb_artifact_file_status" "$(render_log_value_of file_status "$CHROME_ARGB_ARTIFACT_ENV")"
+    render_log_append_kv "macos_metal_render_log_compare_chrome_argb_artifact_format" "$(render_log_value_of format "$CHROME_ARGB_ARTIFACT_ENV")"
+    render_log_append_kv "macos_metal_render_log_compare_chrome_argb_artifact_width" "$(render_log_value_of width "$CHROME_ARGB_ARTIFACT_ENV")"
+    render_log_append_kv "macos_metal_render_log_compare_chrome_argb_artifact_height" "$(render_log_value_of height "$CHROME_ARGB_ARTIFACT_ENV")"
+    render_log_append_kv "macos_metal_render_log_compare_chrome_argb_artifact_pixel_count" "$(render_log_value_of pixel_count "$CHROME_ARGB_ARTIFACT_ENV")"
+    render_log_append_kv "macos_metal_render_log_compare_chrome_argb_artifact_nonblank_pixel_count" "$(render_log_value_of nonblank_pixel_count "$CHROME_ARGB_ARTIFACT_ENV")"
+    render_log_append_kv "macos_metal_render_log_compare_chrome_argb_artifact_checksum" "$(render_log_value_of checksum "$CHROME_ARGB_ARTIFACT_ENV")"
+    render_log_append_kv "macos_metal_render_log_compare_electron_argb_artifact_reason" "$electron_argb_artifact_reason"
+    render_log_append_kv "macos_metal_render_log_compare_electron_argb_artifact_path" "$(render_log_value_of path "$ELECTRON_ARGB_ARTIFACT_ENV")"
+    render_log_append_kv "macos_metal_render_log_compare_electron_argb_artifact_file_status" "$(render_log_value_of file_status "$ELECTRON_ARGB_ARTIFACT_ENV")"
+    render_log_append_kv "macos_metal_render_log_compare_electron_argb_artifact_format" "$(render_log_value_of format "$ELECTRON_ARGB_ARTIFACT_ENV")"
+    render_log_append_kv "macos_metal_render_log_compare_electron_argb_artifact_width" "$(render_log_value_of width "$ELECTRON_ARGB_ARTIFACT_ENV")"
+    render_log_append_kv "macos_metal_render_log_compare_electron_argb_artifact_height" "$(render_log_value_of height "$ELECTRON_ARGB_ARTIFACT_ENV")"
+    render_log_append_kv "macos_metal_render_log_compare_electron_argb_artifact_pixel_count" "$(render_log_value_of pixel_count "$ELECTRON_ARGB_ARTIFACT_ENV")"
+    render_log_append_kv "macos_metal_render_log_compare_electron_argb_artifact_nonblank_pixel_count" "$(render_log_value_of nonblank_pixel_count "$ELECTRON_ARGB_ARTIFACT_ENV")"
+    render_log_append_kv "macos_metal_render_log_compare_electron_argb_artifact_checksum" "$(render_log_value_of checksum "$ELECTRON_ARGB_ARTIFACT_ENV")"
     render_log_append_kv "macos_metal_render_log_compare_argb_viewport_reason" "$argb_viewport_reason"
     render_log_append_kv "macos_metal_render_log_compare_argb_checksum_reason" "$argb_checksum_reason"
     render_log_append_kv "macos_metal_render_log_compare_gpu_capture_gate_status" "$gpu_capture_gate_status"
