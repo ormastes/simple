@@ -35,6 +35,8 @@ SIMPLE_LIB=src bin/simple test/03_system/check/production_gui_web_renderer_parit
   top-level parity proof cannot pass on shallow event counts alone.
 - Promoted Electron event performance and input-to-paint timing rows must be
   positive and no more than 1000 ms before production parity can pass.
+- Backend-executed performance rows must include a positive sample count,
+  elapsed-time rows, and throughput rows before production parity can pass.
 - A complete fixture pass must promote Chrome live-capture provenance,
   backend-executed Metal frame/timing rows, raw Metal readback rows, font
   readback rows, and Electron event/capture/performance/animation rows at the
@@ -184,6 +186,9 @@ describe "Production GUI/web renderer parity evidence":
         expect(script).to_contain("num_positive_at_most \"$input_to_paint_ms\" 1000")
         expect(script).to_contain("num_positive_at_most \"$event_performance_now_delta_ms_final\" 1000")
         expect(script).to_contain("num_positive_at_most \"$event_input_to_paint_ms_final\" 1000")
+        expect(script).to_contain("production_gui_web_renderer_parity_backend_timing_status=$backend_timing_status")
+        expect(script).to_contain("[ \"$backend_timing_status\" = \"pass\" ]")
+        expect(script).to_contain("[ \"$backend_timing_status_final\" != \"pass\" ]")
         expect(script).to_contain("num_at_least \"$animation_frame_count\" 2")
         expect(script).to_contain("PRODUCTION_GUI_WEB_RENDERER_PARITY_SUBCHECK_TIMEOUT_SECS:-180")
         expect(script).to_contain("timeout \"$SUBCHECK_TIMEOUT_SECS\" \"$@\"")
@@ -437,6 +442,7 @@ describe "Production GUI/web renderer parity evidence":
         expect(evidence).to_contain("production_gui_web_renderer_parity_backend_sample_count=3")
         expect(evidence).to_contain("production_gui_web_renderer_parity_backend_total_elapsed_us_avg=100")
         expect(evidence).to_contain("production_gui_web_renderer_parity_backend_total_pixels_per_second_avg=2400000")
+        expect(evidence).to_contain("production_gui_web_renderer_parity_backend_timing_status=pass")
         expect(evidence).to_contain("production_gui_web_renderer_parity_font_offload_status=pass")
         expect(evidence).to_contain("production_gui_web_renderer_parity_font_offload_vector_readback_status=pass")
         expect(evidence).to_contain("production_gui_web_renderer_parity_font_offload_bitmap_readback_status=pass")
@@ -454,3 +460,14 @@ describe "Production GUI/web renderer parity evidence":
         expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_title_input_background=rgb(241, 245, 249)")
         expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_close_button_background=rgb(239, 68, 68)")
         expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_blur_or_tolerance_used=false")
+
+        val missing_timing_command = command.replace("production_gui_backend_sample_count=3\\\\nproduction_gui_backend_total_elapsed_us_min=90\\\\nproduction_gui_backend_total_elapsed_us_avg=100\\\\nproduction_gui_backend_total_elapsed_us_max=120\\\\nproduction_gui_backend_total_pixels_per_second_min=2000000\\\\nproduction_gui_backend_total_pixels_per_second_avg=2400000\\\\nproduction_gui_backend_total_pixels_per_second_max=2800000\\\\n", "") + " || true"
+        val (_missing_timing_stdout, _missing_timing_stderr, missing_timing_code) = process_run("/bin/sh", ["-c", missing_timing_command])
+        expect(missing_timing_code).to_equal(0)
+
+        val missing_timing = file_read(root + "/out/evidence.env")
+        expect(missing_timing).to_contain("production_gui_web_renderer_parity_status=fail")
+        expect(missing_timing).to_contain("production_gui_web_renderer_parity_reason=backend-executed-parity-failed")
+        expect(missing_timing).to_contain("production_gui_web_renderer_parity_backend_status=pass")
+        expect(missing_timing).to_contain("production_gui_web_renderer_parity_backend_timing_status=fail")
+        expect(missing_timing).to_contain("production_gui_web_renderer_parity_backend_sample_count=")

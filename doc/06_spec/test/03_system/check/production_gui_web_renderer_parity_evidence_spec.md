@@ -84,6 +84,8 @@ SIMPLE_LIB=src bin/simple test/03_system/check/production_gui_web_renderer_parit
   top-level parity proof cannot pass on shallow event counts alone.
 - Promoted Electron event performance and input-to-paint timing rows must be
   positive and no more than 1000 ms before production parity can pass.
+- Backend-executed performance rows must include a positive sample count,
+  elapsed-time rows, and throughput rows before production parity can pass.
 - A complete fixture pass must promote Chrome live-capture provenance,
   backend-executed Metal frame/timing rows, raw Metal readback rows, font
   readback rows, and Electron event/capture/performance/animation rows at the
@@ -181,7 +183,7 @@ the produced `evidence.env` to validate the final release-blocking contract.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 57 lines folded for reproduction.
+Runnable source: 60 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -237,6 +239,9 @@ expect(script).to_contain("num_positive_at_most \"$performance_now_delta_ms\" 10
 expect(script).to_contain("num_positive_at_most \"$input_to_paint_ms\" 1000")
 expect(script).to_contain("num_positive_at_most \"$event_performance_now_delta_ms_final\" 1000")
 expect(script).to_contain("num_positive_at_most \"$event_input_to_paint_ms_final\" 1000")
+expect(script).to_contain("production_gui_web_renderer_parity_backend_timing_status=$backend_timing_status")
+expect(script).to_contain("[ \"$backend_timing_status\" = \"pass\" ]")
+expect(script).to_contain("[ \"$backend_timing_status_final\" != \"pass\" ]")
 expect(script).to_contain("num_at_least \"$animation_frame_count\" 2")
 expect(script).to_contain("PRODUCTION_GUI_WEB_RENDERER_PARITY_SUBCHECK_TIMEOUT_SECS:-180")
 expect(script).to_contain("timeout \"$SUBCHECK_TIMEOUT_SECS\" \"$@\"")
@@ -610,12 +615,13 @@ expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_bl
 
 - "printf '#!/bin/sh\\nmkdir -p \"$BUILD DIR\"\\nprintf \"wm browser event routing status=pass\\\\nwm browser event routing reason=pass\\\\nwm browser event routing validation status=pass\\\\nwm browser event routing validation reason=pass\\\\nwm browser event routing ready=true\\\\nwm browser event routing wm found=true\\\\nwm browser event routing focus count=1\\\\nwm browser event routing move count=1\\\\nwm browser event routing maximize count=1\\\\nwm browser event routing title command count=1\\\\nwm browser event routing text input count=1\\\\nwm browser event routing pointer down count=1\\\\nwm browser event routing pointer up count=1\\\\nwm browser event routing performance now available=true\\\\nwm browser event routing performance now delta ms=16 7\\\\nwm browser event routing input to paint ms=18 4\\\\nwm browser event routing animation frame available=true\\\\nwm browser event routing animation frame count=2\\\\nwm browser event routing css animation probe=true\\\\nwm browser event routing event sequence=host wm pointer:down,window cmd:focus,window cmd:move,window cmd:title command,window cmd:maximize,input event:text input,input event:pointer down,input event:pointer up\\\\nwm browser event routing title text=Terminal\\\\nwm browser event routing title context text=terminal\\\\nwm browser event routing traffic button count=3\\\\nwm browser event routing title input tag=input\\\\nwm browser event routing titlebar height=34px\\\\nwm browser event routing titlebar display=flex\\\\nwm browser event routing titlebar cursor=grab\\\\nwm browser event routing titlebar background=rgb
    - Expected: code equals `0`
+   - Expected: missing_timing_code equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 42 lines folded for reproduction.
+Runnable source: 54 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -644,6 +650,7 @@ expect(evidence).to_contain("production_gui_web_renderer_parity_backend_metal_gp
 expect(evidence).to_contain("production_gui_web_renderer_parity_backend_sample_count=3")
 expect(evidence).to_contain("production_gui_web_renderer_parity_backend_total_elapsed_us_avg=100")
 expect(evidence).to_contain("production_gui_web_renderer_parity_backend_total_pixels_per_second_avg=2400000")
+expect(evidence).to_contain("production_gui_web_renderer_parity_backend_timing_status=pass")
 expect(evidence).to_contain("production_gui_web_renderer_parity_font_offload_status=pass")
 expect(evidence).to_contain("production_gui_web_renderer_parity_font_offload_vector_readback_status=pass")
 expect(evidence).to_contain("production_gui_web_renderer_parity_font_offload_bitmap_readback_status=pass")
@@ -661,6 +668,17 @@ expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_ti
 expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_title_input_background=rgb(241, 245, 249)")
 expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_close_button_background=rgb(239, 68, 68)")
 expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_blur_or_tolerance_used=false")
+
+val missing_timing_command = command.replace("production_gui_backend_sample_count=3\\\\nproduction_gui_backend_total_elapsed_us_min=90\\\\nproduction_gui_backend_total_elapsed_us_avg=100\\\\nproduction_gui_backend_total_elapsed_us_max=120\\\\nproduction_gui_backend_total_pixels_per_second_min=2000000\\\\nproduction_gui_backend_total_pixels_per_second_avg=2400000\\\\nproduction_gui_backend_total_pixels_per_second_max=2800000\\\\n", "") + " || true"
+val (_missing_timing_stdout, _missing_timing_stderr, missing_timing_code) = process_run("/bin/sh", ["-c", missing_timing_command])
+expect(missing_timing_code).to_equal(0)
+
+val missing_timing = file_read(root + "/out/evidence.env")
+expect(missing_timing).to_contain("production_gui_web_renderer_parity_status=fail")
+expect(missing_timing).to_contain("production_gui_web_renderer_parity_reason=backend-executed-parity-failed")
+expect(missing_timing).to_contain("production_gui_web_renderer_parity_backend_status=pass")
+expect(missing_timing).to_contain("production_gui_web_renderer_parity_backend_timing_status=fail")
+expect(missing_timing).to_contain("production_gui_web_renderer_parity_backend_sample_count=")
 ```
 
 </details>
