@@ -886,6 +886,21 @@ expect(bad_checksum).to_contain("production_gui_web_renderer_parity_status=fail"
 expect(bad_checksum).to_contain("production_gui_web_renderer_parity_reason=backend-executed-parity-failed")
 expect(bad_checksum).to_contain("production_gui_web_renderer_parity_backend_cpu_simd_checksum=901")
 expect(bad_checksum).to_contain("production_gui_web_renderer_parity_backend_software_checksum=900")
+
+it "finalizes partial evidence when the wrapper is interrupted":
+    val root = "build/test-production-gui-web-renderer-parity-interrupted"
+    val command = "rm -rf " + root + " && mkdir -p " + root + "/fixture && " +
+        "printf '#!/bin/sh\\nmkdir -p \"$BUILD_ROOT\"\\nprintf \"electron_generated_gui_web_matrix_status=pass\\\\nelectron_generated_gui_web_matrix_reason=pass\\\\n\" > \"$BUILD_ROOT/evidence.env\"\\n' > " + root + "/fixture/matrix.sh && " +
+        "printf '#!/bin/sh\\nmkdir -p \"$BUILD_DIR\"\\nprintf \"electron_simple_web_layout_manifest_status=running\\\\nelectron_simple_web_layout_manifest_reason=synthetic-long-layout\\\\n\" > \"$BUILD_DIR/evidence.env\"\\nsleep 20\\n' > " + root + "/fixture/layout.sh && " +
+        "timeout 2 env PRODUCTION_GUI_WEB_RENDERER_PARITY_MATRIX_SCRIPT=" + root + "/fixture/matrix.sh PRODUCTION_GUI_WEB_RENDERER_PARITY_LAYOUT_SCRIPT=" + root + "/fixture/layout.sh BUILD_ROOT=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-production-gui-web-renderer-parity-evidence.shs || true"
+    val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+    expect(code).to_equal(0)
+
+    val evidence = file_read(root + "/out/evidence.env")
+    expect(evidence).to_contain("production_gui_web_renderer_parity_status=fail")
+    expect(evidence).to_contain("production_gui_web_renderer_parity_reason=partial-production-parity-run-incomplete")
+    expect(evidence).to_contain("production_gui_web_renderer_parity_interrupted_exit_code=143")
+    expect(evidence).to_contain("production_gui_web_renderer_parity_matrix_status=pass")
 ```
 
 </details>
@@ -894,8 +909,8 @@ expect(bad_checksum).to_contain("production_gui_web_renderer_parity_backend_soft
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 16 |
-| Active scenarios | 16 |
+| Total scenarios | 17 |
+| Active scenarios | 17 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

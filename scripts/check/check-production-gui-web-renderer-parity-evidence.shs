@@ -92,6 +92,28 @@ field_of() {
     sed -n "s/^${key}=//p" "$file" | tail -n 1
 }
 
+PARTIAL_FINALIZED=0
+finalize_partial_evidence_on_exit() {
+    code="$1"
+    if [ "${PARTIAL_FINALIZED:-0}" = "1" ]; then
+        return
+    fi
+    if [ -s "$BUILD_ROOT/evidence.env" ] && [ "$(field_of production_gui_web_renderer_parity_status "$BUILD_ROOT/evidence.env")" = "" ]; then
+        {
+            echo "production_gui_web_renderer_parity_status=fail"
+            echo "production_gui_web_renderer_parity_reason=partial-production-parity-run-incomplete"
+            echo "production_gui_web_renderer_parity_interrupted_exit_code=$code"
+            cat "$BUILD_ROOT/evidence.env"
+        } >"$BUILD_ROOT/evidence.partial.env"
+        mv "$BUILD_ROOT/evidence.partial.env" "$BUILD_ROOT/evidence.env"
+    fi
+    PARTIAL_FINALIZED=1
+}
+trap 'finalize_partial_evidence_on_exit "$?"' EXIT
+trap 'finalize_partial_evidence_on_exit 129; exit 129' HUP
+trap 'finalize_partial_evidence_on_exit 130; exit 130' INT
+trap 'finalize_partial_evidence_on_exit 143; exit 143' TERM
+
 file_size_bytes() {
     path="$1"
     if [ -f "$path" ]; then
@@ -1176,6 +1198,7 @@ fi
     cat "$BUILD_ROOT/evidence.env"
 } >"$BUILD_ROOT/evidence.final.env"
 mv "$BUILD_ROOT/evidence.final.env" "$BUILD_ROOT/evidence.env"
+PARTIAL_FINALIZED=1
 
 {
     echo "# Production GUI Web Renderer Parity Evidence"
