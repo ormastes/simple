@@ -126,6 +126,18 @@ and checksum/readback proof. If the host cannot produce the row, record an
 explicit blocker such as `8k-host-unavailable`; do not convert a small viewport,
 software fallback, or cached replay into an 8K pass.
 
+Before accepting GUI/web/2D implementation, wrapper, benchmark, or platform
+agent patches, run the diff-scoped source-coupling guard:
+
+```bash
+sh scripts/check/check-rendering-source-coupling.shs
+```
+
+For a specific jj change, set `RENDERING_SOURCE_COUPLING_REVISION=<rev>`. The
+guard rejects new raw `rt_*` calls, direct backend proof/status pokes, and forced
+backend pass states in rendering-scoped files. The only raw RenderDoc helper
+exception is the canonical `scripts/tool/renderdoc-evidence.shs` path.
+
 For Metal claims, only macOS native raw Metal readback is proof. Linux and other
 non-macOS hosts must report `metal-requires-macos`, not a Metal pass. A Metal
 claim without raw readback, backend handle, and checksum/readback provenance is

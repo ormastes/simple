@@ -338,6 +338,9 @@ Before accepting any implementation or wrapper patch from Spark, mini sidecars,
 or future platform agents, Lane C must run a source-coupling review over the
 diff:
 
+- Run `sh scripts/check/check-rendering-source-coupling.shs` against the
+  working diff, or set `RENDERING_SOURCE_COUPLING_REVISION=<rev>` for a
+  specific jj change.
 - No new raw `rt_*` calls in app, GUI, web, 2D, benchmark, or evidence-wrapper
   code unless the owning facade already exposes that operation.
 - No direct backend field pokes to force pass states.

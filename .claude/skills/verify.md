@@ -139,11 +139,18 @@ For each source file in scope:
    Treat browser `RDOC_RENDERDOC_HOOK_CHILDREN=0` and Chromium
    `--in-process-gpu` runs as diagnostic only unless they still produce valid
    browser GPU-process `.rdc` evidence with `RDOC` magic and prove Vulkan active.
-5. Metal/Vulkan/8K claims require matching evidence: native Metal raw readback
+5. For GUI/web/2D rendering-lane implementation, wrapper, benchmark, or
+   platform-agent diffs, run
+   `sh scripts/check/check-rendering-source-coupling.shs`. Use
+   `RENDERING_SOURCE_COUPLING_REVISION=<rev>` for a specific jj change. New raw
+   `rt_*`, direct backend proof/status pokes, or forced backend pass states in
+   rendering-scoped files are FAIL unless routed through an owning facade or the
+   documented RenderDoc helper exception.
+6. Metal/Vulkan/8K claims require matching evidence: native Metal raw readback
    on macOS, `metal-requires-macos` for Linux Metal, the Vulkan gate above for
    Vulkan, and a retained 8K row or explicit blocker in `doc/09_report` /
    `doc/10_metrics` for 8K performance.
-6. For GUI/web queue proof, reject runtime-only evidence. Runtime queue/drain
+7. For GUI/web queue proof, reject runtime-only evidence. Runtime queue/drain
    receipts are necessary but not sufficient; production proof requires
    same-frame backend `device_readback`, a positive backend handle, and matching
    checksum. Synthetic handles, upload-only provenance, and CPU mirrors fail.

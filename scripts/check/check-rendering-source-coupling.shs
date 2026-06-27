@@ -1,0 +1,86 @@
+#!/bin/sh
+# Diff-scoped guard for GUI/web/2D rendering source-coupling review.
+#
+# This intentionally scans added lines, not the whole tree: legacy low-level
+# runtime and RenderDoc paths still contain raw rt_* externs. New rendering-lane
+# patches should enter through facades or explicitly documented helper shims.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+REVISION="${RENDERING_SOURCE_COUPLING_REVISION:-@}"
+DIFF_FILE="${RENDERING_SOURCE_COUPLING_DIFF_FILE:-}"
+
+tmp_diff="$(mktemp)"
+trap 'rm -f "$tmp_diff"' EXIT INT TERM
+
+if [ -n "$DIFF_FILE" ]; then
+    cp "$DIFF_FILE" "$tmp_diff"
+elif command -v jj >/dev/null 2>&1 && jj root >/dev/null 2>&1; then
+    jj diff --git -r "$REVISION" >"$tmp_diff"
+elif git rev-parse --show-toplevel >/dev/null 2>&1; then
+    git diff --no-ext-diff --no-color >"$tmp_diff"
+else
+    echo "rendering_source_coupling_reason=no-vcs-diff-source" >&2
+    echo "STATUS: FAIL rendering-source-coupling" >&2
+    exit 1
+fi
+
+awk '
+function in_scope(path) {
+    if (path == "scripts/check/check-rendering-source-coupling.shs" ||
+        path == "test/03_system/check/rendering_source_coupling_spec.spl") {
+        return 0
+    }
+    return path ~ /^src\/app\/(ui|ui\.browser|wm_compare|os\/wm)(\/|$)/ ||
+        path ~ /^src\/lib\/common\/ui(\/|$)/ ||
+        path ~ /^src\/lib\/gc_async_mut\/(ui|gpu\/engine2d|gpu\/browser_engine)(\/|$)/ ||
+        path ~ /^examples\/06_io\/ui(\/|$)/ ||
+        path ~ /^scripts\/(check|setup|tool)\/.*(gui|render|vulkan|metal|directx|d3d|widget|web|gpu).*$/ ||
+        path ~ /^test\/(03_system\/check|05_perf)\/.*(gui|render|vulkan|metal|directx|d3d|widget|web|gpu).*\.spl$/
+}
+
+function allowed_raw_rt(path, text) {
+    return path == "scripts/tool/renderdoc-evidence.shs" &&
+        text ~ /rt_renderdoc_/
+}
+
+function report(kind, path, text) {
+    print "rendering_source_coupling_" kind "=" path ":" text > "/dev/stderr"
+    failures += 1
+}
+
+/^diff --git / {
+    path = $4
+    sub(/^b\//, "", path)
+    scoped = in_scope(path)
+    next
+}
+
+!scoped { next }
+/^\+\+\+/ { next }
+/^\+/ {
+    text = substr($0, 2)
+    if (text ~ /(^|[^A-Za-z0-9_])rt_[A-Za-z0-9_]+/ && !allowed_raw_rt(path, text)) {
+        report("raw_rt", path, text)
+    }
+    if (text ~ /(^|[.[:space:]])backend_(status|proof|handle|name)[[:space:]]*=[[:space:]]*"?pass"?/) {
+        report("backend_poke", path, text)
+    }
+    if (text ~ /(force|forced|override).*backend.*(pass|vulkan|metal|d3d|directx)/) {
+        report("forced_backend", path, text)
+    }
+}
+
+END {
+    if (failures > 0) {
+        exit 1
+    }
+}
+' "$tmp_diff" || {
+    echo "STATUS: FAIL rendering-source-coupling" >&2
+    exit 1
+}
+
+echo "STATUS: PASS rendering-source-coupling"

@@ -85,6 +85,13 @@ not create, rewrite, or weaken SPipe after verification.
   `RDOC_RENDERDOC_HOOK_CHILDREN=0` and Chromium `--in-process-gpu` runs are
   diagnostic only unless they still produce valid browser GPU-process `.rdc`
   evidence with `RDOC` magic and prove Vulkan remains active.
+- GUI/web/2D source-coupling verification must run
+  `sh scripts/check/check-rendering-source-coupling.shs` for rendering-lane
+  implementation, wrapper, benchmark, or platform-agent diffs. Set
+  `RENDERING_SOURCE_COUPLING_REVISION=<rev>` to check a specific jj change.
+  New raw `rt_*`, direct backend proof/status pokes, or forced backend pass
+  states in rendering-scoped files are FAIL unless routed through an owning
+  facade or the documented RenderDoc helper exception.
 - Metal/Vulkan/8K claims require matching evidence: native Metal raw readback
   on macOS, `metal-requires-macos` for Linux Metal, the Vulkan gate above for
   Vulkan, and a retained 8K row or explicit blocker in `doc/09_report` /

@@ -170,6 +170,13 @@ Scan for stub patterns — any match is a **FAIL**:
   Chromium `--in-process-gpu` evidence is also a FAIL on this Linux host unless
   it separately proves Vulkan remains active and emits valid browser `.rdc`
   evidence; current diagnostics show Vulkan unsupported or GPU crashes there.
+- **GUI/web/2D source-coupling gate:** for rendering-lane implementation,
+  wrapper, benchmark, or platform-agent patches, run
+  `sh scripts/check/check-rendering-source-coupling.shs` against the working
+  diff, or set `RENDERING_SOURCE_COUPLING_REVISION=<rev>` for a specific jj
+  change. New raw `rt_*` calls, direct backend proof/status pokes, or forced
+  backend pass states in rendering-scoped files are FAIL unless routed through
+  an owning facade or the documented RenderDoc helper exception.
 - **Metal/Vulkan/8K claims:** native Metal proof is macOS-only and must include
   raw Metal readback; Linux Metal is only `metal-requires-macos`. Vulkan claims
   need the readback/RenderDoc gate above. Any 8K performance claim needs a
