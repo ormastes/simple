@@ -6,13 +6,102 @@ cd "$ROOT_DIR"
 
 BUILD_DIR="${BUILD_DIR:-build/gui_color_image_pipeline_8k_evidence}"
 REPORT_PATH="${REPORT_PATH:-doc/09_report/gui_color_image_pipeline_8k_evidence_$(date -u +%F).md}"
-SIMPLE_BIN="${SIMPLE_BIN:-src/compiler_rust/target/release/simple}"
+SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
+SIMPLE_BIN_STATUS=pass
+if [ -z "${SIMPLE_BIN+x}" ]; then
+    SIMPLE_BIN=""
+    SIMPLE_BIN_SOURCE=auto-self-hosted
+    for _cand in bin/simple ./bin/simple release/*/simple bin/release/*/simple build/bootstrap/stage3/simple; do
+        if [ -x "$_cand" ]; then
+            SIMPLE_BIN="$_cand"
+            break
+        fi
+    done
+fi
+
+is_rust_seed_simple() {
+    case "$1" in
+        src/compiler_rust/*|./src/compiler_rust/*|*/src/compiler_rust/*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+if [ -z "$SIMPLE_BIN" ]; then
+    SIMPLE_BIN_STATUS=missing
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-missing"
+elif is_rust_seed_simple "$SIMPLE_BIN"; then
+    SIMPLE_BIN_STATUS=forbidden
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-rust-seed-forbidden"
+elif [ ! -x "$SIMPLE_BIN" ]; then
+    SIMPLE_BIN_STATUS=missing
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-missing"
+fi
+export SIMPLE_BIN SIMPLE_BIN_SOURCE SIMPLE_BIN_STATUS
 EVIDENCE_SRC="$BUILD_DIR/gui_color_image_pipeline_8k_evidence.spl"
 EVIDENCE_OUT="$BUILD_DIR/evidence.env"
 SPEC_OUT="$BUILD_DIR/spec.out"
+FOCUSED_SPECS="
+examples/11_advanced/browser/test/gpu/surface_color_plan_spec.spl
+test/01_unit/lib/common/color/color_lab_xyz_spec.spl
+examples/11_advanced/browser/test/paint/image_decode_spec.spl
+examples/11_advanced/browser/test/gpu/tiff_image_raster_spec.spl
+"
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
 rm -f "$EVIDENCE_SRC" "$EVIDENCE_OUT" "$SPEC_OUT" "$REPORT_PATH"
+
+write_early_report() {
+    {
+        echo "# GUI Color/Image Pipeline 8K Evidence"
+        echo
+        echo "- status: fail"
+        echo "- reason: $1"
+        echo "- simple_bin: $SIMPLE_BIN"
+        echo "- simple_bin_source: $SIMPLE_BIN_SOURCE"
+        echo "- simple_bin_status: $SIMPLE_BIN_STATUS"
+        echo
+        echo "## Evidence"
+        echo
+        sed 's/^/- /' "$EVIDENCE_OUT"
+    } >"$REPORT_PATH"
+}
+
+fail_early() {
+    {
+        echo "gui_color_image_pipeline_8k_status=fail"
+        echo "gui_color_image_pipeline_8k_reason=$1"
+        echo "gui_color_image_pipeline_8k_simple_bin=$SIMPLE_BIN"
+        echo "gui_color_image_pipeline_8k_simple_bin_source=$SIMPLE_BIN_SOURCE"
+        echo "gui_color_image_pipeline_8k_simple_bin_status=$SIMPLE_BIN_STATUS"
+    } >"$EVIDENCE_OUT"
+    write_early_report "$1"
+    cat "$EVIDENCE_OUT"
+    exit 1
+}
+
+if [ "$SIMPLE_BIN_STATUS" != "pass" ]; then
+    fail_early "simple-bin-$SIMPLE_BIN_STATUS"
+fi
+
+missing_specs=""
+for spec_path in $FOCUSED_SPECS; do
+    if [ ! -f "$spec_path" ]; then
+        missing_specs="${missing_specs}${missing_specs:+,}$spec_path"
+    fi
+done
+if [ -n "$missing_specs" ]; then
+    {
+        echo "gui_color_image_pipeline_8k_status=fail"
+        echo "gui_color_image_pipeline_8k_reason=missing-focused-spec"
+        echo "gui_color_image_pipeline_8k_missing_focused_specs=$missing_specs"
+        echo "gui_color_image_pipeline_8k_simple_bin=$SIMPLE_BIN"
+        echo "gui_color_image_pipeline_8k_simple_bin_source=$SIMPLE_BIN_SOURCE"
+        echo "gui_color_image_pipeline_8k_simple_bin_status=$SIMPLE_BIN_STATUS"
+    } >"$EVIDENCE_OUT"
+    write_early_report "missing-focused-spec"
+    cat "$EVIDENCE_OUT"
+    exit 1
+fi
 
 cat >"$EVIDENCE_SRC" <<'SIMPLE'
 use examples.browser.feature.gpu.surface.{
@@ -53,6 +142,7 @@ fn main() -> i64:
         packed_lab.white_point == "D65"
 
     print("gui_color_image_pipeline_8k_status=" + (if status: "pass" else: "fail"))
+    print("gui_color_image_pipeline_8k_reason=" + (if status: "pass" else: "surface-plan-mismatch"))
     print("gui_color_image_pipeline_8k_width=" + plan.width.to_text())
     print("gui_color_image_pipeline_8k_height=" + plan.height.to_text())
     print("gui_color_image_pipeline_8k_bytes_per_pixel=" + plan.bytes_per_pixel.to_text())
@@ -72,13 +162,13 @@ fn main() -> i64:
 SIMPLE
 
 SIMPLE_LIB="${SIMPLE_LIB:-src}" "$SIMPLE_BIN" run "$EVIDENCE_SRC" --mode=interpreter --clean >"$EVIDENCE_OUT"
+{
+    echo "gui_color_image_pipeline_8k_simple_bin=$SIMPLE_BIN"
+    echo "gui_color_image_pipeline_8k_simple_bin_source=$SIMPLE_BIN_SOURCE"
+    echo "gui_color_image_pipeline_8k_simple_bin_status=$SIMPLE_BIN_STATUS"
+} >>"$EVIDENCE_OUT"
 spec_code=0
-for spec_path in \
-    examples/11_advanced/browser/test/gpu/surface_color_plan_spec.spl \
-    test/01_unit/lib/common/color/color_lab_xyz_spec.spl \
-    examples/11_advanced/browser/test/paint/image_decode_spec.spl \
-    examples/11_advanced/browser/test/gpu/tiff_image_raster_spec.spl
-do
+for spec_path in $FOCUSED_SPECS; do
     {
         echo "spec_path=$spec_path"
         SIMPLE_LIB="${SIMPLE_LIB:-src}" "$SIMPLE_BIN" test "$spec_path" --mode=interpreter --clean
@@ -96,6 +186,7 @@ if [ "$spec_code" -ne 0 ]; then
 fi
 
 status="$(grep '^gui_color_image_pipeline_8k_status=' "$EVIDENCE_OUT" | cut -d= -f2)"
+reason="$(grep '^gui_color_image_pipeline_8k_reason=' "$EVIDENCE_OUT" | cut -d= -f2)"
 width="$(grep '^gui_color_image_pipeline_8k_width=' "$EVIDENCE_OUT" | cut -d= -f2)"
 height="$(grep '^gui_color_image_pipeline_8k_height=' "$EVIDENCE_OUT" | cut -d= -f2)"
 framebuffer_bytes="$(grep '^gui_color_image_pipeline_8k_framebuffer_bytes=' "$EVIDENCE_OUT" | cut -d= -f2)"
@@ -109,6 +200,10 @@ red_roundtrip="$(grep '^gui_color_image_pipeline_8k_red_roundtrip_ok=' "$EVIDENC
     echo "# GUI Color/Image Pipeline 8K Evidence"
     echo
     echo "- status: $status"
+    echo "- reason: $reason"
+    echo "- simple_bin: $SIMPLE_BIN"
+    echo "- simple_bin_source: $SIMPLE_BIN_SOURCE"
+    echo "- simple_bin_status: $SIMPLE_BIN_STATUS"
     echo "- surface: ${width}x${height} BGRA8"
     echo "- framebuffer_bytes: $framebuffer_bytes"
     echo "- lab_xyz_full_frame_bytes: $lab_xyz_bytes"
