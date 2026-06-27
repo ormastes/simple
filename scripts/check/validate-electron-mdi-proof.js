@@ -54,6 +54,29 @@ function jsonBoolTextOrBlank(value) {
   return '';
 }
 
+function pngHasStructuredImageChunks(bytes) {
+  let offset = 8;
+  let sawIdat = false;
+  let sawIend = false;
+  while (offset + 12 <= bytes.length) {
+    const length = bytes.readUInt32BE(offset);
+    const type = bytes.subarray(offset + 4, offset + 8).toString('ascii');
+    const dataStart = offset + 8;
+    const crcStart = dataStart + length;
+    const next = crcStart + 4;
+    if (next > bytes.length) return false;
+    if (type === 'IDAT' && length > 0) {
+      sawIdat = true;
+    }
+    if (type === 'IEND') {
+      sawIend = true;
+      break;
+    }
+    offset = next;
+  }
+  return sawIdat && sawIend;
+}
+
 const [proofPath, screenshotPath] = process.argv.slice(2);
 const maxEventTimingMs = 1000;
 if (!proofPath || !screenshotPath) {
@@ -123,8 +146,7 @@ if (screenshotStat !== null && screenshotStat.isFile() && screenshotStat.size >=
     screenshotStructureOk =
       screenshotMagicOk &&
       ihdrOk &&
-      bytes.indexOf(Buffer.from('IDAT', 'ascii')) >= 0 &&
-      bytes.indexOf(Buffer.from('IEND', 'ascii')) >= 0;
+      pngHasStructuredImageChunks(bytes);
   } catch (_err) {
     screenshotMagicOk = false;
     screenshotStructureOk = false;

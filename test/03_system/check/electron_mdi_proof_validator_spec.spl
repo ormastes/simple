@@ -30,8 +30,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_mdi_proof_validator
 - Capture pass requires the proof screenshot path to match the captured
   screenshot artifact and the artifact file to exist with nonzero bytes.
 - Capture artifacts must carry PNG signature bytes, IHDR dimensions, and image
-  chunks; arbitrary nonempty files and signature-only files are not accepted as
-  Electron screenshot proof.
+  chunks; arbitrary nonempty files, signature-only files, and forged chunk text
+  are not accepted as Electron screenshot proof.
 - Performance, interaction latency, and animation pass require
   `performance.now()`, an explicit positive timing delta, a positive
   `inputToPaintMs` sample after routed MDI input, at least two animation
@@ -56,6 +56,9 @@ fn _proof_command(path: text, mutation: text) -> text:
 
 fn _png_capture_command() -> text:
     "node -e \"process.stdout.write(Buffer.from(process.argv[1], process.argv[2]))\" iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII= base64 > build/electron-proof/screen.png"
+
+fn _forged_png_capture_command() -> text:
+    "node -e \"process.stdout.write(Buffer.from(process.argv[1], process.argv[2]))\" iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAMAAAAoyzS7AAAAElSURBVElFTkQ= base64 > build/electron-proof/screen.png"
 
 describe "Electron MDI proof validator":
 
@@ -269,6 +272,24 @@ describe "Electron MDI proof validator":
         expect(evidence).to_contain("electron_mdi_screenshot_png_magic_status=pass")
         expect(evidence).to_contain("electron_mdi_screenshot_png_structure_status=fail")
 
+    it "rejects forged PNG chunk text in Electron screenshot artifacts":
+        val root = "build/test-electron-mdi-validator-capture-forged-chunks"
+        val command = "rm -rf " + root + " build/electron-proof && mkdir -p " + root + " build/electron-proof && " +
+            _forged_png_capture_command() + " && " +
+            _proof_command(root + "/proof.json", "") +
+            " && node scripts/check/validate-electron-mdi-proof.js " + root + "/proof.json build/electron-proof/screen.png > " + root + "/evidence.env"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(1)
+
+        val evidence = file_read(root + "/evidence.env")
+        step("Confirm Electron screenshot proof needs structured PNG chunks, not bare IDAT/IEND text")
+        expect(evidence).to_contain("electron_mdi_json_proof=fail")
+        expect(evidence).to_contain("electron_mdi_json_proof_reason=capture-contract-missing:screenshotPngStructure")
+        expect(evidence).to_contain("electron_mdi_capture_status=fail")
+        expect(evidence).to_contain("electron_mdi_screenshot_file_status=pass")
+        expect(evidence).to_contain("electron_mdi_screenshot_png_magic_status=pass")
+        expect(evidence).to_contain("electron_mdi_screenshot_png_structure_status=fail")
+
     it "rejects performance availability without explicit timing delta":
         val root = "build/test-electron-mdi-validator-performance"
         val command = "rm -rf " + root + " && mkdir -p " + root + " build/electron-proof && " + _png_capture_command() + " && " +
@@ -437,6 +458,7 @@ describe "Electron MDI proof validator":
         expect(wrapper).to_contain("electron-mdi-json-proof-failed")
         val validator = file_read("scripts/check/validate-electron-mdi-proof.js")
         expect(validator).to_contain("jsonBoolTextOrBlank")
+        expect(validator).to_contain("pngHasStructuredImageChunks")
         expect(validator).to_contain("electron_mdi_event_body_click_routed")
         expect(validator).to_contain("electron_mdi_bridge_mouse_up_frame_routed")
         expect(validator).to_contain("electron_mdi_event_taskbar_labels_visible")
