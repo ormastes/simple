@@ -115,6 +115,8 @@ Browser evidence must prove Metal backing and exact pairwise ARGB comparison:
   missing source artifacts is not accepted as browser-backed Metal proof.
 - Electron and Chrome browser backing source files must also be nonempty; a
   zero-byte source artifact is reported distinctly from a missing file.
+- Electron and Chrome browser backing source files must be regular proof files,
+  not symlinks to browser metadata outside the evidence boundary.
 - Electron and Chrome browser backing source files must contain structured
   Metal GPU metadata scoped to the expected Electron or Chrome backing prefix,
   not arbitrary nonempty text or generic renderer rows.
@@ -191,25 +193,26 @@ macos_metal_render_log_compare_pairwise_status=pass
    Metal GPU metadata is otherwise complete.
 8. Reject browser backing rows whose source artifacts are arbitrary non-proof
    text even when normalized Metal rows claim pass.
-9. Reject browser backing source artifacts that only contain generic GPU
+9. Reject symlinked browser backing source artifacts.
+10. Reject browser backing source artifacts that only contain generic GPU
    metadata rather than Electron/Chrome-scoped backing rows.
-10. Reject pairwise rows whose Simple, Chrome, or Electron ARGB evidence is
+11. Reject pairwise rows whose Simple, Chrome, or Electron ARGB evidence is
    blank or uses mismatched viewport geometry.
-11. Reject pairwise rows whose ARGB checksums are missing or mismatched.
-12. Reject pairwise rows whose ARGB artifact files are missing or malformed.
-13. Reject ARGB artifact fallbacks that borrow stale working-directory files
+12. Reject pairwise rows whose ARGB checksums are missing or mismatched.
+13. Reject pairwise rows whose ARGB artifact files are missing or malformed.
+14. Reject ARGB artifact fallbacks that borrow stale working-directory files
     instead of evidence beside the browser env file.
-14. Reject ARGB artifact paths that are symlinks to external artifacts.
-15. Reject missing Xcode GPU capture when strict capture mode is enabled.
-16. Reject Xcode GPU capture rows whose artifact bytes do not match the native
+15. Reject ARGB artifact paths that are symlinks to external artifacts.
+16. Reject missing Xcode GPU capture when strict capture mode is enabled.
+17. Reject Xcode GPU capture rows whose artifact bytes do not match the native
    marker, even if the env row claims `XCODE-GPUTRACE`.
-17. Reject Xcode GPU capture rows that omit the capture artifact or native
+18. Reject Xcode GPU capture rows that omit the capture artifact or native
     artifact marker.
-18. Preserve typed unavailable evidence when required Metal input env files are
+19. Preserve typed unavailable evidence when required Metal input env files are
     missing.
-19. Reject strict Metal capture rows that use browser metadata as the capture
+20. Reject strict Metal capture rows that use browser metadata as the capture
     tool even when the `.gputrace` artifact bytes are valid.
-20. Reject strict Metal capture rows whose bare relative `.gputrace` artifact
+21. Reject strict Metal capture rows whose bare relative `.gputrace` artifact
     would otherwise be satisfied by a stale working-directory file.
 
 ## Scenarios
@@ -222,6 +225,7 @@ macos_metal_render_log_compare_pairwise_status=pass
    - Expected: code equals `0`
    - Expected: missing_source_code equals `0`
    - Expected: empty_source_code equals `0`
+   - Expected: symlink_source_code equals `0`
    - Expected: invalid_source_code equals `0`
    - Expected: generic_source_code equals `0`
    - Expected: missing_magic_code equals `0`
@@ -231,7 +235,7 @@ macos_metal_render_log_compare_pairwise_status=pass
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 148 lines folded for reproduction.
+Runnable source: 162 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -332,6 +336,20 @@ expect(empty_source_evidence).to_contain("electron-metal-source-empty")
 expect(empty_source_evidence).to_contain("chrome-metal-source-empty")
 expect(empty_source_evidence).to_contain("macos_metal_render_log_compare_electron_browser_backing_source_file_status=empty")
 expect(empty_source_evidence).to_contain("macos_metal_render_log_compare_chrome_browser_backing_source_file_status=empty")
+
+val symlink_source_base_command = command.replace("rm -rf build/test-macos-metal-render-log-pass && mkdir -p build/test-macos-metal-render-log-pass && " + _argb_artifacts_command("build/test-macos-metal-render-log-pass") + " && ", "rm -rf build/test-macos-metal-render-log-pass build/test-macos-metal-render-log-pass-external && mkdir -p build/test-macos-metal-render-log-pass build/test-macos-metal-render-log-pass-external && " + _argb_artifacts_command("build/test-macos-metal-render-log-pass") + " && cp test/fixtures/render_log/macos_metal_browser_backing_source.env build/test-macos-metal-render-log-pass-external/source.env && ln -s ../test-macos-metal-render-log-pass-external/source.env build/test-macos-metal-render-log-pass/electron-source.env && ln -s ../test-macos-metal-render-log-pass-external/source.env build/test-macos-metal-render-log-pass/chrome-source.env && ")
+val symlink_electron_source_command = symlink_source_base_command.replace("macos_metal_electron_browser_backing_source=test/fixtures/render_log/macos_metal_browser_backing_source.env", "macos_metal_electron_browser_backing_source=build/test-macos-metal-render-log-pass/electron-source.env")
+val symlink_source_command = symlink_electron_source_command.replace("macos_metal_chrome_browser_backing_source=test/fixtures/render_log/macos_metal_browser_backing_source.env", "macos_metal_chrome_browser_backing_source=build/test-macos-metal-render-log-pass/chrome-source.env") + " || true"
+val (_symlink_source_stdout, _symlink_source_stderr, symlink_source_code) = process_run("/bin/sh", ["-c", symlink_source_command])
+expect(symlink_source_code).to_equal(0)
+
+val symlink_source_evidence = file_read("build/test-macos-metal-render-log-pass/out/evidence.env")
+expect(symlink_source_evidence).to_contain("macos_metal_render_log_compare_status=fail")
+expect(symlink_source_evidence).to_contain("electron-metal-source-symlink")
+expect(symlink_source_evidence).to_contain("chrome-metal-source-symlink")
+expect(symlink_source_evidence).to_contain("macos_metal_render_log_compare_electron_browser_backing_source_file_status=symlink")
+expect(symlink_source_evidence).to_contain("macos_metal_render_log_compare_chrome_browser_backing_source_file_status=symlink")
+expect(symlink_source_evidence).to_contain("macos_metal_render_log_compare_browser_backing_gate_status=fail")
 
 val invalid_source_base_command = command.replace("rm -rf build/test-macos-metal-render-log-pass && mkdir -p build/test-macos-metal-render-log-pass && " + _argb_artifacts_command("build/test-macos-metal-render-log-pass") + " && ", "rm -rf build/test-macos-metal-render-log-pass && mkdir -p build/test-macos-metal-render-log-pass && " + _argb_artifacts_command("build/test-macos-metal-render-log-pass") + " && printf 'not structured metal gpu proof\\n' > build/test-macos-metal-render-log-pass/invalid-source.txt && ")
 val invalid_electron_source_command = invalid_source_base_command.replace("macos_metal_electron_browser_backing_source=test/fixtures/render_log/macos_metal_browser_backing_source.env", "macos_metal_electron_browser_backing_source=build/test-macos-metal-render-log-pass/invalid-source.txt")
