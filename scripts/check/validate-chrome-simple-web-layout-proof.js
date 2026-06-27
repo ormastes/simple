@@ -78,6 +78,14 @@ function artifactStat(value, proofPath) {
   }
   const raw = value.trim();
   const proofDir = path.resolve(path.dirname(proofPath));
+  let realProofDir;
+  let realProofPath;
+  try {
+    realProofDir = fs.realpathSync(proofDir);
+    realProofPath = fs.realpathSync(proofPath);
+  } catch (_err) {
+    return null;
+  }
   const candidates = path.isAbsolute(raw)
     ? [raw]
     : [raw, path.join(path.dirname(proofPath), raw)];
@@ -90,9 +98,16 @@ function artifactStat(value, proofPath) {
       continue;
     }
     try {
-      const stat = fs.statSync(candidate);
+      const realCandidate = fs.realpathSync(candidate);
+      if (
+        realCandidate === realProofPath ||
+        !(realCandidate === realProofDir || realCandidate.startsWith(`${realProofDir}${path.sep}`))
+      ) {
+        continue;
+      }
+      const stat = fs.statSync(realCandidate);
       if (stat.isFile()) {
-        return { stat, path: candidate };
+        return { stat, path: realCandidate };
       }
     } catch (_err) {
       // Try the next candidate.

@@ -27,7 +27,7 @@ electron_generated_gui_web_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 18 | 18 | 0 | 0 |
+| 19 | 19 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -85,6 +85,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_generated_gui_web_p
   diagnostics cannot treat a zero-byte artifact as a valid capture file.
 - ARGB capture proof paths must not resolve back to the top-level proof JSON
   even if the proof contains artifact-shaped fields.
+- ARGB capture proof paths must not resolve through proof-local symlinks to
+  artifacts outside the proof directory.
 - Captured ARGB files must parse as `argb-u32` Electron live-capture artifacts,
   match the proof viewport, include the expected pixel count, and contain
   nonzero pixels with numeric uint32 JSON pixel values.
@@ -516,6 +518,38 @@ expect(evidence).to_contain("electron_generated_gui_web_captured_argb_size_bytes
 
 </details>
 
+#### rejects proof-local symlink captured ARGB paths that escape the proof directory
+
+-  proof command
+   - Expected: code equals `1`
+- Confirm symlink targets cannot smuggle external ARGB artifacts into proof evidence
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-electron-generated-gui-web-validator-symlink-artifact"
+val command = "rm -rf " + root + " " + root + "-external && mkdir -p " + root + " && " +
+    _proof_command(root + "/proof.json", "const external=dir+\"-external\";fs.mkdirSync(external,{recursive:true});fs.writeFileSync(path.join(external,\"captured.json\"),JSON.stringify(argb));fs.symlinkSync(path.join(external,\"captured.json\"),path.join(dir,\"linked.json\"));p.captured_argb_path=\"linked.json\"") +
+    " && node scripts/check/validate-electron-generated-gui-web-proof.js " + root + "/proof.json > " + root + "/evidence.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read(root + "/evidence.env")
+step("Confirm symlink targets cannot smuggle external ARGB artifacts into proof evidence")
+expect(evidence).to_contain("electron_generated_gui_web_validation_status=fail")
+expect(evidence).to_contain("electron_generated_gui_web_validation_reason=missing-captured-argb-file")
+expect(evidence).to_contain("electron_generated_gui_web_captured_argb_path=linked.json")
+expect(evidence).to_contain("electron_generated_gui_web_captured_argb_file_status=missing")
+expect(evidence).to_contain("electron_generated_gui_web_captured_argb_size_bytes=")
+```
+
+</details>
+
 #### rejects malformed captured ARGB shape and pixel data
 
 -  proof command
@@ -840,12 +874,14 @@ expect(pixel).to_contain("electron_generated_gui_web_mismatch_count=4")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 30 lines folded for reproduction.
+Runnable source: 32 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val validator = file_read("scripts/check/validate-electron-generated-gui-web-proof.js")
 expect(validator).to_contain("path.resolve(candidate) === path.resolve(proofPath)")
+expect(validator).to_contain("fs.realpathSync(candidate)")
+expect(validator).to_contain("realCandidate === realProofPath")
 expect(validator).to_contain("jsonIntegerBetween(proof.frame_us, 1, 1000000)")
 expect(validator).to_contain("jsonBoolTextOrBlank")
 
@@ -882,8 +918,8 @@ expect(fixture).to_contain("chrome_process_version")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 18 |
-| Active scenarios | 18 |
+| Total scenarios | 19 |
+| Active scenarios | 19 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
