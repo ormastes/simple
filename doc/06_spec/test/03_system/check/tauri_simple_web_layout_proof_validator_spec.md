@@ -74,8 +74,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_simple_web_layout_proo
   `tauri_simple_web_layout_*` rows.
 - Large checksum and weighted-checksum values compare as exact decimal integer
   text, not rounded JavaScript numbers.
-- Malformed `frame_us` fails closed instead of relying on shell integer
-  comparison behavior.
+- Malformed and implausibly high `frame_us` values fail closed instead of
+  relying on shell integer comparison behavior.
 - Blur/tolerance use, missing ARGB capture, malformed mismatch counts, and
   malformed WebKit expected-profile metadata are rejected.
 - ARGB capture proof paths must resolve to nonempty files instead of relying
@@ -180,27 +180,34 @@ expect(evidence).to_contain("tauri_simple_web_layout_simple_weighted_checksum=18
 #### rejects malformed Tauri frame timing
 
 -  proof command
+-  proof command
    - Expected: code equals `1`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val root = "build/test-tauri-layout-validator-bad-frame"
 val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
     _proof_command(root + "/proof.json", "p.frame_us=\"not-a-number\"") +
-    " && node scripts/check/validate-tauri-simple-web-layout-proof.js " + root + "/proof.json > " + root + "/evidence.env"
+    " && node scripts/check/validate-tauri-simple-web-layout-proof.js " + root + "/proof.json > " + root + "/evidence.env; " +
+    _proof_command(root + "/high.json", "p.frame_us=1000001") +
+    " && node scripts/check/validate-tauri-simple-web-layout-proof.js " + root + "/high.json > " + root + "/high.env"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(1)
 
 val evidence = file_read(root + "/evidence.env")
+val high = file_read(root + "/high.env")
 expect(evidence).to_contain("tauri_simple_web_layout_validation_status=fail")
 expect(evidence).to_contain("tauri_simple_web_layout_validation_reason=missing-tauri-timing")
 expect(evidence).to_contain("tauri_simple_web_layout_tauri_frame_us=not-a-number")
+expect(high).to_contain("tauri_simple_web_layout_validation_status=fail")
+expect(high).to_contain("tauri_simple_web_layout_validation_reason=missing-tauri-timing")
+expect(high).to_contain("tauri_simple_web_layout_tauri_frame_us=1000001")
 ```
 
 </details>
@@ -559,7 +566,7 @@ expect(pixel).to_contain("tauri_simple_web_layout_mismatch_count=4")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -575,6 +582,7 @@ expect(script).to_contain("tauri_simple_web_layout_requested_width")
 expect(script).to_contain("checksum-mismatch|weighted-checksum-mismatch|pixel-mismatch")
 expect(script).to_contain("status=divergent")
 expect(validator).to_contain("path.resolve(candidate) === path.resolve(proofPath)")
+expect(validator).to_contain("jsonIntegerBetween(proof.frame_us, 1, 1000000)")
 val converter = file_read("tools/tauri-live-bitmap/raw_rgba_to_argb.js")
 expect(converter).to_contain("captured_argb_path: outputPath")
 ```

@@ -49,6 +49,13 @@ function jsonIntegerAtLeast(value, min) {
   return BigInt(text) >= BigInt(min);
 }
 
+function jsonIntegerBetween(value, min, max) {
+  const text = jsonIntegerText(value);
+  if (text === null) return false;
+  const bigint = BigInt(text);
+  return bigint >= BigInt(min) && bigint <= BigInt(max);
+}
+
 function integerTextOrClean(value) {
   const text = decimalIntegerText(value);
   return text === null ? clean(value) : text;
@@ -187,7 +194,7 @@ if (proof.blur_or_tolerance_used !== false) {
   reason = 'captured-argb-pixel-count-mismatch';
 } else if (!integerAtLeast(capturedArgbNonzeroPixelCount, 1)) {
   reason = 'blank-captured-argb';
-} else if (!jsonIntegerAtLeast(proof.frame_us, 1)) {
+} else if (!jsonIntegerBetween(proof.frame_us, 1, 1000000)) {
   reason = 'missing-tauri-timing';
 } else if (typeof proof.expected_profile !== 'string' || proof.expected_profile === '') {
   reason = 'missing-expected-profile';
