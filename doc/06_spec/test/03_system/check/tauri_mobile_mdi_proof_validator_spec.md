@@ -101,9 +101,9 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_mobile_mdi_proof_valid
   control-discovery, and taskbar-visibility rows rather than only a coarse
   event status.
 - Render counts, event counts, viewport dimensions, device pixel ratio,
-  performance timing deltas, and animation-frame counts must be real JSON numbers; stringified or
-  fractional values do not prove routed events, capture, performance, or full
-  animation frames.
+  performance timing deltas, and animation-frame counts must be real JSON
+  numbers; stringified, fractional, unsafe, or exponential integer values do not
+  prove routed events, capture, performance, or full animation frames.
 - Renderability, event-routing, performance, and animation booleans must be
   real JSON booleans; string booleans are rejected and not normalized as
   `false` diagnostics.
@@ -922,6 +922,56 @@ expect(animation.contains("android_mdi_animation_frame_count=2.5")).to_equal(fal
 
 </details>
 
+#### rejects unsafe exponential integer proof values without crashing
+
+-  proof log command
+-  proof log command
+-  proof log command
+   - Expected: code equals `1`
+- Confirm exponential integer fields produce typed fail-closed rows
+   - Expected: count does not contain `Cannot convert`
+   - Expected: viewport does not contain `1e+21`
+   - Expected: animation does not contain `Cannot convert`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 31 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-tauri-mobile-mdi-validator-unsafe-integers"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_log_command(root + "/count.log", "p.count=1e21") +
+    " && node scripts/check/validate-tauri-mobile-mdi-proof.js ios " + root + "/count.json " + root + "/count.log > " + root + "/count.env; " +
+    _proof_log_command(root + "/viewport.log", "p.viewportWidth=1e21") +
+    " && node scripts/check/validate-tauri-mobile-mdi-proof.js ios " + root + "/viewport.json " + root + "/viewport.log > " + root + "/viewport.env; " +
+    _proof_log_command(root + "/animation.log", "p.animationFrameCount=1e21") +
+    " && node scripts/check/validate-tauri-mobile-mdi-proof.js android " + root + "/animation.json " + root + "/animation.log > " + root + "/animation.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val count = file_read(root + "/count.env")
+val viewport = file_read(root + "/viewport.env")
+val animation = file_read(root + "/animation.env")
+step("Confirm exponential integer fields produce typed fail-closed rows")
+expect(count).to_contain("ios_mdi_proof_status=fail")
+expect(count).to_contain("ios_mdi_event_status=fail")
+expect(count).to_contain("ios_mdi_proof_window_count=")
+expect(count.contains("Cannot convert")).to_equal(false)
+expect(viewport).to_contain("ios_mdi_proof_status=fail")
+expect(viewport).to_contain("ios_mdi_capture_status=fail")
+expect(viewport).to_contain("ios_mdi_capture_viewport_width=")
+expect(viewport.contains("1e+21")).to_equal(false)
+expect(animation).to_contain("android_mdi_proof_status=fail")
+expect(animation).to_contain("android_mdi_animation_status=fail")
+expect(animation).to_contain("android_mdi_animation_frame_count=")
+expect(animation.contains("Cannot convert")).to_equal(false)
+```
+
+</details>
+
 #### rejects stringified numeric render event capture performance and animation proof values
 
 -  proof log command
@@ -1189,8 +1239,8 @@ expect(aggregate).to_contain("android-mdi-proof-marker-source-artifact-missing")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 24 |
-| Active scenarios | 24 |
+| Total scenarios | 25 |
+| Active scenarios | 25 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

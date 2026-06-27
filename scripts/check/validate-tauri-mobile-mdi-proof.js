@@ -16,7 +16,7 @@ function emit(key, value) {
 }
 
 function jsonIntegerText(value) {
-  if (typeof value === "number" && Number.isInteger(value)) return String(value);
+  if (typeof value === "number" && Number.isSafeInteger(value)) return String(value);
   return null;
 }
 
