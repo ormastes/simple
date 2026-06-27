@@ -40,6 +40,11 @@ which increases crash/session-loss risk and makes broad reruns expensive.
 only `evidence.env` and `report.md` from a static cached nested gate into the
 scenario target directory. Fresh cache population remains unchanged.
 
+The checker also supports `GUI_RENDERDOC_AGGREGATE_PRINT_ENV=0` to suppress the
+large raw evidence stdout stream. The aggregate SPipe spec uses this mode
+because every scenario already reads `evidence.env` from disk and does not need
+to retain the raw stdout string in the test runner.
+
 ## Verification
 
 - `sh -n scripts/check/check-gui-renderdoc-feature-coverage-status.shs` passed.
@@ -48,6 +53,8 @@ scenario target directory. Fresh cache population remains unchanged.
 - The resulting aggregate directory was 340 KB and contained only top-level
   nested gate `evidence.env` / `report.md` files, instead of recursive cached
   gate trees near 15 MB per synthetic scenario.
+- A quiet-mode checker invocation completed without printing the raw evidence
+  env to stdout.
 - The 33-scenario interpreted aggregate spec was intentionally not rerun in this
   session to avoid repeating the crash-prone broad path.
 
