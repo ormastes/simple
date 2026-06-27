@@ -85,6 +85,36 @@ if (!proofPath || !screenshotPath) {
   process.exit(1);
 }
 
+function pathInfo(filePath) {
+  let lstat = null;
+  let stat = null;
+  try {
+    lstat = fs.lstatSync(filePath);
+  } catch (_err) {
+    lstat = null;
+  }
+  try {
+    stat = fs.statSync(filePath);
+  } catch (_err) {
+    stat = null;
+  }
+  return {
+    lstat,
+    stat,
+    isSymlink: lstat !== null && lstat.isSymbolicLink(),
+    isRegularFile: lstat !== null && lstat.isFile(),
+  };
+}
+
+const proofInfo = pathInfo(proofPath);
+if (proofInfo.isSymlink) {
+  emit('electron_mdi_json_proof', 'fail');
+  emit('electron_mdi_json_proof_reason', 'proof-json-symlink');
+  emit('electron_mdi_proof_symlink_status', 'fail');
+  emit('reason', 'proof-json-symlink');
+  process.exit(1);
+}
+
 let proof;
 try {
   proof = JSON.parse(fs.readFileSync(proofPath, 'utf8'));
@@ -125,15 +155,11 @@ const eventChecks = {
   taskbarLabelsVisible: proof.taskbarLabelsVisible === true,
   htmlRenderable: proof.htmlRenderable === true,
 };
-let screenshotStat = null;
-try {
-  screenshotStat = fs.statSync(screenshotPath);
-} catch (_err) {
-  screenshotStat = null;
-}
+const screenshotInfo = pathInfo(screenshotPath);
+const screenshotStat = screenshotInfo.stat;
 let screenshotMagicOk = false;
 let screenshotStructureOk = false;
-if (screenshotStat !== null && screenshotStat.isFile() && screenshotStat.size >= 8) {
+if (!screenshotInfo.isSymlink && screenshotStat !== null && screenshotStat.isFile() && screenshotStat.size >= 8) {
   try {
     const bytes = fs.readFileSync(screenshotPath);
     screenshotMagicOk = bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
@@ -156,6 +182,7 @@ const captureChecks = {
   screenshotPath: proof.screenshotPath === screenshotPath,
   screenshotFileExists: screenshotStat !== null && screenshotStat.isFile(),
   screenshotFileNonempty: screenshotStat !== null && screenshotStat.isFile() && screenshotStat.size > 0,
+  screenshotNotSymlink: !screenshotInfo.isSymlink,
   screenshotPngMagic: screenshotMagicOk,
   screenshotPngStructure: screenshotStructureOk,
 };
@@ -203,6 +230,7 @@ if (eventFailed.length) {
 
 emit('electron_mdi_json_proof', reason === 'pass' ? 'pass' : 'fail');
 emit('electron_mdi_json_proof_reason', reason);
+emit('electron_mdi_proof_symlink_status', proofInfo.isSymlink ? 'fail' : 'pass');
 emit('electron_mdi_event_status', eventFailed.length ? 'fail' : 'pass');
 emit('electron_mdi_capture_status', captureFailed.length ? 'fail' : 'pass');
 emit('electron_mdi_performance_status', performanceFailed.length ? 'fail' : 'pass');
@@ -244,6 +272,7 @@ emit('electron_mdi_animation_frame_available', jsonBoolTextOrBlank(proof.animati
 emit('electron_mdi_animation_frame_count', jsonIntegerTextOrBlank(proof.animationFrameCount));
 emit('electron_mdi_css_animation_probe', jsonBoolTextOrBlank(proof.cssAnimationProbe));
 emit('electron_mdi_screenshot_path_matches', proof.screenshotPath === screenshotPath ? 'true' : 'false');
+emit('electron_mdi_screenshot_symlink_status', screenshotInfo.isSymlink ? 'fail' : 'pass');
 emit('electron_mdi_screenshot_file_status', screenshotStat !== null && screenshotStat.isFile() ? 'pass' : 'fail');
 emit('electron_mdi_screenshot_size_bytes', screenshotStat !== null && screenshotStat.isFile() ? String(screenshotStat.size) : '');
 emit('electron_mdi_screenshot_png_magic_status', screenshotMagicOk ? 'pass' : 'fail');
