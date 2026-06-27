@@ -939,10 +939,11 @@ For the HTML-backed GUI modernization claim, the top-level audit consumes
 input, pointer, and click evidence. The aggregate also emits explicit
 `*_file_status` rows for the HTML, ARGB, PNG, audit, interaction JSON,
 interaction PNG, and interaction log artifacts so missing host output is visible
-without inferring it from blank paths. `environment-unavailable` remains a
-useful host diagnosis but is still reported as `modern Web WM Electron visual
-and interaction evidence` in `blocked_completion_gates` until a real Electron
-host produces the pass row.
+without inferring it from blank paths. The wrapper keeps the legacy artifact
+keys and also emits canonical `*_path` aliases; aggregate checks consume the
+canonical aliases. `environment-unavailable` remains a useful host diagnosis but
+is still reported as `modern Web WM Electron visual and interaction evidence`
+in `blocked_completion_gates` until a real Electron host produces the pass row.
 
 For the all-GUI-item claim, use the focused wrapper
 `scripts/check/check-gui-widget-renderdoc-goal-status.shs`. It composes the
