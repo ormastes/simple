@@ -89,6 +89,7 @@ function pathInfo(filePath) {
     lstat,
     stat,
     isSymlink: lstat !== null && lstat.isSymbolicLink(),
+    hasMultipleLinks: lstat !== null && lstat.isFile() && lstat.nlink > 1,
   };
 }
 
@@ -120,7 +121,7 @@ function artifactStat(value, proofPath) {
     try {
       const lstat = fs.lstatSync(candidate);
       if (lstat.isSymbolicLink()) {
-        return { stat: null, path: resolvedCandidate, symlink: true };
+        return { stat: null, path: resolvedCandidate, symlink: true, hardlink: false };
       }
       const realCandidate = fs.realpathSync(candidate);
       if (
@@ -131,7 +132,7 @@ function artifactStat(value, proofPath) {
       }
       const stat = fs.statSync(realCandidate);
       if (stat.isFile()) {
-        return { stat, path: realCandidate, symlink: false };
+        return { stat, path: realCandidate, symlink: false, hardlink: stat.nlink > 1 };
       }
     } catch (_err) {
       // Try the next candidate.
@@ -141,7 +142,7 @@ function artifactStat(value, proofPath) {
 }
 
 function readJsonArtifact(artifact, fallback) {
-  if (!artifact || artifact.symlink) return { ok: false, value: null };
+  if (!artifact || artifact.symlink || artifact.hardlink) return { ok: false, value: null };
   try {
     return { ok: true, value: JSON.parse(fs.readFileSync(artifact.path, 'utf8')) };
   } catch (_err) {
@@ -152,12 +153,18 @@ function readJsonArtifact(artifact, fallback) {
 function artifactFileStatus(artifact) {
   if (artifact === null) return 'missing';
   if (artifact.symlink) return 'symlink';
+  if (artifact.hardlink) return 'hardlink';
   return artifact.stat.size <= 0 ? 'empty' : 'pass';
 }
 
 function artifactSymlinkStatus(artifact) {
   if (artifact === null) return 'missing';
   return artifact.symlink ? 'fail' : 'pass';
+}
+
+function artifactHardlinkStatus(artifact) {
+  if (artifact === null) return 'missing';
+  return artifact.hardlink ? 'fail' : 'pass';
 }
 
 function pixelCountMatches(pixels, width, height) {
@@ -260,6 +267,15 @@ if (proofInfo.isSymlink) {
   emit('chrome_simple_web_layout_validation_status', 'fail');
   emit('chrome_simple_web_layout_validation_reason', 'proof-json-symlink');
   emit('chrome_simple_web_layout_proof_symlink_status', 'fail');
+  emit('chrome_simple_web_layout_proof_hardlink_status', 'unknown');
+  process.exit(1);
+}
+
+if (proofInfo.hasMultipleLinks) {
+  emit('chrome_simple_web_layout_validation_status', 'fail');
+  emit('chrome_simple_web_layout_validation_reason', 'proof-json-hardlink');
+  emit('chrome_simple_web_layout_proof_symlink_status', 'pass');
+  emit('chrome_simple_web_layout_proof_hardlink_status', 'fail');
   process.exit(1);
 }
 
@@ -339,6 +355,8 @@ if (proof.blur_or_tolerance_used !== false) {
   reason = 'missing-captured-argb';
 } else if (capturedArgbStat !== null && capturedArgbStat.symlink) {
   reason = 'captured-argb-symlink';
+} else if (capturedArgbStat !== null && capturedArgbStat.hardlink) {
+  reason = 'captured-argb-hardlink';
 } else if (capturedArgbStat === null) {
   reason = 'missing-captured-argb-file';
 } else if (capturedArgbStat.stat.size <= 0) {
@@ -365,6 +383,8 @@ if (proof.blur_or_tolerance_used !== false) {
   reason = 'missing-chrome-geometry';
 } else if (geometryStat !== null && geometryStat.symlink) {
   reason = 'chrome-geometry-symlink';
+} else if (geometryStat !== null && geometryStat.hardlink) {
+  reason = 'chrome-geometry-hardlink';
 } else if (geometryStat === null) {
   reason = 'missing-chrome-geometry-file';
 } else if (geometryStat.stat.size <= 0) {
@@ -384,6 +404,7 @@ if (proof.blur_or_tolerance_used !== false) {
 emit('chrome_simple_web_layout_validation_status', reason === 'pass' ? 'pass' : 'fail');
 emit('chrome_simple_web_layout_validation_reason', reason);
 emit('chrome_simple_web_layout_proof_symlink_status', proofInfo.isSymlink ? 'fail' : 'pass');
+emit('chrome_simple_web_layout_proof_hardlink_status', proofInfo.hasMultipleLinks ? 'fail' : 'pass');
 emit('chrome_simple_web_layout_proof_source', proof.proof_source);
 emit('chrome_simple_web_layout_proof_source_file_status', proofSourceFileStatus);
 emit('chrome_simple_web_layout_proof_source_size_bytes', proofSourceSizeBytes);
@@ -404,7 +425,8 @@ emit('chrome_simple_web_layout_captured_argb_path', proof.captured_argb_path);
 emit('chrome_simple_web_layout_captured_argb_written', jsonBoolTextOrBlank(proof.captured_argb_written));
 emit('chrome_simple_web_layout_captured_argb_file_status', artifactFileStatus(capturedArgbStat));
 emit('chrome_simple_web_layout_captured_argb_symlink_status', artifactSymlinkStatus(capturedArgbStat));
-emit('chrome_simple_web_layout_captured_argb_size_bytes', capturedArgbStat === null || capturedArgbStat.symlink ? '' : String(capturedArgbStat.stat.size));
+emit('chrome_simple_web_layout_captured_argb_hardlink_status', artifactHardlinkStatus(capturedArgbStat));
+emit('chrome_simple_web_layout_captured_argb_size_bytes', capturedArgbStat === null || capturedArgbStat.symlink || capturedArgbStat.hardlink ? '' : String(capturedArgbStat.stat.size));
 emit('chrome_simple_web_layout_captured_argb_format', capturedArgb.format);
 emit('chrome_simple_web_layout_captured_argb_producer', capturedArgb.producer);
 emit('chrome_simple_web_layout_captured_argb_width', jsonIntegerTextOrBlank(capturedArgb.width));
@@ -417,7 +439,8 @@ emit('chrome_simple_web_layout_geometry_path', proof.geometry_path);
 emit('chrome_simple_web_layout_geometry_written', jsonBoolTextOrBlank(proof.geometry_written));
 emit('chrome_simple_web_layout_geometry_file_status', artifactFileStatus(geometryStat));
 emit('chrome_simple_web_layout_geometry_symlink_status', artifactSymlinkStatus(geometryStat));
-emit('chrome_simple_web_layout_geometry_size_bytes', geometryStat === null || geometryStat.symlink ? '' : String(geometryStat.stat.size));
+emit('chrome_simple_web_layout_geometry_hardlink_status', artifactHardlinkStatus(geometryStat));
+emit('chrome_simple_web_layout_geometry_size_bytes', geometryStat === null || geometryStat.symlink || geometryStat.hardlink ? '' : String(geometryStat.stat.size));
 emit('chrome_simple_web_layout_geometry_producer', geometry.producer);
 emit('chrome_simple_web_layout_geometry_viewport_width', jsonIntegerTextOrBlank(geometryViewport.width));
 emit('chrome_simple_web_layout_geometry_viewport_height', jsonIntegerTextOrBlank(geometryViewport.height));

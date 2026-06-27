@@ -27,7 +27,7 @@ chrome_simple_web_layout_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 23 | 23 | 0 | 0 |
+| 24 | 24 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -117,8 +117,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/chrome_simple_web_layout_pro
 - The top-level proof must carry Chrome DevTools capture mode, Chrome or
   Chromium runtime user-agent, product, and protocol version evidence, not only
   a binary path.
-- The proof JSON, captured ARGB artifact, and geometry artifact must be regular
-  files, not symlinks to mutable or substituted evidence.
+- The proof JSON, captured ARGB artifact, and geometry artifact must be single
+  regular files, not symlinks or hardlinks to mutable or substituted evidence.
 - The live Chrome wrapper emits validation and proof-source diagnostic rows
   even on early missing-artifact exits before the validator can run.
 - The live Chrome wrapper consumes the validator and still maps real pixel
@@ -154,6 +154,7 @@ step("Inspect normalized Chrome layout proof rows")
 expect(evidence).to_contain("chrome_simple_web_layout_validation_status=pass")
 expect(evidence).to_contain("chrome_simple_web_layout_validation_reason=pass")
 expect(evidence).to_contain("chrome_simple_web_layout_proof_symlink_status=pass")
+expect(evidence).to_contain("chrome_simple_web_layout_proof_hardlink_status=pass")
 expect(evidence).to_contain("chrome_simple_web_layout_proof_source=tools/chrome-live-bitmap/capture_html_argb.js")
 expect(evidence).to_contain("chrome_simple_web_layout_proof_source_file_status=pass")
 expect(evidence).to_contain("chrome_simple_web_layout_proof_source_size_bytes=")
@@ -174,6 +175,7 @@ expect(evidence).to_contain("chrome_simple_web_layout_captured_argb_path=capture
 expect(evidence).to_contain("chrome_simple_web_layout_captured_argb_written=true")
 expect(evidence).to_contain("chrome_simple_web_layout_captured_argb_file_status=pass")
 expect(evidence).to_contain("chrome_simple_web_layout_captured_argb_symlink_status=pass")
+expect(evidence).to_contain("chrome_simple_web_layout_captured_argb_hardlink_status=pass")
 expect(evidence).to_contain("chrome_simple_web_layout_captured_argb_size_bytes=")
 expect(evidence).to_contain("chrome_simple_web_layout_captured_argb_format=argb-u32")
 expect(evidence).to_contain("chrome_simple_web_layout_captured_argb_producer=chrome-headless-screenshot")
@@ -187,6 +189,7 @@ expect(evidence).to_contain("chrome_simple_web_layout_geometry_path=geometry.jso
 expect(evidence).to_contain("chrome_simple_web_layout_geometry_written=true")
 expect(evidence).to_contain("chrome_simple_web_layout_geometry_file_status=pass")
 expect(evidence).to_contain("chrome_simple_web_layout_geometry_symlink_status=pass")
+expect(evidence).to_contain("chrome_simple_web_layout_geometry_hardlink_status=pass")
 expect(evidence).to_contain("chrome_simple_web_layout_geometry_producer=chrome-headless-geometry")
 expect(evidence).to_contain("chrome_simple_web_layout_geometry_viewport_width=96")
 expect(evidence).to_contain("chrome_simple_web_layout_geometry_viewport_height=64")
@@ -644,7 +647,7 @@ val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
     " && node scripts/check/validate-chrome-simple-web-layout-proof.js " + root + "/proof.json > " + root + "/proof.env; " +
     _proof_command(root + "/argb.json", "fs.renameSync(path.join(dir,\"captured.json\"),path.join(dir,\"captured-real.json\"));fs.symlinkSync(\"captured-real.json\",path.join(dir,\"captured.json\"))") +
     " && node scripts/check/validate-chrome-simple-web-layout-proof.js " + root + "/argb.json > " + root + "/argb.env; " +
-    _proof_command(root + "/geometry-proof.json", "fs.renameSync(path.join(dir,\"geometry.json\"),path.join(dir,\"geometry-real.json\"));fs.symlinkSync(\"geometry-real.json\",path.join(dir,\"geometry.json\"))") +
+    _proof_command(root + "/geometry-proof.json", "fs.unlinkSync(path.join(dir,\"captured.json\"));fs.writeFileSync(path.join(dir,\"captured.json\"),JSON.stringify(argb));fs.renameSync(path.join(dir,\"geometry.json\"),path.join(dir,\"geometry-real.json\"));fs.symlinkSync(\"geometry-real.json\",path.join(dir,\"geometry.json\"))") +
     " && node scripts/check/validate-chrome-simple-web-layout-proof.js " + root + "/geometry-proof.json > " + root + "/geometry.env"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(1)
@@ -656,16 +659,73 @@ step("Confirm Chrome layout evidence cannot be substituted through symlinks")
 expect(proof).to_contain("chrome_simple_web_layout_validation_status=fail")
 expect(proof).to_contain("chrome_simple_web_layout_validation_reason=proof-json-symlink")
 expect(proof).to_contain("chrome_simple_web_layout_proof_symlink_status=fail")
+expect(proof).to_contain("chrome_simple_web_layout_proof_hardlink_status=unknown")
 expect(argb).to_contain("chrome_simple_web_layout_validation_status=fail")
 expect(argb).to_contain("chrome_simple_web_layout_validation_reason=captured-argb-symlink")
 expect(argb).to_contain("chrome_simple_web_layout_proof_symlink_status=pass")
+expect(argb).to_contain("chrome_simple_web_layout_proof_hardlink_status=pass")
 expect(argb).to_contain("chrome_simple_web_layout_captured_argb_file_status=symlink")
 expect(argb).to_contain("chrome_simple_web_layout_captured_argb_symlink_status=fail")
+expect(argb).to_contain("chrome_simple_web_layout_captured_argb_hardlink_status=pass")
 expect(geometry).to_contain("chrome_simple_web_layout_validation_status=fail")
 expect(geometry).to_contain("chrome_simple_web_layout_validation_reason=chrome-geometry-symlink")
 expect(geometry).to_contain("chrome_simple_web_layout_proof_symlink_status=pass")
+expect(geometry).to_contain("chrome_simple_web_layout_proof_hardlink_status=pass")
 expect(geometry).to_contain("chrome_simple_web_layout_geometry_file_status=symlink")
 expect(geometry).to_contain("chrome_simple_web_layout_geometry_symlink_status=fail")
+expect(geometry).to_contain("chrome_simple_web_layout_geometry_hardlink_status=pass")
+```
+
+</details>
+
+#### rejects hardlinked Chrome proof and artifact files
+
+-  proof command
+-  proof command
+-  proof command
+   - Expected: code equals `1`
+- Confirm Chrome layout evidence cannot be substituted through hardlinks
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 40 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-chrome-layout-validator-hardlinks"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_command(root + "/proof.json", "") +
+    " && ln " + root + "/proof.json " + root + "/linked-proof.json && " +
+    "node scripts/check/validate-chrome-simple-web-layout-proof.js " + root + "/linked-proof.json > " + root + "/proof.env; " +
+    _proof_command(root + "/argb.json", "fs.renameSync(path.join(dir,\"captured.json\"),path.join(dir,\"captured-real.json\"));fs.linkSync(path.join(dir,\"captured-real.json\"),path.join(dir,\"captured.json\"))") +
+    " && node scripts/check/validate-chrome-simple-web-layout-proof.js " + root + "/argb.json > " + root + "/argb.env; " +
+    _proof_command(root + "/geometry-proof.json", "fs.unlinkSync(path.join(dir,\"captured.json\"));fs.writeFileSync(path.join(dir,\"captured.json\"),JSON.stringify(argb));fs.renameSync(path.join(dir,\"geometry.json\"),path.join(dir,\"geometry-real.json\"));fs.linkSync(path.join(dir,\"geometry-real.json\"),path.join(dir,\"geometry.json\"))") +
+    " && node scripts/check/validate-chrome-simple-web-layout-proof.js " + root + "/geometry-proof.json > " + root + "/geometry.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val proof = file_read(root + "/proof.env")
+val argb = file_read(root + "/argb.env")
+val geometry = file_read(root + "/geometry.env")
+step("Confirm Chrome layout evidence cannot be substituted through hardlinks")
+expect(proof).to_contain("chrome_simple_web_layout_validation_status=fail")
+expect(proof).to_contain("chrome_simple_web_layout_validation_reason=proof-json-hardlink")
+expect(proof).to_contain("chrome_simple_web_layout_proof_symlink_status=pass")
+expect(proof).to_contain("chrome_simple_web_layout_proof_hardlink_status=fail")
+expect(argb).to_contain("chrome_simple_web_layout_validation_status=fail")
+expect(argb).to_contain("chrome_simple_web_layout_validation_reason=captured-argb-hardlink")
+expect(argb).to_contain("chrome_simple_web_layout_proof_hardlink_status=pass")
+expect(argb).to_contain("chrome_simple_web_layout_captured_argb_file_status=hardlink")
+expect(argb).to_contain("chrome_simple_web_layout_captured_argb_symlink_status=pass")
+expect(argb).to_contain("chrome_simple_web_layout_captured_argb_hardlink_status=fail")
+expect(geometry).to_contain("chrome_simple_web_layout_validation_status=fail")
+expect(geometry).to_contain("chrome_simple_web_layout_validation_reason=chrome-geometry-hardlink")
+expect(geometry).to_contain("chrome_simple_web_layout_proof_hardlink_status=pass")
+expect(geometry).to_contain("chrome_simple_web_layout_geometry_file_status=hardlink")
+expect(geometry).to_contain("chrome_simple_web_layout_geometry_symlink_status=pass")
+expect(geometry).to_contain("chrome_simple_web_layout_geometry_hardlink_status=fail")
 ```
 
 </details>
@@ -1060,7 +1120,9 @@ expect(script).to_contain("chrome_simple_web_layout_chrome_user_agent")
 expect(script).to_contain("chrome_simple_web_layout_chrome_product")
 expect(script).to_contain("chrome_simple_web_layout_chrome_protocol_version")
 expect(script).to_contain("chrome_simple_web_layout_chrome_bin")
+expect(script).to_contain("chrome_simple_web_layout_proof_hardlink_status")
 expect(validator).to_contain("chrome_simple_web_layout_proof_symlink_status")
+expect(validator).to_contain("chrome_simple_web_layout_proof_hardlink_status")
 expect(script).to_contain("Chrome binary: $chrome_bin")
 expect(script).to_contain("capture-viewport-mismatch")
 expect(script).to_contain("chrome_simple_web_layout_capture_width")
@@ -1069,8 +1131,12 @@ expect(script).to_contain("chrome_simple_web_layout_captured_argb_nonzero_pixel_
 expect(script).to_contain("chrome_simple_web_layout_captured_argb_checksum")
 expect(script).to_contain("chrome_simple_web_layout_captured_argb_weighted_checksum")
 expect(script).to_contain("chrome_simple_web_layout_geometry_file_status")
+expect(script).to_contain("chrome_simple_web_layout_captured_argb_hardlink_status")
+expect(script).to_contain("chrome_simple_web_layout_geometry_hardlink_status")
 expect(validator).to_contain("chrome_simple_web_layout_captured_argb_symlink_status")
 expect(validator).to_contain("chrome_simple_web_layout_geometry_symlink_status")
+expect(validator).to_contain("chrome_simple_web_layout_captured_argb_hardlink_status")
+expect(validator).to_contain("chrome_simple_web_layout_geometry_hardlink_status")
 expect(script).to_contain("chrome_simple_web_layout_geometry_size_bytes")
 expect(script).to_contain("chrome_simple_web_layout_geometry_producer")
 expect(script).to_contain("chrome_simple_web_layout_geometry_viewport_width")
@@ -1135,12 +1201,18 @@ expect(evidence).to_contain("chrome_simple_web_layout_chrome_user_agent=")
 expect(evidence).to_contain("chrome_simple_web_layout_chrome_product=")
 expect(evidence).to_contain("chrome_simple_web_layout_chrome_protocol_version=")
 expect(evidence).to_contain("chrome_simple_web_layout_chrome_bin=")
+expect(evidence).to_contain("chrome_simple_web_layout_proof_symlink_status=")
+expect(evidence).to_contain("chrome_simple_web_layout_proof_hardlink_status=")
 expect(evidence).to_contain("chrome_simple_web_layout_chrome_frame_us=")
 expect(evidence).to_contain("chrome_simple_web_layout_capture_width=")
 expect(evidence).to_contain("chrome_simple_web_layout_capture_height=")
 expect(evidence).to_contain("chrome_simple_web_layout_captured_argb_checksum=")
 expect(evidence).to_contain("chrome_simple_web_layout_captured_argb_weighted_checksum=")
 expect(evidence).to_contain("chrome_simple_web_layout_geometry_file_status=fail")
+expect(evidence).to_contain("chrome_simple_web_layout_geometry_symlink_status=")
+expect(evidence).to_contain("chrome_simple_web_layout_geometry_hardlink_status=")
+expect(evidence).to_contain("chrome_simple_web_layout_captured_argb_symlink_status=")
+expect(evidence).to_contain("chrome_simple_web_layout_captured_argb_hardlink_status=")
 expect(evidence).to_contain("chrome_simple_web_layout_geometry_size_bytes=")
 expect(evidence).to_contain("chrome_simple_web_layout_geometry_producer=")
 expect(evidence).to_contain("chrome_simple_web_layout_geometry_viewport_width=")
@@ -1154,8 +1226,8 @@ expect(evidence).to_contain("chrome_simple_web_layout_geometry_item_count=0")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 23 |
-| Active scenarios | 23 |
+| Total scenarios | 24 |
+| Active scenarios | 24 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
