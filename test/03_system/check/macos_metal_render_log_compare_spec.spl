@@ -83,6 +83,8 @@ Browser evidence must prove Metal backing and exact pairwise ARGB comparison:
 - Simple, Chrome, and Electron ARGB artifact JSON files must exist, parse as
   `argb-u32`, match the reported dimensions, nonblank counts, and checksums,
   and contain the expected pixel count.
+- ARGB artifact dimensions must be safe JSON integers; unsafe exponential
+  viewport values fail closed and are not emitted as normalized dimensions.
 - ARGB artifact fallbacks must resolve beside the browser env file so stale
   working-directory artifacts cannot satisfy the Metal proof.
 - ARGB artifact paths beside the browser env file must be regular files, not
@@ -153,22 +155,24 @@ macos_metal_render_log_compare_pairwise_status=pass
    blank or uses mismatched viewport geometry.
 12. Reject pairwise rows whose ARGB checksums are missing or mismatched.
 13. Reject pairwise rows whose ARGB artifact files are missing or malformed.
-14. Reject ARGB artifact fallbacks that borrow stale working-directory files
+14. Reject ARGB artifact unsafe exponential dimensions without leaking them as
+    normalized viewport rows.
+15. Reject ARGB artifact fallbacks that borrow stale working-directory files
     instead of evidence beside the browser env file.
-15. Reject ARGB artifact paths that are symlinks to external artifacts.
-16. Reject missing Xcode GPU capture when strict capture mode is enabled.
-17. Reject Xcode GPU capture rows whose artifact bytes do not match the native
+16. Reject ARGB artifact paths that are symlinks to external artifacts.
+17. Reject missing Xcode GPU capture when strict capture mode is enabled.
+18. Reject Xcode GPU capture rows whose artifact bytes do not match the native
    marker, even if the env row claims `XCODE-GPUTRACE`.
-18. Reject Xcode GPU capture rows that omit the capture artifact or native
+19. Reject Xcode GPU capture rows that omit the capture artifact or native
     artifact marker.
-19. Preserve typed unavailable evidence when required Metal input env files are
+20. Preserve typed unavailable evidence when required Metal input env files are
     missing.
-20. Reject strict Metal capture rows that use browser metadata as the capture
+21. Reject strict Metal capture rows that use browser metadata as the capture
     tool even when the `.gputrace` artifact bytes are valid.
-21. Reject strict Metal capture rows whose relative `.gputrace` artifact would
+22. Reject strict Metal capture rows whose relative `.gputrace` artifact would
     otherwise be satisfied by a stale working-directory file, including nested
     relative artifact paths.
-22. Reject strict Metal capture rows whose `.gputrace` artifact is a symlink to
+23. Reject strict Metal capture rows whose `.gputrace` artifact is a symlink to
     another capture artifact.
 """
 
@@ -365,6 +369,27 @@ describe "macOS Metal render-log compare gate":
         expect(evidence).to_contain("macos_metal_render_log_compare_status=fail")
         expect(evidence).to_contain("macos_metal_render_log_compare_simple_argb_artifact_reason=simple-argb-artifact-missing")
         expect(evidence).to_contain("macos_metal_render_log_compare_simple_argb_artifact_file_status=missing")
+        expect(evidence).to_contain("macos_metal_render_log_compare_argb_source_gate_status=fail")
+
+    it "rejects unsafe exponential Metal ARGB artifact dimensions without leaking them":
+        val root = "build/test-macos-metal-render-log-unsafe-argb-dimensions"
+        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+            _argb_artifacts_command(root) + " && " +
+            "printf '{\"width\":1e21,\"height\":3,\"format\":\"argb-u32\",\"producer\":\"macos-metal-fixture\",\"pixels\":[1,1,1,1,1,1,1,1,1,1,1,1]}\\n' > " + root + "/simple.argb.json && " +
+            "printf 'metal_generated_2d_readback_status=pass\\nmetal_generated_2d_readback_module_verified=true\\nmetal_generated_2d_readback_submit_attempted=true\\nmetal_generated_2d_readback_readback_available=true\\nmetal_generated_2d_readback_expected_checksum=7\\nmetal_generated_2d_readback_actual_checksum=7\\n' > " + root + "/generated.env && " +
+            "printf 'metal_engine2d_framebuffer_readback_status=pass\\nmetal_engine2d_framebuffer_gpu_readback_available=true\\nmetal_engine2d_framebuffer_blur_or_tolerance_used=false\\n' > " + root + "/framebuffer.env && " +
+            "printf 'macos_metal_electron_browser_backing_status=pass\\nmacos_metal_chrome_browser_backing_status=pass\\nmacos_metal_browser_backing_status=pass\\nmacos_metal_electron_browser_backing_reason=electron-metal-backed\\nmacos_metal_electron_browser_backing_gpu_compositing=enabled\\nmacos_metal_electron_browser_backing_display_type=Metal\\nmacos_metal_electron_browser_backing_gl_implementation_parts=metal\\nmacos_metal_electron_browser_backing_skia_backend_type=Metal\\nmacos_metal_electron_browser_backing_gl_renderer=Apple GPU\\nmacos_metal_electron_browser_backing_source=test/fixtures/render_log/macos_metal_browser_backing_source.env\\nmacos_metal_chrome_browser_backing_reason=chrome-metal-backed\\nmacos_metal_chrome_browser_backing_gpu_compositing=enabled\\nmacos_metal_chrome_browser_backing_display_type=Metal\\nmacos_metal_chrome_browser_backing_gl_implementation_parts=metal\\nmacos_metal_chrome_browser_backing_skia_backend_type=Metal\\nmacos_metal_chrome_browser_backing_gl_renderer=Apple GPU\\nmacos_metal_chrome_browser_backing_source=test/fixtures/render_log/macos_metal_browser_backing_source.env\\nmacos_metal_pixel_comparison_status=pass\\nmacos_metal_pixel_comparison_mode=pairwise-argb-diff\\nmacos_metal_electron_chrome_pairwise_diff_status=pass\\nmacos_metal_electron_simple_pairwise_diff_status=pass\\nmacos_metal_chrome_simple_pairwise_diff_status=pass\\nmacos_metal_simple_argb_width=4\\nmacos_metal_simple_argb_height=3\\nmacos_metal_simple_argb_nonblank_pixel_count=12\\nmacos_metal_simple_argb_checksum=12\\nmacos_metal_chrome_argb_width=4\\nmacos_metal_chrome_argb_height=3\\nmacos_metal_chrome_argb_nonblank_pixel_count=12\\nmacos_metal_chrome_argb_checksum=12\\nmacos_metal_electron_argb_width=4\\nmacos_metal_electron_argb_height=3\\nmacos_metal_electron_argb_nonblank_pixel_count=12\\nmacos_metal_electron_argb_checksum=12\\n' > " + root + "/browser.env && " +
+            "BUILD_DIR=" + root + "/out METAL_GENERATED_2D_READBACK_ENV=" + root + "/generated.env METAL_ENGINE2D_FRAMEBUFFER_READBACK_ENV=" + root + "/framebuffer.env MACOS_METAL_BROWSER_ENV=" + root + "/browser.env sh scripts/check/check-macos-metal-render-log-compare.shs || true"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(0)
+
+        val evidence = file_read(root + "/out/evidence.env")
+        step("Confirm unsafe ARGB dimensions are rejected as structured Metal proof")
+        expect(evidence).to_contain("macos_metal_render_log_compare_status=fail")
+        expect(evidence).to_contain("simple-argb-artifact-missing-viewport")
+        expect(evidence).to_contain("macos_metal_render_log_compare_simple_argb_artifact_reason=simple-argb-artifact-missing-viewport")
+        expect(evidence).to_contain("macos_metal_render_log_compare_simple_argb_artifact_width=")
+        expect(evidence.contains("macos_metal_render_log_compare_simple_argb_artifact_width=1e+21")).to_equal(false)
         expect(evidence).to_contain("macos_metal_render_log_compare_argb_source_gate_status=fail")
 
     it "rejects symlinked Metal ARGB artifacts that escape the browser evidence directory":
