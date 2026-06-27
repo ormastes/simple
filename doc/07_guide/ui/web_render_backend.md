@@ -169,6 +169,10 @@ The Node/Web bitmap parity wrapper follows the same fail-closed contract under
 from the repository by default, records missing binaries as `simple-bin-missing`,
 and records any `src/compiler_rust/**` override as `simple-bin-forbidden`
 without executing the seed.
+The Simple Web Engine2D JavaScript bitmap wrapper uses the matching
+`simple_web_engine2d_js_simple_bin*` fields. A Web/Engine2D bitmap parity row is
+not production evidence unless `simple_web_engine2d_js_simple_bin_status=pass`
+and the source is a self-hosted or explicit non-seed Simple binary.
 
 The renderer parity wrapper also runs the Electron/Chromium event-routing probe
 before a top-level pass. Saved evidence must include
