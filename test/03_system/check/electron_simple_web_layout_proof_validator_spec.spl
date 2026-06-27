@@ -57,6 +57,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_simple_web_layout_p
 - Complete proofs must identify the Electron offscreen capture backend,
   compositor mode, Electron/Chromium runtime identity, Chromium GPU
   feature-status diagnostics, and at least two measured capture iterations.
+- The proof JSON, captured ARGB artifact, and geometry artifact must be regular
+  files, not symlinks to mutable or substituted evidence.
 - The live Electron layout wrapper consumes the validator and still maps real
   pixel mismatches to `divergent` evidence.
 """
@@ -83,6 +85,7 @@ describe "Electron Simple Web layout proof validator":
         step("Inspect normalized Electron layout proof rows")
         expect(evidence).to_contain("electron_simple_web_layout_validation_status=pass")
         expect(evidence).to_contain("electron_simple_web_layout_validation_reason=pass")
+        expect(evidence).to_contain("electron_simple_web_layout_proof_symlink_status=pass")
         expect(evidence).to_contain("electron_simple_web_layout_renderer=electron-live-capture-page")
         expect(evidence).to_contain("electron_simple_web_layout_proof_source=tools/electron-live-bitmap/exact_fixture.js")
         expect(evidence).to_contain("electron_simple_web_layout_capture_backend=electron-offscreen-capture-page")
@@ -108,6 +111,7 @@ describe "Electron Simple Web layout proof validator":
         expect(evidence).to_contain("electron_simple_web_layout_geometry_path=geometry.json")
         expect(evidence).to_contain("electron_simple_web_layout_geometry_written=true")
         expect(evidence).to_contain("electron_simple_web_layout_geometry_file_status=pass")
+        expect(evidence).to_contain("electron_simple_web_layout_geometry_symlink_status=pass")
         expect(evidence).to_contain("electron_simple_web_layout_geometry_producer=electron-offscreen-geometry")
         expect(evidence).to_contain("electron_simple_web_layout_geometry_viewport_width=96")
         expect(evidence).to_contain("electron_simple_web_layout_geometry_viewport_height=64")
@@ -116,6 +120,7 @@ describe "Electron Simple Web layout proof validator":
         expect(evidence).to_contain("electron_simple_web_layout_captured_argb_path=captured.json")
         expect(evidence).to_contain("electron_simple_web_layout_captured_argb_written=true")
         expect(evidence).to_contain("electron_simple_web_layout_captured_argb_file_status=pass")
+        expect(evidence).to_contain("electron_simple_web_layout_captured_argb_symlink_status=pass")
         expect(evidence).to_contain("electron_simple_web_layout_captured_argb_format=argb-u32")
         expect(evidence).to_contain("electron_simple_web_layout_captured_argb_producer=electron-live-capture-page")
         expect(evidence).to_contain("electron_simple_web_layout_captured_argb_width=96")
@@ -301,6 +306,37 @@ describe "Electron Simple Web layout proof validator":
         expect(evidence).to_contain("electron_simple_web_layout_captured_argb_path=proof.json")
         expect(evidence).to_contain("electron_simple_web_layout_captured_argb_file_status=missing")
         expect(evidence).to_contain("electron_simple_web_layout_captured_argb_size_bytes=")
+
+    it "rejects symlinked Electron layout proof and artifact files":
+        val root = "build/test-electron-layout-validator-symlinks"
+        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+            _proof_command(root + "/proof-real.json", "") +
+            " && ln -s proof-real.json " + root + "/proof.json" +
+            " && node scripts/check/validate-electron-simple-web-layout-proof.js " + root + "/proof.json > " + root + "/proof.env; " +
+            _proof_command(root + "/argb.json", "fs.renameSync(path.join(dir,\"captured.json\"),path.join(dir,\"captured-real.json\"));fs.symlinkSync(\"captured-real.json\",path.join(dir,\"captured.json\"))") +
+            " && node scripts/check/validate-electron-simple-web-layout-proof.js " + root + "/argb.json > " + root + "/argb.env; " +
+            _proof_command(root + "/geometry-proof.json", "fs.renameSync(path.join(dir,\"geometry.json\"),path.join(dir,\"geometry-real.json\"));fs.symlinkSync(\"geometry-real.json\",path.join(dir,\"geometry.json\"))") +
+            " && node scripts/check/validate-electron-simple-web-layout-proof.js " + root + "/geometry-proof.json > " + root + "/geometry.env"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(1)
+
+        val proof = file_read(root + "/proof.env")
+        val argb = file_read(root + "/argb.env")
+        val geometry = file_read(root + "/geometry.env")
+        step("Confirm Electron layout evidence cannot be substituted through symlinks")
+        expect(proof).to_contain("electron_simple_web_layout_validation_status=fail")
+        expect(proof).to_contain("electron_simple_web_layout_validation_reason=proof-json-symlink")
+        expect(proof).to_contain("electron_simple_web_layout_proof_symlink_status=fail")
+        expect(argb).to_contain("electron_simple_web_layout_validation_status=fail")
+        expect(argb).to_contain("electron_simple_web_layout_validation_reason=captured-argb-symlink")
+        expect(argb).to_contain("electron_simple_web_layout_proof_symlink_status=pass")
+        expect(argb).to_contain("electron_simple_web_layout_captured_argb_file_status=symlink")
+        expect(argb).to_contain("electron_simple_web_layout_captured_argb_symlink_status=fail")
+        expect(geometry).to_contain("electron_simple_web_layout_validation_status=fail")
+        expect(geometry).to_contain("electron_simple_web_layout_validation_reason=electron-geometry-symlink")
+        expect(geometry).to_contain("electron_simple_web_layout_proof_symlink_status=pass")
+        expect(geometry).to_contain("electron_simple_web_layout_geometry_file_status=symlink")
+        expect(geometry).to_contain("electron_simple_web_layout_geometry_symlink_status=fail")
 
     it "rejects malformed captured ARGB shape and pixel data":
         val root = "build/test-electron-layout-validator-argb-shape"
@@ -523,6 +559,9 @@ describe "Electron Simple Web layout proof validator":
         expect(validator).to_contain("measuredGeometryItemCount")
         expect(validator).to_contain("missing-electron-geometry-measured-items")
         expect(validator).to_contain("electron_simple_web_layout_geometry_measured_item_count")
+        expect(validator).to_contain("electron_simple_web_layout_proof_symlink_status")
+        expect(validator).to_contain("electron_simple_web_layout_captured_argb_symlink_status")
+        expect(validator).to_contain("electron_simple_web_layout_geometry_symlink_status")
 
         val script = file_read("scripts/check/check-electron-simple-web-layout-bitmap-evidence.shs")
         expect(script).to_contain("validate-electron-simple-web-layout-proof.js")

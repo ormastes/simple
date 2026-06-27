@@ -80,6 +80,19 @@ function textField(value) {
   return typeof value === 'string' ? value : '';
 }
 
+function pathInfo(filePath) {
+  let lstat = null;
+  try {
+    lstat = fs.lstatSync(filePath);
+  } catch (_err) {
+    lstat = null;
+  }
+  return {
+    lstat,
+    isSymlink: lstat !== null && lstat.isSymbolicLink(),
+  };
+}
+
 function artifactStat(value, proofPath) {
   if (typeof value !== 'string' || value.trim() === '') {
     return null;
@@ -106,6 +119,10 @@ function artifactStat(value, proofPath) {
       continue;
     }
     try {
+      const lstat = fs.lstatSync(candidate);
+      if (lstat.isSymbolicLink()) {
+        return { stat: null, path: resolvedCandidate, symlink: true };
+      }
       const realCandidate = fs.realpathSync(candidate);
       if (
         realCandidate === realProofPath ||
@@ -115,7 +132,7 @@ function artifactStat(value, proofPath) {
       }
       const stat = fs.statSync(realCandidate);
       if (stat.isFile()) {
-        return { stat, path: realCandidate };
+        return { stat, path: realCandidate, symlink: false };
       }
     } catch (_err) {
       // Try the next candidate.
@@ -125,7 +142,7 @@ function artifactStat(value, proofPath) {
 }
 
 function readJsonArtifact(artifact) {
-  if (!artifact) return { ok: false, value: null };
+  if (!artifact || artifact.symlink) return { ok: false, value: null };
   try {
     return { ok: true, value: JSON.parse(fs.readFileSync(artifact.path, 'utf8')) };
   } catch (_err) {
@@ -135,7 +152,13 @@ function readJsonArtifact(artifact) {
 
 function artifactFileStatus(artifact) {
   if (artifact === null) return 'missing';
+  if (artifact.symlink) return 'symlink';
   return artifact.stat.size <= 0 ? 'empty' : 'pass';
+}
+
+function artifactSymlinkStatus(artifact) {
+  if (artifact === null) return 'missing';
+  return artifact.symlink ? 'fail' : 'pass';
 }
 
 function pixelCountMatches(pixels, width, height) {
@@ -168,6 +191,14 @@ const proofPath = process.argv[2];
 if (!proofPath) {
   emit('electron_simple_web_engine2d_validation_status', 'fail');
   emit('electron_simple_web_engine2d_validation_reason', 'usage-proof-json');
+  process.exit(1);
+}
+
+const proofInfo = pathInfo(proofPath);
+if (proofInfo.isSymlink) {
+  emit('electron_simple_web_engine2d_validation_status', 'fail');
+  emit('electron_simple_web_engine2d_validation_reason', 'proof-json-symlink');
+  emit('electron_simple_web_engine2d_proof_symlink_status', 'fail');
   process.exit(1);
 }
 
@@ -245,6 +276,8 @@ if (proof.blur_or_tolerance_used !== false) {
   reason = 'missing-viewport-proof';
 } else if (proof.captured_argb_written !== true) {
   reason = 'missing-captured-argb';
+} else if (capturedArgbStat !== null && capturedArgbStat.symlink) {
+  reason = 'captured-argb-symlink';
 } else if (capturedArgbStat === null) {
   reason = 'missing-captured-argb-file';
 } else if (capturedArgbStat.stat.size <= 0) {
@@ -271,6 +304,7 @@ if (proof.blur_or_tolerance_used !== false) {
 
 emit('electron_simple_web_engine2d_validation_status', reason === 'pass' ? 'pass' : 'fail');
 emit('electron_simple_web_engine2d_validation_reason', reason);
+emit('electron_simple_web_engine2d_proof_symlink_status', proofInfo.isSymlink ? 'fail' : 'pass');
 emit('electron_simple_web_engine2d_renderer', proof.renderer);
 emit('electron_simple_web_engine2d_proof_source', proof.proof_source);
 emit('electron_simple_web_engine2d_capture_backend', proof.capture_backend);
@@ -299,7 +333,8 @@ emit('electron_simple_web_engine2d_capture_downsampled', jsonBoolTextOrBlank(pro
 emit('electron_simple_web_engine2d_captured_argb_path', proof.captured_argb_path);
 emit('electron_simple_web_engine2d_captured_argb_written', jsonBoolTextOrBlank(proof.captured_argb_written));
 emit('electron_simple_web_engine2d_captured_argb_file_status', artifactFileStatus(capturedArgbStat));
-emit('electron_simple_web_engine2d_captured_argb_size_bytes', capturedArgbStat === null ? '' : String(capturedArgbStat.stat.size));
+emit('electron_simple_web_engine2d_captured_argb_symlink_status', artifactSymlinkStatus(capturedArgbStat));
+emit('electron_simple_web_engine2d_captured_argb_size_bytes', capturedArgbStat === null || capturedArgbStat.symlink ? '' : String(capturedArgbStat.stat.size));
 emit('electron_simple_web_engine2d_captured_argb_format', capturedArgb.format);
 emit('electron_simple_web_engine2d_captured_argb_producer', capturedArgb.producer);
 emit('electron_simple_web_engine2d_captured_argb_width', jsonIntegerTextOrBlank(capturedArgb.width));

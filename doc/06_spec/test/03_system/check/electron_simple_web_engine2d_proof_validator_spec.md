@@ -27,7 +27,7 @@ electron_simple_web_engine2d_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 17 | 17 | 0 | 0 |
+| 18 | 18 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -106,6 +106,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_simple_web_engine2d
   within the Simple Web Engine2D scene family.
 - Proof source must identify the live exact fixture producer, not a generic
   hand-authored JSON file.
+- The proof JSON and captured ARGB artifact must be regular files, not
+  symlinks to mutable or substituted evidence.
 - The live Electron wrapper consumes the validator instead of raw shell JSON
   parsing or shell integer timing checks.
 
@@ -123,7 +125,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_simple_web_engine2d
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 42 lines folded for reproduction.
+Runnable source: 44 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -138,6 +140,7 @@ val evidence = file_read(root + "/evidence.env")
 step("Inspect normalized Electron Engine2D proof rows")
 expect(evidence).to_contain("electron_simple_web_engine2d_validation_status=pass")
 expect(evidence).to_contain("electron_simple_web_engine2d_validation_reason=pass")
+expect(evidence).to_contain("electron_simple_web_engine2d_proof_symlink_status=pass")
 expect(evidence).to_contain("electron_simple_web_engine2d_renderer=electron-live-capture-page")
 expect(evidence).to_contain("electron_simple_web_engine2d_proof_source=tools/electron-live-bitmap/exact_fixture.js")
 expect(evidence).to_contain("electron_simple_web_engine2d_capture_backend=electron-offscreen-capture-page")
@@ -163,6 +166,7 @@ expect(evidence).to_contain("electron_simple_web_engine2d_capture_downsampled=fa
 expect(evidence).to_contain("electron_simple_web_engine2d_captured_argb_path=captured.json")
 expect(evidence).to_contain("electron_simple_web_engine2d_captured_argb_written=true")
 expect(evidence).to_contain("electron_simple_web_engine2d_captured_argb_file_status=pass")
+expect(evidence).to_contain("electron_simple_web_engine2d_captured_argb_symlink_status=pass")
 expect(evidence).to_contain("electron_simple_web_engine2d_captured_argb_format=argb-u32")
 expect(evidence).to_contain("electron_simple_web_engine2d_captured_argb_producer=electron-live-capture-page")
 expect(evidence).to_contain("electron_simple_web_engine2d_captured_argb_width=96")
@@ -513,6 +517,46 @@ expect(evidence).to_contain("electron_simple_web_engine2d_captured_argb_size_byt
 
 </details>
 
+#### rejects symlinked Electron Engine2D proof and ARGB artifact files
+
+-  proof command
+-  proof command
+   - Expected: code equals `1`
+- Confirm Electron Engine2D evidence cannot be substituted through symlinks
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 21 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-electron-engine2d-validator-symlinks"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_command(root + "/proof-real.json", "") +
+    " && ln -s proof-real.json " + root + "/proof.json" +
+    " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/proof.json > " + root + "/proof.env; " +
+    _proof_command(root + "/argb.json", "fs.renameSync(path.join(dir,\"captured.json\"),path.join(dir,\"captured-real.json\"));fs.symlinkSync(\"captured-real.json\",path.join(dir,\"captured.json\"))") +
+    " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/argb.json > " + root + "/argb.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val proof = file_read(root + "/proof.env")
+val argb = file_read(root + "/argb.env")
+step("Confirm Electron Engine2D evidence cannot be substituted through symlinks")
+expect(proof).to_contain("electron_simple_web_engine2d_validation_status=fail")
+expect(proof).to_contain("electron_simple_web_engine2d_validation_reason=proof-json-symlink")
+expect(proof).to_contain("electron_simple_web_engine2d_proof_symlink_status=fail")
+expect(argb).to_contain("electron_simple_web_engine2d_validation_status=fail")
+expect(argb).to_contain("electron_simple_web_engine2d_validation_reason=captured-argb-symlink")
+expect(argb).to_contain("electron_simple_web_engine2d_proof_symlink_status=pass")
+expect(argb).to_contain("electron_simple_web_engine2d_captured_argb_file_status=symlink")
+expect(argb).to_contain("electron_simple_web_engine2d_captured_argb_symlink_status=fail")
+```
+
+</details>
+
 #### rejects malformed captured ARGB shape and pixel data
 
 -  proof command
@@ -813,7 +857,7 @@ expect(pixel).to_contain("electron_simple_web_engine2d_mismatch_count=4")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 32 lines folded for reproduction.
+Runnable source: 34 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -845,6 +889,8 @@ expect(validator).to_contain("startsWith")
 expect(validator).to_contain("proofDir")
 expect(validator).to_contain("path.sep")
 expect(validator).to_contain("resolvedCandidate === path.resolve(proofPath)")
+expect(validator).to_contain("electron_simple_web_engine2d_proof_symlink_status")
+expect(validator).to_contain("electron_simple_web_engine2d_captured_argb_symlink_status")
 val fixture = file_read("tools/electron-live-bitmap/exact_fixture.js")
 expect(fixture).to_contain("electron_user_agent")
 expect(fixture).to_contain("electron_process_version")
@@ -857,8 +903,8 @@ expect(fixture).to_contain("chrome_process_version")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 17 |
-| Active scenarios | 17 |
+| Total scenarios | 18 |
+| Active scenarios | 18 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

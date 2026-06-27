@@ -27,7 +27,7 @@ electron_simple_web_layout_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 18 | 18 | 0 | 0 |
+| 19 | 19 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -106,6 +106,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_simple_web_layout_p
 - Complete proofs must identify the Electron offscreen capture backend,
   compositor mode, Electron/Chromium runtime identity, Chromium GPU
   feature-status diagnostics, and at least two measured capture iterations.
+- The proof JSON, captured ARGB artifact, and geometry artifact must be regular
+  files, not symlinks to mutable or substituted evidence.
 - The live Electron layout wrapper consumes the validator and still maps real
   pixel mismatches to `divergent` evidence.
 
@@ -123,7 +125,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_simple_web_layout_p
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 50 lines folded for reproduction.
+Runnable source: 53 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -138,6 +140,7 @@ val evidence = file_read(root + "/evidence.env")
 step("Inspect normalized Electron layout proof rows")
 expect(evidence).to_contain("electron_simple_web_layout_validation_status=pass")
 expect(evidence).to_contain("electron_simple_web_layout_validation_reason=pass")
+expect(evidence).to_contain("electron_simple_web_layout_proof_symlink_status=pass")
 expect(evidence).to_contain("electron_simple_web_layout_renderer=electron-live-capture-page")
 expect(evidence).to_contain("electron_simple_web_layout_proof_source=tools/electron-live-bitmap/exact_fixture.js")
 expect(evidence).to_contain("electron_simple_web_layout_capture_backend=electron-offscreen-capture-page")
@@ -163,6 +166,7 @@ expect(evidence).to_contain("electron_simple_web_layout_capture_downsampled=fals
 expect(evidence).to_contain("electron_simple_web_layout_geometry_path=geometry.json")
 expect(evidence).to_contain("electron_simple_web_layout_geometry_written=true")
 expect(evidence).to_contain("electron_simple_web_layout_geometry_file_status=pass")
+expect(evidence).to_contain("electron_simple_web_layout_geometry_symlink_status=pass")
 expect(evidence).to_contain("electron_simple_web_layout_geometry_producer=electron-offscreen-geometry")
 expect(evidence).to_contain("electron_simple_web_layout_geometry_viewport_width=96")
 expect(evidence).to_contain("electron_simple_web_layout_geometry_viewport_height=64")
@@ -171,6 +175,7 @@ expect(evidence).to_contain("electron_simple_web_layout_geometry_measured_item_c
 expect(evidence).to_contain("electron_simple_web_layout_captured_argb_path=captured.json")
 expect(evidence).to_contain("electron_simple_web_layout_captured_argb_written=true")
 expect(evidence).to_contain("electron_simple_web_layout_captured_argb_file_status=pass")
+expect(evidence).to_contain("electron_simple_web_layout_captured_argb_symlink_status=pass")
 expect(evidence).to_contain("electron_simple_web_layout_captured_argb_format=argb-u32")
 expect(evidence).to_contain("electron_simple_web_layout_captured_argb_producer=electron-live-capture-page")
 expect(evidence).to_contain("electron_simple_web_layout_captured_argb_width=96")
@@ -509,6 +514,55 @@ expect(evidence).to_contain("electron_simple_web_layout_validation_reason=missin
 expect(evidence).to_contain("electron_simple_web_layout_captured_argb_path=proof.json")
 expect(evidence).to_contain("electron_simple_web_layout_captured_argb_file_status=missing")
 expect(evidence).to_contain("electron_simple_web_layout_captured_argb_size_bytes=")
+```
+
+</details>
+
+#### rejects symlinked Electron layout proof and artifact files
+
+-  proof command
+-  proof command
+-  proof command
+   - Expected: code equals `1`
+- Confirm Electron layout evidence cannot be substituted through symlinks
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 29 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-electron-layout-validator-symlinks"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_command(root + "/proof-real.json", "") +
+    " && ln -s proof-real.json " + root + "/proof.json" +
+    " && node scripts/check/validate-electron-simple-web-layout-proof.js " + root + "/proof.json > " + root + "/proof.env; " +
+    _proof_command(root + "/argb.json", "fs.renameSync(path.join(dir,\"captured.json\"),path.join(dir,\"captured-real.json\"));fs.symlinkSync(\"captured-real.json\",path.join(dir,\"captured.json\"))") +
+    " && node scripts/check/validate-electron-simple-web-layout-proof.js " + root + "/argb.json > " + root + "/argb.env; " +
+    _proof_command(root + "/geometry-proof.json", "fs.renameSync(path.join(dir,\"geometry.json\"),path.join(dir,\"geometry-real.json\"));fs.symlinkSync(\"geometry-real.json\",path.join(dir,\"geometry.json\"))") +
+    " && node scripts/check/validate-electron-simple-web-layout-proof.js " + root + "/geometry-proof.json > " + root + "/geometry.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val proof = file_read(root + "/proof.env")
+val argb = file_read(root + "/argb.env")
+val geometry = file_read(root + "/geometry.env")
+step("Confirm Electron layout evidence cannot be substituted through symlinks")
+expect(proof).to_contain("electron_simple_web_layout_validation_status=fail")
+expect(proof).to_contain("electron_simple_web_layout_validation_reason=proof-json-symlink")
+expect(proof).to_contain("electron_simple_web_layout_proof_symlink_status=fail")
+expect(argb).to_contain("electron_simple_web_layout_validation_status=fail")
+expect(argb).to_contain("electron_simple_web_layout_validation_reason=captured-argb-symlink")
+expect(argb).to_contain("electron_simple_web_layout_proof_symlink_status=pass")
+expect(argb).to_contain("electron_simple_web_layout_captured_argb_file_status=symlink")
+expect(argb).to_contain("electron_simple_web_layout_captured_argb_symlink_status=fail")
+expect(geometry).to_contain("electron_simple_web_layout_validation_status=fail")
+expect(geometry).to_contain("electron_simple_web_layout_validation_reason=electron-geometry-symlink")
+expect(geometry).to_contain("electron_simple_web_layout_proof_symlink_status=pass")
+expect(geometry).to_contain("electron_simple_web_layout_geometry_file_status=symlink")
+expect(geometry).to_contain("electron_simple_web_layout_geometry_symlink_status=fail")
 ```
 
 </details>
@@ -874,7 +928,7 @@ expect(pixel).to_contain("electron_simple_web_layout_mismatch_count=4")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 38 lines folded for reproduction.
+Runnable source: 41 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -885,6 +939,9 @@ expect(validator).to_contain("jsonBoolTextOrBlank")
 expect(validator).to_contain("measuredGeometryItemCount")
 expect(validator).to_contain("missing-electron-geometry-measured-items")
 expect(validator).to_contain("electron_simple_web_layout_geometry_measured_item_count")
+expect(validator).to_contain("electron_simple_web_layout_proof_symlink_status")
+expect(validator).to_contain("electron_simple_web_layout_captured_argb_symlink_status")
+expect(validator).to_contain("electron_simple_web_layout_geometry_symlink_status")
 
 val script = file_read("scripts/check/check-electron-simple-web-layout-bitmap-evidence.shs")
 expect(script).to_contain("validate-electron-simple-web-layout-proof.js")
@@ -924,8 +981,8 @@ expect(fixture).to_contain("chrome_process_version")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 18 |
-| Active scenarios | 18 |
+| Total scenarios | 19 |
+| Active scenarios | 19 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
