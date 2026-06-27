@@ -307,9 +307,11 @@ const proofSourceFileStatus = proofSourceStat.isSymlink
   ? 'symlink'
   : proofSourceStat.lstat === null || !proofSourceStat.lstat.isFile()
     ? 'missing'
-    : proofSourceStat.lstat.size <= 0
-      ? 'empty'
-      : 'pass';
+    : proofSourceStat.hasMultipleLinks
+      ? 'hardlink'
+      : proofSourceStat.lstat.size <= 0
+        ? 'empty'
+        : 'pass';
 const proofSourceSizeBytes = proofSourceFileStatus === 'empty'
   ? '0'
   : proofSourceFileStatus === 'pass'

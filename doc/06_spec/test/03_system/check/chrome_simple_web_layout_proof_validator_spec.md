@@ -111,9 +111,9 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/chrome_simple_web_layout_pro
   `true` or `false` diagnostics.
 - The top-level proof must carry the live Chrome capture source marker; a
   hand-authored proof object with valid-looking artifacts is not sufficient.
-- The top-level proof source marker must resolve to a regular nonempty Chrome
-  capture producer source file so stale JSON cannot be paired with a missing
-  DevTools capture script.
+- The top-level proof source marker must resolve to a single-link regular
+  nonempty Chrome capture producer source file so stale JSON cannot be paired
+  with a missing or aliased DevTools capture script.
 - The top-level proof must carry Chrome DevTools capture mode, Chrome or
   Chromium runtime user-agent, product, and protocol version evidence, not only
   a binary path.
@@ -237,7 +237,7 @@ expect(wrong).to_contain("chrome_simple_web_layout_proof_source=tools/manual/chr
 
 </details>
 
-#### rejects proof when the live Chrome capture source artifact is missing
+#### rejects proof when the live Chrome capture source artifact is missing or hardlinked
 
 - Confirm Chrome proof source marker is bound to the producer source file
 
@@ -245,24 +245,31 @@ expect(wrong).to_contain("chrome_simple_web_layout_proof_source=tools/manual/chr
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val root = "build/test-chrome-layout-validator-source-artifact"
 val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
     _proof_command(root + "/proof.json", "") +
-    " && cd " + root + " && node ../../scripts/check/validate-chrome-simple-web-layout-proof.js proof.json > evidence.env"
+    " && cd " + root + " && node ../../scripts/check/validate-chrome-simple-web-layout-proof.js proof.json > missing.env; missing_code=$?; cd ../.. && " +
+    "mkdir -p " + root + "/hardlink/tools/chrome-live-bitmap && cp tools/chrome-live-bitmap/capture_html_argb.js " + root + "/hardlink/original-capture.js && ln " + root + "/hardlink/original-capture.js " + root + "/hardlink/tools/chrome-live-bitmap/capture_html_argb.js && cp " + root + "/proof.json " + root + "/hardlink/proof.json && " +
+    "cd " + root + "/hardlink && node ../../../scripts/check/validate-chrome-simple-web-layout-proof.js proof.json > hardlink.env; hardlink_code=$?; [ \"$missing_code\" -eq 1 ] && [ \"$hardlink_code\" -eq 1 ]"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-expect(code).to_equal(1)
+expect(code).to_equal(0)
 
-val evidence = file_read(root + "/evidence.env")
+val missing = file_read(root + "/missing.env")
+val hardlink = file_read(root + "/hardlink/hardlink.env")
 step("Confirm Chrome proof source marker is bound to the producer source file")
-expect(evidence).to_contain("chrome_simple_web_layout_validation_status=fail")
-expect(evidence).to_contain("chrome_simple_web_layout_validation_reason=unexpected-chrome-proof-source-file-missing")
-expect(evidence).to_contain("chrome_simple_web_layout_proof_source=tools/chrome-live-bitmap/capture_html_argb.js")
-expect(evidence).to_contain("chrome_simple_web_layout_proof_source_file_status=missing")
-expect(evidence).to_contain("chrome_simple_web_layout_proof_source_size_bytes=")
+expect(missing).to_contain("chrome_simple_web_layout_validation_status=fail")
+expect(missing).to_contain("chrome_simple_web_layout_validation_reason=unexpected-chrome-proof-source-file-missing")
+expect(missing).to_contain("chrome_simple_web_layout_proof_source=tools/chrome-live-bitmap/capture_html_argb.js")
+expect(missing).to_contain("chrome_simple_web_layout_proof_source_file_status=missing")
+expect(missing).to_contain("chrome_simple_web_layout_proof_source_size_bytes=")
+expect(hardlink).to_contain("chrome_simple_web_layout_validation_status=fail")
+expect(hardlink).to_contain("chrome_simple_web_layout_validation_reason=unexpected-chrome-proof-source-file-hardlink")
+expect(hardlink).to_contain("chrome_simple_web_layout_proof_source=tools/chrome-live-bitmap/capture_html_argb.js")
+expect(hardlink).to_contain("chrome_simple_web_layout_proof_source_file_status=hardlink")
 ```
 
 </details>
@@ -435,7 +442,7 @@ val evidence = file_read(root + "/evidence.env")
 expect(evidence).to_contain("chrome_simple_web_layout_validation_status=fail")
 expect(evidence).to_contain("chrome_simple_web_layout_validation_reason=missing-chrome-timing")
 expect(evidence).to_contain("chrome_simple_web_layout_chrome_frame_us=")
-expect(evidence.contains("chrome_simple_web_layout_chrome_frame_us=not-a-number")).to_equal(false)
+expect_not(evidence.contains("chrome_simple_web_layout_chrome_frame_us=not-a-number"))
 ```
 
 </details>
@@ -534,15 +541,15 @@ step("Confirm Chrome boolean proof rows must be structured JSON booleans")
 expect(capture).to_contain("chrome_simple_web_layout_validation_status=fail")
 expect(capture).to_contain("chrome_simple_web_layout_validation_reason=missing-captured-argb")
 expect(capture).to_contain("chrome_simple_web_layout_captured_argb_written=")
-expect(capture.contains("chrome_simple_web_layout_captured_argb_written=false")).to_equal(false)
+expect_not(capture.contains("chrome_simple_web_layout_captured_argb_written=false"))
 expect(geometry).to_contain("chrome_simple_web_layout_validation_status=fail")
 expect(geometry).to_contain("chrome_simple_web_layout_validation_reason=missing-chrome-geometry")
 expect(geometry).to_contain("chrome_simple_web_layout_geometry_written=")
-expect(geometry.contains("chrome_simple_web_layout_geometry_written=false")).to_equal(false)
+expect_not(geometry.contains("chrome_simple_web_layout_geometry_written=false"))
 expect(blur).to_contain("chrome_simple_web_layout_validation_status=fail")
 expect(blur).to_contain("chrome_simple_web_layout_validation_reason=blur-or-tolerance-not-allowed")
 expect(blur).to_contain("chrome_simple_web_layout_blur_or_tolerance_used=")
-expect(blur.contains("chrome_simple_web_layout_blur_or_tolerance_used=false")).to_equal(false)
+expect_not(blur.contains("chrome_simple_web_layout_blur_or_tolerance_used=false"))
 ```
 
 </details>
@@ -958,7 +965,7 @@ expect(missing).to_contain("chrome_simple_web_layout_capture_width=")
 expect(fractional).to_contain("chrome_simple_web_layout_validation_status=fail")
 expect(fractional).to_contain("chrome_simple_web_layout_validation_reason=missing-capture-viewport")
 expect(fractional).to_contain("chrome_simple_web_layout_capture_height=")
-expect(fractional.contains("chrome_simple_web_layout_capture_height=64.5")).to_equal(false)
+expect_not(fractional.contains("chrome_simple_web_layout_capture_height=64.5"))
 ```
 
 </details>
@@ -1010,23 +1017,23 @@ step("Confirm Chrome live numeric proof cannot be stringified")
 expect(capture).to_contain("chrome_simple_web_layout_validation_status=fail")
 expect(capture).to_contain("chrome_simple_web_layout_validation_reason=missing-capture-viewport")
 expect(capture).to_contain("chrome_simple_web_layout_capture_width=")
-expect(capture.contains("chrome_simple_web_layout_capture_width=96")).to_equal(false)
+expect_not(capture.contains("chrome_simple_web_layout_capture_width=96"))
 expect(mismatch).to_contain("chrome_simple_web_layout_validation_status=fail")
 expect(mismatch).to_contain("chrome_simple_web_layout_validation_reason=malformed-mismatch-count")
 expect(mismatch).to_contain("chrome_simple_web_layout_mismatch_count=")
-expect(mismatch.contains("chrome_simple_web_layout_mismatch_count=0")).to_equal(false)
+expect_not(mismatch.contains("chrome_simple_web_layout_mismatch_count=0"))
 expect(argb).to_contain("chrome_simple_web_layout_validation_status=fail")
 expect(argb).to_contain("chrome_simple_web_layout_validation_reason=captured-argb-viewport-mismatch")
 expect(argb).to_contain("chrome_simple_web_layout_captured_argb_width=")
-expect(argb.contains("chrome_simple_web_layout_captured_argb_width=96")).to_equal(false)
+expect_not(argb.contains("chrome_simple_web_layout_captured_argb_width=96"))
 expect(geometry).to_contain("chrome_simple_web_layout_validation_status=fail")
 expect(geometry).to_contain("chrome_simple_web_layout_validation_reason=chrome-geometry-viewport-mismatch")
 expect(geometry).to_contain("chrome_simple_web_layout_geometry_viewport_width=")
-expect(geometry.contains("chrome_simple_web_layout_geometry_viewport_width=96")).to_equal(false)
+expect_not(geometry.contains("chrome_simple_web_layout_geometry_viewport_width=96"))
 expect(timing).to_contain("chrome_simple_web_layout_validation_status=fail")
 expect(timing).to_contain("chrome_simple_web_layout_validation_reason=missing-chrome-timing")
 expect(timing).to_contain("chrome_simple_web_layout_chrome_frame_us=")
-expect(timing.contains("chrome_simple_web_layout_chrome_frame_us=1250")).to_equal(false)
+expect_not(timing.contains("chrome_simple_web_layout_chrome_frame_us=1250"))
 ```
 
 </details>
@@ -1060,7 +1067,7 @@ val mismatch = file_read(root + "/mismatch.env")
 expect(blur).to_contain("chrome_simple_web_layout_validation_reason=blur-or-tolerance-not-allowed")
 expect(mismatch).to_contain("chrome_simple_web_layout_validation_reason=malformed-mismatch-count")
 expect(mismatch).to_contain("chrome_simple_web_layout_mismatch_count=")
-expect(mismatch.contains("chrome_simple_web_layout_mismatch_count=bad")).to_equal(false)
+expect_not(mismatch.contains("chrome_simple_web_layout_mismatch_count=bad"))
 ```
 
 </details>
