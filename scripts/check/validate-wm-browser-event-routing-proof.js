@@ -172,6 +172,8 @@ if (!boolTrue(proof.pass)) {
 } else if (!boolTrue(proof.ready) || !boolTrue(proof.wm_found)) {
   reason = 'event-routing-ready-missing';
 } else if (
+  !sameJsonInteger(proof.window_cmd_count, 4) ||
+  !sameJsonInteger(proof.input_event_count, 3) ||
   !jsonIntegerAtLeast(proof.focus_count, 1) ||
   !jsonIntegerAtLeast(proof.move_count, 1) ||
   !jsonIntegerAtLeast(proof.maximize_count, 1) ||

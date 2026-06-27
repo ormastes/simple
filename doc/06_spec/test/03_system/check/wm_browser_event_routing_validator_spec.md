@@ -77,6 +77,9 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/wm_browser_event_routing_val
 - The raw frame stream must include the canonical event sequence from host pointer, focus,
   drag move, title command, maximize, text input, pointer down, and pointer up;
   counts alone are not enough event-routing proof.
+- Aggregate window-command and input-event counts must match the canonical
+  frame stream so a forged proof cannot hide dropped or extra frames behind a
+  matching event sequence.
 - Chromium timing must include an explicit positive `performance.now()` delta;
   `0` does not prove distinct timing samples, and multi-second timing does not
   prove responsive event-loop progress.
@@ -114,7 +117,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/wm_browser_event_routing_val
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -128,6 +131,8 @@ val evidence = file_read("build/test-wm-browser-event-validator-pass/evidence.en
 expect(evidence).to_contain("wm_browser_event_routing_validation_status=pass")
 expect(evidence).to_contain("wm_browser_event_routing_validation_reason=pass")
 expect(evidence).to_contain("wm_browser_event_routing_proof_source=tools/web-render-backend/wm_event_check.js")
+expect(evidence).to_contain("wm_browser_event_routing_window_cmd_count=4")
+expect(evidence).to_contain("wm_browser_event_routing_input_event_count=3")
 expect(evidence).to_contain("wm_browser_event_routing_performance_now_available=true")
 expect(evidence).to_contain("wm_browser_event_routing_performance_now_delta_ms=16.7")
 expect(evidence).to_contain("wm_browser_event_routing_input_to_paint_ms=18.4")
@@ -147,26 +152,41 @@ expect(evidence).to_contain("wm_browser_event_routing_text_input_text=Hello Simp
 #### rejects pass true proof when required event counts are missing
 
 -  fixture command
+-  fixture command
+-  fixture command
    - Expected: code equals `1`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val command = "rm -rf build/test-wm-browser-event-validator-counts && mkdir -p build/test-wm-browser-event-validator-counts && " +
-    _fixture_command("build/test-wm-browser-event-validator-counts/proof.json", "p.focus_count=0") +
-    " && node scripts/check/validate-wm-browser-event-routing-proof.js build/test-wm-browser-event-validator-counts/proof.json > build/test-wm-browser-event-validator-counts/evidence.env"
+val root = "build/test-wm-browser-event-validator-counts"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _fixture_command(root + "/proof.json", "p.focus_count=0") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js " + root + "/proof.json > " + root + "/evidence.env; " +
+    _fixture_command(root + "/window-count.json", "p.window_cmd_count=3") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js " + root + "/window-count.json > " + root + "/window-count.env; " +
+    _fixture_command(root + "/input-count.json", "p.input_event_count=4") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js " + root + "/input-count.json > " + root + "/input-count.env"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(1)
 
-val evidence = file_read("build/test-wm-browser-event-validator-counts/evidence.env")
+val evidence = file_read(root + "/evidence.env")
+val window_count = file_read(root + "/window-count.env")
+val input_count = file_read(root + "/input-count.env")
 expect(evidence).to_contain("wm_browser_event_routing_validation_status=fail")
 expect(evidence).to_contain("wm_browser_event_routing_validation_reason=event-routing-contract-missing")
 expect(evidence).to_contain("wm_browser_event_routing_focus_count=0")
+expect(window_count).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(window_count).to_contain("wm_browser_event_routing_validation_reason=event-routing-contract-missing")
+expect(window_count).to_contain("wm_browser_event_routing_window_cmd_count=3")
+expect(input_count).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(input_count).to_contain("wm_browser_event_routing_validation_reason=event-routing-contract-missing")
+expect(input_count).to_contain("wm_browser_event_routing_input_event_count=4")
 ```
 
 </details>
@@ -415,9 +435,11 @@ expect(perf.contains("wm_browser_event_routing_css_animation_probe=true")).to_eq
 -  fixture command
 -  fixture command
 -  fixture command
+-  fixture command
    - Expected: code equals `1`
 - Confirm stringified numeric evidence is not accepted as live browser proof
    - Expected: count does not contain `wm_browser_event_routing_focus_count=1`
+   - Expected: aggregate does not contain `wm_browser_event_routing_window_cmd_count=4`
    - Expected: perf does not contain `wm_browser_event_routing_performance_now_delta_ms=16.7`
    - Expected: frame does not contain `wm_browser_event_routing_animation_frame_count=2`
    - Expected: ui does not contain `wm_browser_event_routing_traffic_button_count=3`
@@ -429,13 +451,15 @@ expect(perf.contains("wm_browser_event_routing_css_animation_probe=true")).to_eq
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 54 lines folded for reproduction.
+Runnable source: 61 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val command = "rm -rf build/test-wm-browser-event-validator-string-numbers && mkdir -p build/test-wm-browser-event-validator-string-numbers && " +
     _fixture_command("build/test-wm-browser-event-validator-string-numbers/count.json", "p.focus_count=\"1\"") +
     " && node scripts/check/validate-wm-browser-event-routing-proof.js build/test-wm-browser-event-validator-string-numbers/count.json > build/test-wm-browser-event-validator-string-numbers/count.env; " +
+    _fixture_command("build/test-wm-browser-event-validator-string-numbers/aggregate.json", "p.window_cmd_count=\"4\"") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js build/test-wm-browser-event-validator-string-numbers/aggregate.json > build/test-wm-browser-event-validator-string-numbers/aggregate.env; " +
     _fixture_command("build/test-wm-browser-event-validator-string-numbers/perf.json", "p.performance_now_delta_ms=\"16.7\"") +
     " && node scripts/check/validate-wm-browser-event-routing-proof.js build/test-wm-browser-event-validator-string-numbers/perf.json > build/test-wm-browser-event-validator-string-numbers/perf.env; " +
     _fixture_command("build/test-wm-browser-event-validator-string-numbers/frame.json", "p.animation_frame_count=\"2\"") +
@@ -452,6 +476,7 @@ val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(1)
 
 val count = file_read("build/test-wm-browser-event-validator-string-numbers/count.env")
+val aggregate = file_read("build/test-wm-browser-event-validator-string-numbers/aggregate.env")
 val perf = file_read("build/test-wm-browser-event-validator-string-numbers/perf.env")
 val frame = file_read("build/test-wm-browser-event-validator-string-numbers/frame.env")
 val ui = file_read("build/test-wm-browser-event-validator-string-numbers/ui.env")
@@ -463,6 +488,10 @@ expect(count).to_contain("wm_browser_event_routing_validation_status=fail")
 expect(count).to_contain("wm_browser_event_routing_validation_reason=event-routing-contract-missing")
 expect(count).to_contain("wm_browser_event_routing_focus_count=")
 expect(count.contains("wm_browser_event_routing_focus_count=1")).to_equal(false)
+expect(aggregate).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(aggregate).to_contain("wm_browser_event_routing_validation_reason=event-routing-contract-missing")
+expect(aggregate).to_contain("wm_browser_event_routing_window_cmd_count=")
+expect(aggregate.contains("wm_browser_event_routing_window_cmd_count=4")).to_equal(false)
 expect(perf).to_contain("wm_browser_event_routing_validation_status=fail")
 expect(perf).to_contain("wm_browser_event_routing_validation_reason=event-routing-performance-animation-contract-missing")
 expect(perf).to_contain("wm_browser_event_routing_performance_now_delta_ms=")
