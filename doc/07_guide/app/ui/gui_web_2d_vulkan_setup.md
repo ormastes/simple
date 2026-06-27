@@ -196,6 +196,34 @@ with
 It does not satisfy RenderDoc `.rdc`, PIX, GPU debugger, or native render-log
 capture gates.
 
+## Current Linux Perf And RenderDoc Status - 2026-06-27
+
+Retained report:
+`doc/09_report/gui_renderdoc_current_perf_browser_renderdoc_blocker_2026-06-27.md`.
+
+Current-source retained showcase rows pass at source revision `56a1985b1d38`:
+
+- `gui_showcase_4k_200fps_status=pass`
+- `gui_showcase_4k_200fps_source_revision_status=current`
+- `gui_showcase_8k_perf_status=pass`
+- `gui_showcase_8k_perf_source_revision_status=current`
+
+The host has hardware Vulkan through NVIDIA:
+
+- `gui_web_2d_vulkan_loader_status=present`
+- `gui_web_2d_vulkan_device=NVIDIA TITAN RTX`
+- `gui_web_2d_vulkan_driver=NVIDIA`
+
+RenderDoc capture is still blocked on this host:
+
+- `gui_web_2d_vulkan_renderdoc_status=unavailable`
+- `gui_web_2d_vulkan_renderdoc_reason=missing-renderdoccmd-in-search-paths`
+
+Do not claim `.rdc` capture completion from browser backing or 4K/8K retained
+perf rows. Install or expose `renderdoccmd` first, then run
+`scripts/setup/setup-gui-web-2d-vulkan-env.shs --renderdoc-simple` or the full
+`--renderdoc` path.
+
 ## Full Evidence
 
 After SDK tools and browser backing are ready, use:
