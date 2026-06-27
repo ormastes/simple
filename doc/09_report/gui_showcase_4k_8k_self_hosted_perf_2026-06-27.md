@@ -10,7 +10,9 @@ budgets. A 4K row was refreshed after narrowing the generated alias to retained
 perf code and changing default binary discovery to prefer release/self-hosted
 binaries before `bin/simple`. The canonical 8K build directory was refreshed
 after that wrapper fix so the aggregate no longer reads stale Rust-seed 8K
-evidence.
+evidence. A later refresh after the plan-only Simple-binary status fix produced
+current source revision `74744b04ae2d` for both 4K and 8K rows; strict aggregate
+source freshness accepted both rows as current.
 
 This proves the current retained 4K/8K showcase perf contract for this host. It
 does not prove RenderDoc `.rdc`, Chrome/Electron Vulkan backing, macOS Metal,
@@ -41,12 +43,32 @@ REPORT_PATH=build/gui-renderdoc-current-2026-06-27-self-hosted-perf/report.md \
 GUI_RENDERDOC_AGGREGATE_STATIC_CACHE_DIR=build/gui-renderdoc-current-2026-06-27-self-hosted-perf-cache \
 GUI_RENDERDOC_AGGREGATE_PRINT_ENV=0 \
 sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
+
+BUILD_DIR=build/widget-showcase-4k-200fps-current-2026-06-27-after-simple-status \
+TIMEOUT_SECS=60 \
+sh scripts/check/check-widget-showcase-4k-200fps.shs
+
+RESOLUTION=8k \
+BUILD_DIR=build/widget-showcase-8k-perf-current-2026-06-27-after-simple-status \
+TIMEOUT_SECS=90 \
+sh scripts/check/check-widget-showcase-4k-200fps.shs
+
+GUI_SHOWCASE_REQUIRE_CURRENT_SOURCE_REVISION=1 \
+GUI_SHOWCASE_4K_PERF_ENV=build/widget-showcase-4k-200fps-current-2026-06-27-after-simple-status/status.env \
+GUI_SHOWCASE_8K_PERF_ENV=build/widget-showcase-8k-perf-current-2026-06-27-after-simple-status/status.env \
+BUILD_DIR=build/gui-renderdoc-current-2026-06-27-after-simple-status-perf \
+REPORT_PATH=build/gui-renderdoc-current-2026-06-27-after-simple-status-perf/report.md \
+GUI_RENDERDOC_AGGREGATE_STATIC_CACHE_DIR=build/gui-renderdoc-current-2026-06-27-after-simple-status-perf-cache \
+GUI_RENDERDOC_AGGREGATE_PRINT_ENV=0 \
+sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
 ```
 
 ## Evidence
 
 | Row | Status | FPS x1000 | RSS KiB | Binary Source | Native Format | Fallback | Source Status |
 | --- | --- | ---: | --- | --- | --- | --- | --- |
+| 4K after Simple-status fix | pass (`met-200fps`) | 56195560 | 131328 / 262144 | self-hosted-release | pass | none | current (`74744b04ae2d`) |
+| 8K after Simple-status fix | pass (`met-target-fps`) | 14015416 | 519680 / 750000 | self-hosted-release | pass | none | current (`74744b04ae2d`) |
 | 4K 200fps refreshed | pass (`met-200fps`) | 61766522 | 131328 / 262144 | self-hosted-release | pass | none | current (`7ff296568c26`) |
 | 4K 200fps | pass (`met-200fps`) | 53763440 | 131328 / 262144 | self-hosted-release | pass | none | current |
 | 8K perf refreshed | pass (`met-target-fps`) | 15291688 | 519680 / 750000 | self-hosted-release | pass | none | current (`7ff296568c26`) |
@@ -54,6 +76,12 @@ sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
 
 Readback proof:
 
+- 4K after Simple-status fix: `3840x2160`, `8294400` pixels, `5458` nonzero
+  pixels, checksum `23357114226484`, retained static frame, redraw frames `1`,
+  frame p50/p95 `17795` ns.
+- 8K after Simple-status fix: `7680x4320`, `33177600` pixels, `203` nonzero
+  pixels, checksum `869060580878`, retained static frame, redraw frames `1`,
+  frame p50/p95 `71350` ns.
 - 4K refreshed: `3840x2160`, `8294400` pixels, `5458` nonzero pixels, checksum
   `23357114226484`, retained static frame, redraw frames `1`, frame average
   `16190` ns.
@@ -73,6 +101,18 @@ reports:
 - `gui_showcase_8k_perf_simple_bin=release/x86_64-unknown-linux-gnu/simple`
 - `gui_showcase_8k_perf_simple_bin_source=self-hosted-release`
 - `gui_showcase_8k_perf_frame_elapsed_ns_status=pass`
+- `blocked_completion_gate_count=8`
+
+After the Simple-status fix refresh, strict aggregate source freshness reports:
+
+- `gui_showcase_4k_200fps_status=pass`
+- `gui_showcase_4k_200fps_source_revision_status=current`
+- `gui_showcase_4k_200fps_current_source_revision=74744b04ae2d`
+- `gui_showcase_4k_200fps_simple_bin_status=pass`
+- `gui_showcase_8k_perf_status=pass`
+- `gui_showcase_8k_perf_source_revision_status=current`
+- `gui_showcase_8k_perf_current_source_revision=74744b04ae2d`
+- `gui_showcase_8k_perf_simple_bin_status=pass`
 - `blocked_completion_gate_count=8`
 
 The remaining aggregate blockers are Chrome/Electron RenderDoc `.rdc` capture,
