@@ -14,13 +14,50 @@ set -eu
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
 
+SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
+SIMPLE_BIN_STATUS=pass
+
+is_rust_seed_simple() {
+    case "$1" in
+        src/compiler_rust/*|*/src/compiler_rust/*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 # Locate simple binary
 if [ -z "${SIMPLE_BIN:-}" ]; then
-    for _cand in src/compiler_rust/target/release/simple bin/simple; do
-        if [ -x "$_cand" ]; then SIMPLE_BIN="$_cand"; break; fi
+    SIMPLE_BIN_SOURCE="missing-self-hosted"
+    for _cand in \
+        "release"/*/simple \
+        "bin/release"/*/simple \
+        "build/bootstrap/stage3/simple" \
+        "bin/simple" \
+        "./bin/simple"
+    do
+        if [ -x "$_cand" ]; then
+            SIMPLE_BIN="$_cand"
+            SIMPLE_BIN_SOURCE="repo-self-hosted-fallback"
+            break
+        fi
     done
+    if [ "${SIMPLE_BIN:-}" = "" ] && [ "${ALLOW_PATH_SIMPLE_BIN:-0}" = "1" ] && command -v simple >/dev/null 2>&1; then
+        SIMPLE_BIN="$(command -v simple)"
+        SIMPLE_BIN_SOURCE="path-opt-in"
+    fi
+else
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
 fi
-SIMPLE_BIN="${SIMPLE_BIN:-src/compiler_rust/target/release/simple}"
+SIMPLE_BIN="${SIMPLE_BIN:-}"
+if [ "$SIMPLE_BIN" = "" ]; then
+    SIMPLE_BIN_STATUS=missing
+elif is_rust_seed_simple "$SIMPLE_BIN"; then
+    SIMPLE_BIN_STATUS=forbidden
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-rust-seed-forbidden"
+elif [ ! -x "$SIMPLE_BIN" ]; then
+    SIMPLE_BIN_STATUS=missing
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-missing"
+fi
+export SIMPLE_BIN SIMPLE_BIN_SOURCE SIMPLE_BIN_STATUS
 
 TIMEOUT_SECS="${RESPONSIVE_TIMEOUT_SECS:-300}"
 WORK_DIR="${BUILD_DIR:-build/responsive-showcase-evidence}"
@@ -49,10 +86,13 @@ REASON=unknown
 # Guard: binary must exist
 # =========================================================================
 
-if [ ! -x "$SIMPLE_BIN" ]; then
+if [ "$SIMPLE_BIN_STATUS" != "pass" ]; then
     echo "responsive_showcase_status=fail"  >"$STATUS_ENV"
-    echo "responsive_showcase_reason=missing-simple-binary" >>"$STATUS_ENV"
-    echo "FAIL: $SIMPLE_BIN not executable"
+    echo "responsive_showcase_reason=simple-bin-$SIMPLE_BIN_STATUS" >>"$STATUS_ENV"
+    echo "responsive_showcase_simple_bin=$SIMPLE_BIN" >>"$STATUS_ENV"
+    echo "responsive_showcase_simple_bin_source=$SIMPLE_BIN_SOURCE" >>"$STATUS_ENV"
+    echo "responsive_showcase_simple_bin_status=$SIMPLE_BIN_STATUS" >>"$STATUS_ENV"
+    echo "FAIL: simple-bin-$SIMPLE_BIN_STATUS: $SIMPLE_BIN"
     exit 1
 fi
 
@@ -156,6 +196,9 @@ fi
 {
     echo "responsive_showcase_status=pass"
     echo "responsive_showcase_reason=3-viewports-proven"
+    echo "responsive_showcase_simple_bin=$SIMPLE_BIN"
+    echo "responsive_showcase_simple_bin_source=$SIMPLE_BIN_SOURCE"
+    echo "responsive_showcase_simple_bin_status=$SIMPLE_BIN_STATUS"
     echo "responsive_showcase_cpu_bottom=$HAS_BOTTOM"
     echo "responsive_showcase_cpu_rail=$HAS_RAIL"
     echo "responsive_showcase_cpu_sidebar=$HAS_SIDEBAR"
