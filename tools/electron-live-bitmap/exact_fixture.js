@@ -25,6 +25,8 @@ const capturedArgbPath = process.env.ELECTRON_BITMAP_CAPTURED_ARGB_PATH || "";
 const proofPath = process.env.ELECTRON_BITMAP_PROOF_PATH || "";
 const htmlPath = process.env.ELECTRON_BITMAP_HTML_PATH || "";
 const scene = process.env.ELECTRON_BITMAP_SCENE || "wm-image-taskbar-command";
+const captureBackend = "electron-offscreen-capture-page";
+const compositorMode = "offscreen-osr-exact-srgb";
 let expectedArgb = null;
 let generatedGuiTextNormalizationPixels = 0;
 
@@ -825,6 +827,9 @@ async function main() {
 
   const expected = expectedChecksum > 0n ? expectedChecksum : expectedFrameChecksum();
   const expectedWeighted = expectedWeightedChecksum > 0n ? expectedWeightedChecksum : weightedChecksum(expectedFramePixels());
+  const gpuFeatureStatus = app.getGPUFeatureStatus();
+  const gpuCompositing = typeof gpuFeatureStatus.gpu_compositing === "string" ? gpuFeatureStatus.gpu_compositing : "";
+  const gpuRasterization = typeof gpuFeatureStatus.rasterization === "string" ? gpuFeatureStatus.rasterization : "";
   let last = { sum: 0n, weighted: 0n, mismatches: width * height };
   let capture = { nativeWidth: width, nativeHeight: height, downsampled: false };
   const start = process.hrtime.bigint();
@@ -838,6 +843,10 @@ async function main() {
   const wroteCapturedArgb = writeCapturedArgb(last.capturedPixels);
 
   emit("renderer", "electron-live-capture-page");
+  emit("capture_backend", captureBackend);
+  emit("compositor_mode", compositorMode);
+  emit("gpu_compositing", gpuCompositing);
+  emit("gpu_rasterization", gpuRasterization);
   emit("scene", scene);
   emit("width", width);
   emit("height", height);
@@ -859,6 +868,11 @@ async function main() {
     fs.writeFileSync(proofPath, JSON.stringify({
       renderer: "electron-live-capture-page",
       proof_source: "tools/electron-live-bitmap/exact_fixture.js",
+      capture_backend: captureBackend,
+      compositor_mode: compositorMode,
+      gpu_feature_status: gpuFeatureStatus,
+      gpu_compositing: gpuCompositing,
+      gpu_rasterization: gpuRasterization,
       scene,
       width,
       height,

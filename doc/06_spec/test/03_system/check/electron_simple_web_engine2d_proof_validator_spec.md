@@ -27,7 +27,7 @@ electron_simple_web_engine2d_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 11 | 11 | 0 | 0 |
+| 12 | 12 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -72,6 +72,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_simple_web_engine2d
 
 - Complete Electron Simple Web Engine2D proof JSON validates and emits
   normalized `electron_simple_web_engine2d_*` rows.
+- Complete proofs must identify the Electron offscreen capture backend,
+  compositor mode, and Chromium GPU feature-status diagnostics.
 - Large integer checksum values compare exactly, without JavaScript number
   rounding.
 - Malformed `frame_us`, malformed mismatch counts, blur/tolerance use, missing
@@ -109,7 +111,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_simple_web_engine2d
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 34 lines folded for reproduction.
+Runnable source: 38 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -126,6 +128,10 @@ expect(evidence).to_contain("electron_simple_web_engine2d_validation_status=pass
 expect(evidence).to_contain("electron_simple_web_engine2d_validation_reason=pass")
 expect(evidence).to_contain("electron_simple_web_engine2d_renderer=electron-live-capture-page")
 expect(evidence).to_contain("electron_simple_web_engine2d_proof_source=tools/electron-live-bitmap/exact_fixture.js")
+expect(evidence).to_contain("electron_simple_web_engine2d_capture_backend=electron-offscreen-capture-page")
+expect(evidence).to_contain("electron_simple_web_engine2d_compositor_mode=offscreen-osr-exact-srgb")
+expect(evidence).to_contain("electron_simple_web_engine2d_gpu_compositing=disabled_software")
+expect(evidence).to_contain("electron_simple_web_engine2d_gpu_rasterization=disabled_software")
 expect(evidence).to_contain("electron_simple_web_engine2d_scene=simple-web-engine2d-image-taskbar-command")
 expect(evidence).to_contain("electron_simple_web_engine2d_simple_checksum=18446744073709551610")
 expect(evidence).to_contain("electron_simple_web_engine2d_electron_weighted_checksum=18446744073709551611")
@@ -186,6 +192,53 @@ expect(renderer).to_contain("electron_simple_web_engine2d_validation_reason=unex
 expect(source).to_contain("electron_simple_web_engine2d_validation_reason=unexpected-proof-source")
 expect(source).to_contain("electron_simple_web_engine2d_proof_source=tools/manual/proof.json")
 expect(scene).to_contain("electron_simple_web_engine2d_validation_reason=unexpected-electron-scene")
+```
+
+</details>
+
+#### rejects missing Electron capture backend and GPU feature diagnostics
+
+-  proof command
+-  proof command
+-  proof command
+-  proof command
+   - Expected: code equals `1`
+- Confirm Engine2D proof carries capture backend and GPU diagnostics
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 26 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-electron-engine2d-validator-backend"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_command(root + "/backend.json", "p.capture_backend=\"manual-json\"") +
+    " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/backend.json > " + root + "/backend.env; " +
+    _proof_command(root + "/mode.json", "p.compositor_mode=\"unknown\"") +
+    " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/mode.json > " + root + "/mode.env; " +
+    _proof_command(root + "/gpu.json", "delete p.gpu_feature_status") +
+    " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/gpu.json > " + root + "/gpu.env; " +
+    _proof_command(root + "/gpu-mismatch.json", "p.gpu_feature_status.gpu_compositing=\"enabled\"") +
+    " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/gpu-mismatch.json > " + root + "/gpu-mismatch.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val backend = file_read(root + "/backend.env")
+val mode = file_read(root + "/mode.env")
+val gpu_env = file_read(root + "/gpu.env")
+val gpu_mismatch = file_read(root + "/gpu-mismatch.env")
+step("Confirm Engine2D proof carries capture backend and GPU diagnostics")
+expect(backend).to_contain("electron_simple_web_engine2d_validation_reason=unexpected-capture-backend")
+expect(backend).to_contain("electron_simple_web_engine2d_capture_backend=manual-json")
+expect(mode).to_contain("electron_simple_web_engine2d_validation_reason=unexpected-compositor-mode")
+expect(mode).to_contain("electron_simple_web_engine2d_compositor_mode=unknown")
+expect(gpu_env).to_contain("electron_simple_web_engine2d_validation_reason=missing-gpu-feature-status")
+expect(gpu_env).to_contain("electron_simple_web_engine2d_gpu_compositing=disabled_software")
+expect(gpu_mismatch).to_contain("electron_simple_web_engine2d_validation_reason=missing-gpu-feature-status")
+expect(gpu_mismatch).to_contain("electron_simple_web_engine2d_gpu_compositing=disabled_software")
 ```
 
 </details>
@@ -542,7 +595,7 @@ expect(pixel).to_contain("electron_simple_web_engine2d_mismatch_count=4")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -551,6 +604,10 @@ expect(script).to_contain("validate-electron-simple-web-engine2d-proof.js")
 expect(script).to_contain("cat \"$VALIDATED_ENV\"")
 expect(script).to_contain("electron_simple_web_engine2d_validation_status")
 expect(script).to_contain("electron_simple_web_engine2d_capture_native_width")
+expect(script).to_contain("electron_simple_web_engine2d_capture_backend")
+expect(script).to_contain("electron_simple_web_engine2d_compositor_mode")
+expect(script).to_contain("electron_simple_web_engine2d_gpu_compositing")
+expect(script).to_contain("electron_simple_web_engine2d_gpu_rasterization")
 expect(script).to_contain("electron_simple_web_engine2d_proof_source")
 expect(script).to_contain("electron_simple_web_engine2d_proof_iterations")
 expect(script).to_contain("electron_simple_web_engine2d_estimated_fps_floor")
@@ -567,8 +624,8 @@ expect(script).to_contain("electron-proof.validation.env")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 11 |
-| Active scenarios | 11 |
+| Total scenarios | 12 |
+| Active scenarios | 12 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
