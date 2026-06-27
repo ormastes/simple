@@ -84,6 +84,9 @@ SIMPLE_LIB=src bin/simple test/03_system/check/production_gui_web_renderer_parit
   top-level parity proof cannot pass on shallow event counts alone.
 - The wrapper promotes and requires event-routing proof symlink status so a
   symlinked JSON proof cannot satisfy production parity.
+- The wrapper independently classifies the event-routing proof source file so
+  hardlinked, symlinked, missing, or size-mismatched sources cannot satisfy
+  production parity.
 - Promoted Electron event performance and input-to-paint timing rows must be
   positive and no more than 1000 ms before production parity can pass.
 - Backend-executed performance rows must include a positive sample count,
@@ -222,6 +225,9 @@ expect(script).to_contain("production_gui_web_renderer_parity_event_routing_proo
 expect(script).to_contain("production_gui_web_renderer_parity_event_routing_proof_source")
 expect(script).to_contain("production_gui_web_renderer_parity_event_routing_proof_source_file_status")
 expect(script).to_contain("production_gui_web_renderer_parity_event_routing_proof_source_size_bytes")
+expect(script).to_contain("production_gui_web_renderer_parity_event_routing_proof_source_actual_size_bytes")
+expect(script).to_contain("production_gui_web_renderer_parity_event_routing_proof_source_file_reason")
+expect(script).to_contain("production_gui_web_renderer_parity_event_routing_proof_source_artifact_status")
 expect(script).to_contain("production_gui_web_renderer_parity_event_routing_browser_engine")
 expect(script).to_contain("production_gui_web_renderer_parity_event_routing_electron_user_agent")
 expect(script).to_contain("production_gui_web_renderer_parity_event_routing_electron_process_version")
@@ -244,9 +250,15 @@ expect(script).to_contain("production_gui_web_renderer_parity_event_routing_blur
 expect(script).to_contain("[ \"$validation_status\" = \"pass\" ]")
 expect(script).to_contain("[ \"$proof_symlink_status\" = \"pass\" ]")
 expect(script).to_contain("[ \"$proof_source_file_status\" = \"pass\" ]")
+expect(script).to_contain("[ \"$proof_source_artifact_status\" = \"pass\" ]")
 expect(script).to_contain("num_at_least \"$proof_source_size_bytes\" 1")
 expect(script).to_contain("event_proof_source_file_status_final")
 expect(script).to_contain("event_proof_source_size_bytes_final")
+expect(script).to_contain("event_proof_source_actual_size_bytes_final")
+expect(script).to_contain("event_proof_source_file_reason_final")
+expect(script).to_contain("event_proof_source_artifact_status_final")
+expect(script).to_contain("event-routing-proof-source-hardlink")
+expect(script).to_contain("event-routing-proof-source-size-mismatch")
 expect(script).to_contain("host_wm_pointer:down,window_cmd:focus,window_cmd:move,window_cmd:title_command,window_cmd:maximize,input_event:text_input,input_event:pointer_down,input_event:pointer_up")
 expect(script).to_contain("[ \"$expected_move_x\" = \"$move_payload_x\" ]")
 expect(script).to_contain("[ \"$move_payload_source\" = \"native_event\" ]")
@@ -445,6 +457,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val root = "build/test-production-gui-web-renderer-parity-bounded-stdout"
 val command = "rm -rf " + root + " && mkdir -p " + root + "/fixture && " +
+    "rm -f fixture-event-proof-hardlink.js && printf '12345678901234567890123' > fixture-event-proof.js && " +
     "printf '#!/bin/sh\\nmkdir -p \"$BUILD_ROOT\"\\nprintf \"electron_generated_gui_web_matrix_status=pass\\\\nelectron_generated_gui_web_matrix_reason=pass\\\\nelectron_generated_gui_web_matrix_verbose_marker=stored-only\\\\n\" > \"$BUILD_ROOT/evidence.env\"\\n' > " + root + "/fixture/matrix.sh && " +
     "printf '#!/bin/sh\\nmkdir -p \"$BUILD_DIR\"\\nprintf \"electron_simple_web_layout_manifest_status=fail\\\\nelectron_simple_web_layout_manifest_reason=fixture-layout-fail\\\\nelectron_simple_web_layout_manifest_verbose_marker=stored-only\\\\n\" > \"$BUILD_DIR/evidence.env\"\\nexit 1\\n' > " + root + "/fixture/layout.sh && " +
     "PRODUCTION_GUI_WEB_RENDERER_PARITY_MATRIX_SCRIPT=" + root + "/fixture/matrix.sh PRODUCTION_GUI_WEB_RENDERER_PARITY_LAYOUT_SCRIPT=" + root + "/fixture/layout.sh BUILD_ROOT=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-production-gui-web-renderer-parity-evidence.shs || true"
@@ -456,7 +469,7 @@ expect(evidence).to_contain("matrix_electron_generated_gui_web_matrix_verbose_ma
 expect(evidence).to_contain("layout_electron_simple_web_layout_manifest_verbose_marker=stored-only")
 expect(stdout).to_contain("production_gui_web_renderer_parity_status=fail")
 expect(stdout).to_contain("production_gui_web_renderer_parity_layout_manifest_status=fail")
-expect(stdout.contains("verbose_marker=stored-only")).to_equal(false)
+expect_not(stdout.contains("verbose_marker=stored-only"))
 expect(stdout.length()).to_be_less_than(800)
 ```
 
@@ -672,6 +685,9 @@ expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_st
 expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_validation_status=pass")
 expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_proof_source_file_status=pass")
 expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_proof_source_size_bytes=23")
+expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_proof_source_actual_size_bytes=23")
+expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_proof_source_file_reason=pass")
+expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_proof_source_artifact_status=pass")
 expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_focus_count=1")
 expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_pointer_down_count=1")
 expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_performance_now_delta_ms=16.7")
@@ -708,6 +724,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val root = "build/test-production-gui-web-renderer-parity-event-high-timing"
 val command = "rm -rf " + root + " && mkdir -p " + root + "/fixture && " +
+    "rm -f fixture-event-proof-hardlink.js && printf '12345678901234567890123' > fixture-event-proof.js && " +
     "printf '#!/bin/sh\\nmkdir -p \"$BUILD_ROOT\"\\nprintf \"electron_generated_gui_web_matrix_status=pass\\\\nelectron_generated_gui_web_matrix_reason=pass\\\\n\" > \"$BUILD_ROOT/evidence.env\"\\n' > " + root + "/fixture/matrix.sh && " +
     "printf '#!/bin/sh\\nmkdir -p \"$BUILD_DIR\"\\nprintf \"electron_simple_web_layout_manifest_status=pass\\\\nelectron_simple_web_layout_manifest_reason=pass\\\\nelectron_simple_web_layout_manifest_case_count=1\\\\nelectron_simple_web_layout_manifest_pass_count=1\\\\nelectron_simple_web_layout_manifest_tracked_count=0\\\\nelectron_simple_web_layout_manifest_fail_count=0\\\\nelectron_simple_web_layout_manifest_dependency_status=pass\\\\nelectron_simple_web_layout_manifest_dependency_reason=pass\\\\nelectron_simple_web_layout_manifest_dependency_missing_count=0\\\\n\" > \"$BUILD_DIR/evidence.env\"\\n' > " + root + "/fixture/layout.sh && " +
     "printf '#!/bin/sh\\nmkdir -p \"$BUILD_DIR\"\\nprintf \"tauri_chrome_simple_web_layout_manifest_status=pass\\\\ntauri_chrome_simple_web_layout_manifest_reason=pass\\\\ntauri_chrome_simple_web_layout_manifest_host_uname_s=Darwin\\\\ntauri_chrome_simple_web_layout_manifest_host_uname_m=arm64\\\\ntauri_chrome_simple_web_layout_manifest_electron_capture_status=pass\\\\ntauri_chrome_simple_web_layout_manifest_tauri_capture_status=pass\\\\ntauri_chrome_simple_web_layout_manifest_tauri_capture_backend=macos-wkwebview-snapshot\\\\ntauri_chrome_simple_web_layout_manifest_tauri_capture_required_commands=swift,node\\\\ntauri_chrome_simple_web_layout_manifest_tauri_capture_missing_commands=\\\\ntauri_chrome_simple_web_layout_manifest_chrome_capture_status=pass\\\\ntauri_chrome_simple_web_layout_manifest_chrome_capture_backend=chrome-live-bitmap\\\\ntauri_chrome_simple_web_layout_manifest_tauri_live_capture=true\\\\ntauri_chrome_simple_web_layout_manifest_chrome_live_capture=true\\\\ntauri_chrome_simple_web_layout_manifest_tauri_case_count=1\\\\ntauri_chrome_simple_web_layout_manifest_tauri_pass_count=1\\\\ntauri_chrome_simple_web_layout_manifest_tauri_tracked_count=0\\\\ntauri_chrome_simple_web_layout_manifest_tauri_fail_count=0\\\\ntauri_chrome_simple_web_layout_manifest_chrome_case_count=1\\\\ntauri_chrome_simple_web_layout_manifest_chrome_pass_count=1\\\\ntauri_chrome_simple_web_layout_manifest_chrome_tracked_count=0\\\\ntauri_chrome_simple_web_layout_manifest_chrome_fail_count=0\\\\ntauri_chrome_simple_web_layout_manifest_tauri_mismatch_count=0\\\\ntauri_chrome_simple_web_layout_manifest_chrome_mismatch_count=0\\\\ntauri_chrome_simple_web_layout_manifest_no_fake_capture=true\\\\ntauri_chrome_simple_web_layout_manifest_blur_or_tolerance_used=false\\\\n\" > \"$BUILD_DIR/evidence.env\"\\n' > " + root + "/fixture/surface.sh && " +
@@ -726,6 +743,9 @@ expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_st
 expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_validation_status=pass")
 expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_proof_source_file_status=pass")
 expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_proof_source_size_bytes=23")
+expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_proof_source_actual_size_bytes=23")
+expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_proof_source_file_reason=pass")
+expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_proof_source_artifact_status=pass")
 expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_performance_now_delta_ms=1001")
 expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_input_to_paint_ms=1001")
 expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_animation_frame_count=2")
@@ -743,6 +763,9 @@ expect(animation_evidence).to_contain("production_gui_web_renderer_parity_event_
 expect(animation_evidence).to_contain("production_gui_web_renderer_parity_event_routing_validation_status=pass")
 expect(animation_evidence).to_contain("production_gui_web_renderer_parity_event_routing_proof_source_file_status=pass")
 expect(animation_evidence).to_contain("production_gui_web_renderer_parity_event_routing_proof_source_size_bytes=23")
+expect(animation_evidence).to_contain("production_gui_web_renderer_parity_event_routing_proof_source_actual_size_bytes=23")
+expect(animation_evidence).to_contain("production_gui_web_renderer_parity_event_routing_proof_source_file_reason=pass")
+expect(animation_evidence).to_contain("production_gui_web_renderer_parity_event_routing_proof_source_artifact_status=pass")
 expect(animation_evidence).to_contain("production_gui_web_renderer_parity_event_routing_performance_now_delta_ms=16.7")
 expect(animation_evidence).to_contain("production_gui_web_renderer_parity_event_routing_input_to_paint_ms=18.4")
 expect(animation_evidence).to_contain("production_gui_web_renderer_parity_event_routing_animation_frame_count=1")
@@ -768,6 +791,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val root = "build/test-production-gui-web-renderer-parity-complete-pass"
 val command = "rm -rf " + root + " && mkdir -p " + root + "/fixture && " +
+    "rm -f fixture-event-proof-hardlink.js && printf '12345678901234567890123' > fixture-event-proof.js && " +
     "printf '#!/bin/sh\\nmkdir -p \"$BUILD_ROOT\"\\nprintf \"electron_generated_gui_web_matrix_status=pass\\\\nelectron_generated_gui_web_matrix_reason=pass\\\\n\" > \"$BUILD_ROOT/evidence.env\"\\n' > " + root + "/fixture/matrix.sh && " +
     "printf '#!/bin/sh\\nmkdir -p \"$BUILD_DIR\"\\nprintf \"electron_simple_web_layout_manifest_status=pass\\\\nelectron_simple_web_layout_manifest_reason=pass\\\\nelectron_simple_web_layout_manifest_case_count=3\\\\nelectron_simple_web_layout_manifest_pass_count=3\\\\nelectron_simple_web_layout_manifest_tracked_count=0\\\\nelectron_simple_web_layout_manifest_fail_count=0\\\\nelectron_simple_web_layout_manifest_dependency_status=pass\\\\nelectron_simple_web_layout_manifest_dependency_reason=pass\\\\nelectron_simple_web_layout_manifest_dependency_missing_count=0\\\\n\" > \"$BUILD_DIR/evidence.env\"\\n' > " + root + "/fixture/layout.sh && " +
     "printf '#!/bin/sh\\nmkdir -p \"$BUILD_DIR\"\\nprintf \"tauri_chrome_simple_web_layout_manifest_status=pass\\\\ntauri_chrome_simple_web_layout_manifest_reason=pass\\\\ntauri_chrome_simple_web_layout_manifest_host_uname_s=Darwin\\\\ntauri_chrome_simple_web_layout_manifest_host_uname_m=arm64\\\\ntauri_chrome_simple_web_layout_manifest_electron_capture_status=pass\\\\ntauri_chrome_simple_web_layout_manifest_tauri_capture_status=pass\\\\ntauri_chrome_simple_web_layout_manifest_tauri_capture_reason=pass\\\\ntauri_chrome_simple_web_layout_manifest_tauri_capture_backend=macos-wkwebview-snapshot\\\\ntauri_chrome_simple_web_layout_manifest_tauri_capture_required_commands=swift,node\\\\ntauri_chrome_simple_web_layout_manifest_tauri_capture_missing_commands=\\\\ntauri_chrome_simple_web_layout_manifest_chrome_capture_status=pass\\\\ntauri_chrome_simple_web_layout_manifest_chrome_capture_reason=pass\\\\ntauri_chrome_simple_web_layout_manifest_chrome_capture_backend=chrome-live-bitmap\\\\ntauri_chrome_simple_web_layout_manifest_tauri_live_capture=true\\\\ntauri_chrome_simple_web_layout_manifest_chrome_live_capture=true\\\\ntauri_chrome_simple_web_layout_manifest_tauri_case_count=3\\\\ntauri_chrome_simple_web_layout_manifest_tauri_pass_count=3\\\\ntauri_chrome_simple_web_layout_manifest_tauri_tracked_count=0\\\\ntauri_chrome_simple_web_layout_manifest_tauri_fail_count=0\\\\ntauri_chrome_simple_web_layout_manifest_chrome_case_count=3\\\\ntauri_chrome_simple_web_layout_manifest_chrome_pass_count=3\\\\ntauri_chrome_simple_web_layout_manifest_chrome_tracked_count=0\\\\ntauri_chrome_simple_web_layout_manifest_chrome_fail_count=0\\\\ntauri_chrome_simple_web_layout_manifest_tauri_mismatch_count=0\\\\ntauri_chrome_simple_web_layout_manifest_chrome_mismatch_count=0\\\\ntauri_chrome_simple_web_layout_manifest_no_fake_capture=true\\\\ntauri_chrome_simple_web_layout_manifest_blur_or_tolerance_used=false\\\\n\" > \"$BUILD_DIR/evidence.env\"\\n' > " + root + "/fixture/surface.sh && " +
@@ -810,6 +834,9 @@ expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_pr
 expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_proof_source=fixture-event-proof.js")
 expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_proof_source_file_status=pass")
 expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_proof_source_size_bytes=23")
+expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_proof_source_actual_size_bytes=23")
+expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_proof_source_file_reason=pass")
+expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_proof_source_artifact_status=pass")
 expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_browser_engine=chromium")
 expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_electron_user_agent=Mozilla/5.0 Chrome/142.0.0.0 Electron/42.5.0 Safari/537.36")
 expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_electron_process_version=42.5.0")
@@ -824,6 +851,20 @@ expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_ti
 expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_title_input_background=rgb(241, 245, 249)")
 expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_close_button_background=rgb(239, 68, 68)")
 expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_blur_or_tolerance_used=false")
+
+val hardlinked_proof_command = "rm -f fixture-event-proof-hardlink.js && ln fixture-event-proof.js fixture-event-proof-hardlink.js && " +
+    "perl -0pi -e 's/wm_browser_event_routing_proof_source=fixture-event-proof\\.js/wm_browser_event_routing_proof_source=fixture-event-proof-hardlink.js/g' " + root + "/fixture/event.sh && " +
+    "PRODUCTION_GUI_WEB_RENDERER_PARITY_MATRIX_SCRIPT=" + root + "/fixture/matrix.sh PRODUCTION_GUI_WEB_RENDERER_PARITY_LAYOUT_SCRIPT=" + root + "/fixture/layout.sh PRODUCTION_GUI_WEB_RENDERER_PARITY_SURFACE_SCRIPT=" + root + "/fixture/surface.sh PRODUCTION_GUI_WEB_RENDERER_PARITY_BACKEND_SCRIPT=" + root + "/fixture/backend.sh PRODUCTION_GUI_WEB_RENDERER_PARITY_FONT_OFFLOAD_SCRIPT=" + root + "/fixture/font.sh PRODUCTION_GUI_WEB_RENDERER_PARITY_METAL_READBACK_SCRIPT=" + root + "/fixture/metal.sh PRODUCTION_GUI_WEB_RENDERER_PARITY_EVENT_SCRIPT=" + root + "/fixture/event.sh BUILD_ROOT=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-production-gui-web-renderer-parity-evidence.shs || true"
+val (_hardlinked_proof_stdout, _hardlinked_proof_stderr, hardlinked_proof_code) = process_run("/bin/sh", ["-c", hardlinked_proof_command])
+expect(hardlinked_proof_code).to_equal(0)
+
+val hardlinked_proof = file_read(root + "/out/evidence.env")
+expect(hardlinked_proof).to_contain("production_gui_web_renderer_parity_status=fail")
+expect(hardlinked_proof).to_contain("production_gui_web_renderer_parity_reason=event-routing-proof-source-hardlink")
+expect(hardlinked_proof).to_contain("production_gui_web_renderer_parity_event_routing_proof_source=fixture-event-proof-hardlink.js")
+expect(hardlinked_proof).to_contain("production_gui_web_renderer_parity_event_routing_proof_source_actual_size_bytes=23")
+expect(hardlinked_proof).to_contain("production_gui_web_renderer_parity_event_routing_proof_source_file_reason=hardlink")
+expect(hardlinked_proof).to_contain("production_gui_web_renderer_parity_event_routing_proof_source_artifact_status=fail")
 
 val missing_timing_command = command.replace("production_gui_backend_sample_count=3\\\\nproduction_gui_backend_total_elapsed_us_min=90\\\\nproduction_gui_backend_total_elapsed_us_avg=100\\\\nproduction_gui_backend_total_elapsed_us_max=120\\\\nproduction_gui_backend_total_pixels_per_second_min=2000000\\\\nproduction_gui_backend_total_pixels_per_second_avg=2400000\\\\nproduction_gui_backend_total_pixels_per_second_max=2800000\\\\n", "") + " || true"
 val (_missing_timing_stdout, _missing_timing_stderr, missing_timing_code) = process_run("/bin/sh", ["-c", missing_timing_command])

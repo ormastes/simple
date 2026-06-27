@@ -92,6 +92,61 @@ field_of() {
     sed -n "s/^${key}=//p" "$file" | tail -n 1
 }
 
+file_size_bytes() {
+    path="$1"
+    if [ -f "$path" ]; then
+        wc -c <"$path" | tr -d '[:space:]'
+    else
+        echo ""
+    fi
+}
+
+file_link_count() {
+    path="$1"
+    if command -v stat >/dev/null 2>&1; then
+        count="$(stat -f '%l' "$path" 2>/dev/null || stat -c '%h' "$path" 2>/dev/null || true)"
+        case "$count" in
+            ''|*[!0-9]*) echo "" ;;
+            *) echo "$count" ;;
+        esac
+    else
+        echo ""
+    fi
+}
+
+artifact_file_reason() {
+    path="$1"
+    expected_size="$2"
+    if [ -n "$path" ] && [ -L "$path" ]; then
+        echo symlink
+        return
+    fi
+    if [ -z "$path" ] || [ ! -s "$path" ]; then
+        echo missing
+        return
+    fi
+    link_count="$(file_link_count "$path")"
+    if [ -n "$link_count" ] && [ "$link_count" -gt 1 ]; then
+        echo hardlink
+        return
+    fi
+    actual_size="$(file_size_bytes "$path")"
+    if [ -n "$expected_size" ] && [ "$actual_size" != "$expected_size" ]; then
+        echo size-mismatch
+        return
+    fi
+    echo pass
+}
+
+artifact_file_status() {
+    reason="$1"
+    if [ "$reason" = "pass" ]; then
+        echo pass
+    else
+        echo fail
+    fi
+}
+
 append_prefixed_env() {
     prefix="$1"
     file="$2"
@@ -739,6 +794,9 @@ run_event_routing() {
     proof_source=""
     proof_source_file_status=""
     proof_source_size_bytes=""
+    proof_source_actual_size_bytes=""
+    proof_source_file_reason="not-run"
+    proof_source_artifact_status="unavailable"
     browser_engine=""
     electron_user_agent=""
     electron_process_version=""
@@ -804,6 +862,9 @@ run_event_routing() {
         result_path="$(field_of wm_browser_event_routing_result_path "$env_file")"
         tolerance="$(field_of wm_browser_event_routing_blur_or_tolerance_used "$env_file")"
     fi
+    proof_source_actual_size_bytes="$(file_size_bytes "$proof_source")"
+    proof_source_file_reason="$(artifact_file_reason "$proof_source" "$proof_source_size_bytes")"
+    proof_source_artifact_status="$(artifact_file_status "$proof_source_file_reason")"
     if [ "$code" -eq 124 ]; then
         event_status=timeout
         event_reason=event-routing-timeout
@@ -863,6 +924,9 @@ run_event_routing() {
         echo "production_gui_web_renderer_parity_event_routing_proof_source=$proof_source"
         echo "production_gui_web_renderer_parity_event_routing_proof_source_file_status=$proof_source_file_status"
         echo "production_gui_web_renderer_parity_event_routing_proof_source_size_bytes=$proof_source_size_bytes"
+        echo "production_gui_web_renderer_parity_event_routing_proof_source_actual_size_bytes=$proof_source_actual_size_bytes"
+        echo "production_gui_web_renderer_parity_event_routing_proof_source_file_reason=$proof_source_file_reason"
+        echo "production_gui_web_renderer_parity_event_routing_proof_source_artifact_status=$proof_source_artifact_status"
         echo "production_gui_web_renderer_parity_event_routing_browser_engine=$browser_engine"
         echo "production_gui_web_renderer_parity_event_routing_electron_user_agent=$electron_user_agent"
         echo "production_gui_web_renderer_parity_event_routing_electron_process_version=$electron_process_version"
@@ -874,7 +938,8 @@ run_event_routing() {
     append_prefixed_env "event_" "$env_file"
     [ "$code" -eq 0 ] && [ "$event_status" = "pass" ] && [ "$validation_status" = "pass" ] && \
         [ "$proof_symlink_status" = "pass" ] && \
-        [ "$proof_source_file_status" = "pass" ] && num_at_least "$proof_source_size_bytes" 1 && \
+        [ "$proof_source_file_status" = "pass" ] && [ "$proof_source_artifact_status" = "pass" ] && \
+        num_at_least "$proof_source_size_bytes" 1 && \
         [ "$ready" = "true" ] && [ "$wm_found" = "true" ] && \
         num_at_least "$focus_count" 1 && num_at_least "$move_count" 1 && num_at_least "$maximize_count" 1 && \
         num_at_least "$title_command_count" 1 && num_at_least "$text_input_count" 1 && \
@@ -1025,6 +1090,9 @@ event_title_command_text_final="$(field_of production_gui_web_renderer_parity_ev
 event_text_input_text_final="$(field_of production_gui_web_renderer_parity_event_routing_text_input_text "$BUILD_ROOT/evidence.env")"
 event_proof_source_file_status_final="$(field_of production_gui_web_renderer_parity_event_routing_proof_source_file_status "$BUILD_ROOT/evidence.env")"
 event_proof_source_size_bytes_final="$(field_of production_gui_web_renderer_parity_event_routing_proof_source_size_bytes "$BUILD_ROOT/evidence.env")"
+event_proof_source_actual_size_bytes_final="$(field_of production_gui_web_renderer_parity_event_routing_proof_source_actual_size_bytes "$BUILD_ROOT/evidence.env")"
+event_proof_source_file_reason_final="$(field_of production_gui_web_renderer_parity_event_routing_proof_source_file_reason "$BUILD_ROOT/evidence.env")"
+event_proof_source_artifact_status_final="$(field_of production_gui_web_renderer_parity_event_routing_proof_source_artifact_status "$BUILD_ROOT/evidence.env")"
 event_tolerance_final="$(field_of production_gui_web_renderer_parity_event_routing_blur_or_tolerance_used "$BUILD_ROOT/evidence.env")"
 
 if [ "$matrix_status_final" != "pass" ]; then
@@ -1057,8 +1125,17 @@ elif [ "$metal_status_final" != "pass" ] && [ "$metal_reason_final" != "metal-re
 elif [ "$event_exit_code_final" != "0" ] || [ "$event_status_final" != "pass" ]; then
     status=fail
     reason=event-routing-evidence-failed
+elif [ "$event_proof_source_artifact_status_final" != "pass" ]; then
+    status=fail
+    case "$event_proof_source_file_reason_final" in
+        symlink) reason=event-routing-proof-source-symlink ;;
+        hardlink) reason=event-routing-proof-source-hardlink ;;
+        size-mismatch) reason=event-routing-proof-source-size-mismatch ;;
+        *) reason=event-routing-proof-source-artifact-missing ;;
+    esac
 elif [ "$event_validation_status_final" != "pass" ] || [ "$event_proof_symlink_status_final" != "pass" ] || \
     [ "$event_proof_source_file_status_final" != "pass" ] || ! num_at_least "$event_proof_source_size_bytes_final" 1 || \
+    [ "$event_proof_source_actual_size_bytes_final" != "$event_proof_source_size_bytes_final" ] || \
     [ "$event_ready_final" != "true" ] || [ "$event_wm_found_final" != "true" ] || \
     ! num_at_least "$event_focus_count_final" 1 || ! num_at_least "$event_move_count_final" 1 || ! num_at_least "$event_maximize_count_final" 1 || \
     ! num_at_least "$event_title_command_count_final" 1 || ! num_at_least "$event_text_input_count_final" 1 || \
