@@ -113,7 +113,8 @@ if (proof.target !== 'electron') {
   proof.event_dispatch_available !== true ||
   !integerNumberAtLeast(proof.event_dispatch_count, 1) ||
   proof.event_dispatch_type !== 'simple-electron-live-smoke-event' ||
-  proof.event_dispatch_detail !== 'live-smoke-input'
+  proof.event_dispatch_detail !== 'live-smoke-input' ||
+  textSample(proof.event_dispatch_error).length > 0
 ) {
   reason = 'missing-event-dispatch';
 } else if (proof.blur_or_tolerance_used !== false) {

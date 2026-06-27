@@ -87,6 +87,9 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_live_smoke_proof_va
 - The proof must include a renderer-side event dispatch result with the expected
   live smoke event type and detail so passive DOM snapshots cannot stand in for
   event handling proof.
+- Renderer-side event dispatch proof must not carry a nonempty dispatch error;
+  event counts, types, and details are not enough if the bridge recorded an
+  event error.
 - The rendered text sample must include the live-smoke entry text and must not
   exceed the reported rendered text length.
 - Requested capture viewport dimensions must be explicit decimal integers; the
@@ -371,6 +374,7 @@ expect(css).to_contain("electron_live_smoke_validation_reason=missing-css-animat
 -  proof command
 -  proof command
 -  proof command
+-  proof command
    - Expected: code equals `1`
 - Confirm Electron live smoke needs renderer event dispatch evidence
 
@@ -378,7 +382,7 @@ expect(css).to_contain("electron_live_smoke_validation_reason=missing-css-animat
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 28 lines folded for reproduction.
+Runnable source: 36 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -391,7 +395,9 @@ val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
     _proof_command(root + "/type.json", "p.event_dispatch_type=\"manual-event\"") +
     " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/type.json 1280 720 > " + root + "/type.env; " +
     _proof_command(root + "/detail.json", "p.event_dispatch_detail=\"stale\"") +
-    " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/detail.json 1280 720 > " + root + "/detail.env"
+    " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/detail.json 1280 720 > " + root + "/detail.env; " +
+    _proof_command(root + "/error.json", "p.event_dispatch_error=\"dispatch failed\"") +
+    " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/error.json 1280 720 > " + root + "/error.env"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(1)
 
@@ -399,6 +405,7 @@ val available = file_read(root + "/available.env")
 val count = file_read(root + "/count.env")
 val type = file_read(root + "/type.env")
 val detail = file_read(root + "/detail.env")
+val error = file_read(root + "/error.env")
 step("Confirm Electron live smoke needs renderer event dispatch evidence")
 expect(available).to_contain("electron_live_smoke_validation_status=fail")
 expect(available).to_contain("electron_live_smoke_validation_reason=missing-event-dispatch")
@@ -410,6 +417,11 @@ expect(type).to_contain("electron_live_smoke_event_dispatch_type=manual-event")
 expect(detail).to_contain("electron_live_smoke_validation_reason=missing-event-dispatch")
 expect(detail).to_contain("electron_live_smoke_event_dispatch_detail=stale")
 expect(detail).to_contain("electron_live_smoke_event_dispatch_error=")
+expect(error).to_contain("electron_live_smoke_validation_reason=missing-event-dispatch")
+expect(error).to_contain("electron_live_smoke_event_dispatch_count=1")
+expect(error).to_contain("electron_live_smoke_event_dispatch_type=simple-electron-live-smoke-event")
+expect(error).to_contain("electron_live_smoke_event_dispatch_detail=live-smoke-input")
+expect(error).to_contain("electron_live_smoke_event_dispatch_error=dispatch failed")
 ```
 
 </details>
