@@ -41,6 +41,9 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_mdi_proof_validator
   frame counts, performance timing deltas, and input-to-paint latency must be
   real JSON numbers; stringified or fractional values are not valid
   routed-event or full-frame proof.
+- Event routing, renderability, performance, and animation booleans must be
+  real JSON booleans; string booleans are rejected and not normalized as
+  `false` diagnostic rows.
 """
 
 # @tag: system, gui, electron, mdi, event-routing, performance, animation
@@ -145,6 +148,44 @@ describe "Electron MDI proof validator":
         expect(taskbar).to_contain("electron_mdi_event_status=fail")
         expect(taskbar).to_contain("electron_mdi_event_taskbar_labels_visible=false")
         expect(taskbar).to_contain("electron_mdi_event_taskbar_icons_visible=true")
+
+    it "rejects string booleans without normalizing them as false diagnostics":
+        val root = "build/test-electron-mdi-validator-string-booleans"
+        val command = "rm -rf " + root + " && mkdir -p " + root + " build/electron-proof && " + _png_capture_command() + " && " +
+            _proof_command(root + "/event.json", "p.bodyClickRouted=\"true\"") +
+            " && node scripts/check/validate-electron-mdi-proof.js " + root + "/event.json build/electron-proof/screen.png > " + root + "/event.env; " +
+            _proof_command(root + "/html.json", "p.htmlRenderable=\"true\"") +
+            " && node scripts/check/validate-electron-mdi-proof.js " + root + "/html.json build/electron-proof/screen.png > " + root + "/html.env; " +
+            _proof_command(root + "/perf.json", "p.performanceNowAvailable=\"true\"") +
+            " && node scripts/check/validate-electron-mdi-proof.js " + root + "/perf.json build/electron-proof/screen.png > " + root + "/perf.env; " +
+            _proof_command(root + "/animation.json", "p.animationFrameAvailable=\"true\";p.cssAnimationProbe=\"true\"") +
+            " && node scripts/check/validate-electron-mdi-proof.js " + root + "/animation.json build/electron-proof/screen.png > " + root + "/animation.env"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(1)
+
+        val event = file_read(root + "/event.env")
+        val html = file_read(root + "/html.env")
+        val perf = file_read(root + "/perf.env")
+        val animation = file_read(root + "/animation.env")
+        step("Confirm string booleans remain malformed diagnostics")
+        expect(event).to_contain("electron_mdi_json_proof=fail")
+        expect(event).to_contain("electron_mdi_json_proof_reason=event-contract-missing:bodyClickRouted")
+        expect(event).to_contain("electron_mdi_event_body_click_routed=")
+        expect(event.contains("electron_mdi_event_body_click_routed=false")).to_equal(false)
+        expect(html).to_contain("electron_mdi_json_proof=fail")
+        expect(html).to_contain("electron_mdi_json_proof_reason=event-contract-missing:htmlRenderable")
+        expect(html).to_contain("electron_mdi_render_html_renderable=")
+        expect(html.contains("electron_mdi_render_html_renderable=false")).to_equal(false)
+        expect(perf).to_contain("electron_mdi_json_proof=fail")
+        expect(perf).to_contain("electron_mdi_json_proof_reason=performance-contract-missing:performanceNowAvailable")
+        expect(perf).to_contain("electron_mdi_performance_now_available=")
+        expect(perf.contains("electron_mdi_performance_now_available=false")).to_equal(false)
+        expect(animation).to_contain("electron_mdi_json_proof=fail")
+        expect(animation).to_contain("electron_mdi_animation_status=fail")
+        expect(animation).to_contain("electron_mdi_animation_frame_available=")
+        expect(animation).to_contain("electron_mdi_css_animation_probe=")
+        expect(animation.contains("electron_mdi_animation_frame_available=false")).to_equal(false)
+        expect(animation.contains("electron_mdi_css_animation_probe=false")).to_equal(false)
 
     it "rejects proof bound to a different screenshot artifact":
         val root = "build/test-electron-mdi-validator-capture"
@@ -395,6 +436,7 @@ describe "Electron MDI proof validator":
         expect(wrapper).to_contain("node \"$VALIDATOR\" \"$PROOF_PATH\" \"$SCREENSHOT_PATH\"")
         expect(wrapper).to_contain("electron-mdi-json-proof-failed")
         val validator = file_read("scripts/check/validate-electron-mdi-proof.js")
+        expect(validator).to_contain("jsonBoolTextOrBlank")
         expect(validator).to_contain("electron_mdi_event_body_click_routed")
         expect(validator).to_contain("electron_mdi_bridge_mouse_up_frame_routed")
         expect(validator).to_contain("electron_mdi_event_taskbar_labels_visible")
