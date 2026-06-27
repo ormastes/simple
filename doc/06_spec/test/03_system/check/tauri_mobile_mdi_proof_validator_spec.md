@@ -27,7 +27,7 @@ tauri_mobile_mdi_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 22 | 22 | 0 | 0 |
+| 23 | 23 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -74,7 +74,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_mobile_mdi_proof_valid
   `{prefix}_mdi_*` rows.
 - Explicitly requested mobile MDI proof source paths must exist and be
   nonempty regular files; a valid companion device log cannot hide a missing,
-  empty, or symlinked requested source artifact.
+  empty, symlinked, or non-regular requested source artifact.
 - When multiple requested device logs contain MDI proof markers, their latest
   proof JSON must agree; conflicting render/event/capture/performance/
   animation proof payloads fail closed instead of letting one log shadow
@@ -291,6 +291,43 @@ expect(evidence).to_contain("ios_mdi_proof_marker_source_count=1")
 expect(evidence).to_contain("ios_mdi_proof_missing_source_count=0")
 expect(evidence).to_contain("ios_mdi_proof_symlink_source_count=1")
 expect(evidence).to_contain("ios_mdi_proof_empty_source_count=0")
+expect(evidence).to_contain("ios_mdi_proof_nonregular_source_count=0")
+```
+
+</details>
+
+#### rejects non regular requested mobile MDI proof log source paths
+
+-  proof log command
+   - Expected: code equals `1`
+- Confirm a valid companion MDI proof log cannot hide a non-regular requested source
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 20 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-tauri-mobile-mdi-validator-nonregular-source"
+val command = "rm -rf " + root + " && mkdir -p " + root + "/not-a-log && " +
+    _proof_log_command(root + "/device.log", "") +
+    " && node scripts/check/validate-tauri-mobile-mdi-proof.js android " + root + "/proof.json " + root + "/device.log " + root + "/not-a-log > " + root + "/evidence.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read(root + "/evidence.env")
+step("Confirm a valid companion MDI proof log cannot hide a non-regular requested source")
+expect(evidence).to_contain("android_mdi_proof_status=fail")
+expect(evidence).to_contain("android_mdi_proof_reason=nonregular-mdi-proof-source")
+expect(evidence).to_contain("android_mdi_proof_requested_source_count=2")
+expect(evidence).to_contain("android_mdi_proof_source_count=1")
+expect(evidence).to_contain("android_mdi_proof_marker_source_count=1")
+expect(evidence).to_contain("android_mdi_proof_missing_source_count=0")
+expect(evidence).to_contain("android_mdi_proof_symlink_source_count=0")
+expect(evidence).to_contain("android_mdi_proof_empty_source_count=0")
+expect(evidence).to_contain("android_mdi_proof_nonregular_source_count=1")
 ```
 
 </details>
@@ -1069,11 +1106,13 @@ val validator = file_read("scripts/check/validate-tauri-mobile-mdi-proof.js")
 expect(validator).to_contain("jsonBoolTextOrBlank")
 expect(ios).to_contain("ios_mdi_proof_empty_source_count")
 expect(ios).to_contain("ios_mdi_proof_symlink_source_count")
+expect(ios).to_contain("ios_mdi_proof_nonregular_source_count")
 expect(ios).to_contain("ios_mdi_proof_marker_source_count")
 expect(ios).to_contain("ios_mdi_proof_marker_source_path")
 expect(ios).to_contain("ios_mdi_proof_marker_source_size_bytes")
 expect(android).to_contain("android_mdi_proof_empty_source_count")
 expect(android).to_contain("android_mdi_proof_symlink_source_count")
+expect(android).to_contain("android_mdi_proof_nonregular_source_count")
 expect(android).to_contain("android_mdi_proof_marker_source_count")
 expect(android).to_contain("android_mdi_proof_marker_source_path")
 expect(android).to_contain("android_mdi_proof_marker_source_size_bytes")
@@ -1083,11 +1122,13 @@ expect(shell).to_contain("devicePixelRatio")
 expect(shell).to_contain("screenOrientation")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_empty_source_count")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_symlink_source_count")
+expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_nonregular_source_count")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_marker_source_count")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_marker_source_path")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_marker_source_size_bytes")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_empty_source_count")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_symlink_source_count")
+expect(aggregate).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_nonregular_source_count")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_marker_source_count")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_marker_source_path")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_marker_source_size_bytes")
@@ -1095,9 +1136,11 @@ expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_mdi_capture_devic
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_android_mdi_capture_screen_orientation")
 expect(aggregate).to_contain("ios-mdi-proof-source-empty")
 expect(aggregate).to_contain("ios-mdi-proof-source-symlink")
+expect(aggregate).to_contain("ios-mdi-proof-source-not-regular")
 expect(aggregate).to_contain("ios-mdi-proof-marker-source-artifact-missing")
 expect(aggregate).to_contain("android-mdi-proof-source-empty")
 expect(aggregate).to_contain("android-mdi-proof-source-symlink")
+expect(aggregate).to_contain("android-mdi-proof-source-not-regular")
 expect(aggregate).to_contain("android-mdi-proof-marker-source-artifact-missing")
 ```
 
@@ -1107,8 +1150,8 @@ expect(aggregate).to_contain("android-mdi-proof-marker-source-artifact-missing")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 22 |
-| Active scenarios | 22 |
+| Total scenarios | 23 |
+| Active scenarios | 23 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
