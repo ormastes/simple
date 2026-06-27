@@ -283,12 +283,14 @@ expect(evidence).to_contain("electron_simple_web_layout_manifest_fail_count=2")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val script = file_read("scripts/check/check-electron-simple-web-layout-manifest-evidence.shs")
 expect(script).to_contain("repo-self-hosted-fallback")
+expect(script).to_contain("\"release\"/*/simple")
+expect(script).to_contain("\"build/bootstrap/stage3/simple\" \\\n        \"bin/simple\"")
 expect(script).to_contain("\"bin/simple\"")
 expect(script).to_contain("\"bin/release\"/*/simple")
 expect(script).to_contain("is_rust_seed_simple")
