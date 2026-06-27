@@ -54,9 +54,10 @@ required, platform render-log comparison, and separate full-CSS closure.
   accept the relevant fresh evidence rows.
 - Current full-CSS evidence keys remain incomplete:
   `html_css_full_rendering_goal_status=incomplete`,
-  `html_css_full_rendering_goal_full_css_rendered_count=133`, and
-  `html_css_full_rendering_goal_full_css_unrendered_count=261`.
-  `aspect-ratio` and `object-fit` are completed narrow implemented-CSS slices.
+  `html_css_full_rendering_goal_full_css_rendered_count=134`, and
+  `html_css_full_rendering_goal_full_css_unrendered_count=260`.
+  `aspect-ratio`, `object-fit`, and `object-position` are completed narrow
+  implemented-CSS slices.
 
 ## Current Parallel Start Status
 
@@ -345,6 +346,7 @@ This session's immediate integration target:
 | WO-10 CSS aspect-ratio slice | Main agent | Low: Spark may only inspect evidence after implementation | Renderer, CSS traceability wrapper, focused unit/system specs, generated docs, report | Focused renderer spec passes, full CSS gate reports implemented CSS `132/132`, and no full-CSS/native-platform completion is claimed |
 | WO-11 CSS object-fit slice | Main agent | Low: Spark may only inspect evidence after implementation | Renderer, CSS traceability wrapper, Electron bitmap evidence fixture, focused unit/system specs, generated docs, report | Focused renderer spec passes, full CSS gate reports implemented CSS `133/133`, and no full-CSS/native-platform completion is claimed |
 | WO-12 Spark restart queue | Main agent or future orchestrator | High: same read-only prompts after quota recovers | None | New Spark outputs are explicitly compared against `Feynman`/`Mill` fallback results and accepted only after `Poincare`-style normal review |
+| WO-13 CSS object-position slice | Main agent | Low: Spark may only inspect evidence after implementation | Renderer, CSS traceability wrapper, Electron bitmap evidence fixture, focused unit/system specs, generated docs, report | Focused renderer spec passes, full CSS gate reports implemented CSS `134/134`, and no full-CSS/native-platform completion is claimed |
 
 WO-12 rule: do not spawn Spark against source-edit scopes until the read-only
 gap/matrix lanes complete and a normal reviewer approves the intended write
@@ -383,6 +385,15 @@ Current evidence is recorded in
 `doc/09_report/html_css_full_rendering_goal_status_object_fit_2026-06-27.md`:
 implemented CSS is `133/133`, full CSS is `133/394`, full CSS unrendered is
 `261`, and unsupported inventory ownership is `268`. This is a completed narrow
+web-renderer slice, not completion evidence for full CSS or native platform
+capture lanes.
+
+WO-13 status, 2026-06-27: `object-position` moved into implemented Simple Web
+CSS with focused contained image-placeholder pixel coverage and full-goal status
+coverage. Current evidence is recorded in
+`doc/09_report/html_css_full_rendering_goal_status_object_position_2026-06-27.md`:
+implemented CSS is `134/134`, full CSS is `134/394`, full CSS unrendered is
+`260`, and unsupported inventory ownership is `267`. This is a completed narrow
 web-renderer slice, not completion evidence for full CSS or native platform
 capture lanes.
 

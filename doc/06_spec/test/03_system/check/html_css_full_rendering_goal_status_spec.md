@@ -97,12 +97,13 @@ sh scripts/check/check-html-css-full-rendering-goal-status.shs
    - Expected: code equals `0`
 - Read the full rendering goal evidence
    - Expected: full_css_total equals `394`
-   - Expected: full_css_rendered equals `133`
-   - Expected: full_css_unrendered equals `261`
-   - Expected: unsupported_inventory equals `268`
-   - Expected: full_css_unrendered_properties.split(",").len() equals `261`
+   - Expected: full_css_rendered equals `134`
+   - Expected: full_css_unrendered equals `260`
+   - Expected: unsupported_inventory equals `267`
+   - Expected: full_css_unrendered_properties.split(",").len() equals `260`
    - Expected: full_css_unrendered_properties does not contain `aspect-ratio`
    - Expected: full_css_unrendered_properties does not contain `object-fit`
+   - Expected: full_css_unrendered_properties does not contain `object-position`
    - Expected: animation_css_unrendered_properties equals ``
 - Verify the operator report names the full CSS gap
 
@@ -110,7 +111,7 @@ sh scripts/check/check-html-css-full-rendering-goal-status.shs
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 77 lines folded for reproduction.
+Runnable source: 78 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -138,8 +139,8 @@ expect(evidence).to_contain("html_css_full_rendering_goal_implemented_css_status
 expect(evidence).to_contain("html_css_full_rendering_goal_all_implemented_css_ready_status=pass")
 expect(evidence).to_contain("html_css_full_rendering_goal_all_implemented_css_ready_reason=pass")
 expect(evidence).to_contain("html_css_full_rendering_goal_implemented_css_scope=implemented-simple-web-css")
-expect(evidence).to_contain("html_css_full_rendering_goal_implemented_css_total_count=133")
-expect(evidence).to_contain("html_css_full_rendering_goal_implemented_css_rendered_count=133")
+expect(evidence).to_contain("html_css_full_rendering_goal_implemented_css_total_count=134")
+expect(evidence).to_contain("html_css_full_rendering_goal_implemented_css_rendered_count=134")
 expect(evidence).to_contain("html_css_full_rendering_goal_implemented_css_missing=")
 expect(evidence).to_contain("html_css_full_rendering_goal_full_css_status=incomplete")
 expect(evidence).to_contain("html_css_full_rendering_goal_all_css_properties_ready_status=incomplete")
@@ -166,12 +167,13 @@ val full_css_unrendered_properties = _value_of(evidence, "html_css_full_renderin
 val animation_css_unrendered_properties = _value_of(evidence, "html_css_full_rendering_goal_animation_css_unrendered_properties")
 val unsupported_inventory = _value_of(evidence, "html_css_full_rendering_goal_unsupported_css_inventory_count")
 expect(full_css_total).to_equal("394")
-expect(full_css_rendered).to_equal("133")
-expect(full_css_unrendered).to_equal("261")
-expect(unsupported_inventory).to_equal("268")
-expect(full_css_unrendered_properties.split(",").len()).to_equal(261)
+expect(full_css_rendered).to_equal("134")
+expect(full_css_unrendered).to_equal("260")
+expect(unsupported_inventory).to_equal("267")
+expect(full_css_unrendered_properties.split(",").len()).to_equal(260)
 expect(full_css_unrendered_properties.contains("aspect-ratio")).to_equal(false)
 expect(full_css_unrendered_properties.contains("object-fit")).to_equal(false)
+expect(full_css_unrendered_properties.contains("object-position")).to_equal(false)
 expect(animation_css_unrendered_properties).to_equal("")
 expect(full_css_unrendered_properties).to_contain("accent-color")
 expect(full_css_unrendered_properties).to_contain("border-image-source")
