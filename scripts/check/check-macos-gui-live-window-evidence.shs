@@ -7,10 +7,37 @@ cd "$ROOT_DIR"
 BUILD_DIR="${BUILD_DIR:-build/tmp/macos_gui_live_window_evidence}"
 REPORT_PATH="${REPORT_PATH:-doc/09_report/macos_gui_live_window_evidence_$(date -u +%F).md}"
 SAMPLE_SPL="${MACOS_GUI_LIVE_WINDOW_SAMPLE:-src/app/ui_shared_mdi/main.spl}"
-SIMPLE_BIN="${SIMPLE_BIN:-src/compiler_rust/target/release/simple}"
-if [ ! -x "$SIMPLE_BIN" ] && [ -x "bin/simple" ]; then
-    SIMPLE_BIN="bin/simple"
+SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
+SIMPLE_BIN_STATUS=pass
+if [ -z "${SIMPLE_BIN+x}" ]; then
+    SIMPLE_BIN=""
+    SIMPLE_BIN_SOURCE=auto-self-hosted
+    for _cand in bin/simple ./bin/simple release/*/simple bin/release/*/simple build/bootstrap/stage3/simple; do
+        if [ -x "$_cand" ]; then
+            SIMPLE_BIN="$_cand"
+            break
+        fi
+    done
 fi
+
+is_rust_seed_simple() {
+    case "$1" in
+        src/compiler_rust/*|./src/compiler_rust/*|*/src/compiler_rust/*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+if [ -z "$SIMPLE_BIN" ]; then
+    SIMPLE_BIN_STATUS=missing
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-missing"
+elif is_rust_seed_simple "$SIMPLE_BIN"; then
+    SIMPLE_BIN_STATUS=forbidden
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-rust-seed-forbidden"
+elif [ ! -x "$SIMPLE_BIN" ]; then
+    SIMPLE_BIN_STATUS=missing
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-missing"
+fi
+export SIMPLE_BIN SIMPLE_BIN_SOURCE SIMPLE_BIN_STATUS
 CAPTURE_PNG="$BUILD_DIR/simplegui-window.png"
 CAPTURE_BMP="$BUILD_DIR/simplegui-window.bmp"
 EVIDENCE_ENV="$BUILD_DIR/evidence.env"
@@ -143,6 +170,9 @@ run_mdi_titlebar_contract() {
 }
 
 append_mdi_titlebar_contract_env() {
+    append_env "macos_gui_live_window_evidence_simple_bin" "$SIMPLE_BIN"
+    append_env "macos_gui_live_window_evidence_simple_bin_source" "$SIMPLE_BIN_SOURCE"
+    append_env "macos_gui_live_window_evidence_simple_bin_status" "$SIMPLE_BIN_STATUS"
     append_env "macos_gui_live_window_evidence_sample" "$SAMPLE_SPL"
     append_env "macos_gui_live_window_evidence_mdi_titlebar_contract_status" "$mdi_titlebar_contract_status"
     append_env "macos_gui_live_window_evidence_mdi_titlebar_button_markup_present" "$mdi_titlebar_button_markup_present"
@@ -218,6 +248,10 @@ cleanup_macos_app() {
     osascript -e 'tell application "SimpleGui" to quit' >/dev/null 2>&1 || true
     pkill -x SimpleGui >/dev/null 2>&1 || true
 }
+
+if [ "$SIMPLE_BIN_STATUS" != "pass" ]; then
+    emit_fail "simple-bin-$SIMPLE_BIN_STATUS"
+fi
 
 run_gui_smf_artifact_contract
 run_mdi_titlebar_contract
