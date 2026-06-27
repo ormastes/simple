@@ -15,6 +15,7 @@ const requestedSourceCount = files.length;
 let missingSourceCount = 0;
 let emptySourceCount = 0;
 let symlinkSourceCount = 0;
+let nonregularSourceCount = 0;
 let sourceCount = 0;
 let text = '';
 let coherentSource = false;
@@ -51,7 +52,7 @@ for (const file of files) {
     continue;
   }
   if (!stat.isFile()) {
-    missingSourceCount += 1;
+    nonregularSourceCount += 1;
     continue;
   }
   const content = fs.readFileSync(file, 'utf8');
@@ -96,6 +97,8 @@ if (requestedSourceCount === 0 || sourceCount === 0) {
   reason = 'ios-render-log-source-missing';
 } else if (symlinkSourceCount > 0) {
   reason = 'ios-render-log-source-symlink';
+} else if (nonregularSourceCount > 0) {
+  reason = 'ios-render-log-source-not-regular';
 } else if (emptySourceCount > 0) {
   reason = 'ios-render-log-source-empty';
 } else if (failureMarker) {
@@ -123,6 +126,7 @@ emit('ios_render_log_source_count', sourceCount);
 emit('ios_render_log_missing_source_count', missingSourceCount);
 emit('ios_render_log_empty_source_count', emptySourceCount);
 emit('ios_render_log_symlink_source_count', symlinkSourceCount);
+emit('ios_render_log_nonregular_source_count', nonregularSourceCount);
 emit('ios_render_log_source_coherence_status', coherentSource ? 'pass' : 'fail');
 emit('ios_render_log_coherent_source_path', coherentSourcePath);
 emit('ios_render_log_coherent_source_size_bytes', coherentSourceSizeBytes);

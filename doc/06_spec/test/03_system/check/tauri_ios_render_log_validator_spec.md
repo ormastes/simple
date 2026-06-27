@@ -27,7 +27,7 @@ tauri_ios_render_log_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 19 | 19 | 0 | 0 |
+| 20 | 20 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -99,6 +99,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_ios_render_log_validat
   companion log cannot hide an empty render-log source artifact.
 - Explicitly requested iOS log source paths must be regular files, not
   symlinks to other render-log artifacts.
+- Explicitly requested iOS log source paths must not be directories or other
+  non-regular artifacts.
 - Failure markers such as eval failures fail closed even when render and Metal
   markers are present.
 - The iOS renderer wrapper keeps render-log, Metal, MDI event/capture,
@@ -521,6 +523,42 @@ expect(evidence).to_contain("ios_render_log_source_count=1")
 expect(evidence).to_contain("ios_render_log_missing_source_count=0")
 expect(evidence).to_contain("ios_render_log_empty_source_count=0")
 expect(evidence).to_contain("ios_render_log_symlink_source_count=1")
+expect(evidence).to_contain("ios_render_log_nonregular_source_count=0")
+expect(evidence).to_contain("ios_render_log_marker_status=pass")
+expect(evidence).to_contain("ios_render_log_metal_context_status=pass")
+```
+
+</details>
+
+#### rejects non regular requested iOS log source paths
+
+- Confirm iOS render logs cannot be substituted through non-regular sources
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 21 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-tauri-ios-render-log-validator-nonregular-source"
+val command = "rm -rf " + root + " && mkdir -p " + root + "/not-a-log && " +
+    "printf '[tauri-shell] creating window from app://index.html\\n[tauri-shell] ios renderer context: backend=WKWebView metal_expected=true metal_layer=CAMetalLayer\\n[tauri-shell] render, html_len=347702\\nCAMetalLayer Metal renderer ready\\n' > " + root + "/ios.log && " +
+    "node scripts/check/validate-tauri-ios-render-log-proof.js " + root + "/ios.log " + root + "/not-a-log > " + root + "/evidence.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read(root + "/evidence.env")
+step("Confirm iOS render logs cannot be substituted through non-regular sources")
+expect(evidence).to_contain("ios_render_log_validation_status=fail")
+expect(evidence).to_contain("ios_render_log_validation_reason=ios-render-log-source-not-regular")
+expect(evidence).to_contain("ios_render_log_requested_source_count=2")
+expect(evidence).to_contain("ios_render_log_source_count=1")
+expect(evidence).to_contain("ios_render_log_missing_source_count=0")
+expect(evidence).to_contain("ios_render_log_empty_source_count=0")
+expect(evidence).to_contain("ios_render_log_symlink_source_count=0")
+expect(evidence).to_contain("ios_render_log_nonregular_source_count=1")
 expect(evidence).to_contain("ios_render_log_marker_status=pass")
 expect(evidence).to_contain("ios_render_log_metal_context_status=pass")
 ```
@@ -670,6 +708,7 @@ expect(evidence).to_contain("ios_render_log_source_count=0")
 expect(evidence).to_contain("ios_render_log_missing_source_count=0")
 expect(evidence).to_contain("ios_render_log_empty_source_count=0")
 expect(evidence).to_contain("ios_render_log_symlink_source_count=0")
+expect(evidence).to_contain("ios_render_log_nonregular_source_count=0")
 expect(evidence).to_contain("ios_render_log_source_coherence_status=")
 expect(evidence).to_contain("ios_render_log_coherent_source_path=")
 expect(evidence).to_contain("ios_render_log_coherent_source_size_bytes=")
@@ -725,6 +764,7 @@ expect(direct).to_contain("emit_existing_or_default ios_render_log_source_cohere
 expect(direct).to_contain("emit_existing_or_default ios_render_log_coherent_source_path \"\" \"$IOS_RENDER_LOG_VALIDATION_ENV\"")
 expect(direct).to_contain("emit_existing_or_default ios_render_log_coherent_source_size_bytes \"\" \"$IOS_RENDER_LOG_VALIDATION_ENV\"")
 expect(direct).to_contain("emit_existing_or_default ios_render_log_symlink_source_count 0 \"$IOS_RENDER_LOG_VALIDATION_ENV\"")
+expect(direct).to_contain("emit_existing_or_default ios_render_log_nonregular_source_count 0 \"$IOS_RENDER_LOG_VALIDATION_ENV\"")
 expect(direct).to_contain("emit_existing_or_default ios_render_log_tauri_context_status \"$diagnostic_status\" \"$IOS_RENDER_LOG_VALIDATION_ENV\"")
 expect(direct).to_contain("emit_existing_or_default ios_render_log_metal_context_status \"$diagnostic_status\" \"$IOS_RENDER_LOG_VALIDATION_ENV\"")
 expect(direct).to_contain("emit_existing_or_default ios_render_log_fallback_marker_status \"$diagnostic_status\" \"$IOS_RENDER_LOG_VALIDATION_ENV\"")
@@ -761,6 +801,7 @@ expect(direct).to_contain("emit_unavailable_ios_diagnostics")
 expect(direct).to_contain("value_of ios_render_log_validation_status")
 expect(direct).to_contain("ios_render_log_empty_source_count=$ios_render_log_empty_source_count")
 expect(direct).to_contain("ios_render_log_symlink_source_count=$ios_render_log_symlink_source_count")
+expect(direct).to_contain("ios_render_log_nonregular_source_count=$ios_render_log_nonregular_source_count")
 expect(direct).to_contain("ios_render_log_source_coherence_status=$ios_render_log_source_coherence_status")
 expect(direct).to_contain("ios_render_log_coherent_source_path=$ios_render_log_coherent_source_path")
 expect(direct).to_contain("ios_render_log_coherent_source_size_bytes=$ios_render_log_coherent_source_size_bytes")
@@ -782,6 +823,7 @@ expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_render_log_source
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_render_log_missing_source_count")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_render_log_empty_source_count")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_render_log_symlink_source_count")
+expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_render_log_nonregular_source_count")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_render_log_html_len")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_render_log_source_coherence_status")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_render_log_coherent_source_path")
@@ -801,6 +843,7 @@ expect(aggregate).to_contain("ios-render-log-fallback-gpu")
 expect(aggregate).to_contain("ios-render-log-source-missing")
 expect(aggregate).to_contain("ios-render-log-source-empty")
 expect(aggregate).to_contain("ios-render-log-source-symlink")
+expect(aggregate).to_contain("ios-render-log-source-not-regular")
 expect(tauri).to_contain("ios renderer context: backend=WKWebView")
 expect(tauri).to_contain("metal_layer=CAMetalLayer")
 ```
