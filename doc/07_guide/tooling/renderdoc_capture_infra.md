@@ -1084,12 +1084,13 @@ The current canonical evidence contract is:
   report `partial-production-parity-source-status`,
   `production_gui_web_renderer_parity_gate_source_partial_status=partial`, and
   `production_gui_web_renderer_parity_gate_refresh_command`; matrix-only
-  evidence is not live renderer parity evidence.
-  wrapper exports the resolved `SIMPLE_BIN` to nested parity checks and records
+  evidence is not live renderer parity evidence. The wrapper exports the
+  resolved self-hosted `SIMPLE_BIN` to nested parity checks and records
   `production_gui_web_renderer_parity_simple_bin` plus
-  `production_gui_web_renderer_parity_simple_bin_source`; a clean worktree with
-  no `src/compiler_rust/target/release/simple` should use repo/path fallback
-  evidence instead of failing with `missing-simple-bin`. Font offload
+  `production_gui_web_renderer_parity_simple_bin_source` and
+  `production_gui_web_renderer_parity_simple_bin_status`. The Rust seed under
+  `src/compiler_rust/` is `forbidden` for this production evidence path and is
+  not executed; missing self-hosted binaries fail closed as `missing`. Font offload
   `unavailable` is recorded but does not satisfy the production parity wrapper.
   The Tauri/Chrome surface manifest must prove live Electron, Tauri, and Chrome
   captures, 50 Tauri and 50 Chrome cases, 36 pass cases plus 14 tracked

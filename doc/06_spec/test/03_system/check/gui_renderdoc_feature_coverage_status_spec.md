@@ -385,7 +385,7 @@ checksum, and exact geometry is downgraded to `fail`.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 955 lines folded for reproduction.
+Runnable source: 958 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -541,6 +541,9 @@ expect(evidence).to_contain("production_gui_web_renderer_parity_gate_status=")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_reason=")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_source_env=")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_source_env_status=")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_simple_bin=")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_simple_bin_source=")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_simple_bin_status=")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_matrix_exit_code=")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_matrix_reason=")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_matrix_timed_out=")

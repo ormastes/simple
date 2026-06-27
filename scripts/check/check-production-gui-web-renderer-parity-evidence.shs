@@ -9,6 +9,7 @@ REPORT_PATH="${REPORT_PATH:-doc/09_report/production_gui_web_renderer_parity_evi
 TIMEOUT_SECS="${ELECTRON_BITMAP_TIMEOUT_SECS:-20}"
 CHROME_SURFACE_TIMEOUT_SECS="${CHROME_LAYOUT_TIMEOUT_SECS:-60}"
 SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
+SIMPLE_BIN_STATUS=pass
 SUBCHECK_TIMEOUT_SECS="${PRODUCTION_GUI_WEB_RENDERER_PARITY_SUBCHECK_TIMEOUT_SECS:-180}"
 MATRIX_SCRIPT="${PRODUCTION_GUI_WEB_RENDERER_PARITY_MATRIX_SCRIPT:-scripts/check/check-electron-generated-gui-web-parity-matrix-evidence.shs}"
 LAYOUT_SCRIPT="${PRODUCTION_GUI_WEB_RENDERER_PARITY_LAYOUT_SCRIPT:-scripts/check/check-electron-simple-web-layout-manifest-evidence.shs}"
@@ -19,19 +20,25 @@ METAL_READBACK_SCRIPT="${PRODUCTION_GUI_WEB_RENDERER_PARITY_METAL_READBACK_SCRIP
 EVENT_SCRIPT="${PRODUCTION_GUI_WEB_RENDERER_PARITY_EVENT_SCRIPT:-scripts/check/check-wm-browser-event-routing-evidence.shs}"
 LAYOUT_MANIFEST_RESUME="${PRODUCTION_GUI_WEB_RENDERER_PARITY_LAYOUT_MANIFEST_RESUME:-0}"
 
+is_rust_seed_simple() {
+    case "$1" in
+        src/compiler_rust/*|*/src/compiler_rust/*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 if [ -z "${SIMPLE_BIN+x}" ]; then
     SIMPLE_BIN_SOURCE="default-missing"
     for candidate in \
         "bin/simple" \
         "./bin/simple" \
-        "src/compiler_rust/target/release/simple"
+        "release"/*/simple \
+        "bin/release"/*/simple \
+        "build/bootstrap/stage3/simple"
     do
         if [ -x "$candidate" ]; then
             SIMPLE_BIN="$candidate"
-            case "$candidate" in
-                src/compiler_rust/target/release/simple) SIMPLE_BIN_SOURCE="in-tree-release" ;;
-                *) SIMPLE_BIN_SOURCE="repo-bin-fallback" ;;
-            esac
+            SIMPLE_BIN_SOURCE="repo-self-hosted-fallback"
             break
         fi
     done
@@ -39,12 +46,45 @@ if [ -z "${SIMPLE_BIN+x}" ]; then
         SIMPLE_BIN="$(command -v simple)"
         SIMPLE_BIN_SOURCE="path-fallback"
     fi
-    : "${SIMPLE_BIN:=src/compiler_rust/target/release/simple}"
 fi
-export SIMPLE_BIN SIMPLE_BIN_SOURCE
+if [ -z "${SIMPLE_BIN+x}" ] || [ "$SIMPLE_BIN" = "" ]; then
+    SIMPLE_BIN=""
+    SIMPLE_BIN_STATUS=missing
+    SIMPLE_BIN_SOURCE="missing-self-hosted"
+elif is_rust_seed_simple "$SIMPLE_BIN"; then
+    SIMPLE_BIN_STATUS=forbidden
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-rust-seed-forbidden"
+elif [ ! -x "$SIMPLE_BIN" ]; then
+    SIMPLE_BIN_STATUS=missing
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-missing"
+fi
+export SIMPLE_BIN SIMPLE_BIN_SOURCE SIMPLE_BIN_STATUS
 
 mkdir -p "$BUILD_ROOT" "$(dirname -- "$REPORT_PATH")"
 rm -f "$BUILD_ROOT/evidence.env" "$REPORT_PATH"
+
+if [ "$SIMPLE_BIN_STATUS" != "pass" ]; then
+    {
+        echo "production_gui_web_renderer_parity_status=fail"
+        echo "production_gui_web_renderer_parity_reason=simple-bin-$SIMPLE_BIN_STATUS"
+        echo "production_gui_web_renderer_parity_simple_bin=$SIMPLE_BIN"
+        echo "production_gui_web_renderer_parity_simple_bin_source=$SIMPLE_BIN_SOURCE"
+        echo "production_gui_web_renderer_parity_simple_bin_status=$SIMPLE_BIN_STATUS"
+        echo "production_gui_web_renderer_parity_evidence_env=$BUILD_ROOT/evidence.env"
+        echo "production_gui_web_renderer_parity_report=$REPORT_PATH"
+    } >"$BUILD_ROOT/evidence.env"
+    {
+        echo "# Production GUI/Web Renderer Parity Evidence"
+        echo
+        echo "- Status: fail"
+        echo "- Reason: simple-bin-$SIMPLE_BIN_STATUS"
+        echo "- Simple binary: $SIMPLE_BIN"
+        echo "- Simple binary source: $SIMPLE_BIN_SOURCE"
+        echo "- Simple binary status: $SIMPLE_BIN_STATUS"
+    } >"$REPORT_PATH"
+    cat "$BUILD_ROOT/evidence.env"
+    exit 0
+fi
 
 field_of() {
     key="$1"
@@ -115,6 +155,9 @@ emit_summary_env() {
     do
         echo "$key=$(field_of "$key" "$file")"
     done
+    echo "production_gui_web_renderer_parity_simple_bin=$SIMPLE_BIN"
+    echo "production_gui_web_renderer_parity_simple_bin_source=$SIMPLE_BIN_SOURCE"
+    echo "production_gui_web_renderer_parity_simple_bin_status=$SIMPLE_BIN_STATUS"
     echo "production_gui_web_renderer_parity_evidence_env=$file"
     echo "production_gui_web_renderer_parity_report=$REPORT_PATH"
 }
@@ -141,6 +184,7 @@ run_matrix() {
     {
         echo "production_gui_web_renderer_parity_simple_bin=$SIMPLE_BIN"
         echo "production_gui_web_renderer_parity_simple_bin_source=$SIMPLE_BIN_SOURCE"
+        echo "production_gui_web_renderer_parity_simple_bin_status=$SIMPLE_BIN_STATUS"
         echo "production_gui_web_renderer_parity_matrix_exit_code=$code"
         echo "production_gui_web_renderer_parity_matrix_status=$status"
         echo "production_gui_web_renderer_parity_matrix_reason=$reason"
