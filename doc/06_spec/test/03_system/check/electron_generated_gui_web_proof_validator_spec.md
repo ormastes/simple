@@ -85,8 +85,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_generated_gui_web_p
   diagnostics cannot treat a zero-byte artifact as a valid capture file.
 - ARGB capture proof paths must not resolve back to the top-level proof JSON
   even if the proof contains artifact-shaped fields.
-- ARGB capture proof paths must not resolve through proof-local symlinks to
-  artifacts outside the proof directory.
+- Electron generated-GUI proof JSON and captured ARGB artifacts must be regular
+  files, not symlinks to mutable or substituted evidence.
 - Captured ARGB files must parse as `argb-u32` Electron live-capture artifacts,
   match the proof viewport, include the expected pixel count, and contain
   nonzero pixels with numeric uint32 JSON pixel values.
@@ -123,7 +123,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_generated_gui_web_p
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 42 lines folded for reproduction.
+Runnable source: 44 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -160,7 +160,9 @@ expect(evidence).to_contain("electron_generated_gui_web_capture_native_height=72
 expect(evidence).to_contain("electron_generated_gui_web_capture_downsampled=false")
 expect(evidence).to_contain("electron_generated_gui_web_captured_argb_path=captured.json")
 expect(evidence).to_contain("electron_generated_gui_web_captured_argb_written=true")
+expect(evidence).to_contain("electron_generated_gui_web_proof_symlink_status=pass")
 expect(evidence).to_contain("electron_generated_gui_web_captured_argb_file_status=pass")
+expect(evidence).to_contain("electron_generated_gui_web_captured_argb_symlink_status=pass")
 expect(evidence).to_contain("electron_generated_gui_web_captured_argb_size_bytes=")
 expect(evidence).to_contain("electron_generated_gui_web_captured_argb_format=argb-u32")
 expect(evidence).to_contain("electron_generated_gui_web_captured_argb_producer=electron-live-capture-page")
@@ -518,34 +520,44 @@ expect(evidence).to_contain("electron_generated_gui_web_captured_argb_size_bytes
 
 </details>
 
-#### rejects proof-local symlink captured ARGB paths that escape the proof directory
+#### rejects symlinked Electron generated-GUI proof and captured ARGB artifacts
 
 -  proof command
+-  proof command
    - Expected: code equals `1`
-- Confirm symlink targets cannot smuggle external ARGB artifacts into proof evidence
+- Confirm generated-GUI Electron evidence cannot be substituted through symlinks
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val root = "build/test-electron-generated-gui-web-validator-symlink-artifact"
 val command = "rm -rf " + root + " " + root + "-external && mkdir -p " + root + " && " +
+    _proof_command(root + "/proof-real.json", "") + " && " +
+    "ln -s proof-real.json " + root + "/proof-link.json && " +
+    "node scripts/check/validate-electron-generated-gui-web-proof.js " + root + "/proof-link.json > " + root + "/proof.env; " +
     _proof_command(root + "/proof.json", "const external=dir+\"-external\";fs.mkdirSync(external,{recursive:true});fs.writeFileSync(path.join(external,\"captured.json\"),JSON.stringify(argb));fs.symlinkSync(path.join(external,\"captured.json\"),path.join(dir,\"linked.json\"));p.captured_argb_path=\"linked.json\"") +
-    " && node scripts/check/validate-electron-generated-gui-web-proof.js " + root + "/proof.json > " + root + "/evidence.env"
+    " && node scripts/check/validate-electron-generated-gui-web-proof.js " + root + "/proof.json > " + root + "/argb.env"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(1)
 
-val evidence = file_read(root + "/evidence.env")
-step("Confirm symlink targets cannot smuggle external ARGB artifacts into proof evidence")
-expect(evidence).to_contain("electron_generated_gui_web_validation_status=fail")
-expect(evidence).to_contain("electron_generated_gui_web_validation_reason=missing-captured-argb-file")
-expect(evidence).to_contain("electron_generated_gui_web_captured_argb_path=linked.json")
-expect(evidence).to_contain("electron_generated_gui_web_captured_argb_file_status=missing")
-expect(evidence).to_contain("electron_generated_gui_web_captured_argb_size_bytes=")
+val proof = file_read(root + "/proof.env")
+val argb = file_read(root + "/argb.env")
+step("Confirm generated-GUI Electron evidence cannot be substituted through symlinks")
+expect(proof).to_contain("electron_generated_gui_web_validation_status=fail")
+expect(proof).to_contain("electron_generated_gui_web_validation_reason=proof-json-symlink")
+expect(proof).to_contain("electron_generated_gui_web_proof_symlink_status=fail")
+expect(argb).to_contain("electron_generated_gui_web_validation_status=fail")
+expect(argb).to_contain("electron_generated_gui_web_validation_reason=captured-argb-symlink")
+expect(argb).to_contain("electron_generated_gui_web_proof_symlink_status=pass")
+expect(argb).to_contain("electron_generated_gui_web_captured_argb_path=linked.json")
+expect(argb).to_contain("electron_generated_gui_web_captured_argb_file_status=symlink")
+expect(argb).to_contain("electron_generated_gui_web_captured_argb_symlink_status=fail")
+expect(argb).to_contain("electron_generated_gui_web_captured_argb_size_bytes=")
 ```
 
 </details>
@@ -874,7 +886,7 @@ expect(pixel).to_contain("electron_generated_gui_web_mismatch_count=4")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 32 lines folded for reproduction.
+Runnable source: 36 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -896,7 +908,9 @@ expect(script).to_contain("electron_generated_gui_web_electron_process_version")
 expect(script).to_contain("electron_generated_gui_web_chrome_process_version")
 expect(script).to_contain("electron_generated_gui_web_gpu_compositing")
 expect(script).to_contain("electron_generated_gui_web_estimated_fps_floor")
+expect(script).to_contain("electron_generated_gui_web_proof_symlink_status")
 expect(script).to_contain("electron_generated_gui_web_captured_argb_file_status")
+expect(script).to_contain("electron_generated_gui_web_captured_argb_symlink_status")
 expect(script).to_contain("electron_generated_gui_web_captured_argb_size_bytes")
 expect(script).to_contain("electron_generated_gui_web_captured_argb_format")
 expect(script).to_contain("electron_generated_gui_web_captured_argb_nonzero_pixel_count")
@@ -904,6 +918,8 @@ expect(script).to_contain("electron_generated_gui_web_proof_renderer")
 expect(script).to_contain("electron_generated_gui_web_proof_source")
 expect(script).to_contain("checksum-mismatch|weighted-checksum-mismatch|pixel-mismatch")
 expect(script).to_contain("status=divergent")
+expect(validator).to_contain("proof-json-symlink")
+expect(validator).to_contain("captured-argb-symlink")
 
 val fixture = file_read("tools/electron-live-bitmap/exact_fixture.js")
 expect(fixture).to_contain("browser_engine")
