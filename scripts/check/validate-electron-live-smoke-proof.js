@@ -50,6 +50,29 @@ function versionText(value) {
   return typeof value === 'string' && /^[0-9]+(?:\.[0-9]+)*$/.test(value);
 }
 
+function proofSourceArtifact(marker) {
+  const [filePath, symbol] = marker.split(':');
+  let stat;
+  try {
+    stat = fs.lstatSync(filePath);
+  } catch (_err) {
+    return { status: 'missing', size: '' };
+  }
+  if (stat.isSymbolicLink()) return { status: 'symlink', size: '' };
+  if (!stat.isFile()) return { status: 'missing', size: '' };
+  if (stat.size <= 0) return { status: 'empty', size: '0' };
+  let source = '';
+  try {
+    source = fs.readFileSync(filePath, 'utf8');
+  } catch (_err) {
+    return { status: 'missing', size: '' };
+  }
+  if (!source.includes(`function ${symbol}`) || !source.includes(`proof_source: '${marker}'`)) {
+    return { status: 'symbol-missing', size: String(stat.size) };
+  }
+  return { status: 'pass', size: String(stat.size) };
+}
+
 const [proofPath, widthText, heightText] = process.argv.slice(2);
 if (!proofPath || !widthText || !heightText) {
   emit('electron_live_smoke_validation_status', 'fail');
@@ -88,6 +111,7 @@ const expectedHeightText = decimalIntegerText(heightText);
 const expectedWidth = expectedWidthText === null ? NaN : Number(expectedWidthText);
 const expectedHeight = expectedHeightText === null ? NaN : Number(expectedHeightText);
 const expectedProofSource = 'src/app/ui.electron/bridge.js:electronLiveSmokeProofScript';
+const proofSource = proofSourceArtifact(expectedProofSource);
 const userAgent = textSample(proof.electron_user_agent);
 const maxEventTimingMs = 1000;
 
@@ -98,6 +122,8 @@ if (proof.target !== 'electron') {
   reason = 'unexpected-surface';
 } else if (proof.proof_source !== expectedProofSource) {
   reason = 'unexpected-proof-source';
+} else if (proofSource.status !== 'pass') {
+  reason = `unexpected-proof-source-file-${proofSource.status}`;
 } else if (proof.browser_engine !== 'chromium') {
   reason = 'unexpected-browser-engine';
 } else if (!/Electron\/[0-9]/.test(userAgent) || !/(Chrome|Chromium)\/[0-9]/.test(userAgent)) {
@@ -150,6 +176,8 @@ emit('electron_live_smoke_proof_symlink_status', proofPathStat.isSymbolicLink() 
 emit('electron_live_smoke_target', proof.target);
 emit('electron_live_smoke_surface_id', proof.surface_id);
 emit('electron_live_smoke_proof_source', proof.proof_source);
+emit('electron_live_smoke_proof_source_file_status', proofSource.status);
+emit('electron_live_smoke_proof_source_size_bytes', proofSource.size);
 emit('electron_live_smoke_browser_engine', proof.browser_engine);
 emit('electron_live_smoke_electron_user_agent', proof.electron_user_agent);
 emit('electron_live_smoke_electron_process_version', proof.electron_process_version);

@@ -27,7 +27,7 @@ electron_live_smoke_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 15 | 15 | 0 | 0 |
+| 16 | 16 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -47,7 +47,7 @@ Validates the live Electron smoke proof used by the package CI wrapper. The proo
 | Design | doc/04_architecture/ui/simple_gui_stack.md |
 | Research | N/A |
 | Source | `test/03_system/check/electron_live_smoke_proof_validator_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-06-27 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -98,6 +98,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_live_smoke_proof_va
 - The proof must carry the Electron bridge live-smoke source marker so a
   generic hand-authored JSON object cannot stand in for the renderer bridge
   probe.
+- The bridge source marker must resolve to a regular nonempty bridge source
+  file that still contains the live smoke proof producer and marker.
 - The proof must include Chromium/Electron runtime evidence from the renderer
   user agent and Electron/Chrome process versions, not only a hand-authored
   source marker.
@@ -148,6 +150,8 @@ expect(evidence).to_contain("electron_live_smoke_proof_symlink_status=pass")
 expect(evidence).to_contain("electron_live_smoke_target=electron")
 expect(evidence).to_contain("electron_live_smoke_surface_id=main")
 expect(evidence).to_contain("electron_live_smoke_proof_source=src/app/ui.electron/bridge.js:electronLiveSmokeProofScript")
+expect(evidence).to_contain("electron_live_smoke_proof_source_file_status=pass")
+expect(evidence).to_contain("electron_live_smoke_proof_source_size_bytes=")
 expect(evidence).to_contain("electron_live_smoke_browser_engine=chromium")
 expect(evidence).to_contain("electron_live_smoke_electron_user_agent=Mozilla/5.0 Chrome/142.0.0.0 Electron/42.5.0 Safari/537.36")
 expect(evidence).to_contain("electron_live_smoke_electron_process_version=42.5.0")
@@ -280,6 +284,36 @@ expect(missing).to_contain("electron_live_smoke_proof_source=")
 expect(wrong).to_contain("electron_live_smoke_validation_status=fail")
 expect(wrong).to_contain("electron_live_smoke_validation_reason=unexpected-proof-source")
 expect(wrong).to_contain("electron_live_smoke_proof_source=tools/manual/proof.json")
+```
+
+</details>
+
+#### rejects proof when the live Electron bridge source artifact is missing
+
+- Confirm live smoke proof source marker is bound to the bridge producer source file
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-electron-live-smoke-validator-source-artifact"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_command(root + "/proof.json", "") +
+    " && cd " + root + " && node ../../scripts/check/validate-electron-live-smoke-proof.js proof.json 1280 720 > evidence.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read(root + "/evidence.env")
+step("Confirm live smoke proof source marker is bound to the bridge producer source file")
+expect(evidence).to_contain("electron_live_smoke_validation_status=fail")
+expect(evidence).to_contain("electron_live_smoke_validation_reason=unexpected-proof-source-file-missing")
+expect(evidence).to_contain("electron_live_smoke_proof_source=src/app/ui.electron/bridge.js:electronLiveSmokeProofScript")
+expect(evidence).to_contain("electron_live_smoke_proof_source_file_status=missing")
+expect(evidence).to_contain("electron_live_smoke_proof_source_size_bytes=")
 ```
 
 </details>
@@ -768,6 +802,8 @@ expect(wrapper).to_contain("electron_live_smoke_proof_symlink_status")
 expect(wrapper).to_contain("electron_live_smoke_target")
 expect(wrapper).to_contain("electron_live_smoke_surface_id")
 expect(wrapper).to_contain("electron_live_smoke_proof_source")
+expect(wrapper).to_contain("electron_live_smoke_proof_source_file_status")
+expect(wrapper).to_contain("electron_live_smoke_proof_source_size_bytes")
 expect(wrapper).to_contain("electron_live_smoke_browser_engine")
 expect(wrapper).to_contain("electron_live_smoke_electron_user_agent")
 expect(wrapper).to_contain("electron_live_smoke_electron_process_version")
@@ -839,6 +875,8 @@ expect(evidence).to_contain("electron_live_smoke_proof_symlink_status=")
 expect(evidence).to_contain("electron_live_smoke_target=")
 expect(evidence).to_contain("electron_live_smoke_surface_id=")
 expect(evidence).to_contain("electron_live_smoke_proof_source=")
+expect(evidence).to_contain("electron_live_smoke_proof_source_file_status=")
+expect(evidence).to_contain("electron_live_smoke_proof_source_size_bytes=")
 expect(evidence).to_contain("electron_live_smoke_browser_engine=")
 expect(evidence).to_contain("electron_live_smoke_electron_user_agent=")
 expect(evidence).to_contain("electron_live_smoke_electron_process_version=")
@@ -869,8 +907,8 @@ expect(evidence).to_contain("electron_live_smoke_blur_or_tolerance_used=")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 15 |
-| Active scenarios | 15 |
+| Total scenarios | 16 |
+| Active scenarios | 16 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
