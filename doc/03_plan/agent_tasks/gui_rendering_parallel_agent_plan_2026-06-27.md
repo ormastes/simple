@@ -381,6 +381,7 @@ This session's immediate integration target:
 | WO-19 CSS logical sizing slice | Main agent | Low: Spark may only inspect evidence after implementation | Renderer, CSS traceability wrapper, Electron bitmap evidence fixture, focused renderer/inventory/system specs, generated docs, report | Focused renderer spec passes, full CSS gate reports implemented CSS `153/153`, and no full-CSS/native-platform completion is claimed |
 | WO-20 CSS logical inset slice | Main agent | Low: Spark may only inspect evidence after implementation | Renderer, CSS traceability wrapper, Electron bitmap evidence fixture, focused renderer/inventory/system specs, generated docs, report | Focused renderer spec passes, full CSS gate reports implemented CSS `160/160`, and no full-CSS/native-platform completion is claimed |
 | WO-21 CSS logical border slice | Main agent | Low: Spark may only inspect evidence after implementation | Renderer, CSS traceability wrapper, Electron bitmap evidence fixture, focused renderer/inventory/system specs, generated docs, report | Focused renderer spec passes, full CSS gate reports implemented CSS `184/184`, and no full-CSS/native-platform completion is claimed |
+| WO-22 CSS logical border radius slice | Main agent | Low: Spark may only inspect evidence after implementation | Renderer, CSS traceability wrapper, Electron bitmap evidence fixture, focused renderer/inventory/system specs, generated docs, report | Focused renderer spec passes, full CSS gate reports implemented CSS `188/188`, and no full-CSS/native-platform completion is claimed |
 
 WO-12 rule: do not spawn Spark against source-edit scopes until the read-only
 gap/matrix lanes complete and a normal reviewer approves the intended write
@@ -508,6 +509,16 @@ in
 `doc/09_report/html_css_full_rendering_goal_status_logical_border_2026-06-27.md`:
 implemented CSS is `184/184`, full CSS is `184/394`, full CSS unrendered is
 `210`, and unsupported inventory ownership is `217`. This is a completed
+narrow web-renderer slice, not completion evidence for vertical writing-mode
+remapping, full CSS, RenderDoc, Metal, or D3D12 lanes.
+
+WO-22 status, 2026-06-27: `border-start-start-radius`,
+`border-start-end-radius`, `border-end-start-radius`, and
+`border-end-end-radius` moved into implemented Simple Web CSS for the default
+horizontal writing-mode path. Current evidence is recorded in
+`doc/09_report/html_css_full_rendering_goal_status_logical_radius_2026-06-27.md`:
+implemented CSS is `188/188`, full CSS is `188/394`, full CSS unrendered is
+`206`, and unsupported inventory ownership is `213`. This is a completed
 narrow web-renderer slice, not completion evidence for vertical writing-mode
 remapping, full CSS, RenderDoc, Metal, or D3D12 lanes.
 

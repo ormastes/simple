@@ -28,7 +28,7 @@ simple_web_renderer_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 74 | 74 | 0 | 0 |
+| 75 | 75 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -251,6 +251,28 @@ expect(pixels[175]).to_equal(0xFF22C55Eu32)
 expect(pixels[603]).to_equal(0xFF1D4ED8u32)
 expect(pixels[122]).to_equal(0xFF111827u32)
 expect(_count_color(pixels, 0xFF7C3AEDu32)).to_equal(0)
+```
+
+</details>
+
+#### maps logical border radius corners to physical Draw IR corners
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><head><style>#card{display:block;width:18px;height:12px;background-color:#1d4ed8;border-radius:1px;border-top-left-radius:2px;border-top-right-radius:3px;border-bottom-right-radius:4px;border-bottom-left-radius:5px;border-start-start-radius:6px;border-start-end-radius:7px;border-end-start-radius:8px;border-end-end-radius:9px}</style></head><body><section id='card'></section></body></html>"
+val composition = simple_web_layout_render_html_draw_ir(html, 48, 32)
+val batch = composition.batches[0]
+val card = _draw_ir_command_by_id(batch.commands, "card")
+
+expect(_draw_ir_style_value(card, "border-top-left-radius")).to_equal("6")
+expect(_draw_ir_style_value(card, "border-top-right-radius")).to_equal("7")
+expect(_draw_ir_style_value(card, "border-bottom-left-radius")).to_equal("8")
+expect(_draw_ir_style_value(card, "border-bottom-right-radius")).to_equal("9")
 ```
 
 </details>
@@ -1674,8 +1696,8 @@ expect(_count_color(pixels, 0xFF065F46u32)).to_equal(0)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 74 |
-| Active scenarios | 74 |
+| Total scenarios | 75 |
+| Active scenarios | 75 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

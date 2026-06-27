@@ -276,12 +276,12 @@ checksum, and exact geometry is downgraded to `fail`.
    - Expected: rendering_manifest_tag_covered equals `105`
    - Expected: rendering_manifest_tag_covered_names.split(",").len() equals `105`
    - Expected: rendering_manifest_tag_missing equals ``
-   - Expected: rendering_manifest_css_count equals `184`
+   - Expected: rendering_manifest_css_count equals `188`
    - Expected: rendering_manifest_css_source equals `scripts/check/check-html-css-sspec-traceability.shs`
    - Expected: rendering_manifest_css_source_status equals `pass`
    - Expected: rendering_manifest_css_source_count equals `rendering_manifest_css_count`
-   - Expected: rendering_manifest_css_covered equals `184`
-   - Expected: rendering_manifest_css_covered_names.split(",").len() equals `184`
+   - Expected: rendering_manifest_css_covered equals `188`
+   - Expected: rendering_manifest_css_covered_names.split(",").len() equals `188`
    - Expected: rendering_manifest_css_missing equals ``
    - Expected: rendering_manifest_css_scope equals `implemented-simple-web-css`
    - Expected: rendering_manifest_total_css_count equals `traceability_css_count`
@@ -295,11 +295,11 @@ checksum, and exact geometry is downgraded to `fail`.
    - Expected: full_rendering_goal_html_total equals `105`
    - Expected: full_rendering_goal_html_rendered equals `105`
    - Expected: full_rendering_goal_implemented_css_status equals `pass`
-   - Expected: full_rendering_goal_implemented_css_total equals `184`
-   - Expected: full_rendering_goal_implemented_css_rendered equals `184`
+   - Expected: full_rendering_goal_implemented_css_total equals `188`
+   - Expected: full_rendering_goal_implemented_css_rendered equals `188`
    - Expected: full_rendering_goal_full_css_status equals `incomplete`
    - Expected: full_rendering_goal_full_css_total equals `traceability_css_count`
-   - Expected: full_rendering_goal_full_css_rendered equals `184`
+   - Expected: full_rendering_goal_full_css_rendered equals `188`
    - Expected: full_rendering_goal_full_css_unrendered equals `rendering_manifest_unrendered_css_count`
    - Expected: full_rendering_goal_full_css_unrendered_properties equals `rendering_manifest_unrendered_css_properties`
    - Expected: html_css_implemented_surface_status equals `pass`
@@ -320,7 +320,7 @@ checksum, and exact geometry is downgraded to `fail`.
    - Expected: windows_d3d12_render_log_required_api equals `d3d12`
    - Expected: traceability_status equals `pass`
    - Expected: traceability_html_count equals `105`
-   - Expected: traceability_implemented_css_count equals `184`
+   - Expected: traceability_implemented_css_count equals `188`
    - Expected: traceability_unsupported_css_missing_count equals `0`
    - Expected: comparison_fixture_status equals `pass`
    - Expected: comparison_artifact_reason equals `pass`
@@ -1100,22 +1100,22 @@ expect(rendering_manifest_tag_covered_names).to_contain("article")
 expect(rendering_manifest_tag_covered_names).to_contain("video")
 expect(rendering_manifest_tag_covered_names.split(",").len()).to_equal(105)
 expect(rendering_manifest_tag_missing).to_equal("")
-expect(rendering_manifest_css_count).to_equal("184")
+expect(rendering_manifest_css_count).to_equal("188")
 expect(rendering_manifest_css_source).to_equal("scripts/check/check-html-css-sspec-traceability.shs")
 expect(rendering_manifest_css_source_status).to_equal("pass")
 expect(rendering_manifest_css_source_count).to_equal(rendering_manifest_css_count)
-expect(rendering_manifest_css_covered).to_equal("184")
+expect(rendering_manifest_css_covered).to_equal("188")
 expect(rendering_manifest_css_covered_names).to_contain("align-content")
 expect(rendering_manifest_css_covered_names).to_contain("align-items")
 expect(rendering_manifest_css_covered_names).to_contain("align-self")
 expect(rendering_manifest_css_covered_names).to_contain("display")
 expect(rendering_manifest_css_covered_names).to_contain("justify-content")
 expect(rendering_manifest_css_covered_names).to_contain("border-style")
-expect(rendering_manifest_css_covered_names.split(",").len()).to_equal(184)
+expect(rendering_manifest_css_covered_names.split(",").len()).to_equal(188)
 expect(rendering_manifest_css_missing).to_equal("")
 expect(rendering_manifest_css_scope).to_equal("implemented-simple-web-css")
 expect(rendering_manifest_total_css_count).to_equal(traceability_css_count)
-expect(rendering_manifest_unrendered_css_count.to_i64()).to_be_greater_than(209)
+expect(rendering_manifest_unrendered_css_count.to_i64()).to_be_greater_than(205)
 expect(rendering_manifest_unrendered_css_properties).to_equal(traceability_unsupported_css_properties)
 expect(rendering_manifest_unrendered_css_properties).to_contain("accent-color")
 expect(rendering_manifest_case_count).to_equal("50")
@@ -1128,11 +1128,11 @@ expect(full_rendering_goal_html_status).to_equal("pass")
 expect(full_rendering_goal_html_total).to_equal("105")
 expect(full_rendering_goal_html_rendered).to_equal("105")
 expect(full_rendering_goal_implemented_css_status).to_equal("pass")
-expect(full_rendering_goal_implemented_css_total).to_equal("184")
-expect(full_rendering_goal_implemented_css_rendered).to_equal("184")
+expect(full_rendering_goal_implemented_css_total).to_equal("188")
+expect(full_rendering_goal_implemented_css_rendered).to_equal("188")
 expect(full_rendering_goal_full_css_status).to_equal("incomplete")
 expect(full_rendering_goal_full_css_total).to_equal(traceability_css_count)
-expect(full_rendering_goal_full_css_rendered).to_equal("184")
+expect(full_rendering_goal_full_css_rendered).to_equal("188")
 expect(full_rendering_goal_full_css_unrendered).to_equal(rendering_manifest_unrendered_css_count)
 expect(full_rendering_goal_full_css_unrendered_properties).to_equal(rendering_manifest_unrendered_css_properties)
 expect(html_css_implemented_surface_status).to_equal("pass")
@@ -1162,9 +1162,9 @@ expect(windows_d3d12_render_log_required_api).to_equal("d3d12")
 expect(traceability_status).to_equal("pass")
 expect(traceability_html_count).to_equal("105")
 expect(traceability_css_count.to_i64()).to_be_greater_than(389)
-expect(traceability_implemented_css_count).to_equal("184")
+expect(traceability_implemented_css_count).to_equal("188")
 expect(traceability_implemented_css_indexed_count.to_i64()).to_be_greater_than(50)
-expect(traceability_unsupported_css_count.to_i64()).to_be_greater_than(216)
+expect(traceability_unsupported_css_count.to_i64()).to_be_greater_than(212)
 expect(traceability_unsupported_css_properties.len()).to_be_greater_than(1000)
 expect(traceability_unsupported_css_missing_count).to_equal("0")
 expect(comparison_fixture_status).to_equal("pass")
