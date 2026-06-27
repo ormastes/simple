@@ -103,7 +103,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_live_smoke_proof_va
 - The bridge source marker must resolve to a single-link regular nonempty
   bridge source file that still contains the live smoke proof producer and
   marker. Symlinked, hardlinked, empty, non-regular, or markerless bridge source
-  artifacts fail closed.
+  artifacts fail closed, and the validator must expose both reported and actual
+  bridge source byte-size rows.
 - The proof must include Chromium/Electron runtime evidence from the renderer
   user agent and Electron/Chrome process versions, not only a hand-authored
   source marker.
@@ -158,6 +159,7 @@ expect(evidence).to_contain("electron_live_smoke_surface_id=main")
 expect(evidence).to_contain("electron_live_smoke_proof_source=src/app/ui.electron/bridge.js:electronLiveSmokeProofScript")
 expect(evidence).to_contain("electron_live_smoke_proof_source_file_status=pass")
 expect(evidence).to_contain("electron_live_smoke_proof_source_size_bytes=")
+expect(evidence).to_contain("electron_live_smoke_proof_source_actual_size_bytes=")
 expect(evidence).to_contain("electron_live_smoke_browser_engine=chromium")
 expect(evidence).to_contain("electron_live_smoke_electron_user_agent=Mozilla/5.0 Chrome/142.0.0.0 Electron/42.5.0 Safari/537.36")
 expect(evidence).to_contain("electron_live_smoke_electron_process_version=42.5.0")
@@ -324,10 +326,12 @@ expect(missing).to_contain("electron_live_smoke_validation_reason=unexpected-pro
 expect(missing).to_contain("electron_live_smoke_proof_source=src/app/ui.electron/bridge.js:electronLiveSmokeProofScript")
 expect(missing).to_contain("electron_live_smoke_proof_source_file_status=missing")
 expect(missing).to_contain("electron_live_smoke_proof_source_size_bytes=")
+expect(missing).to_contain("electron_live_smoke_proof_source_actual_size_bytes=")
 expect(hardlink).to_contain("electron_live_smoke_validation_status=fail")
 expect(hardlink).to_contain("electron_live_smoke_validation_reason=unexpected-proof-source-file-hardlink")
 expect(hardlink).to_contain("electron_live_smoke_proof_source=src/app/ui.electron/bridge.js:electronLiveSmokeProofScript")
 expect(hardlink).to_contain("electron_live_smoke_proof_source_file_status=hardlink")
+expect(hardlink).to_contain("electron_live_smoke_proof_source_actual_size_bytes=")
 ```
 
 </details>
@@ -904,6 +908,7 @@ expect(wrapper).to_contain("electron_live_smoke_surface_id")
 expect(wrapper).to_contain("electron_live_smoke_proof_source")
 expect(wrapper).to_contain("electron_live_smoke_proof_source_file_status")
 expect(wrapper).to_contain("electron_live_smoke_proof_source_size_bytes")
+expect(wrapper).to_contain("electron_live_smoke_proof_source_actual_size_bytes")
 expect(wrapper).to_contain("electron_live_smoke_browser_engine")
 expect(wrapper).to_contain("electron_live_smoke_electron_user_agent")
 expect(wrapper).to_contain("electron_live_smoke_electron_process_version")
@@ -982,6 +987,7 @@ expect(evidence).to_contain("electron_live_smoke_surface_id=")
 expect(evidence).to_contain("electron_live_smoke_proof_source=")
 expect(evidence).to_contain("electron_live_smoke_proof_source_file_status=")
 expect(evidence).to_contain("electron_live_smoke_proof_source_size_bytes=")
+expect(evidence).to_contain("electron_live_smoke_proof_source_actual_size_bytes=")
 expect(evidence).to_contain("electron_live_smoke_browser_engine=")
 expect(evidence).to_contain("electron_live_smoke_electron_user_agent=")
 expect(evidence).to_contain("electron_live_smoke_electron_process_version=")

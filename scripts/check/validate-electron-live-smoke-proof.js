@@ -56,22 +56,23 @@ function proofSourceArtifact(marker) {
   try {
     stat = fs.lstatSync(filePath);
   } catch (_err) {
-    return { status: 'missing', size: '' };
+    return { status: 'missing', size: '', actualSize: '' };
   }
-  if (stat.isSymbolicLink()) return { status: 'symlink', size: '' };
-  if (!stat.isFile()) return { status: 'not-regular', size: '' };
-  if (stat.nlink > 1) return { status: 'hardlink', size: String(stat.size) };
-  if (stat.size <= 0) return { status: 'empty', size: '0' };
+  if (stat.isSymbolicLink()) return { status: 'symlink', size: '', actualSize: '' };
+  if (!stat.isFile()) return { status: 'not-regular', size: '', actualSize: '' };
+  const actualSize = String(stat.size);
+  if (stat.nlink > 1) return { status: 'hardlink', size: actualSize, actualSize };
+  if (stat.size <= 0) return { status: 'empty', size: '0', actualSize: '0' };
   let source = '';
   try {
     source = fs.readFileSync(filePath, 'utf8');
   } catch (_err) {
-    return { status: 'missing', size: '' };
+    return { status: 'missing', size: '', actualSize: '' };
   }
   if (!source.includes(`function ${symbol}`) || !source.includes(`proof_source: '${marker}'`)) {
-    return { status: 'symbol-missing', size: String(stat.size) };
+    return { status: 'symbol-missing', size: actualSize, actualSize };
   }
-  return { status: 'pass', size: String(stat.size) };
+  return { status: 'pass', size: actualSize, actualSize };
 }
 
 const [proofPath, widthText, heightText] = process.argv.slice(2);
@@ -204,6 +205,7 @@ emit('electron_live_smoke_surface_id', proof.surface_id);
 emit('electron_live_smoke_proof_source', proof.proof_source);
 emit('electron_live_smoke_proof_source_file_status', proofSource.status);
 emit('electron_live_smoke_proof_source_size_bytes', proofSource.size);
+emit('electron_live_smoke_proof_source_actual_size_bytes', proofSource.actualSize);
 emit('electron_live_smoke_browser_engine', proof.browser_engine);
 emit('electron_live_smoke_electron_user_agent', proof.electron_user_agent);
 emit('electron_live_smoke_electron_process_version', proof.electron_process_version);
