@@ -1,0 +1,58 @@
+"""
+# Linux Vulkan RenderDoc Reason Forwarding
+
+## Overview
+
+Verifies the lightweight contract that Linux Vulkan render-log diagnostics keep
+the actionable Chrome/Electron RenderDoc failure reason visible at aggregate
+level. This spec intentionally avoids the broad GUI aggregate fixture so it can
+run quickly when the full aggregate SSpec is too expensive for a focused check.
+
+**Plan:** doc/03_plan/agent_tasks/vulkan_backed_web_gui_renderdoc_parallel_plan.md
+**Requirements:** N/A
+**Research:** doc/09_report/gui_renderdoc_feature_coverage_status_2026-06-27.md
+**Design:** doc/07_guide/tooling/renderdoc_capture_infra.md
+
+## Syntax
+
+```sh
+SIMPLE_LIB=src bin/simple test test/03_system/check/linux_vulkan_renderdoc_reason_forwarding_spec.spl --mode=interpreter --clean
+```
+
+## Acceptance
+
+- The Linux comparison wrapper prefers
+  `rdoc_external_host_capture_reason_raw` before the generic gate reason.
+- The aggregate status wrapper reads and emits Simple, Chrome, and Electron
+  Linux RenderDoc reason keys.
+- The current report records the actionable Chrome and Electron blockers.
+"""
+
+# @tag: system, gui, renderdoc, vulkan, linux
+
+use std.spec.*
+use std.io_runtime.{file_read}
+
+describe "Linux Vulkan RenderDoc reason forwarding":
+    it "keeps actionable browser RenderDoc failure reasons in the Linux comparison and aggregate":
+        step("Read the Linux comparison wrapper")
+        val linux_compare = file_read("scripts/check/check-linux-vulkan-render-log-compare.shs")
+
+        step("Assert Chrome raw capture reason is preferred over the generic gate reason")
+        expect(linux_compare).to_contain("render_log_reason_from_rdoc_env \"$RDOC_HTML_EVIDENCE_ENV\" rdoc_external_host_capture_reason_raw rdoc_external_host_gate_reason")
+
+        step("Read the GUI RenderDoc aggregate wrapper")
+        val aggregate = file_read("scripts/check/check-gui-renderdoc-feature-coverage-status.shs")
+
+        step("Assert aggregate reads and emits per-backend Linux RenderDoc reasons")
+        expect(aggregate).to_contain("linux_vulkan_render_log_renderdoc_simple_reason = value_of(\"linux_vulkan_render_log_compare_renderdoc_simple_reason\"")
+        expect(aggregate).to_contain("linux_vulkan_render_log_renderdoc_chrome_reason = value_of(\"linux_vulkan_render_log_compare_renderdoc_chrome_reason\"")
+        expect(aggregate).to_contain("linux_vulkan_render_log_renderdoc_electron_reason = value_of(\"linux_vulkan_render_log_compare_renderdoc_electron_reason\"")
+        expect(aggregate).to_contain("emit(\"linux_vulkan_render_log_compare_renderdoc_simple_reason\", linux_vulkan_render_log_renderdoc_simple_reason)")
+        expect(aggregate).to_contain("emit(\"linux_vulkan_render_log_compare_renderdoc_chrome_reason\", linux_vulkan_render_log_renderdoc_chrome_reason)")
+        expect(aggregate).to_contain("emit(\"linux_vulkan_render_log_compare_renderdoc_electron_reason\", linux_vulkan_render_log_renderdoc_electron_reason)")
+
+        step("Assert the current report exposes actionable browser blocker reasons")
+        val report = file_read("doc/09_report/gui_renderdoc_feature_coverage_status_2026-06-27.md")
+        expect(report).to_contain("linux_vulkan_render_log_compare_renderdoc_chrome_reason=chromium-gpu-process-crashed-under-renderdoc")
+        expect(report).to_contain("linux_vulkan_render_log_compare_renderdoc_electron_reason=missing-rdc")
