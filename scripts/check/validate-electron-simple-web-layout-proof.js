@@ -96,26 +96,31 @@ function pathInfo(filePath) {
 
 function proofSourceArtifact(filePath) {
   const info = pathInfo(filePath);
-  if (info.isSymlink) return { status: 'symlink', size: '' };
-  if (info.lstat === null) return { status: 'missing', size: '' };
-  if (!info.lstat.isFile()) return { status: 'not-regular', size: '' };
-  if (info.hasMultipleLinks) return { status: 'hardlink', size: String(info.lstat.size) };
-  if (info.lstat.size <= 0) return { status: 'empty', size: '0' };
-  let source = '';
+  if (info.isSymlink) return { status: 'symlink', size: '', actualSize: '' };
+  if (info.lstat === null) return { status: 'missing', size: '', actualSize: '' };
+  if (!info.lstat.isFile()) return { status: 'not-regular', size: '', actualSize: '' };
+  if (info.hasMultipleLinks) return { status: 'hardlink', size: String(info.lstat.size), actualSize: '' };
+  if (info.lstat.size <= 0) return { status: 'empty', size: '0', actualSize: '' };
+  let bytes;
   try {
-    source = fs.readFileSync(filePath, 'utf8');
+    bytes = fs.readFileSync(filePath);
   } catch (_err) {
-    return { status: 'missing', size: '' };
+    return { status: 'missing', size: '', actualSize: '' };
   }
+  const actualSize = String(bytes.length);
+  if (actualSize !== String(info.lstat.size)) {
+    return { status: 'size-mismatch', size: String(info.lstat.size), actualSize };
+  }
+  const source = bytes.toString('utf8');
   if (
     !source.includes('renderer: "electron-live-capture-page"') ||
     !source.includes('proof_source: "tools/electron-live-bitmap/exact_fixture.js"') ||
     !source.includes('capture_backend: captureBackend') ||
     !source.includes('compositor_mode: compositorMode')
   ) {
-    return { status: 'marker-missing', size: String(info.lstat.size) };
+    return { status: 'marker-missing', size: String(info.lstat.size), actualSize };
   }
-  return { status: 'pass', size: String(info.lstat.size) };
+  return { status: 'pass', size: String(info.lstat.size), actualSize };
 }
 
 function artifactStat(value, proofPath) {
@@ -342,6 +347,7 @@ const expectedProofSource = 'tools/electron-live-bitmap/exact_fixture.js';
 const proofSource = proofSourceArtifact(expectedProofSource);
 const proofSourceFileStatus = proofSource.status;
 const proofSourceSizeBytes = proofSource.size;
+const proofSourceActualSizeBytes = proofSource.actualSize;
 const expectedCaptureBackend = 'electron-offscreen-capture-page';
 const expectedCompositorMode = 'offscreen-osr-exact-srgb';
 const browserEngine = textField(proof.browser_engine);
@@ -461,6 +467,7 @@ emit('electron_simple_web_layout_renderer', proof.renderer);
 emit('electron_simple_web_layout_proof_source', proof.proof_source);
 emit('electron_simple_web_layout_proof_source_file_status', proofSourceFileStatus);
 emit('electron_simple_web_layout_proof_source_size_bytes', proofSourceSizeBytes);
+emit('electron_simple_web_layout_proof_source_actual_size_bytes', proofSourceActualSizeBytes);
 emit('electron_simple_web_layout_capture_backend', proof.capture_backend);
 emit('electron_simple_web_layout_compositor_mode', proof.compositor_mode);
 emit('electron_simple_web_layout_browser_engine', browserEngine);

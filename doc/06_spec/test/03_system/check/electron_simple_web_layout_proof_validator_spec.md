@@ -109,6 +109,9 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_simple_web_layout_p
   nonempty producer source file with expected offscreen capture markers so
   stale JSON cannot be paired with a missing, substituted, or aliased capture
   script.
+- The Electron capture producer source proof must emit both the expected
+  `lstat` size and actual bytes read from the producer, and fail closed when
+  those sizes diverge.
 - Complete proofs must identify the Electron offscreen capture backend,
   compositor mode, Electron/Chromium runtime identity, Chromium GPU
   feature-status diagnostics, and at least two measured capture iterations.
@@ -152,6 +155,7 @@ expect(evidence).to_contain("electron_simple_web_layout_renderer=electron-live-c
 expect(evidence).to_contain("electron_simple_web_layout_proof_source=tools/electron-live-bitmap/exact_fixture.js")
 expect(evidence).to_contain("electron_simple_web_layout_proof_source_file_status=pass")
 expect(evidence).to_contain("electron_simple_web_layout_proof_source_size_bytes=")
+expect(evidence).to_contain("electron_simple_web_layout_proof_source_actual_size_bytes=")
 expect(evidence).to_contain("electron_simple_web_layout_capture_backend=electron-offscreen-capture-page")
 expect(evidence).to_contain("electron_simple_web_layout_compositor_mode=offscreen-osr-exact-srgb")
 expect(evidence).to_contain("electron_simple_web_layout_browser_engine=chromium")
@@ -297,6 +301,7 @@ expect(evidence).to_contain("electron_simple_web_layout_validation_reason=unexpe
 expect(evidence).to_contain("electron_simple_web_layout_proof_source=tools/electron-live-bitmap/exact_fixture.js")
 expect(evidence).to_contain("electron_simple_web_layout_proof_source_file_status=missing")
 expect(evidence).to_contain("electron_simple_web_layout_proof_source_size_bytes=")
+expect(evidence).to_contain("electron_simple_web_layout_proof_source_actual_size_bytes=")
 ```
 
 </details>
@@ -1164,10 +1169,12 @@ expect(validator).to_contain("captured-argb-checksum-mismatch")
 expect(validator).to_contain("captured-argb-weighted-checksum-mismatch")
 expect(validator).to_contain("proofSourceArtifact")
 expect(validator).to_contain("marker-missing")
+expect(validator).to_contain("size-mismatch")
 expect(script).to_contain("electron_simple_web_layout_proof_renderer")
 expect(script).to_contain("electron_simple_web_layout_proof_source")
 expect(script).to_contain("electron_simple_web_layout_proof_source_file_status")
 expect(script).to_contain("electron_simple_web_layout_proof_source_size_bytes")
+expect(script).to_contain("electron_simple_web_layout_proof_source_actual_size_bytes")
 expect(script).to_contain("captured-argb-checksum-mismatch")
 expect(script).to_contain("captured-argb-weighted-checksum-mismatch")
 expect(script).to_contain("status=divergent")
