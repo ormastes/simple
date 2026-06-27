@@ -28,7 +28,7 @@ simple_web_renderer_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 69 | 69 | 0 | 0 |
+| 70 | 70 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -313,6 +313,34 @@ expect(_draw_ir_style_value(stack, "flex-wrap")).to_equal("wrap")
 > expect(_draw_ir_style_value(stack, "flex-wrap")).to_equal("wrap")
 
 </details>
+
+</details>
+
+#### maps inline logical spacing to horizontal physical layout
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 15 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><head><style>html,body{margin:0;padding:0;background-color:#ffffff}#card{display:block;background-color:#1d4ed8;width:12px;height:8px;padding-inline:3px 5px;padding-inline-start:4px;margin-inline:2px 6px;margin-inline-end:7px}</style></head><body><section id='card'></section></body></html>"
+val composition = simple_web_layout_render_html_draw_ir(html, 48, 28)
+val batch = composition.batches[0]
+val card = _draw_ir_command_by_id(batch.commands, "card")
+val pixels = simple_web_render_html_to_pixels(html, 48, 28)
+
+expect(_draw_ir_style_value(card, "padding-left")).to_equal("4")
+expect(_draw_ir_style_value(card, "padding-right")).to_equal("5")
+expect(_draw_ir_style_value(card, "margin-left")).to_equal("2")
+expect(_draw_ir_style_value(card, "margin-right")).to_equal("7")
+expect(card.x).to_equal(2)
+expect(card.content_rect.x).to_equal(6)
+expect(card.content_rect.width).to_equal(12)
+expect(pixels[2]).to_equal(0xFF1D4ED8u32)
+expect(pixels[1]).to_equal(0xFFFFFFFFu32)
+```
 
 </details>
 
@@ -1533,8 +1561,8 @@ expect(_count_color(pixels, 0xFF065F46u32)).to_equal(0)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 69 |
-| Active scenarios | 69 |
+| Total scenarios | 70 |
+| Active scenarios | 70 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

@@ -54,10 +54,10 @@ required, platform render-log comparison, and separate full-CSS closure.
   accept the relevant fresh evidence rows.
 - Current full-CSS evidence keys remain incomplete:
   `html_css_full_rendering_goal_status=incomplete`,
-  `html_css_full_rendering_goal_full_css_rendered_count=135`, and
-  `html_css_full_rendering_goal_full_css_unrendered_count=259`.
-  `aspect-ratio`, `object-fit`, `object-position`, and `flex-flow` are
-  completed narrow implemented-CSS slices.
+  `html_css_full_rendering_goal_full_css_rendered_count=141`, and
+  `html_css_full_rendering_goal_full_css_unrendered_count=253`.
+  `aspect-ratio`, `object-fit`, `object-position`, `flex-flow`, and logical
+  inline spacing are completed narrow implemented-CSS slices.
 
 ## Current Parallel Start Status
 
@@ -121,6 +121,8 @@ Fallback sidecar findings accepted for planning only:
 Agents must use these names consistently:
 
 - Aggregate gate: `scripts/check/check-gui-renderdoc-feature-coverage-status.shs`
+- Executable completion checklist:
+  `test/03_system/check/gui_web_2d_goal_completion_criteria_spec.spl`
 - Web WM wrapper: `scripts/check/check-web-wm-modern-shell-evidence.shs`
 - Vulkan host setup: `scripts/setup/setup-gui-web-2d-vulkan-env.shs`
 - 4K/8K perf wrapper: `scripts/check/check-widget-showcase-4k-200fps.shs`
@@ -282,6 +284,30 @@ Review gate:
 
 - Main agent integrates only reviewed changes.
 
+## Explicit Completion Criteria
+
+The active goal is complete only when the executable completion checklist in
+`test/03_system/check/gui_web_2d_goal_completion_criteria_spec.spl` passes
+without fail-fast placeholders. The current file is intentionally a failing
+SSpec skeleton so generated manuals expose the remaining work as scenario
+steps instead of burying it in prose.
+
+Each scenario maps to one completion gate:
+
+| Gate | Required proof | Host owner | Current state |
+| --- | --- | --- | --- |
+| Linux Vulkan RenderDoc | Chrome, Electron, and Simple Vulkan backing; nonblank pairwise ARGB equivalence; strict Linux render-log compare; `.rdc` artifacts with `RDOC` magic for Chrome, Electron, and Simple | Prepared Ubuntu GUI host | Blocked here by missing RenderDoc command |
+| macOS Metal | Native Metal readback; browser/gui backing; pairwise equivalence; macOS render-log compare; Xcode GPU Capture proof when required | Darwin GUI host | Not run on this Linux host |
+| Windows D3D12 | Native D3D12/DXGI readback; browser/gui backing; pairwise equivalence; D3D12 render-log compare; verified PIX artifact files and GPU-debugger artifact files | Windows GUI host | Not run on this Linux host |
+| 4K/8K retained perf | Current-source 4K and 8K rows at 200 FPS with viewport, p50/p95 or equivalent timing, RSS, checksum/readback, native binary provenance, retained mode, redraw count, source revision, and `fallback_state=none` | Main/perf agent | Prior retained rows pass; keep source freshness required |
+| Full HTML/CSS | All HTML tags and all CSS inventory properties render; strict full CSS gate passes | Main/web-renderer agents | Incomplete: implemented CSS subset is `141/141`, full CSS is `141/394` |
+| Production GUI/Web parity | Same-frame backend readback, positive backend handles, matching checksums, and no CPU-mirror-only pass | Platform/main agents | Still separate from Linux direct ARGB diagnostics |
+| Parallel-agent review | Spark or fallback sidecar output plus normal/high-capability review before broad findings or done marks are accepted | Main + review agent | Spark may be quota-blocked; fallback output remains advisory until reviewed |
+
+Do not mark the overall goal done from a subset pass. A narrow CSS slice,
+browser Vulkan backing row, retained 8K row, or diagnostic render-log row can
+close only its own work order.
+
 Current review checklist:
 
 - Treat Spark or mini sidecar output as advisory until verified against current
@@ -349,6 +375,8 @@ This session's immediate integration target:
 | WO-13 CSS object-position slice | Main agent | Low: Spark may only inspect evidence after implementation | Renderer, CSS traceability wrapper, Electron bitmap evidence fixture, focused unit/system specs, generated docs, report | Focused renderer spec passes, full CSS gate reports implemented CSS `134/134`, and no full-CSS/native-platform completion is claimed |
 | WO-14 Aggregate current-evidence autodiscovery | Main agent | Low: Spark may inspect output only | Aggregate checker, focused autodiscovery SSpec/manual doc | Default aggregate discovers current 4K, 8K, browser-backing, and direct ARGB evidence rows without explicit env overrides; blocker count drops from 16 to 10 on this host |
 | WO-15 CSS flex-flow slice | Main agent | Low: Spark may only inspect evidence after implementation | CSS traceability wrapper, focused renderer/inventory/system specs, generated docs, report | Focused renderer spec passes, full CSS gate reports implemented CSS `135/135`, and no full-CSS/native-platform completion is claimed |
+| WO-16 CSS logical inline spacing slice | Main agent | Low: Spark may only inspect evidence after implementation | Renderer, CSS traceability wrapper, Electron bitmap evidence fixture, focused renderer/inventory/system specs, generated docs, report | Focused renderer spec passes, full CSS gate reports implemented CSS `141/141`, and no full-CSS/native-platform completion is claimed |
+| WO-17 Goal completion checklist SSpec | Main agent defines, Spark/fallback may inspect, normal/high-capability agent reviews | High for read-only review, low for source edits | `test/03_system/check/gui_web_2d_goal_completion_criteria_spec.spl`, generated/manual doc, this plan | The SSpec lists all final gates as fail-fast scenario helpers; goal completion requires replacing every placeholder with evidence assertions and making the spec pass |
 
 WO-12 rule: do not spawn Spark against source-edit scopes until the read-only
 gap/matrix lanes complete and a normal reviewer approves the intended write
@@ -421,6 +449,22 @@ implemented CSS is `135/135`, full CSS is `135/394`, full CSS unrendered is
 `259`, and unsupported inventory ownership is `266`. This is a completed
 narrow web-renderer slice, not completion evidence for full CSS or native
 platform capture lanes.
+
+WO-16 status, 2026-06-27: `margin-inline`, `margin-inline-start`,
+`margin-inline-end`, `padding-inline`, `padding-inline-start`, and
+`padding-inline-end` moved into implemented Simple Web CSS for the default
+horizontal layout path. Current evidence is recorded in
+`doc/09_report/html_css_full_rendering_goal_status_logical_inline_spacing_2026-06-27.md`:
+implemented CSS is `141/141`, full CSS is `141/394`, full CSS unrendered is
+`253`, and unsupported inventory ownership is `260`. This is a completed
+narrow web-renderer slice, not completion evidence for writing-mode/RTL logical
+mapping, full CSS, RenderDoc, Metal, or D3D12 lanes.
+
+WO-17 status, 2026-06-27: the completion checklist SSpec exists with one
+fail-fast helper per final gate. It is expected to fail until platform agents
+replace placeholders with assertions over fresh evidence. Generated/manual
+SSpec output should be used as the operator-facing checklist for future
+Linux/macOS/Windows/perf/full-CSS completion reviews.
 
 WO-5 status: refreshed non-RenderDoc Linux evidence is passing in
 `doc/09_report/gui_web_2d_linux_vulkan_refresh_2026-06-27.md`. A fresh
@@ -505,12 +549,16 @@ Normal-review acceptance:
   `gui_showcase_4k_200fps_target_fps=200`,
   `gui_showcase_4k_200fps_render_mode=retained-static-frame`,
   `gui_showcase_4k_200fps_redraw_frames=1`,
-  `gui_showcase_4k_200fps_rss_status=pass`, and current source alignment.
+  `gui_showcase_4k_200fps_rss_status=pass`,
+  `gui_showcase_4k_200fps_fallback_state=none`, native binary provenance, and
+  current source alignment.
 - Verify `gui_showcase_8k_perf_status=pass`,
   `gui_showcase_8k_perf_target_fps=200`,
   `gui_showcase_8k_perf_render_mode=retained-static-frame`,
   `gui_showcase_8k_perf_redraw_frames=1`,
-  `gui_showcase_8k_perf_rss_status=pass`, and current source alignment.
+  `gui_showcase_8k_perf_rss_status=pass`,
+  `gui_showcase_8k_perf_fallback_state=none`, native binary provenance, and
+  current source alignment.
 - Reject small viewport, software fallback, cached replay without source
   freshness, missing timing logs, missing checksum/readback proof, or missing
   RSS budget as 4K/8K completion evidence.

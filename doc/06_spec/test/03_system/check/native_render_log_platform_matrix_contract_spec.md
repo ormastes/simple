@@ -110,8 +110,9 @@ row. Windows must report
 `windows_d3d12_render_log_compare_pairwise_status=pass`,
 `windows_d3d12_render_log_compare_pix_status=pass` with a `PIX` artifact
 marker plus `windows_d3d12_render_log_compare_pix_artifact_file_magic=PIX`, and
-`windows_d3d12_render_log_compare_gpu_debugger_status=pass` with a debugger
-artifact.
+`windows_d3d12_render_log_compare_gpu_debugger_status=pass` with verified
+debugger artifact file proof. Metadata strings alone are not PIX or GPU
+debugger completion evidence.
 
 ## Matrix Semantics
 
