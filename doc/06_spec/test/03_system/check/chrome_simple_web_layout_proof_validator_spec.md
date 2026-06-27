@@ -27,7 +27,7 @@ chrome_simple_web_layout_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 17 | 17 | 0 | 0 |
+| 18 | 18 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -79,7 +79,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/chrome_simple_web_layout_pro
 - Blur/tolerance use, missing ARGB capture, missing geometry, malformed
   mismatch counts, and checksum mismatches are rejected.
 - ARGB capture and Chrome geometry proof paths must resolve to nonempty files
-  instead of relying on boolean flags alone.
+  instead of relying on boolean flags alone, and they must not resolve back to
+  the top-level proof JSON itself.
 - ARGB capture files must parse as `argb-u32` artifacts from the Chrome
   screenshot producer, match the captured viewport, contain the exact pixel
   count, include nonzero pixels, and encode pixels as numeric uint32 JSON
@@ -371,6 +372,45 @@ expect(empty).to_contain("chrome_simple_web_layout_validation_status=fail")
 expect(empty).to_contain("chrome_simple_web_layout_validation_reason=empty-captured-argb-file")
 expect(empty).to_contain("chrome_simple_web_layout_captured_argb_file_status=pass")
 expect(empty).to_contain("chrome_simple_web_layout_captured_argb_size_bytes=0")
+```
+
+</details>
+
+#### rejects self-referential Chrome capture and geometry artifact paths
+
+-  proof command
+-  proof command
+   - Expected: code equals `1`
+- Confirm Chrome proof cannot use its own JSON as capture or geometry artifact evidence
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 20 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-chrome-layout-validator-self-artifacts"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_command(root + "/argb-self.json", "p.captured_argb_path=path.basename(process.argv[1]);p.format=\"argb-u32\";p.producer=\"chrome-headless-screenshot\";p.pixels=Array(96*64).fill(4294967295)") +
+    " && node scripts/check/validate-chrome-simple-web-layout-proof.js " + root + "/argb-self.json > " + root + "/argb-self.env; " +
+    _proof_command(root + "/geometry-self.json", "p.geometry_path=path.basename(process.argv[1]);p.producer=\"chrome-headless-geometry\";p.viewport={width:96,height:64};p.items=[{label:\"root\",tag:\"div\",x:0,y:0,width:96,height:64}]") +
+    " && node scripts/check/validate-chrome-simple-web-layout-proof.js " + root + "/geometry-self.json > " + root + "/geometry-self.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val argb_self = file_read(root + "/argb-self.env")
+val geometry_self = file_read(root + "/geometry-self.env")
+step("Confirm Chrome proof cannot use its own JSON as capture or geometry artifact evidence")
+expect(argb_self).to_contain("chrome_simple_web_layout_validation_status=fail")
+expect(argb_self).to_contain("chrome_simple_web_layout_validation_reason=missing-captured-argb-file")
+expect(argb_self).to_contain("chrome_simple_web_layout_captured_argb_path=argb-self.json")
+expect(argb_self).to_contain("chrome_simple_web_layout_captured_argb_file_status=fail")
+expect(geometry_self).to_contain("chrome_simple_web_layout_validation_status=fail")
+expect(geometry_self).to_contain("chrome_simple_web_layout_validation_reason=missing-chrome-geometry-file")
+expect(geometry_self).to_contain("chrome_simple_web_layout_geometry_path=geometry-self.json")
+expect(geometry_self).to_contain("chrome_simple_web_layout_geometry_file_status=fail")
 ```
 
 </details>
@@ -729,11 +769,12 @@ expect(pixel).to_contain("chrome_simple_web_layout_mismatch_count=4")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 28 lines folded for reproduction.
+Runnable source: 30 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val script = file_read("scripts/check/check-chrome-simple-web-layout-bitmap-evidence.shs")
+val validator = file_read("scripts/check/validate-chrome-simple-web-layout-proof.js")
 expect(script).to_contain("validate-chrome-simple-web-layout-proof.js")
 expect(script).to_contain("cat \"$VALIDATED_ENV\"")
 expect(script).to_contain("chrome_simple_web_layout_validation_status")
@@ -751,6 +792,7 @@ expect(script).to_contain("chrome_simple_web_layout_geometry_producer")
 expect(script).to_contain("chrome_simple_web_layout_geometry_viewport_width")
 expect(script).to_contain("chrome_simple_web_layout_geometry_viewport_height")
 expect(script).to_contain("chrome_simple_web_layout_geometry_item_count")
+expect(validator).to_contain("path.resolve(candidate) === path.resolve(proofPath)")
 expect(script).to_contain("checksum-mismatch|weighted-checksum-mismatch|pixel-mismatch")
 expect(script).to_contain("status=divergent")
 val capture = file_read("tools/chrome-live-bitmap/capture_html_argb.js")
@@ -809,8 +851,8 @@ expect(evidence).to_contain("chrome_simple_web_layout_geometry_item_count=0")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 17 |
-| Active scenarios | 17 |
+| Total scenarios | 18 |
+| Active scenarios | 18 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
