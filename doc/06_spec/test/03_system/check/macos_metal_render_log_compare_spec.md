@@ -114,7 +114,8 @@ Browser evidence must prove Metal backing and exact pairwise ARGB comparison:
 - Electron and Chrome browser backing source files must also be nonempty; a
   zero-byte source artifact is reported distinctly from a missing file.
 - Electron and Chrome browser backing source files must contain structured
-  Metal GPU metadata, not arbitrary nonempty text.
+  Metal GPU metadata scoped to the expected Electron or Chrome backing prefix,
+  not arbitrary nonempty text or generic renderer rows.
 - Electron and Chrome GPU metadata must not include explicit fallback renderers
   such as SwiftShader, software, OpenGL, Vulkan, or D3D.
 - `macos_metal_browser_backing_status=pass`
@@ -186,20 +187,22 @@ macos_metal_render_log_compare_pairwise_status=pass
    Metal GPU metadata is otherwise complete.
 8. Reject browser backing rows whose source artifacts are arbitrary non-proof
    text even when normalized Metal rows claim pass.
-9. Reject pairwise rows whose Simple, Chrome, or Electron ARGB evidence is
+9. Reject browser backing source artifacts that only contain generic GPU
+   metadata rather than Electron/Chrome-scoped backing rows.
+10. Reject pairwise rows whose Simple, Chrome, or Electron ARGB evidence is
    blank or uses mismatched viewport geometry.
-10. Reject pairwise rows whose ARGB checksums are missing or mismatched.
-11. Reject pairwise rows whose ARGB artifact files are missing or malformed.
-12. Reject ARGB artifact fallbacks that borrow stale working-directory files
+11. Reject pairwise rows whose ARGB checksums are missing or mismatched.
+12. Reject pairwise rows whose ARGB artifact files are missing or malformed.
+13. Reject ARGB artifact fallbacks that borrow stale working-directory files
     instead of evidence beside the browser env file.
-13. Reject missing Xcode GPU capture when strict capture mode is enabled.
-14. Reject Xcode GPU capture rows whose artifact bytes do not match the native
+14. Reject missing Xcode GPU capture when strict capture mode is enabled.
+15. Reject Xcode GPU capture rows whose artifact bytes do not match the native
    marker, even if the env row claims `XCODE-GPUTRACE`.
-15. Reject Xcode GPU capture rows that omit the capture artifact or native
+16. Reject Xcode GPU capture rows that omit the capture artifact or native
     artifact marker.
-16. Preserve typed unavailable evidence when required Metal input env files are
+17. Preserve typed unavailable evidence when required Metal input env files are
     missing.
-17. Reject strict Metal capture rows that use browser metadata as the capture
+18. Reject strict Metal capture rows that use browser metadata as the capture
     tool even when the `.gputrace` artifact bytes are valid.
 
 ## Scenarios
@@ -213,6 +216,7 @@ macos_metal_render_log_compare_pairwise_status=pass
    - Expected: missing_source_code equals `0`
    - Expected: empty_source_code equals `0`
    - Expected: invalid_source_code equals `0`
+   - Expected: generic_source_code equals `0`
    - Expected: missing_magic_code equals `0`
    - Expected: missing_argb_code equals `0`
 
@@ -220,7 +224,7 @@ macos_metal_render_log_compare_pairwise_status=pass
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 135 lines folded for reproduction.
+Runnable source: 147 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -335,6 +339,18 @@ expect(invalid_source_evidence).to_contain("macos_metal_render_log_compare_elect
 expect(invalid_source_evidence).to_contain("macos_metal_render_log_compare_electron_browser_backing_source_reason=electron-metal-source-proof-invalid")
 expect(invalid_source_evidence).to_contain("macos_metal_render_log_compare_chrome_browser_backing_source_reason=chrome-metal-source-proof-invalid")
 expect(invalid_source_evidence).to_contain("macos_metal_render_log_compare_browser_backing_gate_status=fail")
+
+val generic_source_base_command = command.replace("rm -rf build/test-macos-metal-render-log-pass && mkdir -p build/test-macos-metal-render-log-pass && " + _argb_artifacts_command("build/test-macos-metal-render-log-pass") + " && ", "rm -rf build/test-macos-metal-render-log-pass && mkdir -p build/test-macos-metal-render-log-pass && " + _argb_artifacts_command("build/test-macos-metal-render-log-pass") + " && printf 'gpu_compositing=enabled\\ndisplay_type=Metal\\ngl_implementation_parts=metal\\nskia_backend_type=Metal\\nrenderer=Apple GPU\\n' > build/test-macos-metal-render-log-pass/generic-source.env && ")
+val generic_electron_source_command = generic_source_base_command.replace("macos_metal_electron_browser_backing_source=test/fixtures/render_log/macos_metal_browser_backing_source.env", "macos_metal_electron_browser_backing_source=build/test-macos-metal-render-log-pass/generic-source.env")
+val generic_source_command = generic_electron_source_command.replace("macos_metal_chrome_browser_backing_source=test/fixtures/render_log/macos_metal_browser_backing_source.env", "macos_metal_chrome_browser_backing_source=build/test-macos-metal-render-log-pass/generic-source.env") + " || true"
+val (_generic_source_stdout, _generic_source_stderr, generic_source_code) = process_run("/bin/sh", ["-c", generic_source_command])
+expect(generic_source_code).to_equal(0)
+
+val generic_source_evidence = file_read("build/test-macos-metal-render-log-pass/out/evidence.env")
+expect(generic_source_evidence).to_contain("macos_metal_render_log_compare_status=fail")
+expect(generic_source_evidence).to_contain("macos_metal_render_log_compare_electron_browser_backing_source_reason=electron-metal-source-gpu-compositing-missing")
+expect(generic_source_evidence).to_contain("macos_metal_render_log_compare_chrome_browser_backing_source_reason=chrome-metal-source-gpu-compositing-missing")
+expect(generic_source_evidence).to_contain("macos_metal_render_log_compare_browser_backing_gate_status=fail")
 
 val missing_claimed_magic_command = command.replace("macos_metal_gpu_capture_artifact_magic=XCODE-GPUTRACE\\n", "") + " || true"
 val (_missing_magic_stdout, _missing_magic_stderr, missing_magic_code) = process_run("/bin/sh", ["-c", missing_claimed_magic_command])
