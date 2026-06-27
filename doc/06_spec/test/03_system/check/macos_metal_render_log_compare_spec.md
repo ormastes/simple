@@ -27,7 +27,7 @@ macos_metal_render_log_compare_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 17 | 17 | 0 | 0 |
+| 18 | 18 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -104,6 +104,9 @@ It also requires Engine2D framebuffer readback evidence:
 - `metal_engine2d_framebuffer_readback_status=pass`
 - `metal_engine2d_framebuffer_gpu_readback_available=true`
 - `metal_engine2d_framebuffer_blur_or_tolerance_used=false`
+- The generated readback, framebuffer readback, and browser backing input env
+  files must be single regular files, not symlinks or hardlinks to stale or
+  shared evidence.
 
 Browser evidence must prove Metal backing and exact pairwise ARGB comparison:
 
@@ -226,6 +229,8 @@ macos_metal_render_log_compare_pairwise_status=pass
     relative artifact paths.
 23. Reject strict Metal capture rows whose `.gputrace` artifact is a symlink or
     hardlink to another capture artifact.
+24. Reject symlinked or hardlinked Metal input env files before treating their
+    rows as native/rendering proof.
 
 ## Scenarios
 
@@ -1059,6 +1064,51 @@ expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_gate_sta
 expect(evidence).to_contain("macos_metal_render_log_compare_required_api=metal")
 expect(evidence).to_contain("macos_metal_render_log_compare_pairwise_status=fail")
 expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_status=unavailable")
+```
+
+</details>
+
+#### rejects symlinked or hardlinked Metal input env files
+
+-  argb artifacts command
+   - Expected: code equals `0`
+- Confirm aliased Metal input env files cannot stand in for fresh evidence
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 42 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-macos-metal-render-log-input-env-aliases"
+val external = "build/test-macos-metal-render-log-input-env-aliases-external"
+val command = "rm -rf " + root + " " + external + " && mkdir -p " + root + " " + external + " && " +
+    _argb_artifacts_command(root) + " && " +
+    "printf 'metal_generated_2d_readback_status=pass\\nmetal_generated_2d_readback_module_verified=true\\nmetal_generated_2d_readback_submit_attempted=true\\nmetal_generated_2d_readback_readback_available=true\\nmetal_generated_2d_readback_expected_checksum=7\\nmetal_generated_2d_readback_actual_checksum=7\\n' > " + external + "/generated.env && " +
+    "ln -s ../test-macos-metal-render-log-input-env-aliases-external/generated.env " + root + "/generated.env && " +
+    "printf 'metal_engine2d_framebuffer_readback_status=pass\\nmetal_engine2d_framebuffer_gpu_readback_available=true\\nmetal_engine2d_framebuffer_blur_or_tolerance_used=false\\n' > " + root + "/framebuffer-original.env && " +
+    "ln " + root + "/framebuffer-original.env " + root + "/framebuffer.env && " +
+    "printf 'macos_metal_electron_browser_backing_status=pass\\nmacos_metal_chrome_browser_backing_status=pass\\nmacos_metal_browser_backing_status=pass\\nmacos_metal_electron_browser_backing_reason=electron-metal-backed\\nmacos_metal_electron_browser_backing_gpu_compositing=enabled\\nmacos_metal_electron_browser_backing_display_type=Metal\\nmacos_metal_electron_browser_backing_gl_implementation_parts=metal\\nmacos_metal_electron_browser_backing_skia_backend_type=Metal\\nmacos_metal_electron_browser_backing_gl_renderer=Apple GPU\\nmacos_metal_electron_browser_backing_source=test/fixtures/render_log/macos_metal_browser_backing_source.env\\nmacos_metal_chrome_browser_backing_reason=chrome-metal-backed\\nmacos_metal_chrome_browser_backing_gpu_compositing=enabled\\nmacos_metal_chrome_browser_backing_display_type=Metal\\nmacos_metal_chrome_browser_backing_gl_implementation_parts=metal\\nmacos_metal_chrome_browser_backing_skia_backend_type=Metal\\nmacos_metal_chrome_browser_backing_gl_renderer=Apple GPU\\nmacos_metal_chrome_browser_backing_source=test/fixtures/render_log/macos_metal_browser_backing_source.env\\nmacos_metal_pixel_comparison_status=pass\\nmacos_metal_pixel_comparison_mode=pairwise-argb-diff\\nmacos_metal_electron_chrome_pairwise_diff_status=pass\\nmacos_metal_electron_simple_pairwise_diff_status=pass\\nmacos_metal_chrome_simple_pairwise_diff_status=pass\\nmacos_metal_simple_argb_width=4\\nmacos_metal_simple_argb_height=3\\nmacos_metal_simple_argb_nonblank_pixel_count=12\\nmacos_metal_simple_argb_checksum=12\\nmacos_metal_chrome_argb_width=4\\nmacos_metal_chrome_argb_height=3\\nmacos_metal_chrome_argb_nonblank_pixel_count=12\\nmacos_metal_chrome_argb_checksum=12\\nmacos_metal_electron_argb_width=4\\nmacos_metal_electron_argb_height=3\\nmacos_metal_electron_argb_nonblank_pixel_count=12\\nmacos_metal_electron_argb_checksum=12\\n' > " + root + "/browser-original.env && " +
+    "ln " + root + "/browser-original.env " + root + "/browser.env && " +
+    "BUILD_DIR=" + root + "/out METAL_GENERATED_2D_READBACK_ENV=" + root + "/generated.env METAL_ENGINE2D_FRAMEBUFFER_READBACK_ENV=" + root + "/framebuffer.env MACOS_METAL_BROWSER_ENV=" + root + "/browser.env sh scripts/check/check-macos-metal-render-log-compare.shs || true"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val evidence = file_read(root + "/out/evidence.env")
+step("Confirm aliased Metal input env files cannot stand in for fresh evidence")
+expect(evidence).to_contain("macos_metal_render_log_compare_status=fail")
+expect(evidence).to_contain("metal-generated-readback-env-file-symlink")
+expect(evidence).to_contain("metal-framebuffer-readback-env-file-hardlink")
+expect(evidence).to_contain("macos-metal-browser-env-file-hardlink")
+expect(evidence).to_contain("macos_metal_render_log_compare_generated_readback_env_file_status=symlink")
+expect(evidence).to_contain("macos_metal_render_log_compare_framebuffer_readback_env_file_status=hardlink")
+expect(evidence).to_contain("macos_metal_render_log_compare_browser_env_file_status=hardlink")
+expect(evidence).to_contain("macos_metal_render_log_compare_generated_readback_gate_status=fail")
+expect(evidence).to_contain("macos_metal_render_log_compare_framebuffer_readback_gate_status=fail")
+expect(evidence).to_contain("macos_metal_render_log_compare_browser_backing_gate_status=fail")
+expect(evidence).to_contain("macos_metal_render_log_compare_blocked_gates=metal-generated-readback-env,metal-framebuffer-readback-env,macos-metal-browser-env,metal-generated-readback,metal-framebuffer-readback,browser-metal-backing")
 ```
 
 </details>

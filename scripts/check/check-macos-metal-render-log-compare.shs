@@ -306,17 +306,39 @@ finish(reason, artifact, "pass", payload, pixels);
 NODE
 }
 
-if [ ! -s "$METAL_GENERATED_2D_READBACK_ENV" ]; then
+generated_readback_env_file_status="$(file_status "$METAL_GENERATED_2D_READBACK_ENV")"
+framebuffer_readback_env_file_status="$(file_status "$METAL_ENGINE2D_FRAMEBUFFER_READBACK_ENV")"
+browser_env_file_status="$(file_status "$MACOS_METAL_BROWSER_ENV")"
+gpu_capture_env_file_status="$(file_status "$MACOS_METAL_CAPTURE_ENV")"
+
+if [ "$generated_readback_env_file_status" = "missing" ]; then
     compare_status="unavailable"
     add_reason "missing-metal-generated-2d-readback-env"
 fi
-if [ ! -s "$METAL_ENGINE2D_FRAMEBUFFER_READBACK_ENV" ]; then
+if [ "$framebuffer_readback_env_file_status" = "missing" ]; then
     compare_status="unavailable"
     add_reason "missing-metal-engine2d-framebuffer-env"
 fi
-if [ ! -s "$MACOS_METAL_BROWSER_ENV" ]; then
+if [ "$browser_env_file_status" = "missing" ]; then
     compare_status="unavailable"
     add_reason "missing-macos-metal-browser-env"
+fi
+if [ "$generated_readback_env_file_status" != "pass" ] && [ "$generated_readback_env_file_status" != "missing" ]; then
+    [ "$compare_status" = "unavailable" ] || compare_status="fail"
+    add_reason "metal-generated-readback-env-file-$generated_readback_env_file_status"
+fi
+if [ "$framebuffer_readback_env_file_status" != "pass" ] && [ "$framebuffer_readback_env_file_status" != "missing" ]; then
+    [ "$compare_status" = "unavailable" ] || compare_status="fail"
+    add_reason "metal-framebuffer-readback-env-file-$framebuffer_readback_env_file_status"
+fi
+if [ "$browser_env_file_status" != "pass" ] && [ "$browser_env_file_status" != "missing" ]; then
+    [ "$compare_status" = "unavailable" ] || compare_status="fail"
+    add_reason "macos-metal-browser-env-file-$browser_env_file_status"
+fi
+if [ "${MACOS_METAL_RENDER_LOG_REQUIRE_GPU_CAPTURE:-0}" = "1" ] &&
+    [ "$gpu_capture_env_file_status" != "pass" ] && [ "$gpu_capture_env_file_status" != "missing" ]; then
+    [ "$compare_status" = "unavailable" ] || compare_status="fail"
+    add_reason "macos-metal-gpu-capture-env-file-$gpu_capture_env_file_status"
 fi
 
 metal_status="$(render_log_value_of metal_generated_2d_readback_status "$METAL_GENERATED_2D_READBACK_ENV")"
@@ -631,10 +653,16 @@ fi
 if [ "$metal_generated_checksum_reason" != "pass" ]; then
     metal_generated_gate_status="fail"
 fi
+if [ "$generated_readback_env_file_status" != "pass" ]; then
+    metal_generated_gate_status="fail"
+fi
 
 metal_framebuffer_gate_status="pass"
 if [ "$framebuffer_status" != "pass" ] || [ "$framebuffer_readback" != "true" ] ||
     [ "$framebuffer_blur" != "false" ]; then
+    metal_framebuffer_gate_status="fail"
+fi
+if [ "$framebuffer_readback_env_file_status" != "pass" ]; then
     metal_framebuffer_gate_status="fail"
 fi
 
@@ -645,6 +673,9 @@ if [ "$electron_backing" != "pass" ] || [ "$chrome_backing" != "pass" ] ||
     [ "$chrome_backing_detail_reason" != "pass" ] ||
     [ "$electron_backing_source_reason" != "pass" ] ||
     [ "$chrome_backing_source_reason" != "pass" ]; then
+    browser_backing_gate_status="fail"
+fi
+if [ "$browser_env_file_status" != "pass" ]; then
     browser_backing_gate_status="fail"
 fi
 
@@ -668,6 +699,7 @@ gpu_capture_gate_status="not-required"
 if [ "${MACOS_METAL_RENDER_LOG_REQUIRE_GPU_CAPTURE:-0}" = "1" ]; then
     gpu_capture_gate_status="pass"
     if [ "$capture_status" != "pass" ] || [ -z "$capture_artifact" ] ||
+        [ "$gpu_capture_env_file_status" != "pass" ] ||
         [ "$capture_artifact_file_status" != "pass" ] ||
         [ "$capture_artifact_magic" != "XCODE-GPUTRACE" ] ||
         [ "$capture_artifact_claimed_magic_reason" != "pass" ] ||
@@ -691,13 +723,13 @@ add_blocked_gate() {
     blocked_gate_count=$((blocked_gate_count + 1))
 }
 
-if [ ! -s "$METAL_GENERATED_2D_READBACK_ENV" ]; then
+if [ "$generated_readback_env_file_status" != "pass" ]; then
     add_blocked_gate "metal-generated-readback-env"
 fi
-if [ ! -s "$METAL_ENGINE2D_FRAMEBUFFER_READBACK_ENV" ]; then
+if [ "$framebuffer_readback_env_file_status" != "pass" ]; then
     add_blocked_gate "metal-framebuffer-readback-env"
 fi
-if [ ! -s "$MACOS_METAL_BROWSER_ENV" ]; then
+if [ "$browser_env_file_status" != "pass" ]; then
     add_blocked_gate "macos-metal-browser-env"
 fi
 [ "$metal_generated_gate_status" = "pass" ] || add_blocked_gate "metal-generated-readback"
@@ -732,13 +764,13 @@ render_log_write_native_log "$ELECTRON_LOG" "macos" "metal" "electron" "browser-
     render_log_append_kv "macos_metal_render_log_compare_status" "$compare_status"
     render_log_append_kv "macos_metal_render_log_compare_reason" "$reason_parts"
     render_log_append_kv "macos_metal_render_log_compare_generated_readback_env" "$METAL_GENERATED_2D_READBACK_ENV"
-    render_log_append_kv "macos_metal_render_log_compare_generated_readback_env_file_status" "$(file_status "$METAL_GENERATED_2D_READBACK_ENV")"
+    render_log_append_kv "macos_metal_render_log_compare_generated_readback_env_file_status" "$generated_readback_env_file_status"
     render_log_append_kv "macos_metal_render_log_compare_framebuffer_readback_env" "$METAL_ENGINE2D_FRAMEBUFFER_READBACK_ENV"
-    render_log_append_kv "macos_metal_render_log_compare_framebuffer_readback_env_file_status" "$(file_status "$METAL_ENGINE2D_FRAMEBUFFER_READBACK_ENV")"
+    render_log_append_kv "macos_metal_render_log_compare_framebuffer_readback_env_file_status" "$framebuffer_readback_env_file_status"
     render_log_append_kv "macos_metal_render_log_compare_browser_env" "$MACOS_METAL_BROWSER_ENV"
-    render_log_append_kv "macos_metal_render_log_compare_browser_env_file_status" "$(file_status "$MACOS_METAL_BROWSER_ENV")"
+    render_log_append_kv "macos_metal_render_log_compare_browser_env_file_status" "$browser_env_file_status"
     render_log_append_kv "macos_metal_render_log_compare_gpu_capture_env" "$MACOS_METAL_CAPTURE_ENV"
-    render_log_append_kv "macos_metal_render_log_compare_gpu_capture_env_file_status" "$(file_status "$MACOS_METAL_CAPTURE_ENV")"
+    render_log_append_kv "macos_metal_render_log_compare_gpu_capture_env_file_status" "$gpu_capture_env_file_status"
     render_log_append_kv "macos_metal_render_log_compare_blocked_gate_count" "$blocked_gate_count"
     render_log_append_kv "macos_metal_render_log_compare_blocked_gates" "$blocked_gates"
     render_log_append_kv "macos_metal_render_log_compare_generated_readback_gate_status" "$metal_generated_gate_status"
