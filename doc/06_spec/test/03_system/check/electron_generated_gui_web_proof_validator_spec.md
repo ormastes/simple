@@ -74,8 +74,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_generated_gui_web_p
   `electron_generated_gui_web_*` rows.
 - Large checksum and weighted-checksum values compare as exact decimal integer
   text, not rounded JavaScript numbers.
-- Malformed `frame_us` fails closed instead of relying on shell integer
-  comparison behavior.
+- Malformed and implausibly high `frame_us` values fail closed instead of
+  relying on shell integer comparison behavior.
 - Blur/tolerance use, missing ARGB capture, missing capture provenance,
   missing viewport proof, capture viewport mismatches, malformed mismatch
   counts, and checksum mismatches are rejected.
@@ -371,6 +371,7 @@ expect(evidence).to_contain("electron_generated_gui_web_simple_weighted_checksum
 
 -  proof command
 -  proof command
+-  proof command
    - Expected: code equals `1`
    - Expected: evidence does not contain `electron_generated_gui_web_electron_frame_us=not-a-number`
 
@@ -378,7 +379,7 @@ expect(evidence).to_contain("electron_generated_gui_web_simple_weighted_checksum
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -386,17 +387,23 @@ val root = "build/test-electron-generated-gui-web-validator-bad-frame"
 val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
     _proof_command(root + "/proof.json", "p.frame_us=\"not-a-number\"") +
     " && node scripts/check/validate-electron-generated-gui-web-proof.js " + root + "/proof.json > " + root + "/evidence.env; " +
+    _proof_command(root + "/high.json", "p.frame_us=1000001") +
+    " && node scripts/check/validate-electron-generated-gui-web-proof.js " + root + "/high.json > " + root + "/high.env; " +
     _proof_command(root + "/iterations.json", "p.iterations=1") +
     " && node scripts/check/validate-electron-generated-gui-web-proof.js " + root + "/iterations.json > " + root + "/iterations.env"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(1)
 
 val evidence = file_read(root + "/evidence.env")
+val high = file_read(root + "/high.env")
 val iterations = file_read(root + "/iterations.env")
 expect(evidence).to_contain("electron_generated_gui_web_validation_status=fail")
 expect(evidence).to_contain("electron_generated_gui_web_validation_reason=missing-electron-timing")
 expect(evidence).to_contain("electron_generated_gui_web_electron_frame_us=")
 expect(evidence.contains("electron_generated_gui_web_electron_frame_us=not-a-number")).to_equal(false)
+expect(high).to_contain("electron_generated_gui_web_validation_status=fail")
+expect(high).to_contain("electron_generated_gui_web_validation_reason=missing-electron-timing")
+expect(high).to_contain("electron_generated_gui_web_electron_frame_us=1000001")
 expect(iterations).to_contain("electron_generated_gui_web_validation_reason=missing-performance-iterations")
 expect(iterations).to_contain("electron_generated_gui_web_proof_iterations=1")
 ```
@@ -777,12 +784,13 @@ expect(pixel).to_contain("electron_generated_gui_web_mismatch_count=4")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 28 lines folded for reproduction.
+Runnable source: 29 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val validator = file_read("scripts/check/validate-electron-generated-gui-web-proof.js")
 expect(validator).to_contain("path.resolve(candidate) === path.resolve(proofPath)")
+expect(validator).to_contain("jsonIntegerBetween(proof.frame_us, 1, 1000000)")
 
 val script = file_read("scripts/check/check-electron-generated-gui-web-parity-evidence.shs")
 expect(script).to_contain("validate-electron-generated-gui-web-proof.js")

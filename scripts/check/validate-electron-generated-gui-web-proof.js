@@ -49,6 +49,13 @@ function jsonIntegerAtLeast(value, min) {
   return BigInt(text) >= BigInt(min);
 }
 
+function jsonIntegerBetween(value, min, max) {
+  const text = jsonIntegerText(value);
+  if (text === null) return false;
+  const bigint = BigInt(text);
+  return bigint >= BigInt(min) && bigint <= BigInt(max);
+}
+
 function integerTextOrClean(value) {
   const text = decimalIntegerText(value);
   return text === null ? clean(value) : text;
@@ -243,7 +250,7 @@ if (proof.blur_or_tolerance_used !== false) {
   reason = 'capture-viewport-mismatch';
 } else if (!jsonIntegerAtLeast(proof.iterations, 2)) {
   reason = 'missing-performance-iterations';
-} else if (!jsonIntegerAtLeast(proof.frame_us, 1)) {
+} else if (!jsonIntegerBetween(proof.frame_us, 1, 1000000)) {
   reason = 'missing-electron-timing';
 } else if (!jsonIntegerAtLeast(proof.generated_gui_text_normalization_pixels, 0)) {
   reason = 'malformed-text-normalization';
