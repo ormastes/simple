@@ -27,7 +27,7 @@ tauri_mobile_renderer_parity_artifact_gate_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 14 | 14 | 0 | 0 |
+| 15 | 15 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -94,6 +94,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_mobile_renderer_parity
   detailed render/event/capture/performance/animation rows claim pass.
 - The aggregate requires detailed desktop production backend parity rows before
   accepting mobile renderer evidence.
+- The aggregate requires desktop production backend timing rows before
+  accepting mobile renderer evidence.
 - The aggregate emits explicit mobile screenshot and MDI proof file status rows.
 - The aggregate preserves iOS and Android render-log validator env rows before
   deriving mobile parity status.
@@ -110,7 +112,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_mobile_renderer_parity
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 40 lines folded for reproduction.
+Runnable source: 48 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -129,6 +131,14 @@ expect(evidence).to_contain("tauri_mobile_renderer_parity_production_backend_met
 expect(evidence).to_contain("tauri_mobile_renderer_parity_production_backend_metal_different_pixels=0")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_production_backend_metal_gpu_frame_complete=true")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_production_backend_blur_or_tolerance_used=false")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_production_backend_sample_count=3")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_production_backend_total_elapsed_us_min=90")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_production_backend_total_elapsed_us_avg=100")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_production_backend_total_elapsed_us_max=120")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_production_backend_total_pixels_per_second_min=2000000")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_production_backend_total_pixels_per_second_avg=2400000")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_production_backend_total_pixels_per_second_max=2800000")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_production_backend_timing_status=pass")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_html_len=347702")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_tauri_context_status=pass")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_metal_context_status=pass")
@@ -452,6 +462,33 @@ expect(evidence).to_contain("tauri_mobile_renderer_parity_production_backend_met
 
 </details>
 
+#### rejects mobile pass claims with missing desktop backend timing evidence
+
+- Confirm mobile aggregate pass claims require desktop backend timing evidence
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-tauri-mobile-artifact-gate-missing-production-backend-timing"
+val command = _run_aggregate_command(root, "present", "present", "png", "png").replace("production_gui_web_renderer_parity_backend_timing_status=pass", "production_gui_web_renderer_parity_backend_timing_status=fail")
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read(root + "/stdout.env")
+step("Confirm mobile aggregate pass claims require desktop backend timing evidence")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_status=fail")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_reason=desktop-production-backend-timing-evidence-missing")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_production_backend_timing_status=fail")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_production_backend_sample_count=3")
+```
+
+</details>
+
 #### rejects pass claims with non-PNG mobile screenshots
 
 - Confirm screenshot files need PNG signature bytes
@@ -527,7 +564,7 @@ expect(android).to_contain("tauri_mobile_renderer_parity_android_screenshot_file
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 28 lines folded for reproduction.
+Runnable source: 30 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -558,7 +595,9 @@ expect(script).to_contain("tauri_mobile_renderer_parity_ios_screenshot_file_reas
 expect(script).to_contain("tauri_mobile_renderer_parity_android_screenshot_file_status")
 expect(script).to_contain("tauri_mobile_renderer_parity_android_screenshot_file_reason")
 expect(script).to_contain("production_backend_detail_pass")
+expect(script).to_contain("production_backend_timing_pass")
 expect(script).to_contain("tauri_mobile_renderer_parity_production_backend_metal_gpu_frame_complete")
+expect(script).to_contain("tauri_mobile_renderer_parity_production_backend_timing_status")
 ```
 
 </details>
@@ -567,8 +606,8 @@ expect(script).to_contain("tauri_mobile_renderer_parity_production_backend_metal
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 14 |
-| Active scenarios | 14 |
+| Total scenarios | 15 |
+| Active scenarios | 15 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
