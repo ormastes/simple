@@ -66,10 +66,10 @@ function jsonIntegerTextOrBlank(value) {
   return text === null ? '' : text;
 }
 
-function booleanString(value) {
+function jsonBoolTextOrBlank(value) {
   if (value === true) return 'true';
   if (value === false) return 'false';
-  return clean(value);
+  return '';
 }
 
 function textField(value) {
@@ -318,7 +318,7 @@ emit('electron_simple_web_layout_electron_checksum', integerTextOrClean(proof.ch
 emit('electron_simple_web_layout_simple_weighted_checksum', integerTextOrClean(proof.expected_weighted_checksum));
 emit('electron_simple_web_layout_electron_weighted_checksum', integerTextOrClean(proof.weighted_checksum));
 emit('electron_simple_web_layout_mismatch_count', jsonIntegerTextOrBlank(proof.mismatch_count));
-emit('electron_simple_web_layout_blur_or_tolerance_used', proof.blur_or_tolerance_used === false ? 'false' : clean(proof.blur_or_tolerance_used));
+emit('electron_simple_web_layout_blur_or_tolerance_used', jsonBoolTextOrBlank(proof.blur_or_tolerance_used));
 emit('electron_simple_web_layout_proof_iterations', jsonIntegerTextOrBlank(proof.iterations));
 emit('electron_simple_web_layout_electron_frame_us', jsonIntegerTextOrBlank(proof.frame_us));
 emit('electron_simple_web_layout_estimated_fps_floor', estimatedFpsFloor);
@@ -326,9 +326,9 @@ emit('electron_simple_web_layout_requested_width', jsonIntegerTextOrBlank(proof.
 emit('electron_simple_web_layout_requested_height', jsonIntegerTextOrBlank(proof.height));
 emit('electron_simple_web_layout_capture_native_width', jsonIntegerTextOrBlank(proof.capture_native_width));
 emit('electron_simple_web_layout_capture_native_height', jsonIntegerTextOrBlank(proof.capture_native_height));
-emit('electron_simple_web_layout_capture_downsampled', booleanString(proof.capture_downsampled));
+emit('electron_simple_web_layout_capture_downsampled', jsonBoolTextOrBlank(proof.capture_downsampled));
 emit('electron_simple_web_layout_geometry_path', proof.geometry_path);
-emit('electron_simple_web_layout_geometry_written', proof.geometry_written === true ? 'true' : 'false');
+emit('electron_simple_web_layout_geometry_written', jsonBoolTextOrBlank(proof.geometry_written));
 emit('electron_simple_web_layout_geometry_file_status', artifactFileStatus(geometryStat));
 emit('electron_simple_web_layout_geometry_size_bytes', geometryStat === null ? '' : String(geometryStat.stat.size));
 emit('electron_simple_web_layout_geometry_producer', geometry.producer);
@@ -337,7 +337,7 @@ emit('electron_simple_web_layout_geometry_viewport_height', jsonIntegerTextOrBla
 emit('electron_simple_web_layout_geometry_item_count', String(geometryItems.length));
 emit('electron_simple_web_layout_geometry_measured_item_count', String(geometryMeasuredItemCount));
 emit('electron_simple_web_layout_captured_argb_path', proof.captured_argb_path);
-emit('electron_simple_web_layout_captured_argb_written', proof.captured_argb_written === true ? 'true' : 'false');
+emit('electron_simple_web_layout_captured_argb_written', jsonBoolTextOrBlank(proof.captured_argb_written));
 emit('electron_simple_web_layout_captured_argb_file_status', artifactFileStatus(capturedArgbStat));
 emit('electron_simple_web_layout_captured_argb_size_bytes', capturedArgbStat === null ? '' : String(capturedArgbStat.stat.size));
 emit('electron_simple_web_layout_captured_argb_format', capturedArgb.format);
