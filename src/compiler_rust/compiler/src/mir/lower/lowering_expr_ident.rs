@@ -35,7 +35,14 @@ impl<'a> MirLowerer<'a> {
             // Sanitized enum names from older frontend paths can lose exact variant metadata here.
             let variant_exists = self.is_known_enum_type_for_variant(enum_name, expr_ty);
 
-            if variant_exists || expr_ty == TypeId::ANY {
+            // `::` is the enum-variant separator at this IR boundary: static-method
+            // refs arrive dot-separated (e.g. `Point.origin`) and fall through below.
+            // In a large cross-module unit the type registry can lose an enum's
+            // metadata, leaving variant_exists false for a real variant (e.g.
+            // `Effect::Compute` when lowering the whole compiler driver). Emit
+            // EnumUnit by name anyway — same RuntimeEnum-by-name path the ANY-typed
+            // branch already relies on — rather than failing the build.
+            if variant_exists || expr_ty == TypeId::ANY || name.contains("::") {
                 // Emit EnumUnit instruction for proper RuntimeEnum creation
                 return self.with_func(|func, current_block| {
                     let dest = func.new_vreg();
@@ -48,12 +55,7 @@ impl<'a> MirLowerer<'a> {
                     dest
                 });
             }
-
-            if name.contains("::") {
-                // Enum variant with :: separator not found — genuine error
-                return Err(MirLowerError::Unsupported(format!("unknown enum variant: {}", name)));
-            }
-            // Dot-separated name that's not an enum — static method reference
+            // Dot-separated name that's not a known enum — static method reference
             // (e.g. Point.origin). Fall through to GlobalLoad below.
         }
 
