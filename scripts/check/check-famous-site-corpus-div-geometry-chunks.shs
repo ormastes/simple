@@ -6,7 +6,49 @@ cd "$ROOT_DIR"
 
 BUILD_DIR="${BUILD_DIR:-build/famous_site_corpus_div_geometry_chunks}"
 REPORT_PATH="${REPORT_PATH:-doc/09_report/famous_site_corpus_div_geometry_chunks_$(date -u +%F).md}"
-SIMPLE_BIN="${SIMPLE_BIN:-src/compiler_rust/target/release/simple}"
+SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
+SIMPLE_BIN_STATUS=pass
+
+is_rust_seed_simple() {
+    case "$1" in
+        src/compiler_rust/*|*/src/compiler_rust/*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+if [ "${SIMPLE_BIN:-}" = "" ]; then
+    SIMPLE_BIN_SOURCE="missing-self-hosted"
+    for candidate in \
+        "release"/*/simple \
+        "bin/release"/*/simple \
+        "build/bootstrap/stage3/simple" \
+        "bin/simple" \
+        "./bin/simple"
+    do
+        if [ -x "$candidate" ]; then
+            SIMPLE_BIN="$candidate"
+            SIMPLE_BIN_SOURCE="repo-self-hosted-fallback"
+            break
+        fi
+    done
+    if [ "${SIMPLE_BIN:-}" = "" ] && [ "${ALLOW_PATH_SIMPLE_BIN:-0}" = "1" ] && command -v simple >/dev/null 2>&1; then
+        SIMPLE_BIN="$(command -v simple)"
+        SIMPLE_BIN_SOURCE="path-opt-in"
+    fi
+else
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
+fi
+SIMPLE_BIN="${SIMPLE_BIN:-}"
+if [ "$SIMPLE_BIN" = "" ]; then
+    SIMPLE_BIN_STATUS=missing
+elif is_rust_seed_simple "$SIMPLE_BIN"; then
+    SIMPLE_BIN_STATUS=forbidden
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-rust-seed-forbidden"
+elif [ ! -x "$SIMPLE_BIN" ]; then
+    SIMPLE_BIN_STATUS=missing
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-missing"
+fi
+export SIMPLE_BIN SIMPLE_BIN_SOURCE SIMPLE_BIN_STATUS
 CHUNK_SIZE="${FAMOUS_SITE_CORPUS_DIV_GEOMETRY_CHUNK_SIZE:-6}"
 WIDTH="${FAMOUS_SITE_CORPUS_DIV_GEOMETRY_WIDTH:-160}"
 HEIGHT="${FAMOUS_SITE_CORPUS_DIV_GEOMETRY_HEIGHT:-120}"
@@ -25,6 +67,9 @@ fail_unavailable() {
         echo "chunk_count=0"
         echo "pass_count=0"
         echo "fail_count=0"
+        echo "simple_bin=$SIMPLE_BIN"
+        echo "simple_bin_source=$SIMPLE_BIN_SOURCE"
+        echo "simple_bin_status=$SIMPLE_BIN_STATUS"
         echo "blur_or_tolerance_used=false"
     } >"$SUMMARY"
     {
@@ -38,7 +83,9 @@ fail_unavailable() {
     exit 1
 }
 
-test -x "$SIMPLE_BIN" || fail_unavailable "simple-runtime-missing"
+if [ "$SIMPLE_BIN_STATUS" != "pass" ]; then
+    fail_unavailable "simple-bin-$SIMPLE_BIN_STATUS"
+fi
 if [ "$CHUNK_SIZE" -le 0 ]; then
     fail_unavailable "invalid-chunk-size"
 fi
@@ -105,6 +152,9 @@ fi
     echo "chunk_count=$chunk_count"
     echo "pass_count=$pass_count"
     echo "fail_count=$fail_count"
+    echo "simple_bin=$SIMPLE_BIN"
+    echo "simple_bin_source=$SIMPLE_BIN_SOURCE"
+    echo "simple_bin_status=$SIMPLE_BIN_STATUS"
     echo "width=$WIDTH"
     echo "height=$HEIGHT"
     echo "build_dir=$BUILD_DIR"
