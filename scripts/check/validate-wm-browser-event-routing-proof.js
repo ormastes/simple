@@ -103,6 +103,24 @@ if (!jsonPath) {
   process.exit(1);
 }
 
+let jsonPathStat;
+try {
+  jsonPathStat = fs.lstatSync(jsonPath);
+} catch (err) {
+  row('wm_browser_event_routing_validation_status', 'fail');
+  row('wm_browser_event_routing_validation_reason', 'missing-json');
+  row('wm_browser_event_routing_validation_error', err && err.message ? err.message : err);
+  row('wm_browser_event_routing_proof_symlink_status', 'unknown');
+  process.exit(1);
+}
+
+if (jsonPathStat.isSymbolicLink()) {
+  row('wm_browser_event_routing_validation_status', 'fail');
+  row('wm_browser_event_routing_validation_reason', 'proof-json-symlink');
+  row('wm_browser_event_routing_proof_symlink_status', 'fail');
+  process.exit(1);
+}
+
 let proof;
 try {
   proof = JSON.parse(fs.readFileSync(jsonPath, 'utf8'));
@@ -110,6 +128,7 @@ try {
   row('wm_browser_event_routing_validation_status', 'fail');
   row('wm_browser_event_routing_validation_reason', 'invalid-json');
   row('wm_browser_event_routing_validation_error', err && err.message ? err.message : err);
+  row('wm_browser_event_routing_proof_symlink_status', 'pass');
   process.exit(1);
 }
 
@@ -256,6 +275,7 @@ if (!boolTrue(proof.pass)) {
 const status = reason === 'pass' ? 'pass' : 'fail';
 row('wm_browser_event_routing_validation_status', status);
 row('wm_browser_event_routing_validation_reason', reason);
+row('wm_browser_event_routing_proof_symlink_status', 'pass');
 for (const [key, value] of Object.entries(rows)) {
   row(`wm_browser_event_routing_${key}`, value);
 }

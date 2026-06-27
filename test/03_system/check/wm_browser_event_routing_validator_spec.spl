@@ -53,6 +53,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/wm_browser_event_routing_val
 - The proof must carry live Electron/Chromium runtime identity, including browser
   engine, Electron user-agent, Electron process version, and Chrome process
   version.
+- The proof JSON path itself must be a regular file, never a symlink to stale
+  or attacker-controlled event-routing evidence.
 - The live shell evidence wrapper consumes the standalone validator instead of
   trusting only the probe's top-level `pass` flag.
 - The live shell evidence wrapper keeps validation, proof-source, event,
@@ -80,6 +82,7 @@ describe "WM browser event-routing proof validator":
         val evidence = file_read("build/test-wm-browser-event-validator-pass/evidence.env")
         expect(evidence).to_contain("wm_browser_event_routing_validation_status=pass")
         expect(evidence).to_contain("wm_browser_event_routing_validation_reason=pass")
+        expect(evidence).to_contain("wm_browser_event_routing_proof_symlink_status=pass")
         expect(evidence).to_contain("wm_browser_event_routing_target=electron")
         expect(evidence).to_contain("wm_browser_event_routing_surface_id=wm-browser-event-routing")
         expect(evidence).to_contain("wm_browser_event_routing_proof_source=tools/web-render-backend/wm_event_check.js")
@@ -416,12 +419,29 @@ describe "WM browser event-routing proof validator":
         expect(payload).to_contain("wm_browser_event_routing_move_payload_x=")
         expect(payload.contains("wm_browser_event_routing_move_payload_x=86.5")).to_equal(false)
 
+    it "rejects symlinked WM event-routing proof JSON before reading event evidence":
+        val root = "build/test-wm-browser-event-validator-symlink"
+        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+            _fixture_command(root + "/real.json", "") +
+            " && ln -s real.json " + root + "/proof-link.json" +
+            " && node scripts/check/validate-wm-browser-event-routing-proof.js " + root + "/proof-link.json > " + root + "/symlink.env"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(1)
+
+        val evidence = file_read(root + "/symlink.env")
+        step("Confirm event routing proof path cannot be a symlink")
+        expect(evidence).to_contain("wm_browser_event_routing_validation_status=fail")
+        expect(evidence).to_contain("wm_browser_event_routing_validation_reason=proof-json-symlink")
+        expect(evidence).to_contain("wm_browser_event_routing_proof_symlink_status=fail")
+        expect(evidence.contains("wm_browser_event_routing_target=electron")).to_equal(false)
+
     it "keeps the live shell wrapper wired to the validator result":
         val script = file_read("scripts/check/check-wm-browser-event-routing-evidence.shs")
         expect(script).to_contain("validate-wm-browser-event-routing-proof.js")
         expect(script).to_contain("validator_code")
         expect(script).to_contain("wm_browser_event_routing_validation_status")
         expect(script).to_contain("wm_browser_event_routing_validation_reason")
+        expect(script).to_contain("wm_browser_event_routing_proof_symlink_status")
         expect(script).to_contain("wm_browser_event_routing_target")
         expect(script).to_contain("wm_browser_event_routing_surface_id")
         expect(script).to_contain("wm_browser_event_routing_proof_source")
@@ -458,6 +478,7 @@ describe "WM browser event-routing proof validator":
         expect(evidence).to_contain("wm_browser_event_routing_reason=missing-command:node")
         expect(evidence).to_contain("wm_browser_event_routing_validation_status=fail")
         expect(evidence).to_contain("wm_browser_event_routing_validation_reason=missing-command:node")
+        expect(evidence).to_contain("wm_browser_event_routing_proof_symlink_status=")
         expect(evidence).to_contain("wm_browser_event_routing_target=")
         expect(evidence).to_contain("wm_browser_event_routing_surface_id=")
         expect(evidence).to_contain("wm_browser_event_routing_proof_source=")

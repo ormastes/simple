@@ -27,7 +27,7 @@ wm_browser_event_routing_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 16 | 16 | 0 | 0 |
+| 17 | 17 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -102,6 +102,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/wm_browser_event_routing_val
 - The proof must carry live Electron/Chromium runtime identity, including browser
   engine, Electron user-agent, Electron process version, and Chrome process
   version.
+- The proof JSON path itself must be a regular file, never a symlink to stale
+  or attacker-controlled event-routing evidence.
 - The live shell evidence wrapper consumes the standalone validator instead of
   trusting only the probe's top-level `pass` flag.
 - The live shell evidence wrapper keeps validation, proof-source, event,
@@ -121,7 +123,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/wm_browser_event_routing_val
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 30 lines folded for reproduction.
+Runnable source: 31 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -134,6 +136,7 @@ expect(code).to_equal(0)
 val evidence = file_read("build/test-wm-browser-event-validator-pass/evidence.env")
 expect(evidence).to_contain("wm_browser_event_routing_validation_status=pass")
 expect(evidence).to_contain("wm_browser_event_routing_validation_reason=pass")
+expect(evidence).to_contain("wm_browser_event_routing_proof_symlink_status=pass")
 expect(evidence).to_contain("wm_browser_event_routing_target=electron")
 expect(evidence).to_contain("wm_browser_event_routing_surface_id=wm-browser-event-routing")
 expect(evidence).to_contain("wm_browser_event_routing_proof_source=tools/web-render-backend/wm_event_check.js")
@@ -714,12 +717,45 @@ expect(payload.contains("wm_browser_event_routing_move_payload_x=86.5")).to_equa
 
 </details>
 
+#### rejects symlinked WM event-routing proof JSON before reading event evidence
+
+-  fixture command
+   - Expected: code equals `1`
+- Confirm event routing proof path cannot be a symlink
+   - Expected: evidence does not contain `wm_browser_event_routing_target=electron`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-wm-browser-event-validator-symlink"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _fixture_command(root + "/real.json", "") +
+    " && ln -s real.json " + root + "/proof-link.json" +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js " + root + "/proof-link.json > " + root + "/symlink.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read(root + "/symlink.env")
+step("Confirm event routing proof path cannot be a symlink")
+expect(evidence).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(evidence).to_contain("wm_browser_event_routing_validation_reason=proof-json-symlink")
+expect(evidence).to_contain("wm_browser_event_routing_proof_symlink_status=fail")
+expect(evidence.contains("wm_browser_event_routing_target=electron")).to_equal(false)
+```
+
+</details>
+
 #### keeps the live shell wrapper wired to the validator result
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 27 lines folded for reproduction.
+Runnable source: 28 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -728,6 +764,7 @@ expect(script).to_contain("validate-wm-browser-event-routing-proof.js")
 expect(script).to_contain("validator_code")
 expect(script).to_contain("wm_browser_event_routing_validation_status")
 expect(script).to_contain("wm_browser_event_routing_validation_reason")
+expect(script).to_contain("wm_browser_event_routing_proof_symlink_status")
 expect(script).to_contain("wm_browser_event_routing_target")
 expect(script).to_contain("wm_browser_event_routing_surface_id")
 expect(script).to_contain("wm_browser_event_routing_proof_source")
@@ -762,7 +799,7 @@ expect(producer.contains("out.title_font_weight = titleStyle.fontWeight")).to_eq
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 38 lines folded for reproduction.
+Runnable source: 39 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -778,6 +815,7 @@ expect(evidence).to_contain("wm_browser_event_routing_status=fail")
 expect(evidence).to_contain("wm_browser_event_routing_reason=missing-command:node")
 expect(evidence).to_contain("wm_browser_event_routing_validation_status=fail")
 expect(evidence).to_contain("wm_browser_event_routing_validation_reason=missing-command:node")
+expect(evidence).to_contain("wm_browser_event_routing_proof_symlink_status=")
 expect(evidence).to_contain("wm_browser_event_routing_target=")
 expect(evidence).to_contain("wm_browser_event_routing_surface_id=")
 expect(evidence).to_contain("wm_browser_event_routing_proof_source=")
@@ -812,8 +850,8 @@ expect(evidence).to_contain("wm_browser_event_routing_text_input_text=")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 16 |
-| Active scenarios | 16 |
+| Total scenarios | 17 |
+| Active scenarios | 17 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
