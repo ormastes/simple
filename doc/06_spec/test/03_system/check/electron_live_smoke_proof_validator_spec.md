@@ -27,7 +27,7 @@ electron_live_smoke_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 17 | 17 | 0 | 0 |
+| 18 | 18 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -107,8 +107,9 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_live_smoke_proof_va
   source marker.
 - The proof target and surface must identify the live Electron main surface,
   and early wrapper diagnostics must preserve those identity rows.
-- The proof JSON path itself must be a regular file, never a symlink to a
-  stale or attacker-controlled proof, and never a non-file artifact.
+- The proof JSON path itself must be a regular single-link file, never a
+  symlink to a stale or attacker-controlled proof, a hardlinked reusable proof,
+  or a non-file artifact.
 - The live smoke shell wrapper delegates JSON validation to the proof validator.
 - The package live smoke script must launch the built local Simple compiler, or
   a caller-provided `SIMPLE_BIN`, instead of a non-existent package-local
@@ -149,6 +150,7 @@ step("Inspect normalized Electron live smoke proof rows")
 expect(evidence).to_contain("electron_live_smoke_validation_status=pass")
 expect(evidence).to_contain("electron_live_smoke_validation_reason=pass")
 expect(evidence).to_contain("electron_live_smoke_proof_symlink_status=pass")
+expect(evidence).to_contain("electron_live_smoke_proof_hardlink_status=pass")
 expect(evidence).to_contain("electron_live_smoke_target=electron")
 expect(evidence).to_contain("electron_live_smoke_surface_id=main")
 expect(evidence).to_contain("electron_live_smoke_proof_source=src/app/ui.electron/bridge.js:electronLiveSmokeProofScript")
@@ -794,6 +796,41 @@ step("Confirm Electron live smoke proof path cannot be a symlink")
 expect(evidence).to_contain("electron_live_smoke_validation_status=fail")
 expect(evidence).to_contain("electron_live_smoke_validation_reason=proof-json-symlink")
 expect(evidence).to_contain("electron_live_smoke_proof_symlink_status=fail")
+expect(evidence).to_contain("electron_live_smoke_proof_hardlink_status=unknown")
+expect(evidence.contains("electron_live_smoke_target=electron")).to_equal(false)
+```
+
+</details>
+
+#### rejects hardlinked proof JSON before reading renderer evidence
+
+-  proof command
+   - Expected: code equals `1`
+- Confirm Electron live smoke proof path cannot be a hardlink
+   - Expected: evidence does not contain `electron_live_smoke_target=electron`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 16 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-electron-live-smoke-validator-hardlink"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_command(root + "/original.json", "") +
+    " && ln " + root + "/original.json " + root + "/proof.json" +
+    " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/proof.json 1280 720 > " + root + "/hardlink.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read(root + "/hardlink.env")
+step("Confirm Electron live smoke proof path cannot be a hardlink")
+expect(evidence).to_contain("electron_live_smoke_validation_status=fail")
+expect(evidence).to_contain("electron_live_smoke_validation_reason=proof-json-hardlink")
+expect(evidence).to_contain("electron_live_smoke_proof_symlink_status=pass")
+expect(evidence).to_contain("electron_live_smoke_proof_hardlink_status=fail")
 expect(evidence.contains("electron_live_smoke_target=electron")).to_equal(false)
 ```
 
@@ -824,6 +861,7 @@ step("Confirm Electron live smoke proof path must be a regular file")
 expect(evidence).to_contain("electron_live_smoke_validation_status=fail")
 expect(evidence).to_contain("electron_live_smoke_validation_reason=proof-json-not-regular")
 expect(evidence).to_contain("electron_live_smoke_proof_symlink_status=pass")
+expect(evidence).to_contain("electron_live_smoke_proof_hardlink_status=pass")
 expect(evidence.contains("electron_live_smoke_target=electron")).to_equal(false)
 ```
 
@@ -851,6 +889,7 @@ expect(wrapper).to_contain("electron_live_smoke=fail proof=$PROOF_PATH validatio
 expect(wrapper).to_contain("emit_blank_validation_rows")
 expect(wrapper).to_contain("electron_live_smoke_validation_status")
 expect(wrapper).to_contain("electron_live_smoke_proof_symlink_status")
+expect(wrapper).to_contain("electron_live_smoke_proof_hardlink_status")
 expect(wrapper).to_contain("electron_live_smoke_target")
 expect(wrapper).to_contain("electron_live_smoke_surface_id")
 expect(wrapper).to_contain("electron_live_smoke_proof_source")
@@ -928,6 +967,7 @@ expect(evidence).to_contain("error=missing_command:node")
 expect(evidence).to_contain("electron_live_smoke_validation_status=unavailable")
 expect(evidence).to_contain("electron_live_smoke_validation_reason=missing_command:node")
 expect(evidence).to_contain("electron_live_smoke_proof_symlink_status=")
+expect(evidence).to_contain("electron_live_smoke_proof_hardlink_status=")
 expect(evidence).to_contain("electron_live_smoke_target=")
 expect(evidence).to_contain("electron_live_smoke_surface_id=")
 expect(evidence).to_contain("electron_live_smoke_proof_source=")
@@ -964,8 +1004,8 @@ expect(evidence).to_contain("electron_live_smoke_blur_or_tolerance_used=")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 16 |
-| Active scenarios | 16 |
+| Total scenarios | 18 |
+| Active scenarios | 18 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
