@@ -27,7 +27,7 @@ tauri_simple_web_layout_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 13 | 13 | 0 | 0 |
+| 14 | 14 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -91,6 +91,9 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_simple_web_layout_proo
   fractional, or out-of-range values are not valid screenshot readback proof.
 - Requested viewport, ARGB readback dimensions, frame timing, overlay counts,
   and mismatch counts must be real JSON numbers, not stringified rows.
+- Capture-written and blur/tolerance proof rows must be real JSON booleans;
+  string booleans are rejected and not normalized as valid `true` or `false`
+  diagnostics.
 - The live Tauri wrapper consumes the validator and still maps real pixel
   mismatches to `divergent` evidence.
 
@@ -182,12 +185,13 @@ expect(evidence).to_contain("tauri_simple_web_layout_simple_weighted_checksum=18
 -  proof command
 -  proof command
    - Expected: code equals `1`
+   - Expected: evidence does not contain `tauri_simple_web_layout_tauri_frame_us=not-a-number`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -204,7 +208,8 @@ val evidence = file_read(root + "/evidence.env")
 val high = file_read(root + "/high.env")
 expect(evidence).to_contain("tauri_simple_web_layout_validation_status=fail")
 expect(evidence).to_contain("tauri_simple_web_layout_validation_reason=missing-tauri-timing")
-expect(evidence).to_contain("tauri_simple_web_layout_tauri_frame_us=not-a-number")
+expect(evidence).to_contain("tauri_simple_web_layout_tauri_frame_us=")
+expect(evidence.contains("tauri_simple_web_layout_tauri_frame_us=not-a-number")).to_equal(false)
 expect(high).to_contain("tauri_simple_web_layout_validation_status=fail")
 expect(high).to_contain("tauri_simple_web_layout_validation_reason=missing-tauri-timing")
 expect(high).to_contain("tauri_simple_web_layout_tauri_frame_us=1000001")
@@ -410,12 +415,13 @@ expect(range_pixels).to_contain("tauri_simple_web_layout_validation_reason=captu
 
 -  proof command
    - Expected: code equals `1`
+   - Expected: evidence does not contain `tauri_simple_web_layout_requested_height=64.5`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -429,7 +435,8 @@ expect(code).to_equal(1)
 val evidence = file_read(root + "/missing.env")
 expect(evidence).to_contain("tauri_simple_web_layout_validation_reason=missing-viewport-proof")
 expect(evidence).to_contain("tauri_simple_web_layout_requested_width=")
-expect(evidence).to_contain("tauri_simple_web_layout_requested_height=64.5")
+expect(evidence).to_contain("tauri_simple_web_layout_requested_height=")
+expect(evidence.contains("tauri_simple_web_layout_requested_height=64.5")).to_equal(false)
 ```
 
 </details>
@@ -443,12 +450,17 @@ expect(evidence).to_contain("tauri_simple_web_layout_requested_height=64.5")
 -  proof command
    - Expected: code equals `1`
 - Confirm live Tauri layout numeric proof cannot be stringified
+   - Expected: requested does not contain `tauri_simple_web_layout_requested_width=96`
+   - Expected: argb does not contain `tauri_simple_web_layout_captured_argb_width=96`
+   - Expected: timing does not contain `tauri_simple_web_layout_tauri_frame_us=1250`
+   - Expected: overlay does not contain `tauri_simple_web_layout_expected_overlay_pixel_count=12`
+   - Expected: mismatch does not contain `tauri_simple_web_layout_mismatch_count=0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 36 lines folded for reproduction.
+Runnable source: 41 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -475,19 +487,67 @@ val mismatch = file_read(root + "/mismatch.env")
 step("Confirm live Tauri layout numeric proof cannot be stringified")
 expect(requested).to_contain("tauri_simple_web_layout_validation_status=fail")
 expect(requested).to_contain("tauri_simple_web_layout_validation_reason=missing-viewport-proof")
-expect(requested).to_contain("tauri_simple_web_layout_requested_width=96")
+expect(requested).to_contain("tauri_simple_web_layout_requested_width=")
+expect(requested.contains("tauri_simple_web_layout_requested_width=96")).to_equal(false)
 expect(argb).to_contain("tauri_simple_web_layout_validation_status=fail")
 expect(argb).to_contain("tauri_simple_web_layout_validation_reason=captured-argb-viewport-mismatch")
-expect(argb).to_contain("tauri_simple_web_layout_captured_argb_width=96")
+expect(argb).to_contain("tauri_simple_web_layout_captured_argb_width=")
+expect(argb.contains("tauri_simple_web_layout_captured_argb_width=96")).to_equal(false)
 expect(timing).to_contain("tauri_simple_web_layout_validation_status=fail")
 expect(timing).to_contain("tauri_simple_web_layout_validation_reason=missing-tauri-timing")
-expect(timing).to_contain("tauri_simple_web_layout_tauri_frame_us=1250")
+expect(timing).to_contain("tauri_simple_web_layout_tauri_frame_us=")
+expect(timing.contains("tauri_simple_web_layout_tauri_frame_us=1250")).to_equal(false)
 expect(overlay).to_contain("tauri_simple_web_layout_validation_status=fail")
 expect(overlay).to_contain("tauri_simple_web_layout_validation_reason=malformed-expected-overlay-pixel-count")
-expect(overlay).to_contain("tauri_simple_web_layout_expected_overlay_pixel_count=12")
+expect(overlay).to_contain("tauri_simple_web_layout_expected_overlay_pixel_count=")
+expect(overlay.contains("tauri_simple_web_layout_expected_overlay_pixel_count=12")).to_equal(false)
 expect(mismatch).to_contain("tauri_simple_web_layout_validation_status=fail")
 expect(mismatch).to_contain("tauri_simple_web_layout_validation_reason=malformed-mismatch-count")
-expect(mismatch).to_contain("tauri_simple_web_layout_mismatch_count=0")
+expect(mismatch).to_contain("tauri_simple_web_layout_mismatch_count=")
+expect(mismatch.contains("tauri_simple_web_layout_mismatch_count=0")).to_equal(false)
+```
+
+</details>
+
+#### rejects string booleans without normalizing them as valid diagnostics
+
+-  proof command
+-  proof command
+   - Expected: code equals `1`
+- Confirm string booleans remain malformed Tauri proof diagnostics
+   - Expected: capture does not contain `tauri_simple_web_layout_captured_argb_written=true`
+   - Expected: capture does not contain `tauri_simple_web_layout_captured_argb_written=false`
+   - Expected: blur does not contain `tauri_simple_web_layout_blur_or_tolerance_used=false`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 21 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-tauri-layout-validator-string-booleans"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_command(root + "/capture.json", "p.captured_argb_written=\"true\"") +
+    " && node scripts/check/validate-tauri-simple-web-layout-proof.js " + root + "/capture.json > " + root + "/capture.env; " +
+    _proof_command(root + "/blur.json", "p.blur_or_tolerance_used=\"false\"") +
+    " && node scripts/check/validate-tauri-simple-web-layout-proof.js " + root + "/blur.json > " + root + "/blur.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val capture = file_read(root + "/capture.env")
+val blur = file_read(root + "/blur.env")
+step("Confirm string booleans remain malformed Tauri proof diagnostics")
+expect(capture).to_contain("tauri_simple_web_layout_validation_status=fail")
+expect(capture).to_contain("tauri_simple_web_layout_validation_reason=missing-captured-argb")
+expect(capture).to_contain("tauri_simple_web_layout_captured_argb_written=")
+expect(capture.contains("tauri_simple_web_layout_captured_argb_written=true")).to_equal(false)
+expect(capture.contains("tauri_simple_web_layout_captured_argb_written=false")).to_equal(false)
+expect(blur).to_contain("tauri_simple_web_layout_validation_status=fail")
+expect(blur).to_contain("tauri_simple_web_layout_validation_reason=blur-or-tolerance-not-allowed")
+expect(blur).to_contain("tauri_simple_web_layout_blur_or_tolerance_used=")
+expect(blur.contains("tauri_simple_web_layout_blur_or_tolerance_used=false")).to_equal(false)
 ```
 
 </details>
@@ -497,12 +557,13 @@ expect(mismatch).to_contain("tauri_simple_web_layout_mismatch_count=0")
 -  proof command
 -  proof command
    - Expected: code equals `1`
+   - Expected: mismatch does not contain `tauri_simple_web_layout_mismatch_count=bad`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -518,8 +579,10 @@ expect(code).to_equal(1)
 val blur = file_read(root + "/blur.env")
 val mismatch = file_read(root + "/mismatch.env")
 expect(blur).to_contain("tauri_simple_web_layout_validation_reason=blur-or-tolerance-not-allowed")
+expect(blur).to_contain("tauri_simple_web_layout_blur_or_tolerance_used=true")
 expect(mismatch).to_contain("tauri_simple_web_layout_validation_reason=malformed-mismatch-count")
-expect(mismatch).to_contain("tauri_simple_web_layout_mismatch_count=bad")
+expect(mismatch).to_contain("tauri_simple_web_layout_mismatch_count=")
+expect(mismatch.contains("tauri_simple_web_layout_mismatch_count=bad")).to_equal(false)
 ```
 
 </details>
@@ -566,7 +629,7 @@ expect(pixel).to_contain("tauri_simple_web_layout_mismatch_count=4")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -583,6 +646,7 @@ expect(script).to_contain("checksum-mismatch|weighted-checksum-mismatch|pixel-mi
 expect(script).to_contain("status=divergent")
 expect(validator).to_contain("path.resolve(candidate) === path.resolve(proofPath)")
 expect(validator).to_contain("jsonIntegerBetween(proof.frame_us, 1, 1000000)")
+expect(validator).to_contain("jsonBoolTextOrBlank")
 val converter = file_read("tools/tauri-live-bitmap/raw_rgba_to_argb.js")
 expect(converter).to_contain("captured_argb_path: outputPath")
 ```
@@ -593,8 +657,8 @@ expect(converter).to_contain("captured_argb_path: outputPath")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 13 |
-| Active scenarios | 13 |
+| Total scenarios | 14 |
+| Active scenarios | 14 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
