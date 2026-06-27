@@ -192,12 +192,44 @@ function initialShellHtml() {
 function electronLiveSmokeProofScript() {
     return `
         new Promise(function(resolve) {
+            try {
             var envelope = window.__SIMPLE_WEB_RENDER_ENVELOPE__ || {};
             var appEl = document.getElementById('app');
             var performanceNowAvailable = !!(window.performance && typeof window.performance.now === 'function');
             var start = performanceNowAvailable ? window.performance.now() : 0;
             var animationFrameAvailable = typeof window.requestAnimationFrame === 'function';
             var frameCount = 0;
+            var eventProbeType = 'simple-electron-live-smoke-event';
+            var eventProbeDetail = 'live-smoke-input';
+            var eventDispatchAvailable = typeof document.addEventListener === 'function' && typeof document.dispatchEvent === 'function' && (typeof window.CustomEvent === 'function' || typeof document.createEvent === 'function');
+            var eventDispatchCount = 0;
+            var eventDispatchObservedType = '';
+            var eventDispatchObservedDetail = '';
+            var eventDispatchError = '';
+            function eventProbeHandler(event) {
+                eventDispatchCount += 1;
+                eventDispatchObservedType = event.type || '';
+                eventDispatchObservedDetail = event.detail && event.detail.kind ? String(event.detail.kind) : '';
+            }
+            try {
+                document.addEventListener(eventProbeType, eventProbeHandler);
+                if (eventDispatchAvailable) {
+                    var eventProbe = null;
+                    if (typeof window.CustomEvent === 'function') {
+                        eventProbe = new CustomEvent(eventProbeType, {
+                            detail: { kind: eventProbeDetail }
+                        });
+                    } else {
+                        eventProbe = document.createEvent('CustomEvent');
+                        eventProbe.initCustomEvent(eventProbeType, false, false, { kind: eventProbeDetail });
+                    }
+                    document.dispatchEvent(eventProbe);
+                }
+            } catch (eventProbeErr) {
+                eventDispatchError = String(eventProbeErr && eventProbeErr.message ? eventProbeErr.message : eventProbeErr);
+            } finally {
+                document.removeEventListener(eventProbeType, eventProbeHandler);
+            }
             var styleProbe = document.createElement('style');
             styleProbe.textContent = '@keyframes simple-electron-live-smoke-pulse { from { opacity: 0.2; } to { opacity: 0.9; } } .simple-electron-live-smoke-animation { animation: simple-electron-live-smoke-pulse 80ms linear 2; }';
             document.head.appendChild(styleProbe);
@@ -206,12 +238,13 @@ function electronLiveSmokeProofScript() {
             animationProbe.style.cssText = 'position:fixed;left:-1000px;top:-1000px;width:8px;height:8px;';
             document.body.appendChild(animationProbe);
             function finish() {
+                try {
                 var style = window.getComputedStyle(animationProbe);
                 var text = appEl ? (appEl.textContent || '') : '';
                 var userAgent = (window.navigator && window.navigator.userAgent) || '';
                 var proof = Object.assign({}, envelope, {
                     proof_source: 'src/app/ui.electron/bridge.js:electronLiveSmokeProofScript',
-                    browser_engine: /Chrome\/|Chromium\//.test(userAgent) ? 'chromium' : '',
+                    browser_engine: new RegExp('Chrome/|Chromium/').test(userAgent) ? 'chromium' : '',
                     electron_user_agent: userAgent,
                     app_element_present: !!appEl,
                     body_text_length: text.length,
@@ -221,11 +254,22 @@ function electronLiveSmokeProofScript() {
                     animation_frame_available: animationFrameAvailable,
                     animation_frame_count: frameCount,
                     css_animation_probe: style.animationName === 'simple-electron-live-smoke-pulse',
+                    event_dispatch_available: eventDispatchAvailable,
+                    event_dispatch_count: eventDispatchCount,
+                    event_dispatch_type: eventDispatchObservedType,
+                    event_dispatch_detail: eventDispatchObservedDetail,
+                    event_dispatch_error: eventDispatchError,
                     blur_or_tolerance_used: false
                 });
                 animationProbe.remove();
                 styleProbe.remove();
                 resolve(proof);
+                } catch (finishErr) {
+                    resolve({
+                        error: String(finishErr && finishErr.message ? finishErr.message : finishErr),
+                        stack: finishErr && finishErr.stack ? String(finishErr.stack) : ''
+                    });
+                }
             }
             if (animationFrameAvailable) {
                 requestAnimationFrame(function() {
@@ -237,6 +281,12 @@ function electronLiveSmokeProofScript() {
                 });
             } else {
                 finish();
+            }
+            } catch (proofErr) {
+                resolve({
+                    error: String(proofErr && proofErr.message ? proofErr.message : proofErr),
+                    stack: proofErr && proofErr.stack ? String(proofErr.stack) : ''
+                });
             }
         })
     `;

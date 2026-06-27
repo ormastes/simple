@@ -109,6 +109,13 @@ if (proof.target !== 'electron') {
   reason = 'missing-animation-frames';
 } else if (proof.css_animation_probe !== true) {
   reason = 'missing-css-animation';
+} else if (
+  proof.event_dispatch_available !== true ||
+  !integerNumberAtLeast(proof.event_dispatch_count, 1) ||
+  proof.event_dispatch_type !== 'simple-electron-live-smoke-event' ||
+  proof.event_dispatch_detail !== 'live-smoke-input'
+) {
+  reason = 'missing-event-dispatch';
 } else if (proof.blur_or_tolerance_used !== false) {
   reason = 'blur-or-tolerance-not-allowed';
 }
@@ -132,6 +139,11 @@ emit('electron_live_smoke_performance_now_delta_ms', jsonNumberTextOrBlank(proof
 emit('electron_live_smoke_animation_frame_available', jsonBoolTextOrBlank(proof.animation_frame_available));
 emit('electron_live_smoke_animation_frame_count', jsonIntegerTextOrBlank(proof.animation_frame_count));
 emit('electron_live_smoke_css_animation_probe', jsonBoolTextOrBlank(proof.css_animation_probe));
+emit('electron_live_smoke_event_dispatch_available', jsonBoolTextOrBlank(proof.event_dispatch_available));
+emit('electron_live_smoke_event_dispatch_count', jsonIntegerTextOrBlank(proof.event_dispatch_count));
+emit('electron_live_smoke_event_dispatch_type', proof.event_dispatch_type);
+emit('electron_live_smoke_event_dispatch_detail', proof.event_dispatch_detail);
+emit('electron_live_smoke_event_dispatch_error', proof.event_dispatch_error);
 emit('electron_live_smoke_blur_or_tolerance_used', jsonBoolTextOrBlank(proof.blur_or_tolerance_used));
 
 if (reason !== 'pass') {

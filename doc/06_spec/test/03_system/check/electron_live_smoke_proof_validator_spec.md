@@ -1,6 +1,6 @@
 # Electron live smoke proof validator
 
-> Validates the live Electron smoke proof used by the package CI wrapper. The proof must show that Chromium received the Simple render envelope, populated a nonempty DOM, and exposed browser timing and animation APIs.
+> Validates the live Electron smoke proof used by the package CI wrapper. The proof must show that Chromium received the Simple render envelope, populated a nonempty DOM, executed renderer event handlers, and exposed browser timing and animation APIs.
 
 <!-- sdn-diagram:id=electron_live_smoke_proof_validator_spec.arch -->
 <details class="sdn-source">
@@ -27,14 +27,14 @@ electron_live_smoke_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 12 | 12 | 0 | 0 |
+| 13 | 13 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
 
 # Electron live smoke proof validator
 
-Validates the live Electron smoke proof used by the package CI wrapper. The proof must show that Chromium received the Simple render envelope, populated a nonempty DOM, and exposed browser timing and animation APIs.
+Validates the live Electron smoke proof used by the package CI wrapper. The proof must show that Chromium received the Simple render envelope, populated a nonempty DOM, executed renderer event handlers, and exposed browser timing and animation APIs.
 
 ## At a Glance
 
@@ -54,7 +54,8 @@ Validates the live Electron smoke proof used by the package CI wrapper. The proo
 
 Validates the live Electron smoke proof used by the package CI wrapper. The
 proof must show that Chromium received the Simple render envelope, populated a
-nonempty DOM, and exposed browser timing and animation APIs.
+nonempty DOM, executed renderer event handlers, and exposed browser timing and
+animation APIs.
 
 **Plan:** doc/03_plan/os/wm/shared_wm_renderer_unification_completion_audit.md
 **Requirements:** N/A
@@ -80,8 +81,12 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_live_smoke_proof_va
   rejected as stale or hand-authored proof and are not re-emitted as normalized
   numeric rows.
 - DOM presence, performance availability, animation availability, CSS animation,
-  and tolerance flags must be real JSON booleans; string booleans are rejected
-  and are not re-emitted as normalized boolean rows.
+  event dispatch availability, and tolerance flags must be real JSON booleans;
+  string booleans are rejected and are not re-emitted as normalized boolean
+  rows.
+- The proof must include a renderer-side event dispatch result with the expected
+  live smoke event type and detail so passive DOM snapshots cannot stand in for
+  event handling proof.
 - The rendered text sample must include the live-smoke entry text and must not
   exceed the reported rendered text length.
 - Requested capture viewport dimensions must be explicit decimal integers; the
@@ -93,6 +98,9 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_live_smoke_proof_va
 - The proof must include Chromium/Electron runtime evidence from the renderer
   user agent, not only a hand-authored source marker.
 - The live smoke shell wrapper delegates JSON validation to the proof validator.
+- The package live smoke script must launch the built local Simple compiler, or
+  a caller-provided `SIMPLE_BIN`, instead of a non-existent package-local
+  placeholder binary.
 - The live smoke shell wrapper keeps the full validator diagnostic row surface
   on early unavailable/fail exits, including DOM, CSS, rendered text, viewport,
   performance, animation, and tolerance rows.
@@ -113,7 +121,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_live_smoke_proof_va
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 30 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -141,6 +149,11 @@ expect(evidence).to_contain("electron_live_smoke_body_text_sample=Hello World fr
 expect(evidence).to_contain("electron_live_smoke_performance_now_available=true")
 expect(evidence).to_contain("electron_live_smoke_animation_frame_count=2")
 expect(evidence).to_contain("electron_live_smoke_css_animation_probe=true")
+expect(evidence).to_contain("electron_live_smoke_event_dispatch_available=true")
+expect(evidence).to_contain("electron_live_smoke_event_dispatch_count=1")
+expect(evidence).to_contain("electron_live_smoke_event_dispatch_type=simple-electron-live-smoke-event")
+expect(evidence).to_contain("electron_live_smoke_event_dispatch_detail=live-smoke-input")
+expect(evidence).to_contain("electron_live_smoke_event_dispatch_error=")
 expect(evidence).to_contain("electron_live_smoke_blur_or_tolerance_used=false")
 ```
 
@@ -352,8 +365,58 @@ expect(css).to_contain("electron_live_smoke_validation_reason=missing-css-animat
 
 </details>
 
+#### rejects passive DOM snapshots without renderer event dispatch proof
+
+-  proof command
+-  proof command
+-  proof command
+-  proof command
+   - Expected: code equals `1`
+- Confirm Electron live smoke needs renderer event dispatch evidence
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 28 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-electron-live-smoke-validator-event-dispatch"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_command(root + "/available.json", "p.event_dispatch_available=false") +
+    " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/available.json 1280 720 > " + root + "/available.env; " +
+    _proof_command(root + "/count.json", "p.event_dispatch_count=0") +
+    " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/count.json 1280 720 > " + root + "/count.env; " +
+    _proof_command(root + "/type.json", "p.event_dispatch_type=\"manual-event\"") +
+    " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/type.json 1280 720 > " + root + "/type.env; " +
+    _proof_command(root + "/detail.json", "p.event_dispatch_detail=\"stale\"") +
+    " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/detail.json 1280 720 > " + root + "/detail.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val available = file_read(root + "/available.env")
+val count = file_read(root + "/count.env")
+val type = file_read(root + "/type.env")
+val detail = file_read(root + "/detail.env")
+step("Confirm Electron live smoke needs renderer event dispatch evidence")
+expect(available).to_contain("electron_live_smoke_validation_status=fail")
+expect(available).to_contain("electron_live_smoke_validation_reason=missing-event-dispatch")
+expect(available).to_contain("electron_live_smoke_event_dispatch_available=false")
+expect(count).to_contain("electron_live_smoke_validation_reason=missing-event-dispatch")
+expect(count).to_contain("electron_live_smoke_event_dispatch_count=0")
+expect(type).to_contain("electron_live_smoke_validation_reason=missing-event-dispatch")
+expect(type).to_contain("electron_live_smoke_event_dispatch_type=manual-event")
+expect(detail).to_contain("electron_live_smoke_validation_reason=missing-event-dispatch")
+expect(detail).to_contain("electron_live_smoke_event_dispatch_detail=stale")
+expect(detail).to_contain("electron_live_smoke_event_dispatch_error=")
+```
+
+</details>
+
 #### rejects string booleans for DOM performance animation CSS and tolerance proof
 
+-  proof command
 -  proof command
 -  proof command
 -  proof command
@@ -365,13 +428,14 @@ expect(css).to_contain("electron_live_smoke_validation_reason=missing-css-animat
    - Expected: perf does not contain `electron_live_smoke_performance_now_available=true`
    - Expected: frames does not contain `electron_live_smoke_animation_frame_available=true`
    - Expected: css does not contain `electron_live_smoke_css_animation_probe=true`
+   - Expected: event does not contain `electron_live_smoke_event_dispatch_available=true`
    - Expected: blur does not contain `electron_live_smoke_blur_or_tolerance_used=false`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 41 lines folded for reproduction.
+Runnable source: 48 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -385,6 +449,8 @@ val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
     " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/frames.json 1280 720 > " + root + "/frames.env; " +
     _proof_command(root + "/css.json", "p.css_animation_probe=\"true\"") +
     " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/css.json 1280 720 > " + root + "/css.env; " +
+    _proof_command(root + "/event.json", "p.event_dispatch_available=\"true\"") +
+    " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/event.json 1280 720 > " + root + "/event.env; " +
     _proof_command(root + "/blur.json", "p.blur_or_tolerance_used=\"false\"") +
     " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/blur.json 1280 720 > " + root + "/blur.env"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
@@ -394,6 +460,7 @@ val app = file_read(root + "/app.env")
 val perf = file_read(root + "/perf.env")
 val frames = file_read(root + "/frames.env")
 val css = file_read(root + "/css.env")
+val event = file_read(root + "/event.env")
 val blur = file_read(root + "/blur.env")
 step("Confirm string booleans are not normalized as live Chromium proof")
 expect(app).to_contain("electron_live_smoke_validation_status=fail")
@@ -412,6 +479,10 @@ expect(css).to_contain("electron_live_smoke_validation_status=fail")
 expect(css).to_contain("electron_live_smoke_validation_reason=missing-css-animation")
 expect(css).to_contain("electron_live_smoke_css_animation_probe=")
 expect(css.contains("electron_live_smoke_css_animation_probe=true")).to_equal(false)
+expect(event).to_contain("electron_live_smoke_validation_status=fail")
+expect(event).to_contain("electron_live_smoke_validation_reason=missing-event-dispatch")
+expect(event).to_contain("electron_live_smoke_event_dispatch_available=")
+expect(event.contains("electron_live_smoke_event_dispatch_available=true")).to_equal(false)
 expect(blur).to_contain("electron_live_smoke_validation_status=fail")
 expect(blur).to_contain("electron_live_smoke_validation_reason=blur-or-tolerance-not-allowed")
 expect(blur).to_contain("electron_live_smoke_blur_or_tolerance_used=")
@@ -427,6 +498,7 @@ expect(blur.contains("electron_live_smoke_blur_or_tolerance_used=false")).to_equ
 -  proof command
 -  proof command
 -  proof command
+-  proof command
    - Expected: code equals `1`
 - Confirm numeric-looking text is not accepted as live Chromium counters
    - Expected: width does not contain `electron_live_smoke_width=1280`
@@ -434,12 +506,13 @@ expect(blur.contains("electron_live_smoke_blur_or_tolerance_used=false")).to_equ
    - Expected: text does not contain `electron_live_smoke_body_text_length=23`
    - Expected: perf does not contain `electron_live_smoke_performance_now_delta_ms=1.25`
    - Expected: frames does not contain `electron_live_smoke_animation_frame_count=2`
+   - Expected: event does not contain `electron_live_smoke_event_dispatch_count=1`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 41 lines folded for reproduction.
+Runnable source: 48 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -454,7 +527,9 @@ val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
     _proof_command(root + "/perf.json", "p.performance_now_delta_ms=\"1.25\"") +
     " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/perf.json 1280 720 > " + root + "/perf.env; " +
     _proof_command(root + "/frames.json", "p.animation_frame_count=\"2\"") +
-    " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/frames.json 1280 720 > " + root + "/frames.env"
+    " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/frames.json 1280 720 > " + root + "/frames.env; " +
+    _proof_command(root + "/event.json", "p.event_dispatch_count=\"1\"") +
+    " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/event.json 1280 720 > " + root + "/event.env"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(1)
 
@@ -463,6 +538,7 @@ val html = file_read(root + "/html.env")
 val text = file_read(root + "/text.env")
 val perf = file_read(root + "/perf.env")
 val frames = file_read(root + "/frames.env")
+val event = file_read(root + "/event.env")
 step("Confirm numeric-looking text is not accepted as live Chromium counters")
 expect(width).to_contain("electron_live_smoke_validation_status=fail")
 expect(width).to_contain("electron_live_smoke_validation_reason=unexpected-width")
@@ -484,6 +560,10 @@ expect(frames).to_contain("electron_live_smoke_validation_status=fail")
 expect(frames).to_contain("electron_live_smoke_validation_reason=missing-animation-frames")
 expect(frames).to_contain("electron_live_smoke_animation_frame_count=")
 expect(frames.contains("electron_live_smoke_animation_frame_count=2")).to_equal(false)
+expect(event).to_contain("electron_live_smoke_validation_status=fail")
+expect(event).to_contain("electron_live_smoke_validation_reason=missing-event-dispatch")
+expect(event).to_contain("electron_live_smoke_event_dispatch_count=")
+expect(event.contains("electron_live_smoke_event_dispatch_count=1")).to_equal(false)
 ```
 
 </details>
@@ -561,11 +641,12 @@ expect(fractional).to_contain("electron_live_smoke_height=720")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 30 lines folded for reproduction.
+Runnable source: 43 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val wrapper = file_read("scripts/check/check-electron-live-smoke.shs")
+val package_json = file_read("tools/electron-shell/package.json")
 val bridge = file_read("src/app/ui.electron/bridge.js")
 val envelopes = file_read("src/app/ui.electron/bridge_envelopes.js")
 expect(wrapper).to_contain("validate-electron-live-smoke-proof.js")
@@ -585,7 +666,14 @@ expect(wrapper).to_contain("electron_live_smoke_app_element_present")
 expect(wrapper).to_contain("electron_live_smoke_body_text_length")
 expect(wrapper).to_contain("electron_live_smoke_body_text_sample")
 expect(wrapper).to_contain("electron_live_smoke_css_animation_probe")
+expect(wrapper).to_contain("electron_live_smoke_event_dispatch_available")
+expect(wrapper).to_contain("electron_live_smoke_event_dispatch_count")
+expect(wrapper).to_contain("electron_live_smoke_event_dispatch_type")
+expect(wrapper).to_contain("electron_live_smoke_event_dispatch_detail")
+expect(wrapper).to_contain("electron_live_smoke_event_dispatch_error")
 expect(wrapper).to_contain("electron_live_smoke_blur_or_tolerance_used")
+expect(package_json).to_contain("--simple-bin ${SIMPLE_BIN:-../../src/compiler_rust/target/debug/simple}")
+expect(package_json.contains("--simple-bin bin/simple")).to_equal(false)
 expect(bridge).to_contain("electronLiveSmokeProofScript")
 expect(bridge).to_contain("proof_source: 'src/app/ui.electron/bridge.js:electronLiveSmokeProofScript'")
 expect(bridge).to_contain("browser_engine")
@@ -593,6 +681,11 @@ expect(bridge).to_contain("electron_user_agent")
 expect(bridge).to_contain("performance_now_available")
 expect(bridge).to_contain("animation_frame_count")
 expect(bridge).to_contain("css_animation_probe")
+expect(bridge).to_contain("event_dispatch_available")
+expect(bridge).to_contain("event_dispatch_count")
+expect(bridge).to_contain("simple-electron-live-smoke-event")
+expect(bridge).to_contain("document.createEvent('CustomEvent')")
+expect(bridge).to_contain("new RegExp('Chrome/|Chromium/')")
 expect(envelopes).to_contain("body_html_length")
 expect(envelopes).to_contain("css_length")
 ```
@@ -607,7 +700,7 @@ expect(envelopes).to_contain("css_length")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 28 lines folded for reproduction.
+Runnable source: 33 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -638,6 +731,11 @@ expect(evidence).to_contain("electron_live_smoke_performance_now_delta_ms=")
 expect(evidence).to_contain("electron_live_smoke_animation_frame_available=")
 expect(evidence).to_contain("electron_live_smoke_animation_frame_count=")
 expect(evidence).to_contain("electron_live_smoke_css_animation_probe=")
+expect(evidence).to_contain("electron_live_smoke_event_dispatch_available=")
+expect(evidence).to_contain("electron_live_smoke_event_dispatch_count=")
+expect(evidence).to_contain("electron_live_smoke_event_dispatch_type=")
+expect(evidence).to_contain("electron_live_smoke_event_dispatch_detail=")
+expect(evidence).to_contain("electron_live_smoke_event_dispatch_error=")
 expect(evidence).to_contain("electron_live_smoke_blur_or_tolerance_used=")
 ```
 
@@ -647,8 +745,8 @@ expect(evidence).to_contain("electron_live_smoke_blur_or_tolerance_used=")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 12 |
-| Active scenarios | 12 |
+| Total scenarios | 13 |
+| Active scenarios | 13 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
