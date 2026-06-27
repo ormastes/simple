@@ -95,25 +95,30 @@ function pathInfo(filePath) {
 
 function proofSourceArtifact(filePath) {
   const info = pathInfo(filePath);
-  if (info.isSymlink) return { status: 'symlink', size: '' };
-  if (info.lstat === null) return { status: 'missing', size: '' };
-  if (!info.lstat.isFile()) return { status: 'not-regular', size: '' };
-  if (info.hasMultipleLinks) return { status: 'hardlink', size: String(info.lstat.size) };
-  if (info.lstat.size <= 0) return { status: 'empty', size: '0' };
-  let source = '';
+  if (info.isSymlink) return { status: 'symlink', size: '', actualSize: '' };
+  if (info.lstat === null) return { status: 'missing', size: '', actualSize: '' };
+  if (!info.lstat.isFile()) return { status: 'not-regular', size: '', actualSize: '' };
+  if (info.hasMultipleLinks) return { status: 'hardlink', size: String(info.lstat.size), actualSize: '' };
+  if (info.lstat.size <= 0) return { status: 'empty', size: '0', actualSize: '' };
+  let bytes;
   try {
-    source = fs.readFileSync(filePath, 'utf8');
+    bytes = fs.readFileSync(filePath);
   } catch (_err) {
-    return { status: 'missing', size: '' };
+    return { status: 'missing', size: '', actualSize: '' };
   }
+  const actualSize = String(bytes.length);
+  if (actualSize !== String(info.lstat.size)) {
+    return { status: 'size-mismatch', size: String(info.lstat.size), actualSize };
+  }
+  const source = bytes.toString('utf8');
   if (
     !source.includes('proof_source: "tools/chrome-live-bitmap/capture_html_argb.js"') ||
     !source.includes('capture_mode: geometryOutputPath ? "chrome-devtools-screenshot" : "chrome-headless-screenshot"') ||
     !source.includes('producer: "chrome-headless-screenshot"')
   ) {
-    return { status: 'marker-missing', size: String(info.lstat.size) };
+    return { status: 'marker-missing', size: String(info.lstat.size), actualSize };
   }
-  return { status: 'pass', size: String(info.lstat.size) };
+  return { status: 'pass', size: String(info.lstat.size), actualSize };
 }
 
 function artifactStat(value, proofPath) {
@@ -328,6 +333,7 @@ const expectedProofSource = 'tools/chrome-live-bitmap/capture_html_argb.js';
 const proofSource = proofSourceArtifact(expectedProofSource);
 const proofSourceFileStatus = proofSource.status;
 const proofSourceSizeBytes = proofSource.size;
+const proofSourceActualSizeBytes = proofSource.actualSize;
 const chromeUserAgent = typeof proof.chrome_user_agent === 'string' ? proof.chrome_user_agent : '';
 const chromeProduct = typeof proof.chrome_product === 'string' ? proof.chrome_product : '';
 const chromeProtocolVersion = typeof proof.chrome_protocol_version === 'string' ? proof.chrome_protocol_version : '';
@@ -421,6 +427,7 @@ emit('chrome_simple_web_layout_proof_hardlink_status', proofInfo.hasMultipleLink
 emit('chrome_simple_web_layout_proof_source', proof.proof_source);
 emit('chrome_simple_web_layout_proof_source_file_status', proofSourceFileStatus);
 emit('chrome_simple_web_layout_proof_source_size_bytes', proofSourceSizeBytes);
+emit('chrome_simple_web_layout_proof_source_actual_size_bytes', proofSourceActualSizeBytes);
 emit('chrome_simple_web_layout_capture_mode', proof.capture_mode);
 emit('chrome_simple_web_layout_chrome_user_agent', proof.chrome_user_agent);
 emit('chrome_simple_web_layout_chrome_product', proof.chrome_product);

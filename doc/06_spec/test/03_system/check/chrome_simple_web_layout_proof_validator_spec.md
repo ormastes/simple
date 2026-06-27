@@ -115,6 +115,9 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/chrome_simple_web_layout_pro
   nonempty Chrome capture producer source file with expected DevTools capture
   markers so stale JSON cannot be paired with a missing, substituted, or
   aliased capture script.
+- The Chrome capture producer source proof must emit both the expected `lstat`
+  size and actual bytes read from the producer, and fail closed when those
+  sizes diverge.
 - The top-level proof must carry Chrome DevTools capture mode, Chrome or
   Chromium runtime user-agent, product, and protocol version evidence, not only
   a binary path.
@@ -159,6 +162,7 @@ expect(evidence).to_contain("chrome_simple_web_layout_proof_hardlink_status=pass
 expect(evidence).to_contain("chrome_simple_web_layout_proof_source=tools/chrome-live-bitmap/capture_html_argb.js")
 expect(evidence).to_contain("chrome_simple_web_layout_proof_source_file_status=pass")
 expect(evidence).to_contain("chrome_simple_web_layout_proof_source_size_bytes=")
+expect(evidence).to_contain("chrome_simple_web_layout_proof_source_actual_size_bytes=")
 expect(evidence).to_contain("chrome_simple_web_layout_capture_mode=chrome-devtools-screenshot")
 expect(evidence).to_contain("chrome_simple_web_layout_chrome_user_agent=Mozilla/5.0 Chrome/142.0.0.0 Safari/537.36")
 expect(evidence).to_contain("chrome_simple_web_layout_chrome_product=Chrome/142.0.0.0")
@@ -267,6 +271,7 @@ expect(missing).to_contain("chrome_simple_web_layout_validation_reason=unexpecte
 expect(missing).to_contain("chrome_simple_web_layout_proof_source=tools/chrome-live-bitmap/capture_html_argb.js")
 expect(missing).to_contain("chrome_simple_web_layout_proof_source_file_status=missing")
 expect(missing).to_contain("chrome_simple_web_layout_proof_source_size_bytes=")
+expect(missing).to_contain("chrome_simple_web_layout_proof_source_actual_size_bytes=")
 expect(hardlink).to_contain("chrome_simple_web_layout_validation_status=fail")
 expect(hardlink).to_contain("chrome_simple_web_layout_validation_reason=unexpected-chrome-proof-source-file-hardlink")
 expect(hardlink).to_contain("chrome_simple_web_layout_proof_source=tools/chrome-live-bitmap/capture_html_argb.js")
@@ -1165,6 +1170,7 @@ expect(script).to_contain("chrome_simple_web_layout_validation_reason")
 expect(script).to_contain("chrome_simple_web_layout_proof_source")
 expect(script).to_contain("chrome_simple_web_layout_proof_source_file_status")
 expect(script).to_contain("chrome_simple_web_layout_proof_source_size_bytes")
+expect(script).to_contain("chrome_simple_web_layout_proof_source_actual_size_bytes")
 expect(script).to_contain("chrome_simple_web_layout_capture_mode")
 expect(script).to_contain("chrome_simple_web_layout_chrome_user_agent")
 expect(script).to_contain("chrome_simple_web_layout_chrome_product")
@@ -1201,6 +1207,7 @@ expect(validator).to_contain("jsonBoolTextOrBlank")
 expect(validator).to_contain("missing-chrome-bin")
 expect(validator).to_contain("proofSourceArtifact")
 expect(validator).to_contain("marker-missing")
+expect(validator).to_contain("size-mismatch")
 expect(validator).to_contain("captured-argb-checksum-mismatch")
 expect(validator).to_contain("captured-argb-weighted-checksum-mismatch")
 expect(script).to_contain("captured-argb-checksum-mismatch")
@@ -1248,6 +1255,7 @@ expect(evidence).to_contain("chrome_simple_web_layout_validation_reason=missing-
 expect(evidence).to_contain("chrome_simple_web_layout_proof_source=")
 expect(evidence).to_contain("chrome_simple_web_layout_proof_source_file_status=")
 expect(evidence).to_contain("chrome_simple_web_layout_proof_source_size_bytes=")
+expect(evidence).to_contain("chrome_simple_web_layout_proof_source_actual_size_bytes=")
 expect(evidence).to_contain("chrome_simple_web_layout_capture_mode=")
 expect(evidence).to_contain("chrome_simple_web_layout_chrome_user_agent=")
 expect(evidence).to_contain("chrome_simple_web_layout_chrome_product=")
