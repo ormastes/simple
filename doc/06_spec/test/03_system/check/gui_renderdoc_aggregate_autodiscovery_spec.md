@@ -1,0 +1,119 @@
+# GUI RenderDoc aggregate autodiscovery
+
+> Checks that the aggregate GUI RenderDoc gate can discover current retained showcase and GUI/web/2D Vulkan evidence rows from canonical `*-current-*` build directories without requiring every caller to pass explicit environment overrides.
+
+<!-- sdn-diagram:id=gui_renderdoc_aggregate_autodiscovery_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=gui_renderdoc_aggregate_autodiscovery_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+gui_renderdoc_aggregate_autodiscovery_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=gui_renderdoc_aggregate_autodiscovery_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 1 | 1 | 0 | 0 |
+
+<details>
+<summary>Full Scenario Manual</summary>
+
+# GUI RenderDoc aggregate autodiscovery
+
+Checks that the aggregate GUI RenderDoc gate can discover current retained showcase and GUI/web/2D Vulkan evidence rows from canonical `*-current-*` build directories without requiring every caller to pass explicit environment overrides.
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Other |
+| Status | Active |
+| Source | `test/03_system/check/gui_renderdoc_aggregate_autodiscovery_spec.spl` |
+| Updated | 2026-06-01 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Checks that the aggregate GUI RenderDoc gate can discover current retained
+showcase and GUI/web/2D Vulkan evidence rows from canonical `*-current-*` build
+directories without requiring every caller to pass explicit environment
+overrides.
+
+## Syntax
+
+```sh
+release/x86_64-unknown-linux-gnu/simple test \
+  test/03_system/check/gui_renderdoc_aggregate_autodiscovery_spec.spl \
+  --mode=interpreter
+```
+
+## Scenarios
+
+### GUI RenderDoc aggregate autodiscovery
+
+#### uses current refresh evidence dirs by default
+
+- Create current refresh evidence directories with retained perf and Vulkan rows
+   - Expected: code equals `0`
+- Assert the aggregate discovered current evidence without explicit env overrides
+- Clean synthetic current evidence so later default aggregate runs see real host rows
+   - Expected: cleanup_code equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 20 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Create current refresh evidence directories with retained perf and Vulkan rows")
+val command = "rm -rf build/widget-showcase-4k-200fps-current-autodiscovery-test build/widget-showcase-8k-perf-current-autodiscovery-test build/gui-web-2d-vulkan-env-check-current-autodiscovery-test build/gui-web-2d-vulkan-env-run-current-autodiscovery-test build/gui-web-2d-vulkan-env-browser-backing-current-autodiscovery-test build/test-gui-renderdoc-autodiscovery && mkdir -p build/widget-showcase-4k-200fps-current-autodiscovery-test/source build/widget-showcase-8k-perf-current-autodiscovery-test/source build/gui-web-2d-vulkan-env-check-current-autodiscovery-test build/gui-web-2d-vulkan-env-run-current-autodiscovery-test/simple build/gui-web-2d-vulkan-env-browser-backing-current-autodiscovery-test && printf '%b' '\\177ELF4k\\n' > build/widget-showcase-4k-200fps-current-autodiscovery-test/source/native4k.bin && printf '%b' '\\177ELF8k\\n' > build/widget-showcase-8k-perf-current-autodiscovery-test/source/native8k.bin && chmod +x build/widget-showcase-4k-200fps-current-autodiscovery-test/source/native4k.bin build/widget-showcase-8k-perf-current-autodiscovery-test/source/native8k.bin && printf 'alias4k\\n' > build/widget-showcase-4k-200fps-current-autodiscovery-test/source/showcase4k.spl && printf 'alias8k\\n' > build/widget-showcase-8k-perf-current-autodiscovery-test/source/showcase8k.spl && printf 'build4k\\n' > build/widget-showcase-4k-200fps-current-autodiscovery-test/source/build4k.log && printf 'build8k\\n' > build/widget-showcase-8k-perf-current-autodiscovery-test/source/build8k.log && printf 'log4k\\n' > build/widget-showcase-4k-200fps-current-autodiscovery-test/source/showcase.log && printf 'time4k\\n' > build/widget-showcase-4k-200fps-current-autodiscovery-test/source/time.log && printf 'log8k\\n' > build/widget-showcase-8k-perf-current-autodiscovery-test/source/showcase.log && printf 'time8k\\n' > build/widget-showcase-8k-perf-current-autodiscovery-test/source/time.log && printf 'gui_showcase_4k_200fps_status=pass\\ngui_showcase_4k_200fps_reason=met-target-fps\\ngui_showcase_4k_200fps_resolution=4k\\ngui_showcase_4k_200fps_width=3840\\ngui_showcase_4k_200fps_height=2160\\ngui_showcase_4k_200fps_frames=200\\ngui_showcase_4k_200fps_fps_x1000=201000\\ngui_showcase_4k_200fps_frame_avg_ns=4975124\\ngui_showcase_4k_200fps_frame_elapsed_ns_status=pass\\ngui_showcase_4k_200fps_frame_p50_ns=4975124\\ngui_showcase_4k_200fps_frame_p95_ns=4975124\\ngui_showcase_4k_200fps_target_fps=200\\ngui_showcase_4k_200fps_max_rss_kb=131072\\ngui_showcase_4k_200fps_max_rss_budget_kb=262144\\ngui_showcase_4k_200fps_rss_status=pass\\ngui_showcase_4k_200fps_pixels=8294400\\ngui_showcase_4k_200fps_nonzero_pixels=1000\\ngui_showcase_4k_200fps_checksum=123456\\ngui_showcase_4k_200fps_render_mode=retained-static-frame\\ngui_showcase_4k_200fps_redraw_frames=1\\ngui_showcase_4k_200fps_source_revision=autodiscovery\\ngui_showcase_4k_200fps_source_revision_kind=content-sha256\\ngui_showcase_4k_200fps_source_revision_files=scripts/check/check-widget-showcase-4k-200fps.shs examples/06_io/ui/widget_showcase_gui.spl\\ngui_showcase_4k_200fps_simple_bin=release/x86_64-unknown-linux-gnu/simple\\ngui_showcase_4k_200fps_native_bin=build/widget-showcase-4k-200fps-current-autodiscovery-test/source/native4k.bin\\ngui_showcase_4k_200fps_alias_src=build/widget-showcase-4k-200fps-current-autodiscovery-test/source/showcase4k.spl\\ngui_showcase_4k_200fps_native_build_log=build/widget-showcase-4k-200fps-current-autodiscovery-test/source/build4k.log\\ngui_showcase_4k_200fps_use_native=1\\ngui_showcase_4k_200fps_native_build_mode=aggressive-native\\ngui_showcase_4k_200fps_fallback_state=none\\ngui_showcase_4k_200fps_log=build/widget-showcase-4k-200fps-current-autodiscovery-test/source/showcase.log\\ngui_showcase_4k_200fps_time_log=build/widget-showcase-4k-200fps-current-autodiscovery-test/source/time.log\\n' > build/widget-showcase-4k-200fps-current-autodiscovery-test/status.env && printf 'gui_showcase_8k_perf_status=pass\\ngui_showcase_8k_perf_reason=met-target-fps\\ngui_showcase_8k_perf_resolution=8k\\ngui_showcase_8k_perf_width=7680\\ngui_showcase_8k_perf_height=4320\\ngui_showcase_8k_perf_frames=200\\ngui_showcase_8k_perf_fps_x1000=201000\\ngui_showcase_8k_perf_frame_avg_ns=4975124\\ngui_showcase_8k_perf_frame_elapsed_ns_status=pass\\ngui_showcase_8k_perf_frame_p50_ns=4975124\\ngui_showcase_8k_perf_frame_p95_ns=4975124\\ngui_showcase_8k_perf_target_fps=200\\ngui_showcase_8k_perf_max_rss_kb=524288\\ngui_showcase_8k_perf_max_rss_budget_kb=750000\\ngui_showcase_8k_perf_rss_status=pass\\ngui_showcase_8k_perf_pixels=33177600\\ngui_showcase_8k_perf_nonzero_pixels=1000\\ngui_showcase_8k_perf_checksum=123456\\ngui_showcase_8k_perf_render_mode=retained-static-frame\\ngui_showcase_8k_perf_redraw_frames=1\\ngui_showcase_8k_perf_source_revision=autodiscovery\\ngui_showcase_8k_perf_source_revision_kind=content-sha256\\ngui_showcase_8k_perf_source_revision_files=scripts/check/check-widget-showcase-4k-200fps.shs examples/06_io/ui/widget_showcase_gui.spl\\ngui_showcase_8k_perf_simple_bin=release/x86_64-unknown-linux-gnu/simple\\ngui_showcase_8k_perf_native_bin=build/widget-showcase-8k-perf-current-autodiscovery-test/source/native8k.bin\\ngui_showcase_8k_perf_alias_src=build/widget-showcase-8k-perf-current-autodiscovery-test/source/showcase8k.spl\\ngui_showcase_8k_perf_native_build_log=build/widget-showcase-8k-perf-current-autodiscovery-test/source/build8k.log\\ngui_showcase_8k_perf_use_native=1\\ngui_showcase_8k_perf_native_build_mode=aggressive-native\\ngui_showcase_8k_perf_fallback_state=none\\ngui_showcase_8k_perf_log=build/widget-showcase-8k-perf-current-autodiscovery-test/source/showcase.log\\ngui_showcase_8k_perf_time_log=build/widget-showcase-8k-perf-current-autodiscovery-test/source/time.log\\n' > build/widget-showcase-8k-perf-current-autodiscovery-test/status.env && printf 'gui_web_2d_vulkan_mode=--check\\ngui_web_2d_vulkan_loader_status=present\\ngui_web_2d_vulkan_device=synthetic-vulkan\\ngui_web_2d_vulkan_driver=synthetic-driver\\n' > build/gui-web-2d-vulkan-env-check-current-autodiscovery-test/evidence.env && printf '{\"width\":2,\"height\":2,\"format\":\"argb-u32\",\"producer\":\"electron\",\"pixels\":[4294967295]}\\n' > build/gui-web-2d-vulkan-env-run-current-autodiscovery-test/electron_argb.json && printf '{\"width\":2,\"height\":2,\"format\":\"argb-u32\",\"producer\":\"chrome\",\"pixels\":[4294967295]}\\n' > build/gui-web-2d-vulkan-env-run-current-autodiscovery-test/chrome_argb.json && printf '{\"width\":2,\"height\":2,\"format\":\"argb-u32\",\"producer\":\"simple\",\"pixels\":[4294967295]}\\n' > build/gui-web-2d-vulkan-env-run-current-autodiscovery-test/simple_argb.json && printf 'mismatch_count=0\\n' > build/gui-web-2d-vulkan-env-run-current-autodiscovery-test/electron_chrome_diff.ppm && printf 'mismatch_count=0\\n' > build/gui-web-2d-vulkan-env-run-current-autodiscovery-test/electron_simple_diff.ppm && printf 'mismatch_count=0\\n' > build/gui-web-2d-vulkan-env-run-current-autodiscovery-test/chrome_simple_diff.ppm && printf 'simple_vulkan_probe_status=Initialized\\nsimple_vulkan_backend_name=vulkan\\n' > build/gui-web-2d-vulkan-env-run-current-autodiscovery-test/simple/evidence.env && printf 'gui_web_2d_vulkan_mode=--run\\ngui_web_2d_vulkan_width=2\\ngui_web_2d_vulkan_height=2\\ngui_web_2d_vulkan_electron_argb_status=pass\\ngui_web_2d_vulkan_electron_argb_path=build/gui-web-2d-vulkan-env-run-current-autodiscovery-test/electron_argb.json\\ngui_web_2d_vulkan_electron_argb_width=2\\ngui_web_2d_vulkan_electron_argb_height=2\\ngui_web_2d_vulkan_electron_argb_nonblank_pixel_count=1\\ngui_web_2d_vulkan_chrome_argb_status=pass\\ngui_web_2d_vulkan_chrome_argb_path=build/gui-web-2d-vulkan-env-run-current-autodiscovery-test/chrome_argb.json\\ngui_web_2d_vulkan_chrome_argb_width=2\\ngui_web_2d_vulkan_chrome_argb_height=2\\ngui_web_2d_vulkan_chrome_argb_nonblank_pixel_count=1\\ngui_web_2d_vulkan_simple_status=pass\\ngui_web_2d_vulkan_simple_reason=pass\\ngui_web_2d_vulkan_simple_evidence_env=build/gui-web-2d-vulkan-env-run-current-autodiscovery-test/simple/evidence.env\\ngui_web_2d_vulkan_simple_backend_name=vulkan\\ngui_web_2d_vulkan_simple_argb_status=pass\\ngui_web_2d_vulkan_simple_argb_path=build/gui-web-2d-vulkan-env-run-current-autodiscovery-test/simple_argb.json\\ngui_web_2d_vulkan_simple_argb_width=2\\ngui_web_2d_vulkan_simple_argb_height=2\\ngui_web_2d_vulkan_simple_argb_nonblank_pixel_count=1\\ngui_web_2d_vulkan_electron_chrome_diff_status=pass\\ngui_web_2d_vulkan_electron_chrome_mismatch_count=0\\ngui_web_2d_vulkan_electron_simple_diff_status=pass\\ngui_web_2d_vulkan_electron_simple_mismatch_count=0\\ngui_web_2d_vulkan_chrome_simple_diff_status=pass\\ngui_web_2d_vulkan_chrome_simple_mismatch_count=0\\n' > build/gui-web-2d-vulkan-env-run-current-autodiscovery-test/evidence.env && printf 'electron proof\\n' > build/gui-web-2d-vulkan-env-browser-backing-current-autodiscovery-test/electron-source.txt && printf 'chrome proof\\n' > build/gui-web-2d-vulkan-env-browser-backing-current-autodiscovery-test/chrome-source.txt && printf 'argb proof\\n' > build/gui-web-2d-vulkan-env-browser-backing-current-autodiscovery-test/electron-argb.txt && printf 'gui_web_2d_vulkan_mode=--browser-backing\\ngui_web_2d_vulkan_browser_backing_status=pass\\ngui_web_2d_vulkan_browser_backing_reason=pass\\ngui_web_2d_vulkan_browser_backing_mode=gpu-feature-status\\ngui_web_2d_vulkan_electron_browser_backing_status=pass\\ngui_web_2d_vulkan_electron_browser_backing_reason=electron-vulkan-backed\\ngui_web_2d_vulkan_electron_browser_backing_vulkan=enabled\\ngui_web_2d_vulkan_electron_browser_backing_gpu_compositing=enabled\\ngui_web_2d_vulkan_electron_browser_backing_hardware_supports_vulkan=true\\ngui_web_2d_vulkan_electron_browser_backing_source=build/gui-web-2d-vulkan-env-browser-backing-current-autodiscovery-test/electron-source.txt\\ngui_web_2d_vulkan_electron_browser_backing_argb_source=build/gui-web-2d-vulkan-env-browser-backing-current-autodiscovery-test/electron-argb.txt\\ngui_web_2d_vulkan_chrome_browser_backing_status=pass\\ngui_web_2d_vulkan_chrome_browser_backing_reason=chrome-vulkan-backed\\ngui_web_2d_vulkan_chrome_browser_backing_display_type=vulkan\\ngui_web_2d_vulkan_chrome_browser_backing_gpu_compositing=enabled\\ngui_web_2d_vulkan_chrome_browser_backing_gl_implementation_parts=vulkan\\ngui_web_2d_vulkan_chrome_browser_backing_hardware_supports_vulkan=true\\ngui_web_2d_vulkan_chrome_browser_backing_source=build/gui-web-2d-vulkan-env-browser-backing-current-autodiscovery-test/chrome-source.txt\\n' > build/gui-web-2d-vulkan-env-browser-backing-current-autodiscovery-test/evidence.env && GUI_RENDERDOC_AGGREGATE_PRINT_ENV=0 GUI_RENDERDOC_AGGREGATE_STATIC_CACHE_DIR=build/test-gui-renderdoc-feature-coverage-static-cache BUILD_DIR=build/test-gui-renderdoc-autodiscovery/out REPORT_PATH=build/test-gui-renderdoc-autodiscovery/report.md sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+step("Assert the aggregate discovered current evidence without explicit env overrides")
+val evidence = file_read("build/test-gui-renderdoc-autodiscovery/out/evidence.env")
+expect(evidence).to_contain("gui_showcase_4k_200fps_env=build/widget-showcase-4k-200fps-current-autodiscovery-test/status.env")
+expect(evidence).to_contain("gui_showcase_4k_200fps_status=pass")
+expect(evidence).to_contain("gui_showcase_8k_perf_env=build/widget-showcase-8k-perf-current-autodiscovery-test/status.env")
+expect(evidence).to_contain("gui_showcase_8k_perf_status=pass")
+expect(evidence).to_contain("gui_web_2d_vulkan_direct_run_evidence_env=build/gui-web-2d-vulkan-env-run-current-autodiscovery-test/evidence.env")
+expect(evidence).to_contain("gui_web_2d_vulkan_pixel_comparison_status=pass")
+expect(evidence).to_contain("gui_web_2d_vulkan_browser_backing_evidence_env=build/gui-web-2d-vulkan-env-browser-backing-current-autodiscovery-test/evidence.env")
+expect(evidence).to_contain("gui_web_2d_vulkan_browser_backing_status=pass")
+
+step("Clean synthetic current evidence so later default aggregate runs see real host rows")
+val cleanup = "rm -rf build/widget-showcase-4k-200fps-current-autodiscovery-test build/widget-showcase-8k-perf-current-autodiscovery-test build/gui-web-2d-vulkan-env-check-current-autodiscovery-test build/gui-web-2d-vulkan-env-run-current-autodiscovery-test build/gui-web-2d-vulkan-env-browser-backing-current-autodiscovery-test"
+val (_cleanup_stdout, _cleanup_stderr, cleanup_code) = process_run("/bin/sh", ["-c", cleanup])
+expect(cleanup_code).to_equal(0)
+```
+
+</details>
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 1 |
+| Active scenarios | 1 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
+
+</details>

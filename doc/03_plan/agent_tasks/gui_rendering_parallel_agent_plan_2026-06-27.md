@@ -347,6 +347,7 @@ This session's immediate integration target:
 | WO-11 CSS object-fit slice | Main agent | Low: Spark may only inspect evidence after implementation | Renderer, CSS traceability wrapper, Electron bitmap evidence fixture, focused unit/system specs, generated docs, report | Focused renderer spec passes, full CSS gate reports implemented CSS `133/133`, and no full-CSS/native-platform completion is claimed |
 | WO-12 Spark restart queue | Main agent or future orchestrator | High: same read-only prompts after quota recovers | None | New Spark outputs are explicitly compared against `Feynman`/`Mill` fallback results and accepted only after `Poincare`-style normal review |
 | WO-13 CSS object-position slice | Main agent | Low: Spark may only inspect evidence after implementation | Renderer, CSS traceability wrapper, Electron bitmap evidence fixture, focused unit/system specs, generated docs, report | Focused renderer spec passes, full CSS gate reports implemented CSS `134/134`, and no full-CSS/native-platform completion is claimed |
+| WO-14 Aggregate current-evidence autodiscovery | Main agent | Low: Spark may inspect output only | Aggregate checker, focused autodiscovery SSpec/manual doc | Default aggregate discovers current 4K, 8K, browser-backing, and direct ARGB evidence rows without explicit env overrides; blocker count drops from 16 to 10 on this host |
 
 WO-12 rule: do not spawn Spark against source-edit scopes until the read-only
 gap/matrix lanes complete and a normal reviewer approves the intended write
@@ -396,6 +397,20 @@ implemented CSS is `134/134`, full CSS is `134/394`, full CSS unrendered is
 `260`, and unsupported inventory ownership is `267`. This is a completed narrow
 web-renderer slice, not completion evidence for full CSS or native platform
 capture lanes.
+
+WO-14 status, 2026-06-27: the aggregate checker now auto-discovers current
+refresh evidence under `build/widget-showcase-4k-200fps-current-*`,
+`build/widget-showcase-8k-perf-current-*`,
+`build/gui-web-2d-vulkan-env-check-current*`,
+`build/gui-web-2d-vulkan-env-run-current*`, and
+`build/gui-web-2d-vulkan-env-browser-backing-current*` when explicit env
+overrides are absent. Focused verification:
+`test/03_system/check/gui_renderdoc_aggregate_autodiscovery_spec.spl` passes.
+A quiet default aggregate run with current-source checking now reports
+4K `pass`, 8K `pass`, browser backing `pass`, direct ARGB pixel comparison
+`pass`, and `blocked_completion_gate_count=10`. Remaining blockers are still
+RenderDoc `.rdc`, platform render-log comparison, production parity/font/Metal,
+and full CSS completion.
 
 WO-5 status: refreshed non-RenderDoc Linux evidence is passing in
 `doc/09_report/gui_web_2d_linux_vulkan_refresh_2026-06-27.md`. A fresh
