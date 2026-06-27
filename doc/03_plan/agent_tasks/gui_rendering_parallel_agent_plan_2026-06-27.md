@@ -313,6 +313,15 @@ host produced passing retained 4K and 8K rows with source revision
 `56a1985b1d38`, current-source aggregate validation, checksum/readback proof,
 RSS under budget, and `fallback_state=none`.
 
+WO-5 status: refreshed on 2026-06-27 in
+`doc/09_report/gui_web_2d_linux_vulkan_refresh_2026-06-27.md`. The current
+Linux host passes browser Vulkan backing for Electron and Chrome, direct
+Electron/Chrome/Simple ARGB comparison, Simple Vulkan backend proof, pairwise
+pixel comparison, Web WM modern shell evidence, and retained 4K/8K perf in one
+aggregate run. Strict Linux render-log comparison remains blocked until
+RenderDoc `.rdc` artifacts with `RDOC` magic exist for Simple, Chrome, and
+Electron.
+
 WO-9 status: the two explicit stale agent-task docs now carry 2026-06-27
 superseded/merged routing headers. Future cleanup may still classify deeper
 historical plan docs, but agents should no longer treat those two June 14
