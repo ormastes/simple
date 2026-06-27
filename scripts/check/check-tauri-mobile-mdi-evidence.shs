@@ -2,8 +2,42 @@
 set -eu
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)"
-BUILD_DIR="$ROOT_DIR/build/tauri_android_mdi"
-SIMPLE_BIN="${SIMPLE_BIN:-$ROOT_DIR/src/compiler_rust/target/release/simple}"
+BUILD_DIR="${BUILD_DIR:-$ROOT_DIR/build/tauri_android_mdi}"
+SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
+SIMPLE_BIN_STATUS=pass
+is_rust_seed_simple() {
+    case "$1" in
+        "$ROOT_DIR"/src/compiler_rust/*|src/compiler_rust/*|*/src/compiler_rust/*|./src/compiler_rust/*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+if [ "${SIMPLE_BIN:-}" = "" ]; then
+    SIMPLE_BIN_SOURCE="missing-self-hosted"
+    for candidate in "$ROOT_DIR"/release/*/simple "$ROOT_DIR"/bin/release/*/simple "$ROOT_DIR"/build/bootstrap/stage3/simple "$ROOT_DIR"/bin/simple; do
+        if [ -x "$candidate" ]; then
+            SIMPLE_BIN="$candidate"
+            SIMPLE_BIN_SOURCE="repo-self-hosted-fallback"
+            break
+        fi
+    done
+    if [ "${SIMPLE_BIN:-}" = "" ] && [ "${ALLOW_PATH_SIMPLE_BIN:-0}" = "1" ] && command -v simple >/dev/null 2>&1; then
+        SIMPLE_BIN="$(command -v simple)"
+        SIMPLE_BIN_SOURCE="path-opt-in"
+    fi
+else
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
+fi
+SIMPLE_BIN="${SIMPLE_BIN:-}"
+if [ "$SIMPLE_BIN" = "" ]; then
+    SIMPLE_BIN_STATUS=missing
+elif is_rust_seed_simple "$SIMPLE_BIN"; then
+    SIMPLE_BIN_STATUS=forbidden
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-rust-seed-forbidden"
+elif [ ! -x "$SIMPLE_BIN" ]; then
+    SIMPLE_BIN_STATUS=missing
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-missing"
+fi
+export SIMPLE_BIN SIMPLE_BIN_SOURCE SIMPLE_BIN_STATUS
 SMOKE_SOURCE="$ROOT_DIR/examples/06_io/ui/tauri_mobile_mdi_smoke.spl"
 ANDROID_APK="$ROOT_DIR/tools/tauri-shell/src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk"
 
@@ -36,12 +70,26 @@ mkdir -p "$BUILD_DIR"
 fail() {
     echo "status=fail"
     echo "reason=$1"
+    echo "tauri_mobile_mdi_simple_bin=$SIMPLE_BIN"
+    echo "tauri_mobile_mdi_simple_bin_source=$SIMPLE_BIN_SOURCE"
+    echo "tauri_mobile_mdi_simple_bin_status=$SIMPLE_BIN_STATUS"
     exit 1
 }
 
 pass_line() {
     echo "$1=pass"
 }
+
+echo "tauri_mobile_mdi_simple_bin=$SIMPLE_BIN"
+echo "tauri_mobile_mdi_simple_bin_source=$SIMPLE_BIN_SOURCE"
+echo "tauri_mobile_mdi_simple_bin_status=$SIMPLE_BIN_STATUS"
+
+if [ "$SIMPLE_BIN_STATUS" = "forbidden" ]; then
+    fail "simple-bin-forbidden"
+fi
+if [ "$SIMPLE_BIN_STATUS" != "pass" ]; then
+    fail "host Simple runtime missing: $SIMPLE_BIN"
+fi
 
 test -x "$SIMPLE_BIN" || fail "host Simple runtime missing: $SIMPLE_BIN"
 test -f "$SMOKE_SOURCE" || fail "mobile MDI smoke source missing: $SMOKE_SOURCE"
@@ -86,15 +134,15 @@ test -s "$ANDROID_LOGCAT" || fail "Android live MDI logcat missing: $ANDROID_LOG
 echo "android_screenshot=$ANDROID_SCREENSHOT"
 echo "android_logcat=$ANDROID_LOGCAT"
 
-sh "$IOS_MDI_EVIDENCE" --self-test > "$BUILD_DIR/ios_mdi_probe_self_test.log" 2>&1 \
+SIMPLE_BIN="$SIMPLE_BIN" SIMPLE_BIN_SOURCE="$SIMPLE_BIN_SOURCE" sh "$IOS_MDI_EVIDENCE" --self-test > "$BUILD_DIR/ios_mdi_probe_self_test.log" 2>&1 \
     || fail "iOS MDI probe self-test failed"
 pass_line "ios_mdi_probe_self_test"
 
-sh "$IOS_MDI_EVIDENCE" --browser-self-test > "$BUILD_DIR/ios_mdi_probe_browser_self_test.log" 2>&1 \
+SIMPLE_BIN="$SIMPLE_BIN" SIMPLE_BIN_SOURCE="$SIMPLE_BIN_SOURCE" sh "$IOS_MDI_EVIDENCE" --browser-self-test > "$BUILD_DIR/ios_mdi_probe_browser_self_test.log" 2>&1 \
     || fail "iOS MDI probe browser self-test failed"
 pass_line "ios_mdi_probe_browser_self_test"
 
-sh "$IOS_MDI_EVIDENCE" --tauri-url-self-test > "$BUILD_DIR/ios_mdi_probe_tauri_url_self_test.log" 2>&1 \
+SIMPLE_BIN="$SIMPLE_BIN" SIMPLE_BIN_SOURCE="$SIMPLE_BIN_SOURCE" sh "$IOS_MDI_EVIDENCE" --tauri-url-self-test > "$BUILD_DIR/ios_mdi_probe_tauri_url_self_test.log" 2>&1 \
     || fail "iOS MDI probe Tauri URL-mode self-test failed"
 pass_line "ios_mdi_probe_tauri_url_self_test"
 
@@ -112,3 +160,6 @@ if [ "$doc_spec_count" != "0" ]; then
 fi
 
 echo "status=pass"
+echo "tauri_mobile_mdi_simple_bin=$SIMPLE_BIN"
+echo "tauri_mobile_mdi_simple_bin_source=$SIMPLE_BIN_SOURCE"
+echo "tauri_mobile_mdi_simple_bin_status=$SIMPLE_BIN_STATUS"
