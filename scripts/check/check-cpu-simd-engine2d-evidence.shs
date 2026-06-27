@@ -9,6 +9,15 @@ if [ -n "${SIMPLE_BIN+x}" ]; then
     SIMPLE_BIN_PINNED=1
 fi
 SIMPLE_BIN="${SIMPLE_BIN:-bin/simple}"
+SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
+SIMPLE_BIN_STATUS=pass
+
+is_rust_seed_simple() {
+    case "$1" in
+        src/compiler_rust/*|*/src/compiler_rust/*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
 
 # The genuine Engine2D SIMD evidence needs an interpreter binary that carries the
 # rt_engine2d_simd_fill_row_u32 / copy / blend externs (the names the evidence
@@ -26,17 +35,38 @@ binary_has_engine2d_simd_externs() {
         && LC_ALL=C strings "$1" 2>/dev/null | grep -q 'rt_engine2d_simd_blend_row_u32'
 }
 if [ "$SIMPLE_BIN_PINNED" = "0" ] || [ "$SIMPLE_BIN" = "bin/simple" ]; then
+    SIMPLE_BIN_SOURCE="missing-self-hosted-engine2d-simd"
     for _cand in \
-        "src/compiler_rust/target/gui/debug/simple" \
-        "src/compiler_rust/target/debug/simple" \
-        "src/compiler_rust/target/release/simple" \
+        "release"/*/simple \
+        "bin/release"/*/simple \
+        "build/bootstrap/stage3/simple" \
         "$SIMPLE_BIN"; do
         if binary_has_engine2d_simd_externs "$_cand"; then
             SIMPLE_BIN="$_cand"
+            SIMPLE_BIN_SOURCE="repo-self-hosted-engine2d-simd"
             break
         fi
     done
+    if [ "$SIMPLE_BIN_SOURCE" = "missing-self-hosted-engine2d-simd" ] && [ "${ALLOW_PATH_SIMPLE_BIN:-0}" = "1" ] && command -v simple >/dev/null 2>&1; then
+        _path_simple="$(command -v simple)"
+        if binary_has_engine2d_simd_externs "$_path_simple"; then
+            SIMPLE_BIN="$_path_simple"
+            SIMPLE_BIN_SOURCE="path-opt-in-engine2d-simd"
+        fi
+    fi
+else
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
 fi
+if [ "$SIMPLE_BIN" = "" ]; then
+    SIMPLE_BIN_STATUS=missing
+elif is_rust_seed_simple "$SIMPLE_BIN"; then
+    SIMPLE_BIN_STATUS=forbidden
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-rust-seed-forbidden"
+elif [ ! -x "$SIMPLE_BIN" ]; then
+    SIMPLE_BIN_STATUS=missing
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-missing"
+fi
+export SIMPLE_BIN SIMPLE_BIN_SOURCE SIMPLE_BIN_STATUS
 
 TIMEOUT_SECS="${SIMPLE_CPU_SIMD_EVIDENCE_TIMEOUT_SECS:-120}"
 WORK_DIR="${BUILD_DIR:-build/cpu-simd-engine2d-evidence}"
@@ -85,6 +115,9 @@ emit_report() {
     {
         echo "cpu_simd_evidence_status=${STATUS:-unknown}"
         echo "cpu_simd_evidence_reason=${REASON:-unknown}"
+        echo "cpu_simd_evidence_simple_bin=$SIMPLE_BIN"
+        echo "cpu_simd_evidence_simple_bin_source=$SIMPLE_BIN_SOURCE"
+        echo "cpu_simd_evidence_simple_bin_status=$SIMPLE_BIN_STATUS"
         echo "cpu_simd_evidence_arch=${ARCH:-unknown}"
         echo "cpu_simd_evidence_feature=${FEATURE:-unknown}"
         echo "cpu_simd_evidence_level=${LEVEL:-unknown}"
@@ -129,6 +162,9 @@ emit_report() {
         echo
         echo "- status: ${STATUS:-unknown}"
         echo "- reason: ${REASON:-unknown}"
+        echo "- simple_bin: $SIMPLE_BIN"
+        echo "- simple_bin_source: $SIMPLE_BIN_SOURCE"
+        echo "- simple_bin_status: $SIMPLE_BIN_STATUS"
         echo "- arch: ${ARCH:-unknown}"
         echo "- feature: ${FEATURE:-unknown}"
         echo "- level: ${LEVEL:-unknown}"
@@ -181,7 +217,27 @@ rm -f "$EVIDENCE_LOG" "$ENV_PATH" "$REPORT_PATH"
 
 echo "check=cpu_simd_engine2d_evidence"
 echo "simple_bin=$SIMPLE_BIN"
+echo "simple_bin_source=$SIMPLE_BIN_SOURCE"
+echo "simple_bin_status=$SIMPLE_BIN_STATUS"
 echo "timeout_secs=$TIMEOUT_SECS"
+
+if [ "$SIMPLE_BIN_STATUS" = "forbidden" ]; then
+    STATUS=fail
+    REASON="simple-bin-forbidden"
+    ARCH=unknown
+    FEATURE=unknown
+    LEVEL=unknown
+    CHECKSUM=0
+    REPORT_HITS=0
+    X86_STATUS=unknown
+    ARM_STATUS=unknown
+    RISCV_STATUS=unknown
+    emit_report
+    echo "cpu_simd_evidence_status=$STATUS"
+    echo "cpu_simd_evidence_reason=$REASON"
+    echo "report_path=$REPORT_PATH"
+    exit 1
+fi
 
 if [ ! -x "$SIMPLE_BIN" ] && [ "$SIMPLE_BIN_PINNED" = "1" ]; then
     STATUS=fail
@@ -205,11 +261,15 @@ if [ ! -x "$SIMPLE_BIN" ]; then
     echo "cpu_simd_evidence_status=skip"
     echo "cpu_simd_evidence_reason=engine2d-simd-capable-simple-bin-unavailable"
     echo "cpu_simd_evidence_simple_bin=$SIMPLE_BIN"
+    echo "cpu_simd_evidence_simple_bin_source=$SIMPLE_BIN_SOURCE"
+    echo "cpu_simd_evidence_simple_bin_status=$SIMPLE_BIN_STATUS"
     mkdir -p "$WORK_DIR"
     {
         echo "cpu_simd_evidence_status=skip"
         echo "cpu_simd_evidence_reason=engine2d-simd-capable-simple-bin-unavailable"
         echo "cpu_simd_evidence_simple_bin=$SIMPLE_BIN"
+        echo "cpu_simd_evidence_simple_bin_source=$SIMPLE_BIN_SOURCE"
+        echo "cpu_simd_evidence_simple_bin_status=$SIMPLE_BIN_STATUS"
     } >"$ENV_PATH"
     echo "cpu-simd-engine2d-evidence: skip (no Engine2D SIMD-capable Simple binary found)"
     exit 0
@@ -222,11 +282,15 @@ if ! binary_has_engine2d_simd_externs "$SIMPLE_BIN"; then
     echo "cpu_simd_evidence_status=skip"
     echo "cpu_simd_evidence_reason=engine2d-simd-externs-not-in-binary-bootstrap-required"
     echo "cpu_simd_evidence_simple_bin=$SIMPLE_BIN"
+    echo "cpu_simd_evidence_simple_bin_source=$SIMPLE_BIN_SOURCE"
+    echo "cpu_simd_evidence_simple_bin_status=$SIMPLE_BIN_STATUS"
     mkdir -p "$WORK_DIR"
     {
         echo "cpu_simd_evidence_status=skip"
         echo "cpu_simd_evidence_reason=engine2d-simd-externs-not-in-binary-bootstrap-required"
         echo "cpu_simd_evidence_simple_bin=$SIMPLE_BIN"
+        echo "cpu_simd_evidence_simple_bin_source=$SIMPLE_BIN_SOURCE"
+        echo "cpu_simd_evidence_simple_bin_status=$SIMPLE_BIN_STATUS"
     } >"$ENV_PATH"
     echo "cpu-simd-engine2d-evidence: skip (Engine2D SIMD externs not in $SIMPLE_BIN; run bootstrap --deploy)"
     exit 0
