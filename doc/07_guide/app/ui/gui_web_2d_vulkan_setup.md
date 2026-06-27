@@ -239,7 +239,10 @@ PATH detection cannot use git metadata, set `ALLOW_PATH_SIMPLE_BIN=1` for the
 direct `--run` probe. The setup helper records
 `gui_web_2d_vulkan_simple_bin_selection_reason=default-missing-path-opt-in` so
 the fallback is visible in retained evidence. Prefer explicit `SIMPLE_BIN=...`
-when validating a freshly built driver.
+when validating a freshly built self-hosted driver. Rust seed binaries under
+`src/compiler_rust/**` are not valid Simple-lane evidence for this wrapper; the
+helper records them as `gui_web_2d_vulkan_simple_bin_status=forbidden` and does
+not execute them.
 
 Use `--renderdoc-simple` or `--renderdoc` only on a prepared RenderDoc host.
 Do not run broad Simple checks while a runaway `bin/simple` process tree is

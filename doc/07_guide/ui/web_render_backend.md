@@ -103,8 +103,10 @@ On macOS, `vulkaninfo --summary` with `driverName = MoltenVK` only proves the
 host loader/ICD. Electron or Chrome can still render a bitmap while rejecting
 `--use-angle=vulkan`; in that case evidence records
 `vulkan-angle-unavailable` and the browser Vulkan lane remains failed. The
-wrapper records whether the Simple lane used a macOS Vulkan-capable fresh driver
-in `gui_web_2d_vulkan_simple_bin_selection_reason`. RenderDoc proof requires
+wrapper records whether the Simple lane used a repo-local self-hosted driver in
+`gui_web_2d_vulkan_simple_bin_selection_reason` and
+`gui_web_2d_vulkan_simple_bin_status`; Rust seed binaries are recorded as
+forbidden and are not executed for this lane. RenderDoc proof requires
 `.rdc` files with `RDOC` magic for the Electron, original Chrome, and Simple
 capture lanes; browser bitmaps alone are not Vulkan proof.
 The aggregate audit emits `gui_web_2d_vulkan_direct_run_source` and

@@ -385,7 +385,7 @@ checksum, and exact geometry is downgraded to `fail`.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 954 lines folded for reproduction.
+Runnable source: 955 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -618,6 +618,7 @@ expect(evidence).to_contain("gui_web_2d_vulkan_renderdoc_setup_macos_homebrew_pa
 expect(evidence).to_contain("gui_web_2d_vulkan_renderdoc_setup_macos_upstream_support_status=")
 expect(evidence).to_contain("gui_web_2d_vulkan_simple_bin=")
 expect(evidence).to_contain("gui_web_2d_vulkan_simple_bin_selection_reason=")
+expect(evidence).to_contain("gui_web_2d_vulkan_simple_bin_status=")
 expect(evidence).to_contain("gui_web_2d_vulkan_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html")
 expect(evidence).to_contain("gui_web_2d_vulkan_width=")
 expect(evidence).to_contain("gui_web_2d_vulkan_height=")

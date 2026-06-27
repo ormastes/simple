@@ -614,20 +614,22 @@ If any platform compare evidence is missing or failing, the aggregate keeps
 `gui_renderdoc_feature_coverage_status` incomplete and adds the native
 render-log platform matrix to `blocked_completion_gates`.
 
-On Linux and macOS, the wrapper prefers `src/compiler_rust/target/release/simple`
-or `src/compiler_rust/target/debug/simple` when that binary is the required
-fresh driver for the active lane. The selected executable is recorded
-as `gui_web_2d_vulkan_simple_bin`, with the reason in
-`gui_web_2d_vulkan_simple_bin_selection_reason`. If `bin/simple` is missing in
-a linked worktree, the wrapper falls back to compiler-rust release/debug, then a
-PATH `simple` only when the resolved executable belongs to the same Git
-repository, then checked-in wrappers. It records
-`default-missing-same-repo-path-fallback` for the guarded PATH case and
-`default-missing-fallback` for local file fallbacks. If no fresh driver exists and `bin/simple` is older
-than the Rust runtime changes under test, build the driver and rerun:
+On Linux and macOS, the wrapper uses a repo-local pure/self-hosted Simple
+driver for the Simple Vulkan lane. The selected executable is recorded as
+`gui_web_2d_vulkan_simple_bin`, with provenance in
+`gui_web_2d_vulkan_simple_bin_selection_reason` and
+`gui_web_2d_vulkan_simple_bin_status`. If `bin/simple` is missing in a linked
+worktree, the wrapper falls back to repo release binaries under `release/**` or
+`bin/release/**`, then a PATH `simple` only when the resolved executable belongs
+to the same Git repository or `ALLOW_PATH_SIMPLE_BIN=1` was explicitly set. It
+records `self-hosted-release`, `default-missing-same-repo-path-fallback`, or
+`default-missing-path-opt-in` for those cases. Rust seed binaries under
+`src/compiler_rust/**` are forbidden for this lane; explicit use is recorded as
+`gui_web_2d_vulkan_simple_bin_status=forbidden` and is not executed. If no
+fresh self-hosted driver exists, build/deploy one and rerun:
 
 ```sh
-(cd src/compiler_rust && cargo build --release --bin simple)
+bin/simple bootstrap --release
 scripts/setup/setup-gui-web-2d-vulkan-env.shs --run
 ```
 

@@ -303,7 +303,10 @@ renderdoc_home="$(rdoc_find_renderdoc_home "$ROOT_DIR" || true)"
 chrome_bin="$(rdoc_find_chrome "$ROOT_DIR" || true)"
 electron_bin="$(rdoc_find_electron "$ROOT_DIR" || true)"
 simple_bin="${SIMPLE_BIN:-bin/simple}"
-simple_bin_selection_reason="default"
+simple_bin_selection_reason="repo-bin"
+if [ -n "${SIMPLE_BIN+x}" ] && [ "$SIMPLE_BIN" != "bin/simple" ]; then
+    simple_bin_selection_reason="explicit-env"
+fi
 
 binary_has_macos_vulkan_loader_paths() {
     [ -x "$1" ] && have strings && LC_ALL=C strings "$1" 2>/dev/null | grep -q 'libvulkan.1.dylib'
@@ -321,17 +324,31 @@ same_repo_executable() {
     [ -n "$root_git_dir" ] && [ "$candidate_git_dir" = "$root_git_dir" ]
 }
 
+is_rust_seed_simple() {
+    case "$1" in
+        src/compiler_rust/*|*/src/compiler_rust/*)
+            return 0
+            ;;
+    esac
+    return 1
+}
+
 if [ -z "${SIMPLE_BIN+pinned}" ] || [ "$SIMPLE_BIN" = "bin/simple" ]; then
     if [ ! -x "$simple_bin" ]; then
         path_simple_candidate="$(command -v simple 2>/dev/null || true)"
         for candidate in \
-            "src/compiler_rust/target/release/simple" \
-            "src/compiler_rust/target/debug/simple" \
             "release/x86_64-unknown-linux-gnu/simple" \
+            "release/aarch64-unknown-linux-gnu/simple" \
+            "release/aarch64-apple-darwin/simple" \
+            "release/x86_64-apple-darwin/simple" \
+            "bin/release/x86_64-unknown-linux-gnu/simple" \
+            "bin/release/aarch64-unknown-linux-gnu/simple" \
+            "bin/release/aarch64-apple-darwin/simple" \
+            "bin/release/x86_64-apple-darwin/simple" \
             "bootstrap/stage3/x86_64-unknown-linux-gnu/simple"; do
             if [ -n "$candidate" ] && [ -x "$candidate" ]; then
                 simple_bin="$candidate"
-                simple_bin_selection_reason="default-missing-fallback"
+                simple_bin_selection_reason="self-hosted-release"
                 break
             fi
         done
@@ -356,16 +373,26 @@ if [ -z "${SIMPLE_BIN+pinned}" ] || [ "$SIMPLE_BIN" = "bin/simple" ]; then
     fi
     if [ "$UNAME_S" = "Darwin" ]; then
         for candidate in \
-            "src/compiler_rust/target/release/simple" \
-            "src/compiler_rust/target/debug/simple" \
+            "release/aarch64-apple-darwin/simple" \
+            "release/x86_64-apple-darwin/simple" \
+            "bin/release/aarch64-apple-darwin/simple" \
+            "bin/release/x86_64-apple-darwin/simple" \
             "$simple_bin"; do
             if binary_has_macos_vulkan_loader_paths "$candidate"; then
                 simple_bin="$candidate"
-                simple_bin_selection_reason="macos-vulkan-loader-paths-present"
+                simple_bin_selection_reason="self-hosted-macos-vulkan-loader-paths-present"
                 break
             fi
         done
     fi
+fi
+
+simple_bin_status="missing"
+if is_rust_seed_simple "$simple_bin"; then
+    simple_bin_status="forbidden"
+    simple_bin_selection_reason="${simple_bin_selection_reason}-rust-seed-forbidden"
+elif [ -x "$simple_bin" ]; then
+    simple_bin_status="pass"
 fi
 
 append_kv "gui_web_2d_vulkan_mode" "$MODE"
@@ -402,6 +429,7 @@ else
 fi
 append_kv "gui_web_2d_vulkan_simple_bin" "$simple_bin"
 append_kv "gui_web_2d_vulkan_simple_bin_selection_reason" "$simple_bin_selection_reason"
+append_kv "gui_web_2d_vulkan_simple_bin_status" "$simple_bin_status"
 
 VULKAN_SUMMARY="$BUILD_DIR/vulkaninfo-summary.out"
 if have vulkaninfo && vulkaninfo --summary >"$VULKAN_SUMMARY" 2>&1; then
@@ -646,38 +674,57 @@ NODE
         SIMPLE_ARGB="$BUILD_DIR/simple_argb.json"
         SIMPLE_ARGB_OUT="$BUILD_DIR/simple_argb.out"
         SIMPLE_PIXEL_BACKEND="${GUI_WEB_2D_VULKAN_SIMPLE_PIXEL_BACKEND:-vulkan}"
-        SIMPLE_VULKAN_READBACK_WORK_DIR="$SIMPLE_WORK_DIR" \
-        REPORT_PATH="$SIMPLE_WORK_DIR/report.md" \
-        SIMPLE_BIN="$simple_bin" \
-        SIMPLE_LIB="${SIMPLE_LIB:-src}" \
-            sh "$ROOT_DIR/scripts/check/check-vulkan-engine2d-readback.shs" >"$SIMPLE_OUT" 2>&1
-        simple_code=$?
-        append_kv "gui_web_2d_vulkan_simple_exit_code" "$simple_code"
-        append_kv "gui_web_2d_vulkan_simple_log" "$SIMPLE_OUT"
-        append_kv "gui_web_2d_vulkan_simple_evidence_env" "$SIMPLE_WORK_DIR/evidence.env"
-        if [ -f "$SIMPLE_WORK_DIR/evidence.env" ]; then
-            append_file_value "gui_web_2d_vulkan_simple_status" "$SIMPLE_WORK_DIR/evidence.env" 's/^vulkan_engine2d_readback_status=//p'
-            append_file_value "gui_web_2d_vulkan_simple_reason" "$SIMPLE_WORK_DIR/evidence.env" 's/^vulkan_engine2d_readback_reason=//p'
-            append_file_value "gui_web_2d_vulkan_simple_probe_status" "$SIMPLE_WORK_DIR/evidence.env" 's/^vulkan_engine2d_readback_probe_status=//p'
-            append_file_value "gui_web_2d_vulkan_simple_available" "$SIMPLE_WORK_DIR/evidence.env" 's/^vulkan_engine2d_readback_available=//p'
-            append_file_value "gui_web_2d_vulkan_simple_backend_name" "$SIMPLE_WORK_DIR/evidence.env" 's/^vulkan_engine2d_readback_backend_name=//p'
+        if [ "$simple_bin_status" != "pass" ]; then
+            : >"$SIMPLE_OUT"
+            : >"$SIMPLE_ARGB_OUT"
+            append_kv "gui_web_2d_vulkan_simple_exit_code" ""
+            append_kv "gui_web_2d_vulkan_simple_log" "$SIMPLE_OUT"
+            append_kv "gui_web_2d_vulkan_simple_evidence_env" "$SIMPLE_WORK_DIR/evidence.env"
+            append_kv "gui_web_2d_vulkan_simple_status" "unavailable"
+            append_kv "gui_web_2d_vulkan_simple_reason" "simple-bin-${simple_bin_status}"
+            append_kv "gui_web_2d_vulkan_simple_probe_status" ""
+            append_kv "gui_web_2d_vulkan_simple_available" ""
+            append_kv "gui_web_2d_vulkan_simple_backend_name" ""
+            append_kv "gui_web_2d_vulkan_simple_argb_exit_code" ""
+            append_kv "gui_web_2d_vulkan_simple_argb_stdout" "$SIMPLE_ARGB_OUT"
+            append_kv "gui_web_2d_vulkan_simple_argb_backend" "$SIMPLE_PIXEL_BACKEND"
+            append_kv "gui_web_2d_vulkan_simple_argb_status" "unavailable"
+            append_kv "gui_web_2d_vulkan_simple_argb_reason" "simple-bin-${simple_bin_status}"
+            append_kv "gui_web_2d_vulkan_simple_argb_path" "$SIMPLE_ARGB"
         else
-            append_kv "gui_web_2d_vulkan_simple_status" "missing-evidence"
-            append_kv "gui_web_2d_vulkan_simple_reason" "missing-evidence-env"
-        fi
+            SIMPLE_VULKAN_READBACK_WORK_DIR="$SIMPLE_WORK_DIR" \
+            REPORT_PATH="$SIMPLE_WORK_DIR/report.md" \
+            SIMPLE_BIN="$simple_bin" \
+            SIMPLE_LIB="${SIMPLE_LIB:-src}" \
+                sh "$ROOT_DIR/scripts/check/check-vulkan-engine2d-readback.shs" >"$SIMPLE_OUT" 2>&1
+            simple_code=$?
+            append_kv "gui_web_2d_vulkan_simple_exit_code" "$simple_code"
+            append_kv "gui_web_2d_vulkan_simple_log" "$SIMPLE_OUT"
+            append_kv "gui_web_2d_vulkan_simple_evidence_env" "$SIMPLE_WORK_DIR/evidence.env"
+            if [ -f "$SIMPLE_WORK_DIR/evidence.env" ]; then
+                append_file_value "gui_web_2d_vulkan_simple_status" "$SIMPLE_WORK_DIR/evidence.env" 's/^vulkan_engine2d_readback_status=//p'
+                append_file_value "gui_web_2d_vulkan_simple_reason" "$SIMPLE_WORK_DIR/evidence.env" 's/^vulkan_engine2d_readback_reason=//p'
+                append_file_value "gui_web_2d_vulkan_simple_probe_status" "$SIMPLE_WORK_DIR/evidence.env" 's/^vulkan_engine2d_readback_probe_status=//p'
+                append_file_value "gui_web_2d_vulkan_simple_available" "$SIMPLE_WORK_DIR/evidence.env" 's/^vulkan_engine2d_readback_available=//p'
+                append_file_value "gui_web_2d_vulkan_simple_backend_name" "$SIMPLE_WORK_DIR/evidence.env" 's/^vulkan_engine2d_readback_backend_name=//p'
+            else
+                append_kv "gui_web_2d_vulkan_simple_status" "missing-evidence"
+                append_kv "gui_web_2d_vulkan_simple_reason" "missing-evidence-env"
+            fi
 
-        PIXEL_HTML="$HTML_PATH" \
-        PIXEL_W="$WIDTH" \
-        PIXEL_H="$HEIGHT" \
-        PIXEL_BACKEND="$SIMPLE_PIXEL_BACKEND" \
-        PIXEL_OUT="$SIMPLE_ARGB" \
-        SIMPLE_LIB="${SIMPLE_LIB:-src}" \
-            run_bound "$simple_bin" run "$ROOT_DIR/tools/pixel_compare/render_simple_html.spl" --mode=native --clean >"$SIMPLE_ARGB_OUT" 2>&1
-        simple_argb_code=$?
-        append_kv "gui_web_2d_vulkan_simple_argb_exit_code" "$simple_argb_code"
-        append_kv "gui_web_2d_vulkan_simple_argb_stdout" "$SIMPLE_ARGB_OUT"
-        append_kv "gui_web_2d_vulkan_simple_argb_backend" "$SIMPLE_PIXEL_BACKEND"
-        parse_argb "$SIMPLE_ARGB" "gui_web_2d_vulkan_simple"
+            PIXEL_HTML="$HTML_PATH" \
+            PIXEL_W="$WIDTH" \
+            PIXEL_H="$HEIGHT" \
+            PIXEL_BACKEND="$SIMPLE_PIXEL_BACKEND" \
+            PIXEL_OUT="$SIMPLE_ARGB" \
+            SIMPLE_LIB="${SIMPLE_LIB:-src}" \
+                run_bound "$simple_bin" run "$ROOT_DIR/tools/pixel_compare/render_simple_html.spl" --mode=native --clean >"$SIMPLE_ARGB_OUT" 2>&1
+            simple_argb_code=$?
+            append_kv "gui_web_2d_vulkan_simple_argb_exit_code" "$simple_argb_code"
+            append_kv "gui_web_2d_vulkan_simple_argb_stdout" "$SIMPLE_ARGB_OUT"
+            append_kv "gui_web_2d_vulkan_simple_argb_backend" "$SIMPLE_PIXEL_BACKEND"
+            parse_argb "$SIMPLE_ARGB" "gui_web_2d_vulkan_simple"
+        fi
 
         run_argb_diff "$ELECTRON_ARGB" "$CHROME_ARGB" "gui_web_2d_vulkan_electron_chrome" "$BUILD_DIR/electron_chrome_diff.ppm" "$BUILD_DIR/electron_chrome_diff.out"
         run_argb_diff "$ELECTRON_ARGB" "$SIMPLE_ARGB" "gui_web_2d_vulkan_electron_simple" "$BUILD_DIR/electron_simple_diff.ppm" "$BUILD_DIR/electron_simple_diff.out"
