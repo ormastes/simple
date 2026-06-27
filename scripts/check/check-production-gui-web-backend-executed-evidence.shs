@@ -11,17 +11,47 @@ have() {
 }
 
 SIMPLE_BIN_EXPLICIT="${SIMPLE_BIN+x}"
+SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
+SIMPLE_BIN_STATUS=pass
+
+is_rust_seed_simple() {
+    case "$1" in
+        src/compiler_rust/*|*/src/compiler_rust/*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 if [ -z "$SIMPLE_BIN_EXPLICIT" ]; then
-    if [ -x "bin/simple" ]; then
-        SIMPLE_BIN="bin/simple"
-    elif [ -x "src/compiler_rust/target/release/simple" ]; then
-        SIMPLE_BIN="src/compiler_rust/target/release/simple"
-    elif have simple; then
+    SIMPLE_BIN_SOURCE="missing-self-hosted"
+    for candidate in \
+        "bin/simple" \
+        "./bin/simple" \
+        "release"/*/simple \
+        "bin/release"/*/simple \
+        "build/bootstrap/stage3/simple"
+    do
+        if [ -x "$candidate" ]; then
+            SIMPLE_BIN="$candidate"
+            SIMPLE_BIN_SOURCE="repo-self-hosted-fallback"
+            break
+        fi
+    done
+    if [ "${SIMPLE_BIN:-}" = "" ] && [ "${ALLOW_PATH_SIMPLE_BIN:-0}" = "1" ] && have simple; then
         SIMPLE_BIN="$(command -v simple)"
-    else
-        SIMPLE_BIN="src/compiler_rust/target/release/simple"
+        SIMPLE_BIN_SOURCE="path-opt-in"
     fi
 fi
+SIMPLE_BIN="${SIMPLE_BIN:-}"
+if [ "$SIMPLE_BIN" = "" ]; then
+    SIMPLE_BIN_STATUS=missing
+elif is_rust_seed_simple "$SIMPLE_BIN"; then
+    SIMPLE_BIN_STATUS=forbidden
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-rust-seed-forbidden"
+elif [ ! -x "$SIMPLE_BIN" ]; then
+    SIMPLE_BIN_STATUS=missing
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-missing"
+fi
+export SIMPLE_BIN SIMPLE_BIN_SOURCE SIMPLE_BIN_STATUS
 EVIDENCE_SRC="$BUILD_DIR/backend_executed_gui_scene_evidence.spl"
 EVIDENCE_LOG="$BUILD_DIR/evidence.log"
 ENV_PATH="$BUILD_DIR/evidence.env"
@@ -136,11 +166,13 @@ fn main():
     print "production_gui_backend_total_pixels_per_second_max=" + max_total_pixels_per_second.to_text()
 SIMPLE
 
-if [ ! -x "$SIMPLE_BIN" ]; then
+if [ "$SIMPLE_BIN_STATUS" != "pass" ]; then
     {
         echo "production_gui_backend_status=unavailable"
-        echo "production_gui_backend_reason=missing-simple-bin"
+        echo "production_gui_backend_reason=simple-bin-$SIMPLE_BIN_STATUS"
         echo "production_gui_backend_simple_bin=$SIMPLE_BIN"
+        echo "production_gui_backend_simple_bin_source=$SIMPLE_BIN_SOURCE"
+        echo "production_gui_backend_simple_bin_status=$SIMPLE_BIN_STATUS"
     } >"$ENV_PATH"
     cp "$ENV_PATH" "$EVIDENCE_LOG"
 else
@@ -154,6 +186,8 @@ else
             echo "production_gui_backend_reason=simple-evidence-run-failed"
             echo "production_gui_backend_exit_code=$code"
             echo "production_gui_backend_simple_bin=$SIMPLE_BIN"
+            echo "production_gui_backend_simple_bin_source=$SIMPLE_BIN_SOURCE"
+            echo "production_gui_backend_simple_bin_status=$SIMPLE_BIN_STATUS"
         } >"$ENV_PATH"
     else
         status="$(field_of production_gui_backend_status)"
@@ -224,6 +258,8 @@ else
                 echo "$key=$(field_of "$key")"
             done
             echo "production_gui_backend_simple_bin=$SIMPLE_BIN"
+            echo "production_gui_backend_simple_bin_source=$SIMPLE_BIN_SOURCE"
+            echo "production_gui_backend_simple_bin_status=$SIMPLE_BIN_STATUS"
             echo "production_gui_backend_blur_or_tolerance_used=false"
             echo "production_gui_backend_evidence_log=$EVIDENCE_LOG"
         } >"$ENV_PATH"

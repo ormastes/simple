@@ -1090,7 +1090,13 @@ The current canonical evidence contract is:
   `production_gui_web_renderer_parity_simple_bin_source` and
   `production_gui_web_renderer_parity_simple_bin_status`. The Rust seed under
   `src/compiler_rust/` is `forbidden` for this production evidence path and is
-  not executed; missing self-hosted binaries fail closed as `missing`. Font offload
+  not executed; missing self-hosted binaries fail closed as `missing`. The nested
+  backend-executed parity subcheck records the same contract as
+  `production_gui_backend_simple_bin`,
+  `production_gui_backend_simple_bin_source`, and
+  `production_gui_backend_simple_bin_status`, and the parent parity evidence
+  forwards those as `production_gui_web_renderer_parity_backend_simple_bin*`.
+  Font offload
   `unavailable` is recorded but does not satisfy the production parity wrapper.
   The Tauri/Chrome surface manifest must prove live Electron, Tauri, and Chrome
   captures, 50 Tauri and 50 Chrome cases, 36 pass cases plus 14 tracked

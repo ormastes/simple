@@ -27,7 +27,7 @@ production_gui_web_renderer_parity_evidence_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 14 | 14 | 0 | 0 |
+| 15 | 15 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -123,13 +123,15 @@ pixel mismatch.
 
 Resolved Simple binary:
 
-- The wrapper searches repo `bin/simple`, the Rust release binary, then `simple`
-  on PATH.
-- The selected binary and source are exported to nested subchecks.
+- The wrapper searches repo self-hosted Simple binaries first.
+- Rust seed binaries under `src/compiler_rust/` are forbidden for production
+  GUI/web parity evidence.
+- The selected binary, source, and status are exported to nested subchecks.
 
 Backend explicit override:
 
 - An explicit missing `SIMPLE_BIN` remains visible in backend evidence.
+- An explicit Rust seed `SIMPLE_BIN` is recorded as forbidden and not executed.
 
 Timeout fixture:
 
@@ -183,25 +185,28 @@ the produced `evidence.env` to validate the final release-blocking contract.
 
 ### Production GUI/web renderer parity evidence
 
-#### exports resolved simple bin to nested production parity checks
+#### exports resolved self hosted simple bin to nested production parity checks
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 73 lines folded for reproduction.
+Runnable source: 99 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val script = file_read("scripts/check/check-production-gui-web-renderer-parity-evidence.shs")
 expect(script).to_contain("SIMPLE_BIN_SOURCE=")
+expect(script).to_contain("SIMPLE_BIN_STATUS=pass")
 expect(script).to_contain("for candidate in")
 expect(script).to_contain("\"bin/simple\"")
-expect(script).to_contain("\"src/compiler_rust/target/release/simple\"")
-expect(script.index_of("\"bin/simple\"")).to_be_less_than(script.index_of("\"src/compiler_rust/target/release/simple\""))
+expect(script).to_contain("\"bin/release\"/*/simple")
+expect(script).to_contain("is_rust_seed_simple")
+expect(script).to_contain("SIMPLE_BIN_STATUS=forbidden")
 expect(script).to_contain("command -v simple")
-expect(script).to_contain("export SIMPLE_BIN SIMPLE_BIN_SOURCE")
+expect(script).to_contain("export SIMPLE_BIN SIMPLE_BIN_SOURCE SIMPLE_BIN_STATUS")
 expect(script).to_contain("production_gui_web_renderer_parity_simple_bin=$SIMPLE_BIN")
 expect(script).to_contain("production_gui_web_renderer_parity_simple_bin_source=$SIMPLE_BIN_SOURCE")
+expect(script).to_contain("production_gui_web_renderer_parity_simple_bin_status=$SIMPLE_BIN_STATUS")
 expect(script).to_contain("ELECTRON_LAYOUT_MANIFEST_RESUME=1")
 expect(script).to_contain("PRODUCTION_GUI_WEB_RENDERER_PARITY_EVENT_SCRIPT")
 expect(script).to_contain("run_event_routing")
@@ -292,22 +297,26 @@ expect(script).to_contain("production_gui_web_renderer_parity_layout_manifest_de
 
 </details>
 
-#### selects repo bin simple before legacy cargo target simple
+#### selects only self hosted backend simple candidates by default
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val script = file_read("scripts/check/check-production-gui-web-backend-executed-evidence.shs")
 expect(script).to_contain("SIMPLE_BIN_EXPLICIT=")
-expect(script).to_contain("if [ -x \"bin/simple\" ]; then")
-expect(script).to_contain("elif [ -x \"src/compiler_rust/target/release/simple\" ]; then")
-expect(script).to_contain("elif have simple; then")
+expect(script).to_contain("repo-self-hosted-fallback")
+expect(script).to_contain("\"bin/simple\"")
+expect(script).to_contain("\"bin/release\"/*/simple")
+expect(script).to_contain("ALLOW_PATH_SIMPLE_BIN")
+expect(script).to_contain("is_rust_seed_simple")
+expect(script).to_contain("SIMPLE_BIN_STATUS=forbidden")
 expect(script).to_contain("production_gui_backend_simple_bin=$SIMPLE_BIN")
-expect(script.index_of("if [ -x \"bin/simple\" ]; then")).to_be_less_than(script.index_of("elif [ -x \"src/compiler_rust/target/release/simple\" ]; then"))
+expect(script).to_contain("production_gui_backend_simple_bin_source=$SIMPLE_BIN_SOURCE")
+expect(script).to_contain("production_gui_backend_simple_bin_status=$SIMPLE_BIN_STATUS")
 ```
 
 </details>
@@ -317,7 +326,7 @@ expect(script.index_of("if [ -x \"bin/simple\" ]; then")).to_be_less_than(script
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -327,8 +336,33 @@ expect(code).to_equal(0)
 
 val evidence = file_read("build/test-production-gui-web-backend-explicit-missing/out/evidence.env")
 expect(evidence).to_contain("production_gui_backend_status=unavailable")
-expect(evidence).to_contain("production_gui_backend_reason=missing-simple-bin")
+expect(evidence).to_contain("production_gui_backend_reason=simple-bin-missing")
 expect(evidence).to_contain("production_gui_backend_simple_bin=build/test-production-gui-web-backend-explicit-missing/missing-simple")
+expect(evidence).to_contain("production_gui_backend_simple_bin_source=explicit-env-missing")
+expect(evidence).to_contain("production_gui_backend_simple_bin_status=missing")
+```
+
+</details>
+
+#### rejects explicit backend rust seed simple bin evidence
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val command = "rm -rf build/test-production-gui-web-backend-explicit-seed && SIMPLE_BIN=src/compiler_rust/target/release/simple BUILD_DIR=build/test-production-gui-web-backend-explicit-seed/out REPORT_PATH=build/test-production-gui-web-backend-explicit-seed/report.md sh scripts/check/check-production-gui-web-backend-executed-evidence.shs || true"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val evidence = file_read("build/test-production-gui-web-backend-explicit-seed/out/evidence.env")
+expect(evidence).to_contain("production_gui_backend_status=unavailable")
+expect(evidence).to_contain("production_gui_backend_reason=simple-bin-forbidden")
+expect(evidence).to_contain("production_gui_backend_simple_bin=src/compiler_rust/target/release/simple")
+expect(evidence).to_contain("production_gui_backend_simple_bin_source=explicit-env-rust-seed-forbidden")
+expect(evidence).to_contain("production_gui_backend_simple_bin_status=forbidden")
 ```
 
 </details>
@@ -571,7 +605,7 @@ expect(evidence).to_contain("tauri_chrome_simple_web_layout_manifest_chrome_capt
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 34 lines folded for reproduction.
+Runnable source: 36 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -617,7 +651,7 @@ expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_bl
 
 #### fails top-level parity when Electron event timing or animation rows are invalid
 
-- "printf '#!/bin/sh\\nmkdir -p \"$BUILD DIR\"\\nprintf \"wm browser event routing status=pass\\\\nwm browser event routing reason=pass\\\\nwm browser event routing validation status=pass\\\\nwm browser event routing validation reason=pass\\nwm browser event routing proof symlink status=pass\\nwm browser event routing browser engine=chromium\\nwm browser event routing electron user agent=Mozilla/5 0 Chrome/142 0 0 0 Electron/42 5 0 Safari/537 36\\nwm browser event routing electron process version=42 5 0\\nwm browser event routing chrome process version=142 0 0 0\\nwm browser event routing ready=true\\\\nwm browser event routing wm found=true\\\\nwm browser event routing focus count=1\\\\nwm browser event routing move count=1\\\\nwm browser event routing maximize count=1\\\\nwm browser event routing title command count=1\\\\nwm browser event routing text input count=1\\\\nwm browser event routing pointer down count=1\\\\nwm browser event routing pointer up count=1\\\\nwm browser event routing performance now available=true\\\\nwm browser event routing performance now delta ms=1001\\\\nwm browser event routing input to paint ms=1001\\\\nwm browser event routing animation frame available=true\\\\nwm browser event routing animation frame count=2\\\\nwm browser event routing css animation probe=true\\\\nwm browser event routing event sequence=host wm pointer:down,window cmd:focus,window cmd:move,window cmd:title command,window cmd:maximize,input event:text input,input event:pointer down,input event:pointer up\\\\nwm browser event routing title text=Terminal\\\\nwm browser event routing title context text=terminal\\\\nwm browser event routing traffic button count=3\\\\nwm browser event routing title input tag=input\\\\nwm browser event routing titlebar height=34px\\\\nwm browser event routing titlebar display=flex\\\\nwm browser event routing titlebar cursor=grab\\\\nwm browser event routing titlebar background=rgb
+- "printf '#!/bin/sh\\nmkdir -p \"$BUILD DIR\"\\nprintf \"wm browser event routing status=pass\\\\nwm browser event routing reason=pass\\\\nwm browser event routing validation status=pass\\\\nwm browser event routing validation reason=pass\\nwm browser event routing proof symlink status=pass\\nwm browser event routing proof source=fixture-event-proof js\\nwm browser event routing proof source file status=pass\\nwm browser event routing proof source size bytes=23\\nwm browser event routing browser engine=chromium\\nwm browser event routing electron user agent=Mozilla/5 0 Chrome/142 0 0 0 Electron/42 5 0 Safari/537 36\\nwm browser event routing electron process version=42 5 0\\nwm browser event routing chrome process version=142 0 0 0\\nwm browser event routing ready=true\\\\nwm browser event routing wm found=true\\\\nwm browser event routing focus count=1\\\\nwm browser event routing move count=1\\\\nwm browser event routing maximize count=1\\\\nwm browser event routing title command count=1\\\\nwm browser event routing text input count=1\\\\nwm browser event routing pointer down count=1\\\\nwm browser event routing pointer up count=1\\\\nwm browser event routing performance now available=true\\\\nwm browser event routing performance now delta ms=1001\\\\nwm browser event routing input to paint ms=1001\\\\nwm browser event routing animation frame available=true\\\\nwm browser event routing animation frame count=2\\\\nwm browser event routing css animation probe=true\\\\nwm browser event routing event sequence=host wm pointer:down,window cmd:focus,window cmd:move,window cmd:title command,window cmd:maximize,input event:text input,input event:pointer down,input event:pointer up\\\\nwm browser event routing title text=Terminal\\\\nwm browser event routing title context text=terminal\\\\nwm browser event routing traffic button count=3\\\\nwm browser event routing title input tag=input\\\\nwm browser event routing titlebar height=34px\\\\nwm browser event routing titlebar display=flex\\\\nwm browser event routing titlebar cursor=grab\\\\nwm browser event routing titlebar background=rgb
    - Expected: code equals `0`
    - Expected: animation_code equals `0`
 
@@ -625,7 +659,7 @@ expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_bl
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 37 lines folded for reproduction.
+Runnable source: 41 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -676,15 +710,16 @@ expect(animation_evidence).to_contain("production_gui_web_renderer_parity_event_
 
 #### passes with complete Electron Chrome backend Metal and event proof rows
 
-- "printf '#!/bin/sh\\nmkdir -p \"$BUILD DIR\"\\nprintf \"wm browser event routing status=pass\\\\nwm browser event routing reason=pass\\\\nwm browser event routing validation status=pass\\\\nwm browser event routing validation reason=pass\\nwm browser event routing proof symlink status=pass\\nwm browser event routing browser engine=chromium\\nwm browser event routing electron user agent=Mozilla/5 0 Chrome/142 0 0 0 Electron/42 5 0 Safari/537 36\\nwm browser event routing electron process version=42 5 0\\nwm browser event routing chrome process version=142 0 0 0\\nwm browser event routing ready=true\\\\nwm browser event routing wm found=true\\\\nwm browser event routing focus count=1\\\\nwm browser event routing move count=1\\\\nwm browser event routing maximize count=1\\\\nwm browser event routing title command count=1\\\\nwm browser event routing text input count=1\\\\nwm browser event routing pointer down count=1\\\\nwm browser event routing pointer up count=1\\\\nwm browser event routing performance now available=true\\\\nwm browser event routing performance now delta ms=16 7\\\\nwm browser event routing input to paint ms=18 4\\\\nwm browser event routing animation frame available=true\\\\nwm browser event routing animation frame count=2\\\\nwm browser event routing css animation probe=true\\\\nwm browser event routing event sequence=host wm pointer:down,window cmd:focus,window cmd:move,window cmd:title command,window cmd:maximize,input event:text input,input event:pointer down,input event:pointer up\\\\nwm browser event routing title text=Terminal\\\\nwm browser event routing title context text=terminal\\\\nwm browser event routing traffic button count=3\\\\nwm browser event routing title input tag=input\\\\nwm browser event routing titlebar height=34px\\\\nwm browser event routing titlebar display=flex\\\\nwm browser event routing titlebar cursor=grab\\\\nwm browser event routing titlebar background=rgb
+- "printf '#!/bin/sh\\nmkdir -p \"$BUILD DIR\"\\nprintf \"wm browser event routing status=pass\\\\nwm browser event routing reason=pass\\\\nwm browser event routing validation status=pass\\\\nwm browser event routing validation reason=pass\\nwm browser event routing proof symlink status=pass\\nwm browser event routing proof source=fixture-event-proof js\\nwm browser event routing proof source file status=pass\\nwm browser event routing proof source size bytes=23\\nwm browser event routing browser engine=chromium\\nwm browser event routing electron user agent=Mozilla/5 0 Chrome/142 0 0 0 Electron/42 5 0 Safari/537 36\\nwm browser event routing electron process version=42 5 0\\nwm browser event routing chrome process version=142 0 0 0\\nwm browser event routing ready=true\\\\nwm browser event routing wm found=true\\\\nwm browser event routing focus count=1\\\\nwm browser event routing move count=1\\\\nwm browser event routing maximize count=1\\\\nwm browser event routing title command count=1\\\\nwm browser event routing text input count=1\\\\nwm browser event routing pointer down count=1\\\\nwm browser event routing pointer up count=1\\\\nwm browser event routing performance now available=true\\\\nwm browser event routing performance now delta ms=16 7\\\\nwm browser event routing input to paint ms=18 4\\\\nwm browser event routing animation frame available=true\\\\nwm browser event routing animation frame count=2\\\\nwm browser event routing css animation probe=true\\\\nwm browser event routing event sequence=host wm pointer:down,window cmd:focus,window cmd:move,window cmd:title command,window cmd:maximize,input event:text input,input event:pointer down,input event:pointer up\\\\nwm browser event routing title text=Terminal\\\\nwm browser event routing title context text=terminal\\\\nwm browser event routing traffic button count=3\\\\nwm browser event routing title input tag=input\\\\nwm browser event routing titlebar height=34px\\\\nwm browser event routing titlebar display=flex\\\\nwm browser event routing titlebar cursor=grab\\\\nwm browser event routing titlebar background=rgb
    - Expected: code equals `0`
    - Expected: missing_timing_code equals `0`
+   - Expected: bad_checksum_code equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 59 lines folded for reproduction.
+Runnable source: 79 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -775,8 +810,8 @@ expect(bad_checksum).to_contain("production_gui_web_renderer_parity_backend_soft
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 14 |
-| Active scenarios | 14 |
+| Total scenarios | 15 |
+| Active scenarios | 15 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

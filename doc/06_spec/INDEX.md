@@ -7,7 +7,7 @@
 - **Total Features:** 1
 - **Complete Documentation:** 1 (100%)
 - **Stubs Remaining:** 0
-- **Total Lines:** 179
+- **Total Lines:** 132
 
 ---
 
@@ -15,5 +15,5 @@
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [GUI RenderDoc feature coverage status gate](test/03_system/check/gui_renderdoc_feature_coverage_status_spec.md) | Partial | N/A | 33 | 60% | 179 lines |
+| [Production GUI/web renderer parity evidence](test/03_system/check/production_gui_web_renderer_parity_evidence_spec.md) | Partial | N/A | 15 | 60% | 132 lines |
 
