@@ -1163,6 +1163,59 @@ fn dispatch_to_simple_app(app_relative_path: &str, args: &[String], gc_log: bool
 }
 
 /// Original Rust test runner implementation (fallback)
+/// Arm the OOM kill-monitor watchdog (Unix only). Idempotent via its pidfile:
+/// no-op when an alive monitor already holds /tmp/kill_simple_monitor.pid. The
+/// script is located by walking up from CWD to the repo root and is launched
+/// detached (setsid) so a parent hangup doesn't take it down.
+#[cfg(unix)]
+fn arm_kill_monitor() {
+    use std::path::Path;
+    // Already running?
+    if let Ok(pid) = std::fs::read_to_string("/tmp/kill_simple_monitor.pid") {
+        let pid = pid.trim();
+        if !pid.is_empty() && Path::new(&format!("/proc/{}", pid)).exists() {
+            return;
+        }
+    }
+    // Locate the script by walking up from CWD (repo-root-relative path).
+    let mut dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let mut script: Option<PathBuf> = None;
+    for _ in 0..8 {
+        let cand = dir.join("scripts/resource/kill_simple_monitor.shs");
+        if cand.exists() {
+            script = Some(cand);
+            break;
+        }
+        if !dir.pop() {
+            break;
+        }
+    }
+    let script = match script {
+        Some(s) => s,
+        None => return,
+    };
+    // Detach via setsid so the watchdog survives this process exiting; fall back
+    // to a plain background sh if setsid is unavailable.
+    let spawned = std::process::Command::new("setsid")
+        .arg("sh")
+        .arg(&script)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+    if spawned.is_err() {
+        let _ = std::process::Command::new("sh")
+            .arg(&script)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+    }
+}
+
+#[cfg(not(unix))]
+fn arm_kill_monitor() {}
+
 fn handle_test_rust(args: &[String], gc_log: bool, gc_off: bool) -> i32 {
     // Recursion guard: mark this process as running a test so that any
     // interpreter call to cli_run_tests() / rt_cli_run_tests() sees
@@ -1185,6 +1238,15 @@ fn handle_test_rust(args: &[String], gc_log: bool, gc_off: bool) -> i32 {
     options.gc_log = gc_log;
     options.gc_off = gc_off;
     let is_run_management = options.list_runs || options.cleanup_runs || options.prune_runs.is_some();
+
+    // Arm the OOM kill-monitor watchdog before running tests. The seed's native
+    // test runner — unlike the pure-Simple runner's ensure_kill_monitor_running()
+    // — otherwise never starts it, leaving `simple test` (a known host-OOM
+    // trigger) unguarded. Only the top-level test process arms it, and never for
+    // run-management subcommands. See scripts/resource/kill_simple_monitor.shs.
+    if parent_depth == 0 && !is_run_management {
+        arm_kill_monitor();
+    }
 
     // Check if watch mode is enabled
     if options.watch {

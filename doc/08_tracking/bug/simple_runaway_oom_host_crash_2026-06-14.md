@@ -57,6 +57,41 @@ The uncapped containers were created by the **test daemon** container adapter,
 `docker create` commands. `--memory-swap == --memory` disables swap so a runaway
 is killed at the 4 GB cap instead of thrashing host swap into a global OOM.
 
+## Fix applied (in-process monitor) — 2026-06-27
+The background watchdog `scripts/resource/kill_simple_monitor.shs` (armed by
+`ensure_kill_monitor_running()` at test-runner startup) previously killed only on
+**CPU > 95% for > 60s** — a memory balloon that does not peg CPU, or that reaches
+100 GB before the 60s age gate, slipped through. Added a **memory guard**: any
+`bin/simple run/test` process whose RSS exceeds `MEM_THRESHOLD_MB` (default 24 GB,
+env `KILL_SIMPLE_MEM_MB`) is killed immediately, regardless of CPU/age, reusing
+the existing `is_protected` allow-list. Poll interval lowered 30s→10s
+(`KILL_SIMPLE_INTERVAL`). Also fixed `ensure_kill_monitor_running()` to resolve
+the script path by walking up parent dirs (`resolve_repo_script`) — it used a
+CWD-relative path and silently skipped arming when launched from a subdirectory.
+Regression check: `scripts/resource/kill_simple_monitor_test.shs`.
+
+## Fix applied (monitor never armed under the seed + hard cap) — 2026-06-27
+Two gaps closed:
+
+1. **The watchdog never armed during `bin/simple test`.** `ensure_kill_monitor_running()`
+   lives only in the **pure-Simple** test runner, but `bin/simple` is the **Rust
+   seed**, whose native test handler (`handle_test_rust` in
+   `src/compiler_rust/driver/src/main.rs`) had no reference to the monitor at all.
+   So the guard added above only ran under the self-hosted runner — *not* the
+   default toolchain that actually OOMs. Fixed by arming the monitor from the seed:
+   `arm_kill_monitor()` (Unix-only, idempotent via the pidfile, located by walking
+   up from CWD, launched detached via `setsid`) is called once at the top-level
+   `test` start. Verified live: pidfile appears and the monitor stays alive.
+
+2. **Hard memory cap is now the primary backstop.** The poll-based monitor can lose
+   the race against a no-GC balloon that hits 100 GB in seconds (its own comment
+   says so). The host has **no cgroup `memory.max`** (`max`), so nothing bounded the
+   process. `scripts/resource/run_capped.shs` wraps any command in a
+   `systemd-run --user --scope -p MemoryMax=32G -p MemorySwapMax=0` cgroup — a
+   runaway is killed the instant it crosses the cap, zero poll latency, protecting
+   every runner (seed or self-hosted). Use it for the two known OOM triggers:
+   `scripts/resource/run_capped.shs bin/simple test` and `… build bootstrap`.
+
 ## Remaining work
 - **Host OOM guard (optional, defence-in-depth):** `systemd-oomd` is not present;
   install `earlyoom` (`sudo apt install earlyoom`) so no single process can take
