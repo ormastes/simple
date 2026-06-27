@@ -22,7 +22,7 @@ const maxRenderHtmlLen = 10000000;
 
 const validRenderMarkerPattern = /\[tauri-shell\]\s+render,\s+html_len=([1-9][0-9]*)(?:\s|$)/;
 const anyRenderMarkerPattern = /\[tauri-shell\]\s+render,\s+html_len=/;
-const metalRuntimeMarkerPattern = /(Metal renderer ready|MetalKit\.framework|Metal\.framework|-framework Metal|\bMTL[A-Za-z0-9_]*\b|\bAGX\b|\bIOGPU\b)/i;
+const metalRuntimeMarkerPattern = /(CAMetalLayer\s+Metal renderer ready|MetalKit\.framework|Metal\.framework|-framework Metal|\bMTL[A-Za-z0-9_]*\b|\bAGX\b|\bIOGPU\b)/i;
 const fallbackRendererPattern = /(SwiftShader|software rasterizer|software renderer|software rendering|llvmpipe|ANGLE[^\r\n]*(OpenGL|GL)|OpenGL[^\r\n]*(renderer|fallback|software)|fallback renderer)/i;
 
 function renderHtmlLen(content) {

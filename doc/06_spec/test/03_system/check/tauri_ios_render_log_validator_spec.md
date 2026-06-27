@@ -27,7 +27,7 @@ tauri_ios_render_log_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 16 | 16 | 0 | 0 |
+| 17 | 17 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -80,8 +80,9 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_ios_render_log_validat
   Metal log text elsewhere is not enough.
 - The iOS context line must include both `metal_expected=true` and
   `metal_layer=CAMetalLayer`; a generic Metal expectation flag is not enough.
-- The CAMetalLayer context binding alone is not enough; a separate Metal
-  runtime readiness marker must be present in the same coherent source log.
+- The CAMetalLayer context binding alone is not enough; a separate CAMetalLayer
+  or native Metal runtime readiness marker must be present in the same coherent
+  source log, and generic Metal readiness text is not enough.
 - Fallback GPU markers such as SwiftShader, software rendering, or OpenGL
   renderer fallback text fail even when the log also contains WKWebView,
   CAMetalLayer, and Metal markers.
@@ -209,9 +210,9 @@ expect(code).to_equal(1)
 
 val evidence = file_read(root + "/evidence.env")
 expect(evidence).to_contain("ios_render_log_validation_status=fail")
-expect(evidence).to_contain("ios_render_log_validation_reason=ios-tauri-wkwebview-context-missing")
+expect(evidence).to_contain("ios_render_log_validation_reason=ios-metal-log-marker-missing")
 expect(evidence).to_contain("ios_render_log_marker_status=pass")
-expect(evidence).to_contain("ios_render_log_metal_marker_status=pass")
+expect(evidence).to_contain("ios_render_log_metal_marker_status=fail")
 expect(evidence).to_contain("ios_render_log_tauri_context_status=fail")
 ```
 
@@ -276,6 +277,37 @@ expect(evidence).to_contain("ios_render_log_metal_marker_status=fail")
 expect(evidence).to_contain("ios_render_log_tauri_context_status=pass")
 expect(evidence).to_contain("ios_render_log_metal_context_status=pass")
 expect(evidence).to_contain("ios_render_log_source_coherence_status=fail")
+```
+
+</details>
+
+#### rejects generic Metal readiness text even with CAMetalLayer context
+
+- Confirm iOS Metal readiness is tied to CAMetalLayer or native Metal runtime evidence
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 15 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-tauri-ios-render-log-validator-generic-metal-ready"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    "printf '[tauri-shell] creating window from app://index.html\\n[tauri-shell] ios renderer context: backend=WKWebView metal_expected=true metal_layer=CAMetalLayer\\n[tauri-shell] render, html_len=347702\\nMetal renderer ready\\n' > " + root + "/ios.log && " +
+    "node scripts/check/validate-tauri-ios-render-log-proof.js " + root + "/ios.log > " + root + "/evidence.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read(root + "/evidence.env")
+step("Confirm iOS Metal readiness is tied to CAMetalLayer or native Metal runtime evidence")
+expect(evidence).to_contain("ios_render_log_validation_status=fail")
+expect(evidence).to_contain("ios_render_log_validation_reason=ios-metal-log-marker-missing")
+expect(evidence).to_contain("ios_render_log_marker_status=pass")
+expect(evidence).to_contain("ios_render_log_metal_marker_status=fail")
+expect(evidence).to_contain("ios_render_log_tauri_context_status=pass")
+expect(evidence).to_contain("ios_render_log_metal_context_status=pass")
 ```
 
 </details>
@@ -619,7 +651,7 @@ expect(direct).to_contain("emit_existing_or_default ios_mdi_animation_status \"$
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 42 lines folded for reproduction.
+Runnable source: 43 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -628,6 +660,7 @@ val aggregate = file_read("scripts/check/check-tauri-mobile-renderer-parity-evid
 val tauri = file_read("tools/tauri-shell/src-tauri/src/lib.rs")
 val validator = file_read("scripts/check/validate-tauri-ios-render-log-proof.js")
 expect(validator).to_contain("const maxRenderHtmlLen = 10000000")
+expect(validator).to_contain("CAMetalLayer\\\\s+Metal renderer ready")
 expect(direct).to_contain("validate-tauri-ios-render-log-proof.js")
 expect(direct).to_contain("ios_render_log.validation.env")
 expect(direct).to_contain("ios_mdi_proof.validation.env")
@@ -673,8 +706,8 @@ expect(tauri).to_contain("metal_layer=CAMetalLayer")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 16 |
-| Active scenarios | 16 |
+| Total scenarios | 17 |
+| Active scenarios | 17 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
