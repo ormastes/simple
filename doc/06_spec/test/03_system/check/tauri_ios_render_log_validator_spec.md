@@ -87,8 +87,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_ios_render_log_validat
 - The iOS renderer wrapper keeps render-log, Metal, MDI event/capture,
   performance, input-to-paint, and animation diagnostic rows on early
   unavailable/fail exits.
-- The iOS renderer wrapper persists MDI validator output and re-emits
-  validator-derived success rows instead of fixed MDI pass strings.
+- The iOS renderer wrapper persists render-log and MDI validator output and
+  re-emits validator-derived success rows instead of fixed pass strings.
 - The iOS renderer wrapper, mobile aggregate, and Tauri shell source are wired
   to the validator contract.
 
@@ -464,7 +464,7 @@ expect(evidence).to_contain("ios_mdi_css_animation_probe=")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 26 lines folded for reproduction.
+Runnable source: 30 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -475,6 +475,10 @@ expect(direct).to_contain("validate-tauri-ios-render-log-proof.js")
 expect(direct).to_contain("ios_render_log.validation.env")
 expect(direct).to_contain("ios_mdi_proof.validation.env")
 expect(direct).to_contain("emit_unavailable_ios_diagnostics")
+expect(direct).to_contain("value_of ios_render_log_validation_status")
+expect(direct).to_contain("ios_render_log_source_coherence_status=$ios_render_log_source_coherence_status")
+expect(direct).to_contain("ios_render_log_tauri_context_status=$ios_render_log_tauri_context_status")
+expect(direct).to_contain("ios_render_log_metal_context_status=$ios_render_log_metal_context_status")
 expect(direct).to_contain("value_of ios_mdi_proof_status")
 expect(direct).to_contain("ios_mdi_animation_frame_count")
 expect(direct).to_contain("ios_mdi_input_to_paint_ms")
