@@ -11,6 +11,11 @@ until reviewed by the main agent or a normal/high-capability review agent.
 If Spark quota is unavailable, use mini fallback sidecars for the same lane and
 record that the fallback output is advisory under the same review gate.
 
+Do not read any passing Linux/browser/Vulkan/retained-perf row as final goal
+completion. Completion still requires fresh source-aligned aggregate evidence
+for the relevant row, real RenderDoc `.rdc` artifacts with `RDOC` magic where
+required, platform render-log comparison, and separate full-CSS closure.
+
 ## Current Baseline
 
 - `main` includes `0469771fc204 docs(gui): refresh linux vulkan aggregate
@@ -46,6 +51,11 @@ record that the fallback output is advisory under the same review gate.
   Darwin production parity/font/raw-Metal reports are not reopened by this
   Linux host plan; any final completion claim still needs the aggregate gate to
   accept the relevant fresh evidence rows.
+- Current full-CSS evidence keys remain incomplete:
+  `html_css_full_rendering_goal_status=incomplete`,
+  `html_css_full_rendering_goal_full_css_rendered_count=132`, and
+  `html_css_full_rendering_goal_full_css_unrendered_count=262`.
+  `aspect-ratio` is only a completed narrow implemented-CSS slice.
 
 ## Current Parallel Start Status
 
@@ -66,8 +76,10 @@ parallel:
   fallback sidecar findings.
 
 When Spark quota returns, restart the same Lane A and Lane B prompts with
-`gpt-5.3-codex-spark`. Spark output is advisory only until reviewed by the main
-agent and by Lane C normal/high-capability review.
+`gpt-5.3-codex-spark`. Do not mark the earlier quota-failed Spark agents as
+complete, and do not advance any Spark finding to integration until Lane C or
+the main agent reviews the specific current files or fresh command output named
+by Spark.
 
 Fallback sidecar findings accepted for planning only:
 
@@ -328,6 +340,15 @@ bug tracker now explicitly distinguish historical RenderDoc availability from
 current host proof. Agents must use fresh `--check` discovery and `.rdc` magic,
 not stale `ready` rows, for current completion claims.
 
+WO-10 status, 2026-06-27: `aspect-ratio` moved into implemented Simple Web CSS
+with focused unit coverage and full-goal status coverage. Current evidence is
+recorded in
+`doc/09_report/html_css_full_rendering_goal_status_aspect_ratio_2026-06-27.md`:
+implemented CSS is `132/132`, full CSS is `132/394`, full CSS unrendered is
+`262`, and unsupported inventory ownership is `269`. This is a completed narrow
+CSS renderer slice, not completion evidence for full CSS, RenderDoc, Metal, or
+D3D12 lanes.
+
 WO-5 status: refreshed non-RenderDoc Linux evidence is passing in
 `doc/09_report/gui_web_2d_linux_vulkan_refresh_2026-06-27.md`. A fresh
 RenderDoc host check is recorded in
@@ -340,6 +361,11 @@ check found no `renderdoccmd`, `renderdoc`, or `qrenderdoc`, no passwordless
 sudo for package installation, and no local `apt-cache policy renderdoc`
 package row. Treat this session as `missing-renderdoccmd-in-search-paths` until
 a prepared Ubuntu GUI host installs RenderDoc or exposes `RDOC_HOME`.
+
+If `RDOC_HOME`, `renderdoccmd`, `renderdoc`, or `qrenderdoc` becomes available
+on a prepared host, restart the Linux Vulkan sequence from host readiness, then
+capture all required `.rdc` artifacts before strict render-log comparison. Do
+not skip directly to completion from tool discovery alone.
 
 ## Linux Vulkan Sequencing
 
@@ -413,11 +439,18 @@ Normal-review acceptance:
 ## Review State
 
 - Spark Lane A: attempted twice, most recently as `Singer`; blocked by Spark
-  quota until 5:04 AM and queued for restart.
+  quota until 5:04 AM and queued for restart. Attempted again in this slice as
+  `Kant`; Spark quota still blocked it.
 - Spark Lane B: attempted, blocked by Spark quota until 5:04 AM; queued for
-  restart.
+  restart. Attempted again in this slice as `Pauli`; Spark quota still blocked
+  it.
 - Mini fallback Lane A: completed; planning findings integrated above.
 - Mini fallback Lane B: completed; wrapper/key matrix integrated above.
+- Current mini fallback Lane A: completed as `McClintock`; accepted anti-
+  overclaim, restart-workflow, and RenderDoc-unblock wording is integrated.
+- Current mini fallback Lane B: completed as `Cicero`; it found the
+  `aspect-ratio` evidence keys internally consistent and no false completion
+  claim in the checked files.
 - Normal review Lane C: completed in this slice as `Wegener`; accepted
   corrections are integrated above, except historical reports are not treated as
   current proof when a fresher host check disagrees.

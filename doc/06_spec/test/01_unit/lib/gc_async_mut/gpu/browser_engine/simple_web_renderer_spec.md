@@ -28,7 +28,7 @@ simple_web_renderer_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 65 | 65 | 0 | 0 |
+| 66 | 66 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -373,6 +373,27 @@ expect(_draw_ir_style_value(label, "font-weight")).to_equal("bold")
 expect(_draw_ir_style_value(label, "line-height")).to_equal("18")
 expect(_count_color(shorthand_pixels, 0xFF111827u32)).to_be_greater_than(0)
 expect(_pixels_equal(normal_pixels, shorthand_pixels)).to_equal(false)
+```
+
+</details>
+
+#### renders aspect-ratio boxes from a definite width
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><head><style>html,body{margin:0;padding:0;background-color:#ffffff}.card{width:60px;aspect-ratio:2/1;background-color:#22c55e}.next{width:16px;height:6px;background-color:#f59e0b}</style></head><body><div id='card' class='card'></div><div id='next' class='next'></div></body></html>"
+val pixels = simple_web_render_html_to_pixels(html, 96, 64)
+
+expect(simple_web_layout_debug_layout_by_id(html, 96, 64, "card", "w")).to_equal("60")
+expect(simple_web_layout_debug_layout_by_id(html, 96, 64, "card", "h")).to_equal("30")
+expect(simple_web_layout_debug_layout_by_id(html, 96, 64, "next", "y")).to_equal("30")
+expect(_count_color(pixels, 0xFF22C55Eu32)).to_equal(60 * 30)
+expect(_count_color(pixels, 0xFFF59E0Bu32)).to_equal(16 * 6)
 ```
 
 </details>
@@ -1433,8 +1454,8 @@ expect(_count_color(pixels, 0xFF065F46u32)).to_equal(0)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 65 |
-| Active scenarios | 65 |
+| Total scenarios | 66 |
+| Active scenarios | 66 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
