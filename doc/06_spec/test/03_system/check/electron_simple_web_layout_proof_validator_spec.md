@@ -27,7 +27,7 @@ electron_simple_web_layout_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 21 | 21 | 0 | 0 |
+| 22 | 22 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -130,7 +130,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_simple_web_layout_p
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 55 lines folded for reproduction.
+Runnable source: 57 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -267,6 +267,8 @@ expect(wrong).to_contain("electron_simple_web_layout_proof_source=tools/manual/e
 
 #### rejects proof when the live Electron capture source artifact is missing
 
+-  proof command
+   - Expected: code equals `1`
 - Confirm Electron proof source marker is bound to the producer source file
 
 
@@ -1007,7 +1009,7 @@ expect(weighted).to_contain("electron_simple_web_layout_captured_argb_weighted_c
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 48 lines folded for reproduction.
+Runnable source: 58 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1053,6 +1055,14 @@ expect(script).to_contain("electron_simple_web_layout_proof_source_size_bytes")
 expect(script).to_contain("captured-argb-checksum-mismatch")
 expect(script).to_contain("captured-argb-weighted-checksum-mismatch")
 expect(script).to_contain("status=divergent")
+expect(script).to_contain("repo-self-hosted-fallback")
+expect(script).to_contain("\"release\"/*/simple")
+expect(script).to_contain("\"bin/release\"/*/simple")
+expect(script).to_contain("\"build/bootstrap/stage3/simple\"")
+expect(script).to_contain("is_rust_seed_simple")
+expect(script).to_contain("SIMPLE_BIN_STATUS=forbidden")
+expect(script).to_contain("export SIMPLE_BIN SIMPLE_BIN_SOURCE SIMPLE_BIN_STATUS")
+expect(script).to_contain("electron_simple_web_layout_simple_bin_status=$SIMPLE_BIN_STATUS")
 
 val fixture = file_read("tools/electron-live-bitmap/exact_fixture.js")
 expect(fixture).to_contain("proof_source: \"tools/electron-live-bitmap/exact_fixture.js\"")
@@ -1065,12 +1075,36 @@ expect(fixture).to_contain("chrome_process_version")
 
 </details>
 
+#### rejects explicit rust seed simple launcher in bitmap evidence wrapper
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-electron-layout-bitmap-seed-forbidden"
+val command = "rm -rf " + root + " && SIMPLE_BIN=src/compiler_rust/target/release/simple BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-electron-simple-web-layout-bitmap-evidence.shs || true"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val evidence = file_read(root + "/out/evidence.env")
+expect(evidence).to_contain("electron_simple_web_layout_status=unavailable")
+expect(evidence).to_contain("electron_simple_web_layout_reason=simple-bin-forbidden")
+expect(evidence).to_contain("electron_simple_web_layout_simple_bin=src/compiler_rust/target/release/simple")
+expect(evidence).to_contain("electron_simple_web_layout_simple_bin_source=explicit-env-rust-seed-forbidden")
+expect(evidence).to_contain("electron_simple_web_layout_simple_bin_status=forbidden")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 21 |
-| Active scenarios | 21 |
+| Total scenarios | 22 |
+| Active scenarios | 22 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
