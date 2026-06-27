@@ -27,7 +27,7 @@ tauri_mobile_renderer_parity_artifact_gate_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 20 | 20 | 0 | 0 |
+| 21 | 21 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -85,6 +85,9 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_mobile_renderer_parity
 - Missing Android MDI proof JSON fails even when Android status rows claim pass.
 - Malformed or contract-missing MDI proof JSON files fail even when normalized
   MDI detail rows claim pass.
+- MDI proof JSON detail values must match the normalized render/event/capture/
+  performance/animation rows so stale proof artifacts cannot be paired with
+  fresh-looking status rows.
 - Missing MDI proof source rows fail even when mobile status rows and proof JSON
   files claim pass.
 - Malformed mobile MDI performance and animation detail rows fail even when
@@ -308,6 +311,42 @@ expect(android).to_contain("tauri_mobile_renderer_parity_reason=android-mdi-proo
 expect(android).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_file_status=fail")
 expect(android).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_file_reason=contract-missing")
 expect(android).to_contain("tauri_mobile_renderer_parity_android_mdi_animation_status=pass")
+```
+
+</details>
+
+#### rejects stale mobile MDI proof JSON that disagrees with normalized rows
+
+- Confirm MDI proof artifacts are bound to normalized mobile rows
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 20 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-tauri-mobile-artifact-gate-stale-proof-json"
+val ios_command = _run_aggregate_command(root + "-ios", "present", "present", "png", "png").replace("ios_mdi_performance_now_delta_ms=1.25", "ios_mdi_performance_now_delta_ms=1.5")
+val android_command = _run_aggregate_command(root + "-android", "present", "present", "png", "png").replace("android_mdi_animation_frame_count=2", "android_mdi_animation_frame_count=3")
+val command = ios_command + "; ios_code=$?; " + android_command + "; android_code=$?; exit 0"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val ios = file_read(root + "-ios/stdout.env")
+val android = file_read(root + "-android/stdout.env")
+step("Confirm MDI proof artifacts are bound to normalized mobile rows")
+expect(ios).to_contain("tauri_mobile_renderer_parity_status=fail")
+expect(ios).to_contain("tauri_mobile_renderer_parity_reason=ios-mdi-proof-json-invalid")
+expect(ios).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_file_status=fail")
+expect(ios).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_file_reason=row-mismatch")
+expect(ios).to_contain("tauri_mobile_renderer_parity_ios_mdi_performance_now_delta_ms=1.5")
+expect(android).to_contain("tauri_mobile_renderer_parity_status=fail")
+expect(android).to_contain("tauri_mobile_renderer_parity_reason=android-mdi-proof-json-invalid")
+expect(android).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_file_status=fail")
+expect(android).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_file_reason=row-mismatch")
+expect(android).to_contain("tauri_mobile_renderer_parity_android_mdi_animation_frame_count=3")
 ```
 
 </details>
@@ -742,7 +781,7 @@ expect(android).to_contain("tauri_mobile_renderer_parity_android_screenshot_file
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 38 lines folded for reproduction.
+Runnable source: 41 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -753,6 +792,9 @@ expect(script).to_contain("sawIdat && sawIend")
 expect(script).to_contain("png-dimensions-too-small")
 expect(script).to_contain("png_file_reason \"$ios_screenshot\" \"$ios_mdi_capture_viewport_width\" \"$ios_mdi_capture_viewport_height\"")
 expect(script).to_contain("mdi_proof_file_reason")
+expect(script).to_contain("row-mismatch")
+expect(script).to_contain("\"$ios_mdi_performance_now_delta_ms\"")
+expect(script).to_contain("\"$android_mdi_animation_frame_count\"")
 expect(script).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_file_status")
 expect(script).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_file_reason")
 expect(script).to_contain("tauri_mobile_renderer_parity_ios_mdi_failure_marker_status")
@@ -792,8 +834,8 @@ expect(script).to_contain("tauri_mobile_renderer_parity_production_backend_timin
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 20 |
-| Active scenarios | 20 |
+| Total scenarios | 21 |
+| Active scenarios | 21 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

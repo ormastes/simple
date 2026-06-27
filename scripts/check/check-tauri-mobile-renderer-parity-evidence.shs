@@ -167,9 +167,11 @@ mdi_proof_file_reason() {
         echo json-validator-missing
         return
     fi
-    node - "$path" <<'NODE'
+    shift
+    node - "$path" "$@" <<'NODE'
 const fs = require('fs');
 const path = process.argv[2];
+const expected = process.argv.slice(3);
 function fail(reason) {
   console.log(reason);
   process.exit(0);
@@ -218,12 +220,63 @@ const animationPass =
   proof.animationFrameAvailable === true &&
   integerAtLeast(proof.animationFrameCount, 2) &&
   proof.cssAnimationProbe === true;
-console.log(eventPass && renderPass && capturePass && performancePass && interactionPass && animationPass ? 'pass' : 'contract-missing');
+if (!(eventPass && renderPass && capturePass && performancePass && interactionPass && animationPass)) {
+  fail('contract-missing');
+}
+function boolText(value) {
+  if (value === true) return 'true';
+  if (value === false) return 'false';
+  return '';
+}
+function numberText(value) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return '';
+  return String(value);
+}
+function integerText(value) {
+  if (typeof value !== 'number' || !Number.isInteger(value)) return '';
+  return String(value);
+}
+if (expected.length > 0) {
+  const actual = [
+    integerText(proof.count),
+    integerText(proof.imageCount),
+    boolText(proof.htmlRenderable),
+    integerText(proof.taskbarItemCount),
+    integerText(proof.taskbarIconCount),
+    boolText(proof.hasDesktop),
+    boolText(proof.hasDragRuntime),
+    boolText(proof.hasDragEvents),
+    boolText(proof.dragMoved),
+    boolText(proof.hasWindowEventRuntime),
+    boolText(proof.appActionControlFound),
+    boolText(proof.appInputControlFound),
+    boolText(proof.bodyClickRouted),
+    boolText(proof.bodyInputRouted),
+    boolText(proof.bodyKeyRouted),
+    boolText(proof.taskbarIconsVisible),
+    boolText(proof.taskbarLabelsVisible),
+    integerText(proof.viewportWidth),
+    integerText(proof.viewportHeight),
+    numberText(proof.devicePixelRatio),
+    proof.screenOrientation || '',
+    boolText(proof.performanceNowAvailable),
+    numberText(proof.performanceNowDeltaMs),
+    numberText(proof.inputToPaintMs),
+    boolText(proof.animationFrameAvailable),
+    integerText(proof.animationFrameCount),
+    boolText(proof.cssAnimationProbe),
+  ];
+  if (expected.length !== actual.length) fail('row-count-mismatch');
+  for (let i = 0; i < actual.length; i += 1) {
+    if (actual[i] !== expected[i]) fail('row-mismatch');
+  }
+}
+console.log('pass');
 NODE
 }
 
 mdi_proof_file_status() {
-    if [ "$(mdi_proof_file_reason "$1")" = "pass" ]; then
+    if [ "$1" = "pass" ]; then
         echo pass
     else
         echo fail
@@ -528,8 +581,19 @@ if [ -x "$IOS_SCRIPT" ] || [ -f "$IOS_SCRIPT" ]; then
     ios_mdi_css_animation_probe="$(value_of ios_mdi_css_animation_probe "$BUILD_DIR/ios.out")"
     ios_screenshot_file_reason="$(png_file_reason "$ios_screenshot" "$ios_mdi_capture_viewport_width" "$ios_mdi_capture_viewport_height")"
     ios_screenshot_file_status="$(png_file_status "$ios_screenshot" "$ios_mdi_capture_viewport_width" "$ios_mdi_capture_viewport_height")"
-    ios_mdi_proof_file_reason="$(mdi_proof_file_reason "$ios_mdi_proof_json")"
-    ios_mdi_proof_file_status="$(mdi_proof_file_status "$ios_mdi_proof_json")"
+    ios_mdi_proof_file_reason="$(mdi_proof_file_reason "$ios_mdi_proof_json" \
+        "$ios_mdi_proof_window_count" "$ios_mdi_render_image_count" "$ios_mdi_render_html_renderable" \
+        "$ios_mdi_event_taskbar_item_count" "$ios_mdi_event_taskbar_icon_count" \
+        "$ios_mdi_event_has_desktop" "$ios_mdi_event_drag_runtime_available" "$ios_mdi_event_drag_events_available" \
+        "$ios_mdi_event_drag_moved" "$ios_mdi_event_window_event_runtime_available" \
+        "$ios_mdi_event_app_action_control_found" "$ios_mdi_event_app_input_control_found" \
+        "$ios_mdi_event_body_click_routed" "$ios_mdi_event_body_input_routed" "$ios_mdi_event_body_key_routed" \
+        "$ios_mdi_event_taskbar_icons_visible" "$ios_mdi_event_taskbar_labels_visible" \
+        "$ios_mdi_capture_viewport_width" "$ios_mdi_capture_viewport_height" "$ios_mdi_capture_device_pixel_ratio" \
+        "$ios_mdi_capture_screen_orientation" "$ios_mdi_performance_now_available" "$ios_mdi_performance_now_delta_ms" \
+        "$ios_mdi_input_to_paint_ms" "$ios_mdi_animation_frame_available" "$ios_mdi_animation_frame_count" \
+        "$ios_mdi_css_animation_probe")"
+    ios_mdi_proof_file_status="$(mdi_proof_file_status "$ios_mdi_proof_file_reason")"
     ios_render_log_validation_env="$BUILD_DIR/ios_render_log.validation.env"
     if [ -f "$IOS_RENDER_LOG_VALIDATOR" ]; then
         ios_render_validation_code=0
@@ -722,8 +786,19 @@ if [ -x "$ANDROID_SCRIPT" ] || [ -f "$ANDROID_SCRIPT" ]; then
     android_mdi_css_animation_probe="$(value_of android_mdi_css_animation_probe "$BUILD_DIR/android.out")"
     android_screenshot_file_reason="$(png_file_reason "$android_screenshot" "$android_mdi_capture_viewport_width" "$android_mdi_capture_viewport_height")"
     android_screenshot_file_status="$(png_file_status "$android_screenshot" "$android_mdi_capture_viewport_width" "$android_mdi_capture_viewport_height")"
-    android_mdi_proof_file_reason="$(mdi_proof_file_reason "$android_mdi_proof_json")"
-    android_mdi_proof_file_status="$(mdi_proof_file_status "$android_mdi_proof_json")"
+    android_mdi_proof_file_reason="$(mdi_proof_file_reason "$android_mdi_proof_json" \
+        "$android_mdi_proof_window_count" "$android_mdi_render_image_count" "$android_mdi_render_html_renderable" \
+        "$android_mdi_event_taskbar_item_count" "$android_mdi_event_taskbar_icon_count" \
+        "$android_mdi_event_has_desktop" "$android_mdi_event_drag_runtime_available" "$android_mdi_event_drag_events_available" \
+        "$android_mdi_event_drag_moved" "$android_mdi_event_window_event_runtime_available" \
+        "$android_mdi_event_app_action_control_found" "$android_mdi_event_app_input_control_found" \
+        "$android_mdi_event_body_click_routed" "$android_mdi_event_body_input_routed" "$android_mdi_event_body_key_routed" \
+        "$android_mdi_event_taskbar_icons_visible" "$android_mdi_event_taskbar_labels_visible" \
+        "$android_mdi_capture_viewport_width" "$android_mdi_capture_viewport_height" "$android_mdi_capture_device_pixel_ratio" \
+        "$android_mdi_capture_screen_orientation" "$android_mdi_performance_now_available" "$android_mdi_performance_now_delta_ms" \
+        "$android_mdi_input_to_paint_ms" "$android_mdi_animation_frame_available" "$android_mdi_animation_frame_count" \
+        "$android_mdi_css_animation_probe")"
+    android_mdi_proof_file_status="$(mdi_proof_file_status "$android_mdi_proof_file_reason")"
     android_render_log_validation_env="$BUILD_DIR/android_render_log.validation.env"
     if [ -f "$ANDROID_RENDER_LOG_VALIDATOR" ]; then
         android_render_validation_code=0
