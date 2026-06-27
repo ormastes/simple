@@ -90,6 +90,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_mobile_renderer_parity
 - The aggregate requires detailed desktop production backend parity rows before
   accepting mobile renderer evidence.
 - The aggregate emits explicit mobile screenshot and MDI proof file status rows.
+- The aggregate preserves iOS and Android render-log validator env rows before
+  deriving mobile parity status.
 
 ## Scenarios
 
@@ -410,7 +412,7 @@ expect(android).to_contain("tauri_mobile_renderer_parity_android_screenshot_file
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -419,9 +421,11 @@ expect(script).to_contain("png_file_status")
 expect(script).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_file_status")
 expect(script).to_contain("tauri_mobile_renderer_parity_ios_mdi_failure_marker_status")
 expect(script).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_missing_source_count")
+expect(script).to_contain("cat \"$ios_render_log_validation_env\"")
 expect(script).to_contain("tauri_mobile_renderer_parity_ios_render_log_html_len")
 expect(script).to_contain("tauri_mobile_renderer_parity_android_render_log_html_len")
 expect(script).to_contain("tauri_mobile_renderer_parity_android_render_log_source_coherence_status")
+expect(script).to_contain("cat \"$android_render_log_validation_env\"")
 expect(script).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_file_status")
 expect(script).to_contain("tauri_mobile_renderer_parity_android_mdi_failure_marker_status")
 expect(script).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_source_count")
