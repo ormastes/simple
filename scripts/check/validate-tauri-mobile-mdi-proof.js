@@ -219,6 +219,14 @@ if (jsonPathStat && jsonPathStat.isSymbolicLink()) {
   process.exit(1);
 }
 
+if (jsonPathStat && !jsonPathStat.isFile()) {
+  emit("mdi_proof_json", jsonPath);
+  emit("mdi_proof_status", "fail");
+  emit("mdi_proof_reason", "mdi-proof-json-path-not-regular");
+  emitSourceRows();
+  process.exit(1);
+}
+
 if (!lastJson) {
   emitSourceRows();
   fail(proofMarkerParseError ? `invalid-mdi-proof-json:${proofMarkerParseError}` : "missing-mdi-proof-log");

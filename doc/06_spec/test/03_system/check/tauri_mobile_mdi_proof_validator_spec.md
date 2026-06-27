@@ -27,7 +27,7 @@ tauri_mobile_mdi_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 23 | 23 | 0 | 0 |
+| 24 | 24 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -84,6 +84,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_mobile_mdi_proof_valid
   consumed.
 - The extracted proof JSON output path must also be a regular destination, not
   a symlink to another artifact outside the requested device logs.
+- Existing extracted proof JSON output paths must not be directories or other
+  non-regular artifacts.
 - `performanceNowAvailable=true` is not enough: the proof must include an
   explicit finite positive `performanceNowDeltaMs` from distinct samples, and
   multi-second timing does not prove responsive mobile rendering.
@@ -442,6 +444,43 @@ expect(evidence).to_contain("android_mdi_proof_missing_source_count=0")
 expect(evidence).to_contain("android_mdi_proof_symlink_source_count=0")
 expect(evidence).to_contain("android_mdi_proof_empty_source_count=0")
 expect(external).to_contain("{\"stale\":true}")
+```
+
+</details>
+
+#### rejects non-regular proof JSON output paths before writing extracted MDI proof
+
+-  proof log command
+   - Expected: code equals `1`
+- Confirm extracted iOS MDI proof cannot be written through a directory JSON path
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 21 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-tauri-mobile-mdi-validator-nonregular-output"
+val command = "rm -rf " + root + " && mkdir -p " + root + "/proof.json && " +
+    _proof_log_command(root + "/device.log", "") +
+    " && node scripts/check/validate-tauri-mobile-mdi-proof.js ios " + root + "/proof.json " + root + "/device.log > " + root + "/evidence.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read(root + "/evidence.env")
+step("Confirm extracted iOS MDI proof cannot be written through a directory JSON path")
+expect(evidence).to_contain("ios_mdi_proof_status=fail")
+expect(evidence).to_contain("ios_mdi_proof_reason=mdi-proof-json-path-not-regular")
+expect(evidence).to_contain("ios_mdi_proof_json=" + root + "/proof.json")
+expect(evidence).to_contain("ios_mdi_proof_requested_source_count=1")
+expect(evidence).to_contain("ios_mdi_proof_source_count=1")
+expect(evidence).to_contain("ios_mdi_proof_marker_source_count=1")
+expect(evidence).to_contain("ios_mdi_proof_missing_source_count=0")
+expect(evidence).to_contain("ios_mdi_proof_symlink_source_count=0")
+expect(evidence).to_contain("ios_mdi_proof_empty_source_count=0")
+expect(evidence).to_contain("ios_mdi_proof_nonregular_source_count=0")
 ```
 
 </details>
@@ -1150,8 +1189,8 @@ expect(aggregate).to_contain("android-mdi-proof-marker-source-artifact-missing")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 23 |
-| Active scenarios | 23 |
+| Total scenarios | 24 |
+| Active scenarios | 24 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
