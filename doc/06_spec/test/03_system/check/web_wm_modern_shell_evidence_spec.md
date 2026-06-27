@@ -27,7 +27,7 @@ web_wm_modern_shell_evidence_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 3 | 3 | 0 | 0 |
+| 4 | 4 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -76,8 +76,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/web_wm_modern_shell_evidence
 - The aggregate nested Web WM run enables the opt-in fallback.
 - The aggregate refreshes the default stale `simple-runtime-unavailable` Web WM
   env instead of reusing it forever.
-- The aggregate treats Web WM modern shell artifacts as regular files, not
-  symlinks or directories.
+- The aggregate treats Web WM modern shell artifacts as regular single-link
+  files, not symlinks, hardlinks, or directories.
 
 ## Scenarios
 
@@ -168,6 +168,8 @@ val aggregate = file_read("scripts/check/check-gui-renderdoc-feature-coverage-st
 
 step("Inspect aggregate artifact integrity wiring")
 expect(aggregate).to_contain("def regular_file_reason(value: str) -> str:")
+expect(aggregate).to_contain("path.stat().st_nlink > 1")
+expect(aggregate).to_contain("return \"hardlink\"")
 expect(aggregate).to_contain("web_wm_modern_shell_log_path = value_of(\"web_wm_modern_shell_evidence_log_path\"")
 expect(aggregate).to_contain("web_wm_modern_shell_log_file_status = regular_file_reason(web_wm_modern_shell_log_path)")
 expect(aggregate).to_contain("web_wm_modern_shell_artifact_statuses = {")
@@ -181,12 +183,41 @@ expect(aggregate).to_contain("web_wm_modern_shell_evidence_artifact_integrity_re
 
 </details>
 
+#### reports hardlinked Web WM modern shell artifacts in aggregate evidence
+
+- Confirm hardlinked Web WM log artifacts fail artifact integrity
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 15 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-web-wm-hardlink-artifact"
+val command = "rm -rf " + root + " && mkdir -p " + root + "/artifacts " + root + "/out && " +
+    "for f in html argb png audit log interaction interaction_png interaction_log; do printf '%s\\n' \"$f\" > " + root + "/artifacts/$f.dat; done && " +
+    "ln " + root + "/artifacts/log.dat " + root + "/artifacts/log-hardlink.dat && " +
+    "printf 'web_wm_modern_shell_evidence_status=pass\\nweb_wm_modern_shell_evidence_reason=pass\\nweb_wm_modern_shell_evidence_html_path=" + root + "/artifacts/html.dat\\nweb_wm_modern_shell_evidence_argb_path=" + root + "/artifacts/argb.dat\\nweb_wm_modern_shell_evidence_png_path=" + root + "/artifacts/png.dat\\nweb_wm_modern_shell_evidence_audit_path=" + root + "/artifacts/audit.dat\\nweb_wm_modern_shell_evidence_log_path=" + root + "/artifacts/log-hardlink.dat\\nweb_wm_modern_shell_evidence_interaction_path=" + root + "/artifacts/interaction.dat\\nweb_wm_modern_shell_evidence_interaction_png_path=" + root + "/artifacts/interaction_png.dat\\nweb_wm_modern_shell_evidence_interaction_log_path=" + root + "/artifacts/interaction_log.dat\\nweb_wm_modern_shell_evidence_width=1360\\nweb_wm_modern_shell_evidence_height=840\\nweb_wm_modern_shell_evidence_bitmap_nonblank_status=pass\\nweb_wm_modern_shell_evidence_audit_pass=pass\\nweb_wm_modern_shell_evidence_interaction_pass=pass\\nweb_wm_modern_shell_evidence_interaction_focus=pass\\nweb_wm_modern_shell_evidence_interaction_keyboard=pass\\nweb_wm_modern_shell_evidence_interaction_input=pass\\nweb_wm_modern_shell_evidence_interaction_pointer=pass\\nweb_wm_modern_shell_evidence_interaction_clicks=pass\\nweb_wm_modern_shell_evidence_interaction_event_count=8\\n' > " + root + "/webwm.env && " +
+    "WEB_WM_MODERN_SHELL_EVIDENCE_ENV=" + root + "/webwm.env GUI_RENDERDOC_AGGREGATE_PRINT_ENV=0 BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs || true"
+val (_stdout, _stderr, _code) = process_run("/bin/sh", ["-c", command])
+
+val evidence = file_read(root + "/out/evidence.env")
+step("Confirm hardlinked Web WM log artifacts fail artifact integrity")
+expect(evidence).to_contain("web_wm_modern_shell_evidence_log_file_status=hardlink")
+expect(evidence).to_contain("web_wm_modern_shell_evidence_artifact_integrity_status=fail")
+expect(evidence).to_contain("web_wm_modern_shell_evidence_artifact_integrity_reason=web-wm-modern-shell-log-hardlink")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 3 |
-| Active scenarios | 3 |
+| Total scenarios | 4 |
+| Active scenarios | 4 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
