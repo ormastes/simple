@@ -76,8 +76,9 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_android_render_log_val
 - Failure markers fail closed even when render and Vulkan markers are present.
 - The Android renderer wrapper and mobile aggregate are wired to the validator
   contract.
-- The Android renderer wrapper persists MDI validator output and re-emits
-  validator-derived event/capture/performance/input-to-paint/animation rows.
+- The Android renderer wrapper persists render-log and MDI validator output and
+  re-emits validator-derived event/capture/performance/input-to-paint/animation
+  rows.
 
 ## Scenarios
 
@@ -225,7 +226,7 @@ expect(evidence).to_contain("android_render_log_failure_marker_status=fail")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -233,6 +234,7 @@ val direct = file_read("scripts/check/check-tauri-android-mobile-renderer-eviden
 val aggregate = file_read("scripts/check/check-tauri-mobile-renderer-parity-evidence.shs")
 expect(direct).to_contain("validate-tauri-android-render-log-proof.js")
 expect(direct).to_contain("android_render_log.validation.env")
+expect(direct).to_contain("cat \"$RENDER_LOG_VALIDATION_ENV\"")
 expect(direct).to_contain("android_mdi_proof.validation.env")
 expect(direct).to_contain("android_render_log_html_len")
 expect(direct).to_contain("value_of android_mdi_proof_status")
