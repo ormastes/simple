@@ -17,6 +17,7 @@ SURFACE_SCRIPT="${PRODUCTION_GUI_WEB_RENDERER_PARITY_SURFACE_SCRIPT:-scripts/che
 BACKEND_SCRIPT="${PRODUCTION_GUI_WEB_RENDERER_PARITY_BACKEND_SCRIPT:-scripts/check/check-production-gui-web-backend-executed-evidence.shs}"
 FONT_OFFLOAD_SCRIPT="${PRODUCTION_GUI_WEB_RENDERER_PARITY_FONT_OFFLOAD_SCRIPT:-scripts/check/check-production-gui-font-offload-evidence.shs}"
 METAL_READBACK_SCRIPT="${PRODUCTION_GUI_WEB_RENDERER_PARITY_METAL_READBACK_SCRIPT:-scripts/check/check-metal-engine2d-framebuffer-readback-evidence.shs}"
+METAL_RENDER_LOG_SCRIPT="${PRODUCTION_GUI_WEB_RENDERER_PARITY_METAL_RENDER_LOG_SCRIPT:-scripts/check/check-macos-metal-render-log-compare.shs}"
 EVENT_SCRIPT="${PRODUCTION_GUI_WEB_RENDERER_PARITY_EVENT_SCRIPT:-scripts/check/check-wm-browser-event-routing-evidence.shs}"
 LAYOUT_MANIFEST_RESUME="${PRODUCTION_GUI_WEB_RENDERER_PARITY_LAYOUT_MANIFEST_RESUME:-0}"
 
@@ -721,6 +722,105 @@ run_metal_readback() {
         { [ "$code" -eq 0 ] && [ "$metal_status" = "unavailable" ] && [ "$metal_reason" = "metal-requires-macos" ] && [ "$tolerance" = "false" ]; }
 }
 
+run_metal_render_log_compare() {
+    case_dir="$BUILD_ROOT/metal_render_log"
+    mkdir -p "$case_dir"
+    backend_metal="$(field_of production_gui_web_renderer_parity_backend_metal_resolved "$BUILD_ROOT/evidence.env")"
+    font_status="$(field_of production_gui_web_renderer_parity_font_offload_status "$BUILD_ROOT/evidence.env")"
+    metal_status="$(field_of production_gui_web_renderer_parity_metal_readback_status "$BUILD_ROOT/evidence.env")"
+    if [ "$backend_metal" != "metal" ]; then
+        {
+            echo "production_gui_web_renderer_parity_metal_render_log_exit_code=0"
+            echo "production_gui_web_renderer_parity_metal_render_log_status=skipped"
+            echo "production_gui_web_renderer_parity_metal_render_log_reason=backend-not-metal"
+            echo "production_gui_web_renderer_parity_metal_render_log_timed_out=false"
+            echo "production_gui_web_renderer_parity_metal_render_log_timeout_secs=$SUBCHECK_TIMEOUT_SECS"
+            echo "production_gui_web_renderer_parity_metal_render_log_required_api=metal"
+            echo "production_gui_web_renderer_parity_metal_render_log_report=$case_dir/report.md"
+        } >>"$BUILD_ROOT/evidence.env"
+        return 0
+    fi
+    if [ "$font_status" != "pass" ] || [ "$metal_status" != "pass" ]; then
+        {
+            echo "production_gui_web_renderer_parity_metal_render_log_exit_code=0"
+            echo "production_gui_web_renderer_parity_metal_render_log_status=skipped"
+            echo "production_gui_web_renderer_parity_metal_render_log_reason=upstream-not-ready"
+            echo "production_gui_web_renderer_parity_metal_render_log_timed_out=false"
+            echo "production_gui_web_renderer_parity_metal_render_log_timeout_secs=$SUBCHECK_TIMEOUT_SECS"
+            echo "production_gui_web_renderer_parity_metal_render_log_required_api=metal"
+            echo "production_gui_web_renderer_parity_metal_render_log_report=$case_dir/report.md"
+        } >>"$BUILD_ROOT/evidence.env"
+        return 0
+    fi
+
+    set +e
+    run_subcheck env BUILD_DIR="$case_dir" REPORT_PATH="$case_dir/report.md" \
+        sh "$METAL_RENDER_LOG_SCRIPT" >"$case_dir/stdout.env" 2>"$case_dir/stderr.log"
+    code=$?
+    set -e
+    env_file="$case_dir/evidence.env"
+    compare_status=""
+    compare_reason=""
+    required_api=""
+    generated_gate=""
+    framebuffer_gate=""
+    browser_gate=""
+    pairwise_gate=""
+    argb_source_gate=""
+    gpu_capture_gate=""
+    blocked_gate_count=""
+    blocked_gates=""
+    pairwise_status=""
+    gpu_capture_status=""
+    gpu_capture_tool=""
+    if [ -s "$env_file" ]; then
+        compare_status="$(field_of macos_metal_render_log_compare_status "$env_file")"
+        compare_reason="$(field_of macos_metal_render_log_compare_reason "$env_file")"
+        required_api="$(field_of macos_metal_render_log_compare_required_api "$env_file")"
+        generated_gate="$(field_of macos_metal_render_log_compare_generated_readback_gate_status "$env_file")"
+        framebuffer_gate="$(field_of macos_metal_render_log_compare_framebuffer_readback_gate_status "$env_file")"
+        browser_gate="$(field_of macos_metal_render_log_compare_browser_backing_gate_status "$env_file")"
+        pairwise_gate="$(field_of macos_metal_render_log_compare_pairwise_gate_status "$env_file")"
+        argb_source_gate="$(field_of macos_metal_render_log_compare_argb_source_gate_status "$env_file")"
+        gpu_capture_gate="$(field_of macos_metal_render_log_compare_gpu_capture_gate_status "$env_file")"
+        blocked_gate_count="$(field_of macos_metal_render_log_compare_blocked_gate_count "$env_file")"
+        blocked_gates="$(field_of macos_metal_render_log_compare_blocked_gates "$env_file")"
+        pairwise_status="$(field_of macos_metal_render_log_compare_pairwise_status "$env_file")"
+        gpu_capture_status="$(field_of macos_metal_render_log_compare_gpu_capture_status "$env_file")"
+        gpu_capture_tool="$(field_of macos_metal_render_log_compare_gpu_capture_tool "$env_file")"
+    fi
+    if [ "$code" -eq 124 ]; then
+        compare_status=timeout
+        compare_reason=metal-render-log-timeout
+    fi
+    {
+        echo "production_gui_web_renderer_parity_metal_render_log_exit_code=$code"
+        echo "production_gui_web_renderer_parity_metal_render_log_status=$compare_status"
+        echo "production_gui_web_renderer_parity_metal_render_log_reason=$compare_reason"
+        echo "production_gui_web_renderer_parity_metal_render_log_timed_out=$([ "$code" -eq 124 ] && echo true || echo false)"
+        echo "production_gui_web_renderer_parity_metal_render_log_timeout_secs=$SUBCHECK_TIMEOUT_SECS"
+        echo "production_gui_web_renderer_parity_metal_render_log_required_api=$required_api"
+        echo "production_gui_web_renderer_parity_metal_render_log_generated_readback_gate_status=$generated_gate"
+        echo "production_gui_web_renderer_parity_metal_render_log_framebuffer_readback_gate_status=$framebuffer_gate"
+        echo "production_gui_web_renderer_parity_metal_render_log_browser_backing_gate_status=$browser_gate"
+        echo "production_gui_web_renderer_parity_metal_render_log_pairwise_gate_status=$pairwise_gate"
+        echo "production_gui_web_renderer_parity_metal_render_log_argb_source_gate_status=$argb_source_gate"
+        echo "production_gui_web_renderer_parity_metal_render_log_gpu_capture_gate_status=$gpu_capture_gate"
+        echo "production_gui_web_renderer_parity_metal_render_log_blocked_gate_count=$blocked_gate_count"
+        echo "production_gui_web_renderer_parity_metal_render_log_blocked_gates=$blocked_gates"
+        echo "production_gui_web_renderer_parity_metal_render_log_pairwise_status=$pairwise_status"
+        echo "production_gui_web_renderer_parity_metal_render_log_gpu_capture_status=$gpu_capture_status"
+        echo "production_gui_web_renderer_parity_metal_render_log_gpu_capture_tool=$gpu_capture_tool"
+        echo "production_gui_web_renderer_parity_metal_render_log_report=$case_dir/report.md"
+    } >>"$BUILD_ROOT/evidence.env"
+    append_prefixed_env "metal_render_log_" "$env_file"
+    [ "$code" -eq 0 ] && [ "$compare_status" = "pass" ] && [ "$required_api" = "metal" ] && \
+        [ "$generated_gate" = "pass" ] && [ "$framebuffer_gate" = "pass" ] && \
+        [ "$browser_gate" = "pass" ] && [ "$pairwise_gate" = "pass" ] && \
+        [ "$argb_source_gate" = "pass" ] && [ "$blocked_gate_count" = "0" ] && \
+        { [ "$gpu_capture_gate" = "pass" ] || [ "$gpu_capture_gate" = "not-required" ]; }
+}
+
 num_at_least() {
     value="$1"
     min="$2"
@@ -1042,6 +1142,8 @@ run_metal_readback || {
     fi
 }
 
+run_metal_render_log_compare || remember_failure "metal-render-log-compare-failed"
+
 matrix_status_for_event="$(field_of production_gui_web_renderer_parity_matrix_status "$BUILD_ROOT/evidence.env")"
 layout_status_for_event="$(field_of production_gui_web_renderer_parity_layout_manifest_status "$BUILD_ROOT/evidence.env")"
 surface_status_for_event="$(field_of production_gui_web_renderer_parity_surface_manifest_status "$BUILD_ROOT/evidence.env")"
@@ -1088,6 +1190,15 @@ backend_tolerance_final="$(field_of production_gui_web_renderer_parity_backend_b
 font_status_final="$(field_of production_gui_web_renderer_parity_font_offload_status "$BUILD_ROOT/evidence.env")"
 metal_status_final="$(field_of production_gui_web_renderer_parity_metal_readback_status "$BUILD_ROOT/evidence.env")"
 metal_reason_final="$(field_of production_gui_web_renderer_parity_metal_readback_reason "$BUILD_ROOT/evidence.env")"
+metal_render_log_status_final="$(field_of production_gui_web_renderer_parity_metal_render_log_status "$BUILD_ROOT/evidence.env")"
+metal_render_log_required_api_final="$(field_of production_gui_web_renderer_parity_metal_render_log_required_api "$BUILD_ROOT/evidence.env")"
+metal_render_log_generated_gate_final="$(field_of production_gui_web_renderer_parity_metal_render_log_generated_readback_gate_status "$BUILD_ROOT/evidence.env")"
+metal_render_log_framebuffer_gate_final="$(field_of production_gui_web_renderer_parity_metal_render_log_framebuffer_readback_gate_status "$BUILD_ROOT/evidence.env")"
+metal_render_log_browser_gate_final="$(field_of production_gui_web_renderer_parity_metal_render_log_browser_backing_gate_status "$BUILD_ROOT/evidence.env")"
+metal_render_log_pairwise_gate_final="$(field_of production_gui_web_renderer_parity_metal_render_log_pairwise_gate_status "$BUILD_ROOT/evidence.env")"
+metal_render_log_argb_source_gate_final="$(field_of production_gui_web_renderer_parity_metal_render_log_argb_source_gate_status "$BUILD_ROOT/evidence.env")"
+metal_render_log_gpu_capture_gate_final="$(field_of production_gui_web_renderer_parity_metal_render_log_gpu_capture_gate_status "$BUILD_ROOT/evidence.env")"
+metal_render_log_blocked_gate_count_final="$(field_of production_gui_web_renderer_parity_metal_render_log_blocked_gate_count "$BUILD_ROOT/evidence.env")"
 event_exit_code_final="$(field_of production_gui_web_renderer_parity_event_routing_exit_code "$BUILD_ROOT/evidence.env")"
 event_status_final="$(field_of production_gui_web_renderer_parity_event_routing_status "$BUILD_ROOT/evidence.env")"
 event_validation_status_final="$(field_of production_gui_web_renderer_parity_event_routing_validation_status "$BUILD_ROOT/evidence.env")"
@@ -1238,6 +1349,17 @@ elif [ "$event_validation_status_final" != "pass" ] || [ "$event_proof_symlink_s
     [ "$event_tolerance_final" != "false" ]; then
     status=fail
     reason=event-routing-evidence-failed
+elif [ "$backend_metal_resolved_final" = "metal" ] && { [ "$metal_render_log_status_final" != "pass" ] || \
+    [ "$metal_render_log_required_api_final" != "metal" ] || \
+    [ "$metal_render_log_generated_gate_final" != "pass" ] || \
+    [ "$metal_render_log_framebuffer_gate_final" != "pass" ] || \
+    [ "$metal_render_log_browser_gate_final" != "pass" ] || \
+    [ "$metal_render_log_pairwise_gate_final" != "pass" ] || \
+    [ "$metal_render_log_argb_source_gate_final" != "pass" ] || \
+    { [ "$metal_render_log_gpu_capture_gate_final" != "pass" ] && [ "$metal_render_log_gpu_capture_gate_final" != "not-required" ]; } || \
+    [ "$metal_render_log_blocked_gate_count_final" != "0" ]; }; then
+    status=fail
+    reason=metal-render-log-compare-failed
 else
     status=pass
     reason=pass
@@ -1268,6 +1390,7 @@ PARTIAL_FINALIZED=1
     echo "- vector font readback: $(field_of production_gui_web_renderer_parity_font_offload_vector_readback_status "$BUILD_ROOT/evidence.env")"
     echo "- bitmap font readback: $(field_of production_gui_web_renderer_parity_font_offload_bitmap_readback_status "$BUILD_ROOT/evidence.env")"
     echo "- raw Metal framebuffer readback: $(field_of production_gui_web_renderer_parity_metal_readback_status "$BUILD_ROOT/evidence.env")"
+    echo "- macOS Metal render-log compare: $(field_of production_gui_web_renderer_parity_metal_render_log_status "$BUILD_ROOT/evidence.env")"
     echo "- Electron event routing: $(field_of production_gui_web_renderer_parity_event_routing_status "$BUILD_ROOT/evidence.env")"
     echo "- Electron performance/animation: performance.now $(field_of production_gui_web_renderer_parity_event_routing_performance_now_available "$BUILD_ROOT/evidence.env") / input-to-paint $(field_of production_gui_web_renderer_parity_event_routing_input_to_paint_ms "$BUILD_ROOT/evidence.env") ms / requestAnimationFrame $(field_of production_gui_web_renderer_parity_event_routing_animation_frame_count "$BUILD_ROOT/evidence.env") / CSS animation $(field_of production_gui_web_renderer_parity_event_routing_css_animation_probe "$BUILD_ROOT/evidence.env")"
     echo "- blur/tolerance used: false"
