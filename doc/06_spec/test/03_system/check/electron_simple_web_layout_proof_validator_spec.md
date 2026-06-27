@@ -27,7 +27,7 @@ electron_simple_web_layout_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 23 | 23 | 0 | 0 |
+| 24 | 24 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -1170,12 +1170,39 @@ expect(evidence).to_contain("electron_simple_web_layout_simple_bin_status=forbid
 
 </details>
 
+#### bounds Simple expected-frame generation with timeout evidence
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-electron-layout-bitmap-simple-timeout"
+val command = "rm -rf " + root + " && mkdir -p " + root + "/fixture && " +
+    "printf '#!/bin/sh\\nsleep 2\\n' > " + root + "/fixture/simple && chmod +x " + root + "/fixture/simple && " +
+    "SIMPLE_BIN=" + root + "/fixture/simple ELECTRON_BITMAP_TIMEOUT_SECS=1 BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-electron-simple-web-layout-bitmap-evidence.shs || true"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val evidence = file_read(root + "/out/evidence.env")
+expect(evidence).to_contain("electron_simple_web_layout_status=unavailable")
+expect(evidence).to_contain("electron_simple_web_layout_reason=simple-expected-timeout")
+expect(evidence).to_contain("electron_simple_web_layout_simple_expected_status=unavailable")
+expect(evidence).to_contain("electron_simple_web_layout_simple_expected_reason=simple-expected-timeout")
+expect(evidence).to_contain("electron_simple_web_layout_simple_expected_timeout_secs=1")
+expect(evidence).to_contain("electron_simple_web_layout_simple_expected_timed_out=true")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 23 |
-| Active scenarios | 23 |
+| Total scenarios | 24 |
+| Active scenarios | 24 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

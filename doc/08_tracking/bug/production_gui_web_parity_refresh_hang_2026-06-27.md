@@ -1,7 +1,7 @@
 # Production GUI/Web Parity Refresh Hang
 
 - Date: 2026-06-27
-- Status: open
+- Status: mitigated; text raster parity still open
 - Area: production GUI/web renderer parity evidence
 - Command: `sh scripts/check/check-production-gui-web-renderer-parity-evidence.shs`
 
@@ -53,9 +53,10 @@ visible progress if a per-case Simple run stalls.
 
 ## Follow-Up
 
-- Keep the wrapper fail-closed.
-- Emit a residual mismatch class so text raster mismatches are not mistaken for
-  layout geometry regressions.
-- Add a per-case progress/timeout diagnostic around the Simple expected-frame
-  run so long-running cases report a concrete timeout row instead of relying on
-  outer process termination.
+- Done: the wrapper remains fail-closed.
+- Done: residual mismatch classes distinguish text raster mismatches from
+  surface geometry mismatches.
+- Done: the Simple expected-frame run is bounded by
+  `ELECTRON_BITMAP_TIMEOUT_SECS` and emits `electron_simple_web_layout_simple_expected_*`
+  rows on timeout or failure.
+- Open: fix the underlying Electron/Simple text raster divergence.

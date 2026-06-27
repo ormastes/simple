@@ -65,6 +65,11 @@ ELECTRON_OUT="$BUILD_DIR/electron.out"
 ELECTRON_PROOF="$BUILD_DIR/electron-proof.json"
 VALIDATED_ENV="$BUILD_DIR/electron-proof.validation.env"
 VALIDATOR="scripts/check/validate-electron-simple-web-layout-proof.js"
+SIMPLE_EXPECTED_TIMEOUT_SECS="$TIMEOUT_SECS"
+SIMPLE_EXPECTED_EXIT_CODE=
+SIMPLE_EXPECTED_TIMED_OUT=false
+SIMPLE_EXPECTED_STATUS=not-run
+SIMPLE_EXPECTED_REASON=not-run
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
 rm -f "$SIMPLE_SRC" "$SIMPLE_OUT" "$HTML_PATH" "$EXPECTED_ARGB" "$CAPTURED_ARGB" "$ELECTRON_GEOMETRY" "$ELECTRON_OUT" "$ELECTRON_PROOF" "$VALIDATED_ENV" "$BUILD_DIR/evidence.env" "$REPORT_PATH"
@@ -105,6 +110,11 @@ emit_unavailable() {
         echo "electron_simple_web_layout_width=$WIDTH"
         echo "electron_simple_web_layout_height=$HEIGHT"
         echo "electron_simple_web_layout_iterations=$ITERATIONS"
+        echo "electron_simple_web_layout_simple_expected_status=$SIMPLE_EXPECTED_STATUS"
+        echo "electron_simple_web_layout_simple_expected_reason=$SIMPLE_EXPECTED_REASON"
+        echo "electron_simple_web_layout_simple_expected_timeout_secs=$SIMPLE_EXPECTED_TIMEOUT_SECS"
+        echo "electron_simple_web_layout_simple_expected_timed_out=$SIMPLE_EXPECTED_TIMED_OUT"
+        echo "electron_simple_web_layout_simple_expected_exit_code=$SIMPLE_EXPECTED_EXIT_CODE"
         echo "electron_simple_web_layout_geometry_symlink_status="
         echo "electron_simple_web_layout_geometry_hardlink_status="
         echo "electron_simple_web_layout_captured_argb_symlink_status="
@@ -320,12 +330,31 @@ main()
 SIMPLE_EOF
 
 set +e
-SIMPLE_LIB="${SIMPLE_LIB:-src}" "$SIMPLE_BIN" run "$SIMPLE_SRC" --mode=interpreter --clean >"$SIMPLE_OUT" 2>&1
-simple_code=$?
+if have timeout; then
+    SIMPLE_LIB="${SIMPLE_LIB:-src}" timeout "$SIMPLE_EXPECTED_TIMEOUT_SECS" "$SIMPLE_BIN" run "$SIMPLE_SRC" --mode=interpreter --clean >"$SIMPLE_OUT" 2>&1
+    simple_code=$?
+else
+    simple_code=127
+fi
 set -e
+SIMPLE_EXPECTED_EXIT_CODE=$simple_code
+if [ "$simple_code" -eq 124 ]; then
+    SIMPLE_EXPECTED_TIMED_OUT=true
+    SIMPLE_EXPECTED_STATUS=unavailable
+    SIMPLE_EXPECTED_REASON=simple-expected-timeout
+elif [ "$simple_code" -eq 127 ] && ! have timeout; then
+    SIMPLE_EXPECTED_STATUS=unavailable
+    SIMPLE_EXPECTED_REASON=simple-expected-timeout-command-missing
+elif [ "$simple_code" -ne 0 ]; then
+    SIMPLE_EXPECTED_STATUS=fail
+    SIMPLE_EXPECTED_REASON=simple-layout-render-failed
+else
+    SIMPLE_EXPECTED_STATUS=pass
+    SIMPLE_EXPECTED_REASON=pass
+fi
 
 if [ "$simple_code" -ne 0 ]; then
-    emit_unavailable "simple-layout-render-failed"
+    emit_unavailable "$SIMPLE_EXPECTED_REASON"
     exit 1
 fi
 
@@ -658,6 +687,11 @@ fi
     echo "electron_simple_web_layout_width=$WIDTH"
     echo "electron_simple_web_layout_height=$HEIGHT"
     echo "electron_simple_web_layout_iterations=$ITERATIONS"
+    echo "electron_simple_web_layout_simple_expected_status=$SIMPLE_EXPECTED_STATUS"
+    echo "electron_simple_web_layout_simple_expected_reason=$SIMPLE_EXPECTED_REASON"
+    echo "electron_simple_web_layout_simple_expected_timeout_secs=$SIMPLE_EXPECTED_TIMEOUT_SECS"
+    echo "electron_simple_web_layout_simple_expected_timed_out=$SIMPLE_EXPECTED_TIMED_OUT"
+    echo "electron_simple_web_layout_simple_expected_exit_code=$SIMPLE_EXPECTED_EXIT_CODE"
     echo "electron_simple_web_layout_validation_status=${validation_status:-}"
     echo "electron_simple_web_layout_validation_reason=${validation_reason:-}"
     echo "electron_simple_web_layout_proof_symlink_status=${proof_symlink_status:-}"
@@ -736,6 +770,7 @@ fi
     echo "- capture mode: $CAPTURE_MODE"
     echo "- DOM HTML path: ${ELECTRON_CAPTURE_HTML_PATH:-}"
     echo "- dimensions: ${WIDTH}x${HEIGHT}"
+    echo "- Simple expected status: $SIMPLE_EXPECTED_STATUS ($SIMPLE_EXPECTED_REASON; timeout ${SIMPLE_EXPECTED_TIMEOUT_SECS}s; timed out: $SIMPLE_EXPECTED_TIMED_OUT; exit: $SIMPLE_EXPECTED_EXIT_CODE)"
     echo "- Simple checksum: $simple_checksum"
     echo "- Electron checksum: ${electron_checksum:-0}"
     echo "- Simple weighted checksum: $simple_weighted"
