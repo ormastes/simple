@@ -27,7 +27,7 @@ native_render_log_platform_matrix_contract_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 4 | 4 | 0 | 0 |
+| 5 | 5 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -79,6 +79,8 @@ sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
 - A `pass` Windows row with `required_api=d3d11` is normalized to fail.
 - A `pass` row that omits required RenderDoc/GPU capture/PIX/debugger proof is
   normalized to fail.
+- A `pass` macOS row whose Xcode GPU capture metadata claims `XCODE-GPUTRACE`
+  but omits artifact file-status proof is normalized to fail.
 - A `pass` Windows row whose PIX metadata claims `PIX` but whose propagated
   file-byte magic is missing or invalid is normalized to fail.
 - The platform matrix reports invalid present rows as failed, not missing.
@@ -102,7 +104,8 @@ also report its evidence env file status, artifact file status, and
 `macos_metal_render_log_compare_required_api=metal`,
 `macos_metal_render_log_compare_pairwise_status=pass`, and
 `macos_metal_render_log_compare_gpu_capture_status=pass` with an
-`XCODE-GPUTRACE` artifact marker. Windows must report
+`XCODE-GPUTRACE` artifact marker and a passing capture artifact file-status
+row. Windows must report
 `windows_d3d12_render_log_compare_required_api=d3d12`,
 `windows_d3d12_render_log_compare_pairwise_status=pass`,
 `windows_d3d12_render_log_compare_pix_status=pass` with a `PIX` artifact
@@ -183,7 +186,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Create controlled platform render-log rows with invalid pass claims")
-val command = "rm -rf build/test-native-render-log-platform-matrix-contract && mkdir -p build/test-native-render-log-platform-matrix-contract/renderlogs && printf 'linux_vulkan_render_log_compare_status=pass\\nlinux_vulkan_render_log_compare_reason=pass\\nlinux_vulkan_render_log_compare_required_api=vulkan\\n' > build/test-native-render-log-platform-matrix-contract/renderlogs/linux.env && printf 'macos_metal_render_log_compare_status=pass\\nmacos_metal_render_log_compare_reason=pass\\nmacos_metal_render_log_compare_required_api=metal\\nmacos_metal_render_log_compare_pairwise_status=pass\\nmacos_metal_render_log_compare_gpu_capture_status=pass\\nmacos_metal_render_log_compare_gpu_capture_artifact=frame.gputrace\\nmacos_metal_render_log_compare_gpu_capture_artifact_magic=XCODE-GPUTRACE\\n' > build/test-native-render-log-platform-matrix-contract/renderlogs/macos.env && printf 'windows_d3d12_render_log_compare_status=pass\\nwindows_d3d12_render_log_compare_reason=pass\\nwindows_d3d12_render_log_compare_required_api=d3d11\\nwindows_d3d12_render_log_compare_pairwise_status=pass\\nwindows_d3d12_render_log_compare_pix_status=pass\\nwindows_d3d12_render_log_compare_pix_artifact=frame.wpix\\nwindows_d3d12_render_log_compare_pix_artifact_magic=PIX\\nwindows_d3d12_render_log_compare_gpu_debugger_status=pass\\nwindows_d3d12_render_log_compare_gpu_debugger_artifact=gpu-debugger.log\\n' > build/test-native-render-log-platform-matrix-contract/renderlogs/windows.env && LINUX_VULKAN_RENDER_LOG_COMPARE_ENV=build/test-native-render-log-platform-matrix-contract/renderlogs/linux.env MACOS_METAL_RENDER_LOG_COMPARE_ENV=build/test-native-render-log-platform-matrix-contract/renderlogs/macos.env WINDOWS_D3D12_RENDER_LOG_COMPARE_ENV=build/test-native-render-log-platform-matrix-contract/renderlogs/windows.env GUI_RENDERDOC_AGGREGATE_STATIC_CACHE_DIR=build/test-native-render-log-platform-matrix-static-cache BUILD_DIR=build/test-native-render-log-platform-matrix-contract/out REPORT_PATH=build/test-native-render-log-platform-matrix-contract/report.md sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs || true"
+val command = "rm -rf build/test-native-render-log-platform-matrix-contract && mkdir -p build/test-native-render-log-platform-matrix-contract/renderlogs && printf 'linux_vulkan_render_log_compare_status=pass\\nlinux_vulkan_render_log_compare_reason=pass\\nlinux_vulkan_render_log_compare_required_api=vulkan\\n' > build/test-native-render-log-platform-matrix-contract/renderlogs/linux.env && printf 'macos_metal_render_log_compare_status=pass\\nmacos_metal_render_log_compare_reason=pass\\nmacos_metal_render_log_compare_required_api=metal\\nmacos_metal_render_log_compare_pairwise_status=pass\\nmacos_metal_render_log_compare_gpu_capture_status=pass\\nmacos_metal_render_log_compare_gpu_capture_artifact=frame.gputrace\\nmacos_metal_render_log_compare_gpu_capture_artifact_file_status=pass\\nmacos_metal_render_log_compare_gpu_capture_artifact_magic=XCODE-GPUTRACE\\nmacos_metal_render_log_compare_electron_browser_backing_status=pass\\nmacos_metal_render_log_compare_chrome_browser_backing_status=pass\\nmacos_metal_render_log_compare_browser_backing_status=pass\\nmacos_metal_render_log_compare_pixel_comparison_status=pass\\nmacos_metal_render_log_compare_pixel_comparison_mode=pairwise-argb-diff\\nmacos_metal_render_log_compare_electron_chrome_pairwise_diff_status=pass\\nmacos_metal_render_log_compare_electron_simple_pairwise_diff_status=pass\\nmacos_metal_render_log_compare_chrome_simple_pairwise_diff_status=pass\\nmacos_metal_render_log_compare_simple_argb_reason=pass\\nmacos_metal_render_log_compare_chrome_argb_reason=pass\\nmacos_metal_render_log_compare_electron_argb_reason=pass\\nmacos_metal_render_log_compare_argb_viewport_reason=pass\\n' > build/test-native-render-log-platform-matrix-contract/renderlogs/macos.env && printf 'windows_d3d12_render_log_compare_status=pass\\nwindows_d3d12_render_log_compare_reason=pass\\nwindows_d3d12_render_log_compare_required_api=d3d11\\nwindows_d3d12_render_log_compare_pairwise_status=pass\\nwindows_d3d12_render_log_compare_pix_status=pass\\nwindows_d3d12_render_log_compare_pix_artifact=frame.wpix\\nwindows_d3d12_render_log_compare_pix_artifact_magic=PIX\\nwindows_d3d12_render_log_compare_gpu_debugger_status=pass\\nwindows_d3d12_render_log_compare_gpu_debugger_artifact=gpu-debugger.log\\n' > build/test-native-render-log-platform-matrix-contract/renderlogs/windows.env && LINUX_VULKAN_RENDER_LOG_COMPARE_ENV=build/test-native-render-log-platform-matrix-contract/renderlogs/linux.env MACOS_METAL_RENDER_LOG_COMPARE_ENV=build/test-native-render-log-platform-matrix-contract/renderlogs/macos.env WINDOWS_D3D12_RENDER_LOG_COMPARE_ENV=build/test-native-render-log-platform-matrix-contract/renderlogs/windows.env GUI_RENDERDOC_AGGREGATE_STATIC_CACHE_DIR=build/test-native-render-log-platform-matrix-static-cache BUILD_DIR=build/test-native-render-log-platform-matrix-contract/out REPORT_PATH=build/test-native-render-log-platform-matrix-contract/report.md sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs || true"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(0)
 
@@ -215,7 +218,7 @@ expect(evidence).to_contain("macos_metal_render_log_compare_status=pass")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 26 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -236,6 +239,7 @@ expect(evidence).to_contain("macos_metal_render_log_compare_status=unavailable")
 expect(evidence).to_contain("macos_metal_render_log_compare_pairwise_status=missing")
 expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_status=unavailable")
 expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_artifact=missing")
+expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_artifact_file_status=missing")
 expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_artifact_magic=missing")
 expect(evidence).to_contain("windows_d3d12_render_log_compare_status=unavailable")
 expect(evidence).to_contain("windows_d3d12_render_log_compare_pairwise_status=missing")
@@ -294,7 +298,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Create pass-looking platform rows with PIX metadata but no propagated file magic")
-val command = "rm -rf build/test-native-render-log-platform-matrix-pix-file-magic && mkdir -p build/test-native-render-log-platform-matrix-pix-file-magic/renderlogs && printf 'linux_vulkan_render_log_compare_status=pass\\nlinux_vulkan_render_log_compare_reason=pass\\nlinux_vulkan_render_log_compare_required_api=vulkan\\nlinux_vulkan_render_log_compare_pairwise_status=pass\\nlinux_vulkan_render_log_compare_renderdoc_simple_status=pass\\nlinux_vulkan_render_log_compare_renderdoc_simple_env_file_status=pass\\nlinux_vulkan_render_log_compare_renderdoc_simple_artifact_file_status=pass\\nlinux_vulkan_render_log_compare_renderdoc_simple_artifact_magic=RDOC\\nlinux_vulkan_render_log_compare_renderdoc_chrome_status=pass\\nlinux_vulkan_render_log_compare_renderdoc_chrome_env_file_status=pass\\nlinux_vulkan_render_log_compare_renderdoc_chrome_artifact_file_status=pass\\nlinux_vulkan_render_log_compare_renderdoc_chrome_artifact_magic=RDOC\\nlinux_vulkan_render_log_compare_renderdoc_electron_status=pass\\nlinux_vulkan_render_log_compare_renderdoc_electron_env_file_status=pass\\nlinux_vulkan_render_log_compare_renderdoc_electron_artifact_file_status=pass\\nlinux_vulkan_render_log_compare_renderdoc_electron_artifact_magic=RDOC\\n' > build/test-native-render-log-platform-matrix-pix-file-magic/renderlogs/linux.env && printf 'macos_metal_render_log_compare_status=pass\\nmacos_metal_render_log_compare_reason=pass\\nmacos_metal_render_log_compare_required_api=metal\\nmacos_metal_render_log_compare_pairwise_status=pass\\nmacos_metal_render_log_compare_gpu_capture_status=pass\\nmacos_metal_render_log_compare_gpu_capture_artifact=frame.gputrace\\nmacos_metal_render_log_compare_gpu_capture_artifact_magic=XCODE-GPUTRACE\\n' > build/test-native-render-log-platform-matrix-pix-file-magic/renderlogs/macos.env && printf 'windows_d3d12_render_log_compare_status=pass\\nwindows_d3d12_render_log_compare_reason=pass\\nwindows_d3d12_render_log_compare_required_api=d3d12\\nwindows_d3d12_render_log_compare_pairwise_status=pass\\nwindows_d3d12_render_log_compare_pix_status=pass\\nwindows_d3d12_render_log_compare_pix_artifact=frame.wpix\\nwindows_d3d12_render_log_compare_pix_artifact_magic=PIX\\nwindows_d3d12_render_log_compare_gpu_debugger_status=pass\\nwindows_d3d12_render_log_compare_gpu_debugger_artifact=gpu-debugger.log\\n' > build/test-native-render-log-platform-matrix-pix-file-magic/renderlogs/windows.env && LINUX_VULKAN_RENDER_LOG_COMPARE_ENV=build/test-native-render-log-platform-matrix-pix-file-magic/renderlogs/linux.env MACOS_METAL_RENDER_LOG_COMPARE_ENV=build/test-native-render-log-platform-matrix-pix-file-magic/renderlogs/macos.env WINDOWS_D3D12_RENDER_LOG_COMPARE_ENV=build/test-native-render-log-platform-matrix-pix-file-magic/renderlogs/windows.env GUI_RENDERDOC_AGGREGATE_STATIC_CACHE_DIR=build/test-native-render-log-platform-matrix-static-cache BUILD_DIR=build/test-native-render-log-platform-matrix-pix-file-magic/out REPORT_PATH=build/test-native-render-log-platform-matrix-pix-file-magic/report.md sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs || true"
+val command = "rm -rf build/test-native-render-log-platform-matrix-pix-file-magic && mkdir -p build/test-native-render-log-platform-matrix-pix-file-magic/renderlogs && printf 'linux_vulkan_render_log_compare_status=pass\\nlinux_vulkan_render_log_compare_reason=pass\\nlinux_vulkan_render_log_compare_required_api=vulkan\\nlinux_vulkan_render_log_compare_pairwise_status=pass\\nlinux_vulkan_render_log_compare_renderdoc_simple_status=pass\\nlinux_vulkan_render_log_compare_renderdoc_simple_env_file_status=pass\\nlinux_vulkan_render_log_compare_renderdoc_simple_artifact_file_status=pass\\nlinux_vulkan_render_log_compare_renderdoc_simple_artifact_magic=RDOC\\nlinux_vulkan_render_log_compare_renderdoc_chrome_status=pass\\nlinux_vulkan_render_log_compare_renderdoc_chrome_env_file_status=pass\\nlinux_vulkan_render_log_compare_renderdoc_chrome_artifact_file_status=pass\\nlinux_vulkan_render_log_compare_renderdoc_chrome_artifact_magic=RDOC\\nlinux_vulkan_render_log_compare_renderdoc_electron_status=pass\\nlinux_vulkan_render_log_compare_renderdoc_electron_env_file_status=pass\\nlinux_vulkan_render_log_compare_renderdoc_electron_artifact_file_status=pass\\nlinux_vulkan_render_log_compare_renderdoc_electron_artifact_magic=RDOC\\n' > build/test-native-render-log-platform-matrix-pix-file-magic/renderlogs/linux.env && printf 'macos_metal_render_log_compare_status=pass\\nmacos_metal_render_log_compare_reason=pass\\nmacos_metal_render_log_compare_required_api=metal\\nmacos_metal_render_log_compare_pairwise_status=pass\\nmacos_metal_render_log_compare_gpu_capture_status=pass\\nmacos_metal_render_log_compare_gpu_capture_artifact=frame.gputrace\\nmacos_metal_render_log_compare_gpu_capture_artifact_file_status=pass\\nmacos_metal_render_log_compare_gpu_capture_artifact_magic=XCODE-GPUTRACE\\nmacos_metal_render_log_compare_electron_browser_backing_status=pass\\nmacos_metal_render_log_compare_chrome_browser_backing_status=pass\\nmacos_metal_render_log_compare_browser_backing_status=pass\\nmacos_metal_render_log_compare_pixel_comparison_status=pass\\nmacos_metal_render_log_compare_pixel_comparison_mode=pairwise-argb-diff\\nmacos_metal_render_log_compare_electron_chrome_pairwise_diff_status=pass\\nmacos_metal_render_log_compare_electron_simple_pairwise_diff_status=pass\\nmacos_metal_render_log_compare_chrome_simple_pairwise_diff_status=pass\\nmacos_metal_render_log_compare_simple_argb_reason=pass\\nmacos_metal_render_log_compare_chrome_argb_reason=pass\\nmacos_metal_render_log_compare_electron_argb_reason=pass\\nmacos_metal_render_log_compare_argb_viewport_reason=pass\\n' > build/test-native-render-log-platform-matrix-pix-file-magic/renderlogs/macos.env && printf 'windows_d3d12_render_log_compare_status=pass\\nwindows_d3d12_render_log_compare_reason=pass\\nwindows_d3d12_render_log_compare_required_api=d3d12\\nwindows_d3d12_render_log_compare_pairwise_status=pass\\nwindows_d3d12_render_log_compare_pix_status=pass\\nwindows_d3d12_render_log_compare_pix_artifact=frame.wpix\\nwindows_d3d12_render_log_compare_pix_artifact_magic=PIX\\nwindows_d3d12_render_log_compare_gpu_debugger_status=pass\\nwindows_d3d12_render_log_compare_gpu_debugger_artifact=gpu-debugger.log\\n' > build/test-native-render-log-platform-matrix-pix-file-magic/renderlogs/windows.env && LINUX_VULKAN_RENDER_LOG_COMPARE_ENV=build/test-native-render-log-platform-matrix-pix-file-magic/renderlogs/linux.env MACOS_METAL_RENDER_LOG_COMPARE_ENV=build/test-native-render-log-platform-matrix-pix-file-magic/renderlogs/macos.env WINDOWS_D3D12_RENDER_LOG_COMPARE_ENV=build/test-native-render-log-platform-matrix-pix-file-magic/renderlogs/windows.env GUI_RENDERDOC_AGGREGATE_STATIC_CACHE_DIR=build/test-native-render-log-platform-matrix-static-cache BUILD_DIR=build/test-native-render-log-platform-matrix-pix-file-magic/out REPORT_PATH=build/test-native-render-log-platform-matrix-pix-file-magic/report.md sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs || true"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(0)
 
@@ -310,12 +314,43 @@ expect(evidence).to_contain("windows_d3d12_render_log_compare_pix_artifact_file_
 
 </details>
 
+#### rejects macOS Metal rows whose GPU capture artifact file-status proof is missing
+
+- Create pass-looking macOS Metal rows with claimed Xcode capture magic but no file-status row
+   - Expected: code equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Create pass-looking macOS Metal rows with claimed Xcode capture magic but no file-status row")
+val command = "rm -rf build/test-native-render-log-platform-matrix-macos-file-status && mkdir -p build/test-native-render-log-platform-matrix-macos-file-status/renderlogs && printf 'linux_vulkan_render_log_compare_status=pass\\nlinux_vulkan_render_log_compare_reason=pass\\nlinux_vulkan_render_log_compare_required_api=vulkan\\nlinux_vulkan_render_log_compare_pairwise_status=pass\\nlinux_vulkan_render_log_compare_renderdoc_simple_status=pass\\nlinux_vulkan_render_log_compare_renderdoc_simple_env_file_status=pass\\nlinux_vulkan_render_log_compare_renderdoc_simple_artifact_file_status=pass\\nlinux_vulkan_render_log_compare_renderdoc_simple_artifact_magic=RDOC\\nlinux_vulkan_render_log_compare_renderdoc_chrome_status=pass\\nlinux_vulkan_render_log_compare_renderdoc_chrome_env_file_status=pass\\nlinux_vulkan_render_log_compare_renderdoc_chrome_artifact_file_status=pass\\nlinux_vulkan_render_log_compare_renderdoc_chrome_artifact_magic=RDOC\\nlinux_vulkan_render_log_compare_renderdoc_electron_status=pass\\nlinux_vulkan_render_log_compare_renderdoc_electron_env_file_status=pass\\nlinux_vulkan_render_log_compare_renderdoc_electron_artifact_file_status=pass\\nlinux_vulkan_render_log_compare_renderdoc_electron_artifact_magic=RDOC\\n' > build/test-native-render-log-platform-matrix-macos-file-status/renderlogs/linux.env && printf 'macos_metal_render_log_compare_status=pass\\nmacos_metal_render_log_compare_reason=pass\\nmacos_metal_render_log_compare_required_api=metal\\nmacos_metal_render_log_compare_pairwise_status=pass\\nmacos_metal_render_log_compare_gpu_capture_status=pass\\nmacos_metal_render_log_compare_gpu_capture_artifact=frame.gputrace\\nmacos_metal_render_log_compare_gpu_capture_artifact_magic=XCODE-GPUTRACE\\nmacos_metal_render_log_compare_electron_browser_backing_status=pass\\nmacos_metal_render_log_compare_chrome_browser_backing_status=pass\\nmacos_metal_render_log_compare_browser_backing_status=pass\\nmacos_metal_render_log_compare_pixel_comparison_status=pass\\nmacos_metal_render_log_compare_pixel_comparison_mode=pairwise-argb-diff\\nmacos_metal_render_log_compare_electron_chrome_pairwise_diff_status=pass\\nmacos_metal_render_log_compare_electron_simple_pairwise_diff_status=pass\\nmacos_metal_render_log_compare_chrome_simple_pairwise_diff_status=pass\\nmacos_metal_render_log_compare_simple_argb_reason=pass\\nmacos_metal_render_log_compare_chrome_argb_reason=pass\\nmacos_metal_render_log_compare_electron_argb_reason=pass\\nmacos_metal_render_log_compare_argb_viewport_reason=pass\\n' > build/test-native-render-log-platform-matrix-macos-file-status/renderlogs/macos.env && printf 'windows_d3d12_render_log_compare_status=pass\\nwindows_d3d12_render_log_compare_reason=pass\\nwindows_d3d12_render_log_compare_required_api=d3d12\\nwindows_d3d12_render_log_compare_pairwise_status=pass\\nwindows_d3d12_render_log_compare_pix_status=pass\\nwindows_d3d12_render_log_compare_pix_artifact=frame.wpix\\nwindows_d3d12_render_log_compare_pix_artifact_magic=PIX\\nwindows_d3d12_render_log_compare_pix_artifact_file_magic=PIX\\nwindows_d3d12_render_log_compare_gpu_debugger_status=pass\\nwindows_d3d12_render_log_compare_gpu_debugger_artifact=gpu-debugger.log\\n' > build/test-native-render-log-platform-matrix-macos-file-status/renderlogs/windows.env && LINUX_VULKAN_RENDER_LOG_COMPARE_ENV=build/test-native-render-log-platform-matrix-macos-file-status/renderlogs/linux.env MACOS_METAL_RENDER_LOG_COMPARE_ENV=build/test-native-render-log-platform-matrix-macos-file-status/renderlogs/macos.env WINDOWS_D3D12_RENDER_LOG_COMPARE_ENV=build/test-native-render-log-platform-matrix-macos-file-status/renderlogs/windows.env GUI_RENDERDOC_AGGREGATE_STATIC_CACHE_DIR=build/test-native-render-log-platform-matrix-static-cache BUILD_DIR=build/test-native-render-log-platform-matrix-macos-file-status/out REPORT_PATH=build/test-native-render-log-platform-matrix-macos-file-status/report.md sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs || true"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val evidence = file_read("build/test-native-render-log-platform-matrix-macos-file-status/out/evidence.env")
+expect(evidence).to_contain("native_render_log_platform_matrix_status=fail")
+expect(evidence).to_contain("native_render_log_platform_matrix_missing_platforms=")
+expect(evidence).to_contain("native_render_log_platform_matrix_failed_platforms=macos-metal")
+expect(evidence).to_contain("macos_metal_render_log_compare_status=fail")
+expect(evidence).to_contain("macos_metal_render_log_compare_reason=macos-metal-gpu-capture-artifact-file-not-pass:<missing>")
+expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_artifact=frame.gputrace")
+expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_artifact_file_status=")
+expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_artifact_magic=XCODE-GPUTRACE")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
+| Total scenarios | 5 |
+| Active scenarios | 5 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
