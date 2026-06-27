@@ -117,6 +117,10 @@ const text = proof.text_payload || {};
 
 const rows = {
   proof_source: proof.proof_source,
+  browser_engine: proof.browser_engine,
+  electron_user_agent: proof.electron_user_agent,
+  electron_process_version: proof.electron_process_version,
+  chrome_process_version: proof.chrome_process_version,
   ready: jsonBoolTextOrBlank(proof.ready),
   wm_found: jsonBoolTextOrBlank(proof.wm_found),
   window_cmd_count: jsonIntegerTextOrBlank(proof.window_cmd_count),
@@ -169,6 +173,17 @@ if (!boolTrue(proof.pass)) {
   reason = 'probe-reported-fail';
 } else if (proof.proof_source !== expectedProofSource) {
   reason = 'event-routing-proof-source-missing';
+} else if (
+  proof.browser_engine !== 'chromium' ||
+  typeof proof.electron_user_agent !== 'string' ||
+  !/Chrome\/[0-9]/.test(proof.electron_user_agent) ||
+  !/Electron\/[0-9]/.test(proof.electron_user_agent) ||
+  typeof proof.electron_process_version !== 'string' ||
+  !/^[0-9]+(?:\.[0-9]+)*$/.test(proof.electron_process_version) ||
+  typeof proof.chrome_process_version !== 'string' ||
+  !/^[0-9]+(?:\.[0-9]+)*$/.test(proof.chrome_process_version)
+) {
+  reason = 'event-routing-browser-runtime-missing';
 } else if (!boolTrue(proof.ready) || !boolTrue(proof.wm_found)) {
   reason = 'event-routing-ready-missing';
 } else if (

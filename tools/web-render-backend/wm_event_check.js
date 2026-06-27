@@ -95,6 +95,8 @@ async function main() {
   const result = await win.webContents.executeJavaScript(`(async function(){
     const out = {
       proof_source: 'tools/web-render-backend/wm_event_check.js',
+      browser_engine: 'chromium',
+      electron_user_agent: navigator.userAgent,
       ready: !!window.__wmReady
     };
     const wm = window.simpleWM;
@@ -294,6 +296,8 @@ async function main() {
     return out;
   })();`);
 
+  result.electron_process_version = process.versions.electron || '';
+  result.chrome_process_version = process.versions.chrome || '';
   console.log('WM_EVENT_CHECK ' + JSON.stringify(result));
   win.destroy();
   app.exit(result.pass ? 0 : 1);
