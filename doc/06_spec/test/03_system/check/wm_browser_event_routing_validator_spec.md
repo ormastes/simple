@@ -27,7 +27,7 @@ wm_browser_event_routing_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 19 | 19 | 0 | 0 |
+| 20 | 20 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -104,8 +104,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/wm_browser_event_routing_val
 - The proof must carry live Electron/Chromium runtime identity, including browser
   engine, Electron user-agent, Electron process version, and Chrome process
   version.
-- The proof JSON path itself must be a regular file, never a symlink to stale
-  or attacker-controlled event-routing evidence.
+- The proof JSON path itself must be a single regular file, never a symlink or
+  hardlink to stale or attacker-controlled event-routing evidence.
 - The live shell evidence wrapper consumes the standalone validator instead of
   trusting only the probe's top-level `pass` flag.
 - The live shell evidence wrapper keeps validation, proof-source, event,
@@ -139,6 +139,7 @@ val evidence = file_read("build/test-wm-browser-event-validator-pass/evidence.en
 expect(evidence).to_contain("wm_browser_event_routing_validation_status=pass")
 expect(evidence).to_contain("wm_browser_event_routing_validation_reason=pass")
 expect(evidence).to_contain("wm_browser_event_routing_proof_symlink_status=pass")
+expect(evidence).to_contain("wm_browser_event_routing_proof_hardlink_status=pass")
 expect(evidence).to_contain("wm_browser_event_routing_target=electron")
 expect(evidence).to_contain("wm_browser_event_routing_surface_id=wm-browser-event-routing")
 expect(evidence).to_contain("wm_browser_event_routing_proof_source=tools/web-render-backend/wm_event_check.js")
@@ -424,7 +425,7 @@ val evidence = file_read("build/test-wm-browser-event-validator-animation/eviden
 expect(evidence).to_contain("wm_browser_event_routing_validation_status=fail")
 expect(evidence).to_contain("wm_browser_event_routing_validation_reason=event-routing-performance-animation-contract-missing")
 expect(evidence).to_contain("wm_browser_event_routing_performance_now_delta_ms=")
-expect(evidence.contains("wm_browser_event_routing_performance_now_delta_ms=not-a-number")).to_equal(false)
+expect_not(evidence.contains("wm_browser_event_routing_performance_now_delta_ms=not-a-number"))
 expect(evidence).to_contain("wm_browser_event_routing_animation_frame_count=1")
 ```
 
@@ -509,7 +510,7 @@ expect(zero).to_contain("wm_browser_event_routing_input_to_paint_ms=0")
 expect(string_latency).to_contain("wm_browser_event_routing_validation_status=fail")
 expect(string_latency).to_contain("wm_browser_event_routing_validation_reason=event-routing-interaction-latency-contract-missing")
 expect(string_latency).to_contain("wm_browser_event_routing_input_to_paint_ms=")
-expect(string_latency.contains("wm_browser_event_routing_input_to_paint_ms=18.4")).to_equal(false)
+expect_not(string_latency.contains("wm_browser_event_routing_input_to_paint_ms=18.4"))
 expect(slow).to_contain("wm_browser_event_routing_validation_status=fail")
 expect(slow).to_contain("wm_browser_event_routing_validation_reason=event-routing-interaction-latency-contract-missing")
 expect(slow).to_contain("wm_browser_event_routing_input_to_paint_ms=1001")
@@ -550,15 +551,15 @@ step("Confirm string booleans do not satisfy structured Electron event proof")
 expect(ready).to_contain("wm_browser_event_routing_validation_status=fail")
 expect(ready).to_contain("wm_browser_event_routing_validation_reason=event-routing-ready-missing")
 expect(ready).to_contain("wm_browser_event_routing_ready=")
-expect(ready.contains("wm_browser_event_routing_ready=true")).to_equal(false)
+expect_not(ready.contains("wm_browser_event_routing_ready=true"))
 expect(perf).to_contain("wm_browser_event_routing_validation_status=fail")
 expect(perf).to_contain("wm_browser_event_routing_validation_reason=event-routing-performance-animation-contract-missing")
 expect(perf).to_contain("wm_browser_event_routing_performance_now_available=")
 expect(perf).to_contain("wm_browser_event_routing_animation_frame_available=")
 expect(perf).to_contain("wm_browser_event_routing_css_animation_probe=")
-expect(perf.contains("wm_browser_event_routing_performance_now_available=true")).to_equal(false)
-expect(perf.contains("wm_browser_event_routing_animation_frame_available=true")).to_equal(false)
-expect(perf.contains("wm_browser_event_routing_css_animation_probe=true")).to_equal(false)
+expect_not(perf.contains("wm_browser_event_routing_performance_now_available=true"))
+expect_not(perf.contains("wm_browser_event_routing_animation_frame_available=true"))
+expect_not(perf.contains("wm_browser_event_routing_css_animation_probe=true"))
 ```
 
 </details>
@@ -624,35 +625,35 @@ step("Confirm stringified numeric evidence is not accepted as live browser proof
 expect(count).to_contain("wm_browser_event_routing_validation_status=fail")
 expect(count).to_contain("wm_browser_event_routing_validation_reason=event-routing-contract-missing")
 expect(count).to_contain("wm_browser_event_routing_focus_count=")
-expect(count.contains("wm_browser_event_routing_focus_count=1")).to_equal(false)
+expect_not(count.contains("wm_browser_event_routing_focus_count=1"))
 expect(aggregate).to_contain("wm_browser_event_routing_validation_status=fail")
 expect(aggregate).to_contain("wm_browser_event_routing_validation_reason=event-routing-contract-missing")
 expect(aggregate).to_contain("wm_browser_event_routing_window_cmd_count=")
-expect(aggregate.contains("wm_browser_event_routing_window_cmd_count=4")).to_equal(false)
+expect_not(aggregate.contains("wm_browser_event_routing_window_cmd_count=4"))
 expect(perf).to_contain("wm_browser_event_routing_validation_status=fail")
 expect(perf).to_contain("wm_browser_event_routing_validation_reason=event-routing-performance-animation-contract-missing")
 expect(perf).to_contain("wm_browser_event_routing_performance_now_delta_ms=")
-expect(perf.contains("wm_browser_event_routing_performance_now_delta_ms=16.7")).to_equal(false)
+expect_not(perf.contains("wm_browser_event_routing_performance_now_delta_ms=16.7"))
 expect(frame).to_contain("wm_browser_event_routing_validation_status=fail")
 expect(frame).to_contain("wm_browser_event_routing_validation_reason=event-routing-performance-animation-contract-missing")
 expect(frame).to_contain("wm_browser_event_routing_animation_frame_count=")
-expect(frame.contains("wm_browser_event_routing_animation_frame_count=2")).to_equal(false)
+expect_not(frame.contains("wm_browser_event_routing_animation_frame_count=2"))
 expect(ui).to_contain("wm_browser_event_routing_validation_status=fail")
 expect(ui).to_contain("wm_browser_event_routing_validation_reason=event-routing-ui-contract-missing")
 expect(ui).to_contain("wm_browser_event_routing_traffic_button_count=")
-expect(ui.contains("wm_browser_event_routing_traffic_button_count=3")).to_equal(false)
+expect_not(ui.contains("wm_browser_event_routing_traffic_button_count=3"))
 expect(font).to_contain("wm_browser_event_routing_validation_status=fail")
 expect(font).to_contain("wm_browser_event_routing_validation_reason=event-routing-ui-contract-missing")
 expect(font).to_contain("wm_browser_event_routing_title_font_weight=")
-expect(font.contains("wm_browser_event_routing_title_font_weight=700")).to_equal(false)
+expect_not(font.contains("wm_browser_event_routing_title_font_weight=700"))
 expect(width).to_contain("wm_browser_event_routing_validation_status=fail")
 expect(width).to_contain("wm_browser_event_routing_validation_reason=event-routing-ui-contract-missing")
 expect(width).to_contain("wm_browser_event_routing_title_input_width_px=")
-expect(width.contains("wm_browser_event_routing_title_input_width_px=158")).to_equal(false)
+expect_not(width.contains("wm_browser_event_routing_title_input_width_px=158"))
 expect(payload).to_contain("wm_browser_event_routing_validation_status=fail")
 expect(payload).to_contain("wm_browser_event_routing_validation_reason=event-routing-payload-contract-missing")
 expect(payload).to_contain("wm_browser_event_routing_move_payload_x=")
-expect(payload.contains("wm_browser_event_routing_move_payload_x=86")).to_equal(false)
+expect_not(payload.contains("wm_browser_event_routing_move_payload_x=86"))
 ```
 
 </details>
@@ -742,11 +743,11 @@ step("Confirm fractional event count and move payload values are rejected")
 expect(counts).to_contain("wm_browser_event_routing_validation_status=fail")
 expect(counts).to_contain("wm_browser_event_routing_validation_reason=event-routing-contract-missing")
 expect(counts).to_contain("wm_browser_event_routing_pointer_down_count=")
-expect(counts.contains("wm_browser_event_routing_pointer_down_count=1.5")).to_equal(false)
+expect_not(counts.contains("wm_browser_event_routing_pointer_down_count=1.5"))
 expect(payload).to_contain("wm_browser_event_routing_validation_status=fail")
 expect(payload).to_contain("wm_browser_event_routing_validation_reason=event-routing-payload-contract-missing")
 expect(payload).to_contain("wm_browser_event_routing_move_payload_x=")
-expect(payload.contains("wm_browser_event_routing_move_payload_x=86.5")).to_equal(false)
+expect_not(payload.contains("wm_browser_event_routing_move_payload_x=86.5"))
 ```
 
 </details>
@@ -793,19 +794,19 @@ step("Confirm unsafe exponential integers fail as structured evidence, not BigIn
 expect(count).to_contain("wm_browser_event_routing_validation_status=fail")
 expect(count).to_contain("wm_browser_event_routing_validation_reason=event-routing-contract-missing")
 expect(count).to_contain("wm_browser_event_routing_focus_count=")
-expect(count.contains("Cannot convert")).to_equal(false)
+expect_not(count.contains("Cannot convert"))
 expect(frame).to_contain("wm_browser_event_routing_validation_status=fail")
 expect(frame).to_contain("wm_browser_event_routing_validation_reason=event-routing-performance-animation-contract-missing")
 expect(frame).to_contain("wm_browser_event_routing_animation_frame_count=")
-expect(frame.contains("Cannot convert")).to_equal(false)
+expect_not(frame.contains("Cannot convert"))
 expect(ui).to_contain("wm_browser_event_routing_validation_status=fail")
 expect(ui).to_contain("wm_browser_event_routing_validation_reason=event-routing-ui-contract-missing")
 expect(ui).to_contain("wm_browser_event_routing_traffic_button_count=")
-expect(ui.contains("Cannot convert")).to_equal(false)
+expect_not(ui.contains("Cannot convert"))
 expect(payload).to_contain("wm_browser_event_routing_validation_status=fail")
 expect(payload).to_contain("wm_browser_event_routing_validation_reason=event-routing-payload-contract-missing")
 expect(payload).to_contain("wm_browser_event_routing_move_payload_x=")
-expect(payload.contains("Cannot convert")).to_equal(false)
+expect_not(payload.contains("Cannot convert"))
 ```
 
 </details>
@@ -838,7 +839,42 @@ step("Confirm event routing proof path cannot be a symlink")
 expect(evidence).to_contain("wm_browser_event_routing_validation_status=fail")
 expect(evidence).to_contain("wm_browser_event_routing_validation_reason=proof-json-symlink")
 expect(evidence).to_contain("wm_browser_event_routing_proof_symlink_status=fail")
-expect(evidence.contains("wm_browser_event_routing_target=electron")).to_equal(false)
+expect(evidence).to_contain("wm_browser_event_routing_proof_hardlink_status=unknown")
+expect_not(evidence.contains("wm_browser_event_routing_target=electron"))
+```
+
+</details>
+
+#### rejects hardlinked WM event-routing proof JSON before reading event evidence
+
+-  fixture command
+   - Expected: code equals `1`
+- Confirm event routing proof path cannot be a hardlink
+   - Expected: evidence does not contain `wm_browser_event_routing_target=electron`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 15 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-wm-browser-event-validator-hardlink"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _fixture_command(root + "/real.json", "") +
+    " && ln " + root + "/real.json " + root + "/proof-link.json" +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js " + root + "/proof-link.json > " + root + "/hardlink.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read(root + "/hardlink.env")
+step("Confirm event routing proof path cannot be a hardlink")
+expect(evidence).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(evidence).to_contain("wm_browser_event_routing_validation_reason=proof-json-hardlink")
+expect(evidence).to_contain("wm_browser_event_routing_proof_symlink_status=pass")
+expect(evidence).to_contain("wm_browser_event_routing_proof_hardlink_status=fail")
+expect_not(evidence.contains("wm_browser_event_routing_target=electron"))
 ```
 
 </details>
@@ -853,11 +889,14 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val script = file_read("scripts/check/check-wm-browser-event-routing-evidence.shs")
+val validator = file_read("scripts/check/validate-wm-browser-event-routing-proof.js")
 expect(script).to_contain("validate-wm-browser-event-routing-proof.js")
 expect(script).to_contain("validator_code")
 expect(script).to_contain("wm_browser_event_routing_validation_status")
 expect(script).to_contain("wm_browser_event_routing_validation_reason")
 expect(script).to_contain("wm_browser_event_routing_proof_symlink_status")
+expect(script).to_contain("wm_browser_event_routing_proof_hardlink_status")
+expect(script).to_contain("proof-json-hardlink-status-not-pass")
 expect(script).to_contain("wm_browser_event_routing_target")
 expect(script).to_contain("wm_browser_event_routing_surface_id")
 expect(script).to_contain("wm_browser_event_routing_proof_source")
@@ -871,6 +910,7 @@ expect(script).to_contain("wm_browser_event_routing_input_to_paint_ms")
 expect(script).to_contain("wm_browser_event_routing_move_payload_source")
 expect(script).to_contain("wm_browser_event_routing_title_input_width_px")
 expect(script).to_contain("wm_browser_event_routing_close_button_background")
+expect(validator).to_contain("proof-json-hardlink")
 val producer = file_read("tools/web-render-backend/wm_event_check.js")
 expect(producer).to_contain("target: 'electron'")
 expect(producer).to_contain("surface_id: 'wm-browser-event-routing'")
@@ -879,7 +919,7 @@ expect(producer).to_contain("electron_user_agent: navigator.userAgent")
 expect(producer).to_contain("result.electron_process_version = process.versions.electron")
 expect(producer).to_contain("result.chrome_process_version = process.versions.chrome")
 expect(producer).to_contain("out.title_font_weight = Number.parseFloat(titleStyle.fontWeight)")
-expect(producer.contains("out.title_font_weight = titleStyle.fontWeight")).to_equal(false)
+expect_not(producer.contains("out.title_font_weight = titleStyle.fontWeight"))
 ```
 
 </details>
@@ -909,6 +949,7 @@ expect(evidence).to_contain("wm_browser_event_routing_reason=missing-command:nod
 expect(evidence).to_contain("wm_browser_event_routing_validation_status=fail")
 expect(evidence).to_contain("wm_browser_event_routing_validation_reason=missing-command:node")
 expect(evidence).to_contain("wm_browser_event_routing_proof_symlink_status=")
+expect(evidence).to_contain("wm_browser_event_routing_proof_hardlink_status=")
 expect(evidence).to_contain("wm_browser_event_routing_target=")
 expect(evidence).to_contain("wm_browser_event_routing_surface_id=")
 expect(evidence).to_contain("wm_browser_event_routing_proof_source=")
@@ -945,8 +986,8 @@ expect(evidence).to_contain("wm_browser_event_routing_text_input_text=")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 19 |
-| Active scenarios | 19 |
+| Total scenarios | 20 |
+| Active scenarios | 20 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
