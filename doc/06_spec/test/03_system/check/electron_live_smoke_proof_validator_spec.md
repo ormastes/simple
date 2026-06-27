@@ -99,7 +99,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_live_smoke_proof_va
   generic hand-authored JSON object cannot stand in for the renderer bridge
   probe.
 - The proof must include Chromium/Electron runtime evidence from the renderer
-  user agent, not only a hand-authored source marker.
+  user agent and Electron/Chrome process versions, not only a hand-authored
+  source marker.
 - The proof target and surface must identify the live Electron main surface,
   and early wrapper diagnostics must preserve those identity rows.
 - The live smoke shell wrapper delegates JSON validation to the proof validator.
@@ -126,7 +127,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_live_smoke_proof_va
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 31 lines folded for reproduction.
+Runnable source: 33 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -146,6 +147,8 @@ expect(evidence).to_contain("electron_live_smoke_surface_id=main")
 expect(evidence).to_contain("electron_live_smoke_proof_source=src/app/ui.electron/bridge.js:electronLiveSmokeProofScript")
 expect(evidence).to_contain("electron_live_smoke_browser_engine=chromium")
 expect(evidence).to_contain("electron_live_smoke_electron_user_agent=Mozilla/5.0 Chrome/142.0.0.0 Electron/42.5.0 Safari/537.36")
+expect(evidence).to_contain("electron_live_smoke_electron_process_version=42.5.0")
+expect(evidence).to_contain("electron_live_smoke_chrome_process_version=142.0.0.0")
 expect(evidence).to_contain("electron_live_smoke_width=1280")
 expect(evidence).to_contain("electron_live_smoke_body_html_length=64")
 expect(evidence).to_contain("electron_live_smoke_css_length=12")
@@ -282,6 +285,8 @@ expect(wrong).to_contain("electron_live_smoke_proof_source=tools/manual/proof.js
 
 -  proof command
 -  proof command
+-  proof command
+-  proof command
    - Expected: code equals `1`
 - Confirm live smoke proof needs Chromium and Electron runtime rows
 
@@ -289,7 +294,7 @@ expect(wrong).to_contain("electron_live_smoke_proof_source=tools/manual/proof.js
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 31 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -298,12 +303,18 @@ val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
     _proof_command(root + "/engine.json", "p.browser_engine=\"webkit\"") +
     " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/engine.json 1280 720 > " + root + "/engine.env; " +
     _proof_command(root + "/user-agent.json", "p.electron_user_agent=\"Mozilla/5.0 Chrome/142.0.0.0 Safari/537.36\"") +
-    " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/user-agent.json 1280 720 > " + root + "/user-agent.env"
+    " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/user-agent.json 1280 720 > " + root + "/user-agent.env; " +
+    _proof_command(root + "/electron-version.json", "p.electron_process_version=\"\"") +
+    " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/electron-version.json 1280 720 > " + root + "/electron-version.env; " +
+    _proof_command(root + "/chrome-version.json", "p.chrome_process_version=\"Chrome/142\"") +
+    " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/chrome-version.json 1280 720 > " + root + "/chrome-version.env"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(1)
 
 val engine = file_read(root + "/engine.env")
 val user_agent = file_read(root + "/user-agent.env")
+val electron_version = file_read(root + "/electron-version.env")
+val chrome_version = file_read(root + "/chrome-version.env")
 step("Confirm live smoke proof needs Chromium and Electron runtime rows")
 expect(engine).to_contain("electron_live_smoke_validation_status=fail")
 expect(engine).to_contain("electron_live_smoke_validation_reason=unexpected-browser-engine")
@@ -312,6 +323,12 @@ expect(user_agent).to_contain("electron_live_smoke_validation_status=fail")
 expect(user_agent).to_contain("electron_live_smoke_validation_reason=missing-electron-chromium-user-agent")
 expect(user_agent).to_contain("electron_live_smoke_browser_engine=chromium")
 expect(user_agent).to_contain("electron_live_smoke_electron_user_agent=Mozilla/5.0 Chrome/142.0.0.0 Safari/537.36")
+expect(electron_version).to_contain("electron_live_smoke_validation_status=fail")
+expect(electron_version).to_contain("electron_live_smoke_validation_reason=missing-electron-chromium-process-versions")
+expect(electron_version).to_contain("electron_live_smoke_electron_process_version=")
+expect(chrome_version).to_contain("electron_live_smoke_validation_status=fail")
+expect(chrome_version).to_contain("electron_live_smoke_validation_reason=missing-electron-chromium-process-versions")
+expect(chrome_version).to_contain("electron_live_smoke_chrome_process_version=Chrome/142")
 ```
 
 </details>
@@ -695,7 +712,7 @@ expect(fractional).to_contain("electron_live_smoke_height=720")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 45 lines folded for reproduction.
+Runnable source: 54 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -716,6 +733,8 @@ expect(wrapper).to_contain("electron_live_smoke_surface_id")
 expect(wrapper).to_contain("electron_live_smoke_proof_source")
 expect(wrapper).to_contain("electron_live_smoke_browser_engine")
 expect(wrapper).to_contain("electron_live_smoke_electron_user_agent")
+expect(wrapper).to_contain("electron_live_smoke_electron_process_version")
+expect(wrapper).to_contain("electron_live_smoke_chrome_process_version")
 expect(wrapper).to_contain("electron_live_smoke_body_html_length")
 expect(wrapper).to_contain("electron_live_smoke_css_length")
 expect(wrapper).to_contain("electron_live_smoke_app_element_present")
@@ -734,6 +753,9 @@ expect(bridge).to_contain("electronLiveSmokeProofScript")
 expect(bridge).to_contain("proof_source: 'src/app/ui.electron/bridge.js:electronLiveSmokeProofScript'")
 expect(bridge).to_contain("browser_engine")
 expect(bridge).to_contain("electron_user_agent")
+expect(bridge).to_contain("electron_process_version")
+expect(bridge).to_contain("chrome_process_version")
+expect(bridge).to_contain("window.simpleElectron.runtimeVersions")
 expect(bridge).to_contain("performance_now_available")
 expect(bridge).to_contain("animation_frame_count")
 expect(bridge).to_contain("css_animation_probe")
@@ -742,6 +764,10 @@ expect(bridge).to_contain("event_dispatch_count")
 expect(bridge).to_contain("simple-electron-live-smoke-event")
 expect(bridge).to_contain("document.createEvent('CustomEvent')")
 expect(bridge).to_contain("new RegExp('Chrome/|Chromium/')")
+val preload = file_read("src/app/ui.electron/preload.js")
+expect(preload).to_contain("runtimeVersions")
+expect(preload).to_contain("process.versions.electron")
+expect(preload).to_contain("process.versions.chrome")
 expect(envelopes).to_contain("body_html_length")
 expect(envelopes).to_contain("css_length")
 ```
@@ -756,7 +782,7 @@ expect(envelopes).to_contain("css_length")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 35 lines folded for reproduction.
+Runnable source: 37 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -777,6 +803,8 @@ expect(evidence).to_contain("electron_live_smoke_surface_id=")
 expect(evidence).to_contain("electron_live_smoke_proof_source=")
 expect(evidence).to_contain("electron_live_smoke_browser_engine=")
 expect(evidence).to_contain("electron_live_smoke_electron_user_agent=")
+expect(evidence).to_contain("electron_live_smoke_electron_process_version=")
+expect(evidence).to_contain("electron_live_smoke_chrome_process_version=")
 expect(evidence).to_contain("electron_live_smoke_width=")
 expect(evidence).to_contain("electron_live_smoke_height=")
 expect(evidence).to_contain("electron_live_smoke_body_html_length=")

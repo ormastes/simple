@@ -46,6 +46,10 @@ function textSample(value) {
   return typeof value === 'string' ? value : '';
 }
 
+function versionText(value) {
+  return typeof value === 'string' && /^[0-9]+(?:\.[0-9]+)*$/.test(value);
+}
+
 const [proofPath, widthText, heightText] = process.argv.slice(2);
 if (!proofPath || !widthText || !heightText) {
   emit('electron_live_smoke_validation_status', 'fail');
@@ -81,6 +85,8 @@ if (proof.target !== 'electron') {
   reason = 'unexpected-browser-engine';
 } else if (!/Electron\/[0-9]/.test(userAgent) || !/(Chrome|Chromium)\/[0-9]/.test(userAgent)) {
   reason = 'missing-electron-chromium-user-agent';
+} else if (!versionText(proof.electron_process_version) || !versionText(proof.chrome_process_version)) {
+  reason = 'missing-electron-chromium-process-versions';
 } else if (!Number.isInteger(expectedWidth) || expectedWidth < 1 || proof.width !== expectedWidth) {
   reason = 'unexpected-width';
 } else if (!Number.isInteger(expectedHeight) || expectedHeight < 1 || proof.height !== expectedHeight) {
@@ -128,6 +134,8 @@ emit('electron_live_smoke_surface_id', proof.surface_id);
 emit('electron_live_smoke_proof_source', proof.proof_source);
 emit('electron_live_smoke_browser_engine', proof.browser_engine);
 emit('electron_live_smoke_electron_user_agent', proof.electron_user_agent);
+emit('electron_live_smoke_electron_process_version', proof.electron_process_version);
+emit('electron_live_smoke_chrome_process_version', proof.chrome_process_version);
 emit('electron_live_smoke_width', jsonIntegerTextOrBlank(proof.width));
 emit('electron_live_smoke_height', jsonIntegerTextOrBlank(proof.height));
 emit('electron_live_smoke_body_html_length', jsonIntegerTextOrBlank(proof.body_html_length));

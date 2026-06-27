@@ -242,10 +242,15 @@ function electronLiveSmokeProofScript() {
                 var style = window.getComputedStyle(animationProbe);
                 var text = appEl ? (appEl.textContent || '') : '';
                 var userAgent = (window.navigator && window.navigator.userAgent) || '';
+                var runtimeVersions = window.simpleElectron && typeof window.simpleElectron.runtimeVersions === 'function'
+                    ? window.simpleElectron.runtimeVersions()
+                    : {};
                 var proof = Object.assign({}, envelope, {
                     proof_source: 'src/app/ui.electron/bridge.js:electronLiveSmokeProofScript',
                     browser_engine: new RegExp('Chrome/|Chromium/').test(userAgent) ? 'chromium' : '',
                     electron_user_agent: userAgent,
+                    electron_process_version: runtimeVersions.electron || '',
+                    chrome_process_version: runtimeVersions.chrome || '',
                     app_element_present: !!appEl,
                     body_text_length: text.length,
                     body_text_sample: text.slice(0, 120),
