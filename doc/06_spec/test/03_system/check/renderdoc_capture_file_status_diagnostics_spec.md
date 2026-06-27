@@ -27,7 +27,7 @@ renderdoc_capture_file_status_diagnostics_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 3 | 3 | 0 | 0 |
+| 4 | 4 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -89,11 +89,13 @@ the report can distinguish a missing raw `.rdc` path from a nested gate failure.
 - Controlled Electron `.rdc` evidence reports `capture_file_status=pass`.
 - The external Chrome host wrapper emits capture file status even when capture
   was not requested on the current host.
+- The external Chrome host wrapper reports symlinked `.rdc` artifacts as
+  `symlink` and does not read their magic bytes through the link.
 - The top-level GUI RenderDoc aggregate emits external capture file status,
   external gate capture file status, raw Electron capture file status, and
   Electron gate capture file status.
-- Missing native `.rdc` artifacts are represented by `missing` or `unavailable`
-  status values, not by absent keys.
+- Missing or symlinked native `.rdc` artifacts are represented by typed status
+  values, not by absent keys.
 
 ## Examples
 
@@ -135,9 +137,9 @@ blocked by host packaging or upstream support. On Windows, PIX or GPU debugger
 logs may provide additional native fields, but missing RenderDoc-equivalent
 capture files must still be visible as typed status rather than absent keys.
 
-The contract intentionally accepts `pass`, `missing`, and `unavailable` as
-well-formed values. The value communicates host state; the invariant here is
-that the key exists and is machine-readable.
+The contract intentionally accepts `pass`, `missing`, `unavailable`, and
+`symlink` as well-formed values. The value communicates host state; the
+invariant here is that the key exists and is machine-readable.
 
 ## Evidence Checklist
 
@@ -145,6 +147,8 @@ that the key exists and is machine-readable.
   controlled Electron fixture creates a synthetic `RDOC` file.
 - `rdoc_external_host_capture_file_status=missing` is valid in no-capture mode
   because the wrapper did not ask RenderDoc to launch Chrome.
+- `rdoc_external_host_capture_file_status=symlink` rejects substituted Chrome
+  `.rdc` artifacts before the wrapper reads file magic.
 - `external_renderdoc_capture_file_status` must be emitted by the top-level
   aggregate for Chrome/external-host diagnostics.
 - `electron_renderdoc_capture_file_status` must be emitted by the top-level
@@ -216,6 +220,39 @@ expect(evidence).to_contain("rdoc_external_host_gate_capture_file_status=missing
 
 </details>
 
+#### rejects symlinked external Chrome RDOC artifacts
+
+- Create controlled external-host evidence with a symlinked RDOC artifact
+   - Expected: code equals `0`
+- Assert the wrapper classifies the symlink without reading through it
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 15 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Create controlled external-host evidence with a symlinked RDOC artifact")
+val root = "build/test-renderdoc-capture-file-status-diagnostics/external-symlink"
+val command = "rm -rf " + root + " && mkdir -p " + root + "/source && " +
+    "printf 'RDOCsynthetic external capture\\n' > " + root + "/source/chrome-real.rdc && ln -s chrome-real.rdc " + root + "/source/chrome.rdc && " +
+    "printf 'rdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=" + root + "/source/chrome.rdc\\nrdoc_capture_magic=RDOC\\nrdoc_scene=html-css-chrome\\nrdoc_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\\nrdoc_chromium_requested_api=vulkan\\nrdoc_chromium_requested_angle=vulkan\\nrdoc_chromium_requested_features=Vulkan\\nrdoc_chromium_launch_flags=--no-sandbox --disable-gpu-sandbox --disable-dev-shm-usage --enable-features=Vulkan --use-angle=vulkan\\n' > " + root + "/source/evidence.env && " +
+    "RDOC_HTML_EVIDENCE_ENV=" + root + "/source/evidence.env BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-renderdoc-external-host-capture.shs"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+step("Assert the wrapper classifies the symlink without reading through it")
+val evidence = file_read(root + "/out/evidence.env")
+expect(evidence).to_contain("rdoc_external_host_capture_file_status=symlink")
+expect(evidence).to_contain("rdoc_external_host_gate_capture_file_status=symlink")
+expect(evidence).to_contain("rdoc_external_host_capture_file_magic=")
+expect(evidence).to_contain("rdoc_external_host_gate_reason=rdc-file-symlink")
+```
+
+</details>
+
 #### emits top-level Chrome and Electron capture file status diagnostics
 
 - Run one top-level GUI RenderDoc aggregate pass
@@ -245,10 +282,10 @@ expect(external_capture.len()).to_be_greater_than(0)
 expect(external_gate.len()).to_be_greater_than(0)
 expect(electron_capture.len()).to_be_greater_than(0)
 expect(electron_gate.len()).to_be_greater_than(0)
-expect(["pass", "missing", "unavailable"].contains(external_capture)).to_be(true)
-expect(["pass", "missing", "unavailable"].contains(external_gate)).to_be(true)
-expect(["pass", "missing", "unavailable"].contains(electron_capture)).to_be(true)
-expect(["pass", "missing", "unavailable"].contains(electron_gate)).to_be(true)
+expect(["pass", "missing", "unavailable", "symlink"].contains(external_capture)).to_be(true)
+expect(["pass", "missing", "unavailable", "symlink"].contains(external_gate)).to_be(true)
+expect(["pass", "missing", "unavailable", "symlink"].contains(electron_capture)).to_be(true)
+expect(["pass", "missing", "unavailable", "symlink"].contains(electron_gate)).to_be(true)
 ```
 
 </details>
@@ -257,8 +294,8 @@ expect(["pass", "missing", "unavailable"].contains(electron_gate)).to_be(true)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 3 |
-| Active scenarios | 3 |
+| Total scenarios | 4 |
+| Active scenarios | 4 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

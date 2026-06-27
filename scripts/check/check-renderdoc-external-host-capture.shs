@@ -23,6 +23,19 @@ value_of() {
     sed -n "s/^${key}=//p" "$file" 2>/dev/null | tail -n 1
 }
 
+file_exists_status() {
+    path="$1"
+    if [ -z "$path" ]; then
+        echo "missing"
+    elif [ -L "$path" ]; then
+        echo "symlink"
+    elif [ -s "$path" ]; then
+        echo "pass"
+    else
+        echo "missing"
+    fi
+}
+
 setup_status="unavailable"
 setup_reason="not-run"
 capture_status="not-run"
@@ -90,18 +103,34 @@ if [ "$RUN_CAPTURE" = "1" ]; then
 fi
 
 if [ -f "$capture_env" ]; then
+    capture_status_from_env="$(awk -F= '/^rdoc_capture_status=/ { print $2; exit }' "$capture_env" 2>/dev/null || true)"
+    capture_reason_from_env="$(awk -F= '/^rdoc_capture_reason=/ { print $2; exit }' "$capture_env" 2>/dev/null || true)"
+    if [ "$capture_status_from_env" != "" ]; then
+        capture_status="$capture_status_from_env"
+        capture_reason="$capture_reason_from_env"
+    fi
     capture_file="$(awk -F= '/^rdoc_capture_file=/ { print $2; exit }' "$capture_env" 2>/dev/null || true)"
     capture_magic="$(awk -F= '/^rdoc_capture_magic=/ { print $2; exit }' "$capture_env" 2>/dev/null || true)"
     capture_html_path="$(awk -F= '/^rdoc_html_path=/ { print $2; exit }' "$capture_env" 2>/dev/null || true)"
 fi
-if [ -s "$capture_file" ]; then
-    capture_file_status="pass"
+capture_file_status="$(file_exists_status "$capture_file")"
+if [ "$capture_file_status" = "pass" ]; then
     capture_file_magic="$(dd if="$capture_file" bs=4 count=1 2>/dev/null || true)"
 fi
 
 if [ -f "$capture_env" ] && [ "$capture_status" != "" ] && [ "$capture_status" != "pass" ]; then
     gate_status="fail"
     gate_reason="${capture_reason:-capture-not-pass}"
+    gate_scene="$(awk -F= '/^rdoc_scene=/ { print $2; exit }' "$capture_env" 2>/dev/null || true)"
+    gate_html_path="$capture_html_path"
+    gate_capture_file_magic="$capture_file_magic"
+    gate_requested_api="$(value_of rdoc_chromium_requested_api "$capture_env")"
+    gate_requested_angle="$(value_of rdoc_chromium_requested_angle "$capture_env")"
+    gate_requested_features="$(value_of rdoc_chromium_requested_features "$capture_env")"
+    gate_launch_flags="$(value_of rdoc_chromium_launch_flags "$capture_env")"
+elif [ -f "$capture_env" ] && [ "$capture_file_status" = "symlink" ]; then
+    gate_status="fail"
+    gate_reason="rdc-file-symlink"
     gate_scene="$(awk -F= '/^rdoc_scene=/ { print $2; exit }' "$capture_env" 2>/dev/null || true)"
     gate_html_path="$capture_html_path"
     gate_capture_file_magic="$capture_file_magic"
