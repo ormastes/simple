@@ -94,8 +94,24 @@ function proofSourceArtifact() {
     return { status: 'missing', size: '' };
   }
   if (stat.isSymbolicLink()) return { status: 'symlink', size: '' };
-  if (!stat.isFile()) return { status: 'missing', size: '' };
+  if (!stat.isFile()) return { status: 'not-regular', size: '' };
+  if (stat.nlink > 1) return { status: 'hardlink', size: String(stat.size) };
   if (stat.size <= 0) return { status: 'empty', size: '0' };
+  let source = '';
+  try {
+    source = fs.readFileSync(expectedProofSource, 'utf8');
+  } catch (_err) {
+    return { status: 'missing', size: '' };
+  }
+  if (
+    !source.includes("surface_id: 'wm-browser-event-routing'") ||
+    !source.includes("proof_source: 'tools/web-render-backend/wm_event_check.js'") ||
+    !source.includes("out.event_sequence = window.__wmFrames.map(frameName)") ||
+    !source.includes("out.input_to_paint_ms = inputToPaintMs") ||
+    !source.includes("out.css_animation_probe = animationProbeStyle.animationName === 'simple-wm-proof-pulse'")
+  ) {
+    return { status: 'marker-missing', size: String(stat.size) };
+  }
   return { status: 'pass', size: String(stat.size) };
 }
 

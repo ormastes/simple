@@ -27,7 +27,7 @@ wm_browser_event_routing_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 20 | 20 | 0 | 0 |
+| 21 | 21 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -99,8 +99,10 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/wm_browser_event_routing_val
 - The proof must carry the live WM browser event-check surface identity and
   source marker; a hand-authored JSON object with matching counters is not
   sufficient.
-- The proof source marker must resolve to a regular nonempty producer source
-  file so stale JSON cannot be paired with a missing event-check script.
+- The proof source marker must resolve to a single-link regular nonempty
+  producer source file with expected event, timing, and animation markers so
+  stale JSON cannot be paired with a missing, substituted, or aliased
+  event-check script.
 - The proof must carry live Electron/Chromium runtime identity, including browser
   engine, Electron user-agent, Electron process version, and Chrome process
   version.
@@ -313,6 +315,48 @@ expect(evidence).to_contain("wm_browser_event_routing_validation_reason=event-ro
 expect(evidence).to_contain("wm_browser_event_routing_proof_source=tools/web-render-backend/wm_event_check.js")
 expect(evidence).to_contain("wm_browser_event_routing_proof_source_file_status=missing")
 expect(evidence).to_contain("wm_browser_event_routing_proof_source_size_bytes=")
+```
+
+</details>
+
+#### rejects substituted live event-check source artifacts
+
+- Confirm event proof source evidence cannot be hardlinked, non-regular, or markerless
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 28 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-wm-browser-event-validator-source-artifact-substituted"
+val command = "rm -rf " + root + " && mkdir -p " + root + "/hardlink/tools/web-render-backend " + root + "/directory/tools/web-render-backend " + root + "/markerless/tools/web-render-backend && " +
+    _fixture_command(root + "/proof.json", "") +
+    " && cp " + root + "/proof.json " + root + "/hardlink/proof.json && cp tools/web-render-backend/wm_event_check.js " + root + "/hardlink/original-wm-event-check.js && ln " + root + "/hardlink/original-wm-event-check.js " + root + "/hardlink/tools/web-render-backend/wm_event_check.js && " +
+    "cd " + root + "/hardlink && node ../../../scripts/check/validate-wm-browser-event-routing-proof.js proof.json > hardlink.env; hardlink_code=$?; cd ../../.. && " +
+    "cp " + root + "/proof.json " + root + "/directory/proof.json && mkdir -p " + root + "/directory/tools/web-render-backend/wm_event_check.js && " +
+    "cd " + root + "/directory && node ../../../scripts/check/validate-wm-browser-event-routing-proof.js proof.json > directory.env; directory_code=$?; cd ../../.. && " +
+    "cp " + root + "/proof.json " + root + "/markerless/proof.json && printf 'module.exports = {};\\n' > " + root + "/markerless/tools/web-render-backend/wm_event_check.js && " +
+    "cd " + root + "/markerless && node ../../../scripts/check/validate-wm-browser-event-routing-proof.js proof.json > markerless.env; markerless_code=$?; cd ../../.. && " +
+    "[ \"$hardlink_code\" -eq 1 ] && [ \"$directory_code\" -eq 1 ] && [ \"$markerless_code\" -eq 1 ]"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val hardlink = file_read(root + "/hardlink/hardlink.env")
+val directory = file_read(root + "/directory/directory.env")
+val markerless = file_read(root + "/markerless/markerless.env")
+step("Confirm event proof source evidence cannot be hardlinked, non-regular, or markerless")
+expect(hardlink).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(hardlink).to_contain("wm_browser_event_routing_validation_reason=event-routing-proof-source-hardlink")
+expect(hardlink).to_contain("wm_browser_event_routing_proof_source_file_status=hardlink")
+expect(directory).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(directory).to_contain("wm_browser_event_routing_validation_reason=event-routing-proof-source-not-regular")
+expect(directory).to_contain("wm_browser_event_routing_proof_source_file_status=not-regular")
+expect(markerless).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(markerless).to_contain("wm_browser_event_routing_validation_reason=event-routing-proof-source-marker-missing")
+expect(markerless).to_contain("wm_browser_event_routing_proof_source_file_status=marker-missing")
 ```
 
 </details>
@@ -911,6 +955,8 @@ expect(script).to_contain("wm_browser_event_routing_move_payload_source")
 expect(script).to_contain("wm_browser_event_routing_title_input_width_px")
 expect(script).to_contain("wm_browser_event_routing_close_button_background")
 expect(validator).to_contain("proof-json-hardlink")
+expect(validator).to_contain("event-routing-proof-source-marker-missing")
+expect(validator).to_contain("out.input_to_paint_ms = inputToPaintMs")
 val producer = file_read("tools/web-render-backend/wm_event_check.js")
 expect(producer).to_contain("target: 'electron'")
 expect(producer).to_contain("surface_id: 'wm-browser-event-routing'")
