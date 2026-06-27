@@ -177,6 +177,10 @@ The Chrome HTML compatibility geometry manifest uses generic summary fields
 `simple_bin`, `simple_bin_source`, and `simple_bin_status`; Chrome geometry
 manifest evidence is not production evidence if that status is `missing` or
 `forbidden`.
+The single-fixture Electron HTML compatibility geometry wrapper writes the same
+generic fields to `evidence.env`; an Electron geometry row is not production
+evidence if `simple_bin_status` is `missing` or `forbidden`, even if Electron
+itself could capture the fixture.
 
 The renderer parity wrapper also runs the Electron/Chromium event-routing probe
 before a top-level pass. Saved evidence must include
