@@ -58,8 +58,10 @@ function orientationText(value) {
   return "";
 }
 
-function boolText(value) {
-  return value === true ? "true" : "false";
+function jsonBoolTextOrBlank(value) {
+  if (value === true) return "true";
+  if (value === false) return "false";
+  return "";
 }
 
 function fail(reason) {
@@ -208,21 +210,21 @@ emit("mdi_failure_marker_status", failureMarker ? "fail" : "pass");
 emit("mdi_proof_window_count", jsonIntegerTextOrBlank(proof.count));
 emit("mdi_render_status", renderPass ? "pass" : "fail");
 emit("mdi_render_image_count", jsonIntegerTextOrBlank(proof.imageCount));
-emit("mdi_render_html_renderable", proof.htmlRenderable === true ? "true" : "false");
+emit("mdi_render_html_renderable", jsonBoolTextOrBlank(proof.htmlRenderable));
 emit("mdi_event_taskbar_item_count", jsonIntegerTextOrBlank(proof.taskbarItemCount));
 emit("mdi_event_taskbar_icon_count", jsonIntegerTextOrBlank(proof.taskbarIconCount));
-emit("mdi_event_has_desktop", boolText(proof.hasDesktop));
-emit("mdi_event_drag_runtime_available", boolText(proof.hasDragRuntime));
-emit("mdi_event_drag_events_available", boolText(proof.hasDragEvents));
-emit("mdi_event_drag_moved", boolText(proof.dragMoved));
-emit("mdi_event_window_event_runtime_available", boolText(proof.hasWindowEventRuntime));
-emit("mdi_event_app_action_control_found", boolText(proof.appActionControlFound));
-emit("mdi_event_app_input_control_found", boolText(proof.appInputControlFound));
-emit("mdi_event_body_click_routed", boolText(proof.bodyClickRouted));
-emit("mdi_event_body_input_routed", boolText(proof.bodyInputRouted));
-emit("mdi_event_body_key_routed", boolText(proof.bodyKeyRouted));
-emit("mdi_event_taskbar_icons_visible", boolText(proof.taskbarIconsVisible));
-emit("mdi_event_taskbar_labels_visible", boolText(proof.taskbarLabelsVisible));
+emit("mdi_event_has_desktop", jsonBoolTextOrBlank(proof.hasDesktop));
+emit("mdi_event_drag_runtime_available", jsonBoolTextOrBlank(proof.hasDragRuntime));
+emit("mdi_event_drag_events_available", jsonBoolTextOrBlank(proof.hasDragEvents));
+emit("mdi_event_drag_moved", jsonBoolTextOrBlank(proof.dragMoved));
+emit("mdi_event_window_event_runtime_available", jsonBoolTextOrBlank(proof.hasWindowEventRuntime));
+emit("mdi_event_app_action_control_found", jsonBoolTextOrBlank(proof.appActionControlFound));
+emit("mdi_event_app_input_control_found", jsonBoolTextOrBlank(proof.appInputControlFound));
+emit("mdi_event_body_click_routed", jsonBoolTextOrBlank(proof.bodyClickRouted));
+emit("mdi_event_body_input_routed", jsonBoolTextOrBlank(proof.bodyInputRouted));
+emit("mdi_event_body_key_routed", jsonBoolTextOrBlank(proof.bodyKeyRouted));
+emit("mdi_event_taskbar_icons_visible", jsonBoolTextOrBlank(proof.taskbarIconsVisible));
+emit("mdi_event_taskbar_labels_visible", jsonBoolTextOrBlank(proof.taskbarLabelsVisible));
 emit("mdi_event_status", eventPass ? "pass" : "fail");
 emit("mdi_capture_status", capturePass ? "pass" : "fail");
 emit("mdi_capture_viewport_width", jsonIntegerTextOrBlank(proof.viewportWidth));
@@ -230,14 +232,14 @@ emit("mdi_capture_viewport_height", jsonIntegerTextOrBlank(proof.viewportHeight)
 emit("mdi_capture_device_pixel_ratio", jsonDecimalTextOrBlank(proof.devicePixelRatio));
 emit("mdi_capture_screen_orientation", orientationText(proof.screenOrientation));
 emit("mdi_performance_status", performancePass ? "pass" : "fail");
-emit("mdi_performance_now_available", proof.performanceNowAvailable === true ? "true" : "false");
+emit("mdi_performance_now_available", jsonBoolTextOrBlank(proof.performanceNowAvailable));
 emit("mdi_performance_now_delta_ms", jsonDecimalTextOrBlank(proof.performanceNowDeltaMs));
 emit("mdi_interaction_latency_status", interactionLatencyPass ? "pass" : "fail");
 emit("mdi_input_to_paint_ms", jsonDecimalTextOrBlank(proof.inputToPaintMs));
 emit("mdi_animation_status", animationPass ? "pass" : "fail");
-emit("mdi_animation_frame_available", proof.animationFrameAvailable === true ? "true" : "false");
+emit("mdi_animation_frame_available", jsonBoolTextOrBlank(proof.animationFrameAvailable));
 emit("mdi_animation_frame_count", jsonIntegerTextOrBlank(proof.animationFrameCount));
-emit("mdi_css_animation_probe", proof.cssAnimationProbe === true ? "true" : "false");
+emit("mdi_css_animation_probe", jsonBoolTextOrBlank(proof.cssAnimationProbe));
 
 if (status !== "pass") {
   process.exit(1);
