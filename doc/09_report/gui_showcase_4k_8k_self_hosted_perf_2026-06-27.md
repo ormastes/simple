@@ -115,6 +115,23 @@ After the Simple-status fix refresh, strict aggregate source freshness reports:
 - `gui_showcase_8k_perf_simple_bin_status=pass`
 - `blocked_completion_gate_count=8`
 
+After hardening the default source fingerprint to include the Simple Web
+renderer implementation, fresh strict aggregate source freshness reports:
+
+- `gui_showcase_4k_200fps_status=pass`
+- `gui_showcase_4k_200fps_source_revision_status=current`
+- `gui_showcase_4k_200fps_current_source_revision=b996d435cff9`
+- `gui_showcase_4k_200fps_source_revision_files=scripts/check/check-widget-showcase-4k-200fps.shs examples/06_io/ui/widget_showcase_gui.spl src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl`
+- `gui_showcase_4k_200fps_fps_x1000=62034739`
+- `gui_showcase_4k_200fps_frame_p95_ns=16120`
+- `gui_showcase_8k_perf_status=pass`
+- `gui_showcase_8k_perf_source_revision_status=current`
+- `gui_showcase_8k_perf_current_source_revision=b996d435cff9`
+- `gui_showcase_8k_perf_source_revision_files=scripts/check/check-widget-showcase-4k-200fps.shs examples/06_io/ui/widget_showcase_gui.spl src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl`
+- `gui_showcase_8k_perf_fps_x1000=14035087`
+- `gui_showcase_8k_perf_frame_p95_ns=71250`
+- `blocked_completion_gate_count=8`
+
 The remaining aggregate blockers are Chrome/Electron RenderDoc `.rdc` capture,
 Electron widget RenderDoc `.rdc`, native render-log comparison across Linux
 Vulkan/macOS Metal/Windows D3D12, production GUI/web readback/parity gates, and
