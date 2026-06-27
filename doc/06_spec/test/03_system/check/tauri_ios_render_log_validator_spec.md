@@ -27,7 +27,7 @@ tauri_ios_render_log_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 18 | 18 | 0 | 0 |
+| 19 | 19 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -86,6 +86,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_ios_render_log_validat
 - Passing validation emits the exact coherent iOS render-log source path and
   byte size so aggregate evidence can bind Metal-backed rendering to a real log
   artifact.
+- Passing validation binds `html_len` to the coherent WKWebView/CAMetalLayer
+  render-log source instead of an unrelated companion render marker.
 - Fallback GPU markers such as SwiftShader, software rendering, or OpenGL
   renderer fallback text fail even when the log also contains WKWebView,
   CAMetalLayer, and Metal markers.
@@ -151,6 +153,40 @@ expect(evidence).to_contain("ios_render_log_fallback_marker_status=pass")
 expect(evidence).to_contain("ios_render_log_tauri_context_status=pass")
 expect(evidence).to_contain("ios_render_log_metal_context_status=pass")
 expect(evidence).to_contain("ios_render_log_failure_marker_status=pass")
+```
+
+</details>
+
+#### binds html length evidence to the coherent iOS Metal source
+
+- Confirm html_len is emitted from the coherent WKWebView/CAMetalLayer source
+   - Expected: evidence does not contain `ios_render_log_html_len=999`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 17 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-tauri-ios-render-log-validator-coherent-html-len"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    "printf '[tauri-shell] render, html_len=999\\n' > " + root + "/render-only.log && " +
+    "printf '[tauri-shell] creating window from app://index.html\\n[tauri-shell] ios renderer context: backend=WKWebView metal_expected=true metal_layer=CAMetalLayer\\n[tauri-shell] render, html_len=347702\\nCAMetalLayer Metal renderer ready\\n' > " + root + "/ios.log && " +
+    "node scripts/check/validate-tauri-ios-render-log-proof.js " + root + "/render-only.log " + root + "/ios.log > " + root + "/evidence.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val evidence = file_read(root + "/evidence.env")
+step("Confirm html_len is emitted from the coherent WKWebView/CAMetalLayer source")
+expect(evidence).to_contain("ios_render_log_validation_status=pass")
+expect(evidence).to_contain("ios_render_log_requested_source_count=2")
+expect(evidence).to_contain("ios_render_log_source_count=2")
+expect(evidence).to_contain("ios_render_log_source_coherence_status=pass")
+expect(evidence).to_contain("ios_render_log_coherent_source_path=" + root + "/ios.log")
+expect(evidence).to_contain("ios_render_log_html_len=347702")
+expect(evidence.contains("ios_render_log_html_len=999")).to_equal(false)
 ```
 
 </details>
@@ -707,7 +743,7 @@ expect(direct).to_contain("emit_existing_or_default ios_mdi_animation_status \"$
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 55 lines folded for reproduction.
+Runnable source: 56 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -716,6 +752,7 @@ val aggregate = file_read("scripts/check/check-tauri-mobile-renderer-parity-evid
 val tauri = file_read("tools/tauri-shell/src-tauri/src/lib.rs")
 val validator = file_read("scripts/check/validate-tauri-ios-render-log-proof.js")
 expect(validator).to_contain("const maxRenderHtmlLen = 10000000")
+expect(validator).to_contain("coherentSourceHtmlLen")
 expect(validator).to_contain("CAMetalLayer\\\\s+Metal renderer ready")
 expect(direct).to_contain("validate-tauri-ios-render-log-proof.js")
 expect(direct).to_contain("ios_render_log.validation.env")
@@ -774,8 +811,8 @@ expect(tauri).to_contain("metal_layer=CAMetalLayer")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 18 |
-| Active scenarios | 18 |
+| Total scenarios | 19 |
+| Active scenarios | 19 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

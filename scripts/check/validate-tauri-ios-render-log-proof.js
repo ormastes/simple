@@ -21,6 +21,7 @@ let coherentSource = false;
 let coherentSourcePath = '';
 let coherentSourceSizeBytes = '';
 let htmlLen = '';
+let coherentSourceHtmlLen = '';
 const maxRenderHtmlLen = 10000000;
 
 const validRenderMarkerPattern = /\[tauri-shell\]\s+render,\s+html_len=([1-9][0-9]*)(?:\s|$)/;
@@ -71,8 +72,13 @@ for (const file of files) {
     if (coherentSourcePath === '') {
       coherentSourcePath = file;
       coherentSourceSizeBytes = String(stat.size);
+      coherentSourceHtmlLen = sourceHtmlLen;
     }
   }
+}
+
+if (coherentSourceHtmlLen !== '') {
+  htmlLen = coherentSourceHtmlLen;
 }
 
 const hasAnyRenderMarker = anyRenderMarkerPattern.test(text);
