@@ -20,6 +20,7 @@ let htmlLen = '';
 
 const validRenderMarkerPattern = /\[tauri-shell\]\s+render,\s+html_len=([1-9][0-9]*)(?:\s|$)/;
 const anyRenderMarkerPattern = /\[tauri-shell\]\s+render,\s+html_len=/;
+const metalRuntimeMarkerPattern = /(Metal renderer ready|MetalKit\.framework|Metal\.framework|-framework Metal|\bMTL[A-Za-z0-9_]*\b|\bAGX\b|\bIOGPU\b)/i;
 
 function renderHtmlLen(content) {
   const match = content.match(validRenderMarkerPattern);
@@ -38,7 +39,7 @@ for (const file of files) {
   const sourceHtmlLen = renderHtmlLen(content);
   const sourceRenderMarker = sourceHtmlLen !== '';
   if (htmlLen === '' && sourceHtmlLen !== '') htmlLen = sourceHtmlLen;
-  const sourceMetalMarker = /(CAMetalLayer|Metal renderer ready|MetalKit\.framework|Metal\.framework|-framework Metal|\bMTL[A-Za-z0-9_]*\b|\bAGX\b|\bIOGPU\b)/i.test(content);
+  const sourceMetalMarker = metalRuntimeMarkerPattern.test(content);
   const sourceTauriIosContext = /(\[tauri-shell\]\s+ios renderer context:.*WKWebView|Tauri iOS external_url|ios_mdi_probe\.html|\[tauri-shell\]\s+creating window (from|with)|mobile inline shell base)/i.test(content);
   const sourceMetalContext = /\[tauri-shell\]\s+ios renderer context:(?=.*WKWebView)(?=.*metal_expected=true)(?=.*metal_layer=CAMetalLayer)/i.test(content);
   if (sourceRenderMarker && sourceMetalMarker && sourceTauriIosContext && sourceMetalContext) {
@@ -48,7 +49,7 @@ for (const file of files) {
 
 const hasAnyRenderMarker = anyRenderMarkerPattern.test(text);
 const renderMarker = renderHtmlLen(text) !== '';
-const metalMarker = /(CAMetalLayer|Metal renderer ready|MetalKit\.framework|Metal\.framework|-framework Metal|\bMTL[A-Za-z0-9_]*\b|\bAGX\b|\bIOGPU\b)/i.test(text);
+const metalMarker = metalRuntimeMarkerPattern.test(text);
 const tauriIosContext = /(\[tauri-shell\]\s+ios renderer context:.*WKWebView|Tauri iOS external_url|ios_mdi_probe\.html|\[tauri-shell\]\s+creating window (from|with)|mobile inline shell base)/i.test(text);
 const metalContext = /\[tauri-shell\]\s+ios renderer context:(?=.*WKWebView)(?=.*metal_expected=true)(?=.*metal_layer=CAMetalLayer)/i.test(text);
 const failureMarker = /(eval FAIL|inline shell eval FAIL|delayed inline shell eval FAIL|window 'main' not found|parse error|Fatal signal|F\/DEBUG|NSURLErrorDomain|failed provisional load|Headless UI completed|subprocess exited with code)/i.test(text);

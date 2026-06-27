@@ -27,7 +27,7 @@ tauri_ios_render_log_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 12 | 12 | 0 | 0 |
+| 13 | 13 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -78,6 +78,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_ios_render_log_validat
   Metal log text elsewhere is not enough.
 - The iOS context line must include both `metal_expected=true` and
   `metal_layer=CAMetalLayer`; a generic Metal expectation flag is not enough.
+- The CAMetalLayer context binding alone is not enough; a separate Metal
+  runtime readiness marker must be present in the same coherent source log.
 - Render, WKWebView, and CAMetalLayer markers must be coherent within one
   source log; markers split across unrelated log files fail closed.
 - Explicitly requested iOS log source paths must exist; a valid companion log
@@ -222,6 +224,38 @@ expect(evidence).to_contain("ios_render_log_marker_status=pass")
 expect(evidence).to_contain("ios_render_log_metal_marker_status=pass")
 expect(evidence).to_contain("ios_render_log_tauri_context_status=pass")
 expect(evidence).to_contain("ios_render_log_metal_context_status=fail")
+```
+
+</details>
+
+#### rejects CAMetalLayer context without a Metal runtime readiness marker
+
+- Confirm CAMetalLayer binding does not replace a runtime Metal marker
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 16 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-tauri-ios-render-log-validator-context-only-metal"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    "printf '[tauri-shell] creating window from app://index.html\\n[tauri-shell] ios renderer context: backend=WKWebView metal_expected=true metal_layer=CAMetalLayer\\n[tauri-shell] render, html_len=347702\\n' > " + root + "/ios.log && " +
+    "node scripts/check/validate-tauri-ios-render-log-proof.js " + root + "/ios.log > " + root + "/evidence.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read(root + "/evidence.env")
+step("Confirm CAMetalLayer binding does not replace a runtime Metal marker")
+expect(evidence).to_contain("ios_render_log_validation_status=fail")
+expect(evidence).to_contain("ios_render_log_validation_reason=ios-metal-log-marker-missing")
+expect(evidence).to_contain("ios_render_log_marker_status=pass")
+expect(evidence).to_contain("ios_render_log_metal_marker_status=fail")
+expect(evidence).to_contain("ios_render_log_tauri_context_status=pass")
+expect(evidence).to_contain("ios_render_log_metal_context_status=pass")
+expect(evidence).to_contain("ios_render_log_source_coherence_status=fail")
 ```
 
 </details>
@@ -512,8 +546,8 @@ expect(tauri).to_contain("metal_layer=CAMetalLayer")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 12 |
-| Active scenarios | 12 |
+| Total scenarios | 13 |
+| Active scenarios | 13 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
