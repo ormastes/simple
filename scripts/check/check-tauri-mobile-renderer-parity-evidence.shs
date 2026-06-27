@@ -157,9 +157,73 @@ grep_any_file() {
     return 1
 }
 
-artifact_file_status() {
+mdi_proof_file_reason() {
     path="$1"
-    if [ -n "$path" ] && [ -s "$path" ]; then
+    if [ -z "$path" ] || [ ! -s "$path" ]; then
+        echo missing
+        return
+    fi
+    if ! command -v node >/dev/null 2>&1; then
+        echo json-validator-missing
+        return
+    fi
+    node - "$path" <<'NODE'
+const fs = require('fs');
+const path = process.argv[2];
+function fail(reason) {
+  console.log(reason);
+  process.exit(0);
+}
+let proof;
+try {
+  proof = JSON.parse(fs.readFileSync(path, 'utf8'));
+} catch (_err) {
+  fail('invalid-json');
+}
+function integerAtLeast(value, min) {
+  return typeof value === 'number' && Number.isInteger(value) && value >= min;
+}
+function positiveAtMost(value, max) {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 && value <= max;
+}
+const eventPass =
+  integerAtLeast(proof.count, 4) &&
+  proof.hasDesktop === true &&
+  proof.hasDragRuntime === true &&
+  proof.hasDragEvents === true &&
+  proof.dragMoved === true &&
+  proof.hasWindowEventRuntime === true &&
+  proof.appActionControlFound === true &&
+  proof.appInputControlFound === true &&
+  proof.bodyClickRouted === true &&
+  proof.bodyInputRouted === true &&
+  proof.bodyKeyRouted === true &&
+  integerAtLeast(proof.taskbarItemCount, 4) &&
+  integerAtLeast(proof.taskbarIconCount, 4) &&
+  proof.taskbarIconsVisible === true &&
+  proof.taskbarLabelsVisible === true;
+const renderPass = integerAtLeast(proof.imageCount, 1) && proof.htmlRenderable === true;
+const capturePass =
+  integerAtLeast(proof.viewportWidth, 300) &&
+  integerAtLeast(proof.viewportHeight, 300) &&
+  typeof proof.devicePixelRatio === 'number' &&
+  Number.isFinite(proof.devicePixelRatio) &&
+  proof.devicePixelRatio > 0 &&
+  (proof.screenOrientation === 'portrait' || proof.screenOrientation === 'landscape');
+const performancePass =
+  proof.performanceNowAvailable === true &&
+  positiveAtMost(proof.performanceNowDeltaMs, 1000);
+const interactionPass = positiveAtMost(proof.inputToPaintMs, 1000);
+const animationPass =
+  proof.animationFrameAvailable === true &&
+  integerAtLeast(proof.animationFrameCount, 2) &&
+  proof.cssAnimationProbe === true;
+console.log(eventPass && renderPass && capturePass && performancePass && interactionPass && animationPass ? 'pass' : 'contract-missing');
+NODE
+}
+
+mdi_proof_file_status() {
+    if [ "$(mdi_proof_file_reason "$1")" = "pass" ]; then
         echo pass
     else
         echo fail
@@ -347,6 +411,7 @@ ios_mdi_css_animation_probe=""
 ios_screenshot_file_status=unavailable
 ios_screenshot_file_reason=not-run
 ios_mdi_proof_file_status=unavailable
+ios_mdi_proof_file_reason=not-run
 ios_expected_gpu_backend=metal
 if [ -x "$IOS_SCRIPT" ] || [ -f "$IOS_SCRIPT" ]; then
     run_lane ios "$IOS_SCRIPT"
@@ -400,7 +465,8 @@ if [ -x "$IOS_SCRIPT" ] || [ -f "$IOS_SCRIPT" ]; then
     ios_mdi_css_animation_probe="$(value_of ios_mdi_css_animation_probe "$BUILD_DIR/ios.out")"
     ios_screenshot_file_reason="$(png_file_reason "$ios_screenshot")"
     ios_screenshot_file_status="$(png_file_status "$ios_screenshot")"
-    ios_mdi_proof_file_status="$(artifact_file_status "$ios_mdi_proof_json")"
+    ios_mdi_proof_file_reason="$(mdi_proof_file_reason "$ios_mdi_proof_json")"
+    ios_mdi_proof_file_status="$(mdi_proof_file_status "$ios_mdi_proof_json")"
     ios_render_log_validation_env="$BUILD_DIR/ios_render_log.validation.env"
     if [ -f "$IOS_RENDER_LOG_VALIDATOR" ]; then
         ios_render_validation_code=0
@@ -529,6 +595,7 @@ android_mdi_css_animation_probe=""
 android_screenshot_file_status=unavailable
 android_screenshot_file_reason=not-run
 android_mdi_proof_file_status=unavailable
+android_mdi_proof_file_reason=not-run
 android_expected_gpu_backend=vulkan
 if [ -x "$ANDROID_SCRIPT" ] || [ -f "$ANDROID_SCRIPT" ]; then
     run_lane android "$ANDROID_SCRIPT"
@@ -592,7 +659,8 @@ if [ -x "$ANDROID_SCRIPT" ] || [ -f "$ANDROID_SCRIPT" ]; then
     android_mdi_css_animation_probe="$(value_of android_mdi_css_animation_probe "$BUILD_DIR/android.out")"
     android_screenshot_file_reason="$(png_file_reason "$android_screenshot")"
     android_screenshot_file_status="$(png_file_status "$android_screenshot")"
-    android_mdi_proof_file_status="$(artifact_file_status "$android_mdi_proof_json")"
+    android_mdi_proof_file_reason="$(mdi_proof_file_reason "$android_mdi_proof_json")"
+    android_mdi_proof_file_status="$(mdi_proof_file_status "$android_mdi_proof_json")"
     android_render_log_validation_env="$BUILD_DIR/android_render_log.validation.env"
     if [ -f "$ANDROID_RENDER_LOG_VALIDATOR" ]; then
         android_render_validation_code=0
@@ -702,7 +770,11 @@ elif [ "$ios_metal_log_status" != "pass" ]; then
     reason="$ios_reason"
 elif [ "$ios_mdi_proof_file_status" != "pass" ]; then
     status=fail
-    reason=ios-mdi-proof-json-missing
+    if [ "$ios_mdi_proof_file_reason" = "missing" ]; then
+        reason=ios-mdi-proof-json-missing
+    else
+        reason=ios-mdi-proof-json-invalid
+    fi
 elif [ "$ios_mdi_proof_empty_source_count" != "0" ]; then
     status=fail
     reason=ios-mdi-proof-source-empty
@@ -744,7 +816,11 @@ elif [ "$android_vulkan_log_status" != "pass" ]; then
     reason="$android_reason"
 elif [ "$android_mdi_proof_file_status" != "pass" ]; then
     status=fail
-    reason=android-mdi-proof-json-missing
+    if [ "$android_mdi_proof_file_reason" = "missing" ]; then
+        reason=android-mdi-proof-json-missing
+    else
+        reason=android-mdi-proof-json-invalid
+    fi
 elif [ "$android_mdi_proof_empty_source_count" != "0" ]; then
     status=fail
     reason=android-mdi-proof-source-empty
@@ -822,6 +898,7 @@ fi
     echo "tauri_mobile_renderer_parity_ios_metal_log_status=$ios_metal_log_status"
     echo "tauri_mobile_renderer_parity_ios_mdi_proof_json=$ios_mdi_proof_json"
     echo "tauri_mobile_renderer_parity_ios_mdi_proof_file_status=$ios_mdi_proof_file_status"
+    echo "tauri_mobile_renderer_parity_ios_mdi_proof_file_reason=$ios_mdi_proof_file_reason"
     echo "tauri_mobile_renderer_parity_ios_mdi_proof_status=$ios_mdi_proof_status"
     echo "tauri_mobile_renderer_parity_ios_mdi_failure_marker_status=$ios_mdi_failure_marker_status"
     echo "tauri_mobile_renderer_parity_ios_mdi_proof_requested_source_count=$ios_mdi_proof_requested_source_count"
@@ -887,6 +964,7 @@ fi
     echo "tauri_mobile_renderer_parity_android_vulkan_log_status=$android_vulkan_log_status"
     echo "tauri_mobile_renderer_parity_android_mdi_proof_json=$android_mdi_proof_json"
     echo "tauri_mobile_renderer_parity_android_mdi_proof_file_status=$android_mdi_proof_file_status"
+    echo "tauri_mobile_renderer_parity_android_mdi_proof_file_reason=$android_mdi_proof_file_reason"
     echo "tauri_mobile_renderer_parity_android_mdi_proof_status=$android_mdi_proof_status"
     echo "tauri_mobile_renderer_parity_android_mdi_failure_marker_status=$android_mdi_failure_marker_status"
     echo "tauri_mobile_renderer_parity_android_mdi_proof_requested_source_count=$android_mdi_proof_requested_source_count"

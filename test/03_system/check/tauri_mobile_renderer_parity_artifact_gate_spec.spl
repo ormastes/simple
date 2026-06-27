@@ -33,6 +33,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_mobile_renderer_parity
   layout capture proof.
 - Missing iOS MDI proof JSON fails even when iOS status rows claim pass.
 - Missing Android MDI proof JSON fails even when Android status rows claim pass.
+- Malformed or contract-missing MDI proof JSON files fail even when normalized
+  MDI detail rows claim pass.
 - Missing MDI proof source rows fail even when mobile status rows and proof JSON
   files claim pass.
 - Malformed mobile MDI performance and animation detail rows fail even when
@@ -72,7 +74,13 @@ fn _mobile_script_command(path: text, root: text, platform: text, proof_mode: te
     val log_key = if platform == "ios": "ios_log_stream" else: "android_logcat"
     val dev_log_key = if platform == "ios": "ios_dev_log" else: "android_gpu_log"
     val tooling_row = if platform == "ios": "ios_tooling=fixture\\n" else: ""
-    val write_proof = if proof_mode == "present": "printf '{\"ok\":true}\\n' > " + proof_path + "\\n" else: ""
+    val proof_base64 = "eyJjb3VudCI6NCwiaW1hZ2VDb3VudCI6MSwidGFza2Jhckl0ZW1Db3VudCI6NCwidGFza2Jhckljb25Db3VudCI6NCwidmlld3BvcnRXaWR0aCI6MzkwLCJ2aWV3cG9ydEhlaWdodCI6ODQ0LCJkZXZpY2VQaXhlbFJhdGlvIjozLCJzY3JlZW5PcmllbnRhdGlvbiI6InBvcnRyYWl0IiwicGVyZm9ybWFuY2VOb3dBdmFpbGFibGUiOnRydWUsInBlcmZvcm1hbmNlTm93RGVsdGFNcyI6MS4yNSwiaW5wdXRUb1BhaW50TXMiOjIuNSwiYW5pbWF0aW9uRnJhbWVBdmFpbGFibGUiOnRydWUsImFuaW1hdGlvbkZyYW1lQ291bnQiOjIsImNzc0FuaW1hdGlvblByb2JlIjp0cnVlLCJoYXNEZXNrdG9wIjp0cnVlLCJoYXNEcmFnUnVudGltZSI6dHJ1ZSwiaGFzRHJhZ0V2ZW50cyI6dHJ1ZSwiZHJhZ01vdmVkIjp0cnVlLCJoYXNXaW5kb3dFdmVudFJ1bnRpbWUiOnRydWUsImFwcEFjdGlvbkNvbnRyb2xGb3VuZCI6dHJ1ZSwiYXBwSW5wdXRDb250cm9sRm91bmQiOnRydWUsImJvZHlDbGlja1JvdXRlZCI6dHJ1ZSwiYm9keUlucHV0Um91dGVkIjp0cnVlLCJib2R5S2V5Um91dGVkIjp0cnVlLCJ0YXNrYmFySWNvbnNWaXNpYmxlIjp0cnVlLCJ0YXNrYmFyTGFiZWxzVmlzaWJsZSI6dHJ1ZSwiaHRtbFJlbmRlcmFibGUiOnRydWV9Cg=="
+    val bad_proof_base64 = "e25vdC1qc29ufQo="
+    val incomplete_proof_base64 = "eyJvayI6dHJ1ZX0K"
+    val write_valid_proof = "node -e \"process.stdout.write(Buffer.from(process.argv[1], process.argv[2]))\" " + proof_base64 + " base64 > " + proof_path + "\\n"
+    val write_bad_proof = "node -e \"process.stdout.write(Buffer.from(process.argv[1], process.argv[2]))\" " + bad_proof_base64 + " base64 > " + proof_path + "\\n"
+    val write_incomplete_proof = "node -e \"process.stdout.write(Buffer.from(process.argv[1], process.argv[2]))\" " + incomplete_proof_base64 + " base64 > " + proof_path + "\\n"
+    val write_proof = if proof_mode == "present": write_valid_proof else: if proof_mode == "bad-json": write_bad_proof else: if proof_mode == "contract-missing": write_incomplete_proof else: ""
     val png_base64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
     val write_screenshot = if screenshot_mode == "png": "node -e \"process.stdout.write(Buffer.from(process.argv[1], process.argv[2]))\" " + png_base64 + " base64 > " + screenshot_path + "\\n" else: if screenshot_mode == "signature": "printf \"\\211PNG\\r\\n\\032\\nmobile\" > " + screenshot_path + "\\n" else: "printf not-a-png > " + screenshot_path + "\\n"
     val valid_ios_log = "[tauri-shell] creating window from app://index.html\\\\n[tauri-shell] ios renderer context: backend=WKWebView metal_expected=true metal_layer=CAMetalLayer\\\\n[tauri-shell] render, html_len=347702\\\\nCAMetalLayer Metal renderer ready\\\\n"
@@ -237,6 +245,7 @@ describe "Tauri mobile renderer parity artifact gates":
         expect(evidence).to_contain("tauri_mobile_renderer_parity_status=fail")
         expect(evidence).to_contain("tauri_mobile_renderer_parity_reason=ios-mdi-proof-json-missing")
         expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_file_status=fail")
+        expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_file_reason=missing")
 
     it "rejects an Android pass claim with missing MDI proof JSON":
         val root = "build/test-tauri-mobile-artifact-gate-missing-android-proof"
@@ -248,6 +257,29 @@ describe "Tauri mobile renderer parity artifact gates":
         expect(evidence).to_contain("tauri_mobile_renderer_parity_status=fail")
         expect(evidence).to_contain("tauri_mobile_renderer_parity_reason=android-mdi-proof-json-missing")
         expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_file_status=fail")
+        expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_file_reason=missing")
+
+    it "rejects mobile pass claims with malformed or contract-missing MDI proof JSON":
+        val root = "build/test-tauri-mobile-artifact-gate-bad-proof-json"
+        val ios_command = _run_aggregate_command(root + "-ios", "bad-json", "present", "png", "png")
+        val android_command = _run_aggregate_command(root + "-android", "present", "contract-missing", "png", "png")
+        val command = ios_command + "; ios_code=$?; " + android_command + "; android_code=$?; exit 0"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(0)
+
+        val ios = file_read(root + "-ios/stdout.env")
+        val android = file_read(root + "-android/stdout.env")
+        step("Confirm aggregate validates the MDI proof JSON artifact itself")
+        expect(ios).to_contain("tauri_mobile_renderer_parity_status=fail")
+        expect(ios).to_contain("tauri_mobile_renderer_parity_reason=ios-mdi-proof-json-invalid")
+        expect(ios).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_file_status=fail")
+        expect(ios).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_file_reason=invalid-json")
+        expect(ios).to_contain("tauri_mobile_renderer_parity_ios_mdi_event_status=pass")
+        expect(android).to_contain("tauri_mobile_renderer_parity_status=fail")
+        expect(android).to_contain("tauri_mobile_renderer_parity_reason=android-mdi-proof-json-invalid")
+        expect(android).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_file_status=fail")
+        expect(android).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_file_reason=contract-missing")
+        expect(android).to_contain("tauri_mobile_renderer_parity_android_mdi_animation_status=pass")
 
     it "rejects mobile pass claims with missing MDI proof source rows":
         val root = "build/test-tauri-mobile-artifact-gate-missing-mdi-source"
@@ -456,7 +488,9 @@ describe "Tauri mobile renderer parity artifact gates":
         val script = file_read("scripts/check/check-tauri-mobile-renderer-parity-evidence.shs")
         expect(script).to_contain("png_file_status")
         expect(script).to_contain("png_file_reason")
+        expect(script).to_contain("mdi_proof_file_reason")
         expect(script).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_file_status")
+        expect(script).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_file_reason")
         expect(script).to_contain("tauri_mobile_renderer_parity_ios_mdi_failure_marker_status")
         expect(script).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_missing_source_count")
         expect(script).to_contain("cat \"$ios_render_log_validation_env\"")
@@ -466,6 +500,7 @@ describe "Tauri mobile renderer parity artifact gates":
         expect(script).to_contain("tauri_mobile_renderer_parity_android_render_log_source_coherence_status")
         expect(script).to_contain("cat \"$android_render_log_validation_env\"")
         expect(script).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_file_status")
+        expect(script).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_file_reason")
         expect(script).to_contain("tauri_mobile_renderer_parity_android_mdi_failure_marker_status")
         expect(script).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_source_count")
         expect(script).to_contain("tauri_mobile_renderer_parity_ios_mdi_render_status")
