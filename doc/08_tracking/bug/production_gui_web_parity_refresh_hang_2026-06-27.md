@@ -1,7 +1,7 @@
 # Production GUI/Web Parity Refresh Hang
 
 - Date: 2026-06-27
-- Status: mitigated; text raster parity still open
+- Status: mitigated; paint/text parity still open
 - Area: production GUI/web renderer parity evidence
 - Command: `sh scripts/check/check-production-gui-web-renderer-parity-evidence.shs`
 
@@ -59,4 +59,6 @@ visible progress if a per-case Simple run stalls.
 - Done: the Simple expected-frame run is bounded by
   `ELECTRON_BITMAP_TIMEOUT_SECS` and emits `electron_simple_web_layout_simple_expected_*`
   rows on timeout or failure.
-- Open: fix the underlying Electron/Simple text raster divergence.
+- Open: fix the underlying Electron/Simple paint or text raster divergence. The
+  text-free `position_z_index_matrix` case should classify residual color-only
+  differences as `paint-color-mismatch`, not text glyph raster drift.
