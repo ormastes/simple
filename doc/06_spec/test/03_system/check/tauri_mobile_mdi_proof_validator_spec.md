@@ -27,7 +27,7 @@ tauri_mobile_mdi_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 17 | 17 | 0 | 0 |
+| 18 | 18 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -99,6 +99,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_mobile_mdi_proof_valid
 - Runtime failure markers in any requested device log fail the MDI proof even
   when the JSON counters otherwise prove render, event, capture, performance,
   and animation detail.
+- Unsupported platform prefixes fail closed with neutral diagnostics instead
+  of minting misleading `ios_mdi_*` or `android_mdi_*` evidence rows.
 
 ## Scenarios
 
@@ -268,6 +270,42 @@ expect(evidence).to_contain("ios_mdi_proof_requested_source_count=1")
 expect(evidence).to_contain("ios_mdi_proof_source_count=1")
 expect(evidence).to_contain("ios_mdi_proof_missing_source_count=0")
 expect(evidence).to_contain("ios_mdi_proof_empty_source_count=0")
+expect(device_log).to_contain("[tauri-shell] mdi proof:")
+```
+
+</details>
+
+#### rejects unsupported mobile platform prefixes
+
+-  proof log command
+   - Expected: code equals `1`
+- Confirm bad prefixes cannot mint platform-specific MDI proof rows
+   - Expected: evidence does not contain `ios-simulator_mdi_proof_status`
+   - Expected: evidence does not contain `ios_mdi_proof_status`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 16 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-tauri-mobile-mdi-validator-platform-prefix"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_log_command(root + "/device.log", "") +
+    " && node scripts/check/validate-tauri-mobile-mdi-proof.js ios-simulator " + root + "/proof.json " + root + "/device.log > " + root + "/evidence.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read(root + "/evidence.env")
+val device_log = file_read(root + "/device.log")
+step("Confirm bad prefixes cannot mint platform-specific MDI proof rows")
+expect(evidence).to_contain("mobile_mdi_proof_status=fail")
+expect(evidence).to_contain("mobile_mdi_proof_reason=unsupported-platform-prefix")
+expect(evidence).to_contain("mobile_mdi_proof_prefix=ios-simulator")
+expect(evidence.contains("ios-simulator_mdi_proof_status")).to_equal(false)
+expect(evidence.contains("ios_mdi_proof_status")).to_equal(false)
 expect(device_log).to_contain("[tauri-shell] mdi proof:")
 ```
 
@@ -851,8 +889,8 @@ expect(aggregate).to_contain("android-mdi-proof-source-empty")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 17 |
-| Active scenarios | 17 |
+| Total scenarios | 18 |
+| Active scenarios | 18 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

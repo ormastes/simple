@@ -72,6 +72,13 @@ if (!prefix || !jsonPath || files.length === 0) {
   fail("usage-prefix-jsonpath-files");
 }
 
+if (prefix !== "ios" && prefix !== "android") {
+  console.log("mobile_mdi_proof_status=fail");
+  console.log("mobile_mdi_proof_reason=unsupported-platform-prefix");
+  console.log(`mobile_mdi_proof_prefix=${clean(prefix)}`);
+  process.exit(1);
+}
+
 const requestedSourceCount = files.length;
 let missingSourceCount = 0;
 let emptySourceCount = 0;
