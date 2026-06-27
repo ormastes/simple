@@ -19,6 +19,7 @@ let sourceCount = 0;
 let text = '';
 let coherentSource = false;
 let htmlLen = '';
+let coherentSourceHtmlLen = '';
 const maxRenderHtmlLen = 10000000;
 
 const validRenderMarkerPattern = /\[tauri-shell\]\s+render,\s+html_len=([1-9][0-9]*)(?:\s|$)/;
@@ -62,7 +63,12 @@ for (const file of files) {
   if (htmlLen === '' && sourceHtmlLen !== '') htmlLen = sourceHtmlLen;
   if (sourceHtmlLen !== '' && vulkanMarkerPattern.test(content)) {
     coherentSource = true;
+    if (coherentSourceHtmlLen === '') coherentSourceHtmlLen = sourceHtmlLen;
   }
+}
+
+if (coherentSourceHtmlLen !== '') {
+  htmlLen = coherentSourceHtmlLen;
 }
 
 const hasAnyRenderMarker = anyRenderMarkerPattern.test(text);

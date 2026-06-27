@@ -27,7 +27,7 @@ tauri_android_render_log_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 9 | 9 | 0 | 0 |
+| 10 | 10 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -75,6 +75,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_android_render_log_val
   counting as valid rendered-surface proof.
 - Render-only or generic Vulkan-only logs fail closed.
 - Render and Vulkan markers must be coherent within one source log.
+- Passing validation binds `html_len` to the coherent Vulkan-backed render-log
+  source instead of an unrelated companion render marker.
 - Explicitly requested Android log source paths must exist and be nonempty; a
   valid companion log cannot hide a missing or empty render-log source artifact.
 - Explicitly requested Android log source paths must not be symlinks to stale
@@ -123,6 +125,39 @@ expect(evidence).to_contain("android_render_log_source_coherence_status=pass")
 expect(evidence).to_contain("android_render_log_marker_status=pass")
 expect(evidence).to_contain("android_render_log_vulkan_marker_status=pass")
 expect(evidence).to_contain("android_render_log_failure_marker_status=pass")
+```
+
+</details>
+
+#### binds html length evidence to the coherent Android Vulkan source
+
+- Confirm html_len is emitted from the coherent Vulkan source
+   - Expected: evidence does not contain `android_render_log_html_len=999`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 16 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-tauri-android-render-log-validator-coherent-html-len"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    "printf '[tauri-shell] render, html_len=999\\n' > " + root + "/render-only.log && " +
+    "printf '[tauri-shell] render, html_len=4096\\nHWUI Vulkan renderer ready VK_ANDROID_native_buffer\\n' > " + root + "/android.log && " +
+    "node scripts/check/validate-tauri-android-render-log-proof.js " + root + "/render-only.log " + root + "/android.log > " + root + "/evidence.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val evidence = file_read(root + "/evidence.env")
+step("Confirm html_len is emitted from the coherent Vulkan source")
+expect(evidence).to_contain("android_render_log_validation_status=pass")
+expect(evidence).to_contain("android_render_log_requested_source_count=2")
+expect(evidence).to_contain("android_render_log_source_count=2")
+expect(evidence).to_contain("android_render_log_source_coherence_status=pass")
+expect(evidence).to_contain("android_render_log_html_len=4096")
+expect(evidence.contains("android_render_log_html_len=999")).to_equal(false)
 ```
 
 </details>
@@ -336,7 +371,7 @@ expect(evidence).to_contain("android_render_log_failure_marker_status=fail")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 34 lines folded for reproduction.
+Runnable source: 35 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -344,6 +379,7 @@ val direct = file_read("scripts/check/check-tauri-android-mobile-renderer-eviden
 val aggregate = file_read("scripts/check/check-tauri-mobile-renderer-parity-evidence.shs")
 val validator = file_read("scripts/check/validate-tauri-android-render-log-proof.js")
 expect(validator).to_contain("const maxRenderHtmlLen = 10000000")
+expect(validator).to_contain("coherentSourceHtmlLen")
 expect(direct).to_contain("validate-tauri-android-render-log-proof.js")
 expect(direct).to_contain("android_render_log.validation.env")
 expect(direct).to_contain("cat \"$RENDER_LOG_VALIDATION_ENV\"")
@@ -382,8 +418,8 @@ expect(aggregate).to_contain("android-render-log-source-empty")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 9 |
-| Active scenarios | 9 |
+| Total scenarios | 10 |
+| Active scenarios | 10 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
