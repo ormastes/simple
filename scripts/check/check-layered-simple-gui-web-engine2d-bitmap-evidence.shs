@@ -6,7 +6,49 @@ cd "$ROOT_DIR"
 
 BUILD_DIR="${BUILD_DIR:-build/layered_simple_gui_web_engine2d_bitmap_evidence}"
 REPORT_PATH="${REPORT_PATH:-doc/09_report/layered_simple_gui_web_engine2d_bitmap_evidence_$(date -u +%F).md}"
-SIMPLE_BIN="${SIMPLE_BIN:-src/compiler_rust/target/release/simple}"
+SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
+SIMPLE_BIN_STATUS=pass
+
+is_rust_seed_simple() {
+    case "$1" in
+        src/compiler_rust/*|*/src/compiler_rust/*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+if [ "${SIMPLE_BIN:-}" = "" ]; then
+    SIMPLE_BIN_SOURCE="missing-self-hosted"
+    for candidate in \
+        "release"/*/simple \
+        "bin/release"/*/simple \
+        "build/bootstrap/stage3/simple" \
+        "bin/simple" \
+        "./bin/simple"
+    do
+        if [ -x "$candidate" ]; then
+            SIMPLE_BIN="$candidate"
+            SIMPLE_BIN_SOURCE="repo-self-hosted-fallback"
+            break
+        fi
+    done
+    if [ "${SIMPLE_BIN:-}" = "" ] && [ "${ALLOW_PATH_SIMPLE_BIN:-0}" = "1" ] && command -v simple >/dev/null 2>&1; then
+        SIMPLE_BIN="$(command -v simple)"
+        SIMPLE_BIN_SOURCE="path-opt-in"
+    fi
+else
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
+fi
+SIMPLE_BIN="${SIMPLE_BIN:-}"
+if [ "$SIMPLE_BIN" = "" ]; then
+    SIMPLE_BIN_STATUS=missing
+elif is_rust_seed_simple "$SIMPLE_BIN"; then
+    SIMPLE_BIN_STATUS=forbidden
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-rust-seed-forbidden"
+elif [ ! -x "$SIMPLE_BIN" ]; then
+    SIMPLE_BIN_STATUS=missing
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-missing"
+fi
+export SIMPLE_BIN SIMPLE_BIN_SOURCE SIMPLE_BIN_STATUS
 ITERATIONS="${LAYERED_BITMAP_ITERATIONS:-100}"
 TRIALS="${LAYERED_BITMAP_TRIALS:-1}"
 ELECTRON_ITERATIONS="${LAYERED_ELECTRON_ITERATIONS:-1}"
@@ -155,6 +197,9 @@ check_electron_layer() {
 }
 
 {
+    echo "layered_simple_gui_web_engine2d_simple_bin=$SIMPLE_BIN"
+    echo "layered_simple_gui_web_engine2d_simple_bin_source=$SIMPLE_BIN_SOURCE"
+    echo "layered_simple_gui_web_engine2d_simple_bin_status=$SIMPLE_BIN_STATUS"
     echo "layered_simple_gui_web_engine2d_iterations=$ITERATIONS"
     echo "layered_simple_gui_web_engine2d_trials=$TRIALS"
     echo "layered_simple_gui_web_engine2d_electron_iterations=$ELECTRON_ITERATIONS"
@@ -166,7 +211,15 @@ check_electron_layer() {
 status=pass
 reason=pass
 
+if [ "$SIMPLE_BIN_STATUS" != "pass" ]; then
+    status=unavailable
+    reason="simple-bin-$SIMPLE_BIN_STATUS"
+fi
+
 for scene in image_taskbar_command toolbar_modal_grid; do
+    if [ "$status" = "unavailable" ]; then
+        break
+    fi
     case "$scene" in
         image_taskbar_command)
             node_script="scripts/check/check-node-simple-web-engine2d-image-taskbar-command-bitmap-evidence.shs"
