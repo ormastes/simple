@@ -27,7 +27,7 @@ gui_widget_renderdoc_goal_status_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 5 | 5 | 0 | 0 |
+| 6 | 6 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -83,6 +83,8 @@ sh scripts/check/check-gui-widget-renderdoc-goal-status.shs
 - Simple child gate evidence must include the generated widget fixture path and
   a positive `rdoc_simple_widget_html_bytes` value; a generic Simple Vulkan
   `.rdc` row is not enough to satisfy the widget-specific gate.
+- Synthetic `.rdc` and Electron ARGB artifact rows must name regular files,
+  not symlinks, before the aggregate widget RenderDoc goal can pass.
 
 ## Scenarios
 
@@ -213,6 +215,43 @@ expect(report).to_contain("- blocked gates: 0")
 
 </details>
 
+#### rejects symlinked widget RenderDoc artifacts
+
+- Create otherwise-valid child evidence with symlinked RDOC and ARGB artifacts
+   - Expected: code equals `0`
+- Assert aggregate evidence rejects the symlinked artifacts
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 19 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Create otherwise-valid child evidence with symlinked RDOC and ARGB artifacts")
+val command = "rm -rf build/test-gui-widget-renderdoc-goal-status-symlink-artifacts && mkdir -p build/test-gui-widget-renderdoc-goal-status-symlink-artifacts/simple build/test-gui-widget-renderdoc-goal-status-symlink-artifacts/electron && printf 'RDOCsynthetic simple capture\\n' > build/test-gui-widget-renderdoc-goal-status-symlink-artifacts/simple/simple-real.rdc && ln -s simple-real.rdc build/test-gui-widget-renderdoc-goal-status-symlink-artifacts/simple/simple.rdc && printf 'RDOCsynthetic electron capture\\n' > build/test-gui-widget-renderdoc-goal-status-symlink-artifacts/electron/electron-real.rdc && ln -s electron-real.rdc build/test-gui-widget-renderdoc-goal-status-symlink-artifacts/electron/electron.rdc && printf '{\"width\":2,\"height\":2,\"format\":\"argb-u32\",\"producer\":\"electron-chromium-capture\",\"nativeWidth\":2,\"nativeHeight\":2,\"pixels\":[4294967295,4278190335,4294967295,4294967295]}\\n' > build/test-gui-widget-renderdoc-goal-status-symlink-artifacts/electron/electron_argb-real.json && ln -s electron_argb-real.json build/test-gui-widget-renderdoc-goal-status-symlink-artifacts/electron/electron_argb.json && printf 'rdoc_backend=simple\\nrdoc_scene=vulkan-engine2d\\nrdoc_program=src/app/test/renderdoc_vulkan_widget_capture.spl\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=build/test-gui-widget-renderdoc-goal-status-symlink-artifacts/simple/simple.rdc\\nrdoc_capture_magic=RDOC\\nrdoc_simple_runtime_backend=vulkan\\nrdoc_simple_renderdoc_available=1\\nrdoc_simple_renderdoc_start=1\\nrdoc_simple_renderdoc_end=1\\nrdoc_simple_renderdoc_num_captures=1\\nrdoc_simple_pixel_count=3072\\nrdoc_simple_widget_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\\nrdoc_simple_widget_html_bytes=4096\\n' > build/test-gui-widget-renderdoc-goal-status-symlink-artifacts/simple/evidence.env && printf 'rdoc_backend=electron\\nrdoc_scene=html-css-electron\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=build/test-gui-widget-renderdoc-goal-status-symlink-artifacts/electron/electron.rdc\\nrdoc_capture_magic=RDOC\\nrdoc_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\\nrdoc_electron=tools/electron-shell/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron\\nrdoc_electron_capture_script=tools/electron-live-bitmap/capture_html_argb.js\\nrdoc_electron_argb=build/test-gui-widget-renderdoc-goal-status-symlink-artifacts/electron/electron_argb.json\\nrdoc_electron_width=2\\nrdoc_electron_height=2\\nrdoc_chromium_requested_api=vulkan\\nrdoc_chromium_requested_angle=vulkan\\nrdoc_chromium_requested_features=Vulkan\\nrdoc_chromium_launch_flags=--no-sandbox --disable-gpu-sandbox --enable-features=Vulkan --use-angle=vulkan\\n' > build/test-gui-widget-renderdoc-goal-status-symlink-artifacts/electron/evidence.env && RDOC_SIMPLE_EVIDENCE_ENV=build/test-gui-widget-renderdoc-goal-status-symlink-artifacts/simple/evidence.env RDOC_ELECTRON_HTML_EVIDENCE_ENV=build/test-gui-widget-renderdoc-goal-status-symlink-artifacts/electron/evidence.env BUILD_DIR=build/test-gui-widget-renderdoc-goal-status-symlink-artifacts/out REPORT_PATH=build/test-gui-widget-renderdoc-goal-status-symlink-artifacts/report.md sh scripts/check/check-gui-widget-renderdoc-goal-status.shs"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+step("Assert aggregate evidence rejects the symlinked artifacts")
+val evidence = file_read("build/test-gui-widget-renderdoc-goal-status-symlink-artifacts/out/evidence.env")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_status=incomplete")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_reason=missing-simple-widget-renderdoc")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_simple_gate_status=pass")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_simple_gate_capture_file_status=symlink")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_status=pass")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_failure_class=capture-file-symlink")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_capture_file_status=symlink")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_argb_file_status=symlink")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_argb_status=pass")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_blocked_gate_count=2")
+expect(evidence).to_contain("Simple GUI widget RenderDoc .rdc on Vulkan Engine2D")
+expect(evidence).to_contain("Electron Chromium-on-Vulkan widget RenderDoc .rdc with nonblank ARGB proof")
+```
+
+</details>
+
 #### forwards the Electron child gate failure class for missing ARGB proof
 
 - Create controlled Electron evidence without ARGB proof
@@ -321,8 +360,8 @@ expect(evidence).to_contain("gui_widget_renderdoc_goal_blocked_gates=Electron Ch
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 6 |
+| Active scenarios | 6 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
