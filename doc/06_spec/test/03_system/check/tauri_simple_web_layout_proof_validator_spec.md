@@ -27,7 +27,7 @@ tauri_simple_web_layout_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 15 | 15 | 0 | 0 |
+| 16 | 16 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -91,6 +91,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_simple_web_layout_proo
   count, and include nonzero pixels.
 - Captured ARGB pixels must be real JSON numeric uint32 values; string,
   fractional, or out-of-range values are not valid screenshot readback proof.
+- Checksum proof rows must match the recomputed captured ARGB artifact
+  checksum, not only each other.
 - Requested viewport, ARGB readback dimensions, frame timing, overlay counts,
   and mismatch counts must be real JSON numbers, not stringified rows.
 - Capture-written and blur/tolerance proof rows must be real JSON booleans;
@@ -113,7 +115,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_simple_web_layout_proo
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 30 lines folded for reproduction.
+Runnable source: 34 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -144,6 +146,10 @@ expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_width=96")
 expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_height=64")
 expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_pixel_count=6144")
 expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_nonzero_pixel_count=6144")
+expect(evidence).to_contain("tauri_simple_web_layout_simple_checksum=26388279060480")
+expect(evidence).to_contain("tauri_simple_web_layout_tauri_weighted_checksum=81077987413324800")
+expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_checksum=26388279060480")
+expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_weighted_checksum=81077987413324800")
 expect(evidence).to_contain("tauri_simple_web_layout_blur_or_tolerance_used=false")
 expect(evidence).to_contain("tauri_simple_web_layout_expected_profile=webkitgtk")
 expect(evidence).to_contain("tauri_simple_web_layout_expected_overlay_pixel_count=12")
@@ -668,12 +674,51 @@ expect(pixel).to_contain("tauri_simple_web_layout_mismatch_count=4")
 
 </details>
 
-#### keeps the live Tauri wrapper wired to validator and divergent mapping
+#### rejects checksum rows that do not match captured Tauri ARGB
+
+-  proof command
+-  proof command
+   - Expected: code equals `1`
+- Confirm Tauri checksum proof is bound to the captured ARGB artifact
+
 
 <details>
 <summary>Executable SSpec</summary>
 
 Runnable source: 20 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-tauri-layout-validator-artifact-checksum"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_command(root + "/checksum.json", "const checksumArgbPath=path.join(path.dirname(process.argv[1]),\"captured.json\");const checksumArgb=JSON.parse(fs.readFileSync(checksumArgbPath,\"utf8\"));checksumArgb.pixels[0]=4294967294;fs.writeFileSync(checksumArgbPath,JSON.stringify(checksumArgb))") +
+    " && node scripts/check/validate-tauri-simple-web-layout-proof.js " + root + "/checksum.json > " + root + "/checksum.env; " +
+    _proof_command(root + "/weighted.json", "const weightedArgbPath=path.join(path.dirname(process.argv[1]),\"captured.json\");const weightedArgb={width:96,height:64,format:\"argb-u32\",producer:\"tauri-x11-window-screenshot\",pixels:Array(96*64).fill(1)};weightedArgb.pixels[0]=2;weightedArgb.pixels[1]=0;fs.writeFileSync(weightedArgbPath,JSON.stringify(weightedArgb));p.checksum=\"6144\";p.expected_checksum=\"6144\";p.weighted_checksum=\"18877440\";p.expected_weighted_checksum=\"18877440\"") +
+    " && node scripts/check/validate-tauri-simple-web-layout-proof.js " + root + "/weighted.json > " + root + "/weighted.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val checksum = file_read(root + "/checksum.env")
+val weighted = file_read(root + "/weighted.env")
+step("Confirm Tauri checksum proof is bound to the captured ARGB artifact")
+expect(checksum).to_contain("tauri_simple_web_layout_validation_status=fail")
+expect(checksum).to_contain("tauri_simple_web_layout_validation_reason=captured-argb-checksum-mismatch")
+expect(checksum).to_contain("tauri_simple_web_layout_captured_argb_checksum=26388279060479")
+expect(weighted).to_contain("tauri_simple_web_layout_validation_status=fail")
+expect(weighted).to_contain("tauri_simple_web_layout_validation_reason=captured-argb-weighted-checksum-mismatch")
+expect(weighted).to_contain("tauri_simple_web_layout_tauri_checksum=6144")
+expect(weighted).to_contain("tauri_simple_web_layout_captured_argb_checksum=6144")
+expect(weighted).to_contain("tauri_simple_web_layout_captured_argb_weighted_checksum=18877439")
+```
+
+</details>
+
+#### keeps the live Tauri wrapper wired to validator and divergent mapping
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -687,12 +732,16 @@ expect(script).to_contain("tauri_simple_web_layout_captured_argb_symlink_status"
 expect(script).to_contain("tauri_simple_web_layout_captured_argb_size_bytes")
 expect(script).to_contain("tauri_simple_web_layout_captured_argb_format")
 expect(script).to_contain("tauri_simple_web_layout_captured_argb_nonzero_pixel_count")
+expect(script).to_contain("tauri_simple_web_layout_captured_argb_checksum")
+expect(script).to_contain("tauri_simple_web_layout_captured_argb_weighted_checksum")
 expect(script).to_contain("tauri_simple_web_layout_requested_width")
 expect(script).to_contain("checksum-mismatch|weighted-checksum-mismatch|pixel-mismatch")
 expect(script).to_contain("status=divergent")
 expect(validator).to_contain("path.resolve(candidate) === path.resolve(proofPath)")
 expect(validator).to_contain("proof-json-symlink")
 expect(validator).to_contain("captured-argb-symlink")
+expect(validator).to_contain("captured-argb-checksum-mismatch")
+expect(validator).to_contain("captured-argb-weighted-checksum-mismatch")
 expect(validator).to_contain("jsonIntegerBetween(proof.frame_us, 1, 1000000)")
 expect(validator).to_contain("jsonBoolTextOrBlank")
 val converter = file_read("tools/tauri-live-bitmap/raw_rgba_to_argb.js")
@@ -705,8 +754,8 @@ expect(converter).to_contain("captured_argb_path: outputPath")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 15 |
-| Active scenarios | 15 |
+| Total scenarios | 16 |
+| Active scenarios | 16 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

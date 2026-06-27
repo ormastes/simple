@@ -108,6 +108,41 @@ function nonzeroPixelCount(pixels) {
   return String(count);
 }
 
+function checksum(pixels) {
+  if (!Array.isArray(pixels)) return '';
+  let sum = 0n;
+  for (const pixel of pixels) {
+    if (
+      typeof pixel !== 'number' ||
+      !Number.isInteger(pixel) ||
+      pixel < 0 ||
+      pixel > 0xffffffff
+    ) {
+      return '';
+    }
+    sum += BigInt(pixel);
+  }
+  return sum.toString();
+}
+
+function weightedChecksum(pixels) {
+  if (!Array.isArray(pixels)) return '';
+  let sum = 0n;
+  for (let i = 0; i < pixels.length; i += 1) {
+    const pixel = pixels[i];
+    if (
+      typeof pixel !== 'number' ||
+      !Number.isInteger(pixel) ||
+      pixel < 0 ||
+      pixel > 0xffffffff
+    ) {
+      return '';
+    }
+    sum += BigInt(pixel) * BigInt(i + 1);
+  }
+  return sum.toString();
+}
+
 function artifactStat(value, proofPath) {
   if (typeof value !== 'string' || value.trim() === '') {
     return null;
@@ -204,6 +239,8 @@ const capturedArgbStat = artifactStat(proof.captured_argb_path, proofPath);
 const capturedArgb = readJsonArtifact(capturedArgbStat);
 const capturedArgbPixels = capturedArgb && Array.isArray(capturedArgb.pixels) ? capturedArgb.pixels : null;
 const capturedArgbNonzeroPixelCount = nonzeroPixelCount(capturedArgbPixels);
+const capturedArgbChecksum = checksum(capturedArgbPixels);
+const capturedArgbWeightedChecksum = weightedChecksum(capturedArgbPixels);
 
 let reason = 'pass';
 if (proof.blur_or_tolerance_used !== false) {
@@ -244,6 +281,10 @@ if (proof.blur_or_tolerance_used !== false) {
   reason = 'captured-argb-pixel-count-mismatch';
 } else if (!integerAtLeast(capturedArgbNonzeroPixelCount, 1)) {
   reason = 'blank-captured-argb';
+} else if (!sameInteger(proof.checksum, capturedArgbChecksum)) {
+  reason = 'captured-argb-checksum-mismatch';
+} else if (!sameInteger(proof.weighted_checksum, capturedArgbWeightedChecksum)) {
+  reason = 'captured-argb-weighted-checksum-mismatch';
 } else if (!jsonIntegerBetween(proof.frame_us, 1, 1000000)) {
   reason = 'missing-tauri-timing';
 } else if (typeof proof.expected_profile !== 'string' || proof.expected_profile === '') {
@@ -277,6 +318,8 @@ emit('tauri_simple_web_layout_captured_argb_width', capturedArgb === null ? '' :
 emit('tauri_simple_web_layout_captured_argb_height', capturedArgb === null ? '' : jsonIntegerTextOrBlank(capturedArgb.height));
 emit('tauri_simple_web_layout_captured_argb_pixel_count', capturedArgbPixels === null ? '' : String(capturedArgbPixels.length));
 emit('tauri_simple_web_layout_captured_argb_nonzero_pixel_count', capturedArgbNonzeroPixelCount);
+emit('tauri_simple_web_layout_captured_argb_checksum', capturedArgbChecksum);
+emit('tauri_simple_web_layout_captured_argb_weighted_checksum', capturedArgbWeightedChecksum);
 
 if (reason !== 'pass') {
   process.exit(1);
