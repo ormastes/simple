@@ -232,6 +232,8 @@ mdi_proof_file_status() {
 
 png_file_reason() {
     path="$1"
+    min_width="${2:-300}"
+    min_height="${3:-300}"
     if [ -z "$path" ] || [ ! -s "$path" ]; then
         echo missing
         return
@@ -253,6 +255,36 @@ png_file_reason() {
         echo png-dimensions-missing
         return
     fi
+    if ! command -v node >/dev/null 2>&1; then
+        echo png-dimension-validator-missing
+        return
+    fi
+    dimension_reason="$(node - "$path" "$min_width" "$min_height" <<'NODE'
+const fs = require('fs');
+const path = process.argv[2];
+function minDimension(value) {
+  return /^[0-9]+$/.test(String(value || '')) ? Number(value) : 300;
+}
+const minWidth = minDimension(process.argv[3]);
+const minHeight = minDimension(process.argv[4]);
+const data = fs.readFileSync(path);
+if (data.length < 24) {
+  console.log('png-dimensions-missing');
+  process.exit(0);
+}
+const width = data.readUInt32BE(16);
+const height = data.readUInt32BE(20);
+if (width < minWidth || height < minHeight) {
+  console.log(`png-dimensions-too-small:${width}x${height}<${minWidth}x${minHeight}`);
+} else {
+  console.log('pass');
+}
+NODE
+)"
+    if [ "$dimension_reason" != "pass" ]; then
+        echo "$dimension_reason"
+        return
+    fi
     printable_chunks="$(LC_ALL=C tr -cd '[:print:]' <"$path" 2>/dev/null || true)"
     case "$printable_chunks" in
         *IDAT*IEND*) echo pass ;;
@@ -261,7 +293,7 @@ png_file_reason() {
 }
 
 png_file_status() {
-    if [ "$(png_file_reason "$1")" = "pass" ]; then
+    if [ "$(png_file_reason "$1" "${2:-300}" "${3:-300}")" = "pass" ]; then
         echo pass
     else
         echo fail
@@ -463,8 +495,8 @@ if [ -x "$IOS_SCRIPT" ] || [ -f "$IOS_SCRIPT" ]; then
     ios_mdi_animation_frame_available="$(value_of ios_mdi_animation_frame_available "$BUILD_DIR/ios.out")"
     ios_mdi_animation_frame_count="$(value_of ios_mdi_animation_frame_count "$BUILD_DIR/ios.out")"
     ios_mdi_css_animation_probe="$(value_of ios_mdi_css_animation_probe "$BUILD_DIR/ios.out")"
-    ios_screenshot_file_reason="$(png_file_reason "$ios_screenshot")"
-    ios_screenshot_file_status="$(png_file_status "$ios_screenshot")"
+    ios_screenshot_file_reason="$(png_file_reason "$ios_screenshot" "$ios_mdi_capture_viewport_width" "$ios_mdi_capture_viewport_height")"
+    ios_screenshot_file_status="$(png_file_status "$ios_screenshot" "$ios_mdi_capture_viewport_width" "$ios_mdi_capture_viewport_height")"
     ios_mdi_proof_file_reason="$(mdi_proof_file_reason "$ios_mdi_proof_json")"
     ios_mdi_proof_file_status="$(mdi_proof_file_status "$ios_mdi_proof_json")"
     ios_render_log_validation_env="$BUILD_DIR/ios_render_log.validation.env"
@@ -657,8 +689,8 @@ if [ -x "$ANDROID_SCRIPT" ] || [ -f "$ANDROID_SCRIPT" ]; then
     android_mdi_animation_frame_available="$(value_of android_mdi_animation_frame_available "$BUILD_DIR/android.out")"
     android_mdi_animation_frame_count="$(value_of android_mdi_animation_frame_count "$BUILD_DIR/android.out")"
     android_mdi_css_animation_probe="$(value_of android_mdi_css_animation_probe "$BUILD_DIR/android.out")"
-    android_screenshot_file_reason="$(png_file_reason "$android_screenshot")"
-    android_screenshot_file_status="$(png_file_status "$android_screenshot")"
+    android_screenshot_file_reason="$(png_file_reason "$android_screenshot" "$android_mdi_capture_viewport_width" "$android_mdi_capture_viewport_height")"
+    android_screenshot_file_status="$(png_file_status "$android_screenshot" "$android_mdi_capture_viewport_width" "$android_mdi_capture_viewport_height")"
     android_mdi_proof_file_reason="$(mdi_proof_file_reason "$android_mdi_proof_json")"
     android_mdi_proof_file_status="$(mdi_proof_file_status "$android_mdi_proof_json")"
     android_render_log_validation_env="$BUILD_DIR/android_render_log.validation.env"
