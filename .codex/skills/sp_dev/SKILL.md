@@ -155,6 +155,8 @@ Simple Vulkan Engine2D and Electron Chromium/Vulkan `.rdc` evidence. Defer
 Windows and Linux claims until platform-specific runbooks validate the same
 evidence keys and RDOC gate contract.
 For Linux Vulkan render-log comparison, require the aggregate audit to expose
+`linux_vulkan_render_log_compare_blocked_gate_count`,
+`linux_vulkan_render_log_compare_blocked_gates`,
 `linux_vulkan_render_log_compare_renderdoc_simple_env_file_status`,
 `linux_vulkan_render_log_compare_renderdoc_simple_artifact_file_status`,
 `linux_vulkan_render_log_compare_renderdoc_simple_artifact_magic`,
@@ -164,7 +166,10 @@ For Linux Vulkan render-log comparison, require the aggregate audit to expose
 `linux_vulkan_render_log_compare_renderdoc_electron_env_file_status`,
 `linux_vulkan_render_log_compare_renderdoc_electron_artifact_file_status`, and
 `linux_vulkan_render_log_compare_renderdoc_electron_artifact_magic`; an env file
-that exists without a real `RDOC` artifact remains a blocker.
+that exists without a real `RDOC` artifact remains a blocker. Browser capture
+failures must keep `renderdoc-chrome-rdc` and/or `renderdoc-electron-rdc`
+visible in the blocked-gate list; a summarized reason alone is not enough for a
+completion claim.
 
 For Tauri2 mobile renderer parity, use
 `scripts/check/check-tauri-mobile-renderer-parity-evidence.shs`. It must pass
