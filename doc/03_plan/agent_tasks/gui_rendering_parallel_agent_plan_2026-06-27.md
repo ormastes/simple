@@ -1078,6 +1078,11 @@ Normal-review acceptance:
   that an explicit `GUI_WEB_2D_PLATFORM_FRESHNESS_SOURCE_REVISION` selects the
   review window but cannot hide a lane env whose source revision is stale or
   different from that selected revision.
+- 2026-06-28 bundle optional reason revalidation:
+  `scripts/check/check-gui-web-2d-platform-evidence-bundle.shs` now rejects a
+  required gate status key when the sibling optional reason key is present and
+  not `pass`. A lane env with `*_status=pass` and `*_reason=<failure>` cannot
+  satisfy a live completion gate.
 
 ## Hard Stop Conditions
 

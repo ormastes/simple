@@ -27,7 +27,7 @@ gui_web_2d_platform_evidence_bundle_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 8 | 8 | 0 | 0 |
+| 9 | 9 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -76,6 +76,8 @@ sh scripts/check/check-gui-web-2d-platform-evidence-bundle.shs
 - A present failed platform row is reported as failed, not missing.
 - A present platform env with missing required gate keys is reported as failed,
   not missing.
+- A present platform row with `status=pass` but a non-pass sibling reason is
+  reported as failed evidence.
 - A present failed retained 4K or 8K performance row is reported as failed
   even when the companion perf env is missing.
 - A present failed freshness env is reported as the `cross-platform-freshness`
@@ -169,10 +171,12 @@ perf env has not been produced yet.
 
 The bundle checker is intentionally conservative. It does not infer a platform
 pass from a broader aggregate status when a lane-specific status key is absent.
-It also does not accept a freshness pass unless all revision fields are present,
-because final completion depends on proving that platform evidence, browser or
-WebView revisions, graphics SDK/driver revisions, and runbook revisions belong
-to the same review window.
+It also rejects contradictory optional reason fields for required status keys:
+if a gate env says `*_status=pass` but also emits a non-pass `*_reason`, that
+gate is failed evidence. For freshness, it does not accept a pass unless all
+revision fields are present, because final completion depends on proving that
+platform evidence, browser or WebView revisions, graphics SDK/driver revisions,
+and runbook revisions belong to the same review window.
 
 A failed freshness env is different from a missing freshness env. Missing means
 the freshness rollup was not produced yet. Failed means the rollup ran and found
@@ -269,6 +273,30 @@ expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_failed_gate_cou
 expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_failed_gates=linux-vulkan-renderdoc")
 expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_missing_gate_count=6")
 expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_macos_metal_xcode_gpu_capture_status=pass")
+expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_linux_vulkan_renderdoc_status=fail")
+```
+
+</details>
+
+#### classifies passing evidence with a failed reason as failed
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val command = "rm -rf build/test-gui-web-2d-platform-evidence-bundle-reason-contradiction && mkdir -p build/test-gui-web-2d-platform-evidence-bundle-reason-contradiction/env && printf 'linux_vulkan_render_log_compare_status=pass\\nlinux_vulkan_render_log_compare_reason=source-revision-mismatch\\nmacos_metal_render_log_compare_status=pass\\nwindows_d3d12_render_log_compare_status=pass\\n' > build/test-gui-web-2d-platform-evidence-bundle-reason-contradiction/env/native.env && BUILD_DIR=build/test-gui-web-2d-platform-evidence-bundle-reason-contradiction/out REPORT_PATH=build/test-gui-web-2d-platform-evidence-bundle-reason-contradiction/report.md NATIVE_RENDER_LOG_PLATFORM_MATRIX_ENV=build/test-gui-web-2d-platform-evidence-bundle-reason-contradiction/env/native.env TAURI_MOBILE_RENDERER_PARITY_ENV=build/test-gui-web-2d-platform-evidence-bundle-reason-contradiction/missing/mobile.env GUI_SHOWCASE_4K_200FPS_ENV=build/test-gui-web-2d-platform-evidence-bundle-reason-contradiction/missing/4k.env GUI_SHOWCASE_8K_200FPS_ENV=build/test-gui-web-2d-platform-evidence-bundle-reason-contradiction/missing/8k.env HTML_CSS_FULL_RENDERING_GOAL_ENV=build/test-gui-web-2d-platform-evidence-bundle-reason-contradiction/missing/html.env PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=build/test-gui-web-2d-platform-evidence-bundle-reason-contradiction/missing/production.env GUI_WEB_2D_PLATFORM_FRESHNESS_ENV=build/test-gui-web-2d-platform-evidence-bundle-reason-contradiction/missing/fresh.env sh scripts/check/check-gui-web-2d-platform-evidence-bundle.shs"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read("build/test-gui-web-2d-platform-evidence-bundle-reason-contradiction/out/evidence.env")
+expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_status=fail")
+expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_reason=failed-live-gates")
+expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_failed_gate_count=1")
+expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_failed_gates=linux-vulkan-renderdoc")
+expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_missing_gate_count=6")
 expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_linux_vulkan_renderdoc_status=fail")
 ```
 
@@ -396,8 +424,8 @@ expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_cross_platform_
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 8 |
-| Active scenarios | 8 |
+| Total scenarios | 9 |
+| Active scenarios | 9 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
