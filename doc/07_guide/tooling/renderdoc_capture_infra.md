@@ -625,7 +625,10 @@ windows_d3d12_render_log_compare_pairwise_gate_status=pass
 windows_d3d12_render_log_compare_argb_source_gate_status=pass
 windows_d3d12_render_log_compare_pix_gpu_debugger_gate_status=pass
 windows_d3d12_render_log_compare_pix_status=pass
+windows_d3d12_render_log_compare_pix_artifact_file_status=pass
+windows_d3d12_render_log_compare_pix_artifact_file_magic=PIX
 windows_d3d12_render_log_compare_gpu_debugger_status=pass
+windows_d3d12_render_log_compare_gpu_debugger_artifact_file_status=pass
 ```
 
 The gate rejects D3D11-only evidence, missing PIX/GPU-debugger proof in strict
@@ -637,12 +640,16 @@ It also emits stable structured blockers:
 `windows_d3d12_render_log_compare_browser_backing_gate_status`,
 `windows_d3d12_render_log_compare_pairwise_gate_status`,
 `windows_d3d12_render_log_compare_argb_source_gate_status`, and
-`windows_d3d12_render_log_compare_pix_gpu_debugger_gate_status`. Use these
-fields instead of parsing the reason string when assigning a Windows blocker to
-native D3D12 readback, browser D3D12 backing, pairwise ARGB diff, ARGB source
-evidence, or PIX/GPU-debugger capture. Failing rows list blocked gate names
-such as `windows-d3d12-native-readback`, `browser-d3d12-backing`,
-`pairwise-argb-diff`, `argb-source-evidence`, and `pix-or-gpu-debugger`.
+`windows_d3d12_render_log_compare_pix_gpu_debugger_gate_status`. The aggregate
+also forwards `windows_d3d12_render_log_compare_pix_artifact_file_status` and
+`windows_d3d12_render_log_compare_gpu_debugger_artifact_file_status`; a
+status-only PIX/GPU-debugger row without passing artifact file proof is not
+completion evidence. Use these fields instead of parsing the reason string when
+assigning a Windows blocker to native D3D12 readback, browser D3D12 backing,
+pairwise ARGB diff, ARGB source evidence, or PIX/GPU-debugger capture. Failing
+rows list blocked gate names such as `windows-d3d12-native-readback`,
+`browser-d3d12-backing`, `pairwise-argb-diff`, `argb-source-evidence`, and
+`pix-or-gpu-debugger`.
 
 The GUI RenderDoc aggregate consumes these normalized render-log compare
 outputs without launching them:
