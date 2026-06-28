@@ -430,3 +430,7 @@ Tasks:
    `time_now_unix_micros` facade instead of declaring raw
    `rt_time_now_unix_micros`, keeps the internal absence marker out of public
    generated manuals, and refreshes both mirrored SPipe docs.
+10. Harden retry7 fine-tune app handoff acceptance. Status: done on
+    2026-06-28; the retry7 gate now emits `app_handoff_doc_ready`, treats
+    missing local handoff docs or `do not deploy` usage as non-acceptance
+    evidence, and requires that field before release handoff review can pass.

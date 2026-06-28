@@ -168,7 +168,7 @@ expect(executable_code).to_equal(0)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -181,6 +181,7 @@ expect(output).to_contain("model_manifest_exists=false")
 expect(output).to_contain("eval_result_exists=false")
 expect(output).to_contain("target_accuracy=missing")
 expect(output).to_contain("target_eval_reached=false")
+expect(output).to_contain("app_handoff_doc_ready=false")
 expect(output).to_contain("acceptance_allowed=false")
 expect(output).to_contain("result=BLOCKED_RETRY6_NOT_READY")
 expect(output).to_contain("STATUS: WARN retry7-acceptance-gate")
@@ -263,7 +264,7 @@ expect(output.split(absence_marker()).len()).to_equal(1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
