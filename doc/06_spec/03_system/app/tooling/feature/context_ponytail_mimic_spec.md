@@ -47,7 +47,7 @@ This system spec verifies REQ-012, REQ-013, REQ-014, and REQ-015 for the local c
 | Design | doc/05_design/app/tools/llm_tooling_context_ponytail_mimic.md |
 | Research | doc/01_research/local/llm_tooling_context_ponytail_mimic.md |
 | Source | `test/03_system/app/tooling/feature/context_ponytail_mimic_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-06-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
