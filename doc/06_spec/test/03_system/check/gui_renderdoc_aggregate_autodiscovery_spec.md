@@ -27,7 +27,7 @@ gui_renderdoc_aggregate_autodiscovery_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 1 | 1 | 0 | 0 |
+| 2 | 2 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -42,6 +42,10 @@ Checks that the aggregate GUI RenderDoc gate can discover current retained showc
 |-------|-------|
 | Category | Other |
 | Status | Active |
+| Requirements | N/A |
+| Plan | doc/03_plan/agent_tasks/vulkan_backed_web_gui_renderdoc_parallel_plan.md |
+| Design | doc/07_guide/tooling/renderdoc_capture_infra.md |
+| Research | N/A |
 | Source | `test/03_system/check/gui_renderdoc_aggregate_autodiscovery_spec.spl` |
 | Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
@@ -53,6 +57,11 @@ showcase and GUI/web/2D Vulkan evidence rows from canonical `*-current-*` build
 directories without requiring every caller to pass explicit environment
 overrides.
 
+**Plan:** doc/03_plan/agent_tasks/vulkan_backed_web_gui_renderdoc_parallel_plan.md
+**Requirements:** N/A
+**Research:** N/A
+**Design:** doc/07_guide/tooling/renderdoc_capture_infra.md
+
 ## Syntax
 
 ```sh
@@ -60,6 +69,22 @@ release/x86_64-unknown-linux-gnu/simple test \
   test/03_system/check/gui_renderdoc_aggregate_autodiscovery_spec.spl \
   --mode=interpreter
 ```
+
+## Acceptance
+
+- The aggregate discovers retained 4K, retained 8K, GUI/web/2D Vulkan direct
+  run, and browser-backing evidence from canonical current refresh directories
+  when explicit env overrides are absent.
+- For retained showcase performance rows, the aggregate chooses the newest
+  existing evidence row across canonical wrapper output and `*-current-*`
+  refresh directories so stale current caches cannot hide a fresh wrapper run.
+- Newer canonical retained showcase rows must preserve full source revision file
+  coverage and emit `*_source_revision_files_status=pass`.
+
+## Completion Boundary
+
+This spec verifies evidence discovery and freshness selection only. It does not
+claim RenderDoc `.rdc` capture success or complete GUI/web/2D platform parity.
 
 ## Scenarios
 
@@ -105,15 +130,71 @@ expect(cleanup_code).to_equal(0)
 
 </details>
 
+#### prefers newer canonical showcase rows over stale current refresh rows
+
+- Create stale current rows and newer canonical wrapper rows
+   - Expected: code equals `0`
+- Assert newest canonical wrapper evidence wins over stale current refresh evidence
+- Clean synthetic canonical and stale current rows
+   - Expected: cleanup_code equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 30 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Create stale current rows and newer canonical wrapper rows")
+val full_files = "scripts/check/check-widget-showcase-4k-200fps.shs examples/06_io/ui/widget_showcase_gui.spl examples/06_io/ui/showcase_8k_scroll_gui.spl src/lib/common/ui/scroll_surface.spl src/lib/common/ui/dirty_region.spl src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl"
+val stale_files = "scripts/check/check-widget-showcase-4k-200fps.shs examples/06_io/ui/widget_showcase_gui.spl"
+val command = "rm -rf build/widget-showcase-4k-200fps-current-stale-autodiscovery-test build/widget-showcase-8k-perf-current-stale-autodiscovery-test build/widget-showcase-4k-200fps-newest-autodiscovery-backup build/widget-showcase-8k-perf-newest-autodiscovery-backup build/test-gui-renderdoc-newest-showcase && " +
+    "if [ -e build/widget-showcase-4k-200fps ]; then mv build/widget-showcase-4k-200fps build/widget-showcase-4k-200fps-newest-autodiscovery-backup; fi && " +
+    "if [ -e build/widget-showcase-8k-perf ]; then mv build/widget-showcase-8k-perf build/widget-showcase-8k-perf-newest-autodiscovery-backup; fi && " +
+    "mkdir -p build/widget-showcase-4k-200fps-current-stale-autodiscovery-test build/widget-showcase-8k-perf-current-stale-autodiscovery-test build/widget-showcase-4k-200fps build/widget-showcase-8k-perf && " +
+    "printf 'gui_showcase_4k_200fps_status=pass\\ngui_showcase_4k_200fps_source_revision_kind=content-sha256\\ngui_showcase_4k_200fps_source_revision_files=" + stale_files + "\\n' > build/widget-showcase-4k-200fps-current-stale-autodiscovery-test/status.env && " +
+    "printf 'gui_showcase_8k_perf_status=pass\\ngui_showcase_8k_perf_source_revision_kind=content-sha256\\ngui_showcase_8k_perf_source_revision_files=" + stale_files + "\\n' > build/widget-showcase-8k-perf-current-stale-autodiscovery-test/status.env && " +
+    "touch -t 202601010000 build/widget-showcase-4k-200fps-current-stale-autodiscovery-test/status.env build/widget-showcase-8k-perf-current-stale-autodiscovery-test/status.env && " +
+    "printf 'gui_showcase_4k_200fps_status=pass\\ngui_showcase_4k_200fps_source_revision_kind=content-sha256\\ngui_showcase_4k_200fps_source_revision_files=" + full_files + "\\n' > build/widget-showcase-4k-200fps/status.env && " +
+    "printf 'gui_showcase_8k_perf_status=pass\\ngui_showcase_8k_perf_source_revision_kind=content-sha256\\ngui_showcase_8k_perf_source_revision_files=" + full_files + "\\n' > build/widget-showcase-8k-perf/status.env && " +
+    "touch -t 202601010001 build/widget-showcase-4k-200fps/status.env build/widget-showcase-8k-perf/status.env && " +
+    "GUI_RENDERDOC_AGGREGATE_PRINT_ENV=0 GUI_RENDERDOC_AGGREGATE_STATIC_CACHE_DIR=build/test-gui-renderdoc-feature-coverage-static-cache BUILD_DIR=build/test-gui-renderdoc-newest-showcase/out REPORT_PATH=build/test-gui-renderdoc-newest-showcase/report.md sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+step("Assert newest canonical wrapper evidence wins over stale current refresh evidence")
+val evidence = file_read("build/test-gui-renderdoc-newest-showcase/out/evidence.env")
+expect(evidence).to_contain("gui_showcase_4k_200fps_env=build/widget-showcase-4k-200fps/status.env")
+expect(evidence).to_contain("gui_showcase_4k_200fps_source_revision_files_status=pass")
+expect(evidence).to_contain("gui_showcase_8k_perf_env=build/widget-showcase-8k-perf/status.env")
+expect(evidence).to_contain("gui_showcase_8k_perf_source_revision_files_status=pass")
+
+step("Clean synthetic canonical and stale current rows")
+val cleanup = "rm -rf build/widget-showcase-4k-200fps-current-stale-autodiscovery-test build/widget-showcase-8k-perf-current-stale-autodiscovery-test build/widget-showcase-4k-200fps build/widget-showcase-8k-perf && " +
+    "if [ -e build/widget-showcase-4k-200fps-newest-autodiscovery-backup ]; then mv build/widget-showcase-4k-200fps-newest-autodiscovery-backup build/widget-showcase-4k-200fps; fi && " +
+    "if [ -e build/widget-showcase-8k-perf-newest-autodiscovery-backup ]; then mv build/widget-showcase-8k-perf-newest-autodiscovery-backup build/widget-showcase-8k-perf; fi"
+val (_cleanup_stdout, _cleanup_stderr, cleanup_code) = process_run("/bin/sh", ["-c", cleanup])
+expect(cleanup_code).to_equal(0)
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 1 |
-| Active scenarios | 1 |
+| Total scenarios | 2 |
+| Active scenarios | 2 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
+
+
+## Related Documentation
+
+- **Plan:** [doc/03_plan/agent_tasks/vulkan_backed_web_gui_renderdoc_parallel_plan.md](doc/03_plan/agent_tasks/vulkan_backed_web_gui_renderdoc_parallel_plan.md)
+- **Design:** [doc/07_guide/tooling/renderdoc_capture_infra.md](doc/07_guide/tooling/renderdoc_capture_infra.md)
 
 
 </details>
