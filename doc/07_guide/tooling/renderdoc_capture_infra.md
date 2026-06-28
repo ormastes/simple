@@ -298,7 +298,12 @@ Both Electron and Chrome child passes also require their
 `*_browser_backing_source` files to exist and `gpu_compositing` to remain
 enabled in the captured GPU feature status; the `--browser-backing` producer
 emits `*_browser_backing_source_file_status`, and the aggregate verifies or
-recomputes that status for older evidence before accepting proof.
+recomputes that status for older evidence before accepting proof. Producer
+source statuses are typed: `pass` means a regular single-link proof file, while
+`symlink`, `hardlink`, `empty`, `not-regular`, and `missing` force the Electron
+or Chrome child browser-backing row to fail. The setup producer delegates this
+classification to `scripts/check/gui-web-2d-vulkan-browser-backing-status.js`
+so the same status logic can be tested without launching a GUI host.
 Electron browser backing uses the compact `electron_argb_proof.json` as its
 `gui_web_2d_vulkan_electron_browser_backing_source`; the full ARGB capture is
 reported separately as `gui_web_2d_vulkan_electron_browser_backing_argb_source`
