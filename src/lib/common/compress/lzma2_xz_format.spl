@@ -349,22 +349,23 @@ fn _parse_block_header(input: [u8], block_start: i64, tier: CompressionSimdTier)
 
 fn _decode_xz_block(input: [u8], block_start: i64, check_type: u8, tier: CompressionSimdTier) -> Result<XzDecodedBlock, CompressionError>:
     val header_res = _parse_block_header(input, block_start, tier)
-    if header_res.is_err():
-        return Err(header_res.unwrap_err())
-    val header = header_res.unwrap()
+    val header = match header_res:
+        case Ok(found_header): found_header
+        case Err(reason): return Err(reason)
 
     var pos = header.data_start
     val payload_start = pos
     val check_size_res = _xz_check_size(check_type)
-    if check_size_res.is_err():
-        return Err(check_size_res.unwrap_err())
-    val check_size = check_size_res.unwrap()
+    val check_size = match check_size_res:
+        case Ok(found_size): found_size
+        case Err(reason): return Err(reason)
     if header.declared_compressed_size != nil:
         val declared_payload_end = payload_start + (header.declared_compressed_size ?? 0)
         val declared_padded_pos_res = _consume_alignment_zeroes(input, payload_start, declared_payload_end, "xz block padding")
-        if declared_padded_pos_res.is_err():
-            return Err(declared_padded_pos_res.unwrap_err())
-        if declared_padded_pos_res.unwrap() + check_size > input.len():
+        val declared_padded_pos = match declared_padded_pos_res:
+            case Ok(found_pos): found_pos
+            case Err(reason): return Err(reason)
+        if declared_padded_pos + check_size > input.len():
             return Err(CompressionError.TruncatedInput("xz block check"))
     var out: [u8] = []
     var lzma_st = LzmaState(state: 0, rep0: 0, rep1: 0, rep2: 0, rep3: 0)
@@ -380,9 +381,9 @@ fn _decode_xz_block(input: [u8], block_start: i64, check_type: u8, tier: Compres
             pos = pos + 1
             break
         val chunk_res = _parse_lzma2_chunk_header(input, pos, state)
-        if chunk_res.is_err():
-            return Err(chunk_res.unwrap_err())
-        val chunk_pair = chunk_res.unwrap()
+        val chunk_pair = match chunk_res:
+            case Ok(found_chunk): found_chunk
+            case Err(reason): return Err(reason)
         val chunk = chunk_pair.0
         state = chunk_pair.1
         pos = chunk.body_end
