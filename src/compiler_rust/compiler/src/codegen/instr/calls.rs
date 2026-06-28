@@ -3020,6 +3020,19 @@ pub fn compile_call<M: Module>(
         // corresponding runtime function.
         if let Some(dot_pos) = func_name.rfind('.') {
             let method_part = &func_name[dot_pos + 1..];
+            if method_part == "merge" && args.len() == 2 {
+                let receiver_val = get_vreg_or_default(ctx, builder, &args[0]);
+                let other_val = get_vreg_or_default(ctx, builder, &args[1]);
+                let count = inline_runtime_array_len_value(builder, other_val);
+                if let Some(&func_id) = ctx.runtime_funcs.get("rt_array_extend_i64") {
+                    let runtime_ref = ctx.module.declare_func_in_func(func_id, builder.func);
+                    adapted_call(builder, runtime_ref, &[receiver_val, other_val, count]);
+                    if let Some(d) = dest {
+                        ctx.vreg_values.insert(*d, receiver_val);
+                    }
+                    return Ok(());
+                }
+            }
             let runtime_func: Option<&str> = match method_part {
                 "contains" | "contains_key" | "has_key" => Some("rt_contains"),
                 "len" | "length" => Some("rt_len"),

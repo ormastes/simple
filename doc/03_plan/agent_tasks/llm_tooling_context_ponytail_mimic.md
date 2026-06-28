@@ -455,3 +455,10 @@ Tasks:
     removing the focused HIR lowering warning for that function from mirrored
     context specs. The later runtime-symbol follow-up now tracks the remaining
     JIT/deploy evidence separately from row-inference behavior.
+13. Harden daemon launcher array argument assembly. Status: partial on
+    2026-06-28; `process_run_timeout` now appends timeout wrapper arguments via
+    `push` instead of `Array.merge`, removing the launcher-side
+    `Runtime error: Function 'Array.merge' not found`. Focused retry with the
+    bootstrap seed then moved to daemon unavailability caused by JIT fallback on
+    `rt_len` followed by the `SIMPLE_LIB=src` memory guard, so deploy evidence
+    remains blocked outside the array-merge launcher path.
