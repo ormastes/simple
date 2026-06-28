@@ -306,7 +306,11 @@ pub(crate) fn evaluate_method_call(
             return Ok(Value::Bool(matched));
         }
         "to_be_nil" | "to_be_none" => {
-            let matched = recv_val == Value::Nil;
+            // Treat Option::None as nil-like (matches `== nil` semantics via
+            // Value::is_nil_like), so `expect(none_option).to_be_nil()` /
+            // `.to_be_none()` pass instead of failing with "expected Option::None
+            // to be nil".
+            let matched = recv_val.is_nil_like();
             use crate::interpreter::interpreter_call::{BDD_EXPECT_FAILED, BDD_FAILURE_MSG};
             if !matched {
                 BDD_EXPECT_FAILED.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = true);
@@ -509,7 +513,9 @@ pub(crate) fn evaluate_method_call(
             return Ok(Value::Bool(matched));
         }
         "to_not_be_nil" => {
-            let matched = recv_val != Value::Nil;
+            // Symmetric with to_be_nil: Option::None counts as nil-like, so
+            // to_not_be_nil(None) correctly fails.
+            let matched = !recv_val.is_nil_like();
             use crate::interpreter::interpreter_call::{BDD_EXPECT_FAILED, BDD_FAILURE_MSG};
             if !matched {
                 BDD_EXPECT_FAILED.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = true);
