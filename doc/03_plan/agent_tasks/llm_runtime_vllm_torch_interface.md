@@ -451,10 +451,11 @@ Tasks:
 - Dynamic LoRA resolver.
 - Torch model execution beyond readiness probes.
 - Live endpoint availability evidence against an installed local `vllm`.
-- Live dashboard route wiring of start, poll, probe, and stop against an
-  installed local `vllm`; the web dashboard route now emits runtime-owner
-  execution JSONL for side-effect actions, but the host-dependent live executor
-  proof is still deferred until an installed local `vllm` is available.
+- Host-dependent live dashboard execution of start, poll, probe, and stop
+  against an installed local `vllm`; dashboard route wiring is implemented and
+  already emits runtime-owner execution JSONL for side-effect actions, but proof
+  that the executor starts, probes, and stops a real local process remains
+  deferred until a suitable host is available.
 
 Runtime-adjacent decision record for live HTTP transport:
 
@@ -610,3 +611,11 @@ same sync keeps host-dependent proof explicitly deferred: real local vLLM/GPU
 serving, live dashboard execution against an installed vLLM server, full NVFS
 streaming, and live CUDA/libtorch optimizer execution remain open until the
 host resources and native adapters are available.
+
+## 2026-06-28 Runtime Operator Guide Sync
+
+Added `doc/07_guide/app/llm/llm_runtime_vllm_torch_interface.md` as the
+operator-facing guide for the runtime evidence boundary. It records the public
+absence-text contract, dashboard-control ownership rules, implemented evidence,
+and remaining host-dependent gates so the runtime tracking rows no longer rely
+only on the generic dashboard guide.
