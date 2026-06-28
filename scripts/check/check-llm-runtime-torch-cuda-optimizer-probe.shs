@@ -1,0 +1,76 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+SIMPLE_BIN="${SIMPLE_BIN:-release/x86_64-unknown-linux-gnu/simple}"
+BUILD_DIR="${BUILD_DIR:-build/llm_runtime_torch_cuda_optimizer_probe}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/2026/06/llm_runtime_torch_cuda_optimizer_probe_$(date -u +%F).md}"
+OUT_ENV="$BUILD_DIR/evidence.env"
+OUT_LOG="$BUILD_DIR/probe.log"
+PROBE="src/app/test/torch_cuda_optimizer_probe.spl"
+STRICT=0
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --strict)
+            STRICT=1
+            ;;
+        *)
+            echo "unknown argument: $1" >&2
+            exit 2
+            ;;
+    esac
+    shift
+done
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+rm -f "$OUT_ENV" "$OUT_LOG" "$REPORT_PATH"
+
+status="fail"
+reason="probe_failed"
+exit_code=0
+if "$SIMPLE_BIN" run "$PROBE" --mode=interpreter --clean >"$OUT_LOG" 2>&1; then
+    :
+else
+    exit_code=$?
+fi
+
+grep '^torch_cuda_optimizer_probe_' "$OUT_LOG" >"$OUT_ENV" 2>/dev/null || true
+status="$(sed -n 's/^torch_cuda_optimizer_probe_status=//p' "$OUT_ENV" | tail -n 1)"
+reason="$(sed -n 's/^torch_cuda_optimizer_probe_reason=//p' "$OUT_ENV" | tail -n 1)"
+
+if [ -z "$status" ]; then
+    status="fail"
+    reason="missing_probe_status"
+fi
+if [ -z "$reason" ]; then
+    reason="not_reported"
+fi
+
+{
+    printf '# LLM Runtime Torch CUDA Optimizer Probe\n\n'
+    printf '%s\n' "- command: \`$SIMPLE_BIN run $PROBE --mode=interpreter --clean\`"
+    printf '%s\n' "- status: \`$status\`"
+    printf '%s\n' "- reason: \`$reason\`"
+    printf '%s\n' "- exit_code: \`$exit_code\`"
+    printf '%s\n' "- env: \`$OUT_ENV\`"
+    printf '%s\n' "- log: \`$OUT_LOG\`"
+} >"$REPORT_PATH"
+
+case "$status" in
+    pass)
+        echo "STATUS: PASS llm-runtime-torch-cuda-optimizer-probe"
+        ;;
+    unavailable)
+        echo "STATUS: WARN llm-runtime-torch-cuda-optimizer-probe reason=$reason"
+        if [ "$STRICT" -eq 1 ]; then
+            exit 1
+        fi
+        ;;
+    *)
+        echo "STATUS: FAIL llm-runtime-torch-cuda-optimizer-probe reason=$reason"
+        exit 1
+        ;;
+esac

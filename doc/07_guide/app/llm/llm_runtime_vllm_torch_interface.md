@@ -99,6 +99,14 @@ plus a passing Simple dynamic Torch SFFI readiness spec. Keep
 `FR-LLM-RUNTIME-0003` open until Simple/libtorch executes and records a real
 CUDA optimizer step.
 
+Latest Simple/libtorch optimizer probe:
+`doc/09_report/2026/06/llm_runtime_torch_cuda_optimizer_probe_2026-06-28.md`
+records `scripts/check/check-llm-runtime-torch-cuda-optimizer-probe.shs`
+classifying the self-hosted Simple runtime as `unavailable` with
+`reason=libtorch_unavailable`. Use this wrapper as the canonical evidence path
+for the real CUDA optimizer-step gate; run it with `--strict` when unavailable
+hosts must fail the lane instead of recording a warning.
+
 ## Focused Checks
 
 Use the focused public-rendering guard after changing runtime manuals,
@@ -106,6 +114,13 @@ dashboard JSONL wording, or evidence docs:
 
 ```bash
 sh scripts/check/check-llm-tooling-public-absence-rendering.shs
+```
+
+Use the focused Torch optimizer gate after changing Torch SFFI, CUDA placement,
+or runtime training behavior:
+
+```bash
+sh scripts/check/check-llm-runtime-torch-cuda-optimizer-probe.shs
 ```
 
 Before final handoff for runtime-adjacent changes, also run the direct
