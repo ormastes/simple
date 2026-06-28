@@ -107,6 +107,15 @@ function pngArtifact(filePath, expectedSize) {
   return { status: 'pass', size: actualSize, actualSize };
 }
 
+function artifactStatus(artifact) {
+  return artifact.status === 'pass' &&
+    artifact.size !== '' &&
+    artifact.actualSize !== '' &&
+    artifact.size === artifact.actualSize
+    ? 'pass'
+    : 'fail';
+}
+
 const [proofPath, widthText, heightText] = process.argv.slice(2);
 if (!proofPath || !widthText || !heightText) {
   emit('electron_live_smoke_validation_status', 'fail');
@@ -165,6 +174,8 @@ const expectedHeight = expectedHeightText === null ? NaN : Number(expectedHeight
 const expectedProofSource = 'src/app/ui.electron/bridge.js:electronLiveSmokeProofScript';
 const proofSource = proofSourceArtifact(expectedProofSource);
 const screenshotArtifact = pngArtifact(proof.screenshot_path, proof.screenshot_png_size_bytes);
+const proofSourceArtifactStatus = artifactStatus(proofSource);
+const screenshotArtifactStatus = artifactStatus(screenshotArtifact);
 const userAgent = textSample(proof.electron_user_agent);
 const maxEventTimingMs = 1000;
 const maxEventDispatchToPaintMs = 1000;
@@ -255,6 +266,8 @@ emit('electron_live_smoke_proof_source', proof.proof_source);
 emit('electron_live_smoke_proof_source_file_status', proofSource.status);
 emit('electron_live_smoke_proof_source_size_bytes', proofSource.size);
 emit('electron_live_smoke_proof_source_actual_size_bytes', proofSource.actualSize);
+emit('electron_live_smoke_proof_source_file_reason', proofSource.status);
+emit('electron_live_smoke_proof_source_artifact_status', proofSourceArtifactStatus);
 emit('electron_live_smoke_browser_engine', proof.browser_engine);
 emit('electron_live_smoke_electron_user_agent', proof.electron_user_agent);
 emit('electron_live_smoke_electron_process_version', proof.electron_process_version);
@@ -281,6 +294,8 @@ emit('electron_live_smoke_screenshot_path', proof.screenshot_path);
 emit('electron_live_smoke_screenshot_file_status', screenshotArtifact.status);
 emit('electron_live_smoke_screenshot_size_bytes', jsonIntegerTextOrBlank(proof.screenshot_png_size_bytes));
 emit('electron_live_smoke_screenshot_actual_size_bytes', screenshotArtifact.actualSize);
+emit('electron_live_smoke_screenshot_file_reason', screenshotArtifact.status);
+emit('electron_live_smoke_screenshot_artifact_status', screenshotArtifactStatus);
 emit('electron_live_smoke_screenshot_width', jsonIntegerTextOrBlank(proof.screenshot_width));
 emit('electron_live_smoke_screenshot_height', jsonIntegerTextOrBlank(proof.screenshot_height));
 emit('electron_live_smoke_screenshot_bitmap_byte_count', jsonIntegerTextOrBlank(proof.screenshot_bitmap_byte_count));
