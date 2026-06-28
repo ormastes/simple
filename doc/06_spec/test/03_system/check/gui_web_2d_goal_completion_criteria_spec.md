@@ -115,8 +115,12 @@ The Linux Vulkan lane is now evidence-backed. It requires:
 - `linux_vulkan_render_log_compare_required_api=vulkan`
 - `linux_vulkan_render_log_compare_pairwise_status=pass`
 - `gui_web_2d_vulkan_browser_backing_status=pass`
+- `gui_web_2d_vulkan_browser_backing_mode=gpu-feature-status`
+- Electron browser backing `pass` with `electron-vulkan-backed`
+- Chrome browser backing `pass` with `chrome-vulkan-backed`
 - `gui_web_2d_vulkan_simple_backend_status=pass`
 - `gui_web_2d_vulkan_pixel_comparison_status=pass`
+- `gui_web_2d_vulkan_pixel_comparison_mode=pairwise-argb-diff`
 - all Electron/Chrome/Simple pairwise diff statuses `pass`
 - Simple, Chrome, and Electron RenderDoc env files `pass`
 - Simple, Chrome, and Electron RenderDoc artifact files `pass`
