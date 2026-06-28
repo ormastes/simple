@@ -1,0 +1,186 @@
+#!/bin/sh
+# Non-launching freshness proof for the GUI/Web/2D platform evidence bundle.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/gui-web-2d-platform-freshness}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/gui_web_2d_platform_freshness_$(date -u +%F).md}"
+OUT_ENV="$BUILD_DIR/evidence.env"
+
+NATIVE_ENV="${NATIVE_RENDER_LOG_PLATFORM_MATRIX_ENV:-build/gui_renderdoc_feature_coverage_status/evidence.env}"
+MOBILE_ENV="${TAURI_MOBILE_RENDERER_PARITY_ENV:-build/tauri_mobile_renderer_parity_evidence/evidence.env}"
+PERF_4K_ENV="${GUI_SHOWCASE_4K_200FPS_ENV:-build/widget-showcase-4k-200fps/status.env}"
+PERF_8K_ENV="${GUI_SHOWCASE_8K_200FPS_ENV:-build/widget-showcase-8k-perf/status.env}"
+HTML_CSS_ENV="${HTML_CSS_FULL_RENDERING_GOAL_ENV:-build/html_css_full_rendering_goal_status/evidence.env}"
+PRODUCTION_ENV="${PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV:-build/production_gui_web_renderer_parity_evidence/evidence.env}"
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+
+value_of() {
+    key="$1"
+    file="$2"
+    sed -n "s/^${key}=//p" "$file" 2>/dev/null | tail -n 1
+}
+
+first_value() {
+    file="$1"
+    shift
+    for key in "$@"; do
+        value="$(value_of "$key" "$file")"
+        if [ "$value" != "" ]; then
+            echo "$value"
+            return
+        fi
+    done
+    echo ""
+}
+
+file_status() {
+    if [ -s "$1" ]; then
+        echo pass
+    else
+        echo missing
+    fi
+}
+
+append_csv() {
+    list="$1"
+    item="$2"
+    if [ "$list" = "" ]; then
+        printf '%s' "$item"
+    else
+        printf '%s,%s' "$list" "$item"
+    fi
+}
+
+source_for() {
+    lane="$1"
+    file="$2"
+    prefix="$3"
+    if [ "$(file_status "$file")" != "pass" ]; then
+        echo ""
+        return
+    fi
+    first_value "$file" \
+        "${prefix}_source_revision" \
+        "${prefix}_current_source_revision" \
+        gui_web_2d_evidence_source_revision \
+        source_revision
+}
+
+metadata_for() {
+    file="$1"
+    prefix="$2"
+    suffix="$3"
+    first_value "$file" \
+        "${prefix}_${suffix}" \
+        "gui_web_2d_evidence_${suffix}" \
+        "$suffix"
+}
+
+native_source="$(source_for native "$NATIVE_ENV" native_render_log_platform_matrix)"
+mobile_source="$(source_for mobile "$MOBILE_ENV" tauri_mobile_renderer_parity)"
+perf_4k_source="$(source_for perf_4k "$PERF_4K_ENV" gui_showcase_4k_200fps)"
+perf_8k_source="$(source_for perf_8k "$PERF_8K_ENV" gui_showcase_8k_perf)"
+html_css_source="$(source_for html_css "$HTML_CSS_ENV" html_css_full_rendering_goal)"
+production_source="$(source_for production "$PRODUCTION_ENV" production_gui_web_renderer_parity)"
+
+source_revision="${GUI_WEB_2D_PLATFORM_FRESHNESS_SOURCE_REVISION:-$native_source}"
+runtime_build="${GUI_WEB_2D_PLATFORM_FRESHNESS_RUNTIME_BUILD:-$(metadata_for "$NATIVE_ENV" native_render_log_platform_matrix runtime_build)}"
+browser_revision="${GUI_WEB_2D_PLATFORM_FRESHNESS_BROWSER_WEBVIEW_ELECTRON_REVISION:-$(metadata_for "$NATIVE_ENV" native_render_log_platform_matrix browser_webview_electron_revision)}"
+graphics_driver="${GUI_WEB_2D_PLATFORM_FRESHNESS_GRAPHICS_SDK_DRIVER:-$(metadata_for "$NATIVE_ENV" native_render_log_platform_matrix graphics_sdk_driver)}"
+runbook_version="${GUI_WEB_2D_PLATFORM_FRESHNESS_RUNBOOK_VERSION:-$(metadata_for "$NATIVE_ENV" native_render_log_platform_matrix runbook_version)}"
+
+missing_files=""
+missing_source_lanes=""
+mismatched_source_lanes=""
+for row in \
+    "native:$NATIVE_ENV:$native_source" \
+    "mobile:$MOBILE_ENV:$mobile_source" \
+    "retained-4k:$PERF_4K_ENV:$perf_4k_source" \
+    "retained-8k:$PERF_8K_ENV:$perf_8k_source" \
+    "html-css:$HTML_CSS_ENV:$html_css_source" \
+    "production-parity:$PRODUCTION_ENV:$production_source"
+do
+    lane="${row%%:*}"
+    rest="${row#*:}"
+    file="${rest%%:*}"
+    source="${row##*:}"
+    if [ "$(file_status "$file")" != "pass" ]; then
+        missing_files="$(append_csv "$missing_files" "$lane")"
+    elif [ "$source" = "" ]; then
+        missing_source_lanes="$(append_csv "$missing_source_lanes" "$lane")"
+    elif [ "$source_revision" = "" ] || [ "$source" != "$source_revision" ]; then
+        mismatched_source_lanes="$(append_csv "$mismatched_source_lanes" "$lane")"
+    fi
+done
+
+missing_metadata=""
+[ "$runtime_build" != "" ] || missing_metadata="$(append_csv "$missing_metadata" runtime-build)"
+[ "$browser_revision" != "" ] || missing_metadata="$(append_csv "$missing_metadata" browser-webview-electron-revision)"
+[ "$graphics_driver" != "" ] || missing_metadata="$(append_csv "$missing_metadata" graphics-sdk-driver)"
+[ "$runbook_version" != "" ] || missing_metadata="$(append_csv "$missing_metadata" runbook-version)"
+
+status=pass
+reason=pass
+if [ "$missing_files" != "" ]; then
+    status=fail
+    reason=missing-evidence-files
+elif [ "$missing_source_lanes" != "" ]; then
+    status=fail
+    reason=missing-source-revision
+elif [ "$mismatched_source_lanes" != "" ]; then
+    status=fail
+    reason=source-revision-mismatch
+elif [ "$missing_metadata" != "" ]; then
+    status=fail
+    reason=missing-freshness-metadata
+fi
+
+{
+    echo "gui_web_2d_platform_freshness_status=$status"
+    echo "gui_web_2d_platform_freshness_reason=$reason"
+    echo "gui_web_2d_platform_freshness_source_revision=$source_revision"
+    echo "gui_web_2d_platform_freshness_runtime_build=$runtime_build"
+    echo "gui_web_2d_platform_freshness_browser_webview_electron_revision=$browser_revision"
+    echo "gui_web_2d_platform_freshness_graphics_sdk_driver=$graphics_driver"
+    echo "gui_web_2d_platform_freshness_runbook_version=$runbook_version"
+    echo "gui_web_2d_platform_freshness_missing_evidence_lanes=$missing_files"
+    echo "gui_web_2d_platform_freshness_missing_source_revision_lanes=$missing_source_lanes"
+    echo "gui_web_2d_platform_freshness_mismatched_source_revision_lanes=$mismatched_source_lanes"
+    echo "gui_web_2d_platform_freshness_missing_metadata=$missing_metadata"
+    echo "gui_web_2d_platform_freshness_native_source_revision=$native_source"
+    echo "gui_web_2d_platform_freshness_mobile_source_revision=$mobile_source"
+    echo "gui_web_2d_platform_freshness_retained_4k_source_revision=$perf_4k_source"
+    echo "gui_web_2d_platform_freshness_retained_8k_source_revision=$perf_8k_source"
+    echo "gui_web_2d_platform_freshness_html_css_source_revision=$html_css_source"
+    echo "gui_web_2d_platform_freshness_production_source_revision=$production_source"
+    echo "gui_web_2d_platform_freshness_native_env=$NATIVE_ENV"
+    echo "gui_web_2d_platform_freshness_mobile_env=$MOBILE_ENV"
+    echo "gui_web_2d_platform_freshness_perf_4k_env=$PERF_4K_ENV"
+    echo "gui_web_2d_platform_freshness_perf_8k_env=$PERF_8K_ENV"
+    echo "gui_web_2d_platform_freshness_html_css_env=$HTML_CSS_ENV"
+    echo "gui_web_2d_platform_freshness_production_env=$PRODUCTION_ENV"
+    echo "gui_web_2d_platform_freshness_report=$REPORT_PATH"
+} >"$OUT_ENV"
+
+{
+    echo "# GUI/Web/2D Platform Freshness"
+    echo
+    echo "- Status: $status"
+    echo "- Reason: $reason"
+    echo "- Source revision: $source_revision"
+    echo "- Runtime build: $runtime_build"
+    echo "- Browser/WebView/Electron revision: $browser_revision"
+    echo "- Graphics SDK/driver: $graphics_driver"
+    echo "- Runbook version: $runbook_version"
+    echo "- Missing evidence lanes: $missing_files"
+    echo "- Missing source-revision lanes: $missing_source_lanes"
+    echo "- Mismatched source-revision lanes: $mismatched_source_lanes"
+    echo "- Missing metadata: $missing_metadata"
+} >"$REPORT_PATH"
+
+cat "$OUT_ENV"
+[ "$status" = "pass" ]

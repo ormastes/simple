@@ -157,6 +157,10 @@ from the required host class for that gate.
   retained performance, HTML/CSS, production parity, and freshness env files and
   classifies the same nine live gates as proven, missing, or failed without
   launching RenderDoc, Xcode, PIX, Tauri, Chrome, Electron, or perf probes.
+- The platform freshness producer emits the `gui_web_2d_platform_freshness_*`
+  env consumed by the bundle and fails on missing evidence files, missing source
+  revisions, mismatched source revisions, or missing runtime/browser/graphics/
+  runbook metadata.
 
 ## Scenarios
 
@@ -167,7 +171,7 @@ from the required host class for that gate.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 46 lines folded for reproduction.
+Runnable source: 47 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -182,6 +186,7 @@ expect(plan).to_contain("scripts/check/check-gui-renderdoc-feature-coverage-stat
 expect(plan).to_contain("scripts/check/check-tauri-mobile-renderer-parity-evidence.shs")
 expect(plan).to_contain("scripts/check/check-gui-web-2d-headless-handoff-prep.shs")
 expect(plan).to_contain("scripts/check/check-gui-web-2d-platform-evidence-bundle.shs")
+expect(plan).to_contain("scripts/check/check-gui-web-2d-platform-freshness.shs")
 expect(plan).to_contain("| WO-29 Five-platform handoff contract |")
 expect(plan).to_contain("| WO-30 Retained 4K/8K current-source freshness contract |")
 expect(plan).to_contain("| WO-31 Full HTML/CSS final inventory contract |")
@@ -264,7 +269,7 @@ expect(spec).to_contain("platform runbook version")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 123 lines folded for reproduction.
+Runnable source: 134 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -383,6 +388,17 @@ expect(bundle).to_contain("retained-4k-8k-current-source")
 expect(bundle).to_contain("full-html-css")
 expect(bundle).to_contain("production-gui-web-parity")
 expect(bundle).to_contain("cross-platform-freshness")
+val freshness = file_read("scripts/check/check-gui-web-2d-platform-freshness.shs")
+expect(freshness).to_contain("gui_web_2d_platform_freshness_status")
+expect(freshness).to_contain("gui_web_2d_platform_freshness_source_revision")
+expect(freshness).to_contain("gui_web_2d_platform_freshness_runtime_build")
+expect(freshness).to_contain("gui_web_2d_platform_freshness_browser_webview_electron_revision")
+expect(freshness).to_contain("gui_web_2d_platform_freshness_graphics_sdk_driver")
+expect(freshness).to_contain("gui_web_2d_platform_freshness_runbook_version")
+expect(freshness).to_contain("missing-evidence-files")
+expect(freshness).to_contain("missing-source-revision")
+expect(freshness).to_contain("source-revision-mismatch")
+expect(freshness).to_contain("missing-freshness-metadata")
 expect(negative_selftest).to_contain("proof-format")
 expect(negative_selftest).to_contain("host-gate-id")
 expect(negative_selftest).to_contain("runbook-gate-id")

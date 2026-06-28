@@ -994,6 +994,14 @@ Normal-review acceptance:
   missing, failed, and remaining gate lists. Missing envs remain incomplete and
   present bad rows remain failed; this prepares shared verification without
   claiming live platform completion on the headless host.
+- 2026-06-28 platform freshness producer prep:
+  `scripts/check/check-gui-web-2d-platform-freshness.shs` produces the
+  `gui_web_2d_platform_freshness_*` env consumed by the bundle. It compares the
+  source revision across native render-log, Tauri mobile, retained 4K, retained
+  8K, full HTML/CSS, and production parity env files, then records runtime
+  build, browser/WebView/Electron revision, graphics SDK/driver, and runbook
+  version metadata. Missing files, missing source revisions, mismatched source
+  revisions, or missing freshness metadata fail closed.
 
 ## Hard Stop Conditions
 
