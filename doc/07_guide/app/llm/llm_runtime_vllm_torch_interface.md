@@ -143,7 +143,8 @@ release-completion evidence for the live gates:
 sh scripts/check/check-llm-goal-evidence.shs --strict-host
 ```
 
-Strict host mode passes the focused strict flags to the context/Ponytail,
+Strict host mode first generates repo-local context/Ponytail full-replacement
+evidence, then passes the focused strict flags to the context/Ponytail,
 dashboard, vLLM, svLLM, Torch optimizer, and fine-tune wrappers. The aggregate
 expects all completion lanes to pass, fails for any WARN or missing strict
 evidence result, and writes `llm_goal_evidence_failed_gates`,

@@ -159,6 +159,19 @@ delete all rows, prepared insert/bind, select explicit columns, count, simple
 `LIKE`, and ordered result enumeration. That is enough for context-mode storage
 without adding a new Rust dependency or app-level raw runtime shortcuts.
 
+## Full Replacement Evidence Slice
+
+`scripts/check/check-llm-tooling-context-ponytail-full-replacement.shs`
+produces the strict replacement env consumed by
+`check-llm-tooling-context-ponytail-mimic.shs --strict-full-replacement`.
+
+The checker first runs the focused mimic evidence wrapper, then verifies that
+the repo-local replacement contract is visible in requirements, architecture,
+guide, app MCP, lower MCP, embedded-SQL source-less query handling, source
+filtering, and Ponytail audit/simplification handlers. The evidence scope is
+`repo_local_simple_owned_surfaces`; it intentionally does not claim internet
+fetch, external vector store, or third-party plugin parity.
+
 ## Output Formats
 
 Markdown:

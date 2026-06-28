@@ -120,6 +120,29 @@ Normal-review fixes:
   by importing `app.io.context_ops` and `std.io_runtime` directly instead of
   the broad `app.io.mod` compatibility shim.
 
+## Lane 3: Repo-Local Full Replacement Evidence
+
+Owner: Codex
+
+Status: implemented on 2026-06-28.
+
+Files:
+
+- `scripts/check/check-llm-tooling-context-ponytail-full-replacement.shs`
+- `scripts/check/check-llm-goal-evidence.shs`
+- `doc/07_guide/app/llm/llm_tooling_context_ponytail_mimic.md`
+- `doc/07_guide/app/llm/llm_runtime_vllm_torch_interface.md`
+
+Tasks:
+
+1. Add a focused env producer for
+   `llm_tooling_context_ponytail_full_replacement_status=pass`. Status: done.
+2. Wire strict aggregate evidence to generate that env before running the
+   strict context/Ponytail mimic lane. Status: done.
+3. Document the scope as repo-local Simple-owned replacement surfaces, not
+   internet fetch, external vector store, or third-party plugin parity.
+   Status: done.
+
 ## Sidecars
 
 - Spark/explorer: context surface discovery. Status: completed on 2026-06-25;

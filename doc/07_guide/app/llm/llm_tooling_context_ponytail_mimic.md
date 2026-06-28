@@ -85,11 +85,23 @@ records the context/Ponytail system spec and focused context/Ponytail unit
 specs passing through the self-hosted Simple runtime.
 
 Default evidence proves the in-repo local file-pack, embedded-SQL context query,
-MCP exposure, and Ponytail audit/simplification surfaces. It is not full
-external context-mode fetch/index replacement proof.
+MCP exposure, and Ponytail audit/simplification surfaces.
 
-Use strict full-replacement mode only when that broader replacement evidence is
-expected to exist:
+Use the focused full-replacement checker when the strict aggregate needs a
+repo-local replacement env:
+
+```bash
+sh scripts/check/check-llm-tooling-context-ponytail-full-replacement.shs
+```
+
+That checker writes
+`build/llm_tooling_context_ponytail_full_replacement/evidence.env` with
+`llm_tooling_context_ponytail_full_replacement_status=pass` when the checked-in
+operator guide, requirements, architecture, app MCP, lower MCP, embedded-SQL
+source-less query, source filtering, and Ponytail audit/simplification surfaces
+all converge on Simple-owned `simple_context` and `simple_ponytail` contracts.
+
+Use strict full-replacement mode to consume that env:
 
 ```bash
 CONTEXT_PONYTAIL_FULL_REPLACEMENT_EVIDENCE_ENV=build/llm_tooling_context_ponytail_full_replacement/evidence.env \
@@ -99,6 +111,9 @@ CONTEXT_PONYTAIL_FULL_REPLACEMENT_EVIDENCE_ENV=build/llm_tooling_context_ponytai
 The strict gate requires the evidence env to contain
 `llm_tooling_context_ponytail_full_replacement_status=pass`. The aggregate LLM
 strict mode also runs this wrapper with `--strict-full-replacement`.
+
+This is repo-local Simple tooling replacement evidence. It does not claim
+internet fetch, external vector store, or third-party plugin parity.
 
 After changing context/ponytail public output, manuals, dashboard text, or MCP
 documentation, run:

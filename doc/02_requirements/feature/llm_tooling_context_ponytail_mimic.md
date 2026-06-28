@@ -43,9 +43,14 @@ Selected option: Option A, Context Pack First.
 - REQ-015: App MCP and lower MCP `simple_context` shall expose the SQL
   source/provenance filter and forward it to the shared `context` CLI
   subprocess.
+- REQ-016: A focused full-replacement evidence gate shall prove the checked-in
+  operator, CLI, app MCP, lower MCP, dashboard-adjacent, embedded-SQL, and
+  Ponytail surfaces converge on Simple-owned `simple_context` and
+  `simple_ponytail` contracts.
 
 ## Deferred
 
-- Full context-mode fetch/index replacement beyond local file packs.
+- Internet fetch, external vector store, or third-party plugin parity beyond
+  repo-local Simple-owned context/Ponytail surfaces.
 - Full SQLite SQL dialect support beyond the facade subset exercised by
   context indexing/querying.
