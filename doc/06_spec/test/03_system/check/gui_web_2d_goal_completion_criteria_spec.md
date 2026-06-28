@@ -122,11 +122,10 @@ magic checks.
 
 ## Remaining Placeholders
 
-The macOS Metal, Windows D3D12, full HTML/CSS inventory, and parallel-agent
-review lanes still use explicit
-`TODO(gui-web-2d-completion)` fail-fast assertions. Replacing one of those
-placeholders must add field-level assertions over the current aggregate or
-platform wrapper evidence and update
+The macOS Metal, Windows D3D12, and parallel-agent review lanes still use
+explicit `TODO(gui-web-2d-completion)` fail-fast assertions. Replacing one of
+those placeholders must add field-level assertions over the current aggregate
+or platform wrapper evidence and update
 `gui_web_2d_completion_criteria_placeholder_audit_spec.spl`.
 
 ## Production GUI/Web Parity Assertions
@@ -149,6 +148,23 @@ non-launching parity gate through the aggregate audit and requires:
   pointer down/up, `performance.now`, animation frames, CSS animation probe, and
   no tolerance
 
+## Full HTML/CSS Assertions
+
+The full HTML/CSS lane is evidence-backed. It consumes the full-rendering goal
+fields through the aggregate audit and requires:
+
+- full rendering goal `pass`
+- all HTML element readiness `pass`
+- all implemented Simple Web CSS readiness `pass`
+- full CSS inventory readiness `pass`
+- HTML rendered count equal to HTML total count
+- implemented CSS rendered count equal to implemented CSS total count
+- full CSS rendered count equal to full CSS total count
+- zero unrendered full CSS properties and an empty unrendered property list
+- animation/transition/transform CSS status `pass`
+- zero unrendered animation CSS properties
+- positive full CSS total count meeting the required minimum
+
 ## Acceptance
 
 - Linux Vulkan completion proves Chrome, Electron, and Simple Vulkan backing,
@@ -162,8 +178,8 @@ non-launching parity gate through the aggregate audit and requires:
 - 4K and 8K showcase completion proves current-source retained rows at 200 FPS
   with timing, RSS, checksum/readback, viewport, native binary provenance,
   retained mode, redraw count, and `fallback_state=none`.
-- Full HTML/CSS completion proves all inventory CSS properties are rendered,
-  not only the implemented Simple Web subset.
+- Full HTML/CSS completion proves all inventory CSS properties are rendered with
+  zero unrendered properties, not only the implemented Simple Web subset.
 - Production GUI/Web parity completion proves live Tauri/Chrome captures,
   same-frame backend readback, positive backend handles when a native Metal
   queue is resolved, matching checksums, event routing, and no CPU-mirror-only

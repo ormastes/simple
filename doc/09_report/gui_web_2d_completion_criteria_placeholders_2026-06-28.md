@@ -3,7 +3,7 @@
 - Status: fail
 - Reason: completion-placeholders-remain
 - Spec: test/03_system/check/gui_web_2d_goal_completion_criteria_spec.spl
-- Remaining completion placeholders: 4
+- Remaining completion placeholders: 3
 - Assertion mode: todo-placeholder-count
 
 The broad GUI/Web/2D goal is incomplete while any
@@ -14,5 +14,4 @@ completion criteria spec.
 
 - TODO(gui-web-2d-completion): replace with assertions over macOS Metal readback, render-log compare, and GPU capture evidence from a Darwin GUI host
 - TODO(gui-web-2d-completion): replace with assertions over Windows D3D12/DXGI readback, PIX file proof, GPU debugger file proof, and render-log compare evidence
-- TODO(gui-web-2d-completion): replace with strict full HTML/CSS goal assertions after all CSS inventory properties render
 - TODO(gui-web-2d-completion): replace with assertions over recorded Spark/fallback sidecar outputs and normal/high-capability review acceptance
