@@ -538,7 +538,7 @@ This session's immediate integration target:
 | --- | --- | --- | --- | --- |
 | WO-1 Evidence gap scan | Spark Lane A, mini fallback now | High: read-only search and key comparison | None unless reviewed | Ranked gap list maps to existing files and aggregate keys |
 | WO-2 Wrapper/key matrix | Spark Lane B, mini fallback now | High: read-only matrix extraction | None unless reviewed | Commands and pass/blocker keys match current wrappers |
-| WO-3 Sidecar review | Normal/high-capability Lane C | Not Spark: review must catch overclaiming | None by default | Findings accept/reject each sidecar claim |
+| WO-3 Sidecar review | Normal/high-capability Lane C | Not Spark: review must catch overclaiming | `scripts/check/check-gui-web-2d-parallel-agent-review-evidence.shs`, `test/03_system/check/gui_web_2d_parallel_agent_review_evidence_spec.spl`, mirrored manual only | Findings accept/reject each sidecar claim, Spark quota failures stay attempts only, fallback sidecars stay advisory until reviewed, and the checker fails closed when the plan is missing |
 | WO-4 Plan/doc integration | Main agent | Not delegated | `doc/03_plan/agent_tasks/gui_rendering_parallel_agent_plan_2026-06-27.md` and directly referenced guides only | Baseline names current commit, Spark status, review gates, and next host lanes |
 | WO-5 Linux Vulkan host execution | Future platform agent on prepared Ubuntu GUI host | Medium: Spark may run readiness probes only under supervision | Evidence dirs and reports only | Browser backing and direct ARGB pairwise diff pass first; strict Linux render-log compare remains blocked until Chrome/Electron/Simple RenderDoc `.rdc` artifacts have `RDOC` magic |
 | WO-6 macOS Metal host execution | Future Darwin agent | Medium: Spark may collect logs; normal review required | Evidence dirs and reports only | Native Metal readback, GPU capture if required, and macOS render-log compare pass |
@@ -1017,6 +1017,15 @@ Normal-review acceptance:
   through `GUI_WEB_2D_RUNTIME_BUILD`,
   `GUI_WEB_2D_BROWSER_WEBVIEW_ELECTRON_REVISION`,
   `GUI_WEB_2D_GRAPHICS_SDK_DRIVER`, and `GUI_WEB_2D_RUNBOOK_VERSION`.
+- 2026-06-28 parallel-agent review evidence prep:
+  `test/03_system/check/gui_web_2d_parallel_agent_review_evidence_spec.spl`
+  now directly runs
+  `scripts/check/check-gui-web-2d-parallel-agent-review-evidence.shs` and
+  asserts pass evidence for Spark attempts, mini fallback sidecars,
+  normal/high-capability review, accepted split boundaries, anti-overclaim
+  rules, and reviewed findings. It also asserts the checker fails closed when
+  the plan file is missing. This is a headless review-contract gate only; it
+  does not produce live renderer, platform, or performance evidence.
 
 ## Hard Stop Conditions
 
