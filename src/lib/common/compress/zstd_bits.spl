@@ -232,6 +232,11 @@ struct ZstdBitWriter:
 fn zstd_bit_writer_new() -> ZstdBitWriter:
     ZstdBitWriter(bytes: [], reservoir: 0u64, bits_in_reservoir: 0)
 
+fn _zstd_bit_writer_validate(state: ZstdBitWriter) -> Result<(), CompressionError>:
+    if state.bits_in_reservoir < 0 or state.bits_in_reservoir > 64:
+        return Err(CompressionError.CorruptStream("zstd bit writer reservoir"))
+    Ok(())
+
 fn _zstd_bit_writer_flush_full_bytes(state: ZstdBitWriter) -> ZstdBitWriter:
     var next = state
     while next.bits_in_reservoir >= 8:
@@ -249,6 +254,10 @@ fn _zstd_bit_writer_flush_full_bytes(state: ZstdBitWriter) -> ZstdBitWriter:
 # use `zstd_bit_writer_append_msb` so the matching MSB-first reader sees
 # state bits in the right order.
 fn zstd_bit_writer_append_lsb(state: ZstdBitWriter, value: u64, count: i64) -> Result<ZstdBitWriter, CompressionError>:
+    val state_ok = _zstd_bit_writer_validate(state)
+    match state_ok:
+        case Ok(_): pass
+        case Err(reason): return Err(reason)
     if count < 0:
         return Err(CompressionError.CorruptStream("zstd bit writer negative count"))
     if count == 0:
@@ -287,6 +296,10 @@ fn zstd_bit_writer_append_msb(state: ZstdBitWriter, value: u64, count: i64) -> R
 # `zstd_msb_bits_init`) locates the marker via `_zstd_highbit_index` of the
 # trailing byte, so a non-zero trailing byte is mandatory.
 fn zstd_bit_writer_finish(state: ZstdBitWriter) -> Result<[u8], CompressionError>:
+    val state_ok = _zstd_bit_writer_validate(state)
+    match state_ok:
+        case Ok(_): pass
+        case Err(reason): return Err(reason)
     var next = state
     next.reservoir = next.reservoir | (1u64 << next.bits_in_reservoir.to_u64())
     next.bits_in_reservoir = next.bits_in_reservoir + 1
