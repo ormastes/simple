@@ -95,6 +95,15 @@ local endpoint proves `/v1/models` serves the selected base model. Run the
 wrapper with `--strict` when unavailable or preflight-only hosts must fail the
 lane.
 
+Latest svLLM local readiness evidence:
+`doc/09_report/2026/06/llm_runtime_svllm_local_readiness_2026-06-28.md`
+records `scripts/check/check-llm-runtime-svllm-local-readiness.shs` passing the
+manifest, tensor-byte, stream-plan, std_fs local-read, and streaming-readiness
+contracts. Keep `FR-LLM-RUNTIME-0002` open because that wrapper proves only
+local file-backed readiness; native NVFS async scheduling, pinned buffer
+registration, device staging, and true streaming model loads still need live
+evidence.
+
 Latest Torch/CUDA host probe:
 `doc/09_report/2026/06/llm_runtime_torch_cuda_host_probe_2026-06-28.md`
 records Python Torch `2.9.1+cu130` with CUDA available and visible NVIDIA GPUs,
@@ -124,6 +133,13 @@ environment detection, dashboard control JSONL, or host preflight behavior:
 
 ```bash
 sh scripts/check/check-llm-runtime-vllm-host-probe.shs
+```
+
+Use the focused svLLM local readiness gate after changing svLLM pack manifests,
+tensor byte loading, stream planning, std_fs local reads, or readiness evidence:
+
+```bash
+sh scripts/check/check-llm-runtime-svllm-local-readiness.shs
 ```
 
 Use the focused Torch optimizer gate after changing Torch SFFI, CUDA placement,

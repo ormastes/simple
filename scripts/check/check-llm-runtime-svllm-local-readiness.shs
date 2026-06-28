@@ -1,0 +1,69 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+SIMPLE_BIN="${SIMPLE_BIN:-release/x86_64-unknown-linux-gnu/simple}"
+BUILD_DIR="${BUILD_DIR:-build/llm_runtime_svllm_local_readiness}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/2026/06/llm_runtime_svllm_local_readiness_$(date -u +%F).md}"
+OUT_ENV="$BUILD_DIR/evidence.env"
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+rm -f "$OUT_ENV" "$REPORT_PATH"
+
+run_spec() {
+    key="$1"
+    path="$2"
+    log="$BUILD_DIR/$key.log"
+    if "$SIMPLE_BIN" test "$path" --mode=interpreter --clean >"$log" 2>&1; then
+        eval "${key}_status=pass"
+        eval "${key}_exit=0"
+    else
+        code=$?
+        eval "${key}_status=fail"
+        eval "${key}_exit=$code"
+    fi
+}
+
+run_spec manifest test/01_unit/lib/gc_async_mut/svllm/model_loader_manifest_spec.spl
+run_spec tensor_bytes test/01_unit/lib/gc_async_mut/svllm/model_loader_tensor_bytes_spec.spl
+run_spec stream_plan test/01_unit/lib/gc_async_mut/svllm/model_loader_stream_plan_spec.spl
+run_spec std_fs test/01_unit/lib/gc_async_mut/svllm/nvfs_client/std_fs_spec.spl
+run_spec streaming_readiness test/01_unit/lib/gc_async_mut/svllm/model_loader_streaming_readiness_spec.spl
+
+status="pass"
+for key in manifest tensor_bytes stream_plan std_fs streaming_readiness; do
+    eval "value=\${${key}_status}"
+    if [ "$value" != "pass" ]; then
+        status="fail"
+    fi
+done
+
+{
+    printf '%s\n' "llm_runtime_svllm_local_readiness_status=$status"
+    for key in manifest tensor_bytes stream_plan std_fs streaming_readiness; do
+        eval "value=\${${key}_status}"
+        printf '%s\n' "llm_runtime_svllm_local_readiness_${key}_status=$value"
+    done
+} >"$OUT_ENV"
+
+{
+    printf '# LLM Runtime svLLM Local Readiness Evidence\n\n'
+    printf '%s\n' "- status: \`$status\`"
+    for key in manifest tensor_bytes stream_plan std_fs streaming_readiness; do
+        eval "value=\${${key}_status}"
+        eval "exit_code=\${${key}_exit}"
+        printf '%s\n' "- ${key}: \`$value\` exit=\`$exit_code\` log=\`$BUILD_DIR/$key.log\`"
+    done
+    printf '%s\n' "- env: \`$OUT_ENV\`"
+    printf '\n'
+    printf 'This evidence proves the local file-backed svLLM pack, manifest, tensor-byte, stream-plan, std_fs, and streaming-readiness contracts. It does not prove native NVFS async scheduling, pinned buffer registration, device staging, or true streaming model loads.\n'
+} >"$REPORT_PATH"
+
+if [ "$status" = "pass" ]; then
+    echo "STATUS: PASS llm-runtime-svllm-local-readiness"
+else
+    echo "STATUS: FAIL llm-runtime-svllm-local-readiness"
+    exit 1
+fi
