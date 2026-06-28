@@ -1,0 +1,64 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+SIMPLE_BIN="${SIMPLE_BIN:-release/x86_64-unknown-linux-gnu/simple}"
+BUILD_DIR="${BUILD_DIR:-build/llm_tooling_context_ponytail_mimic}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/2026/06/llm_tooling_context_ponytail_mimic_$(date -u +%F).md}"
+OUT_ENV="$BUILD_DIR/evidence.env"
+SYSTEM_LOG="$BUILD_DIR/context_ponytail_mimic_system.log"
+CONTEXT_UNIT_LOG="$BUILD_DIR/context_generate_unit.log"
+PONYTAIL_UNIT_LOG="$BUILD_DIR/ponytail_audit_unit.log"
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+rm -f "$OUT_ENV" "$SYSTEM_LOG" "$CONTEXT_UNIT_LOG" "$PONYTAIL_UNIT_LOG" "$REPORT_PATH"
+
+run_check() {
+    name="$1"
+    log="$2"
+    shift 2
+    if "$@" >"$log" 2>&1; then
+        eval "${name}_status=pass"
+        eval "${name}_exit=0"
+    else
+        code=$?
+        eval "${name}_status=fail"
+        eval "${name}_exit=$code"
+    fi
+}
+
+run_check system "$SYSTEM_LOG" "$SIMPLE_BIN" test test/03_system/app/tooling/feature/context_ponytail_mimic_spec.spl --mode=interpreter --clean
+run_check context_unit "$CONTEXT_UNIT_LOG" "$SIMPLE_BIN" test test/01_unit/app/tooling/context_generate_spec.spl --mode=interpreter --clean
+run_check ponytail_unit "$PONYTAIL_UNIT_LOG" "$SIMPLE_BIN" test test/01_unit/app/tooling/ponytail_audit_spec.spl --mode=interpreter --clean
+
+status="pass"
+if [ "$system_status" != "pass" ] || [ "$context_unit_status" != "pass" ] || [ "$ponytail_unit_status" != "pass" ]; then
+    status="fail"
+fi
+
+{
+    printf '%s\n' "llm_tooling_context_ponytail_mimic_status=$status"
+    printf '%s\n' "llm_tooling_context_ponytail_mimic_system_status=$system_status"
+    printf '%s\n' "llm_tooling_context_ponytail_mimic_context_unit_status=$context_unit_status"
+    printf '%s\n' "llm_tooling_context_ponytail_mimic_ponytail_unit_status=$ponytail_unit_status"
+} >"$OUT_ENV"
+
+{
+    printf '# LLM Tooling Context/Ponytail Mimic Evidence\n\n'
+    printf '%s\n' "- status: \`$status\`"
+    printf '%s\n' "- system_spec: \`$system_status\` exit=\`$system_exit\` log=\`$SYSTEM_LOG\`"
+    printf '%s\n' "- context_unit: \`$context_unit_status\` exit=\`$context_unit_exit\` log=\`$CONTEXT_UNIT_LOG\`"
+    printf '%s\n' "- ponytail_unit: \`$ponytail_unit_status\` exit=\`$ponytail_unit_exit\` log=\`$PONYTAIL_UNIT_LOG\`"
+    printf '%s\n' "- env: \`$OUT_ENV\`"
+    printf '\n'
+    printf 'This evidence covers the checked-in Simple context-mode mimic, embedded-SQL context query path, Ponytail audit surface, and MCP/guide contract assertions in the executable specs.\n'
+} >"$REPORT_PATH"
+
+if [ "$status" = "pass" ]; then
+    echo "STATUS: PASS llm-tooling-context-ponytail-mimic"
+else
+    echo "STATUS: FAIL llm-tooling-context-ponytail-mimic"
+    exit 1
+fi

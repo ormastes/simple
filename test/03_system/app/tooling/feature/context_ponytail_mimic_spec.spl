@@ -40,6 +40,25 @@ fn _run_context_cli(args: [text]) -> (text, i64):
     val (stdout, stderr, exit_code) = process_run("release/x86_64-unknown-linux-gnu/simple", ["run", "src/app/context/main.spl"] + args)
     (stdout + stderr, exit_code)
 
+fn _mcp_jsonl(body: text) -> text:
+    body + "\n"
+
+fn _mcp_initialize_line(id: text) -> text:
+    _mcp_jsonl("{\"jsonrpc\":\"2.0\",\"id\":\"" + id + "\",\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"context-ponytail-mimic-spec\",\"version\":\"1.0\"}}}")
+
+fn _mcp_initialized_line() -> text:
+    _mcp_jsonl("{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}")
+
+fn _mcp_tool_call_line(id: text, name: text, arguments_json: text) -> text:
+    _mcp_jsonl("{\"jsonrpc\":\"2.0\",\"id\":\"" + id + "\",\"method\":\"tools/call\",\"params\":{\"name\":\"" + name + "\",\"arguments\":" + arguments_json + "}}")
+
+fn _run_app_mcp_jsonl(messages: text) -> (text, i64):
+    val input_path = "build/test/context_ponytail_system/app_mcp_input.jsonl"
+    file_write(input_path, messages)
+    val command = "REPO=$(pwd); cat " + input_path + " | SIMPLE_BINARY=\"$REPO/release/x86_64-unknown-linux-gnu/simple\" SIMPLE_LIB=\"$REPO/src\" \"$REPO/release/x86_64-unknown-linux-gnu/simple\" run \"$REPO/src/app/mcp/main.spl\""
+    val (stdout, stderr, exit_code) = process_run("/bin/sh", ["-c", command])
+    (stdout + stderr, exit_code)
+
 describe "context/ponytail mimic system surface":
     it "REQ-012 exposes source-less SQL context DB query through the CLI":
         val cli = read("src/app/context/main.spl")
@@ -83,6 +102,26 @@ describe "context/ponytail mimic system surface":
         expect(table).to_contain("e.required_json = build_required([])")
         expect(static_tools).to_contain("_mcp_static_tool(\"simple_context\"")
         expect(dispatch).to_contain("return handle_simple_context(id, body)")
+
+    it "REQ-013 executes source-less SQL context DB query through app MCP":
+        dir_create_all("build/test/context_ponytail_system")
+        val source_path = "build/test/context_ponytail_system/mcp_alpha.spl"
+        val db_path = "build/test/context_ponytail_system/context_mcp.db"
+        file_write(source_path, "fn mcp_alpha_context() -> text:\n    \"shared_context_marker mcp_alpha_only\"\n")
+
+        val (index_output, index_code) = _run_context_cli([source_path, "--sql", "--index", "--db=" + db_path, "--text", "--no-progress"])
+        expect(index_code).to_equal(0)
+        expect(index_output).to_contain("status: ready")
+
+        val args = "{\"sql\":\"true\",\"query\":\"shared_context_marker\",\"db\":\"" + db_path + "\",\"source_filter\":\"" + source_path + "\",\"format\":\"text\"}"
+        val input = _mcp_initialize_line("mcp-1") + _mcp_initialized_line() + _mcp_tool_call_line("mcp-2", "simple_context", args)
+        val (output, code) = _run_app_mcp_jsonl(input)
+        expect(code).to_equal(0)
+        expect(output).to_contain("-- simple_context sql query db=" + db_path + " --")
+        expect(output).to_contain("status: ready")
+        expect(output).to_contain("source_filter: " + source_path)
+        expect(output).to_contain("matches: 1")
+        expect(output).to_contain("mcp_alpha_only")
 
     it "REQ-013 and REQ-015 expose SQL query and source filter through lower MCP":
         val handler = read("src/lib/nogc_async_mut/mcp/main_lazy_query_tools.spl")

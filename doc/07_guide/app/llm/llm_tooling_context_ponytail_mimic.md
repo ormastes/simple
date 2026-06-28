@@ -71,6 +71,19 @@ proven insufficient and the lane plan records the rejected shortcut.
 
 ## Focused Checks
 
+Use the focused executable evidence wrapper after changing the context CLI,
+embedded-SQL context query path, Ponytail audit surface, MCP schemas, or
+dashboard collector wiring:
+
+```bash
+sh scripts/check/check-llm-tooling-context-ponytail-mimic.shs
+```
+
+Latest evidence:
+`doc/09_report/2026/06/llm_tooling_context_ponytail_mimic_2026-06-28.md`
+records the context/Ponytail system spec and focused context/Ponytail unit
+specs passing through the self-hosted Simple runtime.
+
 After changing context/ponytail public output, manuals, dashboard text, or MCP
 documentation, run:
 

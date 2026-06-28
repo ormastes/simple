@@ -27,7 +27,7 @@ context_ponytail_mimic_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 7 | 7 | 0 | 0 |
+| 8 | 8 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -156,6 +156,43 @@ expect(dispatch).to_contain("return handle_simple_context(id, body)")
 
 </details>
 
+#### REQ-013 executes source-less SQL context DB query through app MCP
+
+- dir create all
+- file write
+   - Expected: index_code equals `0`
+   - Expected: code equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 18 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+dir_create_all("build/test/context_ponytail_system")
+val source_path = "build/test/context_ponytail_system/mcp_alpha.spl"
+val db_path = "build/test/context_ponytail_system/context_mcp.db"
+file_write(source_path, "fn mcp_alpha_context() -> text:\n    \"shared_context_marker mcp_alpha_only\"\n")
+
+val (index_output, index_code) = _run_context_cli([source_path, "--sql", "--index", "--db=" + db_path, "--text", "--no-progress"])
+expect(index_code).to_equal(0)
+expect(index_output).to_contain("status: ready")
+
+val args = "{\"sql\":\"true\",\"query\":\"shared_context_marker\",\"db\":\"" + db_path + "\",\"source_filter\":\"" + source_path + "\",\"format\":\"text\"}"
+val input = _mcp_initialize_line("mcp-1") + _mcp_initialized_line() + _mcp_tool_call_line("mcp-2", "simple_context", args)
+val (output, code) = _run_app_mcp_jsonl(input)
+expect(code).to_equal(0)
+expect(output).to_contain("-- simple_context sql query db=" + db_path + " --")
+expect(output).to_contain("status: ready")
+expect(output).to_contain("source_filter: " + source_path)
+expect(output).to_contain("matches: 1")
+expect(output).to_contain("mcp_alpha_only")
+```
+
+</details>
+
 #### REQ-013 and REQ-015 expose SQL query and source filter through lower MCP
 
 <details>
@@ -260,8 +297,8 @@ expect(lower_schema).to_contain("Mode: audit/review, simplification/simplify")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 7 |
-| Active scenarios | 7 |
+| Total scenarios | 8 |
+| Active scenarios | 8 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
