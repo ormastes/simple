@@ -54,10 +54,12 @@ required, platform render-log comparison, and separate full-CSS closure.
   accept the relevant fresh evidence rows.
 - Current full-CSS evidence keys remain incomplete:
   `html_css_full_rendering_goal_status=incomplete`,
-  `html_css_full_rendering_goal_full_css_rendered_count=147`, and
-  `html_css_full_rendering_goal_full_css_unrendered_count=247`.
-  `aspect-ratio`, `object-fit`, `object-position`, `flex-flow`, and logical
-  inline/block spacing are completed narrow implemented-CSS slices.
+  `html_css_full_rendering_goal_full_css_rendered_count=233`, and
+  `html_css_full_rendering_goal_full_css_unrendered_count=161`.
+  `aspect-ratio`, `object-fit`, `object-position`, `flex-flow`, logical
+  inline/block spacing, `will-change`, `color-scheme`,
+  `forced-color-adjust`, and `print-color-adjust`, `color-adjust`, `speech-rate`, `pitch`, `pitch-range`, and `volume` are completed narrow
+  implemented-CSS slices.
 
 ## Current Parallel Start Status
 
@@ -112,6 +114,70 @@ parallel:
     `.rdc` evidence, macOS Metal render-log/GPU capture evidence, Windows
     D3D12/PIX evidence, iOS/Android live renderer proof, full CSS closure, and
     current-source retained 4K/8K aggregate validation.
+- 2026-06-28 review refresh:
+  - `Rawls` and `Euclid` (`gpt-5.3-codex-spark` explorers): requested Spark
+    review lanes for SSpec/manual placeholder audit and report overclaim audit;
+    both failed at the Spark quota gate before producing findings.
+  - `Mendel` (`gpt-5.4-mini` explorer): replacement sidecar after Spark quota
+    failure; found no blockers in the focused SSpec/manual audit and confirmed
+    the checked completion criteria remain `prepared-not-verified` on this
+    headless host.
+  - `Dalton` (`gpt-5.5` explorer): higher-model preparedness review completed
+    with `WARN`. The lane remains honest as `prepared-not-verified`, but
+    documentation needed bounded clarity fixes for historical Linux evidence,
+    historical mobile retained evidence, and macOS/Windows producer handoff.
+    Those fixes were applied in `doc/07_guide/app/ui/gui_web_2d_vulkan_setup.md`,
+    `doc/07_guide/platform/mobile/tauri_mobile_guide.md`, and
+    `doc/07_guide/tooling/renderdoc_capture_infra.md`.
+  - Mobile artifact gate hardening completed as headless-safe test-infra work:
+    `test/03_system/check/tauri_mobile_renderer_parity_artifact_gate_spec.spl`
+    now requires Android foreground markers, distinct render-log and dev-log
+    sources, MDI `eventSequence` proof, and stricter row-mismatch ordering.
+    Focused evidence passed `38 examples, 0 failures`. This is contract
+    preparation only; live iOS/Android renderer completion still requires
+    platform/emulator evidence from the mobile runbook.
+- 2026-06-28 parallel-agent review refresh for WO-29:
+  - `Beauvoir` and `Arendt` (`gpt-5.3-codex-spark` explorers): requested Spark
+    sidecars for plan/report overclaim review and SSpec/checker/manual review;
+    both failed at the Spark quota gate before producing findings.
+  - `Kierkegaard` (`gpt-5.4-mini` explorer): replacement sidecar reviewed the
+    plan/report contract and found the plan clear but report wording too easy
+    to misread as final completion.
+  - `Banach` (`gpt-5.4-mini` explorer): replacement sidecar reviewed SSpec,
+    checker, and manual contracts; it found that required-gate checks were
+    whole-file prose greps rather than explicit executable witnesses.
+  - Main/high-capability review accepted both findings and integrated bounded
+    fixes: headless reports now expose
+    `gui_web_2d_headless_handoff_prep_completion_scope=prepared-not-verified`,
+    human reports label wrapper/audit status instead of final completion, and
+    the completion criteria audit requires explicit
+    `completion_gate_witness:<gate>` markers for all `17` gates.
+    Follow-up hardening added
+    `gui_web_2d_completion_criteria_completion_scope=source-shape-only` so
+    downstream automation can distinguish the criteria-shape audit from native
+    host completion proof. The headless wrapper forwards that nested boundary
+    as
+    `gui_web_2d_headless_handoff_prep_completion_criteria_completion_scope`.
+    It explicitly emits
+    `gui_web_2d_headless_handoff_prep_live_completion_status=incomplete` with
+    `gui_web_2d_headless_handoff_prep_live_completion_reason=remaining-live-gates-unverified`,
+    so wrapper `pass` cannot be mistaken for live goal completion.
+    It also emits
+    `gui_web_2d_headless_handoff_prep_remaining_live_completion_gate_count=9`
+    and a stable remaining-gate list for Linux Vulkan/RenderDoc, macOS
+    Metal/Xcode GPU Capture, Windows D3D12/PIX, iOS Tauri/WKWebView Metal,
+    Android Tauri/WebView Vulkan, retained 4K/8K current-source evidence, full
+    HTML/CSS, production GUI/Web parity, and cross-platform freshness. The
+    wrapper derives the count from the pipe-separated list so future gate
+    additions cannot leave a stale numeric count. It also emits
+    `gui_web_2d_headless_handoff_prep_remaining_live_completion_hosts` with
+    one host/platform owner per remaining gate and fails with
+    `remaining-live-host-count-mismatch` if the host map count diverges.
+    It also emits
+    `gui_web_2d_headless_handoff_prep_remaining_live_completion_runbooks` with
+    one platform/runbook mapping per remaining gate and fails with
+    `remaining-live-runbook-count-mismatch` if the map count diverges.
+    This remains source-level handoff preparation only.
 
 When Spark quota returns, restart the same Lane A and Lane B prompts with
 `gpt-5.3-codex-spark`. Do not mark the earlier quota-failed Spark agents as
@@ -140,8 +206,15 @@ Fallback sidecar findings accepted for planning only:
 Agents must use these names consistently:
 
 - Aggregate gate: `scripts/check/check-gui-renderdoc-feature-coverage-status.shs`
+- Mobile parity gate: `scripts/check/check-tauri-mobile-renderer-parity-evidence.shs`
+- Headless handoff prep gate:
+  `scripts/check/check-gui-web-2d-headless-handoff-prep.shs`
 - Executable completion checklist:
   `test/03_system/check/gui_web_2d_goal_completion_criteria_spec.spl`
+- Five-platform handoff contract:
+  `test/03_system/check/gui_web_2d_five_platform_handoff_contract_spec.spl`
+- Headless handoff prep wrapper spec:
+  `test/03_system/check/gui_web_2d_headless_handoff_prep_spec.spl`
 - Web WM wrapper: `scripts/check/check-web-wm-modern-shell-evidence.shs`
 - Vulkan host setup: `scripts/setup/setup-gui-web-2d-vulkan-env.shs`
 - 4K/8K perf wrapper: `scripts/check/check-widget-showcase-4k-200fps.shs`
@@ -153,6 +226,27 @@ Agents must use these names consistently:
   - `web_wm_modern_shell_evidence_interaction_pass=pass`
 - Browser backing pass key: `gui_web_2d_vulkan_browser_backing_status=pass`
 - RenderDoc artifact proof requires `RDOC` magic, not only an env row.
+
+## Handoff Control Block
+
+This block is the machine-checkable summary for future agents.
+
+- Spark sidecar lanes: `WO-1` evidence gap scan, `WO-2` wrapper/key matrix,
+  and `WO-3` sidecar review.
+- Normal/high-model review gate: `WO-3` must approve sidecar findings before
+  any integration claim; Spark or mini fallback output stays advisory until
+  that review completes.
+- Merge owner: `WO-4` main agent integration owns the merge path and is the
+  only lane that may integrate reviewed changes.
+- Review evidence required: current file paths, exact evidence keys, relevant
+  command output or report IDs, and reviewer findings tied to the current
+  source revision.
+- Non-completion criteria for live platform gates: do not mark the goal done
+  while any of these remain unverified on the correct native host or device:
+  Linux Vulkan RenderDoc, macOS Metal, Windows D3D12, iOS Tauri/WKWebView
+  Metal, Android Tauri/WebView Vulkan, retained 4K/8K perf freshness, full
+  HTML/CSS coverage, or production GUI/Web parity. Cached screenshots, stale
+  reports, or headless preparation alone are not completion evidence.
 
 ## Lane A - Spark Evidence Gap Scan
 
@@ -256,19 +350,24 @@ Platform acceptance keys:
   `gui_web_2d_vulkan_simple_backend_status=pass`,
   `linux_vulkan_render_log_compare_status=pass`,
   `linux_vulkan_render_log_compare_required_api=vulkan`, and
-  `linux_vulkan_render_log_compare_pairwise_status=pass`.
+  `linux_vulkan_render_log_compare_pairwise_status=pass`, plus Simple,
+  Chrome, and Electron `.rdc` artifact file statuses with `RDOC` magic.
 - macOS: `readback_metal_verdict=pass`,
   `macos_metal_render_log_compare_status=pass`,
   `macos_metal_render_log_compare_required_api=metal`,
   `macos_metal_render_log_compare_pairwise_status=pass`, and
   `macos_metal_render_log_compare_gpu_capture_status=pass` when GPU capture is
-  required.
+  required, plus GPU capture artifact file status and `XCODE-GPUTRACE` magic.
 - Windows: `directx_native_gate_status=pass`,
   `windows_d3d12_render_log_compare_status=pass`,
   `windows_d3d12_render_log_compare_required_api=d3d12`,
   `windows_d3d12_render_log_compare_pairwise_status=pass`,
-  `windows_d3d12_render_log_compare_pix_status=pass`, and
-  `windows_d3d12_render_log_compare_gpu_debugger_status=pass`.
+  `windows_d3d12_render_log_compare_pix_status=pass`,
+  `windows_d3d12_render_log_compare_pix_artifact_file_status=pass`,
+  `windows_d3d12_render_log_compare_pix_artifact_magic=PIX`,
+  `windows_d3d12_render_log_compare_pix_artifact_file_magic=PIX`,
+  `windows_d3d12_render_log_compare_gpu_debugger_status=pass`, and
+  `windows_d3d12_render_log_compare_gpu_debugger_artifact_file_status=pass`.
 
 Anti-overclaim rules:
 
@@ -316,9 +415,55 @@ and mobile evidence was produced on the correct platform.
 Placeholder audit refresh, 2026-06-28:
 `doc/09_report/gui_web_2d_completion_criteria_placeholders_2026-06-28.md`
 reports `gui_web_2d_completion_criteria_status=pass` and
-`gui_web_2d_completion_criteria_todo_count=0`. This closes only the placeholder
-guard; it does not close native RenderDoc, Metal, D3D12/PIX, mobile, full CSS,
-or production parity gates.
+`gui_web_2d_completion_criteria_todo_count=0`. The refreshed checker also
+requires 17 named completion-gate witnesses, including Tauri mobile event
+sequence/source identity and five-platform freshness criteria, and emits
+`gui_web_2d_completion_criteria_completion_scope=source-shape-only`. This
+scope is forwarded by the headless preparation wrapper as
+`gui_web_2d_headless_handoff_prep_completion_criteria_completion_scope`. The
+same wrapper emits
+`gui_web_2d_headless_handoff_prep_live_completion_status=incomplete`,
+`gui_web_2d_headless_handoff_prep_live_completion_reason=remaining-live-gates-unverified`,
+`gui_web_2d_headless_handoff_prep_remaining_live_completion_gate_count=9` and
+`gui_web_2d_headless_handoff_prep_remaining_live_completion_gates` for the
+five platform renderer gates plus retained 4K/8K, full HTML/CSS, production
+GUI/Web parity, and cross-platform freshness. The count is derived from that
+list. It also emits
+`gui_web_2d_headless_handoff_prep_remaining_live_completion_hosts` and a
+matching count so each gate has a target host/platform owner, plus
+`gui_web_2d_headless_handoff_prep_remaining_live_completion_runbooks` and a
+matching count so platform agents can route each remaining gate without reading
+the plan prose. It also emits
+`gui_web_2d_headless_handoff_prep_remaining_live_completion_proofs` and a
+matching count so each remaining gate has a concrete required-proof checklist;
+the wrapper fails with `remaining-live-proof-count-mismatch` if that proof map
+drifts from the gate list. It rejects empty or malformed map values with
+`remaining-live-host-value-missing`, `remaining-live-runbook-value-missing`, or
+`remaining-live-proof-value-missing`. It also emits
+`gui_web_2d_headless_handoff_prep_remaining_live_completion_matrix` and a
+matching count so reviewers can verify each gate, host, runbook, and proof row
+without reconstructing rows from separate pipe-delimited maps; the matrix uses
+`gate:host=<host>,runbook=<runbook>,proof=<proof>` rows. The wrapper also
+derives gate IDs from the host, runbook, and proof maps and exposes
+`gui_web_2d_headless_handoff_prep_map_gate_alignment_status`; it fails with a
+specific `remaining-live-*-gate-id-mismatch` reason if any map's gate IDs differ
+from the remaining gate list. It also emits
+`gui_web_2d_headless_handoff_prep_gate_uniqueness_status` and fails with
+`remaining-live-gate-duplicate` if the remaining gate list repeats a gate ID.
+`scripts/check/check-gui-web-2d-headless-handoff-negative-selftest.shs` runs
+the wrapper in contract-selftest mode and expects duplicate-gate,
+host/runbook/proof count mismatch, host/runbook/proof empty or malformed
+value, and host/runbook/proof gate-ID mismatch failures without invoking nested Simple
+tests. The normal headless wrapper consumes that selftest and reports
+`gui_web_2d_headless_handoff_prep_negative_selftest_status=pass` plus the
+case list before it reports wrapper `pass`; it fails with
+`negative-selftest-case-mismatch` if the actual case list differs from
+`duplicate-gate|host-count|runbook-count|proof-count|host-value|runbook-value|proof-value|host-format|runbook-format|proof-format|host-gate-id|runbook-gate-id|proof-gate-id`
+and with `negative-selftest-case-status-mismatch` if any expected case is not
+reported as `case:pass`.
+This closes only the source-level criteria-shape guard; it does not close
+native RenderDoc, Metal, D3D12/PIX, mobile, full CSS, or production parity
+gates.
 
 Each scenario maps to one completion gate:
 
@@ -327,9 +472,12 @@ Each scenario maps to one completion gate:
 | Linux Vulkan RenderDoc | Chrome, Electron, and Simple Vulkan backing; nonblank pairwise ARGB equivalence; strict Linux render-log compare; `.rdc` artifacts with `RDOC` magic for Chrome, Electron, and Simple | Prepared Ubuntu GUI host | Blocked here by missing RenderDoc command |
 | macOS Metal | Native Metal readback; browser/gui backing; pairwise equivalence; macOS render-log compare; Xcode GPU Capture proof when required | Darwin GUI host | Not run on this Linux host |
 | Windows D3D12 | Native D3D12/DXGI readback; browser/gui backing; pairwise equivalence; D3D12 render-log compare; verified PIX artifact files and GPU-debugger artifact files | Windows GUI host | Not run on this Linux host |
+| iOS Tauri/WKWebView Metal | Fresh simulator or device WKWebView + CAMetalLayer/Metal evidence; live screenshot PNG artifact checks; `ios_mdi_proof.validation.env`; coherent render-log source file/size identity; `[tauri-shell] render, html_len=` marker; production `device_readback` evidence | macOS/iOS host or simulator agent | Not run on this Linux host; source-level artifact gate only |
+| Android Tauri/WebView Vulkan | Fresh emulator or device WebView + Vulkan/skiavk evidence; live screenshot PNG artifact checks; `android_mdi_proof.validation.env`; coherent render-log source file/size identity; `[tauri-shell] render, html_len=` marker; `com.simple.ui` foreground marker; production `device_readback` evidence | Android emulator/device host agent | Not run on this Linux host; source-level artifact gate only |
 | 4K/8K retained perf | Current-source 4K and 8K rows at 200 FPS with viewport, p50/p95 or equivalent timing, RSS, checksum/readback, native binary provenance, retained mode, redraw count, source revision, and `fallback_state=none` | Main/perf agent | Prior retained rows pass; keep source freshness required |
-| Full HTML/CSS | All HTML tags and all CSS inventory properties render; strict full CSS gate passes | Main/web-renderer agents | Incomplete: implemented CSS subset is `147/147`, full CSS is `147/394` |
+| Full HTML/CSS | All HTML tags and all CSS inventory properties render; strict full CSS gate passes | Main/web-renderer agents | Incomplete: implemented CSS subset is `240/240`, full CSS inventory is `233/394` |
 | Production GUI/Web parity | Same-frame backend readback, positive backend handles, matching checksums, and no CPU-mirror-only pass | Platform/main agents | Still separate from Linux direct ARGB diagnostics |
+| Cross-platform freshness | Linux, macOS, Windows, iOS, Android, retained 4K/8K, full HTML/CSS, and production parity evidence reports are all fresh for the same current source revision, runtime build, browser/WebView/Electron revision, graphics SDK/driver revision, and platform runbook version | Main + platform agents | Explicit remaining handoff gate `cross-platform-freshness`; Historical evidence is retained as preparation only; final completion blocked until fresh same-revision evidence exists |
 | Parallel-agent review | Spark or fallback sidecar output plus normal/high-capability review before broad findings or done marks are accepted | Main + review agent | Spark may be quota-blocked; fallback output remains advisory until reviewed |
 
 Do not mark the overall goal done from a subset pass. A narrow CSS slice,
@@ -405,11 +553,22 @@ This session's immediate integration target:
 | WO-15 CSS flex-flow slice | Main agent | Low: Spark may only inspect evidence after implementation | CSS traceability wrapper, focused renderer/inventory/system specs, generated docs, report | Focused renderer spec passes, full CSS gate reports implemented CSS `135/135`, and no full-CSS/native-platform completion is claimed |
 | WO-16 CSS logical inline spacing slice | Main agent | Low: Spark may only inspect evidence after implementation | Renderer, CSS traceability wrapper, Electron bitmap evidence fixture, focused renderer/inventory/system specs, generated docs, report | Focused renderer spec passes, full CSS gate reports implemented CSS `141/141`, and no full-CSS/native-platform completion is claimed |
 | WO-17 Goal completion checklist SSpec | Main agent defines, Spark/fallback may inspect, normal/high-capability agent reviews | High for read-only review, low for source edits | `test/03_system/check/gui_web_2d_goal_completion_criteria_spec.spl`, generated/manual doc, this plan | The SSpec lists all final gates as evidence-backed scenario helpers; goal completion requires current native-host evidence for every assertion, not just a headless source-level pass |
-| WO-18 CSS logical block spacing slice | Main agent | Low: Spark may only inspect evidence after implementation | Renderer, CSS traceability wrapper, Electron bitmap evidence fixture, focused renderer/inventory/system specs, generated docs, report | Focused renderer spec passes, full CSS gate reports implemented CSS `147/147`, and no full-CSS/native-platform completion is claimed |
+| WO-18 CSS logical block spacing slice | Main agent | Low: Spark may only inspect evidence after implementation | Renderer, CSS traceability wrapper, Electron bitmap evidence fixture, focused renderer/inventory/system specs, generated docs, report | At slice completion, focused renderer spec passed, full CSS gate reported implemented CSS `147/147`, and no full-CSS/native-platform completion was claimed |
 | WO-19 CSS logical sizing slice | Main agent | Low: Spark may only inspect evidence after implementation | Renderer, CSS traceability wrapper, Electron bitmap evidence fixture, focused renderer/inventory/system specs, generated docs, report | Focused renderer spec passes, full CSS gate reports implemented CSS `153/153`, and no full-CSS/native-platform completion is claimed |
 | WO-20 CSS logical inset slice | Main agent | Low: Spark may only inspect evidence after implementation | Renderer, CSS traceability wrapper, Electron bitmap evidence fixture, focused renderer/inventory/system specs, generated docs, report | Focused renderer spec passes, full CSS gate reports implemented CSS `160/160`, and no full-CSS/native-platform completion is claimed |
 | WO-21 CSS logical border slice | Main agent | Low: Spark may only inspect evidence after implementation | Renderer, CSS traceability wrapper, Electron bitmap evidence fixture, focused renderer/inventory/system specs, generated docs, report | Focused renderer spec passes, full CSS gate reports implemented CSS `184/184`, and no full-CSS/native-platform completion is claimed |
 | WO-22 CSS logical border radius slice | Main agent | Low: Spark may only inspect evidence after implementation | Renderer, CSS traceability wrapper, Electron bitmap evidence fixture, focused renderer/inventory/system specs, generated docs, report | Focused renderer spec passes, full CSS gate reports implemented CSS `188/188`, and no full-CSS/native-platform completion is claimed |
+| WO-23 CSS will-change metadata slice | Main agent | Low: Spark/fallback may inspect evidence after implementation | CSS support inventory, Electron bitmap evidence fixture, focused inventory/system specs, generated docs, report | Focused specs pass, full CSS gate reports implemented CSS `232/232`, and no full-CSS/native-platform completion is claimed |
+| WO-24 CSS color-scheme metadata slice | Main agent | Low: Spark/fallback may inspect evidence after implementation | CSS support inventory, Electron bitmap evidence fixture, focused inventory/system specs, generated docs, report | Focused specs pass, full CSS gate reports implemented CSS `233/233`, and no full-CSS/native-platform completion is claimed |
+| WO-25 CSS forced-color-adjust metadata slice | Main agent | Low: Spark/fallback may inspect evidence after implementation | CSS support inventory, Electron bitmap evidence fixture, focused inventory/system specs, generated docs, report | Focused specs pass, full CSS gate reports implemented CSS `234/234`, and no full-CSS/native-platform completion is claimed |
+| WO-26 CSS print-color-adjust metadata slice | Main agent | Low: Spark/fallback may inspect evidence after implementation | CSS support inventory, Electron bitmap evidence fixture, focused inventory/system specs, generated docs, report | Focused specs pass, full CSS gate reports implemented CSS `235/235`, and no full-CSS/native-platform completion is claimed |
+| WO-27 CSS adjust/aural metadata slice | Main agent | Low: Spark/fallback may inspect evidence after implementation | CSS support inventory, Electron bitmap evidence fixture, focused inventory/system specs, generated docs, report | Focused specs pass, full CSS gate reports implemented CSS `240/240`, and no full-CSS/native-platform completion is claimed |
+| WO-28 Tauri mobile artifact gate hardening | Main agent, Spark fallback may inspect, high-model reviewer validates claim boundaries | Medium for read-only review, low for edits | Mobile artifact gate SSpec/manual doc and bug report only | Focused SSpec passes `38/38`; Android foreground marker, distinct render-log/dev-log sources, MDI `eventSequence`, and first-failure row-mismatch assertions are part of the contract; final completion still requires live iOS and Android host/emulator evidence |
+| WO-29 Five-platform handoff contract | Main agent owns, Spark/fallback may inspect after source freeze, high-model reviewer validates no overclaim | High for read-only review, low for edits | `test/03_system/check/gui_web_2d_five_platform_handoff_contract_spec.spl`, `test/03_system/check/gui_web_2d_headless_handoff_prep_spec.spl`, `scripts/check/check-gui-web-2d-headless-handoff-negative-selftest.shs`, mirrored manuals, completion-gate checker, this plan | Focused SSpecs pass `3/3` and `1/1`; required-gate checker reports `17` explicit `completion_gate_witness:<gate>` markers and includes `five-platform-handoff-spec`; negative selftest passes duplicate-gate, host/runbook/proof count mismatch, host/runbook/proof empty/malformed-value, and host/runbook/proof gate-ID mismatch failure cases; headless wrapper consumes that negative selftest, checks the exact expected `duplicate-gate|host-count|runbook-count|proof-count|host-value|runbook-value|proof-value|host-format|runbook-format|proof-format|host-gate-id|runbook-gate-id|proof-gate-id` case list and per-case `case:pass` status set, and reports it as pass, reports pass with `completion_scope=prepared-not-verified`, emits live completion `incomplete`, forwards criteria scope/counts, lists `9` unique remaining live completion gates including `cross-platform-freshness`, maps each gate to a host/platform owner, runbook, and required-proof checklist, emits `gui_web_2d_headless_handoff_prep_remaining_live_completion_matrix`, reports zero host/runbook/proof bad values, and verifies exact map gate-ID alignment while preserving the no-live-evidence boundary; this closes only handoff wiring |
+| WO-30 Retained 4K/8K current-source freshness contract | Main agent owns, Spark/fallback may inspect after source freeze, high-model reviewer validates no perf overclaim | Medium for read-only review, low for edits | `scripts/check/check-gui-web-2d-headless-handoff-prep.shs`, `scripts/check/check-widget-showcase-4k-200fps.shs`, `test/03_system/check/gui_web_2d_five_platform_handoff_contract_spec.spl`, this plan | Handoff wrapper keeps `retained-4k-8k-current-source` as an explicit remaining live gate mapped to `perf-capable-native-gui-host`, runbook `scripts/check/check-widget-showcase-4k-200fps.shs`, and proof checklist `4k-200fps+8k-200fps+source-revision+rss+checksum+fallback-none`; this converts retained perf from report-only context into a machine-checked handoff row and still requires fresh native GUI host evidence before any 4K/8K completion claim |
+| WO-31 Full HTML/CSS final inventory contract | Main/web-renderer agents own, Spark/fallback may inspect inventory diffs after source freeze, high-model reviewer validates no coverage overclaim | Medium for read-only review, low for edits | `scripts/check/check-gui-web-2d-headless-handoff-prep.shs`, `scripts/check/check-html-css-full-rendering-goal-status.shs`, `test/03_system/check/gui_web_2d_five_platform_handoff_contract_spec.spl`, this plan | Handoff wrapper keeps `full-html-css` as an explicit remaining live gate mapped to `headless-or-gui-source-plus-renderer-evidence`, runbook `scripts/check/check-html-css-full-rendering-goal-status.shs`, and proof checklist `all-html+all-css-inventory+zero-unrendered+animation-css`; completion requires the full inventory gate to prove all HTML/CSS inventory rows render with zero unrendered properties, not just the current implemented subset |
+| WO-32 Production GUI/Web parity final evidence contract | Platform/main agents own, Spark/fallback may inspect evidence rows after source freeze, high-model reviewer validates no parity overclaim | Medium for read-only review, low for edits | `scripts/check/check-gui-web-2d-headless-handoff-prep.shs`, `scripts/check/check-production-gui-web-renderer-parity-evidence.shs`, `test/03_system/check/gui_web_2d_five_platform_handoff_contract_spec.spl`, this plan | Handoff wrapper keeps `production-gui-web-parity` as an explicit remaining live gate mapped to `gui-host-with-tauri-chrome-backend-readback`, runbook `scripts/check/check-production-gui-web-renderer-parity-evidence.shs`, and proof checklist `tauri-chrome-captures+device-readback+event-routing+checksum-match+no-tolerance`; completion requires live Tauri/Chrome captures, same-frame device readback, event routing proof, and strict checksum parity with no CPU-mirror-only pass |
+| WO-33 Cross-platform freshness final evidence contract | Main + platform agents own, Spark/fallback may inspect report metadata after source freeze, high-model reviewer validates no stale-evidence overclaim | Medium for read-only review, low for edits | `scripts/check/check-gui-web-2d-headless-handoff-prep.shs`, `test/03_system/check/gui_web_2d_five_platform_handoff_contract_spec.spl`, this plan | Handoff wrapper keeps `cross-platform-freshness` as an explicit remaining live gate mapped to `main-plus-platform-freshness-review`, runbook `doc/03_plan/agent_tasks/gui_rendering_parallel_agent_plan_2026-06-27.md+scripts/check/check-gui-web-2d-headless-handoff-prep.shs`, and proof checklist `same-source-revision+runtime-build+browser-webview-electron-revision+graphics-sdk-driver+runbook-version`; completion requires all platform, retained perf, full HTML/CSS, and production parity evidence to share the same current source and toolchain context |
 
 WO-12 rule: do not spawn Spark against source-edit scopes until the read-only
 gap/matrix lanes complete and a normal reviewer approves the intended write
@@ -468,11 +627,21 @@ refresh evidence under `build/widget-showcase-4k-200fps-current-*`,
 `build/gui-web-2d-vulkan-env-browser-backing-current*` when explicit env
 overrides are absent. Focused verification:
 `test/03_system/check/gui_renderdoc_aggregate_autodiscovery_spec.spl` passes.
-A quiet default aggregate run with current-source checking now reports
-4K `pass`, 8K `pass`, browser backing `pass`, direct ARGB pixel comparison
-`pass`, and `blocked_completion_gate_count=10`. Remaining blockers are still
-RenderDoc `.rdc`, platform render-log comparison, production parity/font/Metal,
-and full CSS completion.
+A quiet default aggregate run with current-source checking reports 4K `pass`,
+8K `pass`, browser backing `pass`, and direct ARGB pixel comparison `pass`.
+The 2026-06-28 focused aggregate refresh reports
+`blocked_completion_gate_count=8`; Linux render-log comparison is narrowed to
+`renderdoc-chrome-rdc` and `renderdoc-electron-rdc` because Simple RenderDoc,
+browser backing, pairwise ARGB comparison, and ARGB source gates pass. Remaining
+blockers are still browser/Electron RenderDoc `.rdc`, platform render-log
+comparison across Linux/macOS/Windows, production parity/font/Metal, and full
+CSS completion. This aggregate blocker count is intentionally separate from
+the headless handoff matrix count of `9`; the handoff matrix includes
+`cross-platform-freshness` as a routing/completion-readiness gate, while the
+aggregate blocker count is the current evidence wrapper's blocked proof list.
+Current evidence summaries:
+`doc/09_report/linux_vulkan_render_log_compare_focused_2026-06-28.md` and
+`doc/09_report/gui_renderdoc_feature_coverage_status_2026-06-28.md`.
 
 WO-15 status, 2026-06-27: `flex-flow` moved into implemented Simple Web CSS
 as a parser-expanded shorthand that feeds the existing `flex-direction` and
@@ -502,7 +671,7 @@ Linux/macOS/Windows/perf/full-CSS completion reviews.
 WO-18 status, 2026-06-27: `margin-block`, `margin-block-start`,
 `margin-block-end`, `padding-block`, `padding-block-start`, and
 `padding-block-end` moved into implemented Simple Web CSS for the default
-horizontal writing-mode path. Current evidence is recorded in
+horizontal writing-mode path. Slice evidence at completion is recorded in
 `doc/09_report/html_css_full_rendering_goal_status_logical_block_spacing_2026-06-27.md`:
 implemented CSS is `147/147`, full CSS is `147/394`, full CSS unrendered is
 `247`, and unsupported inventory ownership is `254`. This is a completed
@@ -549,6 +718,61 @@ implemented CSS is `188/188`, full CSS is `188/394`, full CSS unrendered is
 `206`, and unsupported inventory ownership is `213`. This is a completed
 narrow web-renderer slice, not completion evidence for vertical writing-mode
 remapping, full CSS, RenderDoc, Metal, or D3D12 lanes.
+
+WO-23 status, 2026-06-28: `will-change` moved into implemented Simple Web CSS
+as renderer-recognized metadata/hint. It is accepted by the CSS support
+inventory and covered by the transform/animation fixture without changing
+layout or pixel semantics. Current evidence is recorded in
+`doc/09_report/html_css_full_rendering_goal_status_will_change_2026-06-28.md`:
+implemented CSS is `232/232`, full CSS is `232/394`, full CSS unrendered is
+`162`, and unsupported inventory ownership is `169`. This is a completed narrow
+web-renderer slice, not completion evidence for full CSS, RenderDoc, Metal, or
+D3D12 lanes. The direct unit inventory spec and the broader full-status SSpec
+both pass. The full-status SSpec runs the expensive wrapper once and checks the
+strict-mode fail-closed path as a source contract to avoid test-daemon timeout.
+
+WO-24 status, 2026-06-28: `color-scheme` moved into implemented Simple Web CSS
+as renderer-recognized metadata/hint. It is accepted by the CSS support
+inventory and covered by the transform/animation fixture without changing
+layout or pixel semantics. Current evidence is recorded in
+`doc/09_report/html_css_full_rendering_goal_status_color_scheme_2026-06-28.md`:
+implemented CSS is `233/233`, full CSS is `233/394`, full CSS unrendered is
+`161`, and unsupported inventory ownership is `168`. This is a completed narrow
+web-renderer slice, not completion evidence for full CSS, RenderDoc, Metal, or
+D3D12 lanes. The full-status SSpec now uses a checked evidence fixture and
+wrapper source-contract checks so it stays fast in the test daemon while the
+shell wrapper report remains the authoritative generated evidence.
+
+WO-25 status, 2026-06-28: `forced-color-adjust` moved into implemented Simple
+Web CSS as renderer-recognized metadata/hint. It is accepted by the CSS support
+inventory and covered by the transform/animation fixture without changing
+layout or pixel semantics. Current evidence is recorded in
+`doc/09_report/html_css_full_rendering_goal_status_forced_color_adjust_2026-06-28.md`:
+implemented CSS is `234/234`, full CSS is `234/394`, full CSS unrendered is
+`160`, and unsupported inventory ownership is `167`. This is a completed narrow
+web-renderer slice, not completion evidence for full CSS, RenderDoc, Metal, or
+D3D12 lanes.
+
+WO-26 status, 2026-06-28: `print-color-adjust` moved into implemented Simple
+Web CSS as renderer-recognized metadata/hint. It is accepted by the CSS support
+inventory and covered by the transform/animation fixture without changing
+layout or pixel semantics. Current evidence is recorded in
+`doc/09_report/html_css_full_rendering_goal_status_print_color_adjust_2026-06-28.md`:
+implemented CSS is `235/235`, full CSS is `235/394`, full CSS unrendered is
+`159`, and unsupported inventory ownership is `166`. This is a completed narrow
+web-renderer slice, not completion evidence for full CSS, RenderDoc, Metal, or
+D3D12 lanes.
+
+WO-27 status, 2026-06-28: `color-adjust`, `speech-rate`, `pitch`,
+`pitch-range`, and `volume` moved into implemented Simple Web CSS as
+renderer-recognized adjustment/aural metadata. They are accepted by the CSS
+support inventory and covered by the transform/animation fixture without
+changing visual layout or pixel semantics. Current evidence is recorded in
+`doc/09_report/html_css_full_rendering_goal_status_adjust_aural_metadata_2026-06-28.md`:
+implemented CSS is `240/240`, full CSS inventory is `233/394`, full CSS
+unrendered is `161`, and unsupported inventory ownership is `161`. This is a completed narrow
+web-renderer slice, not completion evidence for full CSS, RenderDoc, Metal, or
+D3D12 lanes.
 
 WO-5 status: refreshed non-RenderDoc Linux evidence is passing in
 `doc/09_report/gui_web_2d_linux_vulkan_refresh_2026-06-27.md`. A fresh
@@ -713,6 +937,56 @@ Normal-review acceptance:
   `doc/07_guide/tooling/renderdoc_capture_infra.md`,
   `doc/07_guide/app/ui/gui_web_2d_vulkan_setup.md`, and stale `doc/09_report`
   snapshots; do not treat those stale pages as current proof.
+- 2026-06-28 source-coupling guard result: the first
+  `sh scripts/check/check-rendering-source-coupling.shs` launch failed before
+  checking because jj reported a stale working copy. After
+  `jj workspace update-stale` refreshed working-copy metadata, the same guard
+  returned `STATUS: PASS rendering-source-coupling`. Treat this as source-
+  coupling evidence only: the current rendering-scoped diff does not introduce
+  new raw `rt_*` shortcuts, direct backend proof/status pokes, or forced pass
+  shortcuts.
+- 2026-06-28 parallel review refresh: requested Spark sidecars could not run
+  because the Spark quota was exhausted. The replacement mini sidecar found the
+  plan/guide headless boundary, and the higher-model review found one required
+  correction: current 4K/8K evidence is retained static alias performance with
+  source freshness and no interpreter fallback, not non-software GPU throughput
+  or dynamic non-cached 8K rendering. Completion criteria and this plan now
+  require native-host evidence, byte-level capture artifacts, and explicit
+  headless `prepared-not-verified` wording before any broad done claim.
+- 2026-06-28 completion-cache hardening: final completion SSpec runs now set
+  `GUI_RENDERDOC_AGGREGATE_DISABLE_DEFAULT_STATIC_CACHE=1` and use only a
+  per-run aggregate static cache. This prevents native-host completion from
+  passing solely by replaying stale shared nested-gate evidence; platform lanes
+  still need fresh host artifacts and backend proof.
+- 2026-06-28 cache-mode SSpec refresh: the aggregate wrapper now exposes
+  `GUI_RENDERDOC_AGGREGATE_CACHE_CONFIG_SELFTEST=1`, and
+  `test/03_system/check/gui_renderdoc_aggregate_cache_modes_spec.spl` asserts
+  both halves of the cache contract: read-only seeded cache precedence for
+  normal fast lanes, and disabled default shared cache with explicit per-run
+  cache preservation for final completion lanes.
+- 2026-06-28 RenderDoc guide refresh: `doc/07_guide/tooling/renderdoc_capture_infra.md`
+  now separates fast repeated aggregate checks from final native-host
+  completion mode. Final completion must disable the default shared cache, use a
+  per-run aggregate cache, and avoid read-only seeded cache replay.
+- 2026-06-28 platform runbook refresh: `doc/07_guide/app/ui/gui_web_2d_vulkan_setup.md`
+  now shows final aggregate completion with disabled shared cache and byte-level
+  `RDOC`/`PIX`/Xcode capture magic requirements, and
+  `doc/07_guide/platform/mobile/tauri_mobile_guide.md` now marks retained mobile
+  pass reports as non-standing completion evidence that must be refreshed on the
+  target host/emulator.
+- 2026-06-28 SSpec check bug recorded:
+  `doc/08_tracking/bug/sspec_simple_check_describe_it_parser_2026-06-28.md`.
+  Do not use `bin/simple check` as the syntax gate for `std.spec` scenario files
+  in this lane; it currently rejects normal `describe`/`it` DSL syntax. Use the
+  focused SSpec runner or wrapper guards instead.
+- 2026-06-28 WO-29 parallel-agent refresh: Spark restart attempted as `Boole`
+  with `gpt-5.3-codex-spark`, but the Spark quota blocked it before findings.
+  Higher-model review completed as `Harvey` with `gpt-5.5`; accepted fixes are
+  integrated in the headless handoff wrapper/report label and the five-platform
+  manual summary so source-shape audits cannot be misread as live completion.
+  Harvey found the 13-case negative selftest list and per-case pass set
+  consistent across wrapper, SSpec expectations, and report. Final status remains
+  `prepared-not-verified` with 9 live gates outstanding.
 
 ## Hard Stop Conditions
 
