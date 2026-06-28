@@ -1410,6 +1410,17 @@ impl CodegenEmitter for LlvmEmitter<'_> {
             return Ok(());
         }
 
+        if method == "merge" && args.len() == 1 {
+            let recv = self.get(receiver)?;
+            let other = self.get(args[0])?;
+            let count = self.call_runtime("rt_len", &[other])?;
+            let _ = self.call_runtime_bool_as_int("rt_array_extend_i64", &[recv, other, count])?;
+            if let Some(d) = dest {
+                self.set(*d, recv);
+            }
+            return Ok(());
+        }
+
         if let Some(rt_name) = Self::runtime_method_name(method) {
             let recv = self.get(receiver)?;
             let mut rt_args = vec![recv];

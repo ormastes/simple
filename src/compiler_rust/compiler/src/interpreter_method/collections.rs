@@ -64,7 +64,7 @@ pub fn handle_array_methods(
             new_arr.pop();
             Value::array(new_arr)
         }
-        "concat" | "extend" => {
+        "concat" | "extend" | "merge" => {
             let other = eval_arg(
                 args,
                 0,
@@ -82,9 +82,9 @@ pub fn handle_array_methods(
             } else {
                 let ctx = ErrorContext::new()
                     .with_code(codes::TYPE_MISMATCH)
-                    .with_help("concat expects an array argument");
+                    .with_help("concat/extend/merge expects an array argument");
                 return Err(CompileError::semantic_with_context(
-                    "concat expects array argument",
+                    "concat/extend/merge expects array argument",
                     ctx,
                 ));
             }

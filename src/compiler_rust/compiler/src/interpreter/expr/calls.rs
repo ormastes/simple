@@ -860,11 +860,14 @@ pub(super) fn eval_call_expr(
                     }
                 }
                 _ => {
-                    // Debug: show what value type we're trying to access
+                    // Debug: show what value type we're trying to access, plus the
+                    // receiver AST so a field-access-on-nil can be traced to its
+                    // originating Simple expression/variable.
                     eprintln!(
-                        "[DEBUG FIELD ACCESS] Trying to access field '{}' on value type: {:?}",
+                        "[DEBUG FIELD ACCESS] Trying to access field '{}' on value type: {:?}; receiver expr: {:?}",
                         field,
-                        recv_val.type_name()
+                        recv_val.type_name(),
+                        receiver
                     );
                     let ctx = ErrorContext::new()
                         .with_code(codes::UNDEFINED_FIELD)

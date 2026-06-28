@@ -1106,6 +1106,18 @@ fn try_compile_builtin_method_call<M: Module>(
         }
         // Map/filter/join
         "join" => "rt_string_join",
+        "merge" => {
+            if args.len() == 1 {
+                let other_val = get_vreg_or_default(ctx, builder, &args[0]);
+                let count = inline_runtime_len_value(builder, other_val);
+                if let Some(&func_id) = ctx.runtime_funcs.get("rt_array_extend_i64") {
+                    let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
+                    adapted_call(builder, func_ref, &[receiver_val, other_val, count]);
+                    return Ok(Some(receiver_val));
+                }
+            }
+            return Ok(None);
+        }
         "map" => {
             // Use rt_option_map for Option.map (also works for arrays since
             // rt_option_map checks if the value is an enum with Some/None)

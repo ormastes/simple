@@ -2050,6 +2050,44 @@ impl LlvmBackend {
                 _ => None,
             };
 
+            if method == "merge" && args.len() == 2 {
+                let recv = self.get_vreg(&args[0], vreg_map)?;
+                let recv = self.coerce_value_to_type(recv, Some(i64_type.into()), builder)?;
+                let other = self.get_vreg(&args[1], vreg_map)?;
+                let other = self.coerce_value_to_type(other, Some(i64_type.into()), builder)?;
+
+                let len_type = i64_type.fn_type(&[i64_type.into()], false);
+                let len_func = module
+                    .get_function("rt_len")
+                    .unwrap_or_else(|| module.add_function("rt_len", len_type, None));
+                let len_call = builder
+                    .build_call(len_func, &[other.into()], "array_merge_len")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("array merge len call", &e))?;
+                let count = len_call
+                    .try_as_basic_value()
+                    .left()
+                    .ok_or_else(|| crate::error::factory::llvm_build_failed("array merge len value", "rt_len returned no value"))?;
+
+                let merge_type = self
+                    .context_ref()
+                    .bool_type()
+                    .fn_type(&[i64_type.into(), i64_type.into(), i64_type.into()], false);
+                let merge_func = module
+                    .get_function("rt_array_extend_i64")
+                    .unwrap_or_else(|| module.add_function("rt_array_extend_i64", merge_type, None));
+                builder
+                    .build_call(
+                        merge_func,
+                        &[recv.into(), other.into(), count.into()],
+                        "array_merge_extend",
+                    )
+                    .map_err(|e| crate::error::factory::llvm_build_failed("array merge extend call", &e))?;
+                if let Some(d) = dest {
+                    vreg_map.insert(d, recv);
+                }
+                return Ok(());
+            }
+
             if let Some(rt_fn_name) = qualified_rt_redirect {
                 let expected_arity = qualified_runtime_arity(method, rt_fn_name);
                 if expected_arity == Some(args.len()) {

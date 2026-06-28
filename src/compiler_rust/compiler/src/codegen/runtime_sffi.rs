@@ -234,6 +234,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_array_set_text", &[I64, I64, I64], &[I8]),
     RuntimeFuncSpec::new("rt_array_pop", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_array_clear", &[I64], &[I8]),
+    RuntimeFuncSpec::new("rt_array_extend_i64", &[I64, I64, I64], &[I8]),
     RuntimeFuncSpec::new("rt_array_len", &[I64], &[I64]),
     // FR-COMPILER-012: array-repeat for `[value; count]` syntax in JIT
     RuntimeFuncSpec::new("rt_array_repeat", &[I64, I64], &[I64]),
@@ -1640,6 +1641,17 @@ mod tests {
         assert!(spec.params.is_empty());
         assert_eq!(spec.returns, [I64]);
         assert_eq!(tier_of(spec.name), RuntimeFuncTier::Async);
+    }
+
+    #[test]
+    fn array_extend_i64_is_registered_for_merge_lowering() {
+        let spec = RUNTIME_FUNCS
+            .iter()
+            .find(|spec| spec.name == "rt_array_extend_i64")
+            .expect("rt_array_extend_i64 must be registered for Array.merge lowering");
+        assert_eq!(spec.params, [I64, I64, I64]);
+        assert_eq!(spec.returns, [I8]);
+        assert_eq!(tier_of(spec.name), RuntimeFuncTier::Alloc);
     }
 
     #[test]
