@@ -30,7 +30,7 @@ tripped the simplebox build. Pre-existing; unrelated to this lane's libc port
 (proven by a marker test: renaming the lane's `["c", ...]` library list to
 `["zzcmark", ...]` left the identical `'c'` error).
 
-## Part 2 — native-build internal 120s timeout on the freestanding path — **OPEN**
+## Part 2 — native-build internal 120s worker timeout — **FIXED 2026-06-28** (perf follow-up open)
 
 With Part 1 fixed, the **real** simplebox build (the committed invocation:
 `--backend llvm --source src/os [--source src/lib] --entry
@@ -57,12 +57,21 @@ contradicted by `simpleos_stdlib_num.spl` (which has an in-function typed `val`
 and `0x7fffffff`) compiling to a real freestanding ELF. Minimal repros mislead
 for native-build — the real-unit result above supersedes them.
 
-Fix levers (not yet chosen): (a) raise/parameterize native-build's internal
-sub-step timeout (the `--timeout` CLI flag maps to per-file `file_timeout`=300,
-a *different* timeout — the 120s here is the process-wrapper default); (b) scope
-discovery so a freestanding entry doesn't parse all 1241 `src/os` files when
-`--entry-closure` only needs 3. This is a native-build perf/infra item, not a
-code bug in this lane.
+Root cause (traced via `ps`): native-build delegates to a worker subprocess
+`timeout 120 bin/simple run src/app/cli/native_build_worker.spl …`
+(`native_build_main.spl:70`), hardcoded to **120s**, which killed the worker
+mid-compile.
+
+- Lever (a) — **FIXED**: `native_build_main.spl` now honors `--timeout <secs>`
+  and defaults to **1800s** (`native_build_timeout_ms`). Verified live: the
+  worker wrapper shows `timeout 1800` and the build runs well past 120s without
+  being killed.
+- Lever (b) — **OPEN (perf)**: even with the timeout raised, the worker spends
+  many minutes because it parses the **entire `src/os` tree (1241 `.spl` files)**
+  on the (stale) interpreter `bin/simple`, though `--entry-closure` needs only 3.
+  Scope discovery to the import closure (and/or run the worker on a fresh
+  self-hosted binary, not the stale seed). Native-build perf item, not a lane
+  code bug.
 
 ## Earlier mis-diagnoses (corrected)
 
