@@ -555,6 +555,61 @@ def run_nested_gate(name: str, argv, build_subdir: str, report_name: str, timeou
     output = target_env.read_text(encoding="utf-8", errors="ignore") if target_env.exists() else proc.stdout
     return output, proc.returncode
 
+def run_cache_selftest() -> None:
+    status = "pass"
+    reason = "pass"
+    readonly_source = ""
+    writable_source = ""
+    writable_cache_status = "missing"
+    if READONLY_STATIC_CACHE_DIR is None or STATIC_CACHE_DIR is None:
+        status = "fail"
+        reason = "cache-dirs-missing"
+    else:
+        readonly_cache_dir = READONLY_STATIC_CACHE_DIR / "cache-selftest-readonly"
+        readonly_cache_dir.mkdir(parents=True, exist_ok=True)
+        (readonly_cache_dir / "evidence.env").write_text(
+            "aggregate_cache_selftest_readonly_source=readonly\n",
+            encoding="utf-8",
+        )
+        readonly_output, readonly_code = run_nested_gate(
+            "cache-selftest-readonly",
+            ["sh", "-c", "mkdir -p \"$BUILD_DIR\" && printf 'aggregate_cache_selftest_readonly_source=writable\\n' > \"$BUILD_DIR/evidence.env\""],
+            "cache-selftest-readonly",
+            "report.md",
+            10,
+            static_cache=True,
+        )
+        writable_output, writable_code = run_nested_gate(
+            "cache-selftest-writable",
+            ["sh", "-c", "mkdir -p \"$BUILD_DIR\" && printf 'aggregate_cache_selftest_writable_source=writable\\n' > \"$BUILD_DIR/evidence.env\""],
+            "cache-selftest-writable",
+            "report.md",
+            10,
+            static_cache=True,
+        )
+        readonly_source = value_of("aggregate_cache_selftest_readonly_source", readonly_output)
+        writable_source = value_of("aggregate_cache_selftest_writable_source", writable_output)
+        writable_cache_env = STATIC_CACHE_DIR / "cache-selftest-writable" / "evidence.env"
+        writable_cache_status = "pass" if writable_cache_env.exists() else "missing"
+        if readonly_code != 0 or writable_code != 0:
+            status = "fail"
+            reason = "nested-gate-exit"
+        elif readonly_source != "readonly":
+            status = "fail"
+            reason = "readonly-cache-not-preferred"
+        elif writable_source != "writable" or writable_cache_status != "pass":
+            status = "fail"
+            reason = "writable-cache-miss-not-populated"
+    print(f"aggregate_cache_selftest_status={status}")
+    print(f"aggregate_cache_selftest_reason={reason}")
+    print(f"aggregate_cache_selftest_readonly_source={readonly_source}")
+    print(f"aggregate_cache_selftest_writable_source={writable_source}")
+    print(f"aggregate_cache_selftest_writable_cache_file_status={writable_cache_status}")
+
+if os.environ.get("GUI_RENDERDOC_AGGREGATE_CACHE_SELFTEST", "0") == "1":
+    run_cache_selftest()
+    raise SystemExit(0)
+
 def is_gui_web_2d_direct_run_env(text: str) -> bool:
     mode = value_of("gui_web_2d_vulkan_mode", text)
     if mode not in {"--run", "--renderdoc", "--renderdoc-simple"}:
