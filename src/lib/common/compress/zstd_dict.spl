@@ -155,12 +155,12 @@ fn zstd_parse_dictionary_for_test(dictionary_bytes: [u8], expected_id: i64) -> R
 
 # Resolves the dictionary state to use for a given frame, returning sensible
 # defaults when no dictionary is referenced.
-fn _zstd_frame_dictionary_state(frame_header: ZstdFrameHeader, dictionary_bytes: [u8]?, dictionary_id: i64?) -> Result<ZstdDictionaryState, CompressionError>:
-    if frame_header.dictionary_id == nil:
+fn _zstd_frame_dictionary_state(frame_dictionary_id: i64?, dictionary_bytes: [u8]?, dictionary_id: i64?) -> Result<ZstdDictionaryState, CompressionError>:
+    if frame_dictionary_id == nil:
         return _zstd_default_dictionary_state()
     if dictionary_bytes == nil or dictionary_id == nil:
         return Err(CompressionError.UnsupportedFeature("zstd dictionary-backed frames require explicit dictionary bytes and dictionary_id"))
-    val expected = frame_header.dictionary_id ?? 0
+    val expected = frame_dictionary_id ?? 0
     val provided = dictionary_id ?? 0
     if expected != provided:
         return Err(CompressionError.CorruptStream("zstd dictionary id mismatch"))
@@ -172,11 +172,11 @@ fn _zstd_decompress_frame_for_tier_with_dictionary(input: [u8], tier: Compressio
     var pos = 0
     while pos < input.len():
         val header_res = _zstd_parse_frame_header(input, pos)
-        val frame_header = match header_res:
-            case Ok(decoded): decoded
-            case Err(reason): return Err(reason)
-        val dictionary_state_res = _zstd_frame_dictionary_state(frame_header, dictionary_bytes, dictionary_id)
-        val dictionary_state = match dictionary_state_res:
+        if header_res.is_err():
+            return Err(header_res.unwrap_err())
+        val frame_header = header_res.unwrap()
+        val dictionary_state_res = _zstd_frame_dictionary_state(frame_header.dictionary_id, dictionary_bytes, dictionary_id)
+        val dictionary_state: ZstdDictionaryState = match dictionary_state_res:
             case Ok(decoded): decoded
             case Err(reason): return Err(reason)
         pos = pos + frame_header.bytes_used
