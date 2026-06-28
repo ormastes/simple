@@ -36,6 +36,73 @@ sh scripts/check/check-gui-widget-renderdoc-goal-status.shs
   `.rdc` row is not enough to satisfy the widget-specific gate.
 - Synthetic `.rdc` and Electron ARGB artifact rows must name regular files,
   not symlinks, before the aggregate widget RenderDoc goal can pass.
+- When Electron produces a nonblank ARGB proof but no `.rdc`, GPU process exit
+  diagnostics from the Electron RenderDoc log are preserved in parent evidence.
+
+## Evidence Flow
+
+The wrapper is a composition gate. It does not launch RenderDoc directly during
+normal status checks; it reads the child evidence paths and runs the child
+validators against them. The widget fixture validator proves the generated HTML
+fixture contains every expected widget feature witness. The Simple child gate
+proves the widget fixture was captured by the Simple Vulkan Engine2D path and
+that the capture file starts with `RDOC`. The Electron child gate proves the
+same widget fixture was rendered by Electron Chromium with Vulkan/ANGLE launch
+fields, a nonblank ARGB bitmap, and a real `.rdc` capture.
+
+The parent status remains `incomplete` when the fixture and one child gate pass
+but another child gate is missing. That distinction is important: `fail` is for
+bad or contradictory fixture evidence, while `incomplete` is for host/platform
+capture evidence that still needs to be collected on a prepared machine.
+
+## Operator Checks
+
+Start with `gui_widget_renderdoc_goal_status`. A pass requires
+`gui_widget_renderdoc_goal_blocked_gate_count=0`,
+`gui_widget_renderdoc_goal_simple_gate_status=pass`, and
+`gui_widget_renderdoc_goal_electron_gate_status=pass`.
+
+For Simple evidence, check `gui_widget_renderdoc_goal_simple_gate_capture_file_status`,
+`gui_widget_renderdoc_goal_simple_gate_capture_file_magic`, and
+`gui_widget_renderdoc_goal_simple_gate_runtime_backend`. They must prove a
+regular `RDOC` file and Vulkan runtime backend for
+`src/app/test/renderdoc_vulkan_widget_capture.spl`.
+
+For Electron evidence, check `gui_widget_renderdoc_goal_electron_gate_capture_file_status`,
+`gui_widget_renderdoc_goal_electron_gate_capture_file_magic`,
+`gui_widget_renderdoc_goal_electron_gate_argb_status`, and
+`gui_widget_renderdoc_goal_electron_gate_requested_angle`. A nonblank ARGB file
+with missing `.rdc` still blocks completion because bitmap proof is not native
+RenderDoc proof.
+
+## Failure Triage
+
+If `gui_widget_renderdoc_goal_electron_gate_failure_class` is
+`electron-gate-missing-rdc`, inspect the forwarded GPU process exit fields.
+`gui_widget_renderdoc_goal_electron_gate_gpu_process_exit_status=fail` with
+`gui_widget_renderdoc_goal_electron_gate_gpu_process_exit_codes=139` means the
+Electron GPU process crashed while RenderDoc/Vulkan was configured. Preserve
+that as a platform capture blocker until a prepared Electron/RenderDoc host
+produces a regular `.rdc` whose first bytes are `RDOC`.
+
+If the ARGB fields fail, fix the Electron live bitmap path first; there is no
+useful RenderDoc comparison without a nonblank widget render. If the widget
+feature count is not 43, fix the generated fixture coverage before spending time
+on platform capture.
+
+## Non-Goals
+
+This wrapper does not claim pixel equivalence, browser backend parity, or full
+platform completion. Those are handled by the broader GUI RenderDoc aggregate,
+Linux Vulkan render-log comparison, macOS Metal comparison, Windows D3D12
+comparison, and production GUI/Web renderer parity gates.
+
+## Completion Checklist
+
+Before marking the widget RenderDoc lane complete, save the report path, confirm
+the blocked gate count is zero, confirm both child capture files are regular
+files with `RDOC` magic, and confirm the widget feature list still contains all
+43 expected entries. If any one of those checks is missing, keep the lane open.
 """
 
 # @tag: system, gui, renderdoc, vulkan, widget, evidence
@@ -220,7 +287,7 @@ describe "GUI widget RenderDoc goal status gate":
 
     it "forwards missing Electron RDOC while preserving ARGB proof status":
         step("Create controlled Electron evidence with ARGB proof but no RDOC capture")
-        val command = "rm -rf build/test-gui-widget-renderdoc-goal-status-missing-rdc-with-argb && mkdir -p build/test-gui-widget-renderdoc-goal-status-missing-rdc-with-argb/simple build/test-gui-widget-renderdoc-goal-status-missing-rdc-with-argb/electron && printf 'RDOCsynthetic simple capture\\n' > build/test-gui-widget-renderdoc-goal-status-missing-rdc-with-argb/simple/simple.rdc && printf '{\"width\":2,\"height\":2,\"format\":\"argb-u32\",\"producer\":\"electron-chromium-capture\",\"nativeWidth\":2,\"nativeHeight\":2,\"pixels\":[4294967295,4278190335,4294967295,4294967295]}\\n' > build/test-gui-widget-renderdoc-goal-status-missing-rdc-with-argb/electron/electron_argb.json && printf 'rdoc_backend=simple\\nrdoc_scene=vulkan-engine2d\\nrdoc_program=src/app/test/renderdoc_vulkan_widget_capture.spl\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=build/test-gui-widget-renderdoc-goal-status-missing-rdc-with-argb/simple/simple.rdc\\nrdoc_capture_magic=RDOC\\nrdoc_simple_runtime_backend=vulkan\\nrdoc_simple_renderdoc_available=1\\nrdoc_simple_renderdoc_start=1\\nrdoc_simple_renderdoc_end=1\\nrdoc_simple_renderdoc_num_captures=1\\nrdoc_simple_pixel_count=3072\\nrdoc_simple_widget_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\\nrdoc_simple_widget_html_bytes=4096\\n' > build/test-gui-widget-renderdoc-goal-status-missing-rdc-with-argb/simple/evidence.env && printf 'rdoc_backend=electron\\nrdoc_scene=html-css-electron\\nrdoc_capture_status=fail\\nrdoc_capture_reason=missing-rdc\\nrdoc_capture_file=\\nrdoc_capture_magic=\\nrdoc_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\\nrdoc_electron=tools/electron-shell/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron\\nrdoc_electron_capture_script=tools/electron-live-bitmap/capture_html_argb.js\\nrdoc_electron_argb=build/test-gui-widget-renderdoc-goal-status-missing-rdc-with-argb/electron/electron_argb.json\\nrdoc_electron_width=2\\nrdoc_electron_height=2\\nrdoc_chromium_requested_api=vulkan\\nrdoc_chromium_requested_angle=vulkan\\nrdoc_chromium_requested_features=Vulkan\\nrdoc_chromium_launch_flags=--no-sandbox --disable-gpu-sandbox --no-zygote --ozone-platform=x11 --enable-features=Vulkan,DefaultANGLEVulkan,VulkanFromANGLE --ignore-gpu-blocklist --enable-gpu-rasterization --use-angle=vulkan\\n' > build/test-gui-widget-renderdoc-goal-status-missing-rdc-with-argb/electron/evidence.env && RDOC_SIMPLE_EVIDENCE_ENV=build/test-gui-widget-renderdoc-goal-status-missing-rdc-with-argb/simple/evidence.env RDOC_ELECTRON_HTML_EVIDENCE_ENV=build/test-gui-widget-renderdoc-goal-status-missing-rdc-with-argb/electron/evidence.env BUILD_DIR=build/test-gui-widget-renderdoc-goal-status-missing-rdc-with-argb/out REPORT_PATH=build/test-gui-widget-renderdoc-goal-status-missing-rdc-with-argb/report.md sh scripts/check/check-gui-widget-renderdoc-goal-status.shs"
+        val command = "rm -rf build/test-gui-widget-renderdoc-goal-status-missing-rdc-with-argb && mkdir -p build/test-gui-widget-renderdoc-goal-status-missing-rdc-with-argb/simple build/test-gui-widget-renderdoc-goal-status-missing-rdc-with-argb/electron && printf 'RDOCsynthetic simple capture\\n' > build/test-gui-widget-renderdoc-goal-status-missing-rdc-with-argb/simple/simple.rdc && printf '{\"width\":2,\"height\":2,\"format\":\"argb-u32\",\"producer\":\"electron-chromium-capture\",\"nativeWidth\":2,\"nativeHeight\":2,\"pixels\":[4294967295,4278190335,4294967295,4294967295]}\\n' > build/test-gui-widget-renderdoc-goal-status-missing-rdc-with-argb/electron/electron_argb.json && printf '[1:1:ERROR:content/browser/gpu/gpu_process_host.cc:998] GPU process exited unexpectedly: exit_code=139\\n[1:1:ERROR:content/browser/gpu/gpu_process_host.cc:998] GPU process exited unexpectedly: exit_code=139\\n' > build/test-gui-widget-renderdoc-goal-status-missing-rdc-with-argb/electron/renderdoc-electron-html.log && printf 'rdoc_backend=simple\\nrdoc_scene=vulkan-engine2d\\nrdoc_program=src/app/test/renderdoc_vulkan_widget_capture.spl\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=build/test-gui-widget-renderdoc-goal-status-missing-rdc-with-argb/simple/simple.rdc\\nrdoc_capture_magic=RDOC\\nrdoc_simple_runtime_backend=vulkan\\nrdoc_simple_renderdoc_available=1\\nrdoc_simple_renderdoc_start=1\\nrdoc_simple_renderdoc_end=1\\nrdoc_simple_renderdoc_num_captures=1\\nrdoc_simple_pixel_count=3072\\nrdoc_simple_widget_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\\nrdoc_simple_widget_html_bytes=4096\\n' > build/test-gui-widget-renderdoc-goal-status-missing-rdc-with-argb/simple/evidence.env && printf 'rdoc_backend=electron\\nrdoc_scene=html-css-electron\\nrdoc_capture_status=fail\\nrdoc_capture_reason=missing-rdc\\nrdoc_capture_file=\\nrdoc_capture_magic=\\nrdoc_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\\nrdoc_electron=tools/electron-shell/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron\\nrdoc_electron_capture_script=tools/electron-live-bitmap/capture_html_argb.js\\nrdoc_electron_argb=build/test-gui-widget-renderdoc-goal-status-missing-rdc-with-argb/electron/electron_argb.json\\nrdoc_electron_width=2\\nrdoc_electron_height=2\\nrdoc_chromium_requested_api=vulkan\\nrdoc_chromium_requested_angle=vulkan\\nrdoc_chromium_requested_features=Vulkan\\nrdoc_chromium_launch_flags=--no-sandbox --disable-gpu-sandbox --no-zygote --ozone-platform=x11 --enable-features=Vulkan,DefaultANGLEVulkan,VulkanFromANGLE --ignore-gpu-blocklist --enable-gpu-rasterization --use-angle=vulkan\\nrdoc_log=build/test-gui-widget-renderdoc-goal-status-missing-rdc-with-argb/electron/renderdoc-electron-html.log\\n' > build/test-gui-widget-renderdoc-goal-status-missing-rdc-with-argb/electron/evidence.env && RDOC_SIMPLE_EVIDENCE_ENV=build/test-gui-widget-renderdoc-goal-status-missing-rdc-with-argb/simple/evidence.env RDOC_ELECTRON_HTML_EVIDENCE_ENV=build/test-gui-widget-renderdoc-goal-status-missing-rdc-with-argb/electron/evidence.env BUILD_DIR=build/test-gui-widget-renderdoc-goal-status-missing-rdc-with-argb/out REPORT_PATH=build/test-gui-widget-renderdoc-goal-status-missing-rdc-with-argb/report.md sh scripts/check/check-gui-widget-renderdoc-goal-status.shs"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
         expect(code).to_equal(0)
 
@@ -236,5 +303,9 @@ describe "GUI widget RenderDoc goal status gate":
         expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_argb_file_status=pass")
         expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_argb_status=pass")
         expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_argb_nonblank_pixel_count=1")
+        expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_gpu_process_exit_status=fail")
+        expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_gpu_process_exit_count=2")
+        expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_gpu_process_exit_codes=139")
+        expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_gpu_process_exit_reason=gpu-process-exited-unexpectedly")
         expect(evidence).to_contain("gui_widget_renderdoc_goal_blocked_gate_count=1")
         expect(evidence).to_contain("gui_widget_renderdoc_goal_blocked_gates=Electron Chromium-on-Vulkan widget RenderDoc .rdc capture (ARGB proof already present)")

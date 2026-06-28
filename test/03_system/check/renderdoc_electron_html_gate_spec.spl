@@ -66,6 +66,9 @@ report the missing requested API, angle, feature, or launch flag.
 The gate also reads the Chromium/Electron log when available. If the log shows
 ANGLE Vulkan initialization failure, the gate reports the Vulkan log reason
 instead of accepting a fallback bitmap render.
+If the log shows Electron GPU process crashes while the `.rdc` is missing, the
+gate preserves the exit count and exit codes as diagnostics while still failing
+closed.
 
 ## Debugging
 
@@ -112,7 +115,7 @@ close the Electron RenderDoc requirement.
 
 # @tag: system, gpu, renderdoc, html, electron, vulkan, evidence
 
-use std.spec
+use std.spec.*
 
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
@@ -247,7 +250,7 @@ describe "RenderDoc Electron HTML gate":
         expect(evidence).to_contain("rdoc_electron_html_gate_argb_reason=electron-argb-symlink")
 
     it "keeps nonblank Electron ARGB proof while failing a missing RDOC capture":
-        val command = "rm -rf build/test-renderdoc-electron-html-gate-missing-rdc-with-argb && mkdir -p build/test-renderdoc-electron-html-gate-missing-rdc-with-argb/source && printf '{\"width\":2,\"height\":2,\"format\":\"argb-u32\",\"producer\":\"electron-chromium-capture\",\"nativeWidth\":2,\"nativeHeight\":2,\"pixels\":[4294967295,4278190335,4294967295,4294967295]}\\n' > build/test-renderdoc-electron-html-gate-missing-rdc-with-argb/source/electron_argb.json && printf 'rdoc_backend=electron\\nrdoc_scene=html-css-electron\\nrdoc_capture_status=fail\\nrdoc_capture_reason=missing-rdc\\nrdoc_capture_file=\\nrdoc_capture_magic=\\nrdoc_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\\nrdoc_electron=tools/electron-shell/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron\\nrdoc_electron_capture_script=tools/electron-live-bitmap/capture_html_argb.js\\nrdoc_electron_argb=build/test-renderdoc-electron-html-gate-missing-rdc-with-argb/source/electron_argb.json\\nrdoc_electron_width=2\\nrdoc_electron_height=2\\nrdoc_chromium_requested_api=vulkan\\nrdoc_chromium_requested_angle=vulkan\\nrdoc_chromium_requested_features=Vulkan\\nrdoc_chromium_launch_flags=--no-sandbox --disable-gpu-sandbox --no-zygote --ozone-platform=x11 --enable-features=Vulkan,DefaultANGLEVulkan,VulkanFromANGLE --ignore-gpu-blocklist --enable-gpu-rasterization --use-angle=vulkan\\n' > build/test-renderdoc-electron-html-gate-missing-rdc-with-argb/source/evidence.env && RDOC_ELECTRON_HTML_EVIDENCE_ENV=build/test-renderdoc-electron-html-gate-missing-rdc-with-argb/source/evidence.env BUILD_DIR=build/test-renderdoc-electron-html-gate-missing-rdc-with-argb/out REPORT_PATH=build/test-renderdoc-electron-html-gate-missing-rdc-with-argb/report.md sh scripts/check/check-renderdoc-electron-html-gate.shs || true"
+        val command = "rm -rf build/test-renderdoc-electron-html-gate-missing-rdc-with-argb && mkdir -p build/test-renderdoc-electron-html-gate-missing-rdc-with-argb/source && printf '{\"width\":2,\"height\":2,\"format\":\"argb-u32\",\"producer\":\"electron-chromium-capture\",\"nativeWidth\":2,\"nativeHeight\":2,\"pixels\":[4294967295,4278190335,4294967295,4294967295]}\\n' > build/test-renderdoc-electron-html-gate-missing-rdc-with-argb/source/electron_argb.json && printf '[1:1:ERROR:content/browser/gpu/gpu_process_host.cc:998] GPU process exited unexpectedly: exit_code=139\\n[1:1:ERROR:content/browser/gpu/gpu_process_host.cc:998] GPU process exited unexpectedly: exit_code=139\\n' > build/test-renderdoc-electron-html-gate-missing-rdc-with-argb/source/renderdoc-electron-html.log && printf 'rdoc_backend=electron\\nrdoc_scene=html-css-electron\\nrdoc_capture_status=fail\\nrdoc_capture_reason=missing-rdc\\nrdoc_capture_file=\\nrdoc_capture_magic=\\nrdoc_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\\nrdoc_electron=tools/electron-shell/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron\\nrdoc_electron_capture_script=tools/electron-live-bitmap/capture_html_argb.js\\nrdoc_electron_argb=build/test-renderdoc-electron-html-gate-missing-rdc-with-argb/source/electron_argb.json\\nrdoc_electron_width=2\\nrdoc_electron_height=2\\nrdoc_chromium_requested_api=vulkan\\nrdoc_chromium_requested_angle=vulkan\\nrdoc_chromium_requested_features=Vulkan\\nrdoc_chromium_launch_flags=--no-sandbox --disable-gpu-sandbox --no-zygote --ozone-platform=x11 --enable-features=Vulkan,DefaultANGLEVulkan,VulkanFromANGLE --ignore-gpu-blocklist --enable-gpu-rasterization --use-angle=vulkan\\nrdoc_log=build/test-renderdoc-electron-html-gate-missing-rdc-with-argb/source/renderdoc-electron-html.log\\n' > build/test-renderdoc-electron-html-gate-missing-rdc-with-argb/source/evidence.env && RDOC_ELECTRON_HTML_EVIDENCE_ENV=build/test-renderdoc-electron-html-gate-missing-rdc-with-argb/source/evidence.env BUILD_DIR=build/test-renderdoc-electron-html-gate-missing-rdc-with-argb/out REPORT_PATH=build/test-renderdoc-electron-html-gate-missing-rdc-with-argb/report.md sh scripts/check/check-renderdoc-electron-html-gate.shs || true"
         val (_stdout, _stderr, code) = rt_process_run("/bin/sh", ["-c", command])
         expect(code).to_equal(0)
 
@@ -261,6 +264,10 @@ describe "RenderDoc Electron HTML gate":
         expect(evidence).to_contain("rdoc_electron_html_gate_argb_reason=pass")
         expect(evidence).to_contain("rdoc_electron_html_gate_argb_pixel_count=4")
         expect(evidence).to_contain("rdoc_electron_html_gate_argb_nonblank_pixel_count=1")
+        expect(evidence).to_contain("rdoc_electron_html_gate_gpu_process_exit_status=fail")
+        expect(evidence).to_contain("rdoc_electron_html_gate_gpu_process_exit_count=2")
+        expect(evidence).to_contain("rdoc_electron_html_gate_gpu_process_exit_codes=139")
+        expect(evidence).to_contain("rdoc_electron_html_gate_gpu_process_exit_reason=gpu-process-exited-unexpectedly")
         expect(evidence).to_contain("rdoc_electron_html_gate_launch_flags=--no-sandbox --disable-gpu-sandbox --no-zygote --ozone-platform=x11 --enable-features=Vulkan,DefaultANGLEVulkan,VulkanFromANGLE --ignore-gpu-blocklist --enable-gpu-rasterization --use-angle=vulkan")
 
     it "rejects Electron captures missing live-bitmap ARGB rendered pixels":
