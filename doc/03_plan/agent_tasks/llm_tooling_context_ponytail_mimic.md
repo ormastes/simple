@@ -417,3 +417,6 @@ Tasks:
    MCP and lower MCP accept `review` as `audit` and `simplify` as
    `simplification`, advertise the aliases, and keep JSON/markdown output on
    the canonical mode names.
+7. Add context format alias compatibility. Status: done on 2026-06-28; app MCP
+   and lower MCP accept `format=md` as `markdown`, advertise `markdown/md`, and
+   keep the subprocess/rendering path on canonical `markdown`.

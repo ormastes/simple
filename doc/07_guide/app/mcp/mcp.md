@@ -309,8 +309,8 @@ CLI accepts:
 - `context --sql --query=<text> --db=<path> --source-filter=<text>` to narrow
   persisted SQL query results by stored source path.
 
-The MCP tool accepts `file`, optional `target`, `format` (`text`, `markdown`, or
-`json`), `index=true`, `query`, `sql=true`, `db`, and `source_filter`. `file` is
+The MCP tool accepts `file`, optional `target`, `format` (`text`, `markdown`/`md`,
+or `json`), `index=true`, `query`, `sql=true`, `db`, and `source_filter`. `file` is
 optional only for the `sql=true` plus non-empty `query` shape; ordinary context
 generation still requires a source file. These fields are forwarded to the
 existing `context` CLI subprocess so source-mode MCP does not import the large
