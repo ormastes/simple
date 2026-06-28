@@ -8,6 +8,26 @@ SIMPLE_BIN="${SIMPLE_BIN:-release/x86_64-unknown-linux-gnu/simple}"
 BUILD_DIR="${BUILD_DIR:-build/llm_dashboard_evidence}"
 REPORT_PATH="${REPORT_PATH:-doc/09_report/2026/06/llm_dashboard_evidence_$(date -u +%F).md}"
 OUT_ENV="$BUILD_DIR/evidence.env"
+LIVE_EVIDENCE_ENV="${LLM_DASHBOARD_LIVE_EVIDENCE_ENV:-build/llm_dashboard_live/evidence.env}"
+STRICT_LIVE=0
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --strict-live)
+            STRICT_LIVE=1
+            ;;
+        --help|-h)
+            echo "usage: sh scripts/check/check-llm-dashboard-evidence.shs [--strict-live]"
+            echo "  --strict-live  require LLM_DASHBOARD_LIVE_EVIDENCE_ENV with llm_dashboard_live_status=pass"
+            exit 0
+            ;;
+        *)
+            echo "unknown argument: $1" >&2
+            exit 2
+            ;;
+    esac
+    shift
+done
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
 rm -f "$OUT_ENV" "$REPORT_PATH"
@@ -40,8 +60,33 @@ for key in diagnostics_panel vllm_control_route log_modes diagnostics_collector 
     fi
 done
 
+live_status="not_required"
+live_reason="default_route_and_collector_evidence_only"
+if [ "$STRICT_LIVE" -eq 1 ]; then
+    live_status="missing"
+    live_reason="missing_live_dashboard_evidence"
+    if [ -f "$LIVE_EVIDENCE_ENV" ]; then
+        evidence_status="$(sed -n 's/^llm_dashboard_live_status=//p' "$LIVE_EVIDENCE_ENV" | tail -n 1)"
+        evidence_reason="$(sed -n 's/^llm_dashboard_live_reason=//p' "$LIVE_EVIDENCE_ENV" | tail -n 1)"
+        if [ "$evidence_status" = "pass" ]; then
+            live_status="pass"
+            live_reason="${evidence_reason:-live_dashboard_passed}"
+        else
+            live_status="${evidence_status:-fail}"
+            live_reason="${evidence_reason:-live_dashboard_not_passed}"
+        fi
+    fi
+    if [ "$live_status" != "pass" ]; then
+        status="fail"
+    fi
+fi
+
 {
     printf '%s\n' "llm_dashboard_evidence_status=$status"
+    printf '%s\n' "llm_dashboard_evidence_strict_live=$STRICT_LIVE"
+    printf '%s\n' "llm_dashboard_evidence_live_status=$live_status"
+    printf '%s\n' "llm_dashboard_evidence_live_reason=$live_reason"
+    printf '%s\n' "llm_dashboard_evidence_live_env=$LIVE_EVIDENCE_ENV"
     for key in diagnostics_panel vllm_control_route log_modes diagnostics_collector tooling_collector; do
         eval "value=\${${key}_status}"
         printf '%s\n' "llm_dashboard_evidence_${key}_status=$value"
@@ -51,6 +96,14 @@ done
 {
     printf '# LLM Dashboard Evidence\n\n'
     printf '%s\n' "- status: \`$status\`"
+    if [ "$STRICT_LIVE" -eq 1 ]; then
+        printf '%s\n' "- strict_live: \`true\`"
+    else
+        printf '%s\n' "- strict_live: \`false\`"
+    fi
+    printf '%s\n' "- live_dashboard: \`$live_status\`"
+    printf '%s\n' "- live_reason: \`$live_reason\`"
+    printf '%s\n' "- live_env: \`$LIVE_EVIDENCE_ENV\`"
     for key in diagnostics_panel vllm_control_route log_modes diagnostics_collector tooling_collector; do
         eval "value=\${${key}_status}"
         eval "exit_code=\${${key}_exit}"
@@ -58,7 +111,11 @@ done
     done
     printf '%s\n' "- env: \`$OUT_ENV\`"
     printf '\n'
-    printf 'This evidence proves the local dashboard diagnostics, vLLM control route planning, log-mode CLI, diagnostics collector, and tooling artifact collector contracts. It is not live vLLM serving proof; live serving remains covered by the runtime vLLM host probe lane.\n'
+    if [ "$STRICT_LIVE" -eq 1 ]; then
+        printf 'This strict live check requires a separate live dashboard evidence env with `llm_dashboard_live_status=pass`. Local route, collector, and CLI evidence alone is not live operator-dashboard completion proof.\n'
+    else
+        printf 'This evidence proves the local dashboard diagnostics, vLLM control route planning, log-mode CLI, diagnostics collector, and tooling artifact collector contracts. It is not live operator-dashboard proof or live vLLM serving proof; live serving remains covered by the runtime vLLM host probe lane. Run with `--strict-live` when live dashboard evidence must pass.\n'
+    fi
 } >"$REPORT_PATH"
 
 if [ "$status" = "pass" ]; then

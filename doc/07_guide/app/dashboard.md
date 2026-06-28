@@ -60,7 +60,21 @@ Latest focused evidence:
 dashboard diagnostics panel, vLLM control route planning, dashboard log modes,
 diagnostics collector, and tooling artifact collector passing locally. This is
 dashboard route/evidence coverage; live vLLM serving still belongs to the LLM
-runtime host-probe lane.
+runtime host-probe lane, and live operator-dashboard completion requires a
+separate live evidence env.
+
+Use strict live mode only on hosts or CI lanes that are supposed to prove live
+dashboard operation:
+
+```bash
+LLM_DASHBOARD_LIVE_EVIDENCE_ENV=build/llm_dashboard_live/evidence.env \
+  sh scripts/check/check-llm-dashboard-evidence.shs --strict-live
+```
+
+The strict live gate requires the evidence env to report
+`llm_dashboard_live_status=pass`. Local route, collector, and CLI evidence alone
+is not live operator-dashboard completion proof. The aggregate LLM strict mode
+also runs this wrapper with `--strict-live`.
 
 ---
 
