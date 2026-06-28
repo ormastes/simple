@@ -591,6 +591,12 @@ PIX and GPU debugger artifacts must be regular, non-symlink, non-hardlink
 files so strict evidence cannot be substituted through shared capture aliases.
 Relative PIX/GPU-debugger artifact names resolve beside `WINDOWS_D3D12_PIX_ENV`
 so stale working-directory files cannot satisfy strict Windows capture proof.
+The DirectX browser-backing setup uses
+`scripts/check/gui-web-2d-directx-browser-backing-status.js` to classify
+Electron and Chrome proof JSON paths before accepting child browser rows.
+`*_browser_backing_proof_file_status=pass` means a regular, nonempty,
+single-link proof file; `symlink`, `hardlink`, `empty`, `not-regular`, and
+`missing` force the child row to fail.
 Completion keys:
 
 ```text

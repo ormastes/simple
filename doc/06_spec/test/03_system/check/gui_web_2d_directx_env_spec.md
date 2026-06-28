@@ -1,5 +1,54 @@
-"""
 # GUI/Web 2D DirectX Environment Evidence
+
+> Pins the Windows DirectX/D3D11 GUI-web environment evidence contract. The setup script records native D3D11 staging readback proof and, in browser-backing mode, launches Electron and Chrome with ANGLE D3D11 flags.
+
+<!-- sdn-diagram:id=gui_web_2d_directx_env_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=gui_web_2d_directx_env_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+gui_web_2d_directx_env_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=gui_web_2d_directx_env_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 3 | 3 | 0 | 0 |
+
+<details>
+<summary>Full Scenario Manual</summary>
+
+# GUI/Web 2D DirectX Environment Evidence
+
+Pins the Windows DirectX/D3D11 GUI-web environment evidence contract. The setup script records native D3D11 staging readback proof and, in browser-backing mode, launches Electron and Chrome with ANGLE D3D11 flags.
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Other |
+| Status | Active |
+| Requirements | N/A |
+| Plan | doc/03_plan/agent_tasks/gui_web_gpu_host_platform_matrix.md |
+| Design | doc/07_guide/tooling/renderdoc_capture_infra.md |
+| Research | N/A |
+| Source | `test/03_system/check/gui_web_2d_directx_env_spec.spl` |
+| Updated | 2026-06-01 |
+| Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
@@ -137,46 +186,94 @@ The spec covers:
 - Direct helper execution with a hardlinked Electron-shaped proof and a
   symlinked Chrome-shaped proof.
 - Windows Chrome/Edge binary discovery in the Chrome live bitmap helper.
-"""
 
-# @tag: system, gui, web, directx, electron, chrome, evidence
+## Scenarios
 
-use std.spec
-use std.io_runtime.{file_read, process_run}
+### GUI/Web 2D DirectX environment evidence
 
-describe "GUI/Web 2D DirectX environment evidence":
+#### script exposes DirectX/D3D11 evidence keys
 
-    it "script exposes DirectX/D3D11 evidence keys":
-        val script = file_read("scripts/setup/setup-gui-web-2d-directx-env.shs")
-        expect(script).to_contain("gui_web_2d_directx_requested_api")
-        expect(script).to_contain("gui_web_2d_directx_requested_angle")
-        expect(script).to_contain("--use-angle=d3d11")
-        expect(script).to_contain("check-directx-native-readback.shs")
-        expect(script).to_contain("gui_web_2d_directx_native_readback_gate_status")
-        expect(script).to_contain("gui_web_2d_directx_electron_browser_backing_status")
-        expect(script).to_contain("gui_web_2d_directx_chrome_browser_backing_status")
-        expect(script).to_contain("gui_web_2d_directx_browser_backing_status")
-        expect(script).to_contain("gui-web-2d-directx-browser-backing-status.js")
+<details>
+<summary>Executable SSpec</summary>
 
-    it "rejects linked DirectX browser proof files":
-        val root = "build/test-gui-web-2d-directx-linked-browser-proof"
-        val command = "rm -rf " + root + " && mkdir -p " + root + " && printf '%s\\n' '{\"status\":\"pass\",\"blur_or_tolerance_used\":false,\"gpu_feature_status\":{\"gpu_compositing\":\"enabled\",\"webgl\":\"enabled\"},\"gpu_info\":{\"renderer\":\"ANGLE D3D11\"}}' > " + root + "/proof-original.json && ln " + root + "/proof-original.json " + root + "/proof-hardlink.json && printf '%s\\n' '{\"status\":\"pass\",\"blur_or_tolerance_used\":false,\"gpu_feature_status\":{\"gpu_compositing\":\"enabled\",\"webgl\":\"enabled\"},\"gpu_info\":{\"renderer\":\"ANGLE D3D11\"}}' > " + root + "/proof-target.json && ln -s proof-target.json " + root + "/proof-symlink.json && node scripts/check/gui-web-2d-directx-browser-backing-status.js " + root + "/proof-hardlink.json gui_web_2d_directx_electron > " + root + "/hardlink.env && node scripts/check/gui-web-2d-directx-browser-backing-status.js " + root + "/proof-symlink.json gui_web_2d_directx_chrome > " + root + "/symlink.env"
-        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(0)
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
 
-        val hardlink = file_read(root + "/hardlink.env")
-        expect(hardlink).to_contain("gui_web_2d_directx_electron_browser_backing_proof_file_status=hardlink")
-        expect(hardlink).to_contain("gui_web_2d_directx_electron_browser_backing_status=fail")
-        expect(hardlink).to_contain("gui_web_2d_directx_electron_browser_backing_reason=proof-file-hardlink")
-        val symlink = file_read(root + "/symlink.env")
-        expect(symlink).to_contain("gui_web_2d_directx_chrome_browser_backing_proof_file_status=symlink")
-        expect(symlink).to_contain("gui_web_2d_directx_chrome_browser_backing_status=fail")
-        expect(symlink).to_contain("gui_web_2d_directx_chrome_browser_backing_reason=proof-file-symlink")
+```simple
+val script = file_read("scripts/setup/setup-gui-web-2d-directx-env.shs")
+expect(script).to_contain("gui_web_2d_directx_requested_api")
+expect(script).to_contain("gui_web_2d_directx_requested_angle")
+expect(script).to_contain("--use-angle=d3d11")
+expect(script).to_contain("check-directx-native-readback.shs")
+expect(script).to_contain("gui_web_2d_directx_native_readback_gate_status")
+expect(script).to_contain("gui_web_2d_directx_electron_browser_backing_status")
+expect(script).to_contain("gui_web_2d_directx_chrome_browser_backing_status")
+expect(script).to_contain("gui_web_2d_directx_browser_backing_status")
+expect(script).to_contain("gui-web-2d-directx-browser-backing-status.js")
+```
 
-    it "Chrome capture helper discovers standard Windows Chrome and Edge paths":
-        val helper = file_read("tools/chrome-live-bitmap/capture_html_argb.js")
-        expect(helper).to_contain("process.platform === \"win32\"")
-        expect(helper).to_contain("Google\", \"Chrome\", \"Application\", \"chrome.exe")
-        expect(helper).to_contain("Microsoft\", \"Edge\", \"Application\", \"msedge.exe")
-        expect(helper).to_contain("chrome.exe")
-        expect(helper).to_contain("msedge.exe")
+</details>
+
+#### rejects linked DirectX browser proof files
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-gui-web-2d-directx-linked-browser-proof"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && printf '%s\\n' '{\"status\":\"pass\",\"blur_or_tolerance_used\":false,\"gpu_feature_status\":{\"gpu_compositing\":\"enabled\",\"webgl\":\"enabled\"},\"gpu_info\":{\"renderer\":\"ANGLE D3D11\"}}' > " + root + "/proof-original.json && ln " + root + "/proof-original.json " + root + "/proof-hardlink.json && printf '%s\\n' '{\"status\":\"pass\",\"blur_or_tolerance_used\":false,\"gpu_feature_status\":{\"gpu_compositing\":\"enabled\",\"webgl\":\"enabled\"},\"gpu_info\":{\"renderer\":\"ANGLE D3D11\"}}' > " + root + "/proof-target.json && ln -s proof-target.json " + root + "/proof-symlink.json && node scripts/check/gui-web-2d-directx-browser-backing-status.js " + root + "/proof-hardlink.json gui_web_2d_directx_electron > " + root + "/hardlink.env && node scripts/check/gui-web-2d-directx-browser-backing-status.js " + root + "/proof-symlink.json gui_web_2d_directx_chrome > " + root + "/symlink.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val hardlink = file_read(root + "/hardlink.env")
+expect(hardlink).to_contain("gui_web_2d_directx_electron_browser_backing_proof_file_status=hardlink")
+expect(hardlink).to_contain("gui_web_2d_directx_electron_browser_backing_status=fail")
+expect(hardlink).to_contain("gui_web_2d_directx_electron_browser_backing_reason=proof-file-hardlink")
+val symlink = file_read(root + "/symlink.env")
+expect(symlink).to_contain("gui_web_2d_directx_chrome_browser_backing_proof_file_status=symlink")
+expect(symlink).to_contain("gui_web_2d_directx_chrome_browser_backing_status=fail")
+expect(symlink).to_contain("gui_web_2d_directx_chrome_browser_backing_reason=proof-file-symlink")
+```
+
+</details>
+
+#### Chrome capture helper discovers standard Windows Chrome and Edge paths
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val helper = file_read("tools/chrome-live-bitmap/capture_html_argb.js")
+expect(helper).to_contain("process.platform === \"win32\"")
+expect(helper).to_contain("Google\", \"Chrome\", \"Application\", \"chrome.exe")
+expect(helper).to_contain("Microsoft\", \"Edge\", \"Application\", \"msedge.exe")
+expect(helper).to_contain("chrome.exe")
+expect(helper).to_contain("msedge.exe")
+```
+
+</details>
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 3 |
+| Active scenarios | 3 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
+
+## Related Documentation
+
+- **Plan:** [doc/03_plan/agent_tasks/gui_web_gpu_host_platform_matrix.md](doc/03_plan/agent_tasks/gui_web_gpu_host_platform_matrix.md)
+- **Design:** [doc/07_guide/tooling/renderdoc_capture_infra.md](doc/07_guide/tooling/renderdoc_capture_infra.md)
+
+
+</details>
