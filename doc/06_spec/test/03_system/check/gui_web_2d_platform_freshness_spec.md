@@ -27,7 +27,7 @@ gui_web_2d_platform_freshness_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 8 | 8 | 0 | 0 |
+| 9 | 9 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -84,6 +84,8 @@ sh scripts/check/check-gui-web-2d-platform-freshness.shs
 - Explicit run-level source and metadata overrides pass freshness when wrapper
   env files provide matching lane revisions but do not carry toolchain metadata
   themselves.
+- Explicit run-level metadata overrides fail freshness when a lane env carries
+  conflicting non-empty metadata.
 - Shared `gui_web_2d_evidence_source_revision` fallback keys pass freshness for
   wrappers that do not emit lane-specific source fields.
 - The checker emits `gui_web_2d_platform_freshness_*` keys consumed by the
@@ -165,6 +167,9 @@ Electron, graphics SDK, driver, and runbook revisions once for the whole run
 instead of duplicating them into every upstream wrapper env. The checker must
 preserve those values in its output so the platform evidence bundle can prove
 freshness without depending on native aggregate metadata alone.
+Those overrides are still checked against lane-provided metadata. A run-level
+override cannot hide a stale runtime build, browser/WebView/Electron revision,
+graphics SDK/driver, or runbook version already present in an upstream env.
 
 ## Output Contract
 
@@ -279,6 +284,30 @@ expect(evidence).to_contain("gui_web_2d_platform_freshness_browser_webview_elect
 expect(evidence).to_contain("gui_web_2d_platform_freshness_graphics_sdk_driver=operator-vulkan-metal-d3d12")
 expect(evidence).to_contain("gui_web_2d_platform_freshness_runbook_version=operator-runbook-2026-06-28")
 expect(evidence).to_contain("gui_web_2d_platform_freshness_missing_metadata=")
+```
+
+</details>
+
+#### fails when run-level metadata overrides conflict with lane metadata
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val command = "rm -rf build/test-gui-web-2d-platform-freshness-override-mismatch && mkdir -p build/test-gui-web-2d-platform-freshness-override-mismatch/env && printf 'native_render_log_platform_matrix_source_revision=rev-selected\\nnative_render_log_platform_matrix_runtime_build=native-runtime\\n' > build/test-gui-web-2d-platform-freshness-override-mismatch/env/native.env && printf 'tauri_mobile_renderer_parity_source_revision=rev-selected\\n' > build/test-gui-web-2d-platform-freshness-override-mismatch/env/mobile.env && printf 'gui_showcase_4k_200fps_source_revision=rev-selected\\n' > build/test-gui-web-2d-platform-freshness-override-mismatch/env/4k.env && printf 'gui_showcase_8k_perf_source_revision=rev-selected\\n' > build/test-gui-web-2d-platform-freshness-override-mismatch/env/8k.env && printf 'html_css_full_rendering_goal_source_revision=rev-selected\\n' > build/test-gui-web-2d-platform-freshness-override-mismatch/env/html.env && printf 'production_gui_web_renderer_parity_source_revision=rev-selected\\n' > build/test-gui-web-2d-platform-freshness-override-mismatch/env/production.env && BUILD_DIR=build/test-gui-web-2d-platform-freshness-override-mismatch/out REPORT_PATH=build/test-gui-web-2d-platform-freshness-override-mismatch/report.md NATIVE_RENDER_LOG_PLATFORM_MATRIX_ENV=build/test-gui-web-2d-platform-freshness-override-mismatch/env/native.env TAURI_MOBILE_RENDERER_PARITY_ENV=build/test-gui-web-2d-platform-freshness-override-mismatch/env/mobile.env GUI_SHOWCASE_4K_200FPS_ENV=build/test-gui-web-2d-platform-freshness-override-mismatch/env/4k.env GUI_SHOWCASE_8K_200FPS_ENV=build/test-gui-web-2d-platform-freshness-override-mismatch/env/8k.env HTML_CSS_FULL_RENDERING_GOAL_ENV=build/test-gui-web-2d-platform-freshness-override-mismatch/env/html.env PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=build/test-gui-web-2d-platform-freshness-override-mismatch/env/production.env GUI_WEB_2D_PLATFORM_FRESHNESS_SOURCE_REVISION=rev-selected GUI_WEB_2D_PLATFORM_FRESHNESS_RUNTIME_BUILD=operator-runtime-build GUI_WEB_2D_PLATFORM_FRESHNESS_BROWSER_WEBVIEW_ELECTRON_REVISION=operator-chrome-electron-webview GUI_WEB_2D_PLATFORM_FRESHNESS_GRAPHICS_SDK_DRIVER=operator-vulkan-metal-d3d12 GUI_WEB_2D_PLATFORM_FRESHNESS_RUNBOOK_VERSION=operator-runbook-2026-06-28 sh scripts/check/check-gui-web-2d-platform-freshness.shs"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read("build/test-gui-web-2d-platform-freshness-override-mismatch/out/evidence.env")
+expect(evidence).to_contain("gui_web_2d_platform_freshness_status=fail")
+expect(evidence).to_contain("gui_web_2d_platform_freshness_reason=metadata-mismatch")
+expect(evidence).to_contain("gui_web_2d_platform_freshness_source_revision=rev-selected")
+expect(evidence).to_contain("gui_web_2d_platform_freshness_runtime_build=operator-runtime-build")
+expect(evidence).to_contain("gui_web_2d_platform_freshness_missing_metadata=")
+expect(evidence).to_contain("gui_web_2d_platform_freshness_mismatched_metadata_lanes=native:runtime-build")
 ```
 
 </details>
@@ -415,8 +444,8 @@ expect(evidence).to_contain("gui_web_2d_platform_freshness_mismatched_source_rev
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 8 |
-| Active scenarios | 8 |
+| Total scenarios | 9 |
+| Active scenarios | 9 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

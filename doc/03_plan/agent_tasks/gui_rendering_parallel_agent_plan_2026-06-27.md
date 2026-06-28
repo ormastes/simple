@@ -1068,6 +1068,11 @@ Normal-review acceptance:
   mismatch diagnostics for runtime build, browser/WebView/Electron revision,
   graphics SDK/driver, and runbook version labels, so all freshness metadata
   fields have fail-closed regression coverage.
+- 2026-06-28 freshness override mismatch coverage:
+  `test/03_system/check/gui_web_2d_platform_freshness_spec.spl` now asserts
+  that explicit run-level metadata overrides cannot hide conflicting non-empty
+  metadata already present in a lane env. Operator-provided metadata is accepted
+  only when the upstream evidence does not contradict it.
 
 ## Hard Stop Conditions
 
