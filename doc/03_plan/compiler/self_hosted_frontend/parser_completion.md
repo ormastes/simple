@@ -46,16 +46,16 @@ every run that hits them.
 | G5 | `expected field name after '.'` — numeric tuple-field access `.0`/`.1` | `src/lib/common/color/manipulate.spl:32` | **60** | `parser_primary.spl` / `parser_expr.spl` — accept integer literal after `.` as tuple index |
 | G6 | `expected 'case' in match block` — `match` arm with `Enum.Variant:` indented body | `src/lib/common/llm/content_authority.spl:30` | **57** | `parser_stmts.spl` — accept `Ident.Ident:` as a match arm without the `case` keyword |
 | G7 | `expected ), got ','` — trailing/multiple args variant | `src/lib/common/cbor/utilities.spl:15` | **51** | `parser_expr.spl` — overlaps G3; same comma-in-call fix |
-| G8 | `expected Ident, got self` — extension `fn f(self: T)` param | `src/lib/common/color/types.spl:9` | **38** | `parser_decls_part1.spl` — allow `self` as first param name in fn signature |
+| G8 | `expected Ident, got self` — extension `fn f(self: T)` param | `src/lib/common/color/types.spl:9` | **38** | `_ParserDecls/fn_struct_decls.spl` — allow `self` as first param name in fn signature |
 | G9 | `unexpected token in expression: '.'` — chained call / glob re-export `export X.*` | `src/lib/common/json/__init__.spl:1` | **35** | `parser_decls.spl` — parse `export Ident.*` as glob re-export |
-| G10 | `expected Ident, got fn` — `fn` inside enum body (method on enum variant) | `src/lib/common/doctest/matcher.spl:12` | **31** | `parser_decls_part2.spl` — allow `fn` declarations inside enum bodies |
-| G11 | `expected :, got Newline` — multi-line fn signature (return type on next line) | `src/lib/common/io/traits.spl:112` | **31** | `parser_decls_part1.spl` — allow Newline+Indent after `->` before `:` body start |
+| G10 | `expected Ident, got fn` — `fn` inside enum body (method on enum variant) | `src/lib/common/doctest/matcher.spl:12` | **31** | `_ParserDecls/enum_module_body.spl` — allow `fn` declarations inside enum bodies |
+| G11 | `expected :, got Newline` — multi-line fn signature (return type on next line) | `src/lib/common/io/traits.spl:112` | **31** | `_ParserDecls/fn_struct_decls.spl` — allow Newline+Indent after `->` before `:` body start |
 | G12 | `unexpected token: '?'` — nullable type `T?` or `?` postfix operator | `src/lib/nogc_sync_mut/io/pipe.spl:91` | **29** | `parser_expr.spl` / `parser_primary.spl` — handle `?` postfix for option unwrap |
 | G13 | `expected Ident, got use` — `export use X.{...}` re-export form | `src/lib/common/cert/pem.spl:11` | **26** | `parser_decls.spl` — parse `export use path.{names}` as re-export statement |
 | G14 | `expected ), got Ident 'as'` — `as` cast in expression | `src/lib/common/color/lab_xyz.spl:67` | **22** | `parser_expr.spl` — parse `expr as Type` infix cast |
-| G15 | `unexpected token in class body` — `static` or other modifier in class | `src/lib/nogc_sync_mut/simd/vector.spl:20` | **18** | `parser_decls_part2.spl` — accept `static` modifier in class member parse |
+| G15 | `unexpected token in class body` — `static` or other modifier in class | `src/lib/nogc_sync_mut/simd/vector.spl:20` | **18** | `_ParserDecls/enum_module_body.spl` — accept `static` modifier in class member parse |
 | G16 | `expected parameter name` — lambda/closure parameter edge | various | **17** | `parser_expr.spl` |
-| G17 | `expected Ident, got _` — wildcard `_` as param name | various | **13** | `parser_decls_part1.spl` — accept `_` as valid param name |
+| G17 | `expected Ident, got _` — wildcard `_` as param name | various | **13** | `_ParserDecls/fn_struct_decls.spl` — accept `_` as valid param name |
 | G18 | `unexpected token: Error` (non-`&`) + misc low-count | various | **12** | lexer + parser_expr |
 
 **Total accounted: ~1,629 of 1,855.** Remainder: crashes (rc=139, 29 files) and
@@ -77,7 +77,7 @@ Fix in prelude-closure-first order (G1→G4 poison every run through prelude fil
   seed directly: `src/compiler_rust/target/release/simple run tmp/site12/<h>.spl`
   (the seed interprets the lean parser .spl sources, so this DOES test the fix).
 - A harness importing only parser+ast segfaults the seed interpreter; adding
-  `use compiler.frontend.flat_ast_bridge_part2.{flat_ast_to_module}` as a third
+  `use compiler.frontend._FlatAstBridge.module_assembly.{flat_ast_to_module}` as a third
   import avoids it (template: `tmp/site12/m1_reverify.spl`).
 - ALWAYS include a must-fail control case (e.g. `"fn h() -> i64:\n    val q = ((\n"`
   → `parser_has_errors()` must be true). If the control passes, the harness is
@@ -87,7 +87,7 @@ Fix in prelude-closure-first order (G1→G4 poison every run through prelude fil
 # inline harness (no file_ops import)
 use compiler.core.parser.{parse_module, parser_has_errors}
 use compiler.core.ast.{ast_reset}
-use compiler.frontend.flat_ast_bridge_part2.{flat_ast_to_module}
+use compiler.frontend._FlatAstBridge.module_assembly.{flat_ast_to_module}
 
 fn main():
     ast_reset()
@@ -125,7 +125,7 @@ Known follow-up: `|`/`&`/`^` sit at multiplication level, diverging from the
 ### M2 — G4: `@attr(...)` annotations before AOP pointcut dispatch (fixes ~61 files) — DONE 2026-06-11
 
 Landed in `03a0aaaeda` (local line) / grafted to origin. Dispatch site was
-`core/parser_decls_part2.spl:313` (`elif par_kind_get() == 171:` in
+`core/_ParserDecls/enum_module_body.spl:313` (`elif par_kind_get() == 171:` in
 `parse_module_body()`). Two root causes:
 1. The decorator-name capture only accepted ident (kind 6); `allow` lexes as
    keyword kind 218, so the name stayed empty, `(star_import)` was left
@@ -184,7 +184,7 @@ lazy_outline_equivalence 16/16.
 
 ### M5 — G8: `self` as first parameter name (fixes ~38 files)
 
-**File:** `src/compiler/10.frontend/core/parser_decls_part1.spl`  
+**File:** `src/compiler/10.frontend/core/_ParserDecls/fn_struct_decls.spl`  
 Accept `self` as a valid param name (same handling as `me`).  
 **Test:** `"fn to_string(self) -> text: \"x\""` in class body → 0 errors.  
 **Docker:** `bin/simple check src/lib/common/color/types.spl`
@@ -244,16 +244,16 @@ shifted two diagnoses:
   `core/tokens.spl` keyword_lookup; cast loops in `parse_unary()` +
   `parse_binary_from()` (parser_expr.spl) via `expr_cast`; all former
   text-based `as` checks (use-alias in parser_decls_use.spl, newunit in
-  parser_decls_part2.spl, match-arm binding in parser_stmts.spl) switched to
+  _ParserDecls/enum_module_body.spl, match-arm binding in parser_stmts.spl) switched to
   kind 221 — text comparison is UNRELIABLE for in-memory sources because
   `par_text_get()` returns "" when the env-var source transport has a fake path.
 - **G15**'s real form (vector.spl:20) was `pass_dn` placeholder in trait/class
   bodies, not `static`; handled `pass/pass_dn/pass_todo/pass_do_nothing` before
-  member dispatch (parser_decls_part1.spl).
+  member dispatch (_ParserDecls/fn_struct_decls.spl).
 - **G10** enum `fn/static/me` members → impl-block creation in
-  `parse_enum_decl` (parser_decls_part2.spl).
+  `parse_enum_decl` (_ParserDecls/enum_module_body.spl).
 - **G11** Newline+Indent skip after `-> Type` in `parse_fn_decl`
-  (parser_decls_part1.spl) and `parse_class_body_method` (parser_decls_use.spl).
+  (_ParserDecls/fn_struct_decls.spl) and `parse_class_body_method` (parser_decls_use.spl).
 
 Verified (orchestrator harness): enum-fn, trait signature-only methods,
 `r as f64` cast, `use std.color as c` alias, `pass_dn` trait body, M6/M8 spot
@@ -268,11 +268,11 @@ Landed in `2c62bd472c7` (local line) / grafted to origin.
 - **G12** `?`(130) postfix in `parse_postfix_on` (~777) + `parse_postfix` (~919),
   parser_expr.spl — covers `expr?` (pipe.spl:91) and `T?` types.
 - **G17** `_`(kind 169) accepted in `parser_expect_param_name()`
-  (parser_decls_part1.spl:82-91) — no real `fn(_:` uses found in src/lib but
+  (_ParserDecls/fn_struct_decls.spl:82-91) — no real `fn(_:` uses found in src/lib but
   the helper now matches the Rust seed.
 - **G16** inline fn-lambda `fn(s: text) -> i64: body` (string_bench.spl:55,
   replay_driver.spl:75) — `fn`(20) handler at end of `parse_primary_expr`,
-  parser_primary_part2.spl.
+  _ParserPrimary/primary_expr.spl.
 - **G18** `loop:`(51) handler in the same site (gzip/compression files).
 
 DEFERRED: `|` in pattern position (needs pattern-parser changes — fold into
@@ -350,7 +350,7 @@ Fix: mirrored the two-token pairing into parse_comparison. Verified:
 tmp/site12/g24_probe.spl — shr/shl green, nested generics unbroken, control
 TRUE.
 WATCH (M12): shifts are encoded as expr_binary(82/83) — same op codes as
-`<`/`>` — and flat_ast_bridge_part1.spl:247 flattens ALL binary ops to
+`<`/`>` — and _FlatAstBridge/convert_nodes.spl:247 flattens ALL binary ops to
 BinOp.Add anyway. Op fidelity is part of M12 flat-bridge hardening.
 
 ### M11e — G25–G31: keyword members, trailing-op continuation, match arrows, tuples — DONE 2026-06-12
@@ -383,8 +383,8 @@ stale crashes: rebuild stage4 with M1–M10, re-run the full src/lib sweep
 (`/tmp/s4_resweep.sh`, docker, `SIMPLE_FRONTEND_DELEGATED=1` to force the
 in-process lean frontend), then fix only crashes that REMAIN.
 Cross-reference `compiled_array_oob_read_segfault_2026-06-11.md` for any
-survivors; recovery-path OOB suspects: `parser_decls_part3.spl`,
-`parser_primary_part3.spl`.
+survivors; recovery-path OOB suspects: `_ParserDecls/bitfield_aop_arch_decls.spl`,
+`_ParserPrimary/asm_match_suffix.spl`.
 
 ---
 
@@ -430,7 +430,7 @@ decl path — empty-array OOB. Fix: bounds guards on 9 `decl_get_*` accessors
 in `core/ast_part1.spl` (span/name/ret_type/fields/field_types/
 field_defaults/field_bits/type_params/type_param_constraints) + 2 bridge
 guards (`STMT_ASSIGN` body[0], `EXPR_DICT_COMP` args) in
-`flat_ast_bridge_part1.spl`. Verified: interpreted m12a_probe now prints
+`_FlatAstBridge/convert_nodes.spl`. Verified: interpreted m12a_probe now prints
 bridge-ok (OOB gone); m11e 8/8 + g33 batteries clean; REBUILT stage4 docker
 solo check on features.spl: rc=139 segv ELIMINATED (now runs the whole
 prelude closure; rc=124 at 900s with 2,413 errors accumulated across prelude
@@ -490,10 +490,10 @@ Combined work of two agents + orchestrator, round-2 verified:
   EXPR_IDENT, `:` follows → consume and parse value). Orchestrator
   hardened the new tag compares to numeric literals (6/11) per the P1
   stage4_imported_const_compare bug; same for extract_dotted_path.
-- `parser_decls_part1.spl`: keyword accepted as parameter name
+- `_ParserDecls/fn_struct_decls.spl`: keyword accepted as parameter name
   (`cli`, `mcp`, `type`, ...) via keyword_lookup round-trip; `_` (169)
-  accepted in binding positions (also parser_primary_part2.spl).
-- `parser_decls_part2.spl`: enum body skips same-line variant commas,
+  accepted in binding positions (also _ParserPrimary/primary_expr.spl).
+- `_ParserDecls/enum_module_body.spl`: enum body skips same-line variant commas,
   advance-on-error recovery (kills the 999× repeat artifact),
   trailing-comma skip.
 - `parser_stmts.spl`: `use` inside fn bodies consumed via
@@ -511,7 +511,7 @@ dict literals (11×), class-body tokens (7×).
 
 ### M12 — Flat-bridge hardening + remove delegation
 
-**Files:** `src/compiler/10.frontend/flat_ast_bridge_part1.spl`, `flat_ast_bridge_part2.spl`
+**Files:** `src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl`, `_FlatAstBridge/module_assembly.spl`
 
 #### M12a — binary-op fidelity — DONE 2026-06-12
 Resolves the M11d WATCH item. Two halves, landed together:
@@ -519,7 +519,7 @@ Resolves the M11d WATCH item. Two halves, landed together:
   (TOK_SHL/TOK_SHR — kinds the lexer never produces, free for AST use)
   instead of reusing 82/83; single `<`/`>` comparisons keep 82/83.
   Sites: parse_comparison :233/:243, parse_binary_from :450/:459.
-- `flat_ast_bridge_part1.spl`: new `op_kind_to_binop(kind)` (:208–228) maps
+- `_FlatAstBridge/convert_nodes.spl`: new `op_kind_to_binop(kind)` (:208–228) maps
   all 19 binary token kinds to real BinOp variants (Shl/Shr/BitAnd/BitOr/
   BitXor confirmed variant names); replaces the hardcoded `BinOp.Add`
   flattening at :269 (was :247).
@@ -682,7 +682,7 @@ Remaining known gap classes (long tail, deferred):
    `infer_module` is wired. See doc/08_tracking/bug/ast_env_var_quadratic_parse_2026-06-13.md
    and interp_parse_superlinear_2026-06-12.md.
 6. **Bridge if/else fidelity** (surfaced by G42): **DONE 2026-06-13, commit
-   2e08f8eddf3d.** `EXPR_IF`/`STMT_IF` in flat_ast_bridge_part1.spl hardcoded the
+   2e08f8eddf3d.** `EXPR_IF`/`STMT_IF` in _FlatAstBridge/convert_nodes.spl hardcoded the
    If else slot to `nil`, dropping every else branch and elif chain when the
    self-hosted lean frontend builds a Module. Fix: STMT_IF reads the else body
    from the elif arena via `elif_get_else(stmt_get_type(idx))`; EXPR_IF reads

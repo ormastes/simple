@@ -67,7 +67,7 @@ Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val src = read_source("src/compiler/10.frontend/core/parser_primary_part2.spl")
+val src = read_source("src/compiler/10.frontend/core/_ParserPrimary/primary_expr.spl")
 expect(src.contains("@traits(query, T, ...) desugars to __traits")).to_equal(true)
 expect(src.contains("val at_callee = expr_ident(\"__traits\", 0)")).to_equal(true)
 expect(src.contains("val at_builtin_name = \"__builtin_\" + ann_name")).to_equal(true)

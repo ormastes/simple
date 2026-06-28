@@ -15,7 +15,7 @@
   Verified: `smallmatch.spl` prints `matched: 10 20 30`; `bigmatch.spl` prints
   `matched: first=1 last=20`. 5 regression tests in `interpreter_patterns::tests`
   (3-field, 20-field, arity mismatch, named-field unaffected, enum positional
-  unaffected) all green. Production workaround in `flat_ast_bridge_part1.spl`
+  unaffected) all green. Production workaround in `_FlatAstBridge/convert_nodes.spl`
   is still in place and does not need to be reverted.
 - **Cranelift-compiled (JIT):** printed "no match" (the `rt_enum_check_discriminant`
   call always returned false on an object pointer). **FIXED 2026-06-12** in
@@ -45,7 +45,7 @@ Compiled: `simple native-build --backend cranelift smallmatch.spl -o out && out`
 
 ## Impact found
 
-`convert_decl_method_fn` (src/compiler/10.frontend/flat_ast_bridge_part1.spl)
+`convert_decl_method_fn` (src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl)
 destructured `Function` with a 19-slot positional `case Function(...)`. In the
 stage4 self-hosted binary this made **every class-with-method check/lint run
 SIGSEGV** (12th-site cluster of the stage4 chain). Rewritten to field access

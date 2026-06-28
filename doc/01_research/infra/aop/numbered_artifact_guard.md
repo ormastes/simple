@@ -53,5 +53,5 @@ Allowed examples:
 - Dates such as `thing_2026-05-30.md`
 - Semantic release/version artifacts such as `RELEASE_0.6.0_SUMMARY.md`
 - Architecture/platform names such as `x86_64`, `rv64`, `i8086`
-- Existing source implementation shards such as `parser_primary_part1.spl`
+- Existing source implementation shards such as `_ParserPrimary/asm_raw_parsing.spl`
 - Imported report files under `doc/09_report/misc/`

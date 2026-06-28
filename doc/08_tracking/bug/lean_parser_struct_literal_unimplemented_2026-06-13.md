@@ -38,7 +38,7 @@ that has no `{`-struct-literal rule — so the `{` is left and the caller report
 
 ## Fix sketch (its own task — do NOT rush; brace-ambiguity hazard)
 Implement `ident {` → `expr_struct_lit` in the primary/postfix parser, reusing the
-field-parsing shape of the dict path (`parser_primary_part2.spl:563`). MUST
+field-parsing shape of the dict path (`_ParserPrimary/primary_expr.spl:563`). MUST
 disambiguate `{` carefully — dict literal (`{ k: v }`), struct literal (`Name { k: v }`),
 and block bodies all use `{`/indentation. Per memory `feedback_struct_literal_brace_syntax`:
 allowlist the `ident {` struct form, never "any ident + `{`". After the primary-level
@@ -57,7 +57,7 @@ literal (dict literals start with a bare `{`). The tail loop tolerates comma- an
 newline-separated fields (multi-line), empty `{}`, trailing comma, keyword field
 names (G25 keyword-as-name), dotted type paths, and nesting. Field entries are
 built as `expr_field_access(value, name, 0)` carriers — str=field name, left=value
-— which is exactly the layout `flat_ast_bridge_part1.spl:355` reads (it ignores the
+— which is exactly the layout `_FlatAstBridge/convert_nodes.spl:355` reads (it ignores the
 parallel field_values/STMTS list that `expr_struct_lit` also stores; the two were
 written inconsistently and never exercised). `parse_call_arg_raw`'s manual ident
 path inherits the rule through `parse_postfix_on`.

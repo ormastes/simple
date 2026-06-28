@@ -32,7 +32,7 @@ Resume the segfault/loader hardening work with Rust treated only as the seed/too
   - The Simple writer symbol entry needed to align with the documented 56-byte symbol layout.
   - Header parsing in `smf_reader_memory_part1.spl` was reading offsets as if there were extra repr(C) padding, but `smf_header.spl::to_bytes()` writes packed fields.
   - The compatibility `compiler.loader` facade path can return a successful load with zero symbols.
-  - A separate parse blocker exists in `src/compiler/10.frontend/flat_ast_bridge_part2.spl`: `Unexpected token: expected expression, found Else`.
+  - A separate parse blocker exists in `src/compiler/10.frontend/_FlatAstBridge/module_assembly.spl`: `Unexpected token: expected expression, found Else`.
 
 ## Restart Steps
 

@@ -17,7 +17,7 @@ bin/simple-interp spipe-docgen test/03_system/app/ide/feature/ide_office_plugin_
 Observed failure:
 
 ```text
-error: compile failed: parse: in "/home/ormastes/dev/pub/simple/src/compiler/10.frontend/flat_ast_bridge_part2.spl": Unexpected token: expected expression, found Else
+error: compile failed: parse: in "/home/ormastes/dev/pub/simple/src/compiler/10.frontend/_FlatAstBridge/module_assembly.spl": Unexpected token: expected expression, found Else
 ```
 
 ## Impact

@@ -25,7 +25,7 @@ a *field read of the receiver*.
 ## 2026-05-29 Repair
 
 Worker B fixed the pure Simple tree-walking interpreter in
-`src/compiler/10.frontend/core/interpreter/eval_ops_part1.spl`.
+`src/compiler/10.frontend/core/interpreter/_EvalOps/call_method_eval.spl`.
 `eval_function_call` now records mutable aggregate parameters after the callee
 body and writes them back to the original caller argument when that argument is
 an identifier or field access. This covers both regression forms:
@@ -34,7 +34,7 @@ an identifier or field access. This covers both regression forms:
 Focused verification passed:
 
 ```bash
-SIMPLE_LIB=src bin/simple check src/compiler/10.frontend/core/interpreter/eval_ops_part1.spl test/01_unit/compiler/interpreter/self_field_assign_spec.spl --mode=interpreter
+SIMPLE_LIB=src bin/simple check src/compiler/10.frontend/core/interpreter/_EvalOps/call_method_eval.spl test/01_unit/compiler/interpreter/self_field_assign_spec.spl --mode=interpreter
 SIMPLE_LIB=src bin/simple test test/01_unit/compiler/interpreter/self_field_assign_spec.spl --mode=interpreter --clean
 SIMPLE_LIB=src bin/simple test test/01_unit/compiler/interpreter/self_field_assign_spec.spl --clean
 ```

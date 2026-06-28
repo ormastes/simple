@@ -111,7 +111,7 @@ find doc/06_spec -name '*_spec.spl' | wc -l
 Known verification caveat:
 - Running some SPipe specs may invoke doc generation and currently expose an
   unrelated parser/docgen failure in
-  `src/compiler/10.frontend/flat_ast_bridge_part2.spl`. That is tracked in
+  `src/compiler/10.frontend/_FlatAstBridge/module_assembly.spl`. That is tracked in
   `doc/08_tracking/bug/spipe_docgen_flat_ast_bridge_parse_error_2026-06-01.md`
   and should not be confused with the profile optimization slice.
 

@@ -181,7 +181,7 @@ or `Rejected` (one-line reason).
         (Rust seed: `types_def/mod.rs:334-365`; self-hosted: follow-up)
   - [x] Parser rejects mixing `@packed` with non-bitfield nested
         structs (use an explicit nested struct instead).
-        (`parser_decls_part2.spl` rejects `@packed` fields that omit explicit
+        (`_ParserDecls/enum_module_body.spl` rejects `@packed` fields that omit explicit
         bit widths; `test/01_unit/compiler/packed_struct_bitfield_spec.spl` covers
         the pure Simple source path.)
   - [x] HIR lowering emits correct shift+mask for reads and

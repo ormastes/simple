@@ -79,13 +79,13 @@ Spawned read-only explorers:
      field mixes and the null-block example status-register criterion.
 7. Driver framework FR-DRIVER-0003 implementation pass made.
    - Added a self-hosted parser guard in
-     `src/compiler/10.frontend/core/parser_decls_part2.spl` that reports an
+     `src/compiler/10.frontend/core/_ParserDecls/enum_module_body.spl` that reports an
      error when `@packed` struct fields omit explicit bit widths.
    - Added a packed `NullBlockStatusRegister` path to the stdlib null-block
      driver and SimpleOS wrapper, plus focused unit/source-evidence tests.
    - Next step: run focused checks and repair any pure Simple failures.
 8. Driver framework FR-DRIVER-0003 focused verification passed.
-   - `SIMPLE_LIB=src bin/simple check src/compiler/10.frontend/core/parser_decls_part2.spl test/01_unit/compiler/packed_struct_bitfield_spec.spl`
+   - `SIMPLE_LIB=src bin/simple check src/compiler/10.frontend/core/_ParserDecls/enum_module_body.spl test/01_unit/compiler/packed_struct_bitfield_spec.spl`
      passed.
    - `SIMPLE_LIB=src bin/simple check src/lib/nogc_sync_mut/driver/null_block_driver.spl examples/09_embedded/simple_os/src/drivers/null_block.spl test/01_unit/lib/driver/null_block_driver_test.spl`
      passed.
@@ -214,14 +214,14 @@ Spawned read-only explorers:
       `test/01_unit/lib/immut/persistent_trie_spec.spl` (`82/82`) and
       `test/01_unit/lib/gc_async_immut/map_facade_native_spec.spl` (`5/5`).
 19. Pure Simple self-to-free-function mutation loss fixed.
-    - Updated `src/compiler/10.frontend/core/interpreter/eval_ops_part1.spl`
+    - Updated `src/compiler/10.frontend/core/interpreter/_EvalOps/call_method_eval.spl`
       so `eval_function_call` writes back mutable aggregate parameters to the
       original caller identifier or field-access argument.
     - This covers `write_first(self.values, next)` and
       `write_holder_first(self, next)` in
       `test/01_unit/compiler/interpreter/self_field_assign_spec.spl`.
     - Verification passed:
-      `SIMPLE_LIB=src bin/simple check src/compiler/10.frontend/core/interpreter/eval_ops_part1.spl test/01_unit/compiler/interpreter/self_field_assign_spec.spl --mode=interpreter`,
+      `SIMPLE_LIB=src bin/simple check src/compiler/10.frontend/core/interpreter/_EvalOps/call_method_eval.spl test/01_unit/compiler/interpreter/self_field_assign_spec.spl --mode=interpreter`,
       `SIMPLE_LIB=src bin/simple test test/01_unit/compiler/interpreter/self_field_assign_spec.spl --mode=interpreter --clean`,
       and
       `SIMPLE_LIB=src bin/simple test test/01_unit/compiler/interpreter/self_field_assign_spec.spl --clean`.
