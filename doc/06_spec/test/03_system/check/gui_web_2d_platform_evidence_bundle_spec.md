@@ -27,7 +27,7 @@ gui_web_2d_platform_evidence_bundle_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 9 | 9 | 0 | 0 |
+| 12 | 12 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -78,6 +78,11 @@ sh scripts/check/check-gui-web-2d-platform-evidence-bundle.shs
   not missing.
 - A present platform row with `status=pass` but a non-pass sibling reason is
   reported as failed evidence.
+- A present platform row with duplicate required status keys is reported as
+  failed evidence.
+- A present platform row with duplicate optional reason keys is reported as
+  failed evidence.
+- A freshness env with duplicate required keys is reported as failed evidence.
 - A present failed retained 4K or 8K performance row is reported as failed
   even when the companion perf env is missing.
 - A present failed freshness env is reported as the `cross-platform-freshness`
@@ -177,6 +182,10 @@ gate is failed evidence. For freshness, it does not accept a pass unless all
 revision fields are present, because final completion depends on proving that
 platform evidence, browser or WebView revisions, graphics SDK/driver revisions,
 and runbook revisions belong to the same review window.
+Duplicate required status keys are also failed evidence. A generated env should
+have one authoritative value per required platform key and one authoritative
+value per required freshness key; accepting the last duplicate line would let a
+hand-edited env hide an earlier failing value.
 
 A failed freshness env is different from a missing freshness env. Missing means
 the freshness rollup was not produced yet. Failed means the rollup ran and found
@@ -298,6 +307,77 @@ expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_failed_gate_cou
 expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_failed_gates=linux-vulkan-renderdoc")
 expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_missing_gate_count=6")
 expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_linux_vulkan_renderdoc_status=fail")
+```
+
+</details>
+
+#### classifies duplicate required status evidence as failed
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val command = "rm -rf build/test-gui-web-2d-platform-evidence-bundle-duplicate-status && mkdir -p build/test-gui-web-2d-platform-evidence-bundle-duplicate-status/env && printf 'linux_vulkan_render_log_compare_status=fail\\nlinux_vulkan_render_log_compare_status=pass\\nmacos_metal_render_log_compare_status=pass\\nwindows_d3d12_render_log_compare_status=pass\\n' > build/test-gui-web-2d-platform-evidence-bundle-duplicate-status/env/native.env && BUILD_DIR=build/test-gui-web-2d-platform-evidence-bundle-duplicate-status/out REPORT_PATH=build/test-gui-web-2d-platform-evidence-bundle-duplicate-status/report.md NATIVE_RENDER_LOG_PLATFORM_MATRIX_ENV=build/test-gui-web-2d-platform-evidence-bundle-duplicate-status/env/native.env TAURI_MOBILE_RENDERER_PARITY_ENV=build/test-gui-web-2d-platform-evidence-bundle-duplicate-status/missing/mobile.env GUI_SHOWCASE_4K_200FPS_ENV=build/test-gui-web-2d-platform-evidence-bundle-duplicate-status/missing/4k.env GUI_SHOWCASE_8K_200FPS_ENV=build/test-gui-web-2d-platform-evidence-bundle-duplicate-status/missing/8k.env HTML_CSS_FULL_RENDERING_GOAL_ENV=build/test-gui-web-2d-platform-evidence-bundle-duplicate-status/missing/html.env PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=build/test-gui-web-2d-platform-evidence-bundle-duplicate-status/missing/production.env GUI_WEB_2D_PLATFORM_FRESHNESS_ENV=build/test-gui-web-2d-platform-evidence-bundle-duplicate-status/missing/fresh.env sh scripts/check/check-gui-web-2d-platform-evidence-bundle.shs"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read("build/test-gui-web-2d-platform-evidence-bundle-duplicate-status/out/evidence.env")
+expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_status=fail")
+expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_reason=failed-live-gates")
+expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_failed_gate_count=1")
+expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_failed_gates=linux-vulkan-renderdoc")
+expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_missing_gate_count=6")
+expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_linux_vulkan_renderdoc_status=fail")
+```
+
+</details>
+
+#### classifies duplicate optional reason evidence as failed
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val command = "rm -rf build/test-gui-web-2d-platform-evidence-bundle-duplicate-reason && mkdir -p build/test-gui-web-2d-platform-evidence-bundle-duplicate-reason/env && printf 'linux_vulkan_render_log_compare_status=pass\\nlinux_vulkan_render_log_compare_reason=pass\\nlinux_vulkan_render_log_compare_reason=pass\\nmacos_metal_render_log_compare_status=pass\\nwindows_d3d12_render_log_compare_status=pass\\n' > build/test-gui-web-2d-platform-evidence-bundle-duplicate-reason/env/native.env && BUILD_DIR=build/test-gui-web-2d-platform-evidence-bundle-duplicate-reason/out REPORT_PATH=build/test-gui-web-2d-platform-evidence-bundle-duplicate-reason/report.md NATIVE_RENDER_LOG_PLATFORM_MATRIX_ENV=build/test-gui-web-2d-platform-evidence-bundle-duplicate-reason/env/native.env TAURI_MOBILE_RENDERER_PARITY_ENV=build/test-gui-web-2d-platform-evidence-bundle-duplicate-reason/missing/mobile.env GUI_SHOWCASE_4K_200FPS_ENV=build/test-gui-web-2d-platform-evidence-bundle-duplicate-reason/missing/4k.env GUI_SHOWCASE_8K_200FPS_ENV=build/test-gui-web-2d-platform-evidence-bundle-duplicate-reason/missing/8k.env HTML_CSS_FULL_RENDERING_GOAL_ENV=build/test-gui-web-2d-platform-evidence-bundle-duplicate-reason/missing/html.env PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=build/test-gui-web-2d-platform-evidence-bundle-duplicate-reason/missing/production.env GUI_WEB_2D_PLATFORM_FRESHNESS_ENV=build/test-gui-web-2d-platform-evidence-bundle-duplicate-reason/missing/fresh.env sh scripts/check/check-gui-web-2d-platform-evidence-bundle.shs"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read("build/test-gui-web-2d-platform-evidence-bundle-duplicate-reason/out/evidence.env")
+expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_status=fail")
+expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_reason=failed-live-gates")
+expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_failed_gate_count=1")
+expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_failed_gates=linux-vulkan-renderdoc")
+expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_missing_gate_count=6")
+expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_linux_vulkan_renderdoc_status=fail")
+```
+
+</details>
+
+#### classifies duplicate freshness status evidence as failed
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val command = "rm -rf build/test-gui-web-2d-platform-evidence-bundle-duplicate-freshness && mkdir -p build/test-gui-web-2d-platform-evidence-bundle-duplicate-freshness/env && printf 'linux_vulkan_render_log_compare_status=pass\\nmacos_metal_render_log_compare_status=pass\\nwindows_d3d12_render_log_compare_status=pass\\n' > build/test-gui-web-2d-platform-evidence-bundle-duplicate-freshness/env/native.env && printf 'tauri_mobile_renderer_parity_ios_status=pass\\ntauri_mobile_renderer_parity_ios_render_log_metal_marker_status=pass\\ntauri_mobile_renderer_parity_ios_mdi_proof_status=pass\\ntauri_mobile_renderer_parity_ios_screenshot_artifact_status=pass\\ntauri_mobile_renderer_parity_android_status=pass\\ntauri_mobile_renderer_parity_android_render_log_vulkan_marker_status=pass\\ntauri_mobile_renderer_parity_android_render_log_foreground_marker_status=pass\\ntauri_mobile_renderer_parity_android_mdi_proof_status=pass\\ntauri_mobile_renderer_parity_android_screenshot_artifact_status=pass\\n' > build/test-gui-web-2d-platform-evidence-bundle-duplicate-freshness/env/mobile.env && printf 'gui_showcase_4k_200fps_status=pass\\ngui_showcase_4k_200fps_rss_status=pass\\ngui_showcase_4k_200fps_checksum_status=pass\\ngui_showcase_4k_200fps_retained_render_mode_status=pass\\ngui_showcase_4k_200fps_retained_redraw_status=pass\\n' > build/test-gui-web-2d-platform-evidence-bundle-duplicate-freshness/env/4k.env && printf 'gui_showcase_8k_perf_status=pass\\ngui_showcase_8k_perf_rss_status=pass\\ngui_showcase_8k_perf_checksum_status=pass\\ngui_showcase_8k_perf_retained_render_mode_status=pass\\ngui_showcase_8k_perf_retained_redraw_status=pass\\n' > build/test-gui-web-2d-platform-evidence-bundle-duplicate-freshness/env/8k.env && printf 'html_css_full_rendering_goal_status=pass\\nhtml_css_full_rendering_goal_all_html_elements_ready_status=pass\\nhtml_css_full_rendering_goal_all_css_properties_ready_status=pass\\nhtml_css_full_rendering_goal_animation_css_status=pass\\n' > build/test-gui-web-2d-platform-evidence-bundle-duplicate-freshness/env/html.env && printf 'production_gui_web_renderer_parity_status=pass\\n' > build/test-gui-web-2d-platform-evidence-bundle-duplicate-freshness/env/production.env && printf 'gui_web_2d_platform_freshness_status=fail\\ngui_web_2d_platform_freshness_status=pass\\ngui_web_2d_platform_freshness_reason=pass\\ngui_web_2d_platform_freshness_source_revision=abc123\\ngui_web_2d_platform_freshness_runtime_build=simple-self-hosted\\ngui_web_2d_platform_freshness_browser_webview_electron_revision=chrome-electron-webview\\ngui_web_2d_platform_freshness_graphics_sdk_driver=vulkan-metal-d3d12\\ngui_web_2d_platform_freshness_runbook_version=2026-06-28\\n' > build/test-gui-web-2d-platform-evidence-bundle-duplicate-freshness/env/fresh.env && BUILD_DIR=build/test-gui-web-2d-platform-evidence-bundle-duplicate-freshness/out REPORT_PATH=build/test-gui-web-2d-platform-evidence-bundle-duplicate-freshness/report.md NATIVE_RENDER_LOG_PLATFORM_MATRIX_ENV=build/test-gui-web-2d-platform-evidence-bundle-duplicate-freshness/env/native.env TAURI_MOBILE_RENDERER_PARITY_ENV=build/test-gui-web-2d-platform-evidence-bundle-duplicate-freshness/env/mobile.env GUI_SHOWCASE_4K_200FPS_ENV=build/test-gui-web-2d-platform-evidence-bundle-duplicate-freshness/env/4k.env GUI_SHOWCASE_8K_200FPS_ENV=build/test-gui-web-2d-platform-evidence-bundle-duplicate-freshness/env/8k.env HTML_CSS_FULL_RENDERING_GOAL_ENV=build/test-gui-web-2d-platform-evidence-bundle-duplicate-freshness/env/html.env PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=build/test-gui-web-2d-platform-evidence-bundle-duplicate-freshness/env/production.env GUI_WEB_2D_PLATFORM_FRESHNESS_ENV=build/test-gui-web-2d-platform-evidence-bundle-duplicate-freshness/env/fresh.env sh scripts/check/check-gui-web-2d-platform-evidence-bundle.shs"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read("build/test-gui-web-2d-platform-evidence-bundle-duplicate-freshness/out/evidence.env")
+expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_status=fail")
+expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_failed_gate_count=1")
+expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_missing_gate_count=0")
+expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_failed_gates=cross-platform-freshness")
+expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_cross_platform_freshness_status=fail")
 ```
 
 </details>
@@ -424,8 +504,8 @@ expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_cross_platform_
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 9 |
-| Active scenarios | 9 |
+| Total scenarios | 12 |
+| Active scenarios | 12 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

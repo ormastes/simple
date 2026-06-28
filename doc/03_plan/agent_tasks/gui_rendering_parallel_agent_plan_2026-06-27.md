@@ -1083,6 +1083,11 @@ Normal-review acceptance:
   required gate status key when the sibling optional reason key is present and
   not `pass`. A lane env with `*_status=pass` and `*_reason=<failure>` cannot
   satisfy a live completion gate.
+- 2026-06-28 bundle duplicate key revalidation:
+  `scripts/check/check-gui-web-2d-platform-evidence-bundle.shs` now rejects
+  duplicate required gate status keys, duplicate optional gate reason keys, and
+  duplicate required freshness keys. A hand-edited env cannot hide a failing
+  value by appending a later `pass` line.
 
 ## Hard Stop Conditions
 
