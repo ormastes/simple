@@ -27,7 +27,7 @@ widget_showcase_4k_8k_perf_contract_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 3 | 3 | 0 | 0 |
+| 4 | 4 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -82,6 +82,84 @@ SIMPLE_LIB=src bin/simple test test/05_perf/gui/widget_showcase_4k_8k_perf_contr
   calls enter the alias source.
 - Native-build output must be a regular executable native binary before the
   checker runs it.
+- Real retained perf runs fail before native-build when the Simple binary is a
+  repo launcher or other non-release source; plan-only remains available for
+  headless alias checks.
+
+## Evidence Inputs
+
+The retained producer is `scripts/check/check-widget-showcase-4k-200fps.shs`.
+It supports `RESOLUTION=4k` and `RESOLUTION=8k`. Real evidence requires
+`USE_NATIVE=1`, a release self-hosted Simple binary, native build output,
+regular log/time artifacts, and retained static-frame readback rows.
+
+Plan-only mode is intentionally weaker. It is for headless hosts and validates
+the generated retained alias and provenance row shape without building or
+running the native GUI probe. Plan-only rows must never be treated as 4K/8K
+performance completion evidence.
+
+## Operator Flow
+
+1. On a headless host, run `PLAN_ONLY=1 USE_NATIVE=1 RESOLUTION=4k` and
+   `RESOLUTION=8k` to check alias generation and raw `rt_*` absence.
+2. On a GUI/perf host, run with `USE_NATIVE=1`, a release self-hosted
+   `SIMPLE_BIN`, and the target resolution.
+3. Feed the status env rows to
+   `scripts/check/check-gui-renderdoc-feature-coverage-status.shs`.
+4. Accept performance completion only when the aggregate reports both retained
+   showcase rows as `pass` with current source revision and no fallback.
+
+## Required Output Rows
+
+Reviewers should inspect these rows for both `gui_showcase_4k_200fps_*` and
+`gui_showcase_8k_perf_*`:
+
+- `status`
+- `reason`
+- `width`
+- `height`
+- `frames`
+- `fps_x1000`
+- `target_fps`
+- `frame_p50_ns`
+- `frame_p95_ns`
+- `max_rss_kb`
+- `max_rss_budget_kb`
+- `rss_status`
+- `nonzero_pixels_status`
+- `checksum_status`
+- `render_mode`
+- `retained_render_mode_status`
+- `redraw_frames`
+- `retained_redraw_status`
+- `source_revision_kind`
+- `source_revision_files`
+- `simple_bin_source`
+- `simple_bin_status`
+- `native_bin_file_status`
+- `native_bin_executable_status`
+- `native_bin_format_status`
+- `alias_raw_rt_count`
+- `native_build_mode`
+- `fallback_state`
+
+## Failure Semantics
+
+- `rust-seed-simple-binary-forbidden`: the Rust bootstrap binary was selected.
+- `release-self-hosted-simple-binary-required`: a real run attempted to use
+  `bin/simple`, PATH `simple`, or another non-release Simple source.
+- `alias-raw-rt-forbidden`: generated alias source contains direct runtime
+  calls and must be fixed in Simple code instead.
+- `native-bin-artifact-invalid`: native build did not produce a regular
+  executable ELF/Mach-O/PE artifact.
+
+## Completion Boundary
+
+This spec does not run a real 4K or 8K GUI benchmark. It proves that the
+retained producer cannot create acceptable performance evidence through the
+Rust seed, repo launcher, raw runtime alias calls, or invalid native artifacts.
+Actual goal completion still requires live retained 4K/8K rows from a prepared
+GUI/perf host and aggregate verification.
 
 ## Scenarios
 
@@ -100,7 +178,7 @@ SIMPLE_LIB=src bin/simple test test/05_perf/gui/widget_showcase_4k_8k_perf_contr
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 62 lines folded for reproduction.
+Runnable source: 63 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -115,6 +193,7 @@ expect(script).to_contain("\"bin/simple\"")
 expect(script).to_contain("ALLOW_PATH_SIMPLE_BIN")
 expect(script).to_contain("rust-seed-simple-binary-forbidden")
 expect(script).to_contain("src/compiler_rust/*|*/src/compiler_rust/*")
+expect(script).to_contain("release-self-hosted-simple-binary-required")
 
 step("Assert 4K and 8K geometry and target FPS are explicit")
 expect(script).to_contain("WIDTH=3840")
@@ -244,12 +323,52 @@ expect(evidence_8k).to_contain("gui_showcase_8k_perf_simple_bin_status=forbidden
 
 </details>
 
+#### rejects repo launcher binaries before real retained perf runs
+
+- Run the 4K checker outside plan-only with an explicit repo launcher
+   - Expected: code_4k equals `0`
+- Run the 8K checker outside plan-only with an explicit repo launcher
+   - Expected: code_8k equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 21 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Run the 4K checker outside plan-only with an explicit repo launcher")
+val command_4k = "rm -rf build/test-widget-showcase-4k-repo-bin-forbidden && USE_NATIVE=1 RESOLUTION=4k SIMPLE_BIN=bin/simple SIMPLE_BIN_SOURCE=repo-bin BUILD_DIR=build/test-widget-showcase-4k-repo-bin-forbidden sh scripts/check/check-widget-showcase-4k-200fps.shs || true"
+val (_stdout_4k, _stderr_4k, code_4k) = process_run("/bin/sh", ["-c", command_4k])
+expect(code_4k).to_equal(0)
+val evidence_4k = file_read("build/test-widget-showcase-4k-repo-bin-forbidden/status.env")
+expect(evidence_4k).to_contain("gui_showcase_4k_200fps_status=fail")
+expect(evidence_4k).to_contain("gui_showcase_4k_200fps_reason=release-self-hosted-simple-binary-required")
+expect(evidence_4k).to_contain("gui_showcase_4k_200fps_simple_bin=bin/simple")
+expect(evidence_4k).to_contain("gui_showcase_4k_200fps_simple_bin_source=repo-bin")
+expect(evidence_4k).to_contain("gui_showcase_4k_200fps_simple_bin_status=forbidden")
+
+step("Run the 8K checker outside plan-only with an explicit repo launcher")
+val command_8k = "rm -rf build/test-widget-showcase-8k-repo-bin-forbidden && USE_NATIVE=1 RESOLUTION=8k SIMPLE_BIN=bin/simple SIMPLE_BIN_SOURCE=repo-bin BUILD_DIR=build/test-widget-showcase-8k-repo-bin-forbidden sh scripts/check/check-widget-showcase-4k-200fps.shs || true"
+val (_stdout_8k, _stderr_8k, code_8k) = process_run("/bin/sh", ["-c", command_8k])
+expect(code_8k).to_equal(0)
+val evidence_8k = file_read("build/test-widget-showcase-8k-repo-bin-forbidden/status.env")
+expect(evidence_8k).to_contain("gui_showcase_8k_perf_status=fail")
+expect(evidence_8k).to_contain("gui_showcase_8k_perf_reason=release-self-hosted-simple-binary-required")
+expect(evidence_8k).to_contain("gui_showcase_8k_perf_simple_bin=bin/simple")
+expect(evidence_8k).to_contain("gui_showcase_8k_perf_simple_bin_source=repo-bin")
+expect(evidence_8k).to_contain("gui_showcase_8k_perf_simple_bin_status=forbidden")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 3 |
-| Active scenarios | 3 |
+| Total scenarios | 4 |
+| Active scenarios | 4 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
