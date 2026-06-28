@@ -153,7 +153,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_mobile_renderer_parity
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 121 lines folded for reproduction.
+Runnable source: 123 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -171,6 +171,8 @@ expect(evidence).to_contain("tauri_mobile_renderer_parity_production_backend_cpu
 expect(evidence).to_contain("tauri_mobile_renderer_parity_production_backend_metal_resolved=metal")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_production_backend_metal_different_pixels=0")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_production_backend_metal_gpu_frame_complete=true")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_production_backend_same_frame_readback=true")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_production_backend_readback_source=device_readback")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_production_backend_blur_or_tolerance_used=false")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_production_backend_sample_count=3")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_production_backend_total_elapsed_us_min=90")
