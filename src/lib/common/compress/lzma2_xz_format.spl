@@ -534,50 +534,55 @@ fn _decompress_xz_stream(input: [u8], start: i64, tier: CompressionSimdTier) -> 
     if stream_flags_0 != XZ_STREAM_FLAGS_0:
         return Err(CompressionError.CorruptStream("xz stream flags"))
     val header_crc_res = _xz_read_u32_le(input, start + 8)
-    if header_crc_res.is_err():
-        return Err(header_crc_res.unwrap_err())
+    val header_crc = match header_crc_res:
+        case Ok(found_crc): found_crc
+        case Err(reason): return Err(reason)
     val stream_flags: [u8] = [stream_flags_0, stream_flags_1]
-    if header_crc_res.unwrap() != _xz_crc32_for_tier(stream_flags, tier):
+    if header_crc != _xz_crc32_for_tier(stream_flags, tier):
         return Err(CompressionError.ChecksumMismatch("xz header crc32"))
     val check_size_res = _xz_check_size(stream_flags_1)
-    if check_size_res.is_err():
-        return Err(check_size_res.unwrap_err())
+    match check_size_res:
+        case Ok(_): nil
+        case Err(reason): return Err(reason)
 
     var pos = start + 12
     var decoded: [u8] = []
     var records: [XzBlockRecord] = []
     while pos < input.len() and input[pos] != 0x00u8:
         val block_res = _decode_xz_block(input, pos, stream_flags_1, tier)
-        if block_res.is_err():
-            return Err(block_res.unwrap_err())
-        decoded = _xz_append_bytes(decoded, block_res.unwrap().decoded)
-        records.push(block_res.unwrap().record)
-        pos = block_res.unwrap().next_pos
+        val block = match block_res:
+            case Ok(found_block): found_block
+            case Err(reason): return Err(reason)
+        decoded = _xz_append_bytes(decoded, block.decoded)
+        records.push(block.record)
+        pos = block.next_pos
     if pos >= input.len():
         return Err(CompressionError.TruncatedInput("xz index"))
 
     val index_start = pos
     val footer_start_res = _parse_xz_index(input, index_start, records, tier)
-    if footer_start_res.is_err():
-        return Err(footer_start_res.unwrap_err())
-    val footer_start = footer_start_res.unwrap()
+    val footer_start = match footer_start_res:
+        case Ok(found_start): found_start
+        case Err(reason): return Err(reason)
     if footer_start + 12 > input.len():
         return Err(CompressionError.TruncatedInput("xz footer"))
     if input[footer_start + 10] != XZ_FOOTER_MAGIC_0 or input[footer_start + 11] != XZ_FOOTER_MAGIC_1:
         return Err(CompressionError.InvalidHeader("xz footer magic"))
 
     val footer_crc_res = _xz_read_u32_le(input, footer_start)
-    if footer_crc_res.is_err():
-        return Err(footer_crc_res.unwrap_err())
+    val footer_crc = match footer_crc_res:
+        case Ok(found_crc): found_crc
+        case Err(reason): return Err(reason)
     val footer_fields = _copy_bytes_range(input, footer_start + 4, footer_start + 10)
-    if footer_crc_res.unwrap() != _xz_crc32_for_tier(footer_fields, tier):
+    if footer_crc != _xz_crc32_for_tier(footer_fields, tier):
         return Err(CompressionError.ChecksumMismatch("xz footer crc32"))
 
     val backward_size_res = _xz_read_u32_le(input, footer_start + 4)
-    if backward_size_res.is_err():
-        return Err(backward_size_res.unwrap_err())
+    val backward_size = match backward_size_res:
+        case Ok(found_size): found_size
+        case Err(reason): return Err(reason)
     val computed_index_size = footer_start - index_start
-    if ((backward_size_res.unwrap().to_i64() + 1) * 4) != computed_index_size:
+    if ((backward_size.to_i64() + 1) * 4) != computed_index_size:
         return Err(CompressionError.CorruptStream("xz backward size"))
 
     if input[footer_start + 8] != stream_flags_0 or input[footer_start + 9] != stream_flags_1:
