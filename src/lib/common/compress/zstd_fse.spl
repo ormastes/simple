@@ -364,11 +364,16 @@ fn _zstd_fse_encode_one_symbol(table: ZstdFseEncodeTable, state: i64, symbol: i6
 # slot (smallest baseline); FSE compression is invariant to seed choice so
 # long as the seed encodes the last input symbol.
 fn _zstd_fse_pick_seed_state(table: ZstdFseEncodeTable, symbol: i64) -> Result<i64, CompressionError>:
+    if table.table_log < ZSTD_FSE_MIN_TABLE_LOG or table.table_log > ZSTD_FSE_MAX_SHIFT_LOG:
+        return Err(CompressionError.CorruptStream("zstd fse encode table log"))
     if symbol < 0 or symbol >= table.slots.len():
         return Err(CompressionError.CorruptStream("zstd fse encode seed symbol oor"))
     val bucket = table.slots[symbol]
     if bucket.len() == 0:
         return Err(CompressionError.CorruptStream("zstd fse encode seed symbol absent"))
+    val table_size = 1 << table.table_log
+    if bucket[0].p < 0 or bucket[0].p >= table_size:
+        return Err(CompressionError.CorruptStream("zstd fse encode seed state oor"))
     Ok(bucket[0].p)
 
 # Encode a full symbol stream. Symbols are processed in REVERSE order. The
@@ -380,9 +385,9 @@ fn zstd_fse_encode_symbols(table: ZstdFseEncodeTable, symbols: [i64]) -> Result<
         return Err(CompressionError.CorruptStream("zstd fse encode empty symbol stream"))
     val last_idx = symbols.len() - 1
     val seed_res = _zstd_fse_pick_seed_state(table, symbols[last_idx])
-    var state = match seed_res:
-        case Ok(decoded): decoded
-        case Err(reason): return Err(reason)
+    if seed_res.is_err():
+        return Err(seed_res.unwrap_err())
+    var state = seed_res.unwrap()
     var writer = zstd_bit_writer_new()
     # Process symbols[N-2] down to symbols[0]. At each step, the new state
     # lands in a slot that emits symbols[idx] when decoded. After the loop,
