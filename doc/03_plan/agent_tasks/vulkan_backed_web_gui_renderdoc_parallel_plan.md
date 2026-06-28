@@ -391,6 +391,13 @@ linux_vulkan_render_log_compare_renderdoc_electron_artifact_file_status=pass
 linux_vulkan_render_log_compare_renderdoc_electron_artifact_magic=RDOC
 ```
 
+If the Linux row is incomplete, preserve the exact blocked gate IDs in
+`linux_vulkan_render_log_compare_blocked_gates`. A missing Chrome `.rdc` must
+surface as `renderdoc-chrome-rdc`; a missing Electron `.rdc` must surface as
+`renderdoc-electron-rdc`. Do not collapse those into a generic RenderDoc
+failure reason, because parallel platform agents use the gate IDs to assign the
+next capture task.
+
 macOS Metal render-log compare:
 
 ```text
@@ -447,6 +454,19 @@ Production parity:
 - font offload/readback is `pass` or explicitly accepted `unavailable`
 - Metal readback is `pass` on macOS or `unavailable/metal-requires-macos` on
   Linux
+
+The compact production parity summary must include these blocker rows so a
+native host can classify failure without opening the full evidence file:
+
+```text
+production_gui_web_renderer_parity_surface_manifest_tauri_live_capture=pass
+production_gui_web_renderer_parity_surface_manifest_chrome_live_capture=pass
+production_gui_web_renderer_parity_font_offload_vector_readback_status=pass
+production_gui_web_renderer_parity_font_offload_bitmap_readback_status=pass
+production_gui_web_renderer_parity_metal_render_log_status=pass
+production_gui_web_renderer_parity_metal_render_log_blocked_gate_count=0
+production_gui_web_renderer_parity_event_routing_status=pass
+```
 
 iOS Tauri2/WKWebView mobile parity:
 

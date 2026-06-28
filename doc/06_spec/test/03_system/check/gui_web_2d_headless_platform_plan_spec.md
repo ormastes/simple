@@ -29,7 +29,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/gui_web_2d_headless_platform
 
 - The plan separates headless preparation from native GUI/mobile platform completion.
 - Linux completion requires Chrome, Electron, and Simple RDOC artifact file
-  proof.
+  proof, and preserves `renderdoc-chrome-rdc` /
+  `renderdoc-electron-rdc` blocked-gate IDs while those captures are missing.
 - macOS completion requires Metal blocked-gate, Xcode GPU capture, browser
   backing, and pairwise ARGB proof.
 - Windows completion requires D3D12 blocked-gate, PIX artifact file proof, and
@@ -40,6 +41,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/gui_web_2d_headless_platform
   MDI proof fields.
 - The aggregate checker exposes the Linux/macOS/Windows fields that native
   platform runs must later populate.
+- The production parity wrapper exposes compact live-capture, font readback,
+  Metal render-log, and event-routing blocker rows for native-host triage.
 - The mobile parity checker exposes the iOS/Android fields that device or
   simulator hosts must later populate.
 
@@ -61,10 +64,13 @@ performance evidence.
 - Assert Linux native completion requires real browser and Simple RDOC proof
 - Assert macOS native completion requires structured Metal and Xcode proof
 - Assert Windows native completion requires structured D3D12, PIX, and GPU-debugger proof
+- Assert production parity summary exposes live capture and readback blockers
 - Assert iOS native completion requires Tauri2 WKWebView Metal, screenshot, and MDI proof
 - Assert Android native completion requires Tauri2 WebView Vulkan, screenshot, and MDI proof
 - Read the aggregate checker
 - Assert aggregate source forwards the required platform completion fields
+- Read the production parity wrapper
+- Assert production parity summary emits native-host blocker rows
 - Read the Tauri mobile parity checker
 - Assert mobile checker exposes required iOS and Android native completion fields
 
