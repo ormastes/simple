@@ -333,6 +333,33 @@ describe "lzma2_typed codec":
             val recovered = xz_decode(ByteSpan.new(bad))
             assert_true(recovered.is_empty())
 
+        it "unsupported XZ index indicator decodes to empty":
+            val input = span_from_text("Hi")
+            val frame = xz_encode(input)
+            var bad = frame.to_bytes()
+            val footer_start = bad.len() - 12
+            val bw0 = bad[footer_start + 4].to_i64()
+            val bw1 = bad[footer_start + 5].to_i64()
+            val bw2 = bad[footer_start + 6].to_i64()
+            val bw3 = bad[footer_start + 7].to_i64()
+            val backward_sz = bw0 | (bw1 << 8) | (bw2 << 16) | (bw3 << 24)
+            val index_total = (backward_sz + 1) * 4
+            val index_start = footer_start - index_total
+            val index_content_len = index_total - 4
+            bad[index_start] = 0x01u8
+            val bad_span = ByteSpan.new(bad)
+            val index_content = bad_span.slice(index_start, index_content_len)
+            var crc = Crc32.new()
+            crc.update(index_content)
+            val raw = crc.raw()
+            val crc_start = index_start + index_content_len
+            bad[crc_start] = (raw & 0xFF).to_u8()
+            bad[crc_start + 1] = ((raw >> 8) & 0xFF).to_u8()
+            bad[crc_start + 2] = ((raw >> 16) & 0xFF).to_u8()
+            bad[crc_start + 3] = ((raw >> 24) & 0xFF).to_u8()
+            val recovered = xz_decode(ByteSpan.new(bad))
+            assert_true(recovered.is_empty())
+
     # -----------------------------------------------------------------------
     # C4.3 RangeCoder bit round-trip
     #
