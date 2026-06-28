@@ -187,17 +187,18 @@ fn _zstd_parse_direct_weights(input: [u8], pos: i64, payload_end: i64) -> Result
             weights.push((packed & 0x0Fu8).to_i64())
         idx = idx + 2
     val completed = zstd_huf_complete_weights(weights)
-    if completed.is_err():
-        return Err(completed.unwrap_err())
-    Ok((completed.unwrap(), 1 + packed_bytes))
+    val complete_weights = match completed:
+        case Ok(decoded): decoded
+        case Err(reason): return Err(reason)
+    Ok((complete_weights, 1 + packed_bytes))
 
 fn _zstd_decode_huffman_stream(input: [u8], data_start: i64, stream_end: i64, regenerated_size: i64, table_state: ZstdHufTableState) -> Result<[u8], CompressionError>:
     if data_start >= stream_end:
         return Err(CompressionError.TruncatedInput("zstd huffman literal stream"))
     val reader_res = zstd_bits_init(input, data_start, stream_end)
-    if reader_res.is_err():
-        return Err(reader_res.unwrap_err())
-    var reader = reader_res.unwrap()
+    var reader = match reader_res:
+        case Ok(decoded): decoded
+        case Err(reason): return Err(reason)
     var literals: [u8] = []
     while literals.len() < regenerated_size:
         # Relaxed peek: at end of stream there may be fewer than table_bits bits remaining,
@@ -207,33 +208,35 @@ fn _zstd_decode_huffman_stream(input: [u8], data_start: i64, stream_end: i64, re
             return Err(CompressionError.TruncatedInput("zstd bitstream bits"))
         val peek_count = if remaining < table_state.table_bits: remaining else: table_state.table_bits
         val idx_res = zstd_bits_peek(reader, peek_count)
-        if idx_res.is_err():
-            return Err(idx_res.unwrap_err())
-        val entry = table_state.table[idx_res.unwrap().to_i64()]
+        val table_idx = match idx_res:
+            case Ok(decoded): decoded.to_i64()
+            case Err(reason): return Err(reason)
+        val entry = table_state.table[table_idx]
         if entry.bits <= 0 or entry.symbol < 0 or entry.symbol > 255:
             return Err(CompressionError.CorruptStream("zstd invalid Huffman decode entry"))
         literals.push(entry.symbol.to_u8())
         val next_res = zstd_bits_consume(reader, entry.bits)
-        if next_res.is_err():
-            return Err(next_res.unwrap_err())
-        reader = next_res.unwrap()
+        reader = match next_res:
+            case Ok(decoded): decoded
+            case Err(reason): return Err(reason)
     if zstd_bits_remaining(reader) != 0:
         return Err(CompressionError.CorruptStream("zstd Huffman literal stream has trailing bits"))
     Ok(literals)
 
 fn _zstd_decode_huffman_literals(input: [u8], stream_start: i64, stream_end: i64, regenerated_size: i64) -> Result<ZstdLiteralsDecodeResult, CompressionError>:
     val weights_res = _zstd_parse_direct_weights(input, stream_start, stream_end)
-    if weights_res.is_err():
-        return Err(weights_res.unwrap_err())
-    val (weights, tree_size) = weights_res.unwrap()
+    val (weights, tree_size) = match weights_res:
+        case Ok(decoded): decoded
+        case Err(reason): return Err(reason)
     val table_state_res = _zstd_huf_build_table_from_weights(weights)
-    if table_state_res.is_err():
-        return Err(table_state_res.unwrap_err())
-    val table_state = table_state_res.unwrap()
+    val table_state = match table_state_res:
+        case Ok(decoded): decoded
+        case Err(reason): return Err(reason)
     val literals_res = _zstd_decode_huffman_stream(input, stream_start + tree_size, stream_end, regenerated_size, table_state)
-    if literals_res.is_err():
-        return Err(literals_res.unwrap_err())
-    Ok(ZstdLiteralsDecodeResult(literals: literals_res.unwrap(), table_state: Some(table_state)))
+    val literals = match literals_res:
+        case Ok(decoded): decoded
+        case Err(reason): return Err(reason)
+    Ok(ZstdLiteralsDecodeResult(literals: literals, table_state: Some(table_state)))
 
 fn _zstd_read_u16_le(input: [u8], pos: i64, what: text) -> Result<i64, CompressionError>:
     if pos < 0 or pos + 2 > input.len():
