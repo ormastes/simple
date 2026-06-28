@@ -243,6 +243,12 @@ pub(crate) fn compile_builtin_method<M: Module>(
             let result_i8 = call_runtime_1(ctx, builder, "rt_array_clear", receiver_val);
             Some(super::helpers::safe_extend_to_i64(builder, result_i8))
         }
+        ("Array", "merge") | ("array", "merge") => {
+            let other_val = ctx.get_vreg(&args[0])?;
+            let count = call_len_method(ctx, builder, "rt_array_len", other_val);
+            let _ = call_runtime_3(ctx, builder, "rt_array_extend_i64", receiver_val, other_val, count);
+            Some(receiver_val)
+        }
         ("String", "len") | ("string", "len") | ("String", "length") | ("string", "length") => {
             Some(call_len_method(ctx, builder, "rt_string_len", receiver_val))
         }

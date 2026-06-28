@@ -29,12 +29,15 @@ feature (multi-pillar, multi-session)
 - AC-3: pure-Simple string/ctype/stdlib core vs musl outputs. [DONE — string+stdlib slices green]
 - AC-4: pure-Simple musl-style buffered stdio (FILE*/fread/fwrite/fgets/fflush). [DONE — FileBuf green]
 - AC-5: port remaining pure-computation C libc → pure Simple. [DONE for string/mem/stdlib-integer:
-  +simpleos_string_copy.spl (strcpy/strncpy/strcat/strncat/strdup/strndup/strnlen, 23/0)
+  +simpleos_string_copy.spl (strcpy/strncpy/strcat/strncat/strdup/strndup/strnlen/strlcpy/strlcat, 30/0)
   +simpleos_string_search.spl (strstr/strspn/strcspn/strpbrk/memchr/memrchr/strcasecmp/strncasecmp/
-  strtok_r/strerror, 50/0) +simpleos_stdlib_num.spl (strtoul/strtoll/strtoull/div/ldiv/lldiv/rand,
-  36/0) — 24 fns, 109 examples, all pure (no extern/rt_/C). C twins kept until parity.
+  strtok_r/strerror, 51/0) +simpleos_stdlib_num.spl (strtoul/strtoll/strtoull/div/ldiv/lldiv/rand,
+  41/0) — 26 fns, 122 examples, all pure (no extern/rt_/C). C twins kept until parity.
   REMAINDER BLOCKED & FILED: float (strtod/strtof/math/printf_float) needs reliable f64; syscall group
-  (alloc/fs/fork/signal/pthread/time/…) is legitimately C — `simpleos_libc_float_port_blocked_f64_2026-06-28.md`.]
+  (alloc/fs/fork/signal/pthread/time/…) is legitimately C — `simpleos_libc_float_port_blocked_f64_2026-06-28.md`.
+  Opus-review follow-up (2026-06-28): added strlcpy/strlcat (BSD, were dropped) via LcResult{bytes,total};
+  fixed strtoul to accept leading +/- sign (C-conformant, was diverging); strtok (non-reentrant, static
+  state) DELIBERATELY superseded by reentrant strtok_r — not ported (decision recorded, not silent skip).]
 ### P3 — busybox multi-call (keep MDSOC+)
 - AC-6: `simplebox` argv[0]/argv[1] dispatch over registry + `--list`, MDSOC+ annotated. [DONE — green]
 - AC-7: missing applets (dd/chown/timeout/+) pure-Simple + registered. [DONE — cores green]
