@@ -19,4 +19,14 @@
 | finetune_guard | `pass` | `pass` | `0` | `build/llm_goal_evidence/finetune_guard.log` |
 | public_absence | `pass` | `pass` | `0` | `build/llm_goal_evidence/public_absence.log` |
 
+## Strict Evidence Hints
+
+- context_ponytail: `CONTEXT_PONYTAIL_FULL_REPLACEMENT_EVIDENCE_ENV with llm_tooling_context_ponytail_full_replacement_status=pass`
+- dashboard: `LLM_DASHBOARD_LIVE_EVIDENCE_ENV with llm_dashboard_live_status=pass`
+- vllm_host: `local vLLM/GPU host evidence through check-llm-runtime-vllm-host-probe.shs --strict`
+- svllm_local: `SVLLM_NATIVE_EVIDENCE_ENV with svllm_native_streaming_status=pass`
+- torch_optimizer: `Simple/libtorch CUDA optimizer evidence through check-llm-runtime-torch-cuda-optimizer-probe.shs --strict`
+- finetune_guard: `FINETUNE_ACCEPTANCE_EVIDENCE_ENV with llm_finetune_acceptance_status=pass`
+- public_absence: `public absence rendering guard must pass`
+
 This aggregate proves the current local LLM tooling evidence lanes remain reproducible. WARN lanes are expected only for host-dependent gates that are still open on this machine: live vLLM serving and Simple/libtorch CUDA optimizer execution. The context/Ponytail lane is local mimic evidence only in default mode, the dashboard lane is route/collector evidence only in default mode, the svLLM lane is local file-backed readiness only in default mode, and the fine-tune lane is guard evidence only in default mode. This report is not release-completion evidence for those live host gates; rerun with `--strict-host` on a configured host when full context/Ponytail replacement, live dashboard operation, live vLLM, native svLLM streaming, fine-tune acceptance, and Simple/libtorch CUDA optimizer gates must pass.
