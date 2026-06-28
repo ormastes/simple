@@ -67,15 +67,52 @@ unchanged (`2`).
   this regression, so deploying it would regress passing specs. `bin/simple`
   is therefore kept on `acfe9654` (which has no regression).
 
-## Suspected change set
+## Bisect result (CONFIRMED — exact commit pinned)
 
-Recent runtime C-migration commits, e.g.:
-- `24b4b6d74f2 refactor(runtime): migrate memory + time FFI from Rust to C`
-- `21b0c76bc62 feat(os/libc): port string/mem/stdlib-integer C libc to pure Simple`
-- `a502776eba7 feat(gpu): ... runtime C migration`
+Pinned by a build-based `git bisect run` (the minimal repro above as the test),
+built in an isolated worktree with the complete vendor dir supplied via
+`cargo build --config "source.vendored-sources.directory='<main>/src/compiler_rust/vendor'"`
+(old checkouts otherwise fail to build — `vendor/` was gitignore-dropped at
+older commits; that is a build artifact, NOT the regression).
 
-`git bisect` between `acfe9654`'s source point and current main, using the
-minimal repro above as the test, will pin the exact commit.
+- **First bad commit: `adaa700d4e557ea36ee2b05c49d8d6fe81ed372e`**
+  `fix: rename DbRow to KvRow in db_persistence/db_query ...` (Wed May 27 2026).
+- Parent `1b338075e97aea0cdd0c43b048c74e10a9d63aad`
+  (`feat: add update_by_key API + PK fast paths ...`) = **GOOD** (repro prints `4`),
+  confirmed twice (bisect + dedicated rebuild).
+- `adaa700` = **BAD** (repro: `Function 'Array.merge' not found`, len `2`).
+  `adaa700` itself does not compile (`E0364`, a transient mid-refactor
+  visibility break); confirmed by applying ONLY the one-line visibility
+  compile-fix from its child `c360d50` (`pub use`→`pub(crate) use` at
+  `compiler/src/interpreter/mod.rs:177`) — a no-op for behavior — then building:
+  still BAD.
+- `c360d50fc88330c8e0bead9382042ac02fb26e87`
+  (`chore: interpreter visibility tightening ...`) is the visibility compile-fix
+  sibling, NOT the behavioral cause.
+
+The earlier "runtime C-migration" suspects (`24b4b6d`, `21b0c76`, `a502776`) are
+EXONERATED — `24b4b6d` (May 17) is on the GOOD side, well before `adaa700`'s
+parent.
+
+### What inside `adaa700` to look at
+
+`adaa700` is a **55-file grab-bag**: its title is the unrelated DbRow→KvRow
+rename, but the body admits it "also includes: interpreter hot-path
+optimizations ... and compiler frontend restructuring." The behavior-changing
+hunks are in the dispatch path, chiefly:
+- `compiler/src/interpreter_method/special/execution.rs` (+136 lines — added a
+  `METHOD_INDEX_CLASS`/`METHOD_INDEX_IMPL` thread-local method-index cache and
+  reworked `find_and_exec_method_with_self`'s class/impl method lookup),
+- `compiler/src/interpreter_method/mod.rs`, `special/mod.rs`,
+- `runtime/src/value/sffi/env_process.rs`, `io_print.rs`.
+
+The exact sub-hunk that reroutes typed-array `.merge` to an `Array.merge`
+runtime-symbol lookup (instead of the `collections.rs` `concat|extend|merge`
+handler) lives in this dispatch rework; review the `find_and_exec_method_with_self`
+fall-through ordering against the builtin-array-method path.
+
+Deployed `acfe9654` predates `adaa700`, which is why it still works and the
+regression went unnoticed (seed deploy is human-gated/blocked).
 
 ## Suggested fix direction
 
