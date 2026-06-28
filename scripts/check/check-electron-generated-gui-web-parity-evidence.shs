@@ -94,6 +94,17 @@ num_at_least() {
     [ "$value" -ge "$min" ]
 }
 
+artifact_status_from_file_status() {
+    status="$1"
+    if [ "$status" = "pass" ]; then
+        echo pass
+    elif [ -z "$status" ] || [ "$status" = "unavailable" ]; then
+        echo unavailable
+    else
+        echo fail
+    fi
+}
+
 emit_unavailable() {
     reason="$1"
     {
@@ -105,12 +116,17 @@ emit_unavailable() {
         echo "electron_generated_gui_web_simple_bin_status=$SIMPLE_BIN_STATUS"
         echo "electron_generated_gui_web_proof_source="
         echo "electron_generated_gui_web_proof_source_file_status="
+        echo "electron_generated_gui_web_proof_source_file_reason=not-run"
+        echo "electron_generated_gui_web_proof_source_artifact_status=unavailable"
         echo "electron_generated_gui_web_proof_source_size_bytes="
         echo "electron_generated_gui_web_proof_source_actual_size_bytes="
         echo "electron_generated_gui_web_proof_symlink_status="
         echo "electron_generated_gui_web_proof_hardlink_status="
         echo "electron_generated_gui_web_captured_argb_symlink_status="
         echo "electron_generated_gui_web_captured_argb_hardlink_status="
+        echo "electron_generated_gui_web_captured_argb_file_status="
+        echo "electron_generated_gui_web_captured_argb_file_reason=not-run"
+        echo "electron_generated_gui_web_captured_argb_artifact_status=unavailable"
         echo "electron_generated_gui_web_width=$WIDTH"
         echo "electron_generated_gui_web_height=$HEIGHT"
     } >"$BUILD_DIR/evidence.env"
@@ -219,6 +235,8 @@ else
         echo "electron_generated_gui_web_renderer="
         echo "electron_generated_gui_web_proof_source="
         echo "electron_generated_gui_web_proof_source_file_status="
+        echo "electron_generated_gui_web_proof_source_file_reason=not-run"
+        echo "electron_generated_gui_web_proof_source_artifact_status=fail"
         echo "electron_generated_gui_web_proof_source_size_bytes="
         echo "electron_generated_gui_web_proof_source_actual_size_bytes="
         echo "electron_generated_gui_web_scene="
@@ -247,6 +265,8 @@ else
         echo "electron_generated_gui_web_captured_argb_path=$CAPTURED_ARGB"
         echo "electron_generated_gui_web_captured_argb_written=false"
         echo "electron_generated_gui_web_captured_argb_file_status=fail"
+        echo "electron_generated_gui_web_captured_argb_file_reason=not-run"
+        echo "electron_generated_gui_web_captured_argb_artifact_status=fail"
         echo "electron_generated_gui_web_captured_argb_size_bytes="
         echo "electron_generated_gui_web_captured_argb_format="
         echo "electron_generated_gui_web_captured_argb_producer="
@@ -266,6 +286,8 @@ validation_reason="$(field_of_env electron_generated_gui_web_validation_reason "
 proof_renderer="$(field_of_env electron_generated_gui_web_renderer "$VALIDATED_ENV")"
 proof_source="$(field_of_env electron_generated_gui_web_proof_source "$VALIDATED_ENV")"
 proof_source_file_status="$(field_of_env electron_generated_gui_web_proof_source_file_status "$VALIDATED_ENV")"
+proof_source_file_reason="${proof_source_file_status:-not-run}"
+proof_source_artifact_status="$(artifact_status_from_file_status "$proof_source_file_status")"
 proof_source_size_bytes="$(field_of_env electron_generated_gui_web_proof_source_size_bytes "$VALIDATED_ENV")"
 proof_source_actual_size_bytes="$(field_of_env electron_generated_gui_web_proof_source_actual_size_bytes "$VALIDATED_ENV")"
 proof_scene="$(field_of_env electron_generated_gui_web_scene "$VALIDATED_ENV")"
@@ -291,6 +313,8 @@ capture_downsampled="$(field_of_env electron_generated_gui_web_capture_downsampl
 captured_argb_path="$(field_of_env electron_generated_gui_web_captured_argb_path "$VALIDATED_ENV")"
 captured_argb_written="$(field_of_env electron_generated_gui_web_captured_argb_written "$VALIDATED_ENV")"
 captured_argb_file_status="$(field_of_env electron_generated_gui_web_captured_argb_file_status "$VALIDATED_ENV")"
+captured_argb_file_reason="${captured_argb_file_status:-not-run}"
+captured_argb_artifact_status="$(artifact_status_from_file_status "$captured_argb_file_status")"
 proof_symlink_status="$(field_of_env electron_generated_gui_web_proof_symlink_status "$VALIDATED_ENV")"
 proof_hardlink_status="$(field_of_env electron_generated_gui_web_proof_hardlink_status "$VALIDATED_ENV")"
 captured_argb_symlink_status="$(field_of_env electron_generated_gui_web_captured_argb_symlink_status "$VALIDATED_ENV")"
@@ -364,7 +388,7 @@ elif [ "$validation_code" -ne 0 ] || [ "$validation_status" != "pass" ]; then
             ;;
     esac
     reason="${validation_reason:-electron-proof-validation-failed}"
-elif [ "$proof_source_file_status" != "pass" ] || ! num_at_least "$proof_source_size_bytes" 1; then
+elif [ "$proof_source_file_status" != "pass" ] || [ "$proof_source_artifact_status" != "pass" ] || ! num_at_least "$proof_source_size_bytes" 1; then
     status=fail
     reason=proof-source-file-status-not-pass
 elif ! num_at_least "$proof_source_actual_size_bytes" 1 || [ "$proof_source_actual_size_bytes" != "$proof_source_size_bytes" ]; then
@@ -373,6 +397,9 @@ elif ! num_at_least "$proof_source_actual_size_bytes" 1 || [ "$proof_source_actu
 elif [ ! -s "$CAPTURED_ARGB" ]; then
     status=fail
     reason=missing-captured-argb-file
+elif [ "$captured_argb_file_status" != "pass" ] || [ "$captured_argb_artifact_status" != "pass" ]; then
+    status=fail
+    reason=captured-argb-file-status-not-pass
 elif [ "$electron_code" -ne 0 ]; then
     watchdog_teardown=true
 fi
@@ -384,6 +411,8 @@ fi
     echo "electron_generated_gui_web_proof_renderer=${proof_renderer:-}"
     echo "electron_generated_gui_web_proof_source=${proof_source:-}"
     echo "electron_generated_gui_web_proof_source_file_status=${proof_source_file_status:-}"
+    echo "electron_generated_gui_web_proof_source_file_reason=${proof_source_file_reason:-}"
+    echo "electron_generated_gui_web_proof_source_artifact_status=${proof_source_artifact_status:-}"
     echo "electron_generated_gui_web_proof_source_size_bytes=${proof_source_size_bytes:-}"
     echo "electron_generated_gui_web_proof_source_actual_size_bytes=${proof_source_actual_size_bytes:-}"
     echo "electron_generated_gui_web_proof_scene=${proof_scene:-}"
@@ -432,6 +461,8 @@ fi
     echo "electron_generated_gui_web_proof_symlink_status=${proof_symlink_status:-}"
     echo "electron_generated_gui_web_proof_hardlink_status=${proof_hardlink_status:-}"
     echo "electron_generated_gui_web_captured_argb_file_status=${captured_argb_file_status:-}"
+    echo "electron_generated_gui_web_captured_argb_file_reason=${captured_argb_file_reason:-}"
+    echo "electron_generated_gui_web_captured_argb_artifact_status=${captured_argb_artifact_status:-}"
     echo "electron_generated_gui_web_captured_argb_symlink_status=${captured_argb_symlink_status:-}"
     echo "electron_generated_gui_web_captured_argb_hardlink_status=${captured_argb_hardlink_status:-}"
     echo "electron_generated_gui_web_captured_argb_size_bytes=${captured_argb_size_bytes:-}"
@@ -455,6 +486,8 @@ fi
     echo "- proof renderer: ${proof_renderer:-}"
     echo "- proof source: ${proof_source:-}"
     echo "- proof source file status: ${proof_source_file_status:-}"
+    echo "- proof source file reason: ${proof_source_file_reason:-}"
+    echo "- proof source artifact status: ${proof_source_artifact_status:-}"
     echo "- proof source size bytes: ${proof_source_size_bytes:-}"
     echo "- proof source actual size bytes: ${proof_source_actual_size_bytes:-}"
     echo "- proof scene: ${proof_scene:-}"
@@ -486,6 +519,8 @@ fi
     echo "- Simple expected ARGB path: $EXPECTED_ARGB"
     echo "- Electron captured ARGB path: ${captured_argb_path:-$CAPTURED_ARGB}"
     echo "- Electron captured ARGB file status: ${captured_argb_file_status:-}"
+    echo "- Electron captured ARGB file reason: ${captured_argb_file_reason:-}"
+    echo "- Electron captured ARGB artifact status: ${captured_argb_artifact_status:-}"
     echo "- Electron captured ARGB size bytes: ${captured_argb_size_bytes:-}"
     echo "- Electron captured ARGB format: ${captured_argb_format:-}"
     echo "- Electron captured ARGB producer: ${captured_argb_producer:-}"
