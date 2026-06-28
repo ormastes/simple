@@ -348,6 +348,32 @@ write_alias_source() {
     } >"$ALIAS_SRC"
 }
 
+alias_raw_rt_count() {
+    if [ ! -s "$ALIAS_SRC" ]; then
+        echo 0
+        return
+    fi
+    grep -E '(^|[^A-Za-z0-9_])rt_[A-Za-z0-9_]+' "$ALIAS_SRC" | wc -l | tr -d '[:space:]'
+}
+
+validate_alias_source() {
+    raw_rt_count="$(alias_raw_rt_count)"
+    if [ "$raw_rt_count" != "0" ]; then
+        {
+            echo "${STATUS_PREFIX}_status=fail"
+            echo "${STATUS_PREFIX}_reason=alias-raw-rt-forbidden"
+            emit_common_fields
+            echo "${STATUS_PREFIX}_alias_raw_rt_count=$raw_rt_count"
+            emit_unmeasured_perf_fields
+            echo "${STATUS_PREFIX}_max_rss_budget_kb=$MAX_RSS_KB"
+            emit_log_fields
+        } >"$STATUS_ENV"
+        echo "FAIL: retained perf alias contains raw rt_* calls: $ALIAS_SRC"
+        return 1
+    fi
+    return 0
+}
+
 case "$SIMPLE_BIN" in
     src/compiler_rust/*|*/src/compiler_rust/*)
         SIMPLE_BIN_STATUS=forbidden
@@ -367,6 +393,7 @@ esac
 if [ "$PLAN_ONLY" = "1" ]; then
     if [ "$USE_NATIVE" = "1" ]; then
         write_alias_source
+        validate_alias_source || exit 1
     fi
     {
         echo "${STATUS_PREFIX}_status=plan-only"
@@ -403,6 +430,7 @@ fi
 RUN_CMD=
 if [ "$USE_NATIVE" = "1" ]; then
     write_alias_source
+    validate_alias_source || exit 1
     if ! "$SIMPLE_BIN" native-build --source src --source examples --entry "$ALIAS_SRC" --entry-closure --opt-level=aggressive --strip --output "$NATIVE_BIN" >"$BUILD_LOG" 2>&1; then
         {
             echo "${STATUS_PREFIX}_status=fail"

@@ -23,5 +23,7 @@ SIMPLE_LIB=src bin/simple test test/05_perf/gui/widget_showcase_4k_8k_perf_contr
 - Evidence includes FPS, p50/p95 frame timing, checksum/readback, RSS budget,
   retained render mode, redraw count, log file status, timing-log status, and
   source revision rows.
+- The generated retained alias is scanned before native-build and fails with
+  `alias-raw-rt-forbidden` if raw `rt_*` calls enter the alias source.
 - Passing this spec is source preparation only. It does not produce a new 4K or
   8K performance measurement.
