@@ -296,6 +296,12 @@ Evidence:
   traversal outside that directory reports
   `STATUS: FAIL llm-finetune-data-gate` instead of executing. The SPipe build
   smoke includes an `unsafe_checker` traversal fixture.
+- 2026-06-28 local handoff-doc readiness hardening: `fine-tune-ready` now
+  requires local filesystem app handoff doc paths to exist before
+  `app_handoff_doc_ready` can become ready. Explicit doc URIs remain valid
+  externally managed evidence. The SPipe build smoke includes a
+  missing-local-handoff-doc fixture that must fail readiness and report
+  `readiness_blocker=app-handoff-doc`.
 
 Next normal-LLM work: finish retry5 licensed cache/checksum evidence and retry6
 real training/eval before retry7 can become an acceptance gate with a PASS

@@ -1404,6 +1404,15 @@ function parseTarget(value) {
   return match ? { metric: match[1], threshold: Number(match[2]) } : null;
 }
 
+function artifactReferenceExistsOrUri(reference) {
+  if (!reference) return false;
+  if (/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(reference)) return true;
+
+  let artifactPath = reference;
+  if (!isAbsolute(artifactPath)) artifactPath = join(process.cwd(), artifactPath);
+  return existsSync(artifactPath);
+}
+
 function fineTuneEvalTargetStatus(root, attemptId, attemptContent) {
   const metricsText = registryValueForAttempt(root, "eval_results.sdn", attemptId, "metrics") || readQuotedValue(attemptContent, "metrics");
   const targetText = registryValueForAttempt(root, "eval_results.sdn", attemptId, "target") || readQuotedValue(attemptContent, "target");
@@ -1421,6 +1430,7 @@ function fineTuneEvalTargetStatus(root, attemptId, attemptContent) {
 
 function fineTuneAppHandoffReady(handoffDoc, usage, licenseConstraints, safetyEval, deploymentEvidence) {
   if (!handoffDoc || handoffDoc === "missing" || handoffDoc === "pending") return false;
+  if (!artifactReferenceExistsOrUri(handoffDoc)) return false;
   if (!usage || /^do not deploy\b/i.test(usage)) return false;
   if (!licenseConstraints || licenseConstraints === "pending") return false;
   if (!safetyEval || safetyEval === "not-run") return false;
