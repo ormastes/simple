@@ -110,7 +110,10 @@ parity, and cross-platform freshness.
 4. Read the headless handoff wrapper and confirm the remaining live gate count,
    host map count, runbook map count, proof map count, and matrix count all stay
    tied to the same nine gate IDs.
-5. Read the negative selftest wrapper and confirm malformed count, malformed
+5. Read the platform evidence bundle checker and confirm it consumes the
+   existing platform env files without launching platform tools, then reports
+   proven, missing, failed, and remaining gate lists for the same nine IDs.
+6. Read the negative selftest wrapper and confirm malformed count, malformed
    value, malformed format, duplicate gate, and map gate-ID mismatch cases are
    expected to fail with specific reasons.
 
@@ -150,6 +153,10 @@ from the required host class for that gate.
 - The headless wrapper keeps retained 4K/8K, full HTML/CSS, production GUI/Web
   parity, and cross-platform freshness as explicit remaining matrix rows with
   host, runbook, and proof checklists.
+- The platform evidence bundle consumes existing native render-log, mobile,
+  retained performance, HTML/CSS, production parity, and freshness env files and
+  classifies the same nine live gates as proven, missing, or failed without
+  launching RenderDoc, Xcode, PIX, Tauri, Chrome, Electron, or perf probes.
 
 ## Scenarios
 
@@ -160,7 +167,7 @@ from the required host class for that gate.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 45 lines folded for reproduction.
+Runnable source: 46 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -174,6 +181,7 @@ expect(plan).to_contain("| Cross-platform freshness |")
 expect(plan).to_contain("scripts/check/check-gui-renderdoc-feature-coverage-status.shs")
 expect(plan).to_contain("scripts/check/check-tauri-mobile-renderer-parity-evidence.shs")
 expect(plan).to_contain("scripts/check/check-gui-web-2d-headless-handoff-prep.shs")
+expect(plan).to_contain("scripts/check/check-gui-web-2d-platform-evidence-bundle.shs")
 expect(plan).to_contain("| WO-29 Five-platform handoff contract |")
 expect(plan).to_contain("| WO-30 Retained 4K/8K current-source freshness contract |")
 expect(plan).to_contain("| WO-31 Full HTML/CSS final inventory contract |")
@@ -256,7 +264,7 @@ expect(spec).to_contain("platform runbook version")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 101 lines folded for reproduction.
+Runnable source: 123 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -353,6 +361,28 @@ expect(negative_selftest).to_contain("runbook-value")
 expect(negative_selftest).to_contain("proof-value")
 expect(negative_selftest).to_contain("host-format")
 expect(negative_selftest).to_contain("runbook-format")
+val bundle = file_read("scripts/check/check-gui-web-2d-platform-evidence-bundle.shs")
+expect(bundle).to_contain("gui_web_2d_platform_evidence_bundle_total_gate_count=9")
+expect(bundle).to_contain("gui_web_2d_platform_evidence_bundle_proven_gate_count")
+expect(bundle).to_contain("gui_web_2d_platform_evidence_bundle_missing_gate_count")
+expect(bundle).to_contain("gui_web_2d_platform_evidence_bundle_failed_gate_count")
+expect(bundle).to_contain("gui_web_2d_platform_evidence_bundle_remaining_gate_count")
+expect(bundle).to_contain("NATIVE_RENDER_LOG_PLATFORM_MATRIX_ENV")
+expect(bundle).to_contain("TAURI_MOBILE_RENDERER_PARITY_ENV")
+expect(bundle).to_contain("GUI_SHOWCASE_4K_200FPS_ENV")
+expect(bundle).to_contain("GUI_SHOWCASE_8K_200FPS_ENV")
+expect(bundle).to_contain("HTML_CSS_FULL_RENDERING_GOAL_ENV")
+expect(bundle).to_contain("PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV")
+expect(bundle).to_contain("GUI_WEB_2D_PLATFORM_FRESHNESS_ENV")
+expect(bundle).to_contain("linux-vulkan-renderdoc")
+expect(bundle).to_contain("macos-metal-xcode-gpu-capture")
+expect(bundle).to_contain("windows-d3d12-pix")
+expect(bundle).to_contain("ios-tauri-wkwebview-metal")
+expect(bundle).to_contain("android-tauri-webview-vulkan")
+expect(bundle).to_contain("retained-4k-8k-current-source")
+expect(bundle).to_contain("full-html-css")
+expect(bundle).to_contain("production-gui-web-parity")
+expect(bundle).to_contain("cross-platform-freshness")
 expect(negative_selftest).to_contain("proof-format")
 expect(negative_selftest).to_contain("host-gate-id")
 expect(negative_selftest).to_contain("runbook-gate-id")

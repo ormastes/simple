@@ -987,6 +987,13 @@ Normal-review acceptance:
   Harvey found the 13-case negative selftest list and per-case pass set
   consistent across wrapper, SSpec expectations, and report. Final status remains
   `prepared-not-verified` with 9 live gates outstanding.
+- 2026-06-28 platform evidence bundle prep: `scripts/check/check-gui-web-2d-platform-evidence-bundle.shs`
+  is the non-launching rollup for the nine live gates. It consumes existing
+  native render-log, Tauri mobile, retained 4K/8K, full HTML/CSS, production
+  GUI/Web parity, and cross-platform freshness env files, then emits proven,
+  missing, failed, and remaining gate lists. Missing envs remain incomplete and
+  present bad rows remain failed; this prepares shared verification without
+  claiming live platform completion on the headless host.
 
 ## Hard Stop Conditions
 
