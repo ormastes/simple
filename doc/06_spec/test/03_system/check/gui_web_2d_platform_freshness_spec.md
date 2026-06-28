@@ -27,7 +27,7 @@ gui_web_2d_platform_freshness_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+| 7 | 7 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -80,6 +80,7 @@ sh scripts/check/check-gui-web-2d-platform-freshness.shs
   SDK/driver, and runbook metadata fail freshness.
 - Matching source revisions plus runtime, browser/WebView/Electron, graphics
   SDK/driver, and runbook metadata pass freshness.
+- Matching source revisions with conflicting lane metadata fail freshness.
 - Explicit run-level source and metadata overrides pass freshness when wrapper
   env files provide matching lane revisions but do not carry toolchain metadata
   themselves.
@@ -142,8 +143,8 @@ compare those env files by the common source-revision field.
 Freshness is broader than source equality. A final completion run also needs
 metadata that identifies the runtime build, browser/WebView/Electron revision,
 graphics SDK/driver revision, and runbook version. Those values may be supplied
-by the native aggregate env with lane-specific keys, by shared
-`gui_web_2d_evidence_*` keys, or by explicit run-level environment variables:
+by any lane env with lane-specific keys, by shared `gui_web_2d_evidence_*` keys,
+or by explicit run-level environment variables:
 
 - `GUI_WEB_2D_PLATFORM_FRESHNESS_RUNTIME_BUILD`
 - `GUI_WEB_2D_PLATFORM_FRESHNESS_BROWSER_WEBVIEW_ELECTRON_REVISION`
@@ -153,6 +154,10 @@ by the native aggregate env with lane-specific keys, by shared
 Explicit run-level metadata is useful when a platform operator records tool
 versions outside individual wrapper env files. It is still fail-closed: empty
 metadata keeps freshness failed.
+When multiple lane env files provide metadata, non-empty values must agree with
+the selected run metadata. A lane that reports the same source revision but a
+different runtime build, browser/WebView/Electron revision, graphics SDK/driver,
+or runbook version fails freshness with `metadata-mismatch`.
 
 The override path is important for final platform review windows where the
 operator pins the selected source revision and records the browser, WebView,
@@ -167,9 +172,9 @@ The checker writes `gui_web_2d_platform_freshness_status`,
 `gui_web_2d_platform_freshness_reason`, the canonical source revision, runtime
 build, browser/WebView/Electron revision, graphics SDK/driver revision, runbook
 version, and diagnostic lane lists for missing evidence, missing source fields,
-and mismatched source fields. The platform evidence bundle consumes only the
-status and non-empty metadata fields, but the diagnostic lists make it clear
-which host or wrapper must be refreshed.
+and mismatched source or metadata fields. The platform evidence bundle consumes
+only the status, pass reason, and non-empty metadata fields, but the diagnostic
+lists make it clear which host or wrapper must be refreshed.
 
 ## Manual Run Steps
 
@@ -195,6 +200,10 @@ The same-source-without-metadata scenario keeps every lane on the same source
 revision but omits runtime, browser/WebView/Electron, graphics SDK/driver, and
 runbook metadata. That must remain a failure because final completion needs the
 toolchain and runbook context, not just source equality.
+The metadata-mismatch scenario keeps every lane on the same source revision but
+sets one lane's runtime build to a different non-empty value. That must remain a
+failure because same-source evidence from different runtime or toolchain windows
+is not a valid final completion proof.
 
 ## Scenarios
 
@@ -304,6 +313,30 @@ expect(evidence).to_contain("gui_web_2d_platform_freshness_missing_metadata=")
 
 </details>
 
+#### fails when same-source evidence has conflicting lane metadata
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val command = "rm -rf build/test-gui-web-2d-platform-freshness-metadata-mismatch && mkdir -p build/test-gui-web-2d-platform-freshness-metadata-mismatch/env && printf 'native_render_log_platform_matrix_source_revision=rev-a\\nnative_render_log_platform_matrix_runtime_build=runtime-a\\nnative_render_log_platform_matrix_browser_webview_electron_revision=chrome-a\\nnative_render_log_platform_matrix_graphics_sdk_driver=vulkan-a\\nnative_render_log_platform_matrix_runbook_version=runbook-a\\n' > build/test-gui-web-2d-platform-freshness-metadata-mismatch/env/native.env && printf 'tauri_mobile_renderer_parity_source_revision=rev-a\\ngui_web_2d_evidence_runtime_build=runtime-b\\n' > build/test-gui-web-2d-platform-freshness-metadata-mismatch/env/mobile.env && printf 'gui_showcase_4k_200fps_source_revision=rev-a\\n' > build/test-gui-web-2d-platform-freshness-metadata-mismatch/env/4k.env && printf 'gui_showcase_8k_perf_source_revision=rev-a\\n' > build/test-gui-web-2d-platform-freshness-metadata-mismatch/env/8k.env && printf 'html_css_full_rendering_goal_source_revision=rev-a\\n' > build/test-gui-web-2d-platform-freshness-metadata-mismatch/env/html.env && printf 'production_gui_web_renderer_parity_source_revision=rev-a\\n' > build/test-gui-web-2d-platform-freshness-metadata-mismatch/env/production.env && BUILD_DIR=build/test-gui-web-2d-platform-freshness-metadata-mismatch/out REPORT_PATH=build/test-gui-web-2d-platform-freshness-metadata-mismatch/report.md NATIVE_RENDER_LOG_PLATFORM_MATRIX_ENV=build/test-gui-web-2d-platform-freshness-metadata-mismatch/env/native.env TAURI_MOBILE_RENDERER_PARITY_ENV=build/test-gui-web-2d-platform-freshness-metadata-mismatch/env/mobile.env GUI_SHOWCASE_4K_200FPS_ENV=build/test-gui-web-2d-platform-freshness-metadata-mismatch/env/4k.env GUI_SHOWCASE_8K_200FPS_ENV=build/test-gui-web-2d-platform-freshness-metadata-mismatch/env/8k.env HTML_CSS_FULL_RENDERING_GOAL_ENV=build/test-gui-web-2d-platform-freshness-metadata-mismatch/env/html.env PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=build/test-gui-web-2d-platform-freshness-metadata-mismatch/env/production.env sh scripts/check/check-gui-web-2d-platform-freshness.shs"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read("build/test-gui-web-2d-platform-freshness-metadata-mismatch/out/evidence.env")
+expect(evidence).to_contain("gui_web_2d_platform_freshness_status=fail")
+expect(evidence).to_contain("gui_web_2d_platform_freshness_reason=metadata-mismatch")
+expect(evidence).to_contain("gui_web_2d_platform_freshness_source_revision=rev-a")
+expect(evidence).to_contain("gui_web_2d_platform_freshness_runtime_build=runtime-a")
+expect(evidence).to_contain("gui_web_2d_platform_freshness_missing_metadata=")
+expect(evidence).to_contain("gui_web_2d_platform_freshness_mismatched_metadata_lanes=mobile:runtime-build")
+```
+
+</details>
+
 #### fails when same-source evidence omits freshness metadata
 
 <details>
@@ -354,8 +387,8 @@ expect(evidence).to_contain("gui_web_2d_platform_freshness_mismatched_source_rev
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 7 |
+| Active scenarios | 7 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

@@ -80,6 +80,33 @@ metadata_for() {
         "$suffix"
 }
 
+metadata_across_lanes() {
+    suffix="$1"
+    value="$(metadata_for "$NATIVE_ENV" native_render_log_platform_matrix "$suffix")"
+    [ "$value" != "" ] || value="$(metadata_for "$MOBILE_ENV" tauri_mobile_renderer_parity "$suffix")"
+    [ "$value" != "" ] || value="$(metadata_for "$PERF_4K_ENV" gui_showcase_4k_200fps "$suffix")"
+    [ "$value" != "" ] || value="$(metadata_for "$PERF_8K_ENV" gui_showcase_8k_perf "$suffix")"
+    [ "$value" != "" ] || value="$(metadata_for "$HTML_CSS_ENV" html_css_full_rendering_goal "$suffix")"
+    [ "$value" != "" ] || value="$(metadata_for "$PRODUCTION_ENV" production_gui_web_renderer_parity "$suffix")"
+    echo "$value"
+}
+
+check_metadata_match() {
+    lane="$1"
+    file="$2"
+    prefix="$3"
+    suffix="$4"
+    label="$5"
+    expected="$6"
+    if [ "$(file_status "$file")" != "pass" ] || [ "$expected" = "" ]; then
+        return
+    fi
+    actual="$(metadata_for "$file" "$prefix" "$suffix")"
+    if [ "$actual" != "" ] && [ "$actual" != "$expected" ]; then
+        mismatched_metadata="$(append_csv "$mismatched_metadata" "$lane:$label")"
+    fi
+}
+
 native_source="$(source_for native "$NATIVE_ENV" native_render_log_platform_matrix)"
 mobile_source="$(source_for mobile "$MOBILE_ENV" tauri_mobile_renderer_parity)"
 perf_4k_source="$(source_for perf_4k "$PERF_4K_ENV" gui_showcase_4k_200fps)"
@@ -88,10 +115,10 @@ html_css_source="$(source_for html_css "$HTML_CSS_ENV" html_css_full_rendering_g
 production_source="$(source_for production "$PRODUCTION_ENV" production_gui_web_renderer_parity)"
 
 source_revision="${GUI_WEB_2D_PLATFORM_FRESHNESS_SOURCE_REVISION:-$native_source}"
-runtime_build="${GUI_WEB_2D_PLATFORM_FRESHNESS_RUNTIME_BUILD:-$(metadata_for "$NATIVE_ENV" native_render_log_platform_matrix runtime_build)}"
-browser_revision="${GUI_WEB_2D_PLATFORM_FRESHNESS_BROWSER_WEBVIEW_ELECTRON_REVISION:-$(metadata_for "$NATIVE_ENV" native_render_log_platform_matrix browser_webview_electron_revision)}"
-graphics_driver="${GUI_WEB_2D_PLATFORM_FRESHNESS_GRAPHICS_SDK_DRIVER:-$(metadata_for "$NATIVE_ENV" native_render_log_platform_matrix graphics_sdk_driver)}"
-runbook_version="${GUI_WEB_2D_PLATFORM_FRESHNESS_RUNBOOK_VERSION:-$(metadata_for "$NATIVE_ENV" native_render_log_platform_matrix runbook_version)}"
+runtime_build="${GUI_WEB_2D_PLATFORM_FRESHNESS_RUNTIME_BUILD:-$(metadata_across_lanes runtime_build)}"
+browser_revision="${GUI_WEB_2D_PLATFORM_FRESHNESS_BROWSER_WEBVIEW_ELECTRON_REVISION:-$(metadata_across_lanes browser_webview_electron_revision)}"
+graphics_driver="${GUI_WEB_2D_PLATFORM_FRESHNESS_GRAPHICS_SDK_DRIVER:-$(metadata_across_lanes graphics_sdk_driver)}"
+runbook_version="${GUI_WEB_2D_PLATFORM_FRESHNESS_RUNBOOK_VERSION:-$(metadata_across_lanes runbook_version)}"
 
 missing_files=""
 missing_source_lanes=""
@@ -123,6 +150,25 @@ missing_metadata=""
 [ "$graphics_driver" != "" ] || missing_metadata="$(append_csv "$missing_metadata" graphics-sdk-driver)"
 [ "$runbook_version" != "" ] || missing_metadata="$(append_csv "$missing_metadata" runbook-version)"
 
+mismatched_metadata=""
+for row in \
+    "native:$NATIVE_ENV:native_render_log_platform_matrix" \
+    "mobile:$MOBILE_ENV:tauri_mobile_renderer_parity" \
+    "retained-4k:$PERF_4K_ENV:gui_showcase_4k_200fps" \
+    "retained-8k:$PERF_8K_ENV:gui_showcase_8k_perf" \
+    "html-css:$HTML_CSS_ENV:html_css_full_rendering_goal" \
+    "production-parity:$PRODUCTION_ENV:production_gui_web_renderer_parity"
+do
+    lane="${row%%:*}"
+    rest="${row#*:}"
+    file="${rest%%:*}"
+    prefix="${row##*:}"
+    check_metadata_match "$lane" "$file" "$prefix" runtime_build runtime-build "$runtime_build"
+    check_metadata_match "$lane" "$file" "$prefix" browser_webview_electron_revision browser-webview-electron-revision "$browser_revision"
+    check_metadata_match "$lane" "$file" "$prefix" graphics_sdk_driver graphics-sdk-driver "$graphics_driver"
+    check_metadata_match "$lane" "$file" "$prefix" runbook_version runbook-version "$runbook_version"
+done
+
 status=pass
 reason=pass
 if [ "$missing_files" != "" ]; then
@@ -137,6 +183,9 @@ elif [ "$mismatched_source_lanes" != "" ]; then
 elif [ "$missing_metadata" != "" ]; then
     status=fail
     reason=missing-freshness-metadata
+elif [ "$mismatched_metadata" != "" ]; then
+    status=fail
+    reason=metadata-mismatch
 fi
 
 {
@@ -151,6 +200,7 @@ fi
     echo "gui_web_2d_platform_freshness_missing_source_revision_lanes=$missing_source_lanes"
     echo "gui_web_2d_platform_freshness_mismatched_source_revision_lanes=$mismatched_source_lanes"
     echo "gui_web_2d_platform_freshness_missing_metadata=$missing_metadata"
+    echo "gui_web_2d_platform_freshness_mismatched_metadata_lanes=$mismatched_metadata"
     echo "gui_web_2d_platform_freshness_native_source_revision=$native_source"
     echo "gui_web_2d_platform_freshness_mobile_source_revision=$mobile_source"
     echo "gui_web_2d_platform_freshness_retained_4k_source_revision=$perf_4k_source"
@@ -180,6 +230,7 @@ fi
     echo "- Missing source-revision lanes: $missing_source_lanes"
     echo "- Mismatched source-revision lanes: $mismatched_source_lanes"
     echo "- Missing metadata: $missing_metadata"
+    echo "- Mismatched metadata lanes: $mismatched_metadata"
 } >"$REPORT_PATH"
 
 cat "$OUT_ENV"

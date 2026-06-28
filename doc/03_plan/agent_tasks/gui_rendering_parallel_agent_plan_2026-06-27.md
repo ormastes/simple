@@ -1057,6 +1057,12 @@ Normal-review acceptance:
   `cross-platform-freshness`. A contradictory freshness env such as
   `status=pass` with `reason=source-revision-mismatch` remains failed evidence
   even if all required metadata fields are present.
+- 2026-06-28 freshness cross-lane metadata consistency:
+  `scripts/check/check-gui-web-2d-platform-freshness.shs` now derives run
+  metadata from any lane or explicit run-level overrides, then rejects non-empty
+  conflicting lane metadata with `metadata-mismatch`. Same-source evidence from
+  different runtime, browser/WebView/Electron, graphics SDK/driver, or runbook
+  windows cannot satisfy `cross-platform-freshness`.
 
 ## Hard Stop Conditions
 
