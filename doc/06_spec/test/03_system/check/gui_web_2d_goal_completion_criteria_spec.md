@@ -217,7 +217,9 @@ fields through the aggregate audit and requires:
   queue is resolved, matching checksums, event routing, and no CPU-mirror-only
   pass.
 - Parallel-agent completion records Spark or fallback sidecar outputs plus
-  normal/high-capability review before accepting broad findings or done marks.
+  normal/high-capability review before accepting broad findings or done marks;
+  Spark quota failures are recorded as attempts only, fallback output remains
+  advisory, and no broad done mark is accepted from sidecar output.
 
 ## Scenarios
 

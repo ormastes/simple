@@ -90,14 +90,12 @@ goal as a runner failure.
 
 ## Current State
 
-The Linux Vulkan, macOS Metal, Windows D3D12, full HTML/CSS, and production
-GUI/Web parity lanes are no longer placeholders; they now read aggregate
-evidence and fail on real missing proof. One placeholder remains:
+The Linux Vulkan, macOS Metal, Windows D3D12, full HTML/CSS, production GUI/Web
+parity, and parallel-agent review lanes are no longer placeholders. They now
+read aggregate, plan, or platform evidence and fail on real missing proof.
 
-- Spark or fallback sidecar outputs plus normal/high-capability review.
-
-The audit must not silently pass while any of those TODO markers remain in the
-executable completion spec.
+The audit must not silently pass while any `TODO(gui-web-2d-completion)` marker
+remains in the executable completion spec.
 
 ## Evidence Contract
 
@@ -121,8 +119,8 @@ report text, or the absence of a recently generated report.
 ## Failure Semantics
 
 `status=fail` with `reason=completion-placeholders-remain` is the expected
-state while any platform or review lane is unfinished. `status=pass` means only
-that no completion placeholders remain; the full goal still requires
+state while any placeholder lane is still encoded as a TODO. `status=pass`
+means only that no completion placeholders remain; the full goal still requires
 `gui_web_2d_goal_completion_criteria_spec.spl` itself to pass.
 
 If the completion spec file is missing, the wrapper reports
@@ -147,42 +145,42 @@ decrease only when a lane becomes evidence-backed.
 
 ## Acceptance
 
-- The audit reports `completion-placeholders-remain` while unfinished lanes
-  still exist.
-- The current placeholder count is one.
+- The audit reports `pass` when no executable completion placeholders remain.
+- The current placeholder count is zero.
 - The audit identifies its assertion mode as `todo-placeholder-count`, not a
   runner workaround.
-- The evidence lists the parallel-agent review placeholder.
+- The remaining-placeholder evidence is empty.
 
 ## Scenarios
 
 ### GUI/Web/2D completion criteria placeholder audit
 
-#### fails closed and lists the one remaining completion placeholder
+#### passes the placeholder audit when no executable completion placeholders remain
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val root = "build/test-gui-web-2d-completion-criteria-placeholder-audit"
-val command = "rm -rf " + root + " && GUI_WEB_2D_COMPLETION_ALLOW_INCOMPLETE=1 BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-gui-web-2d-completion-criteria-placeholders.shs"
+val command = "rm -rf " + root + " && BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-gui-web-2d-completion-criteria-placeholders.shs"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(0)
 
 val evidence = file_read(root + "/out/evidence.env")
-expect(evidence).to_contain("gui_web_2d_completion_criteria_status=fail")
-expect(evidence).to_contain("gui_web_2d_completion_criteria_reason=completion-placeholders-remain")
-expect(evidence).to_contain("gui_web_2d_completion_criteria_todo_count=1")
+expect(evidence).to_contain("gui_web_2d_completion_criteria_status=pass")
+expect(evidence).to_contain("gui_web_2d_completion_criteria_reason=pass")
+expect(evidence).to_contain("gui_web_2d_completion_criteria_todo_count=0")
 expect(evidence).to_contain("gui_web_2d_completion_criteria_assertion_mode=todo-placeholder-count")
-expect(evidence).to_contain("recorded Spark/fallback sidecar outputs")
+expect(evidence).to_contain("gui_web_2d_completion_criteria_remaining_placeholders=")
 expect(evidence.contains("current Linux Vulkan evidence")).to_equal(false)
 expect(evidence.contains("macOS Metal readback")).to_equal(false)
 expect(evidence.contains("Windows D3D12/DXGI readback")).to_equal(false)
 expect(evidence.contains("strict full HTML/CSS goal assertions")).to_equal(false)
 expect(evidence.contains("production GUI/Web backend readback")).to_equal(false)
+expect(evidence.contains("recorded Spark/fallback sidecar outputs")).to_equal(false)
 expect(evidence.contains("script fails while any `TODO(gui-web-2d-completion)`")).to_equal(false)
 expect(evidence.contains("Replacing one of those")).to_equal(false)
 ```
