@@ -51,6 +51,66 @@ def rel_text_path(value: str) -> str:
         return rel(path)
     return value
 
+def path_from_text(value: str) -> Path:
+    path = Path(value)
+    if not path.is_absolute():
+        path = ROOT / path
+    return path
+
+def file_exists_status(value: str) -> str:
+    if not value:
+        return "unavailable"
+    return "pass" if path_from_text(value).is_file() else "missing"
+
+def status_reason(prefix: str, status: str, reason: str) -> str:
+    safe_status = status or "unavailable"
+    safe_reason = reason or "missing-reason"
+    return f"{prefix}-{safe_status}-{safe_reason}"
+
+def png_dimensions_status(value: str, expected_width: str, expected_height: str):
+    if not value:
+        return "", "", "unavailable"
+    path = path_from_text(value)
+    if not path.is_file():
+        return "", "", "missing"
+    try:
+        data = path.read_bytes()[:24]
+    except OSError:
+        return "", "", "unreadable"
+    if len(data) < 24 or data[:8] != b"\x89PNG\r\n\x1a\n" or data[12:16] != b"IHDR":
+        return "", "", "not-png"
+    width = int.from_bytes(data[16:20], "big")
+    height = int.from_bytes(data[20:24], "big")
+    status = "pass" if width == to_int(expected_width) and height == to_int(expected_height) else "fail"
+    return str(width), str(height), status
+
+def to_int(value: str) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+def viewport_match_status(path: str, width: str, height: str, expected_width: str, expected_height: str) -> str:
+    if not path and not width and not height:
+        return "unavailable"
+    if width == expected_width and height == expected_height:
+        return "pass"
+    return "fail"
+
+def nonblank_status(path: str, nonblank: str) -> str:
+    if to_int(nonblank) > 0:
+        return "pass"
+    if path:
+        return "fail"
+    return "unavailable"
+
+def pairwise_diff_status(status: str, mismatch_count: str) -> str:
+    if status == "pass" and mismatch_count == "0":
+        return "pass"
+    if status or mismatch_count:
+        return "fail"
+    return "unavailable"
+
 def file_magic_of(value: str) -> str:
     if not value:
         return ""
@@ -60,6 +120,45 @@ def file_magic_of(value: str) -> str:
     if not path.is_file():
         return ""
     return path.read_bytes()[:4].decode("latin1", errors="ignore")
+
+def env_text_from_path(path: Path) -> str:
+    return path.read_text(encoding="utf-8", errors="ignore") if path.exists() else ""
+
+def is_gui_web_2d_direct_run_env(text: str) -> bool:
+    mode = value_of("gui_web_2d_vulkan_mode", text)
+    if mode not in {"--run", "--renderdoc", "--renderdoc-simple"}:
+        return False
+    runtime_keys = [
+        "gui_web_2d_vulkan_electron_argb_status",
+        "gui_web_2d_vulkan_chrome_argb_status",
+        "gui_web_2d_vulkan_simple_argb_status",
+        "gui_web_2d_vulkan_chrome_bitmap_status",
+        "gui_web_2d_vulkan_simple_status",
+        "gui_web_2d_vulkan_electron_chrome_diff_status",
+        "gui_web_2d_vulkan_electron_simple_diff_status",
+        "gui_web_2d_vulkan_chrome_simple_diff_status",
+        "gui_web_2d_vulkan_renderdoc_simple_exit_code",
+        "gui_web_2d_vulkan_renderdoc_html_exit_code",
+        "gui_web_2d_vulkan_renderdoc_electron_exit_code",
+    ]
+    return any(value_of(key, text) for key in runtime_keys)
+
+def first_existing_direct_run_env(configured_value: str, candidates):
+    if configured_value:
+        path = Path(configured_value)
+        if not path.is_absolute():
+            path = ROOT / path
+        text = env_text_from_path(path)
+        if is_gui_web_2d_direct_run_env(text):
+            return path, text, "configured"
+        return path, text, "configured-not-direct-run"
+    for path in candidates:
+        if not path.is_absolute():
+            path = ROOT / path
+        text = env_text_from_path(path)
+        if is_gui_web_2d_direct_run_env(text):
+            return path, text, "auto-existing"
+    return None, "", "missing"
 
 widget_kind_path = ROOT / "src/lib/common/ui/widget_kind.spl"
 html_widgets_path = ROOT / "src/app/ui.render/html_widgets.spl"
@@ -170,12 +269,24 @@ if Path("scripts/check/check-html-css-sspec-traceability.shs").exists():
     traceability_css_count = value_of("html_css_sspec_traceability_css_property_count", traceability_env)
     traceability_required_css_min_count = value_of("html_css_sspec_traceability_required_css_property_min_count", traceability_env)
     traceability_implemented_css_count = value_of("html_css_sspec_traceability_implemented_css_property_count", traceability_env)
+    traceability_implemented_css_indexed_count = value_of("html_css_sspec_traceability_implemented_css_property_indexed_count", traceability_env)
+    traceability_unsupported_css_count = value_of("html_css_sspec_traceability_unsupported_css_property_count", traceability_env)
+    traceability_unsupported_css_properties = value_of("html_css_sspec_traceability_unsupported_css_properties", traceability_env)
+    traceability_unsupported_css_missing_count = value_of("html_css_sspec_traceability_unsupported_css_property_missing_count", traceability_env)
+    traceability_implemented_css_subset_spec = value_of("html_css_sspec_traceability_implemented_css_subset_spec", traceability_env)
+    traceability_unsupported_css_inventory_spec = value_of("html_css_sspec_traceability_unsupported_css_inventory_spec", traceability_env)
 else:
     traceability_html_count = ""
     traceability_required_html_count = ""
     traceability_css_count = ""
     traceability_required_css_min_count = ""
     traceability_implemented_css_count = ""
+    traceability_implemented_css_indexed_count = ""
+    traceability_unsupported_css_count = ""
+    traceability_unsupported_css_properties = ""
+    traceability_unsupported_css_missing_count = ""
+    traceability_implemented_css_subset_spec = ""
+    traceability_unsupported_css_inventory_spec = ""
 if not traceability_status:
     traceability_status = "fail"
 if not traceability_reason:
@@ -244,8 +355,25 @@ gui_web_2d_vulkan_env = (
     if gui_web_2d_vulkan_env_path.exists()
     else gui_web_2d_vulkan_output
 )
+gui_web_2d_vulkan_direct_run_candidates = [
+    ROOT / "build/gui-web-2d-vulkan-env-run-auto/evidence.env",
+    ROOT / "build/gui-web-2d-vulkan-env-run-fresh/evidence.env",
+    ROOT / "build/gui-web-2d-vulkan-env-latest/evidence.env",
+    ROOT / "build/gui-web-2d-vulkan-env-post-rebase/evidence.env",
+    ROOT / "build/gui-web-2d-vulkan-env-run/evidence.env",
+]
+gui_web_2d_vulkan_direct_run_env_path, gui_web_2d_vulkan_direct_run_env, gui_web_2d_vulkan_direct_run_source = first_existing_direct_run_env(
+    os.environ.get("GUI_WEB_2D_VULKAN_RUN_EVIDENCE_ENV", os.environ.get("GUI_WEB_2D_VULKAN_RUN_ENV", "")),
+    gui_web_2d_vulkan_direct_run_candidates,
+)
+gui_web_2d_vulkan_runtime_env = gui_web_2d_vulkan_direct_run_env if is_gui_web_2d_direct_run_env(gui_web_2d_vulkan_direct_run_env) else gui_web_2d_vulkan_env
+gui_web_2d_vulkan_direct_run_evidence_env = rel(gui_web_2d_vulkan_direct_run_env_path) if gui_web_2d_vulkan_direct_run_env_path else ""
+gui_web_2d_vulkan_direct_run_mode = value_of("gui_web_2d_vulkan_mode", gui_web_2d_vulkan_direct_run_env)
 gui_web_2d_vulkan_mode = value_of("gui_web_2d_vulkan_mode", gui_web_2d_vulkan_env)
 gui_web_2d_vulkan_evidence_env = value_of("gui_web_2d_vulkan_evidence_env", gui_web_2d_vulkan_env) or rel(gui_web_2d_vulkan_env_path)
+gui_web_2d_vulkan_html_path = value_of("gui_web_2d_vulkan_html_path", gui_web_2d_vulkan_runtime_env) or value_of("gui_web_2d_vulkan_html_path", gui_web_2d_vulkan_env)
+gui_web_2d_vulkan_width = value_of("gui_web_2d_vulkan_width", gui_web_2d_vulkan_runtime_env) or value_of("gui_web_2d_vulkan_width", gui_web_2d_vulkan_env)
+gui_web_2d_vulkan_height = value_of("gui_web_2d_vulkan_height", gui_web_2d_vulkan_runtime_env) or value_of("gui_web_2d_vulkan_height", gui_web_2d_vulkan_env)
 gui_web_2d_vulkan_uname_s = value_of("gui_web_2d_vulkan_uname_s", gui_web_2d_vulkan_env)
 gui_web_2d_vulkan_uname_m = value_of("gui_web_2d_vulkan_uname_m", gui_web_2d_vulkan_env)
 gui_web_2d_vulkan_loader_status = value_of("gui_web_2d_vulkan_loader_status", gui_web_2d_vulkan_env)
@@ -253,6 +381,14 @@ gui_web_2d_vulkan_device = value_of("gui_web_2d_vulkan_device", gui_web_2d_vulka
 gui_web_2d_vulkan_driver = value_of("gui_web_2d_vulkan_driver", gui_web_2d_vulkan_env)
 gui_web_2d_vulkan_chrome = value_of("gui_web_2d_vulkan_chrome", gui_web_2d_vulkan_env)
 gui_web_2d_vulkan_electron = value_of("gui_web_2d_vulkan_electron", gui_web_2d_vulkan_env)
+gui_web_2d_vulkan_electron_requested_api = value_of("gui_web_2d_vulkan_electron_requested_api", gui_web_2d_vulkan_runtime_env) or value_of("gui_web_2d_vulkan_electron_requested_api", gui_web_2d_vulkan_env) or "vulkan"
+gui_web_2d_vulkan_electron_requested_angle = value_of("gui_web_2d_vulkan_electron_requested_angle", gui_web_2d_vulkan_runtime_env) or value_of("gui_web_2d_vulkan_electron_requested_angle", gui_web_2d_vulkan_env) or "vulkan"
+gui_web_2d_vulkan_electron_requested_features = value_of("gui_web_2d_vulkan_electron_requested_features", gui_web_2d_vulkan_runtime_env) or value_of("gui_web_2d_vulkan_electron_requested_features", gui_web_2d_vulkan_env) or "Vulkan"
+gui_web_2d_vulkan_electron_launch_flags = value_of("gui_web_2d_vulkan_electron_launch_flags", gui_web_2d_vulkan_runtime_env) or value_of("gui_web_2d_vulkan_electron_launch_flags", gui_web_2d_vulkan_env) or "--no-sandbox --disable-gpu-sandbox --enable-features=Vulkan --use-angle=vulkan"
+gui_web_2d_vulkan_chrome_requested_api = value_of("gui_web_2d_vulkan_chrome_requested_api", gui_web_2d_vulkan_runtime_env) or value_of("gui_web_2d_vulkan_chrome_requested_api", gui_web_2d_vulkan_env) or "vulkan"
+gui_web_2d_vulkan_chrome_requested_angle = value_of("gui_web_2d_vulkan_chrome_requested_angle", gui_web_2d_vulkan_runtime_env) or value_of("gui_web_2d_vulkan_chrome_requested_angle", gui_web_2d_vulkan_env) or "vulkan"
+gui_web_2d_vulkan_chrome_requested_features = value_of("gui_web_2d_vulkan_chrome_requested_features", gui_web_2d_vulkan_runtime_env) or value_of("gui_web_2d_vulkan_chrome_requested_features", gui_web_2d_vulkan_env) or "Vulkan"
+gui_web_2d_vulkan_chrome_launch_flags = value_of("gui_web_2d_vulkan_chrome_launch_flags", gui_web_2d_vulkan_runtime_env) or value_of("gui_web_2d_vulkan_chrome_launch_flags", gui_web_2d_vulkan_env) or "--no-sandbox --disable-gpu-sandbox --disable-dev-shm-usage --enable-features=Vulkan --use-angle=vulkan"
 gui_web_2d_vulkan_simple_bin = value_of("gui_web_2d_vulkan_simple_bin", gui_web_2d_vulkan_env)
 gui_web_2d_vulkan_simple_bin_selection_reason = value_of("gui_web_2d_vulkan_simple_bin_selection_reason", gui_web_2d_vulkan_env)
 gui_web_2d_vulkan_renderdoc_status = value_of("gui_web_2d_vulkan_renderdoc_status", gui_web_2d_vulkan_env)
@@ -265,20 +401,163 @@ gui_web_2d_vulkan_renderdoc_macos_homebrew_package_status = value_of("gui_web_2d
 gui_web_2d_vulkan_renderdoc_macos_upstream_support_status = value_of("gui_web_2d_vulkan_renderdoc_macos_upstream_support_status", gui_web_2d_vulkan_env)
 gui_web_2d_vulkan_renderdoc_setup_macos_homebrew_package_status = value_of("gui_web_2d_vulkan_renderdoc_setup_macos_homebrew_package_status", gui_web_2d_vulkan_env)
 gui_web_2d_vulkan_renderdoc_setup_macos_upstream_support_status = value_of("gui_web_2d_vulkan_renderdoc_setup_macos_upstream_support_status", gui_web_2d_vulkan_env)
-gui_web_2d_vulkan_electron_argb_status = value_of("gui_web_2d_vulkan_electron_argb_status", gui_web_2d_vulkan_env)
-gui_web_2d_vulkan_electron_argb_nonblank = value_of("gui_web_2d_vulkan_electron_argb_nonblank_pixel_count", gui_web_2d_vulkan_env)
-gui_web_2d_vulkan_electron_vulkan_status = value_of("gui_web_2d_vulkan_electron_vulkan_status", gui_web_2d_vulkan_env)
-gui_web_2d_vulkan_electron_vulkan_reason = value_of("gui_web_2d_vulkan_electron_vulkan_reason", gui_web_2d_vulkan_env)
-gui_web_2d_vulkan_chrome_bitmap_status = value_of("gui_web_2d_vulkan_chrome_bitmap_status", gui_web_2d_vulkan_env)
-gui_web_2d_vulkan_chrome_vulkan_status = value_of("gui_web_2d_vulkan_chrome_vulkan_status", gui_web_2d_vulkan_env)
-gui_web_2d_vulkan_chrome_vulkan_reason = value_of("gui_web_2d_vulkan_chrome_vulkan_reason", gui_web_2d_vulkan_env)
-gui_web_2d_vulkan_simple_status = value_of("gui_web_2d_vulkan_simple_status", gui_web_2d_vulkan_env)
-gui_web_2d_vulkan_simple_reason = value_of("gui_web_2d_vulkan_simple_reason", gui_web_2d_vulkan_env)
-gui_web_2d_vulkan_simple_probe_status = value_of("gui_web_2d_vulkan_simple_probe_status", gui_web_2d_vulkan_env)
-gui_web_2d_vulkan_simple_backend_name = value_of("gui_web_2d_vulkan_simple_backend_name", gui_web_2d_vulkan_env)
-gui_web_2d_vulkan_renderdoc_simple_exit_code = value_of("gui_web_2d_vulkan_renderdoc_simple_exit_code", gui_web_2d_vulkan_env)
-gui_web_2d_vulkan_renderdoc_html_exit_code = value_of("gui_web_2d_vulkan_renderdoc_html_exit_code", gui_web_2d_vulkan_env)
-gui_web_2d_vulkan_renderdoc_electron_exit_code = value_of("gui_web_2d_vulkan_renderdoc_electron_exit_code", gui_web_2d_vulkan_env)
+gui_web_2d_vulkan_electron_argb_status = value_of("gui_web_2d_vulkan_electron_argb_status", gui_web_2d_vulkan_runtime_env)
+gui_web_2d_vulkan_electron_argb_path = value_of("gui_web_2d_vulkan_electron_argb_path", gui_web_2d_vulkan_runtime_env)
+gui_web_2d_vulkan_electron_argb_width = value_of("gui_web_2d_vulkan_electron_argb_width", gui_web_2d_vulkan_runtime_env)
+gui_web_2d_vulkan_electron_argb_height = value_of("gui_web_2d_vulkan_electron_argb_height", gui_web_2d_vulkan_runtime_env)
+gui_web_2d_vulkan_electron_argb_nonblank = value_of("gui_web_2d_vulkan_electron_argb_nonblank_pixel_count", gui_web_2d_vulkan_runtime_env)
+gui_web_2d_vulkan_electron_argb_checksum = value_of("gui_web_2d_vulkan_electron_argb_checksum", gui_web_2d_vulkan_runtime_env)
+gui_web_2d_vulkan_electron_argb_weighted_checksum = value_of("gui_web_2d_vulkan_electron_argb_weighted_checksum", gui_web_2d_vulkan_runtime_env)
+gui_web_2d_vulkan_electron_vulkan_status = value_of("gui_web_2d_vulkan_electron_vulkan_status", gui_web_2d_vulkan_runtime_env)
+gui_web_2d_vulkan_electron_vulkan_reason = value_of("gui_web_2d_vulkan_electron_vulkan_reason", gui_web_2d_vulkan_runtime_env)
+gui_web_2d_vulkan_chrome_bitmap_status = value_of("gui_web_2d_vulkan_chrome_bitmap_status", gui_web_2d_vulkan_runtime_env)
+gui_web_2d_vulkan_chrome_screenshot = value_of("gui_web_2d_vulkan_chrome_screenshot", gui_web_2d_vulkan_runtime_env)
+gui_web_2d_vulkan_chrome_argb_status = value_of("gui_web_2d_vulkan_chrome_argb_status", gui_web_2d_vulkan_runtime_env)
+gui_web_2d_vulkan_chrome_argb_path = value_of("gui_web_2d_vulkan_chrome_argb_path", gui_web_2d_vulkan_runtime_env)
+gui_web_2d_vulkan_chrome_argb_width = value_of("gui_web_2d_vulkan_chrome_argb_width", gui_web_2d_vulkan_runtime_env)
+gui_web_2d_vulkan_chrome_argb_height = value_of("gui_web_2d_vulkan_chrome_argb_height", gui_web_2d_vulkan_runtime_env)
+gui_web_2d_vulkan_chrome_argb_nonblank = value_of("gui_web_2d_vulkan_chrome_argb_nonblank_pixel_count", gui_web_2d_vulkan_runtime_env)
+gui_web_2d_vulkan_chrome_argb_checksum = value_of("gui_web_2d_vulkan_chrome_argb_checksum", gui_web_2d_vulkan_runtime_env)
+gui_web_2d_vulkan_chrome_argb_weighted_checksum = value_of("gui_web_2d_vulkan_chrome_argb_weighted_checksum", gui_web_2d_vulkan_runtime_env)
+gui_web_2d_vulkan_chrome_vulkan_status = value_of("gui_web_2d_vulkan_chrome_vulkan_status", gui_web_2d_vulkan_runtime_env)
+gui_web_2d_vulkan_chrome_vulkan_reason = value_of("gui_web_2d_vulkan_chrome_vulkan_reason", gui_web_2d_vulkan_runtime_env)
+gui_web_2d_vulkan_simple_status = value_of("gui_web_2d_vulkan_simple_status", gui_web_2d_vulkan_runtime_env)
+gui_web_2d_vulkan_simple_reason = value_of("gui_web_2d_vulkan_simple_reason", gui_web_2d_vulkan_runtime_env)
+gui_web_2d_vulkan_simple_evidence_env = value_of("gui_web_2d_vulkan_simple_evidence_env", gui_web_2d_vulkan_runtime_env)
+gui_web_2d_vulkan_simple_probe_status = value_of("gui_web_2d_vulkan_simple_probe_status", gui_web_2d_vulkan_runtime_env)
+gui_web_2d_vulkan_simple_backend_name = value_of("gui_web_2d_vulkan_simple_backend_name", gui_web_2d_vulkan_runtime_env)
+gui_web_2d_vulkan_simple_argb_status = value_of("gui_web_2d_vulkan_simple_argb_status", gui_web_2d_vulkan_runtime_env)
+gui_web_2d_vulkan_simple_argb_path = value_of("gui_web_2d_vulkan_simple_argb_path", gui_web_2d_vulkan_runtime_env)
+gui_web_2d_vulkan_simple_argb_width = value_of("gui_web_2d_vulkan_simple_argb_width", gui_web_2d_vulkan_runtime_env)
+gui_web_2d_vulkan_simple_argb_height = value_of("gui_web_2d_vulkan_simple_argb_height", gui_web_2d_vulkan_runtime_env)
+gui_web_2d_vulkan_simple_argb_nonblank = value_of("gui_web_2d_vulkan_simple_argb_nonblank_pixel_count", gui_web_2d_vulkan_runtime_env)
+gui_web_2d_vulkan_simple_argb_checksum = value_of("gui_web_2d_vulkan_simple_argb_checksum", gui_web_2d_vulkan_runtime_env)
+gui_web_2d_vulkan_simple_argb_weighted_checksum = value_of("gui_web_2d_vulkan_simple_argb_weighted_checksum", gui_web_2d_vulkan_runtime_env)
+gui_web_2d_vulkan_electron_chrome_diff_status = value_of("gui_web_2d_vulkan_electron_chrome_diff_status", gui_web_2d_vulkan_runtime_env)
+gui_web_2d_vulkan_electron_chrome_diff_reason = value_of("gui_web_2d_vulkan_electron_chrome_diff_reason", gui_web_2d_vulkan_runtime_env)
+gui_web_2d_vulkan_electron_chrome_mismatch_count = value_of("gui_web_2d_vulkan_electron_chrome_mismatch_count", gui_web_2d_vulkan_runtime_env)
+gui_web_2d_vulkan_electron_chrome_diff_path = value_of("gui_web_2d_vulkan_electron_chrome_diff_path", gui_web_2d_vulkan_runtime_env)
+gui_web_2d_vulkan_electron_simple_diff_status = value_of("gui_web_2d_vulkan_electron_simple_diff_status", gui_web_2d_vulkan_runtime_env)
+gui_web_2d_vulkan_electron_simple_diff_reason = value_of("gui_web_2d_vulkan_electron_simple_diff_reason", gui_web_2d_vulkan_runtime_env)
+gui_web_2d_vulkan_electron_simple_mismatch_count = value_of("gui_web_2d_vulkan_electron_simple_mismatch_count", gui_web_2d_vulkan_runtime_env)
+gui_web_2d_vulkan_electron_simple_diff_path = value_of("gui_web_2d_vulkan_electron_simple_diff_path", gui_web_2d_vulkan_runtime_env)
+gui_web_2d_vulkan_chrome_simple_diff_status = value_of("gui_web_2d_vulkan_chrome_simple_diff_status", gui_web_2d_vulkan_runtime_env)
+gui_web_2d_vulkan_chrome_simple_diff_reason = value_of("gui_web_2d_vulkan_chrome_simple_diff_reason", gui_web_2d_vulkan_runtime_env)
+gui_web_2d_vulkan_chrome_simple_mismatch_count = value_of("gui_web_2d_vulkan_chrome_simple_mismatch_count", gui_web_2d_vulkan_runtime_env)
+gui_web_2d_vulkan_chrome_simple_diff_path = value_of("gui_web_2d_vulkan_chrome_simple_diff_path", gui_web_2d_vulkan_runtime_env)
+gui_web_2d_vulkan_renderdoc_simple_exit_code = value_of("gui_web_2d_vulkan_renderdoc_simple_exit_code", gui_web_2d_vulkan_runtime_env)
+gui_web_2d_vulkan_renderdoc_html_exit_code = value_of("gui_web_2d_vulkan_renderdoc_html_exit_code", gui_web_2d_vulkan_runtime_env)
+gui_web_2d_vulkan_renderdoc_electron_exit_code = value_of("gui_web_2d_vulkan_renderdoc_electron_exit_code", gui_web_2d_vulkan_runtime_env)
+gui_web_2d_vulkan_comparison_fixture_status = "pass" if (
+    gui_web_2d_vulkan_html_path.endswith("test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html")
+    and to_int(gui_web_2d_vulkan_width) > 0
+    and to_int(gui_web_2d_vulkan_height) > 0
+) else "incomplete"
+gui_web_2d_vulkan_electron_argb_viewport_match_status = viewport_match_status(
+    gui_web_2d_vulkan_electron_argb_path,
+    gui_web_2d_vulkan_electron_argb_width,
+    gui_web_2d_vulkan_electron_argb_height,
+    gui_web_2d_vulkan_width,
+    gui_web_2d_vulkan_height,
+)
+gui_web_2d_vulkan_electron_argb_file_status = file_exists_status(gui_web_2d_vulkan_electron_argb_path)
+gui_web_2d_vulkan_electron_argb_nonblank_status = nonblank_status(gui_web_2d_vulkan_electron_argb_path, gui_web_2d_vulkan_electron_argb_nonblank)
+gui_web_2d_vulkan_chrome_screenshot_file_status = file_exists_status(gui_web_2d_vulkan_chrome_screenshot)
+gui_web_2d_vulkan_chrome_screenshot_png_width, gui_web_2d_vulkan_chrome_screenshot_png_height, gui_web_2d_vulkan_chrome_screenshot_png_status = png_dimensions_status(
+    gui_web_2d_vulkan_chrome_screenshot,
+    gui_web_2d_vulkan_width,
+    gui_web_2d_vulkan_height,
+)
+gui_web_2d_vulkan_chrome_argb_file_status = file_exists_status(gui_web_2d_vulkan_chrome_argb_path)
+gui_web_2d_vulkan_chrome_argb_viewport_match_status = viewport_match_status(
+    gui_web_2d_vulkan_chrome_argb_path,
+    gui_web_2d_vulkan_chrome_argb_width,
+    gui_web_2d_vulkan_chrome_argb_height,
+    gui_web_2d_vulkan_width,
+    gui_web_2d_vulkan_height,
+)
+gui_web_2d_vulkan_chrome_argb_nonblank_status = nonblank_status(gui_web_2d_vulkan_chrome_argb_path, gui_web_2d_vulkan_chrome_argb_nonblank)
+gui_web_2d_vulkan_simple_evidence_file_status = file_exists_status(gui_web_2d_vulkan_simple_evidence_env)
+gui_web_2d_vulkan_simple_backend_status = "pass" if (
+    gui_web_2d_vulkan_simple_evidence_file_status == "pass"
+    and gui_web_2d_vulkan_simple_status == "pass"
+    and gui_web_2d_vulkan_simple_probe_status == "Initialized"
+    and gui_web_2d_vulkan_simple_backend_name == "vulkan"
+) else ("unavailable" if not gui_web_2d_vulkan_simple_evidence_env else "fail")
+gui_web_2d_vulkan_simple_argb_file_status = file_exists_status(gui_web_2d_vulkan_simple_argb_path)
+gui_web_2d_vulkan_simple_argb_viewport_match_status = viewport_match_status(
+    gui_web_2d_vulkan_simple_argb_path,
+    gui_web_2d_vulkan_simple_argb_width,
+    gui_web_2d_vulkan_simple_argb_height,
+    gui_web_2d_vulkan_width,
+    gui_web_2d_vulkan_height,
+)
+gui_web_2d_vulkan_simple_argb_nonblank_status = nonblank_status(gui_web_2d_vulkan_simple_argb_path, gui_web_2d_vulkan_simple_argb_nonblank)
+gui_web_2d_vulkan_electron_chrome_pairwise_diff_status = pairwise_diff_status(
+    gui_web_2d_vulkan_electron_chrome_diff_status,
+    gui_web_2d_vulkan_electron_chrome_mismatch_count,
+)
+gui_web_2d_vulkan_electron_simple_pairwise_diff_status = pairwise_diff_status(
+    gui_web_2d_vulkan_electron_simple_diff_status,
+    gui_web_2d_vulkan_electron_simple_mismatch_count,
+)
+gui_web_2d_vulkan_chrome_simple_pairwise_diff_status = pairwise_diff_status(
+    gui_web_2d_vulkan_chrome_simple_diff_status,
+    gui_web_2d_vulkan_chrome_simple_mismatch_count,
+)
+comparison_artifact_reasons = []
+if gui_web_2d_vulkan_comparison_fixture_status != "pass":
+    comparison_artifact_reasons.append("fixture-or-viewport-missing")
+if gui_web_2d_vulkan_electron_argb_file_status != "pass":
+    comparison_artifact_reasons.append("electron-argb-file-" + gui_web_2d_vulkan_electron_argb_file_status)
+if gui_web_2d_vulkan_electron_argb_viewport_match_status != "pass":
+    comparison_artifact_reasons.append("electron-argb-viewport-" + gui_web_2d_vulkan_electron_argb_viewport_match_status)
+if gui_web_2d_vulkan_electron_argb_nonblank_status != "pass":
+    comparison_artifact_reasons.append("electron-argb-nonblank-" + gui_web_2d_vulkan_electron_argb_nonblank_status)
+if gui_web_2d_vulkan_chrome_screenshot_file_status != "pass":
+    comparison_artifact_reasons.append("chrome-screenshot-" + gui_web_2d_vulkan_chrome_screenshot_file_status)
+if gui_web_2d_vulkan_chrome_screenshot_png_status != "pass":
+    comparison_artifact_reasons.append("chrome-screenshot-png-" + gui_web_2d_vulkan_chrome_screenshot_png_status)
+if gui_web_2d_vulkan_simple_evidence_file_status != "pass":
+    comparison_artifact_reasons.append("simple-evidence-" + gui_web_2d_vulkan_simple_evidence_file_status)
+if gui_web_2d_vulkan_simple_backend_status != "pass":
+    comparison_artifact_reasons.append("simple-backend-" + gui_web_2d_vulkan_simple_backend_status)
+gui_web_2d_vulkan_comparison_artifact_status = "pass" if not comparison_artifact_reasons else "incomplete"
+gui_web_2d_vulkan_comparison_artifact_reason = "pass" if not comparison_artifact_reasons else ";".join(comparison_artifact_reasons)
+
+pixel_comparison_reasons = []
+if gui_web_2d_vulkan_comparison_artifact_status != "pass":
+    pixel_comparison_reasons.append("comparison-artifacts-" + gui_web_2d_vulkan_comparison_artifact_status)
+if gui_web_2d_vulkan_chrome_argb_file_status != "pass":
+    pixel_comparison_reasons.append("chrome-argb-file-" + gui_web_2d_vulkan_chrome_argb_file_status)
+if gui_web_2d_vulkan_chrome_argb_viewport_match_status != "pass":
+    pixel_comparison_reasons.append("chrome-argb-viewport-" + gui_web_2d_vulkan_chrome_argb_viewport_match_status)
+if gui_web_2d_vulkan_chrome_argb_nonblank_status != "pass":
+    pixel_comparison_reasons.append("chrome-argb-nonblank-" + gui_web_2d_vulkan_chrome_argb_nonblank_status)
+if gui_web_2d_vulkan_simple_argb_file_status != "pass":
+    pixel_comparison_reasons.append("simple-argb-file-" + gui_web_2d_vulkan_simple_argb_file_status)
+if gui_web_2d_vulkan_simple_argb_viewport_match_status != "pass":
+    pixel_comparison_reasons.append("simple-argb-viewport-" + gui_web_2d_vulkan_simple_argb_viewport_match_status)
+if gui_web_2d_vulkan_simple_argb_nonblank_status != "pass":
+    pixel_comparison_reasons.append("simple-argb-nonblank-" + gui_web_2d_vulkan_simple_argb_nonblank_status)
+if gui_web_2d_vulkan_electron_chrome_pairwise_diff_status != "pass":
+    pixel_comparison_reasons.append("electron-chrome-diff-" + gui_web_2d_vulkan_electron_chrome_pairwise_diff_status)
+if gui_web_2d_vulkan_electron_simple_pairwise_diff_status != "pass":
+    pixel_comparison_reasons.append("electron-simple-diff-" + gui_web_2d_vulkan_electron_simple_pairwise_diff_status)
+if gui_web_2d_vulkan_chrome_simple_pairwise_diff_status != "pass":
+    pixel_comparison_reasons.append("chrome-simple-diff-" + gui_web_2d_vulkan_chrome_simple_pairwise_diff_status)
+pixel_comparison_pairwise_statuses = [
+    gui_web_2d_vulkan_electron_chrome_pairwise_diff_status,
+    gui_web_2d_vulkan_electron_simple_pairwise_diff_status,
+    gui_web_2d_vulkan_chrome_simple_pairwise_diff_status,
+]
+gui_web_2d_vulkan_pixel_comparison_status = "pass" if not pixel_comparison_reasons else ("fail" if "fail" in pixel_comparison_pairwise_statuses else "incomplete")
+gui_web_2d_vulkan_pixel_comparison_reason = "pass" if not pixel_comparison_reasons else ";".join(pixel_comparison_reasons)
+gui_web_2d_vulkan_pixel_comparison_mode = (
+    "pairwise-argb-diff"
+    if not pixel_comparison_reasons
+    else ("pairwise-argb-diff-mismatch" if "fail" in pixel_comparison_pairwise_statuses else "artifact-only-no-pairwise-diff")
+)
 
 goal_output = ""
 goal_code = 127
@@ -537,6 +816,10 @@ electron_gate_launch_flags = value_of("rdoc_electron_html_gate_launch_flags", el
 electron_gate_log = value_of("rdoc_electron_html_gate_log", electron_gate_output)
 electron_gate_vulkan_log_status = value_of("rdoc_electron_html_gate_vulkan_log_status", electron_gate_output)
 electron_gate_vulkan_log_reason = value_of("rdoc_electron_html_gate_vulkan_log_reason", electron_gate_output)
+electron_gate_gpu_process_exit_status = value_of("rdoc_electron_html_gate_gpu_process_exit_status", electron_gate_output)
+electron_gate_gpu_process_exit_count = value_of("rdoc_electron_html_gate_gpu_process_exit_count", electron_gate_output)
+electron_gate_gpu_process_exit_codes = value_of("rdoc_electron_html_gate_gpu_process_exit_codes", electron_gate_output)
+electron_gate_gpu_process_exit_reason = value_of("rdoc_electron_html_gate_gpu_process_exit_reason", electron_gate_output)
 electron_gate_required_backend = value_of("rdoc_electron_html_gate_required_backend", electron_gate_output)
 electron_gate_required_scene = value_of("rdoc_electron_html_gate_required_scene", electron_gate_output)
 electron_gate_required_status = value_of("rdoc_electron_html_gate_required_status", electron_gate_output)
@@ -571,10 +854,19 @@ rendering_manifest_fixture = value_of("html_css_rendering_manifest_traceability_
 rendering_manifest_tag_source = value_of("html_css_rendering_manifest_traceability_tag_source", rendering_manifest_output)
 rendering_manifest_html_tag_count = value_of("html_css_rendering_manifest_traceability_html_tag_count", rendering_manifest_output)
 rendering_manifest_html_tag_covered_count = value_of("html_css_rendering_manifest_traceability_html_tag_covered_count", rendering_manifest_output)
+rendering_manifest_html_tag_covered = value_of("html_css_rendering_manifest_traceability_html_tag_covered", rendering_manifest_output)
 rendering_manifest_html_tag_missing = value_of("html_css_rendering_manifest_traceability_html_tag_missing", rendering_manifest_output)
 rendering_manifest_css_property_count = value_of("html_css_rendering_manifest_traceability_css_property_count", rendering_manifest_output)
 rendering_manifest_css_property_covered_count = value_of("html_css_rendering_manifest_traceability_css_property_covered_count", rendering_manifest_output)
+rendering_manifest_css_property_covered = value_of("html_css_rendering_manifest_traceability_css_property_covered", rendering_manifest_output)
 rendering_manifest_css_property_missing = value_of("html_css_rendering_manifest_traceability_css_property_missing", rendering_manifest_output)
+rendering_manifest_css_property_scope = "implemented-simple-web-css"
+rendering_manifest_total_css_property_count = traceability_css_count
+rendering_manifest_unrendered_spec_css_property_count = max(
+    0,
+    to_int(traceability_css_count) - to_int(rendering_manifest_css_property_covered_count),
+)
+rendering_manifest_unrendered_spec_css_properties = traceability_unsupported_css_properties
 rendering_manifest_case_count = value_of("html_css_rendering_manifest_traceability_manifest_case_count", rendering_manifest_output)
 rendering_manifest_required_case_count = value_of("html_css_rendering_manifest_traceability_required_manifest_case_count", rendering_manifest_output)
 rendering_manifest_fixture_scene_count = value_of("html_css_rendering_manifest_traceability_fixture_scene_count", rendering_manifest_output)
@@ -588,16 +880,23 @@ widget_fixture_spec_count = value_of("gui_widget_rendering_fixture_coverage_spec
 widget_fixture_render_fixture_count = value_of("gui_widget_rendering_fixture_coverage_render_fixture_covered_count", widget_fixture_output)
 widget_fixture_renderdoc_fixture_source = value_of("gui_widget_rendering_fixture_coverage_renderdoc_fixture_source", widget_fixture_output)
 widget_fixture_renderdoc_fixture_count = value_of("gui_widget_rendering_fixture_coverage_renderdoc_fixture_covered_count", widget_fixture_output)
+widget_fixture_renderdoc_fixture_feature_count = value_of("gui_widget_rendering_fixture_coverage_renderdoc_fixture_feature_covered_count", widget_fixture_output)
 widget_fixture_missing_dispatch = value_of("gui_widget_rendering_fixture_coverage_missing_dispatch_widgets", widget_fixture_output)
 widget_fixture_missing_classes = value_of("gui_widget_rendering_fixture_coverage_missing_renderer_classes", widget_fixture_output)
 widget_fixture_missing_specs = value_of("gui_widget_rendering_fixture_coverage_missing_spec_widgets", widget_fixture_output)
 widget_fixture_missing_render_fixtures = value_of("gui_widget_rendering_fixture_coverage_missing_render_fixture_widgets", widget_fixture_output)
 widget_fixture_missing_renderdoc_fixtures = value_of("gui_widget_rendering_fixture_coverage_missing_renderdoc_fixture_widgets", widget_fixture_output)
+widget_fixture_missing_renderdoc_fixture_features = value_of("gui_widget_rendering_fixture_coverage_missing_renderdoc_fixture_features", widget_fixture_output)
 widget_fixture_expected_classes = value_of("gui_widget_rendering_fixture_coverage_expected_classes", widget_fixture_output)
+widget_fixture_expected_renderdoc_fixture_features = value_of("gui_widget_rendering_fixture_coverage_expected_renderdoc_fixture_features", widget_fixture_output)
 widget_fixture_spec_sources = value_of("gui_widget_rendering_fixture_coverage_spec_sources", widget_fixture_output)
 widget_fixture_covered_widgets = value_of("gui_widget_rendering_fixture_coverage_covered_widgets", widget_fixture_output)
+widget_fixture_spec_widget_classes = value_of("gui_widget_rendering_fixture_coverage_spec_widget_classes", widget_fixture_output)
 widget_fixture_render_fixture_widgets = value_of("gui_widget_rendering_fixture_coverage_render_fixture_widgets", widget_fixture_output)
+widget_fixture_render_fixture_widget_classes = value_of("gui_widget_rendering_fixture_coverage_render_fixture_widget_classes", widget_fixture_output)
 widget_fixture_renderdoc_fixture_widgets = value_of("gui_widget_rendering_fixture_coverage_renderdoc_fixture_widgets", widget_fixture_output)
+widget_fixture_renderdoc_fixture_widget_classes = value_of("gui_widget_rendering_fixture_coverage_renderdoc_fixture_widget_classes", widget_fixture_output)
+widget_fixture_renderdoc_fixture_widget_features = value_of("gui_widget_rendering_fixture_coverage_renderdoc_fixture_widget_features", widget_fixture_output)
 simple_status = value_of("simple_renderdoc_status", goal_output)
 simple_reason = value_of("simple_renderdoc_reason", goal_output)
 simple_evidence_env = value_of("simple_renderdoc_evidence_env", goal_output)
@@ -673,6 +972,47 @@ macos_html_gate_status = value_of("macos_portability_html_gate_status", goal_out
 macos_capture_electron_status = value_of("macos_portability_capture_electron_status", goal_output)
 macos_electron_gate_status = value_of("macos_portability_electron_gate_status", goal_output)
 
+browser_backing_reasons = []
+if gui_web_2d_vulkan_electron_vulkan_status != "pass":
+    browser_backing_reasons.append(status_reason("electron-vulkan", gui_web_2d_vulkan_electron_vulkan_status, gui_web_2d_vulkan_electron_vulkan_reason))
+if gui_web_2d_vulkan_chrome_vulkan_status != "pass":
+    browser_backing_reasons.append(status_reason("chrome-vulkan", gui_web_2d_vulkan_chrome_vulkan_status, gui_web_2d_vulkan_chrome_vulkan_reason))
+if electron_gate_status != "pass":
+    browser_backing_reasons.append(status_reason("electron-renderdoc", electron_gate_status, electron_gate_reason))
+if external_gate_status != "pass":
+    browser_backing_reasons.append(status_reason("chrome-renderdoc", external_gate_status, external_gate_reason))
+gui_web_2d_vulkan_browser_backing_status = "pass" if not browser_backing_reasons else "fail"
+gui_web_2d_vulkan_browser_backing_reason = "pass" if not browser_backing_reasons else ";".join(browser_backing_reasons)
+gui_web_2d_vulkan_browser_backing_mode = "vulkan-backed-renderdoc" if not browser_backing_reasons else "fallback-bitmap-comparison"
+
+renderdoc_blocker_gates = []
+if macos_uname_s == "Darwin" and macos_vulkan_status not in {"pass", "present"}:
+    renderdoc_blocker_gates.append(status_reason("macos-vulkan", macos_vulkan_status, macos_reason))
+if gui_web_2d_vulkan_loader_status not in {"pass", "present"}:
+    renderdoc_blocker_gates.append(status_reason("vulkan-loader", gui_web_2d_vulkan_loader_status, gui_web_2d_vulkan_driver))
+if gui_web_2d_vulkan_renderdoc_status != "pass":
+    renderdoc_blocker_gates.append(status_reason("renderdoc-command", gui_web_2d_vulkan_renderdoc_status, gui_web_2d_vulkan_renderdoc_reason))
+if macos_uname_s == "Darwin" and macos_renderdoc_status != "pass":
+    renderdoc_blocker_gates.append(status_reason("macos-renderdoc", macos_renderdoc_status, macos_reason))
+if gui_web_2d_vulkan_simple_backend_status != "pass":
+    renderdoc_blocker_gates.append(status_reason("simple-direct-vulkan", gui_web_2d_vulkan_simple_backend_status, gui_web_2d_vulkan_simple_reason))
+if simple_gate_status != "pass":
+    renderdoc_blocker_gates.append(status_reason("simple-renderdoc-gate", simple_gate_status, simple_gate_reason))
+if gui_web_2d_vulkan_electron_vulkan_status != "pass":
+    renderdoc_blocker_gates.append(status_reason("electron-angle-vulkan", gui_web_2d_vulkan_electron_vulkan_status, gui_web_2d_vulkan_electron_vulkan_reason))
+if electron_gate_status != "pass":
+    renderdoc_blocker_gates.append(status_reason("electron-renderdoc-gate", electron_gate_status, electron_gate_reason))
+if gui_web_2d_vulkan_chrome_vulkan_status != "pass":
+    renderdoc_blocker_gates.append(status_reason("chrome-angle-vulkan", gui_web_2d_vulkan_chrome_vulkan_status, gui_web_2d_vulkan_chrome_vulkan_reason))
+if external_gate_status != "pass":
+    renderdoc_blocker_gates.append(status_reason("chrome-renderdoc-gate", external_gate_status, external_gate_reason))
+if gui_web_2d_vulkan_pixel_comparison_status != "pass":
+    renderdoc_blocker_gates.append(status_reason("pairwise-pixel-comparison", gui_web_2d_vulkan_pixel_comparison_status, gui_web_2d_vulkan_pixel_comparison_reason))
+gui_web_2d_vulkan_renderdoc_blocker_status = "pass" if not renderdoc_blocker_gates else "blocked"
+gui_web_2d_vulkan_renderdoc_blocker_reason = "pass" if not renderdoc_blocker_gates else ";".join(renderdoc_blocker_gates)
+gui_web_2d_vulkan_renderdoc_blocker_gate_count = len(renderdoc_blocker_gates)
+gui_web_2d_vulkan_renderdoc_blocker_gates = "|".join(renderdoc_blocker_gates)
+
 coverage_status = "pass"
 coverage_reason = "pass"
 if missing_dispatch:
@@ -696,6 +1036,18 @@ elif renderdoc_status != "pass":
 elif electron_gate_status != "pass":
     coverage_status = "incomplete"
     coverage_reason = electron_gate_reason or "missing-electron-rdoc"
+elif gui_web_2d_vulkan_comparison_artifact_status != "pass":
+    coverage_status = "incomplete"
+    coverage_reason = gui_web_2d_vulkan_comparison_artifact_reason or "gui-web-2d-vulkan-comparison-artifacts-incomplete"
+elif gui_web_2d_vulkan_pixel_comparison_status != "pass":
+    coverage_status = "incomplete"
+    coverage_reason = gui_web_2d_vulkan_pixel_comparison_reason or "gui-web-2d-vulkan-pixel-comparison-incomplete"
+elif gui_web_2d_vulkan_browser_backing_status != "pass":
+    coverage_status = "incomplete"
+    coverage_reason = gui_web_2d_vulkan_browser_backing_reason or "gui-web-2d-vulkan-browser-backing-incomplete"
+elif gui_web_2d_vulkan_renderdoc_blocker_status != "pass":
+    coverage_status = "incomplete"
+    coverage_reason = gui_web_2d_vulkan_renderdoc_blocker_reason or "gui-web-2d-vulkan-renderdoc-blockers-present"
 elif production_core_status != "pass":
     coverage_status = "incomplete"
     coverage_reason = production_core_reason or "production-gui-web-renderer-core-parity-incomplete"
@@ -734,6 +1086,12 @@ emit("html_css_traceability_required_html_tag_count", traceability_required_html
 emit("html_css_traceability_css_property_count", traceability_css_count)
 emit("html_css_traceability_required_css_property_min_count", traceability_required_css_min_count)
 emit("html_css_traceability_implemented_css_property_count", traceability_implemented_css_count)
+emit("html_css_traceability_implemented_css_property_indexed_count", traceability_implemented_css_indexed_count)
+emit("html_css_traceability_unsupported_css_property_count", traceability_unsupported_css_count)
+emit("html_css_traceability_unsupported_css_properties", traceability_unsupported_css_properties)
+emit("html_css_traceability_unsupported_css_property_missing_count", traceability_unsupported_css_missing_count)
+emit("html_css_traceability_implemented_css_subset_spec", traceability_implemented_css_subset_spec)
+emit("html_css_traceability_unsupported_css_inventory_spec", traceability_unsupported_css_inventory_spec)
 emit("gui_widget_rendering_fixture_coverage_command", "sh scripts/check/check-gui-widget-rendering-fixture-coverage.shs")
 emit("gui_widget_rendering_fixture_coverage_exit_code", widget_fixture_code)
 emit("gui_widget_rendering_fixture_coverage_status", widget_fixture_status)
@@ -745,16 +1103,23 @@ emit("gui_widget_rendering_fixture_coverage_spec_covered_count", widget_fixture_
 emit("gui_widget_rendering_fixture_coverage_render_fixture_covered_count", widget_fixture_render_fixture_count)
 emit("gui_widget_rendering_fixture_coverage_renderdoc_fixture_source", widget_fixture_renderdoc_fixture_source)
 emit("gui_widget_rendering_fixture_coverage_renderdoc_fixture_covered_count", widget_fixture_renderdoc_fixture_count)
+emit("gui_widget_rendering_fixture_coverage_renderdoc_fixture_feature_covered_count", widget_fixture_renderdoc_fixture_feature_count)
 emit("gui_widget_rendering_fixture_coverage_missing_dispatch_widgets", widget_fixture_missing_dispatch)
 emit("gui_widget_rendering_fixture_coverage_missing_renderer_classes", widget_fixture_missing_classes)
 emit("gui_widget_rendering_fixture_coverage_missing_spec_widgets", widget_fixture_missing_specs)
 emit("gui_widget_rendering_fixture_coverage_missing_render_fixture_widgets", widget_fixture_missing_render_fixtures)
 emit("gui_widget_rendering_fixture_coverage_missing_renderdoc_fixture_widgets", widget_fixture_missing_renderdoc_fixtures)
+emit("gui_widget_rendering_fixture_coverage_missing_renderdoc_fixture_features", widget_fixture_missing_renderdoc_fixture_features)
 emit("gui_widget_rendering_fixture_coverage_expected_classes", widget_fixture_expected_classes)
+emit("gui_widget_rendering_fixture_coverage_expected_renderdoc_fixture_features", widget_fixture_expected_renderdoc_fixture_features)
 emit("gui_widget_rendering_fixture_coverage_spec_sources", widget_fixture_spec_sources)
 emit("gui_widget_rendering_fixture_coverage_covered_widgets", widget_fixture_covered_widgets)
+emit("gui_widget_rendering_fixture_coverage_spec_widget_classes", widget_fixture_spec_widget_classes)
 emit("gui_widget_rendering_fixture_coverage_render_fixture_widgets", widget_fixture_render_fixture_widgets)
+emit("gui_widget_rendering_fixture_coverage_render_fixture_widget_classes", widget_fixture_render_fixture_widget_classes)
 emit("gui_widget_rendering_fixture_coverage_renderdoc_fixture_widgets", widget_fixture_renderdoc_fixture_widgets)
+emit("gui_widget_rendering_fixture_coverage_renderdoc_fixture_widget_classes", widget_fixture_renderdoc_fixture_widget_classes)
+emit("gui_widget_rendering_fixture_coverage_renderdoc_fixture_widget_features", widget_fixture_renderdoc_fixture_widget_features)
 emit("html_css_rendering_manifest_traceability_command", "sh scripts/check/check-html-css-rendering-manifest-traceability.shs")
 emit("html_css_rendering_manifest_traceability_exit_code", rendering_manifest_code)
 emit("html_css_rendering_manifest_traceability_status", rendering_manifest_status)
@@ -764,10 +1129,16 @@ emit("html_css_rendering_manifest_traceability_fixture", rendering_manifest_fixt
 emit("html_css_rendering_manifest_traceability_tag_source", rendering_manifest_tag_source)
 emit("html_css_rendering_manifest_traceability_html_tag_count", rendering_manifest_html_tag_count)
 emit("html_css_rendering_manifest_traceability_html_tag_covered_count", rendering_manifest_html_tag_covered_count)
+emit("html_css_rendering_manifest_traceability_html_tag_covered", rendering_manifest_html_tag_covered)
 emit("html_css_rendering_manifest_traceability_html_tag_missing", rendering_manifest_html_tag_missing)
 emit("html_css_rendering_manifest_traceability_css_property_count", rendering_manifest_css_property_count)
 emit("html_css_rendering_manifest_traceability_css_property_covered_count", rendering_manifest_css_property_covered_count)
+emit("html_css_rendering_manifest_traceability_css_property_covered", rendering_manifest_css_property_covered)
 emit("html_css_rendering_manifest_traceability_css_property_missing", rendering_manifest_css_property_missing)
+emit("html_css_rendering_manifest_traceability_css_property_scope", rendering_manifest_css_property_scope)
+emit("html_css_rendering_manifest_traceability_total_css_property_count", rendering_manifest_total_css_property_count)
+emit("html_css_rendering_manifest_traceability_unrendered_spec_css_property_count", rendering_manifest_unrendered_spec_css_property_count)
+emit("html_css_rendering_manifest_traceability_unrendered_spec_css_properties", rendering_manifest_unrendered_spec_css_properties)
 emit("html_css_rendering_manifest_traceability_manifest_case_count", rendering_manifest_case_count)
 emit("html_css_rendering_manifest_traceability_required_manifest_case_count", rendering_manifest_required_case_count)
 emit("html_css_rendering_manifest_traceability_fixture_scene_count", rendering_manifest_fixture_scene_count)
@@ -777,6 +1148,25 @@ emit("gui_web_2d_vulkan_setup_source", gui_web_2d_vulkan_setup_source)
 emit("gui_web_2d_vulkan_setup_exit_code", gui_web_2d_vulkan_code)
 emit("gui_web_2d_vulkan_evidence_env", rel_text_path(gui_web_2d_vulkan_evidence_env))
 emit("gui_web_2d_vulkan_mode", gui_web_2d_vulkan_mode)
+emit("gui_web_2d_vulkan_html_path", rel_text_path(gui_web_2d_vulkan_html_path))
+emit("gui_web_2d_vulkan_width", gui_web_2d_vulkan_width)
+emit("gui_web_2d_vulkan_height", gui_web_2d_vulkan_height)
+emit("gui_web_2d_vulkan_comparison_fixture_status", gui_web_2d_vulkan_comparison_fixture_status)
+emit("gui_web_2d_vulkan_comparison_artifact_status", gui_web_2d_vulkan_comparison_artifact_status)
+emit("gui_web_2d_vulkan_comparison_artifact_reason", gui_web_2d_vulkan_comparison_artifact_reason)
+emit("gui_web_2d_vulkan_pixel_comparison_status", gui_web_2d_vulkan_pixel_comparison_status)
+emit("gui_web_2d_vulkan_pixel_comparison_reason", gui_web_2d_vulkan_pixel_comparison_reason)
+emit("gui_web_2d_vulkan_pixel_comparison_mode", gui_web_2d_vulkan_pixel_comparison_mode)
+emit("gui_web_2d_vulkan_browser_backing_status", gui_web_2d_vulkan_browser_backing_status)
+emit("gui_web_2d_vulkan_browser_backing_reason", gui_web_2d_vulkan_browser_backing_reason)
+emit("gui_web_2d_vulkan_browser_backing_mode", gui_web_2d_vulkan_browser_backing_mode)
+emit("gui_web_2d_vulkan_renderdoc_blocker_status", gui_web_2d_vulkan_renderdoc_blocker_status)
+emit("gui_web_2d_vulkan_renderdoc_blocker_reason", gui_web_2d_vulkan_renderdoc_blocker_reason)
+emit("gui_web_2d_vulkan_renderdoc_blocker_gate_count", gui_web_2d_vulkan_renderdoc_blocker_gate_count)
+emit("gui_web_2d_vulkan_renderdoc_blocker_gates", gui_web_2d_vulkan_renderdoc_blocker_gates)
+emit("gui_web_2d_vulkan_direct_run_evidence_env", rel_text_path(gui_web_2d_vulkan_direct_run_evidence_env))
+emit("gui_web_2d_vulkan_direct_run_source", gui_web_2d_vulkan_direct_run_source)
+emit("gui_web_2d_vulkan_direct_run_mode", gui_web_2d_vulkan_direct_run_mode)
 emit("gui_web_2d_vulkan_uname_s", gui_web_2d_vulkan_uname_s)
 emit("gui_web_2d_vulkan_uname_m", gui_web_2d_vulkan_uname_m)
 emit("gui_web_2d_vulkan_loader_status", gui_web_2d_vulkan_loader_status)
@@ -784,6 +1174,14 @@ emit("gui_web_2d_vulkan_device", gui_web_2d_vulkan_device)
 emit("gui_web_2d_vulkan_driver", gui_web_2d_vulkan_driver)
 emit("gui_web_2d_vulkan_chrome", rel_text_path(gui_web_2d_vulkan_chrome))
 emit("gui_web_2d_vulkan_electron", rel_text_path(gui_web_2d_vulkan_electron))
+emit("gui_web_2d_vulkan_electron_requested_api", gui_web_2d_vulkan_electron_requested_api)
+emit("gui_web_2d_vulkan_electron_requested_angle", gui_web_2d_vulkan_electron_requested_angle)
+emit("gui_web_2d_vulkan_electron_requested_features", gui_web_2d_vulkan_electron_requested_features)
+emit("gui_web_2d_vulkan_electron_launch_flags", gui_web_2d_vulkan_electron_launch_flags)
+emit("gui_web_2d_vulkan_chrome_requested_api", gui_web_2d_vulkan_chrome_requested_api)
+emit("gui_web_2d_vulkan_chrome_requested_angle", gui_web_2d_vulkan_chrome_requested_angle)
+emit("gui_web_2d_vulkan_chrome_requested_features", gui_web_2d_vulkan_chrome_requested_features)
+emit("gui_web_2d_vulkan_chrome_launch_flags", gui_web_2d_vulkan_chrome_launch_flags)
 emit("gui_web_2d_vulkan_simple_bin", rel_text_path(gui_web_2d_vulkan_simple_bin))
 emit("gui_web_2d_vulkan_simple_bin_selection_reason", gui_web_2d_vulkan_simple_bin_selection_reason)
 emit("gui_web_2d_vulkan_renderdoc_status", gui_web_2d_vulkan_renderdoc_status)
@@ -797,16 +1195,67 @@ emit("gui_web_2d_vulkan_renderdoc_macos_upstream_support_status", gui_web_2d_vul
 emit("gui_web_2d_vulkan_renderdoc_setup_macos_homebrew_package_status", gui_web_2d_vulkan_renderdoc_setup_macos_homebrew_package_status)
 emit("gui_web_2d_vulkan_renderdoc_setup_macos_upstream_support_status", gui_web_2d_vulkan_renderdoc_setup_macos_upstream_support_status)
 emit("gui_web_2d_vulkan_electron_argb_status", gui_web_2d_vulkan_electron_argb_status)
+emit("gui_web_2d_vulkan_electron_argb_path", rel_text_path(gui_web_2d_vulkan_electron_argb_path))
+emit("gui_web_2d_vulkan_electron_argb_file_status", gui_web_2d_vulkan_electron_argb_file_status)
+emit("gui_web_2d_vulkan_electron_argb_width", gui_web_2d_vulkan_electron_argb_width)
+emit("gui_web_2d_vulkan_electron_argb_height", gui_web_2d_vulkan_electron_argb_height)
+emit("gui_web_2d_vulkan_electron_argb_viewport_match_status", gui_web_2d_vulkan_electron_argb_viewport_match_status)
 emit("gui_web_2d_vulkan_electron_argb_nonblank_pixel_count", gui_web_2d_vulkan_electron_argb_nonblank)
+emit("gui_web_2d_vulkan_electron_argb_nonblank_status", gui_web_2d_vulkan_electron_argb_nonblank_status)
+emit("gui_web_2d_vulkan_electron_argb_checksum", gui_web_2d_vulkan_electron_argb_checksum)
+emit("gui_web_2d_vulkan_electron_argb_weighted_checksum", gui_web_2d_vulkan_electron_argb_weighted_checksum)
 emit("gui_web_2d_vulkan_electron_vulkan_status", gui_web_2d_vulkan_electron_vulkan_status)
 emit("gui_web_2d_vulkan_electron_vulkan_reason", gui_web_2d_vulkan_electron_vulkan_reason)
 emit("gui_web_2d_vulkan_chrome_bitmap_status", gui_web_2d_vulkan_chrome_bitmap_status)
+emit("gui_web_2d_vulkan_chrome_screenshot", rel_text_path(gui_web_2d_vulkan_chrome_screenshot))
+emit("gui_web_2d_vulkan_chrome_screenshot_file_status", gui_web_2d_vulkan_chrome_screenshot_file_status)
+emit("gui_web_2d_vulkan_chrome_screenshot_png_status", gui_web_2d_vulkan_chrome_screenshot_png_status)
+emit("gui_web_2d_vulkan_chrome_screenshot_png_width", gui_web_2d_vulkan_chrome_screenshot_png_width)
+emit("gui_web_2d_vulkan_chrome_screenshot_png_height", gui_web_2d_vulkan_chrome_screenshot_png_height)
+emit("gui_web_2d_vulkan_chrome_argb_status", gui_web_2d_vulkan_chrome_argb_status)
+emit("gui_web_2d_vulkan_chrome_argb_path", rel_text_path(gui_web_2d_vulkan_chrome_argb_path))
+emit("gui_web_2d_vulkan_chrome_argb_file_status", gui_web_2d_vulkan_chrome_argb_file_status)
+emit("gui_web_2d_vulkan_chrome_argb_width", gui_web_2d_vulkan_chrome_argb_width)
+emit("gui_web_2d_vulkan_chrome_argb_height", gui_web_2d_vulkan_chrome_argb_height)
+emit("gui_web_2d_vulkan_chrome_argb_viewport_match_status", gui_web_2d_vulkan_chrome_argb_viewport_match_status)
+emit("gui_web_2d_vulkan_chrome_argb_nonblank_pixel_count", gui_web_2d_vulkan_chrome_argb_nonblank)
+emit("gui_web_2d_vulkan_chrome_argb_nonblank_status", gui_web_2d_vulkan_chrome_argb_nonblank_status)
+emit("gui_web_2d_vulkan_chrome_argb_checksum", gui_web_2d_vulkan_chrome_argb_checksum)
+emit("gui_web_2d_vulkan_chrome_argb_weighted_checksum", gui_web_2d_vulkan_chrome_argb_weighted_checksum)
 emit("gui_web_2d_vulkan_chrome_vulkan_status", gui_web_2d_vulkan_chrome_vulkan_status)
 emit("gui_web_2d_vulkan_chrome_vulkan_reason", gui_web_2d_vulkan_chrome_vulkan_reason)
 emit("gui_web_2d_vulkan_simple_status", gui_web_2d_vulkan_simple_status)
 emit("gui_web_2d_vulkan_simple_reason", gui_web_2d_vulkan_simple_reason)
+emit("gui_web_2d_vulkan_simple_evidence_env", rel_text_path(gui_web_2d_vulkan_simple_evidence_env))
+emit("gui_web_2d_vulkan_simple_evidence_file_status", gui_web_2d_vulkan_simple_evidence_file_status)
 emit("gui_web_2d_vulkan_simple_probe_status", gui_web_2d_vulkan_simple_probe_status)
 emit("gui_web_2d_vulkan_simple_backend_name", gui_web_2d_vulkan_simple_backend_name)
+emit("gui_web_2d_vulkan_simple_backend_status", gui_web_2d_vulkan_simple_backend_status)
+emit("gui_web_2d_vulkan_simple_argb_status", gui_web_2d_vulkan_simple_argb_status)
+emit("gui_web_2d_vulkan_simple_argb_path", rel_text_path(gui_web_2d_vulkan_simple_argb_path))
+emit("gui_web_2d_vulkan_simple_argb_file_status", gui_web_2d_vulkan_simple_argb_file_status)
+emit("gui_web_2d_vulkan_simple_argb_width", gui_web_2d_vulkan_simple_argb_width)
+emit("gui_web_2d_vulkan_simple_argb_height", gui_web_2d_vulkan_simple_argb_height)
+emit("gui_web_2d_vulkan_simple_argb_viewport_match_status", gui_web_2d_vulkan_simple_argb_viewport_match_status)
+emit("gui_web_2d_vulkan_simple_argb_nonblank_pixel_count", gui_web_2d_vulkan_simple_argb_nonblank)
+emit("gui_web_2d_vulkan_simple_argb_nonblank_status", gui_web_2d_vulkan_simple_argb_nonblank_status)
+emit("gui_web_2d_vulkan_simple_argb_checksum", gui_web_2d_vulkan_simple_argb_checksum)
+emit("gui_web_2d_vulkan_simple_argb_weighted_checksum", gui_web_2d_vulkan_simple_argb_weighted_checksum)
+emit("gui_web_2d_vulkan_electron_chrome_diff_status", gui_web_2d_vulkan_electron_chrome_diff_status)
+emit("gui_web_2d_vulkan_electron_chrome_diff_reason", gui_web_2d_vulkan_electron_chrome_diff_reason)
+emit("gui_web_2d_vulkan_electron_chrome_mismatch_count", gui_web_2d_vulkan_electron_chrome_mismatch_count)
+emit("gui_web_2d_vulkan_electron_chrome_pairwise_diff_status", gui_web_2d_vulkan_electron_chrome_pairwise_diff_status)
+emit("gui_web_2d_vulkan_electron_chrome_diff_path", rel_text_path(gui_web_2d_vulkan_electron_chrome_diff_path))
+emit("gui_web_2d_vulkan_electron_simple_diff_status", gui_web_2d_vulkan_electron_simple_diff_status)
+emit("gui_web_2d_vulkan_electron_simple_diff_reason", gui_web_2d_vulkan_electron_simple_diff_reason)
+emit("gui_web_2d_vulkan_electron_simple_mismatch_count", gui_web_2d_vulkan_electron_simple_mismatch_count)
+emit("gui_web_2d_vulkan_electron_simple_pairwise_diff_status", gui_web_2d_vulkan_electron_simple_pairwise_diff_status)
+emit("gui_web_2d_vulkan_electron_simple_diff_path", rel_text_path(gui_web_2d_vulkan_electron_simple_diff_path))
+emit("gui_web_2d_vulkan_chrome_simple_diff_status", gui_web_2d_vulkan_chrome_simple_diff_status)
+emit("gui_web_2d_vulkan_chrome_simple_diff_reason", gui_web_2d_vulkan_chrome_simple_diff_reason)
+emit("gui_web_2d_vulkan_chrome_simple_mismatch_count", gui_web_2d_vulkan_chrome_simple_mismatch_count)
+emit("gui_web_2d_vulkan_chrome_simple_pairwise_diff_status", gui_web_2d_vulkan_chrome_simple_pairwise_diff_status)
+emit("gui_web_2d_vulkan_chrome_simple_diff_path", rel_text_path(gui_web_2d_vulkan_chrome_simple_diff_path))
 emit("gui_web_2d_vulkan_renderdoc_simple_exit_code", gui_web_2d_vulkan_renderdoc_simple_exit_code)
 emit("gui_web_2d_vulkan_renderdoc_html_exit_code", gui_web_2d_vulkan_renderdoc_html_exit_code)
 emit("gui_web_2d_vulkan_renderdoc_electron_exit_code", gui_web_2d_vulkan_renderdoc_electron_exit_code)
@@ -1026,6 +1475,10 @@ emit("electron_renderdoc_gate_launch_flags", electron_gate_launch_flags)
 emit("electron_renderdoc_gate_log", rel_text_path(electron_gate_log))
 emit("electron_renderdoc_gate_vulkan_log_status", electron_gate_vulkan_log_status)
 emit("electron_renderdoc_gate_vulkan_log_reason", electron_gate_vulkan_log_reason)
+emit("electron_renderdoc_gate_gpu_process_exit_status", electron_gate_gpu_process_exit_status)
+emit("electron_renderdoc_gate_gpu_process_exit_count", electron_gate_gpu_process_exit_count)
+emit("electron_renderdoc_gate_gpu_process_exit_codes", electron_gate_gpu_process_exit_codes)
+emit("electron_renderdoc_gate_gpu_process_exit_reason", electron_gate_gpu_process_exit_reason)
 emit("electron_renderdoc_gate_required_backend", electron_gate_required_backend)
 emit("electron_renderdoc_gate_required_scene", electron_gate_required_scene)
 emit("electron_renderdoc_gate_required_status", electron_gate_required_status)
@@ -1068,8 +1521,22 @@ if electron_status != "pass" or electron_gate_status != "pass":
     electron_blocker = "Electron Chromium-on-Vulkan RenderDoc .rdc with nonblank ARGB render proof"
     if electron_blocker not in blocked_gates:
         blocked_gates.append(electron_blocker)
+if gui_web_2d_vulkan_comparison_artifact_status != "pass":
+    comparison_blocker = "GUI/web/2D Vulkan comparison artifacts for Electron, Chrome, and Simple"
+    if comparison_blocker not in blocked_gates:
+        blocked_gates.append(comparison_blocker)
+if gui_web_2d_vulkan_pixel_comparison_status != "pass":
+    pixel_blocker = "Electron, Chrome, and Simple GUI/web/2D Vulkan pairwise pixel comparison"
+    if pixel_blocker not in blocked_gates:
+        blocked_gates.append(pixel_blocker)
+if gui_web_2d_vulkan_browser_backing_status != "pass":
+    browser_blocker = "Electron and Chrome Vulkan-backed browser RenderDoc proof"
+    if browser_blocker not in blocked_gates:
+        blocked_gates.append(browser_blocker)
 if production_core_status != "pass":
     blocked_gates.append("production GUI/web parity evidence with live Tauri and Chrome captures")
+if rendering_manifest_unrendered_spec_css_property_count > 0:
+    blocked_gates.append("full CSS specification rendering coverage beyond implemented Simple Web subset")
 blocked_gate = blocked_gates[0] if blocked_gates else ""
 emit("blocked_completion_gate", blocked_gate)
 emit("blocked_completion_gate_count", len(blocked_gates))
@@ -1092,14 +1559,19 @@ reason="$(sed -n 's/^gui_renderdoc_feature_coverage_reason=//p' "$OUT_ENV" | tai
     echo "- Electron layout manifest cases: $(sed -n 's/^electron_layout_manifest_case_count=//p' "$OUT_ENV" | tail -n 1)"
     echo "- HTML/CSS rendering manifest traceability: $(sed -n 's/^html_css_rendering_manifest_traceability_status=//p' "$OUT_ENV" | tail -n 1) ($(sed -n 's/^html_css_rendering_manifest_traceability_reason=//p' "$OUT_ENV" | tail -n 1))"
     echo "- HTML/CSS rendered tags: $(sed -n 's/^html_css_rendering_manifest_traceability_html_tag_covered_count=//p' "$OUT_ENV" | tail -n 1)/$(sed -n 's/^html_css_rendering_manifest_traceability_html_tag_count=//p' "$OUT_ENV" | tail -n 1)"
-    echo "- HTML/CSS rendered properties: $(sed -n 's/^html_css_rendering_manifest_traceability_css_property_covered_count=//p' "$OUT_ENV" | tail -n 1)/$(sed -n 's/^html_css_rendering_manifest_traceability_css_property_count=//p' "$OUT_ENV" | tail -n 1)"
+    echo "- HTML/CSS rendered implemented properties: $(sed -n 's/^html_css_rendering_manifest_traceability_css_property_covered_count=//p' "$OUT_ENV" | tail -n 1)/$(sed -n 's/^html_css_rendering_manifest_traceability_css_property_count=//p' "$OUT_ENV" | tail -n 1) ($(sed -n 's/^html_css_rendering_manifest_traceability_css_property_scope=//p' "$OUT_ENV" | tail -n 1))"
+    echo "- HTML/CSS full CSS spec render gap: $(sed -n 's/^html_css_rendering_manifest_traceability_unrendered_spec_css_property_count=//p' "$OUT_ENV" | tail -n 1) of $(sed -n 's/^html_css_rendering_manifest_traceability_total_css_property_count=//p' "$OUT_ENV" | tail -n 1)"
     echo "- RenderDoc goal: $(sed -n 's/^renderdoc_goal_status=//p' "$OUT_ENV" | tail -n 1) ($(sed -n 's/^renderdoc_goal_reason=//p' "$OUT_ENV" | tail -n 1))"
     echo "- Simple RenderDoc: $(sed -n 's/^simple_renderdoc_status=//p' "$OUT_ENV" | tail -n 1) ($(sed -n 's/^simple_renderdoc_reason=//p' "$OUT_ENV" | tail -n 1))"
     echo "- External Chrome/Vulkan RenderDoc: $(sed -n 's/^external_renderdoc_status=//p' "$OUT_ENV" | tail -n 1) ($(sed -n 's/^external_renderdoc_reason=//p' "$OUT_ENV" | tail -n 1))"
     echo "- Electron Chromium/Vulkan RenderDoc: $(sed -n 's/^electron_renderdoc_status=//p' "$OUT_ENV" | tail -n 1) ($(sed -n 's/^electron_renderdoc_reason=//p' "$OUT_ENV" | tail -n 1))"
     echo "- Electron Chromium/Vulkan gate: $(sed -n 's/^electron_renderdoc_gate_status=//p' "$OUT_ENV" | tail -n 1) ($(sed -n 's/^electron_renderdoc_gate_reason=//p' "$OUT_ENV" | tail -n 1))"
+    echo "- Electron Chromium/Vulkan GPU process exits: $(sed -n 's/^electron_renderdoc_gate_gpu_process_exit_status=//p' "$OUT_ENV" | tail -n 1) count=$(sed -n 's/^electron_renderdoc_gate_gpu_process_exit_count=//p' "$OUT_ENV" | tail -n 1) codes=$(sed -n 's/^electron_renderdoc_gate_gpu_process_exit_codes=//p' "$OUT_ENV" | tail -n 1)"
     echo "- GUI/web/2D Vulkan setup source: $(sed -n 's/^gui_web_2d_vulkan_setup_source=//p' "$OUT_ENV" | tail -n 1)"
     echo "- GUI/web/2D Vulkan setup mode: $(sed -n 's/^gui_web_2d_vulkan_mode=//p' "$OUT_ENV" | tail -n 1)"
+    echo "- GUI/web/2D Vulkan direct-run source: $(sed -n 's/^gui_web_2d_vulkan_direct_run_source=//p' "$OUT_ENV" | tail -n 1) ($(sed -n 's/^gui_web_2d_vulkan_direct_run_mode=//p' "$OUT_ENV" | tail -n 1); $(sed -n 's/^gui_web_2d_vulkan_direct_run_evidence_env=//p' "$OUT_ENV" | tail -n 1))"
+    echo "- GUI/web/2D browser Vulkan backing: $(sed -n 's/^gui_web_2d_vulkan_browser_backing_status=//p' "$OUT_ENV" | tail -n 1) ($(sed -n 's/^gui_web_2d_vulkan_browser_backing_mode=//p' "$OUT_ENV" | tail -n 1); $(sed -n 's/^gui_web_2d_vulkan_browser_backing_reason=//p' "$OUT_ENV" | tail -n 1))"
+    echo "- GUI/web/2D Vulkan RenderDoc blockers: $(sed -n 's/^gui_web_2d_vulkan_renderdoc_blocker_status=//p' "$OUT_ENV" | tail -n 1) ($(sed -n 's/^gui_web_2d_vulkan_renderdoc_blocker_gate_count=//p' "$OUT_ENV" | tail -n 1); $(sed -n 's/^gui_web_2d_vulkan_renderdoc_blocker_reason=//p' "$OUT_ENV" | tail -n 1))"
     echo "- GUI/web/2D Vulkan loader: $(sed -n 's/^gui_web_2d_vulkan_loader_status=//p' "$OUT_ENV" | tail -n 1) ($(sed -n 's/^gui_web_2d_vulkan_device=//p' "$OUT_ENV" | tail -n 1) / $(sed -n 's/^gui_web_2d_vulkan_driver=//p' "$OUT_ENV" | tail -n 1))"
     echo "- GUI/web/2D Vulkan RenderDoc: $(sed -n 's/^gui_web_2d_vulkan_renderdoc_status=//p' "$OUT_ENV" | tail -n 1) ($(sed -n 's/^gui_web_2d_vulkan_renderdoc_reason=//p' "$OUT_ENV" | tail -n 1))"
     echo "- GUI/web/2D Vulkan RenderDoc macOS package: $(sed -n 's/^gui_web_2d_vulkan_renderdoc_macos_homebrew_package_status=//p' "$OUT_ENV" | tail -n 1) ($(sed -n 's/^gui_web_2d_vulkan_renderdoc_macos_upstream_support_status=//p' "$OUT_ENV" | tail -n 1))"
