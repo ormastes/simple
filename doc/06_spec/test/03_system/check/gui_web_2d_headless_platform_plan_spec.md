@@ -78,10 +78,10 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/gui_web_2d_headless_platform
   backing, and pairwise ARGB proof.
 - Windows completion requires D3D12 blocked-gate, PIX artifact file proof, and
   GPU-debugger artifact file proof.
-- iOS completion requires Tauri2/WKWebView Metal render-log, screenshot, and MDI
-  proof fields.
+- iOS completion requires Tauri2/WKWebView Metal render-log, screenshot, and
+  MDI event/capture/performance/animation proof fields.
 - Android completion requires Tauri2/WebView Vulkan render-log, screenshot, and
-  MDI proof fields.
+  MDI event/capture/performance/animation proof fields.
 - The aggregate checker exposes the Linux/macOS/Windows fields that native
   platform runs must later populate.
 - The mobile parity checker exposes the iOS/Android fields that device or
@@ -106,8 +106,8 @@ performance evidence.
 - Assert macOS native completion requires structured Metal and Xcode proof
 - Assert Windows native completion requires structured D3D12, PIX, and GPU-debugger proof
 - Assert production parity summary exposes live capture and readback blockers
-- Assert iOS native completion requires Tauri2 WKWebView Metal, screenshot, and MDI proof
-- Assert Android native completion requires Tauri2 WebView Vulkan, screenshot, and MDI proof
+- Assert iOS native completion requires Tauri2 WKWebView Metal, screenshot, and complete MDI proof
+- Assert Android native completion requires Tauri2 WebView Vulkan, screenshot, and complete MDI proof
 - Read the aggregate checker
 - Assert aggregate source forwards the required platform completion fields
 - Read the production parity wrapper
@@ -119,7 +119,7 @@ performance evidence.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 114 lines folded for reproduction.
+Runnable source: 126 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -172,7 +172,7 @@ expect(plan).to_contain("production_gui_web_renderer_parity_event_routing_status
 expect(plan).to_contain("gui_showcase_4k_200fps_alias_raw_rt_count=0")
 expect(plan).to_contain("gui_showcase_8k_perf_alias_raw_rt_count=0")
 
-step("Assert iOS native completion requires Tauri2 WKWebView Metal, screenshot, and MDI proof")
+step("Assert iOS native completion requires Tauri2 WKWebView Metal, screenshot, and complete MDI proof")
 expect(plan).to_contain("tauri_mobile_renderer_parity_ios_status=pass")
 expect(plan).to_contain("tauri_mobile_renderer_parity_ios_expected_gpu_backend=metal")
 expect(plan).to_contain("tauri_mobile_renderer_parity_ios_tauri_backend=tauri2-wkwebview")
@@ -180,10 +180,13 @@ expect(plan).to_contain("tauri_mobile_renderer_parity_ios_render_log_metal_marke
 expect(plan).to_contain("tauri_mobile_renderer_parity_ios_render_log_nonregular_source_count=0")
 expect(plan).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_file_status=pass")
 expect(plan).to_contain("tauri_mobile_renderer_parity_ios_mdi_event_status=pass")
+expect(plan).to_contain("tauri_mobile_renderer_parity_ios_mdi_capture_status=pass")
+expect(plan).to_contain("tauri_mobile_renderer_parity_ios_mdi_performance_status=pass")
+expect(plan).to_contain("tauri_mobile_renderer_parity_ios_mdi_animation_status=pass")
 expect(plan).to_contain("tauri_mobile_renderer_parity_ios_screenshot_file_status=pass")
 expect(plan).to_contain("tauri_mobile_renderer_parity_ios_screenshot_pixel_diversity_status=pass")
 
-step("Assert Android native completion requires Tauri2 WebView Vulkan, screenshot, and MDI proof")
+step("Assert Android native completion requires Tauri2 WebView Vulkan, screenshot, and complete MDI proof")
 expect(plan).to_contain("tauri_mobile_renderer_parity_android_status=pass")
 expect(plan).to_contain("tauri_mobile_renderer_parity_android_expected_gpu_backend=vulkan")
 expect(plan).to_contain("tauri_mobile_renderer_parity_android_tauri_backend=tauri2-android-webview")
@@ -191,6 +194,9 @@ expect(plan).to_contain("tauri_mobile_renderer_parity_android_render_log_vulkan_
 expect(plan).to_contain("tauri_mobile_renderer_parity_android_render_log_nonregular_source_count=0")
 expect(plan).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_file_status=pass")
 expect(plan).to_contain("tauri_mobile_renderer_parity_android_mdi_event_status=pass")
+expect(plan).to_contain("tauri_mobile_renderer_parity_android_mdi_capture_status=pass")
+expect(plan).to_contain("tauri_mobile_renderer_parity_android_mdi_performance_status=pass")
+expect(plan).to_contain("tauri_mobile_renderer_parity_android_mdi_animation_status=pass")
 expect(plan).to_contain("tauri_mobile_renderer_parity_android_screenshot_file_status=pass")
 expect(plan).to_contain("tauri_mobile_renderer_parity_android_screenshot_pixel_diversity_status=pass")
 
@@ -231,11 +237,17 @@ expect(mobile).to_contain("tauri_mobile_renderer_parity_ios_tauri_backend=tauri2
 expect(mobile).to_contain("tauri_mobile_renderer_parity_ios_render_log_metal_marker_status")
 expect(mobile).to_contain("tauri_mobile_renderer_parity_ios_render_log_nonregular_source_count")
 expect(mobile).to_contain("tauri_mobile_renderer_parity_ios_mdi_event_status")
+expect(mobile).to_contain("tauri_mobile_renderer_parity_ios_mdi_capture_status")
+expect(mobile).to_contain("tauri_mobile_renderer_parity_ios_mdi_performance_status")
+expect(mobile).to_contain("tauri_mobile_renderer_parity_ios_mdi_animation_status")
 expect(mobile).to_contain("tauri_mobile_renderer_parity_ios_screenshot_pixel_diversity_status")
 expect(mobile).to_contain("tauri_mobile_renderer_parity_android_tauri_backend=tauri2-android-webview")
 expect(mobile).to_contain("tauri_mobile_renderer_parity_android_render_log_vulkan_marker_status")
 expect(mobile).to_contain("tauri_mobile_renderer_parity_android_render_log_nonregular_source_count")
 expect(mobile).to_contain("tauri_mobile_renderer_parity_android_mdi_event_status")
+expect(mobile).to_contain("tauri_mobile_renderer_parity_android_mdi_capture_status")
+expect(mobile).to_contain("tauri_mobile_renderer_parity_android_mdi_performance_status")
+expect(mobile).to_contain("tauri_mobile_renderer_parity_android_mdi_animation_status")
 expect(mobile).to_contain("tauri_mobile_renderer_parity_android_screenshot_pixel_diversity_status")
 ```
 
