@@ -214,3 +214,12 @@ evidence and is not itself a training attempt.
   evidence until license/distribution review, refusal/boundary/clinical
   disclaimer checks, and runtime/memory/latency/fallback deployment evidence
   are real.
+
+2026-06-28 operator guide sync:
+
+- Added `doc/07_guide/app/llm/spipe_llm_finetune_process.md` as the focused
+  operator guide for retry5/retry6/retry7 handoff, current retry7 blocked
+  semantics, command entrypoints, evidence locations, and promotion rules.
+- The guide keeps retry7 documented as a normal-review acceptance gate, not a
+  training attempt, and it records that blocked public output must use explicit
+  status text rather than internal absence markers.
