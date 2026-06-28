@@ -1,0 +1,36 @@
+use std.spec.{describe, it, expect}
+use std.common.compress.{CompressionError}
+use std.common.compress.lzma2_range_coder.{LzmaRange, _lzma_decode_bit, _lzma_decode_bittree, _lzma_decode_bittree_reverse}
+
+fn fresh_range() -> LzmaRange:
+    LzmaRange(range_v: 0xFFFFFFFFu32, code_v: 0u32, pos: 0)
+
+fn expect_corrupt_bit(result: Result<(LzmaRange, [u32], i64), CompressionError>, message_part: text):
+    expect(result.is_err()).to_equal(true)
+    val err = result.unwrap_err()
+    match err:
+        CompressionError.CorruptStream(message):
+            expect(message).to_contain(message_part)
+        _:
+            expect(false).to_equal(true)
+
+describe "LZMA range coder bounds validation":
+    it "rejects probability indexes outside the table":
+        val probs: [u32] = [1024u32]
+        val input: [u8] = []
+        expect_corrupt_bit(_lzma_decode_bit(fresh_range(), probs, 2, input), "probability index")
+
+    it "rejects negative bittree offsets before indexing":
+        val probs: [u32] = [1024u32, 1024u32]
+        val input: [u8] = []
+        expect_corrupt_bit(_lzma_decode_bittree(fresh_range(), probs, -1, 1, input), "bittree offset")
+
+    it "rejects bittree widths that would overflow shift-derived ranges":
+        val probs: [u32] = [1024u32, 1024u32]
+        val input: [u8] = []
+        expect_corrupt_bit(_lzma_decode_bittree_reverse(fresh_range(), probs, 0, 31, input), "bittree width")
+
+    it "rejects bittree spans beyond the probability table":
+        val probs: [u32] = [1024u32, 1024u32]
+        val input: [u8] = []
+        expect_corrupt_bit(_lzma_decode_bittree(fresh_range(), probs, 1, 1, input), "bittree range")

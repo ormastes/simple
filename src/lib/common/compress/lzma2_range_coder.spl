@@ -79,6 +79,8 @@ fn _lzma_range_normalize(rd: LzmaRange, input: [u8]) -> Result<LzmaRange, Compre
     Ok(out)
 
 fn _lzma_decode_bit(rd: LzmaRange, probs: [u32], idx: i64, input: [u8]) -> Result<(LzmaRange, [u32], i64), CompressionError>:
+    if idx < 0 or idx >= probs.len():
+        return Err(CompressionError.CorruptStream("lzma probability index"))
     var out = rd
     var pp = probs
     # xz/lzma reference normalizes BEFORE computing the bound. Normalizing
@@ -99,7 +101,21 @@ fn _lzma_decode_bit(rd: LzmaRange, probs: [u32], idx: i64, input: [u8]) -> Resul
     pp[idx] = prob - (prob >> 5u32)
     Ok((out, pp, 1))
 
+fn _lzma_validate_bittree_range(probs: [u32], offset: i64, num_bits: i64) -> Result<(), CompressionError>:
+    if offset < 0:
+        return Err(CompressionError.CorruptStream("lzma bittree offset"))
+    if num_bits < 0 or num_bits > 30:
+        return Err(CompressionError.CorruptStream("lzma bittree width"))
+    val span = 1 << num_bits
+    if offset + span > probs.len():
+        return Err(CompressionError.CorruptStream("lzma bittree range"))
+    Ok(())
+
 fn _lzma_decode_bittree(rd: LzmaRange, probs: [u32], offset: i64, num_bits: i64, input: [u8]) -> Result<(LzmaRange, [u32], i64), CompressionError>:
+    val range_ok = _lzma_validate_bittree_range(probs, offset, num_bits)
+    match range_ok:
+        case Ok(_): pass
+        case Err(reason): return Err(reason)
     var cur_rd = rd
     var pp = probs
     var m: i64 = 1
@@ -116,6 +132,10 @@ fn _lzma_decode_bittree(rd: LzmaRange, probs: [u32], offset: i64, num_bits: i64,
     Ok((cur_rd, pp, m - (1 << num_bits)))
 
 fn _lzma_decode_bittree_reverse(rd: LzmaRange, probs: [u32], offset: i64, num_bits: i64, input: [u8]) -> Result<(LzmaRange, [u32], i64), CompressionError>:
+    val range_ok = _lzma_validate_bittree_range(probs, offset, num_bits)
+    match range_ok:
+        case Ok(_): pass
+        case Err(reason): return Err(reason)
     var cur_rd = rd
     var pp = probs
     var m: i64 = 1
