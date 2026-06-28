@@ -113,9 +113,9 @@ parity, and cross-platform freshness.
 5. Read the platform evidence bundle checker and confirm it consumes the
    existing platform env files without launching platform tools, then reports
    proven, missing, failed, and remaining gate lists for the same nine IDs.
-6. Read the negative selftest wrapper and confirm malformed count, malformed
-   value, malformed format, duplicate gate, and map gate-ID mismatch cases are
-   expected to fail with specific reasons.
+6. Read the negative selftest wrapper and confirm malformed count, empty
+   primary gate, malformed value, malformed format, duplicate gate, and map
+   gate-ID mismatch cases are expected to fail with specific reasons.
 
 ## Failure Interpretation
 
@@ -147,9 +147,9 @@ from the required host class for that gate.
   later edits cannot silently remove the explicit `completion_gate_witness`
   markers for those completion gates, the source-shape-only audit scope, or the
   headless wrapper's forwarded nested audit scope, live completion status, and
-  remaining live-gate host/runbook/proof maps plus combined matrix, exact map
-  gate-ID alignment, empty value rejection, duplicate gate-ID rejection, and a
-  fast negative selftest wrapper.
+  remaining live-gate primary gate bad-value count, host/runbook/proof maps plus
+  combined matrix, exact map gate-ID alignment, empty value rejection, duplicate
+  gate-ID rejection, and a fast negative selftest wrapper.
 - The headless wrapper keeps retained 4K/8K, full HTML/CSS, production GUI/Web
   parity, and cross-platform freshness as explicit remaining matrix rows with
   host, runbook, and proof checklists.
@@ -171,7 +171,7 @@ from the required host class for that gate.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 47 lines folded for reproduction.
+Runnable source: 48 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -192,12 +192,13 @@ expect(plan).to_contain("| WO-30 Retained 4K/8K current-source freshness contrac
 expect(plan).to_contain("| WO-31 Full HTML/CSS final inventory contract |")
 expect(plan).to_contain("| WO-32 Production GUI/Web parity final evidence contract |")
 expect(plan).to_contain("| WO-33 Cross-platform freshness final evidence contract |")
-expect(plan).to_contain("Focused SSpecs pass `3/3` and `1/1`")
+expect(plan).to_contain("Focused SSpecs pass `3/3` and `4/4`")
 expect(plan).to_contain("required-gate checker reports `17` explicit `completion_gate_witness:<gate>` markers")
+expect(plan).to_contain("empty primary gate")
 expect(plan).to_contain("host/runbook/proof empty/malformed-value")
-expect(plan).to_contain("duplicate-gate|host-count|runbook-count|proof-count|host-value|runbook-value|proof-value|host-format|runbook-format|proof-format|host-gate-id|runbook-gate-id|proof-gate-id")
+expect(plan).to_contain("duplicate-gate|gate-value|host-count|runbook-count|proof-count|host-value|runbook-value|proof-value|host-format|runbook-format|proof-format|host-gate-id|runbook-gate-id|proof-gate-id")
 expect(plan).to_contain("gui_web_2d_headless_handoff_prep_remaining_live_completion_matrix")
-expect(plan).to_contain("reports zero host/runbook/proof bad values")
+expect(plan).to_contain("reports zero primary gate and host/runbook/proof bad values")
 expect(plan).to_contain("retained-4k-8k-current-source")
 expect(plan).to_contain("perf-capable-native-gui-host")
 expect(plan).to_contain("scripts/check/check-widget-showcase-4k-200fps.shs")
@@ -269,7 +270,7 @@ expect(spec).to_contain("platform runbook version")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 134 lines folded for reproduction.
+Runnable source: 140 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -307,6 +308,10 @@ expect(handoff_wrapper).to_contain("REMAINING_LIVE_COMPLETION_GATE_COUNT=\"$(pri
 expect(handoff_wrapper).to_contain("REMAINING_LIVE_COMPLETION_UNIQUE_GATE_COUNT")
 expect(handoff_wrapper).to_contain("gui_web_2d_headless_handoff_prep_remaining_live_completion_unique_gate_count")
 expect(handoff_wrapper).to_contain("remaining-live-gate-duplicate")
+expect(handoff_wrapper).to_contain("gate_bad_value_count()")
+expect(handoff_wrapper).to_contain("REMAINING_LIVE_COMPLETION_GATE_BAD_VALUE_COUNT")
+expect(handoff_wrapper).to_contain("gui_web_2d_headless_handoff_prep_remaining_live_completion_gate_bad_value_count")
+expect(handoff_wrapper).to_contain("remaining-live-gate-value-missing")
 expect(handoff_wrapper).to_contain("gui_web_2d_headless_handoff_prep_gate_uniqueness_status")
 expect(handoff_wrapper).to_contain("retained-4k-8k-current-source|full-html-css|production-gui-web-parity|$FRESHNESS_GATE")
 expect(handoff_wrapper).to_contain("FRESHNESS_GATE=\"cross-platform-freshness\"")
@@ -358,6 +363,8 @@ expect(handoff_wrapper).to_contain("full-html-css:all-html+all-css-inventory+zer
 expect(handoff_wrapper).to_contain("production-gui-web-parity:tauri-chrome-captures+device-readback+event-routing+checksum-match+no-tolerance")
 val negative_selftest = file_read("scripts/check/check-gui-web-2d-headless-handoff-negative-selftest.shs")
 expect(negative_selftest).to_contain("duplicate-gate")
+expect(negative_selftest).to_contain("gate-value")
+expect(negative_selftest).to_contain("BAD_EMPTY_GATE_GATES")
 expect(negative_selftest).to_contain("host-count")
 expect(negative_selftest).to_contain("runbook-count")
 expect(negative_selftest).to_contain("proof-count")
