@@ -235,6 +235,110 @@ fn compile_vhdl(source_file: text, output_file: text, verbose: bool) -> i64:
 # Native build: compile entire project to native binary
 # Supports --backend=llvm-lib for pure Simple LLVM compilation (Stage 3 bootstrap),
 # otherwise delegates to Rust NativeProjectBuilder SFFI.
+fn _nb_basename(path: text) -> text:
+    val parts = path.split("/")
+    if parts.len() == 0:
+        return path
+    parts[parts.len() - 1]
+
+fn _nb_module_path_from_use(line_in: text) -> text:
+    # Dotted module path of a single-line use/import statement, else "".
+    val line = line_in.trim()
+    var rest = ""
+    if line.starts_with("use lazy "):
+        rest = line.substring(9)
+    elif line.starts_with("export use "):
+        rest = line.substring(11)
+    elif line.starts_with("use "):
+        rest = line.substring(4)
+    elif line.starts_with("import "):
+        rest = line.substring(7)
+    else:
+        return ""
+    rest = rest.trim()
+    # Truncate at the first token-ending delimiter ({, (, *, space, comment).
+    var cut = rest.len()
+    for delim in [" ", "{", "(", "*", "#"]:
+        val idx = rest.index_of(delim)
+        match idx:
+            Some(k):
+                if k < cut:
+                    cut = k
+            nil:
+                pass
+    var path_text = rest[0:cut]
+    # Strip a trailing '.' left by `a.b.c.{...}` / `a.b.c.*`.
+    while path_text.ends_with("."):
+        path_text = path_text[0:path_text.len() - 1]
+    path_text.trim()
+
+fn _nb_resolve_segs(segs: [text], source_dirs: [text]) -> text:
+    # Resolve a module segment list to an .spl file under a --source root.
+    # Mirrors the Rust discovery FS-fallback: strip a leading segment matching
+    # the root's dir name. Returns "" if unresolved.
+    for root in source_dirs:
+        val dir_name = _nb_basename(root)
+        var cand_lists: [[text]] = [segs]
+        if segs.len() > 0 and segs[0] == dir_name:
+            var stripped: [text] = []
+            var si = 1
+            while si < segs.len():
+                stripped.push(segs[si])
+                si = si + 1
+            cand_lists = [stripped, segs]
+        for cl in cand_lists:
+            if cl.len() == 0:
+                continue
+            val rel = cl.join("/")
+            val p1 = "{root}/{rel}.spl"
+            if _cli_file_exists_impl(p1):
+                return p1
+            val p2 = "{root}/{rel}/mod.spl"
+            if _cli_file_exists_impl(p2):
+                return p2
+            val p3 = "{root}/{rel}/__init__.spl"
+            if _cli_file_exists_impl(p3):
+                return p3
+    ""
+
+fn _native_build_entry_closure(entry: text, source_dirs: [text]) -> [text]:
+    # BFS the entry's import closure so --entry-closure compiles only reachable
+    # modules (one `main`), not every file in the --source dirs. Over-approximates
+    # safely: an unresolved `use` is skipped; a genuinely missing import still
+    # errors in the compile phase.
+    var queue: [text] = [entry]
+    var seen: [text] = []
+    var result: [text] = []
+    var qi = 0
+    while qi < queue.len():
+        val f = queue[qi]
+        qi = qi + 1
+        if seen.contains(f):
+            continue
+        seen.push(f)
+        result.push(f)
+        if not _cli_file_exists_impl(f):
+            continue
+        val content = _cli_file_read_impl(f)
+        for raw in content.split("\n"):
+            val mp = _nb_module_path_from_use(raw)
+            if mp == "":
+                continue
+            val segs = mp.split(".")
+            var variants: [[text]] = [segs]
+            if segs.len() > 1:
+                var drop: [text] = []
+                var di = 0
+                while di < segs.len() - 1:
+                    drop.push(segs[di])
+                    di = di + 1
+                variants = [segs, drop]
+            for v in variants:
+                val rp = _nb_resolve_segs(v, source_dirs)
+                if rp != "" and not seen.contains(rp):
+                    queue.push(rp)
+    result
+
 fn cli_native_build(args: [text]) -> i64:
     # Check for --backend=llvm-lib flag to use pure Simple LLVM pipeline
     var backend = ""
@@ -324,6 +428,7 @@ fn cli_native_build(args: [text]) -> i64:
         var strip = false
         var emit_smf = false
         var source_dirs: [text] = []
+        var entry_closure = false
         var release = true
         var opt_level = cli_native_default_opt_level()
         var optimization_requested = false
@@ -333,7 +438,13 @@ fn cli_native_build(args: [text]) -> i64:
             j = 1
         while j < args.len():
             val a = args[j]
-            if a.starts_with("--entry"):
+            if a == "--entry-closure":
+                # Compile only modules reachable from --entry (suppresses the
+                # driver's implicit whole-src bulk-load). Must be matched BEFORE
+                # the `--entry` prefix check below, or it is mis-read as `--entry`
+                # and eats the next token as the entry path.
+                entry_closure = true
+            elif a.starts_with("--entry"):
                 if a.contains("="):
                     val eq_idx = a.index_of("=")
                     match eq_idx:
@@ -456,6 +567,11 @@ fn cli_native_build(args: [text]) -> i64:
         if not env_set("SIMPLE_NATIVE_BUILD_ENTRY", entry_point):
             _cli_eprint("Error: could not export SIMPLE_NATIVE_BUILD_ENTRY={entry_point}")
             return 1
+        # --entry-closure: tell the driver to skip its implicit whole-src bulk-load
+        # (src/app+lib+compiler+runtime). The explicit --source dirs + entry still
+        # load. Gated so the default (bootstrap) path is byte-identical.
+        val nb_closure_env = if entry_closure: "1" else: "0"
+        env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", nb_closure_env)
         if not optimization_requested:
             release = true
             opt_level = cli_native_default_opt_level()
@@ -468,9 +584,13 @@ fn cli_native_build(args: [text]) -> i64:
             use compiler.driver.driver_types (CompileOptions, CompileMode)
             use compiler.driver.driver (CompilerDriver)
             var options = CompileOptions.default()
-            for source_dir in source_dirs:
-                options.input_files.push(source_dir)
-            options.input_files.push(entry_point)
+            if entry_closure:
+                for cf in _native_build_entry_closure(entry_point, source_dirs):
+                    options.input_files.push(cf)
+            else:
+                for source_dir in source_dirs:
+                    options.input_files.push(source_dir)
+                options.input_files.push(entry_point)
             options.mode = CompileMode.Aot
             options.output_file = Some(output)
             options.output_format = driver_output_format_both()
@@ -483,9 +603,13 @@ fn cli_native_build(args: [text]) -> i64:
             compiler_driver_run_compile(driver)
         else:
             var options = CompileOptions.default()
-            for source_dir in source_dirs:
-                options.input_files.push(source_dir)
-            options.input_files.push(entry_point)
+            if entry_closure:
+                for cf in _native_build_entry_closure(entry_point, source_dirs):
+                    options.input_files.push(cf)
+            else:
+                for source_dir in source_dirs:
+                    options.input_files.push(source_dir)
+                options.input_files.push(entry_point)
             options.mode = CompileMode.Aot
             options.output_file = Some(output)
             options.output_format = driver_output_format_native()
