@@ -27,7 +27,7 @@ gui_renderdoc_aggregate_autodiscovery_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 2 | 2 | 0 | 0 |
+| 3 | 3 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -75,6 +75,8 @@ release/x86_64-unknown-linux-gnu/simple test \
 - The aggregate discovers retained 4K, retained 8K, GUI/web/2D Vulkan direct
   run, and browser-backing evidence from canonical current refresh directories
   when explicit env overrides are absent.
+- The aggregate discovers current production GUI/Web parity evidence from the
+  canonical production refresh directory when explicit env overrides are absent.
 - For retained showcase performance rows, the aggregate chooses the newest
   existing evidence row across canonical wrapper output and `*-current-*`
   refresh directories so stale current caches cannot hide a fresh wrapper run.
@@ -124,6 +126,47 @@ expect(evidence).to_contain("gui_web_2d_vulkan_browser_backing_status=pass")
 
 step("Clean synthetic current evidence so later default aggregate runs see real host rows")
 val cleanup = "rm -rf build/widget-showcase-4k-200fps-current-autodiscovery-test build/widget-showcase-8k-perf-current-autodiscovery-test build/gui-web-2d-vulkan-env-check-current-autodiscovery-test build/gui-web-2d-vulkan-env-run-current-autodiscovery-test build/gui-web-2d-vulkan-env-browser-backing-current-autodiscovery-test"
+val (_cleanup_stdout, _cleanup_stderr, cleanup_code) = process_run("/bin/sh", ["-c", cleanup])
+expect(cleanup_code).to_equal(0)
+```
+
+</details>
+
+#### uses current production parity refresh evidence by default
+
+- Create current production parity refresh evidence
+   - Expected: code equals `0`
+- Assert the aggregate selected current production parity refresh evidence
+- Clean synthetic current production parity evidence
+   - Expected: cleanup_code equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 21 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Create current production parity refresh evidence")
+val command = "rm -rf build/production-gui-web-renderer-parity-current-autodiscovery-test build/test-gui-renderdoc-production-autodiscovery && " +
+    "mkdir -p build/production-gui-web-renderer-parity-current-autodiscovery-test && " +
+    "printf 'production_gui_web_renderer_parity_status=fail\\nproduction_gui_web_renderer_parity_reason=layout-manifest-timeout\\nproduction_gui_web_renderer_parity_layout_manifest_status=timeout\\nproduction_gui_web_renderer_parity_layout_manifest_reason=layout-manifest-timeout\\nproduction_gui_web_renderer_parity_surface_manifest_status=fail\\nproduction_gui_web_renderer_parity_surface_manifest_reason=tauri-live-capture-configured\\nproduction_gui_web_renderer_parity_backend_status=pass\\nproduction_gui_web_renderer_parity_backend_reason=pass\\nproduction_gui_web_renderer_parity_font_offload_status=unavailable\\nproduction_gui_web_renderer_parity_font_offload_reason=runtime-unavailable\\nproduction_gui_web_renderer_parity_metal_readback_status=fail\\nproduction_gui_web_renderer_parity_metal_readback_reason=metal-engine2d-read-pixels-contract-changed-review-required\\nproduction_gui_web_renderer_parity_event_routing_status=pass\\nproduction_gui_web_renderer_parity_event_routing_reason=pass\\n' > build/production-gui-web-renderer-parity-current-autodiscovery-test/evidence.env && " +
+    "GUI_RENDERDOC_AGGREGATE_PRINT_ENV=0 GUI_RENDERDOC_AGGREGATE_STATIC_CACHE_DIR=build/test-gui-renderdoc-feature-coverage-static-cache BUILD_DIR=build/test-gui-renderdoc-production-autodiscovery/out REPORT_PATH=build/test-gui-renderdoc-production-autodiscovery/report.md sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+step("Assert the aggregate selected current production parity refresh evidence")
+val evidence = file_read("build/test-gui-renderdoc-production-autodiscovery/out/evidence.env")
+expect(evidence).to_contain("production_gui_web_renderer_parity_existing_env=build/production-gui-web-renderer-parity-current-autodiscovery-test/evidence.env")
+expect(evidence).to_contain("production_gui_web_renderer_parity_existing_status=fail")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_source_env=build/production-gui-web-renderer-parity-current-autodiscovery-test/evidence.env")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_source_status=fail")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_layout_manifest_status=timeout")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_backend_status=pass")
+
+step("Clean synthetic current production parity evidence")
+val cleanup = "rm -rf build/production-gui-web-renderer-parity-current-autodiscovery-test build/test-gui-renderdoc-production-autodiscovery"
 val (_cleanup_stdout, _cleanup_stderr, cleanup_code) = process_run("/bin/sh", ["-c", cleanup])
 expect(cleanup_code).to_equal(0)
 ```
@@ -184,8 +227,8 @@ expect(cleanup_code).to_equal(0)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 2 |
-| Active scenarios | 2 |
+| Total scenarios | 3 |
+| Active scenarios | 3 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
