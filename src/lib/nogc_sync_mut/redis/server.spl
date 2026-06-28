@@ -136,10 +136,10 @@ class RedisServer:
             self.svals.push("1")
             self.sexp.push(-1)
             return Ok(1)
-        val cur = parse_i64(self.svals[idx])
-        if not cur.?:
-            return Err("value is not an integer or out of range")
-        val next = cur.unwrap() + 1
+        val cur = match parse_i64(self.svals[idx]):
+            case Some(v): v
+            case nil: return Err("value is not an integer or out of range")
+        val next = cur + 1
         self.svals[idx] = "{next}"
         Ok(next)
 
@@ -201,18 +201,17 @@ class RedisServer:
             self.set_value(args[1], args[2])
             # Optional EX <seconds> trailer (used by redis-benchmark variants).
             if args.len() >= 5 and ascii_upper(args[3]) == "EX":
-                val secs = parse_i64(args[4])
-                if secs.?:
-                    self.expire_key(args[1], secs.unwrap())
+                match parse_i64(args[4]):
+                    case Some(secs): self.expire_key(args[1], secs)
+                    case nil: pass
             return resp_status("OK")
 
         if cmd == "GET":
             if args.len() < 2:
                 return resp_error("ERR wrong number of arguments for 'get'")
-            val v = self.get_value(args[1])
-            if v.?:
-                return resp_bulk(v.unwrap())
-            return resp_nil()
+            match self.get_value(args[1]):
+                case Some(v): return resp_bulk(v)
+                case nil: return resp_nil()
 
         if cmd == "DEL":
             if args.len() < 2:
@@ -246,10 +245,10 @@ class RedisServer:
         if cmd == "EXPIRE":
             if args.len() < 3:
                 return resp_error("ERR wrong number of arguments for 'expire'")
-            val secs = parse_i64(args[2])
-            if not secs.?:
-                return resp_error("ERR value is not an integer or out of range")
-            val ok = self.expire_key(args[1], secs.unwrap())
+            val secs = match parse_i64(args[2]):
+                case Some(v): v
+                case nil: return resp_error("ERR value is not an integer or out of range")
+            val ok = self.expire_key(args[1], secs)
             if ok:
                 return resp_integer(1)
             return resp_integer(0)
@@ -310,16 +309,16 @@ class RedisServer:
             var progressed = true
             while progressed:
                 progressed = false
-                val req = parse_next_request(buf)
-                if req.?:
-                    val r = req.unwrap()
-                    val reply = self.dispatch(r.args)
-                    rt_io_tcp_write_text(s.fd, reply)
-                    buf = r.rest
-                    progressed = true
-                    if r.args.len() > 0 and ascii_upper(r.args[0]) == "QUIT":
-                        quit = true
-                        progressed = false
+                match parse_next_request(buf):
+                    case Some(r):
+                        val reply = self.dispatch(r.args)
+                        rt_io_tcp_write_text(s.fd, reply)
+                        buf = r.rest
+                        progressed = true
+                        if r.args.len() > 0 and ascii_upper(r.args[0]) == "QUIT":
+                            quit = true
+                            progressed = false
+                    case nil: pass
         rt_io_tcp_close(s.fd)
 
 # ============================================================================
