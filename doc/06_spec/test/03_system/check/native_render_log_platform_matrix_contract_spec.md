@@ -131,6 +131,14 @@ The matrix emits three rollup keys:
 - `native_render_log_platform_matrix_status`
 - `native_render_log_platform_matrix_missing_platforms`
 - `native_render_log_platform_matrix_failed_platforms`
+- `native_gui_platform_verification_status`
+- `native_gui_platform_verification_missing_platforms`
+- `native_gui_platform_verification_failed_platforms`
+
+The `native_gui_platform_verification_*` keys are a plainly named alias for the
+same platform matrix. They exist for goal-completion reviews and must stay in
+lockstep with the native render-log matrix fields instead of becoming a second
+classifier.
 
 `missing_platforms` is reserved for absent or unavailable platform rows. A row
 that exists but claims the wrong API, lacks pairwise comparison proof, or omits
@@ -192,7 +200,7 @@ hide which parallel agent or host owns the next repair.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 25 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -207,6 +215,11 @@ expect(evidence).to_contain("native_render_log_platform_matrix_status=fail")
 expect(evidence).to_contain("native_render_log_platform_matrix_reason=missing-or-failing-native-render-log-platforms")
 expect(evidence).to_contain("native_render_log_platform_matrix_missing_platforms=")
 expect(evidence).to_contain("native_render_log_platform_matrix_failed_platforms=linux-vulkan,macos-metal,windows-d3d12")
+expect(evidence).to_contain("native_gui_platform_verification_status=fail")
+expect(evidence).to_contain("native_gui_platform_verification_reason=missing-or-failing-native-render-log-platforms")
+expect(evidence).to_contain("native_gui_platform_verification_required_platforms=linux-vulkan,macos-metal,windows-d3d12")
+expect(evidence).to_contain("native_gui_platform_verification_missing_platforms=")
+expect(evidence).to_contain("native_gui_platform_verification_failed_platforms=linux-vulkan,macos-metal,windows-d3d12")
 expect(evidence).to_contain("native_render_log_platform_matrix_linux_vulkan_command=BUILD_DIR=build/linux-vulkan-render-log-compare sh scripts/check/check-linux-vulkan-render-log-compare.shs")
 expect(evidence).to_contain("native_render_log_platform_matrix_macos_metal_command=MACOS_METAL_RENDER_LOG_REQUIRE_GPU_CAPTURE=1 BUILD_DIR=build/macos-metal-render-log-compare sh scripts/check/check-macos-metal-render-log-compare.shs")
 expect(evidence).to_contain("native_render_log_platform_matrix_windows_d3d12_command=WINDOWS_D3D12_RENDER_LOG_REQUIRE_PIX=1 BUILD_DIR=build/windows-d3d12-render-log-compare sh scripts/check/check-windows-d3d12-render-log-compare.shs")
@@ -230,7 +243,7 @@ expect(evidence).to_contain("macos_metal_render_log_compare_reason=macos-metal-b
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 33 lines folded for reproduction.
+Runnable source: 36 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -244,6 +257,9 @@ val evidence = file_read("build/test-native-render-log-platform-matrix-missing/o
 expect(evidence).to_contain("native_render_log_platform_matrix_status=incomplete")
 expect(evidence).to_contain("native_render_log_platform_matrix_missing_platforms=macos-metal,windows-d3d12")
 expect(evidence).to_contain("native_render_log_platform_matrix_failed_platforms=")
+expect(evidence).to_contain("native_gui_platform_verification_status=incomplete")
+expect(evidence).to_contain("native_gui_platform_verification_missing_platforms=macos-metal,windows-d3d12")
+expect(evidence).to_contain("native_gui_platform_verification_failed_platforms=")
 expect(evidence).to_contain("native_render_log_platform_matrix_macos_metal_command=MACOS_METAL_RENDER_LOG_REQUIRE_GPU_CAPTURE=1 BUILD_DIR=build/macos-metal-render-log-compare sh scripts/check/check-macos-metal-render-log-compare.shs")
 expect(evidence).to_contain("native_render_log_platform_matrix_windows_d3d12_command=WINDOWS_D3D12_RENDER_LOG_REQUIRE_PIX=1 BUILD_DIR=build/windows-d3d12-render-log-compare sh scripts/check/check-windows-d3d12-render-log-compare.shs")
 expect(evidence).to_contain("linux_vulkan_render_log_compare_status=pass")

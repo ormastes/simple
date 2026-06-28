@@ -141,6 +141,10 @@ magic checks.
 The Linux Vulkan, macOS Metal, and Windows D3D12 lanes are evidence-backed.
 Each lane consumes normalized Simple render-log evidence from the aggregate and
 fails on the first missing native proof field instead of a generic placeholder.
+The aggregate also emits `native_gui_platform_verification_status`, an alias of
+the render-log platform matrix status, so completion reviews can check one
+plainly named native GUI platform gate without mixing it with retained 4K/8K
+performance status.
 
 macOS Metal requires:
 
