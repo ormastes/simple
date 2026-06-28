@@ -1046,6 +1046,11 @@ Normal-review acceptance:
   cross-platform freshness. Runtime build, browser/WebView/Electron revision,
   graphics SDK/driver, and runbook version metadata must also be present, or
   freshness fails with `missing-freshness-metadata`.
+- 2026-06-28 bundle freshness metadata revalidation:
+  `test/03_system/check/gui_web_2d_platform_evidence_bundle_spec.spl` now
+  asserts that the platform evidence bundle rejects a freshness env that says
+  `status=pass` but omits required freshness metadata. A hand-edited or partial
+  freshness env cannot make `cross-platform-freshness` look proven.
 
 ## Hard Stop Conditions
 
