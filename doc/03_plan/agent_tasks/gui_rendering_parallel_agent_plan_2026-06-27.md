@@ -1083,6 +1083,11 @@ Normal-review acceptance:
   accepted source-revision keys inside each present lane env before comparing
   lane freshness. A hand-edited or concatenated env cannot hide a stale source
   line by appending a later fresh value for the same key.
+- 2026-06-28 freshness duplicate metadata key revalidation:
+  `scripts/check/check-gui-web-2d-platform-freshness.shs` now rejects duplicate
+  accepted runtime, browser/WebView/Electron, graphics SDK/driver, and runbook
+  metadata keys inside each present lane env. A concatenated env cannot hide an
+  earlier conflicting toolchain value by appending a later matching value.
 - 2026-06-28 bundle optional reason revalidation:
   `scripts/check/check-gui-web-2d-platform-evidence-bundle.shs` now rejects a
   required gate status key when the sibling optional reason key is present and

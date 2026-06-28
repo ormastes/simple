@@ -98,6 +98,27 @@ metadata_for() {
         "$suffix"
 }
 
+duplicate_metadata_key_for() {
+    file="$1"
+    prefix="$2"
+    suffix="$3"
+    seen_keys=""
+    for key in "${prefix}_${suffix}" "gui_web_2d_evidence_${suffix}" "$suffix"; do
+        count="$(key_count "$key" "$file")"
+        if [ "$count" -gt 1 ]; then
+            echo "$key"
+            return
+        elif [ "$count" -eq 1 ]; then
+            seen_keys="$(append_csv "$seen_keys" "$key")"
+        fi
+    done
+    if [ "${seen_keys#*,}" != "$seen_keys" ]; then
+        echo "$seen_keys"
+        return
+    fi
+    echo ""
+}
+
 metadata_across_lanes() {
     suffix="$1"
     value="$(metadata_for "$NATIVE_ENV" native_render_log_platform_matrix "$suffix")"
@@ -176,6 +197,7 @@ missing_metadata=""
 [ "$graphics_driver" != "" ] || missing_metadata="$(append_csv "$missing_metadata" graphics-sdk-driver)"
 [ "$runbook_version" != "" ] || missing_metadata="$(append_csv "$missing_metadata" runbook-version)"
 
+duplicate_metadata_lanes=""
 mismatched_metadata=""
 for row in \
     "native:$NATIVE_ENV:native_render_log_platform_matrix" \
@@ -189,6 +211,16 @@ do
     rest="${row#*:}"
     file="${rest%%:*}"
     prefix="${row##*:}"
+    if [ "$(file_status "$file")" = "pass" ]; then
+        duplicate_metadata_key="$(duplicate_metadata_key_for "$file" "$prefix" runtime_build)"
+        [ "$duplicate_metadata_key" = "" ] || duplicate_metadata_lanes="$(append_csv "$duplicate_metadata_lanes" "$lane:runtime-build:$duplicate_metadata_key")"
+        duplicate_metadata_key="$(duplicate_metadata_key_for "$file" "$prefix" browser_webview_electron_revision)"
+        [ "$duplicate_metadata_key" = "" ] || duplicate_metadata_lanes="$(append_csv "$duplicate_metadata_lanes" "$lane:browser-webview-electron-revision:$duplicate_metadata_key")"
+        duplicate_metadata_key="$(duplicate_metadata_key_for "$file" "$prefix" graphics_sdk_driver)"
+        [ "$duplicate_metadata_key" = "" ] || duplicate_metadata_lanes="$(append_csv "$duplicate_metadata_lanes" "$lane:graphics-sdk-driver:$duplicate_metadata_key")"
+        duplicate_metadata_key="$(duplicate_metadata_key_for "$file" "$prefix" runbook_version)"
+        [ "$duplicate_metadata_key" = "" ] || duplicate_metadata_lanes="$(append_csv "$duplicate_metadata_lanes" "$lane:runbook-version:$duplicate_metadata_key")"
+    fi
     check_metadata_match "$lane" "$file" "$prefix" runtime_build runtime-build "$runtime_build"
     check_metadata_match "$lane" "$file" "$prefix" browser_webview_electron_revision browser-webview-electron-revision "$browser_revision"
     check_metadata_match "$lane" "$file" "$prefix" graphics_sdk_driver graphics-sdk-driver "$graphics_driver"
@@ -209,6 +241,9 @@ elif [ "$missing_source_lanes" != "" ]; then
 elif [ "$mismatched_source_lanes" != "" ]; then
     status=fail
     reason=source-revision-mismatch
+elif [ "$duplicate_metadata_lanes" != "" ]; then
+    status=fail
+    reason=duplicate-freshness-metadata-key
 elif [ "$missing_metadata" != "" ]; then
     status=fail
     reason=missing-freshness-metadata
@@ -230,6 +265,7 @@ fi
     echo "gui_web_2d_platform_freshness_missing_source_revision_lanes=$missing_source_lanes"
     echo "gui_web_2d_platform_freshness_mismatched_source_revision_lanes=$mismatched_source_lanes"
     echo "gui_web_2d_platform_freshness_missing_metadata=$missing_metadata"
+    echo "gui_web_2d_platform_freshness_duplicate_metadata_lanes=$duplicate_metadata_lanes"
     echo "gui_web_2d_platform_freshness_mismatched_metadata_lanes=$mismatched_metadata"
     echo "gui_web_2d_platform_freshness_native_source_revision=$native_source"
     echo "gui_web_2d_platform_freshness_mobile_source_revision=$mobile_source"
@@ -261,6 +297,7 @@ fi
     echo "- Missing source-revision lanes: $missing_source_lanes"
     echo "- Mismatched source-revision lanes: $mismatched_source_lanes"
     echo "- Missing metadata: $missing_metadata"
+    echo "- Duplicate metadata lanes: $duplicate_metadata_lanes"
     echo "- Mismatched metadata lanes: $mismatched_metadata"
 } >"$REPORT_PATH"
 
