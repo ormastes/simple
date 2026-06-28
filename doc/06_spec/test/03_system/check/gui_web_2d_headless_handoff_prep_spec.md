@@ -27,7 +27,7 @@ gui_web_2d_headless_handoff_prep_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 1 | 1 | 0 | 0 |
+| 2 | 2 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -62,8 +62,9 @@ then report that this is source-level preparation only.
 **Research:** N/A
 **Design:** doc/07_guide/tooling/renderdoc_capture_infra.md
 
-This SSpec intentionally checks the wrapper source contract and report boundary
-instead of invoking the wrapper. See
+This SSpec checks the wrapper source contract, report boundary, and bounded
+contract-selftest mode. It does not invoke normal wrapper mode from inside the
+SSpec runner because that path nests Simple test execution. See
 `doc/08_tracking/bug/simple_test_nested_runner_timeout_2026-06-28.md` for the
 observed nested runner timeout.
 
@@ -114,7 +115,8 @@ recursing into nested Simple test execution.
 ## Manual Run Steps
 
 1. Run this SSpec to confirm the wrapper source and report contract remain
-   reviewable without launching the wrapper from inside the SSpec runner.
+   reviewable and that contract-selftest mode emits the live-gate matrix without
+   launching nested Simple tests.
 2. Run `sh scripts/check/check-gui-web-2d-headless-handoff-prep.shs` directly to
    produce the current handoff report and nested five-platform source audit.
 3. Confirm the wrapper reports `completion_scope=prepared-not-verified`,
@@ -148,6 +150,8 @@ platform or GUI-host artifacts for every remaining live gate in the matrix.
   live gate and fails if the proof map count drifts from the gate count.
 - The wrapper source emits one combined gate/host/runbook/proof matrix row for
   every remaining live gate and fails if the matrix row count drifts.
+- The wrapper contract-selftest mode emits a pass status while preserving
+  `prepared-not-verified` scope and `incomplete` live completion.
 - The wrapper source keeps retained 4K/8K, full HTML/CSS, production GUI/Web
   parity, and cross-platform freshness as explicit matrix rows with host,
   runbook, and proof checklists.
@@ -327,12 +331,65 @@ expect(negative_selftest).to_contain("gui_web_2d_headless_handoff_negative_selft
 
 </details>
 
+#### runs contract selftest mode without claiming live platform completion
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 40 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val command = "rm -rf build/test-gui-web-2d-headless-handoff-prep-contract && GUI_WEB_2D_HEADLESS_HANDOFF_PREP_CONTRACT_SELFTEST=1 BUILD_DIR=build/test-gui-web-2d-headless-handoff-prep-contract/out REPORT_PATH=build/test-gui-web-2d-headless-handoff-prep-contract/report.md sh scripts/check/check-gui-web-2d-headless-handoff-prep.shs"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val evidence = file_read("build/test-gui-web-2d-headless-handoff-prep-contract/out/evidence.env")
+expect(evidence).to_contain("gui_web_2d_headless_handoff_prep_status=pass")
+expect(evidence).to_contain("gui_web_2d_headless_handoff_prep_contract_selftest=1")
+expect(evidence).to_contain("gui_web_2d_headless_handoff_prep_completion_scope=prepared-not-verified")
+expect(evidence).to_contain("gui_web_2d_headless_handoff_prep_live_completion_status=incomplete")
+expect(evidence).to_contain("gui_web_2d_headless_handoff_prep_live_completion_reason=remaining-live-gates-unverified")
+expect(evidence).to_contain("gui_web_2d_headless_handoff_prep_remaining_live_completion_gate_count=9")
+expect(evidence).to_contain("gui_web_2d_headless_handoff_prep_remaining_live_completion_unique_gate_count=9")
+expect(evidence).to_contain("gui_web_2d_headless_handoff_prep_remaining_live_completion_host_count=9")
+expect(evidence).to_contain("gui_web_2d_headless_handoff_prep_remaining_live_completion_runbook_count=9")
+expect(evidence).to_contain("gui_web_2d_headless_handoff_prep_remaining_live_completion_proof_count=9")
+expect(evidence).to_contain("gui_web_2d_headless_handoff_prep_remaining_live_completion_matrix_count=9")
+expect(evidence).to_contain("gui_web_2d_headless_handoff_prep_map_gate_alignment_status=pass")
+expect(evidence).to_contain("gui_web_2d_headless_handoff_prep_gate_uniqueness_status=pass")
+expect(evidence).to_contain("gui_web_2d_headless_handoff_prep_completion_criteria_status=pass")
+expect(evidence).to_contain("gui_web_2d_headless_handoff_prep_completion_criteria_reason=contract-selftest")
+expect(evidence).to_contain("gui_web_2d_headless_handoff_prep_completion_criteria_completion_scope=source-shape-only")
+expect(evidence).to_contain("gui_web_2d_headless_handoff_prep_required_gate_count=17")
+expect(evidence).to_contain("gui_web_2d_headless_handoff_prep_five_platform_handoff_spec_status=pass")
+expect(evidence).to_contain("gui_web_2d_headless_handoff_prep_five_platform_handoff_spec_reason=contract-selftest")
+expect(evidence).to_contain("gui_web_2d_headless_handoff_prep_negative_selftest_status=skipped")
+expect(evidence).to_contain("gui_web_2d_headless_handoff_prep_negative_selftest_reason=contract-selftest")
+expect(evidence).to_contain("gui_web_2d_headless_handoff_prep_remaining_live_completion_gates=linux-vulkan-renderdoc|macos-metal-xcode-gpu-capture|windows-d3d12-pix|ios-tauri-wkwebview-metal|android-tauri-webview-vulkan|retained-4k-8k-current-source|full-html-css|production-gui-web-parity|cross-platform-freshness")
+expect(evidence).to_contain("cross-platform-freshness:host=main-plus-platform-freshness-review")
+expect(evidence).to_contain("proof=same-source-revision+runtime-build+browser-webview-electron-revision+graphics-sdk-driver+runbook-version")
+
+val report = file_read("build/test-gui-web-2d-headless-handoff-prep-contract/report.md")
+expect(report).to_contain("Completion scope: prepared-not-verified")
+expect(report).to_contain("Live completion status: incomplete")
+expect(report).to_contain("This is a headless source-level preparation gate.")
+expect(report).to_contain("It does not produce live")
+expect(report).to_contain("Linux Vulkan/RenderDoc")
+expect(report).to_contain("macOS Metal/Xcode GPU Capture")
+expect(report).to_contain("Windows D3D12/PIX")
+expect(report).to_contain("iOS Tauri/WKWebView Metal")
+expect(report).to_contain("Android Tauri/WebView Vulkan renderer evidence.")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 1 |
-| Active scenarios | 1 |
+| Total scenarios | 2 |
+| Active scenarios | 2 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
