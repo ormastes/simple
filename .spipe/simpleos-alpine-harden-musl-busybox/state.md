@@ -47,12 +47,22 @@ feature (multi-pillar, multi-session)
   Pre-existing nvfs-marker failure in that spec's block 3 filed (image_builder_nvfs_rootfs_marker_
   preexisting_2026-06-28.md) — NOT caused by this wire (origin fails it identically).
   SYSROOT BUILT FOR REAL (sh src/os/port/llvm/sysroot.shs): libsimpleos_c.a 137KB + crt0.o + simpleos.ld
-  + headers under build/os/sysroot (gitignored). simplebox_build.spl corrected to the canonical
-  invocation (--backend llvm/--source src/os+src/lib/--entry-closure/--target x86_64-unknown-none/
-  --linker-script), 7/0. CROSS-COMPILE BLOCKED: native-build exits 255 with no binary + no error for
-  any multi-module freestanding entry (import-free entry emits a real ELF; documented kernel_entry
-  no-ops identically; not memory). Filed native_build_freestanding_multimodule_no_emit_2026-06-28.md.
-  Image pack uses its placeholder until native-build's cross-module emit works.]
+  + headers under build/os/sysroot (gitignored). simplebox_build.spl = canonical invocation
+  (--backend llvm/--source src/os+src/lib/--entry-closure/--target x86_64-unknown-none/
+  --linker-script), 7/0 (dropped a no-op --timeout assertion: the 120s deaths were Simple's own
+  process_run_timeout default, not native-build).
+  ROOT-CAUSED the cross-compile blocker (was mis-filed as "no emit"). Three symptoms, none "no emit":
+  (1) 120s death = process_run_timeout default (test harness); (2) ld.lld cannot open
+  simple_rt_runtime.o = STALE deployed bin/simple seed (current cargo seed builds single libc module
+  -> real freestanding PIE ELF); (3) THE WALL = const-eval `cannot parse 'c' as i64`: native-build
+  parses hex literals digit-by-digit via int(hc), and int("c") numeric-parses->fails, so ANY hex
+  literal with an a-f digit (e.g. kernel 0xc... LIMINE consts scanned by --source src/os) aborted.
+  FIXED in primary_expr.spl (lookup-string hex map, no int(letter)); verified 0xca=202/0xDEAD=57005/
+  0b1010=10; regression spec hex_literal_const_eval_spec.spl 7/0. Lane libc EXONERATED (marker test:
+  renaming ["c",...]->["zzcmark",...] kept identical 'c' error). With hex fixed, native-build still
+  can't emit a typed/module integer val (`val x:i64=255`->"unwrap on Type"; module `val M:i64=0xca`->
+  "kind on nil") — SEPARATE pre-existing gaps, now the remaining blocker (Part 2 of the bug doc).
+  Bug doc: native_build_const_eval_int_letter_2026-06-28.md. Image pack uses placeholder until Part 2.]
 ### P4 — PIE/SSP/RELRO policy
 - AC-8: desktop/Hosted hardening stays UNCONDITIONALLY ON (no regression); ADD embedded opt-out via
   preset. [DONE — resolve_hardening + regression-guarded spec green]
