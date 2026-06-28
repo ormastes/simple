@@ -44,20 +44,18 @@ fn _decode_string(bytes: [u8], offset: i64) -> Result<(text, i64), text>:
         return Err("_decode_string: offset out of range")
     val first = bytes[offset].to_i64()
     val h_bit = (first & 0x80) != 0
-    val len_res = decode_prefix_int(bytes, offset, 7)
-    if len_res.is_err():
-        return Err("_decode_string: length varint: " + len_res.unwrap_err())
-    val len_pair = len_res.unwrap()
+    val len_pair = match decode_prefix_int(bytes, offset, 7):
+        case Ok(decoded): decoded
+        case Err(reason): return Err("_decode_string: length varint: " + reason)
     val length = len_pair.0
     val header_len = len_pair.1
     val payload_start = offset + header_len
     if payload_start + length > bytes.len():
         return Err("_decode_string: declared length exceeds buffer")
     if h_bit:
-        val huff_res = hpack_huffman_decode(bytes, payload_start, length)
-        if huff_res.is_err():
-            return Err("_decode_string: huffman decode: " + huff_res.unwrap_err())
-        val decoded_bytes = huff_res.unwrap()
+        val decoded_bytes = match hpack_huffman_decode(bytes, payload_start, length):
+            case Ok(decoded): decoded
+            case Err(reason): return Err("_decode_string: huffman decode: " + reason)
         Ok((_u8_to_text(decoded_bytes), header_len + length))
     else:
         var raw: [u8] = []
@@ -85,48 +83,43 @@ fn hpack_decode(bytes: [u8], state: HpackDecoderState) -> Result<([HpackHeader],
             val first = bytes[offset].to_i64()
             if (first & 0x80) != 0:
                 # §6.1 Indexed Header Field (1xxxxxxx)
-                val idx_res = decode_prefix_int(bytes, offset, 7)
-                if idx_res.is_err():
-                    return Err("hpack_decode §6.1: " + idx_res.unwrap_err())
-                val idx_pair = idx_res.unwrap()
+                val idx_pair = match decode_prefix_int(bytes, offset, 7):
+                    case Ok(decoded): decoded
+                    case Err(reason): return Err("hpack_decode §6.1: " + reason)
                 val idx = idx_pair.0
                 val consumed = idx_pair.1
                 if idx == 0:
                     return Err("hpack_decode §6.1: index 0 is reserved")
-                val lookup_res = _lookup_unified(cur_table, idx)
-                if lookup_res.is_err():
-                    return Err("hpack_decode §6.1: " + lookup_res.unwrap_err())
-                val pair = lookup_res.unwrap()
+                val pair = match _lookup_unified(cur_table, idx):
+                    case Ok(decoded): decoded
+                    case Err(reason): return Err("hpack_decode §6.1: " + reason)
                 val h = HpackHeader(name: pair.0, value: pair.1, sensitive: false)
                 headers = headers + [h]
                 offset = offset + consumed
             else if (first & 0xc0) == 0x40:
                 # §6.2.1 Literal w/ Incremental Indexing (01xxxxxx)
-                val idx_res = decode_prefix_int(bytes, offset, 6)
-                if idx_res.is_err():
-                    return Err("hpack_decode §6.2.1: " + idx_res.unwrap_err())
-                val idx_pair = idx_res.unwrap()
+                val idx_pair = match decode_prefix_int(bytes, offset, 6):
+                    case Ok(decoded): decoded
+                    case Err(reason): return Err("hpack_decode §6.2.1: " + reason)
                 val name_idx = idx_pair.0
                 val idx_consumed = idx_pair.1
                 offset = offset + idx_consumed
                 var name_text = ""
                 if name_idx == 0:
                     # Literal name
-                    val name_res = _decode_string(bytes, offset)
-                    if name_res.is_err():
-                        return Err("hpack_decode §6.2.1 name: " + name_res.unwrap_err())
-                    val name_pair = name_res.unwrap()
+                    val name_pair = match _decode_string(bytes, offset):
+                        case Ok(decoded): decoded
+                        case Err(reason): return Err("hpack_decode §6.2.1 name: " + reason)
                     name_text = name_pair.0
                     offset = offset + name_pair.1
                 else:
-                    val lookup_res = _lookup_unified(cur_table, name_idx)
-                    if lookup_res.is_err():
-                        return Err("hpack_decode §6.2.1 name lookup: " + lookup_res.unwrap_err())
-                    name_text = lookup_res.unwrap().0
-                val val_res = _decode_string(bytes, offset)
-                if val_res.is_err():
-                    return Err("hpack_decode §6.2.1 value: " + val_res.unwrap_err())
-                val val_pair = val_res.unwrap()
+                    val lookup_pair = match _lookup_unified(cur_table, name_idx):
+                        case Ok(decoded): decoded
+                        case Err(reason): return Err("hpack_decode §6.2.1 name lookup: " + reason)
+                    name_text = lookup_pair.0
+                val val_pair = match _decode_string(bytes, offset):
+                    case Ok(decoded): decoded
+                    case Err(reason): return Err("hpack_decode §6.2.1 value: " + reason)
                 val value_text = val_pair.0
                 offset = offset + val_pair.1
                 val h = HpackHeader(name: name_text, value: value_text, sensitive: false)
@@ -134,40 +127,36 @@ fn hpack_decode(bytes: [u8], state: HpackDecoderState) -> Result<([HpackHeader],
                 cur_table = dynamic_table_insert(cur_table, name_text, value_text)
             else if (first & 0xe0) == 0x20:
                 # §6.3 Dynamic Table Size Update (001xxxxx)
-                val sz_res = decode_prefix_int(bytes, offset, 5)
-                if sz_res.is_err():
-                    return Err("hpack_decode §6.3: " + sz_res.unwrap_err())
-                val sz_pair = sz_res.unwrap()
+                val sz_pair = match decode_prefix_int(bytes, offset, 5):
+                    case Ok(decoded): decoded
+                    case Err(reason): return Err("hpack_decode §6.3: " + reason)
                 val new_size = sz_pair.0
                 val consumed = sz_pair.1
                 cur_table = dynamic_table_resize(cur_table, new_size)
                 offset = offset + consumed
             else if (first & 0xf0) == 0x10:
                 # §6.2.3 Literal Never Indexed (0001xxxx)
-                val idx_res = decode_prefix_int(bytes, offset, 4)
-                if idx_res.is_err():
-                    return Err("hpack_decode §6.2.3: " + idx_res.unwrap_err())
-                val idx_pair = idx_res.unwrap()
+                val idx_pair = match decode_prefix_int(bytes, offset, 4):
+                    case Ok(decoded): decoded
+                    case Err(reason): return Err("hpack_decode §6.2.3: " + reason)
                 val name_idx = idx_pair.0
                 val idx_consumed = idx_pair.1
                 offset = offset + idx_consumed
                 var name_text = ""
                 if name_idx == 0:
-                    val name_res = _decode_string(bytes, offset)
-                    if name_res.is_err():
-                        return Err("hpack_decode §6.2.3 name: " + name_res.unwrap_err())
-                    val name_pair = name_res.unwrap()
+                    val name_pair = match _decode_string(bytes, offset):
+                        case Ok(decoded): decoded
+                        case Err(reason): return Err("hpack_decode §6.2.3 name: " + reason)
                     name_text = name_pair.0
                     offset = offset + name_pair.1
                 else:
-                    val lookup_res = _lookup_unified(cur_table, name_idx)
-                    if lookup_res.is_err():
-                        return Err("hpack_decode §6.2.3 name lookup: " + lookup_res.unwrap_err())
-                    name_text = lookup_res.unwrap().0
-                val val_res = _decode_string(bytes, offset)
-                if val_res.is_err():
-                    return Err("hpack_decode §6.2.3 value: " + val_res.unwrap_err())
-                val val_pair = val_res.unwrap()
+                    val lookup_pair = match _lookup_unified(cur_table, name_idx):
+                        case Ok(decoded): decoded
+                        case Err(reason): return Err("hpack_decode §6.2.3 name lookup: " + reason)
+                    name_text = lookup_pair.0
+                val val_pair = match _decode_string(bytes, offset):
+                    case Ok(decoded): decoded
+                    case Err(reason): return Err("hpack_decode §6.2.3 value: " + reason)
                 val value_text = val_pair.0
                 offset = offset + val_pair.1
                 val h = HpackHeader(name: name_text, value: value_text, sensitive: true)
@@ -175,30 +164,27 @@ fn hpack_decode(bytes: [u8], state: HpackDecoderState) -> Result<([HpackHeader],
                 # Never insert into dynamic table (§6.2.3)
             else:
                 # §6.2.2 Literal without Indexing (0000xxxx)
-                val idx_res = decode_prefix_int(bytes, offset, 4)
-                if idx_res.is_err():
-                    return Err("hpack_decode §6.2.2: " + idx_res.unwrap_err())
-                val idx_pair = idx_res.unwrap()
+                val idx_pair = match decode_prefix_int(bytes, offset, 4):
+                    case Ok(decoded): decoded
+                    case Err(reason): return Err("hpack_decode §6.2.2: " + reason)
                 val name_idx = idx_pair.0
                 val idx_consumed = idx_pair.1
                 offset = offset + idx_consumed
                 var name_text = ""
                 if name_idx == 0:
-                    val name_res = _decode_string(bytes, offset)
-                    if name_res.is_err():
-                        return Err("hpack_decode §6.2.2 name: " + name_res.unwrap_err())
-                    val name_pair = name_res.unwrap()
+                    val name_pair = match _decode_string(bytes, offset):
+                        case Ok(decoded): decoded
+                        case Err(reason): return Err("hpack_decode §6.2.2 name: " + reason)
                     name_text = name_pair.0
                     offset = offset + name_pair.1
                 else:
-                    val lookup_res = _lookup_unified(cur_table, name_idx)
-                    if lookup_res.is_err():
-                        return Err("hpack_decode §6.2.2 name lookup: " + lookup_res.unwrap_err())
-                    name_text = lookup_res.unwrap().0
-                val val_res = _decode_string(bytes, offset)
-                if val_res.is_err():
-                    return Err("hpack_decode §6.2.2 value: " + val_res.unwrap_err())
-                val val_pair = val_res.unwrap()
+                    val lookup_pair = match _lookup_unified(cur_table, name_idx):
+                        case Ok(decoded): decoded
+                        case Err(reason): return Err("hpack_decode §6.2.2 name lookup: " + reason)
+                    name_text = lookup_pair.0
+                val val_pair = match _decode_string(bytes, offset):
+                    case Ok(decoded): decoded
+                    case Err(reason): return Err("hpack_decode §6.2.2 value: " + reason)
                 val value_text = val_pair.0
                 offset = offset + val_pair.1
                 val h = HpackHeader(name: name_text, value: value_text, sensitive: false)
