@@ -93,6 +93,25 @@ parallel:
     the latest Spark quota failure.
   - `Poincare` (`gpt-5.4` explorer): normal/high-capability review of the
     updated plan and dirty-file scope.
+- 2026-06-28 fallback fan-out:
+  - `Helmholtz` (`gpt-5.3-codex-spark` explorer): Lane A SSpec/perf audit;
+    failed at the Spark usage-limit gate before producing findings.
+  - `Erdos` (`gpt-5.3-codex-spark` explorer): Lane B platform plan/doc audit;
+    failed at the Spark usage-limit gate before producing findings. This is a
+    new quota-failed Spark attempt, separate from the earlier mini fallback
+    named `Erdos`.
+  - `Euler` (`gpt-5.4-mini` explorer): replacement Lane A SSpec/perf audit
+    after Spark quota failure.
+  - `Darwin` (`gpt-5.4-mini` explorer): replacement Lane B platform plan/doc
+    audit after Spark quota failure.
+  - `Boyle` (`gpt-5.5` explorer): higher-model review of the sidecar plan,
+    overclaiming risks, and commit/push readiness gates.
+    `Boyle` completed with `WARN`: the split is valid only as a headless
+    preparation plan. This host can claim `prepared-not-verified`, not full
+    rendering/perf completion. Remaining live gates still require Linux Vulkan
+    `.rdc` evidence, macOS Metal render-log/GPU capture evidence, Windows
+    D3D12/PIX evidence, iOS/Android live renderer proof, full CSS closure, and
+    current-source retained 4K/8K aggregate validation.
 
 When Spark quota returns, restart the same Lane A and Lane B prompts with
 `gpt-5.3-codex-spark`. Do not mark the earlier quota-failed Spark agents as
@@ -658,9 +677,37 @@ Normal-review acceptance:
   review-scope separation. Remaining unintegrated `Feynman`/`Mill` suggestions
   remain advisory until the main agent or a later normal reviewer accepts
   specific claims.
+- 2026-06-28 Spark Lane A restart: attempted as `Helmholtz`; Spark quota
+  blocked it before any findings were produced.
+- 2026-06-28 Spark Lane B restart: attempted as `Erdos`; Spark quota blocked it
+  before any findings were produced. This name is ambiguous with an earlier
+  mini fallback, so status must be read from this dated bullet.
+- 2026-06-28 mini fallback Lane A: started as `Euler` to audit the SSpec/manual
+  doc and retained 4K/8K evidence criteria after the Spark quota failure.
+- 2026-06-28 mini fallback Lane B: started as `Darwin` to audit platform
+  plan/runbook completion criteria after the Spark quota failure.
+- 2026-06-28 higher-model review lane: started as `Boyle` (`gpt-5.5`) to review
+  the sidecar split, anti-overclaim rules, and focused commit/push gates before
+  accepting broad findings or done marks.
+- 2026-06-28 higher-model review result: `Boyle` returned `WARN`. Accepted
+  boundary: this headless host may only mark the lane `prepared-not-verified`;
+  any stronger done claim needs live platform evidence for Linux Vulkan,
+  macOS Metal, Windows D3D12, iOS, Android, full CSS, and retained 4K/8K
+  current-source aggregate validation.
+- 2026-06-28 mini fallback Lane A result: `Euler` found the retained 4K/8K
+  criteria mechanically complete and identified a Linux Vulkan RenderDoc gap;
+  accepted fix: assert aggregate env-file status, RenderDoc gate status, and
+  per-surface RenderDoc status/reason fields in the completion SSpec.
+- 2026-06-28 mini fallback Lane B result: `Darwin` confirmed the headless-host
+  criterion is explicit, but flagged fragmented/stale guide and report pages.
+  Accepted as follow-up planning only for
+  `doc/07_guide/tooling/renderdoc_capture_infra.md`,
+  `doc/07_guide/app/ui/gui_web_2d_vulkan_setup.md`, and stale `doc/09_report`
+  snapshots; do not treat those stale pages as current proof.
 
 ## Hard Stop Conditions
 
+- Do not claim stronger than `prepared-not-verified` from this headless host.
 - Do not mark the active goal complete while any required backend capture,
   platform render-log comparison, full CSS coverage, production parity, or
   RenderDoc `.rdc` gate remains incomplete.
