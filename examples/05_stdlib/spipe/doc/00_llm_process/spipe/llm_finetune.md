@@ -106,7 +106,7 @@ hide a WARN cache/license gate. Checker paths are resolved under
 reported as a failed unsafe checker path.
 Use `spipe fine-tune-doctor <attempt_id>` to check registry evidence,
 placeholder values, missing local model artifact or handoff doc paths, and the
-next readiness action before treating an attempt as production evidence.
+target-eval failure reason before treating an attempt as production evidence.
 Use `spipe fine-tune-ready <attempt_id>` as the release/training handoff gate;
 it fails while requirement selection, model choice, real tuning method, model
 artifact, target-reaching eval, accepted decision, or deployable app handoff

@@ -1274,6 +1274,11 @@ function commandFineTuneDoctor(args) {
     warnings += 1;
     console.log(`WARN missing_local_handoff_doc handoff_doc=${handoffDoc}`);
   }
+  const evalDiagnostic = fineTuneEvalTargetDiagnostic(root, attemptId, attemptContent);
+  if (evalDiagnostic) {
+    warnings += 1;
+    console.log(`WARN target_eval_not_reached reason=${evalDiagnostic.reason} result=${evalDiagnostic.result || "(missing)"} target="${quoteSdn(evalDiagnostic.targetText)}" metrics="${quoteSdn(evalDiagnostic.metricsText)}"`);
+  }
 
   const gate = fineTuneDataGateStatus(root, attemptId);
   if (gate) {
@@ -1436,6 +1441,25 @@ function fineTuneEvalTargetStatus(root, attemptId, attemptContent) {
     && metricValue !== undefined
     && metricValue >= target.threshold
   );
+}
+
+function fineTuneEvalTargetDiagnostic(root, attemptId, attemptContent) {
+  const metricsText = registryValueForAttempt(root, "eval_results.sdn", attemptId, "metrics") || readQuotedValue(attemptContent, "metrics");
+  const targetText = registryValueForAttempt(root, "eval_results.sdn", attemptId, "target") || readQuotedValue(attemptContent, "target");
+  const result = registryValueForAttempt(root, "eval_results.sdn", attemptId, "result") || readQuotedValue(attemptContent, "result");
+  if (!metricsText && !targetText && !result) return null;
+
+  const target = parseTarget(targetText);
+  const metrics = parseMetricMap(metricsText);
+  const metricValue = target ? metrics.get(target.metric) : undefined;
+  if (result === "pass" && target && metricValue !== undefined && metricValue >= target.threshold) return null;
+
+  let reason = "result-not-pass";
+  if (!target) reason = "target-unparseable";
+  else if (metricValue === undefined) reason = "metric-missing";
+  else if (metricValue < target.threshold) reason = "metric-below-target";
+
+  return { reason, result, targetText, metricsText };
 }
 
 function fineTuneAppHandoffReady(handoffDoc, usage, licenseConstraints, safetyEval, deploymentEvidence) {

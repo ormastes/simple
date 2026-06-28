@@ -307,6 +307,11 @@ Evidence:
   non-placeholder local paths do not exist, matching the stricter
   `fine-tune-ready` gates instead of leaving operators to infer the blocker
   from `fine-tune-next`.
+- 2026-06-28 doctor target-eval diagnostics: `fine-tune-doctor` now prints
+  `WARN target_eval_not_reached` with a machine-readable reason plus the target
+  and metrics text when eval evidence is malformed, missing the metric, below
+  threshold, or not marked pass. The SPipe build smoke covers a below-target
+  eval fixture.
 
 Next normal-LLM work: finish retry5 licensed cache/checksum evidence and retry6
 real training/eval before retry7 can become an acceptance gate with a PASS
