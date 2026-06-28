@@ -252,6 +252,8 @@ Tasks:
     `bootstrap/stage3/simple` in addition to existing `bin/` and Rust target
     fallbacks, so `simple_context` can execute the context CLI in this release
     workspace without requiring `SIMPLE_BINARY`.
+<<<<<<< Conflict 1 of 1
++++++++ Contents of side #1
 11. Harden SQL row rendering for checked/JIT context-mode execution. Status:
     done on 2026-06-28; `_context_sql_render_rows_filtered(...)` and its
     wrapper now carry explicit `[SqliteRow]` parameter types so checked
@@ -262,6 +264,13 @@ Tasks:
     and concrete `rt_time_now_*` entries, so checked/JIT context-mode code that
     lowers dynamic `.len()` or timing helpers can resolve the symbols instead of
     binding a NULL import.
+%%%%%%% Changes from base to side #2
+-11. Harden SQL row rendering for checked/JIT context-mode execution. Status:
+-    done on 2026-06-28; `_context_sql_render_rows_filtered(...)` and its
+-    wrapper now carry explicit `[SqliteRow]` parameter types so checked
+-    execution no longer falls back on an untyped row parameter in the embedded
+-    SQL context renderer.
+>>>>>>> Conflict 1 of 1 ends
 
 Evidence:
 

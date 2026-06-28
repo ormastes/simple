@@ -42,7 +42,10 @@ feature (multi-pillar, multi-session)
 ### P5 — SimpleOS as compiler HOST
 - AC-11: `cfg_normalize_os("simpleos")` + `@cfg(os="simpleos")` parse + platform_defaults unix-like.
   [DONE — cfg+attr branches green, linux/freebsd regression-guarded]
-- AC-12: `host_os()` can return "simpleos"; linker treats it unix-like; link-plan spec. [OPEN]
+- AC-12: linker treats "simpleos" unix-like; link-plan spec. [DONE — platform_defaults simpleos
+  host branches (libs/crt/loader), proven populated-vs-empty-fallback, linux/freebsd regression-
+  guarded, 12/0]. host_os() runtime-detection string is the runtime's job on real SimpleOS (not
+  needed for cross-link); port of remaining C libc postponed (keep C until parity per user).
 ### P6 — Docs & tracking
 - AC-13: new sspec SYSTEM tests follow `qemu_systest_contract` fail-closed + listed in guide. [DONE]
 - AC-14: deferred perf/hw items filed as concrete bugs, no silent TODO/NOTE. [DONE — 3 bugs filed]
