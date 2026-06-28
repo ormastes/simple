@@ -1063,6 +1063,11 @@ Normal-review acceptance:
   conflicting lane metadata with `metadata-mismatch`. Same-source evidence from
   different runtime, browser/WebView/Electron, graphics SDK/driver, or runbook
   windows cannot satisfy `cross-platform-freshness`.
+- 2026-06-28 freshness metadata mismatch coverage:
+  `test/03_system/check/gui_web_2d_platform_freshness_spec.spl` now covers
+  mismatch diagnostics for runtime build, browser/WebView/Electron revision,
+  graphics SDK/driver, and runbook version labels, so all freshness metadata
+  fields have fail-closed regression coverage.
 
 ## Hard Stop Conditions
 

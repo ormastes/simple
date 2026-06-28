@@ -27,7 +27,7 @@ gui_web_2d_platform_freshness_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 7 | 7 | 0 | 0 |
+| 8 | 8 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -204,6 +204,8 @@ The metadata-mismatch scenario keeps every lane on the same source revision but
 sets one lane's runtime build to a different non-empty value. That must remain a
 failure because same-source evidence from different runtime or toolchain windows
 is not a valid final completion proof.
+The multi-field metadata-mismatch scenario covers the browser/WebView/Electron,
+graphics SDK/driver, and runbook labels through the same shared mismatch helper.
 
 ## Scenarios
 
@@ -337,6 +339,32 @@ expect(evidence).to_contain("gui_web_2d_platform_freshness_mismatched_metadata_l
 
 </details>
 
+#### fails when same-source evidence has conflicting browser driver and runbook metadata
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val command = "rm -rf build/test-gui-web-2d-platform-freshness-metadata-multi-mismatch && mkdir -p build/test-gui-web-2d-platform-freshness-metadata-multi-mismatch/env && printf 'native_render_log_platform_matrix_source_revision=rev-a\\nnative_render_log_platform_matrix_runtime_build=runtime-a\\nnative_render_log_platform_matrix_browser_webview_electron_revision=chrome-a\\nnative_render_log_platform_matrix_graphics_sdk_driver=vulkan-a\\nnative_render_log_platform_matrix_runbook_version=runbook-a\\n' > build/test-gui-web-2d-platform-freshness-metadata-multi-mismatch/env/native.env && printf 'tauri_mobile_renderer_parity_source_revision=rev-a\\ngui_web_2d_evidence_browser_webview_electron_revision=chrome-b\\n' > build/test-gui-web-2d-platform-freshness-metadata-multi-mismatch/env/mobile.env && printf 'gui_showcase_4k_200fps_source_revision=rev-a\\ngui_showcase_4k_200fps_graphics_sdk_driver=vulkan-b\\n' > build/test-gui-web-2d-platform-freshness-metadata-multi-mismatch/env/4k.env && printf 'gui_showcase_8k_perf_source_revision=rev-a\\ngui_showcase_8k_perf_runbook_version=runbook-b\\n' > build/test-gui-web-2d-platform-freshness-metadata-multi-mismatch/env/8k.env && printf 'html_css_full_rendering_goal_source_revision=rev-a\\n' > build/test-gui-web-2d-platform-freshness-metadata-multi-mismatch/env/html.env && printf 'production_gui_web_renderer_parity_source_revision=rev-a\\n' > build/test-gui-web-2d-platform-freshness-metadata-multi-mismatch/env/production.env && BUILD_DIR=build/test-gui-web-2d-platform-freshness-metadata-multi-mismatch/out REPORT_PATH=build/test-gui-web-2d-platform-freshness-metadata-multi-mismatch/report.md NATIVE_RENDER_LOG_PLATFORM_MATRIX_ENV=build/test-gui-web-2d-platform-freshness-metadata-multi-mismatch/env/native.env TAURI_MOBILE_RENDERER_PARITY_ENV=build/test-gui-web-2d-platform-freshness-metadata-multi-mismatch/env/mobile.env GUI_SHOWCASE_4K_200FPS_ENV=build/test-gui-web-2d-platform-freshness-metadata-multi-mismatch/env/4k.env GUI_SHOWCASE_8K_200FPS_ENV=build/test-gui-web-2d-platform-freshness-metadata-multi-mismatch/env/8k.env HTML_CSS_FULL_RENDERING_GOAL_ENV=build/test-gui-web-2d-platform-freshness-metadata-multi-mismatch/env/html.env PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=build/test-gui-web-2d-platform-freshness-metadata-multi-mismatch/env/production.env sh scripts/check/check-gui-web-2d-platform-freshness.shs"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read("build/test-gui-web-2d-platform-freshness-metadata-multi-mismatch/out/evidence.env")
+expect(evidence).to_contain("gui_web_2d_platform_freshness_status=fail")
+expect(evidence).to_contain("gui_web_2d_platform_freshness_reason=metadata-mismatch")
+expect(evidence).to_contain("gui_web_2d_platform_freshness_source_revision=rev-a")
+expect(evidence).to_contain("gui_web_2d_platform_freshness_browser_webview_electron_revision=chrome-a")
+expect(evidence).to_contain("gui_web_2d_platform_freshness_graphics_sdk_driver=vulkan-a")
+expect(evidence).to_contain("gui_web_2d_platform_freshness_runbook_version=runbook-a")
+expect(evidence).to_contain("gui_web_2d_platform_freshness_missing_metadata=")
+expect(evidence).to_contain("gui_web_2d_platform_freshness_mismatched_metadata_lanes=mobile:browser-webview-electron-revision,retained-4k:graphics-sdk-driver,retained-8k:runbook-version")
+```
+
+</details>
+
 #### fails when same-source evidence omits freshness metadata
 
 <details>
@@ -387,8 +415,8 @@ expect(evidence).to_contain("gui_web_2d_platform_freshness_mismatched_source_rev
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 7 |
-| Active scenarios | 7 |
+| Total scenarios | 8 |
+| Active scenarios | 8 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
