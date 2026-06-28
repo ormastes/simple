@@ -24,6 +24,12 @@ value_of() {
     sed -n "s/^${key}=//p" "$file" 2>/dev/null | tail -n 1
 }
 
+key_count() {
+    key="$1"
+    file="$2"
+    sed -n "s/^${key}=//p" "$file" 2>/dev/null | wc -l | tr -d ' '
+}
+
 first_value() {
     file="$1"
     shift
@@ -68,6 +74,18 @@ source_for() {
         "${prefix}_current_source_revision" \
         gui_web_2d_evidence_source_revision \
         source_revision
+}
+
+duplicate_source_key_for() {
+    file="$1"
+    prefix="$2"
+    for key in "${prefix}_source_revision" "${prefix}_current_source_revision" gui_web_2d_evidence_source_revision source_revision; do
+        if [ "$(key_count "$key" "$file")" -gt 1 ]; then
+            echo "$key"
+            return
+        fi
+    done
+    echo ""
 }
 
 metadata_for() {
@@ -121,26 +139,34 @@ graphics_driver="${GUI_WEB_2D_PLATFORM_FRESHNESS_GRAPHICS_SDK_DRIVER:-$(metadata
 runbook_version="${GUI_WEB_2D_PLATFORM_FRESHNESS_RUNBOOK_VERSION:-$(metadata_across_lanes runbook_version)}"
 
 missing_files=""
+duplicate_source_lanes=""
 missing_source_lanes=""
 mismatched_source_lanes=""
 for row in \
-    "native:$NATIVE_ENV:$native_source" \
-    "mobile:$MOBILE_ENV:$mobile_source" \
-    "retained-4k:$PERF_4K_ENV:$perf_4k_source" \
-    "retained-8k:$PERF_8K_ENV:$perf_8k_source" \
-    "html-css:$HTML_CSS_ENV:$html_css_source" \
-    "production-parity:$PRODUCTION_ENV:$production_source"
+    "native:$NATIVE_ENV:native_render_log_platform_matrix:$native_source" \
+    "mobile:$MOBILE_ENV:tauri_mobile_renderer_parity:$mobile_source" \
+    "retained-4k:$PERF_4K_ENV:gui_showcase_4k_200fps:$perf_4k_source" \
+    "retained-8k:$PERF_8K_ENV:gui_showcase_8k_perf:$perf_8k_source" \
+    "html-css:$HTML_CSS_ENV:html_css_full_rendering_goal:$html_css_source" \
+    "production-parity:$PRODUCTION_ENV:production_gui_web_renderer_parity:$production_source"
 do
     lane="${row%%:*}"
     rest="${row#*:}"
     file="${rest%%:*}"
+    rest="${rest#*:}"
+    prefix="${rest%%:*}"
     source="${row##*:}"
     if [ "$(file_status "$file")" != "pass" ]; then
         missing_files="$(append_csv "$missing_files" "$lane")"
-    elif [ "$source" = "" ]; then
-        missing_source_lanes="$(append_csv "$missing_source_lanes" "$lane")"
-    elif [ "$source_revision" = "" ] || [ "$source" != "$source_revision" ]; then
-        mismatched_source_lanes="$(append_csv "$mismatched_source_lanes" "$lane")"
+    else
+        duplicate_source_key="$(duplicate_source_key_for "$file" "$prefix")"
+        if [ "$duplicate_source_key" != "" ]; then
+            duplicate_source_lanes="$(append_csv "$duplicate_source_lanes" "$lane:$duplicate_source_key")"
+        elif [ "$source" = "" ]; then
+            missing_source_lanes="$(append_csv "$missing_source_lanes" "$lane")"
+        elif [ "$source_revision" = "" ] || [ "$source" != "$source_revision" ]; then
+            mismatched_source_lanes="$(append_csv "$mismatched_source_lanes" "$lane")"
+        fi
     fi
 done
 
@@ -174,6 +200,9 @@ reason=pass
 if [ "$missing_files" != "" ]; then
     status=fail
     reason=missing-evidence-files
+elif [ "$duplicate_source_lanes" != "" ]; then
+    status=fail
+    reason=duplicate-source-revision-key
 elif [ "$missing_source_lanes" != "" ]; then
     status=fail
     reason=missing-source-revision
@@ -197,6 +226,7 @@ fi
     echo "gui_web_2d_platform_freshness_graphics_sdk_driver=$graphics_driver"
     echo "gui_web_2d_platform_freshness_runbook_version=$runbook_version"
     echo "gui_web_2d_platform_freshness_missing_evidence_lanes=$missing_files"
+    echo "gui_web_2d_platform_freshness_duplicate_source_revision_lanes=$duplicate_source_lanes"
     echo "gui_web_2d_platform_freshness_missing_source_revision_lanes=$missing_source_lanes"
     echo "gui_web_2d_platform_freshness_mismatched_source_revision_lanes=$mismatched_source_lanes"
     echo "gui_web_2d_platform_freshness_missing_metadata=$missing_metadata"
@@ -227,6 +257,7 @@ fi
     echo "- Graphics SDK/driver: $graphics_driver"
     echo "- Runbook version: $runbook_version"
     echo "- Missing evidence lanes: $missing_files"
+    echo "- Duplicate source-revision lanes: $duplicate_source_lanes"
     echo "- Missing source-revision lanes: $missing_source_lanes"
     echo "- Mismatched source-revision lanes: $mismatched_source_lanes"
     echo "- Missing metadata: $missing_metadata"

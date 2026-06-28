@@ -25,6 +25,7 @@ sh scripts/check/check-gui-web-2d-platform-freshness.shs
 - Missing evidence env files fail freshness.
 - Missing source-revision fields fail freshness.
 - Source-revision mismatches fail freshness.
+- Duplicate source-revision keys in a present lane env fail freshness.
 - Non-pass freshness exits nonzero so automation cannot treat stale or missing
   evidence as a valid handoff input.
 - Matching source revisions without runtime, browser/WebView/Electron, graphics
@@ -57,9 +58,11 @@ wrappers to produce the env files that this checker reads.
 their env files. `missing-source-revision` means an env exists but is too weak
 for final completion because it cannot be tied to source. `source-revision-
 mismatch` means at least one lane is stale relative to the selected source
-revision. `missing-freshness-metadata` means the same-source proof exists but
-the run lacks runtime, browser/WebView/Electron, graphics SDK/driver, or runbook
-version context.
+revision. `duplicate-source-revision-key` means a present lane env repeats one
+source-revision key, which is rejected before any last-value-wins parse can hide
+an earlier stale value. `missing-freshness-metadata` means the same-source proof
+exists but the run lacks runtime, browser/WebView/Electron, graphics SDK/driver,
+or runbook version context.
 
 The process exit code is `0` only for `pass`. Missing evidence, missing source
 revisions, stale source revisions, and missing metadata must all exit nonzero
@@ -92,6 +95,11 @@ The shared fallback must work for every upstream evidence family, not just the
 HTML/CSS wrapper. Platform agents may introduce new wrappers before each lane has
 a stable lane-specific key name, and final freshness should still be able to
 compare those env files by the common source-revision field.
+
+Each accepted source-revision key must appear at most once per lane env. If a
+lane repeats its lane-specific source key, current-source key, shared
+`gui_web_2d_evidence_source_revision`, or generic `source_revision`, freshness
+fails with `duplicate-source-revision-key`.
 
 ## Metadata Contract
 
@@ -240,6 +248,18 @@ describe "GUI/Web/2D platform freshness":
         expect(evidence).to_contain("gui_web_2d_platform_freshness_runtime_build=operator-runtime-build")
         expect(evidence).to_contain("gui_web_2d_platform_freshness_mobile_source_revision=rev-stale")
         expect(evidence).to_contain("gui_web_2d_platform_freshness_mismatched_source_revision_lanes=mobile\n")
+
+    it "fails when a present evidence lane has duplicate source revision keys":
+        val command = "rm -rf build/test-gui-web-2d-platform-freshness-duplicate-source && mkdir -p build/test-gui-web-2d-platform-freshness-duplicate-source/env && printf 'native_render_log_platform_matrix_source_revision=rev-stale\\nnative_render_log_platform_matrix_source_revision=rev-a\\nnative_render_log_platform_matrix_runtime_build=simple-self-hosted\\nnative_render_log_platform_matrix_browser_webview_electron_revision=chrome-1\\nnative_render_log_platform_matrix_graphics_sdk_driver=vulkan-1\\nnative_render_log_platform_matrix_runbook_version=2026-06-28\\n' > build/test-gui-web-2d-platform-freshness-duplicate-source/env/native.env && printf 'tauri_mobile_renderer_parity_source_revision=rev-a\\n' > build/test-gui-web-2d-platform-freshness-duplicate-source/env/mobile.env && printf 'gui_showcase_4k_200fps_source_revision=rev-a\\n' > build/test-gui-web-2d-platform-freshness-duplicate-source/env/4k.env && printf 'gui_showcase_8k_perf_source_revision=rev-a\\n' > build/test-gui-web-2d-platform-freshness-duplicate-source/env/8k.env && printf 'html_css_full_rendering_goal_source_revision=rev-a\\n' > build/test-gui-web-2d-platform-freshness-duplicate-source/env/html.env && printf 'production_gui_web_renderer_parity_source_revision=rev-a\\n' > build/test-gui-web-2d-platform-freshness-duplicate-source/env/production.env && BUILD_DIR=build/test-gui-web-2d-platform-freshness-duplicate-source/out REPORT_PATH=build/test-gui-web-2d-platform-freshness-duplicate-source/report.md NATIVE_RENDER_LOG_PLATFORM_MATRIX_ENV=build/test-gui-web-2d-platform-freshness-duplicate-source/env/native.env TAURI_MOBILE_RENDERER_PARITY_ENV=build/test-gui-web-2d-platform-freshness-duplicate-source/env/mobile.env GUI_SHOWCASE_4K_200FPS_ENV=build/test-gui-web-2d-platform-freshness-duplicate-source/env/4k.env GUI_SHOWCASE_8K_200FPS_ENV=build/test-gui-web-2d-platform-freshness-duplicate-source/env/8k.env HTML_CSS_FULL_RENDERING_GOAL_ENV=build/test-gui-web-2d-platform-freshness-duplicate-source/env/html.env PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=build/test-gui-web-2d-platform-freshness-duplicate-source/env/production.env sh scripts/check/check-gui-web-2d-platform-freshness.shs"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(1)
+
+        val evidence = file_read("build/test-gui-web-2d-platform-freshness-duplicate-source/out/evidence.env")
+        expect(evidence).to_contain("gui_web_2d_platform_freshness_status=fail")
+        expect(evidence).to_contain("gui_web_2d_platform_freshness_reason=duplicate-source-revision-key")
+        expect(evidence).to_contain("gui_web_2d_platform_freshness_duplicate_source_revision_lanes=native:native_render_log_platform_matrix_source_revision")
+        expect(evidence).to_contain("gui_web_2d_platform_freshness_missing_source_revision_lanes=")
+        expect(evidence).to_contain("gui_web_2d_platform_freshness_mismatched_source_revision_lanes=")
 
     it "passes when all lanes use the shared source-revision fallback":
         val command = "rm -rf build/test-gui-web-2d-platform-freshness-shared-source && mkdir -p build/test-gui-web-2d-platform-freshness-shared-source/env && printf 'gui_web_2d_evidence_source_revision=rev-shared\\ngui_web_2d_evidence_runtime_build=shared-runtime\\ngui_web_2d_evidence_browser_webview_electron_revision=shared-browser-webview-electron\\ngui_web_2d_evidence_graphics_sdk_driver=shared-vulkan-metal-d3d12\\ngui_web_2d_evidence_runbook_version=shared-runbook\\n' > build/test-gui-web-2d-platform-freshness-shared-source/env/native.env && printf 'gui_web_2d_evidence_source_revision=rev-shared\\n' > build/test-gui-web-2d-platform-freshness-shared-source/env/mobile.env && printf 'gui_web_2d_evidence_source_revision=rev-shared\\n' > build/test-gui-web-2d-platform-freshness-shared-source/env/4k.env && printf 'gui_web_2d_evidence_source_revision=rev-shared\\n' > build/test-gui-web-2d-platform-freshness-shared-source/env/8k.env && printf 'gui_web_2d_evidence_source_revision=rev-shared\\n' > build/test-gui-web-2d-platform-freshness-shared-source/env/html.env && printf 'gui_web_2d_evidence_source_revision=rev-shared\\n' > build/test-gui-web-2d-platform-freshness-shared-source/env/production.env && BUILD_DIR=build/test-gui-web-2d-platform-freshness-shared-source/out REPORT_PATH=build/test-gui-web-2d-platform-freshness-shared-source/report.md NATIVE_RENDER_LOG_PLATFORM_MATRIX_ENV=build/test-gui-web-2d-platform-freshness-shared-source/env/native.env TAURI_MOBILE_RENDERER_PARITY_ENV=build/test-gui-web-2d-platform-freshness-shared-source/env/mobile.env GUI_SHOWCASE_4K_200FPS_ENV=build/test-gui-web-2d-platform-freshness-shared-source/env/4k.env GUI_SHOWCASE_8K_200FPS_ENV=build/test-gui-web-2d-platform-freshness-shared-source/env/8k.env HTML_CSS_FULL_RENDERING_GOAL_ENV=build/test-gui-web-2d-platform-freshness-shared-source/env/html.env PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=build/test-gui-web-2d-platform-freshness-shared-source/env/production.env sh scripts/check/check-gui-web-2d-platform-freshness.shs"

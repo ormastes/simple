@@ -1078,6 +1078,11 @@ Normal-review acceptance:
   that an explicit `GUI_WEB_2D_PLATFORM_FRESHNESS_SOURCE_REVISION` selects the
   review window but cannot hide a lane env whose source revision is stale or
   different from that selected revision.
+- 2026-06-28 freshness duplicate source key revalidation:
+  `scripts/check/check-gui-web-2d-platform-freshness.shs` now rejects duplicate
+  accepted source-revision keys inside each present lane env before comparing
+  lane freshness. A hand-edited or concatenated env cannot hide a stale source
+  line by appending a later fresh value for the same key.
 - 2026-06-28 bundle optional reason revalidation:
   `scripts/check/check-gui-web-2d-platform-evidence-bundle.shs` now rejects a
   required gate status key when the sibling optional reason key is present and

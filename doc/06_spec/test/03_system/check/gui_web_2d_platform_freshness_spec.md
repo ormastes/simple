@@ -27,7 +27,7 @@ gui_web_2d_platform_freshness_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 10 | 10 | 0 | 0 |
+| 11 | 11 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -74,6 +74,7 @@ sh scripts/check/check-gui-web-2d-platform-freshness.shs
 - Missing evidence env files fail freshness.
 - Missing source-revision fields fail freshness.
 - Source-revision mismatches fail freshness.
+- Duplicate source-revision keys in a present lane env fail freshness.
 - Non-pass freshness exits nonzero so automation cannot treat stale or missing
   evidence as a valid handoff input.
 - Matching source revisions without runtime, browser/WebView/Electron, graphics
@@ -106,9 +107,11 @@ wrappers to produce the env files that this checker reads.
 their env files. `missing-source-revision` means an env exists but is too weak
 for final completion because it cannot be tied to source. `source-revision-
 mismatch` means at least one lane is stale relative to the selected source
-revision. `missing-freshness-metadata` means the same-source proof exists but
-the run lacks runtime, browser/WebView/Electron, graphics SDK/driver, or runbook
-version context.
+revision. `duplicate-source-revision-key` means a present lane env repeats one
+source-revision key, which is rejected before any last-value-wins parse can hide
+an earlier stale value. `missing-freshness-metadata` means the same-source proof
+exists but the run lacks runtime, browser/WebView/Electron, graphics SDK/driver,
+or runbook version context.
 
 The process exit code is `0` only for `pass`. Missing evidence, missing source
 revisions, stale source revisions, and missing metadata must all exit nonzero
@@ -141,6 +144,11 @@ The shared fallback must work for every upstream evidence family, not just the
 HTML/CSS wrapper. Platform agents may introduce new wrappers before each lane has
 a stable lane-specific key name, and final freshness should still be able to
 compare those env files by the common source-revision field.
+
+Each accepted source-revision key must appear at most once per lane env. If a
+lane repeats its lane-specific source key, current-source key, shared
+`gui_web_2d_evidence_source_revision`, or generic `source_revision`, freshness
+fails with `duplicate-source-revision-key`.
 
 ## Metadata Contract
 
@@ -341,6 +349,29 @@ expect(evidence).to_contain("gui_web_2d_platform_freshness_mismatched_source_rev
 
 </details>
 
+#### fails when a present evidence lane has duplicate source revision keys
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val command = "rm -rf build/test-gui-web-2d-platform-freshness-duplicate-source && mkdir -p build/test-gui-web-2d-platform-freshness-duplicate-source/env && printf 'native_render_log_platform_matrix_source_revision=rev-stale\\nnative_render_log_platform_matrix_source_revision=rev-a\\nnative_render_log_platform_matrix_runtime_build=simple-self-hosted\\nnative_render_log_platform_matrix_browser_webview_electron_revision=chrome-1\\nnative_render_log_platform_matrix_graphics_sdk_driver=vulkan-1\\nnative_render_log_platform_matrix_runbook_version=2026-06-28\\n' > build/test-gui-web-2d-platform-freshness-duplicate-source/env/native.env && printf 'tauri_mobile_renderer_parity_source_revision=rev-a\\n' > build/test-gui-web-2d-platform-freshness-duplicate-source/env/mobile.env && printf 'gui_showcase_4k_200fps_source_revision=rev-a\\n' > build/test-gui-web-2d-platform-freshness-duplicate-source/env/4k.env && printf 'gui_showcase_8k_perf_source_revision=rev-a\\n' > build/test-gui-web-2d-platform-freshness-duplicate-source/env/8k.env && printf 'html_css_full_rendering_goal_source_revision=rev-a\\n' > build/test-gui-web-2d-platform-freshness-duplicate-source/env/html.env && printf 'production_gui_web_renderer_parity_source_revision=rev-a\\n' > build/test-gui-web-2d-platform-freshness-duplicate-source/env/production.env && BUILD_DIR=build/test-gui-web-2d-platform-freshness-duplicate-source/out REPORT_PATH=build/test-gui-web-2d-platform-freshness-duplicate-source/report.md NATIVE_RENDER_LOG_PLATFORM_MATRIX_ENV=build/test-gui-web-2d-platform-freshness-duplicate-source/env/native.env TAURI_MOBILE_RENDERER_PARITY_ENV=build/test-gui-web-2d-platform-freshness-duplicate-source/env/mobile.env GUI_SHOWCASE_4K_200FPS_ENV=build/test-gui-web-2d-platform-freshness-duplicate-source/env/4k.env GUI_SHOWCASE_8K_200FPS_ENV=build/test-gui-web-2d-platform-freshness-duplicate-source/env/8k.env HTML_CSS_FULL_RENDERING_GOAL_ENV=build/test-gui-web-2d-platform-freshness-duplicate-source/env/html.env PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=build/test-gui-web-2d-platform-freshness-duplicate-source/env/production.env sh scripts/check/check-gui-web-2d-platform-freshness.shs"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read("build/test-gui-web-2d-platform-freshness-duplicate-source/out/evidence.env")
+expect(evidence).to_contain("gui_web_2d_platform_freshness_status=fail")
+expect(evidence).to_contain("gui_web_2d_platform_freshness_reason=duplicate-source-revision-key")
+expect(evidence).to_contain("gui_web_2d_platform_freshness_duplicate_source_revision_lanes=native:native_render_log_platform_matrix_source_revision")
+expect(evidence).to_contain("gui_web_2d_platform_freshness_missing_source_revision_lanes=")
+expect(evidence).to_contain("gui_web_2d_platform_freshness_mismatched_source_revision_lanes=")
+```
+
+</details>
+
 #### passes when all lanes use the shared source-revision fallback
 
 <details>
@@ -473,8 +504,8 @@ expect(evidence).to_contain("gui_web_2d_platform_freshness_mismatched_source_rev
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 10 |
-| Active scenarios | 10 |
+| Total scenarios | 11 |
+| Active scenarios | 11 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
