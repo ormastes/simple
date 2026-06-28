@@ -434,3 +434,14 @@ Tasks:
     2026-06-28; the retry7 gate now emits `app_handoff_doc_ready`, treats
     missing local handoff docs or `do not deploy` usage as non-acceptance
     evidence, and requires that field before release handoff review can pass.
+11. Harden agent dashboard shared-store evidence. Status: done on 2026-06-28;
+    the `/agents` web dashboard system spec now creates a local assistant
+    store fixture and proves authenticated rendering of selected session,
+    objective, timeline count, read-only replay notice, and absence-marker-free
+    output.
+12. Correct embedded SQL context row typing. Status: done on 2026-06-28;
+    `src/app/io/context_ops.spl` now imports `SqliteRow` and annotates
+    `_context_sql_render_rows_filtered(...)` plus its wrapper with `[SqliteRow]`,
+    removing the focused HIR lowering warning for that function from mirrored
+    context specs. The separate `rt_len` JIT fallback remains tracked as a
+    runtime symbol/deployment issue, not a row-inference issue.
