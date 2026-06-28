@@ -51,7 +51,7 @@ Owns:
 - replay/import mode from persisted records
 - web login surface and operator session handling for dashboard access
 - LLM diagnostics JSONL replay panels that summarize hook events without
-  exposing absent values as literal `nil`
+  exposing the runtime's internal absence marker
 
 Primary inputs:
 
@@ -165,8 +165,8 @@ Fields:
    markers.
 3. The web dashboard embeds the rendered diagnostics panel in the Diagnostics
    view for authenticated operators.
-4. Missing fields render as empty values; user-visible output must not render the
-   internal absence value `nil`.
+4. Missing fields render as explicit public absence text; user-visible output
+   must not render the runtime's internal absence marker.
 
 ### Web Login / PBP Bootstrap Flow
 
@@ -290,7 +290,7 @@ Do not smear assistant logic into dashboard render modules or generic MCP protoc
 
 Concise operator setup for the web login and PBP bootstrap path lives in:
 
-- [LLM Dashboard Web Login Guide](../07_guide/tooling/llm_dashboard_web_login.md)
+- [LLM Dashboard Web Login Guide](../../07_guide/app/llm/llm_dashboard_web_login.md)
 
 ## Key Risks
 
