@@ -11,10 +11,12 @@ and GitHub synchronization without making false parity claims.
 ## Authoritative Workspace State
 
 - Current workspace: `/Users/ormastes/simple`.
-- Current branch: `codex/tauri-mobile-renderer-parity-2026-06-26`.
-- Current branch head: `ad151553c2 feat: add tauri mobile renderer parity evidence`.
-- Current branch upstream: `origin/codex/tauri-mobile-renderer-parity-2026-06-26`.
-- Branch/upstream status at resume: `0 ahead, 0 behind`.
+- Current branch at original recovery: `codex/tauri-mobile-renderer-parity-2026-06-26`.
+- Current branch head at original recovery:
+  `ad151553c2 feat: add tauri mobile renderer parity evidence`.
+- Current branch upstream at original recovery:
+  `origin/codex/tauri-mobile-renderer-parity-2026-06-26`.
+- Branch/upstream status at original recovery: `0 ahead, 0 behind`.
 - `origin/main` has later crash-lane commits, including:
   - `810824dab0 test(gui): surface mobile interaction proof in parity report`
   - `6acc8b06b5 test(gui): surface metal render proof in report`
@@ -24,6 +26,280 @@ and GitHub synchronization without making false parity claims.
 - The current workspace is dirty. Treat existing dirty files as in-flight work;
   do not reset, overwrite, or fold them into unrelated cleanup without an
   explicit ownership decision.
+
+## Post-Sync Audit (2026-07-01)
+
+- Current branch is still `codex/tauri-mobile-renderer-parity-2026-06-26`.
+- Current checked-out head is
+  `4d4f6162ab44f92206778195a3388e264917711c`
+  (`test(gui): harden mobile renderer evidence reporting`).
+- Current upstream is
+  `origin/codex/tauri-mobile-renderer-parity-2026-06-26`; local and upstream
+  are `0 ahead, 0 behind`, and `git ls-remote` during sync verified the remote
+  bookmark at the same commit.
+- The branch is not integrated with `origin/main`: the four crash-lane commits
+  listed above are not ancestors of `HEAD`, and
+  `git log --cherry-pick --right-only HEAD...origin/main` still lists those
+  commits plus many later renderer-evidence hardening commits.
+- Current branch content does expose the same named evidence surfaces for the
+  four listed crash-lane topics:
+  mobile interaction latency rows in
+  `check-tauri-mobile-renderer-parity-evidence.shs`, production Metal render-log
+  gate rows in `check-tauri-mobile-renderer-parity-evidence.shs` and
+  `check-macos-metal-render-log-compare.shs`, Electron live-smoke proof rows in
+  `check-electron-live-smoke.shs`, and Electron RenderDoc/GPU crash diagnostic
+  rows in the RenderDoc aggregate wrappers. This is not a substitute for full
+  `origin/main` reconciliation because the patches are not patch-equivalent and
+  later main hardening remains unapplied.
+- The earlier sync attempt saw `.git/index.lock` with no `lsof` holder observed.
+  Recheck ownership and active processes before any jj commit/rebase/push from
+  this plan.
+- The worktree is broadly dirty across SPipe state, docs, scripts, source,
+  generated manuals, deleted build artifacts, and untracked oversized vendor
+  files. Treat this as mixed other-agent work until the intended commit scope is
+  explicitly isolated.
+
+Current reconciliation decision: do not mark this resume plan complete. The
+feature branch is synced to its own GitHub ref, but it is still intentionally
+separate from `origin/main` and the remaining main renderer hardening commits.
+The next safe action is a scoped port/rebase plan in a clean or isolated
+worktree, not a broad commit of the current dirty checkout.
+
+`jj status` became readable again after the stale `.git/index.lock` disappeared,
+but it still refuses to snapshot oversized untracked Windows vendor libraries
+under `src/compiler_rust/vendor/**`. Treat jj as inspection-only in this checkout
+until those vendor files are ignored, removed from the dirty set by their owner,
+or deliberately included with an explicit snapshot-size decision.
+
+## Mac GUI/Metal Hardening Checklist
+
+The mac GUI/Metal slice is complete only when all rows below are proven from
+current artifacts, not from stale reports or branch-memory:
+
+1. Production GUI/Web source evidence:
+   - Run or consume
+     `scripts/check/check-production-gui-web-renderer-parity-evidence.shs`.
+   - Required rows:
+     `production_gui_web_renderer_parity_status=pass`,
+     `production_gui_web_renderer_parity_backend_status=pass`,
+     `production_gui_web_renderer_parity_backend_exact=true`,
+     `production_gui_web_renderer_parity_backend_same_frame_readback=true`,
+     `production_gui_web_renderer_parity_backend_blur_or_tolerance_used=false`,
+     and `production_gui_web_renderer_parity_metal_readback_status=pass`.
+   - Linux or non-Darwin Metal rows may be typed unavailable, but they are not a
+     macOS Metal pass.
+
+2. macOS Metal render-log comparison:
+   - Run or consume `scripts/check/check-macos-metal-render-log-compare.shs`
+     with current input envs for generated Metal readback, Engine2D framebuffer
+     readback, and browser Metal backing.
+   - Required rows:
+     `macos_metal_render_log_compare_status=pass`,
+     `macos_metal_render_log_compare_required_api=metal`,
+     `macos_metal_render_log_compare_generated_readback_gate_status=pass`,
+     `macos_metal_render_log_compare_framebuffer_readback_gate_status=pass`,
+     `macos_metal_render_log_compare_browser_backing_gate_status=pass`,
+     `macos_metal_render_log_compare_pairwise_gate_status=pass`,
+     `macos_metal_render_log_compare_argb_source_gate_status=pass`,
+     and `macos_metal_render_log_compare_blocked_gate_count=0`.
+   - Required pairwise rows:
+     `macos_metal_render_log_compare_electron_chrome_pairwise_diff_status=pass`,
+     `macos_metal_render_log_compare_electron_simple_pairwise_diff_status=pass`,
+     and `macos_metal_render_log_compare_chrome_simple_pairwise_diff_status=pass`.
+
+3. Browser-backed Metal identity:
+   - Electron and Chrome rows must prove Metal-backed browser rendering through
+     their backing metadata, not only nonblank bitmaps.
+   - Required rows include
+     `macos_metal_render_log_compare_electron_browser_backing_status=pass`,
+     `macos_metal_render_log_compare_chrome_browser_backing_status=pass`,
+     and nonempty backing-source file/artifact status rows.
+   - An ANGLE/Vulkan/SwiftShader fallback, missing backing source, duplicated
+     source, symlink, hardlink, or nonregular artifact is a failed or blocked
+     Metal proof.
+
+4. Simple, Chrome, and Electron ARGB evidence:
+   - Simple, Chrome, and Electron ARGB artifacts must be regular nonempty files
+     with matching viewport, matching checksums, nonblank pixels, and exact
+     pairwise diffs.
+   - The generated `simple.srl.env`, `chrome.srl.env`, `electron.srl.env`, and
+     `compare.srl.env` render logs must be archived with the evidence report.
+
+5. Optional GPU capture:
+   - If `MACOS_METAL_RENDER_LOG_REQUIRE_GPU_CAPTURE=1`, the Xcode GPU capture
+     gate must pass and the capture artifact must have the expected magic.
+   - If the variable is not set, `not-required` is acceptable only for the GPU
+     capture gate; it does not weaken the raw Metal readback, browser backing,
+     or ARGB pairwise gates.
+
+6. GitHub reconciliation:
+   - This feature branch is synced to its own remote ref, but not to
+     `origin/main`.
+   - Before claiming "after sync gh" completion, either rebase/port the relevant
+     `origin/main` renderer hardening commits into an isolated worktree, or
+     record a commit-by-commit equivalence table that explains why each right-only
+     renderer evidence commit is intentionally not applied.
+   - Do not commit from the current checkout until the mixed dirty files and
+     oversized untracked vendor libraries are scoped.
+
+## Renderer Commit Reconciliation Snapshot
+
+This snapshot covers only renderer evidence commits relevant to the mac
+GUI/Metal, Electron/RenderDoc, and Tauri mobile parity plan. It is not a full
+`origin/main` merge audit.
+
+| origin/main commit | Topic | Current branch status | Evidence in this branch |
+| --- | --- | --- | --- |
+| `810824dab0` | Surface mobile interaction proof in Tauri parity report | Represented by current branch rows, not patch-equivalent | `check-tauri-mobile-renderer-parity-evidence.shs` reports `*_mdi_interaction_latency_status` and MDI event/capture/perf/animation detail; `tauri_mobile_renderer_parity_evidence_spec.spl` asserts iOS/Android interaction latency rows. |
+| `6acc8b06b5` | Surface Metal render proof in macOS render-log report | Represented by current branch rows, not patch-equivalent | `check-macos-metal-render-log-compare.shs` emits Metal render-log compare status, required API, pairwise statuses, generated Simple/Chrome/Electron `.srl.env` logs, and report rows. |
+| `7a1dc64ccd` | Report Electron live-smoke proof | Represented by current branch rows, not patch-equivalent | `check-electron-live-smoke.shs` emits proof source, Electron/Chrome process versions, screenshot dimensions/checksum/nontransparent/colors, event dispatch, performance, animation, and no-blur policy rows; the validator spec references those fields. |
+| `ab7929448f` | Surface Electron GPU crash diagnostics for RenderDoc | Represented by current branch rows, not patch-equivalent | RenderDoc Electron gate and aggregate scripts/specs include GPU-process crash/fatal diagnostic handling and fail-closed missing `.rdc` behavior. |
+| `fe6b145228` | Require production Metal render logs before mobile parity pass | Represented by current branch rows, not patch-equivalent | `check-tauri-mobile-renderer-parity-evidence.shs` consumes `production_gui_web_renderer_parity_metal_render_log_*` fields and carries them into mobile parity status decisions. |
+| `e139a317ba` / `5f65fec42f` | Emit macOS Metal render-log file reasons and artifact status | Represented by current branch rows, not patch-equivalent | `check-macos-metal-render-log-compare.shs` emits env file status/reason/artifact rows for generated readback, framebuffer readback, browser backing, GPU capture, Simple/Chrome/Electron ARGB artifacts, and browser backing sources. |
+| `7832d36c1f` | Forward macOS Metal blocked gates into aggregate coverage | Not proven in this branch-level audit | Current Metal compare script emits `macos_metal_render_log_compare_blocked_gate_count` and `blocked_gates`; the aggregate `gui_renderdoc_feature_coverage` path still needs isolated comparison against `origin/main` before claiming equivalent forwarding. |
+| Later right-only renderer commits from `HEAD...origin/main` | Provenance hardening, symlink/hardlink/nonregular/duplicate rejection, stale evidence detection, current-artifact discovery, browser backing validation, mobile screenshot density, ARGB content validation, and seed-forbid fixes | Not reconciled | The current branch contains many equivalent-looking guards, but there are too many right-only commits to claim equivalence from spot checks. Use an isolated worktree for rebase/port or generate a full table before marking this plan complete. |
+
+Current action decision: keep the feature branch synced to its own remote while
+the mac GUI/Metal checklist and reconciliation table guide the next isolated
+integration pass. Do not mark this plan done from this dirty checkout.
+
+## Isolated Integration Work Order (2026-07-02)
+
+Scoped command used for the work-order count:
+
+```sh
+git log --cherry-pick --right-only HEAD...origin/main -- \
+  scripts/check/check-macos-metal-render-log-compare.shs \
+  test/03_system/check/macos_metal_render_log_compare_spec.spl \
+  scripts/check/check-production-gui-web-renderer-parity-evidence.shs \
+  test/03_system/check/production_gui_web_renderer_parity_gate_spec.spl \
+  scripts/check/check-tauri-mobile-renderer-parity-evidence.shs \
+  test/03_system/gui/tauri_mobile_renderer_parity_evidence_spec.spl \
+  scripts/check/check-electron-live-smoke.shs \
+  test/03_system/check/electron_live_smoke_proof_validator_spec.spl \
+  scripts/check/check-renderdoc-electron-html-gate.shs \
+  scripts/check/check-gui-renderdoc-feature-coverage-status.shs \
+  scripts/check/check-gui-widget-renderdoc-goal-status.shs \
+  test/03_system/check/renderdoc_electron_html_gate_spec.spl \
+  test/03_system/check/gui_renderdoc_feature_coverage_status_spec.spl \
+  test/03_system/check/gui_widget_renderdoc_goal_status_spec.spl
+```
+
+Current scoped result: 396 right-only `origin/main` commits still touch these
+renderer evidence files. Bucketed by subject from commit titles:
+
+| Bucket | Count | Example right-only commits |
+| --- | ---: | --- |
+| macOS Metal render-log/readback | 45 | `7832d36c1f`, `6acc8b06b5` |
+| Electron live smoke / Electron RenderDoc | 49 | `a0b05ca9dd`, `4b310257ad` |
+| Tauri mobile iOS/Android renderer evidence | 65 | `810824dab0`, `5cede97315` |
+| RenderDoc aggregate/widget/html gates | 37 | `b222c3b517`, `f093031da8` |
+| Production GUI/Web parity and backend gates | 70 | `a18731ea11`, `36b544843c` |
+| Provenance/artifact guards | 34 | `4f7986a712`, `d908c5e480` |
+| Mixed or uncategorized renderer hardening | 96 | `0915c42175`, `fee4c9f75f` |
+
+Next isolated pass:
+
+1. Create a clean worktree from this branch head, not from the current dirty
+   checkout.
+2. Cherry-pick or rebase the 396 scoped commits in dependency order, stopping at
+   the first semantic conflict.
+3. For each resolved bucket, run only the matching focused specs once:
+   `macos_metal_render_log_compare_spec.spl`,
+   `production_gui_web_renderer_parity_gate_spec.spl`,
+   `tauri_mobile_renderer_parity_evidence_spec.spl`,
+   `electron_live_smoke_proof_validator_spec.spl`,
+   `renderdoc_electron_html_gate_spec.spl`,
+   `gui_renderdoc_feature_coverage_status_spec.spl`, and
+   `gui_widget_renderdoc_goal_status_spec.spl`.
+4. After all focused specs pass, run the mandatory layout and direct-env guards:
+   `find doc/06_spec -name '*_spec.spl' | wc -l`,
+   `sh scripts/audit/direct-env-runtime-guard.shs --working`, and
+   `sh scripts/audit/direct-env-runtime-guard.shs --staged`.
+5. Only then update this plan from "not reconciled" to either a passing port or
+   a precise blocker with the first failing commit/spec.
+
+This work order is intentionally not a completion claim. It makes the remaining
+GitHub-sync delta executable without absorbing unrelated SimpleOS, FPGA, vendor,
+or generated-artifact changes from the shared checkout.
+
+### Integration Probe (2026-07-02)
+
+Probe setup:
+
+- Generated `/tmp/simple_renderer_scoped_origin_main.patch` from
+  `git diff --binary HEAD...origin/main -- <scoped renderer files>`.
+- Patch size: 1,366,482 bytes across 14 renderer evidence files.
+- Created disposable clean worktree:
+  `/tmp/simple-mac-metal-reconcile-probe` at
+  `4d4f6162ab44f92206778195a3388e264917711c`.
+
+Probe results:
+
+- Plain `git apply --check` fails. Several files were independently added or
+  substantially changed on this feature branch, so the raw patch sees existing
+  target files or context mismatches.
+- `git apply --3way --check` exits `0`, so Git can build a 3-way merge base for
+  the scoped renderer delta, but it predicts manual conflicts.
+
+Clean 3-way files:
+
+- `scripts/check/check-electron-live-smoke.shs`
+- `scripts/check/check-macos-metal-render-log-compare.shs`
+- `scripts/check/check-renderdoc-electron-html-gate.shs`
+- `scripts/check/check-tauri-mobile-renderer-parity-evidence.shs`
+- `test/03_system/check/gui_widget_renderdoc_goal_status_spec.spl`
+- `test/03_system/check/production_gui_web_renderer_parity_gate_spec.spl`
+
+Predicted manual-conflict files:
+
+- `scripts/check/check-gui-renderdoc-feature-coverage-status.shs`
+- `scripts/check/check-gui-widget-renderdoc-goal-status.shs`
+- `scripts/check/check-production-gui-web-renderer-parity-evidence.shs`
+- `test/03_system/check/electron_live_smoke_proof_validator_spec.spl`
+- `test/03_system/check/gui_renderdoc_feature_coverage_status_spec.spl`
+- `test/03_system/check/macos_metal_render_log_compare_spec.spl`
+- `test/03_system/check/renderdoc_electron_html_gate_spec.spl`
+- `test/03_system/gui/tauri_mobile_renderer_parity_evidence_spec.spl`
+
+Next integration action: in the disposable worktree, apply the 3-way patch and
+resolve only the eight predicted conflict files, then run the focused specs
+listed above once. Do not apply the patch in the shared checkout.
+
+### Applied 3-Way Probe Conflict Triage (2026-07-02)
+
+The 3-way patch was applied in `/tmp/simple-mac-metal-reconcile-probe` only.
+It stopped with unresolved conflicts and left the main checkout untouched. The
+disposable worktree has these unmerged files:
+
+| File | Conflict blocks | First conflict line | Resolution priority |
+| --- | ---: | ---: | --- |
+| `scripts/check/check-gui-renderdoc-feature-coverage-status.shs` | 49 | 75 | First: this is the aggregate forwarder and the largest semantic merge. |
+| `test/03_system/check/gui_renderdoc_feature_coverage_status_spec.spl` | 20 | 227 | Resolve with the aggregate script so rows and expectations stay paired. |
+| `test/03_system/check/renderdoc_electron_html_gate_spec.spl` | 9 | 72 | Resolve after Electron RenderDoc gate rows are stable. |
+| `test/03_system/check/electron_live_smoke_proof_validator_spec.spl` | 7 | 2 | Resolve after live-smoke proof schema is selected. |
+| `test/03_system/gui/tauri_mobile_renderer_parity_evidence_spec.spl` | 5 | 6 | Resolve after mobile production-Metal dependency rows are selected. |
+| `scripts/check/check-gui-widget-renderdoc-goal-status.shs` | 0 | resolved | Resolved in disposable worktree: kept `origin/main` Electron launch exit/timeout/metadata rows in both env output and Markdown report. `sh -n` passed and the file is staged in the disposable worktree. |
+| `test/03_system/check/macos_metal_render_log_compare_spec.spl` | 0 | resolved | Resolved in disposable worktree: kept the comprehensive controlled-fixture spec from `origin/main`, updated its metadata to this mac/mobile resume plan and requirement/design docs, and confirmed it still asserts gate summary, backing, pairwise ARGB, artifact, and Xcode capture report rows. `/Users/ormastes/simple/bin/simple check` passed and the file is staged in the disposable worktree. |
+| `scripts/check/check-production-gui-web-renderer-parity-evidence.shs` | 0 | resolved | Resolved in disposable worktree: kept `origin/main` Simple binary provenance rows and preserved this branch's 300-second subcheck timeout default. `sh -n` passed and the file is staged in the disposable worktree. |
+
+Cleanly patched files in the disposable worktree:
+
+- `scripts/check/check-electron-live-smoke.shs`
+- `scripts/check/check-macos-metal-render-log-compare.shs`
+- `scripts/check/check-renderdoc-electron-html-gate.shs`
+- `scripts/check/check-tauri-mobile-renderer-parity-evidence.shs`
+- `test/03_system/check/gui_widget_renderdoc_goal_status_spec.spl`
+- `test/03_system/check/production_gui_web_renderer_parity_gate_spec.spl`
+
+Remaining unresolved files in `/tmp/simple-mac-metal-reconcile-probe`: 5.
+
+Next concrete integration step: resolve
+`scripts/check/check-gui-renderdoc-feature-coverage-status.shs` and
+`test/03_system/check/gui_renderdoc_feature_coverage_status_spec.spl` together
+inside the disposable worktree, then run only
+`gui_renderdoc_feature_coverage_status_spec.spl` before moving to the smaller
+conflict pairs.
 
 ## Existing Canonical Artifacts
 
