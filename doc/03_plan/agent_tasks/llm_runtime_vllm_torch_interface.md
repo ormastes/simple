@@ -357,9 +357,9 @@ Tasks:
 8. Add runtime control response surface. Status: done for in-process JSONL
    response generation and direct app execution through
    `src/app/llm_runtime/control_cli.spl`; the source CLI dispatcher also
-   registers `llm-runtime-control`, so the top-level command becomes available
-   after the Simple CLI binary is rebuilt from these sources. The current
-   prebuilt release binary predates the command.
+   registers `llm-runtime-control`, and the tracked release binary smoke now
+   proves the rebuilt top-level command dispatches to the runtime control CLI
+   instead of treating `llm-runtime-control` as a source filename.
 9. Harden pure vLLM planning evidence constructors. Status: done for
    `serve_plan`, `live_request_plan`, `live_environment`, and
    `dashboard_live_control`; these now precompute JSONL without post-construction
@@ -388,14 +388,10 @@ Tasks:
     debug driver, and `src/compiler_rust/target/debug/simple
     llm-runtime-control ...` now reaches the Simple control CLI with planned,
     usage, and missing-local-vLLM JSONL outputs instead of treating the command
-    name as a missing file. Full native CLI rebuild evidence remains blocked:
-    `native-build --source src/app --source src/lib --entry-closure --entry
-    src/app/cli/main.spl --strip --threads 1 --timeout 240 --output
-    build/llm_runtime/simple_cli_full` hit the 300s external cap with no binary.
-    Release artifact evidence is now done for the tracked
+    name as a missing file. Release artifact evidence is done for the tracked
     `release/x86_64-unknown-linux-gnu/simple` binary: it was refreshed from
     `cargo build --manifest-path src/compiler_rust/Cargo.toml --release -p
-    simple-driver --bin simple`, and
+    simple-driver --bin simple`, and the focused binary smoke
     `test/03_system/feature/app/cli/llm_runtime_control_binary_smoke_spec.spl`
     proves `simple llm-runtime-control --action preflight ...` emits
     `llm_runtime_vllm_dashboard_control_execution` JSONL instead of
