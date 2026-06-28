@@ -208,6 +208,10 @@ function artifactHardlinkStatus(artifact) {
   return artifact.hardlink ? 'fail' : 'pass';
 }
 
+function artifactStatusFromFileStatus(status) {
+  return status === 'pass' ? 'pass' : 'fail';
+}
+
 const proofPath = process.argv[2];
 if (!proofPath) {
   emit('tauri_simple_web_layout_validation_status', 'fail');
@@ -261,6 +265,8 @@ const capturedArgbPixels = capturedArgb && Array.isArray(capturedArgb.pixels) ? 
 const capturedArgbNonzeroPixelCount = nonzeroPixelCount(capturedArgbPixels);
 const capturedArgbChecksum = checksum(capturedArgbPixels);
 const capturedArgbWeightedChecksum = weightedChecksum(capturedArgbPixels);
+const capturedArgbFileStatus = artifactFileStatus(capturedArgbStat);
+const capturedArgbArtifactStatus = artifactStatusFromFileStatus(capturedArgbFileStatus);
 
 let reason = 'pass';
 if (proof.blur_or_tolerance_used !== false) {
@@ -332,7 +338,9 @@ emit('tauri_simple_web_layout_expected_overlay_pixel_count', jsonIntegerTextOrBl
 emit('tauri_simple_web_layout_tauri_frame_us', jsonIntegerTextOrBlank(proof.frame_us));
 emit('tauri_simple_web_layout_captured_argb_path', proof.captured_argb_path);
 emit('tauri_simple_web_layout_captured_argb_written', jsonBoolTextOrBlank(proof.captured_argb_written));
-emit('tauri_simple_web_layout_captured_argb_file_status', artifactFileStatus(capturedArgbStat));
+emit('tauri_simple_web_layout_captured_argb_file_status', capturedArgbFileStatus);
+emit('tauri_simple_web_layout_captured_argb_file_reason', capturedArgbFileStatus);
+emit('tauri_simple_web_layout_captured_argb_artifact_status', capturedArgbArtifactStatus);
 emit('tauri_simple_web_layout_captured_argb_symlink_status', artifactSymlinkStatus(capturedArgbStat));
 emit('tauri_simple_web_layout_captured_argb_hardlink_status', artifactHardlinkStatus(capturedArgbStat));
 emit('tauri_simple_web_layout_captured_argb_size_bytes', capturedArgbStat === null || capturedArgbStat.symlink || capturedArgbStat.hardlink ? '' : String(capturedArgbStat.stat.size));
