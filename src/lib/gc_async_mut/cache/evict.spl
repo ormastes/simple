@@ -43,7 +43,7 @@ fn cache_ttl_clear(cache):
 
 fn cache_clear(cache):
     """Generic cache clear operation. Works with any cache type."""
-    val cache_type = cache['type']
+    val cache_type = if cache.has('type'): cache['type'] else: ''
     if cache_type == 'lru':
         cache_lru_clear(cache)
     elif cache_type == 'fifo':
@@ -61,6 +61,12 @@ fn cache_clear(cache):
 
 fn cache_ttl_cleanup(cache):
     """Remove all expired entries from TTL cache."""
+    if not cache.has('keys') or not cache.has('values') or not cache.has('expiry_times'):
+        cache['keys'] = []
+        cache['values'] = []
+        cache['expiry_times'] = []
+        cache['key_index'] = {}
+        return cache
     val now = _get_timestamp()
     val keys = cache['keys']
     val values = cache['values']
@@ -72,7 +78,7 @@ fn cache_ttl_cleanup(cache):
 
     var i = 0
     while i < keys.len():
-        if now < expiry_times[i]:
+        if i < values.len() and i < expiry_times.len() and now < expiry_times[i]:
             # Not expired - keep it
             new_keys.push(keys[i])
             new_values.push(values[i])
@@ -92,27 +98,23 @@ fn cache_ttl_cleanup(cache):
 
 fn cache_lru_size(cache) -> i64:
     """Get current number of entries in LRU cache."""
-    val keys = cache['keys']
-    keys.len()
+    _cache_keys_len(cache)
 
 fn cache_fifo_size(cache) -> i64:
     """Get current number of entries in FIFO cache."""
-    val keys = cache['keys']
-    keys.len()
+    _cache_keys_len(cache)
 
 fn cache_lfu_size(cache) -> i64:
     """Get current number of entries in LFU cache."""
-    val keys = cache['keys']
-    keys.len()
+    _cache_keys_len(cache)
 
 fn cache_ttl_size(cache) -> i64:
     """Get current number of entries in TTL cache."""
-    val keys = cache['keys']
-    keys.len()
+    _cache_keys_len(cache)
 
 fn cache_size(cache) -> i64:
     """Generic cache size operation. Works with any cache type."""
-    val cache_type = cache['type']
+    val cache_type = if cache.has('type'): cache['type'] else: ''
     if cache_type == 'lru':
         cache_lru_size(cache)
     elif cache_type == 'fifo':
@@ -138,10 +140,12 @@ fn cache_lfu_contains(cache, key: text) -> bool:
 
 fn cache_ttl_contains(cache, key: text) -> bool:
     """Check if key exists in TTL cache and is not expired."""
+    if not cache.has('expiry_times'):
+        return false
     val expiry_times = cache['expiry_times']
     val index = _find_key_index_in(cache, key)
 
-    if index >= 0:
+    if index >= 0 and index < expiry_times.len():
         val now = _get_timestamp()
         return now < expiry_times[index]
     else:
@@ -149,7 +153,7 @@ fn cache_ttl_contains(cache, key: text) -> bool:
 
 fn cache_contains(cache, key: text) -> bool:
     """Generic cache contains operation. Works with any cache type."""
-    val cache_type = cache['type']
+    val cache_type = if cache.has('type'): cache['type'] else: ''
     if cache_type == 'lru':
         cache_lru_contains(cache, key)
     elif cache_type == 'fifo':
@@ -175,6 +179,8 @@ fn memo_clear(memo_cache):
 
 fn _find_key_index_in(cache, key: text) -> i64:
     """Find index of key using the key_index dict. Returns -1 if not found."""
+    if not cache.has('key_index'):
+        return -1
     val ki = cache['key_index']
     if ki.has(key):
         return ki[key]
@@ -183,6 +189,9 @@ fn _find_key_index_in(cache, key: text) -> i64:
 fn _rebuild_key_index(cache):
     """Rebuild the key_index dict from the keys array."""
     var ki = {}
+    if not cache.has('keys'):
+        cache['key_index'] = ki
+        return
     val keys = cache['keys']
     var i = 0
     while i < keys.len():
@@ -190,9 +199,14 @@ fn _rebuild_key_index(cache):
         i = i + 1
     cache['key_index'] = ki
 
+fn _cache_keys_len(cache) -> i64:
+    if not cache.has('keys'):
+        return 0
+    val keys = cache['keys']
+    keys.len()
+
 extern fn rt_time_now_unix_micros() -> i64
 
 fn _get_timestamp() -> i64:
     """Get current timestamp in milliseconds."""
     rt_time_now_unix_micros() / 1000
-
