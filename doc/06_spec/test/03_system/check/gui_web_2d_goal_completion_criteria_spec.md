@@ -240,8 +240,9 @@ fields through the aggregate audit and requires:
   pairwise, GPU capture, PIX, or GPU debugger lane.
 - Tauri mobile completion proves iOS Tauri2/WKWebView Metal evidence and
   Android Tauri2/WebView Vulkan evidence with screenshot artifacts plus MDI
-  event, capture, performance, animation proof, live render `html_len`, and
-  desktop production backend `device_readback`.
+  event, capture, performance, animation proof, live render `html_len`, Android
+  foreground execution, desktop production backend `device_readback`, and
+  production Metal render-log gates.
 
 ## Scenarios
 
