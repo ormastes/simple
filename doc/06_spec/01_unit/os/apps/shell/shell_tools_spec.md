@@ -71,7 +71,7 @@ Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val source = rt_file_read_text("src/os/apps/shell/shell_tools_part2.spl")
+val source = rt_file_read_text("src/os/apps/shell/_ShellTools/system_tools.spl")
 
 expect(source.index_of("1970-01-01") ?? -1).to_equal(-1)
 expect(source.index_of("no RTC available") ?? -1).to_equal(-1)
