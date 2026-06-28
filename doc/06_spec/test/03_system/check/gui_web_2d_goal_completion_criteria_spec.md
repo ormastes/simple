@@ -235,6 +235,9 @@ fields through the aggregate audit and requires:
   normal/high-capability review before accepting broad findings or done marks;
   Spark quota failures are recorded as attempts only, fallback output remains
   advisory, and no broad done mark is accepted from sidecar output.
+- macOS Metal and Windows D3D12 completion require zero hidden blocked gates;
+  a passing summary cannot mask a blocked native readback, browser backing,
+  pairwise, GPU capture, PIX, or GPU debugger lane.
 - Tauri mobile completion proves iOS Tauri2/WKWebView Metal evidence and
   Android Tauri2/WebView Vulkan evidence with screenshot artifacts plus MDI
   event, capture, performance, animation proof, live render `html_len`, and
