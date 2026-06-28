@@ -191,6 +191,10 @@ function artifactHardlinkStatus(artifact) {
   return artifact.hardlink ? 'fail' : 'pass';
 }
 
+function artifactStatusFromFileStatus(status) {
+  return status === 'pass' ? 'pass' : 'fail';
+}
+
 function pixelCountMatches(pixels, width, height) {
   const w = jsonIntegerText(width);
   const h = jsonIntegerText(height);
@@ -305,6 +309,15 @@ const proofSource = proofSourceArtifact(expectedProofSource);
 const proofSourceFileStatus = proofSource.status;
 const proofSourceSizeBytes = proofSource.size;
 const proofSourceActualSizeBytes = proofSource.actualSize;
+const proofSourceArtifactStatus =
+  proofSourceFileStatus === 'pass' &&
+  proofSourceSizeBytes !== '' &&
+  proofSourceActualSizeBytes !== '' &&
+  proofSourceSizeBytes === proofSourceActualSizeBytes
+    ? 'pass'
+    : 'fail';
+const capturedArgbFileStatus = artifactFileStatus(capturedArgbStat);
+const capturedArgbArtifactStatus = artifactStatusFromFileStatus(capturedArgbFileStatus);
 const expectedCaptureBackend = 'electron-offscreen-capture-page';
 const expectedCompositorMode = 'offscreen-osr-exact-srgb';
 const browserEngine = textField(proof.browser_engine);
@@ -407,6 +420,8 @@ emit('electron_simple_web_engine2d_proof_source', proof.proof_source);
 emit('electron_simple_web_engine2d_proof_source_file_status', proofSourceFileStatus);
 emit('electron_simple_web_engine2d_proof_source_size_bytes', proofSourceSizeBytes);
 emit('electron_simple_web_engine2d_proof_source_actual_size_bytes', proofSourceActualSizeBytes);
+emit('electron_simple_web_engine2d_proof_source_file_reason', proofSourceFileStatus);
+emit('electron_simple_web_engine2d_proof_source_artifact_status', proofSourceArtifactStatus);
 emit('electron_simple_web_engine2d_capture_backend', proof.capture_backend);
 emit('electron_simple_web_engine2d_compositor_mode', proof.compositor_mode);
 emit('electron_simple_web_engine2d_browser_engine', browserEngine);
@@ -432,7 +447,9 @@ emit('electron_simple_web_engine2d_capture_native_height', jsonIntegerTextOrBlan
 emit('electron_simple_web_engine2d_capture_downsampled', jsonBoolTextOrBlank(proof.capture_downsampled));
 emit('electron_simple_web_engine2d_captured_argb_path', proof.captured_argb_path);
 emit('electron_simple_web_engine2d_captured_argb_written', jsonBoolTextOrBlank(proof.captured_argb_written));
-emit('electron_simple_web_engine2d_captured_argb_file_status', artifactFileStatus(capturedArgbStat));
+emit('electron_simple_web_engine2d_captured_argb_file_status', capturedArgbFileStatus);
+emit('electron_simple_web_engine2d_captured_argb_file_reason', capturedArgbFileStatus);
+emit('electron_simple_web_engine2d_captured_argb_artifact_status', capturedArgbArtifactStatus);
 emit('electron_simple_web_engine2d_captured_argb_symlink_status', artifactSymlinkStatus(capturedArgbStat));
 emit('electron_simple_web_engine2d_captured_argb_hardlink_status', artifactHardlinkStatus(capturedArgbStat));
 emit('electron_simple_web_engine2d_captured_argb_size_bytes', capturedArgbStat === null || capturedArgbStat.symlink || capturedArgbStat.hardlink ? '' : String(capturedArgbStat.stat.size));
