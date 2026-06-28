@@ -312,6 +312,11 @@ Evidence:
   and metrics text when eval evidence is malformed, missing the metric, below
   threshold, or not marked pass. The SPipe build smoke covers a below-target
   eval fixture.
+- 2026-06-28 status readiness visibility: `fine-tune-status` now prints
+  `readiness_blocker=<gate>` so a present set of eval/model/handoff rows cannot
+  hide the first release-gate blocker. Attempts whose release gate is ready
+  print `readiness_blocker=none`; status may still fail separately for missing
+  required registry evidence.
 
 Next normal-LLM work: finish retry5 licensed cache/checksum evidence and retry6
 real training/eval before retry7 can become an acceptance gate with a PASS

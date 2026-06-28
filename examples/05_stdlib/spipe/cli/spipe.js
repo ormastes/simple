@@ -1189,6 +1189,13 @@ function commandFineTuneStatus(args) {
       "acceptance_allowed"
     ]);
   }
+  const firstReadinessBlocker = readinessChecks(root, attemptId).find(([, ok]) => !ok);
+  if (firstReadinessBlocker) {
+    warnings += 1;
+    console.log(`readiness_blocker=${firstReadinessBlocker[0]}`);
+  } else {
+    console.log("readiness_blocker=none");
+  }
   console.log(failures === 0 && warnings === 0 ? "STATUS: PASS llm-finetune-status" : failures ? "STATUS: FAIL llm-finetune-status" : "STATUS: WARN llm-finetune-status");
   process.exitCode = failures === 0 ? 0 : 1;
 }

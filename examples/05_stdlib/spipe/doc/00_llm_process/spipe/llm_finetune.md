@@ -103,7 +103,8 @@ row records a repo-local `.spipe/llm-finetune-process/scripts/*.shs` checker,
 status also prints the checker execution state so a present registry row cannot
 hide a WARN cache/license gate. Checker paths are resolved under
 `.spipe/llm-finetune-process/scripts/`; traversal outside that directory is
-reported as a failed unsafe checker path.
+reported as a failed unsafe checker path. Status also prints the first
+readiness blocker, or `readiness_blocker=none` when the release gate is ready.
 Use `spipe fine-tune-doctor <attempt_id>` to check registry evidence,
 placeholder values, missing local model artifact or handoff doc paths, and the
 target-eval failure reason before treating an attempt as production evidence.
