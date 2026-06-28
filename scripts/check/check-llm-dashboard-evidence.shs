@@ -1,0 +1,69 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+SIMPLE_BIN="${SIMPLE_BIN:-release/x86_64-unknown-linux-gnu/simple}"
+BUILD_DIR="${BUILD_DIR:-build/llm_dashboard_evidence}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/2026/06/llm_dashboard_evidence_$(date -u +%F).md}"
+OUT_ENV="$BUILD_DIR/evidence.env"
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+rm -f "$OUT_ENV" "$REPORT_PATH"
+
+run_spec() {
+    key="$1"
+    path="$2"
+    log="$BUILD_DIR/$key.log"
+    if "$SIMPLE_BIN" test "$path" --mode=interpreter --clean >"$log" 2>&1; then
+        eval "${key}_status=pass"
+        eval "${key}_exit=0"
+    else
+        code=$?
+        eval "${key}_status=fail"
+        eval "${key}_exit=$code"
+    fi
+}
+
+run_spec diagnostics_panel test/03_system/feature/app/web_dashboard/web_dashboard_diagnostics_panel_spec.spl
+run_spec vllm_control_route test/03_system/feature/app/web_dashboard/vllm_control_route_spec.spl
+run_spec log_modes test/02_integration/app/llm_dashboard_log_modes_spec.spl
+run_spec diagnostics_collector test/01_unit/app/llm_dashboard/collectors/diagnostics_jsonl_collector_spec.spl
+run_spec tooling_collector test/01_unit/app/llm_dashboard/collectors/tooling_artifact_collector_spec.spl
+
+status="pass"
+for key in diagnostics_panel vllm_control_route log_modes diagnostics_collector tooling_collector; do
+    eval "value=\${${key}_status}"
+    if [ "$value" != "pass" ]; then
+        status="fail"
+    fi
+done
+
+{
+    printf '%s\n' "llm_dashboard_evidence_status=$status"
+    for key in diagnostics_panel vllm_control_route log_modes diagnostics_collector tooling_collector; do
+        eval "value=\${${key}_status}"
+        printf '%s\n' "llm_dashboard_evidence_${key}_status=$value"
+    done
+} >"$OUT_ENV"
+
+{
+    printf '# LLM Dashboard Evidence\n\n'
+    printf '%s\n' "- status: \`$status\`"
+    for key in diagnostics_panel vllm_control_route log_modes diagnostics_collector tooling_collector; do
+        eval "value=\${${key}_status}"
+        eval "exit_code=\${${key}_exit}"
+        printf '%s\n' "- ${key}: \`$value\` exit=\`$exit_code\` log=\`$BUILD_DIR/$key.log\`"
+    done
+    printf '%s\n' "- env: \`$OUT_ENV\`"
+    printf '\n'
+    printf 'This evidence proves the local dashboard diagnostics, vLLM control route planning, log-mode CLI, diagnostics collector, and tooling artifact collector contracts. It is not live vLLM serving proof; live serving remains covered by the runtime vLLM host probe lane.\n'
+} >"$REPORT_PATH"
+
+if [ "$status" = "pass" ]; then
+    echo "STATUS: PASS llm-dashboard-evidence"
+else
+    echo "STATUS: FAIL llm-dashboard-evidence"
+    exit 1
+fi

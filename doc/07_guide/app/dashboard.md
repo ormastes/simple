@@ -50,9 +50,17 @@ tooling artifacts, and vLLM control evidence.
 Verification:
 
 ```bash
+sh scripts/check/check-llm-dashboard-evidence.shs
 release/x86_64-unknown-linux-gnu/simple test test/03_system/feature/app/web_dashboard/web_dashboard_diagnostics_panel_spec.spl --mode=interpreter --clean
 release/x86_64-unknown-linux-gnu/simple test test/03_system/feature/app/web_dashboard/vllm_control_route_spec.spl --mode=interpreter --clean
 ```
+
+Latest focused evidence:
+`doc/09_report/2026/06/llm_dashboard_evidence_2026-06-28.md` records the
+dashboard diagnostics panel, vLLM control route planning, dashboard log modes,
+diagnostics collector, and tooling artifact collector passing locally. This is
+dashboard route/evidence coverage; live vLLM serving still belongs to the LLM
+runtime host-probe lane.
 
 ---
 
