@@ -18,6 +18,17 @@ struct PlatformLinkDefaults:
     crt_search_dirs: [text]
     dynamic_linker_candidates: [text]
     extra_link_flags: [text]
+    ssp: bool
+
+# ============================================================================
+# Hardening Policy
+# ============================================================================
+
+struct HardeningPolicy:
+    pie: bool
+    ssp: bool
+    relro: bool
+    bind_now: bool
 
 # ============================================================================
 # Main API
@@ -29,8 +40,25 @@ fn platform_defaults(os: text, arch: text) -> PlatformLinkDefaults:
         library_dirs: default_library_dirs(os),
         crt_search_dirs: default_crt_search_dirs(os, arch),
         dynamic_linker_candidates: default_dynamic_linker_candidates(os, arch),
-        extra_link_flags: []
+        extra_link_flags: [],
+        ssp: true
     )
+
+# resolve_hardening returns the per-preset hardening policy.
+# preset: "hosted" | "baremetal" | "embedded_with_heap"
+# Hosted/desktop stays unconditionally fully hardened (regression guard).
+# Baremetal opts out of all security features (no MMU, no PIE, no SSP).
+# EmbeddedWithHeap keeps RELRO/bind-now but disables PIE and SSP.
+# SSP here is config-only — codegen wiring is deferred (separate bug).
+fn resolve_hardening(preset: text) -> HardeningPolicy:
+    if preset == "hosted":
+        return HardeningPolicy(pie: true, ssp: true, relro: true, bind_now: true)
+    elif preset == "baremetal":
+        return HardeningPolicy(pie: false, ssp: false, relro: false, bind_now: false)
+    elif preset == "embedded_with_heap":
+        return HardeningPolicy(pie: false, ssp: false, relro: true, bind_now: true)
+    # Unknown preset → fail-safe: fully hardened (same as hosted)
+    HardeningPolicy(pie: true, ssp: true, relro: true, bind_now: true)
 
 # ============================================================================
 # System Libraries

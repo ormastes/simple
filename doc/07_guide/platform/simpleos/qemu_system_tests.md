@@ -63,6 +63,23 @@ harness.
 
 The `/bin/simple os` subcommands (e.g., `bin/simple os test`) are currently broken per `doc/08_tracking/bug/interp_simpleos_lane_contract_crash_2026-06-13.md`. System tests therefore boot `qemu-system-*` directly rather than through the compiler tool.
 
+## Alpine-Class Hardening Specs (RED until build target exists)
+
+Three new specs in `test/03_system/os/qemu/os/harden/` exercise the SimpleOS x86_64 hardening
+probe. All classify MISSING-MEDIA (RED) until `build/os/simpleos_x86_64_harden_probe.elf` and
+`build/os/fat32-x86_64-harden.img` are produced by the harden probe build target
+(see `doc/08_tracking/bug/simpleos_harden_probe_build_target_2026-06-28.md`).
+
+| Spec | AC | Markers |
+|------|----|---------|
+| `os/harden/cap_exec_gate_spec.spl` | AC-1 | `[exec] capability gate: ENFORCED`, `[exec] uncapable exec REJECTED` |
+| `os/harden/hardened_malloc_spec.spl` | AC-2 | `[hmalloc] guard-page trap OK`, `[hmalloc] double-free TRAPPED` |
+| `os/harden/pie_ssp_relro_preset_spec.spl` | AC-8/9/10 | `[hardening] PIE=1`, `[hardening] RELRO=1 BIND_NOW=1`, `[hardening] NX=1 SMEP=1 SMAP=1`, `[hardening] STACK_CANARY=1` |
+
+Each spec follows the standard fail-closed contract: a media-check `it` (expects `rt_file_exists`
+true for kernel + image) followed by a boot `it` (calls `run_qemu_systest`, expects `== SYSTEST_PASS`).
+Missing media returns `missing-media:<path>` — never `skip()`.
+
 ## Storage Policy
 
 FAT32 images (~4 MB each) and kernel ELFs are kept for reproducibility and regression testing. QMP logs and .ppm screendumps are stale debris.
