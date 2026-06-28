@@ -277,10 +277,11 @@ fn _parse_block_header(input: [u8], block_start: i64, tier: CompressionSimdTier)
     if block_start + header_size > input.len():
         return Err(CompressionError.TruncatedInput("xz block header"))
     val stored_crc_res = _xz_read_u32_le(input, block_start + header_size - 4)
-    if stored_crc_res.is_err():
-        return Err(stored_crc_res.unwrap_err())
+    val stored_crc = match stored_crc_res:
+        case Ok(found_crc): found_crc
+        case Err(reason): return Err(reason)
     val actual_crc = _xz_crc32_for_tier(_copy_bytes_range(input, block_start, block_start + header_size - 4), tier)
-    if stored_crc_res.unwrap() != actual_crc:
+    if stored_crc != actual_crc:
         return Err(CompressionError.ChecksumMismatch("xz block header crc32"))
 
     val flags = input[block_start + 1]
@@ -294,36 +295,38 @@ fn _parse_block_header(input: [u8], block_start: i64, tier: CompressionSimdTier)
     var declared_uncompressed_size: i64? = nil
     if (flags & 0x40u8) != 0x00u8:
         val decoded = _vli_decode(input, pos)
-        if decoded.is_err():
-            return Err(decoded.unwrap_err())
-        val comp_size_res = _vli_to_i64(decoded.unwrap().0, "xz block compressed size")
-        if comp_size_res.is_err():
-            return Err(comp_size_res.unwrap_err())
-        declared_compressed_size = comp_size_res.unwrap()
-        pos = decoded.unwrap().1
+        val (compressed_size_vli, after_compressed_size) = match decoded:
+            case Ok(found_size): found_size
+            case Err(reason): return Err(reason)
+        val comp_size_res = _vli_to_i64(compressed_size_vli, "xz block compressed size")
+        declared_compressed_size = match comp_size_res:
+            case Ok(found_size): found_size
+            case Err(reason): return Err(reason)
+        pos = after_compressed_size
     if (flags & 0x80u8) != 0x00u8:
         val decoded = _vli_decode(input, pos)
-        if decoded.is_err():
-            return Err(decoded.unwrap_err())
-        val uncomp_size_res = _vli_to_i64(decoded.unwrap().0, "xz block uncompressed size")
-        if uncomp_size_res.is_err():
-            return Err(uncomp_size_res.unwrap_err())
-        declared_uncompressed_size = uncomp_size_res.unwrap()
-        pos = decoded.unwrap().1
+        val (uncompressed_size_vli, after_uncompressed_size) = match decoded:
+            case Ok(found_size): found_size
+            case Err(reason): return Err(reason)
+        val uncomp_size_res = _vli_to_i64(uncompressed_size_vli, "xz block uncompressed size")
+        declared_uncompressed_size = match uncomp_size_res:
+            case Ok(found_size): found_size
+            case Err(reason): return Err(reason)
+        pos = after_uncompressed_size
 
     val filter_id_res = _vli_decode(input, pos)
-    if filter_id_res.is_err():
-        return Err(filter_id_res.unwrap_err())
-    val filter_id = filter_id_res.unwrap().0
-    pos = filter_id_res.unwrap().1
+    val (filter_id, after_filter_id) = match filter_id_res:
+        case Ok(found_filter): found_filter
+        case Err(reason): return Err(reason)
+    pos = after_filter_id
     if filter_id != XZ_LZMA2_FILTER_ID:
         return Err(CompressionError.UnsupportedFeature("only xz lzma2 filter chains are supported"))
 
     val props_size_res = _vli_decode(input, pos)
-    if props_size_res.is_err():
-        return Err(props_size_res.unwrap_err())
-    val props_size = props_size_res.unwrap().0
-    pos = props_size_res.unwrap().1
+    val (props_size, after_props_size) = match props_size_res:
+        case Ok(found_size): found_size
+        case Err(reason): return Err(reason)
+    pos = after_props_size
     if props_size != 1u64:
         return Err(CompressionError.UnsupportedFeature("only xz lzma2 single-byte properties are supported"))
     if pos >= block_start + header_size - 4:
