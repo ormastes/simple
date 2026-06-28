@@ -257,6 +257,11 @@ Tasks:
     wrapper now carry explicit `[SqliteRow]` parameter types so checked
     execution no longer falls back on an untyped row parameter in the embedded
     SQL context renderer.
+12. Publish generic length/timing runtime symbols to the JIT registration list.
+    Status: done on 2026-06-28; `RUNTIME_SYMBOL_NAMES` now includes `rt_len`
+    and concrete `rt_time_now_*` entries, so checked/JIT context-mode code that
+    lowers dynamic `.len()` or timing helpers can resolve the symbols instead of
+    binding a NULL import.
 
 Evidence:
 
@@ -297,6 +302,12 @@ Evidence:
 - 2026-06-26 MCP binary discovery hardening: focused MCP analysis specs assert
   app and lower MCP check repo-root release and bootstrap binaries before
   falling back to `bin/simple`, matching the actual release workspace layout.
+- 2026-06-28 JIT symbol publication: `cargo check -p simple-common` passed, and
+  generated `runtime_symbol_entries.rs` contains both `rt_len` and
+  `rt_time_now_unix_micros` link-name declarations plus `RuntimeSymbolEntry`
+  registrations. The focused Rust JIT registration test did not complete within
+  the bounded timeout in this cold workspace, so generated-table evidence is the
+  current focused proof.
 
 ## Lane 3: Dashboard Tooling Artifact Panel
 

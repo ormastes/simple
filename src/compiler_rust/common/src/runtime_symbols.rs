@@ -455,6 +455,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_string_to_upper",
     "rt_string_to_lower",
     "rt_string_to_int",
+    "rt_len",
     "rt_string_find",
     "rt_string_rfind",
     "rt_string_index_of",
@@ -902,6 +903,10 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_process_exists",
     "rt_hostname",
     "rt_system_cpu_count",
+    "rt_time_now_unix",
+    "rt_time_now_nanos",
+    "rt_time_now_micros",
+    "rt_time_now_unix_micros",
     "rt_time_now_monotonic_ms",
     // High-performance collections (HashMap)
     "rt_hashmap_new",
@@ -1884,6 +1889,8 @@ mod tests {
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_array_new"));
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_byte_array_new"));
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_println_value"));
+        assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_len"));
+        assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_time_now_unix_micros"));
     }
 
     #[test]
