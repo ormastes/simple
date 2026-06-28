@@ -475,20 +475,40 @@ expect(evidence).to_contain("android_render_log_vulkan_marker_status=pass")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 30 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val root = "build/test-tauri-android-render-log-validator-failure"
 val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
     "printf '[tauri-shell] render, html_len=4096\\nHWUI Vulkan renderer ready\\nFatal signal 11\\n' > " + root + "/android.log && " +
-    "node scripts/check/validate-tauri-android-render-log-proof.js " + root + "/android.log > " + root + "/evidence.env"
+    "node scripts/check/validate-tauri-android-render-log-proof.js " + root + "/android.log > " + root + "/fatal.env; " +
+    "printf '[tauri-shell] render, html_len=4096\\nHWUI Vulkan renderer ready\\nF/VulkanManager: initialization failed\\n' > " + root + "/vulkan-manager.log && " +
+    "node scripts/check/validate-tauri-android-render-log-proof.js " + root + "/vulkan-manager.log > " + root + "/vulkan-manager.env; " +
+    "printf '[tauri-shell] render, html_len=4096\\nHWUI Vulkan renderer ready\\nHeadless UI completed\\n' > " + root + "/headless.log && " +
+    "node scripts/check/validate-tauri-android-render-log-proof.js " + root + "/headless.log > " + root + "/headless.env; " +
+    "printf '[tauri-shell] render, html_len=4096\\nHWUI Vulkan renderer ready\\nparse error: expected value\\n' > " + root + "/parse.log && " +
+    "node scripts/check/validate-tauri-android-render-log-proof.js " + root + "/parse.log > " + root + "/parse.env; " +
+    "printf '[tauri-shell] render, html_len=4096\\nHWUI Vulkan renderer ready\\nRequested GL implementation angle=vulkan not found\\n' > " + root + "/angle.log && " +
+    "node scripts/check/validate-tauri-android-render-log-proof.js " + root + "/angle.log > " + root + "/angle.env"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(1)
 
-val evidence = file_read(root + "/evidence.env")
-expect(evidence).to_contain("android_render_log_validation_reason=android-render-log-failure-marker")
-expect(evidence).to_contain("android_render_log_failure_marker_status=fail")
+val fatal = file_read(root + "/fatal.env")
+val vulkan_manager = file_read(root + "/vulkan-manager.env")
+val headless = file_read(root + "/headless.env")
+val parse = file_read(root + "/parse.env")
+val angle = file_read(root + "/angle.env")
+expect(fatal).to_contain("android_render_log_validation_reason=android-render-log-failure-marker")
+expect(fatal).to_contain("android_render_log_failure_marker_status=fail")
+expect(vulkan_manager).to_contain("android_render_log_validation_reason=android-render-log-failure-marker")
+expect(vulkan_manager).to_contain("android_render_log_failure_marker_status=fail")
+expect(headless).to_contain("android_render_log_validation_reason=android-render-log-failure-marker")
+expect(headless).to_contain("android_render_log_failure_marker_status=fail")
+expect(parse).to_contain("android_render_log_validation_reason=android-render-log-failure-marker")
+expect(parse).to_contain("android_render_log_failure_marker_status=fail")
+expect(angle).to_contain("android_render_log_validation_reason=android-render-log-failure-marker")
+expect(angle).to_contain("android_render_log_failure_marker_status=fail")
 ```
 
 </details>
@@ -498,7 +518,7 @@ expect(evidence).to_contain("android_render_log_failure_marker_status=fail")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 73 lines folded for reproduction.
+Runnable source: 78 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -506,6 +526,11 @@ val direct = file_read("scripts/check/check-tauri-android-mobile-renderer-eviden
 val aggregate = file_read("scripts/check/check-tauri-mobile-renderer-parity-evidence.shs")
 val validator = file_read("scripts/check/validate-tauri-android-render-log-proof.js")
 expect(validator).to_contain("const maxRenderHtmlLen = 10000000")
+expect(validator).to_contain("Fatal signal")
+expect(validator).to_contain("F\\/VulkanManager")
+expect(validator).to_contain("Headless UI completed")
+expect(validator).to_contain("parse error: expected value")
+expect(validator).to_contain("Requested GL implementation .*angle=vulkan.* not found")
 expect(validator).to_contain("coherentSourceHtmlLen")
 expect(validator).to_contain("duplicateSourceCount")
 expect(validator).to_contain("android-render-log-source-duplicate")
