@@ -27,7 +27,7 @@ production_gui_web_backend_readback_source_contract_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 1 | 1 | 0 | 0 |
+| 2 | 2 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -66,6 +66,9 @@ other non-device shortcut.
 ## Acceptance
 
 - Backend evidence promotes `production_gui_web_renderer_parity_backend_readback_source`.
+- The production gate promotes `production_gui_web_renderer_parity_gate_backend_readback_source`.
+- The top-level GUI/Web/2D aggregate forwards
+  `production_gui_web_renderer_parity_gate_backend_readback_source`.
 - A Metal-backed row with `backend_readback_source=cpu_mirror` fails top-level
   production parity.
 - The failure reason remains `backend-executed-parity-failed`.
@@ -111,12 +114,36 @@ expect(evidence).to_contain("production_gui_web_renderer_parity_reason=backend-e
 
 </details>
 
+#### forwards backend readback source through production gate and aggregate scripts
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val gate = file_read("scripts/check/check-production-gui-web-renderer-parity-gate.shs")
+expect(gate).to_contain("backend_readback_source")
+expect(gate).to_contain("production_gui_web_renderer_parity_backend_readback_source")
+expect(gate).to_contain("production_gui_web_renderer_parity_gate_backend_readback_source")
+expect(gate).to_contain("backend_readback_source")
+expect(gate).to_contain("device_readback")
+
+val aggregate = file_read("scripts/check/check-gui-renderdoc-feature-coverage-status.shs")
+expect(aggregate).to_contain("production_gate_backend_readback_source")
+expect(aggregate).to_contain("production_gui_web_renderer_parity_gate_backend_readback_source")
+expect(aggregate).to_contain("(\"backend_readback_source\", production_gate_backend_readback_source, \"device_readback\")")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 1 |
-| Active scenarios | 1 |
+| Total scenarios | 2 |
+| Active scenarios | 2 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

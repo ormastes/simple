@@ -183,7 +183,8 @@ non-launching parity gate through the aggregate audit and requires:
 - 36 exact pass and 14 tracked divergence cases for both surfaces
 - 0 surface fail cases and 0 mismatch counts
 - no fake capture and no blur/tolerance
-- backend exact match, equal positive checksums, and same-frame readback
+- backend exact match, equal positive checksums, same-frame readback, and
+  `device_readback` source
 - positive backend sample/timing/throughput rows
 - font offload, Metal readback, and event routing gates `pass`
 - event routing with focus, movement, maximize, title command, text input,
@@ -225,9 +226,9 @@ fields through the aggregate audit and requires:
 - Full HTML/CSS completion proves all inventory CSS properties are rendered with
   zero unrendered properties, not only the implemented Simple Web subset.
 - Production GUI/Web parity completion proves live Tauri/Chrome captures,
-  same-frame backend readback, positive backend handles when a native Metal
-  queue is resolved, matching checksums, event routing, and no CPU-mirror-only
-  pass.
+  same-frame backend `device_readback`, positive backend handles when a native
+  Metal queue is resolved, matching checksums, event routing, and no
+  CPU-mirror-only pass.
 - Parallel-agent completion records Spark or fallback sidecar outputs plus
   normal/high-capability review before accepting broad findings or done marks;
   Spark quota failures are recorded as attempts only, fallback output remains
@@ -337,7 +338,7 @@ expect(verify_full_html_css_completion()).to_equal("pass")
 
 #### requires production GUI/Web renderer parity with backend readback
 
-- Verify production GUI/Web parity uses same-frame backend readback, positive handles, and matching checksums
+- Verify production GUI/Web parity uses same-frame backend device readback, positive handles, and matching checksums
    - Expected: verify_production_gui_web_parity_completion() equals `pass`
 
 
@@ -348,7 +349,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("Verify production GUI/Web parity uses same-frame backend readback, positive handles, and matching checksums")
+step("Verify production GUI/Web parity uses same-frame backend device readback, positive handles, and matching checksums")
 expect(verify_production_gui_web_parity_completion()).to_equal("pass")
 ```
 
