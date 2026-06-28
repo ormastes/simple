@@ -27,7 +27,7 @@ tauri_mobile_renderer_parity_artifact_gate_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 37 | 37 | 0 | 0 |
+| 38 | 38 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -47,7 +47,7 @@ Validates the Tauri mobile renderer parity aggregate artifact gates. The aggrega
 | Design | doc/07_guide/tooling/renderdoc_capture_infra.md |
 | Research | N/A |
 | Source | `test/03_system/check/tauri_mobile_renderer_parity_artifact_gate_spec.spl` |
-| Updated | 2026-06-27 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -83,7 +83,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_mobile_renderer_parity
   arbitrary nonempty files, signature-only files, forged chunk text, flat PNGs,
   and 1x1 placeholders are not accepted as layout capture proof.
 - Mobile screenshot evidence must expose decoded distinct-color count, minimum
-  threshold, and pixel-diversity status rows for both iOS and Android.
+  threshold, pixel-diversity status, byte size, and decoded dimensions rows for
+  both iOS and Android.
 - Mobile screenshots must be regular single-link artifact files, not symlinks
   or hardlinks to mutable or substituted PNG captures.
 - Missing iOS MDI proof JSON fails even when iOS status rows claim pass.
@@ -122,6 +123,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_mobile_renderer_parity
   accepting mobile renderer evidence.
 - The aggregate requires desktop production backend timing rows before
   accepting mobile renderer evidence.
+- The aggregate requires desktop production Metal render-log comparator rows
+  before accepting mobile renderer evidence from a Metal-backed desktop source.
 - The aggregate emits explicit mobile screenshot and MDI proof file status rows.
 - The aggregate rejects pre-existing symlinked or hardlinked mobile lane output
   env contracts before reading iOS or Android wrapper evidence rows.
@@ -144,12 +147,13 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_mobile_renderer_parity
 #### accepts complete mobile screenshot and MDI proof artifacts
 
 - Inspect normalized mobile artifact gate rows
+- Confirm the markdown report surfaces mobile artifact gate details
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 58 lines folded for reproduction.
+Runnable source: 121 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -176,6 +180,19 @@ expect(evidence).to_contain("tauri_mobile_renderer_parity_production_backend_tot
 expect(evidence).to_contain("tauri_mobile_renderer_parity_production_backend_total_pixels_per_second_avg=2400000")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_production_backend_total_pixels_per_second_max=2800000")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_production_backend_timing_status=pass")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_production_metal_render_log_status=pass")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_production_metal_render_log_required_api=metal")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_production_metal_render_log_generated_readback_gate_status=pass")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_production_metal_render_log_framebuffer_readback_gate_status=pass")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_production_metal_render_log_browser_backing_gate_status=pass")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_production_metal_render_log_pairwise_gate_status=pass")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_production_metal_render_log_argb_source_gate_status=pass")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_production_metal_render_log_gpu_capture_gate_status=not-required")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_production_metal_render_log_blocked_gate_count=0")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_lane_output_env_file_status=pass")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_lane_output_env_file_reason=pass")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_android_lane_output_env_file_status=pass")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_android_lane_output_env_file_reason=pass")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_html_len=347702")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_tauri_context_status=pass")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_metal_context_status=pass")
@@ -191,6 +208,7 @@ expect(evidence).to_contain("tauri_mobile_renderer_parity_android_render_log_coh
 expect(evidence).to_contain("tauri_mobile_renderer_parity_android_render_log_coherent_source_actual_size_bytes=49")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_android_render_log_coherent_source_file_status=pass")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_android_render_log_coherent_source_file_reason=pass")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_android_render_log_coherent_source_artifact_status=pass")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_file_status=pass")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_file_status=pass")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_mdi_failure_marker_status=pass")
@@ -212,6 +230,7 @@ expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_mark
 expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_marker_source_actual_size_bytes=49")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_marker_source_file_status=pass")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_marker_source_file_reason=pass")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_marker_source_artifact_status=pass")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_marker_source_alias_reason=pass")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_mdi_render_status=pass")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_mdi_event_body_click_routed=true")
@@ -227,14 +246,38 @@ expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_capture_sc
 expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_input_to_paint_ms=2.5")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_screenshot_file_status=pass")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_screenshot_file_reason=pass")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_screenshot_actual_size_bytes=")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_screenshot_width=390")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_screenshot_height=844")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_screenshot_distinct_color_count=16")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_screenshot_distinct_color_min=16")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_screenshot_pixel_diversity_status=pass")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_android_screenshot_file_status=pass")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_android_screenshot_file_reason=pass")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_android_screenshot_artifact_status=pass")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_android_screenshot_actual_size_bytes=")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_android_screenshot_width=390")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_android_screenshot_height=844")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_android_screenshot_distinct_color_count=16")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_android_screenshot_distinct_color_min=16")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_android_screenshot_pixel_diversity_status=pass")
+
+val report = file_read(root + "/report.md")
+step("Confirm the markdown report surfaces mobile artifact gate details")
+expect(report).to_contain("- iOS lane output env artifact: pass / pass")
+expect(report).to_contain("- Android lane output env artifact: pass / pass")
+expect(report).to_contain("- iOS render-log coherent source artifact: pass / pass / pass")
+expect(report).to_contain("- Android render-log coherent source artifact: pass / pass / pass")
+expect(report).to_contain("- iOS MDI proof artifact: pass / pass / marker pass / alias pass")
+expect(report).to_contain("- Android MDI proof artifact: pass / pass / marker pass / alias pass")
+expect(report).to_contain("- iOS screenshot artifact: pass / pass / pass / 390x844 / colors 16")
+expect(report).to_contain("- Android screenshot artifact: pass / pass / pass / 390x844 / colors 16")
+expect(report).to_contain("- iOS MDI render/event/capture/perf/interaction/animation: pass / pass / pass / pass / pass / pass")
+expect(report).to_contain("- Android MDI render/event/capture/perf/interaction/animation: pass / pass / pass / pass / pass / pass")
+expect(report).to_contain("- iOS MDI event detail: windows=4 images=1 html=true taskbar=4/4 desktop=true drag_runtime=true drag_events=true moved=true window_runtime=true action=true input=true body_click=true body_input=true body_key=true sequence=window_drag:move,app_action:body_click,app_input:body_input,app_key:body_key icons=true labels=true")
+expect(report).to_contain("- iOS MDI capture/perf/animation detail: viewport=390x844 dpr=3 orientation=portrait perf=true delta_ms=1.25 input_to_paint_ms=2.5 animation=true frames=2 css=true")
+expect(report).to_contain("- Android MDI event detail: windows=4 images=1 html=true taskbar=4/4 desktop=true drag_runtime=true drag_events=true moved=true window_runtime=true action=true input=true body_click=true body_input=true body_key=true sequence=window_drag:move,app_action:body_click,app_input:body_input,app_key:body_key icons=true labels=true")
+expect(report).to_contain("- Android MDI capture/perf/animation detail: viewport=390x844 dpr=3 orientation=portrait perf=true delta_ms=1.25 input_to_paint_ms=2.5 animation=true frames=2 css=true")
 ```
 
 </details>
@@ -302,7 +345,7 @@ expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_coheren
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -335,7 +378,7 @@ expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_coheren
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -363,10 +406,13 @@ expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_coheren
 
 #### rejects iOS render-log validator pass claims with symlinked coherent source artifacts
 
+- Confirm coherent iOS render-log source rows cannot point at symlink artifacts
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -394,10 +440,13 @@ expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_coheren
 
 #### rejects iOS render-log validator pass claims with hardlinked coherent source artifacts
 
+- Confirm coherent iOS render-log source rows cannot point at hardlinked artifacts
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -423,15 +472,115 @@ expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_coheren
 
 </details>
 
+#### rejects Android render-log validator pass claims without coherent source artifact rows
+
+- Confirm Android render-log pass claims are bound to a coherent source artifact
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 15 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-tauri-mobile-artifact-gate-missing-android-coherent-source"
+val validator = root + "/fake-android-render-validator.js"
+val inject_validator = "printf 'process.stdout.write(\"android_render_log_validation_status=pass\\\\nandroid_render_log_validation_reason=pass\\\\nandroid_render_log_requested_source_count=2\\\\nandroid_render_log_source_count=2\\\\nandroid_render_log_missing_source_count=0\\\\nandroid_render_log_empty_source_count=0\\\\nandroid_render_log_symlink_source_count=0\\\\nandroid_render_log_html_len=347702\\\\nandroid_render_log_source_coherence_status=pass\\\\nandroid_render_log_coherent_source_path=\\\\nandroid_render_log_coherent_source_size_bytes=\\\\nandroid_render_log_marker_status=pass\\\\nandroid_render_log_vulkan_marker_status=pass\\\\nandroid_render_log_failure_marker_status=pass\\\\n\");\\n' > " + validator + " && chmod +x " + validator
+val command = _run_aggregate_command(root, "present", "present", "png", "png").replace("PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=", inject_validator + " && TAURI_MOBILE_RENDERER_ANDROID_RENDER_LOG_VALIDATOR=" + validator + " PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=")
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read(root + "/stdout.env")
+step("Confirm Android render-log pass claims are bound to a coherent source artifact")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_status=fail")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_reason=android-render-log-coherent-source-missing")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_android_render_log_validation_status=pass")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_android_render_log_source_coherence_status=pass")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_android_render_log_coherent_source_path=")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_android_render_log_coherent_source_size_bytes=")
+```
+
+</details>
+
+#### rejects Android render-log validator pass claims with stale coherent source paths
+
+- Confirm coherent Android render-log source rows are rechecked as current artifacts
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 17 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-tauri-mobile-artifact-gate-stale-android-coherent-source"
+val validator = root + "/fake-android-render-validator.js"
+val stale_path = root + "/artifacts/stale-android.log"
+val inject_validator = "printf 'process.stdout.write(\"android_render_log_validation_status=pass\\\\nandroid_render_log_validation_reason=pass\\\\nandroid_render_log_requested_source_count=2\\\\nandroid_render_log_source_count=2\\\\nandroid_render_log_missing_source_count=0\\\\nandroid_render_log_empty_source_count=0\\\\nandroid_render_log_symlink_source_count=0\\\\nandroid_render_log_html_len=347702\\\\nandroid_render_log_source_coherence_status=pass\\\\nandroid_render_log_coherent_source_path=" + stale_path + "\\\\nandroid_render_log_coherent_source_size_bytes=123\\\\nandroid_render_log_marker_status=pass\\\\nandroid_render_log_vulkan_marker_status=pass\\\\nandroid_render_log_failure_marker_status=pass\\\\n\");\\n' > " + validator + " && chmod +x " + validator
+val command = _run_aggregate_command(root, "present", "present", "png", "png").replace("PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=", inject_validator + " && TAURI_MOBILE_RENDERER_ANDROID_RENDER_LOG_VALIDATOR=" + validator + " PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=")
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read(root + "/stdout.env")
+step("Confirm coherent Android render-log source rows are rechecked as current artifacts")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_status=fail")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_reason=android-render-log-coherent-source-artifact-missing")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_android_render_log_validation_status=pass")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_android_render_log_coherent_source_path=" + stale_path)
+expect(evidence).to_contain("tauri_mobile_renderer_parity_android_render_log_coherent_source_size_bytes=123")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_android_render_log_coherent_source_file_status=fail")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_android_render_log_coherent_source_file_reason=missing")
+```
+
+</details>
+
+#### rejects Android render-log validator pass claims with mismatched coherent source byte size
+
+- Confirm coherent Android render-log byte-size rows match the artifact
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 18 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-tauri-mobile-artifact-gate-mismatch-android-coherent-source-size"
+val validator = root + "/fake-android-render-validator.js"
+val coherent_path = root + "/artifacts/android.log"
+val inject_validator = "printf 'process.stdout.write(\"android_render_log_validation_status=pass\\\\nandroid_render_log_validation_reason=pass\\\\nandroid_render_log_requested_source_count=2\\\\nandroid_render_log_source_count=2\\\\nandroid_render_log_missing_source_count=0\\\\nandroid_render_log_empty_source_count=0\\\\nandroid_render_log_symlink_source_count=0\\\\nandroid_render_log_html_len=347702\\\\nandroid_render_log_source_coherence_status=pass\\\\nandroid_render_log_coherent_source_path=" + coherent_path + "\\\\nandroid_render_log_coherent_source_size_bytes=1\\\\nandroid_render_log_marker_status=pass\\\\nandroid_render_log_vulkan_marker_status=pass\\\\nandroid_render_log_failure_marker_status=pass\\\\n\");\\n' > " + validator + " && chmod +x " + validator
+val command = _run_aggregate_command(root, "present", "present", "png", "png").replace("PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=", inject_validator + " && TAURI_MOBILE_RENDERER_ANDROID_RENDER_LOG_VALIDATOR=" + validator + " PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=")
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read(root + "/stdout.env")
+step("Confirm coherent Android render-log byte-size rows match the artifact")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_status=fail")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_reason=android-render-log-coherent-source-size-mismatch")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_android_render_log_validation_status=pass")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_android_render_log_coherent_source_path=" + coherent_path)
+expect(evidence).to_contain("tauri_mobile_renderer_parity_android_render_log_coherent_source_size_bytes=1")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_android_render_log_coherent_source_actual_size_bytes=49")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_android_render_log_coherent_source_file_status=fail")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_android_render_log_coherent_source_file_reason=size-mismatch")
+```
+
+</details>
+
 #### rejects aliased mobile lane output env contracts before reading wrapper rows
 
+-  replace
+   - Expected: code equals `1`
 - Confirm aggregate does not read through pre-existing lane env aliases
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -708,7 +857,7 @@ expect(android).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_marke
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 28 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -746,7 +895,7 @@ expect(android).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_marke
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 32 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -979,12 +1128,15 @@ expect(android).to_contain("tauri_mobile_renderer_parity_android_mdi_event_taskb
 #### rejects mobile pass claims with incomplete desktop backend parity details
 
 - Confirm mobile aggregate pass claims require desktop backend parity details
+   - Expected: bad_checksum_code equals `1`
+   - Expected: missing_handle_code equals `1`
+   - Expected: cpu_mirror_code equals `1`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 40 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1019,6 +1171,15 @@ val missing_handle = file_read(root + "-handle/stdout.env")
 expect(missing_handle).to_contain("tauri_mobile_renderer_parity_status=fail")
 expect(missing_handle).to_contain("tauri_mobile_renderer_parity_reason=desktop-production-backend-parity-contract-missing")
 expect(missing_handle).to_contain("tauri_mobile_renderer_parity_production_backend_metal_command_queue_handle=0")
+
+val cpu_mirror_command = _run_aggregate_command(root + "-readback-source", "present", "present", "png", "png").replace("production_gui_web_renderer_parity_backend_readback_source=device_readback", "production_gui_web_renderer_parity_backend_readback_source=cpu_mirror")
+val (_cpu_mirror_stdout, _cpu_mirror_stderr, cpu_mirror_code) = process_run("/bin/sh", ["-c", cpu_mirror_command])
+expect(cpu_mirror_code).to_equal(1)
+
+val cpu_mirror = file_read(root + "-readback-source/stdout.env")
+expect(cpu_mirror).to_contain("tauri_mobile_renderer_parity_status=fail")
+expect(cpu_mirror).to_contain("tauri_mobile_renderer_parity_reason=desktop-production-backend-parity-contract-missing")
+expect(cpu_mirror).to_contain("tauri_mobile_renderer_parity_production_backend_readback_source=cpu_mirror")
 ```
 
 </details>
@@ -1046,6 +1207,35 @@ expect(evidence).to_contain("tauri_mobile_renderer_parity_status=fail")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_reason=desktop-production-backend-timing-evidence-missing")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_production_backend_timing_status=fail")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_production_backend_sample_count=3")
+```
+
+</details>
+
+#### rejects mobile pass claims with missing desktop Metal render-log proof
+
+- Confirm mobile aggregate requires desktop Metal render-log comparator proof
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-tauri-mobile-artifact-gate-bad-production-metal-log"
+val command = _run_aggregate_command(root, "present", "present", "png", "png").replace("production_gui_web_renderer_parity_metal_render_log_status=pass", "production_gui_web_renderer_parity_metal_render_log_status=fail")
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read(root + "/stdout.env")
+step("Confirm mobile aggregate requires desktop Metal render-log comparator proof")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_status=fail")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_reason=desktop-production-metal-render-log-contract-missing")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_production_backend_metal_resolved=metal")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_production_metal_render_log_status=fail")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_production_metal_render_log_required_api=metal")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_production_metal_render_log_blocked_gate_count=0")
 ```
 
 </details>
@@ -1264,7 +1454,7 @@ expect(android).to_contain("tauri_mobile_renderer_parity_android_screenshot_file
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1301,7 +1491,7 @@ expect(android).to_contain("tauri_mobile_renderer_parity_android_screenshot_pixe
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 55 lines folded for reproduction.
+Runnable source: 124 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1318,10 +1508,22 @@ expect(script).to_contain("png-content-too-flat")
 expect(script).to_contain("PNG_MIN_DISTINCT_COLORS=16")
 expect(script).to_contain("png_distinct_color_count_from_reason")
 expect(script).to_contain("png_pixel_diversity_status")
+expect(script).to_contain("png_width_value")
+expect(script).to_contain("png_height_value")
+expect(script).to_contain("screenshot_artifact_detail_pass")
+expect(script).to_contain("ios-screenshot-artifact-proof-missing")
+expect(script).to_contain("android-screenshot-artifact-proof-missing")
+expect(script).to_contain("tauri_mobile_renderer_parity_ios_screenshot_actual_size_bytes")
+expect(script).to_contain("tauri_mobile_renderer_parity_ios_screenshot_width")
+expect(script).to_contain("tauri_mobile_renderer_parity_ios_screenshot_height")
 expect(script).to_contain("tauri_mobile_renderer_parity_ios_screenshot_distinct_color_count")
 expect(script).to_contain("tauri_mobile_renderer_parity_ios_screenshot_pixel_diversity_status")
+expect(script).to_contain("tauri_mobile_renderer_parity_android_screenshot_actual_size_bytes")
+expect(script).to_contain("tauri_mobile_renderer_parity_android_screenshot_width")
+expect(script).to_contain("tauri_mobile_renderer_parity_android_screenshot_height")
 expect(script).to_contain("tauri_mobile_renderer_parity_android_screenshot_distinct_color_count")
 expect(script).to_contain("tauri_mobile_renderer_parity_android_screenshot_pixel_diversity_status")
+expect(script).to_contain("tauri_mobile_renderer_parity_android_screenshot_artifact_status")
 expect(script).to_contain("png_file_reason \"$ios_screenshot\" \"$ios_mdi_capture_viewport_width\" \"$ios_mdi_capture_viewport_height\"")
 expect(script).to_contain("mdi_proof_file_reason")
 expect(script).to_contain("echo symlink")
@@ -1361,6 +1563,7 @@ expect(script).to_contain("tauri_mobile_renderer_parity_android_render_log_coher
 expect(script).to_contain("tauri_mobile_renderer_parity_android_render_log_coherent_source_actual_size_bytes")
 expect(script).to_contain("tauri_mobile_renderer_parity_android_render_log_coherent_source_file_status")
 expect(script).to_contain("tauri_mobile_renderer_parity_android_render_log_coherent_source_file_reason")
+expect(script).to_contain("tauri_mobile_renderer_parity_android_render_log_coherent_source_artifact_status")
 expect(script).to_contain("android-render-log-coherent-source-artifact-missing")
 expect(script).to_contain("android-render-log-coherent-source-hardlink")
 expect(script).to_contain("android-render-log-coherent-source-size-mismatch")
@@ -1372,6 +1575,7 @@ expect(script).to_contain("tauri_mobile_renderer_parity_android_mdi_failure_mark
 expect(script).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_source_count")
 expect(script).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_marker_source_count")
 expect(script).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_marker_source_file_reason")
+expect(script).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_marker_source_artifact_status")
 expect(script).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_marker_source_alias_reason")
 expect(script).to_contain("android-mdi-proof-marker-source-artifact-missing")
 expect(script).to_contain("android-mdi-proof-marker-source-hardlink")
@@ -1389,9 +1593,17 @@ expect(script).to_contain("tauri_mobile_renderer_parity_ios_screenshot_file_stat
 expect(script).to_contain("tauri_mobile_renderer_parity_ios_screenshot_file_reason")
 expect(script).to_contain("tauri_mobile_renderer_parity_android_screenshot_file_status")
 expect(script).to_contain("tauri_mobile_renderer_parity_android_screenshot_file_reason")
+expect(script).to_contain("tauri_mobile_renderer_parity_android_screenshot_artifact_status")
 expect(script).to_contain("png_file_reason \"$android_screenshot\" \"$android_mdi_capture_viewport_width\" \"$android_mdi_capture_viewport_height\"")
 expect(script).to_contain("production_backend_detail_pass")
 expect(script).to_contain("production_backend_timing_pass")
+expect(script).to_contain("production_metal_render_log_pass")
+expect(script).to_contain("desktop-production-metal-render-log-contract-missing")
+expect(script).to_contain("tauri_mobile_renderer_parity_production_metal_render_log_status")
+expect(script).to_contain("tauri_mobile_renderer_parity_production_metal_render_log_required_api")
+expect(script).to_contain("tauri_mobile_renderer_parity_production_metal_render_log_pairwise_gate_status")
+expect(script).to_contain("tauri_mobile_renderer_parity_production_metal_render_log_argb_source_gate_status")
+expect(script).to_contain("tauri_mobile_renderer_parity_production_metal_render_log_blocked_gate_count")
 expect(script).to_contain("tauri_mobile_renderer_parity_production_backend_metal_gpu_frame_complete")
 expect(script).to_contain("tauri_mobile_renderer_parity_production_backend_metal_command_queue_handle")
 expect(script).to_contain("tauri_mobile_renderer_parity_production_backend_software_checksum")
@@ -1400,8 +1612,12 @@ expect(script).to_contain("tauri_mobile_renderer_parity_production_backend_metal
 expect(script).to_contain("tauri_mobile_renderer_parity_production_backend_metal_gpu_readback_checksum")
 expect(script).to_contain("tauri_mobile_renderer_parity_production_backend_checksum_match")
 expect(script).to_contain("tauri_mobile_renderer_parity_production_backend_same_frame_readback")
-expect(script).to_contain("[ \"$backend_software_checksum\" = \"$backend_cpu_simd_checksum\" ]")
-expect(script).to_contain("num_at_least \"$backend_metal_command_queue_handle\" 1")
+expect(script).to_contain("tauri_mobile_renderer_parity_production_backend_readback_source")
+expect(script).to_contain("backend_readback_source")
+expect(script).to_contain("device_readback")
+expect(script).to_contain("backend_software_checksum")
+expect(script).to_contain("backend_cpu_simd_checksum")
+expect(script).to_contain("backend_metal_command_queue_handle")
 expect(script).to_contain("tauri_mobile_renderer_parity_production_backend_timing_status")
 ```
 
@@ -1411,8 +1627,8 @@ expect(script).to_contain("tauri_mobile_renderer_parity_production_backend_timin
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 36 |
-| Active scenarios | 36 |
+| Total scenarios | 38 |
+| Active scenarios | 38 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
