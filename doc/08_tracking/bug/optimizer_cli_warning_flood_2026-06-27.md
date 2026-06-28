@@ -1,8 +1,14 @@
 # Optimizer CLI Warning Flood Can Overrun Agent Context
 
 Date: 2026-06-27
-Status: open
+Status: resolved
 Severity: medium
+
+Resolution (2026-06-28): optimizer CLI now defaults to a concise per-pass count
+report (stdout 2409 → 16 lines on the renderer repro); per-location detail is
+opt-in via `--verbose` (src/app/optimize/analyze.spl + main.spl). The remaining
+~940 stderr lines are compiler/lint diagnostics emitted from main.spl's import
+graph (src/lib/**) before main() runs and are outside this CLI's control.
 
 ## Summary
 

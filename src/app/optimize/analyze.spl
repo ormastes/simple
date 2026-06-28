@@ -126,7 +126,7 @@ fn _speedup_weight(s: text) -> i64:
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-fn optimize_analyze(file_path: text, level: text) -> i64:
+fn optimize_analyze(file_path: text, level: text, verbose: bool) -> i64:
     print "=== Optimizer Analysis: {file_path} (level={level}) ==="
     print ""
 
@@ -156,12 +156,7 @@ fn optimize_analyze(file_path: text, level: text) -> i64:
 
     print "Optimization opportunities found: {opps.len()}"
     print ""
-    var i = 0
-    while i < opps.len():
-        val opp = opps[i]
-        print "  [{opp.expected_speedup}] {opp.pass_name} @ line {opp.location}"
-        print "         {opp.description}"
-        i = i + 1
+    _report_opportunities(opps, verbose)
 
     # Estimate total speedup
     var total_weight: i64 = 0
@@ -288,9 +283,61 @@ fn _domain_label(d: OptDomain) -> text:
         case OptDomain.General:
             "General"
 
+# ── Opportunity reporting (concise default vs --verbose) ──────────────────────
+# ponytail: aggregate-by-pass keeps the default report a handful of lines even on
+# large files; per-location detail is opt-in via --verbose. This is the root-cause
+# fix for the optimizer CLI warning/opportunity flood (see optimizer_cli_warning
+# _flood_2026-06-27): a 7k-line file no longer prints ~2400 lines of repetition.
+
+fn _opp_label(opp: OptOpportunity) -> text:
+    val dom = _domain_label(opp.domain)
+    "[{dom}:{opp.expected_speedup}] {opp.pass_name}"
+
+fn _labels_contain(xs: [text], s: text) -> bool:
+    var i = 0
+    while i < xs.len():
+        if xs[i] == s:
+            return true
+        i = i + 1
+    false
+
+fn _count_label(opps: [OptOpportunity], label: text) -> i64:
+    var n: i64 = 0
+    var i = 0
+    while i < opps.len():
+        if _opp_label(opps[i]) == label:
+            n = n + 1
+        i = i + 1
+    n
+
+fn _report_opportunities(opps: [OptOpportunity], verbose: bool):
+    if verbose:
+        var i = 0
+        while i < opps.len():
+            val opp = opps[i]
+            print "  {_opp_label(opp)} @ line {opp.location}"
+            print "         {opp.description}"
+            i = i + 1
+        return
+
+    # Concise: one line per distinct pass with an occurrence count.
+    var labels: [text] = []
+    var li = 0
+    while li < opps.len():
+        val lbl = _opp_label(opps[li])
+        if not _labels_contain(labels, lbl):
+            labels.push(lbl)
+        li = li + 1
+    print "By pass (use --verbose for per-location detail):"
+    var j = 0
+    while j < labels.len():
+        val lbl = labels[j]
+        print "  {lbl}  x{_count_label(opps, lbl)}"
+        j = j + 1
+
 # ── DB analyze public API ────────────────────────────────────────────────────
 
-fn optimize_db_analyze(file_path: text) -> i64:
+fn optimize_db_analyze(file_path: text, verbose: bool) -> i64:
     print "=== DB Query Optimization Analysis: {file_path} ==="
     print ""
 
@@ -321,13 +368,7 @@ fn optimize_db_analyze(file_path: text) -> i64:
     print "  General patterns:     {gen_opps.len()}"
     print ""
 
-    var i = 0
-    while i < all_opps.len():
-        val opp = all_opps[i]
-        val dom = _domain_label(opp.domain)
-        print "  [{dom}:{opp.expected_speedup}] {opp.pass_name} @ line {opp.location}"
-        print "         {opp.description}"
-        i = i + 1
+    _report_opportunities(all_opps, verbose)
 
     var total_weight: i64 = 0
     var j = 0
@@ -350,7 +391,7 @@ fn optimize_db_analyze(file_path: text) -> i64:
 
 # ── Full analysis (MIR + DB + General) ───────────────────────────────────────
 
-fn optimize_full_analyze(file_path: text, level: text) -> i64:
+fn optimize_full_analyze(file_path: text, level: text, verbose: bool) -> i64:
     print "=== Full Optimization Analysis: {file_path} (level={level}) ==="
     print ""
 
@@ -388,13 +429,7 @@ fn optimize_full_analyze(file_path: text, level: text) -> i64:
     print "  General patterns:     {gen_opps.len()}"
     print ""
 
-    var i = 0
-    while i < all_opps.len():
-        val opp = all_opps[i]
-        val dom = _domain_label(opp.domain)
-        print "  [{dom}:{opp.expected_speedup}] {opp.pass_name} @ line {opp.location}"
-        print "         {opp.description}"
-        i = i + 1
+    _report_opportunities(all_opps, verbose)
 
     var total_weight: i64 = 0
     var j = 0
