@@ -27,7 +27,7 @@ gui_web_2d_platform_evidence_bundle_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 3 | 3 | 0 | 0 |
+| 4 | 4 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -72,6 +72,10 @@ sh scripts/check/check-gui-web-2d-platform-evidence-bundle.shs
 - Missing evidence files keep all nine live gates incomplete.
 - Passing synthetic platform envs prove all nine live gates.
 - A present failed platform row is reported as failed, not missing.
+- A present failed freshness env is reported as the `cross-platform-freshness`
+  failed gate, not as missing evidence.
+- Missing or failed live gates exit nonzero so automation cannot treat a
+  non-pass bundle as complete.
 - The checker does not launch RenderDoc, Xcode, PIX, Tauri, Chrome, Electron,
   or performance runs; it only consumes existing env evidence.
 
@@ -117,6 +121,9 @@ The checker emits a single `evidence.env` with total, proven, missing, failed,
 and remaining gate counts plus `|`-separated gate lists. Overall status is
 `pass` only when all nine gates are proven, `incomplete` when one or more gates
 are missing and none failed, and `fail` when any present gate evidence is bad.
+The process exit code is `0` only for `pass`; both `incomplete` and `fail` exit
+nonzero so CI, release scripts, and parallel-agent handoffs cannot accidentally
+promote a partial bundle.
 This distinction is important for parallel agents: a missing gate needs a host
 run, while a failed gate needs repair of already-produced evidence.
 
@@ -154,6 +161,12 @@ because final completion depends on proving that platform evidence, browser or
 WebView revisions, graphics SDK/driver revisions, and runbook revisions belong
 to the same review window.
 
+A failed freshness env is different from a missing freshness env. Missing means
+the freshness rollup was not produced yet. Failed means the rollup ran and found
+stale, mismatched, or incomplete metadata. The bundle must preserve that
+distinction so platform agents know whether to run a missing handoff step or fix
+bad evidence from an existing handoff step.
+
 ## Regression Risks
 
 The most important regression is a false pass from stale or partial evidence.
@@ -175,9 +188,9 @@ Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val command = "rm -rf build/test-gui-web-2d-platform-evidence-bundle-missing && BUILD_DIR=build/test-gui-web-2d-platform-evidence-bundle-missing/out REPORT_PATH=build/test-gui-web-2d-platform-evidence-bundle-missing/report.md NATIVE_RENDER_LOG_PLATFORM_MATRIX_ENV=build/test-gui-web-2d-platform-evidence-bundle-missing/missing/native.env TAURI_MOBILE_RENDERER_PARITY_ENV=build/test-gui-web-2d-platform-evidence-bundle-missing/missing/mobile.env GUI_SHOWCASE_4K_200FPS_ENV=build/test-gui-web-2d-platform-evidence-bundle-missing/missing/4k.env GUI_SHOWCASE_8K_200FPS_ENV=build/test-gui-web-2d-platform-evidence-bundle-missing/missing/8k.env HTML_CSS_FULL_RENDERING_GOAL_ENV=build/test-gui-web-2d-platform-evidence-bundle-missing/missing/html.env PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=build/test-gui-web-2d-platform-evidence-bundle-missing/missing/production.env GUI_WEB_2D_PLATFORM_FRESHNESS_ENV=build/test-gui-web-2d-platform-evidence-bundle-missing/missing/fresh.env sh scripts/check/check-gui-web-2d-platform-evidence-bundle.shs || true"
+val command = "rm -rf build/test-gui-web-2d-platform-evidence-bundle-missing && BUILD_DIR=build/test-gui-web-2d-platform-evidence-bundle-missing/out REPORT_PATH=build/test-gui-web-2d-platform-evidence-bundle-missing/report.md NATIVE_RENDER_LOG_PLATFORM_MATRIX_ENV=build/test-gui-web-2d-platform-evidence-bundle-missing/missing/native.env TAURI_MOBILE_RENDERER_PARITY_ENV=build/test-gui-web-2d-platform-evidence-bundle-missing/missing/mobile.env GUI_SHOWCASE_4K_200FPS_ENV=build/test-gui-web-2d-platform-evidence-bundle-missing/missing/4k.env GUI_SHOWCASE_8K_200FPS_ENV=build/test-gui-web-2d-platform-evidence-bundle-missing/missing/8k.env HTML_CSS_FULL_RENDERING_GOAL_ENV=build/test-gui-web-2d-platform-evidence-bundle-missing/missing/html.env PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=build/test-gui-web-2d-platform-evidence-bundle-missing/missing/production.env GUI_WEB_2D_PLATFORM_FRESHNESS_ENV=build/test-gui-web-2d-platform-evidence-bundle-missing/missing/fresh.env sh scripts/check/check-gui-web-2d-platform-evidence-bundle.shs"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-expect(code).to_equal(0)
+expect(code).to_equal(1)
 
 val evidence = file_read("build/test-gui-web-2d-platform-evidence-bundle-missing/out/evidence.env")
 expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_status=incomplete")
@@ -226,9 +239,9 @@ Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val command = "rm -rf build/test-gui-web-2d-platform-evidence-bundle-fail && mkdir -p build/test-gui-web-2d-platform-evidence-bundle-fail/env && printf 'linux_vulkan_render_log_compare_status=fail\\nmacos_metal_render_log_compare_status=pass\\nwindows_d3d12_render_log_compare_status=pass\\n' > build/test-gui-web-2d-platform-evidence-bundle-fail/env/native.env && BUILD_DIR=build/test-gui-web-2d-platform-evidence-bundle-fail/out REPORT_PATH=build/test-gui-web-2d-platform-evidence-bundle-fail/report.md NATIVE_RENDER_LOG_PLATFORM_MATRIX_ENV=build/test-gui-web-2d-platform-evidence-bundle-fail/env/native.env TAURI_MOBILE_RENDERER_PARITY_ENV=build/test-gui-web-2d-platform-evidence-bundle-fail/missing/mobile.env GUI_SHOWCASE_4K_200FPS_ENV=build/test-gui-web-2d-platform-evidence-bundle-fail/missing/4k.env GUI_SHOWCASE_8K_200FPS_ENV=build/test-gui-web-2d-platform-evidence-bundle-fail/missing/8k.env HTML_CSS_FULL_RENDERING_GOAL_ENV=build/test-gui-web-2d-platform-evidence-bundle-fail/missing/html.env PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=build/test-gui-web-2d-platform-evidence-bundle-fail/missing/production.env GUI_WEB_2D_PLATFORM_FRESHNESS_ENV=build/test-gui-web-2d-platform-evidence-bundle-fail/missing/fresh.env sh scripts/check/check-gui-web-2d-platform-evidence-bundle.shs || true"
+val command = "rm -rf build/test-gui-web-2d-platform-evidence-bundle-fail && mkdir -p build/test-gui-web-2d-platform-evidence-bundle-fail/env && printf 'linux_vulkan_render_log_compare_status=fail\\nmacos_metal_render_log_compare_status=pass\\nwindows_d3d12_render_log_compare_status=pass\\n' > build/test-gui-web-2d-platform-evidence-bundle-fail/env/native.env && BUILD_DIR=build/test-gui-web-2d-platform-evidence-bundle-fail/out REPORT_PATH=build/test-gui-web-2d-platform-evidence-bundle-fail/report.md NATIVE_RENDER_LOG_PLATFORM_MATRIX_ENV=build/test-gui-web-2d-platform-evidence-bundle-fail/env/native.env TAURI_MOBILE_RENDERER_PARITY_ENV=build/test-gui-web-2d-platform-evidence-bundle-fail/missing/mobile.env GUI_SHOWCASE_4K_200FPS_ENV=build/test-gui-web-2d-platform-evidence-bundle-fail/missing/4k.env GUI_SHOWCASE_8K_200FPS_ENV=build/test-gui-web-2d-platform-evidence-bundle-fail/missing/8k.env HTML_CSS_FULL_RENDERING_GOAL_ENV=build/test-gui-web-2d-platform-evidence-bundle-fail/missing/html.env PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=build/test-gui-web-2d-platform-evidence-bundle-fail/missing/production.env GUI_WEB_2D_PLATFORM_FRESHNESS_ENV=build/test-gui-web-2d-platform-evidence-bundle-fail/missing/fresh.env sh scripts/check/check-gui-web-2d-platform-evidence-bundle.shs"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-expect(code).to_equal(0)
+expect(code).to_equal(1)
 
 val evidence = file_read("build/test-gui-web-2d-platform-evidence-bundle-fail/out/evidence.env")
 expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_status=fail")
@@ -242,12 +255,35 @@ expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_linux_vulkan_re
 
 </details>
 
+#### classifies present bad freshness evidence as failed
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val command = "rm -rf build/test-gui-web-2d-platform-evidence-bundle-freshness-fail && mkdir -p build/test-gui-web-2d-platform-evidence-bundle-freshness-fail/env && printf 'linux_vulkan_render_log_compare_status=pass\\nmacos_metal_render_log_compare_status=pass\\nwindows_d3d12_render_log_compare_status=pass\\n' > build/test-gui-web-2d-platform-evidence-bundle-freshness-fail/env/native.env && printf 'tauri_mobile_renderer_parity_ios_status=pass\\ntauri_mobile_renderer_parity_ios_render_log_metal_marker_status=pass\\ntauri_mobile_renderer_parity_ios_mdi_proof_status=pass\\ntauri_mobile_renderer_parity_ios_screenshot_artifact_status=pass\\ntauri_mobile_renderer_parity_android_status=pass\\ntauri_mobile_renderer_parity_android_render_log_vulkan_marker_status=pass\\ntauri_mobile_renderer_parity_android_render_log_foreground_marker_status=pass\\ntauri_mobile_renderer_parity_android_mdi_proof_status=pass\\ntauri_mobile_renderer_parity_android_screenshot_artifact_status=pass\\n' > build/test-gui-web-2d-platform-evidence-bundle-freshness-fail/env/mobile.env && printf 'gui_showcase_4k_200fps_status=pass\\ngui_showcase_4k_200fps_rss_status=pass\\ngui_showcase_4k_200fps_checksum_status=pass\\ngui_showcase_4k_200fps_retained_render_mode_status=pass\\ngui_showcase_4k_200fps_retained_redraw_status=pass\\n' > build/test-gui-web-2d-platform-evidence-bundle-freshness-fail/env/4k.env && printf 'gui_showcase_8k_perf_status=pass\\ngui_showcase_8k_perf_rss_status=pass\\ngui_showcase_8k_perf_checksum_status=pass\\ngui_showcase_8k_perf_retained_render_mode_status=pass\\ngui_showcase_8k_perf_retained_redraw_status=pass\\n' > build/test-gui-web-2d-platform-evidence-bundle-freshness-fail/env/8k.env && printf 'html_css_full_rendering_goal_status=pass\\nhtml_css_full_rendering_goal_all_html_elements_ready_status=pass\\nhtml_css_full_rendering_goal_all_css_properties_ready_status=pass\\nhtml_css_full_rendering_goal_animation_css_status=pass\\n' > build/test-gui-web-2d-platform-evidence-bundle-freshness-fail/env/html.env && printf 'production_gui_web_renderer_parity_status=pass\\n' > build/test-gui-web-2d-platform-evidence-bundle-freshness-fail/env/production.env && printf 'gui_web_2d_platform_freshness_status=fail\\ngui_web_2d_platform_freshness_reason=source-revision-mismatch\\ngui_web_2d_platform_freshness_source_revision=abc123\\ngui_web_2d_platform_freshness_runtime_build=simple-self-hosted\\ngui_web_2d_platform_freshness_browser_webview_electron_revision=chrome-electron-webview\\ngui_web_2d_platform_freshness_graphics_sdk_driver=vulkan-metal-d3d12\\ngui_web_2d_platform_freshness_runbook_version=2026-06-28\\n' > build/test-gui-web-2d-platform-evidence-bundle-freshness-fail/env/fresh.env && BUILD_DIR=build/test-gui-web-2d-platform-evidence-bundle-freshness-fail/out REPORT_PATH=build/test-gui-web-2d-platform-evidence-bundle-freshness-fail/report.md NATIVE_RENDER_LOG_PLATFORM_MATRIX_ENV=build/test-gui-web-2d-platform-evidence-bundle-freshness-fail/env/native.env TAURI_MOBILE_RENDERER_PARITY_ENV=build/test-gui-web-2d-platform-evidence-bundle-freshness-fail/env/mobile.env GUI_SHOWCASE_4K_200FPS_ENV=build/test-gui-web-2d-platform-evidence-bundle-freshness-fail/env/4k.env GUI_SHOWCASE_8K_200FPS_ENV=build/test-gui-web-2d-platform-evidence-bundle-freshness-fail/env/8k.env HTML_CSS_FULL_RENDERING_GOAL_ENV=build/test-gui-web-2d-platform-evidence-bundle-freshness-fail/env/html.env PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=build/test-gui-web-2d-platform-evidence-bundle-freshness-fail/env/production.env GUI_WEB_2D_PLATFORM_FRESHNESS_ENV=build/test-gui-web-2d-platform-evidence-bundle-freshness-fail/env/fresh.env sh scripts/check/check-gui-web-2d-platform-evidence-bundle.shs"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read("build/test-gui-web-2d-platform-evidence-bundle-freshness-fail/out/evidence.env")
+expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_status=fail")
+expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_failed_gate_count=1")
+expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_missing_gate_count=0")
+expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_failed_gates=cross-platform-freshness")
+expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_cross_platform_freshness_status=fail")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 3 |
-| Active scenarios | 3 |
+| Total scenarios | 4 |
+| Active scenarios | 4 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
