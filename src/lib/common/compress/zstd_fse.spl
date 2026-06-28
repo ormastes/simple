@@ -89,18 +89,19 @@ fn zstd_fse_parse_normalized_counts(data: [u8], start: i64, limit: i64, max_tabl
     if max_symbol < 1:
         return Err(CompressionError.CorruptStream("zstd fse max symbol must allow at least two entries"))
     val init_res = _zstd_fse_forward_bits_init(data, start, limit)
-    if init_res.is_err():
-        return Err(init_res.unwrap_err())
-    var bits = init_res.unwrap()
+    var bits = match init_res:
+        case Ok(decoded): decoded
+        case Err(reason): return Err(reason)
     val table_res = _zstd_fse_forward_bits_read(bits, 4)
-    if table_res.is_err():
-        return Err(table_res.unwrap_err())
-    val (table_low, after_table) = table_res.unwrap()
+    val (table_low, after_table) = match table_res:
+        case Ok(decoded): decoded
+        case Err(reason): return Err(reason)
     bits = after_table
     val table_log = table_low.to_i64() + ZSTD_FSE_MIN_TABLE_LOG
     val table_ok = zstd_fse_validate_table_log(table_log, max_table_log)
-    if table_ok.is_err():
-        return Err(table_ok.unwrap_err())
+    match table_ok:
+        case Ok(_): pass
+        case Err(reason): return Err(reason)
 
     val table_size = 1 << table_log
     var remaining = table_size + 1
@@ -113,16 +114,16 @@ fn zstd_fse_parse_normalized_counts(data: [u8], start: i64, limit: i64, max_tabl
             return Err(CompressionError.CorruptStream("zstd fse symbol index exceeds caller maximum"))
         val max_value = (threshold << 1) - 1 - remaining
         val low_res = _zstd_fse_forward_bits_read(bits, nb_bits - 1)
-        if low_res.is_err():
-            return Err(low_res.unwrap_err())
-        val (low, after_low) = low_res.unwrap()
+        val (low, after_low) = match low_res:
+            case Ok(decoded): decoded
+            case Err(reason): return Err(reason)
         bits = after_low
         var value = low.to_i64()
         if value >= max_value:
             val high_res = _zstd_fse_forward_bits_read(bits, 1)
-            if high_res.is_err():
-                return Err(high_res.unwrap_err())
-            val (high, after_high) = high_res.unwrap()
+            val (high, after_high) = match high_res:
+                case Ok(decoded): decoded
+                case Err(reason): return Err(reason)
             bits = after_high
             value = value | (high.to_i64() << (nb_bits - 1))
             if value >= threshold:
@@ -138,17 +139,17 @@ fn zstd_fse_parse_normalized_counts(data: [u8], start: i64, limit: i64, max_tabl
             var zero_total = 0
             while true:
                 val repeat_res = _zstd_fse_forward_bits_read(bits, 2)
-                if repeat_res.is_err():
-                    return Err(repeat_res.unwrap_err())
-                val (repeat, after_repeat) = repeat_res.unwrap()
+                val (repeat, after_repeat) = match repeat_res:
+                    case Ok(decoded): decoded
+                    case Err(reason): return Err(reason)
                 bits = after_repeat
                 zero_total = zero_total + repeat.to_i64()
                 if repeat != 3u32:
                     break
             val expanded_res = _zstd_fse_push_zero_repeat(counts, zero_total, max_symbol)
-            if expanded_res.is_err():
-                return Err(expanded_res.unwrap_err())
-            counts = expanded_res.unwrap()
+            counts = match expanded_res:
+                case Ok(decoded): decoded
+                case Err(reason): return Err(reason)
         while remaining < threshold:
             nb_bits = nb_bits - 1
             threshold = threshold >> 1
@@ -163,8 +164,9 @@ fn zstd_fse_parse_normalized_counts(data: [u8], start: i64, limit: i64, max_tabl
 
 fn zstd_fse_build_decode_table(table_log: i64, counts: [i64]) -> Result<ZstdFseDecodeTable, CompressionError>:
     val table_ok = zstd_fse_validate_table_log(table_log, table_log)
-    if table_ok.is_err():
-        return Err(table_ok.unwrap_err())
+    match table_ok:
+        case Ok(_): pass
+        case Err(reason): return Err(reason)
     if counts.len() < 2:
         return Err(CompressionError.CorruptStream("zstd fse needs at least two symbols"))
 
@@ -277,9 +279,9 @@ struct ZstdFseEncodeTable:
 # Build the encoder slot table by inverting the decoder table.
 fn zstd_fse_build_encode_table(table_log: i64, counts: [i64]) -> Result<ZstdFseEncodeTable, CompressionError>:
     val decode_res = zstd_fse_build_decode_table(table_log, counts)
-    if decode_res.is_err():
-        return Err(decode_res.unwrap_err())
-    val decode_table = decode_res.unwrap()
+    val decode_table = match decode_res:
+        case Ok(decoded): decoded
+        case Err(reason): return Err(reason)
     var slots: [[ZstdFseEncodeSlot]] = []
     var s = 0
     while s < counts.len():
@@ -338,14 +340,15 @@ fn _zstd_fse_encode_one_symbol(table: ZstdFseEncodeTable, state: i64, symbol: i6
     if state < 0 or state >= table_size:
         return Err(CompressionError.CorruptStream("zstd fse encode state oor"))
     val slot_res = _zstd_fse_find_slot(table, symbol, state)
-    if slot_res.is_err():
-        return Err(slot_res.unwrap_err())
-    val slot = slot_res.unwrap()
+    val slot = match slot_res:
+        case Ok(decoded): decoded
+        case Err(reason): return Err(reason)
     val low_bits = state - slot.baseline
     val out_writer_res = zstd_bit_writer_append_msb(writer, low_bits.to_u64(), slot.bits)
-    if out_writer_res.is_err():
-        return Err(out_writer_res.unwrap_err())
-    Ok((slot.p, out_writer_res.unwrap()))
+    val out_writer = match out_writer_res:
+        case Ok(decoded): decoded
+        case Err(reason): return Err(reason)
+    Ok((slot.p, out_writer))
 
 # Pick an encoder seed state for the LAST symbol in the input stream. The
 # seed is any slot that produces `symbol` when decoded. We pick the first
@@ -368,9 +371,9 @@ fn zstd_fse_encode_symbols(table: ZstdFseEncodeTable, symbols: [i64]) -> Result<
         return Err(CompressionError.CorruptStream("zstd fse encode empty symbol stream"))
     val last_idx = symbols.len() - 1
     val seed_res = _zstd_fse_pick_seed_state(table, symbols[last_idx])
-    if seed_res.is_err():
-        return Err(seed_res.unwrap_err())
-    var state = seed_res.unwrap()
+    var state = match seed_res:
+        case Ok(decoded): decoded
+        case Err(reason): return Err(reason)
     var writer = zstd_bit_writer_new()
     # Process symbols[N-2] down to symbols[0]. At each step, the new state
     # lands in a slot that emits symbols[idx] when decoded. After the loop,
@@ -378,15 +381,15 @@ fn zstd_fse_encode_symbols(table: ZstdFseEncodeTable, symbols: [i64]) -> Result<
     var idx = last_idx - 1
     while idx >= 0:
         val emit_res = _zstd_fse_encode_one_symbol(table, state, symbols[idx], writer)
-        if emit_res.is_err():
-            return Err(emit_res.unwrap_err())
-        val (next_state, next_writer) = emit_res.unwrap()
+        val (next_state, next_writer) = match emit_res:
+            case Ok(decoded): decoded
+            case Err(reason): return Err(reason)
         state = next_state
         writer = next_writer
         idx = idx - 1
     # Write the final encoder state as the table_log-bit init word LAST.
     val init_bits_res = zstd_bit_writer_append_msb(writer, state.to_u64(), table.table_log)
-    if init_bits_res.is_err():
-        return Err(init_bits_res.unwrap_err())
-    writer = init_bits_res.unwrap()
+    writer = match init_bits_res:
+        case Ok(decoded): decoded
+        case Err(reason): return Err(reason)
     zstd_bit_writer_finish(writer)
