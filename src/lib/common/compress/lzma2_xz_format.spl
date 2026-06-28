@@ -395,18 +395,20 @@ fn _decode_xz_block(input: [u8], block_start: i64, check_type: u8, tier: Compres
                 lzma_st = LzmaState(state: 0, rep0: 0, rep1: 0, rep2: 0, rep3: 0)
             continue
         val range_init_res = _validate_lzma_range_decoder_init(input, chunk.body_start)
-        if range_init_res.is_err():
-            return Err(range_init_res.unwrap_err())
+        match range_init_res:
+            case Ok(_): nil
+            case Err(reason): return Err(reason)
         if chunk.control.sets_props:
             val props_byte = chunk.props ?? 0u8
             val parsed_res = _lzma_parse_props_byte(props_byte)
-            if parsed_res.is_err():
-                return Err(parsed_res.unwrap_err())
+            val parsed_props = match parsed_res:
+                case Ok(found_props): found_props
+                case Err(reason): return Err(reason)
             # Only LCLPPB = 3/0/2 (props byte 0x5D) supported by range decoder.
             if props_byte != 0x5Du8:
                 return Err(CompressionError.UnsupportedFeature("LZMA2 LCLPPB other than 3/0/2"))
             lzma_props = props_byte
-            lzma_parsed_props = parsed_res.unwrap()
+            lzma_parsed_props = parsed_props
             lzma_props_set = true
         if not lzma_props_set:
             # No props yet -- only chunks 0xC0-0xFF set props, and the
@@ -429,9 +431,9 @@ fn _decode_xz_block(input: [u8], block_start: i64, check_type: u8, tier: Compres
             reset_probs,
             lzma_parsed_props
         )
-        if decoded.is_err():
-            return Err(decoded.unwrap_err())
-        val triple = decoded.unwrap()
+        val triple = match decoded:
+            case Ok(decoded_chunk): decoded_chunk
+            case Err(reason): return Err(reason)
         out = triple.0
         lzma_st = triple.1
         lzma_probs = triple.2
