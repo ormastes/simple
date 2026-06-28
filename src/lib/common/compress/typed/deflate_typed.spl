@@ -468,6 +468,7 @@ fn inflate_fixed(input: ByteSpan) -> ByteBuffer:
     if btype != 1:
         return out
     var done = 0
+    var saw_end = false
     while done == 0 and r.eof() == false:
         # Inline inflate_fixed_litlen_sym: decode one lit/len symbol
         var sym = -1
@@ -504,7 +505,10 @@ fn inflate_fixed(input: ByteSpan) -> ByteBuffer:
                                 if acc9 >= 400 and acc9 <= 511:
                                     sym = 144 + (acc9 - 400)
         # End inline inflate_fixed_litlen_sym
-        if sym < 0 or sym == 256:
+        if sym < 0:
+            return ByteBuffer.new()
+        if sym == 256:
+            saw_end = true
             done = 1
         else:
             if sym < 256:
@@ -531,25 +535,28 @@ fn inflate_fixed(input: ByteSpan) -> ByteBuffer:
                 if dj < 99 and dacc >= 0 and dacc <= 29:
                     dsym = dacc
                 # End inline inflate_fixed_read_dist
-                if dsym >= 0:
-                    val dextra = deflate_dist_extra(dsym)
-                    val dbase = deflate_dist_base(dsym)
-                    var dist = dbase
-                    if dextra > 0:
-                        dist = dist + r.read_bits(dextra)
-                    val hist_sp = out.freeze()
-                    val hist_len = hist_sp.len()
-                    if dist <= 0 or dist > hist_len:
-                        return ByteBuffer.new()
-                    var k = 0
-                    while k < mlen:
-                        val current = out.freeze()
-                        val idx = current.len() - dist
-                        var bv = 0
-                        if idx >= 0 and idx < current.len():
-                            bv = current.get(idx).to_i64()
-                        out.push_byte(bv)
-                        k = k + 1
+                if dsym < 0:
+                    return ByteBuffer.new()
+                val dextra = deflate_dist_extra(dsym)
+                val dbase = deflate_dist_base(dsym)
+                var dist = dbase
+                if dextra > 0:
+                    dist = dist + r.read_bits(dextra)
+                val hist_sp = out.freeze()
+                val hist_len = hist_sp.len()
+                if dist <= 0 or dist > hist_len:
+                    return ByteBuffer.new()
+                var k = 0
+                while k < mlen:
+                    val current = out.freeze()
+                    val idx = current.len() - dist
+                    var bv = 0
+                    if idx >= 0 and idx < current.len():
+                        bv = current.get(idx).to_i64()
+                    out.push_byte(bv)
+                    k = k + 1
+    if not saw_end:
+        return ByteBuffer.new()
     out
 
 # ============================================================================
