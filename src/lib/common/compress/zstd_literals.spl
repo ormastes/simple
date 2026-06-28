@@ -382,13 +382,13 @@ fn _zstd_parse_literals_section(input: [u8], block_start: i64, block_end: i64, p
     if literals_type == 2:
         # Fresh-table: parse Huffman tree from the payload prefix
         val tree_res = _zstd_parse_direct_weights(input, payload_start, payload_end)
-        if tree_res.is_err():
-            return Err(tree_res.unwrap_err())
-        val (weights, tree_size) = tree_res.unwrap()
+        val (weights, tree_size) = match tree_res:
+            case Ok(decoded): decoded
+            case Err(reason): return Err(reason)
         val built_res = _zstd_huf_build_table_from_weights(weights)
-        if built_res.is_err():
-            return Err(built_res.unwrap_err())
-        val fresh = built_res.unwrap()
+        val fresh = match built_res:
+            case Ok(decoded): decoded
+            case Err(reason): return Err(reason)
         active_table = fresh
         new_table_state = fresh
         data_start = payload_start + tree_size
@@ -399,10 +399,12 @@ fn _zstd_parse_literals_section(input: [u8], block_start: i64, block_end: i64, p
     val effective_table = active_table ?? ZstdHufTableState(table_bits: 0, table: [])
     if size_format == 0 or size_format == 2:
         val literals_res = _zstd_decode_huffman_stream(input, data_start, payload_end, regenerated_size, effective_table)
-        if literals_res.is_err():
-            return Err(literals_res.unwrap_err())
-        return Ok((ZstdLiteralsSection(literals: literals_res.unwrap(), bytes_used: header_size + compressed_size), new_table_state))
+        val literals = match literals_res:
+            case Ok(decoded): decoded
+            case Err(reason): return Err(reason)
+        return Ok((ZstdLiteralsSection(literals: literals, bytes_used: header_size + compressed_size), new_table_state))
     val literals_res = _zstd_decode_huffman_4streams(input, data_start, payload_end, regenerated_size, effective_table)
-    if literals_res.is_err():
-        return Err(literals_res.unwrap_err())
-    Ok((ZstdLiteralsSection(literals: literals_res.unwrap(), bytes_used: header_size + compressed_size), new_table_state))
+    val literals = match literals_res:
+        case Ok(decoded): decoded
+        case Err(reason): return Err(reason)
+    Ok((ZstdLiteralsSection(literals: literals, bytes_used: header_size + compressed_size), new_table_state))
