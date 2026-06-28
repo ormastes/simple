@@ -27,7 +27,7 @@ native_render_log_platform_matrix_contract_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+| 7 | 7 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -74,8 +74,8 @@ sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
 
 ## Acceptance
 
-- A `pass` Linux row with missing pairwise status is normalized to fail before
-  capture checks.
+- A `pass` Linux row with missing blocked-gate proof or pairwise status is
+  normalized to fail before capture checks.
 - A `pass` Windows row with `required_api=d3d11` is normalized to fail.
 - A `pass` row that omits required RenderDoc/GPU capture/PIX/debugger proof is
   normalized to fail.
@@ -85,6 +85,8 @@ sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
   file-byte magic is missing or invalid is normalized to fail.
 - A `pass` Windows row that omits the structured blocked-gate fields from the
   D3D12 compare wrapper is normalized to fail.
+- A `pass` Windows row that names a GPU debugger artifact but omits verified
+  artifact file-status proof is normalized to fail.
 - The platform matrix reports invalid present rows as failed, not missing.
 - A missing macOS row remains in the missing list without being counted as a
   failed row.
@@ -180,7 +182,7 @@ hide which parallel agent or host owns the next repair.
 
 ### Native render-log platform matrix contract
 
-#### rejects pass rows with missing pairwise status or the wrong native API
+#### rejects pass rows with missing gate proof or the wrong native API
 
 - Create controlled platform render-log rows with invalid pass claims
    - Expected: code equals `0`
@@ -190,7 +192,7 @@ hide which parallel agent or host owns the next repair.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -204,15 +206,16 @@ val evidence = file_read("build/test-native-render-log-platform-matrix-contract/
 expect(evidence).to_contain("native_render_log_platform_matrix_status=fail")
 expect(evidence).to_contain("native_render_log_platform_matrix_reason=missing-or-failing-native-render-log-platforms")
 expect(evidence).to_contain("native_render_log_platform_matrix_missing_platforms=")
-expect(evidence).to_contain("native_render_log_platform_matrix_failed_platforms=linux-vulkan,windows-d3d12")
+expect(evidence).to_contain("native_render_log_platform_matrix_failed_platforms=linux-vulkan,macos-metal,windows-d3d12")
 expect(evidence).to_contain("native_render_log_platform_matrix_linux_vulkan_command=BUILD_DIR=build/linux-vulkan-render-log-compare sh scripts/check/check-linux-vulkan-render-log-compare.shs")
 expect(evidence).to_contain("native_render_log_platform_matrix_macos_metal_command=MACOS_METAL_RENDER_LOG_REQUIRE_GPU_CAPTURE=1 BUILD_DIR=build/macos-metal-render-log-compare sh scripts/check/check-macos-metal-render-log-compare.shs")
 expect(evidence).to_contain("native_render_log_platform_matrix_windows_d3d12_command=WINDOWS_D3D12_RENDER_LOG_REQUIRE_PIX=1 BUILD_DIR=build/windows-d3d12-render-log-compare sh scripts/check/check-windows-d3d12-render-log-compare.shs")
 expect(evidence).to_contain("linux_vulkan_render_log_compare_status=fail")
-expect(evidence).to_contain("linux_vulkan_render_log_compare_reason=linux-vulkan-pairwise-not-pass:<missing>")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_reason=linux-vulkan-blocked-gates-present:<missing>")
 expect(evidence).to_contain("windows_d3d12_render_log_compare_status=fail")
 expect(evidence).to_contain("windows_d3d12_render_log_compare_reason=invalid-windows-d3d12-required-api:d3d11")
-expect(evidence).to_contain("macos_metal_render_log_compare_status=pass")
+expect(evidence).to_contain("macos_metal_render_log_compare_status=fail")
+expect(evidence).to_contain("macos_metal_render_log_compare_reason=macos-metal-blocked-gates-present:<missing>")
 ```
 
 </details>
@@ -294,7 +297,7 @@ expect(evidence).to_contain("native_render_log_platform_matrix_missing_platforms
 expect(evidence).to_contain("native_render_log_platform_matrix_failed_platforms=linux-vulkan,macos-metal,windows-d3d12")
 expect(evidence).to_contain("linux_vulkan_render_log_compare_reason=linux-vulkan-renderdoc-simple-env-not-pass:<missing>")
 expect(evidence).to_contain("macos_metal_render_log_compare_reason=macos-metal-gpu-capture-artifact-missing")
-expect(evidence).to_contain("windows_d3d12_render_log_compare_reason=windows-d3d12-gpu-debugger-artifact-missing")
+expect(evidence).to_contain("windows_d3d12_render_log_compare_reason=windows-d3d12-pix-artifact-file-not-pass:<missing>")
 ```
 
 </details>
@@ -358,6 +361,36 @@ expect(evidence).to_contain("windows_d3d12_render_log_compare_pix_gpu_debugger_g
 
 </details>
 
+#### rejects Windows D3D12 rows whose GPU debugger artifact file-status proof is missing
+
+- Create pass-looking Windows D3D12 rows with a debugger artifact path but no file-status proof
+   - Expected: code equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Create pass-looking Windows D3D12 rows with a debugger artifact path but no file-status proof")
+val command = "rm -rf build/test-native-render-log-platform-matrix-windows-debugger-file-status && mkdir -p build/test-native-render-log-platform-matrix-windows-debugger-file-status/renderlogs && printf 'linux_vulkan_render_log_compare_status=pass\\nlinux_vulkan_render_log_compare_reason=pass\\nlinux_vulkan_render_log_compare_required_api=vulkan\\nlinux_vulkan_render_log_compare_pairwise_status=pass\\nlinux_vulkan_render_log_compare_renderdoc_simple_status=pass\\nlinux_vulkan_render_log_compare_renderdoc_simple_env_file_status=pass\\nlinux_vulkan_render_log_compare_renderdoc_simple_artifact_file_status=pass\\nlinux_vulkan_render_log_compare_renderdoc_simple_artifact_magic=RDOC\\nlinux_vulkan_render_log_compare_renderdoc_chrome_status=pass\\nlinux_vulkan_render_log_compare_renderdoc_chrome_env_file_status=pass\\nlinux_vulkan_render_log_compare_renderdoc_chrome_artifact_file_status=pass\\nlinux_vulkan_render_log_compare_renderdoc_chrome_artifact_magic=RDOC\\nlinux_vulkan_render_log_compare_renderdoc_electron_status=pass\\nlinux_vulkan_render_log_compare_renderdoc_electron_env_file_status=pass\\nlinux_vulkan_render_log_compare_renderdoc_electron_artifact_file_status=pass\\nlinux_vulkan_render_log_compare_renderdoc_electron_artifact_magic=RDOC\\n' > build/test-native-render-log-platform-matrix-windows-debugger-file-status/renderlogs/linux.env && printf 'macos_metal_render_log_compare_status=pass\\nmacos_metal_render_log_compare_reason=pass\\nmacos_metal_render_log_compare_required_api=metal\\nmacos_metal_render_log_compare_pairwise_status=pass\\nmacos_metal_render_log_compare_gpu_capture_status=pass\\nmacos_metal_render_log_compare_gpu_capture_artifact=frame.gputrace\\nmacos_metal_render_log_compare_gpu_capture_artifact_file_status=pass\\nmacos_metal_render_log_compare_gpu_capture_artifact_magic=XCODE-GPUTRACE\\nmacos_metal_render_log_compare_electron_browser_backing_status=pass\\nmacos_metal_render_log_compare_chrome_browser_backing_status=pass\\nmacos_metal_render_log_compare_browser_backing_status=pass\\nmacos_metal_render_log_compare_pixel_comparison_status=pass\\nmacos_metal_render_log_compare_pixel_comparison_mode=pairwise-argb-diff\\nmacos_metal_render_log_compare_electron_chrome_pairwise_diff_status=pass\\nmacos_metal_render_log_compare_electron_simple_pairwise_diff_status=pass\\nmacos_metal_render_log_compare_chrome_simple_pairwise_diff_status=pass\\nmacos_metal_render_log_compare_simple_argb_reason=pass\\nmacos_metal_render_log_compare_chrome_argb_reason=pass\\nmacos_metal_render_log_compare_electron_argb_reason=pass\\nmacos_metal_render_log_compare_simple_argb_artifact_reason=pass\\nmacos_metal_render_log_compare_chrome_argb_artifact_reason=pass\\nmacos_metal_render_log_compare_electron_argb_artifact_reason=pass\\nmacos_metal_render_log_compare_argb_viewport_reason=pass\\n' > build/test-native-render-log-platform-matrix-windows-debugger-file-status/renderlogs/macos.env && printf 'windows_d3d12_render_log_compare_status=pass\\nwindows_d3d12_render_log_compare_reason=pass\\nwindows_d3d12_render_log_compare_required_api=d3d12\\nwindows_d3d12_render_log_compare_pairwise_status=pass\\nwindows_d3d12_render_log_compare_blocked_gate_count=0\\nwindows_d3d12_render_log_compare_blocked_gates=\\nwindows_d3d12_render_log_compare_native_readback_gate_status=pass\\nwindows_d3d12_render_log_compare_browser_backing_gate_status=pass\\nwindows_d3d12_render_log_compare_pairwise_gate_status=pass\\nwindows_d3d12_render_log_compare_argb_source_gate_status=pass\\nwindows_d3d12_render_log_compare_pix_gpu_debugger_gate_status=pass\\nwindows_d3d12_render_log_compare_pix_status=pass\\nwindows_d3d12_render_log_compare_pix_artifact=frame.wpix\\nwindows_d3d12_render_log_compare_pix_artifact_file_status=pass\\nwindows_d3d12_render_log_compare_pix_artifact_magic=PIX\\nwindows_d3d12_render_log_compare_pix_artifact_file_magic=PIX\\nwindows_d3d12_render_log_compare_gpu_debugger_status=pass\\nwindows_d3d12_render_log_compare_gpu_debugger_artifact=gpu-debugger.log\\n' > build/test-native-render-log-platform-matrix-windows-debugger-file-status/renderlogs/windows.env && LINUX_VULKAN_RENDER_LOG_COMPARE_ENV=build/test-native-render-log-platform-matrix-windows-debugger-file-status/renderlogs/linux.env MACOS_METAL_RENDER_LOG_COMPARE_ENV=build/test-native-render-log-platform-matrix-windows-debugger-file-status/renderlogs/macos.env WINDOWS_D3D12_RENDER_LOG_COMPARE_ENV=build/test-native-render-log-platform-matrix-windows-debugger-file-status/renderlogs/windows.env GUI_RENDERDOC_AGGREGATE_STATIC_CACHE_DIR=build/test-native-render-log-platform-matrix-static-cache BUILD_DIR=build/test-native-render-log-platform-matrix-windows-debugger-file-status/out REPORT_PATH=build/test-native-render-log-platform-matrix-windows-debugger-file-status/report.md sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs || true"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val evidence = file_read("build/test-native-render-log-platform-matrix-windows-debugger-file-status/out/evidence.env")
+expect(evidence).to_contain("native_render_log_platform_matrix_status=fail")
+expect(evidence).to_contain("native_render_log_platform_matrix_missing_platforms=")
+expect(evidence).to_contain("native_render_log_platform_matrix_failed_platforms=windows-d3d12")
+expect(evidence).to_contain("windows_d3d12_render_log_compare_status=fail")
+expect(evidence).to_contain("windows_d3d12_render_log_compare_reason=windows-d3d12-gpu-debugger-artifact-file-not-pass:<missing>")
+expect(evidence).to_contain("windows_d3d12_render_log_compare_gpu_debugger_artifact=gpu-debugger.log")
+expect(evidence).to_contain("windows_d3d12_render_log_compare_gpu_debugger_artifact_file_status=")
+```
+
+</details>
+
 #### rejects macOS Metal rows whose GPU capture artifact file-status proof is missing
 
 - Create pass-looking macOS Metal rows with claimed Xcode capture magic but no file-status row
@@ -393,8 +426,8 @@ expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_artifact
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 7 |
+| Active scenarios | 7 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
