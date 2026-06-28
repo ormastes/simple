@@ -197,6 +197,10 @@ function artifactHardlinkStatus(artifact) {
   return artifact.hardlink ? 'fail' : 'pass';
 }
 
+function artifactStatusFromFileStatus(status) {
+  return status === 'pass' ? 'pass' : 'fail';
+}
+
 function pixelCountMatches(pixels, width, height) {
   const w = jsonIntegerText(width);
   const h = jsonIntegerText(height);
@@ -348,6 +352,17 @@ const proofSource = proofSourceArtifact(expectedProofSource);
 const proofSourceFileStatus = proofSource.status;
 const proofSourceSizeBytes = proofSource.size;
 const proofSourceActualSizeBytes = proofSource.actualSize;
+const proofSourceArtifactStatus =
+  proofSourceFileStatus === 'pass' &&
+  proofSourceSizeBytes !== '' &&
+  proofSourceActualSizeBytes !== '' &&
+  proofSourceSizeBytes === proofSourceActualSizeBytes
+    ? 'pass'
+    : 'fail';
+const geometryFileStatus = artifactFileStatus(geometryStat);
+const geometryArtifactStatus = artifactStatusFromFileStatus(geometryFileStatus);
+const capturedArgbFileStatus = artifactFileStatus(capturedArgbStat);
+const capturedArgbArtifactStatus = artifactStatusFromFileStatus(capturedArgbFileStatus);
 const expectedCaptureBackend = 'electron-offscreen-capture-page';
 const expectedCompositorMode = 'offscreen-osr-exact-srgb';
 const browserEngine = textField(proof.browser_engine);
@@ -468,6 +483,8 @@ emit('electron_simple_web_layout_proof_source', proof.proof_source);
 emit('electron_simple_web_layout_proof_source_file_status', proofSourceFileStatus);
 emit('electron_simple_web_layout_proof_source_size_bytes', proofSourceSizeBytes);
 emit('electron_simple_web_layout_proof_source_actual_size_bytes', proofSourceActualSizeBytes);
+emit('electron_simple_web_layout_proof_source_file_reason', proofSourceFileStatus);
+emit('electron_simple_web_layout_proof_source_artifact_status', proofSourceArtifactStatus);
 emit('electron_simple_web_layout_capture_backend', proof.capture_backend);
 emit('electron_simple_web_layout_compositor_mode', proof.compositor_mode);
 emit('electron_simple_web_layout_browser_engine', browserEngine);
@@ -493,7 +510,9 @@ emit('electron_simple_web_layout_capture_native_height', jsonIntegerTextOrBlank(
 emit('electron_simple_web_layout_capture_downsampled', jsonBoolTextOrBlank(proof.capture_downsampled));
 emit('electron_simple_web_layout_geometry_path', proof.geometry_path);
 emit('electron_simple_web_layout_geometry_written', jsonBoolTextOrBlank(proof.geometry_written));
-emit('electron_simple_web_layout_geometry_file_status', artifactFileStatus(geometryStat));
+emit('electron_simple_web_layout_geometry_file_status', geometryFileStatus);
+emit('electron_simple_web_layout_geometry_file_reason', geometryFileStatus);
+emit('electron_simple_web_layout_geometry_artifact_status', geometryArtifactStatus);
 emit('electron_simple_web_layout_geometry_symlink_status', artifactSymlinkStatus(geometryStat));
 emit('electron_simple_web_layout_geometry_hardlink_status', artifactHardlinkStatus(geometryStat));
 emit('electron_simple_web_layout_geometry_size_bytes', geometryStat === null || geometryStat.symlink || geometryStat.hardlink ? '' : String(geometryStat.stat.size));
@@ -504,7 +523,9 @@ emit('electron_simple_web_layout_geometry_item_count', String(geometryItems.leng
 emit('electron_simple_web_layout_geometry_measured_item_count', String(geometryMeasuredItemCount));
 emit('electron_simple_web_layout_captured_argb_path', proof.captured_argb_path);
 emit('electron_simple_web_layout_captured_argb_written', jsonBoolTextOrBlank(proof.captured_argb_written));
-emit('electron_simple_web_layout_captured_argb_file_status', artifactFileStatus(capturedArgbStat));
+emit('electron_simple_web_layout_captured_argb_file_status', capturedArgbFileStatus);
+emit('electron_simple_web_layout_captured_argb_file_reason', capturedArgbFileStatus);
+emit('electron_simple_web_layout_captured_argb_artifact_status', capturedArgbArtifactStatus);
 emit('electron_simple_web_layout_captured_argb_symlink_status', artifactSymlinkStatus(capturedArgbStat));
 emit('electron_simple_web_layout_captured_argb_hardlink_status', artifactHardlinkStatus(capturedArgbStat));
 emit('electron_simple_web_layout_captured_argb_size_bytes', capturedArgbStat === null || capturedArgbStat.symlink || capturedArgbStat.hardlink ? '' : String(capturedArgbStat.stat.size));
