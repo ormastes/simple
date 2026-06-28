@@ -60,12 +60,12 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 mkdir_p(".build/llm_runtime/system")
-val started = rt_time_now_unix_micros()
+val started = time_now_unix_micros()
 val manifest = llm_runtime_manifest("base-model", "http://127.0.0.1:8000/v1", "", [], "disabled")
 val readiness = llm_runtime_probe_manifest_with_torch_status(manifest, "unavailable")
 write_file(evidence_path(), readiness.evidence_jsonl)
 val panel_text = render_llm_diagnostics_panel_text(collect_llm_diagnostics_jsonl(evidence_path()))
-val elapsed = rt_time_now_unix_micros() - started
+val elapsed = time_now_unix_micros() - started
 
 expect(readiness.status).to_equal("blocked")
 expect(readiness.reason).to_equal("torch_unavailable")
