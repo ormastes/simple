@@ -504,6 +504,8 @@ fn _zstd_promote_repeat_offset(history: ZstdRepeatOffsets, offset: i64) -> ZstdR
     ZstdRepeatOffsets(rep1: offset, rep2: history.rep1, rep3: history.rep2)
 
 fn _zstd_resolve_sequence_offset(sequence: ZstdSequence, history: ZstdRepeatOffsets) -> Result<(i64, ZstdRepeatOffsets), CompressionError>:
+    if sequence.offset_value <= 0:
+        return Err(CompressionError.CorruptStream("zstd invalid sequence distance"))
     if sequence.offset_value > 3:
         val offset = sequence.offset_value - 3
         if offset <= 0:
@@ -544,12 +546,12 @@ fn _zstd_execute_sequences(base_out: [u8], literals: [u8], sequences: [ZstdSeque
         out = append_bytes(out, literals.slice(literals_pos, literals_pos + sequence.literal_length))
         literals_pos = literals_pos + sequence.literal_length
         val offset_res = _zstd_resolve_sequence_offset(sequence, history)
-        val (offset, next_history) = match offset_res:
-            case Ok(found_offset): found_offset
-            case Err(reason): return Err(reason)
-        if offset > out.len():
+        if offset_res.is_err():
+            return Err(offset_res.unwrap_err())
+        val (distance, next_history) = offset_res.unwrap()
+        if distance > out.len():
             return Err(CompressionError.CorruptStream("zstd invalid match offset"))
-        val copy_res = append_self_overlap_copy(out, offset, sequence.match_length)
+        val copy_res = append_self_overlap_copy(out, distance, sequence.match_length)
         out = match copy_res:
             case Ok(copied_out): copied_out
             case Err(reason): return Err(reason)
