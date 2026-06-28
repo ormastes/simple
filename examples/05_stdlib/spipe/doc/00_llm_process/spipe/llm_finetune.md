@@ -107,7 +107,10 @@ placeholder values, and the next readiness action before treating an attempt as
 production evidence.
 Use `spipe fine-tune-ready <attempt_id>` as the release/training handoff gate;
 it fails while requirement selection, model choice, real tuning method, model
-artifact, target-reaching eval, or accepted decision evidence remains pending.
+artifact, target-reaching eval, accepted decision, or deployable app handoff
+evidence remains pending. A handoff doc path alone is not ready when the app
+handoff still says `do not deploy`, license constraints are pending, safety eval
+has not run, or deployment evidence is not deployable.
 Use `spipe fine-tune-next <attempt_id>` to print the next required phase for an
 attempt, including create-attempt, requirements selection, model selection,
 tuning method selection, artifact creation, target eval, or acceptance decision.

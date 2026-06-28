@@ -230,7 +230,7 @@ expect(output).to_contain("decision_accepted=pending")
 expect(output).to_contain("license_constraints_reviewed=pending")
 expect(output).to_contain("safety_eval_complete=pending")
 expect(output).to_contain("deployment_evidence_ready=pending")
-expect(output).to_contain("app_handoff_doc_ready=ready")
+expect(output).to_contain("app_handoff_doc_ready=pending")
 expect(output).to_contain("STATUS: FAIL llm-finetune-ready")
 expect(output.split(absence_marker()).len()).to_equal(1)
 ```

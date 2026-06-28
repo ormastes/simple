@@ -1416,6 +1416,15 @@ function fineTuneEvalTargetStatus(root, attemptId, attemptContent) {
   );
 }
 
+function fineTuneAppHandoffReady(handoffDoc, usage, licenseConstraints, safetyEval, deploymentEvidence) {
+  if (!handoffDoc || handoffDoc === "missing" || handoffDoc === "pending") return false;
+  if (!usage || /^do not deploy\b/i.test(usage)) return false;
+  if (!licenseConstraints || licenseConstraints === "pending") return false;
+  if (!safetyEval || safetyEval === "not-run") return false;
+  if (!deploymentEvidence || deploymentEvidence === "not-deployable") return false;
+  return true;
+}
+
 function commandFineTuneReady(args) {
   const [attemptId] = args;
   if (!attemptId) {
@@ -1444,6 +1453,7 @@ function commandFineTuneReady(args) {
   const safetyEval = registryValueForAttempt(root, "app_handoffs.sdn", attemptId, "safety_eval") || readQuotedValue(attemptContent, "safety_eval");
   const deploymentEvidence = registryValueForAttempt(root, "app_handoffs.sdn", attemptId, "deployment_evidence") || readQuotedValue(attemptContent, "deployment_evidence");
   const handoffDoc = registryValueForAttempt(root, "app_handoffs.sdn", attemptId, "handoff_doc") || readQuotedValue(attemptContent, "handoff_doc");
+  const handoffUsage = registryValueForAttempt(root, "app_handoffs.sdn", attemptId, "usage") || readQuotedValue(attemptContent, "usage");
   const artifactReady = modelArtifactReady(modelArtifact);
   const evalTargetReached = fineTuneEvalTargetStatus(root, attemptId, attemptContent);
 
@@ -1458,7 +1468,7 @@ function commandFineTuneReady(args) {
     ["license_constraints_reviewed", licenseConstraints && licenseConstraints !== "pending"],
     ["safety_eval_complete", safetyEval && safetyEval !== "not-run"],
     ["deployment_evidence_ready", deploymentEvidence && deploymentEvidence !== "not-deployable"],
-    ["app_handoff_doc_ready", handoffDoc && handoffDoc !== "missing" && handoffDoc !== "pending"]
+    ["app_handoff_doc_ready", fineTuneAppHandoffReady(handoffDoc, handoffUsage, licenseConstraints, safetyEval, deploymentEvidence)]
   ];
 
   console.log(`attempt_id=${attemptId}`);
@@ -1483,6 +1493,7 @@ function readinessChecks(root, attemptId) {
   const safetyEval = registryValueForAttempt(root, "app_handoffs.sdn", attemptId, "safety_eval") || readQuotedValue(attemptContent, "safety_eval");
   const deploymentEvidence = registryValueForAttempt(root, "app_handoffs.sdn", attemptId, "deployment_evidence") || readQuotedValue(attemptContent, "deployment_evidence");
   const handoffDoc = registryValueForAttempt(root, "app_handoffs.sdn", attemptId, "handoff_doc") || readQuotedValue(attemptContent, "handoff_doc");
+  const handoffUsage = registryValueForAttempt(root, "app_handoffs.sdn", attemptId, "usage") || readQuotedValue(attemptContent, "usage");
   const evalTargetReached = fineTuneEvalTargetStatus(root, attemptId, attemptContent);
   return [
     ["requirements-selection", featureOption && featureOption !== "pending-user-selection" && nfrOption && nfrOption !== "pending-user-selection"],
@@ -1494,7 +1505,7 @@ function readinessChecks(root, attemptId) {
     ["license-constraints", licenseConstraints && licenseConstraints !== "pending"],
     ["safety-eval", safetyEval && safetyEval !== "not-run"],
     ["deployment-evidence", deploymentEvidence && deploymentEvidence !== "not-deployable"],
-    ["app-handoff-doc", handoffDoc && handoffDoc !== "missing" && handoffDoc !== "pending"]
+    ["app-handoff-doc", fineTuneAppHandoffReady(handoffDoc, handoffUsage, licenseConstraints, safetyEval, deploymentEvidence)]
   ];
 }
 

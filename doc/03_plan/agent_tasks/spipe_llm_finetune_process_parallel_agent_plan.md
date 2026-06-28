@@ -273,6 +273,13 @@ Evidence:
   `STATUS: PASS llm-finetune-next` only when readiness is complete. The retry7
   system spec covers the current `retry-implementation` next action, retry
   target, WARN status, and public absence-marker policy.
+- 2026-06-28 app handoff readiness hardening: `fine-tune-ready` and
+  `fine-tune-next` now treat an app handoff doc path as pending while the
+  handoff record still says `do not deploy`, license constraints are pending,
+  safety eval is `not-run`, or deployment evidence is `not-deployable`. Retry7
+  now reports `app_handoff_doc_ready=pending`, matching the acceptance gate's
+  full license/safety/deployment/app-handoff requirement instead of accepting a
+  placeholder architecture doc path as release-ready evidence.
 
 Next normal-LLM work: finish retry5 licensed cache/checksum evidence and retry6
 real training/eval before retry7 can become an acceptance gate with a PASS
