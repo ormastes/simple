@@ -144,11 +144,11 @@ sh scripts/check/check-llm-goal-evidence.shs --strict-host
 ```
 
 Strict host mode first generates repo-local context/Ponytail full-replacement
-evidence and authenticated dashboard route evidence, then passes the focused
-strict flags to the context/Ponytail, dashboard, vLLM, svLLM, Torch optimizer,
-and fine-tune wrappers. The aggregate expects all completion lanes to pass,
-fails for any WARN or missing strict evidence result, and writes
-`llm_goal_evidence_failed_gates`,
+evidence, authenticated dashboard route evidence, and fine-tune retry7
+acceptance evidence, then passes the focused strict flags to the
+context/Ponytail, dashboard, vLLM, svLLM, Torch optimizer, and fine-tune
+wrappers. The aggregate expects all completion lanes to pass, fails for any WARN
+or missing strict evidence result, and writes `llm_goal_evidence_failed_gates`,
 `llm_goal_evidence_failed_gate_hints`, `llm_goal_evidence_warn_gates`, and
 per-lane `llm_goal_evidence_<lane>_hint` values to the env file for direct
 triage.

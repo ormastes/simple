@@ -1,0 +1,90 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/llm_finetune_acceptance}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/2026/06/llm_finetune_acceptance_$(date -u +%F).md}"
+OUT_ENV="$BUILD_DIR/evidence.env"
+ATTEMPT="${FINETUNE_ACCEPTANCE_ATTEMPT:-llm_backed_app_server_dry_run_retry7}"
+GATE_LOG="$BUILD_DIR/retry7_acceptance_gate.log"
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+rm -f "$OUT_ENV" "$REPORT_PATH" "$GATE_LOG"
+
+if .spipe/llm-finetune-process/scripts/check_retry7_acceptance_gate.shs "$ATTEMPT" >"$GATE_LOG" 2>&1; then
+    gate_exit=0
+else
+    gate_exit=$?
+fi
+
+value_for() {
+    key="$1"
+    sed -n "s/^${key}=//p" "$GATE_LOG" | tail -n 1
+}
+
+gate_status="$(sed -n 's/^STATUS: //p' "$GATE_LOG" | tail -n 1)"
+result="$(value_for result)"
+acceptance_allowed="$(value_for acceptance_allowed)"
+acceptance_reason="$(value_for acceptance_reason)"
+upstream_retry6_result="$(value_for upstream_retry6_result)"
+target_eval_reached="$(value_for target_eval_reached)"
+target_accuracy="$(value_for target_accuracy)"
+license_constraints="$(value_for license_constraints)"
+safety_eval="$(value_for safety_eval)"
+deployment_evidence="$(value_for deployment_evidence)"
+app_handoff_doc_ready="$(value_for app_handoff_doc_ready)"
+
+status="fail"
+reason="${result:-acceptance_not_ready}"
+if [ "$gate_exit" -eq 0 ] &&
+   printf '%s\n' "$gate_status" | grep -F "PASS retry7-acceptance-gate" >/dev/null 2>&1 &&
+   [ "$acceptance_allowed" = "true" ]; then
+    status="pass"
+    reason="retry7_acceptance_passed"
+fi
+
+{
+    printf '%s\n' "llm_finetune_acceptance_status=$status"
+    printf '%s\n' "llm_finetune_acceptance_reason=$reason"
+    printf '%s\n' "llm_finetune_acceptance_attempt=$ATTEMPT"
+    printf '%s\n' "llm_finetune_acceptance_gate_exit=$gate_exit"
+    printf '%s\n' "llm_finetune_acceptance_gate_status=$gate_status"
+    printf '%s\n' "llm_finetune_acceptance_result=$result"
+    printf '%s\n' "llm_finetune_acceptance_allowed=${acceptance_allowed:-false}"
+    printf '%s\n' "llm_finetune_acceptance_upstream_retry6_result=$upstream_retry6_result"
+    printf '%s\n' "llm_finetune_acceptance_target_eval_reached=$target_eval_reached"
+    printf '%s\n' "llm_finetune_acceptance_target_accuracy=$target_accuracy"
+    printf '%s\n' "llm_finetune_acceptance_license_constraints=$license_constraints"
+    printf '%s\n' "llm_finetune_acceptance_safety_eval=$safety_eval"
+    printf '%s\n' "llm_finetune_acceptance_deployment_evidence=$deployment_evidence"
+    printf '%s\n' "llm_finetune_acceptance_app_handoff_doc_ready=$app_handoff_doc_ready"
+    printf '%s\n' "llm_finetune_acceptance_gate_log=$GATE_LOG"
+} >"$OUT_ENV"
+
+{
+    printf '# LLM Fine-Tune Acceptance Evidence\n\n'
+    printf '%s\n' "- status: \`$status\`"
+    printf '%s\n' "- reason: \`$reason\`"
+    printf '%s\n' "- attempt: \`$ATTEMPT\`"
+    printf '%s\n' "- gate_status: \`$gate_status\`"
+    printf '%s\n' "- acceptance_allowed: \`${acceptance_allowed:-false}\`"
+    printf '%s\n' "- upstream_retry6_result: \`$upstream_retry6_result\`"
+    printf '%s\n' "- target_eval_reached: \`$target_eval_reached\`"
+    printf '%s\n' "- target_accuracy: \`$target_accuracy\`"
+    printf '%s\n' "- license_constraints: \`$license_constraints\`"
+    printf '%s\n' "- safety_eval: \`$safety_eval\`"
+    printf '%s\n' "- deployment_evidence: \`$deployment_evidence\`"
+    printf '%s\n' "- app_handoff_doc_ready: \`$app_handoff_doc_ready\`"
+    printf '%s\n' "- env: \`$OUT_ENV\`"
+    printf '\n'
+    printf 'This evidence consumes the retry7 normal acceptance gate. It only passes when retry7 itself passes with `acceptance_allowed=true`; otherwise it records the concrete model/eval/license/safety/deployment/app-handoff blockers and keeps strict fine-tune readiness failed.\n'
+} >"$REPORT_PATH"
+
+if [ "$status" = "pass" ]; then
+    echo "STATUS: PASS llm-finetune-acceptance"
+else
+    echo "STATUS: FAIL llm-finetune-acceptance reason=$reason"
+    exit 1
+fi

@@ -73,6 +73,16 @@ Run strict ready mode only when tuned-model acceptance evidence is expected to
 exist:
 
 ```bash
+sh scripts/check/check-llm-finetune-acceptance-evidence.shs
+```
+
+The acceptance checker writes `build/llm_finetune_acceptance/evidence.env`.
+It passes only when retry7 itself reports `STATUS: PASS retry7-acceptance-gate`
+and `acceptance_allowed=true`; otherwise it records the concrete model,
+target-eval, license, safety, deployment, app-handoff, and normal-review
+blockers and keeps `llm_finetune_acceptance_status=fail`.
+
+```bash
 FINETUNE_ACCEPTANCE_EVIDENCE_ENV=build/llm_finetune_acceptance/evidence.env \
   sh scripts/check/check-llm-finetune-guard-evidence.shs --strict-ready
 ```
@@ -80,7 +90,8 @@ FINETUNE_ACCEPTANCE_EVIDENCE_ENV=build/llm_finetune_acceptance/evidence.env \
 Strict ready mode requires the evidence env to contain
 `llm_finetune_acceptance_status=pass`. The local guard pass is intentionally not
 training, target-eval, safety, deployment, app-handoff, or normal-review
-acceptance proof.
+acceptance proof; the current retry7 dry-run should remain failed until those
+records are real.
 
 Run readiness only when upstream evidence is expected to be complete:
 
@@ -99,6 +110,7 @@ Primary retry7 evidence:
 
 - `.spipe/llm-finetune-process/attempts/llm_backed_app_server_dry_run_retry7.sdn`
 - `.spipe/llm-finetune-process/scripts/check_retry7_acceptance_gate.shs`
+- `scripts/check/check-llm-finetune-acceptance-evidence.shs`
 - `scripts/check/check-llm-finetune-guard-evidence.shs`
 - `test/03_system/tools/spipe/llm_finetune_retry7_acceptance_gate_spec.spl`
 - `doc/06_spec/03_system/tools/spipe/llm_finetune_retry7_acceptance_gate_spec.md`
