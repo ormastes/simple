@@ -47,7 +47,7 @@ This system spec verifies REQ-012, REQ-013, REQ-014, and REQ-015 for the local c
 | Design | doc/05_design/app/tools/llm_tooling_context_ponytail_mimic.md |
 | Research | doc/01_research/local/llm_tooling_context_ponytail_mimic.md |
 | Source | `test/03_system/app/tooling/feature/context_ponytail_mimic_spec.spl` |
-| Updated | 2026-06-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -246,12 +246,12 @@ expect(app_handler).to_contain("ponytail_audit")
 expect(app_handler).to_contain("ponytail_simplification_report")
 expect(app_handler).to_contain("Invalid mode: ")
 expect(app_handler).to_contain("_render_ponytail_mcp(file, mode, result, format)")
-expect(app_table).to_contain("prop_str(\"mode\", \"Mode: audit, simplification\")")
+expect(app_table).to_contain("prop_str(\"mode\", \"Mode: audit/review, simplification/simplify\")")
 expect(lower_handler).to_contain("ponytail_audit_source")
 expect(lower_handler).to_contain("ponytail_simplification_report_source")
 expect(lower_handler).to_contain("_mcp_render_ponytail_report")
 expect(lower_schema).to_contain("make_tool_schema(name: \"simple_ponytail\"")
-expect(lower_schema).to_contain("Mode: audit, simplification")
+expect(lower_schema).to_contain("Mode: audit/review, simplification/simplify")
 ```
 
 </details>

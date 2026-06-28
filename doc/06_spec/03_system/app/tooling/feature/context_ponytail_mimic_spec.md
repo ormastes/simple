@@ -246,12 +246,12 @@ expect(app_handler).to_contain("ponytail_audit")
 expect(app_handler).to_contain("ponytail_simplification_report")
 expect(app_handler).to_contain("Invalid mode: ")
 expect(app_handler).to_contain("_render_ponytail_mcp(file, mode, result, format)")
-expect(app_table).to_contain("prop_str(\"mode\", \"Mode: audit, simplification\")")
+expect(app_table).to_contain("prop_str(\"mode\", \"Mode: audit/review, simplification/simplify\")")
 expect(lower_handler).to_contain("ponytail_audit_source")
 expect(lower_handler).to_contain("ponytail_simplification_report_source")
 expect(lower_handler).to_contain("_mcp_render_ponytail_report")
 expect(lower_schema).to_contain("make_tool_schema(name: \"simple_ponytail\"")
-expect(lower_schema).to_contain("Mode: audit, simplification")
+expect(lower_schema).to_contain("Mode: audit/review, simplification/simplify")
 ```
 
 </details>

@@ -88,11 +88,11 @@ The app MCP surface already exposes context-style query behavior. Ponytail
 should be exposed through the same registry/dispatch path when the existing
 handler is verified, rather than as a separate plugin runtime.
 
-## Nil Policy
+## Absence Policy
 
-Internal absence may be represented as nil. User-facing context output must use
-empty strings, omitted fields, or explicit domain text. Literal `nil` is not
-valid output.
+Internal absence may use the runtime's private absence representation.
+User-facing context output must use omitted fields or explicit domain text. The
+internal marker is not valid public output.
 
 ## First Slice Contract
 
@@ -101,11 +101,11 @@ valid output.
 - returns markdown by default
 - supports `text`
 - supports JSON with escaped text
-- returns empty string only when source cannot be read
+- reports missing source input without exposing the internal marker
 
 `context_stats`:
 
-- returns empty string only when source cannot be read
+- reports missing source input without exposing the internal marker
 - reports source lines, selected lines, and estimated tokens
 
 `context_sql_*`:

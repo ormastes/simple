@@ -26,7 +26,7 @@ training primitives only when a later lane explicitly enters training.
    - invalid endpoint and malformed adapter-entry reporting
 4. Evidence layer:
    - SPipe JSONL events
-   - nil-free status/reason fields
+   - internal-marker-free status/reason fields
    - dashboard diagnostics consumption
 5. Runtime control layer:
    - live request planning for `/v1/models` and `/v1/chat/completions`
@@ -60,7 +60,7 @@ training primitives only when a later lane explicitly enters training.
   it must not import process or HTTP backends directly or treat planned controls
   as live endpoint proof.
 - Absence is represented as option-like text such as `none`, `missing`, or an
-  omitted field, never literal `nil`.
+  omitted field, never the runtime's internal marker.
 
 ## MDSOC Ownership
 
