@@ -1026,6 +1026,14 @@ Normal-review acceptance:
   rules, and reviewed findings. It also asserts the checker fails closed when
   the plan file is missing. This is a headless review-contract gate only; it
   does not produce live renderer, platform, or performance evidence.
+- 2026-06-28 retained perf bundle precedence fix:
+  `scripts/check/check-gui-web-2d-platform-evidence-bundle.shs` now classifies
+  the combined `retained-4k-8k-current-source` gate as failed if either present
+  retained perf row is failed, even when the companion 4K or 8K env is still
+  missing. The regression is covered by
+  `test/03_system/check/gui_web_2d_platform_evidence_bundle_spec.spl`. This
+  prevents bad present retained perf evidence from being hidden as merely
+  missing platform work.
 
 ## Hard Stop Conditions
 

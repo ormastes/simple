@@ -27,7 +27,7 @@ gui_web_2d_platform_evidence_bundle_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 4 | 4 | 0 | 0 |
+| 5 | 5 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -70,8 +70,12 @@ sh scripts/check/check-gui-web-2d-platform-evidence-bundle.shs
 ## Acceptance
 
 - Missing evidence files keep all nine live gates incomplete.
-- Passing synthetic platform envs prove all nine live gates.
+- Passing synthetic platform envs prove only that the bundle classifier marks
+  all nine live gates as proven when every required input key is present and
+  passing.
 - A present failed platform row is reported as failed, not missing.
+- A present failed retained 4K or 8K performance row is reported as failed
+  even when the companion perf env is missing.
 - A present failed freshness env is reported as the `cross-platform-freshness`
   failed gate, not as missing evidence.
 - Missing or failed live gates exit nonzero so automation cannot treat a
@@ -153,6 +157,9 @@ platform hosts still need to run their lane. `failed-live-gates` means at least
 one lane produced evidence that was present but insufficient. Do not collapse
 these states: a missing Windows PIX env is scheduling work for a Windows host,
 while a failed Windows PIX env is a bug or capture-quality issue in that lane.
+The same rule applies to split retained performance evidence: if 4K or 8K
+exists and fails, the retained 4K/8K gate is failed even if the other retained
+perf env has not been produced yet.
 
 The bundle checker is intentionally conservative. It does not infer a platform
 pass from a broader aggregate status when a lane-specific status key is absent.
@@ -206,7 +213,7 @@ expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_cross_platform_
 
 </details>
 
-#### proves all nine live gates from passing synthetic evidence envs
+#### marks all nine live gates proven from complete passing synthetic evidence envs
 
 <details>
 <summary>Executable SSpec</summary>
@@ -255,6 +262,30 @@ expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_linux_vulkan_re
 
 </details>
 
+#### classifies a failed retained perf row as failed when the companion perf env is missing
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val command = "rm -rf build/test-gui-web-2d-platform-evidence-bundle-retained-mixed && mkdir -p build/test-gui-web-2d-platform-evidence-bundle-retained-mixed/env && printf 'gui_showcase_4k_200fps_status=fail\\n' > build/test-gui-web-2d-platform-evidence-bundle-retained-mixed/env/4k.env && BUILD_DIR=build/test-gui-web-2d-platform-evidence-bundle-retained-mixed/out REPORT_PATH=build/test-gui-web-2d-platform-evidence-bundle-retained-mixed/report.md NATIVE_RENDER_LOG_PLATFORM_MATRIX_ENV=build/test-gui-web-2d-platform-evidence-bundle-retained-mixed/missing/native.env TAURI_MOBILE_RENDERER_PARITY_ENV=build/test-gui-web-2d-platform-evidence-bundle-retained-mixed/missing/mobile.env GUI_SHOWCASE_4K_200FPS_ENV=build/test-gui-web-2d-platform-evidence-bundle-retained-mixed/env/4k.env GUI_SHOWCASE_8K_200FPS_ENV=build/test-gui-web-2d-platform-evidence-bundle-retained-mixed/missing/8k.env HTML_CSS_FULL_RENDERING_GOAL_ENV=build/test-gui-web-2d-platform-evidence-bundle-retained-mixed/missing/html.env PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=build/test-gui-web-2d-platform-evidence-bundle-retained-mixed/missing/production.env GUI_WEB_2D_PLATFORM_FRESHNESS_ENV=build/test-gui-web-2d-platform-evidence-bundle-retained-mixed/missing/fresh.env sh scripts/check/check-gui-web-2d-platform-evidence-bundle.shs"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read("build/test-gui-web-2d-platform-evidence-bundle-retained-mixed/out/evidence.env")
+expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_status=fail")
+expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_reason=failed-live-gates")
+expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_failed_gate_count=1")
+expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_failed_gates=retained-4k-8k-current-source")
+expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_missing_gate_count=8")
+expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_retained_4k_8k_current_source_status=fail")
+```
+
+</details>
+
 #### classifies present bad freshness evidence as failed
 
 <details>
@@ -282,8 +313,8 @@ expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_cross_platform_
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
+| Total scenarios | 5 |
+| Active scenarios | 5 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
