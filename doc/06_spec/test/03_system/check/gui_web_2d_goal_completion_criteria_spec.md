@@ -27,7 +27,7 @@ gui_web_2d_goal_completion_criteria_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 7 | 7 | 0 | 0 |
+| 8 | 8 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -221,6 +221,9 @@ fields through the aggregate audit and requires:
   normal/high-capability review before accepting broad findings or done marks;
   Spark quota failures are recorded as attempts only, fallback output remains
   advisory, and no broad done mark is accepted from sidecar output.
+- Tauri mobile completion proves iOS Tauri2/WKWebView Metal evidence and
+  Android Tauri2/WebView Vulkan evidence with screenshot artifacts plus MDI
+  event, capture, performance, and animation proof.
 
 ## Scenarios
 
@@ -340,6 +343,25 @@ expect(verify_production_gui_web_parity_completion()).to_equal("pass")
 
 </details>
 
+#### requires Tauri mobile renderer parity for iOS Metal and Android Vulkan
+
+- Verify iOS and Android Tauri mobile renderer parity includes live screenshots, GPU markers, and complete MDI proof
+   - Expected: verify_tauri_mobile_renderer_completion() equals `pass`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Verify iOS and Android Tauri mobile renderer parity includes live screenshots, GPU markers, and complete MDI proof")
+expect(verify_tauri_mobile_renderer_completion()).to_equal("pass")
+```
+
+</details>
+
 #### requires parallel-agent work to have Spark or fallback output and higher-capability review
 
 - Verify sidecar outputs are reviewed before any broad completion claim is accepted
@@ -363,8 +385,8 @@ expect(verify_parallel_agent_review_completion()).to_equal("pass")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 7 |
-| Active scenarios | 7 |
+| Total scenarios | 8 |
+| Active scenarios | 8 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
