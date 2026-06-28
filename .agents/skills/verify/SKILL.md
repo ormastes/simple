@@ -161,6 +161,7 @@ not create, rewrite, or weaken SPipe after verification.
   freshness gate is satisfied or explicitly recorded as `N/A`
 - For `simple_context` or context-mode changes, verify the MCP/tooling guide,
   generated manuals, and skill/command docs mention any new `--sql`/`--db`
-  behavior, embedded SQLite facade boundary, and explicit absence statuses.
-  Run `scripts/check/check-llm-tooling-public-absence-rendering.shs`.
+  behavior, `--source-filter`/MCP `source_filter`, file-optional SQL query
+  shape, embedded SQLite facade boundary, and explicit absence statuses. Run
+  `scripts/check/check-llm-tooling-public-absence-rendering.shs`.
 - Do not mark PASS for compiler/core/lib or MCP/LSP work unless the matching smoke checks passed

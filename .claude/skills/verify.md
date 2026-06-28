@@ -182,8 +182,9 @@ For each source file in scope:
      process docs before final verification
    - `simple_context` or context-mode changes must refresh the MCP/tooling guide,
      generated manuals, and skill/command docs for any new `--sql`/`--db`
-     behavior, embedded SQLite facade boundary, explicit absence statuses, and
-     the public-absence guard.
+     behavior, `--source-filter`/MCP `source_filter`, file-optional SQL query
+     shape, embedded SQLite facade boundary, explicit absence statuses, and the
+     public-absence guard.
 
 5. **Runtime facade boundary:**
    - Run `sh scripts/audit/direct-env-runtime-guard.shs --working` and
@@ -234,8 +235,9 @@ STATUS: FAIL (5 failures must be fixed before release)
   `.claude/agents/spipe/`, or `.gemini/commands/` instructions behind, do not mark verification PASS
 - For `simple_context` or context-mode changes, verify the MCP/tooling guide,
   generated manuals, and skill/command docs mention any new `--sql`/`--db`
-  behavior, embedded SQLite facade boundary, and explicit absence statuses.
-  Run `scripts/check/check-llm-tooling-public-absence-rendering.shs`.
+  behavior, `--source-filter`/MCP `source_filter`, file-optional SQL query
+  shape, embedded SQLite facade boundary, and explicit absence statuses. Run
+  `scripts/check/check-llm-tooling-public-absence-rendering.shs`.
 - Do not mark PASS for scenario-oriented specs whose mirrored `doc/06_spec`
   output reads like raw test mechanics instead of an operator/user manual
 - Do not mark PASS if `direct-env-runtime-guard.shs --working` or `--staged`

@@ -65,8 +65,10 @@ Skip if exist. See `design` skill for details.
   gate is part of completion, not a release follow-up.
 - For `simple_context` or context-mode changes, keep the MCP/tooling guide and
   mirrored generated manuals current. SQL-backed context paths must document the
-  `--sql`/`--db` CLI flags, the embedded SQLite facade boundary, explicit
-  absence statuses, and the required public-absence guard.
+  `--sql`/`--db`/`--source-filter` CLI flags, MCP `source_filter`, the
+  file-optional `sql=true` plus non-empty `query` contract, the embedded SQLite
+  facade boundary, explicit absence statuses, and the required public-absence
+  guard.
 - Do not leave primary manual output dominated by raw test code. Executable
   SPipe should be folded detail; visible content should be scenario steps and
   typed evidence.
