@@ -1511,10 +1511,11 @@ function readinessChecks(root, attemptId) {
 
 function modelArtifactReady(modelArtifact) {
   if (!modelArtifact || modelArtifact === "not-created") return false;
+  if (/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(modelArtifact)) return true;
 
   let artifactPath = modelArtifact;
   if (!isAbsolute(artifactPath)) artifactPath = join(process.cwd(), artifactPath);
-  if (!existsSync(artifactPath)) return true;
+  if (!existsSync(artifactPath)) return false;
 
   const content = readFileSync(artifactPath, "utf8");
   if (content.includes('"deployable":false') || content.includes('"deployable": false')) return false;

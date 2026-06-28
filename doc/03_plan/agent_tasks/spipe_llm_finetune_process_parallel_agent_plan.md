@@ -285,6 +285,12 @@ Evidence:
   Retry7 currently reports `readiness_blocker=model-artifact`, so operators can
   see the first unmet release gate without separately invoking
   `fine-tune-ready`.
+- 2026-06-28 local artifact readiness hardening: `fine-tune-ready` now requires
+  local filesystem model artifact paths to exist before `model_artifact_created`
+  can become ready. Explicit artifact URIs such as `model://...` remain valid
+  provider-managed artifacts. The SPipe build smoke includes a missing-local
+  artifact fixture that must fail readiness and report
+  `readiness_blocker=model-artifact`.
 
 Next normal-LLM work: finish retry5 licensed cache/checksum evidence and retry6
 real training/eval before retry7 can become an acceptance gate with a PASS
