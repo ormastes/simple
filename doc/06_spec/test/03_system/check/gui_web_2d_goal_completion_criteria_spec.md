@@ -209,8 +209,8 @@ fields through the aggregate audit and requires:
   debugger artifact files.
 - 4K and 8K showcase completion proves current-source retained rows at 200 FPS
   with timing, RSS, checksum/readback, viewport, native binary provenance,
-  retained mode, redraw count, `alias_raw_rt_count=0`, and
-  `fallback_state=none`.
+  retained mode, redraw count, frame avg/p50/p95 under the 5 ms 200 FPS budget,
+  `alias_raw_rt_count=0`, and `fallback_state=none`.
 - Full HTML/CSS completion proves all inventory CSS properties are rendered with
   zero unrendered properties, not only the implemented Simple Web subset.
 - Production GUI/Web parity completion proves live Tauri/Chrome captures,
