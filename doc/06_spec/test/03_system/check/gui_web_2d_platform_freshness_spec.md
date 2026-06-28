@@ -27,7 +27,7 @@ gui_web_2d_platform_freshness_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 4 | 4 | 0 | 0 |
+| 5 | 5 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -79,6 +79,8 @@ sh scripts/check/check-gui-web-2d-platform-freshness.shs
 - Explicit run-level source and metadata overrides pass freshness when wrapper
   env files provide matching lane revisions but do not carry toolchain metadata
   themselves.
+- Shared `gui_web_2d_evidence_source_revision` fallback keys pass freshness for
+  wrappers that do not emit lane-specific source fields.
 - The checker emits `gui_web_2d_platform_freshness_*` keys consumed by the
   platform evidence bundle.
 
@@ -120,6 +122,11 @@ Each file must expose a lane-specific source revision, such as
 `production_gui_web_renderer_parity_source_revision`. The checker also accepts
 the shared fallback key `gui_web_2d_evidence_source_revision` for future
 wrappers that prefer one common field name.
+
+The shared fallback must work for every upstream evidence family, not just the
+HTML/CSS wrapper. Platform agents may introduce new wrappers before each lane has
+a stable lane-specific key name, and final freshness should still be able to
+compare those env files by the common source-revision field.
 
 ## Metadata Contract
 
@@ -252,6 +259,38 @@ expect(evidence).to_contain("gui_web_2d_platform_freshness_missing_metadata=")
 
 </details>
 
+#### passes when all lanes use the shared source-revision fallback
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 19 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val command = "rm -rf build/test-gui-web-2d-platform-freshness-shared-source && mkdir -p build/test-gui-web-2d-platform-freshness-shared-source/env && printf 'gui_web_2d_evidence_source_revision=rev-shared\\ngui_web_2d_evidence_runtime_build=shared-runtime\\ngui_web_2d_evidence_browser_webview_electron_revision=shared-browser-webview-electron\\ngui_web_2d_evidence_graphics_sdk_driver=shared-vulkan-metal-d3d12\\ngui_web_2d_evidence_runbook_version=shared-runbook\\n' > build/test-gui-web-2d-platform-freshness-shared-source/env/native.env && printf 'gui_web_2d_evidence_source_revision=rev-shared\\n' > build/test-gui-web-2d-platform-freshness-shared-source/env/mobile.env && printf 'gui_web_2d_evidence_source_revision=rev-shared\\n' > build/test-gui-web-2d-platform-freshness-shared-source/env/4k.env && printf 'gui_web_2d_evidence_source_revision=rev-shared\\n' > build/test-gui-web-2d-platform-freshness-shared-source/env/8k.env && printf 'gui_web_2d_evidence_source_revision=rev-shared\\n' > build/test-gui-web-2d-platform-freshness-shared-source/env/html.env && printf 'gui_web_2d_evidence_source_revision=rev-shared\\n' > build/test-gui-web-2d-platform-freshness-shared-source/env/production.env && BUILD_DIR=build/test-gui-web-2d-platform-freshness-shared-source/out REPORT_PATH=build/test-gui-web-2d-platform-freshness-shared-source/report.md NATIVE_RENDER_LOG_PLATFORM_MATRIX_ENV=build/test-gui-web-2d-platform-freshness-shared-source/env/native.env TAURI_MOBILE_RENDERER_PARITY_ENV=build/test-gui-web-2d-platform-freshness-shared-source/env/mobile.env GUI_SHOWCASE_4K_200FPS_ENV=build/test-gui-web-2d-platform-freshness-shared-source/env/4k.env GUI_SHOWCASE_8K_200FPS_ENV=build/test-gui-web-2d-platform-freshness-shared-source/env/8k.env HTML_CSS_FULL_RENDERING_GOAL_ENV=build/test-gui-web-2d-platform-freshness-shared-source/env/html.env PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=build/test-gui-web-2d-platform-freshness-shared-source/env/production.env sh scripts/check/check-gui-web-2d-platform-freshness.shs"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val evidence = file_read("build/test-gui-web-2d-platform-freshness-shared-source/out/evidence.env")
+expect(evidence).to_contain("gui_web_2d_platform_freshness_status=pass")
+expect(evidence).to_contain("gui_web_2d_platform_freshness_source_revision=rev-shared")
+expect(evidence).to_contain("gui_web_2d_platform_freshness_native_source_revision=rev-shared")
+expect(evidence).to_contain("gui_web_2d_platform_freshness_mobile_source_revision=rev-shared")
+expect(evidence).to_contain("gui_web_2d_platform_freshness_retained_4k_source_revision=rev-shared")
+expect(evidence).to_contain("gui_web_2d_platform_freshness_retained_8k_source_revision=rev-shared")
+expect(evidence).to_contain("gui_web_2d_platform_freshness_html_css_source_revision=rev-shared")
+expect(evidence).to_contain("gui_web_2d_platform_freshness_production_source_revision=rev-shared")
+expect(evidence).to_contain("gui_web_2d_platform_freshness_runtime_build=shared-runtime")
+expect(evidence).to_contain("gui_web_2d_platform_freshness_browser_webview_electron_revision=shared-browser-webview-electron")
+expect(evidence).to_contain("gui_web_2d_platform_freshness_graphics_sdk_driver=shared-vulkan-metal-d3d12")
+expect(evidence).to_contain("gui_web_2d_platform_freshness_runbook_version=shared-runbook")
+expect(evidence).to_contain("gui_web_2d_platform_freshness_missing_source_revision_lanes=")
+expect(evidence).to_contain("gui_web_2d_platform_freshness_missing_metadata=")
+```
+
+</details>
+
 #### fails when a present evidence lane has a stale source revision
 
 <details>
@@ -277,8 +316,8 @@ expect(evidence).to_contain("gui_web_2d_platform_freshness_mismatched_source_rev
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
+| Total scenarios | 5 |
+| Active scenarios | 5 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
