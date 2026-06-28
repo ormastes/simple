@@ -91,6 +91,10 @@ PLAN_ONLY=1 RESOLUTION=8k sh scripts/check/check-widget-showcase-4k-200fps.shs
   `SHOWCASE_8K_PERF`, 7680x4320, 200 frames, and target FPS 200.
 - Plan-only evidence includes native provenance and marks runtime log artifact
   status as `fail` because no expensive benchmark has executed yet.
+- Plan-only evidence includes the full content-revision input set for the
+  wrapper, widget showcase app, 8K scroll fixture, retained scroll/dirty-region
+  helpers, and Simple Web HTML layout renderer. A 4K/8K row whose digest only
+  covers the launcher and app is stale and cannot prove current-source perf.
 - Plan-only evidence reports the generated alias source as present while the
   native binary, native executable bit, native binary format, and native build
   log remain absent until a real native run.
@@ -137,6 +141,9 @@ The full 4K row must prove:
 - `gui_showcase_4k_200fps_redraw_frames=1`
 - `gui_showcase_4k_200fps_retained_redraw_status=pass`
 - `gui_showcase_4k_200fps_rss_status=pass`
+- `gui_showcase_4k_200fps_source_revision_files` names the wrapper, showcase
+  app, 8K scroll fixture, scroll-surface helper, dirty-region helper, and Simple
+  Web HTML layout renderer.
 - The showcase log and `/usr/bin/time` log exist.
 - Producer-side `*_log_file_status` and `*_time_log_file_status` are `pass`.
 - Producer-side `*_alias_src_file_status`, `*_native_bin_file_status`, and
@@ -162,6 +169,8 @@ The full 8K row has the same contract with:
 - `gui_showcase_8k_perf_checksum_status=pass`
 - `gui_showcase_8k_perf_retained_render_mode_status=pass`
 - `gui_showcase_8k_perf_retained_redraw_status=pass`
+- `gui_showcase_8k_perf_source_revision_files` names the same current-source
+  revision input set as the 4K row.
 - Producer-side `*_log_file_status` and `*_time_log_file_status` are `pass`.
 
 ## Completion Boundary
@@ -220,12 +229,13 @@ preexisting hardlinked retained artifacts.
 - Run the wrapper in 4K plan-only mode
    - Expected: code equals `0`
 - Assert 4K evidence and generated native alias select the 4K probe
+-  expect showcase revision files
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 54 lines folded for reproduction.
+Runnable source: 55 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -265,7 +275,8 @@ expect(evidence).to_contain("gui_showcase_4k_200fps_redraw_frames=")
 expect(evidence).to_contain("gui_showcase_4k_200fps_retained_redraw_status=")
 expect(evidence).to_contain("gui_showcase_4k_200fps_source_revision=")
 expect(evidence).to_contain("gui_showcase_4k_200fps_source_revision_kind=content-sha256")
-expect(evidence).to_contain("gui_showcase_4k_200fps_source_revision_files=scripts/check/check-widget-showcase-4k-200fps.shs examples/06_io/ui/widget_showcase_gui.spl")
+val source_files = _value_of(evidence, "gui_showcase_4k_200fps_source_revision_files")
+_expect_showcase_revision_files(source_files)
 expect(evidence).to_contain("gui_showcase_4k_200fps_simple_bin=")
 expect(evidence).to_contain("gui_showcase_4k_200fps_simple_bin_source=")
 expect(evidence).to_contain("gui_showcase_4k_200fps_use_native=1")
@@ -292,12 +303,13 @@ expect(alias_src).to_contain("run_4k_perf_probe()")
 - Run the wrapper in 8K plan-only mode
    - Expected: code equals `0`
 - Assert 8K evidence and generated native alias select the 8K probe
+-  expect showcase revision files
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 54 lines folded for reproduction.
+Runnable source: 55 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -337,7 +349,8 @@ expect(evidence).to_contain("gui_showcase_8k_perf_redraw_frames=")
 expect(evidence).to_contain("gui_showcase_8k_perf_retained_redraw_status=")
 expect(evidence).to_contain("gui_showcase_8k_perf_source_revision=")
 expect(evidence).to_contain("gui_showcase_8k_perf_source_revision_kind=content-sha256")
-expect(evidence).to_contain("gui_showcase_8k_perf_source_revision_files=scripts/check/check-widget-showcase-4k-200fps.shs examples/06_io/ui/widget_showcase_gui.spl")
+val source_files = _value_of(evidence, "gui_showcase_8k_perf_source_revision_files")
+_expect_showcase_revision_files(source_files)
 expect(evidence).to_contain("gui_showcase_8k_perf_simple_bin=")
 expect(evidence).to_contain("gui_showcase_8k_perf_simple_bin_source=")
 expect(evidence).to_contain("gui_showcase_8k_perf_use_native=1")
