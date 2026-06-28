@@ -108,6 +108,51 @@ fn handle_loop_control(ctrl: Control) -> Option<Result<Control, CompileError>> {
     handle_loop_control_labeled(ctrl, &None)
 }
 
+/// Result of evaluating an `if val IDENT = expr` / `elif val IDENT = expr`
+/// optional-binding condition.
+enum LetBind {
+    /// Pattern is not a simple identifier binding — defer to `pattern_matches`.
+    NotApplicable,
+    /// Value is absent (nil / Option::None) — skip this branch.
+    Skip,
+    /// Value is present — take the branch, binding `name` to the *unwrapped* value.
+    Bind(String, Value),
+}
+
+/// `if val IDENT = expr` is an optional-binding: take the branch only when the
+/// value is present, binding IDENT to the *unwrapped* value. Running a bare
+/// identifier pattern through `pattern_matches` instead always matches and binds
+/// the whole value — so the branch was wrongly taken for `None`/`nil` and IDENT
+/// held the Option wrapper rather than its payload. Handle the identifier case
+/// here with correct semantics; defer structural patterns (Some(x), enums,
+/// tuples, …) to `pattern_matches`.
+fn optional_let_binding(pattern: &Pattern, value: &Value) -> LetBind {
+    let name = match pattern {
+        Pattern::Identifier(n) | Pattern::MutIdentifier(n) | Pattern::MoveIdentifier(n) => n.clone(),
+        _ => return LetBind::NotApplicable,
+    };
+    match value {
+        Value::Nil => LetBind::Skip,
+        Value::Enum {
+            enum_name,
+            variant,
+            payload,
+        } if enum_name == "Option" => {
+            if variant == "Some" {
+                let inner = payload.as_ref().map(|b| (**b).clone()).unwrap_or(Value::Nil);
+                LetBind::Bind(name, inner)
+            } else {
+                LetBind::Skip
+            }
+        }
+        // Other enum values keep their existing semantics (a bare identifier may
+        // name a unit variant) — let `pattern_matches` decide.
+        Value::Enum { .. } => LetBind::NotApplicable,
+        // Any other present value binds as-is.
+        other => LetBind::Bind(name, other.clone()),
+    }
+}
+
 pub(super) fn exec_if(
     if_stmt: &IfStmt,
     env: &mut Env,
@@ -119,17 +164,27 @@ pub(super) fn exec_if(
     // Handle if-let: if let PATTERN = EXPR:
     if let Some(pattern) = &if_stmt.let_pattern {
         let value = evaluate_expr(&if_stmt.condition, env, functions, classes, enums, impl_methods)?;
-        let mut bindings = HashMap::new();
-        if pattern_matches(pattern, &value, &mut bindings, enums, classes)? {
-            // Pattern matched - add bindings and execute then block
-            for (name, val) in bindings {
-                env.insert(name, val);
+        match optional_let_binding(pattern, &value) {
+            LetBind::Bind(name, inner) => {
+                env.insert(name, inner);
+                return exec_block(&if_stmt.then_block, env, functions, classes, enums, impl_methods);
             }
-            return exec_block(&if_stmt.then_block, env, functions, classes, enums, impl_methods);
+            // value absent — fall through to elif branches / else below.
+            LetBind::Skip => {}
+            LetBind::NotApplicable => {
+                let mut bindings = HashMap::new();
+                if pattern_matches(pattern, &value, &mut bindings, enums, classes)? {
+                    // Pattern matched - add bindings and execute then block
+                    for (name, val) in bindings {
+                        env.insert(name, val);
+                    }
+                    return exec_block(&if_stmt.then_block, env, functions, classes, enums, impl_methods);
+                }
+                // Pattern didn't match - fall through to elif branches / else below.
+                // (Previously this returned the else block directly, silently skipping
+                // every `elif`/`elif val ...` branch.)
+            }
         }
-        // Pattern didn't match - fall through to elif branches / else below.
-        // (Previously this returned the else block directly, silently skipping
-        // every `elif`/`elif val ...` branch.)
     } else {
         // Normal if condition
         // For if~ (is_suspend), await the condition value before checking truthiness
@@ -154,12 +209,21 @@ pub(super) fn exec_if(
         if let Some(pattern) = pattern {
             // elif val PATTERN = EXPR: pattern binding
             let value = evaluate_expr(cond, env, functions, classes, enums, impl_methods)?;
-            let mut bindings = HashMap::new();
-            if pattern_matches(pattern, &value, &mut bindings, enums, classes)? {
-                for (name, val) in bindings {
-                    env.insert(name, val);
+            match optional_let_binding(pattern, &value) {
+                LetBind::Bind(name, inner) => {
+                    env.insert(name, inner);
+                    return exec_block(block, env, functions, classes, enums, impl_methods);
                 }
-                return exec_block(block, env, functions, classes, enums, impl_methods);
+                LetBind::Skip => {}
+                LetBind::NotApplicable => {
+                    let mut bindings = HashMap::new();
+                    if pattern_matches(pattern, &value, &mut bindings, enums, classes)? {
+                        for (name, val) in bindings {
+                            env.insert(name, val);
+                        }
+                        return exec_block(block, env, functions, classes, enums, impl_methods);
+                    }
+                }
             }
         } else {
             let elif_val = evaluate_expr(cond, env, functions, classes, enums, impl_methods)?;
