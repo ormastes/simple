@@ -52,9 +52,10 @@ fn _read_u16_be_chunk(data: [u8], pos: i64) -> Result<u16, CompressionError>:
 
 fn _read_lzma2_chunk_size(data: [u8], pos: i64, label: text) -> Result<(i64, i64), CompressionError>:
     val size_res = _read_u16_be_chunk(data, pos)
-    if size_res.is_err():
-        return Err(CompressionError.TruncatedInput(label))
-    Ok((size_res.unwrap().to_i64() + 1, pos + 2))
+    val size = match size_res:
+        case Ok(decoded): decoded
+        case Err(_): return Err(CompressionError.TruncatedInput(label))
+    Ok((size.to_i64() + 1, pos + 2))
 
 # Top-level chunk decode for LCLPPB = 3/0/2 (legacy fixed-params path, kept for
 # reference). New callers should use `_lzma_decode_chunk` with a LzmaProperties.
@@ -424,9 +425,9 @@ fn _parse_lzma2_chunk_header(input: [u8], pos: i64, state: Lzma2ChunkState) -> R
         return Err(CompressionError.TruncatedInput("lzma2 control"))
     val control_byte = input[pos]
     val control_res = _decode_lzma2_chunk_control(control_byte)
-    if control_res.is_err():
-        return Err(control_res.unwrap_err())
-    val control = control_res.unwrap()
+    val control = match control_res:
+        case Ok(decoded): decoded
+        case Err(reason): return Err(reason)
     var cursor = pos + 1
     var next_state = state
 
@@ -437,10 +438,10 @@ fn _parse_lzma2_chunk_header(input: [u8], pos: i64, state: Lzma2ChunkState) -> R
         elif state.need_dict_reset:
             return Err(CompressionError.CorruptStream("lzma2 dictionary reset"))
         val size_res = _read_lzma2_chunk_size(input, cursor, "lzma2 chunk size")
-        if size_res.is_err():
-            return Err(size_res.unwrap_err())
-        val uncompressed_size = size_res.unwrap().0
-        cursor = size_res.unwrap().1
+        val (uncompressed_size, after_size) = match size_res:
+            case Ok(decoded): decoded
+            case Err(reason): return Err(reason)
+        cursor = after_size
         if cursor + uncompressed_size > input.len():
             return Err(CompressionError.TruncatedInput("lzma2 uncompressed chunk"))
         return Ok((
@@ -459,16 +460,17 @@ fn _parse_lzma2_chunk_header(input: [u8], pos: i64, state: Lzma2ChunkState) -> R
         return Err(CompressionError.CorruptStream("lzma2 dictionary reset requires new properties"))
 
     val uncompressed_low_res = _read_lzma2_chunk_size(input, cursor, "lzma2 uncompressed size")
-    if uncompressed_low_res.is_err():
-        return Err(uncompressed_low_res.unwrap_err())
-    val uncompressed_size = (control.uncompressed_high_bits << 16) + uncompressed_low_res.unwrap().0
-    cursor = uncompressed_low_res.unwrap().1
+    val (uncompressed_low, after_uncompressed_low) = match uncompressed_low_res:
+        case Ok(decoded): decoded
+        case Err(reason): return Err(reason)
+    val uncompressed_size = (control.uncompressed_high_bits << 16) + uncompressed_low
+    cursor = after_uncompressed_low
 
     val compressed_size_res = _read_lzma2_chunk_size(input, cursor, "lzma2 compressed size")
-    if compressed_size_res.is_err():
-        return Err(compressed_size_res.unwrap_err())
-    val compressed_size = compressed_size_res.unwrap().0
-    cursor = compressed_size_res.unwrap().1
+    val (compressed_size, after_compressed_size) = match compressed_size_res:
+        case Ok(decoded): decoded
+        case Err(reason): return Err(reason)
+    cursor = after_compressed_size
 
     var props: u8? = nil
     if control.sets_props:
