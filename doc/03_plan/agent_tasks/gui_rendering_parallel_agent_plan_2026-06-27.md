@@ -1073,6 +1073,11 @@ Normal-review acceptance:
   that explicit run-level metadata overrides cannot hide conflicting non-empty
   metadata already present in a lane env. Operator-provided metadata is accepted
   only when the upstream evidence does not contradict it.
+- 2026-06-28 freshness source override mismatch coverage:
+  `test/03_system/check/gui_web_2d_platform_freshness_spec.spl` now asserts
+  that an explicit `GUI_WEB_2D_PLATFORM_FRESHNESS_SOURCE_REVISION` selects the
+  review window but cannot hide a lane env whose source revision is stale or
+  different from that selected revision.
 
 ## Hard Stop Conditions
 
