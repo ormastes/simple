@@ -86,6 +86,12 @@ real evidence:
 - live CUDA optimizer execution through libtorch/CUDA
 - PEFT/TRL fine-tuning orchestration and acceptance evidence
 
+Latest local host probe:
+`doc/09_report/2026/06/llm_runtime_vllm_host_probe_2026-06-28.md` records a
+`--detect-resources` preflight that returned `status=skipped` with
+`reason=missing_local_vllm`. Keep `FR-LLM-RUNTIME-0001` open until a configured
+local endpoint proves `/v1/models` serves the selected base model.
+
 ## Focused Checks
 
 Use the focused public-rendering guard after changing runtime manuals,
