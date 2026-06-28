@@ -8,6 +8,26 @@ SIMPLE_BIN="${SIMPLE_BIN:-release/x86_64-unknown-linux-gnu/simple}"
 BUILD_DIR="${BUILD_DIR:-build/llm_runtime_svllm_local_readiness}"
 REPORT_PATH="${REPORT_PATH:-doc/09_report/2026/06/llm_runtime_svllm_local_readiness_$(date -u +%F).md}"
 OUT_ENV="$BUILD_DIR/evidence.env"
+NATIVE_EVIDENCE_ENV="${SVLLM_NATIVE_EVIDENCE_ENV:-build/llm_runtime_svllm_native_streaming/evidence.env}"
+STRICT_NATIVE=0
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --strict-native)
+            STRICT_NATIVE=1
+            ;;
+        --help|-h)
+            echo "usage: sh scripts/check/check-llm-runtime-svllm-local-readiness.shs [--strict-native]"
+            echo "  --strict-native  require native NVFS streaming evidence in SVLLM_NATIVE_EVIDENCE_ENV"
+            exit 0
+            ;;
+        *)
+            echo "unknown argument: $1" >&2
+            exit 2
+            ;;
+    esac
+    shift
+done
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
 rm -f "$OUT_ENV" "$REPORT_PATH"
@@ -42,8 +62,33 @@ for key in manifest tensor_bytes stream_plan std_fs streaming_readiness svllm_pa
     fi
 done
 
+native_status="not_required"
+native_reason="default_local_readiness_only"
+if [ "$STRICT_NATIVE" -eq 1 ]; then
+    native_status="missing"
+    native_reason="missing_native_streaming_evidence"
+    if [ -f "$NATIVE_EVIDENCE_ENV" ]; then
+        evidence_status="$(sed -n 's/^svllm_native_streaming_status=//p' "$NATIVE_EVIDENCE_ENV" | tail -n 1)"
+        evidence_reason="$(sed -n 's/^svllm_native_streaming_reason=//p' "$NATIVE_EVIDENCE_ENV" | tail -n 1)"
+        if [ "$evidence_status" = "pass" ]; then
+            native_status="pass"
+            native_reason="${evidence_reason:-native_streaming_passed}"
+        else
+            native_status="${evidence_status:-fail}"
+            native_reason="${evidence_reason:-native_streaming_not_passed}"
+        fi
+    fi
+    if [ "$native_status" != "pass" ]; then
+        status="fail"
+    fi
+fi
+
 {
     printf '%s\n' "llm_runtime_svllm_local_readiness_status=$status"
+    printf '%s\n' "llm_runtime_svllm_local_readiness_strict_native=$STRICT_NATIVE"
+    printf '%s\n' "llm_runtime_svllm_local_readiness_native_status=$native_status"
+    printf '%s\n' "llm_runtime_svllm_local_readiness_native_reason=$native_reason"
+    printf '%s\n' "llm_runtime_svllm_local_readiness_native_env=$NATIVE_EVIDENCE_ENV"
     for key in manifest tensor_bytes stream_plan std_fs streaming_readiness svllm_pack_cli svllm_pack_log_modes; do
         eval "value=\${${key}_status}"
         printf '%s\n' "llm_runtime_svllm_local_readiness_${key}_status=$value"
@@ -53,6 +98,14 @@ done
 {
     printf '# LLM Runtime svLLM Local Readiness Evidence\n\n'
     printf '%s\n' "- status: \`$status\`"
+    if [ "$STRICT_NATIVE" -eq 1 ]; then
+        printf '%s\n' "- strict_native: \`true\`"
+    else
+        printf '%s\n' "- strict_native: \`false\`"
+    fi
+    printf '%s\n' "- native_streaming: \`$native_status\`"
+    printf '%s\n' "- native_reason: \`$native_reason\`"
+    printf '%s\n' "- native_env: \`$NATIVE_EVIDENCE_ENV\`"
     for key in manifest tensor_bytes stream_plan std_fs streaming_readiness svllm_pack_cli svllm_pack_log_modes; do
         eval "value=\${${key}_status}"
         eval "exit_code=\${${key}_exit}"
@@ -60,7 +113,11 @@ done
     done
     printf '%s\n' "- env: \`$OUT_ENV\`"
     printf '\n'
-    printf 'This evidence proves the local file-backed svLLM pack CLI, manifest, tensor-byte, stream-plan, std_fs, and streaming-readiness contracts. It does not prove native NVFS async scheduling, pinned buffer registration, device staging, or true streaming model loads.\n'
+    if [ "$STRICT_NATIVE" -eq 1 ]; then
+        printf 'This strict native check requires a separate native svLLM streaming evidence env with `svllm_native_streaming_status=pass`. Local file-backed readiness alone is not completion evidence for NVFS async scheduling, pinned buffer registration, device staging, or true streaming model loads.\n'
+    else
+        printf 'This evidence proves the local file-backed svLLM pack CLI, manifest, tensor-byte, stream-plan, std_fs, and streaming-readiness contracts. It does not prove native NVFS async scheduling, pinned buffer registration, device staging, or true streaming model loads. Run with `--strict-native` when those native gates must be release-completion evidence.\n'
+    fi
 } >"$REPORT_PATH"
 
 if [ "$status" = "pass" ]; then

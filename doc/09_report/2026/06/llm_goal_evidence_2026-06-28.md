@@ -16,4 +16,4 @@
 | finetune_guard | `pass` | `pass` | `0` | `build/llm_goal_evidence/finetune_guard.log` |
 | public_absence | `pass` | `pass` | `0` | `build/llm_goal_evidence/public_absence.log` |
 
-This aggregate proves the current local LLM tooling evidence lanes remain reproducible. WARN lanes are expected only for host-dependent gates that are still open on this machine: live vLLM serving and Simple/libtorch CUDA optimizer execution. This report is not release-completion evidence for those live host gates; rerun with `--strict-host` on a configured host when those gates must pass.
+This aggregate proves the current local LLM tooling evidence lanes remain reproducible. WARN lanes are expected only for host-dependent gates that are still open on this machine: live vLLM serving and Simple/libtorch CUDA optimizer execution. The svLLM lane is local file-backed readiness only in default mode. This report is not release-completion evidence for those live host gates; rerun with `--strict-host` on a configured host when live vLLM, native svLLM streaming, and Simple/libtorch CUDA optimizer gates must pass.

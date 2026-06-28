@@ -102,7 +102,9 @@ pack CLI, manifest, tensor-byte, stream-plan, std_fs local-read, and
 streaming-readiness contracts. Keep `FR-LLM-RUNTIME-0002` open because that
 wrapper proves only local file-backed readiness; native NVFS async scheduling, pinned buffer
 registration, device staging, and true streaming model loads still need live
-evidence.
+evidence. Run the wrapper with `--strict-native` when a native svLLM streaming
+gate must fail without `SVLLM_NATIVE_EVIDENCE_ENV` pointing to an env file that
+contains `svllm_native_streaming_status=pass`.
 
 Latest Torch/CUDA host probe:
 `doc/09_report/2026/06/llm_runtime_torch_cuda_host_probe_2026-06-28.md`
@@ -142,7 +144,9 @@ sh scripts/check/check-llm-goal-evidence.shs --strict-host
 ```
 
 Strict host mode passes `--strict` to the vLLM host probe and Torch optimizer
-probe, expects both lanes to pass, and fails the aggregate for any WARN result.
+probe, passes `--strict-native` to the svLLM local-readiness wrapper, expects
+all three host/native lanes to pass, and fails the aggregate for any WARN or
+missing native evidence result.
 
 Use the focused public-rendering guard after changing runtime manuals,
 dashboard JSONL wording, or evidence docs:
@@ -164,6 +168,17 @@ tensor byte loading, stream planning, std_fs local reads, or readiness evidence:
 ```bash
 sh scripts/check/check-llm-runtime-svllm-local-readiness.shs
 ```
+
+Use strict native mode on hosts or CI lanes that are supposed to prove real
+svLLM streaming:
+
+```bash
+SVLLM_NATIVE_EVIDENCE_ENV=build/llm_runtime_svllm_native_streaming/evidence.env \
+  sh scripts/check/check-llm-runtime-svllm-local-readiness.shs --strict-native
+```
+
+The strict native gate requires the evidence env to report
+`svllm_native_streaming_status=pass`; local file-backed bytes are not enough.
 
 Use the focused Torch optimizer gate after changing Torch SFFI, CUDA placement,
 or runtime training behavior:
