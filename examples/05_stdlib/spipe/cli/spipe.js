@@ -1324,7 +1324,10 @@ function fineTuneDataGateStatus(root, attemptId) {
 
   const parts = checker.trim().split(/\s+/).filter(Boolean);
   const script = parts[0] || "";
-  if (!script.startsWith(".spipe/llm-finetune-process/scripts/") || !script.endsWith(".shs")) {
+  const scriptsDir = resolve(process.cwd(), ".spipe/llm-finetune-process/scripts");
+  const scriptPath = resolve(process.cwd(), script);
+  const inScriptsDir = scriptPath === scriptsDir || scriptPath.startsWith(`${scriptsDir}/`);
+  if (!script.endsWith(".shs") || !inScriptsDir) {
     return {
       checker,
       result: "blocked-unsafe-checker-path",
@@ -1333,7 +1336,7 @@ function fineTuneDataGateStatus(root, attemptId) {
     };
   }
 
-  const run = spawnSync(script, parts.slice(1), {
+  const run = spawnSync(scriptPath, parts.slice(1), {
     cwd: process.cwd(),
     encoding: "utf8",
     shell: false

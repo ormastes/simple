@@ -291,6 +291,11 @@ Evidence:
   provider-managed artifacts. The SPipe build smoke includes a missing-local
   artifact fixture that must fail readiness and report
   `readiness_blocker=model-artifact`.
+- 2026-06-28 data-checker path hardening: executable fine-tune data-check
+  scripts are resolved under `.spipe/llm-finetune-process/scripts/`, and path
+  traversal outside that directory reports
+  `STATUS: FAIL llm-finetune-data-gate` instead of executing. The SPipe build
+  smoke includes an `unsafe_checker` traversal fixture.
 
 Next normal-LLM work: finish retry5 licensed cache/checksum evidence and retry6
 real training/eval before retry7 can become an acceptance gate with a PASS

@@ -101,7 +101,9 @@ Use `spipe fine-tune-status <attempt_id>` before handoff to confirm the attempt
 has data, model, training, eval, and decision evidence. If a data-check registry
 row records a repo-local `.spipe/llm-finetune-process/scripts/*.shs` checker,
 status also prints the checker execution state so a present registry row cannot
-hide a WARN cache/license gate.
+hide a WARN cache/license gate. Checker paths are resolved under
+`.spipe/llm-finetune-process/scripts/`; traversal outside that directory is
+reported as a failed unsafe checker path.
 Use `spipe fine-tune-doctor <attempt_id>` to check registry evidence,
 placeholder values, and the next readiness action before treating an attempt as
 production evidence.
