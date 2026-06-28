@@ -13,11 +13,12 @@ Date: 2026-06-25
 1. Static manifest readiness:
    - Given a manifest with a base model and endpoint
    - When the probe runs in static mode
-   - Then the JSONL event remains nil-free and reports `blocked` while
+   - Then the JSONL event remains internal-marker-free and reports `blocked` while
      Torch/svLLM owner readiness is still placeholder-backed
 2. Optional chat template absence:
    - Given no chat template
-   - Then output uses option-like absence and does not contain literal `nil`
+   - Then output uses option-like absence and does not expose the runtime's
+     internal absence marker
 3. Static LoRA adapter:
    - Given one adapter mapping
    - Then the event records adapter readiness/count without exposing adapter
@@ -27,7 +28,8 @@ Date: 2026-06-25
    - Then the event status is `blocked` unless trusted mode is explicit
 5. Dashboard readback:
    - Given probe JSONL
-   - Then the dashboard diagnostics panel renders status/reason nil-free
+   - Then the dashboard diagnostics panel renders status/reason without the
+     runtime's internal absence marker
 6. Security readback:
    - Given probe metadata with sensitive-looking values
    - Then runtime manifest fields do not render credentials, API-key-like
@@ -43,7 +45,7 @@ Date: 2026-06-25
 9. Malformed serve-plan input:
    - Given malformed adapter entries or an invalid endpoint
    - Then the plan reports explicit `invalid_adapter_entry` or
-     `invalid_endpoint` reasons without literal `nil`
+     `invalid_endpoint` reasons without the runtime's internal absence marker
 
 ## Verification Notes
 
