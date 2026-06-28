@@ -58,6 +58,17 @@ Run the direct retry7 acceptance gate:
   llm_backed_app_server_dry_run_retry7
 ```
 
+Run the local guard evidence wrapper:
+
+```bash
+sh scripts/check/check-llm-finetune-guard-evidence.shs
+```
+
+This wrapper is the canonical local non-training check. It runs the
+fixed-format sample quality gate, retry6 and retry7 direct gates, and the
+retry6/retry7 SSpec manuals. For the checked-in dry-run records it should pass
+only when retry6 and retry7 still report the expected WARN/blocked state.
+
 Run readiness only when upstream evidence is expected to be complete:
 
 ```bash
@@ -75,8 +86,10 @@ Primary retry7 evidence:
 
 - `.spipe/llm-finetune-process/attempts/llm_backed_app_server_dry_run_retry7.sdn`
 - `.spipe/llm-finetune-process/scripts/check_retry7_acceptance_gate.shs`
+- `scripts/check/check-llm-finetune-guard-evidence.shs`
 - `test/03_system/tools/spipe/llm_finetune_retry7_acceptance_gate_spec.spl`
 - `doc/06_spec/03_system/tools/spipe/llm_finetune_retry7_acceptance_gate_spec.md`
+- `doc/09_report/2026/06/llm_finetune_guard_evidence_2026-06-28.md`
 
 Related upstream gates:
 
@@ -97,7 +110,8 @@ Before promoting retry7:
 5. Record the accepted normal-review decision with the exact model artifact,
    eval command/result, license constraints, safety eval, deployment evidence,
    and app handoff.
-6. Re-run the retry7 gate and generated manual quality checks once.
+6. Re-run the guard evidence wrapper, retry7 gate, and generated manual quality
+   checks once.
 
 Do not repair stale generated specs or process docs during release. Update this
 guide, the generated/manual spec doc, and the relevant plan first, then verify.
