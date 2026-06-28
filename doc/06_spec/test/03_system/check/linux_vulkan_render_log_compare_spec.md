@@ -119,14 +119,19 @@ Structured blockers are emitted through
 `linux_vulkan_render_log_compare_blocked_gate_count` and
 `linux_vulkan_render_log_compare_blocked_gates`, with separate gate statuses
 for Simple Vulkan backend, browser backing, pairwise ARGB diff, ARGB source
-evidence, and RenderDoc.
+evidence, and RenderDoc. Host readiness is emitted separately through
+`linux_vulkan_render_log_compare_host_renderdoc_status`,
+`linux_vulkan_render_log_compare_host_chrome_status`, and
+`linux_vulkan_render_log_compare_host_electron_status` plus matching `*_tool`
+fields, so missing RenderDoc/Chrome/Electron installations are visible without
+rewriting renderer failure reasons.
 
 ## Normalized Outputs
 
 The wrapper writes one rollup env and four Simple render-log env files:
 
 - `evidence.env` contains `linux_vulkan_render_log_compare_*` keys for the
-  platform-matrix gate.
+  platform-matrix gate, including host tool status and tool-name rows.
 - `simple.srl.env` records the Simple Vulkan source in `simple-render-log-v1`
   format.
 - `chrome.srl.env` records the Chrome source in `simple-render-log-v1` format.
@@ -142,7 +147,7 @@ schema.
 
 ## Test Matrix
 
-The spec covers thirteen cases:
+The spec covers fourteen cases:
 
 1. A combined fixture where direct-run, browser-backing, pairwise diff, and
    RenderDoc statuses all pass. This proves the pass contract and source-log
@@ -176,12 +181,12 @@ The spec covers thirteen cases:
 12. A bare relative RenderDoc capture file resolves beside the evidence env,
     not from the working directory.
 13. A missing RenderDoc source env is surfaced in the top-level Linux evidence
-    so parallel platform agents do not need to open side logs to classify the
-    blocker.
+    with source, artifact, and host-tool readiness rows so parallel platform
+    agents do not need to open side logs to classify the blocker.
 14. A live-blocker-shaped fixture where browser Vulkan backing, pairwise ARGB
     diff, and Simple `.rdc` proof pass, but Chrome/Electron `.rdc` artifacts are
     missing. This proves fallback browser evidence cannot satisfy strict
-    RenderDoc completion.
+    RenderDoc completion and still emits host-tool readiness rows.
 
 ## Completion Boundaries
 
@@ -862,7 +867,7 @@ expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_chrome_ar
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 41 lines folded for reproduction.
+Runnable source: 47 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -907,6 +912,12 @@ expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_electron_
 expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_electron_env_file_status=missing")
 expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_electron_artifact_file_status=missing")
 expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_electron_artifact_magic=missing")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_host_renderdoc_status=")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_host_renderdoc_tool=")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_host_chrome_status=")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_host_chrome_tool=")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_host_electron_status=")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_host_electron_tool=")
 ```
 
 </details>
@@ -989,7 +1000,7 @@ expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_electron_
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 26 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1011,6 +1022,10 @@ expect(script).to_contain("build/renderdoc/chrome-display-helper/evidence.env")
 expect(script).to_contain("RDOC_ELECTRON_HTML_EVIDENCE_ENV")
 expect(script).to_contain("build/renderdoc/electron-display-helper/electron-html/evidence.env")
 expect(script).to_contain("file_link_count()")
+expect(script).to_contain("first_available_command()")
+expect(script).to_contain("linux_vulkan_render_log_compare_host_renderdoc_status")
+expect(script).to_contain("linux_vulkan_render_log_compare_host_chrome_status")
+expect(script).to_contain("linux_vulkan_render_log_compare_host_electron_status")
 expect(script).to_contain("printf '%s\\n' \"hardlink\"")
 expect(script.contains("build/renderdoc/canonical-probe/simple/evidence.env")).to_equal(false)
 expect(script.contains("build/renderdoc/canonical-probe/html/evidence.env")).to_equal(false)

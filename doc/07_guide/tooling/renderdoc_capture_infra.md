@@ -443,6 +443,16 @@ absent, the aggregate reports each Simple/Chrome/Electron RenderDoc source as
 `LINUX_VULKAN_RENDER_LOG_REQUIRE_RDOC=0` only for diagnostic
 partial-log inspection, and never use that mode to claim Linux platform-matrix
 completion.
+The same row exposes host readiness fields before platform agents debug capture
+failures:
+`linux_vulkan_render_log_compare_host_renderdoc_status`,
+`linux_vulkan_render_log_compare_host_renderdoc_tool`,
+`linux_vulkan_render_log_compare_host_chrome_status`,
+`linux_vulkan_render_log_compare_host_chrome_tool`,
+`linux_vulkan_render_log_compare_host_electron_status`, and
+`linux_vulkan_render_log_compare_host_electron_tool`. A `missing` host status is
+not a renderer pass or fail by itself; it means the Linux GUI host must install
+the named capture/browser tool before the `.rdc` blocker can be verified.
 Bare relative `.rdc` artifact names resolve beside their evidence env file, so
 a stale working-directory `frame.rdc` cannot satisfy Simple, Chrome, or Electron
 RenderDoc proof.
