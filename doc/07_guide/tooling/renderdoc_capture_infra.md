@@ -665,11 +665,18 @@ native_render_log_platform_matrix_windows_d3d12_command=WINDOWS_D3D12_RENDER_LOG
 
 The aggregate revalidates each platform row before marking the matrix complete:
 Linux must report `required_api=vulkan`, `pairwise_status=pass`, and pass
-RenderDoc statuses for Simple, Chrome, and Electron; macOS must report
-`required_api=metal`, `pairwise_status=pass`, and GPU capture status `pass`;
-Windows must report `required_api=d3d12`, `pairwise_status=pass`, PIX status
-`pass`, zero blocked gates, passing native readback/browser backing/pairwise
-ARGB/source/PIX-GPU-debugger gate statuses, and GPU debugger status `pass`.
+RenderDoc statuses for Simple, Chrome, and Electron. It also forwards
+`linux_vulkan_render_log_compare_host_renderdoc_*`,
+`linux_vulkan_render_log_compare_host_chrome_*`, and
+`linux_vulkan_render_log_compare_host_electron_*` rows from the Linux leaf
+wrapper so platform agents can distinguish missing host tools from failed
+capture artifacts. These host-tool rows are readiness diagnostics; real `.rdc`
+artifact status and `RDOC` magic remain the RenderDoc completion proof. macOS
+must report `required_api=metal`, `pairwise_status=pass`, and GPU capture status
+`pass`; Windows must report `required_api=d3d12`, `pairwise_status=pass`, PIX
+status `pass`, zero blocked gates, passing native readback/browser
+backing/pairwise ARGB/source/PIX-GPU-debugger gate statuses, and GPU debugger
+status `pass`.
 A stale or forged
 `*_render_log_compare_status=pass` without those fields is downgraded to a
 failed platform row.
