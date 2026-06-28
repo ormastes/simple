@@ -25,7 +25,7 @@ surfaces before choosing the final implementation path.
 | JavaScript execution | `src/lib/gc_async_mut/gpu/browser_engine/browser_script_execute.spl` | Browser-oriented script support only | Decide between contract-first shim, real Node/V8, or bundled runtime |
 | npm/module loading | none dedicated | Missing | Prefer offline pinned package manifests for QEMU validation |
 | Credentials | capability system only | No AI credential store identified | Require explicit secret mount/env grant; ambient reads denied |
-| Multi-arch QEMU | `src/os/qemu_runner_part4.spl`, `src/os/qemu_runner_part5.spl` | RISC-V/x86/ARM fs-exec lanes exist | Add JS runtime + AI CLI serial marker contract per architecture |
+| Multi-arch QEMU | `src/os/_QemuRunner/scenario_disks.spl`, `src/os/_QemuRunner/scenario_exec.spl` | RISC-V/x86/ARM fs-exec lanes exist | Add JS runtime + AI CLI serial marker contract per architecture |
 
 ## CLI Manifest Shape
 

@@ -164,7 +164,7 @@ Additional ARM64 host-readiness and canonical target contract coverage:
 ```bash
 sh -n scripts/check/check-simpleos-arm64-wm-qemu-readiness.shs
 sh scripts/check/check-simpleos-arm64-wm-qemu-readiness.shs
-src/compiler_rust/target/debug/simple check src/os/qemu_runner_part1.spl src/os/qemu_runner_part2.spl test/03_system/gui/arm64_wm_qemu_contract_spec.spl test/01_unit/os/qemu_runner_extended_spec.spl
+src/compiler_rust/target/debug/simple check src/os/_QemuRunner/runner_targets.spl src/os/_QemuRunner/os_build_run.spl test/03_system/gui/arm64_wm_qemu_contract_spec.spl test/01_unit/os/qemu_runner_extended_spec.spl
 SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/03_system/gui/arm64_wm_qemu_contract_spec.spl --mode=interpreter --clean --format json
 SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/01_unit/os/qemu_runner_extended_spec.spl --mode=interpreter --clean --format json
 ```

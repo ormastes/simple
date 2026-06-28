@@ -17,7 +17,7 @@ requests with the reason pure Simple was not possible.
 - FR-MACLINK-002: The bootstrap seed-wrapper C shall emit Mach-O section syntax
   (`__DATA,__data`) on Apple targets, not ELF `.data`. **Done in pure Simple:**
   `src/app/cli/bootstrap_main.spl`, `src/compiler/80.driver/driver_bootstrap.spl`,
-  `src/os/port/bootstrap_cross_part1.spl` (`__APPLE__`/`__MACH__` preprocessor
+  `src/os/port/_BootstrapCross/cross_compile_stages.spl` (`__APPLE__`/`__MACH__` preprocessor
   branch).
 
 ## Could not be done in pure Simple — Rust seed only (feature requests)

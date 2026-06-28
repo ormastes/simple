@@ -22,7 +22,7 @@ tasks, opus review after.
 
 | Track | Scope (exclusive) | Lead | Spipe feature |
 |-------|-------------------|------|---------------|
-| A p1-catalog-fix | `src/os/port/simpleos_multiplatform_build_part3.spl` (+part1 struct if needed), repro spec | sonnet | `p1_catalog_option_fix` |
+| A p1-catalog-fix | `src/os/port/_SimpleosMultiplatformBuild/platform_target_accessors.spl` (+part1 struct if needed), repro spec | sonnet | `p1_catalog_option_fix` |
 | B qemu-systest | `test/03_system/os/qemu/**` (new), `src/os/qemu_systest_contract.spl` (new helper) | sonnet | `qemu_systest_multiarch` |
 | C storage+docs | `doc/07_guide/platform/simpleos/**`, `.claude/skills/spipe.md` (system-test section), `scripts/check/qemu-storage-*.shs` (new) | haiku→sonnet review | `qemu_storage_docs` |
 | D compiler-fix | `src/compiler/**` decorator/skip lowering bug + JIT fallback noise | sonnet | `compiler_jit_lowering_fix` |

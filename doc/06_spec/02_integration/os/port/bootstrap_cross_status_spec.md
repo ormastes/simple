@@ -47,7 +47,7 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val src = file_read("src/os/port/bootstrap_cross_part1.spl")
+val src = file_read("src/os/port/_BootstrapCross/cross_compile_stages.spl")
 expect(src).to_contain("fn bootstrap_artifact_status(path: text) -> text:")
 expect(src).to_contain("if size_bytes < 1048576:")
 expect(src).to_contain("return \"invalid-small (")
@@ -64,7 +64,7 @@ Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val src = file_read("src/os/port/bootstrap_cross_part1.spl")
+val src = file_read("src/os/port/_BootstrapCross/cross_compile_stages.spl")
 expect(src).to_contain("stage 1:  ")
 expect(src).to_contain("bootstrap_artifact_status(s1)")
 expect(src).to_contain("bootstrap_artifact_status(s2)")

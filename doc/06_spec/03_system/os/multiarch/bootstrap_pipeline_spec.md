@@ -443,7 +443,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val body: text = file_read("src/os/qemu_runner_part1.spl")
+val body: text = file_read("src/os/_QemuRunner/runner_targets.spl")
 expect(body.contains("Llvm")).to_equal(true)
 ```
 
@@ -458,7 +458,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val body: text = file_read("src/os/qemu_runner_part1.spl")
+val body: text = file_read("src/os/_QemuRunner/runner_targets.spl")
 expect(body.contains("i686")).to_equal(true)
 ```
 
@@ -473,7 +473,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val body: text = file_read("src/os/qemu_runner_part1.spl")
+val body: text = file_read("src/os/_QemuRunner/runner_targets.spl")
 expect(body.contains("armv7")).to_equal(true)
 ```
 

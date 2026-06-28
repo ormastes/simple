@@ -588,7 +588,7 @@ Added host and guest diagnostics to the RV64 SSH lane:
 - `src/os/ssh_qemu_contract.spl` now prints host-side readiness, OpenSSH
   start/exit, and marker status.
 - `src/os/apps/sshd/sshd.spl` now emits low-rate accept-loop wait markers.
-- `src/os/qemu_runner_part5.spl` gives `rv64-ssh` a 300s scenario timeout on
+- `src/os/_QemuRunner/scenario_exec.spl` gives `rv64-ssh` a 300s scenario timeout on
   both `os test` and `os run` paths.
 
 Guarded OpenSSH-backed QEMU evidence:

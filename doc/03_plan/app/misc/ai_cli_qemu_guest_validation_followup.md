@@ -53,7 +53,7 @@ Fresh evidence from 2026-06-01:
 - `src/os/ai_cli_js_node_contract.spl`
 - `src/os/services/vfs/vfs_boot_init.spl`
 - `src/os/kernel/loader/x86_64_fs_exec_spawn.spl`
-- `src/os/qemu_runner_part5.spl`
+- `src/os/_QemuRunner/scenario_exec.spl`
 
 ## Non-Acceptance
 

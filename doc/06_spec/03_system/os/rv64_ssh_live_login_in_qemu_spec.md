@@ -235,7 +235,7 @@ Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val runner = rt_file_read_text("src/os/qemu_runner_part5.spl")
+val runner = rt_file_read_text("src/os/_QemuRunner/scenario_exec.spl")
 val contract = rt_file_read_text("src/os/ssh_qemu_contract.spl")
 expect(runner.contains("scenario.name == \"rv64-ssh\"")).to_equal(true)
 expect(runner.contains("run_rv64_ssh_probe(cmd_parts, timeout_ms)")).to_equal(true)

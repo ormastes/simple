@@ -20,7 +20,7 @@ the per-lane caveats discovered 2026-06-14.
 
 All lane parameters (kernel path, qemu bin, qemu args, markers, timeout) live in
 `src/os/qemu_systest_contract.spl`. The build matrix (entry, linker, output, boot
-sources per platform) is `src/os/port/simpleos_multiplatform_build_part2.spl`.
+sources per platform) is `src/os/port/_SimpleosMultiplatformBuild/platform_target_catalog.spl`.
 Per-lane specs: `test/03_system/os/qemu/sys_qemu_<arch>_fs_exec_spec.spl`.
 
 ## Build a kernel

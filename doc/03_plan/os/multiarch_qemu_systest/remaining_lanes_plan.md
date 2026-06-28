@@ -34,7 +34,7 @@ its Linux `missing-media` result honestly.
 - **Contract:** `src/os/qemu_systest_contract.spl` (kernel path, image path, qemu bin,
   qemu args, markers, timeout per arch). The contract now includes the settled x86_64
   NVMe/FAT32 model and the aarch64-darwin hosted lane.
-- **Build target reference data:** `src/os/port/simpleos_multiplatform_build_part2.spl`
+- **Build target reference data:** `src/os/port/_SimpleosMultiplatformBuild/platform_target_catalog.spl`
   (`qemu_acceptance_lane` per platform). riscv32, arm32, x86_64, and aarch64-darwin
   targets are declared.
 - **Specs:**
@@ -74,7 +74,7 @@ its Linux `missing-media` result honestly.
   clobbers uncommitted Edit-tool changes within ~1 min ("change was intentional"
   reminders during this are reconcile artifacts, NOT user intent). Verify the COMMIT
   (`git show SHA:path | grep`), not just the working copy.
-- `simpleos_multiplatform_build_part2.spl` is **shared** — only the x86_64 agent edits
+- `_SimpleosMultiplatformBuild/platform_target_catalog.spl` is **shared** — only the x86_64 agent edits
   it (to add the fs_exec target). riscv32/arm32 agents must NOT touch it.
 - Push via git-plumbing single-file commits over SSH (`~/.ssh/id_ed25519_this_mac`)
   to survive non-fast-forward races; verify with `git ls-remote`.

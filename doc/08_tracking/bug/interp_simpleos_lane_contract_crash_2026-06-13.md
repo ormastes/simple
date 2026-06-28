@@ -7,7 +7,7 @@
 
 ## Two distinct Option-poison sites (both worked around, root cause shared & open)
 1. **Platform catalog** (`simpleos_platform_qemu_smoke_lane` etc.) — `Option<SimpleOsPlatformBuildTarget>` unwrap mis-binds. Fixed by index-based accessors (`_simpleos_platform_target_index`, `*_or_smoke`, `*_direct`) so no Option crosses a boundary.
-2. **Scenario catalog** (`get_all_scenarios()[i].name` / `for s in get_all_scenarios(): s.name`) — the seed interpreter wraps **elements of an imported `[QemuScenario]` list as Option**, so BOTH index AND for-iteration field-access fail with `'name' on Option`. Neither access pattern helps; a single constructor call (`scenario_arm64_virtio_fat32_smf().name`) is clean. Worked around with a name→constructor dispatch in `scenario_exists`/`scenario_by_name_direct` (qemu_runner_part3.spl) covering all 27 scenarios — `bin/simple os build/run/test --scenario=X` now runs without the Option crash.
+2. **Scenario catalog** (`get_all_scenarios()[i].name` / `for s in get_all_scenarios(): s.name`) — the seed interpreter wraps **elements of an imported `[QemuScenario]` list as Option**, so BOTH index AND for-iteration field-access fail with `'name' on Option`. Neither access pattern helps; a single constructor call (`scenario_arm64_virtio_fat32_smf().name`) is clean. Worked around with a name→constructor dispatch in `scenario_exists`/`scenario_by_name_direct` (_QemuRunner/scenario_catalog.spl) covering all 27 scenarios — `bin/simple os build/run/test --scenario=X` now runs without the Option crash.
 
 Note: `simpleos_platform_targets()[0].name` works while `get_all_scenarios()[0].name` does not, despite both being `-> [class]` — the seed's element-type resolution differs by call site. Root cause remains a Rust-seed interpreter bug (document-don't-patch); not chased further this session.
 
@@ -122,7 +122,7 @@ Both are "bring up SimpleOS fs-exec on arm64," a multi-session effort — NOT a 
 arm64 fs-exec stays diagnosed-RED pending an explicit decision on path A vs B.
 
 ## Symptom
-Calling `simpleos_platform_qemu_smoke_lane("riscv64")` (src/os/port/simpleos_multiplatform_build_part3.spl:174) in interpreter mode kills the process with exit code 248 and no diagnostic. When reached through spec files (e.g. `test/01_unit/os/qemu_runner_protection_acceptance_spec.spl`), it instead surfaces as:
+Calling `simpleos_platform_qemu_smoke_lane("riscv64")` (src/os/port/_SimpleosMultiplatformBuild/platform_target_accessors.spl:174) in interpreter mode kills the process with exit code 248 and no diagnostic. When reached through spec files (e.g. `test/01_unit/os/qemu_runner_protection_acceptance_spec.spl`), it instead surfaces as:
 
 ```
 semantic: undefined field: unknown property or method 'qemu_smoke_lane' on Option
@@ -155,7 +155,7 @@ Run from repo root with `bin/simple run <file>` (file must be inside the repo tr
 
 ## Workaround (landed 2026-06-13)
 
-Restructured `src/os/port/simpleos_multiplatform_build_part3.spl` to avoid returning `Option<large-struct>` across function boundaries. Added `_simpleos_platform_target_index(name) -> i64` helper (returns -1 when missing); all accessors now do `val idx = _simpleos_platform_target_index(name); if idx >= 0: return simpleos_platform_targets()[idx].<field>` — no Option crossing a call boundary.
+Restructured `src/os/port/_SimpleosMultiplatformBuild/platform_target_accessors.spl` to avoid returning `Option<large-struct>` across function boundaries. Added `_simpleos_platform_target_index(name) -> i64` helper (returns -1 when missing); all accessors now do `val idx = _simpleos_platform_target_index(name); if idx >= 0: return simpleos_platform_targets()[idx].<field>` — no Option crossing a call boundary.
 
 New catalog helpers added to avoid `if val Option<SimpleOsLaneContract>` patterns in qemu_runner:
 - `simpleos_platform_has_qemu_lane(name, lane_name) -> bool`
@@ -165,7 +165,7 @@ New catalog helpers added to avoid `if val Option<SimpleOsLaneContract>` pattern
 - `simpleos_platform_has_board_lane(name) -> bool`
 - `simpleos_platform_board_lane_direct(name) -> SimpleOsLaneContract`
 
-Also fixed `simpleos_platform_arch` in `src/os/qemu_runner_part1.spl` (used same bad pattern) and updated `src/os/qemu_runner_part4.spl` + `src/os/qemu_runner_part5.spl` to use the new catalog helpers.
+Also fixed `simpleos_platform_arch` in `src/os/_QemuRunner/runner_targets.spl` (used same bad pattern) and updated `src/os/_QemuRunner/scenario_disks.spl` + `src/os/_QemuRunner/scenario_exec.spl` to use the new catalog helpers.
 
 Regression spec: `test/01_unit/os/port/simpleos_platform_catalog_spec.spl` (10 cases, all green).
 

@@ -4,7 +4,7 @@ This document contains the **exact code** to be inserted into two shared files
 by the orchestrator after all parallel agents have committed their own changes.
 
 **DO NOT edit `src/os/qemu_systest_contract.spl` or
-`src/os/port/simpleos_multiplatform_build_part2.spl` directly** — two other
+`src/os/port/_SimpleosMultiplatformBuild/platform_target_catalog.spl` directly** — two other
 agents own those files during this parallel work session. This snippet is
 copy-paste ready for the orchestrator's merge step.
 
@@ -87,7 +87,7 @@ stdout for all 5 markers → returns `"pass"`.
 
 ---
 
-## 2. Insert into `src/os/port/simpleos_multiplatform_build_part2.spl`
+## 2. Insert into `src/os/port/_SimpleosMultiplatformBuild/platform_target_catalog.spl`
 
 In `simpleos_platform_targets()`, the list currently ends with the riscv32 target
 followed by a closing `]`. Add the aarch64-darwin target as the **7th element**
@@ -223,7 +223,7 @@ All 15 positional args are used in both lane contracts above.
 After the orchestrator merges both snippets:
 
 - [ ] `bin/simple check src/os/qemu_systest_contract.spl` — no errors
-- [ ] `bin/simple check src/os/port/simpleos_multiplatform_build_part2.spl` — no errors
+- [ ] `bin/simple check src/os/port/_SimpleosMultiplatformBuild/platform_target_catalog.spl` — no errors
 - [ ] `bin/simple test test/03_system/os/qemu/sys_qemu_aarch64_darwin_fs_exec_spec.spl` — RED with `missing-media:build/os/darwin-aarch64/simpleos_aarch64_darwin_fs_exec` (expected on Linux)
 - [ ] The missing-media classification contains the binary path, not a nil/crash
 

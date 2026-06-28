@@ -132,9 +132,9 @@ Shared layers already in place:
 
 ---
 
-### Finding 5 — `simpleos_multiplatform_build_part2.spl` already data-driven; extend it
+### Finding 5 — `_SimpleosMultiplatformBuild/platform_target_catalog.spl` already data-driven; extend it
 
-**File:** `src/os/port/simpleos_multiplatform_build_part2.spl` (707 L)
+**File:** `src/os/port/_SimpleosMultiplatformBuild/platform_target_catalog.spl` (707 L)
 
 **Current state:** `simpleos_platform_targets() -> [SimpleOsPlatformBuildTarget]` is already a struct-array — one record per platform with all build parameters. This is the RIGHT pattern.
 

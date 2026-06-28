@@ -33,7 +33,7 @@ real-board serial evidence for the selected protection mode.
 - `timeout 40s sh scripts/os/run_simpleos_stm32u585.shs --build-only`
 - `bin/release/x86_64-unknown-linux-gnu/simple os build --arch=x86_64`
 - `timeout 20s qemu-system-x86_64 -machine q35 -cpu qemu64 -m 512M -kernel build/os/simpleos_x86_64.elf -serial stdio -monitor none -display none -no-reboot -device isa-debug-exit,iobase=0xf4,iosize=0x04 -drive file=build/os/fat32-x86_64.img,if=none,id=nvme0,format=raw -device nvme,drive=nvme0,serial=simpleos0 -netdev user,id=net0 -device virtio-net-pci,netdev=net0`
-- `bin/release/x86_64-unknown-linux-gnu/simple check src/os/qemu_runner_part5.spl`
+- `bin/release/x86_64-unknown-linux-gnu/simple check src/os/_QemuRunner/scenario_exec.spl`
 - `bin/release/x86_64-unknown-linux-gnu/simple check test/01_unit/os/qemu_runner_spec.spl`
 - `bin/release/x86_64-unknown-linux-gnu/simple test test/01_unit/os/qemu_runner_spec.spl`
 - `bin/release/x86_64-unknown-linux-gnu/simple check src/os/drivers/pci/pci_provider.spl test/01_unit/os/drivers/pci/pci_provider_spec.spl`
@@ -330,7 +330,7 @@ completion queue, DMA isolation, IOMMU or grant-broker evidence, an issued
 direct-access grant token, and a `non-secure-resource-namespace` before
 `rdma_provider_hardware_ready(...)` can pass.
 
-Follow-up QEMU captured-serial gate: `src/os/qemu_runner_part5.spl` now exposes
+Follow-up QEMU captured-serial gate: `src/os/_QemuRunner/scenario_exec.spl` now exposes
 `qemu_scenario_serial_acceptance_reason(...)` and routes catalog lane completion
 through it. Required lane markers are checked first; when
 `SIMPLEOS_PROTECTION_MODE` is set, the same captured serial is also evaluated by
@@ -502,7 +502,7 @@ plain exit `0` is no longer accepted as scenario success.
 
 ## Checks
 
-- `simple check src/os/qemu_runner_part5.spl`: PASS
+- `simple check src/os/_QemuRunner/scenario_exec.spl`: PASS
 - `simple check test/01_unit/os/qemu_runner_spec.spl`: PASS
 - `simple test test/01_unit/os/qemu_runner_spec.spl`: FAIL, unchanged known count
   of `59` passed and `3` failed. The runner does not print failing example
@@ -527,7 +527,7 @@ plain exit `0` is no longer accepted as scenario success.
 - `sh -n scripts/os/run_simpleos_ra4m1.shs && sh -n scripts/os/run_simpleos_stm32u585.shs`: PASS
 - `timeout 40s sh scripts/os/run_simpleos_ra4m1.shs --build-only --protection=fault-test`: PASS
 - `timeout 40s sh scripts/os/run_simpleos_stm32u585.shs --build-only --protection=fault-test`: PASS
-- `simple check src/os/qemu_runner_part5.spl test/01_unit/os/qemu_runner_spec.spl`: PASS
+- `simple check src/os/_QemuRunner/scenario_exec.spl test/01_unit/os/qemu_runner_spec.spl`: PASS
 - `simple test test/01_unit/os/qemu_runner_spec.spl --clean`: FAIL, unchanged
   coarse result of `61` passed and `3` failed. The runner does not print failing
   example names in the captured output.

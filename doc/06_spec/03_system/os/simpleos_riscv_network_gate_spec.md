@@ -511,7 +511,7 @@ Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val runner = rt_file_read_text("src/os/qemu_runner_part1.spl")
+val runner = rt_file_read_text("src/os/_QemuRunner/runner_targets.spl")
 
 expect(runner).to_contain("native backend 'llvm' is not available")
 expect(runner).to_contain("Cranelift native builds do not support hosted riscv32 yet")

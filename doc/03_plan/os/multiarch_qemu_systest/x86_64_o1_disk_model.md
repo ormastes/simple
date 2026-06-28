@@ -3,7 +3,7 @@
 **Status:** RESOLVED — recommendation (a) `-initrd`
 **Author role:** helper agent (disk model + image audit only)
 **Kernel agent scope:** `arch/x86_64/**`, `qemu_systest_contract.spl`,
-`simpleos_multiplatform_build_part2.spl` — do NOT touch those files.
+`_SimpleosMultiplatformBuild/platform_target_catalog.spl` — do NOT touch those files.
 
 ---
 
@@ -153,7 +153,7 @@ The contract edit is necessary but NOT sufficient. The kernel agent must:
    `NATIVE_GUI_PROCESS_RENDER_OK` / `TEST PASSED` on the live probe path.
    Each marker must assert a genuine probe result — do NOT print unconditionally.
 
-3. **O2 — build target** in `simpleos_multiplatform_build_part2.spl`:
+3. **O2 — build target** in `_SimpleosMultiplatformBuild/platform_target_catalog.spl`:
    add `qemu_acceptance_lane` for x86_64 producing
    `build/os/simpleos_x86_64_fs_exec.elf`.
 
