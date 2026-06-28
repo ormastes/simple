@@ -1,0 +1,137 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+SIMPLE_BIN="${SIMPLE_BIN:-release/x86_64-unknown-linux-gnu/simple}"
+BUILD_DIR="${BUILD_DIR:-build/llm_runtime_vllm_host_probe}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/2026/06/llm_runtime_vllm_host_probe_$(date -u +%F).md}"
+OUT_ENV="$BUILD_DIR/evidence.env"
+OUT_LOG="$BUILD_DIR/preflight.log"
+BASE_MODEL="${BASE_MODEL:-base-model}"
+ENDPOINT="${ENDPOINT:-http://127.0.0.1:8000/v1}"
+STRICT=0
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --strict)
+            STRICT=1
+            ;;
+        --base-model)
+            shift
+            BASE_MODEL="${1:-}"
+            ;;
+        --endpoint)
+            shift
+            ENDPOINT="${1:-}"
+            ;;
+        *)
+            echo "unknown argument: $1" >&2
+            exit 2
+            ;;
+    esac
+    shift
+done
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+rm -f "$OUT_ENV" "$OUT_LOG" "$REPORT_PATH"
+
+exit_code=0
+if "$SIMPLE_BIN" run src/app/llm_runtime/control_cli.spl -- \
+    --action preflight \
+    --base-model "$BASE_MODEL" \
+    --endpoint "$ENDPOINT" \
+    --detect-resources >"$OUT_LOG" 2>&1; then
+    :
+else
+    exit_code=$?
+fi
+
+field_for() {
+    key="$1"
+    sed -n "s/.*\"${key}\":\"\\([^\"]*\\)\".*/\\1/p" "$OUT_LOG" | tail -n 1
+}
+
+event="$(field_for event)"
+status="$(field_for status)"
+reason="$(field_for reason)"
+endpoint_status="$(field_for endpoint)"
+models_status="$(field_for models_status)"
+models_reason="$(field_for models_reason)"
+
+if [ -z "$event" ]; then
+    event="missing"
+fi
+if [ -z "$status" ]; then
+    status="fail"
+fi
+if [ -z "$reason" ]; then
+    reason="missing_reason"
+fi
+if [ -z "$endpoint_status" ]; then
+    endpoint_status="missing"
+fi
+if [ -z "$models_status" ]; then
+    models_status="missing"
+fi
+if [ -z "$models_reason" ]; then
+    models_reason="missing"
+fi
+
+wrapper_status="fail"
+wrapper_reason="$reason"
+case "$event:$status:$reason" in
+    llm_runtime_vllm_dashboard_control_execution:skipped:missing_local_vllm*|\
+    llm_runtime_vllm_dashboard_control_execution:skipped:missing_local_gpu*|\
+    llm_runtime_vllm_dashboard_control_execution:skipped:missing_local_vllm_and_gpu*|\
+    llm_runtime_vllm_dashboard_control_execution:planned:serve_and_models_probe_planned)
+        wrapper_status="unavailable"
+        ;;
+    *)
+        wrapper_status="fail"
+        ;;
+esac
+
+{
+    printf '%s\n' "llm_runtime_vllm_host_probe_status=$wrapper_status"
+    printf '%s\n' "llm_runtime_vllm_host_probe_reason=$wrapper_reason"
+    printf '%s\n' "llm_runtime_vllm_host_probe_cli_exit=$exit_code"
+    printf '%s\n' "llm_runtime_vllm_host_probe_event=$event"
+    printf '%s\n' "llm_runtime_vllm_host_probe_preflight_status=$status"
+    printf '%s\n' "llm_runtime_vllm_host_probe_endpoint_status=$endpoint_status"
+    printf '%s\n' "llm_runtime_vllm_host_probe_models_status=$models_status"
+    printf '%s\n' "llm_runtime_vllm_host_probe_models_reason=$models_reason"
+} >"$OUT_ENV"
+
+{
+    printf '# LLM Runtime vLLM Host Probe\n\n'
+    printf '%s\n' "- command: \`$SIMPLE_BIN run src/app/llm_runtime/control_cli.spl -- --action preflight --base-model $BASE_MODEL --endpoint $ENDPOINT --detect-resources\`"
+    printf '%s\n' "- status: \`$wrapper_status\`"
+    printf '%s\n' "- reason: \`$wrapper_reason\`"
+    printf '%s\n' "- preflight_status: \`$status\`"
+    printf '%s\n' "- endpoint_status: \`$endpoint_status\`"
+    printf '%s\n' "- models_status: \`$models_status\`"
+    printf '%s\n' "- models_reason: \`$models_reason\`"
+    printf '%s\n' "- exit_code: \`$exit_code\`"
+    printf '%s\n' "- env: \`$OUT_ENV\`"
+    printf '%s\n' "- log: \`$OUT_LOG\`"
+    printf '\n'
+    printf 'This wrapper records repeatable local vLLM host preflight evidence. It does not prove live serving readiness; `unavailable` means the host lacks local vLLM/GPU resources or only reached preflight planning. Run with `--strict` when unavailable hosts must fail the lane.\n'
+} >"$REPORT_PATH"
+
+case "$wrapper_status" in
+    pass)
+        echo "STATUS: PASS llm-runtime-vllm-host-probe"
+        ;;
+    unavailable)
+        echo "STATUS: WARN llm-runtime-vllm-host-probe reason=$wrapper_reason"
+        if [ "$STRICT" -eq 1 ]; then
+            exit 1
+        fi
+        ;;
+    *)
+        echo "STATUS: FAIL llm-runtime-vllm-host-probe reason=$wrapper_reason"
+        exit 1
+        ;;
+esac

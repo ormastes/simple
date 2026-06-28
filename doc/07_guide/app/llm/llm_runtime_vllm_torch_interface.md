@@ -88,9 +88,12 @@ real evidence:
 
 Latest local host probe:
 `doc/09_report/2026/06/llm_runtime_vllm_host_probe_2026-06-28.md` records a
-`--detect-resources` preflight that returned `status=skipped` with
+repeatable `scripts/check/check-llm-runtime-vllm-host-probe.shs` preflight. On
+the current host it returns `status=unavailable` with
 `reason=missing_local_vllm`. Keep `FR-LLM-RUNTIME-0001` open until a configured
-local endpoint proves `/v1/models` serves the selected base model.
+local endpoint proves `/v1/models` serves the selected base model. Run the
+wrapper with `--strict` when unavailable or preflight-only hosts must fail the
+lane.
 
 Latest Torch/CUDA host probe:
 `doc/09_report/2026/06/llm_runtime_torch_cuda_host_probe_2026-06-28.md`
@@ -114,6 +117,13 @@ dashboard JSONL wording, or evidence docs:
 
 ```bash
 sh scripts/check/check-llm-tooling-public-absence-rendering.shs
+```
+
+Use the focused vLLM host probe after changing vLLM control CLI, live
+environment detection, dashboard control JSONL, or host preflight behavior:
+
+```bash
+sh scripts/check/check-llm-runtime-vllm-host-probe.shs
 ```
 
 Use the focused Torch optimizer gate after changing Torch SFFI, CUDA placement,
