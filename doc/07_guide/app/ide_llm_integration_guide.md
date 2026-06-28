@@ -114,6 +114,11 @@ The IDE must run on both host platforms and SimpleOS:
 | **Dashboard assistant views** | `src/app/dashboard.views/assistant_*.spl` | Render session status / timeline / tasks / overview |
 | **Dashboard bridge** | `src/app/dashboard/assistant_bridge.spl` | Attach-to-snapshot policy (live / stale / degraded); observer, never source-of-truth |
 
+For automation, `simple llm-dashboard --status` prints deterministic key/value
+readiness without launching a GUI/web host. Pass `--web`, `--ios`, or `--tui`
+to inspect the selected mode; web/iOS status reports `host_status=not-started`
+until a host process is deliberately launched.
+
 `assistant_push_signal` is durable: the MCP handler returns success only after
 the signal timeline event is appended. If timeline persistence fails, the MCP
 call fails instead of updating session state and leaving the dashboard without
