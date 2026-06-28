@@ -1324,11 +1324,20 @@ The gate passes only when the source evidence contains:
 - `rdoc_capture_magic=RDOC`
 - `rdoc_chromium_requested_api=vulkan`
 - `rdoc_chromium_requested_angle=vulkan`
+- `rdoc_electron_launch_exit_code`
+- `rdoc_electron_launch_timed_out`
 - an existing `.rdc` path in `rdoc_capture_file`
 
 Missing RenderDoc, missing Electron capture output, non-Electron backend
 evidence, or non-Vulkan Chromium request metadata all keep the gate out of
 `pass`.
+If retained evidence lacks the launch exit-code or timeout rows and is older
+than `scripts/lib/renderdoc-evidence-common.shs`, the gate emits
+`rdoc_electron_html_gate_source_contract_status=stale` and a
+`stale-source-missing-launch-*` reason. Refresh the Electron capture before
+debugging the host in that case; the aggregate cache key includes the Electron
+gate script and shared capture helper so contract changes invalidate cached
+gate output.
 
 ## Linux Browser Backing Notes
 

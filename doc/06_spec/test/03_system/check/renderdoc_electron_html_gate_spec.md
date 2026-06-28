@@ -27,7 +27,7 @@ renderdoc_electron_html_gate_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 11 | 11 | 0 | 0 |
+| 12 | 12 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -122,6 +122,10 @@ The gate also classifies launch metadata presence. Fresh capture evidence should
 emit `rdoc_electron_launch_exit_code` and `rdoc_electron_launch_timed_out`; old
 or hand-written evidence without both rows reports
 `rdoc_electron_html_gate_launch_metadata_status=missing` or `partial`.
+If the source evidence predates the shared RenderDoc capture helper, the gate
+also emits `rdoc_electron_html_gate_source_contract_status=stale` with a
+stale-source launch-metadata reason. Stale evidence remains non-pass; this only
+separates a retained old capture from a fresh failed launch.
 
 ## Debugging
 
@@ -135,6 +139,9 @@ host result. The most important keys are `rdoc_electron_html_gate_status`,
 Use `rdoc_electron_html_gate_launch_metadata_status` and
 `rdoc_electron_html_gate_launch_metadata_reason` to distinguish stale evidence
 from a fresh host run that completed or timed out.
+Use `rdoc_electron_html_gate_source_contract_status` and
+`rdoc_electron_html_gate_source_contract_reason` when deciding whether to
+refresh retained Electron RenderDoc evidence before debugging the host.
 
 When the top-level GUI RenderDoc aggregate is incomplete but ARGB parity passes,
 this gate usually names the remaining native RenderDoc blocker. A prepared host
@@ -179,7 +186,7 @@ close the Electron RenderDoc requirement.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 67 lines folded for reproduction.
+Runnable source: 70 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -217,6 +224,9 @@ expect(evidence).to_contain("rdoc_electron_html_gate_capture_file_status=")
 expect(evidence).to_contain("rdoc_electron_html_gate_capture_file_magic=")
 expect(evidence).to_contain("rdoc_electron_html_gate_launch_metadata_status=")
 expect(evidence).to_contain("rdoc_electron_html_gate_launch_metadata_reason=")
+expect(evidence).to_contain("rdoc_electron_html_gate_source_contract_status=")
+expect(evidence).to_contain("rdoc_electron_html_gate_source_contract_reason=")
+expect(evidence).to_contain("rdoc_electron_html_gate_source_contract=scripts/lib/renderdoc-evidence-common.shs")
 expect(evidence).to_contain("rdoc_electron_html_gate_log=")
 expect(evidence).to_contain("rdoc_electron_html_gate_vulkan_log_status=")
 expect(evidence).to_contain("rdoc_electron_html_gate_vulkan_log_reason=")
@@ -259,7 +269,7 @@ else:
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 32 lines folded for reproduction.
+Runnable source: 34 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -284,6 +294,8 @@ expect(evidence).to_contain("rdoc_electron_html_gate_requested_angle=vulkan")
 expect(evidence).to_contain("rdoc_electron_html_gate_requested_features=Vulkan")
 expect(evidence).to_contain("rdoc_electron_html_gate_launch_metadata_status=pass")
 expect(evidence).to_contain("rdoc_electron_html_gate_launch_metadata_reason=pass")
+expect(evidence).to_contain("rdoc_electron_html_gate_source_contract_status=pass")
+expect(evidence).to_contain("rdoc_electron_html_gate_source_contract_reason=pass")
 expect(evidence).to_contain("rdoc_electron_html_gate_required_features=Vulkan")
 expect(evidence).to_contain("rdoc_electron_html_gate_launch_flags=--no-sandbox --disable-gpu-sandbox --enable-features=Vulkan --use-angle=vulkan")
 expect(evidence).to_contain("rdoc_electron_html_gate_argb_file_status=pass")
@@ -361,6 +373,36 @@ expect(evidence).to_contain("rdoc_electron_html_gate_gpu_process_exit_count=2")
 expect(evidence).to_contain("rdoc_electron_html_gate_gpu_process_exit_codes=139")
 expect(evidence).to_contain("rdoc_electron_html_gate_gpu_process_exit_reason=gpu-process-exited-unexpectedly")
 expect(evidence).to_contain("rdoc_electron_html_gate_launch_flags=--no-sandbox --disable-gpu-sandbox --no-zygote --ozone-platform=x11 --enable-features=Vulkan,DefaultANGLEVulkan,VulkanFromANGLE --ignore-gpu-blocklist --enable-gpu-rasterization --use-angle=vulkan")
+```
+
+</details>
+
+#### classifies old Electron evidence that predates the capture-helper launch metadata contract
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 17 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-renderdoc-electron-html-gate-stale-source-contract"
+val command = "rm -rf " + root + " && mkdir -p " + root + "/source && " +
+    "printf '{\"width\":2,\"height\":2,\"format\":\"argb-u32\",\"producer\":\"electron-chromium-capture\",\"nativeWidth\":2,\"nativeHeight\":2,\"pixels\":[4294967295,4278190335,4294967295,4294967295]}\\n' > " + root + "/source/electron_argb.json && " +
+    "printf 'rdoc_backend=electron\\nrdoc_scene=html-css-electron\\nrdoc_capture_status=fail\\nrdoc_capture_reason=missing-rdc\\nrdoc_capture_file=\\nrdoc_capture_magic=\\nrdoc_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\\nrdoc_electron=tools/electron-shell/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron\\nrdoc_electron_capture_script=tools/electron-live-bitmap/capture_html_argb.js\\nrdoc_electron_argb=" + root + "/source/electron_argb.json\\nrdoc_electron_width=2\\nrdoc_electron_height=2\\nrdoc_chromium_requested_api=vulkan\\nrdoc_chromium_requested_angle=vulkan\\nrdoc_chromium_requested_features=Vulkan\\nrdoc_chromium_launch_flags=--no-sandbox --disable-gpu-sandbox --enable-features=Vulkan --use-angle=vulkan\\n' > " + root + "/source/evidence.env && " +
+    "touch -t 200001010000 " + root + "/source/evidence.env && " +
+    "RDOC_ELECTRON_HTML_EVIDENCE_ENV=" + root + "/source/evidence.env BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-renderdoc-electron-html-gate.shs || true"
+val (_stdout, _stderr, code) = rt_process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val evidence = _read_evidence(root + "/out/evidence.env")
+expect(evidence).to_contain("rdoc_electron_html_gate_status=fail")
+expect(evidence).to_contain("rdoc_electron_html_gate_reason=missing-rdc")
+expect(evidence).to_contain("rdoc_electron_html_gate_launch_metadata_status=missing")
+expect(evidence).to_contain("rdoc_electron_html_gate_launch_metadata_reason=missing-launch-exit-metadata")
+expect(evidence).to_contain("rdoc_electron_html_gate_source_contract_status=stale")
+expect(evidence).to_contain("rdoc_electron_html_gate_source_contract_reason=stale-source-missing-launch-exit-metadata")
+expect(evidence).to_contain("rdoc_electron_html_gate_source_contract=scripts/lib/renderdoc-evidence-common.shs")
 ```
 
 </details>
@@ -541,8 +583,8 @@ expect(evidence).to_contain("rdoc_electron_html_gate_required_features=Vulkan")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 11 |
-| Active scenarios | 11 |
+| Total scenarios | 12 |
+| Active scenarios | 12 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
