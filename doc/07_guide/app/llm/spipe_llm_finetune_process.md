@@ -69,6 +69,19 @@ fixed-format sample quality gate, retry6 and retry7 direct gates, and the
 retry6/retry7 SSpec manuals. For the checked-in dry-run records it should pass
 only when retry6 and retry7 still report the expected WARN/blocked state.
 
+Run strict ready mode only when tuned-model acceptance evidence is expected to
+exist:
+
+```bash
+FINETUNE_ACCEPTANCE_EVIDENCE_ENV=build/llm_finetune_acceptance/evidence.env \
+  sh scripts/check/check-llm-finetune-guard-evidence.shs --strict-ready
+```
+
+Strict ready mode requires the evidence env to contain
+`llm_finetune_acceptance_status=pass`. The local guard pass is intentionally not
+training, target-eval, safety, deployment, app-handoff, or normal-review
+acceptance proof.
+
 Run readiness only when upstream evidence is expected to be complete:
 
 ```bash
@@ -112,6 +125,11 @@ Before promoting retry7:
    and app handoff.
 6. Re-run the guard evidence wrapper, retry7 gate, and generated manual quality
    checks once.
+
+For aggregate LLM completion evidence, `scripts/check/check-llm-goal-evidence.shs
+--strict-host` runs this wrapper with `--strict-ready`, so a missing tuned-model
+acceptance env keeps the fine-tune lane failed instead of treating blocked
+guard evidence as release readiness.
 
 Do not repair stale generated specs or process docs during release. Update this
 guide, the generated/manual spec doc, and the relevant plan first, then verify.
