@@ -107,7 +107,7 @@ expect(source).to_contain("\"current\": FeatureStatus.InProgress")
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/01_unit/lib/database/database_feature_spec.spl` |
-| Updated | 2026-06-28 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview

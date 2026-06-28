@@ -43,7 +43,7 @@ tracking_add_feature_spec -> std
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -51,8 +51,7 @@ val source = tracking_source()
 
 expect(source).to_contain("add-feature")
 expect(source).to_contain("FeatureRequestRow(")
-expect(source).to_contain("db.add_feature_request(feature)")
-expect(source).to_contain("db.save()")
+expect(source).to_contain("add_feature_request_row(FEATURE_DB_PATH, feature)")
 ```
 
 </details>
@@ -86,7 +85,7 @@ expect(source).to_contain("--guide=<path>")
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/tracking/tracking_add_feature_spec.spl` |
-| Updated | 2026-06-28 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview

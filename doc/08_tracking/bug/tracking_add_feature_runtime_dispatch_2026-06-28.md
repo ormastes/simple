@@ -3,14 +3,14 @@
 - **Filed-on:** 2026-06-28
 - **Filed-by:** Codex
 - **Area:** `src/app/tracking/main.spl`, app runtime dispatch
-- **Status:** Open
+- **Status:** Fixed
 - **Severity:** medium
 
 ## Summary
 
-`tracking add-feature` now has a focused owner-path implementation and source
-checks, but invoking the full app entrypoint with `simple run
-src/app/tracking/main.spl add-feature ...` fails before command dispatch while
+`tracking add-feature` originally had a focused owner-path implementation and
+source checks, but invoking the full app entrypoint with `simple run
+src/app/tracking/main.spl add-feature ...` failed before command dispatch while
 loading the broader app/compiler closure.
 
 Observed blocker:
@@ -32,18 +32,36 @@ release/x86_64-unknown-linux-gnu/simple check \
   test/01_unit/app/tracking/tracking_add_feature_spec.spl
 ```
 
+## Fix
+
+`tracking add-feature` now uses
+`std.nogc_sync_mut.database.feature_request_rows.add_feature_request_row`, a
+narrow database-owner writer for canonical requested feature rows. It avoids the
+full generic SDN loader/query stack while still keeping writes out of ad hoc
+manual edits.
+
+Positive evidence:
+
+```text
+release/x86_64-unknown-linux-gnu/simple run src/app/tracking/main.spl add-feature \
+  --id=FR-LLM-RUNTIME-0001 \
+  --group=llm_runtime_vllm_torch_interface \
+  --title='Prove live local vLLM serving' \
+  --source=doc/08_tracking/feature/llm_runtime_vllm_torch_requests.md
+tracking add-feature: FR-LLM-RUNTIME-0001
+```
+
 ## Impact
 
-The new LLM runtime and retry7 requests remain tracked in their Markdown source
-files, but their canonical `feature_db.sdn` rows were not inserted because the
-repo forbids direct DB edits and the owner-path CLI cannot currently dispatch.
+The new LLM runtime and retry7 requests are tracked in their Markdown source
+files and now have canonical `feature_db.sdn` request rows inserted through the
+owner-path command.
 
 ## Required Fix
 
-- Isolate whether the `split` receiver is from CLI arg parsing, app import
-  closure loading, or a pre-existing compiler/runtime inference issue.
-- Add an executable integration spec for `tracking add-feature` against a
-  fixture feature DB.
-- Use the owner-path command to insert the pending rows:
-  `FR-SPIPE-LLM-0006`, `FR-LLM-RUNTIME-0001`, `FR-LLM-RUNTIME-0002`, and
-  `FR-LLM-RUNTIME-0003`.
+- Done: `tracking add-feature` dispatches successfully.
+- Done: `FR-SPIPE-LLM-0006`, `FR-LLM-RUNTIME-0001`,
+  `FR-LLM-RUNTIME-0002`, and `FR-LLM-RUNTIME-0003` are present in
+  `doc/08_tracking/feature/feature_db.sdn`.
+- Remaining broader debt: the full generic SDN loader still needs a separate
+  runtime cleanup before it is a reliable app-command dependency.
