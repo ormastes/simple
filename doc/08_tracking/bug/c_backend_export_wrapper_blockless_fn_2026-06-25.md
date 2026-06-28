@@ -9,7 +9,7 @@
 
 ## Real root cause (the original "block-less" guess was wrong)
 
-`MirToC`'s `impl` is split across four files: `c_backend_translate_part1/2/3.spl`
+`MirToC`'s `impl` is split across four files: `_CBackendTranslate/{class_core,instruction_lowering,export_wrappers}.spl`
 and `c_backend_translate_ops.spl`. The interpreter merged the `impl MirToC`
 blocks from parts 1/2/3 but **silently dropped the 4th file (`_ops`)** — every
 method defined there (`get_local_type`, `get_local_type_from_body`,
@@ -31,7 +31,7 @@ bitfield layout path.
 
 ## Fix
 
-1. Merged `c_backend_translate_ops.spl` into `c_backend_translate_part1.spl`
+1. Merged `c_backend_translate_ops.spl` into `_CBackendTranslate/class_core.spl`
    (245 → 664 lines, under the 800-line limit); deleted `_ops`; removed its
    `use`/`export use` references. Now 3 impl files → all merge.
 2. Added `static fn named(name) -> HirType` to `hir_types.spl` (the API both

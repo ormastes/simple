@@ -191,7 +191,7 @@ no ODR conflict in the actual build. Cleanup is a low-priority housekeeping item
 
 ## Latent: .spl textual MIR-to-LLVM backend (2026-05-29)
 
-The .spl `mir_to_llvm_part2_part1.spl` `Eq`/`Ne` cases use `icmp eq`/`icmp ne`
+The .spl `_MirToLlvm/core_codegen.spl` `Eq`/`Ne` cases use `icmp eq`/`icmp ne`
 on the raw LLVM value. In the MIR type system, strings are `Ptr(I8, false)` →
 LLVM `ptr`, so `icmp eq ptr` compares pointer addresses (identity), not string
 content. However, `rt_native_eq` cannot be used here because it operates on
