@@ -146,8 +146,9 @@ sh scripts/check/check-llm-goal-evidence.shs --strict-host
 Strict host mode passes the focused strict flags to the context/Ponytail,
 dashboard, vLLM, svLLM, Torch optimizer, and fine-tune wrappers. The aggregate
 expects all completion lanes to pass, fails for any WARN or missing strict
-evidence result, and writes `llm_goal_evidence_failed_gates` plus
-`llm_goal_evidence_warn_gates` to the env file for direct triage.
+evidence result, and writes `llm_goal_evidence_failed_gates`,
+`llm_goal_evidence_failed_gate_hints`, and `llm_goal_evidence_warn_gates` to
+the env file for direct triage.
 
 Use the focused public-rendering guard after changing runtime manuals,
 dashboard JSONL wording, or evidence docs:

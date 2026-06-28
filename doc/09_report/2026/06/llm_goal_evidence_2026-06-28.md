@@ -6,6 +6,7 @@
 - fail_count: `0`
 - warn_gates: `vllm_host|torch_optimizer`
 - failed_gates: `none`
+- failed_gate_hints: `none`
 - env: `build/llm_goal_evidence/evidence.env`
 
 | lane | status | expected | exit | log |
