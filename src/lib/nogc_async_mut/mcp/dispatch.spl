@@ -118,9 +118,9 @@ fn dispatch_wrap(reg: DispatchRegistry, tool_name: text, args: [text], token: Au
         return _error_envelope("EACCES", "authority level too low")
 
     val raw_bytes = entry.handler(args)
-    val filtered = reg.gate.filter_response_body(raw_bytes, token)
+    val scan = reg.gate.scan_and_gate(raw_bytes, token)
     reg.record_audit()
-    _ok_envelope(filtered)
+    _ok_envelope(_gate_filtered(scan.kind, raw_bytes))
 
 # ---------------------------------------------------------------------------
 # Test observer
@@ -132,6 +132,14 @@ fn test_audit_sink_size(reg: DispatchRegistry) -> i64:
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+# Build a FilteredBody from the output-gate scan decision. The gate's
+# `filter_response_body` returns raw `[u8]` and drops the decision, so the
+# redaction signal is reconstructed here from the scan kind.
+fn _gate_filtered(scan_kind: text, raw_bytes: [u8]) -> FilteredBody:
+    if scan_kind == "Hold":
+        return FilteredBody(decision: GateDecision.Redact, body: "REDACTED".bytes())
+    FilteredBody(decision: GateDecision.Pass, body: raw_bytes)
 
 fn _ok_envelope(f: FilteredBody) -> text:
     val body_text = _bytes_text(f.body)
