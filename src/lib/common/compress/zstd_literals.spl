@@ -54,13 +54,13 @@ fn _zstd_parse_fse_compressed_weights(input: [u8], pos: i64, payload_end: i64) -
     val weights_start = pos + 1
     val weights_end = weights_start + compressed_size
     val counts_res = zstd_fse_parse_normalized_counts(input, weights_start, weights_end, 6, 11)
-    if counts_res.is_err():
-        return Err(counts_res.unwrap_err())
-    val counts = counts_res.unwrap()
+    val counts = match counts_res:
+        case Ok(decoded): decoded
+        case Err(reason): return Err(reason)
     val table_res = zstd_fse_build_decode_table(counts.table_log, counts.counts)
-    if table_res.is_err():
-        return Err(table_res.unwrap_err())
-    val table = table_res.unwrap()
+    val table = match table_res:
+        case Ok(decoded): decoded
+        case Err(reason): return Err(reason)
     val bitstream_start = weights_start + counts.bytes_used
     if bitstream_start >= weights_end:
         return Err(CompressionError.TruncatedInput("zstd compressed Huffman weights bitstream"))
@@ -70,82 +70,85 @@ fn _zstd_parse_fse_compressed_weights(input: [u8], pos: i64, payload_end: i64) -
     # literal table); use the dedicated MSB-first reader here instead so the
     # state-machine bit values are sampled in the canonical zstd C order.
     val reader_res = zstd_msb_bits_init(input, bitstream_start, weights_end)
-    if reader_res.is_err():
-        return Err(reader_res.unwrap_err())
-    var reader = reader_res.unwrap()
+    var reader = match reader_res:
+        case Ok(decoded): decoded
+        case Err(reason): return Err(reason)
     val state1_res = zstd_msb_bits_read(reader, table.table_log)
-    if state1_res.is_err():
-        return Err(state1_res.unwrap_err())
-    val (state1_raw, after_s1, _s1_padded) = state1_res.unwrap()
+    val (state1_raw, after_s1, _s1_padded) = match state1_res:
+        case Ok(decoded): decoded
+        case Err(reason): return Err(reason)
     val state1_init_res = zstd_fse_init_state(state1_raw, table)
-    if state1_init_res.is_err():
-        return Err(state1_init_res.unwrap_err())
-    var state1 = state1_init_res.unwrap()
+    var state1 = match state1_init_res:
+        case Ok(decoded): decoded
+        case Err(reason): return Err(reason)
     reader = after_s1
     val state2_res = zstd_msb_bits_read(reader, table.table_log)
-    if state2_res.is_err():
-        return Err(state2_res.unwrap_err())
-    val (state2_raw, after_s2, _s2_padded) = state2_res.unwrap()
+    val (state2_raw, after_s2, _s2_padded) = match state2_res:
+        case Ok(decoded): decoded
+        case Err(reason): return Err(reason)
     val state2_init_res = zstd_fse_init_state(state2_raw, table)
-    if state2_init_res.is_err():
-        return Err(state2_init_res.unwrap_err())
-    var state2 = state2_init_res.unwrap()
+    var state2 = match state2_init_res:
+        case Ok(decoded): decoded
+        case Err(reason): return Err(reason)
     reader = after_s2
     var weights: [i64] = []
     while true:
         val entry1_res = zstd_fse_get_entry(table, state1)
-        if entry1_res.is_err():
-            return Err(entry1_res.unwrap_err())
-        val entry1 = entry1_res.unwrap()
+        val entry1 = match entry1_res:
+            case Ok(decoded): decoded
+            case Err(reason): return Err(reason)
         weights.push(entry1.symbol)
         if weights.len() > 255:
             return Err(CompressionError.CorruptStream("zstd Huffman weights exceed 255 symbols"))
         val bits1_res = zstd_msb_bits_read(reader, entry1.bits)
-        if bits1_res.is_err():
-            return Err(bits1_res.unwrap_err())
-        val (state1_low_bits, after_bits1, state1_padded) = bits1_res.unwrap()
+        val (state1_low_bits, after_bits1, state1_padded) = match bits1_res:
+            case Ok(decoded): decoded
+            case Err(reason): return Err(reason)
         val state1_next_res = zstd_fse_init_state(entry1.baseline + state1_low_bits, table)
-        if state1_next_res.is_err():
-            return Err(state1_next_res.unwrap_err())
-        state1 = state1_next_res.unwrap()
+        state1 = match state1_next_res:
+            case Ok(decoded): decoded
+            case Err(reason): return Err(reason)
         reader = after_bits1
         if state1_padded:
             val final2_res = zstd_fse_get_entry(table, state2)
-            if final2_res.is_err():
-                return Err(final2_res.unwrap_err())
-            weights.push(final2_res.unwrap().symbol)
+            val final2 = match final2_res:
+                case Ok(decoded): decoded
+                case Err(reason): return Err(reason)
+            weights.push(final2.symbol)
             if weights.len() > 255:
                 return Err(CompressionError.CorruptStream("zstd Huffman weights exceed 255 symbols"))
             break
 
         val entry2_res = zstd_fse_get_entry(table, state2)
-        if entry2_res.is_err():
-            return Err(entry2_res.unwrap_err())
-        val entry2 = entry2_res.unwrap()
+        val entry2 = match entry2_res:
+            case Ok(decoded): decoded
+            case Err(reason): return Err(reason)
         weights.push(entry2.symbol)
         if weights.len() > 255:
             return Err(CompressionError.CorruptStream("zstd Huffman weights exceed 255 symbols"))
         val bits2_res = zstd_msb_bits_read(reader, entry2.bits)
-        if bits2_res.is_err():
-            return Err(bits2_res.unwrap_err())
-        val (state2_low_bits, after_bits2, state2_padded) = bits2_res.unwrap()
+        val (state2_low_bits, after_bits2, state2_padded) = match bits2_res:
+            case Ok(decoded): decoded
+            case Err(reason): return Err(reason)
         val state2_next_res = zstd_fse_init_state(entry2.baseline + state2_low_bits, table)
-        if state2_next_res.is_err():
-            return Err(state2_next_res.unwrap_err())
-        state2 = state2_next_res.unwrap()
+        state2 = match state2_next_res:
+            case Ok(decoded): decoded
+            case Err(reason): return Err(reason)
         reader = after_bits2
         if state2_padded:
             val final1_res = zstd_fse_get_entry(table, state1)
-            if final1_res.is_err():
-                return Err(final1_res.unwrap_err())
-            weights.push(final1_res.unwrap().symbol)
+            val final1 = match final1_res:
+                case Ok(decoded): decoded
+                case Err(reason): return Err(reason)
+            weights.push(final1.symbol)
             if weights.len() > 255:
                 return Err(CompressionError.CorruptStream("zstd Huffman weights exceed 255 symbols"))
             break
     val completed = zstd_huf_complete_weights(weights)
-    if completed.is_err():
-        return Err(completed.unwrap_err())
-    Ok((completed.unwrap(), 1 + compressed_size))
+    val complete_weights = match completed:
+        case Ok(decoded): decoded
+        case Err(reason): return Err(reason)
+    Ok((complete_weights, 1 + compressed_size))
 
 # Public test seam: decode an FSE-compressed Huffman weight description per
 # RFC 8478 Zstandard §4.2.1.1 + §4.1.1. Returns the completed weight vector
