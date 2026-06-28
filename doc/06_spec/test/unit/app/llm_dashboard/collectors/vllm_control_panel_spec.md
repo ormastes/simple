@@ -58,7 +58,10 @@ expect(panel.status).to_equal("planned")
 expect(panel.reason).to_equal("serve_and_models_probe_planned")
 expect(panel.pid).to_equal(-1)
 expect(text).to_contain("vLLM Controls")
+expect(text).to_contain("pid=0")
 expect(text).to_contain("controls=preflight,start,poll,probe,stop")
+expect(panel.evidence_jsonl).to_contain("\"pid\":0")
+expect(panel.evidence_jsonl.split("\"pid\":-1").len()).to_equal(1)
 expect_absence_marker_hidden(text)
 ```
 
@@ -196,6 +199,7 @@ val html = render_llm_dashboard_vllm_control_panel_html(panel)
 expect(html).to_contain("id=\"llm-vllm-control-panel\"")
 expect(html).to_contain("value=\"start\"")
 expect(html).to_contain("value=\"probe\"")
+expect(html).to_contain("<p>pid=0</p>")
 expect(html).to_contain("serve_and_models_probe_planned")
 expect_absence_marker_hidden(html)
 ```
@@ -220,6 +224,8 @@ val response = server.route_http("GET", "/api/vllm/control?action=preflight", ""
 expect(response).to_contain("HTTP/1.1 200 OK")
 expect(response).to_contain("\"event\":\"llm_dashboard_vllm_control_panel\"")
 expect(response).to_contain("\"status\":\"planned\"")
+expect(response).to_contain("\"pid\":0")
+expect(response.split("\"pid\":-1").len()).to_equal(1)
 expect_absence_marker_hidden(response)
 ```
 

@@ -598,9 +598,9 @@ Evidence:
 
 ## 2026-06-28 vLLM Dashboard PID Public Rendering Hardening
 
-The dashboard runtime-owner JSONL path now matches the direct
-`llm-runtime-control` CLI public PID policy: non-positive internal process
-sentinels for `pid`, `started_pid`, and `stopped_pid` render as `0` in public
-JSONL while the in-memory execution object may still carry `-1` for internal
-control flow. This keeps missing/invalid process identifiers out of dashboard
-evidence without weakening the fail-closed invalid-pid behavior.
+The dashboard runtime-owner JSONL path and dashboard collector panel now match
+the direct `llm-runtime-control` CLI public PID policy: non-positive internal
+process sentinels render as `0` in public text, HTML, and JSONL while the
+in-memory execution object may still carry `-1` for internal control flow. This
+keeps missing/invalid process identifiers out of dashboard evidence without
+weakening the fail-closed invalid-pid behavior.
