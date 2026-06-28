@@ -638,7 +638,9 @@ Linux must report `required_api=vulkan`, `pairwise_status=pass`, and pass
 RenderDoc statuses for Simple, Chrome, and Electron; macOS must report
 `required_api=metal`, `pairwise_status=pass`, and GPU capture status `pass`;
 Windows must report `required_api=d3d12`, `pairwise_status=pass`, PIX status
-`pass`, and GPU debugger status `pass`. A stale or forged
+`pass`, zero blocked gates, passing native readback/browser backing/pairwise
+ARGB/source/PIX-GPU-debugger gate statuses, and GPU debugger status `pass`.
+A stale or forged
 `*_render_log_compare_status=pass` without those fields is downgraded to a
 failed platform row.
 

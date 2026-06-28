@@ -16,6 +16,27 @@ This plan is preparation for the real Ubuntu GUI environment. The current host
 must not be used to claim Electron Vulkan backing when it reports
 `electron-vulkan-disabled_off` or falls back to software/browser bitmap parity.
 
+## Host Scope Update, 2026-06-28
+
+This repository session is running on a Linux host. It cannot complete macOS
+Metal or Windows D3D12/PIX validation locally. Treat those lanes as postponed
+host-validation packets:
+
+- **Linux on this host:** continue only Linux-safe prep, wrapper hardening,
+  source-coupling checks, retained 4K/8K evidence validation, and Linux Vulkan
+  evidence collection when a real GUI/Vulkan/RenderDoc session is available.
+- **macOS Metal:** postponed from this host. The lane is ready only for a
+  Darwin/macOS agent with Metal tools, browser evidence, and Xcode GPU Frame
+  Capture or equivalent native capture logs.
+- **Windows D3D12/PIX:** postponed from this host. The lane is ready only for a
+  Windows agent with D3D12 native readback, Chrome/Electron D3D12 backing, and
+  PIX or equivalent GPU-debugger artifacts.
+
+Do not mark the overall GUI/Web/2D platform goal complete from this Linux host
+unless the macOS and Windows evidence files were produced on their native
+platforms and reviewed as imported evidence. Local Linux work may still improve
+shared wrappers and specs, but macOS/Windows completion remains deferred.
+
 ## Required End State
 
 - Chrome web rendering is Vulkan-backed, proven by browser GPU metadata.
@@ -125,6 +146,9 @@ evidence is available.
 
 macOS Metal render-log normalization and comparison:
 
+Deferred on this Linux host. Run only on a macOS/Darwin host, then import the
+resulting evidence for review:
+
 ```bash
 METAL_GENERATED_2D_READBACK_ENV=build/metal_generated_2d_readback/evidence.env \
 METAL_ENGINE2D_FRAMEBUFFER_READBACK_ENV=build/metal_engine2d_framebuffer_readback_evidence/evidence.env \
@@ -144,6 +168,9 @@ sh scripts/check/check-macos-metal-render-log-compare.shs
 ```
 
 Windows D3D12/PIX render-log normalization and comparison:
+
+Deferred on this Linux host. Run only on a Windows host with D3D12 and PIX or
+an equivalent GPU debugger, then import the resulting evidence for review:
 
 ```bash
 WINDOWS_D3D12_NATIVE_READBACK_ENV=build/windows-d3d12-native-readback/evidence.env \
