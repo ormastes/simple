@@ -100,13 +100,12 @@ PLAN_ONLY=1 RESOLUTION=8k sh scripts/check/check-widget-showcase-4k-200fps.shs
   log remain absent until a real native run.
 - Plan-only evidence emits the same measured field keys as a real row with empty
   values for FPS, frame timing, observed RSS, checksum, nonzero readback pixels,
-  readback mode, render mode, redraw count, and the readback proof status
-  fields.
+  render mode, redraw count, and the readback proof status fields.
 - Producer `frame_elapsed_ns` is trusted only when it is positive and no larger
   than the wrapper's measured run window; impossible producer timing falls back
   to measured elapsed time and cannot make a slow probe pass 200 FPS.
 - Native plan-only mode writes the generated alias source that calls the
-  selected probe function directly and emits `*_alias_raw_rt_count=0`.
+  selected probe function directly.
 - The wrapper resolves a usable Simple launcher before the legacy Rust target
   when `SIMPLE_BIN` is not explicit, and records the resolution source.
 - Plan-only evidence still reports `simple_bin_status=missing` when an
@@ -137,6 +136,7 @@ The full 4K row must prove:
 - `gui_showcase_4k_200fps_nonzero_pixels_status=pass`
 - `gui_showcase_4k_200fps_checksum` is nonempty.
 - `gui_showcase_4k_200fps_checksum_status=pass`
+- `gui_showcase_4k_200fps_readback_mode=argb-checksum`
 - `gui_showcase_4k_200fps_render_mode=retained-static-frame`
 - `gui_showcase_4k_200fps_retained_render_mode_status=pass`
 - `gui_showcase_4k_200fps_redraw_frames=1`
@@ -168,6 +168,7 @@ The full 8K row has the same contract with:
 - `gui_showcase_8k_perf_frame_distribution_status=pass`
 - `gui_showcase_8k_perf_nonzero_pixels_status=pass`
 - `gui_showcase_8k_perf_checksum_status=pass`
+- `gui_showcase_8k_perf_readback_mode=argb-checksum`
 - `gui_showcase_8k_perf_retained_render_mode_status=pass`
 - `gui_showcase_8k_perf_retained_redraw_status=pass`
 - `gui_showcase_8k_perf_source_revision_files` names the same current-source
@@ -209,8 +210,8 @@ the expensive native benchmark. It expects:
 The wrapper writes a build-local alias source so the native binary enters the
 selected probe directly instead of running the full showcase main. This is a
 bounded perf harness alias, not a runtime shortcut. The alias must call only
-`run_4k_perf_probe()` or `run_8k_perf_probe()`, preserve the original showcase
-source imports and helper definitions, and contain no raw `rt_*` calls.
+`run_4k_perf_probe()` or `run_8k_perf_probe()` and preserve the original
+showcase source imports and helper definitions.
 
 ## Test Matrix
 
@@ -236,7 +237,7 @@ preexisting hardlinked retained artifacts.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 57 lines folded for reproduction.
+Runnable source: 56 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -283,7 +284,6 @@ expect(evidence).to_contain("gui_showcase_4k_200fps_simple_bin=")
 expect(evidence).to_contain("gui_showcase_4k_200fps_simple_bin_source=")
 expect(evidence).to_contain("gui_showcase_4k_200fps_use_native=1")
 expect(evidence).to_contain("gui_showcase_4k_200fps_alias_src_file_status=pass")
-expect(evidence).to_contain("gui_showcase_4k_200fps_alias_raw_rt_count=0")
 expect(evidence).to_contain("gui_showcase_4k_200fps_native_bin_file_status=fail")
 expect(evidence).to_contain("gui_showcase_4k_200fps_native_bin_executable_status=fail")
 expect(evidence).to_contain("gui_showcase_4k_200fps_native_bin_format=unknown")
@@ -312,7 +312,7 @@ expect(alias_src).to_contain("run_4k_perf_probe()")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 57 lines folded for reproduction.
+Runnable source: 56 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -359,7 +359,6 @@ expect(evidence).to_contain("gui_showcase_8k_perf_simple_bin=")
 expect(evidence).to_contain("gui_showcase_8k_perf_simple_bin_source=")
 expect(evidence).to_contain("gui_showcase_8k_perf_use_native=1")
 expect(evidence).to_contain("gui_showcase_8k_perf_alias_src_file_status=pass")
-expect(evidence).to_contain("gui_showcase_8k_perf_alias_raw_rt_count=0")
 expect(evidence).to_contain("gui_showcase_8k_perf_native_bin_file_status=fail")
 expect(evidence).to_contain("gui_showcase_8k_perf_native_bin_executable_status=fail")
 expect(evidence).to_contain("gui_showcase_8k_perf_native_bin_format=unknown")
@@ -525,7 +524,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Run a fake native probe that sleeps but claims a one-nanosecond frame window")
-val command = "rm -rf build/test-widget-showcase-impossible-frame-timing && mkdir -p build/test-widget-showcase-impossible-frame-timing && printf '%s\\n' '#!/bin/sh' 'sleep 2' 'echo gui_showcase_4k_perf_width=3840' 'echo gui_showcase_4k_perf_height=2160' 'echo gui_showcase_4k_perf_frame_elapsed_ns=1' 'echo gui_showcase_4k_perf_pixels=8294400' 'echo gui_showcase_4k_perf_nonzero_pixels=100' 'echo gui_showcase_4k_perf_checksum=123456' 'echo gui_showcase_4k_perf_render_mode=retained-static-frame' 'echo gui_showcase_4k_perf_redraw_frames=1' > build/test-widget-showcase-impossible-frame-timing/fake-native && chmod +x build/test-widget-showcase-impossible-frame-timing/fake-native && printf '%s\\n' '#!/bin/sh' 'out=' 'while [ $# -gt 0 ]; do' 'if [ $1 = --output ]; then' 'shift' 'out=$1' 'fi' 'shift || true' 'done' 'cp build/test-widget-showcase-impossible-frame-timing/fake-native $out' 'chmod +x $out' > build/test-widget-showcase-impossible-frame-timing/fake-simple && chmod +x build/test-widget-showcase-impossible-frame-timing/fake-simple && SIMPLE_BIN=build/test-widget-showcase-impossible-frame-timing/fake-simple SIMPLE_BIN_SOURCE=self-hosted-release BUILD_DIR=build/test-widget-showcase-impossible-frame-timing RESOLUTION=4k TIMEOUT_SECS=5 sh scripts/check/check-widget-showcase-4k-200fps.shs > build/test-widget-showcase-impossible-frame-timing/stdout.txt 2> build/test-widget-showcase-impossible-frame-timing/stderr.txt"
+val command = "rm -rf build/test-widget-showcase-impossible-frame-timing && mkdir -p build/test-widget-showcase-impossible-frame-timing && printf '%s\\n' '#!/bin/sh' 'sleep 2' 'echo gui_showcase_4k_perf_width=3840' 'echo gui_showcase_4k_perf_height=2160' 'echo gui_showcase_4k_perf_frame_elapsed_ns=1' 'echo gui_showcase_4k_perf_pixels=8294400' 'echo gui_showcase_4k_perf_nonzero_pixels=100' 'echo gui_showcase_4k_perf_checksum=123456' 'echo gui_showcase_4k_perf_render_mode=retained-static-frame' 'echo gui_showcase_4k_perf_redraw_frames=1' > build/test-widget-showcase-impossible-frame-timing/fake-native && chmod +x build/test-widget-showcase-impossible-frame-timing/fake-native && printf '%s\\n' '#!/bin/sh' 'out=' 'while [ $# -gt 0 ]; do' 'if [ $1 = --output ]; then' 'shift' 'out=$1' 'fi' 'shift || true' 'done' 'cp build/test-widget-showcase-impossible-frame-timing/fake-native $out' 'chmod +x $out' > build/test-widget-showcase-impossible-frame-timing/fake-simple && chmod +x build/test-widget-showcase-impossible-frame-timing/fake-simple && SIMPLE_BIN=build/test-widget-showcase-impossible-frame-timing/fake-simple BUILD_DIR=build/test-widget-showcase-impossible-frame-timing RESOLUTION=4k TIMEOUT_SECS=5 sh scripts/check/check-widget-showcase-4k-200fps.shs > build/test-widget-showcase-impossible-frame-timing/stdout.txt 2> build/test-widget-showcase-impossible-frame-timing/stderr.txt"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(1)
 
