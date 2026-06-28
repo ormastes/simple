@@ -74,6 +74,8 @@ sh scripts/check/check-gui-web-2d-platform-freshness.shs
 - Missing evidence env files fail freshness.
 - Missing source-revision fields fail freshness.
 - Source-revision mismatches fail freshness.
+- Non-pass freshness exits nonzero so automation cannot treat stale or missing
+  evidence as a valid handoff input.
 - Matching source revisions plus runtime, browser/WebView/Electron, graphics
   SDK/driver, and runbook metadata pass freshness.
 - Explicit run-level source and metadata overrides pass freshness when wrapper
@@ -100,6 +102,11 @@ mismatch` means at least one lane is stale relative to the selected source
 revision. `missing-freshness-metadata` means the same-source proof exists but
 the run lacks runtime, browser/WebView/Electron, graphics SDK/driver, or runbook
 version context.
+
+The process exit code is `0` only for `pass`. Missing evidence, missing source
+revisions, stale source revisions, and missing metadata must all exit nonzero
+after writing diagnostic evidence so CI, release scripts, and platform handoff
+automation cannot accidentally continue with a failed freshness env.
 
 ## Input Env Files
 
@@ -196,9 +203,9 @@ Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val command = "rm -rf build/test-gui-web-2d-platform-freshness-missing && BUILD_DIR=build/test-gui-web-2d-platform-freshness-missing/out REPORT_PATH=build/test-gui-web-2d-platform-freshness-missing/report.md NATIVE_RENDER_LOG_PLATFORM_MATRIX_ENV=build/test-gui-web-2d-platform-freshness-missing/missing/native.env TAURI_MOBILE_RENDERER_PARITY_ENV=build/test-gui-web-2d-platform-freshness-missing/missing/mobile.env GUI_SHOWCASE_4K_200FPS_ENV=build/test-gui-web-2d-platform-freshness-missing/missing/4k.env GUI_SHOWCASE_8K_200FPS_ENV=build/test-gui-web-2d-platform-freshness-missing/missing/8k.env HTML_CSS_FULL_RENDERING_GOAL_ENV=build/test-gui-web-2d-platform-freshness-missing/missing/html.env PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=build/test-gui-web-2d-platform-freshness-missing/missing/production.env sh scripts/check/check-gui-web-2d-platform-freshness.shs || true"
+val command = "rm -rf build/test-gui-web-2d-platform-freshness-missing && BUILD_DIR=build/test-gui-web-2d-platform-freshness-missing/out REPORT_PATH=build/test-gui-web-2d-platform-freshness-missing/report.md NATIVE_RENDER_LOG_PLATFORM_MATRIX_ENV=build/test-gui-web-2d-platform-freshness-missing/missing/native.env TAURI_MOBILE_RENDERER_PARITY_ENV=build/test-gui-web-2d-platform-freshness-missing/missing/mobile.env GUI_SHOWCASE_4K_200FPS_ENV=build/test-gui-web-2d-platform-freshness-missing/missing/4k.env GUI_SHOWCASE_8K_200FPS_ENV=build/test-gui-web-2d-platform-freshness-missing/missing/8k.env HTML_CSS_FULL_RENDERING_GOAL_ENV=build/test-gui-web-2d-platform-freshness-missing/missing/html.env PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=build/test-gui-web-2d-platform-freshness-missing/missing/production.env sh scripts/check/check-gui-web-2d-platform-freshness.shs"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-expect(code).to_equal(0)
+expect(code).to_equal(1)
 
 val evidence = file_read("build/test-gui-web-2d-platform-freshness-missing/out/evidence.env")
 expect(evidence).to_contain("gui_web_2d_platform_freshness_status=fail")
@@ -300,9 +307,9 @@ Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val command = "rm -rf build/test-gui-web-2d-platform-freshness-stale && mkdir -p build/test-gui-web-2d-platform-freshness-stale/env && printf 'native_render_log_platform_matrix_source_revision=rev-a\\nnative_render_log_platform_matrix_runtime_build=simple-self-hosted\\nnative_render_log_platform_matrix_browser_webview_electron_revision=chrome-1\\nnative_render_log_platform_matrix_graphics_sdk_driver=vulkan-1\\nnative_render_log_platform_matrix_runbook_version=2026-06-28\\n' > build/test-gui-web-2d-platform-freshness-stale/env/native.env && printf 'tauri_mobile_renderer_parity_source_revision=rev-a\\n' > build/test-gui-web-2d-platform-freshness-stale/env/mobile.env && printf 'gui_showcase_4k_200fps_source_revision=rev-stale\\n' > build/test-gui-web-2d-platform-freshness-stale/env/4k.env && printf 'gui_showcase_8k_perf_source_revision=rev-a\\n' > build/test-gui-web-2d-platform-freshness-stale/env/8k.env && printf 'html_css_full_rendering_goal_source_revision=rev-a\\n' > build/test-gui-web-2d-platform-freshness-stale/env/html.env && printf 'production_gui_web_renderer_parity_source_revision=rev-a\\n' > build/test-gui-web-2d-platform-freshness-stale/env/production.env && BUILD_DIR=build/test-gui-web-2d-platform-freshness-stale/out REPORT_PATH=build/test-gui-web-2d-platform-freshness-stale/report.md NATIVE_RENDER_LOG_PLATFORM_MATRIX_ENV=build/test-gui-web-2d-platform-freshness-stale/env/native.env TAURI_MOBILE_RENDERER_PARITY_ENV=build/test-gui-web-2d-platform-freshness-stale/env/mobile.env GUI_SHOWCASE_4K_200FPS_ENV=build/test-gui-web-2d-platform-freshness-stale/env/4k.env GUI_SHOWCASE_8K_200FPS_ENV=build/test-gui-web-2d-platform-freshness-stale/env/8k.env HTML_CSS_FULL_RENDERING_GOAL_ENV=build/test-gui-web-2d-platform-freshness-stale/env/html.env PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=build/test-gui-web-2d-platform-freshness-stale/env/production.env sh scripts/check/check-gui-web-2d-platform-freshness.shs || true"
+val command = "rm -rf build/test-gui-web-2d-platform-freshness-stale && mkdir -p build/test-gui-web-2d-platform-freshness-stale/env && printf 'native_render_log_platform_matrix_source_revision=rev-a\\nnative_render_log_platform_matrix_runtime_build=simple-self-hosted\\nnative_render_log_platform_matrix_browser_webview_electron_revision=chrome-1\\nnative_render_log_platform_matrix_graphics_sdk_driver=vulkan-1\\nnative_render_log_platform_matrix_runbook_version=2026-06-28\\n' > build/test-gui-web-2d-platform-freshness-stale/env/native.env && printf 'tauri_mobile_renderer_parity_source_revision=rev-a\\n' > build/test-gui-web-2d-platform-freshness-stale/env/mobile.env && printf 'gui_showcase_4k_200fps_source_revision=rev-stale\\n' > build/test-gui-web-2d-platform-freshness-stale/env/4k.env && printf 'gui_showcase_8k_perf_source_revision=rev-a\\n' > build/test-gui-web-2d-platform-freshness-stale/env/8k.env && printf 'html_css_full_rendering_goal_source_revision=rev-a\\n' > build/test-gui-web-2d-platform-freshness-stale/env/html.env && printf 'production_gui_web_renderer_parity_source_revision=rev-a\\n' > build/test-gui-web-2d-platform-freshness-stale/env/production.env && BUILD_DIR=build/test-gui-web-2d-platform-freshness-stale/out REPORT_PATH=build/test-gui-web-2d-platform-freshness-stale/report.md NATIVE_RENDER_LOG_PLATFORM_MATRIX_ENV=build/test-gui-web-2d-platform-freshness-stale/env/native.env TAURI_MOBILE_RENDERER_PARITY_ENV=build/test-gui-web-2d-platform-freshness-stale/env/mobile.env GUI_SHOWCASE_4K_200FPS_ENV=build/test-gui-web-2d-platform-freshness-stale/env/4k.env GUI_SHOWCASE_8K_200FPS_ENV=build/test-gui-web-2d-platform-freshness-stale/env/8k.env HTML_CSS_FULL_RENDERING_GOAL_ENV=build/test-gui-web-2d-platform-freshness-stale/env/html.env PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=build/test-gui-web-2d-platform-freshness-stale/env/production.env sh scripts/check/check-gui-web-2d-platform-freshness.shs"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-expect(code).to_equal(0)
+expect(code).to_equal(1)
 
 val evidence = file_read("build/test-gui-web-2d-platform-freshness-stale/out/evidence.env")
 expect(evidence).to_contain("gui_web_2d_platform_freshness_status=fail")
