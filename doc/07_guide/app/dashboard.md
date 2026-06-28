@@ -36,10 +36,13 @@ tooling artifacts, and vLLM control evidence.
   `simple_context` status, `simple_ponytail` audit/simplification status, and
   source/target summaries without exposing internal absence markers.
 - `/api/vllm/control` exposes dashboard-safe vLLM control planning. The route
-  returns `llm_dashboard_vllm_control_panel` JSONL for authenticated requests,
-  accepts query-style `action`, `base_model`, `endpoint`, `vllm_available`, and
-  `gpu_available` values, and stays on the dashboard collector boundary instead
-  of importing the live process/HTTP executor.
+  returns `llm_runtime_vllm_dashboard_live_boundary` JSONL plus
+  `llm_dashboard_vllm_control_panel` or
+  `llm_runtime_vllm_dashboard_control_execution` JSONL for authenticated
+  requests. It accepts query-style `action`, `base_model`, `endpoint`,
+  `vllm_available`, and `gpu_available` values, and marks dashboard-side output
+  as `not_live_evidence` instead of treating planned actions as process/HTTP
+  proof.
 - The embedded vLLM control form posts to `/api/vllm/control` with `start`,
   `probe`, and related actions. Missing local vLLM/GPU resources produce
   explicit skipped evidence rather than live side effects.

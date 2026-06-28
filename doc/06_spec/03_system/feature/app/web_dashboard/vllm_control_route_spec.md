@@ -47,7 +47,7 @@ vllm_control_route_spec -> app
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -56,6 +56,9 @@ val response = server.route_http("GET", "/api/vllm/control?action=preflight", ""
 
 expect(response).to_contain("HTTP/1.1 200 OK")
 expect(response).to_contain("Content-Type: application/json")
+expect(response).to_contain("\"event\":\"llm_runtime_vllm_dashboard_live_boundary\"")
+expect(response).to_contain("\"boundary_status\":\"intent-only\"")
+expect(response).to_contain("\"acceptance_status\":\"not_live_evidence\"")
 expect(response).to_contain("\"event\":\"llm_dashboard_vllm_control_panel\"")
 expect(response).to_contain("\"action\":\"preflight\"")
 expect(response).to_contain("\"status\":\"planned\"")
@@ -118,7 +121,7 @@ expect_absence_marker_hidden(response)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -126,6 +129,7 @@ val server = DashboardServer.new_with_vllm_manifest(3099, "", "", "", _manifest(
 val response = server.route_http("GET", "/api/vllm/control?action=start&vllm_available=false&gpu_available=true", "", "sid")
 
 expect(response).to_contain("HTTP/1.1 200 OK")
+expect(response).to_contain("\"boundary_status\":\"blocked\"")
 expect(response).to_contain("\"event\":\"llm_runtime_vllm_dashboard_control_execution\"")
 expect(response).to_contain("\"action\":\"start\"")
 expect(response).to_contain("\"status\":\"skipped\"")
@@ -144,7 +148,7 @@ expect_absence_marker_hidden(response)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -152,6 +156,7 @@ val server = DashboardServer.new_with_vllm_manifest(3099, "", "", "", _manifest(
 val response = server.route_http("GET", "/api/vllm/control?action=start&vllm_available=true&gpu_available=false", "", "sid")
 
 expect(response).to_contain("HTTP/1.1 200 OK")
+expect(response).to_contain("\"boundary_status\":\"blocked\"")
 expect(response).to_contain("\"event\":\"llm_runtime_vllm_dashboard_control_execution\"")
 expect(response).to_contain("\"action\":\"start\"")
 expect(response).to_contain("\"status\":\"skipped\"")
@@ -171,7 +176,7 @@ expect_absence_marker_hidden(response)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -179,6 +184,7 @@ val server = DashboardServer.new_with_vllm_manifest(3099, "", "", "", _manifest(
 val response = server.route_http("GET", "/api/vllm/control?action=start&vllm_available=false&gpu_available=false", "", "sid")
 
 expect(response).to_contain("HTTP/1.1 200 OK")
+expect(response).to_contain("\"boundary_status\":\"blocked\"")
 expect(response).to_contain("\"event\":\"llm_runtime_vllm_dashboard_control_execution\"")
 expect(response).to_contain("\"action\":\"start\"")
 expect(response).to_contain("\"status\":\"skipped\"")
@@ -241,7 +247,7 @@ expect_absence_marker_hidden(response)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -252,6 +258,7 @@ val live_executor = _read_source(LIVE_EXECUTOR_PATH)
 
 expect(server_source).to_contain("collect_llm_dashboard_vllm_control_action_with_overrides")
 expect(server_source).to_contain("llm_runtime_execute_dashboard_control_jsonl")
+expect(server_source).to_contain("llm_runtime_dashboard_live_boundary_jsonl")
 expect(server_source).to_contain("_is_vllm_side_effect_action")
 expect(server_source).to_contain("if path.starts_with(\"/api/vllm/control\")")
 expect(server_source).to_contain("vllm_available")

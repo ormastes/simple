@@ -429,3 +429,8 @@ Tasks:
 7. Add context format alias compatibility. Status: done on 2026-06-28; app MCP
    and lower MCP accept `format=md` as `markdown`, advertise `markdown/md`, and
    keep the subprocess/rendering path on canonical `markdown`.
+8. Harden vLLM dashboard control evidence. Status: done on 2026-06-28; the
+   authenticated `/api/vllm/control` route now emits
+   `llm_runtime_vllm_dashboard_live_boundary` before panel/execution JSONL so
+   operators can distinguish intent-only, executor-required, and blocked
+   dashboard evidence from live process/HTTP proof.
