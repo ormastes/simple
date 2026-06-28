@@ -114,6 +114,8 @@ The Linux Vulkan lane is now evidence-backed. It requires:
 - `linux_vulkan_render_log_compare_status=pass`
 - `linux_vulkan_render_log_compare_required_api=vulkan`
 - `linux_vulkan_render_log_compare_pairwise_status=pass`
+- `linux_vulkan_render_log_compare_blocked_gate_count=0`
+- `linux_vulkan_render_log_compare_blocked_gates=`
 - `gui_web_2d_vulkan_browser_backing_status=pass`
 - `gui_web_2d_vulkan_browser_backing_mode=gpu-feature-status`
 - Electron browser backing `pass` with `electron-vulkan-backed`
