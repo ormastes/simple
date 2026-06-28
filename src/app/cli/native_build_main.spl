@@ -21,6 +21,8 @@ fn native_build_entry_args() -> [text]:
         i = i + 1
     args
 
+val DEFAULT_TIMEOUT_MS = 1800000  # 30 min — a real multi-file freestanding build far exceeds 120s
+
 fn print_help():
     print "Simple Native Build"
     print ""
@@ -31,8 +33,34 @@ fn print_help():
     print "  -o <path>            Output binary path"
     print "  --entry <file>       Entry file"
     print "  --backend <name>     Codegen backend: llvm-lib, llvm, cranelift"
+    print "  --timeout <secs>     Worker timeout in seconds (default 1800)"
     print "  --release            Release build"
     print "  -h, --help           Show this help"
+
+fn _parse_secs(s: text) -> i64:
+    # Safe numeric parse (avoids int() erroring on a non-numeric --timeout value).
+    var n = 0
+    var ok = false
+    for ch in s:
+        if ch >= "0" and ch <= "9":
+            n = n * 10 + int(ch)
+            ok = true
+        else:
+            return -1
+    if ok: n else: -1
+
+fn native_build_timeout_ms(args: [text]) -> i64:
+    # Worker subprocess timeout. Honors --timeout <secs> (also forwarded to the
+    # worker as its per-file budget); defaults large because the old hardcoded
+    # 120s killed any real multi-file freestanding build mid-compile.
+    var i = 0
+    while i < args.len():
+        if args[i] == "--timeout" and i + 1 < args.len():
+            val secs = _parse_secs(args[i + 1])
+            if secs > 0:
+                return secs * 1000
+        i = i + 1
+    DEFAULT_TIMEOUT_MS
 
 fn print_bounded(output: text):
     if output.len() == 0:
@@ -67,7 +95,7 @@ fn main() -> i64:
     var worker_args = ["run", "src/app/cli/native_build_worker.spl"]
     for arg in args:
         worker_args.push(arg)
-    val (stdout, stderr, code) = process_run_timeout("bin/simple", worker_args, 120000)
+    val (stdout, stderr, code) = process_run_timeout("bin/simple", worker_args, native_build_timeout_ms(args))
     print_bounded(stdout)
     if code != 0:
         eprint_bounded(stderr)
