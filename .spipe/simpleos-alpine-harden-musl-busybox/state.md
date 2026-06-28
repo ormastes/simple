@@ -41,6 +41,13 @@ feature (multi-pillar, multi-session)
 ### P3 — busybox multi-call (keep MDSOC+)
 - AC-6: `simplebox` argv[0]/argv[1] dispatch over registry + `--list`, MDSOC+ annotated. [DONE — green]
 - AC-7: missing applets (dd/chown/timeout/+) pure-Simple + registered. [DONE — cores green]
+- AC-6b: WIRE userland→image. [DONE — simplebox_main.spl entry genuinely consumes pure-Simple libc
+  (seq via libc_strtoul, 8/0); simplebox_build.spl native-build→rootfs (5/0); image_builder packs
+  /bin/simplebox into the rootfs + deploy manifest (proven by image_builder_artifact_spec block 1).
+  Pre-existing nvfs-marker failure in that spec's block 3 filed (image_builder_nvfs_rootfs_marker_
+  preexisting_2026-06-28.md) — NOT caused by this wire (origin fails it identically). Cross-compile to
+  a real simpleos ELF needs the sysroot (not built here); the build cmd + pack + consumption are
+  verified at the Simple level.]
 ### P4 — PIE/SSP/RELRO policy
 - AC-8: desktop/Hosted hardening stays UNCONDITIONALLY ON (no regression); ADD embedded opt-out via
   preset. [DONE — resolve_hardening + regression-guarded spec green]
