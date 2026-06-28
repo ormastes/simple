@@ -2,7 +2,7 @@
 
 ## Status
 
-Open.
+Mitigated.
 
 ## Summary
 
@@ -26,6 +26,12 @@ SSpec within the daemon timeout. It may still be a concurrency risk because
 `scripts/check/check-gui-renderdoc-feature-coverage-status.shs` can populate
 that cache when a key is missing.
 
+Mitigation: `scripts/check/check-gui-renderdoc-feature-coverage-status.shs`
+now supports `GUI_RENDERDOC_AGGREGATE_READONLY_STATIC_CACHE_DIR` for seeded
+lookup and keeps `GUI_RENDERDOC_AGGREGATE_STATIC_CACHE_DIR` as the writable
+cache for misses. The completion SSpec uses the shared seeded cache as
+read-only and writes misses under its per-run build root.
+
 ## Reproducer
 
 1. In `test/03_system/check/gui_web_2d_goal_completion_criteria_spec.spl`,
@@ -46,7 +52,7 @@ finishing within the test daemon timeout.
 
 The SSpec times out when every nested aggregate gate has a cold per-run cache.
 
-## Candidate Fix
+## Implemented Fix
 
 Split the aggregate cache into two modes:
 
