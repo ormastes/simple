@@ -1,10 +1,54 @@
 # GUI/Web/2D Completion Criteria Placeholder Audit
 
-> Validates the lightweight completion audit for the active GUI/Web/2D hardening goal. The audit fails closed while executable completion placeholders remain and exposes the remaining placeholder list for manual and parallel agent review.
+> Validates the lightweight completion audit for the active GUI/Web/2D hardening goal. The audit must fail closed while executable completion placeholders remain and must expose the remaining placeholder list for manual and parallel agent review.
+
+<!-- sdn-diagram:id=gui_web_2d_completion_criteria_placeholder_audit_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=gui_web_2d_completion_criteria_placeholder_audit_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+gui_web_2d_completion_criteria_placeholder_audit_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=gui_web_2d_completion_criteria_placeholder_audit_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 1 | 1 | 0 | 0 |
+
+<details>
+<summary>Full Scenario Manual</summary>
+
+# GUI/Web/2D Completion Criteria Placeholder Audit
+
+Validates the lightweight completion audit for the active GUI/Web/2D hardening goal. The audit must fail closed while executable completion placeholders remain and must expose the remaining placeholder list for manual and parallel agent review.
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Other |
+| Status | Active |
+| Requirements | N/A |
+| Plan | doc/03_plan/agent_tasks/vulkan_backed_web_gui_renderdoc_parallel_plan.md |
+| Design | doc/07_guide/tooling/renderdoc_capture_infra.md |
+| Research | N/A |
+| Source | `test/03_system/check/gui_web_2d_completion_criteria_placeholder_audit_spec.spl` |
+| Updated | 2026-06-01 |
+| Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
@@ -18,30 +62,154 @@ agent review.
 **Research:** N/A
 **Design:** doc/07_guide/tooling/renderdoc_capture_infra.md
 
+## Syntax
+
+```sh
+GUI_WEB_2D_COMPLETION_ALLOW_INCOMPLETE=1 \
+BUILD_DIR=build/gui_web_2d_completion_criteria_placeholders \
+REPORT_PATH=doc/09_report/gui_web_2d_completion_criteria_placeholders_$(date -u +%F).md \
+sh scripts/check/check-gui-web-2d-completion-criteria-placeholders.shs
+```
+
+Without `GUI_WEB_2D_COMPLETION_ALLOW_INCOMPLETE=1`, the wrapper exits nonzero
+while placeholders remain. Use the allow flag in SSpec and manual audits that
+need to inspect the evidence row without treating the known incomplete broad
+goal as a runner failure.
+
+## Operator Flow
+
+1. Run the placeholder audit before claiming the broad GUI/Web/2D goal is done.
+2. Read `gui_web_2d_completion_criteria_todo_count`.
+3. If the count is nonzero, the goal is incomplete even when narrow specs pass.
+4. Replace one placeholder at a time with evidence-backed assertions in
+   `gui_web_2d_goal_completion_criteria_spec.spl`.
+5. Update this audit's expected count and remaining-lane text in the same
+   change.
+6. Regenerate this manual with `bin/simple spipe-docgen ... --output doc/06_spec
+   --no-index`.
+
+## Current State
+
+The Linux Vulkan lane is no longer a placeholder; it now reads aggregate
+evidence and fails on real missing RenderDoc artifact proof. Five placeholders
+remain:
+
+- macOS Metal readback, browser/gui backing, pairwise diff, and GPU capture.
+- Windows D3D12/DXGI readback, browser/gui backing, pairwise diff, PIX files,
+  and GPU debugger files.
+- Strict full HTML/CSS inventory completion.
+- Production GUI/Web backend readback and checksum parity.
+- Spark or fallback sidecar outputs plus normal/high-capability review.
+
+The audit must not silently pass while any of those TODO markers remain in the
+executable completion spec.
+
+## Evidence Contract
+
+The wrapper writes `evidence.env` under `BUILD_DIR` with these keys:
+
+- `gui_web_2d_completion_criteria_status`
+- `gui_web_2d_completion_criteria_reason`
+- `gui_web_2d_completion_criteria_spec`
+- `gui_web_2d_completion_criteria_todo_count`
+- `gui_web_2d_completion_criteria_assertion_mode`
+- `gui_web_2d_completion_criteria_remaining_placeholders`
+- `gui_web_2d_completion_criteria_report`
+
+`assertion_mode=todo-placeholder-count` means the audit is source-backed: it
+counts explicit `expect("TODO(gui-web-2d-completion)...")` fail-fast assertions
+in the executable SSpec. Documentation prose may mention the TODO marker while
+explaining the process; those mentions must not increase the placeholder count.
+The audit is not allowed to infer completion from aggregate status, broad
+report text, or the absence of a recently generated report.
+
+## Failure Semantics
+
+`status=fail` with `reason=completion-placeholders-remain` is the expected
+state while any platform or review lane is unfinished. `status=pass` means only
+that no completion placeholders remain; the full goal still requires
+`gui_web_2d_goal_completion_criteria_spec.spl` itself to pass.
+
+If the completion spec file is missing, the wrapper reports
+`reason=completion-spec-missing` and must fail. A missing spec is never treated
+as zero placeholders.
+
+## Update Procedure
+
+When replacing another completion placeholder:
+
+1. Convert the placeholder helper to real assertions over current evidence.
+2. Keep the scenario name stable unless the goal requirement itself changes.
+3. Update the expected placeholder count in this audit.
+4. Remove the lane text from the remaining-placeholder expectations.
+5. Run this audit spec.
+6. Regenerate both manual docs under `doc/06_spec`.
+7. Record whether the broad completion spec now fails on real evidence or
+   passes.
+
+This procedure makes goal progress mechanically visible: the TODO count should
+decrease only when a lane becomes evidence-backed.
+
 ## Acceptance
 
 - The audit reports `completion-placeholders-remain` while unfinished lanes
   still exist.
-- The current placeholder count is six.
+- The current placeholder count is five.
 - The audit identifies its assertion mode as `todo-placeholder-count`, not a
   runner workaround.
-- The evidence lists the Linux Vulkan, macOS Metal, Windows D3D12, full
-  HTML/CSS, production GUI/Web parity, and parallel-agent review placeholders.
+- The evidence lists the macOS Metal, Windows D3D12, full HTML/CSS,
+  production GUI/Web parity, and parallel-agent review placeholders.
 
-## Scenario
+## Scenarios
 
-### fails closed and lists the six remaining completion placeholders
+### GUI/Web/2D completion criteria placeholder audit
 
-- Run `scripts/check/check-gui-web-2d-completion-criteria-placeholders.shs`
-  with `GUI_WEB_2D_COMPLETION_ALLOW_INCOMPLETE=1`.
-- Assert the evidence status is `fail`.
-- Assert the reason is `completion-placeholders-remain`.
-- Assert `gui_web_2d_completion_criteria_todo_count=6`.
-- Assert `gui_web_2d_completion_criteria_assertion_mode=todo-placeholder-count`.
-- Assert the placeholder list names Linux Vulkan, macOS Metal, Windows D3D12,
-  full HTML/CSS, production GUI/Web parity, and parallel-agent review.
+#### fails closed and lists the five remaining completion placeholders
 
-## Completion Boundary
+<details>
+<summary>Executable SSpec</summary>
 
-This spec proves that the completion audit reports the remaining work
-accurately. It does not complete any rendering platform lane by itself.
+Runnable source: 18 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-gui-web-2d-completion-criteria-placeholder-audit"
+val command = "rm -rf " + root + " && GUI_WEB_2D_COMPLETION_ALLOW_INCOMPLETE=1 BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-gui-web-2d-completion-criteria-placeholders.shs"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val evidence = file_read(root + "/out/evidence.env")
+expect(evidence).to_contain("gui_web_2d_completion_criteria_status=fail")
+expect(evidence).to_contain("gui_web_2d_completion_criteria_reason=completion-placeholders-remain")
+expect(evidence).to_contain("gui_web_2d_completion_criteria_todo_count=5")
+expect(evidence).to_contain("gui_web_2d_completion_criteria_assertion_mode=todo-placeholder-count")
+expect(evidence).to_contain("macOS Metal readback")
+expect(evidence).to_contain("Windows D3D12/DXGI readback")
+expect(evidence).to_contain("strict full HTML/CSS goal assertions")
+expect(evidence).to_contain("production GUI/Web backend readback")
+expect(evidence).to_contain("recorded Spark/fallback sidecar outputs")
+expect(evidence.contains("current Linux Vulkan evidence")).to_equal(false)
+expect(evidence.contains("script fails while any `TODO(gui-web-2d-completion)`")).to_equal(false)
+expect(evidence.contains("Replacing one of those")).to_equal(false)
+```
+
+</details>
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 1 |
+| Active scenarios | 1 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
+
+## Related Documentation
+
+- **Plan:** [doc/03_plan/agent_tasks/vulkan_backed_web_gui_renderdoc_parallel_plan.md](doc/03_plan/agent_tasks/vulkan_backed_web_gui_renderdoc_parallel_plan.md)
+- **Design:** [doc/07_guide/tooling/renderdoc_capture_infra.md](doc/07_guide/tooling/renderdoc_capture_infra.md)
+
+
+</details>
