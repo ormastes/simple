@@ -132,8 +132,17 @@ sh scripts/check/check-llm-goal-evidence.shs
 The aggregate report is written to
 `doc/09_report/2026/06/llm_goal_evidence_2026-06-28.md`. It treats live vLLM
 and Simple/libtorch CUDA optimizer host gaps as expected WARN lanes on hosts
-where those dependencies are not installed; run the focused wrappers with their
-strict modes when a release gate requires those host-dependent proofs to pass.
+where those dependencies are not installed.
+
+On a configured host, use strict host mode when the aggregate must be
+release-completion evidence for the live gates:
+
+```bash
+sh scripts/check/check-llm-goal-evidence.shs --strict-host
+```
+
+Strict host mode passes `--strict` to the vLLM host probe and Torch optimizer
+probe, expects both lanes to pass, and fails the aggregate for any WARN result.
 
 Use the focused public-rendering guard after changing runtime manuals,
 dashboard JSONL wording, or evidence docs:

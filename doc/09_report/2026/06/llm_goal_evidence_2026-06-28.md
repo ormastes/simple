@@ -1,6 +1,7 @@
 # LLM Goal Evidence
 
 - status: `pass`
+- strict_host: `false`
 - warn_count: `2`
 - fail_count: `0`
 - env: `build/llm_goal_evidence/evidence.env`
@@ -15,4 +16,4 @@
 | finetune_guard | `pass` | `pass` | `0` | `build/llm_goal_evidence/finetune_guard.log` |
 | public_absence | `pass` | `pass` | `0` | `build/llm_goal_evidence/public_absence.log` |
 
-This aggregate proves the current local LLM tooling evidence lanes remain reproducible. WARN lanes are expected only for host-dependent gates that are still open on this machine: live vLLM serving and Simple/libtorch CUDA optimizer execution. This report is not release-completion evidence for those live host gates.
+This aggregate proves the current local LLM tooling evidence lanes remain reproducible. WARN lanes are expected only for host-dependent gates that are still open on this machine: live vLLM serving and Simple/libtorch CUDA optimizer execution. This report is not release-completion evidence for those live host gates; rerun with `--strict-host` on a configured host when those gates must pass.

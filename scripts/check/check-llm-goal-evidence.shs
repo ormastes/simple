@@ -7,6 +7,25 @@ cd "$ROOT_DIR"
 BUILD_DIR="${BUILD_DIR:-build/llm_goal_evidence}"
 REPORT_PATH="${REPORT_PATH:-doc/09_report/2026/06/llm_goal_evidence_$(date -u +%F).md}"
 OUT_ENV="$BUILD_DIR/evidence.env"
+STRICT_HOST=0
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --strict-host)
+            STRICT_HOST=1
+            ;;
+        --help|-h)
+            echo "usage: sh scripts/check/check-llm-goal-evidence.shs [--strict-host]"
+            echo "  --strict-host  require live vLLM and Simple/libtorch CUDA optimizer gates to pass"
+            exit 0
+            ;;
+        *)
+            echo "unknown option: $1" >&2
+            exit 2
+            ;;
+    esac
+    shift
+done
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
 rm -f "$OUT_ENV" "$REPORT_PATH"
@@ -39,9 +58,17 @@ run_lane() {
 
 run_lane context_ponytail pass sh scripts/check/check-llm-tooling-context-ponytail-mimic.shs
 run_lane dashboard pass sh scripts/check/check-llm-dashboard-evidence.shs
-run_lane vllm_host warn sh scripts/check/check-llm-runtime-vllm-host-probe.shs
+if [ "$STRICT_HOST" -eq 1 ]; then
+    run_lane vllm_host pass sh scripts/check/check-llm-runtime-vllm-host-probe.shs --strict
+else
+    run_lane vllm_host warn sh scripts/check/check-llm-runtime-vllm-host-probe.shs
+fi
 run_lane svllm_local pass sh scripts/check/check-llm-runtime-svllm-local-readiness.shs
-run_lane torch_optimizer warn sh scripts/check/check-llm-runtime-torch-cuda-optimizer-probe.shs
+if [ "$STRICT_HOST" -eq 1 ]; then
+    run_lane torch_optimizer pass sh scripts/check/check-llm-runtime-torch-cuda-optimizer-probe.shs --strict
+else
+    run_lane torch_optimizer warn sh scripts/check/check-llm-runtime-torch-cuda-optimizer-probe.shs
+fi
 run_lane finetune_guard pass sh scripts/check/check-llm-finetune-guard-evidence.shs
 run_lane public_absence pass sh scripts/check/check-llm-tooling-public-absence-rendering.shs
 
@@ -68,6 +95,7 @@ done
 
 {
     printf '%s\n' "llm_goal_evidence_status=$status"
+    printf '%s\n' "llm_goal_evidence_strict_host=$STRICT_HOST"
     printf '%s\n' "llm_goal_evidence_warn_count=$warn_count"
     printf '%s\n' "llm_goal_evidence_fail_count=$fail_count"
     for key in context_ponytail dashboard vllm_host svllm_local torch_optimizer finetune_guard public_absence; do
@@ -83,6 +111,11 @@ done
 {
     printf '# LLM Goal Evidence\n\n'
     printf '%s\n' "- status: \`$status\`"
+    if [ "$STRICT_HOST" -eq 1 ]; then
+        printf '%s\n' "- strict_host: \`true\`"
+    else
+        printf '%s\n' "- strict_host: \`false\`"
+    fi
     printf '%s\n' "- warn_count: \`$warn_count\`"
     printf '%s\n' "- fail_count: \`$fail_count\`"
     printf '%s\n' "- env: \`$OUT_ENV\`"
@@ -96,7 +129,11 @@ done
         printf '| %s | `%s` | `%s` | `%s` | `%s` |\n' "$key" "$lane_status" "$expected" "$exit_code" "$BUILD_DIR/$key.log"
     done
     printf '\n'
-    printf 'This aggregate proves the current local LLM tooling evidence lanes remain reproducible. WARN lanes are expected only for host-dependent gates that are still open on this machine: live vLLM serving and Simple/libtorch CUDA optimizer execution. This report is not release-completion evidence for those live host gates.\n'
+    if [ "$STRICT_HOST" -eq 1 ]; then
+        printf 'This aggregate is strict host evidence: live vLLM serving and Simple/libtorch CUDA optimizer execution must pass through their focused strict wrappers. Any WARN or FAIL lane keeps the aggregate failed.\n'
+    else
+        printf 'This aggregate proves the current local LLM tooling evidence lanes remain reproducible. WARN lanes are expected only for host-dependent gates that are still open on this machine: live vLLM serving and Simple/libtorch CUDA optimizer execution. This report is not release-completion evidence for those live host gates; rerun with `--strict-host` on a configured host when those gates must pass.\n'
+    fi
 } >"$REPORT_PATH"
 
 if [ "$status" = "pass" ]; then
