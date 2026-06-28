@@ -12,10 +12,9 @@ impl TestDatabaseExtended:
     me start_run() -> text:
         val run_id = "run_{rt_timestamp_now()}"
 
-        var runs_table_opt = self.db.get_table_mut("test_runs")
-        if not runs_table_opt.?:
-            return run_id
-        var runs_table = runs_table_opt.unwrap()
+        var runs_table = match self.db.get_table_mut("test_runs"):
+            case Some(table): table
+            case nil: return run_id
         val row = SdnRow.empty()
         row.set("run_id", run_id)
         row.set("start_time", "{rt_timestamp_now()}")
@@ -43,10 +42,9 @@ impl TestDatabaseExtended:
         failed: i64,
         timed_out: i64
     ):
-        var runs_table_opt = self.db.get_table_mut("test_runs")
-        if not runs_table_opt.?:
-            return
-        var runs_table = runs_table_opt.unwrap()
+        var runs_table = match self.db.get_table_mut("test_runs"):
+            case Some(table): table
+            case nil: return
 
         for row in runs_table.rows:
             # BUG-044: Use ?? instead of ? to avoid "try: early return"
@@ -69,10 +67,9 @@ impl TestDatabaseExtended:
         val max_age_micros = max_age_hours * 3600 * 1000000
         var cleaned = 0
 
-        var runs_table_opt = self.db.get_table_mut("test_runs")
-        if not runs_table_opt.?:
-            return cleaned
-        var runs_table = runs_table_opt.unwrap()
+        var runs_table = match self.db.get_table_mut("test_runs"):
+            case Some(table): table
+            case nil: return cleaned
         for row in runs_table.rows:
             # BUG-044: Use ?? instead of ? to avoid "try: early return"
             val status = row.get("status") ?? ""
@@ -92,10 +89,9 @@ impl TestDatabaseExtended:
 
     # Prune old runs (keep only N most recent)
     me prune_runs(keep_count: i64) -> i64:
-        val runs_table_opt = self.db.get_table("test_runs")
-        if not runs_table_opt.?:
-            return 0
-        val runs_table = runs_table_opt.unwrap()
+        val runs_table = match self.db.get_table("test_runs"):
+            case Some(table): table
+            case nil: return 0
         var all_runs: [(text, i64)] = []  # (run_id, start_time)
 
         for row in runs_table.rows:
@@ -120,14 +116,16 @@ impl TestDatabaseExtended:
         # Delete old runs
         var deleted = 0
         if all_runs.len() > keep_count:
-            var runs_table_mut_opt = self.db.get_table_mut("test_runs")
-            if runs_table_mut_opt.?:
-                var runs_table_mut = runs_table_mut_opt.unwrap()
-                var i = keep_count
-                while i < all_runs.len():
-                    runs_table_mut.delete_row(all_runs[i].0)
-                    deleted = deleted + 1
-                    i = i + 1
-                self.db.set_table("test_runs", runs_table_mut)
+            match self.db.get_table_mut("test_runs"):
+                case Some(runs_table_mut):
+                    var runs_table_mut = runs_table_mut
+                    var i = keep_count
+                    while i < all_runs.len():
+                        runs_table_mut.delete_row(all_runs[i].0)
+                        deleted = deleted + 1
+                        i = i + 1
+                    self.db.set_table("test_runs", runs_table_mut)
+                case nil:
+                    pass
 
         deleted
