@@ -172,13 +172,13 @@ fn _zstd_decompress_frame_for_tier_with_dictionary(input: [u8], tier: Compressio
     var pos = 0
     while pos < input.len():
         val header_res = _zstd_parse_frame_header(input, pos)
-        if header_res.is_err():
-            return Err(header_res.unwrap_err())
-        val frame_header = header_res.unwrap()
+        val frame_header = match header_res:
+            case Ok(decoded): decoded
+            case Err(reason): return Err(reason)
         val dictionary_state_res = _zstd_frame_dictionary_state(frame_header, dictionary_bytes, dictionary_id)
-        if dictionary_state_res.is_err():
-            return Err(dictionary_state_res.unwrap_err())
-        val dictionary_state = dictionary_state_res.unwrap()
+        val dictionary_state = match dictionary_state_res:
+            case Ok(decoded): decoded
+            case Err(reason): return Err(reason)
         pos = pos + frame_header.bytes_used
         val frame_prefix_len = dictionary_state.content_prefix.len()
         var frame_out = dictionary_state.content_prefix
@@ -214,35 +214,36 @@ fn _zstd_decompress_frame_for_tier_with_dictionary(input: [u8], tier: Compressio
                 if block_end > input.len():
                     return Err(CompressionError.TruncatedInput("zstd compressed block"))
                 val literals_res = _zstd_parse_literals_section(input, pos, block_end, huffman_table_state)
-                if literals_res.is_err():
-                    return Err(literals_res.unwrap_err())
-                val (literals, next_huffman_table_state) = literals_res.unwrap()
+                val (literals, next_huffman_table_state) = match literals_res:
+                    case Ok(decoded): decoded
+                    case Err(reason): return Err(reason)
                 huffman_table_state = next_huffman_table_state
                 pos = pos + literals.bytes_used
                 val sequences_res = _zstd_parse_sequence_count(input, pos, block_end)
-                if sequences_res.is_err():
-                    return Err(sequences_res.unwrap_err())
-                val sequence_count = sequences_res.unwrap()
+                val sequence_count = match sequences_res:
+                    case Ok(decoded): decoded
+                    case Err(reason): return Err(reason)
                 pos = pos + sequence_count.bytes_used
                 if sequence_count.count > 0:
                     val modes_res = _zstd_parse_sequence_modes(input, pos, block_end)
-                    if modes_res.is_err():
-                        return Err(modes_res.unwrap_err())
-                    val modes = modes_res.unwrap()
+                    val modes = match modes_res:
+                        case Ok(decoded): decoded
+                        case Err(reason): return Err(reason)
                     pos = pos + modes.bytes_used
                     val tables_res = _zstd_parse_sequence_tables(input, pos, block_end, modes, sequence_table_history)
-                    if tables_res.is_err():
-                        return Err(tables_res.unwrap_err())
-                    val (tables, next_sequence_table_history) = tables_res.unwrap()
+                    val (tables, next_sequence_table_history) = match tables_res:
+                        case Ok(decoded): decoded
+                        case Err(reason): return Err(reason)
                     sequence_table_history = next_sequence_table_history
                     pos = pos + tables.bytes_used
                     val sequences_decoded_res = _zstd_decode_fse_sequences(input, pos, block_end, sequence_count.count, tables)
-                    if sequences_decoded_res.is_err():
-                        return Err(sequences_decoded_res.unwrap_err())
-                    val executed_res = _zstd_execute_sequences(frame_out, literals.literals, sequences_decoded_res.unwrap(), repeat_offsets)
-                    if executed_res.is_err():
-                        return Err(executed_res.unwrap_err())
-                    (frame_out, repeat_offsets) = executed_res.unwrap()
+                    val sequences_decoded = match sequences_decoded_res:
+                        case Ok(decoded): decoded
+                        case Err(reason): return Err(reason)
+                    val executed_res = _zstd_execute_sequences(frame_out, literals.literals, sequences_decoded, repeat_offsets)
+                    (frame_out, repeat_offsets) = match executed_res:
+                        case Ok(decoded): decoded
+                        case Err(reason): return Err(reason)
                     pos = block_end
                 else:
                     if pos != block_end:
@@ -262,9 +263,9 @@ fn _zstd_decompress_frame_for_tier_with_dictionary(input: [u8], tier: Compressio
             if pos + 4 > input.len():
                 return Err(CompressionError.TruncatedInput("zstd content checksum"))
             val checksum_res = read_u32_le(input, pos)
-            if checksum_res.is_err():
-                return Err(checksum_res.unwrap_err())
-            val expected = checksum_res.unwrap()
+            val expected = match checksum_res:
+                case Ok(decoded): decoded
+                case Err(reason): return Err(reason)
             val actual = (_zstd_xxh64_bytes_for_tier(frame_out.slice(frame_prefix_len, frame_out.len()), 0u64, tier) & 0xFFFFFFFFu64).to_u32()
             if actual != expected:
                 return Err(CompressionError.ChecksumMismatch("zstd content checksum"))
