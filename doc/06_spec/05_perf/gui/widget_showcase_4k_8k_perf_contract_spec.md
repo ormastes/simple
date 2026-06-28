@@ -27,7 +27,7 @@ widget_showcase_4k_8k_perf_contract_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 2 | 2 | 0 | 0 |
+| 3 | 3 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -206,12 +206,50 @@ expect(stdout_8k).to_contain("gui_showcase_8k_perf_alias_raw_rt_count=0")
 
 </details>
 
+#### rejects explicit Rust seed binaries before retained perf evidence can pass
+
+- Run the 4K checker with an explicit Rust seed Simple binary
+   - Expected: code_4k equals `0`
+- Run the 8K checker with an explicit Rust seed Simple binary
+   - Expected: code_8k equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 19 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Run the 4K checker with an explicit Rust seed Simple binary")
+val command_4k = "rm -rf build/test-widget-showcase-4k-seed-forbidden && PLAN_ONLY=1 USE_NATIVE=1 RESOLUTION=4k SIMPLE_BIN=src/compiler_rust/target/release/simple BUILD_DIR=build/test-widget-showcase-4k-seed-forbidden sh scripts/check/check-widget-showcase-4k-200fps.shs || true"
+val (_stdout_4k, _stderr_4k, code_4k) = process_run("/bin/sh", ["-c", command_4k])
+expect(code_4k).to_equal(0)
+val evidence_4k = file_read("build/test-widget-showcase-4k-seed-forbidden/status.env")
+expect(evidence_4k).to_contain("gui_showcase_4k_200fps_status=fail")
+expect(evidence_4k).to_contain("gui_showcase_4k_200fps_reason=rust-seed-simple-binary-forbidden")
+expect(evidence_4k).to_contain("gui_showcase_4k_200fps_simple_bin=src/compiler_rust/target/release/simple")
+expect(evidence_4k).to_contain("gui_showcase_4k_200fps_simple_bin_status=forbidden")
+
+step("Run the 8K checker with an explicit Rust seed Simple binary")
+val command_8k = "rm -rf build/test-widget-showcase-8k-seed-forbidden && PLAN_ONLY=1 USE_NATIVE=1 RESOLUTION=8k SIMPLE_BIN=src/compiler_rust/target/release/simple BUILD_DIR=build/test-widget-showcase-8k-seed-forbidden sh scripts/check/check-widget-showcase-4k-200fps.shs || true"
+val (_stdout_8k, _stderr_8k, code_8k) = process_run("/bin/sh", ["-c", command_8k])
+expect(code_8k).to_equal(0)
+val evidence_8k = file_read("build/test-widget-showcase-8k-seed-forbidden/status.env")
+expect(evidence_8k).to_contain("gui_showcase_8k_perf_status=fail")
+expect(evidence_8k).to_contain("gui_showcase_8k_perf_reason=rust-seed-simple-binary-forbidden")
+expect(evidence_8k).to_contain("gui_showcase_8k_perf_simple_bin=src/compiler_rust/target/release/simple")
+expect(evidence_8k).to_contain("gui_showcase_8k_perf_simple_bin_status=forbidden")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 2 |
-| Active scenarios | 2 |
+| Total scenarios | 3 |
+| Active scenarios | 3 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
