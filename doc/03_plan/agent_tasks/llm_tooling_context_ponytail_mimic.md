@@ -455,10 +455,12 @@ Tasks:
     removing the focused HIR lowering warning for that function from mirrored
     context specs. The later runtime-symbol follow-up now tracks the remaining
     JIT/deploy evidence separately from row-inference behavior.
-13. Harden daemon launcher array argument assembly. Status: partial on
-    2026-06-28; `process_run_timeout` now appends timeout wrapper arguments via
-    `push` instead of `Array.merge`, removing the launcher-side
-    `Runtime error: Function 'Array.merge' not found`. Focused retry with the
-    bootstrap seed then moved to daemon unavailability caused by JIT fallback on
-    `rt_len` followed by the `SIMPLE_LIB=src` memory guard, so deploy evidence
-    remains blocked outside the array-merge launcher path.
+13. Harden daemon launcher array argument assembly and startup mode. Status:
+    done on 2026-06-28; `process_run_timeout` now appends timeout wrapper
+    arguments via `push` instead of `Array.merge`, removing the launcher-side
+    `Runtime error: Function 'Array.merge' not found`. Test daemon/client
+    Pure Simple app dispatch now runs under scoped `SIMPLE_EXECUTION_MODE=interpret`,
+    and daemon child launch uses the process facade with the same mode to avoid
+    the JIT `rt_len`/segfault path. Focused bootstrap evidence:
+    `src/compiler_rust/target/bootstrap/simple test test/01_unit/app/tooling/context_generate_spec.spl --mode=interpreter --clean`
+    passed 15/15.

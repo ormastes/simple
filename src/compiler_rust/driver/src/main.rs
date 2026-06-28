@@ -67,7 +67,7 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use simple_common::target::Target;
 use simple_driver::cli::analysis::{run_info, run_query};
@@ -1220,6 +1220,12 @@ fn dispatch_to_simple_app(app_relative_path: &str, args: &[String], gc_log: bool
         return Some(run_file_with_args(&path, gc_log, gc_off, full_args));
     }
 
+    if test_daemon_app_requires_interpreter(app_relative_path) {
+        let mut full_args = vec![path.to_string_lossy().to_string()];
+        full_args.extend(args.iter().cloned());
+        return Some(run_file_with_interpreter_mode(&path, gc_log, gc_off, full_args));
+    }
+
     if app_receives_user_args_only(app_relative_path) {
         let mut full_args = vec![path.to_string_lossy().to_string()];
         full_args.extend(args.iter().skip(1).cloned());
@@ -1253,6 +1259,32 @@ fn dispatch_to_simple_app(app_relative_path: &str, args: &[String], gc_log: bool
     full_args.extend(args.iter().cloned());
 
     Some(run_file_with_args(&path, gc_log, gc_off, full_args))
+}
+
+fn test_daemon_app_requires_interpreter(app_relative_path: &str) -> bool {
+    matches!(
+        app_relative_path,
+        "src/app/test_runner_new/test_runner_client.spl"
+            | "src/app/test_runner_new/test_runner_single.spl"
+            | "src/app/test_daemon/main.spl"
+            | "src/app/test_daemon/light_daemon.spl"
+    )
+}
+
+fn run_file_with_interpreter_mode(
+    path: &Path,
+    gc_log: bool,
+    gc_off: bool,
+    args: Vec<String>,
+) -> i32 {
+    let previous = std::env::var("SIMPLE_EXECUTION_MODE").ok();
+    std::env::set_var("SIMPLE_EXECUTION_MODE", "interpret");
+    let code = run_file_with_args(path, gc_log, gc_off, args);
+    match previous {
+        Some(value) => std::env::set_var("SIMPLE_EXECUTION_MODE", value),
+        None => std::env::remove_var("SIMPLE_EXECUTION_MODE"),
+    }
+    code
 }
 
 fn app_receives_user_args_only(app_relative_path: &str) -> bool {

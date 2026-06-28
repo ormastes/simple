@@ -1,7 +1,7 @@
 # Lightweight test daemon CLI entrypoint.
 
 use std.sffi.cli.{cli_get_args}
-use app.io.process_ops.{process_run_timeout}
+use app.io.process_ops.{process_run, process_run_timeout}
 
 extern fn rt_dir_create_all(path: text) -> bool
 extern fn rt_file_exists(path: text) -> bool
@@ -94,17 +94,20 @@ fn ensure_daemon() -> bool:
     rt_file_delete(LIGHT_LOCK)
     rt_file_delete(LIGHT_STOP)
     val binary = simple_binary()
-    process_run_timeout(
+    val (_daemon_out, _daemon_err, daemon_code) = process_run(
         "/bin/sh",
-        ["-c", "{binary} run src/app/test_daemon/light_daemon.spl >/tmp/simple-test-daemon-light.log 2>&1 &"],
-        1000
+        ["-c", "SIMPLE_EXECUTION_MODE=interpret {binary} run src/app/test_daemon/light_daemon.spl >/tmp/simple-test-daemon-light.log 2>&1 &"]
     )
+    if daemon_code != 0:
+        rt_file_write_text("/tmp/simple-test-daemon-light.log", "failed to spawn light daemon: {daemon_code}\n")
+        return false
     var waits = 0
     while waits < 40:
         if daemon_lock_alive():
             return true
         rt_sleep_ms(50)
         waits = waits + 1
+    rt_file_write_text("/tmp/simple-test-daemon-light.log", "light daemon shell exited but did not create lock\n")
     false
 
 fn cli_test_daemon_start() -> i64:
