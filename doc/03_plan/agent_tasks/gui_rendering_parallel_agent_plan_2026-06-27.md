@@ -1002,6 +1002,12 @@ Normal-review acceptance:
   build, browser/WebView/Electron revision, graphics SDK/driver, and runbook
   version metadata. Missing files, missing source revisions, mismatched source
   revisions, or missing freshness metadata fail closed.
+- 2026-06-28 source-revision producer prep: native RenderDoc aggregate, Tauri
+  mobile parity, HTML/CSS full rendering status, and production GUI/Web parity
+  wrappers now emit lane-specific source revision keys plus the shared
+  `gui_web_2d_evidence_source_revision` fallback consumed by the freshness
+  checker. `GUI_WEB_2D_SOURCE_REVISION` can pin a final review window across
+  wrappers on platform hosts.
 
 ## Hard Stop Conditions
 
