@@ -595,3 +595,12 @@ Evidence:
   `01_unit` and `unit` vLLM manuals.
 - `check-llm-tooling-public-absence-rendering.shs`, direct env/runtime guards,
   and the `doc/06_spec` executable-spec layout guard passed.
+
+## 2026-06-28 vLLM Dashboard PID Public Rendering Hardening
+
+The dashboard runtime-owner JSONL path now matches the direct
+`llm-runtime-control` CLI public PID policy: non-positive internal process
+sentinels for `pid`, `started_pid`, and `stopped_pid` render as `0` in public
+JSONL while the in-memory execution object may still carry `-1` for internal
+control flow. This keeps missing/invalid process identifiers out of dashboard
+evidence without weakening the fail-closed invalid-pid behavior.
