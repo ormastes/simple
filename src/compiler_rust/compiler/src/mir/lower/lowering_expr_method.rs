@@ -392,6 +392,33 @@ impl<'a> MirLowerer<'a> {
             });
         }
 
+        // Array merge/concat/extend: in-place append the other array's elements
+        // (mirrors codegen's `("Array","merge")` arm — rt_array_len + extend).
+        // Without this the call falls through to a static `Array.merge` symbol
+        // call → rt_function_not_found at runtime. Latent in the compiled path;
+        // exposed when adaa700d4e5 routed `run` through JIT/compiled by default.
+        // Gated on receiver_is_array so String.concat is unaffected.
+        if matches!(method, "merge" | "concat" | "extend")
+            && args.len() == 1
+            && self.receiver_is_array(receiver, receiver_local_ty)
+        {
+            return self.with_func(|func, current_block| {
+                let count = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::Call {
+                    dest: Some(count),
+                    target: crate::mir::effects::CallTarget::from_name("rt_array_len"),
+                    args: vec![arg_regs[0]],
+                });
+                block.instructions.push(MirInst::Call {
+                    dest: None,
+                    target: crate::mir::effects::CallTarget::from_name("rt_array_extend_i64"),
+                    args: vec![receiver_reg, arg_regs[0], count],
+                });
+                receiver_reg
+            });
+        }
+
         // Builtin primitive .to_string()/.to_text()/.str() routes to
         // rt_to_string, which expects a tagged RuntimeValue receiver rather than
         // a raw native scalar.
