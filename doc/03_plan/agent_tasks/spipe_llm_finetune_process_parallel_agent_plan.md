@@ -302,6 +302,11 @@ Evidence:
   externally managed evidence. The SPipe build smoke includes a
   missing-local-handoff-doc fixture that must fail readiness and report
   `readiness_blocker=app-handoff-doc`.
+- 2026-06-28 doctor local-reference diagnostics: `fine-tune-doctor` now prints
+  `WARN missing_local_model_artifact` and `WARN missing_local_handoff_doc` when
+  non-placeholder local paths do not exist, matching the stricter
+  `fine-tune-ready` gates instead of leaving operators to infer the blocker
+  from `fine-tune-next`.
 
 Next normal-LLM work: finish retry5 licensed cache/checksum evidence and retry6
 real training/eval before retry7 can become an acceptance gate with a PASS

@@ -1246,23 +1246,33 @@ function commandFineTuneDoctor(args) {
     }
   }
 
+  const modelArtifact = registryValueForAttempt(root, "training_scripts.sdn", attemptId, "model_artifact") || readQuotedValue(attemptContent, "model_artifact");
+  const handoffDoc = registryValueForAttempt(root, "app_handoffs.sdn", attemptId, "handoff_doc") || readQuotedValue(attemptContent, "handoff_doc");
   const fields = [
     ["feature_option", registryValueForAttempt(root, "requirements_selection.sdn", attemptId, "feature_option")],
     ["nfr_option", registryValueForAttempt(root, "requirements_selection.sdn", attemptId, "nfr_option")],
     ["base_model", registryValueForAttempt(root, "models.sdn", attemptId, "base_model") || readQuotedValue(attemptContent, "base_model")],
     ["tuning_method", registryValueForAttempt(root, "tuning_methods.sdn", attemptId, "method") || readQuotedValue(attemptContent, "method")],
-    ["model_artifact", registryValueForAttempt(root, "training_scripts.sdn", attemptId, "model_artifact") || readQuotedValue(attemptContent, "model_artifact")],
+    ["model_artifact", modelArtifact],
     ["decision_status", registryValueForAttempt(root, "decisions.sdn", attemptId, "status") || readQuotedValue(attemptContent, "status")],
     ["license_constraints", registryValueForAttempt(root, "app_handoffs.sdn", attemptId, "license_constraints") || readQuotedValue(attemptContent, "license_constraints")],
     ["safety_eval", registryValueForAttempt(root, "app_handoffs.sdn", attemptId, "safety_eval") || readQuotedValue(attemptContent, "safety_eval")],
     ["deployment_evidence", registryValueForAttempt(root, "app_handoffs.sdn", attemptId, "deployment_evidence") || readQuotedValue(attemptContent, "deployment_evidence")],
-    ["handoff_doc", registryValueForAttempt(root, "app_handoffs.sdn", attemptId, "handoff_doc") || readQuotedValue(attemptContent, "handoff_doc")]
+    ["handoff_doc", handoffDoc]
   ];
   for (const [name, value] of fields) {
     if (hasPlaceholder(value)) {
       warnings += 1;
       console.log(`WARN placeholder ${name}=${value || "(missing)"}`);
     }
+  }
+  if (modelArtifact && !hasPlaceholder(modelArtifact) && !artifactReferenceExistsOrUri(modelArtifact)) {
+    warnings += 1;
+    console.log(`WARN missing_local_model_artifact model_artifact=${modelArtifact}`);
+  }
+  if (handoffDoc && !hasPlaceholder(handoffDoc) && !artifactReferenceExistsOrUri(handoffDoc)) {
+    warnings += 1;
+    console.log(`WARN missing_local_handoff_doc handoff_doc=${handoffDoc}`);
   }
 
   const gate = fineTuneDataGateStatus(root, attemptId);
