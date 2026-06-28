@@ -30,19 +30,39 @@ tripped the simplebox build. Pre-existing; unrelated to this lane's libc port
 (proven by a marker test: renaming the lane's `["c", ...]` library list to
 `["zzcmark", ...]` left the identical `'c'` error).
 
-## Part 2 — native-build can't compile a typed/module integer `val` — **OPEN**
+## Part 2 — native-build internal 120s timeout on the freestanding path — **OPEN**
 
-With Part 1 fixed, minimal freestanding programs still fail to emit. These are
-separate, pre-existing native-build gaps (not hex-specific, not this lane):
+With Part 1 fixed, the **real** simplebox build (the committed invocation:
+`--backend llvm --source src/os [--source src/lib] --entry
+simplebox_main.spl --entry-closure --target x86_64-unknown-none --linker-script
+…/simpleos.ld`) now progresses past parsing and dies with:
 
-| repro | error |
-|---|---|
-| `fn main() -> i32:`<br>`    val x: i64 = 255`<br>`    if x > 0: return 0`<br>`    return 1` | `method `unwrap` not found on type `Type`` |
-| `val M: i64 = 0xca`<br>`fn main() -> i32: return 0` | `undefined field 'kind': cannot access field on value of type 'nil'` |
+```
+[TIMEOUT: Process killed after 120s]
+BUILD_EXIT=255
+```
 
-A plain **decimal** typed local (`val x: i64 = 255`) reproduces the first error,
-so it is unrelated to hex. These block any non-trivial freestanding entry
-(including simplebox) independently of Part 1.
+This message is Simple's own `process_run_timeout` (`process_ops.spl`, 120s
+default) — native-build shells out to a sub-step (it holds a `bin/simple` path;
+`NativeProjectBuilder::new(project, ".../bin/simple")`) bounded at 120s. The
+freestanding build of simplebox discovers/parses the `src/os` tree (**1241
+`.spl` files**) and exceeds 120s before emitting. Reproduces with `--source
+src/os` alone (no `src/lib`), and the run had no external `timeout`/`process.run`
+wrapper — so the 120s is internal to native-build, not the harness.
+
+NOTE: the earlier "Part 2" claim here (typed/module `val` → "unwrap on Type" /
+"kind on nil") was measured from **barebones 3-line files** built without
+`--target`/`--source`/`--linker-script`. That is the wrong invocation and is
+contradicted by `simpleos_stdlib_num.spl` (which has an in-function typed `val`
+and `0x7fffffff`) compiling to a real freestanding ELF. Minimal repros mislead
+for native-build — the real-unit result above supersedes them.
+
+Fix levers (not yet chosen): (a) raise/parameterize native-build's internal
+sub-step timeout (the `--timeout` CLI flag maps to per-file `file_timeout`=300,
+a *different* timeout — the 120s here is the process-wrapper default); (b) scope
+discovery so a freestanding entry doesn't parse all 1241 `src/os` files when
+`--entry-closure` only needs 3. This is a native-build perf/infra item, not a
+code bug in this lane.
 
 ## Earlier mis-diagnoses (corrected)
 
