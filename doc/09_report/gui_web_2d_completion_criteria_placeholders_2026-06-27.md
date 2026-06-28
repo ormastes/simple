@@ -1,5 +1,12 @@
 # GUI/Web/2D Completion Criteria Placeholder Audit
 
+Historical snapshot from 2026-06-27. The executable completion checklist has
+since replaced the `TODO(gui-web-2d-completion)` placeholders with
+evidence-backed assertions. Keep this report only as evidence of the earlier
+gap; current completion status comes from
+`test/03_system/check/gui_web_2d_goal_completion_criteria_spec.spl` and its
+generated manual.
+
 - Status: fail
 - Reason: completion-placeholders-remain
 - Spec: test/03_system/check/gui_web_2d_goal_completion_criteria_spec.spl

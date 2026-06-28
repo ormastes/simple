@@ -307,9 +307,11 @@ Review gate:
 
 The active goal is complete only when the executable completion checklist in
 `test/03_system/check/gui_web_2d_goal_completion_criteria_spec.spl` passes
-without fail-fast placeholders. The current file is intentionally a failing
-SSpec skeleton so generated manuals expose the remaining work as scenario
-steps instead of burying it in prose.
+without fail-fast placeholders and every passing scenario is backed by fresh
+native-host evidence. The current file now uses real evidence-backed assertions
+instead of `TODO(gui-web-2d-completion)` placeholders, but a headless local pass
+is still only `prepared-not-verified` unless the required Linux/macOS/Windows
+and mobile evidence was produced on the correct platform.
 
 Each scenario maps to one completion gate:
 
@@ -395,7 +397,7 @@ This session's immediate integration target:
 | WO-14 Aggregate current-evidence autodiscovery | Main agent | Low: Spark may inspect output only | Aggregate checker, focused autodiscovery SSpec/manual doc | Default aggregate discovers current 4K, 8K, browser-backing, and direct ARGB evidence rows without explicit env overrides; blocker count drops from 16 to 10 on this host |
 | WO-15 CSS flex-flow slice | Main agent | Low: Spark may only inspect evidence after implementation | CSS traceability wrapper, focused renderer/inventory/system specs, generated docs, report | Focused renderer spec passes, full CSS gate reports implemented CSS `135/135`, and no full-CSS/native-platform completion is claimed |
 | WO-16 CSS logical inline spacing slice | Main agent | Low: Spark may only inspect evidence after implementation | Renderer, CSS traceability wrapper, Electron bitmap evidence fixture, focused renderer/inventory/system specs, generated docs, report | Focused renderer spec passes, full CSS gate reports implemented CSS `141/141`, and no full-CSS/native-platform completion is claimed |
-| WO-17 Goal completion checklist SSpec | Main agent defines, Spark/fallback may inspect, normal/high-capability agent reviews | High for read-only review, low for source edits | `test/03_system/check/gui_web_2d_goal_completion_criteria_spec.spl`, generated/manual doc, this plan | The SSpec lists all final gates as fail-fast scenario helpers; goal completion requires replacing every placeholder with evidence assertions and making the spec pass |
+| WO-17 Goal completion checklist SSpec | Main agent defines, Spark/fallback may inspect, normal/high-capability agent reviews | High for read-only review, low for source edits | `test/03_system/check/gui_web_2d_goal_completion_criteria_spec.spl`, generated/manual doc, this plan | The SSpec lists all final gates as evidence-backed scenario helpers; goal completion requires current native-host evidence for every assertion, not just a headless source-level pass |
 | WO-18 CSS logical block spacing slice | Main agent | Low: Spark may only inspect evidence after implementation | Renderer, CSS traceability wrapper, Electron bitmap evidence fixture, focused renderer/inventory/system specs, generated docs, report | Focused renderer spec passes, full CSS gate reports implemented CSS `147/147`, and no full-CSS/native-platform completion is claimed |
 | WO-19 CSS logical sizing slice | Main agent | Low: Spark may only inspect evidence after implementation | Renderer, CSS traceability wrapper, Electron bitmap evidence fixture, focused renderer/inventory/system specs, generated docs, report | Focused renderer spec passes, full CSS gate reports implemented CSS `153/153`, and no full-CSS/native-platform completion is claimed |
 | WO-20 CSS logical inset slice | Main agent | Low: Spark may only inspect evidence after implementation | Renderer, CSS traceability wrapper, Electron bitmap evidence fixture, focused renderer/inventory/system specs, generated docs, report | Focused renderer spec passes, full CSS gate reports implemented CSS `160/160`, and no full-CSS/native-platform completion is claimed |

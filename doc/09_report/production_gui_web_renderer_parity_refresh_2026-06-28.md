@@ -1,5 +1,12 @@
 # Production GUI Web Renderer Parity Evidence
 
+Historical/headless refresh snapshot. This report shows why production GUI/Web
+parity was not complete in this run: Metal compare was skipped and Electron
+event/performance rows were blank. Do not use the passing matrix or backend
+sample rows below as proof of full production parity; current proof must come
+from the aggregate completion checklist with live Tauri/Chrome capture,
+same-frame backend readback, event routing, and platform render-log gates.
+
 - status: fail
 - reason: electron-layout-manifest-failed
 - simple binary: release/x86_64-unknown-linux-gnu/simple (repo-self-hosted-fallback)

@@ -196,7 +196,10 @@ with
 It does not satisfy RenderDoc `.rdc`, PIX, GPU debugger, or native render-log
 capture gates.
 
-## Current Linux Perf And RenderDoc Status - 2026-06-27
+## Linux Perf And RenderDoc Snapshot - 2026-06-27
+
+This is a dated snapshot, not a standing completion claim. Re-run the wrappers
+below on the target GUI host before using any row as release or goal evidence.
 
 Retained report:
 `doc/09_report/gui_renderdoc_current_perf_browser_renderdoc_blocker_2026-06-27.md`.
@@ -223,6 +226,11 @@ Do not claim `.rdc` capture completion from browser backing or 4K/8K retained
 perf rows. Install or expose `renderdoccmd` first, then run
 `scripts/setup/setup-gui-web-2d-vulkan-env.shs --renderdoc-simple` or the full
 `--renderdoc` path.
+
+Readiness evidence and current blockers must stay separate: `--check` proves
+loader/tool discovery, `--browser-backing` proves Chromium GPU metadata,
+`--run` proves direct ARGB comparison, and `--renderdoc`/`--renderdoc-simple`
+are the only Linux paths that can produce native `.rdc` completion evidence.
 
 ## Full Evidence
 

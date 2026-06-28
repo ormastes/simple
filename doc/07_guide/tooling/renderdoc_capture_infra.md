@@ -91,12 +91,14 @@ keeps these states separate:
 - Simple Engine2D Vulkan readback availability;
 - optional RenderDoc `.rdc` capture availability and gate status.
 
-Real platform validation is tracked in separate host-session plans:
-`doc/03_plan/agent_tasks/linux_vulkan_real_platform_validation.md`,
-`doc/03_plan/agent_tasks/macos_metal_real_platform_validation.md`, and
-`doc/03_plan/agent_tasks/windows_d3d12_real_platform_validation.md`. This guide
-documents shared capture formats, wrappers, and gates only; do not use the
-current prep lane as completion evidence for any real host.
+Real platform validation is tracked through
+`doc/03_plan/agent_tasks/vulkan_backed_web_gui_renderdoc_parallel_plan.md` and
+the active completion matrix in
+`doc/03_plan/agent_tasks/gui_rendering_parallel_agent_plan_2026-06-27.md`.
+Those plans split the native-host packets for Linux Vulkan, macOS Metal, and
+Windows D3D12/PIX. This guide documents shared capture formats, wrappers, and
+gates only; do not use the current prep lane as completion evidence for any
+real host.
 
 Run a readiness-only probe first:
 

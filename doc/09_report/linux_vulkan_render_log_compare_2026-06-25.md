@@ -1,5 +1,11 @@
 # Linux Vulkan Render Log Compare
 
+Historical snapshot from 2026-06-25. This report is retained as failure
+evidence for the old browser-backing state and must not be used as current
+completion evidence. Use the active aggregate completion checklist and a fresh
+`scripts/check/check-linux-vulkan-render-log-compare.shs` run on a prepared
+Linux GUI/Vulkan/RenderDoc host for current proof.
+
 - status: fail
 - reason: electron-browser-backing-fail;browser-backing-fail
 - aggregate evidence: build/gui-web-2d-vulkan-env/evidence.env
