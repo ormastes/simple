@@ -726,7 +726,7 @@ construction or a compiler-side lowering improvement for this case.
 Status: still blocked for the pure-Simple stage2 payload.
 
 Correction to the previous blocker note: the line-only diagnostic for
-`value` matched `src/compiler/20.hir/hir_lowering/items_part2_part1.spl`,
+`value` matched `src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl`,
 not `lower_asm`. The `lower_asm` edits were not retained.
 
 The same direct stage2 probe now clears the next mutability blockers for:

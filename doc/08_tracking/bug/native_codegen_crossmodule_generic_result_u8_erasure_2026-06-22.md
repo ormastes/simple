@@ -43,7 +43,7 @@ generic type (`Result<[u8], E>`). With the no-op checker, that type exists
 nowhere by HIR time. A real fix requires either (a) real generic type
 propagation through the native pipeline, or (b) switching native `--compile` to
 a real type checker **and** fixing variant-payload extraction there
-(`30.types/type_system/stmt_check_part1.spl:365` `EnumPattern` also assigns the
+(`30.types/type_system/_StmtCheck/bindings_check.spl:365` `EnumPattern` also assigns the
 whole subject type, not the payload). Both are major compiler subsystems —
 disproportionate to the payoff (un-gating two svllm byte tests).
 

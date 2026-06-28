@@ -36,7 +36,7 @@ The self-hosted binary can't be produced cleanly because of the above.
 ## Dominant cluster root cause: `use X as Y` alias mangling (seed codegen)
 `ParserModule` (32+ unresolved) is an **import alias**:
 `use compiler.frontend.parser_types.{Module as ParserModule, ...}`
-(`items_part1.spl:10`). The seed's native-build mangles method symbols on the
+(`_Items/lowering_helpers.spl:10`). The seed's native-build mangles method symbols on the
 *alias* (`<using_module>__ParserModule`) instead of the canonical type
 (`parser_types.Module`), so call sites don't match definitions → unresolved. This
 is why "most cases work" — only `use X as Y`-aliased types break. (Other clusters

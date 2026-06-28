@@ -51,7 +51,7 @@ the ones already identified:
 
 1. **Option.map on a present bare value** — the interpreter represents `Some(x)`
    as the bare value, with no Some-fallback for Option methods, so
-   `fn_.return_type.map(...)` (`hir_lowering/items_part2_part2.spl`) errors
+   `fn_.return_type.map(...)` (`hir_lowering/_Items/declaration_lowering.spl`) errors
    "method 'map' not found on type 'Type'". Worked around at one callsite; others
    remain exposed.
 2. **`resolve.spl` MethodResolver method orphaning** — two indent-0 free functions

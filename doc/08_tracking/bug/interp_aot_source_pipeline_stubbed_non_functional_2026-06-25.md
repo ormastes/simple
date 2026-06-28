@@ -37,7 +37,7 @@ immediately exposes an unbounded chain of interpreted-compiler bugs:
 
 - **4a — Option.map on a present value**: interpreter represents `Some(x)` as the
   bare value `x`; it has no Some-fallback for Option methods, so
-  `fn_.return_type.map(...)` (hir_lowering/items_part2_part2.spl:150) errors
+  `fn_.return_type.map(...)` (hir_lowering/_Items/declaration_lowering.spl:150) errors
   "method 'map' not found on type 'Type'". (Already worked around at the callsite
   with an explicit `.?` check; other callsites remain exposed.)
 - **4b — resolve.spl method orphaning**: `class MethodResolver`
