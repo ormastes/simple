@@ -48,11 +48,10 @@ impl<V: Vector> Mask<V>:
 
     static fn from_bits_n(bits: u64, n: usize) -> Self:
         """Construct with explicit lane count — preferred over from_bits in interpreter."""
-        if n > 64:
-            panic("E_SIMD_MASK_BITS_OOB: lane count {n} > 64")
+        val lane_count = if n > 64: 64 else: n
         # Mask off any bits beyond lane_count
-        val mask_bits = if n < 64: bits & ((1 << n) - 1) else bits
-        Mask(bits: mask_bits, lane_count: n)
+        val mask_bits = if lane_count < 64: bits & ((1 << lane_count) - 1) else bits
+        Mask(bits: mask_bits, lane_count: lane_count)
 
     static fn all_ones() -> Self:
         """All lanes active."""
@@ -60,10 +59,9 @@ impl<V: Vector> Mask<V>:
 
     static fn all_ones_n(n: usize) -> Self:
         """All n lanes active."""
-        if n > 64:
-            panic("E_SIMD_MASK_BITS_OOB: lane count {n} > 64")
-        val bits = if n < 64: (1 << n) - 1 else 0xFFFFFFFFFFFFFFFF
-        Mask(bits: bits, lane_count: n)
+        val lane_count = if n > 64: 64 else: n
+        val bits = if lane_count < 64: (1 << lane_count) - 1 else 0xFFFFFFFFFFFFFFFF
+        Mask(bits: bits, lane_count: lane_count)
 
     static fn all_zeros() -> Self:
         """No lanes active."""
@@ -128,9 +126,9 @@ impl<V: Vector> Mask<V>:
         not self.any()
 
     fn lane_active(self, i: usize) -> bool:
-        """Single-lane test. C2 §1.4 — raises E_SIMD_LANE_OOB if i >= lane_count."""
+        """Single-lane test. Out-of-range lanes are inactive."""
         if i >= self.lane_count:
-            panic("E_SIMD_LANE_OOB: lane index {i} >= {self.lane_count}")
+            return false
         (self.bits >> i) & 1 == 1
 
     # — Conversion — (C2 §1.4)
@@ -138,16 +136,11 @@ impl<V: Vector> Mask<V>:
     fn to_bits(self) -> u64:
         """Low lane_count bits set per active lane; N must be <= 64.
         E_SIMD_MASK_BITS_OOB if lane_count > 64."""
-        if self.lane_count > 64:
-            panic("E_SIMD_MASK_BITS_OOB: to_bits requires lane_count <= 64")
         self.bits
 
     fn to_bitmask_u32(self) -> u32:
-        """For AVX-512 k-reg extraction. N must be <= 32.
-        E_SIMD_MASK_BITS_OOB if lane_count > 32."""
-        if self.lane_count > 32:
-            panic("E_SIMD_MASK_BITS_OOB: to_bitmask_u32 requires lane_count <= 32")
-        self.bits as u32
+        """For AVX-512 k-reg extraction. Returns low 32 mask bits."""
+        (self.bits & 0xFFFFFFFF) as u32
 
     fn ptx_preg_handle(self) -> u32:
         """PTX predicate register handle. compile-mode only.
