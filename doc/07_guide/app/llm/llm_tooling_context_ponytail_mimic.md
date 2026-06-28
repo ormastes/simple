@@ -84,6 +84,22 @@ Latest evidence:
 records the context/Ponytail system spec and focused context/Ponytail unit
 specs passing through the self-hosted Simple runtime.
 
+Default evidence proves the in-repo local file-pack, embedded-SQL context query,
+MCP exposure, and Ponytail audit/simplification surfaces. It is not full
+external context-mode fetch/index replacement proof.
+
+Use strict full-replacement mode only when that broader replacement evidence is
+expected to exist:
+
+```bash
+CONTEXT_PONYTAIL_FULL_REPLACEMENT_EVIDENCE_ENV=build/llm_tooling_context_ponytail_full_replacement/evidence.env \
+  sh scripts/check/check-llm-tooling-context-ponytail-mimic.shs --strict-full-replacement
+```
+
+The strict gate requires the evidence env to contain
+`llm_tooling_context_ponytail_full_replacement_status=pass`. The aggregate LLM
+strict mode also runs this wrapper with `--strict-full-replacement`.
+
 After changing context/ponytail public output, manuals, dashboard text, or MCP
 documentation, run:
 

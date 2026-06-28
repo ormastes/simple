@@ -8,9 +8,29 @@ SIMPLE_BIN="${SIMPLE_BIN:-release/x86_64-unknown-linux-gnu/simple}"
 BUILD_DIR="${BUILD_DIR:-build/llm_tooling_context_ponytail_mimic}"
 REPORT_PATH="${REPORT_PATH:-doc/09_report/2026/06/llm_tooling_context_ponytail_mimic_$(date -u +%F).md}"
 OUT_ENV="$BUILD_DIR/evidence.env"
+FULL_REPLACEMENT_EVIDENCE_ENV="${CONTEXT_PONYTAIL_FULL_REPLACEMENT_EVIDENCE_ENV:-build/llm_tooling_context_ponytail_full_replacement/evidence.env}"
 SYSTEM_LOG="$BUILD_DIR/context_ponytail_mimic_system.log"
 CONTEXT_UNIT_LOG="$BUILD_DIR/context_generate_unit.log"
 PONYTAIL_UNIT_LOG="$BUILD_DIR/ponytail_audit_unit.log"
+STRICT_FULL_REPLACEMENT=0
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --strict-full-replacement)
+            STRICT_FULL_REPLACEMENT=1
+            ;;
+        --help|-h)
+            echo "usage: sh scripts/check/check-llm-tooling-context-ponytail-mimic.shs [--strict-full-replacement]"
+            echo "  --strict-full-replacement  require CONTEXT_PONYTAIL_FULL_REPLACEMENT_EVIDENCE_ENV with llm_tooling_context_ponytail_full_replacement_status=pass"
+            exit 0
+            ;;
+        *)
+            echo "unknown argument: $1" >&2
+            exit 2
+            ;;
+    esac
+    shift
+done
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
 rm -f "$OUT_ENV" "$SYSTEM_LOG" "$CONTEXT_UNIT_LOG" "$PONYTAIL_UNIT_LOG" "$REPORT_PATH"
@@ -38,8 +58,33 @@ if [ "$system_status" != "pass" ] || [ "$context_unit_status" != "pass" ] || [ "
     status="fail"
 fi
 
+full_replacement_status="not_required"
+full_replacement_reason="default_local_mimic_evidence_only"
+if [ "$STRICT_FULL_REPLACEMENT" -eq 1 ]; then
+    full_replacement_status="missing"
+    full_replacement_reason="missing_full_replacement_evidence"
+    if [ -f "$FULL_REPLACEMENT_EVIDENCE_ENV" ]; then
+        evidence_status="$(sed -n 's/^llm_tooling_context_ponytail_full_replacement_status=//p' "$FULL_REPLACEMENT_EVIDENCE_ENV" | tail -n 1)"
+        evidence_reason="$(sed -n 's/^llm_tooling_context_ponytail_full_replacement_reason=//p' "$FULL_REPLACEMENT_EVIDENCE_ENV" | tail -n 1)"
+        if [ "$evidence_status" = "pass" ]; then
+            full_replacement_status="pass"
+            full_replacement_reason="${evidence_reason:-full_replacement_passed}"
+        else
+            full_replacement_status="${evidence_status:-fail}"
+            full_replacement_reason="${evidence_reason:-full_replacement_not_passed}"
+        fi
+    fi
+    if [ "$full_replacement_status" != "pass" ]; then
+        status="fail"
+    fi
+fi
+
 {
     printf '%s\n' "llm_tooling_context_ponytail_mimic_status=$status"
+    printf '%s\n' "llm_tooling_context_ponytail_mimic_strict_full_replacement=$STRICT_FULL_REPLACEMENT"
+    printf '%s\n' "llm_tooling_context_ponytail_mimic_full_replacement_status=$full_replacement_status"
+    printf '%s\n' "llm_tooling_context_ponytail_mimic_full_replacement_reason=$full_replacement_reason"
+    printf '%s\n' "llm_tooling_context_ponytail_mimic_full_replacement_env=$FULL_REPLACEMENT_EVIDENCE_ENV"
     printf '%s\n' "llm_tooling_context_ponytail_mimic_system_status=$system_status"
     printf '%s\n' "llm_tooling_context_ponytail_mimic_context_unit_status=$context_unit_status"
     printf '%s\n' "llm_tooling_context_ponytail_mimic_ponytail_unit_status=$ponytail_unit_status"
@@ -48,12 +93,24 @@ fi
 {
     printf '# LLM Tooling Context/Ponytail Mimic Evidence\n\n'
     printf '%s\n' "- status: \`$status\`"
+    if [ "$STRICT_FULL_REPLACEMENT" -eq 1 ]; then
+        printf '%s\n' "- strict_full_replacement: \`true\`"
+    else
+        printf '%s\n' "- strict_full_replacement: \`false\`"
+    fi
+    printf '%s\n' "- full_replacement: \`$full_replacement_status\`"
+    printf '%s\n' "- full_replacement_reason: \`$full_replacement_reason\`"
+    printf '%s\n' "- full_replacement_env: \`$FULL_REPLACEMENT_EVIDENCE_ENV\`"
     printf '%s\n' "- system_spec: \`$system_status\` exit=\`$system_exit\` log=\`$SYSTEM_LOG\`"
     printf '%s\n' "- context_unit: \`$context_unit_status\` exit=\`$context_unit_exit\` log=\`$CONTEXT_UNIT_LOG\`"
     printf '%s\n' "- ponytail_unit: \`$ponytail_unit_status\` exit=\`$ponytail_unit_exit\` log=\`$PONYTAIL_UNIT_LOG\`"
     printf '%s\n' "- env: \`$OUT_ENV\`"
     printf '\n'
-    printf 'This evidence covers the checked-in Simple context-mode mimic, embedded-SQL context query path, Ponytail audit surface, and MCP/guide contract assertions in the executable specs.\n'
+    if [ "$STRICT_FULL_REPLACEMENT" -eq 1 ]; then
+        printf 'This strict full-replacement check requires a separate evidence env with `llm_tooling_context_ponytail_full_replacement_status=pass`. Local file-pack, embedded-SQL mimic, MCP exposure, and Ponytail audit evidence alone is not full external context-mode/Ponytail replacement proof.\n'
+    else
+        printf 'This evidence covers the checked-in Simple context-mode mimic, embedded-SQL context query path, Ponytail audit surface, and MCP/guide contract assertions in the executable specs. It does not prove full context-mode fetch/index replacement beyond local file packs or full external Ponytail workflow replacement; run with `--strict-full-replacement` when that completion evidence must pass.\n'
+    fi
 } >"$REPORT_PATH"
 
 if [ "$status" = "pass" ]; then
