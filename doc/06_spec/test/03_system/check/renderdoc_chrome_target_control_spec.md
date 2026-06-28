@@ -169,8 +169,6 @@ The executable spec covers:
    before qrenderdoc receives `RDOC_TARGET_CONTROL_PID`.
 4. The shell script records GPU-process environment and map diagnostics for the
    RenderDoc Vulkan layer, `librenderdoc`, and `libvulkan`.
-5. The shell script emits capture file status/reason rows and reads magic only
-   after regular-file validation passes.
 
 The spec deliberately does not launch real Chrome. Its symlink scenario uses a
 fake Chrome process and fake qrenderdoc writer to exercise the shell contract
@@ -219,30 +217,38 @@ expect(evidence).to_contain("rdoc_chrome_target_control_gpu_maps=build/test-rend
 
 #### rejects symlinked target-control capture artifacts
 
-- Run target-control with fake Chrome and qrenderdoc producing a symlinked RDOC
-  file
+- Run target-control with fake Chrome and qrenderdoc producing a symlinked RDOC file
+- "printf '#!/bin/sh\\ncap=\"$RDOC TARGET CONTROL CAPTURE OUT\"\\nout=\"$RDOC TARGET CONTROL OUT\"\\nreal=\"$cap real\"\\nprintf '\\''RDOCsynthetic\\\\n'\\'' > \"$real\"\\nln -s \"$
    - Expected: code equals `0`
 - Confirm target-control capture magic is not read through symlinked RDC paths
+   - Expected: evidence does not contain `rdoc_chrome_target_control_capture_magic=RDOC`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
-Reproduction: this block summarizes the executable scenario source.
+Runnable source: 22 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+step("Run target-control with fake Chrome and qrenderdoc producing a symlinked RDOC file")
 val root = "build/test-renderdoc-chrome-target-control-symlink-rdc"
-val command = "rm -rf " + root + " && mkdir -p fake RenderDoc/Chrome fixtures && " +
-    "write a fake Chrome process with a child command containing --type=gpu-process && " +
-    "write fake qrenderdoc output whose capture path is a symlink to an RDOC file && " +
-    "RDOC_CHROME=" + root + "/chrome RDOC_HOME=" + root + "/renderdoc BUILD_DIR=" + root + "/out sh scripts/check/check-renderdoc-chrome-target-control.shs || true"
+val command = "rm -rf " + root + " && mkdir -p " + root + "/renderdoc/bin " + root + "/renderdoc/etc/vulkan/implicit_layer.d && " +
+    "printf '{\"library_path\":\"/io/dist/lib/librenderdoc.so\"}\\n' > " + root + "/renderdoc/etc/vulkan/implicit_layer.d/renderdoc_capture.json && " +
+    "printf '#!/bin/sh\\nsh -c '\\''sleep 60'\\'' --type=gpu-process &\\nchild=$!\\ntrap '\\''kill \"$child\" 2>/dev/null || true; exit 0'\\'' TERM INT\\nwait \"$child\"\\n' > " + root + "/chrome && chmod +x " + root + "/chrome && " +
+    "printf '#!/bin/sh\\ncap=\"$RDOC_TARGET_CONTROL_CAPTURE_OUT\"\\nout=\"$RDOC_TARGET_CONTROL_OUT\"\\nreal=\"$cap.real\"\\nprintf '\\''RDOCsynthetic\\\\n'\\'' > \"$real\"\\nln -s \"$(basename \"$real\")\" \"$cap\"\\nprintf '\\''rdoc_target_control_status=pass\\\\nrdoc_target_control_reason=pass\\\\nrdoc_target_control_chosen_pid=%s\\\\nrdoc_target_control_chosen_api=vulkan\\\\nrdoc_target_control_capture_path=%s\\\\n'\\'' \"$RDOC_TARGET_CONTROL_PID\" \"$cap\" > \"$out\"\\n' > " + root + "/renderdoc/bin/qrenderdoc && chmod +x " + root + "/renderdoc/bin/qrenderdoc && " +
+    "RDOC_CHROME=" + root + "/chrome RDOC_HOME=" + root + "/renderdoc RDOC_CHROME_TARGET_WAIT_SECS=1 RDOC_TARGET_CONTROL_TIMEOUT_SECS=1 BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-renderdoc-chrome-target-control.shs || true"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(0)
 
+step("Confirm target-control capture magic is not read through symlinked RDC paths")
 val evidence = file_read(root + "/out/evidence.env")
 expect(evidence).to_contain("rdoc_chrome_target_control_status=fail")
 expect(evidence).to_contain("rdoc_chrome_target_control_reason=capture-symlink")
+expect(evidence).to_contain("rdoc_chrome_target_control_target_status=pass")
+expect(evidence).to_contain("rdoc_chrome_target_control_target_api=vulkan")
+expect(evidence).to_contain("rdoc_chrome_target_control_capture_file=")
+expect(evidence).to_contain("/target_control_copy.rdc")
 expect(evidence).to_contain("rdoc_chrome_target_control_capture_file_status=fail")
 expect(evidence).to_contain("rdoc_chrome_target_control_capture_file_reason=symlink")
 expect(evidence).to_contain("rdoc_chrome_target_control_capture_magic=")
@@ -253,30 +259,37 @@ expect(evidence.contains("rdoc_chrome_target_control_capture_magic=RDOC")).to_eq
 
 #### rejects hardlinked target-control capture artifacts
 
-- Run target-control with fake Chrome and qrenderdoc producing a hardlinked RDOC
-  file
+- Run target-control with fake Chrome and qrenderdoc producing a hardlinked RDOC file
    - Expected: code equals `0`
 - Confirm target-control capture magic is not read through hardlinked RDC paths
+   - Expected: evidence does not contain `rdoc_chrome_target_control_capture_magic=RDOC`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
-Reproduction: this block summarizes the executable scenario source.
+Runnable source: 22 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+step("Run target-control with fake Chrome and qrenderdoc producing a hardlinked RDOC file")
 val root = "build/test-renderdoc-chrome-target-control-hardlink-rdc"
-val command = "rm -rf " + root + " && mkdir -p fake RenderDoc/Chrome fixtures && " +
-    "write a fake Chrome process with a child command containing --type=gpu-process && " +
-    "write fake qrenderdoc output whose capture path is a hardlink to an RDOC file && " +
-    "RDOC_CHROME=" + root + "/chrome RDOC_HOME=" + root + "/renderdoc BUILD_DIR=" + root + "/out sh scripts/check/check-renderdoc-chrome-target-control.shs || true"
+val command = "rm -rf " + root + " && mkdir -p " + root + "/renderdoc/bin " + root + "/renderdoc/etc/vulkan/implicit_layer.d && " +
+    "printf '{\"library_path\":\"/io/dist/lib/librenderdoc.so\"}\\n' > " + root + "/renderdoc/etc/vulkan/implicit_layer.d/renderdoc_capture.json && " +
+    "printf '#!/bin/sh\\nsh -c '\\''sleep 60'\\'' --type=gpu-process &\\nchild=$!\\ntrap '\\''kill \"$child\" 2>/dev/null || true; exit 0'\\'' TERM INT\\nwait \"$child\"\\n' > " + root + "/chrome && chmod +x " + root + "/chrome && " +
+    "printf '#!/bin/sh\\ncap=\"$RDOC_TARGET_CONTROL_CAPTURE_OUT\"\\nout=\"$RDOC_TARGET_CONTROL_OUT\"\\nreal=\"$cap.real\"\\nprintf '\\''RDOCsynthetic\\\\n'\\'' > \"$real\"\\nln \"$real\" \"$cap\"\\nprintf '\\''rdoc_target_control_status=pass\\\\nrdoc_target_control_reason=pass\\\\nrdoc_target_control_chosen_pid=%s\\\\nrdoc_target_control_chosen_api=vulkan\\\\nrdoc_target_control_capture_path=%s\\\\n'\\'' \"$RDOC_TARGET_CONTROL_PID\" \"$cap\" > \"$out\"\\n' > " + root + "/renderdoc/bin/qrenderdoc && chmod +x " + root + "/renderdoc/bin/qrenderdoc && " +
+    "RDOC_CHROME=" + root + "/chrome RDOC_HOME=" + root + "/renderdoc RDOC_CHROME_TARGET_WAIT_SECS=1 RDOC_TARGET_CONTROL_TIMEOUT_SECS=1 BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-renderdoc-chrome-target-control.shs || true"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(0)
 
+step("Confirm target-control capture magic is not read through hardlinked RDC paths")
 val evidence = file_read(root + "/out/evidence.env")
 expect(evidence).to_contain("rdoc_chrome_target_control_status=fail")
 expect(evidence).to_contain("rdoc_chrome_target_control_reason=capture-hardlink")
+expect(evidence).to_contain("rdoc_chrome_target_control_target_status=pass")
+expect(evidence).to_contain("rdoc_chrome_target_control_target_api=vulkan")
+expect(evidence).to_contain("rdoc_chrome_target_control_capture_file=")
+expect(evidence).to_contain("/target_control_copy.rdc")
 expect(evidence).to_contain("rdoc_chrome_target_control_capture_file_status=fail")
 expect(evidence).to_contain("rdoc_chrome_target_control_capture_file_reason=hardlink")
 expect(evidence).to_contain("rdoc_chrome_target_control_capture_magic=")
@@ -338,7 +351,7 @@ expect(script).to_contain("cp \"/proc/$gpu_pid/maps\" \"$BUILD_DIR/gpu.maps\"")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple

@@ -591,6 +591,9 @@ PIX and GPU debugger artifacts must be regular, non-symlink, non-hardlink
 files so strict evidence cannot be substituted through shared capture aliases.
 Relative PIX/GPU-debugger artifact names resolve beside `WINDOWS_D3D12_PIX_ENV`
 so stale working-directory files cannot satisfy strict Windows capture proof.
+Rendering evidence scripts use GNU `stat -c '%h'` with BSD `stat -f '%l'`
+fallback when counting links, so Linux-host verification catches hardlinked
+artifacts instead of treating GNU `stat -f` filesystem output as a valid count.
 The DirectX browser-backing setup uses
 `scripts/check/gui-web-2d-directx-browser-backing-status.js` to classify
 Electron and Chrome proof JSON paths before accepting child browser rows.
