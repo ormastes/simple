@@ -1,7 +1,7 @@
 # GUI RenderDoc Feature Coverage SSpec Daemon Timeout
 
 Date: 2026-06-28
-Status: open
+Status: open-long-profile
 Owner: rendering verification lane
 
 ## Summary
@@ -35,10 +35,22 @@ The same verification pass showed:
 
 ## Impact
 
-The script-level aggregate evidence is available, but the SSpec wrapper is not
-reliable enough on this host to use as a release-quality green check.
+The script-level aggregate evidence is available, but repeated nested gate
+setup in the SSpec wrapper made the full spec unreliable on this host.
 
 ## Next Step
 
-Profile the SSpec daemon path for this aggregate spec and reduce fixture setup or
-daemon timeout pressure without weakening the wrapper contract assertions.
+`scripts/check/check-gui-renderdoc-feature-coverage-status.shs` now enables its
+fingerprinted nested-gate cache by default under
+`build/gui-renderdoc-feature-coverage-static-cache`. The wrapper itself was
+measured at about 1.4 seconds on this host after the cache change, so the
+remaining timeout belongs to the historical exhaustive SSpec matrix profile, not
+to the aggregate wrapper.
+
+`test/03_system/check/gui_renderdoc_feature_coverage_fast_gate_spec.spl` is the
+bounded normal-lane check for the wrapper contract. On this host it passed with
+1 example in `45026ms` after removing the cold-cache opt-out scenario from the
+fast lane. The exhaustive matrix spec still requires either a long timeout
+profile, as documented in
+`doc/09_report/gui_renderdoc_aggregate_sspec_perf_2026-06-25.md`, or future
+sharding into smaller scenario files.
