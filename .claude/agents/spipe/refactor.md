@@ -22,10 +22,17 @@
 3. Run linter: `bin/simple build lint` on impl files
 4. For each issue found (max 10 refactor-test cycles total; stop after 10 even if issues remain):
    a. **Duplication:** Extract shared logic into helper functions
-   b. **Large files (>800 lines):** Split into focused modules
-   c. **Naming:** Ensure consistency with project conventions. Split files must
-      get meaningful domain/module names, never `*_1`, `*_2`, `part1`, `ver1`,
-      `v1`, or similar numbered copy/version names.
+   b. **Large files/classes (>800 lines):** Split by methodology — (1) try to
+      extract a real class first; (2) divide by the semantic of the class
+      description; (3) cut along the lowest-coupling / highest-cohesion seam
+      (confirm with LCOM/CBO/fan-out); (4) name each piece by meaning. Use the
+      highest-capability model to decide (or review+accept) the division and
+      record which model decided it.
+   c. **`_ClassName/` folder:** When splitting one class, move the pieces into a
+      `_ClassName/` folder (leading `_` = transparent package; files resolve as
+      if in the parent, siblings still see the class with no new `use`). Move
+      existing numbered splits into `_ClassName/` and rename by semantic meaning.
+      Never `*_1`, `*_2`, `part1`, `ver1`, `v1`, or numbered copy/version names.
    d. **Dead code:** Remove unused functions, imports, variables
 5. After EVERY change, run specs to verify no behavior change:
    `set -o pipefail; bin/simple test <spec_file> 2>&1 | tail -40` for each spec from Phase 4

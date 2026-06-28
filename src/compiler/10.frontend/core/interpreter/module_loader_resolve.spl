@@ -248,6 +248,48 @@ fn _resolve_module_path_uncached(module_name: text, current_file: text) -> text:
         if rt_file_exists(numbered_path):
             return numbered_path
 
+    # 6. `_`-transparent folder fallback (underscore packages). A class file
+    #    moved into a `_ClassName/` folder resolves as if it still sat in the
+    #    parent folder, so siblings keep importing it by the original path. The
+    #    `_` folder is transparent and applies recursively to nested `_` folders.
+    #    ponytail: only runs after every normal strategy misses (rare/error path),
+    #    so it adds no cost to successful imports.
+    val np = path_parts.len()
+    if np >= 1:
+        val t_name = path_parts[np - 1]
+        var rel_parts = relative_path.split("/")
+        var rel_dirs: [text] = []
+        var ri: i64 = 0
+        val rn = rel_parts.len()
+        for rp in rel_parts:
+            if ri < rn - 1:
+                rel_dirs = rel_dirs + [rp]
+            ri = ri + 1
+        # a) relative to the importing file
+        val ta = _resolve_transparent(current_dir, rel_dirs, t_name)
+        if ta != "":
+            return ta
+        # b) under src/
+        val tb = _resolve_transparent("src", rel_dirs, t_name)
+        if tb != "":
+            return tb
+        # c) under src/lib/<family>/ for std./lib. imports
+        if rel_dirs.len() >= 1 and rel_dirs[0] == "lib":
+            var sub: [text] = []
+            var si: i64 = 0
+            for sp in rel_dirs:
+                if si >= 1:
+                    sub = sub + [sp]
+                si = si + 1
+            val fams = ["nogc_async_mut", "nogc_async_immut", "nogc_sync_immut", "nogc_sync_mut", "common", "gc_async_mut", "gc_async_immut", "gc_sync_mut", "gc_sync_immut", "nogc_async_mut_noalloc"]
+            for fam in fams:
+                var famparts: [text] = ["lib", fam]
+                for sp2 in sub:
+                    famparts = famparts + [sp2]
+                val tc = _resolve_transparent("src", famparts, t_name)
+                if tc != "":
+                    return tc
+
     # Return attempted path even if not found (will error later)
     relative_path
 
@@ -307,3 +349,46 @@ fn find_numbered_dir_interp(parent: text, segment: text) -> text:
                     if rt_dir_exists(full_path):
                         return full_path
     ""
+
+fn _find_transparent_file(dir: text, name: text) -> text:
+    """Search `dir`'s `_`-prefixed descendant folders (recursively) for
+    `name`.spl. A `_`-prefixed folder is a transparent package: its files
+    resolve as if they sat directly in `dir`. Returns path or ""."""
+    if not rt_dir_exists(dir):
+        return ""
+    val entries = rt_dir_list(dir)
+    for entry in entries:
+        if entry.starts_with("_"):
+            val tdir = rt_path_join(dir, entry)
+            if rt_dir_exists(tdir):
+                val cand = rt_path_join(tdir, name + ".spl")
+                if rt_file_exists(cand):
+                    return cand
+                val deeper = _find_transparent_file(tdir, name)
+                if deeper != "":
+                    return deeper
+    ""
+
+fn _walk_dir_chain(base: text, parts: [text]) -> text:
+    """Resolve intermediate dir `parts` under `base` (direct child or NN.
+    numbered child). Returns concrete dir path, or "" if a segment is missing."""
+    var cur = base
+    for part in parts:
+        val direct = rt_path_join(cur, part)
+        if rt_dir_exists(direct):
+            cur = direct
+        else:
+            val numbered = find_numbered_dir_interp(cur, part)
+            if numbered != "":
+                cur = numbered
+            else:
+                return ""
+    cur
+
+fn _resolve_transparent(base: text, dir_parts: [text], name: text) -> text:
+    """Walk `dir_parts` under `base`, then search `_`-transparent descendants
+    for `name`.spl. Empty `dir_parts` searches `base` itself."""
+    val dir = _walk_dir_chain(base, dir_parts)
+    if dir == "":
+        return ""
+    _find_transparent_file(dir, name)
