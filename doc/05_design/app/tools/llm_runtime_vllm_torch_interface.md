@@ -307,7 +307,7 @@ Runtime-adjacent decision record:
 - `src/app/web_dashboard/server.spl`
 - `test/01_unit/app/llm_dashboard/collectors/vllm_control_panel_spec.spl`
 - `test/unit/app/llm_dashboard/collectors/vllm_control_panel_spec.spl`
-- `doc/06_spec/test/01_unit/app/llm_dashboard/collectors/vllm_control_panel_spec.md`
+- `doc/06_spec/01_unit/app/llm_dashboard/collectors/vllm_control_panel_spec.md`
 - `doc/06_spec/test/unit/app/llm_dashboard/collectors/vllm_control_panel_spec.md`
 
 The dashboard now renders a vLLM control panel with `preflight`, `start`,
@@ -344,7 +344,7 @@ Runtime-adjacent decision record:
 - `src/app/llm_runtime/dashboard_live_control_executor.spl`
 - `test/01_unit/app/llm_runtime/vllm_dashboard_live_control_spec.spl`
 - `test/unit/app/llm_runtime/vllm_dashboard_live_control_spec.spl`
-- `doc/06_spec/test/01_unit/app/llm_runtime/vllm_dashboard_live_control_spec.md`
+- `doc/06_spec/01_unit/app/llm_runtime/vllm_dashboard_live_control_spec.md`
 - `doc/06_spec/test/unit/app/llm_runtime/vllm_dashboard_live_control_spec.md`
 
 The runtime now owns dashboard-requested vLLM control execution. The pure
@@ -376,7 +376,7 @@ Runtime-adjacent decision record:
 - `src/app/llm_runtime/control_cli.spl`
 - `test/01_unit/app/llm_runtime/vllm_control_cli_spec.spl`
 - `test/unit/app/llm_runtime/vllm_control_cli_spec.spl`
-- `doc/06_spec/test/01_unit/app/llm_runtime/vllm_control_cli_spec.md`
+- `doc/06_spec/01_unit/app/llm_runtime/vllm_control_cli_spec.md`
 - `doc/06_spec/test/unit/app/llm_runtime/vllm_control_cli_spec.md`
 
 The runtime exposes `control_cli.spl`, which accepts explicit action,
@@ -416,7 +416,7 @@ Runtime-adjacent decision record:
 
 - `test/01_unit/app/cli/llm_runtime_control_command_spec.spl`
 - `test/unit/app/cli/llm_runtime_control_command_spec.spl`
-- `doc/06_spec/test/01_unit/app/cli/llm_runtime_control_command_spec.md`
+- `doc/06_spec/01_unit/app/cli/llm_runtime_control_command_spec.md`
 - `doc/06_spec/test/unit/app/cli/llm_runtime_control_command_spec.md`
 
 Mirrored SPipe coverage now proves the top-level command is registered in the
@@ -444,7 +444,7 @@ vLLM command logic.
 - `src/app/llm_runtime/control_cli.spl`
 - `test/01_unit/app/llm_runtime/vllm_control_cli_spec.spl`
 - `test/unit/app/llm_runtime/vllm_control_cli_spec.spl`
-- `doc/06_spec/test/01_unit/app/llm_runtime/vllm_control_cli_spec.md`
+- `doc/06_spec/01_unit/app/llm_runtime/vllm_control_cli_spec.md`
 - `doc/06_spec/test/unit/app/llm_runtime/vllm_control_cli_spec.md`
 
 The runtime control CLI now accepts `--detect-resources` for local host
@@ -476,7 +476,7 @@ Runtime-adjacent decision record:
 - `src/app/web_dashboard/server.spl`
 - `test/01_unit/app/llm_dashboard/collectors/vllm_control_panel_spec.spl`
 - `test/unit/app/llm_dashboard/collectors/vllm_control_panel_spec.spl`
-- `doc/06_spec/test/01_unit/app/llm_dashboard/collectors/vllm_control_panel_spec.md`
+- `doc/06_spec/01_unit/app/llm_dashboard/collectors/vllm_control_panel_spec.md`
 - `doc/06_spec/test/unit/app/llm_dashboard/collectors/vllm_control_panel_spec.md`
 
 The web dashboard `/api/vllm/control` route now accepts query-style control
