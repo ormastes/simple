@@ -27,7 +27,7 @@ production_gui_web_renderer_parity_evidence_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 16 | 16 | 0 | 0 |
+| 18 | 18 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -98,6 +98,10 @@ SIMPLE_LIB=src bin/simple test/03_system/check/production_gui_web_renderer_parit
   backend-executed Metal frame/timing rows, raw Metal readback rows, font
   readback rows, and Electron event/capture/performance/animation rows at the
   top level.
+- The compact stdout summary must include live Tauri/Chrome capture, vector and
+  bitmap font readback, Metal render-log blocker count, and Electron event
+  status so native-host failures can be classified without opening the full
+  evidence file. The fixture summary stays below 1400 bytes.
 
 ## Operator Notes
 
@@ -113,6 +117,8 @@ first, then inspect the promoted nested rows. The wrapper is designed to keep
 collecting independent evidence after an earlier layout or matrix failure, so a
 single failed top-level reason does not imply later backend, font, Metal, or
 event-routing rows are absent.
+The compact summary now prints the highest-signal blocker rows for live surface
+capture, font readback, Metal render-log comparison, and Electron event status.
 
 Layout-manifest host dependency rows are especially important on fresh or
 isolated workspaces. If the nested manifest reports
