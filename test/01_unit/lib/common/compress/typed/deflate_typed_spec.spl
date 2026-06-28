@@ -30,6 +30,7 @@ use lib.common.compress.typed.deflate_typed.{
     deflate_reverse_bits
 }
 use lib.common.bytes.checksum.{Crc32}
+use lib.common.bytes.bits.{BitWriter}
 use lib.common.bytes.span.{ByteSpan, ByteBuffer}
 
 # Helper: sum all bytes in a ByteSpan via for-in iteration (avoids get(N>=1) bug)
@@ -211,6 +212,24 @@ describe "deflate_fixed round-trip":
         val raw: [u8] = [0x03u8, 0x02u8]
         val out = inflate_fixed(ByteSpan.new(raw))
         assert_equal(out.freeze().len(), 0)
+
+    it "overlapping fixed match copies from newly emitted bytes":
+        var w = BitWriter.lsb()
+        w.put_bits(1, 1)
+        w.put_bits(1, 1)
+        w.put_bits(0, 1)
+        val lit_a = deflate_reverse_bits(48 + 65, 8)
+        w.put_bits(lit_a, 8)
+        val len3 = deflate_reverse_bits(1, 7)
+        w.put_bits(len3, 7)
+        w.put_bits(0, 5)
+        w.put_bits(0, 7)
+        w.align()
+        val out = inflate_fixed(w.finish().freeze())
+        val out_sp = out.freeze()
+        assert_equal(out_sp.len(), 4)
+        assert_equal(byte_sum(out_sp), 260)
+        assert_equal(all_bytes_equal(out_sp, 65), 1)
 
     it "100 repeated a=97 round-trips via fixed-Huffman literals — sum=9700":
         var ab: [u8] = []
