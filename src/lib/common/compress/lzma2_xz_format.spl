@@ -482,38 +482,42 @@ fn _parse_xz_index(input: [u8], index_start: i64, records: [XzBlockRecord], tier
         return Err(CompressionError.CorruptStream("xz index marker"))
 
     val record_count_res = _vli_decode(input, index_start + 1)
-    if record_count_res.is_err():
-        return Err(record_count_res.unwrap_err())
-    if record_count_res.unwrap().0 != records.len().to_u64():
+    val (record_count, after_record_count) = match record_count_res:
+        case Ok(found_count): found_count
+        case Err(reason): return Err(reason)
+    if record_count != records.len().to_u64():
         return Err(CompressionError.CorruptStream("xz index record count"))
 
-    var pos = record_count_res.unwrap().1
+    var pos = after_record_count
     var i = 0
     while i < records.len():
         val up_res = _vli_decode(input, pos)
-        if up_res.is_err():
-            return Err(up_res.unwrap_err())
-        pos = up_res.unwrap().1
+        val (unpadded_size, after_unpadded_size) = match up_res:
+            case Ok(found_size): found_size
+            case Err(reason): return Err(reason)
+        pos = after_unpadded_size
         val uc_res = _vli_decode(input, pos)
-        if uc_res.is_err():
-            return Err(uc_res.unwrap_err())
-        pos = uc_res.unwrap().1
-        if up_res.unwrap().0 != records[i].unpadded_size:
+        val (uncompressed_size, after_uncompressed_size) = match uc_res:
+            case Ok(found_size): found_size
+            case Err(reason): return Err(reason)
+        pos = after_uncompressed_size
+        if unpadded_size != records[i].unpadded_size:
             return Err(CompressionError.CorruptStream("xz index unpadded size"))
-        if uc_res.unwrap().0 != records[i].uncompressed_size:
+        if uncompressed_size != records[i].uncompressed_size:
             return Err(CompressionError.CorruptStream("xz index uncompressed size"))
         i = i + 1
 
     val padded_pos_res = _consume_alignment_zeroes(input, index_start, pos, "xz index padding")
-    if padded_pos_res.is_err():
-        return Err(padded_pos_res.unwrap_err())
-    pos = padded_pos_res.unwrap()
+    pos = match padded_pos_res:
+        case Ok(found_pos): found_pos
+        case Err(reason): return Err(reason)
     if pos + 4 > input.len():
         return Err(CompressionError.TruncatedInput("xz index crc32"))
     val stored_crc_res = _xz_read_u32_le(input, pos)
-    if stored_crc_res.is_err():
-        return Err(stored_crc_res.unwrap_err())
-    if stored_crc_res.unwrap() != _xz_crc32_for_tier(_copy_bytes_range(input, index_start, pos), tier):
+    val stored_crc = match stored_crc_res:
+        case Ok(found_crc): found_crc
+        case Err(reason): return Err(reason)
+    if stored_crc != _xz_crc32_for_tier(_copy_bytes_range(input, index_start, pos), tier):
         return Err(CompressionError.ChecksumMismatch("xz index crc32"))
     Ok(pos + 4)
 
