@@ -327,9 +327,11 @@ internal absence marker.
 `simple_ponytail` reuses the shared Ponytail audit rules used by the CLI-facing
 helpers. It accepts `file`, optional `format` (`text`, `markdown`, or `json`),
 and optional `mode`: `audit` returns the default over-engineering audit, while
-`simplification` returns concrete cut/replace suggestions. JSON responses expose
-both `audit` and `report` fields so older audit clients and newer generic report
-clients can read the same result.
+`simplification` returns concrete cut/replace suggestions. For plugin
+compatibility, `review` is accepted as an alias for `audit`, and `simplify` is
+accepted as an alias for `simplification`; responses report the canonical mode.
+JSON responses expose both `audit` and `report` fields so older audit clients
+and newer generic report clients can read the same result.
 
 ### UI Access (11 tools)
 

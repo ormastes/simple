@@ -413,3 +413,7 @@ Tasks:
    contract. Status: done on 2026-06-26; both mirrored MCP analysis specs now
    assert `file` is "required except when sql=true and query is non-empty",
    matching the handler, tool table, lower MCP schema, system spec, and guide.
+6. Add Ponytail compatibility mode aliases. Status: done on 2026-06-28; app
+   MCP and lower MCP accept `review` as `audit` and `simplify` as
+   `simplification`, advertise the aliases, and keep JSON/markdown output on
+   the canonical mode names.
