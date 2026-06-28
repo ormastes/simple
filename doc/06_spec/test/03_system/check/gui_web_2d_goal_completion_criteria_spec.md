@@ -122,12 +122,32 @@ magic checks.
 
 ## Remaining Placeholders
 
-The macOS Metal, Windows D3D12, full HTML/CSS inventory, production GUI/Web
-parity, and parallel-agent review lanes still use explicit
+The macOS Metal, Windows D3D12, full HTML/CSS inventory, and parallel-agent
+review lanes still use explicit
 `TODO(gui-web-2d-completion)` fail-fast assertions. Replacing one of those
 placeholders must add field-level assertions over the current aggregate or
 platform wrapper evidence and update
 `gui_web_2d_completion_criteria_placeholder_audit_spec.spl`.
+
+## Production GUI/Web Parity Assertions
+
+The production GUI/Web parity lane is evidence-backed. It consumes the
+non-launching parity gate through the aggregate audit and requires:
+
+- top-level core parity `pass`
+- parity gate `pass`
+- source evidence file present
+- live Tauri and Chrome surface captures
+- 50 Tauri and 50 Chrome surface cases
+- 36 exact pass and 14 tracked divergence cases for both surfaces
+- 0 surface fail cases and 0 mismatch counts
+- no fake capture and no blur/tolerance
+- backend exact match, equal positive checksums, and same-frame readback
+- positive backend sample/timing/throughput rows
+- font offload, Metal readback, and event routing gates `pass`
+- event routing with focus, movement, maximize, title command, text input,
+  pointer down/up, `performance.now`, animation frames, CSS animation probe, and
+  no tolerance
 
 ## Acceptance
 
@@ -144,8 +164,10 @@ platform wrapper evidence and update
   retained mode, redraw count, and `fallback_state=none`.
 - Full HTML/CSS completion proves all inventory CSS properties are rendered,
   not only the implemented Simple Web subset.
-- Production GUI/Web parity completion proves same-frame backend readback,
-  positive backend handles, matching checksums, and no CPU-mirror-only pass.
+- Production GUI/Web parity completion proves live Tauri/Chrome captures,
+  same-frame backend readback, positive backend handles when a native Metal
+  queue is resolved, matching checksums, event routing, and no CPU-mirror-only
+  pass.
 - Parallel-agent completion records Spark or fallback sidecar outputs plus
   normal/high-capability review before accepting broad findings or done marks.
 
