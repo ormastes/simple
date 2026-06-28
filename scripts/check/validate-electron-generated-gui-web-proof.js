@@ -181,6 +181,12 @@ function artifactFileStatus(artifact) {
   return artifact.stat.size <= 0 ? 'empty' : 'pass';
 }
 
+function artifactStatusFromFileStatus(status) {
+  if (status === 'pass') return 'pass';
+  if (status === '' || status === 'unavailable') return 'unavailable';
+  return 'fail';
+}
+
 function artifactSymlinkStatus(artifact) {
   if (artifact === null) return '';
   return artifact.symlink ? 'fail' : 'pass';
@@ -309,8 +315,13 @@ const capturedArgbWeightedChecksum = weightedChecksum(capturedArgbPixels);
 const expectedProofSource = 'tools/electron-live-bitmap/exact_fixture.js';
 const proofSource = proofSourceArtifact(expectedProofSource);
 const proofSourceFileStatus = proofSource.status;
+const proofSourceFileReason = proofSourceFileStatus;
+const proofSourceArtifactStatus = artifactStatusFromFileStatus(proofSourceFileStatus);
 const proofSourceSizeBytes = proofSource.size;
 const proofSourceActualSizeBytes = proofSource.actualSize;
+const capturedArgbFileStatus = artifactFileStatus(capturedArgbStat);
+const capturedArgbFileReason = capturedArgbFileStatus;
+const capturedArgbArtifactStatus = artifactStatusFromFileStatus(capturedArgbFileStatus);
 const expectedCaptureBackend = 'electron-offscreen-capture-page';
 const expectedCompositorMode = 'offscreen-osr-exact-srgb';
 const browserEngine = textField(proof.browser_engine);
@@ -413,6 +424,8 @@ emit('electron_generated_gui_web_proof_hardlink_status', 'pass');
 emit('electron_generated_gui_web_renderer', proof.renderer);
 emit('electron_generated_gui_web_proof_source', proof.proof_source);
 emit('electron_generated_gui_web_proof_source_file_status', proofSourceFileStatus);
+emit('electron_generated_gui_web_proof_source_file_reason', proofSourceFileReason);
+emit('electron_generated_gui_web_proof_source_artifact_status', proofSourceArtifactStatus);
 emit('electron_generated_gui_web_proof_source_size_bytes', proofSourceSizeBytes);
 emit('electron_generated_gui_web_proof_source_actual_size_bytes', proofSourceActualSizeBytes);
 emit('electron_generated_gui_web_capture_backend', proof.capture_backend);
@@ -440,7 +453,9 @@ emit('electron_generated_gui_web_capture_native_height', jsonIntegerTextOrBlank(
 emit('electron_generated_gui_web_capture_downsampled', jsonBoolTextOrBlank(proof.capture_downsampled));
 emit('electron_generated_gui_web_captured_argb_path', proof.captured_argb_path);
 emit('electron_generated_gui_web_captured_argb_written', jsonBoolTextOrBlank(proof.captured_argb_written));
-emit('electron_generated_gui_web_captured_argb_file_status', artifactFileStatus(capturedArgbStat));
+emit('electron_generated_gui_web_captured_argb_file_status', capturedArgbFileStatus);
+emit('electron_generated_gui_web_captured_argb_file_reason', capturedArgbFileReason);
+emit('electron_generated_gui_web_captured_argb_artifact_status', capturedArgbArtifactStatus);
 emit('electron_generated_gui_web_captured_argb_symlink_status', artifactSymlinkStatus(capturedArgbStat));
 emit('electron_generated_gui_web_captured_argb_hardlink_status', artifactHardlinkStatus(capturedArgbStat));
 emit('electron_generated_gui_web_captured_argb_size_bytes', capturedArgbStat === null || capturedArgbStat.symlink || capturedArgbStat.hardlink ? '' : String(capturedArgbStat.stat.size));
