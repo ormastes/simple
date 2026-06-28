@@ -30,6 +30,7 @@ const maxRenderHtmlLen = 10000000;
 const validRenderMarkerPattern = /\[tauri-shell\]\s+render,\s+html_len=([1-9][0-9]*)(?:\s|$)/;
 const anyRenderMarkerPattern = /\[tauri-shell\]\s+render,\s+html_len=/;
 const vulkanMarkerPattern = /(Vulkan|vulkan|VK_|ANGLE.*Vulkan|Renderer.*Vulkan|HWUI.*Vulkan|skiavk)/i;
+const foregroundMarkerPattern = /(foreground=.*com\.simple\.ui|mCurrentFocus=.*com\.simple\.ui|topResumedActivity=.*com\.simple\.ui|ResumedActivity:.*com\.simple\.ui|ACTIVITY[^\n]*com\.simple\.ui)/i;
 const failureMarkerPattern = /(F\/DEBUG|Fatal signal|F\/libc|F\/VulkanManager|Simple subprocess stdout closed before a valid render arrived|Headless UI completed|parse error: expected value|Requested GL implementation .*angle=vulkan.* not found|Exiting GPU process due to errors during initialization)/i;
 const seenSourceRealpaths = new Set();
 
@@ -100,6 +101,7 @@ if (coherentSourceHtmlLen !== '') {
 const hasAnyRenderMarker = anyRenderMarkerPattern.test(text);
 const renderMarker = renderHtmlLen(text) !== '';
 const vulkanMarker = vulkanMarkerPattern.test(text);
+const foregroundMarker = foregroundMarkerPattern.test(text);
 const failureMarker = failureMarkerPattern.test(text);
 
 let reason = 'pass';
@@ -125,6 +127,8 @@ if (requestedSourceCount === 0 || sourceCount === 0) {
   reason = 'android-render-log-marker-missing';
 } else if (!vulkanMarker) {
   reason = 'android-vulkan-log-marker-missing';
+} else if (!foregroundMarker) {
+  reason = 'android-foreground-marker-missing';
 } else if (!coherentSource) {
   reason = 'android-render-log-source-mismatch';
 }
@@ -145,6 +149,7 @@ emit('android_render_log_coherent_source_path', coherentSourcePath);
 emit('android_render_log_coherent_source_size_bytes', coherentSourceSizeBytes);
 emit('android_render_log_marker_status', renderMarker ? 'pass' : 'fail');
 emit('android_render_log_vulkan_marker_status', vulkanMarker ? 'pass' : 'fail');
+emit('android_render_log_foreground_marker_status', foregroundMarker ? 'pass' : 'fail');
 emit('android_render_log_failure_marker_status', failureMarker ? 'fail' : 'pass');
 
 if (reason !== 'pass') {
