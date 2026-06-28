@@ -22,11 +22,12 @@ struct ZstdDictionaryState:
 # offsets (1, 4, 8).
 fn _zstd_default_dictionary_state() -> Result<ZstdDictionaryState, CompressionError>:
     val history_res = _zstd_default_sequence_table_history()
-    if history_res.is_err():
-        return Err(history_res.unwrap_err())
+    val history = match history_res:
+        case Ok(decoded): decoded
+        case Err(reason): return Err(reason)
     Ok(ZstdDictionaryState(
         huffman: nil,
-        sequence_history: history_res.unwrap(),
+        sequence_history: history,
         repeat_offsets: ZstdRepeatOffsets(rep1: 1, rep2: 4, rep3: 8),
         content_prefix: []
     ))
@@ -44,14 +45,15 @@ fn _zstd_parse_dictionary(dictionary_bytes: [u8], expected_id: i64) -> Result<Zs
     if dictionary_bytes.len() < 8:
         return Err(CompressionError.TruncatedInput("zstd dictionary header"))
     val magic_res = read_u32_le(dictionary_bytes, 0)
-    if magic_res.is_err():
-        return Err(magic_res.unwrap_err())
-    if magic_res.unwrap() != ZSTD_DICT_MAGIC:
+    val magic = match magic_res:
+        case Ok(decoded): decoded
+        case Err(reason): return Err(reason)
+    if magic != ZSTD_DICT_MAGIC:
         return Err(CompressionError.InvalidHeader("zstd dictionary magic"))
     val id_res = read_u32_le(dictionary_bytes, 4)
-    if id_res.is_err():
-        return Err(id_res.unwrap_err())
-    val actual_id = id_res.unwrap().to_i64()
+    val actual_id = match id_res:
+        case Ok(decoded): decoded.to_i64()
+        case Err(reason): return Err(reason)
     if actual_id != expected_id:
         return Err(CompressionError.CorruptStream("zstd dictionary id mismatch"))
     var pos = 8
@@ -62,12 +64,13 @@ fn _zstd_parse_dictionary(dictionary_bytes: [u8], expected_id: i64) -> Result<Zs
     # the FSE Huffman-weight Kraft bug tracked under
     # doc/08_tracking/bug/bug_zstd_fse_huffman_weight_kraft_2026-05-01.md.
     val weights_res = _zstd_parse_direct_weights(dictionary_bytes, pos, end)
-    if weights_res.is_err():
-        return Err(weights_res.unwrap_err())
-    val (weights, huf_used) = weights_res.unwrap()
+    val (weights, huf_used) = match weights_res:
+        case Ok(decoded): decoded
+        case Err(reason): return Err(reason)
     val huf_state_res = _zstd_huf_build_table_from_weights(weights)
-    if huf_state_res.is_err():
-        return Err(huf_state_res.unwrap_err())
+    val huf_state = match huf_state_res:
+        case Ok(decoded): decoded
+        case Err(reason): return Err(reason)
     pos = pos + huf_used
 
     # Per RFC 8478 §6 the dictionary stores entropy tables in the order
@@ -76,50 +79,53 @@ fn _zstd_parse_dictionary(dictionary_bytes: [u8], expected_id: i64) -> Result<Zs
     if pos >= end:
         return Err(CompressionError.TruncatedInput("zstd dictionary FSE offsets table"))
     val of_counts_res = zstd_fse_parse_normalized_counts(dictionary_bytes, pos, end, ZSTD_OF_MAX_TABLE_LOG, 31)
-    if of_counts_res.is_err():
-        return Err(of_counts_res.unwrap_err())
-    val of_counts = of_counts_res.unwrap()
+    val of_counts = match of_counts_res:
+        case Ok(decoded): decoded
+        case Err(reason): return Err(reason)
     val of_table_res = zstd_fse_build_decode_table(of_counts.table_log, of_counts.counts)
-    if of_table_res.is_err():
-        return Err(of_table_res.unwrap_err())
+    val of_table = match of_table_res:
+        case Ok(decoded): decoded
+        case Err(reason): return Err(reason)
     pos = pos + of_counts.bytes_used
 
     if pos >= end:
         return Err(CompressionError.TruncatedInput("zstd dictionary FSE match-lengths table"))
     val ml_counts_res = zstd_fse_parse_normalized_counts(dictionary_bytes, pos, end, ZSTD_ML_MAX_TABLE_LOG, 52)
-    if ml_counts_res.is_err():
-        return Err(ml_counts_res.unwrap_err())
-    val ml_counts = ml_counts_res.unwrap()
+    val ml_counts = match ml_counts_res:
+        case Ok(decoded): decoded
+        case Err(reason): return Err(reason)
     val ml_table_res = zstd_fse_build_decode_table(ml_counts.table_log, ml_counts.counts)
-    if ml_table_res.is_err():
-        return Err(ml_table_res.unwrap_err())
+    val ml_table = match ml_table_res:
+        case Ok(decoded): decoded
+        case Err(reason): return Err(reason)
     pos = pos + ml_counts.bytes_used
 
     if pos >= end:
         return Err(CompressionError.TruncatedInput("zstd dictionary FSE literal-lengths table"))
     val ll_counts_res = zstd_fse_parse_normalized_counts(dictionary_bytes, pos, end, ZSTD_LL_MAX_TABLE_LOG, 35)
-    if ll_counts_res.is_err():
-        return Err(ll_counts_res.unwrap_err())
-    val ll_counts = ll_counts_res.unwrap()
+    val ll_counts = match ll_counts_res:
+        case Ok(decoded): decoded
+        case Err(reason): return Err(reason)
     val ll_table_res = zstd_fse_build_decode_table(ll_counts.table_log, ll_counts.counts)
-    if ll_table_res.is_err():
-        return Err(ll_table_res.unwrap_err())
+    val ll_table = match ll_table_res:
+        case Ok(decoded): decoded
+        case Err(reason): return Err(reason)
     pos = pos + ll_counts.bytes_used
 
     if pos + 12 > end:
         return Err(CompressionError.TruncatedInput("zstd dictionary recommended offsets"))
     val rep1_res = read_u32_le(dictionary_bytes, pos)
-    if rep1_res.is_err():
-        return Err(rep1_res.unwrap_err())
+    val rep1 = match rep1_res:
+        case Ok(decoded): decoded.to_i64()
+        case Err(reason): return Err(reason)
     val rep2_res = read_u32_le(dictionary_bytes, pos + 4)
-    if rep2_res.is_err():
-        return Err(rep2_res.unwrap_err())
+    val rep2 = match rep2_res:
+        case Ok(decoded): decoded.to_i64()
+        case Err(reason): return Err(reason)
     val rep3_res = read_u32_le(dictionary_bytes, pos + 8)
-    if rep3_res.is_err():
-        return Err(rep3_res.unwrap_err())
-    val rep1 = rep1_res.unwrap().to_i64()
-    val rep2 = rep2_res.unwrap().to_i64()
-    val rep3 = rep3_res.unwrap().to_i64()
+    val rep3 = match rep3_res:
+        case Ok(decoded): decoded.to_i64()
+        case Err(reason): return Err(reason)
     if rep1 <= 0 or rep2 <= 0 or rep3 <= 0:
         return Err(CompressionError.CorruptStream("zstd dictionary recommended offset must be positive"))
     pos = pos + 12
@@ -131,11 +137,11 @@ fn _zstd_parse_dictionary(dictionary_bytes: [u8], expected_id: i64) -> Result<Zs
         i = i + 1
 
     Ok(ZstdDictionaryState(
-        huffman: Some(huf_state_res.unwrap()),
+        huffman: Some(huf_state),
         sequence_history: ZstdSequenceTableHistory(
-            literal_lengths: ll_table_res.unwrap(),
-            offsets: of_table_res.unwrap(),
-            match_lengths: ml_table_res.unwrap()
+            literal_lengths: ll_table,
+            offsets: of_table,
+            match_lengths: ml_table
         ),
         repeat_offsets: ZstdRepeatOffsets(rep1: rep1, rep2: rep2, rep3: rep3),
         content_prefix: content
