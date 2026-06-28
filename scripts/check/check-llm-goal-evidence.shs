@@ -91,21 +91,43 @@ run_lane public_absence pass sh scripts/check/check-llm-tooling-public-absence-r
 status="pass"
 warn_count=0
 fail_count=0
+warn_gates=""
+failed_gates=""
 for key in context_ponytail dashboard vllm_host svllm_local torch_optimizer finetune_guard public_absence; do
     eval "lane_status=\${${key}_status}"
     eval "expected=\${${key}_expected}"
     if [ "$lane_status" = "fail" ]; then
         status="fail"
         fail_count=$((fail_count + 1))
+        if [ -z "$failed_gates" ]; then
+            failed_gates="$key"
+        else
+            failed_gates="$failed_gates|$key"
+        fi
     elif [ "$lane_status" = "warn" ]; then
         warn_count=$((warn_count + 1))
+        if [ -z "$warn_gates" ]; then
+            warn_gates="$key"
+        else
+            warn_gates="$warn_gates|$key"
+        fi
         if [ "$expected" != "warn" ]; then
             status="fail"
             fail_count=$((fail_count + 1))
+            if [ -z "$failed_gates" ]; then
+                failed_gates="$key"
+            else
+                failed_gates="$failed_gates|$key"
+            fi
         fi
     elif [ "$lane_status" != "$expected" ] && [ "$expected" != "warn" ]; then
         status="fail"
         fail_count=$((fail_count + 1))
+        if [ -z "$failed_gates" ]; then
+            failed_gates="$key"
+        else
+            failed_gates="$failed_gates|$key"
+        fi
     fi
 done
 
@@ -114,6 +136,8 @@ done
     printf '%s\n' "llm_goal_evidence_strict_host=$STRICT_HOST"
     printf '%s\n' "llm_goal_evidence_warn_count=$warn_count"
     printf '%s\n' "llm_goal_evidence_fail_count=$fail_count"
+    printf '%s\n' "llm_goal_evidence_warn_gates=$warn_gates"
+    printf '%s\n' "llm_goal_evidence_failed_gates=$failed_gates"
     for key in context_ponytail dashboard vllm_host svllm_local torch_optimizer finetune_guard public_absence; do
         eval "lane_status=\${${key}_status}"
         eval "exit_code=\${${key}_exit}"
@@ -134,6 +158,16 @@ done
     fi
     printf '%s\n' "- warn_count: \`$warn_count\`"
     printf '%s\n' "- fail_count: \`$fail_count\`"
+    if [ -n "$warn_gates" ]; then
+        printf '%s\n' "- warn_gates: \`$warn_gates\`"
+    else
+        printf '%s\n' "- warn_gates: \`none\`"
+    fi
+    if [ -n "$failed_gates" ]; then
+        printf '%s\n' "- failed_gates: \`$failed_gates\`"
+    else
+        printf '%s\n' "- failed_gates: \`none\`"
+    fi
     printf '%s\n' "- env: \`$OUT_ENV\`"
     printf '\n'
     printf '| lane | status | expected | exit | log |\n'
