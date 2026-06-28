@@ -118,9 +118,9 @@ fn _zstd_parse_window_size(window_descriptor: i64) -> Result<i64, CompressionErr
 
 fn _zstd_parse_content_size(input: [u8], pos: i64, size_code: i64, single_segment: bool) -> Result<(i64?, i64), CompressionError>:
     val field_size_res = _zstd_frame_content_size_field_size(size_code, single_segment)
-    if field_size_res.is_err():
-        return Err(field_size_res.unwrap_err())
-    val field_size = field_size_res.unwrap()
+    val field_size = match field_size_res:
+        case Ok(decoded): decoded
+        case Err(reason): return Err(reason)
     if field_size == 0:
         return Ok((nil, 0))
     if pos + field_size > input.len():
@@ -131,22 +131,23 @@ fn _zstd_parse_content_size(input: [u8], pos: i64, size_code: i64, single_segmen
         return Ok((Some((input[pos].to_i64() | (input[pos + 1].to_i64() << 8)) + 256), 2))
     if field_size == 4:
         val size_res = read_u32_le(input, pos)
-        if size_res.is_err():
-            return Err(size_res.unwrap_err())
-        return Ok((Some(size_res.unwrap().to_i64()), 4))
+        val size32 = match size_res:
+            case Ok(decoded): decoded
+            case Err(reason): return Err(reason)
+        return Ok((Some(size32.to_i64()), 4))
     val size_res = _zstd_read_u64_local(input, pos)
-    if size_res.is_err():
-        return Err(size_res.unwrap_err())
-    val size = size_res.unwrap()
+    val size = match size_res:
+        case Ok(decoded): decoded
+        case Err(reason): return Err(reason)
     if size > 0x7FFFFFFFFFFFFFFFu64:
         return Err(CompressionError.UnsupportedFeature("zstd frame content size exceeds i64"))
     Ok((Some(size.to_i64()), 8))
 
 fn _zstd_parse_dictionary_id(input: [u8], pos: i64, size_code: i64) -> Result<(i64?, i64), CompressionError>:
     val field_size_res = _zstd_dictionary_id_field_size(size_code)
-    if field_size_res.is_err():
-        return Err(field_size_res.unwrap_err())
-    val field_size = field_size_res.unwrap()
+    val field_size = match field_size_res:
+        case Ok(decoded): decoded
+        case Err(reason): return Err(reason)
     if field_size == 0:
         return Ok((nil, 0))
     if pos + field_size > input.len():
@@ -167,9 +168,10 @@ fn _zstd_parse_frame_header(input: [u8], frame_start: i64) -> Result<ZstdFrameHe
     if frame_start + 5 > input.len():
         return Err(CompressionError.TruncatedInput("zstd frame header"))
     val magic_res = read_u32_le(input, frame_start)
-    if magic_res.is_err():
-        return Err(magic_res.unwrap_err())
-    if magic_res.unwrap() != ZSTD_MAGIC:
+    val magic = match magic_res:
+        case Ok(decoded): decoded
+        case Err(reason): return Err(reason)
+    if magic != ZSTD_MAGIC:
         return Err(CompressionError.InvalidHeader("zstd frame magic"))
     val descriptor = input[frame_start + 4].to_i64()
     if ((descriptor >> 3) & 1) == 1:
@@ -184,19 +186,19 @@ fn _zstd_parse_frame_header(input: [u8], frame_start: i64) -> Result<ZstdFrameHe
         if pos >= input.len():
             return Err(CompressionError.TruncatedInput("zstd window descriptor"))
         val window_res = _zstd_parse_window_size(input[pos].to_i64())
-        if window_res.is_err():
-            return Err(window_res.unwrap_err())
-        window_size = window_res.unwrap()
+        window_size = match window_res:
+            case Ok(decoded): decoded
+            case Err(reason): return Err(reason)
         pos = pos + 1
     val dictionary_res = _zstd_parse_dictionary_id(input, pos, dictionary_id_flag)
-    if dictionary_res.is_err():
-        return Err(dictionary_res.unwrap_err())
-    val (dictionary_id, dictionary_used) = dictionary_res.unwrap()
+    val (dictionary_id, dictionary_used) = match dictionary_res:
+        case Ok(decoded): decoded
+        case Err(reason): return Err(reason)
     pos = pos + dictionary_used
     val content_size_res = _zstd_parse_content_size(input, pos, content_size_flag, single_segment)
-    if content_size_res.is_err():
-        return Err(content_size_res.unwrap_err())
-    val (content_size, content_used) = content_size_res.unwrap()
+    val (content_size, content_used) = match content_size_res:
+        case Ok(decoded): decoded
+        case Err(reason): return Err(reason)
     pos = pos + content_used
     if single_segment:
         window_size = content_size ?? 0
