@@ -98,9 +98,9 @@ lane.
 Latest svLLM local readiness evidence:
 `doc/09_report/2026/06/llm_runtime_svllm_local_readiness_2026-06-28.md`
 records `scripts/check/check-llm-runtime-svllm-local-readiness.shs` passing the
-manifest, tensor-byte, stream-plan, std_fs local-read, and streaming-readiness
-contracts. Keep `FR-LLM-RUNTIME-0002` open because that wrapper proves only
-local file-backed readiness; native NVFS async scheduling, pinned buffer
+pack CLI, manifest, tensor-byte, stream-plan, std_fs local-read, and
+streaming-readiness contracts. Keep `FR-LLM-RUNTIME-0002` open because that
+wrapper proves only local file-backed readiness; native NVFS async scheduling, pinned buffer
 registration, device staging, and true streaming model loads still need live
 evidence.
 
