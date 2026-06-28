@@ -159,7 +159,7 @@ fn zstd_msb_bits_init(data: [u8], start: i64, end: i64) -> Result<ZstdMsbBackwar
     ))
 
 fn zstd_msb_bits_remaining(state: ZstdMsbBackwardBits) -> i64:
-    if state.eof:
+    if state.eof or state.start < 0 or state.byte_idx < state.start or state.byte_idx >= state.data.len():
         return 0
     val whole_bytes_left = state.byte_idx - state.start
     (state.next_bit + 1) + 8 * whole_bytes_left
@@ -169,6 +169,10 @@ fn zstd_msb_bits_remaining(state: ZstdMsbBackwardBits) -> i64:
 # is true. This mirrors zstd C's `BIT_reloadDStream`-driven overflow semantics
 # without requiring an explicit refill-to-overflow probe.
 fn zstd_msb_bits_read(state: ZstdMsbBackwardBits, count: i64) -> Result<(i64, ZstdMsbBackwardBits, bool), CompressionError>:
+    if state.start < 0 or state.byte_idx < -1:
+        return Err(CompressionError.CorruptStream("zstd msb bitstream range"))
+    if not state.eof and state.byte_idx >= state.data.len():
+        return Err(CompressionError.TruncatedInput("zstd msb bitstream bits"))
     if count < 0:
         return Err(CompressionError.CorruptStream("zstd msb negative bit count"))
     if count > 32:
@@ -182,8 +186,9 @@ fn zstd_msb_bits_read(state: ZstdMsbBackwardBits, count: i64) -> Result<(i64, Zs
     var next_bit = state.next_bit
     var eof = state.eof
     while i < count:
-        if eof:
+        if eof or byte_idx < state.start:
             value = value << 1
+            eof = true
         else:
             val bit = ((state.data[byte_idx] >> next_bit.to_u8()) & 1u8).to_i64()
             value = (value << 1) | bit
