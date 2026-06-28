@@ -26,9 +26,23 @@ rm -f "$OUT_ENV" "$SIMPLE_LOG" "$CHROME_LOG" "$ELECTRON_LOG" "$COMPARE_LOG" "$RE
 compare_status="pass"
 reason_parts=""
 argb_checksum_reason=""
+simple_argb_reason=""
+chrome_argb_reason=""
+electron_argb_reason=""
 add_reason() {
     reason="$1"
     if [ -z "$reason_parts" ]; then reason_parts="$reason"; else reason_parts="$reason_parts;$reason"; fi
+}
+
+blocked_gates=""
+blocked_gate_count=0
+add_blocked_gate() {
+    gate="$1"
+    if [ "$compare_status" = "pass" ]; then
+        return
+    fi
+    if [ -z "$blocked_gates" ]; then blocked_gates="$gate"; else blocked_gates="$blocked_gates,$gate"; fi
+    blocked_gate_count=$((blocked_gate_count + 1))
 }
 
 file_link_count() {
@@ -157,6 +171,11 @@ if [ "$pixel_status" != "pass" ] || [ "$pixel_mode" != "pairwise-argb-diff" ]; t
 if [ "$ec_diff" != "pass" ] || [ "$es_diff" != "pass" ] || [ "$cs_diff" != "pass" ]; then [ "$compare_status" = "unavailable" ] || compare_status="fail"; add_reason "pairwise-diff-incomplete-or-fail"; fi
 for source_name in simple chrome electron; do
     argb_reason="$(render_log_argb_source_reason windows_d3d12 "$source_name" "$WINDOWS_D3D12_BROWSER_ENV")"
+    case "$source_name" in
+        simple) simple_argb_reason="$argb_reason" ;;
+        chrome) chrome_argb_reason="$argb_reason" ;;
+        electron) electron_argb_reason="$argb_reason" ;;
+    esac
     if [ "$argb_reason" != "pass" ]; then
         [ "$compare_status" = "unavailable" ] || compare_status="fail"
         add_reason "$argb_reason"
@@ -205,6 +224,62 @@ if [ "${WINDOWS_D3D12_RENDER_LOG_REQUIRE_PIX:-0}" = "1" ] && [ "$gpu_debugger_st
 fi
 [ -n "$reason_parts" ] || reason_parts="pass"
 
+native_readback_gate_status="pass"
+if [ "$d3d12_status" != "pass" ] || [ "$d3d12_api" != "d3d12" ] || [ "$d3d12_source" != "device_readback" ] || [ "$d3d12_handle_positive" != "true" ]; then
+    native_readback_gate_status="fail"
+fi
+if [ -n "$d3d12_expected" ] && [ -n "$d3d12_actual" ] && [ "$d3d12_expected" != "$d3d12_actual" ]; then
+    native_readback_gate_status="fail"
+fi
+if [ -s "$DIRECTX_NATIVE_READBACK_ENV" ] && { [ "$directx_status" = "pass" ] || [ "$directx_gate" = "pass" ]; } && [ "$directx_api" != "d3d12" ]; then
+    native_readback_gate_status="fail"
+fi
+
+browser_backing_gate_status="pass"
+if [ "$electron_backing" != "pass" ] || [ "$chrome_backing" != "pass" ] || [ "$browser_backing" != "pass" ]; then
+    browser_backing_gate_status="fail"
+fi
+
+pairwise_gate_status="pass"
+if [ "$pixel_status" != "pass" ] || [ "$pixel_mode" != "pairwise-argb-diff" ] || [ "$ec_diff" != "pass" ] || [ "$es_diff" != "pass" ] || [ "$cs_diff" != "pass" ]; then
+    pairwise_gate_status="fail"
+fi
+
+argb_source_gate_status="pass"
+if [ "$simple_argb_reason" != "pass" ] || [ "$chrome_argb_reason" != "pass" ] || [ "$electron_argb_reason" != "pass" ] || [ "$argb_viewport_reason" != "pass" ] || [ "$argb_checksum_reason" != "pass" ]; then
+    argb_source_gate_status="fail"
+fi
+
+pix_gpu_debugger_gate_status="diagnostic-disabled"
+if [ "${WINDOWS_D3D12_RENDER_LOG_REQUIRE_PIX:-0}" = "1" ]; then
+    pix_gpu_debugger_gate_status="pass"
+    if [ "$pix_status" != "pass" ] && [ "$gpu_debugger_status" != "pass" ]; then
+        pix_gpu_debugger_gate_status="fail"
+    fi
+    if [ "$pix_status" = "pass" ]; then
+        if [ -z "$pix_artifact" ] || [ "$pix_artifact_file_status" != "pass" ] || [ "$pix_artifact_magic" != "PIX" ] || [ "$pix_artifact_file_magic" != "PIX" ]; then
+            pix_gpu_debugger_gate_status="fail"
+        fi
+    fi
+    if [ "$gpu_debugger_status" = "pass" ]; then
+        if [ -z "$gpu_debugger_artifact" ] || [ "$gpu_debugger_artifact_file_status" != "pass" ]; then
+            pix_gpu_debugger_gate_status="fail"
+        fi
+    fi
+fi
+
+if [ "$compare_status" != "pass" ]; then
+    [ "$(file_status "$WINDOWS_D3D12_NATIVE_READBACK_ENV")" = "pass" ] || add_blocked_gate "windows-d3d12-native-readback-env"
+    [ "$(file_status "$WINDOWS_D3D12_BROWSER_ENV")" = "pass" ] || add_blocked_gate "windows-d3d12-browser-env"
+    [ "$native_readback_gate_status" = "pass" ] || add_blocked_gate "windows-d3d12-native-readback"
+    [ "$browser_backing_gate_status" = "pass" ] || add_blocked_gate "browser-d3d12-backing"
+    [ "$pairwise_gate_status" = "pass" ] || add_blocked_gate "pairwise-argb-diff"
+    [ "$argb_source_gate_status" = "pass" ] || add_blocked_gate "argb-source-evidence"
+    if [ "${WINDOWS_D3D12_RENDER_LOG_REQUIRE_PIX:-0}" = "1" ] && [ "$pix_gpu_debugger_gate_status" != "pass" ]; then
+        add_blocked_gate "pix-or-gpu-debugger"
+    fi
+fi
+
 render_log_write_native_log "$SIMPLE_LOG" "windows" "d3d12" "simple" "pix-or-gpu-debugger" "$WINDOWS_D3D12_NATIVE_READBACK_ENV" "$d3d12_status" "d3d12" "$(render_log_value_of windows_d3d12_simple_argb_width "$WINDOWS_D3D12_BROWSER_ENV")" "$(render_log_value_of windows_d3d12_simple_argb_height "$WINDOWS_D3D12_BROWSER_ENV")" "$(render_log_value_of windows_d3d12_simple_argb_nonblank_pixel_count "$WINDOWS_D3D12_BROWSER_ENV")" "${pix_artifact:-$gpu_debugger_artifact}" "$pix_artifact_magic" "$d3d12_actual" "api=$d3d12_api;source=$d3d12_source;pix=$pix_status;gpu-debugger=$gpu_debugger_status"
 render_log_write_native_log "$CHROME_LOG" "windows" "d3d12" "chrome" "browser-gpu-metadata" "$WINDOWS_D3D12_BROWSER_ENV" "$chrome_backing" "d3d12" "$(render_log_value_of windows_d3d12_chrome_argb_width "$WINDOWS_D3D12_BROWSER_ENV")" "$(render_log_value_of windows_d3d12_chrome_argb_height "$WINDOWS_D3D12_BROWSER_ENV")" "$(render_log_value_of windows_d3d12_chrome_argb_nonblank_pixel_count "$WINDOWS_D3D12_BROWSER_ENV")" "" "" "$(render_log_value_of windows_d3d12_chrome_argb_checksum "$WINDOWS_D3D12_BROWSER_ENV")" "browser-backing=$chrome_backing"
 render_log_write_native_log "$ELECTRON_LOG" "windows" "d3d12" "electron" "browser-gpu-metadata" "$WINDOWS_D3D12_BROWSER_ENV" "$electron_backing" "d3d12" "$(render_log_value_of windows_d3d12_electron_argb_width "$WINDOWS_D3D12_BROWSER_ENV")" "$(render_log_value_of windows_d3d12_electron_argb_height "$WINDOWS_D3D12_BROWSER_ENV")" "$(render_log_value_of windows_d3d12_electron_argb_nonblank_pixel_count "$WINDOWS_D3D12_BROWSER_ENV")" "" "" "$(render_log_value_of windows_d3d12_electron_argb_checksum "$WINDOWS_D3D12_BROWSER_ENV")" "browser-backing=$electron_backing"
@@ -227,6 +302,13 @@ render_log_write_native_log "$ELECTRON_LOG" "windows" "d3d12" "electron" "browse
 {
     render_log_append_kv "windows_d3d12_render_log_compare_status" "$compare_status"
     render_log_append_kv "windows_d3d12_render_log_compare_reason" "$reason_parts"
+    render_log_append_kv "windows_d3d12_render_log_compare_blocked_gate_count" "$blocked_gate_count"
+    render_log_append_kv "windows_d3d12_render_log_compare_blocked_gates" "$blocked_gates"
+    render_log_append_kv "windows_d3d12_render_log_compare_native_readback_gate_status" "$native_readback_gate_status"
+    render_log_append_kv "windows_d3d12_render_log_compare_browser_backing_gate_status" "$browser_backing_gate_status"
+    render_log_append_kv "windows_d3d12_render_log_compare_pairwise_gate_status" "$pairwise_gate_status"
+    render_log_append_kv "windows_d3d12_render_log_compare_argb_source_gate_status" "$argb_source_gate_status"
+    render_log_append_kv "windows_d3d12_render_log_compare_pix_gpu_debugger_gate_status" "$pix_gpu_debugger_gate_status"
     render_log_append_kv "windows_d3d12_render_log_compare_required_api" "d3d12"
     render_log_append_kv "windows_d3d12_render_log_compare_native_readback_env" "$WINDOWS_D3D12_NATIVE_READBACK_ENV"
     render_log_append_kv "windows_d3d12_render_log_compare_native_readback_env_file_status" "$(file_status "$WINDOWS_D3D12_NATIVE_READBACK_ENV")"
