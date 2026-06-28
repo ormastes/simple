@@ -313,6 +313,13 @@ instead of `TODO(gui-web-2d-completion)` placeholders, but a headless local pass
 is still only `prepared-not-verified` unless the required Linux/macOS/Windows
 and mobile evidence was produced on the correct platform.
 
+Placeholder audit refresh, 2026-06-28:
+`doc/09_report/gui_web_2d_completion_criteria_placeholders_2026-06-28.md`
+reports `gui_web_2d_completion_criteria_status=pass` and
+`gui_web_2d_completion_criteria_todo_count=0`. This closes only the placeholder
+guard; it does not close native RenderDoc, Metal, D3D12/PIX, mobile, full CSS,
+or production parity gates.
+
 Each scenario maps to one completion gate:
 
 | Gate | Required proof | Host owner | Current state |
