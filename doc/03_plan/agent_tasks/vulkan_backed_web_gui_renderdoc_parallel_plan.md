@@ -37,6 +37,41 @@ unless the macOS and Windows evidence files were produced on their native
 platforms and reviewed as imported evidence. Local Linux work may still improve
 shared wrappers and specs, but macOS/Windows completion remains deferred.
 
+## Headless Host Completion Criteria, 2026-06-28
+
+This headless server can complete only preparation work. A headless completion
+claim for this lane means:
+
+- source-level aggregate logic exists for Linux Vulkan, macOS Metal, and
+  Windows D3D12/PIX evidence normalization, plus source-level Tauri2
+  iOS/Android mobile parity evidence contracts.
+- source-only SSpec contracts exist for Linux RenderDoc blocked-gate forwarding,
+  macOS Metal blocked-gate forwarding, Windows D3D12 debugger artifact
+  forwarding, Tauri2 mobile artifact gating, and this headless platform plan.
+- manual/generated spec docs mirror those source-only contracts under
+  `doc/06_spec/test/03_system/check/`.
+- the plan names the native-host commands and exact evidence keys required to
+  finish each platform.
+- no completion text claims that headless fixture rows, stale env files,
+  software fallback screenshots, or command-line browser flags prove native GPU
+  rendering.
+- no new raw `rt_*`, backend pokes, or runtime alias shortcuts are introduced
+  by headless preparation.
+
+This headless server must not be used to complete:
+
+- Chrome or Electron `.rdc` capture with real `RDOC` magic.
+- macOS Metal/Xcode GPU Frame Capture.
+- Windows D3D12/PIX or equivalent GPU-debugger capture.
+- iOS Tauri2/WKWebView device or simulator capture with Metal renderer proof.
+- Android Tauri2/WebView device or emulator capture with Vulkan renderer proof.
+- live GUI interaction, window manager routing, or production renderer parity.
+- new retained 4K/8K performance measurement after source changes.
+
+The acceptable headless stop state is `prepared-not-verified`: source logic,
+SSpec manuals, plan criteria, and remaining platform packets are ready, but
+native GUI hosts still own capture and verification.
+
 ## Required End State
 
 - Chrome web rendering is Vulkan-backed, proven by browser GPU metadata.
@@ -343,6 +378,17 @@ Linux render-log compare:
 linux_vulkan_render_log_compare_status=pass
 linux_vulkan_render_log_compare_required_api=vulkan
 linux_vulkan_render_log_compare_pairwise_status=pass
+linux_vulkan_render_log_compare_blocked_gate_count=0
+linux_vulkan_render_log_compare_blocked_gates=
+linux_vulkan_render_log_compare_renderdoc_simple_env_file_status=pass
+linux_vulkan_render_log_compare_renderdoc_simple_artifact_file_status=pass
+linux_vulkan_render_log_compare_renderdoc_simple_artifact_magic=RDOC
+linux_vulkan_render_log_compare_renderdoc_chrome_env_file_status=pass
+linux_vulkan_render_log_compare_renderdoc_chrome_artifact_file_status=pass
+linux_vulkan_render_log_compare_renderdoc_chrome_artifact_magic=RDOC
+linux_vulkan_render_log_compare_renderdoc_electron_env_file_status=pass
+linux_vulkan_render_log_compare_renderdoc_electron_artifact_file_status=pass
+linux_vulkan_render_log_compare_renderdoc_electron_artifact_magic=RDOC
 ```
 
 macOS Metal render-log compare:
@@ -351,7 +397,19 @@ macOS Metal render-log compare:
 macos_metal_render_log_compare_status=pass
 macos_metal_render_log_compare_required_api=metal
 macos_metal_render_log_compare_pairwise_status=pass
+macos_metal_render_log_compare_blocked_gate_count=0
+macos_metal_render_log_compare_blocked_gates=
+macos_metal_render_log_compare_generated_readback_gate_status=pass
+macos_metal_render_log_compare_framebuffer_readback_gate_status=pass
+macos_metal_render_log_compare_browser_backing_gate_status=pass
+macos_metal_render_log_compare_pairwise_gate_status=pass
+macos_metal_render_log_compare_argb_source_gate_status=pass
+macos_metal_render_log_compare_gpu_capture_gate_status=pass
 macos_metal_render_log_compare_gpu_capture_status=pass
+macos_metal_render_log_compare_gpu_capture_artifact_file_status=pass
+macos_metal_render_log_compare_gpu_capture_artifact_magic=XCODE-GPUTRACE
+macos_metal_render_log_compare_browser_backing_status=pass
+macos_metal_render_log_compare_pixel_comparison_mode=pairwise-argb-diff
 ```
 
 Windows D3D12/PIX render-log compare:
@@ -360,8 +418,18 @@ Windows D3D12/PIX render-log compare:
 windows_d3d12_render_log_compare_status=pass
 windows_d3d12_render_log_compare_required_api=d3d12
 windows_d3d12_render_log_compare_pairwise_status=pass
+windows_d3d12_render_log_compare_blocked_gate_count=0
+windows_d3d12_render_log_compare_blocked_gates=
+windows_d3d12_render_log_compare_native_readback_gate_status=pass
+windows_d3d12_render_log_compare_browser_backing_gate_status=pass
+windows_d3d12_render_log_compare_pairwise_gate_status=pass
+windows_d3d12_render_log_compare_argb_source_gate_status=pass
+windows_d3d12_render_log_compare_pix_gpu_debugger_gate_status=pass
 windows_d3d12_render_log_compare_pix_status=pass
+windows_d3d12_render_log_compare_pix_artifact_file_status=pass
+windows_d3d12_render_log_compare_pix_artifact_file_magic=PIX
 windows_d3d12_render_log_compare_gpu_debugger_status=pass
+windows_d3d12_render_log_compare_gpu_debugger_artifact_file_status=pass
 ```
 
 Each source log must use `simple_render_log_format=simple-render-log-v1`,
@@ -379,6 +447,60 @@ Production parity:
 - font offload/readback is `pass` or explicitly accepted `unavailable`
 - Metal readback is `pass` on macOS or `unavailable/metal-requires-macos` on
   Linux
+
+iOS Tauri2/WKWebView mobile parity:
+
+```text
+tauri_mobile_renderer_parity_ios_status=pass
+tauri_mobile_renderer_parity_ios_expected_gpu_backend=metal
+tauri_mobile_renderer_parity_ios_tauri_backend=tauri2-wkwebview
+tauri_mobile_renderer_parity_ios_render_log_status=pass
+tauri_mobile_renderer_parity_ios_render_log_validation_status=pass
+tauri_mobile_renderer_parity_ios_render_log_metal_marker_status=pass
+tauri_mobile_renderer_parity_ios_render_log_tauri_context_status=pass
+tauri_mobile_renderer_parity_ios_metal_log_status=pass
+tauri_mobile_renderer_parity_ios_mdi_proof_file_status=pass
+tauri_mobile_renderer_parity_ios_mdi_proof_status=pass
+tauri_mobile_renderer_parity_ios_mdi_render_status=pass
+tauri_mobile_renderer_parity_ios_mdi_event_status=pass
+tauri_mobile_renderer_parity_ios_mdi_capture_status=pass
+tauri_mobile_renderer_parity_ios_mdi_performance_status=pass
+tauri_mobile_renderer_parity_ios_mdi_animation_status=pass
+tauri_mobile_renderer_parity_ios_screenshot_file_status=pass
+tauri_mobile_renderer_parity_ios_screenshot_artifact_status=pass
+tauri_mobile_renderer_parity_ios_screenshot_pixel_diversity_status=pass
+```
+
+Android Tauri2/WebView mobile parity:
+
+```text
+tauri_mobile_renderer_parity_android_status=pass
+tauri_mobile_renderer_parity_android_expected_gpu_backend=vulkan
+tauri_mobile_renderer_parity_android_tauri_backend=tauri2-android-webview
+tauri_mobile_renderer_parity_android_render_log_status=pass
+tauri_mobile_renderer_parity_android_render_log_validation_status=pass
+tauri_mobile_renderer_parity_android_render_log_vulkan_marker_status=pass
+tauri_mobile_renderer_parity_android_render_log_source_coherence_status=pass
+tauri_mobile_renderer_parity_android_vulkan_log_status=pass
+tauri_mobile_renderer_parity_android_mdi_proof_file_status=pass
+tauri_mobile_renderer_parity_android_mdi_proof_status=pass
+tauri_mobile_renderer_parity_android_mdi_render_status=pass
+tauri_mobile_renderer_parity_android_mdi_event_status=pass
+tauri_mobile_renderer_parity_android_mdi_capture_status=pass
+tauri_mobile_renderer_parity_android_mdi_performance_status=pass
+tauri_mobile_renderer_parity_android_mdi_animation_status=pass
+tauri_mobile_renderer_parity_android_screenshot_file_status=pass
+tauri_mobile_renderer_parity_android_screenshot_artifact_status=pass
+tauri_mobile_renderer_parity_android_screenshot_pixel_diversity_status=pass
+```
+
+Mobile parity must be run through
+`scripts/check/check-tauri-mobile-renderer-parity-evidence.shs` on real
+platform-capable hosts. iOS requires a live WKWebView/Tauri2 screenshot,
+Metal render-log markers, and MDI proof. Android requires a live WebView/Tauri2
+screenshot, Vulkan or skiavk/host-emulator Vulkan markers, logcat/GPU logs, and
+MDI proof. Host/emulator logs are supporting evidence only when the app remains
+foreground and the screenshot/proof files are live, non-aliased artifacts.
 
 ## Parallel Agent Lanes
 
@@ -472,6 +594,10 @@ Acceptance:
   `electron-vulkan-disabled_off`; the Ubuntu GUI host must close this.
 - Production parity remains open until surface/backend/font/Metal/browser
   backing/RenderDoc evidence is current.
+- Headless preparation now has source-only contracts for Linux, macOS, and
+  Windows aggregate forwarding and mobile iOS/Android Tauri2 parity criteria,
+  but those contracts are not native capture evidence. Platform completion
+  still requires fresh native-host runs.
 
 ## Commit Scope
 
