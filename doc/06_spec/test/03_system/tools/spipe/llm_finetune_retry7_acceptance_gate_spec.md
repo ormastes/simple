@@ -273,6 +273,7 @@ expect(exit_code).to_equal(1)
 expect(output).to_contain("attempt_id={ATTEMPT_ID}")
 expect(output).to_contain("next_action=retry-implementation")
 expect(output).to_contain("retry_target=complete retry6 real QLoRA artifact and target eval, then normal review may accept or choose another retry")
+expect(output).to_contain("readiness_blocker=model-artifact")
 expect(output).to_contain("STATUS: WARN llm-finetune-next")
 expect(output.split(absence_marker()).len()).to_equal(1)
 ```

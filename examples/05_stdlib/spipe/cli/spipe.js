@@ -1544,23 +1544,24 @@ function commandFineTuneNext(args) {
   const decisionStatus = registryValueForAttempt(root, "decisions.sdn", attemptId, "status") || readQuotedValue(attemptContent, "status");
   const retryTarget = registryValueForAttempt(root, "decisions.sdn", attemptId, "retry_target") || readQuotedValue(attemptContent, "retry_target");
   const nextAttempt = registryValueForAttempt(root, "decisions.sdn", attemptId, "next_attempt") || readQuotedValue(attemptContent, "next_attempt");
+  const firstReadinessBlocker = readinessChecks(root, attemptId).find(([, ok]) => !ok);
   if (decisionStatus && decisionStatus !== "accepted" && retryTarget) {
     console.log(`attempt_id=${attemptId}`);
     console.log(`next_action=${decisionStatus}`);
     console.log(`retry_target=${retryTarget}`);
+    if (firstReadinessBlocker) console.log(`readiness_blocker=${firstReadinessBlocker[0]}`);
     if (nextAttempt) console.log(`next_attempt=${nextAttempt}`);
     console.log("STATUS: WARN llm-finetune-next");
     process.exitCode = 1;
     return;
   }
-  for (const [action, ok] of readinessChecks(root, attemptId)) {
-    if (!ok) {
-      console.log(`attempt_id=${attemptId}`);
-      console.log(`next_action=${action}`);
-      console.log("STATUS: WARN llm-finetune-next");
-      process.exitCode = 1;
-      return;
-    }
+  if (firstReadinessBlocker) {
+    console.log(`attempt_id=${attemptId}`);
+    console.log(`next_action=${firstReadinessBlocker[0]}`);
+    console.log(`readiness_blocker=${firstReadinessBlocker[0]}`);
+    console.log("STATUS: WARN llm-finetune-next");
+    process.exitCode = 1;
+    return;
   }
   console.log(`attempt_id=${attemptId}`);
   console.log("next_action=ready");

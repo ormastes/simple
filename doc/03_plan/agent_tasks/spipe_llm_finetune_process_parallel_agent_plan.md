@@ -280,6 +280,11 @@ Evidence:
   now reports `app_handoff_doc_ready=pending`, matching the acceptance gate's
   full license/safety/deployment/app-handoff requirement instead of accepting a
   placeholder architecture doc path as release-ready evidence.
+- 2026-06-28 next-action blocker hardening: `fine-tune-next` now prints
+  `readiness_blocker=<gate>` for retry-decision and readiness-blocked attempts.
+  Retry7 currently reports `readiness_blocker=model-artifact`, so operators can
+  see the first unmet release gate without separately invoking
+  `fine-tune-ready`.
 
 Next normal-LLM work: finish retry5 licensed cache/checksum evidence and retry6
 real training/eval before retry7 can become an acceptance gate with a PASS
