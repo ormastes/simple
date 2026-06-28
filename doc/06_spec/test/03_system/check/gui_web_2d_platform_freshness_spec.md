@@ -27,7 +27,7 @@ gui_web_2d_platform_freshness_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 3 | 3 | 0 | 0 |
+| 4 | 4 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -76,6 +76,9 @@ sh scripts/check/check-gui-web-2d-platform-freshness.shs
 - Source-revision mismatches fail freshness.
 - Matching source revisions plus runtime, browser/WebView/Electron, graphics
   SDK/driver, and runbook metadata pass freshness.
+- Explicit run-level source and metadata overrides pass freshness when wrapper
+  env files provide matching lane revisions but do not carry toolchain metadata
+  themselves.
 - The checker emits `gui_web_2d_platform_freshness_*` keys consumed by the
   platform evidence bundle.
 
@@ -134,6 +137,13 @@ by the native aggregate env with lane-specific keys, by shared
 Explicit run-level metadata is useful when a platform operator records tool
 versions outside individual wrapper env files. It is still fail-closed: empty
 metadata keeps freshness failed.
+
+The override path is important for final platform review windows where the
+operator pins the selected source revision and records the browser, WebView,
+Electron, graphics SDK, driver, and runbook revisions once for the whole run
+instead of duplicating them into every upstream wrapper env. The checker must
+preserve those values in its output so the platform evidence bundle can prove
+freshness without depending on native aggregate metadata alone.
 
 ## Output Contract
 
@@ -217,6 +227,31 @@ expect(evidence).to_contain("gui_web_2d_platform_freshness_missing_metadata=")
 
 </details>
 
+#### passes when run-level overrides supply source and metadata context
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val command = "rm -rf build/test-gui-web-2d-platform-freshness-override && mkdir -p build/test-gui-web-2d-platform-freshness-override/env && printf 'native_render_log_platform_matrix_source_revision=rev-selected\\n' > build/test-gui-web-2d-platform-freshness-override/env/native.env && printf 'tauri_mobile_renderer_parity_source_revision=rev-selected\\n' > build/test-gui-web-2d-platform-freshness-override/env/mobile.env && printf 'gui_showcase_4k_200fps_source_revision=rev-selected\\n' > build/test-gui-web-2d-platform-freshness-override/env/4k.env && printf 'gui_showcase_8k_perf_source_revision=rev-selected\\n' > build/test-gui-web-2d-platform-freshness-override/env/8k.env && printf 'html_css_full_rendering_goal_source_revision=rev-selected\\n' > build/test-gui-web-2d-platform-freshness-override/env/html.env && printf 'production_gui_web_renderer_parity_source_revision=rev-selected\\n' > build/test-gui-web-2d-platform-freshness-override/env/production.env && BUILD_DIR=build/test-gui-web-2d-platform-freshness-override/out REPORT_PATH=build/test-gui-web-2d-platform-freshness-override/report.md NATIVE_RENDER_LOG_PLATFORM_MATRIX_ENV=build/test-gui-web-2d-platform-freshness-override/env/native.env TAURI_MOBILE_RENDERER_PARITY_ENV=build/test-gui-web-2d-platform-freshness-override/env/mobile.env GUI_SHOWCASE_4K_200FPS_ENV=build/test-gui-web-2d-platform-freshness-override/env/4k.env GUI_SHOWCASE_8K_200FPS_ENV=build/test-gui-web-2d-platform-freshness-override/env/8k.env HTML_CSS_FULL_RENDERING_GOAL_ENV=build/test-gui-web-2d-platform-freshness-override/env/html.env PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=build/test-gui-web-2d-platform-freshness-override/env/production.env GUI_WEB_2D_PLATFORM_FRESHNESS_SOURCE_REVISION=rev-selected GUI_WEB_2D_PLATFORM_FRESHNESS_RUNTIME_BUILD=operator-runtime-build GUI_WEB_2D_PLATFORM_FRESHNESS_BROWSER_WEBVIEW_ELECTRON_REVISION=operator-chrome-electron-webview GUI_WEB_2D_PLATFORM_FRESHNESS_GRAPHICS_SDK_DRIVER=operator-vulkan-metal-d3d12 GUI_WEB_2D_PLATFORM_FRESHNESS_RUNBOOK_VERSION=operator-runbook-2026-06-28 sh scripts/check/check-gui-web-2d-platform-freshness.shs"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val evidence = file_read("build/test-gui-web-2d-platform-freshness-override/out/evidence.env")
+expect(evidence).to_contain("gui_web_2d_platform_freshness_status=pass")
+expect(evidence).to_contain("gui_web_2d_platform_freshness_source_revision=rev-selected")
+expect(evidence).to_contain("gui_web_2d_platform_freshness_runtime_build=operator-runtime-build")
+expect(evidence).to_contain("gui_web_2d_platform_freshness_browser_webview_electron_revision=operator-chrome-electron-webview")
+expect(evidence).to_contain("gui_web_2d_platform_freshness_graphics_sdk_driver=operator-vulkan-metal-d3d12")
+expect(evidence).to_contain("gui_web_2d_platform_freshness_runbook_version=operator-runbook-2026-06-28")
+expect(evidence).to_contain("gui_web_2d_platform_freshness_missing_metadata=")
+```
+
+</details>
+
 #### fails when a present evidence lane has a stale source revision
 
 <details>
@@ -242,8 +277,8 @@ expect(evidence).to_contain("gui_web_2d_platform_freshness_mismatched_source_rev
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 3 |
-| Active scenarios | 3 |
+| Total scenarios | 4 |
+| Active scenarios | 4 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
