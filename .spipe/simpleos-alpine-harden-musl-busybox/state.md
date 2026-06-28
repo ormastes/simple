@@ -59,8 +59,11 @@ build target lands (filed: `doc/08_tracking/bug/simpleos_harden_probe_build_targ
 - `src/os/libc/simpleos_string.spl` (+ `test/01_unit/os/libc/libc_string_ctype_spec.spl`) — 14/0
 - `src/os/libc/simpleos_stdlib.spl` (+ `…/libc_stdlib_spec.spl`) — atol/abs/labs/max/min/bsearch/qsort
 - `src/os/libc/simpleos_stdio.spl` (+ `…/libc_stdio_spec.spl`) — FileBuf buffered stdio — 13/0
-- `src/os/tools/simplebox/simplebox_dispatch.spl` (+ `…/simplebox_dispatch_spec.spl`) — 13/0
+- `src/os/tools/simplebox/simplebox_dispatch.spl` (+ `…/simplebox_dispatch_spec.spl`) — 25/0
 - `src/os/tools/simplebox/simplebox_applets_core.spl` (+ `…/simplebox_applets_core_spec.spl`) — 16/0
+- (libc_stdlib spec = 38/0 after un-hollow fix)
+- **Verified tally: 123 real passing unit examples (authored_it == reported), 0 failures
+  (interpreter) — after fixing 3 hollow specs (sibling top-level describes only ran the last group).**
 - `src/compiler/{10.frontend/core/cfg_platform.spl,30.types/platform_attr_parser.spl}` +simpleos
   (+ `test/01_unit/compiler/simpleos_host_cfg_spec.spl`) — 5/0, linux/freebsd regression-guarded
 - `src/compiler/70.backend/linker/platform_defaults.spl` — `ssp` field + `HardeningPolicy` +
@@ -71,6 +74,14 @@ build target lands (filed: `doc/08_tracking/bug/simpleos_harden_probe_build_targ
 - `doc/08_tracking/bug/simpleos_ssp_codegen_feature_lag_2026-06-28.md`
 - `doc/08_tracking/bug/u8_index_generics_deprecation_false_positive_test_path_2026-06-28.md`
 - `doc/08_tracking/bug/simpleos_harden_probe_build_target_2026-06-28.md`
+- `doc/08_tracking/bug/spec_runner_drops_sibling_top_level_describe_2026-06-28.md` (hollow-green trap)
+
+## Honesty notes (Opus review)
+- libc/applet modules are NOT yet wired in (don't replace the C libc, no simplebox entrypoint) —
+  foundation logic, interpreter-verified, not live behavior. Codegen verification pending (JIT rt_len
+  gap). `resolve_hardening` is computed but linker_wrapper/mold are unchanged — policy landed, NOT yet
+  consumed by the link path (that wiring is follow-up).
+- Durable: pushed to origin/main (tip e42ace4). Recovered twice from parallel-session WC clobbers.
 
 ## Cooperative Review
 - Sidecars: Haiku (mechanical: libc fns, applets, stdio), Sonnet (design: dispatcher, host-cfg,
