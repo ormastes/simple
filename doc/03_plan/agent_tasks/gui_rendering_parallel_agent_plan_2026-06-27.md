@@ -1051,6 +1051,12 @@ Normal-review acceptance:
   asserts that the platform evidence bundle rejects a freshness env that says
   `status=pass` but omits required freshness metadata. A hand-edited or partial
   freshness env cannot make `cross-platform-freshness` look proven.
+- 2026-06-28 bundle freshness reason revalidation:
+  `scripts/check/check-gui-web-2d-platform-evidence-bundle.shs` now also
+  requires `gui_web_2d_platform_freshness_reason=pass` before accepting
+  `cross-platform-freshness`. A contradictory freshness env such as
+  `status=pass` with `reason=source-revision-mismatch` remains failed evidence
+  even if all required metadata fields are present.
 
 ## Hard Stop Conditions
 
