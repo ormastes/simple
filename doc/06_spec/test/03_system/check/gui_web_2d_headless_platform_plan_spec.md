@@ -119,7 +119,7 @@ performance evidence.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 108 lines folded for reproduction.
+Runnable source: 114 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -169,6 +169,8 @@ expect(plan).to_contain("production_gui_web_renderer_parity_font_offload_bitmap_
 expect(plan).to_contain("production_gui_web_renderer_parity_metal_render_log_status=pass")
 expect(plan).to_contain("production_gui_web_renderer_parity_metal_render_log_blocked_gate_count=0")
 expect(plan).to_contain("production_gui_web_renderer_parity_event_routing_status=pass")
+expect(plan).to_contain("gui_showcase_4k_200fps_alias_raw_rt_count=0")
+expect(plan).to_contain("gui_showcase_8k_perf_alias_raw_rt_count=0")
 
 step("Assert iOS native completion requires Tauri2 WKWebView Metal, screenshot, and MDI proof")
 expect(plan).to_contain("tauri_mobile_renderer_parity_ios_status=pass")
@@ -202,6 +204,10 @@ expect(aggregate).to_contain("emit(\"macos_metal_render_log_compare_blocked_gate
 expect(aggregate).to_contain("emit(\"macos_metal_render_log_compare_gpu_capture_gate_status\"")
 expect(aggregate).to_contain("emit(\"windows_d3d12_render_log_compare_pix_artifact_file_status\"")
 expect(aggregate).to_contain("emit(\"windows_d3d12_render_log_compare_gpu_debugger_artifact_file_status\"")
+expect(aggregate).to_contain("emit(\"gui_showcase_4k_200fps_alias_raw_rt_count\"")
+expect(aggregate).to_contain("emit(\"gui_showcase_8k_perf_alias_raw_rt_count\"")
+expect(aggregate).to_contain("raw-rt-in-4k-alias")
+expect(aggregate).to_contain("raw-rt-in-8k-alias")
 expect(aggregate).to_contain("renderdoc-chrome-rdc")
 expect(aggregate).to_contain("renderdoc-electron-rdc")
 

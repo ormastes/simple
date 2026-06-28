@@ -155,10 +155,10 @@ Windows D3D12 requires:
 
 ## Remaining Placeholders
 
-Only the parallel-agent review lane still uses an explicit
-`TODO(gui-web-2d-completion)` fail-fast assertion. Replacing that placeholder
-must add field-level assertions over recorded sidecar/review evidence and update
-`gui_web_2d_completion_criteria_placeholder_audit_spec.spl`.
+The parallel-agent review lane is now evidence-backed by a small source audit
+over the recorded sidecar/review plan. The audit does not prove platform
+rendering completion by itself; it only prevents broad completion claims from
+skipping the Spark-or-fallback sidecar and normal/high-capability review gate.
 
 ## Production GUI/Web Parity Assertions
 
@@ -209,7 +209,8 @@ fields through the aggregate audit and requires:
   debugger artifact files.
 - 4K and 8K showcase completion proves current-source retained rows at 200 FPS
   with timing, RSS, checksum/readback, viewport, native binary provenance,
-  retained mode, redraw count, and `fallback_state=none`.
+  retained mode, redraw count, `alias_raw_rt_count=0`, and
+  `fallback_state=none`.
 - Full HTML/CSS completion proves all inventory CSS properties are rendered with
   zero unrendered properties, not only the implemented Simple Web subset.
 - Production GUI/Web parity completion proves live Tauri/Chrome captures,
@@ -228,7 +229,7 @@ fields through the aggregate audit and requires:
 #### requires Linux Vulkan RenderDoc completion with current Chrome Electron and Simple evidence
 
 - Verify Linux Vulkan browser backing, Simple backend proof, pairwise ARGB equivalence, and RDOC artifacts
-- verify linux vulkan renderdoc completion
+   - Expected: verify_linux_vulkan_renderdoc_completion() equals `pass`
 
 
 <details>
@@ -239,7 +240,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Verify Linux Vulkan browser backing, Simple backend proof, pairwise ARGB equivalence, and RDOC artifacts")
-verify_linux_vulkan_renderdoc_completion()
+expect(verify_linux_vulkan_renderdoc_completion()).to_equal("pass")
 ```
 
 </details>
@@ -247,7 +248,7 @@ verify_linux_vulkan_renderdoc_completion()
 #### requires macOS Metal completion with native readback and GPU capture evidence
 
 - Verify macOS Metal readback, browser/gui backing, pairwise equivalence, and capture artifact proof
-- verify macos metal completion
+   - Expected: verify_macos_metal_completion() equals `pass`
 
 
 <details>
@@ -258,7 +259,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Verify macOS Metal readback, browser/gui backing, pairwise equivalence, and capture artifact proof")
-verify_macos_metal_completion()
+expect(verify_macos_metal_completion()).to_equal("pass")
 ```
 
 </details>
@@ -266,7 +267,7 @@ verify_macos_metal_completion()
 #### requires Windows D3D12 completion with verified PIX and GPU debugger evidence
 
 - Verify Windows D3D12 readback, browser/gui backing, pairwise equivalence, verified PIX files, and verified debugger files
-- verify windows d3d12 completion
+   - Expected: verify_windows_d3d12_completion() equals `pass`
 
 
 <details>
@@ -277,7 +278,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Verify Windows D3D12 readback, browser/gui backing, pairwise equivalence, verified PIX files, and verified debugger files")
-verify_windows_d3d12_completion()
+expect(verify_windows_d3d12_completion()).to_equal("pass")
 ```
 
 </details>
@@ -285,7 +286,7 @@ verify_windows_d3d12_completion()
 #### requires retained 4K and 8K GUI showcase performance at current source revision
 
 - Verify current-source 4K and 8K retained rows include FPS, timing, RSS, checksum/readback, native provenance, retained mode, redraw count, and no fallback
-- verify retained 4k 8k perf completion
+   - Expected: verify_retained_4k_8k_perf_completion() equals `pass`
 
 
 <details>
@@ -296,7 +297,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Verify current-source 4K and 8K retained rows include FPS, timing, RSS, checksum/readback, native provenance, retained mode, redraw count, and no fallback")
-verify_retained_4k_8k_perf_completion()
+expect(verify_retained_4k_8k_perf_completion()).to_equal("pass")
 ```
 
 </details>
@@ -304,7 +305,7 @@ verify_retained_4k_8k_perf_completion()
 #### requires full HTML and CSS rendering inventory completion
 
 - Verify all HTML tags and every CSS inventory property are rendered, with strict mode passing
-- verify full html css completion
+   - Expected: verify_full_html_css_completion() equals `pass`
 
 
 <details>
@@ -315,7 +316,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Verify all HTML tags and every CSS inventory property are rendered, with strict mode passing")
-verify_full_html_css_completion()
+expect(verify_full_html_css_completion()).to_equal("pass")
 ```
 
 </details>
@@ -323,7 +324,7 @@ verify_full_html_css_completion()
 #### requires production GUI/Web renderer parity with backend readback
 
 - Verify production GUI/Web parity uses same-frame backend readback, positive handles, and matching checksums
-- verify production gui web parity completion
+   - Expected: verify_production_gui_web_parity_completion() equals `pass`
 
 
 <details>
@@ -334,7 +335,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Verify production GUI/Web parity uses same-frame backend readback, positive handles, and matching checksums")
-verify_production_gui_web_parity_completion()
+expect(verify_production_gui_web_parity_completion()).to_equal("pass")
 ```
 
 </details>
@@ -342,7 +343,7 @@ verify_production_gui_web_parity_completion()
 #### requires parallel-agent work to have Spark or fallback output and higher-capability review
 
 - Verify sidecar outputs are reviewed before any broad completion claim is accepted
-- verify parallel agent review completion
+   - Expected: verify_parallel_agent_review_completion() equals `pass`
 
 
 <details>
@@ -353,7 +354,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Verify sidecar outputs are reviewed before any broad completion claim is accepted")
-verify_parallel_agent_review_completion()
+expect(verify_parallel_agent_review_completion()).to_equal("pass")
 ```
 
 </details>

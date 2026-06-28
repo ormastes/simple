@@ -284,6 +284,7 @@ gui_showcase_4k_200fps_log_file_status=pass
 gui_showcase_4k_200fps_time_log_file_status=pass
 gui_showcase_4k_200fps_render_mode=retained-static-frame
 gui_showcase_4k_200fps_redraw_frames=1
+gui_showcase_4k_200fps_alias_raw_rt_count=0
 gui_showcase_8k_perf_status=pass
 gui_showcase_8k_perf_width=7680
 gui_showcase_8k_perf_height=4320
@@ -295,6 +296,7 @@ gui_showcase_8k_perf_log_file_status=pass
 gui_showcase_8k_perf_time_log_file_status=pass
 gui_showcase_8k_perf_render_mode=retained-static-frame
 gui_showcase_8k_perf_redraw_frames=1
+gui_showcase_8k_perf_alias_raw_rt_count=0
 ```
 
 The aggregate fails retained showcase `pass` rows when either the showcase log
