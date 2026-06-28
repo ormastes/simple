@@ -530,18 +530,18 @@ fn compile_stage(compiler: &str, output: &str, backend: &str) -> StageResult {
             .arg("180")
             .arg("-o")
             .arg(output);
-        if backend != "auto" {
-            cmd.arg(format!("--backend={}", backend));
-        }
+        // The self-hosted native-build lane only accepts the pure-Simple LLVM
+        // backend (`llvm-lib`); `auto`/`llvm` must be normalized to it or the
+        // receiver's dispatch (src/app/cli/_CliMain) rejects the invocation with
+        // "native-build requires --backend=llvm-lib in the pure Simple command path".
+        let sh_backend = match backend {
+            "llvm" | "llvm-lib" | "llvmlib" | "auto" => "llvm-lib",
+            other => other,
+        };
+        cmd.arg(format!("--backend={}", sh_backend));
         println!(
-            "  Running: {} native-build --source src/app --entry-closure --strip --threads 1 --timeout 180 --entry src/app/cli/bootstrap_main.spl -o {} {}",
-            compiler,
-            output,
-            if backend != "auto" {
-                format!("--backend={}", backend)
-            } else {
-                String::new()
-            }
+            "  Running: {} native-build --source src/app --entry-closure --strip --threads 1 --timeout 180 --entry src/app/cli/bootstrap_main.spl -o {} --backend={}",
+            compiler, output, sh_backend
         );
     }
 
