@@ -600,3 +600,13 @@ process sentinels render as `0` in public text, HTML, and JSONL while the
 in-memory execution object may still carry `-1` for internal control flow. This
 keeps missing/invalid process identifiers out of dashboard evidence without
 weakening the fail-closed invalid-pid behavior.
+
+## 2026-06-28 Requirement Sync for Implemented Live Boundary
+
+The selected Option A requirement docs now include the implemented live request
+planning, response parsing, serve lifecycle, dashboard control boundary,
+bounded resource detection, and Torch/svLLM unavailable-status contracts. The
+same sync keeps host-dependent proof explicitly deferred: real local vLLM/GPU
+serving, live dashboard execution against an installed vLLM server, full NVFS
+streaming, and live CUDA/libtorch optimizer execution remain open until the
+host resources and native adapters are available.

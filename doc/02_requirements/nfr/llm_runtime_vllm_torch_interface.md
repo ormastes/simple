@@ -19,3 +19,15 @@ Selection source: user requested the first implementation option.
   credentials, and secret paths by default.
 - NFR-006: The first slice shall compile and run without GPU, PyTorch, vLLM, or
   CUDA availability.
+- NFR-007: Live request planning, response parsing, dashboard control preflight,
+  and skipped-resource evidence shall be deterministic under unit/system tests
+  and shall not require a local vLLM server, GPU, PyTorch, or CUDA.
+- NFR-008: Dashboard vLLM control output shall label intent-only,
+  executor-required, skipped, blocked, and not-live-evidence states explicitly so
+  operators cannot confuse planned controls with live endpoint proof.
+- NFR-009: Process, HTTP, environment, and time access used by the vLLM control
+  lane shall route through existing owner facades; new raw `rt_*` shortcuts are
+  not acceptable for app/dashboard code.
+- NFR-010: Torch/svLLM placeholder hardening shall fail closed with explicit
+  unavailable or unsupported status strings and remain usable in clean
+  workspaces that lack libtorch, CUDA, vLLM, and NVFS native streaming support.

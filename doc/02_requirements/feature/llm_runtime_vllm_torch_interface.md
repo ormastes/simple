@@ -23,10 +23,31 @@ Selection source: user requested the first implementation option.
   keys, or secret file paths.
 - REQ-007: Known Torch/SFFI or svLLM placeholder readiness shall be represented
   as `blocked`, not normalized into `ready`.
+- REQ-008: Live vLLM request planning shall sanitize `/v1/models` and
+  `/v1/chat/completions` metadata before any transport call, reject invalid
+  endpoints, and block unsupported chat parameters at the planner boundary.
+- REQ-009: Live vLLM response parsing shall distinguish ready, auth rejection,
+  malformed response, wrong-model, empty-choice, and missing-assistant-content
+  states without exposing generated content or private model paths.
+- REQ-010: vLLM serve lifecycle and dashboard control evidence shall keep
+  process and HTTP side effects behind `app.llm_runtime` owner facades. Dashboard
+  rendering may expose intent, preflight, skipped, blocked, and executor-required
+  JSONL, but shall not treat planned controls as live serving proof.
+- REQ-011: Local vLLM/GPU resource detection shall be bounded and optional.
+  Missing resources must produce explicit `skipped` or `blocked` evidence before
+  spawn/fetch behavior is attempted.
+- REQ-012: Torch/svLLM owner-module readiness shall expose explicit unavailable
+  or unsupported statuses for placeholder or host-missing capabilities, including
+  dynamic Torch SFFI tensor operations and svLLM streaming readiness.
 
 ## Deferred
 
-- Starting or supervising a vLLM server.
-- Live `/v1/models` or `/v1/chat/completions` probing.
+- End-to-end proof against an installed local vLLM server and GPU.
+- Live dashboard control execution that proves a real local vLLM process starts,
+  serves `/v1/models`, serves `/v1/chat/completions`, and stops cleanly on this
+  host.
 - Dynamic LoRA adapter resolver plugins.
 - PEFT/TRL fine-tuning orchestration.
+- Full svLLM streaming through native NVFS scheduling, pinned-buffer
+  registration, and device staging.
+- Live CUDA optimizer execution against a local libtorch/CUDA installation.
