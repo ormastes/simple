@@ -8,6 +8,7 @@
 - Live completion reason: remaining-live-gates-unverified
 - Remaining live completion gates: 9
 - Remaining live completion unique gates: 9
+- Remaining live completion gate bad values: 0
 - Remaining live completion gate IDs: linux-vulkan-renderdoc|macos-metal-xcode-gpu-capture|windows-d3d12-pix|ios-tauri-wkwebview-metal|android-tauri-webview-vulkan|retained-4k-8k-current-source|full-html-css|production-gui-web-parity|cross-platform-freshness
 - Remaining live completion hosts: 9
 - Remaining live completion host bad values: 0
@@ -28,10 +29,10 @@
 - Missing required gates: 0
 - Five-platform handoff SSpec: pass (pass)
 - Negative selftest: pass (pass)
-- Negative selftest cases: duplicate-gate|host-count|runbook-count|proof-count|host-value|runbook-value|proof-value|host-format|runbook-format|proof-format|host-gate-id|runbook-gate-id|proof-gate-id
-- Expected negative selftest cases: duplicate-gate|host-count|runbook-count|proof-count|host-value|runbook-value|proof-value|host-format|runbook-format|proof-format|host-gate-id|runbook-gate-id|proof-gate-id
-- Negative selftest case statuses: duplicate-gate:pass|host-count:pass|runbook-count:pass|proof-count:pass|host-value:pass|runbook-value:pass|proof-value:pass|host-format:pass|runbook-format:pass|proof-format:pass|host-gate-id:pass|runbook-gate-id:pass|proof-gate-id:pass
-- Expected negative selftest case statuses: duplicate-gate:pass|host-count:pass|runbook-count:pass|proof-count:pass|host-value:pass|runbook-value:pass|proof-value:pass|host-format:pass|runbook-format:pass|proof-format:pass|host-gate-id:pass|runbook-gate-id:pass|proof-gate-id:pass
+- Negative selftest cases: duplicate-gate|gate-value|host-count|runbook-count|proof-count|host-value|runbook-value|proof-value|host-format|runbook-format|proof-format|host-gate-id|runbook-gate-id|proof-gate-id
+- Expected negative selftest cases: duplicate-gate|gate-value|host-count|runbook-count|proof-count|host-value|runbook-value|proof-value|host-format|runbook-format|proof-format|host-gate-id|runbook-gate-id|proof-gate-id
+- Negative selftest case statuses: duplicate-gate:pass|gate-value:pass|host-count:pass|runbook-count:pass|proof-count:pass|host-value:pass|runbook-value:pass|proof-value:pass|host-format:pass|runbook-format:pass|proof-format:pass|host-gate-id:pass|runbook-gate-id:pass|proof-gate-id:pass
+- Expected negative selftest case statuses: duplicate-gate:pass|gate-value:pass|host-count:pass|runbook-count:pass|proof-count:pass|host-value:pass|runbook-value:pass|proof-value:pass|host-format:pass|runbook-format:pass|proof-format:pass|host-gate-id:pass|runbook-gate-id:pass|proof-gate-id:pass
 
 This is a headless source-level preparation gate. It does not produce live
 Linux Vulkan/RenderDoc, macOS Metal/Xcode GPU Capture, Windows D3D12/PIX,

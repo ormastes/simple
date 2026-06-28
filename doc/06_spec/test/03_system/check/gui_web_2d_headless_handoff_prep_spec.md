@@ -27,7 +27,7 @@ gui_web_2d_headless_handoff_prep_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 3 | 3 | 0 | 0 |
+| 4 | 4 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -107,11 +107,11 @@ production GUI/Web parity, and cross-platform freshness.
 ## Wrapper Failure Modes
 
 The wrapper is expected to fail fast if any handoff map drifts from the gate
-list. A host, runbook, or proof count mismatch is a failure. An empty map value
-or malformed no-colon map entry is a failure. Duplicate remaining gate IDs are a
-failure. Host, runbook, and proof gate-ID order must match the remaining gate
-list exactly. The negative selftest wrapper exercises these paths without
-recursing into nested Simple test execution.
+list. A host, runbook, or proof count mismatch is a failure. An empty primary
+gate-list entry, empty map value, or malformed no-colon map entry is a failure.
+Duplicate remaining gate IDs are a failure. Host, runbook, and proof gate-ID
+order must match the remaining gate list exactly. The negative selftest wrapper
+exercises these paths without recursing into nested Simple test execution.
 
 ## Manual Run Steps
 
@@ -125,8 +125,9 @@ recursing into nested Simple test execution.
    `live_completion_reason=remaining-live-gates-unverified`.
 4. Confirm the wrapper reports nine remaining gates, nine unique gates, nine
    host rows, nine runbook rows, nine proof rows, and nine matrix rows.
-5. Confirm host/runbook/proof bad value counts are zero, map gate alignment is
-   `pass`, gate uniqueness is `pass`, and the negative selftest status is `pass`.
+5. Confirm primary gate-list and host/runbook/proof bad value counts are zero,
+   map gate alignment is `pass`, gate uniqueness is `pass`, and the negative
+   selftest status is `pass`.
 6. Run the negative selftest wrapper directly and confirm every malformed
    remaining-live-gate map case reports `pass` without nested Simple execution.
 
@@ -158,12 +159,13 @@ platform or GUI-host artifacts for every remaining live gate in the matrix.
 - The wrapper source keeps retained 4K/8K, full HTML/CSS, production GUI/Web
   parity, and cross-platform freshness as explicit matrix rows with host,
   runbook, and proof checklists.
-- The wrapper source rejects empty or malformed host, runbook, and proof values.
+- The wrapper source rejects empty primary gate IDs and empty or malformed host,
+  runbook, and proof values.
 - The wrapper source verifies that host, runbook, and proof map gate IDs align
   exactly with the remaining live gate list.
 - The wrapper source verifies that the remaining live gate list itself has no
   duplicate gate IDs.
-- The negative selftest wrapper exercises duplicate-gate and map gate-ID
+- The negative selftest wrapper exercises duplicate-gate, empty-gate, and map gate-ID
   mismatch failures in contract-selftest mode without nested Simple test runs.
 - The generated report explicitly states that no live Linux Vulkan/RenderDoc,
   macOS Metal/Xcode GPU Capture, Windows D3D12/PIX, iOS Tauri/WKWebView Metal,
@@ -178,7 +180,7 @@ platform or GUI-host artifacts for every remaining live gate in the matrix.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 148 lines folded for reproduction.
+Runnable source: 153 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -196,8 +198,8 @@ expect(script).to_contain("gui_web_2d_headless_handoff_prep_negative_selftest_ca
 expect(script).to_contain("gui_web_2d_headless_handoff_prep_expected_negative_selftest_cases")
 expect(script).to_contain("gui_web_2d_headless_handoff_prep_negative_selftest_case_statuses")
 expect(script).to_contain("gui_web_2d_headless_handoff_prep_expected_negative_selftest_case_statuses")
-expect(script).to_contain("EXPECTED_NEGATIVE_SELFTEST_CASES=\"duplicate-gate|host-count|runbook-count|proof-count|host-value|runbook-value|proof-value|host-format|runbook-format|proof-format|host-gate-id|runbook-gate-id|proof-gate-id\"")
-expect(script).to_contain("EXPECTED_NEGATIVE_SELFTEST_CASE_STATUSES=\"duplicate-gate:pass|host-count:pass|runbook-count:pass|proof-count:pass|host-value:pass|runbook-value:pass|proof-value:pass|host-format:pass|runbook-format:pass|proof-format:pass|host-gate-id:pass|runbook-gate-id:pass|proof-gate-id:pass\"")
+expect(script).to_contain("EXPECTED_NEGATIVE_SELFTEST_CASES=\"duplicate-gate|gate-value|host-count|runbook-count|proof-count|host-value|runbook-value|proof-value|host-format|runbook-format|proof-format|host-gate-id|runbook-gate-id|proof-gate-id\"")
+expect(script).to_contain("EXPECTED_NEGATIVE_SELFTEST_CASE_STATUSES=\"duplicate-gate:pass|gate-value:pass|host-count:pass|runbook-count:pass|proof-count:pass|host-value:pass|runbook-value:pass|proof-value:pass|host-format:pass|runbook-format:pass|proof-format:pass|host-gate-id:pass|runbook-gate-id:pass|proof-gate-id:pass\"")
 expect(script).to_contain("negative-selftest-case-mismatch")
 expect(script).to_contain("negative-selftest-case-status-mismatch")
 expect(script).to_contain("negative-selftest-wrapper-failed")
@@ -209,7 +211,9 @@ expect(script).to_contain("LIVE_COMPLETION_STATUS=incomplete")
 expect(script).to_contain("LIVE_COMPLETION_REASON=remaining-live-gates-unverified")
 expect(script).to_contain("gui_web_2d_headless_handoff_prep_remaining_live_completion_gate_count")
 expect(script).to_contain("gui_web_2d_headless_handoff_prep_remaining_live_completion_unique_gate_count")
+expect(script).to_contain("gui_web_2d_headless_handoff_prep_remaining_live_completion_gate_bad_value_count")
 expect(script).to_contain("REMAINING_LIVE_COMPLETION_UNIQUE_GATE_COUNT")
+expect(script).to_contain("gate_bad_value_count()")
 expect(script).to_contain("gui_web_2d_headless_handoff_prep_remaining_live_completion_host_count")
 expect(script).to_contain("gui_web_2d_headless_handoff_prep_remaining_live_completion_hosts")
 expect(script).to_contain("gui_web_2d_headless_handoff_prep_remaining_live_completion_host_bad_value_count")
@@ -232,6 +236,7 @@ expect(script).to_contain("gui_web_2d_headless_handoff_prep_map_gate_alignment_r
 expect(script).to_contain("gui_web_2d_headless_handoff_prep_gate_uniqueness_status")
 expect(script).to_contain("gui_web_2d_headless_handoff_prep_gate_uniqueness_reason")
 expect(script).to_contain("remaining-live-gate-duplicate")
+expect(script).to_contain("remaining-live-gate-value-missing")
 expect(script).to_contain("remaining-live-host-count-mismatch")
 expect(script).to_contain("remaining-live-runbook-count-mismatch")
 expect(script).to_contain("remaining-live-proof-count-mismatch")
@@ -281,6 +286,7 @@ expect(report_text).to_contain("Live completion status: incomplete")
 expect(report_text).to_contain("Live completion reason: remaining-live-gates-unverified")
 expect(report_text).to_contain("Remaining live completion gates: 9")
 expect(report_text).to_contain("Remaining live completion unique gates: 9")
+expect(report_text).to_contain("Remaining live completion gate bad values: 0")
 expect(report_text).to_contain("Remaining live completion hosts: 9")
 expect(report_text).to_contain("Remaining live completion host bad values: 0")
 expect(report_text).to_contain("Remaining live completion runbooks: 9")
@@ -291,10 +297,10 @@ expect(report_text).to_contain("Remaining live completion matrix: 9")
 expect(report_text).to_contain("Remaining live completion map gate alignment: pass (pass)")
 expect(report_text).to_contain("Remaining live completion gate uniqueness: pass (pass)")
 expect(report_text).to_contain("Negative selftest: pass (pass)")
-expect(report_text).to_contain("Negative selftest cases: duplicate-gate|host-count|runbook-count|proof-count|host-value|runbook-value|proof-value|host-format|runbook-format|proof-format|host-gate-id|runbook-gate-id|proof-gate-id")
-expect(report_text).to_contain("Expected negative selftest cases: duplicate-gate|host-count|runbook-count|proof-count|host-value|runbook-value|proof-value|host-format|runbook-format|proof-format|host-gate-id|runbook-gate-id|proof-gate-id")
-expect(report_text).to_contain("Negative selftest case statuses: duplicate-gate:pass|host-count:pass|runbook-count:pass|proof-count:pass|host-value:pass|runbook-value:pass|proof-value:pass|host-format:pass|runbook-format:pass|proof-format:pass|host-gate-id:pass|runbook-gate-id:pass|proof-gate-id:pass")
-expect(report_text).to_contain("Expected negative selftest case statuses: duplicate-gate:pass|host-count:pass|runbook-count:pass|proof-count:pass|host-value:pass|runbook-value:pass|proof-value:pass|host-format:pass|runbook-format:pass|proof-format:pass|host-gate-id:pass|runbook-gate-id:pass|proof-gate-id:pass")
+expect(report_text).to_contain("Negative selftest cases: duplicate-gate|gate-value|host-count|runbook-count|proof-count|host-value|runbook-value|proof-value|host-format|runbook-format|proof-format|host-gate-id|runbook-gate-id|proof-gate-id")
+expect(report_text).to_contain("Expected negative selftest cases: duplicate-gate|gate-value|host-count|runbook-count|proof-count|host-value|runbook-value|proof-value|host-format|runbook-format|proof-format|host-gate-id|runbook-gate-id|proof-gate-id")
+expect(report_text).to_contain("Negative selftest case statuses: duplicate-gate:pass|gate-value:pass|host-count:pass|runbook-count:pass|proof-count:pass|host-value:pass|runbook-value:pass|proof-value:pass|host-format:pass|runbook-format:pass|proof-format:pass|host-gate-id:pass|runbook-gate-id:pass|proof-gate-id:pass")
+expect(report_text).to_contain("Expected negative selftest case statuses: duplicate-gate:pass|gate-value:pass|host-count:pass|runbook-count:pass|proof-count:pass|host-value:pass|runbook-value:pass|proof-value:pass|host-format:pass|runbook-format:pass|proof-format:pass|host-gate-id:pass|runbook-gate-id:pass|proof-gate-id:pass")
 expect(report_text).to_contain("Remaining live completion gate IDs: linux-vulkan-renderdoc|macos-metal-xcode-gpu-capture|windows-d3d12-pix")
 expect(report_text).to_contain("Remaining live completion host map: linux-vulkan-renderdoc:prepared-ubuntu-gui-vulkan-renderdoc")
 expect(report_text).to_contain("retained-4k-8k-current-source:perf-capable-native-gui-host|full-html-css:headless-or-gui-source-plus-renderer-evidence|production-gui-web-parity:gui-host-with-tauri-chrome-backend-readback")
@@ -319,6 +325,7 @@ expect(report_text).to_contain("Android Tauri/WebView Vulkan")
 val negative_selftest = file_read("scripts/check/check-gui-web-2d-headless-handoff-negative-selftest.shs")
 expect(negative_selftest).to_contain("GUI_WEB_2D_HEADLESS_HANDOFF_PREP_CONTRACT_SELFTEST=1")
 expect(negative_selftest).to_contain("remaining-live-gate-duplicate")
+expect(negative_selftest).to_contain("remaining-live-gate-value-missing")
 expect(negative_selftest).to_contain("remaining-live-host-count-mismatch")
 expect(negative_selftest).to_contain("remaining-live-runbook-count-mismatch")
 expect(negative_selftest).to_contain("remaining-live-proof-count-mismatch")
@@ -339,7 +346,7 @@ expect(negative_selftest).to_contain("gui_web_2d_headless_handoff_negative_selft
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 40 lines folded for reproduction.
+Runnable source: 41 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -355,6 +362,7 @@ expect(evidence).to_contain("gui_web_2d_headless_handoff_prep_live_completion_st
 expect(evidence).to_contain("gui_web_2d_headless_handoff_prep_live_completion_reason=remaining-live-gates-unverified")
 expect(evidence).to_contain("gui_web_2d_headless_handoff_prep_remaining_live_completion_gate_count=9")
 expect(evidence).to_contain("gui_web_2d_headless_handoff_prep_remaining_live_completion_unique_gate_count=9")
+expect(evidence).to_contain("gui_web_2d_headless_handoff_prep_remaining_live_completion_gate_bad_value_count=0")
 expect(evidence).to_contain("gui_web_2d_headless_handoff_prep_remaining_live_completion_host_count=9")
 expect(evidence).to_contain("gui_web_2d_headless_handoff_prep_remaining_live_completion_runbook_count=9")
 expect(evidence).to_contain("gui_web_2d_headless_handoff_prep_remaining_live_completion_proof_count=9")
@@ -387,6 +395,33 @@ expect(report).to_contain("Android Tauri/WebView Vulkan renderer evidence.")
 
 </details>
 
+#### rejects an empty primary remaining live gate ID even when handoff maps align
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val command = "rm -rf build/test-gui-web-2d-headless-handoff-empty-gate && GUI_WEB_2D_HEADLESS_HANDOFF_PREP_CONTRACT_SELFTEST=1 GUI_WEB_2D_HEADLESS_HANDOFF_PREP_REMAINING_GATES='linux-vulkan-renderdoc||windows-d3d12-pix' GUI_WEB_2D_HEADLESS_HANDOFF_PREP_REMAINING_HOSTS='linux-vulkan-renderdoc:prepared-ubuntu-gui-vulkan-renderdoc|:empty-gate-host|windows-d3d12-pix:windows-gui-d3d12-pix' GUI_WEB_2D_HEADLESS_HANDOFF_PREP_REMAINING_RUNBOOKS='linux-vulkan-renderdoc:scripts/setup/setup-gui-web-2d-vulkan-env.shs|:empty-gate-runbook|windows-d3d12-pix:doc/07_guide/app/ui/gui_web_2d_vulkan_setup.md' GUI_WEB_2D_HEADLESS_HANDOFF_PREP_REMAINING_PROOFS='linux-vulkan-renderdoc:browser-backing+simple-backend+argb-pairwise+rdoc-magic+linux-render-log|:empty-gate-proof|windows-d3d12-pix:d3d12-readback+browser-backing+argb-pairwise+pix-artifact+gpu-debugger' BUILD_DIR=build/test-gui-web-2d-headless-handoff-empty-gate/out REPORT_PATH=build/test-gui-web-2d-headless-handoff-empty-gate/report.md sh scripts/check/check-gui-web-2d-headless-handoff-prep.shs"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read("build/test-gui-web-2d-headless-handoff-empty-gate/out/evidence.env")
+expect(evidence).to_contain("gui_web_2d_headless_handoff_prep_status=fail")
+expect(evidence).to_contain("gui_web_2d_headless_handoff_prep_reason=remaining-live-gate-value-missing")
+expect(evidence).to_contain("gui_web_2d_headless_handoff_prep_remaining_live_completion_gate_count=3")
+expect(evidence).to_contain("gui_web_2d_headless_handoff_prep_remaining_live_completion_unique_gate_count=3")
+expect(evidence).to_contain("gui_web_2d_headless_handoff_prep_remaining_live_completion_gate_bad_value_count=1")
+expect(evidence).to_contain("gui_web_2d_headless_handoff_prep_remaining_live_completion_host_bad_value_count=0")
+expect(evidence).to_contain("gui_web_2d_headless_handoff_prep_remaining_live_completion_runbook_bad_value_count=0")
+expect(evidence).to_contain("gui_web_2d_headless_handoff_prep_remaining_live_completion_proof_bad_value_count=0")
+expect(evidence).to_contain("gui_web_2d_headless_handoff_prep_map_gate_alignment_status=pass")
+```
+
+</details>
+
 #### runs the negative selftest wrapper without nested Simple execution
 
 <details>
@@ -403,8 +438,8 @@ expect(code).to_equal(0)
 val evidence = file_read("build/test-gui-web-2d-headless-handoff-negative/evidence.env")
 expect(evidence).to_contain("gui_web_2d_headless_handoff_negative_selftest_status=pass")
 expect(evidence).to_contain("gui_web_2d_headless_handoff_negative_selftest_reason=pass")
-expect(evidence).to_contain("gui_web_2d_headless_handoff_negative_selftest_cases=duplicate-gate|host-count|runbook-count|proof-count|host-value|runbook-value|proof-value|host-format|runbook-format|proof-format|host-gate-id|runbook-gate-id|proof-gate-id")
-expect(evidence).to_contain("gui_web_2d_headless_handoff_negative_selftest_case_statuses=duplicate-gate:pass|host-count:pass|runbook-count:pass|proof-count:pass|host-value:pass|runbook-value:pass|proof-value:pass|host-format:pass|runbook-format:pass|proof-format:pass|host-gate-id:pass|runbook-gate-id:pass|proof-gate-id:pass")
+expect(evidence).to_contain("gui_web_2d_headless_handoff_negative_selftest_cases=duplicate-gate|gate-value|host-count|runbook-count|proof-count|host-value|runbook-value|proof-value|host-format|runbook-format|proof-format|host-gate-id|runbook-gate-id|proof-gate-id")
+expect(evidence).to_contain("gui_web_2d_headless_handoff_negative_selftest_case_statuses=duplicate-gate:pass|gate-value:pass|host-count:pass|runbook-count:pass|proof-count:pass|host-value:pass|runbook-value:pass|proof-value:pass|host-format:pass|runbook-format:pass|proof-format:pass|host-gate-id:pass|runbook-gate-id:pass|proof-gate-id:pass")
 ```
 
 </details>
@@ -413,8 +448,8 @@ expect(evidence).to_contain("gui_web_2d_headless_handoff_negative_selftest_case_
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 3 |
-| Active scenarios | 3 |
+| Total scenarios | 4 |
+| Active scenarios | 4 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

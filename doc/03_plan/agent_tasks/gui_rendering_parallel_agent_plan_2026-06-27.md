@@ -1114,6 +1114,13 @@ Normal-review acceptance:
   `test/03_system/check/gui_web_2d_platform_evidence_bundle_spec.spl` now also
   asserts that duplicate freshness diagnostic keys fail the
   `cross-platform-freshness` gate even when the duplicated values are empty.
+- 2026-06-28 headless handoff empty-gate revalidation:
+  `scripts/check/check-gui-web-2d-headless-handoff-prep.shs` now reports a
+  primary remaining-gate bad-value count and fails
+  `remaining-live-gate-value-missing` if the remaining live gate list contains
+  an empty gate ID, even when host/runbook/proof maps align with that empty key.
+  The negative selftest wrapper includes the `gate-value` case so malformed
+  handoff completion maps cannot hide a missing live-platform gate name.
 
 ## Hard Stop Conditions
 
