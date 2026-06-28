@@ -27,7 +27,7 @@ gui_showcase_perf_artifact_provenance_contract_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+| 7 | 7 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -82,6 +82,8 @@ bin/simple test test/03_system/check/gui_showcase_perf_artifact_provenance_contr
   launcher.
 - Complete retained showcase rows must include `*_simple_bin_status=pass`; the
   aggregate must not infer binary validity from path/source text alone.
+- Complete retained showcase rows must not use the Rust seed binary as
+  `*_simple_bin`; 4K/8K completion requires self-hosted Simple evidence.
 - Hardlinked retained logs or native binaries fail with typed `hardlink`
   artifact status so reused artifacts cannot masquerade as fresh evidence.
 - Complete retained showcase rows must include every source file used by the
@@ -143,8 +145,9 @@ editing the env file.
 3. Assert the producer prefers release/self-hosted binaries before repo
    launcher shims.
 4. Reject complete-looking rows that omit `*_simple_bin_status`.
-5. Reject hardlinked 4K retained logs and hardlinked 8K native binaries.
-6. Reject complete-looking 4K/8K rows with truncated source revision file sets.
+5. Reject complete-looking rows that point `*_simple_bin` at the Rust seed.
+6. Reject hardlinked 4K retained logs and hardlinked 8K native binaries.
+7. Reject complete-looking 4K/8K rows with truncated source revision file sets.
 
 ## Completion Boundary
 
@@ -311,6 +314,61 @@ expect(_value_of(evidence, "gui_showcase_4k_200fps_simple_bin_status")).to_equal
 
 </details>
 
+#### rejects retained rows using the Rust seed as the Simple binary
+
+- "printf 'fn main
+   - Expected: code equals `0`
+- Reject Rust seed provenance for 4K retained completion
+   - Expected: _value_of(four_k, "gui_showcase_4k_200fps_status") equals `fail`
+   - Expected: _value_of(four_k, "gui_showcase_4k_200fps_simple_bin") equals `rust_seed`
+   - Expected: _value_of(four_k, "gui_showcase_4k_200fps_reason") equals `invalid-4k-simple-bin-provenance:simple_bin=rust-seed-forbidden`
+- Reject Rust seed provenance for 8K retained completion
+   - Expected: _value_of(eight_k, "gui_showcase_8k_perf_status") equals `fail`
+   - Expected: _value_of(eight_k, "gui_showcase_8k_perf_simple_bin") equals `rust_seed`
+   - Expected: _value_of(eight_k, "gui_showcase_8k_perf_reason") equals `invalid-8k-simple-bin-provenance:simple_bin=rust-seed-forbidden`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 30 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-gui-showcase-perf-rust-seed-provenance"
+val setup = "rm -rf " + root + " && mkdir -p " + root + "/4k " + root + "/8k && " +
+    "printf '%b' '\\177ELFsynthetic-native\\n' > " + root + "/4k/native.bin && chmod +x " + root + "/4k/native.bin && " +
+    "printf '%b' '\\177ELFsynthetic-native\\n' > " + root + "/8k/native.bin && chmod +x " + root + "/8k/native.bin && " +
+    "printf 'fn main() -> i64:\\n    0\\n' > " + root + "/4k/showcase.spl && printf 'fn main() -> i64:\\n    0\\n' > " + root + "/8k/showcase.spl && " +
+    "printf 'native build log\\n' > " + root + "/4k/build.log && printf 'native build log\\n' > " + root + "/8k/build.log && " +
+    "printf 'showcase retained log\\n' > " + root + "/4k/showcase.log && printf 'showcase retained log\\n' > " + root + "/8k/showcase.log && " +
+    "printf 'elapsed_ms=597\\n' > " + root + "/4k/time.log && printf 'elapsed_ms=597\\n' > " + root + "/8k/time.log && "
+val write_4k = _fixture_command(root, "4k", root + "/4k/native.bin", root + "/4k/showcase.spl", root + "/4k/build.log", root + "/4k/showcase.log", root + "/4k/time.log")
+val write_8k = _fixture_command(root, "8k", root + "/8k/native.bin", root + "/8k/showcase.spl", root + "/8k/build.log", root + "/8k/showcase.log", root + "/8k/time.log")
+val rust_seed = "src/compiler_rust/target/release/simple"
+val command = setup + write_4k + " && " + write_8k + " && " +
+    "sed -i 's#gui_showcase_4k_200fps_simple_bin=bin/simple#gui_showcase_4k_200fps_simple_bin=" + rust_seed + "#' " + root + "/4k/status.env && " +
+    "sed -i 's#gui_showcase_8k_perf_simple_bin=bin/simple#gui_showcase_8k_perf_simple_bin=" + rust_seed + "#' " + root + "/8k/status.env && " +
+    "GUI_SHOWCASE_4K_PERF_ENV=" + root + "/4k/status.env GUI_RENDERDOC_AGGREGATE_STATIC_CACHE_DIR=build/test-gui-renderdoc-feature-coverage-static-cache BUILD_DIR=" + root + "/out-4k REPORT_PATH=" + root + "/report-4k.md sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs && " +
+    "GUI_SHOWCASE_8K_PERF_ENV=" + root + "/8k/status.env GUI_RENDERDOC_AGGREGATE_STATIC_CACHE_DIR=build/test-gui-renderdoc-feature-coverage-static-cache BUILD_DIR=" + root + "/out-8k REPORT_PATH=" + root + "/report-8k.md sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val four_k = file_read(root + "/out-4k/evidence.env")
+val eight_k = file_read(root + "/out-8k/evidence.env")
+step("Reject Rust seed provenance for 4K retained completion")
+expect(_value_of(four_k, "gui_showcase_4k_200fps_status")).to_equal("fail")
+expect(_value_of(four_k, "gui_showcase_4k_200fps_simple_bin")).to_equal(rust_seed)
+expect(_value_of(four_k, "gui_showcase_4k_200fps_reason")).to_equal("invalid-4k-simple-bin-provenance:simple_bin=rust-seed-forbidden")
+
+step("Reject Rust seed provenance for 8K retained completion")
+expect(_value_of(eight_k, "gui_showcase_8k_perf_status")).to_equal("fail")
+expect(_value_of(eight_k, "gui_showcase_8k_perf_simple_bin")).to_equal(rust_seed)
+expect(_value_of(eight_k, "gui_showcase_8k_perf_reason")).to_equal("invalid-8k-simple-bin-provenance:simple_bin=rust-seed-forbidden")
+```
+
+</details>
+
 #### rejects retained rows with truncated source revision file sets
 
 - "printf 'fn main
@@ -428,8 +486,8 @@ expect(_value_of(eight_k, "gui_showcase_8k_perf_reason")).to_equal("missing-8k-n
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 7 |
+| Active scenarios | 7 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
