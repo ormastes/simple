@@ -22,7 +22,7 @@
 ## Strict Evidence Hints
 
 - context_ponytail: `check-llm-tooling-context-ponytail-full-replacement.shs evidence with llm_tooling_context_ponytail_full_replacement_status=pass`
-- dashboard: `LLM_DASHBOARD_LIVE_EVIDENCE_ENV with llm_dashboard_live_status=pass`
+- dashboard: `check-llm-dashboard-live-evidence.shs evidence with llm_dashboard_live_status=pass`
 - vllm_host: `local vLLM/GPU host evidence through check-llm-runtime-vllm-host-probe.shs --strict`
 - svllm_local: `SVLLM_NATIVE_EVIDENCE_ENV with svllm_native_streaming_status=pass`
 - torch_optimizer: `Simple/libtorch CUDA optimizer evidence through check-llm-runtime-torch-cuda-optimizer-probe.shs --strict`

@@ -51,6 +51,7 @@ Verification:
 
 ```bash
 sh scripts/check/check-llm-dashboard-evidence.shs
+sh scripts/check/check-llm-dashboard-live-evidence.shs
 release/x86_64-unknown-linux-gnu/simple test test/03_system/feature/app/web_dashboard/web_dashboard_diagnostics_panel_spec.spl --mode=interpreter --clean
 release/x86_64-unknown-linux-gnu/simple test test/03_system/feature/app/web_dashboard/vllm_control_route_spec.spl --mode=interpreter --clean
 ```
@@ -60,11 +61,22 @@ Latest focused evidence:
 dashboard diagnostics panel, vLLM control route planning, dashboard log modes,
 diagnostics collector, and tooling artifact collector passing locally. This is
 dashboard route/evidence coverage; live vLLM serving still belongs to the LLM
-runtime host-probe lane, and live operator-dashboard completion requires a
-separate live evidence env.
+runtime host-probe lane.
 
-Use strict live mode only on hosts or CI lanes that are supposed to prove live
-dashboard operation:
+Use the focused live checker when strict dashboard evidence needs a live env:
+
+```bash
+sh scripts/check/check-llm-dashboard-live-evidence.shs
+```
+
+That checker writes `build/llm_dashboard_live/evidence.env` with
+`llm_dashboard_live_status=pass` when authenticated dashboard HTML and
+`/api/vllm/control` route execution are proven through the checked-in
+DashboardServer surface, including auth rejection, preflight JSONL,
+side-effect action routing to the runtime owner, and safe missing-resource
+execution JSONL.
+
+Use strict live mode to consume that env:
 
 ```bash
 LLM_DASHBOARD_LIVE_EVIDENCE_ENV=build/llm_dashboard_live/evidence.env \
@@ -72,9 +84,9 @@ LLM_DASHBOARD_LIVE_EVIDENCE_ENV=build/llm_dashboard_live/evidence.env \
 ```
 
 The strict live gate requires the evidence env to report
-`llm_dashboard_live_status=pass`. Local route, collector, and CLI evidence alone
-is not live operator-dashboard completion proof. The aggregate LLM strict mode
-also runs this wrapper with `--strict-live`.
+`llm_dashboard_live_status=pass`. This proves live dashboard route execution,
+not live vLLM serving. The aggregate LLM strict mode also generates the live env
+and runs this wrapper with `--strict-live`.
 
 ---
 

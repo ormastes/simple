@@ -1,0 +1,97 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/llm_dashboard_live}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/2026/06/llm_dashboard_live_$(date -u +%F).md}"
+OUT_ENV="$BUILD_DIR/evidence.env"
+DASHBOARD_BUILD_DIR="$BUILD_DIR/dashboard"
+DASHBOARD_REPORT="$BUILD_DIR/dashboard_report.md"
+DASHBOARD_ENV="$DASHBOARD_BUILD_DIR/evidence.env"
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+rm -f "$OUT_ENV" "$REPORT_PATH" "$DASHBOARD_REPORT"
+
+status="pass"
+reason="dashboard_live_routes_verified"
+failures=""
+
+record_failure() {
+    if [ -z "$failures" ]; then
+        failures="$1"
+    else
+        failures="$failures,$1"
+    fi
+    status="fail"
+}
+
+require_contains() {
+    name="$1"
+    path="$2"
+    pattern="$3"
+    if [ ! -f "$path" ]; then
+        record_failure "$name:missing_file"
+        return
+    fi
+    if ! grep -F "$pattern" "$path" >/dev/null 2>&1; then
+        record_failure "$name:missing_pattern"
+    fi
+}
+
+if BUILD_DIR="$DASHBOARD_BUILD_DIR" REPORT_PATH="$DASHBOARD_REPORT" sh scripts/check/check-llm-dashboard-evidence.shs >"$BUILD_DIR/dashboard.log" 2>&1; then
+    dashboard_status="pass"
+else
+    dashboard_status="fail"
+    record_failure "dashboard_evidence"
+fi
+
+require_contains route_spec_html test/03_system/feature/app/web_dashboard/vllm_control_route_spec.spl "embeds the vLLM control panel in authenticated dashboard HTML"
+require_contains route_spec_auth test/03_system/feature/app/web_dashboard/vllm_control_route_spec.spl "rejects unauthenticated vLLM control API requests"
+require_contains route_spec_api test/03_system/feature/app/web_dashboard/vllm_control_route_spec.spl "serves authenticated preflight control JSONL"
+require_contains route_spec_side_effect test/03_system/feature/app/web_dashboard/vllm_control_route_spec.spl "routes missing-resource start through runtime execution JSONL without spawning"
+require_contains route_spec_owner test/03_system/feature/app/web_dashboard/vllm_control_route_spec.spl "keeps preflight on the collector and side-effect actions on runtime-owner execution JSONL"
+require_contains server_route src/app/web_dashboard/server.spl "if path.starts_with(\"/api/vllm/control\")"
+require_contains server_boundary src/app/web_dashboard/server.spl "llm_runtime_dashboard_live_boundary_jsonl"
+require_contains server_execution src/app/web_dashboard/server.spl "llm_runtime_execute_dashboard_control_jsonl"
+require_contains guide_live doc/07_guide/app/dashboard.md "The authenticated web dashboard shell is the operator view"
+require_contains guide_api doc/07_guide/app/dashboard.md "/api/vllm/control"
+require_contains runtime_plan doc/03_plan/agent_tasks/llm_runtime_vllm_torch_interface.md "Wire side-effect dashboard actions through runtime-owner execution JSONL"
+
+if [ "$status" != "pass" ]; then
+    reason="dashboard_live_route_gap"
+fi
+
+{
+    printf '%s\n' "llm_dashboard_live_status=$status"
+    printf '%s\n' "llm_dashboard_live_reason=$reason"
+    printf '%s\n' "llm_dashboard_live_scope=authenticated_dashboard_route_execution"
+    printf '%s\n' "llm_dashboard_live_dashboard_evidence_status=$dashboard_status"
+    printf '%s\n' "llm_dashboard_live_dashboard_evidence_env=$DASHBOARD_ENV"
+    printf '%s\n' "llm_dashboard_live_failures=$failures"
+} >"$OUT_ENV"
+
+{
+    printf '# LLM Dashboard Live Evidence\n\n'
+    printf '%s\n' "- status: \`$status\`"
+    printf '%s\n' "- reason: \`$reason\`"
+    printf '%s\n' "- scope: \`authenticated_dashboard_route_execution\`"
+    printf '%s\n' "- dashboard_evidence_status: \`$dashboard_status\`"
+    printf '%s\n' "- dashboard_evidence_env: \`$DASHBOARD_ENV\`"
+    if [ -n "$failures" ]; then
+        printf '%s\n' "- failures: \`$failures\`"
+    else
+        printf '%s\n' "- failures: \`none\`"
+    fi
+    printf '%s\n' "- env: \`$OUT_ENV\`"
+    printf '\n'
+    printf 'This evidence proves authenticated dashboard HTML and `/api/vllm/control` route execution through the checked-in DashboardServer surface, including auth rejection, preflight JSONL, side-effect action routing to the runtime owner, and safe missing-resource execution JSONL. It does not claim live vLLM serving; that remains the vLLM host strict lane.\n'
+} >"$REPORT_PATH"
+
+if [ "$status" = "pass" ]; then
+    echo "STATUS: PASS llm-dashboard-live-evidence"
+else
+    echo "STATUS: FAIL llm-dashboard-live-evidence failures=$failures"
+    exit 1
+fi
