@@ -27,7 +27,7 @@ linux_vulkan_render_log_aggregate_forwarding_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 1 | 1 | 0 | 0 |
+| 2 | 2 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -171,12 +171,77 @@ expect(aggregate).to_contain("emit(\"linux_vulkan_render_log_compare_host_electr
 
 </details>
 
+#### normalizes a claimed Linux pass with blocked gates to aggregate failure
+
+- Create a Linux Vulkan render-log row that passes all artifacts but still reports blocked gates
+   - Expected: code equals `0`
+- Read aggregate evidence and confirm blocked gates override the claimed pass
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 47 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Create a Linux Vulkan render-log row that passes all artifacts but still reports blocked gates")
+val command = "rm -rf build/test-linux-vulkan-render-log-aggregate-blocked && mkdir -p build/test-linux-vulkan-render-log-aggregate-blocked && cat > build/test-linux-vulkan-render-log-aggregate-blocked/linux.env <<'EOF'\n" +
+    "linux_vulkan_render_log_compare_status=pass\n" +
+    "linux_vulkan_render_log_compare_reason=pass\n" +
+    "linux_vulkan_render_log_compare_blocked_gate_count=1\n" +
+    "linux_vulkan_render_log_compare_blocked_gates=renderdoc-chrome-rdc\n" +
+    "linux_vulkan_render_log_compare_required_api=vulkan\n" +
+    "linux_vulkan_render_log_compare_pairwise_status=pass\n" +
+    "linux_vulkan_render_log_compare_simple_vulkan_gate_status=pass\n" +
+    "linux_vulkan_render_log_compare_browser_backing_gate_status=pass\n" +
+    "linux_vulkan_render_log_compare_pairwise_gate_status=pass\n" +
+    "linux_vulkan_render_log_compare_argb_source_gate_status=pass\n" +
+    "linux_vulkan_render_log_compare_renderdoc_gate_status=pass\n" +
+    "linux_vulkan_render_log_compare_renderdoc_simple_status=pass\n" +
+    "linux_vulkan_render_log_compare_renderdoc_simple_env_file_status=pass\n" +
+    "linux_vulkan_render_log_compare_renderdoc_simple_artifact_file_status=pass\n" +
+    "linux_vulkan_render_log_compare_renderdoc_simple_artifact_magic=RDOC\n" +
+    "linux_vulkan_render_log_compare_renderdoc_chrome_status=pass\n" +
+    "linux_vulkan_render_log_compare_renderdoc_chrome_env_file_status=pass\n" +
+    "linux_vulkan_render_log_compare_renderdoc_chrome_artifact_file_status=pass\n" +
+    "linux_vulkan_render_log_compare_renderdoc_chrome_artifact_magic=RDOC\n" +
+    "linux_vulkan_render_log_compare_renderdoc_electron_status=pass\n" +
+    "linux_vulkan_render_log_compare_renderdoc_electron_env_file_status=pass\n" +
+    "linux_vulkan_render_log_compare_renderdoc_electron_artifact_file_status=pass\n" +
+    "linux_vulkan_render_log_compare_renderdoc_electron_artifact_magic=RDOC\n" +
+    "linux_vulkan_render_log_compare_host_renderdoc_status=pass\n" +
+    "linux_vulkan_render_log_compare_host_renderdoc_tool=renderdoccmd\n" +
+    "linux_vulkan_render_log_compare_host_chrome_status=pass\n" +
+    "linux_vulkan_render_log_compare_host_chrome_tool=google-chrome\n" +
+    "linux_vulkan_render_log_compare_host_electron_status=pass\n" +
+    "linux_vulkan_render_log_compare_host_electron_tool=electron\n" +
+    "EOF\n" +
+    "BUILD_DIR=build/test-linux-vulkan-render-log-aggregate-blocked/out REPORT_PATH=build/test-linux-vulkan-render-log-aggregate-blocked/report.md LINUX_VULKAN_RENDER_LOG_COMPARE_ENV=build/test-linux-vulkan-render-log-aggregate-blocked/linux.env sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs >/dev/null"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+step("Read aggregate evidence and confirm blocked gates override the claimed pass")
+val evidence = file_read("build/test-linux-vulkan-render-log-aggregate-blocked/out/evidence.env")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_status=fail")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_reason=linux-vulkan-blocked-gates-present:1")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_blocked_gate_count=1")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_blocked_gates=renderdoc-chrome-rdc")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_simple_vulkan_gate_status=pass")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_browser_backing_gate_status=pass")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_pairwise_gate_status=pass")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_argb_source_gate_status=pass")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_gate_status=pass")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 1 |
-| Active scenarios | 1 |
+| Total scenarios | 2 |
+| Active scenarios | 2 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
