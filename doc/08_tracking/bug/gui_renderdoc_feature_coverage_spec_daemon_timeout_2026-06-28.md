@@ -48,9 +48,22 @@ remaining timeout belongs to the historical exhaustive SSpec matrix profile, not
 to the aggregate wrapper.
 
 `test/03_system/check/gui_renderdoc_feature_coverage_fast_gate_spec.spl` is the
-bounded normal-lane check for the wrapper contract. On this host it passed with
-1 example in `45026ms` after removing the cold-cache opt-out scenario from the
-fast lane. The exhaustive matrix spec still requires either a long timeout
-profile, as documented in
+intended bounded normal-lane check for the wrapper contract, but it is still not
+fully reliable under the current test daemon. It passed once with 1 example in
+`45026ms`, then timed out in a later focused run after Electron launch metadata
+forwarding was added.
+
+The direct wrapper remains usable verification evidence. On 2026-06-28 it
+completed in about `25.60s` and emitted:
+
+- `electron_renderdoc_gate_launch_metadata_status=missing`
+- `electron_renderdoc_gate_launch_metadata_reason=missing-launch-exit-metadata`
+- `gui_widget_renderdoc_goal_electron_gate_launch_metadata_status=missing`
+- `gui_widget_renderdoc_goal_electron_gate_launch_metadata_reason=missing-launch-exit-metadata`
+
+The exhaustive matrix spec still requires either a long timeout profile, as
+documented in
 `doc/09_report/gui_renderdoc_aggregate_sspec_perf_2026-06-25.md`, or future
-sharding into smaller scenario files.
+sharding into smaller scenario files. The fast gate also needs sharding or a
+daemon timeout classification fix before it can be treated as always-green
+release evidence.

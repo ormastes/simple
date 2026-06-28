@@ -105,6 +105,8 @@ The fast gate requires these aggregate rows to exist:
 - `gui_showcase_8k_perf_status`
 - `gui_widget_renderdoc_goal_electron_gate_launch_exit_code`
 - `gui_widget_renderdoc_goal_electron_gate_launch_timed_out`
+- `gui_widget_renderdoc_goal_electron_gate_launch_metadata_status`
+- `gui_widget_renderdoc_goal_electron_gate_launch_metadata_reason`
 - `gui_widget_renderdoc_goal_electron_gate_gpu_process_exit_status`
 - `gui_widget_renderdoc_goal_electron_gate_gpu_process_exit_count`
 - `gui_widget_renderdoc_goal_electron_gate_gpu_process_exit_codes`
@@ -170,7 +172,7 @@ showcase performance. Do not substitute a small viewport or cached replay for an
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -187,6 +189,8 @@ expect(evidence).to_contain("gui_showcase_4k_200fps_status=")
 expect(evidence).to_contain("gui_showcase_8k_perf_status=")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_launch_exit_code=")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_launch_timed_out=")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_launch_metadata_status=")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_launch_metadata_reason=")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_gpu_process_exit_status=")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_gpu_process_exit_count=")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_gpu_process_exit_codes=")
