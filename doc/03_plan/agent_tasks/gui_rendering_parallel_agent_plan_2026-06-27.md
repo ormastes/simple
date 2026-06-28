@@ -1104,6 +1104,12 @@ Normal-review acceptance:
   duplicate required gate status keys, duplicate optional gate reason keys, and
   duplicate required freshness keys. A hand-edited env cannot hide a failing
   value by appending a later `pass` line.
+- 2026-06-28 bundle freshness diagnostic revalidation:
+  `scripts/check/check-gui-web-2d-platform-evidence-bundle.shs` now rejects a
+  freshness env that says `status=pass` and `reason=pass` while carrying
+  non-empty diagnostic failure lists such as duplicate source, missing source,
+  mismatched metadata, or missing metadata lanes. A contradictory freshness env
+  cannot satisfy `cross-platform-freshness`.
 
 ## Hard Stop Conditions
 
