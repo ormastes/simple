@@ -23,7 +23,8 @@ Date: 2026-06-25
 - `chat_template_status`: `none`, `present`, or `missing`
 - `lora_adapter_count`: integer count without adapter paths
 - `dynamic_lora_status`: `disabled`, `trusted`, or `blocked`
-- `torch_ready`: `blocked` or `unchecked` in Option A
+- `torch_ready`: `ready`, `unavailable`, `blocked`, or `unchecked` depending
+  on the owner Torch/SFFI readiness facade or deterministic test injection
 - `evidence_jsonl`: one SPipe/dashboard diagnostics event
 
 `LlmRuntimeServePlan`:
@@ -51,15 +52,24 @@ Date: 2026-06-25
 6. Generate a sanitized static serve-plan event when requested; do not start
    vLLM or probe HTTP in this slice.
 7. Let the existing dashboard diagnostics collector summarize that event.
-8. Defer live `/v1/models` probing to the live vLLM option.
-9. For the live vLLM option, parse already-fetched `/v1/models` response
-   bodies first. Transport and process supervision are separate follow-on work.
+8. Parse already-fetched `/v1/models` response bodies before transport; report
+   ready, auth rejection, malformed, wrong-model, invalid-endpoint, and
+   redaction outcomes without exposing private model identifiers.
+9. Keep live request planning separate from transport. Build sanitized
+   `/v1/models` and `/v1/chat/completions` plans first, reject invalid
+   endpoints, and block unsupported chat parameters at the planner boundary.
 10. Build sanitized request-plan metadata for `/v1/models` and
-    `/v1/chat/completions` before adding HTTP transport. Unsupported chat
-    parameters block at the planner boundary.
-11. Parse already-fetched `/v1/chat/completions` response bodies before adding
-    transport. Public evidence must report status and counts without exposing
-    generated assistant content.
+    `/v1/chat/completions` before HTTP transport. Transport uses the existing
+    owner HTTP facade only after planning succeeds.
+11. Parse already-fetched `/v1/chat/completions` response bodies and redact
+    generated assistant content from public evidence.
+12. Gate `vllm serve` lifecycle through sanitized serve plans and owner process
+    facades. Treat spawn success as process evidence only; endpoint readiness
+    still requires observed transport/probe evidence.
+13. Route dashboard control requests through the runtime owner boundary.
+    Preflight remains intent-only; side-effecting actions return skipped,
+    blocked, executor-required, or owner execution JSONL without letting
+    dashboard rendering import process or HTTP backends.
 
 ## Error Handling
 
@@ -74,6 +84,10 @@ Date: 2026-06-25
   being silently dropped.
 - Known Torch/SFFI or svLLM loader placeholder behavior becomes
   `status=blocked`; it must not be normalized into `ready`.
+- Missing local vLLM or GPU resources become `skipped` or `blocked` evidence
+  before spawn/fetch paths are attempted.
+- Non-positive internal process sentinels render as public pid `0` in JSONL,
+  text, and HTML.
 
 ## Test Design
 
@@ -98,18 +112,29 @@ Date: 2026-06-25
   endpoint credentials,
   and LoRA adapter paths.
 - Malformed adapter tokens and invalid endpoints are reported explicitly.
-- Live vLLM tests, when selected, cover `/v1/models`, `/v1/chat/completions`,
-  base/adapter model selection, auth rejection, and unsupported parameters.
+- Live vLLM tests cover request planning and already-fetched `/v1/models` and
+  `/v1/chat/completions` response parsing, including base/adapter model
+  selection, auth rejection, malformed responses, wrong model, unsupported
+  parameters, and generated-content redaction.
 - The first live `/v1/models` slice covers already-fetched response parsing:
   ready model lists, auth rejection, malformed bodies, wrong-model responses,
   invalid endpoints, and path/sensitive model redaction without exposing the
   internal absence marker.
+- Serve lifecycle and readiness tests prove no-spawn planning failures,
+  process-state adaptation, timeout cleanup policy, skipped local-resource
+  preflight, and observed-readiness summaries without requiring a host vLLM
+  server.
+- Dashboard route specs prove authenticated preflight and deterministic
+  side-effect action JSONL for missing-resource or invalid-pid cases without
+  spawning a process.
 
 ## Ponytail Cut
 
-The first implementation should stop at manifest/probe/evidence. No trainer, no
-new scheduler, no vLLM supervisor, and no adapter plugin until live evidence
-requires it.
+The first implementation stopped at manifest/probe/evidence, then advanced
+through bounded planning, transport, lifecycle, readiness, and dashboard-control
+evidence without requiring a live vLLM/GPU host. Keep that cut: no trainer, no
+new scheduler, no dynamic adapter plugin, and no claim of live serving until
+real endpoint evidence exists.
 
 If implementation starts from the runtime blocker lane instead, the cut is:
 clear the reported Torch availability/seed/device placeholders and svLLM loader

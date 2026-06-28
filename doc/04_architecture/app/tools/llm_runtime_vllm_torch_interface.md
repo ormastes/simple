@@ -18,7 +18,7 @@ training primitives only when a later lane explicitly enters training.
    - dynamic LoRA trust mode
 2. Probe layer:
    - file/static validation
-   - endpoint readiness when available
+   - endpoint readiness summaries from planned or observed transport evidence
    - Torch/SFFI readiness as a separate capability check
 3. Serve-plan layer:
    - sanitized vLLM command metadata
@@ -28,10 +28,17 @@ training primitives only when a later lane explicitly enters training.
    - SPipe JSONL events
    - nil-free status/reason fields
    - dashboard diagnostics consumption
-5. UI/tool layer:
+5. Runtime control layer:
+   - live request planning for `/v1/models` and `/v1/chat/completions`
+   - HTTP transport through owner facades after planning succeeds
+   - serve lifecycle and readiness orchestration through process/HTTP owner
+     facades
+6. UI/tool layer:
    - existing web dashboard diagnostics panel
    - dashboard vLLM control-intent panel for preflight/start/poll/probe/stop
-   - future MCP/tool exposure
+   - runtime-owned `/api/vllm/control` execution JSONL for authenticated
+     side-effect requests, with skipped/blocked evidence when local resources
+     are missing
 
 ## Boundaries
 
@@ -46,7 +53,12 @@ training primitives only when a later lane explicitly enters training.
 - Sanitized command previews must use `--lora-modules` terminology and replace
   adapter paths with counts/redaction markers.
 - Static serve plans are metadata only; they must not start vLLM, shell out, or
-  probe HTTP.
+  probe HTTP. Live requests and process actions must pass through
+  `src/app/llm_runtime` planner/executor facades before any transport or
+  lifecycle side effect.
+- Dashboard rendering may expose intent and owner-produced execution JSONL, but
+  it must not import process or HTTP backends directly or treat planned controls
+  as live endpoint proof.
 - Absence is represented as option-like text such as `none`, `missing`, or an
   omitted field, never literal `nil`.
 
@@ -63,8 +75,12 @@ training primitives only when a later lane explicitly enters training.
 ## Deferred
 
 - PEFT/TRL training orchestration.
-- Live dashboard execution of vLLM process supervisor actions.
+- End-to-end proof against an installed local vLLM server and GPU-backed
+  endpoint.
+- Host-proven dashboard start/probe/stop execution against a real local vLLM
+  process. The runtime-owned execution boundary exists, but live availability
+  evidence remains host-dependent.
 - Dynamic adapter resolver plugins.
 - GPU memory accounting beyond optional readback.
-- Custom serving engine work in this lane; keep svLLM product work separate
-  unless explicitly selected.
+- Full svLLM native streaming through NVFS scheduling, pinned-buffer
+  registration, and device staging.

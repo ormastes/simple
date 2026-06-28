@@ -41,6 +41,7 @@ Retry7 is a normal-review acceptance gate for the SPipe LLM fine-tune process. I
 | Field | Value |
 |-------|-------|
 | Feature IDs | #SP-FINETUNE-RETRY7-001 |
+| Requirement IDs | REQ-SP-FINETUNE-RETRY7-001 |
 | Category | Tooling |
 | Difficulty | 2/5 |
 | Status | Implemented |
