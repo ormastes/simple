@@ -27,7 +27,7 @@ gui_web_2d_headless_handoff_prep_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 2 | 2 | 0 | 0 |
+| 3 | 3 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -62,9 +62,10 @@ then report that this is source-level preparation only.
 **Research:** N/A
 **Design:** doc/07_guide/tooling/renderdoc_capture_infra.md
 
-This SSpec checks the wrapper source contract, report boundary, and bounded
-contract-selftest mode. It does not invoke normal wrapper mode from inside the
-SSpec runner because that path nests Simple test execution. See
+This SSpec checks the wrapper source contract, report boundary, bounded
+contract-selftest mode, and the direct negative selftest wrapper. It does not
+invoke normal wrapper mode from inside the SSpec runner because that path nests
+Simple test execution. See
 `doc/08_tracking/bug/simple_test_nested_runner_timeout_2026-06-28.md` for the
 observed nested runner timeout.
 
@@ -126,6 +127,8 @@ recursing into nested Simple test execution.
    host rows, nine runbook rows, nine proof rows, and nine matrix rows.
 5. Confirm host/runbook/proof bad value counts are zero, map gate alignment is
    `pass`, gate uniqueness is `pass`, and the negative selftest status is `pass`.
+6. Run the negative selftest wrapper directly and confirm every malformed
+   remaining-live-gate map case reports `pass` without nested Simple execution.
 
 ## Completion Interpretation
 
@@ -384,12 +387,34 @@ expect(report).to_contain("Android Tauri/WebView Vulkan renderer evidence.")
 
 </details>
 
+#### runs the negative selftest wrapper without nested Simple execution
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val command = "rm -rf build/test-gui-web-2d-headless-handoff-negative && mkdir -p build/test-gui-web-2d-headless-handoff-negative && BUILD_DIR=build/test-gui-web-2d-headless-handoff-negative/out sh scripts/check/check-gui-web-2d-headless-handoff-negative-selftest.shs > build/test-gui-web-2d-headless-handoff-negative/evidence.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val evidence = file_read("build/test-gui-web-2d-headless-handoff-negative/evidence.env")
+expect(evidence).to_contain("gui_web_2d_headless_handoff_negative_selftest_status=pass")
+expect(evidence).to_contain("gui_web_2d_headless_handoff_negative_selftest_reason=pass")
+expect(evidence).to_contain("gui_web_2d_headless_handoff_negative_selftest_cases=duplicate-gate|host-count|runbook-count|proof-count|host-value|runbook-value|proof-value|host-format|runbook-format|proof-format|host-gate-id|runbook-gate-id|proof-gate-id")
+expect(evidence).to_contain("gui_web_2d_headless_handoff_negative_selftest_case_statuses=duplicate-gate:pass|host-count:pass|runbook-count:pass|proof-count:pass|host-value:pass|runbook-value:pass|proof-value:pass|host-format:pass|runbook-format:pass|proof-format:pass|host-gate-id:pass|runbook-gate-id:pass|proof-gate-id:pass")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 2 |
-| Active scenarios | 2 |
+| Total scenarios | 3 |
+| Active scenarios | 3 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
