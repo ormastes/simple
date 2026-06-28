@@ -143,6 +143,8 @@ same full matrix repeatedly.
 If the default cache assertion fails, check whether
 `GUI_RENDERDOC_AGGREGATE_DISABLE_DEFAULT_STATIC_CACHE=1` leaked into the test
 environment. The fast lane expects the default cache to be enabled.
+Do not delete `build/gui-renderdoc-feature-coverage-static-cache` as part of the
+fast gate; that turns a bounded contract check into a cold nested-gate refresh.
 
 If 4K or 8K rows are missing, refresh the retained showcase evidence with
 `scripts/check/check-widget-showcase-4k-200fps.shs` before claiming GUI
@@ -177,7 +179,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Run the aggregate audit from a clean fast-gate build directory")
-val command = "rm -rf build/test-gui-renderdoc-feature-coverage-fast build/gui-renderdoc-feature-coverage-static-cache && BUILD_DIR=build/test-gui-renderdoc-feature-coverage-fast REPORT_PATH=build/test-gui-renderdoc-feature-coverage-fast/report.md GUI_RENDERDOC_AGGREGATE_PRINT_ENV=0 sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs"
+val command = "rm -rf build/test-gui-renderdoc-feature-coverage-fast && BUILD_DIR=build/test-gui-renderdoc-feature-coverage-fast REPORT_PATH=build/test-gui-renderdoc-feature-coverage-fast/report.md GUI_RENDERDOC_AGGREGATE_PRINT_ENV=0 sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(0)
 

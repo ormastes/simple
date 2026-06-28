@@ -67,3 +67,10 @@ documented in
 sharding into smaller scenario files. The fast gate also needs sharding or a
 daemon timeout classification fix before it can be treated as always-green
 release evidence.
+
+Follow-up evidence: removing the fast gate's explicit deletion of
+`build/gui-renderdoc-feature-coverage-static-cache` was not sufficient to make
+the SSpec reliable under the current daemon; the focused fast-gate SSpec still
+timed out. Keep the cache-preserving behavior because it avoids deliberate cold
+nested-gate refreshes, but do not claim the SSpec timeout is fixed until the
+gate is split further or the daemon profile is corrected.
