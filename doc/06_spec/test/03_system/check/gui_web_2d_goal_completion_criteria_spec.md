@@ -234,7 +234,7 @@ fields through the aggregate audit and requires:
   advisory, and no broad done mark is accepted from sidecar output.
 - Tauri mobile completion proves iOS Tauri2/WKWebView Metal evidence and
   Android Tauri2/WebView Vulkan evidence with screenshot artifacts plus MDI
-  event, capture, performance, and animation proof.
+  event, capture, performance, animation proof, and live render `html_len`.
 
 ## Scenarios
 
