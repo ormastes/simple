@@ -27,7 +27,7 @@ gui_web_2d_platform_evidence_bundle_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 13 | 13 | 0 | 0 |
+| 14 | 14 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -93,6 +93,8 @@ sh scripts/check/check-gui-web-2d-platform-evidence-bundle.shs
   failed `cross-platform-freshness` gate.
 - A freshness env with `status=pass` but non-empty diagnostic failure lists is
   reported as a failed `cross-platform-freshness` gate.
+- A freshness env with duplicate diagnostic keys is reported as a failed
+  `cross-platform-freshness` gate.
 - Missing or failed live gates exit nonzero so automation cannot treat a
   non-pass bundle as complete.
 - The checker does not launch RenderDoc, Xcode, PIX, Tauri, Chrome, Electron,
@@ -525,12 +527,35 @@ expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_cross_platform_
 
 </details>
 
+#### classifies passing freshness evidence with duplicate diagnostic keys as failed
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val command = "rm -rf build/test-gui-web-2d-platform-evidence-bundle-freshness-duplicate-diagnostic && mkdir -p build/test-gui-web-2d-platform-evidence-bundle-freshness-duplicate-diagnostic/env && printf 'linux_vulkan_render_log_compare_status=pass\\nmacos_metal_render_log_compare_status=pass\\nwindows_d3d12_render_log_compare_status=pass\\n' > build/test-gui-web-2d-platform-evidence-bundle-freshness-duplicate-diagnostic/env/native.env && printf 'tauri_mobile_renderer_parity_ios_status=pass\\ntauri_mobile_renderer_parity_ios_render_log_metal_marker_status=pass\\ntauri_mobile_renderer_parity_ios_mdi_proof_status=pass\\ntauri_mobile_renderer_parity_ios_screenshot_artifact_status=pass\\ntauri_mobile_renderer_parity_android_status=pass\\ntauri_mobile_renderer_parity_android_render_log_vulkan_marker_status=pass\\ntauri_mobile_renderer_parity_android_render_log_foreground_marker_status=pass\\ntauri_mobile_renderer_parity_android_mdi_proof_status=pass\\ntauri_mobile_renderer_parity_android_screenshot_artifact_status=pass\\n' > build/test-gui-web-2d-platform-evidence-bundle-freshness-duplicate-diagnostic/env/mobile.env && printf 'gui_showcase_4k_200fps_status=pass\\ngui_showcase_4k_200fps_rss_status=pass\\ngui_showcase_4k_200fps_checksum_status=pass\\ngui_showcase_4k_200fps_retained_render_mode_status=pass\\ngui_showcase_4k_200fps_retained_redraw_status=pass\\n' > build/test-gui-web-2d-platform-evidence-bundle-freshness-duplicate-diagnostic/env/4k.env && printf 'gui_showcase_8k_perf_status=pass\\ngui_showcase_8k_perf_rss_status=pass\\ngui_showcase_8k_perf_checksum_status=pass\\ngui_showcase_8k_perf_retained_render_mode_status=pass\\ngui_showcase_8k_perf_retained_redraw_status=pass\\n' > build/test-gui-web-2d-platform-evidence-bundle-freshness-duplicate-diagnostic/env/8k.env && printf 'html_css_full_rendering_goal_status=pass\\nhtml_css_full_rendering_goal_all_html_elements_ready_status=pass\\nhtml_css_full_rendering_goal_all_css_properties_ready_status=pass\\nhtml_css_full_rendering_goal_animation_css_status=pass\\n' > build/test-gui-web-2d-platform-evidence-bundle-freshness-duplicate-diagnostic/env/html.env && printf 'production_gui_web_renderer_parity_status=pass\\n' > build/test-gui-web-2d-platform-evidence-bundle-freshness-duplicate-diagnostic/env/production.env && printf 'gui_web_2d_platform_freshness_status=pass\\ngui_web_2d_platform_freshness_reason=pass\\ngui_web_2d_platform_freshness_source_revision=abc123\\ngui_web_2d_platform_freshness_runtime_build=simple-self-hosted\\ngui_web_2d_platform_freshness_browser_webview_electron_revision=chrome-electron-webview\\ngui_web_2d_platform_freshness_graphics_sdk_driver=vulkan-metal-d3d12\\ngui_web_2d_platform_freshness_runbook_version=2026-06-28\\ngui_web_2d_platform_freshness_missing_metadata=\\ngui_web_2d_platform_freshness_missing_metadata=\\n' > build/test-gui-web-2d-platform-evidence-bundle-freshness-duplicate-diagnostic/env/fresh.env && BUILD_DIR=build/test-gui-web-2d-platform-evidence-bundle-freshness-duplicate-diagnostic/out REPORT_PATH=build/test-gui-web-2d-platform-evidence-bundle-freshness-duplicate-diagnostic/report.md NATIVE_RENDER_LOG_PLATFORM_MATRIX_ENV=build/test-gui-web-2d-platform-evidence-bundle-freshness-duplicate-diagnostic/env/native.env TAURI_MOBILE_RENDERER_PARITY_ENV=build/test-gui-web-2d-platform-evidence-bundle-freshness-duplicate-diagnostic/env/mobile.env GUI_SHOWCASE_4K_200FPS_ENV=build/test-gui-web-2d-platform-evidence-bundle-freshness-duplicate-diagnostic/env/4k.env GUI_SHOWCASE_8K_200FPS_ENV=build/test-gui-web-2d-platform-evidence-bundle-freshness-duplicate-diagnostic/env/8k.env HTML_CSS_FULL_RENDERING_GOAL_ENV=build/test-gui-web-2d-platform-evidence-bundle-freshness-duplicate-diagnostic/env/html.env PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=build/test-gui-web-2d-platform-evidence-bundle-freshness-duplicate-diagnostic/env/production.env GUI_WEB_2D_PLATFORM_FRESHNESS_ENV=build/test-gui-web-2d-platform-evidence-bundle-freshness-duplicate-diagnostic/env/fresh.env sh scripts/check/check-gui-web-2d-platform-evidence-bundle.shs"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read("build/test-gui-web-2d-platform-evidence-bundle-freshness-duplicate-diagnostic/out/evidence.env")
+expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_status=fail")
+expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_failed_gate_count=1")
+expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_missing_gate_count=0")
+expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_failed_gates=cross-platform-freshness")
+expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_cross_platform_freshness_status=fail")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 13 |
-| Active scenarios | 13 |
+| Total scenarios | 14 |
+| Active scenarios | 14 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

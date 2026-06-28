@@ -1110,6 +1110,10 @@ Normal-review acceptance:
   non-empty diagnostic failure lists such as duplicate source, missing source,
   mismatched metadata, or missing metadata lanes. A contradictory freshness env
   cannot satisfy `cross-platform-freshness`.
+- 2026-06-28 bundle duplicate diagnostic coverage:
+  `test/03_system/check/gui_web_2d_platform_evidence_bundle_spec.spl` now also
+  asserts that duplicate freshness diagnostic keys fail the
+  `cross-platform-freshness` gate even when the duplicated values are empty.
 
 ## Hard Stop Conditions
 
