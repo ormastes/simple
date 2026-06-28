@@ -92,6 +92,13 @@ Latest local host probe:
 `reason=missing_local_vllm`. Keep `FR-LLM-RUNTIME-0001` open until a configured
 local endpoint proves `/v1/models` serves the selected base model.
 
+Latest Torch/CUDA host probe:
+`doc/09_report/2026/06/llm_runtime_torch_cuda_host_probe_2026-06-28.md`
+records Python Torch `2.9.1+cu130` with CUDA available and visible NVIDIA GPUs,
+plus a passing Simple dynamic Torch SFFI readiness spec. Keep
+`FR-LLM-RUNTIME-0003` open until Simple/libtorch executes and records a real
+CUDA optimizer step.
+
 ## Focused Checks
 
 Use the focused public-rendering guard after changing runtime manuals,
