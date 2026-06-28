@@ -147,6 +147,8 @@ stubs with focused tests, then return to the readiness bridge.
 - `src/app/llm_runtime/serve_plan.spl`
 - `test/01_unit/app/llm_runtime/vllm_readiness_spec.spl`
 - `test/unit/app/llm_runtime/vllm_readiness_spec.spl`
+- `doc/06_spec/01_unit/app/llm_runtime/vllm_readiness_spec.md`
+- `doc/06_spec/unit/app/llm_runtime/vllm_readiness_spec.md`
 - `test/03_system/app/llm_runtime/feature/vllm_torch_readiness_spec.spl`
 - `doc/06_spec/03_system/app/llm_runtime/feature/vllm_torch_readiness_spec.md`
 
@@ -308,7 +310,7 @@ Runtime-adjacent decision record:
 - `test/01_unit/app/llm_dashboard/collectors/vllm_control_panel_spec.spl`
 - `test/unit/app/llm_dashboard/collectors/vllm_control_panel_spec.spl`
 - `doc/06_spec/01_unit/app/llm_dashboard/collectors/vllm_control_panel_spec.md`
-- `doc/06_spec/test/unit/app/llm_dashboard/collectors/vllm_control_panel_spec.md`
+- `doc/06_spec/unit/app/llm_dashboard/collectors/vllm_control_panel_spec.md`
 
 The dashboard now renders a vLLM control panel with `preflight`, `start`,
 `poll`, `probe`, and `stop` intents and exposes `/api/vllm/control` for
@@ -345,7 +347,7 @@ Runtime-adjacent decision record:
 - `test/01_unit/app/llm_runtime/vllm_dashboard_live_control_spec.spl`
 - `test/unit/app/llm_runtime/vllm_dashboard_live_control_spec.spl`
 - `doc/06_spec/01_unit/app/llm_runtime/vllm_dashboard_live_control_spec.md`
-- `doc/06_spec/test/unit/app/llm_runtime/vllm_dashboard_live_control_spec.md`
+- `doc/06_spec/unit/app/llm_runtime/vllm_dashboard_live_control_spec.md`
 
 The runtime now owns dashboard-requested vLLM control execution. The pure
 control module validates `preflight`, `start`, `poll`, `probe`, and `stop`
@@ -377,7 +379,7 @@ Runtime-adjacent decision record:
 - `test/01_unit/app/llm_runtime/vllm_control_cli_spec.spl`
 - `test/unit/app/llm_runtime/vllm_control_cli_spec.spl`
 - `doc/06_spec/01_unit/app/llm_runtime/vllm_control_cli_spec.md`
-- `doc/06_spec/test/unit/app/llm_runtime/vllm_control_cli_spec.md`
+- `doc/06_spec/unit/app/llm_runtime/vllm_control_cli_spec.md`
 
 The runtime exposes `control_cli.spl`, which accepts explicit action,
 base-model, endpoint, pid, and local resource flags and emits public JSONL. The
@@ -417,7 +419,7 @@ Runtime-adjacent decision record:
 - `test/01_unit/app/cli/llm_runtime_control_command_spec.spl`
 - `test/unit/app/cli/llm_runtime_control_command_spec.spl`
 - `doc/06_spec/01_unit/app/cli/llm_runtime_control_command_spec.md`
-- `doc/06_spec/test/unit/app/cli/llm_runtime_control_command_spec.md`
+- `doc/06_spec/unit/app/cli/llm_runtime_control_command_spec.md`
 
 Mirrored SPipe coverage now proves the top-level command is registered in the
 canonical CLI command table, routed by the direct dispatcher branch, and shown
@@ -445,7 +447,7 @@ vLLM command logic.
 - `test/01_unit/app/llm_runtime/vllm_control_cli_spec.spl`
 - `test/unit/app/llm_runtime/vllm_control_cli_spec.spl`
 - `doc/06_spec/01_unit/app/llm_runtime/vllm_control_cli_spec.md`
-- `doc/06_spec/test/unit/app/llm_runtime/vllm_control_cli_spec.md`
+- `doc/06_spec/unit/app/llm_runtime/vllm_control_cli_spec.md`
 
 The runtime control CLI now accepts `--detect-resources` for local host
 capability classification. When explicit `--vllm-available` or
@@ -477,7 +479,7 @@ Runtime-adjacent decision record:
 - `test/01_unit/app/llm_dashboard/collectors/vllm_control_panel_spec.spl`
 - `test/unit/app/llm_dashboard/collectors/vllm_control_panel_spec.spl`
 - `doc/06_spec/01_unit/app/llm_dashboard/collectors/vllm_control_panel_spec.md`
-- `doc/06_spec/test/unit/app/llm_dashboard/collectors/vllm_control_panel_spec.md`
+- `doc/06_spec/unit/app/llm_dashboard/collectors/vllm_control_panel_spec.md`
 
 The web dashboard `/api/vllm/control` route now accepts query-style control
 inputs for `action`, `pid`, `base_model`/`base-model`, `endpoint`,
