@@ -1,0 +1,107 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/llm_goal_evidence}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/2026/06/llm_goal_evidence_$(date -u +%F).md}"
+OUT_ENV="$BUILD_DIR/evidence.env"
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+rm -f "$OUT_ENV" "$REPORT_PATH"
+
+run_lane() {
+    key="$1"
+    expected="$2"
+    shift 2
+    log="$BUILD_DIR/$key.log"
+    exit_code=0
+    if "$@" >"$log" 2>&1; then
+        :
+    else
+        exit_code=$?
+    fi
+    if grep -F "STATUS: PASS" "$log" >/dev/null 2>&1; then
+        status="pass"
+    elif grep -F "STATUS: WARN" "$log" >/dev/null 2>&1; then
+        status="warn"
+    else
+        status="fail"
+    fi
+    if [ "$exit_code" -ne 0 ]; then
+        status="fail"
+    fi
+    eval "${key}_status=\$status"
+    eval "${key}_exit=\$exit_code"
+    eval "${key}_expected=\$expected"
+}
+
+run_lane context_ponytail pass sh scripts/check/check-llm-tooling-context-ponytail-mimic.shs
+run_lane dashboard pass sh scripts/check/check-llm-dashboard-evidence.shs
+run_lane vllm_host warn sh scripts/check/check-llm-runtime-vllm-host-probe.shs
+run_lane svllm_local pass sh scripts/check/check-llm-runtime-svllm-local-readiness.shs
+run_lane torch_optimizer warn sh scripts/check/check-llm-runtime-torch-cuda-optimizer-probe.shs
+run_lane finetune_guard pass sh scripts/check/check-llm-finetune-guard-evidence.shs
+run_lane public_absence pass sh scripts/check/check-llm-tooling-public-absence-rendering.shs
+
+status="pass"
+warn_count=0
+fail_count=0
+for key in context_ponytail dashboard vllm_host svllm_local torch_optimizer finetune_guard public_absence; do
+    eval "lane_status=\${${key}_status}"
+    eval "expected=\${${key}_expected}"
+    if [ "$lane_status" = "fail" ]; then
+        status="fail"
+        fail_count=$((fail_count + 1))
+    elif [ "$lane_status" = "warn" ]; then
+        warn_count=$((warn_count + 1))
+        if [ "$expected" != "warn" ]; then
+            status="fail"
+            fail_count=$((fail_count + 1))
+        fi
+    elif [ "$lane_status" != "$expected" ] && [ "$expected" != "warn" ]; then
+        status="fail"
+        fail_count=$((fail_count + 1))
+    fi
+done
+
+{
+    printf '%s\n' "llm_goal_evidence_status=$status"
+    printf '%s\n' "llm_goal_evidence_warn_count=$warn_count"
+    printf '%s\n' "llm_goal_evidence_fail_count=$fail_count"
+    for key in context_ponytail dashboard vllm_host svllm_local torch_optimizer finetune_guard public_absence; do
+        eval "lane_status=\${${key}_status}"
+        eval "exit_code=\${${key}_exit}"
+        eval "expected=\${${key}_expected}"
+        printf '%s\n' "llm_goal_evidence_${key}_status=$lane_status"
+        printf '%s\n' "llm_goal_evidence_${key}_expected=$expected"
+        printf '%s\n' "llm_goal_evidence_${key}_exit=$exit_code"
+    done
+} >"$OUT_ENV"
+
+{
+    printf '# LLM Goal Evidence\n\n'
+    printf '%s\n' "- status: \`$status\`"
+    printf '%s\n' "- warn_count: \`$warn_count\`"
+    printf '%s\n' "- fail_count: \`$fail_count\`"
+    printf '%s\n' "- env: \`$OUT_ENV\`"
+    printf '\n'
+    printf '| lane | status | expected | exit | log |\n'
+    printf '|------|--------|----------|------|-----|\n'
+    for key in context_ponytail dashboard vllm_host svllm_local torch_optimizer finetune_guard public_absence; do
+        eval "lane_status=\${${key}_status}"
+        eval "exit_code=\${${key}_exit}"
+        eval "expected=\${${key}_expected}"
+        printf '| %s | `%s` | `%s` | `%s` | `%s` |\n' "$key" "$lane_status" "$expected" "$exit_code" "$BUILD_DIR/$key.log"
+    done
+    printf '\n'
+    printf 'This aggregate proves the current local LLM tooling evidence lanes remain reproducible. WARN lanes are expected only for host-dependent gates that are still open on this machine: live vLLM serving and Simple/libtorch CUDA optimizer execution. This report is not release-completion evidence for those live host gates.\n'
+} >"$REPORT_PATH"
+
+if [ "$status" = "pass" ]; then
+    echo "STATUS: PASS llm-goal-evidence warn_count=$warn_count"
+else
+    echo "STATUS: FAIL llm-goal-evidence warn_count=$warn_count fail_count=$fail_count"
+    exit 1
+fi

@@ -121,6 +121,20 @@ hosts must fail the lane instead of recording a warning.
 
 ## Focused Checks
 
+Use the aggregate local LLM evidence wrapper when checking the current
+context/Ponytail, dashboard, vLLM, svLLM, Torch, fine-tune, and public-absence
+lanes together:
+
+```bash
+sh scripts/check/check-llm-goal-evidence.shs
+```
+
+The aggregate report is written to
+`doc/09_report/2026/06/llm_goal_evidence_2026-06-28.md`. It treats live vLLM
+and Simple/libtorch CUDA optimizer host gaps as expected WARN lanes on hosts
+where those dependencies are not installed; run the focused wrappers with their
+strict modes when a release gate requires those host-dependent proofs to pass.
+
 Use the focused public-rendering guard after changing runtime manuals,
 dashboard JSONL wording, or evidence docs:
 
