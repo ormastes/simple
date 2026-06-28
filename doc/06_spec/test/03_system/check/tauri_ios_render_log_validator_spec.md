@@ -113,6 +113,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_ios_render_log_validat
 - The iOS renderer wrapper keeps render-log, Metal, MDI event/capture,
   performance, input-to-paint, and animation diagnostic rows on early
   unavailable/fail exits.
+- The direct iOS renderer wrapper emits screenshot artifact size, dimensions,
+  file status/reason, and pixel-diversity rows on success and early exits.
 - The iOS renderer wrapper preserves validator-derived failure rows on later
   fail diagnostics instead of masking them with generic duplicate keys.
 - The iOS renderer wrapper persists render-log and MDI validator output and
@@ -132,7 +134,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_ios_render_log_validat
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 26 lines folded for reproduction.
+Runnable source: 29 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -154,6 +156,7 @@ expect(evidence).to_contain("ios_render_log_empty_source_count=0")
 expect(evidence).to_contain("ios_render_log_symlink_source_count=0")
 expect(evidence).to_contain("ios_render_log_hardlink_source_count=0")
 expect(evidence).to_contain("ios_render_log_duplicate_source_count=0")
+expect(evidence).to_contain("ios_render_log_nonregular_source_count=0")
 expect(evidence).to_contain("ios_render_log_source_coherence_status=pass")
 expect(evidence).to_contain("ios_render_log_coherent_source_path=" + root + "/ios.log")
 expect(evidence).to_contain("ios_render_log_coherent_source_size_bytes=223")
@@ -171,13 +174,13 @@ expect(evidence).to_contain("ios_render_log_failure_marker_status=pass")
 #### binds html length evidence to the coherent iOS Metal source
 
 - Confirm html_len is emitted from the coherent WKWebView/CAMetalLayer source
-   - Expected: evidence does not contain `ios_render_log_html_len=999`
+- expect not
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -206,7 +209,7 @@ expect_not(evidence.contains("ios_render_log_html_len=999"))
 #### rejects malformed iOS render html length markers
 
 - Confirm iOS render html_len must be a clean positive decimal row
-   - Expected: huge does not contain `ios_render_log_html_len=10000001`
+- expect not
 
 
 <details>
@@ -442,7 +445,7 @@ expect(evidence).to_contain("ios_render_log_metal_context_status=pass")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -463,6 +466,7 @@ expect(evidence).to_contain("ios_render_log_missing_source_count=1")
 expect(evidence).to_contain("ios_render_log_empty_source_count=0")
 expect(evidence).to_contain("ios_render_log_symlink_source_count=0")
 expect(evidence).to_contain("ios_render_log_hardlink_source_count=0")
+expect(evidence).to_contain("ios_render_log_nonregular_source_count=0")
 expect(evidence).to_contain("ios_render_log_marker_status=pass")
 expect(evidence).to_contain("ios_render_log_metal_context_status=pass")
 ```
@@ -477,7 +481,7 @@ expect(evidence).to_contain("ios_render_log_metal_context_status=pass")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -499,6 +503,7 @@ expect(evidence).to_contain("ios_render_log_missing_source_count=0")
 expect(evidence).to_contain("ios_render_log_empty_source_count=1")
 expect(evidence).to_contain("ios_render_log_symlink_source_count=0")
 expect(evidence).to_contain("ios_render_log_hardlink_source_count=0")
+expect(evidence).to_contain("ios_render_log_nonregular_source_count=0")
 expect(evidence).to_contain("ios_render_log_marker_status=pass")
 expect(evidence).to_contain("ios_render_log_metal_context_status=pass")
 ```
@@ -513,7 +518,7 @@ expect(evidence).to_contain("ios_render_log_metal_context_status=pass")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -551,7 +556,7 @@ expect(evidence).to_contain("ios_render_log_metal_context_status=pass")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -590,7 +595,7 @@ expect(evidence).to_contain("ios_render_log_metal_context_status=pass")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 23 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -750,20 +755,40 @@ expect(no_metal).to_contain("ios_render_log_metal_marker_status=fail")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 30 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val root = "build/test-tauri-ios-render-log-validator-failure"
 val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
     "printf '[tauri-shell] ios renderer context: backend=WKWebView metal_expected=true metal_layer=CAMetalLayer\\n[tauri-shell] render, html_len=347702\\nCAMetalLayer Metal renderer ready\\n[tauri-shell] eval FAIL: rejected\\n' > " + root + "/ios.log && " +
-    "node scripts/check/validate-tauri-ios-render-log-proof.js " + root + "/ios.log > " + root + "/evidence.env"
+    "node scripts/check/validate-tauri-ios-render-log-proof.js " + root + "/ios.log > " + root + "/eval.env; " +
+    "printf '[tauri-shell] ios renderer context: backend=WKWebView metal_expected=true metal_layer=CAMetalLayer\\n[tauri-shell] render, html_len=347702\\nCAMetalLayer Metal renderer ready\\nFatal signal 11\\n' > " + root + "/fatal.log && " +
+    "node scripts/check/validate-tauri-ios-render-log-proof.js " + root + "/fatal.log > " + root + "/fatal.env; " +
+    "printf '[tauri-shell] ios renderer context: backend=WKWebView metal_expected=true metal_layer=CAMetalLayer\\n[tauri-shell] render, html_len=347702\\nCAMetalLayer Metal renderer ready\\nNSURLErrorDomain failed provisional load\\n' > " + root + "/network.log && " +
+    "node scripts/check/validate-tauri-ios-render-log-proof.js " + root + "/network.log > " + root + "/network.env; " +
+    "printf '[tauri-shell] ios renderer context: backend=WKWebView metal_expected=true metal_layer=CAMetalLayer\\n[tauri-shell] render, html_len=347702\\nCAMetalLayer Metal renderer ready\\nHeadless UI completed\\n' > " + root + "/headless.log && " +
+    "node scripts/check/validate-tauri-ios-render-log-proof.js " + root + "/headless.log > " + root + "/headless.env; " +
+    "printf '[tauri-shell] ios renderer context: backend=WKWebView metal_expected=true metal_layer=CAMetalLayer\\n[tauri-shell] render, html_len=347702\\nCAMetalLayer Metal renderer ready\\nsubprocess exited with code 1\\n' > " + root + "/subprocess.log && " +
+    "node scripts/check/validate-tauri-ios-render-log-proof.js " + root + "/subprocess.log > " + root + "/subprocess.env"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(1)
 
-val evidence = file_read(root + "/evidence.env")
-expect(evidence).to_contain("ios_render_log_validation_reason=ios-render-log-failure-marker")
-expect(evidence).to_contain("ios_render_log_failure_marker_status=fail")
+val eval_failure = file_read(root + "/eval.env")
+val fatal = file_read(root + "/fatal.env")
+val network = file_read(root + "/network.env")
+val headless = file_read(root + "/headless.env")
+val subprocess = file_read(root + "/subprocess.env")
+expect(eval_failure).to_contain("ios_render_log_validation_reason=ios-render-log-failure-marker")
+expect(eval_failure).to_contain("ios_render_log_failure_marker_status=fail")
+expect(fatal).to_contain("ios_render_log_validation_reason=ios-render-log-failure-marker")
+expect(fatal).to_contain("ios_render_log_failure_marker_status=fail")
+expect(network).to_contain("ios_render_log_validation_reason=ios-render-log-failure-marker")
+expect(network).to_contain("ios_render_log_failure_marker_status=fail")
+expect(headless).to_contain("ios_render_log_validation_reason=ios-render-log-failure-marker")
+expect(headless).to_contain("ios_render_log_failure_marker_status=fail")
+expect(subprocess).to_contain("ios_render_log_validation_reason=ios-render-log-failure-marker")
+expect(subprocess).to_contain("ios_render_log_failure_marker_status=fail")
 ```
 
 </details>
@@ -776,7 +801,7 @@ expect(evidence).to_contain("ios_render_log_failure_marker_status=fail")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 49 lines folded for reproduction.
+Runnable source: 82 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -790,6 +815,15 @@ val evidence = file_read(root + "/stdout.env")
 step("Confirm early iOS wrapper exits preserve normalized render-log and MDI diagnostics")
 expect(evidence).to_contain("ios_render_log_status=")
 expect(evidence).to_contain("ios_mdi_proof_validation_env=")
+expect(evidence).to_contain("ios_screenshot_actual_size_bytes=")
+expect(evidence).to_contain("ios_screenshot_file_status=unavailable")
+expect(evidence).to_contain("ios_screenshot_file_reason=not-run")
+expect(evidence).to_contain("ios_screenshot_artifact_status=unavailable")
+expect(evidence).to_contain("ios_screenshot_width=")
+expect(evidence).to_contain("ios_screenshot_height=")
+expect(evidence).to_contain("ios_screenshot_distinct_color_count=")
+expect(evidence).to_contain("ios_screenshot_distinct_color_min=16")
+expect(evidence).to_contain("ios_screenshot_pixel_diversity_status=unavailable")
 expect(evidence).to_contain("ios_layout_status=")
 expect(evidence).to_contain("ios_metal_log_status=")
 expect(evidence).to_contain("ios_render_log_validation_status=")
@@ -805,6 +839,7 @@ expect(evidence).to_contain("ios_render_log_nonregular_source_count=0")
 expect(evidence).to_contain("ios_render_log_source_coherence_status=")
 expect(evidence).to_contain("ios_render_log_coherent_source_path=")
 expect(evidence).to_contain("ios_render_log_coherent_source_size_bytes=")
+expect(evidence).to_contain("ios_render_log_coherent_source_artifact_status=unavailable")
 expect(evidence).to_contain("ios_render_log_marker_status=")
 expect(evidence).to_contain("ios_render_log_html_len=")
 expect(evidence).to_contain("ios_render_log_metal_marker_status=")
@@ -817,16 +852,32 @@ expect(evidence).to_contain("ios_mdi_failure_marker_status=")
 expect(evidence).to_contain("ios_mdi_proof_requested_source_count=0")
 expect(evidence).to_contain("ios_mdi_proof_source_count=0")
 expect(evidence).to_contain("ios_mdi_proof_marker_source_count=0")
+expect(evidence).to_contain("ios_mdi_proof_missing_source_count=0")
+expect(evidence).to_contain("ios_mdi_proof_symlink_source_count=0")
+expect(evidence).to_contain("ios_mdi_proof_hardlink_source_count=0")
+expect(evidence).to_contain("ios_mdi_proof_duplicate_source_count=0")
+expect(evidence).to_contain("ios_mdi_proof_empty_source_count=0")
+expect(evidence).to_contain("ios_mdi_proof_nonregular_source_count=0")
+expect(evidence).to_contain("ios_mdi_proof_marker_source_path=")
+expect(evidence).to_contain("ios_mdi_proof_marker_source_size_bytes=")
 expect(evidence).to_contain("ios_mdi_proof_marker_source_actual_size_bytes=")
 expect(evidence).to_contain("ios_mdi_proof_marker_source_file_status=unavailable")
 expect(evidence).to_contain("ios_mdi_proof_marker_source_file_reason=not-run")
-expect(evidence).to_contain("ios_mdi_proof_missing_source_count=0")
-expect(evidence).to_contain("ios_mdi_proof_symlink_source_count=0")
-expect(evidence).to_contain("ios_mdi_proof_duplicate_source_count=0")
-expect(evidence).to_contain("ios_mdi_proof_empty_source_count=0")
+expect(evidence).to_contain("ios_mdi_proof_marker_source_artifact_status=unavailable")
+expect(evidence).to_contain("ios_mdi_proof_window_count=")
 expect(evidence).to_contain("ios_mdi_render_status=")
 expect(evidence).to_contain("ios_mdi_event_status=")
 expect(evidence).to_contain("ios_mdi_event_body_click_routed=")
+expect(evidence).to_contain("ios_mdi_event_body_input_routed=")
+expect(evidence).to_contain("ios_mdi_event_body_key_routed=")
+expect(evidence).to_contain("ios_mdi_event_has_desktop=")
+expect(evidence).to_contain("ios_mdi_event_drag_runtime_available=")
+expect(evidence).to_contain("ios_mdi_event_drag_events_available=")
+expect(evidence).to_contain("ios_mdi_event_drag_moved=")
+expect(evidence).to_contain("ios_mdi_event_window_event_runtime_available=")
+expect(evidence).to_contain("ios_mdi_event_app_action_control_found=")
+expect(evidence).to_contain("ios_mdi_event_app_input_control_found=")
+expect(evidence).to_contain("ios_mdi_event_taskbar_icons_visible=")
 expect(evidence).to_contain("ios_mdi_event_taskbar_labels_visible=")
 expect(evidence).to_contain("ios_mdi_capture_status=")
 expect(evidence).to_contain("ios_mdi_performance_status=")
@@ -848,7 +899,7 @@ expect(evidence).to_contain("ios_mdi_css_animation_probe=")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 44 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -864,6 +915,7 @@ expect(direct).to_contain("emit_ios_render_log_coherent_source_artifact_rows")
 expect(direct).to_contain("ios_render_log_coherent_source_actual_size_bytes=")
 expect(direct).to_contain("file_status=\"unavailable\"")
 expect(direct).to_contain("file_reason=\"not-run\"")
+expect(direct).to_contain("ios_render_log_coherent_source_artifact_status=")
 expect(direct).to_contain("emit_existing_or_default ios_render_log_symlink_source_count 0 \"$IOS_RENDER_LOG_VALIDATION_ENV\"")
 expect(direct).to_contain("emit_existing_or_default ios_render_log_hardlink_source_count 0 \"$IOS_RENDER_LOG_VALIDATION_ENV\"")
 expect(direct).to_contain("emit_existing_or_default ios_render_log_duplicate_source_count 0 \"$IOS_RENDER_LOG_VALIDATION_ENV\"")
@@ -874,9 +926,25 @@ expect(direct).to_contain("emit_existing_or_default ios_render_log_fallback_mark
 expect(direct).to_contain("emit_existing_or_default ios_mdi_proof_status \"$diagnostic_status\" \"$MDI_PROOF_VALIDATION_ENV\"")
 expect(direct).to_contain("emit_existing_or_default ios_mdi_failure_marker_status \"$diagnostic_status\" \"$MDI_PROOF_VALIDATION_ENV\"")
 expect(direct).to_contain("emit_existing_or_default ios_mdi_proof_symlink_source_count 0 \"$MDI_PROOF_VALIDATION_ENV\"")
+expect(direct).to_contain("emit_existing_or_default ios_mdi_proof_hardlink_source_count 0 \"$MDI_PROOF_VALIDATION_ENV\"")
 expect(direct).to_contain("emit_existing_or_default ios_mdi_proof_duplicate_source_count 0 \"$MDI_PROOF_VALIDATION_ENV\"")
+expect(direct).to_contain("emit_existing_or_default ios_mdi_proof_nonregular_source_count 0 \"$MDI_PROOF_VALIDATION_ENV\"")
 expect(direct).to_contain("emit_ios_mdi_proof_marker_source_artifact_rows")
+expect(direct).to_contain("ios_mdi_proof_marker_source_artifact_status=")
+expect(direct).to_contain("emit_existing_or_default ios_mdi_proof_window_count \"\" \"$MDI_PROOF_VALIDATION_ENV\"")
 expect(direct).to_contain("emit_existing_or_default ios_mdi_event_status \"$diagnostic_status\" \"$MDI_PROOF_VALIDATION_ENV\"")
+expect(direct).to_contain("emit_existing_or_default ios_mdi_event_has_desktop \"\" \"$MDI_PROOF_VALIDATION_ENV\"")
+expect(direct).to_contain("emit_existing_or_default ios_mdi_event_drag_runtime_available \"\" \"$MDI_PROOF_VALIDATION_ENV\"")
+expect(direct).to_contain("emit_existing_or_default ios_mdi_event_drag_events_available \"\" \"$MDI_PROOF_VALIDATION_ENV\"")
+expect(direct).to_contain("emit_existing_or_default ios_mdi_event_drag_moved \"\" \"$MDI_PROOF_VALIDATION_ENV\"")
+expect(direct).to_contain("emit_existing_or_default ios_mdi_event_window_event_runtime_available \"\" \"$MDI_PROOF_VALIDATION_ENV\"")
+expect(direct).to_contain("emit_existing_or_default ios_mdi_event_app_action_control_found \"\" \"$MDI_PROOF_VALIDATION_ENV\"")
+expect(direct).to_contain("emit_existing_or_default ios_mdi_event_app_input_control_found \"\" \"$MDI_PROOF_VALIDATION_ENV\"")
+expect(direct).to_contain("emit_existing_or_default ios_mdi_event_body_click_routed \"\" \"$MDI_PROOF_VALIDATION_ENV\"")
+expect(direct).to_contain("emit_existing_or_default ios_mdi_event_body_input_routed \"\" \"$MDI_PROOF_VALIDATION_ENV\"")
+expect(direct).to_contain("emit_existing_or_default ios_mdi_event_body_key_routed \"\" \"$MDI_PROOF_VALIDATION_ENV\"")
+expect(direct).to_contain("emit_existing_or_default ios_mdi_event_taskbar_icons_visible \"\" \"$MDI_PROOF_VALIDATION_ENV\"")
+expect(direct).to_contain("emit_existing_or_default ios_mdi_event_taskbar_labels_visible \"\" \"$MDI_PROOF_VALIDATION_ENV\"")
 expect(direct).to_contain("emit_existing_or_default ios_mdi_interaction_latency_status \"$diagnostic_status\" \"$MDI_PROOF_VALIDATION_ENV\"")
 expect(direct).to_contain("emit_existing_or_default ios_mdi_animation_status \"$diagnostic_status\" \"$MDI_PROOF_VALIDATION_ENV\"")
 ```
@@ -888,7 +956,7 @@ expect(direct).to_contain("emit_existing_or_default ios_mdi_animation_status \"$
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 56 lines folded for reproduction.
+Runnable source: 105 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -901,6 +969,11 @@ expect(validator).to_contain("coherentSourceHtmlLen")
 expect(validator).to_contain("duplicateSourceCount")
 expect(validator).to_contain("ios-render-log-source-duplicate")
 expect(validator).to_contain("CAMetalLayer\\\\s+Metal renderer ready")
+expect(validator).to_contain("Fatal signal")
+expect(validator).to_contain("NSURLErrorDomain")
+expect(validator).to_contain("failed provisional load")
+expect(validator).to_contain("Headless UI completed")
+expect(validator).to_contain("subprocess exited with code")
 expect(direct).to_contain("validate-tauri-ios-render-log-proof.js")
 expect(direct).to_contain("ios_render_log.validation.env")
 expect(direct).to_contain("ios_mdi_proof.validation.env")
@@ -917,6 +990,7 @@ expect(direct).to_contain("ios_render_log_coherent_source_size_bytes=$ios_render
 expect(direct).to_contain("ios_render_log_coherent_source_actual_size_bytes=$ios_render_log_coherent_source_actual_size_bytes")
 expect(direct).to_contain("ios_render_log_coherent_source_file_status=$ios_render_log_coherent_source_file_status")
 expect(direct).to_contain("ios_render_log_coherent_source_file_reason=$ios_render_log_coherent_source_file_reason")
+expect(direct).to_contain("ios_render_log_coherent_source_artifact_status=$ios_render_log_coherent_source_artifact_status")
 expect(direct).to_contain("ios-render-log-coherent-source-symlink")
 expect(direct).to_contain("ios-render-log-coherent-source-hardlink")
 expect(direct).to_contain("ios-render-log-coherent-source-size-mismatch")
@@ -935,7 +1009,19 @@ expect(direct).to_contain("ios_mdi_proof_duplicate_source_count")
 expect(direct).to_contain("ios_mdi_proof_marker_source_actual_size_bytes=$ios_mdi_proof_marker_source_actual_size_bytes")
 expect(direct).to_contain("ios_mdi_proof_marker_source_file_status=$ios_mdi_proof_marker_source_file_status")
 expect(direct).to_contain("ios_mdi_proof_marker_source_file_reason=$ios_mdi_proof_marker_source_file_reason")
+expect(direct).to_contain("ios_mdi_proof_marker_source_artifact_status=$ios_mdi_proof_marker_source_artifact_status")
 expect(direct).to_contain("ios-mdi-proof-marker-source-size-mismatch")
+expect(direct).to_contain("load_ios_screenshot_artifact_rows")
+expect(direct).to_contain("ios_screenshot_actual_size_bytes=$ios_screenshot_actual_size_bytes")
+expect(direct).to_contain("ios_screenshot_file_status=$ios_screenshot_file_status")
+expect(direct).to_contain("ios_screenshot_file_reason=$ios_screenshot_file_reason")
+expect(direct).to_contain("ios_screenshot_artifact_status=$ios_screenshot_artifact_status")
+expect(direct).to_contain("ios_screenshot_width=$ios_screenshot_width")
+expect(direct).to_contain("ios_screenshot_height=$ios_screenshot_height")
+expect(direct).to_contain("ios_screenshot_distinct_color_count=$ios_screenshot_distinct_color_count")
+expect(direct).to_contain("ios_screenshot_pixel_diversity_status=$ios_screenshot_pixel_diversity_status")
+expect(direct).to_contain("ios-screenshot-artifact-")
+expect(direct).to_contain("ios-screenshot-pixel-diversity-failed")
 expect(direct).to_contain("ios_mdi_event_body_click_routed")
 expect(direct).to_contain("ios_mdi_event_taskbar_labels_visible")
 expect(aggregate).to_contain("TAURI_MOBILE_RENDERER_IOS_RENDER_LOG_VALIDATOR")
@@ -954,6 +1040,7 @@ expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_render_log_cohere
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_render_log_coherent_source_actual_size_bytes")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_render_log_coherent_source_file_status")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_render_log_coherent_source_file_reason")
+expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_render_log_coherent_source_artifact_status")
 expect(aggregate).to_contain("ios-render-log-coherent-source-missing")
 expect(aggregate).to_contain("ios-render-log-coherent-source-size-mismatch")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_render_log_tauri_context_status")
@@ -961,6 +1048,7 @@ expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_render_log_metal_
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_render_log_fallback_marker_status")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_mdi_event_body_click_routed")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_marker_source_count")
+expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_marker_source_artifact_status")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_symlink_source_count")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_duplicate_source_count")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_mdi_event_taskbar_labels_visible")
@@ -974,6 +1062,7 @@ expect(aggregate).to_contain("ios-render-log-source-symlink")
 expect(aggregate).to_contain("ios-render-log-source-hardlink")
 expect(aggregate).to_contain("ios-render-log-source-duplicate")
 expect(aggregate).to_contain("ios-render-log-source-not-regular")
+expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_screenshot_artifact_status")
 expect(tauri).to_contain("ios renderer context: backend=WKWebView")
 expect(tauri).to_contain("metal_layer=CAMetalLayer")
 ```
