@@ -257,11 +257,13 @@ Tasks:
     wrapper now carry explicit `[SqliteRow]` parameter types so checked
     execution no longer falls back on an untyped row parameter in the embedded
     SQL context renderer.
-12. Publish generic length/timing runtime symbols to the JIT registration list.
-    Status: done on 2026-06-28; `RUNTIME_SYMBOL_NAMES` now includes `rt_len`
-    and concrete `rt_time_now_*` entries, so checked/JIT context-mode code that
-    lowers dynamic `.len()` or timing helpers can resolve the symbols instead of
-    binding a NULL import.
+12. Publish context-mode runtime symbols and conversion aliases to the JIT
+    registration path. Status: done on 2026-06-28; `RUNTIME_SYMBOL_NAMES` now
+    includes `rt_len`, `rt_sleep_ms`, `rt_get_args`, and concrete
+    `rt_time_now_*` entries, and bare conversion calls such as `to_int`,
+    `to_float`, and `to_string` lower through the shared SFFI alias table before
+    cross-module import. Checked/JIT context-mode code no longer binds those
+    names as NULL imports.
 
 Evidence:
 
@@ -302,12 +304,20 @@ Evidence:
 - 2026-06-26 MCP binary discovery hardening: focused MCP analysis specs assert
   app and lower MCP check repo-root release and bootstrap binaries before
   falling back to `bin/simple`, matching the actual release workspace layout.
-- 2026-06-28 JIT symbol publication: `cargo check -p simple-common` passed, and
-  generated `runtime_symbol_entries.rs` contains both `rt_len` and
-  `rt_time_now_unix_micros` link-name declarations plus `RuntimeSymbolEntry`
-  registrations. The focused Rust JIT registration test did not complete within
-  the bounded timeout in this cold workspace, so generated-table evidence is the
-  current focused proof.
+- 2026-06-28 JIT symbol publication: the focused Rust JIT provider test
+  `cargo test -p simple-compiler test_jit_static_provider_resolves_generic_rt_len --lib`
+  passed and proves the static provider resolves `rt_len` plus
+  `rt_time_now_unix_micros`. The focused alias test
+  `cargo test -p simple-compiler conversion_aliases_resolve_to_runtime_symbols --lib`
+  passed and proves `to_int`/`to_i64`/`parse_int`,
+  `to_float`/`to_f64`/`parse_float`, and `to_string`/`to_text` resolve to
+  canonical runtime SFFI names before JIT import declaration. A rebuilt
+  bootstrap-profile seed no longer reports unresolved `rt_len`, `rt_sleep_ms`,
+  `rt_get_args`, or `to_int` for the focused context spec; it now stops in the
+  Simple test-runner path with `Array.merge` plus `test daemon unavailable`.
+  Full `bin/simple` deploy remains blocked because
+  `sh scripts/bootstrap/bootstrap-from-scratch.sh --deploy --no-mcp` failed in
+  Stage 2 before copying a new `release/x86_64-unknown-linux-gnu/simple`.
 
 ## Lane 3: Dashboard Tooling Artifact Panel
 
@@ -443,5 +453,5 @@ Tasks:
     `src/app/io/context_ops.spl` now imports `SqliteRow` and annotates
     `_context_sql_render_rows_filtered(...)` plus its wrapper with `[SqliteRow]`,
     removing the focused HIR lowering warning for that function from mirrored
-    context specs. The separate `rt_len` JIT fallback remains tracked as a
-    runtime symbol/deployment issue, not a row-inference issue.
+    context specs. The later runtime-symbol follow-up now tracks the remaining
+    JIT/deploy evidence separately from row-inference behavior.

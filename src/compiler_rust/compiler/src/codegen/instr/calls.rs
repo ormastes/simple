@@ -56,6 +56,22 @@ fn emit_profiler_call<M: Module>(
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::sffi_alias_target;
+
+    #[test]
+    fn conversion_aliases_resolve_to_runtime_symbols() {
+        assert_eq!(sffi_alias_target("to_int"), Some("rt_string_to_int"));
+        assert_eq!(sffi_alias_target("to_i64"), Some("rt_string_to_int"));
+        assert_eq!(sffi_alias_target("parse_int"), Some("rt_string_to_int"));
+        assert_eq!(sffi_alias_target("to_float"), Some("rt_string_to_float"));
+        assert_eq!(sffi_alias_target("to_f64"), Some("rt_string_to_float"));
+        assert_eq!(sffi_alias_target("to_string"), Some("rt_to_string"));
+        assert_eq!(sffi_alias_target("to_text"), Some("rt_to_string"));
+    }
+}
+
 fn emit_profiler_return<M: Module>(ctx: &mut InstrContext<'_, M>, builder: &mut FunctionBuilder) -> InstrResult<()> {
     if !crate::runtime_profile::is_profiling_active() {
         return Ok(());
@@ -2602,6 +2618,9 @@ pub fn sffi_alias_target(name: &str) -> Option<&'static str> {
         "rt_println" => Some("rt_println_value"),
         "rt_print" => Some("rt_print_value"),
         "len" | "length" => Some("rt_len"),
+        "to_text" | "to_string" | "str" => Some("rt_to_string"),
+        "to_int" | "to_i64" | "parse_int" => Some("rt_string_to_int"),
+        "to_float" | "to_f64" | "parse_float" | "parse_f64" | "parse_f64_safe" => Some("rt_string_to_float"),
         _ => None,
     }
 }

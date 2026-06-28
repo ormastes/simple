@@ -908,6 +908,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_time_now_micros",
     "rt_time_now_unix_micros",
     "rt_time_now_monotonic_ms",
+    "rt_sleep_ms",
     // High-performance collections (HashMap)
     "rt_hashmap_new",
     "rt_hashmap_insert",
@@ -1840,6 +1841,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_file_delete", // -> rt_file_remove
     "rt_print",       // -> rt_print_value
     "rt_println",     // -> rt_println_value
+    "rt_get_args",
     "sys_get_args",   // -> rt_get_args
     "sys_exit",       // -> rt_exit
 ];
@@ -1891,6 +1893,8 @@ mod tests {
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_println_value"));
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_len"));
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_time_now_unix_micros"));
+        assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_sleep_ms"));
+        assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_get_args"));
     }
 
     #[test]
