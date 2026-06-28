@@ -223,6 +223,24 @@ pub fn xz_decode_check_magic(frame: ByteSpan) -> bool:
     val f1 = fn1.to_i64() == 0x5A
     f0 and f1
 
+fn xz_index_vli_matches(frame: ByteSpan, start: i64, limit: i64, expected: i64) -> i64:
+    var pos = start
+    var value = expected
+    var done = false
+    while not done:
+        if pos >= limit:
+            return -1
+        var byte = value & 0x7F
+        value = value >> 7
+        if value > 0:
+            byte = byte | 0x80
+        else:
+            done = true
+        if frame.get(pos).to_i64() != byte:
+            return -1
+        pos = pos + 1
+    pos
+
 pub fn xz_encode(input: ByteSpan) -> ByteSpan:
     """Produce a minimal XZ stream containing `input` as an LZMA2 uncompressed block.
 
@@ -533,7 +551,19 @@ pub fn xz_decode(frame: ByteSpan) -> ByteSpan:
     val block_data = frame.slice(block_data_start, block_data_len)
 
     # Decompress the LZMA2 block data
-    lzma2_decompress(block_data)
+    val decoded = lzma2_decompress(block_data)
+    var index_pos = index_start + 2
+    index_pos = xz_index_vli_matches(frame, index_pos, index_crc_start, bh_total + block_data_len)
+    if index_pos < 0:
+        return ByteSpan.empty()
+    index_pos = xz_index_vli_matches(frame, index_pos, index_crc_start, decoded.len())
+    if index_pos < 0:
+        return ByteSpan.empty()
+    while index_pos < index_crc_start:
+        if frame.get(index_pos).to_i64() != 0:
+            return ByteSpan.empty()
+        index_pos = index_pos + 1
+    decoded
 
 # ============================================================================
 # C4.3 RangeCoder scaffold — typed encoder/decoder
