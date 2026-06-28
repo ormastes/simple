@@ -76,8 +76,27 @@ use compiler.frontend.core.parser_primary.{parse_primary_expr}
 
 # ===== Expression Parsing =====
 
+# Recursion-depth guard for nested expressions. Every structurally nested
+# sub-expression (parens, brackets, slices, call args, dict/array elements)
+# re-enters parse_expr, and each level costs ~14 native frames down the
+# precedence chain. Without a bound, ~175 nested parens overflows the native
+# stack and aborts `check` with a core dump (graceful diagnostic is required
+# instead). 128 is far beyond any real or machine-generated expression and
+# stays well under the measured crash threshold. ponytail: single choke-point
+# guard covers all downstream recursive passes; raise the limit if real code
+# ever legitimately nests deeper.
+var g_expr_nest_depth: i64 = 0
+val MAX_EXPR_NEST_DEPTH: i64 = 128
+
 fn parse_expr() -> i64:
-    parse_pipe()
+    g_expr_nest_depth = g_expr_nest_depth + 1
+    if g_expr_nest_depth > MAX_EXPR_NEST_DEPTH:
+        parser_error("expression nesting too deep (max 128 levels)")
+        g_expr_nest_depth = g_expr_nest_depth - 1
+        return expr_int_lit(0, 0)
+    val result = parse_pipe()
+    g_expr_nest_depth = g_expr_nest_depth - 1
+    result
 
 fn bracket_expr_is_invalid(eid: i64) -> bool:
     # G38: numeric tag literals, not imported EXPR_* consts — the imported
