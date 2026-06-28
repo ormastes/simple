@@ -30,7 +30,7 @@ tripped the simplebox build. Pre-existing; unrelated to this lane's libc port
 (proven by a marker test: renaming the lane's `["c", ...]` library list to
 `["zzcmark", ...]` left the identical `'c'` error).
 
-## Part 2 — native-build internal 120s worker timeout — **FIXED 2026-06-28** (perf follow-up open)
+## Part 2 — native-build worker timeout (lever a) + entry-closure scoping (lever b) — **FIXED 2026-06-28**
 
 With Part 1 fixed, the **real** simplebox build (the committed invocation:
 `--backend llvm --source src/os [--source src/lib] --entry
@@ -66,12 +66,26 @@ mid-compile.
   and defaults to **1800s** (`native_build_timeout_ms`). Verified live: the
   worker wrapper shows `timeout 1800` and the build runs well past 120s without
   being killed.
-- Lever (b) — **OPEN (perf)**: even with the timeout raised, the worker spends
-  many minutes because it parses the **entire `src/os` tree (1241 `.spl` files)**
-  on the (stale) interpreter `bin/simple`, though `--entry-closure` needs only 3.
-  Scope discovery to the import closure (and/or run the worker on a fresh
-  self-hosted binary, not the stale seed). Native-build perf item, not a lane
-  code bug.
+- Lever (b) — **FIXED 2026-06-28** (discovery scoping): the pure-Simple worker
+  path (`cli_native_build` → `CompilerDriver`) never implemented `--entry-closure`
+  — it was mis-parsed as `--entry` (eating the next token), and the driver
+  bulk-loaded all of `src/{app,lib,compiler,runtime}` plus every file in each
+  `--source` dir, so a simplebox build parsed ~1241 `src/os` files (+ the whole
+  compiler) and could never emit (multiple `main`s → undefined `__simple_main`).
+  Now, gated entirely on `--entry-closure` (previously a no-op → no regression):
+  parse it as its own flag; BFS the entry's import closure (FS-resolve each `use`,
+  mirroring the Rust discovery fallback incl. leading-dir-name strip) and compile
+  only those files; export `SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE` so `driver.spl`
+  skips its implicit whole-src bulk-load (default path byte-identical → bootstrap
+  unaffected). **Verified: simplebox closure loads exactly 3 files**
+  (`simplebox_main` + `simplebox_dispatch` + `simpleos_stdlib_num`) vs 1241, and
+  the entry's `main` resolves. Landed `src/app/io/_CliCompile/compile_targets.spl`
+  + `src/compiler/80.driver/driver.spl`.
+  - Residual (separate): the worker still runs on the **stale** `bin/simple`
+    *interpreter*, so codegen of even 3 files is minutes-slow. Deploy a fresh
+    self-hosted binary to the worker path to make it fast. Also: this Simple
+    path ignores `--target`/`--linker-script`, so it emits a host (not
+    freestanding) binary — a separate gap from discovery scoping.
 
 ## Earlier mis-diagnoses (corrected)
 
