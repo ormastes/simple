@@ -249,7 +249,9 @@ row cannot satisfy native binary proof without actual ELF, Mach-O, or PE magic.
 Symlinked or hardlinked retained showcase logs, time logs, alias sources,
 native binaries, and native build logs are rejected as substituted artifacts;
 the aggregate reports typed `symlink` or `hardlink` file statuses in the
-matching `gui_showcase_*` rows.
+matching `gui_showcase_*` rows. The retained perf producer also emits typed
+`symlink` or `hardlink` statuses for those artifact fields, so linked evidence
+is visible before the aggregate recomputes the file checks.
 Producer-side wrapper rows include
 `*_alias_src_file_status`, `*_native_bin_file_status`, and
 `*_native_bin_executable_status`, `*_native_bin_format_status`, and

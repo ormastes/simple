@@ -27,7 +27,7 @@ widget_showcase_perf_wrapper_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 8 | 8 | 0 | 0 |
+| 9 | 9 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -47,7 +47,7 @@ Validates the retained GUI showcase performance wrapper without requiring a live
 | Design | doc/07_guide/tooling/renderdoc_capture_infra.md |
 | Research | N/A |
 | Source | `test/03_system/check/widget_showcase_perf_wrapper_spec.spl` |
-| Updated | 2026-06-27 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -107,6 +107,8 @@ PLAN_ONLY=1 RESOLUTION=8k sh scripts/check/check-widget-showcase-4k-200fps.shs
 - Plan-only evidence still reports `simple_bin_status=missing` when an
   explicit `SIMPLE_BIN` path is not executable; routing-only output must not
   overstate binary validity.
+- Producer artifact status fields report `symlink` or `hardlink` instead of
+  `pass` when retained evidence paths are linked aliases.
 - The GUI showcase app routes `SHOWCASE_8K_PERF=1` through the env facade to
   `run_8k_perf_probe()` before normal GUI startup, and does not reintroduce a
   raw `rt_env_get` shortcut.
@@ -142,6 +144,9 @@ The full 4K row must prove:
   `*_native_build_log_file_status` prove the harness source, compiled binary,
   executable bit, recognized native binary format, and build log artifacts are
   present for native completion evidence.
+- Producer-side artifact status fields are typed: `pass` means a regular
+  producer-owned artifact, while `symlink` and `hardlink` are diagnostic values
+  that downstream aggregate gates must reject as completion evidence.
 
 The full 8K row has the same contract with:
 
@@ -175,6 +180,9 @@ missing, when the render mode is not `retained-static-frame`, when the redraw
 count is not exactly one, when the measured FPS is below target, or when the RSS
 budget is exceeded. A row with `rss_status=measured` is useful diagnostics but
 is not completion evidence for the aggregate gate.
+Producer artifact status is fail-closed: linked retained evidence is reported as
+`symlink` or `hardlink` so copied or aliased artifacts cannot be mistaken for
+fresh native-run proof.
 
 ## Aggregate Consumption
 
@@ -200,7 +208,8 @@ The spec covers plan-only 4K and 8K routing. It verifies the selected probe
 function, evidence prefix, environment flag, resolution, frame count, target
 FPS, pixel count, native provenance fields, empty measured field placeholders,
 plan-only log artifact status, generated native alias source, and app-level 8K
-environment dispatch.
+environment dispatch. It also verifies producer-side typed link statuses for
+preexisting hardlinked retained artifacts.
 
 ## Scenarios
 
@@ -441,6 +450,43 @@ expect(_value_of(evidence, "gui_showcase_4k_200fps_simple_bin_status")).to_equal
 
 </details>
 
+#### emits hardlink artifact statuses in plan-only producer evidence
+
+- Create hardlinked retained artifact paths before plan-only routing
+   - Expected: code equals `0`
+- Assert linked artifacts are not reported as pass
+   - Expected: _value_of(evidence, "gui_showcase_4k_200fps_status") equals `plan-only`
+   - Expected: _value_of(evidence, "gui_showcase_4k_200fps_native_bin_file_status") equals `hardlink`
+   - Expected: _value_of(evidence, "gui_showcase_4k_200fps_native_bin_executable_status") equals `hardlink`
+   - Expected: _value_of(evidence, "gui_showcase_4k_200fps_native_build_log_file_status") equals `hardlink`
+   - Expected: _value_of(evidence, "gui_showcase_4k_200fps_log_file_status") equals `hardlink`
+   - Expected: _value_of(evidence, "gui_showcase_4k_200fps_time_log_file_status") equals `hardlink`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Create hardlinked retained artifact paths before plan-only routing")
+val command = "rm -rf build/test-widget-showcase-plan-only-hardlinks && mkdir -p build/test-widget-showcase-plan-only-hardlinks && printf '\\177ELFfake-native\\n' > build/test-widget-showcase-plan-only-hardlinks/native-original && chmod +x build/test-widget-showcase-plan-only-hardlinks/native-original && ln build/test-widget-showcase-plan-only-hardlinks/native-original build/test-widget-showcase-plan-only-hardlinks/widget_showcase_gui_perf && printf 'native build log\\n' > build/test-widget-showcase-plan-only-hardlinks/native-build-original.log && ln build/test-widget-showcase-plan-only-hardlinks/native-build-original.log build/test-widget-showcase-plan-only-hardlinks/native-build.log && printf 'showcase log\\n' > build/test-widget-showcase-plan-only-hardlinks/showcase-original.log && ln build/test-widget-showcase-plan-only-hardlinks/showcase-original.log build/test-widget-showcase-plan-only-hardlinks/showcase.log && printf 'time log\\n' > build/test-widget-showcase-plan-only-hardlinks/time-original.log && ln build/test-widget-showcase-plan-only-hardlinks/time-original.log build/test-widget-showcase-plan-only-hardlinks/time.log && PLAN_ONLY=1 RESOLUTION=4k BUILD_DIR=build/test-widget-showcase-plan-only-hardlinks sh scripts/check/check-widget-showcase-4k-200fps.shs"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+step("Assert linked artifacts are not reported as pass")
+val evidence = file_read("build/test-widget-showcase-plan-only-hardlinks/status.env")
+expect(_value_of(evidence, "gui_showcase_4k_200fps_status")).to_equal("plan-only")
+expect(_value_of(evidence, "gui_showcase_4k_200fps_native_bin_file_status")).to_equal("hardlink")
+expect(_value_of(evidence, "gui_showcase_4k_200fps_native_bin_executable_status")).to_equal("hardlink")
+expect(_value_of(evidence, "gui_showcase_4k_200fps_native_build_log_file_status")).to_equal("hardlink")
+expect(_value_of(evidence, "gui_showcase_4k_200fps_log_file_status")).to_equal("hardlink")
+expect(_value_of(evidence, "gui_showcase_4k_200fps_time_log_file_status")).to_equal("hardlink")
+```
+
+</details>
+
 #### does not let impossible producer timing pass a slow retained probe
 
 - Run a fake native probe that sleeps but claims a one-nanosecond frame window
@@ -540,8 +586,8 @@ expect(showcase.contains("rt_env_get(")).to_equal(false)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 8 |
-| Active scenarios | 8 |
+| Total scenarios | 9 |
+| Active scenarios | 9 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
