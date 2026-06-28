@@ -107,6 +107,20 @@ function pathInfo(filePath) {
   };
 }
 
+function artifactStatusFromReason(reason) {
+  return reason === 'pass' ? 'pass' : 'fail';
+}
+
+function screenshotFileReason(info) {
+  if (info.isSymlink) return 'symlink';
+  if (info.lstat === null || info.stat === null) return 'missing';
+  if (!info.isRegularFile) return 'not-regular';
+  if (info.hasMultipleLinks) return 'hardlink';
+  if (!info.stat.isFile()) return 'not-regular';
+  if (info.stat.size <= 0) return 'empty';
+  return 'pass';
+}
+
 const proofInfo = pathInfo(proofPath);
 if (proofInfo.isSymlink) {
   emit('electron_mdi_json_proof', 'fail');
@@ -167,6 +181,8 @@ const eventChecks = {
 };
 const screenshotInfo = pathInfo(screenshotPath);
 const screenshotStat = screenshotInfo.stat;
+const screenshotFileReasonValue = screenshotFileReason(screenshotInfo);
+const screenshotArtifactStatus = artifactStatusFromReason(screenshotFileReasonValue);
 let screenshotMagicOk = false;
 let screenshotStructureOk = false;
 if (!screenshotInfo.isSymlink && screenshotStat !== null && screenshotStat.isFile() && screenshotStat.size >= 8) {
@@ -287,6 +303,8 @@ emit('electron_mdi_screenshot_path_matches', proof.screenshotPath === screenshot
 emit('electron_mdi_screenshot_symlink_status', screenshotInfo.isSymlink ? 'fail' : 'pass');
 emit('electron_mdi_screenshot_hardlink_status', screenshotInfo.hasMultipleLinks ? 'fail' : 'pass');
 emit('electron_mdi_screenshot_file_status', screenshotStat !== null && screenshotStat.isFile() ? 'pass' : 'fail');
+emit('electron_mdi_screenshot_file_reason', screenshotFileReasonValue);
+emit('electron_mdi_screenshot_artifact_status', screenshotArtifactStatus);
 emit('electron_mdi_screenshot_size_bytes', screenshotStat !== null && screenshotStat.isFile() ? String(screenshotStat.size) : '');
 emit('electron_mdi_screenshot_png_magic_status', screenshotMagicOk ? 'pass' : 'fail');
 emit('electron_mdi_screenshot_png_structure_status', screenshotStructureOk ? 'pass' : 'fail');
