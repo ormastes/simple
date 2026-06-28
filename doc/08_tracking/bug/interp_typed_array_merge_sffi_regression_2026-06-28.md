@@ -1,10 +1,34 @@
 # Typed-array `.merge()` mis-dispatches to missing `Array.merge` runtime symbol
 
 Date: 2026-06-28
-Status: open
+Status: RESOLVED (fix landed 2edb32ce152, 2026-06-28)
 Severity: high
 Component: runtime SFFI / interpreter method dispatch
 Regression: yes (works on seed `acfe9654`, broken on current-main builds)
+
+## Fix (LANDED — 2edb32ce152)
+
+Root cause was NOT the interpreter (pure `SIMPLE_EXECUTION_MODE=interpret`
+always printed `4`) — it was the **compiled/JIT path**. MIR lowering
+(`compiler/src/mir/lower/lowering_expr_method.rs`) handled array `push`/`append`
+as builtins but had NO case for `merge`/`concat`/`extend`, so they fell through
+to a static `Array.merge` function-symbol call → `rt_function_not_found`. The
+codegen `("Array","merge")` arm (`codegen/instr/methods.rs:246`) was correct but
+unreachable because MIR resolved the call to a static name first.
+
+`adaa700d4e5` did not introduce the codegen bug — it added
+`Runner::run_file_with_args` ("dispatches to JIT or interpreter based on
+execution mode"), so `run` began using the compiled path by default instead of
+the interpreter, **exposing** the latent miscompile (hence the bisect pinned it).
+
+Fix: added a `merge`/`concat`/`extend` array block in `lower_method_call_expr`
+that emits `rt_array_len` + `rt_array_extend_i64` in-place (mirrors the codegen
+arm), gated on `receiver_is_array` so `String.concat` is unaffected.
+
+Verified on a fresh current-main build: repro prints `4` in default/`NO_JIT`/
+`interpret`; `concat`/`extend`/`String.concat` → `4 3 foobar`;
+`ecdsa_p256_spec` restored to `3/0`; `xz_lzma2_spec` 11/9 unchanged vs acfe9654
+(pre-existing, not this fix).
 
 ## Summary
 
