@@ -120,14 +120,16 @@ class PureDatabase:
         ))
 
     static fn memory_deferred() -> Result<PureDatabase, DbError>:
-        val r = PureDatabase.memory()
-        var db = r.unwrap()
+        var db = match PureDatabase.memory():
+            case Ok(created): created
+            case Err(reason): return Err(reason)
         db._auto_checkpoint = false
         Ok(db)
 
     static fn open(path: text) -> Result<PureDatabase, DbError>:
-        val r = PureDatabase.memory()
-        var db = r.unwrap()
+        var db = match PureDatabase.memory():
+            case Ok(created): created
+            case Err(reason): return Err(reason)
         db._path = path
         if file_exists(path):
             val loaded = db._load_from_disk()
@@ -140,8 +142,9 @@ class PureDatabase:
         Ok(db)
 
     static fn open_deferred(path: text) -> Result<PureDatabase, DbError>:
-        val r = PureDatabase.open(path)
-        var db = r.unwrap()
+        var db = match PureDatabase.open(path):
+            case Ok(opened): opened
+            case Err(reason): return Err(reason)
         db._auto_checkpoint = false
         Ok(db)
 
@@ -1194,10 +1197,9 @@ class PureDatabase:
             actual_sql = "INSERT" + after_rep
             is_replace = true
         _reset_param_idx()
-        val pr = sql_parse(actual_sql)
-        if pr.is_err():
-            return Err(DbError.QueryFailed(sql: sql, message: "parse error"))
-        val stmt = pr.unwrap()
+        val stmt = match sql_parse(actual_sql):
+            case Ok(parsed): parsed
+            case Err(_): return Err(DbError.QueryFailed(sql: sql, message: "parse error"))
         if stmt.kind == SqlStmtKind.CreateTable:
             return self._do_create(stmt.create_table)
         if stmt.kind == SqlStmtKind.Insert:
@@ -1219,10 +1221,10 @@ class PureDatabase:
         while si < stmts.len() as i32:
             val s = stmts[si].trim()
             if s != "":
-                val r = self.exec(s, [])
-                if r.is_err():
-                    return r
-                total = total + r.unwrap()
+                val changed = match self.exec(s, []):
+                    case Ok(count): count
+                    case Err(reason): return Err(reason)
+                total = total + changed
             si = si + 1
         Ok(total)
 
@@ -1253,10 +1255,9 @@ class PureDatabase:
         # ── SELECT result cache: skip parse+scan for repeated queries ──
         if params.len() == 0:
             _reset_param_idx()
-            val cpr = sql_parse(sql)
-            if cpr.is_err():
-                return Err(DbError.QueryFailed(sql: sql, message: "parse error"))
-            val cstmt = cpr.unwrap()
+            val cstmt = match sql_parse(sql):
+                case Ok(parsed): parsed
+                case Err(_): return Err(DbError.QueryFailed(sql: sql, message: "parse error"))
             if cstmt.kind == SqlStmtKind.Select:
                 val ctable = cstmt.select.from_table
                 var cti: i32 = -1
@@ -1268,13 +1269,14 @@ class PureDatabase:
                 val result = self._do_select(cstmt.select, params)
                 if result.is_ok() and cti >= 0 and cti < self._sel_cache_key.len() as i32:
                     self._sel_cache_key[cti] = sql
-                    self._sel_cache_res[cti] = result.unwrap()
+                    match result:
+                        case Ok(rows): self._sel_cache_res[cti] = rows
+                        case Err(_): pass
                 return result
         _reset_param_idx()
-        val pr = sql_parse(sql)
-        if pr.is_err():
-            return Err(DbError.QueryFailed(sql: sql, message: "parse error"))
-        val stmt = pr.unwrap()
+        val stmt = match sql_parse(sql):
+            case Ok(parsed): parsed
+            case Err(_): return Err(DbError.QueryFailed(sql: sql, message: "parse error"))
         if stmt.kind == SqlStmtKind.Select:
             return self._do_select(stmt.select, params)
         Err(DbError.QueryFailed(sql: sql, message: "query() requires SELECT"))
