@@ -195,6 +195,10 @@ function artifactHardlinkStatus(artifact) {
   return artifact.hardlink ? 'fail' : 'pass';
 }
 
+function artifactStatusFromFileStatus(status) {
+  return status === 'pass' ? 'pass' : 'fail';
+}
+
 function pixelCountMatches(pixels, width, height) {
   if (!Array.isArray(pixels)) return false;
   const w = jsonIntegerText(width);
@@ -334,6 +338,17 @@ const proofSource = proofSourceArtifact(expectedProofSource);
 const proofSourceFileStatus = proofSource.status;
 const proofSourceSizeBytes = proofSource.size;
 const proofSourceActualSizeBytes = proofSource.actualSize;
+const proofSourceArtifactStatus =
+  proofSourceFileStatus === 'pass' &&
+  proofSourceSizeBytes !== '' &&
+  proofSourceActualSizeBytes !== '' &&
+  proofSourceSizeBytes === proofSourceActualSizeBytes
+    ? 'pass'
+    : 'fail';
+const capturedArgbFileStatus = artifactFileStatus(capturedArgbStat);
+const capturedArgbArtifactStatus = artifactStatusFromFileStatus(capturedArgbFileStatus);
+const geometryFileStatus = artifactFileStatus(geometryStat);
+const geometryArtifactStatus = artifactStatusFromFileStatus(geometryFileStatus);
 const chromeUserAgent = typeof proof.chrome_user_agent === 'string' ? proof.chrome_user_agent : '';
 const chromeProduct = typeof proof.chrome_product === 'string' ? proof.chrome_product : '';
 const chromeProtocolVersion = typeof proof.chrome_protocol_version === 'string' ? proof.chrome_protocol_version : '';
@@ -428,6 +443,8 @@ emit('chrome_simple_web_layout_proof_source', proof.proof_source);
 emit('chrome_simple_web_layout_proof_source_file_status', proofSourceFileStatus);
 emit('chrome_simple_web_layout_proof_source_size_bytes', proofSourceSizeBytes);
 emit('chrome_simple_web_layout_proof_source_actual_size_bytes', proofSourceActualSizeBytes);
+emit('chrome_simple_web_layout_proof_source_file_reason', proofSourceFileStatus);
+emit('chrome_simple_web_layout_proof_source_artifact_status', proofSourceArtifactStatus);
 emit('chrome_simple_web_layout_capture_mode', proof.capture_mode);
 emit('chrome_simple_web_layout_chrome_user_agent', proof.chrome_user_agent);
 emit('chrome_simple_web_layout_chrome_product', proof.chrome_product);
@@ -443,7 +460,9 @@ emit('chrome_simple_web_layout_capture_width', jsonIntegerTextOrBlank(proof.widt
 emit('chrome_simple_web_layout_capture_height', jsonIntegerTextOrBlank(proof.height));
 emit('chrome_simple_web_layout_captured_argb_path', proof.captured_argb_path);
 emit('chrome_simple_web_layout_captured_argb_written', jsonBoolTextOrBlank(proof.captured_argb_written));
-emit('chrome_simple_web_layout_captured_argb_file_status', artifactFileStatus(capturedArgbStat));
+emit('chrome_simple_web_layout_captured_argb_file_status', capturedArgbFileStatus);
+emit('chrome_simple_web_layout_captured_argb_file_reason', capturedArgbFileStatus);
+emit('chrome_simple_web_layout_captured_argb_artifact_status', capturedArgbArtifactStatus);
 emit('chrome_simple_web_layout_captured_argb_symlink_status', artifactSymlinkStatus(capturedArgbStat));
 emit('chrome_simple_web_layout_captured_argb_hardlink_status', artifactHardlinkStatus(capturedArgbStat));
 emit('chrome_simple_web_layout_captured_argb_size_bytes', capturedArgbStat === null || capturedArgbStat.symlink || capturedArgbStat.hardlink ? '' : String(capturedArgbStat.stat.size));
@@ -457,7 +476,9 @@ emit('chrome_simple_web_layout_captured_argb_checksum', capturedArgbChecksum);
 emit('chrome_simple_web_layout_captured_argb_weighted_checksum', capturedArgbWeightedChecksum);
 emit('chrome_simple_web_layout_geometry_path', proof.geometry_path);
 emit('chrome_simple_web_layout_geometry_written', jsonBoolTextOrBlank(proof.geometry_written));
-emit('chrome_simple_web_layout_geometry_file_status', artifactFileStatus(geometryStat));
+emit('chrome_simple_web_layout_geometry_file_status', geometryFileStatus);
+emit('chrome_simple_web_layout_geometry_file_reason', geometryFileStatus);
+emit('chrome_simple_web_layout_geometry_artifact_status', geometryArtifactStatus);
 emit('chrome_simple_web_layout_geometry_symlink_status', artifactSymlinkStatus(geometryStat));
 emit('chrome_simple_web_layout_geometry_hardlink_status', artifactHardlinkStatus(geometryStat));
 emit('chrome_simple_web_layout_geometry_size_bytes', geometryStat === null || geometryStat.symlink || geometryStat.hardlink ? '' : String(geometryStat.stat.size));
