@@ -32,7 +32,7 @@ The real chain:
    payload sub-patterns with no type — the variant's payload type is never
    extracted from the instantiated `Result<[u8], E>`.
 3. **MIR index lowering defaults to dynamic.**
-   `src/compiler/50.mir/mir_lowering_expr_part1.spl:225` reads `expr.type_`,
+   `src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl:225` reads `expr.type_`,
    finds nil, defaults the element type → `local_is_array` is false
    (`60.mir_opt/mir_opt/collection_opt_core.spl:368`) → dynamic `rt_index_get`
    path → unlinked convert → fault.

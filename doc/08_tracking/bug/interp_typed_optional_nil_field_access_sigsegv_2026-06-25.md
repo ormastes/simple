@@ -121,7 +121,7 @@ returns `!special || payload!=NIL` so it works on the boxed value.
 - `codegen/instr/mod.rs` `BoxInt`/`UnboxInt` already exist; reuse.
 
 ### Sites to patch (self-hosted `.spl` `src/compiler/…`) — required for `bin/simple`
-- `50.mir/mir_lowering_expr_part3.spl` (`lower_method_call`) — method dispatch.
+- `50.mir/_MirLoweringExpr/method_calls_literals.spl` (`lower_method_call`) — method dispatch.
 - `20.hir/hir_types.spl:479` already has `Optional(inner)` (richer than the seed's
   `Pointer` decay) — box at its coercion + print path.
 - Reaching production needs a **bootstrap rebuild + `--deploy`** (flagged risky in
@@ -172,7 +172,7 @@ all** — `val a: any = 9; print a` already prints `<invalid-heap:0x9>` on
 production `bin/simple`. A faithful port = implement the tagging primitive
 (MIR `Shl`+`BitOr` or a runtime call) + symmetric unbox, wired at every `T→any`
 and `T→T?` coercion site, then a stage-2/3 bootstrap verification. Dispatch site
-for the method half: `src/compiler/50.mir/mir_lowering_expr_part3.spl`
+for the method half: `src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl`
 `lower_method_call`, intercept `Optional(inner)` before `match resolution` (~L151).
 
 **Conclusion:** native typed-optional support is a representation/infra *feature*

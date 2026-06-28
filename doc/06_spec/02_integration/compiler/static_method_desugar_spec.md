@@ -65,7 +65,7 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val source = file_read("src/compiler/50.mir/mir_lowering_expr_part3.spl")
+val source = file_read("src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl")
 
 expect(source).to_contain("case StaticMethod(type_id, method_id):")
 expect(source).to_contain("method_id")

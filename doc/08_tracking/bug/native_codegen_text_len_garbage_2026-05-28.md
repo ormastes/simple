@@ -37,7 +37,7 @@ The same bug existed in the Cranelift `inline_runtime_len_value` in
 `src/compiler_rust/compiler/src/codegen/instr/helpers.rs`.
 
 The same logic bug exists in the pure-Simple LLVM backend
-(`src/compiler/50.mir/mir_lowering_expr_part3.spl`) but that path is not currently used
+(`src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl`) but that path is not currently used
 by `native-build` (dispatches to Rust seed by default).
 
 ## Reproduction

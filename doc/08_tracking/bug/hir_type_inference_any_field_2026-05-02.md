@@ -232,7 +232,7 @@ as an array/string intrinsic in the field-access path"):
 - Seed Cranelift codegen — `"len" | "length" => rt_len` in `instr/calls.rs`
   (fallback + `sffi_alias_target`), `instr/methods.rs` (typed Array/String/Dict/Tuple),
   `instr/closures_structs.rs`. Commit `a8dc6fac`.
-- Pure-Simple main lowering — `mir_lowering_expr_part3.spl:81` routes typed `.length()`
+- Pure-Simple main lowering — `_MirLoweringExpr/method_calls_literals.spl:81` routes typed `.length()`
   through `len_runtime_symbol_for_hir_type` (type-KIND `case Str/Array/Dict`) like `.len()`.
   Commit `b5391184`. Matches interpreter's existing `"len" | "length"`.
 

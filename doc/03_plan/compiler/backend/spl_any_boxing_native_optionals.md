@@ -40,7 +40,7 @@ interpreter for `any` and `i32?/f64?/bool?/text?`.
 3. **Unify the nil sentinel on `3`** (not `0`) so `0`/`false` payloads don't
    collide with nil.
 4. **Option-method dispatch** for primitive optionals in
-   `src/compiler/50.mir/mir_lowering_expr_part3.spl` `lower_method_call`
+   `src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl` `lower_method_call`
    (intercept `Optional(inner)` before `match resolution`, ~L151):
    `is_some`→sentinel `!= 3`, `is_none`→`== 3`, `unwrap`→Unbox (+ nil trap),
    `unwrap_or(x,d)`→`select(is_some, unbox(x), d)`.
@@ -78,7 +78,7 @@ the seed-derived model does NOT map to the `.spl` backend. Four findings:
 
 1. **`.spl` optionals are a TUPLE, not a tagged word.** `Type::Optional(inner)`
    lowers to `MirType.Tuple([Bool has_value, inner value])`
-   (`src/compiler/50.mir/mir_lowering_part2_part2.spl:272`, "Optional is enum
+   (`src/compiler/50.mir/_MirLowering/function_lowering.spl:272`, "Optional is enum
    {nil, Some(T)}"). So the seed's "box payload `<<3` + nil sentinel `3`" model is
    **wrong for `.spl`** — `<<3` into a tuple slot is corruption. The correct `.spl`
    work is to lower the Option API against the tuple: `is_some`→read `has_value`;
@@ -114,7 +114,7 @@ the seed-derived model does NOT map to the `.spl` backend. Four findings:
 ### Revised sequencing
 - **(A) Optionals (tuple-based, tractable first):** lower `is_some`/`is_none`/
   `unwrap`/`unwrap_or` against the `{has_value, value}` tuple in
-  `src/compiler/50.mir/mir_lowering_expr_part3.spl` `lower_method_call`. No boxing,
+  `src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl` `lower_method_call`. No boxing,
   no sentinel. Blocked end-to-end only by (3)/(4) testability.
 - **(B) `any` display:** deliberately add the `"any"` → `HirTypeKind.Any` arm +
   audit every `: any` fn-pointer site; then box primitive payloads entering `any`.
@@ -182,7 +182,7 @@ primitive payloads entering `any`/`T?` are stored **raw (untagged)**:
 intends `value << 3` boxing for ints entering Any/Optional, but the raw
 (un-shifted) values above prove the `Shl` never executes — the gate
 (`type_.?` + IntLit/Int arm) doesn't match at the `Let`. Worse, the design is
-**incoherent**: `mir_lowering_part2_part2.spl:271` declares `Optional → Tuple([Bool
+**incoherent**: `_MirLowering/function_lowering.spl:271` declares `Optional → Tuple([Bool
 has_value, inner value])`, but the de-facto runtime repr is **bare-payload single
 word** (present=value, absent=nil), and there is **no unboxing** at any consumer
 (print / unwrap_or / unwrap / match Some). Two conflicting representations, both

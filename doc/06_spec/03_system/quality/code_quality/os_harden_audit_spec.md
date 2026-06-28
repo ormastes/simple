@@ -44,7 +44,7 @@ os_harden_audit_spec -> std
 
 2. "             cap check
    - Expected: rt_file_write_text(root + "/src/os/kernel/ipc/syscall.spl", syscall) is true
-   - Expected: rt_file_write_text(root + "/src/compiler/50.mir/mir_lowering_expr_part1.spl", "MirInstKind.Intrinsic(nil, \"bounds_check\"\n") is true
+   - Expected: rt_file_write_text(root + "/src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl", "MirInstKind.Intrinsic(nil, \"bounds_check\"\n") is true
    - Expected: rt_file_write_text(root + "/src/compiler/50.mir/mir_lowering_stmts.spl", "# none\n") is true
    - Expected: rt_file_write_text(root + "/src/runtime/runtime.c", "__simple_intrinsic_bounds_check\n") is true
    - Expected: rt_file_write_text(root + "/src/runtime/runtime.h", "__simple_intrinsic_bounds_check\n") is true
@@ -74,7 +74,7 @@ val syscall =
     "        case 2 # always allowed:\n" +
     "            return 0\n"
 expect(rt_file_write_text(root + "/src/os/kernel/ipc/syscall.spl", syscall)).to_equal(true)
-expect(rt_file_write_text(root + "/src/compiler/50.mir/mir_lowering_expr_part1.spl", "MirInstKind.Intrinsic(nil, \"bounds_check\"\n")).to_equal(true)
+expect(rt_file_write_text(root + "/src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl", "MirInstKind.Intrinsic(nil, \"bounds_check\"\n")).to_equal(true)
 expect(rt_file_write_text(root + "/src/compiler/50.mir/mir_lowering_stmts.spl", "# none\n")).to_equal(true)
 expect(rt_file_write_text(root + "/src/runtime/runtime.c", "__simple_intrinsic_bounds_check\n")).to_equal(true)
 expect(rt_file_write_text(root + "/src/runtime/runtime.h", "__simple_intrinsic_bounds_check\n")).to_equal(true)
