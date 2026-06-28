@@ -321,7 +321,7 @@ expect(evidence).to_contain("rdoc_electron_html_gate_argb_reason=electron-argb-s
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -339,6 +339,8 @@ expect(evidence).to_contain("rdoc_electron_html_gate_argb_status=pass")
 expect(evidence).to_contain("rdoc_electron_html_gate_argb_reason=pass")
 expect(evidence).to_contain("rdoc_electron_html_gate_argb_pixel_count=4")
 expect(evidence).to_contain("rdoc_electron_html_gate_argb_nonblank_pixel_count=1")
+expect(evidence).to_contain("rdoc_electron_html_gate_launch_exit_code=")
+expect(evidence).to_contain("rdoc_electron_html_gate_launch_timed_out=")
 expect(evidence).to_contain("rdoc_electron_html_gate_gpu_process_exit_status=fail")
 expect(evidence).to_contain("rdoc_electron_html_gate_gpu_process_exit_count=2")
 expect(evidence).to_contain("rdoc_electron_html_gate_gpu_process_exit_codes=139")
