@@ -100,3 +100,25 @@ Lifecycle: `Open` -> `Accepted` -> `Implemented` or `Rejected`.
   - [ ] The eval reaches `target_accuracy>=90.0` before any accepted decision.
   - [ ] If eval remains below target, the decision routes to a new retry or a
         retrieval/tool strategy instead of overwriting prior evidence.
+
+### FR-SPIPE-LLM-0006 - Promote retry7 acceptance only after real evidence
+
+- **Filed-on:** 2026-06-28
+- **Filed-by:** Codex
+- **Target:** SPipe LLM fine-tune retry7 / MedGemma Korean acceptance gate
+- **Priority:** P1
+- **Status:** Open
+- **Requested-semantics:** Keep retry7 as the normal-review acceptance gate, but
+  do not allow it to pass until the licensed data, real training/eval, safety,
+  deployment, and app-handoff evidence are all real and locally verifiable.
+- **Acceptance-criteria:**
+  - [ ] `fine-tune-ready llm_backed_app_server_dry_run_retry7` reports PASS only
+        after retry5 licensed-cache evidence and retry6-or-successor real
+        target-reaching eval evidence are present.
+  - [ ] `check_retry7_acceptance_gate.shs` reports missing safety, deployment,
+        app-handoff, or normal-review evidence as WARN/FAIL blockers instead of
+        acceptance.
+  - [ ] The accepted retry7 decision records the final model artifact, target
+        eval command/result, license constraints, safety eval, deployment
+        evidence, and app handoff doc without placeholder or `do not deploy`
+        wording.
