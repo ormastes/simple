@@ -27,7 +27,7 @@ gui_web_2d_platform_freshness_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 5 | 5 | 0 | 0 |
+| 6 | 6 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -76,6 +76,8 @@ sh scripts/check/check-gui-web-2d-platform-freshness.shs
 - Source-revision mismatches fail freshness.
 - Non-pass freshness exits nonzero so automation cannot treat stale or missing
   evidence as a valid handoff input.
+- Matching source revisions without runtime, browser/WebView/Electron, graphics
+  SDK/driver, and runbook metadata fail freshness.
 - Matching source revisions plus runtime, browser/WebView/Electron, graphics
   SDK/driver, and runbook metadata pass freshness.
 - Explicit run-level source and metadata overrides pass freshness when wrapper
@@ -189,6 +191,10 @@ evidence. The stale-source scenario intentionally makes only the 4K retained
 lane differ from the other five lanes and expects a failed freshness status.
 Future changes should keep that single-lane mismatch behavior so platform
 operators can repair the specific stale lane rather than rerunning every host.
+The same-source-without-metadata scenario keeps every lane on the same source
+revision but omits runtime, browser/WebView/Electron, graphics SDK/driver, and
+runbook metadata. That must remain a failure because final completion needs the
+toolchain and runbook context, not just source equality.
 
 ## Scenarios
 
@@ -298,6 +304,31 @@ expect(evidence).to_contain("gui_web_2d_platform_freshness_missing_metadata=")
 
 </details>
 
+#### fails when same-source evidence omits freshness metadata
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val command = "rm -rf build/test-gui-web-2d-platform-freshness-missing-metadata && mkdir -p build/test-gui-web-2d-platform-freshness-missing-metadata/env && printf 'native_render_log_platform_matrix_source_revision=rev-a\\n' > build/test-gui-web-2d-platform-freshness-missing-metadata/env/native.env && printf 'tauri_mobile_renderer_parity_source_revision=rev-a\\n' > build/test-gui-web-2d-platform-freshness-missing-metadata/env/mobile.env && printf 'gui_showcase_4k_200fps_source_revision=rev-a\\n' > build/test-gui-web-2d-platform-freshness-missing-metadata/env/4k.env && printf 'gui_showcase_8k_perf_source_revision=rev-a\\n' > build/test-gui-web-2d-platform-freshness-missing-metadata/env/8k.env && printf 'html_css_full_rendering_goal_source_revision=rev-a\\n' > build/test-gui-web-2d-platform-freshness-missing-metadata/env/html.env && printf 'production_gui_web_renderer_parity_source_revision=rev-a\\n' > build/test-gui-web-2d-platform-freshness-missing-metadata/env/production.env && BUILD_DIR=build/test-gui-web-2d-platform-freshness-missing-metadata/out REPORT_PATH=build/test-gui-web-2d-platform-freshness-missing-metadata/report.md NATIVE_RENDER_LOG_PLATFORM_MATRIX_ENV=build/test-gui-web-2d-platform-freshness-missing-metadata/env/native.env TAURI_MOBILE_RENDERER_PARITY_ENV=build/test-gui-web-2d-platform-freshness-missing-metadata/env/mobile.env GUI_SHOWCASE_4K_200FPS_ENV=build/test-gui-web-2d-platform-freshness-missing-metadata/env/4k.env GUI_SHOWCASE_8K_200FPS_ENV=build/test-gui-web-2d-platform-freshness-missing-metadata/env/8k.env HTML_CSS_FULL_RENDERING_GOAL_ENV=build/test-gui-web-2d-platform-freshness-missing-metadata/env/html.env PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=build/test-gui-web-2d-platform-freshness-missing-metadata/env/production.env sh scripts/check/check-gui-web-2d-platform-freshness.shs"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read("build/test-gui-web-2d-platform-freshness-missing-metadata/out/evidence.env")
+expect(evidence).to_contain("gui_web_2d_platform_freshness_status=fail")
+expect(evidence).to_contain("gui_web_2d_platform_freshness_reason=missing-freshness-metadata")
+expect(evidence).to_contain("gui_web_2d_platform_freshness_source_revision=rev-a")
+expect(evidence).to_contain("gui_web_2d_platform_freshness_missing_evidence_lanes=")
+expect(evidence).to_contain("gui_web_2d_platform_freshness_missing_source_revision_lanes=")
+expect(evidence).to_contain("gui_web_2d_platform_freshness_mismatched_source_revision_lanes=")
+expect(evidence).to_contain("gui_web_2d_platform_freshness_missing_metadata=runtime-build,browser-webview-electron-revision,graphics-sdk-driver,runbook-version")
+```
+
+</details>
+
 #### fails when a present evidence lane has a stale source revision
 
 <details>
@@ -323,8 +354,8 @@ expect(evidence).to_contain("gui_web_2d_platform_freshness_mismatched_source_rev
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 6 |
+| Active scenarios | 6 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

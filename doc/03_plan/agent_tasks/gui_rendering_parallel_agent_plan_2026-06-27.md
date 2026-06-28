@@ -1040,6 +1040,12 @@ Normal-review acceptance:
   classified as failed evidence, not as missing work. Missing means no env was
   produced; failed means a host or wrapper produced evidence too weak for final
   completion.
+- 2026-06-28 freshness metadata fail-closed contract:
+  `test/03_system/check/gui_web_2d_platform_freshness_spec.spl` now asserts
+  that all lanes sharing the same source revision is not enough for
+  cross-platform freshness. Runtime build, browser/WebView/Electron revision,
+  graphics SDK/driver, and runbook version metadata must also be present, or
+  freshness fails with `missing-freshness-metadata`.
 
 ## Hard Stop Conditions
 
