@@ -1,6 +1,6 @@
 # GUI/Web/2D Goal Completion Criteria
 
-> This SSpec is the executable checklist for the active GUI/Web/2D hardening goal. Remaining platform lanes use explicit failing expectations until a platform agent replaces each placeholder with a real evidence-backed assertion. The Linux Vulkan and retained 4K/8K perf lanes now run strict aggregate assertions against current evidence.
+> This SSpec is the executable checklist for the active GUI/Web/2D hardening goal. Remaining review lanes use explicit failing expectations until an agent replaces each placeholder with a real evidence-backed assertion. The Linux Vulkan, macOS Metal, Windows D3D12, and retained 4K/8K perf lanes now run strict aggregate assertions against current evidence.
 
 <!-- sdn-diagram:id=gui_web_2d_goal_completion_criteria_spec.arch -->
 <details class="sdn-source">
@@ -34,7 +34,7 @@ gui_web_2d_goal_completion_criteria_spec -> std
 
 # GUI/Web/2D Goal Completion Criteria
 
-This SSpec is the executable checklist for the active GUI/Web/2D hardening goal. Remaining platform lanes use explicit failing expectations until a platform agent replaces each placeholder with a real evidence-backed assertion. The Linux Vulkan and retained 4K/8K perf lanes now run strict aggregate assertions against current evidence.
+This SSpec is the executable checklist for the active GUI/Web/2D hardening goal. Remaining review lanes use explicit failing expectations until an agent replaces each placeholder with a real evidence-backed assertion. The Linux Vulkan, macOS Metal, Windows D3D12, and retained 4K/8K perf lanes now run strict aggregate assertions against current evidence.
 
 ## At a Glance
 
@@ -53,10 +53,10 @@ This SSpec is the executable checklist for the active GUI/Web/2D hardening goal.
 ## Overview
 
 This SSpec is the executable checklist for the active GUI/Web/2D hardening
-goal. Remaining platform lanes use explicit failing expectations until a
-platform agent replaces each placeholder with a real evidence-backed assertion.
-The Linux Vulkan and retained 4K/8K perf lanes now run strict aggregate
-assertions against current evidence.
+goal. Remaining review lanes use explicit failing expectations until an agent
+replaces each placeholder with a real evidence-backed assertion. The Linux
+Vulkan, macOS Metal, Windows D3D12, and retained 4K/8K perf lanes now run
+strict aggregate assertions against current evidence.
 
 **Plan:** doc/03_plan/agent_tasks/gui_rendering_parallel_agent_plan_2026-06-27.md
 **Requirements:** N/A
@@ -120,12 +120,44 @@ Host-tool readiness fields are useful diagnostics, but they do not satisfy the
 completion proof unless the native `.rdc` artifacts also pass file-status and
 magic checks.
 
+## Platform Render-Log Assertions
+
+The Linux Vulkan, macOS Metal, and Windows D3D12 lanes are evidence-backed.
+Each lane consumes normalized Simple render-log evidence from the aggregate and
+fails on the first missing native proof field instead of a generic placeholder.
+
+macOS Metal requires:
+
+- `macos_metal_render_log_compare_env_file_status=pass`
+- `macos_metal_render_log_compare_status=pass`
+- `macos_metal_render_log_compare_required_api=metal`
+- `macos_metal_render_log_compare_pairwise_status=pass`
+- browser backing, Electron/Chrome pairwise, Electron/Simple pairwise, and
+  Chrome/Simple pairwise statuses `pass`
+- Simple, Chrome, and Electron ARGB source and artifact reasons `pass`
+- GPU capture status `pass`
+- GPU capture artifact file status `pass`
+- GPU capture artifact magic `XCODE-GPUTRACE`
+
+Windows D3D12 requires:
+
+- `windows_d3d12_render_log_compare_env_file_status=pass`
+- `windows_d3d12_render_log_compare_status=pass`
+- `windows_d3d12_render_log_compare_required_api=d3d12`
+- native readback, browser backing, pairwise, ARGB source, and
+  PIX/GPU-debugger gate statuses `pass`
+- blocked gate count `0`
+- pairwise status `pass`
+- PIX status `pass`
+- PIX artifact magic and file magic `PIX`
+- GPU debugger status `pass`
+- non-empty GPU debugger artifact path
+
 ## Remaining Placeholders
 
-The macOS Metal, Windows D3D12, and parallel-agent review lanes still use
-explicit `TODO(gui-web-2d-completion)` fail-fast assertions. Replacing one of
-those placeholders must add field-level assertions over the current aggregate
-or platform wrapper evidence and update
+Only the parallel-agent review lane still uses an explicit
+`TODO(gui-web-2d-completion)` fail-fast assertion. Replacing that placeholder
+must add field-level assertions over recorded sidecar/review evidence and update
 `gui_web_2d_completion_criteria_placeholder_audit_spec.spl`.
 
 ## Production GUI/Web Parity Assertions
