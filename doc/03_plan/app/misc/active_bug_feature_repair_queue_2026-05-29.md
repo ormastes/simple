@@ -413,7 +413,7 @@ Spawned read-only explorers:
       disk probe exit-code acceptance mismatch.
     - Verification passed:
       `git diff --check`,
-      `SIMPLE_LIB=src bin/simple check src/os/services/vfs/vfs_boot_init.spl src/os/services/vfs/vfs_init.spl src/os/drivers/nvme/nvme_driver_part2.spl src/os/drivers/nvme/nvme_queue.spl src/os/kernel/loader/x86_64_fs_exec_spawn.spl src/os/qemu_runner_part5.spl examples/09_embedded/simple_os/arch/x86_64/desktop_e2e_entry.spl`,
+      `SIMPLE_LIB=src bin/simple check src/os/services/vfs/vfs_boot_init.spl src/os/services/vfs/vfs_init.spl src/os/drivers/nvme/_NvmeDriver/driver_operations.spl src/os/drivers/nvme/nvme_queue.spl src/os/kernel/loader/x86_64_fs_exec_spawn.spl src/os/qemu_runner_part5.spl examples/09_embedded/simple_os/arch/x86_64/desktop_e2e_entry.spl`,
       `SIMPLE_LIB=src bin/simple test test/01_unit/os/services/vfs/vfs_boot_nvme_lease_spec.spl --mode=interpreter --clean`,
       `SIMPLE_LIB=src bin/simple test test/01_unit/os/services/vfs/nvme_block_adapter_spec.spl --mode=interpreter --clean`, and
       `SIMPLE_LIB=src bin/simple os test --scenario=x64-desktop-disk`

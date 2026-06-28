@@ -48,7 +48,7 @@ Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val source = read_file("src/os/drivers/nvme/nvme_driver_part2.spl")
+val source = read_file("src/os/drivers/nvme/_NvmeDriver/driver_operations.spl")
 
 expect(source.contains("run_reversible_sector_probe")).to_equal(true)
 expect(source.contains("self.read_sectors(lba, 1u32, original.phys)")).to_equal(true)
@@ -69,7 +69,7 @@ Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val source = read_file("src/os/drivers/nvme/nvme_driver_part2.spl")
+val source = read_file("src/os/drivers/nvme/_NvmeDriver/driver_operations.spl")
 
 expect(source.contains("transfer_evidence_from_reversible_probe")).to_equal(true)
 expect(source.contains("val probe_result = self.run_reversible_sector_probe(lba)")).to_equal(true)
@@ -90,7 +90,7 @@ Runnable source: 47 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val source = read_file("src/os/drivers/nvme/nvme_driver_part2.spl")
+val source = read_file("src/os/drivers/nvme/_NvmeDriver/driver_operations.spl")
 
 expect(source.contains("me read_sectors_in_namespace(nsid: u32")).to_equal(true)
 expect(source.contains("me write_sectors_in_namespace(nsid: u32")).to_equal(true)
@@ -150,7 +150,7 @@ Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val source = read_file("src/os/drivers/nvme/nvme_driver_part2.spl")
+val source = read_file("src/os/drivers/nvme/_NvmeDriver/driver_operations.spl")
 
 expect(source.contains("\"\"\"Read one 4KiB operation as one multi-sector NVMe command.\"\"\"")).to_equal(true)
 expect(source.contains("\"\"\"Write one 4KiB operation as one multi-sector NVMe command.\"\"\"")).to_equal(true)
@@ -172,7 +172,7 @@ Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val source = read_file("src/os/drivers/nvme/nvme_driver_part2.spl")
+val source = read_file("src/os/drivers/nvme/_NvmeDriver/driver_operations.spl")
 
 expect(source.contains("fn data_queue_depth_for_id(queue_id: u16) -> Result<u16, text>:")).to_equal(true)
 expect(source.contains("for existing in self.user_io_queues:")).to_equal(true)
