@@ -1006,17 +1006,18 @@ Normal-review acceptance:
   mobile parity, HTML/CSS full rendering status, and production GUI/Web parity
   wrappers now emit lane-specific source revision keys plus the shared
   `gui_web_2d_evidence_source_revision` fallback consumed by the freshness
-  checker. `GUI_WEB_2D_SOURCE_REVISION` can pin a final review window across
-  wrappers on platform hosts.
+  checker. `GUI_WEB_2D_PLATFORM_FRESHNESS_SOURCE_REVISION` can pin a final
+  review window across wrappers on platform hosts.
 - 2026-06-28 freshness metadata producer prep: native RenderDoc aggregate now
   emits `native_render_log_platform_matrix_runtime_build`,
   `native_render_log_platform_matrix_browser_webview_electron_revision`,
   `native_render_log_platform_matrix_graphics_sdk_driver`, and
   `native_render_log_platform_matrix_runbook_version`, plus shared
   `gui_web_2d_evidence_*` fallbacks. Final platform runs can supply the values
-  through `GUI_WEB_2D_RUNTIME_BUILD`,
-  `GUI_WEB_2D_BROWSER_WEBVIEW_ELECTRON_REVISION`,
-  `GUI_WEB_2D_GRAPHICS_SDK_DRIVER`, and `GUI_WEB_2D_RUNBOOK_VERSION`.
+  through `GUI_WEB_2D_PLATFORM_FRESHNESS_RUNTIME_BUILD`,
+  `GUI_WEB_2D_PLATFORM_FRESHNESS_BROWSER_WEBVIEW_ELECTRON_REVISION`,
+  `GUI_WEB_2D_PLATFORM_FRESHNESS_GRAPHICS_SDK_DRIVER`, and
+  `GUI_WEB_2D_PLATFORM_FRESHNESS_RUNBOOK_VERSION`.
 - 2026-06-28 parallel-agent review evidence prep:
   `test/03_system/check/gui_web_2d_parallel_agent_review_evidence_spec.spl`
   now directly runs
@@ -1083,6 +1084,11 @@ Normal-review acceptance:
   accepted source-revision keys inside each present lane env before comparing
   lane freshness. A hand-edited or concatenated env cannot hide a stale source
   line by appending a later fresh value for the same key.
+- 2026-06-28 freshness source alias revalidation:
+  the freshness checker now also rejects multiple accepted source-revision
+  alias forms in the same lane env, such as a stale shared
+  `gui_web_2d_evidence_source_revision` next to a fresh lane-specific source
+  key. Alias priority cannot hide stale source evidence.
 - 2026-06-28 freshness duplicate metadata key revalidation:
   `scripts/check/check-gui-web-2d-platform-freshness.shs` now rejects duplicate
   accepted runtime, browser/WebView/Electron, graphics SDK/driver, and runbook
