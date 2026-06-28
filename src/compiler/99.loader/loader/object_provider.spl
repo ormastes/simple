@@ -112,10 +112,9 @@ impl ObjectProvider:
     fn get_exported_code(self: ObjectProvider, module_or_path: text) -> Result<[ObjectCodeUnit], text>:
         """Return raw code for all exported symbols (fallback when no .o exists)."""
         val reader_res = self.get_reader(module_or_path)
-        if reader_res.is_err():
-            return Err(reader_res.unwrap_err())
-
-        val reader = reader_res.unwrap()
+        val reader = match reader_res:
+            case Ok(found_reader): found_reader
+            case Err(reason): return Err(reason)
         # Basic safety: require PIC code when emitting executable sections
         if not reader.header.flags.pic:
             return Err("SMF {module_or_path} is not PIC; cannot embed raw code safely")
@@ -134,11 +133,13 @@ impl ObjectProvider:
                     code = bytes
                 case _:
                     val code_res = reader.read_code(sym)
-                    if code_res.is_err():
-                        if self.verbose:
-                            print "[object-provider] skip {sym.name}: {code_res.unwrap_err()}"
-                        continue
-                    code = code_res.unwrap()
+                    match code_res:
+                        case Ok(bytes):
+                            code = bytes
+                        case Err(reason):
+                            if self.verbose:
+                                print "[object-provider] skip {sym.name}: {reason}"
+                            continue
 
             units.push(make_object_code_unit(sym.name, code))
         if units.len() == 0:
