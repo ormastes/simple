@@ -385,8 +385,13 @@ pub fn detect_common_mistake(current: &Token, previous: &Token, next: Option<&To
         return Some(CommonMistake::CppNamespace);
     }
 
-    // Check for 'template' (C++)
-    if current.lexeme == "template" && matches!(current.kind, TokenKind::Identifier { .. }) {
+    // Check for 'template<...>' (C++). A bare identifier named `template` is
+    // valid Simple code, so only flag the C++ mistake when it is immediately
+    // followed by '<' (the `template<T>` form).
+    if current.lexeme == "template"
+        && matches!(current.kind, TokenKind::Identifier { .. })
+        && next.is_some_and(|n| matches!(n.kind, TokenKind::Lt))
+    {
         return Some(CommonMistake::CppTemplate);
     }
 
