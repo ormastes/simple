@@ -49,7 +49,7 @@ restoring FETCH_HEAD copies and re-running)
 - `checker.spl`: `True`/`False` → `true`/`false`; `.append()` → `list + [item]`;
   `ProofStatus` class renamed `ProofStatusReport` (conflicts with enum); `None` → `nil`;
   nil guard on `_rt_process_run` return with static sorry-scan fallback for no-Lean envs.
-- `codegen_part1.spl`: `build_theorem()` uses direct constructor (avoids me-method
+- `_Codegen/lean_codegen.spl`: `build_theorem()` uses direct constructor (avoids me-method
   cross-module mutation loss); `proof_text()` uses `match Some(p)` pattern.
 - `__init__.spl`: `io.fs` stub → `std.nogc_sync_mut.io`; `Dict<text,bool>` → text values;
   `rt_dir_create_all` (unimplemented) → `shell("mkdir -p ...")`.
