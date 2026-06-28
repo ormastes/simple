@@ -403,16 +403,23 @@ pub fn xz_encode(input: ByteSpan) -> ByteSpan:
     out.push(ic3.to_u8())
 
     # Stream Footer (12 bytes)
-    # CRC32 of stream flags (same value as header)
-    out.push(fc0.to_u8())
-    out.push(fc1.to_u8())
-    out.push(fc2.to_u8())
-    out.push(fc3.to_u8())
     # backward_size (4 bytes LE)
     var bs0 = backward_sz & 0xFF
     var bs1 = (backward_sz >> 8) & 0xFF
     var bs2 = (backward_sz >> 16) & 0xFF
     var bs3 = (backward_sz >> 24) & 0xFF
+    var footer_crc_data: [u8] = [bs0.to_u8(), bs1.to_u8(), bs2.to_u8(), bs3.to_u8(), 0x00u8, 0x00u8]
+    var footer_crc_state = Crc32.new()
+    footer_crc_state.update(ByteSpan.new(footer_crc_data))
+    val footer_crc = footer_crc_state.raw()
+    var fcrc0 = footer_crc & 0xFF
+    var fcrc1 = (footer_crc >> 8) & 0xFF
+    var fcrc2 = (footer_crc >> 16) & 0xFF
+    var fcrc3 = (footer_crc >> 24) & 0xFF
+    out.push(fcrc0.to_u8())
+    out.push(fcrc1.to_u8())
+    out.push(fcrc2.to_u8())
+    out.push(fcrc3.to_u8())
     out.push(bs0.to_u8())
     out.push(bs1.to_u8())
     out.push(bs2.to_u8())
@@ -505,9 +512,17 @@ pub fn xz_decode(frame: ByteSpan) -> ByteSpan:
     val footer_start = n - 12
     if frame.get(footer_start + 8).to_i64() != 0 or frame.get(footer_start + 9).to_i64() != 0:
         return ByteSpan.empty()
-    if frame.get(footer_start).to_i64() != expected_fc0 or frame.get(footer_start + 1).to_i64() != expected_fc1:
+    val footer_crc_content = frame.slice(footer_start + 4, 6)
+    var footer_crc_state = Crc32.new()
+    footer_crc_state.update(footer_crc_content)
+    val footer_crc = footer_crc_state.raw()
+    if frame.get(footer_start).to_i64() != (footer_crc & 0xFF):
         return ByteSpan.empty()
-    if frame.get(footer_start + 2).to_i64() != expected_fc2 or frame.get(footer_start + 3).to_i64() != expected_fc3:
+    if frame.get(footer_start + 1).to_i64() != ((footer_crc >> 8) & 0xFF):
+        return ByteSpan.empty()
+    if frame.get(footer_start + 2).to_i64() != ((footer_crc >> 16) & 0xFF):
+        return ByteSpan.empty()
+    if frame.get(footer_start + 3).to_i64() != ((footer_crc >> 24) & 0xFF):
         return ByteSpan.empty()
     var bw0b = frame.get(footer_start + 4)
     var bw1b = frame.get(footer_start + 5)
