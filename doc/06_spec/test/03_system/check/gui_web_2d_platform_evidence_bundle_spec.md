@@ -27,7 +27,7 @@ gui_web_2d_platform_evidence_bundle_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 5 | 5 | 0 | 0 |
+| 6 | 6 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -74,6 +74,8 @@ sh scripts/check/check-gui-web-2d-platform-evidence-bundle.shs
   all nine live gates as proven when every required input key is present and
   passing.
 - A present failed platform row is reported as failed, not missing.
+- A present platform env with missing required gate keys is reported as failed,
+  not missing.
 - A present failed retained 4K or 8K performance row is reported as failed
   even when the companion perf env is missing.
 - A present failed freshness env is reported as the `cross-platform-freshness`
@@ -113,11 +115,11 @@ The rollup keeps the exact nine handoff gate IDs:
 - `production-gui-web-parity`
 - `cross-platform-freshness`
 
-Each gate is classified independently. Missing env files or missing required
-keys are `missing` unless the env file exists and contains a non-pass value for
-that gate's status key, in which case the gate is `fail`. A pass is accepted
-only when every required key for that gate is `pass` and, for freshness, every
-revision field is non-empty.
+Each gate is classified independently. Missing env files are `missing`. Once an
+env file exists, missing required keys and explicit non-pass values are `fail`
+because the lane produced evidence that is too weak for completion. A pass is
+accepted only when every required key for that gate is `pass` and, for
+freshness, every revision field is non-empty.
 
 ## Output Contract
 
@@ -262,6 +264,31 @@ expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_linux_vulkan_re
 
 </details>
 
+#### classifies present incomplete platform evidence as failed rather than missing
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val command = "rm -rf build/test-gui-web-2d-platform-evidence-bundle-incomplete-present && mkdir -p build/test-gui-web-2d-platform-evidence-bundle-incomplete-present/env && printf 'tauri_mobile_renderer_parity_ios_status=pass\\ntauri_mobile_renderer_parity_ios_render_log_metal_marker_status=pass\\ntauri_mobile_renderer_parity_ios_mdi_proof_status=pass\\ntauri_mobile_renderer_parity_ios_screenshot_artifact_status=pass\\ntauri_mobile_renderer_parity_android_status=pass\\ntauri_mobile_renderer_parity_android_render_log_vulkan_marker_status=pass\\ntauri_mobile_renderer_parity_android_mdi_proof_status=pass\\ntauri_mobile_renderer_parity_android_screenshot_artifact_status=pass\\n' > build/test-gui-web-2d-platform-evidence-bundle-incomplete-present/env/mobile.env && BUILD_DIR=build/test-gui-web-2d-platform-evidence-bundle-incomplete-present/out REPORT_PATH=build/test-gui-web-2d-platform-evidence-bundle-incomplete-present/report.md NATIVE_RENDER_LOG_PLATFORM_MATRIX_ENV=build/test-gui-web-2d-platform-evidence-bundle-incomplete-present/missing/native.env TAURI_MOBILE_RENDERER_PARITY_ENV=build/test-gui-web-2d-platform-evidence-bundle-incomplete-present/env/mobile.env GUI_SHOWCASE_4K_200FPS_ENV=build/test-gui-web-2d-platform-evidence-bundle-incomplete-present/missing/4k.env GUI_SHOWCASE_8K_200FPS_ENV=build/test-gui-web-2d-platform-evidence-bundle-incomplete-present/missing/8k.env HTML_CSS_FULL_RENDERING_GOAL_ENV=build/test-gui-web-2d-platform-evidence-bundle-incomplete-present/missing/html.env PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=build/test-gui-web-2d-platform-evidence-bundle-incomplete-present/missing/production.env GUI_WEB_2D_PLATFORM_FRESHNESS_ENV=build/test-gui-web-2d-platform-evidence-bundle-incomplete-present/missing/fresh.env sh scripts/check/check-gui-web-2d-platform-evidence-bundle.shs"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read("build/test-gui-web-2d-platform-evidence-bundle-incomplete-present/out/evidence.env")
+expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_status=fail")
+expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_reason=failed-live-gates")
+expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_failed_gate_count=1")
+expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_failed_gates=android-tauri-webview-vulkan")
+expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_missing_gate_count=7")
+expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_ios_tauri_wkwebview_metal_status=pass")
+expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_android_tauri_webview_vulkan_status=fail")
+```
+
+</details>
+
 #### classifies a failed retained perf row as failed when the companion perf env is missing
 
 <details>
@@ -313,8 +340,8 @@ expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_cross_platform_
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 6 |
+| Active scenarios | 6 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

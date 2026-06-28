@@ -1034,6 +1034,12 @@ Normal-review acceptance:
   `test/03_system/check/gui_web_2d_platform_evidence_bundle_spec.spl`. This
   prevents bad present retained perf evidence from being hidden as merely
   missing platform work.
+- 2026-06-28 present-incomplete bundle evidence contract:
+  `test/03_system/check/gui_web_2d_platform_evidence_bundle_spec.spl` now
+  asserts that an existing platform env with a missing required lane key is
+  classified as failed evidence, not as missing work. Missing means no env was
+  produced; failed means a host or wrapper produced evidence too weak for final
+  completion.
 
 ## Hard Stop Conditions
 
