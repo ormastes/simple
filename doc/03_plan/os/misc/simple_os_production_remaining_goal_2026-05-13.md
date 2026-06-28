@@ -33,7 +33,7 @@ performance, stability, and primitive API hygiene.
     text-scanner pure-math exemption is too broad.
   - `test/02_integration/app/primitive_api_lint_spec.spl` currently fails because
     `pub fn bad(x: i64) -> i64` is incorrectly exempted.
-  - `src/compiler/90.tools/lint/main_part1.spl` still sets
+  - `src/compiler/90.tools/lint/_LintMain/config_and_model.spl` still sets
     `levels["primitive_api"] = "warn"` while the spec expects `deny`.
 - Re-run primitive API lint gates after the scanner fix:
   - `test/03_system/code_quality/primitive_api_lint_spec.spl`

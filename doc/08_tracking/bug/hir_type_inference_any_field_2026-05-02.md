@@ -189,8 +189,8 @@ Stage-4 log `build/bootstrap/logs/x86_64-unknown-linux-gnu/stage4-native-build.l
 | `src/app/llm_dashboard/main.spl` | `bytes` |
 | `src/app/web_dashboard/server.spl` | `bytes` |
 | `src/compiler/90.tools/fix/main.spl` | `replacements` |
-| `src/compiler/90.tools/lint/main_part2.spl` | `description` |
-| `src/compiler/90.tools/lint/main_part4.spl` | `replacements` |
+| `src/compiler/90.tools/lint/_LintMain/lint_checks.spl` | `description` |
+| `src/compiler/90.tools/lint/_LintMain/entry_and_fixes.spl` | `replacements` |
 
 **Root cause (Class 3):** `[WARN] Failed to load imported types` from cross-module imports. The type-loader fails to resolve e.g. `lib.common.llm.output_gate`, `common.ui.glass.tokens`, `std.tooling.easy_fix` in the context of these files, so the struct fields become `ANY`-typed receivers. Example WARN:
 ```

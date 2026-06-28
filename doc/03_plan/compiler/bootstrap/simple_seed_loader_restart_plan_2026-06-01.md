@@ -15,8 +15,8 @@ Resume the segfault/loader hardening work with Rust treated only as the seed/too
   - `src/lib/nogc_sync_mut/sffi/llvm_types.spl`
   - `src/lib/log.spl`
   - `src/compiler/99.loader/loader/smf_mmap_native.spl`
-  - `src/compiler/70.backend/linker/smf_reader_memory_part1.spl`
-  - `src/compiler/70.backend/linker/smf_reader_memory_part2.spl`
+  - `src/compiler/70.backend/linker/_SmfReaderMemory/header_parser.spl`
+  - `src/compiler/70.backend/linker/_SmfReaderMemory/symbol_parser.spl`
   - `src/compiler/80.driver/smf_writer.spl`
   - `src/compiler/99.loader/loader/module_loader.spl`
   - `src/compiler/99.loader/module_loader.spl`
@@ -30,7 +30,7 @@ Resume the segfault/loader hardening work with Rust treated only as the seed/too
   - Simple SMF writer/reader layout assumptions were inconsistent.
   - The in-memory reader needed 64-byte section table entries.
   - The Simple writer symbol entry needed to align with the documented 56-byte symbol layout.
-  - Header parsing in `smf_reader_memory_part1.spl` was reading offsets as if there were extra repr(C) padding, but `smf_header.spl::to_bytes()` writes packed fields.
+  - Header parsing in `_SmfReaderMemory/header_parser.spl` was reading offsets as if there were extra repr(C) padding, but `smf_header.spl::to_bytes()` writes packed fields.
   - The compatibility `compiler.loader` facade path can return a successful load with zero symbols.
   - A separate parse blocker exists in `src/compiler/10.frontend/_FlatAstBridge/module_assembly.spl`: `Unexpected token: expected expression, found Else`.
 

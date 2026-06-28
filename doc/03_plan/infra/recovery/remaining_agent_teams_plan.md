@@ -45,8 +45,8 @@
 | `llm_dashboard` | app |
 | `web_dashboard` | app |
 | `fix/main.spl` | app/fix |
-| `lint/main_part2.spl` | app/lint |
-| `lint/main_part4.spl` | app/lint |
+| `lint/_LintMain/lint_checks.spl` | app/lint |
+| `lint/_LintMain/entry_and_fixes.spl` | app/lint |
 | `cli_commands_part1.spl` | app/cli |
 | `cli_commands_part2.spl` | app/cli |
 

@@ -6,7 +6,7 @@ R2 is **done**. The arena approach below was abandoned (it hit two infrastructur
 "Bootstrap attempt result"). The breakthrough: the `primitive_api` check already existed as a
 **text-based** lint on the compiled CLI engine
 (`compiler.tools.fix.rules.impl_.lint_primitive_api.check_primitive_api`, wired in
-`90.tools/lint/main_part2.spl:225`, with easyfix wrapper suggestions = the auto-fix feature).
+`90.tools/lint/_LintMain/lint_checks.spl:225`, with easyfix wrapper suggestions = the auto-fix feature).
 The only gap was the **LSP/build path** (`query_lint`), which never surfaced it.
 
 Fix (landed in `src/app/cli/query_lint.spl`): a tier-gated text emitter `_emit_primitive_api_text`
@@ -130,7 +130,7 @@ Severity is then governed by the R1-step-3 override map (moderate→suppress, li
 
 ## Bootstrap attempt result (2026-06-16) — BOTH integration paths blocked by infrastructure
 The CLI-engine route was attempted under explicit authorization: wired
-`check_primitive_api_arena` into the **compiled** `90.tools/lint/main_part2.spl` (tier-gated,
+`check_primitive_api_arena` into the **compiled** `90.tools/lint/_LintMain/lint_checks.spl` (tier-gated,
 before the config filter) and ran `bin/simple build bootstrap`. **Stage 1 failed** (`native-build
 --source src/app … exit 248`): because `query_lint` is script-run, the parser was never in the
 compiled binary's closure; importing `compiler.core.parser` + AST into the compiled lint engine

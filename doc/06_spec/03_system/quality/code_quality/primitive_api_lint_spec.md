@@ -254,7 +254,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val source = rt_file_read_text("src/compiler/90.tools/lint/main_part1.spl")
+val source = rt_file_read_text("src/compiler/90.tools/lint/_LintMain/config_and_model.spl")
 expect(source.contains("levels[\"primitive_api\"] = \"deny\"")).to_equal(true)
 ```
 

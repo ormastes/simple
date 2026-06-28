@@ -22,7 +22,7 @@ Runtime error: Function 'line' not found
 ```
 
 Now produces structured lint output (warnings and errors) without crashing.
-Likely fix: `src/compiler/90.tools/lint/main_part2.spl` EasyFix field access
+Likely fix: `src/compiler/90.tools/lint/_LintMain/lint_checks.spl` EasyFix field access
 was repaired; `fix_reps[0].line` resolves correctly.
 
 `bin/simple fmt src/app/io/cli_ops.spl --check` — previously crashed:

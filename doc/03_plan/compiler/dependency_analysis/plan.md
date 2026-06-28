@@ -18,7 +18,7 @@ Status: Wave 1 complete; Wave 2 in progress
 - CLI registration: import in `src/app/cli/main_part1.spl`, dispatch branch in
   `src/app/cli/main_part2.spl` (`todo-scan` pattern, ~line 264).
 - Deep-mode building blocks: SMF reader (`src/compiler/70.backend/linker/
-  smf_reader.spl`, `smf_reader_memory_part1/2.spl` incl. `read_elf_object`),
+  smf_reader.spl`, `_SmfReaderMemory/{header_parser,symbol_parser}.spl` incl. `read_elf_object`),
   ELF section sizes (`elf_inspect.spl`), symbol sizes + reachability
   (`symbol_analysis.spl`), line counts (`src/app/stats/line_counter.spl`),
   closure (Rust `collect_imported_module_paths`; Simple-side loader closure).
