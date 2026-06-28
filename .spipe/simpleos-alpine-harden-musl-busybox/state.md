@@ -45,9 +45,14 @@ feature (multi-pillar, multi-session)
   (seq via libc_strtoul, 8/0); simplebox_build.spl native-build→rootfs (5/0); image_builder packs
   /bin/simplebox into the rootfs + deploy manifest (proven by image_builder_artifact_spec block 1).
   Pre-existing nvfs-marker failure in that spec's block 3 filed (image_builder_nvfs_rootfs_marker_
-  preexisting_2026-06-28.md) — NOT caused by this wire (origin fails it identically). Cross-compile to
-  a real simpleos ELF needs the sysroot (not built here); the build cmd + pack + consumption are
-  verified at the Simple level.]
+  preexisting_2026-06-28.md) — NOT caused by this wire (origin fails it identically).
+  SYSROOT BUILT FOR REAL (sh src/os/port/llvm/sysroot.shs): libsimpleos_c.a 137KB + crt0.o + simpleos.ld
+  + headers under build/os/sysroot (gitignored). simplebox_build.spl corrected to the canonical
+  invocation (--backend llvm/--source src/os+src/lib/--entry-closure/--target x86_64-unknown-none/
+  --linker-script), 7/0. CROSS-COMPILE BLOCKED: native-build exits 255 with no binary + no error for
+  any multi-module freestanding entry (import-free entry emits a real ELF; documented kernel_entry
+  no-ops identically; not memory). Filed native_build_freestanding_multimodule_no_emit_2026-06-28.md.
+  Image pack uses its placeholder until native-build's cross-module emit works.]
 ### P4 — PIE/SSP/RELRO policy
 - AC-8: desktop/Hosted hardening stays UNCONDITIONALLY ON (no regression); ADD embedded opt-out via
   preset. [DONE — resolve_hardening + regression-guarded spec green]
