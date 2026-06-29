@@ -979,6 +979,12 @@ live operator-dashboard pass. The HTTP producer records exact status codes,
 response sizes, and SHA-256 fingerprints for the unauthenticated API rejection,
 dashboard HTML, agents HTML, and authenticated control JSONL responses, so a
 status-only env cannot satisfy strict dashboard evidence.
+The live dashboard wrapper also writes a route surface manifest with path,
+size, and SHA-256 rows for the checked route specs, server source, dashboard
+guide, and runtime task plan, plus size/SHA-256 metadata for the nested
+dashboard evidence env/log. The aggregate dashboard detail forwards those
+fields, so strict live dashboard review can distinguish hashed local
+route-contract proof from the still-required live HTTP proof.
 The aggregate strict-host path now runs
 `check-llm-dashboard-live-http-evidence.shs` before
 `check-llm-dashboard-live-evidence.shs`, so a missing configured dashboard URL

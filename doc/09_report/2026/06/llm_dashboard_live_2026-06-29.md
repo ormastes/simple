@@ -8,6 +8,14 @@
 - primary_blocked_gate: `live_http_authenticated_request`
 - dashboard_evidence_status: `pass`
 - dashboard_evidence_env: `build/llm_dashboard_live/dashboard/evidence.env`
+- dashboard_evidence_env_size: `580`
+- dashboard_evidence_env_sha256: `c1f2c4c83d0f9f2d7349bd5f565744042bfc149194c642b4c255550aa2ae3f14`
+- dashboard_evidence_log_size: `36`
+- dashboard_evidence_log_sha256: `9a43f2eacabcf33d31fed9e00a09b6ae8084248648f20969dfb8d7b632c57592`
+- surface_manifest: `build/llm_dashboard_live/dashboard_live_surface_manifest.tsv`
+- surface_manifest_count: `5`
+- surface_manifest_size: `615`
+- surface_manifest_sha256: `497fce2a07a852f3e6bb80d35088837ea3e7f36b2e618fa162eca98828148dd1`
 - live_http_env: `build/llm_dashboard_live_http/evidence.env`
 - live_http_status: `fail`
 - live_http_reason: `missing_base_url`

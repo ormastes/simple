@@ -252,6 +252,9 @@ size/SHA-256 so a passing replacement row is tied to exact repo-local source
 and spec artifacts. The aggregate env also records
 `llm_goal_evidence_context_ponytail_detail` for mimic/full-replacement state,
 `llm_goal_evidence_dashboard_detail` for dashboard live-readiness state,
+including the strict dashboard route surface manifest count, size, SHA-256,
+dashboard evidence env/log size and SHA-256, live HTTP status, live HTTP
+response hashes, and the live dashboard next action,
 `llm_goal_evidence_vllm_host_detail` for local
 vLLM/GPU/preflight/endpoint/model statuses and pass-log integrity, and
 `llm_goal_evidence_svllm_local_detail` for native svLLM streaming status,

@@ -20,6 +20,30 @@ reason="dashboard_live_routes_verified"
 failures=""
 required_gates="dashboard_evidence,route_spec_html,route_spec_auth,route_spec_api,route_spec_side_effect,route_spec_owner,agent_spec_auth,agent_spec_render,agent_spec_prefix,server_route,server_agents_route,server_agents_render,server_boundary,server_execution,guide_live,guide_api,guide_agents,runtime_plan,live_http_authenticated_request"
 
+artifact_size() {
+    path="$1"
+    if [ -n "$path" ] && [ -f "$path" ]; then
+        wc -c <"$path" | tr -d ' '
+    else
+        printf '%s\n' "missing"
+    fi
+}
+
+artifact_sha256() {
+    path="$1"
+    if [ -n "$path" ] && [ -f "$path" ]; then
+        if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$path" | awk '{print $1}'
+        elif command -v shasum >/dev/null 2>&1; then
+            shasum -a 256 "$path" | awk '{print $1}'
+        else
+            printf '%s\n' "unavailable"
+        fi
+    else
+        printf '%s\n' "missing"
+    fi
+}
+
 record_failure() {
     if [ -z "$failures" ]; then
         failures="$1"
@@ -67,6 +91,26 @@ require_contains guide_api doc/07_guide/app/dashboard.md "/api/vllm/control"
 require_contains guide_agents doc/07_guide/app/dashboard.md "/agents"
 require_contains runtime_plan doc/03_plan/agent_tasks/llm_runtime_vllm_torch_interface.md "Wire side-effect dashboard actions through runtime-owner execution JSONL"
 
+SURFACE_MANIFEST="$BUILD_DIR/dashboard_live_surface_manifest.tsv"
+{
+    for path in \
+        test/03_system/feature/app/web_dashboard/vllm_control_route_spec.spl \
+        test/03_system/feature/app/web_dashboard/llm_agent_dashboard_spec.spl \
+        src/app/web_dashboard/server.spl \
+        doc/07_guide/app/dashboard.md \
+        doc/03_plan/agent_tasks/llm_runtime_vllm_torch_interface.md
+    do
+        printf '%s\t%s\t%s\n' "$path" "$(artifact_size "$path")" "$(artifact_sha256 "$path")"
+    done
+} >"$SURFACE_MANIFEST"
+surface_manifest_count="$(wc -l <"$SURFACE_MANIFEST" | tr -d ' ')"
+surface_manifest_size="$(artifact_size "$SURFACE_MANIFEST")"
+surface_manifest_sha256="$(artifact_sha256 "$SURFACE_MANIFEST")"
+dashboard_env_size="$(artifact_size "$DASHBOARD_ENV")"
+dashboard_env_sha256="$(artifact_sha256 "$DASHBOARD_ENV")"
+dashboard_log_size="$(artifact_size "$BUILD_DIR/dashboard.log")"
+dashboard_log_sha256="$(artifact_sha256 "$BUILD_DIR/dashboard.log")"
+
 live_http_status="missing"
 live_http_reason="missing_live_http_evidence"
 live_http_dashboard_status="not_collected"
@@ -109,6 +153,14 @@ fi
     printf '%s\n' "llm_dashboard_live_primary_blocked_gate=$primary_blocked_gate"
     printf '%s\n' "llm_dashboard_live_dashboard_evidence_status=$dashboard_status"
     printf '%s\n' "llm_dashboard_live_dashboard_evidence_env=$DASHBOARD_ENV"
+    printf '%s\n' "llm_dashboard_live_dashboard_evidence_env_size=$dashboard_env_size"
+    printf '%s\n' "llm_dashboard_live_dashboard_evidence_env_sha256=$dashboard_env_sha256"
+    printf '%s\n' "llm_dashboard_live_dashboard_evidence_log_size=$dashboard_log_size"
+    printf '%s\n' "llm_dashboard_live_dashboard_evidence_log_sha256=$dashboard_log_sha256"
+    printf '%s\n' "llm_dashboard_live_surface_manifest=$SURFACE_MANIFEST"
+    printf '%s\n' "llm_dashboard_live_surface_manifest_count=$surface_manifest_count"
+    printf '%s\n' "llm_dashboard_live_surface_manifest_size=$surface_manifest_size"
+    printf '%s\n' "llm_dashboard_live_surface_manifest_sha256=$surface_manifest_sha256"
     printf '%s\n' "llm_dashboard_live_http_evidence_env=$LIVE_HTTP_ENV"
     printf '%s\n' "llm_dashboard_live_http_status=${live_http_status:-missing}"
     printf '%s\n' "llm_dashboard_live_http_reason=${live_http_reason:-missing_live_http_evidence}"
@@ -130,6 +182,14 @@ fi
     printf '%s\n' "- primary_blocked_gate: \`$primary_blocked_gate\`"
     printf '%s\n' "- dashboard_evidence_status: \`$dashboard_status\`"
     printf '%s\n' "- dashboard_evidence_env: \`$DASHBOARD_ENV\`"
+    printf '%s\n' "- dashboard_evidence_env_size: \`$dashboard_env_size\`"
+    printf '%s\n' "- dashboard_evidence_env_sha256: \`$dashboard_env_sha256\`"
+    printf '%s\n' "- dashboard_evidence_log_size: \`$dashboard_log_size\`"
+    printf '%s\n' "- dashboard_evidence_log_sha256: \`$dashboard_log_sha256\`"
+    printf '%s\n' "- surface_manifest: \`$SURFACE_MANIFEST\`"
+    printf '%s\n' "- surface_manifest_count: \`$surface_manifest_count\`"
+    printf '%s\n' "- surface_manifest_size: \`$surface_manifest_size\`"
+    printf '%s\n' "- surface_manifest_sha256: \`$surface_manifest_sha256\`"
     printf '%s\n' "- live_http_env: \`$LIVE_HTTP_ENV\`"
     printf '%s\n' "- live_http_status: \`${live_http_status:-missing}\`"
     printf '%s\n' "- live_http_reason: \`${live_http_reason:-missing_live_http_evidence}\`"
