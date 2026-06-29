@@ -28,7 +28,7 @@ smf_dynlib_artifact_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 10 | 10 | 0 | 0 |
+| 11 | 11 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -119,6 +119,25 @@ expect(row).to_contain(" qemu_status=not-run ")
 expect(row).to_contain(" qemu_reason=live-qemu-not-executed ")
 expect(row).to_contain(" macos_status=not-run ")
 expect(row).to_contain(" macos_reason=requires-macos-arm64")
+```
+
+</details>
+
+#### accepts a precomputed digest for on-disk artifact evidence
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val smf = gui_smf_wrap_native_library([0xCFu8, 0xFAu8, 0xEDu8, 0xFEu8, 0u8], 3u8)
+val contract = gui_smf_artifact_contract_with_sha256("build/gui/pure_gui_hot.smf", smf, "gui_dynlib_hot_probe_tick", "precomputed-digest")
+expect(contract.status).to_equal("pass")
+expect(contract.sha256_hex).to_equal("precomputed-digest")
+val row = gui_smf_artifact_contract_row(contract)
+expect(row).to_contain(" sha256=precomputed-digest ")
 ```
 
 </details>
@@ -230,7 +249,7 @@ expect(row).to_contain(" macos_reason=requires-macos-arm64")
 
 #### wraps and extracts a role-2 SMF dynlib through pure Simple helpers and file IO
 
-1. extracted stub push
+- extracted stub push
    - Expected: rt_file_write_bytes(extracted_path, extracted_stub) is true
    - Expected: extracted.len() equals `6`
    - Expected: extracted[0] equals `0x7Fu8`
@@ -290,8 +309,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 10 |
-| Active scenarios | 10 |
+| Total scenarios | 11 |
+| Active scenarios | 11 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

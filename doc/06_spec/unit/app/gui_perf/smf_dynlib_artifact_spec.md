@@ -1,5 +1,40 @@
 # Smf Dynlib Artifact Specification
 
+> <details>
+
+<!-- sdn-diagram:id=smf_dynlib_artifact_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=smf_dynlib_artifact_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+smf_dynlib_artifact_spec -> std
+smf_dynlib_artifact_spec -> app
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=smf_dynlib_artifact_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 11 | 11 | 0 | 0 |
+
+<details>
+<summary>Full Scenario Manual</summary>
+
+# Smf Dynlib Artifact Specification
+
 ## Scenarios
 
 ### pure GUI SMF dynlib artifact
@@ -7,7 +42,7 @@
 #### maps common host architecture names to SMF arch codes
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -25,7 +60,7 @@ expect(gui_smf_dynlib_arch_code("weird")).to_equal(0u8)
 #### wraps an ELF host dynlib as a role-2 SMF library envelope
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -47,7 +82,7 @@ expect(parsed.arch).to_equal(1i64)
 #### wraps a Mach-O host dynlib as a role-2 arm64 SMF library envelope
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -64,7 +99,7 @@ expect(header.unwrap().arch).to_equal(3i64)
 #### emits a contract-only row without claiming QEMU or macOS execution
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -88,10 +123,29 @@ expect(row).to_contain(" macos_reason=requires-macos-arm64")
 
 </details>
 
+#### accepts a precomputed digest for on-disk artifact evidence
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val smf = gui_smf_wrap_native_library([0xCFu8, 0xFAu8, 0xEDu8, 0xFEu8, 0u8], 3u8)
+val contract = gui_smf_artifact_contract_with_sha256("build/gui/pure_gui_hot.smf", smf, "gui_dynlib_hot_probe_tick", "precomputed-digest")
+expect(contract.status).to_equal("pass")
+expect(contract.sha256_hex).to_equal("precomputed-digest")
+val row = gui_smf_artifact_contract_row(contract)
+expect(row).to_contain(" sha256=precomputed-digest ")
+```
+
+</details>
+
 #### fails closed for an embedded dynlib with a non-arm64 release arch
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -114,7 +168,7 @@ expect(row).to_contain(" symbol=gui_dynlib_hot_probe_tick ")
 #### fails closed for an embedded arm64 dynlib with the wrong release symbol
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -137,7 +191,7 @@ expect(row).to_contain(" symbol=unexpected_probe ")
 #### fails closed for non-SMF artifact bytes
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -158,7 +212,7 @@ expect(contract.macos_reason).to_equal("requires-macos-arm64")
 #### fails closed for an empty SMF library envelope
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -179,7 +233,7 @@ expect(contract.macos_reason).to_equal("requires-macos-arm64")
 #### emits a missing artifact contract row
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -195,7 +249,7 @@ expect(row).to_contain(" macos_reason=requires-macos-arm64")
 
 #### wraps and extracts a role-2 SMF dynlib through pure Simple helpers and file IO
 
-1. extracted stub push
+- extracted stub push
    - Expected: rt_file_write_bytes(extracted_path, extracted_stub) is true
    - Expected: extracted.len() equals `6`
    - Expected: extracted[0] equals `0x7Fu8`
@@ -203,7 +257,7 @@ expect(row).to_contain(" macos_reason=requires-macos-arm64")
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -255,9 +309,11 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 10 |
-| Active scenarios | 10 |
+| Total scenarios | 11 |
+| Active scenarios | 11 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
 
+
+</details>
