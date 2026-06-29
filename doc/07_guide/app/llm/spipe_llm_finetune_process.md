@@ -80,6 +80,9 @@ current guard blocker without reading a stale acceptance env. It also records
 the retry5 cache-manifest checker actually ran. It also forwards the concrete
 retry5 blocker fields from that checker:
 `llm_finetune_guard_retry5_cache_manifest_exists`,
+`llm_finetune_guard_retry5_cache_manifest_artifact_status`,
+`llm_finetune_guard_retry5_cache_manifest_size`,
+`llm_finetune_guard_retry5_cache_manifest_sha256`,
 `llm_finetune_guard_retry5_cache_license_review`,
 `llm_finetune_guard_retry5_cache_data_access`,
 `llm_finetune_guard_retry5_cache_path`,
@@ -93,7 +96,10 @@ only; they do not replace licensed cache approval, training, target eval,
 safety, deployment, or normal-review acceptance.
 
 Run strict ready mode only when tuned-model acceptance evidence is expected to
-exist:
+exist. Strict mode also binds the consumed acceptance env to
+`llm_backed_app_server_dry_run_retry7` through
+`llm_finetune_guard_acceptance_attempt`; a passing acceptance env for another
+attempt fails with `finetune_acceptance_attempt_mismatch`.
 
 ```bash
 sh scripts/check/check-llm-finetune-acceptance-evidence.shs

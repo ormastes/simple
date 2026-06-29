@@ -500,7 +500,13 @@ for the fixed-format data file, retry6/retry7 gate scripts, retry6/retry7 SSpec
 files, the retry5 cache-manifest checker, and produced guard/spec logs, plus
 per-log sizes and SHA-256 values including
 `llm_finetune_guard_retry5_cache_log_size` and
-`llm_finetune_guard_retry5_cache_log_sha256`.
+`llm_finetune_guard_retry5_cache_log_sha256`. The guard forwards retry5 cache
+manifest artifact status, size, and SHA-256 as
+`llm_finetune_guard_retry5_cache_manifest_artifact_status`,
+`llm_finetune_guard_retry5_cache_manifest_size`, and
+`llm_finetune_guard_retry5_cache_manifest_sha256`; strict-ready mode also
+emits `llm_finetune_guard_acceptance_attempt` and fails if the consumed
+acceptance env is not for the configured retry7 attempt.
 Guard-only fine-tune evidence is therefore traceable to exact local process
 inputs and outputs.
 
