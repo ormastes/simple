@@ -470,6 +470,18 @@ Current 2026-06-26 browser capture findings:
   `build/renderdoc/electron-gpu-egl-init-return/electron-html/evidence.env`,
   `build/linux-vulkan-render-log-compare/evidence.env`, and
   `doc/09_report/renderdoc_browser_egl_initialize_return_2026-06-29.md`.
+- 2026-06-29 Existing GPU-launcher isolation switches now classify three
+  browser failure modes on Linux. With RenderDoc layer plus shim, both browser
+  routes enter `eglInitialize` and do not return. With
+  `RDOC_GPU_LAUNCHER_CLEAR_RENDERDOC_LAYER=1`, Chrome and Electron GPU children
+  crash with `exit_code=139` before wrapper EGL/Vulkan telemetry. With
+  `RDOC_GPU_LAUNCHER_LAYER_ONLY=1` and no preload shim, both routes still fail
+  `missing-rdc` and emit no shim summary by design. Evidence:
+  `build/renderdoc/chrome-gpu-egl-init-return-no-layer/html/evidence.env`,
+  `build/renderdoc/electron-gpu-egl-init-return-no-layer/electron-html/evidence.env`,
+  `build/renderdoc/chrome-gpu-layer-only/html/evidence.env`,
+  `build/renderdoc/electron-gpu-layer-only/electron-html/evidence.env`, and
+  `doc/09_report/renderdoc_browser_gpu_layer_isolation_2026-06-29.md`.
 - The direct Chrome/Electron RenderDoc wrapper now records
   `rdoc_renderdoc_hook_children` and accepts `RDOC_RENDERDOC_HOOK_CHILDREN=0`
   to omit `--opt-hook-children`. This confirms the immediate Chrome GPU crash

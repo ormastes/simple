@@ -1671,6 +1671,14 @@ RDOC_AUTOCAPTURE_END_EGL_VK_UNLOCK=2 \
   current Chrome evidence looks up the EGL/ANGLE Vulkan symbols but still does
   not execute a wrapped submit/present/swap/lock call in the GPU process or
   produce `.rdc`.
+  Current EGL-return diagnostics further narrow the layer-present path: Chrome
+  and Electron both enter `eglInitialize` and report
+  `rdoc_gpu_autocapture_egl_initialize_return_count=0` before `.rdc` remains
+  missing. The complementary `RDOC_GPU_LAUNCHER_CLEAR_RENDERDOC_LAYER=1` probe
+  crashes both browser GPU children with `exit_code=139` before useful wrapper
+  EGL/Vulkan telemetry, and `RDOC_GPU_LAUNCHER_LAYER_ONLY=1` without the preload
+  shim still produces no `.rdc`. The focused evidence is recorded in
+  `doc/09_report/renderdoc_browser_gpu_layer_isolation_2026-06-29.md`.
 - The Chrome target-control diagnostic wraps `qrenderdoc --ui-python` in an
   outer timeout. If qrenderdoc's UI Python startup hangs, the script now records
   `target-control-no-evidence` instead of leaving the lane running indefinitely.
