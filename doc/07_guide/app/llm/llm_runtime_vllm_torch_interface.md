@@ -107,9 +107,11 @@ dashboard URL/auth readiness, local vLLM command/module/GPU readiness, native
 svLLM read-range/pinned-buffer/device-staging readiness, native svLLM
 capability source/evidence schema-event-source-status matching, Torch/libtorch
 readiness including Python Torch/CUDA visibility and system libtorch match
-count, fine-tune retry artifact readiness, manifest metadata, and the next
-operator action. The vLLM prereq section also records the base model and
-endpoint values, plus whether each came from defaults or explicit env, but the
+count, fine-tune retry artifact readiness, manifest metadata, a global next
+operator action, and per-lane `*_next_action` fields for dashboard, vLLM,
+svLLM, Torch, and fine-tune unblock routing. The vLLM prereq section also
+records the base model and endpoint values, plus whether each came from
+defaults or explicit env, but the
 doctor does not contact the endpoint; endpoint reachability and `/v1/models`
 remain strict vLLM host-probe evidence. The fine-tune prereq section records
 retry6 model-manifest and eval-result schema, attempt/base-model, deployable,
