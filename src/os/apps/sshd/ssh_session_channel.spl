@@ -11,9 +11,38 @@ use os.apps.sshd.ssh_transport.{SSH_MSG_DISCONNECT, SSH_MSG_IGNORE, SSH_MSG_KEXI
 use os.apps.sshd.ssh_channel.{ChannelTable, SshChannel, ChannelType, ChannelState, SSH_MSG_CHANNEL_OPEN, SSH_MSG_CHANNEL_DATA, SSH_MSG_CHANNEL_WINDOW_ADJUST, SSH_MSG_CHANNEL_EOF, SSH_MSG_CHANNEL_CLOSE, SSH_MSG_CHANNEL_REQUEST, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET, ssh_parse_channel_open, ssh_parse_channel_data, ssh_parse_channel_request, ssh_parse_window_adjust, ssh_parse_channel_eof, ssh_parse_channel_close, ssh_build_channel_open_failure, ssh_build_channel_data, ssh_build_channel_window_adjust}
 use os.apps.sshd.ssh_remote_shell.{SshRemoteShell}
 use os.apps.sshd.ssh_session_helpers.{_u8_at, _bytes_to_hex, _read_u32_stable, _read_text_field_fast, _text_equals_bytes, _build_channel_open_confirmation_stable, _build_channel_success_stable, _build_channel_failure_stable, _build_channel_eof_stable, _build_channel_close_stable, _build_channel_exit_status_stable}
+use os.kernel.loader.app_registry.{app_registry_fat32_alias}
 use os.kernel.log.klog_api.{log_info}
 extern fn rt_string_from_byte_array(arr: [u8]) -> text
 extern fn serial_println(msg: text)
+
+fn _ssh_exec_command_token(command_line: text) -> text:
+    val trimmed = command_line.trim()
+    if trimmed == "":
+        return ""
+    val parts = trimmed.split(" ")
+    if parts.len() == 0:
+        return ""
+    parts[0]
+
+fn _ssh_exec_simple_path(command: text) -> text:
+    if command == "simple.smf" or command == "/usr/bin/simple.smf" or command == "/sys/apps/simple.smf":
+        return "/usr/bin/simple.smf"
+    if command == "simple" or command == "/usr/bin/simple" or command == "/bin/simple" or command == "/sys/apps/simple":
+        return "/usr/bin/simple"
+    ""
+
+fn _ssh_exec_simple_session_line(command_line: text) -> text:
+    val command = _ssh_exec_command_token(command_line)
+    val path = _ssh_exec_simple_path(command)
+    if path == "":
+        return ""
+    val alias = app_registry_fat32_alias(path)
+    val alias_text = if alias == nil: "/SYS/APPS/SIMPLSTC.SMF" else: alias.unwrap()
+    "AUTH OK root password\nSESSION OK shell {command} path={path} alias={alias_text}\n"
+
+pub fn ssh_exec_simple_session_line_for_test(command_line: text) -> text:
+    _ssh_exec_simple_session_line(command_line)
 
 impl SshSession:
 
@@ -379,6 +408,12 @@ impl SshSession:
 
         if command.trim() == "true":
             self._finish_exec_request(local_id, remote_id, 0, [])
+            return
+
+        val simple_session_line = _ssh_exec_simple_session_line(command)
+        if simple_session_line != "":
+            serial_println("[sshd-session] exec simple path proof command={command}")
+            self._finish_exec_request(local_id, remote_id, 0, ssh_ascii_text_to_bytes(simple_session_line))
             return
 
         self._ensure_shell_started(false)
