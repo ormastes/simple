@@ -160,6 +160,7 @@ require_cmd dbus-run-session "dbus-run-session-unavailable"
 require_cmd xdotool "xdotool-unavailable"
 require_cmd import "imagemagick-import-unavailable"
 require_cmd convert "imagemagick-convert-unavailable"
+require_cmd openbox "openbox-unavailable"
 require_cmd node "node-unavailable"
 
 if [ ! -f "$VALIDATOR" ]; then
@@ -181,23 +182,35 @@ WAIT_STEPS="${TAURI_CAPTURE_WAIT_STEPS:-60}"
 set +e
 START_NS="$(date +%s%N)"
 TAURI_URL="$TAURI_URL" PNG_ABS="$PNG_ABS" OUT_ABS="$OUT_ABS" ERR_ABS="$ERR_ABS" WIDTH="$WIDTH" HEIGHT="$HEIGHT" WAIT_STEPS="$WAIT_STEPS" \
+GDK_BACKEND=x11 WAYLAND_DISPLAY= WEBKIT_DISABLE_DMABUF_RENDERER=1 \
     xvfb-run -a -s "-screen 0 ${SCREEN_WIDTH}x${SCREEN_HEIGHT}x24" dbus-run-session -- sh -eu >"$XVFB_SESSION_OUT_ABS" 2>"$XVFB_SESSION_ERR_ABS" <<'CAPTURE'
 cd tools/tauri-shell
+openbox >/dev/null 2>&1 &
+wm_pid=$!
+sleep 0.5
 npm run prepare:dist >/dev/null 2>&1 || true
 cargo run --manifest-path src-tauri/Cargo.toml -- --url "$TAURI_URL" >"$OUT_ABS" 2>"$ERR_ABS" &
 pid=$!
 win_id=""
 i=0
 while [ "$i" -lt "$WAIT_STEPS" ]; do
-    win_id="$(xdotool search --onlyvisible --class simple-tauri-shell 2>/dev/null | head -n 1 || true)"
+    win_id="$(xdotool search --pid "$pid" 2>/dev/null | head -n 1 || true)"
     if [ "$win_id" = "" ]; then
-        win_id="$(xdotool search --onlyvisible --name "Simple" 2>/dev/null | head -n 1 || true)"
+        win_id="$(xdotool search --name "simple-tauri-shell" 2>/dev/null | head -n 1 || true)"
+    fi
+    if [ "$win_id" = "" ]; then
+        win_id="$(xdotool search --name "Simple" 2>/dev/null | head -n 1 || true)"
+    fi
+    if [ "$win_id" = "" ]; then
+        win_id="$(xdotool search --onlyvisible --class simple-tauri-shell 2>/dev/null | head -n 1 || true)"
     fi
     if [ "$win_id" != "" ]; then
         break
     fi
     if ! kill -0 "$pid" 2>/dev/null; then
         wait "$pid" 2>/dev/null || true
+        kill "$wm_pid" 2>/dev/null || true
+        wait "$wm_pid" 2>/dev/null || true
         exit 23
     fi
     i=$((i + 1))
@@ -206,8 +219,11 @@ done
 if [ "$win_id" = "" ]; then
     kill "$pid" 2>/dev/null || true
     wait "$pid" 2>/dev/null || true
+    kill "$wm_pid" 2>/dev/null || true
+    wait "$wm_pid" 2>/dev/null || true
     exit 22
 fi
+xdotool windowmap "$win_id" >/dev/null 2>&1 || true
 xdotool windowmove "$win_id" 0 0 >/dev/null 2>&1 || true
 xdotool windowsize "$win_id" "$WIDTH" "$HEIGHT" >/dev/null 2>&1 || true
 sleep 1
@@ -215,6 +231,8 @@ import -window "$win_id" "$PNG_ABS" >/dev/null 2>&1
 code=$?
 kill "$pid" 2>/dev/null || true
 wait "$pid" 2>/dev/null || true
+kill "$wm_pid" 2>/dev/null || true
+wait "$wm_pid" 2>/dev/null || true
 exit "$code"
 CAPTURE
 capture_code=$?

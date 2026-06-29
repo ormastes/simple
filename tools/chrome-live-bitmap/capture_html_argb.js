@@ -398,19 +398,28 @@ async function fetchPageTarget(endpoint, timeoutMs) {
 function geometryExpression() {
   return `
     (() => {
-      const nodes = Array.from(document.querySelectorAll("[data-geom-label]"));
+      const candidates = Array.from(document.querySelectorAll("[data-geom-label]"));
+      const nodes = candidates.length > 0
+        ? candidates
+        : Array.from(document.body ? document.body.querySelectorAll("*") : []);
       const px = value => Math.round(Number.parseFloat(String(value || "0"))) || 0;
       const rectPx = value => Number(value).toFixed(3);
       return {
         producer: "chrome-headless-geometry",
         viewport: { width: window.innerWidth, height: window.innerHeight },
-        items: nodes.map((el, index) => {
+        items: nodes
+        .filter((el) => {
+          const tag = el.tagName.toLowerCase();
+          return tag !== "script" && tag !== "style" && tag !== "template";
+        })
+        .slice(0, 128)
+        .map((el, index) => {
           const rect = el.getBoundingClientRect();
           const style = window.getComputedStyle(el);
           const text = String(el.textContent || "").replace(/\\s+/g, " ").trim();
           return {
             index,
-            label: String(el.getAttribute("data-geom-label") || ""),
+            label: String(el.getAttribute("data-geom-label") || el.className || el.id || ""),
             tag: el.tagName.toLowerCase(),
             x: Math.round(rect.left),
             y: Math.round(rect.top),

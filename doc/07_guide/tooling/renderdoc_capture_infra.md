@@ -1315,6 +1315,13 @@ The current canonical evidence contract is:
   `production_gui_web_renderer_parity_surface_manifest_chrome_capture_backend`.
   Missing provenance or nonempty missing-command evidence fails the gate instead
   of being backfilled from the current host.
+  The surface manifest wrapper supports
+  `TAURI_CHROME_LAYOUT_MANIFEST_RESUME=1` for interrupted evidence collection:
+  it reuses accepted per-case `pass`/tracked-divergence evidence and reruns
+  failed, unavailable, or missing rows. Linux Tauri capture is an Xvfb/X11 path;
+  the host must provide the GTK/WebKit development stack plus `openbox`,
+  `xvfb-run`, `dbus-run-session`, `xdotool`, ImageMagick `import`/`convert`,
+  and `node` before the wrapper can produce live Tauri ARGB evidence.
   The same source env must now include Electron/Chromium interaction evidence
   from `scripts/check/check-wm-browser-event-routing-evidence.shs`. The
   wrapper forwards it as `production_gui_web_renderer_parity_event_routing_*`,
