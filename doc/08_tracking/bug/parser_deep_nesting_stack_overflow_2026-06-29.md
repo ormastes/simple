@@ -70,3 +70,16 @@ source produces. A mirrored depth guard in the seed parser was deliberately NOT
 added, per the "fix it in pure-Simple, don't fall back to the seed" project rule
 — if the self-hosted bootstrap stays blocked and this needs to land sooner, the
 follow-up is a depth bound in the seed's `parser/src` expression recursion.
+
+## Related sweep findings (other nesting shapes — NOT crashes)
+
+The same noise probe ran `check` on other deeply-nested shapes to see whether
+the crash class was broader than expression parens:
+
+- ~400 nested brackets `[[[…1…]]]` → graceful error, no crash.
+- ~600 nested `if` blocks and ~300 nested `match` → no stack overflow
+  (`stackpanic=0`), but `check` is very slow (>100 s, timed out under the probe
+  budget) on that depth. This is pathological-input slowness, not a crash, and
+  far below the severity of the paren core-dump; the statement/block parser
+  recursion does not overflow. Left unfixed (no real or generated source nests
+  blocks/matches that deep); recorded here so it isn't mistaken for unexplored.
