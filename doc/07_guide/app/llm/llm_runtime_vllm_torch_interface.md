@@ -95,6 +95,7 @@ run through the runtime-owned control CLI. On the current host it returns
 `blocked_gates=local_vllm|serve_preflight|endpoint_reachable|models_listed`.
 The evidence env records `llm_runtime_vllm_host_probe_required_gates`,
 `llm_runtime_vllm_host_probe_blocked_gates`,
+`llm_runtime_vllm_host_probe_primary_blocked_gate`,
 `llm_runtime_vllm_host_probe_local_vllm_status`,
 `llm_runtime_vllm_host_probe_local_gpu_status`,
 `llm_runtime_vllm_host_probe_readiness_status`,
@@ -102,7 +103,9 @@ The evidence env records `llm_runtime_vllm_host_probe_required_gates`,
 `llm_runtime_vllm_host_probe_endpoint_status`, and
 `llm_runtime_vllm_host_probe_models_status`, and
 `llm_runtime_vllm_host_probe_next_action` so strict aggregate runs can report
-the exact local serving blocker and the next operator step. Keep
+the first local serving blocker, full blocker list, and next operator step. The
+models-list classifier treats `models_status=ready` as satisfying
+`models_listed`, matching the strict pass condition. Keep
 `FR-LLM-RUNTIME-0001` open until a
 configured local endpoint reaches `status=ready`, `endpoint=configured`, and
 `models_status=ready` after `/v1/models` serves the selected base model.

@@ -677,6 +677,12 @@ strict-host aggregate runs should fail that gate until local vLLM is installed,
 serve readiness reaches `ready`, the endpoint is configured, and `/v1/models`
 lists the selected base model.
 
+The host probe now records
+`llm_runtime_vllm_host_probe_primary_blocked_gate` and derives next action from
+that first normalized blocker. Its models-list gate treats
+`models_status=ready` as satisfying `models_listed`, matching the strict pass
+condition and avoiding a false blocker on configured hosts.
+
 The runtime control CLI now exposes a `readiness` action that routes through
 `llm_runtime_vllm_serve_readiness_orchestrate_with_resources(...)` instead of
 the plan-only preflight path. The host probe uses that action, so a configured
