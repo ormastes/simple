@@ -116,11 +116,15 @@ fn pb_encode_varint(value: i64) -> [u8]:
 fn pb_decode_varint(data: [u8], pos: i64) -> list:
     """Decode a varint from data starting at pos.
     Returns [value, new_pos] where new_pos is pos after the varint bytes."""
+    if pos < 0 or pos >= data.len():
+        return [0, pos]
     var result: i64 = 0
     var shift = 0
     var cur = pos
     var done = false
     while not done:
+        if cur >= data.len():
+            return [0, pos]
         val b = _pb_read8(data, cur)
         val bits = b & 0x7F
         result = result | (bits << shift)
@@ -212,9 +216,13 @@ fn pb_decode_field(data: [u8], pos: i64) -> list:
     """Decode a single field from data at pos.
     Returns [field_num, wire_type, value_or_bytes, new_pos].
     value_or_bytes is an i64 for wire types 0/1/5, or [u8] for wire type 2."""
+    if pos < 0 or pos >= data.len():
+        return [0, 0, 0, pos]
     val tag_result = pb_decode_varint(data, pos)
     val tag = tag_result[0]
     val after_tag = tag_result[1]
+    if after_tag <= pos:
+        return [0, 0, 0, pos]
     val field_num = (tag >> 3) & 0x1FFFFFFFFFFFFFFF
     val wire_type = tag & 0x7
 
@@ -225,6 +233,8 @@ fn pb_decode_field(data: [u8], pos: i64) -> list:
         return [field_num, wire_type, value, new_pos]
     elif wire_type == 1:
         # 64-bit fixed
+        if after_tag + 8 > data.len():
+            return [field_num, wire_type, 0, after_tag]
         val v = _pb_read8(data, after_tag) |
             (_pb_read8(data, after_tag + 1) << 8) |
             (_pb_read8(data, after_tag + 2) << 16) |
@@ -239,6 +249,9 @@ fn pb_decode_field(data: [u8], pos: i64) -> list:
         val lv = pb_decode_varint(data, after_tag)
         val length = lv[0]
         val data_start = lv[1]
+        if data_start <= after_tag or data_start + length > data.len():
+            var empty: [u8] = []
+            return [field_num, wire_type, empty, after_tag]
         var body: [u8] = []
         var i: i64 = 0
         while i < length:
@@ -251,6 +264,8 @@ fn pb_decode_field(data: [u8], pos: i64) -> list:
         return [field_num, wire_type, body, new_pos]
     elif wire_type == 5:
         # 32-bit fixed
+        if after_tag + 4 > data.len():
+            return [field_num, wire_type, 0, after_tag]
         val v32 = _pb_read8(data, after_tag) |
             (_pb_read8(data, after_tag + 1) << 8) |
             (_pb_read8(data, after_tag + 2) << 16) |
