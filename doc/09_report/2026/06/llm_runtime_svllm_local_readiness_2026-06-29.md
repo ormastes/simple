@@ -1,23 +1,43 @@
 # LLM Runtime svLLM Local Readiness Evidence
 
-- status: `fail`
-- strict_native: `true`
-- native_streaming: `fail`
-- native_reason: `native_streaming_pass_integrity_missing`
-- native_blocked_gates: `native_pass_integrity`
-- native_primary_blocked_gate: `native_pass_integrity`
-- native_next_action: `rerun native svLLM streaming evidence and require svllm_native_streaming_pass_integrity_status=pass`
-- native_pass_integrity_status: `missing`
-- native_env: `/tmp/svllm_status_only_native.env`
+- status: `pass`
+- strict_native: `false`
+- native_streaming: `not_required`
+- native_reason: `default_local_readiness_only`
+- native_blocked_gates: `none`
+- native_primary_blocked_gate: `n/a`
+- native_next_action: `run with --strict-native when native streaming is release-completion evidence`
+- native_pass_integrity_status: `not_required`
+- native_env: `build/llm_runtime_svllm_native_streaming/evidence.env`
 - spec_timeout_seconds: `120`
+- surface_manifest: `build/llm_runtime_svllm_local_readiness/svllm_local_readiness_surface_manifest.tsv`
+- surface_manifest_count: `16`
+- surface_manifest_size: `2093`
+- surface_manifest_sha256: `e3a833d7e6defcd8a31ff2cd03e7947eb31670485468d464ebd0d97d60387bc7`
 - manifest: `pass` exit=`0` log=`build/llm_runtime_svllm_local_readiness/manifest.log`
+- manifest_log_size: `1428`
+- manifest_log_sha256: `f1b08bf18cad9031fbf93e6a71f0265fc4901f3c280356a056ba8141ff7a56b2`
 - tensor_bytes: `pass` exit=`0` log=`build/llm_runtime_svllm_local_readiness/tensor_bytes.log`
+- tensor_bytes_log_size: `1440`
+- tensor_bytes_log_sha256: `9a952105027a7c4d30e25533d8eae0f5c3d41762ff320ae1929f21ff04c37bf7`
 - stream_plan: `pass` exit=`0` log=`build/llm_runtime_svllm_local_readiness/stream_plan.log`
+- stream_plan_log_size: `1439`
+- stream_plan_log_sha256: `98b822c5a628be5dbb9410340c842b96e89bf39d176c06b2bdb290de97584541`
 - transport: `pass` exit=`0` log=`build/llm_runtime_svllm_local_readiness/transport.log`
+- transport_log_size: `1431`
+- transport_log_sha256: `9f1d2d9d69030851a07cd9d7cb403867c69c30c7993d10efdd95b569900482d4`
 - std_fs: `pass` exit=`0` log=`build/llm_runtime_svllm_local_readiness/std_fs.log`
+- std_fs_log_size: `1420`
+- std_fs_log_sha256: `a49c155c2474be7f40b5d309b7fbf3c4460ea5b8f89437ed706e4f3287523b92`
 - streaming_readiness: `pass` exit=`0` log=`build/llm_runtime_svllm_local_readiness/streaming_readiness.log`
+- streaming_readiness_log_size: `1461`
+- streaming_readiness_log_sha256: `0967213232ef875f18375cf512f8c8817c6c834fea6bf191dad93c0889d83143`
 - svllm_pack_cli: `pass` exit=`0` log=`build/llm_runtime_svllm_local_readiness/svllm_pack_cli.log`
+- svllm_pack_cli_log_size: `1395`
+- svllm_pack_cli_log_sha256: `610b4c18b2dac3bab70ca0f35ea9baf21319f58a52faf876729dd3b92d01b463`
 - svllm_pack_log_modes: `pass` exit=`0` log=`build/llm_runtime_svllm_local_readiness/svllm_pack_log_modes.log`
+- svllm_pack_log_modes_log_size: `1431`
+- svllm_pack_log_modes_log_sha256: `a067f09f43d377050076176fbac34482e8f718be1171e15e1af90f7891d0d18c`
 - env: `build/llm_runtime_svllm_local_readiness/evidence.env`
 
-This strict native check requires a separate native svLLM streaming evidence env with `svllm_native_streaming_status=pass` and `svllm_native_streaming_pass_integrity_status=pass`. Local file-backed readiness alone is not completion evidence for NVFS async scheduling, pinned buffer registration, device staging, or true streaming model loads.
+This evidence proves the local file-backed svLLM pack CLI, manifest, tensor-byte, stream-plan, memory transport, std_fs, and streaming-readiness contracts. It does not prove native NVFS async scheduling, pinned buffer registration, device staging, or true streaming model loads. Run with `--strict-native` when those native gates must be release-completion evidence.

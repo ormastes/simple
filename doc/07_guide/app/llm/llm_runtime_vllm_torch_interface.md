@@ -147,7 +147,11 @@ Latest svLLM local readiness evidence:
 records `scripts/check/check-llm-runtime-svllm-local-readiness.shs` passing the
 pack CLI, manifest, tensor-byte, stream-plan, std_fs local-read, and
 streaming-readiness contracts with per-spec timeout handling through
-`SVLLM_READINESS_SPEC_TIMEOUT_SECONDS` (default `120`). Keep
+`SVLLM_READINESS_SPEC_TIMEOUT_SECONDS` (default `120`). It also records a
+surface manifest count, size, and SHA-256 for the eight checked local readiness
+specs plus their produced logs, and the focused env/report include per-log size
+and SHA-256 values. The aggregate forwards those local manifest fields in
+`llm_goal_evidence_svllm_local_detail`. Keep
 `FR-LLM-RUNTIME-0002` open because that wrapper proves only local file-backed
 readiness; native NVFS async scheduling, pinned buffer registration, device
 staging, and true streaming model loads still need live evidence. Run

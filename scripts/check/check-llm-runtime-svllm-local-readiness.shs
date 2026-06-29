@@ -59,6 +59,30 @@ run_spec() {
     fi
 }
 
+artifact_size() {
+    path="$1"
+    if [ -n "$path" ] && [ -f "$path" ]; then
+        wc -c <"$path" | tr -d ' '
+    else
+        printf '%s\n' "missing"
+    fi
+}
+
+artifact_sha256() {
+    path="$1"
+    if [ -n "$path" ] && [ -f "$path" ]; then
+        if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$path" | awk '{print $1}'
+        elif command -v shasum >/dev/null 2>&1; then
+            shasum -a 256 "$path" | awk '{print $1}'
+        else
+            printf '%s\n' "unavailable"
+        fi
+    else
+        printf '%s\n' "missing"
+    fi
+}
+
 run_spec manifest test/01_unit/lib/gc_async_mut/svllm/model_loader_manifest_spec.spl
 run_spec tensor_bytes test/01_unit/lib/gc_async_mut/svllm/model_loader_tensor_bytes_spec.spl
 run_spec stream_plan test/01_unit/lib/gc_async_mut/svllm/model_loader_stream_plan_spec.spl
@@ -67,6 +91,33 @@ run_spec std_fs test/01_unit/lib/gc_async_mut/svllm/nvfs_client/std_fs_spec.spl
 run_spec streaming_readiness test/01_unit/lib/gc_async_mut/svllm/model_loader_streaming_readiness_spec.spl
 run_spec svllm_pack_cli test/01_unit/app/svllm_pack/main_spec.spl
 run_spec svllm_pack_log_modes test/02_integration/app/svllm_pack_log_modes_spec.spl
+
+SURFACE_MANIFEST="$BUILD_DIR/svllm_local_readiness_surface_manifest.tsv"
+{
+    for path in \
+        test/01_unit/lib/gc_async_mut/svllm/model_loader_manifest_spec.spl \
+        test/01_unit/lib/gc_async_mut/svllm/model_loader_tensor_bytes_spec.spl \
+        test/01_unit/lib/gc_async_mut/svllm/model_loader_stream_plan_spec.spl \
+        test/01_unit/lib/gc_async_mut/svllm/model_loader_transport_spec.spl \
+        test/01_unit/lib/gc_async_mut/svllm/nvfs_client/std_fs_spec.spl \
+        test/01_unit/lib/gc_async_mut/svllm/model_loader_streaming_readiness_spec.spl \
+        test/01_unit/app/svllm_pack/main_spec.spl \
+        test/02_integration/app/svllm_pack_log_modes_spec.spl \
+        "$BUILD_DIR/manifest.log" \
+        "$BUILD_DIR/tensor_bytes.log" \
+        "$BUILD_DIR/stream_plan.log" \
+        "$BUILD_DIR/transport.log" \
+        "$BUILD_DIR/std_fs.log" \
+        "$BUILD_DIR/streaming_readiness.log" \
+        "$BUILD_DIR/svllm_pack_cli.log" \
+        "$BUILD_DIR/svllm_pack_log_modes.log"
+    do
+        printf '%s\t%s\t%s\n' "$path" "$(artifact_size "$path")" "$(artifact_sha256 "$path")"
+    done
+} >"$SURFACE_MANIFEST"
+surface_manifest_count="$(wc -l <"$SURFACE_MANIFEST" | tr -d ' ')"
+surface_manifest_size="$(artifact_size "$SURFACE_MANIFEST")"
+surface_manifest_sha256="$(artifact_sha256 "$SURFACE_MANIFEST")"
 
 status="pass"
 for key in manifest tensor_bytes stream_plan transport std_fs streaming_readiness svllm_pack_cli svllm_pack_log_modes; do
@@ -129,11 +180,17 @@ fi
     printf '%s\n' "llm_runtime_svllm_local_readiness_native_pass_integrity_status=$native_pass_integrity_status"
     printf '%s\n' "llm_runtime_svllm_local_readiness_native_env=$NATIVE_EVIDENCE_ENV"
     printf '%s\n' "llm_runtime_svllm_local_readiness_spec_timeout_seconds=$SPEC_TIMEOUT_SECONDS"
+    printf '%s\n' "llm_runtime_svllm_local_readiness_surface_manifest=$SURFACE_MANIFEST"
+    printf '%s\n' "llm_runtime_svllm_local_readiness_surface_manifest_count=$surface_manifest_count"
+    printf '%s\n' "llm_runtime_svllm_local_readiness_surface_manifest_size=$surface_manifest_size"
+    printf '%s\n' "llm_runtime_svllm_local_readiness_surface_manifest_sha256=$surface_manifest_sha256"
     for key in manifest tensor_bytes stream_plan transport std_fs streaming_readiness svllm_pack_cli svllm_pack_log_modes; do
         eval "value=\${${key}_status}"
         eval "exit_code=\${${key}_exit}"
         printf '%s\n' "llm_runtime_svllm_local_readiness_${key}_status=$value"
         printf '%s\n' "llm_runtime_svllm_local_readiness_${key}_exit=$exit_code"
+        printf '%s\n' "llm_runtime_svllm_local_readiness_${key}_log_size=$(artifact_size "$BUILD_DIR/$key.log")"
+        printf '%s\n' "llm_runtime_svllm_local_readiness_${key}_log_sha256=$(artifact_sha256 "$BUILD_DIR/$key.log")"
     done
 } >"$OUT_ENV"
 
@@ -153,10 +210,16 @@ fi
     printf '%s\n' "- native_pass_integrity_status: \`$native_pass_integrity_status\`"
     printf '%s\n' "- native_env: \`$NATIVE_EVIDENCE_ENV\`"
     printf '%s\n' "- spec_timeout_seconds: \`$SPEC_TIMEOUT_SECONDS\`"
+    printf '%s\n' "- surface_manifest: \`$SURFACE_MANIFEST\`"
+    printf '%s\n' "- surface_manifest_count: \`$surface_manifest_count\`"
+    printf '%s\n' "- surface_manifest_size: \`$surface_manifest_size\`"
+    printf '%s\n' "- surface_manifest_sha256: \`$surface_manifest_sha256\`"
     for key in manifest tensor_bytes stream_plan transport std_fs streaming_readiness svllm_pack_cli svllm_pack_log_modes; do
         eval "value=\${${key}_status}"
         eval "exit_code=\${${key}_exit}"
         printf '%s\n' "- ${key}: \`$value\` exit=\`$exit_code\` log=\`$BUILD_DIR/$key.log\`"
+        printf '%s\n' "- ${key}_log_size: \`$(artifact_size "$BUILD_DIR/$key.log")\`"
+        printf '%s\n' "- ${key}_log_sha256: \`$(artifact_sha256 "$BUILD_DIR/$key.log")\`"
     done
     printf '%s\n' "- env: \`$OUT_ENV\`"
     printf '\n'

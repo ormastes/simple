@@ -827,6 +827,11 @@ readiness report instead of leaving it missing. The native streaming producer
 passes the same timeout through its nested local-readiness run and records
 `svllm_native_streaming_local_spec_timeout_seconds` beside the native
 read-range, pinned-buffer, and device-staging blockers.
+The local readiness wrapper now also writes a local readiness surface manifest
+with path, size, and SHA-256 rows for the eight checked specs and their produced
+logs, plus per-log size/SHA-256 fields in the focused env/report. The aggregate
+svLLM detail forwards the local manifest count, size, and SHA-256 so default
+local-readiness PASS evidence is not a status-only claim.
 
 ## 2026-06-29 svLLM Manifest Spec Cleanup
 
