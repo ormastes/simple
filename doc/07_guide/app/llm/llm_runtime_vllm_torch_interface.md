@@ -116,12 +116,21 @@ plus a passing Simple dynamic Torch SFFI readiness spec. Keep
 CUDA optimizer step.
 
 Latest Simple/libtorch optimizer probe:
-`doc/09_report/2026/06/llm_runtime_torch_cuda_optimizer_probe_2026-06-28.md`
+`doc/09_report/2026/06/llm_runtime_torch_cuda_optimizer_probe_2026-06-29.md`
 records `scripts/check/check-llm-runtime-torch-cuda-optimizer-probe.shs`
 classifying the self-hosted Simple runtime as `unavailable` with
-`reason=libtorch_unavailable`. Use this wrapper as the canonical evidence path
-for the real CUDA optimizer-step gate; run it with `--strict` when unavailable
-hosts must fail the lane instead of recording a warning.
+`reason=libtorch_unavailable` on this host. The evidence env records
+`torch_cuda_optimizer_probe_required_gates`,
+`torch_cuda_optimizer_probe_blocked_gate`,
+`torch_cuda_optimizer_probe_torch_available_normalized`,
+`torch_cuda_optimizer_probe_cuda_available_normalized`,
+`torch_cuda_optimizer_probe_parameter_is_cuda_normalized`,
+`torch_cuda_optimizer_probe_grad_handle_normalized`, and
+`torch_cuda_optimizer_probe_optimizer_step_attempted_normalized` so strict
+aggregate runs can report the exact blocked Torch gate. Use this wrapper as the
+canonical evidence path for the real CUDA optimizer-step gate; run it with
+`--strict` when unavailable hosts must fail the lane instead of recording a
+warning.
 
 ## Focused Checks
 

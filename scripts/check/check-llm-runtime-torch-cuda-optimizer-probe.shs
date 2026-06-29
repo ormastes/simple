@@ -40,6 +40,15 @@ fi
 grep '^torch_cuda_optimizer_probe_' "$OUT_LOG" >"$OUT_ENV" 2>/dev/null || true
 status="$(sed -n 's/^torch_cuda_optimizer_probe_status=//p' "$OUT_ENV" | tail -n 1)"
 reason="$(sed -n 's/^torch_cuda_optimizer_probe_reason=//p' "$OUT_ENV" | tail -n 1)"
+required_gates="$(sed -n 's/^torch_cuda_optimizer_probe_required_gates=//p' "$OUT_ENV" | tail -n 1)"
+blocked_gate="$(sed -n 's/^torch_cuda_optimizer_probe_blocked_gate=//p' "$OUT_ENV" | tail -n 1)"
+torch_available="$(sed -n 's/^torch_cuda_optimizer_probe_torch_available=//p' "$OUT_ENV" | tail -n 1)"
+cuda_available="$(sed -n 's/^torch_cuda_optimizer_probe_cuda_available=//p' "$OUT_ENV" | tail -n 1)"
+parameter_is_cuda="$(sed -n 's/^torch_cuda_optimizer_probe_parameter_is_cuda=//p' "$OUT_ENV" | tail -n 1)"
+grad_handle="$(sed -n 's/^torch_cuda_optimizer_probe_grad_handle=//p' "$OUT_ENV" | tail -n 1)"
+optimizer_step_attempted="$(sed -n 's/^torch_cuda_optimizer_probe_optimizer_step_attempted=//p' "$OUT_ENV" | tail -n 1)"
+before_sum="$(sed -n 's/^torch_cuda_optimizer_probe_before_sum=//p' "$OUT_ENV" | tail -n 1)"
+after_sum="$(sed -n 's/^torch_cuda_optimizer_probe_after_sum=//p' "$OUT_ENV" | tail -n 1)"
 
 if [ -z "$status" ]; then
     status="fail"
@@ -48,15 +57,71 @@ fi
 if [ -z "$reason" ]; then
     reason="not_reported"
 fi
+if [ -z "$required_gates" ]; then
+    required_gates="libtorch,cuda,parameter_cuda,autograd_gradient,optimizer_step_decreases_parameter_sum"
+fi
+if [ -z "$blocked_gate" ]; then
+    case "$status" in
+        pass) blocked_gate="none" ;;
+        *) blocked_gate="$reason" ;;
+    esac
+fi
+if [ -z "$torch_available" ]; then
+    torch_available="missing"
+fi
+if [ -z "$cuda_available" ]; then
+    cuda_available="missing"
+fi
+if [ -z "$parameter_is_cuda" ]; then
+    parameter_is_cuda="missing"
+fi
+if [ -z "$grad_handle" ]; then
+    grad_handle="missing"
+fi
+if [ -z "$optimizer_step_attempted" ]; then
+    optimizer_step_attempted="false"
+fi
+if [ -z "$before_sum" ]; then
+    before_sum="missing"
+fi
+if [ -z "$after_sum" ]; then
+    after_sum="missing"
+fi
+
+{
+    printf '%s\n' "torch_cuda_optimizer_probe_required_gates=$required_gates"
+    printf '%s\n' "torch_cuda_optimizer_probe_blocked_gate=$blocked_gate"
+    printf '%s\n' "torch_cuda_optimizer_probe_wrapper_exit=$exit_code"
+    printf '%s\n' "torch_cuda_optimizer_probe_normalized_status=$status"
+    printf '%s\n' "torch_cuda_optimizer_probe_normalized_reason=$reason"
+    printf '%s\n' "torch_cuda_optimizer_probe_torch_available_normalized=$torch_available"
+    printf '%s\n' "torch_cuda_optimizer_probe_cuda_available_normalized=$cuda_available"
+    printf '%s\n' "torch_cuda_optimizer_probe_parameter_is_cuda_normalized=$parameter_is_cuda"
+    printf '%s\n' "torch_cuda_optimizer_probe_grad_handle_normalized=$grad_handle"
+    printf '%s\n' "torch_cuda_optimizer_probe_optimizer_step_attempted_normalized=$optimizer_step_attempted"
+    printf '%s\n' "torch_cuda_optimizer_probe_before_sum_normalized=$before_sum"
+    printf '%s\n' "torch_cuda_optimizer_probe_after_sum_normalized=$after_sum"
+} >>"$OUT_ENV"
 
 {
     printf '# LLM Runtime Torch CUDA Optimizer Probe\n\n'
     printf '%s\n' "- command: \`$SIMPLE_BIN run $PROBE --mode=interpreter --clean\`"
     printf '%s\n' "- status: \`$status\`"
     printf '%s\n' "- reason: \`$reason\`"
+    printf '%s\n' "- required_gates: \`$required_gates\`"
+    printf '%s\n' "- blocked_gate: \`$blocked_gate\`"
+    printf '%s\n' "- torch_available: \`$torch_available\`"
+    printf '%s\n' "- cuda_available: \`$cuda_available\`"
+    printf '%s\n' "- parameter_is_cuda: \`$parameter_is_cuda\`"
+    printf '%s\n' "- grad_handle: \`$grad_handle\`"
+    printf '%s\n' "- optimizer_step_attempted: \`$optimizer_step_attempted\`"
+    printf '%s\n' "- before_sum: \`$before_sum\`"
+    printf '%s\n' "- after_sum: \`$after_sum\`"
     printf '%s\n' "- exit_code: \`$exit_code\`"
     printf '%s\n' "- env: \`$OUT_ENV\`"
     printf '%s\n' "- log: \`$OUT_LOG\`"
+    printf '\n'
+    printf 'This wrapper proves the Simple/libtorch CUDA optimizer lane only when all required gates pass. `unavailable` records the exact missing host/runtime gate and remains a strict-host failure.\n'
 } >"$REPORT_PATH"
 
 case "$status" in

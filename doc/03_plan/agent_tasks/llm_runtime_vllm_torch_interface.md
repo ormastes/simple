@@ -628,3 +628,13 @@ readiness and the aggregate LLM gate. The checker runs the local svLLM
 readiness wrapper, records local file-backed byte-read evidence separately, and
 keeps native streaming failed with concrete blockers until native read_range,
 pinned buffer registration, and device staging all report `ready`.
+
+## 2026-06-29 Torch Optimizer Evidence Hardening
+
+`scripts/check/check-llm-runtime-torch-cuda-optimizer-probe.shs` now normalizes
+the Simple/libtorch CUDA optimizer evidence contract even when the probe exits
+early. The probe reports the required gate list, the current blocked gate, and
+normalized libtorch/CUDA/parameter/gradient/optimizer-step fields. On this host
+the lane remains `unavailable` with `blocked_gate=libtorch`; strict-host
+aggregate runs should fail that gate until a configured libtorch CUDA runtime
+executes the optimizer step and reports `status=pass`.

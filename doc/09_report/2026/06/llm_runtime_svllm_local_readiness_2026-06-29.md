@@ -1,9 +1,9 @@
 # LLM Runtime svLLM Local Readiness Evidence
 
-- status: `pass`
-- strict_native: `false`
-- native_streaming: `not_required`
-- native_reason: `default_local_readiness_only`
+- status: `fail`
+- strict_native: `true`
+- native_streaming: `fail`
+- native_reason: `native_read_range_unavailable`
 - native_env: `build/llm_runtime_svllm_native_streaming/evidence.env`
 - manifest: `pass` exit=`0` log=`build/llm_runtime_svllm_local_readiness/manifest.log`
 - tensor_bytes: `pass` exit=`0` log=`build/llm_runtime_svllm_local_readiness/tensor_bytes.log`
@@ -14,4 +14,4 @@
 - svllm_pack_log_modes: `pass` exit=`0` log=`build/llm_runtime_svllm_local_readiness/svllm_pack_log_modes.log`
 - env: `build/llm_runtime_svllm_local_readiness/evidence.env`
 
-This evidence proves the local file-backed svLLM pack CLI, manifest, tensor-byte, stream-plan, std_fs, and streaming-readiness contracts. It does not prove native NVFS async scheduling, pinned buffer registration, device staging, or true streaming model loads. Run with `--strict-native` when those native gates must be release-completion evidence.
+This strict native check requires a separate native svLLM streaming evidence env with `svllm_native_streaming_status=pass`. Local file-backed readiness alone is not completion evidence for NVFS async scheduling, pinned buffer registration, device staging, or true streaming model loads.
