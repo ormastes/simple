@@ -62,6 +62,65 @@ require_default_warn_gates() {
     add_failure "default_warn_gates_mismatch"
 }
 
+detail_value() {
+    detail="$1"
+    key="$2"
+    printf '%s\n' "$detail" | tr ';' '\n' | sed -n "s/^$key=//p" | tail -n 1
+}
+
+extract_report_detail() {
+    gate="$1"
+    if [ ! -r "$DEFAULT_REPORT" ]; then
+        return
+    fi
+    awk -F'|' -v gate="$gate" '
+        {
+            name = $2
+            sub(/^ /, "", name)
+            sub(/ $/, "", name)
+            if (name == gate) {
+                detail = $3
+                sub(/^ `/, "", detail)
+                sub(/` $/, "", detail)
+                print detail
+            }
+        }
+    ' "$DEFAULT_REPORT" | tail -n 1
+}
+
+load_default_detail() {
+    gate="$1"
+    env_key="$2"
+    var_prefix="$3"
+    detail=""
+    source="missing"
+    if [ -r "$DEFAULT_ENV" ]; then
+        detail="$(sed -n "s/^$env_key=//p" "$DEFAULT_ENV" | tail -n 1)"
+        if [ -n "$detail" ]; then
+            source="$DEFAULT_ENV"
+        fi
+    fi
+    if [ -z "$detail" ] && [ -r "$DEFAULT_REPORT" ]; then
+        detail="$(extract_report_detail "$gate")"
+        if [ -n "$detail" ]; then
+            source="$DEFAULT_REPORT"
+        fi
+    fi
+    eval "${var_prefix}_detail=\$detail"
+    eval "${var_prefix}_detail_source=\$source"
+}
+
+require_default_manifest_value() {
+    gate_label="$1"
+    var_prefix="$2"
+    key="$3"
+    value="$(eval "printf '%s' \"\${${var_prefix}_$key:-}\"")"
+    checked_count=$((checked_count + 1))
+    if [ -z "$value" ]; then
+        add_failure "default_missing_${gate_label}_${key}"
+    fi
+}
+
 hash_file() {
     path="$1"
     if [ ! -r "$path" ]; then
@@ -87,8 +146,18 @@ size_file() {
 require_file "$TRACKER"
 require_file "$AUDIT"
 default_warn_source="missing"
+load_default_detail "vllm_host" "llm_goal_evidence_vllm_host_detail" "vllm"
+load_default_detail "torch_optimizer" "llm_goal_evidence_torch_optimizer_detail" "torch"
+vllm_surface_manifest_count="$(detail_value "$vllm_detail" "surface_manifest_count")"
+vllm_surface_manifest_sha256="$(detail_value "$vllm_detail" "surface_manifest_sha256")"
+torch_surface_manifest_count="$(detail_value "$torch_detail" "surface_manifest_count")"
+torch_surface_manifest_sha256="$(detail_value "$torch_detail" "surface_manifest_sha256")"
 
 require_default_warn_gates
+require_default_manifest_value "vllm" "vllm_surface_manifest" "count"
+require_default_manifest_value "vllm" "vllm_surface_manifest" "sha256"
+require_default_manifest_value "torch" "torch_surface_manifest" "count"
+require_default_manifest_value "torch" "torch_surface_manifest" "sha256"
 require_pattern "$TRACKER" 'Status: OPEN' "tracker_not_open"
 require_pattern "$TRACKER" 'STATUS: FAIL llm-goal-evidence warn_count=0 fail_count=5' "tracker_strict_fail_summary_missing"
 require_pattern "$TRACKER" 'failed_gates=dashboard\|vllm_host\|svllm_local\|torch_optimizer\|finetune_guard' "tracker_failed_gates_mismatch"
@@ -107,15 +176,22 @@ do
     require_pattern "$TRACKER" "primary blocker: \`$blocker\`" "tracker_missing_primary:$blocker"
 done
 
-require_pattern "$TRACKER" 'surface_manifest_count=10' "tracker_missing_vllm_manifest_count"
-require_pattern "$TRACKER" '83abdc5c0a155eb8bc2cd2c20e3a9349d0e5b43cacf1073c5d59706b5fe9500b' "tracker_missing_vllm_manifest_hash"
-require_pattern "$AUDIT" 'surface_manifest_count=10' "audit_missing_vllm_manifest_count"
-require_pattern "$AUDIT" '83abdc5c0a155eb8bc2cd2c20e3a9349d0e5b43cacf1073c5d59706b5fe9500b' "audit_missing_vllm_manifest_hash"
-
-require_pattern "$TRACKER" 'surface_manifest_count=14' "tracker_missing_torch_manifest_count"
-require_pattern "$TRACKER" '852a1c814199286c0cf686f2bc68ffc8fb946a85691426a4c7440cf69aa7165c' "tracker_missing_torch_manifest_hash"
-require_pattern "$AUDIT" 'surface_manifest_count=14' "audit_missing_torch_manifest_count"
-require_pattern "$AUDIT" '852a1c814199286c0cf686f2bc68ffc8fb946a85691426a4c7440cf69aa7165c' "audit_missing_torch_manifest_hash"
+if [ -n "$vllm_surface_manifest_count" ]; then
+    require_pattern "$TRACKER" "surface_manifest_count=$vllm_surface_manifest_count" "tracker_missing_vllm_manifest_count"
+    require_pattern "$AUDIT" "surface_manifest_count=$vllm_surface_manifest_count" "audit_missing_vllm_manifest_count"
+fi
+if [ -n "$vllm_surface_manifest_sha256" ]; then
+    require_pattern "$TRACKER" "$vllm_surface_manifest_sha256" "tracker_missing_vllm_manifest_hash"
+    require_pattern "$AUDIT" "$vllm_surface_manifest_sha256" "audit_missing_vllm_manifest_hash"
+fi
+if [ -n "$torch_surface_manifest_count" ]; then
+    require_pattern "$TRACKER" "surface_manifest_count=$torch_surface_manifest_count" "tracker_missing_torch_manifest_count"
+    require_pattern "$AUDIT" "surface_manifest_count=$torch_surface_manifest_count" "audit_missing_torch_manifest_count"
+fi
+if [ -n "$torch_surface_manifest_sha256" ]; then
+    require_pattern "$TRACKER" "$torch_surface_manifest_sha256" "tracker_missing_torch_manifest_hash"
+    require_pattern "$AUDIT" "$torch_surface_manifest_sha256" "audit_missing_torch_manifest_hash"
+fi
 
 tracker_size="$(size_file "$TRACKER")"
 tracker_sha256="$(hash_file "$TRACKER")"
@@ -150,6 +226,12 @@ fi
     printf '%s\n' "llm_strict_blocker_tracker_default_env_size=$default_env_size"
     printf '%s\n' "llm_strict_blocker_tracker_default_env_sha256=$default_env_sha256"
     printf '%s\n' "llm_strict_blocker_tracker_default_warn_source=$default_warn_source"
+    printf '%s\n' "llm_strict_blocker_tracker_vllm_detail_source=$vllm_detail_source"
+    printf '%s\n' "llm_strict_blocker_tracker_vllm_surface_manifest_count=$vllm_surface_manifest_count"
+    printf '%s\n' "llm_strict_blocker_tracker_vllm_surface_manifest_sha256=$vllm_surface_manifest_sha256"
+    printf '%s\n' "llm_strict_blocker_tracker_torch_detail_source=$torch_detail_source"
+    printf '%s\n' "llm_strict_blocker_tracker_torch_surface_manifest_count=$torch_surface_manifest_count"
+    printf '%s\n' "llm_strict_blocker_tracker_torch_surface_manifest_sha256=$torch_surface_manifest_sha256"
 } >"$OUT_ENV"
 
 {
@@ -170,9 +252,15 @@ fi
     printf '%s\n' "- default_env_size: \`$default_env_size\`"
     printf '%s\n' "- default_env_sha256: \`$default_env_sha256\`"
     printf '%s\n' "- default_warn_source: \`$default_warn_source\`"
+    printf '%s\n' "- vllm_detail_source: \`$vllm_detail_source\`"
+    printf '%s\n' "- vllm_surface_manifest_count: \`$vllm_surface_manifest_count\`"
+    printf '%s\n' "- vllm_surface_manifest_sha256: \`$vllm_surface_manifest_sha256\`"
+    printf '%s\n' "- torch_detail_source: \`$torch_detail_source\`"
+    printf '%s\n' "- torch_surface_manifest_count: \`$torch_surface_manifest_count\`"
+    printf '%s\n' "- torch_surface_manifest_sha256: \`$torch_surface_manifest_sha256\`"
     printf '%s\n' "- env: \`$OUT_ENV\`"
     printf '\n'
-    printf 'This guard keeps the strict-host blocker tracker aligned with the latest default aggregate evidence and strict completion audit. It requires the aggregate Markdown report to match when that report exists; while the report is absent during regeneration, it accepts the aggregate evidence env as the source for default warn gates. It does not run live host evidence; it fails when the committed tracker/audit no longer name the known strict blockers or the hardened vLLM/Torch provenance hashes.\n'
+    printf 'This guard keeps the strict-host blocker tracker aligned with the latest default aggregate evidence and strict completion audit. It requires the aggregate Markdown report to match when that report exists; while the report is absent during regeneration, it accepts the aggregate evidence env as the source for default warn gates. It does not run live host evidence; it fails when the committed tracker/audit no longer name the known strict blockers or the current aggregate vLLM/Torch provenance counts and hashes.\n'
 } >"$REPORT_PATH"
 
 if [ "$status" = "pass" ]; then

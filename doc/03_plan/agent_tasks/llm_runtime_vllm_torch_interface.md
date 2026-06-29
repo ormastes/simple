@@ -1040,9 +1040,9 @@ Follow-up hardening adds
 drift guard for the strict audit and blocker tracker. It validates that the
 latest default aggregate report still reports
 `warn_gates=vllm_host|torch_optimizer`, the tracker/audit still name the five
-strict blockers, and the vLLM/Torch manifest hashes recorded in the blocker
-docs match the current hardened evidence. If the aggregate report is absent
-while being regenerated, the guard falls back to the aggregate env; if the
-report exists but is stale, the guard fails. This does not collect live host
-evidence; it prevents stale tracker or audit text from being mistaken for
-strict completion.
+strict blockers, and the vLLM/Torch manifest counts and hashes recorded in the
+blocker docs match the current default aggregate evidence. If the aggregate
+report is absent while being regenerated, the guard falls back to the aggregate
+env; if the report exists but is stale, the guard fails. This does not collect
+live host evidence; it prevents stale tracker or audit text from being mistaken
+for strict completion.
