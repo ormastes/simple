@@ -49,7 +49,7 @@ This scenario is the live x86_64 QEMU release gate for the SimpleOS Engine2D, WM
 | Design | doc/05_design/gui_color_image_pipeline_8k.md |
 | Research | doc/01_research/local/gui_color_image_pipeline_8k.md |
 | Source | `test/03_system/gui/gui_entry_engine2d_wm_simple_web_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-06-29 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -68,9 +68,9 @@ render-ready marker, and captures the visible QEMU framebuffer.
   1024x768 PPM with more than 100000 non-black pixels and exact sampled colors
   for the red MMIO probe, browser header, web body bands, top command lane, and
   taskbar/background surface.
-- QMP injects a deterministic host mouse drag and a second `pmemsave` proves
-  the live framebuffer changed after the input sequence, so the scenario cannot
-  pass from a static MDI screenshot alone.
+- QMP injects a deterministic host keyboard event and a second `pmemsave`
+  proves the live framebuffer changed after guest input handling, so the
+  scenario cannot pass from a static MDI screenshot alone.
 - A failed serial marker, failed QMP capture, blank framebuffer, or stale MDI
   surface count fails the scenario explicitly.
 
@@ -88,7 +88,7 @@ Run the live gate with:
 ```bash
 SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple \
   src/compiler_rust/target/release/simple test \
-  test/system/gui_entry_engine2d_wm_simple_web_spec.spl \
+  test/03_system/gui/gui_entry_engine2d_wm_simple_web_spec.spl \
   --mode=interpreter --timeout 420 --clean --format json
 ```
 
@@ -135,11 +135,11 @@ canonical shared-MDI surface setup regressed before the bitmap gate.
    - Expected: _pass_fail(captured) equals `pass`
 -  print guest diagnostics
 - stop guest
-   - Expected: _pass_fail(drag_delta) equals `pass`
+   - Expected: _pass_fail(input_delta) equals `pass`
 - stop guest
    - Expected: _pass_fail(file_exists(capture_ppm)) equals `pass`
-   - Expected: _pass_fail(file_exists(before_drag_ppm)) equals `pass`
-   - Expected: _pass_fail(file_exists(after_drag_ppm)) equals `pass`
+   - Expected: _pass_fail(file_exists(before_input_ppm)) equals `pass`
+   - Expected: _pass_fail(file_exists(after_input_ppm)) equals `pass`
 - Err
    - Expected: err equals ``
 
@@ -167,14 +167,14 @@ val qmp_socket = _qmp_socket(run_id)
 val serial_log = _serial_log(run_id)
 val cwd = rt_get_cwd()
 val capture_ppm = _capture_ppm(cwd, run_id)
-val before_drag_ppm = _capture_before_ppm(cwd, run_id)
-val after_drag_ppm = _capture_after_ppm(cwd, run_id)
+val before_input_ppm = _capture_before_input_ppm(cwd, run_id)
+val after_input_ppm = _capture_after_input_ppm(cwd, run_id)
 
 dir_create_all(artifact_dir)
 val _deleted_qmp_socket = rt_file_delete(qmp_socket)
 val _deleted_capture_ppm = rt_file_delete(capture_ppm)
-val _deleted_before_drag_ppm = rt_file_delete(before_drag_ppm)
-val _deleted_after_drag_ppm = rt_file_delete(after_drag_ppm)
+val _deleted_before_input_ppm = rt_file_delete(before_input_ppm)
+val _deleted_after_input_ppm = rt_file_delete(after_input_ppm)
 
 match spawn_guest_with_qmp(capture_target, qmp_socket, serial_log):
     Ok(handle):
@@ -195,24 +195,17 @@ match spawn_guest_with_qmp(capture_target, qmp_socket, serial_log):
             stop_guest(handle)
             expect(_pass_fail(saw_probe and saw_wm and saw_engine and saw_web and saw_mdi and saw_top and saw_taskbar and saw_html and saw_ready)).to_equal("pass")
         else:
-            val captured = _capture_and_assert_web_ppm_retry(qmp_socket, capture_ppm, 1)
-            if not captured:
-                print "[gui_entry_engine2d_wm_simple_web_spec] QMP pmemsave framebuffer or web pixel assertion failed"
+            val captured_input = _qmp_capture_and_assert_web_ppm_with_input_delta(qmp_socket, capture_ppm, before_input_ppm, after_input_ppm)
+            if not captured_input:
+                print "[gui_entry_engine2d_wm_simple_web_spec] QMP framebuffer capture or input replay assertion failed"
                 _print_guest_diagnostics("[gui_entry_engine2d_wm_simple_web_spec]", serial, read_qemu_stderr_log(handle))
                 stop_guest(handle)
-                expect(_pass_fail(captured)).to_equal("pass")
+                expect(_pass_fail(captured_input)).to_equal("pass")
             else:
-                val drag_delta = _qmp_drag_and_assert_framebuffer_delta(qmp_socket, before_drag_ppm, after_drag_ppm)
-                if not drag_delta:
-                    print "[gui_entry_engine2d_wm_simple_web_spec] QMP drag replay did not change the framebuffer"
-                    _print_guest_diagnostics("[gui_entry_engine2d_wm_simple_web_spec]", serial, read_qemu_stderr_log(handle))
-                    stop_guest(handle)
-                    expect(_pass_fail(drag_delta)).to_equal("pass")
-                else:
-                    stop_guest(handle)
-                    expect(_pass_fail(file_exists(capture_ppm))).to_equal("pass")
-                    expect(_pass_fail(file_exists(before_drag_ppm))).to_equal("pass")
-                    expect(_pass_fail(file_exists(after_drag_ppm))).to_equal("pass")
+                stop_guest(handle)
+                expect(_pass_fail(file_exists(capture_ppm))).to_equal("pass")
+                expect(_pass_fail(file_exists(before_input_ppm))).to_equal("pass")
+                expect(_pass_fail(file_exists(after_input_ppm))).to_equal("pass")
     Err(err):
         print "[gui_entry_engine2d_wm_simple_web_spec] failed to spawn guest: {err}"
         expect(err).to_equal("")

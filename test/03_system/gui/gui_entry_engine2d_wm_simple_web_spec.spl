@@ -79,7 +79,7 @@ use std.io_runtime.{getpid, time_now_unix_micros}
 
 use os.qemu_runner.{OsTarget, build_os, get_wm_simple_web_check_target}
 use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
-use app.io.mod.{cwd, file_delete, thread_sleep, process_run_timeout}
+use app.io.mod.{cwd, file_delete, file_write, thread_sleep, process_run_timeout}
 
 use test.system.qemu.os.common.qemu_os_harness.{
     can_run_target, file_exists, spawn_guest_with_qmp, stop_guest,
@@ -109,11 +109,11 @@ fn _serial_log(run_id: text) -> text:
 fn _capture_ppm(cwd: text, run_id: text) -> text:
     cwd + "/" + _run_dir(run_id) + "/capture.ppm"
 
-fn _capture_before_ppm(cwd: text, run_id: text) -> text:
-    cwd + "/" + _run_dir(run_id) + "/capture-before-drag.ppm"
+fn _capture_before_input_ppm(cwd: text, run_id: text) -> text:
+    cwd + "/" + _run_dir(run_id) + "/capture-before-input.ppm"
 
-fn _capture_after_ppm(cwd: text, run_id: text) -> text:
-    cwd + "/" + _run_dir(run_id) + "/capture-after-drag.ppm"
+fn _capture_after_input_ppm(cwd: text, run_id: text) -> text:
+    cwd + "/" + _run_dir(run_id) + "/capture-after-input.ppm"
 
 fn _capture_hold_target(target: OsTarget) -> OsTarget:
     OsTarget(
@@ -136,10 +136,10 @@ fn _capture_and_assert_web_ppm(qmp_socket: text, output_path: text) -> bool:
         "sock,out=sys.argv[1],sys.argv[2];raw=out+'.raw';" +
         "s=socket.socket(socket.AF_UNIX);s.settimeout(5);s.connect(sock);" +
         "f=s.makefile('rwb',buffering=0);" +
-        "f.readline();" +
+        "f.readline();\n" +
         "f.write(json.dumps(dict(execute='qmp_capabilities')).encode()+b'\\n');f.flush();f.readline();" +
         "f.write(json.dumps(dict(execute='human-monitor-command',arguments=dict([('command-line','pmemsave 0xfd000000 3145728 \"'+raw+'\"')]))).encode()+b'\\n');f.flush();" +
-        "f.readline();" +
+        "f.readline();\n" +
         "ok=any((time.sleep(0.1) or (os.path.exists(raw) and os.path.getsize(raw)>=3145728)) for _ in range(100));" +
         "mem=open(raw,'rb').read() if ok else b'';" +
         "w,h=(1024,768) if ok and len(mem)>=3145728 else (0,0);" +
@@ -181,18 +181,18 @@ fn _qmp_input_and_assert_framebuffer_delta(qmp_socket: text, before_path: text, 
         "before_raw=before+'.raw';after_raw=after+'.raw';" +
         "s=socket.socket(socket.AF_UNIX);s.settimeout(5);s.connect(sock);" +
         "f=s.makefile('rwb',buffering=0);" +
-        "f.readline();" +
+        "f.readline();\n" +
         "def q(obj):\n f.write(json.dumps(obj).encode()+b'\\n');f.flush();return f.readline()\n" +
         "def hmp(cmd):\n return q(dict(execute='human-monitor-command',arguments=dict([('command-line',cmd)])))\n" +
         "def pmem(raw,ppm):\n hmp('pmemsave 0xfd000000 3145728 \"'+raw+'\"');ok=any((time.sleep(0.1) or (os.path.exists(raw) and os.path.getsize(raw)>=3145728)) for _ in range(100));mem=open(raw,'rb').read() if ok else b'';pix=bytearray();[pix.extend([mem[i+2],mem[i+1],mem[i]]) for i in range(0,1024*768*4,4)] if ok else None;open(ppm,'wb').write((b'P6\\n1024 768\\n255\\n'+bytes(pix)) if ok else b'');return mem\n" +
         "q(dict(execute='qmp_capabilities'));" +
         "mem0=pmem(before_raw,before);" +
-        "hmp('sendkey a');time.sleep(0.45);" +
+        "hmp('sendkey a');time.sleep(1.25);" +
         "mem1=pmem(after_raw,after);" +
         "diff=sum(1 for a,b in zip(mem0,mem1) if a!=b) if len(mem0)==3145728 and len(mem1)==3145728 else 0;" +
         "sha0=hashlib.sha256(mem0).hexdigest() if mem0 else '';" +
         "sha1=hashlib.sha256(mem1).hexdigest() if mem1 else '';" +
-        "print('qmp_keyboard_input before_raw_bytes=%d after_raw_bytes=%d framebuffer_changed_bytes=%d before_sha256=%s after_sha256=%s before_ppm=%s after_ppm=%s' % (len(mem0),len(mem1),diff,sha0,sha1,before,after));" +
+        "print('qmp_keyboard_input before_raw_bytes=%d after_raw_bytes=%d framebuffer_changed_bytes=%d before_sha256_prefix=%s after_sha256_prefix=%s' % (len(mem0),len(mem1),diff,sha0[:12],sha1[:12]));" +
         "sys.exit(0 if len(mem0)==3145728 and len(mem1)==3145728 and diff>2048 and sha0!=sha1 else 5)"
     val result = process_run_timeout("python3", ["-c", script, qmp_socket, before_path, after_path], 25000)
     if result[0] != "":
@@ -200,6 +200,48 @@ fn _qmp_input_and_assert_framebuffer_delta(qmp_socket: text, before_path: text, 
     if result[1] != "":
         print "[gui_entry_engine2d_wm_simple_web_spec] qmp input stderr: {result[1]}"
     result[2] == 0 and file_exists(before_path) and file_exists(after_path) and result[0].contains("qmp_keyboard_input") and result[0].contains("framebuffer_changed_bytes=")
+
+fn _qmp_capture_and_assert_web_ppm_with_input_delta(qmp_socket: text, capture_path: text, before_path: text, after_path: text) -> bool:
+    val script = "import hashlib,json,os,socket,sys,time;" +
+        "sock,capture,before,after=sys.argv[1],sys.argv[2],sys.argv[3],sys.argv[4];" +
+        "cap_raw=capture+'.raw';before_raw=before+'.raw';after_raw=after+'.raw';" +
+        "s=socket.socket(socket.AF_UNIX);s.settimeout(5);s.connect(sock);" +
+        "f=s.makefile('rwb',buffering=0);" +
+        "f.readline();\n" +
+        "def q(obj):\n f.write(json.dumps(obj).encode()+b'\\n');f.flush();return f.readline()\n" +
+        "def hmp(cmd):\n return q(dict(execute='human-monitor-command',arguments=dict([('command-line',cmd)])))\n" +
+        "def pmem(raw,ppm):\n hmp('pmemsave 0xfd000000 3145728 \"'+raw+'\"');ok=any((time.sleep(0.1) or (os.path.exists(raw) and os.path.getsize(raw)>=3145728)) for _ in range(100));mem=open(raw,'rb').read() if ok else b'';pix=bytearray();[pix.extend([mem[i+2],mem[i+1],mem[i]]) for i in range(0,1024*768*4,4)] if ok else None;open(ppm,'wb').write((b'P6\\n1024 768\\n255\\n'+bytes(pix)) if ok else b'');return mem,pix\n" +
+        "q(dict(execute='qmp_capabilities'));" +
+        "cap_mem,cap_pix=pmem(cap_raw,capture);" +
+        "rgb=lambda p,x,y: p[(y*1024+x)*3:(y*1024+x)*3+3];" +
+        "near=lambda g,e,t: len(g)==3 and all(abs(g[i]-e[i])<=t for i in range(3));" +
+        "non=sum(1 for i in range(0,len(cap_pix),3) if cap_pix[i:i+3] != b'\\x00\\x00\\x00');" +
+        "probe=near(rgb(cap_pix,10,0),bytes([255,0,0]),8);" +
+        "head=near(rgb(cap_pix,404,166),bytes([0x20,0x50,0xA0]),8);" +
+        "bodya=near(rgb(cap_pix,404,200),bytes([0x18,0x22,0x30]),8);" +
+        "bodyb=near(rgb(cap_pix,450,300),bytes([0x1F,0x29,0x37]),8);" +
+        "top=near(rgb(cap_pix,64,20),bytes([0x20,0x50,0xA0]),8) and near(rgb(cap_pix,500,42),bytes([0x34,0x98,0xDB]),8) and near(rgb(cap_pix,900,20),bytes([0x1F,0x29,0x37]),8);" +
+        "task=near(rgb(cap_pix,346,750),bytes([0x34,0x98,0xDB]),8) and near(rgb(cap_pix,500,740),bytes([0x17,0x20,0x2A]),8) and near(rgb(cap_pix,920,748),bytes([0x24,0x34,0x47]),8);" +
+        "cap_sha=hashlib.sha256(open(capture,'rb').read()).hexdigest() if os.path.exists(capture) else '';" +
+        "print('capture_method=pmemsave pmem_addr=0xfd000000 pmem_size=3145728 pmem_raw_bytes=%d ppm_dims=1024x768 nonblack=%d ppm_bytes=%d ppm_sha256=%s checks=[probe=%s,header=%s,bodyA=%s,bodyB=%s,top=%s,taskbar=%s]' % (len(cap_mem),non,os.path.getsize(capture) if os.path.exists(capture) else 0,cap_sha,probe,head,bodya,bodyb,top,task));" +
+        "mem0,pix0=pmem(before_raw,before);" +
+        "hmp('sendkey a');time.sleep(1.25);" +
+        "mem1,pix1=pmem(after_raw,after);" +
+        "diff=sum(1 for a,b in zip(mem0,mem1) if a!=b) if len(mem0)==3145728 and len(mem1)==3145728 else 0;" +
+        "sha0=hashlib.sha256(mem0).hexdigest() if mem0 else '';" +
+        "sha1=hashlib.sha256(mem1).hexdigest() if mem1 else '';" +
+        "print('qmp_keyboard_input before_raw_bytes=%d after_raw_bytes=%d framebuffer_changed_bytes=%d before_sha256_prefix=%s after_sha256_prefix=%s' % (len(mem0),len(mem1),diff,sha0[:12],sha1[:12]));" +
+        "anchor_ok=len(cap_mem)==3145728 and os.path.exists(capture) and os.path.getsize(capture)==2359312 and non>100000 and probe and head and bodya and bodyb and top and task;" +
+        "input_ok=len(mem0)==3145728 and len(mem1)==3145728 and diff>2048 and sha0!=sha1 and os.path.exists(before) and os.path.exists(after);" +
+        "sys.exit(0 if anchor_ok and input_ok else 6)"
+    val result = process_run_timeout("python3", ["-c", script, qmp_socket, capture_path, before_path, after_path], 30000)
+    if result[0] != "":
+        print "[gui_entry_engine2d_wm_simple_web_spec] qmp capture/input {result[0]}"
+    if result[1] != "":
+        print "[gui_entry_engine2d_wm_simple_web_spec] qmp capture/input stderr: {result[1]}"
+    if result[2] != 0:
+        file_write(capture_path + ".qmp_result.txt", "exit_code={result[2]}\nstdout:\n{result[0]}\nstderr:\n{result[1]}\n")
+    result[2] == 0 and file_exists(capture_path) and file_exists(before_path) and file_exists(after_path) and result[0].contains("capture_method=pmemsave") and result[0].contains("qmp_keyboard_input")
 
 fn _print_guest_diagnostics(prefix: text, serial: text, stderr: text):
     print "{prefix} serial_len={serial.len()} stderr_len={stderr.len()}"
@@ -226,14 +268,14 @@ describe "WM Simple Web Engine2D BGA QEMU check":
         val serial_log = _serial_log(run_id)
         val cwd = cwd()
         val capture_ppm = _capture_ppm(cwd, run_id)
-        val before_drag_ppm = _capture_before_ppm(cwd, run_id)
-        val after_drag_ppm = _capture_after_ppm(cwd, run_id)
+        val before_input_ppm = _capture_before_input_ppm(cwd, run_id)
+        val after_input_ppm = _capture_after_input_ppm(cwd, run_id)
 
         dir_create_all(artifact_dir)
         val _deleted_qmp_socket = file_delete(qmp_socket)
         val _deleted_capture_ppm = file_delete(capture_ppm)
-        val _deleted_before_drag_ppm = file_delete(before_drag_ppm)
-        val _deleted_after_drag_ppm = file_delete(after_drag_ppm)
+        val _deleted_before_input_ppm = file_delete(before_input_ppm)
+        val _deleted_after_input_ppm = file_delete(after_input_ppm)
 
         match spawn_guest_with_qmp(capture_target, qmp_socket, serial_log):
             Ok(handle):
@@ -254,24 +296,17 @@ describe "WM Simple Web Engine2D BGA QEMU check":
                     stop_guest(handle)
                     expect(_pass_fail(saw_probe and saw_wm and saw_engine and saw_web and saw_mdi and saw_top and saw_taskbar and saw_html and saw_ready)).to_equal("pass")
                 else:
-                    val captured = _capture_and_assert_web_ppm_retry(qmp_socket, capture_ppm, 1)
-                    if not captured:
-                        print "[gui_entry_engine2d_wm_simple_web_spec] QMP pmemsave framebuffer or web pixel assertion failed"
+                    val captured_input = _qmp_capture_and_assert_web_ppm_with_input_delta(qmp_socket, capture_ppm, before_input_ppm, after_input_ppm)
+                    if not captured_input:
+                        print "[gui_entry_engine2d_wm_simple_web_spec] QMP framebuffer capture or input replay assertion failed"
                         _print_guest_diagnostics("[gui_entry_engine2d_wm_simple_web_spec]", serial, read_qemu_stderr_log(handle))
                         stop_guest(handle)
-                        expect(_pass_fail(captured)).to_equal("pass")
+                        expect(_pass_fail(captured_input)).to_equal("pass")
                     else:
-                        val input_delta = _qmp_input_and_assert_framebuffer_delta(qmp_socket, before_drag_ppm, after_drag_ppm)
-                        if not input_delta:
-                            print "[gui_entry_engine2d_wm_simple_web_spec] QMP input replay did not change the framebuffer"
-                            _print_guest_diagnostics("[gui_entry_engine2d_wm_simple_web_spec]", serial, read_qemu_stderr_log(handle))
-                            stop_guest(handle)
-                            expect(_pass_fail(input_delta)).to_equal("pass")
-                        else:
-                            stop_guest(handle)
-                            expect(_pass_fail(file_exists(capture_ppm))).to_equal("pass")
-                            expect(_pass_fail(file_exists(before_drag_ppm))).to_equal("pass")
-                            expect(_pass_fail(file_exists(after_drag_ppm))).to_equal("pass")
+                        stop_guest(handle)
+                        expect(_pass_fail(file_exists(capture_ppm))).to_equal("pass")
+                        expect(_pass_fail(file_exists(before_input_ppm))).to_equal("pass")
+                        expect(_pass_fail(file_exists(after_input_ppm))).to_equal("pass")
             Err(err):
                 print "[gui_entry_engine2d_wm_simple_web_spec] failed to spawn guest: {err}"
                 expect(err).to_equal("")
