@@ -27,7 +27,7 @@ simple_web_generated_html_css_combinations_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 11 | 11 | 0 | 0 |
+| 12 | 12 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -400,12 +400,40 @@ expect(_pixel_at(pixels, 96, 9, 5)).to_equal(0xFFDBEAFEu32)
 
 </details>
 
+#### renders empty-cells hide by suppressing empty table-cell background paint
+
+- Render table cells where only the empty cell uses empty-cells:hide
+- Assert the empty cell shows the table background while the non-empty cell keeps its own background
+   - Expected: pixels.len() equals `64 * 32`
+   - Expected: _pixel_at(pixels, 64, 5, 4) equals `0xFFDBEAFEu32`
+   - Expected: _pixel_at(pixels, 64, 5, 12) equals `0xFFEF4444u32`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Render table cells where only the empty cell uses empty-cells:hide")
+val html = "<html><head><style>html,body{margin:0;padding:0;background-color:#ffffff}table{width:40px;background-color:#dbeafe}td{display:block;width:20px;height:8px;background-color:#ef4444;empty-cells:hide;color:#111827;font-size:8px}</style></head><body><table><tr><td></td><td>x</td></tr></table></body></html>"
+val pixels = simple_web_render_html_to_pixels(html, 64, 32)
+
+step("Assert the empty cell shows the table background while the non-empty cell keeps its own background")
+expect(pixels.len()).to_equal(64 * 32)
+expect(_pixel_at(pixels, 64, 5, 4)).to_equal(0xFFDBEAFEu32)
+expect(_pixel_at(pixels, 64, 5, 12)).to_equal(0xFFEF4444u32)
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 11 |
-| Active scenarios | 11 |
+| Total scenarios | 12 |
+| Active scenarios | 12 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
