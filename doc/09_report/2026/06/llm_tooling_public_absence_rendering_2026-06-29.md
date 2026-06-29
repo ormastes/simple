@@ -5,9 +5,9 @@
 - required_gates: `nil_marker_absent,option_none_absent,empty_string_absent`
 - blocked_gates: `none`
 - surface_manifest: `build/llm_tooling_public_absence_rendering/public_absence_surface_manifest.tsv`
-- surface_manifest_count: `120`
-- surface_manifest_size: `16336`
-- surface_manifest_sha256: `7faf84f84a67dc5a6e2f21adcae30cebd8db23a9457311406e6ef97add50fee0`
+- surface_manifest_count: `121`
+- surface_manifest_size: `16461`
+- surface_manifest_sha256: `0d4c4c9754ea8a89cdd49055e327c10df824511ebe5f5fd53e58aa365a5878f4`
 - failure_count: `0`
 - next_action: `rerun after public manual or dashboard wording changes`
 

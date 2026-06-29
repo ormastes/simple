@@ -13,6 +13,12 @@
 - dashboard_base_url: `missing`
 - dashboard_auth_source: `missing`
 - vllm_command: `missing`
+- vllm_base_model: `base-model`
+- vllm_base_model_status: `configured`
+- vllm_base_model_source: `default`
+- vllm_endpoint: `http://127.0.0.1:8000/v1`
+- vllm_endpoint_status: `configured`
+- vllm_endpoint_source: `default`
 - python_vllm_module: `missing`
 - local_gpu: `available`
 - svllm_read_range: `missing`
@@ -39,6 +45,6 @@
 - retry7_attempt: `ready`
 - surface_manifest_count: `8`
 - surface_manifest_size: `1045`
-- surface_manifest_sha256: `9c8ebb59dbbe072732e6a98d2c4fd6bc1ccc2e8ed5f061d4bba6b647943209b4`
+- surface_manifest_sha256: `16530fe029cc390cda863383e496a4c3680194909a8166186ae9068473c9689e`
 - next_action: `provide blocked host prerequisites, then rerun strict evidence wrappers`
 - env: `build/llm_strict_host_prereq_doctor/evidence.env`
