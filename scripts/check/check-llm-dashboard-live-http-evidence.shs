@@ -21,9 +21,23 @@ if [ -z "$BASE_URL" ]; then
         printf '%s\n' "llm_dashboard_live_http_blocked_gates=base_url"
         printf '%s\n' "llm_dashboard_live_http_primary_blocked_gate=base_url"
         printf '%s\n' "llm_dashboard_live_http_dashboard_status=not_collected"
+        printf '%s\n' "llm_dashboard_live_http_dashboard_code=not_collected"
+        printf '%s\n' "llm_dashboard_live_http_dashboard_size=not_collected"
+        printf '%s\n' "llm_dashboard_live_http_dashboard_sha256=not_collected"
         printf '%s\n' "llm_dashboard_live_http_agents_status=not_collected"
+        printf '%s\n' "llm_dashboard_live_http_agents_code=not_collected"
+        printf '%s\n' "llm_dashboard_live_http_agents_size=not_collected"
+        printf '%s\n' "llm_dashboard_live_http_agents_sha256=not_collected"
         printf '%s\n' "llm_dashboard_live_http_control_status=not_collected"
+        printf '%s\n' "llm_dashboard_live_http_control_code=not_collected"
+        printf '%s\n' "llm_dashboard_live_http_control_size=not_collected"
+        printf '%s\n' "llm_dashboard_live_http_control_sha256=not_collected"
         printf '%s\n' "llm_dashboard_live_http_unauth_api_status=not_collected"
+        printf '%s\n' "llm_dashboard_live_http_unauth_api_code=not_collected"
+        printf '%s\n' "llm_dashboard_live_http_unauth_api_size=not_collected"
+        printf '%s\n' "llm_dashboard_live_http_unauth_api_sha256=not_collected"
+        printf '%s\n' "llm_dashboard_live_http_pass_integrity_status=not_applicable"
+        printf '%s\n' "llm_dashboard_live_http_pass_integrity_reason=missing_base_url"
         printf '%s\n' "llm_dashboard_live_http_next_action=set LLM_DASHBOARD_LIVE_BASE_URL and authentication env, then rerun this wrapper"
     } >"$OUT_ENV"
     {
@@ -32,6 +46,8 @@ if [ -z "$BASE_URL" ]; then
         printf '%s\n' "- reason: \`missing_base_url\`"
         printf '%s\n' "- blocked_gates: \`base_url\`"
         printf '%s\n' "- primary_blocked_gate: \`base_url\`"
+        printf '%s\n' "- pass_integrity_status: \`not_applicable\`"
+        printf '%s\n' "- pass_integrity_reason: \`missing_base_url\`"
         printf '%s\n' "- env: \`$OUT_ENV\`"
         printf '\nSet `LLM_DASHBOARD_LIVE_BASE_URL` to the running dashboard origin and provide either `LLM_DASHBOARD_LIVE_AUTH_HEADER`, `LLM_DASHBOARD_LIVE_AUTH_COOKIE`, or `LLM_DASHBOARD_LIVE_COOKIE_NAME` plus `LLM_DASHBOARD_LIVE_COOKIE_VALUE`.\n'
     } >"$REPORT_PATH"
@@ -41,6 +57,7 @@ fi
 
 python3 - "$BASE_URL" "$TIMEOUT_SECONDS" "$OUT_ENV" "$REPORT_PATH" <<'PY'
 import os
+import hashlib
 import sys
 import urllib.error
 import urllib.parse
@@ -93,11 +110,14 @@ def request(path, headers):
     req = urllib.request.Request(join_url(path), headers=headers, method="GET")
     try:
         with opener.open(req, timeout=timeout) as resp:
-            return resp.getcode(), resp.read(200000).decode("utf-8", "replace")
+            body = resp.read(200000)
+            return resp.getcode(), body, body.decode("utf-8", "replace")
     except urllib.error.HTTPError as exc:
-        return exc.code, exc.read(200000).decode("utf-8", "replace")
+        body = exc.read(200000)
+        return exc.code, body, body.decode("utf-8", "replace")
     except Exception as exc:
-        return -1, f"{type(exc).__name__}:{exc}"
+        text = f"{type(exc).__name__}:{exc}"
+        return -1, text.encode("utf-8"), text
 
 
 def gate(name, ok, reason):
@@ -107,25 +127,35 @@ def gate(name, ok, reason):
         blocked.append(name)
 
 
-unauth_code, unauth_body = request("/api/vllm/control?action=preflight", {})
+def record_response(name, code, body_bytes):
+    details[f"{name}_code"] = str(code)
+    details[f"{name}_size"] = str(len(body_bytes))
+    details[f"{name}_sha256"] = hashlib.sha256(body_bytes).hexdigest() if body_bytes else "missing"
+
+
+unauth_code, unauth_bytes, unauth_body = request("/api/vllm/control?action=preflight", {})
+record_response("unauth_api", unauth_code, unauth_bytes)
 gate("unauth_api", unauth_code == 401 and "Authentication required" in unauth_body, f"http_{unauth_code}")
 
 headers = auth_headers()
-dashboard_code, dashboard_body = request("/", headers)
+dashboard_code, dashboard_bytes, dashboard_body = request("/", headers)
+record_response("dashboard", dashboard_code, dashboard_bytes)
 gate(
     "dashboard",
     dashboard_code == 200 and "llm-vllm-control-panel" in dashboard_body,
     f"http_{dashboard_code}",
 )
 
-agents_code, agents_body = request("/agents", headers)
+agents_code, agents_bytes, agents_body = request("/agents", headers)
+record_response("agents", agents_code, agents_bytes)
 gate(
     "agents",
     agents_code == 200 and "agent-dashboard" in agents_body,
     f"http_{agents_code}",
 )
 
-control_code, control_body = request("/api/vllm/control?action=preflight", headers)
+control_code, control_bytes, control_body = request("/api/vllm/control?action=preflight", headers)
+record_response("control", control_code, control_bytes)
 gate(
     "control",
     control_code == 200 and "llm_runtime_vllm_dashboard_live_boundary" in control_body,
@@ -144,6 +174,41 @@ next_action = "strict live dashboard HTTP evidence is ready"
 if status != "pass":
     next_action = f"fix live dashboard HTTP gate: {primary}"
 
+pass_integrity_status = "not_applicable"
+pass_integrity_reason = "not_applicable"
+if status == "pass":
+    pass_integrity_status = "pass"
+    pass_integrity_reason = "all_live_http_proof_fields_present"
+    expected = {
+        "unauth_api": "401",
+        "dashboard": "200",
+        "agents": "200",
+        "control": "200",
+    }
+    for name, code in expected.items():
+        if details.get(f"{name}_status") != "pass":
+            pass_integrity_status = "fail"
+            pass_integrity_reason = f"{name}_gate_not_pass"
+            break
+        if details.get(f"{name}_code") != code:
+            pass_integrity_status = "fail"
+            pass_integrity_reason = f"{name}_code_not_{code}"
+            break
+        if int(details.get(f"{name}_size", "0") or "0") <= 0:
+            pass_integrity_status = "fail"
+            pass_integrity_reason = f"{name}_body_empty"
+            break
+        if details.get(f"{name}_sha256", "missing") == "missing":
+            pass_integrity_status = "fail"
+            pass_integrity_reason = f"{name}_sha256_missing"
+            break
+    if pass_integrity_status != "pass":
+        status = "fail"
+        reason = f"live_http_pass_integrity_failed:{pass_integrity_reason}"
+        blocked_gates = "live_http_pass_integrity"
+        primary = "live_http_pass_integrity"
+        next_action = "fix live dashboard HTTP proof fields and rerun this wrapper"
+
 with open(out_env, "w", encoding="utf-8") as f:
     f.write(f"llm_dashboard_live_http_status={status}\n")
     f.write(f"llm_dashboard_live_http_reason={reason}\n")
@@ -152,12 +217,26 @@ with open(out_env, "w", encoding="utf-8") as f:
     f.write(f"llm_dashboard_live_http_primary_blocked_gate={primary}\n")
     f.write(f"llm_dashboard_live_http_dashboard_status={details.get('dashboard_status', 'not_collected')}\n")
     f.write(f"llm_dashboard_live_http_dashboard_reason={details.get('dashboard_reason', 'not_collected')}\n")
+    f.write(f"llm_dashboard_live_http_dashboard_code={details.get('dashboard_code', 'not_collected')}\n")
+    f.write(f"llm_dashboard_live_http_dashboard_size={details.get('dashboard_size', 'not_collected')}\n")
+    f.write(f"llm_dashboard_live_http_dashboard_sha256={details.get('dashboard_sha256', 'not_collected')}\n")
     f.write(f"llm_dashboard_live_http_agents_status={details.get('agents_status', 'not_collected')}\n")
     f.write(f"llm_dashboard_live_http_agents_reason={details.get('agents_reason', 'not_collected')}\n")
+    f.write(f"llm_dashboard_live_http_agents_code={details.get('agents_code', 'not_collected')}\n")
+    f.write(f"llm_dashboard_live_http_agents_size={details.get('agents_size', 'not_collected')}\n")
+    f.write(f"llm_dashboard_live_http_agents_sha256={details.get('agents_sha256', 'not_collected')}\n")
     f.write(f"llm_dashboard_live_http_control_status={details.get('control_status', 'not_collected')}\n")
     f.write(f"llm_dashboard_live_http_control_reason={details.get('control_reason', 'not_collected')}\n")
+    f.write(f"llm_dashboard_live_http_control_code={details.get('control_code', 'not_collected')}\n")
+    f.write(f"llm_dashboard_live_http_control_size={details.get('control_size', 'not_collected')}\n")
+    f.write(f"llm_dashboard_live_http_control_sha256={details.get('control_sha256', 'not_collected')}\n")
     f.write(f"llm_dashboard_live_http_unauth_api_status={details.get('unauth_api_status', 'not_collected')}\n")
     f.write(f"llm_dashboard_live_http_unauth_api_reason={details.get('unauth_api_reason', 'not_collected')}\n")
+    f.write(f"llm_dashboard_live_http_unauth_api_code={details.get('unauth_api_code', 'not_collected')}\n")
+    f.write(f"llm_dashboard_live_http_unauth_api_size={details.get('unauth_api_size', 'not_collected')}\n")
+    f.write(f"llm_dashboard_live_http_unauth_api_sha256={details.get('unauth_api_sha256', 'not_collected')}\n")
+    f.write(f"llm_dashboard_live_http_pass_integrity_status={pass_integrity_status}\n")
+    f.write(f"llm_dashboard_live_http_pass_integrity_reason={pass_integrity_reason}\n")
     f.write(f"llm_dashboard_live_http_next_action={next_action}\n")
 
 with open(report_path, "w", encoding="utf-8") as f:
@@ -168,12 +247,26 @@ with open(report_path, "w", encoding="utf-8") as f:
     f.write(f"- blocked_gates: `{blocked_gates}`\n")
     f.write(f"- primary_blocked_gate: `{primary}`\n")
     f.write(f"- dashboard_status: `{details.get('dashboard_status', 'not_collected')}`\n")
+    f.write(f"- dashboard_code: `{details.get('dashboard_code', 'not_collected')}`\n")
+    f.write(f"- dashboard_size: `{details.get('dashboard_size', 'not_collected')}`\n")
+    f.write(f"- dashboard_sha256: `{details.get('dashboard_sha256', 'not_collected')}`\n")
     f.write(f"- agents_status: `{details.get('agents_status', 'not_collected')}`\n")
+    f.write(f"- agents_code: `{details.get('agents_code', 'not_collected')}`\n")
+    f.write(f"- agents_size: `{details.get('agents_size', 'not_collected')}`\n")
+    f.write(f"- agents_sha256: `{details.get('agents_sha256', 'not_collected')}`\n")
     f.write(f"- control_status: `{details.get('control_status', 'not_collected')}`\n")
+    f.write(f"- control_code: `{details.get('control_code', 'not_collected')}`\n")
+    f.write(f"- control_size: `{details.get('control_size', 'not_collected')}`\n")
+    f.write(f"- control_sha256: `{details.get('control_sha256', 'not_collected')}`\n")
     f.write(f"- unauth_api_status: `{details.get('unauth_api_status', 'not_collected')}`\n")
+    f.write(f"- unauth_api_code: `{details.get('unauth_api_code', 'not_collected')}`\n")
+    f.write(f"- unauth_api_size: `{details.get('unauth_api_size', 'not_collected')}`\n")
+    f.write(f"- unauth_api_sha256: `{details.get('unauth_api_sha256', 'not_collected')}`\n")
+    f.write(f"- pass_integrity_status: `{pass_integrity_status}`\n")
+    f.write(f"- pass_integrity_reason: `{pass_integrity_reason}`\n")
     f.write(f"- next_action: `{next_action}`\n")
     f.write(f"- env: `{out_env}`\n\n")
-    f.write("This wrapper probes a configured running dashboard origin and writes the live HTTP env consumed by `check-llm-dashboard-live-evidence.shs`. It does not print authentication secrets and does not claim live vLLM model serving.\n")
+    f.write("This wrapper probes a configured running dashboard origin and writes the live HTTP env consumed by `check-llm-dashboard-live-evidence.shs`. A PASS requires exact HTTP status codes, route markers, non-empty response bodies, and SHA-256 fingerprints for the unauthenticated API rejection, dashboard HTML, agents HTML, and authenticated control JSONL responses. It does not print authentication secrets and does not claim live vLLM model serving.\n")
 
 print(f"STATUS: {status.upper()} llm-dashboard-live-http-evidence reason={reason}")
 sys.exit(0 if status == "pass" else 1)

@@ -81,9 +81,14 @@ The HTTP producer writes `build/llm_dashboard_live_http/evidence.env` with
 `llm_dashboard_live_http_status=pass` only after a configured running dashboard
 origin rejects an unauthenticated `/api/vllm/control` request and accepts
 authenticated dashboard HTML, `/agents`, and `/api/vllm/control?action=preflight`
-requests. Provide authentication with `LLM_DASHBOARD_LIVE_AUTH_HEADER`,
-`LLM_DASHBOARD_LIVE_AUTH_COOKIE`, or `LLM_DASHBOARD_LIVE_COOKIE_NAME` plus
-`LLM_DASHBOARD_LIVE_COOKIE_VALUE`; secret values are not written to reports.
+requests. A pass also requires
+`llm_dashboard_live_http_pass_integrity_status=pass`, which independently
+checks exact HTTP status codes, non-empty response bodies, and SHA-256
+fingerprints for the unauthenticated API rejection, dashboard HTML, agents HTML,
+and authenticated control JSONL responses. Provide authentication with
+`LLM_DASHBOARD_LIVE_AUTH_HEADER`, `LLM_DASHBOARD_LIVE_AUTH_COOKIE`, or
+`LLM_DASHBOARD_LIVE_COOKIE_NAME` plus `LLM_DASHBOARD_LIVE_COOKIE_VALUE`; secret
+values are not written to reports.
 
 That checker writes `build/llm_dashboard_live/evidence.env` with
 `llm_dashboard_live_status=pass` when authenticated dashboard HTML, `/agents`
@@ -103,9 +108,12 @@ LLM_DASHBOARD_LIVE_EVIDENCE_ENV=build/llm_dashboard_live/evidence.env \
 ```
 
 The strict live gate requires the evidence env to report
-`llm_dashboard_live_status=pass`. This proves live dashboard route execution,
-not live vLLM serving. The aggregate LLM strict mode also generates the live env
-and runs this wrapper with `--strict-live`.
+`llm_dashboard_live_status=pass`; that wrapper in turn requires
+`llm_dashboard_live_http_status=pass` and
+`llm_dashboard_live_http_pass_integrity_status=pass` from the live HTTP
+producer. This proves live dashboard route execution, not live vLLM serving.
+The aggregate LLM strict mode also generates the live env and runs this wrapper
+with `--strict-live`.
 
 ---
 

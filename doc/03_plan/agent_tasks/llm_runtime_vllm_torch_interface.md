@@ -962,9 +962,14 @@ rows as vLLM, svLLM, Torch optimizer, and fine-tune blockers.
 Normal-review and Spark sidecars both flagged that route/source checks were not
 live authenticated dashboard proof. The dashboard live wrapper now requires a
 separate `LLM_DASHBOARD_LIVE_HTTP_EVIDENCE_ENV` with
-`llm_dashboard_live_http_status=pass`; without it, strict dashboard completion
-fails with `live_http_authenticated_request` blocked instead of treating route
-contracts as a live operator-dashboard pass.
+`llm_dashboard_live_http_status=pass` and
+`llm_dashboard_live_http_pass_integrity_status=pass`; without it, strict
+dashboard completion fails with `live_http_authenticated_request` or
+`live_http_pass_integrity` blocked instead of treating route contracts as a
+live operator-dashboard pass. The HTTP producer records exact status codes,
+response sizes, and SHA-256 fingerprints for the unauthenticated API rejection,
+dashboard HTML, agents HTML, and authenticated control JSONL responses, so a
+status-only env cannot satisfy strict dashboard evidence.
 The aggregate strict-host path now runs
 `check-llm-dashboard-live-http-evidence.shs` before
 `check-llm-dashboard-live-evidence.shs`, so a missing configured dashboard URL
