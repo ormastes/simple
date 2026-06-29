@@ -40,6 +40,15 @@
 | torch_optimizer | `libtorch,cuda,parameter_cuda,autograd_gradient,optimizer_step_decreases_parameter_sum` | `libtorch` | `libtorch_unavailable` |
 | finetune_guard | `retry6_training_eval,training_allowed,model_manifest,eval_result,target_eval,decision,license,safety,deployment,app_handoff` | `retry6_training_eval|training_allowed|model_manifest|eval_result|target_eval|decision|license|safety|deployment|app_handoff` | `BLOCKED_RETRY6_NOT_READY` |
 
+## Next Actions
+
+| lane | next_action |
+|------|-------------|
+| vllm_host | `install or expose the local vllm executable, then rerun the strict vLLM host probe` |
+| svllm_local | `run --strict-host on a configured native svLLM host when native streaming completion evidence is required` |
+| torch_optimizer | `build or install the Simple runtime with libtorch symbols available, then rerun the strict Torch optimizer probe` |
+| finetune_guard | `complete retry6 training/eval gate before normal acceptance review` |
+
 ## Replacement, Dashboard, Host, svLLM, Torch, And Acceptance Details
 
 | lane | details |

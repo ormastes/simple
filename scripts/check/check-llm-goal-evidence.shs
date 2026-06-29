@@ -236,6 +236,47 @@ lane_blocker_reason() {
     esac
 }
 
+lane_next_action() {
+    case "$1" in
+        vllm_host)
+            env_value build/llm_runtime_vllm_host_probe/evidence.env llm_runtime_vllm_host_probe_next_action
+            ;;
+        svllm_local)
+            if [ "$STRICT_HOST" -eq 1 ]; then
+                reason="$(env_value build/llm_runtime_svllm_native_streaming/evidence.env svllm_native_streaming_reason)"
+                case "$reason" in
+                    native_read_range_unavailable)
+                        printf '%s\n' "implement native read_range support, then rerun strict svLLM native streaming evidence"
+                        ;;
+                    pinned_buffer_registration_unavailable)
+                        printf '%s\n' "implement pinned-buffer registration, then rerun strict svLLM native streaming evidence"
+                        ;;
+                    device_staging_unavailable)
+                        printf '%s\n' "implement device staging, then rerun strict svLLM native streaming evidence"
+                        ;;
+                    native_streaming_ready)
+                        printf '%s\n' "strict svLLM native streaming evidence is ready"
+                        ;;
+                    *)
+                        printf '%s\n' "collect strict svLLM native streaming evidence and resolve reported native blockers"
+                        ;;
+                esac
+            else
+                printf '%s\n' "run --strict-host on a configured native svLLM host when native streaming completion evidence is required"
+            fi
+            ;;
+        torch_optimizer)
+            env_value build/llm_runtime_torch_cuda_optimizer_probe/evidence.env torch_cuda_optimizer_probe_next_action
+            ;;
+        finetune_guard)
+            env_value build/llm_finetune_acceptance/evidence.env llm_finetune_acceptance_next_action
+            ;;
+        *)
+            printf '%s\n' "n/a"
+            ;;
+    esac
+}
+
 lane_detail_values() {
     key="$1"
     case "$key" in
@@ -474,6 +515,7 @@ done
         printf '%s\n' "llm_goal_evidence_${key}_required_gates=${required:-n/a}"
         printf '%s\n' "llm_goal_evidence_${key}_blocked_gates=${blocked:-n/a}"
         printf '%s\n' "llm_goal_evidence_${key}_blocker_reason=${reason:-n/a}"
+        printf '%s\n' "llm_goal_evidence_${key}_next_action=$(lane_next_action "$key")"
         printf '%s\n' "llm_goal_evidence_${key}_detail=$(lane_detail_values "$key")"
     done
 } >"$OUT_ENV"
@@ -537,6 +579,13 @@ done
             reason="lane_timeout_$(lane_timeout_seconds "$key")s"
         fi
         printf '| %s | `%s` | `%s` | `%s` |\n' "$key" "${required:-n/a}" "${blocked:-n/a}" "${reason:-n/a}"
+    done
+    printf '\n'
+    printf '## Next Actions\n\n'
+    printf '| lane | next_action |\n'
+    printf '|------|-------------|\n'
+    for key in vllm_host svllm_local torch_optimizer finetune_guard; do
+        printf '| %s | `%s` |\n' "$key" "$(lane_next_action "$key")"
     done
     printf '\n'
     printf '## Replacement, Dashboard, Host, svLLM, Torch, And Acceptance Details\n\n'

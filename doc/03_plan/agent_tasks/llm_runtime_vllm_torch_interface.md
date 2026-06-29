@@ -799,3 +799,8 @@ The focused vLLM host probe and Torch optimizer probe now write `next_action`
 fields, and the aggregate forwards them through the vLLM/Torch detail rows.
 The remaining WARN lanes therefore name both the blocked gate and the concrete
 operator action needed before strict host completion can pass.
+
+The aggregate now promotes next actions to first-class
+`llm_goal_evidence_<lane>_next_action` env fields and a `Next Actions` report
+table for vLLM, svLLM, Torch optimizer, and fine-tune. This makes the strict
+host handoff actionable without parsing the longer detail strings.
