@@ -96,7 +96,10 @@ the lower MCP handlers.
 Latest evidence:
 `doc/09_report/2026/06/llm_tooling_context_ponytail_mimic_2026-06-29.md`
 records the context/Ponytail system spec and focused context/Ponytail unit
-specs passing through the self-hosted Simple runtime.
+specs passing through the self-hosted Simple runtime. The mimic env and report
+also record per-log sizes, SHA-256 hashes, and a checked surface manifest for
+the wrapper, specs, guide, architecture, requirements, and produced logs so
+default evidence can be compared without re-reading raw logs.
 
 Default evidence proves the in-repo local file-pack, embedded-SQL context query,
 MCP exposure, and Ponytail audit/simplification surfaces.
