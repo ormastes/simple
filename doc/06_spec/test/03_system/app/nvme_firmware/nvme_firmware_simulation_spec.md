@@ -27,7 +27,7 @@ nvme_firmware_simulation_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 9 | 9 | 0 | 0 |
+| 8 | 8 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -61,42 +61,12 @@ crash recovery, garbage collection), a Flash Interface Layer (ONFI NAND device +
 ECC + bad-block), and an NVMe controller front end (admin queue + multiple IO
 queues). The modules live under examples/ and are exercised here through the real
 CLI (`bin/simple run`) as subprocesses, asserting the operator-visible PASS
-evidence. Run: `bin/simple test test/03_system/app/nvme_firmware/nvme_firmware_simulation_spec.spl`.
+evidence. (The aggregated unit self-test suite is gated separately by `bin/simple run
+.../fw/test_fw.spl` per fw/CONVENTIONS.md; this system spec covers the end-to-end,
+controller, production-hardening, and formal scenarios.)
+Run: `bin/simple test test/03_system/app/nvme_firmware/nvme_firmware_simulation_spec.spl`.
 
 ## Scenarios
-
-### NVMe firmware: layered self-tests (HIL / FTL / FIL + controller)
-
-#### passes the full firmware self-test suite
-
-- Run the aggregated firmware self-test suite
-   - Expected: code equals `0`
-- Confirm each layer's section ran
-- Confirm the suite reports overall PASS
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 12 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-step("Run the aggregated firmware self-test suite")
-val (out, err, code) = _run(FW + "/test_fw.spl")
-expect(code).to_equal(0)
-
-step("Confirm each layer's section ran")
-expect(out).to_contain("FIL (flash interface)")
-expect(out).to_contain("FTL (translation)")
-expect(out).to_contain("HIL (host interface)")
-expect(out).to_contain("NVMe controller (admin + multi IO queue)")
-
-step("Confirm the suite reports overall PASS")
-expect(out).to_contain("ALL FIRMWARE SELF-TESTS PASS")
-```
-
-</details>
 
 ### NVMe firmware: end-to-end SSD lifecycle
 
@@ -338,8 +308,8 @@ expect(out).to_contain("LEAN_OK")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 9 |
-| Active scenarios | 9 |
+| Total scenarios | 8 |
+| Active scenarios | 8 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
