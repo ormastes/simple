@@ -106,6 +106,10 @@ The evidence env records `llm_runtime_vllm_host_probe_required_gates`,
 `llm_runtime_vllm_host_probe_preflight_status`,
 `llm_runtime_vllm_host_probe_endpoint_status`, and
 `llm_runtime_vllm_host_probe_models_status`, and
+`llm_runtime_vllm_host_probe_models_reason`,
+`llm_runtime_vllm_host_probe_log_size`,
+`llm_runtime_vllm_host_probe_log_sha256`,
+`llm_runtime_vllm_host_probe_serve_readiness_run_event_count`,
 `llm_runtime_vllm_host_probe_pass_integrity_status`,
 `llm_runtime_vllm_host_probe_pass_integrity_reason`, and
 `llm_runtime_vllm_host_probe_next_action` so strict aggregate runs can report
@@ -113,7 +117,9 @@ the first local serving blocker, full blocker list, pass-log integrity, and
 next operator step. The wrapper accepts a PASS only when the runtime event is
 `llm_runtime_vllm_serve_readiness_run`, CLI exit is zero, blocked gates are
 `none`, local vLLM/GPU are available, readiness is `ready`, endpoint is
-`configured`, and model listing is `ready`. The
+`configured`, model listing is `ready`, models reason is
+`models_endpoint_ready`, and the hashed readiness log contains exactly one
+serve-readiness run event. The
 models-list classifier treats `models_status=ready` as satisfying
 `models_listed`, matching the strict pass condition. Keep
 `FR-LLM-RUNTIME-0001` open until a

@@ -733,7 +733,8 @@ vLLM live-serving proof into required and blocked gates. The env records the
 required gate list, compact blocked gates, selected base model, endpoint,
 `vllm` command path, Python `vllm` module status, local vLLM/GPU command
 statuses, readiness status, endpoint status, models-list status, and
-models-list reason.
+models-list reason, plus readiness-log size, SHA-256, and serve-readiness run
+event count.
 On this host the lane remains `unavailable` with
 `blocked_gates=local_vllm|serve_preflight|endpoint_reachable|models_listed`;
 strict-host aggregate runs should fail that gate until local vLLM is installed,
@@ -745,6 +746,10 @@ The host probe now records
 that first normalized blocker. Its models-list gate treats
 `models_status=ready` as satisfying `models_listed`, matching the strict pass
 condition and avoiding a false blocker on configured hosts.
+The host probe PASS integrity also requires `models_reason=models_endpoint_ready`
+and exactly one `llm_runtime_vllm_serve_readiness_run` event in the non-empty
+hashed readiness log, so a status-only or duplicated log cannot satisfy strict
+host completion.
 
 The runtime control CLI now exposes a `readiness` action that routes through
 `llm_runtime_vllm_serve_readiness_orchestrate_with_resources(...)` instead of

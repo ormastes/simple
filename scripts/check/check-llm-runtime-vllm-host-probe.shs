@@ -82,6 +82,21 @@ endpoint_status="$(field_for endpoint)"
 models_status="$(field_for models_status)"
 models_reason="$(field_for models_reason)"
 
+log_size="0"
+log_sha256="missing"
+serve_readiness_run_event_count="0"
+if [ -s "$OUT_LOG" ]; then
+    log_size="$(wc -c <"$OUT_LOG" | tr -d ' ')"
+    if command -v sha256sum >/dev/null 2>&1; then
+        log_sha256="$(sha256sum "$OUT_LOG" | awk '{print $1}')"
+    elif command -v shasum >/dev/null 2>&1; then
+        log_sha256="$(shasum -a 256 "$OUT_LOG" | awk '{print $1}')"
+    else
+        log_sha256="unavailable"
+    fi
+    serve_readiness_run_event_count="$(grep -o 'llm_runtime_vllm_serve_readiness_run' "$OUT_LOG" | wc -l | tr -d ' ')"
+fi
+
 if [ -z "$event" ]; then
     event="missing"
 fi
@@ -229,6 +244,15 @@ if [ "$wrapper_status" = "pass" ]; then
     elif [ "$models_status" != "ready" ]; then
         pass_integrity_status="fail"
         pass_integrity_reason="models_not_ready"
+    elif [ "$models_reason" != "models_endpoint_ready" ]; then
+        pass_integrity_status="fail"
+        pass_integrity_reason="models_reason_not_ready"
+    elif [ "$log_size" = "0" ]; then
+        pass_integrity_status="fail"
+        pass_integrity_reason="readiness_log_empty"
+    elif [ "$serve_readiness_run_event_count" != "1" ]; then
+        pass_integrity_status="fail"
+        pass_integrity_reason="readiness_run_event_count_not_one"
     fi
     if [ "$pass_integrity_status" != "pass" ]; then
         wrapper_status="fail"
@@ -250,6 +274,9 @@ fi
     printf '%s\n' "llm_runtime_vllm_host_probe_base_model=$BASE_MODEL"
     printf '%s\n' "llm_runtime_vllm_host_probe_endpoint=$ENDPOINT"
     printf '%s\n' "llm_runtime_vllm_host_probe_cli_exit=$exit_code"
+    printf '%s\n' "llm_runtime_vllm_host_probe_log_size=$log_size"
+    printf '%s\n' "llm_runtime_vllm_host_probe_log_sha256=$log_sha256"
+    printf '%s\n' "llm_runtime_vllm_host_probe_serve_readiness_run_event_count=$serve_readiness_run_event_count"
     printf '%s\n' "llm_runtime_vllm_host_probe_event=$event"
     printf '%s\n' "llm_runtime_vllm_host_probe_local_vllm_status=$local_vllm_status"
     printf '%s\n' "llm_runtime_vllm_host_probe_vllm_command_path=$vllm_command_path"
@@ -284,6 +311,9 @@ fi
     printf '%s\n' "- endpoint_status: \`$endpoint_status\`"
     printf '%s\n' "- models_status: \`$models_status\`"
     printf '%s\n' "- models_reason: \`$models_reason\`"
+    printf '%s\n' "- log_size: \`$log_size\`"
+    printf '%s\n' "- log_sha256: \`$log_sha256\`"
+    printf '%s\n' "- serve_readiness_run_event_count: \`$serve_readiness_run_event_count\`"
     printf '%s\n' "- pass_integrity_status: \`$pass_integrity_status\`"
     printf '%s\n' "- pass_integrity_reason: \`$pass_integrity_reason\`"
     printf '%s\n' "- next_action: \`$next_action\`"
@@ -291,7 +321,7 @@ fi
     printf '%s\n' "- env: \`$OUT_ENV\`"
     printf '%s\n' "- log: \`$OUT_LOG\`"
     printf '\n'
-    printf 'This wrapper records repeatable local vLLM host preflight evidence. It only proves live serving readiness when all required gates pass. A `status=pass` wrapper result must also have no blocked gates, a serve-readiness event, zero CLI exit, local vLLM and GPU availability, ready preflight/readiness, a configured endpoint, and ready model listing evidence. `unavailable` records the compact blocked-gates list for missing local vLLM/GPU resources, skipped serve preflight, endpoint reachability, or model-listing evidence; run with `--strict` when unavailable hosts must fail the lane.\n'
+    printf 'This wrapper records repeatable local vLLM host preflight evidence. It only proves live serving readiness when all required gates pass. A `status=pass` wrapper result must also have no blocked gates, exactly one serve-readiness run event in a non-empty hashed log, zero CLI exit, local vLLM and GPU availability, ready preflight/readiness, a configured endpoint, `models_status=ready`, and `models_reason=models_endpoint_ready`. `unavailable` records the compact blocked-gates list for missing local vLLM/GPU resources, skipped serve preflight, endpoint reachability, or model-listing evidence; run with `--strict` when unavailable hosts must fail the lane.\n'
 } >"$REPORT_PATH"
 
 case "$wrapper_status" in
