@@ -29,11 +29,10 @@
 - GUI/web/2D Vulkan setup source: existing-evidence
 - GUI/web/2D Vulkan setup mode: --check
 - GUI/web/2D Vulkan direct-run source: auto-existing (--run; evidence build/gui-web-2d-vulkan-env-run-auto/evidence.env)
-- GUI/web/2D browser Vulkan backing: fail (gpu-feature-status; browser-backing-pass-missing-proof:electron_status,electron_reason,electron_gpu_compositing,electron_hardware,chrome_status,chrome_reason,chrome_gpu_compositing)
-- GUI/web/2D Electron browser backing: fail (electron-vulkan-proof-missing:electron_gpu_compositing,electron_hardware; vulkan enabled_on; gpu ; browser_cdp ; display ; gl (gl=none,angle=none); skia ; renderer ; source build/gui-web-2d-vulkan-env-browser-backing-electron42/electron_argb.json; argb_source )
-- GUI/web/2D Chrome browser backing: fail (chrome-vulkan-proof-missing:chrome_gpu_compositing; display ANGLE_VULKAN; gpu ; gl (gl=egl-angle,angle=vulkan); skia ; renderer ; source build/gui-web-2d-vulkan-env-browser-backing-electron42/chrome_argb_proof.json)
-- GUI/web/2D browser backing blocker: doc/08_tracking/bug/gui_web_2d_vulkan_browser_backing_2026-06-23.md
-- GUI/web/2D Vulkan RenderDoc blockers: blocked (4; electron-angle-vulkan-not-rejected-by-log-no-angle-vulkan-unavailable-log;electron-renderdoc-gate-fail-chromium-gpu-process-crashed-under-renderdoc;chrome-angle-vulkan-not-rejected-by-log-no-angle-vulkan-unavailable-log;chrome-renderdoc-gate-fail-missing-rdc)
+- GUI/web/2D browser Vulkan backing: pass (gpu-feature-status; pass)
+- GUI/web/2D Electron browser backing: pass (electron-vulkan-backed; vulkan enabled_on; gpu enabled; browser_cdp pass; display ANGLE_VULKAN; gl (gl=egl-angle,angle=vulkan); skia GaneshVulkan; renderer ANGLE (Intel, Vulkan 1.4.318 (Intel(R) Graphics (RPL-P) (0x0000A7A8)), Intel open-source Mesa driver-25.2.8); source build/gui-web-2d-vulkan-env-browser-backing/electron_argb_proof.json; argb_source build/gui-web-2d-vulkan-env-browser-backing/electron_argb.json)
+- GUI/web/2D Chrome browser backing: pass (chrome-vulkan-backed; display ANGLE_VULKAN; gpu enabled; gl (gl=egl-angle,angle=vulkan); skia GaneshVulkan; renderer ANGLE (Intel, Vulkan 1.4.318 (Intel(R) Graphics (RPL-P) (0x0000A7A8)), Intel open-source Mesa driver-25.2.8); source build/gui-web-2d-vulkan-env-browser-backing/chrome_argb_proof.json)
+- GUI/web/2D Vulkan RenderDoc blockers: blocked (2; electron-renderdoc-gate-fail-chromium-gpu-process-crashed-under-renderdoc;chrome-renderdoc-gate-fail-missing-rdc)
 - GUI/web/2D RenderDoc blocker: doc/08_tracking/bug/gui_web_2d_vulkan_renderdoc_blockers_2026-06-23.md
 - GUI/web/2D Vulkan loader: present (Intel(R) Graphics (RPL-P) / Intel open-source Mesa driver)
 - GUI/web/2D Vulkan RenderDoc: ready (ready)
@@ -54,12 +53,11 @@
 - Production surface host:
 - Production Tauri surface capture: missing (missing-tauri-capture-evidence)
 - Production Chrome surface capture: missing (missing-chrome-capture-evidence)
-- blocked completion gates: 11
+- blocked completion gates: 10
 - blocked gate list:
   - original Chrome-on-Vulkan RenderDoc .rdc with RDOC magic
   - Electron Chromium-on-Vulkan RenderDoc .rdc with nonblank ARGB render proof
   - Electron Chromium-on-Vulkan GPU process exits under RenderDoc before .rdc capture
-  - Electron and Chrome Vulkan-backed browser RenderDoc proof
   - native render-log comparison for Linux Vulkan, macOS Metal, and Windows D3D12
   - production GUI/web font offload readback evidence
   - production GUI/web raw Metal readback evidence
@@ -296,12 +294,12 @@
 - html_css_readiness_answer=implemented-html-css-ready-full-css-incomplete
 - native_render_log_platform_matrix_status=fail
 - native_render_log_platform_matrix_reason=missing-or-failing-native-render-log-platforms
-- native_render_log_platform_matrix_source_revision=@  4706e207a4e1 │ ~
+- native_render_log_platform_matrix_source_revision=@  f7ff7c55c1e7 │ ~
 - native_render_log_platform_matrix_runtime_build=
 - native_render_log_platform_matrix_browser_webview_electron_revision=
 - native_render_log_platform_matrix_graphics_sdk_driver=
 - native_render_log_platform_matrix_runbook_version=
-- gui_web_2d_evidence_source_revision=@  4706e207a4e1 │ ~
+- gui_web_2d_evidence_source_revision=@  f7ff7c55c1e7 │ ~
 - gui_web_2d_evidence_runtime_build=
 - gui_web_2d_evidence_browser_webview_electron_revision=
 - gui_web_2d_evidence_graphics_sdk_driver=
@@ -427,44 +425,44 @@
 - gui_web_2d_vulkan_pixel_comparison_reason=pass
 - gui_web_2d_vulkan_pixel_comparison_mode=pairwise-argb-diff
 - gui_web_2d_vulkan_pixel_comparison_blocker_doc=
-- gui_web_2d_vulkan_browser_backing_status=fail
-- gui_web_2d_vulkan_browser_backing_reason=browser-backing-pass-missing-proof:electron_status,electron_reason,electron_gpu_compositing,electron_hardware,chrome_status,chrome_reason,chrome_gpu_compositing
+- gui_web_2d_vulkan_browser_backing_status=pass
+- gui_web_2d_vulkan_browser_backing_reason=pass
 - gui_web_2d_vulkan_browser_backing_mode=gpu-feature-status
-- gui_web_2d_vulkan_browser_backing_blocker_doc=doc/08_tracking/bug/gui_web_2d_vulkan_browser_backing_2026-06-23.md
-- gui_web_2d_vulkan_electron_browser_backing_status=fail
-- gui_web_2d_vulkan_electron_browser_backing_reason=electron-vulkan-proof-missing:electron_gpu_compositing,electron_hardware
+- gui_web_2d_vulkan_browser_backing_blocker_doc=
+- gui_web_2d_vulkan_electron_browser_backing_status=pass
+- gui_web_2d_vulkan_electron_browser_backing_reason=electron-vulkan-backed
 - gui_web_2d_vulkan_electron_browser_backing_vulkan=enabled_on
-- gui_web_2d_vulkan_electron_browser_backing_gpu_compositing=
-- gui_web_2d_vulkan_electron_browser_backing_display_type=
-- gui_web_2d_vulkan_electron_browser_backing_hardware_supports_vulkan=false
-- gui_web_2d_vulkan_electron_browser_backing_gl_implementation_parts=(gl=none,angle=none)
-- gui_web_2d_vulkan_electron_browser_backing_skia_backend_type=
-- gui_web_2d_vulkan_electron_browser_backing_gl_renderer=
-- gui_web_2d_vulkan_electron_browser_backing_source=build/gui-web-2d-vulkan-env-browser-backing-electron42/electron_argb.json
+- gui_web_2d_vulkan_electron_browser_backing_gpu_compositing=enabled
+- gui_web_2d_vulkan_electron_browser_backing_display_type=ANGLE_VULKAN
+- gui_web_2d_vulkan_electron_browser_backing_hardware_supports_vulkan=true
+- gui_web_2d_vulkan_electron_browser_backing_gl_implementation_parts=(gl=egl-angle,angle=vulkan)
+- gui_web_2d_vulkan_electron_browser_backing_skia_backend_type=GaneshVulkan
+- gui_web_2d_vulkan_electron_browser_backing_gl_renderer=ANGLE (Intel, Vulkan 1.4.318 (Intel(R) Graphics (RPL-P) (0x0000A7A8)), Intel open-source Mesa driver-25.2.8)
+- gui_web_2d_vulkan_electron_browser_backing_source=build/gui-web-2d-vulkan-env-browser-backing/electron_argb_proof.json
 - gui_web_2d_vulkan_electron_browser_backing_source_file_status=pass
-- gui_web_2d_vulkan_electron_browser_backing_argb_source=
-- gui_web_2d_vulkan_electron_browser_backing_argb_source_file_status=unavailable
-- gui_web_2d_vulkan_electron_browser_backing_browser_target_gpu_info_status=
-- gui_web_2d_vulkan_electron_browser_backing_browser_target_gpu_info_reason=
-- gui_web_2d_vulkan_chrome_browser_backing_status=fail
-- gui_web_2d_vulkan_chrome_browser_backing_reason=chrome-vulkan-proof-missing:chrome_gpu_compositing
+- gui_web_2d_vulkan_electron_browser_backing_argb_source=build/gui-web-2d-vulkan-env-browser-backing/electron_argb.json
+- gui_web_2d_vulkan_electron_browser_backing_argb_source_file_status=pass
+- gui_web_2d_vulkan_electron_browser_backing_browser_target_gpu_info_status=pass
+- gui_web_2d_vulkan_electron_browser_backing_browser_target_gpu_info_reason=pass
+- gui_web_2d_vulkan_chrome_browser_backing_status=pass
+- gui_web_2d_vulkan_chrome_browser_backing_reason=chrome-vulkan-backed
 - gui_web_2d_vulkan_chrome_browser_backing_display_type=ANGLE_VULKAN
-- gui_web_2d_vulkan_chrome_browser_backing_gpu_compositing=
+- gui_web_2d_vulkan_chrome_browser_backing_gpu_compositing=enabled
 - gui_web_2d_vulkan_chrome_browser_backing_gl_implementation_parts=(gl=egl-angle,angle=vulkan)
-- gui_web_2d_vulkan_chrome_browser_backing_skia_backend_type=
-- gui_web_2d_vulkan_chrome_browser_backing_gl_renderer=
+- gui_web_2d_vulkan_chrome_browser_backing_skia_backend_type=GaneshVulkan
+- gui_web_2d_vulkan_chrome_browser_backing_gl_renderer=ANGLE (Intel, Vulkan 1.4.318 (Intel(R) Graphics (RPL-P) (0x0000A7A8)), Intel open-source Mesa driver-25.2.8)
 - gui_web_2d_vulkan_chrome_browser_backing_hardware_supports_vulkan=true
-- gui_web_2d_vulkan_chrome_browser_backing_source=build/gui-web-2d-vulkan-env-browser-backing-electron42/chrome_argb_proof.json
+- gui_web_2d_vulkan_chrome_browser_backing_source=build/gui-web-2d-vulkan-env-browser-backing/chrome_argb_proof.json
 - gui_web_2d_vulkan_chrome_browser_backing_source_file_status=pass
 - gui_web_2d_vulkan_renderdoc_blocker_status=blocked
-- gui_web_2d_vulkan_renderdoc_blocker_reason=electron-angle-vulkan-not-rejected-by-log-no-angle-vulkan-unavailable-log;electron-renderdoc-gate-fail-chromium-gpu-process-crashed-under-renderdoc;chrome-angle-vulkan-not-rejected-by-log-no-angle-vulkan-unavailable-log;chrome-renderdoc-gate-fail-missing-rdc
-- gui_web_2d_vulkan_renderdoc_blocker_gate_count=4
-- gui_web_2d_vulkan_renderdoc_blocker_gates=electron-angle-vulkan-not-rejected-by-log-no-angle-vulkan-unavailable-log|electron-renderdoc-gate-fail-chromium-gpu-process-crashed-under-renderdoc|chrome-angle-vulkan-not-rejected-by-log-no-angle-vulkan-unavailable-log|chrome-renderdoc-gate-fail-missing-rdc
+- gui_web_2d_vulkan_renderdoc_blocker_reason=electron-renderdoc-gate-fail-chromium-gpu-process-crashed-under-renderdoc;chrome-renderdoc-gate-fail-missing-rdc
+- gui_web_2d_vulkan_renderdoc_blocker_gate_count=2
+- gui_web_2d_vulkan_renderdoc_blocker_gates=electron-renderdoc-gate-fail-chromium-gpu-process-crashed-under-renderdoc|chrome-renderdoc-gate-fail-missing-rdc
 - gui_web_2d_vulkan_renderdoc_blocker_doc=doc/08_tracking/bug/gui_web_2d_vulkan_renderdoc_blockers_2026-06-23.md
 - gui_web_2d_vulkan_direct_run_evidence_env=build/gui-web-2d-vulkan-env-run-auto/evidence.env
 - gui_web_2d_vulkan_direct_run_source=auto-existing
 - gui_web_2d_vulkan_direct_run_mode=--run
-- gui_web_2d_vulkan_browser_backing_evidence_env=build/gui-web-2d-vulkan-env-browser-backing-electron42/evidence.env
+- gui_web_2d_vulkan_browser_backing_evidence_env=build/gui-web-2d-vulkan-env-browser-backing/evidence.env
 - gui_web_2d_vulkan_browser_backing_source=auto-existing
 - gui_web_2d_vulkan_browser_backing_direct_mode=--browser-backing
 - gui_web_2d_vulkan_uname_s=Linux
@@ -1051,5 +1049,5 @@
 - html_renderdoc_capture_command=RDOC_EXTERNAL_RUN_CAPTURE=1 sh scripts/check/check-renderdoc-external-host-capture.shs
 - electron_renderdoc_capture_command=RDOC_OUTPUT_DIR=build/renderdoc/canonical-probe scripts/tool/renderdoc-evidence.shs capture-electron-html
 - blocked_completion_gate=original Chrome-on-Vulkan RenderDoc .rdc with RDOC magic
-- blocked_completion_gate_count=11
-- blocked_completion_gates=original Chrome-on-Vulkan RenderDoc .rdc with RDOC magic|Electron Chromium-on-Vulkan RenderDoc .rdc with nonblank ARGB render proof|Electron Chromium-on-Vulkan GPU process exits under RenderDoc before .rdc capture|Electron and Chrome Vulkan-backed browser RenderDoc proof|native render-log comparison for Linux Vulkan, macOS Metal, and Windows D3D12|production GUI/web font offload readback evidence|production GUI/web raw Metal readback evidence|production GUI/web parity evidence with live Tauri and Chrome captures|retained 4K GUI/web/2D 200fps performance evidence with FPS and checksum|retained 8K GUI/web/2D performance evidence with FPS, checksum, and RSS|full CSS specification rendering coverage beyond implemented Simple Web subset
+- blocked_completion_gate_count=10
+- blocked_completion_gates=original Chrome-on-Vulkan RenderDoc .rdc with RDOC magic|Electron Chromium-on-Vulkan RenderDoc .rdc with nonblank ARGB render proof|Electron Chromium-on-Vulkan GPU process exits under RenderDoc before .rdc capture|native render-log comparison for Linux Vulkan, macOS Metal, and Windows D3D12|production GUI/web font offload readback evidence|production GUI/web raw Metal readback evidence|production GUI/web parity evidence with live Tauri and Chrome captures|retained 4K GUI/web/2D 200fps performance evidence with FPS and checksum|retained 8K GUI/web/2D performance evidence with FPS, checksum, and RSS|full CSS specification rendering coverage beyond implemented Simple Web subset
