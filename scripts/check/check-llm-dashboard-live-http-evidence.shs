@@ -9,9 +9,56 @@ REPORT_PATH="${REPORT_PATH:-doc/09_report/2026/06/llm_dashboard_live_http_$(date
 OUT_ENV="$BUILD_DIR/evidence.env"
 BASE_URL="${LLM_DASHBOARD_LIVE_BASE_URL:-}"
 TIMEOUT_SECONDS="${LLM_DASHBOARD_LIVE_HTTP_TIMEOUT_SECONDS:-10}"
+SURFACE_MANIFEST="$BUILD_DIR/dashboard_live_http_surface_manifest.tsv"
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
-rm -f "$OUT_ENV" "$REPORT_PATH"
+rm -f "$OUT_ENV" "$REPORT_PATH" "$SURFACE_MANIFEST"
+
+artifact_size() {
+    path="$1"
+    if [ -n "$path" ] && [ -f "$path" ]; then
+        wc -c <"$path" | tr -d ' '
+    else
+        printf '%s\n' "missing"
+    fi
+}
+
+artifact_sha256() {
+    path="$1"
+    if [ -n "$path" ] && [ -f "$path" ]; then
+        if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$path" | awk '{print $1}'
+        elif command -v shasum >/dev/null 2>&1; then
+            shasum -a 256 "$path" | awk '{print $1}'
+        else
+            printf '%s\n' "unavailable"
+        fi
+    else
+        printf '%s\n' "missing"
+    fi
+}
+
+{
+    for path in \
+        scripts/check/check-llm-dashboard-live-http-evidence.shs \
+        scripts/check/check-llm-dashboard-live-evidence.shs \
+        src/app/web_dashboard/server.spl \
+        test/03_system/feature/app/web_dashboard/vllm_control_route_spec.spl \
+        test/03_system/feature/app/web_dashboard/llm_agent_dashboard_spec.spl \
+        doc/07_guide/app/dashboard.md \
+        doc/07_guide/app/llm/llm_runtime_vllm_torch_interface.md
+    do
+        printf '%s\t%s\t%s\n' "$path" "$(artifact_size "$path")" "$(artifact_sha256 "$path")"
+    done
+} >"$SURFACE_MANIFEST"
+surface_manifest_count="$(wc -l <"$SURFACE_MANIFEST" | tr -d ' ')"
+surface_manifest_size="$(artifact_size "$SURFACE_MANIFEST")"
+surface_manifest_sha256="$(artifact_sha256 "$SURFACE_MANIFEST")"
+
+export LLM_DASHBOARD_LIVE_HTTP_SURFACE_MANIFEST="$SURFACE_MANIFEST"
+export LLM_DASHBOARD_LIVE_HTTP_SURFACE_MANIFEST_COUNT="$surface_manifest_count"
+export LLM_DASHBOARD_LIVE_HTTP_SURFACE_MANIFEST_SIZE="$surface_manifest_size"
+export LLM_DASHBOARD_LIVE_HTTP_SURFACE_MANIFEST_SHA256="$surface_manifest_sha256"
 
 if [ -z "$BASE_URL" ]; then
     {
@@ -37,6 +84,10 @@ if [ -z "$BASE_URL" ]; then
         printf '%s\n' "llm_dashboard_live_http_unauth_api_code=not_collected"
         printf '%s\n' "llm_dashboard_live_http_unauth_api_size=not_collected"
         printf '%s\n' "llm_dashboard_live_http_unauth_api_sha256=not_collected"
+        printf '%s\n' "llm_dashboard_live_http_surface_manifest=$SURFACE_MANIFEST"
+        printf '%s\n' "llm_dashboard_live_http_surface_manifest_count=$surface_manifest_count"
+        printf '%s\n' "llm_dashboard_live_http_surface_manifest_size=$surface_manifest_size"
+        printf '%s\n' "llm_dashboard_live_http_surface_manifest_sha256=$surface_manifest_sha256"
         printf '%s\n' "llm_dashboard_live_http_pass_integrity_status=not_applicable"
         printf '%s\n' "llm_dashboard_live_http_pass_integrity_reason=missing_base_url"
         printf '%s\n' "llm_dashboard_live_http_next_action=set LLM_DASHBOARD_LIVE_BASE_URL and authentication env, then rerun this wrapper"
@@ -49,6 +100,10 @@ if [ -z "$BASE_URL" ]; then
         printf '%s\n' "- blocked_gates: \`base_url\`"
         printf '%s\n' "- primary_blocked_gate: \`base_url\`"
         printf '%s\n' "- auth_source: \`not_collected\`"
+        printf '%s\n' "- surface_manifest: \`$SURFACE_MANIFEST\`"
+        printf '%s\n' "- surface_manifest_count: \`$surface_manifest_count\`"
+        printf '%s\n' "- surface_manifest_size: \`$surface_manifest_size\`"
+        printf '%s\n' "- surface_manifest_sha256: \`$surface_manifest_sha256\`"
         printf '%s\n' "- pass_integrity_status: \`not_applicable\`"
         printf '%s\n' "- pass_integrity_reason: \`missing_base_url\`"
         printf '%s\n' "- env: \`$OUT_ENV\`"
@@ -254,6 +309,10 @@ with open(out_env, "w", encoding="utf-8") as f:
     f.write(f"llm_dashboard_live_http_unauth_api_code={details.get('unauth_api_code', 'not_collected')}\n")
     f.write(f"llm_dashboard_live_http_unauth_api_size={details.get('unauth_api_size', 'not_collected')}\n")
     f.write(f"llm_dashboard_live_http_unauth_api_sha256={details.get('unauth_api_sha256', 'not_collected')}\n")
+    f.write(f"llm_dashboard_live_http_surface_manifest={os.environ.get('LLM_DASHBOARD_LIVE_HTTP_SURFACE_MANIFEST', 'not_collected')}\n")
+    f.write(f"llm_dashboard_live_http_surface_manifest_count={os.environ.get('LLM_DASHBOARD_LIVE_HTTP_SURFACE_MANIFEST_COUNT', 'not_collected')}\n")
+    f.write(f"llm_dashboard_live_http_surface_manifest_size={os.environ.get('LLM_DASHBOARD_LIVE_HTTP_SURFACE_MANIFEST_SIZE', 'not_collected')}\n")
+    f.write(f"llm_dashboard_live_http_surface_manifest_sha256={os.environ.get('LLM_DASHBOARD_LIVE_HTTP_SURFACE_MANIFEST_SHA256', 'not_collected')}\n")
     f.write(f"llm_dashboard_live_http_pass_integrity_status={pass_integrity_status}\n")
     f.write(f"llm_dashboard_live_http_pass_integrity_reason={pass_integrity_reason}\n")
     f.write(f"llm_dashboard_live_http_next_action={next_action}\n")
@@ -282,6 +341,10 @@ with open(report_path, "w", encoding="utf-8") as f:
     f.write(f"- unauth_api_code: `{details.get('unauth_api_code', 'not_collected')}`\n")
     f.write(f"- unauth_api_size: `{details.get('unauth_api_size', 'not_collected')}`\n")
     f.write(f"- unauth_api_sha256: `{details.get('unauth_api_sha256', 'not_collected')}`\n")
+    f.write(f"- surface_manifest: `{os.environ.get('LLM_DASHBOARD_LIVE_HTTP_SURFACE_MANIFEST', 'not_collected')}`\n")
+    f.write(f"- surface_manifest_count: `{os.environ.get('LLM_DASHBOARD_LIVE_HTTP_SURFACE_MANIFEST_COUNT', 'not_collected')}`\n")
+    f.write(f"- surface_manifest_size: `{os.environ.get('LLM_DASHBOARD_LIVE_HTTP_SURFACE_MANIFEST_SIZE', 'not_collected')}`\n")
+    f.write(f"- surface_manifest_sha256: `{os.environ.get('LLM_DASHBOARD_LIVE_HTTP_SURFACE_MANIFEST_SHA256', 'not_collected')}`\n")
     f.write(f"- pass_integrity_status: `{pass_integrity_status}`\n")
     f.write(f"- pass_integrity_reason: `{pass_integrity_reason}`\n")
     f.write(f"- next_action: `{next_action}`\n")

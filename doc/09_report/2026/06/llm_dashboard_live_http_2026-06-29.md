@@ -6,6 +6,10 @@
 - blocked_gates: `base_url`
 - primary_blocked_gate: `base_url`
 - auth_source: `not_collected`
+- surface_manifest: `build/llm_dashboard_live_http/dashboard_live_http_surface_manifest.tsv`
+- surface_manifest_count: `7`
+- surface_manifest_size: `863`
+- surface_manifest_sha256: `33df788fc79b76ab8bdc960d567708d20c8610826b5ff024b80794e197b457d1`
 - pass_integrity_status: `not_applicable`
 - pass_integrity_reason: `missing_base_url`
 - env: `build/llm_dashboard_live_http/evidence.env`

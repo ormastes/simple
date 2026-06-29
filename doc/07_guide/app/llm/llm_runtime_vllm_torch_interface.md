@@ -394,7 +394,12 @@ canonical `evidence.env` before the producer runs so stale results cannot mask a
 timeout or early producer failure. When no dashboard URL is configured, strict
 dashboard detail reports the live HTTP `base_url` blocker from
 `check-llm-dashboard-live-http-evidence.shs` instead of a generic missing-env
-failure.
+failure. The live HTTP producer always writes
+`llm_dashboard_live_http_surface_manifest_count`,
+`llm_dashboard_live_http_surface_manifest_size`, and
+`llm_dashboard_live_http_surface_manifest_sha256`, even for
+`missing_base_url`, so strict dashboard failures are tied to the exact wrapper,
+dashboard route source, route specs, and operator docs used by the live proof.
 The aggregate expects all completion lanes to pass, fails for any WARN
 or missing strict evidence result, and writes `llm_goal_evidence_failed_gates`,
 `llm_goal_evidence_failed_gate_hints`, `llm_goal_evidence_warn_gates`, and

@@ -20,7 +20,7 @@ Default aggregate:
   evidence now include checked surface/input manifests with size/SHA-256
   metadata and focused log hashes. Public absence rendering also records
   `public_absence_surface_manifest_count=93` and
-  `public_absence_surface_manifest_sha256=564c57ce69260d0dbd96a5f6995f123de0a3b14024831464ec60cfbd2551282f`
+  `public_absence_surface_manifest_sha256=a893171fbbc6c35f8d4d9529f7ca7e3c7580d90885effad17f2001fefec81f42`
   with `failure_count=0`, so public manuals and generated evidence continue to
   hide internal absence markers from operator-facing text.
 
@@ -36,7 +36,9 @@ Strict-host aggregate:
 - primary blocker: `live_http_authenticated_request`
 - concrete reason: `missing_base_url`
 - local proof already hardened: dashboard route/source/spec evidence has a
-  manifest and nested dashboard env/log hashes
+  manifest and nested dashboard env/log hashes; the live HTTP producer also
+  records a surface manifest for its wrapper/source/spec/doc proof path even
+  when `LLM_DASHBOARD_LIVE_BASE_URL` is missing
 - required evidence: `llm_dashboard_live_http_status=pass` with explicit
   dashboard auth env and non-secret `llm_dashboard_live_http_auth_source`
 - next action: set `LLM_DASHBOARD_LIVE_BASE_URL` plus dashboard authentication
