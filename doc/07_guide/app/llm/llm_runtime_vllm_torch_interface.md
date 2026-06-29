@@ -117,6 +117,34 @@ metric, dataset checksum, and sample fields when those artifacts exist; retry7
 acceptance remains the strict evidence gate for licensing, safety, deployment,
 decision, and app handoff.
 
+Strict-host unblock checklist:
+
+1. Dashboard live HTTP: export `LLM_DASHBOARD_LIVE_BASE_URL` for a running
+   dashboard and exactly one non-secret auth source accepted by
+   `scripts/check/check-llm-dashboard-live-http-evidence.shs`, then run that
+   wrapper until `llm_dashboard_live_http_status=pass`.
+2. vLLM host: install an importable Python `vllm` module and local `vllm`
+   command, set `LLM_VLLM_BASE_MODEL` and `LLM_VLLM_ENDPOINT` when defaults are
+   not correct, start the endpoint, and run
+   `scripts/check/check-llm-runtime-vllm-host-probe.shs --strict` until the
+   local command, Python module, endpoint, and `/v1/models` gates pass.
+3. svLLM native: produce a non-default native capability artifact with matching
+   `SVLLM_NATIVE_CAPABILITY_SOURCE` and
+   `SVLLM_NATIVE_CAPABILITY_EVIDENCE_PATH`, then run
+   `scripts/check/check-llm-runtime-svllm-native-streaming-evidence.shs` and
+   `SVLLM_NATIVE_EVIDENCE_ENV=build/llm_runtime_svllm_native_streaming/evidence.env sh scripts/check/check-llm-runtime-svllm-local-readiness.shs --strict-native`.
+4. Torch/libtorch: make `libspl_torch.so` visible through `SIMPLE_SFFI_PATH`
+   and point `SCILIB_TORCH_ROOT` or `LIBTORCH` at the CUDA libtorch install,
+   then run `scripts/check/check-llm-runtime-torch-cuda-optimizer-probe.shs --strict`
+   until the Simple optimizer probe records a CUDA parameter, gradient handle,
+   optimizer step, and decreased parameter sum.
+5. Fine-tune retry: complete the licensed cache review and retry6 training/eval
+   artifacts under `.spipe/llm-finetune-process/artifacts/`, including
+   `llm_backed_app_server_dry_run_retry6/model_manifest.json` and
+   `llm_backed_app_server_dry_run_retry6/eval_result.json`, then run
+   `scripts/check/check-llm-finetune-acceptance-evidence.shs` and
+   `FINETUNE_ACCEPTANCE_EVIDENCE_ENV=build/llm_finetune_acceptance/evidence.env sh scripts/check/check-llm-finetune-guard-evidence.shs --strict-ready`.
+
 Latest local host probe:
 `doc/09_report/2026/06/llm_runtime_vllm_host_probe_2026-06-29.md` records a
 repeatable `scripts/check/check-llm-runtime-vllm-host-probe.shs` readiness

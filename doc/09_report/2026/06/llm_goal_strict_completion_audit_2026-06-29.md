@@ -36,7 +36,7 @@ but local proof is no longer status-only for the completed repo-local lanes:
   nested dashboard evidence env/log hashes; live HTTP proof is still required.
 - vLLM host evidence records a checked runtime control/readiness source/spec
   manifest (`surface_manifest_count=13`,
-  `surface_manifest_sha256=b0d5fb05e47b447524403b952c6a50d5c914f62f1b2848634b48e2e464c9b513`)
+  `surface_manifest_sha256=08ff4da378f624b0d3d0209fd891d06c952fc2e810eb250baa004700f62d2cf9`)
   plus local `vllm`, Python module, GPU, and readiness-log hashes; a local
   `vllm` executable, importable Python `vllm` module, and live endpoint proof
   are still required.
@@ -45,7 +45,7 @@ but local proof is no longer status-only for the completed repo-local lanes:
   is still required.
 - Torch optimizer evidence records a checked live probe/source/spec/doc manifest
   (`surface_manifest_count=18`,
-  `surface_manifest_sha256=c27ff364da8a4f4f11a631c9d215bfec004fdd9b368309b35926b5ecefb38496`)
+  `surface_manifest_sha256=b4a7d3d8b1296cc4a191d5fefeea04bb32b2dfdfdf74b7d6d8d649095b9ad52a`)
   plus hashed Python Torch/CUDA visibility and system libtorch probe logs; Simple-visible
   libtorch and live CUDA optimizer execution proof are still required.
 - fine-tune guard evidence records a checked process/input/log manifest and
@@ -56,7 +56,7 @@ but local proof is no longer status-only for the completed repo-local lanes:
   required.
 - public absence rendering records a checked public wording manifest
   (`public_absence_surface_manifest_count=121`,
-  `public_absence_surface_manifest_sha256=cdc68e98dd7aff539e273675ea9d26806806b26a859ecd36a60d193ca5ed263a`)
+  `public_absence_surface_manifest_sha256=cd8e1dbf7ce385279bf75bd993d1666308d04bc36967f7d9be0c967fa0a6d83a`)
   with `failure_count=0`, proving operator-facing manuals and generated
   evidence do not expose internal absence markers.
 
