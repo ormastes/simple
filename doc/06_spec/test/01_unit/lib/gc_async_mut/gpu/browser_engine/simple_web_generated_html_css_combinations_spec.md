@@ -27,7 +27,7 @@ simple_web_generated_html_css_combinations_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 8 | 8 | 0 | 0 |
+| 9 | 9 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -308,12 +308,42 @@ expect(_pixel_at(pixels, 96, 28, 12)).to_equal(0xFFDBEAFEu32)
 
 </details>
 
+#### renders individual rotate property as a quarter-turn painted box
+
+- Render a block using the CSS individual rotate property
+- Assert rotate:90deg swaps the painted box dimensions
+   - Expected: pixels.len() equals `96 * 48`
+   - Expected: _count_color(pixels, 0xFFEF4444u32) equals `8 * 20`
+   - Expected: _pixel_at(pixels, 96, 5, 16) equals `0xFFEF4444u32`
+   - Expected: _pixel_at(pixels, 96, 12, 5) equals `0xFFDBEAFEu32`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Render a block using the CSS individual rotate property")
+val html = "<html><head><style>html,body{margin:0;padding:0;background-color:#ffffff}.stage{width:80px;height:40px;background-color:#dbeafe}.chip{width:20px;height:8px;background-color:#ef4444;rotate:90deg}</style></head><body><section class='stage'><div class='chip'></div></section></body></html>"
+val pixels = simple_web_render_html_to_pixels(html, 96, 48)
+
+step("Assert rotate:90deg swaps the painted box dimensions")
+expect(pixels.len()).to_equal(96 * 48)
+expect(_count_color(pixels, 0xFFEF4444u32)).to_equal(8 * 20)
+expect(_pixel_at(pixels, 96, 5, 16)).to_equal(0xFFEF4444u32)
+expect(_pixel_at(pixels, 96, 12, 5)).to_equal(0xFFDBEAFEu32)
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 8 |
-| Active scenarios | 8 |
+| Total scenarios | 9 |
+| Active scenarios | 9 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

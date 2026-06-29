@@ -80,13 +80,13 @@ coverage.
 
 - Record the functional SSpec owner for implemented Simple Web CSS properties
 - Keep the full implemented Simple Web CSS subset tied to renderer behavior
-   - Expected: implemented.split(" ").len() equals `236`
+   - Expected: implemented.split(" ").len() equals `237`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 134 lines folded for reproduction.
+Runnable source: 135 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -95,8 +95,8 @@ val owner = _implemented_css_owner()
 expect(owner).to_contain("simple_web_generated_html_css_combinations_spec.spl")
 
 step("Keep the full implemented Simple Web CSS subset tied to renderer behavior")
-val implemented = "align-content align-items align-self animation animation-delay animation-direction animation-duration animation-fill-mode animation-iteration-count animation-name animation-play-state animation-timing-function aspect-ratio background background-attachment background-clip background-color background-origin background-image background-position background-repeat background-size block-size border border-bottom border-bottom-color border-bottom-style border-bottom-width border-color border-left border-left-color border-left-style border-left-width border-right border-right-color border-right-style border-right-width border-style border-top border-top-color border-top-style border-width border-top-width border-radius border-bottom-left-radius border-bottom-right-radius border-top-left-radius border-top-right-radius border-start-start-radius border-start-end-radius border-end-start-radius border-end-end-radius border-block border-block-color border-block-end border-block-end-color border-block-end-style border-block-end-width border-block-start border-block-start-color border-block-start-style border-block-start-width border-block-style border-block-width border-inline border-inline-color border-inline-end border-inline-end-color border-inline-end-style border-inline-end-width border-inline-start border-inline-start-color border-inline-start-style border-inline-start-width border-inline-style border-inline-width bottom box-sizing box-shadow caret-color clear color color-scheme column-gap content content-visibility contain cursor direction display filter flex flex-basis flex-direction flex-flow flex-grow flex-shrink flex-wrap float font font-family font-feature-settings font-language-override font-variation-settings font-variant font-variant-alternates font-variant-caps font-variant-east-asian font-variant-emoji font-variant-ligatures font-variant-numeric font-variant-position font-kerning font-optical-sizing font-palette font-stretch font-width font-size font-size-adjust font-style font-synthesis font-synthesis-small-caps font-synthesis-position font-synthesis-style font-synthesis-weight font-weight gap height image-rendering inline-size inset inset-block inset-block-end inset-block-start inset-inline inset-inline-end inset-inline-start justify-content left letter-spacing line-height line-break hyphens list-style list-style-type margin margin-block margin-block-end margin-block-start margin-bottom margin-inline margin-inline-end margin-inline-start margin-left margin-right margin-top max-block-size max-height max-inline-size max-width min-block-size min-height min-inline-size min-width object-fit object-position opacity order outline outline-color outline-offset outline-style outline-width overflow overflow-wrap overflow-x overflow-y padding padding-block padding-block-end padding-block-start padding-bottom padding-inline padding-inline-end padding-inline-start padding-left padding-right padding-top place-content position resize right row-gap scale scrollbar-color scrollbar-width tab-size table-layout text-align text-align-all text-align-last text-decoration text-decoration-color text-decoration-line text-decoration-style text-decoration-thickness text-indent text-combine-upright text-justify text-orientation text-overflow text-shadow text-transform text-underline-offset text-underline-position top transform transform-box transform-origin transform-style transition transition-delay transition-duration transition-property transition-timing-function translate unicode-bidi vertical-align visibility white-space width word-break word-spacing word-wrap writing-mode z-index"
-expect(implemented.split(" ").len()).to_equal(236)
+val implemented = "align-content align-items align-self animation animation-delay animation-direction animation-duration animation-fill-mode animation-iteration-count animation-name animation-play-state animation-timing-function aspect-ratio background background-attachment background-clip background-color background-origin background-image background-position background-repeat background-size block-size border border-bottom border-bottom-color border-bottom-style border-bottom-width border-color border-left border-left-color border-left-style border-left-width border-right border-right-color border-right-style border-right-width border-style border-top border-top-color border-top-style border-width border-top-width border-radius border-bottom-left-radius border-bottom-right-radius border-top-left-radius border-top-right-radius border-start-start-radius border-start-end-radius border-end-start-radius border-end-end-radius border-block border-block-color border-block-end border-block-end-color border-block-end-style border-block-end-width border-block-start border-block-start-color border-block-start-style border-block-start-width border-block-style border-block-width border-inline border-inline-color border-inline-end border-inline-end-color border-inline-end-style border-inline-end-width border-inline-start border-inline-start-color border-inline-start-style border-inline-start-width border-inline-style border-inline-width bottom box-sizing box-shadow caret-color clear color color-scheme column-gap content content-visibility contain cursor direction display filter flex flex-basis flex-direction flex-flow flex-grow flex-shrink flex-wrap float font font-family font-feature-settings font-language-override font-variation-settings font-variant font-variant-alternates font-variant-caps font-variant-east-asian font-variant-emoji font-variant-ligatures font-variant-numeric font-variant-position font-kerning font-optical-sizing font-palette font-stretch font-width font-size font-size-adjust font-style font-synthesis font-synthesis-small-caps font-synthesis-position font-synthesis-style font-synthesis-weight font-weight gap height image-rendering inline-size inset inset-block inset-block-end inset-block-start inset-inline inset-inline-end inset-inline-start justify-content left letter-spacing line-height line-break hyphens list-style list-style-type margin margin-block margin-block-end margin-block-start margin-bottom margin-inline margin-inline-end margin-inline-start margin-left margin-right margin-top max-block-size max-height max-inline-size max-width min-block-size min-height min-inline-size min-width object-fit object-position opacity order outline outline-color outline-offset outline-style outline-width overflow overflow-wrap overflow-x overflow-y padding padding-block padding-block-end padding-block-start padding-bottom padding-inline padding-inline-end padding-inline-start padding-left padding-right padding-top place-content position resize right rotate row-gap scale scrollbar-color scrollbar-width tab-size table-layout text-align text-align-all text-align-last text-decoration text-decoration-color text-decoration-line text-decoration-style text-decoration-thickness text-indent text-combine-upright text-justify text-orientation text-overflow text-shadow text-transform text-underline-offset text-underline-position top transform transform-box transform-origin transform-style transition transition-delay transition-duration transition-property transition-timing-function translate unicode-bidi vertical-align visibility white-space width word-break word-spacing word-wrap writing-mode z-index"
+expect(implemented.split(" ").len()).to_equal(237)
 expect(implemented).to_contain("aspect-ratio")
 expect(implemented).to_contain("object-fit")
 expect(implemented).to_contain("object-position")
@@ -194,6 +194,7 @@ expect(implemented).to_contain("outline-width")
 expect(implemented).to_contain("overflow-wrap")
 expect(implemented).to_contain("place-content")
 expect(implemented).to_contain("resize")
+expect(implemented).to_contain("rotate")
 expect(implemented).to_contain("scale")
 expect(implemented).to_contain("scrollbar-color")
 expect(implemented).to_contain("scrollbar-width")
@@ -232,10 +233,11 @@ expect(implemented).to_contain("z-index")
 
 - Record the inventory SSpec owner for unsupported CSS properties
 - Keep the complete current unsupported W3C property inventory visible without claiming renderer support
-   - Expected: unsupported_cases.len() equals `165`
+   - Expected: unsupported_cases.len() equals `164`
    - Expected: unsupported does not contain `background-attachment`
    - Expected: unsupported_words does not contain ` color-scheme `
    - Expected: unsupported_words does not contain ` filter `
+   - Expected: unsupported_words does not contain ` rotate `
    - Expected: unsupported_words does not contain ` scale `
    - Expected: unsupported_words does not contain ` place-content `
    - Expected: unsupported_words contains ` place-items `
@@ -324,7 +326,7 @@ expect(implemented).to_contain("z-index")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 100 lines folded for reproduction.
+Runnable source: 101 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -336,12 +338,13 @@ step("Keep the complete current unsupported W3C property inventory visible witho
 val unsupported = _unsupported_css_inventory()
 val unsupported_cases = unsupported.split(" ")
 val unsupported_words = " " + unsupported + " "
-expect(unsupported_cases.len()).to_equal(165)
+expect(unsupported_cases.len()).to_equal(164)
 expect(unsupported).to_contain("accent-color")
 expect(unsupported.contains("background-attachment")).to_equal(false)
 expect(unsupported).to_contain("border-image-source")
 expect(unsupported_words.contains(" color-scheme ")).to_equal(false)
 expect(unsupported_words.contains(" filter ")).to_equal(false)
+expect(unsupported_words.contains(" rotate ")).to_equal(false)
 expect(unsupported_words.contains(" scale ")).to_equal(false)
 expect(unsupported).to_contain("grid-template-columns")
 expect(unsupported_words.contains(" place-content ")).to_equal(false)
