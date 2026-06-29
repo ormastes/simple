@@ -16,7 +16,7 @@
 - HTML/CSS full CSS spec render gap: 163 of 394
 - HTML/CSS full rendering goal: incomplete (full-css-rendering-incomplete; full CSS 231/394)
 - HTML/CSS readiness answer: implemented-html-css-ready-full-css-incomplete (implemented surface pass, full CSS incomplete; unrendered CSS 163)
-- Web WM modern shell evidence: pass (pass; interaction pass; bitmap pass; audit pass)
+- Web WM modern shell evidence: fail (web-wm-modern-shell-html-missing-path; interaction pass; bitmap pass; audit pass)
 - Native render-log platform matrix: fail (missing-or-failing-native-render-log-platforms; missing macos-metal,windows-d3d12; failed linux-vulkan; required linux-vulkan,macos-metal,windows-d3d12)
 - Native GUI platform verification: fail (missing-or-failing-native-render-log-platforms; missing macos-metal,windows-d3d12; failed linux-vulkan; required linux-vulkan,macos-metal,windows-d3d12)
 - macOS Metal browser/pixel detail: electron unavailable; chrome unavailable; browser unavailable; pixel missing/missing; diffs missing,missing,missing; ARGB missing,missing,missing; viewport missing
@@ -54,12 +54,13 @@
 - Production surface host:
 - Production Tauri surface capture: missing (missing-tauri-capture-evidence)
 - Production Chrome surface capture: missing (missing-chrome-capture-evidence)
-- blocked completion gates: 11
+- blocked completion gates: 12
 - blocked gate list:
   - original Chrome-on-Vulkan RenderDoc .rdc with RDOC magic
   - Electron Chromium-on-Vulkan RenderDoc .rdc with nonblank ARGB render proof
   - Electron Chromium-on-Vulkan GPU process exits under RenderDoc before .rdc capture
   - Electron and Chrome Vulkan-backed browser RenderDoc proof
+  - modern Web WM Electron visual and interaction evidence
   - native render-log comparison for Linux Vulkan, macOS Metal, and Windows D3D12
   - production GUI/web font offload readback evidence
   - production GUI/web raw Metal readback evidence
@@ -233,8 +234,8 @@
 - web_wm_modern_shell_evidence_exit_code=0
 - web_wm_modern_shell_evidence_source=existing-evidence
 - web_wm_modern_shell_evidence_env=build/test-artifacts/02_integration/app/ui/web_wm_modern_shell_evidence/evidence.env
-- web_wm_modern_shell_evidence_status=pass
-- web_wm_modern_shell_evidence_reason=pass
+- web_wm_modern_shell_evidence_status=fail
+- web_wm_modern_shell_evidence_reason=web-wm-modern-shell-html-missing-path
 - web_wm_modern_shell_evidence_html_path=
 - web_wm_modern_shell_evidence_argb_path=
 - web_wm_modern_shell_evidence_png_path=
@@ -296,12 +297,12 @@
 - html_css_readiness_answer=implemented-html-css-ready-full-css-incomplete
 - native_render_log_platform_matrix_status=fail
 - native_render_log_platform_matrix_reason=missing-or-failing-native-render-log-platforms
-- native_render_log_platform_matrix_source_revision=@  c068818a9613 │ ~
+- native_render_log_platform_matrix_source_revision=@  02ec29ee3a8c │ ~
 - native_render_log_platform_matrix_runtime_build=
 - native_render_log_platform_matrix_browser_webview_electron_revision=
 - native_render_log_platform_matrix_graphics_sdk_driver=
 - native_render_log_platform_matrix_runbook_version=
-- gui_web_2d_evidence_source_revision=@  c068818a9613 │ ~
+- gui_web_2d_evidence_source_revision=@  02ec29ee3a8c │ ~
 - gui_web_2d_evidence_runtime_build=
 - gui_web_2d_evidence_browser_webview_electron_revision=
 - gui_web_2d_evidence_graphics_sdk_driver=
@@ -320,15 +321,15 @@
 - linux_vulkan_render_log_compare_env=build/linux-vulkan-render-log-compare/evidence.env
 - linux_vulkan_render_log_compare_env_file_status=pass
 - linux_vulkan_render_log_compare_status=fail
-- linux_vulkan_render_log_compare_reason=renderdoc-chrome-fail;renderdoc-electron-fail
-- linux_vulkan_render_log_compare_blocked_gate_count=2
-- linux_vulkan_render_log_compare_blocked_gates=renderdoc-chrome-rdc,renderdoc-electron-rdc
+- linux_vulkan_render_log_compare_reason=simple-vulkan-status-missing;simple-backend-not-vulkan;pixel-comparison-missing;pairwise-diff-incomplete-or-fail;simple-argb-missing-viewport;argb-viewport-mismatch;renderdoc-chrome-fail;renderdoc-electron-fail
+- linux_vulkan_render_log_compare_blocked_gate_count=5
+- linux_vulkan_render_log_compare_blocked_gates=simple-vulkan-backend,pairwise-argb-diff,argb-source-evidence,renderdoc-chrome-rdc,renderdoc-electron-rdc
 - linux_vulkan_render_log_compare_required_api=vulkan
-- linux_vulkan_render_log_compare_pairwise_status=pass
-- linux_vulkan_render_log_compare_simple_vulkan_gate_status=pass
+- linux_vulkan_render_log_compare_pairwise_status=missing
+- linux_vulkan_render_log_compare_simple_vulkan_gate_status=fail
 - linux_vulkan_render_log_compare_browser_backing_gate_status=pass
-- linux_vulkan_render_log_compare_pairwise_gate_status=pass
-- linux_vulkan_render_log_compare_argb_source_gate_status=pass
+- linux_vulkan_render_log_compare_pairwise_gate_status=fail
+- linux_vulkan_render_log_compare_argb_source_gate_status=fail
 - linux_vulkan_render_log_compare_renderdoc_gate_status=fail
 - linux_vulkan_render_log_compare_renderdoc_simple_status=pass
 - linux_vulkan_render_log_compare_renderdoc_simple_reason=pass
@@ -346,11 +347,11 @@
 - linux_vulkan_render_log_compare_renderdoc_electron_artifact_file_status=missing
 - linux_vulkan_render_log_compare_renderdoc_electron_artifact_magic=missing
 - linux_vulkan_render_log_compare_host_renderdoc_status=pass
-- linux_vulkan_render_log_compare_host_renderdoc_tool=renderdoccmd
+- linux_vulkan_render_log_compare_host_renderdoc_tool=/opt/renderdoc/bin/renderdoccmd
 - linux_vulkan_render_log_compare_host_chrome_status=pass
-- linux_vulkan_render_log_compare_host_chrome_tool=google-chrome
-- linux_vulkan_render_log_compare_host_electron_status=missing
-- linux_vulkan_render_log_compare_host_electron_tool=missing
+- linux_vulkan_render_log_compare_host_chrome_tool=/usr/bin/google-chrome
+- linux_vulkan_render_log_compare_host_electron_status=pass
+- linux_vulkan_render_log_compare_host_electron_tool=/home/yoon/simple/tools/electron-shell/node_modules/.bin/electron
 - macos_metal_render_log_compare_env=build/macos-metal-render-log-compare/evidence.env
 - macos_metal_render_log_compare_env_file_status=missing
 - macos_metal_render_log_compare_status=unavailable
@@ -888,7 +889,7 @@
 - gui_showcase_8k_perf_time_log=
 - gui_showcase_8k_perf_time_log_file_status=unavailable
 - renderdoc_goal_status_command=sh scripts/check/check-html-css-renderdoc-goal-status.shs
-- renderdoc_goal_status_exit_code=1
+- renderdoc_goal_status_exit_code=0
 - renderdoc_goal_status=fail
 - renderdoc_goal_reason=missing-rdc
 - renderdoc_goal_blocked_gate=original Chrome-on-Vulkan RenderDoc .rdc with RDOC magic
@@ -971,7 +972,7 @@
 - electron_renderdoc_requested_features=Vulkan
 - electron_renderdoc_launch_flags=--no-sandbox --disable-gpu-sandbox --disable-dev-shm-usage --no-zygote --ozone-platform=x11 --enable-features=Vulkan,DefaultANGLEVulkan,VulkanFromANGLE --ignore-gpu-blocklist --enable-gpu-rasterization --use-angle=vulkan
 - electron_renderdoc_gate_command=RDOC_ELECTRON_HTML_EVIDENCE_ENV=build/renderdoc/electron-display-helper/electron-html/evidence.env sh scripts/check/check-renderdoc-electron-html-gate.shs
-- electron_renderdoc_gate_exit_code=1
+- electron_renderdoc_gate_exit_code=0
 - electron_renderdoc_gate_status=fail
 - electron_renderdoc_gate_reason=chromium-gpu-process-crashed-under-renderdoc
 - electron_renderdoc_gate_source_env=build/renderdoc/electron-display-helper/electron-html/evidence.env
@@ -1051,5 +1052,5 @@
 - html_renderdoc_capture_command=RDOC_EXTERNAL_RUN_CAPTURE=1 sh scripts/check/check-renderdoc-external-host-capture.shs
 - electron_renderdoc_capture_command=RDOC_OUTPUT_DIR=build/renderdoc/canonical-probe scripts/tool/renderdoc-evidence.shs capture-electron-html
 - blocked_completion_gate=original Chrome-on-Vulkan RenderDoc .rdc with RDOC magic
-- blocked_completion_gate_count=11
-- blocked_completion_gates=original Chrome-on-Vulkan RenderDoc .rdc with RDOC magic|Electron Chromium-on-Vulkan RenderDoc .rdc with nonblank ARGB render proof|Electron Chromium-on-Vulkan GPU process exits under RenderDoc before .rdc capture|Electron and Chrome Vulkan-backed browser RenderDoc proof|native render-log comparison for Linux Vulkan, macOS Metal, and Windows D3D12|production GUI/web font offload readback evidence|production GUI/web raw Metal readback evidence|production GUI/web parity evidence with live Tauri and Chrome captures|retained 4K GUI/web/2D 200fps performance evidence with FPS and checksum|retained 8K GUI/web/2D performance evidence with FPS, checksum, and RSS|full CSS specification rendering coverage beyond implemented Simple Web subset
+- blocked_completion_gate_count=12
+- blocked_completion_gates=original Chrome-on-Vulkan RenderDoc .rdc with RDOC magic|Electron Chromium-on-Vulkan RenderDoc .rdc with nonblank ARGB render proof|Electron Chromium-on-Vulkan GPU process exits under RenderDoc before .rdc capture|Electron and Chrome Vulkan-backed browser RenderDoc proof|modern Web WM Electron visual and interaction evidence|native render-log comparison for Linux Vulkan, macOS Metal, and Windows D3D12|production GUI/web font offload readback evidence|production GUI/web raw Metal readback evidence|production GUI/web parity evidence with live Tauri and Chrome captures|retained 4K GUI/web/2D 200fps performance evidence with FPS and checksum|retained 8K GUI/web/2D performance evidence with FPS, checksum, and RSS|full CSS specification rendering coverage beyond implemented Simple Web subset
