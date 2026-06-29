@@ -4862,16 +4862,20 @@ fn gradient_dither_threshold(px: i32, py: i32) -> i32:
     if mx == 2: return 13
     5
 
-fn mix_channel_gradient(a: i32, b: i32, pos: i32, denom: i32, px: i32, py: i32) -> i32:
-    val weighted = a * (denom - pos) + b * pos
+fn mix_channel_gradient_centered(a: i32, b: i32, pos: i32, span: i32, px: i32, py: i32) -> i32:
+    if span <= 0:
+        return a
+    val denom = span * 2
+    val b_weight = pos * 2 + 1
+    val weighted = a * (denom - b_weight) + b * b_weight
     var base = weighted / denom
     val rem = weighted - base * denom
     if rem > 0 and rem * 16 > gradient_dither_threshold(px, py) * denom:
         base = base + 1
     base
 
-fn mix_color_vertical(a: u32, b: u32, pos: i32, denom: i32, px: i32, py: i32) -> u32:
-    if denom <= 0:
+fn mix_color_vertical_centered(a: u32, b: u32, pos: i32, span: i32, px: i32, py: i32) -> u32:
+    if span <= 0:
         return a
     val ar = (((a >> 16) & 255u32) as i32)
     val ag = (((a >> 8) & 255u32) as i32)
@@ -4879,7 +4883,7 @@ fn mix_color_vertical(a: u32, b: u32, pos: i32, denom: i32, px: i32, py: i32) ->
     val br = (((b >> 16) & 255u32) as i32)
     val bg = (((b >> 8) & 255u32) as i32)
     val bb = ((b & 255u32) as i32)
-    argb(mix_channel_gradient(ar, br, pos, denom, px, py), mix_channel_gradient(ag, bg, pos, denom, px, py), mix_channel_gradient(ab, bb, pos, denom, px, py))
+    argb(mix_channel_gradient_centered(ar, br, pos, span, px, py), mix_channel_gradient_centered(ag, bg, pos, span, px, py), mix_channel_gradient_centered(ab, bb, pos, span, px, py))
 
 fn fb_style_background_opacity_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, st: Style, clip: ClipRect) -> [u32]:
     var bg_x = x
@@ -4924,26 +4928,29 @@ fn fb_style_background_opacity_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i3
         out = fb_style_rounded_rect_opacity_clip(out, fbw, fbh, bg_x, bg_y, bg_w, bg_h, st, st.bg, st.opacity_pct, clip)
     val tile_w = if st.background_size_w_px > 0: st.background_size_w_px else: image_origin_w
     val tile_h = if st.background_size_h_px > 0: st.background_size_h_px else: image_origin_h
+    val fixed_no_repeat = st.background_attachment == "fixed" and st.background_repeat == "no-repeat"
     val image_x = if st.background_repeat == "no-repeat": st.background_position_x_px else: 0
     val image_y = if st.background_repeat == "no-repeat": st.background_position_y_px else: 0
     val remaining_w = image_origin_w - image_x
     val remaining_h = image_origin_h - image_y
-    val max_x = if st.background_repeat == "no-repeat": (if tile_w < remaining_w: tile_w else: remaining_w) else: image_origin_w
-    val max_y = if st.background_repeat == "no-repeat": (if tile_h < remaining_h: tile_h else: remaining_h) else: image_origin_h
+    val max_x = if fixed_no_repeat: tile_w else: (if st.background_repeat == "no-repeat": (if tile_w < remaining_w: tile_w else: remaining_w) else: image_origin_w)
+    val max_y = if fixed_no_repeat: tile_h else: (if st.background_repeat == "no-repeat": (if tile_h < remaining_h: tile_h else: remaining_h) else: image_origin_h)
+    val image_base_x = if fixed_no_repeat: image_x else: image_origin_x + image_x
+    val image_base_y = if fixed_no_repeat: image_y else: image_origin_y + image_y
+    val image_clip = if fixed_no_repeat: clip_intersect(clip, bg_x, bg_y, bg_x + bg_w, bg_y + bg_h) else: clip
     var py = 0
-    val denom = if tile_h > 1: tile_h - 1 else: 1
     val small_no_repeat_gradient_tile = st.background_repeat == "no-repeat" and tile_w <= 64 and tile_h <= 64
     while py < max_y:
         val tile_py = py % tile_h
         if small_no_repeat_gradient_tile:
             var px = 0
             while px < max_x:
-                val color = mix_color_vertical(st.background_gradient_from, st.background_gradient_to, tile_py, denom, px, tile_py)
-                out = fb_rounded_rect_corners_opacity_clip(out, fbw, fbh, image_origin_x + image_x + px, image_origin_y + image_y + py, 1, 1, st.border_radius_tl_px, st.border_radius_tr_px, st.border_radius_br_px, st.border_radius_bl_px, color, st.opacity_pct, clip)
+                val color = mix_color_vertical_centered(st.background_gradient_from, st.background_gradient_to, tile_py, tile_h, px, tile_py)
+                out = fb_rounded_rect_corners_opacity_clip(out, fbw, fbh, image_base_x + px, image_base_y + py, 1, 1, st.border_radius_tl_px, st.border_radius_tr_px, st.border_radius_br_px, st.border_radius_bl_px, color, st.opacity_pct, image_clip)
                 px = px + 1
         else:
-            val color = mix_color_vertical(st.background_gradient_from, st.background_gradient_to, tile_py, denom, 0, tile_py)
-            out = fb_rounded_rect_corners_opacity_clip(out, fbw, fbh, image_origin_x + image_x, image_origin_y + image_y + py, max_x, 1, st.border_radius_tl_px, st.border_radius_tr_px, st.border_radius_br_px, st.border_radius_bl_px, color, st.opacity_pct, clip)
+            val color = mix_color_vertical_centered(st.background_gradient_from, st.background_gradient_to, tile_py, tile_h, 0, tile_py)
+            out = fb_rounded_rect_corners_opacity_clip(out, fbw, fbh, image_base_x, image_base_y + py, max_x, 1, st.border_radius_tl_px, st.border_radius_tr_px, st.border_radius_br_px, st.border_radius_bl_px, color, st.opacity_pct, image_clip)
         py = py + 1
     out
 
