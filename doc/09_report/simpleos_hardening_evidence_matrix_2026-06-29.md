@@ -2,14 +2,14 @@
 
 - status: fail
 - reason: matrix-incomplete
-- passed: 7/9
-- executable_launch_from_fs: fail
-- ssh_shell_smf_and_exec: fail
+- passed: 8/9
+- executable_launch_from_fs: pass
+- ssh_shell_smf_and_exec: pass
 - shared_wm_logic: pass
 - cpu_simd_engine2d_diagram: pass
 - web_renderer_engine2d_bitmap: pass
-- simple_gui_webrenderer_bitmap: pass
-- production_gui_web_renderer_parity: pass
+- simple_gui_webrenderer_bitmap: fail
+- production_gui_web_renderer_parity: fail
 - qemu_host_counterpart_bitmap: pass
 - qemu_gui_smf_artifact_contract: pass
 - qemu_gui_smf_artifact_contract_status: pass
@@ -36,7 +36,7 @@
 - qemu_wm_simple_gui_mdi_input_after_sha256: 1f3b7077cc368c8b8f072f80cc0975cd216734b24d918ba3eb8dd2f7867df760
 - simple_web_node_report: doc/09_report/simple_web_engine2d_js_bitmap_evidence_2026-06-02.md
 - simple_web_bun_report: doc/09_report/bun_simple_web_engine2d_js_bitmap_evidence_2026-06-02.md
-- production_gui_parity_report: doc/09_report/production_gui_web_renderer_parity_evidence_2026-06-05.md
+- production_gui_parity_report: doc/09_report/production_gui_web_renderer_parity_evidence_2026-06-29.md
 - simple_web_node_env: build/simple_web_engine2d_js_bitmap_evidence_current/evidence.env
 - simple_web_bun_env: build/bun_simple_web_engine2d_js_bitmap_evidence_current/evidence.env
 - gui_entry_latest_dir: build/tmp/gui_entry_engine2d_wm_simple_web_spec_1743678_1782696037439161
