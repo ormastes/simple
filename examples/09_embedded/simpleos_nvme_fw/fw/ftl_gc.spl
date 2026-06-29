@@ -1,0 +1,54 @@
+"""
+ftl_gc — garbage-collection victim selection.
+
+Greedy policy: among CLOSED blocks (full, holding a mix of valid + stale pages),
+pick the one with the fewest valid pages — it is cheapest to reclaim (fewest live
+pages to relocate) and yields the most free space. Returns UNMAP if nothing is
+reclaimable (no CLOSED block exists yet).
+"""
+
+use nvme_types.*
+use ftl_band.*
+
+fn gc_select_victim(band: BandAlloc) -> i64:
+    var best: i64 = UNMAP
+    var best_valid: i64 = PAGES_PER_BLOCK + 1
+    var blk: i64 = 0
+    while blk < NUM_BLOCKS:
+        val st: i64 = band.block_state(blk)
+        if st == BLK_CLOSED:
+            val v: i64 = band.valid_count(blk)
+            if v < best_valid:
+                best_valid = v
+                best = blk
+        blk = blk + 1
+    best
+
+fn ftl_gc_selftest() -> i64:
+    var fail: i64 = 0
+    var band: BandAlloc = ftl_band_new()
+
+    # Nothing closed yet -> no victim.
+    fail = fail + expect_eq(gc_select_victim(band), UNMAP, "no victim when nothing closed")
+
+    # Fill block 0 completely (marks every page valid), then one more alloc to
+    # close block 0 and open block 1.
+    var i: i64 = 0
+    while i < PAGES_PER_BLOCK:
+        val ppn: i64 = band.alloc_page()
+        band.mark_valid(ppn)
+        i = i + 1
+    val p2: i64 = band.alloc_page()
+    band.mark_valid(p2)
+
+    # block 0 is now CLOSED with PAGES_PER_BLOCK valid pages; it is the only CLOSED block.
+    fail = fail + expect_eq(gc_select_victim(band), 0, "victim is the closed block")
+
+    # Invalidate most of block 0 -> still the (only) victim, now cheap to reclaim.
+    var j: i64 = 0
+    while j < PAGES_PER_BLOCK - 3:
+        band.mark_invalid(block_first_ppn(0) + j)
+        j = j + 1
+    fail = fail + expect_eq(band.valid_count(0), 3, "block 0 down to 3 valid")
+    fail = fail + expect_eq(gc_select_victim(band), 0, "victim still block 0")
+    fail

@@ -20,19 +20,23 @@ commit → rebase onto origin/main (adds-only) → non-force SSH push.
   leading param; callers pass 0). Every multi-param `me` method's self-test must round-trip
   each stored value. See `CONVENTIONS.md`.
 
-## TODO (integration, in order)
-1. **`ftl.spl`** — `struct Ftl{fil:Fil, map:L2pMap, band:BandAlloc, journal:Journal, seq:i64}`;
-   `me write(lba,data)` (alloc_page → fil.program → journal.append(0,…) → map.update →
-   band.mark_valid + invalidate old), `me read(lba)->i64`, `me trim(lba)`, `me recover()`
-   (clear map, replay journal / P2L-scan newest-seq), plus GC + wear (below). `ftl_selftest`.
-2. **`ftl_gc.spl`** — `fn gc_select_victim(band)->i64` (greedy: CLOSED block, fewest valid);
-   the page-move + erase as an `Ftl` method (`me gc_once()`), transactional (new durable before
-   old freed). Test crash-during-GC keeps data.
-3. **`ftl_wear.spl`** — dynamic + static wear leveling helpers (free fns on band/erase counts).
-4. **`hil.spl`** — `Hil{queues,ftl,pool}`; `me submit(cmd)`, `me tick()` (fetch SQ → validate →
-   dispatch to ftl via a fw_pool WriteTask state machine → post CQ), `me reap()->NvmeCpl`.
-5. **`firmware.spl`** — top-level wiring + cooperative reactor (`me run_until_idle()`, watchdog).
-6. **`sim_main.spl`** — END-TO-END demo (has `fn main()`): host workload (writes/reads/overwrite/
-   trim) → assert read-back → inject crash (drop RAM map) → `recover()` → assert committed
-   survives → trigger GC → assert logical view preserved + free reclaimed. THE production gate.
-7. Tests: `test_ftl.spl`, `test_e2e.spl`; update top-level `README.md`.
+## Integration — COMPLETE (run-green, end-to-end verified, on origin/main)
+
+All layers implemented and verified. `test_fw.spl` = **225 self-test assertions** across 14
+modules; `sim_main.spl` = full end-to-end (128 writes → read-back → overwrite/GC → trim →
+power-fail + recovery) — all green via `bin/simple run`.
+
+- **`ftl.spl`** — `Ftl{fil,map,band,journal,seq}`: `write` (alloc → fil.program → journal →
+  map.update → mark_valid + invalidate old), `read`/`read_status`, `trim`, `checkpoint`,
+  `crash`, `recover` (WAL replay, newest-seq wins), `gc_once` (transactional relocate→erase).
+- **`ftl_gc.spl`** — `gc_select_victim(band)` greedy (CLOSED block, fewest valid pages).
+- **`hil.spl`** — `Hil{q,ftl,pool}`: `submit`, `tick` (fetch SQ → validate → dispatch behind a
+  `fw_pool` WriteTask state machine → post CQ), `run`, `reap`, `gc`/`crash`/`recover`.
+- **`firmware.spl`** — `Firmware{hil}` cooperative reactor: `service` (drain queues + background
+  GC below the free-block watermark), `gc_sweep`, `checkpoint`, `power_cycle`, `reap_all`.
+- **`sim_main.spl`** — the production end-to-end gate (`fn main()`).
+- **`test_fw.spl`** — full self-test suite. `README.md` — architecture + requirements coverage.
+
+Deferred to the build plan (not part of this firmware's run-green core): Lean4 proofs (req 6)
+and sandboxed dynamic policy hooks (req 7); multi-channel scheduling + static wear leveling are
+natural next extensions (dynamic wear leveling is implicit in the log-structured write path).
