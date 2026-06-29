@@ -36,7 +36,7 @@ but local proof is no longer status-only for the completed repo-local lanes:
   nested dashboard evidence env/log hashes; live HTTP proof is still required.
 - vLLM host evidence records a checked runtime control/readiness source/spec
   manifest (`surface_manifest_count=13`,
-  `surface_manifest_sha256=9f73daa7cfebd2ce82b0ea5c03d27c26d5550fe66a5e277c58d5d0cf2c6abf41`)
+  `surface_manifest_sha256=7d1759e328cc80724b6029081e96ca0c5ddbdb7f5098e01ed6d5ad31bea8b416`)
   plus local `vllm`, Python module, GPU, and readiness-log hashes; a local
   `vllm` executable, importable Python `vllm` module, and live endpoint proof
   are still required.
@@ -56,7 +56,7 @@ but local proof is no longer status-only for the completed repo-local lanes:
   required.
 - public absence rendering records a checked public wording manifest
   (`public_absence_surface_manifest_count=120`,
-  `public_absence_surface_manifest_sha256=ba09eb428bbfa652fe9b8dadcaa0b2324547554b822287220b66998fc0aa0f89`)
+  `public_absence_surface_manifest_sha256=a442d4d559d3e5c1222e02a982c99eb0adde3ac0e7baf7851470d22e21698f0e`)
   with `failure_count=0`, proving operator-facing manuals and generated
   evidence do not expose internal absence markers.
 

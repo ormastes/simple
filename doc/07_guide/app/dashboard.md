@@ -62,7 +62,7 @@ release/x86_64-unknown-linux-gnu/simple test test/03_system/feature/app/web_dash
 ```
 
 Latest focused evidence:
-`doc/09_report/2026/06/llm_dashboard_evidence_2026-06-28.md` records the
+`doc/09_report/2026/06/llm_dashboard_evidence_2026-06-29.md` records the
 dashboard diagnostics panel, `/agents` route, vLLM control route planning,
 dashboard log modes, diagnostics collector, and tooling artifact collector
 passing locally. This is dashboard route/evidence coverage; live vLLM serving

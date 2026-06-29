@@ -6,8 +6,8 @@
 - blocked_gates: `none`
 - surface_manifest: `build/llm_tooling_public_absence_rendering/public_absence_surface_manifest.tsv`
 - surface_manifest_count: `119`
-- surface_manifest_size: `16168`
-- surface_manifest_sha256: `620e0906a6db59913264bca399b07f0d04e75a9110cb98e85eb808e6eace4a37`
+- surface_manifest_size: `16190`
+- surface_manifest_sha256: `ee9145d6bfa3447be4108467778ce3d3d956ccc70b2bbf26ad220dd938b957d4`
 - failure_count: `0`
 - next_action: `rerun after public manual or dashboard wording changes`
 

@@ -128,14 +128,14 @@ Primary retry7 evidence:
 - `scripts/check/check-llm-finetune-guard-evidence.shs`
 - `test/03_system/tools/spipe/llm_finetune_retry7_acceptance_gate_spec.spl`
 - `doc/06_spec/03_system/tools/spipe/llm_finetune_retry7_acceptance_gate_spec.md`
-- `doc/09_report/2026/06/llm_finetune_guard_evidence_2026-06-28.md`
+- `doc/09_report/2026/06/llm_finetune_guard_evidence_2026-06-29.md`
 
 Related upstream gates:
 
 - retry5 licensed data/cache evidence
 - retry6 training/eval gate evidence
 - `.spipe/llm-finetune-process/app_handoffs.sdn`
-- `.spipe/llm-finetune-process/retry_decisions.sdn`
+- `.spipe/llm-finetune-process/decisions.sdn`
 
 ## Handoff Rules
 

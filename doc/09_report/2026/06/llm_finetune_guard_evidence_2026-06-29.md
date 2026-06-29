@@ -12,9 +12,9 @@
 - acceptance_pass_integrity_status: `not_required`
 - acceptance_env: `build/llm_finetune_acceptance/evidence.env`
 - surface_manifest: `build/llm_finetune_guard_evidence/fine_tune_guard_surface_manifest.tsv`
-- surface_manifest_count: `11`
-- surface_manifest_size: `1502`
-- surface_manifest_sha256: `4649fd73873fc1e62cf1232402d6714aeac17493f3336c4c4fad0569af0c317f`
+- surface_manifest_count: `20`
+- surface_manifest_size: `2526`
+- surface_manifest_sha256: `c97510b4d3ea081fc0b2e12d8d45589d6af10f480c0f833979b513e0a53dd1d3`
 - fixed_format_data_quality: `pass` exit=`0` log=`build/llm_finetune_guard_evidence/fixed_format_data_quality.log`
 - fixed_format_data_quality_log_size: `67`
 - fixed_format_data_quality_log_sha256: `9c8fd3d817ac3378db09e63fd46142dde34246778b3aa06336f538b865f6ab42`
@@ -25,11 +25,11 @@
 - retry7_direct_gate_log_size: `2040`
 - retry7_direct_gate_log_sha256: `05fd3bf2fc1c210b445e62a01cee639c6457221ebf3837bf0c69ac132d0cac18`
 - retry6_spec: `pass` exit=`0` log=`build/llm_finetune_guard_evidence/retry6_spec.log`
-- retry6_spec_log_size: `1456`
-- retry6_spec_log_sha256: `d857f0ef8e9adfdb5b788bcd74b477b12e49a255691f01de11cd3eca853d9715`
+- retry6_spec_log_size: `1454`
+- retry6_spec_log_sha256: `1eb5135702c5d32f81ca4363f7cb2155fe497e403a57de9a910b6b7b706e3e2e`
 - retry7_spec: `pass` exit=`0` log=`build/llm_finetune_guard_evidence/retry7_spec.log`
 - retry7_spec_log_size: `1447`
-- retry7_spec_log_sha256: `04e437fc8c90633d028ec696dc8338054e1d7f7f8875ed76285b343393eea17f`
+- retry7_spec_log_sha256: `5ab1e07d8864aa5b56a14c73f602404ec91e8a9209796fab2170b0453673ebd5`
 - env: `build/llm_finetune_guard_evidence/evidence.env`
 
 This evidence proves the local fine-tune process guards: fixed-format sample quality passes, retry6 remains blocked before licensed data/model/eval evidence, and retry7 remains blocked before retry6 target-eval plus normal-review evidence. It is not model training, target-eval, safety, deployment, or release-handoff proof. Run with `--strict-ready` when a tuned-model acceptance gate must pass.
