@@ -20,7 +20,7 @@ Default aggregate:
   evidence now include checked surface/input manifests with size/SHA-256
   metadata and focused log hashes. Public absence rendering also records
   `public_absence_surface_manifest_count=93` and
-  `public_absence_surface_manifest_sha256=951807ea3f1fc80eeb331d7deec0f8a8b024146e6add0d54954eabbb9b21bfb3`
+  `public_absence_surface_manifest_sha256=6b6fd5d7faae2c3781274d930979107316cf9ffb7c10f58ec5bf56fcd882dc24`
   with `failure_count=0`, so public manuals and generated evidence continue to
   hide internal absence markers from operator-facing text.
 
@@ -66,7 +66,9 @@ Strict-host aggregate:
   ready, but native `read_range`, pinned-buffer registration, and device
   staging are `unsupported`
 - local proof already hardened: svLLM local readiness has a checked spec/log
-  manifest and per-log hashes
+  manifest and per-log hashes; native streaming evidence also records a checked
+  wrapper/source/spec/doc surface manifest so strict failures identify the
+  exact native capability contract they consumed
 - required evidence: `svllm_native_streaming_status=pass`
 - next action: implement native streaming capability evidence and rerun
   `scripts/check/check-llm-runtime-svllm-native-streaming-evidence.shs` with

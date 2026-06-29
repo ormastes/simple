@@ -7,6 +7,7 @@ cd "$ROOT_DIR"
 BUILD_DIR="${BUILD_DIR:-build/llm_runtime_svllm_native_streaming}"
 REPORT_PATH="${REPORT_PATH:-doc/09_report/2026/06/llm_runtime_svllm_native_streaming_$(date -u +%F).md}"
 OUT_ENV="$BUILD_DIR/evidence.env"
+SURFACE_MANIFEST="$BUILD_DIR/svllm_native_streaming_surface_manifest.tsv"
 LOCAL_BUILD_DIR="$BUILD_DIR/local_readiness"
 LOCAL_REPORT="$BUILD_DIR/local_readiness_report.md"
 LOCAL_ENV="$LOCAL_BUILD_DIR/evidence.env"
@@ -19,7 +20,7 @@ CAPABILITY_SOURCE="${SVLLM_NATIVE_CAPABILITY_SOURCE:-env_or_default}"
 CAPABILITY_EVIDENCE_PATH="${SVLLM_NATIVE_CAPABILITY_EVIDENCE_PATH:-}"
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
-rm -f "$OUT_ENV" "$REPORT_PATH" "$LOCAL_REPORT" "$LOCAL_LOG"
+rm -f "$OUT_ENV" "$REPORT_PATH" "$SURFACE_MANIFEST" "$LOCAL_REPORT" "$LOCAL_LOG"
 
 status="fail"
 reason="native_read_range_unavailable"
@@ -227,6 +228,24 @@ if [ "$status" = "pass" ]; then
 fi
 
 {
+    for path in \
+        scripts/check/check-llm-runtime-svllm-native-streaming-evidence.shs \
+        scripts/check/check-llm-runtime-svllm-local-readiness.shs \
+        src/lib/gc_async_mut/svllm/model_executor/model_loader/streaming_readiness.spl \
+        src/lib/gc_async_mut/svllm/model_executor/model_loader/streamer.spl \
+        src/lib/gc_async_mut/svllm/model_executor/model_loader/transport.spl \
+        test/01_unit/lib/gc_async_mut/svllm/model_loader_streaming_readiness_spec.spl \
+        test/01_unit/lib/gc_async_mut/svllm/model_loader_stream_plan_spec.spl \
+        doc/07_guide/app/llm/llm_runtime_vllm_torch_interface.md
+    do
+        printf '%s\t%s\t%s\n' "$path" "$(artifact_size "$path")" "$(artifact_sha256 "$path")"
+    done
+} >"$SURFACE_MANIFEST"
+surface_manifest_count="$(wc -l <"$SURFACE_MANIFEST" | tr -d ' ')"
+surface_manifest_size="$(artifact_size "$SURFACE_MANIFEST")"
+surface_manifest_sha256="$(artifact_sha256 "$SURFACE_MANIFEST")"
+
+{
     printf '%s\n' "svllm_native_streaming_status=$status"
     printf '%s\n' "svllm_native_streaming_reason=$reason"
     printf '%s\n' "svllm_native_streaming_blocked_gates=$blocked_gates"
@@ -264,6 +283,10 @@ fi
     printf '%s\n' "svllm_native_streaming_local_readiness_report_size=$local_readiness_report_size"
     printf '%s\n' "svllm_native_streaming_local_readiness_report_sha256=$local_readiness_report_sha256"
     printf '%s\n' "svllm_native_streaming_local_spec_timeout_seconds=$LOCAL_SPEC_TIMEOUT_SECONDS"
+    printf '%s\n' "svllm_native_streaming_surface_manifest=$SURFACE_MANIFEST"
+    printf '%s\n' "svllm_native_streaming_surface_manifest_count=$surface_manifest_count"
+    printf '%s\n' "svllm_native_streaming_surface_manifest_size=$surface_manifest_size"
+    printf '%s\n' "svllm_native_streaming_surface_manifest_sha256=$surface_manifest_sha256"
 } >"$OUT_ENV"
 
 {
@@ -305,9 +328,13 @@ fi
     printf '%s\n' "- device_staging: \`$device_staging_status\`"
     printf '%s\n' "- local_read_bytes: \`$local_read_bytes_status\`"
     printf '%s\n' "- local_spec_timeout_seconds: \`$LOCAL_SPEC_TIMEOUT_SECONDS\`"
+    printf '%s\n' "- surface_manifest: \`$SURFACE_MANIFEST\`"
+    printf '%s\n' "- surface_manifest_count: \`$surface_manifest_count\`"
+    printf '%s\n' "- surface_manifest_size: \`$surface_manifest_size\`"
+    printf '%s\n' "- surface_manifest_sha256: \`$surface_manifest_sha256\`"
     printf '%s\n' "- env: \`$OUT_ENV\`"
     printf '\n'
-    printf 'This evidence consumes the local svLLM readiness gate and records native streaming capability statuses from `SVLLM_NATIVE_READ_RANGE_STATUS`, `SVLLM_NATIVE_PINNED_BUFFER_STATUS`, and `SVLLM_NATIVE_DEVICE_STAGING_STATUS` (default `unsupported`). It hashes the nested local-readiness env, log, and report so strict native evidence identifies the exact local readiness run it consumed. It only passes when local readiness passes, all three native capability statuses are `ready`, `SVLLM_NATIVE_CAPABILITY_SOURCE` names the host probe or artifact that proved those ready statuses, and `SVLLM_NATIVE_CAPABILITY_EVIDENCE_PATH` points at a non-empty schema-v1 probe artifact with matching `svllm_native_capability_source`, `svllm_native_capability_probe_event=svllm_native_capability_probe`, `svllm_native_capability_probe_status=pass`, `svllm_native_capability_probe_exit=0`, and reported native statuses matching the wrapper inputs. Local file-backed bytes alone remain explicit bring-up evidence, not native streaming completion.\n'
+    printf 'This evidence consumes the local svLLM readiness gate and records native streaming capability statuses from `SVLLM_NATIVE_READ_RANGE_STATUS`, `SVLLM_NATIVE_PINNED_BUFFER_STATUS`, and `SVLLM_NATIVE_DEVICE_STAGING_STATUS` (default `unsupported`). It hashes the wrapper/source/spec/doc surface manifest plus the nested local-readiness env, log, and report so strict native evidence identifies the exact contract and local readiness run it consumed. It only passes when local readiness passes, all three native capability statuses are `ready`, `SVLLM_NATIVE_CAPABILITY_SOURCE` names the host probe or artifact that proved those ready statuses, and `SVLLM_NATIVE_CAPABILITY_EVIDENCE_PATH` points at a non-empty schema-v1 probe artifact with matching `svllm_native_capability_source`, `svllm_native_capability_probe_event=svllm_native_capability_probe`, `svllm_native_capability_probe_status=pass`, `svllm_native_capability_probe_exit=0`, and reported native statuses matching the wrapper inputs. Local file-backed bytes alone remain explicit bring-up evidence, not native streaming completion.\n'
 } >"$REPORT_PATH"
 
 if [ "$status" = "pass" ]; then

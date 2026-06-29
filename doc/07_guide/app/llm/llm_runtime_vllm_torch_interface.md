@@ -177,6 +177,13 @@ the producer's canonical blocker contract instead of re-deriving it.
 The native wrapper also records SHA-256 and size metadata for the nested
 local-readiness env, log, and report, making strict native evidence traceable to
 the exact local readiness run it consumed.
+It also writes `svllm_native_streaming_surface_manifest`,
+`svllm_native_streaming_surface_manifest_count`,
+`svllm_native_streaming_surface_manifest_size`, and
+`svllm_native_streaming_surface_manifest_sha256` for the wrapper, local
+readiness wrapper, streaming readiness implementation, stream/transport
+helpers, focused specs, and this guide. Strict aggregate detail forwards those
+native manifest fields when `--strict-host` collects native svLLM evidence.
 Configured native hosts provide those native capability results through
 `SVLLM_NATIVE_READ_RANGE_STATUS`, `SVLLM_NATIVE_PINNED_BUFFER_STATUS`, and
 `SVLLM_NATIVE_DEVICE_STAGING_STATUS`. Values normalize to `ready`,
@@ -495,6 +502,11 @@ artifact source as `capability_evidence_source`. Strict local readiness requires
 `svllm_native_streaming_status=pass` and
 `svllm_native_streaming_pass_integrity_status=pass`, so a status-only native env
 cannot satisfy strict completion.
+The native evidence env also exposes the strict contract manifest fields
+`svllm_native_streaming_surface_manifest_count`,
+`svllm_native_streaming_surface_manifest_size`, and
+`svllm_native_streaming_surface_manifest_sha256`; use them to confirm a stale
+wrapper/spec/doc bundle was not mixed with a newer native capability artifact.
 
 Use the focused Torch optimizer gate after changing Torch SFFI, CUDA placement,
 or runtime training behavior:
