@@ -18,4 +18,4 @@
 - default_warn_source: `doc/09_report/2026/06/llm_goal_evidence_2026-06-29.md`
 - env: `build/llm_strict_blocker_tracker/evidence.env`
 
-This guard keeps the strict-host blocker tracker aligned with the latest default aggregate evidence and strict completion audit. It accepts the aggregate Markdown report or, while that report is being regenerated, the aggregate evidence env as the source for default warn gates. It does not run live host evidence; it fails when the committed tracker/audit no longer name the known strict blockers or the hardened vLLM/Torch provenance hashes.
+This guard keeps the strict-host blocker tracker aligned with the latest default aggregate evidence and strict completion audit. It requires the aggregate Markdown report to match when that report exists; while the report is absent during regeneration, it accepts the aggregate evidence env as the source for default warn gates. It does not run live host evidence; it fails when the committed tracker/audit no longer name the known strict blockers or the hardened vLLM/Torch provenance hashes.
