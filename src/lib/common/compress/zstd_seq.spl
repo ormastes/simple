@@ -4,8 +4,11 @@ use std.common.compress.zstd_fse.{ZstdFseDecodeTable, ZstdFseState, zstd_fse_par
 use std.common.compress.zstd_types.{append_bytes, append_self_overlap_copy}
 use std.common.compress.zstd_types.{ZstdSequenceCount, ZstdSequenceModes, ZstdSequence, ZstdRepeatOffsets, ZstdRleSequenceTables, ZstdSequenceTables, ZstdSequenceTableHistory, ZSTD_LL_MAX_TABLE_LOG, ZSTD_ML_MAX_TABLE_LOG, ZSTD_OF_MAX_TABLE_LOG, ZSTD_LL_DEFAULT_DISTRIBUTION, ZSTD_ML_DEFAULT_DISTRIBUTION, ZSTD_OF_DEFAULT_DISTRIBUTION}
 
+fn _zstd_sequence_bounds_invalid(pos: i64, block_end: i64, input_len: i64) -> bool:
+    pos < 0 or pos >= block_end or block_end > input_len
+
 fn _zstd_parse_sequence_count(input: [u8], pos: i64, block_end: i64) -> Result<ZstdSequenceCount, CompressionError>:
-    if pos < 0 or pos >= block_end:
+    if _zstd_sequence_bounds_invalid(pos, block_end, input.len()):
         return Err(CompressionError.TruncatedInput("zstd sequences header"))
     val byte0 = input[pos].to_i64()
     if byte0 < 128:
@@ -25,7 +28,7 @@ fn _zstd_parse_sequence_count(input: [u8], pos: i64, block_end: i64) -> Result<Z
     ))
 
 fn _zstd_parse_sequence_modes(input: [u8], pos: i64, block_end: i64) -> Result<ZstdSequenceModes, CompressionError>:
-    if pos < 0 or pos >= block_end:
+    if _zstd_sequence_bounds_invalid(pos, block_end, input.len()):
         return Err(CompressionError.TruncatedInput("zstd sequence modes"))
     val mode_byte = input[pos].to_i64()
     if (mode_byte & 0x03) != 0:
@@ -192,7 +195,7 @@ fn _zstd_match_length_extra_bits(code: i64) -> Result<i64, CompressionError>:
 fn _zstd_parse_rle_sequence_tables(input: [u8], pos: i64, block_end: i64, modes: ZstdSequenceModes) -> Result<ZstdRleSequenceTables, CompressionError>:
     if modes.literals_length_mode != 1 or modes.offsets_mode != 1 or modes.match_length_mode != 1:
         return Err(CompressionError.UnsupportedFeature("zstd non-rle sequence tables are not supported"))
-    if pos < 0 or pos + 3 > block_end:
+    if pos < 0 or block_end > input.len() or pos + 3 > block_end:
         return Err(CompressionError.TruncatedInput("zstd rle sequence tables"))
     Ok(ZstdRleSequenceTables(
         literal_length_code: input[pos].to_i64(),
@@ -206,7 +209,7 @@ fn _zstd_predefined_table(distribution: [i64], table_log: i64) -> Result<ZstdFse
 
 fn _zstd_parse_single_sequence_table(input: [u8], pos: i64, block_end: i64, mode: i64, max_table_log: i64, predefined_distribution: [i64], previous_table: ZstdFseDecodeTable) -> Result<(i64?, ZstdFseDecodeTable?, ZstdFseDecodeTable, i64), CompressionError>:
     if mode == 1:
-        if pos < 0 or pos >= block_end:
+        if _zstd_sequence_bounds_invalid(pos, block_end, input.len()):
             return Err(CompressionError.TruncatedInput("zstd rle sequence table"))
         return Ok((Some(input[pos].to_i64()), nil, previous_table, 1))
     if mode == 3:
