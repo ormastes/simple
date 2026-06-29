@@ -509,6 +509,12 @@ this build is available and reports compile-time API support as `Vulkan` only,
 but Chrome and Electron still fail `missing-rdc` with
 `egl_initialize_return_count=0`; see
 `doc/09_report/renderdoc_linux_vulkan_only_build_2026-06-29.md`.
+For diagnostic Chromium flag variants, the shared flag helpers accept
+`RDOC_CHROME_EXTRA_VULKAN_FLAGS` and `RDOC_ELECTRON_EXTRA_VULKAN_FLAGS`.
+These variables append to the browser-specific Vulkan launch flags without
+changing the canonical defaults. A 2026-06-29 `--use-gl=angle` probe still
+failed before `eglInitialize` returned and before `vkCreateInstance`; see
+`doc/09_report/renderdoc_browser_use_gl_angle_2026-06-29.md`.
 The same row exposes host readiness fields before platform agents debug capture
 failures:
 `linux_vulkan_render_log_compare_host_renderdoc_status`,

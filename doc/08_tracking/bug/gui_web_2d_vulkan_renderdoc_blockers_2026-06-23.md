@@ -518,6 +518,16 @@ Current 2026-06-26 browser capture findings:
   `build/renderdoc/chrome-gpu-layer-only/html/evidence.env`,
   `build/renderdoc/electron-gpu-layer-only/electron-html/evidence.env`, and
   `doc/09_report/renderdoc_browser_gpu_layer_isolation_2026-06-29.md`.
+- 2026-06-29 A diagnostic `--use-gl=angle` flag variant is now reproducible via
+  `RDOC_CHROME_EXTRA_VULKAN_FLAGS` and `RDOC_ELECTRON_EXTRA_VULKAN_FLAGS`.
+  Fresh Chrome and Electron GPU-child autocapture runs with `--use-gl=angle`
+  still report ANGLE status `pass`, enter `eglInitialize`, do not return from
+  `eglInitialize`, do not reach `eglChooseConfig` or `vkCreateInstance`, and
+  produce no `.rdc`. This rules out missing explicit `--use-gl=angle` selection
+  as the current Linux browser RenderDoc blocker. Evidence:
+  `build/renderdoc/chrome-gpu-use-gl-angle/html/evidence.env`,
+  `build/renderdoc/electron-gpu-use-gl-angle/electron-html/evidence.env`, and
+  `doc/09_report/renderdoc_browser_use_gl_angle_2026-06-29.md`.
 - 2026-06-29 ANGLE's upstream debugging guide documents
   `RENDERDOC_HOOK_EGL=0` as a Windows workaround and says Linux requires a
   RenderDoc build without GL/GLES support for this EGL-hooking capture issue.
