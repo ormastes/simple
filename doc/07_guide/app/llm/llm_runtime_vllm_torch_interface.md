@@ -143,9 +143,24 @@ sh scripts/check/check-llm-goal-evidence.shs
 ```
 
 The aggregate report is written to
-`doc/09_report/2026/06/llm_goal_evidence_2026-06-28.md`. It treats live vLLM
+`doc/09_report/2026/06/llm_goal_evidence_2026-06-29.md`. It treats live vLLM
 and Simple/libtorch CUDA optimizer host gaps as expected WARN lanes on hosts
-where those dependencies are not installed.
+where those dependencies are not installed, while fine-tune readiness remains a
+guard-only pass in default mode.
+
+Latest fine-tune acceptance evidence:
+`doc/09_report/2026/06/llm_finetune_acceptance_2026-06-29.md` records
+`scripts/check/check-llm-finetune-acceptance-evidence.shs` failing the retry7
+normal acceptance gate with `reason=BLOCKED_RETRY6_NOT_READY`. The evidence env
+records `llm_finetune_acceptance_required_gates`,
+`llm_finetune_acceptance_blocked_gates`,
+`llm_finetune_acceptance_training_allowed`,
+`llm_finetune_acceptance_model_manifest_exists`,
+`llm_finetune_acceptance_eval_result_exists`,
+`llm_finetune_acceptance_decision_status`,
+`llm_finetune_acceptance_handoff_doc`, and
+`llm_finetune_acceptance_next_action` so strict aggregate runs can report the
+exact model/eval/license/safety/deployment/app-handoff blockers.
 
 On a configured host, use strict host mode when the aggregate must be
 release-completion evidence for the live gates:

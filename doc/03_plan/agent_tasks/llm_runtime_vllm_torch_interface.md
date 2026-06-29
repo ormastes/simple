@@ -638,3 +638,14 @@ normalized libtorch/CUDA/parameter/gradient/optimizer-step fields. On this host
 the lane remains `unavailable` with `blocked_gate=libtorch`; strict-host
 aggregate runs should fail that gate until a configured libtorch CUDA runtime
 executes the optimizer step and reports `status=pass`.
+
+## 2026-06-29 Fine-Tune Acceptance Evidence Hardening
+
+`scripts/check/check-llm-finetune-acceptance-evidence.shs` now preserves the
+retry7 normal-acceptance gate as a machine-readable blocker contract. The env
+records required gates, compact blocked gates, training allowance,
+model-manifest/eval-result presence, target-eval status, decision status,
+license, safety, deployment, app-handoff doc, handoff usage, and next action.
+On this host the lane remains failed with `BLOCKED_RETRY6_NOT_READY` and
+blocked gates for retry6 training/eval, model/eval artifacts, target eval,
+decision, license, safety, deployment, and app handoff.
