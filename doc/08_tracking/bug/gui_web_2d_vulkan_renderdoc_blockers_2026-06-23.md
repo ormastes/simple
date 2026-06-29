@@ -374,6 +374,18 @@ Current 2026-06-26 browser capture findings:
   the wrapped frame trigger calls are not reached in this route. Evidence:
   `build/renderdoc/electron-gpu-autocapture-current/electron-html/evidence.env`
   and `doc/09_report/renderdoc_electron_gpu_autocapture_heartbeat_2026-06-29.md`.
+- 2026-06-29 The GPU-process autocapture shim now also records passive EGL
+  lifecycle counters for `eglMakeCurrent`, `eglCreateWindowSurface`, and
+  `eglCreatePlatformWindowSurface`. Fresh Chrome and Electron probes both
+  report shim injection plus 220 proc-name traces, but all new EGL lifecycle
+  counters remain zero along with submit/present/swap/ANGLE counters. This
+  means the failing route is earlier than the currently wrapped frame and
+  surface calls; the next diagnostic should inspect Chromium GPU launcher
+  ownership, Vulkan loader/layer dispatch, or RenderDoc layer registration in
+  the child process. Evidence:
+  `build/renderdoc/chrome-gpu-autocapture-egl-lifecycle/html/evidence.env`,
+  `build/renderdoc/electron-gpu-autocapture-egl-lifecycle/electron-html/evidence.env`,
+  and `doc/09_report/renderdoc_browser_gpu_autocapture_egl_lifecycle_2026-06-29.md`.
 - The direct Chrome/Electron RenderDoc wrapper now records
   `rdoc_renderdoc_hook_children` and accepts `RDOC_RENDERDOC_HOOK_CHILDREN=0`
   to omit `--opt-hook-children`. This confirms the immediate Chrome GPU crash

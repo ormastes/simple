@@ -25,12 +25,17 @@ typedef void *(*egl_get_proc_address_fn_t)(const char *);
 typedef void (*egl_vulkan_queue_lock_fn_t)(void *);
 typedef int (*egl_display_surface_fn_t)(void *, void *);
 typedef int (*egl_display_fn_t)(void *);
+typedef int (*egl_make_current_fn_t)(void *, void *, void *, void *);
+typedef void *(*egl_create_window_surface_fn_t)(void *, void *, void *, const void *);
 static egl_swap_buffers_fn_t real_eglSwapBuffers;
 static egl_get_proc_address_fn_t real_eglGetProcAddress;
 static egl_vulkan_queue_lock_fn_t real_eglLockVulkanQueueANGLE;
 static egl_vulkan_queue_lock_fn_t real_eglUnlockVulkanQueueANGLE;
 static egl_display_surface_fn_t real_eglPrepareSwapBuffersANGLE;
 static egl_display_fn_t real_eglWaitUntilWorkScheduledANGLE;
+static egl_make_current_fn_t real_eglMakeCurrent;
+static egl_create_window_surface_fn_t real_eglCreateWindowSurface;
+static egl_create_window_surface_fn_t real_eglCreatePlatformWindowSurface;
 typedef void *(*real_dlsym_fn_t)(void *, const char *);
 static real_dlsym_fn_t real_dlsym_fn;
 static int capture_started;
@@ -46,6 +51,9 @@ static uint64_t egl_vulkan_queue_lock_count;
 static uint64_t egl_vulkan_queue_unlock_count;
 static uint64_t egl_prepare_swap_count;
 static uint64_t egl_wait_scheduled_count;
+static uint64_t egl_make_current_count;
+static uint64_t egl_create_window_surface_count;
+static uint64_t egl_create_platform_window_surface_count;
 static uint64_t proc_trace_count;
 
 static int env_enabled(const char *name);
@@ -55,6 +63,9 @@ void eglLockVulkanQueueANGLE(void *display);
 void eglUnlockVulkanQueueANGLE(void *display);
 int eglPrepareSwapBuffersANGLE(void *display, void *surface);
 int eglWaitUntilWorkScheduledANGLE(void *display);
+int eglMakeCurrent(void *display, void *draw, void *read, void *context);
+void *eglCreateWindowSurface(void *display, void *config, void *native_window, const void *attrib_list);
+void *eglCreatePlatformWindowSurface(void *display, void *config, void *native_window, const void *attrib_list);
 
 struct library_lookup {
     const char *needle;
@@ -207,7 +218,7 @@ static void log_capture_summary(void) {
     }
     char buf[384];
     snprintf(buf, sizeof(buf),
-        "rdoc_autocapture_summary=status:%s api:%u started:%u finished:%u start_source:%s end_source:%s submit:%llu present:%llu egl_swap:%llu egl_prepare_swap:%llu egl_wait_scheduled:%llu egl_vk_lock:%llu egl_vk_unlock:%llu proc_trace:%llu",
+        "rdoc_autocapture_summary=status:%s api:%u started:%u finished:%u start_source:%s end_source:%s submit:%llu present:%llu egl_swap:%llu egl_prepare_swap:%llu egl_wait_scheduled:%llu egl_vk_lock:%llu egl_vk_unlock:%llu egl_make_current:%llu egl_create_window_surface:%llu egl_create_platform_window_surface:%llu proc_trace:%llu",
         status,
         rdoc_api ? 1u : 0u,
         capture_started ? 1u : 0u,
@@ -221,6 +232,9 @@ static void log_capture_summary(void) {
         (unsigned long long)egl_wait_scheduled_count,
         (unsigned long long)egl_vulkan_queue_lock_count,
         (unsigned long long)egl_vulkan_queue_unlock_count,
+        (unsigned long long)egl_make_current_count,
+        (unsigned long long)egl_create_window_surface_count,
+        (unsigned long long)egl_create_platform_window_surface_count,
         (unsigned long long)proc_trace_count);
     log_line(buf);
 }
@@ -507,6 +521,29 @@ void *eglGetProcAddress(const char *procname) {
         log_line("rdoc_autocapture_eglgetproc=vkGetInstanceProcAddr");
         return (void *)vkGetInstanceProcAddr;
     }
+    if (procname && (strcmp(procname, "eglMakeCurrent") == 0 || strcmp(procname, "EGL_MakeCurrent") == 0)) {
+        if (!real_eglMakeCurrent && real_eglGetProcAddress) {
+            real_eglMakeCurrent = (egl_make_current_fn_t)real_eglGetProcAddress(procname);
+        }
+        log_line("rdoc_autocapture_eglgetproc=eglMakeCurrent");
+        return (void *)eglMakeCurrent;
+    }
+    if (procname && (strcmp(procname, "eglCreateWindowSurface") == 0 ||
+        strcmp(procname, "EGL_CreateWindowSurface") == 0)) {
+        if (!real_eglCreateWindowSurface && real_eglGetProcAddress) {
+            real_eglCreateWindowSurface = (egl_create_window_surface_fn_t)real_eglGetProcAddress(procname);
+        }
+        log_line("rdoc_autocapture_eglgetproc=eglCreateWindowSurface");
+        return (void *)eglCreateWindowSurface;
+    }
+    if (procname && (strcmp(procname, "eglCreatePlatformWindowSurface") == 0 ||
+        strcmp(procname, "EGL_CreatePlatformWindowSurface") == 0)) {
+        if (!real_eglCreatePlatformWindowSurface && real_eglGetProcAddress) {
+            real_eglCreatePlatformWindowSurface = (egl_create_window_surface_fn_t)real_eglGetProcAddress(procname);
+        }
+        log_line("rdoc_autocapture_eglgetproc=eglCreatePlatformWindowSurface");
+        return (void *)eglCreatePlatformWindowSurface;
+    }
     if (procname && strcmp(procname, "eglLockVulkanQueueANGLE") == 0) {
         if (!real_eglLockVulkanQueueANGLE && real_eglGetProcAddress) {
             real_eglLockVulkanQueueANGLE = (egl_vulkan_queue_lock_fn_t)real_eglGetProcAddress(procname);
@@ -579,6 +616,30 @@ int eglWaitUntilWorkScheduledANGLE(void *display) {
     uint64_t end_after = env_u64("RDOC_AUTOCAPTURE_END_EGL_WAIT_SCHEDULED", 1);
     if (egl_wait_scheduled_count >= end_after) maybe_end_capture("eglWaitUntilWorkScheduledANGLE");
     return result;
+}
+
+int eglMakeCurrent(void *display, void *draw, void *read, void *context) {
+    if (!real_eglMakeCurrent) {
+        real_eglMakeCurrent = (egl_make_current_fn_t)real_next_symbol("eglMakeCurrent");
+    }
+    egl_make_current_count++;
+    return real_eglMakeCurrent ? real_eglMakeCurrent(display, draw, read, context) : 0;
+}
+
+void *eglCreateWindowSurface(void *display, void *config, void *native_window, const void *attrib_list) {
+    if (!real_eglCreateWindowSurface) {
+        real_eglCreateWindowSurface = (egl_create_window_surface_fn_t)real_next_symbol("eglCreateWindowSurface");
+    }
+    egl_create_window_surface_count++;
+    return real_eglCreateWindowSurface ? real_eglCreateWindowSurface(display, config, native_window, attrib_list) : NULL;
+}
+
+void *eglCreatePlatformWindowSurface(void *display, void *config, void *native_window, const void *attrib_list) {
+    if (!real_eglCreatePlatformWindowSurface) {
+        real_eglCreatePlatformWindowSurface = (egl_create_window_surface_fn_t)real_next_symbol("eglCreatePlatformWindowSurface");
+    }
+    egl_create_platform_window_surface_count++;
+    return real_eglCreatePlatformWindowSurface ? real_eglCreatePlatformWindowSurface(display, config, native_window, attrib_list) : NULL;
 }
 
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(
