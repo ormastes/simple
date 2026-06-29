@@ -131,12 +131,24 @@ identical md5 0cf511d4). Re-open as its own lane later if wanted; not part of th
   `SIMPLE_VAR_*` reads + `simple var {list,check,roots,resolve}` (resolve uses
   var_module_candidates). These need the driver/CLI layer + a deploy to matter.
 
-## Next steps
-1. (optional) bootstrap to exercise the live hook end-to-end through the binary
-   — BLOCKED by the native-build segfault bug (filed); needs that fix first.
-2. Rust-seed parity: mirror hook + cache fingerprint in resolution.rs:579 /
-   path_resolution.rs:59 (its key already hashes SIMD tier; add var fingerprint).
-3. `config/var.sdn` loader + CLI `--var`/`--var-profile` + `simple var
-   {list,check,roots,resolve}` (uses `var_module_candidates`) + DI `var_profile`
-   + LSP + remaining E-VAR005/006/008.
-4. os/libs/ui variant examples once the binary hook is live.
+## Rust resolver parity DONE (H4) — committed
+- `bin/simple` is the cargo-built Rust compiler (54.7 MB == target/release/simple),
+  so REAL resolution uses the Rust resolver. Mirrored the hook there:
+  `module_resolver/types.rs` ModuleResolver +`var_roots` + `with_var_roots()`
+  (inert default); `resolution.rs` Strategy 0 searches var_roots after relative,
+  before stdlib, via resolve_from_base. No Rust resolution cache → no fingerprint
+  needed there. **`cargo check -p simple-compiler` clean (15s).** Committed pmy 3913.
+- Hook now source-complete + compile-verified in BOTH resolvers (Simple 21/21 +
+  Rust cargo-check).
+
+## Next steps (for a LIVE binary demo)
+1. CLI glue: populate var_roots from config/var.sdn + manifest + host detect, call
+   `with_var_roots` (Rust driver) / `moduleresolver_with_var_roots` (Simple). Until
+   this exists, var_roots stay empty so the overlay is inert even when deployed.
+2. Deploy: `cargo build --release -p simple-driver` + copy to bin/simple — POLICY
+   note (bootstrap.md): bin/simple should be self-hosted; current one is already
+   the Rust binary. Self-hosted deploy needs bootstrap, blocked by native-build
+   segfault. Redeploy affects all parallel sessions → user decision.
+3. `simple var {list,check,roots,resolve}` (resolve uses var_module_candidates) +
+   DI var_profile + LSP + E-VAR005/006/008.
+4. os/libs/ui variant migration — user-gated separate lanes.
