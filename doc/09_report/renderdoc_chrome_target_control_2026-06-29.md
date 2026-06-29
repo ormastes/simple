@@ -1,21 +1,22 @@
 # Chrome RenderDoc Target-Control Probe
 
 - status: fail
-- reason: no-new-capture-message
-- gpu pid: 1979453
-- window pid: 1979412
+- reason: target-control-no-api-use-renderdoc-layer-not-in-vulkan-instance
+- gpu pid: 1981252
+- window pid: 1981211
 - window pid matches gpu pid: 0
 - RenderDoc debug log status: pass
 - RenderDoc loaded status: pass
 - RenderDoc Vulkan hooks status: pass
+- RenderDoc Vulkan instance status: missing
 - target status: fail
 - target api: 
 - target ident count: 2
 - target chosen ident: 38920
-- target message count: 3874
-- target noop count: 3874
-- target pretrigger message count: 5809
-- target pretrigger noop count: 5809
+- target message count: 3875
+- target noop count: 3875
+- target pretrigger message count: 5812
+- target pretrigger noop count: 5812
 - target api message count: 0
 - target last api: 
 - target last api presenting: 0
@@ -26,7 +27,7 @@
 - qrenderdoc log status: empty
 - target client rc: 1
 - target client timed out: 0
-- target client build status: cached
+- target client build status: pass
 - target env status: pass
 - capture: 
 - magic: 

@@ -1733,16 +1733,20 @@ RDOC_AUTOCAPTURE_END_EGL_VK_UNLOCK=2 \
   `rdoc_chrome_target_control_gpu_env_has_layer`,
   `rdoc_chrome_target_control_gpu_maps_has_renderdoc`,
   `rdoc_chrome_target_control_gpu_maps_has_vulkan`,
+  `rdoc_chrome_target_control_renderdoc_debug_log_vulkan_instance_status`,
   `rdoc_chrome_target_control_target_ident_count`,
   `rdoc_chrome_target_control_target_api`,
   `rdoc_chrome_target_control_target_api_message_count`,
   `rdoc_chrome_target_control_target_window_message_count`,
   `rdoc_chrome_target_control_target_message_count`, and
   `rdoc_chrome_target_control_target_noop_count`. Current Vulkan-only evidence
-  connects to the GPU process target, but a 12s pre-trigger API wait reports no
-  API-use messages and no capturable-window messages; target API remains empty
-  and every post-trigger message is `Noop`, so no `.rdc` is produced. If Chrome
-  does not create a GPU process, the script fails closed with
+  connects to the GPU process target, but RenderDoc's log never reaches
+  `Initialised capture layer in Vulkan instance`, so
+  `rdoc_chrome_target_control_renderdoc_debug_log_vulkan_instance_status=missing`.
+  A 12s pre-trigger API wait reports no API-use messages and no
+  capturable-window messages; target API remains empty and every post-trigger
+  message is `Noop`, so no `.rdc` is produced. If Chrome does not create a GPU
+  process, the script fails closed with
   `rdoc_chrome_target_control_reason=no-gpu-process` before triggering capture
   on an unrelated target:
 

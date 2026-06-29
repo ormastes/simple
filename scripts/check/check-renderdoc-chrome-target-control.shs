@@ -41,6 +41,7 @@ renderdoc_debug_log_file="$BUILD_DIR/renderdoc-layer.log"
 renderdoc_debug_log_file_status=""
 renderdoc_debug_log_loaded_status=""
 renderdoc_debug_log_vulkan_hooks_status=""
+renderdoc_debug_log_vulkan_instance_status=""
 chrome_launch_flags="$(rdoc_chrome_vulkan_flags)"
 target_status=""
 target_reason=""
@@ -146,6 +147,7 @@ write_env() {
         echo "rdoc_chrome_target_control_renderdoc_debug_log_file_status=$renderdoc_debug_log_file_status"
         echo "rdoc_chrome_target_control_renderdoc_debug_log_loaded_status=$renderdoc_debug_log_loaded_status"
         echo "rdoc_chrome_target_control_renderdoc_debug_log_vulkan_hooks_status=$renderdoc_debug_log_vulkan_hooks_status"
+        echo "rdoc_chrome_target_control_renderdoc_debug_log_vulkan_instance_status=$renderdoc_debug_log_vulkan_instance_status"
         echo "rdoc_chrome_target_control_target_status=$target_status"
         echo "rdoc_chrome_target_control_target_reason=$target_reason"
         echo "rdoc_chrome_target_control_target_pid=$target_pid"
@@ -194,6 +196,7 @@ write_env() {
         echo "- RenderDoc debug log status: $renderdoc_debug_log_file_status"
         echo "- RenderDoc loaded status: $renderdoc_debug_log_loaded_status"
         echo "- RenderDoc Vulkan hooks status: $renderdoc_debug_log_vulkan_hooks_status"
+        echo "- RenderDoc Vulkan instance status: $renderdoc_debug_log_vulkan_instance_status"
         echo "- target status: $target_status"
         echo "- target api: $target_api"
         echo "- target ident count: $target_ident_count"
@@ -327,10 +330,16 @@ if [ -s "$renderdoc_debug_log_file" ]; then
     else
         renderdoc_debug_log_vulkan_hooks_status="missing"
     fi
+    if grep -q 'Initialised capture layer in Vulkan instance' "$renderdoc_debug_log_file"; then
+        renderdoc_debug_log_vulkan_instance_status="pass"
+    else
+        renderdoc_debug_log_vulkan_instance_status="missing"
+    fi
 else
     renderdoc_debug_log_file_status="missing"
     renderdoc_debug_log_loaded_status="missing"
     renderdoc_debug_log_vulkan_hooks_status="missing"
+    renderdoc_debug_log_vulkan_instance_status="missing"
 fi
 
 if [ "$gpu_pid" != "" ] && [ -r "/proc/$gpu_pid/environ" ]; then
@@ -484,7 +493,14 @@ elif [ "$target_status" = "" ]; then
     fi
 elif [ "$control_rc" -ne 0 ]; then
     status="fail"
-    reason="${target_reason:-target-control-failed}"
+    if [ "$target_reason" = "no-new-capture-message" ] &&
+       [ "${target_api_message_count:-0}" = "0" ] &&
+       [ "$renderdoc_debug_log_vulkan_hooks_status" = "pass" ] &&
+       [ "$renderdoc_debug_log_vulkan_instance_status" = "missing" ]; then
+        reason="target-control-no-api-use-renderdoc-layer-not-in-vulkan-instance"
+    else
+        reason="${target_reason:-target-control-failed}"
+    fi
 else
     status="fail"
     reason="missing-rdc"

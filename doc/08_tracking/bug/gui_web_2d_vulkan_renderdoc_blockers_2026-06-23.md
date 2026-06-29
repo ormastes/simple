@@ -220,13 +220,15 @@ Current 2026-06-26 browser capture findings:
   availability. Current evidence auto-builds the client, connects to the
   Chromium GPU process target-control server, selects the GPU PID, and sends
   `TriggerCapture(1)`. With a 12s pre-trigger wait, the target reports
+  `rdoc_chrome_target_control_renderdoc_debug_log_vulkan_instance_status=missing`,
   `target_api=`, `rdoc_chrome_target_control_target_api_message_count=0`,
   `rdoc_chrome_target_control_target_window_message_count=0`, and then returns
   only Noop messages after trigger
-  (`rdoc_chrome_target_control_target_message_count=3874`,
-  `rdoc_chrome_target_control_target_noop_count=3874`), so no `NewCapture`
-  message or `.rdc` is produced. Evidence:
-  `build/renderdoc/chrome-target-control-wait-api-vulkan-only/evidence.env`
+  (`rdoc_chrome_target_control_target_message_count=3875`,
+  `rdoc_chrome_target_control_target_noop_count=3875`), so no `NewCapture`
+  message or `.rdc` is produced. Current reason:
+  `target-control-no-api-use-renderdoc-layer-not-in-vulkan-instance`. Evidence:
+  `build/renderdoc/chrome-target-control-vulkan-instance-status/evidence.env`
   and `doc/09_report/renderdoc_chrome_target_control_2026-06-29.md`.
 
 2026-06-26 follow-up diagnostics:
