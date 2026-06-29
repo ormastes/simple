@@ -173,6 +173,11 @@ Current 2026-06-26 browser capture findings:
   `chrome-renderdoc-gate-fail-chromium-gpu-process-crashed-under-renderdoc`.
   Evidence:
   `doc/09_report/gui_renderdoc_feature_coverage_status_2026-06-29.md`.
+- Raw browser capture envs and the Linux render-log comparison now also expose
+  the GPU-process exit counts and codes, so missing `.rdc` remains visible as
+  the artifact failure while the crash class stays machine-readable. Current
+  aggregate values: Chrome `9` exits with code `139`, Electron `6` exits with
+  code `139`.
 
 2026-06-26 follow-up diagnostics:
 - `renderdoccmd inject --PID=<chrome-gpu-pid>` is not a Linux workaround.

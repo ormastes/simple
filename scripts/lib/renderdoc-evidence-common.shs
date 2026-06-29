@@ -471,6 +471,34 @@ rdoc_validate_rdc_magic() {
     return 1
 }
 
+rdoc_emit_chromium_gpu_process_exit_metadata() {
+    log_path="$1"
+
+    if [ "$log_path" = "" ] || [ ! -s "$log_path" ]; then
+        echo "rdoc_chromium_gpu_process_exit_status=not-recorded"
+        echo "rdoc_chromium_gpu_process_exit_count=0"
+        echo "rdoc_chromium_gpu_process_exit_codes="
+        echo "rdoc_chromium_gpu_process_exit_reason="
+        return 0
+    fi
+
+    exit_lines="$(grep -E 'GPU process exited unexpectedly: exit_code=' "$log_path" 2>/dev/null || true)"
+    if [ "$exit_lines" = "" ]; then
+        echo "rdoc_chromium_gpu_process_exit_status=pass"
+        echo "rdoc_chromium_gpu_process_exit_count=0"
+        echo "rdoc_chromium_gpu_process_exit_codes="
+        echo "rdoc_chromium_gpu_process_exit_reason=pass"
+        return 0
+    fi
+
+    exit_count="$(printf '%s\n' "$exit_lines" | sed '/^$/d' | wc -l | tr -d ' ')"
+    exit_codes="$(printf '%s\n' "$exit_lines" | sed -n 's/.*exit_code=\([0-9][0-9]*\).*/\1/p' | sort -u | paste -sd, -)"
+    echo "rdoc_chromium_gpu_process_exit_status=fail"
+    echo "rdoc_chromium_gpu_process_exit_count=$exit_count"
+    echo "rdoc_chromium_gpu_process_exit_codes=$exit_codes"
+    echo "rdoc_chromium_gpu_process_exit_reason=gpu-process-exited-unexpectedly"
+}
+
 rdoc_emit_simple_runtime_metadata() {
     log_path="$1"
     if [ -s "$log_path" ]; then
@@ -818,6 +846,7 @@ rdoc_capture_html() {
         fi
     fi
     sed -n '1,160p' "$out_dir/renderdoc-html.log"
+    rdoc_emit_chromium_gpu_process_exit_metadata "$out_dir/renderdoc-html.log" | tee -a "$env_path"
     rdc_file="$(find "$out_dir" -name '*.rdc' 2>/dev/null | head -1)"
     tmp_env="$out_dir/evidence.status.env"
     set +e
@@ -969,6 +998,7 @@ rdoc_capture_electron_html() {
         echo "rdoc_electron_launch_timed_out=false" | tee -a "$env_path"
     fi
     sed -n '1,160p' "$out_dir/renderdoc-electron-html.log"
+    rdoc_emit_chromium_gpu_process_exit_metadata "$out_dir/renderdoc-electron-html.log" | tee -a "$env_path"
     rdoc_emit_electron_argb_metadata "$out_dir/electron_argb.json" "$width" "$height" >>"$env_path"
     rdc_file="$(find "$out_dir" -name '*.rdc' 2>/dev/null | head -1)"
     tmp_env="$out_dir/evidence.status.env"
