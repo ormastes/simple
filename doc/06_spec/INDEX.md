@@ -16,5 +16,5 @@
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [MCP Context/Ponytail Dispatch Execution Specification](test/02_integration/app/mcp_context_ponytail_dispatch_spec.md) | Minimal | N/A | 6 | 20% | 21 lines |
+| [MCP Context/Ponytail Dispatch Execution Specification](test/02_integration/app/mcp_context_ponytail_dispatch_spec.md) | Minimal | N/A | 7 | 20% | 21 lines |
 

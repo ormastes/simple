@@ -29,7 +29,7 @@ mcp_context_ponytail_dispatch_spec -> lib
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+| 7 | 7 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -132,6 +132,54 @@ expect(response.split("sql_dispatch_broad").len()).to_equal(1)
 
 </details>
 
+#### renders MCP context and Ponytail absence without internal markers
+
+- dir create all
+- file write
+-  expect absence marker hidden
+-  expect absence marker hidden
+-  expect absence marker hidden
+-  expect absence marker hidden
+-  expect absence marker hidden
+-  expect absence marker hidden
+-  expect absence marker hidden
+-  expect absence marker hidden
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 23 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+dir_create_all("build/test/mcp_context_ponytail_dispatch")
+val clean_path = "build/test/mcp_context_ponytail_dispatch/absence_clean.spl"
+file_write(clean_path, "fn clean_marker() -> text:\n    \"absence_safe_context_marker\"\n")
+
+val context_args = "{\"file\":\"" + clean_path + "\",\"target\":\"clean_marker\",\"format\":\"text\"}"
+val app_context = dispatch_tool_content("simple_context", context_args)
+val lower_context = lower_handle_simple_context("lower-absence-context", context_args)
+expect(app_context).to_contain("status: ready")
+expect(lower_context).to_contain("status: ready")
+_expect_absence_marker_hidden(app_context)
+_expect_absence_marker_hidden(lower_context)
+
+val missing_context_args = """{"file":"build/test/mcp_context_ponytail_dispatch/missing_context.spl","format":"text"}"""
+_expect_absence_marker_hidden(dispatch_tool_content("simple_context", missing_context_args))
+_expect_absence_marker_hidden(lower_handle_simple_context("lower-missing-context", missing_context_args))
+
+val ponytail_args = "{\"file\":\"" + clean_path + "\",\"mode\":\"audit\",\"format\":\"text\"}"
+_expect_absence_marker_hidden(dispatch_tool_content("simple_ponytail", ponytail_args))
+_expect_absence_marker_hidden(lower_handle_simple_ponytail("lower-absence-ponytail", ponytail_args))
+
+val missing_ponytail_args = """{"file":"build/test/mcp_context_ponytail_dispatch/missing_ponytail.spl","mode":"audit","format":"text"}"""
+_expect_absence_marker_hidden(dispatch_tool_content("simple_ponytail", missing_ponytail_args))
+_expect_absence_marker_hidden(lower_handle_simple_ponytail("lower-missing-ponytail", missing_ponytail_args))
+```
+
+</details>
+
 #### simple_ponytail
 
 #### executes through the app MCP dispatcher and returns an audit report
@@ -213,8 +261,8 @@ expect(response).to_contain("source: src/lib/nogc_async_mut/mcp/main_lazy.spl")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 7 |
+| Active scenarios | 7 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

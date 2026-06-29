@@ -3,7 +3,7 @@
 - status: `pass`
 - reason: `repo_local_replacement_surfaces_verified`
 - scope: `repo_local_simple_owned_surfaces`
-- required_gates: `mimic_evidence,execution_spec,execution_sql_dispatch,execution_live_tools_list,execution_lower_tools_list,execution_lower_context,execution_lower_ponytail,generated_execution_manual,generated_system_manual,wrapper_manifest,guide_replacement,guide_context,guide_ponytail,guide_sql,architecture_contract,architecture_no_parallel,requirements_sql,requirements_mcp,app_context_table,app_context_sql,app_context_filter,app_ponytail_table,app_context_dispatch,app_ponytail_dispatch,app_context_sourceless,app_ponytail_handler,lower_context_schema,lower_context_sql,lower_context_filter,lower_ponytail_schema,lower_context_dispatch,lower_ponytail_dispatch,lower_context_sourceless,lower_context_filter_handler,lower_ponytail_handler`
+- required_gates: `mimic_evidence,execution_spec,execution_sql_dispatch,execution_public_absence_runtime,execution_live_tools_list,execution_lower_tools_list,execution_lower_context,execution_lower_ponytail,generated_execution_manual,generated_system_manual,wrapper_manifest,guide_replacement,guide_context,guide_ponytail,guide_sql,architecture_contract,architecture_no_parallel,requirements_sql,requirements_mcp,app_context_table,app_context_sql,app_context_filter,app_ponytail_table,app_context_dispatch,app_ponytail_dispatch,app_context_sourceless,app_ponytail_handler,lower_context_schema,lower_context_sql,lower_context_filter,lower_ponytail_schema,lower_context_dispatch,lower_ponytail_dispatch,lower_context_sourceless,lower_context_filter_handler,lower_ponytail_handler`
 - blocked_gates: `none`
 - primary_blocked_gate: `none`
 - surface_check_count: `28`
@@ -16,17 +16,18 @@
 - mimic_log_sha256: `39121936f29d4d543d55c593965da75296ab8a08ba4dacf35d347126919c6b85`
 - execution_spec_status: `pass`
 - execution_sql_dispatch_status: `pass`
+- execution_public_absence_runtime_status: `pass`
 - execution_live_tools_list_status: `pass`
 - execution_lower_tools_list_status: `pass`
 - execution_lower_context_status: `pass`
 - execution_lower_ponytail_status: `pass`
 - execution_spec_log: `build/llm_tooling_context_ponytail_full_replacement/mcp_context_ponytail_dispatch_spec.log`
 - execution_spec_log_size: `1458`
-- execution_spec_log_sha256: `6965f67673f77e84dd7356d933f5d5ba7ba81bcb14faf68dccee54f8b22fd6fc`
+- execution_spec_log_sha256: `f38b9cc796ae35dc7fb14cfa1bbd704e6ba46558600e7b25c9da1877aa55b23e`
 - surface_manifest: `build/llm_tooling_context_ponytail_full_replacement/replacement_surface_manifest.tsv`
 - surface_manifest_count: `15`
-- surface_manifest_size: `1900`
-- surface_manifest_sha256: `658756d0887db59ac9c57eee6739d032c930c42555a15b622b4312c18ad279da`
+- surface_manifest_size: `1901`
+- surface_manifest_sha256: `0a922de9859a2224c04272830af9a4be03a86780452ffabdde38523e5238f0ab`
 - failures: `none`
 - next_action: `strict context/Ponytail full-replacement evidence is ready`
 - env: `build/llm_tooling_context_ponytail_full_replacement/evidence.env`
