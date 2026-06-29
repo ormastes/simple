@@ -14,7 +14,7 @@
 - surface_manifest: `build/llm_finetune_acceptance/finetune_acceptance_surface_manifest.tsv`
 - surface_manifest_count: `9`
 - surface_manifest_size: `1206`
-- surface_manifest_sha256: `3f927a7b72aaf9f0d0706cbdcc7db38e848738d2b7a87c30965f424ddedcd919`
+- surface_manifest_sha256: `1e7ebb3b2c08d991732f1d7542df4d154eefe2fc183d556ffd5717f1daa1bb94`
 - acceptance_allowed: `false`
 - training_allowed: `false`
 - upstream_retry6_result: `BLOCKED_UPSTREAM_LICENSED_DATA_NOT_READY`
