@@ -17,10 +17,7 @@ crash recovery, garbage collection), a Flash Interface Layer (ONFI NAND device +
 ECC + bad-block), and an NVMe controller front end (admin queue + multiple IO
 queues). The modules live under examples/ and are exercised here through the real
 CLI (`bin/simple run`) as subprocesses, asserting the operator-visible PASS
-evidence. (The aggregated unit self-test suite is gated separately by `bin/simple run
-.../fw/test_fw.spl` per fw/CONVENTIONS.md; this system spec covers the end-to-end,
-controller, production-hardening, and formal scenarios.)
-Run: `bin/simple test test/03_system/app/nvme_firmware/nvme_firmware_simulation_spec.spl`.
+evidence. Run: `bin/simple test test/03_system/app/nvme_firmware/nvme_firmware_simulation_spec.spl`.
 """
 
 use std.spec.*
@@ -33,6 +30,27 @@ fn _run(file: text) -> (text, text, i64):
 
 fn _lean(file: text) -> (text, text, i64):
     process_run("/bin/sh", ["-c", "export PATH=\"$HOME/.elan/bin:$PATH\"; lean " + file + " && echo LEAN_OK"])
+
+describe "NVMe firmware: layered self-tests (HIL / FTL / FIL + controller)":
+    """
+    Every layer's self-tests run as one suite covering the flash interface (NAND,
+    ECC, bad-block, ONFI device), the translation layer (map, band, journal, GC),
+    and the host interface plus the NVMe admin/IO-queue controller.
+    """
+
+    it "passes the full firmware self-test suite":
+        step("Run the aggregated firmware self-test suite")
+        val (out, err, code) = _run(FW + "/test_fw.spl")
+        expect(code).to_equal(0)
+
+        step("Confirm each layer's section ran")
+        expect(out).to_contain("FIL (flash interface)")
+        expect(out).to_contain("FTL (translation)")
+        expect(out).to_contain("HIL (host interface)")
+        expect(out).to_contain("NVMe controller (admin + multi IO queue)")
+
+        step("Confirm the suite reports overall PASS")
+        expect(out).to_contain("ALL FIRMWARE SELF-TESTS PASS")
 
 describe "NVMe firmware: end-to-end SSD lifecycle":
     """
