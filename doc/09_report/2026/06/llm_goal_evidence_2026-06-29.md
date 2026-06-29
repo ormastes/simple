@@ -44,10 +44,13 @@
 
 | lane | next_action |
 |------|-------------|
+| context_ponytail | `run --strict-host on a configured host when full context/Ponytail replacement completion evidence is required` |
+| dashboard | `run --strict-host on a configured host when live authenticated dashboard completion evidence is required` |
 | vllm_host | `install or expose the local vllm executable, then rerun the strict vLLM host probe` |
 | svllm_local | `run --strict-host on a configured native svLLM host when native streaming completion evidence is required` |
 | torch_optimizer | `build or install the Simple runtime with libtorch symbols available, then rerun the strict Torch optimizer probe` |
 | finetune_guard | `complete retry6 training/eval gate before normal acceptance review` |
+| public_absence | `rerun the public absence rendering guard after public manual or dashboard wording changes` |
 
 ## Replacement, Dashboard, Host, svLLM, Torch, And Acceptance Details
 

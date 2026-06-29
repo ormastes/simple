@@ -230,7 +230,8 @@ current mode. It also copies focused blocker details into
 and fine-tune lanes so operators can triage strict failures from the aggregate
 report without opening every focused env first. It also writes
 `llm_goal_evidence_<lane>_next_action` and a report `Next Actions` table for
-those lanes. The detail table also includes
+all aggregate lanes, including context/Ponytail replacement, live dashboard,
+host runtime, fine-tune, and public absence rendering triage. The detail table also includes
 svLLM native streaming subfields, Torch optimizer subfields, and fine-tune
 acceptance subfields needed to distinguish missing native streaming support, a
 missing host runtime, a failed optimizer step, and a blocked retry/eval gate

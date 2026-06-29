@@ -804,3 +804,9 @@ The aggregate now promotes next actions to first-class
 `llm_goal_evidence_<lane>_next_action` env fields and a `Next Actions` report
 table for vLLM, svLLM, Torch optimizer, and fine-tune. This makes the strict
 host handoff actionable without parsing the longer detail strings.
+
+The aggregate `Next Actions` table now covers every lane: context/Ponytail
+replacement, live dashboard, vLLM, svLLM, Torch optimizer, fine-tune, and public
+absence rendering. Default mode explicitly points context/Ponytail and dashboard
+at `--strict-host` when completion evidence is required; strict mode points
+failed replacement and live-dashboard lanes at their focused wrappers.
