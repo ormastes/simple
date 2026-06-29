@@ -106,9 +106,9 @@ sh scripts/check/check-html-css-rendering-manifest-traceability.shs
    - Expected: tag_manifest_only_count equals `0`
    - Expected: tag_manifest_only equals ``
    - Expected: tag_missing equals ``
-   - Expected: css_count equals `233`
-   - Expected: css_covered equals `233`
-   - Expected: css_covered_names.split(",").len() equals `233`
+   - Expected: css_count equals `234`
+   - Expected: css_covered equals `234`
+   - Expected: css_covered_names.split(",").len() equals `234`
    - Expected: css_missing equals ``
    - Expected: manifest_cases equals `50`
    - Expected: required_manifest_cases equals `50`
@@ -119,7 +119,7 @@ sh scripts/check/check-html-css-rendering-manifest-traceability.shs
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 61 lines folded for reproduction.
+Runnable source: 62 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -136,7 +136,7 @@ expect(evidence).to_contain("html_css_rendering_manifest_traceability_manifest=t
 expect(evidence).to_contain("html_css_rendering_manifest_traceability_fixture=scripts/check/check-electron-simple-web-layout-bitmap-evidence.shs")
 expect(evidence).to_contain("html_css_rendering_manifest_traceability_css_property_source=scripts/check/check-html-css-sspec-traceability.shs")
 expect(evidence).to_contain("html_css_rendering_manifest_traceability_css_property_source_status=pass")
-expect(evidence).to_contain("html_css_rendering_manifest_traceability_css_property_source_count=233")
+expect(evidence).to_contain("html_css_rendering_manifest_traceability_css_property_source_count=234")
 
 val tag_count = _value_of(evidence, "html_css_rendering_manifest_traceability_html_tag_count")
 val tag_covered = _value_of(evidence, "html_css_rendering_manifest_traceability_html_tag_covered_count")
@@ -162,18 +162,19 @@ expect(tag_fixture_covered).to_equal("105")
 expect(tag_manifest_only_count).to_equal("0")
 expect(tag_manifest_only).to_equal("")
 expect(tag_missing).to_equal("")
-expect(css_count).to_equal("233")
-expect(css_covered).to_equal("233")
+expect(css_count).to_equal("234")
+expect(css_covered).to_equal("234")
 expect(css_covered_names).to_contain("align-content")
 expect(css_covered_names).to_contain("align-items")
 expect(css_covered_names).to_contain("align-self")
 expect(css_covered_names).to_contain("display")
+expect(css_covered_names).to_contain("filter")
 expect(css_covered_names).to_contain("justify-content")
 expect(css_covered_names).to_contain("place-content")
 expect(css_covered_names).to_contain("border-style")
 expect(css_covered_names).to_contain("transition-property")
 expect(css_covered_names).to_contain("translate")
-expect(css_covered_names.split(",").len()).to_equal(233)
+expect(css_covered_names.split(",").len()).to_equal(234)
 expect(css_missing).to_equal("")
 expect(manifest_cases).to_equal("50")
 expect(required_manifest_cases).to_equal("50")
@@ -183,7 +184,7 @@ step("Verify the operator report was written")
 val report = file_read("build/test-html-css-rendering-manifest-traceability/report.md") ?? ""
 expect(report).to_contain("# HTML/CSS Rendering Manifest Traceability")
 expect(report).to_contain("- HTML tags: 105/105")
-expect(report).to_contain("- implemented CSS properties: 233/233")
+expect(report).to_contain("- implemented CSS properties: 234/234")
 ```
 
 </details>

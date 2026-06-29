@@ -27,7 +27,7 @@ simple_web_generated_html_css_combinations_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 5 | 5 | 0 | 0 |
+| 6 | 6 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -223,12 +223,40 @@ expect(_pixel_at(pixels, 96, 24, 8)).to_equal(0xFFEF4444u32)
 
 </details>
 
+#### renders filter opacity through blended box paint
+
+- Render a block using filter:opacity over a known background color
+- Assert the filter opacity path blends foreground and background pixels
+   - Expected: pixels.len() equals `80 * 40`
+   - Expected: _pixel_at(pixels, 80, 5, 5) equals `0xFFE597A1u32`
+   - Expected: _pixel_at(pixels, 80, 30, 5) equals `0xFFDBEAFEu32`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Render a block using filter:opacity over a known background color")
+val html = "<html><head><style>html,body{margin:0;padding:0;background-color:#ffffff}.stage{width:64px;height:32px;background-color:#dbeafe}.chip{width:20px;height:12px;background-color:#ef4444;filter:opacity(50%)}</style></head><body><section class='stage'><div class='chip'></div></section></body></html>"
+val pixels = simple_web_render_html_to_pixels(html, 80, 40)
+
+step("Assert the filter opacity path blends foreground and background pixels")
+expect(pixels.len()).to_equal(80 * 40)
+expect(_pixel_at(pixels, 80, 5, 5)).to_equal(0xFFE597A1u32)
+expect(_pixel_at(pixels, 80, 30, 5)).to_equal(0xFFDBEAFEu32)
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 6 |
+| Active scenarios | 6 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
