@@ -603,6 +603,28 @@ fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<Pat
         }
     }
 
+    // Variant overlay (`variants/`) search — after relative/parent resolution
+    // fails, before stdlib. Stable imports only (never crate.*). Roots come from
+    // config/var.sdn + variants/__init__.spl and are empty (inert) when the
+    // overlay is not configured. Mirrors the namespace resolver's Strategy 0
+    // (module_resolver/resolution.rs) so `run` and compiled paths agree.
+    if parts.first().map(|s| s != "crate").unwrap_or(false) {
+        if let Some(ref root) = project_root {
+            for var_root in crate::module_resolver::var_overlay::compute_var_roots(root) {
+                let mut cand = var_root.join(&relative);
+                cand.set_extension("spl");
+                if cand.exists() && cand.is_file() {
+                    return Ok(cand);
+                }
+                let mut init = var_root.join(&relative);
+                init.push("__init__.spl");
+                if init.exists() && init.is_file() {
+                    return Ok(init);
+                }
+            }
+        }
+    }
+
     // Stdlib search: try canonical paths first, then legacy.
     // Skip stdlib search entirely for non-stdlib imports (parts[0] != std/lib/std_lib).
     let is_stdlib = is_stdlib_import(parts);

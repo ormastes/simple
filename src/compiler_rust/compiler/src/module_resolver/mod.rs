@@ -15,6 +15,7 @@
 mod manifest;
 mod resolution;
 mod types;
+pub(crate) mod var_overlay;
 
 // Re-export public types
 pub use types::{

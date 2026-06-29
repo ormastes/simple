@@ -272,6 +272,7 @@ impl ModuleResolver {
     /// Create a new module resolver for a project
     pub fn new(project_root: PathBuf, source_root: PathBuf) -> Self {
         let stdlib_root = detect_stdlib_root(&project_root, &source_root);
+        let var_roots = super::var_overlay::compute_var_roots(&project_root);
 
         Self {
             type_root: project_root.join("src").join("type"),
@@ -285,7 +286,7 @@ impl ModuleResolver {
             profiles: HashMap::new(),
             import_graph: ImportGraph::new(),
             project_symbols: ProjectSymbols::new(),
-            var_roots: Vec::new(),
+            var_roots,
         }
     }
 
@@ -315,6 +316,7 @@ impl ModuleResolver {
             parent.clone()
         };
         let stdlib_root = detect_stdlib_root(&project_root, &parent);
+        let var_roots = super::var_overlay::compute_var_roots(&project_root);
 
         Self {
             type_root: project_root.join("src").join("type"),
@@ -328,7 +330,7 @@ impl ModuleResolver {
             profiles: HashMap::new(),
             import_graph: ImportGraph::new(),
             project_symbols: ProjectSymbols::new(),
-            var_roots: Vec::new(),
+            var_roots,
         }
     }
 
