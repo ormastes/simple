@@ -783,3 +783,9 @@ The aggregate now records `llm_goal_evidence_<lane>_producer_exit` and
 `llm_goal_evidence_<lane>_producer_log`, and shows both values in the lane
 table. Strict producer failures and timeouts can be distinguished from
 downstream strict lane failures without hunting for the producer log path first.
+
+The aggregate now also forwards `llm_goal_evidence_svllm_local_detail`.
+Strict-native svLLM failures show the native streaming status, blocker reason,
+local readiness, native `read_range`, pinned-buffer, device-staging, and local
+file-backed byte-read states in the aggregate report instead of collapsing the
+detail row to `n/a`.

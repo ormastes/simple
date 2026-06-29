@@ -168,6 +168,11 @@ guard-only pass in default mode. The aggregate env also records
 `llm_goal_evidence_dashboard_detail` for dashboard live-readiness state,
 `llm_goal_evidence_vllm_host_detail` for local
 vLLM/GPU/preflight/endpoint/model statuses, and
+`llm_goal_evidence_svllm_local_detail` for native svLLM streaming status,
+native blocker reason, local readiness, native `read_range`, pinned-buffer,
+device-staging, and local file-backed byte-read states. In default mode, the
+native fields report `not_required` / `not_collected`; strict host mode
+generates and consumes the native streaming evidence. It also records
 `llm_goal_evidence_torch_optimizer_detail` for Simple/libtorch CUDA optimizer
 status, host/runtime gates, gradient handle, optimizer-step attempt, and
 before/after parameter sums. It also records
@@ -216,9 +221,10 @@ current mode. It also copies focused blocker details into
 `llm_goal_evidence_<lane>_blocker_reason` for the vLLM, svLLM, Torch optimizer,
 and fine-tune lanes so operators can triage strict failures from the aggregate
 report without opening every focused env first. The detail table also includes
-the Torch optimizer and fine-tune acceptance subfields needed to distinguish a
-missing host runtime from a failed optimizer step, and a blocked retry/eval
-gate from a licensing, safety, deployment, or app-handoff blocker.
+svLLM native streaming subfields, Torch optimizer subfields, and fine-tune
+acceptance subfields needed to distinguish missing native streaming support, a
+missing host runtime, a failed optimizer step, and a blocked retry/eval gate
+from a licensing, safety, deployment, or app-handoff blocker.
 
 Use the focused public-rendering guard after changing runtime manuals,
 dashboard JSONL wording, or evidence docs:

@@ -40,13 +40,14 @@
 | torch_optimizer | `libtorch,cuda,parameter_cuda,autograd_gradient,optimizer_step_decreases_parameter_sum` | `libtorch` | `libtorch_unavailable` |
 | finetune_guard | `retry6_training_eval,training_allowed,model_manifest,eval_result,target_eval,decision,license,safety,deployment,app_handoff` | `retry6_training_eval|training_allowed|model_manifest|eval_result|target_eval|decision|license|safety|deployment|app_handoff` | `BLOCKED_RETRY6_NOT_READY` |
 
-## Replacement, Dashboard, Host, Torch, And Acceptance Details
+## Replacement, Dashboard, Host, svLLM, Torch, And Acceptance Details
 
 | lane | details |
 |------|---------|
 | context_ponytail | `mimic_status=pass;full_replacement_status=not_required;full_replacement_reason=default_local_mimic_evidence_only;replacement_status=not_collected;replacement_scope=strict_host_only;replacement_failures=not_collected` |
 | dashboard | `dashboard_status=pass;live_status=not_required;live_reason=default_route_and_collector_evidence_only;live_wrapper_status=not_collected;live_wrapper_scope=strict_host_only;live_wrapper_failures=not_collected` |
 | vllm_host | `local_vllm_status=missing;local_gpu_status=available;readiness_status=skipped;preflight_status=skipped;endpoint_status=not_checked;models_status=not_fetched` |
+| svllm_local | `native_status=not_required;native_reason=default_local_readiness_only;local_readiness_status=n/a;default_readiness_status=pass;read_range_status=not_collected;pinned_buffer_status=not_collected;device_staging_status=not_collected;local_read_bytes_status=not_collected` |
 | torch_optimizer | `torch_status=unavailable;torch_reason=libtorch_unavailable;torch_available=false;cuda_available=false;parameter_is_cuda=missing;grad_handle=missing;optimizer_step_attempted=false;before_sum=missing;after_sum=missing;wrapper_exit=0` |
 | finetune_guard | `acceptance_status=fail;acceptance_reason=BLOCKED_RETRY6_NOT_READY;gate_exit=0;gate_status=WARN retry7-acceptance-gate;blocked_gates=retry6_training_eval|training_allowed|model_manifest|eval_result|target_eval|decision|license|safety|deployment|app_handoff;training_allowed=false;model_manifest_exists=false;eval_result_exists=false;target_eval_reached=false;decision_status=retry-implementation;license_constraints=pending;safety_eval=not-run;deployment_evidence=not-deployable;app_handoff_doc_ready=false;next_action=complete retry6 training/eval gate before normal acceptance review` |
 
