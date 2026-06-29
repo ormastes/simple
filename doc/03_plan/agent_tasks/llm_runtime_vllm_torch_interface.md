@@ -810,3 +810,19 @@ replacement, live dashboard, vLLM, svLLM, Torch optimizer, fine-tune, and public
 absence rendering. Default mode explicitly points context/Ponytail and dashboard
 at `--strict-host` when completion evidence is required; strict mode points
 failed replacement and live-dashboard lanes at their focused wrappers.
+
+## 2026-06-29 Strict Context/Dashboard Blocker Metadata
+
+`check-llm-tooling-context-ponytail-full-replacement.shs` and
+`check-llm-dashboard-live-evidence.shs` now emit wrapper-local
+`required_gates`, `blocked_gates`, and `next_action` fields. The aggregate
+consumes those fields in strict mode, so replacement-surface failures and live
+dashboard route/auth failures are visible in the same blocker table and detail
+rows as vLLM, svLLM, Torch optimizer, and fine-tune blockers.
+
+Normal-review and Spark sidecars both flagged that route/source checks were not
+live authenticated dashboard proof. The dashboard live wrapper now requires a
+separate `LLM_DASHBOARD_LIVE_HTTP_EVIDENCE_ENV` with
+`llm_dashboard_live_http_status=pass`; without it, strict dashboard completion
+fails with `live_http_authenticated_request` blocked instead of treating route
+contracts as a live operator-dashboard pass.

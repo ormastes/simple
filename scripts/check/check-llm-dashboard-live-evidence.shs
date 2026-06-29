@@ -10,6 +10,7 @@ OUT_ENV="$BUILD_DIR/evidence.env"
 DASHBOARD_BUILD_DIR="$BUILD_DIR/dashboard"
 DASHBOARD_REPORT="$BUILD_DIR/dashboard_report.md"
 DASHBOARD_ENV="$DASHBOARD_BUILD_DIR/evidence.env"
+LIVE_HTTP_ENV="${LLM_DASHBOARD_LIVE_HTTP_EVIDENCE_ENV:-build/llm_dashboard_live_http/evidence.env}"
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
 rm -f "$OUT_ENV" "$REPORT_PATH" "$DASHBOARD_REPORT"
@@ -17,6 +18,7 @@ rm -f "$OUT_ENV" "$REPORT_PATH" "$DASHBOARD_REPORT"
 status="pass"
 reason="dashboard_live_routes_verified"
 failures=""
+required_gates="dashboard_evidence,route_spec_html,route_spec_auth,route_spec_api,route_spec_side_effect,route_spec_owner,agent_spec_auth,agent_spec_render,agent_spec_prefix,server_route,server_agents_route,server_agents_render,server_boundary,server_execution,guide_live,guide_api,guide_agents,runtime_plan,live_http_authenticated_request"
 
 record_failure() {
     if [ -z "$failures" ]; then
@@ -65,17 +67,46 @@ require_contains guide_api doc/07_guide/app/dashboard.md "/api/vllm/control"
 require_contains guide_agents doc/07_guide/app/dashboard.md "/agents"
 require_contains runtime_plan doc/03_plan/agent_tasks/llm_runtime_vllm_torch_interface.md "Wire side-effect dashboard actions through runtime-owner execution JSONL"
 
+live_http_status="missing"
+live_http_reason="missing_live_http_evidence"
+live_http_dashboard_status="not_collected"
+live_http_control_status="not_collected"
+if [ -f "$LIVE_HTTP_ENV" ]; then
+    live_http_status="$(sed -n 's/^llm_dashboard_live_http_status=//p' "$LIVE_HTTP_ENV" | tail -n 1)"
+    live_http_reason="$(sed -n 's/^llm_dashboard_live_http_reason=//p' "$LIVE_HTTP_ENV" | tail -n 1)"
+    live_http_dashboard_status="$(sed -n 's/^llm_dashboard_live_http_dashboard_status=//p' "$LIVE_HTTP_ENV" | tail -n 1)"
+    live_http_control_status="$(sed -n 's/^llm_dashboard_live_http_control_status=//p' "$LIVE_HTTP_ENV" | tail -n 1)"
+fi
+if [ "$live_http_status" != "pass" ]; then
+    record_failure "live_http_authenticated_request:${live_http_reason:-not_passed}"
+fi
+
 if [ "$status" != "pass" ]; then
-    reason="dashboard_live_route_gap"
+    reason="dashboard_live_http_or_route_gap"
+fi
+blocked_gates="$failures"
+next_action="strict live dashboard evidence is ready"
+if [ -z "$blocked_gates" ]; then
+    blocked_gates="none"
+else
+    next_action="resolve live dashboard evidence failures: $blocked_gates"
 fi
 
 {
     printf '%s\n' "llm_dashboard_live_status=$status"
     printf '%s\n' "llm_dashboard_live_reason=$reason"
     printf '%s\n' "llm_dashboard_live_scope=authenticated_dashboard_route_execution"
+    printf '%s\n' "llm_dashboard_live_required_gates=$required_gates"
+    printf '%s\n' "llm_dashboard_live_blocked_gates=$blocked_gates"
     printf '%s\n' "llm_dashboard_live_dashboard_evidence_status=$dashboard_status"
     printf '%s\n' "llm_dashboard_live_dashboard_evidence_env=$DASHBOARD_ENV"
+    printf '%s\n' "llm_dashboard_live_http_evidence_env=$LIVE_HTTP_ENV"
+    printf '%s\n' "llm_dashboard_live_http_status=${live_http_status:-missing}"
+    printf '%s\n' "llm_dashboard_live_http_reason=${live_http_reason:-missing_live_http_evidence}"
+    printf '%s\n' "llm_dashboard_live_http_dashboard_status=${live_http_dashboard_status:-not_collected}"
+    printf '%s\n' "llm_dashboard_live_http_control_status=${live_http_control_status:-not_collected}"
     printf '%s\n' "llm_dashboard_live_failures=$failures"
+    printf '%s\n' "llm_dashboard_live_next_action=$next_action"
 } >"$OUT_ENV"
 
 {
@@ -83,16 +114,24 @@ fi
     printf '%s\n' "- status: \`$status\`"
     printf '%s\n' "- reason: \`$reason\`"
     printf '%s\n' "- scope: \`authenticated_dashboard_route_execution\`"
+    printf '%s\n' "- required_gates: \`$required_gates\`"
+    printf '%s\n' "- blocked_gates: \`$blocked_gates\`"
     printf '%s\n' "- dashboard_evidence_status: \`$dashboard_status\`"
     printf '%s\n' "- dashboard_evidence_env: \`$DASHBOARD_ENV\`"
+    printf '%s\n' "- live_http_env: \`$LIVE_HTTP_ENV\`"
+    printf '%s\n' "- live_http_status: \`${live_http_status:-missing}\`"
+    printf '%s\n' "- live_http_reason: \`${live_http_reason:-missing_live_http_evidence}\`"
+    printf '%s\n' "- live_http_dashboard_status: \`${live_http_dashboard_status:-not_collected}\`"
+    printf '%s\n' "- live_http_control_status: \`${live_http_control_status:-not_collected}\`"
     if [ -n "$failures" ]; then
         printf '%s\n' "- failures: \`$failures\`"
     else
         printf '%s\n' "- failures: \`none\`"
     fi
+    printf '%s\n' "- next_action: \`$next_action\`"
     printf '%s\n' "- env: \`$OUT_ENV\`"
     printf '\n'
-    printf 'This evidence proves authenticated dashboard HTML, `/agents` route rendering, and `/api/vllm/control` route execution through the checked-in DashboardServer surface, including auth rejection, preflight JSONL, side-effect action routing to the runtime owner, and safe missing-resource execution JSONL. It does not claim live vLLM serving; that remains the vLLM host strict lane.\n'
+    printf 'This evidence proves authenticated dashboard route contracts through checked-in specs and source surfaces, then requires separate live HTTP evidence from `LLM_DASHBOARD_LIVE_HTTP_EVIDENCE_ENV` with `llm_dashboard_live_http_status=pass`. Without that env, strict dashboard completion stays failed instead of treating route-contract checks as live operator-dashboard proof. It does not claim live vLLM serving; that remains the vLLM host strict lane.\n'
 } >"$REPORT_PATH"
 
 if [ "$status" = "pass" ]; then

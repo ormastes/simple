@@ -35,6 +35,8 @@
 
 | lane | required_gates | blocked_gates | reason |
 |------|----------------|---------------|--------|
+| context_ponytail | `mimic_evidence` | `none` | `default_mimic_evidence_only` |
+| dashboard | `route_and_collector_evidence` | `none` | `default_route_and_collector_evidence_only` |
 | vllm_host | `local_vllm,local_gpu,serve_preflight,endpoint_reachable,models_listed` | `local_vllm|serve_preflight|endpoint_reachable|models_listed` | `missing_local_vllm` |
 | svllm_local | `local_readiness` | `none` | `default_local_readiness_only` |
 | torch_optimizer | `libtorch,cuda,parameter_cuda,autograd_gradient,optimizer_step_decreases_parameter_sum` | `libtorch` | `libtorch_unavailable` |
@@ -56,8 +58,8 @@
 
 | lane | details |
 |------|---------|
-| context_ponytail | `mimic_status=pass;full_replacement_status=not_required;full_replacement_reason=default_local_mimic_evidence_only;replacement_status=not_collected;replacement_scope=strict_host_only;replacement_failures=not_collected` |
-| dashboard | `dashboard_status=pass;live_status=not_required;live_reason=default_route_and_collector_evidence_only;live_wrapper_status=not_collected;live_wrapper_scope=strict_host_only;live_wrapper_failures=not_collected` |
+| context_ponytail | `mimic_status=pass;full_replacement_status=not_required;full_replacement_reason=default_local_mimic_evidence_only;replacement_status=not_collected;replacement_scope=strict_host_only;replacement_required_gates=not_collected;replacement_blocked_gates=not_collected;replacement_failures=not_collected;next_action=not_collected` |
+| dashboard | `dashboard_status=pass;live_status=not_required;live_reason=default_route_and_collector_evidence_only;live_wrapper_status=not_collected;live_wrapper_scope=strict_host_only;live_wrapper_required_gates=not_collected;live_wrapper_blocked_gates=not_collected;live_wrapper_failures=not_collected;live_http_status=not_collected;live_http_reason=not_collected;next_action=not_collected` |
 | vllm_host | `local_vllm_status=missing;local_gpu_status=available;readiness_status=skipped;preflight_status=skipped;endpoint_status=not_checked;models_status=not_fetched;next_action=install or expose the local vllm executable, then rerun the strict vLLM host probe` |
 | svllm_local | `native_status=not_required;native_reason=default_local_readiness_only;local_readiness_status=n/a;default_readiness_status=pass;read_range_status=not_collected;pinned_buffer_status=not_collected;device_staging_status=not_collected;local_read_bytes_status=not_collected` |
 | torch_optimizer | `torch_status=unavailable;torch_reason=libtorch_unavailable;torch_available=false;cuda_available=false;parameter_is_cuda=missing;grad_handle=missing;optimizer_step_attempted=false;before_sum=missing;after_sum=missing;wrapper_exit=0;next_action=build or install the Simple runtime with libtorch symbols available, then rerun the strict Torch optimizer probe` |
