@@ -23,6 +23,7 @@ Full completion of all remaining GUI hardening lanes in one edit is not assumed;
 dev-done
 
 ## Log
+- continue-runtime-boundary: runtime_need=live SimpleOS/QEMU WM input proof needs guest-visible PS/2 keyboard polling during the framebuffer capture hold; facade_checked=freestanding x86_64 GUI entry already uses direct port I/O for `rt_port_outb` and no std/app input facade is available in the baremetal entry-closure lane; chosen_path=reuse-existing-freestanding-port-io-boundary with the smallest `rt_port_inb` read in `examples/09_embedded/simple_os/arch/x86_64/gui_entry_engine2d.spl`; rejected_shortcuts=host-only framebuffer mutation, fixture-only pass markers, QMP artifact fabrication, and accepting static screenshot evidence.
 - dev: Created state file with 5 acceptance criteria (type: todo).
 - audit: Current plan has ten open Remaining Work lanes; the smallest next GUI slice is `site_0_google` production glyph paint/compositing.
 - audit: VCS is current with `origin/main` at `f77679210c`; no unpushed commits, but main has dirty files and `/tmp/simple-js-wasm-qemu-audit` contains overlapping process-grant tests.
