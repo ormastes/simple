@@ -12,6 +12,8 @@ LOCAL_BUILD_DIR="$BUILD_DIR/local_readiness"
 LOCAL_REPORT="$BUILD_DIR/local_readiness_report.md"
 LOCAL_ENV="$LOCAL_BUILD_DIR/evidence.env"
 LOCAL_LOG="$BUILD_DIR/local_readiness.log"
+CAPABILITY_PROBE_BUILD_DIR="$BUILD_DIR/capability_probe"
+CAPABILITY_PROBE_REPORT="$BUILD_DIR/capability_probe_report.md"
 LOCAL_SPEC_TIMEOUT_SECONDS="${SVLLM_READINESS_SPEC_TIMEOUT_SECONDS:-120}"
 INPUT_READ_RANGE_STATUS="${SVLLM_NATIVE_READ_RANGE_STATUS:-unsupported}"
 INPUT_PINNED_BUFFER_STATUS="${SVLLM_NATIVE_PINNED_BUFFER_STATUS:-unsupported}"
@@ -20,7 +22,7 @@ CAPABILITY_SOURCE="${SVLLM_NATIVE_CAPABILITY_SOURCE:-env_or_default}"
 CAPABILITY_EVIDENCE_PATH="${SVLLM_NATIVE_CAPABILITY_EVIDENCE_PATH:-}"
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
-rm -f "$OUT_ENV" "$REPORT_PATH" "$SURFACE_MANIFEST" "$LOCAL_REPORT" "$LOCAL_LOG"
+rm -f "$OUT_ENV" "$REPORT_PATH" "$SURFACE_MANIFEST" "$LOCAL_REPORT" "$LOCAL_LOG" "$CAPABILITY_PROBE_REPORT"
 
 status="fail"
 reason="native_read_range_unavailable"
@@ -126,6 +128,20 @@ artifact_value() {
     sed -n "s/^${key}=//p" "$CAPABILITY_EVIDENCE_PATH" 2>/dev/null | tail -n 1
 }
 
+if [ -z "$CAPABILITY_EVIDENCE_PATH" ] && [ "$CAPABILITY_SOURCE" = "env_or_default" ]; then
+    if BUILD_DIR="$CAPABILITY_PROBE_BUILD_DIR" REPORT_PATH="$CAPABILITY_PROBE_REPORT" sh scripts/check/check-llm-runtime-svllm-native-capability-probe.shs >/dev/null 2>&1; then
+        CAPABILITY_EVIDENCE_PATH="$CAPABILITY_PROBE_BUILD_DIR/evidence.env"
+        CAPABILITY_SOURCE="$(sed -n 's/^svllm_native_capability_source=//p' "$CAPABILITY_EVIDENCE_PATH" | tail -n 1)"
+        INPUT_READ_RANGE_STATUS="$(sed -n 's/^svllm_native_capability_read_range_status=//p' "$CAPABILITY_EVIDENCE_PATH" | tail -n 1)"
+        INPUT_PINNED_BUFFER_STATUS="$(sed -n 's/^svllm_native_capability_pinned_buffer_status=//p' "$CAPABILITY_EVIDENCE_PATH" | tail -n 1)"
+        INPUT_DEVICE_STAGING_STATUS="$(sed -n 's/^svllm_native_capability_device_staging_status=//p' "$CAPABILITY_EVIDENCE_PATH" | tail -n 1)"
+        read_range_status="$(normalize_capability_status "$INPUT_READ_RANGE_STATUS")"
+        pinned_buffer_status="$(normalize_capability_status "$INPUT_PINNED_BUFFER_STATUS")"
+        device_staging_status="$(normalize_capability_status "$INPUT_DEVICE_STAGING_STATUS")"
+        capability_provenance_status="ready"
+    fi
+fi
+
 if [ -n "$CAPABILITY_EVIDENCE_PATH" ] && [ -s "$CAPABILITY_EVIDENCE_PATH" ]; then
     capability_evidence_size="$(artifact_size "$CAPABILITY_EVIDENCE_PATH")"
     capability_evidence_mtime="$(stat -c %Y "$CAPABILITY_EVIDENCE_PATH" 2>/dev/null || stat -f %m "$CAPABILITY_EVIDENCE_PATH" 2>/dev/null || printf 'unknown')"
@@ -230,6 +246,7 @@ fi
 {
     for path in \
         scripts/check/check-llm-runtime-svllm-native-streaming-evidence.shs \
+        scripts/check/check-llm-runtime-svllm-native-capability-probe.shs \
         scripts/check/check-llm-runtime-svllm-local-readiness.shs \
         src/lib/gc_async_mut/svllm/model_executor/model_loader/streaming_readiness.spl \
         src/lib/gc_async_mut/svllm/model_executor/model_loader/streamer.spl \
@@ -267,6 +284,9 @@ surface_manifest_sha256="$(artifact_sha256 "$SURFACE_MANIFEST")"
     printf '%s\n' "svllm_native_streaming_capability_evidence_reported_read_range_status=$capability_evidence_read_range_status"
     printf '%s\n' "svllm_native_streaming_capability_evidence_reported_pinned_buffer_status=$capability_evidence_pinned_buffer_status"
     printf '%s\n' "svllm_native_streaming_capability_evidence_reported_device_staging_status=$capability_evidence_device_staging_status"
+    printf '%s\n' "svllm_native_streaming_capability_probe_report=$CAPABILITY_PROBE_REPORT"
+    printf '%s\n' "svllm_native_streaming_capability_probe_report_size=$(artifact_size "$CAPABILITY_PROBE_REPORT")"
+    printf '%s\n' "svllm_native_streaming_capability_probe_report_sha256=$(artifact_sha256 "$CAPABILITY_PROBE_REPORT")"
     printf '%s\n' "svllm_native_streaming_pass_integrity_status=$pass_integrity_status"
     printf '%s\n' "svllm_native_streaming_pass_integrity_reason=$pass_integrity_reason"
     printf '%s\n' "svllm_native_streaming_read_range_status=$read_range_status"
@@ -321,6 +341,9 @@ surface_manifest_sha256="$(artifact_sha256 "$SURFACE_MANIFEST")"
     printf '%s\n' "- capability_evidence_reported_read_range: \`$capability_evidence_read_range_status\`"
     printf '%s\n' "- capability_evidence_reported_pinned_buffer: \`$capability_evidence_pinned_buffer_status\`"
     printf '%s\n' "- capability_evidence_reported_device_staging: \`$capability_evidence_device_staging_status\`"
+    printf '%s\n' "- capability_probe_report: \`$CAPABILITY_PROBE_REPORT\`"
+    printf '%s\n' "- capability_probe_report_size: \`$(artifact_size "$CAPABILITY_PROBE_REPORT")\`"
+    printf '%s\n' "- capability_probe_report_sha256: \`$(artifact_sha256 "$CAPABILITY_PROBE_REPORT")\`"
     printf '%s\n' "- pass_integrity_status: \`$pass_integrity_status\`"
     printf '%s\n' "- pass_integrity_reason: \`$pass_integrity_reason\`"
     printf '%s\n' "- read_range: \`$read_range_status\`"

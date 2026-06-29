@@ -255,7 +255,14 @@ Configured native hosts provide those native capability results through
 `SVLLM_NATIVE_READ_RANGE_STATUS`, `SVLLM_NATIVE_PINNED_BUFFER_STATUS`, and
 `SVLLM_NATIVE_DEVICE_STAGING_STATUS`. Values normalize to `ready`,
 `unsupported`, `unavailable`, or `unchecked`; omitted values default to
-`unsupported`. The native streaming report records
+`unsupported`. When callers do not provide `SVLLM_NATIVE_CAPABILITY_SOURCE` or
+`SVLLM_NATIVE_CAPABILITY_EVIDENCE_PATH`, the native streaming wrapper runs
+`scripts/check/check-llm-runtime-svllm-native-capability-probe.shs` and consumes
+its schema-v1 artifact. That local probe is fail-closed: it records
+`unsupported` for read-range, pinned-buffer, and device-staging support with
+`svllm_native_capability_source=local_simple_svllm_capability_probe`, so reports
+show a probed unsupported state instead of ambiguous missing provenance. The
+native streaming report records
 `svllm_native_streaming_capability_source` and
 `svllm_native_streaming_capability_provenance_status` so reviewers can
 distinguish an explicit host probe from the default fallback. A strict native
@@ -280,8 +287,11 @@ and device-staging statuses. Strict aggregate detail forwards those fields as
 `capability_evidence_reported_pinned_buffer_status`, and
 `capability_evidence_reported_device_staging_status`, so a top-level report can
 prove the artifact matched the claimed native capability inputs without opening
-the nested native evidence env.
-probe event/status/exit, and reported native statuses.
+the nested native evidence env. It also forwards
+`svllm_native_streaming_capability_probe_report`,
+`svllm_native_streaming_capability_probe_report_size`, and
+`svllm_native_streaming_capability_probe_report_sha256` when the local
+fail-closed probe produced the default artifact.
 
 Latest Torch/CUDA host probe:
 `doc/09_report/2026/06/llm_runtime_torch_cuda_host_probe_2026-06-28.md`
@@ -617,12 +627,11 @@ SVLLM_NATIVE_EVIDENCE_ENV=build/llm_runtime_svllm_native_streaming/evidence.env 
 The strict native gate requires the evidence env to report
 `svllm_native_streaming_status=pass`; local file-backed bytes are recorded as
 bring-up evidence but are not enough for native streaming completion. Ready
-native capability env values without a non-default
-`SVLLM_NATIVE_CAPABILITY_SOURCE` fail as `capability_provenance`, and ready
-values without a non-empty `SVLLM_NATIVE_CAPABILITY_EVIDENCE_PATH` fail as
-`capability_evidence`; the artifact must also record the same source string as
-`SVLLM_NATIVE_CAPABILITY_SOURCE`, and strict aggregate detail forwards that
-artifact source as `capability_evidence_source`. Strict local readiness requires both
+native capability env values require matching structured evidence; the artifact
+must record the same source string as `SVLLM_NATIVE_CAPABILITY_SOURCE`, and
+strict aggregate detail forwards that artifact source as
+`capability_evidence_source`. Status-only ready claims fail as
+`capability_evidence`. Strict local readiness requires both
 `svllm_native_streaming_status=pass` and
 `svllm_native_streaming_pass_integrity_status=pass`, so a status-only native env
 cannot satisfy strict completion.
