@@ -35,8 +35,9 @@ impl ModuleResolver:
                 "provide at least one module path segment"
             )
 
-        # Check resolution cache
-        val cache_key = "{segments.join('.')};{from_file}"
+        # Check resolution cache. The active variant fingerprint is part of the
+        # key so a `--var-profile` change cannot reuse a stale resolved path.
+        val cache_key = "{segments.join('.')};{from_file};{self.var_fingerprint}"
         if self.resolution_cache.has(cache_key):
             self.cache_hit_count = self.cache_hit_count + 1
             val cached = self.resolution_cache[cache_key]
@@ -65,6 +66,20 @@ impl ModuleResolver:
                 self.resolution_cache[cache_key] = Some(resolved.path)
                 return Ok(resolved)
             Err(err):
+                # Variant overlay (`variants/`) roots — searched after relative
+                # resolution fails, before stdlib. Stable imports only; never
+                # crate.* (absolute) paths. Roots are in precedence order
+                # (selected before default), each project-root-relative.
+                if segments[0] != "crate":
+                    for var_root in self.var_roots:
+                        val abs_root = path_join(self.project_root, var_root)
+                        match self.resolve_from_base(abs_root, segments, path):
+                            Ok(resolved):
+                                self.resolution_cache[cache_key] = Some(resolved.path)
+                                return Ok(resolved)
+                            Err(_):
+                                pass
+
                 # If relative resolution failed and stdlib is available, try stdlib
                 if segments[0] != "crate":
                     if val Some(stdlib_root) = self.stdlib_root:

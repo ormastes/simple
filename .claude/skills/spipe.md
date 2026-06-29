@@ -714,3 +714,40 @@ reimplement an existing algorithm:
 ```
 bin/simple test path/to/my_spec.spl
 ```
+
+## Var-resolution lanes (`variants/` overlay)
+
+Use this section when a lane touches `variants/` (the resolver-only variant
+overlay), `variants/__init__.spl`, resolver root ordering, variant profile
+selection, default fallback, or DI module selection. Background:
+`doc/03_plan/compiler/module_resolution/var_resolution_plan.md`.
+
+Hard rules:
+
+- **No new grammar.** `var` is the mutable-variable keyword; never make `var.*`
+  or `variants.*` an importable namespace. Source imports stable module names;
+  SDN config selects the active variant.
+- **`variants/` is the on-disk root** (vocabulary stays `var:` / `--var` /
+  `SIMPLE_VAR_*` / `E-VAR*`). Do not reuse `var/` — it is FHS runtime state.
+- Parse `variants/__init__.spl` with the bootstrap-safe line reader
+  (`var_parse_manifest`), not the full SDN parser (resolver precedes it).
+
+Required SSpec coverage before PASS:
+
+- selected variant root resolves before any default root; any selected root
+  before any group/global default root; group `order` breaks selected-vs-selected
+  ties deterministically;
+- group `default`, global `variants/default`, and `src` fallback each covered;
+- missing `default` fails when `default_required: error`; unknown group/value
+  fails; direct `var.*`/`variants.*` import is rejected;
+- DI service declarations keep stable `module:` paths and resolve through the
+  active var profile (DI selects at build time, when the factory module loads);
+- **resolver cache keys include the active var fingerprint** — assert the cache
+  invalidates across `--var-profile` changes in BOTH the Rust seed and the
+  self-hosted Simple resolver (the Simple cache key historically omitted even the
+  SIMD tier — parity is part of acceptance).
+
+Generated manuals must show the active `config/var.sdn`, the candidate root list,
+the selected resolved path, and fallback evidence. A stale
+`doc/07_guide/compiler/module_resolver.md` / `var_resolution.md` or generated
+`doc/06_spec/...` manual is a verify failure, not release cleanup.
