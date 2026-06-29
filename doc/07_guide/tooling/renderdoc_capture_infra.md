@@ -1321,7 +1321,10 @@ The current canonical evidence contract is:
   failed, unavailable, or missing rows. Linux Tauri capture is an Xvfb/X11 path;
   the host must provide the GTK/WebKit development stack plus `openbox`,
   `xvfb-run`, `dbus-run-session`, `xdotool`, ImageMagick `import`/`convert`,
-  and `node` before the wrapper can produce live Tauri ARGB evidence.
+  and `node` before the wrapper can produce live Tauri ARGB evidence. The
+  Tauri layout bitmap wrapper launches the shell with
+  `SIMPLE_TAURI_CAPTURE_WINDOW=1` and capture dimensions so the evidence window
+  is undecorated, fixed-size, and comparable to the expected ARGB fixture.
   The same source env must now include Electron/Chromium interaction evidence
   from `scripts/check/check-wm-browser-event-routing-evidence.shs`. The
   wrapper forwards it as `production_gui_web_renderer_parity_event_routing_*`,

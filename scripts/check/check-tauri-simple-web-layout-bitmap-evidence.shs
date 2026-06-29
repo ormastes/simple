@@ -20,9 +20,10 @@ VALIDATED_ENV="$BUILD_DIR/tauri-proof.validation.env"
 VALIDATOR="scripts/check/validate-tauri-simple-web-layout-proof.js"
 XVFB_SESSION_OUT="$BUILD_DIR/xvfb-session.out"
 XVFB_SESSION_ERR="$BUILD_DIR/xvfb-session.err"
+FRAME_US_PATH="$BUILD_DIR/frame-us.txt"
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
-rm -f "$CAPTURED_PNG" "$CAPTURED_RAW" "$CAPTURED_ARGB" "$TAURI_OUT" "$TAURI_ERR" "$TAURI_PROOF" "$VALIDATED_ENV" "$XVFB_SESSION_OUT" "$XVFB_SESSION_ERR" "$BUILD_DIR/evidence.env" "$REPORT_PATH"
+rm -f "$CAPTURED_PNG" "$CAPTURED_RAW" "$CAPTURED_ARGB" "$TAURI_OUT" "$TAURI_ERR" "$TAURI_PROOF" "$VALIDATED_ENV" "$XVFB_SESSION_OUT" "$XVFB_SESSION_ERR" "$FRAME_US_PATH" "$BUILD_DIR/evidence.env" "$REPORT_PATH"
 
 field_of_json() {
     key="$1"
@@ -174,15 +175,16 @@ OUT_ABS="$(cd "$BUILD_DIR" && pwd)/$(basename -- "$TAURI_OUT")"
 ERR_ABS="$(cd "$BUILD_DIR" && pwd)/$(basename -- "$TAURI_ERR")"
 XVFB_SESSION_OUT_ABS="$(cd "$BUILD_DIR" && pwd)/$(basename -- "$XVFB_SESSION_OUT")"
 XVFB_SESSION_ERR_ABS="$(cd "$BUILD_DIR" && pwd)/$(basename -- "$XVFB_SESSION_ERR")"
+FRAME_US_ABS="$(cd "$BUILD_DIR" && pwd)/$(basename -- "$FRAME_US_PATH")"
 TAURI_URL="file://$HTML_ABS"
 SCREEN_WIDTH="${TAURI_SCREEN_WIDTH:-1280}"
 SCREEN_HEIGHT="${TAURI_SCREEN_HEIGHT:-1024}"
 WAIT_STEPS="${TAURI_CAPTURE_WAIT_STEPS:-60}"
 
 set +e
-START_NS="$(date +%s%N)"
-TAURI_URL="$TAURI_URL" PNG_ABS="$PNG_ABS" OUT_ABS="$OUT_ABS" ERR_ABS="$ERR_ABS" WIDTH="$WIDTH" HEIGHT="$HEIGHT" WAIT_STEPS="$WAIT_STEPS" \
-GDK_BACKEND=x11 WAYLAND_DISPLAY= WEBKIT_DISABLE_DMABUF_RENDERER=1 \
+TAURI_URL="$TAURI_URL" PNG_ABS="$PNG_ABS" OUT_ABS="$OUT_ABS" ERR_ABS="$ERR_ABS" FRAME_US_ABS="$FRAME_US_ABS" WIDTH="$WIDTH" HEIGHT="$HEIGHT" WAIT_STEPS="$WAIT_STEPS" \
+GDK_BACKEND=x11 WAYLAND_DISPLAY= WEBKIT_DISABLE_DMABUF_RENDERER=1 GTK_USE_PORTAL=0 GIO_USE_PORTALS=0 \
+SIMPLE_TAURI_CAPTURE_WINDOW=1 SIMPLE_TAURI_CAPTURE_WIDTH="$WIDTH" SIMPLE_TAURI_CAPTURE_HEIGHT="$HEIGHT" \
     xvfb-run -a -s "-screen 0 ${SCREEN_WIDTH}x${SCREEN_HEIGHT}x24" dbus-run-session -- sh -eu >"$XVFB_SESSION_OUT_ABS" 2>"$XVFB_SESSION_ERR_ABS" <<'CAPTURE'
 cd tools/tauri-shell
 openbox >/dev/null 2>&1 &
@@ -194,24 +196,33 @@ pid=$!
 win_id=""
 i=0
 while [ "$i" -lt "$WAIT_STEPS" ]; do
-    win_id="$(xdotool search --pid "$pid" 2>/dev/null | head -n 1 || true)"
-    if [ "$win_id" = "" ]; then
-        win_id="$(xdotool search --name "simple-tauri-shell" 2>/dev/null | head -n 1 || true)"
-    fi
-    if [ "$win_id" = "" ]; then
-        win_id="$(xdotool search --name "Simple" 2>/dev/null | head -n 1 || true)"
-    fi
-    if [ "$win_id" = "" ]; then
-        win_id="$(xdotool search --onlyvisible --class simple-tauri-shell 2>/dev/null | head -n 1 || true)"
-    fi
-    if [ "$win_id" != "" ]; then
-        break
-    fi
     if ! kill -0 "$pid" 2>/dev/null; then
         wait "$pid" 2>/dev/null || true
         kill "$wm_pid" 2>/dev/null || true
         wait "$wm_pid" 2>/dev/null || true
         exit 23
+    fi
+    candidates="$({
+        xdotool search --pid "$pid" 2>/dev/null || true
+        xdotool search --name "simple-tauri-shell" 2>/dev/null || true
+        xdotool search --name "Simple" 2>/dev/null || true
+        xdotool search --onlyvisible --class simple-tauri-shell 2>/dev/null || true
+    } | awk '/^[0-9]+$/ {print}' | sort -u)"
+    for candidate in $candidates; do
+        info="$(xwininfo -id "$candidate" 2>/dev/null || true)"
+        echo "$info" | grep -q "Class: InputOutput" || continue
+        candidate_width="$(printf '%s\n' "$info" | sed -n 's/^  Width: //p' | head -n 1)"
+        candidate_height="$(printf '%s\n' "$info" | sed -n 's/^  Height: //p' | head -n 1)"
+        case "$candidate_width:$candidate_height" in
+            *[!0-9:]*|:|*:|"") continue ;;
+        esac
+        if [ "$candidate_width" -ge "$WIDTH" ] && [ "$candidate_height" -ge "$HEIGHT" ]; then
+            win_id="$candidate"
+            break
+        fi
+    done
+    if [ "$win_id" != "" ]; then
+        break
     fi
     i=$((i + 1))
     sleep 0.25
@@ -227,8 +238,11 @@ xdotool windowmap "$win_id" >/dev/null 2>&1 || true
 xdotool windowmove "$win_id" 0 0 >/dev/null 2>&1 || true
 xdotool windowsize "$win_id" "$WIDTH" "$HEIGHT" >/dev/null 2>&1 || true
 sleep 1
+start_ns="$(date +%s%N)"
 import -window "$win_id" "$PNG_ABS" >/dev/null 2>&1
 code=$?
+end_ns="$(date +%s%N)"
+printf '%s\n' "$(( (end_ns - start_ns) / 1000 ))" >"$FRAME_US_ABS"
 kill "$pid" 2>/dev/null || true
 wait "$pid" 2>/dev/null || true
 kill "$wm_pid" 2>/dev/null || true
@@ -236,9 +250,8 @@ wait "$wm_pid" 2>/dev/null || true
 exit "$code"
 CAPTURE
 capture_code=$?
-END_NS="$(date +%s%N)"
 set -e
-FRAME_US=$(( (END_NS - START_NS) / 1000 ))
+FRAME_US="$(cat "$FRAME_US_PATH" 2>/dev/null || echo 0)"
 
 if [ "$capture_code" -ne 0 ] || [ ! -s "$CAPTURED_PNG" ]; then
     reason="tauri-window-capture-failed"

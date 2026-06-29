@@ -1541,6 +1541,21 @@ fn html_data_url(html: &str) -> String {
     format!("data:text/html;charset=utf-8,{}", urlencoding::encode(html))
 }
 
+#[cfg(not(mobile))]
+fn desktop_window_size() -> (f64, f64) {
+    let width = env::var("SIMPLE_TAURI_CAPTURE_WIDTH")
+        .ok()
+        .and_then(|value| value.parse::<f64>().ok())
+        .filter(|value| *value >= 1.0)
+        .unwrap_or(1280.0);
+    let height = env::var("SIMPLE_TAURI_CAPTURE_HEIGHT")
+        .ok()
+        .and_then(|value| value.parse::<f64>().ok())
+        .filter(|value| *value >= 1.0)
+        .unwrap_or(720.0);
+    (width, height)
+}
+
 fn inline_shell_document_script(html: &str) -> String {
     format!(
         r#"(function() {{
@@ -1773,10 +1788,18 @@ pub fn run() {
             };
 
             let builder = WebviewWindowBuilder::new(app, "main", url);
-            #[cfg(desktop)]
-            let builder = builder
-                .title("Simple Window Manager")
-                .inner_size(1280.0, 720.0);
+            #[cfg(not(mobile))]
+            let builder = {
+                let (width, height) = desktop_window_size();
+                let builder = builder
+                    .title("Simple Window Manager")
+                    .inner_size(width, height);
+                if env::var("SIMPLE_TAURI_CAPTURE_WINDOW").as_deref() == Ok("1") {
+                    builder.decorations(false).resizable(false)
+                } else {
+                    builder
+                }
+            };
             #[cfg(target_os = "ios")]
             eprintln!(
                 "[tauri-shell] ios renderer context: backend=WKWebView metal_expected=true metal_layer=CAMetalLayer"
