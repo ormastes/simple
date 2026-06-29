@@ -530,7 +530,15 @@ The dashboard detail also forwards per-route live HTTP status and reason fields:
 `live_http_dashboard_status`/`live_http_dashboard_reason`,
 `live_http_agents_status`/`live_http_agents_reason`,
 `live_http_control_status`/`live_http_control_reason`, and
-`live_http_unauth_api_status`/`live_http_unauth_api_reason`.
+`live_http_unauth_api_status`/`live_http_unauth_api_reason`. The live HTTP
+producer also emits non-secret setup diagnostics before network calls:
+`llm_dashboard_live_http_base_url_status`,
+`llm_dashboard_live_http_base_url_scheme_status`,
+`llm_dashboard_live_http_auth_config_status`,
+`llm_dashboard_live_http_auth_source`, and
+`llm_dashboard_live_http_timeout_seconds`. These fields distinguish missing
+dashboard URL, malformed URL, and missing auth configuration without printing
+secrets or treating route-contract evidence as live HTTP proof.
 The aggregate expects all completion lanes to pass, fails for any WARN
 or missing strict evidence result, and writes `llm_goal_evidence_failed_gates`,
 `llm_goal_evidence_failed_gate_hints`, `llm_goal_evidence_warn_gates`, and

@@ -60,6 +60,23 @@ export LLM_DASHBOARD_LIVE_HTTP_SURFACE_MANIFEST_COUNT="$surface_manifest_count"
 export LLM_DASHBOARD_LIVE_HTTP_SURFACE_MANIFEST_SIZE="$surface_manifest_size"
 export LLM_DASHBOARD_LIVE_HTTP_SURFACE_MANIFEST_SHA256="$surface_manifest_sha256"
 
+auth_source="missing"
+auth_config_status="fail"
+if [ -n "${LLM_DASHBOARD_LIVE_AUTH_HEADER:-}" ]; then
+    if printf '%s\n' "$LLM_DASHBOARD_LIVE_AUTH_HEADER" | grep -F ':' >/dev/null 2>&1; then
+        auth_source="auth_header"
+        auth_config_status="pass"
+    else
+        auth_source="auth_header_invalid"
+    fi
+elif [ -n "${LLM_DASHBOARD_LIVE_AUTH_COOKIE:-}" ]; then
+    auth_source="auth_cookie"
+    auth_config_status="pass"
+elif [ -n "${LLM_DASHBOARD_LIVE_COOKIE_NAME:-}" ] && [ -n "${LLM_DASHBOARD_LIVE_COOKIE_VALUE:-}" ]; then
+    auth_source="cookie_pair"
+    auth_config_status="pass"
+fi
+
 if [ -z "$BASE_URL" ]; then
     {
         printf '%s\n' "llm_dashboard_live_http_status=fail"
@@ -67,7 +84,11 @@ if [ -z "$BASE_URL" ]; then
         printf '%s\n' "llm_dashboard_live_http_required_gates=base_url,auth_configured,unauth_api_rejected,authenticated_dashboard_html,authenticated_agents_html,authenticated_control_jsonl"
         printf '%s\n' "llm_dashboard_live_http_blocked_gates=base_url"
         printf '%s\n' "llm_dashboard_live_http_primary_blocked_gate=base_url"
-        printf '%s\n' "llm_dashboard_live_http_auth_source=not_collected"
+        printf '%s\n' "llm_dashboard_live_http_base_url_status=missing"
+        printf '%s\n' "llm_dashboard_live_http_base_url_scheme_status=not_collected"
+        printf '%s\n' "llm_dashboard_live_http_auth_config_status=$auth_config_status"
+        printf '%s\n' "llm_dashboard_live_http_auth_source=$auth_source"
+        printf '%s\n' "llm_dashboard_live_http_timeout_seconds=$TIMEOUT_SECONDS"
         printf '%s\n' "llm_dashboard_live_http_dashboard_status=not_collected"
         printf '%s\n' "llm_dashboard_live_http_dashboard_code=not_collected"
         printf '%s\n' "llm_dashboard_live_http_dashboard_size=not_collected"
@@ -99,7 +120,11 @@ if [ -z "$BASE_URL" ]; then
         printf '%s\n' "- required_gates: \`base_url,auth_configured,unauth_api_rejected,authenticated_dashboard_html,authenticated_agents_html,authenticated_control_jsonl\`"
         printf '%s\n' "- blocked_gates: \`base_url\`"
         printf '%s\n' "- primary_blocked_gate: \`base_url\`"
-        printf '%s\n' "- auth_source: \`not_collected\`"
+        printf '%s\n' "- base_url_status: \`missing\`"
+        printf '%s\n' "- base_url_scheme_status: \`not_collected\`"
+        printf '%s\n' "- auth_config_status: \`$auth_config_status\`"
+        printf '%s\n' "- auth_source: \`$auth_source\`"
+        printf '%s\n' "- timeout_seconds: \`$TIMEOUT_SECONDS\`"
         printf '%s\n' "- surface_manifest: \`$SURFACE_MANIFEST\`"
         printf '%s\n' "- surface_manifest_count: \`$surface_manifest_count\`"
         printf '%s\n' "- surface_manifest_size: \`$surface_manifest_size\`"
@@ -126,6 +151,11 @@ timeout = float(timeout_text)
 required = "base_url,auth_configured,unauth_api_rejected,authenticated_dashboard_html,authenticated_agents_html,authenticated_control_jsonl"
 blocked = []
 details = {}
+parsed_base = urllib.parse.urlparse(base_url)
+details["base_url_status"] = "configured" if base_url else "missing"
+base_url_is_http = parsed_base.scheme in ("http", "https") and bool(parsed_base.netloc)
+details["base_url_scheme_status"] = "configured" if base_url_is_http else "missing"
+details["timeout_seconds"] = timeout_text
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -152,15 +182,19 @@ def auth_headers():
         if ":" not in raw_header:
             blocked.append("auth_configured")
             details["auth_header_reason"] = "missing_colon"
+            details["auth_source"] = "auth_header_invalid"
+            details["auth_config_status"] = "fail"
             return headers
         name, value = raw_header.split(":", 1)
         headers[name.strip()] = value.strip()
         details["auth_source"] = "auth_header"
+        details["auth_config_status"] = "pass"
         return headers
     cookie = env("LLM_DASHBOARD_LIVE_AUTH_COOKIE")
     if cookie:
         headers["Cookie"] = cookie
         details["auth_source"] = "auth_cookie"
+        details["auth_config_status"] = "pass"
         return headers
     if "LLM_DASHBOARD_LIVE_COOKIE_NAME" in os.environ and "LLM_DASHBOARD_LIVE_COOKIE_VALUE" in os.environ:
         name = env("LLM_DASHBOARD_LIVE_COOKIE_NAME")
@@ -168,9 +202,11 @@ def auth_headers():
         cookie = f"{name}={value}"
         headers["Cookie"] = cookie
         details["auth_source"] = "cookie_pair"
+        details["auth_config_status"] = "pass"
         return headers
     blocked.append("auth_configured")
     details["auth_header_reason"] = "missing_auth_env"
+    details["auth_config_status"] = "fail"
     return headers
 
 
@@ -201,38 +237,48 @@ def record_response(name, code, body_bytes):
     details[f"{name}_sha256"] = hashlib.sha256(body_bytes).hexdigest() if body_bytes else "missing"
 
 
-unauth_code, unauth_bytes, unauth_body = request("/api/vllm/control?action=preflight", {})
-record_response("unauth_api", unauth_code, unauth_bytes)
-gate("unauth_api", unauth_code == 401 and "Authentication required" in unauth_body, f"http_{unauth_code}")
+headers = {}
+if not base_url_is_http:
+    if "base_url" not in blocked:
+        blocked.append("base_url")
+    details["base_url_reason"] = "missing_or_invalid_http_scheme"
+    details["base_url_scheme_status"] = "missing" if not parsed_base.scheme else "invalid"
+    headers = auth_headers()
+    for skipped_name in ("unauth_api", "dashboard", "agents", "control"):
+        details[f"{skipped_name}_status"] = "not_collected"
+        details[f"{skipped_name}_reason"] = "base_url_missing_scheme"
+        details[f"{skipped_name}_code"] = "not_collected"
+        details[f"{skipped_name}_size"] = "not_collected"
+        details[f"{skipped_name}_sha256"] = "not_collected"
+else:
+    headers = auth_headers()
+    unauth_code, unauth_bytes, unauth_body = request("/api/vllm/control?action=preflight", {})
+    record_response("unauth_api", unauth_code, unauth_bytes)
+    gate("unauth_api", unauth_code == 401 and "Authentication required" in unauth_body, f"http_{unauth_code}")
 
-headers = auth_headers()
-dashboard_code, dashboard_bytes, dashboard_body = request("/", headers)
-record_response("dashboard", dashboard_code, dashboard_bytes)
-gate(
-    "dashboard",
-    dashboard_code == 200 and "llm-vllm-control-panel" in dashboard_body,
-    f"http_{dashboard_code}",
-)
+    dashboard_code, dashboard_bytes, dashboard_body = request("/", headers)
+    record_response("dashboard", dashboard_code, dashboard_bytes)
+    gate(
+        "dashboard",
+        dashboard_code == 200 and "llm-vllm-control-panel" in dashboard_body,
+        f"http_{dashboard_code}",
+    )
 
-agents_code, agents_bytes, agents_body = request("/agents", headers)
-record_response("agents", agents_code, agents_bytes)
-gate(
-    "agents",
-    agents_code == 200 and "agent-dashboard" in agents_body,
-    f"http_{agents_code}",
-)
+    agents_code, agents_bytes, agents_body = request("/agents", headers)
+    record_response("agents", agents_code, agents_bytes)
+    gate(
+        "agents",
+        agents_code == 200 and "agent-dashboard" in agents_body,
+        f"http_{agents_code}",
+    )
 
-control_code, control_bytes, control_body = request("/api/vllm/control?action=preflight", headers)
-record_response("control", control_code, control_bytes)
-gate(
-    "control",
-    control_code == 200 and "llm_runtime_vllm_dashboard_live_boundary" in control_body,
-    f"http_{control_code}",
-)
-
-if not urllib.parse.urlparse(base_url).scheme:
-    blocked.append("base_url")
-    details["base_url_reason"] = "missing_scheme"
+    control_code, control_bytes, control_body = request("/api/vllm/control?action=preflight", headers)
+    record_response("control", control_code, control_bytes)
+    gate(
+        "control",
+        control_code == 200 and "llm_runtime_vllm_dashboard_live_boundary" in control_body,
+        f"http_{control_code}",
+    )
 
 status = "pass" if not blocked else "fail"
 reason = "authenticated_live_http_passed" if status == "pass" else "dashboard_live_http_probe_failed"
@@ -288,7 +334,11 @@ with open(out_env, "w", encoding="utf-8") as f:
     f.write(f"llm_dashboard_live_http_required_gates={required}\n")
     f.write(f"llm_dashboard_live_http_blocked_gates={blocked_gates}\n")
     f.write(f"llm_dashboard_live_http_primary_blocked_gate={primary}\n")
+    f.write(f"llm_dashboard_live_http_base_url_status={details.get('base_url_status', 'not_collected')}\n")
+    f.write(f"llm_dashboard_live_http_base_url_scheme_status={details.get('base_url_scheme_status', 'not_collected')}\n")
+    f.write(f"llm_dashboard_live_http_auth_config_status={details.get('auth_config_status', 'not_collected')}\n")
     f.write(f"llm_dashboard_live_http_auth_source={details.get('auth_source', 'not_collected')}\n")
+    f.write(f"llm_dashboard_live_http_timeout_seconds={details.get('timeout_seconds', 'not_collected')}\n")
     f.write(f"llm_dashboard_live_http_dashboard_status={details.get('dashboard_status', 'not_collected')}\n")
     f.write(f"llm_dashboard_live_http_dashboard_reason={details.get('dashboard_reason', 'not_collected')}\n")
     f.write(f"llm_dashboard_live_http_dashboard_code={details.get('dashboard_code', 'not_collected')}\n")
@@ -324,7 +374,11 @@ with open(report_path, "w", encoding="utf-8") as f:
     f.write(f"- required_gates: `{required}`\n")
     f.write(f"- blocked_gates: `{blocked_gates}`\n")
     f.write(f"- primary_blocked_gate: `{primary}`\n")
+    f.write(f"- base_url_status: `{details.get('base_url_status', 'not_collected')}`\n")
+    f.write(f"- base_url_scheme_status: `{details.get('base_url_scheme_status', 'not_collected')}`\n")
+    f.write(f"- auth_config_status: `{details.get('auth_config_status', 'not_collected')}`\n")
     f.write(f"- auth_source: `{details.get('auth_source', 'not_collected')}`\n")
+    f.write(f"- timeout_seconds: `{details.get('timeout_seconds', 'not_collected')}`\n")
     f.write(f"- dashboard_status: `{details.get('dashboard_status', 'not_collected')}`\n")
     f.write(f"- dashboard_code: `{details.get('dashboard_code', 'not_collected')}`\n")
     f.write(f"- dashboard_size: `{details.get('dashboard_size', 'not_collected')}`\n")
