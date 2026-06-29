@@ -27,7 +27,7 @@ simple_web_generated_html_css_combinations_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 12 | 12 | 0 | 0 |
+| 13 | 13 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -428,12 +428,42 @@ expect(_pixel_at(pixels, 64, 5, 12)).to_equal(0xFFEF4444u32)
 
 </details>
 
+#### renders accent-color on generated checkbox controls
+
+- Render a checkbox input with a CSS accent color
+- Assert the generated checkbox accent swatch uses the authored accent-color
+   - Expected: pixels.len() equals `40 * 30`
+   - Expected: _pixel_at(pixels, 40, 1, 1) equals `0xFF22C55Eu32`
+   - Expected: _pixel_at(pixels, 40, 5, 5) equals `0xFF22C55Eu32`
+   - Expected: _pixel_at(pixels, 40, 20, 5) equals `0xFFFFFFFFu32`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Render a checkbox input with a CSS accent color")
+val html = "<html><head><style>html,body{margin:0;padding:0;background-color:#ffffff}input{display:block;width:14px;height:14px;accent-color:#22c55e}</style></head><body><input type='checkbox' checked></body></html>"
+val pixels = simple_web_render_html_to_pixels(html, 40, 30)
+
+step("Assert the generated checkbox accent swatch uses the authored accent-color")
+expect(pixels.len()).to_equal(40 * 30)
+expect(_pixel_at(pixels, 40, 1, 1)).to_equal(0xFF22C55Eu32)
+expect(_pixel_at(pixels, 40, 5, 5)).to_equal(0xFF22C55Eu32)
+expect(_pixel_at(pixels, 40, 20, 5)).to_equal(0xFFFFFFFFu32)
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 12 |
-| Active scenarios | 12 |
+| Total scenarios | 13 |
+| Active scenarios | 13 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
