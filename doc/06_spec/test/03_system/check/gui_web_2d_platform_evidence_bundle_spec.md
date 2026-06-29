@@ -76,8 +76,8 @@ sh scripts/check/check-gui-web-2d-platform-evidence-bundle.shs
 - A present failed platform row is reported as failed, not missing.
 - A present platform env with missing required gate keys is reported as failed,
   not missing.
-- A present platform row with `status=pass` but a non-pass sibling reason is
-  reported as failed evidence.
+- A present platform row with `status=pass` may carry a descriptive sibling
+  reason, while duplicate optional reason keys are still failed evidence.
 - A present platform row with duplicate required status keys is reported as
   failed evidence.
 - A present platform row with duplicate optional reason keys is reported as
@@ -183,12 +183,13 @@ perf env has not been produced yet.
 
 The bundle checker is intentionally conservative. It does not infer a platform
 pass from a broader aggregate status when a lane-specific status key is absent.
-It also rejects contradictory optional reason fields for required status keys:
-if a gate env says `*_status=pass` but also emits a non-pass `*_reason`, that
-gate is failed evidence. For freshness, it does not accept a pass unless all
-revision fields are present, because final completion depends on proving that
-platform evidence, browser or WebView revisions, graphics SDK/driver revisions,
-and runbook revisions belong to the same review window.
+It allows descriptive optional reason fields for required status keys, because
+several real evidence producers report pass reasons such as `met-200fps`.
+Duplicate optional reason keys are still failed evidence. For freshness, it
+does not accept a pass unless all revision fields are present, because final
+completion depends on proving that platform evidence, browser or WebView
+revisions, graphics SDK/driver revisions, and runbook revisions belong to the
+same review window.
 Duplicate required status keys are also failed evidence. A generated env should
 have one authoritative value per required platform key and one authoritative
 value per required freshness key; accepting the last duplicate line would let a
@@ -315,7 +316,7 @@ expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_linux_vulkan_re
 
 </details>
 
-#### classifies passing evidence with a failed reason as failed
+#### accepts descriptive reasons on passing non-freshness gate rows
 
 <details>
 <summary>Executable SSpec</summary>
@@ -329,12 +330,12 @@ val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(1)
 
 val evidence = file_read("build/test-gui-web-2d-platform-evidence-bundle-reason-contradiction/out/evidence.env")
-expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_status=fail")
-expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_reason=failed-live-gates")
-expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_failed_gate_count=1")
-expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_failed_gates=linux-vulkan-renderdoc")
+expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_status=incomplete")
+expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_reason=missing-live-gates")
+expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_proven_gate_count=3")
+expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_failed_gate_count=0")
 expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_missing_gate_count=6")
-expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_linux_vulkan_renderdoc_status=fail")
+expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_linux_vulkan_renderdoc_status=pass")
 ```
 
 </details>
