@@ -20,7 +20,7 @@ Default aggregate:
   evidence now include checked surface/input manifests with size/SHA-256
   metadata and focused log hashes. Public absence rendering also records
   `public_absence_surface_manifest_count=93` and
-  `public_absence_surface_manifest_sha256=a893171fbbc6c35f8d4d9529f7ca7e3c7580d90885effad17f2001fefec81f42`
+  `public_absence_surface_manifest_sha256=d4cfa3f01be3651b75e440cba7c4e015440b2692877b3b65847625f2fcba05cc`
   with `failure_count=0`, so public manuals and generated evidence continue to
   hide internal absence markers from operator-facing text.
 
@@ -96,7 +96,9 @@ Strict-host aggregate:
   retry6 model manifest, eval result, target eval, license, safety,
   deployment, app handoff, and accepted decision are not ready
 - local proof already hardened: fine-tune guard evidence has a checked
-  process/input/log manifest and per-log hashes
+  process/input/log manifest and per-log hashes; retry7 acceptance evidence
+  now also records a checked surface manifest for the acceptance wrapper,
+  retry6/retry7 gate scripts and specs, operator docs, and produced gate log
 - required evidence: `llm_finetune_acceptance_status=pass`
 - next action: complete retry5 licensed cache/checksum review, run retry6
   training/eval to target, then record retry7 normal acceptance evidence with

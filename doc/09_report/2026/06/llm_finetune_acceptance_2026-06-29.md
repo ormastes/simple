@@ -11,6 +11,10 @@
 - gate_log_artifact_status: `ready`
 - gate_log_sha256: `05fd3bf2fc1c210b445e62a01cee639c6457221ebf3837bf0c69ac132d0cac18`
 - gate_log_size: `2040`
+- surface_manifest: `build/llm_finetune_acceptance/finetune_acceptance_surface_manifest.tsv`
+- surface_manifest_count: `9`
+- surface_manifest_size: `1206`
+- surface_manifest_sha256: `3f927a7b72aaf9f0d0706cbdcc7db38e848738d2b7a87c30965f424ddedcd919`
 - acceptance_allowed: `false`
 - training_allowed: `false`
 - upstream_retry6_result: `BLOCKED_UPSTREAM_LICENSED_DATA_NOT_READY`

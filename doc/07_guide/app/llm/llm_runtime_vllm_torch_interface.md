@@ -319,6 +319,9 @@ records `llm_finetune_acceptance_required_gates`,
 `llm_finetune_acceptance_training_allowed`,
 `llm_finetune_acceptance_gate_log_artifact_status`,
 `llm_finetune_acceptance_gate_log_sha256`,
+`llm_finetune_acceptance_surface_manifest_count`,
+`llm_finetune_acceptance_surface_manifest_size`,
+`llm_finetune_acceptance_surface_manifest_sha256`,
 `llm_finetune_acceptance_upstream_attempt_record`,
 `llm_finetune_acceptance_upstream_attempt_record_artifact_status`,
 `llm_finetune_acceptance_upstream_attempt_record_sha256`,
@@ -367,6 +370,12 @@ model manifest, passing eval result, metric target metadata, dataset checksum,
 eval sample count, and deployable handoff usage. A retry7 PASS line cannot
 override missing model, eval, license, safety, deployment, handoff, or
 artifact-integrity evidence.
+The acceptance wrapper also writes a checked surface manifest for the retry6
+and retry7 gate scripts/specs, this wrapper, the guard wrapper, the operator
+guide, the agent task plan, and the produced retry7 gate log. Aggregate
+fine-tune detail forwards the acceptance surface manifest count/size/SHA-256,
+so strict review can distinguish stale process scripts from missing model/eval
+artifacts.
 
 The local fine-tune guard evidence writes its own current blocker contract to
 `build/llm_finetune_guard_evidence/evidence.env`. Default aggregate mode uses

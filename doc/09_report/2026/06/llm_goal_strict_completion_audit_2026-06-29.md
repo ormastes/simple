@@ -49,11 +49,14 @@ but local proof is no longer status-only for the completed repo-local lanes:
   plus Python Torch/CUDA visibility and probe-log hashes; Simple-visible
   libtorch and live CUDA optimizer execution proof are still required.
 - fine-tune guard evidence records a checked process/input/log manifest and
-  per-log hashes; retry6/7 model, eval, safety, deployment, and handoff proof is
-  still required.
+  per-log hashes; retry7 acceptance evidence also records a checked acceptance
+  wrapper/script/spec/doc/log manifest (`surface_manifest_count=9`,
+  `surface_manifest_sha256=3f927a7b72aaf9f0d0706cbdcc7db38e848738d2b7a87c30965f424ddedcd919`);
+  retry6/7 model, eval, safety, deployment, and handoff proof is still
+  required.
 - public absence rendering records a checked public wording manifest
   (`public_absence_surface_manifest_count=93`,
-  `public_absence_surface_manifest_sha256=a893171fbbc6c35f8d4d9529f7ca7e3c7580d90885effad17f2001fefec81f42`)
+  `public_absence_surface_manifest_sha256=d4cfa3f01be3651b75e440cba7c4e015440b2692877b3b65847625f2fcba05cc`)
   with `failure_count=0`, proving operator-facing manuals and generated
   evidence do not expose internal absence markers.
 
