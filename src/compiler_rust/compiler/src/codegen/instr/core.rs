@@ -53,6 +53,27 @@ fn vreg_is_native_equality_scalar<M: Module>(ctx: &InstrContext<'_, M>, v: VReg)
     )
 }
 
+fn interp_call_returns_f64(func_name: &str) -> bool {
+    matches!(
+        func_name,
+        "rt_torch_torchtensor_sum"
+            | "rt_torch_torchtensor_norm"
+            | "rt_torch_torchtensor_mean"
+            | "rt_torch_torchtensor_max"
+            | "rt_torch_torchtensor_min"
+            | "rt_torch_torchtensor_std"
+            | "rt_torch_torchtensor_var"
+            | "rt_torch_nn_mse_loss"
+            | "rt_torch_nn_cross_entropy"
+            | "rt_torch_nn_binary_cross_entropy"
+            | "rt_torch_nn_nll_loss"
+    )
+}
+
+fn interp_call_keeps_boxed_result(func_name: &str) -> bool {
+    matches!(func_name, "rt_torch_torchtensor_shape")
+}
+
 fn vreg_is_text<M: Module>(ctx: &InstrContext<'_, M>, v: VReg) -> bool {
     matches!(ctx.vreg_types.get(&v).copied(), Some(TypeId::STRING))
 }
@@ -760,10 +781,34 @@ pub(crate) fn compile_interp_call<M: Module>(
     };
 
     for (index, arg) in args.iter().enumerate() {
-        let arg_val = match ctx.vreg_values.get(arg) {
+        let mut arg_val = match ctx.vreg_values.get(arg) {
             Some(&v) => v,
             None => return Err(format!("interp_call: arg vreg {:?} not found", arg)),
         };
+        match ctx.vreg_types.get(arg).copied() {
+            Some(TypeId::BOOL) => {
+                arg_val = call_runtime_1(ctx, builder, "rt_value_bool", arg_val);
+            }
+            Some(TypeId::I8 | TypeId::I16 | TypeId::I32) => {
+                if builder.func.dfg.value_type(arg_val) != types::I64 {
+                    arg_val = builder.ins().sextend(types::I64, arg_val);
+                }
+                arg_val = call_runtime_1(ctx, builder, "rt_value_int", arg_val);
+            }
+            Some(TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::CHAR) => {
+                if builder.func.dfg.value_type(arg_val) != types::I64 {
+                    arg_val = builder.ins().uextend(types::I64, arg_val);
+                }
+                arg_val = call_runtime_1(ctx, builder, "rt_value_int", arg_val);
+            }
+            Some(TypeId::I64 | TypeId::U64) => {
+                arg_val = call_runtime_1(ctx, builder, "rt_value_int", arg_val);
+            }
+            Some(TypeId::F64) => {
+                arg_val = call_runtime_1(ctx, builder, "rt_value_float", arg_val);
+            }
+            _ => {}
+        }
         builder.ins().store(MemFlags::new(), arg_val, argv, (index * 8) as i32);
     }
 
@@ -785,10 +830,15 @@ pub(crate) fn compile_interp_call<M: Module>(
         // strips the NaN-box tag and corrupts the downstream `rt_tuple_get` /
         // `rt_string_*` reads. Keep those boxed so compiled consumers (e.g.
         // `val (a,b,c) = rt_http_request(...)`) read them correctly. Scalar
-        // returns keep the historical unbox unchanged. (f64 remains a separate
-        // gap: it is still unboxed via rt_value_raw_i64 rather than _f64.)
+        // returns keep the historical unbox unchanged.
         let is_extern_bridge = func_name.starts_with("rt_") || func_name.starts_with("spl_");
-        let value = if !boxed_result && (is_extern_bridge || vreg_is_native_equality_scalar(ctx, *d)) {
+        let keep_boxed_result = boxed_result || interp_call_keeps_boxed_result(func_name);
+        let value = if !keep_boxed_result
+            && (ctx.vreg_types.get(d).copied() == Some(TypeId::F64)
+                || interp_call_returns_f64(func_name))
+        {
+            call_runtime_1(ctx, builder, "rt_value_as_float", result)
+        } else if !keep_boxed_result && (is_extern_bridge || vreg_is_native_equality_scalar(ctx, *d)) {
             call_runtime_1(ctx, builder, "rt_value_raw_i64", result)
         } else {
             result

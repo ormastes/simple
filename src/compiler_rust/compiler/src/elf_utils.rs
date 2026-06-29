@@ -555,6 +555,7 @@ fn resolve_runtime_symbol(name: &str) -> Option<usize> {
         "rt_value_bool" => simple_runtime::rt_value_bool as *const () as usize,
         "rt_value_nil" => simple_runtime::rt_value_nil as *const () as usize,
         "rt_value_as_int" => simple_runtime::rt_value_as_int as *const () as usize,
+        "rt_value_as_float" => simple_runtime::rt_value_as_float as *const () as usize,
 
         // Object operations
         "rt_object_new" => simple_runtime::rt_object_new as *const () as usize,

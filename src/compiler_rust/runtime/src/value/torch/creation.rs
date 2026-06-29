@@ -397,6 +397,21 @@ pub extern "C" fn rt_ps_torch_tensor(data: RuntimeValue, dims: RuntimeValue, dty
         return 0;
     };
 
+    #[cfg(not(feature = "pytorch"))]
+    if dtype_code == 1 && device_code == 0 {
+        let data_bits: Vec<i64> = data_vec.iter().map(|value| value.to_bits() as i64).collect();
+        if shape_vec.len() == 1 && shape_vec[0] == data_vec.len() as i64 {
+            return dynamic_runtime::call_dyn_bits_1d(data_bits.as_ptr(), data_bits.len() as i64).unwrap_or(0);
+        }
+        if shape_vec.len() == 2
+            && shape_vec[0] > 0
+            && shape_vec[1] > 0
+            && shape_vec[0].saturating_mul(shape_vec[1]) == data_vec.len() as i64
+        {
+            return dynamic_runtime::call_dyn_bits_2d(data_bits.as_ptr(), shape_vec[0], shape_vec[1]).unwrap_or(0);
+        }
+    }
+
     rt_torch_tensor(
         data_vec.as_ptr(),
         data_vec.len() as i64,

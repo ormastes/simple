@@ -1612,11 +1612,46 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_tls13_aes256_gcm_encrypt", simd::rt_tls13_aes256_gcm_encrypt);
     insert_simple!("rt_tls13_ed25519_verify", signatures::rt_ed25519_verify);
     insert_simple!("rt_torch_available", torch::rt_torch_available);
+    insert_simple!("rt_torch_autograd_backward", torch::rt_torch_autograd_backward);
+    insert_simple!("rt_torch_autograd_grad", torch::rt_torch_autograd_grad);
+    insert_simple!(
+        "rt_torch_autograd_no_grad_begin",
+        torch::rt_torch_autograd_no_grad_begin
+    );
+    insert_simple!(
+        "rt_torch_autograd_no_grad_end",
+        torch::rt_torch_autograd_no_grad_end
+    );
+    insert_simple!(
+        "rt_torch_autograd_set_requires_grad",
+        torch::rt_torch_autograd_set_requires_grad
+    );
+    insert_simple!("rt_torch_autograd_zero_grad", torch::rt_torch_autograd_zero_grad);
     insert_simple!("rt_torch_cuda_available", torch::rt_torch_cuda_available);
     insert_simple!("rt_torch_clone", torch::rt_torch_clone);
     insert_simple!("rt_torch_copy_data_to_cpu", torch::rt_torch_copy_data_to_cpu);
     insert_simple!("rt_torch_free", torch::rt_torch_free);
     insert_simple!("rt_torch_tensor", torch::rt_torch_tensor);
+    insert_simple!("rt_torch_tensor_from_data", torch::rt_torch_tensor_from_data);
+    insert_simple!("rt_torch_torchtensor_add", torch::rt_torch_torchtensor_add);
+    insert_simple!(
+        "rt_torch_torchtensor_add_scalar",
+        torch::rt_torch_torchtensor_add_scalar
+    );
+    insert_simple!("rt_torch_torchtensor_cuda", torch::rt_torch_torchtensor_cuda);
+    insert_simple!("rt_torch_torchtensor_device", torch::rt_torch_torchtensor_device);
+    insert_simple!("rt_torch_torchtensor_free", torch::rt_torch_torchtensor_free);
+    insert_simple!("rt_torch_torchtensor_is_cuda", torch::rt_torch_torchtensor_is_cuda);
+    insert_simple!("rt_torch_torchtensor_mul", torch::rt_torch_torchtensor_mul);
+    insert_simple!(
+        "rt_torch_torchtensor_mul_scalar",
+        torch::rt_torch_torchtensor_mul_scalar
+    );
+    insert_simple!("rt_torch_torchtensor_ndim", torch::rt_torch_torchtensor_ndim);
+    insert_simple!("rt_torch_torchtensor_numel", torch::rt_torch_torchtensor_numel);
+    insert_simple!("rt_torch_torchtensor_shape", torch::rt_torch_torchtensor_shape);
+    insert_simple!("rt_torch_torchtensor_sub", torch::rt_torch_torchtensor_sub);
+    insert_simple!("rt_torch_torchtensor_sum", torch::rt_torch_torchtensor_sum);
     insert_simple!("rt_torch_to_cpu", torch::rt_torch_to_cpu);
     insert_simple!("rt_torch_to_cuda", torch::rt_torch_to_cuda);
     insert_simple!("rt_typed_bytes_u32_le_at", sffi_array::rt_bytes_u32_le_at_fn);
@@ -2193,12 +2228,8 @@ pub(crate) fn call_extern_function_with_values(
         return match name {
             "rt_host_gpu_queue_reset" => host_gpu_lane::rt_host_gpu_queue_reset(evaluated),
             "rt_host_gpu_queue_emit" => host_gpu_lane::rt_host_gpu_queue_emit(evaluated),
-            "rt_host_gpu_queue_emit_payload" => {
-                host_gpu_lane::rt_host_gpu_queue_emit_payload(evaluated)
-            }
-            "rt_host_gpu_queue_emit_payload_text" => {
-                host_gpu_lane::rt_host_gpu_queue_emit_payload_text(evaluated)
-            }
+            "rt_host_gpu_queue_emit_payload" => host_gpu_lane::rt_host_gpu_queue_emit_payload(evaluated),
+            "rt_host_gpu_queue_emit_payload_text" => host_gpu_lane::rt_host_gpu_queue_emit_payload_text(evaluated),
             "rt_host_gpu_queue_drain" => host_gpu_lane::rt_host_gpu_queue_drain(evaluated),
             "rt_host_gpu_queue_submit" => host_gpu_lane::rt_host_gpu_queue_submit(evaluated),
             "rt_host_gpu_queue_complete" => host_gpu_lane::rt_host_gpu_queue_complete(evaluated),

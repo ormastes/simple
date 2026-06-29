@@ -133,28 +133,62 @@ fn torch_runtime_library() -> Option<&'static libloading::Library> {
 
     TORCH_RUNTIME
         .get_or_init(|| {
-            let path = std::env::var("SIMPLE_RUNTIME_PATH")
-                .ok()
-                .filter(|s| !s.trim().is_empty())
-                .unwrap_or_else(|| {
-                    #[cfg(target_os = "windows")]
-                    {
-                        "simple_runtime.dll".to_string()
+            let mut paths = Vec::new();
+            for name in ["SIMPLE_TORCH_RUNTIME_PATH", "SIMPLE_RUNTIME_PATH"] {
+                if let Ok(value) = std::env::var(name) {
+                    let trimmed = value.trim();
+                    if !trimmed.is_empty() {
+                        paths.push(trimmed.to_string());
                     }
-                    #[cfg(target_os = "macos")]
-                    {
-                        "libsimple_runtime.dylib".to_string()
-                    }
-                    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-                    {
-                        "libsimple_runtime.so".to_string()
-                    }
-                });
-            let lib = unsafe { libloading::Library::new(&path).ok()? };
-            Some(Box::leak(Box::new(lib)))
+                }
+            }
+            if let Some(sffi_paths) = std::env::var_os("SIMPLE_SFFI_PATH") {
+                for dir in std::env::split_paths(&sffi_paths) {
+                    paths.push(dir.join(torch_sffi_library_name()).to_string_lossy().into_owned());
+                }
+            }
+            paths.push(default_runtime_library_name().to_string());
+            for path in paths {
+                if let Ok(lib) = unsafe { libloading::Library::new(&path) } {
+                    return Some(Box::leak(Box::new(lib)));
+                }
+            }
+            None
         })
         .as_ref()
         .copied()
+}
+
+#[cfg(not(feature = "pytorch"))]
+fn torch_sffi_library_name() -> &'static str {
+    #[cfg(target_os = "windows")]
+    {
+        "spl_torch.dll"
+    }
+    #[cfg(target_os = "macos")]
+    {
+        "libspl_torch.dylib"
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        "libspl_torch.so"
+    }
+}
+
+#[cfg(not(feature = "pytorch"))]
+fn default_runtime_library_name() -> &'static str {
+    #[cfg(target_os = "windows")]
+    {
+        "simple_runtime.dll"
+    }
+    #[cfg(target_os = "macos")]
+    {
+        "libsimple_runtime.dylib"
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        "libsimple_runtime.so"
+    }
 }
 
 #[cfg(not(feature = "pytorch"))]

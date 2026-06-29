@@ -636,6 +636,8 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_io_tcp_set_read_timeout",
     "rt_io_tcp_set_write_timeout",
     "rt_io_tcp_shutdown",
+    "rt_value_as_float",
+    "rt_value_as_int",
     "rt_value_raw_i64",
     "rt_tls_client_connect",
     "rt_tls_client_connect_with_sni",

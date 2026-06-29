@@ -60,6 +60,10 @@ static thread_local torch::NoGradGuard* g_no_grad_guard = nullptr;
 /* Store a tensor in the handle table and return its handle */
 static int64_t store_tensor(at::Tensor t) {
     int64_t h = g_next_handle.fetch_add(1);
+    if (std::getenv("SIMPLE_TORCH_TRACE")) {
+        fprintf(stderr, "torch_sffi store_tensor map=%p handle=%ld defined=%d\n",
+                static_cast<void*>(&g_tensors), static_cast<long>(h), t.defined() ? 1 : 0);
+    }
     g_tensors[h] = std::move(t);
     return h;
 }
@@ -68,10 +72,18 @@ static bool has_tensor(int64_t h) {
     return g_tensors.find(h) != g_tensors.end();
 }
 
+static at::Tensor* find_defined_tensor(int64_t h) {
+    auto it = g_tensors.find(h);
+    if (it == g_tensors.end() || !it->second.defined()) {
+        return nullptr;
+    }
+    return &it->second;
+}
+
 /* Retrieve a tensor by handle (panics on invalid handle) */
 static at::Tensor get_tensor(int64_t h) {
     auto it = g_tensors.find(h);
-    if (it == g_tensors.end()) {
+    if (it == g_tensors.end() || !it->second.defined()) {
         safe_eprintln("rt_torch: invalid tensor handle");
         safe_panic("invalid tensor handle");
     }
@@ -643,7 +655,20 @@ double rt_torch_nn_nll_loss(int64_t input, int64_t target) {
  * -------------------------------------------------------------------------- */
 
 void rt_torch_autograd_set_requires_grad(int64_t handle, bool requires_grad) {
-    g_tensors[handle].requires_grad_(requires_grad);
+    if (std::getenv("SIMPLE_TORCH_TRACE")) {
+        auto it = g_tensors.find(handle);
+        fprintf(stderr, "torch_sffi set_requires_grad map=%p handle=%ld has=%d defined=%d requires=%d\n",
+                static_cast<void*>(&g_tensors), static_cast<long>(handle),
+                it != g_tensors.end() ? 1 : 0,
+                it != g_tensors.end() && it->second.defined() ? 1 : 0,
+                requires_grad ? 1 : 0);
+    }
+    auto* t = find_defined_tensor(handle);
+    if (!t) {
+        safe_eprintln("rt_torch: invalid tensor handle in set_requires_grad");
+        return;
+    }
+    t->requires_grad_(requires_grad);
 }
 
 bool rt_torch_autograd_requires_grad(int64_t handle) {
@@ -663,10 +688,14 @@ void rt_torch_autograd_backward(int64_t handle) {
 }
 
 void rt_torch_autograd_zero_grad(int64_t handle) {
-    auto& t = g_tensors[handle];
-    if (!t.requires_grad()) return;
-    if (t.grad().defined()) {
-        t.grad().zero_();
+    auto* t = find_defined_tensor(handle);
+    if (!t) {
+        safe_eprintln("rt_torch: invalid tensor handle in zero_grad");
+        return;
+    }
+    if (!t->requires_grad()) return;
+    if (t->grad().defined()) {
+        t->grad().zero_();
     }
 }
 

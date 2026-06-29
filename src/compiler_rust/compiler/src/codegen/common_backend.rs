@@ -70,6 +70,12 @@ pub(crate) fn referenced_call_names(functions: &[MirFunction]) -> HashSet<String
                         // The interp bridge returns boxed RuntimeValues; raw
                         // bool/int destinations are unboxed via this helper.
                         names.insert("rt_value_raw_i64".to_string());
+                        // InterpCall arguments are RuntimeValues. Raw scalar
+                        // VRegs must be tagged before entering the bridge.
+                        names.insert("rt_value_int".to_string());
+                        names.insert("rt_value_float".to_string());
+                        names.insert("rt_value_bool".to_string());
+                        names.insert("rt_value_as_float".to_string());
                     }
                     MirInst::DictLit { .. } => {
                         names.insert("rt_dict_new".to_string());

@@ -4,6 +4,7 @@ use crate::error::CompileError;
 use crate::value::Value;
 #[cfg(not(feature = "pytorch"))]
 use std::ffi::CString;
+use std::sync::Arc;
 #[cfg(not(feature = "pytorch"))]
 use std::sync::OnceLock;
 
@@ -119,6 +120,35 @@ fn extract_i64_array(arg: &Value, func_name: &str) -> Result<Vec<i64>, CompileEr
     }
 }
 
+fn extract_bool(arg: &Value, func_name: &str) -> Result<bool, CompileError> {
+    match arg {
+        Value::Bool(value) => Ok(*value),
+        Value::Int(value) => Ok(*value != 0),
+        Value::UInt { value, .. } => Ok(*value != 0),
+        Value::Unit { value, .. } | Value::Union { inner: value, .. } => extract_bool(value, func_name),
+        _ => Err(CompileError::runtime(format!(
+            "{func_name}: expected bool, got {}",
+            arg.type_name()
+        ))),
+    }
+}
+
+#[cfg(not(feature = "pytorch"))]
+unsafe fn torch_tensor_from_bits_1d(data: &[f64]) -> Option<u64> {
+    let fptr = lookup_torch_symbol("rt_dyn_torch_tensor_from_bits_1d")?;
+    let func: extern "C" fn(*const i64, i64) -> u64 = std::mem::transmute(fptr);
+    let bits: Vec<i64> = data.iter().map(|value| value.to_bits() as i64).collect();
+    Some(func(bits.as_ptr(), bits.len() as i64))
+}
+
+#[cfg(not(feature = "pytorch"))]
+unsafe fn torch_tensor_from_bits_2d(data: &[f64], rows: i64, cols: i64) -> Option<u64> {
+    let fptr = lookup_torch_symbol("rt_dyn_torch_tensor_from_bits_2d")?;
+    let func: extern "C" fn(*const i64, i64, i64) -> u64 = std::mem::transmute(fptr);
+    let bits: Vec<i64> = data.iter().map(|value| value.to_bits() as i64).collect();
+    Some(func(bits.as_ptr(), rows, cols))
+}
+
 #[cfg(feature = "pytorch")]
 fn torch_tensor_impl(data: &[f64], dims: &[i64], dtype_code: i32, device_code: i32) -> u64 {
     simple_runtime::value::rt_torch_tensor(
@@ -134,6 +164,18 @@ fn torch_tensor_impl(data: &[f64], dims: &[i64], dtype_code: i32, device_code: i
 #[cfg(not(feature = "pytorch"))]
 fn torch_tensor_impl(data: &[f64], dims: &[i64], dtype_code: i32, device_code: i32) -> u64 {
     unsafe {
+        if dtype_code == 1 && device_code == 0 {
+            if dims.len() == 1 && dims[0] == data.len() as i64 {
+                if let Some(handle) = torch_tensor_from_bits_1d(data) {
+                    return handle;
+                }
+            }
+            if dims.len() == 2 && dims[0] > 0 && dims[1] > 0 && dims[0].saturating_mul(dims[1]) == data.len() as i64 {
+                if let Some(handle) = torch_tensor_from_bits_2d(data, dims[0], dims[1]) {
+                    return handle;
+                }
+            }
+        }
         let fptr = match lookup_torch_symbol("rt_torch_tensor") {
             Some(fptr) => fptr,
             None => return 0,
@@ -234,6 +276,159 @@ fn torch_copy_data_to_cpu_impl(handle: u64, buffer_ptr: i64, buffer_size: i64) -
         func(handle, buffer_ptr as *mut f32, buffer_size)
     }
 }
+
+#[cfg(not(feature = "pytorch"))]
+unsafe fn torch_call_i64_i64_i64(symbol: &str, a0: i64, a1: i64) -> i64 {
+    let fptr = match lookup_torch_symbol(symbol) {
+        Some(fptr) => fptr,
+        None => return 0,
+    };
+    let func: extern "C" fn(i64, i64) -> i64 = std::mem::transmute(fptr);
+    func(a0, a1)
+}
+
+#[cfg(feature = "pytorch")]
+unsafe fn torch_call_i64_i64_i64(_symbol: &str, _a0: i64, _a1: i64) -> i64 {
+    0
+}
+
+#[cfg(not(feature = "pytorch"))]
+unsafe fn torch_call_i64_f64_i64(symbol: &str, a0: i64, a1: f64) -> i64 {
+    let fptr = match lookup_torch_symbol(symbol) {
+        Some(fptr) => fptr,
+        None => return 0,
+    };
+    let func: extern "C" fn(i64, f64) -> i64 = std::mem::transmute(fptr);
+    func(a0, a1)
+}
+
+#[cfg(feature = "pytorch")]
+unsafe fn torch_call_i64_f64_i64(_symbol: &str, _a0: i64, _a1: f64) -> i64 {
+    0
+}
+
+#[cfg(not(feature = "pytorch"))]
+unsafe fn torch_call_i64_i32_i64(symbol: &str, a0: i64, a1: i32) -> i64 {
+    let fptr = match lookup_torch_symbol(symbol) {
+        Some(fptr) => fptr,
+        None => return 0,
+    };
+    let func: extern "C" fn(i64, i32) -> i64 = std::mem::transmute(fptr);
+    func(a0, a1)
+}
+
+#[cfg(feature = "pytorch")]
+unsafe fn torch_call_i64_i32_i64(_symbol: &str, _a0: i64, _a1: i32) -> i64 {
+    0
+}
+
+#[cfg(not(feature = "pytorch"))]
+unsafe fn torch_call_i64_i64(symbol: &str, a0: i64) -> i64 {
+    let fptr = match lookup_torch_symbol(symbol) {
+        Some(fptr) => fptr,
+        None => return 0,
+    };
+    let func: extern "C" fn(i64) -> i64 = std::mem::transmute(fptr);
+    func(a0)
+}
+
+#[cfg(feature = "pytorch")]
+unsafe fn torch_call_i64_i64(_symbol: &str, _a0: i64) -> i64 {
+    0
+}
+
+#[cfg(not(feature = "pytorch"))]
+unsafe fn torch_call_i64_i32(symbol: &str, a0: i64) -> i32 {
+    let fptr = match lookup_torch_symbol(symbol) {
+        Some(fptr) => fptr,
+        None => return -1,
+    };
+    let func: extern "C" fn(i64) -> i32 = std::mem::transmute(fptr);
+    func(a0)
+}
+
+#[cfg(feature = "pytorch")]
+unsafe fn torch_call_i64_i32(_symbol: &str, _a0: i64) -> i32 {
+    -1
+}
+
+#[cfg(not(feature = "pytorch"))]
+unsafe fn torch_call_i64_i64_i64_arg(symbol: &str, a0: i64, a1: i64) -> i64 {
+    let fptr = match lookup_torch_symbol(symbol) {
+        Some(fptr) => fptr,
+        None => return 0,
+    };
+    let func: extern "C" fn(i64, i64) -> i64 = std::mem::transmute(fptr);
+    func(a0, a1)
+}
+
+#[cfg(feature = "pytorch")]
+unsafe fn torch_call_i64_i64_i64_arg(_symbol: &str, _a0: i64, _a1: i64) -> i64 {
+    0
+}
+
+#[cfg(not(feature = "pytorch"))]
+unsafe fn torch_call_i64_f64(symbol: &str, a0: i64) -> f64 {
+    let fptr = match lookup_torch_symbol(symbol) {
+        Some(fptr) => fptr,
+        None => return 0.0,
+    };
+    let func: extern "C" fn(i64) -> f64 = std::mem::transmute(fptr);
+    func(a0)
+}
+
+#[cfg(feature = "pytorch")]
+unsafe fn torch_call_i64_f64(_symbol: &str, _a0: i64) -> f64 {
+    0.0
+}
+
+#[cfg(not(feature = "pytorch"))]
+unsafe fn torch_call_i64_bool(symbol: &str, a0: i64) -> bool {
+    let fptr = match lookup_torch_symbol(symbol) {
+        Some(fptr) => fptr,
+        None => return false,
+    };
+    let func: extern "C" fn(i64) -> bool = std::mem::transmute(fptr);
+    func(a0)
+}
+
+#[cfg(feature = "pytorch")]
+unsafe fn torch_call_i64_bool(_symbol: &str, _a0: i64) -> bool {
+    false
+}
+
+#[cfg(not(feature = "pytorch"))]
+unsafe fn torch_call_i64_bool_void(symbol: &str, a0: i64, a1: bool) {
+    if let Some(fptr) = lookup_torch_symbol(symbol) {
+        let func: extern "C" fn(i64, bool) = std::mem::transmute(fptr);
+        func(a0, a1);
+    }
+}
+
+#[cfg(feature = "pytorch")]
+unsafe fn torch_call_i64_bool_void(_symbol: &str, _a0: i64, _a1: bool) {}
+
+#[cfg(not(feature = "pytorch"))]
+unsafe fn torch_call_i64_void(symbol: &str, a0: i64) {
+    if let Some(fptr) = lookup_torch_symbol(symbol) {
+        let func: extern "C" fn(i64) = std::mem::transmute(fptr);
+        func(a0);
+    }
+}
+
+#[cfg(feature = "pytorch")]
+unsafe fn torch_call_i64_void(_symbol: &str, _a0: i64) {}
+
+#[cfg(not(feature = "pytorch"))]
+unsafe fn torch_call_void(symbol: &str) {
+    if let Some(fptr) = lookup_torch_symbol(symbol) {
+        let func: extern "C" fn() = std::mem::transmute(fptr);
+        func();
+    }
+}
+
+#[cfg(feature = "pytorch")]
+unsafe fn torch_call_void(_symbol: &str) {}
 
 pub fn rt_torch_tensor(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 4 {
@@ -340,6 +535,207 @@ pub fn rt_torch_copy_data_to_cpu(args: &[Value]) -> Result<Value, CompileError> 
     Ok(Value::Int(torch_copy_data_to_cpu_impl(handle, buffer_ptr, buffer_size)))
 }
 
+pub fn rt_torch_torchtensor_add(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 2 {
+        return Err(CompileError::runtime("rt_torch_torchtensor_add requires 2 arguments"));
+    }
+    Ok(Value::Int(unsafe {
+        torch_call_i64_i64_i64("rt_torch_torchtensor_add", args[0].as_int()?, args[1].as_int()?)
+    }))
+}
+
+pub fn rt_torch_torchtensor_sub(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 2 {
+        return Err(CompileError::runtime("rt_torch_torchtensor_sub requires 2 arguments"));
+    }
+    Ok(Value::Int(unsafe {
+        torch_call_i64_i64_i64("rt_torch_torchtensor_sub", args[0].as_int()?, args[1].as_int()?)
+    }))
+}
+
+pub fn rt_torch_torchtensor_mul(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 2 {
+        return Err(CompileError::runtime("rt_torch_torchtensor_mul requires 2 arguments"));
+    }
+    Ok(Value::Int(unsafe {
+        torch_call_i64_i64_i64("rt_torch_torchtensor_mul", args[0].as_int()?, args[1].as_int()?)
+    }))
+}
+
+pub fn rt_torch_torchtensor_add_scalar(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 2 {
+        return Err(CompileError::runtime(
+            "rt_torch_torchtensor_add_scalar requires 2 arguments",
+        ));
+    }
+    Ok(Value::Int(unsafe {
+        torch_call_i64_f64_i64(
+            "rt_torch_torchtensor_add_scalar",
+            args[0].as_int()?,
+            args[1].as_float()?,
+        )
+    }))
+}
+
+pub fn rt_torch_torchtensor_mul_scalar(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 2 {
+        return Err(CompileError::runtime(
+            "rt_torch_torchtensor_mul_scalar requires 2 arguments",
+        ));
+    }
+    Ok(Value::Int(unsafe {
+        torch_call_i64_f64_i64(
+            "rt_torch_torchtensor_mul_scalar",
+            args[0].as_int()?,
+            args[1].as_float()?,
+        )
+    }))
+}
+
+pub fn rt_torch_torchtensor_sum(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 1 {
+        return Err(CompileError::runtime("rt_torch_torchtensor_sum requires 1 argument"));
+    }
+    Ok(Value::Float(unsafe {
+        torch_call_i64_f64("rt_torch_torchtensor_sum", args[0].as_int()?)
+    }))
+}
+
+pub fn rt_torch_torchtensor_ndim(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 1 {
+        return Err(CompileError::runtime("rt_torch_torchtensor_ndim requires 1 argument"));
+    }
+    Ok(Value::Int(unsafe {
+        torch_call_i64_i64("rt_torch_torchtensor_ndim", args[0].as_int()?)
+    }))
+}
+
+pub fn rt_torch_torchtensor_numel(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 1 {
+        return Err(CompileError::runtime("rt_torch_torchtensor_numel requires 1 argument"));
+    }
+    Ok(Value::Int(unsafe {
+        torch_call_i64_i64("rt_torch_torchtensor_numel", args[0].as_int()?)
+    }))
+}
+
+pub fn rt_torch_torchtensor_shape(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 1 {
+        return Err(CompileError::runtime("rt_torch_torchtensor_shape requires 1 argument"));
+    }
+    let handle = args[0].as_int()?;
+    let ndim = unsafe { torch_call_i64_i64("rt_torch_torchtensor_ndim", handle) };
+    if ndim <= 0 {
+        return Ok(Value::Array(Arc::new(Vec::new())));
+    }
+    let mut dims = Vec::with_capacity(ndim as usize);
+    for dim in 0..ndim {
+        let value = unsafe { torch_call_i64_i64_i64_arg("rt_torch_torchtensor_shape_dim", handle, dim) };
+        dims.push(Value::Int(value));
+    }
+    Ok(Value::Array(Arc::new(dims)))
+}
+
+pub fn rt_torch_torchtensor_cuda(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 2 {
+        return Err(CompileError::runtime("rt_torch_torchtensor_cuda requires 2 arguments"));
+    }
+    Ok(Value::Int(unsafe {
+        torch_call_i64_i32_i64("rt_torch_torchtensor_cuda", args[0].as_int()?, args[1].as_int()? as i32)
+    }))
+}
+
+pub fn rt_torch_torchtensor_is_cuda(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 1 {
+        return Err(CompileError::runtime(
+            "rt_torch_torchtensor_is_cuda requires 1 argument",
+        ));
+    }
+    Ok(Value::Bool(unsafe {
+        torch_call_i64_bool("rt_torch_torchtensor_is_cuda", args[0].as_int()?)
+    }))
+}
+
+pub fn rt_torch_torchtensor_device(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 1 {
+        return Err(CompileError::runtime(
+            "rt_torch_torchtensor_device requires 1 argument",
+        ));
+    }
+    Ok(Value::Int(unsafe {
+        torch_call_i64_i32("rt_torch_torchtensor_device", args[0].as_int()?) as i64
+    }))
+}
+
+pub fn rt_torch_torchtensor_free(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 1 {
+        return Err(CompileError::runtime("rt_torch_torchtensor_free requires 1 argument"));
+    }
+    unsafe { torch_call_i64_void("rt_torch_torchtensor_free", args[0].as_int()?) };
+    Ok(Value::Nil)
+}
+
+pub fn rt_torch_autograd_set_requires_grad(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 2 {
+        return Err(CompileError::runtime(
+            "rt_torch_autograd_set_requires_grad requires 2 arguments",
+        ));
+    }
+    unsafe {
+        torch_call_i64_bool_void(
+            "rt_torch_autograd_set_requires_grad",
+            args[0].as_int()?,
+            extract_bool(&args[1], "rt_torch_autograd_set_requires_grad")?,
+        )
+    };
+    Ok(Value::Nil)
+}
+
+pub fn rt_torch_autograd_grad(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 1 {
+        return Err(CompileError::runtime("rt_torch_autograd_grad requires 1 argument"));
+    }
+    Ok(Value::Int(unsafe {
+        torch_call_i64_i64("rt_torch_autograd_grad", args[0].as_int()?)
+    }))
+}
+
+pub fn rt_torch_autograd_backward(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 1 {
+        return Err(CompileError::runtime("rt_torch_autograd_backward requires 1 argument"));
+    }
+    unsafe { torch_call_i64_void("rt_torch_autograd_backward", args[0].as_int()?) };
+    Ok(Value::Nil)
+}
+
+pub fn rt_torch_autograd_zero_grad(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 1 {
+        return Err(CompileError::runtime("rt_torch_autograd_zero_grad requires 1 argument"));
+    }
+    unsafe { torch_call_i64_void("rt_torch_autograd_zero_grad", args[0].as_int()?) };
+    Ok(Value::Nil)
+}
+
+pub fn rt_torch_autograd_no_grad_begin(args: &[Value]) -> Result<Value, CompileError> {
+    if !args.is_empty() {
+        return Err(CompileError::runtime(
+            "rt_torch_autograd_no_grad_begin requires 0 arguments",
+        ));
+    }
+    unsafe { torch_call_void("rt_torch_autograd_no_grad_begin") };
+    Ok(Value::Nil)
+}
+
+pub fn rt_torch_autograd_no_grad_end(args: &[Value]) -> Result<Value, CompileError> {
+    if !args.is_empty() {
+        return Err(CompileError::runtime(
+            "rt_torch_autograd_no_grad_end requires 0 arguments",
+        ));
+    }
+    unsafe { torch_call_void("rt_torch_autograd_no_grad_end") };
+    Ok(Value::Nil)
+}
+
 pub fn rt_ps_torch_tensor_from_data(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 2 {
         return Err(CompileError::runtime(
@@ -349,6 +745,18 @@ pub fn rt_ps_torch_tensor_from_data(args: &[Value]) -> Result<Value, CompileErro
 
     let data = extract_f64_array(&args[0], "rt_ps_torch_tensor_from_data")?;
     let dims = extract_i64_array(&args[1], "rt_ps_torch_tensor_from_data")?;
+    Ok(Value::Int(torch_tensor_impl(&data, &dims, 1, 0) as i64))
+}
+
+pub fn rt_torch_tensor_from_data(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 2 {
+        return Err(CompileError::runtime(
+            "rt_torch_tensor_from_data requires 2 arguments (data, dims)",
+        ));
+    }
+
+    let data = extract_f64_array(&args[0], "rt_torch_tensor_from_data")?;
+    let dims = extract_i64_array(&args[1], "rt_torch_tensor_from_data")?;
     Ok(Value::Int(torch_tensor_impl(&data, &dims, 1, 0) as i64))
 }
 

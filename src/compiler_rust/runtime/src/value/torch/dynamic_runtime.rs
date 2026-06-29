@@ -132,6 +132,16 @@ pub(super) fn call_dyn_bits_1d(data_bits_ptr: *const i64, data_len: i64) -> Opti
 }
 
 #[cfg(not(feature = "pytorch"))]
+pub(super) fn call_dyn_bits_2d(data_bits_ptr: *const i64, rows: i64, cols: i64) -> Option<u64> {
+    let lib = library()?;
+    unsafe {
+        let func: Symbol<unsafe extern "C" fn(*const i64, i64, i64) -> u64> =
+            lib.get(b"rt_dyn_torch_tensor_from_bits_2d").ok()?;
+        Some(func(data_bits_ptr, rows, cols))
+    }
+}
+
+#[cfg(not(feature = "pytorch"))]
 pub(super) fn call_zeros(shape_ptr: *const i64, ndim: i32, dtype: i32, device: i32) -> Option<u64> {
     let lib = library()?;
     unsafe {
