@@ -743,3 +743,12 @@ dashboard evidence as pass.
 depends only on the collapsed control-CLI reason, so a host missing both local
 vLLM and GPU tooling reports both `local_vllm` and `local_gpu` blockers before
 serve preflight, endpoint, and model-listing gates.
+
+## 2026-06-29 Aggregate LLM Evidence Detail Surfacing
+
+`scripts/check/check-llm-goal-evidence.shs` now forwards vLLM host resource
+details into `llm_goal_evidence_vllm_host_detail` and fine-tune retry7
+acceptance details into `llm_goal_evidence_finetune_guard_detail`. This keeps
+the default aggregate report honest: guard-only fine-tune evidence can pass
+locally, while the acceptance detail still names the retry6/model/eval/license/
+safety/deployment blocker that must pass before strict host completion.

@@ -8,18 +8,18 @@
 - failed_gates: `none`
 - failed_gate_hints: `none`
 - env: `build/llm_goal_evidence/evidence.env`
-- lane_timeout_seconds: `45`
-- svllm_lane_timeout_seconds: `120`
+- lane_timeout_seconds: `180`
+- svllm_lane_timeout_seconds: `180`
 
 | lane | status | expected | exit | timeout | log |
 |------|--------|----------|------|---------|-----|
-| context_ponytail | `pass` | `pass` | `0` | `45` | `build/llm_goal_evidence/context_ponytail.log` |
-| dashboard | `pass` | `pass` | `0` | `45` | `build/llm_goal_evidence/dashboard.log` |
-| vllm_host | `warn` | `warn` | `0` | `45` | `build/llm_goal_evidence/vllm_host.log` |
-| svllm_local | `pass` | `pass` | `0` | `120` | `build/llm_goal_evidence/svllm_local.log` |
-| torch_optimizer | `warn` | `warn` | `0` | `45` | `build/llm_goal_evidence/torch_optimizer.log` |
-| finetune_guard | `pass` | `pass` | `0` | `45` | `build/llm_goal_evidence/finetune_guard.log` |
-| public_absence | `pass` | `pass` | `0` | `45` | `build/llm_goal_evidence/public_absence.log` |
+| context_ponytail | `pass` | `pass` | `0` | `180` | `build/llm_goal_evidence/context_ponytail.log` |
+| dashboard | `pass` | `pass` | `0` | `180` | `build/llm_goal_evidence/dashboard.log` |
+| vllm_host | `warn` | `warn` | `0` | `180` | `build/llm_goal_evidence/vllm_host.log` |
+| svllm_local | `pass` | `pass` | `0` | `180` | `build/llm_goal_evidence/svllm_local.log` |
+| torch_optimizer | `warn` | `warn` | `0` | `180` | `build/llm_goal_evidence/torch_optimizer.log` |
+| finetune_guard | `pass` | `pass` | `0` | `180` | `build/llm_goal_evidence/finetune_guard.log` |
+| public_absence | `pass` | `pass` | `0` | `180` | `build/llm_goal_evidence/public_absence.log` |
 
 ## Strict Evidence Hints
 
@@ -39,5 +39,12 @@
 | svllm_local | `native_read_range,pinned_buffer,device_staging` | `native_read_range|pinned_buffer|device_staging` | `native_read_range_unavailable` |
 | torch_optimizer | `libtorch,cuda,parameter_cuda,autograd_gradient,optimizer_step_decreases_parameter_sum` | `libtorch` | `libtorch_unavailable` |
 | finetune_guard | `retry6_training_eval,training_allowed,model_manifest,eval_result,target_eval,decision,license,safety,deployment,app_handoff` | `retry6_training_eval|training_allowed|model_manifest|eval_result|target_eval|decision|license|safety|deployment|app_handoff` | `BLOCKED_RETRY6_NOT_READY` |
+
+## Host And Acceptance Details
+
+| lane | details |
+|------|---------|
+| vllm_host | `local_vllm_status=missing;local_gpu_status=available;preflight_status=skipped;endpoint_status=not_checked;models_status=not_fetched` |
+| finetune_guard | `acceptance_status=fail;acceptance_reason=BLOCKED_RETRY6_NOT_READY;training_allowed=false;model_manifest_exists=false;eval_result_exists=false;decision_status=retry-implementation;next_action=complete retry6 training/eval gate before normal acceptance review` |
 
 This aggregate proves the current local LLM tooling evidence lanes remain reproducible. WARN lanes are expected only for host-dependent gates that are still open on this machine: live vLLM serving and Simple/libtorch CUDA optimizer execution. The context/Ponytail lane is local mimic evidence only in default mode, the dashboard lane is route/collector evidence only in default mode, the svLLM lane is local file-backed readiness only in default mode, and the fine-tune lane is guard evidence only in default mode. This report is not release-completion evidence for those live host gates; rerun with `--strict-host` on a configured host when full context/Ponytail replacement, live dashboard operation, live vLLM, native svLLM streaming, fine-tune acceptance, and Simple/libtorch CUDA optimizer gates must pass.
