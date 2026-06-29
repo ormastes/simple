@@ -538,7 +538,9 @@ only the LLM, SPipe LLM, and dashboard feature rows in
 `doc/`, `test/`, `src/`, `scripts/`, `.spipe/`, and `examples/` path exists,
 and fails if the known stale svLLM generated-spec paths under
 `doc/06_spec/01_unit/lib/gc_async_mut/svllm/...` reappear instead of the real
-`doc/06_spec/test/01_unit/...` generated docs.
+`doc/06_spec/test/01_unit/...` generated docs. The aggregate forwards this as
+`llm_goal_evidence_feature_db_reference_detail`, so a passing aggregate also
+proves LLM feature tracking rows do not point at missing local evidence.
 
 Use the focused vLLM host probe after changing vLLM control CLI, live
 environment detection, dashboard control JSONL, or host preflight behavior:
