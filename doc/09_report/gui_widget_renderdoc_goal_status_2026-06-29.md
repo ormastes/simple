@@ -1,37 +1,35 @@
 # GUI Widget RenderDoc Goal Status
 
-- status: incomplete
-- reason: electron-widget-renderdoc-gpu-process-crashed-under-renderdoc
-- blocker: doc/08_tracking/bug/gui_widget_renderdoc_goal_blockers_2026-06-23.md
-- Electron Chromium-on-Vulkan widget RenderDoc blocker: doc/08_tracking/bug/gui_widget_renderdoc_goal_blockers_2026-06-23.md
+- status: pass
+- reason: pass
 - widget fixture status: pass
 - widgets with RenderDoc fixture features: 43 / 43
 - Simple gate status: pass
 - Simple source evidence: build/renderdoc/widget-probe-small/simple/evidence.env
 - Simple source evidence file: pass
 - Simple capture artifact: pass / RDOC
-- Simple widget fixture: pass; html bytes 9478 (pass)
+- Simple widget fixture: pass; html bytes 10700 (pass)
 - Simple runtime backend: vulkan; required vulkan
-- Electron gate status: fail
-- Electron gate failure class: electron-gate-chromium-gpu-process-crashed-under-renderdoc
-- Electron source evidence: build/renderdoc/electron-display-helper/electron-html/evidence.env
+- Electron gate status: pass
+- Electron gate failure class: pass
+- Electron source evidence: build/renderdoc/electron-implicit-layer-default-autocapture/electron-html/evidence.env
 - Electron source evidence file: pass
 - Electron fixture path status: pass
-- Electron capture artifact: missing / 
+- Electron capture artifact: pass / RDOC
 - Electron ARGB artifact: pass / pass; nonblank 403594
 - Electron requested Vulkan: api=vulkan angle=vulkan features=Vulkan log=pass
-- Electron GPU process exits: fail count=6 codes=139
+- Electron GPU process exits: pass count=0 codes=
 - Electron launch: exit=0 timed_out=false
 - Electron launch metadata: pass reason=pass
-- blocked gates: 1
-- blocked gate list: Electron Chromium-on-Vulkan GPU process exits under RenderDoc before .rdc capture
+- blocked gates: 0
+- blocked gate list: 
 
 ## Raw Evidence
-- gui_widget_renderdoc_goal_status=incomplete
-- gui_widget_renderdoc_goal_reason=electron-widget-renderdoc-gpu-process-crashed-under-renderdoc
-- gui_widget_renderdoc_goal_blocker_doc=doc/08_tracking/bug/gui_widget_renderdoc_goal_blockers_2026-06-23.md
+- gui_widget_renderdoc_goal_status=pass
+- gui_widget_renderdoc_goal_reason=pass
+- gui_widget_renderdoc_goal_blocker_doc=
 - gui_widget_renderdoc_goal_simple_blocker_doc=
-- gui_widget_renderdoc_goal_electron_blocker_doc=doc/08_tracking/bug/gui_widget_renderdoc_goal_blockers_2026-06-23.md
+- gui_widget_renderdoc_goal_electron_blocker_doc=
 - gui_widget_renderdoc_goal_widget_fixture_status=pass
 - gui_widget_renderdoc_goal_widget_fixture_reason=pass
 - gui_widget_renderdoc_goal_widget_fixture_exit_code=0
@@ -46,12 +44,12 @@
 - gui_widget_renderdoc_goal_simple_gate_source_env=build/renderdoc/widget-probe-small/simple/evidence.env
 - gui_widget_renderdoc_goal_simple_gate_capture_command=RDOC_OUTPUT_DIR=build/renderdoc/widget-probe-small RDOC_SIMPLE_PROG="$PWD/src/app/test/renderdoc_vulkan_widget_capture.spl" RDOC_HTML_PATH="$PWD/test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html" scripts/tool/renderdoc-evidence.shs capture-simple
 - gui_widget_renderdoc_goal_simple_gate_source_env_file_status=pass
-- gui_widget_renderdoc_goal_simple_gate_capture_file=build/renderdoc/widget-probe-small/simple/simple_gui_app_capture.rdc
+- gui_widget_renderdoc_goal_simple_gate_capture_file=/home/yoon/simple/build/renderdoc/widget-probe-small/simple/simple_gui_app_capture.rdc
 - gui_widget_renderdoc_goal_simple_gate_capture_file_status=pass
 - gui_widget_renderdoc_goal_simple_gate_capture_file_magic=RDOC
 - gui_widget_renderdoc_goal_simple_gate_runtime_backend=vulkan
 - gui_widget_renderdoc_goal_simple_gate_widget_html_path=/home/yoon/simple/test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html
-- gui_widget_renderdoc_goal_simple_gate_widget_html_bytes=9478
+- gui_widget_renderdoc_goal_simple_gate_widget_html_bytes=10700
 - gui_widget_renderdoc_goal_simple_gate_widget_html_bytes_status=pass
 - gui_widget_renderdoc_goal_simple_gate_fixture_path_status=pass
 - gui_widget_renderdoc_goal_simple_gate_required_backend=simple
@@ -60,19 +58,19 @@
 - gui_widget_renderdoc_goal_simple_gate_required_html_path_suffix=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html
 - gui_widget_renderdoc_goal_simple_gate_required_magic=RDOC
 - gui_widget_renderdoc_goal_simple_gate_required_runtime_backend=vulkan
-- gui_widget_renderdoc_goal_electron_gate_status=fail
-- gui_widget_renderdoc_goal_electron_gate_reason=chromium-gpu-process-crashed-under-renderdoc
-- gui_widget_renderdoc_goal_electron_gate_failure_class=electron-gate-chromium-gpu-process-crashed-under-renderdoc
-- gui_widget_renderdoc_goal_electron_gate_exit_code=1
-- gui_widget_renderdoc_goal_electron_gate_source_env=build/renderdoc/electron-display-helper/electron-html/evidence.env
+- gui_widget_renderdoc_goal_electron_gate_status=pass
+- gui_widget_renderdoc_goal_electron_gate_reason=pass
+- gui_widget_renderdoc_goal_electron_gate_failure_class=pass
+- gui_widget_renderdoc_goal_electron_gate_exit_code=0
+- gui_widget_renderdoc_goal_electron_gate_source_env=build/renderdoc/electron-implicit-layer-default-autocapture/electron-html/evidence.env
 - gui_widget_renderdoc_goal_electron_gate_capture_command=RDOC_OUTPUT_DIR=build/renderdoc/electron-display-helper RDOC_HTML_PATH="$PWD/test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html" scripts/tool/renderdoc-evidence.shs capture-electron-html
 - gui_widget_renderdoc_goal_electron_gate_source_env_file_status=pass
 - gui_widget_renderdoc_goal_electron_gate_html_path=/home/yoon/simple/test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html
 - gui_widget_renderdoc_goal_electron_gate_fixture_path_status=pass
-- gui_widget_renderdoc_goal_electron_gate_capture_file=
-- gui_widget_renderdoc_goal_electron_gate_capture_file_status=missing
-- gui_widget_renderdoc_goal_electron_gate_capture_file_magic=
-- gui_widget_renderdoc_goal_electron_gate_argb_path=build/renderdoc/electron-display-helper/electron-html/electron_argb.json
+- gui_widget_renderdoc_goal_electron_gate_capture_file=build/renderdoc/electron-implicit-layer-default-autocapture/electron-html/electron_gpu_capture.rdc
+- gui_widget_renderdoc_goal_electron_gate_capture_file_status=pass
+- gui_widget_renderdoc_goal_electron_gate_capture_file_magic=RDOC
+- gui_widget_renderdoc_goal_electron_gate_argb_path=build/renderdoc/electron-implicit-layer-default-autocapture/electron-html/electron_argb.json
 - gui_widget_renderdoc_goal_electron_gate_argb_file_status=pass
 - gui_widget_renderdoc_goal_electron_gate_argb_status=pass
 - gui_widget_renderdoc_goal_electron_gate_argb_nonblank_pixel_count=403594
@@ -84,10 +82,10 @@
 - gui_widget_renderdoc_goal_electron_gate_launch_metadata_status=pass
 - gui_widget_renderdoc_goal_electron_gate_launch_metadata_reason=pass
 - gui_widget_renderdoc_goal_electron_gate_vulkan_log_status=pass
-- gui_widget_renderdoc_goal_electron_gate_gpu_process_exit_status=fail
-- gui_widget_renderdoc_goal_electron_gate_gpu_process_exit_count=6
-- gui_widget_renderdoc_goal_electron_gate_gpu_process_exit_codes=139
-- gui_widget_renderdoc_goal_electron_gate_gpu_process_exit_reason=gpu-process-exited-unexpectedly
+- gui_widget_renderdoc_goal_electron_gate_gpu_process_exit_status=pass
+- gui_widget_renderdoc_goal_electron_gate_gpu_process_exit_count=0
+- gui_widget_renderdoc_goal_electron_gate_gpu_process_exit_codes=
+- gui_widget_renderdoc_goal_electron_gate_gpu_process_exit_reason=pass
 - gui_widget_renderdoc_goal_electron_gate_required_backend=electron
 - gui_widget_renderdoc_goal_electron_gate_required_scene=html-css-electron
 - gui_widget_renderdoc_goal_electron_gate_required_magic=RDOC
@@ -95,6 +93,6 @@
 - gui_widget_renderdoc_goal_electron_gate_required_angle=vulkan
 - gui_widget_renderdoc_goal_electron_gate_required_features=Vulkan
 - gui_widget_renderdoc_goal_electron_gate_required_html_path_suffix=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html
-- gui_widget_renderdoc_goal_blocked_gate=Electron Chromium-on-Vulkan GPU process exits under RenderDoc before .rdc capture
-- gui_widget_renderdoc_goal_blocked_gate_count=1
-- gui_widget_renderdoc_goal_blocked_gates=Electron Chromium-on-Vulkan GPU process exits under RenderDoc before .rdc capture
+- gui_widget_renderdoc_goal_blocked_gate=
+- gui_widget_renderdoc_goal_blocked_gate_count=0
+- gui_widget_renderdoc_goal_blocked_gates=

@@ -1,22 +1,22 @@
 # Linux Vulkan Render Log Compare
 
-- status: fail
-- reason: simple-vulkan-status-missing;simple-backend-not-vulkan;pixel-comparison-missing;pairwise-diff-incomplete-or-fail;simple-argb-missing-viewport;chrome-argb-missing-viewport;electron-argb-missing-viewport
-- aggregate evidence: build/gui-web-2d-vulkan-env/evidence.env
-- simple log: build/linux-vulkan-render-log-compare-implicit-layer-default-raw/simple.srl.env
-- chrome log: build/linux-vulkan-render-log-compare-implicit-layer-default-raw/chrome.srl.env
-- electron log: build/linux-vulkan-render-log-compare-implicit-layer-default-raw/electron.srl.env
-- compare log: build/linux-vulkan-render-log-compare-implicit-layer-default-raw/compare.srl.env
+- status: pass
+- reason: pass
+- aggregate evidence: build/gui-web-2d-vulkan-env-run-current/evidence.env
+- simple log: build/linux-vulkan-render-log-compare-current/simple.srl.env
+- chrome log: build/linux-vulkan-render-log-compare-current/chrome.srl.env
+- electron log: build/linux-vulkan-render-log-compare-current/electron.srl.env
+- compare log: build/linux-vulkan-render-log-compare-current/compare.srl.env
 
 ## Evidence
-- linux_vulkan_render_log_compare_status=fail
-- linux_vulkan_render_log_compare_reason=simple-vulkan-status-missing;simple-backend-not-vulkan;pixel-comparison-missing;pairwise-diff-incomplete-or-fail;simple-argb-missing-viewport;chrome-argb-missing-viewport;electron-argb-missing-viewport
-- linux_vulkan_render_log_compare_blocked_gate_count=3
-- linux_vulkan_render_log_compare_blocked_gates=simple-vulkan-backend,pairwise-argb-diff,argb-source-evidence
-- linux_vulkan_render_log_compare_simple_vulkan_gate_status=fail
+- linux_vulkan_render_log_compare_status=pass
+- linux_vulkan_render_log_compare_reason=pass
+- linux_vulkan_render_log_compare_blocked_gate_count=0
+- linux_vulkan_render_log_compare_blocked_gates=
+- linux_vulkan_render_log_compare_simple_vulkan_gate_status=pass
 - linux_vulkan_render_log_compare_browser_backing_gate_status=pass
-- linux_vulkan_render_log_compare_pairwise_gate_status=fail
-- linux_vulkan_render_log_compare_argb_source_gate_status=fail
+- linux_vulkan_render_log_compare_pairwise_gate_status=pass
+- linux_vulkan_render_log_compare_argb_source_gate_status=pass
 - linux_vulkan_render_log_compare_renderdoc_gate_status=pass
 - linux_vulkan_render_log_compare_platform=linux
 - linux_vulkan_render_log_compare_required_api=vulkan
@@ -26,16 +26,16 @@
 - linux_vulkan_render_log_compare_host_chrome_tool=/usr/bin/google-chrome
 - linux_vulkan_render_log_compare_host_electron_status=pass
 - linux_vulkan_render_log_compare_host_electron_tool=/home/yoon/simple/tools/electron-shell/node_modules/.bin/electron
-- linux_vulkan_render_log_compare_gui_web_2d_vulkan_env=build/gui-web-2d-vulkan-env/evidence.env
+- linux_vulkan_render_log_compare_gui_web_2d_vulkan_env=build/gui-web-2d-vulkan-env-run-current/evidence.env
 - linux_vulkan_render_log_compare_gui_web_2d_vulkan_env_file_status=pass
 - linux_vulkan_render_log_compare_browser_backing_env=build/gui-web-2d-vulkan-env-browser-backing/evidence.env
 - linux_vulkan_render_log_compare_browser_backing_env_file_status=pass
-- linux_vulkan_render_log_compare_simple_log=build/linux-vulkan-render-log-compare-implicit-layer-default-raw/simple.srl.env
-- linux_vulkan_render_log_compare_chrome_log=build/linux-vulkan-render-log-compare-implicit-layer-default-raw/chrome.srl.env
-- linux_vulkan_render_log_compare_electron_log=build/linux-vulkan-render-log-compare-implicit-layer-default-raw/electron.srl.env
-- linux_vulkan_render_log_compare_compare_log=build/linux-vulkan-render-log-compare-implicit-layer-default-raw/compare.srl.env
-- linux_vulkan_render_log_compare_pairwise_status=missing
-- linux_vulkan_render_log_compare_pairwise_mode=missing
+- linux_vulkan_render_log_compare_simple_log=build/linux-vulkan-render-log-compare-current/simple.srl.env
+- linux_vulkan_render_log_compare_chrome_log=build/linux-vulkan-render-log-compare-current/chrome.srl.env
+- linux_vulkan_render_log_compare_electron_log=build/linux-vulkan-render-log-compare-current/electron.srl.env
+- linux_vulkan_render_log_compare_compare_log=build/linux-vulkan-render-log-compare-current/compare.srl.env
+- linux_vulkan_render_log_compare_pairwise_status=pass
+- linux_vulkan_render_log_compare_pairwise_mode=pairwise-argb-diff
 - linux_vulkan_render_log_compare_renderdoc_simple_env=build/renderdoc/canonical-probe/simple/evidence.env
 - linux_vulkan_render_log_compare_renderdoc_simple_env_file_status=pass
 - linux_vulkan_render_log_compare_renderdoc_simple_artifact=build/renderdoc/canonical-probe/simple/simple_gui_app_capture.rdc

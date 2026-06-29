@@ -1,14 +1,13 @@
 # GUI RenderDoc Feature Coverage Status
 
 - status: incomplete
-- reason: missing-simple-widget-renderdoc
+- reason: missing-production-parity-evidence
 - widget HTML renderer dispatch: 43/43
 - widget rendering fixture/spec coverage: pass (43/43)
 - widget renderer class coverage: 43/43
 - widget render fixture witnesses: 43/43
 - widget RenderDoc HTML fixture witnesses: 43/43
-- widget RenderDoc goal: incomplete (missing-simple-widget-renderdoc; blocked 1)
-- widget RenderDoc blocker: doc/08_tracking/bug/gui_widget_renderdoc_goal_blockers_2026-06-23.md
+- widget RenderDoc goal: pass (pass; blocked 0)
 - Electron layout manifest cases: 50
 - HTML/CSS rendering manifest traceability: pass (pass)
 - HTML/CSS rendered tags: 105/105
@@ -17,27 +16,26 @@
 - HTML/CSS full rendering goal: incomplete (full-css-rendering-incomplete; full CSS 231/394)
 - HTML/CSS readiness answer: implemented-html-css-ready-full-css-incomplete (implemented surface pass, full CSS incomplete; unrendered CSS 163)
 - Web WM modern shell evidence: pass (pass; interaction pass; bitmap pass; audit pass)
-- Native render-log platform matrix: fail (missing-or-failing-native-render-log-platforms; missing macos-metal,windows-d3d12; failed linux-vulkan; required linux-vulkan,macos-metal,windows-d3d12)
-- Native GUI platform verification: fail (missing-or-failing-native-render-log-platforms; missing macos-metal,windows-d3d12; failed linux-vulkan; required linux-vulkan,macos-metal,windows-d3d12)
+- Native render-log platform matrix: incomplete (missing-or-failing-native-render-log-platforms; missing macos-metal,windows-d3d12; failed ; required linux-vulkan,macos-metal,windows-d3d12)
+- Native GUI platform verification: incomplete (missing-or-failing-native-render-log-platforms; missing macos-metal,windows-d3d12; failed ; required linux-vulkan,macos-metal,windows-d3d12)
 - macOS Metal browser/pixel detail: electron unavailable; chrome unavailable; browser unavailable; pixel missing/missing; diffs missing,missing,missing; ARGB missing,missing,missing; viewport missing
 - HTML/CSS animation rendering: pass (0/0; animation-transition-transform-css)
-- RenderDoc goal: fail (chromium-gpu-process-crashed-under-renderdoc)
+- RenderDoc goal: pass (pass)
 - Simple RenderDoc: pass (pass)
-- External Chrome/Vulkan RenderDoc: fail (chromium-gpu-process-crashed-under-renderdoc)
-- Electron Chromium/Vulkan RenderDoc: fail (missing-rdc)
-- Electron Chromium/Vulkan gate: fail (chromium-gpu-process-crashed-under-renderdoc)
+- External Chrome/Vulkan RenderDoc: pass (pass)
+- Electron Chromium/Vulkan RenderDoc: pass (pass)
+- Electron Chromium/Vulkan gate: pass (pass)
 - GUI/web/2D Vulkan setup source: existing-evidence
-- GUI/web/2D Vulkan setup mode: --check
-- GUI/web/2D Vulkan direct-run source: auto-existing (--run; evidence build/gui-web-2d-vulkan-env-run-auto/evidence.env)
+- GUI/web/2D Vulkan setup mode: --run
+- GUI/web/2D Vulkan direct-run source: auto-existing (--run; evidence build/gui-web-2d-vulkan-env-run-current/evidence.env)
 - GUI/web/2D browser Vulkan backing: pass (gpu-feature-status; pass)
 - GUI/web/2D Electron browser backing: pass (electron-vulkan-backed; vulkan enabled_on; gpu enabled; browser_cdp pass; display ANGLE_VULKAN; gl (gl=egl-angle,angle=vulkan); skia GaneshVulkan; renderer ANGLE (Intel, Vulkan 1.4.318 (Intel(R) Graphics (RPL-P) (0x0000A7A8)), Intel open-source Mesa driver-25.2.8); source build/gui-web-2d-vulkan-env-browser-backing/electron_argb_proof.json; argb_source build/gui-web-2d-vulkan-env-browser-backing/electron_argb.json)
 - GUI/web/2D Chrome browser backing: pass (chrome-vulkan-backed; display ANGLE_VULKAN; gpu enabled; gl (gl=egl-angle,angle=vulkan); skia GaneshVulkan; renderer ANGLE (Intel, Vulkan 1.4.318 (Intel(R) Graphics (RPL-P) (0x0000A7A8)), Intel open-source Mesa driver-25.2.8); source build/gui-web-2d-vulkan-env-browser-backing/chrome_argb_proof.json)
-- GUI/web/2D Vulkan RenderDoc blockers: blocked (2; electron-renderdoc-gate-fail-chromium-gpu-process-crashed-under-renderdoc;chrome-renderdoc-gate-fail-chromium-gpu-process-crashed-under-renderdoc)
-- GUI/web/2D RenderDoc blocker: doc/08_tracking/bug/gui_web_2d_vulkan_renderdoc_blockers_2026-06-23.md
+- GUI/web/2D Vulkan RenderDoc blockers: pass (0; pass)
 - GUI/web/2D Vulkan loader: present (Intel(R) Graphics (RPL-P) / Intel open-source Mesa driver)
 - GUI/web/2D Vulkan RenderDoc: ready (ready)
 - GUI/web/2D Vulkan RenderDoc macOS package: not-applicable (not-applicable)
-- GUI/web/2D Electron direct Vulkan: not-rejected-by-log (no-angle-vulkan-unavailable-log; ARGB pass)
+- GUI/web/2D Electron direct Vulkan: pass (electron-vulkan-enabled; ARGB pass)
 - GUI/web/2D Chrome direct Vulkan: not-rejected-by-log (no-angle-vulkan-unavailable-log; bitmap not-run)
 - GUI/web/2D Simple Vulkan: pass (pass; backend vulkan)
 - macOS Vulkan:
@@ -53,11 +51,8 @@
 - Production surface host:
 - Production Tauri surface capture: missing (missing-tauri-capture-evidence)
 - Production Chrome surface capture: missing (missing-chrome-capture-evidence)
-- blocked completion gates: 10
+- blocked completion gates: 7
 - blocked gate list:
-  - original Chrome-on-Vulkan RenderDoc .rdc with RDOC magic
-  - Electron Chromium-on-Vulkan RenderDoc .rdc with nonblank ARGB render proof
-  - Simple GUI widget RenderDoc .rdc on Vulkan Engine2D
   - native render-log comparison for Linux Vulkan, macOS Metal, and Windows D3D12
   - production GUI/web font offload readback evidence
   - production GUI/web raw Metal readback evidence
@@ -79,11 +74,11 @@
 - Simple RenderDoc: `RDOC_OUTPUT_DIR=build/renderdoc/canonical-probe scripts/tool/renderdoc-evidence.shs capture-simple`
 - Original Chrome/Vulkan RenderDoc: `RDOC_EXTERNAL_RUN_CAPTURE=1 sh scripts/check/check-renderdoc-external-host-capture.shs`
 - Electron Chromium RenderDoc: `RDOC_OUTPUT_DIR=build/renderdoc/canonical-probe scripts/tool/renderdoc-evidence.shs capture-electron-html`
-- Electron Chromium/Vulkan gate: `RDOC_ELECTRON_HTML_EVIDENCE_ENV=build/renderdoc/electron-display-helper/electron-html/evidence.env sh scripts/check/check-renderdoc-electron-html-gate.shs`
+- Electron Chromium/Vulkan gate: `RDOC_ELECTRON_HTML_EVIDENCE_ENV=build/renderdoc/electron-implicit-layer-default-autocapture/electron-html/evidence.env sh scripts/check/check-renderdoc-electron-html-gate.shs`
 
 ## Raw Evidence
 - gui_renderdoc_feature_coverage_status=incomplete
-- gui_renderdoc_feature_coverage_reason=missing-simple-widget-renderdoc
+- gui_renderdoc_feature_coverage_reason=missing-production-parity-evidence
 - widget_kind_source=src/lib/common/ui/widget_kind.spl
 - widget_kind_count=43
 - widget_html_renderer_source=src/app/ui.render/html_widgets.spl
@@ -110,7 +105,7 @@
 - html_css_traceability_reason=pass
 - html_css_traceability_command=sh scripts/check/check-html-css-sspec-traceability.shs
 - html_css_traceability_exit_code=0
-- html_css_traceability_evidence_env=build/gui-renderdoc-feature-coverage-status-implicit-layer-default/sspec-traceability/evidence.env
+- html_css_traceability_evidence_env=build/gui-renderdoc-feature-coverage-status-current-widget-pass/sspec-traceability/evidence.env
 - html_css_traceability_html_tag_count=105
 - html_css_traceability_required_html_tag_count=105
 - html_css_traceability_css_property_count=394
@@ -152,21 +147,21 @@
 - gui_widget_rendering_fixture_coverage_renderdoc_fixture_widget_features=panel:container-surface,text:text-run,list:list-rows,table:tabular-grid,progress:meter-fill,menubar:menu-actions,statusbar:status-line,input:form-input,tabs:tab-selection,button:command-action,checkbox:binary-choice,radio:exclusive-choice,dropdown:option-select,textfield:single-line-edit,image:media-image,divider:separator-line,dialog:modal-surface,tooltip:hover-help,tree:hierarchy-root,treenode:hierarchy-node,scroll:scroll-region,textarea:multi-line-edit,heading:section-title,label:field-label,navigation_bar:primary-navigation,tab_bar:tab-navigation,card:content-card,switch:toggle-control,segmented_control:segmented-choice,search_bar:search-input,glass_title_bar:window-titlebar,sidebar:side-navigation,command_bar:command-actions,workspace_tabs:workspace-tab-strip,command_palette:command-search,toast:transient-message,sheet_modal:sheet-modal,context_menu:context-actions,inspector:property-inspector,utility_rail:utility-navigation,status_chip:status-indicator,selection_pill:selection-token,empty_state:empty-feedback
 - gui_widget_renderdoc_goal_command=sh scripts/check/check-gui-widget-renderdoc-goal-status.shs
 - gui_widget_renderdoc_goal_exit_code=0
-- gui_widget_renderdoc_goal_status=incomplete
-- gui_widget_renderdoc_goal_reason=missing-simple-widget-renderdoc
-- gui_widget_renderdoc_goal_blocker_doc=doc/08_tracking/bug/gui_widget_renderdoc_goal_blockers_2026-06-23.md
-- gui_widget_renderdoc_goal_simple_blocker_doc=doc/08_tracking/bug/gui_widget_renderdoc_goal_blockers_2026-06-23.md
+- gui_widget_renderdoc_goal_status=pass
+- gui_widget_renderdoc_goal_reason=pass
+- gui_widget_renderdoc_goal_blocker_doc=
+- gui_widget_renderdoc_goal_simple_blocker_doc=
 - gui_widget_renderdoc_goal_electron_blocker_doc=
-- gui_widget_renderdoc_goal_simple_gate_status=fail
-- gui_widget_renderdoc_goal_simple_gate_source_env=build/renderdoc/canonical-probe/simple/evidence.env
+- gui_widget_renderdoc_goal_simple_gate_status=pass
+- gui_widget_renderdoc_goal_simple_gate_source_env=build/renderdoc/widget-probe-small/simple/evidence.env
 - gui_widget_renderdoc_goal_simple_gate_capture_command=RDOC_OUTPUT_DIR=build/renderdoc/widget-probe-small RDOC_SIMPLE_PROG="$PWD/src/app/test/renderdoc_vulkan_widget_capture.spl" RDOC_HTML_PATH="$PWD/test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html" scripts/tool/renderdoc-evidence.shs capture-simple
 - gui_widget_renderdoc_goal_simple_gate_source_env_file_status=pass
 - gui_widget_renderdoc_goal_simple_gate_capture_file_status=pass
 - gui_widget_renderdoc_goal_simple_gate_capture_file_magic=RDOC
 - gui_widget_renderdoc_goal_simple_gate_runtime_backend=vulkan
-- gui_widget_renderdoc_goal_simple_gate_widget_html_bytes=
-- gui_widget_renderdoc_goal_simple_gate_widget_html_bytes_status=fail
-- gui_widget_renderdoc_goal_simple_gate_fixture_path_status=fail
+- gui_widget_renderdoc_goal_simple_gate_widget_html_bytes=10700
+- gui_widget_renderdoc_goal_simple_gate_widget_html_bytes_status=pass
+- gui_widget_renderdoc_goal_simple_gate_fixture_path_status=pass
 - gui_widget_renderdoc_goal_simple_gate_required_backend=simple
 - gui_widget_renderdoc_goal_simple_gate_required_scene=vulkan-engine2d
 - gui_widget_renderdoc_goal_simple_gate_required_program=src/app/test/renderdoc_vulkan_widget_capture.spl
@@ -199,8 +194,8 @@
 - gui_widget_renderdoc_goal_electron_gate_required_scene=html-css-electron
 - gui_widget_renderdoc_goal_electron_gate_required_magic=RDOC
 - gui_widget_renderdoc_goal_electron_gate_required_html_path_suffix=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html
-- gui_widget_renderdoc_goal_blocked_gate_count=1
-- gui_widget_renderdoc_goal_blocked_gates=Simple GUI widget RenderDoc .rdc on Vulkan Engine2D
+- gui_widget_renderdoc_goal_blocked_gate_count=0
+- gui_widget_renderdoc_goal_blocked_gates=
 - html_css_rendering_manifest_traceability_command=sh scripts/check/check-html-css-rendering-manifest-traceability.shs
 - html_css_rendering_manifest_traceability_exit_code=0
 - html_css_rendering_manifest_traceability_status=pass
@@ -292,51 +287,51 @@
 - html_css_full_css_completion_rendered_count=231
 - html_css_full_css_completion_unrendered_count=163
 - html_css_readiness_answer=implemented-html-css-ready-full-css-incomplete
-- native_render_log_platform_matrix_status=fail
+- native_render_log_platform_matrix_status=incomplete
 - native_render_log_platform_matrix_reason=missing-or-failing-native-render-log-platforms
-- native_render_log_platform_matrix_source_revision=@  bc5d41513d02 │ ~
+- native_render_log_platform_matrix_source_revision=@  31de75c6209d │ ~
 - native_render_log_platform_matrix_runtime_build=
 - native_render_log_platform_matrix_browser_webview_electron_revision=
 - native_render_log_platform_matrix_graphics_sdk_driver=
 - native_render_log_platform_matrix_runbook_version=
-- gui_web_2d_evidence_source_revision=@  bc5d41513d02 │ ~
+- gui_web_2d_evidence_source_revision=@  31de75c6209d │ ~
 - gui_web_2d_evidence_runtime_build=
 - gui_web_2d_evidence_browser_webview_electron_revision=
 - gui_web_2d_evidence_graphics_sdk_driver=
 - gui_web_2d_evidence_runbook_version=
 - native_render_log_platform_matrix_required_platforms=linux-vulkan,macos-metal,windows-d3d12
 - native_render_log_platform_matrix_missing_platforms=macos-metal,windows-d3d12
-- native_render_log_platform_matrix_failed_platforms=linux-vulkan
-- native_gui_platform_verification_status=fail
+- native_render_log_platform_matrix_failed_platforms=
+- native_gui_platform_verification_status=incomplete
 - native_gui_platform_verification_reason=missing-or-failing-native-render-log-platforms
 - native_gui_platform_verification_required_platforms=linux-vulkan,macos-metal,windows-d3d12
 - native_gui_platform_verification_missing_platforms=macos-metal,windows-d3d12
-- native_gui_platform_verification_failed_platforms=linux-vulkan
+- native_gui_platform_verification_failed_platforms=
 - native_render_log_platform_matrix_linux_vulkan_command=BUILD_DIR=build/linux-vulkan-render-log-compare sh scripts/check/check-linux-vulkan-render-log-compare.shs
 - native_render_log_platform_matrix_macos_metal_command=MACOS_METAL_RENDER_LOG_REQUIRE_GPU_CAPTURE=1 BUILD_DIR=build/macos-metal-render-log-compare sh scripts/check/check-macos-metal-render-log-compare.shs
 - native_render_log_platform_matrix_windows_d3d12_command=WINDOWS_D3D12_RENDER_LOG_REQUIRE_PIX=1 BUILD_DIR=build/windows-d3d12-render-log-compare sh scripts/check/check-windows-d3d12-render-log-compare.shs
-- linux_vulkan_render_log_compare_env=build/linux-vulkan-render-log-compare/evidence.env
+- linux_vulkan_render_log_compare_env=build/linux-vulkan-render-log-compare-current/evidence.env
 - linux_vulkan_render_log_compare_env_file_status=pass
-- linux_vulkan_render_log_compare_status=fail
-- linux_vulkan_render_log_compare_reason=simple-vulkan-status-missing;simple-backend-not-vulkan;pixel-comparison-missing;pairwise-diff-incomplete-or-fail;simple-argb-missing-viewport;chrome-argb-missing-viewport;electron-argb-missing-viewport;renderdoc-chrome-fail;renderdoc-electron-fail
-- linux_vulkan_render_log_compare_blocked_gate_count=5
-- linux_vulkan_render_log_compare_blocked_gates=simple-vulkan-backend,pairwise-argb-diff,argb-source-evidence,renderdoc-chrome-rdc,renderdoc-electron-rdc
+- linux_vulkan_render_log_compare_status=pass
+- linux_vulkan_render_log_compare_reason=pass
+- linux_vulkan_render_log_compare_blocked_gate_count=0
+- linux_vulkan_render_log_compare_blocked_gates=
 - linux_vulkan_render_log_compare_required_api=vulkan
-- linux_vulkan_render_log_compare_pairwise_status=missing
-- linux_vulkan_render_log_compare_simple_vulkan_gate_status=fail
+- linux_vulkan_render_log_compare_pairwise_status=pass
+- linux_vulkan_render_log_compare_simple_vulkan_gate_status=pass
 - linux_vulkan_render_log_compare_browser_backing_gate_status=pass
-- linux_vulkan_render_log_compare_pairwise_gate_status=fail
-- linux_vulkan_render_log_compare_argb_source_gate_status=fail
-- linux_vulkan_render_log_compare_renderdoc_gate_status=fail
+- linux_vulkan_render_log_compare_pairwise_gate_status=pass
+- linux_vulkan_render_log_compare_argb_source_gate_status=pass
+- linux_vulkan_render_log_compare_renderdoc_gate_status=pass
 - linux_vulkan_render_log_compare_renderdoc_simple_status=pass
 - linux_vulkan_render_log_compare_renderdoc_simple_reason=pass
 - linux_vulkan_render_log_compare_renderdoc_simple_env_file_status=pass
 - linux_vulkan_render_log_compare_renderdoc_simple_artifact_file_status=pass
 - linux_vulkan_render_log_compare_renderdoc_simple_artifact_magic=RDOC
-- linux_vulkan_render_log_compare_renderdoc_linux_angle_workaround_status=unknown
-- linux_vulkan_render_log_compare_renderdoc_linux_angle_workaround_reason=insufficient-egl-initialize-return-evidence
-- linux_vulkan_render_log_compare_renderdoc_chrome_status=fail
-- linux_vulkan_render_log_compare_renderdoc_chrome_reason=missing-rdc
+- linux_vulkan_render_log_compare_renderdoc_linux_angle_workaround_status=pass
+- linux_vulkan_render_log_compare_renderdoc_linux_angle_workaround_reason=browser-renderdoc-rdc-present
+- linux_vulkan_render_log_compare_renderdoc_chrome_status=pass
+- linux_vulkan_render_log_compare_renderdoc_chrome_reason=pass
 - linux_vulkan_render_log_compare_renderdoc_chrome_gpu_process_exit_status=not-recorded
 - linux_vulkan_render_log_compare_renderdoc_chrome_gpu_process_exit_count=0
 - linux_vulkan_render_log_compare_renderdoc_chrome_gpu_process_exit_codes=
@@ -344,39 +339,39 @@
 - linux_vulkan_render_log_compare_renderdoc_chrome_gpu_launcher_angle_status=pass
 - linux_vulkan_render_log_compare_renderdoc_chrome_gpu_launcher_angle_error_count=0
 - linux_vulkan_render_log_compare_renderdoc_chrome_gpu_launcher_clear_renderdoc_layer=0
-- linux_vulkan_render_log_compare_renderdoc_chrome_autocapture_status=missing-summary
-- linux_vulkan_render_log_compare_renderdoc_chrome_delay_trigger_loaded_count=1
-- linux_vulkan_render_log_compare_renderdoc_chrome_delay_trigger_api_ready_count=1
-- linux_vulkan_render_log_compare_renderdoc_chrome_delay_trigger_mode=start-end
+- linux_vulkan_render_log_compare_renderdoc_chrome_autocapture_status=ended
+- linux_vulkan_render_log_compare_renderdoc_chrome_delay_trigger_loaded_count=0
+- linux_vulkan_render_log_compare_renderdoc_chrome_delay_trigger_api_ready_count=0
+- linux_vulkan_render_log_compare_renderdoc_chrome_delay_trigger_mode=
 - linux_vulkan_render_log_compare_renderdoc_chrome_delay_trigger_capture_count=0
-- linux_vulkan_render_log_compare_renderdoc_chrome_delay_trigger_last_end_ok=0
-- linux_vulkan_render_log_compare_renderdoc_chrome_delay_trigger_elf_status=rdoc_delay_trigger_elf=symbol-found
-- linux_vulkan_render_log_compare_renderdoc_chrome_delay_trigger_capfile_template=/home/yoon/simple/build/renderdoc/chrome-gpu-delay-device-target-vulkan-only/html/gpu_chrome
-- linux_vulkan_render_log_compare_renderdoc_chrome_delay_trigger_target_device=(nil)
-- linux_vulkan_render_log_compare_renderdoc_chrome_delay_trigger_last_vk_instance=(nil)
+- linux_vulkan_render_log_compare_renderdoc_chrome_delay_trigger_last_end_ok=
+- linux_vulkan_render_log_compare_renderdoc_chrome_delay_trigger_elf_status=
+- linux_vulkan_render_log_compare_renderdoc_chrome_delay_trigger_capfile_template=
+- linux_vulkan_render_log_compare_renderdoc_chrome_delay_trigger_target_device=
+- linux_vulkan_render_log_compare_renderdoc_chrome_delay_trigger_last_vk_instance=
 - linux_vulkan_render_log_compare_renderdoc_chrome_delay_trigger_vk_create_instance_count=0
-- linux_vulkan_render_log_compare_renderdoc_chrome_delay_trigger_num_captures_before=0
-- linux_vulkan_render_log_compare_renderdoc_chrome_delay_trigger_num_captures_after=0
-- linux_vulkan_render_log_compare_renderdoc_chrome_delay_trigger_is_capturing_after_start=0
+- linux_vulkan_render_log_compare_renderdoc_chrome_delay_trigger_num_captures_before=
+- linux_vulkan_render_log_compare_renderdoc_chrome_delay_trigger_num_captures_after=
+- linux_vulkan_render_log_compare_renderdoc_chrome_delay_trigger_is_capturing_after_start=
 - linux_vulkan_render_log_compare_renderdoc_chrome_delay_trigger_is_capturing_after_trigger=
-- linux_vulkan_render_log_compare_renderdoc_chrome_delay_trigger_is_capturing_before_end=0
-- linux_vulkan_render_log_compare_renderdoc_chrome_egl_get_platform_display_count=
-- linux_vulkan_render_log_compare_renderdoc_chrome_egl_initialize_count=
-- linux_vulkan_render_log_compare_renderdoc_chrome_egl_initialize_return_count=
-- linux_vulkan_render_log_compare_renderdoc_chrome_egl_initialize_success_count=
-- linux_vulkan_render_log_compare_renderdoc_chrome_egl_initialize_fail_count=
-- linux_vulkan_render_log_compare_renderdoc_chrome_egl_initialize_last_result=
-- linux_vulkan_render_log_compare_renderdoc_chrome_egl_initialize_last_error=
-- linux_vulkan_render_log_compare_renderdoc_chrome_egl_choose_config_count=
-- linux_vulkan_render_log_compare_renderdoc_chrome_vk_enum_instance_layer_count=
-- linux_vulkan_render_log_compare_renderdoc_chrome_vk_enum_instance_extension_count=
-- linux_vulkan_render_log_compare_renderdoc_chrome_vk_create_instance_count=
-- linux_vulkan_render_log_compare_renderdoc_chrome_vk_create_device_count=
+- linux_vulkan_render_log_compare_renderdoc_chrome_delay_trigger_is_capturing_before_end=
+- linux_vulkan_render_log_compare_renderdoc_chrome_egl_get_platform_display_count=1
+- linux_vulkan_render_log_compare_renderdoc_chrome_egl_initialize_count=1
+- linux_vulkan_render_log_compare_renderdoc_chrome_egl_initialize_return_count=1
+- linux_vulkan_render_log_compare_renderdoc_chrome_egl_initialize_success_count=1
+- linux_vulkan_render_log_compare_renderdoc_chrome_egl_initialize_fail_count=0
+- linux_vulkan_render_log_compare_renderdoc_chrome_egl_initialize_last_result=1
+- linux_vulkan_render_log_compare_renderdoc_chrome_egl_initialize_last_error=12288
+- linux_vulkan_render_log_compare_renderdoc_chrome_egl_choose_config_count=0
+- linux_vulkan_render_log_compare_renderdoc_chrome_vk_enum_instance_layer_count=4
+- linux_vulkan_render_log_compare_renderdoc_chrome_vk_enum_instance_extension_count=8
+- linux_vulkan_render_log_compare_renderdoc_chrome_vk_create_instance_count=1
+- linux_vulkan_render_log_compare_renderdoc_chrome_vk_create_device_count=1
 - linux_vulkan_render_log_compare_renderdoc_chrome_env_file_status=pass
-- linux_vulkan_render_log_compare_renderdoc_chrome_artifact_file_status=missing
-- linux_vulkan_render_log_compare_renderdoc_chrome_artifact_magic=missing
-- linux_vulkan_render_log_compare_renderdoc_electron_status=fail
-- linux_vulkan_render_log_compare_renderdoc_electron_reason=missing-rdc
+- linux_vulkan_render_log_compare_renderdoc_chrome_artifact_file_status=pass
+- linux_vulkan_render_log_compare_renderdoc_chrome_artifact_magic=RDOC
+- linux_vulkan_render_log_compare_renderdoc_electron_status=pass
+- linux_vulkan_render_log_compare_renderdoc_electron_reason=pass
 - linux_vulkan_render_log_compare_renderdoc_electron_gpu_process_exit_status=pass
 - linux_vulkan_render_log_compare_renderdoc_electron_gpu_process_exit_count=0
 - linux_vulkan_render_log_compare_renderdoc_electron_gpu_process_exit_codes=
@@ -384,37 +379,37 @@
 - linux_vulkan_render_log_compare_renderdoc_electron_gpu_launcher_angle_status=pass
 - linux_vulkan_render_log_compare_renderdoc_electron_gpu_launcher_angle_error_count=0
 - linux_vulkan_render_log_compare_renderdoc_electron_gpu_launcher_clear_renderdoc_layer=0
-- linux_vulkan_render_log_compare_renderdoc_electron_autocapture_status=missing-summary
-- linux_vulkan_render_log_compare_renderdoc_electron_delay_trigger_loaded_count=1
-- linux_vulkan_render_log_compare_renderdoc_electron_delay_trigger_api_ready_count=1
-- linux_vulkan_render_log_compare_renderdoc_electron_delay_trigger_mode=start-end
+- linux_vulkan_render_log_compare_renderdoc_electron_autocapture_status=ended
+- linux_vulkan_render_log_compare_renderdoc_electron_delay_trigger_loaded_count=0
+- linux_vulkan_render_log_compare_renderdoc_electron_delay_trigger_api_ready_count=0
+- linux_vulkan_render_log_compare_renderdoc_electron_delay_trigger_mode=
 - linux_vulkan_render_log_compare_renderdoc_electron_delay_trigger_capture_count=0
-- linux_vulkan_render_log_compare_renderdoc_electron_delay_trigger_last_end_ok=0
-- linux_vulkan_render_log_compare_renderdoc_electron_delay_trigger_elf_status=rdoc_delay_trigger_elf=symbol-found
-- linux_vulkan_render_log_compare_renderdoc_electron_delay_trigger_capfile_template=/home/yoon/simple/build/renderdoc/electron-gpu-delay-device-target-vulkan-only/electron-html/electron_gpu
-- linux_vulkan_render_log_compare_renderdoc_electron_delay_trigger_target_device=(nil)
-- linux_vulkan_render_log_compare_renderdoc_electron_delay_trigger_last_vk_instance=(nil)
+- linux_vulkan_render_log_compare_renderdoc_electron_delay_trigger_last_end_ok=
+- linux_vulkan_render_log_compare_renderdoc_electron_delay_trigger_elf_status=
+- linux_vulkan_render_log_compare_renderdoc_electron_delay_trigger_capfile_template=
+- linux_vulkan_render_log_compare_renderdoc_electron_delay_trigger_target_device=
+- linux_vulkan_render_log_compare_renderdoc_electron_delay_trigger_last_vk_instance=
 - linux_vulkan_render_log_compare_renderdoc_electron_delay_trigger_vk_create_instance_count=0
-- linux_vulkan_render_log_compare_renderdoc_electron_delay_trigger_num_captures_before=0
-- linux_vulkan_render_log_compare_renderdoc_electron_delay_trigger_num_captures_after=0
-- linux_vulkan_render_log_compare_renderdoc_electron_delay_trigger_is_capturing_after_start=0
+- linux_vulkan_render_log_compare_renderdoc_electron_delay_trigger_num_captures_before=
+- linux_vulkan_render_log_compare_renderdoc_electron_delay_trigger_num_captures_after=
+- linux_vulkan_render_log_compare_renderdoc_electron_delay_trigger_is_capturing_after_start=
 - linux_vulkan_render_log_compare_renderdoc_electron_delay_trigger_is_capturing_after_trigger=
-- linux_vulkan_render_log_compare_renderdoc_electron_delay_trigger_is_capturing_before_end=0
-- linux_vulkan_render_log_compare_renderdoc_electron_egl_get_platform_display_count=
-- linux_vulkan_render_log_compare_renderdoc_electron_egl_initialize_count=
-- linux_vulkan_render_log_compare_renderdoc_electron_egl_initialize_return_count=
-- linux_vulkan_render_log_compare_renderdoc_electron_egl_initialize_success_count=
-- linux_vulkan_render_log_compare_renderdoc_electron_egl_initialize_fail_count=
-- linux_vulkan_render_log_compare_renderdoc_electron_egl_initialize_last_result=
-- linux_vulkan_render_log_compare_renderdoc_electron_egl_initialize_last_error=
-- linux_vulkan_render_log_compare_renderdoc_electron_egl_choose_config_count=
-- linux_vulkan_render_log_compare_renderdoc_electron_vk_enum_instance_layer_count=
-- linux_vulkan_render_log_compare_renderdoc_electron_vk_enum_instance_extension_count=
-- linux_vulkan_render_log_compare_renderdoc_electron_vk_create_instance_count=
-- linux_vulkan_render_log_compare_renderdoc_electron_vk_create_device_count=
+- linux_vulkan_render_log_compare_renderdoc_electron_delay_trigger_is_capturing_before_end=
+- linux_vulkan_render_log_compare_renderdoc_electron_egl_get_platform_display_count=1
+- linux_vulkan_render_log_compare_renderdoc_electron_egl_initialize_count=1
+- linux_vulkan_render_log_compare_renderdoc_electron_egl_initialize_return_count=1
+- linux_vulkan_render_log_compare_renderdoc_electron_egl_initialize_success_count=1
+- linux_vulkan_render_log_compare_renderdoc_electron_egl_initialize_fail_count=0
+- linux_vulkan_render_log_compare_renderdoc_electron_egl_initialize_last_result=1
+- linux_vulkan_render_log_compare_renderdoc_electron_egl_initialize_last_error=12288
+- linux_vulkan_render_log_compare_renderdoc_electron_egl_choose_config_count=0
+- linux_vulkan_render_log_compare_renderdoc_electron_vk_enum_instance_layer_count=4
+- linux_vulkan_render_log_compare_renderdoc_electron_vk_enum_instance_extension_count=8
+- linux_vulkan_render_log_compare_renderdoc_electron_vk_create_instance_count=1
+- linux_vulkan_render_log_compare_renderdoc_electron_vk_create_device_count=1
 - linux_vulkan_render_log_compare_renderdoc_electron_env_file_status=pass
-- linux_vulkan_render_log_compare_renderdoc_electron_artifact_file_status=missing
-- linux_vulkan_render_log_compare_renderdoc_electron_artifact_magic=missing
+- linux_vulkan_render_log_compare_renderdoc_electron_artifact_file_status=pass
+- linux_vulkan_render_log_compare_renderdoc_electron_artifact_magic=RDOC
 - linux_vulkan_render_log_compare_host_renderdoc_status=pass
 - linux_vulkan_render_log_compare_host_renderdoc_tool=/home/yoon/simple/build/tools/renderdoc-linux-vulkan-only/bin/renderdoccmd
 - linux_vulkan_render_log_compare_host_chrome_status=pass
@@ -484,8 +479,8 @@
 - gui_web_2d_vulkan_setup_command=sh scripts/setup/setup-gui-web-2d-vulkan-env.shs --check
 - gui_web_2d_vulkan_setup_source=existing-evidence
 - gui_web_2d_vulkan_setup_exit_code=
-- gui_web_2d_vulkan_evidence_env=build/gui-web-2d-vulkan-env-check-current-codex-2026-06-28/evidence.env
-- gui_web_2d_vulkan_mode=--check
+- gui_web_2d_vulkan_evidence_env=build/gui-web-2d-vulkan-env-run-current/evidence.env
+- gui_web_2d_vulkan_mode=--run
 - gui_web_2d_vulkan_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html
 - gui_web_2d_vulkan_width=1280
 - gui_web_2d_vulkan_height=720
@@ -526,12 +521,12 @@
 - gui_web_2d_vulkan_chrome_browser_backing_hardware_supports_vulkan=true
 - gui_web_2d_vulkan_chrome_browser_backing_source=build/gui-web-2d-vulkan-env-browser-backing/chrome_argb_proof.json
 - gui_web_2d_vulkan_chrome_browser_backing_source_file_status=pass
-- gui_web_2d_vulkan_renderdoc_blocker_status=blocked
-- gui_web_2d_vulkan_renderdoc_blocker_reason=electron-renderdoc-gate-fail-chromium-gpu-process-crashed-under-renderdoc;chrome-renderdoc-gate-fail-chromium-gpu-process-crashed-under-renderdoc
-- gui_web_2d_vulkan_renderdoc_blocker_gate_count=2
-- gui_web_2d_vulkan_renderdoc_blocker_gates=electron-renderdoc-gate-fail-chromium-gpu-process-crashed-under-renderdoc|chrome-renderdoc-gate-fail-chromium-gpu-process-crashed-under-renderdoc
-- gui_web_2d_vulkan_renderdoc_blocker_doc=doc/08_tracking/bug/gui_web_2d_vulkan_renderdoc_blockers_2026-06-23.md
-- gui_web_2d_vulkan_direct_run_evidence_env=build/gui-web-2d-vulkan-env-run-auto/evidence.env
+- gui_web_2d_vulkan_renderdoc_blocker_status=pass
+- gui_web_2d_vulkan_renderdoc_blocker_reason=pass
+- gui_web_2d_vulkan_renderdoc_blocker_gate_count=0
+- gui_web_2d_vulkan_renderdoc_blocker_gates=
+- gui_web_2d_vulkan_renderdoc_blocker_doc=
+- gui_web_2d_vulkan_direct_run_evidence_env=build/gui-web-2d-vulkan-env-run-current/evidence.env
 - gui_web_2d_vulkan_direct_run_source=auto-existing
 - gui_web_2d_vulkan_direct_run_mode=--run
 - gui_web_2d_vulkan_browser_backing_evidence_env=build/gui-web-2d-vulkan-env-browser-backing/evidence.env
@@ -547,32 +542,32 @@
 - gui_web_2d_vulkan_electron_requested_api=vulkan
 - gui_web_2d_vulkan_electron_requested_angle=vulkan
 - gui_web_2d_vulkan_electron_requested_features=Vulkan
-- gui_web_2d_vulkan_electron_launch_flags=--no-sandbox --disable-gpu-sandbox --enable-features=Vulkan --use-angle=vulkan
+- gui_web_2d_vulkan_electron_launch_flags=--no-sandbox --disable-gpu-sandbox --disable-dev-shm-usage --no-zygote --ozone-platform=x11 --enable-features=Vulkan,DefaultANGLEVulkan,VulkanFromANGLE --ignore-gpu-blocklist --enable-gpu-rasterization --use-angle=vulkan
 - gui_web_2d_vulkan_chrome_requested_api=vulkan
 - gui_web_2d_vulkan_chrome_requested_angle=vulkan
 - gui_web_2d_vulkan_chrome_requested_features=Vulkan
-- gui_web_2d_vulkan_chrome_launch_flags=--no-sandbox --disable-gpu-sandbox --disable-dev-shm-usage --enable-features=Vulkan --use-angle=vulkan
+- gui_web_2d_vulkan_chrome_launch_flags=--no-sandbox --disable-gpu-sandbox --disable-dev-shm-usage --no-zygote --ozone-platform=x11 --enable-features=Vulkan,DefaultANGLEVulkan,VulkanFromANGLE --ignore-gpu-blocklist --enable-gpu-rasterization --use-angle=vulkan
 - gui_web_2d_vulkan_simple_bin=release/x86_64-unknown-linux-gnu/simple
-- gui_web_2d_vulkan_simple_bin_selection_reason=default-missing-fallback
+- gui_web_2d_vulkan_simple_bin_selection_reason=self-hosted-release
 - gui_web_2d_vulkan_simple_bin_status=pass
 - gui_web_2d_vulkan_renderdoc_status=ready
 - gui_web_2d_vulkan_renderdoc_reason=ready
 - gui_web_2d_vulkan_renderdoc_setup_reason=ready
-- gui_web_2d_vulkan_renderdoc_cmd=/opt/renderdoc/bin/renderdoccmd
-- gui_web_2d_vulkan_renderdoc_search_paths=RDOC_HOME_UNSET|/home/yoon/simple/build/tools/renderdoc|/home/yoon/simple/build/tools/renderdoc-*|/Applications/RenderDoc.app|/home/yoon/Applications/RenderDoc.app|/home/yoon/simple/build/tools/RenderDoc.app|/home/yoon/simple/build/tools/renderdoc/RenderDoc.app|PATH:renderdoccmd
+- gui_web_2d_vulkan_renderdoc_cmd=build/tools/renderdoc-linux-vulkan-only/bin/renderdoccmd
+- gui_web_2d_vulkan_renderdoc_search_paths=build/tools/renderdoc-linux-vulkan-only|/home/yoon/simple/build/tools/renderdoc|/home/yoon/simple/build/tools/renderdoc-*|/Applications/RenderDoc.app|/home/yoon/Applications/RenderDoc.app|/home/yoon/simple/build/tools/RenderDoc.app|/home/yoon/simple/build/tools/renderdoc/RenderDoc.app|PATH:renderdoccmd
 - gui_web_2d_vulkan_renderdoc_install_hint=
 - gui_web_2d_vulkan_renderdoc_macos_homebrew_package_status=not-applicable
 - gui_web_2d_vulkan_renderdoc_macos_upstream_support_status=not-applicable
 - gui_web_2d_vulkan_renderdoc_setup_macos_homebrew_package_status=not-applicable
 - gui_web_2d_vulkan_renderdoc_setup_macos_upstream_support_status=not-applicable
-- gui_web_2d_vulkan_electron_stdout=build/gui-web-2d-vulkan-env-run-auto/electron.out
+- gui_web_2d_vulkan_electron_stdout=build/gui-web-2d-vulkan-env-run-current/electron.out
 - gui_web_2d_vulkan_electron_stdout_file_status=pass
-- gui_web_2d_vulkan_electron_log=build/gui-web-2d-vulkan-env-run-auto/electron.log
+- gui_web_2d_vulkan_electron_log=build/gui-web-2d-vulkan-env-run-current/electron.log
 - gui_web_2d_vulkan_electron_log_file_status=pass
 - gui_web_2d_vulkan_electron_argb_status=pass
-- gui_web_2d_vulkan_electron_argb_path=build/gui-web-2d-vulkan-env-run-auto/electron_argb.json
+- gui_web_2d_vulkan_electron_argb_path=build/gui-web-2d-vulkan-env-run-current/electron_argb.json
 - gui_web_2d_vulkan_electron_argb_file_status=pass
-- gui_web_2d_vulkan_electron_argb_proof=build/gui-web-2d-vulkan-env-run-auto/electron_argb_proof.json
+- gui_web_2d_vulkan_electron_argb_proof=build/gui-web-2d-vulkan-env-run-current/electron_argb_proof.json
 - gui_web_2d_vulkan_electron_argb_proof_file_status=pass
 - gui_web_2d_vulkan_electron_argb_width=1280
 - gui_web_2d_vulkan_electron_argb_height=720
@@ -583,24 +578,24 @@
 - gui_web_2d_vulkan_electron_argb_checksum_status=pass
 - gui_web_2d_vulkan_electron_argb_weighted_checksum=1823529669080970897482
 - gui_web_2d_vulkan_electron_argb_weighted_checksum_status=pass
-- gui_web_2d_vulkan_electron_vulkan_status=not-rejected-by-log
-- gui_web_2d_vulkan_electron_vulkan_reason=no-angle-vulkan-unavailable-log
-- gui_web_2d_vulkan_chrome_stdout=build/gui-web-2d-vulkan-env-run-auto/chrome.out
+- gui_web_2d_vulkan_electron_vulkan_status=pass
+- gui_web_2d_vulkan_electron_vulkan_reason=electron-vulkan-enabled
+- gui_web_2d_vulkan_chrome_stdout=build/gui-web-2d-vulkan-env-run-current/chrome.out
 - gui_web_2d_vulkan_chrome_stdout_file_status=pass
-- gui_web_2d_vulkan_chrome_log=build/gui-web-2d-vulkan-env-run-auto/chrome.log
+- gui_web_2d_vulkan_chrome_log=build/gui-web-2d-vulkan-env-run-current/chrome.log
 - gui_web_2d_vulkan_chrome_log_file_status=pass
 - gui_web_2d_vulkan_chrome_bitmap_status=not-run
-- gui_web_2d_vulkan_chrome_screenshot=build/gui-web-2d-vulkan-env-run-auto/chrome.png
+- gui_web_2d_vulkan_chrome_screenshot=build/gui-web-2d-vulkan-env-run-current/chrome.png
 - gui_web_2d_vulkan_chrome_screenshot_file_status=missing
 - gui_web_2d_vulkan_chrome_screenshot_png_status=missing
 - gui_web_2d_vulkan_chrome_screenshot_png_width=
 - gui_web_2d_vulkan_chrome_screenshot_png_height=
 - gui_web_2d_vulkan_chrome_argb_status=pass
-- gui_web_2d_vulkan_chrome_argb_path=build/gui-web-2d-vulkan-env-run-auto/chrome_argb.json
+- gui_web_2d_vulkan_chrome_argb_path=build/gui-web-2d-vulkan-env-run-current/chrome_argb.json
 - gui_web_2d_vulkan_chrome_argb_file_status=pass
-- gui_web_2d_vulkan_chrome_argb_stdout=build/gui-web-2d-vulkan-env-run-auto/chrome_argb.out
+- gui_web_2d_vulkan_chrome_argb_stdout=build/gui-web-2d-vulkan-env-run-current/chrome_argb.out
 - gui_web_2d_vulkan_chrome_argb_stdout_file_status=pass
-- gui_web_2d_vulkan_chrome_argb_proof=build/gui-web-2d-vulkan-env-run-auto/chrome_argb_proof.json
+- gui_web_2d_vulkan_chrome_argb_proof=build/gui-web-2d-vulkan-env-run-current/chrome_argb_proof.json
 - gui_web_2d_vulkan_chrome_argb_proof_file_status=pass
 - gui_web_2d_vulkan_chrome_argb_proof_json_status=pass
 - gui_web_2d_vulkan_chrome_argb_proof_json_reason=pass
@@ -617,7 +612,7 @@
 - gui_web_2d_vulkan_chrome_vulkan_reason=no-angle-vulkan-unavailable-log
 - gui_web_2d_vulkan_simple_status=pass
 - gui_web_2d_vulkan_simple_reason=pass
-- gui_web_2d_vulkan_simple_evidence_env=build/gui-web-2d-vulkan-env-run-auto/simple-vulkan-readback/evidence.env
+- gui_web_2d_vulkan_simple_evidence_env=build/gui-web-2d-vulkan-env-run-current/simple-vulkan-readback/evidence.env
 - gui_web_2d_vulkan_simple_evidence_file_status=pass
 - vulkan_engine2d_readback_status=pass
 - vulkan_engine2d_readback_reason=pass
@@ -635,8 +630,8 @@
 - gui_web_2d_vulkan_simple_backend_name=vulkan
 - gui_web_2d_vulkan_simple_backend_status=pass
 - gui_web_2d_vulkan_simple_argb_status=pass
-- gui_web_2d_vulkan_simple_argb_path=build/gui-web-2d-vulkan-env-run-auto/simple_argb.json
-- gui_web_2d_vulkan_simple_argb_stdout=build/gui-web-2d-vulkan-env-run-auto/simple_argb.out
+- gui_web_2d_vulkan_simple_argb_path=build/gui-web-2d-vulkan-env-run-current/simple_argb.json
+- gui_web_2d_vulkan_simple_argb_stdout=build/gui-web-2d-vulkan-env-run-current/simple_argb.out
 - gui_web_2d_vulkan_simple_argb_stdout_file_status=pass
 - gui_web_2d_vulkan_simple_argb_file_status=pass
 - gui_web_2d_vulkan_simple_argb_width=1280
@@ -654,19 +649,19 @@
 - gui_web_2d_vulkan_electron_chrome_diff_reason=pass
 - gui_web_2d_vulkan_electron_chrome_mismatch_count=0
 - gui_web_2d_vulkan_electron_chrome_pairwise_diff_status=pass
-- gui_web_2d_vulkan_electron_chrome_diff_path=build/gui-web-2d-vulkan-env-run-auto/electron_chrome_diff.ppm
+- gui_web_2d_vulkan_electron_chrome_diff_path=build/gui-web-2d-vulkan-env-run-current/electron_chrome_diff.ppm
 - gui_web_2d_vulkan_electron_chrome_diff_file_status=pass
 - gui_web_2d_vulkan_electron_simple_diff_status=pass
 - gui_web_2d_vulkan_electron_simple_diff_reason=pass
 - gui_web_2d_vulkan_electron_simple_mismatch_count=0
 - gui_web_2d_vulkan_electron_simple_pairwise_diff_status=pass
-- gui_web_2d_vulkan_electron_simple_diff_path=build/gui-web-2d-vulkan-env-run-auto/electron_simple_diff.ppm
+- gui_web_2d_vulkan_electron_simple_diff_path=build/gui-web-2d-vulkan-env-run-current/electron_simple_diff.ppm
 - gui_web_2d_vulkan_electron_simple_diff_file_status=pass
 - gui_web_2d_vulkan_chrome_simple_diff_status=pass
 - gui_web_2d_vulkan_chrome_simple_diff_reason=pass
 - gui_web_2d_vulkan_chrome_simple_mismatch_count=0
 - gui_web_2d_vulkan_chrome_simple_pairwise_diff_status=pass
-- gui_web_2d_vulkan_chrome_simple_diff_path=build/gui-web-2d-vulkan-env-run-auto/chrome_simple_diff.ppm
+- gui_web_2d_vulkan_chrome_simple_diff_path=build/gui-web-2d-vulkan-env-run-current/chrome_simple_diff.ppm
 - gui_web_2d_vulkan_chrome_simple_diff_file_status=pass
 - gui_web_2d_vulkan_renderdoc_simple_exit_code=
 - gui_web_2d_vulkan_renderdoc_html_exit_code=
@@ -958,12 +953,12 @@
 - gui_showcase_8k_perf_time_log=
 - gui_showcase_8k_perf_time_log_file_status=unavailable
 - renderdoc_goal_status_command=sh scripts/check/check-html-css-renderdoc-goal-status.shs
-- renderdoc_goal_status_exit_code=1
-- renderdoc_goal_status=fail
-- renderdoc_goal_reason=chromium-gpu-process-crashed-under-renderdoc
-- renderdoc_goal_blocked_gate=original Chrome-on-Vulkan RenderDoc .rdc with RDOC magic
-- renderdoc_goal_blocked_gate_count=2
-- renderdoc_goal_blocked_gates=original Chrome-on-Vulkan RenderDoc .rdc with RDOC magic|Electron Chromium-on-Vulkan RenderDoc .rdc with nonblank ARGB render proof
+- renderdoc_goal_status_exit_code=0
+- renderdoc_goal_status=pass
+- renderdoc_goal_reason=pass
+- renderdoc_goal_blocked_gate=
+- renderdoc_goal_blocked_gate_count=0
+- renderdoc_goal_blocked_gates=
 - simple_renderdoc_status=pass
 - simple_renderdoc_reason=pass
 - simple_renderdoc_evidence_env=build/renderdoc/canonical-probe/simple/evidence.env
@@ -971,7 +966,7 @@
 - simple_renderdoc_capture_magic=RDOC
 - simple_renderdoc_capture_file_magic=RDOC
 - simple_renderdoc_capture_file=build/renderdoc/canonical-probe/simple/simple_gui_app_capture.rdc
-- simple_renderdoc_gate_env=build/gui-renderdoc-feature-coverage-static-cache/renderdoc-goal-status-fde81efc77b693ab/simple-gate/evidence.env
+- simple_renderdoc_gate_env=build/gui-renderdoc-feature-coverage-static-cache/renderdoc-goal-status-8bcf9e60978b0aab/simple-gate/evidence.env
 - simple_renderdoc_gate_status=pass
 - simple_renderdoc_gate_reason=pass
 - simple_renderdoc_gate_capture_file_magic=RDOC
@@ -994,28 +989,28 @@
 - simple_renderdoc_gate_required_renderdoc_end_recorded=1
 - simple_renderdoc_gate_required_num_captures_min=1
 - simple_renderdoc_gate_required_pixel_count_min=1
-- external_renderdoc_status=fail
-- external_renderdoc_reason=chromium-gpu-process-crashed-under-renderdoc
-- external_renderdoc_evidence_env=build/renderdoc/chrome-display-helper/evidence.env
-- external_renderdoc_capture_env=build/renderdoc/chrome-display-helper/capture/html/evidence.env
-- external_renderdoc_capture_status=fail
-- external_renderdoc_capture_reason=missing-rdc
-- external_renderdoc_capture_file=
-- external_renderdoc_capture_file_status=missing
-- external_renderdoc_capture_magic=
-- external_renderdoc_capture_file_magic=
+- external_renderdoc_status=pass
+- external_renderdoc_reason=pass
+- external_renderdoc_evidence_env=build/renderdoc/chrome-implicit-layer-default-autocapture/html/evidence.env
+- external_renderdoc_capture_env=build/renderdoc/chrome-implicit-layer-default-autocapture/html/evidence.env
+- external_renderdoc_capture_status=pass
+- external_renderdoc_capture_reason=pass
+- external_renderdoc_capture_file=build/renderdoc/chrome-implicit-layer-default-autocapture/html/gpu_chrome_capture.rdc
+- external_renderdoc_capture_file_status=pass
+- external_renderdoc_capture_magic=RDOC
+- external_renderdoc_capture_file_magic=RDOC
 - external_renderdoc_capture_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html
-- external_renderdoc_capture_log=build/renderdoc/chrome-display-helper/capture/html/renderdoc-html.log
-- external_renderdoc_gpu_process_exit_status=fail
-- external_renderdoc_gpu_process_exit_count=9
-- external_renderdoc_gpu_process_exit_codes=139
-- external_renderdoc_gpu_process_exit_reason=gpu-process-exited-unexpectedly
-- external_renderdoc_gate_status=fail
-- external_renderdoc_gate_reason=chromium-gpu-process-crashed-under-renderdoc
+- external_renderdoc_capture_log=build/renderdoc/chrome-implicit-layer-default-autocapture/html/renderdoc-html.log
+- external_renderdoc_gpu_process_exit_status=
+- external_renderdoc_gpu_process_exit_count=
+- external_renderdoc_gpu_process_exit_codes=
+- external_renderdoc_gpu_process_exit_reason=
+- external_renderdoc_gate_status=pass
+- external_renderdoc_gate_reason=pass
 - external_renderdoc_gate_scene=html-css-chrome
 - external_renderdoc_gate_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html
-- external_renderdoc_gate_capture_file_status=missing
-- external_renderdoc_gate_capture_file_magic=
+- external_renderdoc_gate_capture_file_status=pass
+- external_renderdoc_gate_capture_file_magic=RDOC
 - external_renderdoc_gate_requested_api=vulkan
 - external_renderdoc_gate_requested_angle=vulkan
 - external_renderdoc_gate_requested_features=Vulkan
@@ -1030,14 +1025,14 @@
 - external_renderdoc_required_html_path_suffix=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html
 - external_renderdoc_required_launch_flag_enable_features=--enable-features=Vulkan
 - external_renderdoc_required_launch_flag_use_angle=--use-angle=vulkan
-- electron_renderdoc_evidence_env=build/renderdoc/electron-display-helper/electron-html/evidence.env
-- electron_renderdoc_status=fail
-- electron_renderdoc_reason=missing-rdc
-- electron_renderdoc_magic=
+- electron_renderdoc_evidence_env=build/renderdoc/electron-implicit-layer-default-autocapture/electron-html/evidence.env
+- electron_renderdoc_status=pass
+- electron_renderdoc_reason=pass
+- electron_renderdoc_magic=RDOC
 - electron_renderdoc_scene=html-css-electron
-- electron_renderdoc_capture_file=
-- electron_renderdoc_capture_file_status=unavailable
-- electron_renderdoc_capture_file_magic=
+- electron_renderdoc_capture_file=build/renderdoc/electron-implicit-layer-default-autocapture/electron-html/electron_gpu_capture.rdc
+- electron_renderdoc_capture_file_status=pass
+- electron_renderdoc_capture_file_magic=RDOC
 - electron_renderdoc_html_path=/home/yoon/simple/test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html
 - electron_renderdoc_binary=/home/yoon/simple/tools/electron-shell/node_modules/.bin/electron
 - electron_renderdoc_capture_script=/home/yoon/simple/tools/electron-live-bitmap/capture_html_argb.js
@@ -1045,23 +1040,23 @@
 - electron_renderdoc_requested_angle=vulkan
 - electron_renderdoc_requested_features=Vulkan
 - electron_renderdoc_launch_flags=--no-sandbox --disable-gpu-sandbox --disable-dev-shm-usage --no-zygote --ozone-platform=x11 --enable-features=Vulkan,DefaultANGLEVulkan,VulkanFromANGLE --ignore-gpu-blocklist --enable-gpu-rasterization --use-angle=vulkan
-- electron_renderdoc_gate_command=RDOC_ELECTRON_HTML_EVIDENCE_ENV=build/renderdoc/electron-display-helper/electron-html/evidence.env sh scripts/check/check-renderdoc-electron-html-gate.shs
-- electron_renderdoc_gate_exit_code=1
-- electron_renderdoc_gate_status=fail
-- electron_renderdoc_gate_reason=chromium-gpu-process-crashed-under-renderdoc
-- electron_renderdoc_gate_source_env=build/renderdoc/electron-display-helper/electron-html/evidence.env
+- electron_renderdoc_gate_command=RDOC_ELECTRON_HTML_EVIDENCE_ENV=build/renderdoc/electron-implicit-layer-default-autocapture/electron-html/evidence.env sh scripts/check/check-renderdoc-electron-html-gate.shs
+- electron_renderdoc_gate_exit_code=0
+- electron_renderdoc_gate_status=pass
+- electron_renderdoc_gate_reason=pass
+- electron_renderdoc_gate_source_env=build/renderdoc/electron-implicit-layer-default-autocapture/electron-html/evidence.env
 - electron_renderdoc_gate_backend=electron
 - electron_renderdoc_gate_scene=html-css-electron
-- electron_renderdoc_gate_capture_status=fail
-- electron_renderdoc_gate_capture_reason=missing-rdc
-- electron_renderdoc_gate_capture_file=
-- electron_renderdoc_gate_capture_file_status=missing
-- electron_renderdoc_gate_capture_magic=
-- electron_renderdoc_gate_capture_file_magic=
+- electron_renderdoc_gate_capture_status=pass
+- electron_renderdoc_gate_capture_reason=pass
+- electron_renderdoc_gate_capture_file=build/renderdoc/electron-implicit-layer-default-autocapture/electron-html/electron_gpu_capture.rdc
+- electron_renderdoc_gate_capture_file_status=pass
+- electron_renderdoc_gate_capture_magic=RDOC
+- electron_renderdoc_gate_capture_file_magic=RDOC
 - electron_renderdoc_gate_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html
 - electron_renderdoc_gate_binary=tools/electron-shell/node_modules/.bin/electron
 - electron_renderdoc_gate_capture_script=tools/electron-live-bitmap/capture_html_argb.js
-- electron_renderdoc_gate_argb_path=build/renderdoc/electron-display-helper/electron-html/electron_argb.json
+- electron_renderdoc_gate_argb_path=build/renderdoc/electron-implicit-layer-default-autocapture/electron-html/electron_argb.json
 - electron_renderdoc_gate_argb_status=pass
 - electron_renderdoc_gate_argb_reason=pass
 - electron_renderdoc_gate_argb_width=1280
@@ -1083,7 +1078,7 @@
 - electron_renderdoc_gate_source_contract_status=pass
 - electron_renderdoc_gate_source_contract_reason=pass
 - electron_renderdoc_gate_source_contract=scripts/lib/renderdoc-evidence-common.shs
-- electron_renderdoc_gate_log=build/renderdoc/electron-display-helper/electron-html/renderdoc-electron-html.log
+- electron_renderdoc_gate_log=build/renderdoc/electron-implicit-layer-default-autocapture/electron-html/renderdoc-electron-html.log
 - electron_renderdoc_gate_vulkan_log_status=pass
 - electron_renderdoc_gate_vulkan_log_reason=pass
 - electron_renderdoc_gate_required_backend=electron
@@ -1105,7 +1100,7 @@
 - electron_renderdoc_gate_required_vulkan_log_no_angle_failure=1
 - macos_portability_status=unavailable
 - macos_portability_reason=missing-macos-probe-evidence
-- macos_portability_evidence_env=build/gui-renderdoc-feature-coverage-static-cache/renderdoc-goal-status-fde81efc77b693ab/macos-probe/evidence.env
+- macos_portability_evidence_env=build/gui-renderdoc-feature-coverage-static-cache/renderdoc-goal-status-8bcf9e60978b0aab/macos-probe/evidence.env
 - macos_portability_uname_s=
 - macos_portability_uname_m=
 - macos_portability_version=
@@ -1125,6 +1120,6 @@
 - simple_renderdoc_capture_command=RDOC_OUTPUT_DIR=build/renderdoc/canonical-probe scripts/tool/renderdoc-evidence.shs capture-simple
 - html_renderdoc_capture_command=RDOC_EXTERNAL_RUN_CAPTURE=1 sh scripts/check/check-renderdoc-external-host-capture.shs
 - electron_renderdoc_capture_command=RDOC_OUTPUT_DIR=build/renderdoc/canonical-probe scripts/tool/renderdoc-evidence.shs capture-electron-html
-- blocked_completion_gate=original Chrome-on-Vulkan RenderDoc .rdc with RDOC magic
-- blocked_completion_gate_count=10
-- blocked_completion_gates=original Chrome-on-Vulkan RenderDoc .rdc with RDOC magic|Electron Chromium-on-Vulkan RenderDoc .rdc with nonblank ARGB render proof|Simple GUI widget RenderDoc .rdc on Vulkan Engine2D|native render-log comparison for Linux Vulkan, macOS Metal, and Windows D3D12|production GUI/web font offload readback evidence|production GUI/web raw Metal readback evidence|production GUI/web parity evidence with live Tauri and Chrome captures|retained 4K GUI/web/2D 200fps performance evidence with FPS and checksum|retained 8K GUI/web/2D performance evidence with FPS, checksum, and RSS|full CSS specification rendering coverage beyond implemented Simple Web subset
+- blocked_completion_gate=native render-log comparison for Linux Vulkan, macOS Metal, and Windows D3D12
+- blocked_completion_gate_count=7
+- blocked_completion_gates=native render-log comparison for Linux Vulkan, macOS Metal, and Windows D3D12|production GUI/web font offload readback evidence|production GUI/web raw Metal readback evidence|production GUI/web parity evidence with live Tauri and Chrome captures|retained 4K GUI/web/2D 200fps performance evidence with FPS and checksum|retained 8K GUI/web/2D performance evidence with FPS, checksum, and RSS|full CSS specification rendering coverage beyond implemented Simple Web subset

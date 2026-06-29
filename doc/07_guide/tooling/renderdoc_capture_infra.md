@@ -72,7 +72,9 @@ Common variables:
 - `RDOC_SIMPLE_BIN`: optional Simple binary for `capture-simple`. Leave unset
   for normal operator runs so the helper builds
   `src/compiler_rust/target/release/simple`, which carries the current
-  `rt_renderdoc_*` extern table.
+  `rt_renderdoc_*` extern table. Focused evidence reruns may set this to an
+  already-built `src/compiler_rust/target/release/simple` when that binary is
+  current and the lane is only refreshing capture artifacts.
 
 The helper validates `.rdc` files by checking the `RDOC` magic header. If a host
 cannot provide Chrome Vulkan or a non-CPU Vulkan device, record the concrete
@@ -1554,6 +1556,7 @@ fixture with the dedicated Simple program:
 
 ```sh
 RDOC_OUTPUT_DIR=build/renderdoc/widget-probe-small \
+RDOC_SIMPLE_BIN="$PWD/src/compiler_rust/target/release/simple" \
 RDOC_SIMPLE_PROG="$PWD/src/app/test/renderdoc_vulkan_widget_capture.spl" \
 RDOC_HTML_PATH="$PWD/test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html" \
   scripts/tool/renderdoc-evidence.shs capture-simple
@@ -1569,8 +1572,9 @@ Passing Simple widget evidence records
 `rdoc_simple_gate_required_program=src/app/test/renderdoc_vulkan_widget_capture.spl`,
 the generated fixture path, positive `rdoc_simple_widget_html_bytes`, Vulkan
 runtime metadata, and `.rdc` `RDOC` magic.
-The widget goal still remains incomplete until Electron Chromium/Vulkan also
-produces widget `.rdc` evidence with nonblank ARGB proof.
+The widget goal passes only when the Simple widget capture and Electron
+Chromium/Vulkan widget evidence both pass, all 43 widget feature witnesses are
+covered, and `gui_widget_renderdoc_goal_blocked_gate_count=0`.
 
 Linux browser diagnostics:
 
