@@ -193,6 +193,13 @@ fn _zstd_parse_direct_weights(input: [u8], pos: i64, payload_end: i64) -> Result
     Ok((complete_weights, 1 + packed_bytes))
 
 fn _zstd_decode_huffman_stream(input: [u8], data_start: i64, stream_end: i64, regenerated_size: i64, table_state: ZstdHufTableState) -> Result<[u8], CompressionError>:
+    if regenerated_size < 0:
+        return Err(CompressionError.CorruptStream("zstd huffman regenerated size"))
+    if table_state.table_bits <= 0 or table_state.table_bits > 11:
+        return Err(CompressionError.CorruptStream("zstd huffman table width"))
+    val expected_table_size = 1 << table_state.table_bits
+    if table_state.table.len() < expected_table_size:
+        return Err(CompressionError.CorruptStream("zstd huffman decode table size"))
     if data_start >= stream_end:
         return Err(CompressionError.TruncatedInput("zstd huffman literal stream"))
     val reader_res = zstd_bits_init(input, data_start, stream_end)
@@ -211,8 +218,10 @@ fn _zstd_decode_huffman_stream(input: [u8], data_start: i64, stream_end: i64, re
         val table_idx = match idx_res:
             case Ok(decoded): decoded.to_i64()
             case Err(reason): return Err(reason)
+        if table_idx < 0 or table_idx >= table_state.table.len():
+            return Err(CompressionError.CorruptStream("zstd huffman decode table index"))
         val entry = table_state.table[table_idx]
-        if entry.bits <= 0 or entry.symbol < 0 or entry.symbol > 255:
+        if entry.bits <= 0 or entry.bits > table_state.table_bits or entry.symbol < 0 or entry.symbol > 255:
             return Err(CompressionError.CorruptStream("zstd invalid Huffman decode entry"))
         literals.push(entry.symbol.to_u8())
         val next_res = zstd_bits_consume(reader, entry.bits)
