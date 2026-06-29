@@ -1,6 +1,6 @@
 use std.spec.{describe, it, expect}
 use std.common.compress.{CompressionError}
-use std.common.compress.lzma2_xz_format.{_xz_read_u32_le, _xz_read_u64_le, _validate_lzma_range_decoder_init}
+use std.common.compress.lzma2_xz_format.{_xz_read_u32_le, _xz_read_u64_le, _validate_lzma_range_decoder_init, _decompress_xz_stream}
 
 fn expect_truncated_u32(result: Result<u32, CompressionError>, message_part: text):
     expect(result.is_err()).to_equal(true)
@@ -29,6 +29,15 @@ fn expect_truncated_unit(result: Result<(), CompressionError>, message_part: tex
         _:
             expect(false).to_equal(true)
 
+fn expect_truncated_stream(result: Result<([u8], i64), CompressionError>, message_part: text):
+    expect(result.is_err()).to_equal(true)
+    val err = result.unwrap_err()
+    match err:
+        CompressionError.TruncatedInput(message):
+            expect(message).to_contain(message_part)
+        _:
+            expect(false).to_equal(true)
+
 describe "XZ little-endian reader bounds validation":
     it "rejects negative u32 offsets before indexing":
         expect_truncated_u32(_xz_read_u32_le([0x01u8, 0x02u8, 0x03u8, 0x04u8], -1), "need 4 bytes")
@@ -43,3 +52,9 @@ describe "XZ little-endian reader bounds validation":
         expect_truncated_unit(_validate_lzma_range_decoder_init([
             0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8
         ], -1), "range decoder init")
+
+    it "rejects negative XZ stream offsets before indexing":
+        expect_truncated_stream(_decompress_xz_stream([
+            0xFDu8, 0x37u8, 0x7Au8, 0x58u8, 0x5Au8, 0x00u8,
+            0x00u8, 0x01u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8
+        ], -1, CompressionSimdTier.scalar), "xz stream")
