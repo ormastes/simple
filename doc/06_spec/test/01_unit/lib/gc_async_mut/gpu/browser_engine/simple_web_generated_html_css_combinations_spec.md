@@ -27,7 +27,7 @@ simple_web_generated_html_css_combinations_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+| 7 | 7 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -251,12 +251,40 @@ expect(_pixel_at(pixels, 80, 30, 5)).to_equal(0xFFDBEAFEu32)
 
 </details>
 
+#### renders color-scheme dark as default surface colors
+
+- Render a block with color-scheme:dark and no explicit background color
+- Assert color-scheme:dark supplies a dark default painted surface
+   - Expected: pixels.len() equals `64 * 32`
+   - Expected: _pixel_at(pixels, 64, 5, 5) equals `0xFF111827u32`
+   - Expected: _pixel_at(pixels, 64, 45, 5) equals `0xFFFFFFFFu32`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Render a block with color-scheme:dark and no explicit background color")
+val html = "<html><head><style>html,body{margin:0;padding:0;background-color:#ffffff}.panel{width:40px;height:20px;color-scheme:dark}</style></head><body><section class='panel'></section></body></html>"
+val pixels = simple_web_render_html_to_pixels(html, 64, 32)
+
+step("Assert color-scheme:dark supplies a dark default painted surface")
+expect(pixels.len()).to_equal(64 * 32)
+expect(_pixel_at(pixels, 64, 5, 5)).to_equal(0xFF111827u32)
+expect(_pixel_at(pixels, 64, 45, 5)).to_equal(0xFFFFFFFFu32)
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 7 |
+| Active scenarios | 7 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
