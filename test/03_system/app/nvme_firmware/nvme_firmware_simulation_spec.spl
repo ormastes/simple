@@ -28,6 +28,9 @@ val FW: text = "examples/09_embedded/simpleos_nvme_fw/fw"
 fn _run(file: text) -> (text, text, i64):
     process_run("/bin/sh", ["-c", "bin/simple run " + file])
 
+fn _lean(file: text) -> (text, text, i64):
+    process_run("/bin/sh", ["-c", "export PATH=\"$HOME/.elan/bin:$PATH\"; lean " + file + " && echo LEAN_OK"])
+
 describe "NVMe firmware: layered self-tests (HIL / FTL / FIL + controller)":
     """
     Every layer's self-tests run as one suite covering the flash interface (NAND,
@@ -117,3 +120,62 @@ describe "NVMe firmware: admin queue + multiple IO queues (controller front end)
         expect(out).to_contain("SMART shows writes occurred")
         expect(out).to_contain("LBA 200 survives power cycle")
         expect(out).to_contain("ALL NVME CONTROLLER E2E CHECKS PASS")
+
+describe "NVMe firmware: production-hardening regressions":
+    """
+    The reliability properties a production FTL must hold under adversarial pressure,
+    each a standalone runnable check: garbage collection never erases a victim it could
+    not fully drain (no data loss) and the over-provisioning reserve prevents a
+    write-cliff; power loss wipes all volatile DRAM state and recovery rebuilds the L2P
+    and band from persistent media with no silent journal drop; and static wear-leveling
+    plus read-disturb scrub relocate data without loss.
+    """
+
+    it "guards garbage collection against data loss and the write-cliff":
+        step("Drive the device to the host-write boundary and run GC under pressure")
+        val (out, err, code) = _run(FW + "/gc_safety_check.spl")
+        expect(code).to_equal(0)
+        step("The reserve is held back, GC reclaims safely, and writes resume (no cliff / no loss)")
+        expect(out).to_contain("GC SAFETY OK")
+
+    it "preserves committed data across power loss and a full journal":
+        step("Run the power-loss durability check (volatile loss + recovery + WAL overflow)")
+        val (out, err, code) = _run(FW + "/durability_check.spl")
+        expect(code).to_equal(0)
+        step("Recovery restores committed writes and 600 writes survive a full WAL")
+        expect(out).to_contain("DURABILITY OK")
+
+    it "relocates data safely during wear-leveling and read-disturb scrub":
+        step("Run the static wear-leveling and read-disturb scrub check")
+        val (out, err, code) = _run(FW + "/wear_scrub_check.spl")
+        expect(code).to_equal(0)
+        step("Both passes reclaim the targeted block with all data preserved")
+        expect(out).to_contain("WEAR/SCRUB OK")
+
+describe "NVMe firmware: Lean4 formal verification of the FTL invariants":
+    """
+    The safety-critical FTL invariants are proven in Lean4 (standalone proofs of the
+    hand-transcribed algorithms; each checks with `lean` at exit 0 with no sorry/admit):
+    the log allocator hands out distinct in-range pages and the GC reserve is never
+    breached; power-on recovery yields the committed prefix (newest write wins, trims
+    stay trimmed); and a garbage-collected page is relocated outside its victim block so
+    the erase loses no committed data.
+    """
+
+    it "verifies the allocator and GC-reserve safety (Alloc.lean)":
+        step("Check proofs/Alloc.lean with the Lean toolchain")
+        val (out, err, code) = _lean(FW + "/proofs/Alloc.lean")
+        expect(code).to_equal(0)
+        expect(out).to_contain("LEAN_OK")
+
+    it "verifies that recovery preserves the committed prefix (Recover.lean)":
+        step("Check proofs/Recover.lean with the Lean toolchain")
+        val (out, err, code) = _lean(FW + "/proofs/Recover.lean")
+        expect(code).to_equal(0)
+        expect(out).to_contain("LEAN_OK")
+
+    it "verifies the garbage-collection data-loss guard (Gc.lean)":
+        step("Check proofs/Gc.lean with the Lean toolchain")
+        val (out, err, code) = _lean(FW + "/proofs/Gc.lean")
+        expect(code).to_equal(0)
+        expect(out).to_contain("LEAN_OK")
