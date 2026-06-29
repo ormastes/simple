@@ -100,6 +100,11 @@ That checker writes
 operator guide, requirements, architecture, app MCP, lower MCP, embedded-SQL
 source-less query, source filtering, and Ponytail audit/simplification surfaces
 all converge on Simple-owned `simple_context` and `simple_ponytail` contracts.
+The same env records
+`llm_tooling_context_ponytail_full_replacement_surface_check_count` and
+`llm_tooling_context_ponytail_full_replacement_failure_count` so strict
+aggregate review can distinguish a complete replacement-surface pass from a
+partial static grep pass.
 
 Use strict full-replacement mode to consume that env:
 

@@ -3,6 +3,8 @@
 - status: `pass`
 - reason: `repo_local_replacement_surfaces_verified`
 - scope: `repo_local_simple_owned_surfaces`
+- surface_check_count: `25`
+- failure_count: `0`
 - mimic_status: `pass`
 - mimic_env: `build/llm_tooling_context_ponytail_full_replacement/mimic/evidence.env`
 - failures: `none`

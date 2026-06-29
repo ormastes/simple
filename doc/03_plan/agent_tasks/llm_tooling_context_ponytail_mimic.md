@@ -493,3 +493,7 @@ Tasks:
     to the same source-less SQL routing, `--db`, `--source-filter`, and
     Ponytail `review`/`simplify` alias contracts without overstating noisy
     lower-server startup as live evidence.
+15. Harden full replacement evidence counts. Status: done on 2026-06-29; the
+    full-replacement checker now records surface and failure counts in its env,
+    and it checks lower-MCP source-less SQL plus `--source-filter` forwarding
+    directly in the strict replacement surface, not only through app MCP.
