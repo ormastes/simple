@@ -13,9 +13,9 @@
 - dashboard_evidence_log_size: `36`
 - dashboard_evidence_log_sha256: `9a43f2eacabcf33d31fed9e00a09b6ae8084248648f20969dfb8d7b632c57592`
 - surface_manifest: `build/llm_dashboard_live/dashboard_live_surface_manifest.tsv`
-- surface_manifest_count: `5`
-- surface_manifest_size: `615`
-- surface_manifest_sha256: `fac19f722e0c1ca3432e535d9b23b68bcd6ac715f1fbd1a4658483bfaaeb415e`
+- surface_manifest_count: `9`
+- surface_manifest_size: `1111`
+- surface_manifest_sha256: `45fe4fb605a053ab19b631619ffed03bbc4319eaf015d66ecd2256f4aeb187f6`
 - live_http_env: `build/llm_dashboard_live_http/evidence.env`
 - live_http_status: `fail`
 - live_http_reason: `missing_base_url`
@@ -24,7 +24,7 @@
 - live_http_control_status: `not_collected`
 - live_http_surface_manifest_count: `7`
 - live_http_surface_manifest_size: `863`
-- live_http_surface_manifest_sha256: `33df788fc79b76ab8bdc960d567708d20c8610826b5ff024b80794e197b457d1`
+- live_http_surface_manifest_sha256: `f12e6c405dd8f8e389e6887a395671d52c1507a29633c62106b9e0dc95c7d54e`
 - live_http_pass_integrity_status: `not_applicable`
 - live_http_pass_integrity_reason: `missing_base_url`
 - failures: `live_http_authenticated_request:missing_base_url`

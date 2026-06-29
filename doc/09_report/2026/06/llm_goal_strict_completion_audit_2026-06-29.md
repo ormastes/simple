@@ -56,7 +56,7 @@ but local proof is no longer status-only for the completed repo-local lanes:
   required.
 - public absence rendering records a checked public wording manifest
   (`public_absence_surface_manifest_count=120`,
-  `public_absence_surface_manifest_sha256=e427322375750c8277402fbe703925127138f034fce963bb08555248ec4d2242`)
+  `public_absence_surface_manifest_sha256=618d220bceae5dcb12a2d95a134017351e80d17a624b3a2ede52d05df820cb41`)
   with `failure_count=0`, proving operator-facing manuals and generated
   evidence do not expose internal absence markers.
 
