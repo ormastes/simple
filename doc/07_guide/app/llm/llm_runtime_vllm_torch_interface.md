@@ -101,7 +101,12 @@ sh scripts/check/check-llm-strict-host-prereq-doctor.shs
 The doctor does not replace the strict aggregate or the per-lane evidence
 wrappers. It only reports whether this host has the dashboard auth/url, local
 vLLM, native svLLM capability artifact, Simple-visible libtorch/CUDA, and
-fine-tune retry artifacts needed before the strict wrappers can pass.
+fine-tune retry artifacts needed before the strict wrappers can pass. Its
+Markdown report mirrors the actionable env fields: the primary blocked gate,
+dashboard URL/auth readiness, local vLLM command/module/GPU readiness, native
+svLLM read-range/pinned-buffer/device-staging readiness, Torch/libtorch
+readiness, fine-tune retry artifact readiness, manifest metadata, and the next
+operator action.
 
 Latest local host probe:
 `doc/09_report/2026/06/llm_runtime_vllm_host_probe_2026-06-29.md` records a

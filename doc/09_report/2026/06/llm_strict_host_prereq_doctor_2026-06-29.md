@@ -9,5 +9,25 @@
 - svllm_native: `blocked`
 - torch_libtorch: `blocked`
 - finetune_retry: `blocked`
-- surface_manifest_sha256: `4b5af90516dd919af38816f6f9fe01624b4d7c3bda97a55152c7ebf8602126d3`
+- primary_blocked_gate: `dashboard_live_http`
+- dashboard_base_url: `missing`
+- dashboard_auth_source: `missing`
+- vllm_command: `missing`
+- python_vllm_module: `missing`
+- local_gpu: `available`
+- svllm_read_range: `missing`
+- svllm_pinned_buffer: `missing`
+- svllm_device_staging: `missing`
+- svllm_capability_source: `missing`
+- svllm_capability_evidence: `missing`
+- python_torch_cuda_available: `true`
+- system_libtorch: `missing`
+- retry5_cache_manifest: `missing`
+- retry6_model_manifest: `missing`
+- retry6_eval_result: `missing`
+- retry7_attempt: `ready`
+- surface_manifest_count: `8`
+- surface_manifest_size: `1045`
+- surface_manifest_sha256: `a2d654b7578ad496802e399d337e411fec94acf7a7e5374c39963b35790076c8`
+- next_action: `provide blocked host prerequisites, then rerun strict evidence wrappers`
 - env: `build/llm_strict_host_prereq_doctor/evidence.env`
