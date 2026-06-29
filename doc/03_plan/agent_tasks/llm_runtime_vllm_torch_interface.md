@@ -685,9 +685,11 @@ legacy singular `torch_cuda_optimizer_probe_blocked_gate` key. The aggregate
 uses the plural key when available and forwards both the compact list and first
 blocked gate in `llm_goal_evidence_torch_optimizer_detail`.
 It also records Python Torch host visibility (`python_torch_module_status`,
-version, CUDA availability, device count) and `system_libtorch_status`, so a
-host with Python Torch/CUDA installed but no Simple-visible libtorch is reported
-as a Simple/runtime integration blocker rather than a general CUDA absence.
+version, CUDA availability, device count), `system_libtorch_status`, and a
+hashed system libtorch probe log, so a host with Python Torch/CUDA installed
+but no Simple-visible libtorch is reported as a Simple/runtime integration
+blocker rather than a general CUDA absence and the blocker is tied to the exact
+`ldconfig`/availability probe that ran.
 The wrapper now writes a Torch optimizer surface manifest with path, size, and
 SHA-256 rows for the live probe, Torch facades, backend/optimizer/training
 sources, and focused Torch specs. The aggregate forwards the manifest count,
@@ -805,8 +807,9 @@ status `ready`. The aggregate forwards the pass-integrity status and reason in
 The aggregate LLM evidence report now includes `torch_optimizer` in the detail
 table and forwards normalized Simple/libtorch CUDA optimizer fields: status,
 reason, Python Torch/CUDA host visibility, system libtorch visibility,
-libtorch/CUDA availability, parameter CUDA placement, gradient handle,
-optimizer-step attempt, before/after sums, and wrapper exit. The same aggregate
+system libtorch probe-log hash, libtorch/CUDA availability, parameter CUDA
+placement, gradient handle, optimizer-step attempt, before/after sums, and
+wrapper exit. The same aggregate
 also expands `finetune_guard` detail with retry7 gate exit/status, compact
 blocked gates, target eval, license, safety, deployment, and app-handoff fields,
 so strict-host review can distinguish retry/eval blockers from deployment or

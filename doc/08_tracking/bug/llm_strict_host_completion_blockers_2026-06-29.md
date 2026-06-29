@@ -76,7 +76,8 @@ Strict-host aggregate:
   devices; system/Simple-visible libtorch is missing
 - local proof already hardened: Torch optimizer evidence has a checked live
   probe/source/spec manifest with `surface_manifest_count=14` and
-  `surface_manifest_sha256=852a1c814199286c0cf686f2bc68ffc8fb946a85691426a4c7440cf69aa7165c`
+  `surface_manifest_sha256=852a1c814199286c0cf686f2bc68ffc8fb946a85691426a4c7440cf69aa7165c`,
+  plus a hashed system libtorch probe log
 - required evidence: Simple/libtorch CUDA optimizer probe with parameter on
   CUDA, gradient handle, optimizer step attempted, and parameter sum decrease
 - next action: build or install Simple-visible libtorch and rerun

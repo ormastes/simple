@@ -222,6 +222,8 @@ classifying the self-hosted Simple runtime as `unavailable` with
 `torch_cuda_optimizer_probe_python_torch_cuda_available`,
 `torch_cuda_optimizer_probe_python_torch_cuda_device_count`,
 `torch_cuda_optimizer_probe_system_libtorch_status`,
+`torch_cuda_optimizer_probe_system_libtorch_probe_log_size`,
+`torch_cuda_optimizer_probe_system_libtorch_probe_log_sha256`,
 `torch_cuda_optimizer_probe_surface_manifest_count`,
 `torch_cuda_optimizer_probe_surface_manifest_size`,
 `torch_cuda_optimizer_probe_surface_manifest_sha256`,
@@ -235,8 +237,8 @@ classifying the self-hosted Simple runtime as `unavailable` with
 `torch_cuda_optimizer_probe_pass_integrity_reason`, and
 `torch_cuda_optimizer_probe_next_action` so strict aggregate runs can report the
 compact blocked Torch gate list, the first blocked gate, independent pass-log
-integrity, the hashed Torch optimizer source/spec surface, and the next
-operator step. A probe `status=pass` is accepted only
+integrity, the hashed system libtorch probe, the hashed Torch optimizer
+source/spec surface, and the next operator step. A probe `status=pass` is accepted only
 when the wrapper also sees a zero wrapper exit, a non-empty hashed probe log,
 exactly one complete proof record for status, required gates, libtorch/CUDA
 availability, CUDA parameter placement, gradient handle, optimizer step, and
@@ -293,6 +295,7 @@ also records
 `llm_goal_evidence_torch_optimizer_detail` for Simple/libtorch CUDA optimizer
 status, compact blocked gates, primary blocked gate, Python Torch/CUDA host
 visibility, system libtorch visibility, Simple runtime gates, gradient handle,
+system libtorch probe-log hash, Simple runtime gates, gradient handle,
 optimizer-step attempt, before/after parameter sums, sum-decrease status, and
 pass-log integrity. vLLM
 and Torch detail rows include the focused

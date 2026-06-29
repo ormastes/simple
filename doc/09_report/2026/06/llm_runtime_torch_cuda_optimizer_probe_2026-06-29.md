@@ -8,7 +8,7 @@
 - blocked_gates: `libtorch`
 - primary_blocked_gate: `libtorch`
 - log_size: `29962`
-- log_sha256: `e27212ea09b7a100e92698e68b48a7d356cf9d7fc8e19f5ea13ed528cc2430d3`
+- log_sha256: `65c41e740187279668c442de6eec202cc3739a7bb8d26abfd62ccc5418a067ad`
 - status_line_count: `2`
 - required_gates_line_count: `1`
 - torch_available_line_count: `1`
@@ -23,6 +23,9 @@
 - python_torch_cuda_available: `true`
 - python_torch_cuda_device_count: `2`
 - system_libtorch_status: `missing`
+- system_libtorch_probe_log: `build/llm_runtime_torch_cuda_optimizer_probe/system_libtorch_probe.log`
+- system_libtorch_probe_log_size: `37`
+- system_libtorch_probe_log_sha256: `ac12d9869521cf8cfba92166a3cae26886942911aea5ff546e369e66faf28e29`
 - surface_manifest: `build/llm_runtime_torch_cuda_optimizer_probe/torch_cuda_optimizer_surface_manifest.tsv`
 - surface_manifest_count: `14`
 - surface_manifest_size: `1666`
@@ -42,4 +45,4 @@
 - env: `build/llm_runtime_torch_cuda_optimizer_probe/evidence.env`
 - log: `build/llm_runtime_torch_cuda_optimizer_probe/probe.log`
 
-This wrapper proves the Simple/libtorch CUDA optimizer lane only when all required gates pass. A `status=pass` probe log must be non-empty, hashed, exit with code 0, and include exactly one complete proof record for status, required gates, libtorch/CUDA availability, CUDA parameter placement, gradient handle, optimizer step, and before/after sums. The normalized fields must show libtorch and CUDA availability, CUDA parameter placement, a nonzero gradient handle, an attempted optimizer step, and numeric `after_sum < before_sum`. `unavailable` records the exact missing host/runtime gate and remains a strict-host failure.
+This wrapper proves the Simple/libtorch CUDA optimizer lane only when all required gates pass. A `status=pass` probe log must be non-empty, hashed, exit with code 0, and include exactly one complete proof record for status, required gates, libtorch/CUDA availability, CUDA parameter placement, gradient handle, optimizer step, and before/after sums. The normalized fields must show libtorch and CUDA availability, CUDA parameter placement, a nonzero gradient handle, an attempted optimizer step, and numeric `after_sum < before_sum`. `unavailable` records the exact missing host/runtime gate, plus a hashed system libtorch probe log, and remains a strict-host failure.
