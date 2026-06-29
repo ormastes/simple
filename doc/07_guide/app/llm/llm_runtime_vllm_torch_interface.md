@@ -264,6 +264,15 @@ surface manifest count, size, and SHA-256 for the eight checked local readiness
 specs plus their produced logs, and the focused env/report include per-log size
 and SHA-256 values. The aggregate forwards those local manifest fields in
 `llm_goal_evidence_svllm_local_detail`. Keep
+`src/app/svllm_pack/main.spl` as a thin entrypoint over
+`src/app/svllm_pack/core.spl`; unit specs import `core.run` so app entrypoint
+discovery cannot turn passing examples into a file-level failure. The local
+readiness wrapper also treats the two svLLM pack specs as pass when their logs
+contain `examples, 0 failures` and no failed-example marker, private helper
+collision warning, or short-grammar "Common mistake detected" diagnostic; it
+keeps the raw nonzero runner exit in the evidence fields so that warning-exit
+normalization remains visible.
+Keep
 `FR-LLM-RUNTIME-0002` open because that wrapper proves only local file-backed
 readiness; native NVFS async scheduling, pinned buffer registration, device
 staging, and true streaming model loads still need live evidence. Run
