@@ -714,6 +714,12 @@ and blocker reasons in `llm_goal_evidence_<lane>_*` keys and adds a Blocker
 Details table to the Markdown report, so strict-host failures can be triaged
 from one artifact instead of opening every focused wrapper output first.
 
+Follow-up hardening aligns the strict context/Ponytail and live dashboard
+wrappers with the vLLM, Torch, and fine-tune contracts: both now emit
+`primary_blocked_gate` fields in their focused env/report outputs, and the
+aggregate strict detail rows forward those first-blocker values beside the full
+blocked-gates lists.
+
 ## 2026-06-29 svLLM Readiness Timeout Hardening
 
 `scripts/check/check-llm-runtime-svllm-local-readiness.shs` now bounds each

@@ -5,6 +5,7 @@
 - scope: `repo_local_simple_owned_surfaces`
 - required_gates: `mimic_evidence,execution_spec,guide_replacement,guide_context,guide_ponytail,guide_sql,architecture_contract,architecture_no_parallel,requirements_sql,requirements_mcp,app_context_table,app_context_sql,app_context_filter,app_ponytail_table,app_context_dispatch,app_ponytail_dispatch,app_context_sourceless,app_ponytail_handler,lower_context_schema,lower_context_sql,lower_context_filter,lower_ponytail_schema,lower_context_dispatch,lower_ponytail_dispatch,lower_context_sourceless,lower_context_filter_handler,lower_ponytail_handler`
 - blocked_gates: `none`
+- primary_blocked_gate: `none`
 - surface_check_count: `25`
 - failure_count: `0`
 - mimic_status: `pass`

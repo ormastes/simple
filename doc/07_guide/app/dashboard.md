@@ -79,7 +79,10 @@ That checker writes `build/llm_dashboard_live/evidence.env` with
 route rendering, and `/api/vllm/control` route execution are proven through the
 checked-in DashboardServer surface, including auth rejection, preflight JSONL,
 side-effect action routing to the runtime owner, and safe missing-resource
-execution JSONL.
+execution JSONL. It also records `llm_dashboard_live_blocked_gates` and
+`llm_dashboard_live_primary_blocked_gate` so strict aggregate review can show
+the first dashboard route, auth, execution-boundary, guide, or live HTTP
+blocker to fix.
 
 Use strict live mode to consume that env:
 

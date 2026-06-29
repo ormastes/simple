@@ -249,8 +249,10 @@ opening every focused env first. It also writes
 `llm_goal_evidence_<lane>_next_action` and a report `Next Actions` table for
 all aggregate lanes, including context/Ponytail replacement, live dashboard,
 host runtime, fine-tune, and public absence rendering triage. The detail table also includes
-context/Ponytail replacement subfields, live dashboard route and live HTTP
-subfields, svLLM native streaming subfields, Torch optimizer subfields, and
+context/Ponytail replacement subfields including the replacement primary
+blocked gate, live dashboard route and live HTTP subfields including the live
+dashboard primary blocked gate, svLLM native streaming subfields, Torch
+optimizer subfields, and
 fine-tune acceptance subfields needed to distinguish missing replacement
 surfaces, dashboard route/auth gaps, missing authenticated live HTTP proof,
 missing native streaming support, a missing host runtime, a failed optimizer

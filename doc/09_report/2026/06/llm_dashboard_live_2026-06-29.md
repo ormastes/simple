@@ -5,6 +5,7 @@
 - scope: `authenticated_dashboard_route_execution`
 - required_gates: `dashboard_evidence,route_spec_html,route_spec_auth,route_spec_api,route_spec_side_effect,route_spec_owner,agent_spec_auth,agent_spec_render,agent_spec_prefix,server_route,server_agents_route,server_agents_render,server_boundary,server_execution,guide_live,guide_api,guide_agents,runtime_plan,live_http_authenticated_request`
 - blocked_gates: `live_http_authenticated_request:missing_live_http_evidence`
+- primary_blocked_gate: `live_http_authenticated_request`
 - dashboard_evidence_status: `pass`
 - dashboard_evidence_env: `build/llm_dashboard_live/dashboard/evidence.env`
 - live_http_env: `build/llm_dashboard_live_http/evidence.env`
