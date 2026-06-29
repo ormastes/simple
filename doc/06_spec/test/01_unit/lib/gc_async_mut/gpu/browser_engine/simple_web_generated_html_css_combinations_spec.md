@@ -27,7 +27,7 @@ simple_web_generated_html_css_combinations_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 3 | 3 | 0 | 0 |
+| 4 | 4 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -165,12 +165,41 @@ expect(_count_color(pixels, 0xFFFED7AAu32)).to_be_greater_than(0)
 
 </details>
 
+#### renders place-content shorthand through flex alignment
+
+- Render a flex container using place-content as the align-content and justify-content shorthand
+- Assert place-content:center moves the flex child away from the start edge
+   - Expected: pixels.len() equals `120 * 48`
+   - Expected: _pixel_at(pixels, 120, 5, 6) equals `0xFFDBEAFEu32`
+   - Expected: _pixel_at(pixels, 120, 50, 6) equals `0xFFEF4444u32`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Render a flex container using place-content as the align-content and justify-content shorthand")
+val html = "<html><head><style>html,body{margin:0;padding:0;background-color:#ffffff}.stage{display:flex;width:100px;height:24px;place-content:center;background-color:#dbeafe}.chip{width:20px;height:12px;background-color:#ef4444}</style></head><body><section class='stage'><div class='chip'></div></section></body></html>"
+val pixels = simple_web_render_html_to_pixels(html, 120, 48)
+
+step("Assert place-content:center moves the flex child away from the start edge")
+expect(pixels.len()).to_equal(120 * 48)
+expect(_count_color(pixels, 0xFFEF4444u32)).to_be_greater_than(0)
+expect(_pixel_at(pixels, 120, 5, 6)).to_equal(0xFFDBEAFEu32)
+expect(_pixel_at(pixels, 120, 50, 6)).to_equal(0xFFEF4444u32)
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 3 |
-| Active scenarios | 3 |
+| Total scenarios | 4 |
+| Active scenarios | 4 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
