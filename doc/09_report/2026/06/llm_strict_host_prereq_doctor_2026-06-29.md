@@ -19,7 +19,18 @@
 - svllm_pinned_buffer: `missing`
 - svllm_device_staging: `missing`
 - svllm_capability_source: `missing`
+- svllm_capability_source_status: `missing`
+- svllm_capability_evidence_path: ``
 - svllm_capability_evidence: `missing`
+- svllm_capability_evidence_sha256: `missing`
+- svllm_capability_evidence_source: `missing`
+- svllm_capability_evidence_schema_version: `missing`
+- svllm_capability_probe_event: `missing`
+- svllm_capability_probe_status: `missing`
+- svllm_capability_probe_exit: `missing`
+- svllm_capability_evidence_read_range: `missing`
+- svllm_capability_evidence_pinned_buffer: `missing`
+- svllm_capability_evidence_device_staging: `missing`
 - python_torch_cuda_available: `true`
 - system_libtorch: `missing`
 - retry5_cache_manifest: `missing`
@@ -28,6 +39,6 @@
 - retry7_attempt: `ready`
 - surface_manifest_count: `8`
 - surface_manifest_size: `1045`
-- surface_manifest_sha256: `a2d654b7578ad496802e399d337e411fec94acf7a7e5374c39963b35790076c8`
+- surface_manifest_sha256: `9c8ebb59dbbe072732e6a98d2c4fd6bc1ccc2e8ed5f061d4bba6b647943209b4`
 - next_action: `provide blocked host prerequisites, then rerun strict evidence wrappers`
 - env: `build/llm_strict_host_prereq_doctor/evidence.env`

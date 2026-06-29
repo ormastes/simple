@@ -51,6 +51,35 @@ env_presence() {
     fi
 }
 
+normalize_capability_status() {
+    case "$(printf '%s\n' "$1" | tr '[:upper:]' '[:lower:]')" in
+        ready)
+            printf '%s\n' "ready"
+            ;;
+        unsupported)
+            printf '%s\n' "unsupported"
+            ;;
+        unavailable)
+            printf '%s\n' "unavailable"
+            ;;
+        unchecked)
+            printf '%s\n' "unchecked"
+            ;;
+        missing|"")
+            printf '%s\n' "missing"
+            ;;
+        *)
+            printf '%s\n' "unavailable"
+            ;;
+    esac
+}
+
+artifact_value() {
+    key="$1"
+    file="$2"
+    sed -n "s/^${key}=//p" "$file" 2>/dev/null | tail -n 1
+}
+
 append_gate() {
     gate="$1"
     if [ -z "$blocked_gates" ]; then
@@ -172,20 +201,55 @@ else
     vllm_prereq_status="blocked"
 fi
 
-svllm_read_range_status="${SVLLM_NATIVE_READ_RANGE_STATUS:-missing}"
-svllm_pinned_buffer_status="${SVLLM_NATIVE_PINNED_BUFFER_STATUS:-missing}"
-svllm_device_staging_status="${SVLLM_NATIVE_DEVICE_STAGING_STATUS:-missing}"
+svllm_read_range_status="$(normalize_capability_status "${SVLLM_NATIVE_READ_RANGE_STATUS:-missing}")"
+svllm_pinned_buffer_status="$(normalize_capability_status "${SVLLM_NATIVE_PINNED_BUFFER_STATUS:-missing}")"
+svllm_device_staging_status="$(normalize_capability_status "${SVLLM_NATIVE_DEVICE_STAGING_STATUS:-missing}")"
 svllm_capability_source="${SVLLM_NATIVE_CAPABILITY_SOURCE:-missing}"
 svllm_capability_evidence_path="${SVLLM_NATIVE_CAPABILITY_EVIDENCE_PATH:-}"
+svllm_capability_source_status="ready"
+case "$svllm_capability_source" in
+    ""|missing|env_or_default|default|unknown)
+        svllm_capability_source_status="missing"
+        ;;
+esac
+svllm_capability_evidence_size="$(artifact_size "$svllm_capability_evidence_path")"
+svllm_capability_evidence_sha256="$(artifact_sha256 "$svllm_capability_evidence_path")"
+svllm_capability_evidence_schema_version="missing"
+svllm_capability_evidence_source="missing"
+svllm_capability_probe_event="missing"
+svllm_capability_probe_status="missing"
+svllm_capability_probe_exit="missing"
+svllm_capability_evidence_read_range_status="missing"
+svllm_capability_evidence_pinned_buffer_status="missing"
+svllm_capability_evidence_device_staging_status="missing"
 if [ -n "$svllm_capability_evidence_path" ] && [ -s "$svllm_capability_evidence_path" ]; then
-    svllm_capability_evidence_status="ready"
+    svllm_capability_evidence_schema_version="$(artifact_value svllm_native_capability_schema_version "$svllm_capability_evidence_path")"
+    svllm_capability_evidence_source="$(artifact_value svllm_native_capability_source "$svllm_capability_evidence_path")"
+    svllm_capability_probe_event="$(artifact_value svllm_native_capability_probe_event "$svllm_capability_evidence_path")"
+    svllm_capability_probe_status="$(artifact_value svllm_native_capability_probe_status "$svllm_capability_evidence_path")"
+    svllm_capability_probe_exit="$(artifact_value svllm_native_capability_probe_exit "$svllm_capability_evidence_path")"
+    svllm_capability_evidence_read_range_status="$(normalize_capability_status "$(artifact_value svllm_native_capability_read_range_status "$svllm_capability_evidence_path")")"
+    svllm_capability_evidence_pinned_buffer_status="$(normalize_capability_status "$(artifact_value svllm_native_capability_pinned_buffer_status "$svllm_capability_evidence_path")")"
+    svllm_capability_evidence_device_staging_status="$(normalize_capability_status "$(artifact_value svllm_native_capability_device_staging_status "$svllm_capability_evidence_path")")"
+    if [ "$svllm_capability_evidence_schema_version" = "1" ] &&
+        [ "$svllm_capability_evidence_source" = "$svllm_capability_source" ] &&
+        [ "$svllm_capability_probe_event" = "svllm_native_capability_probe" ] &&
+        [ "$svllm_capability_probe_status" = "pass" ] &&
+        [ "$svllm_capability_probe_exit" = "0" ] &&
+        [ "$svllm_capability_evidence_read_range_status" = "$svllm_read_range_status" ] &&
+        [ "$svllm_capability_evidence_pinned_buffer_status" = "$svllm_pinned_buffer_status" ] &&
+        [ "$svllm_capability_evidence_device_staging_status" = "$svllm_device_staging_status" ]; then
+        svllm_capability_evidence_status="ready"
+    else
+        svllm_capability_evidence_status="invalid"
+    fi
 else
     svllm_capability_evidence_status="missing"
 fi
 if [ "$svllm_read_range_status" = "ready" ] && \
     [ "$svllm_pinned_buffer_status" = "ready" ] && \
     [ "$svllm_device_staging_status" = "ready" ] && \
-    [ "$svllm_capability_source" != "missing" ] && \
+    [ "$svllm_capability_source_status" = "ready" ] && \
     [ "$svllm_capability_evidence_status" = "ready" ]; then
     svllm_prereq_status="ready"
 else
@@ -283,7 +347,19 @@ surface_manifest_sha256="$(artifact_sha256 "$SURFACE_MANIFEST")"
     printf '%s\n' "llm_strict_host_prereq_doctor_svllm_pinned_buffer_status=$svllm_pinned_buffer_status"
     printf '%s\n' "llm_strict_host_prereq_doctor_svllm_device_staging_status=$svllm_device_staging_status"
     printf '%s\n' "llm_strict_host_prereq_doctor_svllm_capability_source=$svllm_capability_source"
+    printf '%s\n' "llm_strict_host_prereq_doctor_svllm_capability_source_status=$svllm_capability_source_status"
+    printf '%s\n' "llm_strict_host_prereq_doctor_svllm_capability_evidence_path=$svllm_capability_evidence_path"
     printf '%s\n' "llm_strict_host_prereq_doctor_svllm_capability_evidence_status=$svllm_capability_evidence_status"
+    printf '%s\n' "llm_strict_host_prereq_doctor_svllm_capability_evidence_size=$svllm_capability_evidence_size"
+    printf '%s\n' "llm_strict_host_prereq_doctor_svllm_capability_evidence_sha256=$svllm_capability_evidence_sha256"
+    printf '%s\n' "llm_strict_host_prereq_doctor_svllm_capability_evidence_source=$svllm_capability_evidence_source"
+    printf '%s\n' "llm_strict_host_prereq_doctor_svllm_capability_evidence_schema_version=$svllm_capability_evidence_schema_version"
+    printf '%s\n' "llm_strict_host_prereq_doctor_svllm_capability_probe_event=$svllm_capability_probe_event"
+    printf '%s\n' "llm_strict_host_prereq_doctor_svllm_capability_probe_status=$svllm_capability_probe_status"
+    printf '%s\n' "llm_strict_host_prereq_doctor_svllm_capability_probe_exit=$svllm_capability_probe_exit"
+    printf '%s\n' "llm_strict_host_prereq_doctor_svllm_capability_evidence_read_range_status=$svllm_capability_evidence_read_range_status"
+    printf '%s\n' "llm_strict_host_prereq_doctor_svllm_capability_evidence_pinned_buffer_status=$svllm_capability_evidence_pinned_buffer_status"
+    printf '%s\n' "llm_strict_host_prereq_doctor_svllm_capability_evidence_device_staging_status=$svllm_capability_evidence_device_staging_status"
     printf '%s\n' "llm_strict_host_prereq_doctor_torch_status=$torch_prereq_status"
     printf '%s\n' "llm_strict_host_prereq_doctor_python_torch_module_status=$python_torch_module_status"
     printf '%s\n' "llm_strict_host_prereq_doctor_python_torch_version=$python_torch_version"
@@ -331,7 +407,18 @@ surface_manifest_sha256="$(artifact_sha256 "$SURFACE_MANIFEST")"
     printf '%s\n' "- svllm_pinned_buffer: \`$svllm_pinned_buffer_status\`"
     printf '%s\n' "- svllm_device_staging: \`$svllm_device_staging_status\`"
     printf '%s\n' "- svllm_capability_source: \`$svllm_capability_source\`"
+    printf '%s\n' "- svllm_capability_source_status: \`$svllm_capability_source_status\`"
+    printf '%s\n' "- svllm_capability_evidence_path: \`$svllm_capability_evidence_path\`"
     printf '%s\n' "- svllm_capability_evidence: \`$svllm_capability_evidence_status\`"
+    printf '%s\n' "- svllm_capability_evidence_sha256: \`$svllm_capability_evidence_sha256\`"
+    printf '%s\n' "- svllm_capability_evidence_source: \`$svllm_capability_evidence_source\`"
+    printf '%s\n' "- svllm_capability_evidence_schema_version: \`$svllm_capability_evidence_schema_version\`"
+    printf '%s\n' "- svllm_capability_probe_event: \`$svllm_capability_probe_event\`"
+    printf '%s\n' "- svllm_capability_probe_status: \`$svllm_capability_probe_status\`"
+    printf '%s\n' "- svllm_capability_probe_exit: \`$svllm_capability_probe_exit\`"
+    printf '%s\n' "- svllm_capability_evidence_read_range: \`$svllm_capability_evidence_read_range_status\`"
+    printf '%s\n' "- svllm_capability_evidence_pinned_buffer: \`$svllm_capability_evidence_pinned_buffer_status\`"
+    printf '%s\n' "- svllm_capability_evidence_device_staging: \`$svllm_capability_evidence_device_staging_status\`"
     printf '%s\n' "- python_torch_cuda_available: \`$python_torch_cuda_available\`"
     printf '%s\n' "- system_libtorch: \`$system_libtorch_status\`"
     printf '%s\n' "- retry5_cache_manifest: \`$retry5_cache_manifest_status\`"
