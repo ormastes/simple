@@ -421,6 +421,11 @@ failure. The live HTTP producer always writes
 `llm_dashboard_live_http_surface_manifest_sha256`, even for
 `missing_base_url`, so strict dashboard failures are tied to the exact wrapper,
 dashboard route source, route specs, and operator docs used by the live proof.
+The dashboard detail also forwards per-route live HTTP status and reason fields:
+`live_http_dashboard_status`/`live_http_dashboard_reason`,
+`live_http_agents_status`/`live_http_agents_reason`,
+`live_http_control_status`/`live_http_control_reason`, and
+`live_http_unauth_api_status`/`live_http_unauth_api_reason`.
 The aggregate expects all completion lanes to pass, fails for any WARN
 or missing strict evidence result, and writes `llm_goal_evidence_failed_gates`,
 `llm_goal_evidence_failed_gate_hints`, `llm_goal_evidence_warn_gates`, and

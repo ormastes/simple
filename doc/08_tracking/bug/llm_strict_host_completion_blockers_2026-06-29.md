@@ -20,7 +20,7 @@ Default aggregate:
   evidence now include checked surface/input manifests with size/SHA-256
   metadata and focused log hashes. Public absence rendering also records
   `public_absence_surface_manifest_count=93` and
-  `public_absence_surface_manifest_sha256=b516f5a4b33121fa3d630378a2ead8420d9b4fdbb7f8cc0c8535419509aa3b44`
+  `public_absence_surface_manifest_sha256=4548f884a84f5b5e1c1f09183f237bc991c5170fd5ef180d101fe420d5b590ad`
   with `failure_count=0`, so public manuals and generated evidence continue to
   hide internal absence markers from operator-facing text.
 
@@ -52,7 +52,7 @@ Strict-host aggregate:
 - local proof already hardened: vLLM host evidence has a checked runtime
   control/readiness source/spec plus operator-guide manifest with
   `surface_manifest_count=13` and
-  `surface_manifest_sha256=0ed111f1843094893e2dfc6469ed452ec26de9583b7ed6f7140573b2b6e671b0`
+  `surface_manifest_sha256=9b85d129def40b7c89806c870829fbb612efbde1ff410392bfa54e4c33ac194c`
 - required evidence: local `vllm` executable, importable Python `vllm` module
   with non-missing origin, serve preflight, reachable endpoint, and `/v1/models`
   listing the selected base model
@@ -84,7 +84,7 @@ Strict-host aggregate:
   devices; system/Simple-visible libtorch is missing
 - local proof already hardened: Torch optimizer evidence has a checked live
   probe/source/spec/doc manifest with `surface_manifest_count=18` and
-  `surface_manifest_sha256=475c7f98feafb8a46108b8a37b8c97c5d31e5e55f1b0b5cac2b1ead4bfb793be`,
+  `surface_manifest_sha256=f7380104165ed45c8a3341c3ca1af672c50bfcf15bd3c5273009f60c2d4f505f`,
   plus hashed Python Torch discovery and system libtorch probe logs
 - required evidence: Simple/libtorch CUDA optimizer probe with parameter on
   CUDA, gradient handle, optimizer step attempted, and parameter sum decrease

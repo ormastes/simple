@@ -9,7 +9,7 @@
 - surface_manifest: `build/llm_dashboard_live_http/dashboard_live_http_surface_manifest.tsv`
 - surface_manifest_count: `7`
 - surface_manifest_size: `863`
-- surface_manifest_sha256: `33df788fc79b76ab8bdc960d567708d20c8610826b5ff024b80794e197b457d1`
+- surface_manifest_sha256: `f12e6c405dd8f8e389e6887a395671d52c1507a29633c62106b9e0dc95c7d54e`
 - pass_integrity_status: `not_applicable`
 - pass_integrity_reason: `missing_base_url`
 - env: `build/llm_dashboard_live_http/evidence.env`

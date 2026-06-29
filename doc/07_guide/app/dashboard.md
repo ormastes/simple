@@ -88,7 +88,14 @@ fingerprints for the unauthenticated API rejection, dashboard HTML, agents HTML,
 and authenticated control JSONL responses. Provide authentication with
 `LLM_DASHBOARD_LIVE_AUTH_HEADER`, `LLM_DASHBOARD_LIVE_AUTH_COOKIE`, or
 `LLM_DASHBOARD_LIVE_COOKIE_NAME` plus `LLM_DASHBOARD_LIVE_COOKIE_VALUE`; secret
-values are not written to reports.
+values are not written to reports. The aggregate strict detail forwards each
+route's status and reason as
+`live_http_dashboard_status`/`live_http_dashboard_reason`,
+`live_http_agents_status`/`live_http_agents_reason`,
+`live_http_control_status`/`live_http_control_reason`, and
+`live_http_unauth_api_status`/`live_http_unauth_api_reason`, so a failed live
+dashboard run identifies whether auth, dashboard HTML, `/agents`, control JSONL,
+or unauthenticated rejection is the first route gap.
 
 That checker writes `build/llm_dashboard_live/evidence.env` with
 `llm_dashboard_live_status=pass` when authenticated dashboard HTML, `/agents`
