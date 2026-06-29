@@ -679,3 +679,12 @@ readiness report instead of leaving it missing. The native streaming producer
 passes the same timeout through its nested local-readiness run and records
 `svllm_native_streaming_local_spec_timeout_seconds` beside the native
 read-range, pinned-buffer, and device-staging blockers.
+
+## 2026-06-29 svLLM Manifest Spec Cleanup
+
+`test/01_unit/lib/gc_async_mut/svllm/model_executor/model_loader/manifest_spec.spl`
+no longer carries stale `TODO:` scenario names or intentionally failing parser
+comments. The spec now asserts the implemented canonical v0 manifest parser and
+`build_tensor_pack` materializer behavior directly, and the generated manual
+under `doc/06_spec/test/01_unit/lib/gc_async_mut/svllm/model_executor/model_loader/`
+records 11 active scenarios with no pending cases.
