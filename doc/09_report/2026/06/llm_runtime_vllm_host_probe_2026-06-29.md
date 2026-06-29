@@ -5,6 +5,8 @@
 - reason: `missing_local_vllm`
 - required_gates: `local_vllm,local_gpu,serve_preflight,endpoint_reachable,models_listed`
 - blocked_gates: `local_vllm|serve_preflight|endpoint_reachable|models_listed`
+- local_vllm_status: `missing`
+- local_gpu_status: `available`
 - preflight_status: `skipped`
 - endpoint_status: `not_checked`
 - models_status: `not_fetched`

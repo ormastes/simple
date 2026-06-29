@@ -654,9 +654,10 @@ decision, license, safety, deployment, and app handoff.
 
 `scripts/check/check-llm-runtime-vllm-host-probe.shs` now normalizes the local
 vLLM live-serving proof into required and blocked gates. The env records the
-required gate list, compact blocked gates, preflight status, endpoint status,
-models-list status, and models-list reason. On this host the lane remains
-`unavailable` with `blocked_gates=local_vllm|serve_preflight|endpoint_reachable|models_listed`;
+required gate list, compact blocked gates, local vLLM/GPU command statuses,
+preflight status, endpoint status, models-list status, and models-list reason.
+On this host the lane remains `unavailable` with
+`blocked_gates=local_vllm|serve_preflight|endpoint_reachable|models_listed`;
 strict-host aggregate runs should fail that gate until local vLLM is installed,
 serve preflight succeeds, the endpoint is reachable, and `/v1/models` lists the
 selected base model.
@@ -733,3 +734,12 @@ the same dashboard lane as diagnostics and vLLM control. The live dashboard
 wrapper requires authenticated `/agents` rendering, unauthenticated redirect,
 non-prefix hijack protection, and server/guide route contracts before reporting
 dashboard evidence as pass.
+
+## 2026-06-29 vLLM Host Resource Blocker Precision
+
+`scripts/check/check-llm-runtime-vllm-host-probe.shs` now probes `vllm` and
+`nvidia-smi` explicitly and records `local_vllm_status` plus
+`local_gpu_status` in the evidence env/report. The blocked-gates list no longer
+depends only on the collapsed control-CLI reason, so a host missing both local
+vLLM and GPU tooling reports both `local_vllm` and `local_gpu` blockers before
+serve preflight, endpoint, and model-listing gates.

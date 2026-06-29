@@ -37,6 +37,19 @@ done
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
 rm -f "$OUT_ENV" "$OUT_LOG" "$REPORT_PATH"
 
+probe_command() {
+    command="$1"
+    shift
+    if command -v "$command" >/dev/null 2>&1 && timeout 3 "$command" "$@" >/dev/null 2>&1; then
+        printf '%s\n' "available"
+    else
+        printf '%s\n' "missing"
+    fi
+}
+
+local_vllm_status="$(probe_command vllm --version)"
+local_gpu_status="$(probe_command nvidia-smi --query-gpu=name --format=csv,noheader)"
+
 exit_code=0
 if "$SIMPLE_BIN" run src/app/llm_runtime/control_cli.spl -- \
     --action preflight \
@@ -90,13 +103,13 @@ append_blocked_gate() {
     fi
 }
 
-case "$reason" in
-    missing_local_vllm*)
+case "$local_vllm_status:$reason" in
+    missing:*|*:missing_local_vllm*|*:missing_local_vllm_and_gpu*)
         append_blocked_gate "local_vllm"
         ;;
 esac
-case "$reason" in
-    missing_local_gpu*|missing_local_vllm_and_gpu*)
+case "$local_gpu_status:$reason" in
+    missing:*|*:missing_local_gpu*|*:missing_local_vllm_and_gpu*)
         append_blocked_gate "local_gpu"
         ;;
 esac
@@ -146,6 +159,8 @@ esac
     printf '%s\n' "llm_runtime_vllm_host_probe_blocked_gates=$blocked_gates"
     printf '%s\n' "llm_runtime_vllm_host_probe_cli_exit=$exit_code"
     printf '%s\n' "llm_runtime_vllm_host_probe_event=$event"
+    printf '%s\n' "llm_runtime_vllm_host_probe_local_vllm_status=$local_vllm_status"
+    printf '%s\n' "llm_runtime_vllm_host_probe_local_gpu_status=$local_gpu_status"
     printf '%s\n' "llm_runtime_vllm_host_probe_preflight_status=$status"
     printf '%s\n' "llm_runtime_vllm_host_probe_endpoint_status=$endpoint_status"
     printf '%s\n' "llm_runtime_vllm_host_probe_models_status=$models_status"
@@ -159,6 +174,8 @@ esac
     printf '%s\n' "- reason: \`$wrapper_reason\`"
     printf '%s\n' "- required_gates: \`$required_gates\`"
     printf '%s\n' "- blocked_gates: \`$blocked_gates\`"
+    printf '%s\n' "- local_vllm_status: \`$local_vllm_status\`"
+    printf '%s\n' "- local_gpu_status: \`$local_gpu_status\`"
     printf '%s\n' "- preflight_status: \`$status\`"
     printf '%s\n' "- endpoint_status: \`$endpoint_status\`"
     printf '%s\n' "- models_status: \`$models_status\`"

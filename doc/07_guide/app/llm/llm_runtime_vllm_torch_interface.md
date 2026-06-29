@@ -94,11 +94,15 @@ the current host it returns `status=unavailable` with
 `blocked_gates=local_vllm|serve_preflight|endpoint_reachable|models_listed`.
 The evidence env records `llm_runtime_vllm_host_probe_required_gates`,
 `llm_runtime_vllm_host_probe_blocked_gates`,
+`llm_runtime_vllm_host_probe_local_vllm_status`,
+`llm_runtime_vllm_host_probe_local_gpu_status`,
 `llm_runtime_vllm_host_probe_preflight_status`,
 `llm_runtime_vllm_host_probe_endpoint_status`, and
 `llm_runtime_vllm_host_probe_models_status` so strict aggregate runs can report
 the exact local serving blocker. Keep `FR-LLM-RUNTIME-0001` open until a
 configured local endpoint proves `/v1/models` serves the selected base model.
+If a host is missing GPU tooling too, `local_gpu` is added to the blocked-gates
+list independently of the collapsed control-CLI reason.
 Run the wrapper with `--strict` when unavailable or preflight-only hosts must
 fail the lane.
 
