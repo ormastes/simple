@@ -42,7 +42,10 @@ recursing. Single choke-point guard covers all downstream recursive passes.
 - depth 128 → guard fires with the expected message
 - depth 120 → parses clean, 0 guard fires (no false positive)
 
-Regression: `test/01_unit/compiler/parser/deep_nesting_guard_spec.spl`.
+Regression harness: `test/01_unit/compiler/parser/deep_nesting_guard_check.spl`
+— standalone (`bin/simple run`) rather than a `*_spec.spl`, because driving the
+full parser through the test daemon exceeds its per-spec timeout (see
+`simple_test_nested_runner_timeout_2026-06-28.md`).
 
 ## Deploy gate
 
