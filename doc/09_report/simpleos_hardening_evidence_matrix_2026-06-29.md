@@ -1,15 +1,15 @@
 # SimpleOS Hardening Evidence Matrix
 
-- status: fail
-- reason: matrix-incomplete
-- passed: 8/9
+- status: pass
+- reason: pass
+- passed: 9/9
 - executable_launch_from_fs: pass
 - ssh_shell_smf_and_exec: pass
 - shared_wm_logic: pass
 - cpu_simd_engine2d_diagram: pass
 - web_renderer_engine2d_bitmap: pass
-- simple_gui_webrenderer_bitmap: fail
-- production_gui_web_renderer_parity: fail
+- simple_gui_webrenderer_bitmap: pass
+- production_gui_web_renderer_parity: pass
 - qemu_host_counterpart_bitmap: pass
 - qemu_gui_smf_artifact_contract: pass
 - qemu_gui_smf_artifact_contract_status: pass

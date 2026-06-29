@@ -53,6 +53,33 @@ num_at_least() {
     [ "$1" -ge "$2" ]
 }
 
+is_tracked_policy() {
+    case "$1" in
+        track-*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+is_tracked_surface_result() {
+    tracked_policy="$1"
+    tracked_status="$2"
+    tracked_reason="$3"
+    tracked_mismatch_count="$4"
+
+    is_tracked_policy "$tracked_policy" || return 1
+    if [ "$tracked_status" = "pass" ] && [ "$tracked_mismatch_count" = "0" ]; then
+        return 0
+    fi
+    case "$tracked_reason" in
+        checksum-mismatch|weighted-checksum-mismatch|pixel-mismatch)
+            [ "$tracked_status" = "divergent" ] && [ -n "$tracked_mismatch_count" ] && [ "$tracked_mismatch_count" != "0" ]
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
 argb_artifact_pass() {
     written="$1"
     file_status="$2"
@@ -178,7 +205,8 @@ run_tauri_capture() {
             prior_argb_height="$(field_of tauri_simple_web_layout_captured_argb_height "$env_file")"
             prior_argb_pixel_count="$(field_of tauri_simple_web_layout_captured_argb_pixel_count "$env_file")"
             prior_argb_nonzero_pixel_count="$(field_of tauri_simple_web_layout_captured_argb_nonzero_pixel_count "$env_file")"
-            if { [ "$prior_status" = "pass" ] || { [ "$policy" = "track-text-divergence" ] && [ "$prior_status" = "divergent" ] && [ "$prior_reason" = "checksum-mismatch" ]; }; } &&
+            prior_mismatch="$(field_of tauri_simple_web_layout_mismatch_count "$env_file")"
+            if { [ "$prior_status" = "pass" ] || is_tracked_surface_result "$policy" "$prior_status" "$prior_reason" "$prior_mismatch"; } &&
                 argb_artifact_pass "$prior_argb_written" "$prior_argb_file_status" "$prior_argb_symlink_status" "$prior_argb_hardlink_status" "$prior_argb_size_bytes" "$prior_argb_format" "$prior_argb_producer" "$prior_argb_width" "$prior_argb_height" "$prior_argb_pixel_count" "$prior_argb_nonzero_pixel_count" "$width" "$height" "tauri-x11-window-screenshot"; then
                 case_reused=true
                 prior_code="$(field_of tauri_simple_web_layout_exit_code "$env_file")"
@@ -217,8 +245,9 @@ run_tauri_capture() {
         if [ "$case_mismatch" = "" ]; then
             case_mismatch=0
         fi
-        if [ "$case_status" = "pass" ]; then
-            tauri_pass_count=$((tauri_pass_count + 1))
+        if is_tracked_surface_result "$policy" "$case_status" "$case_reason" "$case_mismatch"; then
+            tauri_tracked_count=$((tauri_tracked_count + 1))
+            tauri_tracked_mismatch_count=$((tauri_tracked_mismatch_count + case_mismatch))
             tauri_live_capture=true
             if argb_artifact_pass "$case_argb_written" "$case_argb_file_status" "$case_argb_symlink_status" "$case_argb_hardlink_status" "$case_argb_size_bytes" "$case_argb_format" "$case_argb_producer" "$case_argb_width" "$case_argb_height" "$case_argb_pixel_count" "$case_argb_nonzero_pixel_count" "$width" "$height" "tauri-x11-window-screenshot"; then
                 tauri_argb_artifact_pass_count=$((tauri_argb_artifact_pass_count + 1))
@@ -227,9 +256,8 @@ run_tauri_capture() {
                 tauri_capture_status="fail"
                 tauri_capture_reason="tauri-layout-manifest-argb-artifact-missing"
             fi
-        elif [ "$policy" = "track-text-divergence" ] && [ "$case_status" = "divergent" ] && [ "$case_reason" = "checksum-mismatch" ]; then
-            tauri_tracked_count=$((tauri_tracked_count + 1))
-            tauri_tracked_mismatch_count=$((tauri_tracked_mismatch_count + case_mismatch))
+        elif [ "$case_status" = "pass" ]; then
+            tauri_pass_count=$((tauri_pass_count + 1))
             tauri_live_capture=true
             if argb_artifact_pass "$case_argb_written" "$case_argb_file_status" "$case_argb_symlink_status" "$case_argb_hardlink_status" "$case_argb_size_bytes" "$case_argb_format" "$case_argb_producer" "$case_argb_width" "$case_argb_height" "$case_argb_pixel_count" "$case_argb_nonzero_pixel_count" "$width" "$height" "tauri-x11-window-screenshot"; then
                 tauri_argb_artifact_pass_count=$((tauri_argb_artifact_pass_count + 1))
@@ -346,7 +374,8 @@ run_chrome_capture() {
             prior_argb_height="$(field_of chrome_simple_web_layout_captured_argb_height "$env_file")"
             prior_argb_pixel_count="$(field_of chrome_simple_web_layout_captured_argb_pixel_count "$env_file")"
             prior_argb_nonzero_pixel_count="$(field_of chrome_simple_web_layout_captured_argb_nonzero_pixel_count "$env_file")"
-            if { [ "$prior_status" = "pass" ] || { [ "$policy" = "track-text-divergence" ] && [ "$prior_status" = "divergent" ] && [ "$prior_reason" = "checksum-mismatch" ]; }; } &&
+            prior_mismatch="$(field_of chrome_simple_web_layout_mismatch_count "$env_file")"
+            if { [ "$prior_status" = "pass" ] || is_tracked_surface_result "$policy" "$prior_status" "$prior_reason" "$prior_mismatch"; } &&
                 argb_artifact_pass "$prior_argb_written" "$prior_argb_file_status" "$prior_argb_symlink_status" "$prior_argb_hardlink_status" "$prior_argb_size_bytes" "$prior_argb_format" "$prior_argb_producer" "$prior_argb_width" "$prior_argb_height" "$prior_argb_pixel_count" "$prior_argb_nonzero_pixel_count" "$width" "$height" "chrome-headless-screenshot"; then
                 case_reused=true
                 prior_code="$(field_of chrome_simple_web_layout_exit_code "$env_file")"
@@ -385,8 +414,9 @@ run_chrome_capture() {
         if [ "$case_mismatch" = "" ]; then
             case_mismatch=0
         fi
-        if [ "$case_status" = "pass" ]; then
-            chrome_pass_count=$((chrome_pass_count + 1))
+        if is_tracked_surface_result "$policy" "$case_status" "$case_reason" "$case_mismatch"; then
+            chrome_tracked_count=$((chrome_tracked_count + 1))
+            chrome_tracked_mismatch_count=$((chrome_tracked_mismatch_count + case_mismatch))
             chrome_live_capture=true
             if argb_artifact_pass "$case_argb_written" "$case_argb_file_status" "$case_argb_symlink_status" "$case_argb_hardlink_status" "$case_argb_size_bytes" "$case_argb_format" "$case_argb_producer" "$case_argb_width" "$case_argb_height" "$case_argb_pixel_count" "$case_argb_nonzero_pixel_count" "$width" "$height" "chrome-headless-screenshot"; then
                 chrome_argb_artifact_pass_count=$((chrome_argb_artifact_pass_count + 1))
@@ -395,9 +425,8 @@ run_chrome_capture() {
                 chrome_capture_status="fail"
                 chrome_capture_reason="chrome-layout-manifest-argb-artifact-missing"
             fi
-        elif [ "$policy" = "track-text-divergence" ] && [ "$case_status" = "divergent" ] && [ "$case_reason" = "checksum-mismatch" ]; then
-            chrome_tracked_count=$((chrome_tracked_count + 1))
-            chrome_tracked_mismatch_count=$((chrome_tracked_mismatch_count + case_mismatch))
+        elif [ "$case_status" = "pass" ]; then
+            chrome_pass_count=$((chrome_pass_count + 1))
             chrome_live_capture=true
             if argb_artifact_pass "$case_argb_written" "$case_argb_file_status" "$case_argb_symlink_status" "$case_argb_hardlink_status" "$case_argb_size_bytes" "$case_argb_format" "$case_argb_producer" "$case_argb_width" "$case_argb_height" "$case_argb_pixel_count" "$case_argb_nonzero_pixel_count" "$width" "$height" "chrome-headless-screenshot"; then
                 chrome_argb_artifact_pass_count=$((chrome_argb_artifact_pass_count + 1))

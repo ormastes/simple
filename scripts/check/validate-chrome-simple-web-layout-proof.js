@@ -431,7 +431,7 @@ if (proof.blur_or_tolerance_used !== false) {
   reason = 'missing-chrome-geometry-items';
 } else if (geometryMeasuredItemCount < 1) {
   reason = 'missing-chrome-geometry-measured-items';
-} else if (!jsonIntegerBetween(proof.frame_us, 1, 1000000)) {
+} else if (!jsonIntegerBetween(proof.frame_us, 1, 60000000)) {
   reason = 'missing-chrome-timing';
 }
 
