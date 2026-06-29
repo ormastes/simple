@@ -145,11 +145,16 @@ Strict-host unblock checklist:
    `SVLLM_NATIVE_CAPABILITY_EVIDENCE_PATH`, then run
    `scripts/check/check-llm-runtime-svllm-native-streaming-evidence.shs` and
    `SVLLM_NATIVE_EVIDENCE_ENV=build/llm_runtime_svllm_native_streaming/evidence.env sh scripts/check/check-llm-runtime-svllm-local-readiness.shs --strict-native`.
-4. Torch/libtorch: make `libspl_torch.so` visible through `SIMPLE_SFFI_PATH`
-   and point `SCILIB_TORCH_ROOT` or `LIBTORCH` at the CUDA libtorch install,
-   then run `scripts/check/check-llm-runtime-torch-cuda-optimizer-probe.shs --strict`
+4. Torch/libtorch: make `libspl_torch.so` visible as
+   `$SIMPLE_SFFI_PATH/libspl_torch.so`, point `SCILIB_TORCH_ROOT` or `LIBTORCH`
+   at the CUDA libtorch install, and include the libtorch directory in
+   `LD_LIBRARY_PATH`; then run
+   `scripts/check/check-llm-runtime-torch-cuda-optimizer-probe.shs --strict`
    until the Simple optimizer probe records a CUDA parameter, gradient handle,
-   optimizer step, and decreased parameter sum.
+   optimizer step, and decreased parameter sum. The probe reports
+   `simple_sffi_libtorch_bridge_status` separately from Python libtorch
+   discovery so an exposed Python Torch bundle cannot mask a missing Simple
+   SFFI bridge.
 5. Fine-tune retry: complete the licensed cache review and retry6 training/eval
    artifacts under `.spipe/llm-finetune-process/artifacts/`, including
    `llm_backed_app_server_dry_run_retry6/model_manifest.json` and

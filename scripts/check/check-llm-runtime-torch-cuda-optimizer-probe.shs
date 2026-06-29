@@ -175,12 +175,36 @@ if [ -s "$LIBTORCH_PROBE_LOG" ]; then
     fi
 fi
 libtorch_env_value="${LIBTORCH:-}"
+scilib_torch_root_value="${SCILIB_TORCH_ROOT:-}"
+simple_sffi_path_value="${SIMPLE_SFFI_PATH:-}"
 ld_library_path_value="${LD_LIBRARY_PATH:-}"
 libtorch_env_status="missing"
+scilib_torch_root_status="missing"
+simple_sffi_path_status="missing"
+simple_sffi_libtorch_bridge_status="missing"
 ld_library_path_libtorch_status="missing"
 simple_runtime_torch_link_status="not_evaluated"
 if [ -n "$libtorch_env_value" ]; then
     libtorch_env_status="set"
+fi
+if [ -n "$scilib_torch_root_value" ]; then
+    if [ -d "$scilib_torch_root_value" ]; then
+        scilib_torch_root_status="set_dir"
+    else
+        scilib_torch_root_status="set_missing_dir"
+    fi
+fi
+if [ -n "$simple_sffi_path_value" ]; then
+    simple_sffi_path_status="set"
+    old_ifs="$IFS"
+    IFS=:
+    for simple_sffi_dir in $simple_sffi_path_value; do
+        if [ -n "$simple_sffi_dir" ] && [ -f "$simple_sffi_dir/libspl_torch.so" ]; then
+            simple_sffi_libtorch_bridge_status="visible"
+            break
+        fi
+    done
+    IFS="$old_ifs"
 fi
 if [ -n "${python_torch_library_dir:-}" ] && [ "${python_torch_library_dir:-missing}" != "missing" ]; then
     case ":$ld_library_path_value:" in
@@ -418,6 +442,12 @@ case "$blocked_gate" in
         if [ "${python_torch_cuda_library_bundle_status:-missing}" = "ready" ] &&
            [ "${libtorch_env_status:-missing}" = "set" ] &&
            [ "${ld_library_path_libtorch_status:-missing}" = "contains_python_torch_library_dir" ] &&
+           [ "${simple_sffi_libtorch_bridge_status:-missing}" != "visible" ]; then
+            simple_runtime_torch_link_status="missing_simple_sffi_bridge"
+            next_action="build libspl_torch.so and expose its directory through SIMPLE_SFFI_PATH, then rerun the strict Torch optimizer probe"
+        elif [ "${python_torch_cuda_library_bundle_status:-missing}" = "ready" ] &&
+           [ "${libtorch_env_status:-missing}" = "set" ] &&
+           [ "${ld_library_path_libtorch_status:-missing}" = "contains_python_torch_library_dir" ] &&
            [ "${torch_available:-missing}" != "true" ]; then
             simple_runtime_torch_link_status="missing_after_libtorch_env_exposed"
             next_action="rebuild or relink the Simple runtime with Torch SFFI/libtorch symbols enabled; Python libtorch is exposed but rt_torch_available remains false"
@@ -491,6 +521,9 @@ esac
     printf '%s\n' "torch_cuda_optimizer_probe_system_libtorch_probe_log_size=$system_libtorch_probe_log_size"
     printf '%s\n' "torch_cuda_optimizer_probe_system_libtorch_probe_log_sha256=$system_libtorch_probe_log_sha256"
     printf '%s\n' "torch_cuda_optimizer_probe_libtorch_env_status=$libtorch_env_status"
+    printf '%s\n' "torch_cuda_optimizer_probe_scilib_torch_root_status=$scilib_torch_root_status"
+    printf '%s\n' "torch_cuda_optimizer_probe_simple_sffi_path_status=$simple_sffi_path_status"
+    printf '%s\n' "torch_cuda_optimizer_probe_simple_sffi_libtorch_bridge_status=$simple_sffi_libtorch_bridge_status"
     printf '%s\n' "torch_cuda_optimizer_probe_ld_library_path_libtorch_status=$ld_library_path_libtorch_status"
     printf '%s\n' "torch_cuda_optimizer_probe_simple_runtime_torch_link_status=$simple_runtime_torch_link_status"
     printf '%s\n' "torch_cuda_optimizer_probe_surface_manifest=$SURFACE_MANIFEST"
@@ -561,6 +594,9 @@ esac
     printf '%s\n' "- system_libtorch_probe_log_size: \`$system_libtorch_probe_log_size\`"
     printf '%s\n' "- system_libtorch_probe_log_sha256: \`$system_libtorch_probe_log_sha256\`"
     printf '%s\n' "- libtorch_env_status: \`$libtorch_env_status\`"
+    printf '%s\n' "- scilib_torch_root_status: \`$scilib_torch_root_status\`"
+    printf '%s\n' "- simple_sffi_path_status: \`$simple_sffi_path_status\`"
+    printf '%s\n' "- simple_sffi_libtorch_bridge_status: \`$simple_sffi_libtorch_bridge_status\`"
     printf '%s\n' "- ld_library_path_libtorch_status: \`$ld_library_path_libtorch_status\`"
     printf '%s\n' "- simple_runtime_torch_link_status: \`$simple_runtime_torch_link_status\`"
     printf '%s\n' "- surface_manifest: \`$SURFACE_MANIFEST\`"
