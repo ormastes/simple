@@ -690,6 +690,13 @@ SVLLM_NATIVE_EVIDENCE_ENV=build/llm_runtime_svllm_native_streaming/evidence.env 
   sh scripts/check/check-llm-runtime-svllm-local-readiness.shs --strict-native
 ```
 
+`scripts/check/check-llm-runtime-svllm-setup-contract.shs` is the focused
+diagnostic contract for this lane. It runs the default native streaming wrapper
+and local readiness wrapper, then verifies local-readiness proof, native
+read-range/pinned-buffer/device-staging blocker diagnostics, capability
+provenance fields, surface-manifest hashes, and `next_action` fields remain
+present. It does not mark native svLLM streaming complete.
+
 The strict native gate requires the evidence env to report
 `svllm_native_streaming_status=pass`; local file-backed bytes are recorded as
 bring-up evidence but are not enough for native streaming completion. Ready
