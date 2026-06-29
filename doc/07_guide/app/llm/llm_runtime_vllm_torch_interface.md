@@ -157,6 +157,13 @@ The evidence env records `llm_runtime_vllm_host_probe_required_gates`,
 `llm_runtime_vllm_host_probe_primary_blocked_gate`,
 `llm_runtime_vllm_host_probe_base_model`,
 `llm_runtime_vllm_host_probe_endpoint`,
+`llm_runtime_vllm_host_probe_endpoint_scheme_status`,
+`llm_runtime_vllm_host_probe_endpoint_host_status`,
+`llm_runtime_vllm_host_probe_wrapper_path`,
+`llm_runtime_vllm_host_probe_wrapper_sha256`,
+`llm_runtime_vllm_host_probe_control_cli_path`,
+`llm_runtime_vllm_host_probe_control_cli_sha256`,
+`llm_runtime_vllm_host_probe_probe_command_sha256`,
 `llm_runtime_vllm_host_probe_local_vllm_status`,
 `llm_runtime_vllm_host_probe_vllm_command_path`,
 `llm_runtime_vllm_host_probe_vllm_version_log_size`,
@@ -185,10 +192,15 @@ The evidence env records `llm_runtime_vllm_host_probe_required_gates`,
 `llm_runtime_vllm_host_probe_log_sha256`,
 `llm_runtime_vllm_host_probe_serve_readiness_run_event_count`,
 `llm_runtime_vllm_host_probe_pass_integrity_status`,
-`llm_runtime_vllm_host_probe_pass_integrity_reason`, and
+`llm_runtime_vllm_host_probe_pass_integrity_reason`,
+`llm_runtime_vllm_host_probe_report_path`,
+`llm_runtime_vllm_host_probe_report_size`,
+`llm_runtime_vllm_host_probe_report_sha256`, and
 `llm_runtime_vllm_host_probe_next_action` so strict aggregate runs can report
 the first local serving blocker, full blocker list, pass-log integrity, and
-next operator step. The wrapper accepts a PASS only when the runtime event is
+next operator step. The wrapper accepts a PASS only when endpoint setup is
+well-formed, wrapper/control CLI/probe command provenance is hashed, report
+provenance is present, the runtime event is
 `llm_runtime_vllm_serve_readiness_run`, CLI exit is zero, blocked gates are
 `none`, the local vLLM executable is available, the Python `vllm` module is
 available with a non-missing origin, GPU tooling is available, readiness is

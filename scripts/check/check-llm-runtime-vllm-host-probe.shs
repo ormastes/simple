@@ -12,6 +12,8 @@ OUT_LOG="$BUILD_DIR/preflight.log"
 VLLM_VERSION_LOG="$BUILD_DIR/vllm_version.log"
 PYTHON_VLLM_LOG="$BUILD_DIR/python_vllm_probe.log"
 GPU_PROBE_LOG="$BUILD_DIR/gpu_probe.log"
+WRAPPER_PATH="scripts/check/check-llm-runtime-vllm-host-probe.shs"
+CONTROL_CLI_PATH="src/app/llm_runtime/control_cli.spl"
 BASE_MODEL="${BASE_MODEL:-base-model}"
 ENDPOINT="${ENDPOINT:-http://127.0.0.1:8000/v1}"
 STRICT=0
@@ -64,6 +66,17 @@ artifact_sha256() {
     fi
 }
 
+text_sha256() {
+    text="$1"
+    if command -v sha256sum >/dev/null 2>&1; then
+        printf '%s' "$text" | sha256sum | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        printf '%s' "$text" | shasum -a 256 | awk '{print $1}'
+    else
+        printf '%s\n' "unavailable"
+    fi
+}
+
 probe_command_log() {
     log="$1"
     shift
@@ -83,6 +96,31 @@ probe_command_log() {
         printf '%s\n' "missing"
     fi
 }
+
+PROBE_COMMAND="$SIMPLE_BIN run $CONTROL_CLI_PATH -- --action readiness --base-model $BASE_MODEL --endpoint $ENDPOINT --detect-resources"
+wrapper_sha256="$(artifact_sha256 "$WRAPPER_PATH")"
+control_cli_sha256="$(artifact_sha256 "$CONTROL_CLI_PATH")"
+probe_command_sha256="$(text_sha256 "$PROBE_COMMAND")"
+endpoint_scheme_status="missing"
+endpoint_host_status="missing"
+case "$ENDPOINT" in
+    http://*|https://*)
+        endpoint_scheme_status="configured"
+        endpoint_after_scheme="${ENDPOINT#*://}"
+        case "$endpoint_after_scheme" in
+            ""|/*)
+                endpoint_host_status="missing"
+                ;;
+            *)
+                endpoint_host_status="configured"
+                ;;
+        esac
+        ;;
+    *)
+        endpoint_scheme_status="missing"
+        endpoint_host_status="missing"
+        ;;
+esac
 
 vllm_command_path="$(command -v vllm 2>/dev/null || true)"
 if [ -z "$vllm_command_path" ]; then
@@ -152,7 +190,7 @@ surface_manifest_size="$(artifact_size "$SURFACE_MANIFEST")"
 surface_manifest_sha256="$(artifact_sha256 "$SURFACE_MANIFEST")"
 
 exit_code=0
-if "$SIMPLE_BIN" run src/app/llm_runtime/control_cli.spl -- \
+if "$SIMPLE_BIN" run "$CONTROL_CLI_PATH" -- \
     --action readiness \
     --base-model "$BASE_MODEL" \
     --endpoint "$ENDPOINT" \
@@ -381,6 +419,14 @@ fi
     printf '%s\n' "llm_runtime_vllm_host_probe_primary_blocked_gate=$primary_blocked_gate"
     printf '%s\n' "llm_runtime_vllm_host_probe_base_model=$BASE_MODEL"
     printf '%s\n' "llm_runtime_vllm_host_probe_endpoint=$ENDPOINT"
+    printf '%s\n' "llm_runtime_vllm_host_probe_endpoint_scheme_status=$endpoint_scheme_status"
+    printf '%s\n' "llm_runtime_vllm_host_probe_endpoint_host_status=$endpoint_host_status"
+    printf '%s\n' "llm_runtime_vllm_host_probe_wrapper_path=$WRAPPER_PATH"
+    printf '%s\n' "llm_runtime_vllm_host_probe_wrapper_sha256=$wrapper_sha256"
+    printf '%s\n' "llm_runtime_vllm_host_probe_control_cli_path=$CONTROL_CLI_PATH"
+    printf '%s\n' "llm_runtime_vllm_host_probe_control_cli_sha256=$control_cli_sha256"
+    printf '%s\n' "llm_runtime_vllm_host_probe_probe_command=$PROBE_COMMAND"
+    printf '%s\n' "llm_runtime_vllm_host_probe_probe_command_sha256=$probe_command_sha256"
     printf '%s\n' "llm_runtime_vllm_host_probe_cli_exit=$exit_code"
     printf '%s\n' "llm_runtime_vllm_host_probe_surface_manifest=$SURFACE_MANIFEST"
     printf '%s\n' "llm_runtime_vllm_host_probe_surface_manifest_count=$surface_manifest_count"
@@ -415,7 +461,12 @@ fi
 
 {
     printf '# LLM Runtime vLLM Host Probe\n\n'
-    printf '%s\n' "- command: \`$SIMPLE_BIN run src/app/llm_runtime/control_cli.spl -- --action readiness --base-model $BASE_MODEL --endpoint $ENDPOINT --detect-resources\`"
+    printf '%s\n' "- command: \`$PROBE_COMMAND\`"
+    printf '%s\n' "- probe_command_sha256: \`$probe_command_sha256\`"
+    printf '%s\n' "- wrapper_path: \`$WRAPPER_PATH\`"
+    printf '%s\n' "- wrapper_sha256: \`$wrapper_sha256\`"
+    printf '%s\n' "- control_cli_path: \`$CONTROL_CLI_PATH\`"
+    printf '%s\n' "- control_cli_sha256: \`$control_cli_sha256\`"
     printf '%s\n' "- status: \`$wrapper_status\`"
     printf '%s\n' "- reason: \`$wrapper_reason\`"
     printf '%s\n' "- required_gates: \`$required_gates\`"
@@ -423,6 +474,8 @@ fi
     printf '%s\n' "- primary_blocked_gate: \`$primary_blocked_gate\`"
     printf '%s\n' "- base_model: \`$BASE_MODEL\`"
     printf '%s\n' "- endpoint: \`$ENDPOINT\`"
+    printf '%s\n' "- endpoint_scheme_status: \`$endpoint_scheme_status\`"
+    printf '%s\n' "- endpoint_host_status: \`$endpoint_host_status\`"
     printf '%s\n' "- surface_manifest: \`$SURFACE_MANIFEST\`"
     printf '%s\n' "- surface_manifest_count: \`$surface_manifest_count\`"
     printf '%s\n' "- surface_manifest_size: \`$surface_manifest_size\`"
@@ -454,9 +507,38 @@ fi
     printf '%s\n' "- exit_code: \`$exit_code\`"
     printf '%s\n' "- env: \`$OUT_ENV\`"
     printf '%s\n' "- log: \`$OUT_LOG\`"
+    printf '%s\n' "- report: \`$REPORT_PATH\`"
     printf '\n'
     printf 'This wrapper records repeatable local vLLM host preflight evidence. It only proves live serving readiness when all required gates pass. A `status=pass` wrapper result must also have no blocked gates, exactly one serve-readiness run event in a non-empty hashed log, zero CLI exit, local vLLM executable availability, Python `vllm` module availability with a non-missing origin, local GPU availability, ready preflight/readiness, a configured endpoint, `models_status=ready`, and `models_reason=models_endpoint_ready`. `unavailable` records the compact blocked-gates list for missing local vLLM executable/module/GPU resources, skipped serve preflight, endpoint reachability, or model-listing evidence, plus hashed local `vllm --version`, Python module, and GPU probe logs; run with `--strict` when unavailable hosts must fail the lane.\n'
 } >"$REPORT_PATH"
+
+report_size="$(artifact_size "$REPORT_PATH")"
+report_sha256="$(artifact_sha256 "$REPORT_PATH")"
+if [ "$wrapper_status" = "pass" ]; then
+    if [ "$report_size" = "0" ] || [ "$report_sha256" = "missing" ] || [ "$report_sha256" = "unavailable" ]; then
+        wrapper_status="fail"
+        wrapper_reason="wrapper_pass_integrity_failed:report_provenance_missing"
+        pass_integrity_status="fail"
+        pass_integrity_reason="report_provenance_missing"
+        if [ "$blocked_gates" = "none" ]; then
+            blocked_gates="serve_preflight"
+            primary_blocked_gate="serve_preflight"
+        fi
+        next_action="fix vLLM host report provenance, then rerun the strict vLLM host probe"
+    fi
+fi
+{
+    printf '%s\n' "llm_runtime_vllm_host_probe_report_path=$REPORT_PATH"
+    printf '%s\n' "llm_runtime_vllm_host_probe_report_size=$report_size"
+    printf '%s\n' "llm_runtime_vllm_host_probe_report_sha256=$report_sha256"
+    printf '%s\n' "llm_runtime_vllm_host_probe_status=$wrapper_status"
+    printf '%s\n' "llm_runtime_vllm_host_probe_reason=$wrapper_reason"
+    printf '%s\n' "llm_runtime_vllm_host_probe_blocked_gates=$blocked_gates"
+    printf '%s\n' "llm_runtime_vllm_host_probe_primary_blocked_gate=$primary_blocked_gate"
+    printf '%s\n' "llm_runtime_vllm_host_probe_pass_integrity_status=$pass_integrity_status"
+    printf '%s\n' "llm_runtime_vllm_host_probe_pass_integrity_reason=$pass_integrity_reason"
+    printf '%s\n' "llm_runtime_vllm_host_probe_next_action=$next_action"
+} >>"$OUT_ENV"
 
 case "$wrapper_status" in
     pass)

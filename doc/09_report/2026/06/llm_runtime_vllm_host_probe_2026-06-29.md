@@ -1,6 +1,11 @@
 # LLM Runtime vLLM Host Probe
 
 - command: `release/x86_64-unknown-linux-gnu/simple run src/app/llm_runtime/control_cli.spl -- --action readiness --base-model base-model --endpoint http://127.0.0.1:8000/v1 --detect-resources`
+- probe_command_sha256: `c2395cfe396cfb3bc37d6422d9c96bb81c8a211ec7e22c3090669f73b5175dc3`
+- wrapper_path: `scripts/check/check-llm-runtime-vllm-host-probe.shs`
+- wrapper_sha256: `78c6cb4bf82008775bd1d72dc7bc19f89cadfcbea2470bae0b2103b8b8f7504b`
+- control_cli_path: `src/app/llm_runtime/control_cli.spl`
+- control_cli_sha256: `c02e4192976015ed7349875f3a4f4a70b45c96dce3fce1c55510961e4b10d57d`
 - status: `unavailable`
 - reason: `missing_local_vllm`
 - required_gates: `local_vllm,python_vllm_module,local_gpu,serve_preflight,endpoint_reachable,models_listed`
@@ -8,10 +13,12 @@
 - primary_blocked_gate: `local_vllm`
 - base_model: `base-model`
 - endpoint: `http://127.0.0.1:8000/v1`
+- endpoint_scheme_status: `configured`
+- endpoint_host_status: `configured`
 - surface_manifest: `build/llm_runtime_vllm_host_probe/vllm_host_surface_manifest.tsv`
 - surface_manifest_count: `13`
 - surface_manifest_size: `1569`
-- surface_manifest_sha256: `35c47029787ab6a878e1c2b9e5bc6789a40eaf44c5573b385bc5d9144729325d`
+- surface_manifest_sha256: `16abc6eaea108786847181d45ca7a02dd585418785b638670b326754589d8cc0`
 - local_vllm_status: `missing`
 - vllm_command_path: `missing`
 - vllm_version_log_size: `21`
@@ -31,7 +38,7 @@
 - models_status: `not_fetched`
 - models_reason: `environment_skipped`
 - log_size: `96660`
-- log_sha256: `a9732bd9cf1dc40bb1393d82fcfb9dffe7da29ffa657c271e13747742a3b76f8`
+- log_sha256: `afafe82a9c4d08316f3a72a1fd83655aa0a75f6b323117f7fa56cc8c1bb45d01`
 - serve_readiness_run_event_count: `1`
 - pass_integrity_status: `not_applicable`
 - pass_integrity_reason: `not_applicable`
@@ -39,5 +46,6 @@
 - exit_code: `0`
 - env: `build/llm_runtime_vllm_host_probe/evidence.env`
 - log: `build/llm_runtime_vllm_host_probe/preflight.log`
+- report: `doc/09_report/2026/06/llm_runtime_vllm_host_probe_2026-06-29.md`
 
 This wrapper records repeatable local vLLM host preflight evidence. It only proves live serving readiness when all required gates pass. A `status=pass` wrapper result must also have no blocked gates, exactly one serve-readiness run event in a non-empty hashed log, zero CLI exit, local vLLM executable availability, Python `vllm` module availability with a non-missing origin, local GPU availability, ready preflight/readiness, a configured endpoint, `models_status=ready`, and `models_reason=models_endpoint_ready`. `unavailable` records the compact blocked-gates list for missing local vLLM executable/module/GPU resources, skipped serve preflight, endpoint reachability, or model-listing evidence, plus hashed local `vllm --version`, Python module, and GPU probe logs; run with `--strict` when unavailable hosts must fail the lane.
