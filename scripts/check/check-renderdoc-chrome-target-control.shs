@@ -20,6 +20,11 @@ HEIGHT="${RDOC_CHROME_HEIGHT:-700}"
 WAIT_SECS="${RDOC_CHROME_TARGET_WAIT_SECS:-8}"
 CONTROL_TIMEOUT="${RDOC_TARGET_CONTROL_TIMEOUT_SECS:-20}"
 CONTROL_WAIT_API_SECS="${RDOC_TARGET_CONTROL_WAIT_API_SECS:-0}"
+USE_GPU_LAUNCHER="${RDOC_CHROME_TARGET_CONTROL_GPU_LAUNCHER:-0}"
+gpu_launcher_flag=""
+if [ "$USE_GPU_LAUNCHER" = "1" ]; then
+    gpu_launcher_flag="--gpu-launcher=$ROOT_DIR/scripts/tool/renderdoc-gpu-launcher.shs"
+fi
 
 mkdir -p "$BUILD_DIR/vulkan-layer.d" "$(dirname -- "$REPORT_PATH")"
 rm -f "$OUT_ENV" "$REPORT_PATH" "$BUILD_DIR/target-control.env" "$BUILD_DIR/rdc.list"
@@ -37,6 +42,12 @@ chosen_window_pid_matches_gpu_pid=""
 gpu_env_has_layer=""
 gpu_maps_has_renderdoc=""
 gpu_maps_has_vulkan=""
+gpu_launcher_log="$BUILD_DIR/gpu-launcher.log"
+gpu_launcher_invoked=""
+gpu_launcher_layer_only=""
+gpu_launcher_exported_capfile=""
+gpu_launcher_vk_instance_layers=""
+gpu_launcher_enable_vulkan_renderdoc_capture=""
 renderdoc_debug_log_file="$BUILD_DIR/renderdoc-layer.log"
 renderdoc_debug_log_file_status=""
 renderdoc_debug_log_loaded_status=""
@@ -136,6 +147,14 @@ write_env() {
         echo "rdoc_chrome_target_control_client_build_status=$target_client_build_status"
         echo "rdoc_chrome_target_control_client_build_log=$target_client_build_log"
         echo "rdoc_chrome_target_control_launch_flags=$chrome_launch_flags"
+        echo "rdoc_chrome_target_control_use_gpu_launcher=$USE_GPU_LAUNCHER"
+        echo "rdoc_chrome_target_control_gpu_launcher=$ROOT_DIR/scripts/tool/renderdoc-gpu-launcher.shs"
+        echo "rdoc_chrome_target_control_gpu_launcher_log=$gpu_launcher_log"
+        echo "rdoc_chrome_target_control_gpu_launcher_invoked=$gpu_launcher_invoked"
+        echo "rdoc_chrome_target_control_gpu_launcher_layer_only=$gpu_launcher_layer_only"
+        echo "rdoc_chrome_target_control_gpu_launcher_exported_capfile=$gpu_launcher_exported_capfile"
+        echo "rdoc_chrome_target_control_gpu_launcher_vk_instance_layers=$gpu_launcher_vk_instance_layers"
+        echo "rdoc_chrome_target_control_gpu_launcher_enable_vulkan_renderdoc_capture=$gpu_launcher_enable_vulkan_renderdoc_capture"
         echo "rdoc_chrome_target_control_gpu_pid=$gpu_pid"
         echo "rdoc_chrome_target_control_chosen_window=$chosen_window"
         echo "rdoc_chrome_target_control_chosen_window_pid=$chosen_window_pid"
@@ -191,6 +210,10 @@ write_env() {
         echo "- status: $status"
         echo "- reason: $reason"
         echo "- gpu pid: $gpu_pid"
+        echo "- use gpu launcher: $USE_GPU_LAUNCHER"
+        echo "- gpu launcher invoked: $gpu_launcher_invoked"
+        echo "- gpu launcher layer only: $gpu_launcher_layer_only"
+        echo "- gpu launcher vk instance layers: $gpu_launcher_vk_instance_layers"
         echo "- window pid: $chosen_window_pid"
         echo "- window pid matches gpu pid: $chosen_window_pid_matches_gpu_pid"
         echo "- RenderDoc debug log status: $renderdoc_debug_log_file_status"
@@ -282,8 +305,15 @@ VK_INSTANCE_LAYERS=VK_LAYER_RENDERDOC_Capture \
 ENABLE_VULKAN_RENDERDOC_CAPTURE=1 \
 RENDERDOC_CAPFILE="$ROOT_DIR/$BUILD_DIR/chrome_target_control" \
 RENDERDOC_DEBUG_LOG_FILE="$ROOT_DIR/$renderdoc_debug_log_file" \
+RDOC_GPU_LAUNCHER_RENDERDOCCMD="$RENDERDOC_HOME/bin/renderdoccmd" \
+RDOC_GPU_LAUNCHER_CAPTURE_PREFIX="$ROOT_DIR/$BUILD_DIR/chrome_target_control_gpu" \
+RDOC_GPU_LAUNCHER_LOG="$ROOT_DIR/$gpu_launcher_log" \
+RDOC_GPU_LAUNCHER_DEBUG_LOG_FILE="$ROOT_DIR/$renderdoc_debug_log_file" \
+RDOC_GPU_LAUNCHER_LAYER_ONLY="$USE_GPU_LAUNCHER" \
+RDOC_GPU_LAUNCHER_CAPOPTS="${RDOC_CAPOPTS:-}" \
 "$CHROME_BIN" \
     $chrome_launch_flags \
+    $gpu_launcher_flag \
     --no-first-run \
     --no-default-browser-check \
     --disable-search-engine-choice-screen \
@@ -317,6 +347,16 @@ fi
     echo "children:"
     ps -o pid,ppid,stat,cmd --ppid "$chrome_pid" || true
 } >"$BUILD_DIR/discovery.log"
+
+if [ -s "$gpu_launcher_log" ]; then
+    gpu_launcher_invoked="1"
+    gpu_launcher_layer_only="$(value_of renderdoc_gpu_launcher_layer_only "$gpu_launcher_log")"
+    gpu_launcher_exported_capfile="$(value_of renderdoc_gpu_launcher_layer_only_exported_capfile "$gpu_launcher_log")"
+    gpu_launcher_vk_instance_layers="$(value_of renderdoc_gpu_launcher_layer_only_vk_instance_layers "$gpu_launcher_log")"
+    gpu_launcher_enable_vulkan_renderdoc_capture="$(value_of renderdoc_gpu_launcher_layer_only_exported_enable "$gpu_launcher_log")"
+else
+    gpu_launcher_invoked="0"
+fi
 
 if [ -s "$renderdoc_debug_log_file" ]; then
     renderdoc_debug_log_file_status="pass"

@@ -2,8 +2,12 @@
 
 - status: fail
 - reason: target-control-no-api-use-renderdoc-layer-not-in-vulkan-instance
-- gpu pid: 1981252
-- window pid: 1981211
+- gpu pid: 1983240
+- use gpu launcher: 1
+- gpu launcher invoked: 1
+- gpu launcher layer only: 1
+- gpu launcher vk instance layers: VK_LAYER_RENDERDOC_Capture
+- window pid: 1983195
 - window pid matches gpu pid: 0
 - RenderDoc debug log status: pass
 - RenderDoc loaded status: pass
@@ -13,10 +17,10 @@
 - target api: 
 - target ident count: 2
 - target chosen ident: 38920
-- target message count: 3875
-- target noop count: 3875
-- target pretrigger message count: 5812
-- target pretrigger noop count: 5812
+- target message count: 3869
+- target noop count: 3869
+- target pretrigger message count: 5810
+- target pretrigger noop count: 5810
 - target api message count: 0
 - target last api: 
 - target last api presenting: 0
