@@ -27,7 +27,7 @@ nvme_firmware_simulation_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 3 | 3 | 0 | 0 |
+| 9 | 9 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -198,12 +198,148 @@ expect(out).to_contain("ALL NVME CONTROLLER E2E CHECKS PASS")
 
 </details>
 
+### NVMe firmware: production-hardening regressions
+
+#### guards garbage collection against data loss and the write-cliff
+
+- Drive the device to the host-write boundary and run GC under pressure
+   - Expected: code equals `0`
+- The reserve is held back, GC reclaims safely, and writes resume (no cliff / no loss)
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Drive the device to the host-write boundary and run GC under pressure")
+val (out, err, code) = _run(FW + "/gc_safety_check.spl")
+expect(code).to_equal(0)
+step("The reserve is held back, GC reclaims safely, and writes resume (no cliff / no loss)")
+expect(out).to_contain("GC SAFETY OK")
+```
+
+</details>
+
+#### preserves committed data across power loss and a full journal
+
+- Run the power-loss durability check (volatile loss + recovery + WAL overflow)
+   - Expected: code equals `0`
+- Recovery restores committed writes and 600 writes survive a full WAL
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Run the power-loss durability check (volatile loss + recovery + WAL overflow)")
+val (out, err, code) = _run(FW + "/durability_check.spl")
+expect(code).to_equal(0)
+step("Recovery restores committed writes and 600 writes survive a full WAL")
+expect(out).to_contain("DURABILITY OK")
+```
+
+</details>
+
+#### relocates data safely during wear-leveling and read-disturb scrub
+
+- Run the static wear-leveling and read-disturb scrub check
+   - Expected: code equals `0`
+- Both passes reclaim the targeted block with all data preserved
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Run the static wear-leveling and read-disturb scrub check")
+val (out, err, code) = _run(FW + "/wear_scrub_check.spl")
+expect(code).to_equal(0)
+step("Both passes reclaim the targeted block with all data preserved")
+expect(out).to_contain("WEAR/SCRUB OK")
+```
+
+</details>
+
+### NVMe firmware: Lean4 formal verification of the FTL invariants
+
+#### verifies the allocator and GC-reserve safety (Alloc.lean)
+
+- Check proofs/Alloc.lean with the Lean toolchain
+   - Expected: code equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Check proofs/Alloc.lean with the Lean toolchain")
+val (out, err, code) = _lean(FW + "/proofs/Alloc.lean")
+expect(code).to_equal(0)
+expect(out).to_contain("LEAN_OK")
+```
+
+</details>
+
+#### verifies that recovery preserves the committed prefix (Recover.lean)
+
+- Check proofs/Recover.lean with the Lean toolchain
+   - Expected: code equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Check proofs/Recover.lean with the Lean toolchain")
+val (out, err, code) = _lean(FW + "/proofs/Recover.lean")
+expect(code).to_equal(0)
+expect(out).to_contain("LEAN_OK")
+```
+
+</details>
+
+#### verifies the garbage-collection data-loss guard (Gc.lean)
+
+- Check proofs/Gc.lean with the Lean toolchain
+   - Expected: code equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Check proofs/Gc.lean with the Lean toolchain")
+val (out, err, code) = _lean(FW + "/proofs/Gc.lean")
+expect(code).to_equal(0)
+expect(out).to_contain("LEAN_OK")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 3 |
-| Active scenarios | 3 |
+| Total scenarios | 9 |
+| Active scenarios | 9 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

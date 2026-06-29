@@ -17,6 +17,18 @@ bin/simple run examples/09_embedded/simpleos_nvme_fw/fw/test_fw.spl    # full se
 bin/simple run examples/09_embedded/simpleos_nvme_fw/fw/nvme_main.spl  # NVMe admin/multi-IO-queue controller e2e
 ```
 
+Standalone production-hardening regressions and proofs:
+
+```bash
+bin/simple run examples/09_embedded/simpleos_nvme_fw/fw/gc_safety_check.spl   # GC data-loss guard + no write-cliff
+bin/simple run examples/09_embedded/simpleos_nvme_fw/fw/durability_check.spl  # power-loss recovery + WAL overflow
+bin/simple run examples/09_embedded/simpleos_nvme_fw/fw/wear_scrub_check.spl  # static wear-leveling + read-disturb scrub
+lean examples/09_embedded/simpleos_nvme_fw/fw/proofs/Alloc.lean              # + Recover.lean, Gc.lean (req 6)
+```
+
+> **Production-hardening status & acceptance bar:** `fw/PRODUCTION_STATUS.md` — production-grade
+> *logic and NVMe protocol compliance, simulation-validated* (the silicon boundary is stated there).
+>
 > Operator guide (both `fw/` firmware and the sibling `emu/` emulator):
 > `doc/07_guide/hardware/nvme_firmware/`.
 
@@ -65,7 +77,7 @@ trim → **power-fail + recovery** (committed state survives, trim stays trimmed
 | 3 | Index pointer + object pool | `fw_pool` generation-checked `Handle{pool,index,generation}` (use-after-free guard) |
 | 4 | MDSOC+ multi-domain architecture | HIL / FTL / FIL domains, composed structs (`Firmware{hil{ftl{fil}}}`) |
 | 5 | Offloadable operations | `fil` offload-op seam (ECC is a swappable op); abstract page-level API |
-| 6 | Lean4 formal verification | **planned for the firmware** (here the invariants are guarded by run-green self-tests + an absolute-oracle e2e). Lean4 proofs *do* exist for the sibling **`emu/`** emulator's algorithms (`emu/proofs/*.lean`) — standalone, no mechanical link to executed bytes |
+| 6 | Lean4 formal verification | **done** — `fw/proofs/{Alloc,Recover,Gc}.lean` prove the allocator/GC-reserve, committed-prefix recovery, and GC data-loss-guard invariants (standalone, `lean`-checked, no mechanical link to executed bytes). The sibling **`emu/`** has its own proofs (`emu/proofs/*.lean`) |
 | 7 | Dynamic loaded code hooks | **planned** (sandboxed GC/QoS policy hooks) per the plan |
 
 Recovery and verification are architectural (committed-prefix recovery is proven by the

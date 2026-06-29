@@ -74,6 +74,21 @@ Bare-metal **rv32** boot of *this Simple firmware* is the no-alloc follow-up (`[
 needs a heap); a self-contained C NAND/FTL demo already boots on `qemu-system-riscv32 -bios none`
 (`ALL RV32 NAND CHECKS PASS`) as current proof of the toolchain + boot path.
 
-Deferred to the build plan (not part of this firmware's run-green core): Lean4 proofs (req 6)
-and sandboxed dynamic policy hooks (req 7); multi-channel scheduling + static wear leveling are
-natural next extensions (dynamic wear leveling is implicit in the log-structured write path).
+## Production hardening — DONE (run-green, on origin/main)
+
+See `PRODUCTION_STATUS.md` for the acceptance bar. Landed since the initial build:
+- **Data-path correctness**: GC data-loss guard (a victim is erased only after every live page
+  is relocated), a GC scratch reserve eliminating the write-cliff, and no silent journal-record
+  drop on WAL overflow. Regressions: `gc_safety_check.spl`, `durability_check.spl`.
+- **Faithful durability**: power loss wipes all volatile DRAM (map cache + band bitmap); recovery
+  replays the journal onto the flash-resident L2P, rebuilds the band, and re-applies the
+  persistent bad-block table.
+- **Protocol surface**: overflow-safe command validation (correct `SC_*`, no crash) + the
+  mandatory admin set (Abort, Async Event Request, Format NVM, Firmware Download/Commit).
+- **Media management**: static wear-leveling (`wear_level_once`) + read-disturb scrub (`scrub_once`).
+- **Health**: SMART wired to real activity (wear, spare, media errors, unsafe shutdowns) + error log.
+- **Formal (req 6) — DONE**: `proofs/{Alloc,Recover,Gc}.lean` (`lean`-checked).
+
+Still deferred (per the build plan): sandboxed dynamic policy hooks (req 7); multi-channel
+scheduling; and the silicon-only pieces (real BCH/RS hardware ECC, MMIO/PCIe, persistent backing
+store) — see `PRODUCTION_STATUS.md` § Silicon boundary and the bare-metal rv32 port note above.
