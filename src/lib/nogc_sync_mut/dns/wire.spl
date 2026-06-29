@@ -43,14 +43,20 @@ fn wire_push_u32(buf: [i64], v: i64) -> [i64]:
     buf
 
 fn wire_read_u8(bytes: [i64], offset: i64) -> i64:
+    if offset < 0 or offset >= bytes.length():
+        return 0
     bytes[offset]
 
 fn wire_read_u16(bytes: [i64], offset: i64) -> i64:
+    if offset < 0 or offset + 1 >= bytes.length():
+        return 0
     val hi: i64 = bytes[offset]
     val lo: i64 = bytes[offset + 1]
     (hi << 8) | lo
 
 fn wire_read_u32(bytes: [i64], offset: i64) -> i64:
+    if offset < 0 or offset + 3 >= bytes.length():
+        return 0
     val b0: i64 = bytes[offset]
     val b1: i64 = bytes[offset + 1]
     val b2: i64 = bytes[offset + 2]
@@ -92,6 +98,8 @@ fn wire_encode_name_to_bytes(name: text) -> [i64]:
 # bytes_consumed is the span in the original message at `offset`, NOT
 # counting pointer targets — callers must advance by bytes_consumed.
 fn wire_decode_name(bytes: [i64], offset: i64) -> (text, i64):
+    if offset < 0:
+        return ("", 0)
     var labels: [text] = []
     var pos = offset
     var consumed = 0          # bytes consumed at the original offset
@@ -113,8 +121,12 @@ fn wire_decode_name(bytes: [i64], offset: i64) -> (text, i64):
                 val top2: i64 = b & 0xC0
                 if top2 == 0xC0:
                     # Compression pointer
+                    if pos + 1 >= bytes.length():
+                        return (labels.join("."), consumed)
                     val lo: i64 = bytes[pos + 1]
                     val ptr: i64 = ((b & 63) << 8) | lo
+                    if ptr < 0 or ptr >= bytes.length():
+                        return (labels.join("."), consumed)
                     if followed_pointer == 0:
                         consumed = pos - offset + 2
                     followed_pointer = 1
@@ -123,6 +135,8 @@ fn wire_decode_name(bytes: [i64], offset: i64) -> (text, i64):
                     # Normal label
                     val llen: i64 = b
                     pos = pos + 1
+                    if pos + llen > bytes.length():
+                        return (labels.join("."), consumed)
                     var label_chars: [text] = []
                     var k = 0
                     while k < llen:
