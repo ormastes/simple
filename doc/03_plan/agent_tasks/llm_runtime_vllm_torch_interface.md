@@ -628,6 +628,9 @@ readiness and the aggregate LLM gate. The checker runs the local svLLM
 readiness wrapper, records local file-backed byte-read evidence separately, and
 keeps native streaming failed with concrete blockers until native read_range,
 pinned buffer registration, and device staging all report `ready`.
+It also hashes the nested local-readiness env, log, and report so the strict
+native wrapper can prove exactly which local readiness run it consumed before
+evaluating native capability evidence.
 
 The native streaming wrapper now consumes explicit host capability inputs:
 `SVLLM_NATIVE_READ_RANGE_STATUS`, `SVLLM_NATIVE_PINNED_BUFFER_STATUS`, and

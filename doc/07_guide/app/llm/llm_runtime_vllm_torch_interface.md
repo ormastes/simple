@@ -162,6 +162,9 @@ It also writes `svllm_native_streaming_blocked_gates`,
 `svllm_native_streaming_next_action`; strict local readiness forwards those
 fields as `llm_runtime_svllm_local_readiness_native_*` so aggregate reports use
 the producer's canonical blocker contract instead of re-deriving it.
+The native wrapper also records SHA-256 and size metadata for the nested
+local-readiness env, log, and report, making strict native evidence traceable to
+the exact local readiness run it consumed.
 Configured native hosts provide those native capability results through
 `SVLLM_NATIVE_READ_RANGE_STATUS`, `SVLLM_NATIVE_PINNED_BUFFER_STATUS`, and
 `SVLLM_NATIVE_DEVICE_STAGING_STATUS`. Values normalize to `ready`,
