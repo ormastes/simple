@@ -315,6 +315,12 @@ Current 2026-06-26 browser capture findings:
   `target-control.env`, so no `.rdc` is produced. Current reason:
   `qrenderdoc-ui-python-timeout-without-target-evidence`. Evidence:
   `doc/09_report/renderdoc_chrome_target_control_2026-06-29.md`.
+- 2026-06-29 Chrome GPU-process autocapture evidence now emits structured
+  `rdoc_gpu_autocapture_*` fields from `gpu-launcher.log`. Current Chrome
+  app-mode evidence reports `rdoc_gpu_autocapture_status=shim-loaded-no-summary`:
+  the shim loaded, traced 160 EGL/ANGLE/Vulkan proc names, but recorded no
+  start/end/summary before timeout and no `.rdc` was produced. Evidence:
+  `build/renderdoc/chrome-gpu-autocapture-current/html/evidence.env`.
 - Adding `--no-zygote` to the Chromium launch contract did not fix the direct
   Chrome RenderDoc capture; Chrome still restarts the GPU process with
   `exit_code=139` and produces no `.rdc`. Evidence:

@@ -499,6 +499,59 @@ rdoc_emit_chromium_gpu_process_exit_metadata() {
     echo "rdoc_chromium_gpu_process_exit_reason=gpu-process-exited-unexpectedly"
 }
 
+rdoc_summary_value() {
+    field="$1"
+    line="$2"
+    printf '%s\n' "$line" | sed -n "s/.*${field}:\([^ ]*\).*/\1/p" | tail -n 1
+}
+
+rdoc_emit_gpu_autocapture_metadata() {
+    log_path="$1"
+
+    echo "rdoc_gpu_autocapture_log=$log_path"
+    if [ "$log_path" = "" ] || [ ! -s "$log_path" ]; then
+        echo "rdoc_gpu_autocapture_log_status=missing"
+        echo "rdoc_gpu_autocapture_summary="
+        echo "rdoc_gpu_autocapture_status=missing-log"
+        return 0
+    fi
+
+    summary="$(grep 'rdoc_autocapture_summary=' "$log_path" 2>/dev/null | tail -n 1 || true)"
+    loaded_count="$(grep -c '^rdoc_autocapture_loaded=1$' "$log_path" 2>/dev/null || true)"
+    proc_trace_count="$(grep -c '^rdoc_autocapture_proc_' "$log_path" 2>/dev/null || true)"
+    start_line="$(grep '^rdoc_autocapture_start=' "$log_path" 2>/dev/null | tail -n 1 || true)"
+    end_line="$(grep '^rdoc_autocapture_end=' "$log_path" 2>/dev/null | tail -n 1 || true)"
+    echo "rdoc_gpu_autocapture_log_status=pass"
+    echo "rdoc_gpu_autocapture_loaded_count=$loaded_count"
+    echo "rdoc_gpu_autocapture_proc_trace_line_count=$proc_trace_count"
+    echo "rdoc_gpu_autocapture_last_start=$start_line"
+    echo "rdoc_gpu_autocapture_last_end=$end_line"
+    echo "rdoc_gpu_autocapture_summary=$summary"
+    if [ "$summary" = "" ]; then
+        if [ "${loaded_count:-0}" -gt 0 ]; then
+            echo "rdoc_gpu_autocapture_status=shim-loaded-no-summary"
+        else
+            echo "rdoc_gpu_autocapture_status=missing-summary"
+        fi
+        return 0
+    fi
+
+    echo "rdoc_gpu_autocapture_status=$(rdoc_summary_value status "$summary")"
+    echo "rdoc_gpu_autocapture_api=$(rdoc_summary_value api "$summary")"
+    echo "rdoc_gpu_autocapture_started=$(rdoc_summary_value started "$summary")"
+    echo "rdoc_gpu_autocapture_finished=$(rdoc_summary_value finished "$summary")"
+    echo "rdoc_gpu_autocapture_start_source=$(rdoc_summary_value start_source "$summary")"
+    echo "rdoc_gpu_autocapture_end_source=$(rdoc_summary_value end_source "$summary")"
+    echo "rdoc_gpu_autocapture_submit_count=$(rdoc_summary_value submit "$summary")"
+    echo "rdoc_gpu_autocapture_present_count=$(rdoc_summary_value present "$summary")"
+    echo "rdoc_gpu_autocapture_egl_swap_count=$(rdoc_summary_value egl_swap "$summary")"
+    echo "rdoc_gpu_autocapture_egl_prepare_swap_count=$(rdoc_summary_value egl_prepare_swap "$summary")"
+    echo "rdoc_gpu_autocapture_egl_wait_scheduled_count=$(rdoc_summary_value egl_wait_scheduled "$summary")"
+    echo "rdoc_gpu_autocapture_egl_vk_lock_count=$(rdoc_summary_value egl_vk_lock "$summary")"
+    echo "rdoc_gpu_autocapture_egl_vk_unlock_count=$(rdoc_summary_value egl_vk_unlock "$summary")"
+    echo "rdoc_gpu_autocapture_proc_trace_count=$(rdoc_summary_value proc_trace "$summary")"
+}
+
 rdoc_emit_simple_runtime_metadata() {
     log_path="$1"
     if [ -s "$log_path" ]; then
@@ -847,6 +900,7 @@ rdoc_capture_html() {
     fi
     sed -n '1,160p' "$out_dir/renderdoc-html.log"
     rdoc_emit_chromium_gpu_process_exit_metadata "$out_dir/renderdoc-html.log" | tee -a "$env_path"
+    rdoc_emit_gpu_autocapture_metadata "$out_dir/gpu-launcher.log" | tee -a "$env_path"
     rdc_file="$(find "$out_dir" -name '*.rdc' 2>/dev/null | head -1)"
     tmp_env="$out_dir/evidence.status.env"
     set +e
@@ -999,6 +1053,7 @@ rdoc_capture_electron_html() {
     fi
     sed -n '1,160p' "$out_dir/renderdoc-electron-html.log"
     rdoc_emit_chromium_gpu_process_exit_metadata "$out_dir/renderdoc-electron-html.log" | tee -a "$env_path"
+    rdoc_emit_gpu_autocapture_metadata "$out_dir/gpu-launcher.log" | tee -a "$env_path"
     rdoc_emit_electron_argb_metadata "$out_dir/electron_argb.json" "$width" "$height" >>"$env_path"
     rdc_file="$(find "$out_dir" -name '*.rdc' 2>/dev/null | head -1)"
     tmp_env="$out_dir/evidence.status.env"
