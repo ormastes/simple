@@ -199,8 +199,10 @@ producer runs so stale results cannot mask a timeout or early producer failure.
 The aggregate expects all completion lanes to pass, fails for any WARN
 or missing strict evidence result, and writes `llm_goal_evidence_failed_gates`,
 `llm_goal_evidence_failed_gate_hints`, `llm_goal_evidence_warn_gates`, and
-per-lane `llm_goal_evidence_<lane>_hint` values to the env file for direct
-triage. It also copies focused blocker details into
+per-lane `llm_goal_evidence_<lane>_hint` and
+`llm_goal_evidence_<lane>_producer_exit` values to the env file for direct
+triage. `producer_exit` is `n/a` for lanes without a strict producer in the
+current mode. It also copies focused blocker details into
 `llm_goal_evidence_<lane>_required_gates`,
 `llm_goal_evidence_<lane>_blocked_gates`, and
 `llm_goal_evidence_<lane>_blocker_reason` for the vLLM, svLLM, Torch optimizer,
