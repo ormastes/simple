@@ -53,6 +53,11 @@ static void log_str_value(const char *key, const char *value) {
     log_line(buf);
 }
 
+static bool env_equals(const char *name, const char *expected) {
+    const char *value = getenv(name);
+    return value && strcmp(value, expected) == 0;
+}
+
 static int find_loaded_library_callback(struct dl_phdr_info *info, size_t size, void *data) {
     (void)size;
     struct library_lookup *lookup = (struct library_lookup *)data;
@@ -200,6 +205,8 @@ static void *delay_trigger_thread(void *arg) {
     }
 
     log_line("rdoc_delay_trigger=api-ready");
+    const bool trigger_mode = env_equals("RDOC_DELAY_TRIGGER_MODE", "trigger");
+    log_str_value("rdoc_delay_trigger_mode", trigger_mode ? "trigger" : "start-end");
     const char *capfile = getenv("RDOC_AUTOCAPTURE_FILE");
     if (capfile && capfile[0]) {
         api->SetCaptureFilePathTemplate(capfile);
@@ -208,6 +215,16 @@ static void *delay_trigger_thread(void *arg) {
     log_str_value("rdoc_delay_trigger_capfile_template", api->GetCaptureFilePathTemplate());
     log_u32("rdoc_delay_trigger_num_captures_before", api->GetNumCaptures());
     log_u32("rdoc_delay_trigger_is_capturing_before", api->IsFrameCapturing());
+    if (trigger_mode) {
+        api->TriggerCapture();
+        log_line("rdoc_delay_trigger=triggercapture");
+        log_u32("rdoc_delay_trigger_is_capturing_after_trigger", api->IsFrameCapturing());
+        usleep((useconds_t)(duration_ms * 1000));
+        log_u32("rdoc_delay_trigger_is_capturing_before_end", api->IsFrameCapturing());
+        log_u32("rdoc_delay_trigger_is_capturing_after_end", api->IsFrameCapturing());
+        log_u32("rdoc_delay_trigger_num_captures_after", api->GetNumCaptures());
+        return NULL;
+    }
     api->StartFrameCapture(NULL, NULL);
     log_line("rdoc_delay_trigger=start");
     log_u32("rdoc_delay_trigger_is_capturing_after_start", api->IsFrameCapturing());

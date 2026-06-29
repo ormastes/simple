@@ -525,11 +525,14 @@ RenderDoc proof.
 For browser GPU-child capture attempts that need a trigger without interposing
 EGL/Vulkan symbols, set `RDOC_GPU_LAUNCHER_DELAY_TRIGGER=1`. This uses
 `scripts/tool/renderdoc-delay-trigger.c`, a minimal preload shim that locates
-`RENDERDOC_GetAPI` with a loader-lock-free ELF lookup and calls timed
-`StartFrameCapture`/`EndFrameCapture`. Current Chrome and Electron evidence
-against the Vulkan-only RenderDoc build reaches the API but reports
-`rdoc_gpu_delay_trigger_last_end_ok=0`, with
-`rdoc_gpu_delay_trigger_is_capturing_after_start=0` and
+`RENDERDOC_GetAPI` with a loader-lock-free ELF lookup. By default it calls
+timed `StartFrameCapture`/`EndFrameCapture`; with
+`RDOC_GPU_LAUNCHER_DELAY_TRIGGER_MODE=trigger`, it calls `TriggerCapture()`
+instead. Current Chrome and Electron evidence against the Vulkan-only RenderDoc
+build reaches the API but reports zero captures for both modes:
+`rdoc_gpu_delay_trigger_last_end_ok=0`,
+`rdoc_gpu_delay_trigger_is_capturing_after_start=0`,
+`rdoc_gpu_delay_trigger_is_capturing_after_trigger=0`, and
 `rdoc_gpu_delay_trigger_num_captures_after=0`, so no `.rdc` is produced; see
 `doc/09_report/renderdoc_browser_delay_trigger_vulkan_only_2026-06-29.md`.
 The Linux row also emits structured blocker fields for parallel platform

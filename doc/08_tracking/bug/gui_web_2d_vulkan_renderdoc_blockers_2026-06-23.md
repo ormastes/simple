@@ -194,6 +194,19 @@ Current 2026-06-26 browser capture findings:
   produced. Current reason:
   `hotkey-window-owned-by-browser-not-renderdoc-gpu-process`. Evidence:
   `doc/09_report/renderdoc_chrome_x11_layer_hotkey_gpu_launcher_2026-06-29.md`.
+- The minimal delay-trigger GPU-child shim now supports
+  `RDOC_GPU_LAUNCHER_DELAY_TRIGGER_MODE=trigger`, which calls RenderDoc's
+  `TriggerCapture()` without exporting EGL or Vulkan wrapper symbols. Current
+  Chrome and Electron probes both load the shim, resolve `RENDERDOC_GetAPI`
+  from the already-loaded Vulkan-only `librenderdoc.so`, set the capfile
+  template, and call `TriggerCapture()` once, but
+  `rdoc_gpu_delay_trigger_num_captures_after=0`,
+  `rdoc_gpu_delay_trigger_is_capturing_after_trigger=0`, and no `RDOC` artifact
+  is produced. Evidence:
+  `build/renderdoc/chrome-gpu-triggercapture-vulkan-only/html/evidence.env`,
+  `build/renderdoc/electron-gpu-triggercapture-vulkan-only/electron-html/evidence.env`,
+  and
+  `doc/09_report/renderdoc_browser_delay_trigger_vulkan_only_2026-06-29.md`.
 
 2026-06-26 follow-up diagnostics:
 - `renderdoccmd inject --PID=<chrome-gpu-pid>` is not a Linux workaround.
