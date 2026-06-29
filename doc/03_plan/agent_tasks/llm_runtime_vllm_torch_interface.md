@@ -911,3 +911,13 @@ The context/Ponytail replacement wrapper now also runs
 `execution_spec`. That spec calls `simple_context` and `simple_ponytail` through
 `app.mcp.main_dispatch.dispatch_tool_content`, so full-replacement evidence is
 no longer source-contract-only for the app MCP path.
+
+## 2026-06-29 Strict Completion Audit
+
+`doc/09_report/2026/06/llm_goal_strict_completion_audit_2026-06-29.md` records
+the current completion state. Default aggregate evidence passes with
+`warn_gates=vllm_host|torch_optimizer`; strict-host aggregate evidence fails
+five lanes: live dashboard HTTP auth/base URL, local vLLM serving, native svLLM
+streaming, Simple-visible libtorch optimizer execution, and fine-tune retry6/7
+acceptance. Context/Ponytail full replacement is passing and is no longer a
+strict blocker.

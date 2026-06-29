@@ -351,3 +351,11 @@ sh scripts/check/check-llm-runtime-torch-cuda-optimizer-probe.shs
 
 Before final handoff for runtime-adjacent changes, also run the direct
 environment/runtime guards for working and staged content.
+
+Latest strict-completion audit:
+`doc/09_report/2026/06/llm_goal_strict_completion_audit_2026-06-29.md`.
+Default aggregate evidence passes with host-dependent WARN lanes for vLLM and
+Torch. Strict-host completion still fails live dashboard HTTP auth/base URL,
+local vLLM serving, native svLLM streaming, Simple-visible libtorch optimizer
+execution, and fine-tune retry6/7 acceptance. Context/Ponytail full replacement
+is passing.
