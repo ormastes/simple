@@ -38,7 +38,10 @@
 - svllm_capability_evidence_pinned_buffer: `missing`
 - svllm_capability_evidence_device_staging: `missing`
 - python_torch_cuda_available: `true`
+- python_torch_cuda_device_count: `2`
+- python_torch_error: `none`
 - system_libtorch: `missing`
+- system_libtorch_match_count: `0`
 - retry5_cache_manifest: `missing`
 - retry6_model_manifest: `missing`
 - retry6_model_manifest_schema_version: `missing`
@@ -57,6 +60,6 @@
 - retry7_attempt: `ready`
 - surface_manifest_count: `8`
 - surface_manifest_size: `1045`
-- surface_manifest_sha256: `8cd1e953257345f79b49a7c7dfffc73c7a4f416ae945876eb1e06efa14f912e4`
+- surface_manifest_sha256: `c72ca404f1c75baad566daadb72c6366ba149cb3f7fe5cf25e3010b9cc209cbf`
 - next_action: `provide blocked host prerequisites, then rerun strict evidence wrappers`
 - env: `build/llm_strict_host_prereq_doctor/evidence.env`

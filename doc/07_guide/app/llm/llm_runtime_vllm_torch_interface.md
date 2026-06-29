@@ -106,7 +106,8 @@ Markdown report mirrors the actionable env fields: the primary blocked gate,
 dashboard URL/auth readiness, local vLLM command/module/GPU readiness, native
 svLLM read-range/pinned-buffer/device-staging readiness, native svLLM
 capability source/evidence schema-event-source-status matching, Torch/libtorch
-readiness, fine-tune retry artifact readiness, manifest metadata, and the next
+readiness including Python Torch/CUDA visibility and system libtorch match
+count, fine-tune retry artifact readiness, manifest metadata, and the next
 operator action. The vLLM prereq section also records the base model and
 endpoint values, plus whether each came from defaults or explicit env, but the
 doctor does not contact the endpoint; endpoint reachability and `/v1/models`
