@@ -110,6 +110,14 @@ fn _cb_shr56(x: i64) -> i64:
 fn _cb_read_u8(data: [u8], pos: i64) -> i64:
     data[pos].to_i64() & 0xFF
 
+fn _cb_payload_available(data: [u8], offset: i64, hdr_consumed: i64, blen: i64) -> bool:
+    if offset < 0 or hdr_consumed < 0 or blen < 0:
+        return false
+    val payload_start = offset + hdr_consumed
+    if payload_start < 0 or payload_start > data.len():
+        return false
+    payload_start + blen <= data.len()
+
 # ============================================================================
 # Internal big-endian integer helpers
 # ============================================================================
@@ -337,7 +345,7 @@ fn cbor_decode_type(data: [u8], offset: i64) -> list:
     On error returns [-1, -1, -1, 0].
     """
     var result = []
-    if offset >= data.len():
+    if offset < 0 or offset >= data.len():
         result.push(-1)
         result.push(-1)
         result.push(-1)
@@ -447,6 +455,10 @@ fn cbor_decode_text(data: [u8], offset: i64) -> list:
         result.push("")
         result.push(0)
         return result
+    if not _cb_payload_available(data, offset, hdr_consumed, blen):
+        result.push("")
+        result.push(0)
+        return result
     val payload_start = offset + hdr_consumed
     var parts: [text] = []
     var i = 0
@@ -471,6 +483,8 @@ fn cbor_decode_bytes(data: [u8], offset: i64) -> list:
     val blen = r[2]
     val hdr_consumed = r[3]
     if hdr_consumed == 0 or major != 2:
+        return result
+    if not _cb_payload_available(data, offset, hdr_consumed, blen):
         return result
     val payload_start = offset + hdr_consumed
     var payload: [u8] = []
@@ -539,11 +553,15 @@ fn cbor_decode(data: [u8], offset: i64) -> (CborValue, i64):
 
     # Major type 2: byte string
     if major == 2:
+        if not _cb_payload_available(data, offset, hdr_consumed, raw_val):
+            return (CborValue.Null, offset)
         val bdata = _cb_decode_bytes_value(data, offset, hdr_consumed, raw_val)
         return (CborValue.Bytes(bdata), offset + hdr_consumed + raw_val)
 
     # Major type 3: text string
     if major == 3:
+        if not _cb_payload_available(data, offset, hdr_consumed, raw_val):
+            return (CborValue.Null, offset)
         val tdata = _cb_decode_text_value(data, offset, hdr_consumed, raw_val)
         return (CborValue.Text(tdata), offset + hdr_consumed + raw_val)
 
