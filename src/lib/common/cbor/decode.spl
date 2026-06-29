@@ -428,7 +428,7 @@ fn cbor_decode_tag(bytes: [i64], offset: i64) -> (i64, i64):
 fn cbor_item_size(bytes: [i64], offset: i64) -> i64:
     """Calculate size in bytes of CBOR item at offset.
     Returns total size including header and payload, or 0 on error."""
-    if offset >= bytes.len():
+    if offset < 0 or offset >= bytes.len():
         return 0
 
     val type_info = cbor_decode_type(bytes, offset)
@@ -438,9 +438,11 @@ fn cbor_item_size(bytes: [i64], offset: i64) -> i64:
 
     # Unsigned/negative integer - just header
     if major == major_unsigned_int():
-        return header_size
+        val int_info = decode_uint_value(bytes, offset, addl)
+        return int_info.1
     if major == major_negative_int():
-        return header_size
+        val int_info = decode_uint_value(bytes, offset, addl)
+        return int_info.1
 
     # Byte/text string - header + length
     if major == major_byte_string():
@@ -448,14 +450,20 @@ fn cbor_item_size(bytes: [i64], offset: i64) -> i64:
             return 0  # Not implemented
         val length_info = decode_uint_value(bytes, offset, addl)
         val length = length_info.0
-        return header_size + length
+        val consumed = length_info.1
+        if consumed == 0 or offset + consumed + length > bytes.len():
+            return 0
+        return consumed + length
 
     if major == major_text_string():
         if addl == addl_indefinite():
             return 0  # Not implemented
         val length_info = decode_uint_value(bytes, offset, addl)
         val length = length_info.0
-        return header_size + length
+        val consumed = length_info.1
+        if consumed == 0 or offset + consumed + length > bytes.len():
+            return 0
+        return consumed + length
 
     # Array - header + sum of item sizes
     if major == major_array():
@@ -463,8 +471,11 @@ fn cbor_item_size(bytes: [i64], offset: i64) -> i64:
             return 0  # Not implemented
         val length_info = decode_uint_value(bytes, offset, addl)
         val count = length_info.0
-        var total_size = header_size
-        var item_offset = offset + header_size
+        val consumed = length_info.1
+        if consumed == 0:
+            return 0
+        var total_size = consumed
+        var item_offset = offset + consumed
         var i = 0
         while i < count:
             val item_size = cbor_item_size(bytes, item_offset)
@@ -481,8 +492,11 @@ fn cbor_item_size(bytes: [i64], offset: i64) -> i64:
             return 0  # Not implemented
         val length_info = decode_uint_value(bytes, offset, addl)
         val pair_count = length_info.0
-        var total_size = header_size
-        var item_offset = offset + header_size
+        val consumed = length_info.1
+        if consumed == 0:
+            return 0
+        var total_size = consumed
+        var item_offset = offset + consumed
         var i = 0
         while i < pair_count * 2:  # Each pair = key + value
             val item_size = cbor_item_size(bytes, item_offset)
@@ -495,11 +509,15 @@ fn cbor_item_size(bytes: [i64], offset: i64) -> i64:
 
     # Tagged - header + value size
     if major == major_tag():
-        val value_offset = offset + header_size
+        val tag_info = decode_uint_value(bytes, offset, addl)
+        val consumed = tag_info.1
+        if consumed == 0:
+            return 0
+        val value_offset = offset + consumed
         val value_size = cbor_item_size(bytes, value_offset)
         if value_size == 0:
             return 0
-        return header_size + value_size
+        return consumed + value_size
 
     # Simple/float - just header for simple, header + payload for floats
     if major == major_simple_float():
@@ -512,13 +530,21 @@ fn cbor_item_size(bytes: [i64], offset: i64) -> i64:
         if addl == simple_undefined():
             return 1
         if addl == simple_float16():
+            if offset + 3 > bytes.len():
+                return 0
             return 3
         if addl == simple_float32():
+            if offset + 5 > bytes.len():
+                return 0
             return 5
         if addl == simple_float64():
+            if offset + 9 > bytes.len():
+                return 0
             return 9
         if addl == simple_break():
             return 1
+        if offset + header_size > bytes.len():
+            return 0
         return header_size
 
     0
