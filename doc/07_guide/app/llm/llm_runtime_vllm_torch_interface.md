@@ -252,6 +252,7 @@ triage. Producer fields are `n/a` for lanes without a strict producer in the
 current mode. It also copies focused blocker details into
 `llm_goal_evidence_<lane>_required_gates`,
 `llm_goal_evidence_<lane>_blocked_gates`, and
+`llm_goal_evidence_<lane>_primary_blocked_gate`, and
 `llm_goal_evidence_<lane>_blocker_reason` for strict context/Ponytail
 replacement, strict live dashboard, vLLM, svLLM, Torch optimizer, and fine-tune
 lanes so operators can triage strict failures from the aggregate report without

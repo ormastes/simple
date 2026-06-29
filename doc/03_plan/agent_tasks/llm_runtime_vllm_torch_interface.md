@@ -717,9 +717,10 @@ acceptance env.
 `scripts/check/check-llm-goal-evidence.shs` now copies focused blocker contracts
 into the aggregate env and report for the vLLM, svLLM, Torch optimizer, and
 fine-tune lanes. The aggregate records per-lane required gates, blocked gates,
-and blocker reasons in `llm_goal_evidence_<lane>_*` keys and adds a Blocker
-Details table to the Markdown report, so strict-host failures can be triaged
-from one artifact instead of opening every focused wrapper output first.
+primary blocked gate, and blocker reasons in `llm_goal_evidence_<lane>_*` keys
+and adds a Blocker Details table to the Markdown report, so strict-host
+failures can be triaged from one artifact instead of opening every focused
+wrapper output first.
 
 Follow-up hardening aligns the strict context/Ponytail and live dashboard
 wrappers with the vLLM, Torch, and fine-tune contracts: both now emit
