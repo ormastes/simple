@@ -1,7 +1,19 @@
-# simpleos_nvme_fw — Minimal log-structured FTL prototype
+# simpleos_nvme_fw — NVMe SSD firmware + emulator (and a teaching scaffold)
 
 **Simulation only — no hardware, no QEMU, no real MMIO.**  
-Host-runnable teaching scaffold for bare-metal NVMe SSD firmware on SimpleOS.
+Host-runnable, pure-Simple NVMe SSD firmware on SimpleOS.
+
+## Subdirectories (the two real deliverables)
+
+- **`fw/`** — the full layered NVMe SSD **firmware**: HIL/FTL/FIL + an NVMe admin/multi-IO-queue
+  controller front end over an ONFI NAND device. 300 self-test asserts. See `fw/README.md`.
+- **`emu/`** — a pure-Simple NVMe **host/device emulator** with a settable memcpy/DMA seam on
+  both sides, ONFI NAND, domain newtypes, and **Lean4 proofs**. See `emu/README.md`.
+- **Operator guide for both:** `doc/07_guide/hardware/nvme_firmware/`.
+
+The two files below (`main.spl`, `pool_demo.spl`) are the original **Phase-1 teaching slice** —
+the smallest standalone illustrations of the FTL and the object pool. The production firmware
+lives in `fw/`.
 
 ## What it demonstrates
 

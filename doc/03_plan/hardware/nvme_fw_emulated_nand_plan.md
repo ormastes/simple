@@ -1,5 +1,20 @@
 # Plan: Working with Emulated NAND — an ONFI-style controller seam for the firmware
 
+> **Status (2026-06-29): phase E3 IMPLEMENTED.** The ONFI NAND *device* + FIL-driving-it is
+> built and run-green: `fw/fil_nand_device.spl` is a protocol-accurate ONFI device (CMD/ADDR/
+> DATA latch + `exec()` state machine, STATUS reg, OOB, fault injection) and `fil.spl` composes
+> it as a faithful drop-in for `fil_nand.Nand`, so every write/read/GC-erase/recovery in
+> `sim_main`/`nvme_main` goes through the real ONFI handshake (300 self-test asserts green).
+> **However it landed as a SINGLE module (`fil_nand_device.spl`), not the planned 4-module
+> `nand_device`/`nand_bus`/`nand_bus_sw`/`nand_ctrl` split** — the register-seam decomposition,
+> async busy-timing reactor (E4: R/B# polling + per-command deadlines), no-alloc rv32 boot (E5),
+> and `nand_bus_mmio` (E6) are **still future**. Operator guide:
+> `doc/07_guide/hardware/nvme_firmware/`. NOTE: §7 below claims a
+> `examples/09_embedded/simpleos_nvme_fw/baremetal_rv32/` directory exists and proves the seam on
+> rv32 — that directory **does not exist** and the Simple firmware was **not** booted on rv32
+> (only a separate self-contained C NAND/FTL demo booted on `qemu-system-riscv32` as a toolchain
+> proof). See the corrected note in §7.
+
 > **Scope.** Evolve the SimpleOS NVMe firmware (`examples/09_embedded/simpleos_nvme_fw/fw/`)
 > from an in-process array NAND (`fil_nand`, which the FIL reads/writes directly) into a proper
 > **emulated NAND *device*** accessed through a **controller register interface**, so the FIL
@@ -173,9 +188,15 @@ today's "drop the RAM L2P".
 Bare-metal `-bios none` has no heap, so the device model + buffers must have a **fixed-storage**
 variant (no `[i64].push()`): static/global arrays sized at the (small) bare-metal geometry, or
 a compile-time geometry constant. Keep the **`NandBus` interface identical** between builds; only
-the backing storage differs (alloc on host, fixed on metal). The in-progress rv32 demo
-(`examples/09_embedded/simpleos_nvme_fw/baremetal_rv32/`) is the seed of this variant and proves
-the seam survives the no-heap target with UART output via `rt_mmio_write8(0x10000000, …)`.
+the backing storage differs (alloc on host, fixed on metal).
+
+> **Correction (2026-06-29).** An earlier draft claimed an in-progress
+> `examples/09_embedded/simpleos_nvme_fw/baremetal_rv32/` directory was the seed of this variant
+> and proved the seam survives the no-heap target. **That directory does not exist** (only `fw/`
+> and `emu/` subdirs do) and the Simple firmware was **not** booted on rv32. What exists today is
+> a *separate, self-contained C* NAND/FTL demo that boots on `qemu-system-riscv32 -bios none`
+> (`ALL RV32 NAND CHECKS PASS`) with UART output via `rt_mmio_write8(0x10000000, …)` — a toolchain
+> + boot-path proof only, not the Simple firmware. The no-alloc rv32 port remains future work.
 
 ---
 

@@ -12,9 +12,13 @@ Built layer-by-layer with parallel agents (Sonnet builders + Opus review gates),
 ## Run it
 
 ```bash
-bin/simple run examples/09_embedded/simpleos_nvme_fw/fw/sim_main.spl   # end-to-end demo
-bin/simple run examples/09_embedded/simpleos_nvme_fw/fw/test_fw.spl    # full self-test suite (225 checks)
+bin/simple run examples/09_embedded/simpleos_nvme_fw/fw/sim_main.spl   # single-queue end-to-end demo
+bin/simple run examples/09_embedded/simpleos_nvme_fw/fw/test_fw.spl    # full self-test suite (300 checks)
+bin/simple run examples/09_embedded/simpleos_nvme_fw/fw/nvme_main.spl  # NVMe admin/multi-IO-queue controller e2e
 ```
+
+> Operator guide (both `fw/` firmware and the sibling `emu/` emulator):
+> `doc/07_guide/hardware/nvme_firmware/`.
 
 `sim_main` drives a full workload: 128 writes → read-back → overwrite-all (write
 amplification) → **garbage collection** (reclaim stale blocks, logical view preserved) →
@@ -46,10 +50,11 @@ trim → **power-fail + recovery** (committed state survives, trim stays trimmed
 | Layer | Modules |
 |-------|---------|
 | Interface | `nvme_types` (constants, `Handle`, `NvmeCmd`/`NvmeCpl`, geometry, helpers) |
-| **FIL** | `fil_nand`, `fil_ecc`, `fil_badblock`, `fil` |
+| **FIL** | `fil_nand`, `fil_nand_device` (ONFI NAND *device*, now driving the FIL), `fil_ecc`, `fil_badblock`, `fil` |
 | **FTL** | `ftl_map`, `ftl_band`, `ftl_journal`, `ftl_gc`, `ftl` |
 | **HIL + core** | `hil_queue`, `hil_command`, `fw_pool`, `hil`, `firmware` |
-| Tests | `test_fw` (all self-tests), `sim_main` (end-to-end) |
+| **NVMe controller front end** | `nvme_admin_types`, `nvme_admin` (admin queue: Identify, Create/Delete IO SQ/CQ, Get/Set Features, Get Log Page), `nvme_qset` (multi IO queue, round-robin), `nvme_controller` |
+| Tests | `test_fw` (all self-tests, 300 checks), `sim_main` (single-queue e2e), `nvme_main` (controller e2e) |
 
 ## Requirements coverage (from the research report)
 
@@ -60,7 +65,7 @@ trim → **power-fail + recovery** (committed state survives, trim stays trimmed
 | 3 | Index pointer + object pool | `fw_pool` generation-checked `Handle{pool,index,generation}` (use-after-free guard) |
 | 4 | MDSOC+ multi-domain architecture | HIL / FTL / FIL domains, composed structs (`Firmware{hil{ftl{fil}}}`) |
 | 5 | Offloadable operations | `fil` offload-op seam (ECC is a swappable op); abstract page-level API |
-| 6 | Lean4 formal verification | **planned** (see `doc/03_plan/hardware/nvme_fw_baremetal_parallel_agent_plan.md`); here the invariants are guarded by run-green self-tests + an absolute-oracle e2e |
+| 6 | Lean4 formal verification | **planned for the firmware** (here the invariants are guarded by run-green self-tests + an absolute-oracle e2e). Lean4 proofs *do* exist for the sibling **`emu/`** emulator's algorithms (`emu/proofs/*.lean`) — standalone, no mechanical link to executed bytes |
 | 7 | Dynamic loaded code hooks | **planned** (sandboxed GC/QoS policy hooks) per the plan |
 
 Recovery and verification are architectural (committed-prefix recovery is proven by the

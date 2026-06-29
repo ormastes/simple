@@ -1,5 +1,22 @@
 # Parallel-Agent Build Plan — SimpleOS NVMe FW Baremetal Example
 
+> **Status (2026-06-29): largely IMPLEMENTED — see `examples/09_embedded/simpleos_nvme_fw/fw/`
+> and the operator guide `doc/07_guide/hardware/nvme_firmware/`.** The data-path phases are
+> built and run-green (300 self-test assertions): sim NAND, generation-handle pool (`fw_pool`),
+> bounded queue (`hil_queue`), cooperative reactor (`firmware.service`), page-level FTL (`ftl`),
+> WAL + checkpoint + A/B superblock (`ftl_journal`), P2L crash recovery (`ftl.recover`), GC
+> (`ftl_gc`/`ftl.gc_once`), DFTL map cache (`ftl_map`). **Done ≈ phases 0–7.** An NVMe admin +
+> multi-IO-queue controller front end (`nvme_admin`/`nvme_qset`/`nvme_controller`/`nvme_main`,
+> verified by `nvme_main.spl`) also landed — it is **not** in the phase table below. **Still
+> genuinely future:** phase 8 multicore/shard, phase 9 offload/caps, phase 10 dynamic
+> hooks/sandbox, and rv32 bare-metal boot. Two scheduled items were **never produced as planned**:
+> (a) the Phase-11 "docs" row's generated `doc/06_spec` manual + a `doc/07_guide` guide — the
+> guide now exists (link above) but `doc/06_spec` is unmade (no sspec tests exist; the example
+> self-verifies via run-mains); (b) the Lean4 proofs A–I were scheduled under the *firmware*
+> roadmap but actually landed under `emu/proofs/` (4 files, 20 theorems) verifying the
+> **emulator's** algorithms — the firmware itself still has zero Lean. The text below is the
+> original plan, kept for the decomposition/process; treat phases 0–7 as done.
+
 > **Scope.** How to build the bare-metal NVMe SSD firmware example (rooted at
 > `examples/09_embedded/simpleos_nvme_fw/`) with a fleet of lower-cost worker agents
 > (Claude Haiku + Sonnet) gated by Claude Opus reviews, following the SPipe
