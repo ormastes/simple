@@ -741,6 +741,29 @@ void *dlsym(void *handle, const char *symbol) {
         log_line("rdoc_autocapture_dlsym=eglGetProcAddress");
         return (void *)eglGetProcAddress;
     }
+    if (symbol && (strcmp(symbol, "eglMakeCurrent") == 0 || strcmp(symbol, "EGL_MakeCurrent") == 0)) {
+        if (!real_eglMakeCurrent) {
+            real_eglMakeCurrent = (egl_make_current_fn_t)real_dlsym_lookup(handle, symbol);
+        }
+        log_line("rdoc_autocapture_dlsym=eglMakeCurrent");
+        return (void *)eglMakeCurrent;
+    }
+    if (symbol && (strcmp(symbol, "eglCreateWindowSurface") == 0 ||
+        strcmp(symbol, "EGL_CreateWindowSurface") == 0)) {
+        if (!real_eglCreateWindowSurface) {
+            real_eglCreateWindowSurface = (egl_create_window_surface_fn_t)real_dlsym_lookup(handle, symbol);
+        }
+        log_line("rdoc_autocapture_dlsym=eglCreateWindowSurface");
+        return (void *)eglCreateWindowSurface;
+    }
+    if (symbol && (strcmp(symbol, "eglCreatePlatformWindowSurface") == 0 ||
+        strcmp(symbol, "EGL_CreatePlatformWindowSurface") == 0)) {
+        if (!real_eglCreatePlatformWindowSurface) {
+            real_eglCreatePlatformWindowSurface = (egl_create_window_surface_fn_t)real_dlsym_lookup(handle, symbol);
+        }
+        log_line("rdoc_autocapture_dlsym=eglCreatePlatformWindowSurface");
+        return (void *)eglCreatePlatformWindowSurface;
+    }
     if (symbol && strcmp(symbol, "eglLockVulkanQueueANGLE") == 0) {
         if (!real_eglLockVulkanQueueANGLE) {
             real_eglLockVulkanQueueANGLE = (egl_vulkan_queue_lock_fn_t)real_dlsym_lookup(handle, symbol);

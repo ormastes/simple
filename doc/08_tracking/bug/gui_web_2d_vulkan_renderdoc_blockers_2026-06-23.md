@@ -386,6 +386,18 @@ Current 2026-06-26 browser capture findings:
   `build/renderdoc/chrome-gpu-autocapture-egl-lifecycle/html/evidence.env`,
   `build/renderdoc/electron-gpu-autocapture-egl-lifecycle/electron-html/evidence.env`,
   and `doc/09_report/renderdoc_browser_gpu_autocapture_egl_lifecycle_2026-06-29.md`.
+- 2026-06-29 GPU launcher boundary diagnostics now prove the Chrome and
+  Electron GPU child commands run with `VK_LAYER_RENDERDOC_Capture`,
+  `ENABLE_VULKAN_RENDERDOC_CAPTURE=1`, a RenderDoc capfile, and the autocapture
+  shim in `LD_PRELOAD`. In both runs the shim constructor executes
+  (`rdoc_gpu_autocapture_loaded_count=1`) and traces 220 proc-name lookups, but
+  the capture still remains `not-started` with zero wrapped Vulkan/EGL/ANGLE
+  counters and no `.rdc`. This rules out missing GPU launcher invocation,
+  missing layer env, missing capfile, missing preload, and missing shim load as
+  the current blocker. Evidence:
+  `build/renderdoc/chrome-gpu-launcher-boundary-current/html/evidence.env`,
+  `build/renderdoc/electron-gpu-launcher-boundary-current/electron-html/evidence.env`,
+  and `doc/09_report/renderdoc_browser_gpu_launcher_boundary_2026-06-29.md`.
 - The direct Chrome/Electron RenderDoc wrapper now records
   `rdoc_renderdoc_hook_children` and accepts `RDOC_RENDERDOC_HOOK_CHILDREN=0`
   to omit `--opt-hook-children`. This confirms the immediate Chrome GPU crash
