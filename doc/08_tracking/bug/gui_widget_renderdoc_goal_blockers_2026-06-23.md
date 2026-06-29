@@ -60,6 +60,12 @@ Still blocked:
   pixels, but still fails with `missing-rdc`; the Chromium GPU process exits
   `139` under RenderDoc and no `.rdc` is produced:
   `build/renderdoc/electron-display-helper/electron-html/evidence.env`.
+- 2026-06-29 gate classification now preserves the same missing `.rdc` and
+  nonblank ARGB evidence, but reports the actionable top-level reason
+  `electron-widget-renderdoc-gpu-process-crashed-under-renderdoc` and Electron
+  gate reason `chromium-gpu-process-crashed-under-renderdoc`. Evidence reports:
+  `doc/09_report/gui_widget_renderdoc_goal_status_2026-06-29.md` and
+  `doc/09_report/renderdoc_electron_html_gate_2026-06-29.md`.
 - 2026-06-26 no-child-hook RenderDoc diagnostics now record
   `rdoc_renderdoc_hook_children=0`. They avoid the direct child-hook crash path
   but still do not produce a browser GPU-process `.rdc`, so they are diagnostic
