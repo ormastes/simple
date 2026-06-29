@@ -24,6 +24,70 @@ value_for() {
     sed -n "s/^${key}=//p" "$GATE_LOG" | tail -n 1
 }
 
+resolve_local_path() {
+    ref="$1"
+    case "$ref" in
+        ""|"missing"|"pending"|*://*)
+            printf '%s\n' ""
+            ;;
+        /*)
+            printf '%s\n' "$ref"
+            ;;
+        *)
+            printf '%s\n' "$(pwd)/$ref"
+            ;;
+    esac
+}
+
+artifact_status() {
+    path="$1"
+    if [ -n "$path" ] && [ -s "$path" ]; then
+        printf '%s\n' "ready"
+    else
+        printf '%s\n' "missing"
+    fi
+}
+
+artifact_size() {
+    path="$1"
+    if [ -n "$path" ] && [ -s "$path" ]; then
+        wc -c <"$path" | tr -d ' '
+    else
+        printf '%s\n' "0"
+    fi
+}
+
+artifact_sha256() {
+    path="$1"
+    if [ -n "$path" ] && [ -s "$path" ]; then
+        if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$path" | awk '{print $1}'
+        elif command -v shasum >/dev/null 2>&1; then
+            shasum -a 256 "$path" | awk '{print $1}'
+        else
+            printf '%s\n' "unavailable"
+        fi
+    else
+        printf '%s\n' "missing"
+    fi
+}
+
+json_string_for() {
+    key="$1"
+    file="$2"
+    if [ -n "$file" ] && [ -f "$file" ]; then
+        sed -n "s/.*\"${key}\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p" "$file" | tail -n 1
+    fi
+}
+
+json_number_for() {
+    key="$1"
+    file="$2"
+    if [ -n "$file" ] && [ -f "$file" ]; then
+        sed -n "s/.*\"${key}\"[[:space:]]*:[[:space:]]*\\([0-9][0-9.]*\\).*/\\1/p" "$file" | tail -n 1
+    fi
+}
+
 gate_status="$(sed -n 's/^STATUS: //p' "$GATE_LOG" | tail -n 1)"
 result="$(value_for result)"
 acceptance_allowed="$(value_for acceptance_allowed)"
@@ -51,6 +115,52 @@ handoff_doc="$(value_for handoff_doc)"
 handoff_usage="$(value_for handoff_usage)"
 app_handoff_doc_ready="$(value_for app_handoff_doc_ready)"
 next_action="$(value_for next_action)"
+
+attempt_record_path="$(resolve_local_path "$attempt_record")"
+model_manifest_path="$(resolve_local_path "$model_manifest")"
+eval_result_path="$(resolve_local_path "$eval_result")"
+handoff_doc_path="$(resolve_local_path "$handoff_doc")"
+attempt_record_artifact_status="$(artifact_status "$attempt_record_path")"
+model_manifest_artifact_status="$(artifact_status "$model_manifest_path")"
+eval_result_artifact_status="$(artifact_status "$eval_result_path")"
+handoff_doc_artifact_status="$(artifact_status "$handoff_doc_path")"
+attempt_record_sha256="$(artifact_sha256 "$attempt_record_path")"
+model_manifest_sha256="$(artifact_sha256 "$model_manifest_path")"
+eval_result_sha256="$(artifact_sha256 "$eval_result_path")"
+handoff_doc_sha256="$(artifact_sha256 "$handoff_doc_path")"
+attempt_record_size="$(artifact_size "$attempt_record_path")"
+model_manifest_size="$(artifact_size "$model_manifest_path")"
+eval_result_size="$(artifact_size "$eval_result_path")"
+handoff_doc_size="$(artifact_size "$handoff_doc_path")"
+model_manifest_schema_version="$(json_string_for schema_version "$model_manifest_path")"
+model_manifest_schema_version="${model_manifest_schema_version:-$(json_number_for schema_version "$model_manifest_path")}"
+model_manifest_attempt_id="$(json_string_for attempt_id "$model_manifest_path")"
+model_manifest_base_model="$(json_string_for base_model "$model_manifest_path")"
+model_manifest_base_model_revision="$(json_string_for base_model_revision "$model_manifest_path")"
+model_artifact_path="$(json_string_for model_artifact_path "$model_manifest_path")"
+model_artifact_local_path="$(resolve_local_path "$model_artifact_path")"
+model_artifact_status="$(artifact_status "$model_artifact_local_path")"
+model_artifact_sha256="$(artifact_sha256 "$model_artifact_local_path")"
+model_artifact_size="$(artifact_size "$model_artifact_local_path")"
+eval_result_schema_version="$(json_string_for schema_version "$eval_result_path")"
+eval_result_schema_version="${eval_result_schema_version:-$(json_number_for schema_version "$eval_result_path")}"
+eval_result_status="$(json_string_for status "$eval_result_path")"
+eval_metric_name="$(json_string_for metric_name "$eval_result_path")"
+eval_metric_value="$(json_number_for target_accuracy "$eval_result_path")"
+if [ -z "$eval_metric_value" ]; then
+    eval_metric_value="$(json_number_for final_accuracy "$eval_result_path")"
+fi
+eval_metric_target="$(json_number_for required_accuracy "$eval_result_path")"
+eval_dataset_id="$(json_string_for dataset_id "$eval_result_path")"
+eval_dataset_split="$(json_string_for dataset_split "$eval_result_path")"
+eval_dataset_checksum="$(json_string_for dataset_checksum "$eval_result_path")"
+eval_samples="$(json_number_for samples "$eval_result_path")"
+license_constraints_status="$license_constraints"
+safety_eval_status="$safety_eval"
+deployment_evidence_status="$deployment_evidence"
+handoff_status="$app_handoff_doc_ready"
+pass_integrity_status="not_applicable"
+pass_integrity_reason="not_applicable"
 
 required_gates="retry6_training_eval,training_allowed,model_manifest,eval_result,target_eval,decision,license,safety,deployment,app_handoff"
 blocked_gates=""
@@ -145,8 +255,38 @@ if [ "$gate_exit" -eq 0 ] &&
    printf '%s\n' "$gate_status" | grep -F "PASS retry7-acceptance-gate" >/dev/null 2>&1 &&
    [ "$acceptance_allowed" = "true" ] &&
    [ "$blocked_gates" = "none" ]; then
-    status="pass"
-    reason="retry7_acceptance_passed"
+    pass_integrity_status="pass"
+    pass_integrity_reason="all_required_artifacts_present"
+    for pair in \
+        "attempt_record:$attempt_record_artifact_status" \
+        "model_manifest:$model_manifest_artifact_status" \
+        "eval_result:$eval_result_artifact_status" \
+        "handoff_doc:$handoff_doc_artifact_status" \
+        "model_manifest_schema:${model_manifest_schema_version:-missing}" \
+        "model_manifest_attempt_id:${model_manifest_attempt_id:-missing}" \
+        "model_manifest_base_model:${model_manifest_base_model:-missing}" \
+        "eval_result_schema:${eval_result_schema_version:-missing}" \
+        "eval_metric_value:${eval_metric_value:-missing}" \
+        "eval_dataset_id:${eval_dataset_id:-missing}"; do
+        artifact_name="${pair%%:*}"
+        artifact_state="${pair#*:}"
+        if [ "$artifact_state" != "ready" ] &&
+           [ "$artifact_state" = "missing" -o "$artifact_state" = "" ]; then
+            pass_integrity_status="fail"
+            pass_integrity_reason="${artifact_name}_artifact_missing"
+            break
+        fi
+    done
+    if [ "$pass_integrity_status" = "pass" ]; then
+        status="pass"
+        reason="retry7_acceptance_passed"
+    else
+        status="fail"
+        reason="retry7_acceptance_pass_integrity_failed:${pass_integrity_reason}"
+        blocked_gates="pass_integrity"
+        primary_blocked_gate="pass_integrity"
+        next_action="provide local non-empty attempt, model manifest, eval result, and handoff artifacts before retry7 acceptance can pass"
+    fi
 fi
 
 {
@@ -165,11 +305,37 @@ fi
     printf '%s\n' "llm_finetune_acceptance_upstream_attempt_record=$upstream_attempt_record"
     printf '%s\n' "llm_finetune_acceptance_upstream_cache_manifest=$upstream_cache_manifest"
     printf '%s\n' "llm_finetune_acceptance_attempt_record=$attempt_record"
+    printf '%s\n' "llm_finetune_acceptance_attempt_record_artifact_status=$attempt_record_artifact_status"
+    printf '%s\n' "llm_finetune_acceptance_attempt_record_sha256=$attempt_record_sha256"
+    printf '%s\n' "llm_finetune_acceptance_attempt_record_size=$attempt_record_size"
     printf '%s\n' "llm_finetune_acceptance_model_manifest=$model_manifest"
     printf '%s\n' "llm_finetune_acceptance_model_manifest_exists=${model_manifest_exists:-false}"
+    printf '%s\n' "llm_finetune_acceptance_model_manifest_artifact_status=$model_manifest_artifact_status"
+    printf '%s\n' "llm_finetune_acceptance_model_manifest_sha256=$model_manifest_sha256"
+    printf '%s\n' "llm_finetune_acceptance_model_manifest_size=$model_manifest_size"
+    printf '%s\n' "llm_finetune_acceptance_model_manifest_schema_version=${model_manifest_schema_version:-missing}"
+    printf '%s\n' "llm_finetune_acceptance_model_manifest_attempt_id=${model_manifest_attempt_id:-missing}"
+    printf '%s\n' "llm_finetune_acceptance_base_model=${model_manifest_base_model:-missing}"
+    printf '%s\n' "llm_finetune_acceptance_base_model_revision=${model_manifest_base_model_revision:-missing}"
+    printf '%s\n' "llm_finetune_acceptance_model_artifact_path=${model_artifact_path:-missing}"
+    printf '%s\n' "llm_finetune_acceptance_model_artifact_status=$model_artifact_status"
+    printf '%s\n' "llm_finetune_acceptance_model_artifact_sha256=$model_artifact_sha256"
+    printf '%s\n' "llm_finetune_acceptance_model_artifact_size=$model_artifact_size"
     printf '%s\n' "llm_finetune_acceptance_model_manifest_deployable=$model_manifest_deployable"
     printf '%s\n' "llm_finetune_acceptance_eval_result=$eval_result"
     printf '%s\n' "llm_finetune_acceptance_eval_result_exists=${eval_result_exists:-false}"
+    printf '%s\n' "llm_finetune_acceptance_eval_result_artifact_status=$eval_result_artifact_status"
+    printf '%s\n' "llm_finetune_acceptance_eval_result_sha256=$eval_result_sha256"
+    printf '%s\n' "llm_finetune_acceptance_eval_result_size=$eval_result_size"
+    printf '%s\n' "llm_finetune_acceptance_eval_result_schema_version=${eval_result_schema_version:-missing}"
+    printf '%s\n' "llm_finetune_acceptance_eval_result_status=${eval_result_status:-missing}"
+    printf '%s\n' "llm_finetune_acceptance_eval_metric_name=${eval_metric_name:-missing}"
+    printf '%s\n' "llm_finetune_acceptance_eval_metric_value=${eval_metric_value:-missing}"
+    printf '%s\n' "llm_finetune_acceptance_eval_metric_target=${eval_metric_target:-$required_accuracy}"
+    printf '%s\n' "llm_finetune_acceptance_eval_dataset_id=${eval_dataset_id:-missing}"
+    printf '%s\n' "llm_finetune_acceptance_eval_dataset_split=${eval_dataset_split:-missing}"
+    printf '%s\n' "llm_finetune_acceptance_eval_dataset_checksum=${eval_dataset_checksum:-missing}"
+    printf '%s\n' "llm_finetune_acceptance_eval_samples=${eval_samples:-missing}"
     printf '%s\n' "llm_finetune_acceptance_target_eval_reached=$target_eval_reached"
     printf '%s\n' "llm_finetune_acceptance_target_accuracy=$target_accuracy"
     printf '%s\n' "llm_finetune_acceptance_required_accuracy=$required_accuracy"
@@ -177,11 +343,20 @@ fi
     printf '%s\n' "llm_finetune_acceptance_attempt_record_status=$attempt_record_status"
     printf '%s\n' "llm_finetune_acceptance_decision_status=$decision_status"
     printf '%s\n' "llm_finetune_acceptance_license_constraints=$license_constraints"
+    printf '%s\n' "llm_finetune_acceptance_license_constraints_status=$license_constraints_status"
     printf '%s\n' "llm_finetune_acceptance_safety_eval=$safety_eval"
+    printf '%s\n' "llm_finetune_acceptance_safety_eval_status=$safety_eval_status"
     printf '%s\n' "llm_finetune_acceptance_deployment_evidence=$deployment_evidence"
+    printf '%s\n' "llm_finetune_acceptance_deployment_evidence_status=$deployment_evidence_status"
     printf '%s\n' "llm_finetune_acceptance_handoff_doc=$handoff_doc"
+    printf '%s\n' "llm_finetune_acceptance_handoff_doc_artifact_status=$handoff_doc_artifact_status"
+    printf '%s\n' "llm_finetune_acceptance_handoff_doc_sha256=$handoff_doc_sha256"
+    printf '%s\n' "llm_finetune_acceptance_handoff_doc_size=$handoff_doc_size"
     printf '%s\n' "llm_finetune_acceptance_handoff_usage=$handoff_usage"
+    printf '%s\n' "llm_finetune_acceptance_handoff_status=$handoff_status"
     printf '%s\n' "llm_finetune_acceptance_app_handoff_doc_ready=$app_handoff_doc_ready"
+    printf '%s\n' "llm_finetune_acceptance_pass_integrity_status=$pass_integrity_status"
+    printf '%s\n' "llm_finetune_acceptance_pass_integrity_reason=$pass_integrity_reason"
     printf '%s\n' "llm_finetune_acceptance_next_action=$next_action"
     printf '%s\n' "llm_finetune_acceptance_gate_log=$GATE_LOG"
 } >"$OUT_ENV"
@@ -201,11 +376,33 @@ fi
     printf '%s\n' "- upstream_attempt_record: \`$upstream_attempt_record\`"
     printf '%s\n' "- upstream_cache_manifest: \`$upstream_cache_manifest\`"
     printf '%s\n' "- attempt_record: \`$attempt_record\`"
+    printf '%s\n' "- attempt_record_artifact_status: \`$attempt_record_artifact_status\`"
+    printf '%s\n' "- attempt_record_sha256: \`$attempt_record_sha256\`"
     printf '%s\n' "- model_manifest: \`$model_manifest\`"
     printf '%s\n' "- model_manifest_exists: \`${model_manifest_exists:-false}\`"
+    printf '%s\n' "- model_manifest_artifact_status: \`$model_manifest_artifact_status\`"
+    printf '%s\n' "- model_manifest_sha256: \`$model_manifest_sha256\`"
+    printf '%s\n' "- model_manifest_schema_version: \`${model_manifest_schema_version:-missing}\`"
+    printf '%s\n' "- model_manifest_attempt_id: \`${model_manifest_attempt_id:-missing}\`"
+    printf '%s\n' "- base_model: \`${model_manifest_base_model:-missing}\`"
+    printf '%s\n' "- base_model_revision: \`${model_manifest_base_model_revision:-missing}\`"
+    printf '%s\n' "- model_artifact_path: \`${model_artifact_path:-missing}\`"
+    printf '%s\n' "- model_artifact_status: \`$model_artifact_status\`"
+    printf '%s\n' "- model_artifact_sha256: \`$model_artifact_sha256\`"
     printf '%s\n' "- model_manifest_deployable: \`$model_manifest_deployable\`"
     printf '%s\n' "- eval_result: \`$eval_result\`"
     printf '%s\n' "- eval_result_exists: \`${eval_result_exists:-false}\`"
+    printf '%s\n' "- eval_result_artifact_status: \`$eval_result_artifact_status\`"
+    printf '%s\n' "- eval_result_sha256: \`$eval_result_sha256\`"
+    printf '%s\n' "- eval_result_schema_version: \`${eval_result_schema_version:-missing}\`"
+    printf '%s\n' "- eval_result_status: \`${eval_result_status:-missing}\`"
+    printf '%s\n' "- eval_metric_name: \`${eval_metric_name:-missing}\`"
+    printf '%s\n' "- eval_metric_value: \`${eval_metric_value:-missing}\`"
+    printf '%s\n' "- eval_metric_target: \`${eval_metric_target:-$required_accuracy}\`"
+    printf '%s\n' "- eval_dataset_id: \`${eval_dataset_id:-missing}\`"
+    printf '%s\n' "- eval_dataset_split: \`${eval_dataset_split:-missing}\`"
+    printf '%s\n' "- eval_dataset_checksum: \`${eval_dataset_checksum:-missing}\`"
+    printf '%s\n' "- eval_samples: \`${eval_samples:-missing}\`"
     printf '%s\n' "- target_eval_reached: \`$target_eval_reached\`"
     printf '%s\n' "- target_accuracy: \`$target_accuracy\`"
     printf '%s\n' "- required_accuracy: \`$required_accuracy\`"
@@ -216,12 +413,16 @@ fi
     printf '%s\n' "- safety_eval: \`$safety_eval\`"
     printf '%s\n' "- deployment_evidence: \`$deployment_evidence\`"
     printf '%s\n' "- handoff_doc: \`$handoff_doc\`"
+    printf '%s\n' "- handoff_doc_artifact_status: \`$handoff_doc_artifact_status\`"
+    printf '%s\n' "- handoff_doc_sha256: \`$handoff_doc_sha256\`"
     printf '%s\n' "- handoff_usage: \`$handoff_usage\`"
     printf '%s\n' "- app_handoff_doc_ready: \`$app_handoff_doc_ready\`"
+    printf '%s\n' "- pass_integrity_status: \`$pass_integrity_status\`"
+    printf '%s\n' "- pass_integrity_reason: \`$pass_integrity_reason\`"
     printf '%s\n' "- next_action: \`$next_action\`"
     printf '%s\n' "- env: \`$OUT_ENV\`"
     printf '\n'
-    printf 'This evidence consumes the retry7 normal acceptance gate. It only passes when retry7 itself passes with `acceptance_allowed=true` and every normalized required gate is unblocked. Otherwise it records the required gate list, compact blocked-gates list, model/eval/license/safety/deployment/app-handoff fields, and next action while keeping strict fine-tune readiness failed.\n'
+    printf 'This evidence consumes the retry7 normal acceptance gate. It only passes when retry7 itself passes with `acceptance_allowed=true`, every normalized required gate is unblocked, and local non-empty attempt, model manifest, eval result, and handoff artifacts can be hashed for pass integrity. Otherwise it records the required gate list, compact blocked-gates list, artifact hashes, model/eval/license/safety/deployment/app-handoff fields, and next action while keeping strict fine-tune readiness failed.\n'
 } >"$REPORT_PATH"
 
 if [ "$status" = "pass" ]; then

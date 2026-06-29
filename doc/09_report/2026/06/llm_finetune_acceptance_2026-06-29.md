@@ -13,11 +13,33 @@
 - upstream_attempt_record: `/home/ormastes/dev/pub/simple-llm-runtime-workspace-20260629/.spipe/llm-finetune-process/attempts/llm_backed_app_server_dry_run_retry5.sdn`
 - upstream_cache_manifest: `/home/ormastes/dev/pub/simple-llm-runtime-workspace-20260629/.spipe/llm-finetune-process/data/llm_backed_app_server_dry_run_retry5_cache_manifest.sdn`
 - attempt_record: `/home/ormastes/dev/pub/simple-llm-runtime-workspace-20260629/.spipe/llm-finetune-process/attempts/llm_backed_app_server_dry_run_retry7.sdn`
+- attempt_record_artifact_status: `ready`
+- attempt_record_sha256: `c3cc16e60bec5e2099b9e3a1924bcda319d7f3ee92f592a2af65298685038dee`
 - model_manifest: `/home/ormastes/dev/pub/simple-llm-runtime-workspace-20260629/.spipe/llm-finetune-process/artifacts/llm_backed_app_server_dry_run_retry6/model_manifest.json`
 - model_manifest_exists: `false`
+- model_manifest_artifact_status: `missing`
+- model_manifest_sha256: `missing`
+- model_manifest_schema_version: `missing`
+- model_manifest_attempt_id: `missing`
+- base_model: `missing`
+- base_model_revision: `missing`
+- model_artifact_path: `missing`
+- model_artifact_status: `missing`
+- model_artifact_sha256: `missing`
 - model_manifest_deployable: `missing`
 - eval_result: `/home/ormastes/dev/pub/simple-llm-runtime-workspace-20260629/.spipe/llm-finetune-process/artifacts/llm_backed_app_server_dry_run_retry6/eval_result.json`
 - eval_result_exists: `false`
+- eval_result_artifact_status: `missing`
+- eval_result_sha256: `missing`
+- eval_result_schema_version: `missing`
+- eval_result_status: `missing`
+- eval_metric_name: `missing`
+- eval_metric_value: `missing`
+- eval_metric_target: `90.0`
+- eval_dataset_id: `missing`
+- eval_dataset_split: `missing`
+- eval_dataset_checksum: `missing`
+- eval_samples: `missing`
 - target_eval_reached: `false`
 - target_accuracy: `missing`
 - required_accuracy: `90.0`
@@ -28,9 +50,13 @@
 - safety_eval: `not-run`
 - deployment_evidence: `not-deployable`
 - handoff_doc: `doc/04_architecture/app/spipe/spipe_llm_finetune_model_architecture.md`
+- handoff_doc_artifact_status: `ready`
+- handoff_doc_sha256: `baa73e9781adbd30c97de0082e7d6ca611ca11df616d89bb06c951bba739531e`
 - handoff_usage: `do not deploy; retry7 has no accepted retry6 model/eval/safety/deployment evidence`
 - app_handoff_doc_ready: `false`
+- pass_integrity_status: `not_applicable`
+- pass_integrity_reason: `not_applicable`
 - next_action: `complete retry6 training/eval gate before normal acceptance review`
 - env: `build/llm_finetune_acceptance/evidence.env`
 
-This evidence consumes the retry7 normal acceptance gate. It only passes when retry7 itself passes with `acceptance_allowed=true` and every normalized required gate is unblocked. Otherwise it records the required gate list, compact blocked-gates list, model/eval/license/safety/deployment/app-handoff fields, and next action while keeping strict fine-tune readiness failed.
+This evidence consumes the retry7 normal acceptance gate. It only passes when retry7 itself passes with `acceptance_allowed=true`, every normalized required gate is unblocked, and local non-empty attempt, model manifest, eval result, and handoff artifacts can be hashed for pass integrity. Otherwise it records the required gate list, compact blocked-gates list, artifact hashes, model/eval/license/safety/deployment/app-handoff fields, and next action while keeping strict fine-tune readiness failed.

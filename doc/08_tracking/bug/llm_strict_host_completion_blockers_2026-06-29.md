@@ -73,7 +73,10 @@ Strict-host aggregate:
   deployment, app handoff, and accepted decision are not ready
 - required evidence: `llm_finetune_acceptance_status=pass`
 - next action: complete retry5 licensed cache/checksum review, run retry6
-  training/eval to target, then record retry7 normal acceptance evidence.
+  training/eval to target, then record retry7 normal acceptance evidence with
+  `llm_finetune_acceptance_pass_integrity_status=pass` from local attempt,
+  model manifest, eval result, and handoff artifact hashing plus schema/linkage
+  extraction.
 
 ## Done Criteria
 

@@ -698,6 +698,12 @@ attempt/cache refs, model-manifest/eval-result paths and presence, deployable
 model-manifest status, target-eval status, required accuracy, decision status,
 license, safety, deployment, app-handoff doc, handoff usage, retry6 next action,
 and final next action.
+It also records local artifact integrity for the retry7 attempt record, model
+manifest, eval result, and handoff doc: artifact status, SHA-256, size,
+model-manifest schema version, manifest attempt id, base model/revision,
+model-artifact status/hash, eval schema version, eval status, metric
+name/value/target, dataset id/split/checksum, sample count, and
+`llm_finetune_acceptance_pass_integrity_status`.
 On this host the lane remains failed with `BLOCKED_RETRY6_NOT_READY` and
 blocked gates for retry6 training/eval, model/eval artifacts, target eval,
 decision, license, safety, deployment, and app handoff.
@@ -712,8 +718,13 @@ gate log.
 
 The acceptance wrapper pass condition is intentionally stricter than the retry7
 gate line alone: it requires retry7 `acceptance_allowed=true` and normalized
-`llm_finetune_acceptance_blocked_gates=none`. A future retry7 PASS cannot mask
-missing model/eval/license/safety/deployment/app-handoff evidence.
+`llm_finetune_acceptance_blocked_gates=none`, plus
+`llm_finetune_acceptance_pass_integrity_status=pass` from local artifact
+hashing and schema/linkage extraction. The strict fine-tune guard also rejects
+an acceptance env that reports `llm_finetune_acceptance_status=pass` without
+that pass-integrity field. A future retry7 PASS cannot mask missing
+model/eval/license/safety/deployment/app-handoff evidence or status-only
+artifact placeholders.
 
 ## 2026-06-29 vLLM Host Evidence Hardening
 

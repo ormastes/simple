@@ -271,20 +271,40 @@ records `llm_finetune_acceptance_required_gates`,
 `llm_finetune_acceptance_attempt_record`,
 `llm_finetune_acceptance_model_manifest`,
 `llm_finetune_acceptance_model_manifest_exists`,
+`llm_finetune_acceptance_model_manifest_artifact_status`,
+`llm_finetune_acceptance_model_manifest_sha256`,
+`llm_finetune_acceptance_model_manifest_schema_version`,
+`llm_finetune_acceptance_model_manifest_attempt_id`,
+`llm_finetune_acceptance_base_model`,
+`llm_finetune_acceptance_base_model_revision`,
+`llm_finetune_acceptance_model_artifact_status`,
 `llm_finetune_acceptance_model_manifest_deployable`,
 `llm_finetune_acceptance_eval_result`,
 `llm_finetune_acceptance_eval_result_exists`,
+`llm_finetune_acceptance_eval_result_artifact_status`,
+`llm_finetune_acceptance_eval_result_sha256`,
+`llm_finetune_acceptance_eval_result_schema_version`,
+`llm_finetune_acceptance_eval_result_status`,
+`llm_finetune_acceptance_eval_metric_name`,
+`llm_finetune_acceptance_eval_metric_value`,
+`llm_finetune_acceptance_eval_dataset_id`,
+`llm_finetune_acceptance_eval_dataset_checksum`,
 `llm_finetune_acceptance_required_accuracy`,
 `llm_finetune_acceptance_retry6_next_action`,
 `llm_finetune_acceptance_decision_status`,
-`llm_finetune_acceptance_handoff_doc`, and
+`llm_finetune_acceptance_handoff_doc`,
+`llm_finetune_acceptance_handoff_doc_artifact_status`,
+`llm_finetune_acceptance_handoff_doc_sha256`,
+`llm_finetune_acceptance_pass_integrity_status`, and
 `llm_finetune_acceptance_next_action` so strict aggregate runs can report the
 first concrete blocker, the exact upstream artifact refs to fill, and the
 model/eval/license/safety/deployment/app-handoff blocker list.
 The wrapper passes only when retry7 reports `acceptance_allowed=true` and the
-normalized `llm_finetune_acceptance_blocked_gates` value is `none`; a retry7
-PASS line cannot override missing model, eval, license, safety, deployment, or
-handoff evidence.
+normalized `llm_finetune_acceptance_blocked_gates` value is `none`, and
+`llm_finetune_acceptance_pass_integrity_status=pass` after hashing local
+attempt, model manifest, eval result, and handoff artifacts and extracting
+schema/linkage fields. A retry7 PASS line cannot override missing model, eval,
+license, safety, deployment, handoff, or artifact-integrity evidence.
 
 The local fine-tune guard evidence writes its own current blocker contract to
 `build/llm_finetune_guard_evidence/evidence.env`. Default aggregate mode uses
