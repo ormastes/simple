@@ -1,14 +1,18 @@
 # Chrome X11 RenderDoc Layer Hotkey Probe
 
 - status: fail
-- reason: renderdoc-gpu-launcher-capfile-not-visible-in-gpu-proc-env
+- reason: renderdoc-capfile-exported-before-exec-but-cleared-in-gpu-process
 - capture: 
 - magic: 
 - window: 10485764
-- gpu pid: 1893576
+- gpu pid: 1895401
 - gpu launcher invoked: 1
+- gpu launcher pid: 1895401
+- gpu launcher exec pid: 1895401
+- gpu launcher pid matches gpu pid: 1
 - gpu launcher layer only: 1
 - gpu launcher capfile: /home/yoon/simple/build/renderdoc/chrome-x11-layer-hotkey-gpu-launcher-current/chrome_x11_hotkey_gpu
+- gpu launcher exported capfile: /home/yoon/simple/build/renderdoc/chrome-x11-layer-hotkey-gpu-launcher-current/chrome_x11_hotkey_gpu
 - gpu env capfile: 0
 - gpu maps renderdoc: 1
 - gpu maps vulkan: 1
@@ -16,7 +20,7 @@
 
 ## Raw Evidence
 - rdoc_chrome_x11_hotkey_status=fail
-- rdoc_chrome_x11_hotkey_reason=renderdoc-gpu-launcher-capfile-not-visible-in-gpu-proc-env
+- rdoc_chrome_x11_hotkey_reason=renderdoc-capfile-exported-before-exec-but-cleared-in-gpu-process
 - rdoc_chrome_x11_hotkey_html_path=/home/yoon/simple/test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html
 - rdoc_chrome_x11_hotkey_chrome=/usr/bin/google-chrome
 - rdoc_chrome_x11_hotkey_renderdoc_home=/opt/renderdoc
@@ -26,12 +30,17 @@
 - rdoc_chrome_x11_hotkey_gpu_launcher=/home/yoon/simple/scripts/tool/renderdoc-gpu-launcher.shs
 - rdoc_chrome_x11_hotkey_gpu_launcher_log=build/renderdoc/chrome-x11-layer-hotkey-gpu-launcher-current/gpu-launcher.log
 - rdoc_chrome_x11_hotkey_gpu_launcher_invoked=1
+- rdoc_chrome_x11_hotkey_gpu_launcher_pid=1895401
+- rdoc_chrome_x11_hotkey_gpu_launcher_exec_pid=1895401
+- rdoc_chrome_x11_hotkey_gpu_launcher_pid_matches_gpu_pid=1
 - rdoc_chrome_x11_hotkey_gpu_launcher_layer_only=1
 - rdoc_chrome_x11_hotkey_gpu_launcher_capfile=/home/yoon/simple/build/renderdoc/chrome-x11-layer-hotkey-gpu-launcher-current/chrome_x11_hotkey_gpu
+- rdoc_chrome_x11_hotkey_gpu_launcher_exported_capfile=/home/yoon/simple/build/renderdoc/chrome-x11-layer-hotkey-gpu-launcher-current/chrome_x11_hotkey_gpu
+- rdoc_chrome_x11_hotkey_gpu_launcher_exported_capopts=
 - rdoc_chrome_x11_hotkey_capture_file=
 - rdoc_chrome_x11_hotkey_capture_magic=
 - rdoc_chrome_x11_hotkey_chosen_window=10485764
-- rdoc_chrome_x11_hotkey_gpu_pid=1893576
+- rdoc_chrome_x11_hotkey_gpu_pid=1895401
 - rdoc_chrome_x11_hotkey_gpu_env_has_layer=0
 - rdoc_chrome_x11_hotkey_gpu_env_has_capfile=0
 - rdoc_chrome_x11_hotkey_gpu_env_has_capopts=0

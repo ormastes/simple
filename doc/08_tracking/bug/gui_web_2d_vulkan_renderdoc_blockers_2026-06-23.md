@@ -183,8 +183,11 @@ Current 2026-06-26 browser capture findings:
   through `scripts/tool/renderdoc-gpu-launcher.shs` without wrapping it in
   `renderdoccmd capture`. Current evidence shows the launcher is invoked with
   `renderdoc_gpu_launcher_layer_only=1`, and the GPU process maps both
-  `librenderdoc` and `libvulkan` without crashing, but `RENDERDOC_CAPFILE` is
-  not visible in the GPU process env and no `.rdc` is produced. Evidence:
+  `librenderdoc` and `libvulkan` without crashing. A follow-up provenance run
+  proves the launcher exec PID and inspected GPU PID are the same process, and
+  the launcher exports `RENDERDOC_CAPFILE` before `exec`, but the live Chromium
+  GPU process clears that env key before `/proc/<pid>/environ` inspection; no
+  `.rdc` is produced. Evidence:
   `doc/09_report/renderdoc_chrome_x11_layer_hotkey_gpu_launcher_2026-06-29.md`.
 
 2026-06-26 follow-up diagnostics:

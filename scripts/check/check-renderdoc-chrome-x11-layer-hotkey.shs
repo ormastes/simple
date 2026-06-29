@@ -39,8 +39,13 @@ gpu_process_exit_reason=""
 chrome_launch_flags="$(rdoc_chrome_vulkan_flags)"
 gpu_launcher_log="$BUILD_DIR/gpu-launcher.log"
 gpu_launcher_invoked=""
+gpu_launcher_pid=""
+gpu_launcher_exec_pid=""
+gpu_launcher_pid_matches_gpu_pid=""
 gpu_launcher_layer_only=""
 gpu_launcher_capfile=""
+gpu_launcher_exported_capfile=""
+gpu_launcher_exported_capopts=""
 gpu_launcher_flag=""
 if [ "$USE_GPU_LAUNCHER" = "1" ]; then
     gpu_launcher_flag="--gpu-launcher=$ROOT_DIR/scripts/tool/renderdoc-gpu-launcher.shs"
@@ -59,8 +64,13 @@ write_env() {
         echo "rdoc_chrome_x11_hotkey_gpu_launcher=$ROOT_DIR/scripts/tool/renderdoc-gpu-launcher.shs"
         echo "rdoc_chrome_x11_hotkey_gpu_launcher_log=$gpu_launcher_log"
         echo "rdoc_chrome_x11_hotkey_gpu_launcher_invoked=$gpu_launcher_invoked"
+        echo "rdoc_chrome_x11_hotkey_gpu_launcher_pid=$gpu_launcher_pid"
+        echo "rdoc_chrome_x11_hotkey_gpu_launcher_exec_pid=$gpu_launcher_exec_pid"
+        echo "rdoc_chrome_x11_hotkey_gpu_launcher_pid_matches_gpu_pid=$gpu_launcher_pid_matches_gpu_pid"
         echo "rdoc_chrome_x11_hotkey_gpu_launcher_layer_only=$gpu_launcher_layer_only"
         echo "rdoc_chrome_x11_hotkey_gpu_launcher_capfile=$gpu_launcher_capfile"
+        echo "rdoc_chrome_x11_hotkey_gpu_launcher_exported_capfile=$gpu_launcher_exported_capfile"
+        echo "rdoc_chrome_x11_hotkey_gpu_launcher_exported_capopts=$gpu_launcher_exported_capopts"
         echo "rdoc_chrome_x11_hotkey_capture_file=$capture_file"
         echo "rdoc_chrome_x11_hotkey_capture_magic=$capture_magic"
         echo "rdoc_chrome_x11_hotkey_chosen_window=$chosen_window"
@@ -91,8 +101,12 @@ write_env() {
         echo "- window: $chosen_window"
         echo "- gpu pid: $gpu_pid"
         echo "- gpu launcher invoked: $gpu_launcher_invoked"
+        echo "- gpu launcher pid: $gpu_launcher_pid"
+        echo "- gpu launcher exec pid: $gpu_launcher_exec_pid"
+        echo "- gpu launcher pid matches gpu pid: $gpu_launcher_pid_matches_gpu_pid"
         echo "- gpu launcher layer only: $gpu_launcher_layer_only"
         echo "- gpu launcher capfile: $gpu_launcher_capfile"
+        echo "- gpu launcher exported capfile: $gpu_launcher_exported_capfile"
         echo "- gpu env capfile: $gpu_env_has_capfile"
         echo "- gpu maps renderdoc: $gpu_maps_has_renderdoc"
         echo "- gpu maps vulkan: $gpu_maps_has_vulkan"
@@ -217,10 +231,21 @@ fi
 sleep 5
 if [ -s "$gpu_launcher_log" ]; then
     gpu_launcher_invoked="1"
+    gpu_launcher_pid="$(sed -n 's/^renderdoc_gpu_launcher_pid=//p' "$gpu_launcher_log" | tail -n 1)"
+    gpu_launcher_exec_pid="$(sed -n 's/^renderdoc_gpu_launcher_layer_only_exec_pid=//p' "$gpu_launcher_log" | tail -n 1)"
     gpu_launcher_layer_only="$(sed -n 's/^renderdoc_gpu_launcher_layer_only=//p' "$gpu_launcher_log" | tail -n 1)"
     gpu_launcher_capfile="$(sed -n 's/^renderdoc_gpu_launcher_capfile=//p' "$gpu_launcher_log" | tail -n 1)"
+    gpu_launcher_exported_capfile="$(sed -n 's/^renderdoc_gpu_launcher_layer_only_exported_capfile=//p' "$gpu_launcher_log" | tail -n 1)"
+    gpu_launcher_exported_capopts="$(sed -n 's/^renderdoc_gpu_launcher_layer_only_exported_capopts=//p' "$gpu_launcher_log" | tail -n 1)"
 else
     gpu_launcher_invoked="0"
+fi
+if [ "$gpu_launcher_exec_pid" != "" ] && [ "$gpu_pid" != "" ]; then
+    if [ "$gpu_launcher_exec_pid" = "$gpu_pid" ]; then
+        gpu_launcher_pid_matches_gpu_pid="1"
+    else
+        gpu_launcher_pid_matches_gpu_pid="0"
+    fi
 fi
 gpu_exit_env="$BUILD_DIR/gpu-process-exit.env"
 rdoc_emit_chromium_gpu_process_exit_metadata "$BUILD_DIR/chrome.log" >"$gpu_exit_env"
@@ -257,7 +282,9 @@ elif [ "$gpu_maps_has_vulkan" != "1" ]; then
     reason="vulkan-not-mapped-in-gpu-process"
 elif [ "$gpu_env_has_capfile" != "1" ]; then
     status="fail"
-    if [ "$USE_GPU_LAUNCHER" = "1" ] && [ "$gpu_launcher_invoked" = "1" ]; then
+    if [ "$USE_GPU_LAUNCHER" = "1" ] && [ "$gpu_launcher_pid_matches_gpu_pid" = "1" ] && [ "$gpu_launcher_exported_capfile" != "" ]; then
+        reason="renderdoc-capfile-exported-before-exec-but-cleared-in-gpu-process"
+    elif [ "$USE_GPU_LAUNCHER" = "1" ] && [ "$gpu_launcher_invoked" = "1" ]; then
         reason="renderdoc-gpu-launcher-capfile-not-visible-in-gpu-proc-env"
     else
         reason="renderdoc-capfile-env-not-propagated-to-gpu-process"
