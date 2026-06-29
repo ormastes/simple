@@ -36,17 +36,17 @@ but local proof is no longer status-only for the completed repo-local lanes:
   nested dashboard evidence env/log hashes; live HTTP proof is still required.
 - vLLM host evidence records a checked runtime control/readiness source/spec
   manifest (`surface_manifest_count=13`,
-  `surface_manifest_sha256=cd140b6bf7432c350e7861023083314d1ab48086aee98835d1a6e15cded2032e`)
+  `surface_manifest_sha256=0ed111f1843094893e2dfc6469ed452ec26de9583b7ed6f7140573b2b6e671b0`)
   plus local `vllm`, Python module, GPU, and readiness-log hashes; a local
   `vllm` executable, importable Python `vllm` module, and live endpoint proof
   are still required.
 - svLLM local readiness records a checked local-readiness spec/log manifest and
   per-log hashes; native `read_range`, pinned-buffer, and device-staging proof
   is still required.
-- Torch optimizer evidence records a checked live probe/source/spec manifest
-  (`surface_manifest_count=14`,
-  `surface_manifest_sha256=852a1c814199286c0cf686f2bc68ffc8fb946a85691426a4c7440cf69aa7165c`)
-  plus Python Torch/CUDA visibility and probe-log hashes; Simple-visible
+- Torch optimizer evidence records a checked live probe/source/spec/doc manifest
+  (`surface_manifest_count=18`,
+  `surface_manifest_sha256=475c7f98feafb8a46108b8a37b8c97c5d31e5e55f1b0b5cac2b1ead4bfb793be`)
+  plus hashed Python Torch/CUDA visibility and system libtorch probe logs; Simple-visible
   libtorch and live CUDA optimizer execution proof are still required.
 - fine-tune guard evidence records a checked process/input/log manifest and
   per-log hashes; retry7 acceptance evidence also records a checked acceptance
@@ -56,7 +56,7 @@ but local proof is no longer status-only for the completed repo-local lanes:
   required.
 - public absence rendering records a checked public wording manifest
   (`public_absence_surface_manifest_count=93`,
-  `public_absence_surface_manifest_sha256=d941dd61691769e726a367f199c135c50edd5271ad385ec7ce30bd394cf4454a`)
+  `public_absence_surface_manifest_sha256=b516f5a4b33121fa3d630378a2ead8420d9b4fdbb7f8cc0c8535419509aa3b44`)
   with `failure_count=0`, proving operator-facing manuals and generated
   evidence do not expose internal absence markers.
 

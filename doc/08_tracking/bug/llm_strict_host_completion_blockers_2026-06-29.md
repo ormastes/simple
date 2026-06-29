@@ -20,7 +20,7 @@ Default aggregate:
   evidence now include checked surface/input manifests with size/SHA-256
   metadata and focused log hashes. Public absence rendering also records
   `public_absence_surface_manifest_count=93` and
-  `public_absence_surface_manifest_sha256=d941dd61691769e726a367f199c135c50edd5271ad385ec7ce30bd394cf4454a`
+  `public_absence_surface_manifest_sha256=b516f5a4b33121fa3d630378a2ead8420d9b4fdbb7f8cc0c8535419509aa3b44`
   with `failure_count=0`, so public manuals and generated evidence continue to
   hide internal absence markers from operator-facing text.
 
@@ -52,7 +52,7 @@ Strict-host aggregate:
 - local proof already hardened: vLLM host evidence has a checked runtime
   control/readiness source/spec plus operator-guide manifest with
   `surface_manifest_count=13` and
-  `surface_manifest_sha256=cd140b6bf7432c350e7861023083314d1ab48086aee98835d1a6e15cded2032e`
+  `surface_manifest_sha256=0ed111f1843094893e2dfc6469ed452ec26de9583b7ed6f7140573b2b6e671b0`
 - required evidence: local `vllm` executable, importable Python `vllm` module
   with non-missing origin, serve preflight, reachable endpoint, and `/v1/models`
   listing the selected base model
@@ -83,9 +83,9 @@ Strict-host aggregate:
 - current evidence: Python Torch `2.9.1+cu130` has CUDA available with 2
   devices; system/Simple-visible libtorch is missing
 - local proof already hardened: Torch optimizer evidence has a checked live
-  probe/source/spec manifest with `surface_manifest_count=14` and
-  `surface_manifest_sha256=852a1c814199286c0cf686f2bc68ffc8fb946a85691426a4c7440cf69aa7165c`,
-  plus a hashed system libtorch probe log
+  probe/source/spec/doc manifest with `surface_manifest_count=18` and
+  `surface_manifest_sha256=475c7f98feafb8a46108b8a37b8c97c5d31e5e55f1b0b5cac2b1ead4bfb793be`,
+  plus hashed Python Torch discovery and system libtorch probe logs
 - required evidence: Simple/libtorch CUDA optimizer probe with parameter on
   CUDA, gradient handle, optimizer step attempted, and parameter sum decrease
 - next action: build or install Simple-visible libtorch and rerun

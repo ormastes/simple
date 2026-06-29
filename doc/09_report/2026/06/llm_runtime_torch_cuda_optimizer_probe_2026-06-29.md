@@ -8,7 +8,7 @@
 - blocked_gates: `libtorch`
 - primary_blocked_gate: `libtorch`
 - log_size: `29962`
-- log_sha256: `65c41e740187279668c442de6eec202cc3739a7bb8d26abfd62ccc5418a067ad`
+- log_sha256: `490ecedb545e894d09b935f52e8ba8e6d8bfff66f876d0b9354e12bf907f5952`
 - status_line_count: `2`
 - required_gates_line_count: `1`
 - torch_available_line_count: `1`
@@ -22,14 +22,17 @@
 - python_torch_version: `2.9.1+cu130`
 - python_torch_cuda_available: `true`
 - python_torch_cuda_device_count: `2`
+- python_torch_env: `build/llm_runtime_torch_cuda_optimizer_probe/python_torch.env`
+- python_torch_env_size: `160`
+- python_torch_env_sha256: `d7fb05968f8e3a25463b97962b44086c28bb170b2b04e056225a7a8d5856a1e9`
 - system_libtorch_status: `missing`
 - system_libtorch_probe_log: `build/llm_runtime_torch_cuda_optimizer_probe/system_libtorch_probe.log`
 - system_libtorch_probe_log_size: `37`
 - system_libtorch_probe_log_sha256: `ac12d9869521cf8cfba92166a3cae26886942911aea5ff546e369e66faf28e29`
 - surface_manifest: `build/llm_runtime_torch_cuda_optimizer_probe/torch_cuda_optimizer_surface_manifest.tsv`
-- surface_manifest_count: `14`
-- surface_manifest_size: `1666`
-- surface_manifest_sha256: `852a1c814199286c0cf686f2bc68ffc8fb946a85691426a4c7440cf69aa7165c`
+- surface_manifest_count: `18`
+- surface_manifest_size: `2192`
+- surface_manifest_sha256: `662c528b701c6a98bcd5e95840786d01b98309e2b84981dac26ebc6ad630f54b`
 - torch_available: `false`
 - cuda_available: `false`
 - parameter_is_cuda: `missing`
@@ -45,4 +48,4 @@
 - env: `build/llm_runtime_torch_cuda_optimizer_probe/evidence.env`
 - log: `build/llm_runtime_torch_cuda_optimizer_probe/probe.log`
 
-This wrapper proves the Simple/libtorch CUDA optimizer lane only when all required gates pass. A `status=pass` probe log must be non-empty, hashed, exit with code 0, and include exactly one complete proof record for status, required gates, libtorch/CUDA availability, CUDA parameter placement, gradient handle, optimizer step, and before/after sums. The normalized fields must show libtorch and CUDA availability, CUDA parameter placement, a nonzero gradient handle, an attempted optimizer step, and numeric `after_sum < before_sum`. `unavailable` records the exact missing host/runtime gate, plus a hashed system libtorch probe log, and remains a strict-host failure.
+This wrapper proves the Simple/libtorch CUDA optimizer lane only when all required gates pass. A `status=pass` probe log must be non-empty, hashed, exit with code 0, and include exactly one complete proof record for status, required gates, libtorch/CUDA availability, CUDA parameter placement, gradient handle, optimizer step, and before/after sums. The normalized fields must show libtorch and CUDA availability, CUDA parameter placement, a nonzero gradient handle, an attempted optimizer step, and numeric `after_sum < before_sum`. `unavailable` records the exact missing host/runtime gate, plus hashed Python Torch discovery, system libtorch probe, and wrapper/source/spec/doc surface logs, and remains a strict-host failure.
