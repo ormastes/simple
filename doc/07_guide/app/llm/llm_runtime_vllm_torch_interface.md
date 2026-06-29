@@ -583,6 +583,9 @@ producer also emits non-secret setup diagnostics before network calls:
 `llm_dashboard_live_http_timeout_seconds`. These fields distinguish missing
 dashboard URL, malformed URL, and missing auth configuration without printing
 secrets or treating route-contract evidence as live HTTP proof.
+Use `scripts/check/check-llm-dashboard-live-http-setup-contract.shs` after
+editing the live HTTP wrapper to verify the no-URL/no-auth path keeps the
+combined `base_url|auth_configured` blocker and report `next_action`.
 The aggregate expects all completion lanes to pass, fails for any WARN
 or missing strict evidence result, and writes `llm_goal_evidence_failed_gates`,
 `llm_goal_evidence_failed_gate_hints`, `llm_goal_evidence_warn_gates`, and
