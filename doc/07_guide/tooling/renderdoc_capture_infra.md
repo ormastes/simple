@@ -356,6 +356,21 @@ Vulkan acceptance, Chrome RenderDoc gate status, and pairwise pixel comparison.
 A blocker status of `blocked` means the GUI/web/2D comparison can still be
 useful, but at least one required Vulkan-backed `.rdc` proof or pixel-diff lane
 remains a completion blocker.
+For Linux browser RenderDoc diagnostics, the Chromium GPU launcher writes child
+stdout/stderr and shim telemetry to `gpu-launcher.log`. Evidence envs from
+`capture-html` and `capture-electron-html` expose
+`rdoc_chromium_gpu_launcher_angle_status`,
+`rdoc_chromium_gpu_launcher_angle_error_count`,
+`rdoc_gpu_launcher_clear_renderdoc_layer`,
+`rdoc_gpu_launcher_vk_instance_layers`,
+`rdoc_gpu_autocapture_status`,
+`rdoc_gpu_autocapture_vk_enum_instance_layer_count`,
+`rdoc_gpu_autocapture_vk_enum_instance_extension_count`,
+`rdoc_gpu_autocapture_vk_create_instance_count`, and
+`rdoc_gpu_autocapture_vk_create_device_count`. The diagnostic
+`RDOC_GPU_LAUNCHER_CLEAR_RENDERDOC_LAYER=1` deliberately clears the RenderDoc
+Vulkan layer before GPU-child exec; use it only to isolate layer interaction,
+never as browser `.rdc` completion evidence.
 
 As of 2026-06-25 on Linux x86_64, the prepared host state is:
 Chrome `139.0.7258.138`, repo-local Electron `30.5.1`, RenderDoc
@@ -446,6 +461,20 @@ absent, the aggregate reports each Simple/Chrome/Electron RenderDoc source as
 `LINUX_VULKAN_RENDER_LOG_REQUIRE_RDOC=0` only for diagnostic
 partial-log inspection, and never use that mode to claim Linux platform-matrix
 completion.
+For browser RenderDoc blockers, the Linux compare env forwards the GPU-child
+diagnostics from the Chrome and Electron evidence envs:
+`linux_vulkan_render_log_compare_renderdoc_chrome_gpu_launcher_angle_status`,
+`linux_vulkan_render_log_compare_renderdoc_chrome_gpu_launcher_angle_error_count`,
+`linux_vulkan_render_log_compare_renderdoc_chrome_gpu_launcher_clear_renderdoc_layer`,
+`linux_vulkan_render_log_compare_renderdoc_chrome_gpu_launcher_vk_instance_layers`,
+`linux_vulkan_render_log_compare_renderdoc_chrome_autocapture_status`,
+`linux_vulkan_render_log_compare_renderdoc_chrome_vk_enum_instance_layer_count`,
+`linux_vulkan_render_log_compare_renderdoc_chrome_vk_enum_instance_extension_count`,
+`linux_vulkan_render_log_compare_renderdoc_chrome_vk_create_instance_count`, and
+`linux_vulkan_render_log_compare_renderdoc_chrome_vk_create_device_count`, with
+matching `...renderdoc_electron...` fields. These fields preserve the current
+Linux diagnosis that browser GPU children can enumerate Vulkan layers and
+extensions while still failing to produce `.rdc` before `vkCreateInstance`.
 The same row exposes host readiness fields before platform agents debug capture
 failures:
 `linux_vulkan_render_log_compare_host_renderdoc_status`,
