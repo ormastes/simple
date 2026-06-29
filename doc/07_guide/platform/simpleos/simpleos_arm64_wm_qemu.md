@@ -44,6 +44,19 @@ qemu-system-aarch64 \
   -device ramfb
 ```
 
+On Linux hosts that are not ARM64/KVM, use TCG with an emulated ARMv8 CPU:
+
+```bash
+qemu-system-aarch64 \
+  -machine virt -cpu cortex-a57 -accel tcg -m 384M \
+  -serial file:build/os/arm64_wm_serial.log \
+  -display none -no-reboot \
+  -kernel build/os/simpleos_arm64_wm.elf \
+  -device ramfb
+```
+
+On Linux ARM64 hosts with `/dev/kvm`, use `-accel kvm -cpu host` instead.
+
 ## Host Readiness Probe
 
 Before attempting the full build and boot, check that the host QEMU binary
@@ -55,8 +68,10 @@ sh scripts/check/check-simpleos-arm64-wm-qemu-readiness.shs
 
 The probe verifies that `qemu-system-aarch64` is on `PATH`, that the `virt`
 machine and `ramfb` device are available, and that QEMU accepts the documented
-headless `virt`/`ramfb` dry-run command. It is not a live boot proof; the serial
-markers below remain the acceptance signal for a completed ARM64 WM run.
+headless `virt`/`ramfb` dry-run command for the current host accelerator:
+`hvf` on Darwin, `kvm` on Linux ARM64 with `/dev/kvm`, otherwise `tcg` with
+`cortex-a57`. It is not a live boot proof; the serial markers below remain the
+acceptance signal for a completed ARM64 WM run.
 
 ## Runner Scenario Contract
 
@@ -67,7 +82,7 @@ builds/runs:
 ```text
 examples/09_embedded/simple_os/arch/arm64/wm_entry.spl
 build/os/simpleos_arm64_wm.elf
-qemu-system-aarch64 -machine virt -cpu host -accel hvf -m 384M -kernel build/os/simpleos_arm64_wm.elf -device ramfb
+qemu-system-aarch64 -machine virt -cpu <host|cortex-a57> -accel <hvf|kvm|tcg> -m 384M -kernel build/os/simpleos_arm64_wm.elf -device ramfb
 ```
 
 This is a build/run command contract for the existing scenario machinery. It
