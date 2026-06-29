@@ -655,6 +655,10 @@ and `torch_cuda_optimizer_probe_primary_blocked_gate` while preserving the
 legacy singular `torch_cuda_optimizer_probe_blocked_gate` key. The aggregate
 uses the plural key when available and forwards both the compact list and first
 blocked gate in `llm_goal_evidence_torch_optimizer_detail`.
+It also records Python Torch host visibility (`python_torch_module_status`,
+version, CUDA availability, device count) and `system_libtorch_status`, so a
+host with Python Torch/CUDA installed but no Simple-visible libtorch is reported
+as a Simple/runtime integration blocker rather than a general CUDA absence.
 
 ## 2026-06-29 Fine-Tune Acceptance Evidence Hardening
 
@@ -706,7 +710,8 @@ vLLM/GPU hosts still produce bounded `skipped` evidence without spawning.
 
 The aggregate LLM evidence report now includes `torch_optimizer` in the detail
 table and forwards normalized Simple/libtorch CUDA optimizer fields: status,
-reason, libtorch/CUDA availability, parameter CUDA placement, gradient handle,
+reason, Python Torch/CUDA host visibility, system libtorch visibility,
+libtorch/CUDA availability, parameter CUDA placement, gradient handle,
 optimizer-step attempt, before/after sums, and wrapper exit. The same aggregate
 also expands `finetune_guard` detail with retry7 gate exit/status, compact
 blocked gates, target eval, license, safety, deployment, and app-handoff fields,

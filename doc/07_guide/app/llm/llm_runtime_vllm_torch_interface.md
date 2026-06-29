@@ -162,6 +162,11 @@ classifying the self-hosted Simple runtime as `unavailable` with
 `torch_cuda_optimizer_probe_blocked_gate`,
 `torch_cuda_optimizer_probe_blocked_gates`,
 `torch_cuda_optimizer_probe_primary_blocked_gate`,
+`torch_cuda_optimizer_probe_python_torch_module_status`,
+`torch_cuda_optimizer_probe_python_torch_version`,
+`torch_cuda_optimizer_probe_python_torch_cuda_available`,
+`torch_cuda_optimizer_probe_python_torch_cuda_device_count`,
+`torch_cuda_optimizer_probe_system_libtorch_status`,
 `torch_cuda_optimizer_probe_torch_available_normalized`,
 `torch_cuda_optimizer_probe_cuda_available_normalized`,
 `torch_cuda_optimizer_probe_parameter_is_cuda_normalized`,
@@ -209,8 +214,9 @@ blocked native gates, while strict host mode reports the native producer's
 `blocked_gates` and `next_action` contract. It
 also records
 `llm_goal_evidence_torch_optimizer_detail` for Simple/libtorch CUDA optimizer
-status, compact blocked gates, primary blocked gate, host/runtime gates,
-gradient handle, optimizer-step attempt, and before/after parameter sums. vLLM
+status, compact blocked gates, primary blocked gate, Python Torch/CUDA host
+visibility, system libtorch visibility, Simple runtime gates, gradient handle,
+optimizer-step attempt, and before/after parameter sums. vLLM
 and Torch detail rows include the focused
 wrapper `next_action` values. It also records
 `llm_goal_evidence_finetune_guard_detail` for the fine-tune guard and
