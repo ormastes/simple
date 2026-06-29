@@ -817,6 +817,13 @@ The same aggregate now forwards `llm_goal_evidence_context_ponytail_detail` and
 Ponytail, and authenticated dashboard evidence cannot be hidden behind a single
 lane status when host completion evidence is reviewed.
 
+Default aggregate mode now also generates and consumes the repo-local
+context/Ponytail full-replacement env before running the context/Ponytail lane.
+This keeps the default report aligned with the completed Simple-owned
+`simple_context`/`simple_ponytail` replacement surfaces, while live dashboard,
+vLLM, native svLLM, fine-tune acceptance, and Torch optimizer gates remain
+strict-host completion evidence.
+
 Strict aggregate mode also clears each strict producer env before running the
 producer. A timeout or early producer failure therefore leaves missing evidence
 instead of reusing a stale full-replacement, live-dashboard, native-svLLM, or

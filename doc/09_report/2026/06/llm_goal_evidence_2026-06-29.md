@@ -13,7 +13,7 @@
 
 | lane | status | expected | exit | producer_exit | timeout | log | producer_log |
 |------|--------|----------|------|---------------|---------|-----|--------------|
-| context_ponytail | `pass` | `pass` | `0` | `n/a` | `180` | `build/llm_goal_evidence/context_ponytail.log` | `n/a` |
+| context_ponytail | `pass` | `pass` | `0` | `0` | `180` | `build/llm_goal_evidence/context_ponytail.log` | `build/llm_goal_evidence/context_ponytail_full_replacement.log` |
 | dashboard | `pass` | `pass` | `0` | `n/a` | `180` | `build/llm_goal_evidence/dashboard.log` | `n/a` |
 | vllm_host | `warn` | `warn` | `0` | `n/a` | `180` | `build/llm_goal_evidence/vllm_host.log` | `n/a` |
 | svllm_local | `pass` | `pass` | `0` | `n/a` | `180` | `build/llm_goal_evidence/svllm_local.log` | `n/a` |
@@ -35,7 +35,7 @@
 
 | lane | required_gates | blocked_gates | primary_blocked_gate | reason |
 |------|----------------|---------------|----------------------|--------|
-| context_ponytail | `mimic_evidence` | `none` | `none` | `default_mimic_evidence_only` |
+| context_ponytail | `mimic_evidence,execution_spec,guide_replacement,guide_context,guide_ponytail,guide_sql,architecture_contract,architecture_no_parallel,requirements_sql,requirements_mcp,app_context_table,app_context_sql,app_context_filter,app_ponytail_table,app_context_dispatch,app_ponytail_dispatch,app_context_sourceless,app_ponytail_handler,lower_context_schema,lower_context_sql,lower_context_filter,lower_ponytail_schema,lower_context_dispatch,lower_ponytail_dispatch,lower_context_sourceless,lower_context_filter_handler,lower_ponytail_handler` | `none` | `none` | `repo_local_replacement_surfaces_verified` |
 | dashboard | `route_and_collector_evidence` | `none` | `none` | `default_route_and_collector_evidence_only` |
 | vllm_host | `local_vllm,local_gpu,serve_preflight,endpoint_reachable,models_listed` | `local_vllm|serve_preflight|endpoint_reachable|models_listed` | `local_vllm` | `missing_local_vllm` |
 | svllm_local | `local_readiness` | `none` | `none` | `default_local_readiness_only` |
@@ -46,7 +46,7 @@
 
 | lane | next_action |
 |------|-------------|
-| context_ponytail | `run --strict-host on a configured host when full context/Ponytail replacement completion evidence is required` |
+| context_ponytail | `strict context/Ponytail full-replacement evidence is ready` |
 | dashboard | `run --strict-host on a configured host when live authenticated dashboard completion evidence is required` |
 | vllm_host | `install or expose the local vllm executable, then rerun the strict vLLM host probe` |
 | svllm_local | `run --strict-host on a configured native svLLM host when native streaming completion evidence is required` |
@@ -58,11 +58,11 @@
 
 | lane | details |
 |------|---------|
-| context_ponytail | `mimic_status=pass;full_replacement_status=not_required;full_replacement_reason=default_local_mimic_evidence_only;replacement_status=not_collected;replacement_scope=strict_host_only;replacement_required_gates=not_collected;replacement_blocked_gates=not_collected;replacement_primary_blocked_gate=not_collected;replacement_failures=not_collected;next_action=not_collected` |
+| context_ponytail | `mimic_status=pass;full_replacement_status=pass;full_replacement_reason=repo_local_replacement_surfaces_verified;replacement_status=pass;replacement_scope=repo_local_simple_owned_surfaces;replacement_required_gates=mimic_evidence,execution_spec,guide_replacement,guide_context,guide_ponytail,guide_sql,architecture_contract,architecture_no_parallel,requirements_sql,requirements_mcp,app_context_table,app_context_sql,app_context_filter,app_ponytail_table,app_context_dispatch,app_ponytail_dispatch,app_context_sourceless,app_ponytail_handler,lower_context_schema,lower_context_sql,lower_context_filter,lower_ponytail_schema,lower_context_dispatch,lower_ponytail_dispatch,lower_context_sourceless,lower_context_filter_handler,lower_ponytail_handler;replacement_blocked_gates=none;replacement_primary_blocked_gate=none;replacement_failures=none;next_action=strict context/Ponytail full-replacement evidence is ready` |
 | dashboard | `dashboard_status=pass;live_status=not_required;live_reason=default_route_and_collector_evidence_only;live_wrapper_status=not_collected;live_wrapper_scope=strict_host_only;live_wrapper_required_gates=not_collected;live_wrapper_blocked_gates=not_collected;live_wrapper_primary_blocked_gate=not_collected;live_wrapper_failures=not_collected;live_http_status=not_collected;live_http_reason=not_collected;next_action=not_collected` |
 | vllm_host | `local_vllm_status=missing;local_gpu_status=available;readiness_status=skipped;preflight_status=skipped;endpoint_status=not_checked;models_status=not_fetched;primary_blocked_gate=local_vllm;next_action=install or expose the local vllm executable, then rerun the strict vLLM host probe` |
 | svllm_local | `native_status=not_required;native_reason=default_local_readiness_only;local_readiness_status=n/a;default_readiness_status=pass;capability_source=not_collected;read_range_status=not_collected;pinned_buffer_status=not_collected;device_staging_status=not_collected;local_read_bytes_status=not_collected` |
 | torch_optimizer | `torch_status=unavailable;torch_reason=libtorch_unavailable;blocked_gates=libtorch;primary_blocked_gate=libtorch;torch_available=false;cuda_available=false;parameter_is_cuda=missing;grad_handle=missing;optimizer_step_attempted=false;before_sum=missing;after_sum=missing;wrapper_exit=0;next_action=build or install the Simple runtime with libtorch symbols available, then rerun the strict Torch optimizer probe` |
 | finetune_guard | `guard_status=pass;guard_strict_ready=0;guard_blocked_gates=retry6_training_eval|retry7_acceptance|tuned_model_acceptance;guard_primary_blocked_gate=retry6_training_eval;guard_reason=guard_only_retry6_retry7_blocked;acceptance_status=fail;acceptance_reason=BLOCKED_RETRY6_NOT_READY;acceptance_blocked_gates=retry6_training_eval|training_allowed|model_manifest|eval_result|target_eval|decision|license|safety|deployment|app_handoff;acceptance_primary_blocked_gate=retry6_training_eval;training_allowed=false;model_manifest_exists=false;eval_result_exists=false;target_eval_reached=false;decision_status=retry-implementation;license_constraints=pending;safety_eval=not-run;deployment_evidence=not-deployable;app_handoff_doc_ready=false;next_action=complete retry6 training/eval gate before normal acceptance review` |
 
-This aggregate proves the current local LLM tooling evidence lanes remain reproducible. WARN lanes are expected only for host-dependent gates that are still open on this machine: live vLLM serving and Simple/libtorch CUDA optimizer execution. The context/Ponytail lane is local mimic evidence only in default mode, the dashboard lane is route/collector evidence only in default mode, the svLLM lane is local file-backed readiness only in default mode, and the fine-tune lane is guard evidence only in default mode. This report is not release-completion evidence for those live host gates; rerun with `--strict-host` on a configured host when full context/Ponytail replacement, live dashboard operation, live vLLM, native svLLM streaming, fine-tune acceptance, and Simple/libtorch CUDA optimizer gates must pass.
+This aggregate proves the current local LLM tooling evidence lanes remain reproducible. WARN lanes are expected only for host-dependent gates that are still open on this machine: live vLLM serving and Simple/libtorch CUDA optimizer execution. The context/Ponytail lane includes repo-local full-replacement surface evidence, the dashboard lane is route/collector evidence only in default mode, the svLLM lane is local file-backed readiness only in default mode, and the fine-tune lane includes guard evidence plus non-blocking retry7 acceptance blocker details. This report is not release-completion evidence for live dashboard, live vLLM, native svLLM streaming, fine-tune acceptance, and Simple/libtorch CUDA optimizer gates; rerun with `--strict-host` on a configured host when those live gates must pass.

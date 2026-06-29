@@ -179,7 +179,10 @@ The aggregate report is written to
 `doc/09_report/2026/06/llm_goal_evidence_2026-06-29.md`. It treats live vLLM
 and Simple/libtorch CUDA optimizer host gaps as expected WARN lanes on hosts
 where those dependencies are not installed, while fine-tune readiness remains a
-guard-only pass in default mode. The aggregate env also records
+guard-only pass in default mode. Default mode also generates repo-local
+context/Ponytail full-replacement evidence before running the context/Ponytail
+lane, so the detail row shows checked-in Simple-owned replacement surfaces
+instead of only mimic evidence. The aggregate env also records
 `llm_goal_evidence_context_ponytail_detail` for mimic/full-replacement state,
 `llm_goal_evidence_dashboard_detail` for dashboard live-readiness state,
 `llm_goal_evidence_vllm_host_detail` for local
@@ -236,10 +239,10 @@ release-completion evidence for the live gates:
 sh scripts/check/check-llm-goal-evidence.shs --strict-host
 ```
 
-Strict host mode first generates repo-local context/Ponytail full-replacement
-evidence, authenticated dashboard route evidence, and fine-tune retry7
-acceptance evidence, then passes the focused strict flags to the
-context/Ponytail, dashboard, vLLM, svLLM, Torch optimizer, and fine-tune
+Strict host mode generates authenticated dashboard route evidence and
+fine-tune retry7 acceptance evidence, reuses the same repo-local
+context/Ponytail full-replacement contract, then passes the focused strict
+flags to the context/Ponytail, dashboard, vLLM, svLLM, Torch optimizer, and fine-tune
 wrappers. It clears each strict producer's canonical `evidence.env` before the
 producer runs so stale results cannot mask a timeout or early producer failure.
 The aggregate expects all completion lanes to pass, fails for any WARN
