@@ -1,4 +1,4 @@
-# svllm safetensors — A2 real parser specs (fail until Phase 5 lands the parser)
+# svllm safetensors — real parser specs
 #
 # Fixture strategy: a 162-byte tiny checkpoint built inline via push() calls,
 # well under the interpreter's multi-MiB buffer limit. Two tensors:
@@ -8,20 +8,24 @@
 
 use std.gc_async_mut.svllm.model_executor.model_loader.safetensors.{SafetensorsHeader, SafetensorsTensorEntry, SafetensorsError, parse_safetensors_header}
 use std.gc_async_mut.svllm.model_executor.model_loader.weight_utils.{Dtype}
+use std.common.base_encoding.{text_to_bytes}
 
 # Helper: push the ASCII bytes of `s` into `buf`.
 fn push_ascii(buf: [u8], s: text) -> [u8]:
+    val bytes = text_to_bytes(s)
     var i = 0
-    while i < s.len():
-        buf.push(s.byte_at(i) as u8)
+    while i < bytes.len():
+        buf.push(bytes[i])
         i = i + 1
     buf
 
 # Helper: push a u64 as 8 little-endian bytes.
 fn push_u64_le(buf: [u8], v: i64) -> [u8]:
+    var remaining = v
     var i = 0
     while i < 8:
-        buf.push(((v >> (i * 8)) and 0xFF) as u8)
+        buf.push((remaining % 256) as u8)
+        remaining = remaining / 256
         i = i + 1
     buf
 
@@ -65,7 +69,8 @@ describe "parse_safetensors_header — happy path (A2)":
         val h = parse_safetensors_header(buf).unwrap()
         val w = h.tensors[0]
         expect(w.name).to_equal("w")
-        expect(w.dtype).to_equal(Dtype.F32)
+        expect(w.dtype).to_equal("F32")
+        expect(w.dtype_tag).to_equal(Dtype.F32)
 
     it "first tensor has shape [2,2] and data_offsets [0,16]":
         val buf = build_tiny_safetensors()
@@ -82,7 +87,8 @@ describe "parse_safetensors_header — happy path (A2)":
         val h = parse_safetensors_header(buf).unwrap()
         val b = h.tensors[1]
         expect(b.name).to_equal("b")
-        expect(b.dtype).to_equal(Dtype.I64)
+        expect(b.dtype).to_equal("I64")
+        expect(b.dtype_tag).to_equal(Dtype.I64)
 
 describe "parse_safetensors_header — error paths":
     it "rejects buffers shorter than 8 bytes as TruncatedHeader":

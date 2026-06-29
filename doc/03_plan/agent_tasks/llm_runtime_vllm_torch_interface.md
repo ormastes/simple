@@ -688,3 +688,12 @@ comments. The spec now asserts the implemented canonical v0 manifest parser and
 `build_tensor_pack` materializer behavior directly, and the generated manual
 under `doc/06_spec/test/01_unit/lib/gc_async_mut/svllm/model_executor/model_loader/`
 records 11 active scenarios with no pending cases.
+
+## 2026-06-29 svLLM Safetensors Parser Cleanup
+
+`test/01_unit/lib/gc_async_mut/svllm/model_executor/model_loader/safetensors_spec.spl`
+now uses the repo text-to-bytes helper and an arithmetic little-endian length
+fixture writer, matching the parser's runtime constraints. The safetensors
+parser's little-endian length reader now uses arithmetic accumulation instead
+of boolean-style bitwise syntax, and stale stub comments in the safetensors and
+loader modules were replaced with the current implemented boundary.
