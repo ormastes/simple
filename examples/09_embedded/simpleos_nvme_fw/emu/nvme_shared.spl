@@ -22,29 +22,42 @@ fn shared_mem_new() -> SharedMem:
     SharedMem(words: w)
 
 impl SharedMem:
-    # Copy src into the owned region starting at off.value. src is read-only; the
-    # write lands in me.words (owned field) so it persists.
+    # Copy src into the owned region starting at off.value. Every touched index is
+    # bounds-checked against [0, SHARED_WORDS) so a transfer can never overrun the
+    # region — this is the runtime guard that establishes proofs/Memcpy.lean's
+    # precondition (memcpy_index_in_bounds). src is read-only; writes land in the
+    # owned me.words field so they persist.
     me store(off: Addr, src: [i64]):
         var i: i64 = 0
         while i < src.length():
-            me.words[off.value + i] = src[i]
+            val idx: i64 = off.value + i
+            if idx >= 0 and idx < SHARED_WORDS:
+                me.words[idx] = src[i]
             i = i + 1
 
     # Read n words from off.value and RETURN them in a new array (gotcha 3).
+    # Out-of-region indices read as 0 (never an out-of-bounds access — Memcpy.lean).
     me load(off: Addr, n: i64) -> [i64]:
         var out: [i64] = []
         var i: i64 = 0
         while i < n:
-            out.push(me.words[off.value + i])
+            val idx: i64 = off.value + i
+            if idx >= 0 and idx < SHARED_WORDS:
+                out.push(me.words[idx])
+            else:
+                out.push(0)
             i = i + 1
         out
 
-    # Single-word store: v (second param) lands at me.words[off.value].
+    # Single-word store: v (second param) lands at me.words[off.value] if in range.
     me store1(off: Addr, v: i64):
-        me.words[off.value] = v
+        if off.value >= 0 and off.value < SHARED_WORDS:
+            me.words[off.value] = v
 
     me load1(off: Addr) -> i64:
-        me.words[off.value]
+        if off.value >= 0 and off.value < SHARED_WORDS:
+            return me.words[off.value]
+        0
 
     # Zero the whole region.
     me clear():

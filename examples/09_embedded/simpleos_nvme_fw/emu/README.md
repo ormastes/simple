@@ -40,7 +40,24 @@ for f in Addr Memcpy Queue Resource; do lean examples/09_embedded/simpleos_nvme_
 Domain **newtypes** are used pervasively in signatures/records. On this compiler they
 are **not enforced** (a `Ppn` is accepted where an `Lba` is expected) and arithmetic
 erases the wrapper — see `doc/08_tracking/bug/newtype_run_path_and_enforcement_gaps_2026-06-29.md`.
-So the types document intent; the **enforced** guarantees (address bijection, memcpy
-bounds, queue invariants, resource safety) are the **Lean4 proofs**. The seam carries
-data only via the settable memcpy on *both* sides — proven by injecting a faulting
-memcpy on each side and observing the corrupted byte.
+So the types document intent; the seam carries data only via the settable memcpy on
+*both* sides — proven by injecting a faulting memcpy on each side and observing the
+corrupted byte.
+
+## Lean4 verification — what it does and does NOT claim
+The `proofs/*.lean` files prove properties **of the algorithms**, with the math
+**hand-transcribed** from the Simple logic. There is **no mechanical link** between the
+proofs and the executed bytes (the compiler's `@verify`/gen-lean MIR→Lean path does not
+yet handle this code; see the bug doc). So a proof certifies "this *algorithm* is correct",
+verified independently by Lean — not "the compiled interpreter cannot deviate". Each proof
+is written to mirror a specific Simple code path, and where a proof has a precondition the
+code is written to *establish* it at runtime:
+
+| proof | property | corresponds to (Simple) |
+|-------|----------|--------------------------|
+| `Addr.lean` | PPA↔ppn is a bijection onto [0,128) | `nvme_ct.ppa_to_ppn` + `ppn_channel/bank/plane/block/page` (same formula) |
+| `Memcpy.lean` | a transfer never touches an index outside the region | `nvme_shared.SharedMem.store/load` — now **bounds-checks every index** against `[0,SHARED_WORDS)` |
+| `Queue.lean` | the monotonic head cursor never reads out of bounds | `nvme_device` SQ/CQ append columns + guarded `*_head` reap |
+| `Resource.lean` | (a) FTL allocator hands out valid, never-reused pages; (b) distinct PRP buffers don't overlap | (a) `ftl_emu.Ftl.write` cursor allocator; (b) `nvme_shared` regions / distinct PRPs in `nvme_emu_main` |
+
+Run: `for f in Addr Memcpy Queue Resource; do lean proofs/$f.lean; done` → each exits 0, no `sorry`.
