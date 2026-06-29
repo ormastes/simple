@@ -19,8 +19,8 @@ Default aggregate:
   vLLM host, svLLM local readiness, Torch optimizer, and fine-tune guard
   evidence now include checked surface/input manifests with size/SHA-256
   metadata and focused log hashes. Public absence rendering also records
-  `public_absence_surface_manifest_count=120` and
-  `public_absence_surface_manifest_sha256=6c8d04a0f8e90367e27ddc4f87a74ae8196b9809b03eef8ec23d61a96f795207`
+  `public_absence_surface_manifest_count=121` and
+  `public_absence_surface_manifest_sha256=1ddd6d40375beddffb6ba1eea0e9f50ea66cf84d241902ab59516a1f0578134a`
   with `failure_count=0`, so public manuals and generated evidence continue to
   hide internal absence markers from operator-facing text.
 
@@ -58,7 +58,7 @@ prerequisite summary and must not be treated as a completion pass.
 - local proof already hardened: vLLM host evidence has a checked runtime
   control/readiness source/spec plus operator-guide manifest with
   `surface_manifest_count=13` and
-  `surface_manifest_sha256=7467220ed92a59a6acd105a093063fd553f499f0eaf8c7fc43442075c1a10a8a`
+  `surface_manifest_sha256=189f36512af3a471592de81cc0644ace205dfcf6bbfa1508e1ddcb96261250c7`
 - required evidence: local `vllm` executable, importable Python `vllm` module
   with non-missing origin, serve preflight, reachable endpoint, and `/v1/models`
   listing the selected base model
@@ -90,7 +90,7 @@ prerequisite summary and must not be treated as a completion pass.
   devices; system/Simple-visible libtorch is missing
 - local proof already hardened: Torch optimizer evidence has a checked live
   probe/source/spec/doc manifest with `surface_manifest_count=18` and
-  `surface_manifest_sha256=8b865e8d0a17bc20bc653f75d8ab1e320bfaa1169c0ddb90a2290351959e71d8`,
+  `surface_manifest_sha256=2856141918874a4cd91e61f6ddf2d78a8cfef7441de3d83613c5ab31357849ab`,
   plus hashed Python Torch discovery and system libtorch probe logs
 - required evidence: Simple/libtorch CUDA optimizer probe with parameter on
   CUDA, gradient handle, optimizer step attempted, and parameter sum decrease

@@ -523,6 +523,23 @@ evidence surfaces it scanned. The aggregate forwards those values through
 must include a reproducible manifest count/size/hash, not only a terminal
 `STATUS: PASS` line.
 
+Use the LLM feature database reference guard after changing feature rows,
+generated/manual spec locations, fine-tune process paths, dashboard references,
+or runtime evidence references:
+
+```bash
+sh scripts/check/check-llm-feature-db-reference-integrity.shs
+```
+
+The guard writes `build/llm_feature_db_reference_integrity/evidence.env` and
+`doc/09_report/2026/06/llm_feature_db_reference_integrity_<date>.md`. It scans
+only the LLM, SPipe LLM, and dashboard feature rows in
+`doc/08_tracking/feature/feature_db.sdn`, verifies every referenced local
+`doc/`, `test/`, `src/`, `scripts/`, `.spipe/`, and `examples/` path exists,
+and fails if the known stale svLLM generated-spec paths under
+`doc/06_spec/01_unit/lib/gc_async_mut/svllm/...` reappear instead of the real
+`doc/06_spec/test/01_unit/...` generated docs.
+
 Use the focused vLLM host probe after changing vLLM control CLI, live
 environment detection, dashboard control JSONL, or host preflight behavior:
 
