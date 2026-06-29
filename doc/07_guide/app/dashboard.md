@@ -71,8 +71,19 @@ still belongs to the LLM runtime host-probe lane.
 Use the focused live checker when strict dashboard evidence needs a live env:
 
 ```bash
+LLM_DASHBOARD_LIVE_BASE_URL=http://127.0.0.1:3099 \
+  sh scripts/check/check-llm-dashboard-live-http-evidence.shs
+
 sh scripts/check/check-llm-dashboard-live-evidence.shs
 ```
+
+The HTTP producer writes `build/llm_dashboard_live_http/evidence.env` with
+`llm_dashboard_live_http_status=pass` only after a configured running dashboard
+origin rejects an unauthenticated `/api/vllm/control` request and accepts
+authenticated dashboard HTML, `/agents`, and `/api/vllm/control?action=preflight`
+requests. Provide authentication with `LLM_DASHBOARD_LIVE_AUTH_HEADER`,
+`LLM_DASHBOARD_LIVE_AUTH_COOKIE`, or `LLM_DASHBOARD_LIVE_COOKIE_NAME` plus
+`LLM_DASHBOARD_LIVE_COOKIE_VALUE`; secret values are not written to reports.
 
 That checker writes `build/llm_dashboard_live/evidence.env` with
 `llm_dashboard_live_status=pass` when authenticated dashboard HTML, `/agents`
