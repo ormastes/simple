@@ -533,7 +533,12 @@ build reaches the API but reports zero captures for both modes:
 `rdoc_gpu_delay_trigger_last_end_ok=0`,
 `rdoc_gpu_delay_trigger_is_capturing_after_start=0`,
 `rdoc_gpu_delay_trigger_is_capturing_after_trigger=0`, and
-`rdoc_gpu_delay_trigger_num_captures_after=0`, so no `.rdc` is produced; see
+`rdoc_gpu_delay_trigger_num_captures_after=0`, so no `.rdc` is produced.
+`RDOC_GPU_LAUNCHER_DELAY_TARGET_DEVICE=1` attempts to derive a
+`RENDERDOC_DevicePointer` by intercepting `vkCreateInstance`, but current
+Chrome/Electron runs report `rdoc_gpu_delay_trigger_vk_create_instance_count=0`
+and `rdoc_gpu_delay_trigger_target_device=(nil)`, so Chromium/ANGLE is not
+exposing its Vulkan instance through this LD_PRELOAD path; see
 `doc/09_report/renderdoc_browser_delay_trigger_vulkan_only_2026-06-29.md`.
 The Linux row also emits structured blocker fields for parallel platform
 agents:

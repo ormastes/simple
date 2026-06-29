@@ -63,6 +63,20 @@ rdoc_capture_reason=missing-rdc
 rdoc_capture_magic=
 ```
 
+Targeted-device evidence:
+`build/renderdoc/chrome-gpu-delay-device-target-vulkan-only/html/evidence.env`.
+
+```text
+rdoc_gpu_delay_trigger_mode=start-end
+rdoc_gpu_delay_trigger_target_device=(nil)
+rdoc_gpu_delay_trigger_last_vk_instance=(nil)
+rdoc_gpu_delay_trigger_vk_create_instance_count=0
+rdoc_gpu_delay_trigger_last_end_ok=0
+rdoc_gpu_delay_trigger_num_captures_after=0
+rdoc_capture_status=fail
+rdoc_capture_reason=missing-rdc
+```
+
 ## Electron Probe
 
 Evidence:
@@ -104,6 +118,20 @@ rdoc_capture_reason=missing-rdc
 rdoc_capture_magic=
 ```
 
+Targeted-device evidence:
+`build/renderdoc/electron-gpu-delay-device-target-vulkan-only/electron-html/evidence.env`.
+
+```text
+rdoc_gpu_delay_trigger_mode=start-end
+rdoc_gpu_delay_trigger_target_device=(nil)
+rdoc_gpu_delay_trigger_last_vk_instance=(nil)
+rdoc_gpu_delay_trigger_vk_create_instance_count=0
+rdoc_gpu_delay_trigger_last_end_ok=0
+rdoc_gpu_delay_trigger_num_captures_after=0
+rdoc_capture_status=fail
+rdoc_capture_reason=missing-rdc
+```
+
 ## Aggregate
 
 Focused aggregate:
@@ -114,20 +142,24 @@ The Linux aggregate now forwards:
 ```text
 linux_vulkan_render_log_compare_renderdoc_chrome_delay_trigger_loaded_count=1
 linux_vulkan_render_log_compare_renderdoc_chrome_delay_trigger_api_ready_count=1
-linux_vulkan_render_log_compare_renderdoc_chrome_delay_trigger_mode=trigger
-linux_vulkan_render_log_compare_renderdoc_chrome_delay_trigger_capture_count=1
+linux_vulkan_render_log_compare_renderdoc_chrome_delay_trigger_mode=start-end
+linux_vulkan_render_log_compare_renderdoc_chrome_delay_trigger_capture_count=0
 linux_vulkan_render_log_compare_renderdoc_chrome_delay_trigger_last_end_ok=0
+linux_vulkan_render_log_compare_renderdoc_chrome_delay_trigger_target_device=(nil)
+linux_vulkan_render_log_compare_renderdoc_chrome_delay_trigger_last_vk_instance=(nil)
+linux_vulkan_render_log_compare_renderdoc_chrome_delay_trigger_vk_create_instance_count=0
 linux_vulkan_render_log_compare_renderdoc_chrome_delay_trigger_num_captures_after=0
 linux_vulkan_render_log_compare_renderdoc_chrome_delay_trigger_is_capturing_after_start=0
-linux_vulkan_render_log_compare_renderdoc_chrome_delay_trigger_is_capturing_after_trigger=0
 linux_vulkan_render_log_compare_renderdoc_electron_delay_trigger_loaded_count=1
 linux_vulkan_render_log_compare_renderdoc_electron_delay_trigger_api_ready_count=1
-linux_vulkan_render_log_compare_renderdoc_electron_delay_trigger_mode=trigger
-linux_vulkan_render_log_compare_renderdoc_electron_delay_trigger_capture_count=1
+linux_vulkan_render_log_compare_renderdoc_electron_delay_trigger_mode=start-end
+linux_vulkan_render_log_compare_renderdoc_electron_delay_trigger_capture_count=0
 linux_vulkan_render_log_compare_renderdoc_electron_delay_trigger_last_end_ok=0
+linux_vulkan_render_log_compare_renderdoc_electron_delay_trigger_target_device=(nil)
+linux_vulkan_render_log_compare_renderdoc_electron_delay_trigger_last_vk_instance=(nil)
+linux_vulkan_render_log_compare_renderdoc_electron_delay_trigger_vk_create_instance_count=0
 linux_vulkan_render_log_compare_renderdoc_electron_delay_trigger_num_captures_after=0
 linux_vulkan_render_log_compare_renderdoc_electron_delay_trigger_is_capturing_after_start=0
-linux_vulkan_render_log_compare_renderdoc_electron_delay_trigger_is_capturing_after_trigger=0
 ```
 
 `renderdoc-chrome-rdc` and `renderdoc-electron-rdc` remain blocked because no
@@ -148,6 +180,10 @@ child using the Vulkan-only RenderDoc build. RenderDoc still declines both
 trigger paths: the capfile template is set, but `IsFrameCapturing()` remains
 `0` immediately after `StartFrameCapture`, `EndFrameCapture` returns `0`,
 `TriggerCapture()` leaves `IsFrameCapturing()` at `0`, and `GetNumCaptures()`
-remains `0`. The next debugging target is why the RenderDoc API is callable but
-not bound to an active capturable Vulkan frame in the Chromium GPU child after
-successful API lookup and layer load.
+remains `0`. A follow-up targeted-device probe added minimal
+`vkCreateInstance`/`vkGetInstanceProcAddr` interception to derive
+`RENDERDOC_DEVICEPOINTER_FROM_VKINSTANCE`, but Chromium/ANGLE does not route
+instance creation through that LD_PRELOAD symbol path in either Chrome or
+Electron (`vk_create_instance_count=0`, target device `(nil)`). The next
+debugging target is inside the active RenderDoc Vulkan layer or target-control
+state, not another `NULL,NULL` in-application API trigger.

@@ -9,15 +9,24 @@
 #include <string.h>
 #include <link.h>
 #include <elf.h>
+#include <vulkan/vulkan.h>
 #include <renderdoc_app.h>
 
 typedef int (*renderdoc_get_api_fn_t)(int, void **);
+typedef void *(*real_dlsym_fn_t)(void *, const char *);
 
 struct library_lookup {
     const char *needle;
     uintptr_t base;
     char path[1024];
 };
+
+static real_dlsym_fn_t real_dlsym_fn;
+static void *real_vulkan_handle;
+static PFN_vkCreateInstance real_vkCreateInstance;
+static PFN_vkGetInstanceProcAddr real_vkGetInstanceProcAddr;
+static VkInstance last_vk_instance;
+static RENDERDOC_DevicePointer last_rdoc_device_pointer;
 
 static int env_enabled(const char *name) {
     const char *value = getenv(name);
@@ -56,6 +65,87 @@ static void log_str_value(const char *key, const char *value) {
 static bool env_equals(const char *name, const char *expected) {
     const char *value = getenv(name);
     return value && strcmp(value, expected) == 0;
+}
+
+static void log_ptr_value(const char *key, const void *value) {
+    char buf[160];
+    snprintf(buf, sizeof(buf), "%s=%p", key, value);
+    log_line(buf);
+}
+
+static void *real_dlsym_lookup(void *handle, const char *symbol) {
+    if (!real_dlsym_fn) {
+        real_dlsym_fn = (real_dlsym_fn_t)dlvsym(RTLD_NEXT, "dlsym", "GLIBC_2.2.5");
+    }
+    return real_dlsym_fn ? real_dlsym_fn(handle, symbol) : NULL;
+}
+
+static void *library_symbol(const char *library_name, void **cached_handle, const char *symbol) {
+    if (!*cached_handle) {
+        *cached_handle = dlopen(library_name, RTLD_NOW | RTLD_NOLOAD);
+        if (!*cached_handle) *cached_handle = dlopen(library_name, RTLD_NOW | RTLD_LOCAL);
+    }
+    return *cached_handle ? real_dlsym_lookup(*cached_handle, symbol) : NULL;
+}
+
+static void *real_vulkan_symbol(const char *symbol) {
+    void *result = real_dlsym_lookup(RTLD_NEXT, symbol);
+    if (result) return result;
+    result = library_symbol("libvulkan.so.1", &real_vulkan_handle, symbol);
+    if (!result) result = library_symbol("libvulkan.so", &real_vulkan_handle, symbol);
+    return result;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL vkCreateInstance(
+    const VkInstanceCreateInfo *pCreateInfo,
+    const VkAllocationCallbacks *pAllocator,
+    VkInstance *pInstance) {
+    if (!real_vkCreateInstance) {
+        real_vkCreateInstance = (PFN_vkCreateInstance)real_vulkan_symbol("vkCreateInstance");
+    }
+    log_line("rdoc_delay_trigger_vk=vkCreateInstance");
+    if (!real_vkCreateInstance) return VK_ERROR_INITIALIZATION_FAILED;
+    VkResult result = real_vkCreateInstance(pCreateInfo, pAllocator, pInstance);
+    if (result == VK_SUCCESS && pInstance && *pInstance) {
+        last_vk_instance = *pInstance;
+        last_rdoc_device_pointer = RENDERDOC_DEVICEPOINTER_FROM_VKINSTANCE(*pInstance);
+        log_ptr_value("rdoc_delay_trigger_vk_instance", (const void *)last_vk_instance);
+        log_ptr_value("rdoc_delay_trigger_vk_device_pointer", last_rdoc_device_pointer);
+    }
+    return result;
+}
+
+VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(
+    VkInstance instance,
+    const char *pName) {
+    (void)instance;
+    if (!real_vkGetInstanceProcAddr) {
+        real_vkGetInstanceProcAddr = (PFN_vkGetInstanceProcAddr)real_vulkan_symbol("vkGetInstanceProcAddr");
+    }
+    if (pName && strcmp(pName, "vkCreateInstance") == 0) {
+        log_line("rdoc_delay_trigger_vk=wrap-vkCreateInstance");
+        return (PFN_vkVoidFunction)vkCreateInstance;
+    }
+    if (!real_vkGetInstanceProcAddr) return NULL;
+    return real_vkGetInstanceProcAddr(instance, pName);
+}
+
+void *dlsym(void *handle, const char *symbol) {
+    if (symbol && strcmp(symbol, "vkGetInstanceProcAddr") == 0) {
+        if (!real_vkGetInstanceProcAddr) {
+            real_vkGetInstanceProcAddr = (PFN_vkGetInstanceProcAddr)real_dlsym_lookup(handle, symbol);
+        }
+        log_line("rdoc_delay_trigger_dlsym=vkGetInstanceProcAddr");
+        return (void *)vkGetInstanceProcAddr;
+    }
+    if (symbol && strcmp(symbol, "vkCreateInstance") == 0) {
+        if (!real_vkCreateInstance) {
+            real_vkCreateInstance = (PFN_vkCreateInstance)real_dlsym_lookup(handle, symbol);
+        }
+        log_line("rdoc_delay_trigger_dlsym=vkCreateInstance");
+        return (void *)vkCreateInstance;
+    }
+    return real_dlsym_lookup(handle, symbol);
 }
 
 static int find_loaded_library_callback(struct dl_phdr_info *info, size_t size, void *data) {
@@ -213,6 +303,12 @@ static void *delay_trigger_thread(void *arg) {
         log_str_value("rdoc_delay_trigger_capfile_set", capfile);
     }
     log_str_value("rdoc_delay_trigger_capfile_template", api->GetCaptureFilePathTemplate());
+    RENDERDOC_DevicePointer target_device = NULL;
+    if (env_enabled("RDOC_DELAY_TRIGGER_TARGET_DEVICE")) {
+        target_device = last_rdoc_device_pointer;
+    }
+    log_ptr_value("rdoc_delay_trigger_target_device", target_device);
+    log_ptr_value("rdoc_delay_trigger_last_vk_instance", (const void *)last_vk_instance);
     log_u32("rdoc_delay_trigger_num_captures_before", api->GetNumCaptures());
     log_u32("rdoc_delay_trigger_is_capturing_before", api->IsFrameCapturing());
     if (trigger_mode) {
@@ -225,12 +321,12 @@ static void *delay_trigger_thread(void *arg) {
         log_u32("rdoc_delay_trigger_num_captures_after", api->GetNumCaptures());
         return NULL;
     }
-    api->StartFrameCapture(NULL, NULL);
+    api->StartFrameCapture(target_device, NULL);
     log_line("rdoc_delay_trigger=start");
     log_u32("rdoc_delay_trigger_is_capturing_after_start", api->IsFrameCapturing());
     usleep((useconds_t)(duration_ms * 1000));
     log_u32("rdoc_delay_trigger_is_capturing_before_end", api->IsFrameCapturing());
-    uint32_t ok = api->EndFrameCapture(NULL, NULL);
+    uint32_t ok = api->EndFrameCapture(target_device, NULL);
     log_u32("rdoc_delay_trigger_is_capturing_after_end", api->IsFrameCapturing());
     log_u32("rdoc_delay_trigger_num_captures_after", api->GetNumCaptures());
     char buf[96];

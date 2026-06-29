@@ -207,6 +207,14 @@ Current 2026-06-26 browser capture findings:
   `build/renderdoc/electron-gpu-triggercapture-vulkan-only/electron-html/evidence.env`,
   and
   `doc/09_report/renderdoc_browser_delay_trigger_vulkan_only_2026-06-29.md`.
+- A targeted-device variant of the same shim attempts to intercept
+  `vkCreateInstance` and call `StartFrameCapture(device,NULL)` using
+  `RENDERDOC_DEVICEPOINTER_FROM_VKINSTANCE`, but both Chrome and Electron
+  report `rdoc_gpu_delay_trigger_vk_create_instance_count=0`,
+  `rdoc_gpu_delay_trigger_target_device=(nil)`, and `missing-rdc`. Evidence:
+  `build/renderdoc/chrome-gpu-delay-device-target-vulkan-only/html/evidence.env`
+  and
+  `build/renderdoc/electron-gpu-delay-device-target-vulkan-only/electron-html/evidence.env`.
 
 2026-06-26 follow-up diagnostics:
 - `renderdoccmd inject --PID=<chrome-gpu-pid>` is not a Linux workaround.
