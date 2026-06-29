@@ -266,15 +266,17 @@ native streaming report records
 `svllm_native_streaming_capability_source` and
 `svllm_native_streaming_capability_provenance_status` so reviewers can
 distinguish an explicit host probe from the default fallback. A strict native
-PASS requires `SVLLM_NATIVE_CAPABILITY_SOURCE` to name the probe or artifact
-that proved the ready native capabilities and
-`SVLLM_NATIVE_CAPABILITY_EVIDENCE_PATH` to point at a non-empty probe artifact.
+PASS requires either `SVLLM_NATIVE_CAPABILITY_SOURCE` to name the probe or
+artifact that proved the ready native capabilities, or a non-empty
+`SVLLM_NATIVE_CAPABILITY_EVIDENCE_PATH` whose schema-v1 artifact carries
+`svllm_native_capability_source`; the wrapper derives the source from that
+artifact when the env source is omitted.
 It also writes `svllm_native_streaming_pass_integrity_status` and
 `svllm_native_streaming_pass_integrity_reason`; PASS integrity requires local
 readiness, all three native capability statuses, provenance, and the evidence
 artifact to be present together. The artifact is a line-oriented schema-v1 env
-file with `svllm_native_capability_source` matching
-`SVLLM_NATIVE_CAPABILITY_SOURCE`,
+file with `svllm_native_capability_source` matching the explicit or
+artifact-derived capability source,
 `svllm_native_capability_probe_event=svllm_native_capability_probe`,
 `svllm_native_capability_probe_status=pass`,
 `svllm_native_capability_probe_exit=0`, and reported read-range, pinned-buffer,
@@ -642,13 +644,19 @@ The strict native gate requires the evidence env to report
 `svllm_native_streaming_status=pass`; local file-backed bytes are recorded as
 bring-up evidence but are not enough for native streaming completion. Ready
 native capability env values require matching structured evidence; the artifact
-must record the same source string as `SVLLM_NATIVE_CAPABILITY_SOURCE`, and
-strict aggregate detail forwards that artifact source as
+must record the same source string as the explicit or artifact-derived source,
+and strict aggregate detail forwards that artifact source as
 `capability_evidence_source`. Status-only ready claims fail as
-`capability_evidence`. Strict local readiness requires both
+`capability_evidence`. Strict local readiness requires
 `svllm_native_streaming_status=pass` and
-`svllm_native_streaming_pass_integrity_status=pass`, so a status-only native env
-cannot satisfy strict completion.
+`svllm_native_streaming_pass_integrity_status=pass` plus complete native
+provenance fields. It exposes
+`llm_runtime_svllm_local_readiness_native_evidence_completeness_status`,
+`llm_runtime_svllm_local_readiness_native_capability_provenance_status`,
+`llm_runtime_svllm_local_readiness_native_capability_evidence_status`,
+`llm_runtime_svllm_local_readiness_native_surface_manifest_count`, and
+`llm_runtime_svllm_local_readiness_native_surface_manifest_sha256`, so a
+status-only native env cannot satisfy strict completion.
 The native evidence env also exposes the strict contract manifest fields
 `svllm_native_streaming_surface_manifest_count`,
 `svllm_native_streaming_surface_manifest_size`, and

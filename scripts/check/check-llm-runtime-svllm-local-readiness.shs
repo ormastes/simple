@@ -133,12 +133,22 @@ native_blocked_gates="none"
 native_primary_blocked_gate="n/a"
 native_next_action="run with --strict-native when native streaming is release-completion evidence"
 native_pass_integrity_status="not_required"
+native_capability_provenance_status="not_required"
+native_capability_evidence_status="not_required"
+native_surface_manifest_count="not_required"
+native_surface_manifest_sha256="not_required"
+native_evidence_completeness_status="not_required"
 if [ "$STRICT_NATIVE" -eq 1 ]; then
     native_status="missing"
     native_reason="missing_native_streaming_evidence"
     native_blocked_gates="native_streaming_evidence"
     native_primary_blocked_gate="native_streaming_evidence"
     native_next_action="run scripts/check/check-llm-runtime-svllm-native-streaming-evidence.shs, then rerun strict local readiness"
+    native_capability_provenance_status="missing"
+    native_capability_evidence_status="missing"
+    native_surface_manifest_count="missing"
+    native_surface_manifest_sha256="missing"
+    native_evidence_completeness_status="missing"
     if [ -f "$NATIVE_EVIDENCE_ENV" ]; then
         evidence_status="$(sed -n 's/^svllm_native_streaming_status=//p' "$NATIVE_EVIDENCE_ENV" | tail -n 1)"
         evidence_reason="$(sed -n 's/^svllm_native_streaming_reason=//p' "$NATIVE_EVIDENCE_ENV" | tail -n 1)"
@@ -146,10 +156,33 @@ if [ "$STRICT_NATIVE" -eq 1 ]; then
         evidence_primary_blocked_gate="$(sed -n 's/^svllm_native_streaming_primary_blocked_gate=//p' "$NATIVE_EVIDENCE_ENV" | tail -n 1)"
         evidence_next_action="$(sed -n 's/^svllm_native_streaming_next_action=//p' "$NATIVE_EVIDENCE_ENV" | tail -n 1)"
         evidence_pass_integrity="$(sed -n 's/^svllm_native_streaming_pass_integrity_status=//p' "$NATIVE_EVIDENCE_ENV" | tail -n 1)"
+        native_capability_provenance_status="$(sed -n 's/^svllm_native_streaming_capability_provenance_status=//p' "$NATIVE_EVIDENCE_ENV" | tail -n 1)"
+        native_capability_evidence_status="$(sed -n 's/^svllm_native_streaming_capability_evidence_status=//p' "$NATIVE_EVIDENCE_ENV" | tail -n 1)"
+        native_surface_manifest_count="$(sed -n 's/^svllm_native_streaming_surface_manifest_count=//p' "$NATIVE_EVIDENCE_ENV" | tail -n 1)"
+        native_surface_manifest_sha256="$(sed -n 's/^svllm_native_streaming_surface_manifest_sha256=//p' "$NATIVE_EVIDENCE_ENV" | tail -n 1)"
+        native_evidence_completeness_status="pass"
+        if [ "${native_capability_provenance_status:-missing}" != "ready" ] ||
+           [ "${native_capability_evidence_status:-missing}" != "ready" ] ||
+           [ -z "${native_surface_manifest_count:-}" ] ||
+           [ "${native_surface_manifest_count:-missing}" = "missing" ] ||
+           [ "${native_surface_manifest_count:-0}" = "0" ] ||
+           [ -z "${native_surface_manifest_sha256:-}" ] ||
+           [ "${native_surface_manifest_sha256:-missing}" = "missing" ]; then
+            native_evidence_completeness_status="fail"
+        fi
         native_pass_integrity_status="${evidence_pass_integrity:-missing}"
-        if [ "$evidence_status" = "pass" ] && [ "$evidence_pass_integrity" = "pass" ]; then
+        if [ "$evidence_status" = "pass" ] &&
+           [ "$evidence_pass_integrity" = "pass" ] &&
+           [ "$native_evidence_completeness_status" = "pass" ]; then
             native_status="pass"
             native_reason="${evidence_reason:-native_streaming_passed}"
+        elif [ "$evidence_status" = "pass" ] &&
+             [ "$evidence_pass_integrity" = "pass" ]; then
+            native_status="fail"
+            native_reason="native_streaming_evidence_incomplete"
+            evidence_blocked_gates="native_evidence_completeness"
+            evidence_primary_blocked_gate="native_evidence_completeness"
+            evidence_next_action="rerun native svLLM streaming evidence and require capability provenance, capability evidence, and surface manifest fields"
         elif [ "$evidence_status" = "pass" ]; then
             native_status="fail"
             native_reason="native_streaming_pass_integrity_missing"
@@ -178,6 +211,11 @@ fi
     printf '%s\n' "llm_runtime_svllm_local_readiness_native_primary_blocked_gate=$native_primary_blocked_gate"
     printf '%s\n' "llm_runtime_svllm_local_readiness_native_next_action=$native_next_action"
     printf '%s\n' "llm_runtime_svllm_local_readiness_native_pass_integrity_status=$native_pass_integrity_status"
+    printf '%s\n' "llm_runtime_svllm_local_readiness_native_evidence_completeness_status=$native_evidence_completeness_status"
+    printf '%s\n' "llm_runtime_svllm_local_readiness_native_capability_provenance_status=$native_capability_provenance_status"
+    printf '%s\n' "llm_runtime_svllm_local_readiness_native_capability_evidence_status=$native_capability_evidence_status"
+    printf '%s\n' "llm_runtime_svllm_local_readiness_native_surface_manifest_count=$native_surface_manifest_count"
+    printf '%s\n' "llm_runtime_svllm_local_readiness_native_surface_manifest_sha256=$native_surface_manifest_sha256"
     printf '%s\n' "llm_runtime_svllm_local_readiness_native_env=$NATIVE_EVIDENCE_ENV"
     printf '%s\n' "llm_runtime_svllm_local_readiness_spec_timeout_seconds=$SPEC_TIMEOUT_SECONDS"
     printf '%s\n' "llm_runtime_svllm_local_readiness_surface_manifest=$SURFACE_MANIFEST"
