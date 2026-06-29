@@ -308,6 +308,13 @@ Current 2026-06-26 browser capture findings:
   outer timeout so a UI Python startup failure cannot hang evidence collection.
   After layer registration it still produced no target-control Python evidence:
   `build/renderdoc/chrome-target-control-timeout-bounded/evidence.env`.
+- 2026-06-29 target-control rerun aligns the Chrome launch flags with the
+  canonical Vulkan browser path and records RenderDoc debug-log proof. The
+  Chrome GPU process loads RenderDoc and registers Vulkan hooks, but
+  `qrenderdoc --ui-python` exits by timeout (`rc=124`) with an empty log and no
+  `target-control.env`, so no `.rdc` is produced. Current reason:
+  `qrenderdoc-ui-python-timeout-without-target-evidence`. Evidence:
+  `doc/09_report/renderdoc_chrome_target_control_2026-06-29.md`.
 - Adding `--no-zygote` to the Chromium launch contract did not fix the direct
   Chrome RenderDoc capture; Chrome still restarts the GPU process with
   `exit_code=139` and produces no `.rdc`. Evidence:
