@@ -1,52 +1,52 @@
 # RenderDoc External Host Capture
 
-- status: fail
-- reason: chromium-gpu-process-crashed-under-renderdoc
+- status: pass
+- reason: pass
 - setup status: ready
 - setup reason: ready
-- run capture: 1
-- capture env: build/renderdoc/chrome-display-helper/capture/html/evidence.env
-- capture status: fail
-- capture reason: missing-rdc
-- capture file: 
-- capture magic: 
-- capture file magic: 
+- run capture: 0
+- capture env: build/renderdoc/chrome-implicit-layer-default-autocapture/html/evidence.env
+- capture status: pass
+- capture reason: pass
+- capture file: build/renderdoc/chrome-implicit-layer-default-autocapture/html/gpu_chrome_capture.rdc
+- capture magic: RDOC
+- capture file magic: RDOC
 - capture HTML fixture: /home/yoon/simple/test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html
-- capture log: build/renderdoc/chrome-display-helper/capture/html/renderdoc-html.log
-- GPU process exits: fail count=9 codes=139
-- gate status: fail
-- gate reason: chromium-gpu-process-crashed-under-renderdoc
+- capture log: build/renderdoc/chrome-implicit-layer-default-autocapture/html/renderdoc-html.log
+- GPU process exits: not-recorded count=0 codes=
+- gate status: pass
+- gate reason: pass
 - gate scene: html-css-chrome
 - gate HTML fixture: /home/yoon/simple/test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html
-- gate capture file magic: 
+- gate capture file magic: RDOC
 - gate requested API: vulkan
 - gate requested ANGLE: vulkan
 
 ## Raw Evidence
-- rdoc_external_host_capture_status=fail
-- rdoc_external_host_capture_reason=chromium-gpu-process-crashed-under-renderdoc
+- rdoc_external_host_capture_status=pass
+- rdoc_external_host_capture_reason=pass
 - rdoc_external_host_setup_status=ready
 - rdoc_external_host_setup_reason=ready
-- rdoc_external_host_run_capture=1
-- rdoc_external_host_capture_env=build/renderdoc/chrome-display-helper/capture/html/evidence.env
-- rdoc_external_host_capture_status_raw=fail
-- rdoc_external_host_capture_reason_raw=missing-rdc
-- rdoc_external_host_capture_file=
-- rdoc_external_host_capture_file_status=missing
-- rdoc_external_host_capture_magic=
-- rdoc_external_host_capture_file_magic=
+- rdoc_external_host_run_capture=0
+- rdoc_external_host_capture_env=build/renderdoc/chrome-implicit-layer-default-autocapture/html/evidence.env
+- rdoc_external_host_capture_status_raw=pass
+- rdoc_external_host_capture_reason_raw=pass
+- rdoc_external_host_capture_file=build/renderdoc/chrome-implicit-layer-default-autocapture/html/gpu_chrome_capture.rdc
+- rdoc_external_host_capture_file_status=pass
+- rdoc_external_host_capture_magic=RDOC
+- rdoc_external_host_capture_file_magic=RDOC
 - rdoc_external_host_capture_html_path=/home/yoon/simple/test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html
-- rdoc_external_host_capture_log=build/renderdoc/chrome-display-helper/capture/html/renderdoc-html.log
-- rdoc_external_host_gpu_process_exit_status=fail
-- rdoc_external_host_gpu_process_exit_count=9
-- rdoc_external_host_gpu_process_exit_codes=139
-- rdoc_external_host_gpu_process_exit_reason=gpu-process-exited-unexpectedly
-- rdoc_external_host_gate_status=fail
-- rdoc_external_host_gate_reason=chromium-gpu-process-crashed-under-renderdoc
+- rdoc_external_host_capture_log=build/renderdoc/chrome-implicit-layer-default-autocapture/html/renderdoc-html.log
+- rdoc_external_host_gpu_process_exit_status=not-recorded
+- rdoc_external_host_gpu_process_exit_count=0
+- rdoc_external_host_gpu_process_exit_codes=
+- rdoc_external_host_gpu_process_exit_reason=
+- rdoc_external_host_gate_status=pass
+- rdoc_external_host_gate_reason=pass
 - rdoc_external_host_gate_scene=html-css-chrome
 - rdoc_external_host_gate_html_path=/home/yoon/simple/test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html
-- rdoc_external_host_gate_capture_file_status=missing
-- rdoc_external_host_gate_capture_file_magic=
+- rdoc_external_host_gate_capture_file_status=pass
+- rdoc_external_host_gate_capture_file_magic=RDOC
 - rdoc_external_host_gate_requested_api=vulkan
 - rdoc_external_host_gate_requested_angle=vulkan
 - rdoc_external_host_gate_requested_features=Vulkan

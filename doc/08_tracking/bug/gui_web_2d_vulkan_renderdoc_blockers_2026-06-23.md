@@ -528,6 +528,22 @@ Current 2026-06-26 browser capture findings:
   `build/renderdoc/chrome-gpu-use-gl-angle/html/evidence.env`,
   `build/renderdoc/electron-gpu-use-gl-angle/electron-html/evidence.env`, and
   `doc/09_report/renderdoc_browser_use_gl_angle_2026-06-29.md`.
+- 2026-06-29 The Linux browser `.rdc` blocker is resolved for the GPU-child
+  autocapture route by forcing the Vulkan implicit layer search path to the
+  per-run Vulkan-only RenderDoc manifest. The previous runs set only
+  `VK_LAYER_PATH`, which let the Vulkan loader select the globally registered
+  `/opt/renderdoc` implicit layer. The helpers now export
+  `VK_IMPLICIT_LAYER_PATH` beside `VK_LAYER_PATH` and default GPU autocapture to
+  the loader-lock-free ELF RenderDoc API lookup. Fresh Chrome and Electron
+  evidence both emit valid `RDOC` artifacts, and the focused Linux render-log
+  aggregate reports `linux_vulkan_render_log_compare_renderdoc_gate_status=pass`.
+  Evidence:
+  `build/renderdoc/chrome-implicit-layer-default-autocapture/html/evidence.env`,
+  `build/renderdoc/electron-implicit-layer-default-autocapture/electron-html/evidence.env`,
+  `build/renderdoc/chrome-implicit-layer-default-gate/evidence.env`,
+  `build/renderdoc/electron-implicit-layer-default-gate/evidence.env`,
+  `build/linux-vulkan-render-log-compare-implicit-layer-default-raw/evidence.env`,
+  and `doc/09_report/renderdoc_browser_implicit_layer_capture_2026-06-29.md`.
 - 2026-06-29 ANGLE's upstream debugging guide documents
   `RENDERDOC_HOOK_EGL=0` as a Windows workaround and says Linux requires a
   RenderDoc build without GL/GLES support for this EGL-hooking capture issue.

@@ -504,11 +504,20 @@ see `doc/09_report/renderdoc_browser_linux_angle_egl_hook_2026-06-29.md`.
 For Linux, `scripts/setup/build-renderdoc-linux-vulkan-only.shs` builds
 RenderDoc with `ENABLE_GL=OFF`, `ENABLE_GLES=OFF`, `ENABLE_EGL=OFF`, and
 `ENABLE_VULKAN=ON` into `build/tools/renderdoc-linux-vulkan-only`. The shared
-RenderDoc finder prefers this tree when present. Current local evidence shows
-this build is available and reports compile-time API support as `Vulkan` only,
-but Chrome and Electron still fail `missing-rdc` with
-`egl_initialize_return_count=0`; see
+RenderDoc finder prefers this tree when present. Earlier local evidence showed
+this build available with compile-time API support as `Vulkan` only, but Chrome
+and Electron still failed `missing-rdc` while only `VK_LAYER_PATH` was forced;
+see
 `doc/09_report/renderdoc_linux_vulkan_only_build_2026-06-29.md`.
+Browser GPU-child capture must force both `VK_LAYER_PATH` and
+`VK_IMPLICIT_LAYER_PATH` to the generated per-run `vulkan-layer.d` directory.
+`VK_LAYER_PATH` alone is not enough for RenderDoc because the Vulkan loader can
+still choose a globally registered implicit layer before the run-local
+Vulkan-only manifest. The GPU-autocapture launcher defaults to the
+loader-lock-free ELF lookup for `RENDERDOC_GetAPI` and disables the `dlopen`
+fallback for this route. Current Linux evidence closes both browser `.rdc`
+gates with `RDOC` magic; see
+`doc/09_report/renderdoc_browser_implicit_layer_capture_2026-06-29.md`.
 For diagnostic Chromium flag variants, the shared flag helpers accept
 `RDOC_CHROME_EXTRA_VULKAN_FLAGS` and `RDOC_ELECTRON_EXTRA_VULKAN_FLAGS`.
 These variables append to the browser-specific Vulkan launch flags without
