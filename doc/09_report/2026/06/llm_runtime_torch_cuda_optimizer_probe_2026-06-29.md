@@ -12,6 +12,7 @@
 - optimizer_step_attempted: `false`
 - before_sum: `missing`
 - after_sum: `missing`
+- next_action: `build or install the Simple runtime with libtorch symbols available, then rerun the strict Torch optimizer probe`
 - exit_code: `0`
 - env: `build/llm_runtime_torch_cuda_optimizer_probe/evidence.env`
 - log: `build/llm_runtime_torch_cuda_optimizer_probe/probe.log`

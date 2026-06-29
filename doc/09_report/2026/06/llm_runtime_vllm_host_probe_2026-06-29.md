@@ -12,6 +12,7 @@
 - endpoint_status: `not_checked`
 - models_status: `not_fetched`
 - models_reason: `environment_skipped`
+- next_action: `install or expose the local vllm executable, then rerun the strict vLLM host probe`
 - exit_code: `0`
 - env: `build/llm_runtime_vllm_host_probe/evidence.env`
 - log: `build/llm_runtime_vllm_host_probe/preflight.log`

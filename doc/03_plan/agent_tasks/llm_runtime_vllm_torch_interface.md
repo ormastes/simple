@@ -794,3 +794,8 @@ The svLLM aggregate blocker table is now mode-aware. Default local-readiness
 mode reports `required_gates=local_readiness`, `blocked_gates=none`, and
 `reason=default_local_readiness_only`; strict host mode remains responsible for
 the native `read_range`, pinned-buffer, and device-staging blockers.
+
+The focused vLLM host probe and Torch optimizer probe now write `next_action`
+fields, and the aggregate forwards them through the vLLM/Torch detail rows.
+The remaining WARN lanes therefore name both the blocked gate and the concrete
+operator action needed before strict host completion can pass.

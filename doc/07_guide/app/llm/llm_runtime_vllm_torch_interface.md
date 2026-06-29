@@ -100,8 +100,10 @@ The evidence env records `llm_runtime_vllm_host_probe_required_gates`,
 `llm_runtime_vllm_host_probe_readiness_status`,
 `llm_runtime_vllm_host_probe_preflight_status`,
 `llm_runtime_vllm_host_probe_endpoint_status`, and
-`llm_runtime_vllm_host_probe_models_status` so strict aggregate runs can report
-the exact local serving blocker. Keep `FR-LLM-RUNTIME-0001` open until a
+`llm_runtime_vllm_host_probe_models_status`, and
+`llm_runtime_vllm_host_probe_next_action` so strict aggregate runs can report
+the exact local serving blocker and the next operator step. Keep
+`FR-LLM-RUNTIME-0001` open until a
 configured local endpoint reaches `status=ready`, `endpoint=configured`, and
 `models_status=ready` after `/v1/models` serves the selected base model.
 If a host is missing GPU tooling too, `local_gpu` is added to the blocked-gates
@@ -143,8 +145,9 @@ classifying the self-hosted Simple runtime as `unavailable` with
 `torch_cuda_optimizer_probe_cuda_available_normalized`,
 `torch_cuda_optimizer_probe_parameter_is_cuda_normalized`,
 `torch_cuda_optimizer_probe_grad_handle_normalized`, and
-`torch_cuda_optimizer_probe_optimizer_step_attempted_normalized` so strict
-aggregate runs can report the exact blocked Torch gate. Use this wrapper as the
+`torch_cuda_optimizer_probe_optimizer_step_attempted_normalized`, and
+`torch_cuda_optimizer_probe_next_action` so strict aggregate runs can report the
+exact blocked Torch gate and the next operator step. Use this wrapper as the
 canonical evidence path for the real CUDA optimizer-step gate; run it with
 `--strict` when unavailable hosts must fail the lane instead of recording a
 warning.
@@ -179,7 +182,8 @@ blocked native gates, while strict host mode reports
 also records
 `llm_goal_evidence_torch_optimizer_detail` for Simple/libtorch CUDA optimizer
 status, host/runtime gates, gradient handle, optimizer-step attempt, and
-before/after parameter sums. It also records
+before/after parameter sums. vLLM and Torch detail rows include the focused
+wrapper `next_action` values. It also records
 `llm_goal_evidence_finetune_guard_detail` for acceptance status, reason, gate
 exit/status, compact blocked gates, training/model/eval readiness, license,
 safety, deployment, app handoff, decision status, and next action. Those detail
