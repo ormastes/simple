@@ -110,13 +110,32 @@ class HostedWmCaptureMetrics:
     backend_evidence: GuiBackendEvidence
     write_ok: bool
 
-fn write_argb_crop_ppm(path: text, source_width: i32, x: i32, y: i32, width: i32, height: i32, pixels: [u32]) -> bool:
+class HostedCaptureResult:
+    write_ok: bool
+    metrics: HostedCropMetrics
+
+# Single pass over the crop: writes the P3 PPM (when path is set) AND accumulates
+# the first-frame diagnostics. Both need r/g/b per pixel, so folding them avoids a
+# second full pass. Metric definitions (background #0F172A, bright, accent spread,
+# FNV sample checksum on the 17x13 grid) mirror
+# scripts/check/validate_hosted_wm_capture_ppm.spl so the producer log is
+# self-describing and cross-checkable against the PPM; a producer/PPM divergence
+# pinpoints a broken encode/write path.
+fn render_crop_ppm_with_metrics(path: text, source_width: i32, x: i32, y: i32, width: i32, height: i32, pixels: [u32]) -> HostedCaptureResult:
+    val want_write = path != ""
     var offset: i64 = 0
-    val header = "P3\n{width} {height}\n255\n"
-    val header_bytes = rt_file_write_text_at(path, offset, header)
-    if header_bytes < 0:
-        return false
-    offset = offset + header_bytes
+    var write_ok = true
+    if want_write:
+        val header = "P3\n{width} {height}\n255\n"
+        val header_bytes = rt_file_write_text_at(path, offset, header)
+        if header_bytes < 0:
+            write_ok = false
+        else:
+            offset = offset + header_bytes
+    var non_bg: i32 = 0
+    var bright: i32 = 0
+    var accent: i32 = 0
+    var checksum: i64 = 2166136261
     var row: i32 = 0
     while row < height:
         var out = ""
@@ -124,17 +143,52 @@ fn write_argb_crop_ppm(path: text, source_width: i32, x: i32, y: i32, width: i32
         while col < width:
             val idx = (y + row) * source_width + x + col
             val p = if idx >= 0 and idx < pixels.len(): pixels[idx] else: 0xFF000000u32
-            val r = ((p >> 16u32) & 0xFFu32).to_i32()
-            val g = ((p >> 8u32) & 0xFFu32).to_i32()
-            val b = (p & 0xFFu32).to_i32()
-            out = out + r.to_text() + " " + g.to_text() + " " + b.to_text() + "\n"
+            val r = ((p >> 16u32) & 0xFFu32).to_i64()
+            val g = ((p >> 8u32) & 0xFFu32).to_i64()
+            val b = (p & 0xFFu32).to_i64()
+            if r != 15 or g != 23 or b != 42:
+                non_bg = non_bg + 1
+            if r > 210 and g > 210 and b > 210:
+                bright = bright + 1
+            if _crop_max3(r, g, b) - _crop_min3(r, g, b) > 65:
+                accent = accent + 1
+            if (col % 17) == 0 and (row % 13) == 0:
+                val mixed = checksum ^ ((r << 16) | (g << 8) | b)
+                checksum = (mixed * 16777619) & 0xffffffff
+            if want_write and write_ok:
+                out = out + r.to_text() + " " + g.to_text() + " " + b.to_text() + "\n"
             col = col + 1
-        val row_bytes = rt_file_write_text_at(path, offset, out)
-        if row_bytes < 0:
-            return false
-        offset = offset + row_bytes
+        if want_write and write_ok:
+            val row_bytes = rt_file_write_text_at(path, offset, out)
+            if row_bytes < 0:
+                write_ok = false
+            else:
+                offset = offset + row_bytes
         row = row + 1
-    true
+    val metrics = HostedCropMetrics(non_background_pixels: non_bg, bright_pixels: bright, accent_pixels: accent, sample_checksum: checksum.to_u64())
+    HostedCaptureResult(write_ok: write_ok, metrics: metrics)
+
+class HostedCropMetrics:
+    non_background_pixels: i32
+    bright_pixels: i32
+    accent_pixels: i32
+    sample_checksum: u64
+
+fn _crop_max3(a: i64, b: i64, c: i64) -> i64:
+    var m = a
+    if b > m:
+        m = b
+    if c > m:
+        m = c
+    m
+
+fn _crop_min3(a: i64, b: i64, c: i64) -> i64:
+    var m = a
+    if b < m:
+        m = b
+    if c < m:
+        m = c
+    m
 
 fn simple_web_capture_request(title: text, state_text: text, viewport_w: i32, viewport_h: i32) -> HostedWebRenderRequest:
     val app_css = ":root { --glass-accent: #60a5fa; --glass-success: #22c55e; --glass-warning: #f59e0b; --glass-text-secondary: #94a3b8; } body { margin: 0; overflow: hidden; background: #182230; } #app { min-height: 100vh; padding: 0; } .wm-app-container { min-height: 100vh; background: #182230; } .wm-app-titlebar { height: 24px; background: #2050a0; color: #fff; } .wm-app-content { min-height: calc(100vh - 24px); background: #182230; color: #e5e7eb; } .simple-web-line { height: 22px; padding: 0 10px; } .simple-web-accent { color: var(--glass-accent); } .simple-web-success { color: var(--glass-success); } .simple-web-warning { color: var(--glass-warning); } .simple-web-muted { color: var(--glass-text-secondary); }"
@@ -179,7 +233,9 @@ fn capture_shared_hosted_wm_frame(path: text) -> HostedWmCaptureMetrics:
     val fb = HostedCaptureFramebuffer.with_color(HOSTED_WM_CAPTURE_WIDTH, HOSTED_WM_CAPTURE_HEIGHT, HOSTED_WM_BACKGROUND)
     render_shared_mdi_frame(fb)
     val elapsed: i64 = 0
-    val ok = if path != "": write_argb_crop_ppm(path, HOSTED_WM_CAPTURE_WIDTH, HOSTED_WM_CROP_X, HOSTED_WM_CROP_Y, HOSTED_WM_CROP_WIDTH, HOSTED_WM_CROP_HEIGHT, fb.pixels) else: true
+    val capture = render_crop_ppm_with_metrics(path, HOSTED_WM_CAPTURE_WIDTH, HOSTED_WM_CROP_X, HOSTED_WM_CROP_Y, HOSTED_WM_CROP_WIDTH, HOSTED_WM_CROP_HEIGHT, fb.pixels)
+    val metrics = capture.metrics
+    val ok = capture.write_ok
     val evidence = make_gui_backend_evidence(
         "macos_metal",
         "simple_web_request_local_raster_readback",
@@ -191,10 +247,10 @@ fn capture_shared_hosted_wm_frame(path: text) -> HostedWmCaptureMetrics:
         width: HOSTED_WM_CROP_WIDTH,
         height: HOSTED_WM_CROP_HEIGHT,
         pixels: HOSTED_WM_CROP_WIDTH * HOSTED_WM_CROP_HEIGHT,
-        non_background_pixels: 0,
-        bright_pixels: 0,
-        accent_pixels: 0,
-        sample_checksum: 0u64,
+        non_background_pixels: metrics.non_background_pixels,
+        bright_pixels: metrics.bright_pixels,
+        accent_pixels: metrics.accent_pixels,
+        sample_checksum: metrics.sample_checksum,
         render_us: elapsed,
         backend_evidence: evidence,
         write_ok: ok
@@ -208,6 +264,10 @@ fn main() -> i64:
     print "hosted_wm_capture_width=" + metrics.width.to_text()
     print "hosted_wm_capture_height=" + metrics.height.to_text()
     print "hosted_wm_capture_pixels=" + metrics.pixels.to_text()
+    print "hosted_wm_capture_non_background_pixels=" + metrics.non_background_pixels.to_text()
+    print "hosted_wm_capture_bright_pixels=" + metrics.bright_pixels.to_text()
+    print "hosted_wm_capture_accent_pixels=" + metrics.accent_pixels.to_text()
+    print "hosted_wm_capture_sample_checksum=" + metrics.sample_checksum.to_text()
     print "hosted_wm_capture_render_us=" + metrics.render_us.to_text()
     print "hosted_wm_backend_selected=" + metrics.backend_evidence.selected_backend
     print "hosted_wm_backend_fallback_reason=" + metrics.backend_evidence.fallback_reason

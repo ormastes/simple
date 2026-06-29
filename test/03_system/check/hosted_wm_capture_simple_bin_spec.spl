@@ -21,6 +21,8 @@ capture checks do not hide regressions behind the bootstrap seed.
   `simple-bin-forbidden` before capture or validation programs run.
 - REQ-HOSTED-WM-CAPTURE-BIN-003: Evidence records selected Simple binary,
   source, and status fields.
+- REQ-HOSTED-WM-CAPTURE-BIN-004: The capture producer emits the same
+  first-frame pixel diagnostics that the PPM validator independently checks.
 
 ## Plan
 
@@ -28,9 +30,11 @@ capture checks do not hide regressions behind the bootstrap seed.
 
 1. Inspect the wrapper source for self-hosted candidate selection.
 2. Inspect the wrapper source for Rust seed detection and provenance fields.
-3. Run the wrapper with a Rust seed `SIMPLE_BIN` override.
-4. Confirm stdout and report show `simple-bin-forbidden`.
-5. Confirm capture and validation logs are not created for the forbidden path.
+3. Inspect the capture producer for nonzero pixel diagnostics and checksum
+   emission.
+4. Run the wrapper with a Rust seed `SIMPLE_BIN` override.
+5. Confirm stdout and report show `simple-bin-forbidden`.
+6. Confirm capture and validation logs are not created for the forbidden path.
 
 ## Design
 
@@ -71,6 +75,26 @@ describe "Hosted WM capture Simple binary contract":
         expect(script).to_contain("hosted_wm_capture_simple_bin=")
         expect(script).to_contain("hosted_wm_capture_simple_bin_source=")
         expect(script).to_contain("hosted_wm_capture_simple_bin_status=")
+
+    it "keeps producer crop diagnostics aligned with validator evidence":
+        val producer = file_read("src/os/compositor/hosted_wm_capture_evidence.spl")
+        expect(producer).to_contain("render_crop_ppm_with_metrics")
+        expect(producer).to_contain("HostedCropMetrics")
+        expect(producer).to_contain("r != 15 or g != 23 or b != 42")
+        expect(producer).to_contain("r > 210 and g > 210 and b > 210")
+        expect(producer).to_contain("_crop_max3(r, g, b) - _crop_min3(r, g, b) > 65")
+        expect(producer).to_contain("(col % 17) == 0 and (row % 13) == 0")
+        expect(producer).to_contain("sample_checksum: metrics.sample_checksum")
+        expect(producer).to_contain("hosted_wm_capture_non_background_pixels=\" + metrics.non_background_pixels")
+        expect(producer).to_contain("hosted_wm_capture_bright_pixels=\" + metrics.bright_pixels")
+        expect(producer).to_contain("hosted_wm_capture_accent_pixels=\" + metrics.accent_pixels")
+        expect(producer).to_contain("hosted_wm_capture_sample_checksum=\" + metrics.sample_checksum")
+
+        val validator = file_read("scripts/check/validate_hosted_wm_capture_ppm.spl")
+        expect(validator).to_contain("r != 15 or g != 23 or b != 42")
+        expect(validator).to_contain("r > 210 and g > 210 and b > 210")
+        expect(validator).to_contain("max3(r, g, b) - min3(r, g, b) > 65")
+        expect(validator).to_contain("(x % 17) == 0 and (y % 13) == 0")
 
     it "rejects explicit Rust seed before capture or validation execution":
         val root = "build/test-hosted-wm-capture-seed-forbidden"
