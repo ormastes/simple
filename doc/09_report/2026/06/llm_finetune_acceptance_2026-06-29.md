@@ -5,6 +5,7 @@
 - attempt: `llm_backed_app_server_dry_run_retry7`
 - required_gates: `retry6_training_eval,training_allowed,model_manifest,eval_result,target_eval,decision,license,safety,deployment,app_handoff`
 - blocked_gates: `retry6_training_eval|training_allowed|model_manifest|eval_result|target_eval|decision|license|safety|deployment|app_handoff`
+- primary_blocked_gate: `retry6_training_eval`
 - gate_status: `WARN retry7-acceptance-gate`
 - acceptance_allowed: `false`
 - training_allowed: `false`

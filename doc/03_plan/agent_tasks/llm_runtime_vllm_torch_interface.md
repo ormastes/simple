@@ -657,6 +657,14 @@ On this host the lane remains failed with `BLOCKED_RETRY6_NOT_READY` and
 blocked gates for retry6 training/eval, model/eval artifacts, target eval,
 decision, license, safety, deployment, and app handoff.
 
+The acceptance wrapper now also records
+`llm_finetune_acceptance_primary_blocked_gate` and derives
+`llm_finetune_acceptance_next_action` from the first normalized blocked gate.
+Strict aggregate review can therefore distinguish a retry6 training/eval
+blocker from later model manifest, eval result, target eval, review decision,
+license, safety, deployment, or app-handoff blockers without parsing the whole
+gate log.
+
 ## 2026-06-29 vLLM Host Evidence Hardening
 
 `scripts/check/check-llm-runtime-vllm-host-probe.shs` now normalizes the local

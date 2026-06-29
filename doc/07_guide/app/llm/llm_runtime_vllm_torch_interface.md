@@ -202,13 +202,15 @@ Latest fine-tune acceptance evidence:
 normal acceptance gate with `reason=BLOCKED_RETRY6_NOT_READY`. The evidence env
 records `llm_finetune_acceptance_required_gates`,
 `llm_finetune_acceptance_blocked_gates`,
+`llm_finetune_acceptance_primary_blocked_gate`,
 `llm_finetune_acceptance_training_allowed`,
 `llm_finetune_acceptance_model_manifest_exists`,
 `llm_finetune_acceptance_eval_result_exists`,
 `llm_finetune_acceptance_decision_status`,
 `llm_finetune_acceptance_handoff_doc`, and
 `llm_finetune_acceptance_next_action` so strict aggregate runs can report the
-exact model/eval/license/safety/deployment/app-handoff blockers.
+first concrete blocker plus the exact model/eval/license/safety/deployment/
+app-handoff blocker list.
 
 On a configured host, use strict host mode when the aggregate must be
 release-completion evidence for the live gates:
