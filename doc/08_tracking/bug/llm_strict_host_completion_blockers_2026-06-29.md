@@ -19,10 +19,10 @@ Default aggregate:
   vLLM host, svLLM local readiness, Torch optimizer, and fine-tune guard
   evidence now include checked surface/input manifests with size/SHA-256
   metadata and focused log hashes. Public absence rendering also records
-  `vllm_surface_manifest_sha256=d5e832329fd363e592a7989a23e24786e6071d9c8e1a2bf2e81c7dbd757fb451`,
-  `torch_surface_manifest_sha256=617980c0ef42725f88c18981e263cc9976b9ea9fd6c8bf966995acf3ef288861`,
+  `vllm_surface_manifest_sha256=a4ca90b8196d0cc8fbffef4782ad993c82a7201217e0f440d0a20353b51e1075`,
+  `torch_surface_manifest_sha256=5769be59bbaac9c4790f3ce917804a703e3f2c3fbe48e99a36f9144c9691e77a`,
   `public_absence_surface_manifest_count=123` and
-  `public_absence_surface_manifest_sha256=536a912d985c37cebab8a014e4061641ecc6ceb5ee754fc0baf5de54aeb2360c`
+  `public_absence_surface_manifest_sha256=25c0c2106b1b7565dd37cc4a05dceedba094b46071aaca5268035584f848e528`
   with `failure_count=0`, so public manuals and generated evidence continue to
   hide internal absence markers from operator-facing text.
 
@@ -60,7 +60,7 @@ prerequisite summary and must not be treated as a completion pass.
 - local proof already hardened: vLLM host evidence has a checked runtime
   control/readiness source/spec plus operator-guide manifest with
   `vllm_surface_manifest_count=15` and
-  `vllm_surface_manifest_sha256=d5e832329fd363e592a7989a23e24786e6071d9c8e1a2bf2e81c7dbd757fb451`
+  `vllm_surface_manifest_sha256=a4ca90b8196d0cc8fbffef4782ad993c82a7201217e0f440d0a20353b51e1075`
 - required evidence: local `vllm` executable, importable Python `vllm` module
   with non-missing origin, serve preflight, reachable endpoint, and `/v1/models`
   listing the selected base model
@@ -92,7 +92,7 @@ prerequisite summary and must not be treated as a completion pass.
   devices; system/Simple-visible libtorch is missing
 - local proof already hardened: Torch optimizer evidence has a checked live
   probe/source/spec/doc manifest with `torch_surface_manifest_count=19` and
-  `torch_surface_manifest_sha256=617980c0ef42725f88c18981e263cc9976b9ea9fd6c8bf966995acf3ef288861`,
+  `torch_surface_manifest_sha256=5769be59bbaac9c4790f3ce917804a703e3f2c3fbe48e99a36f9144c9691e77a`,
   plus hashed Python Torch discovery, Python wheel path diagnostics, and
   system libtorch probe logs
 - required evidence: Simple/libtorch CUDA optimizer probe with parameter on

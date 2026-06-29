@@ -2,7 +2,7 @@
 
 - command: `release/x86_64-unknown-linux-gnu/simple run src/app/test/torch_cuda_optimizer_probe.spl --mode=interpreter --clean`
 - wrapper_path: `scripts/check/check-llm-runtime-torch-cuda-optimizer-probe.shs`
-- wrapper_sha256: `2f58d759debeca5fd7f89eba553aebced23602bb64f20934ed14cd76f92c9235`
+- wrapper_sha256: `d22e111c16f8350c5368fb7b6675518e93f2a237ab4229b43d1a72324cef9448`
 - probe_path: `src/app/test/torch_cuda_optimizer_probe.spl`
 - probe_sha256: `a541d87776a8203562c3e793f0fa0372fb4a4c8bb88ba366b0200cfec143776c`
 - probe_command_sha256: `fc6c7792072dfddfbfd24fa8f2fa495f3a5649dc20b90082f74d4cefb4ed5463`
@@ -13,7 +13,7 @@
 - blocked_gates: `libtorch`
 - primary_blocked_gate: `libtorch`
 - log_size: `29962`
-- log_sha256: `3311607e41e235e692988d746ebfb8e37e437eaf45ef07ef0a22ba7cdac3b9bd`
+- log_sha256: `64bfca1b4a3578edfc929ee329ee061f0fd6524d97c7b4341771a17b9e3060b7`
 - status_line_count: `2`
 - required_gates_line_count: `1`
 - torch_available_line_count: `1`
@@ -27,9 +27,11 @@
 - python_torch_version: `2.9.1+cu130`
 - python_torch_file: `/home/ormastes/.local/lib/python3.12/site-packages/torch/__init__.py`
 - python_torch_package_dir: `/home/ormastes/.local/lib/python3.12/site-packages/torch`
+- python_torch_library_dir: `/home/ormastes/.local/lib/python3.12/site-packages/torch/lib`
 - python_torch_cmake_prefix_path: `/home/ormastes/.local/lib/python3.12/site-packages/torch/share/cmake`
 - python_torch_library_paths: `/home/ormastes/.local/lib/python3.12/site-packages/torch/lib/libc10.so,/home/ormastes/.local/lib/python3.12/site-packages/torch/lib/libc10_cuda.so,/home/ormastes/.local/lib/python3.12/site-packages/torch/lib/libtorch.so,/home/ormastes/.local/lib/python3.12/site-packages/torch/lib/libtorch_cpu.so,/home/ormastes/.local/lib/python3.12/site-packages/torch/lib/libtorch_cuda.so,/home/ormastes/.local/lib/python3.12/site-packages/torch/lib/libtorch_cuda_linalg.so,/home/ormastes/.local/lib/python3.12/site-packages/torch/lib/libtorch_global_deps.so,/home/ormastes/.local/lib/python3.12/site-packages/torch/lib/libtorch_nvshmem.so,/home/ormastes/.local/lib/python3.12/site-packages/torch/lib/libtorch_python.so`
 - python_torch_library_count: `9`
+- python_torch_libtorch_bundle_status: `ready`
 - python_torch_libtorch_status: `ready`
 - python_torch_libtorch_cuda_status: `ready`
 - python_torch_libc10_status: `ready`
@@ -38,16 +40,16 @@
 - python_torch_cuda_available: `true`
 - python_torch_cuda_device_count: `2`
 - python_torch_env: `build/llm_runtime_torch_cuda_optimizer_probe/python_torch.env`
-- python_torch_env_size: `1383`
-- python_torch_env_sha256: `41cecc1ce1cdf6d7ac9e7f7a8d9d3f7821b60aa84dccff74f0c25e05d7039971`
+- python_torch_env_size: `1511`
+- python_torch_env_sha256: `92be6d3aba966fce00aa76a7ad4b096d4556fa9cb62f55bac6cdc67c15779d1c`
 - system_libtorch_status: `missing`
 - system_libtorch_probe_log: `build/llm_runtime_torch_cuda_optimizer_probe/system_libtorch_probe.log`
 - system_libtorch_probe_log_size: `37`
 - system_libtorch_probe_log_sha256: `ac12d9869521cf8cfba92166a3cae26886942911aea5ff546e369e66faf28e29`
 - surface_manifest: `build/llm_runtime_torch_cuda_optimizer_probe/torch_cuda_optimizer_surface_manifest.tsv`
-- surface_manifest_count: `18`
-- surface_manifest_size: `2192`
-- surface_manifest_sha256: `353f3b72150c26b434807597ea91c6a7fc8a7f4567b28f6c3cd0b50e078fdb58`
+- surface_manifest_count: `19`
+- surface_manifest_size: `2319`
+- surface_manifest_sha256: `5769be59bbaac9c4790f3ce917804a703e3f2c3fbe48e99a36f9144c9691e77a`
 - torch_available: `false`
 - cuda_available: `false`
 - parameter_is_cuda: `missing`
@@ -58,7 +60,7 @@
 - sum_decreased_status: `not_collected`
 - pass_integrity_status: `not_applicable`
 - pass_integrity_reason: `not_applicable`
-- next_action: `build or install the Simple runtime with libtorch symbols available, then rerun the strict Torch optimizer probe`
+- next_action: `expose Python Torch lib directory /home/ormastes/.local/lib/python3.12/site-packages/torch/lib to the Simple runtime with LIBTORCH or LD_LIBRARY_PATH, then rerun the strict Torch optimizer probe`
 - exit_code: `0`
 - env: `build/llm_runtime_torch_cuda_optimizer_probe/evidence.env`
 - log: `build/llm_runtime_torch_cuda_optimizer_probe/probe.log`

@@ -723,6 +723,16 @@ wrapper/spec/doc bundle was not mixed with a newer native capability artifact.
 Use the focused Torch optimizer gate after changing Torch SFFI, CUDA placement,
 or runtime training behavior:
 
+The wrapper records Python Torch discovery separately from Simple runtime
+availability. If `python_torch_libtorch_bundle_status=ready` and
+`python_torch_cuda_library_bundle_status=ready` but `torch_available=false`,
+the next setup step is to expose the reported `python_torch_library_dir` to the
+Simple runtime through the supported libtorch environment (`LIBTORCH` or
+`LD_LIBRARY_PATH`) and rerun the strict optimizer probe. That setup evidence is
+not optimizer completion; strict completion still requires the probe to show
+Simple/libtorch availability, CUDA availability, CUDA parameter placement,
+gradient production, and a decreasing optimizer step.
+
 ```bash
 sh scripts/check/check-llm-runtime-torch-cuda-optimizer-probe.shs
 ```
