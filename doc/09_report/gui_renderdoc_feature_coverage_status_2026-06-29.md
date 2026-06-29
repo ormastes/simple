@@ -16,7 +16,7 @@
 - HTML/CSS full CSS spec render gap: 163 of 394
 - HTML/CSS full rendering goal: incomplete (full-css-rendering-incomplete; full CSS 231/394)
 - HTML/CSS readiness answer: implemented-html-css-ready-full-css-incomplete (implemented surface pass, full CSS incomplete; unrendered CSS 163)
-- Web WM modern shell evidence: fail (capture-failed; interaction not-run; bitmap not-run; audit not-run)
+- Web WM modern shell evidence: pass (pass; interaction pass; bitmap pass; audit pass)
 - Native render-log platform matrix: fail (missing-or-failing-native-render-log-platforms; missing macos-metal,windows-d3d12; failed linux-vulkan; required linux-vulkan,macos-metal,windows-d3d12)
 - Native GUI platform verification: fail (missing-or-failing-native-render-log-platforms; missing macos-metal,windows-d3d12; failed linux-vulkan; required linux-vulkan,macos-metal,windows-d3d12)
 - macOS Metal browser/pixel detail: electron unavailable; chrome unavailable; browser unavailable; pixel missing/missing; diffs missing,missing,missing; ARGB missing,missing,missing; viewport missing
@@ -54,13 +54,12 @@
 - Production surface host:
 - Production Tauri surface capture: missing (missing-tauri-capture-evidence)
 - Production Chrome surface capture: missing (missing-chrome-capture-evidence)
-- blocked completion gates: 12
+- blocked completion gates: 11
 - blocked gate list:
   - original Chrome-on-Vulkan RenderDoc .rdc with RDOC magic
   - Electron Chromium-on-Vulkan RenderDoc .rdc with nonblank ARGB render proof
   - Electron Chromium-on-Vulkan GPU process exits under RenderDoc before .rdc capture
   - Electron and Chrome Vulkan-backed browser RenderDoc proof
-  - modern Web WM Electron visual and interaction evidence
   - native render-log comparison for Linux Vulkan, macOS Metal, and Windows D3D12
   - production GUI/web font offload readback evidence
   - production GUI/web raw Metal readback evidence
@@ -234,8 +233,8 @@
 - web_wm_modern_shell_evidence_exit_code=0
 - web_wm_modern_shell_evidence_source=existing-evidence
 - web_wm_modern_shell_evidence_env=build/test-artifacts/02_integration/app/ui/web_wm_modern_shell_evidence/evidence.env
-- web_wm_modern_shell_evidence_status=fail
-- web_wm_modern_shell_evidence_reason=capture-failed
+- web_wm_modern_shell_evidence_status=pass
+- web_wm_modern_shell_evidence_reason=pass
 - web_wm_modern_shell_evidence_html_path=build/test-artifacts/02_integration/app/ui/web_wm_modern_shell_evidence/simple_wm_modern_preview.html
 - web_wm_modern_shell_evidence_argb_path=build/test-artifacts/02_integration/app/ui/web_wm_modern_shell_evidence/simple_wm_modern_preview_argb.json
 - web_wm_modern_shell_evidence_png_path=build/test-artifacts/02_integration/app/ui/web_wm_modern_shell_evidence/simple_wm_modern_preview.png
@@ -244,30 +243,30 @@
 - web_wm_modern_shell_evidence_interaction_png_path=build/test-artifacts/02_integration/app/ui/web_wm_modern_shell_evidence/simple_wm_modern_preview_after_interaction.png
 - web_wm_modern_shell_evidence_interaction_log_path=build/test-artifacts/02_integration/app/ui/web_wm_modern_shell_evidence/electron_interaction.log
 - web_wm_modern_shell_evidence_html_file_status=pass
-- web_wm_modern_shell_evidence_argb_file_status=missing
-- web_wm_modern_shell_evidence_png_file_status=missing
-- web_wm_modern_shell_evidence_audit_file_status=missing
+- web_wm_modern_shell_evidence_argb_file_status=pass
+- web_wm_modern_shell_evidence_png_file_status=pass
+- web_wm_modern_shell_evidence_audit_file_status=pass
 - web_wm_modern_shell_evidence_log_file_status=pass
-- web_wm_modern_shell_evidence_interaction_file_status=missing
-- web_wm_modern_shell_evidence_interaction_png_file_status=missing
-- web_wm_modern_shell_evidence_interaction_log_file_status=missing
-- web_wm_modern_shell_evidence_artifact_integrity_status=fail
-- web_wm_modern_shell_evidence_artifact_integrity_reason=web-wm-modern-shell-argb-missing
+- web_wm_modern_shell_evidence_interaction_file_status=pass
+- web_wm_modern_shell_evidence_interaction_png_file_status=pass
+- web_wm_modern_shell_evidence_interaction_log_file_status=pass
+- web_wm_modern_shell_evidence_artifact_integrity_status=pass
+- web_wm_modern_shell_evidence_artifact_integrity_reason=pass
 - web_wm_modern_shell_evidence_width=1360
 - web_wm_modern_shell_evidence_height=840
-- web_wm_modern_shell_evidence_bitmap_nonblank_status=not-run
-- web_wm_modern_shell_evidence_audit_pass=not-run
-- web_wm_modern_shell_evidence_unexpected_overlap_count=not-run
-- web_wm_modern_shell_evidence_clipped_count=not-run
-- web_wm_modern_shell_evidence_contrast_failures=not-run
-- web_wm_modern_shell_evidence_touch_failures=not-run
-- web_wm_modern_shell_evidence_interaction_pass=not-run
-- web_wm_modern_shell_evidence_interaction_focus=not-run
-- web_wm_modern_shell_evidence_interaction_keyboard=not-run
-- web_wm_modern_shell_evidence_interaction_input=not-run
-- web_wm_modern_shell_evidence_interaction_pointer=not-run
-- web_wm_modern_shell_evidence_interaction_clicks=not-run
-- web_wm_modern_shell_evidence_interaction_event_count=not-run
+- web_wm_modern_shell_evidence_bitmap_nonblank_status=pass
+- web_wm_modern_shell_evidence_audit_pass=pass
+- web_wm_modern_shell_evidence_unexpected_overlap_count=0
+- web_wm_modern_shell_evidence_clipped_count=0
+- web_wm_modern_shell_evidence_contrast_failures=0
+- web_wm_modern_shell_evidence_touch_failures=0
+- web_wm_modern_shell_evidence_interaction_pass=pass
+- web_wm_modern_shell_evidence_interaction_focus=pass
+- web_wm_modern_shell_evidence_interaction_keyboard=pass
+- web_wm_modern_shell_evidence_interaction_input=pass
+- web_wm_modern_shell_evidence_interaction_pointer=pass
+- web_wm_modern_shell_evidence_interaction_clicks=pass
+- web_wm_modern_shell_evidence_interaction_event_count=13
 - html_css_full_rendering_goal_command=sh scripts/check/check-html-css-full-rendering-goal-status.shs
 - html_css_full_rendering_goal_exit_code=0
 - html_css_full_rendering_goal_status=incomplete
@@ -297,12 +296,12 @@
 - html_css_readiness_answer=implemented-html-css-ready-full-css-incomplete
 - native_render_log_platform_matrix_status=fail
 - native_render_log_platform_matrix_reason=missing-or-failing-native-render-log-platforms
-- native_render_log_platform_matrix_source_revision=@  735025e4d0f5 │ ~
+- native_render_log_platform_matrix_source_revision=@  4706e207a4e1 │ ~
 - native_render_log_platform_matrix_runtime_build=
 - native_render_log_platform_matrix_browser_webview_electron_revision=
 - native_render_log_platform_matrix_graphics_sdk_driver=
 - native_render_log_platform_matrix_runbook_version=
-- gui_web_2d_evidence_source_revision=@  735025e4d0f5 │ ~
+- gui_web_2d_evidence_source_revision=@  4706e207a4e1 │ ~
 - gui_web_2d_evidence_runtime_build=
 - gui_web_2d_evidence_browser_webview_electron_revision=
 - gui_web_2d_evidence_graphics_sdk_driver=
@@ -1052,5 +1051,5 @@
 - html_renderdoc_capture_command=RDOC_EXTERNAL_RUN_CAPTURE=1 sh scripts/check/check-renderdoc-external-host-capture.shs
 - electron_renderdoc_capture_command=RDOC_OUTPUT_DIR=build/renderdoc/canonical-probe scripts/tool/renderdoc-evidence.shs capture-electron-html
 - blocked_completion_gate=original Chrome-on-Vulkan RenderDoc .rdc with RDOC magic
-- blocked_completion_gate_count=12
-- blocked_completion_gates=original Chrome-on-Vulkan RenderDoc .rdc with RDOC magic|Electron Chromium-on-Vulkan RenderDoc .rdc with nonblank ARGB render proof|Electron Chromium-on-Vulkan GPU process exits under RenderDoc before .rdc capture|Electron and Chrome Vulkan-backed browser RenderDoc proof|modern Web WM Electron visual and interaction evidence|native render-log comparison for Linux Vulkan, macOS Metal, and Windows D3D12|production GUI/web font offload readback evidence|production GUI/web raw Metal readback evidence|production GUI/web parity evidence with live Tauri and Chrome captures|retained 4K GUI/web/2D 200fps performance evidence with FPS and checksum|retained 8K GUI/web/2D performance evidence with FPS, checksum, and RSS|full CSS specification rendering coverage beyond implemented Simple Web subset
+- blocked_completion_gate_count=11
+- blocked_completion_gates=original Chrome-on-Vulkan RenderDoc .rdc with RDOC magic|Electron Chromium-on-Vulkan RenderDoc .rdc with nonblank ARGB render proof|Electron Chromium-on-Vulkan GPU process exits under RenderDoc before .rdc capture|Electron and Chrome Vulkan-backed browser RenderDoc proof|native render-log comparison for Linux Vulkan, macOS Metal, and Windows D3D12|production GUI/web font offload readback evidence|production GUI/web raw Metal readback evidence|production GUI/web parity evidence with live Tauri and Chrome captures|retained 4K GUI/web/2D 200fps performance evidence with FPS and checksum|retained 8K GUI/web/2D performance evidence with FPS, checksum, and RSS|full CSS specification rendering coverage beyond implemented Simple Web subset
