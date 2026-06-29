@@ -681,10 +681,14 @@ as a Simple/runtime integration blocker rather than a general CUDA absence.
 
 Follow-up hardening makes wrapper PASS stricter than the probe status line
 alone. If the Simple probe emits `status=pass`, the wrapper now independently
-requires normalized libtorch/CUDA availability, CUDA parameter placement, a
-nonzero gradient handle, an attempted optimizer step, and numeric
-`after_sum < before_sum`; otherwise it rewrites the lane to fail with
-`wrapper_pass_integrity_failed:*`. The aggregate forwards
+requires zero wrapper exit, a non-empty hashed probe log, exactly one complete
+proof record for status, required gates, libtorch/CUDA availability, CUDA
+parameter placement, gradient handle, optimizer step, and before/after sums,
+plus normalized libtorch/CUDA availability, CUDA parameter placement, a nonzero
+gradient handle, an attempted optimizer step, and numeric `after_sum <
+before_sum`; otherwise it rewrites the lane to fail with
+`wrapper_pass_integrity_failed:*` and `blocked_gate=probe_log_integrity`. The
+aggregate forwards the log SHA-256, log size, record counts,
 `torch_cuda_optimizer_probe_sum_decreased_status`,
 `torch_cuda_optimizer_probe_pass_integrity_status`, and
 `torch_cuda_optimizer_probe_pass_integrity_reason`.

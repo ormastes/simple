@@ -204,8 +204,11 @@ classifying the self-hosted Simple runtime as `unavailable` with
 `torch_cuda_optimizer_probe_next_action` so strict aggregate runs can report the
 compact blocked Torch gate list, the first blocked gate, independent pass-log
 integrity, and the next operator step. A probe `status=pass` is accepted only
-when the wrapper also sees libtorch/CUDA availability, CUDA parameter placement,
-a nonzero gradient handle, an attempted optimizer step, and numeric
+when the wrapper also sees a zero wrapper exit, a non-empty hashed probe log,
+exactly one complete proof record for status, required gates, libtorch/CUDA
+availability, CUDA parameter placement, gradient handle, optimizer step, and
+before/after sums, plus normalized libtorch/CUDA availability, CUDA parameter
+placement, a nonzero gradient handle, an attempted optimizer step, and numeric
 `after_sum < before_sum`. Use this wrapper as the
 canonical evidence path for the real CUDA optimizer-step gate; run it with
 `--strict` when unavailable hosts must fail the lane instead of recording a

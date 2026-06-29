@@ -73,6 +73,35 @@ else
     exit_code=$?
 fi
 
+log_size="0"
+log_sha256="missing"
+status_line_count="0"
+required_gates_line_count="0"
+torch_available_line_count="0"
+cuda_available_line_count="0"
+parameter_is_cuda_line_count="0"
+grad_handle_line_count="0"
+optimizer_step_line_count="0"
+before_sum_line_count="0"
+after_sum_line_count="0"
+if [ -s "$OUT_LOG" ]; then
+    log_size="$(wc -c <"$OUT_LOG" | tr -d ' ')"
+    if command -v sha256sum >/dev/null 2>&1; then
+        log_sha256="$(sha256sum "$OUT_LOG" | awk '{print $1}')"
+    elif command -v shasum >/dev/null 2>&1; then
+        log_sha256="$(shasum -a 256 "$OUT_LOG" | awk '{print $1}')"
+    fi
+    status_line_count="$(grep -c '^torch_cuda_optimizer_probe_status=' "$OUT_LOG" 2>/dev/null || true)"
+    required_gates_line_count="$(grep -c '^torch_cuda_optimizer_probe_required_gates=' "$OUT_LOG" 2>/dev/null || true)"
+    torch_available_line_count="$(grep -c '^torch_cuda_optimizer_probe_torch_available=' "$OUT_LOG" 2>/dev/null || true)"
+    cuda_available_line_count="$(grep -c '^torch_cuda_optimizer_probe_cuda_available=' "$OUT_LOG" 2>/dev/null || true)"
+    parameter_is_cuda_line_count="$(grep -c '^torch_cuda_optimizer_probe_parameter_is_cuda=' "$OUT_LOG" 2>/dev/null || true)"
+    grad_handle_line_count="$(grep -c '^torch_cuda_optimizer_probe_grad_handle=' "$OUT_LOG" 2>/dev/null || true)"
+    optimizer_step_line_count="$(grep -c '^torch_cuda_optimizer_probe_optimizer_step_attempted=' "$OUT_LOG" 2>/dev/null || true)"
+    before_sum_line_count="$(grep -c '^torch_cuda_optimizer_probe_before_sum=' "$OUT_LOG" 2>/dev/null || true)"
+    after_sum_line_count="$(grep -c '^torch_cuda_optimizer_probe_after_sum=' "$OUT_LOG" 2>/dev/null || true)"
+fi
+
 grep '^torch_cuda_optimizer_probe_' "$OUT_LOG" >"$OUT_ENV" 2>/dev/null || true
 status="$(sed -n 's/^torch_cuda_optimizer_probe_status=//p' "$OUT_ENV" | tail -n 1)"
 reason="$(sed -n 's/^torch_cuda_optimizer_probe_reason=//p' "$OUT_ENV" | tail -n 1)"
@@ -94,7 +123,7 @@ if [ -z "$reason" ]; then
     reason="not_reported"
 fi
 if [ -z "$required_gates" ]; then
-    required_gates="libtorch,cuda,parameter_cuda,autograd_gradient,optimizer_step_decreases_parameter_sum"
+    required_gates="libtorch,cuda,parameter_cuda,autograd_gradient,optimizer_step_decreases_parameter_sum,probe_log_integrity"
 fi
 if [ -z "$blocked_gate" ]; then
     case "$status" in
@@ -139,7 +168,40 @@ sum_decreased_status="not_collected"
 if [ "$status" = "pass" ]; then
     pass_integrity_status="pass"
     pass_integrity_reason="all_required_pass_fields_present"
-    if [ "$torch_available" != "true" ]; then
+    if [ "$exit_code" != "0" ]; then
+        pass_integrity_status="fail"
+        pass_integrity_reason="wrapper_exit_nonzero"
+    elif [ "$log_size" = "0" ]; then
+        pass_integrity_status="fail"
+        pass_integrity_reason="probe_log_empty"
+    elif [ "$status_line_count" != "1" ]; then
+        pass_integrity_status="fail"
+        pass_integrity_reason="status_record_count_not_one"
+    elif [ "$required_gates_line_count" != "1" ]; then
+        pass_integrity_status="fail"
+        pass_integrity_reason="required_gates_record_count_not_one"
+    elif [ "$torch_available_line_count" != "1" ]; then
+        pass_integrity_status="fail"
+        pass_integrity_reason="torch_available_record_count_not_one"
+    elif [ "$cuda_available_line_count" != "1" ]; then
+        pass_integrity_status="fail"
+        pass_integrity_reason="cuda_available_record_count_not_one"
+    elif [ "$parameter_is_cuda_line_count" != "1" ]; then
+        pass_integrity_status="fail"
+        pass_integrity_reason="parameter_is_cuda_record_count_not_one"
+    elif [ "$grad_handle_line_count" != "1" ]; then
+        pass_integrity_status="fail"
+        pass_integrity_reason="grad_handle_record_count_not_one"
+    elif [ "$optimizer_step_line_count" != "1" ]; then
+        pass_integrity_status="fail"
+        pass_integrity_reason="optimizer_step_record_count_not_one"
+    elif [ "$before_sum_line_count" != "1" ]; then
+        pass_integrity_status="fail"
+        pass_integrity_reason="before_sum_record_count_not_one"
+    elif [ "$after_sum_line_count" != "1" ]; then
+        pass_integrity_status="fail"
+        pass_integrity_reason="after_sum_record_count_not_one"
+    elif [ "$torch_available" != "true" ]; then
         pass_integrity_status="fail"
         pass_integrity_reason="torch_available_not_true"
     elif [ "$cuda_available" != "true" ]; then
@@ -164,7 +226,7 @@ if [ "$status" = "pass" ]; then
     if [ "$pass_integrity_status" != "pass" ]; then
         status="fail"
         reason="wrapper_pass_integrity_failed:$pass_integrity_reason"
-        blocked_gate="optimizer_step_decreases_parameter_sum"
+        blocked_gate="probe_log_integrity"
         blocked_gates="$blocked_gate"
         primary_blocked_gate="$blocked_gate"
     fi
@@ -187,6 +249,9 @@ case "$blocked_gate" in
     optimizer_step_decreases_parameter_sum|optimizer_step_failed)
         next_action="fix optimizer step execution until parameter sum decreases, then rerun the strict Torch optimizer probe"
         ;;
+    probe_log_integrity)
+        next_action="fix the Torch optimizer probe log so it emits one complete hashed PASS record with all required proof fields"
+        ;;
     none)
         next_action="strict Torch optimizer probe is ready"
         ;;
@@ -198,6 +263,17 @@ esac
     printf '%s\n' "torch_cuda_optimizer_probe_blocked_gates=$blocked_gates"
     printf '%s\n' "torch_cuda_optimizer_probe_primary_blocked_gate=$primary_blocked_gate"
     printf '%s\n' "torch_cuda_optimizer_probe_wrapper_exit=$exit_code"
+    printf '%s\n' "torch_cuda_optimizer_probe_log_size=$log_size"
+    printf '%s\n' "torch_cuda_optimizer_probe_log_sha256=$log_sha256"
+    printf '%s\n' "torch_cuda_optimizer_probe_status_line_count=$status_line_count"
+    printf '%s\n' "torch_cuda_optimizer_probe_required_gates_line_count=$required_gates_line_count"
+    printf '%s\n' "torch_cuda_optimizer_probe_torch_available_line_count=$torch_available_line_count"
+    printf '%s\n' "torch_cuda_optimizer_probe_cuda_available_line_count=$cuda_available_line_count"
+    printf '%s\n' "torch_cuda_optimizer_probe_parameter_is_cuda_line_count=$parameter_is_cuda_line_count"
+    printf '%s\n' "torch_cuda_optimizer_probe_grad_handle_line_count=$grad_handle_line_count"
+    printf '%s\n' "torch_cuda_optimizer_probe_optimizer_step_line_count=$optimizer_step_line_count"
+    printf '%s\n' "torch_cuda_optimizer_probe_before_sum_line_count=$before_sum_line_count"
+    printf '%s\n' "torch_cuda_optimizer_probe_after_sum_line_count=$after_sum_line_count"
     printf '%s\n' "torch_cuda_optimizer_probe_python_torch_module_status=$python_torch_module_status"
     printf '%s\n' "torch_cuda_optimizer_probe_python_torch_version=$python_torch_version"
     printf '%s\n' "torch_cuda_optimizer_probe_python_torch_cuda_available=$python_torch_cuda_available"
@@ -228,6 +304,17 @@ esac
     printf '%s\n' "- blocked_gate: \`$blocked_gate\`"
     printf '%s\n' "- blocked_gates: \`$blocked_gates\`"
     printf '%s\n' "- primary_blocked_gate: \`$primary_blocked_gate\`"
+    printf '%s\n' "- log_size: \`$log_size\`"
+    printf '%s\n' "- log_sha256: \`$log_sha256\`"
+    printf '%s\n' "- status_line_count: \`$status_line_count\`"
+    printf '%s\n' "- required_gates_line_count: \`$required_gates_line_count\`"
+    printf '%s\n' "- torch_available_line_count: \`$torch_available_line_count\`"
+    printf '%s\n' "- cuda_available_line_count: \`$cuda_available_line_count\`"
+    printf '%s\n' "- parameter_is_cuda_line_count: \`$parameter_is_cuda_line_count\`"
+    printf '%s\n' "- grad_handle_line_count: \`$grad_handle_line_count\`"
+    printf '%s\n' "- optimizer_step_line_count: \`$optimizer_step_line_count\`"
+    printf '%s\n' "- before_sum_line_count: \`$before_sum_line_count\`"
+    printf '%s\n' "- after_sum_line_count: \`$after_sum_line_count\`"
     printf '%s\n' "- python_torch_module_status: \`$python_torch_module_status\`"
     printf '%s\n' "- python_torch_version: \`$python_torch_version\`"
     printf '%s\n' "- python_torch_cuda_available: \`$python_torch_cuda_available\`"
@@ -248,7 +335,7 @@ esac
     printf '%s\n' "- env: \`$OUT_ENV\`"
     printf '%s\n' "- log: \`$OUT_LOG\`"
     printf '\n'
-    printf 'This wrapper proves the Simple/libtorch CUDA optimizer lane only when all required gates pass. A `status=pass` probe log must also include normalized proof fields showing libtorch and CUDA availability, CUDA parameter placement, a nonzero gradient handle, an attempted optimizer step, and numeric `after_sum < before_sum`. `unavailable` records the exact missing host/runtime gate and remains a strict-host failure.\n'
+    printf 'This wrapper proves the Simple/libtorch CUDA optimizer lane only when all required gates pass. A `status=pass` probe log must be non-empty, hashed, exit with code 0, and include exactly one complete proof record for status, required gates, libtorch/CUDA availability, CUDA parameter placement, gradient handle, optimizer step, and before/after sums. The normalized fields must show libtorch and CUDA availability, CUDA parameter placement, a nonzero gradient handle, an attempted optimizer step, and numeric `after_sum < before_sum`. `unavailable` records the exact missing host/runtime gate and remains a strict-host failure.\n'
 } >"$REPORT_PATH"
 
 case "$status" in
