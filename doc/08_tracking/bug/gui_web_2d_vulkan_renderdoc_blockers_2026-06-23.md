@@ -482,6 +482,18 @@ Current 2026-06-26 browser capture findings:
   `build/renderdoc/chrome-gpu-layer-only/html/evidence.env`,
   `build/renderdoc/electron-gpu-layer-only/electron-html/evidence.env`, and
   `doc/09_report/renderdoc_browser_gpu_layer_isolation_2026-06-29.md`.
+- 2026-06-29 ANGLE's upstream debugging guide documents
+  `RENDERDOC_HOOK_EGL=0` as a Windows workaround and says Linux requires a
+  RenderDoc build without GL/GLES support for this EGL-hooking capture issue.
+  Local Chrome and Electron probes with `RENDERDOC_HOOK_EGL=0` still report
+  `egl_initialize_count=1`, `egl_initialize_return_count=0`, and `missing-rdc`.
+  The Linux aggregate now exposes this as
+  `linux_vulkan_render_log_compare_renderdoc_linux_angle_workaround_status=needed`
+  with reason
+  `linux-angle-eglinitialize-does-not-return-under-renderdoc-layer`. Evidence:
+  `build/renderdoc/chrome-gpu-egl-hook-off/html/evidence.env`,
+  `build/renderdoc/electron-gpu-egl-hook-off/electron-html/evidence.env`, and
+  `doc/09_report/renderdoc_browser_linux_angle_egl_hook_2026-06-29.md`.
 - The direct Chrome/Electron RenderDoc wrapper now records
   `rdoc_renderdoc_hook_children` and accepts `RDOC_RENDERDOC_HOOK_CHILDREN=0`
   to omit `--opt-hook-children`. This confirms the immediate Chrome GPU crash

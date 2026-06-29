@@ -492,6 +492,15 @@ matching `...renderdoc_electron...` fields. These fields preserve the current
 Linux diagnosis that browser GPU children can enumerate Vulkan layers and
 extensions, enter `eglInitialize`, and still fail to produce `.rdc` before
 `eglInitialize` returns or `vkCreateInstance` is reached.
+When this pattern is present, the row emits
+`linux_vulkan_render_log_compare_renderdoc_linux_angle_workaround_status=needed`
+with reason
+`linux-angle-eglinitialize-does-not-return-under-renderdoc-layer`. ANGLE's
+upstream debugging guide documents `RENDERDOC_HOOK_EGL=0` as a Windows-only
+workaround and says Linux requires a RenderDoc build without GL/GLES support
+for this class of capture issue. The local installed RenderDoc still reports
+the same non-returning `eglInitialize` behavior with `RENDERDOC_HOOK_EGL=0`;
+see `doc/09_report/renderdoc_browser_linux_angle_egl_hook_2026-06-29.md`.
 The same row exposes host readiness fields before platform agents debug capture
 failures:
 `linux_vulkan_render_log_compare_host_renderdoc_status`,
@@ -1679,6 +1688,11 @@ RDOC_AUTOCAPTURE_END_EGL_VK_UNLOCK=2 \
   EGL/Vulkan telemetry, and `RDOC_GPU_LAUNCHER_LAYER_ONLY=1` without the preload
   shim still produces no `.rdc`. The focused evidence is recorded in
   `doc/09_report/renderdoc_browser_gpu_layer_isolation_2026-06-29.md`.
+  `RENDERDOC_HOOK_EGL=0` is also ineffective on this Linux host: Chrome and
+  Electron still enter `eglInitialize`, report
+  `rdoc_gpu_autocapture_egl_initialize_return_count=0`, and produce no `.rdc`.
+  Per ANGLE's upstream debugging guide, the next viable Linux route is a
+  RenderDoc build without GL/GLES support.
 - The Chrome target-control diagnostic wraps `qrenderdoc --ui-python` in an
   outer timeout. If qrenderdoc's UI Python startup hangs, the script now records
   `target-control-no-evidence` instead of leaving the lane running indefinitely.
