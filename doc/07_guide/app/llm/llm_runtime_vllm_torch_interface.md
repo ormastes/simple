@@ -184,7 +184,12 @@ wrappers. The aggregate expects all completion lanes to pass, fails for any WARN
 or missing strict evidence result, and writes `llm_goal_evidence_failed_gates`,
 `llm_goal_evidence_failed_gate_hints`, `llm_goal_evidence_warn_gates`, and
 per-lane `llm_goal_evidence_<lane>_hint` values to the env file for direct
-triage.
+triage. It also copies focused blocker details into
+`llm_goal_evidence_<lane>_required_gates`,
+`llm_goal_evidence_<lane>_blocked_gates`, and
+`llm_goal_evidence_<lane>_blocker_reason` for the vLLM, svLLM, Torch optimizer,
+and fine-tune lanes so operators can triage strict failures from the aggregate
+report without opening every focused env first.
 
 Use the focused public-rendering guard after changing runtime manuals,
 dashboard JSONL wording, or evidence docs:

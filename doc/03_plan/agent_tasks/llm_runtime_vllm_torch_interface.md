@@ -660,3 +660,12 @@ models-list status, and models-list reason. On this host the lane remains
 strict-host aggregate runs should fail that gate until local vLLM is installed,
 serve preflight succeeds, the endpoint is reachable, and `/v1/models` lists the
 selected base model.
+
+## 2026-06-29 Aggregate Blocker Detail Hardening
+
+`scripts/check/check-llm-goal-evidence.shs` now copies focused blocker contracts
+into the aggregate env and report for the vLLM, svLLM, Torch optimizer, and
+fine-tune lanes. The aggregate records per-lane required gates, blocked gates,
+and blocker reasons in `llm_goal_evidence_<lane>_*` keys and adds a Blocker
+Details table to the Markdown report, so strict-host failures can be triaged
+from one artifact instead of opening every focused wrapper output first.
