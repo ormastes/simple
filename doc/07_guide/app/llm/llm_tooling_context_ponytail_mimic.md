@@ -94,7 +94,7 @@ That wrapper includes source/schema contract checks plus
 the lower MCP handlers.
 
 Latest evidence:
-`doc/09_report/2026/06/llm_tooling_context_ponytail_mimic_2026-06-28.md`
+`doc/09_report/2026/06/llm_tooling_context_ponytail_mimic_2026-06-29.md`
 records the context/Ponytail system spec and focused context/Ponytail unit
 specs passing through the self-hosted Simple runtime.
 

@@ -20,11 +20,11 @@
 - execution_lower_ponytail_status: `pass`
 - execution_spec_log: `build/llm_tooling_context_ponytail_full_replacement/mcp_context_ponytail_dispatch_spec.log`
 - execution_spec_log_size: `1420`
-- execution_spec_log_sha256: `2567c99c6279475cd1ef3d456f3827fc6cd99ea0f1cf805a3c5e51010b0feac4`
+- execution_spec_log_sha256: `926d927e0d2ebd3553b3bc746e4c972c6befc16667d9710823c33012b756314c`
 - surface_manifest: `build/llm_tooling_context_ponytail_full_replacement/replacement_surface_manifest.tsv`
 - surface_manifest_count: `10`
 - surface_manifest_size: `1204`
-- surface_manifest_sha256: `63b83529c1d79601f42dd11fa8c8795934c2b1e775f2b1f0f9cb4ad108eaf19d`
+- surface_manifest_sha256: `fc42091e23af5eb19030176fe52c8fe3e142ded243bb796e16e623a651ece716`
 - failures: `none`
 - next_action: `strict context/Ponytail full-replacement evidence is ready`
 - env: `build/llm_tooling_context_ponytail_full_replacement/evidence.env`
