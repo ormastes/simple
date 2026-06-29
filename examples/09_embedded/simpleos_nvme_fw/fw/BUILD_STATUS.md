@@ -22,9 +22,10 @@ commit → rebase onto origin/main (adds-only) → non-force SSH push.
 
 ## Integration — COMPLETE (run-green, end-to-end verified, on origin/main)
 
-All layers implemented and verified. `test_fw.spl` = **225 self-test assertions** across 14
-modules; `sim_main.spl` = full end-to-end (128 writes → read-back → overwrite/GC → trim →
-power-fail + recovery) — all green via `bin/simple run`.
+All layers implemented and verified. `test_fw.spl` = **295 self-test assertions** across 22
+modules; `sim_main.spl` = full single-queue end-to-end (128 writes → read-back → overwrite/GC →
+trim → power-fail + recovery); `nvme_main.spl` = the admin-driven controller e2e (27 asserts) —
+all green via `bin/simple run`.
 
 - **`ftl.spl`** — `Ftl{fil,map,band,journal,seq}`: `write` (alloc → fil.program → journal →
   map.update → mark_valid + invalidate old), `read`/`read_status`, `trim`, `checkpoint`,
@@ -36,6 +37,35 @@ power-fail + recovery) — all green via `bin/simple run`.
   GC below the free-block watermark), `gc_sweep`, `checkpoint`, `power_cycle`, `reap_all`.
 - **`sim_main.spl`** — the production end-to-end gate (`fn main()`).
 - **`test_fw.spl`** — full self-test suite. `README.md` — architecture + requirements coverage.
+
+## NVMe controller front end — COMPLETE (admin + multi IO queue + ONFI NAND)
+
+The full-controller layer, on top of the FTL/FIL stack (legacy single-queue
+`hil.spl`/`firmware.spl` left untouched so its assertions stay the regression gate):
+
+- **`nvme_admin_types.spl`** — admin opcodes, CNS/feature/log ids, admin status codes,
+  `AdminCmd{cid,opcode,nsid,cdw10..12}`, `IdentifyData`, `SmartLog` (types only, no `me`).
+- **`nvme_admin.spl`** — `AdminQueue` (qid-0 SQ/CQ rings), `FeatureStore` (Get/Set Features),
+  command-dword decoders + `AdminCmd` builders, Identify Controller/Namespace + SMART builders.
+- **`nvme_qset.spl`** — `QueueSet`: up to `MAX_IO_QUEUES` IO SQ/CQ pairs in flat parallel
+  arrays (ring of qid q at offset `q*MAX_QUEUE_SIZE`). Enforces NVMe-faithful semantics:
+  CQ-before-SQ, SQ binds to an existing CQ (`SC_CQ_INVALID`), no delete of a CQ with a bound
+  SQ (`SC_QUEUE_BUSY`), qid range / in-use / size checks; fair round-robin `next_pending_sq`.
+- **`nvme_controller.spl`** — `NvmeController{aq,qset,features,ftl,pool,last_id,smart,…}`:
+  `admin_process` (Create/Delete IO SQ/CQ, Identify, Get/Set Features, Get Log Page) and
+  `io_process` (round-robins active SQs → FTL → FIL, posts to each SQ's bound CQ).
+- **`fil_nand_device.spl`** — protocol-accurate ONFI NAND *device* model: CMD/ADDR/DATA latch +
+  `exec()` state machine (READ 00h/30h, PROGRAM 80h/10h, ERASE 60h/D0h, STATUS 70h, RESET FFh),
+  status register (FAIL/ARDY/RDY/WP_N), no-overwrite rule, bad-block + one-shot fault injection.
+- **`nvme_main.spl`** — the controller acceptance e2e: host bring-up (Identify → Features →
+  Create CQ→SQ) → multi-queue IO + round-robin → negative cases (SQ→missing-CQ, delete-bound-CQ)
+  → reverse-order teardown → SMART log → power-cycle survival.
+
+Scope notes (explicit): "full NVMe SSD fw" here = the host-runnable simulation (run-green).
+Bare-metal **rv32** boot of *this Simple firmware* is the no-alloc follow-up (`[i64]`/`.push`
+needs a heap); a self-contained C NAND/FTL demo already boots on `qemu-system-riscv32 -bios none`
+(`ALL RV32 NAND CHECKS PASS`) as current proof of the toolchain + boot path. The FIL→ONFI-device
+swap (run the FIL through `fil_nand_device`) is the API-stable next step (plan phase E3).
 
 Deferred to the build plan (not part of this firmware's run-green core): Lean4 proofs (req 6)
 and sandboxed dynamic policy hooks (req 7); multi-channel scheduling + static wear leveling are

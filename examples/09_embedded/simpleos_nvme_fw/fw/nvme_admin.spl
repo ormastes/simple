@@ -1,0 +1,249 @@
+"""
+nvme_admin — admin command building blocks for the NVMe controller.
+
+Holds the pieces the controller (nvme_controller.spl) composes to service the
+admin queue:
+  * AdminQueue — the qid-0 ring carrying AdminCmd + its completion ring;
+  * FeatureStore — Get/Set Features backing store;
+  * command-dword decoders (qid/qsize/cqid/cns/fid/logid bit layouts);
+  * AdminCmd builders so callers/tests read like NVMe transactions;
+  * Identify Controller/Namespace and SMART log page builders.
+
+Mutations that must persist live on structs the controller OWNS as fields
+(AdminQueue, FeatureStore) so field-mutation-through-`me` semantics apply.
+"""
+
+use nvme_types.*
+use nvme_admin_types.*
+use hil_queue.*   # bool_to_i64
+
+# ── Command-dword decoders (NVMe Create/Delete/Identify/Features layouts) ──────
+fn admin_qid(cdw10: i64) -> i64:
+    cdw10 & 0xFFFF
+
+fn admin_qsize(cdw10: i64) -> i64:
+    (cdw10 >> 16) & 0xFFFF
+
+fn admin_cqid(cdw11: i64) -> i64:
+    (cdw11 >> 16) & 0xFFFF
+
+fn admin_cns(cdw10: i64) -> i64:
+    cdw10 & 0xFF
+
+fn admin_fid(cdw10: i64) -> i64:
+    cdw10 & 0xFF
+
+fn admin_logid(cdw10: i64) -> i64:
+    cdw10 & 0xFF
+
+# ── AdminCmd builders (readable host transactions) ────────────────────────────
+fn admin_identify_cmd(cid: i64, cns: i64) -> AdminCmd:
+    admin_cmd_make(cid, ADMIN_IDENTIFY, 0, cns, 0, 0)
+
+fn admin_identify_ns_cmd(cid: i64, nsid: i64) -> AdminCmd:
+    admin_cmd_make(cid, ADMIN_IDENTIFY, nsid, CNS_NAMESPACE, 0, 0)
+
+fn admin_create_cq_cmd(cid: i64, qid: i64, size: i64) -> AdminCmd:
+    val cdw10: i64 = (size << 16) | qid
+    admin_cmd_make(cid, ADMIN_CREATE_CQ, 0, cdw10, 1, 0)   # cdw11 bit0=PC
+
+fn admin_create_sq_cmd(cid: i64, qid: i64, size: i64, cqid: i64) -> AdminCmd:
+    val cdw10: i64 = (size << 16) | qid
+    val cdw11: i64 = (cqid << 16) | 1                      # cqid + PC
+    admin_cmd_make(cid, ADMIN_CREATE_SQ, 0, cdw10, cdw11, 0)
+
+fn admin_delete_cq_cmd(cid: i64, qid: i64) -> AdminCmd:
+    admin_cmd_make(cid, ADMIN_DELETE_CQ, 0, qid, 0, 0)
+
+fn admin_delete_sq_cmd(cid: i64, qid: i64) -> AdminCmd:
+    admin_cmd_make(cid, ADMIN_DELETE_SQ, 0, qid, 0, 0)
+
+fn admin_set_feature_cmd(cid: i64, fid: i64, value: i64) -> AdminCmd:
+    admin_cmd_make(cid, ADMIN_SET_FEATURES, 0, fid, value, 0)
+
+fn admin_get_feature_cmd(cid: i64, fid: i64) -> AdminCmd:
+    admin_cmd_make(cid, ADMIN_GET_FEATURES, 0, fid, 0, 0)
+
+fn admin_get_log_cmd(cid: i64, logid: i64) -> AdminCmd:
+    admin_cmd_make(cid, ADMIN_GET_LOG, 0, logid, 0, 0)
+
+# ── Identify / SMART builders ─────────────────────────────────────────────────
+fn build_identify_controller() -> IdentifyData:
+    IdentifyData(kind: CNS_CONTROLLER, vid: 0x1B36, num_ns: 1, max_queues: MAX_IO_QUEUES, mdts: 8, nsid: 0, ns_size: 0, ns_cap: 0, lba_bytes: 0)
+
+fn build_identify_namespace(nsid: i64) -> IdentifyData:
+    IdentifyData(kind: CNS_NAMESPACE, vid: 0, num_ns: 0, max_queues: 0, mdts: 0, nsid: nsid, ns_size: LBA_COUNT, ns_cap: LBA_COUNT, lba_bytes: 4096)
+
+fn build_smart_log(reads: i64, writes: i64, power_cycles: i64, unsafe_sd: i64, media_err: i64) -> SmartLog:
+    var crit: i64 = 0
+    if media_err > 0:
+        crit = 1
+    SmartLog(crit_warning: crit, temperature: 313, avail_spare: 100, percent_used: 0, data_units_read: reads, data_units_written: writes, power_cycles: power_cycles, unsafe_shutdowns: unsafe_sd, media_errors: media_err)
+
+# ── FeatureStore — Get/Set Features backing store ─────────────────────────────
+struct FeatureStore:
+    vals: [i64]
+
+fn feature_store_new() -> FeatureStore:
+    var vals: [i64] = []
+    var i: i64 = 0
+    while i < FEAT_MAX:
+        vals.push(0)
+        i = i + 1
+    var fs: FeatureStore = FeatureStore(vals: vals)
+    # default: report (MAX-1) IO queues available, 0's-based per NVMe (NCQR/NSQR)
+    fs.set(FEAT_NUM_QUEUES, ((MAX_IO_QUEUES - 1) << 16) | (MAX_IO_QUEUES - 1))
+    fs.set(FEAT_VOLATILE_WC, 1)
+    fs
+
+impl FeatureStore:
+    me set(fid: i64, value: i64) -> bool:
+        if fid < 0 or fid >= FEAT_MAX:
+            return false
+        me.vals[fid] = value
+        true
+
+    me get(fid: i64) -> i64:
+        if fid < 0 or fid >= FEAT_MAX:
+            return 0
+        me.vals[fid]
+
+# ── AdminQueue — qid-0 submission + completion rings ──────────────────────────
+struct AdminQueue:
+    sq_cid:   [i64]
+    sq_op:    [i64]
+    sq_nsid:  [i64]
+    sq_cdw10: [i64]
+    sq_cdw11: [i64]
+    sq_cdw12: [i64]
+    sq_head:  i64
+    sq_tail:  i64
+    sq_len:   i64
+    cq_cid:    [i64]
+    cq_status: [i64]
+    cq_data:   [i64]
+    cq_head:  i64
+    cq_tail:  i64
+    cq_len:   i64
+    depth:    i64
+
+fn admin_queue_new() -> AdminQueue:
+    val cap: i64 = MAX_QUEUE_SIZE
+    var sq_cid:   [i64] = []
+    var sq_op:    [i64] = []
+    var sq_nsid:  [i64] = []
+    var sq_cdw10: [i64] = []
+    var sq_cdw11: [i64] = []
+    var sq_cdw12: [i64] = []
+    var cq_cid:    [i64] = []
+    var cq_status: [i64] = []
+    var cq_data:   [i64] = []
+    var i: i64 = 0
+    while i < cap:
+        sq_cid.push(0)
+        sq_op.push(0)
+        sq_nsid.push(0)
+        sq_cdw10.push(0)
+        sq_cdw11.push(0)
+        sq_cdw12.push(0)
+        cq_cid.push(0)
+        cq_status.push(0)
+        cq_data.push(0)
+        i = i + 1
+    AdminQueue(sq_cid: sq_cid, sq_op: sq_op, sq_nsid: sq_nsid, sq_cdw10: sq_cdw10, sq_cdw11: sq_cdw11, sq_cdw12: sq_cdw12, sq_head: 0, sq_tail: 0, sq_len: 0, cq_cid: cq_cid, cq_status: cq_status, cq_data: cq_data, cq_head: 0, cq_tail: 0, cq_len: 0, depth: cap)
+
+impl AdminQueue:
+    me submit(c: AdminCmd) -> bool:
+        if me.sq_len == me.depth:
+            return false
+        val t: i64 = me.sq_tail
+        me.sq_cid[t]   = c.cid
+        me.sq_op[t]    = c.opcode
+        me.sq_nsid[t]  = c.nsid
+        me.sq_cdw10[t] = c.cdw10
+        me.sq_cdw11[t] = c.cdw11
+        me.sq_cdw12[t] = c.cdw12
+        me.sq_tail = (me.sq_tail + 1) % me.depth
+        me.sq_len = me.sq_len + 1
+        true
+
+    me pending() -> i64:
+        me.sq_len
+
+    me fetch() -> AdminCmd:
+        val h: i64 = me.sq_head
+        val cid:   i64 = me.sq_cid[h]
+        val op:    i64 = me.sq_op[h]
+        val nsid:  i64 = me.sq_nsid[h]
+        val cdw10: i64 = me.sq_cdw10[h]
+        val cdw11: i64 = me.sq_cdw11[h]
+        val cdw12: i64 = me.sq_cdw12[h]
+        me.sq_head = (me.sq_head + 1) % me.depth
+        me.sq_len = me.sq_len - 1
+        admin_cmd_make(cid, op, nsid, cdw10, cdw11, cdw12)
+
+    me cq_post(p: NvmeCpl) -> bool:
+        if me.cq_len == me.depth:
+            return false
+        val t: i64 = me.cq_tail
+        me.cq_cid[t]    = p.cid
+        me.cq_status[t] = p.status
+        me.cq_data[t]   = p.data
+        me.cq_tail = (me.cq_tail + 1) % me.depth
+        me.cq_len = me.cq_len + 1
+        true
+
+    me cq_pending() -> i64:
+        me.cq_len
+
+    me cq_reap() -> NvmeCpl:
+        val h: i64 = me.cq_head
+        val cid:    i64 = me.cq_cid[h]
+        val status: i64 = me.cq_status[h]
+        val data:   i64 = me.cq_data[h]
+        me.cq_head = (me.cq_head + 1) % me.depth
+        me.cq_len = me.cq_len - 1
+        cpl_make(cid, status, data)
+
+# ── Self-test ─────────────────────────────────────────────────────────────────
+fn nvme_admin_selftest() -> i64:
+    var fail: i64 = 0
+
+    # decoders invert the builders' bit packing
+    val ccq: AdminCmd = admin_create_cq_cmd(11, 3, 64)
+    fail = fail + expect_eq(admin_qid(ccq.cdw10), 3, "create-cq decodes qid")
+    fail = fail + expect_eq(admin_qsize(ccq.cdw10), 64, "create-cq decodes qsize")
+    val csq: AdminCmd = admin_create_sq_cmd(12, 3, 64, 2)
+    fail = fail + expect_eq(admin_qid(csq.cdw10), 3, "create-sq decodes qid")
+    fail = fail + expect_eq(admin_cqid(csq.cdw11), 2, "create-sq decodes bound cqid")
+    val idc: AdminCmd = admin_identify_cmd(13, CNS_CONTROLLER)
+    fail = fail + expect_eq(admin_cns(idc.cdw10), CNS_CONTROLLER, "identify decodes cns")
+
+    # FeatureStore round-trip (value is the 2nd param -> x8-bug guard)
+    var fs: FeatureStore = feature_store_new()
+    fs.set(FEAT_TEMP_THRESH, 358)
+    fail = fail + expect_eq(fs.get(FEAT_TEMP_THRESH), 358, "feature set/get round-trips (x8 guard)")
+    fail = fail + expect_eq(fs.get(FEAT_VOLATILE_WC), 1, "volatile write cache default on")
+
+    # AdminQueue submit/fetch preserves cid + all dwords
+    var aq: AdminQueue = admin_queue_new()
+    aq.submit(admin_set_feature_cmd(21, FEAT_TEMP_THRESH, 311))
+    fail = fail + expect_eq(aq.pending(), 1, "admin SQ pending == 1")
+    val af: AdminCmd = aq.fetch()
+    fail = fail + expect_eq(af.cid, 21, "admin fetch cid round-trips")
+    fail = fail + expect_eq(af.opcode, ADMIN_SET_FEATURES, "admin fetch opcode")
+    fail = fail + expect_eq(admin_fid(af.cdw10), FEAT_TEMP_THRESH, "admin fetch fid")
+    fail = fail + expect_eq(af.cdw11, 311, "admin fetch value dword")
+    aq.cq_post(cpl_make(21, SC_SUCCESS, 0))
+    fail = fail + expect_eq(aq.cq_pending(), 1, "admin CQ pending == 1")
+    val ar: NvmeCpl = aq.cq_reap()
+    fail = fail + expect_eq(ar.cid, 21, "admin completion cid round-trips")
+
+    # Identify builders surface the device geometry
+    val ictrl: IdentifyData = build_identify_controller()
+    fail = fail + expect_eq(ictrl.max_queues, MAX_IO_QUEUES, "identify-controller reports max queues")
+    val ins: IdentifyData = build_identify_namespace(1)
+    fail = fail + expect_eq(ins.ns_size, LBA_COUNT, "identify-namespace reports LBA count")
+    fail = fail + expect_eq(ins.lba_bytes, 4096, "identify-namespace block size 4096")
+
+    fail

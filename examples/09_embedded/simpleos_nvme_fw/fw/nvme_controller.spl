@@ -1,0 +1,230 @@
+"""
+nvme_controller — the full NVMe controller front end.
+
+Composes the admin path and the multi-queue IO path over the existing
+translation/flash stack:
+
+  AdminQueue (qid 0) ─► admin_process ─► QueueSet create/delete, Identify,
+                                          Get/Set Features, Get Log Page
+  QueueSet IO SQ/CQ pairs ─► io_process ─► FTL ─► FIL ─► (emulated) NAND
+                                          behind a generation-handle task context
+
+This is the "full SSD firmware" front end. The legacy single-queue
+hil.spl/firmware.spl path stays untouched (its 225 self-test assertions remain
+the regression gate); this controller is the admin-driven, many-IO-queue layer.
+"""
+
+use nvme_types.*
+use nvme_admin_types.*
+use nvme_admin.*
+use nvme_qset.*
+use hil_command.*
+use hil_queue.*
+use fw_pool.*
+use ftl.*
+
+struct NvmeController:
+    aq:       AdminQueue
+    qset:     QueueSet
+    features: FeatureStore
+    ftl:      Ftl
+    pool:     TaskPool
+    last_id:  IdentifyData
+    smart:    SmartLog
+    reads:    i64
+    writes:   i64
+    power_cycles: i64
+
+fn nvme_controller_new() -> NvmeController:
+    NvmeController(aq: admin_queue_new(), qset: queue_set_new(), features: feature_store_new(), ftl: ftl_new(), pool: task_pool_new(), last_id: identify_empty(), smart: smart_empty(), reads: 0, writes: 0, power_cycles: 0)
+
+impl NvmeController:
+    # ── Admin path ───────────────────────────────────────────────────────────
+    me admin_submit(c: AdminCmd) -> bool:
+        me.aq.submit(c)
+
+    me admin_completions() -> i64:
+        me.aq.cq_pending()
+
+    me admin_reap() -> NvmeCpl:
+        me.aq.cq_reap()
+
+    me last_identify() -> IdentifyData:
+        me.last_id
+
+    me last_smart() -> SmartLog:
+        me.smart
+
+    # Service every queued admin command; post a completion for each.
+    me admin_process() -> i64:
+        var n: i64 = 0
+        var pend: i64 = me.aq.pending()
+        while pend > 0:
+            val cmd: AdminCmd = me.aq.fetch()
+            var status: i64 = SC_SUCCESS
+            var data: i64 = 0
+            if cmd.opcode == ADMIN_CREATE_CQ:
+                status = me.qset.create_cq(admin_qid(cmd.cdw10), admin_qsize(cmd.cdw10))
+            else:
+                if cmd.opcode == ADMIN_CREATE_SQ:
+                    status = me.qset.create_sq(admin_qid(cmd.cdw10), admin_qsize(cmd.cdw10), admin_cqid(cmd.cdw11))
+                else:
+                    if cmd.opcode == ADMIN_DELETE_SQ:
+                        status = me.qset.delete_sq(admin_qid(cmd.cdw10))
+                    else:
+                        if cmd.opcode == ADMIN_DELETE_CQ:
+                            status = me.qset.delete_cq(admin_qid(cmd.cdw10))
+                        else:
+                            if cmd.opcode == ADMIN_IDENTIFY:
+                                status = me.do_identify(cmd)
+                            else:
+                                if cmd.opcode == ADMIN_SET_FEATURES:
+                                    me.features.set(admin_fid(cmd.cdw10), cmd.cdw11)
+                                    data = cmd.cdw11
+                                else:
+                                    if cmd.opcode == ADMIN_GET_FEATURES:
+                                        data = me.features.get(admin_fid(cmd.cdw10))
+                                    else:
+                                        if cmd.opcode == ADMIN_GET_LOG:
+                                            status = me.do_get_log(cmd)
+                                        else:
+                                            status = SC_INVALID_OPCODE
+            me.aq.cq_post(cpl_make(cmd.cid, status, data))
+            n = n + 1
+            pend = me.aq.pending()
+        n
+
+    me do_identify(cmd: AdminCmd) -> i64:
+        val cns: i64 = admin_cns(cmd.cdw10)
+        if cns == CNS_CONTROLLER:
+            me.last_id = build_identify_controller()
+            return SC_SUCCESS
+        if cns == CNS_NAMESPACE:
+            var nsid: i64 = cmd.nsid
+            if nsid == 0:
+                nsid = 1
+            me.last_id = build_identify_namespace(nsid)
+            return SC_SUCCESS
+        SC_INVALID_FIELD
+
+    me do_get_log(cmd: AdminCmd) -> i64:
+        val logid: i64 = admin_logid(cmd.cdw10)
+        if logid == LOG_SMART:
+            me.smart = build_smart_log(me.reads, me.writes, me.power_cycles, 0, 0)
+            return SC_SUCCESS
+        if logid == LOG_ERROR or logid == LOG_FW_SLOT:
+            return SC_SUCCESS
+        SC_INVALID_FIELD
+
+    # ── IO path (multi-queue) ────────────────────────────────────────────────
+    me io_submit(qid: i64, c: NvmeCmd) -> bool:
+        me.qset.sq_submit(qid, c)
+
+    me io_completions(qid: i64) -> i64:
+        me.qset.cq_pending(qid)
+
+    me io_reap(qid: i64) -> NvmeCpl:
+        me.qset.cq_reap(qid)
+
+    # Run one command end-to-end through the translation/flash stack.
+    me process_one_io(cmd: NvmeCmd) -> NvmeCpl:
+        var status: i64 = cmd_validate(cmd)
+        var rdata: i64 = 0
+        if status == SC_SUCCESS:
+            if cmd_is_write(cmd):
+                val h: Handle = me.pool.acquire(cmd.cid, cmd.lba, cmd.nblocks, cmd.data)
+                me.pool.set_phase(h, PH_PROGRAM)
+                status = me.ftl.write(cmd.lba, cmd.data)
+                me.pool.set_status(h, status)
+                me.pool.set_phase(h, PH_DONE)
+                me.pool.release(h)
+                me.writes = me.writes + 1
+            else:
+                if cmd_is_read(cmd):
+                    rdata = me.ftl.read(cmd.lba)
+                    status = me.ftl.read_status(cmd.lba)
+                    me.reads = me.reads + 1
+                else:
+                    if cmd_is_trim(cmd):
+                        status = me.ftl.trim(cmd.lba)
+                    else:
+                        if cmd_is_flush(cmd):
+                            me.ftl.checkpoint()
+                            status = SC_SUCCESS
+                        else:
+                            status = SC_INTERNAL
+        cpl_make(cmd.cid, status, rdata)
+
+    # Round-robin across all active IO submission queues; post each completion
+    # to that SQ's bound completion queue. Bounded -> always terminates.
+    me io_process() -> i64:
+        var n: i64 = 0
+        var guard: i64 = 0
+        val limit: i64 = MAX_IO_QUEUES * MAX_QUEUE_SIZE
+        var qid: i64 = me.qset.next_pending_sq()
+        while qid >= 1 and guard < limit:
+            val cmd: NvmeCmd = me.qset.sq_fetch(qid)
+            val cpl: NvmeCpl = me.process_one_io(cmd)
+            me.qset.cq_post(me.qset.sq_bound_cq(qid), cpl)
+            n = n + 1
+            guard = guard + 1
+            qid = me.qset.next_pending_sq()
+        n
+
+    # ── Maintenance / durability passthrough ─────────────────────────────────
+    me gc() -> i64:
+        me.ftl.gc_once()
+
+    me free_blocks() -> i64:
+        me.ftl.free_blocks()
+
+    me checkpoint():
+        me.ftl.checkpoint()
+
+    me power_cycle():
+        me.ftl.crash()
+        me.ftl.recover()
+        me.power_cycles = me.power_cycles + 1
+
+# ── Self-test (compact; full admin-driven e2e lives in nvme_main.spl) ─────────
+fn nvme_controller_selftest() -> i64:
+    var fail: i64 = 0
+    var c: NvmeController = nvme_controller_new()
+
+    # Identify the controller via the admin queue
+    c.admin_submit(admin_identify_cmd(1, CNS_CONTROLLER))
+    c.admin_process()
+    val ic: NvmeCpl = c.admin_reap()
+    fail = fail + expect_eq(ic.status, SC_SUCCESS, "identify controller ok")
+    val id: IdentifyData = c.last_identify()
+    fail = fail + expect_eq(id.max_queues, MAX_IO_QUEUES, "identify reports max IO queues")
+
+    # Bring up one IO queue pair (CQ then SQ) via admin
+    c.admin_submit(admin_create_cq_cmd(2, 1, 64))
+    c.admin_submit(admin_create_sq_cmd(3, 1, 64, 1))
+    c.admin_process()
+    val cc: NvmeCpl = c.admin_reap()
+    val cs: NvmeCpl = c.admin_reap()
+    fail = fail + expect_eq(cc.status, SC_SUCCESS, "create IO CQ 1 ok")
+    fail = fail + expect_eq(cs.status, SC_SUCCESS, "create IO SQ 1 ok")
+
+    # Write then read on the new IO queue
+    c.io_submit(1, cmd_make(100, OP_WRITE, 9, 1, 0x55))
+    c.io_process()
+    val w: NvmeCpl = c.io_reap(1)
+    fail = fail + expect_eq(w.status, SC_SUCCESS, "IO write completed")
+    c.io_submit(1, cmd_make(101, OP_READ, 9, 1, 0))
+    c.io_process()
+    val r: NvmeCpl = c.io_reap(1)
+    fail = fail + expect_eq(r.data, 0x55, "IO read returns written byte")
+
+    # Get/Set Features through the admin path
+    c.admin_submit(admin_set_feature_cmd(4, FEAT_TEMP_THRESH, 345))
+    c.admin_submit(admin_get_feature_cmd(5, FEAT_TEMP_THRESH))
+    c.admin_process()
+    val sf: NvmeCpl = c.admin_reap()
+    val gf: NvmeCpl = c.admin_reap()
+    fail = fail + expect_eq(sf.status, SC_SUCCESS, "set feature ok")
+    fail = fail + expect_eq(gf.data, 345, "get feature returns the set value")
+
+    fail

@@ -1,0 +1,277 @@
+"""
+fil_nand_device — ONFI-protocol NAND *device* model (FIL physical layer).
+
+Where `fil_nand` is a behavioural array, this module drives a single NAND chip
+through the real ONFI command/address/data handshake:
+
+    READ    :  00h , <addr> , 30h , (data out)
+    PROGRAM :  80h , <addr> , (data in) , 10h
+    ERASE   :  60h , <block> , D0h
+    STATUS  :  70h            (read status register)
+
+The chip latches a command byte, an address, and (for program) a data byte; the
+*second* command byte of a sequence triggers execution. Results surface through
+the ONFI status register (FAIL/ARDY/RDY/WP_N bits) and a data-out latch, exactly
+as a host flash controller would observe them. Depends only on nvme_types.
+
+Geometry is inherited from nvme_types: NUM_BLOCKS=64, PAGES_PER_BLOCK=64,
+NUM_PAGES=4096. One i64 per page stands in for the 4 KiB page payload.
+"""
+
+use nvme_types.*
+
+# ── ONFI command opcodes ──────────────────────────────────────────────────────
+val ONFI_READ_1ST:  i64 = 0x00   # read setup
+val ONFI_READ_2ND:  i64 = 0x30   # read confirm -> data out
+val ONFI_PROG_1ST:  i64 = 0x80   # program setup
+val ONFI_PROG_2ND:  i64 = 0x10   # program confirm -> execute
+val ONFI_ERASE_1ST: i64 = 0x60   # block-erase setup
+val ONFI_ERASE_2ND: i64 = 0xD0   # block-erase confirm -> execute
+val ONFI_STATUS:    i64 = 0x70   # read status register
+val ONFI_RESET:     i64 = 0xFF   # reset chip state
+val ONFI_READID:    i64 = 0x90   # read id (manufacturer/device)
+
+# ── ONFI status register bits ─────────────────────────────────────────────────
+val STATUS_FAIL: i64 = 0x01   # bit0: last operation failed
+val STATUS_ARDY: i64 = 0x20   # bit5: array ready (no cached op pending)
+val STATUS_RDY:  i64 = 0x40   # bit6: ready (1 = not busy)
+val STATUS_WP_N: i64 = 0x80   # bit7: write-protect# (1 = NOT write protected)
+
+# Idle / ready status: ready, array ready, not write protected, FAIL clear.
+val STATUS_IDLE: i64 = 0xE0   # STATUS_RDY + STATUS_ARDY + STATUS_WP_N
+val STATUS_BUSY_FAIL: i64 = 0xE1  # STATUS_IDLE + STATUS_FAIL
+
+# ── NandDevice: one ONFI-driven NAND chip ─────────────────────────────────────
+struct NandDevice:
+    page_data:  [i64]   # length NUM_PAGES, programmed page payload byte
+    programmed: [i64]   # length NUM_PAGES, 1 = page holds data (cannot overwrite)
+    bad_block:  [i64]   # length NUM_BLOCKS, 1 = block retired
+    cmd:        i64     # latched command byte (last 00h/30h/80h/10h/60h/D0h/70h)
+    addr:       i64     # latched row address: page ppn (read/prog) or block (erase)
+    din:        i64     # data-in latch  (host -> chip, the byte to program)
+    dout:       i64     # data-out latch (chip -> host, post-read)
+    status:     i64     # ONFI status register
+    prog_fail:  i64     # one-shot fault injection: next program fails
+    ecc_fail:   i64     # one-shot fault injection: next read fails ECC
+
+fn nand_device_new() -> NandDevice:
+    var page_data:  [i64] = []
+    var programmed: [i64] = []
+    var bad_block:  [i64] = []
+
+    var i: i64 = 0
+    while i < NUM_PAGES:
+        page_data.push(0)
+        programmed.push(0)
+        i = i + 1
+
+    i = 0
+    while i < NUM_BLOCKS:
+        bad_block.push(0)
+        i = i + 1
+
+    NandDevice(page_data: page_data, programmed: programmed, bad_block: bad_block, cmd: 0, addr: -1, din: 0, dout: 0, status: STATUS_IDLE, prog_fail: 0, ecc_fail: 0)
+
+# ── ONFI bus protocol (all array-mutating methods are single-param) ───────────
+impl NandDevice:
+    # Latch a command byte. RESET clears state; STATUS leaves the register
+    # readable (status() always returns it). The 2nd byte of a sequence is what
+    # exec() dispatches on.
+    me cmd_latch(op: i64):
+        me.cmd = op
+        if op == ONFI_RESET:
+            me.addr = -1
+            me.din = 0
+            me.dout = 0
+            me.status = STATUS_IDLE
+
+    # Latch the target row address (page ppn for read/program, block for erase).
+    me addr_latch(ppn: i64):
+        me.addr = ppn
+
+    # Host presents the byte to be programmed.
+    me data_in(value: i64):
+        me.din = value
+
+    # Execute the latched sequence; the second command byte selects the op.
+    me exec():
+        if me.cmd == ONFI_READ_2ND:
+            me.exec_read()
+        if me.cmd == ONFI_PROG_2ND:
+            me.exec_program()
+        if me.cmd == ONFI_ERASE_2ND:
+            me.exec_erase()
+
+    # READ: load page payload into the data-out latch. An unprogrammed (erased)
+    # page reads as 0 and is still OK. inject_ecc_fail arms an uncorrectable read.
+    me exec_read():
+        val ppn: i64 = me.addr
+        if me.ecc_fail == 1:
+            me.ecc_fail = 0
+            me.dout = 0
+            me.status = STATUS_BUSY_FAIL
+            return
+        if me.programmed[ppn] == 1:
+            me.dout = me.page_data[ppn]
+        else:
+            me.dout = 0
+        me.status = STATUS_IDLE
+
+    # PROGRAM: write data-in to the page. Fails (STATUS_FAIL) if the block is
+    # bad, if the page is already programmed (NAND cannot overwrite), or if a
+    # one-shot program fault is armed.
+    me exec_program():
+        val ppn: i64 = me.addr
+        val blk: i64 = ppn_block(ppn)
+        if me.prog_fail == 1:
+            me.prog_fail = 0
+            me.status = STATUS_BUSY_FAIL
+            return
+        if me.bad_block[blk] == 1:
+            me.status = STATUS_BUSY_FAIL
+            return
+        if me.programmed[ppn] == 1:
+            me.status = STATUS_BUSY_FAIL
+            return
+        me.page_data[ppn] = me.din
+        me.programmed[ppn] = 1
+        me.status = STATUS_IDLE
+
+    # ERASE: clear every page in the block (data + programmed bits). Fails if the
+    # block is retired.
+    me exec_erase():
+        val blk: i64 = me.addr
+        if me.bad_block[blk] == 1:
+            me.status = STATUS_BUSY_FAIL
+            return
+        val first: i64 = block_first_ppn(blk)
+        var pg: i64 = 0
+        while pg < PAGES_PER_BLOCK:
+            val ppn: i64 = first + pg
+            me.page_data[ppn] = 0
+            me.programmed[ppn] = 0
+            pg = pg + 1
+        me.status = STATUS_IDLE
+
+    # Host reads the data-out latch (post-READ).
+    me data_out() -> i64:
+        me.dout
+
+    # Host reads the status register.
+    me status_reg() -> i64:
+        me.status
+
+    # ── test hooks ──
+    me set_bad(block: i64):
+        me.bad_block[block] = 1
+
+    me inject_prog_fail():
+        me.prog_fail = 1
+
+    me inject_ecc_fail():
+        me.ecc_fail = 1
+
+# ── Convenience ONFI sequences (free fns; struct mutation persists) ───────────
+# Issue a full PROGRAM handshake; returns the resulting status register.
+fn onfi_program(dev: NandDevice, ppn: i64, value: i64) -> i64:
+    dev.cmd_latch(ONFI_PROG_1ST)
+    dev.addr_latch(ppn)
+    dev.data_in(value)
+    dev.cmd_latch(ONFI_PROG_2ND)
+    dev.exec()
+    dev.status_reg()
+
+# Issue a full READ handshake; returns the byte from the data-out latch.
+fn onfi_read(dev: NandDevice, ppn: i64) -> i64:
+    dev.cmd_latch(ONFI_READ_1ST)
+    dev.addr_latch(ppn)
+    dev.cmd_latch(ONFI_READ_2ND)
+    dev.exec()
+    dev.data_out()
+
+# Issue a full ERASE handshake on a block; returns the resulting status register.
+fn onfi_erase(dev: NandDevice, block: i64) -> i64:
+    dev.cmd_latch(ONFI_ERASE_1ST)
+    dev.addr_latch(block)
+    dev.cmd_latch(ONFI_ERASE_2ND)
+    dev.exec()
+    dev.status_reg()
+
+# ── Self-test ─────────────────────────────────────────────────────────────────
+fn nand_device_selftest() -> i64:
+    var fail: i64 = 0
+    var dev = nand_device_new()
+
+    # RDY bit is set when idle (freshly reset chip).
+    val s_idle: i64 = dev.status_reg()
+    fail = fail + expect_eq(s_idle & STATUS_RDY, STATUS_RDY, "RDY set when idle")
+    fail = fail + expect_eq(s_idle & STATUS_FAIL, 0, "FAIL clear when idle")
+
+    # Program + read round-trips the EXACT byte for several distinct values.
+    # 13 -> read 13 (a *8 corruption would surface as 104).
+    val pa: i64 = block_first_ppn(3) + 5
+    val pb: i64 = block_first_ppn(3) + 6
+    val pc: i64 = block_first_ppn(3) + 7
+    val pd: i64 = block_first_ppn(3) + 8
+
+    val sa: i64 = onfi_program(dev, pa, 0x42)
+    fail = fail + expect_eq(sa & STATUS_FAIL, 0, "program 0x42 no FAIL")
+    fail = fail + expect_eq(onfi_read(dev, pa), 0x42, "read 0x42 round-trips")
+
+    onfi_program(dev, pb, 102)
+    fail = fail + expect_eq(onfi_read(dev, pb), 102, "read 102 round-trips")
+
+    onfi_program(dev, pc, 255)
+    fail = fail + expect_eq(onfi_read(dev, pc), 255, "read 255 round-trips")
+
+    onfi_program(dev, pd, 13)
+    fail = fail + expect_eq(onfi_read(dev, pd), 13, "read 13 round-trips (x8 guard)")
+
+    # Program the SAME page twice without erase -> second program sets STATUS_FAIL.
+    val s_ov: i64 = onfi_program(dev, pa, 0x99)
+    fail = fail + expect_eq(s_ov & STATUS_FAIL, STATUS_FAIL, "no-overwrite -> FAIL")
+    fail = fail + expect_eq(onfi_read(dev, pa), 0x42, "overwrite did not corrupt page")
+
+    # Erase the block, then program+read works again, and the page reads 0 first.
+    val s_er: i64 = onfi_erase(dev, 3)
+    fail = fail + expect_eq(s_er & STATUS_FAIL, 0, "erase no FAIL")
+    fail = fail + expect_eq(onfi_read(dev, pa), 0, "erased page reads 0")
+    onfi_program(dev, pa, 0x77)
+    fail = fail + expect_eq(onfi_read(dev, pa), 0x77, "reprogram after erase")
+
+    # Program to a retired block -> STATUS_FAIL.
+    dev.set_bad(7)
+    val s_bad: i64 = onfi_program(dev, block_first_ppn(7), 0x11)
+    fail = fail + expect_eq(s_bad & STATUS_FAIL, STATUS_FAIL, "bad block program -> FAIL")
+
+    # inject_prog_fail -> next program reports FAIL; the one-shot then clears.
+    dev.inject_prog_fail()
+    val pf: i64 = block_first_ppn(4)
+    val s_pf: i64 = onfi_program(dev, pf, 0x33)
+    fail = fail + expect_eq(s_pf & STATUS_FAIL, STATUS_FAIL, "inject_prog_fail -> FAIL")
+    val s_pf2: i64 = onfi_program(dev, pf, 0x33)
+    fail = fail + expect_eq(s_pf2 & STATUS_FAIL, 0, "program ok after one-shot clears")
+    fail = fail + expect_eq(onfi_read(dev, pf), 0x33, "post-recovery read round-trips")
+
+    # inject_ecc_fail -> next read reports the ECC-fail path (status FAIL, data 0).
+    val pe: i64 = block_first_ppn(5)
+    onfi_program(dev, pe, 0x5A)
+    fail = fail + expect_eq(onfi_read(dev, pe), 0x5A, "pre-ECC-fail read ok")
+    dev.inject_ecc_fail()
+    val ev: i64 = onfi_read(dev, pe)
+    fail = fail + expect_eq(ev, 0, "ECC fail read returns 0")
+    fail = fail + expect_eq(dev.status_reg() & STATUS_FAIL, STATUS_FAIL, "ECC fail sets STATUS_FAIL")
+    fail = fail + expect_eq(onfi_read(dev, pe), 0x5A, "read ok after ECC one-shot clears")
+
+    # Read of an unprogrammed (erased) page returns 0 with no FAIL.
+    val pu: i64 = block_first_ppn(6) + 10
+    fail = fail + expect_eq(onfi_read(dev, pu), 0, "unprogrammed read returns 0")
+    fail = fail + expect_eq(dev.status_reg() & STATUS_FAIL, 0, "unprogrammed read no FAIL")
+
+    # RESET returns the chip to a ready idle state.
+    dev.cmd_latch(ONFI_RESET)
+    fail = fail + expect_eq(dev.status_reg() & STATUS_RDY, STATUS_RDY, "RDY set after RESET")
+
+    fail
+# Aggregated through test_fw.spl (nand_device_selftest); no module-level `main`
+# so the file composes without main-collision. Verify with `bin/simple run`.
