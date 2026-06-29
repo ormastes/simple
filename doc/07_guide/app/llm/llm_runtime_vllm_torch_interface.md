@@ -348,7 +348,11 @@ The local fine-tune guard evidence writes its own current blocker contract to
 `build/llm_finetune_guard_evidence/evidence.env`. Default aggregate mode uses
 that guard env for fine-tune required gates, blocked gates, blocker reason, and
 next action; strict host mode still uses the acceptance env generated during
-the strict run.
+the strict run. The guard env also records a manifest count, size, and SHA-256
+for the fixed-format data file, retry6/retry7 gate scripts, retry6/retry7 SSpec
+files, and produced guard/spec logs, plus per-log sizes and SHA-256 values.
+Guard-only fine-tune evidence is therefore traceable to exact local process
+inputs and outputs.
 
 On a configured host, use strict host mode when the aggregate must be
 release-completion evidence for the live gates:

@@ -795,6 +795,12 @@ action. Default aggregate mode reads those fields from
 `build/llm_finetune_guard_evidence/evidence.env` instead of relying on a
 previous acceptance env; strict host mode still reads the freshly-generated
 acceptance env.
+The guard wrapper also writes a fine-tune guard surface manifest with path,
+size, and SHA-256 rows for the fixed-format data file, retry6/retry7 gate
+scripts, retry6/retry7 SSpec files, and each produced guard/spec log. The
+aggregate fine-tune detail forwards the manifest hash plus per-log size and
+SHA-256 fields, so guard-only PASS evidence cannot be accepted as a status-only
+claim.
 
 ## 2026-06-29 Aggregate Blocker Detail Hardening
 
