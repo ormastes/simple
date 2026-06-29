@@ -26,6 +26,9 @@ read_range_status="unsupported"
 pinned_buffer_status="unsupported"
 device_staging_status="unsupported"
 local_read_bytes_status="unknown"
+blocked_gates="native_read_range"
+primary_blocked_gate="native_read_range"
+next_action="implement native read_range support, then rerun strict svLLM native streaming evidence"
 
 normalize_capability_status() {
     case "$(printf '%s\n' "$1" | tr '[:upper:]' '[:lower:]')" in
@@ -79,9 +82,48 @@ elif [ "$local_status" = "pass" ]; then
     fi
 fi
 
+if [ "$status" = "pass" ]; then
+    blocked_gates="none"
+    primary_blocked_gate="n/a"
+    next_action="strict svLLM native streaming evidence is ready"
+elif [ "$local_status" != "pass" ]; then
+    blocked_gates="local_readiness"
+    primary_blocked_gate="local_readiness"
+    next_action="fix local svLLM readiness failures, then rerun strict svLLM native streaming evidence"
+else
+    blocked_gates=""
+    if [ "$read_range_status" != "ready" ]; then
+        blocked_gates="native_read_range"
+    fi
+    if [ "$pinned_buffer_status" != "ready" ]; then
+        if [ -z "$blocked_gates" ]; then blocked_gates="pinned_buffer"; else blocked_gates="$blocked_gates|pinned_buffer"; fi
+    fi
+    if [ "$device_staging_status" != "ready" ]; then
+        if [ -z "$blocked_gates" ]; then blocked_gates="device_staging"; else blocked_gates="$blocked_gates|device_staging"; fi
+    fi
+    primary_blocked_gate="${blocked_gates%%|*}"
+    case "$primary_blocked_gate" in
+        native_read_range)
+            next_action="implement native read_range support, then rerun strict svLLM native streaming evidence"
+            ;;
+        pinned_buffer)
+            next_action="implement pinned-buffer registration, then rerun strict svLLM native streaming evidence"
+            ;;
+        device_staging)
+            next_action="implement device staging, then rerun strict svLLM native streaming evidence"
+            ;;
+        *)
+            next_action="collect strict svLLM native streaming evidence and resolve reported native blockers"
+            ;;
+    esac
+fi
+
 {
     printf '%s\n' "svllm_native_streaming_status=$status"
     printf '%s\n' "svllm_native_streaming_reason=$reason"
+    printf '%s\n' "svllm_native_streaming_blocked_gates=$blocked_gates"
+    printf '%s\n' "svllm_native_streaming_primary_blocked_gate=$primary_blocked_gate"
+    printf '%s\n' "svllm_native_streaming_next_action=$next_action"
     printf '%s\n' "svllm_native_streaming_local_readiness_status=$local_status"
     printf '%s\n' "svllm_native_streaming_capability_source=$CAPABILITY_SOURCE"
     printf '%s\n' "svllm_native_streaming_read_range_status=$read_range_status"
@@ -96,6 +138,9 @@ fi
     printf '# LLM Runtime svLLM Native Streaming Evidence\n\n'
     printf '%s\n' "- status: \`$status\`"
     printf '%s\n' "- reason: \`$reason\`"
+    printf '%s\n' "- blocked_gates: \`$blocked_gates\`"
+    printf '%s\n' "- primary_blocked_gate: \`$primary_blocked_gate\`"
+    printf '%s\n' "- next_action: \`$next_action\`"
     printf '%s\n' "- local_readiness: \`$local_status\`"
     printf '%s\n' "- capability_source: \`$CAPABILITY_SOURCE\`"
     printf '%s\n' "- read_range: \`$read_range_status\`"

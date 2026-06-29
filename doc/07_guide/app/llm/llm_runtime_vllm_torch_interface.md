@@ -129,6 +129,11 @@ the native evidence env. It records concrete blockers such as
 buffer registration, and device staging are all ready. Native evidence records
 `svllm_native_streaming_local_spec_timeout_seconds` so nested local-readiness
 timeouts remain visible when strict aggregate evidence is collected.
+It also writes `svllm_native_streaming_blocked_gates`,
+`svllm_native_streaming_primary_blocked_gate`, and
+`svllm_native_streaming_next_action`; strict local readiness forwards those
+fields as `llm_runtime_svllm_local_readiness_native_*` so aggregate reports use
+the producer's canonical blocker contract instead of re-deriving it.
 Configured native hosts provide those native capability results through
 `SVLLM_NATIVE_READ_RANGE_STATUS`, `SVLLM_NATIVE_PINNED_BUFFER_STATUS`, and
 `SVLLM_NATIVE_DEVICE_STAGING_STATUS`. Values normalize to `ready`,
@@ -189,12 +194,13 @@ instead of only mimic evidence. The aggregate env also records
 vLLM/GPU/preflight/endpoint/model statuses, and
 `llm_goal_evidence_svllm_local_detail` for native svLLM streaming status,
 native blocker reason, local readiness, native `read_range`, pinned-buffer,
-device-staging, capability source, and local file-backed byte-read states. In
-default mode, the native fields report `not_required` / `not_collected`; strict
-host mode generates and consumes the native streaming evidence. The svLLM blocker table
+device-staging, capability source, local file-backed byte-read states, native
+blocked gates, primary blocked gate, and next action. In default mode, the
+native fields report `not_required` / `not_collected`; strict host mode
+generates and consumes the native streaming evidence. The svLLM blocker table
 is mode-aware too: default mode reports the `local_readiness` gate with no
-blocked native gates, while strict host mode reports
-`native_read_range,pinned_buffer,device_staging` and their exact blockers. It
+blocked native gates, while strict host mode reports the native producer's
+`blocked_gates` and `next_action` contract. It
 also records
 `llm_goal_evidence_torch_optimizer_detail` for Simple/libtorch CUDA optimizer
 status, compact blocked gates, primary blocked gate, host/runtime gates,

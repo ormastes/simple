@@ -634,7 +634,11 @@ The native streaming wrapper now consumes explicit host capability inputs:
 `SVLLM_NATIVE_DEVICE_STAGING_STATUS`. Missing inputs default to `unsupported`,
 but a configured host can provide `ready` values without editing tests or
 source fixtures. The wrapper records `svllm_native_streaming_capability_source`,
-and the aggregate forwards that field in `llm_goal_evidence_svllm_local_detail`.
+`svllm_native_streaming_blocked_gates`,
+`svllm_native_streaming_primary_blocked_gate`, and
+`svllm_native_streaming_next_action`; strict local readiness forwards those
+native blocker fields, and the aggregate forwards them in
+`llm_goal_evidence_svllm_local_detail`.
 
 ## 2026-06-29 Torch Optimizer Evidence Hardening
 
@@ -836,14 +840,16 @@ downstream strict lane failures without hunting for the producer log path first.
 
 The aggregate now also forwards `llm_goal_evidence_svllm_local_detail`.
 Strict-native svLLM failures show the native streaming status, blocker reason,
-local readiness, native `read_range`, pinned-buffer, device-staging, and local
-file-backed byte-read states in the aggregate report instead of collapsing the
-detail row to `n/a`.
+native blocked gates, primary blocked gate, next action, local readiness,
+native `read_range`, pinned-buffer, device-staging, and local file-backed
+byte-read states in the aggregate report instead of collapsing the detail row to
+`n/a`.
 
 The svLLM aggregate blocker table is now mode-aware. Default local-readiness
 mode reports `required_gates=local_readiness`, `blocked_gates=none`, and
-`reason=default_local_readiness_only`; strict host mode remains responsible for
-the native `read_range`, pinned-buffer, and device-staging blockers.
+`reason=default_local_readiness_only`; strict host mode consumes
+`svllm_native_streaming_blocked_gates` directly so producer and aggregate
+blocker ordering stay identical.
 
 The focused vLLM host probe and Torch optimizer probe now write `next_action`
 fields, and the aggregate forwards them through the vLLM/Torch detail rows.
