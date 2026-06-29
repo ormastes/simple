@@ -276,8 +276,11 @@ if [ "$gate_exit" -eq 0 ] &&
         "model_manifest_schema:${model_manifest_schema_version:-missing}" \
         "model_manifest_attempt_id:${model_manifest_attempt_id:-missing}" \
         "model_manifest_base_model:${model_manifest_base_model:-missing}" \
+        "model_artifact:$model_artifact_status" \
         "eval_result_schema:${eval_result_schema_version:-missing}" \
+        "eval_result_status:${eval_result_status:-missing}" \
         "eval_metric_value:${eval_metric_value:-missing}" \
+        "eval_metric_target:${eval_metric_target:-missing}" \
         "eval_dataset_id:${eval_dataset_id:-missing}"; do
         artifact_name="${pair%%:*}"
         artifact_state="${pair#*:}"
@@ -288,6 +291,25 @@ if [ "$gate_exit" -eq 0 ] &&
             break
         fi
     done
+    if [ "$pass_integrity_status" = "pass" ] && [ "${model_manifest_deployable:-missing}" != "true" ]; then
+        pass_integrity_status="fail"
+        pass_integrity_reason="model_manifest_not_deployable"
+    elif [ "$pass_integrity_status" = "pass" ] && [ "${eval_result_status:-missing}" != "pass" ]; then
+        pass_integrity_status="fail"
+        pass_integrity_reason="eval_result_status_not_pass"
+    elif [ "$pass_integrity_status" = "pass" ] && [ -z "${eval_dataset_checksum:-}" -o "${eval_dataset_checksum:-missing}" = "missing" ]; then
+        pass_integrity_status="fail"
+        pass_integrity_reason="eval_dataset_checksum_missing"
+    elif [ "$pass_integrity_status" = "pass" ] && [ -z "${eval_samples:-}" -o "${eval_samples:-missing}" = "missing" ]; then
+        pass_integrity_status="fail"
+        pass_integrity_reason="eval_samples_missing"
+    elif [ "$pass_integrity_status" = "pass" ] && [ -z "${handoff_usage:-}" -o "${handoff_usage:-missing}" = "missing" ]; then
+        pass_integrity_status="fail"
+        pass_integrity_reason="handoff_usage_missing"
+    elif [ "$pass_integrity_status" = "pass" ] && printf '%s\n' "$handoff_usage" | grep -F "do not deploy" >/dev/null 2>&1; then
+        pass_integrity_status="fail"
+        pass_integrity_reason="handoff_usage_not_deployable"
+    fi
     if [ "$pass_integrity_status" = "pass" ]; then
         status="pass"
         reason="retry7_acceptance_passed"
@@ -452,7 +474,7 @@ fi
     printf '%s\n' "- next_action: \`$next_action\`"
     printf '%s\n' "- env: \`$OUT_ENV\`"
     printf '\n'
-    printf 'This evidence consumes the retry7 normal acceptance gate. It only passes when retry7 itself passes with `acceptance_allowed=true`, every normalized required gate is unblocked, and local non-empty attempt, model manifest, eval result, and handoff artifacts can be hashed for pass integrity. Otherwise it records the required gate list, compact blocked-gates list, gate-log and upstream retry5 artifact provenance hashes, model/eval/license/safety/deployment/app-handoff fields, and next action while keeping strict fine-tune readiness failed.\n'
+    printf 'This evidence consumes the retry7 normal acceptance gate. It only passes when retry7 itself passes with `acceptance_allowed=true`, every normalized required gate is unblocked, and local non-empty attempt, model manifest, model artifact, eval result, and handoff artifacts can be hashed for pass integrity. PASS integrity also requires a deployable model manifest, passing eval result, metric target, dataset checksum, eval sample count, and deployable handoff usage. Otherwise it records the required gate list, compact blocked-gates list, gate-log and upstream retry5 artifact provenance hashes, model/eval/license/safety/deployment/app-handoff fields, and next action while keeping strict fine-tune readiness failed.\n'
 } >"$REPORT_PATH"
 
 if [ "$status" = "pass" ]; then

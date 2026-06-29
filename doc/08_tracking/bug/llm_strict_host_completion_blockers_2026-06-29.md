@@ -94,8 +94,9 @@ Strict-host aggregate:
 - next action: complete retry5 licensed cache/checksum review, run retry6
   training/eval to target, then record retry7 normal acceptance evidence with
   `llm_finetune_acceptance_pass_integrity_status=pass` from local attempt,
-  model manifest, eval result, and handoff artifact hashing plus schema/linkage
-  extraction.
+  model manifest, model artifact, eval result, and handoff artifact hashing
+  plus schema/linkage extraction, deployable manifest status, passing eval
+  status, dataset checksum, eval sample count, and deployable handoff usage.
 
 ## Done Criteria
 

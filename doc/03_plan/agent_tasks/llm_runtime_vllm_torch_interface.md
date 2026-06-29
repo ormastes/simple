@@ -742,11 +742,14 @@ The acceptance wrapper pass condition is intentionally stricter than the retry7
 gate line alone: it requires retry7 `acceptance_allowed=true` and normalized
 `llm_finetune_acceptance_blocked_gates=none`, plus
 `llm_finetune_acceptance_pass_integrity_status=pass` from local artifact
-hashing and schema/linkage extraction. The strict fine-tune guard also rejects
-an acceptance env that reports `llm_finetune_acceptance_status=pass` without
-that pass-integrity field. A future retry7 PASS cannot mask missing
-model/eval/license/safety/deployment/app-handoff evidence or status-only
-artifact placeholders.
+hashing and schema/linkage extraction. Follow-up hardening also requires a
+hashable model artifact, deployable model manifest, passing eval result, eval
+target metadata, dataset checksum, eval sample count, and deployable handoff
+usage before PASS integrity can be `pass`. The strict fine-tune guard also
+rejects an acceptance env that reports `llm_finetune_acceptance_status=pass`
+without that pass-integrity field. A future retry7 PASS cannot mask missing
+model/eval/license/safety/deployment/app-handoff evidence, non-deployable
+handoff text, or status-only artifact placeholders.
 
 ## 2026-06-29 vLLM Host Evidence Hardening
 

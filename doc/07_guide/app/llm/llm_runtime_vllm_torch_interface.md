@@ -358,9 +358,12 @@ normal-review gate output and cache/attempt artifacts it consumed.
 The wrapper passes only when retry7 reports `acceptance_allowed=true` and the
 normalized `llm_finetune_acceptance_blocked_gates` value is `none`, and
 `llm_finetune_acceptance_pass_integrity_status=pass` after hashing local
-attempt, model manifest, eval result, and handoff artifacts and extracting
-schema/linkage fields. A retry7 PASS line cannot override missing model, eval,
-license, safety, deployment, handoff, or artifact-integrity evidence.
+attempt, model manifest, model artifact, eval result, and handoff artifacts and
+extracting schema/linkage fields. PASS integrity also requires a deployable
+model manifest, passing eval result, metric target metadata, dataset checksum,
+eval sample count, and deployable handoff usage. A retry7 PASS line cannot
+override missing model, eval, license, safety, deployment, handoff, or
+artifact-integrity evidence.
 
 The local fine-tune guard evidence writes its own current blocker contract to
 `build/llm_finetune_guard_evidence/evidence.env`. Default aggregate mode uses
