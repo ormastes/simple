@@ -13,7 +13,7 @@
 - surface_manifest: `build/llm_dashboard_live_http/dashboard_live_http_surface_manifest.tsv`
 - surface_manifest_count: `8`
 - surface_manifest_size: `996`
-- surface_manifest_sha256: `bdf92ba5af9e66e78988a5982d32106fe8e3b4f9cb43b504e0c4c35dcc5301fa`
+- surface_manifest_sha256: `f5c85f9c93791ce9f4f6bf15af3f1d9501fd5a3a631df3163eb7dc72600f6744`
 - pass_integrity_status: `not_applicable`
 - pass_integrity_reason: `missing_base_url`
 - next_action: `set LLM_DASHBOARD_LIVE_BASE_URL and authentication env, then rerun this wrapper`

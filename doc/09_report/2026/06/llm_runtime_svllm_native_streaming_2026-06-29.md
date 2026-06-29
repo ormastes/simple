@@ -8,20 +8,20 @@
 - local_readiness: `pass`
 - local_readiness_env: `build/llm_runtime_svllm_native_streaming/local_readiness/evidence.env`
 - local_readiness_env_size: `3910`
-- local_readiness_env_sha256: `67384e4d236de2ff559d8cdb566f1fe86728f29530e4eaf3aa3522c5a198b6c4`
+- local_readiness_env_sha256: `e11f38812be161093d4bcaea2f3ded2199c68321a5ef835076cb8a423989bc32`
 - local_readiness_log: `build/llm_runtime_svllm_native_streaming/local_readiness.log`
 - local_readiness_log_size: `47`
 - local_readiness_log_sha256: `ad8a0549552e637ab385bca1fa04ca3ee086760d1b1142f91d3b8d46e27e0f3b`
 - local_readiness_report: `build/llm_runtime_svllm_native_streaming/local_readiness_report.md`
 - local_readiness_report_size: `3130`
-- local_readiness_report_sha256: `10eeea06e098389c0345fe176a39a474ba9d42204e6784169876e9fecfa21e24`
+- local_readiness_report_sha256: `0816dc069f0162dff67e32d16d3b663b878c80758111e8f76c27ca3418286676`
 - capability_source: `local_simple_svllm_capability_probe`
 - capability_provenance: `ready`
 - capability_evidence_path: `build/llm_runtime_svllm_native_streaming/capability_probe/evidence.env`
 - capability_evidence: `ready`
-- capability_evidence_sha256: `75a3d8fedf7330ada6937dd508eed8d9e945e835d0b937c803814e16d8758c0a`
+- capability_evidence_sha256: `5af21564216bf125910ab635615488cd403be40fe2c0bb91210bc3cc477f83de`
 - capability_evidence_size: `989`
-- capability_evidence_mtime: `1782758745`
+- capability_evidence_mtime: `1782777375`
 - capability_evidence_source: `local_simple_svllm_capability_probe`
 - capability_evidence_schema_version: `1`
 - capability_probe_event: `svllm_native_capability_probe`
@@ -32,7 +32,7 @@
 - capability_evidence_reported_device_staging: `unsupported`
 - capability_probe_report: `build/llm_runtime_svllm_native_streaming/capability_probe_report.md`
 - capability_probe_report_size: `1024`
-- capability_probe_report_sha256: `c4b234cdff113a94cd14d0cfcf15d98b5f699032a30857e2e468f8a193c2e9ee`
+- capability_probe_report_sha256: `127db736d9377352eb3abc47144d41c52d2668b3395a899d1e4098a9afd61395`
 - pass_integrity_status: `not_applicable`
 - pass_integrity_reason: `not_applicable`
 - read_range: `unsupported`
@@ -41,9 +41,9 @@
 - local_read_bytes: `ready`
 - local_spec_timeout_seconds: `120`
 - surface_manifest: `build/llm_runtime_svllm_native_streaming/svllm_native_streaming_surface_manifest.tsv`
-- surface_manifest_count: `9`
-- surface_manifest_size: `1246`
-- surface_manifest_sha256: `739a6ab646e0a960417b9376f19dafb570c312e5d3dfe09e78aa76badb33ee48`
+- surface_manifest_count: `10`
+- surface_manifest_size: `1373`
+- surface_manifest_sha256: `0f798e949d5a76cbea8e00dc7bfc561f789fc7ee2ff7956b3b93f05c9090b604`
 - env: `build/llm_runtime_svllm_native_streaming/evidence.env`
 
 This evidence consumes the local svLLM readiness gate and records native streaming capability statuses from `SVLLM_NATIVE_READ_RANGE_STATUS`, `SVLLM_NATIVE_PINNED_BUFFER_STATUS`, and `SVLLM_NATIVE_DEVICE_STAGING_STATUS` (default `unsupported`). It hashes the wrapper/source/spec/doc surface manifest plus the nested local-readiness env, log, and report so strict native evidence identifies the exact contract and local readiness run it consumed. It only passes when local readiness passes, all three native capability statuses are `ready`, `SVLLM_NATIVE_CAPABILITY_SOURCE` names the host probe or artifact that proved those ready statuses, and `SVLLM_NATIVE_CAPABILITY_EVIDENCE_PATH` points at a non-empty schema-v1 probe artifact with matching `svllm_native_capability_source`, `svllm_native_capability_probe_event=svllm_native_capability_probe`, `svllm_native_capability_probe_status=pass`, `svllm_native_capability_probe_exit=0`, and reported native statuses matching the wrapper inputs. Local file-backed bytes alone remain explicit bring-up evidence, not native streaming completion.
