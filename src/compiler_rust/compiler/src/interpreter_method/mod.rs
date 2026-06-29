@@ -242,8 +242,11 @@ pub(crate) fn evaluate_method_call(
             | "to_end_with" | "to_not_equal" | "to_not_contain" | "to_not_include"
             | "to_not_be_nil" | "to" | "not_to" | "to_not"
     ) {
-        use crate::interpreter::interpreter_call::BDD_EXPECT_PROVISIONAL;
+        use crate::interpreter::interpreter_call::{BDD_EXPECT_PROVISIONAL, BDD_MATCHER_RAN};
         BDD_EXPECT_PROVISIONAL.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = false);
+        // Monotonic within an example: records that a matcher checked the expect
+        // receiver, so a re-set provisional flag can't false-fail the example.
+        BDD_MATCHER_RAN.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = true);
     }
     match method {
         "to_equal" | "to_be" => {
