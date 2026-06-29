@@ -822,7 +822,9 @@ evidence first; strict mode consumes the same env as a required pass gate.
 The same aggregate now forwards `llm_goal_evidence_context_ponytail_detail` and
 `llm_goal_evidence_dashboard_detail`, so strict/full-replacement context mode,
 Ponytail, and authenticated dashboard evidence cannot be hidden behind a single
-lane status when host completion evidence is reviewed.
+lane status when host completion evidence is reviewed. Default dashboard detail
+now carries the strict-host next action instead of `not_collected`, so the
+default report still tells operators how to produce live authenticated evidence.
 
 Default aggregate mode now also generates and consumes the repo-local
 context/Ponytail full-replacement env before running the context/Ponytail lane.

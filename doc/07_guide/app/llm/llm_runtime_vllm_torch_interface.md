@@ -196,7 +196,9 @@ vLLM/GPU/preflight/endpoint/model statuses, and
 native blocker reason, local readiness, native `read_range`, pinned-buffer,
 device-staging, capability source, local file-backed byte-read states, native
 blocked gates, primary blocked gate, and next action. In default mode, the
-native fields report `not_required` / `not_collected`; strict host mode
+dashboard detail keeps a concrete strict-host next action even though live HTTP
+evidence is intentionally not collected, and the svLLM native fields report
+`not_required` / `not_collected`; strict host mode
 generates and consumes the native streaming evidence. The svLLM blocker table
 is mode-aware too: default mode reports the `local_readiness` gate with no
 blocked native gates, while strict host mode reports the native producer's
