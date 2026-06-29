@@ -24,9 +24,15 @@ Recursive-descent expression parsing: every structurally nested sub-expression
 (parens, brackets, slices, call args, dict/array elements) re-enters
 `parse_expr`, and each level costs ~14 native frames down the precedence chain
 (`parse_pipe → parse_compose → … → parse_unary → parse_postfix →
-parse_primary_expr`). With no depth bound, deep input recurses without limit
-and overflows the stack; downstream recursive AST passes amplify it under
-`check`.
+parse_primary_expr`). With no depth bound, deep input recurses without limit.
+
+NOTE — `run`/`fmt` survive the same input; only `check` core-dumps. The exact
+overflowing routine in the deployed binary was **not located** — that `check`
+runs additional recursive AST passes (lint/semantic) over the same tree is the
+most likely amplifier, but this is an **inference** from "run survives, check
+crashes", not a confirmed finding. The parse-time depth guard fixes it
+regardless of which recursive pass overflows, by bounding tree depth before any
+pass runs.
 
 ## Fix
 
@@ -50,8 +56,17 @@ full parser through the test daemon exceeds its per-spec timeout (see
 ## Deploy gate
 
 The currently-deployed `bin/simple` is the Rust seed (`compiler_rust`), whose
-`check` parser/analyzer is what core-dumps today. The pure-Simple fix takes
-effect for the `check`/`build` path only after the self-hosted binary is
-rebuilt and deployed (bootstrap). Until then the seed retains the old behavior;
-the equivalent guard in the seed analysis pass is out of scope here per the
-"fix it in pure-Simple, don't fall back to the seed" project rule.
+`check` is what core-dumps today. The pure-Simple fix takes effect for the
+`check`/`build` path ONLY after the self-hosted binary is rebuilt and deployed
+via a full bootstrap.
+
+**Honest status:** unlike the matcher / enum-dispatch fixes (which are seed-side
+and land on a seed rebuild), this fix is pure-Simple and rides the self-hosted
+bootstrap path — which memory records as currently failing at stage3. So
+**`bin/simple check <175+ nested parens>` still core-dumps today and will
+continue to until a working self-hosted bootstrap deploys this change.** The
+residual risk is low: the trigger is adversarial input no real or generated
+source produces. A mirrored depth guard in the seed parser was deliberately NOT
+added, per the "fix it in pure-Simple, don't fall back to the seed" project rule
+— if the self-hosted bootstrap stays blocked and this needs to land sooner, the
+follow-up is a depth bound in the seed's `parser/src` expression recursion.
