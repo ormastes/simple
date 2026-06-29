@@ -408,6 +408,16 @@ Current 2026-06-26 browser capture findings:
   `build/renderdoc/chrome-gpu-vulkan-loader-boundary/html/evidence.env`,
   `build/renderdoc/electron-gpu-vulkan-loader-boundary/electron-html/evidence.env`,
   and `doc/09_report/renderdoc_browser_vulkan_loader_boundary_2026-06-29.md`.
+- 2026-06-29 Browser evidence now emits structured Chromium ANGLE/EGL
+  initialization metadata. The fixed Electron visible-window GPU-launcher route
+  reports `rdoc_chromium_angle_status=pass` with zero ANGLE/EGL init errors
+  while still reaching only Vulkan layer/extension enumeration and not
+  `vkCreateInstance`. The Chrome app-mode GPU-launcher route leaves the main
+  Chromium run log empty, so its ANGLE metadata is `missing-log`; GPU-child
+  state remains available through `gpu-launcher.log`. Evidence:
+  `build/renderdoc/chrome-gpu-angle-init-current/html/evidence.env`,
+  `build/renderdoc/electron-gpu-angle-init-current/electron-html/evidence.env`,
+  and `doc/09_report/renderdoc_browser_angle_init_metadata_2026-06-29.md`.
 - The direct Chrome/Electron RenderDoc wrapper now records
   `rdoc_renderdoc_hook_children` and accepts `RDOC_RENDERDOC_HOOK_CHILDREN=0`
   to omit `--opt-hook-children`. This confirms the immediate Chrome GPU crash
