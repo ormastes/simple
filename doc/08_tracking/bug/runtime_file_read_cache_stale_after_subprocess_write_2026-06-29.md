@@ -57,14 +57,29 @@ read-cache fix specifically cleared the `duplicate-field:serial` assertion that
 was reading a stale prior `duplicate-field:model` result. `interpreter_bdd`
 regression tests still pass.
 
-**Residual (not this fix):** one assertion deep in the 40-step
-"requires serial identity to match the host preflight report" mega-`it` still
-reads stale content (a later `multi_preflight` check observes the prior
-`duplicate` check's output). With unique per-step report paths the single-slot
-read cache always misses, so the remaining staleness is NOT the path-cache —
-it points to a deeper runtime string-value lifetime/aliasing interaction across
-many sequential `val text = rt_file_read_text(p) ?? ""` reads in one function.
-Tracked separately; needs runtime memory investigation, not a path-cache change.
+## Hardening also applied
+
+`rt_process_run` / `rt_process_run_timeout` / `rt_process_run_with_limits` now
+call `invalidate_all_read_caches()` on entry. A spawned subprocess can rewrite
+any file without going through this process's write path, and a same-length
+rewrite landing in the same mtime tick could still satisfy the stamp check;
+clearing the single-slot read caches around a subprocess removes that window.
+Negligible cost vs. a process spawn.
+
+## Residual (UNRESOLVED — ruled OUT as the read cache)
+
+One assertion deep in the "requires serial identity to match the host preflight
+report" mega-`it` still reads stale content (a later `multi_preflight` check
+observes the prior `duplicate` check's `duplicate-field:model` output).
+**Adding the subprocess cache invalidation above did NOT change it** — every
+nvme read is preceded by a cache-clearing subprocess, so the read cache is now
+effectively bypassed for this test, yet the symptom persists. So this is NOT the
+file read cache. Evidence remaining unexplained: the on-disk output file is
+correct (`:serial`), and the checker on the exact dumped inputs reports `:serial`
+standalone, yet the in-test parent read returns `:model`. This points to a
+deeper runtime string-value lifetime/aliasing or arena-reuse issue across the
+~40 sequential `val text = rt_file_read_text(p) ?? ""` reads in one function.
+Needs runtime memory investigation; tracked, not yet root-caused.
 
 ## Deploy gate
 

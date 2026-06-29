@@ -140,6 +140,20 @@ fn invalidate_read_mmap_caches(path: &str) {
     }
 }
 
+/// Drop all cached file reads. A spawned subprocess can rewrite arbitrary files
+/// without going through this process's write path, so the per-path stamp check
+/// can still be fooled by a same-length rewrite landing in the same filesystem
+/// mtime tick. Clearing the read caches after a subprocess runs guarantees the
+/// next read reflects on-disk state. Cheap: these are single-slot caches.
+pub fn invalidate_all_read_caches() {
+    if let Ok(mut guard) = read_text_cache().lock() {
+        *guard = None;
+    }
+    if let Ok(mut guard) = mmap_len_cache().lock() {
+        *guard = None;
+    }
+}
+
 fn tagged_text_to_bytes(value: i64) -> Option<&'static [u8]> {
     let text = RuntimeValue::from_raw(value as u64);
     let len = rt_string_len(text);

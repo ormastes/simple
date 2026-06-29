@@ -348,6 +348,7 @@ fn finish_child_output(mut child: std::process::Child, timeout_ms: i64) -> std::
 #[no_mangle]
 pub unsafe extern "C" fn rt_process_run(cmd_ptr: *const u8, cmd_len: u64, args: RuntimeValue) -> RuntimeValue {
     use std::process::Command;
+    crate::value::sffi::file_io::file_ops::invalidate_all_read_caches();
 
     if cmd_ptr.is_null() {
         // Return tuple: ("", "", -1)
@@ -657,6 +658,10 @@ pub unsafe extern "C" fn rt_process_run_timeout(
     timeout_ms: i64,
 ) -> RuntimeValue {
     use std::process::Command;
+    // A subprocess may rewrite files this process has cached; clear the read
+    // caches so reads after it reflect on-disk state (stamp checks can be fooled
+    // by a same-length rewrite in the same mtime tick).
+    crate::value::sffi::file_io::file_ops::invalidate_all_read_caches();
 
     if cmd_ptr.is_null() {
         let empty_str = rt_string_new(b"".as_ptr(), 0);
@@ -773,6 +778,7 @@ pub unsafe extern "C" fn rt_process_run_with_limits(
     max_procs: i64,
 ) -> RuntimeValue {
     use std::process::Command;
+    crate::value::sffi::file_io::file_ops::invalidate_all_read_caches();
 
     let make_error_tuple = || -> RuntimeValue {
         let empty_str = rt_string_new(b"".as_ptr(), 0);
