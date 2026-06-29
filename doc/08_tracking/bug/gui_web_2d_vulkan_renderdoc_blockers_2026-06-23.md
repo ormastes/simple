@@ -398,6 +398,16 @@ Current 2026-06-26 browser capture findings:
   `build/renderdoc/chrome-gpu-launcher-boundary-current/html/evidence.env`,
   `build/renderdoc/electron-gpu-launcher-boundary-current/electron-html/evidence.env`,
   and `doc/09_report/renderdoc_browser_gpu_launcher_boundary_2026-06-29.md`.
+- 2026-06-29 Vulkan loader-boundary counters now show both Chrome and Electron
+  GPU-child routes reach `vkEnumerateInstanceLayerProperties` twice and
+  `vkEnumerateInstanceExtensionProperties` once with the RenderDoc layer env
+  active, but neither reaches `vkCreateInstance` or `vkCreateDevice` before
+  timeout. The shim resolver was hardened to fall back to loaded `libvulkan`
+  and `libEGL` symbols so exported diagnostic wrappers do not break ANGLE
+  initialization. Evidence:
+  `build/renderdoc/chrome-gpu-vulkan-loader-boundary/html/evidence.env`,
+  `build/renderdoc/electron-gpu-vulkan-loader-boundary/electron-html/evidence.env`,
+  and `doc/09_report/renderdoc_browser_vulkan_loader_boundary_2026-06-29.md`.
 - The direct Chrome/Electron RenderDoc wrapper now records
   `rdoc_renderdoc_hook_children` and accepts `RDOC_RENDERDOC_HOOK_CHILDREN=0`
   to omit `--opt-hook-children`. This confirms the immediate Chrome GPU crash

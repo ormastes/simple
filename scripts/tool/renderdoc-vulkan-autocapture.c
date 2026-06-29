@@ -18,6 +18,10 @@ static PFN_vkQueuePresentKHR real_vkQueuePresentKHR;
 static PFN_vkQueueSubmit real_vkQueueSubmit;
 static PFN_vkQueueSubmit2 real_vkQueueSubmit2;
 static PFN_vkQueueSubmit2KHR real_vkQueueSubmit2KHR;
+static PFN_vkCreateInstance real_vkCreateInstance;
+static PFN_vkCreateDevice real_vkCreateDevice;
+static PFN_vkEnumerateInstanceLayerProperties real_vkEnumerateInstanceLayerProperties;
+static PFN_vkEnumerateInstanceExtensionProperties real_vkEnumerateInstanceExtensionProperties;
 static PFN_vkGetDeviceProcAddr real_vkGetDeviceProcAddr;
 static PFN_vkGetInstanceProcAddr real_vkGetInstanceProcAddr;
 typedef int (*egl_swap_buffers_fn_t)(void *, void *);
@@ -38,6 +42,8 @@ static egl_create_window_surface_fn_t real_eglCreateWindowSurface;
 static egl_create_window_surface_fn_t real_eglCreatePlatformWindowSurface;
 typedef void *(*real_dlsym_fn_t)(void *, const char *);
 static real_dlsym_fn_t real_dlsym_fn;
+static void *real_vulkan_handle;
+static void *real_egl_handle;
 static int capture_started;
 static int capture_finished;
 static int delay_thread_started;
@@ -54,6 +60,10 @@ static uint64_t egl_wait_scheduled_count;
 static uint64_t egl_make_current_count;
 static uint64_t egl_create_window_surface_count;
 static uint64_t egl_create_platform_window_surface_count;
+static uint64_t vk_create_instance_count;
+static uint64_t vk_create_device_count;
+static uint64_t vk_enum_instance_layer_count;
+static uint64_t vk_enum_instance_extension_count;
 static uint64_t proc_trace_count;
 
 static int env_enabled(const char *name);
@@ -66,6 +76,10 @@ int eglWaitUntilWorkScheduledANGLE(void *display);
 int eglMakeCurrent(void *display, void *draw, void *read, void *context);
 void *eglCreateWindowSurface(void *display, void *config, void *native_window, const void *attrib_list);
 void *eglCreatePlatformWindowSurface(void *display, void *config, void *native_window, const void *attrib_list);
+VKAPI_ATTR VkResult VKAPI_CALL vkCreateInstance(const VkInstanceCreateInfo *pCreateInfo, const VkAllocationCallbacks *pAllocator, VkInstance *pInstance);
+VKAPI_ATTR VkResult VKAPI_CALL vkCreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *pCreateInfo, const VkAllocationCallbacks *pAllocator, VkDevice *pDevice);
+VKAPI_ATTR VkResult VKAPI_CALL vkEnumerateInstanceLayerProperties(uint32_t *pPropertyCount, VkLayerProperties *pProperties);
+VKAPI_ATTR VkResult VKAPI_CALL vkEnumerateInstanceExtensionProperties(const char *pLayerName, uint32_t *pPropertyCount, VkExtensionProperties *pProperties);
 
 struct library_lookup {
     const char *needle;
@@ -100,8 +114,28 @@ static void *real_dlsym_lookup(void *handle, const char *symbol) {
     return real_dlsym_fn(handle, symbol);
 }
 
+static void *library_symbol(const char *library_name, void **cached_handle, const char *symbol) {
+    if (!*cached_handle) {
+        *cached_handle = dlopen(library_name, RTLD_NOW | RTLD_NOLOAD);
+        if (!*cached_handle) *cached_handle = dlopen(library_name, RTLD_NOW | RTLD_LOCAL);
+    }
+    return *cached_handle ? real_dlsym_lookup(*cached_handle, symbol) : NULL;
+}
+
 static void *real_next_symbol(const char *symbol) {
-    return real_dlsym_lookup(RTLD_NEXT, symbol);
+    void *result = real_dlsym_lookup(RTLD_NEXT, symbol);
+    if (result) return result;
+    if (strncmp(symbol, "vk", 2) == 0) {
+        result = library_symbol("libvulkan.so.1", &real_vulkan_handle, symbol);
+        if (!result) result = library_symbol("libvulkan.so", &real_vulkan_handle, symbol);
+        return result;
+    }
+    if (strncmp(symbol, "egl", 3) == 0 || strncmp(symbol, "EGL_", 4) == 0) {
+        result = library_symbol("libEGL.so.1", &real_egl_handle, symbol);
+        if (!result) result = library_symbol("libEGL.so", &real_egl_handle, symbol);
+        return result;
+    }
+    return NULL;
 }
 
 static void load_renderdoc_api(void) {
@@ -216,9 +250,9 @@ static void log_capture_summary(void) {
     } else if (capture_started) {
         status = "started-not-ended";
     }
-    char buf[384];
+    char buf[1024];
     snprintf(buf, sizeof(buf),
-        "rdoc_autocapture_summary=status:%s api:%u started:%u finished:%u start_source:%s end_source:%s submit:%llu present:%llu egl_swap:%llu egl_prepare_swap:%llu egl_wait_scheduled:%llu egl_vk_lock:%llu egl_vk_unlock:%llu egl_make_current:%llu egl_create_window_surface:%llu egl_create_platform_window_surface:%llu proc_trace:%llu",
+        "rdoc_autocapture_summary=status:%s api:%u started:%u finished:%u start_source:%s end_source:%s submit:%llu present:%llu egl_swap:%llu egl_prepare_swap:%llu egl_wait_scheduled:%llu egl_vk_lock:%llu egl_vk_unlock:%llu egl_make_current:%llu egl_create_window_surface:%llu egl_create_platform_window_surface:%llu vk_create_instance:%llu vk_create_device:%llu vk_enum_instance_layer:%llu vk_enum_instance_extension:%llu proc_trace:%llu",
         status,
         rdoc_api ? 1u : 0u,
         capture_started ? 1u : 0u,
@@ -235,6 +269,10 @@ static void log_capture_summary(void) {
         (unsigned long long)egl_make_current_count,
         (unsigned long long)egl_create_window_surface_count,
         (unsigned long long)egl_create_platform_window_surface_count,
+        (unsigned long long)vk_create_instance_count,
+        (unsigned long long)vk_create_device_count,
+        (unsigned long long)vk_enum_instance_layer_count,
+        (unsigned long long)vk_enum_instance_extension_count,
         (unsigned long long)proc_trace_count);
     log_line(buf);
 }
@@ -642,6 +680,54 @@ void *eglCreatePlatformWindowSurface(void *display, void *config, void *native_w
     return real_eglCreatePlatformWindowSurface ? real_eglCreatePlatformWindowSurface(display, config, native_window, attrib_list) : NULL;
 }
 
+VKAPI_ATTR VkResult VKAPI_CALL vkEnumerateInstanceLayerProperties(
+    uint32_t *pPropertyCount,
+    VkLayerProperties *pProperties) {
+    if (!real_vkEnumerateInstanceLayerProperties) {
+        real_vkEnumerateInstanceLayerProperties = (PFN_vkEnumerateInstanceLayerProperties)real_next_symbol("vkEnumerateInstanceLayerProperties");
+    }
+    vk_enum_instance_layer_count++;
+    if (!real_vkEnumerateInstanceLayerProperties) return VK_ERROR_INITIALIZATION_FAILED;
+    return real_vkEnumerateInstanceLayerProperties(pPropertyCount, pProperties);
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL vkEnumerateInstanceExtensionProperties(
+    const char *pLayerName,
+    uint32_t *pPropertyCount,
+    VkExtensionProperties *pProperties) {
+    if (!real_vkEnumerateInstanceExtensionProperties) {
+        real_vkEnumerateInstanceExtensionProperties = (PFN_vkEnumerateInstanceExtensionProperties)real_next_symbol("vkEnumerateInstanceExtensionProperties");
+    }
+    vk_enum_instance_extension_count++;
+    if (!real_vkEnumerateInstanceExtensionProperties) return VK_ERROR_INITIALIZATION_FAILED;
+    return real_vkEnumerateInstanceExtensionProperties(pLayerName, pPropertyCount, pProperties);
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL vkCreateInstance(
+    const VkInstanceCreateInfo *pCreateInfo,
+    const VkAllocationCallbacks *pAllocator,
+    VkInstance *pInstance) {
+    if (!real_vkCreateInstance) {
+        real_vkCreateInstance = (PFN_vkCreateInstance)real_next_symbol("vkCreateInstance");
+    }
+    vk_create_instance_count++;
+    if (!real_vkCreateInstance) return VK_ERROR_INITIALIZATION_FAILED;
+    return real_vkCreateInstance(pCreateInfo, pAllocator, pInstance);
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL vkCreateDevice(
+    VkPhysicalDevice physicalDevice,
+    const VkDeviceCreateInfo *pCreateInfo,
+    const VkAllocationCallbacks *pAllocator,
+    VkDevice *pDevice) {
+    if (!real_vkCreateDevice) {
+        real_vkCreateDevice = (PFN_vkCreateDevice)real_next_symbol("vkCreateDevice");
+    }
+    vk_create_device_count++;
+    if (!real_vkCreateDevice) return VK_ERROR_INITIALIZATION_FAILED;
+    return real_vkCreateDevice(physicalDevice, pCreateInfo, pAllocator, pDevice);
+}
+
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(
     VkDevice device,
     const char *pName) {
@@ -677,6 +763,13 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(
         log_line("rdoc_autocapture_wrap=vkQueuePresentKHR");
         return (PFN_vkVoidFunction)vkQueuePresentKHR;
     }
+    if (pName && strcmp(pName, "vkCreateDevice") == 0) {
+        if (real_vkGetDeviceProcAddr && !real_vkCreateDevice) {
+            real_vkCreateDevice = (PFN_vkCreateDevice)real_vkGetDeviceProcAddr(device, pName);
+        }
+        log_line("rdoc_autocapture_wrap=vkCreateDevice");
+        return (PFN_vkVoidFunction)vkCreateDevice;
+    }
     if (!real_vkGetDeviceProcAddr) return NULL;
     return real_vkGetDeviceProcAddr(device, pName);
 }
@@ -691,6 +784,22 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(
     if (pName && strcmp(pName, "vkGetDeviceProcAddr") == 0) {
         log_line("rdoc_autocapture_wrap=vkGetDeviceProcAddr");
         return (PFN_vkVoidFunction)vkGetDeviceProcAddr;
+    }
+    if (pName && strcmp(pName, "vkEnumerateInstanceLayerProperties") == 0) {
+        log_line("rdoc_autocapture_wrap=vkEnumerateInstanceLayerProperties");
+        return (PFN_vkVoidFunction)vkEnumerateInstanceLayerProperties;
+    }
+    if (pName && strcmp(pName, "vkEnumerateInstanceExtensionProperties") == 0) {
+        log_line("rdoc_autocapture_wrap=vkEnumerateInstanceExtensionProperties");
+        return (PFN_vkVoidFunction)vkEnumerateInstanceExtensionProperties;
+    }
+    if (pName && strcmp(pName, "vkCreateInstance") == 0) {
+        log_line("rdoc_autocapture_wrap=vkCreateInstance");
+        return (PFN_vkVoidFunction)vkCreateInstance;
+    }
+    if (pName && strcmp(pName, "vkCreateDevice") == 0) {
+        log_line("rdoc_autocapture_wrap=vkCreateDevice-instance");
+        return (PFN_vkVoidFunction)vkCreateDevice;
     }
     if (pName && strcmp(pName, "vkQueueSubmit") == 0) {
         log_line("rdoc_autocapture_wrap=vkQueueSubmit-instance");
@@ -800,6 +909,34 @@ void *dlsym(void *handle, const char *symbol) {
         }
         log_line("rdoc_autocapture_dlsym=vkGetDeviceProcAddr");
         return (void *)vkGetDeviceProcAddr;
+    }
+    if (symbol && strcmp(symbol, "vkEnumerateInstanceLayerProperties") == 0) {
+        if (!real_vkEnumerateInstanceLayerProperties) {
+            real_vkEnumerateInstanceLayerProperties = (PFN_vkEnumerateInstanceLayerProperties)real_dlsym_lookup(handle, symbol);
+        }
+        log_line("rdoc_autocapture_dlsym=vkEnumerateInstanceLayerProperties");
+        return (void *)vkEnumerateInstanceLayerProperties;
+    }
+    if (symbol && strcmp(symbol, "vkEnumerateInstanceExtensionProperties") == 0) {
+        if (!real_vkEnumerateInstanceExtensionProperties) {
+            real_vkEnumerateInstanceExtensionProperties = (PFN_vkEnumerateInstanceExtensionProperties)real_dlsym_lookup(handle, symbol);
+        }
+        log_line("rdoc_autocapture_dlsym=vkEnumerateInstanceExtensionProperties");
+        return (void *)vkEnumerateInstanceExtensionProperties;
+    }
+    if (symbol && strcmp(symbol, "vkCreateInstance") == 0) {
+        if (!real_vkCreateInstance) {
+            real_vkCreateInstance = (PFN_vkCreateInstance)real_dlsym_lookup(handle, symbol);
+        }
+        log_line("rdoc_autocapture_dlsym=vkCreateInstance");
+        return (void *)vkCreateInstance;
+    }
+    if (symbol && strcmp(symbol, "vkCreateDevice") == 0) {
+        if (!real_vkCreateDevice) {
+            real_vkCreateDevice = (PFN_vkCreateDevice)real_dlsym_lookup(handle, symbol);
+        }
+        log_line("rdoc_autocapture_dlsym=vkCreateDevice");
+        return (void *)vkCreateDevice;
     }
     if (symbol && strcmp(symbol, "vkQueueSubmit") == 0) {
         if (!real_vkQueueSubmit) {
