@@ -9,9 +9,9 @@
 - base_model: `base-model`
 - endpoint: `http://127.0.0.1:8000/v1`
 - surface_manifest: `build/llm_runtime_vllm_host_probe/vllm_host_surface_manifest.tsv`
-- surface_manifest_count: `10`
-- surface_manifest_size: `1209`
-- surface_manifest_sha256: `83abdc5c0a155eb8bc2cd2c20e3a9349d0e5b43cacf1073c5d59706b5fe9500b`
+- surface_manifest_count: `13`
+- surface_manifest_size: `1569`
+- surface_manifest_sha256: `cd140b6bf7432c350e7861023083314d1ab48086aee98835d1a6e15cded2032e`
 - local_vllm_status: `missing`
 - vllm_command_path: `missing`
 - vllm_version_log_size: `21`
@@ -31,7 +31,7 @@
 - models_status: `not_fetched`
 - models_reason: `environment_skipped`
 - log_size: `96660`
-- log_sha256: `2eef8e893fbc4f9d9eb3286eeeaaedd4d87d98af3fd5fefe6dbc58068265b225`
+- log_sha256: `01ef86f52567c045c9b40f4e924f92839503e10579801b56dde385d92a5207e7`
 - serve_readiness_run_event_count: `1`
 - pass_integrity_status: `not_applicable`
 - pass_integrity_reason: `not_applicable`

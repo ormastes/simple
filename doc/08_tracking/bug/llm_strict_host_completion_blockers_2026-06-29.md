@@ -20,7 +20,7 @@ Default aggregate:
   evidence now include checked surface/input manifests with size/SHA-256
   metadata and focused log hashes. Public absence rendering also records
   `public_absence_surface_manifest_count=93` and
-  `public_absence_surface_manifest_sha256=6b6fd5d7faae2c3781274d930979107316cf9ffb7c10f58ec5bf56fcd882dc24`
+  `public_absence_surface_manifest_sha256=d941dd61691769e726a367f199c135c50edd5271ad385ec7ce30bd394cf4454a`
   with `failure_count=0`, so public manuals and generated evidence continue to
   hide internal absence markers from operator-facing text.
 
@@ -50,9 +50,9 @@ Strict-host aggregate:
 - current evidence: `vllm_command_path=missing`,
   `python_vllm_module_status=missing`, `local_gpu_status=available`
 - local proof already hardened: vLLM host evidence has a checked runtime
-  control/readiness source/spec manifest with
-  `surface_manifest_count=10` and
-  `surface_manifest_sha256=83abdc5c0a155eb8bc2cd2c20e3a9349d0e5b43cacf1073c5d59706b5fe9500b`
+  control/readiness source/spec plus operator-guide manifest with
+  `surface_manifest_count=13` and
+  `surface_manifest_sha256=cd140b6bf7432c350e7861023083314d1ab48086aee98835d1a6e15cded2032e`
 - required evidence: local `vllm` executable, importable Python `vllm` module
   with non-missing origin, serve preflight, reachable endpoint, and `/v1/models`
   listing the selected base model
