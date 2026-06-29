@@ -458,6 +458,18 @@ Current 2026-06-26 browser capture findings:
   `build/renderdoc/chrome-gpu-egl-init-boundary/html/evidence.env`,
   `build/renderdoc/electron-gpu-egl-init-boundary/electron-html/evidence.env`,
   and `doc/09_report/renderdoc_browser_egl_init_boundary_2026-06-29.md`.
+- 2026-06-29 The EGL boundary diagnostic now records `eglInitialize` return
+  status. Fresh Chrome and Electron GPU-child probes both report
+  `egl_initialize_count=1`, `egl_initialize_return_count=0`,
+  `egl_initialize_success_count=0`, `egl_initialize_fail_count=0`,
+  `egl_initialize_last_result=-1`, `egl_initialize_last_error=-1`,
+  `egl_choose_config=0`, and `vk_create_instance=0`. This proves both browser
+  routes enter `eglInitialize` under the RenderDoc GPU-child shim and do not
+  return from that call before timing out without `.rdc`. Evidence:
+  `build/renderdoc/chrome-gpu-egl-init-return/html/evidence.env`,
+  `build/renderdoc/electron-gpu-egl-init-return/electron-html/evidence.env`,
+  `build/linux-vulkan-render-log-compare/evidence.env`, and
+  `doc/09_report/renderdoc_browser_egl_initialize_return_2026-06-29.md`.
 - The direct Chrome/Electron RenderDoc wrapper now records
   `rdoc_renderdoc_hook_children` and accepts `RDOC_RENDERDOC_HOOK_CHILDREN=0`
   to omit `--opt-hook-children`. This confirms the immediate Chrome GPU crash

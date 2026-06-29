@@ -366,6 +366,11 @@ stdout/stderr and shim telemetry to `gpu-launcher.log`. Evidence envs from
 `rdoc_gpu_autocapture_status`,
 `rdoc_gpu_autocapture_egl_get_platform_display_count`,
 `rdoc_gpu_autocapture_egl_initialize_count`,
+`rdoc_gpu_autocapture_egl_initialize_return_count`,
+`rdoc_gpu_autocapture_egl_initialize_success_count`,
+`rdoc_gpu_autocapture_egl_initialize_fail_count`,
+`rdoc_gpu_autocapture_egl_initialize_last_result`,
+`rdoc_gpu_autocapture_egl_initialize_last_error`,
 `rdoc_gpu_autocapture_egl_choose_config_count`,
 `rdoc_gpu_autocapture_vk_enum_instance_layer_count`,
 `rdoc_gpu_autocapture_vk_enum_instance_extension_count`,
@@ -473,6 +478,11 @@ diagnostics from the Chrome and Electron evidence envs:
 `linux_vulkan_render_log_compare_renderdoc_chrome_autocapture_status`,
 `linux_vulkan_render_log_compare_renderdoc_chrome_egl_get_platform_display_count`,
 `linux_vulkan_render_log_compare_renderdoc_chrome_egl_initialize_count`,
+`linux_vulkan_render_log_compare_renderdoc_chrome_egl_initialize_return_count`,
+`linux_vulkan_render_log_compare_renderdoc_chrome_egl_initialize_success_count`,
+`linux_vulkan_render_log_compare_renderdoc_chrome_egl_initialize_fail_count`,
+`linux_vulkan_render_log_compare_renderdoc_chrome_egl_initialize_last_result`,
+`linux_vulkan_render_log_compare_renderdoc_chrome_egl_initialize_last_error`,
 `linux_vulkan_render_log_compare_renderdoc_chrome_egl_choose_config_count`,
 `linux_vulkan_render_log_compare_renderdoc_chrome_vk_enum_instance_layer_count`,
 `linux_vulkan_render_log_compare_renderdoc_chrome_vk_enum_instance_extension_count`,
@@ -480,7 +490,8 @@ diagnostics from the Chrome and Electron evidence envs:
 `linux_vulkan_render_log_compare_renderdoc_chrome_vk_create_device_count`, with
 matching `...renderdoc_electron...` fields. These fields preserve the current
 Linux diagnosis that browser GPU children can enumerate Vulkan layers and
-extensions while still failing to produce `.rdc` before `vkCreateInstance`.
+extensions, enter `eglInitialize`, and still fail to produce `.rdc` before
+`eglInitialize` returns or `vkCreateInstance` is reached.
 The same row exposes host readiness fields before platform agents debug capture
 failures:
 `linux_vulkan_render_log_compare_host_renderdoc_status`,
