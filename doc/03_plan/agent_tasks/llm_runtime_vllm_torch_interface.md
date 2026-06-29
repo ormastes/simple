@@ -990,6 +990,11 @@ The context/Ponytail replacement wrapper now also runs
 `execution_spec`. That spec calls `simple_context` and `simple_ponytail` through
 `app.mcp.main_dispatch.dispatch_tool_content`, so full-replacement evidence is
 no longer source-contract-only for the app MCP path.
+The wrapper also writes a replacement-surface manifest with path, size, and
+SHA-256 rows for the checked guide, architecture, requirements, app MCP, lower
+MCP, and dispatch spec files, plus size/SHA-256 metadata for the mimic env/log
+and execution-spec log. The aggregate detail row forwards those values, so a
+passing context/Ponytail replacement cannot be accepted as a status-only claim.
 
 ## 2026-06-29 Strict Completion Audit
 

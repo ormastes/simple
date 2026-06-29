@@ -246,7 +246,10 @@ where those dependencies are not installed, while fine-tune readiness remains a
 guard-only pass in default mode. Default mode also generates repo-local
 context/Ponytail full-replacement evidence before running the context/Ponytail
 lane, so the detail row shows checked-in Simple-owned replacement surfaces
-instead of only mimic evidence. The aggregate env also records
+instead of only mimic evidence. That detail includes the checked surface
+manifest count, size, SHA-256, execution-spec log size/SHA-256, and mimic env
+size/SHA-256 so a passing replacement row is tied to exact repo-local source
+and spec artifacts. The aggregate env also records
 `llm_goal_evidence_context_ponytail_detail` for mimic/full-replacement state,
 `llm_goal_evidence_dashboard_detail` for dashboard live-readiness state,
 `llm_goal_evidence_vllm_host_detail` for local

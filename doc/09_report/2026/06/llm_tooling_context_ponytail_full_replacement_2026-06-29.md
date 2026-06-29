@@ -10,8 +10,18 @@
 - failure_count: `0`
 - mimic_status: `pass`
 - mimic_env: `build/llm_tooling_context_ponytail_full_replacement/mimic/evidence.env`
+- mimic_env_size: `569`
+- mimic_env_sha256: `397003f765af393e58903e1ceb076dd294cbd8d80f67e42f3ed8d1b12b5b011a`
+- mimic_log_size: `48`
+- mimic_log_sha256: `39121936f29d4d543d55c593965da75296ab8a08ba4dacf35d347126919c6b85`
 - execution_spec_status: `pass`
 - execution_spec_log: `build/llm_tooling_context_ponytail_full_replacement/mcp_context_ponytail_dispatch_spec.log`
+- execution_spec_log_size: `1418`
+- execution_spec_log_sha256: `f42bd3317e21c2ab7026182bb378b7710c04e2b6c1f5149762a7c61807476fa6`
+- surface_manifest: `build/llm_tooling_context_ponytail_full_replacement/replacement_surface_manifest.tsv`
+- surface_manifest_count: `10`
+- surface_manifest_size: `1204`
+- surface_manifest_sha256: `1e580e505d036faf38f94cbb3652f2a1b25becde178465b01d1ba4589a365a6b`
 - failures: `none`
 - next_action: `strict context/Ponytail full-replacement evidence is ready`
 - env: `build/llm_tooling_context_ponytail_full_replacement/evidence.env`
