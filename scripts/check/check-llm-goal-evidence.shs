@@ -8,6 +8,7 @@ BUILD_DIR="${BUILD_DIR:-build/llm_goal_evidence}"
 REPORT_PATH="${REPORT_PATH:-doc/09_report/2026/06/llm_goal_evidence_$(date -u +%F).md}"
 OUT_ENV="$BUILD_DIR/evidence.env"
 LANE_TIMEOUT_SECONDS="${LLM_GOAL_LANE_TIMEOUT_SECONDS:-180}"
+SVLLM_LANE_TIMEOUT_SECONDS="${LLM_GOAL_SVLLM_LANE_TIMEOUT_SECONDS:-}"
 STRICT_HOST=0
 
 while [ "$#" -gt 0 ]; do
@@ -31,19 +32,39 @@ done
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
 rm -f "$OUT_ENV" "$REPORT_PATH"
 
+lane_timeout_seconds() {
+    key="$1"
+    case "$key" in
+        svllm_local)
+            if [ -n "$SVLLM_LANE_TIMEOUT_SECONDS" ]; then
+                printf '%s\n' "$SVLLM_LANE_TIMEOUT_SECONDS"
+            elif [ "$LANE_TIMEOUT_SECONDS" -lt 120 ]; then
+                printf '%s\n' "120"
+            else
+                printf '%s\n' "$LANE_TIMEOUT_SECONDS"
+            fi
+            ;;
+        *)
+            printf '%s\n' "$LANE_TIMEOUT_SECONDS"
+            ;;
+    esac
+}
+
 run_lane() {
     key="$1"
     expected="$2"
     shift 2
     log="$BUILD_DIR/$key.log"
+    report_path="$BUILD_DIR/${key}_report.md"
+    timeout_seconds="$(lane_timeout_seconds "$key")"
     exit_code=0
     if command -v timeout >/dev/null 2>&1; then
-        if timeout "$LANE_TIMEOUT_SECONDS" "$@" >"$log" 2>&1; then
+        if timeout "$timeout_seconds" env REPORT_PATH="$report_path" "$@" >"$log" 2>&1; then
             :
         else
             exit_code=$?
         fi
-    elif "$@" >"$log" 2>&1; then
+    elif env REPORT_PATH="$report_path" "$@" >"$log" 2>&1; then
         :
     else
         exit_code=$?
@@ -61,8 +82,9 @@ run_lane() {
     eval "${key}_status=\$status"
     eval "${key}_exit=\$exit_code"
     eval "${key}_expected=\$expected"
+    eval "${key}_timeout_seconds=\$timeout_seconds"
     if [ "$exit_code" -eq 124 ]; then
-        printf '%s\n' "STATUS: FAIL llm-goal-evidence-lane-timeout lane=$key seconds=$LANE_TIMEOUT_SECONDS" >>"$log"
+        printf '%s\n' "STATUS: FAIL llm-goal-evidence-lane-timeout lane=$key seconds=$timeout_seconds" >>"$log"
     fi
 }
 
@@ -185,13 +207,13 @@ lane_blocker_reason() {
 }
 
 if [ "$STRICT_HOST" -eq 1 ]; then
-    run_producer "$BUILD_DIR/context_ponytail_full_replacement.log" env -u BUILD_DIR -u REPORT_PATH sh scripts/check/check-llm-tooling-context-ponytail-full-replacement.shs
+    run_producer "$BUILD_DIR/context_ponytail_full_replacement.log" env -u BUILD_DIR REPORT_PATH="$BUILD_DIR/context_ponytail_full_replacement_report.md" sh scripts/check/check-llm-tooling-context-ponytail-full-replacement.shs
     run_lane context_ponytail pass env CONTEXT_PONYTAIL_FULL_REPLACEMENT_EVIDENCE_ENV=build/llm_tooling_context_ponytail_full_replacement/evidence.env sh scripts/check/check-llm-tooling-context-ponytail-mimic.shs --strict-full-replacement
 else
     run_lane context_ponytail pass sh scripts/check/check-llm-tooling-context-ponytail-mimic.shs
 fi
 if [ "$STRICT_HOST" -eq 1 ]; then
-    run_producer "$BUILD_DIR/dashboard_live.log" env -u BUILD_DIR -u REPORT_PATH sh scripts/check/check-llm-dashboard-live-evidence.shs
+    run_producer "$BUILD_DIR/dashboard_live.log" env -u BUILD_DIR REPORT_PATH="$BUILD_DIR/dashboard_live_report.md" sh scripts/check/check-llm-dashboard-live-evidence.shs
     run_lane dashboard pass env LLM_DASHBOARD_LIVE_EVIDENCE_ENV=build/llm_dashboard_live/evidence.env sh scripts/check/check-llm-dashboard-evidence.shs --strict-live
 else
     run_lane dashboard pass sh scripts/check/check-llm-dashboard-evidence.shs
@@ -202,7 +224,7 @@ else
     run_lane vllm_host warn sh scripts/check/check-llm-runtime-vllm-host-probe.shs
 fi
 if [ "$STRICT_HOST" -eq 1 ]; then
-    run_producer "$BUILD_DIR/svllm_native_streaming.log" env -u BUILD_DIR -u REPORT_PATH sh scripts/check/check-llm-runtime-svllm-native-streaming-evidence.shs
+    run_producer "$BUILD_DIR/svllm_native_streaming.log" env -u BUILD_DIR REPORT_PATH="$BUILD_DIR/svllm_native_streaming_report.md" sh scripts/check/check-llm-runtime-svllm-native-streaming-evidence.shs
     run_lane svllm_local pass env SVLLM_NATIVE_EVIDENCE_ENV=build/llm_runtime_svllm_native_streaming/evidence.env sh scripts/check/check-llm-runtime-svllm-local-readiness.shs --strict-native
 else
     run_lane svllm_local pass sh scripts/check/check-llm-runtime-svllm-local-readiness.shs
@@ -213,7 +235,7 @@ else
     run_lane torch_optimizer warn sh scripts/check/check-llm-runtime-torch-cuda-optimizer-probe.shs
 fi
 if [ "$STRICT_HOST" -eq 1 ]; then
-    run_producer "$BUILD_DIR/finetune_acceptance.log" env -u BUILD_DIR -u REPORT_PATH sh scripts/check/check-llm-finetune-acceptance-evidence.shs
+    run_producer "$BUILD_DIR/finetune_acceptance.log" env -u BUILD_DIR REPORT_PATH="$BUILD_DIR/finetune_acceptance_report.md" sh scripts/check/check-llm-finetune-acceptance-evidence.shs
     run_lane finetune_guard pass env FINETUNE_ACCEPTANCE_EVIDENCE_ENV=build/llm_finetune_acceptance/evidence.env sh scripts/check/check-llm-finetune-guard-evidence.shs --strict-ready
 else
     run_lane finetune_guard pass sh scripts/check/check-llm-finetune-guard-evidence.shs
@@ -295,17 +317,19 @@ done
         eval "lane_status=\${${key}_status}"
         eval "exit_code=\${${key}_exit}"
         eval "expected=\${${key}_expected}"
+        eval "timeout_seconds=\${${key}_timeout_seconds}"
         hint="$(gate_hint "$key")"
         printf '%s\n' "llm_goal_evidence_${key}_status=$lane_status"
         printf '%s\n' "llm_goal_evidence_${key}_expected=$expected"
         printf '%s\n' "llm_goal_evidence_${key}_exit=$exit_code"
+        printf '%s\n' "llm_goal_evidence_${key}_timeout_seconds=$timeout_seconds"
         printf '%s\n' "llm_goal_evidence_${key}_hint=$hint"
         required="$(lane_required_gates "$key")"
         blocked="$(lane_blocked_gates "$key")"
         reason="$(lane_blocker_reason "$key")"
         if [ "$exit_code" -eq 124 ]; then
             blocked="lane_timeout"
-            reason="lane_timeout_${LANE_TIMEOUT_SECONDS}s"
+            reason="lane_timeout_${timeout_seconds}s"
         fi
         printf '%s\n' "llm_goal_evidence_${key}_required_gates=${required:-n/a}"
         printf '%s\n' "llm_goal_evidence_${key}_blocked_gates=${blocked:-n/a}"
@@ -340,14 +364,16 @@ done
     fi
     printf '%s\n' "- env: \`$OUT_ENV\`"
     printf '%s\n' "- lane_timeout_seconds: \`$LANE_TIMEOUT_SECONDS\`"
+    printf '%s\n' "- svllm_lane_timeout_seconds: \`$(lane_timeout_seconds svllm_local)\`"
     printf '\n'
-    printf '| lane | status | expected | exit | log |\n'
-    printf '|------|--------|----------|------|-----|\n'
+    printf '| lane | status | expected | exit | timeout | log |\n'
+    printf '|------|--------|----------|------|---------|-----|\n'
     for key in context_ponytail dashboard vllm_host svllm_local torch_optimizer finetune_guard public_absence; do
         eval "lane_status=\${${key}_status}"
         eval "exit_code=\${${key}_exit}"
         eval "expected=\${${key}_expected}"
-        printf '| %s | `%s` | `%s` | `%s` | `%s` |\n' "$key" "$lane_status" "$expected" "$exit_code" "$BUILD_DIR/$key.log"
+        eval "timeout_seconds=\${${key}_timeout_seconds}"
+        printf '| %s | `%s` | `%s` | `%s` | `%s` | `%s` |\n' "$key" "$lane_status" "$expected" "$exit_code" "$timeout_seconds" "$BUILD_DIR/$key.log"
     done
     printf '\n'
     printf '## Strict Evidence Hints\n\n'
@@ -365,7 +391,7 @@ done
         reason="$(lane_blocker_reason "$key")"
         if [ "$exit_code" -eq 124 ]; then
             blocked="lane_timeout"
-            reason="lane_timeout_${LANE_TIMEOUT_SECONDS}s"
+            reason="lane_timeout_$(lane_timeout_seconds "$key")s"
         fi
         printf '| %s | `%s` | `%s` | `%s` |\n' "$key" "${required:-n/a}" "${blocked:-n/a}" "${reason:-n/a}"
     done

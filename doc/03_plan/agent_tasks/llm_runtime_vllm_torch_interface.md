@@ -697,3 +697,12 @@ fixture writer, matching the parser's runtime constraints. The safetensors
 parser's little-endian length reader now uses arithmetic accumulation instead
 of boolean-style bitwise syntax, and stale stub comments in the safetensors and
 loader modules were replaced with the current implemented boundary.
+
+## 2026-06-29 LLM Aggregate svLLM Timeout Floor
+
+`scripts/check/check-llm-goal-evidence.shs` now gives the `svllm_local` lane a
+separate bounded timeout contract. Short global aggregate timeouts still bound
+quick lanes, while svLLM local readiness uses
+`LLM_GOAL_SVLLM_LANE_TIMEOUT_SECONDS` or a 120s floor so a normal local
+readiness pass is not misreported as `lane_timeout_45s`. The aggregate env and
+report include each lane's actual timeout seconds for review.
