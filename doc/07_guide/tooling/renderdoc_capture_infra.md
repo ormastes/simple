@@ -1301,6 +1301,10 @@ The current canonical evidence contract is:
   `blur_or_tolerance_used=false`.
   Font offload
   `unavailable` is recorded but does not satisfy the production parity wrapper.
+  A font pass must also carry
+  `production_gui_web_renderer_parity_font_offload_runtime_evidence_status=pass`
+  from `PRODUCTION_GUI_FONT_RUNTIME_EVIDENCE_ENV`; direct env-only readiness
+  values are diagnostic inputs, not production completion evidence.
   The Tauri/Chrome surface manifest must prove live Electron, Tauri, and Chrome
   captures, 50 Tauri and 50 Chrome cases, 36 pass cases plus 14 tracked
   divergence cases for each browser surface, 0 fail cases, 0 mismatch counts,

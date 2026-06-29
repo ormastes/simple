@@ -22,6 +22,7 @@ Use `scripts/check/check-production-gui-font-offload-evidence.shs`. Completion
 requires:
 
 - `production_gui_font_offload_status=pass`
+- `production_gui_font_offload_runtime_evidence_status=pass`
 - `production_gui_font_offload_vector_production_ready=true`
 - `production_gui_font_offload_bitmap_production_ready=true`
 - vector and bitmap actual checksums match their expected checksums

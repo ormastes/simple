@@ -6,13 +6,62 @@ cd "$ROOT_DIR"
 
 BUILD_DIR="${BUILD_DIR:-build/production_gui_font_offload_evidence}"
 REPORT_PATH="${REPORT_PATH:-doc/09_report/production_gui_font_offload_evidence_$(date -u +%F).md}"
-SIMPLE_BIN="${SIMPLE_BIN:-bin/simple}"
+SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
+SIMPLE_BIN_STATUS=pass
 SIMPLE_SRC="$BUILD_DIR/production_gui_font_offload_evidence.spl"
 SIMPLE_OUT="$BUILD_DIR/simple.out"
 ENV_PATH="$BUILD_DIR/evidence.env"
 TIMEOUT_SECS="${PRODUCTION_GUI_FONT_EVIDENCE_TIMEOUT_SECS:-60}"
 KILL_SECS="${PRODUCTION_GUI_FONT_EVIDENCE_KILL_SECS:-5}"
 BLOCKER_DOC="doc/08_tracking/bug/production_gui_font_offload_runtime_readback_2026-06-23.md"
+RUNTIME_EVIDENCE_ENV="${PRODUCTION_GUI_FONT_RUNTIME_EVIDENCE_ENV:-}"
+RUNTIME_EVIDENCE_STATUS=missing
+
+is_rust_seed_simple() {
+    case "$1" in
+        src/compiler_rust/*|*/src/compiler_rust/*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+if [ -z "${SIMPLE_BIN+x}" ]; then
+    SIMPLE_BIN_SOURCE="default-missing"
+    for candidate in \
+        "release"/*/simple \
+        "bin/release"/*/simple \
+        "build/bootstrap/stage3/simple" \
+        "bin/simple" \
+        "./bin/simple"
+    do
+        if [ -x "$candidate" ]; then
+            SIMPLE_BIN="$candidate"
+            SIMPLE_BIN_SOURCE="repo-self-hosted-fallback"
+            break
+        fi
+    done
+    if [ -z "${SIMPLE_BIN+x}" ] && command -v simple >/dev/null 2>&1; then
+        SIMPLE_BIN="$(command -v simple)"
+        SIMPLE_BIN_SOURCE="path-fallback"
+    fi
+fi
+if [ -z "${SIMPLE_BIN+x}" ] || [ "$SIMPLE_BIN" = "" ]; then
+    SIMPLE_BIN=""
+    SIMPLE_BIN_STATUS=missing
+    SIMPLE_BIN_SOURCE="missing-self-hosted"
+elif is_rust_seed_simple "$SIMPLE_BIN"; then
+    SIMPLE_BIN_STATUS=forbidden
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-rust-seed-forbidden"
+elif [ ! -x "$SIMPLE_BIN" ]; then
+    SIMPLE_BIN_STATUS=missing
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-missing"
+fi
+export SIMPLE_BIN SIMPLE_BIN_SOURCE SIMPLE_BIN_STATUS
+
+field_of() {
+    key="$1"
+    file="$2"
+    sed -n "s/^${key}=//p" "$file" | tail -n 1
+}
 
 VECTOR_RUNTIME_READY="${VECTOR_FONT_RUNTIME_READY:-false}"
 VECTOR_MODULE_READY="${VECTOR_FONT_MODULE_READY:-false}"
@@ -31,6 +80,40 @@ BITMAP_MODULE_READY="${BITMAP_FONT_MODULE_READY:-false}"
 BITMAP_BACKEND_SUBMIT_OK="${BITMAP_FONT_BACKEND_SUBMIT_OK:-false}"
 BITMAP_READBACK_AVAILABLE="${BITMAP_FONT_READBACK_AVAILABLE:-false}"
 
+if [ -n "$RUNTIME_EVIDENCE_ENV" ] && [ -s "$RUNTIME_EVIDENCE_ENV" ]; then
+    RUNTIME_EVIDENCE_STATUS=pass
+    VECTOR_RUNTIME_READY="$(field_of production_gui_font_runtime_vector_runtime_ready "$RUNTIME_EVIDENCE_ENV")"
+    VECTOR_MODULE_READY="$(field_of production_gui_font_runtime_vector_module_ready "$RUNTIME_EVIDENCE_ENV")"
+    VECTOR_BACKEND_SUBMIT_OK="$(field_of production_gui_font_runtime_vector_backend_submit_ok "$RUNTIME_EVIDENCE_ENV")"
+    VECTOR_READBACK_AVAILABLE="$(field_of production_gui_font_runtime_vector_readback_available "$RUNTIME_EVIDENCE_ENV")"
+    VECTOR_ACCEL_ATTEMPTS="$(field_of production_gui_font_runtime_vector_accel_attempts "$RUNTIME_EVIDENCE_ENV")"
+    VECTOR_CUDA_HITS="$(field_of production_gui_font_runtime_vector_cuda_hits "$RUNTIME_EVIDENCE_ENV")"
+    VECTOR_OPENCL_HITS="$(field_of production_gui_font_runtime_vector_opencl_hits "$RUNTIME_EVIDENCE_ENV")"
+    VECTOR_CPU_FALLBACK_HITS="$(field_of production_gui_font_runtime_vector_cpu_fallback_hits "$RUNTIME_EVIDENCE_ENV")"
+    VECTOR_GPU_RETURNED_GLYPHS="$(field_of production_gui_font_runtime_vector_gpu_returned_glyphs "$RUNTIME_EVIDENCE_ENV")"
+    VECTOR_GPU_RETURNED_GLYPH_PIXELS="$(field_of production_gui_font_runtime_vector_gpu_returned_glyph_pixels "$RUNTIME_EVIDENCE_ENV")"
+    VECTOR_REASON="$(field_of production_gui_font_runtime_vector_reason "$RUNTIME_EVIDENCE_ENV")"
+    BITMAP_RUNTIME_READY="$(field_of production_gui_font_runtime_bitmap_runtime_ready "$RUNTIME_EVIDENCE_ENV")"
+    BITMAP_MODULE_READY="$(field_of production_gui_font_runtime_bitmap_module_ready "$RUNTIME_EVIDENCE_ENV")"
+    BITMAP_BACKEND_SUBMIT_OK="$(field_of production_gui_font_runtime_bitmap_backend_submit_ok "$RUNTIME_EVIDENCE_ENV")"
+    BITMAP_READBACK_AVAILABLE="$(field_of production_gui_font_runtime_bitmap_readback_available "$RUNTIME_EVIDENCE_ENV")"
+fi
+VECTOR_RUNTIME_READY="${VECTOR_RUNTIME_READY:-false}"
+VECTOR_MODULE_READY="${VECTOR_MODULE_READY:-false}"
+VECTOR_BACKEND_SUBMIT_OK="${VECTOR_BACKEND_SUBMIT_OK:-false}"
+VECTOR_READBACK_AVAILABLE="${VECTOR_READBACK_AVAILABLE:-false}"
+VECTOR_ACCEL_ATTEMPTS="${VECTOR_ACCEL_ATTEMPTS:-0}"
+VECTOR_CUDA_HITS="${VECTOR_CUDA_HITS:-0}"
+VECTOR_OPENCL_HITS="${VECTOR_OPENCL_HITS:-0}"
+VECTOR_CPU_FALLBACK_HITS="${VECTOR_CPU_FALLBACK_HITS:-1}"
+VECTOR_GPU_RETURNED_GLYPHS="${VECTOR_GPU_RETURNED_GLYPHS:-0}"
+VECTOR_GPU_RETURNED_GLYPH_PIXELS="${VECTOR_GPU_RETURNED_GLYPH_PIXELS:-0}"
+VECTOR_REASON="${VECTOR_REASON:-font-device-readback-unavailable}"
+BITMAP_RUNTIME_READY="${BITMAP_RUNTIME_READY:-false}"
+BITMAP_MODULE_READY="${BITMAP_MODULE_READY:-false}"
+BITMAP_BACKEND_SUBMIT_OK="${BITMAP_BACKEND_SUBMIT_OK:-false}"
+BITMAP_READBACK_AVAILABLE="${BITMAP_READBACK_AVAILABLE:-false}"
+
 if [ -n "${PRODUCTION_GUI_FONT_CANDIDATES_SIMPLE:-}" ]; then
     FONT_CANDIDATES_SIMPLE="$PRODUCTION_GUI_FONT_CANDIDATES_SIMPLE"
 elif [ "$(uname -s 2>/dev/null || printf unknown)" = "Darwin" ]; then
@@ -47,6 +130,11 @@ emit_unavailable() {
     {
         echo "production_gui_font_offload_status=unavailable"
         echo "production_gui_font_offload_reason=$reason"
+        echo "production_gui_font_offload_simple_bin=$SIMPLE_BIN"
+        echo "production_gui_font_offload_simple_bin_source=$SIMPLE_BIN_SOURCE"
+        echo "production_gui_font_offload_simple_bin_status=$SIMPLE_BIN_STATUS"
+        echo "production_gui_font_offload_runtime_evidence_env=$RUNTIME_EVIDENCE_ENV"
+        echo "production_gui_font_offload_runtime_evidence_status=$RUNTIME_EVIDENCE_STATUS"
         echo "production_gui_font_offload_vector_status=unavailable"
         echo "production_gui_font_offload_bitmap_status=unavailable"
         echo "production_gui_font_offload_report=$REPORT_PATH"
@@ -62,8 +150,8 @@ emit_unavailable() {
     cat "$ENV_PATH"
 }
 
-if [ ! -x "$SIMPLE_BIN" ]; then
-    emit_unavailable "missing-simple-bin"
+if [ "$SIMPLE_BIN_STATUS" != "pass" ]; then
+    emit_unavailable "simple-bin-$SIMPLE_BIN_STATUS"
     exit 1
 fi
 
@@ -182,9 +270,21 @@ bitmap_readback_status="$(value_of production_gui_font_offload_bitmap_readback_s
 bitmap_readback_reason="$(value_of production_gui_font_offload_bitmap_readback_reason)"
 bitmap_ready="$(value_of production_gui_font_offload_bitmap_production_ready)"
 
+if [ "$status" = "pass" ] && [ "$RUNTIME_EVIDENCE_STATUS" != "pass" ]; then
+    status="unavailable"
+    reason="runtime-evidence-missing"
+    vector_ready="false"
+    bitmap_ready="false"
+fi
+
 {
     echo "production_gui_font_offload_status=$status"
     echo "production_gui_font_offload_reason=$reason"
+    echo "production_gui_font_offload_simple_bin=$SIMPLE_BIN"
+    echo "production_gui_font_offload_simple_bin_source=$SIMPLE_BIN_SOURCE"
+    echo "production_gui_font_offload_simple_bin_status=$SIMPLE_BIN_STATUS"
+    echo "production_gui_font_offload_runtime_evidence_env=$RUNTIME_EVIDENCE_ENV"
+    echo "production_gui_font_offload_runtime_evidence_status=$RUNTIME_EVIDENCE_STATUS"
     echo "production_gui_font_offload_vector_backend=$vector_backend"
     echo "production_gui_font_offload_vector_status=$vector_status"
     echo "production_gui_font_offload_vector_reason=$vector_reason"
@@ -210,6 +310,10 @@ bitmap_ready="$(value_of production_gui_font_offload_bitmap_production_ready)"
     echo
     echo "- status: $status"
     echo "- reason: $reason"
+    echo "- simple_bin: $SIMPLE_BIN"
+    echo "- simple_bin_source: $SIMPLE_BIN_SOURCE"
+    echo "- simple_bin_status: $SIMPLE_BIN_STATUS"
+    echo "- runtime evidence: $RUNTIME_EVIDENCE_STATUS"
     echo "- vector backend: $vector_backend"
     echo "- vector offload status: $vector_status"
     echo "- vector offload reason: $vector_reason"
