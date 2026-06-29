@@ -23,6 +23,13 @@ use hil_queue.*
 use fw_pool.*
 use ftl.*
 
+# Result of dispatching one admin command. `post` is false only for an Async Event
+# Request held outstanding (its completion is posted later, when an event is raised).
+struct AdminResult:
+    status: i64
+    data:   i64
+    post:   bool
+
 struct NvmeController:
     aq:       AdminQueue
     qset:     QueueSet
@@ -34,9 +41,17 @@ struct NvmeController:
     reads:    i64
     writes:   i64
     power_cycles: i64
+    abort_count:  i64
+    format_count: i64
+    aer_held_cid: i64   # cid of a single outstanding AER, or -1 if none
+    aer_event:    i64   # event awaiting an AER (0 = none), if one arrived first
+    fw_revision:  i64   # active firmware revision (bumped on commit)
+    fw_dl_bytes:  i64   # bytes accumulated by the in-progress firmware download
+    media_errors: i64   # uncorrectable read errors observed (SMART)
+    unsafe_shutdowns: i64   # power cycles without a clean checkpoint (SMART)
 
 fn nvme_controller_new() -> NvmeController:
-    NvmeController(aq: admin_queue_new(), qset: queue_set_new(), features: feature_store_new(), ftl: ftl_new(), pool: task_pool_new(), last_id: identify_empty(), smart: smart_empty(), reads: 0, writes: 0, power_cycles: 0)
+    NvmeController(aq: admin_queue_new(), qset: queue_set_new(), features: feature_store_new(), ftl: ftl_new(), pool: task_pool_new(), last_id: identify_empty(), smart: smart_empty(), reads: 0, writes: 0, power_cycles: 0, abort_count: 0, format_count: 0, aer_held_cid: -1, aer_event: 0, fw_revision: 1, fw_dl_bytes: 0, media_errors: 0, unsafe_shutdowns: 0)
 
 impl NvmeController:
     # ── Admin path ───────────────────────────────────────────────────────────
@@ -55,44 +70,90 @@ impl NvmeController:
     me last_smart() -> SmartLog:
         me.smart
 
-    # Service every queued admin command; post a completion for each.
+    # Service every queued admin command, posting a completion for each (except an
+    # Async Event Request held outstanding). Returns the number of completions posted.
     me admin_process() -> i64:
         var n: i64 = 0
         var pend: i64 = me.aq.pending()
         while pend > 0:
             val cmd: AdminCmd = me.aq.fetch()
-            var status: i64 = SC_SUCCESS
-            var data: i64 = 0
-            if cmd.opcode == ADMIN_CREATE_CQ:
-                status = me.qset.create_cq(admin_qid(cmd.cdw10), admin_qsize(cmd.cdw10))
-            else:
-                if cmd.opcode == ADMIN_CREATE_SQ:
-                    status = me.qset.create_sq(admin_qid(cmd.cdw10), admin_qsize(cmd.cdw10), admin_cqid(cmd.cdw11))
-                else:
-                    if cmd.opcode == ADMIN_DELETE_SQ:
-                        status = me.qset.delete_sq(admin_qid(cmd.cdw10))
-                    else:
-                        if cmd.opcode == ADMIN_DELETE_CQ:
-                            status = me.qset.delete_cq(admin_qid(cmd.cdw10))
-                        else:
-                            if cmd.opcode == ADMIN_IDENTIFY:
-                                status = me.do_identify(cmd)
-                            else:
-                                if cmd.opcode == ADMIN_SET_FEATURES:
-                                    me.features.set(admin_fid(cmd.cdw10), cmd.cdw11)
-                                    data = cmd.cdw11
-                                else:
-                                    if cmd.opcode == ADMIN_GET_FEATURES:
-                                        data = me.features.get(admin_fid(cmd.cdw10))
-                                    else:
-                                        if cmd.opcode == ADMIN_GET_LOG:
-                                            status = me.do_get_log(cmd)
-                                        else:
-                                            status = SC_INVALID_OPCODE
-            me.aq.cq_post(cpl_make(cmd.cid, status, data))
-            n = n + 1
+            val r: AdminResult = me.admin_exec(cmd)
+            if r.post:
+                me.aq.cq_post(cpl_make(cmd.cid, r.status, r.data))
+                n = n + 1
             pend = me.aq.pending()
         n
+
+    # Dispatch one admin command to its handler.
+    me admin_exec(cmd: AdminCmd) -> AdminResult:
+        if cmd.opcode == ADMIN_CREATE_CQ:
+            return AdminResult(status: me.qset.create_cq(admin_qid(cmd.cdw10), admin_qsize(cmd.cdw10)), data: 0, post: true)
+        if cmd.opcode == ADMIN_CREATE_SQ:
+            return AdminResult(status: me.qset.create_sq(admin_qid(cmd.cdw10), admin_qsize(cmd.cdw10), admin_cqid(cmd.cdw11)), data: 0, post: true)
+        if cmd.opcode == ADMIN_DELETE_SQ:
+            return AdminResult(status: me.qset.delete_sq(admin_qid(cmd.cdw10)), data: 0, post: true)
+        if cmd.opcode == ADMIN_DELETE_CQ:
+            return AdminResult(status: me.qset.delete_cq(admin_qid(cmd.cdw10)), data: 0, post: true)
+        if cmd.opcode == ADMIN_IDENTIFY:
+            return AdminResult(status: me.do_identify(cmd), data: 0, post: true)
+        if cmd.opcode == ADMIN_SET_FEATURES:
+            me.features.set(admin_fid(cmd.cdw10), cmd.cdw11)
+            return AdminResult(status: SC_SUCCESS, data: cmd.cdw11, post: true)
+        if cmd.opcode == ADMIN_GET_FEATURES:
+            return AdminResult(status: SC_SUCCESS, data: me.features.get(admin_fid(cmd.cdw10)), post: true)
+        if cmd.opcode == ADMIN_GET_LOG:
+            return AdminResult(status: me.do_get_log(cmd), data: 0, post: true)
+        if cmd.opcode == ADMIN_ABORT:
+            me.abort_count = me.abort_count + 1
+            # Synchronous model: the target command has already completed -> "not aborted".
+            return AdminResult(status: SC_SUCCESS, data: 1, post: true)
+        if cmd.opcode == ADMIN_FORMAT_NVM:
+            me.ftl = ftl_new()                 # erase all user data; LBAs read 0 afterward
+            me.format_count = me.format_count + 1
+            return AdminResult(status: SC_SUCCESS, data: 0, post: true)
+        if cmd.opcode == ADMIN_FW_DOWNLOAD:
+            me.fw_dl_bytes = me.fw_dl_bytes + cmd.cdw10 * 4   # NUMD dwords accumulated
+            return AdminResult(status: SC_SUCCESS, data: 0, post: true)
+        if cmd.opcode == ADMIN_FW_COMMIT:
+            me.fw_revision = me.fw_revision + 1               # activate the downloaded image
+            me.fw_dl_bytes = 0
+            return AdminResult(status: SC_SUCCESS, data: 0, post: true)
+        if cmd.opcode == ADMIN_ASYNC_EVENT:
+            return me.admin_async_event(cmd)
+        AdminResult(status: SC_INVALID_OPCODE, data: 0, post: true)
+
+    # Async Event Request: complete immediately if an event is already pending,
+    # otherwise hold the request outstanding (no completion) until one is raised.
+    me admin_async_event(cmd: AdminCmd) -> AdminResult:
+        if me.aer_event != 0:
+            val evt: i64 = me.aer_event
+            me.aer_event = 0
+            return AdminResult(status: SC_SUCCESS, data: evt, post: true)
+        if me.aer_held_cid == -1:
+            me.aer_held_cid = cmd.cid
+            return AdminResult(status: SC_SUCCESS, data: 0, post: false)
+        AdminResult(status: SC_INVALID_FIELD, data: 0, post: true)   # AER limit (1) exceeded
+
+    # Raise an asynchronous event: complete a held AER now, or remember it for the
+    # next AER the host posts.
+    me raise_async_event(evt: i64):
+        if me.aer_held_cid != -1:
+            me.aq.cq_post(cpl_make(me.aer_held_cid, SC_SUCCESS, evt))
+            me.aer_held_cid = -1
+        else:
+            me.aer_event = evt
+
+    me aer_outstanding() -> i64:
+        var n: i64 = 0
+        if me.aer_held_cid != -1:
+            n = 1
+        n
+
+    me firmware_revision() -> i64:
+        me.fw_revision
+
+    me format_passes() -> i64:
+        me.format_count
 
     me do_identify(cmd: AdminCmd) -> i64:
         val cns: i64 = admin_cns(cmd.cdw10)
@@ -226,5 +287,46 @@ fn nvme_controller_selftest() -> i64:
     val gf: NvmeCpl = c.admin_reap()
     fail = fail + expect_eq(sf.status, SC_SUCCESS, "set feature ok")
     fail = fail + expect_eq(gf.data, 345, "get feature returns the set value")
+
+    # Abort (best-effort): completes; the synchronous target is already done.
+    c.admin_submit(admin_abort_cmd(30, 1, 100))
+    c.admin_process()
+    val ab: NvmeCpl = c.admin_reap()
+    fail = fail + expect_eq(ab.status, SC_SUCCESS, "abort completes SC_SUCCESS")
+    fail = fail + expect_eq(ab.data, 1, "abort reports target not in flight")
+
+    # Async Event Request: held outstanding (no completion) until an event is raised.
+    c.admin_submit(admin_async_event_cmd(31))
+    c.admin_process()
+    fail = fail + expect_eq(c.admin_completions(), 0, "AER held: no completion yet")
+    fail = fail + expect_eq(c.aer_outstanding(), 1, "AER outstanding == 1")
+    c.raise_async_event(AER_SMART_HEALTH)
+    fail = fail + expect_eq(c.admin_completions(), 1, "AER completes after event raised")
+    val aer: NvmeCpl = c.admin_reap()
+    fail = fail + expect_eq(aer.data, AER_SMART_HEALTH, "AER reports the event type")
+
+    # Firmware Download + Commit advances the active firmware revision.
+    val rev0: i64 = c.firmware_revision()
+    c.admin_submit(admin_fw_download_cmd(32, 1024, 0))
+    c.admin_submit(admin_fw_commit_cmd(33, 1, 1))
+    c.admin_process()
+    val fd: NvmeCpl = c.admin_reap()
+    val fc2: NvmeCpl = c.admin_reap()
+    fail = fail + expect_eq(fd.status, SC_SUCCESS, "fw download accepted")
+    fail = fail + expect_eq(fc2.status, SC_SUCCESS, "fw commit accepted")
+    fail = fail + expect_eq(c.firmware_revision(), rev0 + 1, "fw commit advances revision")
+
+    # Format NVM erases user data: write, format, then the LBA reads back 0.
+    c.io_submit(1, cmd_make(110, OP_WRITE, 5, 1, 0xEE))
+    c.io_process()
+    c.io_reap(1)
+    c.admin_submit(admin_format_cmd(34, 1))
+    c.admin_process()
+    val fmt: NvmeCpl = c.admin_reap()
+    fail = fail + expect_eq(fmt.status, SC_SUCCESS, "format completes")
+    c.io_submit(1, cmd_make(111, OP_READ, 5, 1, 0))
+    c.io_process()
+    val rr: NvmeCpl = c.io_reap(1)
+    fail = fail + expect_eq(rr.data, 0, "format erased user data (read -> 0)")
 
     fail
