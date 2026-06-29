@@ -23,6 +23,7 @@ extern fn rt_fb_blit_array32(dst_addr: u64, dst_stride_pixels: u64,
     src_pixels: [u32], src_stride_pixels: u64, copy_w: u64, copy_h: u64)
 
 var g_qemu_input_repainted: u64 = 0
+var g_qemu_mouse_initialized: u64 = 0
 
 fn _fb_w() -> i32:
     1024
@@ -143,9 +144,76 @@ fn _poll_qemu_keyboard_input(fb_addr: u64, stride: i32, app_count: i64):
     g_qemu_input_repainted = 1u64
     serial_println("[mdi-demo] qemu-keyboard-repainted")
 
+fn _ps2_wait_input_clear():
+    var i: u64 = 0
+    while i < 100000u64:
+        if (rt_port_inb(0x64u64) & 2u64) == 0u64:
+            return
+        i = i + 1u64
+
+fn _ps2_wait_output_full():
+    var i: u64 = 0
+    while i < 100000u64:
+        if (rt_port_inb(0x64u64) & 1u64) != 0u64:
+            return
+        i = i + 1u64
+
+fn _ps2_mouse_write(byte_val: u8):
+    _ps2_wait_input_clear()
+    rt_port_outb(0x64u16, 0xD4u8)
+    _ps2_wait_input_clear()
+    rt_port_outb(0x60u16, byte_val)
+    _ps2_wait_output_full()
+    val _ack = rt_port_inb(0x60u64)
+
+fn _ps2_flush_pending():
+    var i: u64 = 0
+    while i < 16u64:
+        if (rt_port_inb(0x64u64) & 1u64) != 0u64:
+            val _d = rt_port_inb(0x60u64)
+        i = i + 1u64
+
+fn _qemu_mouse_init():
+    if g_qemu_mouse_initialized == 1u64:
+        return
+    _ps2_flush_pending()
+    _ps2_wait_input_clear()
+    rt_port_outb(0x64u16, 0xA8u8)
+    _ps2_wait_input_clear()
+    rt_port_outb(0x64u16, 0x20u8)
+    _ps2_wait_output_full()
+    val config = rt_port_inb(0x60u64)
+    val new_config = (config | 2u64) & 0xDFu64
+    _ps2_wait_input_clear()
+    rt_port_outb(0x64u16, 0x60u8)
+    _ps2_wait_input_clear()
+    rt_port_outb(0x60u16, new_config.to_u8())
+    _ps2_mouse_write(0xF6u8)
+    _ps2_mouse_write(0xF4u8)
+    g_qemu_mouse_initialized = 1u64
+    serial_println("[mdi-demo] qemu-mouse-ready")
+
+fn _poll_qemu_mouse_input(fb_addr: u64, stride: i32, app_count: i64):
+    if g_qemu_input_repainted == 1u64:
+        return
+    val status = rt_port_inb(0x64u64)
+    if (status & 0x21u64) != 0x21u64:
+        return
+    val byte1 = rt_port_inb(0x60u64)
+    if (byte1 & 0x08u64) == 0u64:
+        return
+    _ps2_wait_output_full()
+    val _byte2 = rt_port_inb(0x60u64)
+    _ps2_wait_output_full()
+    val _byte3 = rt_port_inb(0x60u64)
+    _present_mdi_scene_input_fb(fb_addr, stride, app_count)
+    g_qemu_input_repainted = 1u64
+    serial_println("[mdi-demo] qemu-mouse-repainted")
+
 fn _capture_settle_window(fb_addr: u64, stride: i32, app_count: i64):
     var iter: u64 = 0
     while iter < _capture_wait_iters():
+        _poll_qemu_mouse_input(fb_addr, stride, app_count)
         _poll_qemu_keyboard_input(fb_addr, stride, app_count)
         rt_port_outb(0x80u16, 0u8)
         iter = iter + 1
@@ -440,5 +508,6 @@ fn spl_start():
     serial_println("[integrated-demo] render-ready")
     serial_println("TEST PASSED")
     serial_println("[GUI] Holding rendered frame for capture")
+    _qemu_mouse_init()
     _capture_settle_window(fb_addr, _fb_w(), app_count)
     rt_port_outb(0xf4u16, 0u8)
