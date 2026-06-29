@@ -1294,6 +1294,11 @@ The current canonical evidence contract is:
   `production_gui_web_renderer_parity_metal_readback_simple_bin*`, and the gate
   re-emits them under
   `production_gui_web_renderer_parity_gate_metal_readback_simple_bin*`.
+  On non-Darwin hosts, Metal framebuffer readback is classified as
+  `unavailable` with reason `metal-requires-macos`; this is not a Linux
+  GUI/web hardening failure. On Darwin, the same subcheck remains strict and
+  must prove the raw Metal framebuffer download path, the interpreter spec, and
+  `blur_or_tolerance_used=false`.
   Font offload
   `unavailable` is recorded but does not satisfy the production parity wrapper.
   The Tauri/Chrome surface manifest must prove live Electron, Tauri, and Chrome
