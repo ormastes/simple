@@ -13,6 +13,7 @@ rm -f "$OUT_ENV" "$REPORT_PATH"
 TRACKER="doc/08_tracking/bug/llm_strict_host_completion_blockers_2026-06-29.md"
 AUDIT="doc/09_report/2026/06/llm_goal_strict_completion_audit_2026-06-29.md"
 DEFAULT_REPORT="doc/09_report/2026/06/llm_goal_evidence_2026-06-29.md"
+DEFAULT_ENV="build/llm_goal_evidence/evidence.env"
 
 failures=""
 checked_count=0
@@ -44,6 +45,19 @@ require_pattern() {
     fi
 }
 
+require_default_warn_gates() {
+    checked_count=$((checked_count + 1))
+    if [ -r "$DEFAULT_REPORT" ] && rg -q 'warn_gates: `vllm_host\|torch_optimizer`' "$DEFAULT_REPORT"; then
+        default_warn_source="$DEFAULT_REPORT"
+        return
+    fi
+    if [ -r "$DEFAULT_ENV" ] && rg -q '^llm_goal_evidence_warn_gates=vllm_host\|torch_optimizer$' "$DEFAULT_ENV"; then
+        default_warn_source="$DEFAULT_ENV"
+        return
+    fi
+    add_failure "default_warn_gates_mismatch"
+}
+
 hash_file() {
     path="$1"
     if [ ! -r "$path" ]; then
@@ -68,9 +82,9 @@ size_file() {
 
 require_file "$TRACKER"
 require_file "$AUDIT"
-require_file "$DEFAULT_REPORT"
+default_warn_source="missing"
 
-require_pattern "$DEFAULT_REPORT" 'warn_gates: `vllm_host\|torch_optimizer`' "default_warn_gates_mismatch"
+require_default_warn_gates
 require_pattern "$TRACKER" 'Status: OPEN' "tracker_not_open"
 require_pattern "$TRACKER" 'STATUS: FAIL llm-goal-evidence warn_count=0 fail_count=5' "tracker_strict_fail_summary_missing"
 require_pattern "$TRACKER" 'failed_gates=dashboard\|vllm_host\|svllm_local\|torch_optimizer\|finetune_guard' "tracker_failed_gates_mismatch"
@@ -105,6 +119,8 @@ audit_size="$(size_file "$AUDIT")"
 audit_sha256="$(hash_file "$AUDIT")"
 default_report_size="$(size_file "$DEFAULT_REPORT")"
 default_report_sha256="$(hash_file "$DEFAULT_REPORT")"
+default_env_size="$(size_file "$DEFAULT_ENV")"
+default_env_sha256="$(hash_file "$DEFAULT_ENV")"
 
 status="pass"
 reason="tracker_consistent"
@@ -126,6 +142,10 @@ fi
     printf '%s\n' "llm_strict_blocker_tracker_default_report=$DEFAULT_REPORT"
     printf '%s\n' "llm_strict_blocker_tracker_default_report_size=$default_report_size"
     printf '%s\n' "llm_strict_blocker_tracker_default_report_sha256=$default_report_sha256"
+    printf '%s\n' "llm_strict_blocker_tracker_default_env=$DEFAULT_ENV"
+    printf '%s\n' "llm_strict_blocker_tracker_default_env_size=$default_env_size"
+    printf '%s\n' "llm_strict_blocker_tracker_default_env_sha256=$default_env_sha256"
+    printf '%s\n' "llm_strict_blocker_tracker_default_warn_source=$default_warn_source"
 } >"$OUT_ENV"
 
 {
@@ -142,9 +162,13 @@ fi
     printf '%s\n' "- default_report: \`$DEFAULT_REPORT\`"
     printf '%s\n' "- default_report_size: \`$default_report_size\`"
     printf '%s\n' "- default_report_sha256: \`$default_report_sha256\`"
+    printf '%s\n' "- default_env: \`$DEFAULT_ENV\`"
+    printf '%s\n' "- default_env_size: \`$default_env_size\`"
+    printf '%s\n' "- default_env_sha256: \`$default_env_sha256\`"
+    printf '%s\n' "- default_warn_source: \`$default_warn_source\`"
     printf '%s\n' "- env: \`$OUT_ENV\`"
     printf '\n'
-    printf 'This guard keeps the strict-host blocker tracker aligned with the latest default aggregate report and strict completion audit. It does not run live host evidence; it fails when the committed tracker/audit no longer name the known strict blockers or the hardened vLLM/Torch provenance hashes.\n'
+    printf 'This guard keeps the strict-host blocker tracker aligned with the latest default aggregate evidence and strict completion audit. It accepts the aggregate Markdown report or, while that report is being regenerated, the aggregate evidence env as the source for default warn gates. It does not run live host evidence; it fails when the committed tracker/audit no longer name the known strict blockers or the hardened vLLM/Torch provenance hashes.\n'
 } >"$REPORT_PATH"
 
 if [ "$status" = "pass" ]; then

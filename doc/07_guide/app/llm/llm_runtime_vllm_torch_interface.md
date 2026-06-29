@@ -483,5 +483,7 @@ sh scripts/check/check-llm-strict-blocker-tracker.shs
 ```
 
 The guard checks that the committed tracker, strict audit, and latest default
-aggregate report still agree on open strict blockers and the hardened vLLM/Torch
-manifest hashes. It is a drift check, not strict-host completion evidence.
+aggregate evidence still agree on open strict blockers and the hardened
+vLLM/Torch manifest hashes. It reads the aggregate Markdown report when present
+and falls back to `build/llm_goal_evidence/evidence.env` while that report is
+being regenerated. It is a drift check, not strict-host completion evidence.

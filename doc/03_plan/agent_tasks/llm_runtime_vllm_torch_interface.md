@@ -1038,8 +1038,10 @@ The open blocker tracker is
 Follow-up hardening adds
 `scripts/check/check-llm-strict-blocker-tracker.shs`, a cheap committed-doc
 drift guard for the strict audit and blocker tracker. It validates that the
-latest default aggregate still reports `warn_gates=vllm_host|torch_optimizer`,
-the tracker/audit still name the five strict blockers, and the vLLM/Torch
-manifest hashes recorded in the blocker docs match the current hardened
-evidence. This does not collect live host evidence; it prevents stale tracker
-or audit text from being mistaken for strict completion.
+latest default aggregate report or fallback aggregate env still reports
+`warn_gates=vllm_host|torch_optimizer`, the tracker/audit still name the five
+strict blockers, and the vLLM/Torch manifest hashes recorded in the blocker
+docs match the current hardened evidence. This does not collect live host
+evidence; it prevents stale tracker or audit text from being mistaken for
+strict completion, and it remains stable while the aggregate report is being
+regenerated.
