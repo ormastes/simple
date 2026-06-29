@@ -5,6 +5,7 @@
 - native_streaming: `fail`
 - native_reason: `native_read_range_unavailable`
 - native_env: `build/llm_runtime_svllm_native_streaming/evidence.env`
+- spec_timeout_seconds: `120`
 - manifest: `pass` exit=`0` log=`build/llm_runtime_svllm_local_readiness/manifest.log`
 - tensor_bytes: `pass` exit=`0` log=`build/llm_runtime_svllm_local_readiness/tensor_bytes.log`
 - stream_plan: `pass` exit=`0` log=`build/llm_runtime_svllm_local_readiness/stream_plan.log`

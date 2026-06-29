@@ -103,17 +103,20 @@ Run the wrapper with `--strict` when unavailable or preflight-only hosts must
 fail the lane.
 
 Latest svLLM local readiness evidence:
-`doc/09_report/2026/06/llm_runtime_svllm_local_readiness_2026-06-28.md`
+`doc/09_report/2026/06/llm_runtime_svllm_local_readiness_2026-06-29.md`
 records `scripts/check/check-llm-runtime-svllm-local-readiness.shs` passing the
 pack CLI, manifest, tensor-byte, stream-plan, std_fs local-read, and
-streaming-readiness contracts. Keep `FR-LLM-RUNTIME-0002` open because that
-wrapper proves only local file-backed readiness; native NVFS async scheduling,
-pinned buffer registration, device staging, and true streaming model loads
-still need live evidence. Run
+streaming-readiness contracts with per-spec timeout handling through
+`SVLLM_READINESS_SPEC_TIMEOUT_SECONDS` (default `120`). Keep
+`FR-LLM-RUNTIME-0002` open because that wrapper proves only local file-backed
+readiness; native NVFS async scheduling, pinned buffer registration, device
+staging, and true streaming model loads still need live evidence. Run
 `scripts/check/check-llm-runtime-svllm-native-streaming-evidence.shs` to produce
 the native evidence env. It records concrete blockers such as
 `native_read_range_unavailable` and only passes when native read_range, pinned
-buffer registration, and device staging are all ready.
+buffer registration, and device staging are all ready. Native evidence records
+`svllm_native_streaming_local_spec_timeout_seconds` so nested local-readiness
+timeouts remain visible when strict aggregate evidence is collected.
 
 Latest Torch/CUDA host probe:
 `doc/09_report/2026/06/llm_runtime_torch_cuda_host_probe_2026-06-28.md`

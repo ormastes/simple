@@ -9,6 +9,7 @@ BUILD_DIR="${BUILD_DIR:-build/llm_runtime_svllm_local_readiness}"
 REPORT_PATH="${REPORT_PATH:-doc/09_report/2026/06/llm_runtime_svllm_local_readiness_$(date -u +%F).md}"
 OUT_ENV="$BUILD_DIR/evidence.env"
 NATIVE_EVIDENCE_ENV="${SVLLM_NATIVE_EVIDENCE_ENV:-build/llm_runtime_svllm_native_streaming/evidence.env}"
+SPEC_TIMEOUT_SECONDS="${SVLLM_READINESS_SPEC_TIMEOUT_SECONDS:-120}"
 STRICT_NATIVE=0
 
 while [ "$#" -gt 0 ]; do
@@ -36,7 +37,19 @@ run_spec() {
     key="$1"
     path="$2"
     log="$BUILD_DIR/$key.log"
-    if "$SIMPLE_BIN" test "$path" --mode=interpreter --clean >"$log" 2>&1; then
+    if command -v timeout >/dev/null 2>&1; then
+        if timeout "$SPEC_TIMEOUT_SECONDS" "$SIMPLE_BIN" test "$path" --mode=interpreter --clean >"$log" 2>&1; then
+            eval "${key}_status=pass"
+            eval "${key}_exit=0"
+        else
+            code=$?
+            eval "${key}_status=fail"
+            eval "${key}_exit=$code"
+            if [ "$code" -eq 124 ]; then
+                printf '%s\n' "STATUS: FAIL svllm-local-readiness-subgate-timeout gate=$key seconds=$SPEC_TIMEOUT_SECONDS" >>"$log"
+            fi
+        fi
+    elif "$SIMPLE_BIN" test "$path" --mode=interpreter --clean >"$log" 2>&1; then
         eval "${key}_status=pass"
         eval "${key}_exit=0"
     else
@@ -89,9 +102,12 @@ fi
     printf '%s\n' "llm_runtime_svllm_local_readiness_native_status=$native_status"
     printf '%s\n' "llm_runtime_svllm_local_readiness_native_reason=$native_reason"
     printf '%s\n' "llm_runtime_svllm_local_readiness_native_env=$NATIVE_EVIDENCE_ENV"
+    printf '%s\n' "llm_runtime_svllm_local_readiness_spec_timeout_seconds=$SPEC_TIMEOUT_SECONDS"
     for key in manifest tensor_bytes stream_plan std_fs streaming_readiness svllm_pack_cli svllm_pack_log_modes; do
         eval "value=\${${key}_status}"
+        eval "exit_code=\${${key}_exit}"
         printf '%s\n' "llm_runtime_svllm_local_readiness_${key}_status=$value"
+        printf '%s\n' "llm_runtime_svllm_local_readiness_${key}_exit=$exit_code"
     done
 } >"$OUT_ENV"
 
@@ -106,6 +122,7 @@ fi
     printf '%s\n' "- native_streaming: \`$native_status\`"
     printf '%s\n' "- native_reason: \`$native_reason\`"
     printf '%s\n' "- native_env: \`$NATIVE_EVIDENCE_ENV\`"
+    printf '%s\n' "- spec_timeout_seconds: \`$SPEC_TIMEOUT_SECONDS\`"
     for key in manifest tensor_bytes stream_plan std_fs streaming_readiness svllm_pack_cli svllm_pack_log_modes; do
         eval "value=\${${key}_status}"
         eval "exit_code=\${${key}_exit}"

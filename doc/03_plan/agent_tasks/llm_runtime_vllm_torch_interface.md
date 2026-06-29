@@ -669,3 +669,13 @@ fine-tune lanes. The aggregate records per-lane required gates, blocked gates,
 and blocker reasons in `llm_goal_evidence_<lane>_*` keys and adds a Blocker
 Details table to the Markdown report, so strict-host failures can be triaged
 from one artifact instead of opening every focused wrapper output first.
+
+## 2026-06-29 svLLM Readiness Timeout Hardening
+
+`scripts/check/check-llm-runtime-svllm-local-readiness.shs` now bounds each
+local svLLM spec with `SVLLM_READINESS_SPEC_TIMEOUT_SECONDS` and records every
+subgate exit code in the env/report. Timeout failures write the top-level
+readiness report instead of leaving it missing. The native streaming producer
+passes the same timeout through its nested local-readiness run and records
+`svllm_native_streaming_local_spec_timeout_seconds` beside the native
+read-range, pinned-buffer, and device-staging blockers.
