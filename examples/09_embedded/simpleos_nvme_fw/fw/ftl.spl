@@ -40,6 +40,7 @@ impl Ftl:
         val pc: i64 = me.fil.program(ppn, lba, s, data)
         if pc != NAND_OK:
             return SC_INTERNAL
+        me.ensure_journal_room()
         me.journal.append(0, lba, old_ppn, ppn, s)
         me.map.update(lba, ppn)
         me.band.mark_valid(ppn)
@@ -73,20 +74,42 @@ impl Ftl:
             me.band.mark_invalid(ppn)
             me.map.update(lba, UNMAP)
             me.seq = me.seq + 1
+            me.ensure_journal_room()
             me.journal.append(0, lba, ppn, UNMAP, me.seq)
         SC_SUCCESS
 
-    # Persist a checkpoint: flush the dirty map cache and advance the journal checkpoint.
+    # Persist a checkpoint: flush the dirty map cache to the flash-resident L2P,
+    # advance the journal checkpoint, and truncate the now-durable WAL prefix. After
+    # this the L2P alone reflects all state up to me.seq, so the dropped WAL records
+    # are not needed for recovery.
     me checkpoint():
         me.map.flush()
         me.journal.checkpoint(me.seq)
+        me.journal.truncate_checkpointed()
 
-    # Simulate a dirty shutdown: lose the volatile L2P (map cache + table).
+    # Guarantee room for one more WAL record. If the ring is full, checkpoint first
+    # (flush durable + truncate) so the record is never silently dropped — which would
+    # otherwise ack a write to the host whose mapping is lost on the next power cycle.
+    me ensure_journal_room():
+        if me.journal.is_full():
+            me.checkpoint()
+
+    # Simulate a power loss: lose ALL volatile DRAM state. The write-back map cache
+    # (un-flushed dirty entries) and the band valid bitmap + allocator frontier are
+    # gone; the flash-resident L2P, the journal, the NAND array + OOB, and the
+    # bad-block table are persistent and survive. recover() rebuilds the volatile
+    # state from this persistent media.
     me crash():
-        me.map = ftl_map_new()
+        me.map.crash_volatile()
+        me.band.reset_volatile()
 
-    # Dirty-shutdown recovery: replay the WAL in append order (= ascending seq), so the
-    # newest mapping per LBA wins. Trimmed records (new_ppn == UNMAP) clear the entry.
+    # Power-on recovery. Rebuild all volatile state from persistent media:
+    #  1. Replay the journal (WAL) onto the flash-resident L2P in append order
+    #     (= ascending seq) so the newest mapping per LBA wins and trim records
+    #     (new_ppn == UNMAP) clear the entry. Records <= the last checkpoint are
+    #     already durable in the L2P; replaying them is idempotent.
+    #  2. Reconstruct the band valid bitmap from the now-authoritative L2P.
+    #  3. Re-apply persistently-retired blocks so the allocator skips them.
     me recover():
         val n: i64 = me.journal.wal_len()
         var i: i64 = 0
@@ -96,6 +119,18 @@ impl Ftl:
             me.map.update(lba, newp)
             i = i + 1
         me.map.flush()
+        var lba2: i64 = 0
+        while lba2 < LBA_COUNT:
+            val ppn: i64 = me.map.l2p_entry(lba2)
+            if ppn != UNMAP:
+                me.band.rebuild_mark(ppn)
+            lba2 = lba2 + 1
+        var blk: i64 = 0
+        while blk < NUM_BLOCKS:
+            if me.fil.block_bad(blk):
+                me.band.set_bad(blk)
+            blk = blk + 1
+        me.band.rebuild_finalize()
 
     me free_blocks() -> i64:
         me.band.free_blocks()
@@ -146,6 +181,7 @@ impl Ftl:
                     return UNMAP    # cannot relocate -> do NOT erase; victim stays intact
                 me.seq = me.seq + 1
                 me.fil.program(newp, rd.lba, me.seq, rd.data)
+                me.ensure_journal_room()
                 me.journal.append(0, rd.lba, ppn, newp, me.seq)
                 me.map.update(rd.lba, newp)
                 me.band.mark_valid(newp)
@@ -221,4 +257,39 @@ fn ftl_gc_safety_selftest() -> i64:
     fail = fail + expect_eq(ftl.read(1), 1001, "gc-safety: LBA1 live before GC")
     ftl.gc_once()                        # under zero-free this must abort, not erase
     fail = fail + expect_eq(ftl.read(1), 1001, "gc-safety: LBA1 survives GC (no data loss)")
+    fail
+
+# Regression: power loss wipes volatile state; recovery rebuilds from persistent media,
+# and the journal never silently drops a record (see durability_check.spl).
+fn ftl_durability_selftest() -> i64:
+    var fail: i64 = 0
+    # A. volatile-loss + recovery (checkpoint, then post-checkpoint updates).
+    var ftl: Ftl = ftl_new()
+    ftl.write(10, 1010)
+    ftl.write(20, 1020)
+    ftl.checkpoint()
+    ftl.write(30, 1030)
+    ftl.write(10, 9999)
+    ftl.trim(20)
+    ftl.crash()
+    fail = fail + expect_eq(ftl.read(10), 1010, "durab: post-crash only checkpointed value remains")
+    ftl.recover()
+    fail = fail + expect_eq(ftl.read(10), 9999, "durab: recover restores post-checkpoint overwrite")
+    fail = fail + expect_eq(ftl.read(20), 0,    "durab: recover keeps trim trimmed")
+    fail = fail + expect_eq(ftl.read(30), 1030, "durab: recover restores post-checkpoint write")
+    # B. journal overflow must not lose data (600 > WAL cap 512, no explicit checkpoint).
+    var ftl2: Ftl = ftl_new()
+    var i: i64 = 0
+    while i < 600:
+        ftl2.write(i, i + 7000)
+        i = i + 1
+    ftl2.crash()
+    ftl2.recover()
+    var miss: i64 = 0
+    i = 0
+    while i < 600:
+        if ftl2.read(i) != i + 7000:
+            miss = miss + 1
+        i = i + 1
+    fail = fail + expect_eq(miss, 0, "durab: 600 writes survive WAL overflow + power cycle")
     fail

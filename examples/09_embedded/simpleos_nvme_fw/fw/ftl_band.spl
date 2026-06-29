@@ -112,6 +112,53 @@ impl BandAlloc:
     me free_blocks() -> i64:
         me.free_count
 
+    # ── Power-loss volatile-state rebuild ─────────────────────────────────────
+    # The valid bitmap, per-block valid counts, lifecycle states, and the allocator
+    # frontier are volatile DRAM. On power loss they are cleared (reset_volatile)
+    # and reconstructed from the persistent L2P + bad-block table on recovery
+    # (rebuild_mark + set_bad + rebuild_finalize).
+
+    # Clear all volatile state. NAND contents are untouched (persistent); blocks read
+    # as FREE until rebuild marks the ones still holding live pages.
+    me reset_volatile():
+        var i: i64 = 0
+        while i < NUM_PAGES:
+            me.valid[i] = 0
+            i = i + 1
+        i = 0
+        while i < NUM_BLOCKS:
+            me.blk_state[i] = BLK_FREE
+            me.blk_valid[i] = 0
+            i = i + 1
+        me.active_blk = UNMAP
+        me.active_wp = 0
+        me.free_count = NUM_BLOCKS
+
+    # Recovery: mark one physical page live (an L2P entry points at it) and close its
+    # block (it holds committed data, so it is not free for allocation).
+    me rebuild_mark(ppn: i64):
+        if me.valid[ppn] == 0:
+            me.valid[ppn] = 1
+            val blk: i64 = ppn_block(ppn)
+            me.blk_valid[blk] = me.blk_valid[blk] + 1
+            me.blk_state[blk] = BLK_CLOSED
+
+    # Recovery: retire a persistently-bad block so the allocator never selects it.
+    me set_bad(blk: i64):
+        me.blk_state[blk] = BLK_BAD
+
+    # Recovery: recompute free_count after rebuild_mark/set_bad. A block holding no
+    # live page and not retired is free; its stale NAND contents are erased before
+    # reuse, and the allocator opens a fresh free block on the next write.
+    me rebuild_finalize():
+        var fc: i64 = 0
+        var b: i64 = 0
+        while b < NUM_BLOCKS:
+            if me.blk_state[b] == BLK_FREE:
+                fc = fc + 1
+            b = b + 1
+        me.free_count = fc
+
 # ── Self-test ─────────────────────────────────────────────────────────────────
 
 fn ftl_band_selftest() -> i64:
