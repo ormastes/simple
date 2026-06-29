@@ -1321,10 +1321,18 @@ The current canonical evidence contract is:
   row also carries the current ARGB artifact contract, including symlink and
   hardlink checks, exact viewport dimensions, nonzero pixels, and the expected
   Tauri or Chrome producer. It reruns failed, unavailable, missing, or stale
-  artifact rows. For focused repair runs, set
-  `TAURI_CHROME_LAYOUT_CASE_FILTER` to a whitespace-separated case list, such as
-  `css_box_matrix text_raster_track`; unset it for release evidence. Linux
-  Tauri capture is an Xvfb/X11 path;
+  artifact rows. When running through
+  `scripts/check/check-production-gui-web-renderer-parity-evidence.shs`, use
+  the production-level controls
+  `PRODUCTION_GUI_WEB_RENDERER_PARITY_LAYOUT_ENV` to point at a completed
+  Electron layout manifest when repairing only the surface lane,
+  `PRODUCTION_GUI_WEB_RENDERER_PARITY_SURFACE_MANIFEST_RESUME=1`,
+  `PRODUCTION_GUI_WEB_RENDERER_PARITY_SURFACE_TIMEOUT_SECS`, and
+  `PRODUCTION_GUI_WEB_RENDERER_PARITY_TAURI_CAPTURE_WAIT_STEPS`. For focused
+  repair runs, set `PRODUCTION_GUI_WEB_RENDERER_PARITY_SURFACE_CASE_FILTER`
+  (or the nested `TAURI_CHROME_LAYOUT_CASE_FILTER`) to a whitespace-separated
+  case list, such as `css_box_matrix text_raster_track`; unset the filter for
+  release evidence. Linux Tauri capture is an Xvfb/X11 path;
   the host must provide the GTK/WebKit development stack plus `openbox`,
   `xvfb-run`, `dbus-run-session`, `xdotool`, ImageMagick `import`/`convert`,
   and `node` before the wrapper can produce live Tauri ARGB evidence. The

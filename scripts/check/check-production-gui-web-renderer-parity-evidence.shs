@@ -11,6 +11,7 @@ CHROME_SURFACE_TIMEOUT_SECS="${CHROME_LAYOUT_TIMEOUT_SECS:-60}"
 SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
 SIMPLE_BIN_STATUS=pass
 SUBCHECK_TIMEOUT_SECS="${PRODUCTION_GUI_WEB_RENDERER_PARITY_SUBCHECK_TIMEOUT_SECS:-180}"
+SURFACE_SUBCHECK_TIMEOUT_SECS="${PRODUCTION_GUI_WEB_RENDERER_PARITY_SURFACE_TIMEOUT_SECS:-$SUBCHECK_TIMEOUT_SECS}"
 MATRIX_SCRIPT="${PRODUCTION_GUI_WEB_RENDERER_PARITY_MATRIX_SCRIPT:-scripts/check/check-electron-generated-gui-web-parity-matrix-evidence.shs}"
 LAYOUT_SCRIPT="${PRODUCTION_GUI_WEB_RENDERER_PARITY_LAYOUT_SCRIPT:-scripts/check/check-electron-simple-web-layout-manifest-evidence.shs}"
 SURFACE_SCRIPT="${PRODUCTION_GUI_WEB_RENDERER_PARITY_SURFACE_SCRIPT:-scripts/check/check-tauri-chrome-simple-web-layout-manifest-evidence.shs}"
@@ -20,6 +21,10 @@ METAL_READBACK_SCRIPT="${PRODUCTION_GUI_WEB_RENDERER_PARITY_METAL_READBACK_SCRIP
 METAL_RENDER_LOG_SCRIPT="${PRODUCTION_GUI_WEB_RENDERER_PARITY_METAL_RENDER_LOG_SCRIPT:-scripts/check/check-macos-metal-render-log-compare.shs}"
 EVENT_SCRIPT="${PRODUCTION_GUI_WEB_RENDERER_PARITY_EVENT_SCRIPT:-scripts/check/check-wm-browser-event-routing-evidence.shs}"
 LAYOUT_MANIFEST_RESUME="${PRODUCTION_GUI_WEB_RENDERER_PARITY_LAYOUT_MANIFEST_RESUME:-0}"
+LAYOUT_MANIFEST_SOURCE_ENV="${PRODUCTION_GUI_WEB_RENDERER_PARITY_LAYOUT_ENV:-}"
+SURFACE_MANIFEST_RESUME="${PRODUCTION_GUI_WEB_RENDERER_PARITY_SURFACE_MANIFEST_RESUME:-0}"
+SURFACE_CASE_FILTER="${PRODUCTION_GUI_WEB_RENDERER_PARITY_SURFACE_CASE_FILTER:-}"
+SURFACE_TAURI_WAIT_STEPS="${PRODUCTION_GUI_WEB_RENDERER_PARITY_TAURI_CAPTURE_WAIT_STEPS:-${TAURI_CAPTURE_WAIT_STEPS:-}}"
 
 current_source_revision() {
     if [ "${GUI_WEB_2D_SOURCE_REVISION:-}" != "" ]; then
@@ -234,6 +239,16 @@ run_subcheck() {
     fi
 }
 
+run_timed_subcheck() {
+    timeout_secs="$1"
+    shift
+    if [ "$timeout_secs" -gt 0 ] 2>/dev/null; then
+        timeout "$timeout_secs" "$@"
+    else
+        "$@"
+    fi
+}
+
 emit_summary_env() {
     file="$1"
     for key in \
@@ -296,12 +311,21 @@ run_matrix() {
 run_layout_manifest() {
     case_dir="$BUILD_ROOT/layout_manifest"
     mkdir -p "$case_dir"
-    set +e
-    run_subcheck env BUILD_DIR="$case_dir" REPORT_PATH="$case_dir/report.md" ELECTRON_BITMAP_TIMEOUT_SECS="$TIMEOUT_SECS" ELECTRON_LAYOUT_MANIFEST_RESUME="$LAYOUT_MANIFEST_RESUME" \
-        sh "$LAYOUT_SCRIPT" >"$case_dir/stdout.env" 2>"$case_dir/stderr.log"
-    code=$?
-    set -e
     env_file="$case_dir/evidence.env"
+    layout_reused=false
+    if [ -n "$LAYOUT_MANIFEST_SOURCE_ENV" ] && [ -s "$LAYOUT_MANIFEST_SOURCE_ENV" ]; then
+        cp "$LAYOUT_MANIFEST_SOURCE_ENV" "$env_file"
+        : >"$case_dir/stdout.env"
+        : >"$case_dir/stderr.log"
+        code=0
+        layout_reused=true
+    else
+        set +e
+        run_subcheck env BUILD_DIR="$case_dir" REPORT_PATH="$case_dir/report.md" ELECTRON_BITMAP_TIMEOUT_SECS="$TIMEOUT_SECS" ELECTRON_LAYOUT_MANIFEST_RESUME="$LAYOUT_MANIFEST_RESUME" \
+            sh "$LAYOUT_SCRIPT" >"$case_dir/stdout.env" 2>"$case_dir/stderr.log"
+        code=$?
+        set -e
+    fi
     status=""
     reason=""
     case_count=""
@@ -348,6 +372,8 @@ run_layout_manifest() {
         echo "production_gui_web_renderer_parity_layout_manifest_reason=$reason"
         echo "production_gui_web_renderer_parity_layout_manifest_timed_out=$([ "$code" -eq 124 ] && echo true || echo false)"
         echo "production_gui_web_renderer_parity_layout_manifest_timeout_secs=$SUBCHECK_TIMEOUT_SECS"
+        echo "production_gui_web_renderer_parity_layout_manifest_reused=$layout_reused"
+        echo "production_gui_web_renderer_parity_layout_manifest_source_env=$LAYOUT_MANIFEST_SOURCE_ENV"
         echo "production_gui_web_renderer_parity_layout_manifest_case_count=$case_count"
         echo "production_gui_web_renderer_parity_layout_manifest_pass_count=$pass_count"
         echo "production_gui_web_renderer_parity_layout_manifest_tracked_count=$tracked_count"
@@ -369,7 +395,7 @@ run_surface_manifest() {
     mkdir -p "$case_dir"
     layout_env="$BUILD_ROOT/layout_manifest/evidence.env"
     set +e
-    run_subcheck env BUILD_DIR="$case_dir" REPORT_PATH="$case_dir/report.md" LAYOUT_ENV="$layout_env" ELECTRON_BITMAP_TIMEOUT_SECS="$TIMEOUT_SECS" CHROME_LAYOUT_TIMEOUT_SECS="$CHROME_SURFACE_TIMEOUT_SECS" \
+    run_timed_subcheck "$SURFACE_SUBCHECK_TIMEOUT_SECS" env BUILD_DIR="$case_dir" REPORT_PATH="$case_dir/report.md" LAYOUT_ENV="$layout_env" ELECTRON_BITMAP_TIMEOUT_SECS="$TIMEOUT_SECS" CHROME_LAYOUT_TIMEOUT_SECS="$CHROME_SURFACE_TIMEOUT_SECS" TAURI_CHROME_LAYOUT_MANIFEST_RESUME="$SURFACE_MANIFEST_RESUME" TAURI_CHROME_LAYOUT_CASE_FILTER="$SURFACE_CASE_FILTER" TAURI_CAPTURE_WAIT_STEPS="$SURFACE_TAURI_WAIT_STEPS" \
         sh "$SURFACE_SCRIPT" >"$case_dir/stdout.env" 2>"$case_dir/stderr.log"
     code=$?
     set -e
@@ -461,7 +487,10 @@ run_surface_manifest() {
         echo "production_gui_web_renderer_parity_surface_manifest_status=$status"
         echo "production_gui_web_renderer_parity_surface_manifest_reason=$reason"
         echo "production_gui_web_renderer_parity_surface_manifest_timed_out=$([ "$code" -eq 124 ] && echo true || echo false)"
-        echo "production_gui_web_renderer_parity_surface_manifest_timeout_secs=$SUBCHECK_TIMEOUT_SECS"
+        echo "production_gui_web_renderer_parity_surface_manifest_timeout_secs=$SURFACE_SUBCHECK_TIMEOUT_SECS"
+        echo "production_gui_web_renderer_parity_surface_manifest_resume=$SURFACE_MANIFEST_RESUME"
+        echo "production_gui_web_renderer_parity_surface_manifest_case_filter=$SURFACE_CASE_FILTER"
+        echo "production_gui_web_renderer_parity_surface_manifest_tauri_capture_wait_steps=$SURFACE_TAURI_WAIT_STEPS"
         echo "production_gui_web_renderer_parity_surface_manifest_host_uname_s=$host_uname_s"
         echo "production_gui_web_renderer_parity_surface_manifest_host_uname_m=$host_uname_m"
         echo "production_gui_web_renderer_parity_surface_manifest_electron_capture_status=$electron_status"
