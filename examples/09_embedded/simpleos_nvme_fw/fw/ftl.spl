@@ -122,7 +122,14 @@ impl Ftl:
     # Garbage-collect one victim block: relocate its live pages to fresh pages
     # (durable + journaled BEFORE the victim is erased), then erase and reclaim it.
     # A crash mid-GC leaves the new copy discoverable by recovery (newest seq wins).
-    # Returns the reclaimed block, or UNMAP if there is nothing to collect.
+    # Returns the reclaimed block, or UNMAP if there is nothing to collect OR the
+    # victim could not be fully drained.
+    #
+    # SAFETY (data-loss guard): the victim is erased ONLY after EVERY live page has
+    # been relocated. If a relocation cannot allocate a fresh page (device full /
+    # GC reserve exhausted), GC aborts and returns UNMAP, leaving the victim — and
+    # the host data it still holds — intact. Erasing a victim with un-relocated live
+    # pages would destroy committed data while the L2P map still points into it.
     me gc_once() -> i64:
         val victim: i64 = gc_select_victim(me.band)
         if victim == UNMAP:
@@ -135,13 +142,14 @@ impl Ftl:
             if live:
                 val rd: FilRead = me.fil.read(ppn)
                 val newp: i64 = me.band.alloc_page()
-                if newp != NO_PPN:
-                    me.seq = me.seq + 1
-                    me.fil.program(newp, rd.lba, me.seq, rd.data)
-                    me.journal.append(0, rd.lba, ppn, newp, me.seq)
-                    me.map.update(rd.lba, newp)
-                    me.band.mark_valid(newp)
-                    me.band.mark_invalid(ppn)
+                if newp == NO_PPN:
+                    return UNMAP    # cannot relocate -> do NOT erase; victim stays intact
+                me.seq = me.seq + 1
+                me.fil.program(newp, rd.lba, me.seq, rd.data)
+                me.journal.append(0, rd.lba, ppn, newp, me.seq)
+                me.map.update(rd.lba, newp)
+                me.band.mark_valid(newp)
+                me.band.mark_invalid(ppn)
             p = p + 1
         me.fil.erase(victim)
         me.band.free_block(victim)
@@ -192,4 +200,25 @@ fn ftl_selftest() -> i64:
     fail = fail + expect_eq(ftl.read(163), 263, "post-GC read relocated lba163")
     fail = fail + expect_eq(ftl.erase_count(victim), 1, "gc erased + reclaimed the victim block")
 
+    fail
+
+# Regression: GC must never erase a victim it could not fully drain (data-loss guard).
+# Drives the device to 0 free with the active block full, where the cheapest victim
+# (block 0) still holds a live page (LBA 1, never overwritten); one GC pass must keep
+# it readable. See gc_safety_check.spl for the standalone runnable demonstration.
+fn ftl_gc_safety_selftest() -> i64:
+    var fail: i64 = 0
+    var ftl: Ftl = ftl_new()
+    var x: i64 = 0
+    while x < LBA_COUNT:                 # fill all surfaced LBAs (blocks 0..47 live)
+        ftl.write(x, x + 1000)
+        x = x + 1
+    var k: i64 = 0
+    while k < LBA_COUNT:                 # overwrite every 3rd LBA: spread staleness, fill OP
+        ftl.write(k, k + 5000)
+        k = k + 3
+    fail = fail + expect_eq(ftl.free_blocks(), 0, "gc-safety: device driven to zero free")
+    fail = fail + expect_eq(ftl.read(1), 1001, "gc-safety: LBA1 live before GC")
+    ftl.gc_once()                        # under zero-free this must abort, not erase
+    fail = fail + expect_eq(ftl.read(1), 1001, "gc-safety: LBA1 survives GC (no data loss)")
     fail
