@@ -562,7 +562,9 @@ canonical `evidence.env` before the producer runs so stale results cannot mask a
 timeout or early producer failure. When no dashboard URL is configured, strict
 dashboard detail reports the live HTTP `base_url` blocker from
 `check-llm-dashboard-live-http-evidence.shs` instead of a generic missing-env
-failure. The live HTTP producer always writes
+failure; if authentication is also absent or invalid, the same no-network path
+reports `base_url|auth_configured` so both setup tasks stay visible. The live
+HTTP producer always writes
 `llm_dashboard_live_http_surface_manifest_count`,
 `llm_dashboard_live_http_surface_manifest_size`, and
 `llm_dashboard_live_http_surface_manifest_sha256`, even for

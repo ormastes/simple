@@ -36,7 +36,7 @@ but local proof is no longer status-only for the completed repo-local lanes:
   nested dashboard evidence env/log hashes; live HTTP proof is still required.
 - vLLM host evidence records a checked runtime control/readiness source/spec
   manifest (`vllm_surface_manifest_count=13`,
-  `vllm_surface_manifest_sha256=dee949eea18950263c979d28f91d826ba1699e574d4bcd66eadd41bb1fb1a060`)
+  `vllm_surface_manifest_sha256=96b1de4e91491900eda4334c21c569cbaff0521125324183ef9e4ea88fa8cda8`)
   plus local `vllm`, Python module, GPU, and readiness-log hashes; a local
   `vllm` executable, importable Python `vllm` module, and live endpoint proof
   are still required.
@@ -45,7 +45,7 @@ but local proof is no longer status-only for the completed repo-local lanes:
   is still required.
 - Torch optimizer evidence records a checked live probe/source/spec/doc manifest
   (`torch_surface_manifest_count=18`,
-  `torch_surface_manifest_sha256=931a1b068c2e4accf18445cc1f0896f2a18c9dff20b362d8056c306bea09a811`)
+  `torch_surface_manifest_sha256=93d72812ddbcd957131c6b8015722364950770a1dbc7a90cebed500a547a9604`)
   plus hashed Python Torch/CUDA visibility, Python wheel path diagnostics, and
   system libtorch probe logs; Simple-visible libtorch and live CUDA optimizer
   execution proof are still required.
@@ -58,10 +58,10 @@ but local proof is no longer status-only for the completed repo-local lanes:
   retry6/7 model, eval, safety, deployment, and handoff proof is still
   required.
 - public absence rendering records a checked public wording manifest
-  (`vllm_surface_manifest_sha256=dee949eea18950263c979d28f91d826ba1699e574d4bcd66eadd41bb1fb1a060`,
-  `torch_surface_manifest_sha256=931a1b068c2e4accf18445cc1f0896f2a18c9dff20b362d8056c306bea09a811`,
+  (`vllm_surface_manifest_sha256=96b1de4e91491900eda4334c21c569cbaff0521125324183ef9e4ea88fa8cda8`,
+  `torch_surface_manifest_sha256=93d72812ddbcd957131c6b8015722364950770a1dbc7a90cebed500a547a9604`,
   `public_absence_surface_manifest_count=122`,
-  `public_absence_surface_manifest_sha256=d78ae024c82c7d310025924427ce0f7bbe0e96f41885599aa771b6bce2e76397`)
+  `public_absence_surface_manifest_sha256=311dab85bdc246967d9f81f670d060f4f7867c30a65e0b1c37cedc23153729a6`)
   with `failure_count=0`, proving operator-facing manuals and generated
   evidence do not expose internal absence markers.
 
