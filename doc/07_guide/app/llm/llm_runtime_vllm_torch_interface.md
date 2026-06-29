@@ -478,7 +478,10 @@ that guard env for fine-tune required gates, blocked gates, blocker reason, and
 next action; strict host mode still uses the acceptance env generated during
 the strict run. The guard env also records a manifest count, size, and SHA-256
 for the fixed-format data file, retry6/retry7 gate scripts, retry6/retry7 SSpec
-files, and produced guard/spec logs, plus per-log sizes and SHA-256 values.
+files, the retry5 cache-manifest checker, and produced guard/spec logs, plus
+per-log sizes and SHA-256 values including
+`llm_finetune_guard_retry5_cache_log_size` and
+`llm_finetune_guard_retry5_cache_log_sha256`.
 Guard-only fine-tune evidence is therefore traceable to exact local process
 inputs and outputs.
 

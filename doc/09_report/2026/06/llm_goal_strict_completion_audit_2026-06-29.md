@@ -36,7 +36,7 @@ but local proof is no longer status-only for the completed repo-local lanes:
   nested dashboard evidence env/log hashes; live HTTP proof is still required.
 - vLLM host evidence records a checked runtime control/readiness source/spec
   manifest (`surface_manifest_count=13`,
-  `surface_manifest_sha256=08ff4da378f624b0d3d0209fd891d06c952fc2e810eb250baa004700f62d2cf9`)
+  `surface_manifest_sha256=c514ad1e0b8c408dd29d4c10e687650cf01179215fd9dd9a45f4d30bc74dba8f`)
   plus local `vllm`, Python module, GPU, and readiness-log hashes; a local
   `vllm` executable, importable Python `vllm` module, and live endpoint proof
   are still required.
@@ -45,18 +45,20 @@ but local proof is no longer status-only for the completed repo-local lanes:
   is still required.
 - Torch optimizer evidence records a checked live probe/source/spec/doc manifest
   (`surface_manifest_count=18`,
-  `surface_manifest_sha256=b4a7d3d8b1296cc4a191d5fefeea04bb32b2dfdfdf74b7d6d8d649095b9ad52a`)
+  `surface_manifest_sha256=4efc29a41912b80f97b02dbae6182184ccd042b0d8951f516f68bbe24291b933`)
   plus hashed Python Torch/CUDA visibility and system libtorch probe logs; Simple-visible
   libtorch and live CUDA optimizer execution proof are still required.
-- fine-tune guard evidence records a checked process/input/log manifest and
-  per-log hashes; retry7 acceptance evidence also records a checked acceptance
-  wrapper/script/spec/doc/log manifest (`surface_manifest_count=9`,
-  `surface_manifest_sha256=3f927a7b72aaf9f0d0706cbdcc7db38e848738d2b7a87c30965f424ddedcd919`);
+- fine-tune guard evidence records a checked process/input/log manifest
+  including the retry5 cache-manifest checker (`surface_manifest_count=22`,
+  `surface_manifest_sha256=a24f6d93ff9674b435c69fd762dc8276cf269bd42140ed8bc8060b6afb6660ec`)
+  and per-log hashes; retry7 acceptance evidence also records a checked
+  acceptance wrapper/script/spec/doc/log manifest (`surface_manifest_count=18`,
+  `surface_manifest_sha256=7d760e893525e716651800c4a23ad7ca66268ac0015a9cec97d19188a4f8eeb7`);
   retry6/7 model, eval, safety, deployment, and handoff proof is still
   required.
 - public absence rendering records a checked public wording manifest
   (`public_absence_surface_manifest_count=121`,
-  `public_absence_surface_manifest_sha256=7d55e76e6375ef8fa16e4f5af4af183c5a9048c5c5e4f0ac8809b472c8fe9881`)
+  `public_absence_surface_manifest_sha256=93c3ae4d224b8a6e8d535238870cedc0bba2c02b887570980c695a778f926e87`)
   with `failure_count=0`, proving operator-facing manuals and generated
   evidence do not expose internal absence markers.
 
