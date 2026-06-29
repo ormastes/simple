@@ -988,9 +988,22 @@ host handoff actionable without parsing the longer detail strings.
 
 The aggregate `Next Actions` table now covers every lane: context/Ponytail
 replacement, live dashboard, vLLM, svLLM, Torch optimizer, fine-tune, and public
-absence rendering. Default mode explicitly points context/Ponytail and dashboard
-at `--strict-host` when completion evidence is required; strict mode points
-failed replacement and live-dashboard lanes at their focused wrappers.
+absence rendering.
+Default mode explicitly points context/Ponytail and dashboard at `--strict-host`
+when completion evidence is required; strict mode points failed replacement and
+live-dashboard lanes at their focused wrappers.
+
+## 2026-06-29 Public Absence Evidence Manifest
+
+`scripts/check/check-llm-tooling-public-absence-rendering.shs` now writes
+canonical evidence under `build/llm_tooling_public_absence_rendering/`. The
+evidence env records status, required gates, blocked gates, failure count, next
+action, and a hashed `public_absence_surface_manifest.tsv` for the public
+manuals, generated/manual SPipe docs, dashboard wording, and runtime evidence
+surfaces scanned for forbidden absence markers. The aggregate forwards those
+fields into `llm_goal_evidence_public_absence_detail`, so public absence
+completion is auditable from the aggregate report without relying on prior
+terminal output.
 
 The aggregate lane runner now unsets the aggregate `BUILD_DIR` before invoking
 focused wrappers. Each wrapper writes its canonical `build/<lane>/evidence.env`,

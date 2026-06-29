@@ -435,6 +435,17 @@ dashboard JSONL wording, or evidence docs:
 sh scripts/check/check-llm-tooling-public-absence-rendering.shs
 ```
 
+The public-rendering guard writes
+`build/llm_tooling_public_absence_rendering/evidence.env` and
+`doc/09_report/2026/06/llm_tooling_public_absence_rendering_<date>.md`.
+The env records the required absence-marker gates, blocked gates, failure
+count, and a hashed `public_absence_surface_manifest.tsv` covering the public
+manuals, generated/manual SPipe docs, dashboard wording, and LLM runtime
+evidence surfaces it scanned. The aggregate forwards those values through
+`llm_goal_evidence_public_absence_detail`, so a passing public absence lane
+must include a reproducible manifest count/size/hash, not only a terminal
+`STATUS: PASS` line.
+
 Use the focused vLLM host probe after changing vLLM control CLI, live
 environment detection, dashboard control JSONL, or host preflight behavior:
 

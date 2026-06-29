@@ -10,11 +10,11 @@
 - audit_size: `3295`
 - audit_sha256: `6e79374334be6fe69fe632c6f01b5f8b6bd226c61859ef9417aadcd3c3cecb56`
 - default_report: `doc/09_report/2026/06/llm_goal_evidence_2026-06-29.md`
-- default_report_size: `16020`
-- default_report_sha256: `80809557d281e581d2f3cda7cfb5cb43b8d4cd924b24d74b3fddb4fb943b1892`
+- default_report_size: `16008`
+- default_report_sha256: `1fcea97205646306b0d8b3326a3dc69a0d17c69164e16abd53157df46b1282b8`
 - default_env: `build/llm_goal_evidence/evidence.env`
-- default_env_size: `17166`
-- default_env_sha256: `963bef4d50fee43699fb1536ff288324dc3ccc959491b9d07107032eb2a017f4`
+- default_env_size: `17720`
+- default_env_sha256: `e26c14b0662b86ee1f85083497751f3bbc175d0f96f3b95e8a3d9478a412fe54`
 - default_warn_source: `doc/09_report/2026/06/llm_goal_evidence_2026-06-29.md`
 - vllm_detail_source: `build/llm_goal_evidence/evidence.env`
 - vllm_surface_manifest_count: `10`
