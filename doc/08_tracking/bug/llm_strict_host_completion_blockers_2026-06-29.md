@@ -19,10 +19,10 @@ Default aggregate:
   vLLM host, svLLM local readiness, Torch optimizer, and fine-tune guard
   evidence now include checked surface/input manifests with size/SHA-256
   metadata and focused log hashes. Public absence rendering also records
-  `vllm_surface_manifest_sha256=815ec0d5b537abadafe21caa026327c453e2a4cc6a3be2d485fbc03fa58d466c`,
+  `vllm_surface_manifest_sha256=d5e832329fd363e592a7989a23e24786e6071d9c8e1a2bf2e81c7dbd757fb451`,
   `torch_surface_manifest_sha256=617980c0ef42725f88c18981e263cc9976b9ea9fd6c8bf966995acf3ef288861`,
   `public_absence_surface_manifest_count=122` and
-  `public_absence_surface_manifest_sha256=8a5670341374acb9dbe2d9ea42bf6e849f6aad2f58d220da865a21a2582a52ad`
+  `public_absence_surface_manifest_sha256=eaab8ea648e86ed763b86d97febcc9d361ba283497902401900442e5bd5d3b6d`
   with `failure_count=0`, so public manuals and generated evidence continue to
   hide internal absence markers from operator-facing text.
 
@@ -60,7 +60,7 @@ prerequisite summary and must not be treated as a completion pass.
 - local proof already hardened: vLLM host evidence has a checked runtime
   control/readiness source/spec plus operator-guide manifest with
   `vllm_surface_manifest_count=15` and
-  `vllm_surface_manifest_sha256=815ec0d5b537abadafe21caa026327c453e2a4cc6a3be2d485fbc03fa58d466c`
+  `vllm_surface_manifest_sha256=d5e832329fd363e592a7989a23e24786e6071d9c8e1a2bf2e81c7dbd757fb451`
 - required evidence: local `vllm` executable, importable Python `vllm` module
   with non-missing origin, serve preflight, reachable endpoint, and `/v1/models`
   listing the selected base model

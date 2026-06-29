@@ -65,8 +65,10 @@ Latest focused evidence:
 `doc/09_report/2026/06/llm_dashboard_evidence_2026-06-29.md` records the
 dashboard diagnostics panel, `/agents` route, vLLM control route planning,
 dashboard log modes, diagnostics collector, and tooling artifact collector
-passing locally. This is dashboard route/evidence coverage; live vLLM serving
-still belongs to the LLM runtime host-probe lane.
+passing locally. The evidence env/report also records per-log sizes, SHA-256
+hashes, and a checked surface manifest for the wrapper, specs, collectors, docs,
+and logs. This is dashboard route/evidence coverage; live vLLM serving still
+belongs to the LLM runtime host-probe lane.
 
 Use the focused live checker when strict dashboard evidence needs a live env:
 
