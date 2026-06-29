@@ -681,6 +681,11 @@ It also records Python Torch host visibility (`python_torch_module_status`,
 version, CUDA availability, device count) and `system_libtorch_status`, so a
 host with Python Torch/CUDA installed but no Simple-visible libtorch is reported
 as a Simple/runtime integration blocker rather than a general CUDA absence.
+The wrapper now writes a Torch optimizer surface manifest with path, size, and
+SHA-256 rows for the live probe, Torch facades, backend/optimizer/training
+sources, and focused Torch specs. The aggregate forwards the manifest count,
+size, and SHA-256 in `llm_goal_evidence_torch_optimizer_detail` so a strict
+review can bind WARN/PASS evidence to the checked source surface.
 
 Follow-up hardening makes wrapper PASS stricter than the probe status line
 alone. If the Simple probe emits `status=pass`, the wrapper now independently

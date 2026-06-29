@@ -8,7 +8,7 @@
 - blocked_gates: `libtorch`
 - primary_blocked_gate: `libtorch`
 - log_size: `29962`
-- log_sha256: `82f406cf8a07f4f1308334617eeaf159e7e715675bc697dc84547f3296220c8e`
+- log_sha256: `e27212ea09b7a100e92698e68b48a7d356cf9d7fc8e19f5ea13ed528cc2430d3`
 - status_line_count: `2`
 - required_gates_line_count: `1`
 - torch_available_line_count: `1`
@@ -23,6 +23,10 @@
 - python_torch_cuda_available: `true`
 - python_torch_cuda_device_count: `2`
 - system_libtorch_status: `missing`
+- surface_manifest: `build/llm_runtime_torch_cuda_optimizer_probe/torch_cuda_optimizer_surface_manifest.tsv`
+- surface_manifest_count: `14`
+- surface_manifest_size: `1666`
+- surface_manifest_sha256: `852a1c814199286c0cf686f2bc68ffc8fb946a85691426a4c7440cf69aa7165c`
 - torch_available: `false`
 - cuda_available: `false`
 - parameter_is_cuda: `missing`

@@ -216,6 +216,9 @@ classifying the self-hosted Simple runtime as `unavailable` with
 `torch_cuda_optimizer_probe_python_torch_cuda_available`,
 `torch_cuda_optimizer_probe_python_torch_cuda_device_count`,
 `torch_cuda_optimizer_probe_system_libtorch_status`,
+`torch_cuda_optimizer_probe_surface_manifest_count`,
+`torch_cuda_optimizer_probe_surface_manifest_size`,
+`torch_cuda_optimizer_probe_surface_manifest_sha256`,
 `torch_cuda_optimizer_probe_torch_available_normalized`,
 `torch_cuda_optimizer_probe_cuda_available_normalized`,
 `torch_cuda_optimizer_probe_parameter_is_cuda_normalized`,
@@ -226,7 +229,8 @@ classifying the self-hosted Simple runtime as `unavailable` with
 `torch_cuda_optimizer_probe_pass_integrity_reason`, and
 `torch_cuda_optimizer_probe_next_action` so strict aggregate runs can report the
 compact blocked Torch gate list, the first blocked gate, independent pass-log
-integrity, and the next operator step. A probe `status=pass` is accepted only
+integrity, the hashed Torch optimizer source/spec surface, and the next
+operator step. A probe `status=pass` is accepted only
 when the wrapper also sees a zero wrapper exit, a non-empty hashed probe log,
 exactly one complete proof record for status, required gates, libtorch/CUDA
 availability, CUDA parameter placement, gradient handle, optimizer step, and

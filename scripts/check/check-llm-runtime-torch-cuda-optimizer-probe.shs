@@ -9,6 +9,7 @@ BUILD_DIR="${BUILD_DIR:-build/llm_runtime_torch_cuda_optimizer_probe}"
 REPORT_PATH="${REPORT_PATH:-doc/09_report/2026/06/llm_runtime_torch_cuda_optimizer_probe_$(date -u +%F).md}"
 OUT_ENV="$BUILD_DIR/evidence.env"
 OUT_LOG="$BUILD_DIR/probe.log"
+SURFACE_MANIFEST="$BUILD_DIR/torch_cuda_optimizer_surface_manifest.tsv"
 PROBE="src/app/test/torch_cuda_optimizer_probe.spl"
 STRICT=0
 
@@ -26,7 +27,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
-rm -f "$OUT_ENV" "$OUT_LOG" "$REPORT_PATH"
+rm -f "$OUT_ENV" "$OUT_LOG" "$REPORT_PATH" "$SURFACE_MANIFEST"
 
 PYTHON_TORCH_ENV="$BUILD_DIR/python_torch.env"
 python3 - "$PYTHON_TORCH_ENV" <<'PY'
@@ -62,6 +63,48 @@ python_torch_error="$(sed -n 's/^python_torch_error=//p' "$PYTHON_TORCH_ENV" | t
 system_libtorch_status="missing"
 if command -v ldconfig >/dev/null 2>&1 && ldconfig -p 2>/dev/null | grep -E 'libtorch|libc10' >/dev/null 2>&1; then
     system_libtorch_status="visible"
+fi
+
+for path in \
+    "$PROBE" \
+    "src/lib/common/torch/dyn_sffi_ops.spl" \
+    "src/lib/common/torch/dyn_sffi_tensor_ops.spl" \
+    "src/lib/gc_async_mut/torch/backend.spl" \
+    "src/lib/gc_async_mut/torch/optim.spl" \
+    "src/lib/gc_async_mut/torch/torch_training.spl" \
+    "src/lib/nogc_sync_mut/torch/backend.spl" \
+    "src/lib/nogc_sync_mut/torch/optim.spl" \
+    "src/lib/nogc_sync_mut/torch/torch_training.spl" \
+    "test/01_unit/lib/common/torch/dyn_sffi_ops_readiness_spec.spl" \
+    "test/01_unit/lib/common/torch/dyn_sffi_tensor_ops_status_spec.spl" \
+    "test/01_unit/lib/common/torch/torch_device_placement_status_spec.spl" \
+    "test/01_unit/lib/extended/torch_optim_unit_spec.spl" \
+    "test/01_unit/lib/extended/torch_optim_integration_spec.spl"
+do
+    if [ -r "$path" ]; then
+        file_size="$(wc -c <"$path" | tr -d ' ')"
+        if command -v sha256sum >/dev/null 2>&1; then
+            file_sha256="$(sha256sum "$path" | awk '{print $1}')"
+        elif command -v shasum >/dev/null 2>&1; then
+            file_sha256="$(shasum -a 256 "$path" | awk '{print $1}')"
+        else
+            file_sha256="missing"
+        fi
+        printf '%s\t%s\t%s\n' "$path" "$file_size" "$file_sha256" >>"$SURFACE_MANIFEST"
+    fi
+done
+
+surface_manifest_count="0"
+surface_manifest_size="0"
+surface_manifest_sha256="missing"
+if [ -s "$SURFACE_MANIFEST" ]; then
+    surface_manifest_count="$(wc -l <"$SURFACE_MANIFEST" | tr -d ' ')"
+    surface_manifest_size="$(wc -c <"$SURFACE_MANIFEST" | tr -d ' ')"
+    if command -v sha256sum >/dev/null 2>&1; then
+        surface_manifest_sha256="$(sha256sum "$SURFACE_MANIFEST" | awk '{print $1}')"
+    elif command -v shasum >/dev/null 2>&1; then
+        surface_manifest_sha256="$(shasum -a 256 "$SURFACE_MANIFEST" | awk '{print $1}')"
+    fi
 fi
 
 status="fail"
@@ -280,6 +323,10 @@ esac
     printf '%s\n' "torch_cuda_optimizer_probe_python_torch_cuda_device_count=$python_torch_cuda_device_count"
     printf '%s\n' "torch_cuda_optimizer_probe_python_torch_error=$python_torch_error"
     printf '%s\n' "torch_cuda_optimizer_probe_system_libtorch_status=$system_libtorch_status"
+    printf '%s\n' "torch_cuda_optimizer_probe_surface_manifest=$SURFACE_MANIFEST"
+    printf '%s\n' "torch_cuda_optimizer_probe_surface_manifest_count=$surface_manifest_count"
+    printf '%s\n' "torch_cuda_optimizer_probe_surface_manifest_size=$surface_manifest_size"
+    printf '%s\n' "torch_cuda_optimizer_probe_surface_manifest_sha256=$surface_manifest_sha256"
     printf '%s\n' "torch_cuda_optimizer_probe_normalized_status=$status"
     printf '%s\n' "torch_cuda_optimizer_probe_normalized_reason=$reason"
     printf '%s\n' "torch_cuda_optimizer_probe_torch_available_normalized=$torch_available"
@@ -320,6 +367,10 @@ esac
     printf '%s\n' "- python_torch_cuda_available: \`$python_torch_cuda_available\`"
     printf '%s\n' "- python_torch_cuda_device_count: \`$python_torch_cuda_device_count\`"
     printf '%s\n' "- system_libtorch_status: \`$system_libtorch_status\`"
+    printf '%s\n' "- surface_manifest: \`$SURFACE_MANIFEST\`"
+    printf '%s\n' "- surface_manifest_count: \`$surface_manifest_count\`"
+    printf '%s\n' "- surface_manifest_size: \`$surface_manifest_size\`"
+    printf '%s\n' "- surface_manifest_sha256: \`$surface_manifest_sha256\`"
     printf '%s\n' "- torch_available: \`$torch_available\`"
     printf '%s\n' "- cuda_available: \`$cuda_available\`"
     printf '%s\n' "- parameter_is_cuda: \`$parameter_is_cuda\`"
