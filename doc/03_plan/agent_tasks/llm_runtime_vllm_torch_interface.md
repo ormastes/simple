@@ -809,6 +809,8 @@ acceptance details into `llm_goal_evidence_finetune_guard_detail`. This keeps
 the default aggregate report honest: guard-only fine-tune evidence can pass
 locally, while the acceptance detail still names the retry6/model/eval/license/
 safety/deployment blocker that must pass before strict host completion.
+Default mode runs the retry7 acceptance producer as non-blocking detail
+evidence first; strict mode consumes the same env as a required pass gate.
 
 The same aggregate now forwards `llm_goal_evidence_context_ponytail_detail` and
 `llm_goal_evidence_dashboard_detail`, so strict/full-replacement context mode,
