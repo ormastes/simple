@@ -368,14 +368,15 @@ device-staging, capability source, capability provenance, capability evidence
 artifact status, source, and hash metadata, probe event/status/exit, pass integrity,
 local file-backed byte-read states, native blocked gates, primary blocked gate,
 and next action.
-In default mode, the
-dashboard detail keeps a concrete strict-host next action even though live HTTP
-evidence is intentionally not collected, and svLLM native streaming evidence is
-collected as a non-blocking diagnostic producer. The default svLLM lane still
-passes or fails on local file-backed readiness, but its detail row forwards the
-native producer's blocked gates, capability provenance, surface manifest, and
-next action. Strict host mode consumes the same native streaming evidence as a
-release-completion gate. The svLLM blocker table is mode-aware too: default mode
+In default mode, dashboard live HTTP and svLLM native streaming evidence are
+collected as non-blocking diagnostic producers. The default dashboard lane still
+passes or fails on route/collector evidence, but its detail row forwards live
+HTTP blocked gates, auth source, response hashes, surface manifest, and next
+action. The default svLLM lane still passes or fails on local file-backed
+readiness, but its detail row forwards the native producer's blocked gates,
+capability provenance, surface manifest, and next action. Strict host mode
+consumes the same live dashboard and native streaming evidence as
+release-completion gates. The svLLM blocker table is mode-aware too: default mode
 reports the `local_readiness` gate with no lane-blocking native gates, while
 strict host mode reports the native producer's `blocked_gates` and
 `next_action` contract. It
