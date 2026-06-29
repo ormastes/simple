@@ -77,7 +77,20 @@ env records `llm_finetune_guard_required_gates`,
 current guard blocker without reading a stale acceptance env. It also records
 `llm_finetune_guard_retry5_cache_log_size` and
 `llm_finetune_guard_retry5_cache_log_sha256` so aggregate evidence can prove
-the retry5 cache-manifest checker actually ran.
+the retry5 cache-manifest checker actually ran. It also forwards the concrete
+retry5 blocker fields from that checker:
+`llm_finetune_guard_retry5_cache_manifest_exists`,
+`llm_finetune_guard_retry5_cache_license_review`,
+`llm_finetune_guard_retry5_cache_data_access`,
+`llm_finetune_guard_retry5_cache_path`,
+`llm_finetune_guard_retry5_cache_path_exists`,
+`llm_finetune_guard_retry5_cache_expected_checksum`,
+`llm_finetune_guard_retry5_cache_actual_checksum`,
+`llm_finetune_guard_retry5_cache_checksum_match`,
+`llm_finetune_guard_retry5_cache_training_allowed`, and
+`llm_finetune_guard_retry5_cache_result`. These fields are diagnostic evidence
+only; they do not replace licensed cache approval, training, target eval,
+safety, deployment, or normal-review acceptance.
 
 Run strict ready mode only when tuned-model acceptance evidence is expected to
 exist:

@@ -5,16 +5,16 @@
 - checked_count: `36`
 - tracker: `doc/08_tracking/bug/llm_strict_host_completion_blockers_2026-06-29.md`
 - tracker_size: `6166`
-- tracker_sha256: `f940be0380fc05794f21c7c811ac080d739f18c18410f5490b2861ee011276ff`
+- tracker_sha256: `4b4b163b769e2274463bdf20c071b5f9bbae1375369c2d49edfecdac4836c271`
 - audit: `doc/09_report/2026/06/llm_goal_strict_completion_audit_2026-06-29.md`
 - audit_size: `4096`
-- audit_sha256: `cc51ba801c8e6a99eab0d55dd0e40724ac265ba68e2df668e9b73c5b335f9def`
+- audit_sha256: `9fafe2619ceb5b3b257017a832bf5fe62516eadf813879ca3edae3f102cd1663`
 - default_report: `doc/09_report/2026/06/llm_goal_evidence_2026-06-29.md`
-- default_report_size: `22031`
-- default_report_sha256: `e7bc01af4ffd8000908bb6b06f463a20b3001259ade5222148c4b38a9318d891`
+- default_report_size: `22449`
+- default_report_sha256: `3a0e6810cf7af536b098ae0e9662c0fb85b426f2b69b51ed4bd11e4746779282`
 - default_env: `build/llm_goal_evidence/evidence.env`
-- default_env_size: `23614`
-- default_env_sha256: `77e7ba87fc06d9481c474b1e73fdfa8ebcc1bde4f6b8c3384a51e9584758d5cc`
+- default_env_size: `24032`
+- default_env_sha256: `d45cc2e9bf14199c889f25db719575209b5a6bf4f56175bb719e1e45bdbc4b45`
 - default_warn_source: `doc/09_report/2026/06/llm_goal_evidence_2026-06-29.md`
 - vllm_detail_source: `build/llm_goal_evidence/evidence.env`
 - vllm_surface_manifest_count: `13`
@@ -24,7 +24,7 @@
 - torch_surface_manifest_sha256: `8b4788b1e7d8c7855c1254736e932ab24fffbead4d6addde4f0367c34c3c6e55`
 - public_absence_detail_source: `build/llm_goal_evidence/evidence.env`
 - public_absence_surface_manifest_count: `121`
-- public_absence_surface_manifest_sha256: `f3cfdf40c8a5a93beb9eb3af23f4e1cbdc60ff857509ae8a83522e23f54ffd8e`
+- public_absence_surface_manifest_sha256: `3719ded873e237cf1a209aad022aa54eac05cdd56767c2c21ba6402837d7f304`
 - public_absence_failure_count: `0`
 - env: `build/llm_strict_blocker_tracker/evidence.env`
 
