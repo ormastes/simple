@@ -789,3 +789,8 @@ Strict-native svLLM failures show the native streaming status, blocker reason,
 local readiness, native `read_range`, pinned-buffer, device-staging, and local
 file-backed byte-read states in the aggregate report instead of collapsing the
 detail row to `n/a`.
+
+The svLLM aggregate blocker table is now mode-aware. Default local-readiness
+mode reports `required_gates=local_readiness`, `blocked_gates=none`, and
+`reason=default_local_readiness_only`; strict host mode remains responsible for
+the native `read_range`, pinned-buffer, and device-staging blockers.

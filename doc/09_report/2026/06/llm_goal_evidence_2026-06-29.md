@@ -36,7 +36,7 @@
 | lane | required_gates | blocked_gates | reason |
 |------|----------------|---------------|--------|
 | vllm_host | `local_vllm,local_gpu,serve_preflight,endpoint_reachable,models_listed` | `local_vllm|serve_preflight|endpoint_reachable|models_listed` | `missing_local_vllm` |
-| svllm_local | `native_read_range,pinned_buffer,device_staging` | `native_read_range|pinned_buffer|device_staging` | `native_read_range_unavailable` |
+| svllm_local | `local_readiness` | `none` | `default_local_readiness_only` |
 | torch_optimizer | `libtorch,cuda,parameter_cuda,autograd_gradient,optimizer_step_decreases_parameter_sum` | `libtorch` | `libtorch_unavailable` |
 | finetune_guard | `retry6_training_eval,training_allowed,model_manifest,eval_result,target_eval,decision,license,safety,deployment,app_handoff` | `retry6_training_eval|training_allowed|model_manifest|eval_result|target_eval|decision|license|safety|deployment|app_handoff` | `BLOCKED_RETRY6_NOT_READY` |
 

@@ -172,7 +172,11 @@ vLLM/GPU/preflight/endpoint/model statuses, and
 native blocker reason, local readiness, native `read_range`, pinned-buffer,
 device-staging, and local file-backed byte-read states. In default mode, the
 native fields report `not_required` / `not_collected`; strict host mode
-generates and consumes the native streaming evidence. It also records
+generates and consumes the native streaming evidence. The svLLM blocker table
+is mode-aware too: default mode reports the `local_readiness` gate with no
+blocked native gates, while strict host mode reports
+`native_read_range,pinned_buffer,device_staging` and their exact blockers. It
+also records
 `llm_goal_evidence_torch_optimizer_detail` for Simple/libtorch CUDA optimizer
 status, host/runtime gates, gradient handle, optimizer-step attempt, and
 before/after parameter sums. It also records
