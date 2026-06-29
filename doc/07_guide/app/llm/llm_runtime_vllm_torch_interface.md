@@ -86,6 +86,23 @@ real evidence:
 - live CUDA optimizer execution through libtorch/CUDA
 - PEFT/TRL fine-tuning orchestration and acceptance evidence
 
+Run the canonical strict aggregate before any completion claim:
+
+```sh
+sh scripts/check/check-llm-goal-evidence.shs --strict-host
+```
+
+For operator setup triage, run the non-network prerequisite doctor first:
+
+```sh
+sh scripts/check/check-llm-strict-host-prereq-doctor.shs
+```
+
+The doctor does not replace the strict aggregate or the per-lane evidence
+wrappers. It only reports whether this host has the dashboard auth/url, local
+vLLM, native svLLM capability artifact, Simple-visible libtorch/CUDA, and
+fine-tune retry artifacts needed before the strict wrappers can pass.
+
 Latest local host probe:
 `doc/09_report/2026/06/llm_runtime_vllm_host_probe_2026-06-29.md` records a
 repeatable `scripts/check/check-llm-runtime-vllm-host-probe.shs` readiness

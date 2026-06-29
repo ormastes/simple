@@ -20,7 +20,7 @@ Default aggregate:
   evidence now include checked surface/input manifests with size/SHA-256
   metadata and focused log hashes. Public absence rendering also records
   `public_absence_surface_manifest_count=93` and
-  `public_absence_surface_manifest_sha256=6f4cfecd1df9d67a6249a072e9bd8bac4ac3622e8a136e3176ce92aab9cd7c3c`
+  `public_absence_surface_manifest_sha256=976c611ac8f6374448178464a3f60682db591c3c9ce5d44fc22a7e92506cc429`
   with `failure_count=0`, so public manuals and generated evidence continue to
   hide internal absence markers from operator-facing text.
 
@@ -28,6 +28,12 @@ Strict-host aggregate:
 
 - `STATUS: FAIL llm-goal-evidence warn_count=0 fail_count=5`
 - `failed_gates=dashboard|vllm_host|svllm_local|torch_optimizer|finetune_guard`
+
+Canonical strict completion evidence remains
+`scripts/check/check-llm-goal-evidence.shs --strict-host`. For operator setup
+triage before rerunning strict evidence, use
+`scripts/check/check-llm-strict-host-prereq-doctor.shs`; it is a non-network
+prerequisite summary and must not be treated as a completion pass.
 
 ## Blockers
 
@@ -52,7 +58,7 @@ Strict-host aggregate:
 - local proof already hardened: vLLM host evidence has a checked runtime
   control/readiness source/spec plus operator-guide manifest with
   `surface_manifest_count=13` and
-  `surface_manifest_sha256=35c47029787ab6a878e1c2b9e5bc6789a40eaf44c5573b385bc5d9144729325d`
+  `surface_manifest_sha256=9f73daa7cfebd2ce82b0ea5c03d27c26d5550fe66a5e277c58d5d0cf2c6abf41`
 - required evidence: local `vllm` executable, importable Python `vllm` module
   with non-missing origin, serve preflight, reachable endpoint, and `/v1/models`
   listing the selected base model
@@ -84,7 +90,7 @@ Strict-host aggregate:
   devices; system/Simple-visible libtorch is missing
 - local proof already hardened: Torch optimizer evidence has a checked live
   probe/source/spec/doc manifest with `surface_manifest_count=18` and
-  `surface_manifest_sha256=dd7796837a328390a24abdd5d2769f8d3dafcdaedca0d840f3adc73f1dbbdef3`,
+  `surface_manifest_sha256=133ded4adf7b7953eb00927fd0637d1f07e3e15eb613620ef8fc9ad35586e39e`,
   plus hashed Python Torch discovery and system libtorch probe logs
 - required evidence: Simple/libtorch CUDA optimizer probe with parameter on
   CUDA, gradient handle, optimizer step attempted, and parameter sum decrease
