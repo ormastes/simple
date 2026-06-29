@@ -667,6 +667,16 @@ version, CUDA availability, device count) and `system_libtorch_status`, so a
 host with Python Torch/CUDA installed but no Simple-visible libtorch is reported
 as a Simple/runtime integration blocker rather than a general CUDA absence.
 
+Follow-up hardening makes wrapper PASS stricter than the probe status line
+alone. If the Simple probe emits `status=pass`, the wrapper now independently
+requires normalized libtorch/CUDA availability, CUDA parameter placement, a
+nonzero gradient handle, an attempted optimizer step, and numeric
+`after_sum < before_sum`; otherwise it rewrites the lane to fail with
+`wrapper_pass_integrity_failed:*`. The aggregate forwards
+`torch_cuda_optimizer_probe_sum_decreased_status`,
+`torch_cuda_optimizer_probe_pass_integrity_status`, and
+`torch_cuda_optimizer_probe_pass_integrity_reason`.
+
 ## 2026-06-29 Fine-Tune Acceptance Evidence Hardening
 
 `scripts/check/check-llm-finetune-acceptance-evidence.shs` now preserves the

@@ -133,6 +133,43 @@ if [ -z "$after_sum" ]; then
     after_sum="missing"
 fi
 
+pass_integrity_status="not_applicable"
+pass_integrity_reason="not_applicable"
+sum_decreased_status="not_collected"
+if [ "$status" = "pass" ]; then
+    pass_integrity_status="pass"
+    pass_integrity_reason="all_required_pass_fields_present"
+    if [ "$torch_available" != "true" ]; then
+        pass_integrity_status="fail"
+        pass_integrity_reason="torch_available_not_true"
+    elif [ "$cuda_available" != "true" ]; then
+        pass_integrity_status="fail"
+        pass_integrity_reason="cuda_available_not_true"
+    elif [ "$parameter_is_cuda" != "true" ]; then
+        pass_integrity_status="fail"
+        pass_integrity_reason="parameter_not_cuda"
+    elif [ "$grad_handle" = "missing" ] || [ "$grad_handle" = "0" ]; then
+        pass_integrity_status="fail"
+        pass_integrity_reason="gradient_handle_missing"
+    elif [ "$optimizer_step_attempted" != "true" ]; then
+        pass_integrity_status="fail"
+        pass_integrity_reason="optimizer_step_not_attempted"
+    elif awk "BEGIN { exit !(($after_sum) < ($before_sum)) }" >/dev/null 2>&1; then
+        sum_decreased_status="pass"
+    else
+        pass_integrity_status="fail"
+        pass_integrity_reason="parameter_sum_not_decreased"
+        sum_decreased_status="fail"
+    fi
+    if [ "$pass_integrity_status" != "pass" ]; then
+        status="fail"
+        reason="wrapper_pass_integrity_failed:$pass_integrity_reason"
+        blocked_gate="optimizer_step_decreases_parameter_sum"
+        blocked_gates="$blocked_gate"
+        primary_blocked_gate="$blocked_gate"
+    fi
+fi
+
 next_action="verify Simple/libtorch CUDA optimizer execution and parameter-sum decrease"
 case "$blocked_gate" in
     libtorch|libtorch_unavailable)
@@ -176,6 +213,9 @@ esac
     printf '%s\n' "torch_cuda_optimizer_probe_optimizer_step_attempted_normalized=$optimizer_step_attempted"
     printf '%s\n' "torch_cuda_optimizer_probe_before_sum_normalized=$before_sum"
     printf '%s\n' "torch_cuda_optimizer_probe_after_sum_normalized=$after_sum"
+    printf '%s\n' "torch_cuda_optimizer_probe_sum_decreased_status=$sum_decreased_status"
+    printf '%s\n' "torch_cuda_optimizer_probe_pass_integrity_status=$pass_integrity_status"
+    printf '%s\n' "torch_cuda_optimizer_probe_pass_integrity_reason=$pass_integrity_reason"
     printf '%s\n' "torch_cuda_optimizer_probe_next_action=$next_action"
 } >>"$OUT_ENV"
 
@@ -200,12 +240,15 @@ esac
     printf '%s\n' "- optimizer_step_attempted: \`$optimizer_step_attempted\`"
     printf '%s\n' "- before_sum: \`$before_sum\`"
     printf '%s\n' "- after_sum: \`$after_sum\`"
+    printf '%s\n' "- sum_decreased_status: \`$sum_decreased_status\`"
+    printf '%s\n' "- pass_integrity_status: \`$pass_integrity_status\`"
+    printf '%s\n' "- pass_integrity_reason: \`$pass_integrity_reason\`"
     printf '%s\n' "- next_action: \`$next_action\`"
     printf '%s\n' "- exit_code: \`$exit_code\`"
     printf '%s\n' "- env: \`$OUT_ENV\`"
     printf '%s\n' "- log: \`$OUT_LOG\`"
     printf '\n'
-    printf 'This wrapper proves the Simple/libtorch CUDA optimizer lane only when all required gates pass. `unavailable` records the exact missing host/runtime gate and remains a strict-host failure.\n'
+    printf 'This wrapper proves the Simple/libtorch CUDA optimizer lane only when all required gates pass. A `status=pass` probe log must also include normalized proof fields showing libtorch and CUDA availability, CUDA parameter placement, a nonzero gradient handle, an attempted optimizer step, and numeric `after_sum < before_sum`. `unavailable` records the exact missing host/runtime gate and remains a strict-host failure.\n'
 } >"$REPORT_PATH"
 
 case "$status" in

@@ -175,9 +175,15 @@ classifying the self-hosted Simple runtime as `unavailable` with
 `torch_cuda_optimizer_probe_parameter_is_cuda_normalized`,
 `torch_cuda_optimizer_probe_grad_handle_normalized`, and
 `torch_cuda_optimizer_probe_optimizer_step_attempted_normalized`, and
+`torch_cuda_optimizer_probe_sum_decreased_status`,
+`torch_cuda_optimizer_probe_pass_integrity_status`,
+`torch_cuda_optimizer_probe_pass_integrity_reason`, and
 `torch_cuda_optimizer_probe_next_action` so strict aggregate runs can report the
-compact blocked Torch gate list, the first blocked gate, and the next operator
-step. Use this wrapper as the
+compact blocked Torch gate list, the first blocked gate, independent pass-log
+integrity, and the next operator step. A probe `status=pass` is accepted only
+when the wrapper also sees libtorch/CUDA availability, CUDA parameter placement,
+a nonzero gradient handle, an attempted optimizer step, and numeric
+`after_sum < before_sum`. Use this wrapper as the
 canonical evidence path for the real CUDA optimizer-step gate; run it with
 `--strict` when unavailable hosts must fail the lane instead of recording a
 warning.
@@ -220,7 +226,8 @@ also records
 `llm_goal_evidence_torch_optimizer_detail` for Simple/libtorch CUDA optimizer
 status, compact blocked gates, primary blocked gate, Python Torch/CUDA host
 visibility, system libtorch visibility, Simple runtime gates, gradient handle,
-optimizer-step attempt, and before/after parameter sums. vLLM
+optimizer-step attempt, before/after parameter sums, sum-decrease status, and
+pass-log integrity. vLLM
 and Torch detail rows include the focused
 wrapper `next_action` values. It also records
 `llm_goal_evidence_finetune_guard_detail` for the fine-tune guard and
