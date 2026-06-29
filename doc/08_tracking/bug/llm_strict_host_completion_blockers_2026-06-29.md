@@ -16,8 +16,9 @@ Default aggregate:
 - `STATUS: PASS llm-goal-evidence warn_count=2`
 - `warn_gates=vllm_host|torch_optimizer`
 - local provenance hardening: context/Ponytail replacement, dashboard route,
-  svLLM local readiness, and fine-tune guard evidence now include checked
-  surface/input manifests with size/SHA-256 metadata and focused log hashes.
+  vLLM host, svLLM local readiness, Torch optimizer, and fine-tune guard
+  evidence now include checked surface/input manifests with size/SHA-256
+  metadata and focused log hashes.
 
 Strict-host aggregate:
 
@@ -41,6 +42,10 @@ Strict-host aggregate:
 - primary blocker: `local_vllm`
 - current evidence: `vllm_command_path=missing`,
   `python_vllm_module_status=missing`, `local_gpu_status=available`
+- local proof already hardened: vLLM host evidence has a checked runtime
+  control/readiness source/spec manifest with
+  `surface_manifest_count=10` and
+  `surface_manifest_sha256=83abdc5c0a155eb8bc2cd2c20e3a9349d0e5b43cacf1073c5d59706b5fe9500b`
 - required evidence: local `vllm` executable, serve preflight, reachable
   endpoint, and `/v1/models` listing the selected base model
 - next action: install or expose local vLLM, then rerun
@@ -67,6 +72,9 @@ Strict-host aggregate:
 - primary blocker: `libtorch`
 - current evidence: Python Torch `2.9.1+cu130` has CUDA available with 2
   devices; system/Simple-visible libtorch is missing
+- local proof already hardened: Torch optimizer evidence has a checked live
+  probe/source/spec manifest with `surface_manifest_count=14` and
+  `surface_manifest_sha256=852a1c814199286c0cf686f2bc68ffc8fb946a85691426a4c7440cf69aa7165c`
 - required evidence: Simple/libtorch CUDA optimizer probe with parameter on
   CUDA, gradient handle, optimizer step attempted, and parameter sum decrease
 - next action: build or install Simple-visible libtorch and rerun

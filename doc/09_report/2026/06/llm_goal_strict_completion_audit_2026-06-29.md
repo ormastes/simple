@@ -34,9 +34,19 @@ but local proof is no longer status-only for the completed repo-local lanes:
   execution-spec log hash, and mimic env/log hashes.
 - dashboard live route evidence records a checked route surface manifest plus
   nested dashboard evidence env/log hashes; live HTTP proof is still required.
+- vLLM host evidence records a checked runtime control/readiness source/spec
+  manifest (`surface_manifest_count=10`,
+  `surface_manifest_sha256=83abdc5c0a155eb8bc2cd2c20e3a9349d0e5b43cacf1073c5d59706b5fe9500b`)
+  plus local `vllm`, Python module, GPU, and readiness-log hashes; a local
+  `vllm` executable and live endpoint proof are still required.
 - svLLM local readiness records a checked local-readiness spec/log manifest and
   per-log hashes; native `read_range`, pinned-buffer, and device-staging proof
   is still required.
+- Torch optimizer evidence records a checked live probe/source/spec manifest
+  (`surface_manifest_count=14`,
+  `surface_manifest_sha256=852a1c814199286c0cf686f2bc68ffc8fb946a85691426a4c7440cf69aa7165c`)
+  plus Python Torch/CUDA visibility and probe-log hashes; Simple-visible
+  libtorch and live CUDA optimizer execution proof are still required.
 - fine-tune guard evidence records a checked process/input/log manifest and
   per-log hashes; retry6/7 model, eval, safety, deployment, and handoff proof is
   still required.
