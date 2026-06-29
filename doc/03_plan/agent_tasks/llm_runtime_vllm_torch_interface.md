@@ -826,3 +826,9 @@ separate `LLM_DASHBOARD_LIVE_HTTP_EVIDENCE_ENV` with
 `llm_dashboard_live_http_status=pass`; without it, strict dashboard completion
 fails with `live_http_authenticated_request` blocked instead of treating route
 contracts as a live operator-dashboard pass.
+
+The context/Ponytail replacement wrapper now also runs
+`test/02_integration/app/mcp_context_ponytail_dispatch_spec.spl` as
+`execution_spec`. That spec calls `simple_context` and `simple_ponytail` through
+`app.mcp.main_dispatch.dispatch_tool_content`, so full-replacement evidence is
+no longer source-contract-only for the app MCP path.

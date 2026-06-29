@@ -79,6 +79,16 @@ dashboard collector wiring:
 sh scripts/check/check-llm-tooling-context-ponytail-mimic.shs
 ```
 
+For replacement evidence, run the stricter wrapper:
+
+```bash
+sh scripts/check/check-llm-tooling-context-ponytail-full-replacement.shs
+```
+
+That wrapper includes source/schema contract checks plus
+`test/02_integration/app/mcp_context_ponytail_dispatch_spec.spl`, which calls
+`simple_context` and `simple_ponytail` through the real app MCP dispatcher.
+
 Latest evidence:
 `doc/09_report/2026/06/llm_tooling_context_ponytail_mimic_2026-06-28.md`
 records the context/Ponytail system spec and focused context/Ponytail unit
