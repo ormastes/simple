@@ -13,28 +13,28 @@
 - acceptance_pass_integrity_status: `not_required`
 - acceptance_env: `build/llm_finetune_acceptance/evidence.env`
 - surface_manifest: `build/llm_finetune_guard_evidence/fine_tune_guard_surface_manifest.tsv`
-- surface_manifest_count: `22`
-- surface_manifest_size: `2793`
-- surface_manifest_sha256: `5c81112cb9bbd78d8b2220137670e651f75c68635c165a21ad9085f2b993f938`
+- surface_manifest_count: `24`
+- surface_manifest_size: `3073`
+- surface_manifest_sha256: `a9a005cda2bbddd230ce5bba8b51f0beb3b6f47a688f301f3dc62b7373faa213`
 - fixed_format_data_quality: `pass` exit=`0` log=`build/llm_finetune_guard_evidence/fixed_format_data_quality.log`
 - fixed_format_data_quality_log_size: `67`
 - fixed_format_data_quality_log_sha256: `9c8fd3d817ac3378db09e63fd46142dde34246778b3aa06336f538b865f6ab42`
 - retry5_cache_manifest: exit=`pass` expected_status=`pass` expected_result=`pass` log=`build/llm_finetune_guard_evidence/retry5_cache_manifest.log`
-- retry5_cache_manifest_log_size: `517`
-- retry5_cache_manifest_log_sha256: `433289b6db07a72b04f8765ffd1884b83df477b7bf1aff300238200a16e7d760`
-- retry5_cache_manifest_exists: `false`
-- retry5_cache_manifest_artifact_status: `missing`
-- retry5_cache_manifest_size: `0`
-- retry5_cache_manifest_sha256: `missing`
-- retry5_cache_license_review: `missing`
-- retry5_cache_data_access: `missing`
-- retry5_cache_path: `missing`
+- retry5_cache_manifest_log_size: `593`
+- retry5_cache_manifest_log_sha256: `768ca1f573a2bfadc441c8c790a2ba4fe301cd45a48b1c611895a50b790a2467`
+- retry5_cache_manifest_exists: `true`
+- retry5_cache_manifest_artifact_status: `ready`
+- retry5_cache_manifest_size: `479`
+- retry5_cache_manifest_sha256: `3d9ad3350890a30b36cec4b492e272517b725a52fe1265b7a450df63f9bb81cd`
+- retry5_cache_license_review: `pending`
+- retry5_cache_data_access: `pending`
+- retry5_cache_path: `not-created`
 - retry5_cache_path_exists: `false`
-- retry5_cache_expected_checksum: `missing`
+- retry5_cache_expected_checksum: `missing-before-cache`
 - retry5_cache_actual_checksum: `missing`
 - retry5_cache_checksum_match: `false`
 - retry5_cache_training_allowed: `false`
-- retry5_cache_result: `BLOCKED_CACHE_MANIFEST_MISSING`
+- retry5_cache_result: `BLOCKED_CACHE_MANIFEST_INCOMPLETE`
 - retry6_direct_gate: exit=`pass` expected_status=`pass` expected_result=`pass` log=`build/llm_finetune_guard_evidence/retry6_direct_gate.log`
 - retry6_direct_gate_log_size: `1366`
 - retry6_direct_gate_log_sha256: `350b7de6f744fd7bea50157bf5fc2169f51e8adc5cd5e41f2cd2c86445d9093b`
@@ -43,10 +43,10 @@
 - retry7_direct_gate_log_sha256: `05fd3bf2fc1c210b445e62a01cee639c6457221ebf3837bf0c69ac132d0cac18`
 - retry6_spec: `pass` exit=`0` log=`build/llm_finetune_guard_evidence/retry6_spec.log`
 - retry6_spec_log_size: `1456`
-- retry6_spec_log_sha256: `a05a3514f24e687377d815e9348da29837ed3afd96156e29a4a109d76350c025`
+- retry6_spec_log_sha256: `1f1eb1f113a39280b9900bd63d524b31983cb90401939c0447f54589804f57c5`
 - retry7_spec: `pass` exit=`0` log=`build/llm_finetune_guard_evidence/retry7_spec.log`
 - retry7_spec_log_size: `1447`
-- retry7_spec_log_sha256: `ae48dd1cc4db063479ce221d6b27f0b466b9f53837c6561bf61de0618f26c723`
+- retry7_spec_log_sha256: `bf36e336b636fef03ee786b24c91d44afcc640c71be7bad51c10f47568598495`
 - env: `build/llm_finetune_guard_evidence/evidence.env`
 
 This evidence proves the local fine-tune process guards: fixed-format sample quality passes, retry5 cache-manifest review remains blocked before licensed cache/checksum evidence, retry6 remains blocked before licensed data/model/eval evidence, and retry7 remains blocked before retry6 target-eval plus normal-review evidence. It is not model training, target-eval, safety, deployment, or release-handoff proof. Run with `--strict-ready` when a tuned-model acceptance gate must pass.

@@ -21,8 +21,8 @@ Default aggregate:
   metadata and focused log hashes. Public absence rendering also records
   `vllm_surface_manifest_sha256=d5e832329fd363e592a7989a23e24786e6071d9c8e1a2bf2e81c7dbd757fb451`,
   `torch_surface_manifest_sha256=617980c0ef42725f88c18981e263cc9976b9ea9fd6c8bf966995acf3ef288861`,
-  `public_absence_surface_manifest_count=122` and
-  `public_absence_surface_manifest_sha256=eaab8ea648e86ed763b86d97febcc9d361ba283497902401900442e5bd5d3b6d`
+  `public_absence_surface_manifest_count=123` and
+  `public_absence_surface_manifest_sha256=536a912d985c37cebab8a014e4061641ecc6ceb5ee754fc0baf5de54aeb2360c`
   with `failure_count=0`, so public manuals and generated evidence continue to
   hide internal absence markers from operator-facing text.
 

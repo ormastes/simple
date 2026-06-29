@@ -68,7 +68,10 @@ This wrapper is the canonical local non-training check. It runs the
 fixed-format sample quality gate, the retry5 cache-manifest gate, retry6 and
 retry7 direct gates, and the retry6/retry7 SSpec manuals. For the checked-in
 dry-run records it should pass only when retry5, retry6, and retry7 still report
-the expected WARN/blocked state. Its
+the expected WARN/blocked state. Retry5 has a checked-in fail-closed cache
+manifest that records pending license review and data access without claiming a
+cache artifact or checksum; training remains blocked until that manifest is
+approved and checksum-matched. Its
 env records `llm_finetune_guard_required_gates`,
 `llm_finetune_guard_blocked_gates`,
 `llm_finetune_guard_primary_blocked_gate`,
