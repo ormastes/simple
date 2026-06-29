@@ -79,6 +79,52 @@ if [ -z "$models_reason" ]; then
     models_reason="missing"
 fi
 
+required_gates="local_vllm,local_gpu,serve_preflight,endpoint_reachable,models_listed"
+blocked_gates=""
+append_blocked_gate() {
+    gate="$1"
+    if [ -z "$blocked_gates" ]; then
+        blocked_gates="$gate"
+    else
+        blocked_gates="$blocked_gates|$gate"
+    fi
+}
+
+case "$reason" in
+    missing_local_vllm*)
+        append_blocked_gate "local_vllm"
+        ;;
+esac
+case "$reason" in
+    missing_local_gpu*|missing_local_vllm_and_gpu*)
+        append_blocked_gate "local_gpu"
+        ;;
+esac
+case "$status" in
+    planned|pass)
+        ;;
+    *)
+        append_blocked_gate "serve_preflight"
+        ;;
+esac
+case "$endpoint_status" in
+    pass|reachable)
+        ;;
+    *)
+        append_blocked_gate "endpoint_reachable"
+        ;;
+esac
+case "$models_status" in
+    pass|fetched)
+        ;;
+    *)
+        append_blocked_gate "models_listed"
+        ;;
+esac
+if [ -z "$blocked_gates" ]; then
+    blocked_gates="none"
+fi
+
 wrapper_status="fail"
 wrapper_reason="$reason"
 case "$event:$status:$reason" in
@@ -96,6 +142,8 @@ esac
 {
     printf '%s\n' "llm_runtime_vllm_host_probe_status=$wrapper_status"
     printf '%s\n' "llm_runtime_vllm_host_probe_reason=$wrapper_reason"
+    printf '%s\n' "llm_runtime_vllm_host_probe_required_gates=$required_gates"
+    printf '%s\n' "llm_runtime_vllm_host_probe_blocked_gates=$blocked_gates"
     printf '%s\n' "llm_runtime_vllm_host_probe_cli_exit=$exit_code"
     printf '%s\n' "llm_runtime_vllm_host_probe_event=$event"
     printf '%s\n' "llm_runtime_vllm_host_probe_preflight_status=$status"
@@ -109,6 +157,8 @@ esac
     printf '%s\n' "- command: \`$SIMPLE_BIN run src/app/llm_runtime/control_cli.spl -- --action preflight --base-model $BASE_MODEL --endpoint $ENDPOINT --detect-resources\`"
     printf '%s\n' "- status: \`$wrapper_status\`"
     printf '%s\n' "- reason: \`$wrapper_reason\`"
+    printf '%s\n' "- required_gates: \`$required_gates\`"
+    printf '%s\n' "- blocked_gates: \`$blocked_gates\`"
     printf '%s\n' "- preflight_status: \`$status\`"
     printf '%s\n' "- endpoint_status: \`$endpoint_status\`"
     printf '%s\n' "- models_status: \`$models_status\`"
@@ -117,7 +167,7 @@ esac
     printf '%s\n' "- env: \`$OUT_ENV\`"
     printf '%s\n' "- log: \`$OUT_LOG\`"
     printf '\n'
-    printf 'This wrapper records repeatable local vLLM host preflight evidence. It does not prove live serving readiness; `unavailable` means the host lacks local vLLM/GPU resources or only reached preflight planning. Run with `--strict` when unavailable hosts must fail the lane.\n'
+    printf 'This wrapper records repeatable local vLLM host preflight evidence. It only proves live serving readiness when all required gates pass. `unavailable` records the compact blocked-gates list for missing local vLLM/GPU resources, skipped serve preflight, endpoint reachability, or model-listing evidence; run with `--strict` when unavailable hosts must fail the lane.\n'
 } >"$REPORT_PATH"
 
 case "$wrapper_status" in

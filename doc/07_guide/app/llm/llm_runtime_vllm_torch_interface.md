@@ -87,13 +87,20 @@ real evidence:
 - PEFT/TRL fine-tuning orchestration and acceptance evidence
 
 Latest local host probe:
-`doc/09_report/2026/06/llm_runtime_vllm_host_probe_2026-06-28.md` records a
+`doc/09_report/2026/06/llm_runtime_vllm_host_probe_2026-06-29.md` records a
 repeatable `scripts/check/check-llm-runtime-vllm-host-probe.shs` preflight. On
 the current host it returns `status=unavailable` with
-`reason=missing_local_vllm`. Keep `FR-LLM-RUNTIME-0001` open until a configured
-local endpoint proves `/v1/models` serves the selected base model. Run the
-wrapper with `--strict` when unavailable or preflight-only hosts must fail the
-lane.
+`reason=missing_local_vllm` and
+`blocked_gates=local_vllm|serve_preflight|endpoint_reachable|models_listed`.
+The evidence env records `llm_runtime_vllm_host_probe_required_gates`,
+`llm_runtime_vllm_host_probe_blocked_gates`,
+`llm_runtime_vllm_host_probe_preflight_status`,
+`llm_runtime_vllm_host_probe_endpoint_status`, and
+`llm_runtime_vllm_host_probe_models_status` so strict aggregate runs can report
+the exact local serving blocker. Keep `FR-LLM-RUNTIME-0001` open until a
+configured local endpoint proves `/v1/models` serves the selected base model.
+Run the wrapper with `--strict` when unavailable or preflight-only hosts must
+fail the lane.
 
 Latest svLLM local readiness evidence:
 `doc/09_report/2026/06/llm_runtime_svllm_local_readiness_2026-06-28.md`

@@ -649,3 +649,14 @@ license, safety, deployment, app-handoff doc, handoff usage, and next action.
 On this host the lane remains failed with `BLOCKED_RETRY6_NOT_READY` and
 blocked gates for retry6 training/eval, model/eval artifacts, target eval,
 decision, license, safety, deployment, and app handoff.
+
+## 2026-06-29 vLLM Host Evidence Hardening
+
+`scripts/check/check-llm-runtime-vllm-host-probe.shs` now normalizes the local
+vLLM live-serving proof into required and blocked gates. The env records the
+required gate list, compact blocked gates, preflight status, endpoint status,
+models-list status, and models-list reason. On this host the lane remains
+`unavailable` with `blocked_gates=local_vllm|serve_preflight|endpoint_reachable|models_listed`;
+strict-host aggregate runs should fail that gate until local vLLM is installed,
+serve preflight succeeds, the endpoint is reachable, and `/v1/models` lists the
+selected base model.
