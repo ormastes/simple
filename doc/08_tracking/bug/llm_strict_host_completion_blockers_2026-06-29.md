@@ -15,6 +15,9 @@ Default aggregate:
 
 - `STATUS: PASS llm-goal-evidence warn_count=2`
 - `warn_gates=vllm_host|torch_optimizer`
+- local provenance hardening: context/Ponytail replacement, dashboard route,
+  svLLM local readiness, and fine-tune guard evidence now include checked
+  surface/input manifests with size/SHA-256 metadata and focused log hashes.
 
 Strict-host aggregate:
 
@@ -27,6 +30,8 @@ Strict-host aggregate:
 
 - primary blocker: `live_http_authenticated_request`
 - concrete reason: `missing_base_url`
+- local proof already hardened: dashboard route/source/spec evidence has a
+  manifest and nested dashboard env/log hashes
 - required evidence: `llm_dashboard_live_http_status=pass`
 - next action: set `LLM_DASHBOARD_LIVE_BASE_URL` plus dashboard authentication
   env and rerun `scripts/check/check-llm-dashboard-live-http-evidence.shs`.
@@ -47,6 +52,8 @@ Strict-host aggregate:
 - current evidence: local readiness passes, local file-backed byte reads are
   ready, but native `read_range`, pinned-buffer registration, and device
   staging are `unsupported`
+- local proof already hardened: svLLM local readiness has a checked spec/log
+  manifest and per-log hashes
 - required evidence: `svllm_native_streaming_status=pass`
 - next action: implement native streaming capability evidence and rerun
   `scripts/check/check-llm-runtime-svllm-native-streaming-evidence.shs` with
@@ -71,6 +78,8 @@ Strict-host aggregate:
 - current evidence: retry7 acceptance is blocked; retry5 licensed cache review,
   retry6 model manifest, eval result, target eval, license, safety,
   deployment, app handoff, and accepted decision are not ready
+- local proof already hardened: fine-tune guard evidence has a checked
+  process/input/log manifest and per-log hashes
 - required evidence: `llm_finetune_acceptance_status=pass`
 - next action: complete retry5 licensed cache/checksum review, run retry6
   training/eval to target, then record retry7 normal acceptance evidence with

@@ -24,3 +24,22 @@ completion gates still require live host/runtime/model evidence.
 
 The context/Ponytail lane has repo-local Simple-owned full-replacement evidence
 including dispatch execution coverage. It is no longer a strict blocker.
+
+## Local Provenance Hardening
+
+The latest default evidence remains host-limited rather than strict-complete,
+but local proof is no longer status-only for the completed repo-local lanes:
+
+- context/Ponytail full replacement records a checked surface manifest,
+  execution-spec log hash, and mimic env/log hashes.
+- dashboard live route evidence records a checked route surface manifest plus
+  nested dashboard evidence env/log hashes; live HTTP proof is still required.
+- svLLM local readiness records a checked local-readiness spec/log manifest and
+  per-log hashes; native `read_range`, pinned-buffer, and device-staging proof
+  is still required.
+- fine-tune guard evidence records a checked process/input/log manifest and
+  per-log hashes; retry6/7 model, eval, safety, deployment, and handoff proof is
+  still required.
+
+These hardened local artifacts reduce review ambiguity, but they do not close
+the five strict-host blockers above.
