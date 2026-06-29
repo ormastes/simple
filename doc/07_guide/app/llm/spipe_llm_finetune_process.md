@@ -95,6 +95,13 @@ retry5 blocker fields from that checker:
 only; they do not replace licensed cache approval, training, target eval,
 safety, deployment, or normal-review acceptance.
 
+Use `scripts/check/check-llm-finetune-setup-contract.shs` when changing the
+guard or acceptance wrappers. It runs the default acceptance and guard wrappers
+and verifies that retry5 cache review, retry6 training/eval, retry7
+acceptance, surface-manifest hashes, and `next_action` diagnostics remain
+present. This is a setup diagnostic contract only; it keeps the current blocked
+state visible and does not promote retry7 acceptance.
+
 Run strict ready mode only when tuned-model acceptance evidence is expected to
 exist. Strict mode also binds the consumed acceptance env to
 `llm_backed_app_server_dry_run_retry7` through

@@ -61,7 +61,7 @@ but local proof is no longer status-only for the completed repo-local lanes:
   (`vllm_surface_manifest_sha256=05f67846d07e6cd2bdc2f90afc1b01ee520fff404cbb5bdb9610676f47915667`,
   `torch_surface_manifest_sha256=f3cff8e65d26227ae70e7985542710932954a142acc5d68b5878d0b5cc837cde`,
   `public_absence_surface_manifest_count=122`,
-  `public_absence_surface_manifest_sha256=c90bdfca6ea35b90fd7334365384c3bb4c4cf7a28123163a900029be64d1d62e`)
+  `public_absence_surface_manifest_sha256=ee9ea8b92083a32a5b03ba5eb7a94a4327b1bbd08d12cbdc2332eaa7c70baed8`)
   with `failure_count=0`, proving operator-facing manuals and generated
   evidence do not expose internal absence markers.
 
