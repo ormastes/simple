@@ -49,9 +49,11 @@ struct NvmeController:
     fw_dl_bytes:  i64   # bytes accumulated by the in-progress firmware download
     media_errors: i64   # uncorrectable read errors observed (SMART)
     unsafe_shutdowns: i64   # power cycles without a clean checkpoint (SMART)
+    error_count:  i64   # IO commands completed with a non-success status (error log)
+    last_error:   i64   # status code of the most recent failed IO command
 
 fn nvme_controller_new() -> NvmeController:
-    NvmeController(aq: admin_queue_new(), qset: queue_set_new(), features: feature_store_new(), ftl: ftl_new(), pool: task_pool_new(), last_id: identify_empty(), smart: smart_empty(), reads: 0, writes: 0, power_cycles: 0, abort_count: 0, format_count: 0, aer_held_cid: -1, aer_event: 0, fw_revision: 1, fw_dl_bytes: 0, media_errors: 0, unsafe_shutdowns: 0)
+    NvmeController(aq: admin_queue_new(), qset: queue_set_new(), features: feature_store_new(), ftl: ftl_new(), pool: task_pool_new(), last_id: identify_empty(), smart: smart_empty(), reads: 0, writes: 0, power_cycles: 0, abort_count: 0, format_count: 0, aer_held_cid: -1, aer_event: 0, fw_revision: 1, fw_dl_bytes: 0, media_errors: 0, unsafe_shutdowns: 0, error_count: 0, last_error: 0)
 
 impl NvmeController:
     # ── Admin path ───────────────────────────────────────────────────────────
@@ -171,11 +173,20 @@ impl NvmeController:
     me do_get_log(cmd: AdminCmd) -> i64:
         val logid: i64 = admin_logid(cmd.cdw10)
         if logid == LOG_SMART:
-            me.smart = build_smart_log(me.reads, me.writes, me.power_cycles, 0, 0)
+            val pu: i64 = smart_percent_used(me.ftl.max_erase())
+            val spare: i64 = smart_avail_spare(me.ftl.bad_blocks())
+            me.smart = build_smart_log(me.reads, me.writes, me.power_cycles, me.unsafe_shutdowns, me.media_errors, pu, spare)
             return SC_SUCCESS
         if logid == LOG_ERROR or logid == LOG_FW_SLOT:
             return SC_SUCCESS
         SC_INVALID_FIELD
+
+    # Error-log introspection (the Get Log Page ERROR data the host would read).
+    me error_log_count() -> i64:
+        me.error_count
+
+    me last_error_status() -> i64:
+        me.last_error
 
     # ── IO path (multi-queue) ────────────────────────────────────────────────
     me io_submit(qid: i64, c: NvmeCmd) -> bool:
@@ -214,6 +225,12 @@ impl NvmeController:
                             status = SC_SUCCESS
                         else:
                             status = SC_INVALID_OPCODE
+        # Health telemetry: record uncorrectable reads and the error log.
+        if status != SC_SUCCESS:
+            me.error_count = me.error_count + 1
+            me.last_error = status
+            if status == SC_MEDIA_ERR:
+                me.media_errors = me.media_errors + 1
         cpl_make(cmd.cid, status, rdata)
 
     # Round-robin across all active IO submission queues; post each completion
@@ -242,10 +259,21 @@ impl NvmeController:
     me checkpoint():
         me.ftl.checkpoint()
 
+    # Physical page backing a logical block (introspection / test hook).
+    me physical_ppn(lba: i64) -> i64:
+        me.ftl.physical_ppn(lba)
+
+    # test hook: inject NAND read bit-errors at a physical page.
+    me inject_read_bitflip(ppn: i64, n: i64):
+        me.ftl.inject_read_bitflip(ppn, n)
+
     me power_cycle():
+        # A power cycle is a dirty (unsafe) shutdown: the controller did not flush a
+        # clean checkpoint before losing power.
         me.ftl.crash()
         me.ftl.recover()
         me.power_cycles = me.power_cycles + 1
+        me.unsafe_shutdowns = me.unsafe_shutdowns + 1
 
 # ── Self-test (compact; full admin-driven e2e lives in nvme_main.spl) ─────────
 fn nvme_controller_selftest() -> i64:
@@ -328,5 +356,41 @@ fn nvme_controller_selftest() -> i64:
     c.io_process()
     val rr: NvmeCpl = c.io_reap(1)
     fail = fail + expect_eq(rr.data, 0, "format erased user data (read -> 0)")
+
+    # SMART: an uncorrectable read is counted in media_errors and raises crit_warning.
+    c.io_submit(1, cmd_make(120, OP_WRITE, 8, 1, 0xDD))
+    c.io_process()
+    c.io_reap(1)
+    val pp: i64 = c.physical_ppn(8)
+    c.inject_read_bitflip(pp, 2)                 # 2 flips -> uncorrectable
+    c.io_submit(1, cmd_make(121, OP_READ, 8, 1, 0))
+    c.io_process()
+    val mederr: NvmeCpl = c.io_reap(1)
+    fail = fail + expect_eq(mederr.status, SC_MEDIA_ERR, "uncorrectable read -> SC_MEDIA_ERR")
+    c.admin_submit(admin_get_log_cmd(40, LOG_SMART))
+    c.admin_process()
+    c.admin_reap()
+    val sm: SmartLog = c.last_smart()
+    fail = fail + expect_eq(sm.media_errors, 1, "SMART media_errors counts the uncorrectable read")
+    fail = fail + expect_eq(sm.crit_warning, 1, "SMART critical warning set on media error")
+    var duw_ok: i64 = 0
+    if sm.data_units_written > 0:
+        duw_ok = 1
+    fail = fail + expect_eq(duw_ok, 1, "SMART data units written reflects activity")
+
+    # Error log records a failed IO command (status + count).
+    val ec0: i64 = c.error_log_count()
+    c.io_submit(1, cmd_make(122, OP_WRITE, LBA_COUNT + 1, 1, 0))
+    c.io_process()
+    c.io_reap(1)
+    fail = fail + expect_eq(c.error_log_count(), ec0 + 1, "error log counts the failed write")
+    fail = fail + expect_eq(c.last_error_status(), SC_LBA_RANGE, "error log records the last status")
+
+    # SMART: a power cycle is recorded as an unsafe shutdown.
+    c.power_cycle()
+    c.admin_submit(admin_get_log_cmd(41, LOG_SMART))
+    c.admin_process()
+    c.admin_reap()
+    fail = fail + expect_eq(c.last_smart().unsafe_shutdowns, 1, "power cycle counted as unsafe shutdown")
 
     fail
