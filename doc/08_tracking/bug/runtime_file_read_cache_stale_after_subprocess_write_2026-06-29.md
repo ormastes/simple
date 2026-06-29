@@ -66,20 +66,35 @@ rewrite landing in the same mtime tick could still satisfy the stamp check;
 clearing the single-slot read caches around a subprocess removes that window.
 Negligible cost vs. a process spawn.
 
-## Residual (UNRESOLVED — ruled OUT as the read cache)
+## Residual (UNRESOLVED — runtime read returns a PRIOR file's content)
 
-One assertion deep in the "requires serial identity to match the host preflight
-report" mega-`it` still reads stale content (a later `multi_preflight` check
-observes the prior `duplicate` check's `duplicate-field:model` output).
-**Adding the subprocess cache invalidation above did NOT change it** — every
-nvme read is preceded by a cache-clearing subprocess, so the read cache is now
-effectively bypassed for this test, yet the symptom persists. So this is NOT the
-file read cache. Evidence remaining unexplained: the on-disk output file is
-correct (`:serial`), and the checker on the exact dumped inputs reports `:serial`
-standalone, yet the in-test parent read returns `:model`. This points to a
-deeper runtime string-value lifetime/aliasing or arena-reuse issue across the
-~40 sequential `val text = rt_file_read_text(p) ?? ""` reads in one function.
-Needs runtime memory investigation; tracked, not yet root-caused.
+After the checker's own logic was corrected (see
+`simpleos_nvme_checker_multiple_devices_ordering_2026-06-29.md`), one assertion
+in the "requires serial identity…" mega-`it` still fails. Definitive evidence
+collected this session:
+
+- The `multi` step's checker child computes the right reason and **writes the
+  correct report to disk**: `/tmp/…_multi.sdn` =
+  `reason: …multiple-devices` / `preflight_identity_match: false` (verified by
+  reading the file directly, and by in-checker logging `devcount=2
+  reason=…multiple-devices`).
+- Yet the **parent test process** `rt_file_read_text(multi_report)` returns the
+  content of the *previously read* report (`…_match.sdn` =
+  `reason: ready` / `preflight_identity_match: true`).
+- The subprocess cache-invalidation above clears the read caches before that
+  read, so it is a *fresh* read of a *correct* on-disk file — and it still
+  returns the prior file's content. Adding the stamp check and the
+  subprocess-invalidation did NOT resolve it.
+
+So the parent's `rt_file_read_text` of path B returns the value previously read
+for path A, even though B on disk is correct and the cache was cleared. The
+mechanism is NOT explained by the single-slot path-keyed cache (path A ≠ path B
+is a miss). It points to a runtime string-value / arena-reuse aliasing across
+the ~40 sequential `val text = rt_file_read_text(p) ?? ""` reads in one
+function. A minimal 2-read standalone repro could not reproduce it (the harness's
+reads returned empty for unrelated reasons), so it needs the full sequence.
+Needs runtime-memory-level investigation (value lifetime / arena, or the mmap
+read path); deliberately NOT blind-fixed.
 
 ## Deploy gate
 
