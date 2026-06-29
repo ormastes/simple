@@ -20,7 +20,7 @@ Default aggregate:
   evidence now include checked surface/input manifests with size/SHA-256
   metadata and focused log hashes. Public absence rendering also records
   `public_absence_surface_manifest_count=93` and
-  `public_absence_surface_manifest_sha256=d4cfa3f01be3651b75e440cba7c4e015440b2692877b3b65847625f2fcba05cc`
+  `public_absence_surface_manifest_sha256=951807ea3f1fc80eeb331d7deec0f8a8b024146e6add0d54954eabbb9b21bfb3`
   with `failure_count=0`, so public manuals and generated evidence continue to
   hide internal absence markers from operator-facing text.
 

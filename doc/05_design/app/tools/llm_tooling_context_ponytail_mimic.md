@@ -113,9 +113,11 @@ record shape into `context_packs` through `app.io.sqlite_sffi`:
 
 `context_sql_query_packs(paths, target, query, db_path, format)` rebuilds the
 one-shot pack table when paths are supplied, then selects records where source,
-target, or content match the escaped SQL `LIKE` pattern. Empty queries return
-`status: empty_query`; unavailable database handles return `status:
-unavailable`; no rows return `status: no_matches`.
+target, or content match the SQL-backed candidate predicate. The query string is
+literal context text: after SQL returns candidate rows, Simple filters source,
+target, and content with literal `contains`, so `%`, `_`, and backslash do not
+act as caller-controlled wildcards. Empty queries return `status: empty_query`; unavailable database handles return
+`status: unavailable`; no rows return `status: no_matches`.
 
 `context_sql_query_packs_by_source(paths, target, query, source_filter, db_path,
 format)` keeps the same SQL query contract and applies the optional source
@@ -155,8 +157,8 @@ clients can discover `audit` and `simplification` through metadata.
 
 Interpreter mode implements the existing `rt_sqlite_*` facade in
 `sffi_db.rs`. The supported SQL subset is intentionally narrow: create table,
-delete all rows, prepared insert/bind, select explicit columns, count, simple
-`LIKE`, and ordered result enumeration. That is enough for context-mode storage
+delete all rows, prepared insert/bind, select explicit columns, count, bounded
+`LIKE` candidate scans, and ordered result enumeration. That is enough for context-mode storage
 without adding a new Rust dependency or app-level raw runtime shortcuts.
 
 ## Full Replacement Evidence Slice

@@ -320,7 +320,10 @@ The SQL-backed context path uses the existing `app.io.sqlite_sffi` facade. In
 interpreter mode the compiler provides a narrow `rt_sqlite_*` subset for context
 indexing/querying: open/close, create table, delete, prepared insert/bind,
 select explicit columns, count, ordered rows, and simple `LIKE`. It is not a
-general SQL planner. Public context output must render explicit statuses such
+general SQL planner. Query text is filtered literally after SQL returns
+candidate rows, so `%`, `_`, and backslash are literal characters rather than
+caller-controlled wildcards.
+Public context output must render explicit statuses such
 as `ready`, `empty_query`, `no_matches`, or `unavailable`; it must not expose the
 internal absence marker.
 

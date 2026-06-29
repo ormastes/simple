@@ -65,7 +65,9 @@ The SQL-backed context slice stays on the same helper boundary:
 - `context_sql_index_packs(paths, target, db_path, format)` stores context pack
   rows through `app.io.sqlite_sffi`.
 - `context_sql_query_packs(paths, target, query, db_path, format)` queries rows
-  with SQL `LIKE` predicates over source, target, and content.
+  with SQL-backed candidate predicates over source, target, and content, then
+  applies a Simple literal filter so `%`, `_`, and backslash in user query text
+  are not caller-controlled wildcard patterns.
 - `context --sql --index` and `context --sql --query=<text>` select this
   backend without introducing a daemon or separate context app.
 
@@ -74,7 +76,7 @@ Interpreter support is owned by
 existing `rt_db_*` database externs. The interpreter implementation is a
 SQLite-compatible subset for the existing facade operations used here: open,
 close, create table, delete, prepared insert/bind, select, count, ordered rows,
-and simple `LIKE`. It is not a full SQL planner.
+and bounded `LIKE` candidate scans. It is not a full SQL planner.
 
 ### MCP Exposure Layer
 

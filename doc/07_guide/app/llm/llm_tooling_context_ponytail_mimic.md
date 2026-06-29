@@ -55,6 +55,9 @@ The embedded SQL context mode stores the same pack records behind the existing
 Simple SQLite facade. The interpreter implements only the facade subset needed
 by context indexing/querying: open, close, table creation, delete, prepared
 insert/bind, select, count, ordered rows, and simple `LIKE`.
+The context helper treats `%`, `_`, and backslash in user queries as literal
+text by applying a Simple literal filter after SQL returns candidate rows;
+callers do not pass SQL wildcard patterns.
 
 This is not a full SQL-planner surface. Add new SQL needs through the owner
 facade and interpreter extern owner, not through app-level raw runtime

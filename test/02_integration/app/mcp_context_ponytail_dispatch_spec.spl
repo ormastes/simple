@@ -6,7 +6,9 @@ dispatcher, not only through source/table/schema presence checks.
 """
 
 use std.spec
+use std.io_runtime.{dir_create_all, file_write}
 use app.mcp.main_dispatch.{dispatch_tool_content}
+use app.io.context_ops.{context_sql_index_packs}
 
 describe "MCP context and Ponytail replacement dispatch":
     context "simple_context":
@@ -16,6 +18,25 @@ describe "MCP context and Ponytail replacement dispatch":
             expect(response).to_contain("-- simple_context file=src/app/mcp/main_dispatch.spl --")
             expect(response).to_contain("--- Context Pack ---")
             expect(response).to_contain("dispatch_tool")
+
+        it "executes source-less embedded SQL query through the app MCP dispatcher":
+            dir_create_all("build/test/mcp_context_ponytail_dispatch")
+            val source_path = "build/test/mcp_context_ponytail_dispatch/sql_dispatch_literal.spl"
+            val broad_path = "build/test/mcp_context_ponytail_dispatch/sql_dispatch_broad.spl"
+            val db_path = "build/test/mcp_context_ponytail_dispatch/context_dispatch.db"
+            file_write(source_path, "fn dispatch_sql_context_marker() -> text:\n    \"dispatch_sql_context_marker dispatch_sql_100%_exact sql_dispatch_only\"\n")
+            file_write(broad_path, "fn dispatch_sql_context_marker_broad() -> text:\n    \"dispatch_sql_context_marker dispatch_sql_100xxexact sql_dispatch_broad\"\n")
+
+            val index_output = context_sql_index_packs([source_path, broad_path], "ctx", db_path, "text")
+            expect(index_output).to_contain("status: ready")
+
+            val args = "{\"sql\":\"true\",\"query\":\"dispatch_sql_100%_exact\",\"db\":\"" + db_path + "\",\"format\":\"text\"}"
+            val response = dispatch_tool_content("simple_context", args)
+            expect(response).to_contain("-- simple_context sql query db=" + db_path + " --")
+            expect(response).to_contain("status: ready")
+            expect(response).to_contain("matches: 1")
+            expect(response).to_contain("sql_dispatch_only")
+            expect(response.split("sql_dispatch_broad").len()).to_equal(1)
 
     context "simple_ponytail":
         it "executes through the app MCP dispatcher and returns an audit report":

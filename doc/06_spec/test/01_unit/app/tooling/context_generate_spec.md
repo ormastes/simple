@@ -28,7 +28,7 @@ context_generate_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 15 | 15 | 0 | 0 |
+| 16 | 16 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -362,6 +362,50 @@ expect(indexed.split(absence_marker).len()).to_equal(1)
 
 </details>
 
+#### treats embedded sql LIKE wildcards as literal query text
+
+- dir create all
+- file write
+- file write
+   - Expected: percent_output.split("broad_only").len() equals `1`
+   - Expected: quoted_output.split("broad_only").len() equals `1`
+   - Expected: indexed.split(absence_marker).len() equals `1`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 23 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val absence_marker = "n" + "il"
+dir_create_all("build/test")
+val literal_path = "build/test/context_wildcard_literal.spl"
+val broad_path = "build/test/context_wildcard_broad.spl"
+val db_path = "build/test/context_wildcard_literal.db"
+file_write(literal_path, "fn wildcard_literal() -> text:\n    \"wildcard marker 100%_exact o'clock_100%\"\n")
+file_write(broad_path, "fn wildcard_broad() -> text:\n    \"wildcard marker 100xxexact broad_only\"\n")
+
+val indexed = context_sql_index_packs([literal_path, broad_path], "ctx", db_path, "text")
+expect(indexed).to_contain("backend: sqlite")
+if not indexed.contains("status: unavailable"):
+    val percent_output = context_sql_query_packs_by_source([], "", "100%_exact", "", db_path, "text")
+    expect(percent_output).to_contain("status: ready")
+    expect(percent_output).to_contain("matches: 1")
+    expect(percent_output).to_contain("100%_exact")
+    expect(percent_output.split("broad_only").len()).to_equal(1)
+
+    val quoted_output = context_sql_query_packs_by_source([], "", "o'clock_100%", "", db_path, "text")
+    expect(quoted_output).to_contain("status: ready")
+    expect(quoted_output).to_contain("matches: 1")
+    expect(quoted_output).to_contain("o'clock_100%")
+    expect(quoted_output.split("broad_only").len()).to_equal(1)
+expect(indexed.split(absence_marker).len()).to_equal(1)
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -381,8 +425,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 15 |
-| Active scenarios | 15 |
+| Total scenarios | 16 |
+| Active scenarios | 16 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

@@ -28,7 +28,7 @@ mcp_context_ponytail_dispatch_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 2 | 2 | 0 | 0 |
+| 3 | 3 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -74,6 +74,42 @@ expect(response).to_contain("dispatch_tool")
 
 </details>
 
+#### executes source-less embedded SQL query through the app MCP dispatcher
+
+- dir create all
+- file write
+- file write
+   - Expected: response.split("sql_dispatch_broad").len() equals `1`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 17 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+dir_create_all("build/test/mcp_context_ponytail_dispatch")
+val source_path = "build/test/mcp_context_ponytail_dispatch/sql_dispatch_literal.spl"
+val broad_path = "build/test/mcp_context_ponytail_dispatch/sql_dispatch_broad.spl"
+val db_path = "build/test/mcp_context_ponytail_dispatch/context_dispatch.db"
+file_write(source_path, "fn dispatch_sql_context_marker() -> text:\n    \"dispatch_sql_context_marker dispatch_sql_100%_exact sql_dispatch_only\"\n")
+file_write(broad_path, "fn dispatch_sql_context_marker_broad() -> text:\n    \"dispatch_sql_context_marker dispatch_sql_100xxexact sql_dispatch_broad\"\n")
+
+val index_output = context_sql_index_packs([source_path, broad_path], "ctx", db_path, "text")
+expect(index_output).to_contain("status: ready")
+
+val args = "{\"sql\":\"true\",\"query\":\"dispatch_sql_100%_exact\",\"db\":\"" + db_path + "\",\"format\":\"text\"}"
+val response = dispatch_tool_content("simple_context", args)
+expect(response).to_contain("-- simple_context sql query db=" + db_path + " --")
+expect(response).to_contain("status: ready")
+expect(response).to_contain("matches: 1")
+expect(response).to_contain("sql_dispatch_only")
+expect(response.split("sql_dispatch_broad").len()).to_equal(1)
+```
+
+</details>
+
 #### simple_ponytail
 
 #### executes through the app MCP dispatcher and returns an audit report
@@ -97,8 +133,8 @@ expect(response).to_contain("source: src/app/mcp/main_dispatch.spl")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 2 |
-| Active scenarios | 2 |
+| Total scenarios | 3 |
+| Active scenarios | 3 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
