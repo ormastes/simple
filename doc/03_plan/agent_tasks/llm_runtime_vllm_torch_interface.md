@@ -716,3 +716,12 @@ span across sequential chunks instead of rejecting split tensors. The new
 `model_loader_transport_spec` covers success, missing transport chunks, short
 chunk data, and split-tensor streaming; local svLLM readiness now includes that
 transport spec as an evidence subgate.
+
+## 2026-06-29 Torch Optimizer Probe Lowering Cleanup
+
+The GC and NoGC Torch training optimizers now declare mutating `step` methods
+with mutable receivers, and the device-placement status spec locks that source
+contract for SGD, Adam, and RMSprop. The CUDA optimizer probe now returns CLI
+status codes from `main() -> i64` instead of calling an unbound `exit`, so this
+host reaches the intended `libtorch_unavailable` evidence boundary without the
+previous RMSprop mutability or probe-exit lowering errors.

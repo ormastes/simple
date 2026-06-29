@@ -33,6 +33,24 @@ fn assert_tensor_method_uses_requested_cuda_device(path: text):
     expect(body).to_contain("val device_i32 = device_id as i32")
     expect(body.contains("val device_i32 = 0")).to_equal(false)
 
+fn assert_gc_tensor_arithmetic_uses_mutable_ownership_handoffs(path: text):
+    val sub_body = body_between(
+        source(path),
+        "fn sub(other: Tensor) -> Tensor:",
+        "\n\n    fn mul"
+    )
+    val div_body = body_between(
+        source(path),
+        "fn div(other: Tensor) -> Tensor:",
+        "\n\n    fn matmul"
+    )
+    expect(sub_body).to_contain("var scaled = neg_one.mul(other)")
+    expect(sub_body).to_contain("scaled.owns_handle = false")
+    expect(sub_body.contains("val scaled = neg_one.mul(other)")).to_equal(false)
+    expect(div_body).to_contain("var ones_t = Tensor.ones(other.shape())")
+    expect(div_body).to_contain("ones_t.owns_handle = false")
+    expect(div_body.contains("val ones_t = Tensor.ones(other.shape())")).to_equal(false)
+
 fn assert_stream_uses_requested_device(path: text):
     val body = body_between(
         source(path),
@@ -58,6 +76,18 @@ fn assert_optimizer_state_uses_parameter_device(path: text):
     expect(text).to_contain("rt_torch_torchtensor_cuda(zeros, device_id)")
     expect(text).to_contain("rt_torch_torchtensor_free(zeros)")
 
+fn assert_mutating_training_optimizers_use_mut_receiver(path: text):
+    val text = source(path)
+    val sgd_body = body_between(text, "class SGD:", "\n\nclass Adam:")
+    val adam_body = body_between(text, "class Adam:", "\n\nclass RMSprop:")
+    val rmsprop_body = body_between(text, "class RMSprop:", "\n\n# =========================================================================")
+    expect(sgd_body).to_contain("me step():")
+    expect(adam_body).to_contain("me step():")
+    expect(rmsprop_body).to_contain("me step():")
+    expect(sgd_body.contains("fn step():")).to_equal(false)
+    expect(adam_body.contains("fn step():")).to_equal(false)
+    expect(rmsprop_body.contains("fn step():")).to_equal(false)
+
 describe "Torch device placement status":
     it "passes explicit CUDA device ids through backend facades":
         assert_backend_uses_requested_cuda_device("src/lib/gc_async_mut/torch/backend.spl")
@@ -66,6 +96,9 @@ describe "Torch device placement status":
     it "passes explicit CUDA device ids through Tensor methods":
         assert_tensor_method_uses_requested_cuda_device("src/lib/gc_async_mut/torch/mod.spl")
         assert_tensor_method_uses_requested_cuda_device("src/lib/nogc_sync_mut/torch/mod.spl")
+
+    it "keeps GC Tensor arithmetic ownership handoffs mutable":
+        assert_gc_tensor_arithmetic_uses_mutable_ownership_handoffs("src/lib/gc_async_mut/torch/mod.spl")
 
     it "passes explicit stream device ids to stream creation":
         assert_stream_uses_requested_device("src/lib/gc_async_mut/torch/torch_training.spl")
@@ -78,3 +111,7 @@ describe "Torch device placement status":
     it "initializes optimizer state on the parameter device":
         assert_optimizer_state_uses_parameter_device("src/lib/gc_async_mut/torch/optim.spl")
         assert_optimizer_state_uses_parameter_device("src/lib/nogc_sync_mut/torch/optim.spl")
+
+    it "declares mutating training optimizer steps with mutable receivers":
+        assert_mutating_training_optimizers_use_mut_receiver("src/lib/gc_async_mut/torch/torch_training.spl")
+        assert_mutating_training_optimizers_use_mut_receiver("src/lib/nogc_sync_mut/torch/torch_training.spl")
