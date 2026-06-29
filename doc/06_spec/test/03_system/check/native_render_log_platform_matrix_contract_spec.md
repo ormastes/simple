@@ -27,7 +27,7 @@ native_render_log_platform_matrix_contract_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 7 | 7 | 0 | 0 |
+| 8 | 8 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -438,12 +438,53 @@ expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_artifact
 
 </details>
 
+<details>
+<summary>Advanced: accepts properly shaped macOS Metal Xcode capture rows in the platform matrix</summary>
+
+#### accepts properly shaped macOS Metal Xcode capture rows in the platform matrix
+
+- Create synthetic all-platform pass evidence with Xcode GPU capture file proof
+   - Expected: code equals `0`
+- Assert synthetic Xcode capture-shaped evidence satisfies only the headless contract shape
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 17 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Create synthetic all-platform pass evidence with Xcode GPU capture file proof")
+val root = "build/test-native-render-log-platform-matrix-macos-xcode-capture-pass"
+val command = "rm -rf " + root + " && mkdir -p " + root + "/renderlogs " + root + "/captures && printf 'XCODE-GPUTRACE synthetic fixture\\n' > " + root + "/captures/frame.gputrace && printf 'linux_vulkan_render_log_compare_status=pass\\nlinux_vulkan_render_log_compare_reason=pass\\nlinux_vulkan_render_log_compare_required_api=vulkan\\nlinux_vulkan_render_log_compare_blocked_gate_count=0\\nlinux_vulkan_render_log_compare_blocked_gates=\\nlinux_vulkan_render_log_compare_pairwise_status=pass\\nlinux_vulkan_render_log_compare_renderdoc_simple_status=pass\\nlinux_vulkan_render_log_compare_renderdoc_simple_env_file_status=pass\\nlinux_vulkan_render_log_compare_renderdoc_simple_artifact_file_status=pass\\nlinux_vulkan_render_log_compare_renderdoc_simple_artifact_magic=RDOC\\nlinux_vulkan_render_log_compare_renderdoc_chrome_status=pass\\nlinux_vulkan_render_log_compare_renderdoc_chrome_env_file_status=pass\\nlinux_vulkan_render_log_compare_renderdoc_chrome_artifact_file_status=pass\\nlinux_vulkan_render_log_compare_renderdoc_chrome_artifact_magic=RDOC\\nlinux_vulkan_render_log_compare_renderdoc_electron_status=pass\\nlinux_vulkan_render_log_compare_renderdoc_electron_env_file_status=pass\\nlinux_vulkan_render_log_compare_renderdoc_electron_artifact_file_status=pass\\nlinux_vulkan_render_log_compare_renderdoc_electron_artifact_magic=RDOC\\n' > " + root + "/renderlogs/linux.env && printf 'macos_metal_render_log_compare_status=pass\\nmacos_metal_render_log_compare_reason=pass\\nmacos_metal_render_log_compare_required_api=metal\\nmacos_metal_render_log_compare_pairwise_status=pass\\nmacos_metal_render_log_compare_blocked_gate_count=0\\nmacos_metal_render_log_compare_blocked_gates=\\nmacos_metal_render_log_compare_generated_readback_gate_status=pass\\nmacos_metal_render_log_compare_framebuffer_readback_gate_status=pass\\nmacos_metal_render_log_compare_browser_backing_gate_status=pass\\nmacos_metal_render_log_compare_pairwise_gate_status=pass\\nmacos_metal_render_log_compare_argb_source_gate_status=pass\\nmacos_metal_render_log_compare_gpu_capture_gate_status=pass\\nmacos_metal_render_log_compare_gpu_capture_status=pass\\nmacos_metal_render_log_compare_gpu_capture_artifact=" + root + "/captures/frame.gputrace\\nmacos_metal_render_log_compare_gpu_capture_artifact_file_status=pass\\nmacos_metal_render_log_compare_gpu_capture_artifact_magic=XCODE-GPUTRACE\\nmacos_metal_render_log_compare_electron_browser_backing_status=pass\\nmacos_metal_render_log_compare_chrome_browser_backing_status=pass\\nmacos_metal_render_log_compare_browser_backing_status=pass\\nmacos_metal_render_log_compare_pixel_comparison_status=pass\\nmacos_metal_render_log_compare_pixel_comparison_mode=pairwise-argb-diff\\nmacos_metal_render_log_compare_electron_chrome_pairwise_diff_status=pass\\nmacos_metal_render_log_compare_electron_simple_pairwise_diff_status=pass\\nmacos_metal_render_log_compare_chrome_simple_pairwise_diff_status=pass\\nmacos_metal_render_log_compare_simple_argb_reason=pass\\nmacos_metal_render_log_compare_chrome_argb_reason=pass\\nmacos_metal_render_log_compare_electron_argb_reason=pass\\nmacos_metal_render_log_compare_simple_argb_artifact_reason=pass\\nmacos_metal_render_log_compare_chrome_argb_artifact_reason=pass\\nmacos_metal_render_log_compare_electron_argb_artifact_reason=pass\\nmacos_metal_render_log_compare_argb_viewport_reason=pass\\n' > " + root + "/renderlogs/macos.env && printf 'windows_d3d12_render_log_compare_status=pass\\nwindows_d3d12_render_log_compare_reason=pass\\nwindows_d3d12_render_log_compare_required_api=d3d12\\nwindows_d3d12_render_log_compare_pairwise_status=pass\\nwindows_d3d12_render_log_compare_blocked_gate_count=0\\nwindows_d3d12_render_log_compare_blocked_gates=\\nwindows_d3d12_render_log_compare_native_readback_gate_status=pass\\nwindows_d3d12_render_log_compare_browser_backing_gate_status=pass\\nwindows_d3d12_render_log_compare_pairwise_gate_status=pass\\nwindows_d3d12_render_log_compare_argb_source_gate_status=pass\\nwindows_d3d12_render_log_compare_pix_gpu_debugger_gate_status=pass\\nwindows_d3d12_render_log_compare_pix_status=pass\\nwindows_d3d12_render_log_compare_pix_artifact=frame.wpix\\nwindows_d3d12_render_log_compare_pix_artifact_file_status=pass\\nwindows_d3d12_render_log_compare_pix_artifact_magic=PIX\\nwindows_d3d12_render_log_compare_pix_artifact_file_magic=PIX\\nwindows_d3d12_render_log_compare_gpu_debugger_status=pass\\nwindows_d3d12_render_log_compare_gpu_debugger_artifact=gpu-debugger.log\\nwindows_d3d12_render_log_compare_gpu_debugger_artifact_file_status=pass\\n' > " + root + "/renderlogs/windows.env && LINUX_VULKAN_RENDER_LOG_COMPARE_ENV=" + root + "/renderlogs/linux.env MACOS_METAL_RENDER_LOG_COMPARE_ENV=" + root + "/renderlogs/macos.env WINDOWS_D3D12_RENDER_LOG_COMPARE_ENV=" + root + "/renderlogs/windows.env GUI_RENDERDOC_AGGREGATE_STATIC_CACHE_DIR=build/test-native-render-log-platform-matrix-static-cache BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs || true"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+step("Assert synthetic Xcode capture-shaped evidence satisfies only the headless contract shape")
+val evidence = file_read(root + "/out/evidence.env")
+expect(evidence).to_contain("native_render_log_platform_matrix_status=pass")
+expect(evidence).to_contain("native_render_log_platform_matrix_missing_platforms=")
+expect(evidence).to_contain("native_render_log_platform_matrix_failed_platforms=")
+expect(evidence).to_contain("native_gui_platform_verification_status=pass")
+expect(evidence).to_contain("macos_metal_render_log_compare_status=pass")
+expect(evidence).to_contain("macos_metal_render_log_compare_reason=pass")
+expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_gate_status=pass")
+expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_artifact_file_status=pass")
+expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_artifact_magic=XCODE-GPUTRACE")
+```
+
+</details>
+
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 7 |
-| Active scenarios | 7 |
+| Total scenarios | 8 |
+| Active scenarios | 8 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

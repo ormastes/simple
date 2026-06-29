@@ -295,7 +295,7 @@ docs only if the sidecar is asked to patch after review.
 Task:
 
 1. Split remaining platform work into Linux Vulkan, macOS Metal, and Windows
-   D3D12/DXGI/Pix verification lanes.
+   D3D12/DXGI/PIX verification lanes.
 2. Make clear which evidence can be prepared on this host and which must be run
    in another platform GUI environment.
 3. Include RenderDoc, Metal GPU capture, PIX, and native render-log comparison
@@ -329,7 +329,8 @@ Accepted reviewed split:
 - macOS Metal lane: native Metal readback, render-log normalization, and GPU
   Capture evidence when capture is required.
 - Windows D3D12 lane: native D3D12/DXGI readback, render-log normalization,
-  PIX evidence, and GPU-debugger capture evidence.
+  PIX or equivalent GPU-debugger capture evidence, and strict D3D12 render-log
+  comparison.
 
 Host-preparable here:
 
@@ -339,8 +340,8 @@ Host-preparable here:
 Requires another GUI platform:
 
 - macOS Metal proof on a real Darwin host with Metal tooling.
-- Windows D3D12/PIX/GPU-debugger proof on a real Windows host with native
-  capture tools.
+- Windows D3D12 proof on a real Windows host with native capture tools and PIX
+  or equivalent GPU-debugger evidence.
 
 Platform acceptance keys:
 
@@ -358,16 +359,20 @@ Platform acceptance keys:
   `macos_metal_render_log_compare_pairwise_status=pass`, and
   `macos_metal_render_log_compare_gpu_capture_status=pass` when GPU capture is
   required, plus GPU capture artifact file status and `XCODE-GPUTRACE` magic.
-- Windows: `directx_native_gate_status=pass`,
+- Windows: `windows_d3d12_native_readback_api=d3d12`,
+  `windows_d3d12_render_log_compare_native_readback_gate_status=pass`,
   `windows_d3d12_render_log_compare_status=pass`,
   `windows_d3d12_render_log_compare_required_api=d3d12`,
   `windows_d3d12_render_log_compare_pairwise_status=pass`,
+  `windows_d3d12_render_log_compare_pix_gpu_debugger_gate_status=pass`,
   `windows_d3d12_render_log_compare_pix_status=pass`,
   `windows_d3d12_render_log_compare_pix_artifact_file_status=pass`,
   `windows_d3d12_render_log_compare_pix_artifact_magic=PIX`,
   `windows_d3d12_render_log_compare_pix_artifact_file_magic=PIX`,
   `windows_d3d12_render_log_compare_gpu_debugger_status=pass`, and
   `windows_d3d12_render_log_compare_gpu_debugger_artifact_file_status=pass`.
+  `gui_web_2d_directx_native_readback_gate_status=pass` is diagnostic producer
+  evidence only and does not replace the D3D12 API and render-log keys above.
 
 Anti-overclaim rules:
 
@@ -474,7 +479,7 @@ Each scenario maps to one completion gate:
 | --- | --- | --- | --- |
 | Linux Vulkan RenderDoc | Chrome, Electron, and Simple Vulkan backing; nonblank pairwise ARGB equivalence; strict Linux render-log compare; `.rdc` artifacts with `RDOC` magic for Chrome, Electron, and Simple | Prepared Ubuntu GUI host | Blocked here by missing RenderDoc command |
 | macOS Metal | Native Metal readback; browser/gui backing; pairwise equivalence; macOS render-log compare; Xcode GPU Capture proof when required | Darwin GUI host | Not run on this Linux host |
-| Windows D3D12 | Native D3D12/DXGI readback; browser/gui backing; pairwise equivalence; D3D12 render-log compare; verified PIX artifact files and GPU-debugger artifact files | Windows GUI host | Not run on this Linux host |
+| Windows D3D12 | Native D3D12/DXGI readback; D3D12-backed Chrome/Electron/Simple browser/gui backing; pairwise ARGB equivalence; D3D12 render-log compare; strict `WINDOWS_D3D12_RENDER_LOG_REQUIRE_PIX=1`; verified PIX artifact file/status/magic or equivalent GPU-debugger artifact files as required by the strict wrapper | Windows GUI host | Not run on this Linux host |
 | iOS Tauri/WKWebView Metal | Fresh simulator or device WKWebView + CAMetalLayer/Metal evidence; live screenshot PNG artifact checks; `ios_mdi_proof.validation.env`; coherent render-log source file/size identity; `[tauri-shell] render, html_len=` marker; production `device_readback` evidence | macOS/iOS host or simulator agent | Not run on this Linux host; source-level artifact gate only |
 | Android Tauri/WebView Vulkan | Fresh emulator or device WebView + Vulkan/skiavk evidence; live screenshot PNG artifact checks; `android_mdi_proof.validation.env`; coherent render-log source file/size identity; `[tauri-shell] render, html_len=` marker; `com.simple.ui` foreground marker; production `device_readback` evidence | Android emulator/device host agent | Not run on this Linux host; source-level artifact gate only |
 | 4K/8K retained perf | Current-source 4K and 8K rows at 200 FPS with viewport, p50/p95 or equivalent timing, RSS, checksum/readback, native binary provenance, retained mode, redraw count, source revision, and `fallback_state=none` | Main/perf agent | Prior retained rows pass; keep source freshness required |
@@ -545,7 +550,7 @@ This session's immediate integration target:
 | WO-4 Plan/doc integration | Main agent | Not delegated | `doc/03_plan/agent_tasks/gui_rendering_parallel_agent_plan_2026-06-27.md` and directly referenced guides only | Baseline names current commit, Spark status, review gates, and next host lanes |
 | WO-5 Linux Vulkan host execution | Future platform agent on prepared Ubuntu GUI host | Medium: Spark may run readiness probes only under supervision | Evidence dirs and reports only | Browser backing and direct ARGB pairwise diff pass first; strict Linux render-log compare remains blocked until Chrome/Electron/Simple RenderDoc `.rdc` artifacts have `RDOC` magic |
 | WO-6 macOS Metal host execution | Future Darwin agent | Medium: Spark may collect logs; normal review required | Evidence dirs and reports only | Native Metal readback, GPU capture if required, and macOS render-log compare pass |
-| WO-7 Windows D3D12 host execution | Future Windows agent | Low/medium: Spark can collect command output; normal review required | Evidence dirs and reports only | Native D3D12/DXGI readback, PIX/GPU-debugger proof, and Windows render-log compare pass |
+| WO-7 Windows D3D12 host execution | Future Windows agent | Low/medium: Spark can collect command output; normal review required | Evidence dirs and reports only | Native D3D12/DXGI readback, `windows_d3d12_native_readback_api=d3d12`, D3D12-backed Chrome/Electron/Simple pairwise ARGB, strict `WINDOWS_D3D12_RENDER_LOG_REQUIRE_PIX=1`, PIX file/status/magic or equivalent GPU-debugger artifact proof, and Windows render-log compare pass; DirectX/D3D11 producer diagnostics are not completion proof |
 | WO-8 4K/8K perf freshness | Main or supervised perf sidecar | Medium: Spark can check retained rows; normal review required for perf claims | Reports/metrics only | Retained rows include viewport, source revision, timing, RSS, checksum/readback, and fallback state |
 | WO-9 Stale planning cleanup | Spark scan followed by normal review | High for discovery, review required for edits | `doc/03_plan/agent_tasks/gui_web_host_gpu_queue_readback_spark_tasks.md`, `doc/03_plan/agent_tasks/gui_web_gpu_host_platform_matrix.md`, and directly referenced stale plan docs | Older queue/readback and platform-matrix docs either point to current aggregate/runbook evidence or are explicitly marked historical/superseded |
 | WO-10 CSS aspect-ratio slice | Main agent | Low: Spark may only inspect evidence after implementation | Renderer, CSS traceability wrapper, focused unit/system specs, generated docs, report | Focused renderer spec passes, full CSS gate reports implemented CSS `132/132`, and no full-CSS/native-platform completion is claimed |
@@ -1124,6 +1129,69 @@ Normal-review acceptance:
   an empty gate ID, even when host/runbook/proof maps align with that empty key.
   The negative selftest wrapper includes the `gate-value` case so malformed
   handoff completion maps cannot hide a missing live-platform gate name.
+
+## Remaining Headless Plan - 2026-06-29
+
+Current headless host scope is contract preparation only. The goal is
+`headless-prepared`, not live rendering completion. A headless work item is
+complete only when the executable SSpec/manual pair exists, the focused SSpec
+passes once on current `main@origin`, docgen reports the affected manual as
+complete with zero stubs, `doc/06_spec` contains zero executable `.spl` files,
+and the text states that live Vulkan, Metal, D3D12/PIX, iOS, Android, Chrome,
+Electron, RenderDoc, Xcode, PIX, and 4K/8K GUI evidence are still required on
+platform hosts.
+
+Headless completion checklist for this slice:
+
+| Headless item | Owner | Files | Acceptance |
+| --- | --- | --- | --- |
+| Handoff stale/missing assertion audit | Main agent, Spark/normal read-only review | `scripts/check/check-gui-web-2d-headless-handoff-prep.shs`, `test/03_system/check/gui_web_2d_five_platform_handoff_contract_spec.spl`, `test/03_system/check/gui_web_2d_headless_handoff_prep_spec.spl`, completion criteria SSpec, this plan | Current `main@origin` contains the wrapper/spec files; completion criteria references match existing files; stale sidecar reports are marked invalid for this checkout, not integrated blindly |
+| macOS Metal positive Xcode capture contract | Main agent, Spark read-only review, normal/high review | `test/03_system/check/native_render_log_platform_matrix_contract_spec.spl`, mirrored manual | Synthetic all-platform matrix row passes with macOS `required_api=metal`, all macOS gates `pass`, `gpu_capture_artifact_file_status=pass`, and `gpu_capture_artifact_magic=XCODE-GPUTRACE`; manual states this proves contract shape only, not a real Xcode capture |
+| Windows D3D12/PIX handoff wording | Main agent, Windows sidecar read-only review | This plan | Windows rows name `windows_d3d12_native_readback_api=d3d12`, D3D12-backed Chrome/Electron/Simple pairwise ARGB, strict `WINDOWS_D3D12_RENDER_LOG_REQUIRE_PIX=1`, and PIX/GPU-debugger file proof; no wording treats DirectX/D3D11 producer diagnostics as final D3D12/PIX completion |
+| Android coherent render-log alias fixtures | Main agent, Android/Tauri sidecar read-only review | `test/03_system/check/tauri_mobile_renderer_parity_artifact_gate_spec.spl`, mirrored manual | Android coherent render-log source symlink and hardlink fixtures fail with `android-render-log-coherent-source-symlink` and `android-render-log-coherent-source-hardlink`, including typed file reasons; manual states this is artifact-forgery protection only |
+
+Headless verification notes for this slice:
+
+- `test/03_system/check/native_render_log_platform_matrix_contract_spec.spl`
+  was run once on this host. The newly added macOS Xcode-capture-shaped
+  positive scenario passed, but the full file still has six existing/stale
+  failures in earlier matrix scenarios on current `main@origin`; treat those as
+  a separate native-matrix cleanup item, not as live-platform completion.
+- `test/03_system/check/tauri_mobile_renderer_parity_artifact_gate_spec.spl`
+  was run once and the test daemon timed out before file completion. The new
+  Android coherent-source alias scenarios remain headless-prepared and
+  documented; full-file runtime verification needs either a narrower runner or
+  a split/optimized artifact-gate spec before it can be a reliable green gate.
+- Docgen completed for both affected SSpecs with `0` stubs, and
+  `find doc/06_spec -name '*_spec.spl'` reported `0`.
+- Handoff stale/missing assertion re-check on current `main@origin` found the
+  headless handoff wrapper/spec files present, so earlier sidecar reports that
+  those files were missing are stale for this checkout.
+
+Parallel-agent plan:
+
+- Spark lane A: read-only Metal matrix contract check. Output may identify
+  missing assertions but cannot be accepted without main-agent verification.
+- Normal lane B: read-only Windows wording/key audit. Output is accepted only
+  when current file paths and exact keys still match.
+- Normal lane C: read-only Android/Tauri artifact-gate audit. Output is
+  accepted only if it preserves live-device overclaim boundaries.
+- High-capability review lane: read-only review of the final diff before
+  push. Findings must be resolved or recorded explicitly.
+
+Remaining non-headless completion gates after this slice:
+
+- Linux Vulkan: real Chrome/Electron/Simple Vulkan RenderDoc `.rdc` captures
+  with `RDOC` magic and pairwise ARGB equivalence on an Ubuntu GUI host.
+- macOS Metal: real Metal/Xcode GPU capture and Metal render-log compare on a
+  Darwin GUI host.
+- Windows D3D12: real D3D12/PIX or GPU-debugger capture and render-log compare
+  on a Windows GUI host.
+- iOS/Android: real Tauri2/WKWebView/WebView device or emulator evidence with
+  coherent render-log sources and screenshots.
+- Retained 4K/8K, full HTML/CSS, production GUI/Web parity, and
+  cross-platform freshness must all be rerun against the same current source
+  and toolchain context before overall completion.
 
 ## Hard Stop Conditions
 
