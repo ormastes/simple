@@ -136,6 +136,10 @@ Strict-host unblock checklist:
    `BASE_MODEL` / `ENDPOINT`) when defaults are not correct, start the endpoint, and run
    `scripts/check/check-llm-runtime-vllm-host-probe.shs --strict` until the
    local command, Python module, endpoint, and `/v1/models` gates pass.
+   Use `scripts/check/check-llm-runtime-vllm-host-env-contract.shs` after
+   editing the host probe to verify the documented `LLM_VLLM_*` env names still
+   drive the base model and endpoint evidence; the main LLM goal aggregate also
+   runs it as the `vllm_host_env_contract` lane.
 3. svLLM native: produce a non-default native capability artifact with matching
    `SVLLM_NATIVE_CAPABILITY_SOURCE` and
    `SVLLM_NATIVE_CAPABILITY_EVIDENCE_PATH`, then run
