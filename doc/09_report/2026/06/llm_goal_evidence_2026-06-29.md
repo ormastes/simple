@@ -40,10 +40,12 @@
 | torch_optimizer | `libtorch,cuda,parameter_cuda,autograd_gradient,optimizer_step_decreases_parameter_sum` | `libtorch` | `libtorch_unavailable` |
 | finetune_guard | `retry6_training_eval,training_allowed,model_manifest,eval_result,target_eval,decision,license,safety,deployment,app_handoff` | `retry6_training_eval|training_allowed|model_manifest|eval_result|target_eval|decision|license|safety|deployment|app_handoff` | `BLOCKED_RETRY6_NOT_READY` |
 
-## Host And Acceptance Details
+## Replacement, Dashboard, Host, And Acceptance Details
 
 | lane | details |
 |------|---------|
+| context_ponytail | `mimic_status=pass;full_replacement_status=not_required;full_replacement_reason=default_local_mimic_evidence_only;replacement_status=not_collected;replacement_scope=strict_host_only;replacement_failures=not_collected` |
+| dashboard | `dashboard_status=pass;live_status=not_required;live_reason=default_route_and_collector_evidence_only;live_wrapper_status=not_collected;live_wrapper_scope=strict_host_only;live_wrapper_failures=not_collected` |
 | vllm_host | `local_vllm_status=missing;local_gpu_status=available;preflight_status=skipped;endpoint_status=not_checked;models_status=not_fetched` |
 | finetune_guard | `acceptance_status=fail;acceptance_reason=BLOCKED_RETRY6_NOT_READY;training_allowed=false;model_manifest_exists=false;eval_result_exists=false;decision_status=retry-implementation;next_action=complete retry6 training/eval gate before normal acceptance review` |
 

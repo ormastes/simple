@@ -161,10 +161,13 @@ The aggregate report is written to
 and Simple/libtorch CUDA optimizer host gaps as expected WARN lanes on hosts
 where those dependencies are not installed, while fine-tune readiness remains a
 guard-only pass in default mode. The aggregate env also records
-`llm_goal_evidence_vllm_host_detail` with local vLLM/GPU/preflight/endpoint/model
-statuses and `llm_goal_evidence_finetune_guard_detail` with acceptance status,
-reason, training/model/eval readiness, decision status, and next action. Those
-detail fields are diagnostic only; they do not relax the strict host gates.
+`llm_goal_evidence_context_ponytail_detail` for mimic/full-replacement state,
+`llm_goal_evidence_dashboard_detail` for dashboard live-readiness state,
+`llm_goal_evidence_vllm_host_detail` for local
+vLLM/GPU/preflight/endpoint/model statuses, and
+`llm_goal_evidence_finetune_guard_detail` for acceptance status, reason,
+training/model/eval readiness, decision status, and next action. Those detail
+fields are diagnostic only; they do not relax the strict host gates.
 
 Latest fine-tune acceptance evidence:
 `doc/09_report/2026/06/llm_finetune_acceptance_2026-06-29.md` records

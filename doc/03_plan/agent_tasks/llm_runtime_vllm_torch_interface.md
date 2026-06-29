@@ -752,3 +752,8 @@ acceptance details into `llm_goal_evidence_finetune_guard_detail`. This keeps
 the default aggregate report honest: guard-only fine-tune evidence can pass
 locally, while the acceptance detail still names the retry6/model/eval/license/
 safety/deployment blocker that must pass before strict host completion.
+
+The same aggregate now forwards `llm_goal_evidence_context_ponytail_detail` and
+`llm_goal_evidence_dashboard_detail`, so strict/full-replacement context mode,
+Ponytail, and authenticated dashboard evidence cannot be hidden behind a single
+lane status when host completion evidence is reviewed.
