@@ -87,3 +87,43 @@ describe "bdd hollow call":
         .success()
         .stdout(contains("1 example, 1 failure"));
 }
+
+#[test]
+fn bdd_enum_method_in_nested_call_context() {
+    // Regression: calling an enum method on an enum value returned by a nested
+    // call (e.g. `t.arch().to_string()`) failed in chained-call position with
+    // "method 'to_string' not found on value of type enum in nested call
+    // context", even though the same chain works in a plain function body.
+    let dir = tempdir().expect("tempdir");
+    let spec = dir.path().join("bdd_enum_nested_spec.spl");
+    fs::write(
+        &spec,
+        r#"enum Color:
+    Red
+    Green
+    fn label() -> text:
+        match self:
+            Red: "red"
+            Green: "green"
+class Box:
+    pass_dn
+impl Box:
+    static fn create() -> Box:
+        Box()
+    fn color() -> Color:
+        Color.Green
+describe "enum method in nested call":
+    it "dispatches to_string-style method on nested enum result":
+        val b = Box.create()
+        expect(b.color().label()).to_equal("green")
+"#,
+    )
+    .expect("write fixture");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("simple"));
+    cmd.current_dir(project_root()).arg("run").arg(&spec);
+
+    cmd.assert()
+        .success()
+        .stdout(contains("1 example, 0 failures"));
+}

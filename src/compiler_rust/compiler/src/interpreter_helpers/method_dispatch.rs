@@ -592,6 +592,41 @@ pub(crate) fn call_method_on_value(
             // Method not found, fall through to error
         }
 
+        // Enum methods in chained/nested position (e.g. `t.arch().to_string()`).
+        // The primary method evaluator handles enum receivers, but this
+        // nested-call dispatcher previously skipped them and errored with
+        // "method '...' not found on value of type enum in nested call context".
+        // Mirror the primary path: enum impl-block methods, then methods on the
+        // enum body (local enums map, then GLOBAL_ENUMS for cross-module enums).
+        Value::Enum { enum_name, .. } => {
+            if let Some(methods) = _impl_methods.get(enum_name) {
+                if let Some(func) = methods.iter().find(|m| m.name == method) {
+                    let mut enum_fields = HashMap::new();
+                    enum_fields.insert("self".to_string(), recv_val.clone());
+                    let enum_fields = Arc::new(enum_fields);
+                    return exec_function_with_values_and_self(
+                        func, _args, _env, _functions, _classes, _enums, _impl_methods,
+                        Some((enum_name, &enum_fields)),
+                    );
+                }
+            }
+            let enum_def_opt = _enums.get(enum_name).cloned().or_else(|| {
+                crate::interpreter::GLOBAL_ENUMS.with(|cell| cell.borrow().get(enum_name).cloned())
+            });
+            if let Some(enum_def) = enum_def_opt {
+                if let Some(func) = enum_def.methods.iter().find(|m| m.name == method) {
+                    let mut enum_fields = HashMap::new();
+                    enum_fields.insert("self".to_string(), recv_val.clone());
+                    let enum_fields = Arc::new(enum_fields);
+                    return exec_function_with_values_and_self(
+                        func, _args, _env, _functions, _classes, _enums, _impl_methods,
+                        Some((enum_name, &enum_fields)),
+                    );
+                }
+            }
+            // Not found — fall through to trait/UFCS/error below.
+        }
+
         _ => {}
     }
 
