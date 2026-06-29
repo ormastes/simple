@@ -20,7 +20,7 @@ Default aggregate:
   evidence now include checked surface/input manifests with size/SHA-256
   metadata and focused log hashes. Public absence rendering also records
   `public_absence_surface_manifest_count=121` and
-  `public_absence_surface_manifest_sha256=d741537b5ae15d93b31e5292e4e2a5b8813125f020cddb291fd903febf6a4081`
+  `public_absence_surface_manifest_sha256=f3cfdf40c8a5a93beb9eb3af23f4e1cbdc60ff857509ae8a83522e23f54ffd8e`
   with `failure_count=0`, so public manuals and generated evidence continue to
   hide internal absence markers from operator-facing text.
 
@@ -58,7 +58,7 @@ prerequisite summary and must not be treated as a completion pass.
 - local proof already hardened: vLLM host evidence has a checked runtime
   control/readiness source/spec plus operator-guide manifest with
   `surface_manifest_count=13` and
-  `surface_manifest_sha256=bec9f8d08c5dad63135becf23843e23dfdfd39e11e98767ca3812a5f2bcf347b`
+  `surface_manifest_sha256=2bb71fcaf53ac7ff3235cff05e55c52d71d3a3464ed476b55a47671ee9dcf83d`
 - required evidence: local `vllm` executable, importable Python `vllm` module
   with non-missing origin, serve preflight, reachable endpoint, and `/v1/models`
   listing the selected base model
@@ -90,8 +90,9 @@ prerequisite summary and must not be treated as a completion pass.
   devices; system/Simple-visible libtorch is missing
 - local proof already hardened: Torch optimizer evidence has a checked live
   probe/source/spec/doc manifest with `surface_manifest_count=18` and
-  `surface_manifest_sha256=eae0dcf2ef6f99541d7f23e468fb6f63309d4e601ae471ae893276cc3ff2b3df`,
-  plus hashed Python Torch discovery and system libtorch probe logs
+  `surface_manifest_sha256=8b4788b1e7d8c7855c1254736e932ab24fffbead4d6addde4f0367c34c3c6e55`,
+  plus hashed Python Torch discovery, Python wheel path diagnostics, and
+  system libtorch probe logs
 - required evidence: Simple/libtorch CUDA optimizer probe with parameter on
   CUDA, gradient handle, optimizer step attempted, and parameter sum decrease
 - next action: build or install Simple-visible libtorch and rerun

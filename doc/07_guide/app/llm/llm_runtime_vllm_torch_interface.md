@@ -301,6 +301,10 @@ classifying the self-hosted Simple runtime as `unavailable` with
 `torch_cuda_optimizer_probe_primary_blocked_gate`,
 `torch_cuda_optimizer_probe_python_torch_module_status`,
 `torch_cuda_optimizer_probe_python_torch_version`,
+`torch_cuda_optimizer_probe_python_torch_file`,
+`torch_cuda_optimizer_probe_python_torch_package_dir`,
+`torch_cuda_optimizer_probe_python_torch_cmake_prefix_path`,
+`torch_cuda_optimizer_probe_python_torch_library_paths`,
 `torch_cuda_optimizer_probe_python_torch_cuda_available`,
 `torch_cuda_optimizer_probe_python_torch_cuda_device_count`,
 `torch_cuda_optimizer_probe_python_torch_env_size`,
@@ -321,9 +325,10 @@ classifying the self-hosted Simple runtime as `unavailable` with
 `torch_cuda_optimizer_probe_pass_integrity_reason`, and
 `torch_cuda_optimizer_probe_next_action` so strict aggregate runs can report the
 compact blocked Torch gate list, the first blocked gate, independent pass-log
-integrity, the hashed Python Torch discovery env, the hashed system libtorch
-probe, the hashed Torch optimizer source/spec/doc surface, and the next
-operator step. A probe `status=pass` is accepted only
+integrity, the Python Torch wheel file/package/CMake/library path diagnostics,
+the hashed Python Torch discovery env, the hashed system libtorch probe, the
+hashed Torch optimizer source/spec/doc surface, and the next operator step. A
+probe `status=pass` is accepted only
 when the wrapper also sees a zero wrapper exit, a non-empty hashed probe log,
 exactly one complete proof record for status, required gates, libtorch/CUDA
 availability, CUDA parameter placement, gradient handle, optimizer step, and
@@ -383,8 +388,8 @@ strict host mode reports the native producer's `blocked_gates` and
 also records
 `llm_goal_evidence_torch_optimizer_detail` for Simple/libtorch CUDA optimizer
 status, compact blocked gates, primary blocked gate, Python Torch/CUDA host
-visibility, system libtorch visibility, Simple runtime gates, gradient handle,
-system libtorch probe-log hash, Simple runtime gates, gradient handle,
+visibility, Python Torch wheel path diagnostics, system libtorch visibility,
+Simple runtime gates, gradient handle, system libtorch probe-log hash,
 optimizer-step attempt, before/after parameter sums, sum-decrease status, and
 pass-log integrity. vLLM
 and Torch detail rows include the focused
