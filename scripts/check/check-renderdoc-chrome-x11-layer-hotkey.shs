@@ -26,6 +26,8 @@ reason="not-run"
 capture_file=""
 capture_magic=""
 chosen_window=""
+chosen_window_pid=""
+chosen_window_pid_matches_gpu_pid=""
 gpu_pid=""
 gpu_env_has_layer=""
 gpu_env_has_capfile=""
@@ -86,6 +88,8 @@ write_env() {
         echo "rdoc_chrome_x11_hotkey_capture_file=$capture_file"
         echo "rdoc_chrome_x11_hotkey_capture_magic=$capture_magic"
         echo "rdoc_chrome_x11_hotkey_chosen_window=$chosen_window"
+        echo "rdoc_chrome_x11_hotkey_chosen_window_pid=$chosen_window_pid"
+        echo "rdoc_chrome_x11_hotkey_chosen_window_pid_matches_gpu_pid=$chosen_window_pid_matches_gpu_pid"
         echo "rdoc_chrome_x11_hotkey_gpu_pid=$gpu_pid"
         echo "rdoc_chrome_x11_hotkey_gpu_env_has_layer=$gpu_env_has_layer"
         echo "rdoc_chrome_x11_hotkey_gpu_env_has_capfile=$gpu_env_has_capfile"
@@ -111,6 +115,8 @@ write_env() {
         echo "- capture: $capture_file"
         echo "- magic: $capture_magic"
         echo "- window: $chosen_window"
+        echo "- window pid: $chosen_window_pid"
+        echo "- window pid matches gpu pid: $chosen_window_pid_matches_gpu_pid"
         echo "- gpu pid: $gpu_pid"
         echo "- gpu launcher invoked: $gpu_launcher_invoked"
         echo "- gpu launcher pid: $gpu_launcher_pid"
@@ -203,7 +209,17 @@ sleep "$WAIT_SECS"
 } >"$BUILD_DIR/discovery.log"
 
 chosen_window="$(xdotool search --pid "$chrome_pid" 2>/dev/null | tail -n 1 || true)"
+if [ "$chosen_window" != "" ]; then
+    chosen_window_pid="$(xdotool getwindowpid "$chosen_window" 2>/dev/null || true)"
+fi
 gpu_pid="$(pgrep -P "$chrome_pid" -af -- '--type=gpu-process' | awk 'NR==1 { print $1 }' || true)"
+if [ "$chosen_window_pid" != "" ] && [ "$gpu_pid" != "" ]; then
+    if [ "$chosen_window_pid" = "$gpu_pid" ]; then
+        chosen_window_pid_matches_gpu_pid="1"
+    else
+        chosen_window_pid_matches_gpu_pid="0"
+    fi
+fi
 if [ "$gpu_pid" != "" ] && [ -r "/proc/$gpu_pid/environ" ]; then
     tr '\0' '\n' <"/proc/$gpu_pid/environ" >"$BUILD_DIR/gpu.env" 2>/dev/null || true
     if grep -q '^VK_INSTANCE_LAYERS=VK_LAYER_RENDERDOC_Capture$' "$BUILD_DIR/gpu.env"; then
@@ -328,6 +344,9 @@ elif [ "$gpu_maps_has_renderdoc" != "1" ]; then
 elif [ "$gpu_maps_has_vulkan" != "1" ]; then
     status="fail"
     reason="vulkan-not-mapped-in-gpu-process"
+elif [ "$renderdoc_debug_log_loaded_status" = "pass" ] && [ "$chosen_window_pid_matches_gpu_pid" = "0" ]; then
+    status="fail"
+    reason="hotkey-window-owned-by-browser-not-renderdoc-gpu-process"
 elif [ "$gpu_env_has_capfile" != "1" ]; then
     status="fail"
     if [ "$renderdoc_debug_log_loaded_status" = "pass" ] && [ "$renderdoc_debug_log_vulkan_hooks_status" = "pass" ]; then

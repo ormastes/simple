@@ -188,9 +188,11 @@ Current 2026-06-26 browser capture findings:
   the launcher exports `RENDERDOC_CAPFILE` plus `RENDERDOC_DEBUG_LOG_FILE`
   before `exec`. The RenderDoc debug log is written by that GPU process and
   records RenderDoc v1.44 loading into Chrome plus Vulkan hook registration, so
-  the layer is active; no capture/error log line appears and no `.rdc` is
+  the layer is active. The X11 app window that receives the generated hotkeys is
+  owned by the browser process, not the GPU process where RenderDoc is loaded,
+  so the hotkey route cannot reach the active RenderDoc layer; no `.rdc` is
   produced. Current reason:
-  `renderdoc-layer-loaded-vulkan-hooks-but-hotkey-produced-no-rdc`. Evidence:
+  `hotkey-window-owned-by-browser-not-renderdoc-gpu-process`. Evidence:
   `doc/09_report/renderdoc_chrome_x11_layer_hotkey_gpu_launcher_2026-06-29.md`.
 
 2026-06-26 follow-up diagnostics:
