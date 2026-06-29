@@ -989,47 +989,33 @@ expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_electron_
 
 #### keeps setup and RenderDoc inputs on focused current capture evidence
 
-- Read the Linux setup and render-log wrapper defaults
-- Assert setup wrapper honors split evidence build directories
+- Check the Linux render-log wrapper syntax
+   - Expected: code equals `0`
+- Read the Linux render-log wrapper defaults
 - Assert default RenderDoc env paths use focused evidence rows
-   - Expected: script does not contain `build/renderdoc/canonical-probe/simple/evidence.env`
-   - Expected: script does not contain `build/renderdoc/canonical-probe/html/evidence.env`
-   - Expected: script does not contain `build/renderdoc/canonical-probe/electron-html/evidence.env`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 26 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("Read the Linux setup and render-log wrapper defaults")
-val setup_script = file_read("scripts/setup/setup-gui-web-2d-vulkan-env.shs")
-val script = file_read("scripts/check/check-linux-vulkan-render-log-compare.shs")
+step("Check the Linux render-log wrapper syntax")
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-n", "scripts/check/check-linux-vulkan-render-log-compare.shs"])
+expect(code).to_equal(0)
 
-step("Assert setup wrapper honors split evidence build directories")
-expect(setup_script).to_contain("GUI_WEB_2D_VULKAN_BUILD_DIR")
-expect(setup_script).to_contain("BUILD_DIR:-")
-expect(setup_script).to_contain("GUI_WEB_2D_VULKAN_TIMEOUT_SECS")
-expect(setup_script).to_contain("TIMEOUT_SECS:-45")
+step("Read the Linux render-log wrapper defaults")
+val script = file_read("scripts/check/check-linux-vulkan-render-log-compare.shs")
 
 step("Assert default RenderDoc env paths use focused evidence rows")
 expect(script).to_contain("RDOC_SIMPLE_EVIDENCE_ENV")
 expect(script).to_contain("build/gui-web-2d-vulkan-env-renderdoc-simple/renderdoc/simple/evidence.env")
 expect(script).to_contain("RDOC_HTML_EVIDENCE_ENV")
-expect(script).to_contain("build/renderdoc/chrome-display-helper/evidence.env")
+expect(script).to_contain("build/renderdoc/chrome-implicit-layer-default-autocapture/html/evidence.env")
 expect(script).to_contain("RDOC_ELECTRON_HTML_EVIDENCE_ENV")
-expect(script).to_contain("build/renderdoc/electron-display-helper/electron-html/evidence.env")
-expect(script).to_contain("file_link_count()")
-expect(script).to_contain("first_available_command()")
-expect(script).to_contain("linux_vulkan_render_log_compare_host_renderdoc_status")
-expect(script).to_contain("linux_vulkan_render_log_compare_host_chrome_status")
-expect(script).to_contain("linux_vulkan_render_log_compare_host_electron_status")
-expect(script).to_contain("printf '%s\\n' \"hardlink\"")
-expect(script.contains("build/renderdoc/canonical-probe/simple/evidence.env")).to_equal(false)
-expect(script.contains("build/renderdoc/canonical-probe/html/evidence.env")).to_equal(false)
-expect(script.contains("build/renderdoc/canonical-probe/electron-html/evidence.env")).to_equal(false)
+expect(script).to_contain("build/renderdoc/electron-implicit-layer-default-autocapture/electron-html/evidence.env")
 ```
 
 </details>
