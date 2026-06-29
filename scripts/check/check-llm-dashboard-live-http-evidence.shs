@@ -17,9 +17,10 @@ if [ -z "$BASE_URL" ]; then
     {
         printf '%s\n' "llm_dashboard_live_http_status=fail"
         printf '%s\n' "llm_dashboard_live_http_reason=missing_base_url"
-        printf '%s\n' "llm_dashboard_live_http_required_gates=base_url,unauth_api_rejected,authenticated_dashboard_html,authenticated_agents_html,authenticated_control_jsonl"
+        printf '%s\n' "llm_dashboard_live_http_required_gates=base_url,auth_configured,unauth_api_rejected,authenticated_dashboard_html,authenticated_agents_html,authenticated_control_jsonl"
         printf '%s\n' "llm_dashboard_live_http_blocked_gates=base_url"
         printf '%s\n' "llm_dashboard_live_http_primary_blocked_gate=base_url"
+        printf '%s\n' "llm_dashboard_live_http_auth_source=not_collected"
         printf '%s\n' "llm_dashboard_live_http_dashboard_status=not_collected"
         printf '%s\n' "llm_dashboard_live_http_dashboard_code=not_collected"
         printf '%s\n' "llm_dashboard_live_http_dashboard_size=not_collected"
@@ -44,8 +45,10 @@ if [ -z "$BASE_URL" ]; then
         printf '# LLM Dashboard Live HTTP Evidence\n\n'
         printf '%s\n' "- status: \`fail\`"
         printf '%s\n' "- reason: \`missing_base_url\`"
+        printf '%s\n' "- required_gates: \`base_url,auth_configured,unauth_api_rejected,authenticated_dashboard_html,authenticated_agents_html,authenticated_control_jsonl\`"
         printf '%s\n' "- blocked_gates: \`base_url\`"
         printf '%s\n' "- primary_blocked_gate: \`base_url\`"
+        printf '%s\n' "- auth_source: \`not_collected\`"
         printf '%s\n' "- pass_integrity_status: \`not_applicable\`"
         printf '%s\n' "- pass_integrity_reason: \`missing_base_url\`"
         printf '%s\n' "- env: \`$OUT_ENV\`"
@@ -65,7 +68,7 @@ import urllib.request
 
 base_url, timeout_text, out_env, report_path = sys.argv[1:5]
 timeout = float(timeout_text)
-required = "base_url,unauth_api_rejected,authenticated_dashboard_html,authenticated_agents_html,authenticated_control_jsonl"
+required = "base_url,auth_configured,unauth_api_rejected,authenticated_dashboard_html,authenticated_agents_html,authenticated_control_jsonl"
 blocked = []
 details = {}
 
@@ -88,21 +91,31 @@ def join_url(path):
 
 def auth_headers():
     headers = {}
+    details["auth_source"] = "missing"
     raw_header = env("LLM_DASHBOARD_LIVE_AUTH_HEADER")
     if raw_header:
         if ":" not in raw_header:
-            blocked.append("auth_header")
+            blocked.append("auth_configured")
             details["auth_header_reason"] = "missing_colon"
             return headers
         name, value = raw_header.split(":", 1)
         headers[name.strip()] = value.strip()
+        details["auth_source"] = "auth_header"
         return headers
     cookie = env("LLM_DASHBOARD_LIVE_AUTH_COOKIE")
-    if not cookie:
-        name = env("LLM_DASHBOARD_LIVE_COOKIE_NAME", "simple-dashboard-session")
-        value = env("LLM_DASHBOARD_LIVE_COOKIE_VALUE", "sid")
+    if cookie:
+        headers["Cookie"] = cookie
+        details["auth_source"] = "auth_cookie"
+        return headers
+    if "LLM_DASHBOARD_LIVE_COOKIE_NAME" in os.environ and "LLM_DASHBOARD_LIVE_COOKIE_VALUE" in os.environ:
+        name = env("LLM_DASHBOARD_LIVE_COOKIE_NAME")
+        value = env("LLM_DASHBOARD_LIVE_COOKIE_VALUE")
         cookie = f"{name}={value}"
-    headers["Cookie"] = cookie
+        headers["Cookie"] = cookie
+        details["auth_source"] = "cookie_pair"
+        return headers
+    blocked.append("auth_configured")
+    details["auth_header_reason"] = "missing_auth_env"
     return headers
 
 
@@ -185,7 +198,12 @@ if status == "pass":
         "agents": "200",
         "control": "200",
     }
+    if details.get("auth_source", "missing") == "missing":
+        pass_integrity_status = "fail"
+        pass_integrity_reason = "auth_source_missing"
     for name, code in expected.items():
+        if pass_integrity_status != "pass":
+            break
         if details.get(f"{name}_status") != "pass":
             pass_integrity_status = "fail"
             pass_integrity_reason = f"{name}_gate_not_pass"
@@ -215,6 +233,7 @@ with open(out_env, "w", encoding="utf-8") as f:
     f.write(f"llm_dashboard_live_http_required_gates={required}\n")
     f.write(f"llm_dashboard_live_http_blocked_gates={blocked_gates}\n")
     f.write(f"llm_dashboard_live_http_primary_blocked_gate={primary}\n")
+    f.write(f"llm_dashboard_live_http_auth_source={details.get('auth_source', 'not_collected')}\n")
     f.write(f"llm_dashboard_live_http_dashboard_status={details.get('dashboard_status', 'not_collected')}\n")
     f.write(f"llm_dashboard_live_http_dashboard_reason={details.get('dashboard_reason', 'not_collected')}\n")
     f.write(f"llm_dashboard_live_http_dashboard_code={details.get('dashboard_code', 'not_collected')}\n")
@@ -246,6 +265,7 @@ with open(report_path, "w", encoding="utf-8") as f:
     f.write(f"- required_gates: `{required}`\n")
     f.write(f"- blocked_gates: `{blocked_gates}`\n")
     f.write(f"- primary_blocked_gate: `{primary}`\n")
+    f.write(f"- auth_source: `{details.get('auth_source', 'not_collected')}`\n")
     f.write(f"- dashboard_status: `{details.get('dashboard_status', 'not_collected')}`\n")
     f.write(f"- dashboard_code: `{details.get('dashboard_code', 'not_collected')}`\n")
     f.write(f"- dashboard_size: `{details.get('dashboard_size', 'not_collected')}`\n")
@@ -266,7 +286,7 @@ with open(report_path, "w", encoding="utf-8") as f:
     f.write(f"- pass_integrity_reason: `{pass_integrity_reason}`\n")
     f.write(f"- next_action: `{next_action}`\n")
     f.write(f"- env: `{out_env}`\n\n")
-    f.write("This wrapper probes a configured running dashboard origin and writes the live HTTP env consumed by `check-llm-dashboard-live-evidence.shs`. A PASS requires exact HTTP status codes, route markers, non-empty response bodies, and SHA-256 fingerprints for the unauthenticated API rejection, dashboard HTML, agents HTML, and authenticated control JSONL responses. It does not print authentication secrets and does not claim live vLLM model serving.\n")
+    f.write("This wrapper probes a configured running dashboard origin and writes the live HTTP env consumed by `check-llm-dashboard-live-evidence.shs`. A PASS requires an explicit authentication source, exact HTTP status codes, route markers, non-empty response bodies, and SHA-256 fingerprints for the unauthenticated API rejection, dashboard HTML, agents HTML, and authenticated control JSONL responses. It records only the authentication source type and does not print authentication secrets or claim live vLLM model serving.\n")
 
 print(f"STATUS: {status.upper()} llm-dashboard-live-http-evidence reason={reason}")
 sys.exit(0 if status == "pass" else 1)

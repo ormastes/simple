@@ -1007,9 +1007,10 @@ separate `LLM_DASHBOARD_LIVE_HTTP_EVIDENCE_ENV` with
 dashboard completion fails with `live_http_authenticated_request` or
 `live_http_pass_integrity` blocked instead of treating route contracts as a
 live operator-dashboard pass. The HTTP producer records exact status codes,
-response sizes, and SHA-256 fingerprints for the unauthenticated API rejection,
-dashboard HTML, agents HTML, and authenticated control JSONL responses, so a
-status-only env cannot satisfy strict dashboard evidence.
+response sizes, SHA-256 fingerprints, and the non-secret authentication source
+type for the unauthenticated API rejection, dashboard HTML, agents HTML, and
+authenticated control JSONL responses, so a status-only env or implicit dummy
+cookie cannot satisfy strict dashboard evidence.
 The live dashboard wrapper also writes a route surface manifest with path,
 size, and SHA-256 rows for the checked route specs, server source, dashboard
 guide, and runtime task plan, plus size/SHA-256 metadata for the nested

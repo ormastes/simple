@@ -272,7 +272,7 @@ and spec artifacts. The aggregate env also records
 `llm_goal_evidence_dashboard_detail` for dashboard live-readiness state,
 including the strict dashboard route surface manifest count, size, SHA-256,
 dashboard evidence env/log size and SHA-256, live HTTP status, live HTTP
-response hashes, and the live dashboard next action,
+auth source type, response hashes, and the live dashboard next action,
 `llm_goal_evidence_vllm_host_detail` for local
 vLLM/GPU/preflight/endpoint/model statuses and pass-log integrity, and
 `llm_goal_evidence_svllm_local_detail` for native svLLM streaming status,
@@ -410,7 +410,7 @@ all aggregate lanes, including context/Ponytail replacement, live dashboard,
 host runtime, fine-tune, and public absence rendering triage. The detail table also includes
 context/Ponytail replacement subfields including the replacement primary
 blocked gate, live dashboard route and live HTTP subfields including the live
-dashboard primary blocked gate, svLLM native streaming subfields, Torch
+dashboard primary blocked gate and non-secret auth source type, svLLM native streaming subfields, Torch
 optimizer subfields, and
 fine-tune acceptance subfields needed to distinguish missing replacement
 surfaces, dashboard route/auth gaps, missing authenticated live HTTP proof,

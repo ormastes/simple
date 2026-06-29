@@ -33,7 +33,8 @@ Strict-host aggregate:
 - concrete reason: `missing_base_url`
 - local proof already hardened: dashboard route/source/spec evidence has a
   manifest and nested dashboard env/log hashes
-- required evidence: `llm_dashboard_live_http_status=pass`
+- required evidence: `llm_dashboard_live_http_status=pass` with explicit
+  dashboard auth env and non-secret `llm_dashboard_live_http_auth_source`
 - next action: set `LLM_DASHBOARD_LIVE_BASE_URL` plus dashboard authentication
   env and rerun `scripts/check/check-llm-dashboard-live-http-evidence.shs`.
 
