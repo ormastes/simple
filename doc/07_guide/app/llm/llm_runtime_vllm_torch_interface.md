@@ -188,12 +188,14 @@ It also writes `svllm_native_streaming_pass_integrity_status` and
 `svllm_native_streaming_pass_integrity_reason`; PASS integrity requires local
 readiness, all three native capability statuses, provenance, and the evidence
 artifact to be present together. The artifact is a line-oriented schema-v1 env
-file with `svllm_native_capability_probe_event=svllm_native_capability_probe`,
+file with `svllm_native_capability_source` matching
+`SVLLM_NATIVE_CAPABILITY_SOURCE`,
+`svllm_native_capability_probe_event=svllm_native_capability_probe`,
 `svllm_native_capability_probe_status=pass`,
 `svllm_native_capability_probe_exit=0`, and reported read-range, pinned-buffer,
 and device-staging statuses that match the wrapper inputs. The wrapper records
-the artifact SHA-256, size, mtime, schema version, probe event/status/exit, and
-reported native statuses.
+the artifact SHA-256, size, mtime, source, schema version,
+probe event/status/exit, and reported native statuses.
 
 Latest Torch/CUDA host probe:
 `doc/09_report/2026/06/llm_runtime_torch_cuda_host_probe_2026-06-28.md`
@@ -452,7 +454,8 @@ bring-up evidence but are not enough for native streaming completion. Ready
 native capability env values without a non-default
 `SVLLM_NATIVE_CAPABILITY_SOURCE` fail as `capability_provenance`, and ready
 values without a non-empty `SVLLM_NATIVE_CAPABILITY_EVIDENCE_PATH` fail as
-`capability_evidence`. Strict local readiness requires both
+`capability_evidence`; the artifact must also record the same source string as
+`SVLLM_NATIVE_CAPABILITY_SOURCE`. Strict local readiness requires both
 `svllm_native_streaming_status=pass` and
 `svllm_native_streaming_pass_integrity_status=pass`, so a status-only native env
 cannot satisfy strict completion.

@@ -651,6 +651,8 @@ without that provenance now fails with `capability_provenance` instead of
 claiming native streaming completion from env defaults alone.
 It also requires `SVLLM_NATIVE_CAPABILITY_EVIDENCE_PATH` to point at a
 non-empty schema-v1 probe artifact with
+`svllm_native_capability_source` matching
+`SVLLM_NATIVE_CAPABILITY_SOURCE`,
 `svllm_native_capability_probe_event=svllm_native_capability_probe`,
 `svllm_native_capability_probe_status=pass`,
 `svllm_native_capability_probe_exit=0`, and reported read-range, pinned-buffer,
@@ -661,6 +663,11 @@ schema version, probe event/status/exit, reported native statuses,
 `svllm_native_streaming_pass_integrity_status` plus
 `svllm_native_streaming_pass_integrity_reason` so aggregate detail can
 distinguish a real native pass from env-only status injection.
+
+Follow-up hardening binds `SVLLM_NATIVE_CAPABILITY_SOURCE` to the probe
+artifact itself through `svllm_native_capability_source`. A ready-status env
+plus an artifact from another source now remains `capability_evidence` instead
+of satisfying native streaming completion.
 
 ## 2026-06-29 Torch Optimizer Evidence Hardening
 
