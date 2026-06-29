@@ -629,6 +629,13 @@ readiness wrapper, records local file-backed byte-read evidence separately, and
 keeps native streaming failed with concrete blockers until native read_range,
 pinned buffer registration, and device staging all report `ready`.
 
+The native streaming wrapper now consumes explicit host capability inputs:
+`SVLLM_NATIVE_READ_RANGE_STATUS`, `SVLLM_NATIVE_PINNED_BUFFER_STATUS`, and
+`SVLLM_NATIVE_DEVICE_STAGING_STATUS`. Missing inputs default to `unsupported`,
+but a configured host can provide `ready` values without editing tests or
+source fixtures. The wrapper records `svllm_native_streaming_capability_source`,
+and the aggregate forwards that field in `llm_goal_evidence_svllm_local_detail`.
+
 ## 2026-06-29 Torch Optimizer Evidence Hardening
 
 `scripts/check/check-llm-runtime-torch-cuda-optimizer-probe.shs` now normalizes

@@ -126,6 +126,13 @@ the native evidence env. It records concrete blockers such as
 buffer registration, and device staging are all ready. Native evidence records
 `svllm_native_streaming_local_spec_timeout_seconds` so nested local-readiness
 timeouts remain visible when strict aggregate evidence is collected.
+Configured native hosts provide those native capability results through
+`SVLLM_NATIVE_READ_RANGE_STATUS`, `SVLLM_NATIVE_PINNED_BUFFER_STATUS`, and
+`SVLLM_NATIVE_DEVICE_STAGING_STATUS`. Values normalize to `ready`,
+`unsupported`, `unavailable`, or `unchecked`; omitted values default to
+`unsupported`. The native streaming report records
+`svllm_native_streaming_capability_source` so reviewers can distinguish an
+explicit host probe from the default fallback.
 
 Latest Torch/CUDA host probe:
 `doc/09_report/2026/06/llm_runtime_torch_cuda_host_probe_2026-06-28.md`
@@ -173,9 +180,9 @@ guard-only pass in default mode. The aggregate env also records
 vLLM/GPU/preflight/endpoint/model statuses, and
 `llm_goal_evidence_svllm_local_detail` for native svLLM streaming status,
 native blocker reason, local readiness, native `read_range`, pinned-buffer,
-device-staging, and local file-backed byte-read states. In default mode, the
-native fields report `not_required` / `not_collected`; strict host mode
-generates and consumes the native streaming evidence. The svLLM blocker table
+device-staging, capability source, and local file-backed byte-read states. In
+default mode, the native fields report `not_required` / `not_collected`; strict
+host mode generates and consumes the native streaming evidence. The svLLM blocker table
 is mode-aware too: default mode reports the `local_readiness` gate with no
 blocked native gates, while strict host mode reports
 `native_read_range,pinned_buffer,device_staging` and their exact blockers. It

@@ -11,6 +11,10 @@ LOCAL_BUILD_DIR="$BUILD_DIR/local_readiness"
 LOCAL_REPORT="$BUILD_DIR/local_readiness_report.md"
 LOCAL_ENV="$LOCAL_BUILD_DIR/evidence.env"
 LOCAL_SPEC_TIMEOUT_SECONDS="${SVLLM_READINESS_SPEC_TIMEOUT_SECONDS:-120}"
+INPUT_READ_RANGE_STATUS="${SVLLM_NATIVE_READ_RANGE_STATUS:-unsupported}"
+INPUT_PINNED_BUFFER_STATUS="${SVLLM_NATIVE_PINNED_BUFFER_STATUS:-unsupported}"
+INPUT_DEVICE_STAGING_STATUS="${SVLLM_NATIVE_DEVICE_STAGING_STATUS:-unsupported}"
+CAPABILITY_SOURCE="${SVLLM_NATIVE_CAPABILITY_SOURCE:-env_or_default}"
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
 rm -f "$OUT_ENV" "$REPORT_PATH" "$LOCAL_REPORT"
@@ -23,6 +27,26 @@ pinned_buffer_status="unsupported"
 device_staging_status="unsupported"
 local_read_bytes_status="unknown"
 
+normalize_capability_status() {
+    case "$(printf '%s\n' "$1" | tr '[:upper:]' '[:lower:]')" in
+        ready)
+            printf '%s\n' "ready"
+            ;;
+        unsupported)
+            printf '%s\n' "unsupported"
+            ;;
+        unavailable)
+            printf '%s\n' "unavailable"
+            ;;
+        unchecked)
+            printf '%s\n' "unchecked"
+            ;;
+        *)
+            printf '%s\n' "unavailable"
+            ;;
+    esac
+}
+
 if BUILD_DIR="$LOCAL_BUILD_DIR" REPORT_PATH="$LOCAL_REPORT" SVLLM_READINESS_SPEC_TIMEOUT_SECONDS="$LOCAL_SPEC_TIMEOUT_SECONDS" sh scripts/check/check-llm-runtime-svllm-local-readiness.shs >"$BUILD_DIR/local_readiness.log" 2>&1; then
     local_status="pass"
 else
@@ -30,21 +54,9 @@ else
     reason="local_readiness_failed"
 fi
 
-if grep -F 'expect(readiness.read_range_status).to_equal("unsupported")' test/01_unit/lib/gc_async_mut/svllm/model_loader_streaming_readiness_spec.spl >/dev/null 2>&1; then
-    read_range_status="unsupported"
-else
-    read_range_status="unknown"
-fi
-if grep -F 'expect(readiness.pinned_buffer_status).to_equal("unsupported")' test/01_unit/lib/gc_async_mut/svllm/model_loader_streaming_readiness_spec.spl >/dev/null 2>&1; then
-    pinned_buffer_status="unsupported"
-else
-    pinned_buffer_status="unknown"
-fi
-if grep -F 'expect(readiness.device_staging_status).to_equal("unsupported")' test/01_unit/lib/gc_async_mut/svllm/model_loader_streaming_readiness_spec.spl >/dev/null 2>&1; then
-    device_staging_status="unsupported"
-else
-    device_staging_status="unknown"
-fi
+read_range_status="$(normalize_capability_status "$INPUT_READ_RANGE_STATUS")"
+pinned_buffer_status="$(normalize_capability_status "$INPUT_PINNED_BUFFER_STATUS")"
+device_staging_status="$(normalize_capability_status "$INPUT_DEVICE_STAGING_STATUS")"
 if grep -F 'expect(readiness.local_read_bytes_status).to_equal("ready")' test/01_unit/lib/gc_async_mut/svllm/model_loader_streaming_readiness_spec.spl >/dev/null 2>&1; then
     local_read_bytes_status="ready"
 else
@@ -71,6 +83,7 @@ fi
     printf '%s\n' "svllm_native_streaming_status=$status"
     printf '%s\n' "svllm_native_streaming_reason=$reason"
     printf '%s\n' "svllm_native_streaming_local_readiness_status=$local_status"
+    printf '%s\n' "svllm_native_streaming_capability_source=$CAPABILITY_SOURCE"
     printf '%s\n' "svllm_native_streaming_read_range_status=$read_range_status"
     printf '%s\n' "svllm_native_streaming_pinned_buffer_status=$pinned_buffer_status"
     printf '%s\n' "svllm_native_streaming_device_staging_status=$device_staging_status"
@@ -84,6 +97,7 @@ fi
     printf '%s\n' "- status: \`$status\`"
     printf '%s\n' "- reason: \`$reason\`"
     printf '%s\n' "- local_readiness: \`$local_status\`"
+    printf '%s\n' "- capability_source: \`$CAPABILITY_SOURCE\`"
     printf '%s\n' "- read_range: \`$read_range_status\`"
     printf '%s\n' "- pinned_buffer: \`$pinned_buffer_status\`"
     printf '%s\n' "- device_staging: \`$device_staging_status\`"
@@ -91,7 +105,7 @@ fi
     printf '%s\n' "- local_spec_timeout_seconds: \`$LOCAL_SPEC_TIMEOUT_SECONDS\`"
     printf '%s\n' "- env: \`$OUT_ENV\`"
     printf '\n'
-    printf 'This evidence consumes the local svLLM readiness gate and records the native streaming blockers. It only passes when native read_range, pinned buffer registration, and device staging are all ready. Local file-backed bytes alone remain explicit bring-up evidence, not native streaming completion.\n'
+    printf 'This evidence consumes the local svLLM readiness gate and records native streaming capability statuses from `SVLLM_NATIVE_READ_RANGE_STATUS`, `SVLLM_NATIVE_PINNED_BUFFER_STATUS`, and `SVLLM_NATIVE_DEVICE_STAGING_STATUS` (default `unsupported`). It only passes when local readiness passes and all three native capability statuses are `ready`. Local file-backed bytes alone remain explicit bring-up evidence, not native streaming completion.\n'
 } >"$REPORT_PATH"
 
 if [ "$status" = "pass" ]; then
