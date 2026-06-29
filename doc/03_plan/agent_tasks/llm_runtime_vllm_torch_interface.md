@@ -766,10 +766,10 @@ readiness path, and the aggregate vLLM detail forwards the manifest count,
 size, and SHA-256. Missing-host vLLM evidence is therefore tied to both the
 host probes and the exact checked local source/spec surface.
 On this host the lane remains `unavailable` with
-`blocked_gates=local_vllm|serve_preflight|endpoint_reachable|models_listed`;
-strict-host aggregate runs should fail that gate until local vLLM is installed,
-serve readiness reaches `ready`, the endpoint is configured, and `/v1/models`
-lists the selected base model.
+`blocked_gates=local_vllm|python_vllm_module|serve_preflight|endpoint_reachable|models_listed`;
+strict-host aggregate runs should fail that gate until the local vLLM
+executable and Python module are installed, serve readiness reaches `ready`,
+the endpoint is configured, and `/v1/models` lists the selected base model.
 
 The host probe now records
 `llm_runtime_vllm_host_probe_primary_blocked_gate` and derives next action from
@@ -778,8 +778,10 @@ that first normalized blocker. Its models-list gate treats
 condition and avoiding a false blocker on configured hosts.
 The host probe PASS integrity also requires `models_reason=models_endpoint_ready`
 and exactly one `llm_runtime_vllm_serve_readiness_run` event in the non-empty
-hashed readiness log, so a status-only or duplicated log cannot satisfy strict
-host completion.
+hashed readiness log. Follow-up hardening also makes the Python `vllm` module a
+required gate: a PASS now requires `python_vllm_module_status=available` with a
+non-missing origin, so an executable-only host cannot satisfy strict local vLLM
+completion.
 
 The runtime control CLI now exposes a `readiness` action that routes through
 `llm_runtime_vllm_serve_readiness_orchestrate_with_resources(...)` instead of
@@ -792,9 +794,10 @@ Follow-up hardening makes the wrapper PASS stricter than those normalized
 status fields alone. A PASS now also requires
 `llm_runtime_vllm_host_probe_pass_integrity_status=pass`, which verifies
 `blocked_gates=none`, event `llm_runtime_vllm_serve_readiness_run`, zero CLI
-exit, local vLLM/GPU availability, readiness `ready`, endpoint `configured`,
-and models status `ready`. The aggregate forwards the pass-integrity status and
-reason in `llm_goal_evidence_vllm_host_detail`.
+exit, local vLLM executable availability, Python `vllm` module availability and
+origin, GPU availability, readiness `ready`, endpoint `configured`, and models
+status `ready`. The aggregate forwards the pass-integrity status and reason in
+`llm_goal_evidence_vllm_host_detail`.
 
 The aggregate LLM evidence report now includes `torch_optimizer` in the detail
 table and forwards normalized Simple/libtorch CUDA optimizer fields: status,

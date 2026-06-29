@@ -17,7 +17,7 @@ completion gates still require live host/runtime/model evidence.
 | lane | primary blocker | next action |
 |------|-----------------|-------------|
 | dashboard | `live_http_authenticated_request` | Set `LLM_DASHBOARD_LIVE_BASE_URL` and auth env, then rerun strict dashboard HTTP/live evidence. |
-| vLLM host | `local_vllm` | Install or expose local `vllm`; then prove serve preflight, endpoint reachability, and `/v1/models`. |
+| vLLM host | `local_vllm` | Install or expose local `vllm` executable and Python module; then prove serve preflight, endpoint reachability, and `/v1/models`. |
 | svLLM native | `native_read_range` | Implement native `read_range`, pinned buffer registration, and device staging evidence. |
 | Torch optimizer | `libtorch` | Build or install Simple-visible libtorch; Python Torch/CUDA is available, but system libtorch is missing. |
 | fine-tune | `retry6_training_eval` | Complete retry5 licensed cache/checksum review, retry6 model/eval artifacts, target eval, and retry7 acceptance evidence. |
@@ -38,7 +38,8 @@ but local proof is no longer status-only for the completed repo-local lanes:
   manifest (`surface_manifest_count=10`,
   `surface_manifest_sha256=83abdc5c0a155eb8bc2cd2c20e3a9349d0e5b43cacf1073c5d59706b5fe9500b`)
   plus local `vllm`, Python module, GPU, and readiness-log hashes; a local
-  `vllm` executable and live endpoint proof are still required.
+  `vllm` executable, importable Python `vllm` module, and live endpoint proof
+  are still required.
 - svLLM local readiness records a checked local-readiness spec/log manifest and
   per-log hashes; native `read_range`, pinned-buffer, and device-staging proof
   is still required.

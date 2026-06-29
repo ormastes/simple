@@ -46,8 +46,9 @@ Strict-host aggregate:
   control/readiness source/spec manifest with
   `surface_manifest_count=10` and
   `surface_manifest_sha256=83abdc5c0a155eb8bc2cd2c20e3a9349d0e5b43cacf1073c5d59706b5fe9500b`
-- required evidence: local `vllm` executable, serve preflight, reachable
-  endpoint, and `/v1/models` listing the selected base model
+- required evidence: local `vllm` executable, importable Python `vllm` module
+  with non-missing origin, serve preflight, reachable endpoint, and `/v1/models`
+  listing the selected base model
 - next action: install or expose local vLLM, then rerun
   `scripts/check/check-llm-runtime-vllm-host-probe.shs --strict`.
 

@@ -205,7 +205,7 @@ if [ -z "$models_reason" ]; then
     models_reason="missing"
 fi
 
-required_gates="local_vllm,local_gpu,serve_preflight,endpoint_reachable,models_listed"
+required_gates="local_vllm,python_vllm_module,local_gpu,serve_preflight,endpoint_reachable,models_listed"
 blocked_gates=""
 append_blocked_gate() {
     gate="$1"
@@ -219,6 +219,11 @@ append_blocked_gate() {
 case "$local_vllm_status:$reason" in
     missing:*|*:missing_local_vllm*|*:missing_local_vllm_and_gpu*)
         append_blocked_gate "local_vllm"
+        ;;
+esac
+case "$python_vllm_module_status:$python_vllm_origin" in
+    available:missing|missing:*)
+        append_blocked_gate "python_vllm_module"
         ;;
 esac
 case "$local_gpu_status:$reason" in
@@ -263,6 +268,9 @@ case "$primary_blocked_gate" in
     local_vllm)
         next_action="install or expose the local vllm executable, then rerun the strict vLLM host probe"
         ;;
+    python_vllm_module)
+        next_action="install or expose the Python vllm module, then rerun the strict vLLM host probe"
+        ;;
     local_gpu)
         next_action="make nvidia-smi/GPU tooling available, then rerun the strict vLLM host probe"
         ;;
@@ -283,6 +291,8 @@ esac
 wrapper_status="fail"
 wrapper_reason="$reason"
 if [ "$local_vllm_status" = "available" ] &&
+   [ "$python_vllm_module_status" = "available" ] &&
+   [ "${python_vllm_origin:-missing}" != "missing" ] &&
    [ "$local_gpu_status" = "available" ] &&
    [ "$status" = "ready" ] &&
    [ "$endpoint_status" = "configured" ] &&
@@ -321,6 +331,12 @@ if [ "$wrapper_status" = "pass" ]; then
     elif [ "$local_vllm_status" != "available" ]; then
         pass_integrity_status="fail"
         pass_integrity_reason="local_vllm_not_available"
+    elif [ "$python_vllm_module_status" != "available" ]; then
+        pass_integrity_status="fail"
+        pass_integrity_reason="python_vllm_module_not_available"
+    elif [ "${python_vllm_origin:-missing}" = "missing" ]; then
+        pass_integrity_status="fail"
+        pass_integrity_reason="python_vllm_origin_missing"
     elif [ "$local_gpu_status" != "available" ]; then
         pass_integrity_status="fail"
         pass_integrity_reason="local_gpu_not_available"
@@ -436,7 +452,7 @@ fi
     printf '%s\n' "- env: \`$OUT_ENV\`"
     printf '%s\n' "- log: \`$OUT_LOG\`"
     printf '\n'
-    printf 'This wrapper records repeatable local vLLM host preflight evidence. It only proves live serving readiness when all required gates pass. A `status=pass` wrapper result must also have no blocked gates, exactly one serve-readiness run event in a non-empty hashed log, zero CLI exit, local vLLM and GPU availability, ready preflight/readiness, a configured endpoint, `models_status=ready`, and `models_reason=models_endpoint_ready`. `unavailable` records the compact blocked-gates list for missing local vLLM/GPU resources, skipped serve preflight, endpoint reachability, or model-listing evidence, plus hashed local `vllm --version`, Python module, and GPU probe logs; run with `--strict` when unavailable hosts must fail the lane.\n'
+    printf 'This wrapper records repeatable local vLLM host preflight evidence. It only proves live serving readiness when all required gates pass. A `status=pass` wrapper result must also have no blocked gates, exactly one serve-readiness run event in a non-empty hashed log, zero CLI exit, local vLLM executable availability, Python `vllm` module availability with a non-missing origin, local GPU availability, ready preflight/readiness, a configured endpoint, `models_status=ready`, and `models_reason=models_endpoint_ready`. `unavailable` records the compact blocked-gates list for missing local vLLM executable/module/GPU resources, skipped serve preflight, endpoint reachability, or model-listing evidence, plus hashed local `vllm --version`, Python module, and GPU probe logs; run with `--strict` when unavailable hosts must fail the lane.\n'
 } >"$REPORT_PATH"
 
 case "$wrapper_status" in

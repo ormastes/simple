@@ -92,7 +92,7 @@ repeatable `scripts/check/check-llm-runtime-vllm-host-probe.shs` readiness
 run through the runtime-owned control CLI. On the current host it returns
 `status=unavailable` with
 `reason=missing_local_vllm` and
-`blocked_gates=local_vllm|serve_preflight|endpoint_reachable|models_listed`.
+`blocked_gates=local_vllm|python_vllm_module|serve_preflight|endpoint_reachable|models_listed`.
 The evidence env records `llm_runtime_vllm_host_probe_required_gates`,
 `llm_runtime_vllm_host_probe_blocked_gates`,
 `llm_runtime_vllm_host_probe_primary_blocked_gate`,
@@ -125,8 +125,9 @@ The evidence env records `llm_runtime_vllm_host_probe_required_gates`,
 the first local serving blocker, full blocker list, pass-log integrity, and
 next operator step. The wrapper accepts a PASS only when the runtime event is
 `llm_runtime_vllm_serve_readiness_run`, CLI exit is zero, blocked gates are
-`none`, local vLLM/GPU are available, readiness is `ready`, endpoint is
-`configured`, model listing is `ready`, models reason is
+`none`, the local vLLM executable is available, the Python `vllm` module is
+available with a non-missing origin, GPU tooling is available, readiness is
+`ready`, endpoint is `configured`, model listing is `ready`, models reason is
 `models_endpoint_ready`, and the hashed readiness log contains exactly one
 serve-readiness run event. The
 models-list classifier treats `models_status=ready` as satisfying
@@ -136,6 +137,9 @@ configured local endpoint reaches `status=ready`, `endpoint=configured`, and
 `models_status=ready` after `/v1/models` serves the selected base model.
 If a host is missing GPU tooling too, `local_gpu` is added to the blocked-gates
 list independently of the collapsed control-CLI reason.
+If the executable exists but the Python module cannot be imported,
+`python_vllm_module` remains blocked even when the control CLI can still render
+skipped or planned evidence.
 The local `vllm --version`, Python `vllm` module discovery, and `nvidia-smi`
 GPU probes are written as bounded logs with SHA-256 hashes, so missing-host
 evidence can be traced to the exact command/module checks that ran.
