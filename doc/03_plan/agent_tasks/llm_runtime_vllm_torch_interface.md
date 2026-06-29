@@ -660,9 +660,11 @@ blocked gate in `llm_goal_evidence_torch_optimizer_detail`.
 
 `scripts/check/check-llm-finetune-acceptance-evidence.shs` now preserves the
 retry7 normal-acceptance gate as a machine-readable blocker contract. The env
-records required gates, compact blocked gates, training allowance,
-model-manifest/eval-result presence, target-eval status, decision status,
-license, safety, deployment, app-handoff doc, handoff usage, and next action.
+records required gates, compact blocked gates, training allowance, upstream
+attempt/cache refs, model-manifest/eval-result paths and presence, deployable
+model-manifest status, target-eval status, required accuracy, decision status,
+license, safety, deployment, app-handoff doc, handoff usage, retry6 next action,
+and final next action.
 On this host the lane remains failed with `BLOCKED_RETRY6_NOT_READY` and
 blocked gates for retry6 training/eval, model/eval artifacts, target eval,
 decision, license, safety, deployment, and app handoff.
@@ -812,7 +814,8 @@ details into `llm_goal_evidence_vllm_host_detail` and fine-tune retry7
 acceptance details into `llm_goal_evidence_finetune_guard_detail`. This keeps
 the default aggregate report honest: guard-only fine-tune evidence can pass
 locally, while the acceptance detail still names the retry6/model/eval/license/
-safety/deployment blocker that must pass before strict host completion.
+safety/deployment blocker and artifact refs that must pass before strict host
+completion.
 Default mode runs the retry7 acceptance producer as non-blocking detail
 evidence first; strict mode consumes the same env as a required pass gate.
 

@@ -224,13 +224,21 @@ records `llm_finetune_acceptance_required_gates`,
 `llm_finetune_acceptance_blocked_gates`,
 `llm_finetune_acceptance_primary_blocked_gate`,
 `llm_finetune_acceptance_training_allowed`,
+`llm_finetune_acceptance_upstream_attempt_record`,
+`llm_finetune_acceptance_upstream_cache_manifest`,
+`llm_finetune_acceptance_attempt_record`,
+`llm_finetune_acceptance_model_manifest`,
 `llm_finetune_acceptance_model_manifest_exists`,
+`llm_finetune_acceptance_model_manifest_deployable`,
+`llm_finetune_acceptance_eval_result`,
 `llm_finetune_acceptance_eval_result_exists`,
+`llm_finetune_acceptance_required_accuracy`,
+`llm_finetune_acceptance_retry6_next_action`,
 `llm_finetune_acceptance_decision_status`,
 `llm_finetune_acceptance_handoff_doc`, and
 `llm_finetune_acceptance_next_action` so strict aggregate runs can report the
-first concrete blocker plus the exact model/eval/license/safety/deployment/
-app-handoff blocker list.
+first concrete blocker, the exact upstream artifact refs to fill, and the
+model/eval/license/safety/deployment/app-handoff blocker list.
 
 The local fine-tune guard evidence writes its own current blocker contract to
 `build/llm_finetune_guard_evidence/evidence.env`. Default aggregate mode uses
