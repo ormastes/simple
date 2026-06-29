@@ -438,6 +438,16 @@ Current 2026-06-26 browser capture findings:
   `build/renderdoc/chrome-gpu-no-renderdoc-layer/html/evidence.env`,
   `build/renderdoc/electron-gpu-no-renderdoc-layer/electron-html/evidence.env`,
   and `doc/09_report/renderdoc_browser_no_layer_isolation_2026-06-29.md`.
+- 2026-06-29 Linux aggregate checks now forward the current browser
+  GPU-launcher diagnostics. `check-linux-vulkan-render-log-compare.shs` and
+  `check-gui-renderdoc-feature-coverage-status.shs` expose Chrome/Electron
+  GPU-launcher ANGLE status, no-layer flag, autocapture status, Vulkan
+  layer/extension enumeration counts, and `vkCreateInstance`/`vkCreateDevice`
+  counts under `linux_vulkan_render_log_compare_renderdoc_*`. The focused
+  aggregate still keeps `renderdoc-chrome-rdc` and `renderdoc-electron-rdc`
+  blocked with both browser reasons `missing-rdc`. Evidence:
+  `build/linux-vulkan-render-log-compare/evidence.env` and
+  `doc/09_report/renderdoc_linux_aggregate_browser_fields_2026-06-29.md`.
 - The direct Chrome/Electron RenderDoc wrapper now records
   `rdoc_renderdoc_hook_children` and accepts `RDOC_RENDERDOC_HOOK_CHILDREN=0`
   to omit `--opt-hook-children`. This confirms the immediate Chrome GPU crash
