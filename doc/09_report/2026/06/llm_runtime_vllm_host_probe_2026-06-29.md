@@ -8,6 +8,10 @@
 - primary_blocked_gate: `local_vllm`
 - base_model: `base-model`
 - endpoint: `http://127.0.0.1:8000/v1`
+- surface_manifest: `build/llm_runtime_vllm_host_probe/vllm_host_surface_manifest.tsv`
+- surface_manifest_count: `10`
+- surface_manifest_size: `1209`
+- surface_manifest_sha256: `83abdc5c0a155eb8bc2cd2c20e3a9349d0e5b43cacf1073c5d59706b5fe9500b`
 - local_vllm_status: `missing`
 - vllm_command_path: `missing`
 - vllm_version_log_size: `21`
@@ -27,7 +31,7 @@
 - models_status: `not_fetched`
 - models_reason: `environment_skipped`
 - log_size: `96660`
-- log_sha256: `226f28ae94d79706c29d5dd288578c3beb562d6ecd2bbe52c0bf5c0b51d53e2e`
+- log_sha256: `27a5e7e54aa062e938462568cb527f8b6d4988da83b9dbd0e48976526483d8da`
 - serve_readiness_run_event_count: `1`
 - pass_integrity_status: `not_applicable`
 - pass_integrity_reason: `not_applicable`

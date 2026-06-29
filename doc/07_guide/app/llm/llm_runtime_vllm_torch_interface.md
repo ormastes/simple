@@ -139,6 +139,10 @@ list independently of the collapsed control-CLI reason.
 The local `vllm --version`, Python `vllm` module discovery, and `nvidia-smi`
 GPU probes are written as bounded logs with SHA-256 hashes, so missing-host
 evidence can be traced to the exact command/module checks that ran.
+The wrapper also records a surface manifest count, size, and SHA-256 for the
+runtime control/readiness source files and unit specs that define the local
+serve-readiness path; the aggregate forwards those fields in
+`llm_goal_evidence_vllm_host_detail`.
 Run the wrapper with `--strict` when unavailable or readiness-incomplete hosts must
 fail the lane.
 

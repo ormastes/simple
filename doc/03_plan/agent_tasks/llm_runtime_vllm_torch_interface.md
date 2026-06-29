@@ -748,6 +748,11 @@ event count. It also writes bounded local host probe logs with SHA-256 hashes
 for `vllm --version`, Python `vllm` module/version discovery, and `nvidia-smi`,
 so unavailable-host evidence is tied to concrete command/module probes instead
 of status labels alone.
+It now also writes a vLLM host surface manifest with path, size, and SHA-256
+rows for the runtime control/readiness sources and unit specs that define the
+readiness path, and the aggregate vLLM detail forwards the manifest count,
+size, and SHA-256. Missing-host vLLM evidence is therefore tied to both the
+host probes and the exact checked local source/spec surface.
 On this host the lane remains `unavailable` with
 `blocked_gates=local_vllm|serve_preflight|endpoint_reachable|models_listed`;
 strict-host aggregate runs should fail that gate until local vLLM is installed,
