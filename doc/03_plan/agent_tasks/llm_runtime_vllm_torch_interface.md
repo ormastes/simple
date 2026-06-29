@@ -730,6 +730,14 @@ host can produce a real pass from `llm_runtime_vllm_serve_readiness_run` with
 `status=ready`, `endpoint=configured`, and `models_status=ready`; missing local
 vLLM/GPU hosts still produce bounded `skipped` evidence without spawning.
 
+Follow-up hardening makes the wrapper PASS stricter than those normalized
+status fields alone. A PASS now also requires
+`llm_runtime_vllm_host_probe_pass_integrity_status=pass`, which verifies
+`blocked_gates=none`, event `llm_runtime_vllm_serve_readiness_run`, zero CLI
+exit, local vLLM/GPU availability, readiness `ready`, endpoint `configured`,
+and models status `ready`. The aggregate forwards the pass-integrity status and
+reason in `llm_goal_evidence_vllm_host_detail`.
+
 The aggregate LLM evidence report now includes `torch_optimizer` in the detail
 table and forwards normalized Simple/libtorch CUDA optimizer fields: status,
 reason, Python Torch/CUDA host visibility, system libtorch visibility,

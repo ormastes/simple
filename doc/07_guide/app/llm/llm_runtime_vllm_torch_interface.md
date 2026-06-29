@@ -106,8 +106,14 @@ The evidence env records `llm_runtime_vllm_host_probe_required_gates`,
 `llm_runtime_vllm_host_probe_preflight_status`,
 `llm_runtime_vllm_host_probe_endpoint_status`, and
 `llm_runtime_vllm_host_probe_models_status`, and
+`llm_runtime_vllm_host_probe_pass_integrity_status`,
+`llm_runtime_vllm_host_probe_pass_integrity_reason`, and
 `llm_runtime_vllm_host_probe_next_action` so strict aggregate runs can report
-the first local serving blocker, full blocker list, and next operator step. The
+the first local serving blocker, full blocker list, pass-log integrity, and
+next operator step. The wrapper accepts a PASS only when the runtime event is
+`llm_runtime_vllm_serve_readiness_run`, CLI exit is zero, blocked gates are
+`none`, local vLLM/GPU are available, readiness is `ready`, endpoint is
+`configured`, and model listing is `ready`. The
 models-list classifier treats `models_status=ready` as satisfying
 `models_listed`, matching the strict pass condition. Keep
 `FR-LLM-RUNTIME-0001` open until a
@@ -209,7 +215,7 @@ instead of only mimic evidence. The aggregate env also records
 `llm_goal_evidence_context_ponytail_detail` for mimic/full-replacement state,
 `llm_goal_evidence_dashboard_detail` for dashboard live-readiness state,
 `llm_goal_evidence_vllm_host_detail` for local
-vLLM/GPU/preflight/endpoint/model statuses, and
+vLLM/GPU/preflight/endpoint/model statuses and pass-log integrity, and
 `llm_goal_evidence_svllm_local_detail` for native svLLM streaming status,
 native blocker reason, local readiness, native `read_range`, pinned-buffer,
 device-staging, capability source, capability provenance, local file-backed

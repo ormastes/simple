@@ -151,6 +151,9 @@ if [ "$blocked_gates" != "none" ]; then
     primary_blocked_gate="$(printf '%s\n' "$blocked_gates" | cut -d '|' -f 1)"
 fi
 
+pass_integrity_status="not_applicable"
+pass_integrity_reason="not_applicable"
+
 next_action="verify local vLLM, GPU tooling, endpoint reachability, and /v1/models response for the selected base model"
 case "$primary_blocked_gate" in
     local_vllm)
@@ -199,6 +202,45 @@ case "$event:$status:$reason" in
 esac
 fi
 
+if [ "$wrapper_status" = "pass" ]; then
+    pass_integrity_status="pass"
+    pass_integrity_reason="all_required_pass_fields_present"
+    if [ "$blocked_gates" != "none" ]; then
+        pass_integrity_status="fail"
+        pass_integrity_reason="blocked_gates_not_none"
+    elif [ "$event" != "llm_runtime_vllm_serve_readiness_run" ]; then
+        pass_integrity_status="fail"
+        pass_integrity_reason="unexpected_event"
+    elif [ "$exit_code" -ne 0 ]; then
+        pass_integrity_status="fail"
+        pass_integrity_reason="cli_exit_not_zero"
+    elif [ "$local_vllm_status" != "available" ]; then
+        pass_integrity_status="fail"
+        pass_integrity_reason="local_vllm_not_available"
+    elif [ "$local_gpu_status" != "available" ]; then
+        pass_integrity_status="fail"
+        pass_integrity_reason="local_gpu_not_available"
+    elif [ "$status" != "ready" ]; then
+        pass_integrity_status="fail"
+        pass_integrity_reason="readiness_not_ready"
+    elif [ "$endpoint_status" != "configured" ]; then
+        pass_integrity_status="fail"
+        pass_integrity_reason="endpoint_not_configured"
+    elif [ "$models_status" != "ready" ]; then
+        pass_integrity_status="fail"
+        pass_integrity_reason="models_not_ready"
+    fi
+    if [ "$pass_integrity_status" != "pass" ]; then
+        wrapper_status="fail"
+        wrapper_reason="wrapper_pass_integrity_failed:$pass_integrity_reason"
+        if [ "$blocked_gates" = "none" ]; then
+            blocked_gates="serve_preflight"
+            primary_blocked_gate="serve_preflight"
+        fi
+        next_action="fix vLLM host pass-integrity evidence, then rerun the strict vLLM host probe"
+    fi
+fi
+
 {
     printf '%s\n' "llm_runtime_vllm_host_probe_status=$wrapper_status"
     printf '%s\n' "llm_runtime_vllm_host_probe_reason=$wrapper_reason"
@@ -218,6 +260,8 @@ fi
     printf '%s\n' "llm_runtime_vllm_host_probe_endpoint_status=$endpoint_status"
     printf '%s\n' "llm_runtime_vllm_host_probe_models_status=$models_status"
     printf '%s\n' "llm_runtime_vllm_host_probe_models_reason=$models_reason"
+    printf '%s\n' "llm_runtime_vllm_host_probe_pass_integrity_status=$pass_integrity_status"
+    printf '%s\n' "llm_runtime_vllm_host_probe_pass_integrity_reason=$pass_integrity_reason"
     printf '%s\n' "llm_runtime_vllm_host_probe_next_action=$next_action"
 } >"$OUT_ENV"
 
@@ -240,12 +284,14 @@ fi
     printf '%s\n' "- endpoint_status: \`$endpoint_status\`"
     printf '%s\n' "- models_status: \`$models_status\`"
     printf '%s\n' "- models_reason: \`$models_reason\`"
+    printf '%s\n' "- pass_integrity_status: \`$pass_integrity_status\`"
+    printf '%s\n' "- pass_integrity_reason: \`$pass_integrity_reason\`"
     printf '%s\n' "- next_action: \`$next_action\`"
     printf '%s\n' "- exit_code: \`$exit_code\`"
     printf '%s\n' "- env: \`$OUT_ENV\`"
     printf '%s\n' "- log: \`$OUT_LOG\`"
     printf '\n'
-    printf 'This wrapper records repeatable local vLLM host preflight evidence. It only proves live serving readiness when all required gates pass. `unavailable` records the compact blocked-gates list for missing local vLLM/GPU resources, skipped serve preflight, endpoint reachability, or model-listing evidence; run with `--strict` when unavailable hosts must fail the lane.\n'
+    printf 'This wrapper records repeatable local vLLM host preflight evidence. It only proves live serving readiness when all required gates pass. A `status=pass` wrapper result must also have no blocked gates, a serve-readiness event, zero CLI exit, local vLLM and GPU availability, ready preflight/readiness, a configured endpoint, and ready model listing evidence. `unavailable` records the compact blocked-gates list for missing local vLLM/GPU resources, skipped serve preflight, endpoint reachability, or model-listing evidence; run with `--strict` when unavailable hosts must fail the lane.\n'
 } >"$REPORT_PATH"
 
 case "$wrapper_status" in
