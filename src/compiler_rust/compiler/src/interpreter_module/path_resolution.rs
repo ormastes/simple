@@ -923,6 +923,84 @@ mod tests {
         result
     }
 
+    // --- variants/ overlay round-trip (lib.crypto lane) ---------------------
+    // Proves the production-safe pattern: source keeps its existing import
+    // (`std.common.crypto.constant_time`); the canonical impl lives in src and
+    // is selected when the active profile picks `default` (fall-through), while
+    // a non-default profile (`openssl`) resolves the mirrored variant file.
+
+    fn unique_overlay_dir(tag: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static SEQ: AtomicUsize = AtomicUsize::new(0);
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!("var_overlay_{}_{}_{}", tag, std::process::id(), n))
+    }
+
+    fn write_overlay_project(root: &Path, profile: &str, make_openssl_variant: bool) {
+        // project-root marker + an entry file dir
+        fs::create_dir_all(root.join("src/app")).unwrap();
+        fs::write(root.join("src/app/main.spl"), "fn main():\n    0\n").unwrap();
+        // canonical (src) impl — what `default` must fall through to
+        fs::create_dir_all(root.join("src/lib/common/crypto")).unwrap();
+        fs::write(
+            root.join("src/lib/common/crypto/constant_time.spl"),
+            "# canonical\nfn marker() -> text:\n    \"src-default\"\n",
+        )
+        .unwrap();
+        // overlay manifest + config
+        fs::create_dir_all(root.join("variants")).unwrap();
+        fs::write(
+            root.join("variants/__init__.spl"),
+            "var:\n  order: [lib.crypto]\n",
+        )
+        .unwrap();
+        fs::create_dir_all(root.join("config")).unwrap();
+        fs::write(
+            root.join("config/var.sdn"),
+            format!(
+                "var:\n  profile: {profile}\n  profiles:\n    prod: {{ lib.crypto: openssl }}\n    base: {{ lib.crypto: default }}\n"
+            ),
+        )
+        .unwrap();
+        if make_openssl_variant {
+            // variant file mirrors the FULL import segments (std.common.crypto.*)
+            let vdir = root.join("variants/lib/crypto/openssl/std/common/crypto");
+            fs::create_dir_all(&vdir).unwrap();
+            fs::write(vdir.join("constant_time.spl"), "# openssl\nfn marker() -> text:\n    \"openssl\"\n").unwrap();
+        }
+    }
+
+    #[test]
+    fn var_overlay_default_profile_falls_through_to_src() {
+        let root = unique_overlay_dir("default");
+        write_overlay_project(&root, "base", true);
+        let base_dir = root.join("src/app");
+        let parts: Vec<String> = ["std", "common", "crypto", "constant_time"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let resolved = resolve_module_path(&parts, &base_dir).unwrap();
+        assert_eq!(resolved, root.join("src/lib/common/crypto/constant_time.spl"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn var_overlay_openssl_profile_selects_variant() {
+        let root = unique_overlay_dir("openssl");
+        write_overlay_project(&root, "prod", true);
+        let base_dir = root.join("src/app");
+        let parts: Vec<String> = ["std", "common", "crypto", "constant_time"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let resolved = resolve_module_path(&parts, &base_dir).unwrap();
+        assert_eq!(
+            resolved,
+            root.join("variants/lib/crypto/openssl/std/common/crypto/constant_time.spl")
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
     fn render_string_list(values: &[String]) -> String {
         format!(
             "[{}]",
