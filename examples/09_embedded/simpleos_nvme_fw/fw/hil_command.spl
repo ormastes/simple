@@ -24,15 +24,26 @@ fn cmd_is_flush(c: NvmeCmd) -> bool:
 # ── Validation ────────────────────────────────────────────────────────────────
 
 fn cmd_validate(c: NvmeCmd) -> i64:
-    # Flush carries nblocks=0 by spec — pass unconditionally.
+    # Reject any opcode the IO command set does not implement -> SC_INVALID_OPCODE.
+    val known: bool = c.opcode == OP_FLUSH or c.opcode == OP_WRITE or c.opcode == OP_READ or c.opcode == OP_DSM_TRIM
+    if not known:
+        return SC_INVALID_OPCODE
+    # Flush carries nblocks=0 by spec and addresses no LBA range — pass unconditionally.
     if c.opcode == OP_FLUSH:
         return SC_SUCCESS
     if c.lba < 0:
         return SC_LBA_RANGE
     if c.nblocks <= 0:
         return SC_LBA_RANGE
-    val end: i64 = c.lba + c.nblocks
-    if end > LBA_COUNT:
+    # Range check, written to be overflow-safe: a malicious lba/nblocks near i64-max
+    # must never wrap `lba + nblocks` negative and slip past the bound (which would
+    # then index l2p[] out of range and crash). Reject the start and count first, then
+    # compare against the headroom so no addition can overflow.
+    if c.lba >= LBA_COUNT:
+        return SC_LBA_RANGE
+    if c.nblocks > LBA_COUNT:
+        return SC_LBA_RANGE
+    if c.lba > LBA_COUNT - c.nblocks:
         return SC_LBA_RANGE
     SC_SUCCESS
 
@@ -94,6 +105,20 @@ fn hil_command_selftest() -> i64:
     # --- flush nblocks=0 -> SC_SUCCESS ---
     val fl: NvmeCmd = cmd_make(13, OP_FLUSH, 0, 0, 0)
     failures = failures + expect_eq(cmd_validate(fl), SC_SUCCESS, "validate flush nblocks=0")
+
+    # --- unknown opcode -> SC_INVALID_OPCODE (not silently accepted / SC_INTERNAL) ---
+    val unk: NvmeCmd = cmd_make(14, 0x7F, 0, 1, 0)
+    failures = failures + expect_eq(cmd_validate(unk), SC_INVALID_OPCODE, "validate unknown opcode")
+
+    # --- overflow-safe range: lba/nblocks near i64-max must NOT wrap past the bound ---
+    val ovf: NvmeCmd = cmd_make(15, OP_WRITE, 9223372036854775000, 9223372036854775000, 0)
+    failures = failures + expect_eq(cmd_validate(ovf), SC_LBA_RANGE, "validate lba+nblocks overflow rejected")
+
+    # --- boundary: lba == LBA_COUNT is out of range; last valid block is in range ---
+    val atlim: NvmeCmd = cmd_make(16, OP_WRITE, LBA_COUNT, 1, 0)
+    failures = failures + expect_eq(cmd_validate(atlim), SC_LBA_RANGE, "validate lba==LBA_COUNT rejected")
+    val lastok: NvmeCmd = cmd_make(17, OP_WRITE, LBA_COUNT - 1, 1, 0)
+    failures = failures + expect_eq(cmd_validate(lastok), SC_SUCCESS, "validate last block in range")
 
     # --- prp_byte returns payload ---
     val p: NvmeCmd = cmd_make(20, OP_READ, 0, 4, 99)
