@@ -252,7 +252,12 @@ pub unsafe extern "C" fn rt_file_read_text(path_ptr: *const u8, path_len: u64) -
 
     if let Ok(guard) = read_text_cache().lock() {
         if let Some(cached) = guard.as_ref() {
-            if cached.path == path_str {
+            // Serve the cached value only when the file on disk is unchanged.
+            // A path-only hit returns stale content after the file was rewritten
+            // out-of-process (e.g. by a subprocess this runtime spawned), which
+            // the in-process write cache never sees. Validate the stamp (len +
+            // mtime) before trusting the cache.
+            if cached.path == path_str && file_stamp(Path::new(path_str)) == Some(cached.stamp) {
                 return cached.value;
             }
         }
@@ -529,7 +534,9 @@ pub unsafe extern "C" fn rt_file_mmap_len(path_ptr: *const u8, path_len: u64) ->
     };
     if let Ok(guard) = mmap_len_cache().lock() {
         if let Some(cached) = guard.as_ref() {
-            if cached.path == path {
+            // Validate the file stamp: a path-only hit returns a stale length
+            // after the file was rewritten out-of-process.
+            if cached.path == path && file_stamp(Path::new(path)) == Some(cached.stamp) {
                 return cached.len;
             }
         }
