@@ -706,3 +706,13 @@ quick lanes, while svLLM local readiness uses
 `LLM_GOAL_SVLLM_LANE_TIMEOUT_SECONDS` or a 120s floor so a normal local
 readiness pass is not misreported as `lane_timeout_45s`. The aggregate env and
 report include each lane's actual timeout seconds for review.
+
+## 2026-06-29 svLLM Memory Transport Restore
+
+`load_model_from_pack_streamed(...)` is restored as the bridge from already-read
+manifest text and chunk bytes into the pure streamer. The memory NVFS transport
+now compiles against that entry again, and `stream_pack` can gather a tensor
+span across sequential chunks instead of rejecting split tensors. The new
+`model_loader_transport_spec` covers success, missing transport chunks, short
+chunk data, and split-tensor streaming; local svLLM readiness now includes that
+transport spec as an evidence subgate.

@@ -107,17 +107,32 @@ fn stream_pack(pack: TensorPack, chunk_data: [[u8]]) -> Result<StreamResult, Str
         val idx = _chunk_index_by_id(pack, t.chunk_id)
         if idx < 0:
             return Err(StreamError.ChunkNotFound)
-        val buf = chunk_data[idx]
-        val chunk_byte_len = pack.chunks[idx].byte_len
-        val start = t.offset_in_chunk
-        val end = t.offset_in_chunk + t.byte_len
-        if start < 0 or t.byte_len < 0 or end > chunk_byte_len:
+        if t.offset_in_chunk < 0 or t.byte_len < 0:
             return Err(StreamError.TensorOutOfBounds)
         var bytes: [u8] = []
-        var b = start
-        while b < end:
-            bytes.push(buf[b])
-            b = b + 1
+        var chunk_idx = idx
+        var chunk_offset = t.offset_in_chunk
+        var remaining = t.byte_len
+        while remaining > 0:
+            if chunk_idx >= pack.chunks.len():
+                return Err(StreamError.TensorOutOfBounds)
+            val buf = chunk_data[chunk_idx]
+            val chunk_byte_len = pack.chunks[chunk_idx].byte_len
+            if chunk_offset < 0 or chunk_offset > chunk_byte_len:
+                return Err(StreamError.TensorOutOfBounds)
+            val available = chunk_byte_len - chunk_offset
+            if available <= 0:
+                return Err(StreamError.TensorOutOfBounds)
+            var take = remaining
+            if take > available:
+                take = available
+            var b = chunk_offset
+            while b < chunk_offset + take:
+                bytes.push(buf[b])
+                b = b + 1
+            remaining = remaining - take
+            chunk_idx = chunk_idx + 1
+            chunk_offset = 0
         stages.push(TensorStage(name: t.name, chunk_id: t.chunk_id, byte_len: t.byte_len, bytes: bytes))
         staged = staged + t.byte_len
         ti = ti + 1

@@ -12,6 +12,7 @@
 
 use std.gc_async_mut.svllm.model_executor.model_loader.tensor_pack.{TensorPack}
 use std.gc_async_mut.svllm.model_executor.model_loader.manifest.{ManifestError, parse_manifest, build_tensor_pack}
+use std.gc_async_mut.svllm.model_executor.model_loader.streamer.{StreamError, plan_stream, stream_pack}
 use std.io_runtime.{file_exists, read_file, file_read_bytes, file_size, file_hash_sha256}
 
 enum LoaderError:
@@ -55,6 +56,25 @@ fn load_model_from_manifest_text(pack_root: text, manifest_text: text) -> Result
             match build_tensor_pack(pack_root, manifest):
                 Err(_) => Err(LoaderError.ManifestInvalid)
                 Ok(pack) => Ok(LoadResult(pack: pack))
+
+fn _stream_error_to_loader_error(error: StreamError) -> LoaderError:
+    match error:
+        StreamError.ChunkDataMissing => LoaderError.ChunkOpenFailed
+        StreamError.ChunkTooShort => LoaderError.ChunkOpenFailed
+        StreamError.TensorOutOfBounds => LoaderError.TensorRangeInvalid
+        StreamError.ChunkNotFound => LoaderError.TensorRangeInvalid
+
+fn load_model_from_pack_streamed(pack_root: text, manifest_text: text, granule: i64, chunk_data: [[u8]]) -> Result<LoadResult, LoaderError>:
+    match load_model_from_manifest_text(pack_root, manifest_text):
+        Err(e) => Err(e)
+        Ok(result) =>
+            val plan = plan_stream(result.pack, granule)
+            match stream_pack(result.pack, chunk_data):
+                Err(e) => Err(_stream_error_to_loader_error(e))
+                Ok(streamed) =>
+                    if streamed.bytes_streamed != plan.total_bytes:
+                        return Err(LoaderError.ChunkOpenFailed)
+                    Ok(result)
 
 fn _manifest_path(pack_root: text) -> text:
     if pack_root.ends_with("/"):
