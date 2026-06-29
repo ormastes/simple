@@ -100,7 +100,9 @@ sh scripts/check/check-llm-strict-host-prereq-doctor.shs
 
 Use `scripts/check/check-llm-strict-host-prereq-doctor-contract.shs` after
 editing the doctor to verify the machine-readable env and Markdown report still
-publish all per-lane `*_next_action` fields.
+publish all per-lane `*_next_action` fields. The main
+`scripts/check/check-llm-goal-evidence.shs` aggregate also runs this contract
+as the `prereq_doctor_contract` lane.
 
 The doctor does not replace the strict aggregate or the per-lane evidence
 wrappers. It only reports whether this host has the dashboard auth/url, local
