@@ -487,3 +487,9 @@ Tasks:
     the JIT `rt_len`/segfault path. Focused bootstrap evidence:
     `src/compiler_rust/target/bootstrap/simple test test/01_unit/app/tooling/context_generate_spec.spl --mode=interpreter --clean`
     passed 15/15.
+14. Harden lower MCP context/Ponytail parity evidence. Status: done on
+    2026-06-29; the system spec now distinguishes live app MCP JSONL execution
+    from lower MCP source-contract parity. Shared assertions lock both handlers
+    to the same source-less SQL routing, `--db`, `--source-filter`, and
+    Ponytail `review`/`simplify` alias contracts without overstating noisy
+    lower-server startup as live evidence.

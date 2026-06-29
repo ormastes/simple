@@ -27,7 +27,7 @@ context_ponytail_mimic_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 8 | 8 | 0 | 0 |
+| 9 | 9 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -128,10 +128,13 @@ expect(query_output).to_contain("alpha_only")
 
 #### REQ-013 and REQ-015 expose SQL query and source filter through app MCP
 
+-  expect context handler contract
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -139,13 +142,7 @@ val handler = read("src/app/mcp/main_lazy_query_tools.spl")
 val table = read("src/app/mcp/tool_table.spl")
 val static_tools = read("src/app/mcp/main_static_tools.spl")
 val dispatch = read("src/app/mcp/main_dispatch.spl")
-expect(handler).to_contain("val sourceless_sql_query = file == \"\" and sql_enabled and query != \"\"")
-expect(handler).to_contain("if file == \"\" and not sourceless_sql_query")
-expect(handler).to_contain("Missing required parameter: file")
-expect(handler).to_contain("ctx_args.push(\"--query=\" + query)")
-expect(handler).to_contain("ctx_args.push(\"--sql\")")
-expect(handler).to_contain("ctx_args.push(\"--db=\" + db_path)")
-expect(handler).to_contain("ctx_args.push(\"--source-filter=\" + source_filter)")
+_expect_context_handler_contract(handler)
 expect(table).to_contain("tool_entry(\"simple_context\"")
 expect(table).to_contain("Source file path; required except when sql=true and query is non-empty")
 expect(table).to_contain("prop_str(\"source_filter\", \"Filter SQL query rows by stored source path\")")
@@ -195,28 +192,51 @@ expect(output).to_contain("mcp_alpha_only")
 
 #### REQ-013 and REQ-015 expose SQL query and source filter through lower MCP
 
+-  expect context handler contract
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val handler = read("src/lib/nogc_async_mut/mcp/main_lazy_query_tools.spl")
 val schema = read("src/lib/nogc_async_mut/mcp/lazy_protocol_schemas.spl")
 val dispatch = read("src/lib/nogc_async_mut/mcp/main_lazy.spl")
-expect(handler).to_contain("val sourceless_sql_query = file == \"\" and sql_enabled and query != \"\"")
-expect(handler).to_contain("if file == \"\" and not sourceless_sql_query")
-expect(handler).to_contain("Missing required parameter: file")
-expect(handler).to_contain("ctx_args.push(\"--sql\")")
-expect(handler).to_contain("ctx_args.push(\"--db=\" + db_path)")
-expect(handler).to_contain("ctx_args.push(\"--source-filter=\" + source_filter)")
+_expect_context_handler_contract(handler)
 expect(schema).to_contain("make_tool_schema(name: \"simple_context\"")
 expect(schema).to_contain("Source file path; required except when sql=true and query is non-empty")
 expect(schema).to_contain("jp(\"source_filter\", jo2")
 expect(schema).to_contain("req = \"[]\"")
 expect(dispatch).to_contain("tool_name == \"simple_context\"")
 expect(dispatch).to_contain("handle_simple_context(id, body)")
+```
+
+</details>
+
+#### keeps app and lower MCP context and Ponytail handler contracts in parity
+
+-  expect context handler contract
+-  expect context handler contract
+-  expect ponytail handler contract
+-  expect ponytail handler contract
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val app_handler = read("src/app/mcp/main_lazy_query_tools.spl")
+val lower_handler = read("src/lib/nogc_async_mut/mcp/main_lazy_query_tools.spl")
+_expect_context_handler_contract(app_handler)
+_expect_context_handler_contract(lower_handler)
+_expect_ponytail_handler_contract(app_handler, "ponytail_simplification_report(file)")
+_expect_ponytail_handler_contract(lower_handler, "ponytail_simplification_report_source(file, source)")
 ```
 
 </details>
@@ -268,10 +288,14 @@ expect(guard).to_contain("Public absence-rendering gate")
 
 #### exposes Ponytail audit and simplification modes through app and lower MCP
 
+-  expect ponytail handler contract
+-  expect ponytail handler contract
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -281,11 +305,12 @@ val lower_handler = read("src/lib/nogc_async_mut/mcp/main_lazy_query_tools.spl")
 val lower_schema = read("src/lib/nogc_async_mut/mcp/lazy_protocol_schemas.spl")
 expect(app_handler).to_contain("ponytail_audit")
 expect(app_handler).to_contain("ponytail_simplification_report")
-expect(app_handler).to_contain("Invalid mode: ")
+_expect_ponytail_handler_contract(app_handler, "ponytail_simplification_report(file)")
 expect(app_handler).to_contain("_render_ponytail_mcp(file, mode, result, format)")
 expect(app_table).to_contain("prop_str(\"mode\", \"Mode: audit/review, simplification/simplify\")")
 expect(lower_handler).to_contain("ponytail_audit_source")
 expect(lower_handler).to_contain("ponytail_simplification_report_source")
+_expect_ponytail_handler_contract(lower_handler, "ponytail_simplification_report_source(file, source)")
 expect(lower_handler).to_contain("_mcp_render_ponytail_report")
 expect(lower_schema).to_contain("make_tool_schema(name: \"simple_ponytail\"")
 expect(lower_schema).to_contain("Mode: audit/review, simplification/simplify")
@@ -297,8 +322,8 @@ expect(lower_schema).to_contain("Mode: audit/review, simplification/simplify")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 8 |
-| Active scenarios | 8 |
+| Total scenarios | 9 |
+| Active scenarios | 9 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

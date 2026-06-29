@@ -41,7 +41,7 @@ Keep:
 
 - `simple_context` coverage includes local index/query, embedded SQLite
   index/query, source-less persisted SQL query, and SQL `source_filter`
-  forwarding through app MCP and lower MCP.
+  forwarding through live app MCP plus lower MCP schema/handler parity.
 - `simple_ponytail` coverage includes audit and simplification report modes,
-  public schema exposure, JSON/Markdown/text rendering contracts, and absence
-  rendering without internal absence markers.
+  app/lower handler mode parity, public schema exposure, JSON/Markdown/text
+  rendering contracts, and absence rendering without internal absence markers.
