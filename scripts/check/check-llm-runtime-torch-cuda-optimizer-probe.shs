@@ -11,7 +11,9 @@ OUT_ENV="$BUILD_DIR/evidence.env"
 OUT_LOG="$BUILD_DIR/probe.log"
 LIBTORCH_PROBE_LOG="$BUILD_DIR/system_libtorch_probe.log"
 SURFACE_MANIFEST="$BUILD_DIR/torch_cuda_optimizer_surface_manifest.tsv"
+WRAPPER_PATH="scripts/check/check-llm-runtime-torch-cuda-optimizer-probe.shs"
 PROBE="src/app/test/torch_cuda_optimizer_probe.spl"
+PROBE_COMMAND="$SIMPLE_BIN run $PROBE --mode=interpreter --clean"
 STRICT=0
 
 while [ "$#" -gt 0 ]; do
@@ -30,6 +32,36 @@ done
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
 rm -f "$OUT_ENV" "$OUT_LOG" "$REPORT_PATH" "$SURFACE_MANIFEST" "$LIBTORCH_PROBE_LOG"
 
+artifact_sha256() {
+    path="$1"
+    if [ -n "$path" ] && [ -f "$path" ]; then
+        if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$path" | awk '{print $1}'
+        elif command -v shasum >/dev/null 2>&1; then
+            shasum -a 256 "$path" | awk '{print $1}'
+        else
+            printf '%s\n' "unavailable"
+        fi
+    else
+        printf '%s\n' "missing"
+    fi
+}
+
+text_sha256() {
+    text="$1"
+    if command -v sha256sum >/dev/null 2>&1; then
+        printf '%s' "$text" | sha256sum | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        printf '%s' "$text" | shasum -a 256 | awk '{print $1}'
+    else
+        printf '%s\n' "unavailable"
+    fi
+}
+
+wrapper_sha256="$(artifact_sha256 "$WRAPPER_PATH")"
+probe_sha256="$(artifact_sha256 "$PROBE")"
+probe_command_sha256="$(text_sha256 "$PROBE_COMMAND")"
+
 PYTHON_TORCH_ENV="$BUILD_DIR/python_torch.env"
 python3 - "$PYTHON_TORCH_ENV" <<'PY'
 import sys
@@ -42,6 +74,12 @@ values = {
     "python_torch_package_dir": "missing",
     "python_torch_cmake_prefix_path": "missing",
     "python_torch_library_paths": "missing",
+    "python_torch_library_count": "0",
+    "python_torch_libtorch_status": "missing",
+    "python_torch_libtorch_cuda_status": "missing",
+    "python_torch_libc10_status": "missing",
+    "python_torch_libc10_cuda_status": "missing",
+    "python_torch_cuda_library_bundle_status": "missing",
     "python_torch_cuda_available": "false",
     "python_torch_cuda_device_count": "0",
     "python_torch_error": "none",
@@ -60,6 +98,17 @@ try:
         libs = sorted(str(path) for pattern in ("libtorch*.so*", "libc10*.so*") for path in lib_dir.glob(pattern))
         if libs:
             values["python_torch_library_paths"] = ",".join(libs)
+            values["python_torch_library_count"] = str(len(libs))
+            names = {Path(path).name for path in libs}
+            values["python_torch_libtorch_status"] = "ready" if "libtorch.so" in names else "missing"
+            values["python_torch_libtorch_cuda_status"] = "ready" if "libtorch_cuda.so" in names else "missing"
+            values["python_torch_libc10_status"] = "ready" if "libc10.so" in names else "missing"
+            values["python_torch_libc10_cuda_status"] = "ready" if "libc10_cuda.so" in names else "missing"
+            if (values["python_torch_libtorch_status"] == "ready"
+                    and values["python_torch_libtorch_cuda_status"] == "ready"
+                    and values["python_torch_libc10_status"] == "ready"
+                    and values["python_torch_libc10_cuda_status"] == "ready"):
+                values["python_torch_cuda_library_bundle_status"] = "ready"
     cmake_prefix_path = getattr(getattr(torch, "utils", None), "cmake_prefix_path", "")
     if cmake_prefix_path:
         values["python_torch_cmake_prefix_path"] = str(cmake_prefix_path)
@@ -78,6 +127,12 @@ python_torch_file="$(sed -n 's/^python_torch_file=//p' "$PYTHON_TORCH_ENV" | tai
 python_torch_package_dir="$(sed -n 's/^python_torch_package_dir=//p' "$PYTHON_TORCH_ENV" | tail -n 1)"
 python_torch_cmake_prefix_path="$(sed -n 's/^python_torch_cmake_prefix_path=//p' "$PYTHON_TORCH_ENV" | tail -n 1)"
 python_torch_library_paths="$(sed -n 's/^python_torch_library_paths=//p' "$PYTHON_TORCH_ENV" | tail -n 1)"
+python_torch_library_count="$(sed -n 's/^python_torch_library_count=//p' "$PYTHON_TORCH_ENV" | tail -n 1)"
+python_torch_libtorch_status="$(sed -n 's/^python_torch_libtorch_status=//p' "$PYTHON_TORCH_ENV" | tail -n 1)"
+python_torch_libtorch_cuda_status="$(sed -n 's/^python_torch_libtorch_cuda_status=//p' "$PYTHON_TORCH_ENV" | tail -n 1)"
+python_torch_libc10_status="$(sed -n 's/^python_torch_libc10_status=//p' "$PYTHON_TORCH_ENV" | tail -n 1)"
+python_torch_libc10_cuda_status="$(sed -n 's/^python_torch_libc10_cuda_status=//p' "$PYTHON_TORCH_ENV" | tail -n 1)"
+python_torch_cuda_library_bundle_status="$(sed -n 's/^python_torch_cuda_library_bundle_status=//p' "$PYTHON_TORCH_ENV" | tail -n 1)"
 python_torch_cuda_available="$(sed -n 's/^python_torch_cuda_available=//p' "$PYTHON_TORCH_ENV" | tail -n 1)"
 python_torch_cuda_device_count="$(sed -n 's/^python_torch_cuda_device_count=//p' "$PYTHON_TORCH_ENV" | tail -n 1)"
 python_torch_error="$(sed -n 's/^python_torch_error=//p' "$PYTHON_TORCH_ENV" | tail -n 1)"
@@ -161,7 +216,7 @@ fi
 status="fail"
 reason="probe_failed"
 exit_code=0
-if "$SIMPLE_BIN" run "$PROBE" --mode=interpreter --clean >"$OUT_LOG" 2>&1; then
+if $PROBE_COMMAND >"$OUT_LOG" 2>&1; then
     :
 else
     exit_code=$?
@@ -353,6 +408,12 @@ esac
 
 {
     printf '%s\n' "torch_cuda_optimizer_probe_required_gates=$required_gates"
+    printf '%s\n' "torch_cuda_optimizer_probe_wrapper_path=$WRAPPER_PATH"
+    printf '%s\n' "torch_cuda_optimizer_probe_wrapper_sha256=$wrapper_sha256"
+    printf '%s\n' "torch_cuda_optimizer_probe_probe_path=$PROBE"
+    printf '%s\n' "torch_cuda_optimizer_probe_probe_sha256=$probe_sha256"
+    printf '%s\n' "torch_cuda_optimizer_probe_probe_command=$PROBE_COMMAND"
+    printf '%s\n' "torch_cuda_optimizer_probe_probe_command_sha256=$probe_command_sha256"
     printf '%s\n' "torch_cuda_optimizer_probe_blocked_gate=$blocked_gate"
     printf '%s\n' "torch_cuda_optimizer_probe_blocked_gates=$blocked_gates"
     printf '%s\n' "torch_cuda_optimizer_probe_primary_blocked_gate=$primary_blocked_gate"
@@ -374,6 +435,12 @@ esac
     printf '%s\n' "torch_cuda_optimizer_probe_python_torch_package_dir=$python_torch_package_dir"
     printf '%s\n' "torch_cuda_optimizer_probe_python_torch_cmake_prefix_path=$python_torch_cmake_prefix_path"
     printf '%s\n' "torch_cuda_optimizer_probe_python_torch_library_paths=$python_torch_library_paths"
+    printf '%s\n' "torch_cuda_optimizer_probe_python_torch_library_count=${python_torch_library_count:-0}"
+    printf '%s\n' "torch_cuda_optimizer_probe_python_torch_libtorch_status=${python_torch_libtorch_status:-missing}"
+    printf '%s\n' "torch_cuda_optimizer_probe_python_torch_libtorch_cuda_status=${python_torch_libtorch_cuda_status:-missing}"
+    printf '%s\n' "torch_cuda_optimizer_probe_python_torch_libc10_status=${python_torch_libc10_status:-missing}"
+    printf '%s\n' "torch_cuda_optimizer_probe_python_torch_libc10_cuda_status=${python_torch_libc10_cuda_status:-missing}"
+    printf '%s\n' "torch_cuda_optimizer_probe_python_torch_cuda_library_bundle_status=${python_torch_cuda_library_bundle_status:-missing}"
     printf '%s\n' "torch_cuda_optimizer_probe_python_torch_cuda_available=$python_torch_cuda_available"
     printf '%s\n' "torch_cuda_optimizer_probe_python_torch_cuda_device_count=$python_torch_cuda_device_count"
     printf '%s\n' "torch_cuda_optimizer_probe_python_torch_error=$python_torch_error"
@@ -405,7 +472,12 @@ esac
 
 {
     printf '# LLM Runtime Torch CUDA Optimizer Probe\n\n'
-    printf '%s\n' "- command: \`$SIMPLE_BIN run $PROBE --mode=interpreter --clean\`"
+    printf '%s\n' "- command: \`$PROBE_COMMAND\`"
+    printf '%s\n' "- wrapper_path: \`$WRAPPER_PATH\`"
+    printf '%s\n' "- wrapper_sha256: \`$wrapper_sha256\`"
+    printf '%s\n' "- probe_path: \`$PROBE\`"
+    printf '%s\n' "- probe_sha256: \`$probe_sha256\`"
+    printf '%s\n' "- probe_command_sha256: \`$probe_command_sha256\`"
     printf '%s\n' "- status: \`$status\`"
     printf '%s\n' "- reason: \`$reason\`"
     printf '%s\n' "- required_gates: \`$required_gates\`"
@@ -429,6 +501,12 @@ esac
     printf '%s\n' "- python_torch_package_dir: \`$python_torch_package_dir\`"
     printf '%s\n' "- python_torch_cmake_prefix_path: \`$python_torch_cmake_prefix_path\`"
     printf '%s\n' "- python_torch_library_paths: \`$python_torch_library_paths\`"
+    printf '%s\n' "- python_torch_library_count: \`${python_torch_library_count:-0}\`"
+    printf '%s\n' "- python_torch_libtorch_status: \`${python_torch_libtorch_status:-missing}\`"
+    printf '%s\n' "- python_torch_libtorch_cuda_status: \`${python_torch_libtorch_cuda_status:-missing}\`"
+    printf '%s\n' "- python_torch_libc10_status: \`${python_torch_libc10_status:-missing}\`"
+    printf '%s\n' "- python_torch_libc10_cuda_status: \`${python_torch_libc10_cuda_status:-missing}\`"
+    printf '%s\n' "- python_torch_cuda_library_bundle_status: \`${python_torch_cuda_library_bundle_status:-missing}\`"
     printf '%s\n' "- python_torch_cuda_available: \`$python_torch_cuda_available\`"
     printf '%s\n' "- python_torch_cuda_device_count: \`$python_torch_cuda_device_count\`"
     printf '%s\n' "- python_torch_env: \`$PYTHON_TORCH_ENV\`"

@@ -311,12 +311,24 @@ classifying the self-hosted Simple runtime as `unavailable` with
 `torch_cuda_optimizer_probe_blocked_gate`,
 `torch_cuda_optimizer_probe_blocked_gates`,
 `torch_cuda_optimizer_probe_primary_blocked_gate`,
+`torch_cuda_optimizer_probe_wrapper_path`,
+`torch_cuda_optimizer_probe_wrapper_sha256`,
+`torch_cuda_optimizer_probe_probe_path`,
+`torch_cuda_optimizer_probe_probe_sha256`,
+`torch_cuda_optimizer_probe_probe_command`,
+`torch_cuda_optimizer_probe_probe_command_sha256`,
 `torch_cuda_optimizer_probe_python_torch_module_status`,
 `torch_cuda_optimizer_probe_python_torch_version`,
 `torch_cuda_optimizer_probe_python_torch_file`,
 `torch_cuda_optimizer_probe_python_torch_package_dir`,
 `torch_cuda_optimizer_probe_python_torch_cmake_prefix_path`,
 `torch_cuda_optimizer_probe_python_torch_library_paths`,
+`torch_cuda_optimizer_probe_python_torch_library_count`,
+`torch_cuda_optimizer_probe_python_torch_libtorch_status`,
+`torch_cuda_optimizer_probe_python_torch_libtorch_cuda_status`,
+`torch_cuda_optimizer_probe_python_torch_libc10_status`,
+`torch_cuda_optimizer_probe_python_torch_libc10_cuda_status`,
+`torch_cuda_optimizer_probe_python_torch_cuda_library_bundle_status`,
 `torch_cuda_optimizer_probe_python_torch_cuda_available`,
 `torch_cuda_optimizer_probe_python_torch_cuda_device_count`,
 `torch_cuda_optimizer_probe_python_torch_env_size`,
@@ -338,8 +350,10 @@ classifying the self-hosted Simple runtime as `unavailable` with
 `torch_cuda_optimizer_probe_next_action` so strict aggregate runs can report the
 compact blocked Torch gate list, the first blocked gate, independent pass-log
 integrity, the Python Torch wheel file/package/CMake/library path diagnostics,
-the hashed Python Torch discovery env, the hashed system libtorch probe, the
-hashed Torch optimizer source/spec/doc surface, and the next operator step. A
+explicit Python wheel libtorch/libc10 CUDA library-bundle readiness, the hashed
+Python Torch discovery env, the hashed system libtorch probe, the hashed wrapper
+and probe source, the hashed probe command, the hashed Torch optimizer
+source/spec/doc surface, and the next operator step. A
 probe `status=pass` is accepted only
 when the wrapper also sees a zero wrapper exit, a non-empty hashed probe log,
 exactly one complete proof record for status, required gates, libtorch/CUDA
