@@ -624,6 +624,9 @@ pub fn rc_prob_update(prob: i64, bit: i64) -> i64:
     else:
         prob - (prob >> RC_SHIFT_BITS)
 
+fn rc_prob_is_valid(prob: i64) -> bool:
+    prob > 0 and prob < RC_BIT_MODEL_TOTAL
+
 # ---------------------------------------------------------------------------
 # RangeEncoder
 # ---------------------------------------------------------------------------
@@ -767,13 +770,19 @@ pub fn rc_encode_bits(bits: [i64], prob_init: i64) -> ByteSpan:
     Starting probability is `prob_init`; it is updated via rc_prob_update after
     each bit. Returns the flushed byte stream as a ByteSpan.
     """
+    if not rc_prob_is_valid(prob_init):
+        return ByteSpan.empty()
     var enc = RangeEncoder.new()
     var prob = prob_init
     var i = 0
     while i < bits.len():
         var b = bits[i]
+        if b != 0 and b != 1:
+            return ByteSpan.empty()
         enc.encode_bit(prob, b)
         prob = rc_prob_update(prob, b)
+        if not rc_prob_is_valid(prob):
+            return ByteSpan.empty()
         i = i + 1
     enc.flush()
     enc.finish()
@@ -785,6 +794,8 @@ pub fn rc_decode_bits(encoded: ByteSpan, count: i64, prob_init: i64) -> [i64]:
     each bit, mirroring the encoder's probability evolution.
     Returns the decoded bit sequence as [i64].
     """
+    if count < 0 or not rc_prob_is_valid(prob_init):
+        return []
     var dec = RangeDecoder.new(encoded)
     var prob = prob_init
     var out: [i64] = []
@@ -793,5 +804,7 @@ pub fn rc_decode_bits(encoded: ByteSpan, count: i64, prob_init: i64) -> [i64]:
         val b = dec.decode_bit(prob)
         out.push(b)
         prob = rc_prob_update(prob, b)
+        if not rc_prob_is_valid(prob):
+            return []
         i = i + 1
     out
