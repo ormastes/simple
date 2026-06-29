@@ -9,6 +9,7 @@ reclaimable (no CLOSED block exists yet).
 
 use nvme_types.*
 use ftl_band.*
+use fil.*
 
 fn gc_select_victim(band: BandAlloc) -> i64:
     var best: i64 = UNMAP
@@ -21,6 +22,23 @@ fn gc_select_victim(band: BandAlloc) -> i64:
             if v < best_valid:
                 best_valid = v
                 best = blk
+        blk = blk + 1
+    best
+
+# Static wear-leveling victim: the CLOSED block holding live data with the LOWEST
+# erase count (the coldest block). Reclaiming it frees a lightly-worn block back into
+# the write rotation so wear spreads evenly. Returns UNMAP if none qualifies.
+fn gc_select_wear_victim(band: BandAlloc, fil: Fil) -> i64:
+    var best: i64 = UNMAP
+    var best_ec: i64 = 0
+    var blk: i64 = 0
+    while blk < NUM_BLOCKS:
+        if band.block_state(blk) == BLK_CLOSED:
+            if band.valid_count(blk) > 0:
+                val ec: i64 = fil.erase_count(blk)
+                if best == UNMAP or ec < best_ec:
+                    best_ec = ec
+                    best = blk
         blk = blk + 1
     best
 

@@ -18,14 +18,15 @@ use ftl_journal.*
 use ftl_gc.*
 
 struct Ftl:
-    fil:     Fil
-    map:     L2pMap
-    band:    BandAlloc
-    journal: Journal
-    seq:     i64
+    fil:       Fil
+    map:       L2pMap
+    band:      BandAlloc
+    journal:   Journal
+    seq:       i64
+    rd_disturb: [i64]   # per-block read counter (volatile) driving read-disturb scrub
 
 fn ftl_new() -> Ftl:
-    Ftl(fil: fil_new(), map: ftl_map_new(), band: ftl_band_new(), journal: ftl_journal_new(), seq: 0)
+    Ftl(fil: fil_new(), map: ftl_map_new(), band: ftl_band_new(), journal: ftl_journal_new(), seq: 0, rd_disturb: ftl_fill(NUM_BLOCKS, 0))
 
 impl Ftl:
     # Write one logical block (log-structured): program a fresh physical page with OOB
@@ -51,10 +52,13 @@ impl Ftl:
         SC_SUCCESS
 
     # Read one logical block; an unmapped (never-written / trimmed) LBA reads 0.
+    # Each read accumulates read-disturb on the backing block (drives scrub_once).
     me read(lba: i64) -> i64:
         val ppn: i64 = me.map.lookup(lba)
         if ppn == UNMAP:
             return 0
+        val blk: i64 = ppn_block(ppn)
+        me.rd_disturb[blk] = me.rd_disturb[blk] + 1
         val rd: FilRead = me.fil.read(ppn)
         rd.data
 
@@ -104,6 +108,7 @@ impl Ftl:
     me crash():
         me.map.crash_volatile()
         me.band.reset_volatile()
+        me.rd_disturb = ftl_fill(NUM_BLOCKS, 0)
 
     # Power-on recovery. Rebuild all volatile state from persistent media:
     #  1. Replay the journal (WAL) onto the flash-resident L2P in append order
@@ -182,22 +187,31 @@ impl Ftl:
     me nand_word(ppn: i64) -> i64:
         me.fil.read(ppn).data
 
-    # Garbage-collect one victim block: relocate its live pages to fresh pages
-    # (durable + journaled BEFORE the victim is erased), then erase and reclaim it.
-    # A crash mid-GC leaves the new copy discoverable by recovery (newest seq wins).
-    # Returns the reclaimed block, or UNMAP if there is nothing to collect OR the
-    # victim could not be fully drained.
+    # OOB logical-block tag stored at a physical page (UNMAP if erased/empty).
+    me nand_lba(ppn: i64) -> i64:
+        me.fil.read(ppn).lba
+
+    me block_valid_count(blk: i64) -> i64:
+        me.band.valid_count(blk)
+
+    me page_live(ppn: i64) -> i64:
+        var v: i64 = 0
+        if me.band.is_valid(ppn):
+            v = 1
+        v
+
+    # Reclaim one block: relocate its live pages to fresh pages (durable + journaled
+    # BEFORE the block is erased), then erase and free it. Returns the block, or UNMAP
+    # if it could not be fully drained.
     #
-    # SAFETY (data-loss guard): the victim is erased ONLY after EVERY live page has
-    # been relocated. If a relocation cannot allocate a fresh page (device full /
-    # GC reserve exhausted), GC aborts and returns UNMAP, leaving the victim — and
-    # the host data it still holds — intact. Erasing a victim with un-relocated live
-    # pages would destroy committed data while the L2P map still points into it.
-    me gc_once() -> i64:
-        val victim: i64 = gc_select_victim(me.band)
-        if victim == UNMAP:
-            return UNMAP
-        val base: i64 = block_first_ppn(victim)
+    # SAFETY (data-loss guard): the block is erased ONLY after EVERY live page has been
+    # relocated. If a relocation cannot allocate a fresh page (device full / GC reserve
+    # exhausted), this aborts and returns UNMAP, leaving the block — and the host data it
+    # still holds — intact. Erasing a block with un-relocated live pages would destroy
+    # committed data while the L2P map still points into it. A crash mid-reclaim leaves
+    # the new copy discoverable by recovery (newest seq wins).
+    me reclaim_block(blk: i64) -> i64:
+        val base: i64 = block_first_ppn(blk)
         var p: i64 = 0
         while p < PAGES_PER_BLOCK:
             val ppn: i64 = base + p
@@ -206,7 +220,7 @@ impl Ftl:
                 val rd: FilRead = me.fil.read(ppn)
                 val newp: i64 = me.band.alloc_page()
                 if newp == NO_PPN:
-                    return UNMAP    # cannot relocate -> do NOT erase; victim stays intact
+                    return UNMAP    # cannot relocate -> do NOT erase; block stays intact
                 me.seq = me.seq + 1
                 me.fil.program(newp, rd.lba, me.seq, rd.data)
                 me.ensure_journal_room()
@@ -215,9 +229,46 @@ impl Ftl:
                 me.band.mark_valid(newp)
                 me.band.mark_invalid(ppn)
             p = p + 1
-        me.fil.erase(victim)
-        me.band.free_block(victim)
-        victim
+        me.fil.erase(blk)
+        me.band.free_block(blk)
+        me.rd_disturb[blk] = 0      # erased -> read-disturb accumulation cleared
+        blk
+
+    # Garbage-collect one victim: the greedy (fewest-valid) CLOSED block. Returns the
+    # reclaimed block, or UNMAP if nothing is collectable / it could not be drained.
+    me gc_once() -> i64:
+        val victim: i64 = gc_select_victim(me.band)
+        if victim == UNMAP:
+            return UNMAP
+        me.reclaim_block(victim)
+
+    # Static wear leveling: when the erase-count spread between the most- and least-worn
+    # live blocks exceeds WL_THRESHOLD, reclaim the coldest (least-erased) block so the
+    # static data it holds moves and that lightly-worn block rejoins the write rotation.
+    # Returns the leveled block, or UNMAP if wear is already balanced.
+    me wear_level_once() -> i64:
+        val cold: i64 = gc_select_wear_victim(me.band, me.fil)
+        if cold == UNMAP:
+            return UNMAP
+        if me.max_erase() - me.fil.erase_count(cold) <= WL_THRESHOLD:
+            return UNMAP
+        me.reclaim_block(cold)
+
+    # Read-disturb scrub: reclaim a CLOSED block whose accumulated read count exceeds
+    # READ_DISTURB_THRESHOLD, rewriting its live pages fresh (clearing disturb) and
+    # erasing it. Returns the scrubbed block, or UNMAP if none needs it.
+    me scrub_once() -> i64:
+        var target: i64 = UNMAP
+        var blk: i64 = 0
+        while blk < NUM_BLOCKS:
+            if me.band.block_state(blk) == BLK_CLOSED:
+                if me.band.valid_count(blk) > 0 and me.rd_disturb[blk] > READ_DISTURB_THRESHOLD:
+                    if target == UNMAP:
+                        target = blk
+            blk = blk + 1
+        if target == UNMAP:
+            return UNMAP
+        me.reclaim_block(target)
 
 # ── Self-test ─────────────────────────────────────────────────────────────────
 
@@ -330,4 +381,50 @@ fn ftl_durability_selftest() -> i64:
             miss = miss + 1
         i = i + 1
     fail = fail + expect_eq(miss, 0, "durab: 600 writes survive WAL overflow + power cycle")
+    fail
+
+# Regression: static wear-leveling + read-disturb scrub (see wear_scrub_check.spl).
+fn ftl_media_mgmt_selftest() -> i64:
+    var fail: i64 = 0
+    # A. read-disturb scrub: a heavily-read CLOSED block is reclaimed, data preserved.
+    var ftl: Ftl = ftl_new()
+    var j: i64 = 0
+    while j < PAGES_PER_BLOCK:
+        ftl.write(100 + j, 200 + j)
+        j = j + 1
+    ftl.write(900, 0x55)
+    var i: i64 = 0
+    while i <= READ_DISTURB_THRESHOLD:
+        ftl.read(100)
+        i = i + 1
+    var sok: i64 = 0
+    if ftl.scrub_once() != UNMAP:
+        sok = 1
+    fail = fail + expect_eq(sok, 1, "media: scrub reclaims a heavily-read block")
+    fail = fail + expect_eq(ftl.read(100), 200, "media: data survives read-disturb scrub")
+    fail = fail + expect_eq(ftl.scrub_once(), UNMAP, "media: no scrub after the counter reset")
+    # B. static wear leveling: the coldest block is reclaimed once wear spread is high.
+    var f2: Ftl = ftl_new()
+    var c: i64 = 0
+    while c < PAGES_PER_BLOCK:
+        f2.write(c, 1000 + c)
+        c = c + 1
+    f2.write(2500, 0xC0)
+    var h0: i64 = 0
+    while h0 < PAGES_PER_BLOCK:
+        f2.write(2000 + h0, h0)
+        h0 = h0 + 1
+    var guard: i64 = 0
+    while f2.max_erase() <= WL_THRESHOLD and guard < 100:
+        var h: i64 = 0
+        while h < PAGES_PER_BLOCK:
+            f2.write(2000 + h, guard * 1000 + h)
+            h = h + 1
+        f2.gc_once()
+        guard = guard + 1
+    var lok: i64 = 0
+    if f2.wear_level_once() != UNMAP:
+        lok = 1
+    fail = fail + expect_eq(lok, 1, "media: wear-level reclaims the coldest block")
+    fail = fail + expect_eq(f2.read(0), 1000, "media: cold data survives wear-leveling")
     fail
