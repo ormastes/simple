@@ -1,0 +1,219 @@
+#![allow(unnamed_duplicate_typed_args)]
+"""3D Engine — Color Utilities
+
+@tag:stdlib
+@tag:api
+@tag:gpu
+
+RGBA color packing/unpacking, linear/sRGB conversion, HDR color support.
+Colors are packed as u32 in ARGB layout: 0xAARRGGBB.
+
+Usage:
+    use std.gpu.engine3d.color3d.{rgba3d, rgb3d, linear_to_srgb, srgb_to_linear}
+"""
+
+extern fn rt_f64_sqrt(x: f64) -> f64
+extern fn rt_f64_pow(base: f64, exp: f64) -> f64
+
+# ============================================================================
+# Internal Helpers
+# ============================================================================
+
+fn _c3d_sqrt(x: f32) -> f32:
+    rt_f64_sqrt(x as f64) as f32
+
+fn _c3d_pow(base: f32, exp: f32) -> f32:
+    rt_f64_pow(base as f64, exp as f64) as f32
+
+fn _c3d_clamp_byte(v: i32) -> i32:
+    if v < 0:
+        0
+    else if v > 255:
+        255
+    else:
+        v
+
+fn _c3d_clamp_f32(v: f32, lo: f32, hi: f32) -> f32:
+    if v < lo:
+        lo
+    else if v > hi:
+        hi
+    else:
+        v
+
+fn _c3d_to_u32(v: i32) -> u32:
+    v as u32
+
+fn _c3d_to_i32(v: u32) -> i32:
+    v as i32
+
+# ============================================================================
+# Color Construction
+# ============================================================================
+
+fn rgba3d(r: i32, g: i32, b: i32, a: i32) -> u32:
+    """Pack RGBA components into a single u32 (ARGB layout).
+
+    Args:
+        r: Red component (0-255)
+        g: Green component (0-255)
+        b: Blue component (0-255)
+        a: Alpha component (0-255, 255=opaque)
+
+    Returns:
+        Packed color as u32
+    """
+    val rc = _c3d_clamp_byte(r)
+    val gc = _c3d_clamp_byte(g)
+    val bc = _c3d_clamp_byte(b)
+    val ac = _c3d_clamp_byte(a)
+    var result: u32 = 0
+    result = result | (_c3d_to_u32(ac) << 24)
+    result = result | (_c3d_to_u32(rc) << 16)
+    result = result | (_c3d_to_u32(gc) << 8)
+    result = result | _c3d_to_u32(bc)
+    result
+
+fn rgb3d(r: i32, g: i32, b: i32) -> u32:
+    """Pack RGB components into u32 with full opacity (alpha=255)."""
+    rgba3d(r, g, b, 255)
+
+# ============================================================================
+# Color Extraction
+# ============================================================================
+
+fn c3d_r(c: u32) -> i32:
+    """Extract red component from packed color."""
+    _c3d_to_i32((c >> 16) & 0xFF)
+
+fn c3d_g(c: u32) -> i32:
+    """Extract green component from packed color."""
+    _c3d_to_i32((c >> 8) & 0xFF)
+
+fn c3d_b(c: u32) -> i32:
+    """Extract blue component from packed color."""
+    _c3d_to_i32(c & 0xFF)
+
+fn c3d_a(c: u32) -> i32:
+    """Extract alpha component from packed color."""
+    _c3d_to_i32((c >> 24) & 0xFF)
+
+# ============================================================================
+# Linear / sRGB Conversion
+# ============================================================================
+
+fn srgb_to_linear_component(v: f32) -> f32:
+    """Convert a single sRGB component [0,1] to linear [0,1]."""
+    if v <= 0.04045:
+        v / 12.92
+    else:
+        _c3d_pow((v + 0.055) / 1.055, 2.4)
+
+fn linear_to_srgb_component(v: f32) -> f32:
+    """Convert a single linear component [0,1] to sRGB [0,1]."""
+    if v <= 0.0031308:
+        v * 12.92
+    else:
+        1.055 * _c3d_pow(v, 1.0 / 2.4) - 0.055
+
+fn srgb_to_linear(color: u32) -> [f32]:
+    """Convert packed sRGB color to linear RGB float array [r,g,b,a]."""
+    val r = (c3d_r(color) as f32) / 255.0
+    val g = (c3d_g(color) as f32) / 255.0
+    val b = (c3d_b(color) as f32) / 255.0
+    val a = (c3d_a(color) as f32) / 255.0
+    [srgb_to_linear_component(r), srgb_to_linear_component(g), srgb_to_linear_component(b), a]
+
+fn linear_to_srgb(linear: [f32]) -> u32:
+    """Convert linear RGB float [r,g,b,a] to packed sRGB color."""
+    val r = _c3d_clamp_f32(linear_to_srgb_component(linear[0]), 0.0, 1.0)
+    val g = _c3d_clamp_f32(linear_to_srgb_component(linear[1]), 0.0, 1.0)
+    val b = _c3d_clamp_f32(linear_to_srgb_component(linear[2]), 0.0, 1.0)
+    val a = _c3d_clamp_f32(linear[3], 0.0, 1.0)
+    rgba3d((r * 255.0) as i32, (g * 255.0) as i32, (b * 255.0) as i32, (a * 255.0) as i32)
+
+# ============================================================================
+# Blending
+# ============================================================================
+
+fn blend3d(src: u32, dst: u32) -> u32:
+    """Alpha-blend src over dst (Porter-Duff src-over)."""
+    val sa = c3d_a(src)
+    if sa == 255:
+        return src
+    if sa == 0:
+        return dst
+    val inv = 255 - sa
+    val rr = (c3d_r(src) * sa + c3d_r(dst) * inv) / 255
+    val rg = (c3d_g(src) * sa + c3d_g(dst) * inv) / 255
+    val rb = (c3d_b(src) * sa + c3d_b(dst) * inv) / 255
+    val ra = sa + (c3d_a(dst) * inv) / 255
+    rgba3d(rr, rg, rb, ra)
+
+fn lerp_color3d(a_col: u32, b_col: u32, t: f32) -> u32:
+    """Linearly interpolate between two colors."""
+    var tc = t
+    if tc < 0.0:
+        tc = 0.0
+    if tc > 1.0:
+        tc = 1.0
+    val ti = (tc * 255.0) as i32
+    val inv = 255 - ti
+    val rr = (c3d_r(a_col) * inv + c3d_r(b_col) * ti) / 255
+    val rg = (c3d_g(a_col) * inv + c3d_g(b_col) * ti) / 255
+    val rb = (c3d_b(a_col) * inv + c3d_b(b_col) * ti) / 255
+    val ra = (c3d_a(a_col) * inv + c3d_a(b_col) * ti) / 255
+    rgba3d(rr, rg, rb, ra)
+
+# ============================================================================
+# HDR Support
+# ============================================================================
+
+fn pack_hdr_color(r: f32, g: f32, b: f32, a: f32) -> [f32]:
+    """Pack HDR color as float array (no clamping)."""
+    [r, g, b, a]
+
+fn tonemap_reinhard(hdr: [f32], exposure: f32) -> u32:
+    """Reinhard tonemap: convert HDR [r,g,b,a] to LDR u32."""
+    val r = hdr[0] * exposure / (1.0 + hdr[0] * exposure)
+    val g = hdr[1] * exposure / (1.0 + hdr[1] * exposure)
+    val b = hdr[2] * exposure / (1.0 + hdr[2] * exposure)
+    rgba3d(
+        _c3d_clamp_byte((r * 255.0) as i32),
+        _c3d_clamp_byte((g * 255.0) as i32),
+        _c3d_clamp_byte((b * 255.0) as i32),
+        _c3d_clamp_byte((hdr[3] * 255.0) as i32)
+    )
+
+fn luminance3d(color: u32) -> f32:
+    """Compute relative luminance (BT.709)."""
+    val r = (c3d_r(color) as f32) / 255.0
+    val g = (c3d_g(color) as f32) / 255.0
+    val b = (c3d_b(color) as f32) / 255.0
+    0.2126 * r + 0.7152 * g + 0.0722 * b
+
+fn luminance_linear(linear: [f32]) -> f32:
+    """Compute luminance from linear RGB float array."""
+    0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+
+# ============================================================================
+# Named Color Constants
+# ============================================================================
+
+fn color3d_white() -> u32:
+    rgb3d(255, 255, 255)
+
+fn color3d_black() -> u32:
+    rgb3d(0, 0, 0)
+
+fn color3d_red() -> u32:
+    rgb3d(255, 0, 0)
+
+fn color3d_green() -> u32:
+    rgb3d(0, 255, 0)
+
+fn color3d_blue() -> u32:
+    rgb3d(0, 0, 255)
+
+fn color3d_transparent() -> u32:
+    rgba3d(0, 0, 0, 0)

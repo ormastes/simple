@@ -1,0 +1,216 @@
+# @cover src/compiler/70.backend/spec_const_registry.spl 90%
+# @cover src/compiler/70.backend/gpu_intrinsics.spl 70%
+# @cover src/compiler/70.backend/backend/opencl_backend.spl 70%
+# @cover src/compiler/70.backend/backend/cuda_backend.spl 70%
+# @tag: unit, compiler, gpu, codegen, spec_constants
+
+use compiler.backend.backend.backend_types.{BackendKind, CodegenTarget, compileoptions_default_options, CompileError}
+use compiler.backend.opencl_backend.{OpenClBackend}
+use compiler.backend.cuda_backend.{CudaBackend}
+use compiler.backend.gpu_intrinsics.{is_gpu_intrinsic, recognize_gpu_intrinsic, all_gpu_intrinsic_names}
+use compiler.backend.spec_const_registry.{spec_const_set, spec_const_clear, spec_const_resolve}
+use compiler.common.attributes.{vhdl_hardware_metadata_default}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir_data.{MirFunction, MirModule, MirSignature, BlockId, LocalId}
+use compiler.mir.mir_instructions.{MirBlock, MirInst, MirInstKind, MirTerminator, MirOperand, MirOperandKind, GpuBarrierScope}
+use compiler.mir.mir_types.{MirLocal, MirType, MirTypeKind, MirConstValue, LocalKind}
+
+# ============================================================================
+# Helpers (mirrored from sibling specs)
+# ============================================================================
+
+fn i32_type() -> MirType:
+    MirType(kind: MirTypeKind.I32)
+
+fn i64_type() -> MirType:
+    MirType(kind: MirTypeKind.I64)
+
+fn temp_local(id: i64, type_: MirType) -> MirLocal:
+    MirLocal(id: LocalId(id: id), name: nil, type_: type_, kind: LocalKind.Temp, is_ghost: false)
+
+fn str_const_operand(s: text) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Const(MirConstValue.Str(s), MirType.unit()))
+
+fn i64_const_operand(v: i64) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(v), MirType.i64()))
+
+fn make_opencl_spec_const_kernel(name: text, sym_id: i64, block: MirBlock) -> MirFunction:
+    MirFunction(
+        symbol: SymbolId(id: sym_id),
+        name: name,
+        signature: MirSignature(params: [], return_type: MirType.unit(), is_variadic: false),
+        locals: [temp_local(0, i64_type())],
+        blocks: [block],
+        entry_block: BlockId.entry(),
+        span: Span.empty(),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {},
+        layout_phase: nil,
+        is_kernel: true,
+        gpu_target: "opencl",
+        gpu_backend_order: "opencl",
+        is_export_c: false,
+        export_name: "",
+        has_driver_manifest_attr: false,
+        driver_manifest_attr: nil,
+        has_vhdl_metadata: false,
+        vhdl_metadata: vhdl_hardware_metadata_default(),
+        has_fast_math: false
+    )
+
+fn make_cuda_spec_const_kernel(name: text, sym_id: i64, block: MirBlock) -> MirFunction:
+    MirFunction(
+        symbol: SymbolId(id: sym_id),
+        name: name,
+        signature: MirSignature(params: [], return_type: MirType.unit(), is_variadic: false),
+        locals: [temp_local(0, i64_type())],
+        blocks: [block],
+        entry_block: BlockId.entry(),
+        span: Span.empty(),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {},
+        layout_phase: nil,
+        is_kernel: true,
+        gpu_target: "cuda",
+        gpu_backend_order: "cuda",
+        is_export_c: false,
+        export_name: "",
+        has_driver_manifest_attr: false,
+        driver_manifest_attr: nil,
+        has_vhdl_metadata: false,
+        vhdl_metadata: vhdl_hardware_metadata_default(),
+        has_fast_math: false
+    )
+
+fn make_module_from(func: MirFunction) -> MirModule:
+    var map: Dict<SymbolId, MirFunction> = {}
+    map[func.symbol] = func
+    MirModule(name: "spec_const_test_module", functions: map, statics: {}, constants: {}, types: {})
+
+# gpu_spec_const_i64("tile", 16) — block with dest local 0
+fn spec_const_tile_block() -> MirBlock:
+    MirBlock(
+        id: BlockId.entry(),
+        label: Some("entry"),
+        instructions: [MirInst(kind: MirInstKind.Intrinsic(Some(LocalId(id: 0)), "gpu_spec_const_i64", [str_const_operand("tile"), i64_const_operand(16)]), span: nil)],
+        terminator: MirTerminator.Ret(nil)
+    )
+
+# gpu_spec_const_i64 with missing args (only 1 arg) — reject case
+fn spec_const_bad_args_block() -> MirBlock:
+    MirBlock(
+        id: BlockId.entry(),
+        label: Some("entry"),
+        instructions: [MirInst(kind: MirInstKind.Intrinsic(Some(LocalId(id: 0)), "gpu_spec_const_i64", [str_const_operand("tile")]), span: nil)],
+        terminator: MirTerminator.Ret(nil)
+    )
+
+# gpu_spec_const_i64 with non-string name arg — reject case
+fn spec_const_bad_name_block() -> MirBlock:
+    MirBlock(
+        id: BlockId.entry(),
+        label: Some("entry"),
+        instructions: [MirInst(kind: MirInstKind.Intrinsic(Some(LocalId(id: 0)), "gpu_spec_const_i64", [i64_const_operand(99), i64_const_operand(16)]), span: nil)],
+        terminator: MirTerminator.Ret(nil)
+    )
+
+# ============================================================================
+# Registry unit tests
+# ============================================================================
+
+describe "spec_const_registry — resolve logic":
+
+    it "returns default when no binding set":
+        spec_const_clear()
+        val result = spec_const_resolve("tile", 16)
+        expect(result).to_equal(16)
+
+    it "returns bound value when binding is set":
+        spec_const_clear()
+        spec_const_set("tile", 32)
+        val result = spec_const_resolve("tile", 16)
+        expect(result).to_equal(32)
+
+    it "returns default for unrelated name after binding another":
+        spec_const_clear()
+        spec_const_set("wg", 64)
+        val result = spec_const_resolve("tile", 16)
+        expect(result).to_equal(16)
+
+    it "allows overwriting an existing binding":
+        spec_const_clear()
+        spec_const_set("tile", 32)
+        spec_const_set("tile", 128)
+        val result = spec_const_resolve("tile", 16)
+        expect(result).to_equal(128)
+
+    it "clear removes all bindings":
+        spec_const_set("tile", 32)
+        spec_const_clear()
+        val result = spec_const_resolve("tile", 16)
+        expect(result).to_equal(16)
+
+# ============================================================================
+# GpuIntrinsicKind recognition
+# ============================================================================
+
+describe "gpu_spec_const_i64 — intrinsic recognition":
+
+    it "is recognized as a GPU intrinsic":
+        expect(recognize_gpu_intrinsic("gpu_spec_const_i64").?).to_equal(true)
+
+    it "appears in all_gpu_intrinsic_names":
+        val names = all_gpu_intrinsic_names()
+        expect(names).to_contain("gpu_spec_const_i64")
+
+# ============================================================================
+# OpenCL emission — default value
+# ============================================================================
+
+describe "spec constants contract — OpenCL backend":
+
+    it "emits default literal 16 when no binding set":
+        spec_const_clear()
+        val func = make_opencl_spec_const_kernel("tile_kernel_default", 200, spec_const_tile_block())
+        val source = OpenClBackend.compile_module_to_opencl_source(make_module_from(func)).unwrap()
+        expect(source).to_contain("16")
+
+    it "emits bound literal 32 when tile binding set to 32":
+        spec_const_clear()
+        spec_const_set("tile", 32)
+        val func = make_opencl_spec_const_kernel("tile_kernel_bound", 201, spec_const_tile_block())
+        val source = OpenClBackend.compile_module_to_opencl_source(make_module_from(func)).unwrap()
+        expect(source).to_contain("32")
+
+    it "does not contain 16 at spec-const site when bound to 32":
+        spec_const_clear()
+        spec_const_set("tile", 32)
+        val func = make_opencl_spec_const_kernel("tile_kernel_no16", 202, spec_const_tile_block())
+        val source = OpenClBackend.compile_module_to_opencl_source(make_module_from(func)).unwrap()
+        # The bound value (32) must appear; the default (16) must NOT appear as a standalone assignment
+        # We check that "= 32" is present as the emitted constant assignment
+        expect(source).to_contain("= 32")
+
+    it "emits diagnostic comment for missing args (bad call)":
+        spec_const_clear()
+        val func = make_opencl_spec_const_kernel("tile_kernel_bad_args", 203, spec_const_bad_args_block())
+        val source = OpenClBackend.compile_module_to_opencl_source(make_module_from(func)).unwrap()
+        expect(source).to_contain("gpu_spec_const_i64 missing arguments")
+
+    it "emits diagnostic comment for non-string name arg":
+        spec_const_clear()
+        val func = make_opencl_spec_const_kernel("tile_kernel_bad_name", 204, spec_const_bad_name_block())
+        val source = OpenClBackend.compile_module_to_opencl_source(make_module_from(func)).unwrap()
+        expect(source).to_contain("gpu_spec_const_i64 requires a string literal constant name")
+
+    it "restores default after clear":
+        spec_const_set("tile", 32)
+        spec_const_clear()
+        val func = make_opencl_spec_const_kernel("tile_kernel_restored", 205, spec_const_tile_block())
+        val source = OpenClBackend.compile_module_to_opencl_source(make_module_from(func)).unwrap()
+        expect(source).to_contain("16")

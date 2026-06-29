@@ -1,0 +1,100 @@
+"""Bounded KERNEL32 local-memory bridge for Wine startup probes."""
+
+use common.wine_nt_api_catalog.{wine_nt_api_kernel32_local_memory_dispatch_gate}
+use common.wine_nt_heap.{WineNtHeap, WineNtHeapBlock, WineNtHeapResult, wine_nt_get_process_heap, wine_nt_heap_alloc, wine_nt_heap_free}
+
+class WineKernel32LocalMemoryResult:
+    ok: bool
+    error: text
+    heap: WineNtHeap
+    ptr: i64
+    size: i64
+    previous_ptr: i64
+    operations: text
+
+fn _result(ok: bool, error: text, heap: WineNtHeap, ptr: i64, size: i64, previous_ptr: i64, operations: text) -> WineKernel32LocalMemoryResult:
+    WineKernel32LocalMemoryResult(ok: ok, error: error, heap: heap, ptr: ptr, size: size, previous_ptr: previous_ptr, operations: operations)
+
+fn _find_block(heap: WineNtHeap, ptr: i64) -> WineNtHeapBlock:
+    for block in heap.blocks:
+        if block.ptr == ptr:
+            return block
+    WineNtHeapBlock(ptr: 0, size: 0, freed: true)
+
+fn _sequence_gate(symbols: [text]) -> text:
+    val dispatch_state = wine_nt_api_kernel32_local_memory_dispatch_gate(symbols)
+    if dispatch_state != "ready":
+        return dispatch_state
+    if symbols.len() != 4:
+        return "kernel32-local-memory-sequence-count-mismatch"
+    if symbols[0] != "LocalAlloc":
+        return "kernel32-local-memory-sequence-expected:LocalAlloc"
+    if symbols[1] != "LocalSize":
+        return "kernel32-local-memory-sequence-expected:LocalSize"
+    if symbols[2] != "LocalReAlloc":
+        return "kernel32-local-memory-sequence-expected:LocalReAlloc"
+    if symbols[3] != "LocalFree":
+        return "kernel32-local-memory-sequence-expected:LocalFree"
+    "ready"
+
+fn _failure(symbol: text, step: WineNtHeapResult, operations: text) -> WineKernel32LocalMemoryResult:
+    _result(false, symbol + ":" + step.state, step.heap, step.ptr, step.size, 0, operations)
+
+pub fn wine_kernel32_local_alloc(heap: WineNtHeap, size: i64) -> WineKernel32LocalMemoryResult:
+    val process_heap = wine_nt_get_process_heap(heap)
+    if not process_heap.ok:
+        return _failure("LocalAlloc", process_heap, "")
+    val allocated = wine_nt_heap_alloc(process_heap.heap, process_heap.ptr, size)
+    if not allocated.ok:
+        return _failure("LocalAlloc", allocated, "")
+    _result(true, "", allocated.heap, allocated.ptr, allocated.size, 0, "LocalAlloc")
+
+pub fn wine_kernel32_local_size(heap: WineNtHeap, ptr: i64) -> WineKernel32LocalMemoryResult:
+    val block = _find_block(heap, ptr)
+    if block.ptr == 0:
+        return _result(false, "LocalSize:invalid-pointer", heap, ptr, 0, 0, "")
+    if block.freed:
+        return _result(false, "LocalSize:freed-pointer", heap, ptr, block.size, 0, "")
+    _result(true, "", heap, ptr, block.size, 0, "LocalSize")
+
+pub fn wine_kernel32_local_realloc(heap: WineNtHeap, ptr: i64, size: i64) -> WineKernel32LocalMemoryResult:
+    val existing = wine_kernel32_local_size(heap, ptr)
+    if not existing.ok:
+        return _result(false, "LocalReAlloc:" + existing.error, heap, ptr, 0, ptr, "")
+    val process_heap = wine_nt_get_process_heap(heap)
+    if not process_heap.ok:
+        return _failure("LocalReAlloc", process_heap, "")
+    val allocated = wine_nt_heap_alloc(process_heap.heap, process_heap.ptr, size)
+    if not allocated.ok:
+        return _failure("LocalReAlloc", allocated, "")
+    val freed = wine_nt_heap_free(allocated.heap, process_heap.ptr, ptr)
+    if not freed.ok:
+        return _failure("LocalReAlloc", freed, "LocalAlloc LocalSize")
+    _result(true, "", freed.heap, allocated.ptr, allocated.size, ptr, "LocalReAlloc")
+
+pub fn wine_kernel32_local_free(heap: WineNtHeap, ptr: i64) -> WineKernel32LocalMemoryResult:
+    val process_heap = wine_nt_get_process_heap(heap)
+    if not process_heap.ok:
+        return _failure("LocalFree", process_heap, "")
+    val freed = wine_nt_heap_free(process_heap.heap, process_heap.ptr, ptr)
+    if not freed.ok:
+        return _failure("LocalFree", freed, "")
+    _result(true, "", freed.heap, ptr, freed.size, 0, "LocalFree")
+
+pub fn wine_kernel32_execute_local_memory(symbols: [text], heap: WineNtHeap, initial_size: i64, resized_size: i64) -> WineKernel32LocalMemoryResult:
+    val sequence_state = _sequence_gate(symbols)
+    if sequence_state != "ready":
+        return _result(false, sequence_state, heap, 0, 0, 0, "")
+    val allocated = wine_kernel32_local_alloc(heap, initial_size)
+    if not allocated.ok:
+        return allocated
+    val sized = wine_kernel32_local_size(allocated.heap, allocated.ptr)
+    if not sized.ok:
+        return _result(false, sized.error, sized.heap, allocated.ptr, 0, 0, "LocalAlloc")
+    val reallocated = wine_kernel32_local_realloc(sized.heap, allocated.ptr, resized_size)
+    if not reallocated.ok:
+        return _result(false, reallocated.error, reallocated.heap, allocated.ptr, 0, allocated.ptr, "LocalAlloc LocalSize")
+    val freed = wine_kernel32_local_free(reallocated.heap, reallocated.ptr)
+    if not freed.ok:
+        return _result(false, freed.error, freed.heap, reallocated.ptr, reallocated.size, allocated.ptr, "LocalAlloc LocalSize LocalReAlloc")
+    _result(true, "", freed.heap, reallocated.ptr, reallocated.size, allocated.ptr, "LocalAlloc LocalSize LocalReAlloc LocalFree")

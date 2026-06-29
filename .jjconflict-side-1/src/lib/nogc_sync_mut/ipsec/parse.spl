@@ -1,0 +1,126 @@
+# IPsec wire parsing (RFC 4303 / 4302 / 7296).
+#
+# ESP and AH ICV lengths are negotiated per-SA and not self-describing on the
+# wire, so the caller supplies icv_len. Parsers build a local ByteReader and
+# read inline (never pass ByteReader by value).
+
+use std.common.net.byte_cursor.{ByteReader}
+use std.common.net.anti_replay.{SecurityParameterIndex}
+use std.nogc_sync_mut.ipsec.types.{EspPacket, AhHeader, IkeHeader, IkePayloadHeader, IkeMessage}
+
+# ESP layout: SPI(4) Seq(4) [payload .. pad .. padlen(1) nexthdr(1)] ICV(icv_len).
+# The encrypted region length = total - 8 (header) - icv_len. The pad/padlen/
+# nexthdr trailer is *inside* the encrypted region, so post-decrypt; here we
+# expose payload = the whole encrypted region and leave pad empty (framing).
+fn parse_esp_packet(bytes: [u8], icv_len: u64) -> Result<EspPacket, text>:
+    var r = ByteReader.new(bytes)
+    val spi = match r.read_u32():
+        case Ok(v): v
+        case Err(_): return Err("esp: spi")
+    val seq = match r.read_u32():
+        case Ok(v): v
+        case Err(_): return Err("esp: seq")
+    val total = bytes.len().to_u64()
+    if total < (8 + icv_len):
+        return Err("esp: too short for icv")
+    val enc_len = (total - 8) - icv_len
+    val enc = match r.read_bytes(enc_len):
+        case Ok(v): v
+        case Err(_): return Err("esp: encrypted region truncated")
+    val icv = match r.read_bytes(icv_len):
+        case Ok(v): v
+        case Err(_): return Err("esp: icv truncated")
+    var pkt = EspPacket.new(SecurityParameterIndex.new(spi), seq, enc, [], 0, icv)
+    Ok(pkt)
+
+# AH layout: NextHdr(1) PayloadLen(1) Reserved(2) SPI(4) Seq(4) ICV(icv_len).
+fn parse_ah_header(bytes: [u8], icv_len: u64) -> Result<AhHeader, text>:
+    var r = ByteReader.new(bytes)
+    val nh = match r.read_u8():
+        case Ok(v): v
+        case Err(_): return Err("ah: next_header")
+    val pl = match r.read_u8():
+        case Ok(v): v
+        case Err(_): return Err("ah: payload_length")
+    match r.read_u16():
+        case Ok(_): pass
+        case Err(_): return Err("ah: reserved")
+    val spi = match r.read_u32():
+        case Ok(v): v
+        case Err(_): return Err("ah: spi")
+    val seq = match r.read_u32():
+        case Ok(v): v
+        case Err(_): return Err("ah: seq")
+    val icv = match r.read_bytes(icv_len):
+        case Ok(v): v
+        case Err(_): return Err("ah: icv truncated")
+    var ah = AhHeader.new(nh, SecurityParameterIndex.new(spi), seq, icv)
+    ah.payload_length = pl
+    Ok(ah)
+
+# IKEv2 fixed header (RFC 7296 §3.1, 28 bytes).
+fn parse_ike_header(bytes: [u8]) -> Result<IkeHeader, text>:
+    var r = ByteReader.new(bytes)
+    val ispi = match r.read_u64():
+        case Ok(v): v
+        case Err(_): return Err("ike: initiator_spi")
+    val rspi = match r.read_u64():
+        case Ok(v): v
+        case Err(_): return Err("ike: responder_spi")
+    val np = match r.read_u8():
+        case Ok(v): v
+        case Err(_): return Err("ike: next_payload")
+    val ver = match r.read_u8():
+        case Ok(v): v
+        case Err(_): return Err("ike: version")
+    val ex = match r.read_u8():
+        case Ok(v): v
+        case Err(_): return Err("ike: exchange_type")
+    val fl = match r.read_u8():
+        case Ok(v): v
+        case Err(_): return Err("ike: flags")
+    val mid = match r.read_u32():
+        case Ok(v): v
+        case Err(_): return Err("ike: message_id")
+    val len = match r.read_u32():
+        case Ok(v): v
+        case Err(_): return Err("ike: length")
+    var h = IkeHeader.new(ispi, rspi, np, ex, fl, mid, len)
+    h.version = ver
+    Ok(h)
+
+# Parse a full IKEv2 message: header then a chain of generic payloads.
+# The chain is walked by next_payload until 0 (NONE) or input exhausted.
+fn parse_ike_message(bytes: [u8]) -> Result<IkeMessage, text>:
+    val hdr = match parse_ike_header(bytes):
+        case Ok(v): v
+        case Err(_): return Err("ike msg: header")
+    var payloads: [IkePayloadHeader] = []
+    var next = hdr.next_payload
+    var off: u64 = 28
+    var guard: u64 = 0
+    while next != 0 and off < bytes.len() and guard < 64:
+        if (off + 4) > bytes.len():
+            return Err("ike msg: payload header truncated")
+        val np = bytes[off]
+        val crit_byte = bytes[off + 1]
+        val len_hi = bytes[off + 2].to_u16()
+        val len_lo = bytes[off + 3].to_u16()
+        val plen = ((len_hi << 8) | len_lo).to_u64()
+        if plen < 4:
+            return Err("ike msg: payload length < 4")
+        if (off + plen) > bytes.len():
+            return Err("ike msg: payload body truncated")
+        var body: [u8] = []
+        var j: u64 = off + 4
+        while j < (off + plen):
+            body.push(bytes[j])
+            j = j + 1
+        val critical = (crit_byte & 0x80) != 0
+        var ph = IkePayloadHeader.new(np, critical, body)
+        payloads.push(ph)
+        next = np
+        off = off + plen
+        guard = guard + 1
+    var msg = IkeMessage.new(hdr, payloads)
+    Ok(msg)

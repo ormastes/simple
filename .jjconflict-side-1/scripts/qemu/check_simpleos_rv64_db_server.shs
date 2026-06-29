@@ -1,0 +1,79 @@
+#!/bin/sh
+set -eu
+
+ARTIFACT_DIR=""
+
+usage() {
+    cat <<'USAGE'
+Usage: sh scripts/qemu/check_simpleos_rv64_db_server.shs --artifacts DIR
+
+Validates QEMU RV64 SimpleOS DB server evidence. This gate intentionally does
+not accept DBFS/storage-only readiness as proof of a connected DB server.
+
+Required files in DIR:
+  serial.log       QEMU RV64 SimpleOS serial log with DB service bind marker
+  db_health.log    Host DB health transcript
+  db_query.log     Host DB query transcript
+USAGE
+}
+
+fail() {
+    printf 'FAIL %s\n' "$1"
+    exit 1
+}
+
+pass() {
+    printf 'PASS %s\n' "$1"
+}
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --artifacts)
+            shift
+            [ "$#" -gt 0 ] || fail "missing_artifact_dir"
+            ARTIFACT_DIR="$1"
+            ;;
+        --artifacts=*)
+            ARTIFACT_DIR="${1#*=}"
+            ;;
+        --help|-h)
+            usage
+            exit 0
+            ;;
+        *)
+            fail "unknown_arg=$1"
+            ;;
+    esac
+    shift
+done
+
+[ -n "$ARTIFACT_DIR" ] || fail "missing_artifact_dir"
+[ -d "$ARTIFACT_DIR" ] || fail "artifact_dir_not_found path=$ARTIFACT_DIR"
+
+serial_log="$ARTIFACT_DIR/serial.log"
+db_health_log="$ARTIFACT_DIR/db_health.log"
+db_query_log="$ARTIFACT_DIR/db_query.log"
+
+[ -f "$serial_log" ] || fail "serial_log_missing"
+[ -f "$db_health_log" ] || fail "db_health_log_missing"
+[ -f "$db_query_log" ] || fail "db_query_log_missing"
+
+grep -q 'SimpleOS RV64' "$serial_log" ||
+    fail "serial_simpleos_rv64_marker_missing"
+grep -Eq 'DB service ready|Simple DB server listening' "$serial_log" ||
+    fail "serial_db_service_ready_missing"
+grep -Eq 'port=(5432|15432)|0\.0\.0\.0:(5432|15432)' "$serial_log" ||
+    fail "serial_db_port_missing"
+pass "serial_db_service_ready"
+
+grep -Eq 'status=(ok|ready)|DB_HEALTH_OK|health: ok' "$db_health_log" ||
+    fail "db_health_ok_missing"
+pass "db_health_ok"
+
+grep -Eq 'SELECT 1|select 1|query=health' "$db_query_log" ||
+    fail "db_query_probe_missing"
+grep -Eq 'result=1|row: 1|DB_QUERY_OK' "$db_query_log" ||
+    fail "db_query_result_missing"
+pass "db_query_ok"
+
+pass "simpleos_rv64_db_server_connected"

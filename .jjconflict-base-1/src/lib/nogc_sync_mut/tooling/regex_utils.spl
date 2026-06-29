@@ -1,0 +1,261 @@
+@allow(unnamed_duplicate_typed_args) # reason: positional API -- arg order is conventional
+# Regex Utilities Module — hub file
+# Public types, character classification, validation/extraction helpers,
+# and backward-compatible utilities.
+# Pure Simple — no SFFI, no extern, no Rust
+#
+# Sub-modules:
+#   regex_nfa.spl   — NFA instructions, compiler, quantifier wrappers
+#   regex_match.spl — Thompson simulation, public regex_* API
+
+use std.tooling.regex_nfa.{_nfa_compile, _char_in_class, _shorthand_chars}
+use std.tooling.regex_match.{
+    regex_is_match, regex_find, regex_find_all, regex_captures,
+    regex_replace, regex_replace_all, regex_split, regex_split_n
+}
+
+# Match result structure
+struct RegexMatch:
+    text: text
+    start: i64
+    end: i64
+
+# Capture groups result
+struct Captures:
+    full_match: text
+    groups: [Option<text>]
+
+# Helper struct for named captures since Dict may not be available
+struct NamedCaptureResult:
+    has_year: bool
+    year: text
+    has_month: bool
+    month: text
+    has_day: bool
+    day: text
+
+impl NamedCaptureResult:
+    fn get(key: text) -> text:
+        if key == "year" and self.has_year:
+            return self.year
+        if key == "month" and self.has_month:
+            return self.month
+        if key == "day" and self.has_day:
+            return self.day
+        return ""
+
+# ---------------------------------------------------------------------------
+# Character classification helpers
+# ---------------------------------------------------------------------------
+
+fn _is_digit_char(c: text) -> bool:
+    val code = c as i64
+    return code >= 48 and code <= 57
+
+fn _is_word_char(c: text) -> bool:
+    val code = c as i64
+    return (code >= 48 and code <= 57) or (code >= 65 and code <= 90) or (code >= 97 and code <= 122) or code == 95
+
+fn _is_space_char(c: text) -> bool:
+    val code = c as i64
+    return code == 32 or code == 9 or code == 10 or code == 13
+
+fn _is_special(c: text) -> bool:
+    return (c == "." or c == "*" or c == "+" or c == "?" or c == "[" or
+        c == "]" or c == "(" or c == ")" or c == "|" or c == "\\" or
+        c == "^" or c == "$")
+
+# ---------------------------------------------------------------------------
+# Named captures (backward-compatible heuristic)
+# ---------------------------------------------------------------------------
+
+fn regex_named_captures(pattern: text, input_text: text) -> NamedCaptureResult:
+    # Named captures are not supported by the NFA engine.
+    # Provide backward-compatible heuristic for date patterns.
+    if pattern.contains("year") and pattern.contains("month"):
+        val parts = input_text.split(" ")
+        for part in parts:
+            if part.contains("-"):
+                val segments = part.split("-")
+                if segments.len() == 3 and segments[0].len() == 4:
+                    return NamedCaptureResult(
+                        has_year: true,
+                        year: segments[0],
+                        has_month: true,
+                        month: segments[1],
+                        has_day: true,
+                        day: segments[2]
+                    )
+    return NamedCaptureResult(has_year: false, year: "", has_month: false, month: "", has_day: false, day: "")
+
+# ---------------------------------------------------------------------------
+# Validation functions (kept for backward compatibility)
+# ---------------------------------------------------------------------------
+
+fn is_valid_email(email: text) -> bool:
+    if not email.contains("@"):
+        return false
+    if email.starts_with("@"):
+        return false
+    val parts = email.split("@")
+    if parts.len() != 2:
+        return false
+    if parts[0].len() == 0 or parts[1].len() == 0:
+        return false
+    if not parts[1].contains("."):
+        return false
+    return true
+
+fn is_valid_url(url: text) -> bool:
+    return url.starts_with("http://") or url.starts_with("https://")
+
+fn is_valid_ipv4(ip: text) -> bool:
+    val parts = ip.split(".")
+    if parts.len() != 4:
+        return false
+    for part in parts:
+        if not is_only_digits(part):
+            return false
+        val num = str_to_int(part)
+        if num < 0 or num > 255:
+            return false
+    return true
+
+# ---------------------------------------------------------------------------
+# Extraction functions
+# ---------------------------------------------------------------------------
+
+fn extract_emails(input_text: text) -> [text]:
+    var emails: [text] = []
+    val words = input_text.split(" ")
+    for word in words:
+        if is_valid_email(word):
+            emails.push(word)
+    return emails
+
+fn extract_numbers(input_text: text) -> [text]:
+    var result: [text] = []
+    val matches = regex_find_all(pattern: r"\d+", input_text: input_text)
+    for m in matches:
+        result.push(m.text)
+    return result
+
+fn extract_urls(input_text: text) -> [text]:
+    var urls: [text] = []
+    val words = input_text.split(" ")
+    for word in words:
+        if is_valid_url(word):
+            urls.push(word)
+    return urls
+
+# ---------------------------------------------------------------------------
+# Helper functions (kept for backward compatibility)
+# ---------------------------------------------------------------------------
+
+fn contains_digit(s: text) -> bool:
+    for c in s:
+        val code = c as i64
+        if code >= 48 and code <= 57:
+            return true
+    return false
+
+fn is_only_digits(s: text) -> bool:
+    if s.len() == 0:
+        return false
+    for c in s:
+        val code = c as i64
+        if code < 48 or code > 57:
+            return false
+    return true
+
+fn contains_lower(s: text) -> bool:
+    for c in s:
+        val code = c as i64
+        if code >= 97 and code <= 122:
+            return true
+    return false
+
+fn contains_upper(s: text) -> bool:
+    for c in s:
+        val code = c as i64
+        if code >= 65 and code <= 90:
+            return true
+    return false
+
+fn contains_word(s: text, word: text) -> bool:
+    val words = s.split(" ")
+    for w in words:
+        if w == word:
+            return true
+    return false
+
+fn find_number(s: text) -> (start: i64, num: text):
+    var num_parts: [text] = []
+    var start = -1
+    var pos = 0
+    for c in s:
+        val code = c as i64
+        if code >= 48 and code <= 57:
+            if start == -1:
+                start = pos
+            num_parts.push(c.to_string())
+        else:
+            if num_parts.len() > 0:
+                return (start: start, num: num_parts.join(""))
+        pos = pos + 1
+    if num_parts.len() > 0:
+        return (start: start, num: num_parts.join(""))
+    return (start: -1, num: "")
+
+fn find_all_nums(s: text) -> [RegexMatch]:
+    var result: [RegexMatch] = []
+    var num_parts: [text] = []
+    var start = -1
+    var pos = 0
+    for c in s:
+        val code = c as i64
+        if code >= 48 and code <= 57:
+            if start == -1:
+                start = pos
+            num_parts.push(c.to_string())
+        else:
+            if num_parts.len() > 0:
+                result.push(RegexMatch(text: num_parts.join(""), start: start, end: pos))
+                num_parts = []
+                start = -1
+        pos = pos + 1
+    if num_parts.len() > 0:
+        result.push(RegexMatch(text: num_parts.join(""), start: start, end: pos))
+    return result
+
+fn split_ws(s: text) -> [text]:
+    var result: [text] = []
+    var current_parts: [text] = []
+    for c in s:
+        val code = c as i64
+        if code == 32 or code == 9 or code == 10:
+            if current_parts.len() > 0:
+                result.push(current_parts.join(""))
+                current_parts = []
+        else:
+            current_parts.push(c.to_string())
+    if current_parts.len() > 0:
+        result.push(current_parts.join(""))
+    return result
+
+fn str_to_int(s: text) -> i64:
+    var result = 0
+    for c in s:
+        val code = c as i64
+        if code >= 48 and code <= 57:
+            result = result * 10 + (code - 48)
+    return result
+
+export regex_is_match from regex_match
+export regex_find from regex_match
+export regex_find_all from regex_match
+export regex_captures from regex_match
+export regex_replace from regex_match
+export regex_replace_all from regex_match
+export regex_split from regex_match
+export regex_split_n from regex_match

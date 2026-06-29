@@ -1,0 +1,26 @@
+use common.wine_advapi32_service.{wine_advapi32_execute_service_start}
+
+describe "Wine ADVAPI32 service-control bridge":
+    it "executes a bounded service manager open-create-open-start-close sequence":
+        val result = wine_advapi32_execute_service_start(["OpenSCManagerW", "CreateServiceW", "OpenServiceW", "StartServiceW", "CloseServiceHandle"], "SimpleOSSCM", "WineEventLog")
+        expect(result.ok).to_equal(true)
+        expect(result.manager).to_equal("SimpleOSSCM")
+        expect(result.service).to_equal("WineEventLog")
+        expect(result.handle).to_be_greater_than(0)
+        expect(result.started).to_equal(true)
+        expect(result.operations).to_contain("OpenSCManagerW")
+        expect(result.operations).to_contain("StartServiceW")
+        expect(result.operations).to_contain("CloseServiceHandle")
+
+    it "keeps service-control dispatch ordered and bounded":
+        val out_of_order = wine_advapi32_execute_service_start(["CreateServiceW", "OpenSCManagerW", "OpenServiceW", "StartServiceW", "CloseServiceHandle"], "SCM", "Svc")
+        expect(out_of_order.ok).to_equal(false)
+        expect(out_of_order.error).to_equal("advapi32-service-sequence-expected:OpenSCManagerW")
+
+        val unsupported = wine_advapi32_execute_service_start(["OpenSCManagerW", "CreateServiceW", "OpenServiceW", "GetMessageW", "CloseServiceHandle"], "SCM", "Svc")
+        expect(unsupported.ok).to_equal(false)
+        expect(unsupported.error).to_equal("bridge-unsupported:GetMessageW")
+
+        val invalid = wine_advapi32_execute_service_start(["OpenSCManagerW", "CreateServiceW", "OpenServiceW", "StartServiceW", "CloseServiceHandle"], "SCM", "")
+        expect(invalid.ok).to_equal(false)
+        expect(invalid.error).to_equal("empty-service")

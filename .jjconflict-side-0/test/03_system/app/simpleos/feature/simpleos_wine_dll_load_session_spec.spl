@@ -1,0 +1,25 @@
+use common.wine_dll_load_session.{
+    wine_dll_load_session_loaded_count,
+    wine_dll_load_session_new,
+    wine_dll_session_load_with_rollback
+}
+
+describe "REQ-043 SimpleOS Wine modeled DLL load session":
+    it "records load state and rollback evidence without executing DLL code":
+        val session = wine_dll_load_session_new(0x75000000)
+        val committed = wine_dll_session_load_with_rollback(session, "kernel32.dll", "C:\\Games", "C:\\Users\\Player", ["D:\\GameBin"], ["kernel32.dll"], 0x6000, true)
+        expect(committed.ok).to_equal(true)
+        expect(committed.status).to_equal("dll-load-session-recorded")
+        expect(wine_dll_load_session_loaded_count(committed.session)).to_equal(1)
+        expect(committed.evidence).to_contain("dll-image-map-handoff-ready")
+        expect(committed.evidence).to_contain("modeled-loaded-image")
+        expect(committed.evidence).to_contain("no-real-dll-loaded")
+        expect(committed.evidence).to_contain("no-dll-entrypoint-executed")
+        expect(committed.evidence).to_contain("no-tls-callback-executed")
+
+        val rolled = wine_dll_session_load_with_rollback(committed.session, "user32.dll", "C:\\Games", "C:\\Users\\Player", [], ["kernel32.dll"], 0x7000, false)
+        expect(rolled.ok).to_equal(false)
+        expect(rolled.status).to_equal("rolled-back")
+        expect(wine_dll_load_session_loaded_count(rolled.session)).to_equal(1)
+        expect(rolled.evidence).to_contain("dll-load-session-rolled-back")
+        expect(rolled.evidence).to_contain("no-arbitrary-execution")

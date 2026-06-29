@@ -1,0 +1,313 @@
+# @cover src/lib/common/ui/web_render_api.spl 80%
+# @tag: unit, ui, web_render_api
+
+use common.ui.web_render_api.{
+    WEB_RENDER_TARGET_ANDROID_WASM,
+    WEB_RENDER_TARGET_ELECTRON,
+    WEB_RENDER_TARGET_HOST_WM_WASM,
+    WEB_RENDER_TARGET_IOS_WASM,
+    WEB_RENDER_TARGET_PURE_SIMPLE,
+    WEB_RENDER_TARGET_SIMPLEOS_WM_WASM,
+    WEB_RENDER_TARGET_TAURI,
+    WEB_RENDER_WASM_SCHEMA_VERSION,
+    WebRenderRequest,
+    WebRenderHostWindowCommand,
+    WebRenderInputEnvelope,
+    WebRenderPatchEnvelope,
+    WebRenderSnapshotEnvelope,
+    WebRenderBinaryArtifactMetadata,
+    WebRenderWasmArtifactMetadata,
+    web_render_artifact_with_binary_metadata,
+    web_render_capabilities_for_target,
+    web_render_body_html,
+    web_render_full_html,
+    web_render_generated_wasm_artifact,
+    web_render_exact_bitmap_comparison_evidence,
+    web_render_gtk_benchmark_evidence,
+    web_render_gtk_benchmark_evidence_with_trials,
+    web_render_host_window_command_to_json,
+    web_render_input_envelope_to_json,
+    web_render_input_envelope_from_event,
+    web_render_ipc_json,
+    web_render_patch_envelope_to_json,
+    web_render_pixel_artifact,
+    web_render_snapshot_envelope_to_json,
+    web_render_transport_bundle,
+    web_render_to_artifact,
+    web_render_vector_font_benchmark_evidence,
+    web_render_vector_font_compute_evidence,
+    web_render_wasm_abi_for_target,
+    web_render_wasm_no_js_is_valid,
+    web_render_wasm_no_js_target,
+    web_render_wasm_no_js_validation_error
+}
+use common.ui.widget.{UIEvent}
+
+describe "shared web render API":
+
+    it "builds one full HTML shell for host web renderers":
+        val req = WebRenderRequest.html(WEB_RENDER_TARGET_ELECTRON, "Demo", "<button>Run</button>", ".x{color:red}", "console.log('x')", 320, 240)
+        val html = web_render_full_html(req)
+        expect(html).to_contain("<div id=\"app\"><button>Run</button></div>")
+        expect(html).to_contain("<style>.x{color:red}</style>")
+        expect(html).to_contain("<script>console.log('x')</script>")
+
+    it "preserves render_html body semantics separately from the full shell":
+        val req = WebRenderRequest.html(WEB_RENDER_TARGET_PURE_SIMPLE, "Demo", "<main><p>Body only</p></main>", ".x{}", "boot()", 320, 240)
+        expect(web_render_body_html(req)).to_equal("<main><p>Body only</p></main>")
+        expect(web_render_full_html(req)).to_contain("<div id=\"app\"><main><p>Body only</p></main></div>")
+
+    it "builds the same render envelope for electron and tauri":
+        val e = WebRenderRequest.html(WEB_RENDER_TARGET_ELECTRON, "", "<p>Hello</p>", "", "", 1280, 720)
+        val t = WebRenderRequest.html(WEB_RENDER_TARGET_TAURI, "", "<p>Hello</p>", "", "", 1280, 720)
+        val electron_json = web_render_ipc_json(e)
+        val tauri_json = web_render_ipc_json(t)
+        expect(electron_json).to_contain("\"type\":\"render\"")
+        expect(tauri_json).to_contain("\"type\":\"render\"")
+        expect(electron_json).to_contain("\"html\"")
+        expect(tauri_json).to_contain("\"html\"")
+
+    it "represents pure simple pixels as an optional artifact":
+        val req = WebRenderRequest.html(WEB_RENDER_TARGET_PURE_SIMPLE, "", "<canvas></canvas>", "", "", 2, 2)
+        val artifact = web_render_pixel_artifact(req, [0xFF000000u32, 0xFFFFFFFFu32, 0xFF112233u32, 0xFF445566u32])
+        expect(artifact.target).to_equal(WEB_RENDER_TARGET_PURE_SIMPLE)
+        expect(artifact.pixels.len()).to_equal(4)
+        expect(artifact.viewport_w).to_equal(2)
+        expect(artifact.viewport_h).to_equal(2)
+        expect(artifact.binary_schema).to_equal("")
+
+    it "carries binary artifact metadata through the common artifact contract":
+        val req = WebRenderRequest.html(WEB_RENDER_TARGET_TAURI, "Binary", "<main>static</main>", "", "", 320, 200)
+        val artifact = web_render_to_artifact(req)
+        val with_binary = web_render_artifact_with_binary_metadata(artifact, WebRenderBinaryArtifactMetadata(
+            schema: "SWBC1",
+            cache_key: "cache-key",
+            cache_path: "build/cache/artifact.swbc",
+            encoded_bytes: 128,
+            layout_bytes: 64,
+            command_count: 3
+        ))
+        expect(with_binary.target).to_equal(WEB_RENDER_TARGET_TAURI)
+        expect(with_binary.html).to_equal(artifact.html)
+        expect(with_binary.ipc_json).to_equal(artifact.ipc_json)
+        expect(with_binary.binary_schema).to_equal("SWBC1")
+        expect(with_binary.binary_cache_key).to_equal("cache-key")
+        expect(with_binary.binary_cache_path).to_equal("build/cache/artifact.swbc")
+        expect(with_binary.binary_bytes).to_equal(128)
+        expect(with_binary.binary_layout_bytes).to_equal(64)
+        expect(with_binary.binary_command_count).to_equal(3)
+
+    it "reports native host capabilities through the common API":
+        val caps = web_render_capabilities_for_target(WEB_RENDER_TARGET_ELECTRON)
+        expect(caps.len() > 0).to_equal(true)
+        val artifact = web_render_to_artifact(WebRenderRequest.html(WEB_RENDER_TARGET_TAURI, "", "<p/>", "", "", 1, 1))
+        expect(artifact.capability_summary).to_contain("native_dialogs")
+
+    it "serializes host window commands through the common web render API":
+        val cmd = WebRenderHostWindowCommand(
+            action: "spawn_native_window",
+            window_id: "host-window-1",
+            surface_id: "host-surface-1",
+            app_id: "/sys/apps/terminal",
+            title: "Terminal \"One\"",
+            url: "/wm/native_window?title=Line\nBreak",
+            x: 10,
+            y: 20,
+            width: 640,
+            height: 420
+        )
+        val json = web_render_host_window_command_to_json(cmd)
+        expect(json).to_contain("\"action\":\"spawn_native_window\"")
+        expect(json).to_contain("\"title\":\"Terminal \\\"One\\\"\"")
+        expect(json).to_contain("\"url\":\"/wm/native_window?title=Line\\nBreak\"")
+        expect(json).to_contain("\"width\":640")
+
+    it "serializes snapshot patch and input envelopes through the common API":
+        val snap = WebRenderSnapshotEnvelope(
+            target: WEB_RENDER_TARGET_TAURI,
+            surface_id: "main",
+            revision: 7u64,
+            snapshot_json: "{\"mode\":\"NORMAL\",\"active_surface\":\"main\"}"
+        )
+        val patch = WebRenderPatchEnvelope(
+            target: WEB_RENDER_TARGET_ELECTRON,
+            surface_id: "main",
+            from_sequence: 7u64,
+            to_sequence: 9u64,
+            patches_json: "[{\"kind\":\"UpdateProp\",\"target_id\":\"button1\"}]",
+            snapshot_json: ""
+        )
+        val input = WebRenderInputEnvelope(
+            target: WEB_RENDER_TARGET_PURE_SIMPLE,
+            surface_id: "main",
+            event_type: "mouse",
+            target_id: "button1",
+            key: "",
+            value: "",
+            x: 12.5,
+            y: 24.0,
+            dx: 0.0,
+            dy: 0.0,
+            button: "left"
+        )
+        val snap_json = web_render_snapshot_envelope_to_json(snap)
+        val patch_json = web_render_patch_envelope_to_json(patch)
+        val input_json = web_render_input_envelope_to_json(input)
+        expect(snap_json).to_contain("\"type\":\"snapshot\"")
+        expect(snap_json).to_contain("\"revision\":7")
+        expect(snap_json).to_contain("\"snapshot\":{\"mode\":\"NORMAL\"")
+        expect(patch_json).to_contain("\"type\":\"patch\"")
+        expect(patch_json).to_contain("\"from_sequence\":7")
+        expect(patch_json).to_contain("\"patches\":[{\"kind\":\"UpdateProp\"")
+        expect(input_json).to_contain("\"type\":\"input\"")
+        expect(input_json).to_contain("\"event_type\":\"mouse\"")
+        expect(input_json).to_contain("\"button\":\"left\"")
+
+    it "builds a complete transport bundle from the common web render API":
+        val req = WebRenderRequest.html(WEB_RENDER_TARGET_ELECTRON, "Transport", "<main>Body</main>", "main{}", "", 800, 600)
+        val cmd = WebRenderHostWindowCommand(action: "new_browser_window", window_id: "win-1", surface_id: "surface-1", app_id: "/sys/apps/browser", title: "Browser", url: "https://example.test", x: 1, y: 2, width: 640, height: 480)
+        val bundle = web_render_transport_bundle(req, "surface-1", UIEvent.KeyPress(key: "enter"), 5u64, 5u64, 6u64, "[]", "{\"mode\":\"NORMAL\"}", cmd)
+        expect(bundle.render_json).to_contain("\"type\":\"render\"")
+        expect(bundle.render_json).to_contain("\"surface_id\":\"surface-1\"")
+        expect(bundle.input_json).to_contain("\"event_type\":\"key\"")
+        expect(bundle.snapshot_json).to_contain("\"revision\":5")
+        expect(bundle.patch_json).to_contain("\"to_sequence\":6")
+        expect(bundle.host_window_json).to_contain("\"action\":\"new_browser_window\"")
+
+    it "normalizes UI events into common web render input envelopes":
+        val key = web_render_input_envelope_from_event(WEB_RENDER_TARGET_ELECTRON, "main", UIEvent.KeyPress(key: "enter"))
+        expect(key.event_type).to_equal("key")
+        expect(key.key).to_equal("enter")
+        val mouse = web_render_input_envelope_from_event(WEB_RENDER_TARGET_PURE_SIMPLE, "main", UIEvent.MouseEvent(x: 10.0, y: 20.0, button: "left", kind: "down"))
+        expect(mouse.event_type).to_equal("mouse_down")
+        expect(mouse.button).to_equal("left")
+        val input = web_render_input_envelope_from_event(WEB_RENDER_TARGET_TAURI, "main", UIEvent.InputChange(target_id: "name", value: "Ada"))
+        expect(input.event_type).to_equal("input")
+        expect(input.target_id).to_equal("name")
+        expect(input.value).to_equal("Ada")
+
+    it "declares generated WASM no-JavaScript render targets for mobile and WMs":
+        expect(web_render_wasm_no_js_target(WEB_RENDER_TARGET_ANDROID_WASM)).to_equal(true)
+        expect(web_render_wasm_no_js_target(WEB_RENDER_TARGET_IOS_WASM)).to_equal(true)
+        expect(web_render_wasm_no_js_target(WEB_RENDER_TARGET_HOST_WM_WASM)).to_equal(true)
+        expect(web_render_wasm_no_js_target(WEB_RENDER_TARGET_SIMPLEOS_WM_WASM)).to_equal(true)
+        expect(web_render_wasm_no_js_target(WEB_RENDER_TARGET_ELECTRON)).to_equal(false)
+        expect(web_render_wasm_abi_for_target(WEB_RENDER_TARGET_IOS_WASM)).to_equal("wasm32-simple-ui-ios")
+        expect(web_render_wasm_abi_for_target(WEB_RENDER_TARGET_SIMPLEOS_WM_WASM)).to_equal("wasm32-simple-ui-simpleos-wm")
+
+    it "rejects JavaScript and ABI mismatches for generated WASM targets":
+        val meta = WebRenderWasmArtifactMetadata.create("build/gui/hello-ios.wasm", "wasm32-simple-ui-ios", 4096, 256, 12)
+        val valid = WebRenderRequest.html(WEB_RENDER_TARGET_IOS_WASM, "Hello iOS", "<main>Hello</main>", "main{}", "", 390, 844)
+        val with_js = WebRenderRequest.html(WEB_RENDER_TARGET_IOS_WASM, "Hello iOS", "<main>Hello</main>", "main{}", "boot()", 390, 844)
+        val wrong_abi = WebRenderWasmArtifactMetadata.create("build/gui/hello-ios.wasm", "wasm32-simple-ui-android", 4096, 256, 12)
+
+        expect(web_render_wasm_no_js_is_valid(valid, meta)).to_equal(true)
+        expect(web_render_wasm_no_js_validation_error(with_js, meta)).to_equal("javascript is not allowed for generated wasm target")
+        expect(web_render_wasm_no_js_validation_error(valid, wrong_abi)).to_equal("wasm abi does not match render target")
+
+    it "carries generated WASM metadata without producing host IPC JavaScript":
+        val req = WebRenderRequest.html(WEB_RENDER_TARGET_SIMPLEOS_WM_WASM, "Hello WM", "<button>Launch</button>", "button{}", "", 800, 600)
+        val meta = WebRenderWasmArtifactMetadata.create("build/gui/simpleos-wm/hello.wasm", web_render_wasm_abi_for_target(WEB_RENDER_TARGET_SIMPLEOS_WM_WASM), 8192, 512, 18)
+        val artifact = web_render_generated_wasm_artifact(req, meta)
+
+        expect(artifact.target).to_equal(WEB_RENDER_TARGET_SIMPLEOS_WM_WASM)
+        expect(artifact.ipc_json).to_equal("")
+        expect(artifact.html).to_contain("<button>Launch</button>")
+        expect(artifact.html.contains("<script>")).to_equal(false)
+        expect(artifact.binary_schema).to_equal(WEB_RENDER_WASM_SCHEMA_VERSION)
+        expect(artifact.binary_cache_path).to_equal("build/gui/simpleos-wm/hello.wasm")
+        expect(artifact.binary_command_count).to_equal(18)
+        expect(artifact.capability_summary).to_contain("generated_wasm")
+        expect(artifact.capability_summary).to_contain("no_javascript")
+
+    it "requires measured GUI and text timings to beat GTK on the same scene":
+        val pass_evidence = web_render_gtk_benchmark_evidence_with_trials("wm-static-text-grid", 900, 1200, 220, 300, 40, 200, 3, 3)
+        val frame_fail = web_render_gtk_benchmark_evidence_with_trials("wm-static-text-grid", 1200, 1200, 220, 300, 40, 200, 3, 3)
+        val text_fail = web_render_gtk_benchmark_evidence_with_trials("wm-static-text-grid", 900, 1200, 320, 300, 40, 200, 3, 3)
+        val low_sample = web_render_gtk_benchmark_evidence_with_trials("wm-static-text-grid", 90, 1200, 22, 300, 1, 1, 3, 3)
+        val low_trial = web_render_gtk_benchmark_evidence_with_trials("wm-static-text-grid", 900, 1200, 220, 300, 40, 200, 1, 3)
+        val missing_trial = web_render_gtk_benchmark_evidence_with_trials("wm-static-text-grid", 900, 1200, 220, 300, 40, 200, 0, 3)
+        val legacy_one_off = web_render_gtk_benchmark_evidence("wm-static-text-grid", 900, 1200, 220, 300, 40, 200)
+        val missing = web_render_gtk_benchmark_evidence_with_trials("", 900, 1200, 220, 300, 40, 200, 3, 3)
+
+        expect(pass_evidence.faster_than_gtk).to_equal(true)
+        expect(pass_evidence.status).to_equal("pass")
+        expect(pass_evidence.reason).to_equal("pass")
+        expect(pass_evidence.min_iterations).to_equal(3)
+        expect(pass_evidence.min_trials).to_equal(3)
+        expect(pass_evidence.sample_confident).to_equal(true)
+        expect(pass_evidence.trial_confident).to_equal(true)
+        expect(pass_evidence.summary()).to_contain("scene=wm-static-text-grid")
+        expect(pass_evidence.summary()).to_contain("sample_confident=true")
+        expect(pass_evidence.summary()).to_contain("trial_confident=true")
+        expect(frame_fail.faster_than_gtk).to_equal(false)
+        expect(frame_fail.reason).to_equal("frame-not-faster")
+        expect(text_fail.faster_than_gtk).to_equal(false)
+        expect(text_fail.reason).to_equal("text-not-faster")
+        expect(low_sample.faster_than_gtk).to_equal(false)
+        expect(low_sample.status).to_equal("fail")
+        expect(low_sample.sample_confident).to_equal(false)
+        expect(low_sample.reason).to_equal("sample-count-too-low")
+        expect(low_trial.trial_confident).to_equal(false)
+        expect(low_trial.reason).to_equal("trial-count-too-low")
+        expect(missing_trial.reason).to_equal("missing-trials")
+        expect(legacy_one_off.reason).to_equal("trial-count-too-low")
+        expect(missing.reason).to_equal("missing-scene")
+
+    it "requires vector font rendering evidence to be timed non-empty and deterministic":
+        val pass_evidence = web_render_vector_font_benchmark_evidence("wm-vector-text-grid", 180, 64000, 1200, 8800, 4, true)
+        val empty = web_render_vector_font_benchmark_evidence("wm-vector-text-grid", 180, 64000, 0, 8800, 4, true)
+        val missing_checksum = web_render_vector_font_benchmark_evidence("wm-vector-text-grid", 180, 64000, 1200, 0, 4, true)
+        val nondeterministic = web_render_vector_font_benchmark_evidence("wm-vector-text-grid", 180, 64000, 1200, 8800, 4, false)
+        val missing_timing = web_render_vector_font_benchmark_evidence("wm-vector-text-grid", 0, 64000, 1200, 8800, 4, true)
+
+        expect(pass_evidence.status).to_equal("pass")
+        expect(pass_evidence.reason).to_equal("pass")
+        expect(pass_evidence.summary()).to_contain("scene=wm-vector-text-grid")
+        expect(pass_evidence.summary()).to_contain("ink_pixels=1200")
+        expect(pass_evidence.summary()).to_contain("checksum=8800")
+        expect(empty.status).to_equal("fail")
+        expect(empty.reason).to_equal("empty-render-output")
+        expect(missing_checksum.reason).to_equal("missing-checksum")
+        expect(nondeterministic.reason).to_equal("nondeterministic-render-output")
+        expect(missing_timing.reason).to_equal("missing-timing")
+
+    it "records vector font compute evidence without claiming unavailable accelerators":
+        val unavailable_ok = web_render_vector_font_compute_evidence("wm-vector-text-grid", 8800, 1200, "unavailable", "missing-vector-font-cuda-kernel", 0, "unavailable", "missing-vector-font-opencl-kernel", 0, false)
+        val cuda_ok = web_render_vector_font_compute_evidence("wm-vector-text-grid", 8800, 1200, "pass", "matched-cpu", 8800, "unavailable", "missing-vector-font-opencl-kernel", 0, false)
+        val blurred = web_render_vector_font_compute_evidence("wm-vector-text-grid", 8800, 1200, "unavailable", "missing-vector-font-cuda-kernel", 0, "unavailable", "missing-vector-font-opencl-kernel", 0, true)
+        val missing_unavailable_reason = web_render_vector_font_compute_evidence("wm-vector-text-grid", 8800, 1200, "unavailable", "", 0, "unavailable", "missing-vector-font-opencl-kernel", 0, false)
+        val cuda_mismatch = web_render_vector_font_compute_evidence("wm-vector-text-grid", 8800, 1200, "pass", "matched-cpu", 8799, "unavailable", "missing-vector-font-opencl-kernel", 0, false)
+        val opencl_bad_status = web_render_vector_font_compute_evidence("wm-vector-text-grid", 8800, 1200, "unavailable", "missing-vector-font-cuda-kernel", 0, "pending", "not-run", 0, false)
+
+        expect(unavailable_ok.status).to_equal("pass")
+        expect(unavailable_ok.summary()).to_contain("cuda_status=unavailable")
+        expect(unavailable_ok.summary()).to_contain("opencl_reason=missing-vector-font-opencl-kernel")
+        expect(cuda_ok.status).to_equal("pass")
+        expect(cuda_ok.summary()).to_contain("cuda_checksum=8800")
+        expect(blurred.reason).to_equal("blur-or-tolerance-not-allowed")
+        expect(missing_unavailable_reason.reason).to_equal("missing-cuda-unavailable-reason")
+        expect(cuda_mismatch.reason).to_equal("cuda-checksum-mismatch")
+        expect(opencl_bad_status.reason).to_equal("opencl-not-proven")
+
+    it "requires exact bitmap evidence without blur or tolerance for node and electron baselines":
+        val node_pass = web_render_exact_bitmap_comparison_evidence("wm-image-taskbar-command", "pure-simple-engine2d", "nodejs-canvas", 320, 200, 771200, 771200, 0, false, 90, 140, 4, 4, 3, 3)
+        val electron_pass = web_render_exact_bitmap_comparison_evidence("wm-image-taskbar-command", "simple-web-renderer", "electron-compositor", 320, 200, 771200, 771200, 0, false, 95, 160, 4, 4, 3, 3)
+        val blurred = web_render_exact_bitmap_comparison_evidence("wm-image-taskbar-command", "pure-simple-engine2d", "nodejs-canvas", 320, 200, 771200, 771200, 0, true, 90, 140, 4, 4, 3, 3)
+        val checksum_mismatch = web_render_exact_bitmap_comparison_evidence("wm-image-taskbar-command", "pure-simple-engine2d", "nodejs-canvas", 320, 200, 771200, 771199, 0, false, 90, 140, 4, 4, 3, 3)
+        val pixel_mismatch = web_render_exact_bitmap_comparison_evidence("wm-image-taskbar-command", "pure-simple-engine2d", "nodejs-canvas", 320, 200, 771200, 771200, 1, false, 90, 140, 4, 4, 3, 3)
+        val equal_perf = web_render_exact_bitmap_comparison_evidence("wm-image-taskbar-command", "pure-simple-engine2d", "bun", 320, 200, 771200, 771200, 0, false, 140, 140, 4, 4, 3, 3)
+        val slower = web_render_exact_bitmap_comparison_evidence("wm-image-taskbar-command", "pure-simple-engine2d", "bun", 320, 200, 771200, 771200, 0, false, 141, 140, 4, 4, 3, 3)
+        val low_trial = web_render_exact_bitmap_comparison_evidence("wm-image-taskbar-command", "pure-simple-engine2d", "nodejs-canvas", 320, 200, 771200, 771200, 0, false, 90, 140, 4, 4, 1, 3)
+
+        expect(node_pass.status).to_equal("pass")
+        expect(node_pass.reason).to_equal("pass")
+        expect(electron_pass.status).to_equal("pass")
+        expect(electron_pass.summary()).to_contain("baseline_renderer=electron-compositor")
+        expect(electron_pass.summary()).to_contain("blur_or_tolerance_used=false")
+        expect(blurred.reason).to_equal("blur-or-tolerance-not-allowed")
+        expect(checksum_mismatch.reason).to_equal("checksum-mismatch")
+        expect(pixel_mismatch.reason).to_equal("pixel-mismatch")
+        expect(equal_perf.status).to_equal("pass")
+        expect(slower.reason).to_equal("simple-slower-than-baseline")
+        expect(low_trial.reason).to_equal("trial-count-too-low")

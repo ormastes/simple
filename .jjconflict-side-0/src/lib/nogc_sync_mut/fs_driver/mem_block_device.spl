@@ -1,0 +1,159 @@
+# MemBlockDevice — in-memory BlockDevice implementation.
+#
+# Backed by a module-level byte-buffer store keyed by inst_id.
+# This works around interpreter value-semantics: struct field writes on copies
+# are lost; module-level arrays survive across call boundaries.
+#
+# Usage:
+#   val dev = MemBlockDevice.new(256u64, 512u32)
+#   dev.write_sector(2u64, sector_bytes)  -- via BlockDevice trait
+#   val raw = dev.bytes()                  -- returns live backing buffer
+#   dev.write_to_file("/tmp/out.img")
+#
+# Maps to: AC-2 (MemBlockDevice infrastructure layer).
+
+use std.fs_driver.block_device.{BlockDevice}
+
+extern fn rt_bytes_alloc(len: i64) -> [u8]
+extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
+
+# ---------------------------------------------------------------------------
+# Module-level backing store
+# ---------------------------------------------------------------------------
+
+var _mem_bd_next_id: i64         = 1
+var _mem_bd_ids:     [i64]       = []
+var _mem_bd_bufs:    [[u8]]      = []
+var _mem_bd_ssizes:  [u32]       = []
+var _mem_bd_scounts: [u64]       = []
+
+fn _mem_bd_alloc_id() -> i64:
+    val id = _mem_bd_next_id
+    _mem_bd_next_id = _mem_bd_next_id + 1
+    id
+
+fn _mem_bd_find(inst_id: i64) -> i64:
+    """Return index for inst_id, or -1 if not found."""
+    var i: i64 = 0
+    while i < _mem_bd_ids.len():
+        if _mem_bd_ids[i] == inst_id:
+            return i
+        i = i + 1
+    -1
+
+fn _mem_bd_register(inst_id: i64, sector_count: u64, sector_size: u32):
+    """Allocate a zeroed backing buffer and register it."""
+    val total = (sector_count as i64) * (sector_size as i64)
+    val buf = rt_bytes_alloc(total)
+    _mem_bd_ids.push(inst_id)
+    _mem_bd_bufs.push(buf)
+    _mem_bd_ssizes.push(sector_size)
+    _mem_bd_scounts.push(sector_count)
+
+# ---------------------------------------------------------------------------
+# MemBlockDevice struct
+# ---------------------------------------------------------------------------
+
+pub struct MemBlockDevice:
+    """In-memory block device backed by a module-level byte buffer.
+
+    Construct via MemBlockDevice.new(sector_count, sector_size).
+    All reads and writes operate on a flat byte array: lba * sector_size.
+    """
+    inst_id:      i64
+    sector_size_: u32
+    sector_count_: u64
+
+impl MemBlockDevice:
+    static fn new(sector_count: u64, sector_size: u32) -> MemBlockDevice:
+        """Create a zeroed in-memory block device."""
+        val id = _mem_bd_alloc_id()
+        _mem_bd_register(id, sector_count, sector_size)
+        MemBlockDevice(
+            inst_id:       id,
+            sector_size_:  sector_size,
+            sector_count_: sector_count,
+        )
+
+    fn sector_count() -> u64:
+        self.sector_count_
+
+    fn bytes() -> [u8]:
+        """Return the raw backing byte buffer for this device."""
+        val idx = _mem_bd_find(self.inst_id)
+        if idx < 0:
+            return []
+        _mem_bd_bufs[idx]
+
+    fn write_to_file(path: text) -> Result<bool, text>:
+        """Write the full backing buffer to a file."""
+        val idx = _mem_bd_find(self.inst_id)
+        if idx < 0:
+            return Err("MemBlockDevice.write_to_file: device not found")
+        val buf = _mem_bd_bufs[idx]
+        if rt_file_write_bytes(path, buf):
+            Ok(true)
+        else:
+            Err("MemBlockDevice.write_to_file: write failed: " + path)
+
+    fn read_sector(lba: u64) -> Result<[u8], text>:
+        """Read one sector and return its bytes (convenience method)."""
+        val idx = _mem_bd_find(self.inst_id)
+        if idx < 0:
+            return Err("MemBlockDevice: device not found")
+        val sc = _mem_bd_scounts[idx]
+        if lba >= sc:
+            return Err("MemBlockDevice.read_sector: lba out of range")
+        val ss = _mem_bd_ssizes[idx] as i64
+        val off = (lba as i64) * ss
+        var out: [u8] = []
+        val buf = _mem_bd_bufs[idx]
+        var i: i64 = 0
+        while i < ss:
+            out.push(buf[off + i])
+            i = i + 1
+        Ok(out)
+
+# ---------------------------------------------------------------------------
+# BlockDevice trait conformance
+# ---------------------------------------------------------------------------
+
+impl BlockDevice for MemBlockDevice:
+    fn read_sector(lba: u64) -> Result<[u8], text>:
+        """Return sector bytes from backing store at the given LBA."""
+        val idx = _mem_bd_find(self.inst_id)
+        if idx < 0:
+            return Err("MemBlockDevice: device not found")
+        val sc = _mem_bd_scounts[idx]
+        if lba >= sc:
+            return Err("MemBlockDevice.read_sector: lba out of range")
+        val ss = _mem_bd_ssizes[idx] as i64
+        val off = (lba as i64) * ss
+        val src = _mem_bd_bufs[idx]
+        var out: [u8] = []
+        var i: i64 = 0
+        while i < ss:
+            out.push(src[off + i])
+            i = i + 1
+        Ok(out)
+
+    me fn write_sector(lba: u64, data: [u8]) -> Result<bool, text>:
+        """Write data into backing store at the given LBA."""
+        val idx = _mem_bd_find(self.inst_id)
+        if idx < 0:
+            return Err("MemBlockDevice: device not found")
+        val sc = _mem_bd_scounts[idx]
+        if lba >= sc:
+            return Err("MemBlockDevice.write_sector: lba out of range")
+        val ss = _mem_bd_ssizes[idx] as i64
+        val off = (lba as i64) * ss
+        var buf = _mem_bd_bufs[idx]
+        var i: i64 = 0
+        while (i < ss) and (i < data.len()):
+            buf[off + i] = data[i]
+            i = i + 1
+        _mem_bd_bufs[idx] = buf
+        Ok(true)
+
+    fn sector_size() -> u32:
+        self.sector_size_

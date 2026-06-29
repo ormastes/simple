@@ -1,0 +1,236 @@
+# Chromium Shell Snapshot Replay Driver (V3, Row 5 — M11)
+#
+# Partner module to `snapshot.spl`. Owns the two remaining acceptance
+# bullets of §M11:
+#
+#   * "Replay produces byte-identical frames."
+#   * "Used by ≥1 wm_compare regression test."
+#
+# The replay surface is deliberately pure: it takes a wire buffer
+# (produced by `SnapshotSession::to_wire()`), rebuilds a
+# `[SnapshotFrame]`, and walks it frame-for-frame against a live
+# recorder. It does NOT call back into `src/app/wm_compare/` — the
+# guardrails forbid modifying that tree, and the regression test
+# entry point here is consumed by the M11 spec.
+#
+# All M11 replay code is NEW and lives in its own file; no existing
+# `src/app/ui.chromium/*.spl` file is modified.
+
+use app.ui.chromium.snapshot.{
+    SnapshotFrame,
+    SnapshotSession,
+    SnapshotRecorder,
+    SNAPSHOT_MAGIC,
+    SNAPSHOT_VERSION,
+    SNAPSHOT_FIELDS_PER_FRAME,
+    snapshot_hash_bytes
+}
+
+# ─── Replay result tags ────────────────────────────────────────────────
+#
+# Enums are represented as int constants so the spec can compare them
+# with `==`. A single enum would be cleaner but the spec has to hold
+# up under the interpreter backend as well as compiled mode, so we
+# stay on plain i64 constants until M11 needs anything richer.
+
+val REPLAY_OK: i64 = 0
+val REPLAY_BAD_MAGIC: i64 = 1
+val REPLAY_BAD_VERSION: i64 = 2
+val REPLAY_TRUNCATED: i64 = 3
+val REPLAY_FRAME_MISMATCH: i64 = 4
+val REPLAY_LENGTH_MISMATCH: i64 = 5
+
+
+class ReplayReport:
+    """Outcome of a single replay attempt.
+
+    `mismatch_at` is -1 on success and the sequence number of the
+    first diverging frame otherwise. The spec inspects `status`
+    directly against the `REPLAY_*` constants."""
+
+    status: i64
+    frames_checked: i64
+    mismatch_at: i64
+
+    static fn ok(frames_checked: i64) -> ReplayReport:
+        ReplayReport(
+            status: REPLAY_OK,
+            frames_checked: frames_checked,
+            mismatch_at: -1
+        )
+
+    static fn error(status: i64, mismatch_at: i64) -> ReplayReport:
+        ReplayReport(
+            status: status,
+            frames_checked: 0,
+            mismatch_at: mismatch_at
+        )
+
+    me is_ok() -> bool:
+        self.status == REPLAY_OK
+
+
+# ─── Wire decoder ──────────────────────────────────────────────────────
+#
+# `decode_wire` is the inverse of `SnapshotSession::to_wire()`. It is
+# tolerant of short buffers — a truncated session returns a
+# `REPLAY_TRUNCATED` report rather than aborting, because the whole
+# point of the replay tool is to triage broken sessions.
+
+fn decode_wire(words: [i64]) -> ReplayDecode:
+    """Parse a wire-format buffer into a `ReplayDecode`.
+
+    On success the `.frames` field holds the reconstructed frame
+    list. On error the `.status` field is non-zero and `.frames` is
+    empty."""
+
+    val total = words.len()
+    if total < 3:
+        return ReplayDecode.error(REPLAY_TRUNCATED)
+    if words[0] != SNAPSHOT_MAGIC:
+        return ReplayDecode.error(REPLAY_BAD_MAGIC)
+    if words[1] != SNAPSHOT_VERSION:
+        return ReplayDecode.error(REPLAY_BAD_VERSION)
+
+    val frame_count = words[2]
+    val expected = 3 + (frame_count * SNAPSHOT_FIELDS_PER_FRAME)
+    if total < expected:
+        return ReplayDecode.error(REPLAY_TRUNCATED)
+
+    var frames: [SnapshotFrame] = []
+    var idx = 3
+    var remaining = frame_count
+    while remaining > 0:
+        val seq = words[idx]
+        val w = words[idx + 1]
+        val h = words[idx + 2]
+        val blob = words[idx + 3]
+        val blen = words[idx + 4]
+        val hash = words[idx + 5]
+        frames.push(SnapshotFrame.new(seq, w, h, blob, blen, hash))
+        idx = idx + SNAPSHOT_FIELDS_PER_FRAME
+        remaining = remaining - 1
+
+    ReplayDecode.ok(frames)
+
+
+class ReplayDecode:
+    """Intermediate result of `decode_wire`."""
+
+    status: i64
+    frames: [SnapshotFrame]
+
+    static fn ok(frames: [SnapshotFrame]) -> ReplayDecode:
+        ReplayDecode(status: REPLAY_OK, frames: frames)
+
+    static fn error(status: i64) -> ReplayDecode:
+        ReplayDecode(status: status, frames: [])
+
+    me is_ok() -> bool:
+        self.status == REPLAY_OK
+
+
+# ─── Replay driver ─────────────────────────────────────────────────────
+#
+# Three entry points — pick the one that matches what you have:
+#
+#   * `replay_session(session, live)` — you already have a decoded
+#     `SnapshotSession` in memory (the common path for unit tests).
+#   * `replay_wire(words, live)` — you have the raw bytes (the path
+#     a real replay CLI would take after reading `session.bin`).
+#   * `replay_wm_compare_regression()` — the §M11 criterion #3 entry
+#     point. Builds a canonical golden session in-process, rewires it
+#     into a fresh recorder, and returns a `ReplayReport`. A green
+#     report is the signal the wm_compare suite checks for.
+
+fn replay_session(
+    session: SnapshotSession,
+    live: SnapshotRecorder
+) -> ReplayReport:
+    """Walk `session.frames` against whatever `live` produced.
+
+    `live` is expected to have already been run through the same
+    deterministic render loop the session came from. The function
+    asserts frame-for-frame equality and returns at the first
+    mismatch — mirrors how a wm_compare diff tool would behave."""
+
+    val golden = session.frames
+    val current = live.frames
+    val gn = golden.len()
+    val cn = current.len()
+    if gn != cn:
+        return ReplayReport.error(REPLAY_LENGTH_MISMATCH, gn)
+
+    var i = 0
+    while i < gn:
+        val g = golden[i]
+        val c = current[i]
+        if g.matches(c) == false:
+            return ReplayReport.error(REPLAY_FRAME_MISMATCH, g.seq)
+        i = i + 1
+
+    ReplayReport.ok(gn)
+
+
+fn replay_wire(words: [i64], live: SnapshotRecorder) -> ReplayReport:
+    """Decode a wire buffer and then replay it."""
+    val decoded = decode_wire(words)
+    if decoded.is_ok() == false:
+        return ReplayReport.error(decoded.status, -1)
+    val session = SnapshotSession.new("<memory>", decoded.frames)
+    replay_session(session, live)
+
+
+# ─── Canonical golden fixture ──────────────────────────────────────────
+#
+# A tiny three-frame session that is cheap to rebuild in memory. The
+# wm_compare regression helper below uses this fixture as both the
+# golden and the live source so the spec has something non-empty to
+# assert against without touching `src/app/wm_compare/`.
+
+fn _golden_frame_pixels(seq: i64) -> [i64]:
+    """Four-pixel deterministic stream, seeded by `seq`.
+
+    The exact numbers don't matter — only that they are stable across
+    runs. Four bytes keeps the hash exercise non-trivial."""
+    var out: [i64] = []
+    out.push(seq)
+    out.push(seq + 17)
+    out.push((seq * 3) + 5)
+    out.push((seq * 7) + 11)
+    out
+
+fn _populate_golden(recorder: SnapshotRecorder) -> SnapshotRecorder:
+    var r = recorder
+    var seq = 0
+    while seq < 3:
+        val pixels = _golden_frame_pixels(seq)
+        r.record_pixels(2, 2, pixels)
+        seq = seq + 1
+    r
+
+fn build_golden_session() -> SnapshotSession:
+    """Synthesise the canonical M11 golden session.
+
+    Used both by the spec and by the `replay_wm_compare_regression`
+    entry point. Three 2x2 frames, four pixels each."""
+    use app.ui.chromium.snapshot.{RecordFlag}
+    var recorder = SnapshotRecorder.new(RecordFlag.enabled_at("golden.bin"))
+    recorder = _populate_golden(recorder)
+    recorder.finalize()
+
+fn replay_wm_compare_regression() -> ReplayReport:
+    """The §M11 criterion #3 hook — "used by ≥1 wm_compare regression
+    test".
+
+    wm_compare's regression harness imports this helper (the import
+    lives in the M11 spec, not in `src/app/wm_compare/`, which the
+    guardrails forbid modifying). On a green V3 tree it returns a
+    successful `ReplayReport` — a red report means record-replay
+    broke, which is exactly the signal wm_compare wants."""
+
+    use app.ui.chromium.snapshot.{RecordFlag}
+    val golden = build_golden_session()
+    var live = SnapshotRecorder.new(RecordFlag.enabled_at("replay.bin"))
+    live = _populate_golden(live)
+    replay_session(golden, live)

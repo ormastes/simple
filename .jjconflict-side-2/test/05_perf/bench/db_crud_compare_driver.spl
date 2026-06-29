@@ -1,0 +1,133 @@
+use std.database.sql.types.{DbValue}
+use nogc_sync_mut.database.pure_sql.database.{PureDatabase}
+
+extern fn rt_time_now_unix_micros() -> i64
+
+val N: i64 = 100
+
+fn row_for(i: i64) -> [DbValue]:
+    [DbValue.Integer(value: i), DbValue.Text(value: "name_" + i.to_text()), DbValue.Integer(value: i * 10)]
+
+fn prebuilt_rows() -> [[DbValue]]:
+    var rows: [[DbValue]] = []
+    var i: i64 = 0
+    while i < N:
+        rows.push(row_for(i))
+        i = i + 1
+    rows
+
+fn prebuilt_keys() -> [DbValue]:
+    var keys: [DbValue] = []
+    var i: i64 = 0
+    while i < N:
+        keys.push(DbValue.Integer(value: i))
+        i = i + 1
+    keys
+
+fn prebuilt_update_values() -> [DbValue]:
+    var values: [DbValue] = []
+    var i: i64 = 0
+    while i < N:
+        values.push(DbValue.Integer(value: i * 11))
+        i = i + 1
+    values
+
+fn require_present(db: PureDatabase, table: text, key: i64, want: bool, label: text):
+    val row = db.get(table, "id", DbValue.Integer(value: key)).unwrap()
+    if row.? != want:
+        print("validation_failed=" + label)
+        exit(2)
+
+fn seed_db() -> PureDatabase:
+    var db = PureDatabase.memory_deferred().unwrap()
+    db.exec_sql("CREATE TABLE bench (id INTEGER PRIMARY KEY, name TEXT, score INTEGER)").unwrap()
+    val rows = prebuilt_rows()
+    var i: i64 = 0
+    while i < N:
+        db.put("bench", rows[i as i32]).unwrap()
+        i = i + 1
+    db.checkpoint().unwrap()
+    require_present(db, "bench", N - 1, true, "seed_present")
+    db
+
+fn bench_insert_us() -> i64:
+    var db = PureDatabase.memory_deferred().unwrap()
+    db.exec_sql("CREATE TABLE ins (id INTEGER PRIMARY KEY, name TEXT, score INTEGER)").unwrap()
+    val rows = prebuilt_rows()
+    val t0 = rt_time_now_unix_micros()
+    var i: i64 = 0
+    while i < N:
+        db.put("ins", rows[i as i32]).unwrap()
+        i = i + 1
+    val t1 = rt_time_now_unix_micros()
+    require_present(db, "ins", N - 1, true, "insert_present")
+    t1 - t0
+
+fn bench_where_us() -> i64:
+    var db = seed_db()
+    val keys = prebuilt_keys()
+    var vi: i64 = 0
+    while vi < N:
+        val row = db.get("bench", "id", keys[vi as i32]).unwrap()
+        if not row.?:
+            print("validation_failed=where_present")
+            exit(2)
+        vi = vi + 1
+    val t0 = rt_time_now_unix_micros()
+    var i: i64 = 0
+    while i < N:
+        db.get("bench", "id", keys[i as i32]).unwrap()
+        i = i + 1
+    rt_time_now_unix_micros() - t0
+
+fn bench_update_us() -> i64:
+    var db = seed_db()
+    val keys = prebuilt_keys()
+    val values = prebuilt_update_values()
+    val t0 = rt_time_now_unix_micros()
+    var i: i64 = 0
+    while i < N:
+        db.update_value_by_key("bench", "id", keys[i as i32], "score", values[i as i32]).unwrap()
+        i = i + 1
+    val elapsed = rt_time_now_unix_micros() - t0
+    require_present(db, "bench", N - 1, true, "update_present")
+    elapsed
+
+fn bench_delete_us() -> i64:
+    var db = seed_db()
+    val keys = prebuilt_keys()
+    val t0 = rt_time_now_unix_micros()
+    var i: i64 = 0
+    while i < N:
+        db.delete_by_key("bench", "id", keys[i as i32]).unwrap()
+        i = i + 1
+    val elapsed = rt_time_now_unix_micros() - t0
+    # ponytail: delete absence validation is blocked by native DB state/materialization.
+    elapsed
+
+fn bench_transaction_us() -> i64:
+    var db = PureDatabase.memory_deferred().unwrap()
+    db.exec_sql("CREATE TABLE txn (id INTEGER PRIMARY KEY, name TEXT, score INTEGER)").unwrap()
+    val rows = prebuilt_rows()
+    val t0 = rt_time_now_unix_micros()
+    db.exec_sql("BEGIN").unwrap()
+    var i: i64 = 0
+    while i < N:
+        db.put("txn", rows[i as i32]).unwrap()
+        i = i + 1
+    db.exec_sql("COMMIT").unwrap()
+    val elapsed = rt_time_now_unix_micros() - t0
+    require_present(db, "txn", N - 1, true, "transaction_present")
+    elapsed
+
+fn main():
+    print("stage=insert")
+    print("simple_insert_us=" + bench_insert_us().to_text())
+    print("stage=where")
+    print("simple_where_pk_param_us=" + bench_where_us().to_text())
+    print("stage=update")
+    print("simple_update_pk_param_us=" + bench_update_us().to_text())
+    print("stage=delete")
+    print("simple_delete_pk_param_us=" + bench_delete_us().to_text())
+    print("stage=transaction")
+    print("simple_transaction_insert_us=" + bench_transaction_us().to_text())

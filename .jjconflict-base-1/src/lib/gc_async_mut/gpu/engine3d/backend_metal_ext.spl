@@ -1,0 +1,170 @@
+# 3D Engine — MetalBackend3D Extended Methods
+#
+# Engine3DExtended impl (optional advanced features: MSAA, clip planes, ray
+# tracing, variable rate shading, mesh shading) and Metal-specific hardware
+# extensions (argument buffers, tile shading, mesh shading, ICBs).
+#
+# The required RenderBackend3D methods (shader/pipeline, buffer management,
+# render passes, post-processing, occlusion, animation, extended texture ops)
+# are implemented directly in backend_metal.spl's impl RenderBackend3D block
+# alongside the core drawing methods.
+
+use std.gpu.engine3d.backend_metal.{MetalBackend3D}
+use std.gpu.engine3d.backend.{Engine3DExtended}
+
+# ============================================================================
+# Engine3DExtended — Metal Advanced 3D Features
+# ============================================================================
+
+impl Engine3DExtended for MetalBackend3D:
+
+    me enable_msaa(samples: i32):
+        # Metal: MTLRenderPassDescriptor.sampleCount / MTLTexture multisampleType
+        self.stats.draw_calls = self.stats.draw_calls
+
+    me set_clip_planes(planes: [[f32]]):
+        # Metal: [[clip_distance]] attribute in vertex shader; up to 8 planes
+        self.stats.draw_calls = self.stats.draw_calls
+
+    me enable_subgroup_ops(enabled: bool):
+        # Metal: simd_vote/simd_broadcast/simd_prefix_inclusive_sum in MSL
+        self.stats.draw_calls = self.stats.draw_calls
+
+    me set_dual_source_blend(enabled: bool):
+        # Metal: MTLRenderPipelineDescriptor colorAttachments[0].writeMask
+        # and [[color(0), index(1)]] output in fragment shader
+        self.stats.draw_calls = self.stats.draw_calls
+
+    me enable_hdr_render_target(enabled: bool):
+        # Metal: MTLPixelFormatRGBA16Float / MTLPixelFormatRGB10A2Unorm render target
+        self.stats.draw_calls = self.stats.draw_calls
+
+    # -- Ray tracing (Metal 3 / A15+) --
+
+    me build_acceleration_structure(vertices: [f32], indices: [u32]) -> i32:
+        # TODO(gpu-rt): MTLAccelerationStructure + MTLPrimitiveAccelerationStructureDescriptor
+        return -1
+
+    me trace_rays(accel_id: i32, ray_count: i32, origins: [f32], directions: [f32]) -> [u32]:
+        # TODO(gpu-rt): MTLComputeCommandEncoder intersect_rays / MTLIntersectionFunctionTable
+        return []
+
+    # -- Variable rate shading --
+
+    me set_variable_rate_shading(mode: i32):
+        # TODO(gpu-vrs): MTLRasterizationRateMap (Apple Silicon tile-rasterization rates)
+        return
+
+    # -- Mesh shaders (Metal 3 / M2+) --
+
+    me set_mesh_shader_enabled(enabled: bool):
+        # TODO(gpu-mesh): MTLMeshRenderPipelineDescriptor; mesh + object + fragment stages
+        return
+
+# ============================================================================
+# MetalBackend3D — Metal 3D Hardware Extension Operations
+# Argument buffers, tile shading, mesh shading, indirect command buffers.
+# ============================================================================
+
+impl MetalBackend3D:
+
+    # -- Argument Buffers (Metal 2+) --
+    # Argument buffers let shaders access resources by index rather than
+    # binding each resource individually, enabling GPU-driven resource binding.
+
+    me create_argument_buffer(resource_ids: [i32], resource_types: [i32]) -> i32:
+        # Metal: MTLArgumentEncoder encodes resources into a MTLBuffer.
+        # resource_types: 0=texture, 1=sampler, 2=buffer
+        # Returns an argument buffer ID (handle into backend resource table).
+        # TODO(gpu-argbuf): MTLArgumentEncoder + MTLBuffer layout encoding
+        return -1
+
+    me bind_argument_buffer(arg_buffer_id: i32, stage: i32, index: i32):
+        # Metal: setBuffer(argBuffer, offset:0, index:index) on render/compute encoder.
+        # stage: 0=vertex, 1=fragment, 2=compute
+        # TODO(gpu-argbuf): MTLRenderCommandEncoder setBuffer at argument buffer slot
+        return
+
+    me destroy_argument_buffer(arg_buffer_id: i32):
+        # Metal: release the underlying MTLBuffer; remove from resource table.
+        # TODO(gpu-argbuf): release MTLBuffer + remove tracking entry
+        return
+
+    me update_argument_buffer(arg_buffer_id: i32, slot: i32, resource_id: i32):
+        # Metal: re-encode a single resource slot within an existing argument buffer.
+        # TODO(gpu-argbuf): MTLArgumentEncoder useResource / re-encode slot
+        return
+
+    # -- Tile Shading (Apple Silicon / A11+) --
+    # Tile shaders run in the tile memory stage between vertex and fragment,
+    # enabling efficient on-chip deferred/forward+ rendering.
+
+    me set_tile_shader(shader_id: i32):
+        # Metal: MTLRenderPipelineDescriptor.tileFunction — kernel executed per tile.
+        # TODO(gpu-tile): MTLRenderPipelineDescriptor tileFunction assignment
+        return
+
+    me dispatch_tile_shader(threadgroup_width: i32, threadgroup_height: i32):
+        # Metal: MTLRenderCommandEncoder dispatchThreadsPerTile(MTLSize).
+        # Must be called inside a render pass with tile shading enabled.
+        # TODO(gpu-tile): MTLRenderCommandEncoder dispatchThreadsPerTile
+        return
+
+    me set_tile_memory_length(bytes: i32):
+        # Metal: MTLRenderPassDescriptor.tileWidth/tileHeight and
+        # MTLRenderPipelineDescriptor.maxTotalThreadsPerThreadgroup * threadgroupMemoryLength.
+        # TODO(gpu-tile): configure imageblockSampleLength / threadgroupMemoryLength
+        return
+
+    # -- Mesh Shading (Metal 3 / M2+ / A17+) --
+    # Replaces the vertex + geometry pipeline with object + mesh + fragment stages.
+    # Object stage culls/generates meshlets; mesh stage outputs geometry.
+
+    me create_mesh_pipeline(object_src: text, mesh_src: text, fragment_src: text) -> i32:
+        # Metal: MTLMeshRenderPipelineDescriptor with objectFunction, meshFunction, fragmentFunction.
+        # TODO(gpu-mesh): MTLMeshRenderPipelineDescriptor creation + MTLDevice newRenderPipelineState
+        return -1
+
+    me draw_mesh_threadgroups(pipeline_id: i32, threadgroups_x: i32, threadgroups_y: i32, threadgroups_z: i32):
+        # Metal: MTLRenderCommandEncoder drawMeshThreadgroups(MTLSize, threadsPerObjectThreadgroup:, threadsPerMeshThreadgroup:).
+        # TODO(gpu-mesh): MTLRenderCommandEncoder drawMeshThreadgroups dispatch
+        return
+
+    me draw_mesh_threadgroups_indirect(pipeline_id: i32, buffer_id: i32, offset: i32):
+        # Metal: MTLRenderCommandEncoder drawMeshThreadgroupsWithIndirectBuffer.
+        # TODO(gpu-mesh): indirect mesh dispatch from GPU-populated MTLBuffer
+        return
+
+    # -- Indirect Command Buffers (Metal 2+) --
+    # ICBs allow the GPU to encode draw/dispatch commands directly, enabling
+    # fully GPU-driven rendering without CPU round-trips.
+
+    me create_indirect_command_buffer(max_commands: i32, allow_draw: bool, allow_dispatch: bool) -> i32:
+        # Metal: MTLDevice newIndirectCommandBufferWithDescriptor(MTLIndirectCommandBufferDescriptor).
+        # allow_draw: MTLIndirectCommandType.draw / .drawIndexed
+        # allow_dispatch: MTLIndirectCommandType.concurrent_dispatch
+        # TODO(gpu-icb): MTLIndirectCommandBufferDescriptor + newIndirectCommandBuffer
+        return -1
+
+    me reset_indirect_command_buffer(icb_id: i32, range_start: i32, range_count: i32):
+        # Metal: MTLIndirectCommandBuffer resetWithRange(NSRange).
+        # Clears command slots so the GPU can re-encode them.
+        # TODO(gpu-icb): MTLBlitCommandEncoder resetCommandsInBuffer range
+        return
+
+    me execute_indirect_command_buffer(icb_id: i32, range_start: i32, range_count: i32):
+        # Metal: MTLRenderCommandEncoder executeCommandsInBuffer:withRange: or
+        # MTLComputeCommandEncoder executeCommandsInBuffer:withRange:.
+        # TODO(gpu-icb): encode ICB execution into active render/compute encoder
+        return
+
+    me optimize_indirect_command_buffer(icb_id: i32):
+        # Metal: MTLBlitCommandEncoder optimizeIndirectCommandBuffer:withRange:.
+        # Reorders/patches commands for better GPU execution efficiency.
+        # TODO(gpu-icb): MTLBlitCommandEncoder optimizeIndirectCommandBuffer
+        return
+
+    me destroy_indirect_command_buffer(icb_id: i32):
+        # Metal: release MTLIndirectCommandBuffer; remove from resource table.
+        # TODO(gpu-icb): release MTLIndirectCommandBuffer + remove tracking entry
+        return

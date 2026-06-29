@@ -1,0 +1,89 @@
+# SReplay — Multi-Thread Recording Extension (Track 3, Phase 3.8)
+#
+# Records thread creation, context switches, and exits for deterministic
+# multi-thread replay.  The recorded schedule order enables the replayer
+# to force the same thread interleaving on replay.
+
+# ============================================================================
+# Thread Events
+# ============================================================================
+
+struct ThreadSwitchEvent:
+    timestamp: i64
+    from_tid: i64
+    to_tid: i64
+    cpu_id: i32
+
+struct ThreadCreateEvent:
+    timestamp: i64
+    parent_tid: i64
+    child_tid: i64
+
+# ============================================================================
+# ThreadRecorder
+# ============================================================================
+
+struct ThreadRecorder:
+    switches: [ThreadSwitchEvent]
+    creates: [ThreadCreateEvent]
+    active_threads: [i64]
+
+impl ThreadRecorder:
+    static fn create() -> ThreadRecorder:
+        ThreadRecorder(
+            switches: [],
+            creates: [],
+            active_threads: []
+        )
+
+    # Record a new thread being created by parent_tid.
+    me fn on_thread_create(parent_tid: i64, child_tid: i64, timestamp: i64):
+        val ev = ThreadCreateEvent(
+            timestamp: timestamp,
+            parent_tid: parent_tid,
+            child_tid: child_tid
+        )
+        self.creates.push(ev)
+        # Add child to active set (add parent too if first thread)
+        if self.active_threads.len() == 0:
+            self.active_threads.push(parent_tid)
+        var already_active = false
+        for tid in self.active_threads:
+            if tid == child_tid:
+                already_active = true
+                break
+        if not already_active:
+            self.active_threads.push(child_tid)
+
+    # Record a context switch from one thread to another.
+    me fn on_thread_switch(from_tid: i64, to_tid: i64, cpu_id: i32, timestamp: i64):
+        val ev = ThreadSwitchEvent(
+            timestamp: timestamp,
+            from_tid: from_tid,
+            to_tid: to_tid,
+            cpu_id: cpu_id
+        )
+        self.switches.push(ev)
+
+    # Record a thread exiting.  Removes it from the active set.
+    me fn on_thread_exit(tid: i64, timestamp: i64):
+        var new_active: [i64] = []
+        for t in self.active_threads:
+            if t != tid:
+                new_active.push(t)
+        self.active_threads = new_active
+
+    # Return the number of currently active threads.
+    fn thread_count() -> i32:
+        self.active_threads.len() as i32
+
+    # Return the total number of recorded context switches.
+    fn switch_count() -> i64:
+        self.switches.len()
+
+    # Return the thread IDs in the order they were scheduled (switch order).
+    fn get_schedule_order() -> [i64]:
+        var order: [i64] = []
+        for sw in self.switches:
+            order.push(sw.to_tid)
+        order

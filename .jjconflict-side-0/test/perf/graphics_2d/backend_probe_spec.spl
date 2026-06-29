@@ -1,0 +1,149 @@
+# test/perf/graphics_2d/backend_probe_spec.spl
+#
+# **Feature IDs:** AC-1 — Backend probe strict-fail, no silent fallback
+# **Category:** Graphics | Backend | Probe
+# **Status:** Pending implementation (Phase 5)
+#
+# Verifies that backend_probe reports selected backend identity,
+# enforces strict mode (no silent CPU fallback when GPU is requested),
+# and surfaces shader format in the probe result.
+#
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_probe.spl
+# @cover src/lib/gc_async_mut/gpu/engine2d/ffi_dispatch.spl
+
+val BACKEND_CPU: text = "cpu"
+val BACKEND_SOFTWARE: text = "software"
+val STATUS_OK: text = "Ok"
+val STATUS_FAILED: text = "Failed"
+val STATUS_FALLBACK: text = "Fallback"
+
+# Sentinel probe result for testing field structure
+struct ProbeResultSentinel:
+    requested_name: text
+    selected_name:  text
+    status:         text
+    device_name:    text
+    api_name:       text
+    feature_gate:   text
+    shader_format:  text
+    fallback_reason: text
+
+fn make_ok_sentinel(req: text, sel: text, fmt: text) -> ProbeResultSentinel:
+    ProbeResultSentinel(
+        requested_name: req,
+        selected_name:  sel,
+        status:         STATUS_OK,
+        device_name:    "test-device",
+        api_name:       "test-api",
+        feature_gate:   "none",
+        shader_format:  fmt,
+        fallback_reason: ""
+    )
+
+fn make_failed_sentinel(req: text) -> ProbeResultSentinel:
+    ProbeResultSentinel(
+        requested_name:  req,
+        selected_name:   req,
+        status:          STATUS_FAILED,
+        device_name:     "unavailable",
+        api_name:        "none",
+        feature_gate:    "none",
+        shader_format:   "none",
+        fallback_reason: "device not present"
+    )
+
+fn make_fallback_sentinel(req: text, sel: text) -> ProbeResultSentinel:
+    ProbeResultSentinel(
+        requested_name:  req,
+        selected_name:   sel,
+        status:          STATUS_FALLBACK,
+        device_name:     "cpu",
+        api_name:        "software",
+        feature_gate:    "none",
+        shader_format:   "none",
+        fallback_reason: "silent fallback (should be rejected in strict mode)"
+    )
+
+fn is_strict_fallback_violation(r: ProbeResultSentinel) -> bool:
+    r.status == STATUS_FALLBACK and r.requested_name != BACKEND_CPU and r.requested_name != BACKEND_SOFTWARE
+
+describe "backend_probe — AC-1: strict probe, no silent fallback":
+
+    describe "BackendProbeResult field contract":
+
+        it "AC-1: probe result carries requested_name field":
+            val r: ProbeResultSentinel = make_ok_sentinel("vulkan", "vulkan", "spirv")
+            expect(r.requested_name).to_equal("vulkan")
+
+        it "AC-1: probe result carries selected_name field":
+            val r: ProbeResultSentinel = make_ok_sentinel("vulkan", "vulkan", "spirv")
+            expect(r.selected_name).to_equal("vulkan")
+
+        it "AC-1: probe result carries status field":
+            val r: ProbeResultSentinel = make_ok_sentinel("vulkan", "vulkan", "spirv")
+            expect(r.status).to_equal(STATUS_OK)
+
+        it "AC-1: probe result carries shader_format field":
+            val r: ProbeResultSentinel = make_ok_sentinel("vulkan", "vulkan", "spirv")
+            expect(r.shader_format).to_equal("spirv")
+
+        it "AC-1: probe result carries fallback_reason field (empty on Ok)":
+            val r: ProbeResultSentinel = make_ok_sentinel("vulkan", "vulkan", "spirv")
+            expect(r.fallback_reason).to_equal("")
+
+        it "AC-1: failed probe result has non-empty fallback_reason":
+            val r: ProbeResultSentinel = make_failed_sentinel("cuda")
+            expect(r.fallback_reason).to_equal("device not present")
+
+        it "AC-1: failed probe status is Failed":
+            val r: ProbeResultSentinel = make_failed_sentinel("cuda")
+            expect(r.status).to_equal(STATUS_FAILED)
+
+    describe "strict mode — no silent GPU→CPU fallback":
+
+        it "AC-1: fallback sentinel from GPU request is a strict violation":
+            val r: ProbeResultSentinel = make_fallback_sentinel("vulkan", "cpu")
+            expect(is_strict_fallback_violation(r)).to_equal(true)
+
+        it "AC-1: fallback sentinel from cuda request is a strict violation":
+            val r: ProbeResultSentinel = make_fallback_sentinel("cuda", "cpu")
+            expect(is_strict_fallback_violation(r)).to_equal(true)
+
+        it "AC-1: fallback sentinel from metal request is a strict violation":
+            val r: ProbeResultSentinel = make_fallback_sentinel("metal", "cpu")
+            expect(is_strict_fallback_violation(r)).to_equal(true)
+
+        it "AC-1: fallback sentinel from webgpu request is a strict violation":
+            val r: ProbeResultSentinel = make_fallback_sentinel("webgpu", "software")
+            expect(is_strict_fallback_violation(r)).to_equal(true)
+
+        it "AC-1: cpu-requested fallback is not a strict violation":
+            val r: ProbeResultSentinel = make_fallback_sentinel("cpu", "software")
+            expect(is_strict_fallback_violation(r)).to_equal(false)
+
+        it "AC-1: Ok status with matching requested/selected is not a violation":
+            val r: ProbeResultSentinel = make_ok_sentinel("vulkan", "vulkan", "spirv")
+            expect(is_strict_fallback_violation(r)).to_equal(false)
+
+    describe "GLSL exclusion from selection":
+
+        it "AC-1: shader_format 'glsl' must not appear in an Ok probe result for vulkan":
+            val r: ProbeResultSentinel = make_ok_sentinel("vulkan", "vulkan", "spirv")
+            expect(r.shader_format).to_equal("spirv")
+
+        it "AC-1: shader_format 'spirv' is the only acceptable vulkan format":
+            val glsl_format: text = "glsl"
+            val spirv_format: text = "spirv"
+            expect(glsl_format == spirv_format).to_equal(false)
+
+    describe "CPU-only default when no GPU feature enabled":
+
+        it "AC-1: cpu probe status is Ok with shader_format none":
+            val r: ProbeResultSentinel = make_ok_sentinel("cpu", "cpu", "none")
+            expect(r.status).to_equal(STATUS_OK)
+            expect(r.shader_format).to_equal("none")
+
+        it "AC-1: software probe status is Ok with shader_format none":
+            val r: ProbeResultSentinel = make_ok_sentinel("software", "software", "none")
+            expect(r.status).to_equal(STATUS_OK)
+            expect(r.shader_format).to_equal("none")

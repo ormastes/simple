@@ -1,0 +1,109 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/llm_dashboard_live_http_setup_contract}"
+PROBE_BUILD_DIR="$BUILD_DIR/live_http"
+PROBE_REPORT="$BUILD_DIR/live_http_setup_contract_report.md"
+OUT_ENV="$BUILD_DIR/evidence.env"
+PROBE_ENV="$PROBE_BUILD_DIR/evidence.env"
+PROBE_STDOUT="$BUILD_DIR/live_http_stdout.log"
+mkdir -p "$BUILD_DIR"
+rm -f "$OUT_ENV" "$PROBE_REPORT" "$PROBE_STDOUT"
+
+failures=""
+checked_count=0
+
+add_failure() {
+    if [ -z "$failures" ]; then
+        failures="$1"
+    else
+        failures="$failures|$1"
+    fi
+}
+
+env_value() {
+    key="$1"
+    sed -n "s/^${key}=//p" "$PROBE_ENV" 2>/dev/null | tail -n 1
+}
+
+require_env_value() {
+    key="$1"
+    expected="$2"
+    checked_count=$((checked_count + 1))
+    actual="$(env_value "$key")"
+    if [ "$actual" != "$expected" ]; then
+        add_failure "env_${key}_expected_${expected}_got_${actual:-missing}"
+    fi
+}
+
+require_report_pattern() {
+    pattern="$1"
+    label="$2"
+    checked_count=$((checked_count + 1))
+    if ! rg -q "$pattern" "$PROBE_REPORT"; then
+        add_failure "$label"
+    fi
+}
+
+set +e
+env -u LLM_DASHBOARD_LIVE_BASE_URL \
+    -u LLM_DASHBOARD_LIVE_AUTH_HEADER \
+    -u LLM_DASHBOARD_LIVE_AUTH_COOKIE \
+    -u LLM_DASHBOARD_LIVE_COOKIE_NAME \
+    -u LLM_DASHBOARD_LIVE_COOKIE_VALUE \
+    BUILD_DIR="$PROBE_BUILD_DIR" \
+    REPORT_PATH="$PROBE_REPORT" \
+    sh scripts/check/check-llm-dashboard-live-http-evidence.shs >"$PROBE_STDOUT" 2>&1
+probe_exit=$?
+set -e
+
+if [ "$probe_exit" -ne 1 ]; then
+    add_failure "probe_exit_expected_1_got_$probe_exit"
+fi
+
+if [ ! -s "$PROBE_ENV" ]; then
+    add_failure "missing_probe_env"
+else
+    require_env_value llm_dashboard_live_http_status fail
+    require_env_value llm_dashboard_live_http_reason missing_base_url
+    require_env_value llm_dashboard_live_http_blocked_gates 'base_url|auth_configured'
+    require_env_value llm_dashboard_live_http_primary_blocked_gate base_url
+    require_env_value llm_dashboard_live_http_auth_config_status fail
+    require_env_value llm_dashboard_live_http_next_action 'set LLM_DASHBOARD_LIVE_BASE_URL and authentication env, then rerun this wrapper'
+fi
+
+if [ ! -s "$PROBE_REPORT" ]; then
+    add_failure "missing_probe_report"
+else
+    require_report_pattern '^- blocked_gates: `base_url\|auth_configured`' "report_missing_blocked_gates"
+    require_report_pattern '^- next_action: `set LLM_DASHBOARD_LIVE_BASE_URL and authentication env, then rerun this wrapper`' "report_missing_next_action"
+fi
+
+if [ -z "$failures" ]; then
+    status="pass"
+    reason="dashboard_live_http_setup_contract_present"
+else
+    status="fail"
+    reason="$failures"
+fi
+
+{
+    printf '%s\n' "llm_dashboard_live_http_setup_contract_status=$status"
+    printf '%s\n' "llm_dashboard_live_http_setup_contract_reason=$reason"
+    printf '%s\n' "llm_dashboard_live_http_setup_contract_checked_count=$checked_count"
+    printf '%s\n' "llm_dashboard_live_http_setup_contract_probe_exit=$probe_exit"
+    printf '%s\n' "llm_dashboard_live_http_setup_contract_probe_env=$PROBE_ENV"
+    printf '%s\n' "llm_dashboard_live_http_setup_contract_probe_report=$PROBE_REPORT"
+    printf '%s\n' "llm_dashboard_live_http_setup_contract_probe_stdout=$PROBE_STDOUT"
+} >"$OUT_ENV"
+
+if [ "$status" = "pass" ]; then
+    printf '%s\n' "STATUS: PASS llm-dashboard-live-http-setup-contract checked_count=$checked_count"
+    exit 0
+fi
+
+printf '%s\n' "STATUS: FAIL llm-dashboard-live-http-setup-contract reason=$reason"
+exit 1

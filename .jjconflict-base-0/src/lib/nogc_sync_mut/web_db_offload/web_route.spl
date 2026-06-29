@@ -1,0 +1,305 @@
+# codex-impl
+# Reusable web route GPU offload boundary for coarse payload work.
+
+use std.web_db_offload.contract.{
+    GpuWdbWorkKind,
+    GpuWdbBudget,
+    GpuWdbCoarseBatchProfile,
+    GpuWdbExecutionPlan,
+    GpuWdbRuntimeSnapshot,
+    gpu_wdb_default_budget,
+    gpu_wdb_cpu,
+    gpu_wdb_web_payload_profile,
+    gpu_wdb_profile_allows_gpu
+}
+use std.web_db_offload.queue.{
+    GpuWdbQueueState,
+    GpuWdbQueueSubmission,
+    gpu_wdb_complete_submission
+}
+use std.web_db_offload.library.{
+    GpuWdbLibraryRegistry,
+    gpu_wdb_library_snapshot,
+    gpu_wdb_submit_registered_batch,
+    gpu_wdb_submit_registered_batch_for_generation
+}
+use std.web_db_offload.scheduler.{
+    GpuWdbBatchAccumulator,
+    GpuWdbBatchAccumulatorResult,
+    GpuWdbScheduleClass,
+    GpuWdbScheduleAction,
+    gpu_wdb_batch_accumulator_add,
+    gpu_wdb_schedule_request,
+    gpu_wdb_schedule_registered
+}
+
+enum WebGpuRouteKind:
+    Inference
+    Embedding
+    Rank
+    Transform
+    ProxyForwarding
+    HttpControlPlane
+
+struct WebGpuRouteOffloadExecution:
+    route: text
+    route_kind: WebGpuRouteKind
+    work_kind: GpuWdbWorkKind
+    profile: GpuWdbCoarseBatchProfile
+    payload_bytes: i64
+    item_count: i64
+    submission: GpuWdbQueueSubmission
+    state_after: GpuWdbQueueState
+    cpu_status: i64
+    cpu_body: text
+    gpu_dispatched: bool
+    cpu_authoritative: bool
+    schedule_action: GpuWdbScheduleAction
+    gpu_candidate_validated: bool
+    validation_reason: text
+
+struct WebGpuRouteAccumulatedExecution:
+    execution: WebGpuRouteOffloadExecution
+    accumulator_result: GpuWdbBatchAccumulatorResult
+
+fn web_gpu_route_work_kind(route_kind: WebGpuRouteKind) -> GpuWdbWorkKind:
+    match route_kind:
+        WebGpuRouteKind.Inference: GpuWdbWorkKind.WebInference
+        WebGpuRouteKind.Embedding: GpuWdbWorkKind.WebEmbedding
+        WebGpuRouteKind.Rank: GpuWdbWorkKind.WebRank
+        WebGpuRouteKind.Transform: GpuWdbWorkKind.WebTransform
+        WebGpuRouteKind.ProxyForwarding: GpuWdbWorkKind.ProxyForwarding
+        WebGpuRouteKind.HttpControlPlane: GpuWdbWorkKind.HttpControlPlane
+
+fn web_gpu_route_estimated_payload_bytes(item_count: i64, bytes_per_item: i64) -> i64:
+    if item_count <= 0:
+        return 0
+    if bytes_per_item <= 0:
+        return 0
+    item_count * bytes_per_item
+
+fn web_gpu_route_deferred_submission(state: GpuWdbQueueState,
+                                     work_kind: GpuWdbWorkKind,
+                                     reason: text) -> GpuWdbQueueSubmission:
+    val execution = GpuWdbExecutionPlan(
+        kind: work_kind,
+        target: "gpu_batch_accumulator",
+        decision: gpu_wdb_cpu(reason)
+    )
+    GpuWdbQueueSubmission(
+        accepted: false,
+        state: state,
+        execution: execution,
+        queue_depth_after: state.queue_depth,
+        dispatch_target: "gpu_batch_accumulator",
+        pinned_host_bytes: 0,
+        stream_id: -1,
+        reason: reason
+    )
+
+fn web_gpu_route_offload_execute_scheduled(route: text, route_kind: WebGpuRouteKind,
+                                           item_count: i64, bytes_per_item: i64,
+                                           state: GpuWdbQueueState,
+                                           registry: GpuWdbLibraryRegistry,
+                                           gpu_available: bool,
+                                           cpu_fallback_available: bool,
+                                           budget: GpuWdbBudget,
+                                           schedule_class: GpuWdbScheduleClass,
+                                           allow_defer: bool,
+                                           cpu_status: i64,
+                                           cpu_body: text) -> WebGpuRouteOffloadExecution:
+    web_gpu_route_offload_execute_scheduled_with_generation(
+        route,
+        route_kind,
+        item_count,
+        bytes_per_item,
+        state,
+        registry,
+        gpu_available,
+        registry.generation,
+        cpu_fallback_available,
+        budget,
+        schedule_class,
+        allow_defer,
+        cpu_status,
+        cpu_body
+    )
+
+fn web_gpu_route_offload_execute_scheduled_with_generation(route: text, route_kind: WebGpuRouteKind,
+                                                           item_count: i64, bytes_per_item: i64,
+                                                           state: GpuWdbQueueState,
+                                                           registry: GpuWdbLibraryRegistry,
+                                                           gpu_available: bool,
+                                                           expected_generation: i64,
+                                                           cpu_fallback_available: bool,
+                                                           budget: GpuWdbBudget,
+                                                           schedule_class: GpuWdbScheduleClass,
+                                                           allow_defer: bool,
+                                                           cpu_status: i64,
+                                                           cpu_body: text) -> WebGpuRouteOffloadExecution:
+    val work_kind = web_gpu_route_work_kind(route_kind)
+    val payload_bytes = web_gpu_route_estimated_payload_bytes(item_count, bytes_per_item)
+    val snapshot = gpu_wdb_library_snapshot(
+        state,
+        registry,
+        expected_generation,
+        gpu_available,
+        cpu_fallback_available
+    )
+    val schedule = gpu_wdb_schedule_registered(
+        gpu_wdb_schedule_request(
+            work_kind,
+            payload_bytes,
+            item_count,
+            schedule_class,
+            allow_defer,
+            snapshot
+        ),
+        registry,
+        budget
+    )
+    val submission =
+        if schedule.action == GpuWdbScheduleAction.DeferForBatch:
+            web_gpu_route_deferred_submission(state, work_kind, schedule.reason)
+        else:
+            gpu_wdb_submit_registered_batch_for_generation(
+                state,
+                registry,
+                work_kind,
+                payload_bytes,
+                item_count,
+                gpu_available,
+                expected_generation,
+                cpu_fallback_available,
+                budget
+            )
+    val state_after =
+        if submission.accepted:
+            gpu_wdb_complete_submission(submission.state, submission)
+        else:
+            submission.state
+    WebGpuRouteOffloadExecution(
+        route: route,
+        route_kind: route_kind,
+        work_kind: work_kind,
+        profile: gpu_wdb_web_payload_profile(work_kind),
+        payload_bytes: payload_bytes,
+        item_count: item_count,
+        submission: submission,
+        state_after: state_after,
+        cpu_status: cpu_status,
+        cpu_body: cpu_body,
+        gpu_dispatched: submission.accepted,
+        cpu_authoritative: true,
+        schedule_action: schedule.action,
+        gpu_candidate_validated: false,
+        validation_reason: "gpu-candidate-not-evaluated"
+    )
+
+fn web_gpu_route_offload_execute_accumulating(route: text, route_kind: WebGpuRouteKind,
+                                              item_count: i64, bytes_per_item: i64,
+                                              state: GpuWdbQueueState,
+                                              registry: GpuWdbLibraryRegistry,
+                                              gpu_available: bool,
+                                              cpu_fallback_available: bool,
+                                              budget: GpuWdbBudget,
+                                              schedule_class: GpuWdbScheduleClass,
+                                              accumulator: GpuWdbBatchAccumulator,
+                                              cpu_status: i64,
+                                              cpu_body: text) -> WebGpuRouteAccumulatedExecution:
+    val execution = web_gpu_route_offload_execute_scheduled(
+        route,
+        route_kind,
+        item_count,
+        bytes_per_item,
+        state,
+        registry,
+        gpu_available,
+        cpu_fallback_available,
+        budget,
+        schedule_class,
+        true,
+        cpu_status,
+        cpu_body
+    )
+    val snapshot = GpuWdbRuntimeSnapshot(
+        queue_depth: state.queue_depth,
+        gpu_available: gpu_available,
+        generation_current: true,
+        cpu_fallback_available: cpu_fallback_available
+    )
+    val request = gpu_wdb_schedule_request(
+        execution.work_kind,
+        execution.payload_bytes,
+        execution.item_count,
+        schedule_class,
+        true,
+        snapshot
+    )
+    val acc_result =
+        if execution.schedule_action == GpuWdbScheduleAction.DeferForBatch:
+            gpu_wdb_batch_accumulator_add(accumulator, request, budget)
+        else:
+            GpuWdbBatchAccumulatorResult(
+                accepted: false,
+                should_flush: false,
+                reason: "route-not-deferred",
+                accumulator: accumulator
+            )
+    WebGpuRouteAccumulatedExecution(
+        execution: execution,
+        accumulator_result: acc_result
+    )
+
+fn web_gpu_route_offload_execute(route: text, route_kind: WebGpuRouteKind,
+                                 item_count: i64, bytes_per_item: i64,
+                                 state: GpuWdbQueueState,
+                                 registry: GpuWdbLibraryRegistry,
+                                 gpu_available: bool,
+                                 cpu_fallback_available: bool,
+                                 budget: GpuWdbBudget,
+                                 cpu_status: i64,
+                                 cpu_body: text) -> WebGpuRouteOffloadExecution:
+    web_gpu_route_offload_execute_scheduled(
+        route,
+        route_kind,
+        item_count,
+        bytes_per_item,
+        state,
+        registry,
+        gpu_available,
+        cpu_fallback_available,
+        budget,
+        GpuWdbScheduleClass.Interactive,
+        false,
+        cpu_status,
+        cpu_body
+    )
+
+fn web_gpu_route_offload_execute_default(route: text, route_kind: WebGpuRouteKind,
+                                         item_count: i64, bytes_per_item: i64,
+                                         state: GpuWdbQueueState,
+                                         registry: GpuWdbLibraryRegistry,
+                                         gpu_available: bool,
+                                         cpu_fallback_available: bool,
+                                         cpu_status: i64,
+                                         cpu_body: text) -> WebGpuRouteOffloadExecution:
+    web_gpu_route_offload_execute(
+        route,
+        route_kind,
+        item_count,
+        bytes_per_item,
+        state,
+        registry,
+        gpu_available,
+        cpu_fallback_available,
+        gpu_wdb_default_budget(),
+        cpu_status,
+        cpu_body
+    )
+
+fn web_gpu_route_offload_used_gpu(execution: WebGpuRouteOffloadExecution) -> bool:
+    execution.gpu_dispatched and web_gpu_route_profile_allows_gpu(execution)
+
+fn web_gpu_route_profile_allows_gpu(execution: WebGpuRouteOffloadExecution) -> bool:
+    gpu_wdb_profile_allows_gpu(execution.profile, execution.submission.execution.decision)

@@ -1,0 +1,171 @@
+# ============================================================================
+# RV64GC RTL ALU — Combinational Arithmetic/Logic Unit (64-bit)
+# ============================================================================
+#
+# Adapts RV32I ALU for 64-bit.  Pure functions only (combinational logic).
+# All operands and results are i64 (VHDL synthesizable subset).
+#
+# Operations: ADD, SUB, SLL, SLT, SLTU, XOR, SRL, SRA, OR, AND, PASS_B
+# W-suffix:   ADDW, SUBW, SLLW, SRLW, SRAW
+# ============================================================================
+
+use std.hardware.rv64gc_rtl.pkg.{ALU_ADD, ALU_SUB, ALU_SLL, ALU_SLT, ALU_SLTU}
+use std.hardware.rv64gc_rtl.pkg.{ALU_XOR, ALU_SRL, ALU_SRA, ALU_OR, ALU_AND}
+use std.hardware.rv64gc_rtl.pkg.ALU_PASS_B
+use std.hardware.rv64gc_rtl.pkg.{ALU_ADDW, ALU_SUBW, ALU_SLLW, ALU_SRLW, ALU_SRAW}
+
+# ============================================================================
+# ALU result bundle
+# ============================================================================
+
+struct AluResult64:
+    """Combinational ALU output signals."""
+    result: i64    # 64-bit ALU result
+    zero: bool     # true when result == 0
+
+# ============================================================================
+# Signed comparison helper for i64
+# ============================================================================
+
+fn i64_signed_lt(a: i64, b: i64) -> bool:
+    """Signed less-than for i64 values."""
+    a < b
+
+# ============================================================================
+# Logical right shift helper for i64
+# ============================================================================
+
+fn i64_logical_srl(value: i64, shamt: i64) -> i64:
+    """Logical right shift: fills vacated bits with zero.
+    For i64 where >> may be arithmetic, mask off sign-extended bits."""
+    if shamt == 0:
+        return value
+    if shamt >= 64:
+        return 0
+    # Shift right then mask to clear any sign-extended bits
+    val shifted = value >> shamt
+    val mask_bits = 64 - shamt
+    # Build a mask with mask_bits ones in the low positions
+    # (1 << mask_bits) - 1, but avoid overflow if mask_bits == 63
+    if mask_bits >= 64:
+        return shifted
+    val mask = (1 << mask_bits) - 1
+    shifted & mask
+
+# ============================================================================
+# Arithmetic right shift helper for i64
+# ============================================================================
+
+fn i64_sra(value: i64, shamt: i64) -> i64:
+    """Arithmetic right shift: replicates sign bit into vacated positions.
+    i64 >> should be arithmetic in Simple, but we make it explicit."""
+    if shamt == 0:
+        return value
+    if shamt >= 64:
+        if value < 0:
+            return -1
+        else:
+            return 0
+    # Arithmetic shift — >> on i64 replicates sign bit
+    value >> shamt
+
+# ============================================================================
+# Sign-extend 32-bit result to 64 bits
+# ============================================================================
+
+fn sign_extend_32_to_64(value: i64) -> i64:
+    """Sign-extend bit 31 of a 32-bit value into bits [63:32].
+    Used by all W-suffix instructions."""
+    val low32 = value & 0xFFFFFFFF
+    val sign_bit = low32 & 0x80000000
+    if sign_bit != 0:
+        low32 | 0xFFFFFFFF00000000
+    else:
+        low32
+
+# ============================================================================
+# ALU compute — combinational logic, no side effects
+# ============================================================================
+
+fn alu64_compute(op_a: i64, op_b: i64, alu_op: i64) -> AluResult64:
+    """Evaluate the ALU operation on op_a and op_b.
+    Mirrors the VHDL alu entity (combinational process)."""
+
+    val shamt = op_b & 0x3F    # shift amount = lower 6 bits for RV64
+    val shamt_w = op_b & 0x1F  # shift amount = lower 5 bits for W-suffix ops
+
+    var res: i64 = 0
+
+    if alu_op == ALU_ADD:
+        res = op_a + op_b
+
+    else if alu_op == ALU_SUB:
+        res = op_a - op_b
+
+    else if alu_op == ALU_SLL:
+        res = op_a << shamt
+
+    else if alu_op == ALU_SLT:
+        # Signed comparison
+        if i64_signed_lt(op_a, op_b):
+            res = 1
+        else:
+            res = 0
+
+    else if alu_op == ALU_SLTU:
+        # Unsigned comparison via XOR-flip trick
+        val flip: i64 = 0x8000000000000000
+        val fa = op_a ^ flip
+        val fb = op_b ^ flip
+        if fa < fb:
+            res = 1
+        else:
+            res = 0
+
+    else if alu_op == ALU_XOR:
+        res = op_a ^ op_b
+
+    else if alu_op == ALU_SRL:
+        res = i64_logical_srl(op_a, shamt)
+
+    else if alu_op == ALU_SRA:
+        res = i64_sra(op_a, shamt)
+
+    else if alu_op == ALU_OR:
+        res = op_a | op_b
+
+    else if alu_op == ALU_AND:
+        res = op_a & op_b
+
+    else if alu_op == ALU_PASS_B:
+        res = op_b
+
+    # W-suffix operations: operate on low 32 bits, sign-extend result
+    else if alu_op == ALU_ADDW:
+        val sum = (op_a + op_b) & 0xFFFFFFFF
+        res = sign_extend_32_to_64(sum)
+
+    else if alu_op == ALU_SUBW:
+        val diff = (op_a - op_b) & 0xFFFFFFFF
+        res = sign_extend_32_to_64(diff)
+
+    else if alu_op == ALU_SLLW:
+        val shifted = (op_a << shamt_w) & 0xFFFFFFFF
+        res = sign_extend_32_to_64(shifted)
+
+    else if alu_op == ALU_SRLW:
+        val low32 = op_a & 0xFFFFFFFF
+        val shifted = i64_logical_srl(low32, shamt_w)
+        res = sign_extend_32_to_64(shifted)
+
+    else if alu_op == ALU_SRAW:
+        # Arithmetic right shift on low 32 bits
+        val low32 = op_a & 0xFFFFFFFF
+        val sign_bit = low32 & 0x80000000
+        var sval = low32
+        if sign_bit != 0:
+            sval = low32 | 0xFFFFFFFF00000000
+        val shifted = i64_sra(sval, shamt_w)
+        res = sign_extend_32_to_64(shifted)
+
+    AluResult64(result: res, zero: res == 0)

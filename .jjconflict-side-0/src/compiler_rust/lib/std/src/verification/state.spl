@@ -1,0 +1,135 @@
+# Verification State Model
+#
+# Canonical verification states for the Lean proof workflow.
+# Every proof unit, obligation, and report must use these states.
+#
+# Invariants:
+# - Verified never includes admitted or trusted obligations
+# - Stale overrides any previous state until re-check
+# - Admitted and Trusted never collapse into Verified
+
+# The six canonical verification states
+enum VerificationState:
+    Verified      # All obligations checked by Lean, no admits/trust
+    Failed        # Proof check ran, at least one obligation failed
+    Admitted      # Obligations remain via sorry/admit debt path
+    Trusted       # Obligations bypassed via @trusted/assume axiom path
+    Stale         # Cached result exists but source/proof inputs changed
+    NotChecked    # Lean artifacts may exist, but proof check has not run
+
+    fn to_string(self) -> text:
+        match self:
+            case Verified: "verified"
+            case Failed: "failed"
+            case Admitted: "admitted"
+            case Trusted: "trusted"
+            case Stale: "stale"
+            case NotChecked: "not_checked"
+
+    fn to_display(self) -> text:
+        match self:
+            case Verified: "Verified"
+            case Failed: "FAILED"
+            case Admitted: "Admitted (sorry)"
+            case Trusted: "Trusted (assume)"
+            case Stale: "Stale"
+            case NotChecked: "Not Checked"
+
+    # Whether this state indicates a successful proof
+    fn is_proven(self) -> bool:
+        self == VerificationState.Verified
+
+    # Whether this state indicates proof debt (admitted or trusted)
+    fn has_debt(self) -> bool:
+        self == VerificationState.Admitted or self == VerificationState.Trusted
+
+    # Whether this state needs user action
+    fn needs_action(self) -> bool:
+        match self:
+            case Failed: true
+            case Stale: true
+            case NotChecked: true
+            case _: false
+
+    # Whether cached results are still trustworthy
+    fn is_cache_valid(self) -> bool:
+        self != VerificationState.Stale and self != VerificationState.NotChecked
+
+# Compute aggregate state from a list of states.
+# The most severe state wins:
+#   Failed > Admitted > Trusted > Stale > NotChecked > Verified
+fn aggregate_states(states: List<VerificationState>) -> VerificationState:
+    if states.len() == 0:
+        return VerificationState.NotChecked
+
+    var has_failed = false
+    var has_admitted = false
+    var has_trusted = false
+    var has_stale = false
+    var has_not_checked = false
+
+    for s in states:
+        match s:
+            case Failed: has_failed = true
+            case Admitted: has_admitted = true
+            case Trusted: has_trusted = true
+            case Stale: has_stale = true
+            case NotChecked: has_not_checked = true
+            case Verified: pass_do_nothing
+
+    if has_failed:
+        return VerificationState.Failed
+    if has_admitted:
+        return VerificationState.Admitted
+    if has_trusted:
+        return VerificationState.Trusted
+    if has_stale:
+        return VerificationState.Stale
+    if has_not_checked:
+        return VerificationState.NotChecked
+    VerificationState.Verified
+
+# State counts for summary display
+class StateCounts:
+    verified: i32
+    failed: i32
+    admitted: i32
+    trusted: i32
+    stale: i32
+    not_checked: i32
+
+    static fn empty() -> StateCounts:
+        StateCounts(0, 0, 0, 0, 0, 0)
+
+    static fn from_states(states: List<VerificationState>) -> StateCounts:
+        var counts = StateCounts.empty()
+        for s in states:
+            match s:
+                case Verified: counts.verified = counts.verified + 1
+                case Failed: counts.failed = counts.failed + 1
+                case Admitted: counts.admitted = counts.admitted + 1
+                case Trusted: counts.trusted = counts.trusted + 1
+                case Stale: counts.stale = counts.stale + 1
+                case NotChecked: counts.not_checked = counts.not_checked + 1
+        counts
+
+    fn total(self) -> i32:
+        self.verified + self.failed + self.admitted + self.trusted + self.stale + self.not_checked
+
+    fn format(self) -> text:
+        var parts: List<text> = []
+        if self.verified > 0:
+            parts = parts + ["{self.verified} verified"]
+        if self.failed > 0:
+            parts = parts + ["{self.failed} failed"]
+        if self.admitted > 0:
+            parts = parts + ["{self.admitted} admitted"]
+        if self.trusted > 0:
+            parts = parts + ["{self.trusted} trusted"]
+        if self.stale > 0:
+            parts = parts + ["{self.stale} stale"]
+        if self.not_checked > 0:
+            parts = parts + ["{self.not_checked} not_checked"]
+        if parts.len() == 0:
+            return "0 total"
+        parts.join(", ")

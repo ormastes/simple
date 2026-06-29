@@ -1,0 +1,84 @@
+# ECS Entity — opaque handle with generational index
+#
+# An Entity is an i64 pair (id, generation). The id is reused after despawn;
+# the generation bumps on reuse so stale handles do not alias a new entity.
+# EntityAllocator owns the id pool and the free list.
+
+struct Entity:
+    id: i32
+    generation: i32
+
+    static fn null() -> Entity:
+        """The sentinel null entity. Never allocated by EntityAllocator."""
+        Entity(id: -1, generation: 0)
+
+    fn is_null(self) -> bool:
+        self.id < 0
+
+    fn eq(self, other: Entity) -> bool:
+        self.id == other.id and self.generation == other.generation
+
+struct EntityAllocator:
+    """Free-list allocator for entity ids with per-slot generational bump.
+
+    Invariants:
+      - generations[id] is the live generation for slot id; any handle whose
+        generation does not match is stale and must not be dereferenced.
+      - free_head points to the top of the free list stored in-band in
+        generations (stored as negated indices); -1 means empty.
+    """
+    generations: [i32]
+    free_head: i32
+    live_count: i32
+
+    static fn new() -> EntityAllocator:
+        EntityAllocator(
+            generations: [],
+            free_head: -1,
+            live_count: 0
+        )
+
+    static fn with_capacity(capacity: i32) -> EntityAllocator:
+        var gens: [i32] = []
+        var i = 0
+        while i < capacity:
+            gens.push(0)
+            i = i + 1
+        EntityAllocator(
+            generations: gens,
+            free_head: -1,
+            live_count: 0
+        )
+
+    fn alloc(self) -> Entity:
+        """Allocate a new Entity. Reuses a free slot if one exists."""
+        if self.free_head >= 0:
+            val id = self.free_head
+            self.free_head = -(self.generations[id] + 1)
+            self.generations[id] = (-self.generations[id] + 1)
+            self.live_count = self.live_count + 1
+            return Entity(id: id, generation: self.generations[id])
+        val id = self.generations.len() as i32
+        self.generations.push(1)
+        self.live_count = self.live_count + 1
+        Entity(id: id, generation: 1)
+
+    fn free(self, e: Entity) -> bool:
+        """Free an entity slot. Returns false if the handle is stale."""
+        if e.id < 0 or e.id >= (self.generations.len() as i32):
+            return false
+        if self.generations[e.id] != e.generation:
+            return false
+        val prev_free = self.free_head
+        self.generations[e.id] = -(prev_free + 1)
+        self.free_head = e.id
+        self.live_count = self.live_count - 1
+        true
+
+    fn is_live(self, e: Entity) -> bool:
+        if e.id < 0 or e.id >= (self.generations.len() as i32):
+            return false
+        self.generations[e.id] == e.generation
+
+    fn len(self) -> i32:
+        self.live_count

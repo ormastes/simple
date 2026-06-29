@@ -1,0 +1,399 @@
+# HKDF — HMAC-based Key Derivation Function per RFC 5869.
+#
+# Provides SHA-1, SHA-256, SHA-384, and SHA-512/256 variants.
+# SHA-512/256 uses the FIPS 180-4 §5.3.6.2 initial values (distinct from SHA-512)
+# and a 128-byte HMAC block size.
+#
+# API (per hash):
+#   hkdf_extract_sha1(salt, ikm)         -> 20-byte PRK
+#   hkdf_expand_sha1(prk, info, len)     -> len-byte OKM  (len <= 255*20)
+#   hkdf_sha1(salt, ikm, info, len)      -> len-byte OKM  (one-shot)
+#
+#   hkdf_extract_sha256(salt, ikm)       -> 32-byte PRK
+#   hkdf_expand_sha256(prk, info, len)   -> len-byte OKM  (len <= 255*32)
+#   hkdf_sha256(salt, ikm, info, len)    -> len-byte OKM  (one-shot)
+#
+#   hkdf_extract_sha384(salt, ikm)       -> 48-byte PRK
+#   hkdf_expand_sha384(prk, info, len)   -> len-byte OKM  (len <= 255*48)
+#   hkdf_sha384(salt, ikm, info, len)    -> len-byte OKM  (one-shot)
+#
+#   hkdf_extract_sha512_256(salt, ikm)   -> 32-byte PRK
+#   hkdf_expand_sha512_256(prk, info, l) -> l-byte OKM    (l <= 255*32)
+#   hkdf_sha512_256(salt, ikm, info, l)  -> l-byte OKM    (one-shot)
+#
+# All inputs/outputs are [i64] byte lists (values 0-255).
+# Empty salt is treated as HashLen zero bytes per RFC 5869 §2.2.
+
+use std.common.crypto.hmac.{hmac_sha256_bytes, hmac_sha512_256_bytes, hmac_sha1_bytes, hmac_sha384_bytes, hmac_sha3_256_bytes, hmac_sha3_384_bytes, hmac_sha3_512_bytes}
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn _zeros(n: i64) -> [i64]:
+    var result: [i64] = []
+    var i = 0
+    while i < n:
+        result.push(0)
+        i = i + 1
+    result
+
+fn _copy_bytes(src: [i64]) -> [i64]:
+    var result: [i64] = []
+    var i = 0
+    val n = src.len()
+    while i < n:
+        result.push(src[i])
+        i = i + 1
+    result
+
+fn _take_bytes(src: [i64], count: i64) -> [i64]:
+    var result: [i64] = []
+    var i = 0
+    while i < count:
+        result.push(src[i])
+        i = i + 1
+    result
+
+# Append src to dst in-place.
+fn _append_bytes(dst: [i64], src: [i64]):
+    var i = 0
+    val n = src.len()
+    while i < n:
+        dst.push(src[i])
+        i = i + 1
+
+# ============================================================================
+# HKDF-SHA-256  (hash_len = 32, block = 64)
+# ============================================================================
+
+# HKDF-Extract (RFC 5869 §2.2) with SHA-256.
+# Returns 32-byte PRK.
+fn hkdf_extract_sha256(salt: [i64], ikm: [i64]) -> [i64]:
+    var effective_salt: [i64] = []
+    if salt.len() == 0:
+        effective_salt = _zeros(32)
+    else:
+        effective_salt = _copy_bytes(salt)
+    hmac_sha256_bytes(effective_salt, ikm)
+
+# HKDF-Expand (RFC 5869 §2.3) with SHA-256.
+# prk: 32-byte PRK; info: context bytes (may be empty); length: desired output bytes.
+# Returns length-byte OKM, or empty list if length > 255*32.
+fn hkdf_expand_sha256(prk: [i64], info: [i64], length: i64) -> [i64]:
+    val hash_len = 32
+    val max_len = 255 * hash_len
+    if length > max_len:
+        return []
+    var okm: [i64] = []
+    var t_prev: [i64] = []
+    var counter = 1
+    while okm.len() < length:
+        # T(i) = HMAC-SHA256(PRK, T(i-1) || info || byte(i))
+        var msg: [i64] = []
+        var mi = 0
+        while mi < t_prev.len():
+            msg.push(t_prev[mi])
+            mi = mi + 1
+        mi = 0
+        while mi < info.len():
+            msg.push(info[mi])
+            mi = mi + 1
+        msg.push(counter)
+        t_prev = hmac_sha256_bytes(prk, msg)
+        var oki = 0
+        while oki < t_prev.len():
+            okm.push(t_prev[oki])
+            oki = oki + 1
+        counter = counter + 1
+    _take_bytes(okm, length)
+
+# HKDF one-shot with SHA-256: Extract then Expand.
+fn hkdf_sha256(salt: [i64], ikm: [i64], info: [i64], length: i64) -> [i64]:
+    val prk = hkdf_extract_sha256(salt, ikm)
+    hkdf_expand_sha256(prk, info, length)
+
+# ============================================================================
+# HKDF-SHA-512/256  (hash_len = 32, block = 128)
+# Uses SHA-512/256 (FIPS 180-4 §5.3.6.2 IVs, not SHA-512 truncated).
+# ============================================================================
+
+# HKDF-Extract with SHA-512/256.
+# Returns 32-byte PRK.
+fn hkdf_extract_sha512_256(salt: [i64], ikm: [i64]) -> [i64]:
+    var effective_salt: [i64] = []
+    if salt.len() == 0:
+        effective_salt = _zeros(32)
+    else:
+        effective_salt = _copy_bytes(salt)
+    hmac_sha512_256_bytes(effective_salt, ikm)
+
+# HKDF-Expand with SHA-512/256.
+# prk: 32-byte PRK; info: context bytes (may be empty); length: desired output bytes.
+# Returns length-byte OKM, or empty list if length > 255*32.
+fn hkdf_expand_sha512_256(prk: [i64], info: [i64], length: i64) -> [i64]:
+    val hash_len = 32
+    val max_len = 255 * hash_len
+    if length > max_len:
+        return []
+    var okm: [i64] = []
+    var t_prev: [i64] = []
+    var counter = 1
+    while okm.len() < length:
+        var msg: [i64] = []
+        var mi = 0
+        while mi < t_prev.len():
+            msg.push(t_prev[mi])
+            mi = mi + 1
+        mi = 0
+        while mi < info.len():
+            msg.push(info[mi])
+            mi = mi + 1
+        msg.push(counter)
+        t_prev = hmac_sha512_256_bytes(prk, msg)
+        var oki = 0
+        while oki < t_prev.len():
+            okm.push(t_prev[oki])
+            oki = oki + 1
+        counter = counter + 1
+    _take_bytes(okm, length)
+
+# HKDF one-shot with SHA-512/256: Extract then Expand.
+fn hkdf_sha512_256(salt: [i64], ikm: [i64], info: [i64], length: i64) -> [i64]:
+    val prk = hkdf_extract_sha512_256(salt, ikm)
+    hkdf_expand_sha512_256(prk, info, length)
+
+# ============================================================================
+# HKDF-SHA-1  (hash_len = 20, block = 64)
+# WARNING: SHA-1 is cryptographically broken. Provided for legacy interop.
+# ============================================================================
+
+# HKDF-Extract with SHA-1. Returns 20-byte PRK.
+fn hkdf_extract_sha1(salt: [i64], ikm: [i64]) -> [i64]:
+    var effective_salt: [i64] = []
+    if salt.len() == 0:
+        effective_salt = _zeros(20)
+    else:
+        effective_salt = _copy_bytes(salt)
+    hmac_sha1_bytes(effective_salt, ikm)
+
+# HKDF-Expand with SHA-1.
+# prk: 20-byte PRK; info: context bytes; length: desired output bytes.
+# Returns length-byte OKM, or empty list if length > 255*20.
+fn hkdf_expand_sha1(prk: [i64], info: [i64], length: i64) -> [i64]:
+    val hash_len = 20
+    val max_len = 255 * hash_len
+    if length > max_len:
+        return []
+    var okm: [i64] = []
+    var t_prev: [i64] = []
+    var counter = 1
+    while okm.len() < length:
+        var msg: [i64] = []
+        var mi = 0
+        while mi < t_prev.len():
+            msg.push(t_prev[mi])
+            mi = mi + 1
+        mi = 0
+        while mi < info.len():
+            msg.push(info[mi])
+            mi = mi + 1
+        msg.push(counter)
+        t_prev = hmac_sha1_bytes(prk, msg)
+        var oki = 0
+        while oki < t_prev.len():
+            okm.push(t_prev[oki])
+            oki = oki + 1
+        counter = counter + 1
+    _take_bytes(okm, length)
+
+# HKDF one-shot with SHA-1: Extract then Expand.
+fn hkdf_sha1(salt: [i64], ikm: [i64], info: [i64], length: i64) -> [i64]:
+    val prk = hkdf_extract_sha1(salt, ikm)
+    hkdf_expand_sha1(prk, info, length)
+
+# ============================================================================
+# HKDF-SHA-384  (hash_len = 48, block = 128)
+# ============================================================================
+
+# HKDF-Extract with SHA-384. Returns 48-byte PRK.
+fn hkdf_extract_sha384(salt: [i64], ikm: [i64]) -> [i64]:
+    var effective_salt: [i64] = []
+    if salt.len() == 0:
+        effective_salt = _zeros(48)
+    else:
+        effective_salt = _copy_bytes(salt)
+    hmac_sha384_bytes(effective_salt, ikm)
+
+# HKDF-Expand with SHA-384.
+# prk: 48-byte PRK; info: context bytes; length: desired output bytes.
+# Returns length-byte OKM, or empty list if length > 255*48.
+fn hkdf_expand_sha384(prk: [i64], info: [i64], length: i64) -> [i64]:
+    val hash_len = 48
+    val max_len = 255 * hash_len
+    if length > max_len:
+        return []
+    var okm: [i64] = []
+    var t_prev: [i64] = []
+    var counter = 1
+    while okm.len() < length:
+        var msg: [i64] = []
+        var mi = 0
+        while mi < t_prev.len():
+            msg.push(t_prev[mi])
+            mi = mi + 1
+        mi = 0
+        while mi < info.len():
+            msg.push(info[mi])
+            mi = mi + 1
+        msg.push(counter)
+        t_prev = hmac_sha384_bytes(prk, msg)
+        var oki = 0
+        while oki < t_prev.len():
+            okm.push(t_prev[oki])
+            oki = oki + 1
+        counter = counter + 1
+    _take_bytes(okm, length)
+
+# HKDF one-shot with SHA-384: Extract then Expand.
+fn hkdf_sha384(salt: [i64], ikm: [i64], info: [i64], length: i64) -> [i64]:
+    val prk = hkdf_extract_sha384(salt, ikm)
+    hkdf_expand_sha384(prk, info, length)
+
+# ============================================================================
+# HKDF-SHA3-256  (hash_len = 32, block = 136)
+# ============================================================================
+
+# HKDF-Extract with SHA3-256. Returns 32-byte PRK.
+fn hkdf_extract_sha3_256(salt: [i64], ikm: [i64]) -> [i64]:
+    var effective_salt: [i64] = []
+    if salt.len() == 0:
+        effective_salt = _zeros(32)
+    else:
+        effective_salt = _copy_bytes(salt)
+    hmac_sha3_256_bytes(effective_salt, ikm)
+
+# HKDF-Expand with SHA3-256.
+fn hkdf_expand_sha3_256(prk: [i64], info: [i64], length: i64) -> [i64]:
+    val hash_len = 32
+    val max_len = 255 * hash_len
+    if length > max_len:
+        return []
+    var okm: [i64] = []
+    var t_prev: [i64] = []
+    var counter = 1
+    while okm.len() < length:
+        var msg: [i64] = []
+        var mi = 0
+        while mi < t_prev.len():
+            msg.push(t_prev[mi])
+            mi = mi + 1
+        mi = 0
+        while mi < info.len():
+            msg.push(info[mi])
+            mi = mi + 1
+        msg.push(counter)
+        t_prev = hmac_sha3_256_bytes(prk, msg)
+        var oki = 0
+        while oki < t_prev.len():
+            okm.push(t_prev[oki])
+            oki = oki + 1
+        counter = counter + 1
+    _take_bytes(okm, length)
+
+# HKDF one-shot with SHA3-256: Extract then Expand.
+fn hkdf_sha3_256(salt: [i64], ikm: [i64], info: [i64], length: i64) -> [i64]:
+    val prk = hkdf_extract_sha3_256(salt, ikm)
+    hkdf_expand_sha3_256(prk, info, length)
+
+# ============================================================================
+# HKDF-SHA3-384  (hash_len = 48, block = 104)
+# ============================================================================
+
+# HKDF-Extract with SHA3-384. Returns 48-byte PRK.
+fn hkdf_extract_sha3_384(salt: [i64], ikm: [i64]) -> [i64]:
+    var effective_salt: [i64] = []
+    if salt.len() == 0:
+        effective_salt = _zeros(48)
+    else:
+        effective_salt = _copy_bytes(salt)
+    hmac_sha3_384_bytes(effective_salt, ikm)
+
+# HKDF-Expand with SHA3-384.
+fn hkdf_expand_sha3_384(prk: [i64], info: [i64], length: i64) -> [i64]:
+    val hash_len = 48
+    val max_len = 255 * hash_len
+    if length > max_len:
+        return []
+    var okm: [i64] = []
+    var t_prev: [i64] = []
+    var counter = 1
+    while okm.len() < length:
+        var msg: [i64] = []
+        var mi = 0
+        while mi < t_prev.len():
+            msg.push(t_prev[mi])
+            mi = mi + 1
+        mi = 0
+        while mi < info.len():
+            msg.push(info[mi])
+            mi = mi + 1
+        msg.push(counter)
+        t_prev = hmac_sha3_384_bytes(prk, msg)
+        var oki = 0
+        while oki < t_prev.len():
+            okm.push(t_prev[oki])
+            oki = oki + 1
+        counter = counter + 1
+    _take_bytes(okm, length)
+
+# HKDF one-shot with SHA3-384: Extract then Expand.
+fn hkdf_sha3_384(salt: [i64], ikm: [i64], info: [i64], length: i64) -> [i64]:
+    val prk = hkdf_extract_sha3_384(salt, ikm)
+    hkdf_expand_sha3_384(prk, info, length)
+
+# ============================================================================
+# HKDF-SHA3-512  (hash_len = 64, block = 72)
+# ============================================================================
+
+# HKDF-Extract with SHA3-512. Returns 64-byte PRK.
+fn hkdf_extract_sha3_512(salt: [i64], ikm: [i64]) -> [i64]:
+    var effective_salt: [i64] = []
+    if salt.len() == 0:
+        effective_salt = _zeros(64)
+    else:
+        effective_salt = _copy_bytes(salt)
+    hmac_sha3_512_bytes(effective_salt, ikm)
+
+# HKDF-Expand with SHA3-512.
+fn hkdf_expand_sha3_512(prk: [i64], info: [i64], length: i64) -> [i64]:
+    val hash_len = 64
+    val max_len = 255 * hash_len
+    if length > max_len:
+        return []
+    var okm: [i64] = []
+    var t_prev: [i64] = []
+    var counter = 1
+    while okm.len() < length:
+        var msg: [i64] = []
+        var mi = 0
+        while mi < t_prev.len():
+            msg.push(t_prev[mi])
+            mi = mi + 1
+        mi = 0
+        while mi < info.len():
+            msg.push(info[mi])
+            mi = mi + 1
+        msg.push(counter)
+        t_prev = hmac_sha3_512_bytes(prk, msg)
+        var oki = 0
+        while oki < t_prev.len():
+            okm.push(t_prev[oki])
+            oki = oki + 1
+        counter = counter + 1
+    _take_bytes(okm, length)
+
+# HKDF one-shot with SHA3-512: Extract then Expand.
+fn hkdf_sha3_512(salt: [i64], ikm: [i64], info: [i64], length: i64) -> [i64]:
+    val prk = hkdf_extract_sha3_512(salt, ikm)
+    hkdf_expand_sha3_512(prk, info, length)

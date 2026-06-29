@@ -1,0 +1,160 @@
+# std.game2d.render.draw_batcher — Draw call batching for game2d Canvas
+#
+# `DrawBatcher` is a higher-level coordinator that sits between a
+# `Canvas` and the backend.  It accepts `Image` + position submissions,
+# routes them through a `SpriteBatch` and (optionally) a `TextureAtlas2D`,
+# and flushes a final `RenderCommandBuffer` when the frame is complete.
+#
+# Batching contract:
+#   1. User calls `submit(image, dst)` any number of times per frame.
+#   2. User calls `end_frame(cmd_buf)` once.
+#      - Sprites are sorted by (z, texture_id).
+#      - All DrawSprite commands for the same texture_id that are
+#        *contiguous after sort* are emitted as a single logical batch
+#        (tracked via `BatchStats`).
+#   3. User calls `begin_frame()` before the next frame.
+#
+# Usage:
+#   var batcher = DrawBatcher.create()
+#   batcher.begin_frame()
+#   batcher.submit(my_image, dst_rect, z)
+#   batcher.submit(other_image, dst_rect2, z)
+#   batcher.end_frame(cmd_buf)
+#
+# ============================================================================
+# BatchStats — per-frame draw-call statistics
+# ============================================================================
+
+use std.common.engine.ids.{TextureId}
+use std.common.engine.rect.{Rect2}
+use std.common.engine.color.{EngineColor}
+use std.common.engine.units.{ZIndex}
+use std.nogc_sync_mut.engine.render.command.{RenderCommand, RenderCommandBuffer}
+use std.nogc_sync_mut.game2d.render.image.{Image}
+use std.nogc_sync_mut.game2d.render.sprite_batch.{SpriteBatch}
+
+class BatchStats:
+    """Counters for the most recently flushed frame."""
+    sprites_submitted: i64
+    draw_calls_emitted: i64
+    texture_switches: i64
+
+    static fn zero() -> BatchStats:
+        BatchStats(
+            sprites_submitted: 0,
+            draw_calls_emitted: 0,
+            texture_switches: 0
+        )
+
+    fn summary(self) -> text:
+        "sprites=" + text(self.sprites_submitted) +
+        " draw_calls=" + text(self.draw_calls_emitted) +
+        " tex_switches=" + text(self.texture_switches)
+
+# ============================================================================
+# DrawBatcher
+# ============================================================================
+
+class DrawBatcher:
+    """Frame-scoped draw call batcher.
+
+    Collects Image submissions, defers sorting to SpriteBatch.flush, and
+    tracks per-frame BatchStats for performance monitoring."""
+    batch: SpriteBatch
+    stats: BatchStats
+    frame_open: bool
+
+    static fn create() -> DrawBatcher:
+        DrawBatcher(
+            batch: SpriteBatch.create(),
+            stats: BatchStats.zero(),
+            frame_open: false
+        )
+
+    fn begin_frame(self):
+        """Open a new frame.  Must be called before any `submit`."""
+        self.batch.clear()
+        self.stats = BatchStats.zero()
+        self.frame_open = true
+
+    fn submit(self, image: Image, dst: Rect2, z: ZIndex):
+        """Queue one sprite for the current frame.
+
+        No-op if the image is null (defers to Canvas.draw null-check policy)
+        or if `begin_frame` has not been called."""
+        if not self.frame_open:
+            return
+        if image.is_null():
+            return
+        val src = image.sprite.src_rect
+        val tid = image.sprite.texture_id
+        val tint = EngineColor.white()
+        self.batch.add(tid, src, dst, tint, z)
+        self.stats.sprites_submitted = self.stats.sprites_submitted + 1
+
+    fn submit_tinted(self, image: Image, dst: Rect2, tint: EngineColor, z: ZIndex):
+        """Queue one sprite with an explicit tint color."""
+        if not self.frame_open:
+            return
+        if image.is_null():
+            return
+        val src = image.sprite.src_rect
+        val tid = image.sprite.texture_id
+        self.batch.add(tid, src, dst, tint, z)
+        self.stats.sprites_submitted = self.stats.sprites_submitted + 1
+
+    fn end_frame(self, buf: RenderCommandBuffer):
+        """Flush all queued sprites into `buf`, update BatchStats, close frame.
+
+        Counts logical draw calls as consecutive runs sharing the same
+        texture_id after the sort that `SpriteBatch.flush` applies."""
+        if not self.frame_open:
+            return
+        self.frame_open = false
+
+        # SpriteBatch.flush sorts by (z, texture_id) then emits each entry
+        # as a DrawSprite command.  We shadow the real flush here so we can
+        # intercept and count texture-switch boundaries.
+        val entries_before = buf.commands.len()
+        self.batch.flush(buf)
+        val entries_after = buf.commands.len()
+        val n = entries_after - entries_before
+
+        # Walk the newly-appended commands to count texture-switch boundaries
+        val draw_calls = _count_batches(buf, entries_before, n)
+        self.stats.draw_calls_emitted = draw_calls
+        self.stats.texture_switches = _max(0, draw_calls - 1)
+
+    fn last_stats(self) -> BatchStats:
+        """Return statistics from the most recently flushed frame."""
+        self.stats
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn _max(a: i64, b: i64) -> i64:
+    if a > b:
+        a
+    else:
+        b
+
+fn _count_batches(buf: RenderCommandBuffer, start: i64, count: i64) -> i64:
+    """Count contiguous texture-id runs in the slice [start, start+count)
+    of buf.commands.  Each run is one logical draw call."""
+    if count == 0:
+        return 0
+    var batches: i64 = 1
+    var prev_raw: i64 = -1
+    var i = start
+    while i < start + count:
+        val cmd = buf.commands[i]
+        match cmd:
+            case RenderCommand.DrawSprite(texture_id: tid, src_rect: _, dst_rect: _, tint: _, z_order: _):
+                if prev_raw >= 0 and tid.raw != prev_raw:
+                    batches = batches + 1
+                prev_raw = tid.raw
+            case _:
+                pass_dn
+        i = i + 1
+    batches
