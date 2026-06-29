@@ -2,7 +2,7 @@
 
 - command: `release/x86_64-unknown-linux-gnu/simple run src/app/test/torch_cuda_optimizer_probe.spl --mode=interpreter --clean`
 - wrapper_path: `scripts/check/check-llm-runtime-torch-cuda-optimizer-probe.shs`
-- wrapper_sha256: `d22e111c16f8350c5368fb7b6675518e93f2a237ab4229b43d1a72324cef9448`
+- wrapper_sha256: `e790e9d321f233f1ae4df09c3e23a8f8f846b544368ee67eb3041b427bd4ef74`
 - probe_path: `src/app/test/torch_cuda_optimizer_probe.spl`
 - probe_sha256: `a541d87776a8203562c3e793f0fa0372fb4a4c8bb88ba366b0200cfec143776c`
 - probe_command_sha256: `fc6c7792072dfddfbfd24fa8f2fa495f3a5649dc20b90082f74d4cefb4ed5463`
@@ -13,7 +13,7 @@
 - blocked_gates: `libtorch`
 - primary_blocked_gate: `libtorch`
 - log_size: `29962`
-- log_sha256: `64bfca1b4a3578edfc929ee329ee061f0fd6524d97c7b4341771a17b9e3060b7`
+- log_sha256: `0cdab63015326c12d097fd1f2bdfc77fb9ea4bf15ea52fbed1a24bdd2b1ec0b1`
 - status_line_count: `2`
 - required_gates_line_count: `1`
 - torch_available_line_count: `1`
@@ -46,10 +46,13 @@
 - system_libtorch_probe_log: `build/llm_runtime_torch_cuda_optimizer_probe/system_libtorch_probe.log`
 - system_libtorch_probe_log_size: `37`
 - system_libtorch_probe_log_sha256: `ac12d9869521cf8cfba92166a3cae26886942911aea5ff546e369e66faf28e29`
+- libtorch_env_status: `missing`
+- ld_library_path_libtorch_status: `missing_python_torch_library_dir`
+- simple_runtime_torch_link_status: `not_evaluated`
 - surface_manifest: `build/llm_runtime_torch_cuda_optimizer_probe/torch_cuda_optimizer_surface_manifest.tsv`
 - surface_manifest_count: `19`
 - surface_manifest_size: `2319`
-- surface_manifest_sha256: `5769be59bbaac9c4790f3ce917804a703e3f2c3fbe48e99a36f9144c9691e77a`
+- surface_manifest_sha256: `3b8aff56a00b45bb3058d00aa11348bb894ca41c36e0248060812d2ba84c86c7`
 - torch_available: `false`
 - cuda_available: `false`
 - parameter_is_cuda: `missing`

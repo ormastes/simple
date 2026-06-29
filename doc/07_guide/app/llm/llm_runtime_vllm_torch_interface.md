@@ -729,9 +729,12 @@ availability. If `python_torch_libtorch_bundle_status=ready` and
 the next setup step is to expose the reported `python_torch_library_dir` to the
 Simple runtime through the supported libtorch environment (`LIBTORCH` or
 `LD_LIBRARY_PATH`) and rerun the strict optimizer probe. That setup evidence is
-not optimizer completion; strict completion still requires the probe to show
-Simple/libtorch availability, CUDA availability, CUDA parameter placement,
-gradient production, and a decreasing optimizer step.
+not optimizer completion. If the probe then reports
+`simple_runtime_torch_link_status=missing_after_libtorch_env_exposed`, the
+library bundle is visible but the Simple runtime still needs to be rebuilt or
+relinked with Torch SFFI/libtorch symbols enabled. Strict completion still
+requires the probe to show Simple/libtorch availability, CUDA availability,
+CUDA parameter placement, gradient production, and a decreasing optimizer step.
 
 ```bash
 sh scripts/check/check-llm-runtime-torch-cuda-optimizer-probe.shs
