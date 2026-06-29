@@ -1,11 +1,20 @@
 use std.spec.{describe, it, expect}
 use std.common.compress.{CompressionError}
-use std.common.compress.lzma2_range_coder.{LzmaRange, _lzma_decode_bit, _lzma_decode_bittree, _lzma_decode_bittree_reverse}
+use std.common.compress.lzma2_range_coder.{LzmaRange, _lzma_decode_bit, _lzma_decode_bittree, _lzma_decode_bittree_reverse, _lzma_decode_direct, _lzma_decode_len, _lzma_decode_distance, _lzma_decode_distance_lclp, _lzma_init_probs, LZMA_PROBS_TOTAL, LZMA_PROBS_LEN_BASE, LZMA_MATCH_MIN_LEN}
 
 fn fresh_range() -> LzmaRange:
     LzmaRange(range_v: 0xFFFFFFFFu32, code_v: 0u32, pos: 0)
 
 fn expect_corrupt_bit(result: Result<(LzmaRange, [u32], i64), CompressionError>, message_part: text):
+    expect(result.is_err()).to_equal(true)
+    val err = result.unwrap_err()
+    match err:
+        CompressionError.CorruptStream(message):
+            expect(message).to_contain(message_part)
+        _:
+            expect(false).to_equal(true)
+
+fn expect_corrupt_direct(result: Result<(LzmaRange, i64), CompressionError>, message_part: text):
     expect(result.is_err()).to_equal(true)
     val err = result.unwrap_err()
     match err:
@@ -47,3 +56,23 @@ describe "LZMA range coder bounds validation":
         val probs: [u32] = [1024u32, 1024u32]
         val input: [u8] = []
         expect_corrupt_bit(_lzma_decode_bittree(fresh_range(), probs, 1, 1, input), "bittree range")
+
+    it "rejects negative direct bit counts":
+        val input: [u8] = []
+        expect_corrupt_direct(_lzma_decode_direct(fresh_range(), -1, input), "direct bit count")
+
+    it "rejects oversized direct bit counts":
+        val input: [u8] = []
+        expect_corrupt_direct(_lzma_decode_direct(fresh_range(), 31, input), "direct bit count")
+
+    it "rejects length decoder pos_state values outside the four-state table":
+        val probs = _lzma_init_probs(LZMA_PROBS_TOTAL)
+        val input: [u8] = []
+        expect_corrupt_bit(_lzma_decode_len(fresh_range(), probs, LZMA_PROBS_LEN_BASE, -1, input), "length pos_state")
+        expect_corrupt_bit(_lzma_decode_len(fresh_range(), probs, LZMA_PROBS_LEN_BASE, 4, input), "length pos_state")
+
+    it "rejects distance decoding for lengths below the LZMA match minimum":
+        val probs = _lzma_init_probs(LZMA_PROBS_TOTAL)
+        val input: [u8] = []
+        expect_corrupt_bit(_lzma_decode_distance(fresh_range(), probs, LZMA_MATCH_MIN_LEN - 1, input), "distance length")
+        expect_corrupt_bit(_lzma_decode_distance_lclp(fresh_range(), probs, LZMA_MATCH_MIN_LEN - 1, input, 3, 0), "distance length")
