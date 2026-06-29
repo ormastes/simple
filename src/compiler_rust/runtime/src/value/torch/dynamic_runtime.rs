@@ -29,16 +29,35 @@ fn default_library_name() -> &'static str {
 }
 
 #[cfg(not(feature = "pytorch"))]
+fn configured_library_paths() -> Vec<String> {
+    let mut paths = Vec::new();
+    for name in ["SIMPLE_TORCH_RUNTIME_PATH", "SIMPLE_RUNTIME_PATH"] {
+        if let Ok(value) = std::env::var(name) {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                paths.push(trimmed.to_string());
+            }
+        }
+    }
+    if let Some(sffi_paths) = std::env::var_os("SIMPLE_SFFI_PATH") {
+        for dir in std::env::split_paths(&sffi_paths) {
+            paths.push(dir.join("libspl_torch.so").to_string_lossy().into_owned());
+        }
+    }
+    paths.push(default_library_name().to_string());
+    paths
+}
+
+#[cfg(not(feature = "pytorch"))]
 fn library() -> Option<DynLibrary> {
     TORCH_RUNTIME
         .get_or_init(|| {
-            let path = std::env::var("SIMPLE_RUNTIME_PATH")
-                .ok()
-                .filter(|s| !s.trim().is_empty())
-                .unwrap_or_else(|| default_library_name().to_string());
-
-            let lib = unsafe { Library::new(&path).ok()? };
-            Some(Box::leak(Box::new(lib)))
+            for path in configured_library_paths() {
+                if let Ok(lib) = unsafe { Library::new(&path) } {
+                    return Some(Box::leak(Box::new(lib)));
+                }
+            }
+            None
         })
         .copied()
 }

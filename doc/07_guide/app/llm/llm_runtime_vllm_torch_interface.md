@@ -159,7 +159,10 @@ Strict-host unblock checklist:
    optimizer step, and decreased parameter sum. The probe reports
    `simple_sffi_libtorch_bridge_status` separately from Python libtorch
    discovery so an exposed Python Torch bundle cannot mask a missing Simple
-   SFFI bridge.
+   SFFI bridge. Fresh runtime builds auto-discover `libspl_torch.so` from
+   `SIMPLE_SFFI_PATH`; older deployed binaries may need
+   `SIMPLE_TORCH_RUNTIME_PATH` pointed at the generated bridge as a temporary
+   diagnostic override.
 5. Fine-tune retry: complete the licensed cache review and retry6 training/eval
    artifacts under `.spipe/llm-finetune-process/artifacts/`, including
    `llm_backed_app_server_dry_run_retry6/model_manifest.json` and
@@ -736,15 +739,20 @@ or runtime training behavior:
 The wrapper records Python Torch discovery separately from Simple runtime
 availability. If `python_torch_libtorch_bundle_status=ready` and
 `python_torch_cuda_library_bundle_status=ready` but `torch_available=false`,
-the next setup step is to expose the reported `python_torch_library_dir` to the
-Simple runtime through the supported libtorch environment (`LIBTORCH` or
-`LD_LIBRARY_PATH`) and rerun the strict optimizer probe. That setup evidence is
-not optimizer completion. If the probe then reports
+the next setup step is to run the Torch SFFI bridge setup wrapper, expose its
+reported `SIMPLE_SFFI_PATH` and libtorch directory, and rerun the strict
+optimizer probe. That setup evidence is not optimizer completion. If the probe
+then reports
 `simple_runtime_torch_link_status=missing_after_libtorch_env_exposed`, the
-library bundle is visible but the Simple runtime still needs to be rebuilt or
-relinked with Torch SFFI/libtorch symbols enabled. Strict completion still
+library bundle and bridge are visible but the running Simple binary likely
+needs the Torch SFFI auto-discovery loader rebuild, or a temporary
+`SIMPLE_TORCH_RUNTIME_PATH` diagnostic override. Strict completion still
 requires the probe to show Simple/libtorch availability, CUDA availability,
 CUDA parameter placement, gradient production, and a decreasing optimizer step.
+If the diagnostic override gets availability to `true` but the probe reports
+`blocked_gate=torch_extern_surface`, the loader path is working and the next
+implementation task is registering or implementing the named `rt_torch_*`
+extern in the interpreter/runtime Torch surface.
 
 ```bash
 sh scripts/check/check-llm-runtime-torch-cuda-optimizer-probe.shs

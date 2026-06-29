@@ -227,6 +227,8 @@ for path in \
     "src/lib/nogc_sync_mut/torch/backend.spl" \
     "src/lib/nogc_sync_mut/torch/optim.spl" \
     "src/lib/nogc_sync_mut/torch/torch_training.spl" \
+    "src/compiler_rust/runtime/src/value/torch/dynamic_runtime.rs" \
+    "src/compiler_rust/compiler/src/interpreter_extern/torch.rs" \
     "test/01_unit/lib/common/torch/dyn_sffi_ops_readiness_spec.spl" \
     "test/01_unit/lib/common/torch/dyn_sffi_tensor_ops_status_spec.spl" \
     "test/01_unit/lib/common/torch/torch_device_placement_status_spec.spl" \
@@ -319,6 +321,14 @@ after_sum="$(sed -n 's/^torch_cuda_optimizer_probe_after_sum=//p' "$OUT_ENV" | t
 if [ -z "$status" ]; then
     status="fail"
     reason="missing_probe_status"
+fi
+if { [ "$reason" = "missing_probe_status" ] || { [ "$status" = "running" ] && [ -z "$reason" ]; }; } && [ -s "$OUT_LOG" ]; then
+    unknown_torch_extern="$(sed -n 's/.*unknown extern function: \(rt_torch_[A-Za-z0-9_]*\).*/\1/p' "$OUT_LOG" | tail -n 1)"
+    if [ -n "$unknown_torch_extern" ]; then
+        status="fail"
+        reason="unknown_torch_extern:$unknown_torch_extern"
+        blocked_gate="torch_extern_surface"
+    fi
 fi
 if [ -z "$reason" ]; then
     reason="not_reported"
@@ -451,7 +461,7 @@ case "$blocked_gate" in
            [ "${ld_library_path_libtorch_status:-missing}" = "contains_python_torch_library_dir" ] &&
            [ "${torch_available:-missing}" != "true" ]; then
             simple_runtime_torch_link_status="missing_after_libtorch_env_exposed"
-            next_action="rebuild or relink the Simple runtime with Torch SFFI/libtorch symbols enabled; Python libtorch is exposed but rt_torch_available remains false"
+            next_action="rebuild or relink the Simple runtime with Torch SFFI auto-discovery from SIMPLE_SFFI_PATH; Python libtorch and libspl_torch are exposed but rt_torch_available remains false"
         fi
         ;;
     cuda|cuda_unavailable)
@@ -468,6 +478,9 @@ case "$blocked_gate" in
         ;;
     probe_log_integrity)
         next_action="fix the Torch optimizer probe log so it emits one complete hashed PASS record with all required proof fields"
+        ;;
+    torch_extern_surface)
+        next_action="implement or register the missing Torch extern surface reported in normalized_reason, then rerun the strict Torch optimizer probe"
         ;;
     none)
         next_action="strict Torch optimizer probe is ready"

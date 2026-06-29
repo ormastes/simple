@@ -28,11 +28,23 @@ fn torch_runtime_name() -> &'static str {
 }
 
 #[cfg(not(feature = "pytorch"))]
-fn torch_runtime_path() -> String {
-    std::env::var("SIMPLE_RUNTIME_PATH")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| torch_runtime_name().to_string())
+fn torch_runtime_paths() -> Vec<String> {
+    let mut paths = Vec::new();
+    for name in ["SIMPLE_TORCH_RUNTIME_PATH", "SIMPLE_RUNTIME_PATH"] {
+        if let Ok(value) = std::env::var(name) {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                paths.push(trimmed.to_string());
+            }
+        }
+    }
+    if let Some(sffi_paths) = std::env::var_os("SIMPLE_SFFI_PATH") {
+        for dir in std::env::split_paths(&sffi_paths) {
+            paths.push(dir.join("libspl_torch.so").to_string_lossy().into_owned());
+        }
+    }
+    paths.push(torch_runtime_name().to_string());
+    paths
 }
 
 #[cfg(all(not(feature = "pytorch"), unix))]
@@ -40,13 +52,16 @@ fn torch_runtime_handle() -> Option<usize> {
     static HANDLE: OnceLock<Option<usize>> = OnceLock::new();
     HANDLE
         .get_or_init(|| {
-            let path = CString::new(torch_runtime_path()).ok()?;
-            let handle = unsafe { libc::dlopen(path.as_ptr(), libc::RTLD_LAZY | libc::RTLD_LOCAL) };
-            if handle.is_null() {
-                None
-            } else {
-                Some(handle as usize)
+            for path in torch_runtime_paths() {
+                let Ok(path) = CString::new(path) else {
+                    continue;
+                };
+                let handle = unsafe { libc::dlopen(path.as_ptr(), libc::RTLD_LAZY | libc::RTLD_LOCAL) };
+                if !handle.is_null() {
+                    return Some(handle as usize);
+                }
             }
+            None
         })
         .to_owned()
 }
