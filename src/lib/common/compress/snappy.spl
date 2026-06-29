@@ -18,20 +18,22 @@ fn _snappy_encode_varint(value: i64) -> [u8]:
     result.push(last)
     result
 
-fn _snappy_decode_varint(data: [u8], pos: i64) -> [i64]:
+fn _snappy_decode_varint(data: [u8], pos: i64) -> Result<[i64], CompressionError>:
+    if pos < 0 or pos >= data.len():
+        return Err(CompressionError.TruncatedInput("snappy varint length"))
     var result: i64 = 0
     var shift = 0
     var idx = pos
     while idx < data.len():
+        if shift >= 35:
+            return Err(CompressionError.CorruptStream("snappy varint length"))
         val byte = data[idx].to_i64()
         result = result | ((byte & 0x7F) << shift)
         idx = idx + 1
         if (byte & 0x80) == 0:
-            break
+            return Ok([result, idx])
         shift = shift + 7
-        if shift > 35:
-            break
-    [result, idx]
+    Err(CompressionError.TruncatedInput("snappy varint length"))
 
 fn _snappy_hash4(data: [u8], pos: i64) -> i64:
     val b0 = data[pos].to_i64()
@@ -200,10 +202,11 @@ pub fn try_snappy_decompress(data: [u8]) -> Result<[u8], CompressionError>:
     if data.len() == 0:
         return Err(CompressionError.TruncatedInput("snappy empty input"))
     val varint_result = _snappy_decode_varint(data, 0)
-    val uncompressed_len = varint_result[0]
-    var pos = varint_result[1]
-    if pos > 0 and pos >= data.len() and (data[pos - 1].to_i64() & 0x80) != 0:
-        return Err(CompressionError.TruncatedInput("snappy varint length"))
+    if varint_result.is_err():
+        return Err(varint_result.unwrap_err())
+    val decoded_varint = varint_result.unwrap()
+    val uncompressed_len = decoded_varint[0]
+    var pos = decoded_varint[1]
     if pos > 5:
         return Err(CompressionError.CorruptStream("snappy varint length"))
     if pos > 1 and uncompressed_len < (1 << ((pos - 1) * 7)):
