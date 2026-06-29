@@ -1317,8 +1317,14 @@ The current canonical evidence contract is:
   of being backfilled from the current host.
   The surface manifest wrapper supports
   `TAURI_CHROME_LAYOUT_MANIFEST_RESUME=1` for interrupted evidence collection:
-  it reuses accepted per-case `pass`/tracked-divergence evidence and reruns
-  failed, unavailable, or missing rows. Linux Tauri capture is an Xvfb/X11 path;
+  it reuses accepted per-case `pass`/tracked-divergence evidence only when the
+  row also carries the current ARGB artifact contract, including symlink and
+  hardlink checks, exact viewport dimensions, nonzero pixels, and the expected
+  Tauri or Chrome producer. It reruns failed, unavailable, missing, or stale
+  artifact rows. For focused repair runs, set
+  `TAURI_CHROME_LAYOUT_CASE_FILTER` to a whitespace-separated case list, such as
+  `css_box_matrix text_raster_track`; unset it for release evidence. Linux
+  Tauri capture is an Xvfb/X11 path;
   the host must provide the GTK/WebKit development stack plus `openbox`,
   `xvfb-run`, `dbus-run-session`, `xdotool`, ImageMagick `import`/`convert`,
   and `node` before the wrapper can produce live Tauri ARGB evidence. The
