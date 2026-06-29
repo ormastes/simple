@@ -9,25 +9,25 @@
 - launcher reason: pass
 - launcher target: wm-simple-web
 - launcher entry: examples/09_embedded/simple_os/arch/x86_64/gui_entry_engine2d.spl
-- qmp socket: /tmp/simpleos_desktop_qmp_3286854_1782748187694087424.sock
+- qmp socket: /tmp/simpleos_desktop_qmp_3311078_1782749592571413948.sock
 - marker state: probe:true wm:true engine:true web:true mdi:true top:true taskbar:true html:true
 - injection protocol: hmp-mouse-events
 - guest input contract: pass (pass)
 - guest mouse polling: pass
 - guest keyboard polling: pass
-- changed bytes: 705403
-- source region changed pixels: 15000
-- target region changed pixels: 20974
+- changed bytes: 376700
+- source region changed pixels: 9300
+- target region changed pixels: 1120
 - before sha256: 5fcc2dc196224169bc9a044e57bd2faa88f4ff3dddf415f6d4b44e805d2d1f8f
-- after sha256: dbea4481e7b3960bf57fc14d9fdff8ee9e096b87eacd21e2b476187bde745755
+- after sha256: c33b92bbeaee5f6ec9ce288b61b20448bcb85fc76f0d9cb985e2d8328376a2e1
 - before ppm: build/simpleos_wm_qmp_drag_delta_evidence/before-drag.ppm (2359312 bytes)
 - before raw: build/simpleos_wm_qmp_drag_delta_evidence/before-drag.ppm.raw (3145728 bytes; pass)
 - before ppm status: pass; magic pass
 - after ppm: build/simpleos_wm_qmp_drag_delta_evidence/after-drag.ppm (2359312 bytes)
 - after raw: build/simpleos_wm_qmp_drag_delta_evidence/after-drag.ppm.raw (3145728 bytes; pass)
 - after ppm status: pass; magic pass
-- serial log: build/os/simpleos_desktop_qmp_3286854_1782748187694087424.log (1531 bytes)
-- stderr log: build/os/simpleos_desktop_qmp_3286854_1782748187694087424.log.stderr (0 bytes)
+- serial log: build/os/simpleos_desktop_qmp_3311078_1782749592571413948.log (1494 bytes)
+- stderr log: build/os/simpleos_desktop_qmp_3311078_1782749592571413948.log.stderr (0 bytes)
 
 This wrapper launches the exact WM + Simple Web + Engine2D target in a
 separate QEMU process, captures the BGA framebuffer with QMP

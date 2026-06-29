@@ -328,6 +328,14 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     );
     insert_simple!("rt_host_gpu_queue_reset", host_gpu_lane::rt_host_gpu_queue_reset);
     insert_simple!("rt_host_gpu_queue_emit", host_gpu_lane::rt_host_gpu_queue_emit);
+    insert_simple!(
+        "rt_host_gpu_queue_emit_payload",
+        host_gpu_lane::rt_host_gpu_queue_emit_payload
+    );
+    insert_simple!(
+        "rt_host_gpu_queue_emit_payload_text",
+        host_gpu_lane::rt_host_gpu_queue_emit_payload_text
+    );
     insert_simple!("rt_host_gpu_queue_drain", host_gpu_lane::rt_host_gpu_queue_drain);
     insert_simple!("rt_host_gpu_queue_submit", host_gpu_lane::rt_host_gpu_queue_submit);
     insert_simple!("rt_host_gpu_queue_complete", host_gpu_lane::rt_host_gpu_queue_complete);
@@ -2185,6 +2193,12 @@ pub(crate) fn call_extern_function_with_values(
         return match name {
             "rt_host_gpu_queue_reset" => host_gpu_lane::rt_host_gpu_queue_reset(evaluated),
             "rt_host_gpu_queue_emit" => host_gpu_lane::rt_host_gpu_queue_emit(evaluated),
+            "rt_host_gpu_queue_emit_payload" => {
+                host_gpu_lane::rt_host_gpu_queue_emit_payload(evaluated)
+            }
+            "rt_host_gpu_queue_emit_payload_text" => {
+                host_gpu_lane::rt_host_gpu_queue_emit_payload_text(evaluated)
+            }
             "rt_host_gpu_queue_drain" => host_gpu_lane::rt_host_gpu_queue_drain(evaluated),
             "rt_host_gpu_queue_submit" => host_gpu_lane::rt_host_gpu_queue_submit(evaluated),
             "rt_host_gpu_queue_complete" => host_gpu_lane::rt_host_gpu_queue_complete(evaluated),

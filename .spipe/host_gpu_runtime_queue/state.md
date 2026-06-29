@@ -217,6 +217,19 @@ dev-in-progress
   pixel/readback artifact, Draw IR dispatch, framebuffer copy, and state-store
   cost. The production evidence script now captures these fields in
   `build/production_gui_web_host_gpu_queue_readback/evidence.env`.
+- impl: Moved the host/GPU event-path system spec off direct `rt_host_gpu_*`
+  declarations by adding owner-module wrappers
+  `engine2d_host_gpu_runtime_reset` and
+  `engine2d_host_gpu_runtime_emit_packet`.
+  `runtime_need`: test and adapter code need to reset and seed the real
+  host/GPU runtime queue before exercising submit/complete/drain phases.
+  `facade_checked`: existing Engine2D host/GPU event queue facade already wraps
+  submit, complete, drain, status, and payload paths but did not expose reset or
+  plain packet seeding.
+  `chosen_path`: add-smallest-owner-facade in the Engine2D host/GPU queue owner
+  module, mirrored across no-GC canonical and legacy GC surfaces.
+  `rejected_shortcuts`: direct runtime externs in SPipe specs, fixture-only
+  queue counters, backend field pokes, and generated-code workarounds.
 - impl: Extracted the SimpleWeb Engine2D layout-routing predicate and used it
   from the readback path so layout-routed HTML can call
   `simple_web_layout_render_html_readback` directly instead of rendering pixels

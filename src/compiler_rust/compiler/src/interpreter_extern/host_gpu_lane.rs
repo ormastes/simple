@@ -67,6 +67,52 @@ pub fn rt_host_gpu_queue_emit(args: &[Value]) -> Result<Value, CompileError> {
     )))
 }
 
+pub fn rt_host_gpu_queue_emit_payload(args: &[Value]) -> Result<Value, CompileError> {
+    let lane = expect_int(args.first(), "rt_host_gpu_queue_emit_payload expects lane code")?;
+    let kind = expect_int(args.get(1), "rt_host_gpu_queue_emit_payload expects kind code")?;
+    let payload_size =
+        expect_int(args.get(2), "rt_host_gpu_queue_emit_payload expects payload size")?;
+    let backend = expect_int(args.get(3), "rt_host_gpu_queue_emit_payload expects backend code")?;
+    let payload_hash =
+        expect_int(args.get(4), "rt_host_gpu_queue_emit_payload expects payload hash")?;
+    Ok(Value::Int(host_gpu_lane::rt_host_gpu_queue_emit_payload(
+        lane,
+        kind,
+        payload_size,
+        backend,
+        payload_hash,
+    )))
+}
+
+pub fn rt_host_gpu_queue_emit_payload_text(args: &[Value]) -> Result<Value, CompileError> {
+    let lane = expect_int(args.first(), "rt_host_gpu_queue_emit_payload_text expects lane code")?;
+    let kind = expect_int(args.get(1), "rt_host_gpu_queue_emit_payload_text expects kind code")?;
+    let payload_size = expect_int(
+        args.get(2),
+        "rt_host_gpu_queue_emit_payload_text expects payload size",
+    )?;
+    let backend = expect_int(
+        args.get(3),
+        "rt_host_gpu_queue_emit_payload_text expects backend code",
+    )?;
+    let payload_hash = expect_int(
+        args.get(4),
+        "rt_host_gpu_queue_emit_payload_text expects payload hash",
+    )?;
+    let payload_text = expect_text(
+        args.get(5),
+        "rt_host_gpu_queue_emit_payload_text expects payload text",
+    )?;
+    Ok(Value::Int(host_gpu_lane::rt_host_gpu_queue_emit_payload_text(
+        lane,
+        kind,
+        payload_size,
+        backend,
+        payload_hash,
+        &payload_text,
+    )))
+}
+
 pub fn rt_host_gpu_queue_drain(args: &[Value]) -> Result<Value, CompileError> {
     let max_packets = expect_int(args.first(), "rt_host_gpu_queue_drain expects max packet count")?;
     Ok(Value::Int(host_gpu_lane::rt_host_gpu_queue_drain(max_packets)))
@@ -125,6 +171,13 @@ pub fn rt_host_gpu_queue_last_payload_text(_args: &[Value]) -> Result<Value, Com
 fn expect_int(value: Option<&Value>, message: &str) -> Result<i64, CompileError> {
     match value {
         Some(Value::Int(v)) => Ok(*v),
+        _ => Err(CompileError::Runtime(message.to_string())),
+    }
+}
+
+fn expect_text(value: Option<&Value>, message: &str) -> Result<String, CompileError> {
+    match value {
+        Some(Value::Str(s)) => Ok(s.clone()),
         _ => Err(CompileError::Runtime(message.to_string())),
     }
 }
