@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
+#include <signal.h>
 #include <unistd.h>
 #include <link.h>
 #include <elf.h>
@@ -35,6 +36,7 @@ static real_dlsym_fn_t real_dlsym_fn;
 static int capture_started;
 static int capture_finished;
 static int delay_thread_started;
+static int summary_thread_started;
 static const char *capture_start_source;
 static const char *capture_end_source;
 static uint64_t submit_count;
@@ -223,6 +225,16 @@ static void log_capture_summary(void) {
     log_line(buf);
 }
 
+static void handle_autocapture_signal(int signum) {
+    char buf[80];
+    snprintf(buf, sizeof(buf), "rdoc_autocapture_signal=%d", signum);
+    log_line(buf);
+    maybe_end_capture("signal");
+    log_capture_summary();
+    signal(signum, SIG_DFL);
+    raise(signum);
+}
+
 static uint64_t env_u64(const char *name, uint64_t fallback) {
     const char *value = getenv(name);
     if (!value || !*value) return fallback;
@@ -355,6 +367,30 @@ static void *delayed_capture_thread(void *unused) {
     log_line("rdoc_autocapture_delay_wake=end");
     maybe_end_capture("delay");
     return NULL;
+}
+
+static void *summary_thread(void *unused) {
+    (void)unused;
+    uint64_t interval_ms = env_u64("RDOC_AUTOCAPTURE_SUMMARY_INTERVAL_MS", 0);
+    if (interval_ms == 0) return NULL;
+    for (;;) {
+        usleep((useconds_t)(interval_ms * 1000));
+        log_capture_summary();
+        if (capture_finished) return NULL;
+    }
+}
+
+static void maybe_start_summary_thread(void) {
+    if (summary_thread_started) return;
+    if (env_u64("RDOC_AUTOCAPTURE_SUMMARY_INTERVAL_MS", 0) == 0) return;
+    summary_thread_started = 1;
+    pthread_t thread;
+    if (pthread_create(&thread, NULL, summary_thread, NULL) == 0) {
+        pthread_detach(thread);
+        log_line("rdoc_autocapture_summary_thread=started");
+    } else {
+        log_line("rdoc_autocapture_summary_thread=failed");
+    }
 }
 
 static void maybe_start_delay_thread(void) {
@@ -715,6 +751,9 @@ void *dlsym(void *handle, const char *symbol) {
 __attribute__((constructor))
 static void rdoc_autocapture_init(void) {
     log_line("rdoc_autocapture_loaded=1");
+    signal(SIGTERM, handle_autocapture_signal);
+    signal(SIGINT, handle_autocapture_signal);
+    maybe_start_summary_thread();
     maybe_start_delay_thread();
 }
 

@@ -317,9 +317,11 @@ Current 2026-06-26 browser capture findings:
   `doc/09_report/renderdoc_chrome_target_control_2026-06-29.md`.
 - 2026-06-29 Chrome GPU-process autocapture evidence now emits structured
   `rdoc_gpu_autocapture_*` fields from `gpu-launcher.log`. Current Chrome
-  app-mode evidence reports `rdoc_gpu_autocapture_status=shim-loaded-no-summary`:
-  the shim loaded, traced 160 EGL/ANGLE/Vulkan proc names, but recorded no
-  start/end/summary before timeout and no `.rdc` was produced. Evidence:
+  app-mode evidence with `RDOC_AUTOCAPTURE_SUMMARY_INTERVAL_MS=2000` reports
+  `rdoc_gpu_autocapture_status=not-started`, `api=0`, and zero
+  submit/present/EGL swap/ANGLE queue counters after tracing 160 proc names.
+  This proves the shim is alive but none of the currently wrapped frame trigger
+  calls execute before timeout, so no `.rdc` is produced. Evidence:
   `build/renderdoc/chrome-gpu-autocapture-current/html/evidence.env`.
 - Adding `--no-zygote` to the Chromium launch contract did not fix the direct
   Chrome RenderDoc capture; Chrome still restarts the GPU process with
