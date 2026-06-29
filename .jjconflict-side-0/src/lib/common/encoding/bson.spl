@@ -217,12 +217,18 @@ fn _bson_decode_i64_le(bytes: [u8], pos: i64) -> i64:
 # Encoder helpers
 # ============================================================================
 
-fn _bson_append(dest: [u8], src: [u8]):
-    """Append all bytes from src into dest in-place."""
+fn _bson_append(dest: [u8], src: [u8]) -> [u8]:
+    """Append all bytes from src; returns the grown array (reassign at call site).
+
+    Returns rather than mutating in place: the interpreter drops array-arg
+    write-back when a cross-module helper runs inside a BDD it-block closure.
+    """
+    var d = dest
     var i = 0
     while i < src.len():
-        dest.push(src[i])
+        d.push(src[i])
         i = i + 1
+    d
 
 fn _bson_encode_cstring(s: text) -> [u8]:
     """Encode a cstring: UTF-8 bytes + null terminator."""
@@ -248,8 +254,8 @@ fn _bson_encode_string(s: text) -> [u8]:
     # string length includes the null terminator
     val byte_len = body.len() + 1
     var result: [u8] = []
-    _bson_append(result, _bson_encode_i32_le(byte_len))
-    _bson_append(result, body)
+    result = _bson_append(result, _bson_encode_i32_le(byte_len))
+    result = _bson_append(result, body)
     result.push(0x00)
     result
 
@@ -260,7 +266,7 @@ fn _bson_encode_element(key: text, v: BsonValue) -> [u8]:
     match v:
         case BsonValue.Double(dv_ignored):
             result.push(0x01)
-            _bson_append(result, key_bytes)
+            result = _bson_append(result, key_bytes)
             # Deferred: encode as 8 zero bytes
             var j = 0
             while j < 8:
@@ -268,76 +274,76 @@ fn _bson_encode_element(key: text, v: BsonValue) -> [u8]:
                 j = j + 1
         case BsonValue.Str(s):
             result.push(0x02)
-            _bson_append(result, key_bytes)
-            _bson_append(result, _bson_encode_string(s))
+            result = _bson_append(result, key_bytes)
+            result = _bson_append(result, _bson_encode_string(s))
         case BsonValue.Doc(ps):
             result.push(0x03)
-            _bson_append(result, key_bytes)
-            _bson_append(result, _bson_encode_doc_body(ps))
+            result = _bson_append(result, key_bytes)
+            result = _bson_append(result, _bson_encode_doc_body(ps))
         case BsonValue.Array(arr):
             result.push(0x04)
-            _bson_append(result, key_bytes)
+            result = _bson_append(result, key_bytes)
             # Array is a subdocument with keys "0", "1", ...
             var arr_pairs: [(text, BsonValue)] = []
             var idx = 0
             while idx < arr.len():
                 arr_pairs.push((idx.to_string(), arr[idx]))
                 idx = idx + 1
-            _bson_append(result, _bson_encode_doc_body(arr_pairs))
+            result = _bson_append(result, _bson_encode_doc_body(arr_pairs))
         case BsonValue.Bin(st, bd):
             result.push(0x05)
-            _bson_append(result, key_bytes)
-            _bson_append(result, _bson_encode_i32_le(bd.len()))
+            result = _bson_append(result, key_bytes)
+            result = _bson_append(result, _bson_encode_i32_le(bd.len()))
             result.push(_bson_mask8(st))
-            _bson_append(result, bd)
+            result = _bson_append(result, bd)
         case BsonValue.Undefined:
             result.push(0x06)
-            _bson_append(result, key_bytes)
+            result = _bson_append(result, key_bytes)
         case BsonValue.ObjectId(oid):
             result.push(0x07)
-            _bson_append(result, key_bytes)
-            _bson_append(result, oid)
+            result = _bson_append(result, key_bytes)
+            result = _bson_append(result, oid)
         case BsonValue.Bool(b):
             result.push(0x08)
-            _bson_append(result, key_bytes)
+            result = _bson_append(result, key_bytes)
             if b:
                 result.push(0x01)
             else:
                 result.push(0x00)
         case BsonValue.DateTime(ms_val):
             result.push(0x09)
-            _bson_append(result, key_bytes)
-            _bson_append(result, _bson_encode_i64_le(ms_val))
+            result = _bson_append(result, key_bytes)
+            result = _bson_append(result, _bson_encode_i64_le(ms_val))
         case BsonValue.Null:
             result.push(0x0A)
-            _bson_append(result, key_bytes)
+            result = _bson_append(result, key_bytes)
         case BsonValue.Regex(pat, opt):
             result.push(0x0B)
-            _bson_append(result, key_bytes)
-            _bson_append(result, _bson_encode_cstring(pat))
-            _bson_append(result, _bson_encode_cstring(opt))
+            result = _bson_append(result, key_bytes)
+            result = _bson_append(result, _bson_encode_cstring(pat))
+            result = _bson_append(result, _bson_encode_cstring(opt))
         case BsonValue.Int32(n32):
             result.push(0x10)
-            _bson_append(result, key_bytes)
-            _bson_append(result, _bson_encode_i32_le(n32))
+            result = _bson_append(result, key_bytes)
+            result = _bson_append(result, _bson_encode_i32_le(n32))
         case BsonValue.Timestamp(ts_val):
             result.push(0x11)
-            _bson_append(result, key_bytes)
-            _bson_append(result, _bson_encode_i64_le(ts_val))
+            result = _bson_append(result, key_bytes)
+            result = _bson_append(result, _bson_encode_i64_le(ts_val))
         case BsonValue.Int64(n64):
             result.push(0x12)
-            _bson_append(result, key_bytes)
-            _bson_append(result, _bson_encode_i64_le(n64))
+            result = _bson_append(result, key_bytes)
+            result = _bson_append(result, _bson_encode_i64_le(n64))
         case BsonValue.Decimal128(d128):
             result.push(0x13)
-            _bson_append(result, key_bytes)
-            _bson_append(result, d128)
+            result = _bson_append(result, key_bytes)
+            result = _bson_append(result, d128)
         case BsonValue.MinKey:
             result.push(0xFF)
-            _bson_append(result, key_bytes)
+            result = _bson_append(result, key_bytes)
         case BsonValue.MaxKey:
             result.push(0x7F)
-            _bson_append(result, key_bytes)
+            result = _bson_append(result, key_bytes)
     result
 
 fn _bson_encode_doc_body(doc_pairs: [(text, BsonValue)]) -> [u8]:
@@ -348,12 +354,12 @@ fn _bson_encode_doc_body(doc_pairs: [(text, BsonValue)]) -> [u8]:
     while i < doc_pairs.len():
         val pair = doc_pairs[i]
         val elem_bytes = _bson_encode_element(pair.0, pair.1)
-        _bson_append(body, elem_bytes)
+        body = _bson_append(body, elem_bytes)
         i = i + 1
     val total = 4 + body.len() + 1
     var result: [u8] = []
-    _bson_append(result, _bson_encode_i32_le(total))
-    _bson_append(result, body)
+    result = _bson_append(result, _bson_encode_i32_le(total))
+    result = _bson_append(result, body)
     result.push(0x00)
     result
 
