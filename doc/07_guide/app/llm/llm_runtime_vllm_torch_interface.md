@@ -151,13 +151,16 @@ classifying the self-hosted Simple runtime as `unavailable` with
 `reason=libtorch_unavailable` on this host. The evidence env records
 `torch_cuda_optimizer_probe_required_gates`,
 `torch_cuda_optimizer_probe_blocked_gate`,
+`torch_cuda_optimizer_probe_blocked_gates`,
+`torch_cuda_optimizer_probe_primary_blocked_gate`,
 `torch_cuda_optimizer_probe_torch_available_normalized`,
 `torch_cuda_optimizer_probe_cuda_available_normalized`,
 `torch_cuda_optimizer_probe_parameter_is_cuda_normalized`,
 `torch_cuda_optimizer_probe_grad_handle_normalized`, and
 `torch_cuda_optimizer_probe_optimizer_step_attempted_normalized`, and
 `torch_cuda_optimizer_probe_next_action` so strict aggregate runs can report the
-exact blocked Torch gate and the next operator step. Use this wrapper as the
+compact blocked Torch gate list, the first blocked gate, and the next operator
+step. Use this wrapper as the
 canonical evidence path for the real CUDA optimizer-step gate; run it with
 `--strict` when unavailable hosts must fail the lane instead of recording a
 warning.
@@ -191,8 +194,9 @@ blocked native gates, while strict host mode reports
 `native_read_range,pinned_buffer,device_staging` and their exact blockers. It
 also records
 `llm_goal_evidence_torch_optimizer_detail` for Simple/libtorch CUDA optimizer
-status, host/runtime gates, gradient handle, optimizer-step attempt, and
-before/after parameter sums. vLLM and Torch detail rows include the focused
+status, compact blocked gates, primary blocked gate, host/runtime gates,
+gradient handle, optimizer-step attempt, and before/after parameter sums. vLLM
+and Torch detail rows include the focused
 wrapper `next_action` values. It also records
 `llm_goal_evidence_finetune_guard_detail` for acceptance status, reason, gate
 exit/status, compact blocked gates, training/model/eval readiness, license,

@@ -646,6 +646,12 @@ the lane remains `unavailable` with `blocked_gate=libtorch`; strict-host
 aggregate runs should fail that gate until a configured libtorch CUDA runtime
 executes the optimizer step and reports `status=pass`.
 
+The optimizer wrapper now also emits `torch_cuda_optimizer_probe_blocked_gates`
+and `torch_cuda_optimizer_probe_primary_blocked_gate` while preserving the
+legacy singular `torch_cuda_optimizer_probe_blocked_gate` key. The aggregate
+uses the plural key when available and forwards both the compact list and first
+blocked gate in `llm_goal_evidence_torch_optimizer_detail`.
+
 ## 2026-06-29 Fine-Tune Acceptance Evidence Hardening
 
 `scripts/check/check-llm-finetune-acceptance-evidence.shs` now preserves the

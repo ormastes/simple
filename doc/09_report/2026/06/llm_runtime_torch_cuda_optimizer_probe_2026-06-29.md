@@ -5,6 +5,8 @@
 - reason: `libtorch_unavailable`
 - required_gates: `libtorch,cuda,parameter_cuda,autograd_gradient,optimizer_step_decreases_parameter_sum`
 - blocked_gate: `libtorch`
+- blocked_gates: `libtorch`
+- primary_blocked_gate: `libtorch`
 - torch_available: `false`
 - cuda_available: `false`
 - parameter_is_cuda: `missing`
