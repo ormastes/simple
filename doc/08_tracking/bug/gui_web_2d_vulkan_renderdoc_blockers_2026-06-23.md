@@ -429,6 +429,15 @@ Current 2026-06-26 browser capture findings:
   `build/renderdoc/chrome-gpu-launcher-angle-log/html/evidence.env`,
   `build/renderdoc/electron-gpu-launcher-angle-log/electron-html/evidence.env`,
   and `doc/09_report/renderdoc_browser_gpu_launcher_angle_log_2026-06-29.md`.
+- 2026-06-29 A diagnostic-only no-layer switch
+  `RDOC_GPU_LAUNCHER_CLEAR_RENDERDOC_LAYER=1` clears `VK_INSTANCE_LAYERS` and
+  `ENABLE_VULKAN_RENDERDOC_CAPTURE` immediately before GPU-child exec while
+  keeping the preload shim. This does not provide a workaround: Chrome reports
+  nine GPU-process `exit_code=139` crashes and Electron reports six
+  `exit_code=139` crashes, with no `.rdc` in either route. Evidence:
+  `build/renderdoc/chrome-gpu-no-renderdoc-layer/html/evidence.env`,
+  `build/renderdoc/electron-gpu-no-renderdoc-layer/electron-html/evidence.env`,
+  and `doc/09_report/renderdoc_browser_no_layer_isolation_2026-06-29.md`.
 - The direct Chrome/Electron RenderDoc wrapper now records
   `rdoc_renderdoc_hook_children` and accepts `RDOC_RENDERDOC_HOOK_CHILDREN=0`
   to omit `--opt-hook-children`. This confirms the immediate Chrome GPU crash
