@@ -7,11 +7,21 @@
 - blocked_gates: `retry6_training_eval|training_allowed|model_manifest|eval_result|target_eval|decision|license|safety|deployment|app_handoff`
 - primary_blocked_gate: `retry6_training_eval`
 - gate_status: `WARN retry7-acceptance-gate`
+- gate_log: `build/llm_finetune_acceptance/retry7_acceptance_gate.log`
+- gate_log_artifact_status: `ready`
+- gate_log_sha256: `05fd3bf2fc1c210b445e62a01cee639c6457221ebf3837bf0c69ac132d0cac18`
+- gate_log_size: `2040`
 - acceptance_allowed: `false`
 - training_allowed: `false`
 - upstream_retry6_result: `BLOCKED_UPSTREAM_LICENSED_DATA_NOT_READY`
 - upstream_attempt_record: `/home/ormastes/dev/pub/simple-llm-runtime-workspace-20260629/.spipe/llm-finetune-process/attempts/llm_backed_app_server_dry_run_retry5.sdn`
+- upstream_attempt_record_artifact_status: `ready`
+- upstream_attempt_record_sha256: `2ec3d84ab4d641ea3d5a2e5adb4748b933b3473207945e665b89654e693da5c8`
+- upstream_attempt_record_size: `4725`
 - upstream_cache_manifest: `/home/ormastes/dev/pub/simple-llm-runtime-workspace-20260629/.spipe/llm-finetune-process/data/llm_backed_app_server_dry_run_retry5_cache_manifest.sdn`
+- upstream_cache_manifest_artifact_status: `missing`
+- upstream_cache_manifest_sha256: `missing`
+- upstream_cache_manifest_size: `0`
 - attempt_record: `/home/ormastes/dev/pub/simple-llm-runtime-workspace-20260629/.spipe/llm-finetune-process/attempts/llm_backed_app_server_dry_run_retry7.sdn`
 - attempt_record_artifact_status: `ready`
 - attempt_record_sha256: `c3cc16e60bec5e2099b9e3a1924bcda319d7f3ee92f592a2af65298685038dee`
@@ -59,4 +69,4 @@
 - next_action: `complete retry6 training/eval gate before normal acceptance review`
 - env: `build/llm_finetune_acceptance/evidence.env`
 
-This evidence consumes the retry7 normal acceptance gate. It only passes when retry7 itself passes with `acceptance_allowed=true`, every normalized required gate is unblocked, and local non-empty attempt, model manifest, eval result, and handoff artifacts can be hashed for pass integrity. Otherwise it records the required gate list, compact blocked-gates list, artifact hashes, model/eval/license/safety/deployment/app-handoff fields, and next action while keeping strict fine-tune readiness failed.
+This evidence consumes the retry7 normal acceptance gate. It only passes when retry7 itself passes with `acceptance_allowed=true`, every normalized required gate is unblocked, and local non-empty attempt, model manifest, eval result, and handoff artifacts can be hashed for pass integrity. Otherwise it records the required gate list, compact blocked-gates list, gate-log and upstream retry5 artifact provenance hashes, model/eval/license/safety/deployment/app-handoff fields, and next action while keeping strict fine-tune readiness failed.

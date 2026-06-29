@@ -275,8 +275,14 @@ records `llm_finetune_acceptance_required_gates`,
 `llm_finetune_acceptance_blocked_gates`,
 `llm_finetune_acceptance_primary_blocked_gate`,
 `llm_finetune_acceptance_training_allowed`,
+`llm_finetune_acceptance_gate_log_artifact_status`,
+`llm_finetune_acceptance_gate_log_sha256`,
 `llm_finetune_acceptance_upstream_attempt_record`,
+`llm_finetune_acceptance_upstream_attempt_record_artifact_status`,
+`llm_finetune_acceptance_upstream_attempt_record_sha256`,
 `llm_finetune_acceptance_upstream_cache_manifest`,
+`llm_finetune_acceptance_upstream_cache_manifest_artifact_status`,
+`llm_finetune_acceptance_upstream_cache_manifest_sha256`,
 `llm_finetune_acceptance_attempt_record`,
 `llm_finetune_acceptance_model_manifest`,
 `llm_finetune_acceptance_model_manifest_exists`,
@@ -307,7 +313,9 @@ records `llm_finetune_acceptance_required_gates`,
 `llm_finetune_acceptance_pass_integrity_status`, and
 `llm_finetune_acceptance_next_action` so strict aggregate runs can report the
 first concrete blocker, the exact upstream artifact refs to fill, and the
-model/eval/license/safety/deployment/app-handoff blocker list.
+model/eval/license/safety/deployment/app-handoff blocker list. The gate-log and
+upstream retry5 hashes make a blocked acceptance report traceable to the exact
+normal-review gate output and cache/attempt artifacts it consumed.
 The wrapper passes only when retry7 reports `acceptance_allowed=true` and the
 normalized `llm_finetune_acceptance_blocked_gates` value is `none`, and
 `llm_finetune_acceptance_pass_integrity_status=pass` after hashing local

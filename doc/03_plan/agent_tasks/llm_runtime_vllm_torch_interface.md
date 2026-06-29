@@ -702,7 +702,8 @@ attempt/cache refs, model-manifest/eval-result paths and presence, deployable
 model-manifest status, target-eval status, required accuracy, decision status,
 license, safety, deployment, app-handoff doc, handoff usage, retry6 next action,
 and final next action.
-It also records local artifact integrity for the retry7 attempt record, model
+It also records provenance and local artifact integrity for the retry7 gate log,
+the upstream retry5 attempt/cache artifacts, the retry7 attempt record, model
 manifest, eval result, and handoff doc: artifact status, SHA-256, size,
 model-manifest schema version, manifest attempt id, base model/revision,
 model-artifact status/hash, eval schema version, eval status, metric
@@ -718,7 +719,9 @@ The acceptance wrapper now also records
 Strict aggregate review can therefore distinguish a retry6 training/eval
 blocker from later model manifest, eval result, target eval, review decision,
 license, safety, deployment, or app-handoff blockers without parsing the whole
-gate log.
+gate log. The aggregate detail forwards the gate-log and upstream retry5
+artifact hashes so a blocker report can be traced to the exact cached data and
+attempt evidence it consumed.
 
 The acceptance wrapper pass condition is intentionally stricter than the retry7
 gate line alone: it requires retry7 `acceptance_allowed=true` and normalized
