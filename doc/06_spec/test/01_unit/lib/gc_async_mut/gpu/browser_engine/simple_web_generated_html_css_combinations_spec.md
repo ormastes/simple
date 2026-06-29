@@ -27,7 +27,7 @@ simple_web_generated_html_css_combinations_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 10 | 10 | 0 | 0 |
+| 11 | 11 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -190,6 +190,38 @@ expect(pixels.len()).to_equal(120 * 48)
 expect(_count_color(pixels, 0xFFEF4444u32)).to_be_greater_than(0)
 expect(_pixel_at(pixels, 120, 5, 6)).to_equal(0xFFDBEAFEu32)
 expect(_pixel_at(pixels, 120, 50, 6)).to_equal(0xFFEF4444u32)
+```
+
+</details>
+
+#### renders place-items and place-self shorthands through flex cross-axis alignment
+
+- Render flex children using place-items on the container and place-self on one child
+- Assert place-items centers one child while place-self overrides the other to the end
+   - Expected: pixels.len() equals `80 * 40`
+   - Expected: _pixel_at(pixels, 80, 5, 3) equals `0xFFDBEAFEu32`
+   - Expected: _pixel_at(pixels, 80, 5, 10) equals `0xFF1D4ED8u32`
+   - Expected: _pixel_at(pixels, 80, 15, 10) equals `0xFFDBEAFEu32`
+   - Expected: _pixel_at(pixels, 80, 15, 20) equals `0xFFEF4444u32`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Render flex children using place-items on the container and place-self on one child")
+val html = "<html><head><style>html,body{margin:0;padding:0;background-color:#ffffff}.stage{display:flex;width:64px;height:24px;background-color:#dbeafe;place-items:center}.a{width:10px;height:6px;background-color:#1d4ed8}.b{width:10px;height:6px;background-color:#ef4444;place-self:flex-end}</style></head><body><section class='stage'><div class='a'></div><div class='b'></div></section></body></html>"
+val pixels = simple_web_render_html_to_pixels(html, 80, 40)
+
+step("Assert place-items centers one child while place-self overrides the other to the end")
+expect(pixels.len()).to_equal(80 * 40)
+expect(_pixel_at(pixels, 80, 5, 3)).to_equal(0xFFDBEAFEu32)
+expect(_pixel_at(pixels, 80, 5, 10)).to_equal(0xFF1D4ED8u32)
+expect(_pixel_at(pixels, 80, 15, 10)).to_equal(0xFFDBEAFEu32)
+expect(_pixel_at(pixels, 80, 15, 20)).to_equal(0xFFEF4444u32)
 ```
 
 </details>
@@ -372,8 +404,8 @@ expect(_pixel_at(pixels, 96, 9, 5)).to_equal(0xFFDBEAFEu32)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 10 |
-| Active scenarios | 10 |
+| Total scenarios | 11 |
+| Active scenarios | 11 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
