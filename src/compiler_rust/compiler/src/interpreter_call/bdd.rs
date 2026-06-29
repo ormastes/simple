@@ -31,6 +31,14 @@ thread_local! {
     pub(crate) static BDD_INSIDE_IT: RefCell<bool> = const { RefCell::new(false) };
     // Failure message from expect (for display in it block)
     pub(crate) static BDD_FAILURE_MSG: RefCell<Option<String>> = const { RefCell::new(None) };
+    // Provisional "hollow call" failure: a bare `expect(<call>)` whose result is
+    // falsy and which has NOT yet had a matcher applied. A following `.to_*()`
+    // matcher clears this (the call was checked after all); if no matcher ever
+    // runs, it counts as a failure at example end. Kept separate from
+    // BDD_EXPECT_FAILED so a passing matcher on a falsy call result
+    // (e.g. `expect(returns_zero()).to_equal(0)`) is not falsely failed — while
+    // still preserving "a passing matcher must not clear a real prior failure".
+    pub(crate) static BDD_EXPECT_PROVISIONAL: RefCell<bool> = const { RefCell::new(false) };
 
     // TEST-010: Shared examples registry - maps name to block
     pub(crate) static BDD_SHARED_EXAMPLES: RefCell<HashMap<String, Value>> = RefCell::new(HashMap::new());
@@ -618,6 +626,7 @@ pub(super) fn eval_bdd_builtin(
             add_example_to_current_group(example);
 
             BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = false);
+            BDD_EXPECT_PROVISIONAL.with(|cell| *cell.borrow_mut() = false);
             BDD_FAILURE_MSG.with(|cell| *cell.borrow_mut() = None);
             BDD_INSIDE_IT.with(|cell| *cell.borrow_mut() = true);
 
@@ -678,8 +687,12 @@ pub(super) fn eval_bdd_builtin(
                     Ok(Some(Value::Nil))
                 }
                 Ok(_) => {
-                    // Check if expect failed
-                    let failed = BDD_EXPECT_FAILED.with(|cell| *cell.borrow());
+                    // Check if expect failed. A still-set provisional hollow-call
+                    // failure (a bare `expect(<falsy call>)` with no matcher) also
+                    // counts as a failure.
+                    let hard_failed = BDD_EXPECT_FAILED.with(|cell| *cell.borrow());
+                    let provisional = BDD_EXPECT_PROVISIONAL.with(|cell| *cell.borrow());
+                    let failed = hard_failed || provisional;
                     let failure_msg = BDD_FAILURE_MSG.with(|cell| cell.borrow().clone());
 
                     if failed {
@@ -847,7 +860,11 @@ pub(super) fn eval_bdd_builtin(
                 impl_methods,
             )?;
             if is_call_expr && !value.truthy() {
-                BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = true);
+                // Provisional only: if a `.to_*()` matcher follows, it clears this
+                // (the call IS being checked, and a falsy result like 0/false/""
+                // may be exactly what the matcher expects). If no matcher follows,
+                // it stands as a hollow-call failure at example end.
+                BDD_EXPECT_PROVISIONAL.with(|cell| *cell.borrow_mut() = true);
                 BDD_FAILURE_MSG.with(|cell| {
                     *cell.borrow_mut() = Some(format!(
                         "expected call result to be truthy, got {}",
@@ -1666,6 +1683,7 @@ pub fn clear_bdd_state() {
     BDD_INDENT.with(|cell| *cell.borrow_mut() = 0);
     BDD_COUNTS.with(|cell| *cell.borrow_mut() = (0, 0));
     BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = false);
+    BDD_EXPECT_PROVISIONAL.with(|cell| *cell.borrow_mut() = false);
     BDD_INSIDE_IT.with(|cell| *cell.borrow_mut() = false);
     BDD_FAILURE_MSG.with(|cell| *cell.borrow_mut() = None);
     BDD_SHARED_EXAMPLES.with(|cell| cell.borrow_mut().clear());
