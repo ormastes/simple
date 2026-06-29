@@ -1,0 +1,119 @@
+"""
+NVMe SSD firmware (HIL/FTL/FIL + admin/IO-queue controller) — system scenario.
+
+**Feature IDs:** #NVME-FW-001
+**Category:** Hardware
+**Difficulty:** 4/5
+**Status:** Implemented
+**Requirements:** N/A
+**Plan:** doc/03_plan/hardware/nvme_fw_baremetal_parallel_agent_plan.md
+**Design:** N/A
+**Research:** doc/01_research/hardware/nvme_firmware/nvme_ssd_firmware_architecture.md
+
+The pure-Simple firmware (examples/09_embedded/simpleos_nvme_fw/fw/) is a layered,
+host-runnable NVMe SSD controller simulation: a Host Interface Layer (queues +
+command decode), a Flash Translation Layer (log-structured map, WAL/checkpoint,
+crash recovery, garbage collection), a Flash Interface Layer (ONFI NAND device +
+ECC + bad-block), and an NVMe controller front end (admin queue + multiple IO
+queues). The modules live under examples/ and are exercised here through the real
+CLI (`bin/simple run`) as subprocesses, asserting the operator-visible PASS
+evidence. Run: `bin/simple test test/03_system/app/nvme_firmware/nvme_firmware_simulation_spec.spl`.
+"""
+
+use std.spec.*
+use std.io_runtime.{process_run}
+
+val FW: text = "examples/09_embedded/simpleos_nvme_fw/fw"
+
+fn _run(file: text) -> (text, text, i64):
+    process_run("/bin/sh", ["-c", "bin/simple run " + file])
+
+describe "NVMe firmware: layered self-tests (HIL / FTL / FIL + controller)":
+    """
+    Every layer's self-tests run as one suite covering the flash interface (NAND,
+    ECC, bad-block, ONFI device), the translation layer (map, band, journal, GC),
+    and the host interface plus the NVMe admin/IO-queue controller.
+    """
+
+    it "passes the full firmware self-test suite":
+        step("Run the aggregated firmware self-test suite")
+        val (out, err, code) = _run(FW + "/test_fw.spl")
+        expect(code).to_equal(0)
+
+        step("Confirm each layer's section ran")
+        expect(out).to_contain("FIL (flash interface)")
+        expect(out).to_contain("FTL (translation)")
+        expect(out).to_contain("HIL (host interface)")
+        expect(out).to_contain("NVMe controller (admin + multi IO queue)")
+
+        step("Confirm the suite reports overall PASS")
+        expect(out).to_contain("ALL FIRMWARE SELF-TESTS PASS")
+
+describe "NVMe firmware: end-to-end SSD lifecycle":
+    """
+    The full HIL -> FTL -> FIL stack driven through the host queues: write a batch
+    of blocks, read them back, overwrite to generate stale pages, garbage-collect,
+    trim, then power-fail and recover (the committed-prefix durability property).
+    """
+
+    it "writes, reads, garbage-collects, trims, and survives a power cycle":
+        step("Run the end-to-end SSD simulation")
+        val (out, err, code) = _run(FW + "/sim_main.spl")
+        expect(code).to_equal(0)
+
+        step("Read-back verification after the initial writes")
+        expect(out).to_contain("read LBA 7 == 8")
+
+        step("Overwrites produce stale pages and the newest version reads back")
+        expect(out).to_contain("LBA 7 reads newest version")
+
+        step("Garbage collection reclaims a stale block while the logical view is preserved")
+        expect(out).to_contain("GC reclaimed at least one block")
+
+        step("Trim deallocates an LBA (a later read returns zero)")
+        expect(out).to_contain("read after trim -> 0")
+
+        step("After a power-fail + recovery, committed data survives and trims stay trimmed")
+        expect(out).to_contain("LBA 50 survives power cycle")
+        expect(out).to_contain("trimmed LBA 7 stays trimmed after recovery")
+        expect(out).to_contain("ALL END-TO-END CHECKS PASS")
+
+describe "NVMe firmware: admin queue + multiple IO queues (controller front end)":
+    """
+    The NVMe controller brought up exactly as a host driver does: Identify, Set/Get
+    Features, Create IO Completion then Submission queues, host IO across multiple
+    queues with round-robin servicing, the negative cases (bind to a missing CQ,
+    delete a busy CQ), reverse-order teardown, SMART log, and power-cycle survival.
+    """
+
+    it "drives the full admin-and-IO-queue controller lifecycle":
+        step("Run the controller end-to-end demo")
+        val (out, err, code) = _run(FW + "/nvme_main.spl")
+        expect(code).to_equal(0)
+
+        step("Identify the controller and the namespace via the admin queue")
+        expect(out).to_contain("identify controller ok")
+        expect(out).to_contain("controller reports max IO queues")
+        expect(out).to_contain("namespace size == LBA_COUNT")
+
+        step("Create an IO completion queue, then the submission queue bound to it")
+        expect(out).to_contain("create IO CQ 1")
+        expect(out).to_contain("create IO SQ 1 -> CQ 1")
+
+        step("Negative: a submission queue bound to a non-existent completion queue is rejected")
+        expect(out).to_contain("SQ -> missing CQ rejected")
+
+        step("A second IO queue pair is created and the controller round-robins both")
+        expect(out).to_contain("round-robin serviced all 4 across both queues")
+
+        step("Negative: deleting a completion queue with a live bound submission queue is rejected")
+        expect(out).to_contain("delete bound CQ rejected")
+
+        step("Reverse-order teardown deletes the submission queue then the completion queue")
+        expect(out).to_contain("delete SQ 1 ok")
+        expect(out).to_contain("delete CQ 1 ok")
+
+        step("The SMART log reflects the IO, and committed data survives a power cycle")
+        expect(out).to_contain("SMART shows writes occurred")
+        expect(out).to_contain("LBA 200 survives power cycle")
+        expect(out).to_contain("ALL NVME CONTROLLER E2E CHECKS PASS")
