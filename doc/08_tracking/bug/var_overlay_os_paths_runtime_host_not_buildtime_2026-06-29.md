@@ -3,6 +3,23 @@
 Date: 2026-06-29
 Candidate: `variants/os/` overlay keyed on `path_separator` (`:` vs `;`)
 
+## RESOLVED — OS lane IMPLEMENTED via a different (qualifying) seam
+
+`path_separator` itself stays REJECTED (see verdict below). But the OS lane's
+genuine build-time seam is the **build-target file extensions**
+(`lib_ext` `.so`/`.dylib`/`.dll`, `exe_ext` `.exe`/``) — a pure build-target
+property, advisor-endorsed. Implemented (landed): new seam
+`src/lib/nogc_sync_mut/target_ext.spl` (canonical = host detection, so
+default/`auto` is unchanged); `platform.spl` `lib_ext`/`exe_ext` delegate to it;
+`variants/platform/{windows,mac,linux}/nogc_sync_mut/target_ext.spl` return fixed
+extensions for explicit targets. Default-host behavior verified at runtime
+(`lib_ext()==".so"`, `exe_ext()==""`); spec
+`test/01_unit/lib/nogc_sync_mut/target_ext_spec.spl` green. Unlike
+`path_separator`, the canonical falls back to host detection so `auto` never
+regresses; only an explicit `platform:` value bakes a fixed extension.
+
+---
+
 ## Verdict: FAILS criterion (2) — separator is a runtime-host decision
 
 ### Evidence
