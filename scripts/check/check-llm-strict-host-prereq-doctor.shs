@@ -12,12 +12,16 @@ PYTHON_VLLM_LOG="$BUILD_DIR/python_vllm_probe.log"
 PYTHON_TORCH_LOG="$BUILD_DIR/python_torch_probe.log"
 SYSTEM_LIBTORCH_LOG="$BUILD_DIR/system_libtorch_probe.log"
 GPU_LOG="$BUILD_DIR/gpu_probe.log"
+TORCH_BRIDGE_BUILD_DIR="$BUILD_DIR/torch_sffi_bridge"
+TORCH_BRIDGE_LOG="$BUILD_DIR/torch_sffi_bridge_setup.log"
+TORCH_BRIDGE_ENV="$TORCH_BRIDGE_BUILD_DIR/evidence.env"
 BASE_MODEL="${LLM_VLLM_BASE_MODEL:-${BASE_MODEL:-base-model}}"
 ENDPOINT="${LLM_VLLM_ENDPOINT:-${ENDPOINT:-http://127.0.0.1:8000/v1}}"
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
 rm -f "$OUT_ENV" "$REPORT_PATH" "$SURFACE_MANIFEST" \
-    "$PYTHON_VLLM_LOG" "$PYTHON_TORCH_LOG" "$SYSTEM_LIBTORCH_LOG" "$GPU_LOG"
+    "$PYTHON_VLLM_LOG" "$PYTHON_TORCH_LOG" "$SYSTEM_LIBTORCH_LOG" "$GPU_LOG" \
+    "$TORCH_BRIDGE_LOG"
 
 artifact_size() {
     path="$1"
@@ -308,7 +312,29 @@ python_torch_cuda_available="$(value_for python_torch_cuda_available "$PYTHON_TO
 python_torch_cuda_device_count="$(value_for python_torch_cuda_device_count "$PYTHON_TORCH_LOG")"
 python_torch_error="$(value_for python_torch_error "$PYTHON_TORCH_LOG")"
 python_torch_error="${python_torch_error:-none}"
-if [ "$system_libtorch_status" = "available" ] && [ "$python_torch_cuda_available" = "true" ]; then
+if BUILD_DIR="$TORCH_BRIDGE_BUILD_DIR" REPORT_PATH="$TORCH_BRIDGE_BUILD_DIR/report.md" \
+    sh scripts/setup/setup-llm-runtime-torch-sffi-bridge.shs >"$TORCH_BRIDGE_LOG" 2>&1; then
+    torch_bridge_setup_exit="0"
+else
+    torch_bridge_setup_exit="$?"
+fi
+torch_bridge_status="$(artifact_value llm_runtime_torch_sffi_bridge_status "$TORCH_BRIDGE_ENV")"
+torch_bridge_reason="$(artifact_value llm_runtime_torch_sffi_bridge_reason "$TORCH_BRIDGE_ENV")"
+torch_bridge_output_status="$(artifact_value llm_runtime_torch_sffi_bridge_output_status "$TORCH_BRIDGE_ENV")"
+torch_bridge_output_path="$(artifact_value llm_runtime_torch_sffi_bridge_output_path "$TORCH_BRIDGE_ENV")"
+torch_bridge_compile_status="$(artifact_value llm_runtime_torch_sffi_bridge_compile_status "$TORCH_BRIDGE_ENV")"
+torch_bridge_libtorch_export="$(artifact_value llm_runtime_torch_sffi_bridge_libtorch_export "$TORCH_BRIDGE_ENV")"
+torch_bridge_simple_sffi_path_export="$(artifact_value llm_runtime_torch_sffi_bridge_simple_sffi_path_export "$TORCH_BRIDGE_ENV")"
+torch_bridge_status="${torch_bridge_status:-missing}"
+torch_bridge_reason="${torch_bridge_reason:-missing}"
+torch_bridge_output_status="${torch_bridge_output_status:-missing}"
+torch_bridge_output_path="${torch_bridge_output_path:-missing}"
+torch_bridge_compile_status="${torch_bridge_compile_status:-missing}"
+torch_bridge_libtorch_export="${torch_bridge_libtorch_export:-missing}"
+torch_bridge_simple_sffi_path_export="${torch_bridge_simple_sffi_path_export:-missing}"
+if [ "$python_torch_cuda_available" = "true" ] &&
+    [ "$torch_bridge_status" = "pass" ] &&
+    [ "$torch_bridge_output_status" = "visible" ]; then
     torch_prereq_status="ready"
 else
     torch_prereq_status="blocked"
@@ -389,7 +415,7 @@ fi
 if [ "$torch_prereq_status" = "ready" ]; then
     torch_next_action="run scripts/check/check-llm-runtime-torch-cuda-optimizer-probe.shs --strict"
 else
-    torch_next_action="make Simple-visible libtorch available through SIMPLE_SFFI_PATH plus SCILIB_TORCH_ROOT or LIBTORCH"
+    torch_next_action="run scripts/setup/setup-llm-runtime-torch-sffi-bridge.shs, export SIMPLE_SFFI_PATH and LIBTORCH from its evidence, then rerun the strict Torch optimizer probe"
 fi
 if [ "$finetune_prereq_status" = "ready" ]; then
     finetune_next_action="run scripts/check/check-llm-finetune-acceptance-evidence.shs"
@@ -404,6 +430,7 @@ fi
         scripts/check/check-llm-dashboard-live-http-evidence.shs \
         scripts/check/check-llm-runtime-vllm-host-probe.shs \
         scripts/check/check-llm-runtime-svllm-native-streaming-evidence.shs \
+        scripts/setup/setup-llm-runtime-torch-sffi-bridge.shs \
         scripts/check/check-llm-runtime-torch-cuda-optimizer-probe.shs \
         scripts/check/check-llm-finetune-acceptance-evidence.shs \
         doc/07_guide/app/llm/llm_runtime_vllm_torch_interface.md \
@@ -469,6 +496,14 @@ surface_manifest_sha256="$(artifact_sha256 "$SURFACE_MANIFEST")"
     printf '%s\n' "llm_strict_host_prereq_doctor_python_torch_error=$python_torch_error"
     printf '%s\n' "llm_strict_host_prereq_doctor_system_libtorch_status=$system_libtorch_status"
     printf '%s\n' "llm_strict_host_prereq_doctor_system_libtorch_match_count=$system_libtorch_match_count"
+    printf '%s\n' "llm_strict_host_prereq_doctor_torch_bridge_setup_exit=$torch_bridge_setup_exit"
+    printf '%s\n' "llm_strict_host_prereq_doctor_torch_bridge_status=$torch_bridge_status"
+    printf '%s\n' "llm_strict_host_prereq_doctor_torch_bridge_reason=$torch_bridge_reason"
+    printf '%s\n' "llm_strict_host_prereq_doctor_torch_bridge_output_status=$torch_bridge_output_status"
+    printf '%s\n' "llm_strict_host_prereq_doctor_torch_bridge_output_path=$torch_bridge_output_path"
+    printf '%s\n' "llm_strict_host_prereq_doctor_torch_bridge_compile_status=$torch_bridge_compile_status"
+    printf '%s\n' "llm_strict_host_prereq_doctor_torch_bridge_simple_sffi_path_export=$torch_bridge_simple_sffi_path_export"
+    printf '%s\n' "llm_strict_host_prereq_doctor_torch_bridge_libtorch_export=$torch_bridge_libtorch_export"
     printf '%s\n' "llm_strict_host_prereq_doctor_torch_next_action=$torch_next_action"
     printf '%s\n' "llm_strict_host_prereq_doctor_finetune_status=$finetune_prereq_status"
     printf '%s\n' "llm_strict_host_prereq_doctor_retry5_cache_manifest_status=$retry5_cache_manifest_status"
@@ -494,6 +529,10 @@ surface_manifest_sha256="$(artifact_sha256 "$SURFACE_MANIFEST")"
     printf '%s\n' "llm_strict_host_prereq_doctor_python_torch_log_sha256=$(artifact_sha256 "$PYTHON_TORCH_LOG")"
     printf '%s\n' "llm_strict_host_prereq_doctor_system_libtorch_log_size=$(artifact_size "$SYSTEM_LIBTORCH_LOG")"
     printf '%s\n' "llm_strict_host_prereq_doctor_system_libtorch_log_sha256=$(artifact_sha256 "$SYSTEM_LIBTORCH_LOG")"
+    printf '%s\n' "llm_strict_host_prereq_doctor_torch_bridge_log_size=$(artifact_size "$TORCH_BRIDGE_LOG")"
+    printf '%s\n' "llm_strict_host_prereq_doctor_torch_bridge_log_sha256=$(artifact_sha256 "$TORCH_BRIDGE_LOG")"
+    printf '%s\n' "llm_strict_host_prereq_doctor_torch_bridge_env_size=$(artifact_size "$TORCH_BRIDGE_ENV")"
+    printf '%s\n' "llm_strict_host_prereq_doctor_torch_bridge_env_sha256=$(artifact_sha256 "$TORCH_BRIDGE_ENV")"
     printf '%s\n' "llm_strict_host_prereq_doctor_gpu_log_size=$(artifact_size "$GPU_LOG")"
     printf '%s\n' "llm_strict_host_prereq_doctor_gpu_log_sha256=$(artifact_sha256 "$GPU_LOG")"
     printf '%s\n' "llm_strict_host_prereq_doctor_surface_manifest=$SURFACE_MANIFEST"
@@ -550,6 +589,11 @@ surface_manifest_sha256="$(artifact_sha256 "$SURFACE_MANIFEST")"
     printf '%s\n' "- python_torch_error: \`$python_torch_error\`"
     printf '%s\n' "- system_libtorch: \`$system_libtorch_status\`"
     printf '%s\n' "- system_libtorch_match_count: \`$system_libtorch_match_count\`"
+    printf '%s\n' "- torch_bridge_status: \`$torch_bridge_status\`"
+    printf '%s\n' "- torch_bridge_output_status: \`$torch_bridge_output_status\`"
+    printf '%s\n' "- torch_bridge_compile_status: \`$torch_bridge_compile_status\`"
+    printf '%s\n' "- torch_bridge_simple_sffi_path_export: \`$torch_bridge_simple_sffi_path_export\`"
+    printf '%s\n' "- torch_bridge_libtorch_export: \`$torch_bridge_libtorch_export\`"
     printf '%s\n' "- torch_next_action: \`$torch_next_action\`"
     printf '%s\n' "- retry5_cache_manifest: \`$retry5_cache_manifest_status\`"
     printf '%s\n' "- retry6_model_manifest: \`$retry6_model_manifest_status\`"

@@ -119,7 +119,11 @@ svLLM, Torch, and fine-tune unblock routing. The vLLM prereq section also
 records the base model and endpoint values, plus whether each came from
 defaults or explicit env, but the
 doctor does not contact the endpoint; endpoint reachability and `/v1/models`
-remain strict vLLM host-probe evidence. The fine-tune prereq section records
+remain strict vLLM host-probe evidence. The Torch prereq section runs the
+local bridge setup wrapper, records `torch_bridge_status`,
+`torch_bridge_output_status`, the exported `SIMPLE_SFFI_PATH`/`LIBTORCH`
+values, and keeps `system_libtorch_status` as supporting host context only.
+The fine-tune prereq section records
 retry6 model-manifest and eval-result schema, attempt/base-model, deployable,
 metric, dataset checksum, and sample fields when those artifacts exist; retry7
 acceptance remains the strict evidence gate for licensing, safety, deployment,
@@ -145,10 +149,11 @@ Strict-host unblock checklist:
    `SVLLM_NATIVE_CAPABILITY_EVIDENCE_PATH`, then run
    `scripts/check/check-llm-runtime-svllm-native-streaming-evidence.shs` and
    `SVLLM_NATIVE_EVIDENCE_ENV=build/llm_runtime_svllm_native_streaming/evidence.env sh scripts/check/check-llm-runtime-svllm-local-readiness.shs --strict-native`.
-4. Torch/libtorch: make `libspl_torch.so` visible as
-   `$SIMPLE_SFFI_PATH/libspl_torch.so`, point `SCILIB_TORCH_ROOT` or `LIBTORCH`
-   at the CUDA libtorch install, and include the libtorch directory in
-   `LD_LIBRARY_PATH`; then run
+4. Torch/libtorch: run
+   `scripts/setup/setup-llm-runtime-torch-sffi-bridge.shs` to build
+   `libspl_torch.so` from the local Python Torch package, export the reported
+   `SIMPLE_SFFI_PATH` and `LIBTORCH` values, and include the libtorch directory
+   in `LD_LIBRARY_PATH`; then run
    `scripts/check/check-llm-runtime-torch-cuda-optimizer-probe.shs --strict`
    until the Simple optimizer probe records a CUDA parameter, gradient handle,
    optimizer step, and decreased parameter sum. The probe reports
