@@ -619,3 +619,12 @@ operator-facing guide for the runtime evidence boundary. It records the public
 absence-text contract, dashboard-control ownership rules, implemented evidence,
 and remaining host-dependent gates so the runtime tracking rows no longer rely
 only on the generic dashboard guide.
+
+## 2026-06-29 svLLM Native Streaming Evidence Hardening
+
+`scripts/check/check-llm-runtime-svllm-native-streaming-evidence.shs` now
+produces the `SVLLM_NATIVE_EVIDENCE_ENV` contract consumed by strict svLLM
+readiness and the aggregate LLM gate. The checker runs the local svLLM
+readiness wrapper, records local file-backed byte-read evidence separately, and
+keeps native streaming failed with concrete blockers until native read_range,
+pinned buffer registration, and device staging all report `ready`.

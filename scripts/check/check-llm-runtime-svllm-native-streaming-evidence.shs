@@ -1,0 +1,99 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/llm_runtime_svllm_native_streaming}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/2026/06/llm_runtime_svllm_native_streaming_$(date -u +%F).md}"
+OUT_ENV="$BUILD_DIR/evidence.env"
+LOCAL_BUILD_DIR="$BUILD_DIR/local_readiness"
+LOCAL_REPORT="$BUILD_DIR/local_readiness_report.md"
+LOCAL_ENV="$LOCAL_BUILD_DIR/evidence.env"
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+rm -f "$OUT_ENV" "$REPORT_PATH" "$LOCAL_REPORT"
+
+status="fail"
+reason="native_read_range_unavailable"
+local_status="fail"
+read_range_status="unsupported"
+pinned_buffer_status="unsupported"
+device_staging_status="unsupported"
+local_read_bytes_status="unknown"
+
+if BUILD_DIR="$LOCAL_BUILD_DIR" REPORT_PATH="$LOCAL_REPORT" sh scripts/check/check-llm-runtime-svllm-local-readiness.shs >"$BUILD_DIR/local_readiness.log" 2>&1; then
+    local_status="pass"
+else
+    local_status="fail"
+    reason="local_readiness_failed"
+fi
+
+if grep -F 'expect(readiness.read_range_status).to_equal("unsupported")' test/01_unit/lib/gc_async_mut/svllm/model_loader_streaming_readiness_spec.spl >/dev/null 2>&1; then
+    read_range_status="unsupported"
+else
+    read_range_status="unknown"
+fi
+if grep -F 'expect(readiness.pinned_buffer_status).to_equal("unsupported")' test/01_unit/lib/gc_async_mut/svllm/model_loader_streaming_readiness_spec.spl >/dev/null 2>&1; then
+    pinned_buffer_status="unsupported"
+else
+    pinned_buffer_status="unknown"
+fi
+if grep -F 'expect(readiness.device_staging_status).to_equal("unsupported")' test/01_unit/lib/gc_async_mut/svllm/model_loader_streaming_readiness_spec.spl >/dev/null 2>&1; then
+    device_staging_status="unsupported"
+else
+    device_staging_status="unknown"
+fi
+if grep -F 'expect(readiness.local_read_bytes_status).to_equal("ready")' test/01_unit/lib/gc_async_mut/svllm/model_loader_streaming_readiness_spec.spl >/dev/null 2>&1; then
+    local_read_bytes_status="ready"
+else
+    local_read_bytes_status="unknown"
+fi
+
+if [ "$local_status" = "pass" ] &&
+   [ "$read_range_status" = "ready" ] &&
+   [ "$pinned_buffer_status" = "ready" ] &&
+   [ "$device_staging_status" = "ready" ]; then
+    status="pass"
+    reason="native_streaming_ready"
+elif [ "$local_status" = "pass" ]; then
+    if [ "$read_range_status" != "ready" ]; then
+        reason="native_read_range_unavailable"
+    elif [ "$pinned_buffer_status" != "ready" ]; then
+        reason="pinned_buffer_registration_unavailable"
+    else
+        reason="device_staging_unavailable"
+    fi
+fi
+
+{
+    printf '%s\n' "svllm_native_streaming_status=$status"
+    printf '%s\n' "svllm_native_streaming_reason=$reason"
+    printf '%s\n' "svllm_native_streaming_local_readiness_status=$local_status"
+    printf '%s\n' "svllm_native_streaming_read_range_status=$read_range_status"
+    printf '%s\n' "svllm_native_streaming_pinned_buffer_status=$pinned_buffer_status"
+    printf '%s\n' "svllm_native_streaming_device_staging_status=$device_staging_status"
+    printf '%s\n' "svllm_native_streaming_local_read_bytes_status=$local_read_bytes_status"
+    printf '%s\n' "svllm_native_streaming_local_readiness_env=$LOCAL_ENV"
+} >"$OUT_ENV"
+
+{
+    printf '# LLM Runtime svLLM Native Streaming Evidence\n\n'
+    printf '%s\n' "- status: \`$status\`"
+    printf '%s\n' "- reason: \`$reason\`"
+    printf '%s\n' "- local_readiness: \`$local_status\`"
+    printf '%s\n' "- read_range: \`$read_range_status\`"
+    printf '%s\n' "- pinned_buffer: \`$pinned_buffer_status\`"
+    printf '%s\n' "- device_staging: \`$device_staging_status\`"
+    printf '%s\n' "- local_read_bytes: \`$local_read_bytes_status\`"
+    printf '%s\n' "- env: \`$OUT_ENV\`"
+    printf '\n'
+    printf 'This evidence consumes the local svLLM readiness gate and records the native streaming blockers. It only passes when native read_range, pinned buffer registration, and device staging are all ready. Local file-backed bytes alone remain explicit bring-up evidence, not native streaming completion.\n'
+} >"$REPORT_PATH"
+
+if [ "$status" = "pass" ]; then
+    echo "STATUS: PASS llm-runtime-svllm-native-streaming"
+else
+    echo "STATUS: FAIL llm-runtime-svllm-native-streaming reason=$reason"
+    exit 1
+fi
