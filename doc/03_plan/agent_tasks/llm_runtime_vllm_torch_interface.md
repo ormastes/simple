@@ -669,6 +669,15 @@ host can produce a real pass from `llm_runtime_vllm_serve_readiness_run` with
 `status=ready`, `endpoint=configured`, and `models_status=ready`; missing local
 vLLM/GPU hosts still produce bounded `skipped` evidence without spawning.
 
+The aggregate LLM evidence report now includes `torch_optimizer` in the detail
+table and forwards normalized Simple/libtorch CUDA optimizer fields: status,
+reason, libtorch/CUDA availability, parameter CUDA placement, gradient handle,
+optimizer-step attempt, before/after sums, and wrapper exit. The same aggregate
+also expands `finetune_guard` detail with retry7 gate exit/status, compact
+blocked gates, target eval, license, safety, deployment, and app-handoff fields,
+so strict-host review can distinguish retry/eval blockers from deployment or
+safety blockers without opening the focused env files first.
+
 ## 2026-06-29 Aggregate Blocker Detail Hardening
 
 `scripts/check/check-llm-goal-evidence.shs` now copies focused blocker contracts
