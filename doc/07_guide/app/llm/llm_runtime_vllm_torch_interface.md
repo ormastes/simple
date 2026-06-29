@@ -370,12 +370,15 @@ local file-backed byte-read states, native blocked gates, primary blocked gate,
 and next action.
 In default mode, the
 dashboard detail keeps a concrete strict-host next action even though live HTTP
-evidence is intentionally not collected, and the svLLM native fields report
-`not_required` / `not_collected`; strict host mode
-generates and consumes the native streaming evidence. The svLLM blocker table
-is mode-aware too: default mode reports the `local_readiness` gate with no
-blocked native gates, while strict host mode reports the native producer's
-`blocked_gates` and `next_action` contract. It
+evidence is intentionally not collected, and svLLM native streaming evidence is
+collected as a non-blocking diagnostic producer. The default svLLM lane still
+passes or fails on local file-backed readiness, but its detail row forwards the
+native producer's blocked gates, capability provenance, surface manifest, and
+next action. Strict host mode consumes the same native streaming evidence as a
+release-completion gate. The svLLM blocker table is mode-aware too: default mode
+reports the `local_readiness` gate with no lane-blocking native gates, while
+strict host mode reports the native producer's `blocked_gates` and
+`next_action` contract. It
 also records
 `llm_goal_evidence_torch_optimizer_detail` for Simple/libtorch CUDA optimizer
 status, compact blocked gates, primary blocked gate, Python Torch/CUDA host
