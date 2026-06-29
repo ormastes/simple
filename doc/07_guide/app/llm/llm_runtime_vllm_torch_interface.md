@@ -280,7 +280,7 @@ vLLM/GPU/preflight/endpoint/model statuses and pass-log integrity, and
 `llm_goal_evidence_svllm_local_detail` for native svLLM streaming status,
 native blocker reason, local readiness, native `read_range`, pinned-buffer,
 device-staging, capability source, capability provenance, capability evidence
-artifact status and hash metadata, probe event/status/exit, pass integrity,
+artifact status, source, and hash metadata, probe event/status/exit, pass integrity,
 local file-backed byte-read states, native blocked gates, primary blocked gate,
 and next action.
 In default mode, the
@@ -465,7 +465,8 @@ native capability env values without a non-default
 `SVLLM_NATIVE_CAPABILITY_SOURCE` fail as `capability_provenance`, and ready
 values without a non-empty `SVLLM_NATIVE_CAPABILITY_EVIDENCE_PATH` fail as
 `capability_evidence`; the artifact must also record the same source string as
-`SVLLM_NATIVE_CAPABILITY_SOURCE`. Strict local readiness requires both
+`SVLLM_NATIVE_CAPABILITY_SOURCE`, and strict aggregate detail forwards that
+artifact source as `capability_evidence_source`. Strict local readiness requires both
 `svllm_native_streaming_status=pass` and
 `svllm_native_streaming_pass_integrity_status=pass`, so a status-only native env
 cannot satisfy strict completion.

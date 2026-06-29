@@ -659,7 +659,7 @@ non-empty schema-v1 probe artifact with
 and device-staging statuses that match the wrapper inputs. Ready native status
 env values plus a source label but without that artifact fail with
 `capability_evidence`, and the wrapper records artifact SHA-256, size, mtime,
-schema version, probe event/status/exit, reported native statuses,
+source, schema version, probe event/status/exit, reported native statuses,
 `svllm_native_streaming_pass_integrity_status` plus
 `svllm_native_streaming_pass_integrity_reason` so aggregate detail can
 distinguish a real native pass from env-only status injection.
@@ -963,8 +963,9 @@ The aggregate now also forwards `llm_goal_evidence_svllm_local_detail`.
 Strict-native svLLM failures show the native streaming status, blocker reason,
 native blocked gates, primary blocked gate, next action, local readiness,
 native `read_range`, pinned-buffer, device-staging, and local file-backed
-byte-read states, capability evidence artifact status, and pass-integrity state
-in the aggregate report instead of collapsing the detail row to `n/a`.
+byte-read states, capability evidence artifact status, source, and
+pass-integrity state in the aggregate report instead of collapsing the detail
+row to `n/a`.
 Strict local readiness also rejects native envs that report
 `svllm_native_streaming_status=pass` without
 `svllm_native_streaming_pass_integrity_status=pass`.
