@@ -437,27 +437,34 @@ fn _bson_decode_doc_at(bytes: [u8], pos: i64) -> _BsonDecResult:
         return _bson_err(BsonError.UnexpectedEnd)
     if not _bson_need(bytes, pos, doc_len):
         return _bson_err(BsonError.UnexpectedEnd)
+    val doc_end = pos + doc_len
     var doc_pairs: [(text, BsonValue)] = []
     var cur = pos + 4
     var done = false
     while not done:
-        if cur >= bytes.len():
+        if cur >= doc_end:
             return _bson_err(BsonError.UnexpectedEnd)
         val type_byte = _bson_read_u8(bytes, cur)
         if type_byte == 0:
             done = true
         else:
             cur = cur + 1
+            if cur >= doc_end:
+                return _bson_err(BsonError.InvalidCString)
             # decode key cstring
             val kr = _bson_decode_cstring(bytes, cur)
             if not kr.ok:
                 return _bson_err(kr.error)
+            if cur + kr.consumed > doc_end:
+                return _bson_err(BsonError.InvalidCString)
             val key_text = _bson_extract_str(kr.value)
             cur = cur + kr.consumed
             # decode value
             val vr = _bson_decode_value(bytes, cur, type_byte)
             if not vr.ok:
                 return _bson_err(vr.error)
+            if cur + vr.consumed > doc_end:
+                return _bson_err(BsonError.UnexpectedEnd)
             doc_pairs.push((key_text, vr.value))
             cur = cur + vr.consumed
     if cur != pos + doc_len - 1:
