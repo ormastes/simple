@@ -1,0 +1,103 @@
+"""
+hil_command — host command classification, validation, and simulated PRP/SGL
+             addressing for the SimpleOS NVMe firmware (host-runnable simulation).
+
+All functions are pure free functions; no structs or me-methods.
+"""
+
+use nvme_types.*
+
+# ── Classification helpers ────────────────────────────────────────────────────
+
+fn cmd_is_write(c: NvmeCmd) -> bool:
+    c.opcode == OP_WRITE
+
+fn cmd_is_read(c: NvmeCmd) -> bool:
+    c.opcode == OP_READ
+
+fn cmd_is_trim(c: NvmeCmd) -> bool:
+    c.opcode == OP_DSM_TRIM
+
+fn cmd_is_flush(c: NvmeCmd) -> bool:
+    c.opcode == OP_FLUSH
+
+# ── Validation ────────────────────────────────────────────────────────────────
+
+fn cmd_validate(c: NvmeCmd) -> i64:
+    # Flush carries nblocks=0 by spec — pass unconditionally.
+    if c.opcode == OP_FLUSH:
+        return SC_SUCCESS
+    if c.lba < 0:
+        return SC_LBA_RANGE
+    if c.nblocks <= 0:
+        return SC_LBA_RANGE
+    val end: i64 = c.lba + c.nblocks
+    if end > LBA_COUNT:
+        return SC_LBA_RANGE
+    SC_SUCCESS
+
+# ── Simulated host-buffer addressing ─────────────────────────────────────────
+
+fn prp_byte(c: NvmeCmd, i: i64) -> i64:
+    # Single-byte-per-page simulation: every logical block of this command
+    # carries the same payload byte (c.data).  The index i is accepted for
+    # realism / bounds compatibility but does not alter the result.
+    c.data
+
+# ── Self-test ─────────────────────────────────────────────────────────────────
+
+fn hil_command_selftest() -> i64:
+    var failures: i64 = 0
+
+    # --- classification ---
+    val w: NvmeCmd = cmd_make(1, OP_WRITE, 0, 1, 42)
+    var bv: i64 = 0
+    if cmd_is_write(w):
+        bv = 1
+    failures = failures + expect_eq(bv, 1, "cmd_is_write(OP_WRITE)")
+
+    bv = 0
+    if cmd_is_read(w):
+        bv = 1
+    failures = failures + expect_eq(bv, 0, "cmd_is_read(OP_WRITE)==false")
+
+    val r: NvmeCmd = cmd_make(2, OP_READ, 0, 1, 0)
+    bv = 0
+    if cmd_is_read(r):
+        bv = 1
+    failures = failures + expect_eq(bv, 1, "cmd_is_read(OP_READ)")
+
+    val t: NvmeCmd = cmd_make(3, OP_DSM_TRIM, 0, 1, 0)
+    bv = 0
+    if cmd_is_trim(t):
+        bv = 1
+    failures = failures + expect_eq(bv, 1, "cmd_is_trim(OP_DSM_TRIM)")
+
+    val f: NvmeCmd = cmd_make(4, OP_FLUSH, 0, 0, 0)
+    bv = 0
+    if cmd_is_flush(f):
+        bv = 1
+    failures = failures + expect_eq(bv, 1, "cmd_is_flush(OP_FLUSH)")
+
+    # --- validate normal write -> SC_SUCCESS ---
+    val good: NvmeCmd = cmd_make(10, OP_WRITE, 100, 16, 7)
+    failures = failures + expect_eq(cmd_validate(good), SC_SUCCESS, "validate normal write")
+
+    # --- lba + nblocks past LBA_COUNT -> SC_LBA_RANGE ---
+    val past: NvmeCmd = cmd_make(11, OP_WRITE, 3000, 100, 0)
+    failures = failures + expect_eq(cmd_validate(past), SC_LBA_RANGE, "validate lba+n>LBA_COUNT")
+
+    # --- negative lba -> SC_LBA_RANGE ---
+    val neg: NvmeCmd = cmd_make(12, OP_WRITE, -1, 1, 0)
+    failures = failures + expect_eq(cmd_validate(neg), SC_LBA_RANGE, "validate negative lba")
+
+    # --- flush nblocks=0 -> SC_SUCCESS ---
+    val fl: NvmeCmd = cmd_make(13, OP_FLUSH, 0, 0, 0)
+    failures = failures + expect_eq(cmd_validate(fl), SC_SUCCESS, "validate flush nblocks=0")
+
+    # --- prp_byte returns payload ---
+    val p: NvmeCmd = cmd_make(20, OP_READ, 0, 4, 99)
+    failures = failures + expect_eq(prp_byte(p, 0), 99, "prp_byte lba=0")
+    failures = failures + expect_eq(prp_byte(p, 3), 99, "prp_byte lba=3")
+
+    failures
