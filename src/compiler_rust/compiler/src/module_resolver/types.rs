@@ -261,6 +261,11 @@ pub struct ModuleResolver {
     pub(super) import_graph: ImportGraph,
     /// Project-wide symbol tables
     pub(super) project_symbols: ProjectSymbols,
+    /// Variant overlay (`variants/`) candidate roots, absolute, in precedence
+    /// order (selected before default). Empty = overlay inactive (default).
+    /// Searched after relative resolution, before stdlib. Mirrors the
+    /// self-hosted resolver (src/compiler/99.loader/module_resolver).
+    pub(super) var_roots: Vec<PathBuf>,
 }
 
 impl ModuleResolver {
@@ -280,7 +285,15 @@ impl ModuleResolver {
             profiles: HashMap::new(),
             import_graph: ImportGraph::new(),
             project_symbols: ProjectSymbols::new(),
+            var_roots: Vec::new(),
         }
+    }
+
+    /// Activate the `variants/` overlay with absolute candidate roots in
+    /// precedence order (selected before default). No-op when `roots` is empty.
+    pub fn with_var_roots(mut self, roots: Vec<PathBuf>) -> Self {
+        self.var_roots = roots;
+        self
     }
 
     /// Create a resolver for single-file mode (no project)
@@ -315,6 +328,7 @@ impl ModuleResolver {
             profiles: HashMap::new(),
             import_graph: ImportGraph::new(),
             project_symbols: ProjectSymbols::new(),
+            var_roots: Vec::new(),
         }
     }
 

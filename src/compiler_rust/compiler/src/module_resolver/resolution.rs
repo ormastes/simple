@@ -578,6 +578,19 @@ impl ModuleResolver {
 
                 // If relative resolution failed, try alternative resolution strategies
 
+                // Strategy 0: Variant overlay (`variants/`) roots — after
+                // relative resolution fails, before stdlib. Stable imports only
+                // (never crate.*). Roots are absolute, in precedence order
+                // (selected before default). Empty by default = inert. Mirrors
+                // the self-hosted resolver (src/compiler/99.loader/module_resolver).
+                if segments[0] != "crate" {
+                    for var_root in &self.var_roots {
+                        if let Ok(resolved) = self.resolve_from_base(var_root, segments, path) {
+                            return Ok(resolved);
+                        }
+                    }
+                }
+
                 // Strategy 1: Try stdlib
                 if segments[0] != "crate" {
                     let stdlib_segments = if !segments.is_empty()
