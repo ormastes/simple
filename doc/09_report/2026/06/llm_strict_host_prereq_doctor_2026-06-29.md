@@ -63,8 +63,8 @@
 - retry6_eval_result_samples: `missing`
 - retry7_attempt: `ready`
 - finetune_next_action: `complete retry5 cache manifest, retry6 model/eval artifacts, and retry7 acceptance attempt evidence`
-- surface_manifest_count: `8`
-- surface_manifest_size: `1045`
-- surface_manifest_sha256: `3a91e182c2ec763d47416d21c99c52d6731322663329d0315c85004e91e07c36`
+- surface_manifest_count: `9`
+- surface_manifest_size: `1178`
+- surface_manifest_sha256: `3a67ff030ea72bcd5092d132e3c83be7f316418edf3bb4d70bd0b6ecb397513b`
 - next_action: `provide blocked host prerequisites, then rerun strict evidence wrappers`
 - env: `build/llm_strict_host_prereq_doctor/evidence.env`

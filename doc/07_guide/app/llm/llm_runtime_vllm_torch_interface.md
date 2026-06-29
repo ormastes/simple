@@ -98,6 +98,10 @@ For operator setup triage, run the non-network prerequisite doctor first:
 sh scripts/check/check-llm-strict-host-prereq-doctor.shs
 ```
 
+Use `scripts/check/check-llm-strict-host-prereq-doctor-contract.shs` after
+editing the doctor to verify the machine-readable env and Markdown report still
+publish all per-lane `*_next_action` fields.
+
 The doctor does not replace the strict aggregate or the per-lane evidence
 wrappers. It only reports whether this host has the dashboard auth/url, local
 vLLM, native svLLM capability artifact, Simple-visible libtorch/CUDA, and
