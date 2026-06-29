@@ -51,6 +51,11 @@ but local proof is no longer status-only for the completed repo-local lanes:
 - fine-tune guard evidence records a checked process/input/log manifest and
   per-log hashes; retry6/7 model, eval, safety, deployment, and handoff proof is
   still required.
+- public absence rendering records a checked public wording manifest
+  (`public_absence_surface_manifest_count=93`,
+  `public_absence_surface_manifest_sha256=564c57ce69260d0dbd96a5f6995f123de0a3b14024831464ec60cfbd2551282f`)
+  with `failure_count=0`, proving operator-facing manuals and generated
+  evidence do not expose internal absence markers.
 
 These hardened local artifacts reduce review ambiguity, but they do not close
 the five strict-host blockers above.

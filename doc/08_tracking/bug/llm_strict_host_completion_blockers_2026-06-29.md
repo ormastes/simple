@@ -18,7 +18,11 @@ Default aggregate:
 - local provenance hardening: context/Ponytail replacement, dashboard route,
   vLLM host, svLLM local readiness, Torch optimizer, and fine-tune guard
   evidence now include checked surface/input manifests with size/SHA-256
-  metadata and focused log hashes.
+  metadata and focused log hashes. Public absence rendering also records
+  `public_absence_surface_manifest_count=93` and
+  `public_absence_surface_manifest_sha256=564c57ce69260d0dbd96a5f6995f123de0a3b14024831464ec60cfbd2551282f`
+  with `failure_count=0`, so public manuals and generated evidence continue to
+  hide internal absence markers from operator-facing text.
 
 Strict-host aggregate:
 
