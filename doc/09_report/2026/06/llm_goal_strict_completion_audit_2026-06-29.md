@@ -8,6 +8,7 @@
 - strict_fail_count: `5`
 - strict_failed_gates: `dashboard|vllm_host|svllm_local|torch_optimizer|finetune_guard`
 - context_ponytail_replacement: `pass`
+- blocker_tracker: `doc/08_tracking/bug/llm_strict_host_completion_blockers_2026-06-29.md`
 
 Default evidence remains reproducible and keeps only host-dependent vLLM and
 Torch lanes as WARN. Strict-host completion is not finished because five
@@ -23,4 +24,3 @@ completion gates still require live host/runtime/model evidence.
 
 The context/Ponytail lane has repo-local Simple-owned full-replacement evidence
 including dispatch execution coverage. It is no longer a strict blocker.
-

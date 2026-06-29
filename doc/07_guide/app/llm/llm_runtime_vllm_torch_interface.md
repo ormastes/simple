@@ -359,3 +359,5 @@ Torch. Strict-host completion still fails live dashboard HTTP auth/base URL,
 local vLLM serving, native svLLM streaming, Simple-visible libtorch optimizer
 execution, and fine-tune retry6/7 acceptance. Context/Ponytail full replacement
 is passing.
+Track those blockers in
+`doc/08_tracking/bug/llm_strict_host_completion_blockers_2026-06-29.md`.
