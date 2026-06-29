@@ -1735,16 +1735,20 @@ RDOC_AUTOCAPTURE_END_EGL_VK_UNLOCK=2 \
   `rdoc_chrome_target_control_gpu_maps_has_vulkan`,
   `rdoc_chrome_target_control_target_ident_count`,
   `rdoc_chrome_target_control_target_api`,
+  `rdoc_chrome_target_control_target_api_message_count`,
+  `rdoc_chrome_target_control_target_window_message_count`,
   `rdoc_chrome_target_control_target_message_count`, and
   `rdoc_chrome_target_control_target_noop_count`. Current Vulkan-only evidence
-  connects to the GPU process target, but target API remains empty and every
-  post-trigger message is `Noop`, so no `.rdc` is produced. If Chrome does not
-  create a GPU process, the script fails closed with
+  connects to the GPU process target, but a 12s pre-trigger API wait reports no
+  API-use messages and no capturable-window messages; target API remains empty
+  and every post-trigger message is `Noop`, so no `.rdc` is produced. If Chrome
+  does not create a GPU process, the script fails closed with
   `rdoc_chrome_target_control_reason=no-gpu-process` before triggering capture
   on an unrelated target:
 
 ```sh
 RDOC_HOME=build/tools/renderdoc-linux-vulkan-only \
+RDOC_TARGET_CONTROL_WAIT_API_SECS=12 \
   sh scripts/check/check-renderdoc-chrome-target-control.shs
 ```
 - Running Electron with only the RenderDoc Vulkan layer currently times out

@@ -2,8 +2,8 @@
 
 - status: fail
 - reason: no-new-capture-message
-- gpu pid: 1977072
-- window pid: 1977030
+- gpu pid: 1979453
+- window pid: 1979412
 - window pid matches gpu pid: 0
 - RenderDoc debug log status: pass
 - RenderDoc loaded status: pass
@@ -12,14 +12,21 @@
 - target api: 
 - target ident count: 2
 - target chosen ident: 38920
-- target message count: 3875
-- target noop count: 3875
+- target message count: 3874
+- target noop count: 3874
+- target pretrigger message count: 5809
+- target pretrigger noop count: 5809
+- target api message count: 0
+- target last api: 
+- target last api presenting: 0
+- target last api supported: 0
+- target last window count: 0
 - qrenderdoc rc: 1
 - qrenderdoc timed out: 0
 - qrenderdoc log status: empty
 - target client rc: 1
 - target client timed out: 0
-- target client build status: pass
+- target client build status: cached
 - target env status: pass
 - capture: 
 - magic: 

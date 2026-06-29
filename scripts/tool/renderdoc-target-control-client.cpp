@@ -53,6 +53,7 @@ int main()
   std::string out_path = env_str("RDOC_TARGET_CONTROL_OUT", "build/renderdoc/target-control.env");
   uint32_t wanted_pid = (uint32_t)env_int("RDOC_TARGET_CONTROL_PID", 0);
   int timeout_s = env_int("RDOC_TARGET_CONTROL_TIMEOUT_SECS", 20);
+  int wait_api_s = env_int("RDOC_TARGET_CONTROL_WAIT_API_SECS", 0);
   std::string capture_out = env_str("RDOC_TARGET_CONTROL_CAPTURE_OUT", "");
   std::string client_name = env_str("RDOC_TARGET_CONTROL_CLIENT", "simple-renderdoc-target-control-cpp");
 
@@ -61,6 +62,7 @@ int main()
     out << "rdoc_target_control_status=running\n";
     out << "rdoc_target_control_wanted_pid=" << wanted_pid << "\n";
     out << "rdoc_target_control_timeout_secs=" << timeout_s << "\n";
+    out << "rdoc_target_control_wait_api_secs=" << wait_api_s << "\n";
     out << "rdoc_target_control_client=cpp\n";
   }
 
@@ -126,6 +128,83 @@ int main()
   append_line(out_path, "rdoc_target_control_chosen_api", chosen->GetAPI().c_str());
   append_line(out_path, "rdoc_target_control_chosen_target", chosen->GetTarget().c_str());
 
+  uint32_t pretrigger_message_count = 0;
+  uint32_t pretrigger_noop_count = 0;
+  uint32_t api_message_count = 0;
+  uint32_t window_message_count = 0;
+  std::string last_api_name;
+  bool last_api_presenting = false;
+  bool last_api_supported = false;
+  uint32_t last_window_count = 0;
+
+  auto record_message = [&](const TargetControlMessage &msg, const char *phase) {
+    if(msg.type == TargetControlMessageType::RegisterAPI)
+    {
+      api_message_count++;
+      last_api_name = msg.apiUse.name.c_str();
+      last_api_presenting = msg.apiUse.presenting;
+      last_api_supported = msg.apiUse.supported;
+      append_line(out_path, std::string("rdoc_target_control_") + phase + "_api_name",
+                  last_api_name);
+      append_line(out_path, std::string("rdoc_target_control_") + phase + "_api_presenting",
+                  last_api_presenting ? "1" : "0");
+      append_line(out_path, std::string("rdoc_target_control_") + phase + "_api_supported",
+                  last_api_supported ? "1" : "0");
+      if(!msg.apiUse.supportMessage.empty())
+        append_line(out_path, std::string("rdoc_target_control_") + phase + "_api_support_message",
+                    msg.apiUse.supportMessage.c_str());
+    }
+    else if(msg.type == TargetControlMessageType::CapturableWindowCount)
+    {
+      window_message_count++;
+      last_window_count = msg.capturableWindowCount;
+      append_line(out_path, std::string("rdoc_target_control_") + phase + "_window_count",
+                  std::to_string(last_window_count));
+    }
+    else if(msg.type != TargetControlMessageType::Noop)
+    {
+      append_line(out_path, std::string("rdoc_target_control_") + phase + "_message",
+                  message_type_name(msg.type));
+    }
+  };
+
+  if(wait_api_s > 0)
+  {
+    auto wait_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(wait_api_s);
+    while(std::chrono::steady_clock::now() < wait_deadline)
+    {
+      TargetControlMessage msg = chosen->ReceiveMessage(nullptr);
+      pretrigger_message_count++;
+      if(msg.type == TargetControlMessageType::Noop)
+      {
+        pretrigger_noop_count++;
+      }
+      else
+      {
+        record_message(msg, "pretrigger");
+      }
+      if(msg.type == TargetControlMessageType::RegisterAPI && msg.apiUse.presenting &&
+         msg.apiUse.supported)
+      {
+        break;
+      }
+    }
+  }
+
+  append_line(out_path, "rdoc_target_control_pretrigger_message_count",
+              std::to_string(pretrigger_message_count));
+  append_line(out_path, "rdoc_target_control_pretrigger_noop_count",
+              std::to_string(pretrigger_noop_count));
+  append_line(out_path, "rdoc_target_control_api_message_count", std::to_string(api_message_count));
+  append_line(out_path, "rdoc_target_control_window_message_count",
+              std::to_string(window_message_count));
+  append_line(out_path, "rdoc_target_control_last_api_name", last_api_name);
+  append_line(out_path, "rdoc_target_control_last_api_presenting",
+              last_api_presenting ? "1" : "0");
+  append_line(out_path, "rdoc_target_control_last_api_supported", last_api_supported ? "1" : "0");
+  append_line(out_path, "rdoc_target_control_last_window_count",
+              std::to_string(last_window_count));
+
   chosen->TriggerCapture(1);
   append_line(out_path, "rdoc_target_control_trigger", "sent");
 
@@ -142,7 +221,7 @@ int main()
     }
     else
     {
-      append_line(out_path, "rdoc_target_control_message", message_type_name(msg.type));
+      record_message(msg, "posttrigger");
     }
     if(msg.type == TargetControlMessageType::NewCapture)
     {
