@@ -16,6 +16,7 @@ KILL_SECS="${PRODUCTION_GUI_FONT_EVIDENCE_KILL_SECS:-5}"
 BLOCKER_DOC="doc/08_tracking/bug/production_gui_font_offload_runtime_readback_2026-06-23.md"
 RUNTIME_EVIDENCE_ENV="${PRODUCTION_GUI_FONT_RUNTIME_EVIDENCE_ENV:-}"
 RUNTIME_EVIDENCE_STATUS=missing
+RUNTIME_EVIDENCE_SCRIPT="${PRODUCTION_GUI_FONT_RUNTIME_EVIDENCE_SCRIPT:-scripts/check/check-production-gui-font-runtime-evidence.shs}"
 
 is_rust_seed_simple() {
     case "$1" in
@@ -63,6 +64,22 @@ field_of() {
     sed -n "s/^${key}=//p" "$file" | tail -n 1
 }
 
+if [ -z "$RUNTIME_EVIDENCE_ENV" ] \
+    && [ "${PRODUCTION_GUI_FONT_RUNTIME_EVIDENCE_AUTO:-1}" = "1" ] \
+    && [ -x "$RUNTIME_EVIDENCE_SCRIPT" ]; then
+    runtime_dir="$BUILD_DIR/runtime"
+    mkdir -p "$runtime_dir"
+    set +e
+    BUILD_DIR="$runtime_dir" REPORT_PATH="$runtime_dir/report.md" SIMPLE_BIN="${SIMPLE_BIN:-}" SIMPLE_LIB="${SIMPLE_LIB:-src}" sh "$RUNTIME_EVIDENCE_SCRIPT" >"$runtime_dir/stdout.env" 2>"$runtime_dir/stderr.log"
+    runtime_code=$?
+    set -e
+    if [ -s "$runtime_dir/evidence.env" ]; then
+        RUNTIME_EVIDENCE_ENV="$runtime_dir/evidence.env"
+    elif [ -s "$runtime_dir/stdout.env" ]; then
+        RUNTIME_EVIDENCE_ENV="$runtime_dir/stdout.env"
+    fi
+fi
+
 VECTOR_RUNTIME_READY="${VECTOR_FONT_RUNTIME_READY:-false}"
 VECTOR_MODULE_READY="${VECTOR_FONT_MODULE_READY:-false}"
 VECTOR_BACKEND_SUBMIT_OK="${VECTOR_FONT_BACKEND_SUBMIT_OK:-false}"
@@ -81,7 +98,10 @@ BITMAP_BACKEND_SUBMIT_OK="${BITMAP_FONT_BACKEND_SUBMIT_OK:-false}"
 BITMAP_READBACK_AVAILABLE="${BITMAP_FONT_READBACK_AVAILABLE:-false}"
 
 if [ -n "$RUNTIME_EVIDENCE_ENV" ] && [ -s "$RUNTIME_EVIDENCE_ENV" ]; then
-    RUNTIME_EVIDENCE_STATUS=pass
+    RUNTIME_EVIDENCE_STATUS="$(field_of production_gui_font_runtime_status "$RUNTIME_EVIDENCE_ENV")"
+    if [ -z "$RUNTIME_EVIDENCE_STATUS" ]; then
+        RUNTIME_EVIDENCE_STATUS=missing-status
+    fi
     VECTOR_RUNTIME_READY="$(field_of production_gui_font_runtime_vector_runtime_ready "$RUNTIME_EVIDENCE_ENV")"
     VECTOR_MODULE_READY="$(field_of production_gui_font_runtime_vector_module_ready "$RUNTIME_EVIDENCE_ENV")"
     VECTOR_BACKEND_SUBMIT_OK="$(field_of production_gui_font_runtime_vector_backend_submit_ok "$RUNTIME_EVIDENCE_ENV")"
@@ -97,6 +117,10 @@ if [ -n "$RUNTIME_EVIDENCE_ENV" ] && [ -s "$RUNTIME_EVIDENCE_ENV" ]; then
     BITMAP_MODULE_READY="$(field_of production_gui_font_runtime_bitmap_module_ready "$RUNTIME_EVIDENCE_ENV")"
     BITMAP_BACKEND_SUBMIT_OK="$(field_of production_gui_font_runtime_bitmap_backend_submit_ok "$RUNTIME_EVIDENCE_ENV")"
     BITMAP_READBACK_AVAILABLE="$(field_of production_gui_font_runtime_bitmap_readback_available "$RUNTIME_EVIDENCE_ENV")"
+    runtime_candidates="$(field_of production_gui_font_runtime_candidates_simple "$RUNTIME_EVIDENCE_ENV")"
+    if [ -n "$runtime_candidates" ]; then
+        PRODUCTION_GUI_FONT_CANDIDATES_SIMPLE="$runtime_candidates"
+    fi
 fi
 VECTOR_RUNTIME_READY="${VECTOR_RUNTIME_READY:-false}"
 VECTOR_MODULE_READY="${VECTOR_MODULE_READY:-false}"

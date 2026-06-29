@@ -1303,8 +1303,16 @@ The current canonical evidence contract is:
   `unavailable` is recorded but does not satisfy the production parity wrapper.
   A font pass must also carry
   `production_gui_web_renderer_parity_font_offload_runtime_evidence_status=pass`
-  from `PRODUCTION_GUI_FONT_RUNTIME_EVIDENCE_ENV`; direct env-only readiness
-  values are diagnostic inputs, not production completion evidence.
+  from `PRODUCTION_GUI_FONT_RUNTIME_EVIDENCE_ENV`; by default
+  `scripts/check/check-production-gui-font-offload-evidence.shs` now attempts
+  to create that env through
+  `scripts/check/check-production-gui-font-runtime-evidence.shs`. The runtime
+  producer fails closed unless current vector-font compute evidence reports GPU
+  returned glyphs and the selected CUDA/OpenCL generated-2D readback proof
+  reports submit plus readback availability. It also emits
+  `production_gui_font_runtime_candidates_simple` so the font wrapper evaluates
+  the backend that actually produced the source proof. Direct env-only
+  readiness values are diagnostic inputs, not production completion evidence.
   The Tauri/Chrome surface manifest must prove live Electron, Tauri, and Chrome
   captures, 50 Tauri and 50 Chrome cases, 36 pass cases plus 14 tracked
   divergence cases for each browser surface, 0 fail cases, 0 mismatch counts,
