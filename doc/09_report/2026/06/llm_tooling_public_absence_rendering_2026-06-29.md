@@ -7,7 +7,7 @@
 - surface_manifest: `build/llm_tooling_public_absence_rendering/public_absence_surface_manifest.tsv`
 - surface_manifest_count: `121`
 - surface_manifest_size: `16461`
-- surface_manifest_sha256: `0d4c4c9754ea8a89cdd49055e327c10df824511ebe5f5fd53e58aa365a5878f4`
+- surface_manifest_sha256: `305833f1f1a7737e15253b3970e3f0203c5563e2af21f9420e1704cb5b45d11b`
 - failure_count: `0`
 - next_action: `rerun after public manual or dashboard wording changes`
 

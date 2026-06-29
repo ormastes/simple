@@ -110,7 +110,11 @@ readiness, fine-tune retry artifact readiness, manifest metadata, and the next
 operator action. The vLLM prereq section also records the base model and
 endpoint values, plus whether each came from defaults or explicit env, but the
 doctor does not contact the endpoint; endpoint reachability and `/v1/models`
-remain strict vLLM host-probe evidence.
+remain strict vLLM host-probe evidence. The fine-tune prereq section records
+retry6 model-manifest and eval-result schema, attempt/base-model, deployable,
+metric, dataset checksum, and sample fields when those artifacts exist; retry7
+acceptance remains the strict evidence gate for licensing, safety, deployment,
+decision, and app handoff.
 
 Latest local host probe:
 `doc/09_report/2026/06/llm_runtime_vllm_host_probe_2026-06-29.md` records a

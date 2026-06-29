@@ -41,10 +41,22 @@
 - system_libtorch: `missing`
 - retry5_cache_manifest: `missing`
 - retry6_model_manifest: `missing`
+- retry6_model_manifest_schema_version: `missing`
+- retry6_model_manifest_attempt_id: `missing`
+- retry6_model_manifest_base_model: `missing`
+- retry6_model_manifest_deployable: `missing`
+- retry6_model_manifest_model_artifact_path: `missing`
 - retry6_eval_result: `missing`
+- retry6_eval_result_schema_version: `missing`
+- retry6_eval_result_status_value: `missing`
+- retry6_eval_result_metric_value: `missing`
+- retry6_eval_result_metric_target: `missing`
+- retry6_eval_result_dataset_id: `missing`
+- retry6_eval_result_dataset_checksum: `missing`
+- retry6_eval_result_samples: `missing`
 - retry7_attempt: `ready`
 - surface_manifest_count: `8`
 - surface_manifest_size: `1045`
-- surface_manifest_sha256: `16530fe029cc390cda863383e496a4c3680194909a8166186ae9068473c9689e`
+- surface_manifest_sha256: `8cd1e953257345f79b49a7c7dfffc73c7a4f416ae945876eb1e06efa14f912e4`
 - next_action: `provide blocked host prerequisites, then rerun strict evidence wrappers`
 - env: `build/llm_strict_host_prereq_doctor/evidence.env`
