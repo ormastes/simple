@@ -13,6 +13,7 @@ log_path="${RDOC_GPU_LAUNCHER_LOG:-}"
 autocapture="${RDOC_GPU_LAUNCHER_AUTOCAPTURE:-0}"
 layer_only="${RDOC_GPU_LAUNCHER_LAYER_ONLY:-0}"
 clear_renderdoc_layer="${RDOC_GPU_LAUNCHER_CLEAR_RENDERDOC_LAYER:-0}"
+delay_trigger="${RDOC_GPU_LAUNCHER_DELAY_TRIGGER:-0}"
 script_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 root_dir="$(CDPATH= cd -- "$script_dir/../.." && pwd)"
 
@@ -26,6 +27,7 @@ if [ "$log_path" != "" ]; then
         echo "renderdoc_gpu_launcher_capture_prefix=$capture_prefix"
         echo "renderdoc_gpu_launcher_autocapture=$autocapture"
         echo "renderdoc_gpu_launcher_layer_only=$layer_only"
+        echo "renderdoc_gpu_launcher_delay_trigger=$delay_trigger"
         echo "renderdoc_gpu_launcher_clear_renderdoc_layer=$clear_renderdoc_layer"
         echo "renderdoc_gpu_launcher_initial_vk_layer_path=${VK_LAYER_PATH:-}"
         echo "renderdoc_gpu_launcher_initial_vk_instance_layers=${VK_INSTANCE_LAYERS:-}"
@@ -78,13 +80,19 @@ if [ "$autocapture" = "1" ]; then
     renderdoc_home="${RDOC_HOME:-/opt/renderdoc}"
     renderdoc_lib="${RDOC_GPU_LAUNCHER_RENDERDOC_LIB:-$renderdoc_home/lib}"
     shim_dir="${RDOC_GPU_LAUNCHER_SHIM_DIR:-$root_dir/build/renderdoc/autocapture-shim}"
-    shim="$shim_dir/renderdoc-vulkan-autocapture.so"
+    if [ "$delay_trigger" = "1" ]; then
+        shim="$shim_dir/renderdoc-delay-trigger.so"
+        shim_src="$script_dir/renderdoc-delay-trigger.c"
+    else
+        shim="$shim_dir/renderdoc-vulkan-autocapture.so"
+        shim_src="$script_dir/renderdoc-vulkan-autocapture.c"
+    fi
     mkdir -p "$shim_dir"
-    if [ ! -s "$shim" ] || [ "$script_dir/renderdoc-vulkan-autocapture.c" -nt "$shim" ]; then
+    if [ ! -s "$shim" ] || [ "$shim_src" -nt "$shim" ]; then
         cc -shared -fPIC \
             -I"$renderdoc_home/include" \
             -o "$shim" \
-            "$script_dir/renderdoc-vulkan-autocapture.c" \
+            "$shim_src" \
             -ldl -pthread
     fi
     export LD_LIBRARY_PATH="$renderdoc_lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
@@ -111,8 +119,13 @@ if [ "$autocapture" = "1" ]; then
     export RDOC_AUTOCAPTURE_DISABLE_DLSYM_WRAP="${RDOC_GPU_LAUNCHER_DISABLE_DLSYM_WRAP:-0}"
     export RDOC_AUTOCAPTURE_NO_DLOPEN_FALLBACK="${RDOC_GPU_LAUNCHER_NO_DLOPEN_FALLBACK:-0}"
     export RDOC_AUTOCAPTURE_TRIGGER_ONLY="${RDOC_GPU_LAUNCHER_TRIGGER_ONLY:-0}"
+    export RDOC_DELAY_TRIGGER_ENABLE="$delay_trigger"
+    export RDOC_DELAY_TRIGGER_RENDERDOC_LIB="$renderdoc_lib/librenderdoc.so"
+    export RDOC_DELAY_TRIGGER_START_MS="${RDOC_GPU_LAUNCHER_DELAY_START_MS:-2000}"
+    export RDOC_DELAY_TRIGGER_DURATION_MS="${RDOC_GPU_LAUNCHER_DELAY_DURATION_MS:-2000}"
     if [ "$log_path" != "" ]; then
         export RDOC_AUTOCAPTURE_LOG="$log_path"
+        export RDOC_DELAY_TRIGGER_LOG="$log_path"
         {
             echo "renderdoc_gpu_launcher_shim=$shim"
             echo "renderdoc_gpu_launcher_ld_preload=$LD_PRELOAD"

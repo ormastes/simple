@@ -508,6 +508,19 @@ Current 2026-06-26 browser capture findings:
   `build/renderdoc/chrome-gpu-vulkan-only-renderdoc/html/evidence.env`,
   `build/renderdoc/electron-gpu-vulkan-only-renderdoc/electron-html/evidence.env`,
   and `doc/09_report/renderdoc_linux_vulkan_only_build_2026-06-29.md`.
+- 2026-06-29 Added a minimal GPU-child delay-trigger preload shim that exports
+  no EGL/Vulkan wrapper symbols. `RDOC_GPU_LAUNCHER_DELAY_TRIGGER=1` loads
+  `scripts/tool/renderdoc-delay-trigger.c` in the Chromium GPU child, finds
+  `RENDERDOC_GetAPI` through loader-lock-free ELF lookup, and calls timed
+  `StartFrameCapture`/`EndFrameCapture`. Chrome and Electron both report
+  `rdoc_gpu_delay_trigger_loaded_count=1`,
+  `rdoc_gpu_delay_trigger_api_ready_count=1`, and
+  `rdoc_gpu_delay_trigger_last_end_ok=0`; no `.rdc` is produced. The Linux
+  aggregate forwards these delay-trigger fields while keeping
+  `renderdoc-chrome-rdc` and `renderdoc-electron-rdc` blocked. Evidence:
+  `build/renderdoc/chrome-gpu-delay-trigger-structured-vulkan-only/html/evidence.env`,
+  `build/renderdoc/electron-gpu-delay-trigger-structured-vulkan-only/electron-html/evidence.env`,
+  and `doc/09_report/renderdoc_browser_delay_trigger_vulkan_only_2026-06-29.md`.
 - The direct Chrome/Electron RenderDoc wrapper now records
   `rdoc_renderdoc_hook_children` and accepts `RDOC_RENDERDOC_HOOK_CHILDREN=0`
   to omit `--opt-hook-children`. This confirms the immediate Chrome GPU crash

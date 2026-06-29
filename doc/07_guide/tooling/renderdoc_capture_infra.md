@@ -522,6 +522,14 @@ the named capture/browser tool before the `.rdc` blocker can be verified.
 Bare relative `.rdc` artifact names resolve beside their evidence env file, so
 a stale working-directory `frame.rdc` cannot satisfy Simple, Chrome, or Electron
 RenderDoc proof.
+For browser GPU-child capture attempts that need a trigger without interposing
+EGL/Vulkan symbols, set `RDOC_GPU_LAUNCHER_DELAY_TRIGGER=1`. This uses
+`scripts/tool/renderdoc-delay-trigger.c`, a minimal preload shim that locates
+`RENDERDOC_GetAPI` with a loader-lock-free ELF lookup and calls timed
+`StartFrameCapture`/`EndFrameCapture`. Current Chrome and Electron evidence
+against the Vulkan-only RenderDoc build reaches the API but reports
+`rdoc_gpu_delay_trigger_last_end_ok=0`, so no `.rdc` is produced; see
+`doc/09_report/renderdoc_browser_delay_trigger_vulkan_only_2026-06-29.md`.
 The Linux row also emits structured blocker fields for parallel platform
 agents:
 `linux_vulkan_render_log_compare_blocked_gate_count`,
