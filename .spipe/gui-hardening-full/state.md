@@ -80,6 +80,20 @@ evidence lanes only; they do not close acceptance criteria alone.
 implementation-evidence-in-progress
 
 ## Log
+- continue-evidence: Rechecked the current Linux RenderDoc/Vulkan and SimpleOS
+  QEMU/WM hardening gates from the authoritative wrappers. `check-linux-vulkan-
+  render-log-compare.shs` passed with blocked gate count `0`, browser backing,
+  pairwise ARGB, ARGB source, and RenderDoc gates all `pass`, and real `RDOC`
+  magic for Simple, Chrome, and Electron captures. `check-gui-hardening-open-
+  gates.shs` passed the Chrome/corpus guard and wrote
+  `doc/09_report/gui_hardening_open_gates_2026-06-29.md`. The current
+  SimpleOS matrix report `doc/09_report/simpleos_hardening_evidence_matrix_2026-
+  06-29.md` is `pass` at `9/9`, including QEMU GUI SMF artifact contract,
+  qemu-guest perf sample origin, live MDI PPM anchors, and keyboard/input
+  framebuffer delta. Added focused report
+  `doc/09_report/linux_renderdoc_simpleos_hardening_evidence_2026-06-30.md`.
+  This is Linux + SimpleOS evidence only; macOS/Windows/mobile/cross-platform
+  freshness remain outside this slice and are not claimed complete.
 - dev: Created state file with 10 acceptance criteria (type: feature).
 - implementation: Added `WebRenderExactBitmapComparisonEvidence` to the shared web render API so Node.js/Electron bitmap claims fail closed on blur/tolerance matching, checksum mismatch, pixel mismatch, low samples/trials, missing timings, or Simple not being faster.
 - verification: `bin/simple check src/lib/common/ui/web_render_api.spl test/01_unit/lib/common/ui/web_render_api_spec.spl` passed.
