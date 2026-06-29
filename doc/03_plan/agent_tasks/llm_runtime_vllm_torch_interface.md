@@ -757,3 +757,8 @@ The same aggregate now forwards `llm_goal_evidence_context_ponytail_detail` and
 `llm_goal_evidence_dashboard_detail`, so strict/full-replacement context mode,
 Ponytail, and authenticated dashboard evidence cannot be hidden behind a single
 lane status when host completion evidence is reviewed.
+
+Strict aggregate mode also clears each strict producer env before running the
+producer. A timeout or early producer failure therefore leaves missing evidence
+instead of reusing a stale full-replacement, live-dashboard, native-svLLM, or
+fine-tune acceptance env from a prior run.
