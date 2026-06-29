@@ -27,7 +27,7 @@ simple_web_generated_html_css_combinations_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 4 | 4 | 0 | 0 |
+| 5 | 5 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -194,12 +194,41 @@ expect(_pixel_at(pixels, 120, 50, 6)).to_equal(0xFFEF4444u32)
 
 </details>
 
+#### renders individual translate property as a paint offset
+
+- Render a block using the CSS individual translate property
+- Assert translate moves the painted box away from its original origin
+   - Expected: pixels.len() equals `96 * 48`
+   - Expected: _pixel_at(pixels, 96, 5, 4) equals `0xFFDBEAFEu32`
+   - Expected: _pixel_at(pixels, 96, 24, 8) equals `0xFFEF4444u32`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Render a block using the CSS individual translate property")
+val html = "<html><head><style>html,body{margin:0;padding:0;background-color:#ffffff}.stage{width:80px;height:36px;background-color:#dbeafe}.chip{width:12px;height:8px;background-color:#ef4444;translate:20px 6px}</style></head><body><section class='stage'><div class='chip'></div></section></body></html>"
+val pixels = simple_web_render_html_to_pixels(html, 96, 48)
+
+step("Assert translate moves the painted box away from its original origin")
+expect(pixels.len()).to_equal(96 * 48)
+expect(_count_color(pixels, 0xFFEF4444u32)).to_be_greater_than(0)
+expect(_pixel_at(pixels, 96, 5, 4)).to_equal(0xFFDBEAFEu32)
+expect(_pixel_at(pixels, 96, 24, 8)).to_equal(0xFFEF4444u32)
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
+| Total scenarios | 5 |
+| Active scenarios | 5 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
