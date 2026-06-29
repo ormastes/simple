@@ -270,7 +270,7 @@ expect(spec).to_contain("platform runbook version")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 140 lines folded for reproduction.
+Runnable source: 142 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -381,6 +381,8 @@ expect(bundle).to_contain("gui_web_2d_platform_evidence_bundle_failed_gate_count
 expect(bundle).to_contain("gui_web_2d_platform_evidence_bundle_remaining_gate_count")
 expect(bundle).to_contain("NATIVE_RENDER_LOG_PLATFORM_MATRIX_ENV")
 expect(bundle).to_contain("TAURI_MOBILE_RENDERER_PARITY_ENV")
+expect(bundle).to_contain("GUI_SHOWCASE_4K_PERF_ENV")
+expect(bundle).to_contain("GUI_SHOWCASE_8K_PERF_ENV")
 expect(bundle).to_contain("GUI_SHOWCASE_4K_200FPS_ENV")
 expect(bundle).to_contain("GUI_SHOWCASE_8K_200FPS_ENV")
 expect(bundle).to_contain("HTML_CSS_FULL_RENDERING_GOAL_ENV")

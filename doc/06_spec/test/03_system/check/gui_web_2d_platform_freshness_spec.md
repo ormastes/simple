@@ -27,7 +27,7 @@ gui_web_2d_platform_freshness_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 12 | 12 | 0 | 0 |
+| 13 | 13 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -129,8 +129,10 @@ bundle:
 
 - `NATIVE_RENDER_LOG_PLATFORM_MATRIX_ENV`
 - `TAURI_MOBILE_RENDERER_PARITY_ENV`
-- `GUI_SHOWCASE_4K_200FPS_ENV`
-- `GUI_SHOWCASE_8K_200FPS_ENV`
+- `GUI_SHOWCASE_4K_PERF_ENV` (`GUI_SHOWCASE_4K_200FPS_ENV` remains a
+  compatibility alias)
+- `GUI_SHOWCASE_8K_PERF_ENV` (`GUI_SHOWCASE_8K_200FPS_ENV` remains a
+  compatibility alias)
 - `HTML_CSS_FULL_RENDERING_GOAL_ENV`
 - `PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV`
 
@@ -285,6 +287,26 @@ expect(evidence).to_contain("gui_web_2d_platform_freshness_browser_webview_elect
 expect(evidence).to_contain("gui_web_2d_platform_freshness_graphics_sdk_driver=vulkan-1+metal-2+d3d12-3")
 expect(evidence).to_contain("gui_web_2d_platform_freshness_runbook_version=2026-06-28")
 expect(evidence).to_contain("gui_web_2d_platform_freshness_missing_metadata=")
+```
+
+</details>
+
+#### passes when retained perf evidence is routed through canonical env names
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val command = "rm -rf build/test-gui-web-2d-platform-freshness-canonical-perf && mkdir -p build/test-gui-web-2d-platform-freshness-canonical-perf/env && printf 'native_render_log_platform_matrix_source_revision=rev-canonical\\nnative_render_log_platform_matrix_runtime_build=simple-self-hosted\\nnative_render_log_platform_matrix_browser_webview_electron_revision=chrome-1+electron-2+wkwebview-3\\nnative_render_log_platform_matrix_graphics_sdk_driver=vulkan-1+metal-2+d3d12-3\\nnative_render_log_platform_matrix_runbook_version=2026-06-28\\n' > build/test-gui-web-2d-platform-freshness-canonical-perf/env/native.env && printf 'tauri_mobile_renderer_parity_source_revision=rev-canonical\\n' > build/test-gui-web-2d-platform-freshness-canonical-perf/env/mobile.env && printf 'gui_showcase_4k_200fps_source_revision=rev-canonical\\n' > build/test-gui-web-2d-platform-freshness-canonical-perf/env/4k.env && printf 'gui_showcase_8k_perf_source_revision=rev-canonical\\n' > build/test-gui-web-2d-platform-freshness-canonical-perf/env/8k.env && printf 'html_css_full_rendering_goal_source_revision=rev-canonical\\n' > build/test-gui-web-2d-platform-freshness-canonical-perf/env/html.env && printf 'production_gui_web_renderer_parity_source_revision=rev-canonical\\n' > build/test-gui-web-2d-platform-freshness-canonical-perf/env/production.env && BUILD_DIR=build/test-gui-web-2d-platform-freshness-canonical-perf/out REPORT_PATH=build/test-gui-web-2d-platform-freshness-canonical-perf/report.md NATIVE_RENDER_LOG_PLATFORM_MATRIX_ENV=build/test-gui-web-2d-platform-freshness-canonical-perf/env/native.env TAURI_MOBILE_RENDERER_PARITY_ENV=build/test-gui-web-2d-platform-freshness-canonical-perf/env/mobile.env GUI_SHOWCASE_4K_PERF_ENV=build/test-gui-web-2d-platform-freshness-canonical-perf/env/4k.env GUI_SHOWCASE_8K_PERF_ENV=build/test-gui-web-2d-platform-freshness-canonical-perf/env/8k.env HTML_CSS_FULL_RENDERING_GOAL_ENV=build/test-gui-web-2d-platform-freshness-canonical-perf/env/html.env PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=build/test-gui-web-2d-platform-freshness-canonical-perf/env/production.env sh scripts/check/check-gui-web-2d-platform-freshness.shs"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val evidence = file_read("build/test-gui-web-2d-platform-freshness-canonical-perf/out/evidence.env")
+expect(evidence).to_contain("gui_web_2d_platform_freshness_status=pass")
+expect(evidence).to_contain("gui_web_2d_platform_freshness_source_revision=rev-canonical")
 ```
 
 </details>
@@ -541,8 +563,8 @@ expect(evidence).to_contain("gui_web_2d_platform_freshness_mismatched_source_rev
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 12 |
-| Active scenarios | 12 |
+| Total scenarios | 13 |
+| Active scenarios | 13 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
