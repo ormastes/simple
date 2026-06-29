@@ -100,8 +100,17 @@ The evidence env records `llm_runtime_vllm_host_probe_required_gates`,
 `llm_runtime_vllm_host_probe_endpoint`,
 `llm_runtime_vllm_host_probe_local_vllm_status`,
 `llm_runtime_vllm_host_probe_vllm_command_path`,
+`llm_runtime_vllm_host_probe_vllm_version_log_size`,
+`llm_runtime_vllm_host_probe_vllm_version_log_sha256`,
 `llm_runtime_vllm_host_probe_python_vllm_module_status`,
+`llm_runtime_vllm_host_probe_python_vllm_origin`,
+`llm_runtime_vllm_host_probe_python_vllm_version`,
+`llm_runtime_vllm_host_probe_python_vllm_probe_log_size`,
+`llm_runtime_vllm_host_probe_python_vllm_probe_log_sha256`,
 `llm_runtime_vllm_host_probe_local_gpu_status`,
+`llm_runtime_vllm_host_probe_nvidia_smi_path`,
+`llm_runtime_vllm_host_probe_gpu_probe_log_size`,
+`llm_runtime_vllm_host_probe_gpu_probe_log_sha256`,
 `llm_runtime_vllm_host_probe_readiness_status`,
 `llm_runtime_vllm_host_probe_preflight_status`,
 `llm_runtime_vllm_host_probe_endpoint_status`, and
@@ -127,6 +136,9 @@ configured local endpoint reaches `status=ready`, `endpoint=configured`, and
 `models_status=ready` after `/v1/models` serves the selected base model.
 If a host is missing GPU tooling too, `local_gpu` is added to the blocked-gates
 list independently of the collapsed control-CLI reason.
+The local `vllm --version`, Python `vllm` module discovery, and `nvidia-smi`
+GPU probes are written as bounded logs with SHA-256 hashes, so missing-host
+evidence can be traced to the exact command/module checks that ran.
 Run the wrapper with `--strict` when unavailable or readiness-incomplete hosts must
 fail the lane.
 

@@ -741,7 +741,10 @@ required gate list, compact blocked gates, selected base model, endpoint,
 `vllm` command path, Python `vllm` module status, local vLLM/GPU command
 statuses, readiness status, endpoint status, models-list status, and
 models-list reason, plus readiness-log size, SHA-256, and serve-readiness run
-event count.
+event count. It also writes bounded local host probe logs with SHA-256 hashes
+for `vllm --version`, Python `vllm` module/version discovery, and `nvidia-smi`,
+so unavailable-host evidence is tied to concrete command/module probes instead
+of status labels alone.
 On this host the lane remains `unavailable` with
 `blocked_gates=local_vllm|serve_preflight|endpoint_reachable|models_listed`;
 strict-host aggregate runs should fail that gate until local vLLM is installed,

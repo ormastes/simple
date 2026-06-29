@@ -10,15 +10,24 @@
 - endpoint: `http://127.0.0.1:8000/v1`
 - local_vllm_status: `missing`
 - vllm_command_path: `missing`
+- vllm_version_log_size: `21`
+- vllm_version_log_sha256: `c5cd2c9ca65508172c4ffa478a704719089b034c4bbc8b8b98a94f08f3f9a685`
 - python_vllm_module_status: `missing`
+- python_vllm_origin: `missing`
+- python_vllm_version: `missing`
+- python_vllm_probe_log_size: `89`
+- python_vllm_probe_log_sha256: `7648e5f26e3ab963a47e53e4411e9d94276f7eb45a0cb20ed8099ac8a082e1d1`
 - local_gpu_status: `available`
+- nvidia_smi_path: `/usr/bin/nvidia-smi`
+- gpu_probe_log_size: `34`
+- gpu_probe_log_sha256: `192b820d5ee5af357155824b552778ef140af437954e510078176b8e6ad9208b`
 - readiness_status: `skipped`
 - preflight_status: `skipped`
 - endpoint_status: `not_checked`
 - models_status: `not_fetched`
 - models_reason: `environment_skipped`
 - log_size: `96660`
-- log_sha256: `fe9cdac733c972f4e5ee309bbbd6c3867115c1e8f363c6499c7bc7935d7c14fd`
+- log_sha256: `226f28ae94d79706c29d5dd288578c3beb562d6ecd2bbe52c0bf5c0b51d53e2e`
 - serve_readiness_run_event_count: `1`
 - pass_integrity_status: `not_applicable`
 - pass_integrity_reason: `not_applicable`
@@ -27,4 +36,4 @@
 - env: `build/llm_runtime_vllm_host_probe/evidence.env`
 - log: `build/llm_runtime_vllm_host_probe/preflight.log`
 
-This wrapper records repeatable local vLLM host preflight evidence. It only proves live serving readiness when all required gates pass. A `status=pass` wrapper result must also have no blocked gates, exactly one serve-readiness run event in a non-empty hashed log, zero CLI exit, local vLLM and GPU availability, ready preflight/readiness, a configured endpoint, `models_status=ready`, and `models_reason=models_endpoint_ready`. `unavailable` records the compact blocked-gates list for missing local vLLM/GPU resources, skipped serve preflight, endpoint reachability, or model-listing evidence; run with `--strict` when unavailable hosts must fail the lane.
+This wrapper records repeatable local vLLM host preflight evidence. It only proves live serving readiness when all required gates pass. A `status=pass` wrapper result must also have no blocked gates, exactly one serve-readiness run event in a non-empty hashed log, zero CLI exit, local vLLM and GPU availability, ready preflight/readiness, a configured endpoint, `models_status=ready`, and `models_reason=models_endpoint_ready`. `unavailable` records the compact blocked-gates list for missing local vLLM/GPU resources, skipped serve preflight, endpoint reachability, or model-listing evidence, plus hashed local `vllm --version`, Python module, and GPU probe logs; run with `--strict` when unavailable hosts must fail the lane.

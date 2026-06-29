@@ -9,6 +9,9 @@ BUILD_DIR="${BUILD_DIR:-build/llm_runtime_vllm_host_probe}"
 REPORT_PATH="${REPORT_PATH:-doc/09_report/2026/06/llm_runtime_vllm_host_probe_$(date -u +%F).md}"
 OUT_ENV="$BUILD_DIR/evidence.env"
 OUT_LOG="$BUILD_DIR/preflight.log"
+VLLM_VERSION_LOG="$BUILD_DIR/vllm_version.log"
+PYTHON_VLLM_LOG="$BUILD_DIR/python_vllm_probe.log"
+GPU_PROBE_LOG="$BUILD_DIR/gpu_probe.log"
 BASE_MODEL="${BASE_MODEL:-base-model}"
 ENDPOINT="${ENDPOINT:-http://127.0.0.1:8000/v1}"
 STRICT=0
@@ -35,14 +38,48 @@ while [ "$#" -gt 0 ]; do
 done
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
-rm -f "$OUT_ENV" "$OUT_LOG" "$REPORT_PATH"
+rm -f "$OUT_ENV" "$OUT_LOG" "$VLLM_VERSION_LOG" "$PYTHON_VLLM_LOG" "$GPU_PROBE_LOG" "$REPORT_PATH"
 
-probe_command() {
+artifact_size() {
+    path="$1"
+    if [ -n "$path" ] && [ -s "$path" ]; then
+        wc -c <"$path" | tr -d ' '
+    else
+        printf '%s\n' "0"
+    fi
+}
+
+artifact_sha256() {
+    path="$1"
+    if [ -n "$path" ] && [ -s "$path" ]; then
+        if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$path" | awk '{print $1}'
+        elif command -v shasum >/dev/null 2>&1; then
+            shasum -a 256 "$path" | awk '{print $1}'
+        else
+            printf '%s\n' "unavailable"
+        fi
+    else
+        printf '%s\n' "missing"
+    fi
+}
+
+probe_command_log() {
+    log="$1"
+    shift
     command="$1"
     shift
-    if command -v "$command" >/dev/null 2>&1 && timeout 3 "$command" "$@" >/dev/null 2>&1; then
+    if ! command -v "$command" >/dev/null 2>&1; then
+        printf '%s\n' "missing_command=$command" >"$log"
+        printf '%s\n' "missing"
+        return
+    fi
+    if timeout 3 "$command" "$@" >"$log" 2>&1; then
         printf '%s\n' "available"
     else
+        if [ ! -s "$log" ]; then
+            printf '%s\n' "probe_failed=$command" >"$log"
+        fi
         printf '%s\n' "missing"
     fi
 }
@@ -51,13 +88,44 @@ vllm_command_path="$(command -v vllm 2>/dev/null || true)"
 if [ -z "$vllm_command_path" ]; then
     vllm_command_path="missing"
 fi
-python_vllm_module_status="$(python3 - <<'PY'
+nvidia_smi_path="$(command -v nvidia-smi 2>/dev/null || true)"
+if [ -z "$nvidia_smi_path" ]; then
+    nvidia_smi_path="missing"
+fi
+python3 - >"$PYTHON_VLLM_LOG" <<'PY'
 import importlib.util
-print("available" if importlib.util.find_spec("vllm") else "missing")
+try:
+    from importlib import metadata
+except Exception:
+    metadata = None
+
+spec = importlib.util.find_spec("vllm")
+if spec:
+    print("python_vllm_module_status=available")
+    print(f"python_vllm_origin={getattr(spec, 'origin', 'missing') or 'missing'}")
+    version = "missing"
+    if metadata is not None:
+        try:
+            version = metadata.version("vllm")
+        except Exception:
+            version = "missing"
+    print(f"python_vllm_version={version}")
+else:
+    print("python_vllm_module_status=missing")
+    print("python_vllm_origin=missing")
+    print("python_vllm_version=missing")
 PY
-)"
-local_vllm_status="$(probe_command vllm --version)"
-local_gpu_status="$(probe_command nvidia-smi --query-gpu=name --format=csv,noheader)"
+python_vllm_module_status="$(sed -n 's/^python_vllm_module_status=//p' "$PYTHON_VLLM_LOG" | tail -n 1)"
+python_vllm_origin="$(sed -n 's/^python_vllm_origin=//p' "$PYTHON_VLLM_LOG" | tail -n 1)"
+python_vllm_version="$(sed -n 's/^python_vllm_version=//p' "$PYTHON_VLLM_LOG" | tail -n 1)"
+local_vllm_status="$(probe_command_log "$VLLM_VERSION_LOG" vllm --version)"
+local_gpu_status="$(probe_command_log "$GPU_PROBE_LOG" nvidia-smi --query-gpu=name --format=csv,noheader)"
+vllm_version_log_size="$(artifact_size "$VLLM_VERSION_LOG")"
+vllm_version_log_sha256="$(artifact_sha256 "$VLLM_VERSION_LOG")"
+python_vllm_probe_log_size="$(artifact_size "$PYTHON_VLLM_LOG")"
+python_vllm_probe_log_sha256="$(artifact_sha256 "$PYTHON_VLLM_LOG")"
+gpu_probe_log_size="$(artifact_size "$GPU_PROBE_LOG")"
+gpu_probe_log_sha256="$(artifact_sha256 "$GPU_PROBE_LOG")"
 
 exit_code=0
 if "$SIMPLE_BIN" run src/app/llm_runtime/control_cli.spl -- \
@@ -280,8 +348,17 @@ fi
     printf '%s\n' "llm_runtime_vllm_host_probe_event=$event"
     printf '%s\n' "llm_runtime_vllm_host_probe_local_vllm_status=$local_vllm_status"
     printf '%s\n' "llm_runtime_vllm_host_probe_vllm_command_path=$vllm_command_path"
+    printf '%s\n' "llm_runtime_vllm_host_probe_vllm_version_log_size=$vllm_version_log_size"
+    printf '%s\n' "llm_runtime_vllm_host_probe_vllm_version_log_sha256=$vllm_version_log_sha256"
     printf '%s\n' "llm_runtime_vllm_host_probe_python_vllm_module_status=$python_vllm_module_status"
+    printf '%s\n' "llm_runtime_vllm_host_probe_python_vllm_origin=${python_vllm_origin:-missing}"
+    printf '%s\n' "llm_runtime_vllm_host_probe_python_vllm_version=${python_vllm_version:-missing}"
+    printf '%s\n' "llm_runtime_vllm_host_probe_python_vllm_probe_log_size=$python_vllm_probe_log_size"
+    printf '%s\n' "llm_runtime_vllm_host_probe_python_vllm_probe_log_sha256=$python_vllm_probe_log_sha256"
     printf '%s\n' "llm_runtime_vllm_host_probe_local_gpu_status=$local_gpu_status"
+    printf '%s\n' "llm_runtime_vllm_host_probe_nvidia_smi_path=$nvidia_smi_path"
+    printf '%s\n' "llm_runtime_vllm_host_probe_gpu_probe_log_size=$gpu_probe_log_size"
+    printf '%s\n' "llm_runtime_vllm_host_probe_gpu_probe_log_sha256=$gpu_probe_log_sha256"
     printf '%s\n' "llm_runtime_vllm_host_probe_preflight_status=$status"
     printf '%s\n' "llm_runtime_vllm_host_probe_readiness_status=$status"
     printf '%s\n' "llm_runtime_vllm_host_probe_endpoint_status=$endpoint_status"
@@ -304,8 +381,17 @@ fi
     printf '%s\n' "- endpoint: \`$ENDPOINT\`"
     printf '%s\n' "- local_vllm_status: \`$local_vllm_status\`"
     printf '%s\n' "- vllm_command_path: \`$vllm_command_path\`"
+    printf '%s\n' "- vllm_version_log_size: \`$vllm_version_log_size\`"
+    printf '%s\n' "- vllm_version_log_sha256: \`$vllm_version_log_sha256\`"
     printf '%s\n' "- python_vllm_module_status: \`$python_vllm_module_status\`"
+    printf '%s\n' "- python_vllm_origin: \`${python_vllm_origin:-missing}\`"
+    printf '%s\n' "- python_vllm_version: \`${python_vllm_version:-missing}\`"
+    printf '%s\n' "- python_vllm_probe_log_size: \`$python_vllm_probe_log_size\`"
+    printf '%s\n' "- python_vllm_probe_log_sha256: \`$python_vllm_probe_log_sha256\`"
     printf '%s\n' "- local_gpu_status: \`$local_gpu_status\`"
+    printf '%s\n' "- nvidia_smi_path: \`$nvidia_smi_path\`"
+    printf '%s\n' "- gpu_probe_log_size: \`$gpu_probe_log_size\`"
+    printf '%s\n' "- gpu_probe_log_sha256: \`$gpu_probe_log_sha256\`"
     printf '%s\n' "- readiness_status: \`$status\`"
     printf '%s\n' "- preflight_status: \`$status\`"
     printf '%s\n' "- endpoint_status: \`$endpoint_status\`"
@@ -321,7 +407,7 @@ fi
     printf '%s\n' "- env: \`$OUT_ENV\`"
     printf '%s\n' "- log: \`$OUT_LOG\`"
     printf '\n'
-    printf 'This wrapper records repeatable local vLLM host preflight evidence. It only proves live serving readiness when all required gates pass. A `status=pass` wrapper result must also have no blocked gates, exactly one serve-readiness run event in a non-empty hashed log, zero CLI exit, local vLLM and GPU availability, ready preflight/readiness, a configured endpoint, `models_status=ready`, and `models_reason=models_endpoint_ready`. `unavailable` records the compact blocked-gates list for missing local vLLM/GPU resources, skipped serve preflight, endpoint reachability, or model-listing evidence; run with `--strict` when unavailable hosts must fail the lane.\n'
+    printf 'This wrapper records repeatable local vLLM host preflight evidence. It only proves live serving readiness when all required gates pass. A `status=pass` wrapper result must also have no blocked gates, exactly one serve-readiness run event in a non-empty hashed log, zero CLI exit, local vLLM and GPU availability, ready preflight/readiness, a configured endpoint, `models_status=ready`, and `models_reason=models_endpoint_ready`. `unavailable` records the compact blocked-gates list for missing local vLLM/GPU resources, skipped serve preflight, endpoint reachability, or model-listing evidence, plus hashed local `vllm --version`, Python module, and GPU probe logs; run with `--strict` when unavailable hosts must fail the lane.\n'
 } >"$REPORT_PATH"
 
 case "$wrapper_status" in
