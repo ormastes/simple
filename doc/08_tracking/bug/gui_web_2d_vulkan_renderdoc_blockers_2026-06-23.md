@@ -364,6 +364,16 @@ Current 2026-06-26 browser capture findings:
   `build/renderdoc/electron-display-only-trigger-autocapture/electron-html/gpu-launcher.log`
   and
   `build/renderdoc/electron-display-only-small-trigger/electron-html/gpu-launcher.log`.
+- 2026-06-29 Electron GPU-process autocapture now has the same heartbeat
+  summary evidence as Chrome. With
+  `RDOC_AUTOCAPTURE_SUMMARY_INTERVAL_MS=2000`, the visible-window Electron run
+  loads the shim, traces 160 proc-name lookups, records no Chromium GPU-process
+  crash, and reports `rdoc_gpu_autocapture_status=not-started`, `api=0`, and
+  zero submit/present/EGL swap/ANGLE queue counters before timeout. This proves
+  the current failure is not missing shim injection or missing summary emission;
+  the wrapped frame trigger calls are not reached in this route. Evidence:
+  `build/renderdoc/electron-gpu-autocapture-current/electron-html/evidence.env`
+  and `doc/09_report/renderdoc_electron_gpu_autocapture_heartbeat_2026-06-29.md`.
 - The direct Chrome/Electron RenderDoc wrapper now records
   `rdoc_renderdoc_hook_children` and accepts `RDOC_RENDERDOC_HOOK_CHILDREN=0`
   to omit `--opt-hook-children`. This confirms the immediate Chrome GPU crash
