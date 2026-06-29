@@ -494,6 +494,20 @@ Current 2026-06-26 browser capture findings:
   `build/renderdoc/chrome-gpu-egl-hook-off/html/evidence.env`,
   `build/renderdoc/electron-gpu-egl-hook-off/electron-html/evidence.env`, and
   `doc/09_report/renderdoc_browser_linux_angle_egl_hook_2026-06-29.md`.
+- 2026-06-29 Added and ran the repo-local Linux Vulkan-only RenderDoc build
+  path. `scripts/setup/build-renderdoc-linux-vulkan-only.shs` builds RenderDoc
+  `v1.44` with `ENABLE_GL=OFF`, `ENABLE_GLES=OFF`, `ENABLE_EGL=OFF`, and
+  `ENABLE_VULKAN=ON`, installs into
+  `build/tools/renderdoc-linux-vulkan-only`, and the shared RenderDoc finder
+  now prefers that tree on Linux. The built `renderdoccmd --version` reports
+  compile-time API support as `Vulkan` only. Chrome and Electron probes against
+  this build still report `egl_initialize_count=1`,
+  `egl_initialize_return_count=0`, `vk_create_instance=0`, and `missing-rdc`.
+  Evidence:
+  `build/tools/renderdoc-linux-vulkan-only-build/evidence.env`,
+  `build/renderdoc/chrome-gpu-vulkan-only-renderdoc/html/evidence.env`,
+  `build/renderdoc/electron-gpu-vulkan-only-renderdoc/electron-html/evidence.env`,
+  and `doc/09_report/renderdoc_linux_vulkan_only_build_2026-06-29.md`.
 - The direct Chrome/Electron RenderDoc wrapper now records
   `rdoc_renderdoc_hook_children` and accepts `RDOC_RENDERDOC_HOOK_CHILDREN=0`
   to omit `--opt-hook-children`. This confirms the immediate Chrome GPU crash

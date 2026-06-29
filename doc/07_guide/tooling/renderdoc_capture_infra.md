@@ -501,6 +501,14 @@ workaround and says Linux requires a RenderDoc build without GL/GLES support
 for this class of capture issue. The local installed RenderDoc still reports
 the same non-returning `eglInitialize` behavior with `RENDERDOC_HOOK_EGL=0`;
 see `doc/09_report/renderdoc_browser_linux_angle_egl_hook_2026-06-29.md`.
+For Linux, `scripts/setup/build-renderdoc-linux-vulkan-only.shs` builds
+RenderDoc with `ENABLE_GL=OFF`, `ENABLE_GLES=OFF`, `ENABLE_EGL=OFF`, and
+`ENABLE_VULKAN=ON` into `build/tools/renderdoc-linux-vulkan-only`. The shared
+RenderDoc finder prefers this tree when present. Current local evidence shows
+this build is available and reports compile-time API support as `Vulkan` only,
+but Chrome and Electron still fail `missing-rdc` with
+`egl_initialize_return_count=0`; see
+`doc/09_report/renderdoc_linux_vulkan_only_build_2026-06-29.md`.
 The same row exposes host readiness fields before platform agents debug capture
 failures:
 `linux_vulkan_render_log_compare_host_renderdoc_status`,
@@ -1692,7 +1700,10 @@ RDOC_AUTOCAPTURE_END_EGL_VK_UNLOCK=2 \
   Electron still enter `eglInitialize`, report
   `rdoc_gpu_autocapture_egl_initialize_return_count=0`, and produce no `.rdc`.
   Per ANGLE's upstream debugging guide, the next viable Linux route is a
-  RenderDoc build without GL/GLES support.
+  RenderDoc build without GL/GLES support. The repo-local Vulkan-only RenderDoc
+  build path now exists and is selected by default on Linux when present, but
+  current Chrome/Electron probes against that build still stop inside
+  `eglInitialize` and produce no `.rdc`.
 - The Chrome target-control diagnostic wraps `qrenderdoc --ui-python` in an
   outer timeout. If qrenderdoc's UI Python startup hangs, the script now records
   `target-control-no-evidence` instead of leaving the lane running indefinitely.
