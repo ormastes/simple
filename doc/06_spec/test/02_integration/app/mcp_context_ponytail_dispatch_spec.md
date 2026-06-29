@@ -1,6 +1,6 @@
 # MCP Context/Ponytail Dispatch Execution Specification
 
-> Proves the Simple-owned MCP replacement tools execute through the real app MCP
+> This specification proves the Simple-owned context/Ponytail replacement tools execute through both MCP dispatch layers. App MCP coverage proves `simple_context` and `simple_ponytail` are not only registered in tool tables. Lower MCP coverage proves the shared lazy handlers execute the same replacement behavior instead of relying only on schema/source-shape checks.
 
 <!-- sdn-diagram:id=mcp_context_ponytail_dispatch_spec.arch -->
 <details class="sdn-source">
@@ -12,6 +12,7 @@
 
 mcp_context_ponytail_dispatch_spec -> std
 mcp_context_ponytail_dispatch_spec -> app
+mcp_context_ponytail_dispatch_spec -> lib
 ```
 
 </details>
@@ -28,14 +29,14 @@ mcp_context_ponytail_dispatch_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 3 | 3 | 0 | 0 |
+| 5 | 5 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
 
 # MCP Context/Ponytail Dispatch Execution Specification
 
-Proves the Simple-owned MCP replacement tools execute through the real app MCP
+This specification proves the Simple-owned context/Ponytail replacement tools execute through both MCP dispatch layers. App MCP coverage proves `simple_context` and `simple_ponytail` are not only registered in tool tables. Lower MCP coverage proves the shared lazy handlers execute the same replacement behavior instead of relying only on schema/source-shape checks.
 
 ## At a Glance
 
@@ -43,12 +44,33 @@ Proves the Simple-owned MCP replacement tools execute through the real app MCP
 |-------|-------|
 | Category | Application |
 | Status | Active |
+| Requirements | doc/02_requirements/feature/llm_tooling_context_ponytail_mimic.md |
+| Plan | doc/03_plan/agent_tasks/llm_tooling_context_ponytail_mimic.md |
+| Design | doc/05_design/app/tools/llm_tooling_context_ponytail_mimic.md |
+| Research | doc/01_research/local/llm_tooling_context_ponytail_mimic.md |
 | Source | `test/02_integration/app/mcp_context_ponytail_dispatch_spec.spl` |
 | Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
-Proves the Simple-owned MCP replacement tools execute through the real app MCP
-dispatcher, not only through source/table/schema presence checks.
+## Overview
+
+This specification proves the Simple-owned context/Ponytail replacement tools
+execute through both MCP dispatch layers. App MCP coverage proves
+`simple_context` and `simple_ponytail` are not only registered in tool tables.
+Lower MCP coverage proves the shared lazy handlers execute the same replacement
+behavior instead of relying only on schema/source-shape checks.
+
+## Examples
+
+- `simple_context` renders a bounded context pack for a source file.
+- `simple_context` can run a source-less embedded SQL query against a generated
+  context DB.
+- `simple_ponytail` renders an audit report from app and lower MCP handlers.
+
+**Requirements:** doc/02_requirements/feature/llm_tooling_context_ponytail_mimic.md
+**Plan:** doc/03_plan/agent_tasks/llm_tooling_context_ponytail_mimic.md
+**Design:** doc/05_design/app/tools/llm_tooling_context_ponytail_mimic.md
+**Research:** doc/01_research/local/llm_tooling_context_ponytail_mimic.md
 
 ## Scenarios
 
@@ -129,15 +151,60 @@ expect(response).to_contain("source: src/app/mcp/main_dispatch.spl")
 
 </details>
 
+#### lower MCP
+
+#### executes simple_context through the lower MCP handler
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val args = """{"file":"src/lib/nogc_async_mut/mcp/main_lazy.spl","target":"handle_simple_context","format":"text"}"""
+val response = lower_handle_simple_context("lower-context-1", args)
+expect(response).to_contain("-- simple_context file=src/lib/nogc_async_mut/mcp/main_lazy.spl --")
+expect(response).to_contain("--- Context Pack ---")
+expect(response).to_contain("handle_simple_context")
+```
+
+</details>
+
+#### executes simple_ponytail through the lower MCP handler
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val args = """{"file":"src/lib/nogc_async_mut/mcp/main_lazy.spl","mode":"audit","format":"text"}"""
+val response = lower_handle_simple_ponytail("lower-ponytail-1", args)
+expect(response).to_contain("Ponytail Audit")
+expect(response).to_contain("source: src/lib/nogc_async_mut/mcp/main_lazy.spl")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 3 |
-| Active scenarios | 3 |
+| Total scenarios | 5 |
+| Active scenarios | 5 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
+
+
+## Related Documentation
+
+- **Requirements:** [doc/02_requirements/feature/llm_tooling_context_ponytail_mimic.md](doc/02_requirements/feature/llm_tooling_context_ponytail_mimic.md)
+- **Plan:** [doc/03_plan/agent_tasks/llm_tooling_context_ponytail_mimic.md](doc/03_plan/agent_tasks/llm_tooling_context_ponytail_mimic.md)
+- **Design:** [doc/05_design/app/tools/llm_tooling_context_ponytail_mimic.md](doc/05_design/app/tools/llm_tooling_context_ponytail_mimic.md)
+- **Research:** [doc/01_research/local/llm_tooling_context_ponytail_mimic.md](doc/01_research/local/llm_tooling_context_ponytail_mimic.md)
 
 
 </details>

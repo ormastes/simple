@@ -1,14 +1,35 @@
 """
 # MCP Context/Ponytail Dispatch Execution Specification
 
-Proves the Simple-owned MCP replacement tools execute through the real app MCP
-dispatcher, not only through source/table/schema presence checks.
+## Overview
+
+This specification proves the Simple-owned context/Ponytail replacement tools
+execute through both MCP dispatch layers. App MCP coverage proves
+`simple_context` and `simple_ponytail` are not only registered in tool tables.
+Lower MCP coverage proves the shared lazy handlers execute the same replacement
+behavior instead of relying only on schema/source-shape checks.
+
+## Examples
+
+- `simple_context` renders a bounded context pack for a source file.
+- `simple_context` can run a source-less embedded SQL query against a generated
+  context DB.
+- `simple_ponytail` renders an audit report from app and lower MCP handlers.
+
+**Requirements:** doc/02_requirements/feature/llm_tooling_context_ponytail_mimic.md
+**Plan:** doc/03_plan/agent_tasks/llm_tooling_context_ponytail_mimic.md
+**Design:** doc/05_design/app/tools/llm_tooling_context_ponytail_mimic.md
+**Research:** doc/01_research/local/llm_tooling_context_ponytail_mimic.md
 """
 
 use std.spec
 use std.io_runtime.{dir_create_all, file_write}
 use app.mcp.main_dispatch.{dispatch_tool_content}
 use app.io.context_ops.{context_sql_index_packs}
+use lib.nogc_async_mut.mcp.main_lazy_query_tools.{
+    handle_simple_context as lower_handle_simple_context,
+    handle_simple_ponytail as lower_handle_simple_ponytail,
+}
 
 describe "MCP context and Ponytail replacement dispatch":
     context "simple_context":
@@ -44,3 +65,17 @@ describe "MCP context and Ponytail replacement dispatch":
             val response = dispatch_tool_content("simple_ponytail", args)
             expect(response).to_contain("Ponytail Audit")
             expect(response).to_contain("source: src/app/mcp/main_dispatch.spl")
+
+    context "lower MCP":
+        it "executes simple_context through the lower MCP handler":
+            val args = """{"file":"src/lib/nogc_async_mut/mcp/main_lazy.spl","target":"handle_simple_context","format":"text"}"""
+            val response = lower_handle_simple_context("lower-context-1", args)
+            expect(response).to_contain("-- simple_context file=src/lib/nogc_async_mut/mcp/main_lazy.spl --")
+            expect(response).to_contain("--- Context Pack ---")
+            expect(response).to_contain("handle_simple_context")
+
+        it "executes simple_ponytail through the lower MCP handler":
+            val args = """{"file":"src/lib/nogc_async_mut/mcp/main_lazy.spl","mode":"audit","format":"text"}"""
+            val response = lower_handle_simple_ponytail("lower-ponytail-1", args)
+            expect(response).to_contain("Ponytail Audit")
+            expect(response).to_contain("source: src/lib/nogc_async_mut/mcp/main_lazy.spl")

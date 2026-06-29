@@ -19,8 +19,8 @@ Default aggregate:
   vLLM host, svLLM local readiness, Torch optimizer, and fine-tune guard
   evidence now include checked surface/input manifests with size/SHA-256
   metadata and focused log hashes. Public absence rendering also records
-  `public_absence_surface_manifest_count=93` and
-  `public_absence_surface_manifest_sha256=976c611ac8f6374448178464a3f60682db591c3c9ce5d44fc22a7e92506cc429`
+  `public_absence_surface_manifest_count=120` and
+  `public_absence_surface_manifest_sha256=ba09eb428bbfa652fe9b8dadcaa0b2324547554b822287220b66998fc0aa0f89`
   with `failure_count=0`, so public manuals and generated evidence continue to
   hide internal absence markers from operator-facing text.
 

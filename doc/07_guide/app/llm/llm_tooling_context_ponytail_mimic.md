@@ -90,7 +90,8 @@ sh scripts/check/check-llm-tooling-context-ponytail-full-replacement.shs
 
 That wrapper includes source/schema contract checks plus
 `test/02_integration/app/mcp_context_ponytail_dispatch_spec.spl`, which calls
-`simple_context` and `simple_ponytail` through the real app MCP dispatcher.
+`simple_context` and `simple_ponytail` through the real app MCP dispatcher and
+the lower MCP handlers.
 
 Latest evidence:
 `doc/09_report/2026/06/llm_tooling_context_ponytail_mimic_2026-06-28.md`
@@ -114,6 +115,8 @@ operator guide, requirements, architecture, app MCP, lower MCP, embedded-SQL
 source-less query, source filtering, and Ponytail audit/simplification surfaces
 all converge on Simple-owned `simple_context` and `simple_ponytail` contracts.
 The same env records
+`llm_tooling_context_ponytail_full_replacement_execution_lower_context_status`,
+`llm_tooling_context_ponytail_full_replacement_execution_lower_ponytail_status`,
 `llm_tooling_context_ponytail_full_replacement_blocked_gates`,
 `llm_tooling_context_ponytail_full_replacement_primary_blocked_gate`,
 `llm_tooling_context_ponytail_full_replacement_surface_check_count` and

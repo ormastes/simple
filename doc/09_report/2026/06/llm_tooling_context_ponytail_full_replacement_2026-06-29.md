@@ -3,7 +3,7 @@
 - status: `pass`
 - reason: `repo_local_replacement_surfaces_verified`
 - scope: `repo_local_simple_owned_surfaces`
-- required_gates: `mimic_evidence,execution_spec,execution_sql_dispatch,guide_replacement,guide_context,guide_ponytail,guide_sql,architecture_contract,architecture_no_parallel,requirements_sql,requirements_mcp,app_context_table,app_context_sql,app_context_filter,app_ponytail_table,app_context_dispatch,app_ponytail_dispatch,app_context_sourceless,app_ponytail_handler,lower_context_schema,lower_context_sql,lower_context_filter,lower_ponytail_schema,lower_context_dispatch,lower_ponytail_dispatch,lower_context_sourceless,lower_context_filter_handler,lower_ponytail_handler`
+- required_gates: `mimic_evidence,execution_spec,execution_sql_dispatch,execution_lower_context,execution_lower_ponytail,guide_replacement,guide_context,guide_ponytail,guide_sql,architecture_contract,architecture_no_parallel,requirements_sql,requirements_mcp,app_context_table,app_context_sql,app_context_filter,app_ponytail_table,app_context_dispatch,app_ponytail_dispatch,app_context_sourceless,app_ponytail_handler,lower_context_schema,lower_context_sql,lower_context_filter,lower_ponytail_schema,lower_context_dispatch,lower_ponytail_dispatch,lower_context_sourceless,lower_context_filter_handler,lower_ponytail_handler`
 - blocked_gates: `none`
 - primary_blocked_gate: `none`
 - surface_check_count: `25`
@@ -16,13 +16,15 @@
 - mimic_log_sha256: `39121936f29d4d543d55c593965da75296ab8a08ba4dacf35d347126919c6b85`
 - execution_spec_status: `pass`
 - execution_sql_dispatch_status: `pass`
+- execution_lower_context_status: `pass`
+- execution_lower_ponytail_status: `pass`
 - execution_spec_log: `build/llm_tooling_context_ponytail_full_replacement/mcp_context_ponytail_dispatch_spec.log`
 - execution_spec_log_size: `1420`
-- execution_spec_log_sha256: `eebaccda234136a0e3a75e2a6fbecf21f18d15476af6d0004695270346548658`
+- execution_spec_log_sha256: `2567c99c6279475cd1ef3d456f3827fc6cd99ea0f1cf805a3c5e51010b0feac4`
 - surface_manifest: `build/llm_tooling_context_ponytail_full_replacement/replacement_surface_manifest.tsv`
 - surface_manifest_count: `10`
 - surface_manifest_size: `1204`
-- surface_manifest_sha256: `bf18db0f51ef87d98dd701683f23a28db8cb1b7f6573fd62321f5a87b39848d7`
+- surface_manifest_sha256: `63b83529c1d79601f42dd11fa8c8795934c2b1e775f2b1f0f9cb4ad108eaf19d`
 - failures: `none`
 - next_action: `strict context/Ponytail full-replacement evidence is ready`
 - env: `build/llm_tooling_context_ponytail_full_replacement/evidence.env`
