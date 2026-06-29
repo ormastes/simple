@@ -10,7 +10,7 @@ OUT_ENV="$BUILD_DIR/evidence.env"
 LANE_TIMEOUT_SECONDS="${LLM_GOAL_LANE_TIMEOUT_SECONDS:-180}"
 SVLLM_LANE_TIMEOUT_SECONDS="${LLM_GOAL_SVLLM_LANE_TIMEOUT_SECONDS:-}"
 STRICT_HOST=0
-LANES="context_ponytail dashboard vllm_host svllm_local torch_optimizer finetune_guard public_absence feature_db_reference prereq_doctor_contract"
+LANES="context_ponytail dashboard vllm_host svllm_local torch_optimizer finetune_guard public_absence feature_db_reference prereq_doctor_contract dashboard_http_setup_contract"
 COMPLETION_LANES="context_ponytail dashboard vllm_host svllm_local torch_optimizer finetune_guard"
 
 while [ "$#" -gt 0 ]; do
@@ -199,6 +199,9 @@ lane_required_gates() {
         prereq_doctor_contract)
             printf '%s\n' "dashboard_next_action,vllm_next_action,svllm_next_action,torch_next_action,finetune_next_action"
             ;;
+        dashboard_http_setup_contract)
+            printf '%s\n' "base_url,auth_configured,next_action"
+            ;;
         *)
             printf '%s\n' "n/a"
             ;;
@@ -256,6 +259,13 @@ lane_blocked_gates() {
                 env_value build/llm_strict_host_prereq_doctor_contract/evidence.env llm_strict_host_prereq_doctor_contract_reason
             fi
             ;;
+        dashboard_http_setup_contract)
+            if [ "$(env_value build/llm_dashboard_live_http_setup_contract/evidence.env llm_dashboard_live_http_setup_contract_status)" = "pass" ]; then
+                printf '%s\n' "none"
+            else
+                env_value build/llm_dashboard_live_http_setup_contract/evidence.env llm_dashboard_live_http_setup_contract_reason
+            fi
+            ;;
         *)
             printf '%s\n' "n/a"
             ;;
@@ -302,6 +312,9 @@ lane_blocker_reason() {
             ;;
         prereq_doctor_contract)
             env_value build/llm_strict_host_prereq_doctor_contract/evidence.env llm_strict_host_prereq_doctor_contract_reason
+            ;;
+        dashboard_http_setup_contract)
+            env_value build/llm_dashboard_live_http_setup_contract/evidence.env llm_dashboard_live_http_setup_contract_reason
             ;;
         *)
             printf '%s\n' "n/a"
@@ -380,6 +393,14 @@ lane_next_action() {
                 printf '%s\n' "strict host prereq doctor next-action contract is covered"
             else
                 printf '%s\n' "run scripts/check/check-llm-strict-host-prereq-doctor-contract.shs and restore missing next-action fields"
+            fi
+            ;;
+        dashboard_http_setup_contract)
+            status="$(env_value build/llm_dashboard_live_http_setup_contract/evidence.env llm_dashboard_live_http_setup_contract_status)"
+            if [ "$status" = "pass" ]; then
+                printf '%s\n' "dashboard live HTTP setup contract is covered"
+            else
+                printf '%s\n' "run scripts/check/check-llm-dashboard-live-http-setup-contract.shs and restore missing setup blockers"
             fi
             ;;
         *)
@@ -856,6 +877,16 @@ lane_detail_values() {
             doctor_stdout="$(env_value build/llm_strict_host_prereq_doctor_contract/evidence.env llm_strict_host_prereq_doctor_contract_doctor_stdout)"
             printf '%s\n' "contract_status=${contract_status:-n/a};contract_reason=${contract_reason:-n/a};checked_count=${checked_count:-n/a};doctor_exit=${doctor_exit:-n/a};doctor_env=${doctor_env:-n/a};doctor_report=${doctor_report:-n/a};doctor_stdout=${doctor_stdout:-n/a};next_action=$(lane_next_action prereq_doctor_contract)"
             ;;
+        dashboard_http_setup_contract)
+            contract_status="$(env_value build/llm_dashboard_live_http_setup_contract/evidence.env llm_dashboard_live_http_setup_contract_status)"
+            contract_reason="$(env_value build/llm_dashboard_live_http_setup_contract/evidence.env llm_dashboard_live_http_setup_contract_reason)"
+            checked_count="$(env_value build/llm_dashboard_live_http_setup_contract/evidence.env llm_dashboard_live_http_setup_contract_checked_count)"
+            probe_exit="$(env_value build/llm_dashboard_live_http_setup_contract/evidence.env llm_dashboard_live_http_setup_contract_probe_exit)"
+            probe_env="$(env_value build/llm_dashboard_live_http_setup_contract/evidence.env llm_dashboard_live_http_setup_contract_probe_env)"
+            probe_report="$(env_value build/llm_dashboard_live_http_setup_contract/evidence.env llm_dashboard_live_http_setup_contract_probe_report)"
+            probe_stdout="$(env_value build/llm_dashboard_live_http_setup_contract/evidence.env llm_dashboard_live_http_setup_contract_probe_stdout)"
+            printf '%s\n' "contract_status=${contract_status:-n/a};contract_reason=${contract_reason:-n/a};checked_count=${checked_count:-n/a};probe_exit=${probe_exit:-n/a};probe_env=${probe_env:-n/a};probe_report=${probe_report:-n/a};probe_stdout=${probe_stdout:-n/a};next_action=$(lane_next_action dashboard_http_setup_contract)"
+            ;;
         *)
             printf '%s\n' "n/a"
             ;;
@@ -915,6 +946,7 @@ fi
 run_lane public_absence pass sh scripts/check/check-llm-tooling-public-absence-rendering.shs
 run_lane feature_db_reference pass sh scripts/check/check-llm-feature-db-reference-integrity.shs
 run_lane prereq_doctor_contract pass sh scripts/check/check-llm-strict-host-prereq-doctor-contract.shs
+run_lane dashboard_http_setup_contract pass sh scripts/check/check-llm-dashboard-live-http-setup-contract.shs
 
 status="pass"
 warn_count=0
@@ -1091,7 +1123,7 @@ done
     printf '## Replacement, Dashboard, Host, svLLM, Torch, Acceptance, And Local Guard Details\n\n'
     printf '| lane | details |\n'
     printf '|------|---------|\n'
-    for key in context_ponytail dashboard vllm_host svllm_local torch_optimizer finetune_guard public_absence feature_db_reference; do
+    for key in $LANES; do
         printf '| %s | `%s` |\n' "$key" "$(lane_detail_values "$key")"
     done
     printf '\n'

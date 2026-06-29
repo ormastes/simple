@@ -585,7 +585,8 @@ dashboard URL, malformed URL, and missing auth configuration without printing
 secrets or treating route-contract evidence as live HTTP proof.
 Use `scripts/check/check-llm-dashboard-live-http-setup-contract.shs` after
 editing the live HTTP wrapper to verify the no-URL/no-auth path keeps the
-combined `base_url|auth_configured` blocker and report `next_action`.
+combined `base_url|auth_configured` blocker and report `next_action`; the main
+LLM goal aggregate also runs it as the `dashboard_http_setup_contract` lane.
 The aggregate expects all completion lanes to pass, fails for any WARN
 or missing strict evidence result, and writes `llm_goal_evidence_failed_gates`,
 `llm_goal_evidence_failed_gate_hints`, `llm_goal_evidence_warn_gates`, and
