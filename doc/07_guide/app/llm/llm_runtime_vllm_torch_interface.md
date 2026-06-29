@@ -96,7 +96,11 @@ run through the runtime-owned control CLI. On the current host it returns
 The evidence env records `llm_runtime_vllm_host_probe_required_gates`,
 `llm_runtime_vllm_host_probe_blocked_gates`,
 `llm_runtime_vllm_host_probe_primary_blocked_gate`,
+`llm_runtime_vllm_host_probe_base_model`,
+`llm_runtime_vllm_host_probe_endpoint`,
 `llm_runtime_vllm_host_probe_local_vllm_status`,
+`llm_runtime_vllm_host_probe_vllm_command_path`,
+`llm_runtime_vllm_host_probe_python_vllm_module_status`,
 `llm_runtime_vllm_host_probe_local_gpu_status`,
 `llm_runtime_vllm_host_probe_readiness_status`,
 `llm_runtime_vllm_host_probe_preflight_status`,
@@ -293,6 +297,10 @@ surfaces, dashboard route/auth gaps, missing authenticated live HTTP proof,
 missing native streaming support, a missing host runtime, a failed optimizer
 step, and a blocked retry/eval gate from a licensing, safety, deployment, or
 app-handoff blocker.
+Aggregate lane execution unsets the aggregate `BUILD_DIR` before invoking
+focused wrappers, so detail rows consume each wrapper's canonical
+`build/<lane>/evidence.env` instead of stale env files from older standalone
+runs.
 
 Use the focused public-rendering guard after changing runtime manuals,
 dashboard JSONL wording, or evidence docs:

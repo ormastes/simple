@@ -681,8 +681,10 @@ gate log.
 
 `scripts/check/check-llm-runtime-vllm-host-probe.shs` now normalizes the local
 vLLM live-serving proof into required and blocked gates. The env records the
-required gate list, compact blocked gates, local vLLM/GPU command statuses,
-readiness status, endpoint status, models-list status, and models-list reason.
+required gate list, compact blocked gates, selected base model, endpoint,
+`vllm` command path, Python `vllm` module status, local vLLM/GPU command
+statuses, readiness status, endpoint status, models-list status, and
+models-list reason.
 On this host the lane remains `unavailable` with
 `blocked_gates=local_vllm|serve_preflight|endpoint_reachable|models_listed`;
 strict-host aggregate runs should fail that gate until local vLLM is installed,
@@ -801,8 +803,9 @@ dashboard evidence as pass.
 ## 2026-06-29 vLLM Host Resource Blocker Precision
 
 `scripts/check/check-llm-runtime-vllm-host-probe.shs` now probes `vllm` and
-`nvidia-smi` explicitly and records `local_vllm_status` plus
-`local_gpu_status` in the evidence env/report. The blocked-gates list no longer
+`nvidia-smi` explicitly and records `local_vllm_status`, `vllm_command_path`,
+`python_vllm_module_status`, and `local_gpu_status` in the evidence env/report.
+The blocked-gates list no longer
 depends only on the collapsed control-CLI reason, so a host missing both local
 vLLM and GPU tooling reports both `local_vllm` and `local_gpu` blockers before
 serve preflight, endpoint, and model-listing gates.
@@ -871,6 +874,11 @@ replacement, live dashboard, vLLM, svLLM, Torch optimizer, fine-tune, and public
 absence rendering. Default mode explicitly points context/Ponytail and dashboard
 at `--strict-host` when completion evidence is required; strict mode points
 failed replacement and live-dashboard lanes at their focused wrappers.
+
+The aggregate lane runner now unsets the aggregate `BUILD_DIR` before invoking
+focused wrappers. Each wrapper writes its canonical `build/<lane>/evidence.env`,
+and aggregate detail rows read fresh focused evidence instead of stale default
+env files from earlier standalone runs.
 
 ## 2026-06-29 Strict Context/Dashboard Blocker Metadata
 
