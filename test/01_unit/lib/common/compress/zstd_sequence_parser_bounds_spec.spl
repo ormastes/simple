@@ -1,8 +1,8 @@
 use std.spec
 use std.common.compress.{CompressionError}
 use std.common.compress.zstd_fse.{ZstdFseDecodeTable}
-use std.common.compress.zstd_seq.{_zstd_parse_sequence_count, _zstd_parse_sequence_modes, _zstd_parse_rle_sequence_tables, _zstd_parse_single_sequence_table}
-use std.common.compress.zstd_types.{ZstdSequenceModes}
+use std.common.compress.zstd_seq.{_zstd_parse_sequence_count, _zstd_parse_sequence_modes, _zstd_parse_rle_sequence_tables, _zstd_parse_single_sequence_table, _zstd_decode_fse_sequences, _zstd_decode_rle_sequences}
+use std.common.compress.zstd_types.{ZstdSequenceModes, ZstdSequenceTables, ZstdRleSequenceTables}
 
 fn check(condition: bool):
     expect condition == true
@@ -47,5 +47,43 @@ describe "Zstd sequence parser bounds validation":
         match err:
             CompressionError.TruncatedInput(message):
                 check(message.contains("zstd rle sequence table"))
+            _:
+                check(false)
+
+    it "rejects negative fse sequence counts before reading state tables":
+        val tables = ZstdSequenceTables(
+            literal_lengths_mode: 1,
+            literal_lengths_rle: Some(0),
+            literal_lengths: nil,
+            offsets_mode: 1,
+            offsets_rle: Some(0),
+            offsets: nil,
+            match_lengths_mode: 1,
+            match_lengths_rle: Some(0),
+            match_lengths: nil,
+            bytes_used: 0
+        )
+        val decoded = _zstd_decode_fse_sequences([0x01u8], 0, 1, -1, tables)
+        check(decoded.is_err())
+        val err = decoded.unwrap_err()
+        match err:
+            CompressionError.CorruptStream(message):
+                check(message.contains("negative sequence count"))
+            _:
+                check(false)
+
+    it "rejects negative rle sequence counts before reading bitstreams":
+        val tables = ZstdRleSequenceTables(
+            literal_length_code: 0,
+            offset_code: 0,
+            match_length_code: 0,
+            bytes_used: 0
+        )
+        val decoded = _zstd_decode_rle_sequences([0x01u8], 0, 1, -1, tables)
+        check(decoded.is_err())
+        val err = decoded.unwrap_err()
+        match err:
+            CompressionError.CorruptStream(message):
+                check(message.contains("negative sequence count"))
             _:
                 check(false)
