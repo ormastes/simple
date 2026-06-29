@@ -29,7 +29,7 @@ mcp_context_ponytail_dispatch_spec -> lib
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 5 | 5 | 0 | 0 |
+| 6 | 6 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -153,6 +153,27 @@ expect(response).to_contain("source: src/app/mcp/main_dispatch.spl")
 
 #### lower MCP
 
+#### advertises simple_context and simple_ponytail through the lower MCP tools list
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val response = lower_make_tools_list("\"lower-list-1\"")
+expect(response).to_contain("\"id\":\"lower-list-1\"")
+expect(response).to_contain("\"name\":\"simple_context\"")
+expect(response).to_contain("\"name\":\"simple_ponytail\"")
+expect(response).to_contain("\"inputSchema\"")
+expect(response).to_contain("\"Source file path; required except when sql=true and query is non-empty\"")
+expect(response).to_contain("\"Mode: audit/review, simplification/simplify\"")
+expect(response).to_contain("\"source_filter\"")
+```
+
+</details>
+
 #### executes simple_context through the lower MCP handler
 
 <details>
@@ -192,8 +213,8 @@ expect(response).to_contain("source: src/lib/nogc_async_mut/mcp/main_lazy.spl")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 6 |
+| Active scenarios | 6 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
