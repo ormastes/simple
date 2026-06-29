@@ -1,12 +1,13 @@
 # LLM Runtime vLLM Host Probe
 
-- command: `release/x86_64-unknown-linux-gnu/simple run src/app/llm_runtime/control_cli.spl -- --action preflight --base-model base-model --endpoint http://127.0.0.1:8000/v1 --detect-resources`
+- command: `release/x86_64-unknown-linux-gnu/simple run src/app/llm_runtime/control_cli.spl -- --action readiness --base-model base-model --endpoint http://127.0.0.1:8000/v1 --detect-resources`
 - status: `unavailable`
 - reason: `missing_local_vllm`
 - required_gates: `local_vllm,local_gpu,serve_preflight,endpoint_reachable,models_listed`
 - blocked_gates: `local_vllm|serve_preflight|endpoint_reachable|models_listed`
 - local_vllm_status: `missing`
 - local_gpu_status: `available`
+- readiness_status: `skipped`
 - preflight_status: `skipped`
 - endpoint_status: `not_checked`
 - models_status: `not_fetched`

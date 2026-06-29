@@ -88,22 +88,25 @@ real evidence:
 
 Latest local host probe:
 `doc/09_report/2026/06/llm_runtime_vllm_host_probe_2026-06-29.md` records a
-repeatable `scripts/check/check-llm-runtime-vllm-host-probe.shs` preflight. On
-the current host it returns `status=unavailable` with
+repeatable `scripts/check/check-llm-runtime-vllm-host-probe.shs` readiness
+run through the runtime-owned control CLI. On the current host it returns
+`status=unavailable` with
 `reason=missing_local_vllm` and
 `blocked_gates=local_vllm|serve_preflight|endpoint_reachable|models_listed`.
 The evidence env records `llm_runtime_vllm_host_probe_required_gates`,
 `llm_runtime_vllm_host_probe_blocked_gates`,
 `llm_runtime_vllm_host_probe_local_vllm_status`,
 `llm_runtime_vllm_host_probe_local_gpu_status`,
+`llm_runtime_vllm_host_probe_readiness_status`,
 `llm_runtime_vllm_host_probe_preflight_status`,
 `llm_runtime_vllm_host_probe_endpoint_status`, and
 `llm_runtime_vllm_host_probe_models_status` so strict aggregate runs can report
 the exact local serving blocker. Keep `FR-LLM-RUNTIME-0001` open until a
-configured local endpoint proves `/v1/models` serves the selected base model.
+configured local endpoint reaches `status=ready`, `endpoint=configured`, and
+`models_status=ready` after `/v1/models` serves the selected base model.
 If a host is missing GPU tooling too, `local_gpu` is added to the blocked-gates
 list independently of the collapsed control-CLI reason.
-Run the wrapper with `--strict` when unavailable or preflight-only hosts must
+Run the wrapper with `--strict` when unavailable or readiness-incomplete hosts must
 fail the lane.
 
 Latest svLLM local readiness evidence:

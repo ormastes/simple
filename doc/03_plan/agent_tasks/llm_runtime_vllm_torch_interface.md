@@ -655,12 +655,19 @@ decision, license, safety, deployment, and app handoff.
 `scripts/check/check-llm-runtime-vllm-host-probe.shs` now normalizes the local
 vLLM live-serving proof into required and blocked gates. The env records the
 required gate list, compact blocked gates, local vLLM/GPU command statuses,
-preflight status, endpoint status, models-list status, and models-list reason.
+readiness status, endpoint status, models-list status, and models-list reason.
 On this host the lane remains `unavailable` with
 `blocked_gates=local_vllm|serve_preflight|endpoint_reachable|models_listed`;
 strict-host aggregate runs should fail that gate until local vLLM is installed,
-serve preflight succeeds, the endpoint is reachable, and `/v1/models` lists the
-selected base model.
+serve readiness reaches `ready`, the endpoint is configured, and `/v1/models`
+lists the selected base model.
+
+The runtime control CLI now exposes a `readiness` action that routes through
+`llm_runtime_vllm_serve_readiness_orchestrate_with_resources(...)` instead of
+the plan-only preflight path. The host probe uses that action, so a configured
+host can produce a real pass from `llm_runtime_vllm_serve_readiness_run` with
+`status=ready`, `endpoint=configured`, and `models_status=ready`; missing local
+vLLM/GPU hosts still produce bounded `skipped` evidence without spawning.
 
 ## 2026-06-29 Aggregate Blocker Detail Hardening
 

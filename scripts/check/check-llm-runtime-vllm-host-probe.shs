@@ -52,7 +52,7 @@ local_gpu_status="$(probe_command nvidia-smi --query-gpu=name --format=csv,nohea
 
 exit_code=0
 if "$SIMPLE_BIN" run src/app/llm_runtime/control_cli.spl -- \
-    --action preflight \
+    --action readiness \
     --base-model "$BASE_MODEL" \
     --endpoint "$ENDPOINT" \
     --detect-resources >"$OUT_LOG" 2>&1; then
@@ -114,14 +114,14 @@ case "$local_gpu_status:$reason" in
         ;;
 esac
 case "$status" in
-    planned|pass)
+    planned|pass|ready)
         ;;
     *)
         append_blocked_gate "serve_preflight"
         ;;
 esac
 case "$endpoint_status" in
-    pass|reachable)
+    pass|reachable|configured)
         ;;
     *)
         append_blocked_gate "endpoint_reachable"
@@ -140,10 +140,21 @@ fi
 
 wrapper_status="fail"
 wrapper_reason="$reason"
+if [ "$local_vllm_status" = "available" ] &&
+   [ "$local_gpu_status" = "available" ] &&
+   [ "$status" = "ready" ] &&
+   [ "$endpoint_status" = "configured" ] &&
+   [ "$models_status" = "ready" ]; then
+    wrapper_status="pass"
+    wrapper_reason="${models_reason:-models_endpoint_ready}"
+else
 case "$event:$status:$reason" in
     llm_runtime_vllm_dashboard_control_execution:skipped:missing_local_vllm*|\
     llm_runtime_vllm_dashboard_control_execution:skipped:missing_local_gpu*|\
     llm_runtime_vllm_dashboard_control_execution:skipped:missing_local_vllm_and_gpu*|\
+    llm_runtime_vllm_serve_readiness_run:skipped:missing_local_vllm*|\
+    llm_runtime_vllm_serve_readiness_run:skipped:missing_local_gpu*|\
+    llm_runtime_vllm_serve_readiness_run:skipped:missing_local_vllm_and_gpu*|\
     llm_runtime_vllm_dashboard_control_execution:planned:serve_and_models_probe_planned)
         wrapper_status="unavailable"
         ;;
@@ -151,6 +162,7 @@ case "$event:$status:$reason" in
         wrapper_status="fail"
         ;;
 esac
+fi
 
 {
     printf '%s\n' "llm_runtime_vllm_host_probe_status=$wrapper_status"
@@ -162,6 +174,7 @@ esac
     printf '%s\n' "llm_runtime_vllm_host_probe_local_vllm_status=$local_vllm_status"
     printf '%s\n' "llm_runtime_vllm_host_probe_local_gpu_status=$local_gpu_status"
     printf '%s\n' "llm_runtime_vllm_host_probe_preflight_status=$status"
+    printf '%s\n' "llm_runtime_vllm_host_probe_readiness_status=$status"
     printf '%s\n' "llm_runtime_vllm_host_probe_endpoint_status=$endpoint_status"
     printf '%s\n' "llm_runtime_vllm_host_probe_models_status=$models_status"
     printf '%s\n' "llm_runtime_vllm_host_probe_models_reason=$models_reason"
@@ -169,13 +182,14 @@ esac
 
 {
     printf '# LLM Runtime vLLM Host Probe\n\n'
-    printf '%s\n' "- command: \`$SIMPLE_BIN run src/app/llm_runtime/control_cli.spl -- --action preflight --base-model $BASE_MODEL --endpoint $ENDPOINT --detect-resources\`"
+    printf '%s\n' "- command: \`$SIMPLE_BIN run src/app/llm_runtime/control_cli.spl -- --action readiness --base-model $BASE_MODEL --endpoint $ENDPOINT --detect-resources\`"
     printf '%s\n' "- status: \`$wrapper_status\`"
     printf '%s\n' "- reason: \`$wrapper_reason\`"
     printf '%s\n' "- required_gates: \`$required_gates\`"
     printf '%s\n' "- blocked_gates: \`$blocked_gates\`"
     printf '%s\n' "- local_vllm_status: \`$local_vllm_status\`"
     printf '%s\n' "- local_gpu_status: \`$local_gpu_status\`"
+    printf '%s\n' "- readiness_status: \`$status\`"
     printf '%s\n' "- preflight_status: \`$status\`"
     printf '%s\n' "- endpoint_status: \`$endpoint_status\`"
     printf '%s\n' "- models_status: \`$models_status\`"
