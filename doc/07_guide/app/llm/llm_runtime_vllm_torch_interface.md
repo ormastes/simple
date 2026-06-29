@@ -476,3 +476,12 @@ execution, and fine-tune retry6/7 acceptance. Context/Ponytail full replacement
 is passing.
 Track those blockers in
 `doc/08_tracking/bug/llm_strict_host_completion_blockers_2026-06-29.md`.
+When updating the audit or tracker without collecting live host evidence, run:
+
+```bash
+sh scripts/check/check-llm-strict-blocker-tracker.shs
+```
+
+The guard checks that the committed tracker, strict audit, and latest default
+aggregate report still agree on open strict blockers and the hardened vLLM/Torch
+manifest hashes. It is a drift check, not strict-host completion evidence.

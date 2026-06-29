@@ -1,0 +1,155 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/llm_strict_blocker_tracker}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/2026/06/llm_strict_blocker_tracker_$(date -u +%F).md}"
+OUT_ENV="$BUILD_DIR/evidence.env"
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+rm -f "$OUT_ENV" "$REPORT_PATH"
+
+TRACKER="doc/08_tracking/bug/llm_strict_host_completion_blockers_2026-06-29.md"
+AUDIT="doc/09_report/2026/06/llm_goal_strict_completion_audit_2026-06-29.md"
+DEFAULT_REPORT="doc/09_report/2026/06/llm_goal_evidence_2026-06-29.md"
+
+failures=""
+checked_count=0
+
+add_failure() {
+    if [ -z "$failures" ]; then
+        failures="$1"
+    else
+        failures="$failures|$1"
+    fi
+}
+
+require_file() {
+    checked_count=$((checked_count + 1))
+    if [ ! -r "$1" ]; then
+        add_failure "missing_file:$1"
+    fi
+}
+
+require_pattern() {
+    file="$1"
+    pattern="$2"
+    label="$3"
+    checked_count=$((checked_count + 1))
+    if [ ! -r "$file" ]; then
+        add_failure "missing_file:$file"
+    elif ! rg -q "$pattern" "$file"; then
+        add_failure "$label"
+    fi
+}
+
+hash_file() {
+    path="$1"
+    if [ ! -r "$path" ]; then
+        printf 'missing'
+    elif command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$path" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$path" | awk '{print $1}'
+    else
+        printf 'missing'
+    fi
+}
+
+size_file() {
+    path="$1"
+    if [ -r "$path" ]; then
+        wc -c <"$path" | tr -d ' '
+    else
+        printf '0'
+    fi
+}
+
+require_file "$TRACKER"
+require_file "$AUDIT"
+require_file "$DEFAULT_REPORT"
+
+require_pattern "$DEFAULT_REPORT" 'warn_gates: `vllm_host\|torch_optimizer`' "default_warn_gates_mismatch"
+require_pattern "$TRACKER" 'Status: OPEN' "tracker_not_open"
+require_pattern "$TRACKER" 'STATUS: FAIL llm-goal-evidence warn_count=0 fail_count=5' "tracker_strict_fail_summary_missing"
+require_pattern "$TRACKER" 'failed_gates=dashboard\|vllm_host\|svllm_local\|torch_optimizer\|finetune_guard' "tracker_failed_gates_mismatch"
+require_pattern "$AUDIT" 'strict_failed_gates: `dashboard\|vllm_host\|svllm_local\|torch_optimizer\|finetune_guard`' "audit_failed_gates_mismatch"
+
+for gate in \
+    'Dashboard Live HTTP:live_http_authenticated_request' \
+    'vLLM Host:local_vllm' \
+    'svLLM Native Streaming:native_read_range' \
+    'Torch Optimizer:libtorch' \
+    'Fine-Tune Acceptance:retry6_training_eval'
+do
+    title="${gate%%:*}"
+    blocker="${gate#*:}"
+    require_pattern "$TRACKER" "### $title" "tracker_missing_section:$title"
+    require_pattern "$TRACKER" "primary blocker: \`$blocker\`" "tracker_missing_primary:$blocker"
+done
+
+require_pattern "$TRACKER" 'surface_manifest_count=10' "tracker_missing_vllm_manifest_count"
+require_pattern "$TRACKER" '83abdc5c0a155eb8bc2cd2c20e3a9349d0e5b43cacf1073c5d59706b5fe9500b' "tracker_missing_vllm_manifest_hash"
+require_pattern "$AUDIT" 'surface_manifest_count=10' "audit_missing_vllm_manifest_count"
+require_pattern "$AUDIT" '83abdc5c0a155eb8bc2cd2c20e3a9349d0e5b43cacf1073c5d59706b5fe9500b' "audit_missing_vllm_manifest_hash"
+
+require_pattern "$TRACKER" 'surface_manifest_count=14' "tracker_missing_torch_manifest_count"
+require_pattern "$TRACKER" '852a1c814199286c0cf686f2bc68ffc8fb946a85691426a4c7440cf69aa7165c' "tracker_missing_torch_manifest_hash"
+require_pattern "$AUDIT" 'surface_manifest_count=14' "audit_missing_torch_manifest_count"
+require_pattern "$AUDIT" '852a1c814199286c0cf686f2bc68ffc8fb946a85691426a4c7440cf69aa7165c' "audit_missing_torch_manifest_hash"
+
+tracker_size="$(size_file "$TRACKER")"
+tracker_sha256="$(hash_file "$TRACKER")"
+audit_size="$(size_file "$AUDIT")"
+audit_sha256="$(hash_file "$AUDIT")"
+default_report_size="$(size_file "$DEFAULT_REPORT")"
+default_report_sha256="$(hash_file "$DEFAULT_REPORT")"
+
+status="pass"
+reason="tracker_consistent"
+if [ -n "$failures" ]; then
+    status="fail"
+    reason="$failures"
+fi
+
+{
+    printf '%s\n' "llm_strict_blocker_tracker_status=$status"
+    printf '%s\n' "llm_strict_blocker_tracker_reason=$reason"
+    printf '%s\n' "llm_strict_blocker_tracker_checked_count=$checked_count"
+    printf '%s\n' "llm_strict_blocker_tracker_tracker=$TRACKER"
+    printf '%s\n' "llm_strict_blocker_tracker_tracker_size=$tracker_size"
+    printf '%s\n' "llm_strict_blocker_tracker_tracker_sha256=$tracker_sha256"
+    printf '%s\n' "llm_strict_blocker_tracker_audit=$AUDIT"
+    printf '%s\n' "llm_strict_blocker_tracker_audit_size=$audit_size"
+    printf '%s\n' "llm_strict_blocker_tracker_audit_sha256=$audit_sha256"
+    printf '%s\n' "llm_strict_blocker_tracker_default_report=$DEFAULT_REPORT"
+    printf '%s\n' "llm_strict_blocker_tracker_default_report_size=$default_report_size"
+    printf '%s\n' "llm_strict_blocker_tracker_default_report_sha256=$default_report_sha256"
+} >"$OUT_ENV"
+
+{
+    printf '# LLM Strict Blocker Tracker Consistency\n\n'
+    printf '%s\n' "- status: \`$status\`"
+    printf '%s\n' "- reason: \`$reason\`"
+    printf '%s\n' "- checked_count: \`$checked_count\`"
+    printf '%s\n' "- tracker: \`$TRACKER\`"
+    printf '%s\n' "- tracker_size: \`$tracker_size\`"
+    printf '%s\n' "- tracker_sha256: \`$tracker_sha256\`"
+    printf '%s\n' "- audit: \`$AUDIT\`"
+    printf '%s\n' "- audit_size: \`$audit_size\`"
+    printf '%s\n' "- audit_sha256: \`$audit_sha256\`"
+    printf '%s\n' "- default_report: \`$DEFAULT_REPORT\`"
+    printf '%s\n' "- default_report_size: \`$default_report_size\`"
+    printf '%s\n' "- default_report_sha256: \`$default_report_sha256\`"
+    printf '%s\n' "- env: \`$OUT_ENV\`"
+    printf '\n'
+    printf 'This guard keeps the strict-host blocker tracker aligned with the latest default aggregate report and strict completion audit. It does not run live host evidence; it fails when the committed tracker/audit no longer name the known strict blockers or the hardened vLLM/Torch provenance hashes.\n'
+} >"$REPORT_PATH"
+
+if [ "$status" = "pass" ]; then
+    echo "STATUS: PASS llm-strict-blocker-tracker"
+else
+    echo "STATUS: FAIL llm-strict-blocker-tracker reason=$reason"
+    exit 1
+fi
