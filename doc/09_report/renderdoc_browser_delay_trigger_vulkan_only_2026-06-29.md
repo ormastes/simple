@@ -20,7 +20,7 @@ loaded `librenderdoc.so`, then calls `StartFrameCapture` and
 ## Chrome Probe
 
 Evidence:
-`build/renderdoc/chrome-gpu-delay-trigger-structured-vulkan-only/html/evidence.env`.
+`build/renderdoc/chrome-gpu-delay-trigger-state-vulkan-only/html/evidence.env`.
 
 Key result:
 
@@ -29,6 +29,11 @@ rdoc_gpu_delay_trigger_loaded_count=1
 rdoc_gpu_delay_trigger_api_ready_count=1
 rdoc_gpu_delay_trigger_last_end_ok=0
 rdoc_gpu_delay_trigger_elf_status=rdoc_delay_trigger_elf=symbol-found
+rdoc_gpu_delay_trigger_capfile_template=/home/yoon/simple/build/renderdoc/chrome-gpu-delay-trigger-state-vulkan-only/html/gpu_chrome
+rdoc_gpu_delay_trigger_num_captures_before=0
+rdoc_gpu_delay_trigger_num_captures_after=0
+rdoc_gpu_delay_trigger_is_capturing_after_start=0
+rdoc_gpu_delay_trigger_is_capturing_before_end=0
 rdoc_capture_status=fail
 rdoc_capture_reason=missing-rdc
 rdoc_capture_magic=
@@ -41,7 +46,7 @@ also reached the API and returned `EndFrameCapture ok=0`.
 ## Electron Probe
 
 Evidence:
-`build/renderdoc/electron-gpu-delay-trigger-structured-vulkan-only/electron-html/evidence.env`.
+`build/renderdoc/electron-gpu-delay-trigger-state-vulkan-only/electron-html/evidence.env`.
 
 Key result:
 
@@ -50,6 +55,11 @@ rdoc_gpu_delay_trigger_loaded_count=1
 rdoc_gpu_delay_trigger_api_ready_count=1
 rdoc_gpu_delay_trigger_last_end_ok=0
 rdoc_gpu_delay_trigger_elf_status=rdoc_delay_trigger_elf=symbol-found
+rdoc_gpu_delay_trigger_capfile_template=/home/yoon/simple/build/renderdoc/electron-gpu-delay-trigger-state-vulkan-only/electron-html/electron_gpu
+rdoc_gpu_delay_trigger_num_captures_before=0
+rdoc_gpu_delay_trigger_num_captures_after=0
+rdoc_gpu_delay_trigger_is_capturing_after_start=0
+rdoc_gpu_delay_trigger_is_capturing_before_end=0
 rdoc_capture_status=fail
 rdoc_capture_reason=missing-rdc
 rdoc_capture_magic=
@@ -66,9 +76,13 @@ The Linux aggregate now forwards:
 linux_vulkan_render_log_compare_renderdoc_chrome_delay_trigger_loaded_count=1
 linux_vulkan_render_log_compare_renderdoc_chrome_delay_trigger_api_ready_count=1
 linux_vulkan_render_log_compare_renderdoc_chrome_delay_trigger_last_end_ok=0
+linux_vulkan_render_log_compare_renderdoc_chrome_delay_trigger_num_captures_after=0
+linux_vulkan_render_log_compare_renderdoc_chrome_delay_trigger_is_capturing_after_start=0
 linux_vulkan_render_log_compare_renderdoc_electron_delay_trigger_loaded_count=1
 linux_vulkan_render_log_compare_renderdoc_electron_delay_trigger_api_ready_count=1
 linux_vulkan_render_log_compare_renderdoc_electron_delay_trigger_last_end_ok=0
+linux_vulkan_render_log_compare_renderdoc_electron_delay_trigger_num_captures_after=0
+linux_vulkan_render_log_compare_renderdoc_electron_delay_trigger_is_capturing_after_start=0
 ```
 
 `renderdoc-chrome-rdc` and `renderdoc-electron-rdc` remain blocked because no
@@ -86,6 +100,8 @@ of the GPU process. That route also remains diagnostic only.
 The Linux browser blocker has moved past API discovery: a minimal, non-EGL,
 non-Vulkan-wrapper preload shim can reach the RenderDoc API in the Chromium GPU
 child using the Vulkan-only RenderDoc build. RenderDoc still declines the timed
-capture with `EndFrameCapture ok=0`, leaving the next debugging target at
-RenderDoc capture ownership/active frame state inside the GPU child rather than
-EGL symbol interposition alone.
+capture: the capfile template is set, but `IsFrameCapturing()` remains `0`
+immediately after `StartFrameCapture`, `EndFrameCapture` returns `0`, and
+`GetNumCaptures()` remains `0`. The next debugging target is why the RenderDoc
+API is not arming a frame capture in the Chromium GPU child after successful API
+lookup and layer load.

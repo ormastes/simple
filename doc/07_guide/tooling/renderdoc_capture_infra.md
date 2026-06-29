@@ -528,7 +528,9 @@ EGL/Vulkan symbols, set `RDOC_GPU_LAUNCHER_DELAY_TRIGGER=1`. This uses
 `RENDERDOC_GetAPI` with a loader-lock-free ELF lookup and calls timed
 `StartFrameCapture`/`EndFrameCapture`. Current Chrome and Electron evidence
 against the Vulkan-only RenderDoc build reaches the API but reports
-`rdoc_gpu_delay_trigger_last_end_ok=0`, so no `.rdc` is produced; see
+`rdoc_gpu_delay_trigger_last_end_ok=0`, with
+`rdoc_gpu_delay_trigger_is_capturing_after_start=0` and
+`rdoc_gpu_delay_trigger_num_captures_after=0`, so no `.rdc` is produced; see
 `doc/09_report/renderdoc_browser_delay_trigger_vulkan_only_2026-06-29.md`.
 The Linux row also emits structured blocker fields for parallel platform
 agents:

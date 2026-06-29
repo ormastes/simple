@@ -521,6 +521,15 @@ Current 2026-06-26 browser capture findings:
   `build/renderdoc/chrome-gpu-delay-trigger-structured-vulkan-only/html/evidence.env`,
   `build/renderdoc/electron-gpu-delay-trigger-structured-vulkan-only/electron-html/evidence.env`,
   and `doc/09_report/renderdoc_browser_delay_trigger_vulkan_only_2026-06-29.md`.
+- 2026-06-29 The delay-trigger shim now records RenderDoc capture state. Fresh
+  Chrome and Electron runs set the capfile template and reach the API, but
+  `IsFrameCapturing()` remains `0` immediately after `StartFrameCapture`,
+  `EndFrameCapture` returns `0`, and `GetNumCaptures()` remains `0`. This moves
+  the remaining blocker from API discovery to RenderDoc capture arming/ownership
+  inside the Chromium GPU child. Evidence:
+  `build/renderdoc/chrome-gpu-delay-trigger-state-vulkan-only/html/evidence.env`
+  and
+  `build/renderdoc/electron-gpu-delay-trigger-state-vulkan-only/electron-html/evidence.env`.
 - The direct Chrome/Electron RenderDoc wrapper now records
   `rdoc_renderdoc_hook_children` and accepts `RDOC_RENDERDOC_HOOK_CHILDREN=0`
   to omit `--opt-hook-children`. This confirms the immediate Chrome GPU crash
