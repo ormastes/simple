@@ -44,7 +44,7 @@
 - gui_widget_renderdoc_goal_simple_gate_source_env=build/renderdoc/widget-probe-small/simple/evidence.env
 - gui_widget_renderdoc_goal_simple_gate_capture_command=RDOC_OUTPUT_DIR=build/renderdoc/widget-probe-small RDOC_SIMPLE_PROG="$PWD/src/app/test/renderdoc_vulkan_widget_capture.spl" RDOC_HTML_PATH="$PWD/test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html" scripts/tool/renderdoc-evidence.shs capture-simple
 - gui_widget_renderdoc_goal_simple_gate_source_env_file_status=pass
-- gui_widget_renderdoc_goal_simple_gate_capture_file=/home/yoon/simple/build/renderdoc/widget-probe-small/simple/simple_gui_app_capture.rdc
+- gui_widget_renderdoc_goal_simple_gate_capture_file=build/renderdoc/widget-probe-small/simple/simple_gui_app_capture.rdc
 - gui_widget_renderdoc_goal_simple_gate_capture_file_status=pass
 - gui_widget_renderdoc_goal_simple_gate_capture_file_magic=RDOC
 - gui_widget_renderdoc_goal_simple_gate_runtime_backend=vulkan
@@ -63,7 +63,7 @@
 - gui_widget_renderdoc_goal_electron_gate_failure_class=pass
 - gui_widget_renderdoc_goal_electron_gate_exit_code=0
 - gui_widget_renderdoc_goal_electron_gate_source_env=build/renderdoc/electron-implicit-layer-default-autocapture/electron-html/evidence.env
-- gui_widget_renderdoc_goal_electron_gate_capture_command=RDOC_OUTPUT_DIR=build/renderdoc/electron-display-helper RDOC_HTML_PATH="$PWD/test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html" scripts/tool/renderdoc-evidence.shs capture-electron-html
+- gui_widget_renderdoc_goal_electron_gate_capture_command=RDOC_OUTPUT_DIR=build/renderdoc/electron-implicit-layer-default-autocapture RDOC_HTML_PATH="$PWD/test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html" scripts/tool/renderdoc-evidence.shs capture-electron-html
 - gui_widget_renderdoc_goal_electron_gate_source_env_file_status=pass
 - gui_widget_renderdoc_goal_electron_gate_html_path=/home/yoon/simple/test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html
 - gui_widget_renderdoc_goal_electron_gate_fixture_path_status=pass

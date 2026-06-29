@@ -18,12 +18,12 @@
 - html_css_traceability_status=pass
 - html_css_traceability_reason=pass
 - html_css_traceability_command=sh scripts/check/check-html-css-sspec-traceability.shs
-- html_css_traceability_evidence_env=build/renderdoc/html-css-goal-status/sspec-traceability/evidence.env
+- html_css_traceability_evidence_env=build/renderdoc/html-css-goal-status-current/sspec-traceability/evidence.env
 - html_css_traceability_html_tag_count=105
 - html_css_traceability_required_html_tag_count=105
 - html_css_traceability_css_property_count=394
 - html_css_traceability_required_css_property_min_count=390
-- html_css_traceability_implemented_css_property_count=72
+- html_css_traceability_implemented_css_property_count=231
 - html_css_rendering_manifest_traceability_status=pass
 - html_css_rendering_manifest_traceability_reason=pass
 - html_css_rendering_manifest_traceability_command=sh scripts/check/check-html-css-rendering-manifest-traceability.shs
@@ -34,7 +34,7 @@
 - simple_renderdoc_capture_magic=RDOC
 - simple_renderdoc_capture_file_magic=RDOC
 - simple_renderdoc_capture_file=build/renderdoc/canonical-probe/simple/simple_gui_app_capture.rdc
-- simple_renderdoc_gate_env=build/renderdoc/html-css-goal-status/simple-gate/evidence.env
+- simple_renderdoc_gate_env=build/renderdoc/html-css-goal-status-current/simple-gate/evidence.env
 - simple_renderdoc_gate_status=pass
 - simple_renderdoc_gate_reason=pass
 - simple_renderdoc_gate_capture_file_magic=RDOC
@@ -83,7 +83,7 @@
 - external_renderdoc_gate_requested_angle=vulkan
 - external_renderdoc_gate_requested_features=Vulkan
 - external_renderdoc_gate_launch_flags=--no-sandbox --disable-gpu-sandbox --disable-dev-shm-usage --no-zygote --ozone-platform=x11 --enable-features=Vulkan,DefaultANGLEVulkan,VulkanFromANGLE --ignore-gpu-blocklist --enable-gpu-rasterization --use-angle=vulkan
-- electron_renderdoc_gate_env=build/renderdoc/html-css-goal-status/electron-gate/evidence.env
+- electron_renderdoc_gate_env=build/renderdoc/html-css-goal-status-current/electron-gate/evidence.env
 - electron_renderdoc_gate_source_env=build/renderdoc/electron-implicit-layer-default-autocapture/electron-html/evidence.env
 - electron_renderdoc_gate_status=pass
 - electron_renderdoc_gate_reason=pass
@@ -129,7 +129,7 @@
 - electron_renderdoc_gate_required_vulkan_log_no_angle_failure=1
 - macos_portability_status=unavailable
 - macos_portability_reason=missing-macos-probe-evidence
-- macos_portability_evidence_env=build/renderdoc/html-css-goal-status/macos-probe/evidence.env
+- macos_portability_evidence_env=build/renderdoc/html-css-goal-status-current/macos-probe/evidence.env
 - macos_portability_uname_s=
 - macos_portability_uname_m=
 - macos_portability_version=
