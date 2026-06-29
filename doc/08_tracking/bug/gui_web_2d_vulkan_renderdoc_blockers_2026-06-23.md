@@ -178,6 +178,14 @@ Current 2026-06-26 browser capture findings:
   the artifact failure while the crash class stays machine-readable. Current
   aggregate values: Chrome `9` exits with code `139`, Electron `6` exits with
   code `139`.
+- The Chrome X11 layer/hotkey diagnostic now has a layer-only GPU launcher mode
+  (`RDOC_CHROME_HOTKEY_GPU_LAUNCHER=1`) that forces the Chromium GPU child
+  through `scripts/tool/renderdoc-gpu-launcher.shs` without wrapping it in
+  `renderdoccmd capture`. Current evidence shows the launcher is invoked with
+  `renderdoc_gpu_launcher_layer_only=1`, and the GPU process maps both
+  `librenderdoc` and `libvulkan` without crashing, but `RENDERDOC_CAPFILE` is
+  not visible in the GPU process env and no `.rdc` is produced. Evidence:
+  `doc/09_report/renderdoc_chrome_x11_layer_hotkey_gpu_launcher_2026-06-29.md`.
 
 2026-06-26 follow-up diagnostics:
 - `renderdoccmd inject --PID=<chrome-gpu-pid>` is not a Linux workaround.
