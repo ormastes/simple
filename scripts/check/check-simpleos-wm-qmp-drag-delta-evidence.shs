@@ -100,6 +100,44 @@ field() {
     sed -n "s/^$1=//p" "$2" | tail -n 1
 }
 
+source_contains_any() {
+    path="$1"
+    shift
+    if [ ! -f "$path" ]; then
+        return 1
+    fi
+    for pattern in "$@"; do
+        if grep -q "$pattern" "$path"; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+classify_guest_input_contract() {
+    entry_path="$1"
+    guest_entry_mouse_poll_status=missing
+    guest_entry_keyboard_poll_status=missing
+    guest_input_contract_status=fail
+    guest_input_contract_reason=guest-entry-mouse-contract-missing
+    if [ -z "$entry_path" ] || [ ! -f "$entry_path" ]; then
+        guest_input_contract_reason=guest-entry-source-missing
+        return
+    fi
+    if source_contains_any "$entry_path" "_poll_qemu_mouse" "Ps2Mouse" "MOUSE_STATUS_AUX_DATA" "host-input"; then
+        guest_entry_mouse_poll_status=pass
+    fi
+    if source_contains_any "$entry_path" "_poll_qemu_keyboard_input" "qemu-keyboard-repainted"; then
+        guest_entry_keyboard_poll_status=pass
+    fi
+    if [ "$guest_entry_mouse_poll_status" = "pass" ]; then
+        guest_input_contract_status=pass
+        guest_input_contract_reason=pass
+    elif [ "$guest_entry_keyboard_poll_status" = "pass" ]; then
+        guest_input_contract_reason=guest-entry-keyboard-only-for-mouse-injection
+    fi
+}
+
 status=unavailable
 reason=not-run
 changed_bytes=0
@@ -107,6 +145,11 @@ source_region_changed=0
 target_region_changed=0
 before_sha256=
 after_sha256=
+guest_input_contract_status=not-run
+guest_input_contract_reason=not-run
+guest_entry_mouse_poll_status=not-run
+guest_entry_keyboard_poll_status=not-run
+injection_protocol=hmp-mouse-events
 
 emit_simple_bin_failure() {
     reason="$1"
@@ -160,6 +203,7 @@ qmp_socket="$(field simpleos_desktop_qmp_socket "$LAUNCH_OUT")"
 serial_log="$(field simpleos_desktop_qmp_serial_log "$LAUNCH_OUT")"
 stderr_log="$(field simpleos_desktop_qmp_stderr_log "$LAUNCH_OUT")"
 marker_state="$(field simpleos_desktop_qmp_marker_state "$LAUNCH_OUT")"
+classify_guest_input_contract "$launcher_entry"
 
 if [ "$launch_code" -eq 0 ] && [ "$launcher_status" = "pass" ] && [ -S "$qmp_socket" ]; then
     set +e
@@ -254,6 +298,9 @@ PY
     if [ "$drag_code" -eq 0 ]; then
         status=pass
         reason=pass
+    elif [ "$guest_input_contract_status" != "pass" ] && [ "${changed_bytes:-0}" = "0" ]; then
+        status=fail
+        reason="$guest_input_contract_reason"
     else
         status=fail
         reason=qmp-drag-delta-not-proven
@@ -279,6 +326,11 @@ fi
     echo "qemu_wm_drag_delta_stderr_log=${stderr_log:-}"
     echo "qemu_wm_drag_delta_stderr_log_bytes=$(file_byte_count "${stderr_log:-}")"
     echo "qemu_wm_drag_delta_marker_state=${marker_state:-}"
+    echo "qemu_wm_drag_delta_injection_protocol=$injection_protocol"
+    echo "qemu_wm_drag_delta_guest_input_contract_status=$guest_input_contract_status"
+    echo "qemu_wm_drag_delta_guest_input_contract_reason=$guest_input_contract_reason"
+    echo "qemu_wm_drag_delta_guest_entry_mouse_poll_status=$guest_entry_mouse_poll_status"
+    echo "qemu_wm_drag_delta_guest_entry_keyboard_poll_status=$guest_entry_keyboard_poll_status"
     echo "qemu_wm_drag_delta_changed_bytes=${changed_bytes:-0}"
     echo "qemu_wm_drag_delta_source_region_changed=${source_region_changed:-0}"
     echo "qemu_wm_drag_delta_target_region_changed=${target_region_changed:-0}"
@@ -316,6 +368,10 @@ fi
     echo "- launcher entry: ${launcher_entry:-}"
     echo "- qmp socket: ${qmp_socket:--}"
     echo "- marker state: ${marker_state:--}"
+    echo "- injection protocol: $injection_protocol"
+    echo "- guest input contract: $guest_input_contract_status ($guest_input_contract_reason)"
+    echo "- guest mouse polling: $guest_entry_mouse_poll_status"
+    echo "- guest keyboard polling: $guest_entry_keyboard_poll_status"
     echo "- changed bytes: ${changed_bytes:-0}"
     echo "- source region changed pixels: ${source_region_changed:-0}"
     echo "- target region changed pixels: ${target_region_changed:-0}"

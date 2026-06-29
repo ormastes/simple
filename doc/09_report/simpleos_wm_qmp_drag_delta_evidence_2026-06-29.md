@@ -1,7 +1,7 @@
 # SimpleOS WM QMP Drag Delta Evidence
 
 - status: fail
-- reason: qmp-drag-delta-not-proven
+- reason: guest-entry-keyboard-only-for-mouse-injection
 - simple bin: /home/yoon/simple/release/x86_64-unknown-linux-gnu/simple
 - simple bin source: self-hosted:/home/yoon/simple/release/x86_64-unknown-linux-gnu/simple
 - simple bin status: pass
@@ -9,8 +9,12 @@
 - launcher reason: pass
 - launcher target: wm-simple-web
 - launcher entry: examples/09_embedded/simple_os/arch/x86_64/gui_entry_engine2d.spl
-- qmp socket: /tmp/simpleos_desktop_qmp_1866460_1782707432311324827.sock
+- qmp socket: /tmp/simpleos_desktop_qmp_1868319_1782707647168573832.sock
 - marker state: probe:true wm:true engine:true web:true mdi:true top:true taskbar:true html:true
+- injection protocol: hmp-mouse-events
+- guest input contract: fail (guest-entry-keyboard-only-for-mouse-injection)
+- guest mouse polling: missing
+- guest keyboard polling: pass
 - changed bytes: 0
 - source region changed pixels: 0
 - target region changed pixels: 0
@@ -22,8 +26,8 @@
 - after ppm: build/simpleos_wm_qmp_drag_delta_evidence/after-drag.ppm (2359312 bytes)
 - after raw: build/simpleos_wm_qmp_drag_delta_evidence/after-drag.ppm.raw (3145728 bytes; pass)
 - after ppm status: pass; magic pass
-- serial log: build/os/simpleos_desktop_qmp_1866460_1782707432311324827.log (1285 bytes)
-- stderr log: build/os/simpleos_desktop_qmp_1866460_1782707432311324827.log.stderr (0 bytes)
+- serial log: build/os/simpleos_desktop_qmp_1868319_1782707647168573832.log (1285 bytes)
+- stderr log: build/os/simpleos_desktop_qmp_1868319_1782707647168573832.log.stderr (0 bytes)
 
 This wrapper launches the exact WM + Simple Web + Engine2D target in a
 separate QEMU process, captures the BGA framebuffer with QMP
