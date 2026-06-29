@@ -705,6 +705,13 @@ blocked gates, target eval, license, safety, deployment, and app-handoff fields,
 so strict-host review can distinguish retry/eval blockers from deployment or
 safety blockers without opening the focused env files first.
 
+The fine-tune guard wrapper now emits its own default-mode blocker contract:
+required gates, blocked gates, primary blocked gate, blocker reason, and next
+action. Default aggregate mode reads those fields from
+`build/llm_finetune_guard_evidence/evidence.env` instead of relying on a
+previous acceptance env; strict host mode still reads the freshly-generated
+acceptance env.
+
 ## 2026-06-29 Aggregate Blocker Detail Hardening
 
 `scripts/check/check-llm-goal-evidence.shs` now copies focused blocker contracts

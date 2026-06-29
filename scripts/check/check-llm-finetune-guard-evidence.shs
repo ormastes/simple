@@ -97,6 +97,12 @@ do
     fi
 done
 
+required_gates="data_quality,retry6_training_eval,retry7_acceptance,retry6_spec,retry7_spec,tuned_model_acceptance"
+blocked_gates="retry6_training_eval|retry7_acceptance|tuned_model_acceptance"
+primary_blocked_gate="retry6_training_eval"
+blocker_reason="guard_only_retry6_retry7_blocked"
+next_action="complete retry6 training/eval gate before normal acceptance review"
+
 acceptance_status="not_required"
 acceptance_reason="default_guard_only"
 if [ "$STRICT_READY" -eq 1 ]; then
@@ -116,11 +122,30 @@ if [ "$STRICT_READY" -eq 1 ]; then
     if [ "$acceptance_status" != "pass" ]; then
         status="fail"
     fi
+    acceptance_blocked="$(sed -n 's/^llm_finetune_acceptance_blocked_gates=//p' "$ACCEPTANCE_EVIDENCE_ENV" 2>/dev/null | tail -n 1 || true)"
+    acceptance_primary="$(sed -n 's/^llm_finetune_acceptance_primary_blocked_gate=//p' "$ACCEPTANCE_EVIDENCE_ENV" 2>/dev/null | tail -n 1 || true)"
+    acceptance_next="$(sed -n 's/^llm_finetune_acceptance_next_action=//p' "$ACCEPTANCE_EVIDENCE_ENV" 2>/dev/null | tail -n 1 || true)"
+    if [ "$acceptance_status" = "pass" ]; then
+        blocked_gates="none"
+        primary_blocked_gate="none"
+        blocker_reason="$acceptance_reason"
+        next_action="release handoff may cite accepted fine-tune evidence"
+    else
+        blocked_gates="${acceptance_blocked:-tuned_model_acceptance}"
+        primary_blocked_gate="${acceptance_primary:-tuned_model_acceptance}"
+        blocker_reason="$acceptance_reason"
+        next_action="${acceptance_next:-provide passing fine-tune acceptance evidence before strict ready completion}"
+    fi
 fi
 
 {
     printf '%s\n' "llm_finetune_guard_evidence_status=$status"
     printf '%s\n' "llm_finetune_guard_strict_ready=$STRICT_READY"
+    printf '%s\n' "llm_finetune_guard_required_gates=$required_gates"
+    printf '%s\n' "llm_finetune_guard_blocked_gates=$blocked_gates"
+    printf '%s\n' "llm_finetune_guard_primary_blocked_gate=$primary_blocked_gate"
+    printf '%s\n' "llm_finetune_guard_blocker_reason=$blocker_reason"
+    printf '%s\n' "llm_finetune_guard_next_action=$next_action"
     printf '%s\n' "llm_finetune_guard_acceptance_status=$acceptance_status"
     printf '%s\n' "llm_finetune_guard_acceptance_reason=$acceptance_reason"
     printf '%s\n' "llm_finetune_guard_acceptance_env=$ACCEPTANCE_EVIDENCE_ENV"
@@ -143,6 +168,11 @@ fi
     else
         printf '%s\n' "- strict_ready: \`false\`"
     fi
+    printf '%s\n' "- required_gates: \`$required_gates\`"
+    printf '%s\n' "- blocked_gates: \`$blocked_gates\`"
+    printf '%s\n' "- primary_blocked_gate: \`$primary_blocked_gate\`"
+    printf '%s\n' "- blocker_reason: \`$blocker_reason\`"
+    printf '%s\n' "- next_action: \`$next_action\`"
     printf '%s\n' "- acceptance: \`$acceptance_status\`"
     printf '%s\n' "- acceptance_reason: \`$acceptance_reason\`"
     printf '%s\n' "- acceptance_env: \`$ACCEPTANCE_EVIDENCE_ENV\`"

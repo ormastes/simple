@@ -67,7 +67,13 @@ sh scripts/check/check-llm-finetune-guard-evidence.shs
 This wrapper is the canonical local non-training check. It runs the
 fixed-format sample quality gate, retry6 and retry7 direct gates, and the
 retry6/retry7 SSpec manuals. For the checked-in dry-run records it should pass
-only when retry6 and retry7 still report the expected WARN/blocked state.
+only when retry6 and retry7 still report the expected WARN/blocked state. Its
+env records `llm_finetune_guard_required_gates`,
+`llm_finetune_guard_blocked_gates`,
+`llm_finetune_guard_primary_blocked_gate`,
+`llm_finetune_guard_blocker_reason`, and
+`llm_finetune_guard_next_action`, so default aggregate evidence can report the
+current guard blocker without reading a stale acceptance env.
 
 Run strict ready mode only when tuned-model acceptance evidence is expected to
 exist:

@@ -198,10 +198,14 @@ status, compact blocked gates, primary blocked gate, host/runtime gates,
 gradient handle, optimizer-step attempt, and before/after parameter sums. vLLM
 and Torch detail rows include the focused
 wrapper `next_action` values. It also records
-`llm_goal_evidence_finetune_guard_detail` for acceptance status, reason, gate
-exit/status, compact blocked gates, training/model/eval readiness, license,
-safety, deployment, app handoff, decision status, and next action. Those detail
-fields are diagnostic only; they do not relax the strict host gates.
+`llm_goal_evidence_finetune_guard_detail` for the fine-tune guard and
+acceptance path. In default mode this comes from the freshly-run guard wrapper
+and reports guard status, strict-ready mode, guard blocked gates, primary guard
+blocker, guard reason, and next action. In strict host mode it reports the
+fresh acceptance evidence status, reason, gate exit/status, compact blocked
+gates, training/model/eval readiness, license, safety, deployment, app handoff,
+decision status, and next action. Those detail fields are diagnostic only; they
+do not relax the strict host gates.
 
 Latest fine-tune acceptance evidence:
 `doc/09_report/2026/06/llm_finetune_acceptance_2026-06-29.md` records
@@ -218,6 +222,12 @@ records `llm_finetune_acceptance_required_gates`,
 `llm_finetune_acceptance_next_action` so strict aggregate runs can report the
 first concrete blocker plus the exact model/eval/license/safety/deployment/
 app-handoff blocker list.
+
+The local fine-tune guard evidence writes its own current blocker contract to
+`build/llm_finetune_guard_evidence/evidence.env`. Default aggregate mode uses
+that guard env for fine-tune required gates, blocked gates, blocker reason, and
+next action; strict host mode still uses the acceptance env generated during
+the strict run.
 
 On a configured host, use strict host mode when the aggregate must be
 release-completion evidence for the live gates:
