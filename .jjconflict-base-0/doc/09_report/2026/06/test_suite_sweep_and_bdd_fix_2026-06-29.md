@@ -1,5 +1,35 @@
 # Full-suite test sweep + fixes — 2026-06-29
 
+## Update (later 2026-06-29): second systematic fix + decisive categorization
+
+**Fix #2 landed — cross-module array write-back lost in BDD closures.** A
+cross-module function that builds a `[u8]` via an in-place append helper returns
+a TRUNCATED array only when called from a BDD it-block (correct from main).
+Converted `encoding/{msgpack,bson,cbor}` append helpers to return-based +
+reassign — all three specs now **0 failures** (commits `f81e3804`, bson/cbor
+follow-up). Seed bug filed:
+`doc/08_tracking/bug/interp_crossmodule_array_writeback_lost_in_bdd_closure_2026-06-29.md`.
+
+**lib/common after both fixes:** 484 pass / 125 fail / 23 err (23 err = WARN/INFO
+noise). Decisive breakdown of the 125 remaining FAIL files:
+- **~62 `wine_*`** (wine_process 29, wine_dll 12, wine_kernel32_* 6, wine_nt/ntdll 7,
+  wine_hello 3, …): **59 are "function not found"** — a test-first Windows
+  PE-loader / NT / kernel32 / ntdll emulation suite with **no implementation**.
+  NOT bugs; implementing them is a large unrequested feature.
+- **~18 other missing-symbol**: `set_utils`/`iterable`/`functions` modules were
+  **deliberately deleted** (commit "Track production readiness convergence");
+  the specs (incl. `deprecated_removed_spec`, `iter_deprecated_spec`) are **stale**
+  → removal needs approval, not restore.
+- **~45 genuine value-mismatch**: encoding cluster now FIXED; `lshr/overflow_debug`
+  are scratch specs expecting logical `>>` when i64 `>>` is correctly arithmetic
+  (spec wrong, not a bug); the rest is a long individual tail (each its own
+  investigation).
+
+**Conclusion:** the two systematic clusters (BDD matcher + cross-module array
+write-back) are fixed. The literal "fix ALL" is blocked by: unbuilt features
+(Wine), deliberately-removed-API stale specs (approval to delete), and a
+heterogeneous individual tail — no third silver bullet.
+
 ## Fixes landed (verified)
 1. **BDD matcher bug** (seed, commit `62cea5b`, rebuilt+deployed) — `expect(falsy_call()).to_matcher()`
    false-failed ("expected call result to be truthy"). Monotonic `BDD_MATCHER_RAN` flag.
