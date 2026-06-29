@@ -49,7 +49,11 @@ Strict-host aggregate:
   staging are `unsupported`
 - required evidence: `svllm_native_streaming_status=pass`
 - next action: implement native streaming capability evidence and rerun
-  `scripts/check/check-llm-runtime-svllm-native-streaming-evidence.shs`.
+  `scripts/check/check-llm-runtime-svllm-native-streaming-evidence.shs` with
+  `SVLLM_NATIVE_CAPABILITY_SOURCE` and a non-empty
+  schema-v1 `SVLLM_NATIVE_CAPABILITY_EVIDENCE_PATH` from the native probe
+  artifact; the artifact must report probe event/status/exit and native
+  capability statuses matching the wrapper inputs.
 
 ### Torch Optimizer
 
@@ -80,4 +84,3 @@ This tracker can close only when:
 - strict `failed_gates` is empty
 - the strict report shows context/Ponytail replacement, dashboard, vLLM, svLLM,
   Torch optimizer, and fine-tune lanes all passing
-

@@ -15,6 +15,7 @@ INPUT_READ_RANGE_STATUS="${SVLLM_NATIVE_READ_RANGE_STATUS:-unsupported}"
 INPUT_PINNED_BUFFER_STATUS="${SVLLM_NATIVE_PINNED_BUFFER_STATUS:-unsupported}"
 INPUT_DEVICE_STAGING_STATUS="${SVLLM_NATIVE_DEVICE_STAGING_STATUS:-unsupported}"
 CAPABILITY_SOURCE="${SVLLM_NATIVE_CAPABILITY_SOURCE:-env_or_default}"
+CAPABILITY_EVIDENCE_PATH="${SVLLM_NATIVE_CAPABILITY_EVIDENCE_PATH:-}"
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
 rm -f "$OUT_ENV" "$REPORT_PATH" "$LOCAL_REPORT"
@@ -27,6 +28,19 @@ pinned_buffer_status="unsupported"
 device_staging_status="unsupported"
 local_read_bytes_status="unknown"
 capability_provenance_status="missing"
+capability_evidence_status="missing"
+capability_evidence_sha256="missing"
+capability_evidence_size="0"
+capability_evidence_mtime="0"
+capability_evidence_schema_version="missing"
+capability_probe_event="missing"
+capability_probe_status="missing"
+capability_probe_exit="missing"
+capability_evidence_read_range_status="missing"
+capability_evidence_pinned_buffer_status="missing"
+capability_evidence_device_staging_status="missing"
+pass_integrity_status="not_applicable"
+pass_integrity_reason="not_applicable"
 blocked_gates="native_read_range"
 primary_blocked_gate="native_read_range"
 next_action="implement native read_range support, then rerun strict svLLM native streaming evidence"
@@ -74,12 +88,45 @@ case "$CAPABILITY_SOURCE" in
         capability_provenance_status="ready"
         ;;
 esac
+artifact_value() {
+    key="$1"
+    sed -n "s/^${key}=//p" "$CAPABILITY_EVIDENCE_PATH" 2>/dev/null | tail -n 1
+}
+
+if [ -n "$CAPABILITY_EVIDENCE_PATH" ] && [ -s "$CAPABILITY_EVIDENCE_PATH" ]; then
+    capability_evidence_size="$(wc -c <"$CAPABILITY_EVIDENCE_PATH" | tr -d ' ')"
+    capability_evidence_mtime="$(stat -c %Y "$CAPABILITY_EVIDENCE_PATH" 2>/dev/null || stat -f %m "$CAPABILITY_EVIDENCE_PATH" 2>/dev/null || printf 'unknown')"
+    if command -v sha256sum >/dev/null 2>&1; then
+        capability_evidence_sha256="$(sha256sum "$CAPABILITY_EVIDENCE_PATH" | awk '{print $1}')"
+    elif command -v shasum >/dev/null 2>&1; then
+        capability_evidence_sha256="$(shasum -a 256 "$CAPABILITY_EVIDENCE_PATH" | awk '{print $1}')"
+    fi
+    capability_evidence_schema_version="$(artifact_value svllm_native_capability_schema_version)"
+    capability_probe_event="$(artifact_value svllm_native_capability_probe_event)"
+    capability_probe_status="$(artifact_value svllm_native_capability_probe_status)"
+    capability_probe_exit="$(artifact_value svllm_native_capability_probe_exit)"
+    capability_evidence_read_range_status="$(normalize_capability_status "$(artifact_value svllm_native_capability_read_range_status)")"
+    capability_evidence_pinned_buffer_status="$(normalize_capability_status "$(artifact_value svllm_native_capability_pinned_buffer_status)")"
+    capability_evidence_device_staging_status="$(normalize_capability_status "$(artifact_value svllm_native_capability_device_staging_status)")"
+    if [ "$capability_evidence_schema_version" = "1" ] &&
+       [ "$capability_probe_event" = "svllm_native_capability_probe" ] &&
+       [ "$capability_probe_status" = "pass" ] &&
+       [ "$capability_probe_exit" = "0" ] &&
+       [ "$capability_evidence_read_range_status" = "$read_range_status" ] &&
+       [ "$capability_evidence_pinned_buffer_status" = "$pinned_buffer_status" ] &&
+       [ "$capability_evidence_device_staging_status" = "$device_staging_status" ]; then
+        capability_evidence_status="ready"
+    else
+        capability_evidence_status="invalid"
+    fi
+fi
 
 if [ "$local_status" = "pass" ] &&
    [ "$read_range_status" = "ready" ] &&
    [ "$pinned_buffer_status" = "ready" ] &&
    [ "$device_staging_status" = "ready" ] &&
-   [ "$capability_provenance_status" = "ready" ]; then
+   [ "$capability_provenance_status" = "ready" ] &&
+   [ "$capability_evidence_status" = "ready" ]; then
     status="pass"
     reason="native_streaming_ready"
 elif [ "$local_status" = "pass" ]; then
@@ -89,6 +136,8 @@ elif [ "$local_status" = "pass" ]; then
         reason="pinned_buffer_registration_unavailable"
     elif [ "$device_staging_status" != "ready" ]; then
         reason="device_staging_unavailable"
+    elif [ "$capability_evidence_status" != "ready" ]; then
+        reason="capability_evidence_invalid"
     else
         reason="capability_provenance_missing"
     fi
@@ -116,6 +165,9 @@ else
     if [ "$capability_provenance_status" != "ready" ]; then
         if [ -z "$blocked_gates" ]; then blocked_gates="capability_provenance"; else blocked_gates="$blocked_gates|capability_provenance"; fi
     fi
+    if [ "$capability_evidence_status" != "ready" ]; then
+        if [ -z "$blocked_gates" ]; then blocked_gates="capability_evidence"; else blocked_gates="$blocked_gates|capability_evidence"; fi
+    fi
     primary_blocked_gate="${blocked_gates%%|*}"
     case "$primary_blocked_gate" in
         native_read_range)
@@ -130,10 +182,18 @@ else
         capability_provenance)
             next_action="set SVLLM_NATIVE_CAPABILITY_SOURCE to the host probe or artifact that proved the ready native capabilities"
             ;;
+        capability_evidence)
+            next_action="set SVLLM_NATIVE_CAPABILITY_EVIDENCE_PATH to a structured probe artifact whose schema, event, exit, and reported native statuses match the ready capability claims"
+            ;;
         *)
             next_action="collect strict svLLM native streaming evidence and resolve reported native blockers"
             ;;
     esac
+fi
+
+if [ "$status" = "pass" ]; then
+    pass_integrity_status="pass"
+    pass_integrity_reason="all_required_pass_fields_present"
 fi
 
 {
@@ -145,6 +205,20 @@ fi
     printf '%s\n' "svllm_native_streaming_local_readiness_status=$local_status"
     printf '%s\n' "svllm_native_streaming_capability_source=$CAPABILITY_SOURCE"
     printf '%s\n' "svllm_native_streaming_capability_provenance_status=$capability_provenance_status"
+    printf '%s\n' "svllm_native_streaming_capability_evidence_path=$CAPABILITY_EVIDENCE_PATH"
+    printf '%s\n' "svllm_native_streaming_capability_evidence_status=$capability_evidence_status"
+    printf '%s\n' "svllm_native_streaming_capability_evidence_sha256=$capability_evidence_sha256"
+    printf '%s\n' "svllm_native_streaming_capability_evidence_size=$capability_evidence_size"
+    printf '%s\n' "svllm_native_streaming_capability_evidence_mtime=$capability_evidence_mtime"
+    printf '%s\n' "svllm_native_streaming_capability_evidence_schema_version=$capability_evidence_schema_version"
+    printf '%s\n' "svllm_native_streaming_capability_probe_event=$capability_probe_event"
+    printf '%s\n' "svllm_native_streaming_capability_probe_status=$capability_probe_status"
+    printf '%s\n' "svllm_native_streaming_capability_probe_exit=$capability_probe_exit"
+    printf '%s\n' "svllm_native_streaming_capability_evidence_reported_read_range_status=$capability_evidence_read_range_status"
+    printf '%s\n' "svllm_native_streaming_capability_evidence_reported_pinned_buffer_status=$capability_evidence_pinned_buffer_status"
+    printf '%s\n' "svllm_native_streaming_capability_evidence_reported_device_staging_status=$capability_evidence_device_staging_status"
+    printf '%s\n' "svllm_native_streaming_pass_integrity_status=$pass_integrity_status"
+    printf '%s\n' "svllm_native_streaming_pass_integrity_reason=$pass_integrity_reason"
     printf '%s\n' "svllm_native_streaming_read_range_status=$read_range_status"
     printf '%s\n' "svllm_native_streaming_pinned_buffer_status=$pinned_buffer_status"
     printf '%s\n' "svllm_native_streaming_device_staging_status=$device_staging_status"
@@ -163,6 +237,20 @@ fi
     printf '%s\n' "- local_readiness: \`$local_status\`"
     printf '%s\n' "- capability_source: \`$CAPABILITY_SOURCE\`"
     printf '%s\n' "- capability_provenance: \`$capability_provenance_status\`"
+    printf '%s\n' "- capability_evidence_path: \`$CAPABILITY_EVIDENCE_PATH\`"
+    printf '%s\n' "- capability_evidence: \`$capability_evidence_status\`"
+    printf '%s\n' "- capability_evidence_sha256: \`$capability_evidence_sha256\`"
+    printf '%s\n' "- capability_evidence_size: \`$capability_evidence_size\`"
+    printf '%s\n' "- capability_evidence_mtime: \`$capability_evidence_mtime\`"
+    printf '%s\n' "- capability_evidence_schema_version: \`$capability_evidence_schema_version\`"
+    printf '%s\n' "- capability_probe_event: \`$capability_probe_event\`"
+    printf '%s\n' "- capability_probe_status: \`$capability_probe_status\`"
+    printf '%s\n' "- capability_probe_exit: \`$capability_probe_exit\`"
+    printf '%s\n' "- capability_evidence_reported_read_range: \`$capability_evidence_read_range_status\`"
+    printf '%s\n' "- capability_evidence_reported_pinned_buffer: \`$capability_evidence_pinned_buffer_status\`"
+    printf '%s\n' "- capability_evidence_reported_device_staging: \`$capability_evidence_device_staging_status\`"
+    printf '%s\n' "- pass_integrity_status: \`$pass_integrity_status\`"
+    printf '%s\n' "- pass_integrity_reason: \`$pass_integrity_reason\`"
     printf '%s\n' "- read_range: \`$read_range_status\`"
     printf '%s\n' "- pinned_buffer: \`$pinned_buffer_status\`"
     printf '%s\n' "- device_staging: \`$device_staging_status\`"
@@ -170,7 +258,7 @@ fi
     printf '%s\n' "- local_spec_timeout_seconds: \`$LOCAL_SPEC_TIMEOUT_SECONDS\`"
     printf '%s\n' "- env: \`$OUT_ENV\`"
     printf '\n'
-    printf 'This evidence consumes the local svLLM readiness gate and records native streaming capability statuses from `SVLLM_NATIVE_READ_RANGE_STATUS`, `SVLLM_NATIVE_PINNED_BUFFER_STATUS`, and `SVLLM_NATIVE_DEVICE_STAGING_STATUS` (default `unsupported`). It only passes when local readiness passes, all three native capability statuses are `ready`, and `SVLLM_NATIVE_CAPABILITY_SOURCE` names the host probe or artifact that proved those ready statuses. Local file-backed bytes alone remain explicit bring-up evidence, not native streaming completion.\n'
+    printf 'This evidence consumes the local svLLM readiness gate and records native streaming capability statuses from `SVLLM_NATIVE_READ_RANGE_STATUS`, `SVLLM_NATIVE_PINNED_BUFFER_STATUS`, and `SVLLM_NATIVE_DEVICE_STAGING_STATUS` (default `unsupported`). It only passes when local readiness passes, all three native capability statuses are `ready`, `SVLLM_NATIVE_CAPABILITY_SOURCE` names the host probe or artifact that proved those ready statuses, and `SVLLM_NATIVE_CAPABILITY_EVIDENCE_PATH` points at a non-empty schema-v1 probe artifact with `svllm_native_capability_probe_event=svllm_native_capability_probe`, `svllm_native_capability_probe_status=pass`, `svllm_native_capability_probe_exit=0`, and reported native statuses matching the wrapper inputs. Local file-backed bytes alone remain explicit bring-up evidence, not native streaming completion.\n'
 } >"$REPORT_PATH"
 
 if [ "$status" = "pass" ]; then

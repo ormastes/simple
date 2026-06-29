@@ -153,7 +153,18 @@ Configured native hosts provide those native capability results through
 `svllm_native_streaming_capability_provenance_status` so reviewers can
 distinguish an explicit host probe from the default fallback. A strict native
 PASS requires `SVLLM_NATIVE_CAPABILITY_SOURCE` to name the probe or artifact
-that proved the ready native capabilities.
+that proved the ready native capabilities and
+`SVLLM_NATIVE_CAPABILITY_EVIDENCE_PATH` to point at a non-empty probe artifact.
+It also writes `svllm_native_streaming_pass_integrity_status` and
+`svllm_native_streaming_pass_integrity_reason`; PASS integrity requires local
+readiness, all three native capability statuses, provenance, and the evidence
+artifact to be present together. The artifact is a line-oriented schema-v1 env
+file with `svllm_native_capability_probe_event=svllm_native_capability_probe`,
+`svllm_native_capability_probe_status=pass`,
+`svllm_native_capability_probe_exit=0`, and reported read-range, pinned-buffer,
+and device-staging statuses that match the wrapper inputs. The wrapper records
+the artifact SHA-256, size, mtime, schema version, probe event/status/exit, and
+reported native statuses.
 
 Latest Torch/CUDA host probe:
 `doc/09_report/2026/06/llm_runtime_torch_cuda_host_probe_2026-06-28.md`
@@ -218,8 +229,10 @@ instead of only mimic evidence. The aggregate env also records
 vLLM/GPU/preflight/endpoint/model statuses and pass-log integrity, and
 `llm_goal_evidence_svllm_local_detail` for native svLLM streaming status,
 native blocker reason, local readiness, native `read_range`, pinned-buffer,
-device-staging, capability source, capability provenance, local file-backed
-byte-read states, native blocked gates, primary blocked gate, and next action.
+device-staging, capability source, capability provenance, capability evidence
+artifact status and hash metadata, probe event/status/exit, pass integrity,
+local file-backed byte-read states, native blocked gates, primary blocked gate,
+and next action.
 In default mode, the
 dashboard detail keeps a concrete strict-host next action even though live HTTP
 evidence is intentionally not collected, and the svLLM native fields report
@@ -363,7 +376,12 @@ The strict native gate requires the evidence env to report
 `svllm_native_streaming_status=pass`; local file-backed bytes are recorded as
 bring-up evidence but are not enough for native streaming completion. Ready
 native capability env values without a non-default
-`SVLLM_NATIVE_CAPABILITY_SOURCE` fail as `capability_provenance`.
+`SVLLM_NATIVE_CAPABILITY_SOURCE` fail as `capability_provenance`, and ready
+values without a non-empty `SVLLM_NATIVE_CAPABILITY_EVIDENCE_PATH` fail as
+`capability_evidence`. Strict local readiness requires both
+`svllm_native_streaming_status=pass` and
+`svllm_native_streaming_pass_integrity_status=pass`, so a status-only native env
+cannot satisfy strict completion.
 
 Use the focused Torch optimizer gate after changing Torch SFFI, CUDA placement,
 or runtime training behavior:

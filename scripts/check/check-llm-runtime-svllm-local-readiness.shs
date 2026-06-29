@@ -81,6 +81,7 @@ native_reason="default_local_readiness_only"
 native_blocked_gates="none"
 native_primary_blocked_gate="n/a"
 native_next_action="run with --strict-native when native streaming is release-completion evidence"
+native_pass_integrity_status="not_required"
 if [ "$STRICT_NATIVE" -eq 1 ]; then
     native_status="missing"
     native_reason="missing_native_streaming_evidence"
@@ -93,9 +94,17 @@ if [ "$STRICT_NATIVE" -eq 1 ]; then
         evidence_blocked_gates="$(sed -n 's/^svllm_native_streaming_blocked_gates=//p' "$NATIVE_EVIDENCE_ENV" | tail -n 1)"
         evidence_primary_blocked_gate="$(sed -n 's/^svllm_native_streaming_primary_blocked_gate=//p' "$NATIVE_EVIDENCE_ENV" | tail -n 1)"
         evidence_next_action="$(sed -n 's/^svllm_native_streaming_next_action=//p' "$NATIVE_EVIDENCE_ENV" | tail -n 1)"
-        if [ "$evidence_status" = "pass" ]; then
+        evidence_pass_integrity="$(sed -n 's/^svllm_native_streaming_pass_integrity_status=//p' "$NATIVE_EVIDENCE_ENV" | tail -n 1)"
+        native_pass_integrity_status="${evidence_pass_integrity:-missing}"
+        if [ "$evidence_status" = "pass" ] && [ "$evidence_pass_integrity" = "pass" ]; then
             native_status="pass"
             native_reason="${evidence_reason:-native_streaming_passed}"
+        elif [ "$evidence_status" = "pass" ]; then
+            native_status="fail"
+            native_reason="native_streaming_pass_integrity_missing"
+            evidence_blocked_gates="native_pass_integrity"
+            evidence_primary_blocked_gate="native_pass_integrity"
+            evidence_next_action="rerun native svLLM streaming evidence and require svllm_native_streaming_pass_integrity_status=pass"
         else
             native_status="${evidence_status:-fail}"
             native_reason="${evidence_reason:-native_streaming_not_passed}"
@@ -117,6 +126,7 @@ fi
     printf '%s\n' "llm_runtime_svllm_local_readiness_native_blocked_gates=$native_blocked_gates"
     printf '%s\n' "llm_runtime_svllm_local_readiness_native_primary_blocked_gate=$native_primary_blocked_gate"
     printf '%s\n' "llm_runtime_svllm_local_readiness_native_next_action=$native_next_action"
+    printf '%s\n' "llm_runtime_svllm_local_readiness_native_pass_integrity_status=$native_pass_integrity_status"
     printf '%s\n' "llm_runtime_svllm_local_readiness_native_env=$NATIVE_EVIDENCE_ENV"
     printf '%s\n' "llm_runtime_svllm_local_readiness_spec_timeout_seconds=$SPEC_TIMEOUT_SECONDS"
     for key in manifest tensor_bytes stream_plan transport std_fs streaming_readiness svllm_pack_cli svllm_pack_log_modes; do
@@ -140,6 +150,7 @@ fi
     printf '%s\n' "- native_blocked_gates: \`$native_blocked_gates\`"
     printf '%s\n' "- native_primary_blocked_gate: \`$native_primary_blocked_gate\`"
     printf '%s\n' "- native_next_action: \`$native_next_action\`"
+    printf '%s\n' "- native_pass_integrity_status: \`$native_pass_integrity_status\`"
     printf '%s\n' "- native_env: \`$NATIVE_EVIDENCE_ENV\`"
     printf '%s\n' "- spec_timeout_seconds: \`$SPEC_TIMEOUT_SECONDS\`"
     for key in manifest tensor_bytes stream_plan transport std_fs streaming_readiness svllm_pack_cli svllm_pack_log_modes; do
@@ -150,7 +161,7 @@ fi
     printf '%s\n' "- env: \`$OUT_ENV\`"
     printf '\n'
     if [ "$STRICT_NATIVE" -eq 1 ]; then
-        printf 'This strict native check requires a separate native svLLM streaming evidence env with `svllm_native_streaming_status=pass`. Local file-backed readiness alone is not completion evidence for NVFS async scheduling, pinned buffer registration, device staging, or true streaming model loads.\n'
+        printf 'This strict native check requires a separate native svLLM streaming evidence env with `svllm_native_streaming_status=pass` and `svllm_native_streaming_pass_integrity_status=pass`. Local file-backed readiness alone is not completion evidence for NVFS async scheduling, pinned buffer registration, device staging, or true streaming model loads.\n'
     else
         printf 'This evidence proves the local file-backed svLLM pack CLI, manifest, tensor-byte, stream-plan, memory transport, std_fs, and streaming-readiness contracts. It does not prove native NVFS async scheduling, pinned buffer registration, device staging, or true streaming model loads. Run with `--strict-native` when those native gates must be release-completion evidence.\n'
     fi

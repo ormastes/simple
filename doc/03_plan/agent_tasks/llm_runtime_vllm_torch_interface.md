@@ -646,6 +646,18 @@ Strict native evidence also requires a non-default
 ready native capabilities. Setting all native status env values to `ready`
 without that provenance now fails with `capability_provenance` instead of
 claiming native streaming completion from env defaults alone.
+It also requires `SVLLM_NATIVE_CAPABILITY_EVIDENCE_PATH` to point at a
+non-empty schema-v1 probe artifact with
+`svllm_native_capability_probe_event=svllm_native_capability_probe`,
+`svllm_native_capability_probe_status=pass`,
+`svllm_native_capability_probe_exit=0`, and reported read-range, pinned-buffer,
+and device-staging statuses that match the wrapper inputs. Ready native status
+env values plus a source label but without that artifact fail with
+`capability_evidence`, and the wrapper records artifact SHA-256, size, mtime,
+schema version, probe event/status/exit, reported native statuses,
+`svllm_native_streaming_pass_integrity_status` plus
+`svllm_native_streaming_pass_integrity_reason` so aggregate detail can
+distinguish a real native pass from env-only status injection.
 
 ## 2026-06-29 Torch Optimizer Evidence Hardening
 
@@ -885,8 +897,11 @@ The aggregate now also forwards `llm_goal_evidence_svllm_local_detail`.
 Strict-native svLLM failures show the native streaming status, blocker reason,
 native blocked gates, primary blocked gate, next action, local readiness,
 native `read_range`, pinned-buffer, device-staging, and local file-backed
-byte-read states in the aggregate report instead of collapsing the detail row to
-`n/a`.
+byte-read states, capability evidence artifact status, and pass-integrity state
+in the aggregate report instead of collapsing the detail row to `n/a`.
+Strict local readiness also rejects native envs that report
+`svllm_native_streaming_status=pass` without
+`svllm_native_streaming_pass_integrity_status=pass`.
 
 The svLLM aggregate blocker table is now mode-aware. Default local-readiness
 mode reports `required_gates=local_readiness`, `blocked_gates=none`, and
