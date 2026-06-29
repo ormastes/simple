@@ -208,6 +208,14 @@ file with `svllm_native_capability_source` matching
 `svllm_native_capability_probe_exit=0`, and reported read-range, pinned-buffer,
 and device-staging statuses that match the wrapper inputs. The wrapper records
 the artifact SHA-256, size, mtime, source, schema version,
+probe event/status/exit, and the artifact-reported read-range, pinned-buffer,
+and device-staging statuses. Strict aggregate detail forwards those fields as
+`capability_evidence_mtime`,
+`capability_evidence_reported_read_range_status`,
+`capability_evidence_reported_pinned_buffer_status`, and
+`capability_evidence_reported_device_staging_status`, so a top-level report can
+prove the artifact matched the claimed native capability inputs without opening
+the nested native evidence env.
 probe event/status/exit, and reported native statuses.
 
 Latest Torch/CUDA host probe:

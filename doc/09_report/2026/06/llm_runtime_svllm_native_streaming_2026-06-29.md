@@ -8,13 +8,13 @@
 - local_readiness: `pass`
 - local_readiness_env: `build/llm_runtime_svllm_native_streaming/local_readiness/evidence.env`
 - local_readiness_env_size: `3508`
-- local_readiness_env_sha256: `97fd59db77ffc7b7ff6cf7b302405b3266cc93e8d5a3455c9403697ee404f550`
+- local_readiness_env_sha256: `f8157618d749c96decf217da07745225b5b825f07077691e412f0fe3284691fb`
 - local_readiness_log: `build/llm_runtime_svllm_native_streaming/local_readiness.log`
 - local_readiness_log_size: `47`
 - local_readiness_log_sha256: `ad8a0549552e637ab385bca1fa04ca3ee086760d1b1142f91d3b8d46e27e0f3b`
 - local_readiness_report: `build/llm_runtime_svllm_native_streaming/local_readiness_report.md`
 - local_readiness_report_size: `3130`
-- local_readiness_report_sha256: `6091b17c1631484bf30a2e7d3374db93f507ba4ebde2f97403da2d3a48e87ccb`
+- local_readiness_report_sha256: `36b49c7246a24d625bd18f53ca19cb3aeae7503a7562a655bc3cc61666140bcb`
 - capability_source: `env_or_default`
 - capability_provenance: `missing`
 - capability_evidence_path: ``
@@ -40,7 +40,7 @@
 - surface_manifest: `build/llm_runtime_svllm_native_streaming/svllm_native_streaming_surface_manifest.tsv`
 - surface_manifest_count: `8`
 - surface_manifest_size: `1110`
-- surface_manifest_sha256: `4dca55c663eeebb9d6d3ece9ac1831a999b432249bf086430ffe77f1ecddcef6`
+- surface_manifest_sha256: `7c686d53c0e34a5c607e63ddda30f2ed95e2bfc8b2b68faf338888647dcd7440`
 - env: `build/llm_runtime_svllm_native_streaming/evidence.env`
 
 This evidence consumes the local svLLM readiness gate and records native streaming capability statuses from `SVLLM_NATIVE_READ_RANGE_STATUS`, `SVLLM_NATIVE_PINNED_BUFFER_STATUS`, and `SVLLM_NATIVE_DEVICE_STAGING_STATUS` (default `unsupported`). It hashes the wrapper/source/spec/doc surface manifest plus the nested local-readiness env, log, and report so strict native evidence identifies the exact contract and local readiness run it consumed. It only passes when local readiness passes, all three native capability statuses are `ready`, `SVLLM_NATIVE_CAPABILITY_SOURCE` names the host probe or artifact that proved those ready statuses, and `SVLLM_NATIVE_CAPABILITY_EVIDENCE_PATH` points at a non-empty schema-v1 probe artifact with matching `svllm_native_capability_source`, `svllm_native_capability_probe_event=svllm_native_capability_probe`, `svllm_native_capability_probe_status=pass`, `svllm_native_capability_probe_exit=0`, and reported native statuses matching the wrapper inputs. Local file-backed bytes alone remain explicit bring-up evidence, not native streaming completion.
