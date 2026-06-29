@@ -1,7 +1,7 @@
 use std.spec.{describe, it, expect}
 use std.common.compress.{CompressionError}
 use std.common.compress.zstd_huf.{ZstdHufDecodeEntry}
-use std.common.compress.zstd_literals.{zstd_huf_decode_stream_for_test}
+use std.common.compress.zstd_literals.{zstd_huf_decode_stream_for_test, zstd_parse_direct_huffman_weights_for_test, zstd_parse_fse_huffman_weights}
 use std.common.compress.zstd_types.{ZstdHufTableState}
 
 fn expect_corrupt(result: Result<[u8], CompressionError>, message_part: text):
@@ -13,7 +13,22 @@ fn expect_corrupt(result: Result<[u8], CompressionError>, message_part: text):
         _:
             expect(false).to_equal(true)
 
+fn expect_weight_truncated(result: Result<([i64], i64), CompressionError>, message_part: text):
+    expect(result.is_err()).to_equal(true)
+    val err = result.unwrap_err()
+    match err:
+        CompressionError.TruncatedInput(message):
+            expect(message).to_contain(message_part)
+        _:
+            expect(false).to_equal(true)
+
 describe "Zstd Huffman literal stream bounds validation":
+    it "rejects negative FSE weight offsets before indexing":
+        expect_weight_truncated(zstd_parse_fse_huffman_weights([0x01u8], -1, 1), "tree header")
+
+    it "rejects negative direct weight offsets before indexing":
+        expect_weight_truncated(zstd_parse_direct_huffman_weights_for_test([0x80u8], -1, 1), "tree header")
+
     it "rejects negative regenerated sizes before decoding":
         val table = ZstdHufTableState(
             table_bits: 1,
