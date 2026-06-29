@@ -256,7 +256,8 @@ current mode. It also copies focused blocker details into
 `llm_goal_evidence_<lane>_blocker_reason` for strict context/Ponytail
 replacement, strict live dashboard, vLLM, svLLM, Torch optimizer, and fine-tune
 lanes so operators can triage strict failures from the aggregate report without
-opening every focused env first. It also writes
+opening every focused env first; the Markdown Blocker Details table shows the
+same primary blocked gate as a dedicated column. It also writes
 `llm_goal_evidence_<lane>_next_action` and a report `Next Actions` table for
 all aggregate lanes, including context/Ponytail replacement, live dashboard,
 host runtime, fine-tune, and public absence rendering triage. The detail table also includes

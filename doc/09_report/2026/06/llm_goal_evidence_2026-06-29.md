@@ -33,14 +33,14 @@
 
 ## Blocker Details
 
-| lane | required_gates | blocked_gates | reason |
-|------|----------------|---------------|--------|
-| context_ponytail | `mimic_evidence` | `none` | `default_mimic_evidence_only` |
-| dashboard | `route_and_collector_evidence` | `none` | `default_route_and_collector_evidence_only` |
-| vllm_host | `local_vllm,local_gpu,serve_preflight,endpoint_reachable,models_listed` | `local_vllm|serve_preflight|endpoint_reachable|models_listed` | `missing_local_vllm` |
-| svllm_local | `local_readiness` | `none` | `default_local_readiness_only` |
-| torch_optimizer | `libtorch,cuda,parameter_cuda,autograd_gradient,optimizer_step_decreases_parameter_sum` | `libtorch` | `libtorch_unavailable` |
-| finetune_guard | `data_quality,retry6_training_eval,retry7_acceptance,retry6_spec,retry7_spec,tuned_model_acceptance` | `retry6_training_eval|retry7_acceptance|tuned_model_acceptance` | `guard_only_retry6_retry7_blocked` |
+| lane | required_gates | blocked_gates | primary_blocked_gate | reason |
+|------|----------------|---------------|----------------------|--------|
+| context_ponytail | `mimic_evidence` | `none` | `none` | `default_mimic_evidence_only` |
+| dashboard | `route_and_collector_evidence` | `none` | `none` | `default_route_and_collector_evidence_only` |
+| vllm_host | `local_vllm,local_gpu,serve_preflight,endpoint_reachable,models_listed` | `local_vllm|serve_preflight|endpoint_reachable|models_listed` | `local_vllm` | `missing_local_vllm` |
+| svllm_local | `local_readiness` | `none` | `none` | `default_local_readiness_only` |
+| torch_optimizer | `libtorch,cuda,parameter_cuda,autograd_gradient,optimizer_step_decreases_parameter_sum` | `libtorch` | `libtorch` | `libtorch_unavailable` |
+| finetune_guard | `data_quality,retry6_training_eval,retry7_acceptance,retry6_spec,retry7_spec,tuned_model_acceptance` | `retry6_training_eval|retry7_acceptance|tuned_model_acceptance` | `retry6_training_eval` | `guard_only_retry6_retry7_blocked` |
 
 ## Next Actions
 
