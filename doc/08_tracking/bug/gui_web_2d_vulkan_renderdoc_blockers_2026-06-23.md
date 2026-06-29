@@ -215,6 +215,16 @@ Current 2026-06-26 browser capture findings:
   `build/renderdoc/chrome-gpu-delay-device-target-vulkan-only/html/evidence.env`
   and
   `build/renderdoc/electron-gpu-delay-device-target-vulkan-only/electron-html/evidence.env`.
+- The Chrome target-control lane now has a headless C++ client for the
+  Vulkan-only RenderDoc build, so it no longer depends on `qrenderdoc`
+  availability. Current evidence auto-builds the client, connects to the
+  Chromium GPU process target-control server, selects the GPU PID, and sends
+  `TriggerCapture(1)`. The target reports `target_api=` and returns only Noop
+  messages (`rdoc_chrome_target_control_target_message_count=3875`,
+  `rdoc_chrome_target_control_target_noop_count=3875`), so no `NewCapture`
+  message or `.rdc` is produced. Evidence:
+  `build/renderdoc/chrome-target-control-autoclient-vulkan-only/evidence.env`
+  and `doc/09_report/renderdoc_chrome_target_control_2026-06-29.md`.
 
 2026-06-26 follow-up diagnostics:
 - `renderdoccmd inject --PID=<chrome-gpu-pid>` is not a Linux workaround.

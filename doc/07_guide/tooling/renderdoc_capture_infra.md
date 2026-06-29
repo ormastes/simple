@@ -1722,18 +1722,30 @@ RDOC_AUTOCAPTURE_END_EGL_VK_UNLOCK=2 \
   build path now exists and is selected by default on Linux when present, but
   current Chrome/Electron probes against that build still stop inside
   `eglInitialize` and produce no `.rdc`.
-- The Chrome target-control diagnostic wraps `qrenderdoc --ui-python` in an
-  outer timeout. If qrenderdoc's UI Python startup hangs, the script now records
-  `target-control-no-evidence` instead of leaving the lane running indefinitely.
-  It also records `rdoc_chrome_target_control_gpu_env_has_layer`,
-  `rdoc_chrome_target_control_gpu_maps_has_renderdoc`, and
-  `rdoc_chrome_target_control_gpu_maps_has_vulkan` from the Chromium GPU
-  process. If Chrome does not create a GPU process, the script fails closed with
-  `rdoc_chrome_target_control_reason=no-gpu-process` before qrenderdoc can
-  trigger capture on an unrelated target:
+- The Chrome target-control diagnostic can use a headless C++ client when the
+  active RenderDoc tree has `librenderdoc.so` but no `qrenderdoc`, which is the
+  case for the repo-local Vulkan-only build. The wrapper auto-builds
+  `scripts/tool/renderdoc-target-control-client.cpp` against
+  `build/tools/renderdoc-src` when needed, connects directly to RenderDoc's
+  target-control server, and sends `TriggerCapture(1)` without qrenderdoc UI
+  Python. It still wraps qrenderdoc in an outer timeout when qrenderdoc is the
+  selected client. The diagnostic records
+  `rdoc_chrome_target_control_gpu_env_has_layer`,
+  `rdoc_chrome_target_control_gpu_maps_has_renderdoc`,
+  `rdoc_chrome_target_control_gpu_maps_has_vulkan`,
+  `rdoc_chrome_target_control_target_ident_count`,
+  `rdoc_chrome_target_control_target_api`,
+  `rdoc_chrome_target_control_target_message_count`, and
+  `rdoc_chrome_target_control_target_noop_count`. Current Vulkan-only evidence
+  connects to the GPU process target, but target API remains empty and every
+  post-trigger message is `Noop`, so no `.rdc` is produced. If Chrome does not
+  create a GPU process, the script fails closed with
+  `rdoc_chrome_target_control_reason=no-gpu-process` before triggering capture
+  on an unrelated target:
 
 ```sh
-sh scripts/check/check-renderdoc-chrome-target-control.shs
+RDOC_HOME=build/tools/renderdoc-linux-vulkan-only \
+  sh scripts/check/check-renderdoc-chrome-target-control.shs
 ```
 - Running Electron with only the RenderDoc Vulkan layer currently times out
   before ARGB output and produces no `.rdc`; the canonical Electron gate still
