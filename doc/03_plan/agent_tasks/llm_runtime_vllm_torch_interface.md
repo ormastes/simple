@@ -876,6 +876,11 @@ separate `LLM_DASHBOARD_LIVE_HTTP_EVIDENCE_ENV` with
 `llm_dashboard_live_http_status=pass`; without it, strict dashboard completion
 fails with `live_http_authenticated_request` blocked instead of treating route
 contracts as a live operator-dashboard pass.
+The aggregate strict-host path now runs
+`check-llm-dashboard-live-http-evidence.shs` before
+`check-llm-dashboard-live-evidence.shs`, so a missing configured dashboard URL
+is preserved as the concrete `base_url` live-HTTP blocker in dashboard detail
+instead of collapsing to a missing live-HTTP env.
 
 The context/Ponytail replacement wrapper now also runs
 `test/02_integration/app/mcp_context_ponytail_dispatch_spec.spl` as
