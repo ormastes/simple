@@ -751,3 +751,44 @@ Generated manuals must show the active `config/var.sdn`, the candidate root list
 the selected resolved path, and fallback evidence. A stale
 `doc/07_guide/compiler/module_resolver.md` / `var_resolution.md` or generated
 `doc/06_spec/...` manual is a verify failure, not release cleanup.
+
+### Seam qualification bar (before migrating ANY subsystem into `variants/`)
+
+A candidate seam may be migrated ONLY if it passes BOTH:
+
+1. **Real existing variation** in the code today — two+ genuine implementations of
+   one interface, or real branching behind one interface. Refactor OUT existing
+   logic; never invent a backend just to fill a group (violates no-unused-code).
+2. **Genuine build/deploy-target choice, not a runtime-host/per-call decision.**
+   The overlay resolves at COMPILE time, so the chosen variant is baked into the
+   binary. A runtime-host value (host OS, negotiated content-encoding) or a
+   per-call argument baked at build time REGRESSES correctness.
+
+Rejected examples (recorded in `doc/08_tracking/bug/var_overlay_*`):
+`path_separator` (runtime host), `encode_<arch>` (compiler is multi-target at
+runtime — one binary emits all arches), crypto `constant_time` (no real alt
+backend without FFI), compress codec (runtime-parameterized: codec is a per-call
+arg / `Accept-Encoding` negotiation). An honest "no qualifying seam — needs
+precondition X" is the correct deliverable when none passes; never force a weak
+or behavior-breaking variant.
+
+### Safe migration pattern (proven: ui.renderer, os platform-ext)
+
+- Keep the EXISTING import path as the stable name; mirror its exact segments
+  (including any leading `std`/`lib`) under `variants/<group>/<value>/<segs>.spl`.
+  Change ZERO importers; create only non-default variant dirs (NOT `.../default`)
+  so the default profile provably falls through to the canonical `src` impl.
+- Make the canonical (src) seam preserve today's behavior exactly: delegate one
+  selection point (e.g. `renderer_priority_order()`, `target_lib_ext()`); keep all
+  implementations compiled in and any runtime override intact.
+- Keep the active profile inert by default — `auto`/`default` create no selected
+  root (a literal selected value like `cpu` IS a live root: a `config/var.sdn`
+  `dev` footgun).
+
+### Tooling: `simple var`
+
+`simple var {list,check,roots,resolve <module>}` (`src/app/var/main.spl`,
+`--var-profile <name>` override) inspects the active overlay: groups/values,
+manifest validation (excludes the `auto` sentinel), active candidate roots, and
+the resolved candidate file for a stable import. Use it in verify evidence
+instead of hand-tracing resolution.
