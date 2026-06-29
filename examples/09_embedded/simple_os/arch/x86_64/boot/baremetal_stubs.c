@@ -6,6 +6,10 @@
 
 typedef int64_t RuntimeValue;
 
+void x25519_sc_reduce(uint8_t *s);
+void x25519_sc_muladd(uint8_t *s, const uint8_t *a, const uint8_t *b,
+                      const uint8_t *c);
+
 
 #if defined(__x86_64__) || defined(__i386__)
 
@@ -5938,20 +5942,20 @@ static void sc_muladd(uint8_t out[32], const uint8_t a[32], const uint8_t b[32],
 
 /* ---------- ring crypto stubs (baremetal fallback — return -1 to trigger software path) ---------- */
 
-int64_t rt_tls13_ring_ed25519_keypair_raw(const uint8_t seed[32], uint8_t pk[32], uint8_t sk[64])
+__attribute__((weak)) int64_t rt_tls13_ring_ed25519_keypair_raw(const uint8_t seed[32], uint8_t pk[32], uint8_t sk[64])
 {
     (void)seed; (void)pk; (void)sk;
     return -1;
 }
 
-int64_t rt_tls13_ring_ed25519_sign_raw(const uint8_t *msg, uint32_t msg_len,
+__attribute__((weak)) int64_t rt_tls13_ring_ed25519_sign_raw(const uint8_t *msg, uint32_t msg_len,
                                         const uint8_t sk[64], uint8_t sig[64])
 {
     (void)msg; (void)msg_len; (void)sk; (void)sig;
     return -1;
 }
 
-int64_t rt_tls13_ring_ed25519_verify_raw(const uint8_t *msg, uint32_t msg_len,
+__attribute__((weak)) int64_t rt_tls13_ring_ed25519_verify_raw(const uint8_t *msg, uint32_t msg_len,
                                           const uint8_t pk[32], const uint8_t sig[64])
 {
     (void)msg; (void)msg_len; (void)pk; (void)sig;
@@ -5979,10 +5983,58 @@ static void _ed25519_create_keypair(const uint8_t seed[32], uint8_t pk[32], uint
 static void _ed25519_sign(const uint8_t *msg, uint32_t msg_len,
                            const uint8_t sk[64], uint8_t sig[64])
 {
-    extern int64_t rt_tls13_ring_ed25519_sign_raw(const uint8_t *msg, uint32_t msg_len,
-                                                  const uint8_t sk[64], uint8_t sig[64]);
-    if (rt_tls13_ring_ed25519_sign_raw(msg, msg_len, sk, sig) == 0) return;
-    for (int i = 0; i < 64; i++) sig[i] = 0;
+    uint8_t h[64];
+    _ed25519_sha512(sk, 32, h);
+
+    uint8_t a_scalar[32];
+    for (int i = 0; i < 32; i++) a_scalar[i] = h[i];
+    a_scalar[0] &= 248;
+    a_scalar[31] &= 127;
+    a_scalar[31] |= 64;
+
+    uint32_t nonce_input_len = 32U + msg_len;
+    uint8_t *nonce_input = (uint8_t *)malloc(nonce_input_len ? nonce_input_len : 1U);
+    if (!nonce_input) {
+        for (int i = 0; i < 64; i++) sig[i] = 0;
+        return;
+    }
+    for (uint32_t i = 0; i < 32U; i++) nonce_input[i] = h[32U + i];
+    for (uint32_t i = 0; i < msg_len; i++) nonce_input[32U + i] = msg ? msg[i] : 0;
+    uint8_t nonce_hash[64];
+    _ed25519_sha512(nonce_input, nonce_input_len, nonce_hash);
+    free(nonce_input);
+
+    uint8_t r_scalar[32];
+    extern void x25519_sc_reduce(uint8_t *);
+    x25519_sc_reduce(nonce_hash);
+    for (uint32_t i = 0; i < 32U; i++) r_scalar[i] = nonce_hash[i];
+
+    ge_p3 R;
+    ge_scalarmult_base(&R, r_scalar);
+    uint8_t r_encoded[32];
+    ge_tobytes(r_encoded, &R);
+
+    uint32_t hram_input_len = 64U + msg_len;
+    uint8_t *hram_input = (uint8_t *)malloc(hram_input_len ? hram_input_len : 1U);
+    if (!hram_input) {
+        for (int i = 0; i < 64; i++) sig[i] = 0;
+        return;
+    }
+    for (uint32_t i = 0; i < 32U; i++) hram_input[i] = r_encoded[i];
+    for (uint32_t i = 0; i < 32U; i++) hram_input[32U + i] = sk[32U + i];
+    for (uint32_t i = 0; i < msg_len; i++) hram_input[64U + i] = msg ? msg[i] : 0;
+    uint8_t hram_hash[64];
+    _ed25519_sha512(hram_input, hram_input_len, hram_hash);
+    free(hram_input);
+
+    uint8_t hram_reduced[32];
+    x25519_sc_reduce(hram_hash);
+    for (uint32_t i = 0; i < 32U; i++) hram_reduced[i] = hram_hash[i];
+    uint8_t s_scalar[32];
+    x25519_sc_muladd(s_scalar, hram_reduced, a_scalar, r_scalar);
+
+    for (uint32_t i = 0; i < 32U; i++) sig[i] = r_encoded[i];
+    for (uint32_t i = 0; i < 32U; i++) sig[32U + i] = s_scalar[i];
 }
 
 static int _ed25519_verify(const uint8_t *msg, uint32_t msg_len,
@@ -6055,20 +6107,30 @@ int64_t rt_ed25519_sign(int64_t msg_rv, int64_t sk_rv, int64_t sig_rv)
     return 0;
 }
 
-RuntimeValue rt_ed25519_sign_seed(RuntimeValue seed_rv, RuntimeValue msg_rv)
+RuntimeValue rt_ed25519_sign_seed(RuntimeValue seed_rv, RuntimeValue pub_rv, RuntimeValue msg_rv)
 {
-    uint32_t seed_len = 0, msg_len = 0;
+    uint32_t seed_len = 0, pub_len = 0, msg_len = 0;
     uint8_t *seed = _ed_rv_to_bytes(seed_rv, &seed_len);
+    uint8_t *pub = _ed_rv_to_bytes(pub_rv, &pub_len);
     uint8_t *msg = _ed_rv_to_bytes(msg_rv, &msg_len);
-    if (!seed || seed_len != 32) {
+    if (!seed || seed_len != 32 || !pub || pub_len != 32) {
         if (seed) free(seed);
+        if (pub) free(pub);
         if (msg) free(msg);
         return NIL_VALUE;
     }
-    uint8_t pk[32], sk[64], sig[64];
-    _ed25519_create_keypair(seed, pk, sk);
-    _ed25519_sign(msg ? msg : (const uint8_t*)"", msg_len, sk, sig);
+    uint8_t sk[64], sig[64];
+    for (uint32_t i = 0; i < 32; i++) {
+        sk[i] = seed[i];
+        sk[32 + i] = pub[i];
+    }
+    extern int64_t rt_tls13_ring_ed25519_sign_raw(const uint8_t *msg, uint32_t msg_len,
+                                                  const uint8_t sk[64], uint8_t sig[64]);
+    if (rt_tls13_ring_ed25519_sign_raw(msg ? msg : (const uint8_t*)"", msg_len, sk, sig) != 0) {
+        _ed25519_sign(msg ? msg : (const uint8_t*)"", msg_len, sk, sig);
+    }
     free(seed);
+    free(pub);
     if (msg) free(msg);
     RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray) + 64 * sizeof(RuntimeValue));
     if (!a) return NIL_VALUE;
@@ -6517,7 +6579,7 @@ uint64_t rt_x86_rdrand_or_rdtsc(void)
 #endif
 }
 
-/* rt_ed25519_sign_test: sign-only (skip broken verify). Returns 0=pass, -1=fail */
+/* rt_ed25519_sign_test: exact RFC/live-vector signer gate. Returns 0=pass, -1=fail */
 int64_t rt_ed25519_sign_test(void)
 {
     _ed25519_init_consts();
@@ -6527,19 +6589,49 @@ int64_t rt_ed25519_sign_test(void)
         0x44,0x49,0xc5,0x69,0x7b,0x32,0x69,0x19,
         0x70,0x3b,0xac,0x03,0x1c,0xae,0x7f,0x60
     };
+    static const uint8_t expected_empty_sig[64] = {
+        0xe5,0x56,0x43,0x00,0xc3,0x60,0xac,0x72,
+        0x90,0x86,0xe2,0xcc,0x80,0x6e,0x82,0x8a,
+        0x84,0x87,0x7f,0x1e,0xb8,0xe5,0xd9,0x74,
+        0xd8,0x73,0xe0,0x65,0x22,0x49,0x01,0x55,
+        0x5f,0xb8,0x82,0x15,0x90,0xa3,0x3b,0xac,
+        0xc6,0x1e,0x39,0x70,0x1c,0xf9,0xb4,0x6b,
+        0xd2,0x5b,0xf5,0xf0,0x59,0x5b,0xbe,0x24,
+        0x65,0x51,0x41,0x43,0x8e,0x7a,0x10,0x0b
+    };
+    static const uint8_t live_hash[32] = {
+        0xbe,0x43,0x25,0x26,0xd3,0x87,0x3c,0xad,
+        0x9a,0xfd,0xba,0x57,0x51,0x30,0xca,0x1b,
+        0xea,0xa1,0xda,0xf6,0x24,0x09,0x30,0x45,
+        0xcb,0x59,0xf0,0x48,0xc8,0xdf,0x8c,0x41
+    };
+    static const uint8_t expected_live_sig[64] = {
+        0xfb,0x5d,0xf0,0xe0,0x5b,0x4e,0x59,0x96,
+        0xbf,0xe9,0x89,0xbb,0x11,0xb6,0xa5,0xbb,
+        0x5b,0xc2,0x5f,0xc8,0x8d,0x6b,0x2c,0x87,
+        0x17,0x74,0x1a,0x3c,0xf5,0xba,0x05,0xad,
+        0x3c,0x7d,0x13,0x58,0xcc,0xe7,0x2a,0x7c,
+        0x45,0xb3,0x33,0x54,0x90,0xd8,0x0b,0x44,
+        0xe4,0xd6,0x70,0x4f,0xaf,0xbc,0xbc,0x1a,
+        0x95,0x21,0xf6,0x74,0x71,0x06,0xcd,0x09
+    };
     uint8_t pk[32], sk[64], sig1[64], sig2[64];
     _ed25519_create_keypair(seed, pk, sk);
-    _ed25519_sign((const uint8_t*)"", 0, sk, sig1);
-    /* Check sig1 not all zero */
-    int nz = 0;
-    for (int i = 0; i < 64; i++) if (sig1[i] != 0) nz = 1;
-    if (!nz) return -1;
-    /* Sign different message, check sigs differ */
-    static const uint8_t msg2[3] = {0x48, 0x69, 0x21};
-    _ed25519_sign(msg2, 3, sk, sig2);
-    int differ = 0;
-    for (int i = 0; i < 64; i++) if (sig1[i] != sig2[i]) differ = 1;
-    return differ ? 0 : -1;
+    extern int64_t rt_tls13_ring_ed25519_sign_raw(const uint8_t *msg, uint32_t msg_len,
+                                                  const uint8_t sk[64], uint8_t sig[64]);
+    if (rt_tls13_ring_ed25519_sign_raw((const uint8_t*)"", 0, sk, sig1) != 0) {
+        _ed25519_sign((const uint8_t*)"", 0, sk, sig1);
+    }
+    for (int i = 0; i < 64; i++) {
+        if (sig1[i] != expected_empty_sig[i]) return -1;
+    }
+    if (rt_tls13_ring_ed25519_sign_raw(live_hash, 32, sk, sig2) != 0) {
+        _ed25519_sign(live_hash, 32, sk, sig2);
+    }
+    for (int i = 0; i < 64; i++) {
+        if (sig2[i] != expected_live_sig[i]) return -1;
+    }
+    return 0;
 }
 
 /* rt_ed25519_keypair_pk: return 32-byte public key from seed */
@@ -7161,6 +7253,232 @@ RuntimeValue rt_net_last_ssh_plain_payload_slice(int64_t start_i64, int64_t leng
 int64_t rt_net_last_ssh_plain_payload_len(void)
 {
     return (int64_t)_ssh_last_plain_payload_len;
+}
+
+static int64_t _x86_boot_tcp_listen_fd = -1;
+static int64_t _x86_boot_tcp_client_fd = -1;
+
+static int64_t _x86_runtime_int(int64_t value)
+{
+    return IS_INT((RuntimeValue)value) ? (value >> 3) : value;
+}
+
+static RuntimeArray *_x86_runtime_array(RuntimeValue value)
+{
+    HeapHeader *hdr;
+    if (IS_HEAP(value)) {
+        hdr = (HeapHeader *)DECODE_PTR(value);
+    } else if ((((uint64_t)value) & TAG_MASK) == 0ULL && (uint64_t)value >= 0x10000ULL) {
+        hdr = (HeapHeader *)(uintptr_t)value;
+    } else {
+        return NULL;
+    }
+    if (!hdr || hdr->type != HEAP_ARRAY) return NULL;
+    return (RuntimeArray *)hdr;
+}
+
+int64_t rt_boot_tcp_bind(int64_t addr)
+{
+    (void)addr;
+    int64_t socket_rv = rt_net_socket(1);
+    int64_t socket_fd = _x86_runtime_int(socket_rv);
+    if (socket_fd < 0) return socket_fd;
+    int64_t bind_rc = _x86_runtime_int(rt_net_bind(socket_fd, 22));
+    if (bind_rc < 0) return bind_rc;
+    int64_t listen_rc = _x86_runtime_int(rt_net_listen(socket_fd, 8));
+    if (listen_rc < 0) return listen_rc;
+    _x86_boot_tcp_listen_fd = socket_fd;
+    return socket_fd;
+}
+
+int64_t rt_boot_tcp_bind_port(int64_t port)
+{
+    int64_t socket_rv = rt_net_socket(1);
+    int64_t socket_fd = _x86_runtime_int(socket_rv);
+    if (socket_fd < 0) return socket_fd;
+    int64_t bind_rc = _x86_runtime_int(rt_net_bind(socket_fd, port));
+    if (bind_rc < 0) return bind_rc;
+    int64_t listen_rc = _x86_runtime_int(rt_net_listen(socket_fd, 8));
+    if (listen_rc < 0) return listen_rc;
+    _x86_boot_tcp_listen_fd = socket_fd;
+    return socket_fd;
+}
+
+int64_t rt_boot_tcp_accept_timeout(int64_t fd, int64_t ms)
+{
+    (void)ms;
+    int64_t listen_fd = _x86_boot_tcp_listen_fd >= 0 ? _x86_boot_tcp_listen_fd : fd;
+    int64_t accepted = _x86_runtime_int(rt_net_accept(listen_fd));
+    if (accepted < 0) return -1;
+    _x86_boot_tcp_client_fd = accepted;
+    return ENCODE_INT(200);
+}
+
+static int64_t _x86_boot_send_raw(const uint8_t *data, uint32_t len)
+{
+    if (_x86_boot_tcp_client_fd < 0) return -1;
+    RuntimeValue array = _tls_runtime_array_from_bytes(data, len);
+    int64_t rc = _x86_runtime_int(rt_net_send_bytes(_x86_boot_tcp_client_fd, array));
+    return rc < 0 ? rc : (int64_t)len;
+}
+
+int64_t rt_boot_tcp_send_ssh_banner(int64_t fd)
+{
+    static const uint8_t banner[] = "SSH-2.0-SimpleOS_1.0\r\n";
+    if (fd != 200) return -1;
+    return _x86_boot_send_raw(banner, (uint32_t)(sizeof(banner) - 1U));
+}
+
+int64_t rt_boot_tcp_write_bytes(int64_t fd, RuntimeValue data_rv)
+{
+    if (fd != 200 || _x86_boot_tcp_client_fd < 0) return -1;
+    return _x86_runtime_int(rt_net_send_bytes(_x86_boot_tcp_client_fd, data_rv));
+}
+
+int64_t rt_boot_tcp_send_plain_payload(int64_t fd, RuntimeValue data_rv)
+{
+    RuntimeArray *payload = _x86_runtime_array(data_rv);
+    if (fd != 200 || _x86_boot_tcp_client_fd < 0 || !payload) return -1;
+    RuntimeValue *items = runtime_array_items(payload);
+    uint32_t payload_len = payload->len;
+    uint32_t padding_len = 4U;
+    while (((5U + payload_len + padding_len) % 8U) != 0U) padding_len++;
+    uint32_t packet_len = 1U + payload_len + padding_len;
+    uint32_t total = 4U + packet_len;
+    uint8_t *packet = (uint8_t *)malloc(total ? total : 1U);
+    if (!packet) return -12;
+    packet[0] = (uint8_t)(packet_len >> 24);
+    packet[1] = (uint8_t)(packet_len >> 16);
+    packet[2] = (uint8_t)(packet_len >> 8);
+    packet[3] = (uint8_t)packet_len;
+    packet[4] = (uint8_t)padding_len;
+    for (uint32_t i = 0; i < payload_len; i++) {
+        packet[5U + i] = _rv_byte(items[i]);
+    }
+    for (uint32_t i = 0; i < padding_len; i++) {
+        packet[5U + payload_len + i] = 0;
+    }
+    int64_t rc = _x86_boot_send_raw(packet, total);
+    free(packet);
+    return rc < 0 ? rc : (int64_t)payload_len;
+}
+
+RuntimeValue rt_boot_tcp_take_version_bytes(int64_t fd)
+{
+    if (fd != 200 || _x86_boot_tcp_client_fd < 0) {
+        return _tls_runtime_array_from_bytes((const uint8_t *)"", 0);
+    }
+    RuntimeValue text_rv = rt_net_recv_version_text(_x86_boot_tcp_client_fd);
+    if (!IS_HEAP(text_rv)) {
+        return _tls_runtime_array_from_bytes((const uint8_t *)"", 0);
+    }
+    RuntimeString *s = (RuntimeString *)DECODE_PTR(text_rv);
+    if (!s || s->hdr.type != HEAP_STRING) {
+        return _tls_runtime_array_from_bytes((const uint8_t *)"", 0);
+    }
+    return _tls_runtime_array_from_bytes((const uint8_t *)s->data, s->len);
+}
+
+RuntimeValue rt_boot_tcp_take_version_text(int64_t fd)
+{
+    if (fd != 200 || _x86_boot_tcp_client_fd < 0) return rt_string_from_cstr("");
+    return rt_net_recv_version_text(_x86_boot_tcp_client_fd);
+}
+
+RuntimeValue rt_boot_tcp_read_ssh_plain_packet_payload(int64_t fd)
+{
+    if (fd != 200 || _x86_boot_tcp_client_fd < 0) {
+        return _tls_runtime_array_from_bytes((const uint8_t *)"", 0);
+    }
+    return rt_net_recv_ssh_plain_packet_payload(_x86_boot_tcp_client_fd);
+}
+
+RuntimeValue rt_boot_tcp_read_ssh_encrypted_packet(int64_t fd)
+{
+    if (fd != 200 || _x86_boot_tcp_client_fd < 0) {
+        return _tls_runtime_array_from_bytes((const uint8_t *)"", 0);
+    }
+    int sock_fd = (int)_x86_boot_tcp_client_fd;
+    if (sock_fd < 0 || sock_fd >= MAX_SOCKETS || !_sockets[sock_fd].in_use) {
+        return _tls_runtime_array_from_bytes((const uint8_t *)"", 0);
+    }
+    struct tcp_socket *s = &_sockets[sock_fd];
+    int timeout = 0;
+    while (_tcp_rx_available(sock_fd) < 4U &&
+           _sockets[sock_fd].state == TCP_ESTABLISHED &&
+           timeout < 50000) {
+        _virtio_net_poll();
+        timeout++;
+        for (volatile int d = 0; d < 1000; d++) {}
+    }
+    if (_tcp_rx_available(sock_fd) < 4U) {
+        return _tls_runtime_array_from_bytes((const uint8_t *)"", 0);
+    }
+
+    uint32_t idx = s->rx_tail;
+    uint8_t header[4];
+    for (uint32_t i = 0; i < 4U; i++) {
+        header[i] = s->rxbuf[idx];
+        idx = (idx + 1U) % TCP_RXBUF_SIZE;
+    }
+    uint32_t packet_len =
+        ((uint32_t)header[0] << 24) |
+        ((uint32_t)header[1] << 16) |
+        ((uint32_t)header[2] << 8) |
+        (uint32_t)header[3];
+    if (packet_len < 1U || packet_len > 262144U) {
+        return _tls_runtime_array_from_bytes((const uint8_t *)"", 0);
+    }
+    uint32_t total = 4U + packet_len + 16U;
+    while (_tcp_rx_available(sock_fd) < total &&
+           _sockets[sock_fd].state == TCP_ESTABLISHED &&
+           timeout < 50000) {
+        _virtio_net_poll();
+        timeout++;
+        for (volatile int d = 0; d < 1000; d++) {}
+    }
+    if (_tcp_rx_available(sock_fd) < total) {
+        serial_puts("[tcp-ssh-encrypted] incomplete packet\r\n");
+        return _tls_runtime_array_from_bytes((const uint8_t *)"", 0);
+    }
+
+    uint8_t *packet = (uint8_t *)malloc(total ? total : 1U);
+    if (!packet) {
+        return NIL_VALUE;
+    }
+    for (uint32_t i = 0; i < total; i++) {
+        packet[i] = s->rxbuf[s->rx_tail];
+        s->rx_tail = (s->rx_tail + 1U) % TCP_RXBUF_SIZE;
+    }
+    RuntimeValue out = _tls_runtime_array_from_bytes(packet, total);
+    serial_puts("[tcp-ssh-encrypted] packet-len=");
+    serial_put_dec(total);
+    serial_puts("\r\n");
+    free(packet);
+    return out;
+}
+
+RuntimeValue rt_boot_tcp_read_bytes(int64_t max_len)
+{
+    if (_x86_boot_tcp_client_fd < 0) {
+        return _tls_runtime_array_from_bytes((const uint8_t *)"", 0);
+    }
+    return rt_net_recv_bytes(_x86_boot_tcp_client_fd, max_len);
+}
+
+int64_t rt_boot_tcp_close(int64_t fd)
+{
+    if (fd == 200 && _x86_boot_tcp_client_fd >= 0) {
+        int64_t rc = _x86_runtime_int(rt_net_close(_x86_boot_tcp_client_fd));
+        _x86_boot_tcp_client_fd = -1;
+        return rc;
+    }
+    if (_x86_boot_tcp_listen_fd >= 0) {
+        int64_t rc = _x86_runtime_int(rt_net_close(_x86_boot_tcp_listen_fd));
+        _x86_boot_tcp_listen_fd = -1;
+        return rc;
+    }
+    return 0;
 }
 
 RuntimeValue rt_tls13_recv_record(int64_t sock_fd)
@@ -9868,6 +10186,57 @@ static RuntimeValue _tls_runtime_array_from_bytes(const uint8_t *buf, uint32_t l
     out->items = runtime_array_inline_items(out);
     for (uint32_t i = 0; i < len; i++) out->items[i] = ENCODE_INT(buf[i]);
     return ENCODE_PTR(out);
+}
+
+RuntimeValue rt_tls13_sha512_full(RuntimeValue data_rv)
+{
+    uint32_t data_len = 0;
+    uint8_t *data = _tls_copy_runtime_bytes(data_rv, &data_len);
+    uint8_t out[64];
+    if (!data && data_len != 0) {
+        return _tls_runtime_array_from_bytes((const uint8_t *)"", 0);
+    }
+    _ed25519_sha512(data ? data : (const uint8_t *)"", data_len, out);
+    if (data) free(data);
+    return _tls_runtime_array_from_bytes(out, 64U);
+}
+
+RuntimeValue rt_ed25519_sc_reduce_64(RuntimeValue scalar64_rv)
+{
+    uint32_t scalar_len = 0;
+    uint8_t *scalar = _tls_copy_runtime_bytes(scalar64_rv, &scalar_len);
+    uint8_t out[32];
+    if (!scalar || scalar_len != 64U) {
+        if (scalar) free(scalar);
+        return _tls_runtime_array_from_bytes((const uint8_t *)"", 0);
+    }
+    extern void x25519_sc_reduce(uint8_t *);
+    x25519_sc_reduce(scalar);
+    for (uint32_t i = 0; i < 32U; i++) out[i] = scalar[i];
+    free(scalar);
+    return _tls_runtime_array_from_bytes(out, 32U);
+}
+
+RuntimeValue rt_ed25519_sc_muladd(RuntimeValue a_rv, RuntimeValue b_rv, RuntimeValue c_rv)
+{
+    uint32_t a_len = 0, b_len = 0, c_len = 0;
+    uint8_t *a = _tls_copy_runtime_bytes(a_rv, &a_len);
+    uint8_t *b = _tls_copy_runtime_bytes(b_rv, &b_len);
+    uint8_t *c = _tls_copy_runtime_bytes(c_rv, &c_len);
+    uint8_t out[32];
+    if (!a || !b || !c || a_len != 32U || b_len != 32U || c_len != 32U) {
+        if (a) free(a);
+        if (b) free(b);
+        if (c) free(c);
+        return _tls_runtime_array_from_bytes((const uint8_t *)"", 0);
+    }
+    extern void x25519_sc_muladd(uint8_t *s, const uint8_t *a, const uint8_t *b,
+                                 const uint8_t *c);
+    x25519_sc_muladd(out, a, b, c);
+    free(a);
+    free(b);
+    free(c);
+    return _tls_runtime_array_from_bytes(out, 32U);
 }
 
 static int64_t _tls_write_runtime_bytes(RuntimeValue out_rv, const uint8_t *buf, uint32_t len)

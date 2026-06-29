@@ -155,6 +155,8 @@ int64_t rt_tls13_ring_ed25519_verify_raw(const uint8_t *msg, uint32_t msg_len,
 {
     if (!pk || !sig) return -1;
 
+    ge_p3 Rgiven;
+    if (x25519_ge_frombytes_vartime(&Rgiven, sig) == 0) return -1;
     ge_p3 A;
     if (x25519_ge_frombytes_vartime(&A, pk) == 0) return -1;
     ge_p3 negA = A;
@@ -180,17 +182,75 @@ int64_t rt_tls13_ring_ed25519_verify_raw(const uint8_t *msg, uint32_t msg_len,
     ge_p2 Rcheck;
     x25519_ge_double_scalarmult_vartime(&Rcheck, hram, &negA, sig + 32);
 
+    fe recip_check;
+    fe x_check;
+    fe y_check;
+    fe_invert(&recip_check, &Rcheck.Z);
+    fe_mul_ttt(&x_check, &Rcheck.X, &recip_check);
+    fe_mul_ttt(&y_check, &Rcheck.Y, &recip_check);
+
+    fe recip_given;
+    fe x_given;
+    fe y_given;
+    fe_invert(&recip_given, &Rgiven.Z);
+    fe_mul_ttt(&x_given, &Rgiven.X, &recip_given);
+    fe_mul_ttt(&y_given, &Rgiven.Y, &recip_given);
+
+    uint8_t check_x[32], check_y[32], given_x[32], given_y[32];
+    fe_tobytes(check_x, &x_check);
+    fe_tobytes(check_y, &y_check);
+    fe_tobytes(given_x, &x_given);
+    fe_tobytes(given_y, &y_given);
+    return ring_core_0_17_14__CRYPTO_memcmp(check_x, given_x, 32) == 0 &&
+           ring_core_0_17_14__CRYPTO_memcmp(check_y, given_y, 32) == 0 ? 0 : -1;
+}
+
+static int _ed25519_recompute_s_for_sig(const uint8_t *msg, uint32_t msg_len,
+                                        const uint8_t sk[64], const uint8_t a_scalar[32],
+                                        const uint8_t nonce[32], uint8_t sig[64])
+{
+    uint32_t hram_input_len = 64u + msg_len;
+    uint8_t *hram_input = (uint8_t *)malloc(hram_input_len ? hram_input_len : 1);
+    if (!hram_input) return -1;
+    for (uint32_t i = 0; i < 32; i++) hram_input[i] = sig[i];
+    for (uint32_t i = 0; i < 32; i++) hram_input[32 + i] = sk[32 + i];
+    for (uint32_t i = 0; i < msg_len; i++) hram_input[64 + i] = msg ? msg[i] : 0;
+    uint8_t hram[64];
+    _tls_sha512_hash(hram_input, hram_input_len, hram);
+    free(hram_input);
+    x25519_sc_reduce(hram);
+    x25519_sc_muladd(sig + 32, hram, a_scalar, nonce);
+    return 0;
+}
+
+static void _ed25519_affine_xy_from_p3(const ge_p3 *p, uint8_t x_out[32], uint8_t y_out[32])
+{
     fe recip;
     fe x;
     fe y;
-    fe_invert(&recip, &Rcheck.Z);
-    fe_mul_ttt(&x, &Rcheck.X, &recip);
-    fe_mul_ttt(&y, &Rcheck.Y, &recip);
+    fe_invert(&recip, &p->Z);
+    fe_mul_ttt(&x, &p->X, &recip);
+    fe_mul_ttt(&y, &p->Y, &recip);
+    fe_tobytes(x_out, &x);
+    fe_tobytes(y_out, &y);
+}
 
-    uint8_t check[32];
-    fe_tobytes(check, &y);
-    check[31] ^= (uint8_t)(fe_isnegative(&x) << 7);
-    return ring_core_0_17_14__CRYPTO_memcmp(check, sig, 32) == 0 ? 0 : -1;
+static int _ed25519_ge_p3_equal_affine(const ge_p3 *a, const ge_p3 *b)
+{
+    uint8_t ax[32], ay[32], bx[32], by[32];
+    _ed25519_affine_xy_from_p3(a, ax, ay);
+    _ed25519_affine_xy_from_p3(b, bx, by);
+    return ring_core_0_17_14__CRYPTO_memcmp(ax, bx, 32) == 0 &&
+           ring_core_0_17_14__CRYPTO_memcmp(ay, by, 32) == 0;
+}
+
+static void _ed25519_encode_ge_p3(uint8_t out[32], const ge_p3 *p)
+{
+    uint8_t x[32], y[32];
+    _ed25519_affine_xy_from_p3(p, x, y);
+    for (uint32_t i = 0; i < 32; i++) out[i] = y[i];
+    out[31] &= 0x7fU;
+    out[31] |= (uint8_t)((x[0] & 1U) << 7);
 }
 
 int64_t rt_tls13_ring_ed25519_keypair_raw(const uint8_t seed[32], uint8_t pk[32], uint8_t sk[64])
@@ -203,14 +263,7 @@ int64_t rt_tls13_ring_ed25519_keypair_raw(const uint8_t seed[32], uint8_t pk[32]
 
     ge_p3 A;
     x25519_ge_scalarmult_base(&A, h, 0);
-    fe recip;
-    fe x;
-    fe y;
-    fe_invert(&recip, &A.Z);
-    fe_mul_ttt(&x, &A.X, &recip);
-    fe_mul_ttt(&y, &A.Y, &recip);
-    fe_tobytes(pk, &y);
-    pk[31] ^= (uint8_t)(fe_isnegative(&x) << 7);
+    _ed25519_encode_ge_p3(pk, &A);
 
     for (uint32_t i = 0; i < 32; i++) {
         sk[i] = seed[i];
@@ -242,27 +295,9 @@ int64_t rt_tls13_ring_ed25519_sign_raw(const uint8_t *msg, uint32_t msg_len,
 
     ge_p3 R;
     x25519_ge_scalarmult_base(&R, nonce, 0);
-    fe recip;
-    fe x;
-    fe y;
-    fe_invert(&recip, &R.Z);
-    fe_mul_ttt(&x, &R.X, &recip);
-    fe_mul_ttt(&y, &R.Y, &recip);
-    fe_tobytes(sig, &y);
-    sig[31] ^= (uint8_t)(fe_isnegative(&x) << 7);
+    _ed25519_encode_ge_p3(sig, &R);
 
-    uint32_t hram_input_len = 64u + msg_len;
-    uint8_t *hram_input = (uint8_t *)malloc(hram_input_len ? hram_input_len : 1);
-    if (!hram_input) return -1;
-    for (uint32_t i = 0; i < 32; i++) hram_input[i] = sig[i];
-    for (uint32_t i = 0; i < 32; i++) hram_input[32 + i] = sk[32 + i];
-    for (uint32_t i = 0; i < msg_len; i++) hram_input[64 + i] = msg ? msg[i] : 0;
-    uint8_t hram[64];
-    _tls_sha512_hash(hram_input, hram_input_len, hram);
-    free(hram_input);
-    x25519_sc_reduce(hram);
-
-    x25519_sc_muladd(sig + 32, hram, a_scalar, nonce);
+    if (_ed25519_recompute_s_for_sig(msg, msg_len, sk, a_scalar, nonce, sig) != 0) return -1;
     return 0;
 }
 

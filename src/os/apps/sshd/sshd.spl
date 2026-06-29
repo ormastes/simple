@@ -53,9 +53,25 @@ fn decode_net_runtime_fd(raw: i64) -> i64:
         return raw >> 3
     raw
 
+fn normalize_boot_tcp_client_fd(raw: i64) -> i64:
+    """Map the direct boot TCP accept result onto the boot session handle.
+
+    The freestanding runtime exposes the accepted SSH connection through fd 200.
+    Some generated call paths surface that success as decoded fd 0, so normalize
+    non-negative boot accepts before constructing an SshSession.
+    """
+    val decoded = decode_net_runtime_fd(raw)
+    if decoded == 0:
+        return 200
+    decoded
+
 pub fn sshd_decode_net_runtime_i32_for_test(raw: i64) -> i32:
     """Test hook for tagged direct-runtime integer decoding."""
     decode_net_runtime_i32(raw)
+
+pub fn sshd_normalize_boot_tcp_client_fd_for_test(raw: i64) -> i64:
+    """Test hook for the live boot TCP accepted-session handle contract."""
+    normalize_boot_tcp_client_fd(raw)
 
 pub fn sshd_build_host_keys_for_session_for_test(
     advertise_ed25519: bool,
@@ -267,9 +283,10 @@ impl SshDaemon:
         """
         var accept_wait_ticks: u64 = 0
         while self.running:
-            val client_fd = rt_boot_tcp_accept_timeout(self.listen_fd, 1)
-            if client_fd >= 0:
+            val raw_client_fd = rt_boot_tcp_accept_timeout(self.listen_fd, 1)
+            if raw_client_fd >= 0:
                 accept_wait_ticks = 0
+                val client_fd = normalize_boot_tcp_client_fd(raw_client_fd)
                 serial_println("[sshd] accepted client fd={client_fd}")
                 serial_println("[sshd] handle_connection")
 

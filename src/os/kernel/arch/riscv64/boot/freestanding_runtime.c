@@ -144,13 +144,33 @@ static spl_i64 rt_heap(void *ptr) {
     return (spl_i64)(((spl_u64)ptr) | RT_VALUE_TAG_HEAP);
 }
 
+static spl_i64 rt_extern_heap(void *ptr) {
+    if (!ptr) {
+        return rt_nil();
+    }
+    return (spl_i64)(spl_u64)ptr;
+}
+
+static spl_i64 rt_extern_array(spl_i64 value) {
+    RtHeapHeader *header = (RtHeapHeader *)((spl_u64)value & ~RT_VALUE_TAG_MASK);
+    if ((((spl_u64)value) & RT_VALUE_TAG_MASK) == RT_VALUE_TAG_HEAP &&
+        header &&
+        header->object_type == RT_HEAP_ARRAY) {
+        return (spl_i64)(spl_u64)header;
+    }
+    return value;
+}
+
 static RtHeapHeader *rt_as_heap(spl_i64 value, spl_u8 kind) {
     spl_u64 raw = (spl_u64)value;
     RtHeapHeader *header;
-    if ((raw & RT_VALUE_TAG_MASK) != RT_VALUE_TAG_HEAP) {
+    if ((raw & RT_VALUE_TAG_MASK) == RT_VALUE_TAG_HEAP) {
+        header = (RtHeapHeader *)(raw & ~RT_VALUE_TAG_MASK);
+    } else if ((raw & RT_VALUE_TAG_MASK) == 0ULL && raw >= 0x10000ULL) {
+        header = (RtHeapHeader *)raw;
+    } else {
         return (RtHeapHeader *)0;
     }
-    header = (RtHeapHeader *)(raw & ~RT_VALUE_TAG_MASK);
     if (!header || header->object_type != kind) {
         return (RtHeapHeader *)0;
     }
@@ -2685,7 +2705,7 @@ spl_i64 rt_boot_tcp_take_version_text(spl_i64 fd) {
 spl_i64 rt_boot_tcp_take_version_bytes(spl_i64 fd) {
     spl_u64 line_end = 0ULL;
     if (fd != 200 || !g_boot_tcp_client_open) {
-        return rt_byte_array_new_len(rt_int(0));
+        return rt_extern_array(rt_byte_array_new_len(rt_int(0)));
     }
     for (spl_u64 polls = 0ULL; polls < 50000ULL; polls = polls + 1ULL) {
         while (line_end < g_boot_tcp_rx_len) {
@@ -2698,7 +2718,7 @@ spl_i64 rt_boot_tcp_take_version_bytes(spl_i64 fd) {
                 spl_i64 out = rt_byte_array_new_len(rt_int((spl_i64)text_len));
                 spl_i64 *data = (spl_i64 *)(spl_u64)rt_array_data_ptr(out);
                 if (!data) {
-                    return rt_byte_array_new_len(rt_int(0));
+                    return rt_extern_array(rt_byte_array_new_len(rt_int(0)));
                 }
                 for (spl_u64 i = 0ULL; i < text_len; i = i + 1ULL) {
                     data[i] = rt_int((spl_i64)g_boot_tcp_rx_buf[i]);
@@ -2709,13 +2729,13 @@ spl_i64 rt_boot_tcp_take_version_bytes(spl_i64 fd) {
                 }
                 g_boot_tcp_rx_len = unread;
                 g_boot_tcp_rx_off = 0ULL;
-                return out;
+                return rt_extern_array(out);
             }
             line_end = line_end + 1ULL;
         }
         rt_poll_rx_once();
     }
-    return rt_byte_array_new_len(rt_int(0));
+    return rt_extern_array(rt_byte_array_new_len(rt_int(0)));
 }
 
 spl_i64 rt_boot_tcp_close(spl_i64 fd) {
@@ -2794,30 +2814,30 @@ spl_i64 rt_boot_tcp_read_ssh_plain_packet_payload(spl_i64 fd) {
     spl_u32 payload_len;
     spl_i64 out;
     if (fd != 200 || !g_boot_tcp_client_open) {
-        return rt_array_new(0);
+        return rt_extern_array(rt_array_new(0));
     }
     if (rt_boot_tcp_read_raw(header, 5ULL) != 5ULL) {
-        return rt_array_new(0);
+        return rt_extern_array(rt_array_new(0));
     }
     uart_line_tcp_read5(header, 5ULL);
     packet_len = ((spl_u32)header[0] << 24) | ((spl_u32)header[1] << 16) | ((spl_u32)header[2] << 8) | (spl_u32)header[3];
     padding_len = (spl_u32)header[4];
     if (packet_len < 1U || padding_len + 1U > packet_len) {
-        return rt_array_new(0);
+        return rt_extern_array(rt_array_new(0));
     }
     remaining_len = packet_len - 1U;
     if ((spl_u64)remaining_len > sizeof(body)) {
-        return rt_array_new(0);
+        return rt_extern_array(rt_array_new(0));
     }
     if (rt_boot_tcp_read_raw(body, (spl_u64)remaining_len) != (spl_u64)remaining_len) {
-        return rt_array_new(0);
+        return rt_extern_array(rt_array_new(0));
     }
     payload_len = remaining_len - padding_len;
     out = rt_array_new((spl_i64)payload_len);
     for (spl_u32 i = 0U; i < payload_len; i = i + 1U) {
         rt_array_push(out, rt_int((spl_i64)body[i]));
     }
-    return out;
+    return rt_extern_array(out);
 }
 
 spl_i64 rt_boot_tcp_read_ssh_encrypted_packet(spl_i64 fd) {
@@ -2827,21 +2847,21 @@ spl_i64 rt_boot_tcp_read_ssh_encrypted_packet(spl_i64 fd) {
     spl_u32 body_len;
     spl_i64 out;
     if (fd != 200 || !g_boot_tcp_client_open) {
-        return rt_array_new(0);
+        return rt_extern_array(rt_array_new(0));
     }
     if (rt_boot_tcp_read_raw(header, 4ULL) != 4ULL) {
-        return rt_array_new(0);
+        return rt_extern_array(rt_array_new(0));
     }
     packet_len = ((spl_u32)header[0] << 24) | ((spl_u32)header[1] << 16) | ((spl_u32)header[2] << 8) | (spl_u32)header[3];
     if (packet_len < 1U || packet_len > 4096U) {
-        return rt_array_new(0);
+        return rt_extern_array(rt_array_new(0));
     }
     body_len = packet_len + 16U;
     if ((spl_u64)body_len > sizeof(body)) {
-        return rt_array_new(0);
+        return rt_extern_array(rt_array_new(0));
     }
     if (rt_boot_tcp_read_raw(body, (spl_u64)body_len) != (spl_u64)body_len) {
-        return rt_array_new(0);
+        return rt_extern_array(rt_array_new(0));
     }
     out = rt_array_new((spl_i64)(4U + body_len));
     for (spl_u32 i = 0U; i < 4U; i = i + 1U) {
@@ -2850,7 +2870,7 @@ spl_i64 rt_boot_tcp_read_ssh_encrypted_packet(spl_i64 fd) {
     for (spl_u32 i = 0U; i < body_len; i = i + 1U) {
         rt_array_push(out, rt_int((spl_i64)body[i]));
     }
-    return out;
+    return rt_extern_array(out);
 }
 
 spl_i64 rt_boot_tcp_read_bytes(spl_i64 max_len) {
@@ -2858,7 +2878,7 @@ spl_i64 rt_boot_tcp_read_bytes(spl_i64 max_len) {
     spl_u64 available;
     spl_i64 out;
     if (want == 0ULL) {
-        return rt_array_new(0);
+        return rt_extern_array(rt_array_new(0));
     }
     if (g_boot_tcp_rx_off >= g_boot_tcp_rx_len) {
         for (spl_u64 polls = 0ULL; polls < 50000ULL; polls = polls + 1ULL) {
@@ -2869,7 +2889,7 @@ spl_i64 rt_boot_tcp_read_bytes(spl_i64 max_len) {
         }
     }
     if (g_boot_tcp_rx_off >= g_boot_tcp_rx_len) {
-        return rt_array_new(0);
+        return rt_extern_array(rt_array_new(0));
     }
     available = g_boot_tcp_rx_len - g_boot_tcp_rx_off;
     if (want > available) {
@@ -2887,7 +2907,7 @@ spl_i64 rt_boot_tcp_read_bytes(spl_i64 max_len) {
         g_boot_tcp_rx_len = 0;
         g_boot_tcp_rx_off = 0;
     }
-    return out;
+    return rt_extern_array(out);
 }
 
 __attribute__((weak)) spl_i64 rt_io_tcp_bind(spl_i64 addr) {

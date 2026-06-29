@@ -12,10 +12,12 @@ extern fn rt_boot_tcp_write_text(fd: i64, data: text) -> i64
 extern fn rt_boot_tcp_write_bytes(fd: i64, data: [u8]) -> i64
 extern fn rt_boot_tcp_read_bytes(max_len: i64) -> [u8]
 extern fn rt_boot_tcp_read_ssh_plain_packet_payload(fd: i64) -> [u8]
+extern fn rt_boot_tcp_read_ssh_encrypted_packet(fd: i64) -> [u8]
 extern fn rt_boot_tcp_take_version_text(fd: i64) -> text
 extern fn rt_boot_tcp_take_version_bytes(fd: i64) -> [u8]
 extern fn rt_boot_tcp_close(fd: i64) -> i64
 extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+extern fn rt_thread_sleep(ms: i64) -> i64
 
 struct RtNetSocketEntry:
     fd: i64
@@ -132,14 +134,21 @@ fn _rt_net_read_exact(os_fd: i64, want: u64) -> [u8]:
     if os_fd < 0:
         return []
     var out: [u8] = []
+    var empty_reads: u64 = 0
     while out.len() < want:
         val chunk = rt_boot_tcp_read_bytes((want - out.len()).to_i64())
         if chunk.len() == 0:
-            return []
-        var i: u64 = 0
-        while i < chunk.len():
-            out.push(chunk[i])
-            i = i + 1
+            empty_reads = empty_reads + 1
+            if empty_reads > 1000:
+                return []
+            rt_thread_sleep(1)
+            pass_dn
+        else:
+            empty_reads = 0
+            var i: u64 = 0
+            while i < chunk.len():
+                out.push(chunk[i])
+                i = i + 1
     out
 
 fn _rt_net_byte_u32(data: [u8], idx: u64) -> u32:
@@ -417,6 +426,8 @@ fn rt_net_recv_ssh_plain_packet_payload(sock_fd: i64) -> [u8]:
 @export("C", name: "rt_net_recv_ssh_encrypted_packet")
 fn rt_net_recv_ssh_encrypted_packet(sock_fd: i64) -> [u8]:
     serial_println("[rt-net] encrypted recv fn sock_fd={sock_fd}")
+    if sock_fd == 200:
+        return rt_boot_tcp_read_ssh_encrypted_packet(sock_fd)
     val entry = _rt_net_find(sock_fd)
     val os_fd =
         if entry == nil:

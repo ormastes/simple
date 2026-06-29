@@ -59,6 +59,7 @@ extern int64_t rt_tls13_ring_ed25519_verify_raw(const uint8_t *msg, uint32_t msg
 #define rt_aes128_encrypt_block_into tls13_ed25519_helper_rt_aes128_encrypt_block_into
 #define rt_ed25519_keypair tls13_ed25519_helper_rt_ed25519_keypair
 #define rt_ed25519_sign tls13_ed25519_helper_rt_ed25519_sign
+#define rt_ed25519_sign_seed tls13_ed25519_helper_rt_ed25519_sign_seed
 #define rt_ed25519_verify tls13_ed25519_helper_rt_ed25519_verify
 #define rt_ed25519_self_test tls13_ed25519_helper_rt_ed25519_self_test
 #include "../../shared/crypto_common.h"
@@ -74,6 +75,7 @@ extern int64_t rt_tls13_ring_ed25519_verify_raw(const uint8_t *msg, uint32_t msg
 #undef rt_aes128_encrypt_block_into
 #undef rt_ed25519_keypair
 #undef rt_ed25519_sign
+#undef rt_ed25519_sign_seed
 #undef rt_ed25519_verify
 #undef rt_ed25519_self_test
 #undef RV_INT

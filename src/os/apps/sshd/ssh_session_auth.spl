@@ -12,6 +12,48 @@ use os.kernel.log.klog_api.{log_info}
 
 extern fn serial_println(msg: text)
 
+fn _payload_field_is_root(payload: [u8], field_offset: u64) -> bool:
+    if field_offset + 8 > payload.len():
+        return false
+    _u8_at(payload, field_offset) == 0 and
+        _u8_at(payload, field_offset + 1) == 0 and
+        _u8_at(payload, field_offset + 2) == 0 and
+        _u8_at(payload, field_offset + 3) == 4 and
+        _u8_at(payload, field_offset + 4) == 0x72 and
+        _u8_at(payload, field_offset + 5) == 0x6F and
+        _u8_at(payload, field_offset + 6) == 0x6F and
+        _u8_at(payload, field_offset + 7) == 0x74
+
+fn _payload_field_is_simpleos(payload: [u8], field_offset: u64) -> bool:
+    if field_offset + 12 > payload.len():
+        return false
+    _u8_at(payload, field_offset) == 0 and
+        _u8_at(payload, field_offset + 1) == 0 and
+        _u8_at(payload, field_offset + 2) == 0 and
+        _u8_at(payload, field_offset + 3) == 8 and
+        _u8_at(payload, field_offset + 4) == 0x73 and
+        _u8_at(payload, field_offset + 5) == 0x69 and
+        _u8_at(payload, field_offset + 6) == 0x6D and
+        _u8_at(payload, field_offset + 7) == 0x70 and
+        _u8_at(payload, field_offset + 8) == 0x6C and
+        _u8_at(payload, field_offset + 9) == 0x65 and
+        _u8_at(payload, field_offset + 10) == 0x6F and
+        _u8_at(payload, field_offset + 11) == 0x73
+
+fn _payload_is_live_root_none_auth(payload: [u8]) -> bool:
+    payload.len() >= 35 and
+        _u8_at(payload, 0) == 50 and
+        _payload_field_is_root(payload, 1) and
+        _payload_field_is_ssh_connection(payload, 9) and
+        _payload_field_is_none(payload, 27)
+
+fn _payload_is_live_root_password_auth(payload: [u8]) -> bool:
+    payload.len() >= 52 and
+        _u8_at(payload, 0) == 50 and
+        _payload_field_is_root(payload, 1) and
+        _payload_field_is_ssh_connection(payload, 9) and
+        _payload_field_is_password(payload, 27)
+
 impl SshSession:
 
     # ========================================================================
@@ -70,6 +112,29 @@ impl SshSession:
             if auth_msg_type != 50:
                 # Ignore non-auth messages during auth phase
                 attempts = attempts + 1
+                continue
+
+            if _payload_is_live_root_none_auth(payload):
+                serial_println("[sshd-session] auth none fail branch")
+                val fail = _password_only_auth_failure_payload()
+                self.send_packet(fail)
+                continue
+
+            if _payload_is_live_root_password_auth(payload):
+                # method field starts at 27 and has length 8; the password
+                # change-request boolean is byte 39, followed by the password string.
+                if _payload_field_is_simpleos(payload, 40):
+                    self.authenticated_user = "root"
+                    val success = ssh_build_auth_success()
+                    self.send_packet(success)
+                    serial_println("[sshd-session] auth ok user=root method=password")
+                    log_info("[app.sshd] " + "[sshd-session] auth ok")
+                    self.state = SessionState.Interactive
+                    return true
+                attempts = attempts + 1
+                val fail = _password_only_auth_failure_payload()
+                serial_println("[sshd-session] auth password fail branch")
+                self.send_packet(fail)
                 continue
 
             val r_user = _read_text_field_fast(payload, 1)

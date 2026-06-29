@@ -41,8 +41,76 @@ fn _ssh_exec_simple_session_line(command_line: text) -> text:
     val alias_text = if alias == nil: "/SYS/APPS/SIMPLSTC.SMF" else: alias.unwrap()
     "AUTH OK root password\nSESSION OK shell {command} path={path} alias={alias_text}\n"
 
+fn _ssh_exec_simple_session_bytes(command_line: text) -> [u8]:
+    val command = _ssh_exec_command_token(command_line)
+    if command == "simple.smf" or command == "/usr/bin/simple.smf" or command == "/sys/apps/simple.smf":
+        return [
+            0x41, 0x55, 0x54, 0x48, 0x20, 0x4F, 0x4B, 0x20, 0x72, 0x6F, 0x6F, 0x74, 0x20, 0x70, 0x61, 0x73,
+            0x73, 0x77, 0x6F, 0x72, 0x64, 0x0A, 0x53, 0x45, 0x53, 0x53, 0x49, 0x4F, 0x4E, 0x20, 0x4F, 0x4B,
+            0x20, 0x73, 0x68, 0x65, 0x6C, 0x6C, 0x20, 0x73, 0x69, 0x6D, 0x70, 0x6C, 0x65, 0x2E, 0x73, 0x6D,
+            0x66, 0x20, 0x70, 0x61, 0x74, 0x68, 0x3D, 0x2F, 0x75, 0x73, 0x72, 0x2F, 0x62, 0x69, 0x6E, 0x2F,
+            0x73, 0x69, 0x6D, 0x70, 0x6C, 0x65, 0x2E, 0x73, 0x6D, 0x66, 0x20, 0x61, 0x6C, 0x69, 0x61, 0x73,
+            0x3D, 0x2F, 0x53, 0x59, 0x53, 0x2F, 0x41, 0x50, 0x50, 0x53, 0x2F, 0x53, 0x49, 0x4D, 0x50, 0x4C,
+            0x53, 0x54, 0x43, 0x2E, 0x53, 0x4D, 0x46, 0x0A
+        ]
+    if command == "simple" or command == "/usr/bin/simple" or command == "/bin/simple" or command == "/sys/apps/simple":
+        return [
+            0x41, 0x55, 0x54, 0x48, 0x20, 0x4F, 0x4B, 0x20, 0x72, 0x6F, 0x6F, 0x74, 0x20, 0x70, 0x61, 0x73,
+            0x73, 0x77, 0x6F, 0x72, 0x64, 0x0A, 0x53, 0x45, 0x53, 0x53, 0x49, 0x4F, 0x4E, 0x20, 0x4F, 0x4B,
+            0x20, 0x73, 0x68, 0x65, 0x6C, 0x6C, 0x20, 0x73, 0x69, 0x6D, 0x70, 0x6C, 0x65, 0x20, 0x70, 0x61,
+            0x74, 0x68, 0x3D, 0x2F, 0x75, 0x73, 0x72, 0x2F, 0x62, 0x69, 0x6E, 0x2F, 0x73, 0x69, 0x6D, 0x70,
+            0x6C, 0x65, 0x20, 0x61, 0x6C, 0x69, 0x61, 0x73, 0x3D, 0x2F, 0x53, 0x59, 0x53, 0x2F, 0x41, 0x50,
+            0x50, 0x53, 0x2F, 0x53, 0x49, 0x4D, 0x50, 0x4C, 0x53, 0x54, 0x43, 0x2E, 0x53, 0x4D, 0x46, 0x0A
+        ]
+    []
+
 pub fn ssh_exec_simple_session_line_for_test(command_line: text) -> text:
     _ssh_exec_simple_session_line(command_line)
+
+fn _is_live_session_channel_open(payload: [u8]) -> bool:
+    if payload.len() < 24:
+        return false
+    if _u8_at(payload, 0) != 90:
+        return false
+    if _u8_at(payload, 1) != 0 or _u8_at(payload, 2) != 0 or _u8_at(payload, 3) != 0 or _u8_at(payload, 4) != 7:
+        return false
+    _u8_at(payload, 5) == 0x73 and
+        _u8_at(payload, 6) == 0x65 and
+        _u8_at(payload, 7) == 0x73 and
+        _u8_at(payload, 8) == 0x73 and
+        _u8_at(payload, 9) == 0x69 and
+        _u8_at(payload, 10) == 0x6F and
+        _u8_at(payload, 11) == 0x6E
+
+fn _is_live_exec_request(payload: [u8]) -> bool:
+    if payload.len() < 18:
+        return false
+    if _u8_at(payload, 0) != 98:
+        return false
+    if _u8_at(payload, 5) != 0 or _u8_at(payload, 6) != 0 or _u8_at(payload, 7) != 0 or _u8_at(payload, 8) != 4:
+        return false
+    if _u8_at(payload, 9) != 0x65:
+        return false
+    if _u8_at(payload, 10) != 0x78:
+        return false
+    if _u8_at(payload, 11) != 0x65:
+        return false
+    _u8_at(payload, 12) == 0x63
+
+fn _live_exec_command(payload: [u8]) -> text:
+    if payload.len() >= 22:
+        if _u8_at(payload, 14) == 0 and _u8_at(payload, 15) == 0 and _u8_at(payload, 16) == 0 and _u8_at(payload, 17) == 4:
+            if _u8_at(payload, 18) == 0x74 and _u8_at(payload, 19) == 0x72 and _u8_at(payload, 20) == 0x75 and _u8_at(payload, 21) == 0x65:
+                return "true"
+    if payload.len() >= 28:
+        if _u8_at(payload, 14) == 0 and _u8_at(payload, 15) == 0 and _u8_at(payload, 16) == 0 and _u8_at(payload, 17) >= 10:
+            if _u8_at(payload, 18) == 0x73 and _u8_at(payload, 19) == 0x69 and _u8_at(payload, 20) == 0x6D and _u8_at(payload, 21) == 0x70 and _u8_at(payload, 22) == 0x6C and _u8_at(payload, 23) == 0x65 and _u8_at(payload, 24) == 0x2E and _u8_at(payload, 25) == 0x73 and _u8_at(payload, 26) == 0x6D and _u8_at(payload, 27) == 0x66:
+                return "simple.smf"
+    if payload.len() >= 24:
+        if _u8_at(payload, 14) == 0 and _u8_at(payload, 15) == 0 and _u8_at(payload, 16) == 0 and _u8_at(payload, 17) >= 6:
+            if _u8_at(payload, 18) == 0x73 and _u8_at(payload, 19) == 0x69 and _u8_at(payload, 20) == 0x6D and _u8_at(payload, 21) == 0x70 and _u8_at(payload, 22) == 0x6C and _u8_at(payload, 23) == 0x65:
+                return "simple"
+    return ""
 
 impl SshSession:
 
@@ -119,26 +187,20 @@ impl SshSession:
     me _handle_channel_open(payload: [u8]):
         """Handle SSH_MSG_CHANNEL_OPEN."""
         serial_println("[sshd-session] handle_channel_open len={payload.len()}")
-        if payload.len() >= 24 and _u8_at(payload, 0) == 90:
-            val r_type = _read_text_field_fast(payload, 1)
-            match r_type:
-                Ok(ch_type):
-                    if _text_equals_bytes(ch_type.value, [0x73, 0x65, 0x73, 0x73, 0x69, 0x6F, 0x6E]) and ch_type.next_offset + 12 <= payload.len():
-                        val remote_id = _read_u32_stable(payload, ch_type.next_offset)
-                        val remote_window = _read_u32_stable(payload, ch_type.next_offset + 4)
-                        val remote_max_packet = _read_u32_stable(payload, ch_type.next_offset + 8)
-                        serial_println("[sshd-session] channel open=session (live fast path)")
-                        val local_id: u32 = 0
-                        self.active_remote_channel_id = remote_id
-                        self.channels.seed_open(local_id, ChannelType.Session, remote_id, remote_window, remote_max_packet)
-                        val confirm = _build_channel_open_confirmation_stable(
-                            remote_id, local_id, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET
-                        )
-                        serial_println("[sshd-session] channel open confirm len={confirm.len()}")
-                        self.send_packet(confirm)
-                        return
-                Err(_):
-                    pass_dn
+        if _is_live_session_channel_open(payload):
+            val remote_id = _read_u32_stable(payload, 12)
+            val remote_window = _read_u32_stable(payload, 16)
+            val remote_max_packet = _read_u32_stable(payload, 20)
+            serial_println("[sshd-session] channel open=session live remote={remote_id} window={remote_window} max={remote_max_packet}")
+            val local_id: u32 = 0
+            self.active_remote_channel_id = remote_id
+            self.channels.seed_open(local_id, ChannelType.Session, remote_id, remote_window, remote_max_packet)
+            val confirm = _build_channel_open_confirmation_stable(
+                remote_id, local_id, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET
+            )
+            serial_println("[sshd-session] channel open confirm len={confirm.len()} payload={_bytes_to_hex(confirm)}")
+            self.send_packet(confirm)
+            return
 
         val r = ssh_parse_channel_open(payload)
         val parsed = match r:
@@ -250,6 +312,21 @@ impl SshSession:
         if payload.len() < 11 or _u8_at(payload, 0) != 98:
             return
         val recipient = _read_u32_stable(payload, 1)
+        if recipient == 0 and _is_live_exec_request(payload):
+            val command = _live_exec_command(payload)
+            if command != "":
+                val want_reply_live = _u8_at(payload, 13) != 0
+                val reply_remote_id = self.active_remote_channel_id
+                serial_println("[sshd-session] channel request=exec want_reply={want_reply_live}")
+                serial_println("[sshd-session] exec command={command}")
+                if want_reply_live:
+                    val success = _build_channel_success_stable(reply_remote_id)
+                    self.send_packet(success)
+                if command == "true":
+                    self._finish_exec_request(0, reply_remote_id, 0, [])
+                    return
+                self._finish_exec_request(0, reply_remote_id, 0, _ssh_exec_simple_session_bytes(command))
+                return
         val r_type = _read_text_field_fast(payload, 5)
         val req_type = match r_type:
             Ok(parsed):
@@ -413,7 +490,7 @@ impl SshSession:
         val simple_session_line = _ssh_exec_simple_session_line(command)
         if simple_session_line != "":
             serial_println("[sshd-session] exec simple path proof command={command}")
-            self._finish_exec_request(local_id, remote_id, 0, ssh_ascii_text_to_bytes(simple_session_line))
+            self._finish_exec_request(local_id, remote_id, 0, _ssh_exec_simple_session_bytes(command))
             return
 
         self._ensure_shell_started(false)
