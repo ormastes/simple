@@ -157,19 +157,20 @@ files with `RDOC` magic, and confirm the widget feature list still contains all
 
 ### GUI widget RenderDoc goal status gate
 
-#### reports current widget coverage and incomplete live RenderDoc lanes
+#### reports current widget coverage and live RenderDoc lanes
 
 - Run the GUI widget RenderDoc goal status wrapper
    - Expected: code equals `0`
 - Read the emitted evidence contract
 - Assert representative widget RenderDoc feature witnesses
    - Expected: features.split(",").len() equals `43`
+   - Expected: blocked_gates equals ``
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 56 lines folded for reproduction.
+Runnable source: 60 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -180,7 +181,7 @@ expect(code).to_equal(0)
 
 step("Read the emitted evidence contract")
 val evidence = file_read("build/test-gui-widget-renderdoc-goal-status-current/evidence.env")
-expect(evidence).to_contain("gui_widget_renderdoc_goal_status=incomplete")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_status=")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_widget_fixture_status=pass")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_widget_count=43")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_widget_feature_covered_count=43")
@@ -190,7 +191,7 @@ expect(evidence).to_contain("gui_widget_renderdoc_goal_simple_gate_capture_comma
 expect(evidence).to_contain("gui_widget_renderdoc_goal_simple_gate_source_env_file_status=")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_simple_gate_capture_file_status=")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_status=")
-expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_capture_command=RDOC_OUTPUT_DIR=build/renderdoc/electron-display-helper RDOC_HTML_PATH=\"$PWD/test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\" scripts/tool/renderdoc-evidence.shs capture-electron-html")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_capture_command=RDOC_OUTPUT_DIR=build/renderdoc/electron-implicit-layer-default-autocapture RDOC_HTML_PATH=\"$PWD/test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\" scripts/tool/renderdoc-evidence.shs capture-electron-html")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_source_env_file_status=")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_capture_file_status=")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_argb_file_status=")
@@ -212,11 +213,15 @@ val electron_argb_file_status = _value_of(evidence, "gui_widget_renderdoc_goal_e
 val electron_argb_status = _value_of(evidence, "gui_widget_renderdoc_goal_electron_gate_argb_status")
 if simple_status != "pass":
     expect(blocked_gates).to_contain("Simple GUI widget RenderDoc .rdc on Vulkan Engine2D")
-expect(blocked_gates).to_contain("Electron Chromium-on-Vulkan widget RenderDoc .rdc")
-if electron_argb_file_status == "pass" && electron_argb_status == "pass":
-    expect(blocked_gates).to_contain("Electron Chromium-on-Vulkan widget RenderDoc .rdc capture (ARGB proof already present)")
+val widget_status = _value_of(evidence, "gui_widget_renderdoc_goal_status")
+if widget_status == "pass":
+    expect(blocked_gates).to_equal("")
 else:
-    expect(blocked_gates).to_contain("Electron Chromium-on-Vulkan widget RenderDoc .rdc with nonblank ARGB proof")
+    expect(blocked_gates).to_contain("Electron Chromium-on-Vulkan widget RenderDoc .rdc")
+    if electron_argb_file_status == "pass" && electron_argb_status == "pass":
+        expect(blocked_gates).to_contain("Electron Chromium-on-Vulkan widget RenderDoc .rdc capture (ARGB proof already present)")
+    else:
+        expect(blocked_gates).to_contain("Electron Chromium-on-Vulkan widget RenderDoc .rdc with nonblank ARGB proof")
 
 val report = file_read("build/test-gui-widget-renderdoc-goal-status-current/report.md")
 expect(report).to_contain("# GUI Widget RenderDoc Goal Status")
@@ -268,7 +273,7 @@ expect(evidence).to_contain("gui_widget_renderdoc_goal_simple_gate_runtime_backe
 expect(evidence).to_contain("gui_widget_renderdoc_goal_simple_gate_widget_html_bytes=4096")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_simple_gate_widget_html_bytes_status=pass")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_status=pass")
-expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_capture_command=RDOC_OUTPUT_DIR=build/renderdoc/electron-display-helper RDOC_HTML_PATH=\"$PWD/test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\" scripts/tool/renderdoc-evidence.shs capture-electron-html")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_capture_command=RDOC_OUTPUT_DIR=build/renderdoc/electron-implicit-layer-default-autocapture RDOC_HTML_PATH=\"$PWD/test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\" scripts/tool/renderdoc-evidence.shs capture-electron-html")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_failure_class=pass")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_source_env_file_status=pass")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_fixture_path_status=pass")
@@ -308,7 +313,7 @@ expect(report).to_contain("- blocked gates: 0")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -321,14 +326,15 @@ step("Assert aggregate evidence rejects the symlinked artifacts")
 val evidence = file_read("build/test-gui-widget-renderdoc-goal-status-symlink-artifacts/out/evidence.env")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_status=incomplete")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_reason=missing-simple-widget-renderdoc")
-expect(evidence).to_contain("gui_widget_renderdoc_goal_simple_gate_status=pass")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_simple_gate_status=fail")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_simple_gate_reason=rdc-file-symlink")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_simple_gate_capture_file_status=symlink")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_status=fail")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_reason=rdc-file-symlink")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_failure_class=electron-gate-rdc-file-symlink")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_capture_file_status=symlink")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_argb_file_status=symlink")
-expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_argb_status=pass")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_argb_status=fail")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_blocked_gate_count=2")
 expect(evidence).to_contain("Simple GUI widget RenderDoc .rdc on Vulkan Engine2D")
 expect(evidence).to_contain("Electron Chromium-on-Vulkan widget RenderDoc .rdc with nonblank ARGB proof")
@@ -358,7 +364,7 @@ expect(code).to_equal(0)
 step("Assert parent evidence carries the child gate root cause")
 val evidence = file_read("build/test-gui-widget-renderdoc-goal-status-missing-argb/out/evidence.env")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_status=incomplete")
-expect(evidence).to_contain("gui_widget_renderdoc_goal_reason=missing-electron-widget-renderdoc")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_reason=electron-widget-renderdoc-gpu-process-crashed-under-renderdoc")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_simple_gate_status=pass")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_status=fail")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_reason=missing-electron-argb-file")
@@ -428,8 +434,8 @@ expect(evidence).to_contain("gui_widget_renderdoc_goal_status=incomplete")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_reason=missing-electron-widget-renderdoc")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_simple_gate_status=pass")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_status=fail")
-expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_reason=missing-rdc")
-expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_failure_class=electron-gate-missing-rdc")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_reason=chromium-gpu-process-crashed-under-renderdoc")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_failure_class=electron-gate-chromium-gpu-process-crashed-under-renderdoc")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_capture_file_status=missing")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_argb_file_status=pass")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_argb_status=pass")
@@ -439,7 +445,7 @@ expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_gpu_process
 expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_gpu_process_exit_codes=139")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_gpu_process_exit_reason=gpu-process-exited-unexpectedly")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_blocked_gate_count=1")
-expect(evidence).to_contain("gui_widget_renderdoc_goal_blocked_gates=Electron Chromium-on-Vulkan widget RenderDoc .rdc capture (ARGB proof already present)")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_blocked_gates=Electron Chromium-on-Vulkan GPU process exits under RenderDoc before .rdc capture")
 ```
 
 </details>

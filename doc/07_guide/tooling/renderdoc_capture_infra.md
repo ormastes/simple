@@ -12,7 +12,7 @@ sh scripts/check/check-html-css-full-rendering-goal-status.shs
 RDOC_SIMPLE_EVIDENCE_ENV=build/renderdoc/canonical-probe/simple/evidence.env \
   sh scripts/check/check-renderdoc-simple-gate.shs
 RDOC_EXTERNAL_RUN_CAPTURE=1 sh scripts/check/check-renderdoc-external-host-capture.shs
-RDOC_ELECTRON_HTML_EVIDENCE_ENV=build/renderdoc/canonical-probe/electron-html/evidence.env \
+RDOC_ELECTRON_HTML_EVIDENCE_ENV=build/renderdoc/electron-implicit-layer-default-autocapture/electron-html/evidence.env \
   sh scripts/check/check-renderdoc-electron-html-gate.shs
 PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=build/production_gui_web_renderer_parity_evidence/evidence.env \
   sh scripts/check/check-production-gui-web-renderer-parity-gate.shs
@@ -415,7 +415,7 @@ The Linux-first comparison gate normalizes existing aggregate evidence and
 optional native RenderDoc evidence into the Simple render-log format:
 
 ```sh
-GUI_WEB_2D_VULKAN_ENV=build/gui-web-2d-vulkan-env/evidence.env \
+GUI_WEB_2D_VULKAN_ENV=build/gui-web-2d-vulkan-env-run-current/evidence.env \
 GUI_WEB_2D_VULKAN_BROWSER_BACKING_EVIDENCE_ENV=build/gui-web-2d-vulkan-env-browser-backing/evidence.env \
 sh scripts/check/check-linux-vulkan-render-log-compare.shs
 ```
@@ -423,8 +423,8 @@ sh scripts/check/check-linux-vulkan-render-log-compare.shs
 By default this Linux row consumes the focused RenderDoc evidence paths:
 
 - `build/gui-web-2d-vulkan-env-renderdoc-simple/renderdoc/simple/evidence.env`
-- `build/renderdoc/chrome-display-helper/evidence.env`
-- `build/renderdoc/electron-display-helper/electron-html/evidence.env`
+- `build/renderdoc/chrome-implicit-layer-default-autocapture/html/evidence.env`
+- `build/renderdoc/electron-implicit-layer-default-autocapture/electron-html/evidence.env`
 
 Override `RDOC_SIMPLE_EVIDENCE_ENV`, `RDOC_HTML_EVIDENCE_ENV`, or
 `RDOC_ELECTRON_HTML_EVIDENCE_ENV` only when deliberately comparing a different
@@ -1237,7 +1237,7 @@ The current canonical evidence contract is:
   fixture suffix fields so the original Chrome/Vulkan requirement is visible
   beside the Simple and Electron lanes.
 - Electron Chromium HTML/CSS path:
-  `build/renderdoc/canonical-probe/electron-html/evidence.env` should report
+  `build/renderdoc/electron-implicit-layer-default-autocapture/electron-html/evidence.env` should report
   `rdoc_backend=electron`, `rdoc_scene=html-css-electron`,
   `rdoc_capture_status=pass`, `rdoc_capture_magic=RDOC`,
   `rdoc_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html`,
@@ -1396,12 +1396,12 @@ run and writes `rdoc_external_host_capture_status=unavailable` with
 `rdoc_external_host_capture_reason=capture-not-requested`.
 
 The top-level GUI RenderDoc aggregate consumes the focused Chrome wrapper
-summary from `build/renderdoc/chrome-display-helper/evidence.env` by default.
+summary from `build/renderdoc/chrome-implicit-layer-default-autocapture/html/evidence.env` by default.
 That summary is produced with:
 
 ```sh
 RDOC_EXTERNAL_RUN_CAPTURE=1 \
-  BUILD_DIR=build/renderdoc/chrome-display-helper \
+  BUILD_DIR=build/renderdoc/chrome-implicit-layer-default-autocapture \
   sh scripts/check/check-renderdoc-external-host-capture.shs
 ```
 
@@ -1458,10 +1458,10 @@ Use the Electron gate when the canonical Electron capture or a CI host supplies
 the Electron-backed HTML/CSS `.rdc`:
 
 ```sh
-RDOC_OUTPUT_DIR=build/renderdoc/canonical-probe \
+RDOC_OUTPUT_DIR=build/renderdoc/electron-implicit-layer-default-autocapture \
   scripts/tool/renderdoc-evidence.shs capture-electron-html
 
-RDOC_ELECTRON_HTML_EVIDENCE_ENV=build/renderdoc/canonical-probe/electron-html/evidence.env \
+RDOC_ELECTRON_HTML_EVIDENCE_ENV=build/renderdoc/electron-implicit-layer-default-autocapture/electron-html/evidence.env \
   sh scripts/check/check-renderdoc-electron-html-gate.shs
 ```
 
