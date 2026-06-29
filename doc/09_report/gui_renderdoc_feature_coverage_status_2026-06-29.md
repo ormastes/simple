@@ -21,9 +21,9 @@
 - Native GUI platform verification: fail (missing-or-failing-native-render-log-platforms; missing macos-metal,windows-d3d12; failed linux-vulkan; required linux-vulkan,macos-metal,windows-d3d12)
 - macOS Metal browser/pixel detail: electron unavailable; chrome unavailable; browser unavailable; pixel missing/missing; diffs missing,missing,missing; ARGB missing,missing,missing; viewport missing
 - HTML/CSS animation rendering: pass (0/0; animation-transition-transform-css)
-- RenderDoc goal: fail (missing-rdc)
+- RenderDoc goal: fail (chromium-gpu-process-crashed-under-renderdoc)
 - Simple RenderDoc: pass (pass)
-- External Chrome/Vulkan RenderDoc: fail (missing-rdc)
+- External Chrome/Vulkan RenderDoc: fail (chromium-gpu-process-crashed-under-renderdoc)
 - Electron Chromium/Vulkan RenderDoc: fail (missing-rdc)
 - Electron Chromium/Vulkan gate: fail (chromium-gpu-process-crashed-under-renderdoc)
 - GUI/web/2D Vulkan setup source: existing-evidence
@@ -32,7 +32,7 @@
 - GUI/web/2D browser Vulkan backing: pass (gpu-feature-status; pass)
 - GUI/web/2D Electron browser backing: pass (electron-vulkan-backed; vulkan enabled_on; gpu enabled; browser_cdp pass; display ANGLE_VULKAN; gl (gl=egl-angle,angle=vulkan); skia GaneshVulkan; renderer ANGLE (Intel, Vulkan 1.4.318 (Intel(R) Graphics (RPL-P) (0x0000A7A8)), Intel open-source Mesa driver-25.2.8); source build/gui-web-2d-vulkan-env-browser-backing/electron_argb_proof.json; argb_source build/gui-web-2d-vulkan-env-browser-backing/electron_argb.json)
 - GUI/web/2D Chrome browser backing: pass (chrome-vulkan-backed; display ANGLE_VULKAN; gpu enabled; gl (gl=egl-angle,angle=vulkan); skia GaneshVulkan; renderer ANGLE (Intel, Vulkan 1.4.318 (Intel(R) Graphics (RPL-P) (0x0000A7A8)), Intel open-source Mesa driver-25.2.8); source build/gui-web-2d-vulkan-env-browser-backing/chrome_argb_proof.json)
-- GUI/web/2D Vulkan RenderDoc blockers: blocked (2; electron-renderdoc-gate-fail-chromium-gpu-process-crashed-under-renderdoc;chrome-renderdoc-gate-fail-missing-rdc)
+- GUI/web/2D Vulkan RenderDoc blockers: blocked (2; electron-renderdoc-gate-fail-chromium-gpu-process-crashed-under-renderdoc;chrome-renderdoc-gate-fail-chromium-gpu-process-crashed-under-renderdoc)
 - GUI/web/2D RenderDoc blocker: doc/08_tracking/bug/gui_web_2d_vulkan_renderdoc_blockers_2026-06-23.md
 - GUI/web/2D Vulkan loader: present (Intel(R) Graphics (RPL-P) / Intel open-source Mesa driver)
 - GUI/web/2D Vulkan RenderDoc: ready (ready)
@@ -110,7 +110,7 @@
 - html_css_traceability_reason=pass
 - html_css_traceability_command=sh scripts/check/check-html-css-sspec-traceability.shs
 - html_css_traceability_exit_code=0
-- html_css_traceability_evidence_env=build/gui_renderdoc_feature_coverage_status/sspec-traceability/evidence.env
+- html_css_traceability_evidence_env=build/gui-renderdoc-feature-coverage-status-current/sspec-traceability/evidence.env
 - html_css_traceability_html_tag_count=105
 - html_css_traceability_required_html_tag_count=105
 - html_css_traceability_css_property_count=394
@@ -294,12 +294,12 @@
 - html_css_readiness_answer=implemented-html-css-ready-full-css-incomplete
 - native_render_log_platform_matrix_status=fail
 - native_render_log_platform_matrix_reason=missing-or-failing-native-render-log-platforms
-- native_render_log_platform_matrix_source_revision=@  f7ff7c55c1e7 │ ~
+- native_render_log_platform_matrix_source_revision=@  648e42f4c4f3 │ ~
 - native_render_log_platform_matrix_runtime_build=
 - native_render_log_platform_matrix_browser_webview_electron_revision=
 - native_render_log_platform_matrix_graphics_sdk_driver=
 - native_render_log_platform_matrix_runbook_version=
-- gui_web_2d_evidence_source_revision=@  f7ff7c55c1e7 │ ~
+- gui_web_2d_evidence_source_revision=@  648e42f4c4f3 │ ~
 - gui_web_2d_evidence_runtime_build=
 - gui_web_2d_evidence_browser_webview_electron_revision=
 - gui_web_2d_evidence_graphics_sdk_driver=
@@ -334,7 +334,7 @@
 - linux_vulkan_render_log_compare_renderdoc_simple_artifact_file_status=pass
 - linux_vulkan_render_log_compare_renderdoc_simple_artifact_magic=RDOC
 - linux_vulkan_render_log_compare_renderdoc_chrome_status=fail
-- linux_vulkan_render_log_compare_renderdoc_chrome_reason=missing-rdc
+- linux_vulkan_render_log_compare_renderdoc_chrome_reason=chromium-gpu-process-crashed-under-renderdoc
 - linux_vulkan_render_log_compare_renderdoc_chrome_env_file_status=pass
 - linux_vulkan_render_log_compare_renderdoc_chrome_artifact_file_status=missing
 - linux_vulkan_render_log_compare_renderdoc_chrome_artifact_magic=missing
@@ -455,9 +455,9 @@
 - gui_web_2d_vulkan_chrome_browser_backing_source=build/gui-web-2d-vulkan-env-browser-backing/chrome_argb_proof.json
 - gui_web_2d_vulkan_chrome_browser_backing_source_file_status=pass
 - gui_web_2d_vulkan_renderdoc_blocker_status=blocked
-- gui_web_2d_vulkan_renderdoc_blocker_reason=electron-renderdoc-gate-fail-chromium-gpu-process-crashed-under-renderdoc;chrome-renderdoc-gate-fail-missing-rdc
+- gui_web_2d_vulkan_renderdoc_blocker_reason=electron-renderdoc-gate-fail-chromium-gpu-process-crashed-under-renderdoc;chrome-renderdoc-gate-fail-chromium-gpu-process-crashed-under-renderdoc
 - gui_web_2d_vulkan_renderdoc_blocker_gate_count=2
-- gui_web_2d_vulkan_renderdoc_blocker_gates=electron-renderdoc-gate-fail-chromium-gpu-process-crashed-under-renderdoc|chrome-renderdoc-gate-fail-missing-rdc
+- gui_web_2d_vulkan_renderdoc_blocker_gates=electron-renderdoc-gate-fail-chromium-gpu-process-crashed-under-renderdoc|chrome-renderdoc-gate-fail-chromium-gpu-process-crashed-under-renderdoc
 - gui_web_2d_vulkan_renderdoc_blocker_doc=doc/08_tracking/bug/gui_web_2d_vulkan_renderdoc_blockers_2026-06-23.md
 - gui_web_2d_vulkan_direct_run_evidence_env=build/gui-web-2d-vulkan-env-run-auto/evidence.env
 - gui_web_2d_vulkan_direct_run_source=auto-existing
@@ -886,9 +886,9 @@
 - gui_showcase_8k_perf_time_log=
 - gui_showcase_8k_perf_time_log_file_status=unavailable
 - renderdoc_goal_status_command=sh scripts/check/check-html-css-renderdoc-goal-status.shs
-- renderdoc_goal_status_exit_code=0
+- renderdoc_goal_status_exit_code=1
 - renderdoc_goal_status=fail
-- renderdoc_goal_reason=missing-rdc
+- renderdoc_goal_reason=chromium-gpu-process-crashed-under-renderdoc
 - renderdoc_goal_blocked_gate=original Chrome-on-Vulkan RenderDoc .rdc with RDOC magic
 - renderdoc_goal_blocked_gate_count=2
 - renderdoc_goal_blocked_gates=original Chrome-on-Vulkan RenderDoc .rdc with RDOC magic|Electron Chromium-on-Vulkan RenderDoc .rdc with nonblank ARGB render proof
@@ -899,7 +899,7 @@
 - simple_renderdoc_capture_magic=RDOC
 - simple_renderdoc_capture_file_magic=RDOC
 - simple_renderdoc_capture_file=build/gui-web-2d-vulkan-env-renderdoc-simple/renderdoc/simple/simple_gui_app_capture.rdc
-- simple_renderdoc_gate_env=build/gui-renderdoc-feature-coverage-static-cache/renderdoc-goal-status-8c47221ee8cd18f3/simple-gate/evidence.env
+- simple_renderdoc_gate_env=build/gui-renderdoc-feature-coverage-static-cache/renderdoc-goal-status-b07c9606cefbeda3/simple-gate/evidence.env
 - simple_renderdoc_gate_status=pass
 - simple_renderdoc_gate_reason=pass
 - simple_renderdoc_gate_capture_file_magic=RDOC
@@ -923,7 +923,7 @@
 - simple_renderdoc_gate_required_num_captures_min=1
 - simple_renderdoc_gate_required_pixel_count_min=1
 - external_renderdoc_status=fail
-- external_renderdoc_reason=missing-rdc
+- external_renderdoc_reason=chromium-gpu-process-crashed-under-renderdoc
 - external_renderdoc_evidence_env=build/renderdoc/chrome-display-helper/evidence.env
 - external_renderdoc_capture_env=build/renderdoc/chrome-display-helper/capture/html/evidence.env
 - external_renderdoc_capture_status=fail
@@ -933,8 +933,13 @@
 - external_renderdoc_capture_magic=
 - external_renderdoc_capture_file_magic=
 - external_renderdoc_capture_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html
+- external_renderdoc_capture_log=build/renderdoc/chrome-display-helper/capture/html/renderdoc-html.log
+- external_renderdoc_gpu_process_exit_status=fail
+- external_renderdoc_gpu_process_exit_count=9
+- external_renderdoc_gpu_process_exit_codes=139
+- external_renderdoc_gpu_process_exit_reason=gpu-process-exited-unexpectedly
 - external_renderdoc_gate_status=fail
-- external_renderdoc_gate_reason=missing-rdc
+- external_renderdoc_gate_reason=chromium-gpu-process-crashed-under-renderdoc
 - external_renderdoc_gate_scene=html-css-chrome
 - external_renderdoc_gate_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html
 - external_renderdoc_gate_capture_file_status=missing
@@ -1028,7 +1033,7 @@
 - electron_renderdoc_gate_required_vulkan_log_no_angle_failure=1
 - macos_portability_status=unavailable
 - macos_portability_reason=missing-macos-probe-evidence
-- macos_portability_evidence_env=build/gui-renderdoc-feature-coverage-static-cache/renderdoc-goal-status-8c47221ee8cd18f3/macos-probe/evidence.env
+- macos_portability_evidence_env=build/gui-renderdoc-feature-coverage-static-cache/renderdoc-goal-status-b07c9606cefbeda3/macos-probe/evidence.env
 - macos_portability_uname_s=
 - macos_portability_uname_m=
 - macos_portability_version=

@@ -156,6 +156,24 @@ Current 2026-06-26 browser capture findings:
   `.rdc` file is produced:
   `build/renderdoc/canonical-probe/electron-html/evidence.env`.
 
+2026-06-29 gate/reporting hardening:
+- Browser Vulkan backing itself passes in the current aggregate through
+  `build/gui-web-2d-vulkan-env-browser-backing/evidence.env`; this is not
+  RenderDoc `.rdc` proof.
+- Chrome external-host capture now preserves the raw capture reason
+  `missing-rdc`, but promotes the actionable gate reason to
+  `chromium-gpu-process-crashed-under-renderdoc` when the capture log records
+  Chromium GPU process exits. Current evidence reports 9 exits with code `139`:
+  `build/renderdoc/chrome-display-helper/evidence.env` and
+  `doc/09_report/renderdoc_external_host_capture_2026-06-29.md`.
+- The aggregate GUI/web/2D RenderDoc blocker gates now identify both browser
+  failures by the concrete GPU-process crash class:
+  `electron-renderdoc-gate-fail-chromium-gpu-process-crashed-under-renderdoc`
+  and
+  `chrome-renderdoc-gate-fail-chromium-gpu-process-crashed-under-renderdoc`.
+  Evidence:
+  `doc/09_report/gui_renderdoc_feature_coverage_status_2026-06-29.md`.
+
 2026-06-26 follow-up diagnostics:
 - `renderdoccmd inject --PID=<chrome-gpu-pid>` is not a Linux workaround.
   RenderDoc reports: injection into already-running processes is not supported
