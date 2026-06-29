@@ -448,6 +448,16 @@ Current 2026-06-26 browser capture findings:
   blocked with both browser reasons `missing-rdc`. Evidence:
   `build/linux-vulkan-render-log-compare/evidence.env` and
   `doc/09_report/renderdoc_linux_aggregate_browser_fields_2026-06-29.md`.
+- 2026-06-29 The autocapture shim now records EGL display/init boundary
+  counters. Fresh Chrome and Electron GPU-child probes both report
+  `egl_get_platform_display=1`, `egl_initialize=1`, `egl_choose_config=0`,
+  `vk_enum_instance_layer=2`, and `vk_create_instance=0`, with GPU-launcher
+  ANGLE status still `pass` and no `.rdc`. This narrows the live Linux browser
+  blocker to after `eglInitialize` and before EGL config selection / Vulkan
+  instance creation. Evidence:
+  `build/renderdoc/chrome-gpu-egl-init-boundary/html/evidence.env`,
+  `build/renderdoc/electron-gpu-egl-init-boundary/electron-html/evidence.env`,
+  and `doc/09_report/renderdoc_browser_egl_init_boundary_2026-06-29.md`.
 - The direct Chrome/Electron RenderDoc wrapper now records
   `rdoc_renderdoc_hook_children` and accepts `RDOC_RENDERDOC_HOOK_CHILDREN=0`
   to omit `--opt-hook-children`. This confirms the immediate Chrome GPU crash

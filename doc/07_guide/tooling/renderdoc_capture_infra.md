@@ -364,6 +364,9 @@ stdout/stderr and shim telemetry to `gpu-launcher.log`. Evidence envs from
 `rdoc_gpu_launcher_clear_renderdoc_layer`,
 `rdoc_gpu_launcher_vk_instance_layers`,
 `rdoc_gpu_autocapture_status`,
+`rdoc_gpu_autocapture_egl_get_platform_display_count`,
+`rdoc_gpu_autocapture_egl_initialize_count`,
+`rdoc_gpu_autocapture_egl_choose_config_count`,
 `rdoc_gpu_autocapture_vk_enum_instance_layer_count`,
 `rdoc_gpu_autocapture_vk_enum_instance_extension_count`,
 `rdoc_gpu_autocapture_vk_create_instance_count`, and
@@ -468,6 +471,9 @@ diagnostics from the Chrome and Electron evidence envs:
 `linux_vulkan_render_log_compare_renderdoc_chrome_gpu_launcher_clear_renderdoc_layer`,
 `linux_vulkan_render_log_compare_renderdoc_chrome_gpu_launcher_vk_instance_layers`,
 `linux_vulkan_render_log_compare_renderdoc_chrome_autocapture_status`,
+`linux_vulkan_render_log_compare_renderdoc_chrome_egl_get_platform_display_count`,
+`linux_vulkan_render_log_compare_renderdoc_chrome_egl_initialize_count`,
+`linux_vulkan_render_log_compare_renderdoc_chrome_egl_choose_config_count`,
 `linux_vulkan_render_log_compare_renderdoc_chrome_vk_enum_instance_layer_count`,
 `linux_vulkan_render_log_compare_renderdoc_chrome_vk_enum_instance_extension_count`,
 `linux_vulkan_render_log_compare_renderdoc_chrome_vk_create_instance_count`, and

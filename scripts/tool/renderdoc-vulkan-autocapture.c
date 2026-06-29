@@ -31,6 +31,10 @@ typedef int (*egl_display_surface_fn_t)(void *, void *);
 typedef int (*egl_display_fn_t)(void *);
 typedef int (*egl_make_current_fn_t)(void *, void *, void *, void *);
 typedef void *(*egl_create_window_surface_fn_t)(void *, void *, void *, const void *);
+typedef void *(*egl_get_display_fn_t)(void *);
+typedef void *(*egl_get_platform_display_fn_t)(unsigned int, void *, const void *);
+typedef int (*egl_initialize_fn_t)(void *, int *, int *);
+typedef int (*egl_choose_config_fn_t)(void *, const int *, void *, int, int *);
 static egl_swap_buffers_fn_t real_eglSwapBuffers;
 static egl_get_proc_address_fn_t real_eglGetProcAddress;
 static egl_vulkan_queue_lock_fn_t real_eglLockVulkanQueueANGLE;
@@ -40,6 +44,10 @@ static egl_display_fn_t real_eglWaitUntilWorkScheduledANGLE;
 static egl_make_current_fn_t real_eglMakeCurrent;
 static egl_create_window_surface_fn_t real_eglCreateWindowSurface;
 static egl_create_window_surface_fn_t real_eglCreatePlatformWindowSurface;
+static egl_get_display_fn_t real_eglGetDisplay;
+static egl_get_platform_display_fn_t real_eglGetPlatformDisplay;
+static egl_initialize_fn_t real_eglInitialize;
+static egl_choose_config_fn_t real_eglChooseConfig;
 typedef void *(*real_dlsym_fn_t)(void *, const char *);
 static real_dlsym_fn_t real_dlsym_fn;
 static void *real_vulkan_handle;
@@ -60,6 +68,10 @@ static uint64_t egl_wait_scheduled_count;
 static uint64_t egl_make_current_count;
 static uint64_t egl_create_window_surface_count;
 static uint64_t egl_create_platform_window_surface_count;
+static uint64_t egl_get_display_count;
+static uint64_t egl_get_platform_display_count;
+static uint64_t egl_initialize_count;
+static uint64_t egl_choose_config_count;
 static uint64_t vk_create_instance_count;
 static uint64_t vk_create_device_count;
 static uint64_t vk_enum_instance_layer_count;
@@ -76,6 +88,10 @@ int eglWaitUntilWorkScheduledANGLE(void *display);
 int eglMakeCurrent(void *display, void *draw, void *read, void *context);
 void *eglCreateWindowSurface(void *display, void *config, void *native_window, const void *attrib_list);
 void *eglCreatePlatformWindowSurface(void *display, void *config, void *native_window, const void *attrib_list);
+void *eglGetDisplay(void *native_display);
+void *eglGetPlatformDisplay(unsigned int platform, void *native_display, const void *attrib_list);
+int eglInitialize(void *display, int *major, int *minor);
+int eglChooseConfig(void *display, const int *attrib_list, void *configs, int config_size, int *num_config);
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateInstance(const VkInstanceCreateInfo *pCreateInfo, const VkAllocationCallbacks *pAllocator, VkInstance *pInstance);
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *pCreateInfo, const VkAllocationCallbacks *pAllocator, VkDevice *pDevice);
 VKAPI_ATTR VkResult VKAPI_CALL vkEnumerateInstanceLayerProperties(uint32_t *pPropertyCount, VkLayerProperties *pProperties);
@@ -252,7 +268,7 @@ static void log_capture_summary(void) {
     }
     char buf[1024];
     snprintf(buf, sizeof(buf),
-        "rdoc_autocapture_summary=status:%s api:%u started:%u finished:%u start_source:%s end_source:%s submit:%llu present:%llu egl_swap:%llu egl_prepare_swap:%llu egl_wait_scheduled:%llu egl_vk_lock:%llu egl_vk_unlock:%llu egl_make_current:%llu egl_create_window_surface:%llu egl_create_platform_window_surface:%llu vk_create_instance:%llu vk_create_device:%llu vk_enum_instance_layer:%llu vk_enum_instance_extension:%llu proc_trace:%llu",
+        "rdoc_autocapture_summary=status:%s api:%u started:%u finished:%u start_source:%s end_source:%s submit:%llu present:%llu egl_swap:%llu egl_prepare_swap:%llu egl_wait_scheduled:%llu egl_vk_lock:%llu egl_vk_unlock:%llu egl_make_current:%llu egl_create_window_surface:%llu egl_create_platform_window_surface:%llu egl_get_display:%llu egl_get_platform_display:%llu egl_initialize:%llu egl_choose_config:%llu vk_create_instance:%llu vk_create_device:%llu vk_enum_instance_layer:%llu vk_enum_instance_extension:%llu proc_trace:%llu",
         status,
         rdoc_api ? 1u : 0u,
         capture_started ? 1u : 0u,
@@ -269,6 +285,10 @@ static void log_capture_summary(void) {
         (unsigned long long)egl_make_current_count,
         (unsigned long long)egl_create_window_surface_count,
         (unsigned long long)egl_create_platform_window_surface_count,
+        (unsigned long long)egl_get_display_count,
+        (unsigned long long)egl_get_platform_display_count,
+        (unsigned long long)egl_initialize_count,
+        (unsigned long long)egl_choose_config_count,
         (unsigned long long)vk_create_instance_count,
         (unsigned long long)vk_create_device_count,
         (unsigned long long)vk_enum_instance_layer_count,
@@ -559,6 +579,35 @@ void *eglGetProcAddress(const char *procname) {
         log_line("rdoc_autocapture_eglgetproc=vkGetInstanceProcAddr");
         return (void *)vkGetInstanceProcAddr;
     }
+    if (procname && (strcmp(procname, "eglGetDisplay") == 0 || strcmp(procname, "EGL_GetDisplay") == 0)) {
+        if (!real_eglGetDisplay && real_eglGetProcAddress) {
+            real_eglGetDisplay = (egl_get_display_fn_t)real_eglGetProcAddress(procname);
+        }
+        log_line("rdoc_autocapture_eglgetproc=eglGetDisplay");
+        return (void *)eglGetDisplay;
+    }
+    if (procname && (strcmp(procname, "eglGetPlatformDisplay") == 0 ||
+        strcmp(procname, "EGL_GetPlatformDisplay") == 0)) {
+        if (!real_eglGetPlatformDisplay && real_eglGetProcAddress) {
+            real_eglGetPlatformDisplay = (egl_get_platform_display_fn_t)real_eglGetProcAddress(procname);
+        }
+        log_line("rdoc_autocapture_eglgetproc=eglGetPlatformDisplay");
+        return (void *)eglGetPlatformDisplay;
+    }
+    if (procname && (strcmp(procname, "eglInitialize") == 0 || strcmp(procname, "EGL_Initialize") == 0)) {
+        if (!real_eglInitialize && real_eglGetProcAddress) {
+            real_eglInitialize = (egl_initialize_fn_t)real_eglGetProcAddress(procname);
+        }
+        log_line("rdoc_autocapture_eglgetproc=eglInitialize");
+        return (void *)eglInitialize;
+    }
+    if (procname && (strcmp(procname, "eglChooseConfig") == 0 || strcmp(procname, "EGL_ChooseConfig") == 0)) {
+        if (!real_eglChooseConfig && real_eglGetProcAddress) {
+            real_eglChooseConfig = (egl_choose_config_fn_t)real_eglGetProcAddress(procname);
+        }
+        log_line("rdoc_autocapture_eglgetproc=eglChooseConfig");
+        return (void *)eglChooseConfig;
+    }
     if (procname && (strcmp(procname, "eglMakeCurrent") == 0 || strcmp(procname, "EGL_MakeCurrent") == 0)) {
         if (!real_eglMakeCurrent && real_eglGetProcAddress) {
             real_eglMakeCurrent = (egl_make_current_fn_t)real_eglGetProcAddress(procname);
@@ -678,6 +727,38 @@ void *eglCreatePlatformWindowSurface(void *display, void *config, void *native_w
     }
     egl_create_platform_window_surface_count++;
     return real_eglCreatePlatformWindowSurface ? real_eglCreatePlatformWindowSurface(display, config, native_window, attrib_list) : NULL;
+}
+
+void *eglGetDisplay(void *native_display) {
+    if (!real_eglGetDisplay) {
+        real_eglGetDisplay = (egl_get_display_fn_t)real_next_symbol("eglGetDisplay");
+    }
+    egl_get_display_count++;
+    return real_eglGetDisplay ? real_eglGetDisplay(native_display) : NULL;
+}
+
+void *eglGetPlatformDisplay(unsigned int platform, void *native_display, const void *attrib_list) {
+    if (!real_eglGetPlatformDisplay) {
+        real_eglGetPlatformDisplay = (egl_get_platform_display_fn_t)real_next_symbol("eglGetPlatformDisplay");
+    }
+    egl_get_platform_display_count++;
+    return real_eglGetPlatformDisplay ? real_eglGetPlatformDisplay(platform, native_display, attrib_list) : NULL;
+}
+
+int eglInitialize(void *display, int *major, int *minor) {
+    if (!real_eglInitialize) {
+        real_eglInitialize = (egl_initialize_fn_t)real_next_symbol("eglInitialize");
+    }
+    egl_initialize_count++;
+    return real_eglInitialize ? real_eglInitialize(display, major, minor) : 0;
+}
+
+int eglChooseConfig(void *display, const int *attrib_list, void *configs, int config_size, int *num_config) {
+    if (!real_eglChooseConfig) {
+        real_eglChooseConfig = (egl_choose_config_fn_t)real_next_symbol("eglChooseConfig");
+    }
+    egl_choose_config_count++;
+    return real_eglChooseConfig ? real_eglChooseConfig(display, attrib_list, configs, config_size, num_config) : 0;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL vkEnumerateInstanceLayerProperties(
@@ -849,6 +930,35 @@ void *dlsym(void *handle, const char *symbol) {
         }
         log_line("rdoc_autocapture_dlsym=eglGetProcAddress");
         return (void *)eglGetProcAddress;
+    }
+    if (symbol && (strcmp(symbol, "eglGetDisplay") == 0 || strcmp(symbol, "EGL_GetDisplay") == 0)) {
+        if (!real_eglGetDisplay) {
+            real_eglGetDisplay = (egl_get_display_fn_t)real_dlsym_lookup(handle, symbol);
+        }
+        log_line("rdoc_autocapture_dlsym=eglGetDisplay");
+        return (void *)eglGetDisplay;
+    }
+    if (symbol && (strcmp(symbol, "eglGetPlatformDisplay") == 0 ||
+        strcmp(symbol, "EGL_GetPlatformDisplay") == 0)) {
+        if (!real_eglGetPlatformDisplay) {
+            real_eglGetPlatformDisplay = (egl_get_platform_display_fn_t)real_dlsym_lookup(handle, symbol);
+        }
+        log_line("rdoc_autocapture_dlsym=eglGetPlatformDisplay");
+        return (void *)eglGetPlatformDisplay;
+    }
+    if (symbol && (strcmp(symbol, "eglInitialize") == 0 || strcmp(symbol, "EGL_Initialize") == 0)) {
+        if (!real_eglInitialize) {
+            real_eglInitialize = (egl_initialize_fn_t)real_dlsym_lookup(handle, symbol);
+        }
+        log_line("rdoc_autocapture_dlsym=eglInitialize");
+        return (void *)eglInitialize;
+    }
+    if (symbol && (strcmp(symbol, "eglChooseConfig") == 0 || strcmp(symbol, "EGL_ChooseConfig") == 0)) {
+        if (!real_eglChooseConfig) {
+            real_eglChooseConfig = (egl_choose_config_fn_t)real_dlsym_lookup(handle, symbol);
+        }
+        log_line("rdoc_autocapture_dlsym=eglChooseConfig");
+        return (void *)eglChooseConfig;
     }
     if (symbol && (strcmp(symbol, "eglMakeCurrent") == 0 || strcmp(symbol, "EGL_MakeCurrent") == 0)) {
         if (!real_eglMakeCurrent) {
