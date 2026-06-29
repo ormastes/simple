@@ -389,6 +389,12 @@ canonical evidence path for the real CUDA optimizer-step gate; run it with
 `--strict` when unavailable hosts must fail the lane instead of recording a
 warning.
 
+`scripts/check/check-llm-runtime-torch-setup-contract.shs` is the focused
+diagnostic contract for that wrapper. It does not turn the Torch optimizer
+blocker green; it proves the default wrapper continues to expose Python
+Torch/CUDA visibility, system libtorch visibility, hashed surface-manifest
+provenance, and a concrete `next_action` for unconfigured hosts.
+
 ## Focused Checks
 
 Use the aggregate local LLM evidence wrapper when checking the current

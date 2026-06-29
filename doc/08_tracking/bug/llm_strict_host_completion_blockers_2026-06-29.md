@@ -19,10 +19,10 @@ Default aggregate:
   vLLM host, svLLM local readiness, Torch optimizer, and fine-tune guard
   evidence now include checked surface/input manifests with size/SHA-256
   metadata and focused log hashes. Public absence rendering also records
-  `vllm_surface_manifest_sha256=40af3d17017ed34fd11b0ab1cb351c543b645f0e0ce126593f1853228b090d7b`,
-  `torch_surface_manifest_sha256=b8ab77b70962706994780b4e48111fcc2145ba45c54e378d7f1cfb27a3c96f35`,
+  `vllm_surface_manifest_sha256=05f67846d07e6cd2bdc2f90afc1b01ee520fff404cbb5bdb9610676f47915667`,
+  `torch_surface_manifest_sha256=f3cff8e65d26227ae70e7985542710932954a142acc5d68b5878d0b5cc837cde`,
   `public_absence_surface_manifest_count=122` and
-  `public_absence_surface_manifest_sha256=57428df2e4c6a9e839e4b5b67fd53c86a4c07d481ef52b22090743a4766dc82a`
+  `public_absence_surface_manifest_sha256=c90bdfca6ea35b90fd7334365384c3bb4c4cf7a28123163a900029be64d1d62e`
   with `failure_count=0`, so public manuals and generated evidence continue to
   hide internal absence markers from operator-facing text.
 
@@ -60,7 +60,7 @@ prerequisite summary and must not be treated as a completion pass.
 - local proof already hardened: vLLM host evidence has a checked runtime
   control/readiness source/spec plus operator-guide manifest with
   `vllm_surface_manifest_count=15` and
-  `vllm_surface_manifest_sha256=40af3d17017ed34fd11b0ab1cb351c543b645f0e0ce126593f1853228b090d7b`
+  `vllm_surface_manifest_sha256=05f67846d07e6cd2bdc2f90afc1b01ee520fff404cbb5bdb9610676f47915667`
 - required evidence: local `vllm` executable, importable Python `vllm` module
   with non-missing origin, serve preflight, reachable endpoint, and `/v1/models`
   listing the selected base model
@@ -91,8 +91,8 @@ prerequisite summary and must not be treated as a completion pass.
 - current evidence: Python Torch `2.9.1+cu130` has CUDA available with 2
   devices; system/Simple-visible libtorch is missing
 - local proof already hardened: Torch optimizer evidence has a checked live
-  probe/source/spec/doc manifest with `torch_surface_manifest_count=18` and
-  `torch_surface_manifest_sha256=b8ab77b70962706994780b4e48111fcc2145ba45c54e378d7f1cfb27a3c96f35`,
+  probe/source/spec/doc manifest with `torch_surface_manifest_count=19` and
+  `torch_surface_manifest_sha256=f3cff8e65d26227ae70e7985542710932954a142acc5d68b5878d0b5cc837cde`,
   plus hashed Python Torch discovery, Python wheel path diagnostics, and
   system libtorch probe logs
 - required evidence: Simple/libtorch CUDA optimizer probe with parameter on
