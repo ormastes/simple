@@ -75,9 +75,9 @@ sh scripts/check/check-html-css-full-rendering-goal-status.shs
 ## Acceptance
 
 - All 105 HTML tags are rendered in the 50-case fixture manifest.
-- All 242 implemented Simple Web CSS properties are rendered in fixture CSS.
-- The current full CSS inventory is tested as 394 properties, with 152 still
-  unrendered and 159 held in unsupported-inventory ownership.
+- All 248 implemented Simple Web CSS properties are rendered in fixture CSS.
+- The current full CSS inventory is tested as 394 properties, with 146 still
+  unrendered and 153 held in unsupported-inventory ownership.
 - Animation, transition, and transform CSS are reported separately; the current
   implemented subset renders those properties, so that sub-goal is `pass`.
 - Readiness keys explicitly distinguish all HTML elements, the implemented CSS
@@ -97,16 +97,21 @@ sh scripts/check/check-html-css-full-rendering-goal-status.shs
    - Expected: code equals `0`
 - Read the full rendering goal evidence
    - Expected: full_css_total equals `394`
-   - Expected: full_css_rendered equals `242`
-   - Expected: full_css_unrendered equals `152`
-   - Expected: unsupported_inventory equals `159`
-   - Expected: full_css_unrendered_properties.split(",").len() equals `152`
+   - Expected: full_css_rendered equals `248`
+   - Expected: full_css_unrendered equals `146`
+   - Expected: unsupported_inventory equals `153`
+   - Expected: full_css_unrendered_properties.split(",").len() equals `146`
    - Expected: full_css_unrendered_properties does not contain `aspect-ratio`
    - Expected: full_css_unrendered_words does not contain `,accent-color,`
    - Expected: full_css_unrendered_properties does not contain `object-fit`
    - Expected: full_css_unrendered_properties does not contain `object-position`
    - Expected: full_css_unrendered_words does not contain `,clip,`
    - Expected: full_css_unrendered_words does not contain `,color-scheme,`
+   - Expected: full_css_unrendered_words does not contain `,color-adjust,`
+   - Expected: full_css_unrendered_words does not contain `,forced-color-adjust,`
+   - Expected: full_css_unrendered_words does not contain `,print-color-adjust,`
+   - Expected: full_css_unrendered_words does not contain `,orphans,`
+   - Expected: full_css_unrendered_words does not contain `,widows,`
    - Expected: full_css_unrendered_words does not contain `,empty-cells,`
    - Expected: full_css_unrendered_words does not contain `,filter,`
    - Expected: full_css_unrendered_words does not contain `,place-content,`
@@ -181,13 +186,14 @@ sh scripts/check/check-html-css-full-rendering-goal-status.shs
    - Expected: full_css_unrendered_words does not contain `,vertical-align,`
    - Expected: animation_css_unrendered_properties equals ``
    - Expected: full_css_unrendered_properties does not contain `accent-color`
+   - Expected: full_css_unrendered_words does not contain `,will-change,`
 - Verify the operator report names the full CSS gap
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 154 lines folded for reproduction.
+Runnable source: 159 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -215,14 +221,14 @@ expect(evidence).to_contain("html_css_full_rendering_goal_implemented_css_status
 expect(evidence).to_contain("html_css_full_rendering_goal_all_implemented_css_ready_status=pass")
 expect(evidence).to_contain("html_css_full_rendering_goal_all_implemented_css_ready_reason=pass")
 expect(evidence).to_contain("html_css_full_rendering_goal_implemented_css_scope=implemented-simple-web-css")
-expect(evidence).to_contain("html_css_full_rendering_goal_implemented_css_total_count=242")
-expect(evidence).to_contain("html_css_full_rendering_goal_implemented_css_rendered_count=242")
+expect(evidence).to_contain("html_css_full_rendering_goal_implemented_css_total_count=248")
+expect(evidence).to_contain("html_css_full_rendering_goal_implemented_css_rendered_count=248")
 expect(evidence).to_contain("html_css_full_rendering_goal_implemented_css_missing=")
 expect(evidence).to_contain("html_css_full_rendering_goal_full_css_status=incomplete")
 expect(evidence).to_contain("html_css_full_rendering_goal_all_css_properties_ready_status=incomplete")
 expect(evidence).to_contain("html_css_full_rendering_goal_all_css_properties_ready_reason=full-css-rendering-incomplete")
 expect(evidence).to_contain("html_css_full_rendering_goal_full_css_required_min_count=390")
-expect(evidence).to_contain("html_css_full_rendering_goal_full_css_rendered_count=242")
+expect(evidence).to_contain("html_css_full_rendering_goal_full_css_rendered_count=248")
 expect(evidence).to_contain("html_css_full_rendering_goal_full_css_unrendered_properties=")
 expect(evidence).to_contain("html_css_full_rendering_goal_animation_css_status=pass")
 expect(evidence).to_contain("html_css_full_rendering_goal_animation_css_scope=animation-transition-transform-css")
@@ -244,16 +250,21 @@ val full_css_unrendered_words = "," + full_css_unrendered_properties + ","
 val animation_css_unrendered_properties = _value_of(evidence, "html_css_full_rendering_goal_animation_css_unrendered_properties")
 val unsupported_inventory = _value_of(evidence, "html_css_full_rendering_goal_unsupported_css_inventory_count")
 expect(full_css_total).to_equal("394")
-expect(full_css_rendered).to_equal("242")
-expect(full_css_unrendered).to_equal("152")
-expect(unsupported_inventory).to_equal("159")
-expect(full_css_unrendered_properties.split(",").len()).to_equal(152)
+expect(full_css_rendered).to_equal("248")
+expect(full_css_unrendered).to_equal("146")
+expect(unsupported_inventory).to_equal("153")
+expect(full_css_unrendered_properties.split(",").len()).to_equal(146)
 expect(full_css_unrendered_properties.contains("aspect-ratio")).to_equal(false)
 expect(full_css_unrendered_words.contains(",accent-color,")).to_equal(false)
 expect(full_css_unrendered_properties.contains("object-fit")).to_equal(false)
 expect(full_css_unrendered_properties.contains("object-position")).to_equal(false)
 expect(full_css_unrendered_words.contains(",clip,")).to_equal(false)
 expect(full_css_unrendered_words.contains(",color-scheme,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",color-adjust,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",forced-color-adjust,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",print-color-adjust,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",orphans,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",widows,")).to_equal(false)
 expect(full_css_unrendered_words.contains(",empty-cells,")).to_equal(false)
 expect(full_css_unrendered_words.contains(",filter,")).to_equal(false)
 expect(full_css_unrendered_words.contains(",place-content,")).to_equal(false)
@@ -332,7 +343,7 @@ expect(full_css_unrendered_properties).to_contain("border-image-source")
 expect(full_css_unrendered_properties).to_contain("grid-template-columns")
 expect(full_css_unrendered_properties).to_contain("scroll-padding-inline-start")
 expect(full_css_unrendered_properties).to_contain("view-transition-name")
-expect(full_css_unrendered_properties).to_contain("will-change")
+expect(full_css_unrendered_words.contains(",will-change,")).to_equal(false)
 
 step("Verify the operator report names the full CSS gap")
 val report = file_read("build/test-html-css-full-rendering-goal-status/report.md")
@@ -342,7 +353,7 @@ expect(report).to_contain("- all HTML elements ready: pass")
 expect(report).to_contain("- implemented CSS ready: pass")
 expect(report).to_contain("- full CSS inventory ready: incomplete")
 expect(report).to_contain("- HTML tags rendered: 105/105")
-expect(report).to_contain("- implemented CSS rendered: 242/242")
+expect(report).to_contain("- implemented CSS rendered: 248/248")
 expect(report).to_contain("- full CSS unrendered:")
 expect(report).to_contain("- animation CSS rendered: 0/0 (pass)")
 ```

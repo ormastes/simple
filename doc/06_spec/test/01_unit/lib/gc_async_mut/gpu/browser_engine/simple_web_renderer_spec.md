@@ -28,7 +28,7 @@ simple_web_renderer_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 75 | 75 | 0 | 0 |
+| 79 | 79 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -484,18 +484,57 @@ expect(pixels[597]).to_equal(0xFFE5E7EBu32)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 47 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val html = "<html><head><style>#editor { caret-color:#06b6d4; tab-size:4; unicode-bidi:plaintext; }</style></head><body><pre id='editor'>A\tB</pre></body></html>"
+val html = "<html><head><style>#editor { caret-color:#06b6d4; font-size-adjust:0.5; font-palette:dark; font-feature-settings:'kern' 0; font-language-override:'TRK'; font-variation-settings:'wght' 700; font-variant:small-caps tabular-nums; font-variant-alternates:historical-forms; font-variant-caps:small-caps; font-variant-east-asian:ruby; font-variant-emoji:emoji; font-variant-ligatures:no-common-ligatures; font-variant-numeric:tabular-nums; font-variant-position:super; font-kerning:none; font-optical-sizing:none; font-stretch:expanded; font-width:expanded; font-synthesis:none; font-synthesis-small-caps:none; font-synthesis-position:none; font-synthesis-style:none; font-synthesis-weight:none; hyphens:auto; image-rendering:pixelated; line-break:strict; tab-size:4; table-layout:fixed; text-align-all:center; text-justify:inter-word; vertical-align:middle; unicode-bidi:plaintext; writing-mode:vertical-rl; text-orientation:upright; text-combine-upright:all; will-change:transform, opacity; color-adjust:exact; forced-color-adjust:none; print-color-adjust:exact; orphans:4; widows:5; }</style></head><body><pre id='editor'>A\tB</pre></body></html>"
 val composition = simple_web_layout_render_html_draw_ir(html, 96, 64)
 val batch = composition.batches[0]
 val editor = _draw_ir_command_by_id(batch.commands, "editor")
 
 expect(_draw_ir_style_value(editor, "caret-color")).to_equal("4278630100")
+expect(_draw_ir_style_value(editor, "font-kerning")).to_equal("none")
+expect(_draw_ir_style_value(editor, "font-optical-sizing")).to_equal("none")
+expect(_draw_ir_style_value(editor, "font-stretch")).to_equal("expanded")
+expect(_draw_ir_style_value(editor, "font-width")).to_equal("expanded")
+expect(_draw_ir_style_value(editor, "font-size-adjust")).to_equal("0.5")
+expect(_draw_ir_style_value(editor, "font-palette")).to_equal("dark")
+expect(_draw_ir_style_value(editor, "font-feature-settings")).to_equal("'kern' 0")
+expect(_draw_ir_style_value(editor, "font-language-override")).to_equal("'TRK'")
+expect(_draw_ir_style_value(editor, "font-variation-settings")).to_equal("'wght' 700")
+expect(_draw_ir_style_value(editor, "font-variant")).to_equal("small-caps tabular-nums")
+expect(_draw_ir_style_value(editor, "font-variant-alternates")).to_equal("historical-forms")
+expect(_draw_ir_style_value(editor, "font-variant-caps")).to_equal("small-caps")
+expect(_draw_ir_style_value(editor, "font-variant-east-asian")).to_equal("ruby")
+expect(_draw_ir_style_value(editor, "font-variant-emoji")).to_equal("emoji")
+expect(_draw_ir_style_value(editor, "font-variant-ligatures")).to_equal("no-common-ligatures")
+expect(_draw_ir_style_value(editor, "font-variant-numeric")).to_equal("tabular-nums")
+expect(_draw_ir_style_value(editor, "font-variant-position")).to_equal("super")
+expect(_draw_ir_style_value(editor, "font-synthesis")).to_equal("none")
+expect(_draw_ir_style_value(editor, "font-synthesis-small-caps")).to_equal("none")
+expect(_draw_ir_style_value(editor, "font-synthesis-position")).to_equal("none")
+expect(_draw_ir_style_value(editor, "font-synthesis-style")).to_equal("none")
+expect(_draw_ir_style_value(editor, "font-synthesis-weight")).to_equal("none")
+expect(_draw_ir_style_value(editor, "hyphens")).to_equal("auto")
+expect(_draw_ir_style_value(editor, "image-rendering")).to_equal("pixelated")
+expect(_draw_ir_style_value(editor, "line-break")).to_equal("strict")
 expect(_draw_ir_style_value(editor, "tab-size")).to_equal("4")
+expect(_draw_ir_style_value(editor, "table-layout")).to_equal("fixed")
+expect(_draw_ir_style_value(editor, "text-align")).to_equal("center")
+expect(_draw_ir_style_value(editor, "text-align-all")).to_equal("center")
+expect(_draw_ir_style_value(editor, "text-justify")).to_equal("inter-word")
+expect(_draw_ir_style_value(editor, "vertical-align")).to_equal("middle")
+expect(_draw_ir_style_value(editor, "will-change")).to_equal("transform, opacity")
+expect(_draw_ir_style_value(editor, "color-adjust")).to_equal("exact")
+expect(_draw_ir_style_value(editor, "forced-color-adjust")).to_equal("none")
+expect(_draw_ir_style_value(editor, "print-color-adjust")).to_equal("exact")
+expect(_draw_ir_style_value(editor, "orphans")).to_equal("4")
+expect(_draw_ir_style_value(editor, "widows")).to_equal("5")
 expect(_draw_ir_style_value(editor, "unicode-bidi")).to_equal("plaintext")
+expect(_draw_ir_style_value(editor, "writing-mode")).to_equal("vertical-rl")
+expect(_draw_ir_style_value(editor, "text-orientation")).to_equal("upright")
+expect(_draw_ir_style_value(editor, "text-combine-upright")).to_equal("all")
 ```
 
 </details>
@@ -948,6 +987,60 @@ expect(_count_color(pixels, 0xFFEF4444u32)).to_equal(0)
 
 </details>
 
+#### clips overflowing descendants for CSS paint containment
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><head><style>html,body{margin:0;padding:0;width:48px;height:32px;overflow:hidden;background-color:#ffffff}.shell{contain:paint;background-color:#1d4ed8;width:20px;height:12px}.spill{background-color:#ef4444;width:10px;height:10px;margin-left:24px}</style></head><body><section class='shell'><div class='spill'></div></section></body></html>"
+val pixels = simple_web_render_html_to_pixels(html, 48, 32)
+expect(pixels.len()).to_equal(48 * 32)
+expect(_count_color(pixels, 0xFF1D4ED8u32)).to_be_greater_than(0)
+expect(_count_color(pixels, 0xFFEF4444u32)).to_equal(0)
+```
+
+</details>
+
+#### suppresses rendered scrollbars for scrollbar width none
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><head><style>html,body{margin:0;padding:0;width:48px;height:32px;overflow:hidden;background-color:#ffffff}.shell{overflow-x:hidden;overflow-y:scroll;scrollbar-width:none;background-color:#1d4ed8;width:32px;height:20px}.tall{background-color:#22c55e;width:8px;height:40px}</style></head><body><section class='shell'><div class='tall'></div></section></body></html>"
+val pixels = simple_web_render_html_to_pixels(html, 48, 32)
+expect(pixels.len()).to_equal(48 * 32)
+expect(_count_color(pixels, 0xFF1D4ED8u32)).to_be_greater_than(0)
+expect(_count_color(pixels, 0xFFF1F1F1u32)).to_equal(0)
+```
+
+</details>
+
+#### renders custom scrollbar colors
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><head><style>html,body{margin:0;padding:0;width:48px;height:32px;overflow:hidden;background-color:#ffffff}.shell{overflow-x:hidden;overflow-y:scroll;scrollbar-color:#9333ea #f97316;background-color:#1d4ed8;width:32px;height:20px}.tall{background-color:#22c55e;width:8px;height:40px}</style></head><body><section class='shell'><div class='tall'></div></section></body></html>"
+val pixels = simple_web_render_html_to_pixels(html, 48, 32)
+expect(pixels.len()).to_equal(48 * 32)
+expect(_count_color(pixels, 0xFF9333EAu32)).to_be_greater_than(0)
+expect(_count_color(pixels, 0xFFF97316u32)).to_be_greater_than(0)
+```
+
+</details>
+
 #### matches Chrome visibility hidden paint suppression while preserving layout
 
 <details>
@@ -967,6 +1060,28 @@ expect(_count_color(pixels, 0xFF22C55Eu32)).to_equal(72)
 expect(_count_color(pixels, 0xFFEF4444u32)).to_equal(0)
 expect(_count_color(pixels, 0xFFF59E0Bu32)).to_equal(0)
 expect(_count_color(pixels, 0xFF7F1D1Du32)).to_equal(0)
+```
+
+</details>
+
+#### renders content visibility hidden containers while suppressing descendants
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><head><style>html,body{margin:0;padding:0;width:48px;height:32px;overflow:hidden;background-color:#ffffff}#panel{display:block;content-visibility:hidden;width:24px;height:16px;background-color:#1d4ed8}#child{display:block;width:20px;height:12px;background-color:#ef4444}</style></head><body><section id='panel'><div id='child'></div></section></body></html>"
+val pixels = simple_web_render_html_to_pixels(html, 48, 32)
+val composition = simple_web_layout_render_html_draw_ir(html, 48, 32)
+val batch = composition.batches[0]
+val panel = _draw_ir_command_by_id(batch.commands, "panel")
+expect(pixels.len()).to_equal(48 * 32)
+expect(_count_color(pixels, 0xFF1D4ED8u32)).to_be_greater_than(0)
+expect(_count_color(pixels, 0xFFEF4444u32)).to_equal(0)
+expect(_draw_ir_style_value(panel, "content-visibility")).to_equal("hidden")
 ```
 
 </details>
@@ -1696,8 +1811,8 @@ expect(_count_color(pixels, 0xFF065F46u32)).to_equal(0)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 75 |
-| Active scenarios | 75 |
+| Total scenarios | 79 |
+| Active scenarios | 79 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
