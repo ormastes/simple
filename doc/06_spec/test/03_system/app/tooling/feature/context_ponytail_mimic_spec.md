@@ -27,7 +27,7 @@ context_ponytail_mimic_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 9 | 9 | 0 | 0 |
+| 10 | 10 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -149,6 +149,29 @@ expect(table).to_contain("prop_str(\"source_filter\", \"Filter SQL query rows by
 expect(table).to_contain("e.required_json = build_required([])")
 expect(static_tools).to_contain("_mcp_static_tool(\"simple_context\"")
 expect(dispatch).to_contain("return handle_simple_context(id, body)")
+```
+
+</details>
+
+#### REQ-013 and REQ-015 advertise context and Ponytail through live app MCP tools list
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val input = _mcp_initialize_line("list-1") + _mcp_initialized_line() + _mcp_tools_list_line("list-2")
+val (output, code) = _run_app_mcp_jsonl_all_tools(input)
+expect(code).to_equal(0)
+expect(output).to_contain("\"result\":{\"tools\":[")
+expect(output).to_contain("\"name\":\"simple_context\"")
+expect(output).to_contain("\"name\":\"simple_ponytail\"")
+expect(output).to_contain("\"inputSchema\"")
+expect(output).to_contain("\"Source file path; required except when sql=true and query is non-empty\"")
+expect(output).to_contain("\"Mode: audit/review, simplification/simplify\"")
+expect(output).to_contain("\"source_filter\"")
 ```
 
 </details>
@@ -322,8 +345,8 @@ expect(lower_schema).to_contain("Mode: audit/review, simplification/simplify")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 9 |
-| Active scenarios | 9 |
+| Total scenarios | 10 |
+| Active scenarios | 10 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
