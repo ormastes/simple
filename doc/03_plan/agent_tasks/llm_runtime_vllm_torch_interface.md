@@ -725,3 +725,11 @@ contract for SGD, Adam, and RMSprop. The CUDA optimizer probe now returns CLI
 status codes from `main() -> i64` instead of calling an unbound `exit`, so this
 host reaches the intended `libtorch_unavailable` evidence boundary without the
 previous RMSprop mutability or probe-exit lowering errors.
+
+## 2026-06-29 Dashboard Agent Route Evidence Inclusion
+
+The dashboard evidence wrappers now include the `/agents` route system spec in
+the same dashboard lane as diagnostics and vLLM control. The live dashboard
+wrapper requires authenticated `/agents` rendering, unauthenticated redirect,
+non-prefix hijack protection, and server/guide route contracts before reporting
+dashboard evidence as pass.

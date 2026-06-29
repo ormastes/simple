@@ -27,7 +27,7 @@ simple dashboard check-alerts
 ## Web Dashboard
 
 The authenticated web dashboard shell is the operator view for LLM diagnostics,
-tooling artifacts, and vLLM control evidence.
+tooling artifacts, the `/agents` assistant dashboard, and vLLM control evidence.
 
 - `view-diagnostics` renders LLM diagnostics JSONL readback with explicit
   absence text for missing session, event, and tool fields.
@@ -35,6 +35,10 @@ tooling artifacts, and vLLM control evidence.
   source configured for context and Ponytail analysis. The panel reports
   `simple_context` status, `simple_ponytail` audit/simplification status, and
   source/target summaries without exposing internal absence markers.
+- `/agents` renders the assistant dashboard live/replay view through the shared
+  assistant snapshot collector. Unauthenticated or blank-session requests
+  redirect to `/login`, authenticated requests render `id="agent-dashboard"`,
+  and unrelated prefixes such as `/agentship` must not be hijacked.
 - `/api/vllm/control` exposes dashboard-safe vLLM control planning. The route
   returns `llm_runtime_vllm_dashboard_live_boundary` JSONL plus
   `llm_dashboard_vllm_control_panel` or
@@ -53,15 +57,16 @@ Verification:
 sh scripts/check/check-llm-dashboard-evidence.shs
 sh scripts/check/check-llm-dashboard-live-evidence.shs
 release/x86_64-unknown-linux-gnu/simple test test/03_system/feature/app/web_dashboard/web_dashboard_diagnostics_panel_spec.spl --mode=interpreter --clean
+release/x86_64-unknown-linux-gnu/simple test test/03_system/feature/app/web_dashboard/llm_agent_dashboard_spec.spl --mode=interpreter --clean
 release/x86_64-unknown-linux-gnu/simple test test/03_system/feature/app/web_dashboard/vllm_control_route_spec.spl --mode=interpreter --clean
 ```
 
 Latest focused evidence:
 `doc/09_report/2026/06/llm_dashboard_evidence_2026-06-28.md` records the
-dashboard diagnostics panel, vLLM control route planning, dashboard log modes,
-diagnostics collector, and tooling artifact collector passing locally. This is
-dashboard route/evidence coverage; live vLLM serving still belongs to the LLM
-runtime host-probe lane.
+dashboard diagnostics panel, `/agents` route, vLLM control route planning,
+dashboard log modes, diagnostics collector, and tooling artifact collector
+passing locally. This is dashboard route/evidence coverage; live vLLM serving
+still belongs to the LLM runtime host-probe lane.
 
 Use the focused live checker when strict dashboard evidence needs a live env:
 
@@ -70,9 +75,9 @@ sh scripts/check/check-llm-dashboard-live-evidence.shs
 ```
 
 That checker writes `build/llm_dashboard_live/evidence.env` with
-`llm_dashboard_live_status=pass` when authenticated dashboard HTML and
-`/api/vllm/control` route execution are proven through the checked-in
-DashboardServer surface, including auth rejection, preflight JSONL,
+`llm_dashboard_live_status=pass` when authenticated dashboard HTML, `/agents`
+route rendering, and `/api/vllm/control` route execution are proven through the
+checked-in DashboardServer surface, including auth rejection, preflight JSONL,
 side-effect action routing to the runtime owner, and safe missing-resource
 execution JSONL.
 

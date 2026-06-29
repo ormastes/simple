@@ -8,4 +8,4 @@
 - failures: `none`
 - env: `build/llm_dashboard_live/evidence.env`
 
-This evidence proves authenticated dashboard HTML and `/api/vllm/control` route execution through the checked-in DashboardServer surface, including auth rejection, preflight JSONL, side-effect action routing to the runtime owner, and safe missing-resource execution JSONL. It does not claim live vLLM serving; that remains the vLLM host strict lane.
+This evidence proves authenticated dashboard HTML, `/agents` route rendering, and `/api/vllm/control` route execution through the checked-in DashboardServer surface, including auth rejection, preflight JSONL, side-effect action routing to the runtime owner, and safe missing-resource execution JSONL. It does not claim live vLLM serving; that remains the vLLM host strict lane.

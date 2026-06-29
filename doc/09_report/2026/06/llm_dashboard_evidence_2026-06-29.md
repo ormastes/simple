@@ -7,6 +7,7 @@
 - live_env: `build/llm_dashboard_live/evidence.env`
 - diagnostics_panel: `pass` exit=`0` log=`build/llm_dashboard_evidence/diagnostics_panel.log`
 - vllm_control_route: `pass` exit=`0` log=`build/llm_dashboard_evidence/vllm_control_route.log`
+- agent_dashboard: `pass` exit=`0` log=`build/llm_dashboard_evidence/agent_dashboard.log`
 - log_modes: `pass` exit=`0` log=`build/llm_dashboard_evidence/log_modes.log`
 - diagnostics_collector: `pass` exit=`0` log=`build/llm_dashboard_evidence/diagnostics_collector.log`
 - tooling_collector: `pass` exit=`0` log=`build/llm_dashboard_evidence/tooling_collector.log`
