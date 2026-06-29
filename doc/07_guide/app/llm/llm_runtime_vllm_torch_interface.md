@@ -255,6 +255,10 @@ records `llm_finetune_acceptance_required_gates`,
 `llm_finetune_acceptance_next_action` so strict aggregate runs can report the
 first concrete blocker, the exact upstream artifact refs to fill, and the
 model/eval/license/safety/deployment/app-handoff blocker list.
+The wrapper passes only when retry7 reports `acceptance_allowed=true` and the
+normalized `llm_finetune_acceptance_blocked_gates` value is `none`; a retry7
+PASS line cannot override missing model, eval, license, safety, deployment, or
+handoff evidence.
 
 The local fine-tune guard evidence writes its own current blocker contract to
 `build/llm_finetune_guard_evidence/evidence.env`. Default aggregate mode uses

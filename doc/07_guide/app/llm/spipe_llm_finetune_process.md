@@ -84,10 +84,11 @@ sh scripts/check/check-llm-finetune-acceptance-evidence.shs
 
 The acceptance checker writes `build/llm_finetune_acceptance/evidence.env`.
 It passes only when retry7 itself reports `STATUS: PASS retry7-acceptance-gate`
-and `acceptance_allowed=true`; otherwise it records the concrete model,
-target-eval, license, safety, deployment, app-handoff, and normal-review
-blockers and keeps `llm_finetune_acceptance_status=fail`. The env also forwards
-the retry6 artifact refs operators need to fill:
+and `acceptance_allowed=true`, and the wrapper's normalized blocked-gates list
+is `none`; otherwise it records the concrete model, target-eval, license,
+safety, deployment, app-handoff, and normal-review blockers and keeps
+`llm_finetune_acceptance_status=fail`. The env also forwards the retry6
+artifact refs operators need to fill:
 `llm_finetune_acceptance_model_manifest`,
 `llm_finetune_acceptance_eval_result`,
 `llm_finetune_acceptance_upstream_attempt_record`,

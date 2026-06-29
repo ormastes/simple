@@ -688,6 +688,11 @@ blocker from later model manifest, eval result, target eval, review decision,
 license, safety, deployment, or app-handoff blockers without parsing the whole
 gate log.
 
+The acceptance wrapper pass condition is intentionally stricter than the retry7
+gate line alone: it requires retry7 `acceptance_allowed=true` and normalized
+`llm_finetune_acceptance_blocked_gates=none`. A future retry7 PASS cannot mask
+missing model/eval/license/safety/deployment/app-handoff evidence.
+
 ## 2026-06-29 vLLM Host Evidence Hardening
 
 `scripts/check/check-llm-runtime-vllm-host-probe.shs` now normalizes the local
