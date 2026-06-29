@@ -58,8 +58,10 @@ but local proof is no longer status-only for the completed repo-local lanes:
   retry6/7 model, eval, safety, deployment, and handoff proof is still
   required.
 - public absence rendering records a checked public wording manifest
-  (`public_absence_surface_manifest_count=122`,
-  `public_absence_surface_manifest_sha256=c8817eead4ce36afb55d83dbf0541d0ec900ad46d7864810f577cc46df684228`)
+  (`vllm_surface_manifest_sha256=bf7f6c7994534712ec5aa88294eadf5d4bdb9d49d4b1b3716f2afda76f834fce`,
+  `torch_surface_manifest_sha256=a89c148e98bce0149b5fff56b0dae89768c2c33388f353c7ad2a9046c3a84d05`,
+  `public_absence_surface_manifest_count=122`,
+  `public_absence_surface_manifest_sha256=f143f3be41c17eeb28e90f285a9e91b6cb0190336f459f2b6260d86836c27df7`)
   with `failure_count=0`, proving operator-facing manuals and generated
   evidence do not expose internal absence markers.
 

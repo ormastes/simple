@@ -60,6 +60,6 @@
 - retry7_attempt: `ready`
 - surface_manifest_count: `8`
 - surface_manifest_size: `1045`
-- surface_manifest_sha256: `c72ca404f1c75baad566daadb72c6366ba149cb3f7fe5cf25e3010b9cc209cbf`
+- surface_manifest_sha256: `2ffaf99e78d345c064861162f4e0115ef5cd3b48e569bbec36f2abc591ae18db`
 - next_action: `provide blocked host prerequisites, then rerun strict evidence wrappers`
 - env: `build/llm_strict_host_prereq_doctor/evidence.env`

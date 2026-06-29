@@ -3,7 +3,7 @@
 - command: `release/x86_64-unknown-linux-gnu/simple run src/app/llm_runtime/control_cli.spl -- --action readiness --base-model base-model --endpoint http://127.0.0.1:8000/v1 --detect-resources`
 - probe_command_sha256: `c2395cfe396cfb3bc37d6422d9c96bb81c8a211ec7e22c3090669f73b5175dc3`
 - wrapper_path: `scripts/check/check-llm-runtime-vllm-host-probe.shs`
-- wrapper_sha256: `78c6cb4bf82008775bd1d72dc7bc19f89cadfcbea2470bae0b2103b8b8f7504b`
+- wrapper_sha256: `ee6fb769220170a1379c0b0dc380d6fe3d0f07e36d8e731182ea16a573043c4e`
 - control_cli_path: `src/app/llm_runtime/control_cli.spl`
 - control_cli_sha256: `c02e4192976015ed7349875f3a4f4a70b45c96dce3fce1c55510961e4b10d57d`
 - status: `unavailable`
@@ -18,7 +18,7 @@
 - surface_manifest: `build/llm_runtime_vllm_host_probe/vllm_host_surface_manifest.tsv`
 - surface_manifest_count: `13`
 - surface_manifest_size: `1569`
-- surface_manifest_sha256: `16abc6eaea108786847181d45ca7a02dd585418785b638670b326754589d8cc0`
+- surface_manifest_sha256: `bf7f6c7994534712ec5aa88294eadf5d4bdb9d49d4b1b3716f2afda76f834fce`
 - local_vllm_status: `missing`
 - vllm_command_path: `missing`
 - vllm_version_log_size: `21`
@@ -38,7 +38,7 @@
 - models_status: `not_fetched`
 - models_reason: `environment_skipped`
 - log_size: `96660`
-- log_sha256: `afafe82a9c4d08316f3a72a1fd83655aa0a75f6b323117f7fa56cc8c1bb45d01`
+- log_sha256: `f559dfe3fd7e2a60ae7913b69784bd1c8c4277f4fea07d63c45b441842c04045`
 - serve_readiness_run_event_count: `1`
 - pass_integrity_status: `not_applicable`
 - pass_integrity_reason: `not_applicable`

@@ -124,8 +124,8 @@ Strict-host unblock checklist:
    `scripts/check/check-llm-dashboard-live-http-evidence.shs`, then run that
    wrapper until `llm_dashboard_live_http_status=pass`.
 2. vLLM host: install an importable Python `vllm` module and local `vllm`
-   command, set `LLM_VLLM_BASE_MODEL` and `LLM_VLLM_ENDPOINT` when defaults are
-   not correct, start the endpoint, and run
+   command, set `LLM_VLLM_BASE_MODEL` / `LLM_VLLM_ENDPOINT` (or the legacy
+   `BASE_MODEL` / `ENDPOINT`) when defaults are not correct, start the endpoint, and run
    `scripts/check/check-llm-runtime-vllm-host-probe.shs --strict` until the
    local command, Python module, endpoint, and `/v1/models` gates pass.
 3. svLLM native: produce a non-default native capability artifact with matching
