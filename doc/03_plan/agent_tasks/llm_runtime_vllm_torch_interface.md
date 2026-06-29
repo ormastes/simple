@@ -634,11 +634,18 @@ The native streaming wrapper now consumes explicit host capability inputs:
 `SVLLM_NATIVE_DEVICE_STAGING_STATUS`. Missing inputs default to `unsupported`,
 but a configured host can provide `ready` values without editing tests or
 source fixtures. The wrapper records `svllm_native_streaming_capability_source`,
+`svllm_native_streaming_capability_provenance_status`,
 `svllm_native_streaming_blocked_gates`,
 `svllm_native_streaming_primary_blocked_gate`, and
 `svllm_native_streaming_next_action`; strict local readiness forwards those
 native blocker fields, and the aggregate forwards them in
 `llm_goal_evidence_svllm_local_detail`.
+
+Strict native evidence also requires a non-default
+`SVLLM_NATIVE_CAPABILITY_SOURCE` naming the host probe or artifact that proved
+ready native capabilities. Setting all native status env values to `ready`
+without that provenance now fails with `capability_provenance` instead of
+claiming native streaming completion from env defaults alone.
 
 ## 2026-06-29 Torch Optimizer Evidence Hardening
 

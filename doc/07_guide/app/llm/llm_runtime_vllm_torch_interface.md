@@ -143,8 +143,11 @@ Configured native hosts provide those native capability results through
 `SVLLM_NATIVE_DEVICE_STAGING_STATUS`. Values normalize to `ready`,
 `unsupported`, `unavailable`, or `unchecked`; omitted values default to
 `unsupported`. The native streaming report records
-`svllm_native_streaming_capability_source` so reviewers can distinguish an
-explicit host probe from the default fallback.
+`svllm_native_streaming_capability_source` and
+`svllm_native_streaming_capability_provenance_status` so reviewers can
+distinguish an explicit host probe from the default fallback. A strict native
+PASS requires `SVLLM_NATIVE_CAPABILITY_SOURCE` to name the probe or artifact
+that proved the ready native capabilities.
 
 Latest Torch/CUDA host probe:
 `doc/09_report/2026/06/llm_runtime_torch_cuda_host_probe_2026-06-28.md`
@@ -203,8 +206,9 @@ instead of only mimic evidence. The aggregate env also records
 vLLM/GPU/preflight/endpoint/model statuses, and
 `llm_goal_evidence_svllm_local_detail` for native svLLM streaming status,
 native blocker reason, local readiness, native `read_range`, pinned-buffer,
-device-staging, capability source, local file-backed byte-read states, native
-blocked gates, primary blocked gate, and next action. In default mode, the
+device-staging, capability source, capability provenance, local file-backed
+byte-read states, native blocked gates, primary blocked gate, and next action.
+In default mode, the
 dashboard detail keeps a concrete strict-host next action even though live HTTP
 evidence is intentionally not collected, and the svLLM native fields report
 `not_required` / `not_collected`; strict host mode
@@ -340,7 +344,9 @@ SVLLM_NATIVE_EVIDENCE_ENV=build/llm_runtime_svllm_native_streaming/evidence.env 
 
 The strict native gate requires the evidence env to report
 `svllm_native_streaming_status=pass`; local file-backed bytes are recorded as
-bring-up evidence but are not enough for native streaming completion.
+bring-up evidence but are not enough for native streaming completion. Ready
+native capability env values without a non-default
+`SVLLM_NATIVE_CAPABILITY_SOURCE` fail as `capability_provenance`.
 
 Use the focused Torch optimizer gate after changing Torch SFFI, CUDA placement,
 or runtime training behavior:
