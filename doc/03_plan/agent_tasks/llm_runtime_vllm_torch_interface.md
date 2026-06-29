@@ -763,7 +763,7 @@ producer. A timeout or early producer failure therefore leaves missing evidence
 instead of reusing a stale full-replacement, live-dashboard, native-svLLM, or
 fine-tune acceptance env from a prior run.
 
-The aggregate now records `llm_goal_evidence_<lane>_producer_exit` and shows the
-same value in the lane table. Strict producer failures and timeouts can be
-distinguished from downstream strict lane failures without opening every
-focused log first.
+The aggregate now records `llm_goal_evidence_<lane>_producer_exit` and
+`llm_goal_evidence_<lane>_producer_log`, and shows both values in the lane
+table. Strict producer failures and timeouts can be distinguished from
+downstream strict lane failures without hunting for the producer log path first.

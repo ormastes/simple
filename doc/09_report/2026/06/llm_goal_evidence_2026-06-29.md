@@ -11,15 +11,15 @@
 - lane_timeout_seconds: `180`
 - svllm_lane_timeout_seconds: `180`
 
-| lane | status | expected | exit | producer_exit | timeout | log |
-|------|--------|----------|------|---------------|---------|-----|
-| context_ponytail | `pass` | `pass` | `0` | `n/a` | `180` | `build/llm_goal_evidence/context_ponytail.log` |
-| dashboard | `pass` | `pass` | `0` | `n/a` | `180` | `build/llm_goal_evidence/dashboard.log` |
-| vllm_host | `warn` | `warn` | `0` | `n/a` | `180` | `build/llm_goal_evidence/vllm_host.log` |
-| svllm_local | `pass` | `pass` | `0` | `n/a` | `180` | `build/llm_goal_evidence/svllm_local.log` |
-| torch_optimizer | `warn` | `warn` | `0` | `n/a` | `180` | `build/llm_goal_evidence/torch_optimizer.log` |
-| finetune_guard | `pass` | `pass` | `0` | `n/a` | `180` | `build/llm_goal_evidence/finetune_guard.log` |
-| public_absence | `pass` | `pass` | `0` | `n/a` | `180` | `build/llm_goal_evidence/public_absence.log` |
+| lane | status | expected | exit | producer_exit | timeout | log | producer_log |
+|------|--------|----------|------|---------------|---------|-----|--------------|
+| context_ponytail | `pass` | `pass` | `0` | `n/a` | `180` | `build/llm_goal_evidence/context_ponytail.log` | `n/a` |
+| dashboard | `pass` | `pass` | `0` | `n/a` | `180` | `build/llm_goal_evidence/dashboard.log` | `n/a` |
+| vllm_host | `warn` | `warn` | `0` | `n/a` | `180` | `build/llm_goal_evidence/vllm_host.log` | `n/a` |
+| svllm_local | `pass` | `pass` | `0` | `n/a` | `180` | `build/llm_goal_evidence/svllm_local.log` | `n/a` |
+| torch_optimizer | `warn` | `warn` | `0` | `n/a` | `180` | `build/llm_goal_evidence/torch_optimizer.log` | `n/a` |
+| finetune_guard | `pass` | `pass` | `0` | `n/a` | `180` | `build/llm_goal_evidence/finetune_guard.log` | `n/a` |
+| public_absence | `pass` | `pass` | `0` | `n/a` | `180` | `build/llm_goal_evidence/public_absence.log` | `n/a` |
 
 ## Strict Evidence Hints
 
