@@ -31,7 +31,9 @@ impl Ftl:
     # Write one logical block (log-structured): program a fresh physical page with OOB
     # {lba, seq}, journal the remap, update L2P, invalidate the previous version.
     me write(lba: i64, data: i64) -> i64:
-        val ppn: i64 = me.band.alloc_page()
+        # Host writes never consume the GC scratch reserve (over-provisioning headroom),
+        # so garbage collection can always relocate a victim and reclaim stale space.
+        val ppn: i64 = me.band.alloc_page_host(GC_RESERVE)
         if ppn == NO_PPN:
             return SC_NS_NOT_READY
         me.seq = me.seq + 1
@@ -238,10 +240,11 @@ fn ftl_selftest() -> i64:
 
     fail
 
-# Regression: GC must never erase a victim it could not fully drain (data-loss guard).
-# Drives the device to 0 free with the active block full, where the cheapest victim
-# (block 0) still holds a live page (LBA 1, never overwritten); one GC pass must keep
-# it readable. See gc_safety_check.spl for the standalone runnable demonstration.
+# Regression: GC data-loss guard + write-cliff liveness. Drives the device to the host
+# write boundary (free == GC_RESERVE), where the cheapest victim (block 0) still holds a
+# live page (LBA 1, never overwritten). The host write is refused (reserve held back), GC
+# reclaims the victim using the reserve without losing LBA 1, and writes resume (no cliff).
+# See gc_safety_check.spl for the standalone runnable demonstration.
 fn ftl_gc_safety_selftest() -> i64:
     var fail: i64 = 0
     var ftl: Ftl = ftl_new()
@@ -250,13 +253,22 @@ fn ftl_gc_safety_selftest() -> i64:
         ftl.write(x, x + 1000)
         x = x + 1
     var k: i64 = 0
-    while k < LBA_COUNT:                 # overwrite every 3rd LBA: spread staleness, fill OP
-        ftl.write(k, k + 5000)
-        k = k + 3
-    fail = fail + expect_eq(ftl.free_blocks(), 0, "gc-safety: device driven to zero free")
+    var rc: i64 = SC_SUCCESS
+    while k < LBA_COUNT and rc == SC_SUCCESS:   # overwrite every 3rd LBA until refused
+        rc = ftl.write(k, k + 5000)
+        if rc == SC_SUCCESS:
+            k = k + 3
+    fail = fail + expect_eq(ftl.free_blocks(), GC_RESERVE, "gc-safety: host writes stop at the GC reserve")
+    fail = fail + expect_eq(rc, SC_NS_NOT_READY, "gc-safety: write refused cleanly at the boundary")
     fail = fail + expect_eq(ftl.read(1), 1001, "gc-safety: LBA1 live before GC")
-    ftl.gc_once()                        # under zero-free this must abort, not erase
+    fail = fail + expect_eq(ftl.write(7, 77), SC_NS_NOT_READY, "gc-safety: write refused before GC (cliff)")
+    val victim: i64 = ftl.gc_once()      # uses the reserve as scratch -> reclaims safely
+    var reclaimed: i64 = 0
+    if victim != UNMAP:
+        reclaimed = 1
+    fail = fail + expect_eq(reclaimed, 1, "gc-safety: GC reclaims a victim (forward progress)")
     fail = fail + expect_eq(ftl.read(1), 1001, "gc-safety: LBA1 survives GC (no data loss)")
+    fail = fail + expect_eq(ftl.write(7, 77), SC_SUCCESS, "gc-safety: write succeeds after GC (no cliff)")
     fail
 
 # Regression: power loss wipes volatile state; recovery rebuilds from persistent media,

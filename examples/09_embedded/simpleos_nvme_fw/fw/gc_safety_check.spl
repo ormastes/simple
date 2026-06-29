@@ -1,20 +1,20 @@
 """
-gc_safety_check — regression for the GC data-loss defect.
+gc_safety_check — GC data-loss guard + write-cliff (liveness) regression.
 
-Drives the FTL to a *truly full* device (0 free blocks AND the active block full)
-where the cheapest garbage-collection victim still holds live pages, then runs one
-GC pass. A correct FTL must NEVER erase a victim whose live pages could not be
-relocated — doing so destroys committed host data while the L2P map still points
-into the (now erased) block.
+Drives the FTL to the host-write boundary, where the over-provisioning / GC reserve
+is the only free space left, and the cheapest GC victim still holds live pages. Proves:
 
-Construction (geometry: 64 blocks x 64 pages = 4096 pages, 3072 surfaced LBAs):
-  1. write all 3072 LBAs once  -> blocks 0..47 fully live, 16 free over-provision blocks.
-  2. overwrite every 3rd LBA   -> spreads staleness (~22 stale/block, never a fully
-     stale block) and consumes exactly the 16 OP blocks, ending with block 63 FULL
-     and free_blocks() == 0.
-Now the cheapest CLOSED victim is block 0 (42 live pages); LBA 1 was never overwritten
-(1 is not a multiple of 3) so it still lives in block 0. One GC pass must keep LBA 1
-readable. With the defect, gc_once erases block 0 anyway and read(1) -> 0 (data loss).
+  * the host write path never consumes the GC scratch reserve (free stops at GC_RESERVE),
+    and is refused cleanly (SC_NS_NOT_READY) rather than crashing or half-applying;
+  * garbage collection, using the reserve as scratch, relocates the victim's live pages
+    and reclaims it WITHOUT losing committed data (the data-loss guard);
+  * there is no write-cliff: once GC reclaims stale space, host writes succeed again.
+
+Construction (geometry: 64 blocks x 64 pages, 3072 surfaced LBAs, GC_RESERVE held back):
+  1. write all 3072 LBAs once (blocks 0..47 live);
+  2. overwrite every 3rd LBA (ascending) to spread staleness until a host write is
+     refused — block 0 becomes the cheapest victim and still holds LBA 1 (never a
+     multiple of 3, so never overwritten).
 
 Run: bin/simple run examples/09_embedded/simpleos_nvme_fw/fw/gc_safety_check.spl
 """
@@ -32,28 +32,35 @@ fn main():
         ftl.write(x, x + 1000)
         x = x + 1
 
-    # 2. Overwrite every 3rd LBA to spread staleness and exhaust the OP blocks.
+    # 2. Overwrite every 3rd LBA until the host write path is refused at the reserve.
     var k: i64 = 0
-    while k < LBA_COUNT:
-        ftl.write(k, k + 5000)
-        k = k + 3
+    var rc: i64 = SC_SUCCESS
+    while k < LBA_COUNT and rc == SC_SUCCESS:
+        rc = ftl.write(k, k + 5000)
+        if rc == SC_SUCCESS:
+            k = k + 3
 
-    print "free_blocks after fill = {ftl.free_blocks()} (want 0)"
-    fail = fail + expect_eq(ftl.free_blocks(), 0, "device driven to zero free blocks")
+    print "free at boundary = {ftl.free_blocks()} (want GC_RESERVE={GC_RESERVE}); last rc = {rc}"
+    fail = fail + expect_eq(ftl.free_blocks(), GC_RESERVE, "host writes stop at the GC reserve (scratch held back)")
+    fail = fail + expect_eq(rc, SC_NS_NOT_READY, "host write refused cleanly at the reserve boundary (no crash)")
 
     # 3. LBA 1 is a live page in the cheapest victim block (block 0).
-    val before: i64 = ftl.read(1)
-    print "read(1) before GC = {before} (want 1001)"
-    fail = fail + expect_eq(before, 1001, "LBA1 live before GC")
+    fail = fail + expect_eq(ftl.read(1), 1001, "LBA1 live at the boundary")
 
-    # 4. One GC pass under zero-free pressure.
+    # 4. At the boundary (no GC yet) a fresh host write is refused — the cliff state.
+    fail = fail + expect_eq(ftl.write(7, 77), SC_NS_NOT_READY, "write refused before GC (device at the reserve)")
+
+    # 5. GC, using the reserve as scratch, reclaims a victim and preserves its live data.
     val victim: i64 = ftl.gc_once()
-    print "gc_once returned {victim}"
+    var reclaimed: i64 = 0
+    if victim != UNMAP:
+        reclaimed = 1
+    fail = fail + expect_eq(reclaimed, 1, "GC reclaims a victim using the reserve (forward progress)")
+    fail = fail + expect_eq(ftl.read(1), 1001, "LBA1 survives GC under pressure (no data loss)")
 
-    # 5. The live page MUST survive: GC may not erase a victim it could not drain.
-    val after: i64 = ftl.read(1)
-    print "read(1) after GC = {after} (want 1001 — 0 means DATA LOSS)"
-    fail = fail + expect_eq(after, 1001, "LBA1 survives GC under zero-free (no data loss)")
+    # 6. No write-cliff: after GC reclaimed stale space, host writes succeed again.
+    fail = fail + expect_eq(ftl.write(7, 77), SC_SUCCESS, "host write succeeds after GC reclaimed space (no cliff)")
+    fail = fail + expect_eq(ftl.read(7), 77, "post-GC host write reads back")
 
     if fail == 0:
         print "GC SAFETY OK"

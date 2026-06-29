@@ -75,6 +75,20 @@ impl BandAlloc:
         me.active_wp = me.active_wp + 1
         ppn
 
+    # Host allocation: like alloc_page, but refuses to open a NEW block when doing so
+    # would leave fewer than `reserve` free blocks. Those blocks are held back as GC
+    # scratch so garbage collection can always relocate a victim's live pages and make
+    # forward progress — the host write path therefore stops (NO_PPN -> SC_NS_NOT_READY)
+    # before the device reaches a state where stale space exists but GC cannot reclaim it.
+    me alloc_page_host(reserve: i64) -> i64:
+        val no_active: bool = me.active_blk == UNMAP
+        val blk_full:  bool = me.active_wp == PAGES_PER_BLOCK
+        val need_new:  bool = (no_active or blk_full)
+        if need_new:
+            if me.free_count <= reserve:
+                return NO_PPN
+        me.alloc_page()
+
     # Mark a physical page as holding the current version of its LBA.
     me mark_valid(ppn: i64):
         me.valid[ppn] = 1
