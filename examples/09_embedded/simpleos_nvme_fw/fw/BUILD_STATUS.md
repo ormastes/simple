@@ -55,17 +55,24 @@ The full-controller layer, on top of the FTL/FIL stack (legacy single-queue
   `admin_process` (Create/Delete IO SQ/CQ, Identify, Get/Set Features, Get Log Page) and
   `io_process` (round-robins active SQs → FTL → FIL, posts to each SQ's bound CQ).
 - **`fil_nand_device.spl`** — protocol-accurate ONFI NAND *device* model: CMD/ADDR/DATA latch +
-  `exec()` state machine (READ 00h/30h, PROGRAM 80h/10h, ERASE 60h/D0h, STATUS 70h, RESET FFh),
-  status register (FAIL/ARDY/RDY/WP_N), no-overwrite rule, bad-block + one-shot fault injection.
+  `exec()` state machine (READ 00h/30h, PROGRAM 80h/10h main+spare, ERASE 60h/D0h, STATUS 70h,
+  RESET FFh), status register (FAIL/ARDY/RDY/WP_N), OOB {lba,seq} spare area, no-overwrite rule,
+  per-page bit-flip injection, bad-block + one-shot program/erase fault injection. **Faithful
+  drop-in for `fil_nand.Nand`** — same `program/read_page/erase_block/erase_count/inject_*/set_bad`
+  seam, each driving the ONFI bus internally.
 - **`nvme_main.spl`** — the controller acceptance e2e: host bring-up (Identify → Features →
   Create CQ→SQ) → multi-queue IO + round-robin → negative cases (SQ→missing-CQ, delete-bound-CQ)
   → reverse-order teardown → SMART log → power-cycle survival.
 
-Scope notes (explicit): "full NVMe SSD fw" here = the host-runnable simulation (run-green).
+**The FIL runs on the ONFI device** (plan phase E3, done): `fil.spl` composes `NandDevice` (not the
+behavioural `fil_nand.Nand`), so every write/read/GC-erase/recovery-OOB-scan in `sim_main` and
+`nvme_main` goes through the real ONFI handshake. `fil_ecc` keeps the FIL-level ECC (the device
+reports the injected bit-flip count; FIL decides OK/FIXED/FAIL). 300 self-test assertions green.
+
+Scope note (explicit): "full NVMe SSD fw" here = the host-runnable simulation (run-green).
 Bare-metal **rv32** boot of *this Simple firmware* is the no-alloc follow-up (`[i64]`/`.push`
 needs a heap); a self-contained C NAND/FTL demo already boots on `qemu-system-riscv32 -bios none`
-(`ALL RV32 NAND CHECKS PASS`) as current proof of the toolchain + boot path. The FIL→ONFI-device
-swap (run the FIL through `fil_nand_device`) is the API-stable next step (plan phase E3).
+(`ALL RV32 NAND CHECKS PASS`) as current proof of the toolchain + boot path.
 
 Deferred to the build plan (not part of this firmware's run-green core): Lean4 proofs (req 6)
 and sandboxed dynamic policy hooks (req 7); multi-channel scheduling + static wear leveling are
