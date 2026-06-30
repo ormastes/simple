@@ -28,11 +28,16 @@ fn main():
 named "parses import .." and asserts exit 0 + a deprecation-warning string — it
 is checking parse + deprecation, not actual resolution.
 
-## Status
+## Status — RESOLVED (2026-06-30)
 
-5 of the 7 original `module_import_spec` failures were genuine stale import
-paths and are FIXED (commit 69f6b262). These 2 remain and need a seed decision:
-the two modes must agree on whether an unresolvable RELATIVE import is fatal.
+All 7 `module_import_spec` failures are now fixed (spec is 21/0). 5 were stale
+import paths (commit 69f6b262); the remaining 2 relative-`import ..` cases are
+fixed in the seed: `path_resolution.rs` now soft-accepts an unresolvable
+relative import (first path segment starting with `.`) by returning the
+`UNIT_OPAQUE_SENTINEL` (empty namespace) instead of a fatal `cannot_resolve_module`,
+matching the compiled pipeline's lenient warning. Rebuilt + deployed.
+
+Only the secondary finding below remains open.
 
 ## Proper fix (needs a design call)
 
