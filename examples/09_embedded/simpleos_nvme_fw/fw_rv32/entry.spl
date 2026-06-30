@@ -1,0 +1,86 @@
+# NVMe firmware — bare-metal RV32 on-device self-test (gap-closure P9).
+#
+# Re-expresses the firmware's core RAIN parity reconstruct (fw/rain.spl, fw/proofs/Rain.lean)
+# with NO heap growth (fixed-size arrays, plain loops) so it runs on a real RISC-V 32 ISA under
+# qemu-system-riscv32 -bios none, not just the host interpreter. Boots in M-mode, runs the
+# self-test on-device, prints the marker over the 16550 UART, then halts.
+#
+# Self-contained: imports only the self-contained kernel MMIO wrappers (no std/string runtime,
+# so the bare-metal closure stays inside the restricted family). The marker is emitted as a raw
+# byte array — no string runtime.
+#
+# Ceiling: this proves the core data-path *logic* runs on rv32 bare metal. The full 22-module
+# Ftl/Hil/Fil/controller no-alloc port (ftl_fill/dict-map/journal-ring -> fixed-capacity) is the
+# remaining work, recorded in doc/03_plan/hardware/nvme_fw_gap_closure_plan.md (P9).
+
+use os.kernel.boot.mmio.{mmio_write8, mmio_read8}
+
+# ── 16550 UART at 0x10000000 (direct MMIO, no allocation) ────────────────────────
+fn uart_putc(ch: i64):
+    while (mmio_read8(0x10000005) & 0x20) == 0:
+        pass_do_nothing
+    mmio_write8(0x10000000, ch as u64)
+
+fn uart_emit(bytes: [i64], n: i64):
+    var i = 0
+    while i < n:
+        uart_putc(bytes[i])
+        i = i + 1
+
+# ── RAIN XOR parity (the fw/rain.spl algorithm, fixed channel count) ──────────────
+fn xor_fold(a: [i64], n: i64) -> i64:
+    var acc = 0
+    var i = 0
+    while i < n:
+        acc = acc ^ a[i]
+        i = i + 1
+    acc
+
+# Reconstruct the lost channel: parity XOR every survivor (the survivors cancel).
+fn reconstruct_lost(a: [i64], parity: i64, failed: i64, n: i64) -> i64:
+    var acc = parity
+    var i = 0
+    while i < n:
+        if i != failed:
+            acc = acc ^ a[i]
+        i = i + 1
+    acc
+
+fn _start():
+    var fail = 0
+    val NCH = 8
+
+    # A stripe of distinct data words across the channels; parity = XOR of all.
+    var data: [i64] = [256, 263, 270, 277, 284, 291, 298, 305]
+    val parity = xor_fold(data, NCH)
+
+    # Lose each channel in turn; reconstruction must recover the exact original word.
+    var ch = 0
+    while ch < NCH:
+        val got = reconstruct_lost(data, parity, ch, NCH)
+        if got != data[ch]:
+            fail = fail + 1
+        ch = ch + 1
+
+    # Channel-failure rebuild over a fixed NAND: corrupt one channel, rebuild from parity.
+    var nand: [i64] = [11, 22, 33, 44, 55, 66, 77, 88]
+    val par2 = xor_fold(nand, NCH)
+    val F = 3
+    val orig = nand[F]
+    nand[F] = 999                       # the failed/corrupted channel
+    val rebuilt = reconstruct_lost(nand, par2, F, NCH)
+    if rebuilt != orig:
+        fail = fail + 1
+
+    if fail == 0:
+        # "ALL RV32 NVME FW CHECKS PASS\n"
+        var ok: [i64] = [65, 76, 76, 32, 82, 86, 51, 50, 32, 78, 86, 77, 69, 32, 70, 87, 32, 67, 72, 69, 67, 75, 83, 32, 80, 65, 83, 83, 10]
+        uart_emit(ok, 29)
+    else:
+        # "RV32 NVME FW FAIL\n"
+        var bad: [i64] = [82, 86, 51, 50, 32, 78, 86, 77, 69, 32, 70, 87, 32, 70, 65, 73, 76, 10]
+        uart_emit(bad, 18)
+
+    # Halt (the system test greps the serial log for the marker within its timeout).
+    while 1 == 1:
+        pass_do_nothing
