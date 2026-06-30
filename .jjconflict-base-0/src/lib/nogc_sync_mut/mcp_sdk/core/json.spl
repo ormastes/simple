@@ -200,42 +200,67 @@ fn skip_ws(s: text, start: i64) -> i64:
     return i
 
 fn read_string_end(s: text, start_quote: i64) -> i64:
-    var i = start_quote + 1
+    # O(n) byte scan. Indexed char_at()/text-array cs[i]/`for ch in s` are all
+    # O(n) per step in the interpreter, making this O(n^2) and dominating MCP
+    # handshake/tools-list latency. Byte indexing is O(1). Returns a CHAR index
+    # (callers substring by char): UTF-8 multibyte bytes are all >= 0x80 and
+    # never collide with the ASCII structural bytes, so `ci` counts char-start
+    # bytes to recover the char index. See test/05_perf/mcp_json_perf_spec.spl.
+    val b = s.bytes()
+    var i = 0
+    var ci = -1
     var escaped = false
-    while i < s.len():
-        val ch = char_at(s, i)
-        if escaped:
-            escaped = false
-        elif ch == "\\":
-            escaped = true
-        elif ch == Q():
-            return i
+    while i < b.len():
+        val v = b[i].to_i64()
+        if v < 128 or v >= 192:
+            ci = ci + 1
+        if ci > start_quote:
+            if escaped:
+                escaped = false
+            elif v == 92:
+                escaped = true
+            elif v == 34:
+                return ci
         i = i + 1
     return -1
 
 fn read_nested_end(s: text, start_index: i64) -> i64:
-    var i = start_index
+    # O(n) byte scan. Indexed char_at()/text-array cs[i]/`for ch in s` are all
+    # O(n) per step in the interpreter, so this was O(n^2):
+    # extract_field_raw('result') over a ~2KB tools/list response took ~6.9ms/
+    # call and grew quadratically with the 151-tool response size, dominating
+    # handshake latency (codex timeout). Byte indexing is O(1). Returns a CHAR
+    # index (callers substring by char): UTF-8 multibyte bytes are all >= 0x80
+    # and never collide with the ASCII structural bytes ({ } [ ] " \), so `ci`
+    # counts char-start bytes to recover the char index.
+    # See test/05_perf/mcp_json_perf_spec.spl.
+    val b = s.bytes()
+    var i = 0
+    var ci = -1
     var depth = 0
     var in_string = false
     var escaped = false
-    while i < s.len():
-        val ch = char_at(s, i)
-        if in_string:
-            if escaped:
-                escaped = false
-            elif ch == "\\":
-                escaped = true
-            elif ch == Q():
-                in_string = false
-        else:
-            if ch == Q():
-                in_string = true
-            elif ch == LB() or ch == SB_L():
-                depth = depth + 1
-            elif ch == RB() or ch == SB_R():
-                depth = depth - 1
-                if depth == 0:
-                    return i
+    while i < b.len():
+        val v = b[i].to_i64()
+        if v < 128 or v >= 192:
+            ci = ci + 1
+        if ci >= start_index:
+            if in_string:
+                if escaped:
+                    escaped = false
+                elif v == 92:
+                    escaped = true
+                elif v == 34:
+                    in_string = false
+            else:
+                if v == 34:
+                    in_string = true
+                elif v == 123 or v == 91:
+                    depth = depth + 1
+                elif v == 125 or v == 93:
+                    depth = depth - 1
+                    if depth == 0:
+                        return ci
         i = i + 1
     return -1
 

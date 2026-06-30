@@ -86,11 +86,17 @@ impl MirTextCodegen for MirToLlvm:
         if bootstrap_debug:
             print "[mir-to-llvm] function:start {name}"
         self.local_types = {}
+        self.return_locals = {}
         var local_i = 0
         while local_i < body.locals.len():
             val local = body.locals[local_i]
             val llvm_ty = self.llvm_type_text(local.type_)
             self.local_types[local.id.id] = llvm_ty
+            match local.kind:
+                case Return:
+                    self.return_locals[local.id.id] = true
+                case _:
+                    ()
             local_i = local_i + 1
         if bootstrap_debug:
             print "[mir-to-llvm] function:locals {name}"
@@ -102,8 +108,9 @@ impl MirTextCodegen for MirToLlvm:
                 match local.kind:
                     case Arg(index):
                         if index == arg_i:
-                            val local_id = self.local_id_value(local.id)
-                            val param_ty = self.get_local_type(local_id)
+                            val local_id = local.id.id
+                            val maybe_param_ty = self.get_local_type(local_id)
+                            val param_ty = if maybe_param_ty == nil: self.native_int() else: maybe_param_ty
                             params = params.push("{param_ty} {self.get_local(local_id)}")
                     case _:
                         ()
@@ -269,12 +276,18 @@ impl MirTextCodegen for MirToLlvm:
                                         case Int(v):
                                             self.builder.emit_ret(self.llvm_type_text(const_type), "{v}")
                                             return
-                                        case _:
-                                            ()
                                 case _:
                                     ()
+                        match ret_operand.kind:
+                            case Copy(local) | Move(local):
+                                if self.return_locals.has(self.local_id_value(local)):
+                                    self.builder.emit_ret(self.current_return_type, "0")
+                                    return
+                            case _:
+                                ()
                         val val_str = self.translate_operand(ret_operand)
-                        val ret_ty = self.get_operand_type(ret_operand)
+                        val maybe_ret_ty = self.get_operand_type(ret_operand)
+                        val ret_ty = if maybe_ret_ty == nil: self.native_int() else: maybe_ret_ty
                         self.builder.emit_ret(ret_ty, val_str)
                     nil:
                         if self.current_return_type == "void":
@@ -343,6 +356,7 @@ impl MirTextCodegen for MirToLlvm:
     me translate_const(dest: LocalId, value: MirConstValue, ty: MirType):
         val dest_name = self.get_local(dest.id)
         val llvm_ty = self.llvm_type_text(ty)
+        self.local_types[self.local_id_value(dest)] = llvm_ty
 
         match value:
             case Int(v):
@@ -530,13 +544,15 @@ impl MirTextCodegen for MirToLlvm:
         var arg_parts: [text] = []
         for arg in args:
             val arg_val = self.translate_operand(arg)
-            val arg_ty = self.get_operand_type(arg)
+            val maybe_arg_ty = self.get_operand_type(arg)
+            val arg_ty = if maybe_arg_ty == nil: self.native_int() else: maybe_arg_ty
             arg_parts = arg_parts.push("{arg_ty} {arg_val}")
         val args_str = arg_parts.join(", ")
         var ret_ty = "void"
         match dest_name:
             Some(name):
-                ret_ty = self.get_local_type(dest_id)
+                val maybe_ret_ty = self.get_local_type(dest_id)
+                ret_ty = if maybe_ret_ty == nil: self.native_int() else: maybe_ret_ty
                 self.builder.emit("  {name} = call {ret_ty} {func_name}({args_str})")
             nil:
                 self.builder.emit("  call {ret_ty} {func_name}({args_str})")

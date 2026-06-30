@@ -2,6 +2,14 @@
 
 **Date:** 2026-06-29
 **Severity:** High — produces BOTH false-reds and (worse) silent false-greens.
+**Status:** FIXED on the pure-Simple interpreter path (commit: test-runner
+preprocess) — `test_runner_execute.run_test_file_interpreter` and the daemon
+child `test_runner_single` now rewrite word-infix → method form into a sibling
+temp before `simple run`, then delete it. Verified: privilege group/principal/
+id_path pass under `bin/simple test` (were false-red); encoding/math_repr/
+persistent_map unchanged. NOTE: now-evaluated assertions may expose previously
+false-GREEN specs as real failures — re-measure with `bin/simple test`.
+
 **Component:** Rust seed test harness — matcher preprocessing
 (`src/compiler_rust/driver/src/cli/test_runner/execution.rs`
 `preprocess_matchers_only` / `rewrite_infix_expect_line`) + the dispatch that

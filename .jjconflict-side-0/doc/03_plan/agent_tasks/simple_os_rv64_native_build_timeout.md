@@ -27,15 +27,15 @@ SIMPLE_NATIVE_BUILD_ENTRY=src/os/kernel/arch/riscv64/boot.spl timeout 300 \
   --linker-script src/os/kernel/arch/riscv64/linker.ld
 ```
 
-Latest failure:
+Latest failure after the local-map and MIR-local metadata fixes:
 
 ```text
 [driver-mir] bootstrap lower:start
 [driver-mir] bootstrap lower:done
 error: AOT compile error in os.kernel.arch.riscv64.boot:
-llc-18: /tmp/simple_llvm_1978471.ll:6:23: error: expected type
-define i64 @boot_main(nil %l1, nil %l2) nounwind {
-                      ^
+llc-18: /tmp/simple_llvm_2147735.ll:27:36: error: '%l15' defined with type 'i1' but expected 'i64'
+  %l16 = call i64 @unknown_nil(i64 %l15)
+                                   ^
 ```
 
 Generated IR is now less broken than before:
@@ -43,14 +43,24 @@ Generated IR is now less broken than before:
 - Parameter names are real MIR locals (`%l1`, `%l2`) instead of `%arg0`.
 - Branch labels are raw block ids (`%bb1`) instead of `%bbBlockId(id: 1)`.
 - Operand locals are raw locals (`%l24`) instead of `%lLocalId(id: 24)`.
+- LLVM function parameter, call-result, call-argument, and return types no
+  longer emit `nil`; they are normalized to native integer fallbacks where MIR
+  type data is missing.
+- `_uart_put(byte: u64)` now references its real argument local instead of the
+  undefined `%l2`.
+- `_start` no longer fails on `ret i64 %l1`; bootstrap MIR locals are retained
+  in `MirBuilder.new_local`, and `MirToLlvm` treats synthetic return locals as a
+  default return value when they reach a terminator.
 
 Remaining issue:
 
-- LLVM parameter and call result types still emit as `nil`.
-- Adding unsigned integer handling to `LlvmTypeMapper` did not change this, so
-  the active `nil` source is upstream of, or bypassing, that mapper.
+- `boot_main` emits a bool const as `i1` (`%l15`) but the call path still passes
+  it as `i64` to `@unknown_nil`, so `llc` rejects the IR.
 - Function call names still emit as `@unknown_*`, so function-symbol operand
-  lowering is also incomplete on this text LLVM path.
+  lowering is incomplete on this text LLVM path.
+- Later `boot_main` IR still contains memory/condition types as `nil`
+  (`alloca nil`, `store nil`, `icmp ne nil`); `llc` currently stops before
+  those.
 
 ## Fixes Landed In This Lane
 
@@ -72,22 +82,32 @@ Remaining issue:
   parameter, operand, and terminator paths.
 - `LlvmTypeMapper` now maps `U8/U16/U32/U64` to signless LLVM integer widths and
   includes them in size/alignment.
+- `MirToLlvm` now has local native-int fallbacks for missing primitive/local
+  operand types at emitted parameter, call, and return boundaries.
+- `MirLowering.local_map` now keys by raw symbol id so equivalent `SymbolId`
+  values resolve the same parameter/local.
+- `MirBuilder.new_local` now records locals even in `SIMPLE_BOOTSTRAP=1`, which
+  preserves `LocalKind.Arg`/`Return` metadata for the LLVM text backend.
+- `MirToLlvm.translate_const` now updates `local_types` to the type it actually
+  emits; the remaining bool mismatch shows another call-typing path still
+  forces native-int.
 - Temporary Rust diagnostics used for narrowing were removed.
 
 ## Next Step
 
 Do not rerun the same build without new narrowing evidence.
 
-Inspect why `MirToLlvm.get_local_type()` receives/stores `nil` for boot locals
-despite `boot_main(hart_id: u64, dtb_addr: u64)`. Good next probes:
+Inspect why the call argument printer still emits `i64 %l15` even though
+`translate_const` emits `%l15 = add i1 1, 0`. Good next probes:
 
-- Log or inspect `body.locals` and `local.type_.kind` inside
-  `_MirToLlvm/core_codegen.spl::translate_function`.
-- Confirm whether `self.type_mapper.map_type(local.type_)` is dispatched to
-  `LlvmTypeMapper.map_type` or a trait/default mapper that still lacks unsigned
-  support.
+- Inspect `translate_call` and any callee-signature or unknown-call fallback path
+  that can override `get_operand_type(arg)`.
+- If no callee signature is available, use the operand's actual type for call
+  arguments and insert an explicit cast only when a known callee requires it.
 - Inspect function-symbol `MirOperand` lowering so calls stop emitting
   `@unknown_*`.
+- After the bool mismatch is fixed, continue with the remaining `alloca nil` /
+  `icmp ne nil` type sites in `boot_main`.
 
 Keep the stale-ELF preflight blocking QEMU/WM checks until
 `build/os/simpleos_riscv64.elf` is freshly produced.

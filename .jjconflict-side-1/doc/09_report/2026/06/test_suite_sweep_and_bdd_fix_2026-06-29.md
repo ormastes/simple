@@ -40,7 +40,16 @@ Banked clean, verified library fixes (each spec 0 failures after):
   vartheta/varkappa/varphi/varpi unconverted. Added them. tokenizer spec → 0.
 - (encoding msgpack/bson/cbor from Update #1.)
 
-**Major harness finding (filed:
+**Major harness bug — now FIXED (commit: test-runner preprocess):** the
+interpreter test path (daemon child `test_runner_single` + `run_test_file_interpreter`)
+now rewrites legacy word-infix `expect X to_equal Y` → method form before
+`simple run`, mirroring the Rust batch path. privilege group/principal/id_path
+now pass under `bin/simple test` (were false-red); encoding/math_repr/
+persistent_map unchanged. Follow-up: this makes 4251 previously-dropped
+assertions (155 files) actually evaluate — re-measure with `bin/simple test` to
+get the true count (some hidden false-greens will surface as real failures).
+
+**Original finding (filed:
 `doc/08_tracking/bug/harness_word_infix_expect_not_preprocessed_2026-06-29.md`):**
 legacy word-infix `expect X to_equal Y` (4251 uses / 155 files) only works when
 the harness rewrites it to method form. `bin/simple run` AND `bin/simple test
@@ -77,6 +86,20 @@ No shared root remains; no append-helper or matcher shortcut applies. Closing th
 rest requires feature implementation, approved test edits, or seed/harness work
 (the word-infix fix, which will *raise* the measured failure count by exposing
 false-greens — must be done deliberately and re-measured with `bin/simple test`).
+
+## Accurate re-measurement after the harness fix (lib/common, via `test --no-session-daemon`)
+
+`bin/simple test --no-session-daemon <file>` now preprocesses (the fix), giving a
+daemon-free accurate path. lib/common: **PASS 489 / FAIL 140 / NORESULT 3**
+(vs the earlier `run`-based 484/125 which mis-measured word-infix).
+- 5 specs flipped false-RED → PASS (privilege etc.).
+- 20 specs flipped to FAIL: ~12 are `wine_*` that were **false-GREENING** (vacuous
+  word-infix passes) and now correctly fail (still unbuilt PE-loader feature, not
+  bugs); ~6 are module/symbol-resolution errors (run-based NORESULT reclassified
+  as FAIL); ~3 are load-level issues. **No new fixable cluster** — confirms the
+  residual is unbuilt-features + individual issues, as categorized.
+- Net: the harness fix makes the suite HONEST (no silent false-greens), which is
+  why FAIL rose — those were always real, just hidden.
 
 ## Fixes landed (verified)
 1. **BDD matcher bug** (seed, commit `62cea5b`, rebuilt+deployed) — `expect(falsy_call()).to_matcher()`
