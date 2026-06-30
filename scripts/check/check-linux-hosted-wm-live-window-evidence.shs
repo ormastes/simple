@@ -1,0 +1,97 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/linux-hosted-wm-live-window-evidence}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/linux_hosted_wm_live_window_evidence_$(date -u +%F).md}"
+LOG_PATH="$BUILD_DIR/stdout.log"
+ERR_PATH="$BUILD_DIR/stderr.log"
+PID_PATH="$BUILD_DIR/pid"
+TIMEOUT_SECS="${LINUX_HOSTED_WM_LIVE_TIMEOUT_SECS:-25}"
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+rm -f "$LOG_PATH" "$ERR_PATH" "$PID_PATH" "$REPORT_PATH"
+
+GUI_BIN="${GUI_BIN:-}"
+GUI_BIN_SOURCE="${GUI_BIN_SOURCE:-explicit-env}"
+if [ "$GUI_BIN" = "" ]; then
+    GUI_BIN_SOURCE="repo-gui-driver-fallback"
+    for candidate in \
+        "src/compiler_rust/target/gui/debug/simple" \
+        "src/compiler_rust/target/gui/release/simple" \
+        "src/compiler_rust/target/debug/simple" \
+        "src/compiler_rust/target/release/simple"
+    do
+        if [ -x "$candidate" ] && LC_ALL=C grep -aq "rt_winit_event_loop_new" "$candidate"; then
+            GUI_BIN="$candidate"
+            break
+        fi
+    done
+fi
+
+emit_report() {
+    status="$1"
+    reason="$2"
+    window_marker="$3"
+    frame_marker="$4"
+    {
+        echo "# Linux Hosted WM Live Window Evidence"
+        echo
+        echo "- status: $status"
+        echo "- reason: $reason"
+        echo "- gui_bin: $GUI_BIN"
+        echo "- gui_bin_source: $GUI_BIN_SOURCE"
+        echo "- entry: src/os/hosted/hosted_entry.spl"
+        echo "- window_marker: $window_marker"
+        echo "- frame_marker: $frame_marker"
+        echo "- stdout: $LOG_PATH"
+        echo "- stderr: $ERR_PATH"
+    } >"$REPORT_PATH"
+    echo "linux_hosted_wm_live_window_status=$status"
+    echo "linux_hosted_wm_live_window_reason=$reason"
+    echo "linux_hosted_wm_live_window_gui_bin=$GUI_BIN"
+    echo "linux_hosted_wm_live_window_gui_bin_source=$GUI_BIN_SOURCE"
+    echo "linux_hosted_wm_live_window_entry=src/os/hosted/hosted_entry.spl"
+    echo "linux_hosted_wm_live_window_window_marker=$window_marker"
+    echo "linux_hosted_wm_live_window_frame_marker=$frame_marker"
+    echo "linux_hosted_wm_live_window_report_path=$REPORT_PATH"
+}
+
+if [ "$GUI_BIN" = "" ]; then
+    emit_report "unavailable" "missing-gui-enabled-driver" "fail" "fail"
+    exit 1
+fi
+
+set +e
+SIMPLE_LIB="${SIMPLE_LIB:-src}" "$GUI_BIN" run src/os/hosted/hosted_entry.spl >"$LOG_PATH" 2>"$ERR_PATH" &
+run_pid=$!
+echo "$run_pid" >"$PID_PATH"
+deadline=$(($(date +%s) + TIMEOUT_SECS))
+while kill -0 "$run_pid" >/dev/null 2>&1 && [ "$(date +%s)" -lt "$deadline" ]; do
+    if grep -Fq "[hosted-wm] frame-presented" "$LOG_PATH" 2>/dev/null; then
+        break
+    fi
+    sleep 1
+done
+kill "$run_pid" >/dev/null 2>&1 || true
+wait "$run_pid" >/dev/null 2>&1
+set -e
+
+window_marker=fail
+frame_marker=fail
+if grep -Fq "[hosted-wm] window-created backend=winit mode=windowed fullscreen=false width=1024 height=720 title=SimpleOS Shared Hosted WM" "$LOG_PATH"; then
+    window_marker=pass
+fi
+if grep -Fq "[hosted-wm] frame-presented renderer=simple-web host=linux-windowed width=1024 height=720" "$LOG_PATH"; then
+    frame_marker=pass
+fi
+
+if [ "$window_marker" = pass ] && [ "$frame_marker" = pass ]; then
+    emit_report "pass" "linux-windowed-winit-frame-presented" "$window_marker" "$frame_marker"
+    exit 0
+fi
+
+emit_report "fail" "missing-windowed-frame-marker" "$window_marker" "$frame_marker"
+exit 1
