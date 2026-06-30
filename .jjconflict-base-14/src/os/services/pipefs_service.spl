@@ -1,0 +1,154 @@
+# SimpleOS Pipe Filesystem Service (G7)
+#
+# ECS-backed pipe registry. Each entity represents one anonymous pipe,
+# with reader/writer IPC endpoints, buffer accounting, and close state.
+
+use std.ecs.entity.{Entity, EntityAllocator}
+use std.ecs.component_store.{ComponentStore}
+use std.ecs.world.{WorldBase}
+
+# ============================================================================
+# Closed-side constants
+# ============================================================================
+
+val PIPE_OPEN: u32   = 0   # Neither side closed
+val PIPE_READER: u32 = 1   # Reader end closed
+val PIPE_WRITER: u32 = 2   # Writer end closed
+val PIPE_BOTH: u32   = 3   # Both ends closed
+
+# ============================================================================
+# Components
+# ============================================================================
+
+struct ReaderEp:
+    """IPC endpoint of the pipe reader."""
+    value: u64
+
+struct WriterEp:
+    """IPC endpoint of the pipe writer."""
+    value: u64
+
+struct BufferSize:
+    """Maximum capacity of the pipe buffer in bytes."""
+    bytes: u32
+
+struct BytesBuffered:
+    """Number of bytes currently held in the pipe buffer."""
+    value: u32
+
+struct Closed:
+    """Bitmask of closed ends: 0=none, 1=reader, 2=writer, 3=both."""
+    which: u32
+
+# ============================================================================
+# PipefsWorld — ECS world
+# ============================================================================
+
+struct PipefsWorld:
+    """ECS world owning all pipe entity data."""
+    base:      WorldBase
+    readers:   ComponentStore<ReaderEp>
+    writers:   ComponentStore<WriterEp>
+    bufsizes:  ComponentStore<BufferSize>
+    buffered:  ComponentStore<BytesBuffered>
+    closed:    ComponentStore<Closed>
+
+# ============================================================================
+# PipefsService — public API
+# ============================================================================
+
+class PipefsService:
+    """Pipe filesystem service.
+
+    Owns a PipefsWorld (ECS world) internally. Tracks all active kernel
+    pipes with reader/writer endpoints and byte-level buffer accounting.
+    """
+    world: PipefsWorld
+
+impl PipefsService:
+    static fn new() -> PipefsService:
+        """Create an empty PipefsService with no active pipes."""
+        PipefsService(
+            world: PipefsWorld(
+                base:     WorldBase.new(),
+                readers:  ComponentStore.new(),
+                writers:  ComponentStore.new(),
+                bufsizes: ComponentStore.new(),
+                buffered: ComponentStore.new(),
+                closed:   ComponentStore.new()
+            )
+        )
+
+    me pipe_create(reader_ep: u64, writer_ep: u64, buf_size: u32) -> Entity:
+        """Create a new pipe and return its entity handle.
+
+        Both reader and writer endpoints are registered, buffer size is
+        fixed at creation time, current buffered bytes starts at 0, and
+        the closed bitmask starts at PIPE_OPEN (0).
+        """
+        val e = self.world.base.spawn()
+        val tick = self.world.base.now()
+        self.world.readers.insert(e,  ReaderEp(value: reader_ep),   tick)
+        self.world.writers.insert(e,  WriterEp(value: writer_ep),   tick)
+        self.world.bufsizes.insert(e, BufferSize(bytes: buf_size),  tick)
+        self.world.buffered.insert(e, BytesBuffered(value: 0),      tick)
+        self.world.closed.insert(e,   Closed(which: PIPE_OPEN),     tick)
+        e
+
+    me pipe_write_notify(pipe: Entity, bytes: u32) -> i32:
+        """Record that `bytes` additional bytes are now in the pipe buffer.
+
+        Returns the new total buffered count, or -1 if the entity is invalid.
+        Callers must check that bytes_buffered <= buffer_size themselves.
+        """
+        val bslot = self.world.buffered.get_slot(pipe)
+        if bslot < 0:
+            return -1
+        val old_val = self.world.buffered.dense[bslot].value
+        val new_val = old_val + bytes
+        self.world.buffered.insert(pipe, BytesBuffered(value: new_val), self.world.base.now())
+        new_val as i32
+
+    me pipe_read_notify(pipe: Entity, bytes: u32):
+        """Record that `bytes` bytes were consumed from the pipe buffer.
+
+        Decrements BytesBuffered; clamps to 0 if bytes > current value.
+        """
+        val bslot = self.world.buffered.get_slot(pipe)
+        if bslot >= 0:
+            val old_val = self.world.buffered.dense[bslot].value
+            var new_val: u32 = 0
+            if old_val > bytes:
+                new_val = old_val - bytes
+            self.world.buffered.insert(pipe, BytesBuffered(value: new_val), self.world.base.now())
+
+    me pipe_close(pipe: Entity, which: u32) -> bool:
+        """OR `which` bitmask into the Closed component.
+
+        Returns true if new bits were added (state changed), false if
+        the pipe was already at least that closed or entity is invalid.
+        """
+        val cslot = self.world.closed.get_slot(pipe)
+        if cslot < 0:
+            return false
+        val old_which = self.world.closed.dense[cslot].which
+        val new_which = old_which | which
+        if new_which == old_which:
+            return false
+        self.world.closed.insert(pipe, Closed(which: new_which), self.world.base.now())
+        true
+
+    fn pipe_count() -> i32:
+        """Return the number of live pipe entities."""
+        self.world.readers.len()
+
+    fn pipe_is_closed(pipe: Entity, which: u32) -> bool:
+        """Return true if ALL bits in `which` are set in the Closed component.
+
+        Returns false if the pipe entity is not found or no bits match.
+        """
+        val cslot = self.world.closed.get_slot(pipe)
+        if cslot < 0:
+            return false
+        val stored = self.world.closed.dense[cslot].which
+        (stored & which) == which

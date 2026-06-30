@@ -1,0 +1,158 @@
+"""
+Debug Assistant Tests
+
+Tests DiagnosticReport construction, entry tracking, severity checks,
+and DebugAssistant diagnosis functions for physics, scene, and performance.
+"""
+
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.engine.llm.debug_assistant.{DiagnosticEntry, DiagnosticReport, DebugAssistant}
+
+describe "DiagnosticReport":
+    describe "new":
+        it "creates an empty report with summary":
+            val report = DiagnosticReport.new("test summary")
+            expect(report.summary).to_equal("test summary")
+            expect(report.entry_count()).to_equal(0.to_i32())
+
+    describe "add_entry":
+        it "adds diagnostic entries":
+            var report = DiagnosticReport.new("test")
+            report.add_entry(DiagnosticEntry(
+                category: "physics",
+                issue: "no gravity",
+                severity: "warning",
+                suggestion: "enable gravity"
+            ))
+            expect(report.entry_count()).to_equal(1.to_i32())
+
+    describe "has_errors":
+        it "returns false when no errors":
+            var report = DiagnosticReport.new("clean")
+            report.add_entry(DiagnosticEntry(
+                category: "a", issue: "b", severity: "warning", suggestion: "c"
+            ))
+            expect(report.has_errors()).to_equal(false)
+
+        it "returns true when an error entry exists":
+            var report = DiagnosticReport.new("broken")
+            report.add_entry(DiagnosticEntry(
+                category: "a", issue: "b", severity: "error", suggestion: "c"
+            ))
+            expect(report.has_errors()).to_equal(true)
+
+    describe "has_warnings":
+        it "returns false when no warnings":
+            val report = DiagnosticReport.new("clean")
+            expect(report.has_warnings()).to_equal(false)
+
+        it "returns true when a warning entry exists":
+            var report = DiagnosticReport.new("warn")
+            report.add_entry(DiagnosticEntry(
+                category: "a", issue: "b", severity: "warning", suggestion: "c"
+            ))
+            expect(report.has_warnings()).to_equal(true)
+
+    describe "to_text":
+        it "contains report header and summary":
+            val report = DiagnosticReport.new("my summary")
+            val txt = report.to_text()
+            expect(txt).to_contain("Diagnostic Report")
+            expect(txt).to_contain("my summary")
+
+        it "contains entry details":
+            var report = DiagnosticReport.new("details test")
+            report.add_entry(DiagnosticEntry(
+                category: "physics",
+                issue: "no colliders",
+                severity: "error",
+                suggestion: "add CollisionShape"
+            ))
+            val txt = report.to_text()
+            expect(txt).to_contain("[error]")
+            expect(txt).to_contain("physics")
+            expect(txt).to_contain("no colliders")
+            expect(txt).to_contain("add CollisionShape")
+
+describe "DebugAssistant":
+    describe "new":
+        it "starts with zero known issues":
+            val da = DebugAssistant.new()
+            expect(da.known_issue_count()).to_equal(0.to_i64())
+
+    describe "add_known_issue":
+        it "registers known issue patterns":
+            var da = DebugAssistant.new()
+            da.add_known_issue("null pointer in physics")
+            da.add_known_issue("texture not found")
+            expect(da.known_issue_count()).to_equal(2.to_i64())
+
+    describe "diagnose_physics":
+        it "warns when no physics bodies":
+            val da = DebugAssistant.new()
+            val report = da.diagnose_physics(0, true, false)
+            expect(report.has_warnings()).to_equal(true)
+            expect(report.entry_count()).to_be_greater_than(0.to_i32())
+
+        it "errors when bodies exist but no colliders":
+            val da = DebugAssistant.new()
+            val report = da.diagnose_physics(5, true, false)
+            expect(report.has_errors()).to_equal(true)
+
+        it "reports info when gravity is disabled":
+            val da = DebugAssistant.new()
+            val report = da.diagnose_physics(5, false, true)
+            expect(report.entry_count()).to_be_greater_than(0.to_i32())
+
+        it "produces no entries for healthy config":
+            val da = DebugAssistant.new()
+            val report = da.diagnose_physics(5, true, true)
+            expect(report.entry_count()).to_equal(0.to_i32())
+
+    describe "diagnose_scene":
+        it "warns on empty scene":
+            val da = DebugAssistant.new()
+            val report = da.diagnose_scene(0, 0)
+            expect(report.has_warnings()).to_equal(true)
+
+        it "warns on orphan nodes":
+            val da = DebugAssistant.new()
+            val report = da.diagnose_scene(50, 3)
+            expect(report.has_warnings()).to_equal(true)
+
+        it "warns on very large scene":
+            val da = DebugAssistant.new()
+            val report = da.diagnose_scene(20000, 0)
+            expect(report.has_warnings()).to_equal(true)
+
+        it "produces no warnings for healthy scene":
+            val da = DebugAssistant.new()
+            val report = da.diagnose_scene(100, 0)
+            expect(report.has_warnings()).to_equal(false)
+
+    describe "diagnose_performance":
+        it "errors when FPS is below 30":
+            val da = DebugAssistant.new()
+            val report = da.diagnose_performance(15.0, 100, 50000)
+            expect(report.has_errors()).to_equal(true)
+
+        it "warns when FPS is between 30 and 60":
+            val da = DebugAssistant.new()
+            val report = da.diagnose_performance(45.0, 100, 50000)
+            expect(report.has_warnings()).to_equal(true)
+            expect(report.has_errors()).to_equal(false)
+
+        it "warns on high draw call count":
+            val da = DebugAssistant.new()
+            val report = da.diagnose_performance(60.0, 2000, 50000)
+            expect(report.has_warnings()).to_equal(true)
+
+        it "warns on high triangle count":
+            val da = DebugAssistant.new()
+            val report = da.diagnose_performance(60.0, 100, 2000000)
+            expect(report.has_warnings()).to_equal(true)
+
+        it "produces no issues for healthy performance":
+            val da = DebugAssistant.new()
+            val report = da.diagnose_performance(60.0, 500, 500000)
+            expect(report.entry_count()).to_equal(0.to_i32())

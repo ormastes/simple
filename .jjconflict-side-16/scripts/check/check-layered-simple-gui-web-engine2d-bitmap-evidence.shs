@@ -1,0 +1,328 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/layered_simple_gui_web_engine2d_bitmap_evidence}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/layered_simple_gui_web_engine2d_bitmap_evidence_$(date -u +%F).md}"
+SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
+SIMPLE_BIN_STATUS=pass
+
+is_rust_seed_simple() {
+    case "$1" in
+        src/compiler_rust/*|*/src/compiler_rust/*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+if [ "${SIMPLE_BIN:-}" = "" ]; then
+    SIMPLE_BIN_SOURCE="missing-self-hosted"
+    for candidate in \
+        "release"/*/simple \
+        "bin/release"/*/simple \
+        "build/bootstrap/stage3/simple" \
+        "bin/simple" \
+        "./bin/simple"
+    do
+        if [ -x "$candidate" ]; then
+            SIMPLE_BIN="$candidate"
+            SIMPLE_BIN_SOURCE="repo-self-hosted-fallback"
+            break
+        fi
+    done
+    if [ "${SIMPLE_BIN:-}" = "" ] && [ "${ALLOW_PATH_SIMPLE_BIN:-0}" = "1" ] && command -v simple >/dev/null 2>&1; then
+        SIMPLE_BIN="$(command -v simple)"
+        SIMPLE_BIN_SOURCE="path-opt-in"
+    fi
+else
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
+fi
+SIMPLE_BIN="${SIMPLE_BIN:-}"
+if [ "$SIMPLE_BIN" = "" ]; then
+    SIMPLE_BIN_STATUS=missing
+elif is_rust_seed_simple "$SIMPLE_BIN"; then
+    SIMPLE_BIN_STATUS=forbidden
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-rust-seed-forbidden"
+elif [ ! -x "$SIMPLE_BIN" ]; then
+    SIMPLE_BIN_STATUS=missing
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-missing"
+fi
+export SIMPLE_BIN SIMPLE_BIN_SOURCE SIMPLE_BIN_STATUS
+ITERATIONS="${LAYERED_BITMAP_ITERATIONS:-100}"
+TRIALS="${LAYERED_BITMAP_TRIALS:-1}"
+ELECTRON_ITERATIONS="${LAYERED_ELECTRON_ITERATIONS:-1}"
+MIN_ITERATIONS="${LAYERED_BITMAP_MIN_ITERATIONS:-25}"
+
+if [ "$ITERATIONS" -lt "$MIN_ITERATIONS" ]; then
+    ITERATIONS="$MIN_ITERATIONS"
+fi
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+rm -f "$BUILD_DIR/evidence.env" "$REPORT_PATH"
+
+field_of() {
+    field_key="$1"
+    field_file="$2"
+    sed -n "s/^${field_key}=//p" "$field_file" | tail -n 1
+}
+
+append_env() {
+    env_key="$1"
+    env_value="$2"
+    echo "$env_key=$env_value" >>"$BUILD_DIR/evidence.env"
+}
+
+file_byte_count() {
+    if [ -f "$1" ]; then
+        wc -c <"$1" | tr -d ' '
+    else
+        echo 0
+    fi
+}
+
+file_cksum_value() {
+    if [ -f "$1" ]; then
+        cksum "$1" | sed 's/ .*//'
+    else
+        echo 0
+    fi
+}
+
+append_artifact_fingerprint() {
+    artifact_key="$1"
+    artifact_path="$2"
+    append_env "${artifact_key}_bytes" "$(file_byte_count "$artifact_path")"
+    append_env "${artifact_key}_cksum" "$(file_cksum_value "$artifact_path")"
+}
+
+run_checked() {
+    label="$1"
+    script="$2"
+    child_build_dir="$3"
+    child_report_path="$4"
+    out_file="$5"
+    set +e
+    BUILD_DIR="$child_build_dir" \
+    REPORT_PATH="$child_report_path" \
+    SIMPLE_BIN="$SIMPLE_BIN" \
+    SIMPLE_LIB="${SIMPLE_LIB:-src}" \
+    NODE_BITMAP_ITERATIONS="$ITERATIONS" \
+    JS_BITMAP_TRIALS="$TRIALS" \
+    ELECTRON_BITMAP_ITERATIONS="$ELECTRON_ITERATIONS" \
+        sh "$script" >"$out_file" 2>&1
+    code=$?
+    set -e
+    append_env "layered_${label}_exit_code" "$code"
+    return "$code"
+}
+
+check_js_layer() {
+    scene="$1"
+    runtime="$2"
+    env_file="$3"
+    status="$(field_of simple_web_engine2d_js_status "$env_file")"
+    reason="$(field_of simple_web_engine2d_js_reason "$env_file")"
+    mismatch_count="$(field_of simple_web_engine2d_js_mismatch_count "$env_file")"
+    blur_used="$(field_of simple_web_engine2d_js_blur_or_tolerance_used "$env_file")"
+    simple_argb="$(field_of simple_web_engine2d_js_simple_argb_path "$env_file")"
+    baseline_argb="$(field_of simple_web_engine2d_js_baseline_argb_path "$env_file")"
+    speedup="$(field_of simple_web_engine2d_js_speedup_x1000 "$env_file")"
+    prefix="layered_${scene}_${runtime}"
+    append_env "${prefix}_status" "${status:-}"
+    append_env "${prefix}_reason" "${reason:-}"
+    append_env "${prefix}_mismatch_count" "${mismatch_count:-}"
+    append_env "${prefix}_blur_or_tolerance_used" "${blur_used:-}"
+    append_env "${prefix}_simple_argb_path" "${simple_argb:-}"
+    append_env "${prefix}_baseline_argb_path" "${baseline_argb:-}"
+    append_env "${prefix}_speedup_x1000" "${speedup:-0}"
+    if [ "$status" != "pass" ]; then
+        echo "${scene}-${runtime}-not-pass"
+        return 1
+    fi
+    if [ "$mismatch_count" != "0" ]; then
+        echo "${scene}-${runtime}-pixel-mismatch"
+        return 1
+    fi
+    if [ "$blur_used" != "false" ]; then
+        echo "${scene}-${runtime}-blur-or-tolerance-used"
+        return 1
+    fi
+    if [ -z "$simple_argb" ] || [ -z "$baseline_argb" ] || [ ! -s "$simple_argb" ] || [ ! -s "$baseline_argb" ]; then
+        echo "${scene}-${runtime}-missing-argb"
+        return 1
+    fi
+    append_artifact_fingerprint "${prefix}_simple_argb" "$simple_argb"
+    append_artifact_fingerprint "${prefix}_baseline_argb" "$baseline_argb"
+    echo pass
+}
+
+check_electron_layer() {
+    scene="$1"
+    env_file="$2"
+    status="$(field_of electron_simple_web_engine2d_status "$env_file")"
+    reason="$(field_of electron_simple_web_engine2d_reason "$env_file")"
+    mismatch_count="$(field_of electron_simple_web_engine2d_mismatch_count "$env_file")"
+    blur_used="$(field_of electron_simple_web_engine2d_blur_or_tolerance_used "$env_file")"
+    expected_argb="$(field_of electron_simple_web_engine2d_expected_argb_path "$env_file")"
+    captured_argb="$(field_of electron_simple_web_engine2d_captured_argb_path "$env_file")"
+    captured_written="$(field_of electron_simple_web_engine2d_captured_argb_written "$env_file")"
+    prefix="layered_${scene}_electron_gui"
+    append_env "${prefix}_status" "${status:-}"
+    append_env "${prefix}_reason" "${reason:-}"
+    append_env "${prefix}_mismatch_count" "${mismatch_count:-}"
+    append_env "${prefix}_blur_or_tolerance_used" "${blur_used:-}"
+    append_env "${prefix}_expected_argb_path" "${expected_argb:-}"
+    append_env "${prefix}_captured_argb_path" "${captured_argb:-}"
+    append_env "${prefix}_captured_argb_written" "${captured_written:-}"
+    if [ "$status" != "pass" ]; then
+        echo "${scene}-electron-gui-not-pass"
+        return 1
+    fi
+    if [ "$mismatch_count" != "0" ]; then
+        echo "${scene}-electron-gui-pixel-mismatch"
+        return 1
+    fi
+    if [ "$blur_used" != "false" ]; then
+        echo "${scene}-electron-gui-blur-or-tolerance-used"
+        return 1
+    fi
+    if [ "$captured_written" != "true" ] || [ -z "$expected_argb" ] || [ -z "$captured_argb" ] || [ ! -s "$expected_argb" ] || [ ! -s "$captured_argb" ]; then
+        echo "${scene}-electron-gui-missing-argb"
+        return 1
+    fi
+    append_artifact_fingerprint "${prefix}_expected_argb" "$expected_argb"
+    append_artifact_fingerprint "${prefix}_captured_argb" "$captured_argb"
+    echo pass
+}
+
+{
+    echo "layered_simple_gui_web_engine2d_simple_bin=$SIMPLE_BIN"
+    echo "layered_simple_gui_web_engine2d_simple_bin_source=$SIMPLE_BIN_SOURCE"
+    echo "layered_simple_gui_web_engine2d_simple_bin_status=$SIMPLE_BIN_STATUS"
+    echo "layered_simple_gui_web_engine2d_iterations=$ITERATIONS"
+    echo "layered_simple_gui_web_engine2d_trials=$TRIALS"
+    echo "layered_simple_gui_web_engine2d_electron_iterations=$ELECTRON_ITERATIONS"
+    echo "layered_simple_gui_web_engine2d_policy=exact-bitmap-no-blur-no-tolerance"
+    echo "layered_simple_gui_web_engine2d_layers=web-renderer-engine2d-node,web-renderer-engine2d-bun,simple-gui-web-renderer-electron"
+    echo "layered_simple_gui_web_engine2d_scenes=image_taskbar_command,toolbar_modal_grid"
+} >"$BUILD_DIR/evidence.env"
+
+status=pass
+reason=pass
+
+if [ "$SIMPLE_BIN_STATUS" != "pass" ]; then
+    status=unavailable
+    reason="simple-bin-$SIMPLE_BIN_STATUS"
+fi
+
+for scene in image_taskbar_command toolbar_modal_grid; do
+    if [ "$status" = "unavailable" ]; then
+        break
+    fi
+    case "$scene" in
+        image_taskbar_command)
+            node_script="scripts/check/check-node-simple-web-engine2d-image-taskbar-command-bitmap-evidence.shs"
+            bun_script="scripts/check/check-bun-simple-web-engine2d-image-taskbar-command-bitmap-evidence.shs"
+            electron_script="scripts/check/check-electron-simple-web-engine2d-image-taskbar-command-bitmap-evidence.shs"
+            ;;
+        toolbar_modal_grid)
+            node_script="scripts/check/check-node-simple-web-engine2d-toolbar-modal-grid-bitmap-evidence.shs"
+            bun_script="scripts/check/check-bun-simple-web-engine2d-toolbar-modal-grid-bitmap-evidence.shs"
+            electron_script="scripts/check/check-electron-simple-web-engine2d-toolbar-modal-grid-bitmap-evidence.shs"
+            ;;
+    esac
+
+    scene_dir="$BUILD_DIR/$scene"
+    mkdir -p "$scene_dir/node" "$scene_dir/bun" "$scene_dir/electron"
+
+    if run_checked "${scene}_node" "$node_script" "$scene_dir/node" "$scene_dir/node.md" "$scene_dir/node.out"; then
+        node_result="$(check_js_layer "$scene" node "$scene_dir/node/evidence.env")"
+    else
+        node_result="${scene}-node-script-failed"
+    fi
+    append_env "layered_${scene}_node_result" "$node_result"
+
+    if run_checked "${scene}_bun" "$bun_script" "$scene_dir/bun" "$scene_dir/bun.md" "$scene_dir/bun.out"; then
+        bun_result="$(check_js_layer "$scene" bun "$scene_dir/bun/evidence.env")"
+    else
+        # Bun is an optional 4th runtime, not one of the required lanes
+        # (pure-simple/node, electron). When it is simply not installed the bun
+        # script emits status=unavailable/reason=missing-bun and exits non-zero;
+        # treat that as a skip rather than a hard failure (matching how the rest
+        # of the suite handles missing optional runtimes). A bun that IS present
+        # but produces wrong pixels still fails via check_js_layer above.
+        bun_status="$(field_of simple_web_engine2d_js_status "$scene_dir/bun/evidence.env")"
+        if [ "$bun_status" = "unavailable" ]; then
+            bun_result="unavailable"
+        else
+            bun_result="${scene}-bun-script-failed"
+        fi
+    fi
+    append_env "layered_${scene}_bun_result" "$bun_result"
+
+    if run_checked "${scene}_electron" "$electron_script" "$scene_dir/electron" "$scene_dir/electron.md" "$scene_dir/electron.out"; then
+        electron_result="$(check_electron_layer "$scene" "$scene_dir/electron/evidence.env")"
+    else
+        electron_result="${scene}-electron-script-failed"
+    fi
+    append_env "layered_${scene}_electron_result" "$electron_result"
+
+    if [ "$status" = "pass" ]; then
+        if [ "$node_result" != "pass" ]; then
+            status=fail
+            reason="$node_result"
+        elif [ "$bun_result" != "pass" ] && [ "$bun_result" != "unavailable" ]; then
+            status=fail
+            reason="$bun_result"
+        elif [ "$electron_result" != "pass" ]; then
+            status=fail
+            reason="$electron_result"
+        fi
+    fi
+done
+
+tmp_env="$BUILD_DIR/evidence.tmp"
+raw_env="$BUILD_DIR/evidence.raw"
+{
+    echo "layered_simple_gui_web_engine2d_status=$status"
+    echo "layered_simple_gui_web_engine2d_reason=$reason"
+    cat "$BUILD_DIR/evidence.env"
+} >"$raw_env"
+awk -F= '
+    {
+        key = $1
+        if (!(key in seen)) {
+            order[++count] = key
+            seen[key] = 1
+        }
+        row[key] = $0
+    }
+    END {
+        for (i = 1; i <= count; i++) {
+            print row[order[i]]
+        }
+    }
+' "$raw_env" >"$tmp_env"
+mv "$tmp_env" "$BUILD_DIR/evidence.env"
+rm -f "$raw_env"
+
+{
+    echo "# Layered Simple GUI / WebRenderer / Engine2D Bitmap Evidence"
+    echo
+    echo "- status: $status"
+    echo "- reason: $reason"
+    echo "- policy: exact bitmap, no blur, no tolerance"
+    echo "- layers: WebRenderer->Engine2D vs Node, WebRenderer->Engine2D vs Bun, Simple GUI->Simple WebRenderer vs Electron"
+    echo "- scenes: image_taskbar_command, toolbar_modal_grid"
+    echo "- iterations: $ITERATIONS"
+    echo "- trials: $TRIALS"
+    echo "- Electron iterations: $ELECTRON_ITERATIONS"
+    echo
+    echo "## Raw Evidence"
+    sed 's/^/- /' "$BUILD_DIR/evidence.env"
+} >"$REPORT_PATH"
+
+cat "$BUILD_DIR/evidence.env"
+
+[ "$status" = "pass" ]

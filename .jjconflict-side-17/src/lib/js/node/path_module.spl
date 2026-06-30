@@ -1,0 +1,173 @@
+# Node.js-compatible POSIX path helpers for the Simple JS runtime.
+#
+# This is a small, deterministic subset of Node's `path.posix` surface used by
+# the Simple JS/Node compatibility lane. It intentionally avoids host filesystem
+# calls so browser/WebEngine and SimpleOS smoke paths get the same answers.
+
+use std.js.types.js_types.{JsValue}
+
+fn _path_arg_string(args: [JsValue], index: i64) -> text:
+    if index < 0 or index >= args.len():
+        return ""
+    match args[index]:
+        JsValue.String(v): v
+        _: ""
+
+fn _path_replace_backslash(path: text) -> text:
+    var out = ""
+    var i = 0
+    while i < path.len():
+        val ch = path.substring(i, i + 1)
+        if ch == "\\":
+            out = out + "/"
+        else:
+            out = out + ch
+        i = i + 1
+    out
+
+fn _path_trim_trailing_slashes(path: text) -> text:
+    if path == "":
+        return ""
+    var clean = _path_replace_backslash(path)
+    while clean.len() > 1 and clean.ends_with("/"):
+        clean = clean.substring(0, clean.len() - 1)
+    clean
+
+fn _path_last_index_of(path: text, needle: text) -> i64:
+    if path == "" or needle == "":
+        return -1
+    var i = path.len() - 1
+    while i >= 0:
+        if path.substring(i, i + needle.len()) == needle:
+            return i
+        i = i - 1
+    -1
+
+fn _path_split_normal_parts(path: text) -> [text]:
+    val parts = _path_replace_backslash(path).split("/")
+    var out: [text] = []
+    for part in parts:
+        if part == "" or part == ".":
+            continue
+        if part == "..":
+            if out.len() > 0 and out.last != Some(".."):
+                out.pop()
+            else:
+                if not path.starts_with("/"):
+                    out.push("..")
+        else:
+            out.push(part)
+    out
+
+fn _path_normalize_text(path: text) -> text:
+    if path == "":
+        return "."
+    val clean = _path_replace_backslash(path)
+    val absolute = clean.starts_with("/")
+    val keep_trailing = clean.len() > 1 and clean.ends_with("/")
+    val parts = _path_split_normal_parts(clean)
+    if parts.len() == 0:
+        if absolute:
+            return "/"
+        if keep_trailing:
+            return "./"
+        return "."
+    val joined = parts.join("/")
+    if absolute:
+        val result = "/" + joined
+        if keep_trailing:
+            return result + "/"
+        return result
+    if keep_trailing:
+        return joined + "/"
+    joined
+
+fn _path_basename_text(path: text) -> text:
+    val clean = _path_trim_trailing_slashes(path)
+    if clean == "":
+        return ""
+    if clean == "/":
+        return ""
+    val idx = _path_last_index_of(clean, "/")
+    if idx < 0:
+        return clean
+    clean.substring(idx + 1)
+
+fn _path_dirname_text(path: text) -> text:
+    val clean = _path_trim_trailing_slashes(path)
+    if clean == "" or clean == ".":
+        return "."
+    if clean == "/":
+        return "/"
+    val idx = _path_last_index_of(clean, "/")
+    if idx < 0:
+        return "."
+    if idx == 0:
+        return "/"
+    clean.substring(0, idx)
+
+fn _path_extname_text(path: text) -> text:
+    val base = _path_basename_text(path)
+    if base == "" or base == "." or base == "..":
+        return ""
+    val dot = _path_last_index_of(base, ".")
+    if dot <= 0:
+        return ""
+    base.substring(dot)
+
+fn path_dirname(args: [JsValue]) -> JsValue:
+    JsValue.String(v: _path_dirname_text(_path_arg_string(args, 0)))
+
+fn path_basename(args: [JsValue]) -> JsValue:
+    var base = _path_basename_text(_path_arg_string(args, 0))
+    val suffix = _path_arg_string(args, 1)
+    if suffix != "" and base.ends_with(suffix) and base != suffix:
+        base = base.substring(0, base.len() - suffix.len())
+    JsValue.String(v: base)
+
+fn path_extname(args: [JsValue]) -> JsValue:
+    JsValue.String(v: _path_extname_text(_path_arg_string(args, 0)))
+
+fn path_isAbsolute(args: [JsValue]) -> JsValue:
+    JsValue.Boolean(v: _path_replace_backslash(_path_arg_string(args, 0)).starts_with("/"))
+
+fn path_normalize(args: [JsValue]) -> JsValue:
+    JsValue.String(v: _path_normalize_text(_path_arg_string(args, 0)))
+
+fn path_join(args: [JsValue]) -> JsValue:
+    var raw_parts: [text] = []
+    for arg in args:
+        match arg:
+            JsValue.String(v):
+                if v != "":
+                    raw_parts.push(v)
+            _:
+                continue
+    if raw_parts.len() == 0:
+        return JsValue.String(v: ".")
+    JsValue.String(v: _path_normalize_text(raw_parts.join("/")))
+
+fn path_resolve(args: [JsValue]) -> JsValue:
+    var resolved = ""
+    var absolute = false
+    var i = args.len() - 1
+    while i >= 0:
+        match args[i]:
+            JsValue.String(v):
+                if v != "":
+                    if resolved == "":
+                        resolved = v
+                    else:
+                        resolved = v + "/" + resolved
+                    if _path_replace_backslash(v).starts_with("/"):
+                        absolute = true
+                        i = -1
+            _:
+                pass_dn
+        i = i - 1
+    if resolved == "":
+        resolved = "/"
+        absolute = true
+    if not absolute:
+        resolved = "/" + resolved
+    JsValue.String(v: _path_normalize_text(resolved))

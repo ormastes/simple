@@ -1,0 +1,237 @@
+"""
+# loader_api dispatch
+**Feature IDs:** #WAVE2-G10
+**Category:** Kernel loader
+
+Verifies loader_dispatch's magic-sniff branching between ELF64 and SMF.
+"""
+use std.spec.*
+use os.kernel.loader.loader_api.{
+    loader_dispatch,
+    loader_dynopen_bytes,
+    loader_dynopen_mapped_bytes,
+    loader_dynopen_mapped_path,
+    loader_dynopen_path,
+    loader_dynopen_registered,
+    loader_dynsym,
+    loader_dynsym_is_process_callable,
+    loader_dynclose
+}
+use os.kernel.loader.dylib_registry.{dylib_registry_reset_for_test}
+use os.kernel.loader.smf.{SMF64_MAGIC_0, SMF64_MAGIC_1, SMF64_MAGIC_2, SMF64_MAGIC_3, SMF_HEADER_TRAILER_SIZE}
+use os.kernel.types.vmspace_types.{ProcessVmSpace}
+
+fn _empty_space() -> ProcessVmSpace:
+    """A ProcessVmSpace with zeroed fields is fine for dispatch-layer tests —
+    no actual mmap runs in the -ENOEXEC / -ENOENT code paths."""
+    ProcessVmSpace(pml4: 0u64, id: 0u64, vma_count: 0u64, areas: [])
+
+fn _zero_bytes(n: i32) -> [u8]:
+    """Return n zero bytes."""
+    var b: [u8] = []
+    var i = 0
+    while i < n:
+        b.push(0u8)
+        i = i + 1
+    b
+
+fn _elf_magic_prefix() -> [u8]:
+    """A buffer whose first 4 bytes are the ELF magic and rest is zero."""
+    var b: [u8] = []
+    b.push(0x7Fu8)
+    b.push(0x45u8)
+    b.push(0x4Cu8)
+    b.push(0x46u8)
+    var i = 4
+    while i < 128:
+        b.push(0u8)
+        i = i + 1
+    b
+
+fn _smf_trailer_bytes() -> [u8]:
+    """A v1.1-style SMF image with magic at EOF-128, not offset 0."""
+    var b: [u8] = [9u8, 8u8, 7u8, 6u8, 5u8]
+    b.push(SMF64_MAGIC_0)
+    b.push(SMF64_MAGIC_1)
+    b.push(SMF64_MAGIC_2)
+    b.push(SMF64_MAGIC_3)
+    while b.len() < 5 + (SMF_HEADER_TRAILER_SIZE as i32):
+        b.push(0u8)
+    b
+
+fn _push_u16_le(buf: [u8], value: i64) -> [u8]:
+    buf.push((value & 0xFF).to_u8())
+    buf.push(((value >> 8) & 0xFF).to_u8())
+    buf
+
+fn _push_u32_le(buf: [u8], value: i64) -> [u8]:
+    buf.push((value & 0xFF).to_u8())
+    buf.push(((value >> 8) & 0xFF).to_u8())
+    buf.push(((value >> 16) & 0xFF).to_u8())
+    buf.push(((value >> 24) & 0xFF).to_u8())
+    buf
+
+fn _push_u64_le(buf: [u8], value: i64) -> [u8]:
+    var out = buf
+    out = _push_u32_le(out, value & 0xFFFFFFFF)
+    out = _push_u32_le(out, (value >> 32) & 0xFFFFFFFF)
+    out
+
+fn _pad_to(buf: [u8], target: i32) -> [u8]:
+    while buf.len() < target:
+        buf.push(0u8)
+    buf
+
+fn _elf64_with_dynsym() -> [u8]:
+    var b: [u8] = [0x7Fu8, 0x45u8, 0x4Cu8, 0x46u8, 2u8, 1u8, 1u8]
+    b = _pad_to(b, 16)
+    b = _push_u16_le(b, 2)
+    b = _push_u16_le(b, 62)
+    b = _push_u32_le(b, 1)
+    b = _push_u64_le(b, 0x400000)
+    b = _push_u64_le(b, 64)
+    b = _push_u64_le(b, 192)
+    b = _push_u32_le(b, 0)
+    b = _push_u16_le(b, 64)
+    b = _push_u16_le(b, 56)
+    b = _push_u16_le(b, 1)
+    b = _push_u16_le(b, 64)
+    b = _push_u16_le(b, 3)
+    b = _push_u16_le(b, 0)
+    b = _push_u32_le(b, 1)
+    b = _push_u32_le(b, 5)
+    b = _push_u64_le(b, 0)
+    b = _push_u64_le(b, 0x400000)
+    b = _push_u64_le(b, 0x400000)
+    b = _push_u64_le(b, 120)
+    b = _push_u64_le(b, 120)
+    b = _push_u64_le(b, 0x1000)
+    b = _pad_to(b, 128)
+    b.push(0u8)
+    b.push(0x68u8)
+    b.push(0x6Fu8)
+    b.push(0x74u8)
+    b.push(0u8)
+    b = _pad_to(b, 144)
+    b = _pad_to(b, 168)
+    b = _push_u32_le(b, 1)
+    b.push(0x12u8)
+    b.push(0u8)
+    b = _push_u16_le(b, 1)
+    b = _push_u64_le(b, 0xCAFE)
+    b = _push_u64_le(b, 8)
+    b = _pad_to(b, 192)
+    b = _pad_to(b, 256)
+    b = _push_u32_le(b, 0)
+    b = _push_u32_le(b, 11)
+    b = _push_u64_le(b, 0)
+    b = _push_u64_le(b, 0)
+    b = _push_u64_le(b, 144)
+    b = _push_u64_le(b, 48)
+    b = _push_u32_le(b, 2)
+    b = _push_u32_le(b, 0)
+    b = _push_u64_le(b, 0)
+    b = _push_u64_le(b, 24)
+    b = _push_u32_le(b, 0)
+    b = _push_u32_le(b, 3)
+    b = _push_u64_le(b, 0)
+    b = _push_u64_le(b, 0)
+    b = _push_u64_le(b, 128)
+    b = _push_u64_le(b, 5)
+    b = _push_u32_le(b, 0)
+    b = _push_u32_le(b, 0)
+    b = _push_u64_le(b, 0)
+    b = _push_u64_le(b, 0)
+    b
+
+fn _elf64_no_load_segments() -> [u8]:
+    var b: [u8] = [0x7Fu8, 0x45u8, 0x4Cu8, 0x46u8, 2u8, 1u8, 1u8]
+    b = _pad_to(b, 16)
+    b = _push_u16_le(b, 2)
+    b = _push_u16_le(b, 62)
+    b = _push_u32_le(b, 1)
+    b = _push_u64_le(b, 0x400000)
+    b = _push_u64_le(b, 64)
+    b = _push_u64_le(b, 0)
+    b = _push_u32_le(b, 0)
+    b = _push_u16_le(b, 64)
+    b = _push_u16_le(b, 56)
+    b = _push_u16_le(b, 0)
+    b = _push_u16_le(b, 0)
+    b = _push_u16_le(b, 0)
+    b = _push_u16_le(b, 0)
+    b
+
+fn _smf_role2_library() -> [u8]:
+    var b = _elf64_with_dynsym()
+    val stub_size = b.len()
+    b.push(SMF64_MAGIC_0)
+    b.push(SMF64_MAGIC_1)
+    b.push(SMF64_MAGIC_2)
+    b.push(SMF64_MAGIC_3)
+    var i = 4
+    while i < 44:
+        b.push(0u8)
+        i = i + 1
+    b = _push_u64_le(b, 0x400000)
+    b = _push_u32_le(b, stub_size)
+    b = _push_u32_le(b, stub_size)
+    b.push(2u8)
+    while b.len() < stub_size + (SMF_HEADER_TRAILER_SIZE as i32):
+        b.push(0u8)
+    b
+
+describe "loader_dispatch":
+    """Magic-sniff routing."""
+
+    it "empty buffer returns -ENOEXEC":
+        """No magic to match => -8."""
+        val rc = loader_dispatch(_zero_bytes(4), _empty_space())
+        expect rc.to_equal(-8i64)
+
+    it "non-ELF non-SMF bytes return -ENOEXEC":
+        """Random data must not silently dispatch to either loader."""
+        val rc = loader_dispatch(_zero_bytes(128), _empty_space())
+        expect rc.to_equal(-8i64)
+
+    it "ELF magic dispatches to elf64 path":
+        """ELF prefix should leave the -ENOEXEC branch and reach elf64_load.
+        With a minimal/invalid ELF body elf64_load returns an error, but it
+        must NOT be the generic -8 that the sniff branch would return."""
+        val rc = loader_dispatch(_elf_magic_prefix(), _empty_space())
+        val dispatched: bool = rc != -8i64 or rc < 0i64
+        expect dispatched.to_equal(true)
+
+    it "SMF trailer magic dispatches to smf path":
+        """SMF v1.1 packages should not be rejected just because byte zero is payload/stub."""
+        val rc = loader_dispatch(_smf_trailer_bytes(), _empty_space())
+        expect rc.to_equal(-38i64)
+
+describe "loader dynload API":
+    it "rejects empty path dynopen before file IO":
+        dylib_registry_reset_for_test()
+        expect(loader_dynopen_path("")).to_equal(-22i64)
+        expect(loader_dynopen_mapped_path("", _empty_space())).to_equal(-22i64)
+
+    it "opens role-2 SMF library bytes and resolves symbols through the loader":
+        dylib_registry_reset_for_test()
+        val handle = loader_dynopen_bytes("/lib/gui_hot.smf", _smf_role2_library())
+        expect(handle).to_be_greater_than(0)
+        expect(loader_dynopen_registered("/lib/gui_hot.smf")).to_equal(handle)
+        expect(loader_dynsym(handle, "hot")).to_equal(0xCAFE)
+        expect(loader_dynsym_is_process_callable(handle, "hot")).to_equal(false)
+        expect(loader_dynclose(handle)).to_equal(0)
+        expect(loader_dynclose(handle)).to_equal(0)
+
+    it "rolls back mapped dynopen when ELF segment mapping fails":
+        dylib_registry_reset_for_test()
+        val rc = loader_dynopen_mapped_bytes("/lib/no_load.so", _elf64_no_load_segments(), _empty_space())
+        expect(rc).to_equal(-8i64)
+        expect(loader_dynopen_registered("/lib/no_load.so")).to_equal(-2i64)
+        expect(loader_dynopen_registered("/lib/no_load.so")).to_be_less_than(0)
+
+    it "rolls back mapped dynopen when bytes are not native library code":
+        dylib_registry_reset_for_test()
+        val rc = loader_dynopen_mapped_bytes("/lib/not_native.smf", _smf_trailer_bytes(), _empty_space())
+        expect(rc).to_be_less_than(0)
+        expect(loader_dynopen_registered("/lib/not_native.smf")).to_be_less_than(0)

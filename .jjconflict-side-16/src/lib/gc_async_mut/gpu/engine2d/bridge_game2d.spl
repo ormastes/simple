@@ -1,0 +1,205 @@
+# engine2d/bridge_game2d — Additive bridge: game2d Canvas → shared Engine2D
+#
+# The game2d 2D API (`std.nogc_sync_mut.game2d.render.canvas.Canvas`) records a
+# typed `RenderCommandBuffer` of `RenderCommand` variants. The shared rendering
+# stack (`Engine2D` + the `RenderBackend` trait) already covers the SIMD-CPU
+# lane (`cpu_simd`) and every GPU backend, selectable via `SIMPLE_2D_BACKEND`.
+#
+# This module is an ADDITIVE bridge: it walks a game2d `Canvas` command list and
+# replays each primitive through `Engine2D`'s draw API so that game2d content is
+# painted by the very same SIMD-CPU/GPU `RenderBackend` lanes the rest of the
+# stack uses. It does NOT modify game2d source or `engine.spl`.
+#
+# Color/coordinate conversion:
+#   * `EngineColor` (f64 RGBA in [0,1]) -> packed u32 via
+#     `EngineColor.to_rgba8().to_u32()`, which yields ARGB `0xAARRGGBB` — the
+#     exact layout Engine2D consumes.
+#   * `Rect2`/`Vec2` use f64 coordinates -> truncated to i32 for Engine2D.
+
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.nogc_sync_mut.engine.render.command.{RenderCommand, RenderCommandBuffer}
+use std.nogc_sync_mut.game2d.render.canvas.{Canvas}
+
+
+# Clamp a single f64 channel in [0,1] to an i64 byte in [0,255].
+fn _chan_byte(v: f64) -> i64:
+    val i = (v * 255.0).to_i64()
+    if i < 0:
+        0
+    elif i > 255:
+        255
+    else:
+        i
+
+
+# Convert an EngineColor (f64 RGBA in [0,1]) to a packed u32 (ARGB 0xAARRGGBB).
+#
+# This mirrors `EngineColor.to_rgba8().to_u32()` but packs inline rather than
+# delegating to `EngineColor.to_rgba8()`, whose nested local `clamp_f` helper
+# mis-lowers under the JIT (channels collapse to 0, leaving only the alpha bits
+# — an all-black framebuffer). Packing here keeps the bridge backend-correct.
+fn _color_u32(c: EngineColor) -> u32:
+    val rc = _chan_byte(c.r)
+    val gc = _chan_byte(c.g)
+    val bc = _chan_byte(c.b)
+    val ac = _chan_byte(c.a)
+    ((ac * 16777216) + (rc * 65536) + (gc * 256) + bc) as u32
+
+
+# Count how many command kinds in a buffer are NOT mappable by this bridge
+# (currently only `DrawTriangles`). This is a pure inspection over the typed
+# command list — it draws nothing, so it is safe to call across module
+# boundaries (only an i64 crosses back). Each unmapped kind is also logged.
+fn bridge_count_unmapped(buf: RenderCommandBuffer) -> i64:
+    var skipped: i64 = 0
+    var i: i64 = 0
+    val n = buf.len()
+    while i < n:
+        val cmd = buf.commands[i]
+        match cmd:
+            case DrawTriangles(ignored_a, ignored_b, ignored_c, ignored_d):
+                skipped = skipped + 1
+                print("bridge_game2d: skipped unmapped RenderCommand kind")
+            case _:
+                pass_do_nothing("mapped command kind requires no skip accounting")
+        i = i + 1
+    skipped
+
+
+# Replay a game2d RenderCommandBuffer onto an EXISTING, CALLER-LOCAL Engine2D,
+# painting through whatever shared RenderBackend the engine selected (cpu_simd /
+# GPU). Accepts the exact typed command vocabulary game2d's Canvas records.
+# Does NOT call present(); the caller controls frame flushing. Returns the count
+# of command kinds that could not be mapped.
+#
+# IMPORTANT: the `engine` must be a local of the CALLER's module. Under the
+# bootstrap-seed interpreter, an Engine2D passed across a module boundary is
+# value-copied, so backend mutations issued here would not be visible to a
+# caller in a different module. For a self-contained render that always works,
+# use `game2d_render_commands_on_engine2d` / `game2d_render_canvas_on_engine2d`,
+# which keep the Engine2D lifecycle inline.
+fn bridge_apply_commands_to_engine2d(engine: Engine2D, buf: RenderCommandBuffer) -> i64:
+    var skipped: i64 = 0
+    var i: i64 = 0
+    val n = buf.len()
+    while i < n:
+        val cmd = buf.commands[i]
+        match cmd:
+            case Clear(color):
+                engine.clear(_color_u32(color))
+            case DrawRect(rect, color, ignored_rect_opts):
+                engine.draw_rect_filled(
+                    rect.x as i32, rect.y as i32,
+                    rect.width as i32, rect.height as i32,
+                    _color_u32(color))
+            case DrawRectOutlined(rect, color, ignored_rect_outline_opts):
+                engine.draw_rect(
+                    rect.x as i32, rect.y as i32,
+                    rect.width as i32, rect.height as i32,
+                    _color_u32(color))
+            case DrawCircle(cx, cy, radius, color, ignored_circle_opts):
+                engine.draw_circle_filled(
+                    cx as i32, cy as i32, radius as i32, _color_u32(color))
+            case DrawCircleOutlined(cx, cy, radius, color, ignored_circle_outline_opts):
+                engine.draw_circle(
+                    cx as i32, cy as i32, radius as i32, _color_u32(color))
+            case DrawLine(x1, y1, x2, y2, width, color, ignored_line_opts):
+                var thickness = width as i32
+                if thickness < 1:
+                    thickness = 1
+                engine.draw_line(
+                    x1 as i32, y1 as i32, x2 as i32, y2 as i32,
+                    _color_u32(color), thickness)
+            case DrawText(ignored_text_id, content, pos, color, ignored_text_opts):
+                engine.draw_text(
+                    pos.x as i32, pos.y as i32, content, _color_u32(color), 8)
+            case DrawSprite(ignored_sprite_id, ignored_texture_id, dst, tint, ignored_sprite_opts):
+                engine.draw_rect_filled(
+                    dst.x as i32, dst.y as i32,
+                    dst.width as i32, dst.height as i32,
+                    _color_u32(tint))
+            case _:
+                skipped = skipped + 1
+                print("bridge_game2d: skipped unmapped RenderCommand kind")
+        i = i + 1
+    skipped
+
+
+# Canvas-level form of `bridge_apply_commands_to_engine2d` (same caller-local
+# Engine2D contract). Thin delegate over the canvas's recorded command buffer.
+fn bridge_apply_canvas_to_engine2d(engine: Engine2D, canvas: Canvas) -> i64:
+    bridge_apply_commands_to_engine2d(engine, canvas.commands)
+
+
+# Self-contained render entry: create a fresh Engine2D on the named shared
+# backend (e.g. "cpu_simd" for the SIMD-CPU lane, or any GPU backend name),
+# replay the command buffer, present, and read back the framebuffer as a [u32]
+# (ARGB 0xAARRGGBB) buffer.
+#
+# The full draw loop is INLINED here rather than delegated to
+# `bridge_apply_commands_to_engine2d`: under the seed interpreter, handing the
+# Engine2D to a separate function loses the backend's pixel mutations
+# (value-copy across the call). Keeping create+draw+present+readback in one body
+# guarantees the shared backend actually paints. Only a command buffer goes in
+# and a [u32] framebuffer comes out.
+fn game2d_render_commands_on_engine2d(buf: RenderCommandBuffer, width: i32, height: i32, backend_name: text) -> [u32]:
+    var engine = Engine2D.create_with_backend(width, height, backend_name)
+    var i: i64 = 0
+    val n = buf.len()
+    while i < n:
+        val cmd = buf.commands[i]
+        match cmd:
+            case Clear(color):
+                engine.clear(_color_u32(color))
+            case DrawRect(rect, color, ignored_rect_opts):
+                engine.draw_rect_filled(
+                    rect.x as i32, rect.y as i32,
+                    rect.width as i32, rect.height as i32,
+                    _color_u32(color))
+            case DrawRectOutlined(rect, color, ignored_rect_outline_opts):
+                engine.draw_rect(
+                    rect.x as i32, rect.y as i32,
+                    rect.width as i32, rect.height as i32,
+                    _color_u32(color))
+            case DrawCircle(cx, cy, radius, color, ignored_circle_opts):
+                engine.draw_circle_filled(
+                    cx as i32, cy as i32, radius as i32, _color_u32(color))
+            case DrawCircleOutlined(cx, cy, radius, color, ignored_circle_outline_opts):
+                engine.draw_circle(
+                    cx as i32, cy as i32, radius as i32, _color_u32(color))
+            case DrawLine(x1, y1, x2, y2, width, color, ignored_line_opts):
+                var thickness = width as i32
+                if thickness < 1:
+                    thickness = 1
+                engine.draw_line(
+                    x1 as i32, y1 as i32, x2 as i32, y2 as i32,
+                    _color_u32(color), thickness)
+            case DrawText(ignored_text_id, content, pos, color, ignored_text_opts):
+                # game2d uses an 8px default font cell; mirror that font_size.
+                engine.draw_text(
+                    pos.x as i32, pos.y as i32, content, _color_u32(color), 8)
+            case DrawSprite(ignored_sprite_id, ignored_texture_id, dst, tint, ignored_sprite_opts):
+                # game2d's RenderCommand carries only a texture_id + tint, not a
+                # pixel buffer, so real texels can't be blitted through
+                # draw_image here; paint the destination footprint with the
+                # sprite tint, matching the headless backend. A future
+                # texture-cache bridge can resolve texture_id -> [u32] and call
+                # engine.draw_image(...) for true sprite blits.
+                engine.draw_rect_filled(
+                    dst.x as i32, dst.y as i32,
+                    dst.width as i32, dst.height as i32,
+                    _color_u32(tint))
+            case _:
+                # Remaining kinds (e.g. DrawTriangles) have no direct Engine2D
+                # primitive in this bridge — logged, not silently dropped.
+                print("bridge_game2d: skipped unmapped RenderCommand kind")
+        i = i + 1
+    engine.present()
+    engine.read_pixels()
+
+
+# Canvas-level self-contained render entry: replay a whole game2d Canvas onto a
+# fresh shared backend and read back the framebuffer. Delegates to the
+# command-buffer form over the canvas's recorded commands.
+fn game2d_render_canvas_on_engine2d(canvas: Canvas, width: i32, height: i32, backend_name: text) -> [u32]:
+    game2d_render_commands_on_engine2d(canvas.commands, width, height, backend_name)

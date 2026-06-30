@@ -1,0 +1,87 @@
+# src/compiler/60.mir_opt/mir_opt/masked_simd_op.spl
+#
+# Masked / predicated SIMD opcode enum — W10 stub for auto-vec predicate path.
+#
+# Kept dependency-free (no MirOperand / MirType imports) so it parses standalone.
+# Operand slots use i64 lane-count rather than MirType to avoid a dependency cycle.
+# M1 will replace i64 lane placeholders with proper MirOperand / MirType once the
+# x86_64 emit stubs in x86_64_avx512.spl are promoted to full implementations.
+#
+# Reference: doc/04_architecture/simd_backend_strict_emit_detail_part1.md §3
+#            doc/04_architecture/simd_backend_strict_emit_detail_part2.md §8.2
+
+# ============================================================================
+# Masked SIMD Opcode Enum
+# ============================================================================
+
+"""
+Masked / predicated SIMD opcodes for the auto-vectorization predicate path.
+Each variant carries the destination, operands (as i64 virtual-register IDs),
+an opmask k-register ID, and a lane count (power-of-two, 4/8/16).
+
+Invariants (enforced by the ISel pass, not here):
+  mask must be a k1-k7 ID (k0=all-ones sentinel is valid for unmasked form).
+  lanes must be 4, 8, or 16 (f32x4 / f32x8 / f32x16 widths).
+  dest, lhs/rhs/ptr/val are virtual-register IDs (non-negative i64).
+"""
+enum MaskedSimdOp:
+    # Element-wise masked add: dest[i] = mask[i] ? lhs[i] + rhs[i] : dest[i]
+    # x86_64: VADDPS zmm_dst{k}{z}, zmm_src1, zmm_src2  (EVEX.512.0F.W0 58)
+    # TODO(W10→M1): wire to emit_avx512_masked_add_f32x16 in x86_64_avx512.spl
+    MaskedAdd(dest: i64, lhs: i64, rhs: i64, mask: i64, lanes: i64)
+
+    # Masked vector load: dest[i] = mask[i] ? mem[base + i*elem_size] : 0
+    # x86_64: VMOVAPS zmm_dst{k}{z}, [base]  (EVEX.512.0F.W0 28)
+    # TODO(W10→M1): wire to emit_avx512_masked_load_f32x16 in x86_64_avx512.spl
+    MaskedLoad(dest: i64, ptr: i64, mask: i64, lanes: i64)
+
+    # Masked vector store: if mask[i]: mem[base + i*elem_size] = val[i]
+    # x86_64: VMOVAPS [base]{k}, zmm_src  (EVEX.512.0F.W0 29)
+    # TODO(W10→M1): wire to emit_avx512_masked_store_f32x16 in x86_64_avx512.spl
+    MaskedStore(ptr: i64, val: i64, mask: i64, lanes: i64)
+
+    # Predicated select: dest[i] = mask[i] ? t[i] : f[i]
+    # x86_64: VBLENDMPS zmm_dst{k}, zmm_src1, zmm_src2  (EVEX.512.66.0F38.W0 65)
+    # TODO(W10→M1): wire to emit_avx512_select_f32x16 in x86_64_avx512.spl
+    Select(dest: i64, mask: i64, t: i64, f: i64, lanes: i64)
+
+# ============================================================================
+# Arity Query (exhaustive — no else fallthrough)
+# ============================================================================
+
+"""
+Returns the number of live source operands for a given MaskedSimdOp.
+Excludes dest (output operand); includes mask.
+Used by the ISel live-range analysis to allocate the right number of k-regs.
+"""
+fn masked_simd_op_arity(op: MaskedSimdOp) -> i64:
+    match op:
+        MaskedAdd(_, _, _, _, _): 4
+        MaskedLoad(_, _, _, _): 3
+        MaskedStore(_, _, _, _): 3
+        Select(_, _, _, _, _): 4
+
+"""
+Returns the lane count embedded in the opcode variant.
+"""
+fn masked_simd_op_lanes(op: MaskedSimdOp) -> i64:
+    match op:
+        MaskedAdd(_, _, _, _, l): l
+        MaskedLoad(_, _, _, l): l
+        MaskedStore(_, _, _, l): l
+        Select(_, _, _, _, l): l
+
+"""
+Returns true if the opcode variant writes to a destination register.
+MaskedStore has no dest (memory write only).
+"""
+fn masked_simd_op_has_dest(op: MaskedSimdOp) -> bool:
+    match op:
+        MaskedAdd(_, _, _, _, _): true
+        MaskedLoad(_, _, _, _): true
+        MaskedStore(_, _, _, _): false
+        Select(_, _, _, _, _): true
+
+# ============================================================================
+# Exports
+# ============================================================================

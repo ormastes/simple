@@ -1,0 +1,58 @@
+use common.wine_kernel32_error_state.{
+    wine_kernel32_error_state_new,
+    wine_kernel32_execute_error_state,
+    wine_kernel32_format_message_w,
+    wine_kernel32_get_last_error,
+    wine_kernel32_set_last_error
+}
+
+describe "Wine KERNEL32 error-state bridge":
+    it "sets, gets, and formats a bounded last-error code":
+        val result = wine_kernel32_execute_error_state(
+            ["SetLastError", "GetLastError", "FormatMessageW"],
+            wine_kernel32_error_state_new(),
+            87
+        )
+
+        expect(result.ok).to_equal(true)
+        expect(result.code).to_equal(87)
+        expect(result.state.symbol).to_equal("ERROR_INVALID_PARAMETER")
+        expect(result.message).to_equal("The parameter is incorrect.")
+        expect(result.operations).to_equal("SetLastError GetLastError FormatMessageW")
+
+    it "exposes direct error-state helpers":
+        val updated = wine_kernel32_set_last_error(wine_kernel32_error_state_new(), 2)
+        val fetched = wine_kernel32_get_last_error(updated)
+        val formatted = wine_kernel32_format_message_w(updated, fetched.code)
+
+        expect(fetched.ok).to_equal(true)
+        expect(fetched.code).to_equal(2)
+        expect(fetched.message).to_equal("ERROR_FILE_NOT_FOUND")
+        expect(formatted.message).to_equal("The system cannot find the file specified.")
+
+    it "keeps error-state dispatch ordered and bounded":
+        val out_of_order = wine_kernel32_execute_error_state(
+            ["GetLastError", "SetLastError", "FormatMessageW"],
+            wine_kernel32_error_state_new(),
+            87
+        )
+        expect(out_of_order.ok).to_equal(false)
+        expect(out_of_order.error).to_equal("kernel32-error-state-sequence-expected:SetLastError")
+
+        val wrong_family = wine_kernel32_execute_error_state(
+            ["SetLastError", "GetLastError", "HeapAlloc"],
+            wine_kernel32_error_state_new(),
+            87
+        )
+        expect(wrong_family.ok).to_equal(false)
+        expect(wrong_family.error).to_equal("bridge-wrong-category:HeapAlloc")
+
+    it "rejects invalid modeled error codes":
+        val result = wine_kernel32_execute_error_state(
+            ["SetLastError", "GetLastError", "FormatMessageW"],
+            wine_kernel32_error_state_new(),
+            -1
+        )
+
+        expect(result.ok).to_equal(false)
+        expect(result.error).to_equal("SetLastError:invalid-error-code")

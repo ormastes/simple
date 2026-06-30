@@ -1,0 +1,338 @@
+# Reverse-Mode Automatic Differentiation Engine
+#
+# Tape-based autograd that records operations on GpuTensors and computes
+# gradients via reverse-mode (backpropagation). Each forward op appends a
+# TapeEntry; backward() walks the tape in reverse, accumulating gradients.
+#
+# Requirements:
+#   - gpu_tensor.spl in the same package (provides GpuTensor + ops)
+
+use os.ml.gpu_tensor.{
+    GpuTensor,
+    gpu_matmul,
+    gpu_add,
+    gpu_mul,
+    gpu_relu,
+    gpu_sigmoid,
+    gpu_tanh,
+    gpu_scale,
+    gpu_reduce_sum
+}
+
+
+# ============================================================================
+# Gradient Operation Tags
+# ============================================================================
+
+enum GradOp:
+    """Identifies which forward operation produced a tape entry."""
+    Leaf
+    Add(left: i64, right: i64)
+    Mul(left: i64, right: i64)
+    MatMul(left: i64, right: i64)
+    ReLU(input: i64)
+    Sigmoid(input: i64)
+    Tanh(input: i64)
+    Scale(input: i64, scalar: f64)
+    Sum(input: i64)
+
+
+# ============================================================================
+# Tape Entry
+# ============================================================================
+
+struct TapeEntry:
+    """Single node in the computation graph tape."""
+    tensor: GpuTensor
+    grad: GpuTensor?
+    op: GradOp
+    requires_grad: bool
+
+
+# ============================================================================
+# Compute Graph (tape-based autograd)
+# ============================================================================
+
+class ComputeGraph:
+    """Tape-based computation graph for reverse-mode autodiff."""
+    tape: [TapeEntry]
+
+impl ComputeGraph:
+    static fn new() -> ComputeGraph:
+        ComputeGraph(tape: [])
+
+    # ------------------------------------------------------------------
+    # Forward operations — append to tape, return index
+    # ------------------------------------------------------------------
+
+    fn variable(data: GpuTensor, requires_grad: bool) -> i64:
+        """Register a leaf tensor (parameter or input)."""
+        val entry = TapeEntry(
+            tensor: data,
+            grad: none,
+            op: GradOp.Leaf,
+            requires_grad: requires_grad
+        )
+        self.tape.push(entry)
+        self.tape.len() - 1
+
+    fn add(a: i64, b: i64) -> i64:
+        """Element-wise addition."""
+        val t_a = self.tape[a].tensor
+        val t_b = self.tape[b].tensor
+        val result = gpu_add(t_a, t_b)
+        val entry = TapeEntry(
+            tensor: result,
+            grad: none,
+            op: GradOp.Add(left: a, right: b),
+            requires_grad: true
+        )
+        self.tape.push(entry)
+        self.tape.len() - 1
+
+    fn mul(a: i64, b: i64) -> i64:
+        """Element-wise multiplication."""
+        val t_a = self.tape[a].tensor
+        val t_b = self.tape[b].tensor
+        val result = gpu_mul(t_a, t_b)
+        val entry = TapeEntry(
+            tensor: result,
+            grad: none,
+            op: GradOp.Mul(left: a, right: b),
+            requires_grad: true
+        )
+        self.tape.push(entry)
+        self.tape.len() - 1
+
+    fn matmul(a: i64, b: i64) -> i64:
+        """Matrix multiplication."""
+        val t_a = self.tape[a].tensor
+        val t_b = self.tape[b].tensor
+        val result = gpu_matmul(t_a, t_b)
+        val entry = TapeEntry(
+            tensor: result,
+            grad: none,
+            op: GradOp.MatMul(left: a, right: b),
+            requires_grad: true
+        )
+        self.tape.push(entry)
+        self.tape.len() - 1
+
+    fn relu(x: i64) -> i64:
+        """ReLU activation."""
+        val t_x = self.tape[x].tensor
+        val result = gpu_relu(t_x)
+        val entry = TapeEntry(
+            tensor: result,
+            grad: none,
+            op: GradOp.ReLU(input: x),
+            requires_grad: true
+        )
+        self.tape.push(entry)
+        self.tape.len() - 1
+
+    fn sigmoid(x: i64) -> i64:
+        """Sigmoid activation."""
+        val t_x = self.tape[x].tensor
+        val result = gpu_sigmoid(t_x)
+        val entry = TapeEntry(
+            tensor: result,
+            grad: none,
+            op: GradOp.Sigmoid(input: x),
+            requires_grad: true
+        )
+        self.tape.push(entry)
+        self.tape.len() - 1
+
+    fn tanh_op(x: i64) -> i64:
+        """Tanh activation."""
+        val t_x = self.tape[x].tensor
+        val result = gpu_tanh(t_x)
+        val entry = TapeEntry(
+            tensor: result,
+            grad: none,
+            op: GradOp.Tanh(input: x),
+            requires_grad: true
+        )
+        self.tape.push(entry)
+        self.tape.len() - 1
+
+    fn scale(x: i64, s: f64) -> i64:
+        """Scalar multiplication."""
+        val t_x = self.tape[x].tensor
+        val result = gpu_scale(t_x, s)
+        val entry = TapeEntry(
+            tensor: result,
+            grad: none,
+            op: GradOp.Scale(input: x, scalar: s),
+            requires_grad: true
+        )
+        self.tape.push(entry)
+        self.tape.len() - 1
+
+    fn sum(x: i64) -> i64:
+        """Reduce sum to scalar."""
+        val t_x = self.tape[x].tensor
+        val result = gpu_reduce_sum(t_x)
+        val entry = TapeEntry(
+            tensor: result,
+            grad: none,
+            op: GradOp.Sum(input: x),
+            requires_grad: true
+        )
+        self.tape.push(entry)
+        self.tape.len() - 1
+
+    # ------------------------------------------------------------------
+    # Backward pass — reverse-mode gradient computation
+    # ------------------------------------------------------------------
+
+    fn backward(loss_idx: i64):
+        """Compute gradients for all tape entries via reverse-mode from loss."""
+        # Seed: gradient of loss w.r.t. itself is 1.0
+        val loss_shape = self.tape[loss_idx].tensor.shape
+        val ones = GpuTensor.from_host([1.0], loss_shape)
+        self.tape[loss_idx].grad = ones
+
+        # Walk tape in reverse
+        var i = loss_idx
+        while i >= 0:
+            val entry = self.tape[i]
+            if val grad_out = entry.grad:
+                match entry.op:
+                    case GradOp.Leaf:
+                        pass_dn
+                    case GradOp.Add(left, right):
+                        self._accumulate_grad(left, grad_out.clone())
+                        self._accumulate_grad(right, grad_out.clone())
+                    case GradOp.Mul(left, right):
+                        # grad_left = grad_out * right_tensor
+                        val t_right = self.tape[right].tensor
+                        val g_left = gpu_mul(grad_out, t_right)
+                        self._accumulate_grad(left, g_left)
+                        # grad_right = grad_out * left_tensor
+                        val t_left = self.tape[left].tensor
+                        val g_right = gpu_mul(grad_out, t_left)
+                        self._accumulate_grad(right, g_right)
+                    case GradOp.MatMul(left, right):
+                        # grad_left = grad_out @ right^T
+                        val t_right = self.tape[right].tensor
+                        val rt_transposed = gpu_transpose(t_right)
+                        val g_left = gpu_matmul(grad_out, rt_transposed)
+                        rt_transposed.free()
+                        self._accumulate_grad(left, g_left)
+                        # grad_right = left^T @ grad_out
+                        val t_left = self.tape[left].tensor
+                        val lt_transposed = gpu_transpose(t_left)
+                        val g_right = gpu_matmul(lt_transposed, grad_out)
+                        lt_transposed.free()
+                        self._accumulate_grad(right, g_right)
+                    case GradOp.ReLU(input):
+                        # grad_in = grad_out * (x > 0) — relu mask
+                        val t_in = self.tape[input].tensor
+                        val mask = gpu_relu_mask(t_in)
+                        val g_in = gpu_mul(grad_out, mask)
+                        mask.free()
+                        self._accumulate_grad(input, g_in)
+                    case GradOp.Sigmoid(input):
+                        # grad_in = grad_out * sig * (1 - sig)
+                        val sig_out = entry.tensor
+                        val ones_t = GpuTensor.from_host([1.0], sig_out.shape)
+                        val one_minus_sig = gpu_add(ones_t, gpu_scale(sig_out, -1.0))
+                        ones_t.free()
+                        val sig_deriv = gpu_mul(sig_out, one_minus_sig)
+                        one_minus_sig.free()
+                        val g_in = gpu_mul(grad_out, sig_deriv)
+                        sig_deriv.free()
+                        self._accumulate_grad(input, g_in)
+                    case GradOp.Tanh(input):
+                        # grad_in = grad_out * (1 - tanh^2)
+                        val tanh_out = entry.tensor
+                        val tanh_sq = gpu_mul(tanh_out, tanh_out)
+                        val ones_t = GpuTensor.from_host([1.0], tanh_out.shape)
+                        val one_minus_sq = gpu_add(ones_t, gpu_scale(tanh_sq, -1.0))
+                        ones_t.free()
+                        tanh_sq.free()
+                        val g_in = gpu_mul(grad_out, one_minus_sq)
+                        one_minus_sq.free()
+                        self._accumulate_grad(input, g_in)
+                    case GradOp.Scale(input, scalar):
+                        # grad_in = grad_out * scalar
+                        val g_in = gpu_scale(grad_out, scalar)
+                        self._accumulate_grad(input, g_in)
+                    case GradOp.Sum(input):
+                        # grad_in = broadcast grad_out to input shape
+                        val in_shape = self.tape[input].tensor.shape
+                        val g_in = gpu_broadcast(grad_out, in_shape)
+                        self._accumulate_grad(input, g_in)
+            i = i - 1
+
+    # ------------------------------------------------------------------
+    # Gradient accumulation helper
+    # ------------------------------------------------------------------
+
+    fn _accumulate_grad(idx: i64, new_grad: GpuTensor):
+        """Accumulate gradient — adds to existing grad if present."""
+        if not self.tape[idx].requires_grad:
+            new_grad.free()
+            return
+        if val existing = self.tape[idx].grad:
+            val accumulated = gpu_add(existing, new_grad)
+            existing.free()
+            new_grad.free()
+            self.tape[idx].grad = accumulated
+        else:
+            self.tape[idx].grad = new_grad
+
+    # ------------------------------------------------------------------
+    # Accessors
+    # ------------------------------------------------------------------
+
+    fn get_grad(idx: i64) -> GpuTensor?:
+        """Get the computed gradient for a tape entry."""
+        self.tape[idx].grad
+
+    fn get_tensor(idx: i64) -> GpuTensor:
+        """Get the forward tensor for a tape entry."""
+        self.tape[idx].tensor
+
+    fn zero_grads():
+        """Zero all gradients in the tape."""
+        var i = 0
+        while i < self.tape.len():
+            if val g = self.tape[i].grad:
+                g.free()
+                self.tape[i].grad = none
+            i = i + 1
+
+
+# ============================================================================
+# GradTensor — convenience wrapper around graph + index
+# ============================================================================
+
+struct GradTensor:
+    """Wraps a tape index with its owning graph for ergonomic access."""
+    graph: ComputeGraph
+    idx: i64
+
+impl GradTensor:
+    fn tensor() -> GpuTensor:
+        """Get the underlying tensor value."""
+        self.graph.get_tensor(self.idx)
+
+    fn grad() -> GpuTensor?:
+        """Get the gradient (none if backward not yet run)."""
+        self.graph.get_grad(self.idx)
+
+    fn requires_grad() -> bool:
+        """Whether this node tracks gradients."""
+        self.graph.tape[self.idx].requires_grad
+
+
+# ============================================================================
+# Utility GPU ops used only in backward (declared in gpu_tensor.spl)
+# ============================================================================
+
+extern fn gpu_transpose(t: GpuTensor) -> GpuTensor
+extern fn gpu_relu_mask(t: GpuTensor) -> GpuTensor
+extern fn gpu_broadcast(t: GpuTensor, shape: [i64]) -> GpuTensor

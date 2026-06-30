@@ -1,0 +1,44 @@
+use std.spec
+use std.gc_async_mut.replay.process.{
+    ProcessEventKind, ProcessReplayEvent,
+    ProcessRecorder, RecordingMode,
+    ProcessReplayer, ReplayVerdict,
+    PageCheckpoint, CheckpointManager,
+    ThreadRecorder, ChaosScheduler, ChaosStrategy,
+    ProcessTraceMetadata, PROCESS_EVENT_SIZE
+}
+
+describe "gc_async_mut replay process facades":
+
+    it "re-exports event records and metadata":
+        val ev = ProcessReplayEvent.syscall_entry(1, 42, 99, 60, 3, 4)
+        val meta = ProcessTraceMetadata.create("echo hi")
+
+        expect(ev.kind).to_equal(ProcessEventKind.SyscallEntry.to_i32())
+        expect(ev.summary()).to_contain("syscall_entry")
+        expect(meta.command).to_equal("echo hi")
+        expect(PROCESS_EVENT_SIZE).to_equal(60)
+
+    it "re-exports recorder, replayer, and checkpoint types":
+        val recorder = ProcessRecorder.create("echo hi", "/tmp/simple-process-replay")
+        val replayer = ProcessReplayer.create("/tmp/simple-process-replay")
+        var checkpoint = PageCheckpoint.create(1, 10)
+        checkpoint.add_register("pc", 100)
+
+        expect(recorder.mode).to_equal(RecordingMode.Idle)
+        expect(replayer.event_count()).to_equal(0)
+        expect(checkpoint.get_register("pc")).to_equal(Some(100))
+        expect(ReplayVerdict.Match.to_text()).to_equal("match")
+
+    it "re-exports thread recorder and chaos scheduler":
+        var threads = ThreadRecorder.create()
+        threads.on_thread_create(10, 11, 1)
+        threads.on_thread_switch(10, 11, 0, 2)
+
+        var scheduler = ChaosScheduler.create(ChaosStrategy.RoundRobin, 1)
+        val chosen = scheduler.pick_next([11, 12])
+
+        expect(threads.thread_count()).to_equal(2)
+        expect(threads.switch_count()).to_equal(1)
+        expect(chosen).to_equal(11)
+        expect(scheduler.schedule_count()).to_equal(1)

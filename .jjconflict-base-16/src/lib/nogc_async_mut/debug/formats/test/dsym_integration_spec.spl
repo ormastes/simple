@@ -1,0 +1,182 @@
+"""dSYM resolver → DwarfParser → DebugInfoBridge pipeline tests."""
+
+use std.debug.debug_info_bridge.{DebugInfoBridge}
+use std.debug.formats.debug_types.{SourceLocation, DebugLineEntry, DebugFunction, DebugVariable, DebugCompilationUnit, DebugFormatKind}
+use std.debug.formats.dwarf_parser.{DwarfParser, DwarfSections}
+
+fn _build_abbrev() -> [u8]:
+    var b: [u8] = []
+    b = b.push(0x01)
+    b = b.push(0x11)
+    b = b.push(0x01)
+    b = b.push(0x11)
+    b = b.push(0x01)
+    b = b.push(0x12)
+    b = b.push(0x06)
+    b = b.push(0x10)
+    b = b.push(0x17)
+    b = b.push(0x00)
+    b = b.push(0x00)
+    b = b.push(0x02)
+    b = b.push(0x2e)
+    b = b.push(0x00)
+    b = b.push(0x11)
+    b = b.push(0x01)
+    b = b.push(0x12)
+    b = b.push(0x06)
+    b = b.push(0x00)
+    b = b.push(0x00)
+    b = b.push(0x00)
+    b
+
+fn _build_info() -> [u8]:
+    var b: [u8] = []
+    b = b.push(0x1e)
+    b = b.push(0x00)
+    b = b.push(0x00)
+    b = b.push(0x00)
+    b = b.push(0x04)
+    b = b.push(0x00)
+    b = b.push(0x00)
+    b = b.push(0x00)
+    b = b.push(0x00)
+    b = b.push(0x00)
+    b = b.push(0x04)
+    b = b.push(0x01)
+    b = b.push(0x00)
+    b = b.push(0x10)
+    b = b.push(0x00)
+    b = b.push(0x00)
+    b = b.push(0x00)
+    b = b.push(0x01)
+    b = b.push(0x00)
+    b = b.push(0x00)
+    b = b.push(0x00)
+    b = b.push(0x00)
+    b = b.push(0x00)
+    b = b.push(0x00)
+    b = b.push(0x02)
+    b = b.push(0x00)
+    b = b.push(0x10)
+    b = b.push(0x00)
+    b = b.push(0x00)
+    b = b.push(0x80)
+    b = b.push(0x00)
+    b = b.push(0x00)
+    b = b.push(0x00)
+    b = b.push(0x00)
+    b
+
+fn _build_line() -> [u8]:
+    var b: [u8] = []
+    b = b.push(0x2b)
+    b = b.push(0x00)
+    b = b.push(0x00)
+    b = b.push(0x00)
+    b = b.push(0x03)
+    b = b.push(0x00)
+    b = b.push(0x13)
+    b = b.push(0x00)
+    b = b.push(0x00)
+    b = b.push(0x00)
+    b = b.push(0x01)
+    b = b.push(0x01)
+    b = b.push(0xfb)
+    b = b.push(0x0e)
+    b = b.push(0x0d)
+    b = b.push(0x00)
+    b = b.push(0x01)
+    b = b.push(0x01)
+    b = b.push(0x01)
+    b = b.push(0x01)
+    b = b.push(0x00)
+    b = b.push(0x00)
+    b = b.push(0x00)
+    b = b.push(0x01)
+    b = b.push(0x00)
+    b = b.push(0x00)
+    b = b.push(0x01)
+    b = b.push(0x00)
+    b = b.push(0x00)
+    b = b.push(0x00)
+    b = b.push(0x05)
+    b = b.push(0x02)
+    b = b.push(0x00)
+    b = b.push(0x10)
+    b = b.push(0x00)
+    b = b.push(0x00)
+    b = b.push(0x03)
+    b = b.push(0x09)
+    b = b.push(0x01)
+    b = b.push(0x02)
+    b = b.push(0x20)
+    b = b.push(0x03)
+    b = b.push(0x0a)
+    b = b.push(0x01)
+    b = b.push(0x00)
+    b = b.push(0x01)
+    b = b.push(0x01)
+    b
+
+fn _make_parser() -> DwarfParser:
+    val sections = DwarfSections(
+        debug_info: _build_info(),
+        debug_abbrev: _build_abbrev(),
+        debug_line: _build_line(),
+        debug_str: [],
+        debug_line_str: [],
+        addr_size: 4,
+    )
+    DwarfParser.from_sections(sections).ok()!
+
+describe "dSYM pipeline (DwarfParser → Bridge)":
+    it "parser produces bridge with DWARF format":
+        val parser = _make_parser()
+        val bridge = DebugInfoBridge.wrap(parser)
+        expect(bridge.format_kind().to_string()).to_equal("DWARF")
+
+    it "bridge resolves addr to source line":
+        val parser = _make_parser()
+        val bridge = DebugInfoBridge.wrap(parser)
+        val loc = bridge.addr_to_source(0x1000)
+        expect(loc != nil).to_equal(true)
+        expect(loc!.line).to_equal(10)
+
+    it "bridge resolves second entry":
+        val parser = _make_parser()
+        val bridge = DebugInfoBridge.wrap(parser)
+        val loc = bridge.addr_to_source(0x1020)
+        expect(loc != nil).to_equal(true)
+        expect(loc!.line).to_equal(20)
+
+    it "bridge function_name_at returns empty for no-name subprogram":
+        val parser = _make_parser()
+        val bridge = DebugInfoBridge.wrap(parser)
+        val name = bridge.function_name_at(0x1000)
+        expect(name).to_equal("")
+
+    it "bridge line_entries has entries":
+        val parser = _make_parser()
+        val bridge = DebugInfoBridge.wrap(parser)
+        val entries = bridge.line_entries()
+        expect(entries.len() > 0).to_equal(true)
+
+    it "bridge compilation_units has one unit":
+        val parser = _make_parser()
+        val bridge = DebugInfoBridge.wrap(parser)
+        val units = bridge.compilation_units()
+        expect(units.len()).to_equal(1)
+
+    it "bridge functions_in_range finds subprogram":
+        val parser = _make_parser()
+        val bridge = DebugInfoBridge.wrap(parser)
+        val funcs = bridge.functions_in_range(0x1000, 0x1100)
+        expect(funcs.len() > 0).to_equal(true)
+
+    it "bridge source_to_addr round-trips":
+        val parser = _make_parser()
+        val bridge = DebugInfoBridge.wrap(parser)
+        val loc = bridge.addr_to_source(0x1000)
+        if loc != nil:
+            val addr = bridge.source_to_addr(loc!.file, loc!.line)
+            expect(addr != nil).to_equal(true)

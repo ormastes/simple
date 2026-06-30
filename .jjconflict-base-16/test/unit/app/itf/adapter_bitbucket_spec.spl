@@ -1,0 +1,296 @@
+# Bitbucket Cloud REST 2.0 Adapter Unit Tests
+#
+# Feature: Bitbucket Cloud REST 2.0 adapter for SPipe Infra (#10)
+# Category: ITF, Adapter, Bitbucket
+# Status: Implemented
+#
+# Covers (per AC):
+#   - PR-create body shape
+#   - approve URL build
+#   - comment URL build
+#   - ready-to-merge logic on fixture JSON
+#   - error mapping for 403 (general vs merge), 409, 401
+#
+# All tests target pure helper functions to avoid HTTP I/O.
+
+use app.itf.adapter_bitbucket.{
+    bb_pr_collection_url,
+    bb_pr_url,
+    bb_pr_sub_url,
+    bb_build_create_pr_body,
+    bb_build_comment_body,
+    bb_build_merge_body,
+    bb_map_http_error,
+    bb_should_retry,
+    bb_eval_ready_to_merge,
+    bb_auth_header,
+    BB_OP_GENERAL,
+    BB_OP_MERGE
+}
+use std.common.json.{json_parse}
+
+
+# ============================================================================
+# URL builder tests
+# ============================================================================
+
+describe "bb URL builders":
+    it "PR collection URL has /pullrequests suffix":
+        val u = bb_pr_collection_url("acme", "widgets")
+        expect(u).to_equal("https://api.bitbucket.org/2.0/repositories/acme/widgets/pullrequests")
+
+    it "PR resource URL appends id":
+        val u = bb_pr_url("acme", "widgets", 42)
+        expect(u).to_equal("https://api.bitbucket.org/2.0/repositories/acme/widgets/pullrequests/42")
+
+    it "PR comments sub URL":
+        val u = bb_pr_sub_url("acme", "widgets", 42, "comments")
+        expect(u).to_end_with("/pullrequests/42/comments")
+
+    it "PR approve sub URL":
+        val u = bb_pr_sub_url("acme", "widgets", 7, "approve")
+        expect(u).to_equal("https://api.bitbucket.org/2.0/repositories/acme/widgets/pullrequests/7/approve")
+
+    it "PR merge sub URL":
+        val u = bb_pr_sub_url("acme", "widgets", 7, "merge")
+        expect(u).to_end_with("/pullrequests/7/merge")
+
+    it "PR statuses sub URL":
+        val u = bb_pr_sub_url("acme", "widgets", 7, "statuses")
+        expect(u).to_end_with("/pullrequests/7/statuses")
+
+
+# ============================================================================
+# Auth header
+# ============================================================================
+
+describe "bb auth header":
+    it "builds Bearer header when token present":
+        expect(bb_auth_header("abc123")).to_equal("Bearer abc123")
+
+    it "returns empty when token blank":
+        expect(bb_auth_header("")).to_equal("")
+
+
+# ============================================================================
+# PR create body shape
+# ============================================================================
+
+describe "bb_build_create_pr_body":
+    it "minimum body has title and source branch":
+        val body = bb_build_create_pr_body("My PR", "feat-x", "", [])
+        val parsed = json_parse(body)
+        expect(parsed != nil).to_equal(true)
+        expect(body).to_contain("\"title\": \"My PR\"")
+        expect(body).to_contain("\"source\":")
+        expect(body).to_contain("\"name\": \"feat-x\"")
+
+    it "omits destination when blank":
+        val body = bb_build_create_pr_body("T", "src", "", [])
+        expect(body).to_contain("\"source\":")
+        # destination should not appear
+        val has_dest = body.contains("\"destination\":")
+        expect(has_dest).to_equal(false)
+
+    it "includes destination when provided":
+        val body = bb_build_create_pr_body("T", "src", "main", [])
+        expect(body).to_contain("\"destination\":")
+        expect(body).to_contain("\"name\": \"main\"")
+
+    it "includes reviewers as uuid objects":
+        val body = bb_build_create_pr_body("T", "src", "main", ["{u1}", "{u2}"])
+        expect(body).to_contain("\"reviewers\":")
+        expect(body).to_contain("\"uuid\": \"{u1}\"")
+        expect(body).to_contain("\"uuid\": \"{u2}\"")
+
+    it "produces parseable JSON":
+        val body = bb_build_create_pr_body("Add foo", "feat/foo", "develop", ["{abc-uuid}"])
+        val parsed = json_parse(body)
+        expect(parsed != nil).to_equal(true)
+
+
+# ============================================================================
+# Comment body shape
+# ============================================================================
+
+describe "bb_build_comment_body":
+    it "general comment has no inline":
+        val body = bb_build_comment_body("Looks good", "", -1, -1)
+        expect(body).to_contain("\"raw\": \"Looks good\"")
+        expect(body).to_contain("\"markup\": \"markdown\"")
+        val has_inline = body.contains("\"inline\":")
+        expect(has_inline).to_equal(false)
+
+    it "inline comment includes path/from/to":
+        val body = bb_build_comment_body("Bug here", "src/foo.spl", -1, 42)
+        expect(body).to_contain("\"inline\":")
+        expect(body).to_contain("\"path\": \"src/foo.spl\"")
+        expect(body).to_contain("\"from\": null")
+        expect(body).to_contain("\"to\": 42")
+
+    it "inline with both line numbers":
+        val body = bb_build_comment_body("range", "x.spl", 10, 20)
+        expect(body).to_contain("\"from\": 10")
+        expect(body).to_contain("\"to\": 20")
+
+    it "escapes quotes in content":
+        val body = bb_build_comment_body("she said \"hi\"", "", -1, -1)
+        expect(body).to_contain("\\\"hi\\\"")
+
+    it "produces parseable JSON":
+        val body = bb_build_comment_body("ok", "", -1, -1)
+        expect(json_parse(body) != nil).to_equal(true)
+
+
+# ============================================================================
+# Merge body shape
+# ============================================================================
+
+describe "bb_build_merge_body":
+    it "squash strategy with close_source_branch":
+        val body = bb_build_merge_body("squash", true, "")
+        expect(body).to_contain("\"merge_strategy\": \"squash\"")
+        expect(body).to_contain("\"close_source_branch\": true")
+        expect(body).to_contain("\"type\": \"pullrequest\"")
+
+    it "fast_forward strategy without close":
+        val body = bb_build_merge_body("fast_forward", false, "")
+        expect(body).to_contain("\"merge_strategy\": \"fast_forward\"")
+        expect(body).to_contain("\"close_source_branch\": false")
+
+    it "merge_commit with custom message":
+        val body = bb_build_merge_body("merge_commit", true, "Release 1.0")
+        expect(body).to_contain("\"merge_strategy\": \"merge_commit\"")
+        expect(body).to_contain("\"message\": \"Release 1.0\"")
+
+
+# ============================================================================
+# Error mapping
+# ============================================================================
+
+describe "bb_map_http_error":
+    it "401 maps to blocked-auth":
+        val e = bb_map_http_error(401, "no token", BB_OP_GENERAL)
+        expect(e.kind).to_equal("auth_required")
+        expect(e.status_code).to_equal(401)
+        expect(e.message).to_contain("blocked-auth")
+
+    it "403 on merge maps to blocked policy (api_error)":
+        val e = bb_map_http_error(403, "branch restriction", BB_OP_MERGE)
+        expect(e.kind).to_equal("api_error")
+        expect(e.status_code).to_equal(403)
+        expect(e.message).to_contain("branch policy")
+
+    it "403 on general maps to blocked-auth":
+        val e = bb_map_http_error(403, "no scope", BB_OP_GENERAL)
+        expect(e.kind).to_equal("auth_required")
+        expect(e.status_code).to_equal(403)
+
+    it "404 maps to not_found":
+        val e = bb_map_http_error(404, "", BB_OP_GENERAL)
+        expect(e.kind).to_equal("not_found")
+        expect(e.status_code).to_equal(404)
+
+    it "409 maps to conflict":
+        val e = bb_map_http_error(409, "merge conflict", BB_OP_GENERAL)
+        expect(e.kind).to_equal("version_conflict")
+        expect(e.status_code).to_equal(409)
+        expect(e.message).to_contain("blocked-conflict")
+
+    it "429 maps to network/rate-limit":
+        val e = bb_map_http_error(429, "rate limit", BB_OP_GENERAL)
+        expect(e.kind).to_equal("network_error")
+        expect(e.status_code).to_equal(429)
+
+    it "500 maps to api error":
+        val e = bb_map_http_error(500, "boom", BB_OP_GENERAL)
+        expect(e.kind).to_equal("api_error")
+        expect(e.status_code).to_equal(500)
+
+
+# ============================================================================
+# Retry-After handling
+# ============================================================================
+
+describe "bb_should_retry":
+    it "non-429 does not retry":
+        val (retry, secs) = bb_should_retry(500, "")
+        expect(retry).to_equal(false)
+        expect(secs).to_equal(0)
+
+    it "429 with Retry-After parses seconds":
+        val (retry, secs) = bb_should_retry(429, "30")
+        expect(retry).to_equal(true)
+        expect(secs).to_equal(30)
+
+    it "429 without Retry-After defaults to 1":
+        val (retry, secs) = bb_should_retry(429, "")
+        expect(retry).to_equal(true)
+        expect(secs).to_equal(1)
+
+
+# ============================================================================
+# Ready-to-merge logic on fixture JSON
+# ============================================================================
+
+# Fixture: PR object with one approving REVIEWER and state=OPEN.
+val FIXTURE_PR_APPROVED_OPEN = "{\"state\": \"OPEN\", \"participants\": [{\"role\": \"REVIEWER\", \"approved\": true, \"state\": \"approved\"}, {\"role\": \"PARTICIPANT\", \"approved\": false}]}"
+
+# Fixture: PR with reviewer pending.
+val FIXTURE_PR_PENDING = "{\"state\": \"OPEN\", \"participants\": [{\"role\": \"REVIEWER\", \"approved\": false}]}"
+
+# Fixture: closed PR.
+val FIXTURE_PR_CLOSED = "{\"state\": \"MERGED\", \"participants\": [{\"role\": \"REVIEWER\", \"approved\": true}]}"
+
+# Fixture: statuses all SUCCESSFUL.
+val FIXTURE_STATUSES_OK = "{\"values\": [{\"key\": \"ci-build\", \"state\": \"SUCCESSFUL\"}, {\"key\": \"lint\", \"state\": \"SUCCESSFUL\"}]}"
+
+# Fixture: statuses with one FAILED.
+val FIXTURE_STATUSES_FAIL = "{\"values\": [{\"key\": \"ci-build\", \"state\": \"SUCCESSFUL\"}, {\"key\": \"lint\", \"state\": \"FAILED\"}]}"
+
+# Fixture: empty statuses.
+val FIXTURE_STATUSES_EMPTY = "{\"values\": []}"
+
+
+describe "bb_eval_ready_to_merge":
+    it "ready when OPEN + 1 approval + all SUCCESSFUL":
+        val pr = json_parse(FIXTURE_PR_APPROVED_OPEN)
+        val st = json_parse(FIXTURE_STATUSES_OK)
+        val (ready, reason) = bb_eval_ready_to_merge(pr, st)
+        expect(ready).to_equal(true)
+        expect(reason).to_contain("ready")
+
+    it "not ready when no approvals":
+        val pr = json_parse(FIXTURE_PR_PENDING)
+        val st = json_parse(FIXTURE_STATUSES_OK)
+        val (ready, reason) = bb_eval_ready_to_merge(pr, st)
+        expect(ready).to_equal(false)
+        expect(reason).to_contain("no approved reviewers")
+
+    it "not ready when PR not OPEN":
+        val pr = json_parse(FIXTURE_PR_CLOSED)
+        val st = json_parse(FIXTURE_STATUSES_OK)
+        val (ready, reason) = bb_eval_ready_to_merge(pr, st)
+        expect(ready).to_equal(false)
+        expect(reason).to_contain("expected OPEN")
+
+    it "not ready when a status FAILED":
+        val pr = json_parse(FIXTURE_PR_APPROVED_OPEN)
+        val st = json_parse(FIXTURE_STATUSES_FAIL)
+        val (ready, reason) = bb_eval_ready_to_merge(pr, st)
+        expect(ready).to_equal(false)
+        expect(reason).to_contain("FAILED")
+
+    it "not ready when no statuses found":
+        val pr = json_parse(FIXTURE_PR_APPROVED_OPEN)
+        val st = json_parse(FIXTURE_STATUSES_EMPTY)
+        val (ready, reason) = bb_eval_ready_to_merge(pr, st)
+        expect(ready).to_equal(false)
+        expect(reason).to_contain("no commit statuses")
+
+    it "not ready when participants missing":
+        val pr = json_parse("{\"state\": \"OPEN\"}")
+        val st = json_parse(FIXTURE_STATUSES_OK)
+        val (ready, reason) = bb_eval_ready_to_merge(pr, st)
+        expect(ready).to_equal(false)
+        expect(reason).to_contain("no participants")

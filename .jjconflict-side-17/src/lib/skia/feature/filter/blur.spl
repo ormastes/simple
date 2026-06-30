@@ -1,0 +1,219 @@
+# Gaussian blur image filter — mirrors SkImageFilters::Blur.
+#
+# Implementation: separable Gaussian via 3-pass box blur (Kovesi's approximation).
+# 3 box passes produce a very close approximation to a true Gaussian in O(N) time.
+#
+# Input/output: Bitmap (RGBA8888, row-major, premultiplied, 4 bytes per pixel)
+# from std.skia.backend.cpu.raster_prims. Alpha is blurred along with RGB.
+# Boundary handling: clamp-to-edge (replicate boundary pixels).
+
+use std.skia.backend.cpu.raster_prims.{Bitmap}
+
+# ----------------------------------------------------------------------------
+# Math helpers (local — keep module self-contained)
+# ----------------------------------------------------------------------------
+
+fn _b_max_i64(a: i64, b: i64) -> i64:
+    if a > b: a else: b
+
+fn _b_min_i64(a: i64, b: i64) -> i64:
+    if a < b: a else: b
+
+fn _b_floor_i64(v: f64) -> i64:
+    val iv = v as i64
+    if (iv as f64) > v: iv - 1 else: iv
+
+fn _b_sqrt_f64(v: f64) -> f64:
+    if v <= 0.0:
+        0.0
+    else:
+        var x = v
+        var i = 0
+        while i < 20:
+            x = (x + v / x) * 0.5
+            i = i + 1
+        x
+
+fn _b_clamp_u8_from_f64(v: f64) -> u8:
+    val c = if v < 0.0: 0.0 else: if v > 255.0: 255.0 else: v
+    c as u8
+
+# ----------------------------------------------------------------------------
+# BlurFilter — parameter object mirroring SkImageFilters::Blur(sigmaX, sigmaY).
+# ----------------------------------------------------------------------------
+
+class BlurFilter:
+    sigma_x: f64
+    sigma_y: f64
+
+fn blur_filter_new(sigma_x: f64, sigma_y: f64) -> BlurFilter:
+    val sx = if sigma_x < 0.0: 0.0 else: sigma_x
+    val sy = if sigma_y < 0.0: 0.0 else: sigma_y
+    BlurFilter(sigma_x: sx, sigma_y: sy)
+
+# ----------------------------------------------------------------------------
+# _box_radii_for_sigma — Kovesi box-filter radii for a target Gaussian sigma.
+#
+# Reference: P. Kovesi, "Fast Almost-Gaussian Filtering" (2010).
+#   Ideal float width:  wIdeal = sqrt(12*sigma^2/n + 1)
+#   Choose odd integer wl = largest odd <= wIdeal, wu = wl + 2.
+#   Split n passes into m using width wl and (n - m) using width wu where
+#       m = round((12*sigma^2 - n*wl^2 - 4*n*wl - 3*n) / (-4*wl - 4))
+#   Each returned value is the *radius* (width = 2*radius + 1).
+# ----------------------------------------------------------------------------
+
+fn _box_radii_for_sigma(sigma: f64, passes: i64) -> [i64]:
+    var out = [i64]()
+    if passes <= 0:
+        return out
+    if sigma <= 0.0:
+        var i = 0 as i64
+        while i < passes:
+            out.push(0 as i64)
+            i = i + 1
+        return out
+    val n = passes as f64
+    val s2 = sigma * sigma
+    val w_ideal = _b_sqrt_f64(12.0 * s2 / n + 1.0)
+    var wl = _b_floor_i64(w_ideal)
+    # wl must be odd
+    if (wl % 2) == 0:
+        wl = wl - 1
+    if wl < 1:
+        wl = 1
+    val wu = wl + 2
+    val wl_f = wl as f64
+    # m: number of passes that use width wl (remaining use width wu).
+    val num = 12.0 * s2 - n * wl_f * wl_f - 4.0 * n * wl_f - 3.0 * n
+    val den = 0.0 - 4.0 * wl_f - 4.0
+    val m_float = num / den
+    # round to nearest
+    var m = _b_floor_i64(m_float + 0.5)
+    if m < 0:
+        m = 0
+    if m > passes:
+        m = passes
+    var i = 0 as i64
+    while i < passes:
+        # radius = (width - 1) / 2
+        val width = if i < m: wl else: wu
+        val radius = (width - 1) / 2
+        out.push(radius)
+        i = i + 1
+    out
+
+# ----------------------------------------------------------------------------
+# _box_filter_pass_horizontal — one horizontal box blur with window 2*radius+1.
+# Edge handling: clamp-to-edge (replicate boundary pixels).
+# ----------------------------------------------------------------------------
+
+fn _box_filter_pass_horizontal(src: Bitmap, radius: i64) -> Bitmap:
+    val w = src.width
+    val h = src.height
+    val out = Bitmap.zeros(w, h)
+    if radius <= 0:
+        # identity copy
+        var idx = 0 as i64
+        val total = w * h * 4
+        while idx < total:
+            out.pixels[idx] = src.pixels[idx]
+            idx = idx + 1
+        return out
+    val window = 2 * radius + 1
+    val inv = 1.0 / (window as f64)
+    var y = 0 as i64
+    while y < h:
+        var x = 0 as i64
+        while x < w:
+            var sr = 0.0
+            var sg = 0.0
+            var sb = 0.0
+            var sa = 0.0
+            var k = 0 - radius
+            while k <= radius:
+                var sx = x + k
+                if sx < 0: sx = 0
+                if sx >= w: sx = w - 1
+                val sidx = (y * w + sx) * 4
+                sr = sr + (src.pixels[sidx]     as f64)
+                sg = sg + (src.pixels[sidx + 1] as f64)
+                sb = sb + (src.pixels[sidx + 2] as f64)
+                sa = sa + (src.pixels[sidx + 3] as f64)
+                k = k + 1
+            val oidx = (y * w + x) * 4
+            out.pixels[oidx]     = _b_clamp_u8_from_f64(sr * inv)
+            out.pixels[oidx + 1] = _b_clamp_u8_from_f64(sg * inv)
+            out.pixels[oidx + 2] = _b_clamp_u8_from_f64(sb * inv)
+            out.pixels[oidx + 3] = _b_clamp_u8_from_f64(sa * inv)
+            x = x + 1
+        y = y + 1
+    out
+
+# ----------------------------------------------------------------------------
+# _box_filter_pass_vertical — one vertical box blur with window 2*radius+1.
+# Edge handling: clamp-to-edge.
+# ----------------------------------------------------------------------------
+
+fn _box_filter_pass_vertical(src: Bitmap, radius: i64) -> Bitmap:
+    val w = src.width
+    val h = src.height
+    val out = Bitmap.zeros(w, h)
+    if radius <= 0:
+        var idx = 0 as i64
+        val total = w * h * 4
+        while idx < total:
+            out.pixels[idx] = src.pixels[idx]
+            idx = idx + 1
+        return out
+    val window = 2 * radius + 1
+    val inv = 1.0 / (window as f64)
+    var y = 0 as i64
+    while y < h:
+        var x = 0 as i64
+        while x < w:
+            var sr = 0.0
+            var sg = 0.0
+            var sb = 0.0
+            var sa = 0.0
+            var k = 0 - radius
+            while k <= radius:
+                var sy = y + k
+                if sy < 0: sy = 0
+                if sy >= h: sy = h - 1
+                val sidx = (sy * w + x) * 4
+                sr = sr + (src.pixels[sidx]     as f64)
+                sg = sg + (src.pixels[sidx + 1] as f64)
+                sb = sb + (src.pixels[sidx + 2] as f64)
+                sa = sa + (src.pixels[sidx + 3] as f64)
+                k = k + 1
+            val oidx = (y * w + x) * 4
+            out.pixels[oidx]     = _b_clamp_u8_from_f64(sr * inv)
+            out.pixels[oidx + 1] = _b_clamp_u8_from_f64(sg * inv)
+            out.pixels[oidx + 2] = _b_clamp_u8_from_f64(sb * inv)
+            out.pixels[oidx + 3] = _b_clamp_u8_from_f64(sa * inv)
+            x = x + 1
+        y = y + 1
+    out
+
+# ----------------------------------------------------------------------------
+# apply_blur — Skia SkImageFilters::Blur equivalent on Bitmap.
+#
+# Applies 3 horizontal box passes (radii from sigma_x) and 3 vertical box
+# passes (radii from sigma_y). By the central-limit theorem, this closely
+# approximates a true 2D Gaussian at O(N * passes) cost.
+# ----------------------------------------------------------------------------
+
+fn apply_blur(src: Bitmap, filter: BlurFilter) -> Bitmap:
+    val passes = 3 as i64
+    val rx = _box_radii_for_sigma(filter.sigma_x, passes)
+    val ry = _box_radii_for_sigma(filter.sigma_y, passes)
+    var cur = src
+    var i = 0 as i64
+    while i < passes:
+        cur = _box_filter_pass_horizontal(cur, rx[i])
+        i = i + 1
+    var j = 0 as i64
+    while j < passes:
+        cur = _box_filter_pass_vertical(cur, ry[j])
+        j = j + 1
+    cur

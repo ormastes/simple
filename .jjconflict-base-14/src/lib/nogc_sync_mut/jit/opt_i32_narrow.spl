@@ -1,0 +1,99 @@
+# I32 Narrowing Optimization Pass
+#
+# Identifies operations that are safe to execute with 32-bit integers
+# instead of 64-bit, reducing register pressure and improving throughput
+# on x86 mixed-mode JIT pipelines.
+#
+# Usage:
+#   use std.jit.opt_i32_narrow.{I32NarrowPass}
+
+use std.io
+
+class I32NarrowPass:
+    total_ops: i64
+    narrowed_ops: i64
+    estimated_savings_bytes: i64
+
+    static fn create() -> I32NarrowPass:
+        I32NarrowPass(
+            total_ops: 0,
+            narrowed_ops: 0,
+            estimated_savings_bytes: 0
+        )
+
+    me should_narrow(op: text, val_range_max: i64) -> bool:
+        if val_range_max > 2147483647:
+            return false
+        if val_range_max < -2147483648:
+            return false
+        if op == "add":
+            return true
+        if op == "sub":
+            return true
+        if op == "mul":
+            return true
+        if op == "cmp":
+            return true
+        if op == "loop_counter":
+            return true
+        return false
+
+    me analyze(source: text) -> text:
+        # Scan for patterns and update narrowing stats.
+        # Returns the source annotated with i32-hint comments where narrowing
+        # is safe. The analysis is heuristic — it checks for common tokens.
+        var annotated = source
+
+        # Each keyword scan counts as one op opportunity.
+        # We look for arithmetic/loop tokens and decide if they are safe.
+
+        var ops_found: i64 = 0
+        var ops_narrowed: i64 = 0
+
+        # Check add
+        if source.contains(" + "):
+            ops_found = ops_found + 1
+            if self.should_narrow("add", 2147483647):
+                ops_narrowed = ops_narrowed + 1
+                annotated = "# @i32-narrow: add\n" + annotated
+
+        # Check sub
+        if source.contains(" - "):
+            ops_found = ops_found + 1
+            if self.should_narrow("sub", 2147483647):
+                ops_narrowed = ops_narrowed + 1
+                annotated = "# @i32-narrow: sub\n" + annotated
+
+        # Check mul
+        if source.contains(" * "):
+            ops_found = ops_found + 1
+            if self.should_narrow("mul", 2147483647):
+                ops_narrowed = ops_narrowed + 1
+                annotated = "# @i32-narrow: mul\n" + annotated
+
+        # Check compare (< or >)
+        if source.contains(" < "):
+            ops_found = ops_found + 1
+            if self.should_narrow("cmp", 2147483647):
+                ops_narrowed = ops_narrowed + 1
+                annotated = "# @i32-narrow: cmp\n" + annotated
+
+        # Check loop counter (while keyword)
+        if source.contains("while "):
+            ops_found = ops_found + 1
+            if self.should_narrow("loop_counter", 2147483647):
+                ops_narrowed = ops_narrowed + 1
+                annotated = "# @i32-narrow: loop_counter\n" + annotated
+
+        self.total_ops = self.total_ops + ops_found
+        self.narrowed_ops = self.narrowed_ops + ops_narrowed
+        # Each narrowed op saves 4 bytes (i64 → i32 in register allocation)
+        self.estimated_savings_bytes = self.narrowed_ops * 4
+
+        return annotated
+
+    me stats() -> text:
+        var msg = "I32NarrowPass: total_ops=" + self.total_ops.to_text()
+        msg = msg + " narrowed=" + self.narrowed_ops.to_text()
+        msg = msg + " savings=" + self.estimated_savings_bytes.to_text() + "B"
+        return msg

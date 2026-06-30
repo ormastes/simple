@@ -1,0 +1,204 @@
+"""ML Linear Models Specification.
+
+**Feature IDs:** scilib-ml-linear
+**Category:** Stdlib / ML Consumer Layer
+**Difficulty:** 2/5
+**Status:** Draft
+**Plan:** doc/03_plan/agent_tasks/scilib_port_ml.md
+
+## Overview
+
+Tests the pure consumer layer for LinearRegression and Ridge.
+Coefficients are injected directly (simulating what linalg.solve
+would produce) — no solver is called here.
+
+Import path: use std.common.science_math.ml_linear.{LinearRegression, Ridge, ml_predict_linear, ml_mse}
+"""
+
+use std.spipe.*
+use std.common.science_math.ml_linear.{LinearRegression, Ridge, ml_predict_linear, ml_mse}
+
+# ============================================================================
+# Test Group 1: LinearRegression — construction and state
+# ============================================================================
+
+describe "LinearRegression — construction":
+    it "new model is not fitted":
+        val m = LinearRegression.new()
+        expect(m.is_fitted()).to_equal(false)
+
+    it "new model has empty coef":
+        val m = LinearRegression.new()
+        expect(m.coef().len()).to_equal(0)
+
+    it "new model has zero intercept":
+        val m = LinearRegression.new()
+        expect(m.intercept()).to_equal(0.0)
+
+# ============================================================================
+# Test Group 2: LinearRegression — inject coefficients
+# ============================================================================
+
+describe "LinearRegression — set_coef":
+    it "is_fitted becomes true after set_coef":
+        var m = LinearRegression.new()
+        m.set_coef([2.0], 1.0)
+        expect(m.is_fitted()).to_equal(true)
+
+    it "coef returns injected value":
+        var m = LinearRegression.new()
+        m.set_coef([3.5, -1.0], 0.5)
+        val c = m.coef()
+        expect(c.len()).to_equal(2)
+        expect(c[0]).to_equal(3.5)
+        expect(c[1]).to_equal(-1.0)
+
+    it "intercept returns injected value":
+        var m = LinearRegression.new()
+        m.set_coef([2.0], 1.0)
+        expect(m.intercept()).to_equal(1.0)
+
+# ============================================================================
+# Test Group 3: LinearRegression — prediction (y = 2x + 1)
+# ============================================================================
+
+describe "LinearRegression — predict":
+    it "predicts correct value for x=0":
+        # y = 2*0 + 1 = 1
+        var m = LinearRegression.new()
+        m.set_coef([2.0], 1.0)
+        expect(m.predict([0.0])).to_equal(1.0)
+
+    it "predicts correct value for x=1":
+        # y = 2*1 + 1 = 3
+        var m = LinearRegression.new()
+        m.set_coef([2.0], 1.0)
+        expect(m.predict([1.0])).to_equal(3.0)
+
+    it "predicts correct value for x=5":
+        # y = 2*5 + 1 = 11
+        var m = LinearRegression.new()
+        m.set_coef([2.0], 1.0)
+        expect(m.predict([5.0])).to_equal(11.0)
+
+    it "predicts negative value":
+        # y = 2*(-3) + 1 = -5
+        var m = LinearRegression.new()
+        m.set_coef([2.0], 1.0)
+        expect(m.predict([-3.0])).to_equal(-5.0)
+
+    it "predicts with two features":
+        # y = 1*x0 + 2*x1 + 0 = 1*3 + 2*4 = 11
+        var m = LinearRegression.new()
+        m.set_coef([1.0, 2.0], 0.0)
+        expect(m.predict([3.0, 4.0])).to_equal(11.0)
+
+# ============================================================================
+# Test Group 4: LinearRegression — batch prediction
+# ============================================================================
+
+describe "LinearRegression — predict_batch":
+    it "returns correct length":
+        var m = LinearRegression.new()
+        m.set_coef([2.0], 1.0)
+        val preds = m.predict_batch([[0.0], [1.0], [2.0]])
+        expect(preds.len()).to_equal(3)
+
+    it "batch matches individual predictions":
+        var m = LinearRegression.new()
+        m.set_coef([2.0], 1.0)
+        val preds = m.predict_batch([[0.0], [1.0], [5.0]])
+        expect(preds[0]).to_equal(1.0)
+        expect(preds[1]).to_equal(3.0)
+        expect(preds[2]).to_equal(11.0)
+
+    it "empty batch returns empty":
+        var m = LinearRegression.new()
+        m.set_coef([2.0], 1.0)
+        val preds = m.predict_batch([])
+        expect(preds.len()).to_equal(0)
+
+# ============================================================================
+# Test Group 5: Ridge — construction and state
+# ============================================================================
+
+describe "Ridge — construction":
+    it "new model is not fitted":
+        val r = Ridge.new(1.0)
+        expect(r.is_fitted()).to_equal(false)
+
+    it "alpha is stored":
+        val r = Ridge.new(0.5)
+        expect(r.alpha()).to_equal(0.5)
+
+    it "alpha zero is valid":
+        val r = Ridge.new(0.0)
+        expect(r.alpha()).to_equal(0.0)
+
+# ============================================================================
+# Test Group 6: Ridge — inject coefficients and predict
+# ============================================================================
+
+describe "Ridge — set_coef and predict":
+    it "is_fitted becomes true after set_coef":
+        var r = Ridge.new(1.0)
+        r.set_coef([1.5], 0.0)
+        expect(r.is_fitted()).to_equal(true)
+
+    it "predict matches injected coef":
+        # y = 1.5*2 + 0 = 3.0
+        var r = Ridge.new(1.0)
+        r.set_coef([1.5], 0.0)
+        expect(r.predict([2.0])).to_equal(3.0)
+
+    it "Ridge alpha=0 behaves like LinearRegression":
+        # With same coefficients, prediction is identical
+        var lr = LinearRegression.new()
+        lr.set_coef([2.0], 1.0)
+        var ridge = Ridge.new(0.0)
+        ridge.set_coef([2.0], 1.0)
+        expect(lr.predict([3.0])).to_equal(ridge.predict([3.0]))
+
+    it "intercept is preserved":
+        var r = Ridge.new(10.0)
+        r.set_coef([0.0], 7.5)
+        expect(r.predict([99.0])).to_equal(7.5)
+
+# ============================================================================
+# Test Group 7: Free function ml_predict_linear
+# ============================================================================
+
+describe "ml_predict_linear":
+    it "computes dot product plus intercept":
+        # 2*3 + 0.5 = 6.5
+        expect(ml_predict_linear([2.0], 0.5, [3.0])).to_equal(6.5)
+
+    it "handles two features":
+        # 1*2 + 3*4 + 1 = 15
+        expect(ml_predict_linear([1.0, 3.0], 1.0, [2.0, 4.0])).to_equal(15.0)
+
+    it "zero intercept":
+        expect(ml_predict_linear([5.0], 0.0, [2.0])).to_equal(10.0)
+
+    it "negative coefficient":
+        # -1*4 + 0 = -4
+        expect(ml_predict_linear([-1.0], 0.0, [4.0])).to_equal(-4.0)
+
+# ============================================================================
+# Test Group 8: Free function ml_mse
+# ============================================================================
+
+describe "ml_mse":
+    it "perfect prediction gives 0.0":
+        val y = [1.0, 2.0, 3.0]
+        expect(ml_mse(y, y)).to_equal(0.0)
+
+    it "offset by 1 gives 1.0":
+        # mse([1,2,3], [2,3,4]) = mean([1,1,1]) = 1.0
+        expect(ml_mse([1.0, 2.0, 3.0], [2.0, 3.0, 4.0])).to_equal(1.0)
+
+    it "single element":
+        expect(ml_mse([3.0], [1.0])).to_equal(4.0)
+
+    it "empty returns 0.0":
+        expect(ml_mse([], [])).to_equal(0.0)

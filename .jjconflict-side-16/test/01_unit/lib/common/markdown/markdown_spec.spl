@@ -1,0 +1,183 @@
+use std.spec
+use std.common.markdown.{
+    markdown_inline_text,
+    markdown_escape_html,
+    markdown_plain_inline,
+    markdown_block_kind,
+    parse_markdown_blocks,
+    markdown_slugify
+}
+
+describe "markdown_inline_text":
+    it "returns empty string for empty input":
+        expect(markdown_inline_text("")).to_equal("")
+
+    it "passes plain text through unchanged":
+        expect(markdown_inline_text("hello world")).to_equal("hello world")
+
+    it "wraps bold markers":
+        expect(markdown_inline_text("**bold**")).to_equal("<strong>bold</strong>")
+
+    it "wraps italic markers":
+        expect(markdown_inline_text("*italic*")).to_equal("<em>italic</em>")
+
+    it "wraps code span":
+        expect(markdown_inline_text("`code`")).to_equal("<code>code</code>")
+
+    it "leaves unbalanced bold as literal":
+        expect(markdown_inline_text("**oops")).to_equal("**oops")
+
+    it "leaves unbalanced italic as literal":
+        expect(markdown_inline_text("*oops")).to_equal("*oops")
+
+    it "leaves unbalanced backtick as literal":
+        expect(markdown_inline_text("`oops")).to_equal("`oops")
+
+    it "handles escaped star":
+        expect(markdown_inline_text("\\*literal\\*")).to_equal("*literal*")
+
+    it "protects code span content from bold parsing":
+        expect(markdown_inline_text("`**not bold**`")).to_equal("<code>**not bold**</code>")
+
+    it "handles adjacent bold and italic":
+        expect(markdown_inline_text("**a** and *b*")).to_equal("<strong>a</strong> and <em>b</em>")
+
+describe "markdown_escape_html":
+    it "returns empty string for empty input":
+        expect(markdown_escape_html("")).to_equal("")
+
+    it "escapes ampersand first":
+        expect(markdown_escape_html("&amp;")).to_equal("&amp;amp;")
+
+    it "escapes less-than":
+        expect(markdown_escape_html("<b>")).to_equal("&lt;b&gt;")
+
+    it "escapes greater-than":
+        expect(markdown_escape_html(">")).to_equal("&gt;")
+
+    it "escapes double-quote for attribute safety":
+        expect(markdown_escape_html("say \"hi\"")).to_equal("say &quot;hi&quot;")
+
+    it "escapes single-quote for attribute safety":
+        expect(markdown_escape_html("it's")).to_equal("it&#39;s")
+
+    it "escapes all together":
+        expect(markdown_escape_html("<a href=\"x&y\">")).to_equal("&lt;a href=&quot;x&amp;y&quot;&gt;")
+
+describe "markdown_plain_inline":
+    it "returns empty for empty input":
+        expect(markdown_plain_inline("")).to_equal("")
+
+    it "strips bold markers, keeps text":
+        expect(markdown_plain_inline("**bold**")).to_equal("bold")
+
+    it "strips italic markers, keeps text":
+        expect(markdown_plain_inline("*italic*")).to_equal("italic")
+
+    it "strips backtick markers, keeps interior":
+        expect(markdown_plain_inline("`code`")).to_equal("code")
+
+    it "passes plain text unchanged":
+        expect(markdown_plain_inline("hello")).to_equal("hello")
+
+    it "drops unbalanced bold markers":
+        expect(markdown_plain_inline("**oops")).to_equal("oops")
+
+    it "drops lone star in unbalanced italic":
+        expect(markdown_plain_inline("*oops")).to_equal("oops")
+
+    it "keeps escaped star as literal":
+        expect(markdown_plain_inline("\\*literal\\*")).to_equal("*literal*")
+
+    it "code span protects ** from being stripped":
+        expect(markdown_plain_inline("`**keep**`")).to_equal("**keep**")
+
+describe "markdown_block_kind":
+    it "identifies headings":
+        expect(markdown_block_kind("# Hello")).to_equal("heading")
+        expect(markdown_block_kind("## Sub")).to_equal("heading")
+
+    it "identifies code fences":
+        expect(markdown_block_kind("```rust")).to_equal("code")
+        expect(markdown_block_kind("```")).to_equal("code")
+
+    it "identifies blockquotes":
+        expect(markdown_block_kind("> quote")).to_equal("blockquote")
+
+    it "identifies lists":
+        expect(markdown_block_kind("- item")).to_equal("list")
+        expect(markdown_block_kind("* item")).to_equal("list")
+
+    it "identifies tables by leading pipe":
+        expect(markdown_block_kind("| col1 | col2 |")).to_equal("table")
+
+    it "identifies separator rows as table":
+        expect(markdown_block_kind("| --- | --- |")).to_equal("table")
+        expect(markdown_block_kind("|:---:|---:|")).to_equal("table")
+
+    it "does NOT classify mid-paragraph pipe as table":
+        expect(markdown_block_kind("a | b")).to_equal("paragraph")
+        expect(markdown_block_kind("true | false logic")).to_equal("paragraph")
+
+    it "identifies plain paragraph":
+        expect(markdown_block_kind("Just text")).to_equal("paragraph")
+
+    it "empty string is paragraph":
+        expect(markdown_block_kind("")).to_equal("paragraph")
+
+describe "parse_markdown_blocks":
+    it "returns empty list for empty input":
+        val blocks = parse_markdown_blocks("")
+        expect(blocks.len()).to_equal(0)
+
+    it "skips blank lines":
+        val blocks = parse_markdown_blocks("a\n\nb")
+        expect(blocks.len()).to_equal(2)
+
+    it "handles heading with no text (bare #)":
+        val blocks = parse_markdown_blocks("#")
+        expect(blocks.len()).to_equal(1)
+        expect(blocks[0].kind).to_equal("heading")
+
+    it "handles unclosed code fence at EOF without crash":
+        val blocks = parse_markdown_blocks("```\ncode line\nno close")
+        expect(blocks.len()).to_equal(3)
+        expect(blocks[0].kind).to_equal("code")
+        expect(blocks[1].kind).to_equal("code")
+        expect(blocks[2].kind).to_equal("code")
+
+    it "correctly closes a code fence":
+        val blocks = parse_markdown_blocks("```\nfoo\n```\nbar")
+        expect(blocks.len()).to_equal(4)
+        expect(blocks[3].kind).to_equal("paragraph")
+
+    it "preserves block from_line and to_line":
+        val blocks = parse_markdown_blocks("# H\n\npara")
+        expect(blocks[0].from_line).to_equal(0)
+        expect(blocks[1].from_line).to_equal(2)
+
+describe "markdown_slugify":
+    it "returns section for empty input":
+        expect(markdown_slugify("")).to_equal("section")
+
+    it "returns section for whitespace-only input":
+        expect(markdown_slugify("   ")).to_equal("section")
+
+    it "lowercases and replaces spaces with dashes":
+        expect(markdown_slugify("Hello World")).to_equal("hello-world")
+
+    it "collapses repeated dashes":
+        expect(markdown_slugify("foo  bar")).to_equal("foo-bar")
+
+    it "strips leading and trailing dashes":
+        expect(markdown_slugify("  hello  ")).to_equal("hello")
+
+    it "strips punctuation":
+        expect(markdown_slugify("Hello, World!")).to_equal("hello-world")
+
+    it "handles unicode input without crash":
+        val slug = markdown_slugify("こんにちは")
+        expect(slug.len() > 0).to_equal(true)
+
+    it "handles already-slug input":
+        expect(markdown_slugify("hello-world")).to_equal("hello-world")

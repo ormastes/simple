@@ -1,0 +1,407 @@
+# Shared UI Backend Example
+#
+# Demonstrates that the same UI code works across different backends:
+#   - Browser (DOM-based, WebAssembly)
+#   - TUI (Terminal, ANSI escape codes)
+#   - Vulkan (GPU-accelerated, when implemented)
+#
+# This validates that the RenderBackend abstraction is truly backend-agnostic.
+
+use core.*
+use concurrency.*
+use ui.element.*
+use ui.attrs.*
+use ui.patchset.*
+use ui.renderer.*
+use ui.diff.*
+use ui.gui.browser.*
+use ui.tui.renderer_async.*
+
+# =============================================================================
+# Shared UI Code (Backend-Agnostic!)
+# =============================================================================
+
+# Create a simple counter app UI
+fn create_counter_ui(count: i32) -> ElementTree:
+    var tree = ElementTree::new(ElementKind::Div)
+    val root = tree.root_mut()
+
+    # Title
+    val title = Element::text(tree.alloc_id(), "Counter App")
+        .with_style("color", "cyan")
+        .with_style("font-weight", "bold")
+
+    # Counter display
+    val counter_text = Element::text(tree.alloc_id(), &"Count: {count}")
+        .with_style("color", "yellow")
+        .with_style("font-size", "24px")
+
+    # Buttons container
+    var buttons = Element::div(tree.alloc_id())
+        .with_style("display", "flex")
+        .with_style("gap", "10px")
+
+    # Increment button
+    val inc_button = Element::button(tree.alloc_id(), "+ Increment")
+        .with_class("primary")
+        .on_event("click", 1)  # Handler ID 1
+
+    # Decrement button
+    val dec_button = Element::button(tree.alloc_id(), "- Decrement")
+        .with_class("secondary")
+        .on_event("click", 2)  # Handler ID 2
+
+    # Reset button
+    val reset_button = Element::button(tree.alloc_id(), "Reset")
+        .with_class("danger")
+        .on_event("click", 3)  # Handler ID 3
+
+    # Assemble UI
+    buttons = buttons
+        .with_child(inc_button)
+        .with_child(dec_button)
+        .with_child(reset_button)
+
+    root.with_child(title)
+        .with_child(counter_text)
+        .with_child(buttons)
+
+    return tree
+
+# Create a todo list UI
+fn create_todo_ui(todos: &Array<text>) -> ElementTree:
+    var tree = ElementTree::new(ElementKind::Div)
+    val root = tree.root_mut()
+
+    # Title
+    val title = Element::text(tree.alloc_id(), "Todo List")
+        .with_class("title")
+
+    # Input box for new todos
+    val input_box = Element::input(tree.alloc_id())
+        .with_attr("placeholder", "Enter new todo...")
+        .with_attr("value", "")
+
+    # Add button
+    val add_button = Element::button(tree.alloc_id(), "Add")
+        .on_event("click", 10)
+
+    # Todo list
+    var todo_list = Element::div(tree.alloc_id())
+        .with_class("todo-list")
+
+    for (i, todo_text) in todos.iter().enumerate():
+        val todo_item = Element::div(tree.alloc_id())
+            .with_class("todo-item")
+            .with_key(&"todo-{i}")
+            .with_child(
+                Element::text(tree.alloc_id(), todo_text)
+            )
+            .with_child(
+                Element::button(tree.alloc_id(), "✓")
+                    .with_class("done-btn")
+                    .on_event("click", 100 + i as u64)
+            )
+            .with_child(
+                Element::button(tree.alloc_id(), "✗")
+                    .with_class("delete-btn")
+                    .on_event("click", 200 + i as u64)
+            )
+
+        todo_list = todo_list.with_child(todo_item)
+
+    # Assemble
+    root.with_child(title)
+        .with_child(input_box)
+        .with_child(add_button)
+        .with_child(todo_list)
+
+    return tree
+
+# Create a dashboard UI
+fn create_dashboard_ui(metrics: &DashboardMetrics) -> ElementTree:
+    var tree = ElementTree::new(ElementKind::Div)
+    val root = tree.root_mut()
+
+    # Title
+    val title = Element::text(tree.alloc_id(), "System Dashboard")
+        .with_style("color", "white")
+        .with_style("background-color", "blue")
+
+    # Metrics grid
+    var grid = Element::div(tree.alloc_id())
+        .with_style("display", "grid")
+        .with_style("grid-template-columns", "1fr 1fr")
+        .with_style("gap", "10px")
+
+    # CPU metric
+    val cpu_box = Element::div(tree.alloc_id())
+        .with_class("metric-box")
+        .with_child(Element::text(tree.alloc_id(), "CPU"))
+        .with_child(Element::text(tree.alloc_id(), &"{metrics.cpu_usage}%"))
+
+    # Memory metric
+    val mem_box = Element::div(tree.alloc_id())
+        .with_class("metric-box")
+        .with_child(Element::text(tree.alloc_id(), "Memory"))
+        .with_child(Element::text(tree.alloc_id(), &"{metrics.mem_usage}%"))
+
+    # Network metric
+    val net_box = Element::div(tree.alloc_id())
+        .with_class("metric-box")
+        .with_child(Element::text(tree.alloc_id(), "Network"))
+        .with_child(Element::text(tree.alloc_id(), &"{metrics.net_traffic} MB/s"))
+
+    # Disk metric
+    val disk_box = Element::div(tree.alloc_id())
+        .with_class("metric-box")
+        .with_child(Element::text(tree.alloc_id(), "Disk"))
+        .with_child(Element::text(tree.alloc_id(), &"{metrics.disk_usage}%"))
+
+    grid = grid
+        .with_child(cpu_box)
+        .with_child(mem_box)
+        .with_child(net_box)
+        .with_child(disk_box)
+
+    root.with_child(title)
+        .with_child(grid)
+
+    return tree
+
+struct DashboardMetrics:
+    cpu_usage: f32
+    mem_usage: f32
+    net_traffic: f32
+    disk_usage: f32
+
+# =============================================================================
+# Browser Backend Example
+# =============================================================================
+
+async fn run_with_browser_backend():
+    # Create browser renderer
+    val renderer = BrowserRenderer::new("app")?
+    await renderer.init()
+
+    # Create initial UI
+    var count = 0
+    var tree = create_counter_ui(count)
+
+    # Initial render
+    await renderer.render(&tree)
+
+    # Event loop (in browser, this would be event-driven via callbacks)
+    # For demo, we'll just show how updates work
+
+    # Simulate user clicking increment
+    count = count + 1
+    val new_tree = create_counter_ui(count)
+
+    # Compute diff and apply patches
+    val patches = diff(tree.root(), new_tree.root()).take_patches()
+    await renderer.apply_patches(&patches)
+
+    tree = new_tree
+
+    # Simulate user clicking decrement
+    count = count - 1
+    val new_tree = create_counter_ui(count)
+
+    val patches = diff(tree.root(), new_tree.root()).take_patches()
+    await renderer.apply_patches(&patches)
+
+    await renderer.shutdown()
+
+# =============================================================================
+# TUI Backend Example
+# =============================================================================
+
+async fn run_with_tui_backend():
+    # Create TUI renderer
+    val renderer = TuiAsyncRenderer::new()
+        .with_mouse()
+        .with_alternate_screen()
+
+    await renderer.init()
+
+    # Create initial UI
+    var count = 0
+    var tree = create_counter_ui(count)
+
+    # Initial render
+    await renderer.render(&tree)
+
+    # Event loop
+    loop:
+        match await renderer.poll_event(16):  # 60 FPS
+            case Ok(Some(Event::Key(key))):
+                match key.code:
+                    case KeyCode::Char('q') | KeyCode::Escape:
+                        break
+
+                    case KeyCode::Char('+'):
+                        # Increment
+                        count = count + 1
+                        val new_tree = create_counter_ui(count)
+                        val patches = diff(tree.root(), new_tree.root()).take_patches()
+                        await renderer.apply_patches(&patches)
+                        tree = new_tree
+
+                    case KeyCode::Char('-'):
+                        # Decrement
+                        count = count - 1
+                        val new_tree = create_counter_ui(count)
+                        val patches = diff(tree.root(), new_tree.root()).take_patches()
+                        await renderer.apply_patches(&patches)
+                        tree = new_tree
+
+                    case KeyCode::Char('r'):
+                        # Reset
+                        count = 0
+                        val new_tree = create_counter_ui(count)
+                        val patches = diff(tree.root(), new_tree.root()).take_patches()
+                        await renderer.apply_patches(&patches)
+                        tree = new_tree
+
+                    case _:
+                        pass
+
+            case Ok(None):
+                # No event - just re-render
+                await renderer.render(&tree)
+
+            case Err(e):
+                print("Error: {e}")
+                break
+
+    await renderer.shutdown()
+
+# =============================================================================
+# Todo List Example (Both Backends)
+# =============================================================================
+
+async fn run_todo_app<R: RenderBackend>(renderer: R):
+    await renderer.init()
+
+    var todos: Array<text> = [
+        "Implement Browser backend".to_string(),
+        "Implement TUI backend".to_string(),
+        "Implement Vulkan backend".to_string()
+    ]
+
+    var tree = create_todo_ui(&todos)
+    await renderer.render(&tree)
+
+    # Event loop (simplified)
+    loop:
+        match await renderer.poll_event(16):
+            case Ok(Some(Event::Key(key))):
+                if key.code == KeyCode::Escape:
+                    break
+
+                # Handle todo operations...
+
+            case Ok(None):
+                await renderer.render(&tree)
+
+            case Err(e):
+                break
+
+    await renderer.shutdown()
+
+# =============================================================================
+# Dashboard Example (Both Backends)
+# =============================================================================
+
+async fn run_dashboard<R: RenderBackend>(renderer: R):
+    await renderer.init()
+
+    var metrics = DashboardMetrics {
+        cpu_usage: 45.2,
+        mem_usage: 62.8,
+        net_traffic: 1.5,
+        disk_usage: 73.1
+    }
+
+    var tree = create_dashboard_ui(&metrics)
+    await renderer.render(&tree)
+
+    # Update loop (60 FPS)
+    loop:
+        match await renderer.poll_event(16):
+            case Ok(Some(Event::Key(key))):
+                if key.code == KeyCode::Escape or key.code == KeyCode::Char('q'):
+                    break
+
+            case Ok(None):
+                # Update metrics (simulate)
+                metrics.cpu_usage = (metrics.cpu_usage + 0.5) % 100.0
+                metrics.mem_usage = (metrics.mem_usage + 0.3) % 100.0
+                metrics.net_traffic = metrics.net_traffic + 0.1
+
+                # Re-render with new metrics
+                val new_tree = create_dashboard_ui(&metrics)
+                val patches = diff(tree.root(), new_tree.root()).take_patches()
+                await renderer.apply_patches(&patches)
+                tree = new_tree
+
+            case Err(e):
+                break
+
+    await renderer.shutdown()
+
+# =============================================================================
+# Main Entry Points
+# =============================================================================
+
+# Run with browser backend
+async fn main_browser():
+    await run_with_browser_backend()
+
+# Run with TUI backend
+async fn main_tui():
+    await run_with_tui_backend()
+
+# Run todo app with TUI
+async fn main_todo_tui():
+    val renderer = TuiAsyncRenderer::new().with_alternate_screen()
+    await run_todo_app(renderer)
+
+# Run todo app with browser
+async fn main_todo_browser():
+    val renderer = BrowserRenderer::new("app")?
+    await run_todo_app(renderer)
+
+# Run dashboard with TUI
+async fn main_dashboard_tui():
+    val renderer = TuiAsyncRenderer::new().with_alternate_screen()
+    await run_dashboard(renderer)
+
+# Run dashboard with browser
+async fn main_dashboard_browser():
+    val renderer = BrowserRenderer::new("app")?
+    await run_dashboard(renderer)
+
+# =============================================================================
+# Key Takeaway
+# =============================================================================
+
+# The SAME UI code (create_counter_ui, create_todo_ui, create_dashboard_ui)
+# works across DIFFERENT backends:
+#   - Browser (DOM)
+#   - TUI (Terminal)
+#   - Vulkan (GPU, when implemented)
+#
+# This proves the RenderBackend abstraction is solid!
+# The only difference is:
+#   1. Which renderer you create
+#   2. Backend-specific initialization
+#   3. Event handling differences (but same Event types!)
+#
+# Everything else is SHARED:
+#   - Element creation
+#   - Tree building
+#   - Diff algorithm
+#   - Patch generation
+#   - Async rendering
