@@ -1,63 +1,68 @@
-# rv32 LLVM native-build broken in this environment (exit 255, no diagnostic)
+# rv32 native-build: silent 255 FIXED; remaining bare-metal rv32 runtime gap
 
 **Date:** 2026-06-30
-**Area:** compiler / native-build (LLVM backend, `riscv32-unknown-none`) — environment/toolchain
-**Severity:** blocker (rv32 native-build) + DX (swallowed error)
-**Status:** open
+**Area:** compiler / native-build (LLVM backend, `riscv32-unknown-none`)
+**Severity:** the silent-failure + routing defects are FIXED; the remaining boot blocker is a
+bare-metal-runtime gap (separate, larger).
+**Status:** partially resolved — see below.
 
-## Summary
+## Symptom (original)
 
-`bin/simple native-build --backend llvm --target riscv32-unknown-none` exits **255 with no
-diagnostic** in this environment — for **both** a new standalone bare-metal entry **and the
-proven full-OS rv32 boot entry**. It emits the normal workspace-wide warnings (`export use *`,
-deprecated-generics) and the usual non-fatal `[gc-warning] Higher-layer module
-'std.nogc_sync_mut.sffi.*' imported in restricted context` lines, then exits 255 — **no
-`error:`/`fatal:` line, no panic message, and no intermediate artifact** (`.ll`/`.o`/`.s`) is
-written to `build/`. There is no `--verbose`/`--keep-temps`/log flag to surface the real failure.
+`bin/simple native-build --backend llvm --target riscv32-unknown-none ...` exited **255 with no
+diagnostic and no ELF**, for any entry.
 
-## Root cause: environmental (verified by baseline)
+## Root cause + FIX (resolved)
 
-The decisive test was running the **proven** recipe verbatim:
+Two coupled defects, both fixed:
 
-```sh
-SIMPLE_BOOTSTRAP=1 bin/simple native-build --backend llvm --source src/os --source src/lib \
-  --entry src/os/kernel/arch/riscv32/boot.spl --entry-closure \
-  --linker-script src/os/kernel/arch/riscv32/linker.ld --target riscv32-unknown-none \
-  -o build/proven_rv32.elf
-# -> PROVEN_BUILD_EXIT=255, no error message, no ELF
+1. **Mis-route to a too-slow interpreted worker (silent 255).** `native-build` is in
+   `command_is_pure_simple_tool`, so the dispatcher never reached the in-process Rust
+   `handle_native_build`; it always ran the `.spl` app, whose worker (`bin/simple run
+   native_build_worker.spl`) eagerly loads the whole compiler+LLVM import graph in the
+   interpreter. With a large `--source` set (`src/os`+`src/lib`) it exceeds the timeout budget →
+   coreutils `timeout` (124) → `process_ops` remaps to `-1` → `exit(-1)` = 255, with the only
+   hint a single `[TIMEOUT]` line buried under thousands of warnings.
+   - **Fix A (pure Simple, commit a0652371728):** `native_build_main.spl` now prints an explicit,
+     non-truncatable line distinguishing the timeout sentinel and naming the cause/knobs.
+   - **Fix B (Rust seed, commit 187c62110138):** route `native-build` to `handle_native_build`
+     only when an explicit `--target` is passed (host builds stay on the pure-Simple path).
+     `handle_native_build` parses `--target`/`--linker-script`, defaults rv32 to LLVM, threads the
+     target into codegen, and links via `ld.lld`.
+
+2. **Result:** `native-build --target riscv32-unknown-none` now **compiles riscv objects and
+   reaches the linker with real, actionable errors** instead of a silent 255. The rv32 codegen
+   path works.
+
+## Remaining blocker (NOT a toolchain bug): incomplete bare-metal rv32 runtime
+
+Building the firmware self-test (`examples/09_embedded/simpleos_nvme_fw/fw_rv32/entry.spl`, an
+array-free scalar RAIN reconstruct) for rv32 now links and reports:
+
 ```
+ld.lld: error: undefined symbol: rt_native_eq      # emitted for ==
+ld.lld: error: undefined symbol: rt_native_neq     # emitted for !=
+ld.lld: error: undefined symbol: rt_riscv_uart_put # C stub is riscv64-only
+ld.lld: error: undefined symbol: main              # entry-symbol/_start wiring
+```
+The OS entry (`boot.spl`) similarly lacks `rt_value_as_int` / `rt_array_pop`.
 
-The proven full-OS entry **also** fails with the same silent 255. So this is **not** entry-specific
-— the rv32 LLVM native-build itself is broken/unavailable in this environment. The prebuilt
-`build/os/simpleos_riscv32.elf` that *does* boot (verified: `qemu-system-riscv32 ... -bios none`
-prints `[BOOT] boot complete`, `PMM OK`, `HEAP OK`, `SVC OK`) is **stale** — produced by an
-earlier/different build environment, not reproducible here.
+**Verified (discriminators, not inference):** the missing `rt_native_eq`/`rt_native_neq` persist
+under **`--release`** (so not an unoptimized-build artifact — typed `i64 != i64` still lowers to a
+runtime call) AND under **`--runtime-bundle core-c-bootstrap`** (so not a missing-bundle config).
+So the freestanding rv32 runtime genuinely does not provide these primitives.
 
-(An earlier draft of this bug wrongly inferred "only the OS entry builds, standalone entries
-don't" from the stale prebuilt ELF, without running the baseline. Running the baseline corrected
-it: nothing rv32 builds here.)
+Additional bare-metal-entry detail: a standalone entry needs a **rooted `_start`** (the linker GCs
+all code without one; the build's generated `__simple_sandbox_start` wrapper is empty/`size 0` and
+is not a bare-metal entry), and `main` is mangled (not the literal symbol `main`).
 
-## What works vs. what doesn't
+**Next step (separate, substantial effort):** provide the freestanding rv32 runtime primitives
+(`rt_native_eq`/`neq`, `rt_riscv_uart_put` for rv32, `rt_value_as_int`, `rt_array_pop`, …) and a
+bare-metal `_start`/entry, then the firmware self-test (and the OS) link into a bootable ELF.
 
-- ✅ QEMU rv32 boot + serial path (`qemu-system-riscv32`, `riscv64-linux-gnu-gcc` installed; the
-  stale prebuilt ELF boots).
-- ✅ `bin/simple check` on the firmware rv32 entry (`fw_rv32/entry.spl`).
-- ❌ `native-build --backend llvm --target riscv32-unknown-none` — **any** entry, exit 255, no
-  diagnostic, no ELF. Self-hosted and seed (`SIMPLE_BOOTSTRAP=1`), ±`src/lib`.
+## Deploy status
 
-## Two distinct defects
-
-1. **Environmental build break** — the rv32 LLVM native-build produces no ELF here even for the
-   proven OS entry. Likely a missing/broken LLVM rv32 target or linker component in this host's
-   compiler build (the prebuilt ELF predates the breakage). Fix: restore a working
-   `riscv32-unknown-none` LLVM backend/link toolchain, then re-verify the proven recipe builds.
-2. **The silent failure (DX)** — native-build emits no diagnostic and no intermediate artifact, so
-   the real backend/linker error is invisible. This compounded (1): it took a baseline build to
-   even locate the failure. Fix: surface backend/linker stderr; add `--verbose`/`--keep-temps`.
-
-## Impact
-
-Blocks gap-closure **P9** (bare-metal rv32 port of the NVMe firmware) in this environment. The
-on-device self-test source is written and `check`-clean (`fw_rv32/entry.spl`, re-expressing the
-Lean-proven RAIN reconstruct), but **no rv32 ELF can be built here**, so the boot is **not
-observed** and P9 is build-blocked — environmental, not a firmware-logic gap.
+Fix A is **live** (`native_build_main.spl` is interpreted from source — no rebuild). Fix B is the
+Rust routing change: **committed as source and verified via a freshly-built worktree binary, but
+NOT yet in the shared `bin/simple`** (the deployed 54 MB binary predates it). Making it live for
+`bin/simple` requires a rebuild + deploy of the self-hosted/seed binary — deliberately deferred to
+avoid clobbering the shared binary mid parallel-session churn.

@@ -12,33 +12,76 @@
 # after `riscv_noalloc_log_init`), then build with the proven recipe (fw_rv32/build.shs) and boot
 # (fw_rv32/boot.shs). It prints `ALL RV32 NVME FW CHECKS PASS` on success.
 #
-# BUILD STATUS (2026-06-30): the rv32 LLVM native-build is broken in this environment — the
-# proven full-OS recipe also exits 255 with no diagnostic, so no rv32 ELF builds here and the
-# boot cannot be observed. See doc/08_tracking/bug/native_build_rv32_baremetal_silent_255_2026-06-30.md.
-# This source is `bin/simple check`-clean and follows boot.spl's proven structure, ready to build
-# once the toolchain is restored. The full 22-module no-alloc port of ../fw/ is the larger ceiling.
+# BUILD STATUS (2026-06-30): the native-build TOOLCHAIN bug is FIXED — `native-build --target
+# riscv32-unknown-none` now routes to the in-process Rust LLVM handler, compiles this entry to
+# riscv objects, and links with real errors (previously a silent 255). The remaining blocker to
+# an *observed boot* is the incomplete bare-metal rv32 RUNTIME: the freestanding link has no
+# `rt_native_eq`/`rt_native_neq` (emitted for `==`/`!=`), no `rt_riscv_uart_put` (the C stub is
+# riscv64-only), and no rooted bare-metal `_start` (without one the linker GCs all code; the
+# build's `__simple_sandbox_start` wrapper is not a bare-metal entry). Verified NOT resolved by
+# `--release` or `--runtime-bundle`, so it is a genuine runtime gap, not an opt/config artifact.
+# Tracked in doc/08_tracking/bug/native_build_rv32_baremetal_silent_255_2026-06-30.md. The
+# self-test logic below is host-verified (XOR-cancel reproduces fail=0); completing the
+# freestanding rv32 runtime + entry is the next step. Full 22-module no-alloc port is the ceiling.
 
 extern fn rt_riscv_uart_put(byte: u64)
 
 fn _uart_put(byte: i64):
     rt_riscv_uart_put(byte as u64)
 
-# "ALL RV32 NVME FW CHECKS PASS\n" — emitted one byte at a time (no arrays, no string runtime).
+# Emit a NUL-terminated-style fixed byte sequence one byte at a time (no arrays, no string
+# runtime, no `;` statement separators — native-build's parser rejects those).
 fn _emit_pass():
-    _uart_put(65)  ; _uart_put(76) ; _uart_put(76) ; _uart_put(32)   # ALL_
-    _uart_put(82)  ; _uart_put(86) ; _uart_put(51) ; _uart_put(50) ; _uart_put(32)   # RV32_
-    _uart_put(78)  ; _uart_put(86) ; _uart_put(77) ; _uart_put(69) ; _uart_put(32)   # NVME_
-    _uart_put(70)  ; _uart_put(87) ; _uart_put(32)                   # FW_
-    _uart_put(67)  ; _uart_put(72) ; _uart_put(69) ; _uart_put(67) ; _uart_put(75) ; _uart_put(83) ; _uart_put(32)   # CHECKS_
-    _uart_put(80)  ; _uart_put(65) ; _uart_put(83) ; _uart_put(83)   # PASS
+    # "ALL RV32 NVME FW CHECKS PASS\n"
+    _uart_put(65)
+    _uart_put(76)
+    _uart_put(76)
+    _uart_put(32)
+    _uart_put(82)
+    _uart_put(86)
+    _uart_put(51)
+    _uart_put(50)
+    _uart_put(32)
+    _uart_put(78)
+    _uart_put(86)
+    _uart_put(77)
+    _uart_put(69)
+    _uart_put(32)
+    _uart_put(70)
+    _uart_put(87)
+    _uart_put(32)
+    _uart_put(67)
+    _uart_put(72)
+    _uart_put(69)
+    _uart_put(67)
+    _uart_put(75)
+    _uart_put(83)
+    _uart_put(32)
+    _uart_put(80)
+    _uart_put(65)
+    _uart_put(83)
+    _uart_put(83)
     _uart_put(10)
 
-# "RV32 NVME FW FAIL\n"
 fn _emit_fail():
-    _uart_put(82)  ; _uart_put(86) ; _uart_put(51) ; _uart_put(50) ; _uart_put(32)
-    _uart_put(78)  ; _uart_put(86) ; _uart_put(77) ; _uart_put(69) ; _uart_put(32)
-    _uart_put(70)  ; _uart_put(87) ; _uart_put(32)
-    _uart_put(70)  ; _uart_put(65) ; _uart_put(73) ; _uart_put(76)
+    # "RV32 NVME FW FAIL\n"
+    _uart_put(82)
+    _uart_put(86)
+    _uart_put(51)
+    _uart_put(50)
+    _uart_put(32)
+    _uart_put(78)
+    _uart_put(86)
+    _uart_put(77)
+    _uart_put(69)
+    _uart_put(32)
+    _uart_put(70)
+    _uart_put(87)
+    _uart_put(32)
+    _uart_put(70)
+    _uart_put(65)
+    _uart_put(73)
+    _uart_put(76)
     _uart_put(10)
 
 # RAIN reconstruct on 8 scalar channels (no arrays): parity = XOR of all channels; for any lost
@@ -85,3 +128,6 @@ fn nvme_fw_rv32_selftest() -> i64:
     else:
         _emit_fail()
     fail
+
+fn main() -> i64:
+    nvme_fw_rv32_selftest()
