@@ -372,7 +372,7 @@ On a Simple-code change that touches a verified/mirrored path:
 
 1. Re-transcribe **only** the `gen lean` section (or `Basic.lean`) so the defs match the new code.
 2. Re-check: `lean <file>` for standalone proofs, `lake build` for Lake projects, or `simple gen-lean compare` for the gen-lean regeneration tree.
-3. If a def *signature* changed, the manual proofs may need follow-up; if only bodies/constants changed, they usually stay green. Keep def names and namespaces **stable** so external proofs referencing them do not silently break.
+3. If a def *signature* — or a constant that also appears in a theorem statement (e.g. a geometry bound like `wp < 64`) — changed, the manual proofs need follow-up; a pure def-body change usually leaves them green. Keep def names and namespaces **stable** so external proofs referencing them do not silently break.
 
 ### What `gen-lean` does and does not generate
 

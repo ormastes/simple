@@ -20,8 +20,8 @@
   § "Generated-mirror / manual-proof split"). The `gen lean` section below is a MECHANICAL
   mirror of the i64 logic in the cited Simple sources — it is the ONLY part coupled to the
   implementation, so when that code changes you re-transcribe just that section. The MANUAL
-  PROOFS below are hand-written and stay valid across a re-mirror as long as the def
-  signatures are unchanged. Lean core + omega only. Verified standalone: `lean Hooks.lean`.
+  PROOFS below are hand-written; a re-mirror leaves them untouched unless the model's shape or a
+  constant used in a theorem statement changed. Lean core + omega only. Verified: `lean Hooks.lean`.
 -/
 set_option linter.unusedVariables false
 

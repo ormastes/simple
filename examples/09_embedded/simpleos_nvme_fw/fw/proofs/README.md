@@ -38,8 +38,9 @@ minimal effort (see the canonical convention in
   mechanical mirror of the i64 logic in the cited `.spl` (constants, geometry, the
   selection/replay model). This is the **single place coupled to the implementation**: when
   the Simple code changes, re-transcribe just this section.
-- The **`-- MANUAL PROOFS`** section below holds the hand-written theorems. They stay valid
-  across a re-mirror as long as the def *signatures* are unchanged.
+- The **`-- MANUAL PROOFS`** section below holds the hand-written theorems. A re-mirror leaves
+  them untouched when the model's shape is unchanged; a constant that *also* appears in a
+  theorem statement (e.g. a geometry bound) couples to the code and is updated in both places.
 
 The split is **in-file** (not two files) on purpose: these proofs are verified by raw
 `lean <file>`, which does not resolve sibling-source `import`s without a Lake project or a
