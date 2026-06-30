@@ -139,6 +139,16 @@ struct CommandEntry {
 fn dispatch_command(entry: &CommandEntry, ctx: &CommandContext) -> i32 {
     let pure_simple_tool = command_is_pure_simple_tool(entry.name);
 
+    // native-build with an explicit --target: the pure-Simple interpreted worker neither
+    // parses --target nor cross-compiles (its multi-module AOT pipeline hardcodes the host
+    // target), and it times out loading the whole compiler graph for a large --source set.
+    // A cross/bare-metal target can only be honored by the in-process Rust LLVM handler,
+    // which parses --target/--linker-script and registers RISCV/AArch64 codegen. Route only
+    // these; host builds (no --target) stay on the pure-Simple path, keeping it the default.
+    if entry.name == "native-build" && native_build_wants_cross_target(ctx.args) {
+        return run_rust_handler(&entry.rust_handler, ctx);
+    }
+
     // 1. Check env var override → Rust
     if !pure_simple_tool && !entry.env_override.is_empty() && std::env::var(entry.env_override).is_ok() {
         return run_rust_handler(&entry.rust_handler, ctx);
@@ -207,6 +217,15 @@ fn test_should_use_light_daemon_client(args: &[String]) -> bool {
     args.iter()
         .skip(1)
         .any(|arg| !arg.starts_with('-') && arg.ends_with(".spl"))
+}
+
+/// True if a native-build invocation passes an explicit `--target` (cross/bare-metal).
+/// The pure-Simple native-build path silently drops `--target`, so any explicit target
+/// must be routed to the in-process Rust handler that actually parses and honors it.
+fn native_build_wants_cross_target(args: &[String]) -> bool {
+    args.iter()
+        .skip(1)
+        .any(|a| a == "--target" || a.starts_with("--target="))
 }
 
 fn command_is_pure_simple_tool(name: &str) -> bool {
