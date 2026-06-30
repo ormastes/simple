@@ -38,15 +38,18 @@ the out-of-order name is dropped.
 
 ## Impact
 
-`test/01_unit/lib/common/privilege/store_spec.spl` constructs
-`Principal(kind: PrincipalKind.Local, id: "alice")` (out of order). The
-PrivilegeStore `mint`/`lookup`/`revoke`/`expand_groups`/SDN round-trip
-semantics are all implemented and verified correct when the principal is
-constructed in declaration order (id first). The spec passes 5/5 under the
-test runner (which validates file loading), but a *runtime* mint→lookup
-round-trip with the spec's out-of-order Principal would observe an empty
-`principal.id` and therefore fail to match — purely due to this interpreter
-named-arg-ordering defect, NOT the store logic.
+The defect is specific to the `bin/simple run` interpreter eval path. The
+spipe **test runner** (`bin/simple test`) executes it-block assertions through
+a different eval path that binds named args correctly, so
+`test/01_unit/lib/common/privilege/store_spec.spl` — which constructs
+`Principal(kind: PrincipalKind.Local, id: "alice")` (out of order) — genuinely
+passes 5/5 including the runtime mint→lookup round-trip (verified: the probe
+`expect 1 to_equal 2` reports a real failure, confirming assertions execute).
+
+The bug only manifests via `bin/simple run`: a driver constructing the
+out-of-order Principal and reading `principal.id` observes an empty string,
+breaking a mint→lookup match. The PrivilegeStore logic itself is correct (also
+independently verified with in-order Principal construction under `run`).
 
 ## Verified-correct store behavior (in-order Principal)
 
