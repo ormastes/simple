@@ -16,6 +16,8 @@ use ftl_map.*
 use ftl_band.*
 use ftl_journal.*
 use ftl_gc.*
+use sandbox.*
+use hooks.*
 
 struct Ftl:
     fil:       Fil
@@ -23,10 +25,11 @@ struct Ftl:
     band:      BandAlloc
     journal:   Journal
     seq:       i64
-    rd_disturb: [i64]   # per-block read counter (volatile) driving read-disturb scrub
+    rd_disturb: [i64]      # per-block read counter (volatile) driving read-disturb scrub
+    hooks:     PolicyHooks  # sandboxed dynamic policy hooks (req 7)
 
 fn ftl_new() -> Ftl:
-    Ftl(fil: fil_new(), map: ftl_map_new(), band: ftl_band_new(), journal: ftl_journal_new(), seq: 0, rd_disturb: ftl_fill(NUM_BLOCKS, 0))
+    Ftl(fil: fil_new(), map: ftl_map_new(), band: ftl_band_new(), journal: ftl_journal_new(), seq: 0, rd_disturb: ftl_fill(NUM_BLOCKS, 0), hooks: policy_hooks_new())
 
 impl Ftl:
     # Write one logical block (log-structured): program a fresh physical page with OOB
@@ -234,13 +237,59 @@ impl Ftl:
         me.rd_disturb[blk] = 0      # erased -> read-disturb accumulation cleared
         blk
 
-    # Garbage-collect one victim: the greedy (fewest-valid) CLOSED block. Returns the
-    # reclaimed block, or UNMAP if nothing is collectable / it could not be drained.
+    # Garbage-collect one victim. The victim is chosen by the (sandboxed) GC-scoring
+    # policy hook ranking the firmware's OWN CLOSED candidates; with no hook installed
+    # this is the greedy (fewest-valid) default. Returns the reclaimed block, or UNMAP if
+    # nothing is collectable / it could not be drained.
     me gc_once() -> i64:
-        val victim: i64 = gc_select_victim(me.band)
+        val victim: i64 = me.policy_gc_victim()
         if victim == UNMAP:
             return UNMAP
         me.reclaim_block(victim)
+
+    # GC victim selection via the policy hook. The firmware enumerates its OWN CLOSED
+    # candidates (the trusted set) and asks the hook only to SCORE each; the lowest-scored
+    # candidate wins. Because the hook can only score blocks the firmware offers — never
+    # name one — it can never select a FREE / OPEN-active / BAD block (which would corrupt
+    # the allocator). The default scorer ranks by live-page count (greedy). Returns UNMAP
+    # when no CLOSED block exists.
+    me policy_gc_victim() -> i64:
+        var best: i64 = UNMAP
+        var best_score: i64 = 0
+        var blk: i64 = 0
+        while blk < NUM_BLOCKS:
+            if me.band.block_state(blk) == BLK_CLOSED:
+                val score: i64 = me.hooks.gc_candidate_score(blk, me.band.valid_count(blk), me.fil.erase_count(blk))
+                if best == UNMAP or score < best_score:
+                    best_score = score
+                    best = blk
+            blk = blk + 1
+        best
+
+    # ── Dynamic policy-hook control (req 7) ──────────────────────────────────
+    # Install a GC-scoring policy at runtime (caller passes a lambda taking
+    # (block, valid, erase, fuel) -> HookVote). Void delegation form, mirroring the emu
+    # seam: the setter forwards one hop to the hooks registry.
+    me install_gc_policy(f: fn(i64, i64, i64, i64) -> HookVote):
+        me.hooks.install_gc_score(f)
+
+    # Revert GC selection to the built-in greedy default.
+    me clear_gc_policy():
+        me.hooks.clear_gc_score()
+
+    # The loader's install gate: true for an allowed policy kind, false (rejected, counted)
+    # for a forbidden metadata / recovery / commit domain.
+    me try_load_policy(kind: i64) -> bool:
+        me.hooks.request_install(kind)
+
+    me policy_rejected_installs() -> i64:
+        me.hooks.rejected_count()
+
+    me policy_fuel_aborts() -> i64:
+        me.hooks.fuel_abort_count()
+
+    me set_hook_fuel_budget(n: i64):
+        me.hooks.fuel_budget = n
 
     # Static wear leveling: when the erase-count spread between the most- and least-worn
     # live blocks exceeds WL_THRESHOLD, reclaim the coldest (least-erased) block so the
