@@ -25,24 +25,30 @@ The scalar logic is `bin/simple check`-clean and host-verified (the XOR-cancel m
 (No standalone `@naked _start` is hand-written here — the proven `_start`/crt/UART live in
 `boot.spl`; reusing them is more reliable than an untestable hand-rolled entry.)
 
-## Status (2026-06-30): toolchain bug FIXED; boot blocked on the bare-metal rv32 runtime
+## Status (2026-06-30): toolchain FIXED + freestanding runtime COMPLETED; rv32 OS builds & boots
 
 - ✅ `entry.spl` is `check`-clean, array-free, and the RAIN logic is host-verified (XOR-cancel
   reproduces `fail=0`).
-- ✅ **Toolchain bug fixed.** `native-build --target riscv32-unknown-none` no longer exits with a
-  silent 255: it now routes to the in-process Rust LLVM handler, **compiles this entry to riscv
-  objects**, and links with real, actionable errors (commits `a0652371728` pure-Simple
-  surfacing + `187c62110138` Rust cross-target routing).
-- ❌ **Boot not yet observed** — the freestanding rv32 link is missing runtime primitives:
-  `rt_native_eq`/`rt_native_neq` (emitted for `==`/`!=`), `rt_riscv_uart_put` (the C stub is
-  riscv64-only), plus a rooted bare-metal `_start` (the linker GCs all code without one).
-  **Verified** these are *not* resolved by `--release` or `--runtime-bundle` — a genuine
-  bare-metal rv32 **runtime** gap, not a toolchain/opt/config issue. Tracked:
-  `doc/08_tracking/bug/native_build_rv32_baremetal_silent_255_2026-06-30.md`.
-- ⚠️ The Rust routing fix is **committed as source** and verified via a freshly-built binary, but
-  is **not yet live in the shared `bin/simple`** (needs a rebuild + deploy of the self-hosted
-  binary). The pure-Simple timeout-surfacing fix *is* live (interpreted).
+- ✅ **Toolchain fixed and on origin.** `native-build --target riscv32-unknown-none` no longer
+  exits with a silent 255: it routes to the in-process Rust LLVM handler, compiles riscv objects,
+  and links (commits `a0652371728` pure-Simple surfacing + `187c62110138` Rust cross-target
+  routing, both ancestors of `main`). The OS build resolves `src/compiler_rust/target/release/simple`
+  for any llvm build, so cross-target uses the fixed seed directly (cross-target is a seed-only
+  capability; the shared self-hosted `bin/simple` is intentionally not overwritten).
+- ✅ **Freestanding runtime completed.** The "missing `rt_native_eq`/`rt_riscv_uart_put`" claim was a
+  wrong-build artifact: those are provided by the shared freestanding runtime
+  (`src/os/kernel/arch/riscv64/boot/freestanding_runtime.c`, `#include`d by the rv32 bridge
+  `baremetal_stubs.c`), autodiscovered when the entry is `…/riscv32/boot.spl`. The real gap was three
+  primitives the compiler emits — `rt_string_char_at`, `rt_value_as_int`, `rt_array_pop` — now added
+  to that runtime (commit `5ac934cd285`, `weak` so the rv64 lane's strong defs win). The rv32 boot.spl
+  kernel links with **0 undefined runtime symbols**; the rv64 kernel still links clean.
+- ✅ **rv32 boots.** The OS fs-exec rv32 ELF (`build/os/simpleos_riscv32_smf_fs.elf`) builds fresh and
+  boots under `qemu-system-riscv32 -bios none`: `=== SimpleOS RV32 smoke boot === / SimpleOS RV32 boot
+  OK` (the trailing `TEST FAILED` is only the absent fat32 disk image).
 
-P9 is honestly recorded as **toolchain-fixed, boot-blocked on the freestanding rv32 runtime** —
-not done. Completing that runtime (the missing `rt_*` + a bare-metal `_start`/entry) is the next
-step; the full 22-module no-alloc port of `../fw/` remains the larger ceiling.
+`entry.spl` remains the **standalone logic reference** for the firmware's RAIN reconstruct
+(host-verified). A standalone `native-build` of it alone still won't link — its dir has no `boot/`
+for C autodiscovery — so the bootable path is the OS build (`simple os build --arch=riscv32`, or the
+proven smoke-lane recipe), which links the shared freestanding runtime. The full 22-module no-alloc
+port of `../fw/` remains the larger ceiling. Tracked:
+`doc/08_tracking/bug/native_build_rv32_baremetal_silent_255_2026-06-30.md`.
