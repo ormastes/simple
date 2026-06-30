@@ -92,6 +92,15 @@ fn admin_fw_slot(cdw10: i64) -> i64:
 fn admin_fw_action(cdw10: i64) -> i64:
     (cdw10 >> 3) & 0x7
 
+# Valid firmware Commit slots for this 3-slot device (slot 0 is reserved/invalid).
+fn admin_fw_slot_valid(slot: i64) -> bool:
+    slot >= 1 and slot <= 3
+
+# Abort-command decoder: the CID-to-abort is packed in cdw10 bits 16..31 (the target SQID is
+# the low 16 bits, decoded by admin_qid). Inverts admin_abort_cmd's packing.
+fn admin_abort_cid(cdw10: i64) -> i64:
+    (cdw10 >> 16) & 0xFFFF
+
 # ── Identify / SMART builders ─────────────────────────────────────────────────
 fn build_identify_controller() -> IdentifyData:
     IdentifyData(kind: CNS_CONTROLLER, vid: 0x1B36, num_ns: 1, max_queues: MAX_IO_QUEUES, mdts: 8, nsid: 0, ns_size: 0, ns_cap: 0, lba_bytes: 0)
@@ -263,6 +272,18 @@ fn nvme_admin_selftest() -> i64:
     fail = fail + expect_eq(admin_cqid(csq.cdw11), 2, "create-sq decodes bound cqid")
     val idc: AdminCmd = admin_identify_cmd(13, CNS_CONTROLLER)
     fail = fail + expect_eq(admin_cns(idc.cdw10), CNS_CONTROLLER, "identify decodes cns")
+
+    # abort decode inverts the builder packing (SQID low 16, target CID high 16)
+    val abt: AdminCmd = admin_abort_cmd(14, 2, 0x55)
+    fail = fail + expect_eq(admin_qid(abt.cdw10), 2, "abort decodes target sqid")
+    fail = fail + expect_eq(admin_abort_cid(abt.cdw10), 0x55, "abort decodes target cid")
+
+    # firmware-commit decode: slot (bits 0..2) + action (bits 3..5), plus slot validity
+    val fwc: AdminCmd = admin_fw_commit_cmd(15, 2, 3)
+    fail = fail + expect_eq(admin_fw_slot(fwc.cdw10), 2, "fw commit decodes slot")
+    fail = fail + expect_eq(admin_fw_action(fwc.cdw10), 3, "fw commit decodes action")
+    fail = fail + expect_eq(bool_to_i64(admin_fw_slot_valid(2)), 1, "fw slot 2 is valid")
+    fail = fail + expect_eq(bool_to_i64(admin_fw_slot_valid(0)), 0, "fw slot 0 is invalid")
 
     # FeatureStore round-trip (value is the 2nd param -> x8-bug guard)
     var fs: FeatureStore = feature_store_new()
