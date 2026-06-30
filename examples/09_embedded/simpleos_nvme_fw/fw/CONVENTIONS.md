@@ -5,6 +5,11 @@ Written in pure Simple. These conventions exist to work *with* two confirmed sel
 compiler bugs while keeping the code production-shaped.
 
 ## Module layout
+- **MDSOC-only (driver tier).** Domains layer strictly downward (HIL → FTL → FIL; every
+  cross-domain import points down), composition over inheritance, no shared mutable global, and
+  **no ECS** — `use std.ecs` is forbidden for drivers per the architecture Layer Rules
+  (`doc/04_architecture/compiler/mdsoc/mdsoc_architecture_tobe.md`). See the README's
+  "MDSOC vs MDSOC+" note for why a driver is MDSOC-only even though req 4 is labelled "MDSOC+".
 - All modules are flat in `fw/`; the frozen shared interface is `nvme_types.spl`.
 - Import siblings with the **bare** form: `use nvme_types.*`, `use fil_nand.*`, … (the
   package-qualified form `use simpleos_nvme_fw.fw.X.*` emits an E1034 resolution warning).
