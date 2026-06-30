@@ -533,6 +533,11 @@ offers a local `read_range_bytes` helper through the owner file facade so
 bounded file-backed byte reads can be tested without claiming async NVFS
 scheduling or GPU staging. Streaming readiness JSONL now carries a separate
 `local_read_bytes` field so clean pack roots can prove local bytes are readable
-without turning native streaming readiness green. Remaining blockers include full async NVFS
-scheduling, pinned/device staging, live CUDA placement evidence, and
-device-preserving optimizer state for already-CUDA parameters.
+without turning native streaming readiness green. The native capability probe
+now executes the StdFs NVFS client spec and records
+`svllm_native_capability_local_read_range_bytes_status` plus a reason field so
+strict evidence can show local file-backed read-range progress while keeping
+native `read_range`, pinned-buffer registration, and device staging
+unsupported. Remaining blockers include full async NVFS scheduling,
+pinned/device staging, live CUDA placement evidence, and device-preserving
+optimizer state for already-CUDA parameters.

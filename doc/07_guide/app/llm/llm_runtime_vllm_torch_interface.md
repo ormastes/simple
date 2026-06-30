@@ -308,6 +308,17 @@ its schema-v1 artifact. That local probe is fail-closed: it records
 `unsupported` for read-range, pinned-buffer, and device-staging support with
 `svllm_native_capability_source=local_simple_svllm_capability_probe`, so reports
 show a probed unsupported state instead of ambiguous missing provenance. The
+same probe also executes the StdFs NVFS client spec and records
+`svllm_native_capability_local_read_range_bytes_status` plus
+`svllm_native_capability_local_read_range_bytes_reason`. A `ready` value there
+only proves the bounded local `read_range_bytes` helper through checked-in
+specs; it does not satisfy native caller-buffer `read_range`, pinned-buffer
+registration, or device staging. The native streaming wrapper forwards those
+fields as
+`svllm_native_streaming_capability_evidence_local_read_range_bytes_status` and
+`svllm_native_streaming_capability_evidence_local_read_range_bytes_reason` so
+strict reports can show local file-backed progress without turning the native
+streaming gate green. The
 native streaming report records
 `svllm_native_streaming_capability_source` and
 `svllm_native_streaming_capability_provenance_status` so reviewers can
