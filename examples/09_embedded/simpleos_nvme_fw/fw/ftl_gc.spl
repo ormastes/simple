@@ -1,33 +1,17 @@
 """
-ftl_gc — garbage-collection victim selection.
+ftl_gc — garbage-collection / wear-leveling victim selection.
 
-Greedy policy: among CLOSED blocks (full, holding a mix of valid + stale pages),
-pick the one with the fewest valid pages — it is cheapest to reclaim (fewest live
-pages to relocate) and yields the most free space. Returns UNMAP if nothing is
-reclaimable (no CLOSED block exists yet).
+The production GC victim is chosen by `Ftl.policy_gc_victim` (ftl.spl), which enumerates the
+CLOSED blocks and asks the sandboxed policy hook to SCORE each (default = greedy fewest-valid).
+This module holds the STATIC wear-leveling victim: the CLOSED block holding live data with the
+LOWEST erase count (the coldest block), reclaimed by `wear_level_once` so a lightly-worn block
+re-enters the write rotation and wear spreads evenly. Returns UNMAP if none qualifies.
 """
 
 use nvme_types.*
 use ftl_band.*
 use fil.*
 
-fn gc_select_victim(band: BandAlloc) -> i64:
-    var best: i64 = UNMAP
-    var best_valid: i64 = PAGES_PER_BLOCK + 1
-    var blk: i64 = 0
-    while blk < NUM_BLOCKS:
-        val st: i64 = band.block_state(blk)
-        if st == BLK_CLOSED:
-            val v: i64 = band.valid_count(blk)
-            if v < best_valid:
-                best_valid = v
-                best = blk
-        blk = blk + 1
-    best
-
-# Static wear-leveling victim: the CLOSED block holding live data with the LOWEST
-# erase count (the coldest block). Reclaiming it frees a lightly-worn block back into
-# the write rotation so wear spreads evenly. Returns UNMAP if none qualifies.
 fn gc_select_wear_victim(band: BandAlloc, fil: Fil) -> i64:
     var best: i64 = UNMAP
     var best_ec: i64 = 0
@@ -45,28 +29,25 @@ fn gc_select_wear_victim(band: BandAlloc, fil: Fil) -> i64:
 fn ftl_gc_selftest() -> i64:
     var fail: i64 = 0
     var band: BandAlloc = ftl_band_new()
+    var fil: Fil = fil_new()
 
-    # Nothing closed yet -> no victim.
-    fail = fail + expect_eq(gc_select_victim(band), UNMAP, "no victim when nothing closed")
+    # Nothing closed yet -> no wear victim.
+    fail = fail + expect_eq(gc_select_wear_victim(band, fil), UNMAP, "no wear victim when nothing closed")
 
-    # Fill block 0 completely (marks every page valid), then one more alloc to
-    # close block 0 and open block 1.
-    var i: i64 = 0
-    while i < PAGES_PER_BLOCK:
-        val ppn: i64 = band.alloc_page()
-        band.mark_valid(ppn)
-        i = i + 1
-    val p2: i64 = band.alloc_page()
-    band.mark_valid(p2)
+    # Close block 0 and block 1 (each full of valid pages); a third alloc opens block 2.
+    var b: i64 = 0
+    while b < 2:
+        var i: i64 = 0
+        while i < PAGES_PER_BLOCK:
+            band.mark_valid(band.alloc_page())
+            i = i + 1
+        b = b + 1
+    band.mark_valid(band.alloc_page())     # open block 2 so blocks 0 and 1 are CLOSED
 
-    # block 0 is now CLOSED with PAGES_PER_BLOCK valid pages; it is the only CLOSED block.
-    fail = fail + expect_eq(gc_select_victim(band), 0, "victim is the closed block")
+    # Make block 1 hotter than block 0 (higher erase count).
+    fil.erase(1)
+    fil.erase(1)
 
-    # Invalidate most of block 0 -> still the (only) victim, now cheap to reclaim.
-    var j: i64 = 0
-    while j < PAGES_PER_BLOCK - 3:
-        band.mark_invalid(block_first_ppn(0) + j)
-        j = j + 1
-    fail = fail + expect_eq(band.valid_count(0), 3, "block 0 down to 3 valid")
-    fail = fail + expect_eq(gc_select_victim(band), 0, "victim still block 0")
+    # The coldest CLOSED block holding live data (block 0, erase_count 0) is the wear victim.
+    fail = fail + expect_eq(gc_select_wear_victim(band, fil), 0, "coldest closed block is the wear victim")
     fail
