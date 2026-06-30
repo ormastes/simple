@@ -377,16 +377,7 @@ pub(crate) fn exec_function_with_values_and_self(
             enums,
             impl_methods,
             self_mode,
-        )
-        .map_err(|e| {
-            eprintln!(
-                "[DEBUG BIND] function={} params=[{}] arg_count={}",
-                func.name,
-                func.params.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", "),
-                args.len()
-            );
-            e
-        })?;
+        )?;
 
         execute_function_body(
             func,
@@ -720,16 +711,7 @@ fn exec_function_with_values_inner(
         enums,
         impl_methods,
         self_mode,
-    )
-    .map_err(|e| {
-        eprintln!(
-            "[DEBUG BIND] function={} params=[{}] arg_count={}",
-            func.name,
-            func.params.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", "),
-            args.len()
-        );
-        e
-    })?;
+    )?;
 
     // Record function return for layout call graph tracking
     crate::layout_recorder::record_function_return();

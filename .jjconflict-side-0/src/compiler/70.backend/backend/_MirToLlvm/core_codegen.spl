@@ -96,11 +96,18 @@ impl MirTextCodegen for MirToLlvm:
             print "[mir-to-llvm] function:locals {name}"
 
         var params: [text] = []
-        var i = 0
-        while i < body.arg_count:
-            val param_ty = self.get_local_type(i)
-            params = params.push("{param_ty} %arg{i}")
-            i = i + 1
+        var arg_i = 0
+        while arg_i < body.arg_count:
+            for local in body.locals:
+                match local.kind:
+                    case Arg(index):
+                        if index == arg_i:
+                            val local_id = self.local_id_value(local.id)
+                            val param_ty = self.get_local_type(local_id)
+                            params = params.push("{param_ty} {self.get_local(local_id)}")
+                    case _:
+                        ()
+            arg_i = arg_i + 1
         if bootstrap_debug:
             print "[mir-to-llvm] function:params {name}"
 
@@ -276,18 +283,18 @@ impl MirTextCodegen for MirToLlvm:
                             self.builder.emit_ret(self.current_return_type, "0")
 
             case Goto(target):
-                self.builder.emit_br("bb{target}")
+                self.builder.emit_br("bb{self.block_id_value(target)}")
 
             case If(cond, then_, else_):
                 val cond_val = self.translate_operand(cond)
                 val cond_ty = self.get_operand_type(cond)
                 if cond_ty == "i1":
                     # Already boolean, use directly
-                    self.builder.emit_cond_br(cond_val, "bb{then_}", "bb{else_}")
+                    self.builder.emit_cond_br(cond_val, "bb{self.block_id_value(then_)}", "bb{self.block_id_value(else_)}")
                 else:
                     val i1_cond = self.builder.fresh_local()
                     self.builder.emit("  {i1_cond} = icmp ne {cond_ty} {cond_val}, 0")
-                    self.builder.emit_cond_br(i1_cond, "bb{then_}", "bb{else_}")
+                    self.builder.emit_cond_br(i1_cond, "bb{self.block_id_value(then_)}", "bb{self.block_id_value(else_)}")
 
             case Switch(value, targets, default):
                 val discr_val = self.translate_operand(value)
@@ -296,9 +303,9 @@ impl MirTextCodegen for MirToLlvm:
                 for switch_case_raw in targets:
                     val switch_case: SwitchCase = switch_case_raw
                     val case_value = "{switch_case.value}"
-                    val case_label = "bb{switch_case.target}"
+                    val case_label = "bb{self.block_id_value(switch_case.target)}"
                     cases = cases.push((case_value, case_label))
-                self.builder.emit_switch(discr_val, nit, "bb{default}", cases)
+                self.builder.emit_switch(discr_val, nit, "bb{self.block_id_value(default)}", cases)
 
             case Unreachable:
                 self.builder.emit("  unreachable")
@@ -319,17 +326,17 @@ impl MirTextCodegen for MirToLlvm:
                         val ret_ty = self.get_local_type(dest_id)
                         match unwind:
                             Some(unwind_block):
-                                self.builder.emit("  {dest_name} = invoke {ret_ty} @{func_val}({args_str}) to label %bb{normal} unwind label %bb{unwind_block}")
+                                self.builder.emit("  {dest_name} = invoke {ret_ty} @{func_val}({args_str}) to label %bb{self.block_id_value(normal)} unwind label %bb{self.block_id_value(unwind_block)}")
                             nil:
                                 self.builder.emit("  {dest_name} = call {ret_ty} @{func_val}({args_str})")
-                                self.builder.emit_br("bb{normal}")
+                                self.builder.emit_br("bb{self.block_id_value(normal)}")
                     nil:
                         match unwind:
                             Some(unwind_block):
-                                self.builder.emit("  invoke void @{func_val}({args_str}) to label %bb{normal} unwind label %bb{unwind_block}")
+                                self.builder.emit("  invoke void @{func_val}({args_str}) to label %bb{self.block_id_value(normal)} unwind label %bb{self.block_id_value(unwind_block)}")
                             nil:
                                 self.builder.emit("  call void @{func_val}({args_str})")
-                                self.builder.emit_br("bb{normal}")
+                                self.builder.emit_br("bb{self.block_id_value(normal)}")
 
     # === Required: per-category instruction methods ===
 
@@ -540,9 +547,9 @@ impl MirTextCodegen for MirToLlvm:
         """Translate MIR operand to LLVM value."""
         match operand.kind:
             case Copy(local):
-                self.get_local(local)
+                self.get_local(self.local_id_value(local))
             case Move(local):
-                self.get_local(local)
+                self.get_local(self.local_id_value(local))
             case Const(value, type_):
                 # For function references, return @name directly
                 match type_.kind:
@@ -601,6 +608,11 @@ impl MirTextCodegen for MirToLlvm:
     fn local_id_value(local: LocalId) -> i64:
         match local:
             case LocalId(raw_id): raw_id
+            case _: 0
+
+    fn block_id_value(block: BlockId) -> i64:
+        match block:
+            case BlockId(raw_id): raw_id
             case _: 0
 
     # === Overrides: memory ===

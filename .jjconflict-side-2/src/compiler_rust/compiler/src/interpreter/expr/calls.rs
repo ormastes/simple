@@ -860,40 +860,6 @@ pub(super) fn eval_call_expr(
                     }
                 }
                 _ => {
-                    // Debug: show what value type we're trying to access, plus the
-                    // receiver AST so a field-access-on-nil can be traced to its
-                    // originating Simple expression/variable.
-                    let receiver_binding = match receiver.as_ref() {
-                        Expr::Identifier(name) => env.get(name).map(|value| {
-                            format!(
-                                "{}={} ({})",
-                                name,
-                                value.to_display_string().chars().take(120).collect::<String>(),
-                                value.type_name()
-                            )
-                        }),
-                        _ => None,
-                    };
-                    let self_binding = env
-                        .get("self")
-                        .map(|value| {
-                            format!(
-                                "{} ({})",
-                                value.to_display_string().chars().take(160).collect::<String>(),
-                                value.type_name()
-                            )
-                        })
-                        .unwrap_or_else(|| "<missing>".to_string());
-                    let env_keys = env.keys().take(12).cloned().collect::<Vec<_>>().join(", ");
-                    eprintln!(
-                        "[DEBUG FIELD ACCESS] Trying to access field '{}' on value type: {:?}; receiver expr: {:?}; receiver binding: {}; self: {}; env keys: [{}]",
-                        field,
-                        recv_val.type_name(),
-                        receiver,
-                        receiver_binding.unwrap_or_else(|| "<not identifier or missing>".to_string()),
-                        self_binding,
-                        env_keys
-                    );
                     let ctx = ErrorContext::new()
                         .with_code(codes::UNDEFINED_FIELD)
                         .with_help("field access requires an object, array, dict, or enum value");

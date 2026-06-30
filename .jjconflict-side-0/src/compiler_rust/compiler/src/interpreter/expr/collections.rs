@@ -268,26 +268,14 @@ pub(super) fn eval_collection_expr(
         Expr::Range { start, end, bound } => {
             let start_val = start
                 .as_ref()
-                .map(|s| {
-                    let v = evaluate_expr(s, env, functions, classes, enums, impl_methods)?;
-                    if matches!(v, Value::Object { .. }) {
-                        eprintln!("[DEBUG RANGE] start expr={:?} value_type={}", s, v.type_name());
-                    }
-                    Ok::<Value, CompileError>(v)
-                })
+                .map(|s| evaluate_expr(s, env, functions, classes, enums, impl_methods))
                 .transpose()?
                 .map(|v| v.as_int())
                 .transpose()?;
 
             let end_val = end
                 .as_ref()
-                .map(|e| {
-                    let v = evaluate_expr(e, env, functions, classes, enums, impl_methods)?;
-                    if matches!(v, Value::Object { .. }) {
-                        eprintln!("[DEBUG RANGE] end expr={:?} value_type={}", e, v.type_name());
-                    }
-                    Ok::<Value, CompileError>(v)
-                })
+                .map(|e| evaluate_expr(e, env, functions, classes, enums, impl_methods))
                 .transpose()?
                 .map(|v| v.as_int())
                 .transpose()?;

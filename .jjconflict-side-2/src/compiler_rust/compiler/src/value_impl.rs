@@ -37,19 +37,6 @@ impl Value {
             }
             Value::Nil => Ok(0),
             other => {
-                if let Value::Object { class, fields } = other {
-                    let field_keys = fields.keys().take(12).cloned().collect::<Vec<_>>().join(", ");
-                    eprintln!(
-                        "[DEBUG AS_INT] cannot convert object class={} fields=[{}] value={}",
-                        class,
-                        field_keys,
-                        other.to_display_string().chars().take(240).collect::<String>()
-                    );
-                    let bt = std::backtrace::Backtrace::force_capture().to_string();
-                    for line in bt.lines().take(18) {
-                        eprintln!("[DEBUG AS_INT BT] {}", line);
-                    }
-                }
                 let actual_type = self.type_name();
                 let ctx = ErrorContext::new()
                     .with_code(codes::TYPE_MISMATCH)

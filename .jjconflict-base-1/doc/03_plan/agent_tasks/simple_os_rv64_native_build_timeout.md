@@ -2,21 +2,23 @@
 
 ## Current State
 
-- RV64 native-build completes bootstrap MIR lowering for
-  `src/os/kernel/arch/riscv64/boot.spl` and now fails after
-  `[driver-mir] bootstrap lower:done`.
-- Target plumbing now uses `SIMPLE_NATIVE_BUILD_TARGET` from native-build `--target`; `backend_helpers.spl` maps it to `CodegenTarget.Riscv64`.
-- Text MIR-to-LLVM now normalizes block labels through `block_label`, so branches emit `%bb1` instead of `%bbBlockId(id: 1)`.
-- Text MIR-to-LLVM now uses `local_id_value` in the core and active instruction split call paths.
-- `LlvmTypeMapper.map_type` now falls back to the target native integer for missing MIR types instead of returning `nil`.
-- Native-build entry closure again skips parent aggregate modules for brace imports (`use x.y.{A}`), avoiding the broad parse timeout path.
+- RV64 native-build reaches LLVM IR emission for
+  `src/os/kernel/arch/riscv64/boot.spl`; it no longer stops in MIR lowering,
+  MIR optimization, backend helper arity dispatch, or missing
+  `MirToLlvm.translate_instruction`.
+- The current build still does not produce a fresh ELF. Existing artifact:
+  `build/os/simpleos_riscv64.elf`, mtime `2026-06-15 10:14:53`, size `293680`.
+- Temporary `bin/simple` symlink cleanup is working; latest post-run check:
+  `bin_simple_absent=1`.
+- Last bounded build log is `build/os/native_rv64_last.log`.
 
 ## Latest Evidence
 
 Last bounded build command:
 
 ```sh
-timeout 300 src/compiler_rust/target/release/simple run src/app/cli/native_build_worker.spl --verbose \
+SIMPLE_NATIVE_BUILD_ENTRY=src/os/kernel/arch/riscv64/boot.spl timeout 300 \
+  src/compiler_rust/target/release/simple run src/app/cli/native_build_worker.spl --verbose \
   --source build/os/generated --source src --source examples \
   --backend llvm --opt-level=aggressive --log on --entry-closure \
   --entry src/os/kernel/arch/riscv64/boot.spl \
@@ -25,81 +27,67 @@ timeout 300 src/compiler_rust/target/release/simple run src/app/cli/native_build
   --linker-script src/os/kernel/arch/riscv64/linker.ld
 ```
 
-Latest completed run after the MIR optimizer constructor and nil-use fixes now
-gets past MIR lowering and optimization far enough to enter backend translation:
+Latest failure:
 
 ```text
 [driver-mir] bootstrap lower:start
 [driver-mir] bootstrap lower:done
-error: semantic: function expects argument for parameter 'value_map', but none was provided
+error: AOT compile error in os.kernel.arch.riscv64.boot:
+llc-18: /tmp/simple_llvm_1978471.ll:6:23: error: expected type
+define i64 @boot_main(nil %l1, nil %l2) nounwind {
+                      ^
 ```
 
-The existing `build/os/simpleos_riscv64.elf` is stale:
+Generated IR is now less broken than before:
 
-```text
--rwxrwxr-x ... build/os/simpleos_riscv64.elf 293680 Jun 15 10:14
-```
+- Parameter names are real MIR locals (`%l1`, `%l2`) instead of `%arg0`.
+- Branch labels are raw block ids (`%bb1`) instead of `%bbBlockId(id: 1)`.
+- Operand locals are raw locals (`%l24`) instead of `%lLocalId(id: 24)`.
 
-The prior blockers are cleared:
+Remaining issue:
 
-- `method unwrap not found on type Type`: fixed by routing object/class miss
-  paths through the existing bare-payload Option/Result fallback in
-  `src/compiler_rust/compiler/src/interpreter_method/mod.rs`.
-- `method is_public not found on type bool`: fixed by treating
-  `bool.is_public()` as identity in
-  `src/compiler_rust/compiler/src/interpreter_method/primitives.rs`, matching
-  legacy visibility carriers that already store `is_public: bool`.
-- `undefined field 'id'` in `SymbolTable.get(nil)`: fixed by returning `nil`
-  before dereferencing `id.id` in `src/compiler/20.hir/hir_types.spl`.
-- `type mismatch: cannot convert object to int` after MIR lower: traced to
-  `MirModule(..module, functions: ...)` / `MirModule(..mir, functions: ...)`
-  being evaluated as a range ending at `module`/`mir`; fixed by expanding those
-  four constructors to explicit `name/functions/statics/constants/types` copies.
-- `undefined field 'id'` in `CollectionOptimization.count_local_use`: fixed by
-  ignoring nil locals before reading `local.id`.
+- LLVM parameter and call result types still emit as `nil`.
+- Adding unsigned integer handling to `LlvmTypeMapper` did not change this, so
+  the active `nil` source is upstream of, or bypassing, that mapper.
+- Function call names still emit as `@unknown_*`, so function-symbol operand
+  lowering is also incomplete on this text LLVM path.
 
-The active scoped unwrap search is still clean:
+## Fixes Landed In This Lane
 
-Patched unwrap sites now include:
-
-- `_MirToLlvm/core_codegen.spl`, `_MirToLlvm/aggregate_intrinsics.spl`,
-  `_MirToLlvm/asm_constraints_helpers.spl`
-- `mir_to_llvm_instructions.spl`
-- `llvm_ir_builder.spl`, `llvm_lib_translate_expr.spl`,
-  `llvm_cross_target.spl`, `llvm_codegen_adapter.spl`,
-  `llvm_capability.spl`, `llvm_backend_tools.spl`, `llvm_backend.spl`,
-  `llvm_target.spl`
-- `build_native.spl`, `build_native_pipeline.spl`
-
-Do not keep retrying the same build without new narrowing evidence.
-
-Attempted narrowing that did not change the failure:
-
-- Replaced `case SymbolId(id): id` helpers with direct `symbol.id` in
-  `src/compiler/50.mir/_MirLowering/module_lowering.spl`,
-  `src/compiler/50.mir/mir_json.spl`, and
-  `src/compiler/60.mir_opt/mir_opt/_Inline/driver.spl`.
-- Re-ran the same bounded build; it still failed at the identical
-  `receiver expr: Identifier("id")`, so the executed expression is not one of
-  those remaining helper destructures. Search found no generated stale copy
-  under `build/os/generated` or `build`.
-- Added temporary field-access diagnostic context in
-  `src/compiler_rust/compiler/src/interpreter/expr/calls.rs`; it proved the
-  nil-id owner was `SymbolTable` with `env keys: [self, id]`.
+- Rust interpreter fallback now handles bare Option/Result payload methods in
+  object/class miss paths, clearing `method unwrap not found on type Type`.
+- Rust primitive bool method handling now supports `bool.is_public()`.
+- `SymbolTable.define`/`get` no longer construct/index symbol ids through the
+  broken path that produced nil `id.id`.
+- Driver MIR bootstrap cache no longer stores the native boot entry as the
+  hosted bootstrap entry.
+- Four `MirModule(..module, functions: ...)` spread constructors were expanded
+  to explicit field copies to avoid range-expression misparse.
+- `CollectionOptimization.count_local_use` ignores nil locals before reading
+  `local.id`.
+- Cranelift and LLVM-lib free helper functions were prefixed to avoid global
+  helper-name collisions with `MirToLlvm` method dispatch.
+- `MirToLlvm` now has an explicit `translate_instruction` dispatch method.
+- `MirToLlvm` core text generation now uses raw local/block ids for the active
+  parameter, operand, and terminator paths.
+- `LlvmTypeMapper` now maps `U8/U16/U32/U64` to signless LLVM integer widths and
+  includes them in size/alignment.
+- Temporary Rust diagnostics used for narrowing were removed.
 
 ## Next Step
 
-Fix the backend translation arity failure:
+Do not rerun the same build without new narrowing evidence.
 
-```text
-error: semantic: function expects argument for parameter 'value_map', but none was provided
-```
+Inspect why `MirToLlvm.get_local_type()` receives/stores `nil` for boot locals
+despite `boot_main(hart_id: u64, dtb_addr: u64)`. Good next probes:
 
-The narrow search points at LLVM translation helpers in
-`src/compiler/70.backend/backend/llvm_lib_translate_expr.spl`, where
-`translate_instruction` and `translate_terminator` both require `value_map`.
-Likely next useful move is to add a temporary call-site diagnostic in Rust
-function argument binding or inspect backend helper overloads around
-`translate_call`/`translate_terminator` to find the call missing that parameter.
-Keep the stale-ELF preflight blocking until `build/os/simpleos_riscv64.elf` is
-freshly produced.
+- Log or inspect `body.locals` and `local.type_.kind` inside
+  `_MirToLlvm/core_codegen.spl::translate_function`.
+- Confirm whether `self.type_mapper.map_type(local.type_)` is dispatched to
+  `LlvmTypeMapper.map_type` or a trait/default mapper that still lacks unsigned
+  support.
+- Inspect function-symbol `MirOperand` lowering so calls stop emitting
+  `@unknown_*`.
+
+Keep the stale-ELF preflight blocking QEMU/WM checks until
+`build/os/simpleos_riscv64.elf` is freshly produced.
