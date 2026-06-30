@@ -100,6 +100,25 @@ class BrowserResponse:
             error: error
         )
 
+fn browser_status_is_redirect(status: i32) -> bool:
+    status == 301 or status == 302 or status == 303 or status == 307 or status == 308
+
+fn browser_header_location(headers: text) -> text:
+    var found = ""
+    for raw_line in headers.split("\n"):
+        val line = raw_line.trim()
+        val parts = line.split(":")
+        if parts.len() >= 2 and found == "":
+            val key = parts[0].trim().lower()
+            if key == "location":
+                var value = parts[1]
+                var i = 2
+                while i < parts.len():
+                    value = value + ":" + parts[i]
+                    i = i + 1
+                found = value.trim()
+    found
+
 class BrowserPendingModuleEval:
     root_url: text
     source: text
@@ -570,6 +589,7 @@ class BrowserSession:
     cookies: [BrowserCookie]
     runtime_state: BrowserRuntimeState?
     pending_requests: [BrowserRequest]
+    inflight_requests: [BrowserRequest]
     next_request_seq: i32
     active_load: BrowserLoadState?
     resource_overrides: [Pair<text, text>]
@@ -605,6 +625,7 @@ class BrowserSession:
             cookies: [],
             runtime_state: nil,
             pending_requests: [],
+            inflight_requests: [],
             next_request_seq: 1,
             active_load: nil,
             resource_overrides: [],
@@ -748,7 +769,7 @@ impl BrowserSession:
                                 already_emitted = true
                         if not already_emitted:
                             seen_request_ids = seen_request_ids + [request_id]
-                            self.pending_requests.push(BrowserRequest.create(
+                            val drained_req = BrowserRequest.create(
                                 id: request_id,
                                 kind: kind,
                                 url: url,
@@ -756,7 +777,9 @@ impl BrowserSession:
                                 headers: headers,
                                 body: body,
                                 content_type: content_type
-                            ))
+                            )
+                            self.pending_requests.push(drained_req)
+                            self._record_inflight(drained_req)
                             drained = true
                     nil:
                         runtime.interpreter = interpreter
@@ -794,6 +817,19 @@ impl BrowserSession:
                 self.runtime_state = Some(final_state)
                 self._refresh_current_history()
 
+    me _record_inflight(req: BrowserRequest):
+        var updated: [BrowserRequest] = []
+        for existing in self.inflight_requests:
+            if existing.id != req.id:
+                updated = updated + [existing]
+        self.inflight_requests = updated + [req]
+
+    me _inflight_for(request_id: text) -> BrowserRequest?:
+        for existing in self.inflight_requests:
+            if existing.id == request_id:
+                return Some(existing)
+        nil
+
     me commit_network_response(response: BrowserResponse) -> Result<bool, text>:
         self._trace_guest("commit response kind={response.kind}")
         if response.kind == "document":
@@ -813,18 +849,47 @@ impl BrowserSession:
         if response.kind == "module":
             return self._commit_module_response(response)
         if response.kind == "fetch":
+            var orig_method = "GET"
+            var orig_body = ""
+            if val Some(orig) = self._inflight_for(response.request_id):
+                orig_method = orig.method
+                orig_body = orig.body
+            if response.error == "" and browser_status_is_redirect(response.status):
+                val location = browser_header_location(response.headers)
+                if location != "":
+                    val target = normalize_runtime_request_url(response.url, location)
+                    var next_method = orig_method
+                    var next_body = orig_body
+                    if response.status == 303:
+                        next_method = "GET"
+                        next_body = ""
+                    val redirect_req = BrowserRequest.create(
+                        id: response.request_id,
+                        kind: "fetch",
+                        url: target,
+                        method: next_method,
+                        headers: "",
+                        body: next_body,
+                        content_type: ""
+                    )
+                    self.pending_requests.push(redirect_req)
+                    self._record_inflight(redirect_req)
+                    return Ok(true)
             if val Some(state) = self.runtime_state:
                 self._apply_response_headers(response.headers)
                 var runtime = state.runtime
                 if val Some(updated_state) = self.runtime_state:
                     runtime = updated_state.runtime
                 var interpreter = runtime.interpreter
+                var resolved_body = response.body
+                if orig_method.upper() == "HEAD":
+                    resolved_body = ""
                 val _ = interpreter.resolve_async_fetch_response(
                     response.request_id,
                     response.url,
                     response.status,
                     response.headers,
-                    response.body,
+                    resolved_body,
                     response.error
                 )
                 runtime.interpreter = interpreter
