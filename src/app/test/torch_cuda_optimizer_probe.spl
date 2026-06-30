@@ -2,9 +2,6 @@ use std.gc_async_mut.torch.mod.{Tensor, torch_available, cuda_available}
 use std.gc_async_mut.torch.optim.{SGDOptimizer}
 use std.common.torch.dyn_sffi_tensor_ops.{dyn_torch_tensor_from_values_1d_result}
 use std.gc_async_mut.torch.sffi.{
-    rt_ps_torch_tensor_from_data,
-    rt_torch_torchtensor_cuda,
-    rt_torch_torchtensor_is_cuda,
     rt_torch_torchtensor_sum,
     rt_torch_autograd_set_requires_grad,
     rt_torch_autograd_grad
@@ -21,6 +18,15 @@ fn emit_i64(key: text, value: i64):
 
 fn emit_f64(key: text, value: f64):
     emit(key, value.to_text())
+
+fn tensor_sum(handle: i64) -> f64:
+    rt_torch_torchtensor_sum(handle)
+
+fn enable_gradient(handle: i64):
+    rt_torch_autograd_set_requires_grad(handle, true)
+
+fn gradient_handle(handle: i64) -> i64:
+    rt_torch_autograd_grad(handle)
 
 fn main() -> i64:
     emit("torch_cuda_optimizer_probe_phase", "running")
@@ -50,8 +56,7 @@ fn main() -> i64:
     emit("torch_cuda_optimizer_probe_dyn_tensor_reason", dyn_parameter.reason)
     emit_i64("torch_cuda_optimizer_probe_dyn_tensor_handle", dyn_parameter.handle)
 
-    val parameter_handle = rt_ps_torch_tensor_from_data([2.0], [1])
-    val parameter = Tensor.from_handle(parameter_handle)
+    val parameter_handle = dyn_parameter.handle
     emit_i64("torch_cuda_optimizer_probe_parameter_handle", parameter_handle)
     if parameter_handle == 0:
         emit("torch_cuda_optimizer_probe_blocked_gate", "tensor_creation")
@@ -59,10 +64,11 @@ fn main() -> i64:
         emit("torch_cuda_optimizer_probe_reason", "tensor_creation_returned_null_handle")
         return 1
 
-    val parameter_cuda_handle = rt_torch_torchtensor_cuda(parameter_handle, 0)
-    val parameter_cuda = Tensor.from_handle(parameter_cuda_handle)
-    rt_torch_autograd_set_requires_grad(parameter_cuda_handle, true)
-    val parameter_is_cuda = rt_torch_torchtensor_is_cuda(parameter_cuda_handle)
+    val parameter = Tensor.from_handle(parameter_handle)
+    val parameter_cuda = parameter.cuda(0)
+    val parameter_cuda_handle = parameter_cuda.handle
+    enable_gradient(parameter_cuda_handle)
+    val parameter_is_cuda = parameter_cuda.is_cuda()
     emit_bool("torch_cuda_optimizer_probe_parameter_is_cuda", parameter_is_cuda)
 
     if not parameter_is_cuda:
@@ -71,13 +77,13 @@ fn main() -> i64:
         emit("torch_cuda_optimizer_probe_reason", "parameter_not_cuda")
         return 1
 
-    val before = rt_torch_torchtensor_sum(parameter_cuda_handle)
+    val before = tensor_sum(parameter_cuda_handle)
     emit_f64("torch_cuda_optimizer_probe_before_sum", before)
 
     val loss = parameter_cuda.mul(parameter_cuda)
     loss.backward()
 
-    val grad_handle = rt_torch_autograd_grad(parameter_cuda_handle)
+    val grad_handle = gradient_handle(parameter_cuda_handle)
     emit_i64("torch_cuda_optimizer_probe_grad_handle", grad_handle)
     if grad_handle == 0:
         emit("torch_cuda_optimizer_probe_blocked_gate", "autograd_gradient")
@@ -85,14 +91,14 @@ fn main() -> i64:
         emit("torch_cuda_optimizer_probe_reason", "missing_gradient")
         return 1
 
-    val grad_sum = rt_torch_torchtensor_sum(grad_handle)
+    val grad_sum = tensor_sum(grad_handle)
     emit_f64("torch_cuda_optimizer_probe_grad_sum", grad_sum)
 
     val optimizer = SGDOptimizer.create([parameter_cuda_handle], 1.0, 0.0)
     emit_bool("torch_cuda_optimizer_probe_optimizer_step_attempted", true)
     val updated_params = optimizer.step()
 
-    val after = rt_torch_torchtensor_sum(updated_params[0])
+    val after = tensor_sum(updated_params[0])
     emit_f64("torch_cuda_optimizer_probe_after_sum", after)
 
     if after < before:
