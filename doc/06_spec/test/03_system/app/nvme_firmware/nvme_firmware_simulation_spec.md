@@ -27,7 +27,7 @@ nvme_firmware_simulation_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 11 | 11 | 0 | 0 |
+| 12 | 12 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -269,6 +269,29 @@ expect(out).to_contain("WEAR/SCRUB OK")
 
 </details>
 
+#### preserves the bad-block table and wear history across a Format NVM
+
+- Retire a block + accrue wear, then Format NVM
+   - Expected: code equals `0`
+- Format erases user data but the retired block and erase counts survive (wear accrues, never resets)
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Retire a block + accrue wear, then Format NVM")
+val (out, err, code) = _run(FW + "/format_check.spl")
+expect(code).to_equal(0)
+step("Format erases user data but the retired block and erase counts survive (wear accrues, never resets)")
+expect(out).to_contain("FORMAT OK")
+```
+
+</details>
+
 #### sandboxes dynamic policy hooks so a malicious hook cannot corrupt the FTL (req 7)
 
 - Install custom + evil + over-fuel GC policy hooks and exercise the install gate
@@ -382,8 +405,8 @@ expect(out).to_contain("LEAN_OK")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 11 |
-| Active scenarios | 11 |
+| Total scenarios | 12 |
+| Active scenarios | 12 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
