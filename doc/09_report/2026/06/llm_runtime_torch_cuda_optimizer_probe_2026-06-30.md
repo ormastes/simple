@@ -1,28 +1,28 @@
 # LLM Runtime Torch CUDA Optimizer Probe
 
-- command: `release/x86_64-unknown-linux-gnu/simple run src/app/test/torch_cuda_optimizer_probe.spl --mode=interpreter --clean`
+- command: `src/compiler_rust/target/debug/simple run src/app/test/torch_cuda_optimizer_probe.spl --mode=interpreter --clean`
 - wrapper_path: `scripts/check/check-llm-runtime-torch-cuda-optimizer-probe.shs`
 - wrapper_sha256: `f8aa92c5ff24d9fd3a65c95957599c6885a25754018396d62e824e810f5c804a`
 - probe_path: `src/app/test/torch_cuda_optimizer_probe.spl`
 - probe_sha256: `7f32aba5718724281261bd90a3380e4ce9f473bfe965cff7d21332b67b09e645`
-- probe_command_sha256: `fc6c7792072dfddfbfd24fa8f2fa495f3a5649dc20b90082f74d4cefb4ed5463`
-- status: `fail`
-- reason: `tensor_creation_returned_null_handle`
+- probe_command_sha256: `38a23d723edf935b4633bb647d3e03797461726990ec04b9dd446e79134de4ec`
+- status: `pass`
+- reason: `optimizer_step_decreased_parameter_sum`
 - required_gates: `libtorch,cuda,parameter_cuda,autograd_gradient,optimizer_step_decreases_parameter_sum`
-- blocked_gate: `tensor_creation`
-- blocked_gates: `tensor_creation`
-- primary_blocked_gate: `tensor_creation`
-- log_size: `91659`
-- log_sha256: `5bad8c155b1e6df4d449e54d6550518e78f9aa4d0f43d2a9d22e03ece23cffd8`
+- blocked_gate: `none`
+- blocked_gates: `none`
+- primary_blocked_gate: `none`
+- log_size: `2608`
+- log_sha256: `485ce68cd537f99892a80b10a143f68fa28e233c75555fa9b06e2716bacbdb48`
 - status_line_count: `1`
 - required_gates_line_count: `1`
 - torch_available_line_count: `1`
 - cuda_available_line_count: `1`
-- parameter_is_cuda_line_count: `0`
-- grad_handle_line_count: `0`
-- optimizer_step_line_count: `0`
-- before_sum_line_count: `0`
-- after_sum_line_count: `0`
+- parameter_is_cuda_line_count: `1`
+- grad_handle_line_count: `1`
+- optimizer_step_line_count: `1`
+- before_sum_line_count: `1`
+- after_sum_line_count: `1`
 - python_torch_module_status: `available`
 - python_torch_version: `2.9.1+cu130`
 - python_torch_file: `/home/ormastes/.local/lib/python3.12/site-packages/torch/__init__.py`
@@ -59,22 +59,22 @@
 - surface_manifest: `build/llm_runtime_torch_cuda_optimizer_probe/torch_cuda_optimizer_surface_manifest.tsv`
 - surface_manifest_count: `22`
 - surface_manifest_size: `2704`
-- surface_manifest_sha256: `76009d8f50b0e5657adc092190f266c4465d5135a91e805fe0fe5da4cfe55d12`
+- surface_manifest_sha256: `6c23a9d715157f3726f1737e05c959a8c6e4db804c748f92f1fda0e82fbdbffc`
 - torch_available: `true`
 - cuda_available: `true`
-- parameter_is_cuda: `missing`
-- dyn_tensor_status: `error`
-- dyn_tensor_reason: `runtime_returned_null_handle`
-- dyn_tensor_handle: `0`
-- grad_handle: `missing`
-- optimizer_step_attempted: `false`
-- before_sum: `missing`
-- after_sum: `missing`
-- sum_decreased_status: `not_collected`
-- pass_integrity_status: `not_applicable`
-- pass_integrity_reason: `not_applicable`
-- next_action: `verify Simple/libtorch CUDA optimizer execution and parameter-sum decrease`
-- exit_code: `1`
+- parameter_is_cuda: `true`
+- dyn_tensor_status: `ready`
+- dyn_tensor_reason: `ok`
+- dyn_tensor_handle: `1`
+- grad_handle: `4`
+- optimizer_step_attempted: `true`
+- before_sum: `2`
+- after_sum: `-2`
+- sum_decreased_status: `pass`
+- pass_integrity_status: `pass`
+- pass_integrity_reason: `all_required_pass_fields_present`
+- next_action: `strict Torch optimizer probe is ready`
+- exit_code: `0`
 - env: `build/llm_runtime_torch_cuda_optimizer_probe/evidence.env`
 - log: `build/llm_runtime_torch_cuda_optimizer_probe/probe.log`
 

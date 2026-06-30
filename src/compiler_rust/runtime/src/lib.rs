@@ -149,7 +149,7 @@ fn torch_runtime_library() -> Option<&'static libloading::Library> {
             }
             paths.push(default_runtime_library_name().to_string());
             for path in paths {
-                if let Ok(lib) = unsafe { libloading::Library::new(&path) } {
+                if let Ok(lib) = unsafe { open_torch_runtime_library(&path) } {
                     return Some(Box::leak(Box::new(lib)));
                 }
             }
@@ -157,6 +157,20 @@ fn torch_runtime_library() -> Option<&'static libloading::Library> {
         })
         .as_ref()
         .copied()
+}
+
+#[cfg(all(not(feature = "pytorch"), unix))]
+unsafe fn open_torch_runtime_library(path: &str) -> Result<libloading::Library, libloading::Error> {
+    let lib = libloading::os::unix::Library::open(
+        Some(std::ffi::OsStr::new(path)),
+        libloading::os::unix::RTLD_LAZY | libloading::os::unix::RTLD_LOCAL,
+    )?;
+    Ok(lib.into())
+}
+
+#[cfg(all(not(feature = "pytorch"), not(unix)))]
+unsafe fn open_torch_runtime_library(path: &str) -> Result<libloading::Library, libloading::Error> {
+    libloading::Library::new(path)
 }
 
 #[cfg(not(feature = "pytorch"))]

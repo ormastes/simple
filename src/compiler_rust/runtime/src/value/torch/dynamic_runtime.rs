@@ -3,6 +3,8 @@
 
 #[cfg(not(feature = "pytorch"))]
 use libloading::{Library, Symbol};
+#[cfg(all(not(feature = "pytorch"), unix))]
+use std::ffi::OsStr;
 #[cfg(not(feature = "pytorch"))]
 use std::sync::OnceLock;
 
@@ -53,13 +55,27 @@ fn library() -> Option<DynLibrary> {
     TORCH_RUNTIME
         .get_or_init(|| {
             for path in configured_library_paths() {
-                if let Ok(lib) = unsafe { Library::new(&path) } {
+                if let Ok(lib) = unsafe { open_library(&path) } {
                     return Some(Box::leak(Box::new(lib)));
                 }
             }
             None
         })
         .copied()
+}
+
+#[cfg(all(not(feature = "pytorch"), unix))]
+unsafe fn open_library(path: &str) -> Result<Library, libloading::Error> {
+    let lib = libloading::os::unix::Library::open(
+        Some(OsStr::new(path)),
+        libloading::os::unix::RTLD_LAZY | libloading::os::unix::RTLD_LOCAL,
+    )?;
+    Ok(lib.into())
+}
+
+#[cfg(all(not(feature = "pytorch"), not(unix)))]
+unsafe fn open_library(path: &str) -> Result<Library, libloading::Error> {
+    Library::new(path)
 }
 
 #[cfg(not(feature = "pytorch"))]
