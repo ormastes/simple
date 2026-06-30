@@ -47,6 +47,25 @@ When modifying type inference:
 3. Run `lake build` in verification project
 4. Run `simple gen-lean compare`
 
+**Generated-mirror / manual-proof split.** Keep the code-coupled `def`s (constants, geometry,
+state model — the "generated mirror") separated from the hand-written theorems, so a code
+change re-applies to Lean as a localized edit. Two shapes (full guide:
+`doc/07_guide/compiler/lean_verification_workflow.md` § "Generated-Mirror / Manual-Proof Split"):
+- **In-file marked sections** for standalone proofs checked by raw `lean <file>` (e.g.
+  `examples/09_embedded/simpleos_nvme_fw/{fw,emu}/proofs/*.lean`): a `-- BEGIN gen lean … -- END
+  gen lean` defs block, then a `-- MANUAL PROOFS` block. Raw `lean` can't resolve sibling
+  `import`s, so both stay in one file.
+- **Two files** (`Basic.lean` defs + `Theorems.lean` with `import X.Basic`) for Lake projects
+  under `src/verification/<project>/`.
+
+On a code change: re-transcribe only the `gen lean` section / `Basic.lean`, then re-check
+(`lean <file>`, `lake build`, or `gen-lean compare`). Keep def names/namespaces stable.
+
+> `gen-lean` runs a **fixed inventory** of regenerate modules — it does NOT generate Lean from
+> arbitrary `@verify`/firmware `.spl`, and the CLI is currently broken (infinite recursion,
+> `doc/08_tracking/bug/gen_lean_cli_infinite_recursion_2026-06-30.md`). For code outside the
+> inventory, hand-transcribe the marked `gen lean` defs.
+
 ## Design Checklist
 
 Before: Read feature spec, identify affected pipeline stages, draw dependency impact.

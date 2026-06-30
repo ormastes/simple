@@ -331,6 +331,57 @@ The reporting system distinguishes between:
 
 ---
 
+## Generated-Mirror / Manual-Proof Split
+
+A proof file mixes two kinds of content: **definitions** that mirror the Simple code (constants, geometry, the state/selection model) and **theorems** that prove properties about them. The definitions are the only part *coupled to the implementation* — so they must be cheap to re-derive when the code changes, without disturbing the hand-written proofs. Keep them separated.
+
+There are two supported shapes; pick by how the file is checked:
+
+**1. In-file marked sections** — for standalone proofs checked by raw `lean <file>`.
+
+```lean
+-- BEGIN gen lean: mirror of fw/ftl_band.spl (constants + alloc geometry).
+--   Regenerate when the Simple code changes; defs only, NO proofs here.
+def ppn (b wp : Int) : Int := b * 64 + wp
+def GC_RESERVE : Int := 2
+-- END gen lean
+
+-- MANUAL PROOFS (hand-written; stable across a re-mirror of the gen section above).
+theorem alloc_in_range ... := by unfold ppn; omega
+```
+
+Raw `lean <file>` does **not** resolve sibling-source `import`s (it only finds `.olean` on `LEAN_PATH` or a Lake project), so a standalone proof keeps both sections in one file. The marked `gen lean` block is what makes re-transcription a localized edit. This is the model used by `examples/09_embedded/simpleos_nvme_fw/{fw,emu}/proofs/*.lean`.
+
+**2. Two files in a Lake project** — for proofs built with `lake build` under `src/verification/<project>/`.
+
+```lean
+-- <Name>/Basic.lean  — definitions (the generated mirror)
+namespace <Name>.Basic
+def ...
+-- <Name>/Theorems.lean — proofs
+import <Name>.Basic
+open <Name>.Basic
+theorem ...
+```
+
+`import`/`open` work here because Lake puts the package modules on the search path. Used by `actor_channel`, `fat32`, `gc_boundary`, `nvfs`, etc.
+
+### Re-gen discipline (correspondence rule)
+
+On a Simple-code change that touches a verified/mirrored path:
+
+1. Re-transcribe **only** the `gen lean` section (or `Basic.lean`) so the defs match the new code.
+2. Re-check: `lean <file>` for standalone proofs, `lake build` for Lake projects, or `simple gen-lean compare` for the gen-lean regeneration tree.
+3. If a def *signature* changed, the manual proofs may need follow-up; if only bodies/constants changed, they usually stay green. Keep def names and namespaces **stable** so external proofs referencing them do not silently break.
+
+### What `gen-lean` does and does not generate
+
+`simple gen-lean generate|write|compare|verify` operate on a **fixed inventory** of `src/.../verification/regenerate/*.spl` modules — they do **not** scan arbitrary `@verify` user files and cannot emit algorithm Lean for an arbitrary `.spl` (only `gen-lean memory-safety --file <p>` consumes a user file, and only for memory-safety obligations). So for code outside that inventory — the NVMe firmware/emulator, for example — the mirror defs are **hand-transcribed** under the marked `gen lean` section, not machine-generated. `gen-lean write --force` overwrites whole files with **no** manual-edit preservation, so never hand-edit a file the regeneration tree owns; edit its source module instead.
+
+> The `bin/simple gen-lean` CLI is currently broken (the wrapper re-spawns itself and infinitely recurses; the Rust codegen is unreachable through the CLI) — see `doc/08_tracking/bug/gen_lean_cli_infinite_recursion_2026-06-30.md`. Until that is fixed, the regeneration tree is reachable only by internal callers, and the hand-transcribed in-file split above is the working path for example/firmware proofs.
+
+---
+
 ## Known Limitations
 
 ### Deferred (Out of Scope for This Milestone)
