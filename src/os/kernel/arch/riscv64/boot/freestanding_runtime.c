@@ -171,7 +171,12 @@ static RtHeapHeader *rt_as_heap(spl_i64 value, spl_u8 kind) {
     } else {
         return (RtHeapHeader *)0;
     }
-    if (!header || header->object_type != kind) {
+    /* Reject null AND tiny/invalid pointers: a real heap object is never below
+     * 0x10000 (same threshold the untagged branch above already enforces). Without
+     * this, a heap-TAGGED value like 0x9 masks to header 0x8 and the
+     * header->object_type load below faults (rv32: load access fault at 0x8 during
+     * early boot, before any trap vector is installed -> silent hang). */
+    if (!header || (spl_u64)header < 0x10000ULL || header->object_type != kind) {
         return (RtHeapHeader *)0;
     }
     return header;
