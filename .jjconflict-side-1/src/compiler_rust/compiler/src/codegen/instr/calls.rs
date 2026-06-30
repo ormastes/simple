@@ -2208,6 +2208,14 @@ fn known_enum_variant_name<'a, M: Module>(ctx: &InstrContext<'_, M>, func_name: 
         .then_some(variant_name)
 }
 
+fn unresolved_enum_constructor_variant_name(func_name: &str) -> Option<&str> {
+    let (type_name, variant_name) = func_name.rsplit_once("::")?;
+    let type_tail = type_name.rsplit("__").next().unwrap_or(type_name);
+    let type_head_is_upper = type_tail.chars().next().is_some_and(|c| c.is_ascii_uppercase());
+    let variant_head_is_upper = variant_name.chars().next().is_some_and(|c| c.is_ascii_uppercase());
+    (type_head_is_upper && variant_head_is_upper).then_some(variant_name)
+}
+
 fn compile_known_enum_constructor_call<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
@@ -3008,6 +3016,10 @@ pub fn compile_call<M: Module>(
         }
     } else {
         if let Some(variant_name) = known_enum_variant_name(ctx, func_name) {
+            if compile_known_enum_constructor_call(ctx, builder, dest, variant_name, args) {
+                return Ok(());
+            }
+        } else if let Some(variant_name) = unresolved_enum_constructor_variant_name(func_name) {
             if compile_known_enum_constructor_call(ctx, builder, dest, variant_name, args) {
                 return Ok(());
             }

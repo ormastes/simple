@@ -20,9 +20,6 @@ use compiler.backend.gpu_intrinsics.{is_gpu_intrinsic}
 
 extern fn rt_env_get(key: text) -> text
 
-fn mir_expr_env_get(key: text) -> text:
-    rt_env_get(key)
-
 # ============================================================================
 # Expression Lowering
 # ============================================================================
@@ -64,9 +61,10 @@ impl MirLowering:
 
     me emit_bounds_check_for_index(base_type: HirType?, base_local: LocalId, index_local: LocalId):
         """Emit an explicit bounds_check intrinsic before MIR indexed access."""
-        if not base_type.?:
+        val len_symbol = if val found_base_type = base_type:
+            self.len_runtime_symbol_for_hir_type(found_base_type)
+        else:
             return
-        val len_symbol = self.len_runtime_symbol_for_hir_type(base_type.unwrap())
         if len_symbol == "":
             return
         val func_operand = MirOperand(kind: MirOperandKind.Const(
@@ -127,23 +125,20 @@ impl MirLowering:
 
     me lower_expr(expr: HirExpr) -> LocalId:
         """Lower HIR expression to MIR, return result local."""
-        val nil_span = Span.empty()
-        val nil_expr = HirExpr(kind: HirExprKind.NilLit, has_type_: true, type_: HirType(kind: HirTypeKind.Unit, span: nil_span), span: nil_span)
-        val expr_value = expr ?? nil_expr
 
-        match expr_value.kind:
+        match expr.kind:
             case IntLit(value, _):
 
-                if (mir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+                if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
                     print "[mir-lower-expr] int:start"
                 var b = self.builder
-                if (mir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+                if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
                     print "[mir-lower-expr] int:builder"
                 val result = b.emit_const_int(value)
-                if (mir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+                if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
                     print "[mir-lower-expr] int:emitted"
                 self.builder = b
-                if (mir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+                if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
                     print "[mir-lower-expr] int:done"
                 result
 
@@ -178,11 +173,12 @@ impl MirLowering:
                 result
 
             case Var(symbol):
+
                 # Look up variable in local_map using contains_key first
                 if self.local_map.has(symbol.id):
                     self.local_map[symbol.id]
                 else:
-                    self.error("undefined variable", Some(expr_value.span))
+                    self.error("undefined variable", Some(expr.span))
                     var b_err = self.builder
                     val err_tmp = b_err.new_temp(MirType.i64())
                     self.builder = b_err
@@ -219,6 +215,7 @@ impl MirLowering:
                 self.lower_if(cond, then_, else_)
 
             case Call(callee, args, _):
+
                 self.lower_call(callee, args)
 
             case MethodCall(receiver, method, args, resolution):
@@ -232,9 +229,10 @@ impl MirLowering:
                 val base_local = self.lower_expr(base)
                 val index_local = self.lower_expr(index)
                 self.emit_bounds_check_for_index(base.type_, base_local, index_local)
-                var result_type = MirType.i64()
-                if val expr_type = expr_value.type_:
-                    result_type = self.lower_type(expr_type)
+                val result_type = if val expr_type = expr.type_:
+                    self.lower_type(expr_type)
+                else:
+                    MirType.i64()
                 var b = self.builder
                 val ptr = b.emit_gep(
                     mir_operand_copy(base_local),
@@ -318,7 +316,7 @@ impl MirLowering:
 
             # Custom blocks (user-defined: sh{}, sql{}, re{}, etc.)
             case CustomBlock(kind, value):
-                self.lower_custom_block(kind, value, expr_value.span)
+                self.lower_custom_block(kind, value, expr.span)
 
             # Math/DL blocks with special semantics
             case LossBlock(body):
@@ -356,9 +354,10 @@ impl MirLowering:
                 if val bitfield_local = bitfield_result:
                     return bitfield_local
                 val field_idx = self.resolve_field_index(base, field_name, resolved)
-                var field_type = MirType.i64()
-                if val expr_type = expr_value.type_:
-                    field_type = self.lower_type(expr_type)
+                val field_type = if val expr_type = expr.type_:
+                    self.lower_type(expr_type)
+                else:
+                    MirType.i64()
                 var b = self.builder
                 val result = b.emit_get_field(mir_operand_copy(base_local), field_idx, field_type)
                 self.builder = b
@@ -373,7 +372,7 @@ impl MirLowering:
 
             case _:
 
-                self.error("unsupported MIR expression: {expr_value.kind}", nil)
+                self.error("unsupported MIR expression: {expr.kind}", nil)
                 nil
 
     # ========================================================================

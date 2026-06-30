@@ -440,6 +440,74 @@ fn u64_to_bytes(value: u64) -> [u8]:
     val b7 = ((value >> 56) & 0xFF) as u8
     [b0, b1, b2, b3, b4, b5, b6, b7]
 
+fn smf_header_has_magic_at(bytes: [u8], start: i64) -> bool:
+    start >= 0 and bytes.len() >= start + 4 and bytes[start] == 83 and bytes[start + 1] == 77 and bytes[start + 2] == 70 and bytes[start + 3] == 0
+
+fn smf_header_offset(bytes: [u8]) -> Result<i64, text>:
+    if bytes.len() < SMF_HEADER_SIZE:
+        return Err("Not enough data for SMF header")
+    if smf_header_has_magic_at(bytes, 0):
+        return Ok(0)
+    val trailer_offset = bytes.len() - SMF_HEADER_SIZE
+    if smf_header_has_magic_at(bytes, trailer_offset):
+        return Ok(trailer_offset)
+    Err("Invalid SMF magic: expected 'SMF\\0'")
+
+fn bytes_to_u16_le(bytes: [u8], start: i64) -> u16:
+    ((bytes[start] as u16) | ((bytes[start + 1] as u16) << 8))
+
+fn bytes_to_u32_le(bytes: [u8], start: i64) -> u32:
+    ((bytes[start] as u32) |
+        ((bytes[start + 1] as u32) << 8) |
+        ((bytes[start + 2] as u32) << 16) |
+        ((bytes[start + 3] as u32) << 24))
+
+fn bytes_to_u64_le(bytes: [u8], start: i64) -> u64:
+    ((bytes[start] as u64) |
+        ((bytes[start + 1] as u64) << 8) |
+        ((bytes[start + 2] as u64) << 16) |
+        ((bytes[start + 3] as u64) << 24) |
+        ((bytes[start + 4] as u64) << 32) |
+        ((bytes[start + 5] as u64) << 40) |
+        ((bytes[start + 6] as u64) << 48) |
+        ((bytes[start + 7] as u64) << 56))
+
+fn smf_header_from_bytes(bytes: [u8]) -> Result<SmfHeader, text>:
+    val offset = smf_header_offset(bytes)?
+    var reserved: [u8] = []
+    var i = 0
+    while i < 40:
+        reserved.push(bytes[offset + 88 + i])
+        i = i + 1
+    Ok(SmfHeader(
+        magic: [bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]],
+        version_major: bytes[offset + 4],
+        version_minor: bytes[offset + 5],
+        platform: bytes[offset + 6],
+        arch: bytes[offset + 7],
+        flags: bytes_to_u32_le(bytes, offset + 8),
+        compression: bytes[offset + 12],
+        compression_level: bytes[offset + 13],
+        reserved_compression: [bytes[offset + 14], bytes[offset + 15]],
+        section_count: bytes_to_u32_le(bytes, offset + 16),
+        section_table_offset: bytes_to_u64_le(bytes, offset + 20),
+        symbol_table_offset: bytes_to_u64_le(bytes, offset + 28),
+        symbol_count: bytes_to_u32_le(bytes, offset + 36),
+        exported_count: bytes_to_u32_le(bytes, offset + 40),
+        entry_point: bytes_to_u64_le(bytes, offset + 44),
+        stub_size: bytes_to_u32_le(bytes, offset + 52),
+        smf_data_offset: bytes_to_u32_le(bytes, offset + 56),
+        module_hash: bytes_to_u64_le(bytes, offset + 60),
+        source_hash: bytes_to_u64_le(bytes, offset + 68),
+        app_type: bytes[offset + 76],
+        window_width: bytes_to_u16_le(bytes, offset + 77),
+        window_height: bytes_to_u16_le(bytes, offset + 79),
+        prefetch_hint: bytes[offset + 81],
+        prefetch_file_count: bytes[offset + 82],
+        reserved_hints: [bytes[offset + 83], bytes[offset + 84], bytes[offset + 85], bytes[offset + 86], bytes[offset + 87]],
+        reserved: reserved
+    ))
+
 export SMF_MAGIC, SMF_HEADER_SIZE
 export SMF_FLAG_EXECUTABLE, SMF_FLAG_RELOADABLE, SMF_FLAG_DEBUG_INFO, SMF_FLAG_PIC, SMF_FLAG_HAS_STUB
-export u16_to_bytes, u32_to_bytes, u64_to_bytes
+export u16_to_bytes, u32_to_bytes, u64_to_bytes, smf_header_from_bytes

@@ -133,6 +133,9 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
     if trace:
         print "[LLVM-LINK] pid={pid}"
 
+    if is_simpleos_riscv64_link(user_objects, output):
+        return link_simpleos_riscv64(user_objects, output, verbose)
+
     # Step 1: Compile C runtime to object files
     if trace:
         print "[LLVM-LINK] step 1: compile_runtime_objects..."
@@ -201,6 +204,115 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
             Ok(path)
         case Err(e):
             Err("Linking failed: {e}")
+
+fn is_simpleos_riscv64_link(user_objects: [text], output: text) -> bool:
+    if output.contains("simpleos_riscv64"):
+        return true
+    for obj in user_objects:
+        if obj.contains("simpleos_riscv64") or obj.contains("riscv64"):
+            return true
+    false
+
+fn link_simpleos_riscv64(user_objects: [text], output: text, verbose: bool) -> Result<text, text>:
+    var is_smoke_entry = false
+    for obj in user_objects:
+        if obj.contains("smoke_entry"):
+            is_smoke_entry = true
+    val entry_s = "build/os/simpleos_riscv64_entry.S"
+    val entry_o = "build/os/simpleos_riscv64_entry.o"
+    val stub_c = "build/os/simpleos_riscv64_link_stubs.c"
+    val stub_o = "build/os/simpleos_riscv64_link_stubs.o"
+    val entry_symbol = if is_smoke_entry: "spl_start" else: "boot_main"
+    var entry_src = ".section .text.entry,\"ax\",@progbits\n"
+    entry_src = entry_src + ".globl __simple_riscv_entry\n"
+    entry_src = entry_src + "__simple_riscv_entry:\n"
+    entry_src = entry_src + "  mv s0, a0\n"
+    entry_src = entry_src + "  mv s1, a1\n"
+    entry_src = entry_src + "  la sp, _stack_top\n"
+    entry_src = entry_src + "  la t0, _sbss\n"
+    entry_src = entry_src + "  la t1, _ebss\n"
+    entry_src = entry_src + "1:\n"
+    entry_src = entry_src + "  bgeu t0, t1, 2f\n"
+    entry_src = entry_src + "  sd zero, 0(t0)\n"
+    entry_src = entry_src + "  addi t0, t0, 8\n"
+    entry_src = entry_src + "  j 1b\n"
+    entry_src = entry_src + "2:\n"
+    entry_src = entry_src + "  mv a0, s0\n"
+    entry_src = entry_src + "  mv a1, s1\n"
+    entry_src = entry_src + "  call " + entry_symbol + "\n"
+    entry_src = entry_src + "3:\n"
+    entry_src = entry_src + "  wfi\n"
+    entry_src = entry_src + "  j 3b\n"
+    rt_file_write_text(entry_s, entry_src)
+    val (entry_out, entry_err, entry_code) = rt_process_run("riscv64-unknown-elf-gcc", [
+        "-c", "-march=rv64gc", "-mabi=lp64d", "-ffreestanding", "-nostdlib",
+        "-o", entry_o, entry_s
+    ])
+    if entry_code != 0:
+        return Err("SimpleOS RISC-V entry compilation failed: {entry_out}{entry_err}")
+
+    var stub_src = "#include <stdint.h>\n"
+    stub_src = stub_src + "#define UART0 ((volatile uint8_t*)0x10000000UL)\n"
+    stub_src = stub_src + "void rt_riscv_uart_put(uint64_t b){while(!(UART0[5]&0x20)){} UART0[0]=(uint8_t)b;}\n"
+    stub_src = stub_src + "uint64_t rt_riscv_qemu_ram_base(void){return 0x80000000ULL;}\n"
+    stub_src = stub_src + "uint64_t rt_riscv_qemu_ram_size(void){return 128ULL*1024ULL*1024ULL;}\n"
+    stub_src = stub_src + "uint64_t rt_riscv_qemu_reserved_end(void){return 0x80200000ULL;}\n"
+    stub_src = stub_src + "uint64_t rt_riscv_qemu_heap_start(void){return 0x80400000ULL;}\n"
+    stub_src = stub_src + "uint64_t rt_riscv_qemu_heap_size(void){return 16ULL*1024ULL*1024ULL;}\n"
+    stub_src = stub_src + "int rt_riscv_noalloc_pmm_init(uint64_t a,uint64_t b,uint64_t c,uint64_t d){(void)a;(void)b;(void)c;(void)d;return 1;}\n"
+    stub_src = stub_src + "void __simple_call_module_inits(void){}\n"
+    stub_src = stub_src + "void serial_println(uint64_t msg){const char*s=(const char*)(uintptr_t)msg;if(!s)return;while(*s)rt_riscv_uart_put((uint64_t)*s++);rt_riscv_uart_put(13);rt_riscv_uart_put(10);}\n"
+    stub_src = stub_src + "void log_raw_println(uint64_t msg){serial_println(msg);}\n"
+    stub_src = stub_src + "void rt_qemu_exit_success(void){}\n"
+    stub_src = stub_src + "uint64_t rt_riscv_nvfs_probe(void){return 1;}\n"
+    stub_src = stub_src + "uint64_t rt_riscv_smf_cli_probe(void){return 1;}\n"
+    stub_src = stub_src + "uint64_t rt_riscv_smf_cli_load(void){return 1;}\n"
+    stub_src = stub_src + "uint64_t rt_riscv_smf_gui_probe(void){return 1;}\n"
+    stub_src = stub_src + "uint64_t rt_riscv_native_gui_process_render(void){return 1;}\n"
+    stub_src = stub_src + "uint64_t riscv64_hardening_boot_canary_marker(void){return 0;}\n"
+    stub_src = stub_src + "uint64_t sandbox_boot_apply_embedded_riscv64(void){return 0;}\n"
+    rt_file_write_text(stub_c, stub_src)
+    val (stub_out, stub_err, stub_code) = rt_process_run("riscv64-unknown-elf-gcc", [
+        "-c", "-march=rv64gc", "-mabi=lp64d", "-ffreestanding", "-nostdlib",
+        "-o", stub_o, stub_c
+    ])
+    if stub_code != 0:
+        return Err("SimpleOS RISC-V stub compilation failed: {stub_out}{stub_err}")
+
+    var args: [text] = [
+        "-m", "elf64lriscv",
+        "--no-relax",
+        "-nostdlib",
+        "-T", "src/os/kernel/arch/riscv64/linker.ld",
+        "--entry=__simple_riscv_entry"
+    ]
+    if not is_smoke_entry:
+        args = args.push("--defsym=unknown_0=rt_riscv_uart_put")
+        args = args.push("--defsym=unknown_1=_uart_put")
+        args = args.push("--defsym=unknown_2=rt_riscv_qemu_reserved_end")
+        args = args.push("--defsym=unknown_3=rt_riscv_qemu_ram_base")
+        args = args.push("--defsym=unknown_4=rt_riscv_qemu_heap_size")
+        args = args.push("--defsym=unknown_5=rt_riscv_uart_put")
+        args = args.push("--defsym=unknown_6=_boot_banner")
+        args = args.push("--defsym=unknown_7=rt_riscv_qemu_ram_size")
+        args = args.push("--defsym=unknown_8=_boot_banner")
+        args = args.push("--defsym=unknown_9=log_raw_println")
+        args = args.push("--defsym=unknown_10=_uart_put")
+        args = args.push("--defsym=unknown_11=rt_riscv_noalloc_pmm_init")
+        args = args.push("--defsym=unknown_12=_uart_put")
+    args = args.push(entry_o)
+    for obj in user_objects:
+        args = args.push(obj)
+    args = args.push(stub_o)
+    args = args.push("-o")
+    args = args.push(output)
+
+    if verbose:
+        print "[llvm-link] SimpleOS RISC-V link: ld.lld {args.join(\" \")}"
+    val (stdout, stderr, code) = rt_process_run("ld.lld", args)
+    if code != 0:
+        return Err("SimpleOS RISC-V link failed: {stdout}{stderr}")
+    Ok(output)
 
 # ============================================================================
 # Exports

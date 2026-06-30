@@ -135,6 +135,20 @@ fn resolve_numbered_parts_from_root(root: &Path, parts: &[String], use_stmt: &Us
             if file.is_file() {
                 return Some(prefer_package_init_for_member_import(file, use_stmt));
             }
+            if let Some(alias) = layered_alias_child_dir(&current, part) {
+                let init = alias.join("__init__.spl");
+                if init.is_file() {
+                    return Some(init);
+                }
+                let mut nested_file = alias.join(part);
+                nested_file.set_extension("spl");
+                if nested_file.is_file() {
+                    return Some(prefer_package_init_for_member_import(nested_file, use_stmt));
+                }
+            }
+            if let Some(alias_file) = layered_alias_child_file(&current, part) {
+                return Some(prefer_package_init_for_member_import(alias_file, use_stmt));
+            }
             for entry in fs::read_dir(&current).ok()?.flatten() {
                 let path = entry.path();
                 if !path.is_dir() {
@@ -170,6 +184,10 @@ fn resolve_numbered_parts_from_root(root: &Path, parts: &[String], use_stmt: &Us
             current = direct;
             continue;
         }
+        if let Some(alias) = layered_alias_child_dir(&current, part) {
+            current = alias;
+            continue;
+        }
 
         let mut matched = None;
         for entry in fs::read_dir(&current).ok()?.flatten() {
@@ -187,14 +205,55 @@ fn resolve_numbered_parts_from_root(root: &Path, parts: &[String], use_stmt: &Us
                 matched = Some(path);
                 break;
             }
+            let nested = path.join(part);
+            if nested.is_dir() {
+                matched = Some(nested);
+                break;
+            }
         }
         current = matched?;
     }
     None
 }
 
+fn layered_dir_alias_name(current: &Path) -> Option<String> {
+    let name = current.file_name()?.to_str()?;
+    if let Some(after_dot) = name.find('.') {
+        let prefix = &name[..after_dot];
+        let suffix = &name[after_dot + 1..];
+        if !prefix.is_empty() && prefix.len() <= 3 && prefix.chars().all(|c| c.is_ascii_digit()) {
+            return Some(suffix.to_string());
+        }
+    }
+    Some(name.to_string())
+}
+
+fn layered_alias_child_dir(current: &Path, segment: &str) -> Option<PathBuf> {
+    let alias_name = layered_dir_alias_name(current)?;
+    let nested = current.join(alias_name).join(segment);
+    if nested.is_dir() {
+        Some(nested)
+    } else {
+        None
+    }
+}
+
+fn layered_alias_child_file(current: &Path, segment: &str) -> Option<PathBuf> {
+    let alias_name = layered_dir_alias_name(current)?;
+    let mut nested = current.join(alias_name).join(segment);
+    nested.set_extension("spl");
+    if nested.is_file() {
+        Some(nested)
+    } else {
+        None
+    }
+}
+
 fn resolve_parts_with_search_roots(base: &Path, parts: &[String], use_stmt: &UseStmt) -> Option<PathBuf> {
     if let Some(resolved) = resolve_parts_from_root(base, parts, use_stmt) {
+        return Some(resolved);
+    }
+    if let Some(resolved) = resolve_numbered_parts_from_root(base, parts, use_stmt) {
         return Some(resolved);
     }
 
@@ -235,10 +294,16 @@ fn resolve_parts_with_search_roots(base: &Path, parts: &[String], use_stmt: &Use
             if let Some(parent_resolved) = resolve_parts_from_root(&parent_dir, parts, use_stmt) {
                 return Some(parent_resolved);
             }
+            if let Some(parent_resolved) = resolve_numbered_parts_from_root(&parent_dir, parts, use_stmt) {
+                return Some(parent_resolved);
+            }
 
             let parent_src = parent_dir.join("src");
             if parent_src.is_dir() {
                 if let Some(src_resolved) = resolve_parts_from_root(&parent_src, parts, use_stmt) {
+                    return Some(src_resolved);
+                }
+                if let Some(src_resolved) = resolve_numbered_parts_from_root(&parent_src, parts, use_stmt) {
                     return Some(src_resolved);
                 }
             }
@@ -1911,6 +1976,63 @@ mod tests {
             .any(|item| matches!(item, Node::Function(func) if func.name == "run_web"));
 
         assert!(has_run_web);
+    }
+
+    #[test]
+    fn flat_ast_bridge_parser_group_import_keeps_parser_body() {
+        let entry = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("..")
+            .join("src")
+            .join("compiler")
+            .join("10.frontend")
+            .join("_FlatAstBridge")
+            .join("module_assembly.spl")
+            .canonicalize()
+            .unwrap();
+        let parser_use = use_stmt(
+            &["compiler", "core", "parser"],
+            ImportTarget::Group(vec![ImportTarget::Single("parser_init_with_path".to_string())]),
+        );
+        let resolved = resolve_use_to_path(&parser_use, entry.parent().unwrap()).unwrap();
+
+        assert!(resolved.ends_with("src/compiler/10.frontend/core/parser.spl"));
+
+        let loaded = load_module_with_imports(&entry, &mut HashSet::new()).unwrap();
+        let has_parser_init = loaded
+            .items
+            .iter()
+            .any(|item| matches!(item, Node::Function(func) if func.name == "parser_init_with_path"));
+
+        assert!(has_parser_init);
+    }
+
+    #[test]
+    fn compiler_blocks_nested_layer_import_resolves_to_blocks_child_dir() {
+        let registry = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("..")
+            .join("src")
+            .join("compiler")
+            .join("15.blocks")
+            .join("blocks")
+            .join("registry.spl")
+            .canonicalize()
+            .unwrap();
+        let use_stmt = use_stmt(
+            &["compiler", "blocks", "builtin_blocks_math"],
+            ImportTarget::Group(vec![ImportTarget::Single("MathBlockDef".to_string())]),
+        );
+        let resolved = resolve_use_to_path(&use_stmt, registry.parent().unwrap()).unwrap();
+
+        assert!(
+            resolved.ends_with("compiler/blocks/blocks/builtin_blocks_math.spl")
+                || resolved.ends_with("compiler/15.blocks/blocks/builtin_blocks_math.spl"),
+            "resolved to {}",
+            resolved.display()
+        );
     }
 
     #[test]

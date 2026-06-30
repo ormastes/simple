@@ -5,6 +5,19 @@ use super::error::{LowerError, LowerResult};
 use super::lowerer::Lowerer;
 
 impl Lowerer {
+    fn resolve_self_type(&self) -> LowerResult<TypeId> {
+        if let Some(class_ty) = self.current_class_type {
+            Ok(class_ty)
+        } else if self.lenient_types {
+            Ok(TypeId::ANY)
+        } else {
+            Err(LowerError::UnknownType {
+                type_name: "Self".to_string(),
+                available_types: vec![],
+            })
+        }
+    }
+
     pub(super) fn resolve_duplicate_global_field_variant(
         &mut self,
         struct_name: &str,
@@ -120,17 +133,7 @@ impl Lowerer {
                 }
                 // Handle Self type in class/struct methods
                 if name == "Self" {
-                    if let Some(class_ty) = self.current_class_type {
-                        return Ok(class_ty);
-                    } else if self.lenient_types {
-                        return Ok(TypeId::ANY);
-                    } else {
-                        // Self used outside of class context - special case
-                        return Err(LowerError::UnknownType {
-                            type_name: "Self".to_string(),
-                            available_types: vec![],
-                        });
-                    }
+                    return self.resolve_self_type();
                 }
                 if let Some(id) = self.module.types.lookup(name) {
                     return Ok(id);
@@ -165,6 +168,7 @@ impl Lowerer {
                 }
                 // Bare type names from inference / cross-module signatures.
                 match name.as_ref() {
+                    "unit" => return Ok(TypeId::VOID),
                     "list" => {
                         return Ok(self.module.types.register(HirType::Array {
                             element: TypeId::ANY,
@@ -287,6 +291,7 @@ impl Lowerer {
                     inner: inner_id,
                 }))
             }
+            Type::SelfType => self.resolve_self_type(),
             Type::Union(types) => {
                 let mut variant_ids = Vec::new();
                 for t in types {

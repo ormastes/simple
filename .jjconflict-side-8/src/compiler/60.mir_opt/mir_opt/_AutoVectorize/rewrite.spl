@@ -384,16 +384,6 @@ fn _log_recipe(func_name: text, recipe: VectorRecipe):
 # hypothetical BasicBlockId/MirCfg names from the design doc, following
 # the "patterns already in the codebase" rule.
 
-fn find_rewrite_block_by_id(func: MirFunction, id: BlockId) -> MirBlock?:
-    for block in func.blocks:
-        if block.id.id == id.id:
-            return Some(block)
-    nil
-
-class RewriteLoopTerminator:
-    cond: MirOperand
-    exit_block: BlockId
-
 fn detect_loop_bounds(loop_header: BlockId, func: MirFunction) -> LoopBounds?:
     """
     Extract canonical loop bounds from a loop header block inside a function.
@@ -406,26 +396,17 @@ fn detect_loop_bounds(loop_header: BlockId, func: MirFunction) -> LoopBounds?:
     (step=1, lower=0, upper expressed as local or constant text).
     Returns nil conservatively for any other shape.
     """
-    # Locate the header block
-    val header_block = find_rewrite_block_by_id(func, loop_header)
-    if not header_block.?:
-        return nil
+    for block in func.blocks:
+        if block.id.id == loop_header.id:
+            # Extract the condition operand and exit block from the If terminator.
+            return match block.terminator:
+                case If(cond, then_, else_):
+                    # Conservatively treat else_ as exit (loop body is then_).
+                    detect_loop_bounds_only(func, block, cond, else_)
+                case _:
+                    nil
 
-    val header = header_block.unwrap()
-
-    # Extract the condition operand and exit block from the If terminator.
-    val loop_term = match header.terminator:
-        case If(cond, then_, else_):
-            # Conservatively treat else_ as exit (loop body is then_)
-            Some(RewriteLoopTerminator(cond: cond, exit_block: else_))
-        case _:
-            nil
-
-    if not loop_term.?:
-        return nil
-
-    val term = loop_term.unwrap()
-    detect_loop_bounds_only(func, header, term.cond, term.exit_block)
+    nil
 
 # ============================================================================
 # Gap 3 (W-cfg) — CFG splice helper

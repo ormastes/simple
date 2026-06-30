@@ -235,12 +235,29 @@ pub(crate) fn evaluate_method_call(
     // own result (the matcher still sets BDD_EXPECT_FAILED on mismatch).
     if matches!(
         method,
-        "to_equal" | "to_be" | "to_contain" | "to_include" | "to_be_truthy"
-            | "to_be_falsy" | "to_be_nil" | "to_be_none" | "to_be_greater_than"
-            | "to_be_less_than" | "to_be_greater_than_or_equal" | "to_be_gte"
-            | "to_be_less_than_or_equal" | "to_be_lte" | "to_start_with"
-            | "to_end_with" | "to_not_equal" | "to_not_contain" | "to_not_include"
-            | "to_not_be_nil" | "to" | "not_to" | "to_not"
+        "to_equal"
+            | "to_be"
+            | "to_contain"
+            | "to_include"
+            | "to_be_truthy"
+            | "to_be_falsy"
+            | "to_be_nil"
+            | "to_be_none"
+            | "to_be_greater_than"
+            | "to_be_less_than"
+            | "to_be_greater_than_or_equal"
+            | "to_be_gte"
+            | "to_be_less_than_or_equal"
+            | "to_be_lte"
+            | "to_start_with"
+            | "to_end_with"
+            | "to_not_equal"
+            | "to_not_contain"
+            | "to_not_include"
+            | "to_not_be_nil"
+            | "to"
+            | "not_to"
+            | "to_not"
     ) {
         use crate::interpreter::interpreter_call::{BDD_EXPECT_PROVISIONAL, BDD_MATCHER_RAN};
         BDD_EXPECT_PROVISIONAL.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = false);

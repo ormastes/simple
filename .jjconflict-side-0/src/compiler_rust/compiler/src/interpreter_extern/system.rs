@@ -203,6 +203,20 @@ pub fn rt_env_get_i64(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
+/// Get an environment variable parsed as bool.
+pub fn sys_env_bool(args: &[Value]) -> Result<Value, CompileError> {
+    if args.is_empty() {
+        return Err(CompileError::runtime("sys_env_bool requires 1 argument (key)"));
+    }
+
+    let key = match &args[0] {
+        Value::Str(s) => s,
+        _ => return Err(CompileError::runtime("sys_env_bool: key must be a string")),
+    };
+    let value = std::env::var(key).unwrap_or_default().to_ascii_lowercase();
+    Ok(Value::Bool(matches!(value.as_str(), "1" | "true" | "yes" | "on")))
+}
+
 /// Check if an environment variable exists
 ///
 /// Callable from Simple as: `rt_env_exists(key)`

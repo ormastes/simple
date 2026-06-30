@@ -1070,6 +1070,28 @@ void serial_println(spl_i64 msg) {
     log_raw_println(msg);
 }
 
+spl_i64 rt_eprintln_str(spl_i64 msg) {
+    log_raw_println(msg);
+    return rt_nil();
+}
+
+__attribute__((noreturn))
+void rt_exit(spl_i64 code) {
+    char buf[20];
+    spl_u64 len = 0;
+    uart_write_bytes("[exit] rt_exit(", 16);
+    if (code < 0) {
+        uart_put_byte('-');
+        code = -code;
+    }
+    rt_write_decimal(buf, &len, (spl_u64)code);
+    uart_write_bytes(buf, len);
+    uart_write_bytes(") -- halting\r\n", 14);
+    for (;;) {
+        __asm__ volatile("wfi");
+    }
+}
+
 spl_i64 rt_string_len(spl_i64 value) {
     RtString *string = rt_as_string(value);
     return string ? (spl_i64)string->len : 0;

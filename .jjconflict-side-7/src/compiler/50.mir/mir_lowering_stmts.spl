@@ -31,30 +31,29 @@ impl MirLowering:
                 self.lower_expr(expr)
 
             case Let(symbol, type_, init):
+
                 val mir_type = type_.map(self.lower_type(_)) ?? MirType.i64()
                 var b = self.builder
                 val local = b.new_local(nil, mir_type, LocalKind.Var)
                 self.builder = b
                 self.local_map[symbol.id] = local
 
-                var has_init = false
-                var init_local = local
-                if val init_expr = init:
-                    init_local = self.lower_expr(init_expr)
-                    has_init = true
-                if has_init:
-                    var b2 = self.builder
-                    b2.emit_copy(local, init_local)
-                    self.builder = b2
+                val init_local = self.lower_expr(init)
+                var b2 = self.builder
+                b2.emit_copy(local, init_local)
+                self.builder = b2
 
             case Assign(target, op, value):
+
                 val value_local = self.lower_expr(value)
                 self.lower_assign(target, op, value_local)
 
             case Block(block):
+
                 self.lower_block(block)
 
             case AsmAssert(spec):
+
                 self.lower_asm_assert(spec, stmt_span)
 
             case _:
@@ -74,7 +73,17 @@ impl MirLowering:
                         var b = self.builder
                         val result = b.emit_binop(mir_op, current, new_val, MirType.i64())
                         b.emit_copy(local, result)
-                        self.builder = b
+            case NamedVar(symbol, _):
+                if self.local_map.has(symbol.id):
+                    val local = self.local_map[symbol.id]
+                    if val assign_op = op:
+                        # Compound assignment
+                        val current = mir_operand_copy(local)
+                        val new_val = mir_operand_copy(value_local)
+                        val mir_op = self.lower_assign_op(assign_op)
+                        var b = self.builder
+                        val result = b.emit_binop(mir_op, current, new_val, MirType.i64())
+                        b.emit_copy(local, result)
                     else:
                         var b = self.builder
                         b.emit_copy(local, value_local)
@@ -438,7 +447,7 @@ impl MirLowering:
                 loop_ty = self.lower_type(start_type)
 
         # Lower start value (default to typed 0)
-        var start_local: LocalId = 0
+        var start_local = 0
         if val start_expr = start:
             start_local = self.lower_expr(start_expr)
         else:
@@ -449,7 +458,7 @@ impl MirLowering:
             start_local = temp
 
         # Lower end value (default to typed 0; open-ended ranges need the iterator path)
-        var end_local: LocalId = 0
+        var end_local = 0
         if val end_expr = end:
             end_local = self.lower_expr(end_expr)
         else:
@@ -460,7 +469,7 @@ impl MirLowering:
             end_local = temp
 
         # Lower step value (default to typed 1)
-        var step_local: LocalId = 0
+        var step_local = 0
         if val step_expr = step:
             step_local = self.lower_expr(step_expr)
         else:
@@ -561,7 +570,7 @@ impl MirLowering:
         ))
         var b = self.builder
         val iter_result = b.emit_call(iter_func_operand, [mir_operand_copy(collection_local)], MirType.i64())
-        var iter_local: LocalId = 0
+        var iter_local = 0
         if val iter_value = iter_result:
             self.builder = b
             iter_local = iter_value
@@ -592,7 +601,7 @@ impl MirLowering:
         ))
         var b4 = self.builder
         val has_next_result = b4.emit_call(has_next_func_operand, [mir_operand_copy(iter_local)], MirType.bool())
-        var has_next_local: LocalId = 0
+        var has_next_local = 0
         if val has_next_value = has_next_result:
             self.builder = b4
             has_next_local = has_next_value
@@ -612,7 +621,7 @@ impl MirLowering:
         ))
         var b6 = self.builder
         val next_result = b6.emit_call(next_func_operand, [mir_operand_copy(iter_local)], element_type)
-        var next_local: LocalId = 0
+        var next_local = 0
         if val next_value = next_result:
             self.builder = b6
             next_local = next_value

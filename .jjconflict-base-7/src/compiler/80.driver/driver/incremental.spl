@@ -9,31 +9,6 @@
 # File Fingerprinting
 # ============================================================================
 
-extern fn rt_file_exists(path: text) -> bool
-extern fn rt_file_size(path: text) -> i64
-extern fn rt_file_read_text(path: text) -> text
-extern fn rt_hash_text(content: text) -> i64
-extern fn rt_mkdir_p(path: text) -> bool
-extern fn rt_file_write_text(path: text, content: text) -> bool
-
-fn incremental_file_exists(path: text) -> bool:
-    rt_file_exists(path)
-
-fn incremental_file_size(path: text) -> i64:
-    rt_file_size(path)
-
-fn incremental_file_read_text(path: text) -> text:
-    rt_file_read_text(path)
-
-fn incremental_hash_text(content: text) -> i64:
-    rt_hash_text(content)
-
-fn incremental_mkdir_p(path: text) -> bool:
-    rt_mkdir_p(path)
-
-fn incremental_file_write_text(path: text, content: text) -> bool:
-    rt_file_write_text(path, content)
-
 struct FileFingerprint:
     """Content hash + metadata for a source file."""
     path: text
@@ -44,13 +19,17 @@ struct FileFingerprint:
 impl FileFingerprint:
     static fn from_file(path: text) -> FileFingerprint?:
         """Create fingerprint from a file on disk."""
+        extern fn rt_file_exists(path: text) -> bool
+        extern fn rt_file_size(path: text) -> i64
+        extern fn rt_file_read_text(path: text) -> text
+        extern fn rt_hash_text(content: text) -> i64
 
-        if not incremental_file_exists(path):
+        if not rt_file_exists(path):
             return nil
 
-        val content = incremental_file_read_text(path)
-        val hash = incremental_hash_text(content).to_text()
-        val size = incremental_file_size(path)
+        val content = rt_file_read_text(path)
+        val hash = rt_hash_text(content).to_text()
+        val size = rt_file_size(path)
         val mtime = 0
 
         Some(FileFingerprint(path: path, content_hash: hash,
@@ -58,9 +37,11 @@ impl FileFingerprint:
 
     static fn quick_changed(path: text, cached: FileFingerprint) -> bool:
         """Fast check using size only — avoids read+hash when size unchanged."""
-        if not incremental_file_exists(path):
+        extern fn rt_file_exists(path: text) -> bool
+        extern fn rt_file_size(path: text) -> i64
+        if not rt_file_exists(path):
             return true
-        val current_size = incremental_file_size(path)
+        val current_size = rt_file_size(path)
         current_size != cached.size
 
     fn matches(other: FileFingerprint) -> bool:
@@ -176,101 +157,13 @@ impl BuildCache:
 
     static fn load(cache_path: text) -> BuildCache:
         """Load cache from disk, or create empty if not found."""
-        if not incremental_file_exists(cache_path):
-            return BuildCache.empty(cache_path)
-
-        use std.sdn.{parse_file, SdnValue}
-
-        match parse_file(cache_path):
-            case Ok(sdn_value):
-                val ver = sdn_value.get("version")
-                var version: i64 = 0
-                if ver.?:
-                    val v = ver.unwrap().as_i64()
-                    if v.?:
-                        version = v.unwrap()
-
-                var entries: {text: DependencyEntry} = {}
-                var fingerprints: {text: FileFingerprint} = {}
-
-                val entries_val = sdn_value.get("entries")
-                if entries_val.?:
-                    val arr = entries_val.unwrap().as_array()
-                    if arr.?:
-                        for item in arr.unwrap():
-                            val src = item.get("source")
-                            if not src.?:
-                                continue
-                            val source_str = src.unwrap().as_str()
-                            if not source_str.?:
-                                continue
-                            val source = source_str.unwrap()
-
-                            # Parse fingerprint
-                            var fp_hash = ""
-                            var fp_size: i64 = 0
-                            var fp_mtime: i64 = 0
-                            val fp_val = item.get("fingerprint")
-                            if fp_val.?:
-                                val fp_obj = fp_val.unwrap()
-                                val h = fp_obj.get("hash")
-                                if h.?:
-                                    val hs = h.unwrap().as_str()
-                                    if hs.?:
-                                        fp_hash = hs.unwrap()
-                                val s = fp_obj.get("size")
-                                if s.?:
-                                    val si = s.unwrap().as_i64()
-                                    if si.?:
-                                        fp_size = si.unwrap()
-                                val m = fp_obj.get("modified_time")
-                                if m.?:
-                                    val mi = m.unwrap().as_i64()
-                                    if mi.?:
-                                        fp_mtime = mi.unwrap()
-
-                            val fp = FileFingerprint(
-                                path: source, content_hash: fp_hash,
-                                modified_time: fp_mtime, size: fp_size)
-
-                            # Parse dependencies
-                            var deps: [text] = []
-                            val deps_val = item.get("dependencies")
-                            if deps_val.?:
-                                val deps_arr = deps_val.unwrap().as_array()
-                                if deps_arr.?:
-                                    for d in deps_arr.unwrap():
-                                        val ds = d.as_str()
-                                        if ds.?:
-                                            deps = deps.push(ds.unwrap())
-
-                            # Parse outputs
-                            var outs: [text] = []
-                            val outs_val = item.get("outputs")
-                            if outs_val.?:
-                                val outs_arr = outs_val.unwrap().as_array()
-                                if outs_arr.?:
-                                    for o in outs_arr.unwrap():
-                                        val os = o.as_str()
-                                        if os.?:
-                                            outs = outs.push(os.unwrap())
-
-                            val entry = DependencyEntry(
-                                source: source, fingerprint: fp,
-                                dependencies: deps, outputs: outs)
-                            entries[source] = entry
-                            fingerprints[source] = fp
-
-                BuildCache(entries: entries, fingerprints: fingerprints,
-                           cache_path: cache_path, version: version)
-            case Err(error):
-                BuildCache.empty(cache_path)
+        BuildCache.empty(cache_path)
 
     me save():
         """Persist cache to disk."""
         # Cache persistence is optional. Keep native-build self-hostable even
         # while SDN enum constructor lowering is unavailable on this path.
-        return
+        pass
 
     me update_entry(source: text, fingerprint: FileFingerprint,
                     dependencies: [text], outputs: [text]):
@@ -286,6 +179,7 @@ impl BuildCache:
 
     fn has_cached_object(source: text) -> bool:
         """Check if source has a cached entry with fresh fingerprint and existing outputs."""
+        extern fn rt_file_exists(path: text) -> bool
         if not self.entries.has(source):
             return false
         val entry: DependencyEntry = self.entries[source]
@@ -297,7 +191,7 @@ impl BuildCache:
             return false
         # Check all output files still exist on disk
         for out in entry.outputs:
-            if not incremental_file_exists(out):
+            if not rt_file_exists(out):
                 return false
         true
 
@@ -453,6 +347,8 @@ impl IncrementalCompiler:
         Returns a dict mapping function name to serialized MIR text, or nil if no cache.
         Uses .build/mir_cache/ directory for per-function MIR storage.
         """
+        extern fn rt_file_exists(path: text) -> bool
+        extern fn rt_file_read_text(path: text) -> text
 
         if not self.cached_mir_index.has(source):
             return nil
@@ -464,8 +360,8 @@ impl IncrementalCompiler:
         for name in func_names:
             val safe_name = name.replace("/", "_").replace(":", "_")
             val mir_path = "{cache_dir}/{safe_name}.sdn"
-            if incremental_file_exists(mir_path):
-                val content = incremental_file_read_text(mir_path)
+            if rt_file_exists(mir_path):
+                val content = rt_file_read_text(mir_path)
                 if content != "":
                     result[name] = content
 
@@ -475,12 +371,15 @@ impl IncrementalCompiler:
 
     me cache_mir_function(source: text, func_name: text, mir_sdn: text):
         """Cache a single function's MIR to disk."""
+        extern fn rt_mkdir_p(path: text) -> bool
+        extern fn rt_file_write_text(path: text, content: text) -> bool
+
         val cache_dir = ".build/mir_cache"
-        incremental_mkdir_p(cache_dir)
+        rt_mkdir_p(cache_dir)
 
         val safe_name = func_name.replace("/", "_").replace(":", "_")
         val mir_path = "{cache_dir}/{safe_name}.sdn"
-        incremental_file_write_text(mir_path, mir_sdn)
+        rt_file_write_text(mir_path, mir_sdn)
 
         if not self.cached_mir_index.has(source):
             self.cached_mir_index[source] = []

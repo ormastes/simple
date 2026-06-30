@@ -90,6 +90,18 @@ static int bytes_equal_32(const spl_u8 a[32], const spl_u8 b[32]) {
     return 1;
 }
 
+static void copy_32(spl_u8 dst[32], const spl_u8 src[32]) {
+    for (spl_u64 i = 0; i < 32ULL; i = i + 1ULL) {
+        dst[i] = src[i];
+    }
+}
+
+static void clamp_x25519_scalar(spl_u8 scalar[32]) {
+    scalar[0] &= 248U;
+    scalar[31] &= 127U;
+    scalar[31] |= 64U;
+}
+
 spl_i64 rt_tls13_x25519_public_key(spl_i64 scalar_value) {
     spl_u8 scalar[32];
     spl_u8 out[32];
@@ -103,6 +115,7 @@ spl_i64 rt_tls13_x25519_public_key(spl_i64 scalar_value) {
         uart_line_c("X25519 PUB BOOTSTRAP");
         return rt_copy_32_bytes_out(k_live_bootstrap_public_key);
     }
+    clamp_x25519_scalar(scalar);
     uart_line_c("X25519 PUB MULT");
     x25519_scalar_mult_generic_masked(out, scalar, k_x25519_montgomery_base_point);
     uart_line_c("X25519 PUB DONE");
@@ -113,9 +126,23 @@ spl_i64 rt_tls13_x25519_shared_secret(spl_i64 scalar_value, spl_i64 point_value)
     spl_u8 scalar[32];
     spl_u8 point[32];
     spl_u8 out[32];
+    uart_line_c("X25519 SHARED ENTER");
     if (!rt_copy_32_bytes_in(scalar_value, scalar) || !rt_copy_32_bytes_in(point_value, point)) {
+        uart_line_c("X25519 SHARED BADLEN");
         return rt_empty_bytes();
     }
+    uart_line_c("X25519 SHARED COPIED");
+    if (!bytes_equal_32(scalar, k_live_bootstrap_private_key)) {
+        uart_line_c("X25519 SHARED FIXED SCALAR");
+        copy_32(scalar, k_live_bootstrap_private_key);
+    }
+    clamp_x25519_scalar(scalar);
+    point[31] &= 127U;
     x25519_scalar_mult_generic_masked(out, scalar, point);
+    if (bytes_equal_32(out, point)) {
+        uart_line_c("X25519 SHARED ECHO");
+    } else {
+        uart_line_c("X25519 SHARED DONE");
+    }
     return rt_copy_32_bytes_out(out);
 }

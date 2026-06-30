@@ -286,6 +286,14 @@ fn apply_rewrite_to_inst(rule: PatternRule, bindings: [WildcardBinding], inst: M
 # Block-level pass
 # ============================================================================
 
+fn apply_first_matching_rule(inst: MirInst, rules: [PatternRule]) -> MirInst?:
+    for rule in rules:
+        val maybe_bindings = try_match_rule(rule, inst)
+        if maybe_bindings.?:
+            return apply_rewrite_to_inst(rule, maybe_bindings.unwrap(), inst)
+
+    Some(inst)
+
 fn apply_rules_to_block(block: MirBlock, rules: [PatternRule]) -> MirBlock:
     """Apply all rules to each instruction in the block, rebuilding it.
 
@@ -293,17 +301,10 @@ fn apply_rules_to_block(block: MirBlock, rules: [PatternRule]) -> MirBlock:
     """
     var new_insts: [MirInst] = []
     for inst in block.instructions:
-        var handled = false
-        for rule in rules:
-            if not handled:
-                val maybe_bindings = try_match_rule(rule, inst)
-                if maybe_bindings.?:
-                    val new_inst_opt = apply_rewrite_to_inst(rule, maybe_bindings.unwrap(), inst)
-                    if val new_inst = new_inst_opt:
-                        new_insts = new_insts.push(new_inst)
-                    handled = true
-        if not handled:
-            new_insts = new_insts.push(inst)
+        val rewritten_inst = apply_first_matching_rule(inst, rules)
+        if rewritten_inst.?:
+            new_insts = new_insts.push(rewritten_inst.unwrap())
+        # If nil — instruction was removed
     MirBlock(
         id:           block.id,
         label:        block.label,

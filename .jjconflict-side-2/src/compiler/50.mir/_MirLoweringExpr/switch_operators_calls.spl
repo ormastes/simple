@@ -338,6 +338,14 @@ impl MirLowering:
                     return boot_temp
                 if is_gpu_intrinsic(callee_name):
                     return self.lower_gpu_intrinsic_call(callee_name, args)
+            case NamedVar(_, callee_name):
+                if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and (callee_name == "print" or callee_name == "_cli_eprint"):
+                    var b_boot = self.builder
+                    val boot_temp = b_boot.new_temp(MirType.unit())
+                    self.builder = b_boot
+                    return boot_temp
+                if is_gpu_intrinsic(callee_name):
+                    return self.lower_gpu_intrinsic_call(callee_name, args)
             case _: ()
 
         var arg_operands: [MirOperand] = []
@@ -350,6 +358,22 @@ impl MirLowering:
             case Var(symbol):
                 # Direct call - use Call instruction
                 val func_operand = self.symbol_to_operand(symbol)
+                val return_type = self.resolved_call_return_type(symbol)
+                var b = self.builder
+                val result = b.emit_call(func_operand, arg_operands, return_type)
+                if val result_local = result:
+                    self.builder = b
+                    result_local
+                else:
+                    val temp = b.new_temp(MirType.unit())
+                    self.builder = b
+                    temp
+
+            case NamedVar(symbol, callee_name):
+                val func_operand = MirOperand(kind: MirOperandKind.Const(
+                    MirConstValue.Str(callee_name),
+                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+                ))
                 val return_type = self.resolved_call_return_type(symbol)
                 var b = self.builder
                 val result = b.emit_call(func_operand, arg_operands, return_type)

@@ -26,9 +26,6 @@ use std.nogc_sync_mut.io.process_ops.{eprint}
 
 extern fn rt_env_get(key: text) -> text
 
-fn hir_module_env_get(key: text) -> text:
-    rt_env_get(key)
-
 impl HirLowering:
     me register_imported_symbol(imported_mod: any, imported_mod_name: text, imported_name: text, local_name: text, import_span: Span):
         val as_cls = imported_mod.classes[imported_name]
@@ -58,56 +55,59 @@ impl HirLowering:
         pass_dn
 
     me lower_module(module: ParserModule) -> HirModule:
-        val bootstrap_mode = (hir_module_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
+        val bootstrap_mode = (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
+        val native_entry_closure = (rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
+        val native_entry_direct = (rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY") ?? "") != ""
+        val native_entry_hir = native_entry_closure or native_entry_direct
         if bootstrap_mode:
             eprint("[hir-lower] lower_module:start")
         self.lowered_impl_functions = {}
         # Pass 0: pre-register imported type names so explicit `use` paths win
         # over module load order when two modules export the same short name.
-        if not bootstrap_mode:
+        if not bootstrap_mode and not native_entry_hir:
             self.resolve_import_symbols(module)
 
         # First pass: declare all top-level symbols
         if bootstrap_mode:
             eprint("[hir-lower] declare:start")
-        if not bootstrap_mode:
+        if not bootstrap_mode or native_entry_hir:
             self.declare_module_symbols(module)
         if bootstrap_mode:
             eprint("[hir-lower] declare:done")
 
         # Second pass: lower definitions
-        if (hir_module_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
             eprint("[hir-lower] locals:functions:init")
         var functions: Dict<SymbolId, HirFunction> = {}
-        if (hir_module_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
             eprint("[hir-lower] locals:classes:init")
         var classes: Dict<SymbolId, HirClass> = {}
-        if (hir_module_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
             eprint("[hir-lower] locals:structs:init")
         var structs: Dict<SymbolId, HirStruct> = {}
-        if (hir_module_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
             eprint("[hir-lower] locals:enums:init")
         var enums: Dict<SymbolId, HirEnum> = {}
-        if (hir_module_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
             eprint("[hir-lower] locals:bitfields:init")
         var bitfields: Dict<SymbolId, HirBitfield> = {}
-        if (hir_module_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
             eprint("[hir-lower] locals:traits:init")
         var traits: Dict<SymbolId, HirTrait> = {}
-        if (hir_module_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
             eprint("[hir-lower] locals:impls:init")
         var impls: [HirImpl] = []
-        if (hir_module_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
             eprint("[hir-lower] locals:constants:init")
         var constants: Dict<SymbolId, HirConst> = {}
 
         var lower_idx = 0
-        if bootstrap_mode:
+        if bootstrap_mode and not native_entry_hir:
             _bootstrap_hir_functions = []
             eprint("[hir-lower] functions:count:start")
             val bootstrap_function_count = flat_bootstrap_function_count()
             eprint("[hir-lower] functions:count {bootstrap_function_count}")
-            if (hir_module_env_get("SIMPLE_BOOTSTRAP_REAL_HIR") ?? "") == "1":
+            if (rt_env_get("SIMPLE_BOOTSTRAP_REAL_HIR") ?? "") == "1":
                 while lower_idx < bootstrap_function_count:
                     val decl_idx = flat_bootstrap_function_decl_at(lower_idx)
                     val name = decl_get_name(decl_idx)
@@ -129,7 +129,7 @@ impl HirLowering:
                 functions[hir_fn.symbol] = hir_fn
                 lower_idx = lower_idx + 1
 
-        if bootstrap_mode:
+        if bootstrap_mode and not native_entry_hir:
             eprint("[hir-lower] bootstrap-functions:count {_bootstrap_hir_functions.len()}")
             return HirModule(
                 name: "app.cli.bootstrap_main",
@@ -290,7 +290,7 @@ impl HirLowering:
         )
 
     me declare_module_symbols(module: ParserModule):
-        if (hir_module_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and (rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") != "1" and (rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY") ?? "") == "":
             return
         # Pass module filename for visibility tracking
         val mod_name = nil
@@ -445,9 +445,9 @@ impl HirLowering:
             val name = expr_get_str(expr_idx)
             var sym = bootstrap_hir_symbol_for_name(name)
             val found = self.symbols.lookup(name)
-            if val found_symbol = found:
+            if val Some(found_symbol) = found:
                 sym = found_symbol
-            return HirExpr(kind: HirExprKind.Var(sym), has_type_: false, type_: HirType(kind: HirTypeKind.Infer(0, 0), span: span), span: span)
+            return HirExpr(kind: HirExprKind.NamedVar(sym, name), has_type_: false, type_: HirType(kind: HirTypeKind.Infer(0, 0), span: span), span: span)
         if tag == EXPR_BINARY:
             return HirExpr(kind: HirExprKind.Binary(self.bootstrap_hir_bin_op(expr_get_int(expr_idx)), self.lower_bootstrap_flat_expr(expr_get_left(expr_idx)), self.lower_bootstrap_flat_expr(expr_get_right(expr_idx))), has_type_: false, type_: HirType(kind: HirTypeKind.Infer(0, 0), span: span), span: span)
         if tag == EXPR_CALL:

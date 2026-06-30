@@ -330,7 +330,7 @@ fn encode_inst_aarch64(ectx: A64EncodeContext, inst: MachInst) -> A64EncodeConte
         match inst.operands[0].kind:
             case Label(block_id):
                 # Emit placeholder, patch later
-                val jump_offset = code_len(code)
+                val jump_offset = code.len()
                 code = emit_u32_le(code, 0x14000000)
                 pending.push(A64PendingJump(code_offset: jump_offset, target_block: block_id, jump_kind: JUMP_B))
             case _:
@@ -341,7 +341,7 @@ fn encode_inst_aarch64(ectx: A64EncodeContext, inst: MachInst) -> A64EncodeConte
         match inst.operands[0].kind:
             case Sym(name):
                 # Record relocation for linker
-                val reloc_offset = code_len(code)
+                val reloc_offset = code.len()
                 code = emit_u32_le(code, 0x94000000)
                 val reloc = EncodedReloc(
                     offset: reloc_offset,
@@ -351,7 +351,7 @@ fn encode_inst_aarch64(ectx: A64EncodeContext, inst: MachInst) -> A64EncodeConte
                 )
                 relocs.push(reloc)
             case Label(block_id):
-                val jump_offset = code_len(code)
+                val jump_offset = code.len()
                 code = emit_u32_le(code, 0x94000000)
                 pending.push(A64PendingJump(code_offset: jump_offset, target_block: block_id, jump_kind: JUMP_B))
             case _:
@@ -362,7 +362,7 @@ fn encode_inst_aarch64(ectx: A64EncodeContext, inst: MachInst) -> A64EncodeConte
         val cond = branch_opcode_to_cond(inst.opcode)
         match inst.operands[0].kind:
             case Label(block_id):
-                val jump_offset = code_len(code)
+                val jump_offset = code.len()
                 # Emit placeholder with condition code embedded
                 val placeholder = 0x54000000 or cond
                 code = emit_u32_le(code, placeholder)
@@ -376,7 +376,7 @@ fn encode_inst_aarch64(ectx: A64EncodeContext, inst: MachInst) -> A64EncodeConte
         val rd = get_phys_reg_id(inst.operands[0])
         match inst.operands[1].kind:
             case Label(block_id):
-                val jump_offset = code_len(code)
+                val jump_offset = code.len()
                 val placeholder = 0xB4000000 or rd
                 code = emit_u32_le(code, placeholder)
                 pending.push(A64PendingJump(code_offset: jump_offset, target_block: block_id, jump_kind: JUMP_CBZ))
@@ -389,7 +389,7 @@ fn encode_inst_aarch64(ectx: A64EncodeContext, inst: MachInst) -> A64EncodeConte
         val rd = get_phys_reg_id(inst.operands[0])
         match inst.operands[1].kind:
             case Label(block_id):
-                val jump_offset = code_len(code)
+                val jump_offset = code.len()
                 val placeholder = 0xB5000000 or rd
                 code = emit_u32_le(code, placeholder)
                 pending.push(A64PendingJump(code_offset: jump_offset, target_block: block_id, jump_kind: JUMP_CBNZ))
@@ -403,7 +403,7 @@ fn encode_inst_aarch64(ectx: A64EncodeContext, inst: MachInst) -> A64EncodeConte
         val rd = get_phys_reg_id(inst.operands[0])
         match inst.operands[1].kind:
             case Sym(name):
-                val reloc_offset = code_len(code)
+                val reloc_offset = code.len()
                 val placeholder = 0x90000000 or rd
                 code = emit_u32_le(code, placeholder)
                 val reloc = EncodedReloc(
@@ -486,7 +486,7 @@ fn encode_function_aarch64(func: MachFunction) -> EncodedFunction:
     # Pass 1: encode all instructions, record block offsets and pending jumps
     for block in func.blocks:
         var offsets = ectx.block_offsets
-        offsets[block.block_id] = ectx.code_len(code)
+        offsets[block.block_id] = ectx.code.len()
         ectx = A64EncodeContext(code: ectx.code, relocations: ectx.relocations, block_offsets: offsets, pending_jumps: ectx.pending_jumps)
 
         for inst in block.insts:
@@ -494,10 +494,10 @@ fn encode_function_aarch64(func: MachFunction) -> EncodedFunction:
 
     # Pass 2: patch branch targets
     var final_code = ectx.code
-    for i in 0..ectx.pending_jumps_len(pending_jumps):
+    for i in 0..ectx.pending_jumps.len():
         val pj = ectx.pending_jumps[i]
         val target_block = pj.target_block
-        if ectx.block_offsets_contains(block_offsets, target_block):
+        if ectx.block_offsets.contains(target_block):
             val target_offset = ectx.block_offsets[target_block]
             val rel_offset = target_offset - pj.code_offset
             final_code = patch_branch(final_code, pj.code_offset, rel_offset, pj.jump_kind)

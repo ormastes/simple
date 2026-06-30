@@ -455,38 +455,17 @@ fn get_operand_local(op: MirOperand) -> LocalId?:
 # Loop Detection
 # ============================================================================
 
-class AutoVectorizeCompareOperands:
-    upper: MirOperand
-    induction: MirOperand
-
-fn find_block_by_id(func: MirFunction, id: BlockId) -> MirBlock?:
-    for block in func.blocks:
-        if block.id.id == id.id:
-            return Some(block)
-    nil
-
-fn find_lt_compare_operands(header: MirBlock, cond_local_id: i64) -> AutoVectorizeCompareOperands?:
-    for inst in header.instructions:
-        match inst.kind:
-            case BinOp(dest, op, left, right):
-                if dest.id == cond_local_id:
-                    val is_lt = match op:
-                        case Lt: true
-                        case _: false
-                    if not is_lt:
-                        return nil
-                    return Some(AutoVectorizeCompareOperands(upper: right, induction: left))
-            case _:
-                pass_do_nothing
-    nil
-
 fn is_simple_loop(func: MirFunction, header: BlockId) -> LoopInfo?:
     """
     Detect if a block is the header of a simple loop.
     Returns loop information if it matches vectorizable pattern.
     """
     # Find the block
-    val header_block = find_block_by_id(func, header)
+    var header_block: MirBlock? = nil
+    for block in func.blocks:
+        if block.id.id == header.id:
+            header_block = Some(block)
+
     if not header_block.?:
         return nil
 
@@ -533,12 +512,31 @@ fn detect_loop_bounds(func: MirFunction, header: MirBlock, cond: MirOperand, exi
         case _: return nil
 
     # Step 2: Find the instruction that defines cond_local in the header block.
-    val compare_operands = find_lt_compare_operands(header, cond_local_id)
-    if not compare_operands.?:
+    # It must be a BinOp(Lt, left, right) or BinOp(Le, left, right).
+    # Extract the upper-bound operand (the right operand of the comparison).
+    var upper_operand: MirOperand? = nil
+    var induction_operand: MirOperand? = nil
+    for inst in header.instructions:
+        match inst.kind:
+            case BinOp(dest, op, left, right):
+                if dest.id == cond_local_id:
+                    # Only accept Lt (i < n) comparisons — conservative
+                    val is_lt = match op:
+                        case Lt: true
+                        case _:  false
+                    if not is_lt:
+                        return nil
+                    upper_operand    = Some(right)
+                    induction_operand = Some(left)
+            case _:
+                pass_do_nothing
+
+    # If we couldn't find the comparison definition, give up
+    if not upper_operand.?:
         return nil
 
-    val upper_op = compare_operands.unwrap().upper
-    val induction_op = compare_operands.unwrap().induction
+    val upper_op = upper_operand.unwrap()
+    val induction_op = induction_operand.unwrap()
 
     # Step 3: Verify the induction variable is a local (not a constant)
     val induction_local_id: i64 = match induction_op.kind:
@@ -689,15 +687,31 @@ fn detect_bounds_from_block(header: MirBlock, cond: MirOperand, exit: BlockId) -
         case _: return nil
 
     # Step 2: find BinOp(Lt, %i, %n) in header instructions
-    val compare_operands = find_lt_compare_operands(header, cond_local_id)
-    if not compare_operands.?:
+    var upper_operand: MirOperand? = nil
+    var induction_local_id: i64 = -1
+    for inst in header.instructions:
+        match inst.kind:
+            case BinOp(dest, op, left, right):
+                if dest.id == cond_local_id:
+                    val is_lt = match op:
+                        case Lt: true
+                        case _:  false
+                    if not is_lt:
+                        return nil
+                    upper_operand = Some(right)
+                    induction_local_id = match left.kind:
+                        case Copy(local): local.id
+                        case Move(local): local.id
+                        case _: return nil
+            case _:
+                pass_do_nothing
+
+    if not upper_operand.?:
+        return nil
+    if induction_local_id < 0:
         return nil
 
-    val upper_op = compare_operands.unwrap().upper
-    val induction_local_id = match compare_operands.unwrap().induction.kind:
-        case Copy(local): local.id
-        case Move(local): local.id
-        case _: return nil
+    val upper_op = upper_operand.unwrap()
 
     # Step 3: verify unit step within header block
     var found_unit_step = false

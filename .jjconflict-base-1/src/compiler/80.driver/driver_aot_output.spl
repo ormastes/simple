@@ -28,6 +28,7 @@ use compiler.driver.driver_build.parallel.{ParallelBuilder, ParallelBuildConfig,
 
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_copy(src: text, dst: text) -> bool
 extern fn rt_dir_create(path: text, recursive: bool) -> bool
 extern fn rt_path_join(a: text, b: text) -> text
 extern fn rt_path_parent(path: text) -> text
@@ -304,6 +305,24 @@ impl CompilerDriver:
                     object_files = [obj_path]
                 case Err(e):
                     return CompileResult.CodegenError(e)
+
+        if (rt_env_get("SIMPLE_NATIVE_BUILD_EMIT_OBJECT") ?? "") == "1":
+            if object_files.len() == 0:
+                return CompileResult.CodegenError("emit-object requested but no object files were produced")
+            if object_files.len() == 1:
+                if not rt_file_copy(object_files[0], output):
+                    return CompileResult.CodegenError("emit-object failed to copy {object_files[0]} to {output}")
+            else:
+                var args: [text] = ["-r"]
+                for obj in object_files:
+                    args.push(obj)
+                args.push("-o")
+                args.push(output)
+                val (_stdout, stderr, code) = rt_process_run("ld.lld", args)
+                if code != 0:
+                    return CompileResult.CodegenError("emit-object relocatable link failed: {stderr}")
+            driver_log_info(log, "Native object written to {output}")
+            return driver_native_success_with_launch_metadata(ctx, output)
 
         if trace:
             print "[NATIVE] linking {object_files.len()} object files..."
@@ -674,6 +693,8 @@ fn _compile_one_module(ctx: any, backend_name: text, is_release: bool, opt_level
 fn _compile_selected_module(backend_name: text, is_release: bool, opt_level: i64, output_base: text, name: text, mir_module: MirModule) -> Result<text, text>:
     if (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1":
         print "[NATIVE] select module:done"
+    if mir_module.functions.len() == 0:
+        return Err("AOT compile error in {name}: MIR module has no functions")
     val empty_native_obj = rt_env_get("SIMPLE_BOOTSTRAP_EMPTY_NATIVE_OBJ") ?? ""
     if empty_native_obj == "1":
         val c_path = "{output_base}.{name}.bootstrap_empty.c"

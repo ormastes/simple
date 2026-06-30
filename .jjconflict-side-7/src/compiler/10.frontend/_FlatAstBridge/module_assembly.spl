@@ -9,9 +9,6 @@ use compiler.frontend.flat_ast_bridge.*
 use compiler.core.parser.{parser_has_errors, parser_get_errors, parser_init_with_path}
 use compiler.core.parser_decls.{parse_module_body}
 use compiler.core.ast.*
-use compiler.core.ast.{decl_get_body, decl_get_field_bits, decl_get_field_defaults, decl_get_field_types, decl_get_fields}
-use compiler.core.ast.{decl_get_imports, decl_get_is_comptime, decl_get_is_lazy, decl_get_name, decl_get_param_names}
-use compiler.core.ast.{decl_get_param_types, decl_get_ret_type, decl_get_visibility_text, module_decl_at, module_decl_count_get}
 use compiler.core.ast.{decl_is_packed}
 use compiler.core.ast_expr.*
 use compiler.core.ast_stmt.*
@@ -28,20 +25,66 @@ use compiler.common.dependency.visibility.{Visibility}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 extern fn rt_env_get(key: text) -> text
 
-fn flat_module_env_get(key: text) -> text:
-    rt_env_get(key)
-
 fn flat_decl_tag_text(idx: i64) -> text:
-    flat_module_env_get("SIMPLE_BOOTSTRAP_DECL_TAG_" + int_to_str(idx))
+    val env_tag = rt_env_get("SIMPLE_BOOTSTRAP_DECL_TAG_" + int_to_str(idx))
+    if env_tag != "":
+        return env_tag
+    int_to_str(flat_decl_get_tag(idx))
 
 fn flat_decl_field_text(idx: i64, field: text) -> text:
-    flat_module_env_get("SIMPLE_BOOTSTRAP_DECL_" + int_to_str(idx) + "_" + field)
+    rt_env_get("SIMPLE_BOOTSTRAP_DECL_" + int_to_str(idx) + "_" + field)
 
 fn flat_bootstrap_enabled() -> bool:
-    flat_module_env_get("SIMPLE_BOOTSTRAP") == "1"
+    rt_env_get("SIMPLE_BOOTSTRAP") == "1"
 
 fn flat_bridge_trace_enabled() -> bool:
-    (flat_module_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1"
+    (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1"
+
+fn flat_decl_get_tag(idx: i64) -> i64:
+    if idx >= 0 and idx < decl_tag.len():
+        return decl_tag[idx]
+    -1
+
+fn flat_decl_get_name(idx: i64) -> text:
+    if idx >= 0 and idx < decl_name.len():
+        return decl_name[idx]
+    ""
+
+fn flat_decl_get_body(idx: i64) -> [i64]:
+    if idx >= 0 and idx < decl_body_stmts.len():
+        return decl_body_stmts[idx]
+    []
+
+fn flat_decl_get_fields(idx: i64) -> [text]:
+    if idx >= 0 and idx < decl_field_names.len():
+        return decl_field_names[idx]
+    []
+
+fn flat_decl_get_field_types(idx: i64) -> [i64]:
+    if idx >= 0 and idx < decl_field_types.len():
+        return decl_field_types[idx]
+    []
+
+fn flat_decl_get_field_bits(idx: i64) -> [i64]:
+    if idx >= 0 and idx < decl_field_bits.len():
+        return decl_field_bits[idx]
+    []
+
+fn flat_decl_get_imports(idx: i64) -> [text]:
+    if idx >= 0 and idx < decl_imports.len():
+        return decl_imports[idx]
+    []
+
+fn flat_decl_get_is_lazy(idx: i64) -> i64:
+    if idx >= 0 and idx < decl_is_lazy.len():
+        return decl_is_lazy[idx]
+    0
+
+fn flat_module_decl_count_get() -> i64:
+    module_decl_count_get()
+
+fn flat_module_decl_at(index: i64) -> i64:
+    module_decl_at(index)
 
 fn flat_text_list_count(raw: text) -> i64:
     if raw == "":
@@ -98,7 +141,7 @@ fn flat_ast_to_module(path: text) -> Module:
         return flat_empty_module(path)
     if flat_bootstrap_enabled() and flat_bridge_trace_enabled():
         eprint("[flat-bridge] bootstrap real entry:start")
-    val raw_decl_count = module_decl_count_get()
+    val raw_decl_count = flat_module_decl_count_get()
     var decl_count = raw_decl_count
     if flat_bootstrap_enabled() and raw_decl_count > 64:
         decl_count = 64
@@ -120,7 +163,7 @@ fn flat_ast_to_module(path: text) -> Module:
 
     var di = 0
     while di < decl_count:
-        val idx = module_decl_at(di)
+        val idx = flat_module_decl_at(di)
         val tag_text = flat_decl_tag_text(idx)
         if flat_bootstrap_enabled() and flat_bridge_trace_enabled():
             eprint("[flat-bridge] decl:start {di} tag {tag_text}")
@@ -135,10 +178,10 @@ fn flat_ast_to_module(path: text) -> Module:
             val fn_ = convert_decl_extern_fn(idx)
             functions[fn_.name] = fn_
         elif tag_text == "3":
-            val s_name = decl_get_name(idx)
-            val f_names = decl_get_fields(idx)
-            val f_types = decl_get_field_types(idx)
-            val f_bits = decl_get_field_bits(idx)
+            val s_name = flat_decl_get_name(idx)
+            val f_names = flat_decl_get_fields(idx)
+            val f_types = flat_decl_get_field_types(idx)
+            val f_bits = flat_decl_get_field_bits(idx)
             val s_visibility = convert_decl_visibility(idx)
             var is_packed = false
             if idx < decl_is_packed.len():
@@ -169,7 +212,7 @@ fn flat_ast_to_module(path: text) -> Module:
                     backing_type: Type(kind: TypeKind.Infer, span: span),
                     fields: bf_fields,
                     visibility: s_visibility,
-                    is_public: decl_get_visibility_text(idx) == "public",
+                    is_public: s_visibility.is_public(),
                     has_doc_comment: false,
                     doc_comment: "",
                     attributes: [],
@@ -210,27 +253,27 @@ fn flat_ast_to_module(path: text) -> Module:
                     type_params: [],
                     fields: fields,
                     visibility: s_visibility,
-                    is_public: decl_get_visibility_text(idx) == "public",
+                    is_public: s_visibility.is_public(),
                     attributes: [],
                     has_doc_comment: false,
                     doc_comment: "",
                     span: span
                 )
         elif tag_text == "8":
-            val e_name = decl_get_name(idx)
+            val e_name = flat_decl_get_name(idx)
             enums[e_name] = Enum(
                 name: e_name,
                 type_params: [],
                 variants: [],
                 visibility: convert_decl_visibility(idx),
-                is_public: decl_get_visibility_text(idx) == "public",
+                is_public: convert_decl_visibility(idx).is_public(),
                 has_doc_comment: false,
                 doc_comment: "",
                 span: span
             )
         elif tag_text == "9":
-            val target_name = decl_get_name(idx)
-            val method_ids = decl_get_body(idx)
+            val target_name = flat_decl_get_name(idx)
+            val method_ids = flat_decl_get_body(idx)
             var methods: Dict<text, Function> = {}
             var mi = 0
             while mi < method_ids.len():
@@ -249,8 +292,8 @@ fn flat_ast_to_module(path: text) -> Module:
                 span: span
             ))
         elif tag_text == "4" or tag_text == "5":
-            val c_name = decl_get_name(idx)
-            val body = decl_get_body(idx)
+            val c_name = flat_decl_get_name(idx)
+            val body = flat_decl_get_body(idx)
             var init = Expr(kind: ExprKind.NilLit, span: span)
             if body.len() > 0:
                 init = convert_flat_expr(body[0])
@@ -282,15 +325,15 @@ fn flat_ast_to_module(path: text) -> Module:
                 value: init,
                 is_mutable: tag_text == "5",
                 visibility: convert_decl_visibility(idx),
-                is_public: decl_get_visibility_text(idx) == "public",
+                is_public: convert_decl_visibility(idx).is_public(),
                 is_volatile: false,
                 has_fixed_address: false,
                 fixed_address: 0,
                 span: span
             )
         elif tag_text == "6":
-            val module_path = decl_get_name(idx)
-            val items_list = decl_get_imports(idx)
+            val module_path = flat_decl_get_name(idx)
+            val items_list = flat_decl_get_imports(idx)
             var import_items: [ImportItem] = []
             var ii = 0
             while ii < items_list.len():
@@ -303,14 +346,14 @@ fn flat_ast_to_module(path: text) -> Module:
             imports.push(Import(
                 module: module_path,
                 items: import_items,
-                is_lazy: decl_get_is_lazy(idx) != 0,
+                is_lazy: flat_decl_get_is_lazy(idx) != 0,
                 span: span
             ))
         elif tag_text == "7":
-            val export_items = decl_get_imports(idx)
+            val export_items = flat_decl_get_imports(idx)
             exports.push(Export(items: export_items, span: span))
         elif tag_text == "14":
-            val aop_data = decl_get_imports(idx)
+            val aop_data = flat_decl_get_imports(idx)
             var aop_pointcut = ""
             if aop_data.len() > 0:
                 aop_pointcut = aop_data[0]
@@ -323,22 +366,22 @@ fn flat_ast_to_module(path: text) -> Module:
             aop_advices.push(AopAdvice(
                 pointcut: aop_pointcut,
                 form: aop_form,
-                handler: decl_get_name(idx),
+                handler: flat_decl_get_name(idx),
                 priority: text_parse_int_simple(aop_priority_text),
                 span: span
             ))
         elif tag_text == "15":
-            val di_data = decl_get_imports(idx)
+            val di_data = flat_decl_get_imports(idx)
             var di_pointcut = ""
             if di_data.len() > 0:
                 di_pointcut = di_data[0]
             di_bindings.push(DiBinding(
                 pointcut: di_pointcut,
-                implementation: decl_get_name(idx),
+                implementation: flat_decl_get_name(idx),
                 span: span
             ))
         elif tag_text == "16":
-            val ar_data = decl_get_imports(idx)
+            val ar_data = flat_decl_get_imports(idx)
             var ar_pointcut = ""
             if ar_data.len() > 0:
                 ar_pointcut = ar_data[0]
@@ -346,7 +389,7 @@ fn flat_ast_to_module(path: text) -> Module:
             if ar_data.len() > 1:
                 ar_message = ar_data[1]
             arch_rules.push(ArchRule(
-                kind: decl_get_name(idx),
+                kind: flat_decl_get_name(idx),
                 pointcut: ar_pointcut,
                 message: ar_message,
                 span: span
@@ -383,12 +426,24 @@ fn flat_ast_to_module(path: text) -> Module:
     built_module
 
 fn parse_and_build_module(source: text, path: text) -> Module:
+    if flat_bridge_trace_enabled():
+        eprint("[flat-bridge] parser_init:start path={path}")
     parser_init_with_path(source, path)
+    if flat_bridge_trace_enabled():
+        eprint("[flat-bridge] parser_init:done path={path}")
+        eprint("[flat-bridge] parse_module_body:start path={path}")
     parse_module_body()
+    if flat_bridge_trace_enabled():
+        eprint("[flat-bridge] parse_module_body:done path={path}")
     if parser_has_errors():
         val errors = parser_get_errors()
         var ei = 0
         while ei < errors.len():
             print "  {errors[ei]}"
             ei = ei + 1
-    flat_ast_to_module(path)
+    if flat_bridge_trace_enabled():
+        eprint("[flat-bridge] flat_ast_to_module:start path={path}")
+    val parsed_module = flat_ast_to_module(path)
+    if flat_bridge_trace_enabled():
+        eprint("[flat-bridge] flat_ast_to_module:done path={path}")
+    parsed_module

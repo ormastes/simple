@@ -1417,10 +1417,17 @@ impl<M: Module> CodegenBackend<M> {
         let functions = expand_with_outlined(mir);
 
         // Check for duplicate function names and deduplicate
-        let mut seen_names = std::collections::HashSet::new();
         let mut unique_functions = Vec::new();
         for func in functions {
-            if seen_names.insert(func.name.clone()) {
+            if let Some(index) = unique_functions
+                .iter()
+                .position(|existing: &MirFunction| existing.name == func.name)
+            {
+                let existing = &mut unique_functions[index];
+                if existing.blocks.is_empty() && !func.blocks.is_empty() {
+                    *existing = func;
+                }
+            } else {
                 unique_functions.push(func);
             }
         }
@@ -2146,6 +2153,27 @@ mod tests {
         backend.compile_all_functions(&module).expect("compile");
 
         assert!(backend.func_ids.contains_key("external_used"));
+    }
+
+    #[test]
+    fn duplicate_function_dedup_prefers_body_over_stub() {
+        let mut stub = MirFunction::new("parser_init_with_path".to_string(), TypeId::VOID, Visibility::Public);
+        stub.blocks.clear();
+
+        let body = MirFunction::new("parser_init_with_path".to_string(), TypeId::VOID, Visibility::Public);
+
+        let mut module = MirModule::new();
+        module.functions.push(stub);
+        module.functions.push(body);
+
+        let mut backend = test_backend();
+        let functions = backend.compile_all_functions(&module).expect("compile");
+
+        let selected = functions
+            .iter()
+            .find(|function| function.name == "parser_init_with_path")
+            .expect("deduped function");
+        assert!(!selected.blocks.is_empty());
     }
 
     #[test]

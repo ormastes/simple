@@ -13,6 +13,7 @@ from hir_types import {HirType, SymbolId, HirModule}
 from hir_definitions import {HirExpr, HirExprKind, HirConst, HirStaticAssert, HirStmt, HirStmtKind, HirBlock, HirFunction, HirCallArg}
 from compiler.core.lexer_types import {Span}
 
+extern fn rt_env_get(key: text) -> text
 
 # Constant value types (compile-time evaluated)
 enum ConstValue:
@@ -227,6 +228,8 @@ impl ConstEvaluator:
             # Variables (must be constants)
             case HirExprKind.Var(symbol):
                 self.eval_var(symbol, expr.span)
+            case HirExprKind.NamedVar(symbol, name):
+                self.eval_named_var(symbol, name, expr.span)
 
             # Function calls (only const fn or builtins)
             case HirExprKind.Call(callee, args, _):
@@ -360,6 +363,28 @@ impl ConstEvaluator:
 
         Err(ConstEvalError.UndefinedVariable(name, span))
 
+    me eval_named_var(symbol: SymbolId, name: text, span: Span) -> Result<ConstValue, ConstEvalError>:
+        val sym = self.module.symbols.get(symbol)
+        match sym:
+            case Some(_):
+                self.eval_var(symbol, span)
+            case nil:
+                self.eval_var_name(name, span)
+
+    me eval_var_name(name: text, span: Span) -> Result<ConstValue, ConstEvalError>:
+        if self.locals.has(name):
+            return Ok(self.locals[name])
+
+        if self.constants.has(name):
+            return Ok(self.constants[name])
+
+        for const_key in self.module.constants.keys():
+            val const_: HirConst = self.module.constants[const_key]
+            if const_.name == name:
+                return self.eval(const_.value)
+
+        Err(ConstEvalError.UndefinedVariable(name, span))
+
     # Evaluate function call (builtins and user-defined const functions)
     me eval_call(callee: HirExpr, args: [HirCallArg], span: Span) -> Result<ConstValue, ConstEvalError>:
         match callee.kind:
@@ -378,6 +403,13 @@ impl ConstEvaluator:
                                 return self.eval_const_fn_call(sym, args, span)
                     case nil:
                         pass
+            case HirExprKind.NamedVar(sym, name):
+                val builtin_result = self.eval_builtin(name, args, span)
+                match builtin_result:
+                    case Ok(_):
+                        return builtin_result
+                    case _:
+                        return self.eval_const_fn_call(sym, args, span)
             case _:
                 pass
         Err(ConstEvalError.NotConstant("function call", span))
@@ -485,6 +517,17 @@ impl ConstEvaluator:
                         Ok(ConstValue.Int(if x > y: x else: y))
                     case _:
                         Err(ConstEvalError.TypeError("integers", "mixed types", span))
+
+            case "sys_env_bool":
+                if args.len() != 1:
+                    return Err(ConstEvalError.NotConstant("sys_env_bool requires 1 argument", span))
+                val key = self.eval(args[0].value)?
+                match key:
+                    case ConstValue.String(env_name):
+                        val value = rt_env_get(env_name).to_lowercase()
+                        Ok(ConstValue.Bool(value == "1" or value == "true" or value == "yes" or value == "on"))
+                    case _:
+                        Err(ConstEvalError.TypeError("string", "non-string", span))
 
             case _:
                 Err(ConstEvalError.NotConstant("function {name}", span))

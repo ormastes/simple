@@ -40,9 +40,10 @@ fn run_predicate_promote(module: MirModule) -> MirModule:
     """
     var new_functions: Dict<SymbolId, MirFunction> = {}
 
-    for func in module.functions.values():
+    for symbol_id in module.functions.keys():
+        val func = module.functions[symbol_id]
         val promoted_func = promote_function_predicate(func)
-        new_functions[promoted_func.symbol] = promoted_func
+        new_functions[symbol_id] = promoted_func
 
     MirModule(name: module.name, functions: new_functions, statics: module.statics, constants: module.constants, types: module.types)
 
@@ -80,36 +81,38 @@ fn promote_block_predicate(block: MirBlock) -> MirBlock:
     Multi-use or non-adjacent MaskFromCmp instructions are preserved verbatim.
     """
     var new_insts: [MirInst] = []
-    var i: i64 = 0
-
-    while i < block.instructions.len():
-        val inst = block.instructions[i]
-        match inst.kind:
-            case MaskFromCmp(mask_dest, cmp_kind, cmp_a, cmp_b):
-                if i + 1 < block.instructions.len():
-                    val next_inst = block.instructions[i + 1]
-                    val fused = match next_inst.kind:
+    var idx = 0
+    while idx < block.instructions.len():
+        val inst = block.instructions[idx]
+        if idx + 1 < block.instructions.len():
+            val next_inst = block.instructions[idx + 1]
+            match inst.kind:
+                case MaskFromCmp(mask_dest, cmp_kind, cmp_a, cmp_b):
+                    match next_inst.kind:
                         case MaskedAdd(dest, mask, a, b):
-                            try_fuse_binary(Some(mask_dest), cmp_kind, Some(cmp_a), Some(cmp_b), mask, dest, a, b, "add")
+                            val fused = try_fuse_binary(Some(mask_dest), cmp_kind, Some(cmp_a), Some(cmp_b), mask, dest, a, b, "add")
+                            if fused.?:
+                                new_insts.push(fused.unwrap())
+                                idx = idx + 2
+                                continue
                         case MaskedMul(dest, mask, a, b):
-                            try_fuse_binary(Some(mask_dest), cmp_kind, Some(cmp_a), Some(cmp_b), mask, dest, a, b, "mul")
+                            val fused = try_fuse_binary(Some(mask_dest), cmp_kind, Some(cmp_a), Some(cmp_b), mask, dest, a, b, "mul")
+                            if fused.?:
+                                new_insts.push(fused.unwrap())
+                                idx = idx + 2
+                                continue
                         case MaskedFma(dest, mask, a, b, c):
-                            try_fuse_ternary(Some(mask_dest), cmp_kind, Some(cmp_a), Some(cmp_b), mask, dest, a, b, c)
+                            val fused = try_fuse_ternary(Some(mask_dest), cmp_kind, Some(cmp_a), Some(cmp_b), mask, dest, a, b, c)
+                            if fused.?:
+                                new_insts.push(fused.unwrap())
+                                idx = idx + 2
+                                continue
                         case _:
-                            nil
-                    if val fused_inst = fused:
-                        new_insts.push(fused_inst)
-                        i = i + 2
-                    else:
-                        new_insts.push(inst)
-                        i = i + 1
-                else:
-                    new_insts.push(inst)
-                    i = i + 1
-
-            case _:
-                new_insts.push(inst)
-                i = i + 1
+                            pass
+                case _:
+                    pass
+        new_insts.push(inst)
+        idx = idx + 1
 
     MirBlock(
         id: block.id,
@@ -145,22 +148,18 @@ fn try_fuse_binary(
     Returns Some(fused_inst) when the mask operand matches the pending dest.
     Returns nil when there is no pending MaskFromCmp or the mask does not match.
     """
-    if val pd = pending_dest:
-        if val cmp_left = cmp_a:
-            if val cmp_right = cmp_b:
-                if not operand_is_local(mask, pd):
-                    return nil
-                val fused_kind = if op == "add":
-                    MirInstKind.PredicatedAdd(dest, cmp_kind, cmp_left, cmp_right, a, b)
-                else:
-                    MirInstKind.PredicatedMul(dest, cmp_kind, cmp_left, cmp_right, a, b)
-                Some(MirInst(kind: fused_kind))
-            else:
-                nil
-        else:
-            nil
+    if not pending_dest.? or not cmp_a.? or not cmp_b.?:
+        return nil
+    val pd = pending_dest.unwrap()
+    val cmp_left = cmp_a.unwrap()
+    val cmp_right = cmp_b.unwrap()
+    if not operand_is_local(mask, pd):
+        return nil
+    val fused_kind = if op == "add":
+        MirInstKind.PredicatedAdd(dest, cmp_kind, cmp_left, cmp_right, a, b)
     else:
-        nil
+        MirInstKind.PredicatedMul(dest, cmp_kind, cmp_left, cmp_right, a, b)
+    Some(MirInst(kind: fused_kind))
 
 fn try_fuse_ternary(
     pending_dest: LocalId?,
@@ -177,17 +176,13 @@ fn try_fuse_ternary(
     Attempt to fuse a pending MaskFromCmp with a MaskedFma.
     Returns Some(PredicatedFma(...)) on match, nil otherwise.
     """
-    if val pd = pending_dest:
-        if val cmp_left = cmp_a:
-            if val cmp_right = cmp_b:
-                if not operand_is_local(mask, pd):
-                    return nil
-                Some(MirInst(kind: MirInstKind.PredicatedFma(
-                    dest, cmp_kind, cmp_left, cmp_right, a, b, c
-                )))
-            else:
-                nil
-        else:
-            nil
-    else:
-        nil
+    if not pending_dest.? or not cmp_a.? or not cmp_b.?:
+        return nil
+    val pd = pending_dest.unwrap()
+    val cmp_left = cmp_a.unwrap()
+    val cmp_right = cmp_b.unwrap()
+    if not operand_is_local(mask, pd):
+        return nil
+    Some(MirInst(kind: MirInstKind.PredicatedFma(
+        dest, cmp_kind, cmp_left, cmp_right, a, b, c
+    )))

@@ -78,6 +78,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 expect(sshd_normalize_boot_tcp_client_fd_for_test(0)).to_equal(200)
+expect(sshd_normalize_boot_tcp_client_fd_for_test(200)).to_equal(200)
 expect(sshd_normalize_boot_tcp_client_fd_for_test(1600)).to_equal(200)
 expect(sshd_normalize_boot_tcp_client_fd_for_test(-1)).to_equal(-1)
 ```

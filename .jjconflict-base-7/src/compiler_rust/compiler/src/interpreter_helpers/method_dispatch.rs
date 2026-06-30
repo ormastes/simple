@@ -605,21 +605,34 @@ pub(crate) fn call_method_on_value(
                     enum_fields.insert("self".to_string(), recv_val.clone());
                     let enum_fields = Arc::new(enum_fields);
                     return exec_function_with_values_and_self(
-                        func, _args, _env, _functions, _classes, _enums, _impl_methods,
+                        func,
+                        _args,
+                        _env,
+                        _functions,
+                        _classes,
+                        _enums,
+                        _impl_methods,
                         Some((enum_name, &enum_fields)),
                     );
                 }
             }
-            let enum_def_opt = _enums.get(enum_name).cloned().or_else(|| {
-                crate::interpreter::GLOBAL_ENUMS.with(|cell| cell.borrow().get(enum_name).cloned())
-            });
+            let enum_def_opt = _enums
+                .get(enum_name)
+                .cloned()
+                .or_else(|| crate::interpreter::GLOBAL_ENUMS.with(|cell| cell.borrow().get(enum_name).cloned()));
             if let Some(enum_def) = enum_def_opt {
                 if let Some(func) = enum_def.methods.iter().find(|m| m.name == method) {
                     let mut enum_fields = HashMap::new();
                     enum_fields.insert("self".to_string(), recv_val.clone());
                     let enum_fields = Arc::new(enum_fields);
                     return exec_function_with_values_and_self(
-                        func, _args, _env, _functions, _classes, _enums, _impl_methods,
+                        func,
+                        _args,
+                        _env,
+                        _functions,
+                        _classes,
+                        _enums,
+                        _impl_methods,
                         Some((enum_name, &enum_fields)),
                     );
                 }

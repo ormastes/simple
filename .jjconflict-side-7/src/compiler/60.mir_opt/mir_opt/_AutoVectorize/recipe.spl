@@ -283,6 +283,10 @@ struct VectorRecipe:
     store_value:      LocalId?
     induction_update: LocalId
 
+struct AccessBases:
+    input_bases: [LocalId]
+    output_base: LocalId?
+
 # ============================================================================
 # K3 Wave — Pattern matcher: trivial elementwise loop
 # ============================================================================
@@ -309,6 +313,70 @@ struct VectorRecipe:
 # the GEP bases are distinct arrays.  If the full alias oracle from 55.borrow
 # is available on the block, a future wave should add an alias_safe check here.
 # See §10 of simd_auto_vectorize_design.md for the follow-up plan.
+
+fn find_induction_local(block: MirBlock) -> LocalId?:
+    for inst in block.instructions:
+        match inst.kind:
+            case BinOp(dest, op, left, right):
+                if _is_index_increment(op, left, right):
+                    return Some(dest)
+            case _:
+                pass_do_nothing
+
+    nil
+
+fn collect_access_bases(accesses: [ArrayAccess]) -> AccessBases:
+    var input_bases: [LocalId] = []
+    for access in accesses:
+        if access.is_load:
+            input_bases.push(access.base_array)
+
+    for access in accesses:
+        if not access.is_load:
+            return AccessBases(input_bases: input_bases, output_base: Some(access.base_array))
+
+    AccessBases(input_bases: input_bases, output_base: nil)
+
+fn find_reduction_accumulator(block: MirBlock) -> LocalId?:
+    for inst in block.instructions:
+        match inst.kind:
+            case BinOp(dest, op, left, right):
+                if not _is_index_increment(op, left, right):
+                    val op_name = _binop_name(op)
+                    if op_name == "add" or op_name == "mul":
+                        return Some(dest)
+            case _:
+                pass_do_nothing
+
+    for inst in block.instructions:
+        match inst.kind:
+            case BinOp(dest, op, left, right):
+                if not _is_index_increment(op, left, right):
+                    return Some(dest)
+            case _:
+                pass_do_nothing
+
+    nil
+
+fn find_matrix_accumulator(block: MirBlock) -> LocalId?:
+    for inst in block.instructions:
+        match inst.kind:
+            case BinOp(dest, op, left, right):
+                if op == MirBinOp.Add and not _is_index_increment(op, left, right):
+                    return Some(dest)
+            case _:
+                pass_do_nothing
+
+    for inst in block.instructions:
+        match inst.kind:
+            case Store(_, value):
+                val maybe_store = get_operand_local(value)
+                if maybe_store.?:
+                    return maybe_store
+            case _:
+                pass_do_nothing
+
+    nil
 
 fn mir_pattern_match_elementwise_loop(block: MirBlock) -> VectorRecipe?:
     """
@@ -337,7 +405,6 @@ fn mir_pattern_match_elementwise_loop(block: MirBlock) -> VectorRecipe?:
     var binop_count = 0
     var call_count = 0
     var last_binop_op: text = ""
-    var induction_local_id = -1
     var element_type_hint = "f32"
     var has_integer_op = false
 
@@ -351,11 +418,7 @@ fn mir_pattern_match_elementwise_loop(block: MirBlock) -> VectorRecipe?:
                 # Distinguish index-increment (Add with a Const 1 operand)
                 # from data operations
                 val is_index_inc = _is_index_increment(op, left, right)
-                if is_index_inc:
-                    # This is the induction variable update — record the dest
-                    # as a candidate induction variable
-                    induction_local_id = dest.id
-                else:
+                if not is_index_inc:
                     binop_count = binop_count + 1
                     last_binop_op = _binop_name(op)
                     if last_binop_op == "xor" or last_binop_op == "and" or last_binop_op == "or" or last_binop_op == "shl" or last_binop_op == "shr":
@@ -380,28 +443,18 @@ fn mir_pattern_match_elementwise_loop(block: MirBlock) -> VectorRecipe?:
         return nil
 
     # Reject if no induction variable candidate (not a counted loop)
-    if induction_local_id < 0:
+    val induction_local = find_induction_local(block)
+    if not induction_local.?:
         return nil
 
-    val induction = LocalId(id: induction_local_id)
+    val induction = induction_local.unwrap()
 
     # W-recipe: collect GEP base arrays for input loads and output store
-    val accesses = detect_array_accesses(block)
-    var input_bases: [LocalId] = []
-    var output_base_id = -1
-    for access in accesses:
-        if access.is_load:
-            input_bases.push(access.base_array)
-        else:
-            output_base_id = access.base_array.id
+    val access_bases = collect_access_bases(detect_array_accesses(block))
 
     if has_integer_op:
         element_type_hint = "i32"
     val elem_width = get_simd_width(element_type_hint)
-    val output_base = if output_base_id < 0:
-        nil
-    else:
-        Some(LocalId(id: output_base_id))
 
     # Build recipe — trip count unknown until SCEV lands (Wave L)
     Some(VectorRecipe(
@@ -413,8 +466,8 @@ fn mir_pattern_match_elementwise_loop(block: MirBlock) -> VectorRecipe?:
         vector_width:     elem_width,
         op_name:          "{last_binop_op}_elementwise",
         note:             "K3 structural match: {load_count} loads, {store_count} stores, op={last_binop_op}",
-        input_bases:      input_bases,
-        output_base:      output_base,
+        input_bases:      access_bases.input_bases,
+        output_base:      access_bases.output_base,
         accumulator:      nil,
         chunk_width:      elem_width,
         index_locals:     [induction],
@@ -482,9 +535,6 @@ fn mir_pattern_match_reduction(block: MirBlock, has_fast_math: bool) -> VectorRe
     var last_binop_op = ""
     var saw_xor_data_op = false
     var saw_add_data_op = false
-    var induction_local_id = -1
-    # Track the BinOp dest that looks like the accumulator update (non-index BinOp)
-    var accumulator_dest_id = -1
 
     for inst in block.instructions:
         match inst.kind:
@@ -494,7 +544,7 @@ fn mir_pattern_match_reduction(block: MirBlock, has_fast_math: bool) -> VectorRe
                 store_count = store_count + 1
             case BinOp(dest, op, left, right):
                 if _is_index_increment(op, left, right):
-                    induction_local_id = dest.id
+                    pass_do_nothing
                 else:
                     data_binop_count = data_binop_count + 1
                     last_binop_op = _binop_name(op)
@@ -502,12 +552,6 @@ fn mir_pattern_match_reduction(block: MirBlock, has_fast_math: bool) -> VectorRe
                         saw_xor_data_op = true
                     if last_binop_op == "add":
                         saw_add_data_op = true
-                    # Record the result of the accumulator BinOp; the rewriter
-                    # needs this to know which local carries the running sum.
-                    if last_binop_op == "add" or last_binop_op == "mul":
-                        accumulator_dest_id = dest.id
-                    elif data_binop_count == 1:
-                        accumulator_dest_id = dest.id
             case Call(dest, func, args):
                 call_count = call_count + 1
             case CallIndirect(dest, ptr, args, sig):
@@ -534,10 +578,11 @@ fn mir_pattern_match_reduction(block: MirBlock, has_fast_math: bool) -> VectorRe
         return nil
 
     # Reject: no induction variable candidate
-    if induction_local_id < 0:
+    val induction_local = find_induction_local(block)
+    if not induction_local.?:
         return nil
 
-    val induction = LocalId(id: induction_local_id)
+    val induction = induction_local.unwrap()
 
     # §8 failure mode F3: FP reductions require fast-math permission.
     # K3 hardcodes element_type = "f32" (Wave K3 limitation — see docstring).
@@ -556,10 +601,6 @@ fn mir_pattern_match_reduction(block: MirBlock, has_fast_math: bool) -> VectorRe
     val red_elem_type = if red_has_int_op: "i32" else: "f32"
     val red_width = get_simd_width(red_elem_type)
     val red_op_name = if is_xor_sum_reduction: "xor_add_reduction" else: "{last_binop_op}_reduction"
-    val accumulator_dest = if accumulator_dest_id < 0:
-        nil
-    else:
-        Some(LocalId(id: accumulator_dest_id))
 
     Some(VectorRecipe(
         kind:             VectorRecipeKind.Reduction,
@@ -572,7 +613,7 @@ fn mir_pattern_match_reduction(block: MirBlock, has_fast_math: bool) -> VectorRe
         note:             "K3 structural match: {load_count} loads, accumulator op={last_binop_op}",
         input_bases:      input_bases,
         output_base:      nil,
-        accumulator:      accumulator_dest,
+        accumulator:      find_reduction_accumulator(block),
         chunk_width:      red_width,
         index_locals:     [induction],
         store_value:      nil,
@@ -594,8 +635,6 @@ fn mir_pattern_match_matrix_kernel(block: MirBlock, has_fast_math: bool) -> Vect
     var mul_count = 0
     var add_count = 0
     var call_count = 0
-    var induction_local_id = -1
-    var accumulator_dest_id = -1
 
     for inst in block.instructions:
         match inst.kind:
@@ -603,17 +642,13 @@ fn mir_pattern_match_matrix_kernel(block: MirBlock, has_fast_math: bool) -> Vect
                 load_count = load_count + 1
             case Store(_, value):
                 store_count = store_count + 1
-                val maybe_store = get_operand_local(value)
-                if maybe_store.?:
-                    accumulator_dest_id = maybe_store.unwrap().id
             case BinOp(dest, op, left, right):
                 if _is_index_increment(op, left, right):
-                    induction_local_id = dest.id
+                    pass_do_nothing
                 elif op == MirBinOp.Mul:
                     mul_count = mul_count + 1
                 elif op == MirBinOp.Add:
                     add_count = add_count + 1
-                    accumulator_dest_id = dest.id
             case Call(_, _, _):
                 call_count = call_count + 1
             case CallIndirect(_, _, _, _):
@@ -623,28 +658,14 @@ fn mir_pattern_match_matrix_kernel(block: MirBlock, has_fast_math: bool) -> Vect
 
     if call_count > 0 or load_count < 2 or mul_count != 1 or add_count != 1:
         return nil
-    if induction_local_id < 0:
+    val induction_local = find_induction_local(block)
+    if not induction_local.?:
         return nil
     if store_count == 0 and not has_fast_math:
         return nil
 
-    val induction = LocalId(id: induction_local_id)
-    val accesses = detect_array_accesses(block)
-    var input_bases: [LocalId] = []
-    var output_base_id = -1
-    for access in accesses:
-        if access.is_load:
-            input_bases.push(access.base_array)
-        else:
-            output_base_id = access.base_array.id
-    val accumulator_dest = if accumulator_dest_id < 0:
-        nil
-    else:
-        Some(LocalId(id: accumulator_dest_id))
-    val output_base = if output_base_id < 0:
-        nil
-    else:
-        Some(LocalId(id: output_base_id))
+    val induction = induction_local.unwrap()
+    val access_bases = collect_access_bases(detect_array_accesses(block))
 
     Some(VectorRecipe(
         kind:             VectorRecipeKind.MatrixKernel,
@@ -655,12 +676,12 @@ fn mir_pattern_match_matrix_kernel(block: MirBlock, has_fast_math: bool) -> Vect
         vector_width:     get_simd_width("f32"),
         op_name:          if store_count > 0: "matrix_outer_product" else: "matrix_dot",
         note:             "matrix-kernel structural match: loads={load_count}, stores={store_count}",
-        input_bases:      input_bases,
-        output_base:      output_base,
-        accumulator:      accumulator_dest,
+        input_bases:      access_bases.input_bases,
+        output_base:      access_bases.output_base,
+        accumulator:      find_matrix_accumulator(block),
         chunk_width:      get_simd_width("f32"),
         index_locals:     [induction],
-        store_value:      accumulator_dest,
+        store_value:      find_matrix_accumulator(block),
         induction_update: induction
     ))
 

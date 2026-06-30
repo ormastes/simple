@@ -1,1 +1,0 @@
-../skills/bug_review.md

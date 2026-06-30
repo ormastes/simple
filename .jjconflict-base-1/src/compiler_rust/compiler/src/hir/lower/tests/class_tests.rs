@@ -92,3 +92,32 @@ class Counter:
     let result = parse_and_lower(source);
     assert!(result.is_ok(), "Reading self in fn method should work");
 }
+
+#[test]
+fn test_self_return_type_in_method_ok() {
+    let source = r#"
+class Counter:
+    count: i32
+
+    fn identity() -> Self:
+        self
+"#;
+    let result = parse_and_lower(source);
+    assert!(
+        result.is_ok(),
+        "Self return type in method should resolve to owner type"
+    );
+}
+
+#[test]
+fn test_self_return_type_in_trait_method_ok() {
+    let source = r#"
+trait Cloneable:
+    fn clone() -> Self
+"#;
+    let result = parse_and_lower(source);
+    assert!(
+        result.is_ok(),
+        "Self return type in trait method should resolve for vtable metadata"
+    );
+}

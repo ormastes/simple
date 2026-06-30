@@ -537,6 +537,11 @@ pub extern "C" fn rt_process_is_running(pid: i64) -> bool {
     }
 }
 
+#[no_mangle]
+pub extern "C" fn rt_process_exists(pid: i64) -> bool {
+    rt_process_is_running(pid)
+}
+
 /// Wait for a previously spawned async process to finish.
 /// If timeout_ms <= 0, waits indefinitely.
 /// If timeout_ms > 0, polls in a loop up to the timeout.

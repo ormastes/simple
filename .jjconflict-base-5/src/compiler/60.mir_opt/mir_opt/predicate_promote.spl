@@ -40,9 +40,10 @@ fn run_predicate_promote(module: MirModule) -> MirModule:
     """
     var new_functions: Dict<SymbolId, MirFunction> = {}
 
-    for func in module.functions.values():
+    for symbol_id in module.functions.keys():
+        val func = module.functions[symbol_id]
         val promoted_func = promote_function_predicate(func)
-        new_functions[promoted_func.symbol] = promoted_func
+        new_functions[symbol_id] = promoted_func
 
     MirModule(name: module.name, functions: new_functions, statics: module.statics, constants: module.constants, types: module.types)
 
@@ -80,36 +81,93 @@ fn promote_block_predicate(block: MirBlock) -> MirBlock:
     Multi-use or non-adjacent MaskFromCmp instructions are preserved verbatim.
     """
     var new_insts: [MirInst] = []
-    var i: i64 = 0
+    var pending_mask_dest: LocalId? = nil
+    var pending_mask_inst: MirInst? = nil
+    var pending_cmp_kind: text = ""
+    var pending_cmp_a: MirOperand? = nil
+    var pending_cmp_b: MirOperand? = nil
 
-    while i < block.instructions.len():
-        val inst = block.instructions[i]
+    for inst in block.instructions:
         match inst.kind:
-            case MaskFromCmp(mask_dest, cmp_kind, cmp_a, cmp_b):
-                if i + 1 < block.instructions.len():
-                    val next_inst = block.instructions[i + 1]
-                    val fused = match next_inst.kind:
-                        case MaskedAdd(dest, mask, a, b):
-                            try_fuse_binary(Some(mask_dest), cmp_kind, Some(cmp_a), Some(cmp_b), mask, dest, a, b, "add")
-                        case MaskedMul(dest, mask, a, b):
-                            try_fuse_binary(Some(mask_dest), cmp_kind, Some(cmp_a), Some(cmp_b), mask, dest, a, b, "mul")
-                        case MaskedFma(dest, mask, a, b, c):
-                            try_fuse_ternary(Some(mask_dest), cmp_kind, Some(cmp_a), Some(cmp_b), mask, dest, a, b, c)
-                        case _:
-                            nil
-                    if val fused_inst = fused:
-                        new_insts.push(fused_inst)
-                        i = i + 2
-                    else:
-                        new_insts.push(inst)
-                        i = i + 1
+            case MaskFromCmp(dest, cmp_kind, a, b):
+                # Flush any unfused previous pending MaskFromCmp (inline, not helper)
+                if val pending_inst = pending_mask_inst:
+                    new_insts.push(pending_inst)
+                # Record this one as pending
+                pending_mask_dest = Some(dest)
+                pending_mask_inst = Some(inst)
+                pending_cmp_kind = cmp_kind
+                pending_cmp_a = Some(a)
+                pending_cmp_b = Some(b)
+
+            case MaskedAdd(dest, mask, a, b):
+                val fused = try_fuse_binary(
+                    pending_mask_dest, pending_cmp_kind,
+                    pending_cmp_a, pending_cmp_b,
+                    mask, dest, a, b, "add"
+                )
+                if val fused_inst = fused:
+                    new_insts.push(fused_inst)
                 else:
+                    if val pending_inst = pending_mask_inst:
+                        new_insts.push(pending_inst)
                     new_insts.push(inst)
-                    i = i + 1
+                pending_mask_dest = nil
+                pending_mask_inst = nil
+                pending_cmp_kind = ""
+                pending_cmp_a = nil
+                pending_cmp_b = nil
+
+            case MaskedMul(dest, mask, a, b):
+                val fused = try_fuse_binary(
+                    pending_mask_dest, pending_cmp_kind,
+                    pending_cmp_a, pending_cmp_b,
+                    mask, dest, a, b, "mul"
+                )
+                if val fused_inst = fused:
+                    new_insts.push(fused_inst)
+                else:
+                    if val pending_inst = pending_mask_inst:
+                        new_insts.push(pending_inst)
+                    new_insts.push(inst)
+                pending_mask_dest = nil
+                pending_mask_inst = nil
+                pending_cmp_kind = ""
+                pending_cmp_a = nil
+                pending_cmp_b = nil
+
+            case MaskedFma(dest, mask, a, b, c):
+                val fused = try_fuse_ternary(
+                    pending_mask_dest, pending_cmp_kind,
+                    pending_cmp_a, pending_cmp_b,
+                    mask, dest, a, b, c
+                )
+                if val fused_inst = fused:
+                    new_insts.push(fused_inst)
+                else:
+                    if val pending_inst = pending_mask_inst:
+                        new_insts.push(pending_inst)
+                    new_insts.push(inst)
+                pending_mask_dest = nil
+                pending_mask_inst = nil
+                pending_cmp_kind = ""
+                pending_cmp_a = nil
+                pending_cmp_b = nil
 
             case _:
+                # Any other instruction: flush pending MaskFromCmp (inline) then emit
+                if val pending_inst = pending_mask_inst:
+                    new_insts.push(pending_inst)
+                pending_mask_dest = nil
+                pending_mask_inst = nil
+                pending_cmp_kind = ""
+                pending_cmp_a = nil
+                pending_cmp_b = nil
                 new_insts.push(inst)
-                i = i + 1
+
+    # Flush any trailing unfused MaskFromCmp at end of block (inline)
+    if val pending_inst = pending_mask_inst:
+        new_insts.push(pending_inst)
 
     MirBlock(
         id: block.id,

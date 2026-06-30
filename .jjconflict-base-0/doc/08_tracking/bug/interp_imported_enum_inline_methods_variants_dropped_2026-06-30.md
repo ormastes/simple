@@ -1,84 +1,48 @@
-# Bug: imported enum with inline methods loses its variants under the interpreter
+# Bug: `std.sdn.*` resolves to a STALE bundled stdlib copy (divergent SdnValue API)
 
 **Date:** 2026-06-30
-**Severity:** High — any `match`/construction on an imported enum whose body
-mixes variants with inline `static fn` methods fails under the classic
-interpreter (`SIMPLE_EXECUTION_MODE=interpret`, which is what `bin/simple test`
-uses). JIT (`run` default) handles it correctly, so this is interpreter-only.
-**Component:** Rust seed — interpreter module/enum registration
-(`interpreter/expr/calls.rs:501-561`, enum import/registration path).
+**Severity:** Medium — latent. Any code importing `std.sdn.value` / `std.sdn.parser`
+silently gets the seed-bundled SDN module, whose `SdnValue` has a DIFFERENT,
+older variant set (`bool`/`i32`/`f32`/`text`, no `Int`/`String`/`Float`/`Bool`).
+A `match v: case SdnValue.Int(i)` then fails with "unknown variant or method
+'Int' on enum SdnValue", even though the canonical `SdnValue` clearly has `Int`.
+**Component:** module path resolution — `interpreter_module/path_resolution.rs`.
 
-## Symptom
+## Two divergent copies of the SDN stdlib
 
-`match v: case SdnValue.Int(i): …` (and constructing `SdnValue.Int(42)`) raises:
+| Path | `SdnValue` variants | Reached by |
+|------|--------------------|-----------|
+| `src/lib/common/sdn/value.spl` (canonical, live) | `Null Bool Int Float String Array Dict Table(headers:,rows:)` | `use std.common.sdn.value` |
+| `src/compiler_rust/lib/std/src/sdn/value.spl` (seed-bundled, STALE) | `Null bool i32 f32 text Array Dict Table(pos 3-tuple)` | `use std.sdn.value` |
 
-```
-error: semantic: unknown variant or method 'Int' on enum SdnValue
-```
+`path_resolution.rs:666` lists `src/compiler_rust/lib/std/src` ahead of the
+other std roots, and there is NO `std.*` root mapping to `src/lib/common`, so
+`std.sdn.*` ONLY ever finds the bundled stale copy. No active `src/lib` /
+`src/app` code uses the bundled `i32` API; 10+ files use the canonical `Int`
+API (imported via `std.common.sdn.*`).
 
-even though `enum SdnValue` (src/lib/common/sdn/value.spl:28) clearly declares
-`Int(i64)`. At calls.rs:508 `enum_def.variants.iter().find(|v| v.name == "Int")`
-returns None — the registered enum_def's `.variants` is missing/partial for the
-imported enum.
-
-Fails 5 examples in `test/01_unit/lib/common/roundtrip_spec.spl`
-("preserves primitives/inline dicts/inline arrays/block dicts/...").
-
-## Minimal reproducer
+## Reproducer
 
 ```simple
 use std.sdn.value.{SdnValue}
 fn main():
-    val v = SdnValue.Int(42)
-    match v:
-        case SdnValue.Int(i): print("int {i}")
-        case _: print("other")
+    print(SdnValue.i32(5))   # OK   — bundled-only variant resolves
+    print(SdnValue.Int(5))   # FAIL — "unknown variant or method 'Int'"
 ```
 
-- `bin/simple run repro.spl` (JIT)            → `int 42`  ✓
-- `SIMPLE_EXECUTION_MODE=interpret … run`      → `unknown variant or method 'Int'` ✗
+## Workaround (LANDED)
 
-## Isolation (what is NOT the cause)
+`test/01_unit/lib/common/roundtrip_spec.spl` now imports the canonical path
+`std.common.sdn.{parser,value}` instead of `std.sdn.*`. That is the correct path
+for the live Int-API SDN module.
 
-An equivalent enum **defined inline in the same file** works under the
-interpreter — including with a named-field variant (`Table(headers:…, rows:…)`)
-AND a static method whose name case-collides with a variant (`static fn int` vs
-`Int`). Both of these passed:
+## Proper fix (not done — needs a design call)
 
-```simple
-enum MyV:
-    Null
-    Bool(bool)
-    Int(i64)
-    String(text)
-    Table(headers: [text], rows: [[i64]])
-    static fn int(i: i64) -> MyV: MyV.Int(i)
-# match MyV.Int(42) → "int 42"  ✓ under interpret
-```
-
-So the trigger is specifically that the enum is **imported from a module** and
-its body mixes variants with inline `static fn` methods (SdnValue has ~15 inline
-static factory methods in its body, lines 38-207). The variants are dropped from
-the interpreter's registered enum_def during import; JIT keeps them.
-
-## Confirmed: variants absent from ALL registries (not a shadowing issue)
-
-Tried preferring whichever of `enums` / `BLOCK_SCOPED_ENUMS` / `GLOBAL_ENUMS`
-actually declares the variant — no effect. The variants are missing from every
-registry, so the imported enum's `variants` are dropped at **import/registration
-time**, not merely shadowed by a stale stub. The fix must restore variants when
-an imported enum with inline `static fn` methods is loaded.
-
-## Suspected root cause
-
-The module-import enum registration likely processes the enum's inline methods
-into the impl/method table but registers an enum_def whose `.variants` is empty
-or stale (a forward/partial entry overwriting the full one), so the later
-`SdnValue.Int` lookup at calls.rs:508 misses. Compare with the inline-define
-path, which registers variants intact. Audit the import path that populates
-`enums` / `GLOBAL_ENUMS` / `BLOCK_SCOPED_ENUMS` for enums that carry inline
-methods — ensure variants survive when the inline methods are split out.
-
-## Repro files (scratch)
-
-`/tmp/cl_sdn.spl`, `/tmp/cl_enum.spl` (passing inline control).
+The two SDN stdlibs have genuinely diverged (different value model). Either:
+- reconcile / delete the stale bundled `src/compiler_rust/lib/std/src/sdn/*`
+  if it is no longer needed for bootstrap, or
+- make `std.sdn.*` resolve to the canonical `src/lib/common/sdn` for non-seed
+  runs (resolver precedence), or
+- formally deprecate `std.sdn.*` in favour of `std.common.sdn.*`.
+Touching the bundled copy or resolver order risks the bootstrap path, so this is
+deferred to a deliberate change.

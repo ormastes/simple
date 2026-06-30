@@ -126,6 +126,7 @@ fn encode_inst_rv32(ectx: Rv32EncodeContext, inst: MachInst) -> Rv32EncodeContex
     var code = ectx.code
     var relocs = ectx.relocations
     var pending = ectx.pending_jumps
+    val common = riscv_encode_common_inst(inst, code, relocs, RV32_R_RISCV_CALL_PLT)
 
     if inst.opcode == RV_OP_NOP:
         # NOP = ADDI x0, x0, 0 = 0x00000013
@@ -148,8 +149,8 @@ fn encode_inst_rv32(ectx: Rv32EncodeContext, inst: MachInst) -> Rv32EncodeContex
         val imm = get_imm_value(inst.operands[1])
         code = encode_li_rv32(code, rd, imm)
 
-    elif val updated = riscv_encode_common_inst(inst, code, relocs, RV32_R_RISCV_CALL_PLT):
-        code = updated
+    elif common.?:
+        code = common.unwrap()
 
     elif inst.opcode == RV_OP_LW:
         # LW rd, offset(rs1): I-type funct3=0x2, opcode=0x03
@@ -190,7 +191,7 @@ fn encode_inst_rv32(ectx: Rv32EncodeContext, inst: MachInst) -> Rv32EncodeContex
         val rd = get_phys_reg_id(inst.operands[0])
         match inst.operands[1].kind:
             case Label(block_id):
-                val jump_offset = code_len(code)
+                val jump_offset = code.len()
                 val enc = riscv_encode_j_type(0, rd, 0x6F)
                 code = riscv_emit_u32_le(code, enc)
                 pending.push(Rv32PendingJump(code_offset: jump_offset, target_block: block_id, jump_kind: RV32_JUMP_JAL))
@@ -216,7 +217,7 @@ fn encode_inst_rv32(ectx: Rv32EncodeContext, inst: MachInst) -> Rv32EncodeContex
         val funct3 = riscv_branch_funct3(inst.opcode)
         match inst.operands[2].kind:
             case Label(block_id):
-                val jump_offset = code_len(code)
+                val jump_offset = code.len()
                 val enc = riscv_encode_b_type(0, rs2, rs1, funct3, 0x63)
                 code = riscv_emit_u32_le(code, enc)
                 pending.push(Rv32PendingJump(code_offset: jump_offset, target_block: block_id, jump_kind: RV32_JUMP_BRANCH))
@@ -229,7 +230,7 @@ fn encode_inst_rv32(ectx: Rv32EncodeContext, inst: MachInst) -> Rv32EncodeContex
         # Emits 8 bytes (2 instructions), with R_RISCV_CALL_PLT relocation on the pair
         match inst.operands[0].kind:
             case Sym(name):
-                val reloc_offset = code_len(code)
+                val reloc_offset = code.len()
                 # AUIPC x1(ra), 0 - placeholder upper
                 val auipc_enc = riscv_encode_u_type(0, RV_X1, 0x17)
                 code = riscv_emit_u32_le(code, auipc_enc)
@@ -246,7 +247,7 @@ fn encode_inst_rv32(ectx: Rv32EncodeContext, inst: MachInst) -> Rv32EncodeContex
                 relocs.push(reloc)
             case Label(block_id):
                 # Intra-function call via JAL x1, offset
-                val jump_offset = code_len(code)
+                val jump_offset = code.len()
                 val enc = riscv_encode_j_type(0, RV_X1, 0x6F)
                 code = riscv_emit_u32_le(code, enc)
                 pending.push(Rv32PendingJump(code_offset: jump_offset, target_block: block_id, jump_kind: RV32_JUMP_JAL))
@@ -313,7 +314,7 @@ fn encode_function_rv32(func: MachFunction) -> EncodedFunction:
     # Pass 1: encode all instructions, record block offsets and pending jumps
     for block in func.blocks:
         var offsets = ectx.block_offsets
-        offsets[block.block_id] = ectx.code_len(code)
+        offsets[block.block_id] = ectx.code.len()
         ectx = Rv32EncodeContext(code: ectx.code, relocations: ectx.relocations, block_offsets: offsets, pending_jumps: ectx.pending_jumps)
 
         for inst in block.insts:
@@ -321,10 +322,10 @@ fn encode_function_rv32(func: MachFunction) -> EncodedFunction:
 
     # Pass 2: patch branch/jump targets
     var final_code = ectx.code
-    for i in 0..ectx.pending_jumps_len(pending_jumps):
+    for i in 0..ectx.pending_jumps.len():
         val pj = ectx.pending_jumps[i]
         val target_block = pj.target_block
-        if ectx.block_offsets_contains(block_offsets, target_block):
+        if ectx.block_offsets.contains(target_block):
             val target_offset = ectx.block_offsets[target_block]
             val rel_offset = target_offset - pj.code_offset
             final_code = patch_jump_rv32(final_code, pj.code_offset, rel_offset, pj.jump_kind)

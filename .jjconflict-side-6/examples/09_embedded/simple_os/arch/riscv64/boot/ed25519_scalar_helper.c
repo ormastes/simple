@@ -114,6 +114,24 @@ static void ed25519_clamp_scalar(spl_u8 a[32]) {
     a[31] |= 64u;
 }
 
+/* Keep this helper's embedded ring copy private. The RV64 boot image also
+ * links curve25519_ring_helper.c; exporting two strong ring_core x25519/scalar
+ * symbol sets leaves the final freestanding image at the mercy of link order. */
+#define ring_core_0_17_14__CRYPTO_memcmp ed25519_scalar_ring_CRYPTO_memcmp
+#define ring_core_0_17_14__x25519_fe_invert ed25519_scalar_ring_x25519_fe_invert
+#define ring_core_0_17_14__x25519_fe_isnegative ed25519_scalar_ring_x25519_fe_isnegative
+#define ring_core_0_17_14__x25519_fe_mul_ttt ed25519_scalar_ring_x25519_fe_mul_ttt
+#define ring_core_0_17_14__x25519_fe_neg ed25519_scalar_ring_x25519_fe_neg
+#define ring_core_0_17_14__x25519_fe_tobytes ed25519_scalar_ring_x25519_fe_tobytes
+#define ring_core_0_17_14__x25519_ge_double_scalarmult_vartime ed25519_scalar_ring_x25519_ge_double_scalarmult_vartime
+#define ring_core_0_17_14__x25519_ge_frombytes_vartime ed25519_scalar_ring_x25519_ge_frombytes_vartime
+#define ring_core_0_17_14__x25519_ge_scalarmult_base ed25519_scalar_ring_x25519_ge_scalarmult_base
+#define ring_core_0_17_14__x25519_public_from_private_generic_masked ed25519_scalar_ring_x25519_public_from_private_generic_masked
+#define ring_core_0_17_14__x25519_scalar_mult_generic_masked ed25519_scalar_ring_x25519_scalar_mult_generic_masked
+#define ring_core_0_17_14__x25519_sc_mask ed25519_scalar_ring_x25519_sc_mask
+#define ring_core_0_17_14__x25519_sc_muladd ed25519_scalar_ring_x25519_sc_muladd
+#define ring_core_0_17_14__x25519_sc_reduce ed25519_scalar_ring_x25519_sc_reduce
+
 #include "../../../../../../src/compiler_rust/vendor/ring/crypto/mem.c"
 #include "../../../../../../src/compiler_rust/vendor/ring/crypto/curve25519/curve25519.c"
 

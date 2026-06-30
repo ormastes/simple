@@ -446,23 +446,30 @@ impl Lowerer {
     pub(crate) fn register_trait(&mut self, t: &ast::TraitDef) -> LowerResult<()> {
         let mut trait_info = HirTraitInfo::new(t.name.clone());
         trait_info.generic_params = t.generic_params.clone();
+        let previous_class_type = self.current_class_type;
+        self.current_class_type = Some(TypeId::ANY);
 
         // Add each method with its vtable slot
         // Methods are assigned slots in declaration order (0-indexed)
-        for method in &t.methods {
-            // Resolve parameter types (skip self)
-            let param_types: Vec<TypeId> = method
-                .params
-                .iter()
-                .filter(|p| p.name != "self")
-                .map(|p| self.resolve_type_opt(&p.ty))
-                .collect::<LowerResult<Vec<_>>>()?;
+        let result = (|| -> LowerResult<()> {
+            for method in &t.methods {
+                // Resolve parameter types (skip self)
+                let param_types: Vec<TypeId> = method
+                    .params
+                    .iter()
+                    .filter(|p| p.name != "self")
+                    .map(|p| self.resolve_type_opt(&p.ty))
+                    .collect::<LowerResult<Vec<_>>>()?;
 
-            // Resolve return type
-            let return_type = self.resolve_type_opt(&method.return_type)?;
+                // Resolve return type
+                let return_type = self.resolve_type_opt(&method.return_type)?;
 
-            trait_info.add_method(method.name.clone(), param_types, return_type);
-        }
+                trait_info.add_method(method.name.clone(), param_types, return_type);
+            }
+            Ok(())
+        })();
+        self.current_class_type = previous_class_type;
+        result?;
 
         // Store trait info in module
         self.module.trait_infos.insert(t.name.clone(), trait_info);

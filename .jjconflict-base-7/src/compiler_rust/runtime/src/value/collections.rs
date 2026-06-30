@@ -10,6 +10,7 @@ use super::byte_kernels::{
 use super::core::RuntimeValue;
 use super::dict::RuntimeDict;
 use super::heap::{gc_flags, get_typed_ptr, get_typed_ptr_mut, unregister_heap_ptr, HeapHeader, HeapObjectType};
+use super::objects::rt_closure_func_ptr;
 use super::primitive_sort;
 use simple_simd::{active_simd_tier, SimdTier};
 
@@ -1526,6 +1527,18 @@ pub extern "C" fn rt_string_concat(a: RuntimeValue, b: RuntimeValue) -> RuntimeV
     }
 }
 
+/// Runtime dispatch for `any + any`.
+#[no_mangle]
+pub extern "C" fn rt_any_add(left: RuntimeValue, right: RuntimeValue) -> RuntimeValue {
+    if matches!(left.heap_type(), Some(HeapObjectType::String))
+        || matches!(right.heap_type(), Some(HeapObjectType::String))
+    {
+        return rt_string_concat(rt_to_string(left), rt_to_string(right));
+    }
+
+    RuntimeValue::from_int(left.as_int() + right.as_int())
+}
+
 /// Check if string starts with prefix
 /// Returns 1 if true, 0 if false
 #[no_mangle]
@@ -2532,6 +2545,51 @@ pub extern "C" fn rt_array_last(array: RuntimeValue) -> RuntimeValue {
     rt_array_get(array, -1)
 }
 
+/// Return elements for which the closure predicate returns a truthy value.
+#[no_mangle]
+pub extern "C" fn rt_array_filter(array: RuntimeValue, closure: RuntimeValue) -> RuntimeValue {
+    let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
+    let result = rt_array_new(0);
+    if result.is_nil() {
+        return result;
+    }
+
+    let func_ptr = rt_closure_func_ptr(closure);
+    if func_ptr.is_null() {
+        return result;
+    }
+
+    let func: extern "C" fn(RuntimeValue, RuntimeValue) -> RuntimeValue = unsafe { std::mem::transmute(func_ptr) };
+    unsafe {
+        for item in (*arr).as_slice() {
+            if func(closure, *item).truthy() {
+                rt_array_push(result, *item);
+            }
+        }
+    }
+    result
+}
+
+/// Return the first element for which the closure predicate is truthy.
+#[no_mangle]
+pub extern "C" fn rt_array_find(array: RuntimeValue, closure: RuntimeValue) -> RuntimeValue {
+    let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
+    let func_ptr = rt_closure_func_ptr(closure);
+    if func_ptr.is_null() {
+        return RuntimeValue::NIL;
+    }
+
+    let func: extern "C" fn(RuntimeValue, RuntimeValue) -> RuntimeValue = unsafe { std::mem::transmute(func_ptr) };
+    unsafe {
+        for item in (*arr).as_slice() {
+            if func(closure, *item).truthy() {
+                return *item;
+            }
+        }
+    }
+    RuntimeValue::NIL
+}
+
 /// Find the index of a value in an array
 /// Returns -1 if not found
 #[no_mangle]
@@ -2965,6 +3023,11 @@ pub extern "C" fn rt_array_all_truthy(array: RuntimeValue) -> i64 {
     }
 }
 
+#[no_mangle]
+pub extern "C" fn rt_array_all(array: RuntimeValue) -> i64 {
+    rt_array_all_truthy(array)
+}
+
 /// Check if any element is truthy
 /// Returns 1 if any element is truthy, 0 otherwise
 #[no_mangle]
@@ -2991,6 +3054,11 @@ pub extern "C" fn rt_array_any_truthy(array: RuntimeValue) -> i64 {
         }
         0
     }
+}
+
+#[no_mangle]
+pub extern "C" fn rt_array_any(array: RuntimeValue) -> i64 {
+    rt_array_any_truthy(array)
 }
 
 /// Fill array with a value (in place)

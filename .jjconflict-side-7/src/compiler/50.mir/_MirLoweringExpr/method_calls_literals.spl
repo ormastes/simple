@@ -64,6 +64,29 @@ impl MirLowering:
                             self.builder = b
                             return dest
                         case _: ()
+            case NamedVar(sym, _):
+                val recv_name = if self.symbols.get(sym).?: self.symbols.get(sym).name else: ""
+                if recv_name == "this":
+                    match method:
+                        case "index":
+                            var b = self.builder
+                            val dest = b.new_temp(MirType.i64())
+                            b.emit(MirInst(kind: MirInstKind.GpuGlobalId(dest, 0), span: nil))
+                            self.builder = b
+                            return dest
+                        case "thread_index":
+                            var b = self.builder
+                            val dest = b.new_temp(MirType.i64())
+                            b.emit(MirInst(kind: MirInstKind.GpuLocalId(dest, 0), span: nil))
+                            self.builder = b
+                            return dest
+                        case "group_index":
+                            var b = self.builder
+                            val dest = b.new_temp(MirType.i64())
+                            b.emit(MirInst(kind: MirInstKind.GpuBlockId(dest, 0), span: nil))
+                            self.builder = b
+                            return dest
+                        case _: ()
             case _: ()
 
         # Pre-lower writeback origin for mutating methods on indexed/field receivers.
@@ -373,33 +396,26 @@ impl MirLowering:
         self.builder = b
         dest
 
-    me bootstrap_symbol_name(symbol: SymbolId) -> text:
-        if not symbol.?:
-            return ""
-        val id = self.symbol_id_value(symbol)
-        if id == 1:
-            return "bootstrap_version"
-        if id == 2:
-            return "native_build_help"
-        if id == 3:
-            return "compile_result_exit"
-        if id == 4:
-            return "run_native_build_bootstrap"
-        if id == 5:
-            return "get_cli_args"
-        if id == 6:
-            return "main"
-        if id == 7:
-            return "bootstrap_output_from_args"
-        ""
-
     me symbol_to_operand(symbol: SymbolId) -> MirOperand:
         """Convert a symbol to a function pointer operand."""
         # Look up function name from symbol table for direct calls
         val sym = self.symbols.get(symbol)
-        var name = if sym.?: sym.name else: self.bootstrap_symbol_name(symbol)
-        if name == "":
-            name = "unknown_{self.symbol_id_value(symbol)}"
+        val symbol_id = self.symbol_id_value(symbol)
+        val name = if sym.?:
+            sym.name
+        else:
+            var found_name = ""
+            var fn_i = 0
+            while fn_i < self.current_function_symbols.len():
+                if self.symbol_id_value(self.current_function_symbols[fn_i]) == symbol_id:
+                    found_name = self.current_function_names[fn_i]
+                    fn_i = self.current_function_symbols.len()
+                else:
+                    fn_i = fn_i + 1
+            if found_name != "":
+                found_name
+            else:
+                "unknown_{symbol_id}"
         MirOperand(kind: MirOperandKind.Const(
             MirConstValue.Str(name),
             MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))

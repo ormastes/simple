@@ -236,8 +236,8 @@ impl CompilerDriver:
         # Weave each MIR function
         for mod_name in self.ctx.mir_modules.keys():
             val mir_module = self.ctx.mir_modules[mod_name]
-            var woven_functions: Dict<SymbolId, MirFunction> = {}
-            for func in mir_module.functions.values():
+            var woven_functions = mir_module.functions
+            for func in mir_module.functions:
                 # Extract block info for AOP matching
                 val blocks = extract_mir_block_info(func.blocks)
                 # Run weaving analysis
@@ -245,22 +245,14 @@ impl CompilerDriver:
                 # Apply advice insertions to MIR
                 if result.advices_inserted > 0:
                     val woven_func = apply_weaving_result(func, result)
-                    woven_functions[func.symbol] = woven_func
-                else:
-                    woven_functions[func.symbol] = func
+                    woven_functions[func.name] = woven_func
                 # Report diagnostics
                 for diag in result.diagnostics:
                     if diag.is_error():
                         self.ctx.errors.push("[AOP] {diag.message}")
                     elif diag.is_warning():
                         self.ctx.warnings.push("[AOP] {diag.message}")
-            self.ctx.mir_modules[mod_name] = MirModule(
-                name: mir_module.name,
-                functions: woven_functions,
-                statics: mir_module.statics,
-                constants: mir_module.constants,
-                types: mir_module.types
-            )
+            self.ctx.mir_modules[mod_name] = MirModule(name: mir_module.name, functions: woven_functions, statics: mir_module.statics, constants: mir_module.constants, types: mir_module.types)
 
     # --------------------------------------------------------------------------
     # Debug Trace Injection
@@ -311,11 +303,10 @@ impl CompilerDriver:
                 skip_idx = skip_idx + 1
             return self.ctx.errors.len() == 0
 
-        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and (rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY") ?? "") == "":
             print "[driver-mir] bootstrap fixed:start"
-            val bootstrap_hir = self.ctx.hir_modules["app.cli.bootstrap_main"]
-            var bootstrap_lowering = MirLowering.new(bootstrap_hir.symbols)
-            var bootstrap_mir = bootstrap_lowering.lower_module(bootstrap_hir)
+            var bootstrap_lowering = MirLowering.new(SymbolTable.new())
+            var bootstrap_mir = bootstrap_lowering.lower_module(self.ctx.hir_modules["app.cli.bootstrap_main"])
             self.ctx.bootstrap_entry_mir = Some(bootstrap_mir)
             print "[driver-mir] bootstrap fixed:done"
             return self.ctx.errors.len() == 0
@@ -341,6 +332,8 @@ impl CompilerDriver:
                 ),
                 symbols: SymbolTable.new(),
                 local_map: {},
+                current_function_symbols: [],
+                current_function_names: [],
                 loop_stack: [],
                 errors: [],
                 field_map: {}
@@ -348,11 +341,10 @@ impl CompilerDriver:
             while direct_idx < self.ctx.sources.len():
                 val src_direct = self.ctx.sources[direct_idx]
                 val name_direct = src_direct.module_name
-                val mir_direct = if _driver_is_bootstrap_entry_source(src_direct.path, name_direct) or (rt_env_get("SIMPLE_UNSTUB_HIR") ?? "") == "1":
+                val native_entry_closure_direct = (rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
+                val mir_direct = if native_entry_closure_direct or _driver_is_bootstrap_entry_source(src_direct.path, name_direct) or (rt_env_get("SIMPLE_UNSTUB_HIR") ?? "") == "1":
                     print "[driver-mir] bootstrap lower:start"
-                    val direct_hir = self.ctx.hir_modules[name_direct]
-                    direct_lowering.symbols = direct_hir.symbols
-                    var lowered_entry = direct_lowering.lower_module(direct_hir)
+                    var lowered_entry = direct_lowering.lower_module(self.ctx.hir_modules[name_direct])
                     lowered_entry.name = name_direct
                     print "[driver-mir] bootstrap lower:done"
                     lowered_entry
@@ -389,6 +381,8 @@ impl CompilerDriver:
             ),
             symbols: SymbolTable.new(),
             local_map: {},
+            current_function_symbols: [],
+            current_function_names: [],
             loop_stack: [],
             errors: [],
             field_map: {}

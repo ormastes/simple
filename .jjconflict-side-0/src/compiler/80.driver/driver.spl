@@ -37,6 +37,7 @@ use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
 use compiler.hir.hir_types.{SymbolTable, SymbolId}
 use compiler.mir.mir_lowering.{bootstrap_mir_function_count, bootstrap_mir_function_at, bootstrap_mir_function_name_at, bootstrap_lower_hir_globals_to_mir_module}
 use compiler.driver.driver_aot_output.*
+use compiler.driver.watcher.watcher_client.{check_shb_freshness}
 # driver_pipeline.spl extends CompilerDriver via `impl CompilerDriver:`
 # (lower_to_mir, jit_compile_and_run, weave_aop, apply_debug_trace, ...). It was
 # imported by nothing, so the interpreter never loaded it and those methods were
@@ -200,7 +201,6 @@ pub class CompilerDriver:
     # Check if a source file has a fresh SHB cache entry and can skip full parse
     # for import-only modules. Returns true if the file's SHB is fresh.
     fn check_shb_cache(source_path: text) -> bool:
-        use compiler.driver.watcher.watcher_client.{check_shb_freshness}
         val result = check_shb_freshness(source_path, ".build/headers")
         result.status == CACHE_FRESH
 
@@ -320,6 +320,26 @@ pub class CompilerDriver:
         val log = self.ctx.logger
         val sources = self.ctx.sources
         log_debug("parsing sources")
+        val native_entry_closure = (rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
+        val native_entry = rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY") ?? ""
+        if native_entry_closure or native_entry != "":
+            var entry_sources: [SourceFile] = []
+            var entry_idx = 0
+            while entry_idx < sources.len():
+                val source = sources[entry_idx]
+                if native_entry_closure or _driver_is_bootstrap_entry_source(source.path, source.module_name):
+                    if (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1":
+                        eprint("[BOOTSTRAP-PHASE] phase2:parse:entry {source.path} module={source.module_name}")
+                    val entry_module = parse_full_frontend(source.content, source.path, source.module_name, self.ctx.logger)
+                    if (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1":
+                        eprint("[BOOTSTRAP-PHASE] phase2:parse:entry:done {source.path}")
+                    self.ctx.modules[source.module_name] = entry_module
+                    entry_sources.push(source)
+                entry_idx = entry_idx + 1
+            self.ctx.sources = entry_sources
+            if entry_sources.len() == 0:
+                self.ctx.errors.push("native entry source not found: {native_entry}")
+            return self.ctx.errors.len() == 0
         if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
             var boot_idx = 0
             while boot_idx < sources.len():
@@ -433,7 +453,8 @@ pub class CompilerDriver:
             # Bootstrap stage1 cannot safely dereference the parsed frontend
             # Module in HIR lowering yet; keep phase3 moving with an empty HIR
             # shell while the frontend module representation is stabilized.
-            val hir_module = if _driver_is_bootstrap_entry_source(src.path, name):
+            val native_entry_closure_hir = (rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
+            val hir_module = if native_entry_closure_hir or _driver_is_bootstrap_entry_source(src.path, name):
                 val entry_module_for_hir = parse_full_frontend(src.content, src.path, name, self.ctx.logger)
                 lowering.lower_module(entry_module_for_hir)
             elif ((rt_env_get("SIMPLE_UNSTUB_HIR") ?? "") == "1") and (self.ctx.modules[name] != nil):

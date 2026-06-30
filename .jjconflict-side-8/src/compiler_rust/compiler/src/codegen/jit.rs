@@ -242,6 +242,8 @@ fn register_runtime_symbols_from_provider(builder: &mut JITBuilder, provider: &d
     for &name in RUNTIME_SYMBOL_NAMES {
         if let Some(ptr) = provider.get_symbol(name) {
             builder.symbol(name, ptr);
+        } else if let Some(addr) = crate::elf_utils::resolve_runtime_symbol(name) {
+            builder.symbol(name, addr as *const u8);
         }
     }
 }
@@ -254,6 +256,9 @@ fn register_runtime_symbols_from_provider(builder: &mut JITBuilder, provider: &d
 /// slot and would SIGSEGV when called.
 fn jit_import_resolves(provider: &dyn RuntimeSymbolProvider, name: &str) -> bool {
     if provider.get_symbol(name).is_some() {
+        return true;
+    }
+    if crate::elf_utils::resolve_runtime_symbol(name).is_some() {
         return true;
     }
     dlsym_resolves(name)

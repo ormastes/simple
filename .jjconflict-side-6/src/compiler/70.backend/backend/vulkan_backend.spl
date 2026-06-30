@@ -10,7 +10,7 @@ use compiler.backend.codegen_types.{Codegen, CodegenOutput, CodegenOutputKind}
 use compiler.backend.gpu_codegen_types.{GpuCodegen, GpuBarrierScope}
 use compiler.backend.gpu_backend_metadata.{gpu_backend_supports_target}
 use compiler.backend.vulkan_type_mapper.*
-use compiler.backend.vulkan.spirv_builder.SpirvBuilder
+use compiler.backend.vulkan.spirv_builder.{SpirvBuilder}
 use compiler.hir.hir_types.MemorySpace
 
 # ============================================================================
@@ -48,7 +48,7 @@ class VulkanBackend:
         VulkanBackend(
             type_mapper: VulkanTypeMapper.create_version(vk_version[0], vk_version[1], 1, 6),
             vulkan_version: vk_version,
-            options: CompileOptions.default_options().with_target(CodegenTarget.Native)  # Stub for seed.cpp
+            options: compileoptions_default_options().with_target(CodegenTarget.Native)  # Stub for seed.cpp
         )
 
     static fn create_with_options(vk_version: [i64], opts: CompileOptions) -> VulkanBackend:
@@ -59,26 +59,24 @@ class VulkanBackend:
             options: opts
         )
 
-    static fn for_target(target: CodegenTarget) -> text:
+    static fn for_target(target: CodegenTarget) -> Result<VulkanBackend, CompileError>:
         """Create Vulkan backend from target."""
-        match target_vulkan_version(target):
-            case ver:
-                Ok(VulkanBackend.create(ver))
-            case nil:
-                Err(CompileError.backend_error(
-                    BackendKind.Vulkan,
-                    "Target is not a Vulkan target"
-                ))
+        if target == CodegenTarget.VulkanSpirv:
+            return Ok(VulkanBackend.create([1, 3]))
+        Err(compileerror_backend_error(
+            BackendKind.Vulkan,
+            "Target is not a Vulkan target"
+        ))
 
     fn compile(module: MirModule) -> text:
         """Compile MIR module to SPIR-V."""
         val builder = SpirvBuilder.create(self.vulkan_version)
 
         # Emit module header
-        builder_emit_header(builder)
-        builder_emit_capabilities(builder)
-        builder_emit_extensions(builder)
-        builder_emit_memory_model(builder)
+        builder.emit_header()
+        builder.emit_capabilities()
+        builder.emit_extensions()
+        builder.emit_memory_model()
 
         # Collect shaders
         var shaders: [VulkanComputeShader] = []
@@ -90,11 +88,11 @@ class VulkanBackend:
                 val result = self.compile_compute_shader(builder, func)
                 match result:
                     case Ok(shader):
-                        shaders = shaders_push(shaders, shader)
+                        shaders = shaders.push(shader)
                     case Err(e):
                         return Err(e)
 
-        val spirv_assembly = builder_build(builder)
+        val spirv_assembly = builder.build()
 
         Ok(VulkanCompiledModule(
             name: module.name,
@@ -119,40 +117,40 @@ class VulkanBackend:
         """Compile a compute shader."""
 
         # Emit types
-        val void_type = builder_emit_type_void(builder)
-        val bool_type = builder_emit_type_bool(builder)
-        val i32_type = builder_emit_type_int(builder, 32, true)
-        val u32_type = builder_emit_type_int(builder, 32, false)
-        val i64_type = builder_emit_type_int(builder, 64, true)
-        val f32_type = builder_emit_type_float(builder, 32)
+        val void_type = builder.emit_type_void()
+        val bool_type = builder.emit_type_bool()
+        val i32_type = builder.emit_type_int(32, true)
+        val u32_type = builder.emit_type_int(32, false)
+        val i64_type = builder.emit_type_int(64, true)
+        val f32_type = builder.emit_type_float(32)
 
         # Emit vector types for builtins
-        val uvec3_type = builder_emit_type_vector(builder, u32_type, 3)
+        val uvec3_type = builder.emit_type_vector(u32_type, 3)
 
         # Emit pointer types
         val uvec3_input_ptr = builder.emit_type_pointer("Input", uvec3_type)
 
         # Emit function type (void -> void for compute)
-        val func_type = builder_emit_type_function(builder, void_type, [])
+        val func_type = builder.emit_type_function(void_type, [])
 
         # Emit builtin variables
         val global_invocation_id = builder.emit_variable(uvec3_input_ptr, "Input")
-        builder_emit_decorate_builtin(builder, global_invocation_id, SpirvBuiltin.GlobalInvocationId)
+        builder.emit_decorate_builtin(global_invocation_id, SpirvBuiltin.GlobalInvocationId)
 
         val local_invocation_id = builder.emit_variable(uvec3_input_ptr, "Input")
-        builder_emit_decorate_builtin(builder, local_invocation_id, SpirvBuiltin.LocalInvocationId)
+        builder.emit_decorate_builtin(local_invocation_id, SpirvBuiltin.LocalInvocationId)
 
         val workgroup_id = builder.emit_variable(uvec3_input_ptr, "Input")
-        builder_emit_decorate_builtin(builder, workgroup_id, SpirvBuiltin.WorkgroupId)
+        builder.emit_decorate_builtin(workgroup_id, SpirvBuiltin.WorkgroupId)
 
         # Emit entry point
-        val func_id = builder_alloc_id(builder)
+        val func_id = builder.alloc_id()
         val interface_ids = [global_invocation_id, local_invocation_id, workgroup_id]
-        builder_emit_entry_point(builder, func.name, func_id, interface_ids)
+        builder.emit_entry_point(func.name, func_id, interface_ids)
 
         # Default workgroup size (can be overridden)
         val workgroup_size = [256, 1, 1]
-        builder_emit_execution_mode(builder, func_id, workgroup_size)
+        builder.emit_execution_mode(func_id, workgroup_size)
 
         # Decorations section complete
         builder.emit_comment("--- End Decorations ---")
@@ -162,21 +160,24 @@ class VulkanBackend:
         builder.emit("{builder.id_str(func_id)} = OpFunction {builder.id_str(void_type)} None {builder.id_str(func_type)}")
 
         # Emit entry block
-        val entry_label = builder_emit_label(builder)
+        val entry_label = builder.emit_label()
 
         # Compile function body
         for block in func.blocks:
             if block.id.id != 0:  # Skip entry block (already emitted)
-                builder_emit_label(builder)
+                builder.emit_label()
 
             for inst in block.instructions:
                 val result = self.compile_instruction(builder, inst, (i32_type, u32_type, i64_type, f32_type, bool_type, uvec3_type, global_invocation_id, local_invocation_id, workgroup_id))
-                if result_is_err(result):
-                    return Err(result_unwrap_err(result))
+                match result:
+                    case Ok(_):
+                        ()
+                    case Err(e):
+                        return Err(e)
 
             self.compile_terminator(builder, block.terminator)
 
-        builder_emit_function_end(builder)
+        builder.emit_function_end()
 
         Ok(VulkanComputeShader(
             name: func.name,
@@ -227,18 +228,18 @@ class VulkanBackend:
             # GPU-specific instructions
             case GpuGlobalId(dest, dim):
                 # Load from GlobalInvocationId and extract component
-                val loaded = builder_emit_load(builder, uvec3_type, global_id_var)
-                val component = builder_emit_composite_extract(builder, u32_type, loaded, [dim])
+                val loaded = builder.emit_load(uvec3_type, global_id_var)
+                val component = builder.emit_composite_extract(u32_type, loaded, [dim])
                 builder.emit_comment("global_id[{dim}] -> _l{dest.id}")
 
             case GpuLocalId(dest, dim):
-                val loaded = builder_emit_load(builder, uvec3_type, local_id_var)
-                val component = builder_emit_composite_extract(builder, u32_type, loaded, [dim])
+                val loaded = builder.emit_load(uvec3_type, local_id_var)
+                val component = builder.emit_composite_extract(u32_type, loaded, [dim])
                 builder.emit_comment("local_id[{dim}] -> _l{dest.id}")
 
             case GpuBlockId(dest, dim):
-                val loaded = builder_emit_load(builder, uvec3_type, workgroup_id_var)
-                val component = builder_emit_composite_extract(builder, u32_type, loaded, [dim])
+                val loaded = builder.emit_load(uvec3_type, workgroup_id_var)
+                val component = builder.emit_composite_extract(u32_type, loaded, [dim])
                 builder.emit_comment("workgroup_id[{dim}] -> _l{dest.id}")
 
             case GpuBarrier(scope):
@@ -297,22 +298,22 @@ class VulkanBackend:
             case Int(v):
                 match ty.kind:
                     case I32:
-                        builder_emit_const_int(builder, i32_type, v)
+                        builder.emit_const_int(i32_type, v)
                     case U32:
-                        builder_emit_const_int(builder, i32_type, v)
+                        builder.emit_const_int(i32_type, v)
                     case I64:
-                        builder_emit_const_int(builder, i64_type, v)
+                        builder.emit_const_int(i64_type, v)
                     case U64:
-                        builder_emit_const_int(builder, i64_type, v)
+                        builder.emit_const_int(i64_type, v)
                     case _:
-                        builder_emit_const_int(builder, i32_type, v)
+                        builder.emit_const_int(i32_type, v)
             case Float(v):
-                builder_emit_const_float(builder, f32_type, v)
+                builder.emit_const_float(f32_type, v)
             case Bool(v):
                 if v:
-                    builder_emit_const_true(builder, bool_type)
+                    builder.emit_const_true(bool_type)
                 else:
-                    builder_emit_const_false(builder, bool_type)
+                    builder.emit_const_false(bool_type)
             case _:
                 builder.emit_comment("Unsupported constant")
 
@@ -389,7 +390,7 @@ class VulkanBackend:
         """Compile block terminator."""
         match term:
             case Ret(_):
-                builder_emit_return(builder)
+                builder.emit_return()
             case Goto(target):
                 builder.emit_comment("branch to BB{target.id}")
             case Branch(cond, true_target, false_target):
@@ -454,12 +455,12 @@ impl GpuCodegen for VulkanBackend:
         val result = self.compile_compute_shader(builder, func)
         match result:
             case Ok(_):
-                Ok(builder_build(builder))
+                Ok(builder.build())
             case Err(e):
                 Err(e)
 
     fn compile_device_function(func_name: text, body: MirBody) -> Result<text, CompileError>:
-        Err(CompileError.backend_error(
+        Err(compileerror_backend_error(
             BackendKind.Vulkan,
             "Vulkan does not support device functions; use compute shaders instead"
         ))

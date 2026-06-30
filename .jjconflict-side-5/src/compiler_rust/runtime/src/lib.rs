@@ -300,6 +300,21 @@ pub fn register_static_runtime_symbols() {
     let _ = simple_runtime_abi::register_static_runtime_symbols(RUNTIME_SYMBOL_ENTRIES);
 }
 
+#[no_mangle]
+pub extern "C" fn rt_memory_barrier() {
+    std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+}
+
+#[no_mangle]
+pub extern "C" fn rt_load_barrier() {
+    std::sync::atomic::fence(std::sync::atomic::Ordering::Acquire);
+}
+
+#[no_mangle]
+pub extern "C" fn rt_store_barrier() {
+    std::sync::atomic::fence(std::sync::atomic::Ordering::Release);
+}
+
 pub use security_runtime::{
     rt_security_audit_events, rt_security_audit_failure, rt_security_audit_start, rt_security_audit_success,
     rt_security_enter_gate, rt_security_enter_sandbox, rt_security_exit_gate, rt_security_exit_sandbox,
@@ -393,9 +408,13 @@ pub use value::{
     // Raw memory allocation (zero-cost struct support)
     rt_alloc,
     // Array operations
+    rt_array_all,
+    rt_array_any,
     rt_array_data_ptr,
     rt_array_data_ptr_text,
     rt_array_data_ptr_u8,
+    rt_array_filter,
+    rt_array_find,
     rt_array_header_ptr,
     rt_array_get,
     rt_array_get_text,
@@ -507,6 +526,7 @@ pub use value::{
     rt_shared_release,
     rt_slice,
     // String operations
+    rt_any_add,
     rt_cstring_to_text,
     rt_string_char_code_at,
     rt_string_concat,

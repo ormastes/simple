@@ -58,9 +58,7 @@ describe "bdd falsy call result":
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("simple"));
     cmd.current_dir(project_root()).arg("run").arg(&spec);
 
-    cmd.assert()
-        .success()
-        .stdout(contains("2 examples, 0 failures"));
+    cmd.assert().success().stdout(contains("2 examples, 0 failures"));
 }
 
 #[test]
@@ -83,9 +81,7 @@ describe "bdd hollow call":
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("simple"));
     cmd.current_dir(project_root()).arg("run").arg(&spec);
 
-    cmd.assert()
-        .success()
-        .stdout(contains("1 example, 1 failure"));
+    cmd.assert().success().stdout(contains("1 example, 1 failure"));
 }
 
 #[test]
@@ -123,7 +119,5 @@ describe "enum method in nested call":
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("simple"));
     cmd.current_dir(project_root()).arg("run").arg(&spec);
 
-    cmd.assert()
-        .success()
-        .stdout(contains("1 example, 0 failures"));
+    cmd.assert().success().stdout(contains("1 example, 0 failures"));
 }

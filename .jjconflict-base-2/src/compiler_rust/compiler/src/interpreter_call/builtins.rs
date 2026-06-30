@@ -152,6 +152,23 @@ pub(super) fn eval_builtin(
             let val = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
             Ok(Some(Value::err(val)))
         }
+        "sys_env_bool" => {
+            let Value::Str(key) = eval_arg(
+                args,
+                0,
+                Value::Str(String::new()),
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?
+            else {
+                return Err(CompileError::runtime("sys_env_bool expects string argument"));
+            };
+            let value = std::env::var(key).unwrap_or_default().to_ascii_lowercase();
+            Ok(Some(Value::Bool(matches!(value.as_str(), "1" | "true" | "yes" | "on"))))
+        }
         "len" => {
             let val = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
             match val {

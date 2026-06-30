@@ -26,7 +26,6 @@ use compiler.blocks.value.BlockValue
 use compiler.types.type_layout.{compute_struct_layout, layoutattr_default_, FieldLayout}
 
 extern fn rt_env_get(key: text) -> text
-
 fn mir_lower_env_get(key: text) -> text:
     rt_env_get(key)
 
@@ -50,6 +49,8 @@ impl MirLowering:
             builder: MirBuilder.new(),
             symbols: symbols,
             local_map: {},
+            current_function_symbols: [],
+            current_function_names: [],
             loop_stack: [],
             errors: [],
             field_map: {},
@@ -67,37 +68,7 @@ impl MirLowering:
                 fields
 
     fn hir_module_function(module: HirModule, symbol: SymbolId) -> HirFunction:
-        for fn_ in module.functions.values():
-            if fn_.symbol.id == symbol.id:
-                return fn_
-        HirFunction(
-            symbol: symbol,
-            name: "",
-            type_params: [],
-            params: [],
-            return_type: HirType(kind: HirTypeKind.Int(64, true), span: Span.empty()),
-            body: HirBlock(stmts: [], has: false, value: nil, span: Span.empty()),
-            effects: [],
-            visibility: Visibility.Private,
-            is_async: false,
-            is_static: false,
-            is_public: false,
-            is_method: false,
-            is_mutable: false,
-            is_const: false,
-            is_extern: true,
-            func_attr: nil,
-            has_export_attr: false,
-            export_attr: nil,
-            has_driver_manifest_attr: false,
-            driver_manifest_attr: DriverManifestAttr(kind: DriverManifestAttrKind.Driver, driver_class: 0, vendor: 0, device_ids: [], version: "", abi: ""),
-            has_suspension: false,
-            has_vhdl_metadata: false,
-            vhdl_metadata: vhdl_hardware_metadata_default(),
-            has_doc_comment: false,
-            doc_comment: "",
-            span: Span.empty()
-        )
+        module.functions[symbol]
 
     fn hir_function_is_extern(fn_: HirFunction) -> bool:
         match fn_:
@@ -196,7 +167,20 @@ impl MirLowering:
     me lower_module(module: HirModule) -> MirModule:
         """Lower HIR module to MIR."""
         val bootstrap_mode = (mir_lower_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
+        val native_entry_closure = (mir_lower_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
         val bootstrap_trace = bootstrap_mode and mir_lower_trace_enabled()
+        var current_function_symbols: [SymbolId] = []
+        var current_function_names: [text] = []
+        val current_fn_keys = module.functions.keys()
+        var current_fn_i = 0
+        while current_fn_i < current_fn_keys.len():
+            val current_fn_sym = current_fn_keys[current_fn_i]
+            val current_fn = self.hir_module_function(module, current_fn_sym)
+            current_function_symbols = current_function_symbols.push(current_fn_sym)
+            current_function_names = current_function_names.push(current_fn.name)
+            current_fn_i = current_fn_i + 1
+        self.current_function_symbols = current_function_symbols
+        self.current_function_names = current_function_names
         if bootstrap_trace:
             print "[mir-lower] lower_module:start"
         # Copy-modify-reassign: nested field mutations don't propagate in interpreter
@@ -206,7 +190,7 @@ impl MirLowering:
         var builder_module = builder.module
         if bootstrap_trace:
             print "[mir-lower] builder-module"
-        if not bootstrap_mode:
+        if not bootstrap_mode or native_entry_closure:
             builder_module.name = module.name
         if bootstrap_trace:
             print "[mir-lower] builder-name"
@@ -217,7 +201,7 @@ impl MirLowering:
         if bootstrap_trace:
             print "[mir-lower] builder-done"
 
-        if bootstrap_mode:
+        if bootstrap_mode and not native_entry_closure:
             if bootstrap_trace:
                 print "[mir-lower] fn-list:start"
             _bootstrap_mir_functions = []
@@ -267,11 +251,11 @@ impl MirLowering:
 
         # Build field map from struct and class definitions
         # (use while loops - for-in broken in compiled native code)
-        val struct_values = module.structs.values()
+        val struct_keys = module.structs.keys()
         var si = 0
-        while si < struct_values.len():
-            val struct_def = struct_values[si]
-            val sym_id = struct_def.symbol
+        while si < struct_keys.len():
+            val sym_id = struct_keys[si]
+            val struct_def = module.structs[sym_id]
             var field_names: [text] = []
             var fi = 0
             while fi < struct_def.fields.len():
@@ -280,11 +264,11 @@ impl MirLowering:
             self.field_map[self.symbol_id_value(sym_id)] = field_names
             si = si + 1
 
-        val class_values = module.classes.values()
+        val class_keys = module.classes.keys()
         var ci = 0
-        while ci < class_values.len():
-            val class_def = class_values[ci]
-            val sym_id = class_def.symbol
+        while ci < class_keys.len():
+            val sym_id = class_keys[ci]
+            val class_def = module.classes[sym_id]
             var field_names: [text] = []
             var fi = 0
             while fi < class_def.fields.len():
@@ -293,34 +277,37 @@ impl MirLowering:
             self.field_map[self.symbol_id_value(sym_id)] = field_names
             ci = ci + 1
 
-        val bitfield_values = module.bitfields.values()
+        val bitfield_keys = module.bitfields.keys()
         var bi = 0
-        while bi < bitfield_values.len():
-            val bitfield_def = bitfield_values[bi]
-            val sym_id = bitfield_def.symbol
+        while bi < bitfield_keys.len():
+            val sym_id = bitfield_keys[bi]
+            val bitfield_def = module.bitfields[sym_id]
             self.bitfield_map[self.symbol_id_value(sym_id)] = self.hir_bitfield_fields(bitfield_def)
             bi = bi + 1
 
         # Lower type definitions so headers/export wrappers can consume real MIR types.
-        val struct_type_values = module.structs.values()
+        val struct_type_keys = module.structs.keys()
         var sti = 0
-        while sti < struct_type_values.len():
-            self.lower_struct_type(struct_type_values[sti])
+        while sti < struct_type_keys.len():
+            val sym_id = struct_type_keys[sti]
+            self.lower_struct_type(module.structs[sym_id])
             sti = sti + 1
 
-        val class_type_values = module.classes.values()
+        val class_type_keys = module.classes.keys()
         var cti = 0
-        while cti < class_type_values.len():
-            self.lower_class_type(class_type_values[cti])
+        while cti < class_type_keys.len():
+            val sym_id = class_type_keys[cti]
+            self.lower_class_type(module.classes[sym_id])
             cti = cti + 1
 
         # Lower functions (skip extern declarations - they have no body)
-        val fn_values = module.functions.values()
+        val fn_keys = module.functions.keys()
         if bootstrap_trace:
             print "[mir-lower] function-keys"
         var fni = 0
-        while fni < fn_values.len():
-            val fn_ = fn_values[fni]
+        while fni < fn_keys.len():
+            val fn_sym = fn_keys[fni]
+            val fn_ = self.hir_module_function(module, fn_sym)
             if self.hir_function_is_extern(fn_):
                 fni = fni + 1
                 # skip extern functions

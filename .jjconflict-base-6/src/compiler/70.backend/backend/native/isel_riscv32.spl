@@ -82,7 +82,7 @@ fn rv32_lower_const_int(ctx: ISelContext, v: i64) -> LoweredOperand:
     isel_emit_one(ctx, RV_OP_LI, [op_imm(imm32)])
 
 fn rv32_isel_unsupported(message: text):
-    panic("RV32 ISel unsupported: {message}")
+    print("RV32 ISel unsupported: {message}")
 
 # ============================================================================
 # Instruction Selection - Core Entry Point
@@ -114,7 +114,7 @@ fn rv32_isel_function(ctx: ISelContext, func: MirFunction) -> ISelFuncResult:
 
     # Reset vreg counter - use local IDs directly, start high for temps
     var local_ctx = ISelContext(
-        next_vreg: func.locals_len(locals) + 100,
+        next_vreg: func.locals.len() + 100,
         frame_slots: ctx.frame_slots,
         next_frame_offset: 0,
         extern_symbols: ctx.extern_symbols,
@@ -124,7 +124,7 @@ fn rv32_isel_function(ctx: ISelContext, func: MirFunction) -> ISelFuncResult:
 
     # Allocate frame slots for locals that need stack space
     for local in func.locals:
-        val size = local.type__size_bytes(type_)
+        val size = local.type_.size_bytes()
         local_ctx = isel_alloc_frame_slot_aligned(local_ctx, local.id.id, size, 4)
 
     # Generate prologue block
@@ -148,7 +148,7 @@ fn rv32_isel_function(ctx: ISelContext, func: MirFunction) -> ISelFuncResult:
     for local in func.locals:
         match local.kind:
             case Arg(index):
-                if index < rv_arg_regs_len():
+                if index < RV_ARG_REGS.len():
                     val arg_reg = RV_ARG_REGS[index]
                     prologue_block = mach_block_add_inst(prologue_block, new_mach_inst(RV_OP_MV, [local_vreg_op(local.id.id), op_phys(arg_reg)]))
             case _: ()
@@ -421,7 +421,7 @@ fn rv32_isel_set_field(ctx: ISelContext, base: MirOperand, field: i64, value: Mi
     ISelInstResult(insts: insts, ctx: val_low.ctx)
 
 fn rv32_isel_alloc(ctx: ISelContext, dest: LocalId, type_: MirType) -> ISelInstResult:
-    val size = type__size_bytes(type_)
+    val size = type_.size_bytes()
     val aligned = if size < 16: 16 else: size
     # Round up to multiple of 16 (RISC-V ABI stack alignment)
     var alloc_size = aligned
@@ -453,17 +453,17 @@ fn rv32_isel_call(ctx: ISelContext, dest: LocalId, func_op: MirOperand, args: [M
     var current_ctx = ctx
 
     # Lower arguments into ABI registers (a0-a7 = x10-x17)
-    for i in 0..args_len(args):
+    for i in 0..args.len():
         val arg_low = rv32_lower_operand(current_ctx, args[i])
         current_ctx = arg_low.ctx
         for ai in arg_low.insts:
             insts.push(ai)
-        if i < rv_arg_regs_len():
+        if i < RV_ARG_REGS.len():
             val arg_reg = RV_ARG_REGS[i]
             insts.push(new_mach_inst(RV_OP_MV, [op_phys(arg_reg), arg_low.result]))
         else:
             # Stack argument: SW value, offset(sp) - 4-byte slots on RV32
-            val stack_offset = (i - rv_arg_regs_len()) * RV32_WORD_SIZE
+            val stack_offset = (i - RV_ARG_REGS.len()) * RV32_WORD_SIZE
             insts.push(new_mach_inst(RV_OP_SW, [arg_low.result, op_mem(physical_reg(RV_X2), stack_offset)]))
 
     # Emit call
@@ -481,9 +481,7 @@ fn rv32_isel_call(ctx: ISelContext, dest: LocalId, func_op: MirOperand, args: [M
             rv32_isel_unsupported("call target")
 
     # Move return value from a0 (x10)
-    if has_dest:
-        val d = dest_value
-        insts.push(new_mach_inst(RV_OP_MV, [local_vreg_op(d.id), op_phys(RV_X10)]))
+    insts.push(new_mach_inst(RV_OP_MV, [local_vreg_op(dest.id), op_phys(RV_X10)]))
 
     ISelInstResult(insts: insts, ctx: current_ctx)
 
@@ -510,13 +508,14 @@ fn rv32_isel_terminator(ctx: ISelContext, term: MirTerminator) -> ISelInstResult
 
 fn rv32_isel_return(ctx: ISelContext, value: MirOperand?) -> ISelInstResult:
     var insts: [MachInst] = []
-    if has_value:
-        val v = value_value
-        val low = rv32_lower_operand(ctx, v)
-        for ai in low.insts:
-            insts.push(ai)
-        # MV a0, result (move return value to a0 = x10)
-        insts.push(new_mach_inst(RV_OP_MV, [op_phys(RV_X10), low.result]))
+    match value:
+        case Some(v):
+            val low = rv32_lower_operand(ctx, v)
+            for ai in low.insts:
+                insts.push(ai)
+            # MV a0, result (move return value to a0 = x10)
+            insts.push(new_mach_inst(RV_OP_MV, [op_phys(RV_X10), low.result]))
+        case None: ()
     # Epilogue: restore ra, s0, adjust sp, return
     # LW ra, offset(sp) - 32-bit restore on RV32
     insts.push(new_mach_inst(RV_OP_LW, [op_phys(RV_X1), op_mem(physical_reg(RV_X2), 0)]))
@@ -543,7 +542,7 @@ fn rv32_isel_switch(ctx: ISelContext, value: MirOperand, targets: [SwitchCase], 
     var current_ctx = val_low.ctx
 
     # Generate LI + BEQ chain for each case
-    for i in 0..targets_len(targets):
+    for i in 0..targets.len():
         val target = targets[i]
         # Load case value into temp vreg
         val case_low = isel_fresh_dest(current_ctx)

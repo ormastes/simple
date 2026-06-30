@@ -999,6 +999,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_env_get_var", env_sffi::rt_env_get_var);
     insert_simple!("rt_env_has_var", env_sffi::rt_env_has_var);
     insert_simple!("rt_env_home", system::rt_env_home);
+    insert_simple!("sys_env_bool", system::sys_env_bool);
     insert_simple!("rt_env_new_handle", env_sffi::rt_env_new);
     insert_simple!("rt_env_pop_scope", env_sffi::rt_env_pop_scope);
     insert_simple!("rt_env_push_scope", env_sffi::rt_env_push_scope);

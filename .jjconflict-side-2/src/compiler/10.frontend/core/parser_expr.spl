@@ -69,6 +69,19 @@ use compiler.core.parser.{parser_advance, parser_expect, parser_error, parser_sk
 use compiler.core.parser.{parser_has_errors}
 use compiler.core.parser.{parser_parse_type}
 use compiler.frontend.desugar.placeholder_lambda.{transform_placeholder_lambda}
+use std.nogc_sync_mut.io.process_ops.{eprint}
+
+extern fn rt_env_get(key: text) -> text
+
+fn parser_expr_trace_enabled() -> bool:
+    (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1"
+
+fn parser_expr_trace_line_enabled() -> bool:
+    parser_expr_trace_enabled() and par_line_get() >= 60
+
+fn parser_expr_trace_step(name: text):
+    if parser_expr_trace_line_enabled():
+        eprint("[parser-expr] {name}:start kind={par_kind_get()} text={par_text_get()} line={par_line_get()} col={par_col_get()}")
 
 # Forward declarations for mutual recursion with parser_stmts
 use compiler.frontend.core.parser_stmts.{parse_block, parse_match_stmt, parse_if_expr}
@@ -89,6 +102,8 @@ var g_expr_nest_depth: i64 = 0
 val MAX_EXPR_NEST_DEPTH: i64 = 128
 
 fn parse_expr() -> i64:
+    if parser_expr_trace_line_enabled():
+        eprint("[parser-expr] expr:start kind={par_kind_get()} text={par_text_get()} line={par_line_get()} col={par_col_get()}")
     g_expr_nest_depth = g_expr_nest_depth + 1
     if g_expr_nest_depth > MAX_EXPR_NEST_DEPTH:
         parser_error("expression nesting too deep (max 128 levels)")
@@ -96,6 +111,8 @@ fn parse_expr() -> i64:
         return expr_int_lit(0, 0)
     val result = parse_pipe()
     g_expr_nest_depth = g_expr_nest_depth - 1
+    if parser_expr_trace_line_enabled():
+        eprint("[parser-expr] expr:done result={result}")
     result
 
 fn bracket_expr_is_invalid(eid: i64) -> bool:
@@ -126,6 +143,7 @@ fn validate_bracket_expr(eid: i64, context: text) -> bool:
     true
 
 fn parse_pipe() -> i64:
+    parser_expr_trace_step("pipe")
     var left = parse_compose()
     for i in 0..1000:
         if par_kind_get() != 175:
@@ -159,6 +177,7 @@ fn parse_pipe() -> i64:
     left
 
 fn parse_compose() -> i64:
+    parser_expr_trace_step("compose")
     var left = parse_assignment()
     for i in 0..1000:
         if par_kind_get() != 67:
@@ -175,6 +194,7 @@ fn parse_compose() -> i64:
     left
 
 fn parse_assignment() -> i64:
+    parser_expr_trace_step("assignment")
     val left = parse_or()
     if par_kind_get() == 106:
         parser_advance()
@@ -205,6 +225,7 @@ fn parse_assignment() -> i64:
     left
 
 fn parse_or() -> i64:
+    parser_expr_trace_step("or")
     var left = parse_and()
     for i in 0..1000:
         val is_or = par_kind_get() == 56
@@ -218,6 +239,7 @@ fn parse_or() -> i64:
     left
 
 fn parse_and() -> i64:
+    parser_expr_trace_step("and")
     var left = parse_not()
     for i in 0..1000:
         val is_and = par_kind_get() == 55
@@ -231,6 +253,7 @@ fn parse_and() -> i64:
     left
 
 fn parse_not() -> i64:
+    parser_expr_trace_step("not")
     val is_not = par_kind_get() == 57
     val is_not2 = par_kind_get() == 57
     val match_not = is_not or is_not2
@@ -241,6 +264,7 @@ fn parse_not() -> i64:
     parse_comparison()
 
 fn parse_comparison() -> i64:
+    parser_expr_trace_step("comparison")
     var left = parse_null_coalesce()
     for i in 0..100:
         if par_kind_get() == 80:
@@ -284,6 +308,7 @@ fn parse_comparison() -> i64:
     left
 
 fn parse_null_coalesce() -> i64:
+    parser_expr_trace_step("null-coalesce")
     var left = parse_range()
     for i in 0..100:
         if par_kind_get() == 132:
@@ -295,6 +320,7 @@ fn parse_null_coalesce() -> i64:
     left
 
 fn parse_range() -> i64:
+    parser_expr_trace_step("range")
     val left = parse_addition()
     if par_kind_get() == 165:
         parser_advance()
@@ -316,6 +342,7 @@ fn parse_range() -> i64:
     left
 
 fn parse_addition() -> i64:
+    parser_expr_trace_step("addition")
     var left = parse_multiplication()
     for i in 0..1000:
         if par_kind_get() == 60:
@@ -331,6 +358,7 @@ fn parse_addition() -> i64:
     left
 
 fn parse_multiplication() -> i64:
+    parser_expr_trace_step("multiplication")
     var left = parse_unary()
     for i in 0..1000:
         if par_kind_get() == 62:
@@ -366,6 +394,7 @@ fn parse_multiplication() -> i64:
     left
 
 fn parse_unary() -> i64:
+    parser_expr_trace_step("unary")
     if par_kind_get() == 61:
         parser_advance()
         val operand = parse_unary()
@@ -931,6 +960,7 @@ fn parse_postfix_on(base_expr: i64) -> i64:
     base
 
 fn parse_postfix() -> i64:
+    parser_expr_trace_step("postfix")
     var base = parse_primary_expr()
     # Disambiguate Ident<TypeArgs>.method() vs Ident < expr (binary less-than).
     if (expr_get_tag(base) == EXPR_IDENT and
@@ -1047,6 +1077,8 @@ fn parse_postfix() -> i64:
                     base = expr_index(base, index_expr, 0)
         elif par_kind_get() == 140:
             # Function call: f(args)
+            if parser_expr_trace_line_enabled():
+                eprint("[parser-expr] call:start callee={expr_get_str(base)} line={par_line_get()} col={par_col_get()}")
             parser_advance()
             var call_args: [i64] = []
             if par_kind_get() != 141:
@@ -1060,6 +1092,8 @@ fn parse_postfix() -> i64:
                     call_args.push(parse_call_arg())
             parser_expect(141)
             base = expr_call(base, call_args, 0)
+            if parser_expr_trace_line_enabled():
+                eprint("[parser-expr] call:done callee={expr_get_str(base)} argc={call_args.len()}")
         elif par_kind_get() == 131:
             # Optional chaining: x?.field
             parser_advance()

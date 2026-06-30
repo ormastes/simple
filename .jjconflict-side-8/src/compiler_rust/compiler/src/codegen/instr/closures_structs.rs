@@ -417,6 +417,7 @@ pub(crate) fn compile_method_call_static<M: Module>(
             || name.ends_with(&tail_san)
     };
 
+    let mut method_resolution_error: Option<String> = None;
     let func_id = resolve_unique_module_qualified_func(ctx, lookup_name)
         .or_else(|| resolve_unique_module_qualified_func(ctx, &sanitized_name))
         .or_else(|| ctx
@@ -574,12 +575,10 @@ pub(crate) fn compile_method_call_static<M: Module>(
             // diagnostic (loud, via `[CODEGEN-AMBIGUOUS-METHOD]`) and return
             // None so the outer path falls back to a cross-module use_map
             // lookup (or `rt_method_not_found` if that also fails) instead
-            // of silently picking a random wrong target. Set
-            // `SIMPLE_STRICT_METHOD_DISPATCH=1` to turn the diagnostic into
-            // a hard error. For qualified lookups (with type_qualifier) we
-            // keep the existing behaviour — the dot-prefix already picked
-            // the right candidate above, and the tail here is only a
-            // one-candidate fallthrough.
+            // of silently picking a random wrong target. For qualified lookups
+            // (with type_qualifier) we keep the existing behaviour — the
+            // dot-prefix already picked the right candidate above, and the
+            // tail here is only a one-candidate fallthrough.
             // 2026-04-18: same FuncId can appear under multiple keys (raw
             // `Type.method` + mangled `module__Type_dot_method` both inserted
             // by declare_functions in common_backend.rs:425-429 — intentional
@@ -602,22 +601,23 @@ pub(crate) fn compile_method_call_static<M: Module>(
             }
             if type_qualifier.is_none() && candidates.len() > 1 {
                 let cand_names: Vec<&str> = candidates.iter().map(|(k, _)| k.as_str()).collect();
-                eprintln!(
+                let message = format!(
                     "[CODEGEN-AMBIGUOUS-METHOD] in '{}' bare method '{}' has {} candidates: [{}] — refusing to pick shortest (would silently miscall). Qualify the receiver type (e.g. `var x: Type = ...`) or import only one matching method.",
                     ctx.func.name,
                     method_part,
                     candidates.len(),
                     cand_names.join(", ")
                 );
-                if std::env::var("SIMPLE_STRICT_METHOD_DISPATCH").is_ok() {
-                    return None;
-                }
-                // Back-compat: still pick shortest for non-strict mode so
-                // existing (possibly-working-by-accident) call sites keep
-                // compiling, but now with a visible warning.
+                eprintln!("{message}");
+                method_resolution_error = Some(message);
+                return None;
             }
             candidates.iter().min_by_key(|(k, _)| k.len()).map(|(_, v)| **v)
         });
+
+    if let Some(error) = method_resolution_error {
+        return Err(error);
+    }
 
     if let Some(func_id) = func_id {
         let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);

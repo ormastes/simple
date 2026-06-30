@@ -435,7 +435,7 @@ fn get_elf_string(elf_data: &[u8], strtab_off: usize, offset: usize) -> String {
 
 /// Resolve a runtime symbol name to its address.
 #[allow(clippy::fn_to_numeric_cast_any)] // reason: function pointer cast to usize for runtime symbol table address
-fn resolve_runtime_symbol(name: &str) -> Option<usize> {
+pub(crate) fn resolve_runtime_symbol(name: &str) -> Option<usize> {
     // Map symbol names to function pointers
     let addr: usize = match name {
         // Array operations
@@ -480,6 +480,10 @@ fn resolve_runtime_symbol(name: &str) -> Option<usize> {
         "rt_typed_words_u64_set" => value::rt_typed_words_u64_set as *const () as usize,
         "rt_array_pop" => simple_runtime::rt_array_pop as *const () as usize,
         "rt_array_clear" => value::rt_array_clear as *const () as usize,
+        "rt_array_all" => simple_runtime::rt_array_all as *const () as usize,
+        "rt_array_any" => simple_runtime::rt_array_any as *const () as usize,
+        "rt_array_filter" => simple_runtime::rt_array_filter as *const () as usize,
+        "rt_array_find" => simple_runtime::rt_array_find as *const () as usize,
         "rt_array_extend_i64" => value::rt_array_extend_i64 as *const () as usize,
         "rt_len" => value::rt_len as *const () as usize,
 
@@ -527,6 +531,11 @@ fn resolve_runtime_symbol(name: &str) -> Option<usize> {
         "rt_process_spawn" => value::rt_process_spawn as *const () as usize,
         "rt_process_spawn_async" => value::rt_process_spawn_async as *const () as usize,
         "rt_process_execute" => value::rt_process_execute as *const () as usize,
+        "rt_exec" => value::rt_exec as *const () as usize,
+        "spl_dlopen" => value::spl_dlopen as *const () as usize,
+        "spl_dlsym" => value::spl_dlsym as *const () as usize,
+        "spl_dlclose" => value::spl_dlclose as *const () as usize,
+        "spl_wffi_call_i64" => value::spl_wffi_call_i64 as *const () as usize,
         "rt_process_is_running" => value::rt_process_is_running as *const () as usize,
         "rt_process_wait" => value::rt_process_wait as *const () as usize,
         "rt_process_kill" => value::rt_process_kill as *const () as usize,
@@ -540,6 +549,7 @@ fn resolve_runtime_symbol(name: &str) -> Option<usize> {
         // String operations
         "rt_string_new" => simple_runtime::rt_string_new as *const () as usize,
         "rt_string_concat" => simple_runtime::rt_string_concat as *const () as usize,
+        "rt_any_add" => simple_runtime::rt_any_add as *const () as usize,
         "rt_string_builder_new" => simple_runtime::rt_string_builder_new as *const () as usize,
         "rt_string_builder_push" => simple_runtime::rt_string_builder_push as *const () as usize,
         "rt_string_builder_finish" => simple_runtime::rt_string_builder_finish as *const () as usize,
@@ -702,6 +712,9 @@ fn resolve_runtime_symbol(name: &str) -> Option<usize> {
         // Cranelift SFFI operations (for self-hosting compiler)
         "rt_cranelift_module_new" => crate::codegen::cranelift_sffi::rt_cranelift_module_new as *const () as usize,
         "rt_cranelift_new_module" => crate::codegen::cranelift_sffi::rt_cranelift_new_module as *const () as usize,
+        "rt_cranelift_new_aot_module" => {
+            crate::codegen::cranelift_sffi::rt_cranelift_new_aot_module as *const () as usize
+        }
         "rt_cranelift_finalize_module" => {
             crate::codegen::cranelift_sffi::rt_cranelift_finalize_module as *const () as usize
         }
@@ -715,12 +728,21 @@ fn resolve_runtime_symbol(name: &str) -> Option<usize> {
         "rt_cranelift_sig_set_return" => {
             crate::codegen::cranelift_sffi::rt_cranelift_sig_set_return as *const () as usize
         }
+        "rt_cranelift_declare_function" => {
+            crate::codegen::cranelift_sffi::rt_cranelift_declare_function as *const () as usize
+        }
+        "rt_cranelift_import_function" => {
+            crate::codegen::cranelift_sffi::rt_cranelift_import_function as *const () as usize
+        }
         "rt_cranelift_begin_function" => {
             crate::codegen::cranelift_sffi::rt_cranelift_begin_function as *const () as usize
         }
         "rt_cranelift_end_function" => crate::codegen::cranelift_sffi::rt_cranelift_end_function as *const () as usize,
         "rt_cranelift_define_function" => {
             crate::codegen::cranelift_sffi::rt_cranelift_define_function as *const () as usize
+        }
+        "rt_cranelift_aot_define_function" => {
+            crate::codegen::cranelift_sffi::rt_cranelift_aot_define_function as *const () as usize
         }
         "rt_cranelift_create_block" => crate::codegen::cranelift_sffi::rt_cranelift_create_block as *const () as usize,
         "rt_cranelift_switch_to_block" => {
@@ -731,8 +753,67 @@ fn resolve_runtime_symbol(name: &str) -> Option<usize> {
             crate::codegen::cranelift_sffi::rt_cranelift_seal_all_blocks as *const () as usize
         }
         "rt_cranelift_iconst" => crate::codegen::cranelift_sffi::rt_cranelift_iconst as *const () as usize,
+        "rt_cranelift_fconst" => crate::codegen::cranelift_sffi::rt_cranelift_fconst as *const () as usize,
+        "rt_cranelift_bconst" => crate::codegen::cranelift_sffi::rt_cranelift_bconst as *const () as usize,
+        "rt_cranelift_null" => crate::codegen::cranelift_sffi::rt_cranelift_null as *const () as usize,
+        "rt_cranelift_iadd" => crate::codegen::cranelift_sffi::rt_cranelift_iadd as *const () as usize,
+        "rt_cranelift_isub" => crate::codegen::cranelift_sffi::rt_cranelift_isub as *const () as usize,
+        "rt_cranelift_imul" => crate::codegen::cranelift_sffi::rt_cranelift_imul as *const () as usize,
+        "rt_cranelift_sdiv" => crate::codegen::cranelift_sffi::rt_cranelift_sdiv as *const () as usize,
+        "rt_cranelift_udiv" => crate::codegen::cranelift_sffi::rt_cranelift_udiv as *const () as usize,
+        "rt_cranelift_srem" => crate::codegen::cranelift_sffi::rt_cranelift_srem as *const () as usize,
+        "rt_cranelift_urem" => crate::codegen::cranelift_sffi::rt_cranelift_urem as *const () as usize,
+        "rt_cranelift_fadd" => crate::codegen::cranelift_sffi::rt_cranelift_fadd as *const () as usize,
+        "rt_cranelift_fsub" => crate::codegen::cranelift_sffi::rt_cranelift_fsub as *const () as usize,
+        "rt_cranelift_fmul" => crate::codegen::cranelift_sffi::rt_cranelift_fmul as *const () as usize,
+        "rt_cranelift_fdiv" => crate::codegen::cranelift_sffi::rt_cranelift_fdiv as *const () as usize,
+        "rt_cranelift_band" => crate::codegen::cranelift_sffi::rt_cranelift_band as *const () as usize,
+        "rt_cranelift_bor" => crate::codegen::cranelift_sffi::rt_cranelift_bor as *const () as usize,
+        "rt_cranelift_bxor" => crate::codegen::cranelift_sffi::rt_cranelift_bxor as *const () as usize,
+        "rt_cranelift_bnot" => crate::codegen::cranelift_sffi::rt_cranelift_bnot as *const () as usize,
+        "rt_cranelift_ishl" => crate::codegen::cranelift_sffi::rt_cranelift_ishl as *const () as usize,
+        "rt_cranelift_sshr" => crate::codegen::cranelift_sffi::rt_cranelift_sshr as *const () as usize,
+        "rt_cranelift_ushr" => crate::codegen::cranelift_sffi::rt_cranelift_ushr as *const () as usize,
+        "rt_cranelift_icmp" => crate::codegen::cranelift_sffi::rt_cranelift_icmp as *const () as usize,
+        "rt_cranelift_fcmp" => crate::codegen::cranelift_sffi::rt_cranelift_fcmp as *const () as usize,
+        "rt_cranelift_load" => crate::codegen::cranelift_sffi::rt_cranelift_load as *const () as usize,
+        "rt_cranelift_store" => crate::codegen::cranelift_sffi::rt_cranelift_store as *const () as usize,
+        "rt_cranelift_stack_slot" => crate::codegen::cranelift_sffi::rt_cranelift_stack_slot as *const () as usize,
+        "rt_cranelift_stack_addr" => crate::codegen::cranelift_sffi::rt_cranelift_stack_addr as *const () as usize,
+        "rt_cranelift_jump" => crate::codegen::cranelift_sffi::rt_cranelift_jump as *const () as usize,
+        "rt_cranelift_brif" => crate::codegen::cranelift_sffi::rt_cranelift_brif as *const () as usize,
         "rt_cranelift_return" => crate::codegen::cranelift_sffi::rt_cranelift_return as *const () as usize,
         "rt_cranelift_return_void" => crate::codegen::cranelift_sffi::rt_cranelift_return_void as *const () as usize,
+        "rt_cranelift_trap" => crate::codegen::cranelift_sffi::rt_cranelift_trap as *const () as usize,
+        "rt_cranelift_call" => crate::codegen::cranelift_sffi::rt_cranelift_call as *const () as usize,
+        "rt_cranelift_call_indirect" => {
+            crate::codegen::cranelift_sffi::rt_cranelift_call_indirect as *const () as usize
+        }
+        "rt_cranelift_sextend" => crate::codegen::cranelift_sffi::rt_cranelift_sextend as *const () as usize,
+        "rt_cranelift_uextend" => crate::codegen::cranelift_sffi::rt_cranelift_uextend as *const () as usize,
+        "rt_cranelift_ireduce" => crate::codegen::cranelift_sffi::rt_cranelift_ireduce as *const () as usize,
+        "rt_cranelift_fcvt_to_sint" => crate::codegen::cranelift_sffi::rt_cranelift_fcvt_to_sint as *const () as usize,
+        "rt_cranelift_fcvt_to_uint" => crate::codegen::cranelift_sffi::rt_cranelift_fcvt_to_uint as *const () as usize,
+        "rt_cranelift_fcvt_from_sint" => {
+            crate::codegen::cranelift_sffi::rt_cranelift_fcvt_from_sint as *const () as usize
+        }
+        "rt_cranelift_fcvt_from_uint" => {
+            crate::codegen::cranelift_sffi::rt_cranelift_fcvt_from_uint as *const () as usize
+        }
+        "rt_cranelift_bitcast" => crate::codegen::cranelift_sffi::rt_cranelift_bitcast as *const () as usize,
+        "rt_cranelift_append_block_param" => {
+            crate::codegen::cranelift_sffi::rt_cranelift_append_block_param as *const () as usize
+        }
+        "rt_cranelift_block_param" => crate::codegen::cranelift_sffi::rt_cranelift_block_param as *const () as usize,
+        "rt_cranelift_append_func_params" => {
+            crate::codegen::cranelift_sffi::rt_cranelift_append_func_params as *const () as usize
+        }
+        "rt_cranelift_get_function_ptr" => {
+            crate::codegen::cranelift_sffi::rt_cranelift_get_function_ptr as *const () as usize
+        }
+        "rt_cranelift_call_function_ptr" => {
+            crate::codegen::cranelift_sffi::rt_cranelift_call_function_ptr as *const () as usize
+        }
         "rt_cranelift_emit_object" => crate::codegen::cranelift_sffi::rt_cranelift_emit_object as *const () as usize,
 
         _ => return None,

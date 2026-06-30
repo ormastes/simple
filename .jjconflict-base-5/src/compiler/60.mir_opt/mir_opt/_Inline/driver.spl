@@ -263,7 +263,8 @@ impl ModuleInliner:
         # Build both ID-based and name-based candidate tables for lookup
         var inline_candidates: Dict<i64, MirFunction> = {}
         var inline_candidates_by_name: Dict<text, MirFunction> = {}
-        for func in module.functions.values():
+        for func_symbol in module.functions.keys():
+            val func = module.functions[func_symbol]
             val is_recursive = cost_analyzer.is_recursive(func)
 
             val has_inline_marker = cost_analyzer._has_always_inline_marker(func)
@@ -276,7 +277,8 @@ impl ModuleInliner:
 
         # Phase 2: For each function in the module, inline eligible callees
         var optimized_functions = module.functions
-        for func in module.functions.values():
+        for func_symbol in module.functions.keys():
+            val func = module.functions[func_symbol]
             var optimized_blocks: [MirBlock] = []
             var modified = false
             var generated_locals: [MirLocal] = []
@@ -310,8 +312,7 @@ impl ModuleInliner:
                 var new_locals = func.locals
                 for local in generated_locals:
                     new_locals = new_locals.push(local)
-                val updated_func = MirFunction(..func, locals: new_locals, blocks: optimized_blocks)
-                optimized_functions[updated_func.symbol] = updated_func
+                optimized_functions[func_symbol] = MirFunction(..func, locals: new_locals, blocks: optimized_blocks)
                 self.inlined_total = self.inlined_total + 1
 
         MirModule(name: module.name, functions: optimized_functions, statics: module.statics, constants: module.constants, types: module.types)
@@ -351,34 +352,21 @@ impl ModuleInliner:
                 case Call(dest, callee_op, args):
                     # Try to resolve callee to a candidate function
                     # First try by symbol ID
+                    var resolved_callee: MirFunction? = nil
                     val callee_id = self.extract_func_symbol_id(callee_op)
-                    val callee_by_id = if callee_id.?:
-                        val found_callee_id = callee_id.unwrap()
-                        if candidates.has(found_callee_id):
-                            Some(candidates[found_callee_id])
-                        else:
-                            nil
-                    else:
-                        nil
+                    if callee_id.? and candidates.has(callee_id.unwrap()):
+                        resolved_callee = Some(candidates[callee_id.unwrap()])
 
                     # Fall back to name-based lookup
-                    val resolved_callee = if callee_by_id.?:
-                        callee_by_id
-                    else:
+                    if not resolved_callee.?:
                         val callee_name = self.extract_func_name(callee_op)
-                        if val found_callee_name = callee_name:
-                            if candidates_by_name.has(found_callee_name):
-                                # Don't inline self
-                                if found_callee_name != caller.name:
-                                    Some(candidates_by_name[found_callee_name])
-                                else:
-                                    nil
-                            else:
-                                nil
-                        else:
-                            nil
+                        if callee_name.? and candidates_by_name.has(callee_name.unwrap()):
+                            # Don't inline self
+                            if callee_name.unwrap() != caller.name:
+                                resolved_callee = Some(candidates_by_name[callee_name.unwrap()])
 
-                    if val callee = resolved_callee:
+                    if resolved_callee.?:
+                        val callee = resolved_callee.unwrap()
                         # Perform inlining for single-block callees
                         var inliner = FunctionInliner.new(next_inline_local_id(caller, generated_locals))
                         val temp_block = MirBlock(

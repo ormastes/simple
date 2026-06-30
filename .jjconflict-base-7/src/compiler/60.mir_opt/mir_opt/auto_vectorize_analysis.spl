@@ -69,6 +69,10 @@ struct LoopBounds:
     upper: text
     step:  i64
 
+struct LoopComparison:
+    upper: MirOperand
+    induction: MirOperand
+
 # ============================================================================
 # Def-Use Chain Construction
 # ============================================================================
@@ -451,63 +455,48 @@ fn get_operand_local(op: MirOperand) -> LocalId?:
         case Move(local): Some(local)
         case Const(_, _): nil
 
-# ============================================================================
-# Loop Detection
-# ============================================================================
-
-class AutoVectorizeCompareOperands:
-    upper: MirOperand
-    induction: MirOperand
-
-fn find_block_by_id(func: MirFunction, id: BlockId) -> MirBlock?:
-    for block in func.blocks:
-        if block.id.id == id.id:
-            return Some(block)
-    nil
-
-fn find_lt_compare_operands(header: MirBlock, cond_local_id: i64) -> AutoVectorizeCompareOperands?:
+fn find_loop_comparison(header: MirBlock, cond_local_id: i64) -> LoopComparison?:
     for inst in header.instructions:
         match inst.kind:
             case BinOp(dest, op, left, right):
                 if dest.id == cond_local_id:
                     val is_lt = match op:
                         case Lt: true
-                        case _: false
+                        case _:  false
                     if not is_lt:
                         return nil
-                    return Some(AutoVectorizeCompareOperands(upper: right, induction: left))
+                    return Some(LoopComparison(upper: right, induction: left))
             case _:
                 pass_do_nothing
+
     nil
+
+# ============================================================================
+# Loop Detection
+# ============================================================================
 
 fn is_simple_loop(func: MirFunction, header: BlockId) -> LoopInfo?:
     """
     Detect if a block is the header of a simple loop.
     Returns loop information if it matches vectorizable pattern.
     """
-    # Find the block
-    val header_block = find_block_by_id(func, header)
-    if not header_block.?:
-        return nil
+    for block in func.blocks:
+        if block.id.id == header.id:
+            return match block.terminator:
+                case If(cond, then_, else_):
+                    # Check if one branch goes back to header (loop) and one exits
+                    if then_.id == header.id:
+                        # then_ is back-edge, else_ is exit
+                        detect_loop_bounds(func, block, cond, else_)
+                    elif else_.id == header.id:
+                        # else_ is back-edge, then_ is exit
+                        detect_loop_bounds(func, block, cond, then_)
+                    else:
+                        nil
+                case _:
+                    nil
 
-    val block = header_block.unwrap()
-
-    # Check terminator for loop back-edge
-    val loop_info = match block.terminator:
-        case If(cond, then_, else_):
-            # Check if one branch goes back to header (loop) and one exits
-            if then_.id == header.id:
-                # then_ is back-edge, else_ is exit
-                detect_loop_bounds(func, block, cond, else_)
-            elif else_.id == header.id:
-                # else_ is back-edge, then_ is exit
-                detect_loop_bounds(func, block, cond, then_)
-            else:
-                nil
-        case _:
-            nil
-
-    loop_info
+    nil
 
 fn detect_loop_bounds(func: MirFunction, header: MirBlock, cond: MirOperand, exit: BlockId) -> LoopInfo?:
     """
@@ -533,12 +522,15 @@ fn detect_loop_bounds(func: MirFunction, header: MirBlock, cond: MirOperand, exi
         case _: return nil
 
     # Step 2: Find the instruction that defines cond_local in the header block.
-    val compare_operands = find_lt_compare_operands(header, cond_local_id)
-    if not compare_operands.?:
+    # It must be a BinOp(Lt, left, right) or BinOp(Le, left, right).
+    # Extract the upper-bound operand (the right operand of the comparison).
+    val comparison = find_loop_comparison(header, cond_local_id)
+    if not comparison.?:
         return nil
 
-    val upper_op = compare_operands.unwrap().upper
-    val induction_op = compare_operands.unwrap().induction
+    val loop_cmp = comparison.unwrap()
+    val upper_op = loop_cmp.upper
+    val induction_op = loop_cmp.induction
 
     # Step 3: Verify the induction variable is a local (not a constant)
     val induction_local_id: i64 = match induction_op.kind:
@@ -689,12 +681,13 @@ fn detect_bounds_from_block(header: MirBlock, cond: MirOperand, exit: BlockId) -
         case _: return nil
 
     # Step 2: find BinOp(Lt, %i, %n) in header instructions
-    val compare_operands = find_lt_compare_operands(header, cond_local_id)
-    if not compare_operands.?:
+    val comparison = find_loop_comparison(header, cond_local_id)
+    if not comparison.?:
         return nil
 
-    val upper_op = compare_operands.unwrap().upper
-    val induction_local_id = match compare_operands.unwrap().induction.kind:
+    val loop_cmp = comparison.unwrap()
+    val upper_op = loop_cmp.upper
+    val induction_local_id: i64 = match loop_cmp.induction.kind:
         case Copy(local): local.id
         case Move(local): local.id
         case _: return nil
