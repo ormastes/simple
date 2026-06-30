@@ -1,0 +1,167 @@
+"""
+# GUI Showcase Perf Backend Contract
+
+## Overview
+
+Validates that retained 4K and 8K GUI showcase performance evidence must come
+from the canonical retained widget showcase backend. A producer cannot satisfy
+completion by reporting a generic or unrelated backend label.
+
+**Plan:** doc/03_plan/agent_tasks/vulkan_backed_web_gui_renderdoc_parallel_plan.md
+**Requirements:** N/A
+**Research:** N/A
+**Design:** doc/07_guide/tooling/renderdoc_capture_infra.md
+
+## Acceptance
+
+- A retained 4K row with `backend=wrong-backend` is normalized to `fail`.
+- A retained 8K row with `backend=wrong-backend` is normalized to `fail`.
+- The failure reasons are `invalid-4k-backend:wrong-backend` and
+  `invalid-8k-backend:wrong-backend`.
+- Otherwise valid retained 4K and 8K rows with stale failure reasons are
+  normalized back to canonical success reasons.
+- All surrounding timing, RSS, checksum, retained-mode, source, native, and
+  fallback fields remain valid so the backend classifier is the first failing
+  gate.
+
+## Syntax
+
+```sh
+SIMPLE_LIB=src bin/simple test --no-session-daemon \
+  test/03_system/check/gui_showcase_perf_backend_contract_spec.spl \
+  --mode=interpreter --clean --fail-fast
+```
+
+## Evidence Contract
+
+This spec does not render a real 4K or 8K GUI frame. It creates controlled
+retained-performance evidence rows and sends them through the same aggregate
+normalizer used by the top-level GUI/Web/2D completion criteria. The fixture
+keeps timing, RSS, checksum, retained render mode, source revision metadata,
+self-hosted release Simple provenance, native binary metadata, alias source
+metadata, build logs, runtime logs, and fallback state valid. That lets the
+scenario prove the exact backend and success-reason behavior without depending
+on a live GUI/GPU host.
+
+The aggregate must reject an otherwise valid retained row when the backend is
+not `simple-retained-widget-showcase`. This prevents unrelated benchmark rows,
+browser rows, CPU-only rows, or external renderer rows from satisfying the
+retained 200 FPS showcase gate.
+
+The aggregate must also normalize stale failure reasons after all retained
+proof gates pass. A stale `missing-required-...` reason paired with
+`status=pass` is contradictory evidence and cannot be accepted by the top-level
+completion gate. Valid 4K rows must emit `met-200fps`; valid 8K rows must emit
+`met-target-fps`.
+
+## Test Matrix
+
+1. 4K retained fixture with `backend=wrong-backend`.
+2. 8K retained fixture with `backend=wrong-backend`.
+3. 4K retained fixture with valid backend and stale missing-evidence reason.
+4. 8K retained fixture with valid backend and stale missing-evidence reason.
+
+## Required Output Rows
+
+Reviewers should inspect these normalized rows before accepting the retained
+perf aggregate behavior:
+
+- `gui_showcase_4k_200fps_status`
+- `gui_showcase_4k_200fps_reason`
+- `gui_showcase_4k_200fps_backend`
+- `gui_showcase_4k_200fps_alias_raw_rt_count`
+- `gui_showcase_4k_200fps_simple_bin_source`
+- `gui_showcase_4k_200fps_native_build_mode`
+- `gui_showcase_4k_200fps_fallback_state`
+- `gui_showcase_8k_perf_status`
+- `gui_showcase_8k_perf_reason`
+- `gui_showcase_8k_perf_backend`
+- `gui_showcase_8k_perf_alias_raw_rt_count`
+- `gui_showcase_8k_perf_simple_bin_source`
+- `gui_showcase_8k_perf_native_build_mode`
+- `gui_showcase_8k_perf_fallback_state`
+
+## Failure Semantics
+
+`invalid-4k-backend:wrong-backend` and
+`invalid-8k-backend:wrong-backend` mean the aggregate rejected a retained row
+because it did not come from the canonical retained widget showcase backend.
+Those failures are expected in the negative fixtures.
+
+`met-200fps` and `met-target-fps` mean the aggregate accepted the controlled
+row and repaired a stale failure reason after all proof fields passed. Those
+success reasons are required by the top-level completion criteria so a
+contradictory `status=pass` plus `missing-required-...` row cannot slip through.
+
+## Completion Boundary
+
+Passing this spec proves only aggregate normalization behavior. It does not
+prove the real 4K or 8K retained GUI showcase meets 200 FPS on a live host.
+The full goal still requires current-source retained perf evidence from the
+canonical wrapper and all platform rendering gates in
+`gui_web_2d_goal_completion_criteria_spec.spl`.
+"""
+
+# @tag: system, gui, perf, backend
+
+use std.spec.*
+use std.io_runtime.{file_read, process_run}
+
+fn retained_4k_backend_command(root: text) -> text:
+    "rm -rf " + root + " && mkdir -p " + root + "/row && " +
+    "dir=" + root + "/row && " +
+    "printf '%b' '\\177ELFsynthetic-native\\n' > \"$dir/native.bin\" && chmod +x \"$dir/native.bin\" && " +
+    "printf 'fn main() -> i64:\\n    0\\n' > \"$dir/showcase.spl\" && " +
+    "printf 'native build log\\n' > \"$dir/build.log\" && printf 'showcase retained log\\n' > \"$dir/showcase.log\" && printf 'elapsed_ms=597\\n' > \"$dir/time.log\" && " +
+    "{ printf 'gui_showcase_4k_200fps_status=pass\\n'; printf 'gui_showcase_4k_200fps_reason=met-target-fps\\n'; printf 'gui_showcase_4k_200fps_backend=wrong-backend\\n'; printf 'gui_showcase_4k_200fps_resolution=4k\\n'; printf 'gui_showcase_4k_200fps_width=3840\\n'; printf 'gui_showcase_4k_200fps_height=2160\\n'; printf 'gui_showcase_4k_200fps_frames=200\\n'; printf 'gui_showcase_4k_200fps_fps_x1000=201000\\n'; printf 'gui_showcase_4k_200fps_frame_avg_ns=4975124\\n'; printf 'gui_showcase_4k_200fps_frame_elapsed_ns_status=pass\\n'; printf 'gui_showcase_4k_200fps_frame_p50_ns=4975124\\n'; printf 'gui_showcase_4k_200fps_frame_p95_ns=4975124\\n'; printf 'gui_showcase_4k_200fps_target_fps=200\\n'; printf 'gui_showcase_4k_200fps_max_rss_kb=131072\\n'; printf 'gui_showcase_4k_200fps_max_rss_budget_kb=262144\\n'; printf 'gui_showcase_4k_200fps_rss_status=pass\\n'; printf 'gui_showcase_4k_200fps_pixels=8294400\\n'; printf 'gui_showcase_4k_200fps_nonzero_pixels=1000\\n'; printf 'gui_showcase_4k_200fps_checksum=123456\\n'; printf 'gui_showcase_4k_200fps_render_mode=retained-static-frame\\n'; printf 'gui_showcase_4k_200fps_redraw_frames=1\\n'; printf 'gui_showcase_4k_200fps_source_revision=testrev123\\n'; printf 'gui_showcase_4k_200fps_source_revision_kind=content-sha256\\n'; printf 'gui_showcase_4k_200fps_source_revision_files=scripts/check/check-widget-showcase-4k-200fps.shs examples/06_io/ui/widget_showcase_gui.spl examples/06_io/ui/showcase_8k_scroll_gui.spl src/lib/common/ui/scroll_surface.spl src/lib/common/ui/dirty_region.spl src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl\\n'; printf 'gui_showcase_4k_200fps_simple_bin=release/x86_64-unknown-linux-gnu/simple\\n'; printf 'gui_showcase_4k_200fps_simple_bin_source=self-hosted-release\\n'; printf 'gui_showcase_4k_200fps_simple_bin_status=pass\\n'; printf 'gui_showcase_4k_200fps_alias_raw_rt_count=0\\n'; printf 'gui_showcase_4k_200fps_use_native=1\\n'; printf 'gui_showcase_4k_200fps_native_bin=%s/native.bin\\n' \"$dir\"; printf 'gui_showcase_4k_200fps_native_bin_file_status=pass\\n'; printf 'gui_showcase_4k_200fps_native_bin_executable_status=pass\\n'; printf 'gui_showcase_4k_200fps_native_bin_magic=7f454c46\\n'; printf 'gui_showcase_4k_200fps_native_bin_format=elf\\n'; printf 'gui_showcase_4k_200fps_native_bin_format_status=pass\\n'; printf 'gui_showcase_4k_200fps_alias_src=%s/showcase.spl\\n' \"$dir\"; printf 'gui_showcase_4k_200fps_alias_src_file_status=pass\\n'; printf 'gui_showcase_4k_200fps_native_build_log=%s/build.log\\n' \"$dir\"; printf 'gui_showcase_4k_200fps_native_build_log_file_status=pass\\n'; printf 'gui_showcase_4k_200fps_native_build_mode=aggressive-native\\n'; printf 'gui_showcase_4k_200fps_fallback_state=none\\n'; printf 'gui_showcase_4k_200fps_log=%s/showcase.log\\n' \"$dir\"; printf 'gui_showcase_4k_200fps_time_log=%s/time.log\\n' \"$dir\"; } > \"$dir/status.env\" && " +
+    "GUI_SHOWCASE_4K_PERF_ENV=" + root + "/row/status.env GUI_RENDERDOC_AGGREGATE_STATIC_CACHE_DIR=build/test-gui-renderdoc-feature-coverage-static-cache " +
+    "BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs >/dev/null"
+
+fn retained_8k_backend_command(root: text) -> text:
+    "rm -rf " + root + " && mkdir -p " + root + "/row && " +
+    "dir=" + root + "/row && " +
+    "printf '%b' '\\177ELFsynthetic-native\\n' > \"$dir/native.bin\" && chmod +x \"$dir/native.bin\" && " +
+    "printf 'fn main() -> i64:\\n    0\\n' > \"$dir/showcase.spl\" && " +
+    "printf 'native build log\\n' > \"$dir/build.log\" && printf 'showcase retained log\\n' > \"$dir/showcase.log\" && printf 'elapsed_ms=597\\n' > \"$dir/time.log\" && " +
+    "{ printf 'gui_showcase_8k_perf_status=pass\\n'; printf 'gui_showcase_8k_perf_reason=met-target-fps\\n'; printf 'gui_showcase_8k_perf_backend=wrong-backend\\n'; printf 'gui_showcase_8k_perf_resolution=8k\\n'; printf 'gui_showcase_8k_perf_width=7680\\n'; printf 'gui_showcase_8k_perf_height=4320\\n'; printf 'gui_showcase_8k_perf_frames=200\\n'; printf 'gui_showcase_8k_perf_fps_x1000=201000\\n'; printf 'gui_showcase_8k_perf_frame_avg_ns=4975124\\n'; printf 'gui_showcase_8k_perf_frame_elapsed_ns_status=pass\\n'; printf 'gui_showcase_8k_perf_frame_p50_ns=4975124\\n'; printf 'gui_showcase_8k_perf_frame_p95_ns=4975124\\n'; printf 'gui_showcase_8k_perf_target_fps=200\\n'; printf 'gui_showcase_8k_perf_max_rss_kb=131072\\n'; printf 'gui_showcase_8k_perf_max_rss_budget_kb=750000\\n'; printf 'gui_showcase_8k_perf_rss_status=pass\\n'; printf 'gui_showcase_8k_perf_pixels=33177600\\n'; printf 'gui_showcase_8k_perf_nonzero_pixels=1000\\n'; printf 'gui_showcase_8k_perf_checksum=123456\\n'; printf 'gui_showcase_8k_perf_render_mode=retained-static-frame\\n'; printf 'gui_showcase_8k_perf_redraw_frames=1\\n'; printf 'gui_showcase_8k_perf_source_revision=testrev123\\n'; printf 'gui_showcase_8k_perf_source_revision_kind=content-sha256\\n'; printf 'gui_showcase_8k_perf_source_revision_files=scripts/check/check-widget-showcase-4k-200fps.shs examples/06_io/ui/widget_showcase_gui.spl examples/06_io/ui/showcase_8k_scroll_gui.spl src/lib/common/ui/scroll_surface.spl src/lib/common/ui/dirty_region.spl src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl\\n'; printf 'gui_showcase_8k_perf_simple_bin=release/x86_64-unknown-linux-gnu/simple\\n'; printf 'gui_showcase_8k_perf_simple_bin_source=self-hosted-release\\n'; printf 'gui_showcase_8k_perf_simple_bin_status=pass\\n'; printf 'gui_showcase_8k_perf_alias_raw_rt_count=0\\n'; printf 'gui_showcase_8k_perf_use_native=1\\n'; printf 'gui_showcase_8k_perf_native_bin=%s/native.bin\\n' \"$dir\"; printf 'gui_showcase_8k_perf_native_bin_file_status=pass\\n'; printf 'gui_showcase_8k_perf_native_bin_executable_status=pass\\n'; printf 'gui_showcase_8k_perf_native_bin_magic=7f454c46\\n'; printf 'gui_showcase_8k_perf_native_bin_format=elf\\n'; printf 'gui_showcase_8k_perf_native_bin_format_status=pass\\n'; printf 'gui_showcase_8k_perf_alias_src=%s/showcase.spl\\n' \"$dir\"; printf 'gui_showcase_8k_perf_alias_src_file_status=pass\\n'; printf 'gui_showcase_8k_perf_native_build_log=%s/build.log\\n' \"$dir\"; printf 'gui_showcase_8k_perf_native_build_log_file_status=pass\\n'; printf 'gui_showcase_8k_perf_native_build_mode=aggressive-native\\n'; printf 'gui_showcase_8k_perf_fallback_state=none\\n'; printf 'gui_showcase_8k_perf_log=%s/showcase.log\\n' \"$dir\"; printf 'gui_showcase_8k_perf_time_log=%s/time.log\\n' \"$dir\"; } > \"$dir/status.env\" && " +
+    "GUI_SHOWCASE_8K_PERF_ENV=" + root + "/row/status.env GUI_RENDERDOC_AGGREGATE_STATIC_CACHE_DIR=build/test-gui-renderdoc-feature-coverage-static-cache " +
+    "BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs >/dev/null"
+
+fn retained_success_reason_command(root: text) -> text:
+    "rm -rf " + root + " && mkdir -p " + root + "/row4k " + root + "/row8k && " +
+    "for dir in " + root + "/row4k " + root + "/row8k; do printf '%b' '\\177ELFsynthetic-native\\n' > \"$dir/native.bin\" && chmod +x \"$dir/native.bin\" && printf 'fn main() -> i64:\\n    0\\n' > \"$dir/showcase.spl\" && printf 'native build log\\n' > \"$dir/build.log\" && printf 'showcase retained log\\n' > \"$dir/showcase.log\" && printf 'elapsed_ms=597\\n' > \"$dir/time.log\"; done && " +
+    "dir=" + root + "/row4k && { printf 'gui_showcase_4k_200fps_status=pass\\n'; printf 'gui_showcase_4k_200fps_reason=missing-required-4k-200fps-evidence:backend\\n'; printf 'gui_showcase_4k_200fps_backend=simple-retained-widget-showcase\\n'; printf 'gui_showcase_4k_200fps_resolution=4k\\n'; printf 'gui_showcase_4k_200fps_width=3840\\n'; printf 'gui_showcase_4k_200fps_height=2160\\n'; printf 'gui_showcase_4k_200fps_frames=200\\n'; printf 'gui_showcase_4k_200fps_fps_x1000=201000\\n'; printf 'gui_showcase_4k_200fps_frame_avg_ns=4975124\\n'; printf 'gui_showcase_4k_200fps_frame_elapsed_ns_status=pass\\n'; printf 'gui_showcase_4k_200fps_frame_p50_ns=4975124\\n'; printf 'gui_showcase_4k_200fps_frame_p95_ns=4975124\\n'; printf 'gui_showcase_4k_200fps_target_fps=200\\n'; printf 'gui_showcase_4k_200fps_max_rss_kb=131072\\n'; printf 'gui_showcase_4k_200fps_max_rss_budget_kb=262144\\n'; printf 'gui_showcase_4k_200fps_rss_status=pass\\n'; printf 'gui_showcase_4k_200fps_pixels=8294400\\n'; printf 'gui_showcase_4k_200fps_nonzero_pixels=1000\\n'; printf 'gui_showcase_4k_200fps_checksum=123456\\n'; printf 'gui_showcase_4k_200fps_render_mode=retained-static-frame\\n'; printf 'gui_showcase_4k_200fps_redraw_frames=1\\n'; printf 'gui_showcase_4k_200fps_source_revision=testrev123\\n'; printf 'gui_showcase_4k_200fps_source_revision_kind=content-sha256\\n'; printf 'gui_showcase_4k_200fps_source_revision_files=scripts/check/check-widget-showcase-4k-200fps.shs examples/06_io/ui/widget_showcase_gui.spl examples/06_io/ui/showcase_8k_scroll_gui.spl src/lib/common/ui/scroll_surface.spl src/lib/common/ui/dirty_region.spl src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl\\n'; printf 'gui_showcase_4k_200fps_simple_bin=release/x86_64-unknown-linux-gnu/simple\\n'; printf 'gui_showcase_4k_200fps_simple_bin_source=self-hosted-release\\n'; printf 'gui_showcase_4k_200fps_simple_bin_status=pass\\n'; printf 'gui_showcase_4k_200fps_alias_raw_rt_count=0\\n'; printf 'gui_showcase_4k_200fps_use_native=1\\n'; printf 'gui_showcase_4k_200fps_native_bin=%s/native.bin\\n' \"$dir\"; printf 'gui_showcase_4k_200fps_native_bin_file_status=pass\\n'; printf 'gui_showcase_4k_200fps_native_bin_executable_status=pass\\n'; printf 'gui_showcase_4k_200fps_native_bin_magic=7f454c46\\n'; printf 'gui_showcase_4k_200fps_native_bin_format=elf\\n'; printf 'gui_showcase_4k_200fps_native_bin_format_status=pass\\n'; printf 'gui_showcase_4k_200fps_alias_src=%s/showcase.spl\\n' \"$dir\"; printf 'gui_showcase_4k_200fps_alias_src_file_status=pass\\n'; printf 'gui_showcase_4k_200fps_native_build_log=%s/build.log\\n' \"$dir\"; printf 'gui_showcase_4k_200fps_native_build_log_file_status=pass\\n'; printf 'gui_showcase_4k_200fps_native_build_mode=aggressive-native\\n'; printf 'gui_showcase_4k_200fps_fallback_state=none\\n'; printf 'gui_showcase_4k_200fps_log=%s/showcase.log\\n' \"$dir\"; printf 'gui_showcase_4k_200fps_time_log=%s/time.log\\n' \"$dir\"; } > \"$dir/status.env\" && " +
+    "dir=" + root + "/row8k && { printf 'gui_showcase_8k_perf_status=pass\\n'; printf 'gui_showcase_8k_perf_reason=missing-required-8k-perf-evidence:backend\\n'; printf 'gui_showcase_8k_perf_backend=simple-retained-widget-showcase\\n'; printf 'gui_showcase_8k_perf_resolution=8k\\n'; printf 'gui_showcase_8k_perf_width=7680\\n'; printf 'gui_showcase_8k_perf_height=4320\\n'; printf 'gui_showcase_8k_perf_frames=200\\n'; printf 'gui_showcase_8k_perf_fps_x1000=201000\\n'; printf 'gui_showcase_8k_perf_frame_avg_ns=4975124\\n'; printf 'gui_showcase_8k_perf_frame_elapsed_ns_status=pass\\n'; printf 'gui_showcase_8k_perf_frame_p50_ns=4975124\\n'; printf 'gui_showcase_8k_perf_frame_p95_ns=4975124\\n'; printf 'gui_showcase_8k_perf_target_fps=200\\n'; printf 'gui_showcase_8k_perf_max_rss_kb=131072\\n'; printf 'gui_showcase_8k_perf_max_rss_budget_kb=750000\\n'; printf 'gui_showcase_8k_perf_rss_status=pass\\n'; printf 'gui_showcase_8k_perf_pixels=33177600\\n'; printf 'gui_showcase_8k_perf_nonzero_pixels=1000\\n'; printf 'gui_showcase_8k_perf_checksum=123456\\n'; printf 'gui_showcase_8k_perf_render_mode=retained-static-frame\\n'; printf 'gui_showcase_8k_perf_redraw_frames=1\\n'; printf 'gui_showcase_8k_perf_source_revision=testrev123\\n'; printf 'gui_showcase_8k_perf_source_revision_kind=content-sha256\\n'; printf 'gui_showcase_8k_perf_source_revision_files=scripts/check/check-widget-showcase-4k-200fps.shs examples/06_io/ui/widget_showcase_gui.spl examples/06_io/ui/showcase_8k_scroll_gui.spl src/lib/common/ui/scroll_surface.spl src/lib/common/ui/dirty_region.spl src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl\\n'; printf 'gui_showcase_8k_perf_simple_bin=release/x86_64-unknown-linux-gnu/simple\\n'; printf 'gui_showcase_8k_perf_simple_bin_source=self-hosted-release\\n'; printf 'gui_showcase_8k_perf_simple_bin_status=pass\\n'; printf 'gui_showcase_8k_perf_alias_raw_rt_count=0\\n'; printf 'gui_showcase_8k_perf_use_native=1\\n'; printf 'gui_showcase_8k_perf_native_bin=%s/native.bin\\n' \"$dir\"; printf 'gui_showcase_8k_perf_native_bin_file_status=pass\\n'; printf 'gui_showcase_8k_perf_native_bin_executable_status=pass\\n'; printf 'gui_showcase_8k_perf_native_bin_magic=7f454c46\\n'; printf 'gui_showcase_8k_perf_native_bin_format=elf\\n'; printf 'gui_showcase_8k_perf_native_bin_format_status=pass\\n'; printf 'gui_showcase_8k_perf_alias_src=%s/showcase.spl\\n' \"$dir\"; printf 'gui_showcase_8k_perf_alias_src_file_status=pass\\n'; printf 'gui_showcase_8k_perf_native_build_log=%s/build.log\\n' \"$dir\"; printf 'gui_showcase_8k_perf_native_build_log_file_status=pass\\n'; printf 'gui_showcase_8k_perf_native_build_mode=aggressive-native\\n'; printf 'gui_showcase_8k_perf_fallback_state=none\\n'; printf 'gui_showcase_8k_perf_log=%s/showcase.log\\n' \"$dir\"; printf 'gui_showcase_8k_perf_time_log=%s/time.log\\n' \"$dir\"; } > \"$dir/status.env\" && " +
+    "GUI_SHOWCASE_4K_PERF_ENV=" + root + "/row4k/status.env GUI_SHOWCASE_8K_PERF_ENV=" + root + "/row8k/status.env GUI_RENDERDOC_AGGREGATE_STATIC_CACHE_DIR=build/test-gui-renderdoc-feature-coverage-static-cache " +
+    "BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs >/dev/null"
+
+describe "GUI showcase perf backend contract":
+
+    it "rejects retained 4K and 8K rows with non-canonical backend labels":
+        step("Create and aggregate a retained 4K row with a wrong backend")
+        val command_4k = retained_4k_backend_command("build/test-gui-showcase-perf-backend-contract-4k")
+        val (_stdout_4k, _stderr_4k, code_4k) = process_run("/bin/sh", ["-c", command_4k])
+        expect(code_4k).to_equal(0)
+        val evidence_4k = file_read("build/test-gui-showcase-perf-backend-contract-4k/out/evidence.env")
+        expect(evidence_4k).to_contain("gui_showcase_4k_200fps_status=fail")
+        expect(evidence_4k).to_contain("gui_showcase_4k_200fps_reason=invalid-4k-backend:wrong-backend")
+
+        step("Create and aggregate a retained 8K row with a wrong backend")
+        val command_8k = retained_8k_backend_command("build/test-gui-showcase-perf-backend-contract-8k")
+        val (_stdout_8k, _stderr_8k, code_8k) = process_run("/bin/sh", ["-c", command_8k])
+        expect(code_8k).to_equal(0)
+        val evidence_8k = file_read("build/test-gui-showcase-perf-backend-contract-8k/out/evidence.env")
+        expect(evidence_8k).to_contain("gui_showcase_8k_perf_status=fail")
+        expect(evidence_8k).to_contain("gui_showcase_8k_perf_reason=invalid-8k-backend:wrong-backend")
+
+    it "normalizes stale retained success reasons after all retained proof gates pass":
+        step("Aggregate retained 4K and 8K pass rows that still carry stale missing-evidence reasons")
+        val command = retained_success_reason_command("build/test-gui-showcase-perf-success-reason-contract")
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(0)
+
+        val evidence = file_read("build/test-gui-showcase-perf-success-reason-contract/out/evidence.env")
+        expect(evidence).to_contain("gui_showcase_4k_200fps_status=pass")
+        expect(evidence).to_contain("gui_showcase_4k_200fps_reason=met-200fps")
+        expect(evidence).to_contain("gui_showcase_8k_perf_status=pass")
+        expect(evidence).to_contain("gui_showcase_8k_perf_reason=met-target-fps")

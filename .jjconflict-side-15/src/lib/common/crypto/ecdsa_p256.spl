@@ -1,0 +1,73 @@
+# ECDSA P-256 SHA-256 sign and verify — common crypto layer.
+# Wraps rt_ecdsa_p256_sign / rt_ecdsa_p256_verify runtime externs.
+#
+# Key format: PKCS#8 v1 DER-encoded private key / SPKI DER-encoded public key.
+# Signature format: 64-byte fixed-width r||s (32 bytes each, big-endian).
+#
+# NOTE: The interpreter may wrap [u8] extern returns in Option::Some(...)
+# (tracked in doc/09_report/crypto_spec_remains_2026-04-16.md).
+# _unwrap_sig() coerces the return before callers see it.
+
+# ============================================================================
+# Tier 1: Raw SFFI externs
+# ============================================================================
+
+# Verify an ECDSA P-256 SHA-256 fixed-width (64-byte r||s) signature.
+# pubkey:    Raw uncompressed EC point (04 || Qx || Qy, 65 bytes) — ring 0.17
+#            requires this format; use ecdsa_p256_verify for SPKI input.
+# message:   Raw message bytes (hashed internally with SHA-256).
+# signature: 64-byte r||s (NOT the SSH-wire mpint pair).
+# Returns 1 if valid, 0 otherwise.
+extern fn rt_ecdsa_p256_verify(pubkey: [u8], message: [u8], signature: [u8]) -> i64
+
+# Sign `message` with ECDSA P-256 SHA-256 using a PKCS#8-v1 DER private key.
+# Returns 64-byte fixed-width r||s, or an empty array on error.
+extern fn rt_ecdsa_p256_sign(pkcs8: [u8], message: [u8]) -> [u8]
+
+# ============================================================================
+# Tier 2: Simple-friendly wrappers
+# ============================================================================
+
+# Coerce Option<[u8]> -> [u8] in case the interpreter wraps the extern return.
+fn _unwrap_sig(maybe: [u8]) -> [u8]:
+    if val bytes = maybe:
+        bytes
+    else:
+        []
+
+# Sign `message` with ECDSA P-256 SHA-256.
+#
+# Args:
+#   pkcs8:   PKCS#8 v1 DER-encoded P-256 private key.
+#   message: Bytes to sign (hashed with SHA-256 inside the runtime).
+#
+# Returns: 64-byte fixed-width r||s signature.
+#          Returns an empty array on any error — caller must check len > 0.
+#
+# Hosted-only: requires a system CSPRNG in the runtime.
+fn ecdsa_p256_sign(pkcs8: [u8], message: [u8]) -> [u8]:
+    _unwrap_sig(rt_ecdsa_p256_sign(pkcs8, message))
+
+# Extract raw EC point (04 || Qx || Qy, 65 bytes) from a P-256 SPKI (91 bytes).
+# P-256 SPKI layout: 26 bytes of DER headers, then the 65-byte uncompressed point.
+# Returns [] for any non-conforming input.
+fn _spki_to_ec_point(spki: [u8]) -> [u8]:
+    if spki.len() != 91:
+        []
+    else if (spki[26] as i64) != 4:
+        []
+    else:
+        spki.slice(26, 91)
+
+# Verify an ECDSA P-256 SHA-256 signature.
+#
+# Args:
+#   pubkey:    DER-encoded ECDSA P-256 public key (SPKI format, 91 bytes).
+#   message:   Message bytes that were signed.
+#   signature: 64-byte fixed-width r||s (32 + 32, big-endian).
+#
+# Returns: true if the signature is valid, false otherwise.
+fn ecdsa_p256_verify(pubkey: [u8], message: [u8], signature: [u8]) -> bool:
+    val ec_point = _spki_to_ec_point(pubkey)
+    val result = rt_ecdsa_p256_verify(ec_point, message, signature)
+    result == 1

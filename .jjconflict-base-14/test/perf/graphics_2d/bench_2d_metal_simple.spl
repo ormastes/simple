@@ -1,0 +1,293 @@
+# test/perf/graphics_2d/bench_2d_metal_simple.spl
+#
+# Simple + Metal GPU benchmark.
+# Uses rt_metal_run_compute_frame (batched extern) for fill_1080p and
+# clipped_scroll; uses per-call API for blit_tiles (3 buffers needed).
+# MSL kernels take a single packed-params struct at buffer(2).
+#
+# Output format matches c_reference/bench_2d_metal.m (SCENE_RESULT lines).
+# backend=simple_metal_gpu
+
+# ─── Metal FFI ──────────────────────────────────────────────────────────────
+
+extern fn rt_metal_is_available() -> i64
+extern fn rt_metal_create_device(idx: i64) -> i64
+extern fn rt_metal_destroy_device(dev: i64) -> i64
+extern fn rt_metal_create_command_queue(dev: i64) -> i64
+extern fn rt_metal_destroy_command_queue(q: i64) -> i64
+extern fn rt_metal_alloc_buffer(dev: i64, size: i64) -> i64
+extern fn rt_metal_free_buffer(buf: i64) -> i64
+extern fn rt_metal_compile_shader(dev: i64, source: text) -> i64
+extern fn rt_metal_create_compute_pipeline(dev: i64, lib: i64, entry: text) -> i64
+extern fn rt_metal_destroy_pipeline(p: i64) -> i64
+extern fn rt_metal_destroy_shader(s: i64) -> i64
+extern fn rt_metal_create_command_buffer(q: i64) -> i64
+extern fn rt_metal_create_compute_encoder(cmd: i64) -> i64
+extern fn rt_metal_set_buffer(enc: i64, buf: i64, offset: i64, idx: i64) -> i64
+extern fn rt_metal_set_bytes(enc: i64, data: [u8], length: i64, idx: i64) -> i64
+extern fn rt_metal_dispatch_compute(enc: i64, pipeline: i64, gx: i64, gy: i64, gz: i64, bx: i64, by: i64, bz: i64) -> i64
+extern fn rt_metal_end_compute_encoder(enc: i64) -> i64
+extern fn rt_metal_commit_command_buffer(cmd: i64) -> i64
+extern fn rt_metal_wait_completed(cmd: i64) -> i64
+# batched: params_ptr is a raw heap pointer (rt_alloc), params_size in bytes
+extern fn rt_metal_run_compute_frame(queue: i64, pipeline: i64, buf0: i64, buf1: i64, params_ptr: i64, params_size: i64, gx: i64, gy: i64, gz: i64, bx: i64, by: i64, bz: i64) -> i64
+# batched blit: 3 buffers (src, dst, tiles) + setBytes params at index 3
+extern fn rt_metal_run_blit_frame(queue: i64, pipeline: i64, buf0: i64, buf1: i64, buf2: i64, params_ptr: i64, params_size: i64, gx: i64, gy: i64, gz: i64, bx: i64, by: i64, bz: i64) -> i64
+
+# ─── Memory helpers ──────────────────────────────────────────────────────────
+
+extern fn rt_alloc(size: i64) -> i64
+extern fn rt_free(ptr: i64) -> i64
+extern fn rt_ptr_write_i32(ptr: i64, offset: i64, value: i64) -> i64
+extern fn rt_metal_buffer_upload(buf: i64, data: i64, size: i64) -> i64
+
+# ─── Timing ──────────────────────────────────────────────────────────────────
+
+extern fn rt_time_now_nanos() -> i64
+
+# ─── Sort helper (insertion sort for TIMED_FRAMES elements) ──────────────────
+
+fn sort_samples(arr: [i64], n: i64):
+    var i: i64 = 1
+    while i < n:
+        var key = arr[i]
+        var j: i64 = i - 1
+        while j >= 0 and arr[j] > key:
+            arr[j + 1] = arr[j]
+            j = j - 1
+        arr[j + 1] = key
+        i = i + 1
+
+fn percentile_ns(arr: [i64], n: i64, num: i64, den: i64) -> i64:
+    var idx = n * num / den
+    if idx >= n:
+        idx = n - 1
+    arr[idx]
+
+# ─── Dimensions ──────────────────────────────────────────────────────────────
+
+val FRAME_W:       i64 = 1920
+val FRAME_H:       i64 = 1080
+val BYTES_PER_PX:  i64 = 4
+val FB_SIZE:       i64 = 1920 * 1080 * 4
+val TILE_W:        i64 = 64
+val TILE_H:        i64 = 64
+val N_TILES:       i64 = 30
+val SCROLL_W:      i64 = 1024
+val SCROLL_H:      i64 = 768
+val WARMUP_FRAMES: i64 = 30
+val TIMED_FRAMES:  i64 = 200
+
+# ─── MSL Shader source ────────────────────────────────────────────────────────
+#
+# fill_kernel: params at buffer(2) = { color: u32, w: u32, h: u32 }
+#   buf0=dst (buffer(0)), buf1=dst (ignored/same)
+# blit_kernel: src=buffer(0), dst=buffer(1), tiles=buffer(2), fb_w=buffer(3)
+#   uses per-call API since 3 buffers + bytes needed
+# scroll_kernel: params at buffer(2) = { w: u32, h: u32, fb_w: u32, ox: u32, oy: u32 }
+#   buf0=src (buffer(0)), buf1=dst (buffer(1))
+
+val MSL_SOURCE: text = "#include <metal_stdlib>\nusing namespace metal;\n\nstruct FillParams { uint color; uint w; uint h; };\nkernel void fill_kernel(\n    device uint8_t *dst [[ buffer(0) ]],\n    constant FillParams &p [[ buffer(2) ]],\n    uint2 gid [[ thread_position_in_grid ]])\n{\n    if (gid.x >= p.w || gid.y >= p.h) return;\n    uint off = (gid.y * p.w + gid.x) * 4u;\n    dst[off+0] = (p.color) & 0xFF;\n    dst[off+1] = (p.color >> 8) & 0xFF;\n    dst[off+2] = (p.color >> 16) & 0xFF;\n    dst[off+3] = (p.color >> 24) & 0xFF;\n}\n\nstruct TileDesc { uint src_byte_off; uint dst_byte_off; };\nkernel void blit_kernel(\n    device const uint8_t *src [[ buffer(0) ]],\n    device uint8_t *dst [[ buffer(1) ]],\n    device const TileDesc *tiles [[ buffer(2) ]],\n    constant uint &fb_w [[ buffer(3) ]],\n    uint3 gtid [[ thread_position_in_grid ]])\n{\n    uint tile_idx = gtid.z; uint px = gtid.x; uint py = gtid.y;\n    TileDesc td = tiles[tile_idx];\n    uint src_off = td.src_byte_off + (py * 64u + px) * 4u;\n    uint dst_off = td.dst_byte_off + (py * fb_w + px) * 4u;\n    dst[dst_off+0] = src[src_off+0]; dst[dst_off+1] = src[src_off+1];\n    dst[dst_off+2] = src[src_off+2]; dst[dst_off+3] = src[src_off+3];\n}\n\nstruct ScrollParams { uint w; uint h; uint fb_w; uint ox; uint oy; };\nkernel void scroll_kernel(\n    device const uint8_t *src [[ buffer(0) ]],\n    device uint8_t *dst [[ buffer(1) ]],\n    constant ScrollParams &p [[ buffer(2) ]],\n    uint2 gid [[ thread_position_in_grid ]])\n{\n    if (gid.x >= p.w || gid.y >= p.h) return;\n    uint src_y = gid.y + 1u;\n    if (src_y >= p.h) src_y = p.h - 1u;\n    uint src_off = (src_y * p.fb_w + gid.x) * 4u;\n    uint dst_off = ((p.oy + gid.y) * p.fb_w + (p.ox + gid.x)) * 4u;\n    dst[dst_off+0] = src[src_off+0]; dst[dst_off+1] = src[src_off+1];\n    dst[dst_off+2] = src[src_off+2]; dst[dst_off+3] = src[src_off+3];\n}\n"
+
+# ─── Global state ─────────────────────────────────────────────────────────────
+
+var g_dev:          i64 = 0
+var g_queue:        i64 = 0
+var g_fill_pso:     i64 = 0
+var g_blit_pso:     i64 = 0
+var g_scroll_pso:   i64 = 0
+var g_src_buf:      i64 = 0
+var g_dst_buf:      i64 = 0
+var g_tiles_buf:    i64 = 0
+
+# ─── Setup ────────────────────────────────────────────────────────────────────
+
+fn setup() -> bool:
+    g_dev = rt_metal_create_device(0)
+    if g_dev == 0:
+        print("ERROR: rt_metal_create_device returned 0")
+        return false
+
+    g_queue = rt_metal_create_command_queue(g_dev)
+    if g_queue == 0:
+        print("ERROR: rt_metal_create_command_queue returned 0")
+        return false
+
+    var lib = rt_metal_compile_shader(g_dev, MSL_SOURCE)
+    if lib == 0:
+        print("ERROR: rt_metal_compile_shader returned 0")
+        return false
+
+    g_fill_pso   = rt_metal_create_compute_pipeline(g_dev, lib, "fill_kernel")
+    g_blit_pso   = rt_metal_create_compute_pipeline(g_dev, lib, "blit_kernel")
+    g_scroll_pso = rt_metal_create_compute_pipeline(g_dev, lib, "scroll_kernel")
+    rt_metal_destroy_shader(lib)
+
+    if g_fill_pso == 0 or g_blit_pso == 0 or g_scroll_pso == 0:
+        print("ERROR: pipeline creation failed")
+        return false
+
+    g_src_buf = rt_metal_alloc_buffer(g_dev, FB_SIZE)
+    g_dst_buf = rt_metal_alloc_buffer(g_dev, FB_SIZE)
+    if g_src_buf == 0 or g_dst_buf == 0:
+        print("ERROR: buffer alloc failed")
+        return false
+
+    # Build tile descriptor table: TileDesc = {src_byte_off: u32, dst_byte_off: u32} = 8 bytes
+    var tiles_size: i64 = N_TILES * 8
+    g_tiles_buf = rt_metal_alloc_buffer(g_dev, tiles_size)
+    if g_tiles_buf == 0:
+        print("ERROR: tiles buffer alloc failed")
+        return false
+
+    # Upload tile descriptors via rt_alloc + rt_ptr_write_i32 + rt_metal_buffer_upload
+    # We use the Metal buffer contents directly (SharedStorage means CPU can write)
+    # Actually: rt_metal_buffer_upload writes from a CPU pointer to GPU buffer.
+    # We build the tile data in CPU memory then upload.
+    var tiles_cpu = rt_alloc(tiles_size)
+    var tiles_per_row: i64 = FRAME_W / TILE_W
+    var ti: i64 = 0
+    while ti < N_TILES:
+        var src_off: i64 = ti * TILE_W * TILE_H * BYTES_PER_PX
+        var col: i64 = ti mod tiles_per_row
+        var row: i64 = ti / tiles_per_row
+        var dst_off: i64 = (row * FRAME_W * TILE_H + col * TILE_W) * BYTES_PER_PX
+        rt_ptr_write_i32(tiles_cpu, ti * 8,     src_off)
+        rt_ptr_write_i32(tiles_cpu, ti * 8 + 4, dst_off)
+        ti = ti + 1
+    # Upload tile descriptors to GPU buffer (raw pointer variant)
+    rt_metal_buffer_upload(g_tiles_buf, tiles_cpu, tiles_size)
+    rt_free(tiles_cpu)
+
+    true
+
+# ─── Scene: fill_1080p (batched extern) ──────────────────────────────────────
+
+fn bench_fill(samples: [i64]):
+    # FillParams: { color: u32, w: u32, h: u32 } = 12 bytes
+    var params = rt_alloc(12)
+    rt_ptr_write_i32(params, 0, 0xFF808080)
+    rt_ptr_write_i32(params, 4, FRAME_W)
+    rt_ptr_write_i32(params, 8, FRAME_H)
+
+    var gx: i64 = (FRAME_W + 15) / 16
+    var gy: i64 = (FRAME_H + 15) / 16
+
+    # Warmup
+    var w: i64 = 0
+    while w < WARMUP_FRAMES:
+        rt_metal_run_compute_frame(g_queue, g_fill_pso, g_dst_buf, g_dst_buf, params, 12, gx, gy, 1, 16, 16, 1)
+        w = w + 1
+
+    # Timed
+    var f: i64 = 0
+    while f < TIMED_FRAMES:
+        var t0 = rt_time_now_nanos()
+        rt_metal_run_compute_frame(g_queue, g_fill_pso, g_dst_buf, g_dst_buf, params, 12, gx, gy, 1, 16, 16, 1)
+        var t1 = rt_time_now_nanos()
+        samples[f] = t1 - t0
+        f = f + 1
+
+    rt_free(params)
+
+# ─── Scene: blit_tiles (batched extern — 3 buffers + fb_w setBytes at index 3) ─
+
+fn bench_blit(samples: [i64]):
+    # fb_w param: FRAME_W as little-endian u32 in a 4-byte heap block
+    var params = rt_alloc(4)
+    rt_ptr_write_i32(params, 0, FRAME_W)
+
+    # Warmup
+    var w: i64 = 0
+    while w < WARMUP_FRAMES:
+        rt_metal_run_blit_frame(g_queue, g_blit_pso, g_src_buf, g_dst_buf, g_tiles_buf, params, 4, 1, 1, N_TILES, TILE_W, TILE_H, 1)
+        w = w + 1
+
+    # Timed
+    var f: i64 = 0
+    while f < TIMED_FRAMES:
+        var t0 = rt_time_now_nanos()
+        rt_metal_run_blit_frame(g_queue, g_blit_pso, g_src_buf, g_dst_buf, g_tiles_buf, params, 4, 1, 1, N_TILES, TILE_W, TILE_H, 1)
+        var t1 = rt_time_now_nanos()
+        samples[f] = t1 - t0
+        f = f + 1
+
+    rt_free(params)
+
+# ─── Scene: clipped_scroll (batched extern) ───────────────────────────────────
+
+fn bench_scroll(samples: [i64]):
+    # ScrollParams: { w: u32, h: u32, fb_w: u32, ox: u32, oy: u32 } = 20 bytes
+    var params = rt_alloc(20)
+    rt_ptr_write_i32(params,  0, SCROLL_W)
+    rt_ptr_write_i32(params,  4, SCROLL_H)
+    rt_ptr_write_i32(params,  8, FRAME_W)
+    rt_ptr_write_i32(params, 12, FRAME_W / 8)
+    rt_ptr_write_i32(params, 16, FRAME_H / 8)
+
+    var gx: i64 = (SCROLL_W + 15) / 16
+    var gy: i64 = (SCROLL_H + 15) / 16
+
+    # Warmup
+    var w: i64 = 0
+    while w < WARMUP_FRAMES:
+        rt_metal_run_compute_frame(g_queue, g_scroll_pso, g_src_buf, g_dst_buf, params, 20, gx, gy, 1, 16, 16, 1)
+        w = w + 1
+
+    # Timed
+    var f: i64 = 0
+    while f < TIMED_FRAMES:
+        var t0 = rt_time_now_nanos()
+        rt_metal_run_compute_frame(g_queue, g_scroll_pso, g_src_buf, g_dst_buf, params, 20, gx, gy, 1, 16, 16, 1)
+        var t1 = rt_time_now_nanos()
+        samples[f] = t1 - t0
+        f = f + 1
+
+    rt_free(params)
+
+# ─── Output helper ────────────────────────────────────────────────────────────
+
+fn print_result(name: text, samples: [i64]):
+    sort_samples(samples, TIMED_FRAMES)
+    var p50 = percentile_ns(samples, TIMED_FRAMES, 50, 100)
+    var p95 = percentile_ns(samples, TIMED_FRAMES, 95, 100)
+    var p99 = percentile_ns(samples, TIMED_FRAMES, 99, 100)
+    var ppf: i64 = FRAME_W * FRAME_H
+    var pps: i64 = 0
+    if p50 > 0:
+        pps = ppf * 1000000000 / p50
+    var dps: i64 = 0
+    if p50 > 0:
+        dps = 1000000000 / p50
+    print("SCENE_RESULT scene=" + name + " backend=simple_metal_gpu frame_count=200 p50_ms=" + (p50 / 1000000).to_string() + " p95_ms=" + (p95 / 1000000).to_string() + " pixels_per_sec=" + pps.to_string() + " draws_per_sec=" + dps.to_string() + " rss_kb=0 pixel_hash=0 p50_ns=" + p50.to_string() + " p99_ms=" + (p99 / 1000000).to_string() + " p99_ns=" + p99.to_string() + " mode=full")
+
+# ─── Main ─────────────────────────────────────────────────────────────────────
+
+fn main():
+    if rt_metal_is_available() == 0:
+        print("Metal not available on this system")
+        return
+
+    if not setup():
+        print("Setup failed")
+        return
+
+    var samples: [i64] = [0; 200]
+
+    bench_fill(samples)
+    print_result("fill_1080p", samples)
+
+    bench_blit(samples)
+    print_result("blit_tiles", samples)
+
+    bench_scroll(samples)
+    print_result("clipped_scroll", samples)
+
+    rt_metal_free_buffer(g_src_buf)
+    rt_metal_free_buffer(g_dst_buf)
+    rt_metal_free_buffer(g_tiles_buf)
+    rt_metal_destroy_pipeline(g_fill_pso)
+    rt_metal_destroy_pipeline(g_blit_pso)
+    rt_metal_destroy_pipeline(g_scroll_pso)
+    rt_metal_destroy_command_queue(g_queue)
+    rt_metal_destroy_device(g_dev)

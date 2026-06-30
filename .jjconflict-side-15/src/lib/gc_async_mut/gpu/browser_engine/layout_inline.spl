@@ -1,0 +1,67 @@
+
+# CSS Inline Formatting Context — Leaf Helpers
+#
+# Pure text-processing helpers for the inline formatting context.
+# Returns only primitive types (text, [text]) — no LayoutBox dependencies.
+# Called from layout.spl's layout_inline and _build_line_box implementations.
+
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
+use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
+    be_dom_get_is_text, be_dom_get_text, be_dom_get_children, be_dom_get_attr,
+    be_dom_get_style}
+
+fn _collect_text(node: BeDomNode) -> text:
+    """Recursively collect all text content from a node subtree."""
+    if be_dom_get_is_text(node):
+        return be_dom_get_text(node)
+    val kids = be_dom_get_children(node)
+    var result = ""
+    var i = 0
+    while i < kids.len():
+        val child = kids[i]
+        i = i + 1
+        val sub = _collect_text(child)
+        if sub.len() > 0:
+            if result.len() > 0:
+                result = result + " " + sub
+            else:
+                result = sub
+    result
+
+fn _split_words(s: text) -> [text]:
+    """Split text on whitespace into words."""
+    var words: [text] = []
+    val n = s.len()
+    var start = -1
+    var i = 0
+    while i < n:
+        val ch = s.char_at(i)
+        if ch == " " or ch == "\t" or ch == "\n" or ch == "\r":
+            if start >= 0:
+                words.push(s.slice(start, i))
+                start = -1
+        else:
+            if start < 0:
+                start = i
+        i = i + 1
+    if start >= 0:
+        words.push(s.slice(start, n))
+    words
+
+fn _parse_inline_text_align(node: BeDomNode) -> text:
+    """Extract text-align from the node's inline style attribute, or fall back to computed style."""
+    val style_attr = be_dom_get_attr(node, "style")
+    if style_attr.len() > 0:
+        # Simple scan: find "text-align:" in style attribute value
+        val needle = "text-align:"
+        val idx = style_attr.index_of(needle)
+        if idx >= 0:
+            val start = idx + needle.len()
+            # Read until ';' or end
+            var end = start
+            while end < style_attr.len() and style_attr.char_at(end) != ";":
+                end = end + 1
+            val val_raw = style_attr.slice(start, end)
+            return val_raw.trim()
+    val s = be_dom_get_style(node)
+    s.text_align

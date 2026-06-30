@@ -1,0 +1,304 @@
+"""
+# DNS Resolver
+
+DNS resolver with TTL-based caching for the browser engine.
+Delegates system DNS lookups to the hosted runtime via extern.
+"""
+
+#![allow(REQC001)]
+#![allow(REQC004)]
+#![allow(unnamed_duplicate_typed_args)]
+
+use std.gc_async_mut.gpu.browser_engine.shared.error.{BrowserError, network_error}
+use std.gc_async_mut.gpu.browser_engine.shared.logging.{Logger, LogLevel}
+use std.io_runtime.{time_now_unix_micros}
+
+extern fn rt_dns_lookup(hostname: text) -> text
+
+class DnsCacheEntry:
+    hostname: text
+    addresses: [text]
+    created_at: i64
+    ttl: i64
+
+    static fn create(hostname: text, addresses: [text], created_at: i64, ttl: i64) -> DnsCacheEntry:
+        DnsCacheEntry(
+            hostname: hostname,
+            addresses: addresses,
+            created_at: created_at,
+            ttl: ttl
+        )
+
+    fn is_expired(now: i64) -> bool:
+        now - self.created_at > self.ttl
+
+class DnsCache:
+    entries: [DnsCacheEntry]
+    max_ttl: i64
+
+    static fn create(max_ttl: i64) -> DnsCache:
+        DnsCache(entries: [], max_ttl: max_ttl)
+
+    me lookup(hostname: text, now: i64) -> [text]?:
+        val index = self.find_index(normalize_hostname(hostname))
+        if index >= 0:
+            val e = self.entries[index]
+            if e.is_expired(now):
+                self.remove_at(index)
+                return nil
+            return e.addresses
+        nil
+
+    me store(hostname: text, addresses: [text], now: i64, ttl: i64):
+        val effective_ttl = if ttl > self.max_ttl: self.max_ttl else: ttl
+        val key = normalize_hostname(hostname)
+        val entry = DnsCacheEntry.create(key, addresses, now, effective_ttl)
+        val index = self.find_index(key)
+        if index >= 0:
+            self.entries[index] = entry
+        else:
+            self.entries = self.entries + [entry]
+
+    me invalidate(hostname: text):
+        val index = self.find_index(normalize_hostname(hostname))
+        if index >= 0:
+            self.remove_at(index)
+
+    me flush():
+        self.entries = []
+
+    fn size() -> i64:
+        self.entries.len()
+
+    fn find_index(hostname: text) -> i64:
+        var i = 0
+        while i < self.entries.len():
+            if self.entries[i].hostname == hostname:
+                return i
+            i = i + 1
+        -1
+
+    me remove_at(index: i64):
+        var result: [DnsCacheEntry] = []
+        var i = 0
+        while i < self.entries.len():
+            if i != index:
+                result = result + [self.entries[i]]
+            i = i + 1
+        self.entries = result
+
+pub class DnsResolver:
+    cache: DnsCache
+    logger: Logger
+    default_ttl: i64
+    extra_hosts: [DnsCacheEntry]
+
+    static fn new(logger: Logger, cache_ttl: i64) -> DnsResolver:
+        DnsResolver(
+            cache: DnsCache.create(cache_ttl),
+            logger: logger,
+            default_ttl: cache_ttl,
+            extra_hosts: []
+        )
+
+    me resolve(hostname: text) -> Result<[text], BrowserError>:
+        self.logger.debug("dns: resolving {hostname}")
+        val key = normalize_hostname(hostname)
+
+        val cached = self.cache_lookup(key)
+        if cached.?:
+            val addrs = cached.unwrap()
+            self.logger.debug("dns: cache hit for {hostname} ({addrs.len()} addresses)")
+            return Ok(addrs)
+
+        self.logger.info("dns: cache miss for {hostname}, performing lookup")
+        val result = self.system_lookup(key)
+        match result:
+            Ok(addresses):
+                if addresses.is_empty():
+                    self.logger.warn("dns: lookup returned no addresses for {hostname}")
+                    return Err(network_error("DNS resolution failed: no addresses for {hostname}"))
+                self.logger.debug("dns: resolved {hostname} to {addresses.len()} addresses")
+                val now = self.current_time()
+                self.cache.store(key, addresses, now, self.default_ttl)
+                Ok(addresses)
+            Err(e):
+                self.logger.error("dns: lookup failed for {hostname}: {e.message}")
+                Err(e)
+
+    me cache_lookup(hostname: text) -> [text]?:
+        val now = self.current_time()
+        self.cache.lookup(hostname, now)
+
+    me invalidate(hostname: text):
+        self.logger.debug("dns: invalidating cache for {hostname}")
+        self.cache.invalidate(hostname)
+
+    me flush_cache():
+        self.logger.info("dns: flushing entire cache ({self.cache.size()} entries)")
+        self.cache.flush()
+
+    me system_lookup(hostname: text) -> Result<[text], BrowserError>:
+        if hostname == "localhost":
+            return Ok(["127.0.0.1"])
+
+        if self.is_ip_literal(hostname):
+            return Ok([hostname])
+        if self.looks_like_ipv4_literal(hostname):
+            return Err(network_error("Invalid IPv4 address literal: {hostname}"))
+
+        if not self.is_valid_hostname(hostname):
+            return Err(network_error("Invalid hostname: {hostname}"))
+
+        val configured = self.configured_hosts_lookup(hostname)
+        if configured.?:
+            val addrs = configured.unwrap()
+            self.logger.debug("dns: resolved {hostname} via configured hosts ({addrs.len()} addresses)")
+            return Ok(addrs)
+
+        val system_addrs = parse_system_dns_addresses(rt_dns_lookup(hostname))
+        if not system_addrs.is_empty():
+            self.logger.debug("dns: resolved {hostname} via system DNS ({system_addrs.len()} addresses)")
+            return Ok(system_addrs)
+
+        val well_known = self.well_known_lookup(hostname)
+        if well_known.?:
+            val addrs = well_known.unwrap()
+            self.logger.debug("dns: resolved {hostname} via fallback host table ({addrs.len()} addresses)")
+            return Ok(addrs)
+
+        self.logger.warn("dns: system lookup returned no addresses for {hostname}")
+        Err(network_error("DNS resolution failed for '{hostname}': system lookup returned no addresses"))
+
+    fn well_known_lookup(hostname: text) -> [text]?:
+        val h = hostname.to_lower()
+        if h == "localhost":
+            return Some(["127.0.0.1", "::1"])
+        if h == "ip6-localhost" or h == "ip6-loopback":
+            return Some(["::1"])
+        if h == "broadcasthost":
+            return Some(["255.255.255.255"])
+        if h == "example.com" or h == "www.example.com":
+            return Some(["93.184.216.34"])
+        if h == "example.org" or h == "www.example.org":
+            return Some(["93.184.216.34"])
+        if h == "example.net" or h == "www.example.net":
+            return Some(["93.184.216.34"])
+        nil
+
+    fn configured_hosts_lookup(hostname: text) -> [text]?:
+        val h = hostname.to_lower()
+        var i = 0
+        while i < self.extra_hosts.len():
+            val entry = self.extra_hosts[i]
+            if entry.hostname.to_lower() == h:
+                return Some(entry.addresses)
+            i = i + 1
+        nil
+
+    me add_well_known(hostname: text, addresses: [text]):
+        self.logger.debug("dns: adding well-known entry: {hostname} -> {addresses.len()} addresses")
+        val key = normalize_hostname(hostname)
+        val entry = DnsCacheEntry.create(key, addresses, 0, 0)
+        var replaced = false
+        var updated: [DnsCacheEntry] = []
+        var i = 0
+        while i < self.extra_hosts.len():
+            if self.extra_hosts[i].hostname == key:
+                updated = updated + [entry]
+                replaced = true
+            else:
+                updated = updated + [self.extra_hosts[i]]
+            i = i + 1
+        if not replaced:
+            updated = updated + [entry]
+        self.extra_hosts = updated
+        self.cache.invalidate(key)
+
+    fn is_ip_literal(s: text) -> bool:
+        val parts = s.split(".")
+        if parts.len() != 4:
+            return false
+        var valid = true
+        var i = 0
+        while i < parts.len():
+            val part = parts[i]
+            i = i + 1
+            if part.is_empty():
+                valid = false
+            var j = 0
+            while j < part.len():
+                val ch = part.slice(j, j + 1)
+                j = j + 1
+                if ch < "0" or ch > "9":
+                    valid = false
+            if valid:
+                val octet = part.to_i64() ?? -1
+                if octet < 0 or octet > 255:
+                    valid = false
+        valid
+
+    fn looks_like_ipv4_literal(s: text) -> bool:
+        val parts = s.split(".")
+        if parts.len() != 4:
+            return false
+        var numeric = true
+        var i = 0
+        while i < parts.len():
+            val part = parts[i]
+            i = i + 1
+            if part.is_empty():
+                numeric = false
+            var j = 0
+            while j < part.len():
+                val ch = part.slice(j, j + 1)
+                j = j + 1
+                if ch < "0" or ch > "9":
+                    numeric = false
+        numeric
+
+    fn is_valid_hostname(hostname: text) -> bool:
+        if hostname.is_empty():
+            return false
+        if hostname.len() > 253:
+            return false
+        if hostname.contains(" "):
+            return false
+        val labels = hostname.split(".")
+        var i = 0
+        while i < labels.len():
+            val label = labels[i]
+            i = i + 1
+            if label.is_empty():
+                return false
+            if label.len() > 63:
+                return false
+        true
+
+    fn current_time() -> i64:
+        time_now_unix_micros() / 1_000_000
+
+fn normalize_hostname(hostname: text) -> text:
+    var h = hostname.to_lower()
+    while h.ends_with(".") and h.len() > 1:
+        h = h.slice(0, h.len() - 1)
+    h
+
+fn parse_system_dns_addresses(raw: text) -> [text]:
+    var result: [text] = []
+    val parts = raw.split(",")
+    var i = 0
+    while i < parts.len():
+        val addr = parts[i].trim()
+        i = i + 1
+        if not addr.is_empty() and not text_array_contains(result, addr):
+            result = result + [addr]
+    result
+
+fn text_array_contains(items: [text], needle: text) -> bool:
+    var i = 0
+    while i < items.len():
+        if items[i] == needle:
+            return true
+        i = i + 1
+    false

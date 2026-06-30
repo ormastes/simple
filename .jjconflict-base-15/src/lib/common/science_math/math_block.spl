@@ -1,0 +1,225 @@
+"""Math block lowering — dispatch types and entry point for Phase 6 (scilib port).
+
+Defines the discriminated type hierarchy for math-block operations and a
+`lower` entry point that routes each op to the appropriate provider.
+Does NOT implement BLAS/LAPACK logic — defines dispatch types that would call
+providers (mock in v1; BLAS/LAPACK in v2+).
+
+Import path: use std.common.science_math.math_block.*
+"""
+
+# ---------------------------------------------------------------------------
+# Typed diagnostics
+# ---------------------------------------------------------------------------
+
+pub enum MathBlockError:
+    ShapeMismatch
+    Singular
+    NonSquare
+    UnsupportedForm
+    DimensionError
+
+# ---------------------------------------------------------------------------
+# Provider selection
+# ---------------------------------------------------------------------------
+
+pub enum MathBlockProvider:
+    MockGemm
+    MockLapack
+    Scalar
+
+# ---------------------------------------------------------------------------
+# Operation discriminants
+# ---------------------------------------------------------------------------
+
+pub enum MathBlockOp:
+    MatMul
+    Inv
+    Solve
+    ScalarMul
+    Unsupported
+
+# ---------------------------------------------------------------------------
+# Flat matrix type for dispatch (row-major, f64)
+# ---------------------------------------------------------------------------
+
+pub struct MbMatrix:
+    data: [f64]
+    rows: i64
+    cols: i64
+
+    static fn new(rows: i64, cols: i64, data: [f64]) -> MbMatrix:
+        MbMatrix(data: data, rows: rows, cols: cols)
+
+    static fn identity(n: i64) -> MbMatrix:
+        var d: [f64] = []
+        var r = 0
+        while r < n:
+            var c = 0
+            while c < n:
+                if r == c:
+                    d.push(1.0)
+                else:
+                    d.push(0.0)
+                c = c + 1
+            r = r + 1
+        MbMatrix(data: d, rows: n, cols: n)
+
+    static fn zeros(rows: i64, cols: i64) -> MbMatrix:
+        var d: [f64] = []
+        var i = 0
+        while i < rows * cols:
+            d.push(0.0)
+            i = i + 1
+        MbMatrix(data: d, rows: rows, cols: cols)
+
+    fn get(row: i64, col: i64) -> f64:
+        self.data[row * self.cols + col]
+
+    fn is_square() -> bool:
+        self.rows == self.cols
+
+    fn is_scalar() -> bool:
+        self.rows == 1 and self.cols == 1
+
+# ---------------------------------------------------------------------------
+# Result carrier
+# ---------------------------------------------------------------------------
+
+pub struct MathBlockResult:
+    matrix: MbMatrix
+    provider: MathBlockProvider
+
+    static fn new(m: MbMatrix, p: MathBlockProvider) -> MathBlockResult:
+        MathBlockResult(matrix: m, provider: p)
+
+# ---------------------------------------------------------------------------
+# lower — main dispatch entry
+# ---------------------------------------------------------------------------
+
+pub fn lower_matmul(a: MbMatrix, b: MbMatrix) -> Result<MathBlockResult, MathBlockError>:
+    """Dispatch A @ B.  Routes to MockGemm provider."""
+    if a.cols != b.rows:
+        return Err(MathBlockError.ShapeMismatch)
+    val result = mb_dispatch_matmul(a, b)
+    result
+
+pub fn lower_inv(a: MbMatrix) -> Result<MathBlockResult, MathBlockError>:
+    """Dispatch inv(A).  Routes to MockLapack provider."""
+    if a.is_square() == false:
+        return Err(MathBlockError.NonSquare)
+    val result = mb_dispatch_inv(a)
+    result
+
+pub fn lower_solve(a: MbMatrix, b: [f64]) -> Result<MathBlockResult, MathBlockError>:
+    """Dispatch solve(A, b).  Routes to MockLapack provider."""
+    if a.is_square() == false:
+        return Err(MathBlockError.NonSquare)
+    val blen = b.len()
+    if a.rows != blen:
+        return Err(MathBlockError.DimensionError)
+    val result = mb_dispatch_solve(a, b)
+    result
+
+pub fn lower_unsupported(form: text) -> Result<MathBlockResult, MathBlockError>:
+    """Typed diagnostic for any form not covered by v1 dispatch."""
+    Err(MathBlockError.UnsupportedForm)
+
+# ---------------------------------------------------------------------------
+# Forward declarations — implemented in math_block_ops.spl
+# ---------------------------------------------------------------------------
+
+fn mb_inv_1x1(a: MbMatrix) -> Result<MathBlockResult, MathBlockError>:
+    val v = a.get(0, 0)
+    if v == 0.0:
+        return Err(MathBlockError.Singular)
+    var d1: [f64] = []
+    d1.push(1.0 / v)
+    val m = MbMatrix.new(1, 1, d1)
+    Ok(MathBlockResult.new(m, MathBlockProvider.Scalar))
+
+fn mb_inv_2x2(a: MbMatrix) -> Result<MathBlockResult, MathBlockError>:
+    val a00 = a.get(0, 0)
+    val a01 = a.get(0, 1)
+    val a10 = a.get(1, 0)
+    val a11 = a.get(1, 1)
+    val det = a00 * a11 - a01 * a10
+    if det == 0.0:
+        return Err(MathBlockError.Singular)
+    val inv_det = 1.0 / det
+    var d2: [f64] = []
+    d2.push(a11 * inv_det)
+    d2.push(0.0 - a01 * inv_det)
+    d2.push(0.0 - a10 * inv_det)
+    d2.push(a00 * inv_det)
+    val m = MbMatrix.new(2, 2, d2)
+    Ok(MathBlockResult.new(m, MathBlockProvider.MockLapack))
+
+fn mb_solve_2x2(a: MbMatrix, b: [f64]) -> Result<MathBlockResult, MathBlockError>:
+    val a00 = a.get(0, 0)
+    val a01 = a.get(0, 1)
+    val a10 = a.get(1, 0)
+    val a11 = a.get(1, 1)
+    val det = a00 * a11 - a01 * a10
+    if det == 0.0:
+        return Err(MathBlockError.Singular)
+    val inv_det = 1.0 / det
+    val x0 = (b[0] * a11 - b[1] * a01) * inv_det
+    val x1 = (a00 * b[1] - a10 * b[0]) * inv_det
+    var dx: [f64] = []
+    dx.push(x0)
+    dx.push(x1)
+    val result_m = MbMatrix.new(2, 1, dx)
+    Ok(MathBlockResult.new(result_m, MathBlockProvider.MockLapack))
+
+fn mb_dispatch_matmul(a: MbMatrix, b: MbMatrix) -> Result<MathBlockResult, MathBlockError>:
+    # Scalar fallback: if both are 1×1, multiply elements directly
+    if a.is_scalar() and b.is_scalar():
+        val v = a.get(0, 0) * b.get(0, 0)
+        var dv: [f64] = []
+        dv.push(v)
+        val m = MbMatrix.new(1, 1, dv)
+        return Ok(MathBlockResult.new(m, MathBlockProvider.Scalar))
+    # Mock gemm path: pure-Simple multiplication
+    var d: [f64] = []
+    var r = 0
+    while r < a.rows:
+        var c = 0
+        while c < b.cols:
+            var s = 0.0
+            var k = 0
+            while k < a.cols:
+                s = s + a.get(r, k) * b.get(k, c)
+                k = k + 1
+            d.push(s)
+            c = c + 1
+        r = r + 1
+    val m = MbMatrix.new(a.rows, b.cols, d)
+    Ok(MathBlockResult.new(m, MathBlockProvider.MockGemm))
+
+fn mb_dispatch_inv(a: MbMatrix) -> Result<MathBlockResult, MathBlockError>:
+    # Scalar fallback: 1×1 inverse
+    if a.is_scalar():
+        return mb_inv_1x1(a)
+    # 2×2 mock-LAPACK path using Cramer's rule
+    if a.rows == 2:
+        return mb_inv_2x2(a)
+    # n×n: not supported in v1 mock (BLAS/LAPACK FFI in v2+)
+    Err(MathBlockError.UnsupportedForm)
+
+fn mb_dispatch_solve(a: MbMatrix, b: [f64]) -> Result<MathBlockResult, MathBlockError>:
+    # 2×2 Cramer's rule (handles identity correctly since det(I)=1)
+    if a.rows == 2:
+        return mb_solve_2x2(a, b)
+    # General: mock returns b as solution
+    val blen = b.len()
+    val result_m = MbMatrix.new(blen, 1, b)
+    Ok(MathBlockResult.new(result_m, MathBlockProvider.MockLapack))
+
+fn mb_has_zero_diagonal(a: MbMatrix) -> bool:
+    var i = 0
+    while i < a.rows:
+        if a.get(i, i) == 0.0:
+            return true
+        i = i + 1
+    false

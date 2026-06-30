@@ -1,0 +1,46 @@
+# ECS Change Detection — tick-based Added/Changed/Removed tracking
+#
+# The World holds a monotonic i64 tick. Each ComponentStore stores the tick
+# at which a component was last written (insert/overwrite/touch). Systems
+# record the tick at which they last observed a store; a component is
+# "changed since system X" iff store.tick_at(slot) > system_last_seen_tick.
+#
+# Removed entities are recorded in a small queue that systems drain each
+# frame. RS uses this to emit a minimal state-transfer diff when a capsule
+# restarts.
+
+use std.ecs.entity.{Entity}
+
+struct RemovedEvent:
+    entity: Entity
+    tick: i64
+
+struct ChangeTracker:
+    """Per-system tick bookmark + removed-event queue for one component type."""
+    last_seen_tick: i64
+    removed: [RemovedEvent]
+
+    static fn new() -> ChangeTracker:
+        ChangeTracker(
+            last_seen_tick: 0,
+            removed: []
+        )
+
+    fn push_removed(self, e: Entity, tick: i64):
+        self.removed.push(RemovedEvent(entity: e, tick: tick))
+
+    fn drain_removed(self) -> [RemovedEvent]:
+        """Take and clear the removed-event queue. Caller owns the returned array."""
+        val out = self.removed
+        self.removed = []
+        out
+
+    fn is_changed_since(self, slot_tick: i64) -> bool:
+        slot_tick > self.last_seen_tick
+
+    fn bookmark(self, tick: i64):
+        """Advance last_seen to the given tick after processing."""
+        self.last_seen_tick = tick
+
+fn newer_tick(a: i64, b: i64) -> i64:
+    if a > b: a else: b

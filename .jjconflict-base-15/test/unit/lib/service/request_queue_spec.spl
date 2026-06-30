@@ -1,0 +1,159 @@
+"""
+# Request Queue Specification
+#
+# Tests FIFO ordering, priority lane semantics, and shutdown drain.
+"""
+
+use std.io_runtime
+
+extern fn rt_time_now_unix_micros() -> i64
+
+# --- Inline queue types ---
+
+struct QueueEntry:
+    id: text
+    payload: text
+    lane: i64
+    enqueued_at_us: i64
+
+struct RequestQueue:
+    high: [QueueEntry]
+    low: [QueueEntry]
+    next_id: i64
+
+fn request_queue_new() -> RequestQueue:
+    RequestQueue(high: [], low: [], next_id: 1i64)
+
+fn _next_queue_id(q: RequestQueue) -> text:
+    val id = q.next_id
+    q.next_id = q.next_id + 1i64
+    "req-{id}"
+
+fn enqueue(q: RequestQueue, payload: text, lane: i64) -> text:
+    val id = _next_queue_id(q)
+    val entry = QueueEntry(
+        id: id,
+        payload: payload,
+        lane: lane,
+        enqueued_at_us: rt_time_now_unix_micros()
+    )
+    if lane == 1i64:
+        q.high.push(entry)
+    else:
+        q.low.push(entry)
+    id
+
+fn dequeue(q: RequestQueue) -> QueueEntry:
+    if q.high.len() > 0i64:
+        val entry = q.high[0i64]
+        var rest: [QueueEntry] = []
+        var i = 1i64
+        while i < q.high.len():
+            rest.push(q.high[i])
+            i = i + 1i64
+        q.high = rest
+        return entry
+    if q.low.len() > 0i64:
+        val entry = q.low[0i64]
+        var rest: [QueueEntry] = []
+        var i = 1i64
+        while i < q.low.len():
+            rest.push(q.low[i])
+            i = i + 1i64
+        q.low = rest
+        return entry
+    QueueEntry(id: "", payload: "", lane: -1i64, enqueued_at_us: 0i64)
+
+fn queue_len(q: RequestQueue) -> i64:
+    q.high.len() + q.low.len()
+
+fn queue_is_empty(q: RequestQueue) -> bool:
+    q.high.len() == 0i64 and q.low.len() == 0i64
+
+fn queue_drain(q: RequestQueue) -> [QueueEntry]:
+    var all: [QueueEntry] = []
+    var i = 0i64
+    while i < q.high.len():
+        all.push(q.high[i])
+        i = i + 1i64
+    i = 0i64
+    while i < q.low.len():
+        all.push(q.low[i])
+        i = i + 1i64
+    q.high = []
+    q.low = []
+    all
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+describe "Request Queue - FIFO Ordering":
+    it "dequeues in insertion order within same lane":
+        val q = request_queue_new()
+        enqueue(q, "first", 0i64)
+        enqueue(q, "second", 0i64)
+        enqueue(q, "third", 0i64)
+        val e1 = dequeue(q)
+        val e2 = dequeue(q)
+        val e3 = dequeue(q)
+        expect(e1.payload).to_equal("first")
+        expect(e2.payload).to_equal("second")
+        expect(e3.payload).to_equal("third")
+
+    it "returns sentinel for empty queue":
+        val q = request_queue_new()
+        val e = dequeue(q)
+        expect(e.id).to_equal("")
+        expect(e.lane).to_equal(-1i64)
+
+describe "Request Queue - Priority Lanes":
+    it "drains high-priority lane before low":
+        val q = request_queue_new()
+        enqueue(q, "low-1", 0i64)
+        enqueue(q, "high-1", 1i64)
+        enqueue(q, "low-2", 0i64)
+        val e1 = dequeue(q)
+        val e2 = dequeue(q)
+        val e3 = dequeue(q)
+        expect(e1.payload).to_equal("high-1")
+        expect(e2.payload).to_equal("low-1")
+        expect(e3.payload).to_equal("low-2")
+
+    it "tracks queue length correctly":
+        val q = request_queue_new()
+        expect(queue_len(q)).to_equal(0i64)
+        enqueue(q, "a", 0i64)
+        enqueue(q, "b", 1i64)
+        expect(queue_len(q)).to_equal(2i64)
+        dequeue(q)
+        expect(queue_len(q)).to_equal(1i64)
+
+    it "is_empty reflects state":
+        val q = request_queue_new()
+        expect(queue_is_empty(q)).to_equal(true)
+        enqueue(q, "item", 0i64)
+        expect(queue_is_empty(q)).to_equal(false)
+        dequeue(q)
+        expect(queue_is_empty(q)).to_equal(true)
+
+describe "Request Queue - Shutdown Drain":
+    it "drain returns all entries and empties queue":
+        val q = request_queue_new()
+        enqueue(q, "a", 1i64)
+        enqueue(q, "b", 0i64)
+        enqueue(q, "c", 1i64)
+        val drained = queue_drain(q)
+        expect(drained.len()).to_equal(3i64)
+        expect(queue_is_empty(q)).to_equal(true)
+
+    it "drain on empty queue returns empty list":
+        val q = request_queue_new()
+        val drained = queue_drain(q)
+        expect(drained.len()).to_equal(0i64)
+
+    it "assigns unique IDs to entries":
+        val q = request_queue_new()
+        val id1 = enqueue(q, "a", 0i64)
+        val id2 = enqueue(q, "b", 0i64)
+        expect(id1).to_not_equal(id2)

@@ -1,0 +1,396 @@
+@no_gc
+
+# ============================================================================
+# Archive Parser - Unix ar (.a) file format reader
+# ============================================================================
+# Parses Unix archive files (used for static libraries) to extract individual
+# object file members. Supports GNU/System V extended name tables.
+#
+# Format:
+#   - Magic: "!<arch>\n" (8 bytes)
+#   - Members: 60-byte header followed by data, padded to 2-byte alignment
+#
+# Special members:
+#   - "/" : symbol index (GNU format)
+#   - "//": extended name table (for long filenames)
+# ============================================================================
+
+# Archive magic bytes: "!<arch>\n"
+val AR_MAGIC_0: i64 = 0x21  # '!'
+val AR_MAGIC_1: i64 = 0x3C  # '<'
+val AR_MAGIC_2: i64 = 0x61  # 'a'
+val AR_MAGIC_3: i64 = 0x72  # 'r'
+val AR_MAGIC_4: i64 = 0x63  # 'c'
+val AR_MAGIC_5: i64 = 0x68  # 'h'
+val AR_MAGIC_6: i64 = 0x3E  # '>'
+val AR_MAGIC_7: i64 = 0x0A  # '\n'
+
+val AR_MAGIC_SIZE: i64 = 8
+val AR_HEADER_SIZE: i64 = 60
+val AR_NAME_SIZE: i64 = 16
+val AR_SIZE_OFFSET: i64 = 48
+val AR_SIZE_LEN: i64 = 10
+val AR_FMAG_OFFSET: i64 = 58
+val AR_FMAG_0: i64 = 0x60  # '`'
+val AR_FMAG_1: i64 = 0x0A  # '\n'
+
+# ============================================================================
+# Structures
+# ============================================================================
+
+"""A single member (file) within an ar archive."""
+pub struct ArMember:
+    name: text
+    size: i64
+    data_offset: i64      # offset in archive where member data starts
+    data_size: i64        # size of member data
+
+"""The parsed ar archive reader."""
+pub struct ArReader:
+    members: [ArMember]
+    raw: [i64]            # full archive bytes
+    is_valid: bool
+
+"""A single entry in the symbol index."""
+pub struct ArSymbolEntry:
+    name: text
+    member_offset: i64    # offset of the member containing this symbol
+
+"""The parsed symbol index from the "/" special member."""
+pub struct ArSymbolIndex:
+    symbols: [ArSymbolEntry]
+
+# ============================================================================
+# Magic check
+# ============================================================================
+
+"""Check if bytes start with the ar archive magic "!<arch>\n"."""
+pub fn ar_check_magic(bytes: [i64]) -> bool:
+    if bytes.len() < AR_MAGIC_SIZE:
+        return false
+    (bytes[0] == AR_MAGIC_0 and bytes[1] == AR_MAGIC_1 and
+     bytes[2] == AR_MAGIC_2 and bytes[3] == AR_MAGIC_3 and
+     bytes[4] == AR_MAGIC_4 and bytes[5] == AR_MAGIC_5 and
+     bytes[6] == AR_MAGIC_6 and bytes[7] == AR_MAGIC_7)
+
+# ============================================================================
+# Low-level helpers
+# ============================================================================
+
+"""Read a big-endian u32 from bytes at offset, return as i64."""
+fn ar_read_be_u32(bytes: [i64], offset: i64) -> i64:
+    val b0 = bytes[offset]
+    val b1 = bytes[offset + 1]
+    val b2 = bytes[offset + 2]
+    val b3 = bytes[offset + 3]
+    (b0 * 16777216) + (b1 * 65536) + (b2 * 256) + b3
+
+"""Parse a decimal ASCII integer from bytes[offset .. offset+AR_SIZE_LEN], skipping spaces."""
+pub fn ar_parse_size(bytes: [i64], offset: i64) -> i64:
+    var result: i64 = 0
+    var i = offset
+    val end = offset + AR_SIZE_LEN
+    while i < end:
+        val b = bytes[i]
+        if b >= 0x30 and b <= 0x39:
+            result = result * 10 + (b - 0x30)
+        i = i + 1
+    result
+
+"""
+Convert a byte value (ASCII code 32-126) to a single-character text string.
+Uses a lookup in the printable ASCII table string.
+Codes outside 32-126 return "?".
+"""
+fn ar_byte_to_char(b: i64) -> text:
+    # Printable ASCII starts at 32 (space) through 126 (~)
+    val ascii_table = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+    val idx = b - 32
+    if idx >= 0 and idx < ascii_table.len():
+        ascii_table[idx:idx + 1]
+    else:
+        "?"
+
+"""
+Extract text from bytes[offset .. offset+max_len], stopping at first space (0x20),
+NUL (0x00), or newline (0x0A).
+"""
+fn ar_bytes_to_text_raw(bytes: [i64], offset: i64, max_len: i64) -> text:
+    var result = ""
+    var i = offset
+    val end = offset + max_len
+    while i < end:
+        val b = bytes[i]
+        if b == 0x20 or b == 0x00 or b == 0x0A:
+            return result
+        result = result + ar_byte_to_char(b)
+        i = i + 1
+    result
+
+"""Look up a long name in the extended name table starting at byte offset n."""
+fn ar_lookup_extended_name(name_table: text, n: i64) -> text:
+    var result = ""
+    var i = n
+    val tlen = name_table.len()
+    while i < tlen:
+        val ch = name_table[i:i + 1]
+        if ch == "/" or ch == "\n":
+            return result
+        result = result + ch
+        i = i + 1
+    result
+
+"""Parse a non-negative decimal integer from a text string."""
+fn ar_parse_decimal_text(s: text) -> i64:
+    var result: i64 = 0
+    var i = 0
+    while i < s.len():
+        val ch = s[i:i + 1]
+        if ch == "0": result = result * 10 + 0
+        elif ch == "1": result = result * 10 + 1
+        elif ch == "2": result = result * 10 + 2
+        elif ch == "3": result = result * 10 + 3
+        elif ch == "4": result = result * 10 + 4
+        elif ch == "5": result = result * 10 + 5
+        elif ch == "6": result = result * 10 + 6
+        elif ch == "7": result = result * 10 + 7
+        elif ch == "8": result = result * 10 + 8
+        elif ch == "9": result = result * 10 + 9
+        i = i + 1
+    result
+
+"""Strip trailing '/' and spaces from a name string."""
+fn ar_strip_name(name: text) -> text:
+    var end = name.len()
+    while end > 0:
+        val ch = name[end - 1:end]
+        if ch == "/" or ch == " ":
+            end = end - 1
+        else:
+            return name[0..end]
+    ""
+
+# ============================================================================
+# Name parsing
+# ============================================================================
+
+"""
+Parse the member name from a 60-byte header at the given offset in the archive.
+
+Name field is bytes[offset .. offset+16]:
+  - "/"   : GNU symbol index (keep as-is)
+  - "//"  : GNU extended name table (keep as-is)
+  - "/N"  : long name at offset N in the "//" table
+  - other : plain ASCII name, strip trailing '/' and spaces
+"""
+pub fn ar_parse_name(bytes: [i64], offset: i64, name_table: text?) -> text:
+    val raw = ar_bytes_to_text_raw(bytes, offset, AR_NAME_SIZE)
+
+    # Special names: "/" (symbol index) or "//" (extended name table)
+    if raw == "/" or raw == "//":
+        return raw
+
+    # Extended name reference: "/N" where N is a decimal offset
+    if raw.len() >= 2 and raw[0:1] == "/":
+        val rest = raw[1..]
+        # Verify rest is all digits
+        var all_digits = rest.len() > 0
+        var di = 0
+        while di < rest.len():
+            val c = rest[di:di + 1]
+            if c < "0" or c > "9":
+                all_digits = false
+            di = di + 1
+        if all_digits:
+            val ext_offset = ar_parse_decimal_text(rest)
+            match name_table:
+                case Some(nt):
+                    return ar_lookup_extended_name(nt, ext_offset)
+                case nil:
+                    return raw
+
+    # Plain name: strip trailing '/' and spaces
+    ar_strip_name(raw)
+
+# ============================================================================
+# Header parsing
+# ============================================================================
+
+"""
+Parse a single member header at bytes[offset].
+Returns ArMember or error text.
+"""
+pub fn ar_parse_header(bytes: [i64], offset: i64, name_table: text?) -> Result<ArMember, text>:
+    if offset + AR_HEADER_SIZE > bytes.len():
+        return Err("Truncated archive header at offset {offset}")
+
+    # Validate end-of-header magic: "`\n" (0x60, 0x0A)
+    val fmag0 = bytes[offset + AR_FMAG_OFFSET]
+    val fmag1 = bytes[offset + AR_FMAG_OFFSET + 1]
+    if fmag0 != AR_FMAG_0 or fmag1 != AR_FMAG_1:
+        return Err("Invalid ar header magic at offset {offset}")
+
+    val name = ar_parse_name(bytes, offset, name_table)
+    val size = ar_parse_size(bytes, offset + AR_SIZE_OFFSET)
+    val data_off = offset + AR_HEADER_SIZE
+
+    if data_off + size > bytes.len():
+        return Err("Truncated archive member data at offset {data_off}")
+
+    Ok(ArMember(
+        name: name,
+        size: size,
+        data_offset: data_off,
+        data_size: size,
+    ))
+
+# ============================================================================
+# Main parser
+# ============================================================================
+
+"""
+Parse an ar archive from a byte array.
+Returns ArReader on success or an error message.
+"""
+pub fn ar_parse(bytes: [i64]) -> Result<ArReader, text>:
+    if not ar_check_magic(bytes):
+        return Err("Not a valid ar archive: bad magic")
+
+    # First pass: locate the "//" extended name table member if present
+    var name_table: text? = nil
+    var scan_offset = AR_MAGIC_SIZE
+    while scan_offset + AR_HEADER_SIZE <= bytes.len():
+        val fmag0 = bytes[scan_offset + AR_FMAG_OFFSET]
+        val fmag1 = bytes[scan_offset + AR_FMAG_OFFSET + 1]
+        if fmag0 != AR_FMAG_0 or fmag1 != AR_FMAG_1:
+            # Not a valid header — stop first-pass scan
+            scan_offset = bytes.len()
+        else:
+            val raw_name = ar_bytes_to_text_raw(bytes, scan_offset, AR_NAME_SIZE)
+            val size = ar_parse_size(bytes, scan_offset + AR_SIZE_OFFSET)
+            val data_off = scan_offset + AR_HEADER_SIZE
+
+            if raw_name == "//":
+                # Build the extended name table as a text string
+                var ntbl = ""
+                var ni = data_off
+                val ntbl_end = data_off + size
+                while ni < ntbl_end:
+                    ntbl = ntbl + ar_byte_to_char(bytes[ni])
+                    ni = ni + 1
+                name_table = ntbl
+
+            # Advance: data + 1-byte padding if size is odd
+            var next = data_off + size
+            if size % 2 != 0:
+                next = next + 1
+            scan_offset = next
+
+    # Second pass: parse all members
+    var members: [ArMember] = []
+    var offset = AR_MAGIC_SIZE
+
+    while offset + AR_HEADER_SIZE <= bytes.len():
+        val hdr_result = ar_parse_header(bytes, offset, name_table)
+        if hdr_result.is_err():
+            return Err(hdr_result.unwrap_err())
+
+        val member = hdr_result.unwrap()
+        members.push(member)
+
+        # Advance past member data + 1-byte padding if size is odd
+        var next = member.data_offset + member.size
+        if member.size % 2 != 0:
+            next = next + 1
+        offset = next
+
+    Ok(ArReader(
+        members: members,
+        raw: bytes,
+        is_valid: true,
+    ))
+
+# ============================================================================
+# Reader accessors
+# ============================================================================
+
+"""Return the number of members in the archive."""
+pub fn ar_member_count(reader: ArReader) -> i64:
+    reader.members.len()
+
+"""Return the raw data bytes for a given member."""
+pub fn ar_member_data(reader: ArReader, member: ArMember) -> [i64]:
+    val start = member.data_offset
+    val end = start + member.data_size
+    reader.raw[start..end]
+
+"""Find a member by name. Returns nil if not found."""
+pub fn ar_find_member(reader: ArReader, name: text) -> ArMember?:
+    for m in reader.members:
+        if m.name == name:
+            return m
+    nil
+
+"""List all member names in order."""
+pub fn ar_list_names(reader: ArReader) -> [text]:
+    var names: [text] = []
+    for m in reader.members:
+        names.push(m.name)
+    names
+
+# ============================================================================
+# Symbol index parser
+# ============================================================================
+
+"""
+Parse the GNU symbol index from the "/" special member.
+Format: 4-byte big-endian count, count×4-byte big-endian member offsets,
+followed by count NUL-terminated symbol name strings.
+Returns nil if no symbol index member is present.
+"""
+pub fn ar_parse_symbol_index(reader: ArReader) -> ArSymbolIndex?:
+    val sym_opt = ar_find_member(reader, "/")
+    match sym_opt:
+        case Some(member):
+            val data = ar_member_data(reader, member)
+            if data.len() < 4:
+                return nil
+
+            val count = ar_read_be_u32(data, 0)
+            if count <= 0:
+                return ArSymbolIndex(symbols: [])
+
+            val offsets_end = 4 + count * 4
+            if data.len() < offsets_end:
+                return nil
+
+            # Read member offsets
+            var offsets: [i64] = []
+            var oi = 0
+            while oi < count:
+                val off = ar_read_be_u32(data, 4 + oi * 4)
+                offsets.push(off)
+                oi = oi + 1
+
+            # Read NUL-terminated symbol names
+            var symbols: [ArSymbolEntry] = []
+            var si = 0
+            var str_pos = offsets_end
+            while si < count and str_pos < data.len():
+                var sym_name = ""
+                while str_pos < data.len() and data[str_pos] != 0:
+                    sym_name = sym_name + ar_byte_to_char(data[str_pos])
+                    str_pos = str_pos + 1
+                # Skip the NUL terminator
+                str_pos = str_pos + 1
+
+                val member_off = offsets[si]
+                symbols.push(ArSymbolEntry(
+                    name: sym_name,
+                    member_offset: member_off,
+                ))
+                si = si + 1
+
+            ArSymbolIndex(symbols: symbols)
+        case nil:
+            nil

@@ -1,0 +1,118 @@
+# Minimal newc cpio archive parser.
+#
+# Parses the SVR4 cpio newc format (magic "070701") as produced by:
+#   find . -print0 | cpio --null -o -H newc
+#
+# Each entry: 110-byte ASCII header, then name (padded to 4 bytes from
+# start of header), then file data (padded to 4 bytes from start of header).
+# Stops at the "TRAILER!!!" sentinel entry.
+
+class CpioEntry:
+    path: text
+    mode: u32
+    data: [u8]
+
+fn _hex_char_val(c: u8) -> i64:
+    val n = c.to_i64()
+    if n >= 0x30 and n <= 0x39:
+        return n - 0x30
+    if n >= 0x41 and n <= 0x46:
+        return n - 0x41 + 10
+    if n >= 0x61 and n <= 0x66:
+        return n - 0x61 + 10
+    0
+
+fn _hex8_to_i64(raw: [u8], offset: i64) -> i64:
+    var v: i64 = 0
+    var i = 0
+    while i < 8:
+        v = (v << 4) | _hex_char_val(raw[offset + i])
+        i = i + 1
+    v
+
+fn _align4_from(base: i64, current: i64) -> i64:
+    val offset = current - base
+    val rem = offset & 3
+    if rem == 0:
+        current
+    else:
+        current + (4 - rem)
+
+fn _read_text(raw: [u8], start: i64, length: i64) -> text:
+    var chars: [text] = []
+    var i = 0
+    while i < length:
+        val b = raw[start + i].to_i64()
+        if b == 0:
+            # stop at null terminator
+            i = length  # break
+        else:
+            chars.push(b.to_char())
+        i = i + 1
+    chars.join("")
+
+fn cpio_parse(raw: [u8]) -> [CpioEntry]:
+    """Parse a newc cpio archive and return all non-trailer entries."""
+    var entries: [CpioEntry] = []
+    var pos = 0
+
+    while pos + 110 <= raw.len():
+        # Verify magic "070701"
+        val m0 = raw[pos].to_i64()
+        val m1 = raw[pos + 1].to_i64()
+        val m2 = raw[pos + 2].to_i64()
+        val m3 = raw[pos + 3].to_i64()
+        val m4 = raw[pos + 4].to_i64()
+        val m5 = raw[pos + 5].to_i64()
+        if not (m0 == 0x30 and m1 == 0x37 and m2 == 0x30 and m3 == 0x37 and m4 == 0x30 and m5 == 0x31):
+            # Not a valid entry; stop parsing
+            return entries
+
+        val hdr_start = pos
+
+        # Parse header fields (each 8 hex ASCII digits)
+        # ino=6, mode=14, uid=22, gid=30, nlink=38, mtime=46, filesize=54
+        # devmajor=62, devminor=70, rdevmajor=78, rdevminor=86, namesize=94, check=102
+        val mode_val = _hex8_to_i64(raw, pos + 14)
+        val filesize = _hex8_to_i64(raw, pos + 54)
+        val namesize = _hex8_to_i64(raw, pos + 94)
+
+        pos = pos + 110
+
+        # Read filename (namesize bytes including null terminator)
+        val name_end = pos + namesize - 1  # exclude null
+        val path = _read_text(raw, pos, namesize - 1)
+
+        # Advance pos past name, aligned to 4 bytes from hdr_start
+        pos = pos + namesize
+        pos = _align4_from(hdr_start, pos)
+
+        # Stop at trailer
+        if path == "TRAILER!!!":
+            return entries
+
+        # Read file data
+        var data: [u8] = []
+        var i = 0
+        while i < filesize:
+            data.push(raw[pos + i])
+            i = i + 1
+
+        entries.push(CpioEntry(
+            path: path,
+            mode: mode_val.to_u32(),
+            data: data,
+        ))
+
+        # Advance past data, aligned to 4 bytes from hdr_start
+        pos = pos + filesize
+        pos = _align4_from(hdr_start, pos)
+
+    entries
+
+fn cpio_lookup(entries: [CpioEntry], path: text) -> [u8]?:
+    """Find entry by path, return its data bytes or nil."""
+    for entry in entries:
+        if entry.path == path:
+            return entry.data
+    nil

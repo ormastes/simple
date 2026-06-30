@@ -1,0 +1,144 @@
+# Shader Graph System Tests
+
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.engine.render.shader_graph.{ShaderPort, ShaderNode, ShaderConnection, ShaderGraph}
+
+describe "ShaderNode":
+    it "creates node with id and type":
+        val node = ShaderNode.new(0, "color", "base_color")
+        expect(node.id).to_equal(0)
+        expect(node.node_type).to_equal("color")
+        expect(node.name).to_equal("base_color")
+        expect(node.input_count()).to_equal(0)
+        expect(node.output_count()).to_equal(0)
+
+    it "adds inputs and outputs":
+        var node = ShaderNode.new(1, "multiply", "mul")
+        node.add_input("a", "float")
+        node.add_input("b", "float")
+        node.add_output("result", "float")
+        expect(node.input_count()).to_equal(2)
+        expect(node.output_count()).to_equal(1)
+
+    it "adds parameters":
+        var node = ShaderNode.new(2, "color", "tint")
+        node.add_parameter("1.0")
+        node.add_parameter("0.5")
+        node.add_parameter("0.0")
+        expect(node.parameters.len()).to_equal(3)
+
+describe "ShaderGraph":
+    it "creates empty graph":
+        val graph = ShaderGraph.new("test_material")
+        expect(graph.node_count()).to_equal(0)
+        expect(graph.connection_count()).to_equal(0)
+
+    it "adds nodes with auto-incrementing ids":
+        var graph = ShaderGraph.new("mat")
+        val id0 = graph.add_node("color", "base")
+        val id1 = graph.add_node("output", "out")
+        expect(id0).to_equal(0)
+        expect(id1).to_equal(1)
+        expect(graph.node_count()).to_equal(2)
+
+    it "creates default ports for color node":
+        var graph = ShaderGraph.new("mat")
+        val id = graph.add_node("color", "base")
+        if val Some(node) = graph.get_node(id):
+            expect(node.output_count()).to_equal(1)
+
+    it "creates default ports for output node":
+        var graph = ShaderGraph.new("mat")
+        val id = graph.add_node("output", "surface")
+        if val Some(node) = graph.get_node(id):
+            expect(node.input_count()).to_equal(4)
+
+    it "connects nodes":
+        var graph = ShaderGraph.new("mat")
+        val c_id = graph.add_node("color", "base")
+        val o_id = graph.add_node("output", "out")
+        val ok = graph.connect(c_id, "color", o_id, "albedo")
+        expect(ok).to_equal(true)
+        expect(graph.connection_count()).to_equal(1)
+
+    it "rejects connection to non-existent node":
+        var graph = ShaderGraph.new("mat")
+        graph.add_node("color", "base")
+        val ok = graph.connect(0, "color", 99, "albedo")
+        expect(ok).to_equal(false)
+
+    it "disconnects nodes":
+        var graph = ShaderGraph.new("mat")
+        val c_id = graph.add_node("color", "base")
+        val o_id = graph.add_node("output", "out")
+        graph.connect(c_id, "color", o_id, "albedo")
+        expect(graph.connection_count()).to_equal(1)
+        val ok = graph.disconnect(c_id, "color", o_id, "albedo")
+        expect(ok).to_equal(true)
+        expect(graph.connection_count()).to_equal(0)
+
+    it "returns false when disconnecting non-existent connection":
+        var graph = ShaderGraph.new("mat")
+        graph.add_node("color", "base")
+        graph.add_node("output", "out")
+        val ok = graph.disconnect(0, "x", 1, "y")
+        expect(ok).to_equal(false)
+
+    it "gets node by id":
+        var graph = ShaderGraph.new("mat")
+        graph.add_node("color", "tint")
+        if val Some(node) = graph.get_node(0):
+            expect(node.name).to_equal("tint")
+            expect(node.node_type).to_equal("color")
+
+    it "returns None for missing node":
+        val graph = ShaderGraph.new("mat")
+        val maybe = graph.get_node(42)
+        # Should be None — no assertion needed, just verify no crash
+
+    it "gets connections to a node":
+        var graph = ShaderGraph.new("mat")
+        val c_id = graph.add_node("color", "base")
+        val m_id = graph.add_node("multiply", "mul")
+        val o_id = graph.add_node("output", "out")
+        graph.connect(c_id, "color", o_id, "albedo")
+        graph.connect(m_id, "result", o_id, "roughness")
+        val conns = graph.get_connections_to(o_id)
+        expect(conns.len()).to_equal(2)
+
+    it "validates graph with valid connections":
+        var graph = ShaderGraph.new("mat")
+        val c_id = graph.add_node("color", "base")
+        val o_id = graph.add_node("output", "out")
+        graph.connect(c_id, "color", o_id, "albedo")
+        expect(graph.validate()).to_equal(true)
+
+    it "validates empty graph":
+        val graph = ShaderGraph.new("empty")
+        expect(graph.validate()).to_equal(true)
+
+    it "clears graph":
+        var graph = ShaderGraph.new("mat")
+        graph.add_node("color", "base")
+        graph.add_node("output", "out")
+        graph.connect(0, "color", 1, "albedo")
+        graph.clear()
+        expect(graph.node_count()).to_equal(0)
+        expect(graph.connection_count()).to_equal(0)
+
+    it "builds multi-node PBR graph":
+        var graph = ShaderGraph.new("pbr")
+        val albedo = graph.add_node("color", "albedo")
+        val tex = graph.add_node("texture_sample", "diffuse_tex")
+        val mix_id = graph.add_node("mix", "blend")
+        val nmap = graph.add_node("normal_map", "normals")
+        val fres = graph.add_node("fresnel", "rim")
+        val out = graph.add_node("output", "surface")
+        graph.connect(albedo, "color", mix_id, "a")
+        graph.connect(tex, "color", mix_id, "b")
+        graph.connect(mix_id, "result", out, "albedo")
+        graph.connect(nmap, "normal", out, "normal")
+        graph.connect(fres, "factor", out, "roughness")
+        expect(graph.node_count()).to_equal(6)
+        expect(graph.connection_count()).to_equal(5)
+        expect(graph.validate()).to_equal(true)

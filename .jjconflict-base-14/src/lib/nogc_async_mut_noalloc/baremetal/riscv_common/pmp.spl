@@ -1,0 +1,105 @@
+# ============================================================================
+# RISC-V Physical Memory Protection Programming
+# ============================================================================
+#
+# Converts generated baremetal sandbox metadata into concrete PMP CSR writes.
+# The boot/runtime layer can apply the returned writes with csrw instructions.
+# ============================================================================
+
+val CSR_PMPCFG0: i64 = 0x3A0
+val CSR_PMPADDR0: i64 = 0x3B0
+
+val PMP_R: u64 = 0x01
+val PMP_W: u64 = 0x02
+val PMP_X: u64 = 0x04
+val PMP_A_NAPOT: u64 = 0x18
+val PMP_L: u64 = 0x80
+
+struct PmpRegion:
+    """One naturally aligned PMP region."""
+    base: u64
+    size: u64
+    permissions: text
+    locked: bool
+
+struct PmpCsrWrite:
+    """One hardware CSR write needed to program PMP."""
+    csr: i64
+    value: u64
+
+fn pmp_parse_u64(value: text) -> u64:
+    val parsed = value.parse_int() ?? 0
+    parsed.to_u64()
+
+fn pmp_config_byte(permissions: text, locked: bool) -> u64:
+    """Build the PMP config byte for read/write/execute permissions."""
+    var cfg = PMP_A_NAPOT
+    if permissions.contains("r"):
+        cfg = cfg | PMP_R
+    if permissions.contains("w"):
+        cfg = cfg | PMP_W
+    if permissions.contains("x"):
+        cfg = cfg | PMP_X
+    if locked:
+        cfg = cfg | PMP_L
+    cfg
+
+fn pmp_napot_addr(base: u64, size: u64) -> u64:
+    """Encode a naturally aligned power-of-two NAPOT PMP address."""
+    (base >> 2) | ((size - 1) >> 3)
+
+fn pmp_addr_csr(index: i64) -> i64:
+    CSR_PMPADDR0 + index
+
+fn pmp_cfg_csr(index: i64, xlen: i64) -> i64:
+    val slots = if xlen == 64: 8 else: 4
+    CSR_PMPCFG0 + (index / slots)
+
+fn pmp_cfg_value(index: i64, xlen: i64, cfg: u64) -> u64:
+    val slots = if xlen == 64: 8 else: 4
+    val slot = index % slots
+    cfg << (slot * 8)
+
+fn pmp_write_plan(region: PmpRegion, index: i64, xlen: i64) -> [PmpCsrWrite]:
+    """Return pmpaddrN and pmpcfgN writes for a region."""
+    [
+        PmpCsrWrite(csr: pmp_addr_csr(index), value: pmp_napot_addr(region.base, region.size)),
+        PmpCsrWrite(csr: pmp_cfg_csr(index, xlen), value: pmp_cfg_value(index, xlen, pmp_config_byte(region.permissions, region.locked)))
+    ]
+
+fn pmp_regions_from_sandbox_lowering(sandbox_lowering_sdn: text) -> [PmpRegion]:
+    """Read pmp_region rows from generated sandbox_lowering metadata.
+
+    Row format:
+      pmp_region|base|size|permissions|locked
+    """
+    var regions: [PmpRegion] = []
+    for raw_line in sandbox_lowering_sdn.split("\n"):
+        var line = raw_line.trim()
+        if line.starts_with("- "):
+            line = line.substring(2)
+        if line.starts_with("pmp_region|"):
+            val parts = line.split("|")
+            if parts.len() >= 5:
+                regions.push(PmpRegion(
+                    base: pmp_parse_u64(parts[1]),
+                    size: pmp_parse_u64(parts[2]),
+                    permissions: parts[3],
+                    locked: parts[4] == "locked" or parts[4] == "true"
+                ))
+    regions
+
+fn pmp_write_plan_from_sandbox_lowering(sandbox_lowering_sdn: text, xlen: i64) -> [PmpCsrWrite]:
+    """Build hardware PMP CSR writes from generated sandbox_lowering metadata."""
+    var writes: [PmpCsrWrite] = []
+    val regions = pmp_regions_from_sandbox_lowering(sandbox_lowering_sdn)
+    var index = 0
+    for region in regions:
+        if region.base > 0 and region.size > 0:
+            val region_writes = pmp_write_plan(region, index, xlen)
+            for write in region_writes:
+                writes.push(write)
+            index = index + 1
+    writes
+
+export CSR_PMPADDR0, CSR_PMPCFG0, PMP_A_NAPOT, PMP_L, PMP_R, PMP_W, PMP_X

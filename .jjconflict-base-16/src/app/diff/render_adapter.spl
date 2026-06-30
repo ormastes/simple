@@ -1,0 +1,301 @@
+# Diff Render Adapter
+#
+# Bridges the diff app to the shared UI render contract.
+# Produces RenderResult (text and/or html) from diff data,
+# showing colored diff output and side-by-side HTML views.
+
+use app.ui.render.types.{RenderConfig, RenderResult}
+use app.ui.render.ansi.{RESET, BOLD, DIM, RED, GREEN, CYAN, colorize}
+use app.ui.render.fmt.{fmt_number}
+use app.ui.render.html.{html_table, css_dark_theme}
+
+# =========================================================================
+# Diff Data Structures
+# =========================================================================
+
+struct DiffLine:
+    """A single line in a diff."""
+    kind: text       # "add", "remove", "context", "header"
+    line_num_old: i64
+    line_num_new: i64
+    content: text
+
+struct DiffHunk:
+    """A contiguous hunk of changes."""
+    old_start: i64
+    old_count: i64
+    new_start: i64
+    new_count: i64
+    lines: [DiffLine]
+
+struct DiffResult:
+    """Complete diff between two files."""
+    old_path: text
+    new_path: text
+    hunks: [DiffHunk]
+    additions: i64
+    deletions: i64
+    modifications: i64
+
+# =========================================================================
+# Main Render Entry Point
+# =========================================================================
+
+fn render_diff(config: RenderConfig, diff: DiffResult) -> RenderResult:
+    """Render diff output via the shared render contract.
+
+    config.mode selects view: "unified", "stat", or "side-by-side".
+    config.format selects output: "text", "html", or "both".
+    """
+    val mode = if config.mode == "render": "unified" else: config.mode
+    val fmt = config.format
+
+    var text_out = ""
+    var html_out = ""
+
+    if fmt == "text" or fmt == "both":
+        text_out = render_text(diff, mode)
+
+    if fmt == "html" or fmt == "both":
+        html_out = render_html(diff, mode, config)
+
+    val total_changes = diff.additions + diff.deletions + diff.modifications
+    val meta: Dict<text, text> = {
+        "adapter": "diff",
+        "mode": mode,
+        "format": fmt,
+        "old_path": diff.old_path,
+        "new_path": diff.new_path,
+        "additions": "{diff.additions}",
+        "deletions": "{diff.deletions}",
+        "modifications": "{diff.modifications}",
+        "total_changes": "{total_changes}"
+    }
+
+    return RenderResult(
+        format: fmt,
+        text_output: text_out,
+        html_output: html_out,
+        metadata: meta,
+        warnings: []
+    )
+
+# =========================================================================
+# Text Rendering
+# =========================================================================
+
+fn render_text(diff: DiffResult, mode: text) -> text:
+    """Render diff as colored terminal text."""
+    var lines: [text] = []
+
+    if mode == "stat":
+        lines.push("{diff.old_path} -> {diff.new_path}")
+        lines.push("  {GREEN}+{diff.additions}{RESET} additions, {RED}-{diff.deletions}{RESET} deletions, {CYAN}~{diff.modifications}{RESET} modifications")
+        return lines.join("\n")
+
+    # Unified diff header
+    lines.push("{BOLD}--- {diff.old_path}{RESET}")
+    lines.push("{BOLD}+++ {diff.new_path}{RESET}")
+
+    if diff.hunks.len() == 0:
+        lines.push("{DIM}Files are identical.{RESET}")
+        return lines.join("\n")
+
+    for hunk in diff.hunks:
+        # Hunk header
+        lines.push("{CYAN}@@ -{hunk.old_start},{hunk.old_count} +{hunk.new_start},{hunk.new_count} @@{RESET}")
+
+        for dl in hunk.lines:
+            match dl.kind:
+                "add":
+                    lines.push("{GREEN}+ {dl.content}{RESET}")
+                "remove":
+                    lines.push("{RED}- {dl.content}{RESET}")
+                "context":
+                    lines.push("  {dl.content}")
+                "header":
+                    lines.push("{CYAN}{dl.content}{RESET}")
+                _:
+                    lines.push("  {dl.content}")
+
+    # Summary
+    lines.push("")
+    lines.push("{DIM}{diff.hunks.len()} hunk(s): {GREEN}+{diff.additions}{RESET} {RED}-{diff.deletions}{RESET} {CYAN}~{diff.modifications}{RESET}")
+
+    lines.join("\n")
+
+# =========================================================================
+# HTML Rendering
+# =========================================================================
+
+fn render_html(diff: DiffResult, mode: text, config: RenderConfig) -> text:
+    """Render diff as styled HTML with side-by-side or unified view."""
+    var h = ""
+    h = "{h}{_html_head("Diff: {_html_escape(diff.old_path)} vs {_html_escape(diff.new_path)}")}"
+    h = "{h}<body>\n<div class=\"container\">\n"
+
+    # Header with stats
+    h = "{h}<h1>Diff Viewer</h1>\n"
+    h = "{h}<div class=\"diff-header\">\n"
+    h = "{h}  <span class=\"path\">--- {_html_escape(diff.old_path)}</span>\n"
+    h = "{h}  <span class=\"path\">+++ {_html_escape(diff.new_path)}</span>\n"
+    h = "{h}  <div class=\"diff-stats\">"
+    h = "{h}<span class=\"stat-add\">+{diff.additions}</span> "
+    h = "{h}<span class=\"stat-del\">-{diff.deletions}</span> "
+    h = "{h}<span class=\"stat-mod\">~{diff.modifications}</span>"
+    h = "{h}</div>\n"
+    h = "{h}</div>\n"
+
+    if diff.hunks.len() == 0:
+        h = "{h}<div class=\"card\"><p style=\"color:#8b949e\">Files are identical.</p></div>\n"
+    else:
+        for hunk in diff.hunks:
+            h = "{h}<div class=\"hunk\">\n"
+            h = "{h}<div class=\"hunk-header\">@@ -{hunk.old_start},{hunk.old_count} +{hunk.new_start},{hunk.new_count} @@</div>\n"
+            h = "{h}<table class=\"diff-table\">\n"
+
+            for dl in hunk.lines:
+                val css_class = match dl.kind:
+                    "add": "line-add"
+                    "remove": "line-del"
+                    "context": "line-ctx"
+                    _: "line-ctx"
+
+                val prefix = match dl.kind:
+                    "add": "+"
+                    "remove": "-"
+                    _: " "
+
+                val old_num = if dl.kind == "add": "" else: "{dl.line_num_old}"
+                val new_num = if dl.kind == "remove": "" else: "{dl.line_num_new}"
+
+                h = "{h}<tr class=\"{css_class}\">"
+                h = "{h}<td class=\"line-num\">{old_num}</td>"
+                h = "{h}<td class=\"line-num\">{new_num}</td>"
+                h = "{h}<td class=\"line-prefix\">{prefix}</td>"
+                h = "{h}<td class=\"line-content\">{_html_escape(dl.content)}</td>"
+                h = "{h}</tr>\n"
+
+            h = "{h}</table>\n</div>\n"
+
+    h = "{h}</div>\n</body>\n</html>\n"
+    h
+
+# =========================================================================
+# Convenience: Build DiffResult from raw line comparison
+# =========================================================================
+
+fn diff_from_lines(old_path: text, new_path: text, old_lines: [text], new_lines: [text], context: i64) -> DiffResult:
+    """Build a DiffResult from two arrays of lines (simple line-by-line diff)."""
+    var diff_lines: [DiffLine] = []
+    var additions = 0
+    var deletions = 0
+    var modifications = 0
+
+    val max_len = if old_lines.len() > new_lines.len(): old_lines.len() else: new_lines.len()
+    var i = 0
+
+    while i < max_len:
+        val old_line = if i < old_lines.len(): old_lines[i] else: ""
+        val new_line = if i < new_lines.len(): new_lines[i] else: ""
+
+        if old_line == new_line:
+            diff_lines.push(DiffLine(
+                kind: "context",
+                line_num_old: i + 1,
+                line_num_new: i + 1,
+                content: old_line
+            ))
+        elif i >= old_lines.len():
+            diff_lines.push(DiffLine(
+                kind: "add",
+                line_num_old: 0,
+                line_num_new: i + 1,
+                content: new_line
+            ))
+            additions = additions + 1
+        elif i >= new_lines.len():
+            diff_lines.push(DiffLine(
+                kind: "remove",
+                line_num_old: i + 1,
+                line_num_new: 0,
+                content: old_line
+            ))
+            deletions = deletions + 1
+        else:
+            diff_lines.push(DiffLine(
+                kind: "remove",
+                line_num_old: i + 1,
+                line_num_new: 0,
+                content: old_line
+            ))
+            diff_lines.push(DiffLine(
+                kind: "add",
+                line_num_old: 0,
+                line_num_new: i + 1,
+                content: new_line
+            ))
+            modifications = modifications + 1
+        i = i + 1
+
+    val hunk = DiffHunk(
+        old_start: 1,
+        old_count: old_lines.len(),
+        new_start: 1,
+        new_count: new_lines.len(),
+        lines: diff_lines
+    )
+
+    DiffResult(
+        old_path: old_path,
+        new_path: new_path,
+        hunks: [hunk],
+        additions: additions,
+        deletions: deletions,
+        modifications: modifications
+    )
+
+# =========================================================================
+# HTML Helpers
+# =========================================================================
+
+fn _html_head(title: text) -> text:
+    var h = ""
+    h = "{h}<!DOCTYPE html>\n<html>\n<head>\n"
+    h = "{h}  <meta charset=\"utf-8\">\n"
+    h = "{h}  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
+    h = "{h}  <title>{title}</title>\n"
+    h = "{h}  <style>\n"
+    h = "{h}    body { font-family: system-ui, sans-serif; margin: 0; padding: 20px; background: #0d1117; color: #c9d1d9; }\n"
+    h = "{h}    .container { max-width: 1200px; margin: 0 auto; }\n"
+    h = "{h}    h1 { color: #58a6ff; }\n"
+    h = "{h}    .diff-header { background: #161b22; padding: 12px 16px; border-radius: 8px 8px 0 0; border: 1px solid #30363d; margin-bottom: 0; }\n"
+    h = "{h}    .path { display: block; font-family: monospace; font-size: 13px; color: #8b949e; }\n"
+    h = "{h}    .diff-stats { margin-top: 8px; font-size: 13px; }\n"
+    h = "{h}    .stat-add { color: #3fb950; }\n"
+    h = "{h}    .stat-del { color: #f85149; }\n"
+    h = "{h}    .stat-mod { color: #d29922; }\n"
+    h = "{h}    .card { background: #161b22; padding: 20px; border-radius: 8px; border: 1px solid #30363d; }\n"
+    h = "{h}    .hunk { margin: 0 0 16px 0; border: 1px solid #30363d; border-radius: 6px; overflow: hidden; }\n"
+    h = "{h}    .hunk-header { background: #1f2937; padding: 6px 12px; font-family: monospace; font-size: 12px; color: #79c0ff; border-bottom: 1px solid #30363d; }\n"
+    h = "{h}    .diff-table { border-collapse: collapse; width: 100%; font-family: monospace; font-size: 13px; }\n"
+    h = "{h}    .diff-table td { padding: 1px 8px; white-space: pre-wrap; word-break: break-all; vertical-align: top; }\n"
+    h = "{h}    .line-num { width: 40px; text-align: right; color: #484f58; user-select: none; border-right: 1px solid #30363d; }\n"
+    h = "{h}    .line-prefix { width: 16px; text-align: center; user-select: none; }\n"
+    h = "{h}    .line-content { width: 100%; }\n"
+    h = "{h}    .line-add { background: rgba(63, 185, 80, 0.15); }\n"
+    h = "{h}    .line-add .line-prefix { color: #3fb950; }\n"
+    h = "{h}    .line-del { background: rgba(248, 81, 73, 0.15); }\n"
+    h = "{h}    .line-del .line-prefix { color: #f85149; }\n"
+    h = "{h}    .line-ctx { background: transparent; }\n"
+    h = "{h}  </style>\n"
+    h = "{h}</head>\n"
+    h
+
+fn _html_escape(s: text) -> text:
+    var result = s
+    result = result.replace("&", "&amp;")
+    result = result.replace("<", "&lt;")
+    result = result.replace(">", "&gt;")
+    result = result.replace("\"", "&quot;")
+    result

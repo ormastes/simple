@@ -1,0 +1,50 @@
+# snpm update — Update dependencies
+
+use std.js.types.pair.{Pair}
+use app.snpm.config.{SnpmConfig}
+use app.snpm.manifest.{parse_manifest}
+use app.snpm.resolver.{resolve_dependencies}
+use app.snpm.installer.{install_packages}
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+
+fn cmd_update(config: SnpmConfig, args: [text]):
+    """Update dependencies to latest compatible versions."""
+    if not rt_file_exists(config.manifest_name):
+        print "snpm: no {config.manifest_name} found"
+        return
+
+    val manifest_result = parse_manifest(config.manifest_name)
+    match manifest_result:
+        Err(msg):
+            print "snpm: {msg}"
+            return
+        Ok(manifest):
+            if args.len() > 0:
+                # Update specific package
+                val name = args[0]
+                print "snpm: updating {name}..."
+                # Remove existing
+                val pkg_dir = "{config.modules_dir}/{name}"
+                if rt_file_exists(pkg_dir):
+                    rt_file_delete(pkg_dir)
+                # Re-resolve and install
+                var target_deps: [Pair<text, text>] = []
+                var i = 0
+                while i < manifest.dependencies.len():
+                    if manifest.dependencies[i].first == name:
+                        target_deps.push(manifest.dependencies[i])
+                    i = i + 1
+                if target_deps.len() == 0:
+                    print "snpm: {name} not in dependencies"
+                    return
+                val resolved = resolve_dependencies(target_deps, config)
+                install_packages(resolved, config)
+                print "snpm: updated {name}"
+            else:
+                # Update all
+                print "snpm: updating all dependencies..."
+                val resolved = resolve_dependencies(manifest.dependencies, config)
+                install_packages(resolved, config)
+                print "snpm: updated {resolved.len()} packages"

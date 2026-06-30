@@ -1,0 +1,260 @@
+# Target Spec Matching Specification
+#
+# Tests for the target spec matching logic used by asm match/assert.
+# Verifies arch matching, normalization, OS/ABI/backend matching,
+# version constraints, and exhaustiveness checking.
+
+use std.spec.{check, check_msg}
+use std.common.target_spec.{match_target_spec, check_exhaustiveness, all_target_archs, MatchResult}
+
+describe "Target Spec Architecture Matching":
+
+    it "matches exact arch":
+        val result = match_target_spec(
+            ["x86_64"], false, "", false, "", false, "",
+            [], [],
+            "x86_64", "linux", "gnu", "llvm", 15
+        )
+        match result:
+            case MatchResult.Matched: check(true)
+            case _: check(false)
+
+    it "does not match different arch":
+        val result = match_target_spec(
+            ["aarch64"], false, "", false, "", false, "",
+            [], [],
+            "x86_64", "linux", "gnu", "llvm", 15
+        )
+        match result:
+            case MatchResult.NotMatched: check(true)
+            case _: check(false)
+
+    it "matches with pipe group":
+        val result = match_target_spec(
+            ["x86_64", "x86"], false, "", false, "", false, "",
+            [], [],
+            "x86", "linux", "gnu", "llvm", 15
+        )
+        match result:
+            case MatchResult.Matched: check(true)
+            case _: check(false)
+
+    it "normalizes arch aliases":
+        val result = match_target_spec(
+            ["amd64"], false, "", false, "", false, "",
+            [], [],
+            "x86_64", "linux", "gnu", "llvm", 15
+        )
+        match result:
+            case MatchResult.Matched: check(true)
+            case _: check(false)
+
+    it "normalizes arm64 alias":
+        val result = match_target_spec(
+            ["arm64"], false, "", false, "", false, "",
+            [], [],
+            "aarch64", "linux", "gnu", "llvm", 15
+        )
+        match result:
+            case MatchResult.Matched: check(true)
+            case _: check(false)
+
+describe "Target Spec OS Matching":
+
+    it "matches with OS specified":
+        val result = match_target_spec(
+            ["x86_64"], true, "linux", false, "", false, "",
+            [], [],
+            "x86_64", "linux", "gnu", "llvm", 15
+        )
+        match result:
+            case MatchResult.Matched: check(true)
+            case _: check(false)
+
+    it "does not match wrong OS":
+        val result = match_target_spec(
+            ["x86_64"], true, "windows", false, "", false, "",
+            [], [],
+            "x86_64", "linux", "gnu", "llvm", 15
+        )
+        match result:
+            case MatchResult.NotMatched: check(true)
+            case _: check(false)
+
+    it "wildcard OS matches any":
+        val result = match_target_spec(
+            ["x86_64"], true, "_", false, "", false, "",
+            [], [],
+            "x86_64", "freebsd", "gnu", "llvm", 15
+        )
+        match result:
+            case MatchResult.Matched: check(true)
+            case _: check(false)
+
+    it "omitted OS matches any":
+        val result = match_target_spec(
+            ["x86_64"], false, "", false, "", false, "",
+            [], [],
+            "x86_64", "windows", "msvc", "llvm", 15
+        )
+        match result:
+            case MatchResult.Matched: check(true)
+            case _: check(false)
+
+describe "Target Spec ABI and Backend Matching":
+
+    it "matches with ABI specified":
+        val result = match_target_spec(
+            ["x86_64"], true, "linux", true, "gnu", false, "",
+            [], [],
+            "x86_64", "linux", "gnu", "llvm", 15
+        )
+        match result:
+            case MatchResult.Matched: check(true)
+            case _: check(false)
+
+    it "does not match wrong ABI":
+        val result = match_target_spec(
+            ["x86_64"], true, "windows", true, "msvc", false, "",
+            [], [],
+            "x86_64", "windows", "gnu", "llvm", 15
+        )
+        match result:
+            case MatchResult.NotMatched: check(true)
+            case _: check(false)
+
+    it "matches with backend specified":
+        val result = match_target_spec(
+            ["x86_64"], false, "", false, "", true, "llvm",
+            [], [],
+            "x86_64", "linux", "gnu", "llvm", 15
+        )
+        match result:
+            case MatchResult.Matched: check(true)
+            case _: check(false)
+
+    it "does not match wrong backend":
+        val result = match_target_spec(
+            ["x86_64"], false, "", false, "", true, "cranelift",
+            [], [],
+            "x86_64", "linux", "gnu", "llvm", 15
+        )
+        match result:
+            case MatchResult.NotMatched: check(true)
+            case _: check(false)
+
+describe "Target Spec Version Constraints":
+
+    it "matches >= constraint":
+        val result = match_target_spec(
+            ["x86_64"], false, "", false, "", true, "llvm",
+            [">="], [15],
+            "x86_64", "linux", "gnu", "llvm", 15
+        )
+        match result:
+            case MatchResult.Matched: check(true)
+            case _: check(false)
+
+    it "fails >= constraint when too low":
+        val result = match_target_spec(
+            ["x86_64"], false, "", false, "", true, "llvm",
+            [">="], [16],
+            "x86_64", "linux", "gnu", "llvm", 15
+        )
+        match result:
+            case MatchResult.NotMatched: check(true)
+            case _: check(false)
+
+    it "matches == constraint":
+        val result = match_target_spec(
+            ["x86_64"], false, "", false, "", true, "llvm",
+            ["=="], [17],
+            "x86_64", "linux", "gnu", "llvm", 17
+        )
+        match result:
+            case MatchResult.Matched: check(true)
+            case _: check(false)
+
+    it "fails == constraint when different":
+        val result = match_target_spec(
+            ["x86_64"], false, "", false, "", true, "llvm",
+            ["=="], [17],
+            "x86_64", "linux", "gnu", "llvm", 15
+        )
+        match result:
+            case MatchResult.NotMatched: check(true)
+            case _: check(false)
+
+    it "matches < constraint":
+        val result = match_target_spec(
+            ["x86_64"], false, "", false, "", true, "llvm",
+            ["<"], [18],
+            "x86_64", "linux", "gnu", "llvm", 15
+        )
+        match result:
+            case MatchResult.Matched: check(true)
+            case _: check(false)
+
+    it "returns note for ~= constraint with different version":
+        val result = match_target_spec(
+            ["x86_64"], false, "", false, "", true, "llvm",
+            ["~="], [17],
+            "x86_64", "linux", "gnu", "llvm", 15
+        )
+        match result:
+            case MatchResult.MatchedWithNote(msg):
+                check(msg.contains("recommended"))
+            case _: check(false)
+
+    it "returns Matched for ~= constraint with matching version":
+        val result = match_target_spec(
+            ["x86_64"], false, "", false, "", true, "llvm",
+            ["~="], [17],
+            "x86_64", "linux", "gnu", "llvm", 17
+        )
+        match result:
+            case MatchResult.Matched: check(true)
+            case _: check(false)
+
+    it "matches range constraint >= and <":
+        val result = match_target_spec(
+            ["x86_64"], false, "", false, "", true, "llvm",
+            [">=", "<"], [14, 18],
+            "x86_64", "linux", "gnu", "llvm", 15
+        )
+        match result:
+            case MatchResult.Matched: check(true)
+            case _: check(false)
+
+describe "Target Spec Exhaustiveness":
+
+    it "reports missing archs when no wildcard":
+        val arms_archs = [["x86_64"], ["aarch64"]]
+        val arms_is_wildcard = [false, false]
+        val all = all_target_archs()
+        val missing = check_exhaustiveness(arms_archs, arms_is_wildcard, all)
+        check(missing.len() > 0)
+        # x86_64 and aarch64 are covered, others should be missing
+        check(missing.contains("arm"))
+        check(missing.contains("riscv64"))
+
+    it "reports no missing archs when wildcard present":
+        val arms_archs = [["x86_64"], []]
+        val arms_is_wildcard = [false, true]
+        val all = all_target_archs()
+        val missing = check_exhaustiveness(arms_archs, arms_is_wildcard, all)
+        check(missing.len() == 0)
+
+    it "reports all archs missing when no arms":
+        val arms_archs: [[text]] = []
+        val arms_is_wildcard: [bool] = []
+        val all = all_target_archs()
+        val missing = check_exhaustiveness(arms_archs, arms_is_wildcard, all)
+        check(missing.len() == all.len())
+
+    it "handles pipe groups in exhaustiveness":
+        val arms_archs = [["x86_64", "x86"], ["aarch64", "arm"], ["riscv32", "riscv64"], ["wasm32", "wasm64"], ["avr"], ["mcs51"], ["msp430"]]
+        val arms_is_wildcard = [false, false, false, false, false, false, false]
+        val all = all_target_archs()
+        val missing = check_exhaustiveness(arms_archs, arms_is_wildcard, all)
+        check(missing.len() == 0)

@@ -1,0 +1,108 @@
+# CLI Socket Specification
+#
+# Tests process_command dispatch directly (no real sockets).
+# Verifies JSON responses for get_state, get_changes, ping, and errors.
+
+use std.spec.{describe, it, expect}
+use common.ui.widget.{WidgetNode, UITree, UIState, UIEvent}
+use common.ui.builder.{column, text_widget}
+use common.ui.session.{UISession, new_session}
+use app.ui.cli.socket_server.{process_command}
+
+
+# ============================================================================
+# process_command - get_state
+# ============================================================================
+
+describe "process_command get_state":
+    it "returns mode and focused fields":
+        val root = text_widget("sock_gs_root", "Hello")
+        val tree = UITree.new(root)
+        val session = new_session(tree)
+        val response = process_command(session, "{\"command\": \"get_state\"}")
+        expect response to_contain "NORMAL"
+        expect response to_contain "mode"
+
+    it "reflects command mode after dispatch":
+        val root = text_widget("sock_gs_cmd_root", "Cmd")
+        val tree = UITree.new(root)
+        var session = new_session(tree)
+        session.dispatch(UIEvent.CommandMode)
+        val response = process_command(session, "{\"command\": \"get_state\"}")
+        expect response to_contain "COMMAND"
+
+
+# ============================================================================
+# process_command - get_changes
+# ============================================================================
+
+describe "process_command get_changes":
+    it "returns empty changes for fresh session":
+        val root = text_widget("sock_gc_root", "Fresh")
+        val tree = UITree.new(root)
+        val session = new_session(tree)
+        val response = process_command(session, "{\"command\": \"get_changes\"}")
+        expect response to_contain "changes"
+
+    it "returns changes after tree update":
+        val root1 = column("sock_gc_upd", [
+            text_widget("sock_gc_t1", "Old")
+        ])
+        val tree1 = UITree.new(root1)
+        var session = new_session(tree1)
+        val root2 = column("sock_gc_upd", [
+            text_widget("sock_gc_t1", "Old"),
+            text_widget("sock_gc_t2", "New")
+        ])
+        val tree2 = UITree.new(root2)
+        session.update_tree(tree2)
+        val response = process_command(session, "{\"command\": \"get_changes\", \"count\": 5}")
+        expect response to_contain "changes"
+
+    it "respects count parameter":
+        val root = text_widget("sock_gc_cnt_root", "Count")
+        val tree = UITree.new(root)
+        val session = new_session(tree)
+        val response = process_command(session, "{\"command\": \"get_changes\", \"count\": 3}")
+        expect response to_contain "changes"
+
+
+# ============================================================================
+# process_command - ping
+# ============================================================================
+
+describe "process_command ping":
+    it "responds with pong":
+        val root = text_widget("sock_ping_root", "Ping")
+        val tree = UITree.new(root)
+        val session = new_session(tree)
+        val response = process_command(session, "{\"command\": \"ping\"}")
+        expect response to_contain "pong"
+
+
+# ============================================================================
+# process_command - errors
+# ============================================================================
+
+describe "process_command errors":
+    it "returns error for empty command":
+        val root = text_widget("sock_err_empty_root", "Err")
+        val tree = UITree.new(root)
+        val session = new_session(tree)
+        val response = process_command(session, "")
+        expect response to_contain "error"
+
+    it "returns error for unknown command":
+        val root = text_widget("sock_err_unk_root", "Err")
+        val tree = UITree.new(root)
+        val session = new_session(tree)
+        val response = process_command(session, "{\"command\": \"invalid_cmd\"}")
+        expect response to_contain "error"
+        expect response to_contain "unknown command"
+
+    it "returns error for empty JSON object":
+        val root = text_widget("sock_err_obj_root", "Err")
+        val tree = UITree.new(root)
+        val session = new_session(tree)
+        val response = process_command(session, "{}")
+        expect response to_contain "error"

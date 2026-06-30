@@ -1,0 +1,255 @@
+# Concurrent Data Structures
+#
+# Thread-safe data structures for concurrent programming.
+# Built on working SFFI primitives for channels and atomics; maps are pure Simple.
+#
+# Components:
+# - MpscQueue: Multi-producer single-consumer queue (channel-based)
+# - MpmcQueue: Multi-producer multi-consumer queue (channel-based, bounded)
+# - ConcurrentMap: Compatibility hash map backed by pure Simple storage
+# - AtomicFlag: Simple atomic boolean flag
+# - Once: Run initialization exactly once
+# - Barrier: Synchronize multiple threads
+
+use std.nogc_async_mut.concurrent.channel.{Channel, channel_new}
+use std.nogc_async_mut.concurrent.thread.{thread_yield}
+use std.nogc_sync_mut.atomic.{AtomicI64, AtomicBool, MemoryOrdering, atomic_i64_new, atomic_bool_new}
+
+# ============================================================================
+# MpscQueue - Multi-Producer Single-Consumer Queue
+# ============================================================================
+
+class MpscQueue:
+    _channel: Channel
+    _size: AtomicI64
+
+    fn push(value: Any):
+        self._channel.send(value)
+        self._size.fetch_add(1, MemoryOrdering.SeqCst)
+
+    fn pop() -> Any:
+        val result = self._channel.try_recv()
+        if result != nil:
+            self._size.fetch_sub(1, MemoryOrdering.SeqCst)
+        result
+
+    fn is_empty() -> bool:
+        self._size.load(MemoryOrdering.SeqCst) <= 0
+
+    fn len() -> i64:
+        val size = self._size.load(MemoryOrdering.SeqCst)
+        if size < 0:
+            return 0
+        size
+
+    fn close():
+        self._channel.close()
+        self._size.free()
+
+fn mpsc_queue_new() -> MpscQueue:
+    MpscQueue(
+        _channel: channel_new(),
+        _size: atomic_i64_new(0)
+    )
+
+# ============================================================================
+# MpmcQueue - Multi-Producer Multi-Consumer Queue
+# ============================================================================
+
+class MpmcQueue:
+    _channel: Channel
+    _capacity: i64
+    _size: AtomicI64
+
+    fn push(value: Any) -> bool:
+        val current = self._size.load(MemoryOrdering.SeqCst)
+        if current >= self._capacity:
+            return false
+        self._channel.send(value)
+        self._size.fetch_add(1, MemoryOrdering.SeqCst)
+        true
+
+    fn pop() -> Any:
+        val result = self._channel.try_recv()
+        if result != nil:
+            self._size.fetch_sub(1, MemoryOrdering.SeqCst)
+        result
+
+    fn len() -> i64:
+        val size = self._size.load(MemoryOrdering.SeqCst)
+        if size < 0:
+            return 0
+        size
+
+    fn is_empty() -> bool:
+        self._size.load(MemoryOrdering.SeqCst) <= 0
+
+    fn is_full() -> bool:
+        self._size.load(MemoryOrdering.SeqCst) >= self._capacity
+
+    fn close():
+        self._channel.close()
+        self._size.free()
+
+fn mpmc_queue_with_capacity(capacity: i64) -> MpmcQueue:
+    MpmcQueue(
+        _channel: channel_new(),
+        _capacity: capacity,
+        _size: atomic_i64_new(0)
+    )
+
+# ============================================================================
+# ConcurrentMap - Pure Simple Compatibility Map
+# ============================================================================
+
+struct ConcurrentMapEntry:
+    key: text
+    value: Any
+
+class ConcurrentMap:
+    entries_: [ConcurrentMapEntry]
+
+    me insert(key: text, value: Any) -> bool:
+        for i in 0..self.entries_.len():
+            if self.entries_[i].key == key:
+                self.entries_[i] = ConcurrentMapEntry(key: key, value: value)
+                return false
+        self.entries_.append(ConcurrentMapEntry(key: key, value: value))
+        true
+
+    fn get(key: text) -> Any:
+        for entry in self.entries_:
+            if entry.key == key:
+                return entry.value
+        nil
+
+    me remove(key: text) -> Any:
+        for i in 0..self.entries_.len():
+            if self.entries_[i].key == key:
+                val value = self.entries_[i].value
+                self.entries_ = _concurrent_map_entries_remove(self.entries_, i)
+                return value
+        nil
+
+    fn contains_key(key: text) -> bool:
+        for entry in self.entries_:
+            if entry.key == key:
+                return true
+        false
+
+    fn has(key: text) -> bool:
+        self.contains_key(key)
+
+    fn len() -> i64:
+        self.entries_.len() as i64
+
+    fn is_empty() -> bool:
+        self.entries_.len() == 0
+
+fn _concurrent_map_entries_remove(items: [ConcurrentMapEntry], idx: i64) -> [ConcurrentMapEntry]:
+    var result: [ConcurrentMapEntry] = []
+    for i in 0..items.len():
+        if i != idx:
+            result.append(items[i])
+    result
+
+fn concurrent_map_new() -> ConcurrentMap:
+    ConcurrentMap(entries_: [])
+
+# Provided for API compat; sharding is not used by the pure Simple storage.
+fn concurrent_map_with_shards(num_shards: i64) -> ConcurrentMap:
+    ConcurrentMap(entries_: [])
+
+# ============================================================================
+# AtomicFlag - Simple Atomic Boolean Flag
+# ============================================================================
+
+class AtomicFlag:
+    _atomic: AtomicBool
+
+    fn set():
+        self._atomic.store(true, MemoryOrdering.SeqCst)
+
+    fn clear():
+        self._atomic.store(false, MemoryOrdering.SeqCst)
+
+    fn is_set() -> bool:
+        self._atomic.load(MemoryOrdering.SeqCst)
+
+    fn test_and_set() -> bool:
+        self._atomic.swap(true, MemoryOrdering.SeqCst)
+
+    fn free():
+        self._atomic.free()
+
+fn atomic_flag_new() -> AtomicFlag:
+    AtomicFlag(_atomic: atomic_bool_new(false))
+
+fn atomic_flag_new_set() -> AtomicFlag:
+    AtomicFlag(_atomic: atomic_bool_new(true))
+
+# ============================================================================
+# Once - Run Initialization Exactly Once
+# ============================================================================
+
+class Once:
+    _state: AtomicI64  # 0=not run, 1=running, 2=done
+
+    fn call_once(f: fn()):
+        # Fast path: already done
+        if self._state.load(MemoryOrdering.SeqCst) == 2:
+            return
+        # Try to claim execution
+        val ok = self._state.compare_exchange(0, 1, MemoryOrdering.SeqCst, MemoryOrdering.SeqCst)
+        if ok:
+            f()
+            self._state.store(2, MemoryOrdering.SeqCst)
+        else:
+            # Spin-wait for completion
+            while self._state.load(MemoryOrdering.SeqCst) != 2:
+                thread_yield()
+
+    fn is_completed() -> bool:
+        self._state.load(MemoryOrdering.SeqCst) == 2
+
+    fn free():
+        self._state.free()
+
+fn once_new() -> Once:
+    Once(_state: atomic_i64_new(0))
+
+# ============================================================================
+# Barrier - Synchronize Multiple Threads
+# ============================================================================
+
+class Barrier:
+    _count: i64
+    _arrived: AtomicI64
+    _generation: AtomicI64
+
+    fn wait():
+        val current_gen = self._generation.load(MemoryOrdering.SeqCst)
+        val arrived = self._arrived.fetch_add(1, MemoryOrdering.SeqCst)
+        if arrived + 1 == self._count:
+            # Last thread - reset and advance generation
+            self._arrived.store(0, MemoryOrdering.SeqCst)
+            self._generation.fetch_add(1, MemoryOrdering.SeqCst)
+        else:
+            # Wait for generation to advance
+            while self._generation.load(MemoryOrdering.SeqCst) == current_gen:
+                thread_yield()
+
+    fn free():
+        self._arrived.free()
+        self._generation.free()
+
+fn barrier_new(count: i64) -> Barrier:
+    Barrier(
+        _count: count,
+        _arrived: atomic_i64_new(0),
+        _generation: atomic_i64_new(0)
+    )
+
+# ============================================================================
+# Exports
+# ============================================================================

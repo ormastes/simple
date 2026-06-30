@@ -1,0 +1,133 @@
+# Device syscall shims — split from syscall_shim.spl (Wave 10F).
+# Contains spl_handle_* for device syscalls 80–85.
+
+use os.kernel.types.syscall_types.{SyscallArgs, SyscallResult}
+use os.kernel.ipc.syscall.{_handle_dev_enumerate}
+use os.kernel.ipc.syscall.{_handle_dev_get_info}
+use os.kernel.ipc.syscall.{_handle_map_bar}
+use os.kernel.ipc.syscall.{_handle_alloc_dma}
+use os.kernel.ipc.syscall.{_handle_free_dma}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.abi.syscall_shim.{g_shim_scheduler, _make_args}
+
+# _handle_device_grant is defined in syscall.spl alongside the other device handlers
+use os.kernel.ipc.syscall.{_handle_device_grant}
+
+# ===========================================================================
+# syscall 80 — dev_enumerate   [IMPLEMENTED]
+#
+# a0 = pointer to output device list buffer (user VA)
+# a1 = buffer capacity in entries
+# a2..a5 unused
+# returns number of devices written, or negative errno
+# ===========================================================================
+@export("C", name: "spl_handle_dev_enumerate")
+fn spl_handle_dev_enumerate(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_dev_enumerate stub.
+
+    Forwards to _handle_dev_enumerate() in syscall.spl.
+    Syscall number 80: list all kernel-visible hardware devices.
+    """
+    val args = _make_args(80, a0, a1, a2, a3, a4, a5)
+    val result = _handle_dev_enumerate(args)
+    result.value
+
+# ===========================================================================
+# syscall 81 — dev_get_info   [IMPLEMENTED]
+#
+# a0 = device ID
+# a1 = pointer to output DeviceInfo struct (user VA)
+# a2..a5 unused
+# returns 0 on success, negative errno on failure
+# ===========================================================================
+@export("C", name: "spl_handle_dev_get_info")
+fn spl_handle_dev_get_info(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_dev_get_info stub.
+
+    Forwards to _handle_dev_get_info() in syscall.spl.
+    Syscall number 81: retrieve detailed information about a specific device.
+    """
+    val args = _make_args(81, a0, a1, a2, a3, a4, a5)
+    val result = _handle_dev_get_info(args)
+    result.value
+
+# ===========================================================================
+# syscall 82 — device_grant   [IMPLEMENTED]
+#
+# Fetches the caller's TaskId from the scheduler singleton at the moment of
+# dispatch.  This is valid because SYSCALL entry is single-threaded and the
+# scheduler always knows which task issued the call.
+# ===========================================================================
+@export("C", name: "spl_handle_device_grant")
+fn spl_handle_device_grant(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_device_grant stub.
+
+    Extracts the caller's TaskId from the scheduler singleton (valid because
+    SYSCALL entry is single-threaded and the scheduler always knows which
+    task issued the call) and passes it through to _handle_device_grant.
+    """
+    val args = _make_args(82, a0, a1, a2, a3, a4, a5)
+    val caller = g_shim_scheduler.get_current()
+    val result = _handle_device_grant(args, g_shim_scheduler, caller)
+    result.value
+
+# ===========================================================================
+# syscall 83 — map_bar   [IMPLEMENTED]
+#
+# a0 = device ID
+# a1 = BAR index (0-5)
+# a2 = pointer to output mapped address (user VA)
+# a3..a5 unused
+# returns 0 on success, negative errno on failure
+# ===========================================================================
+@export("C", name: "spl_handle_map_bar")
+fn spl_handle_map_bar(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_map_bar stub.
+
+    Forwards to _handle_map_bar() in syscall.spl.
+    Syscall number 83: map a PCI Base Address Register into user address space.
+    """
+    val args = _make_args(83, a0, a1, a2, a3, a4, a5)
+    val result = _handle_map_bar(args)
+    result.value
+
+# ===========================================================================
+# syscall 84 — alloc_dma   [IMPLEMENTED]
+#
+# a0 = size in bytes
+# a1 = alignment (power-of-two, minimum 4096)
+# a2 = pointer to output physical address (user VA)
+# a3..a5 unused
+# returns virtual address on success, negative errno on failure
+# ===========================================================================
+@export("C", name: "spl_handle_alloc_dma")
+fn spl_handle_alloc_dma(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_alloc_dma stub.
+
+    Forwards to _handle_alloc_dma() in syscall.spl.
+    Syscall number 84: allocate physically-contiguous DMA-safe memory.
+    """
+    val args = _make_args(84, a0, a1, a2, a3, a4, a5)
+    val caller = g_shim_scheduler.get_current()
+    val result = _handle_alloc_dma(args, caller)
+    result.value
+
+# ===========================================================================
+# syscall 85 — free_dma   [IMPLEMENTED]
+#
+# a0 = virtual address previously returned by alloc_dma
+# a1 = size in bytes
+# a2..a5 unused
+# returns 0 on success, negative errno on failure
+# ===========================================================================
+@export("C", name: "spl_handle_free_dma")
+fn spl_handle_free_dma(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_free_dma stub.
+
+    Forwards to _handle_free_dma() in syscall.spl.
+    Syscall number 85: release a DMA buffer previously allocated with alloc_dma.
+    """
+    val args = _make_args(85, a0, a1, a2, a3, a4, a5)
+    val caller = g_shim_scheduler.get_current()
+    val result = _handle_free_dma(args, caller)
+    result.value

@@ -1,0 +1,41 @@
+# Regression spec (M12 3b): omitted trailing arguments to a function with
+# default parameters must use the default expression, not a zero-fill.
+#
+# Surface bug (pre-fix): greet("hi") with `count: i64 = 3` returned 100
+# (count zero-filled), not 103. The HIR function *type* carries only parameter
+# TypeIds, not the default exprs, so the call site never saw the default.
+#
+# Fixed by capturing parameter defaults during module lowering
+# (Lowerer.fn_param_defaults, via collect_fn_param_defaults) and filling omitted
+# trailing CONSTANT defaults in lower_call's regular-call path. Verified on the
+# run path: greet("hi")=103, multi(1)=31, etc.
+#
+# tag: unit
+
+fn greet(name: text, count: i64 = 3) -> i64:
+    return count + 100
+
+fn multi(a: i64, b: i64 = 10, c: i64 = 20) -> i64:
+    return a + b + c
+
+fn add(a: i64, b: i64) -> i64:
+    return a + b
+
+describe "M12 3b: default-param call-site fill":
+    it "fills a single omitted trailing default":
+        expect greet("hi") == 103
+
+    it "keeps explicit trailing args":
+        expect greet("hi", 5) == 105
+
+    it "fills both omitted defaults":
+        expect multi(1) == 31
+
+    it "partial fill: one explicit arg, one defaulted":
+        expect multi(1, 2) == 23
+
+    it "all explicit args unchanged":
+        expect multi(1, 2, 3) == 6
+
+    it "no-default function is unaffected":
+        expect add(2, 3) == 5

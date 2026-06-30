@@ -1,0 +1,77 @@
+use std.gc_async_mut.svllm.model_executor.model_loader.loader.{LoaderError, load_model_from_pack_streamed}
+use std.gc_async_mut.svllm.model_executor.model_loader.transport.{load_model_from_pack_via, mem_nvfs_image}
+
+fn digest64() -> text:
+    "0000000000000000000000000000000000000000000000000000000000000000"
+
+fn manifest_one_chunk() -> text:
+    "{\"schema_version\":0,\"model_id\":\"tiny\",\"revision\":\"r1\",\"preferred_chunk_bytes\":8,\"digest_algo\":\"sha256\",\"chunks\":[{\"id\":0,\"relative_path\":\"data-000.bin\",\"byte_len\":4,\"digest_hex\":\"" + digest64() + "\"}],\"tensors\":[{\"name\":\"tok_embeddings.weight\",\"dtype\":\"F32\",\"shape\":[1],\"chunk_id\":0,\"offset_in_chunk\":0,\"byte_len\":4}]}"
+
+fn manifest_two_chunks() -> text:
+    "{\"schema_version\":0,\"model_id\":\"tiny\",\"revision\":\"r1\",\"preferred_chunk_bytes\":2,\"digest_algo\":\"sha256\",\"chunks\":[{\"id\":0,\"relative_path\":\"data-000.bin\",\"byte_len\":2,\"digest_hex\":\"" + digest64() + "\"},{\"id\":1,\"relative_path\":\"data-001.bin\",\"byte_len\":2,\"digest_hex\":\"" + digest64() + "\"}],\"tensors\":[{\"name\":\"split.weight\",\"dtype\":\"F32\",\"shape\":[1],\"chunk_id\":0,\"offset_in_chunk\":0,\"byte_len\":4}]}"
+
+fn bytes4() -> [u8]:
+    var out: [u8] = []
+    out.push(0x10 as u8)
+    out.push(0x20 as u8)
+    out.push(0x30 as u8)
+    out.push(0x40 as u8)
+    out
+
+fn bytes2(a: u8, b: u8) -> [u8]:
+    var out: [u8] = []
+    out.push(a)
+    out.push(b)
+    out
+
+fn loader_error_status(error: LoaderError) -> text:
+    match error:
+        LoaderError.PackRootNotFound => "missing_root"
+        LoaderError.ManifestInvalid => "invalid_manifest"
+        LoaderError.ChunkOpenFailed => "chunk_error"
+        LoaderError.TensorNotFound => "tensor_not_found"
+        LoaderError.TensorRangeInvalid => "tensor_range_invalid"
+        LoaderError.NvfsUnavailable => "nvfs_unavailable"
+        LoaderError.Unimplemented => "unimplemented"
+
+fn streamed_status(manifest_text: text, chunks: [[u8]]) -> text:
+    match load_model_from_pack_streamed("/pack", manifest_text, 2, chunks):
+        Ok(result) => result.pack.model_id + ":" + result.pack.chunk_count().to_text() + ":" + result.pack.tensor_count().to_text()
+        Err(e) => loader_error_status(e)
+
+fn via_status(manifest_text: text, chunk_paths: [text], chunks: [[u8]]) -> text:
+    val client = mem_nvfs_image("/pack", manifest_text, chunk_paths, chunks)
+    match load_model_from_pack_via(client, "/pack", 2):
+        Ok(result) => result.pack.model_id + ":" + result.pack.chunk_count().to_text() + ":" + result.pack.tensor_count().to_text()
+        Err(e) => loader_error_status(e)
+
+describe "svLLM memory NVFS streaming transport":
+    it "streams a manifest and chunk bytes through the restored loader entry":
+        var chunks: [[u8]] = []
+        chunks.push(bytes4())
+        expect(streamed_status(manifest_one_chunk(), chunks)).to_equal("tiny:1:1")
+
+    it "streams a pack image through the memory NVFS transport":
+        var paths: [text] = []
+        paths.push("data-000.bin")
+        var chunks: [[u8]] = []
+        chunks.push(bytes4())
+        expect(via_status(manifest_one_chunk(), paths, chunks)).to_equal("tiny:1:1")
+
+    it "maps missing transport chunks to chunk_error":
+        var paths: [text] = []
+        paths.push("other.bin")
+        var chunks: [[u8]] = []
+        chunks.push(bytes4())
+        expect(via_status(manifest_one_chunk(), paths, chunks)).to_equal("chunk_error")
+
+    it "maps short streamed chunk data to chunk_error":
+        var chunks: [[u8]] = []
+        chunks.push(bytes2(0x10 as u8, 0x20 as u8))
+        expect(streamed_status(manifest_one_chunk(), chunks)).to_equal("chunk_error")
+
+    it "validates split tensor chunks through the streamed path":
+        var chunks: [[u8]] = []
+        chunks.push(bytes2(0x10 as u8, 0x20 as u8))
+        chunks.push(bytes2(0x30 as u8, 0x40 as u8))
+        expect(streamed_status(manifest_two_chunks(), chunks)).to_equal("tiny:2:1")

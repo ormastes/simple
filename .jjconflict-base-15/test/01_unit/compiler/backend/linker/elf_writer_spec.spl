@@ -1,0 +1,305 @@
+# ELF Writer Unit Tests
+#
+# Tests for elf_writer.spl: config constructors, empty object emission,
+# section/symbol/relocation writing, and round-trip through elf_parse_object.
+#
+# @cover src/compiler/70.backend/linker/elf_writer.spl
+
+use compiler.backend.linker.elf_writer.{
+    ElfWriterSection, ElfWriterSymbol, ElfWriterReloc, ElfWriterConfig,
+    elf_write_object, elf_writer_config_x86_64, elf_writer_config_aarch64, elf_writer_config_riscv64
+}
+use compiler.backend.linker.elf_parser.{
+    elf_parse_object, ElfObject, ElfSymbol, ElfRelocation,
+    elf_symbol_binding, elf_reloc_sym, elf_reloc_type,
+    ELF64_SYM_SIZE, ELF64_RELA_SIZE, SHT_RELA, STB_LOCAL, STB_GLOBAL
+}
+use compiler.backend.linker.elf_inspect.{
+    ELF64_HEADER_SIZE, ELF64_SHDR_SIZE,
+    SHT_PROGBITS, SHT_SYMTAB, SHT_STRTAB, SHT_NULL,
+    ET_REL, EM_X86_64, EM_AARCH64
+}
+
+# ============================================================================
+# Helper: read a 16-bit little-endian value from a byte array
+# (elf_read_u16_le is not exported from elf_inspect)
+# ============================================================================
+
+fn read_u16_le(bytes: [i64], offset: i64) -> i64:
+    """Read a 16-bit little-endian value from bytes at offset."""
+    (bytes[offset] & 0xff) | ((bytes[offset + 1] & 0xff) << 8)
+
+# ============================================================================
+# Helper: check if any section in the parsed object has the given sh_type
+# ============================================================================
+
+fn has_section_type(obj: ElfObject, sh_type: i64) -> bool:
+    """Return true if the parsed object has at least one section with the given type."""
+    var i: i64 = 0
+    while i < obj.sections.len():
+        if obj.sections[i].sh_type == sh_type:
+            return true
+        i = i + 1
+    false
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+describe "elf_writer - config constructors":
+    it "x86_64 config has e_machine 62":
+        val cfg = elf_writer_config_x86_64()
+        expect(cfg.e_machine).to_equal(62)
+
+    it "aarch64 config has e_machine 183":
+        val cfg = elf_writer_config_aarch64()
+        expect(cfg.e_machine).to_equal(183)
+
+    it "riscv64 config has e_machine 243":
+        val cfg = elf_writer_config_riscv64()
+        expect(cfg.e_machine).to_equal(243)
+
+describe "elf_writer - empty object":
+    it "produces at least ELF64_HEADER_SIZE bytes":
+        val cfg = elf_writer_config_x86_64()
+        val sections: [ElfWriterSection] = []
+        val symbols: [ElfWriterSymbol] = []
+        val relocs: [ElfWriterReloc] = []
+        val bytes = elf_write_object(cfg, sections, symbols, relocs)
+        expect(bytes.len() >= ELF64_HEADER_SIZE).to_equal(true)
+
+    it "starts with ELF magic bytes":
+        val cfg = elf_writer_config_x86_64()
+        val bytes = elf_write_object(cfg, [], [], [])
+        expect(bytes[0]).to_equal(0x7f)
+        expect(bytes[1]).to_equal(0x45)
+        expect(bytes[2]).to_equal(0x4c)
+        expect(bytes[3]).to_equal(0x46)
+
+    it "has e_type ET_REL at offset 16":
+        val cfg = elf_writer_config_x86_64()
+        val bytes = elf_write_object(cfg, [], [], [])
+        val e_type = read_u16_le(bytes, 16)
+        expect(e_type).to_equal(ET_REL)
+
+    it "has e_machine EM_X86_64 at offset 18":
+        val cfg = elf_writer_config_x86_64()
+        val bytes = elf_write_object(cfg, [], [], [])
+        val e_machine = read_u16_le(bytes, 18)
+        expect(e_machine).to_equal(EM_X86_64)
+
+    it "round-trips through elf_parse_object":
+        val cfg = elf_writer_config_x86_64()
+        val bytes = elf_write_object(cfg, [], [], [])
+        val result = elf_parse_object(bytes)
+        expect(result.is_ok()).to_equal(true)
+
+describe "elf_writer - single .text section":
+    it "round-trips with a .text section":
+        val cfg = elf_writer_config_x86_64()
+        val text_sec = ElfWriterSection(
+            name: ".text",
+            sh_type: 1,
+            sh_flags: 6,
+            data: [0xcc, 0x90, 0xc3, 0x00],
+            sh_link: 0,
+            sh_info: 0
+        )
+        val bytes = elf_write_object(cfg, [text_sec], [], [])
+        val result = elf_parse_object(bytes)
+        expect(result.is_ok()).to_equal(true)
+        val obj = result.unwrap()
+        # Expect at least 5 sections: null + .text + .shstrtab + .strtab + .symtab
+        expect(obj.sections.len() >= 4).to_equal(true)
+
+    it "contains a SHT_PROGBITS section":
+        val cfg = elf_writer_config_x86_64()
+        val text_sec = ElfWriterSection(
+            name: ".text",
+            sh_type: 1,
+            sh_flags: 6,
+            data: [0xcc, 0x90, 0xc3, 0x00],
+            sh_link: 0,
+            sh_info: 0
+        )
+        val bytes = elf_write_object(cfg, [text_sec], [], [])
+        val result = elf_parse_object(bytes)
+        val obj = result.unwrap()
+        expect(has_section_type(obj, SHT_PROGBITS)).to_equal(true)
+
+describe "elf_writer - symbols with locals before globals":
+    it "emits at least 3 symbols (null + local + global)":
+        val cfg = elf_writer_config_x86_64()
+        val text_sec = ElfWriterSection(
+            name: ".text",
+            sh_type: 1,
+            sh_flags: 6,
+            data: [0xcc],
+            sh_link: 0,
+            sh_info: 0
+        )
+        val local_sym = ElfWriterSymbol(
+            name: "local_var",
+            st_info: 0x00,
+            st_other: 0,
+            st_shndx: 1,
+            st_value: 0,
+            st_size: 0
+        )
+        val global_sym = ElfWriterSymbol(
+            name: "global_func",
+            st_info: 0x10,
+            st_other: 0,
+            st_shndx: 1,
+            st_value: 0,
+            st_size: 0
+        )
+        val bytes = elf_write_object(cfg, [text_sec], [local_sym, global_sym], [])
+        val result = elf_parse_object(bytes)
+        expect(result.is_ok()).to_equal(true)
+        val obj = result.unwrap()
+        expect(obj.symbols.len() >= 3).to_equal(true)
+
+    it "places local binding before global binding":
+        val cfg = elf_writer_config_x86_64()
+        val text_sec = ElfWriterSection(
+            name: ".text",
+            sh_type: 1,
+            sh_flags: 6,
+            data: [0xcc],
+            sh_link: 0,
+            sh_info: 0
+        )
+        # Provide global first, local second -- writer should reorder
+        val global_sym = ElfWriterSymbol(
+            name: "global_func",
+            st_info: 0x10,
+            st_other: 0,
+            st_shndx: 1,
+            st_value: 0,
+            st_size: 0
+        )
+        val local_sym = ElfWriterSymbol(
+            name: "local_var",
+            st_info: 0x00,
+            st_other: 0,
+            st_shndx: 1,
+            st_value: 0,
+            st_size: 0
+        )
+        val bytes = elf_write_object(cfg, [text_sec], [global_sym, local_sym], [])
+        val result = elf_parse_object(bytes)
+        val obj = result.unwrap()
+        # Symbol 0 is null; symbol 1 should be the local (binding == 0)
+        val first_sym = obj.symbols[1]
+        expect(elf_symbol_binding(first_sym)).to_equal(STB_LOCAL)
+
+describe "elf_writer - round-trip with relocations":
+    it "produces at least one relocation":
+        val cfg = elf_writer_config_x86_64()
+        val text_sec = ElfWriterSection(
+            name: ".text",
+            sh_type: 1,
+            sh_flags: 6,
+            data: [0xe8, 0x00, 0x00, 0x00, 0x00],
+            sh_link: 0,
+            sh_info: 0
+        )
+        val sym = ElfWriterSymbol(
+            name: "my_func",
+            st_info: 0x12,
+            st_other: 0,
+            st_shndx: 1,
+            st_value: 0,
+            st_size: 0
+        )
+        # R_X86_64_PC32 = 2, sym_idx = 0 => r_info = (0 << 32) | 2 = 2
+        val reloc = ElfWriterReloc(
+            r_offset: 1,
+            r_info: 2,
+            r_addend: -4,
+            section_name: ".text"
+        )
+        val bytes = elf_write_object(cfg, [text_sec], [sym], [reloc])
+        val result = elf_parse_object(bytes)
+        expect(result.is_ok()).to_equal(true)
+        val obj = result.unwrap()
+        expect(obj.relocations.len() >= 1).to_equal(true)
+
+    it "preserves relocation r_offset":
+        val cfg = elf_writer_config_x86_64()
+        val text_sec = ElfWriterSection(
+            name: ".text",
+            sh_type: 1,
+            sh_flags: 6,
+            data: [0xe8, 0x00, 0x00, 0x00, 0x00],
+            sh_link: 0,
+            sh_info: 0
+        )
+        val sym = ElfWriterSymbol(
+            name: "my_func",
+            st_info: 0x12,
+            st_other: 0,
+            st_shndx: 1,
+            st_value: 0,
+            st_size: 0
+        )
+        val reloc = ElfWriterReloc(
+            r_offset: 1,
+            r_info: 2,
+            r_addend: -4,
+            section_name: ".text"
+        )
+        val bytes = elf_write_object(cfg, [text_sec], [sym], [reloc])
+        val obj = elf_parse_object(bytes).unwrap()
+        val first_reloc = obj.relocations[0]
+        expect(first_reloc.r_offset).to_equal(1)
+
+    it "preserves relocation type through round-trip":
+        val cfg = elf_writer_config_x86_64()
+        val text_sec = ElfWriterSection(
+            name: ".text",
+            sh_type: 1,
+            sh_flags: 6,
+            data: [0xe8, 0x00, 0x00, 0x00, 0x00],
+            sh_link: 0,
+            sh_info: 0
+        )
+        val sym = ElfWriterSymbol(
+            name: "my_func",
+            st_info: 0x12,
+            st_other: 0,
+            st_shndx: 1,
+            st_value: 0,
+            st_size: 0
+        )
+        val reloc = ElfWriterReloc(
+            r_offset: 0,
+            r_info: 2,
+            r_addend: -4,
+            section_name: ".text"
+        )
+        val bytes = elf_write_object(cfg, [text_sec], [sym], [reloc])
+        val obj = elf_parse_object(bytes).unwrap()
+        val first_reloc = obj.relocations[0]
+        # reloc type should be R_X86_64_PC32 = 2
+        expect(elf_reloc_type(first_reloc)).to_equal(2)
+
+describe "elf_writer - machine type in header":
+    it "aarch64 config writes e_machine 183":
+        val cfg = elf_writer_config_aarch64()
+        val bytes = elf_write_object(cfg, [], [], [])
+        val e_machine = read_u16_le(bytes, 18)
+        expect(e_machine).to_equal(183)
+
+    it "x86_64 header has correct e_ehsize at offset 52":
+        val cfg = elf_writer_config_x86_64()
+        val bytes = elf_write_object(cfg, [], [], [])
+        val e_ehsize = read_u16_le(bytes, 52)
+        expect(e_ehsize).to_equal(ELF64_HEADER_SIZE)
+
+    it "section header entry size at offset 58 equals ELF64_SHDR_SIZE":
+        val cfg = elf_writer_config_x86_64()
+        val bytes = elf_write_object(cfg, [], [], [])
+        val e_shentsize = read_u16_le(bytes, 58)
+        expect(e_shentsize).to_equal(ELF64_SHDR_SIZE)

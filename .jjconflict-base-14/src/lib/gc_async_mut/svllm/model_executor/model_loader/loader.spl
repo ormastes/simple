@@ -1,0 +1,263 @@
+# @gc — module uses GC runtime
+#
+# Top-level loader. Orchestrates:
+#   1. open the pack root on the NvfsClient
+#   2. read + parse manifest.sdn
+#   3. build a TensorPack descriptor
+#   4. return it for the streamer (A3) to consume
+#
+# The current implementation validates canonical manifests, checks chunk files,
+# reads tensor byte spans, and returns stream plans. It still deliberately does
+# not claim async NVFS scheduling or device staging.
+
+use std.gc_async_mut.svllm.model_executor.model_loader.tensor_pack.{TensorPack}
+use std.gc_async_mut.svllm.model_executor.model_loader.manifest.{ManifestError, parse_manifest, build_tensor_pack}
+use std.gc_async_mut.svllm.model_executor.model_loader.streamer.{StreamError, plan_stream, stream_pack}
+use std.io_runtime.{file_exists, read_file, file_read_bytes, file_size, file_hash_sha256}
+
+enum LoaderError:
+    PackRootNotFound
+    ManifestInvalid
+    ChunkOpenFailed
+    TensorNotFound
+    TensorRangeInvalid
+    NvfsUnavailable
+    Unimplemented
+
+# Result of a successful load. For A1 this is just the pack; A3 adds the
+# streamer handle and staging-pool references.
+struct LoadResult:
+    pack: TensorPack
+
+struct TensorStreamSegment:
+    chunk_id: i32
+    relative_path: text
+    offset_in_chunk: i64
+    byte_len: i64
+    tensor_offset: i64
+
+struct TensorStreamPlan:
+    tensor_name: text
+    total_byte_len: i64
+    segment_count: i64
+    segments: [TensorStreamSegment]
+    pin_extents_requested: bool
+    device_staging_requested: bool
+    execution_status: text
+
+# Parse already-read manifest text. This keeps pack validation testable without
+# direct filesystem access or a live NVFS client.
+fn load_model_from_manifest_text(pack_root: text, manifest_text: text) -> Result<LoadResult, LoaderError>:
+    if pack_root.trim() == "":
+        return Err(LoaderError.PackRootNotFound)
+    match parse_manifest(manifest_text):
+        Err(_):
+            Err(LoaderError.ManifestInvalid)
+        Ok(manifest):
+            match build_tensor_pack(pack_root, manifest):
+                Err(_):
+                    Err(LoaderError.ManifestInvalid)
+                Ok(pack):
+                    Ok(LoadResult(pack: pack))
+
+fn _stream_error_to_loader_error(error: StreamError) -> LoaderError:
+    match error:
+        StreamError.ChunkDataMissing => LoaderError.ChunkOpenFailed
+        StreamError.ChunkTooShort => LoaderError.ChunkOpenFailed
+        StreamError.TensorOutOfBounds => LoaderError.TensorRangeInvalid
+        StreamError.ChunkNotFound => LoaderError.TensorRangeInvalid
+
+fn load_model_from_pack_streamed(pack_root: text, manifest_text: text, granule: i64, chunk_data: [[u8]]) -> Result<LoadResult, LoaderError>:
+    match load_model_from_manifest_text(pack_root, manifest_text):
+        Err(e):
+            Err(e)
+        Ok(result):
+            val plan = plan_stream(result.pack, granule)
+            match stream_pack(result.pack, chunk_data):
+                Err(e):
+                    Err(_stream_error_to_loader_error(e))
+                Ok(streamed):
+                    if streamed.bytes_streamed != plan.total_bytes:
+                        return Err(LoaderError.ChunkOpenFailed)
+                    Ok(result)
+
+fn _manifest_path(pack_root: text) -> text:
+    if pack_root.ends_with("/"):
+        return pack_root + "manifest.sdn"
+    pack_root + "/manifest.sdn"
+
+fn _join_pack_path(pack_root: text, relative_path: text) -> text:
+    if pack_root.ends_with("/"):
+        return pack_root + relative_path
+    pack_root + "/" + relative_path
+
+fn _verify_pack_chunks(pack: TensorPack) -> Result<(), LoaderError>:
+    var i = 0
+    while i < pack.chunks.len():
+        val chunk = pack.chunks[i]
+        val path = _join_pack_path(pack.pack_root, chunk.relative_path)
+        if not file_exists(path):
+            return Err(LoaderError.ChunkOpenFailed)
+        if file_size(path) != chunk.byte_len:
+            return Err(LoaderError.ChunkOpenFailed)
+        if chunk.digest_hex != "":
+            if file_hash_sha256(path) != chunk.digest_hex:
+                return Err(LoaderError.ChunkOpenFailed)
+        i = i + 1
+    Ok(())
+
+fn _slice_bytes(bytes: [u8], offset: i64, byte_len: i64) -> Result<[u8], LoaderError>:
+    if offset < 0 or byte_len < 0:
+        return Err(LoaderError.TensorRangeInvalid)
+    if offset + byte_len > bytes.len():
+        return Err(LoaderError.TensorRangeInvalid)
+    var out: [u8] = []
+    var i = offset
+    while i < offset + byte_len:
+        out.push(bytes[i])
+        i = i + 1
+    Ok(out)
+
+fn _append_bytes(dst: [u8], src: [u8]) -> [u8]:
+    var out = dst
+    var i = 0
+    while i < src.len():
+        out.push(src[i])
+        i = i + 1
+    out
+
+fn _chunk_index(pack: TensorPack, chunk_id: i32) -> Result<i64, LoaderError>:
+    var i = 0
+    while i < pack.chunks.len():
+        if pack.chunks[i].id == chunk_id:
+            return Ok(i)
+        i = i + 1
+    Err(LoaderError.TensorRangeInvalid)
+
+fn _append_segment(dst: [TensorStreamSegment], segment: TensorStreamSegment) -> [TensorStreamSegment]:
+    var out = dst
+    out.push(segment)
+    out
+
+fn _build_tensor_stream_plan(result: LoadResult, tensor_name: text, pin_extents: bool, device_staging: bool) -> Result<TensorStreamPlan, LoaderError>:
+    val tensor = result.pack.find_tensor(tensor_name)
+    if tensor.name == "":
+        return Err(LoaderError.TensorNotFound)
+    if tensor.offset_in_chunk < 0 or tensor.byte_len < 0:
+        return Err(LoaderError.TensorRangeInvalid)
+    var chunk_index = _chunk_index(result.pack, tensor.chunk_id)?
+    var chunk_offset = tensor.offset_in_chunk
+    var remaining = tensor.byte_len
+    var tensor_offset: i64 = 0
+    var segments: [TensorStreamSegment] = []
+    while remaining > 0:
+        if chunk_index >= result.pack.chunks.len():
+            return Err(LoaderError.TensorRangeInvalid)
+        val chunk = result.pack.chunks[chunk_index]
+        if chunk_offset < 0 or chunk_offset > chunk.byte_len:
+            return Err(LoaderError.TensorRangeInvalid)
+        val available = chunk.byte_len - chunk_offset
+        if available <= 0:
+            return Err(LoaderError.TensorRangeInvalid)
+        var take = remaining
+        if take > available:
+            take = available
+        segments = _append_segment(segments, TensorStreamSegment(
+            chunk_id: chunk.id,
+            relative_path: chunk.relative_path,
+            offset_in_chunk: chunk_offset,
+            byte_len: take,
+            tensor_offset: tensor_offset
+        ))
+        remaining = remaining - take
+        tensor_offset = tensor_offset + take
+        chunk_index = chunk_index + 1
+        chunk_offset = 0
+    Ok(TensorStreamPlan(
+        tensor_name: tensor.name,
+        total_byte_len: tensor.byte_len,
+        segment_count: segments.len(),
+        segments: segments,
+        pin_extents_requested: pin_extents,
+        device_staging_requested: device_staging,
+        execution_status: "plan_only_not_scheduled"
+    ))
+
+fn _read_tensor_span_bytes(result: LoadResult, tensor_name: text) -> Result<[u8], LoaderError>:
+    val tensor = result.pack.find_tensor(tensor_name)
+    if tensor.name == "":
+        return Err(LoaderError.TensorNotFound)
+    if tensor.offset_in_chunk < 0 or tensor.byte_len < 0:
+        return Err(LoaderError.TensorRangeInvalid)
+    var chunk_index = _chunk_index(result.pack, tensor.chunk_id)?
+    var chunk_offset = tensor.offset_in_chunk
+    var remaining = tensor.byte_len
+    var out: [u8] = []
+    while remaining > 0:
+        if chunk_index >= result.pack.chunks.len():
+            return Err(LoaderError.TensorRangeInvalid)
+        val chunk = result.pack.chunks[chunk_index]
+        val chunk_path = _join_pack_path(result.pack.pack_root, chunk.relative_path)
+        if not file_exists(chunk_path):
+            return Err(LoaderError.ChunkOpenFailed)
+        val chunk_bytes = file_read_bytes(chunk_path)
+        if chunk_offset < 0 or chunk_offset > chunk_bytes.len():
+            return Err(LoaderError.TensorRangeInvalid)
+        val available = chunk_bytes.len() - chunk_offset
+        if available <= 0:
+            return Err(LoaderError.TensorRangeInvalid)
+        var take = remaining
+        if take > available:
+            take = available
+        out = _append_bytes(out, _slice_bytes(chunk_bytes, chunk_offset, take)?)
+        remaining = remaining - take
+        chunk_index = chunk_index + 1
+        chunk_offset = 0
+    Ok(out)
+
+# Main entry point. Reads the canonical manifest from a pack root, then reuses
+# the already-read manifest loader. Chunk byte reads remain a later streamer
+# concern; this path validates pack metadata without claiming tensor streaming.
+fn load_model_from_pack(pack_root: text) -> Result<LoadResult, LoaderError>:
+    if pack_root.trim() == "":
+        return Err(LoaderError.PackRootNotFound)
+    val manifest_path = _manifest_path(pack_root)
+    if not file_exists(manifest_path):
+        return Err(LoaderError.ManifestInvalid)
+    match load_model_from_manifest_text(pack_root, read_file(manifest_path)):
+        Err(e):
+            Err(e)
+        Ok(result):
+            match _verify_pack_chunks(result.pack):
+                Err(e):
+                    Err(e)
+                Ok(_):
+                    Ok(result)
+
+# Load and return the declared byte range for a single tensor. The manifest
+# records the starting chunk, start offset, and total byte length; this reader
+# continues through following chunks when that span crosses a chunk boundary.
+# It still does not claim async NVFS scheduling or device staging.
+fn load_tensor_bytes_from_pack(pack_root: text, tensor_name: text) -> Result<[u8], LoaderError>:
+    match load_model_from_pack(pack_root):
+        Err(e):
+            Err(e)
+        Ok(result):
+            _read_tensor_span_bytes(result, tensor_name)
+
+# Build the streamer-facing read plan for a named tensor. This validates pack
+# metadata and returns ordered chunk ranges plus pin/device-staging intent. It
+# deliberately does not issue NvfsClient reads or allocate device buffers.
+fn load_tensor_stream_plan_from_pack(pack_root: text, tensor_name: text, pin_extents: bool, device_staging: bool) -> Result<TensorStreamPlan, LoaderError>:
+    match load_model_from_pack(pack_root):
+        Err(e):
+            Err(e)
+        Ok(result):
+            _build_tensor_stream_plan(result, tensor_name, pin_extents, device_staging)
+
+fn load_tensor_stream_plan_from_manifest_text(pack_root: text, manifest_text: text, tensor_name: text, pin_extents: bool, device_staging: bool) -> Result<TensorStreamPlan, LoaderError>:
+    match load_model_from_manifest_text(pack_root, manifest_text):
+        Err(e):
+            Err(e)
+        Ok(result):
+            _build_tensor_stream_plan(result, tensor_name, pin_extents, device_staging)

@@ -1,0 +1,393 @@
+class SessionId:
+    session_name: text
+    created_at: int
+    is_attached: bool
+    session_index: int
+
+    me matches_name(name: text) -> bool:
+        return self.session_name == name
+
+    me to_text() -> text:
+        return "Session(" + self.session_name + "," + self.session_index.to_text() + ")"
+
+    static fn create(name: text, idx: int) -> SessionId:
+        return SessionId(session_name: name, created_at: 0, is_attached: false, session_index: idx)
+
+class WindowId:
+    window_index: int
+    title: text
+    is_active: bool
+    pane_count: int
+
+    me activate() -> WindowId:
+        return WindowId(window_index: self.window_index, title: self.title, is_active: true, pane_count: self.pane_count)
+
+    me deactivate() -> WindowId:
+        return WindowId(window_index: self.window_index, title: self.title, is_active: false, pane_count: self.pane_count)
+
+    static fn create(idx: int, title: text) -> WindowId:
+        return WindowId(window_index: idx, title: title, is_active: false, pane_count: 0)
+
+class PaneId:
+    pane_index: int
+    width: int
+    height: int
+    scroll_pos: int
+
+    me area() -> int:
+        return self.width * self.height
+
+    me resize(w: int, h: int) -> PaneId:
+        return PaneId(pane_index: self.pane_index, width: w, height: h, scroll_pos: self.scroll_pos)
+
+    static fn create(idx: int, w: int, h: int) -> PaneId:
+        return PaneId(pane_index: idx, width: w, height: h, scroll_pos: 0)
+
+class SessionState:
+    sid: SessionId
+    f0_win: WindowId
+    f1_win: WindowId
+    f2_win: WindowId
+    active_count: int
+
+    me active_window() -> WindowId:
+        return self.f0_win
+
+    me is_empty() -> bool:
+        return self.active_count == 0
+
+    static fn create(s: SessionId) -> SessionState:
+        val w = WindowId.create(0, "")
+        return SessionState(sid: s, f0_win: w, f1_win: w, f2_win: w, active_count: 0)
+
+class LayoutSplit:
+    direction: text
+    ratio: int
+    split_id: int
+    depth: int
+
+    me is_horizontal() -> bool:
+        return self.direction == "horizontal"
+
+    me invert() -> LayoutSplit:
+        var new_dir = "vertical"
+        if self.direction == "vertical":
+            new_dir = "horizontal"
+        return LayoutSplit(direction: new_dir, ratio: self.ratio, split_id: self.split_id, depth: self.depth)
+
+    static fn horizontal(id: int, r: int) -> LayoutSplit:
+        return LayoutSplit(direction: "horizontal", ratio: r, split_id: id, depth: 0)
+
+    static fn vertical(id: int, r: int) -> LayoutSplit:
+        return LayoutSplit(direction: "vertical", ratio: r, split_id: id, depth: 0)
+
+class LayoutNode:
+    node_id: int
+    pane_index: int
+    split: LayoutSplit
+    is_leaf: bool
+
+    me has_pane() -> bool:
+        return self.is_leaf
+
+    static fn leaf(id: int, pane_idx: int) -> LayoutNode:
+        val s = LayoutSplit.horizontal(0, 50)
+        return LayoutNode(node_id: id, pane_index: pane_idx, split: s, is_leaf: true)
+
+    static fn internal(id: int, s: LayoutSplit) -> LayoutNode:
+        return LayoutNode(node_id: id, pane_index: -1, split: s, is_leaf: false)
+
+class PtyConfig:
+    shell_path: text
+    working_dir: text
+    rows: int
+    cols: int
+    env_term: text
+
+    me terminal_size() -> int:
+        return self.rows * self.cols
+
+    me with_size(r: int, c: int) -> PtyConfig:
+        return PtyConfig(shell_path: self.shell_path, working_dir: self.working_dir, rows: r, cols: c, env_term: self.env_term)
+
+    static fn default_config() -> PtyConfig:
+        return PtyConfig(shell_path: "/bin/sh", working_dir: "/", rows: 24, cols: 80, env_term: "xterm-256color")
+
+class OutputBuffer:
+    f0_line: text
+    f1_line: text
+    f2_line: text
+    f3_line: text
+    line_count: int
+    max_lines: int
+
+    me append_line(line: text) -> OutputBuffer:
+        if self.line_count == 0:
+            return OutputBuffer(f0_line: line, f1_line: self.f1_line, f2_line: self.f2_line, f3_line: self.f3_line, line_count: 1, max_lines: self.max_lines)
+        if self.line_count == 1:
+            return OutputBuffer(f0_line: self.f0_line, f1_line: line, f2_line: self.f2_line, f3_line: self.f3_line, line_count: 2, max_lines: self.max_lines)
+        if self.line_count == 2:
+            return OutputBuffer(f0_line: self.f0_line, f1_line: self.f1_line, f2_line: line, f3_line: self.f3_line, line_count: 3, max_lines: self.max_lines)
+        return OutputBuffer(f0_line: self.f0_line, f1_line: self.f1_line, f2_line: self.f2_line, f3_line: line, line_count: 4, max_lines: self.max_lines)
+
+    me get_line(idx: int) -> text:
+        if idx == 0:
+            return self.f0_line
+        if idx == 1:
+            return self.f1_line
+        if idx == 2:
+            return self.f2_line
+        return self.f3_line
+
+    me is_full() -> bool:
+        return self.line_count >= self.max_lines
+
+    static fn create(max: int) -> OutputBuffer:
+        return OutputBuffer(f0_line: "", f1_line: "", f2_line: "", f3_line: "", line_count: 0, max_lines: max)
+
+class PaneBackend:
+    pane_id: int
+    config: PtyConfig
+    buffer: OutputBuffer
+    is_running: bool
+    exit_code: int
+
+    me stop(code: int) -> PaneBackend:
+        return PaneBackend(pane_id: self.pane_id, config: self.config, buffer: self.buffer, is_running: false, exit_code: code)
+
+    me feed_output(line: text) -> PaneBackend:
+        val new_buf = self.buffer.append_line(line)
+        return PaneBackend(pane_id: self.pane_id, config: self.config, buffer: new_buf, is_running: self.is_running, exit_code: self.exit_code)
+
+    static fn create(pid: int, cfg: PtyConfig) -> PaneBackend:
+        val buf = OutputBuffer.create(4)
+        return PaneBackend(pane_id: pid, config: cfg, buffer: buf, is_running: true, exit_code: 0)
+
+class SmuxCommand:
+    command: text
+    target_name: text
+    arg_width: int
+    arg_height: int
+    arg_direction: text
+
+    me is_session_cmd() -> bool:
+        if self.command == "new-session":
+            return true
+        if self.command == "attach":
+            return true
+        return false
+
+    me is_pane_cmd() -> bool:
+        if self.command == "split":
+            return true
+        if self.command == "capture":
+            return true
+        return false
+
+    static fn new_session(name: text) -> SmuxCommand:
+        return SmuxCommand(command: "new-session", target_name: name, arg_width: 0, arg_height: 0, arg_direction: "")
+
+    static fn attach(name: text) -> SmuxCommand:
+        return SmuxCommand(command: "attach", target_name: name, arg_width: 0, arg_height: 0, arg_direction: "")
+
+    static fn split(dir: text) -> SmuxCommand:
+        return SmuxCommand(command: "split", target_name: "", arg_width: 0, arg_height: 0, arg_direction: dir)
+
+    static fn capture(target: text) -> SmuxCommand:
+        return SmuxCommand(command: "capture", target_name: target, arg_width: 0, arg_height: 0, arg_direction: "")
+
+class SmuxResponse:
+    success: bool
+    message: text
+    result_data: text
+    error_code: int
+
+    me is_error() -> bool:
+        return self.success == false
+
+    static fn ok(msg: text) -> SmuxResponse:
+        return SmuxResponse(success: true, message: msg, result_data: "", error_code: 0)
+
+    static fn error(msg: text, code: int) -> SmuxResponse:
+        return SmuxResponse(success: false, message: msg, result_data: "", error_code: code)
+
+fn test_session_create():
+    val s = SessionId.create("main", 0)
+    if s.session_name == "main":
+        print("PASS: test_session_create")
+    else:
+        print("FAIL: test_session_create")
+
+fn test_session_match():
+    val s = SessionId.create("work", 1)
+    if s.matches_name("work"):
+        print("PASS: test_session_match")
+    else:
+        print("FAIL: test_session_match")
+
+fn test_session_no_match():
+    val s = SessionId.create("work", 1)
+    if s.matches_name("other") == false:
+        print("PASS: test_session_no_match")
+    else:
+        print("FAIL: test_session_no_match")
+
+fn test_window_create():
+    val w = WindowId.create(2, "editor")
+    if w.window_index == 2:
+        if w.title == "editor":
+            print("PASS: test_window_create")
+            return
+    print("FAIL: test_window_create")
+
+fn test_window_activate():
+    val w = WindowId.create(0, "shell")
+    val a = w.activate()
+    if a.is_active:
+        print("PASS: test_window_activate")
+    else:
+        print("FAIL: test_window_activate")
+
+fn test_window_deactivate():
+    val w = WindowId.create(0, "shell")
+    val a = w.activate()
+    val d = a.deactivate()
+    if d.is_active == false:
+        print("PASS: test_window_deactivate")
+    else:
+        print("FAIL: test_window_deactivate")
+
+fn test_pane_create():
+    val p = PaneId.create(0, 80, 24)
+    if p.width == 80:
+        if p.height == 24:
+            print("PASS: test_pane_create")
+            return
+    print("FAIL: test_pane_create")
+
+fn test_pane_area():
+    val p = PaneId.create(0, 80, 24)
+    val a = p.area()
+    if a == 1920:
+        print("PASS: test_pane_area")
+    else:
+        print("FAIL: test_pane_area")
+
+fn test_pane_resize():
+    val p = PaneId.create(0, 80, 24)
+    val r = p.resize(120, 40)
+    if r.width == 120:
+        if r.height == 40:
+            print("PASS: test_pane_resize")
+            return
+    print("FAIL: test_pane_resize")
+
+fn test_session_state_empty():
+    val s = SessionId.create("main", 0)
+    val ss = SessionState.create(s)
+    if ss.is_empty():
+        print("PASS: test_session_state_empty")
+    else:
+        print("FAIL: test_session_state_empty")
+
+fn test_layout_horizontal():
+    val sp = LayoutSplit.horizontal(1, 50)
+    if sp.direction == "horizontal":
+        print("PASS: test_layout_horizontal")
+    else:
+        print("FAIL: test_layout_horizontal")
+
+fn test_layout_vertical():
+    val sp = LayoutSplit.vertical(2, 30)
+    if sp.direction == "vertical":
+        print("PASS: test_layout_vertical")
+    else:
+        print("FAIL: test_layout_vertical")
+
+fn test_layout_invert():
+    val sp = LayoutSplit.horizontal(1, 50)
+    val inv = sp.invert()
+    if inv.direction == "vertical":
+        print("PASS: test_layout_invert")
+    else:
+        print("FAIL: test_layout_invert")
+
+fn test_layout_leaf():
+    val n = LayoutNode.leaf(1, 0)
+    if n.has_pane():
+        print("PASS: test_layout_leaf")
+    else:
+        print("FAIL: test_layout_leaf")
+
+fn test_layout_internal():
+    val sp = LayoutSplit.vertical(1, 50)
+    val n = LayoutNode.internal(2, sp)
+    if n.has_pane() == false:
+        print("PASS: test_layout_internal")
+    else:
+        print("FAIL: test_layout_internal")
+
+fn test_pty_default():
+    val cfg = PtyConfig.default_config()
+    if cfg.rows == 24:
+        if cfg.cols == 80:
+            print("PASS: test_pty_default")
+            return
+    print("FAIL: test_pty_default")
+
+fn test_pty_resize():
+    val cfg = PtyConfig.default_config()
+    val r = cfg.with_size(40, 120)
+    if r.rows == 40:
+        if r.cols == 120:
+            print("PASS: test_pty_resize")
+            return
+    print("FAIL: test_pty_resize")
+
+fn test_output_buffer():
+    val buf = OutputBuffer.create(4)
+    val b1 = buf.append_line("hello")
+    val line = b1.get_line(0)
+    if line == "hello":
+        print("PASS: test_output_buffer")
+    else:
+        print("FAIL: test_output_buffer")
+
+fn test_backend_stop():
+    val cfg = PtyConfig.default_config()
+    val be = PaneBackend.create(1, cfg)
+    val stopped = be.stop(0)
+    if stopped.is_running == false:
+        print("PASS: test_backend_stop")
+    else:
+        print("FAIL: test_backend_stop")
+
+fn test_command_session():
+    val cmd = SmuxCommand.new_session("dev")
+    if cmd.is_session_cmd():
+        print("PASS: test_command_session")
+    else:
+        print("FAIL: test_command_session")
+
+fn main():
+    test_session_create()
+    test_session_match()
+    test_session_no_match()
+    test_window_create()
+    test_window_activate()
+    test_window_deactivate()
+    test_pane_create()
+    test_pane_area()
+    test_pane_resize()
+    test_session_state_empty()
+    test_layout_horizontal()
+    test_layout_vertical()
+    test_layout_invert()
+    test_layout_leaf()
+    test_layout_internal()
+    test_pty_default()
+    test_pty_resize()
+    test_output_buffer()
+    test_backend_stop()
+    test_command_session()
+    print("DONE")
