@@ -15,12 +15,25 @@
   reclaim_block and exercised by the gc_safety regression; here we prove the placement and
   no-op invariants it relies on.
 
-  Lean core + omega only.
+  GENERATED / MANUAL split (see doc/07_guide/compiler/lean_verification_workflow.md
+  § "Generated-mirror / manual-proof split"). The `gen lean` section below mirrors the
+  page-geometry + L2P model of the Simple code; the MANUAL PROOFS below are hand-written.
+  Lean core + omega only. Verified standalone: `lean Gc.lean`.
 -/
 set_option linter.unusedVariables false
 
+-- BEGIN gen lean: mirror of fw/ftl.spl reclaim_block() geometry + L2P model.
+--   Regenerate when the Simple code changes; defs only, NO proofs here.
+
 -- block index of a physical page (ppn / pages_per_block).
 def ppn_block (p : Int) : Int := p / 64
+
+-- The L2P map and the update used by relocation (same model as Recover.lean).
+def Lmap := Int → Int
+def upd (m : Lmap) (k v : Int) : Lmap := fun x => if k = x then v else m x
+-- END gen lean
+
+-- MANUAL PROOFS (hand-written; stable across a re-mirror of the gen section above).
 
 -- (a) A page allocated in a free block `f` (necessarily ≠ the CLOSED victim block B)
 --     lies outside B: erasing B cannot touch it.
@@ -30,10 +43,6 @@ theorem relocated_outside_victim (f wp B : Int)
   unfold ppn_block
   have hdiv : (f * 64 + wp) / 64 = f := by omega
   rw [hdiv]; exact hfB
-
--- The L2P map and the no-op abort path (same model as Recover.lean).
-def Lmap := Int → Int
-def upd (m : Lmap) (k v : Int) : Lmap := fun x => if k = x then v else m x
 
 -- (a, lifted) After relocating LBA `lba` to a page in free block `f ≠ B`, the LBA maps
 --     outside the victim, so the subsequent erase of B preserves it.

@@ -8,12 +8,24 @@
      `reserve` free blocks back as GC scratch (fw/nvme_types.spl GC_RESERVE = 2);
    * geometry: 64 blocks x 64 pages = 4096 physical pages.
 
-  Lean core + omega only (no mathlib). The constants match the cited Simple sources.
+  GENERATED / MANUAL split (see doc/07_guide/compiler/lean_verification_workflow.md
+  § "Generated-mirror / manual-proof split"). The `gen lean` section below mirrors the
+  Simple constants/arithmetic and is the only part coupled to the implementation; the
+  MANUAL PROOFS below are hand-written. Lean core + omega only. Verified: `lean Alloc.lean`.
 -/
 set_option linter.unusedVariables false
 
+-- BEGIN gen lean: mirror of fw/ftl_band.spl + fw/nvme_types.spl (GC_RESERVE).
+--   Regenerate when the Simple code changes; defs only, NO proofs here.
+
 -- ppn of write pointer `wp` within block `b` (block_first_ppn(b) + wp).
 def ppn (b wp : Int) : Int := b * 64 + wp
+
+-- GC scratch reserve held back from the host allocator (fw/nvme_types.spl GC_RESERVE).
+def GC_RESERVE : Int := 2
+-- END gen lean
+
+-- MANUAL PROOFS (hand-written; stable across a re-mirror of the gen section above).
 
 -- (1) Every page handed out within a valid block/write-pointer is a valid physical page
 --     in [0, 4096). No allocation ever escapes the device.
@@ -37,8 +49,6 @@ theorem alloc_distinct (b wp1 wp2 : Int) (h : wp1 ≠ wp2) : ppn b wp1 ≠ ppn b
 --     invariant of the host write path: the reserve is never breached, so garbage
 --     collection (which uses the unreserved allocator) always has ≥ reserve free blocks
 --     of scratch and can always make forward progress.
-def GC_RESERVE : Int := 2
-
 theorem host_alloc_preserves_reserve (free : Int)
     (hopen : free > GC_RESERVE) :         -- the only branch that decrements free
     free - 1 ≥ GC_RESERVE := by

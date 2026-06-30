@@ -8,9 +8,15 @@
   later write supersedes it. This is exactly the committed-prefix property: every write
   acked to the host (hence journaled) is recovered, and nothing older shadows it.
 
-  Lean core only (no mathlib).
+  GENERATED / MANUAL split (see doc/07_guide/compiler/lean_verification_workflow.md
+  § "Generated-mirror / manual-proof split"). The `gen lean` section below mirrors the
+  replay model of the Simple code; the MANUAL PROOFS below are hand-written. Lean core
+  only (no mathlib). Verified standalone: `lean Recover.lean`.
 -/
 set_option linter.unusedVariables false
+
+-- BEGIN gen lean: mirror of fw/ftl.spl recover() replay model (L2P map + journal replay).
+--   Regenerate when the Simple code changes; defs only, NO proofs here.
 
 -- The L2P map as a total function (UNMAP = -1 is the default for an unmapped LBA).
 def Lmap := Int → Int
@@ -26,6 +32,9 @@ def replay : List (Int × Int) → Lmap → Lmap
 def lastFor (k : Int) : List (Int × Int) → Int → Int
   | [], d => d
   | (l, p) :: rest, d => lastFor k rest (if l = k then p else d)
+-- END gen lean
+
+-- MANUAL PROOFS (hand-written; stable across a re-mirror of the gen section above).
 
 -- Core theorem: after replay, each LBA holds the new_ppn of its LAST journaled record.
 theorem replay_last (rs : List (Int × Int)) (k : Int) (m : Lmap) :
