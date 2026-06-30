@@ -44,18 +44,20 @@ fn _decode_string(bytes: [u8], offset: i64) -> Result<(text, i64), text>:
         return Err("_decode_string: offset out of range")
     val first = bytes[offset].to_i64()
     val h_bit = (first & 0x80) != 0
-    val len_pair = match decode_prefix_int(bytes, offset, 7):
-        case Ok(decoded): decoded
-        case Err(reason): return Err("_decode_string: length varint: " + reason)
+    val len_pair_r = decode_prefix_int(bytes, offset, 7)
+    if not len_pair_r.is_ok():
+        return Err("_decode_string: length varint: " + len_pair_r.unwrap_err())
+    val len_pair = len_pair_r.unwrap()
     val length = len_pair.0
     val header_len = len_pair.1
     val payload_start = offset + header_len
     if payload_start + length > bytes.len():
         return Err("_decode_string: declared length exceeds buffer")
     if h_bit:
-        val decoded_bytes = match hpack_huffman_decode(bytes, payload_start, length):
-            case Ok(decoded): decoded
-            case Err(reason): return Err("_decode_string: huffman decode: " + reason)
+        val decoded_bytes_r = hpack_huffman_decode(bytes, payload_start, length)
+        if not decoded_bytes_r.is_ok():
+            return Err("_decode_string: huffman decode: " + decoded_bytes_r.unwrap_err())
+        val decoded_bytes = decoded_bytes_r.unwrap()
         Ok((_u8_to_text(decoded_bytes), header_len + length))
     else:
         var raw: [u8] = []
@@ -90,9 +92,13 @@ fn hpack_decode(bytes: [u8], state: HpackDecoderState) -> Result<([HpackHeader],
                 val consumed = idx_pair.1
                 if idx == 0:
                     return Err("hpack_decode §6.1: index 0 is reserved")
-                val pair = match _lookup_unified(cur_table, idx):
-                    case Ok(decoded): decoded
-                    case Err(reason): return Err("hpack_decode §6.1: " + reason)
+                # match-with-return doesn't propagate in the interpreter (the
+                # Err `return` is dropped, leaving `pair` bound to the enum and
+                # crashing on the tuple access). Branch explicitly.
+                val pair_r = _lookup_unified(cur_table, idx)
+                if not pair_r.is_ok():
+                    return Err("hpack_decode §6.1: " + pair_r.unwrap_err())
+                val pair = pair_r.unwrap()
                 val h = HpackHeader(name: pair.0, value: pair.1, sensitive: false)
                 headers = headers + [h]
                 offset = offset + consumed
