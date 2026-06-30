@@ -78,7 +78,7 @@ trim → **power-fail + recovery** (committed state survives, trim stays trimmed
 | 4 | MDSOC+ multi-domain architecture | HIL / FTL / FIL domains, composed structs (`Firmware{hil{ftl{fil}}}`) |
 | 5 | Offloadable operations | `fil` offload-op seam (ECC is a swappable op); abstract page-level API |
 | 6 | Lean4 formal verification | **done** — `fw/proofs/{Alloc,Recover,Gc}.lean` prove the allocator/GC-reserve, committed-prefix recovery, and GC data-loss-guard invariants (standalone, `lean`-checked, no mechanical link to executed bytes). The sibling **`emu/`** has its own proofs (`emu/proofs/*.lean`) |
-| 7 | Dynamic loaded code hooks | **planned** (sandboxed GC/QoS policy hooks) per the plan |
+| 7 | Dynamic loaded code hooks | **done** — sandboxed runtime policy hooks: `fw/hooks.spl` registry (GC-score / QoS / hot-cold / telemetry) + `fw/sandbox.spl` install gate (forbidden metadata/recovery/commit domains rejected), modeled fuel bound, output clamps; wired into FTL GC victim selection, which only asks the hook to **score** its own CLOSED candidates (the hook never names a block). Tests: `fw/policy_hooks_check.spl` + `hooks_selftest`/`sandbox_selftest`; proof `fw/proofs/Hooks.lean` |
 
 Recovery and verification are architectural (committed-prefix recovery is proven by the
 crash/recover self-tests and `sim_main`), per the report's central recommendation. Research +

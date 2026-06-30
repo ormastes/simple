@@ -9,8 +9,9 @@ silicon. The simulation boundary is deliberate and unchanged:
   mandatory NVMe admin + IO command surface with correct completion status codes, malformed
   input never crashing the controller, power-loss recovery as a real property (volatile state
   wiped, L2P + bad-block table rebuilt from NAND), wear-leveling + read-disturb-scrub *logic*,
-  SMART/health telemetry wired to real activity, and the safety-critical invariants proven in
-  Lean4 (req 6).
+  SMART/health telemetry wired to real activity, the safety-critical invariants proven in
+  Lean4 (req 6), and sandboxed dynamic policy hooks (req 7: install gate, output clamps, modeled
+  fuel bound).
 - Out of scope (silicon-only — tracked, not built here): real BCH/Reed–Solomon hardware ECC,
   real register MMIO / PCIe transport, a persistent backing store, and multi-channel NAND
   timing. The bare-metal **rv32** no-alloc port remains the follow-up (see `BUILD_STATUS.md`).
@@ -48,6 +49,12 @@ silicon. The simulation boundary is deliberate and unchanged:
       blocks, critical warning); an error log records failed commands (`nvme_controller_selftest`).
 - [x] **Formal (req 6).** `fw/proofs/{Alloc,Recover,Gc}.lean` prove the allocator/GC-reserve,
       committed-prefix recovery, and GC data-loss-guard invariants; each checks green with `lean`.
+- [x] **Sandboxed dynamic policy hooks (req 7).** Runtime-installable GC-score / QoS / hot-cold /
+      telemetry hooks (`hooks.spl`) behind an install gate that rejects forbidden
+      metadata/recovery/commit domains (`sandbox.spl`), with output clamps and a modeled fuel
+      bound; the GC hook only *scores* the firmware's own CLOSED candidates (never names a block),
+      so a malicious hook cannot corrupt the allocator or lose data (`policy_hooks_check.spl`,
+      `hooks_selftest`/`sandbox_selftest`; proven in `fw/proofs/Hooks.lean`).
 - [x] **Green + documented.** `test_fw`, `sim_main`, `nvme_main`, and the production self-tests
       pass via `bin/simple run`; the system sspec (incl. the Lean scenario) passes via
       `bin/simple test`; `doc/06_spec` regenerated at 0 stubs; this doc + `README`/`BUILD_STATUS`
@@ -58,3 +65,12 @@ checksum + injected-bit-error model), real register MMIO / PCIe transport, a per
 store, and multi-channel NAND timing remain out of scope; the bare-metal **rv32** no-alloc port is
 the tracked follow-up (`BUILD_STATUS.md`). "Production level" here = production-grade *logic and
 NVMe protocol compliance, simulation-validated*.
+
+**Policy-hook sandbox boundary (req 7).** The real silicon trust boundary for dynamically loaded
+policy code is cryptographic module signing + a static verifier; in-sim the boundary is the
+**install gate** (only the four policy kinds load; metadata/recovery/commit domains are rejected),
+**structural isolation** (a hook is a pure function of copied scalars with no FTL / NAND / journal
+handle), and **output validation** (clamps; the GC hook only scores trusted CLOSED candidates, so
+the chosen victim is always CLOSED — proven in `fw/proofs/Hooks.lean`). The per-invocation **fuel
+bound is *modeled*** — a cooperative self-reported budget that discards over-budget votes, not a
+hard preemption — so it is a liveness/QoS guard, not the safety claim.

@@ -88,7 +88,13 @@ See `PRODUCTION_STATUS.md` for the acceptance bar. Landed since the initial buil
 - **Media management**: static wear-leveling (`wear_level_once`) + read-disturb scrub (`scrub_once`).
 - **Health**: SMART wired to real activity (wear, spare, media errors, unsafe shutdowns) + error log.
 - **Formal (req 6) — DONE**: `proofs/{Alloc,Recover,Gc}.lean` (`lean`-checked).
+- **Policy hooks (req 7) — DONE**: sandboxed runtime policy hooks — `hooks.spl` registry
+  (GC-score / QoS / hot-cold / telemetry) + `sandbox.spl` install gate (forbidden
+  metadata/recovery/commit domains rejected), modeled fuel bound, and output clamps; wired into
+  FTL GC victim selection, which only asks the hook to **score** its own CLOSED candidates (the
+  hook never names a block). Tested by `policy_hooks_check.spl` + `hooks_selftest`/`sandbox_selftest`
+  and proven by `proofs/Hooks.lean`.
 
-Still deferred (per the build plan): sandboxed dynamic policy hooks (req 7); multi-channel
-scheduling; and the silicon-only pieces (real BCH/RS hardware ECC, MMIO/PCIe, persistent backing
-store) — see `PRODUCTION_STATUS.md` § Silicon boundary and the bare-metal rv32 port note above.
+Still deferred (per the build plan): multi-channel scheduling; and the silicon-only pieces
+(real BCH/RS hardware ECC, MMIO/PCIe, persistent backing store) — see `PRODUCTION_STATUS.md`
+§ Silicon boundary and the bare-metal rv32 port note above.
