@@ -1,0 +1,258 @@
+# NVMe FW — Gap-Closure Implementation Plan (simulation → hardware-faithful), with tests
+
+> **Status (2026-06-30): PLANNED.** This plan closes the gap between the current
+> simulation (`examples/09_embedded/simpleos_nvme_fw/fw/`, ~5K LOC pure-Simple, run-green)
+> and a real hardware-facing NVMe SSD firmware, as measured against the open comparators
+> Cosmos+ OpenSSD GreedyFTL (runs on FPGA+ARM, NVMe 1.2/PCIe) and FEMU (QEMU NVMe emulator),
+> and against commercial firmware ("millions of LOC, a miniature OS").
+>
+> **What "closing the gap" means here.** Each phase implements the missing concern
+> **faithfully in the pure-Simple simulation** — register-level MMIO models, a real
+> multi-channel scheduler, a real ECC codec, a byte-accurate DMA model — with tests and,
+> where the property is provable in Lean core, a proof. This makes the simulation
+> hardware-**faithful and verifiable**; it does **not** produce a silicon binary. The true
+> silicon ceiling (real NAND timing/voltage, PCIe electrical, LDPC hardware, multi-core RTOS)
+> stays out of scope and is stated per phase.
+>
+> **Sources of truth**
+> - Comparison + verdict: this plan's "Gap inventory" below; web comparators
+>   (Cosmos+ `GreedyFTL-2.7.0.d`: `fmc_driver.c`, `low_level_scheduler.c`, `lru_buffer.c`,
+>   `page_map.c`, `nvme/`; FEMU bbssd page-FTL on QEMU).
+> - Current scope + silicon boundary: `examples/09_embedded/simpleos_nvme_fw/fw/PRODUCTION_STATUS.md`,
+>   `BUILD_STATUS.md` (deferred list), `README.md` (req coverage), research
+>   `doc/01_research/hardware/nvme_firmware/nvme_ssd_firmware_architecture.md` (§11 prevention,
+>   §12 ControllerCaps, §15 roadmap).
+> - Predecessor: `doc/03_plan/hardware/nvme_fw_baremetal_parallel_agent_plan.md` (phases 0–7 done).
+
+## Gap inventory (from the real-firmware comparison)
+
+| # | Gap | Today | Real firmware (Cosmos+/commercial) | Phase |
+|---|-----|-------|-----------------------------------|-------|
+| G1 | Flash-controller driver | simulated ONFI device, direct calls | `fmc_driver.c` register MMIO driver | P1 |
+| G2 | Multi-channel/way parallelism | single channel, serial | `low_level_scheduler.c`, 8ch×8way | P2 |
+| G3 | Real ECC | checksum + injected-flip | hardware BCH/LDPC | P3 |
+| G4 | Host data transport | data passed as `i64` values | DMA scatter-gather (PRP/SGL) over PCIe | P4 |
+| G5 | DRAM management | per-instance arrays | managed DRAM arena (buffer + map cache) | P5 |
+| G6 | Concurrency (fg I/O vs bg tasks) | one synchronous tick | multi-core, shared FTL-map under locks | P6 |
+| G7 | Power + thermal | none | NVMe power states + thermal throttle | P7 |
+| G8 | Die/channel failure resilience | none | internal RAID/RAIN parity | P8 |
+| G9 | Real embedded target | host interpreter | bare-metal SoC (rv32 no-alloc) | P9 |
+
+## Test discipline (applies to every phase)
+
+Follow `fw/CONVENTIONS.md`. Each new module exposes `fn <module>_selftest() -> i64`
+(0 = pass) gated by `bin/simple run` (not `check`). Each phase adds:
+1. **Module self-test** (in `test_fw.spl`, kept < 10s total).
+2. **A standalone `*_check.spl`** runnable for the adversarial/property cases (printed
+   `… OK` marker), gated as a `_run` `it` in
+   `test/03_system/app/nvme_firmware/nvme_firmware_simulation_spec.spl`, then
+   `spipe-docgen … --output doc/06_spec` at 0 stubs.
+3. **A Lean proof** under `fw/proofs/<Name>.lean` (in-file `gen lean`/manual split,
+   `lean`-checked) **only when the core invariant is provable in Lean core + omega** — noted
+   per phase. Bind every method-call result to a local before passing it (call-boundary bug,
+   `doc/08_tracking/bug/interp_method_call_result_as_arg_corruption_nested_2026-06-30.md`).
+
+MDSOC discipline: new modules slot into the existing FIL/transport tiers, imports point
+**downward only**, composition not inheritance, no shared mutable global, no `use std.ecs`
+(driver tier). A new **transport** tier (DMA/PCIe regs) sits beside HIL; a new **fmc** tier
+sits below FIL.
+
+---
+
+## P1 — Register-level Flash Memory Controller (FMC) model  *(G1)*
+
+**Goal.** Replace direct `Fil`→`NandDevice` method calls with a register-MMIO handshake,
+mirroring `fmc_driver.c`: a command/address/status register file; issue → poll → complete.
+
+**Build.** `fw/fil_fmc.spl`: `FmcRegs{cmd, addr, len, status, data_ptr}` + `me fmc_issue(op, ppn)`
+/ `me fmc_poll() -> i64` (BUSY/DONE/ERR bits). `NandDevice` becomes the device side of the bus.
+`fil.spl` drives the NAND through `fil_fmc`, not direct calls.
+
+**Tests.**
+- `fil_fmc_selftest`: program/read/erase round-trip via the register handshake; status
+  polling reaches DONE; injected fault sets the ERR bit and surfaces as a NAND fault.
+- `fmc_check.spl`: back-to-back ops without status-clear must serialize correctly; ERR
+  latch must not leak across ops.
+- **Lean** (`Fmc.lean`): the issue→poll→done status state machine has no DONE-without-issue
+  path and ERR is sticky until cleared (provable: small finite state machine).
+
+**Silicon ceiling.** Real MMIO base addresses + ONFI NV-DDR timing are silicon; the register
+**semantics** are faithful.
+
+## P2 — Multi-channel / multi-way request scheduler  *(G2 — the largest real gap)*
+
+**Goal.** N channels × M ways operating in parallel, mirroring `low_level_scheduler.c`.
+
+**Build.** `fw/fil_scheduler.spl`: per-channel ready/busy state, a per-(ch,way) request queue,
+ready-based dispatch (never two ops on one die concurrently, independent dies overlap). FTL
+band allocation becomes **channel-striped** so sequential writes spread across channels.
+`fil` + `ftl_band` consume the scheduler.
+
+**Tests.**
+- `fil_scheduler_selftest`: enqueue across channels, assert independent dies advance in the
+  same step and a busy die is never double-dispatched.
+- `parallelism_check.spl`: a striped write batch completes in ≈ `ceil(n/channels)` steps
+  (parallel speedup), not `n` (serial) — the property that justifies the gap.
+- **Lean** (`Scheduler.lean`): mutual exclusion per die (no concurrent op on one (ch,way)) +
+  progress (every queued request is eventually dispatched). Both provable in Lean core.
+
+**Silicon ceiling.** Real per-channel NAND bus timing/contention is modeled as step counts,
+not nanoseconds.
+
+## P3 — Real ECC codec (BCH)  *(G3)*
+
+**Goal.** Replace checksum+injected-flip with a real **BCH** codec: correct up to *t* bit
+errors per codeword, detect beyond *t*.
+
+**Build.** `fw/fil_ecc_bch.spl`: GF(2^m) arithmetic, syndrome compute, Berlekamp–Massey +
+Chien search (or a bounded *t*=2 BCH for tractability). Keep `inject_read_bitflip` to drive it;
+`fil.read` decodes through it.
+
+**Tests.**
+- `fil_ecc_bch_selftest`: encode→corrupt ≤t bits→decode recovers the word; >t bits →
+  detected (NAND_ECC_FAIL), never silently mis-corrected.
+- `ecc_bch_check.spl`: NIST/known BCH KAT vectors + a sweep over all single/double-flip
+  positions (always corrected).
+- **Lean** (`Ecc.lean`): start with the provable **Hamming SEC-DED** bound (single-error
+  correct, double-error detect) as the formal floor; the full BCH bound is documented, not
+  Lean-proven (Berlekamp–Massey is beyond Lean-core+omega).
+
+**Silicon ceiling.** Commercial NAND uses hardware **LDPC** with soft-decision reads; BCH is a
+faithful, partially-provable step, not the production code.
+
+## P4 — DMA / host data transport (byte-accurate)  *(G4)*
+
+**Goal.** Move real **bytes** between a modeled host memory and the device via a
+PRP/SGL scatter-gather descriptor, replacing `i64`-value data.
+
+**Build.** New **transport** tier `fw/dma.spl`: `HostMem{[u8]}`, `Prp{addr, len}` list,
+`me dma_to_device(prp_list) -> [u8]` / `me dma_from_device(prp_list, bytes)`. `NvmeCmd` carries a
+PRP pointer; `hil`/`nvme_controller` move data through DMA, not inline values.
+
+**Tests.**
+- `dma_selftest`: single- and multi-PRP scatter-gather round-trip; page-boundary split;
+  partial/last-segment lengths.
+- `dma_e2e_check.spl`: host writes a byte pattern → write cmd (DMA in) → read cmd (DMA out) →
+  byte-exact match end-to-end.
+- **Lean** (`Dma.lean`): a gather then scatter over the same PRP list is the identity on the
+  byte range (provable: list/append algebra).
+
+**Silicon ceiling.** Real PCIe BAR/doorbell electrical + IOMMU are modeled as a register file,
+not silicon.
+
+## P5 — DRAM-backed buffer & bounded map cache  *(G5)*
+
+**Goal.** A fixed DRAM budget backing the LRU write buffer + a bounded DFTL map cache with
+miss→load-from-flash (real DRAM pressure), mirroring `lru_buffer.c`.
+
+**Build.** `fw/dram.spl`: a sized `[u8]` arena + allocator (bump/free-list) with a hard
+budget. `ftl_map` becomes a **bounded** cache (capacity from DRAM) with miss→flash-load +
+LRU eviction of clean entries (dirty → flush first).
+
+**Tests.**
+- `dram_selftest`: alloc/free within budget; over-budget alloc fails cleanly (no overflow);
+  LRU eviction order.
+- `map_cache_check.spl`: working set > cache → correct values after evict+reload; a dirty
+  entry is flushed before eviction (no lost mapping).
+- **Lean**: cache-coherence invariant (a looked-up LBA returns its last written ppn whether
+  cached or evicted) — provable as a map-equivalence lemma (extends `Recover.lean`'s model).
+
+**Silicon ceiling.** Real DRAM refresh/ECC/bandwidth is not modeled.
+
+## P6 — Concurrency: foreground I/O vs background tasks  *(G6)*
+
+**Goal.** Model the commercial fg-I/O-vs-bg-task concurrency (GC/wear/scrub) sharing the FTL
+map safely — the core "miniature-OS" challenge.
+
+**Build.** Extend `firmware.service` into cooperative **tasks** (fg IO, bg GC, bg scrub) that
+interleave per tick, each holding the FTL map only within an explicit critical section;
+single-owner-per-mutable-resource (research §6 rule). No preemption (cooperative), so the
+"lock" is a modeled ownership token.
+
+**Tests.**
+- `concurrency_selftest`: interleave a write stream with GC running; assert no lost write and
+  no map corruption across the interleave.
+- `race_check.spl`: a write to an LBA GC is concurrently relocating resolves to exactly one
+  winner (newest), never a torn mapping.
+- **Lean** (`Concurrency.lean`): single-writer mutual exclusion on the map ⇒ no interleaving
+  produces a state unreachable by some serial order (serializability of the modeled tokens).
+
+**Silicon ceiling.** True multi-core memory ordering / cache coherence is not modeled
+(cooperative single-thread token model).
+
+## P7 — Power states + thermal throttling  *(G7)*
+
+**Goal.** NVMe power states (PSDs via Get/Set Features) + a thermal model that throttles
+throughput over a threshold and reports composite temperature in SMART.
+
+**Build.** `fw/power_thermal.spl`: temperature rises with op rate, decays when idle;
+`throttle_factor()` caps dispatched ops/tick over `THERMAL_HIGH`; power-state transitions on
+Set Features `FEAT_POWER_MGMT`. Wire composite temp + throttle events into SMART/AER.
+
+**Tests.**
+- `power_thermal_selftest`: power-state get/set round-trip; temp rises under load, throttle
+  engages over threshold and releases below; SMART composite temp updates.
+- `thermal_check.spl`: sustained load triggers a throttle AER event and a non-fatal temp
+  warning, never a crash.
+
+**Silicon ceiling.** No real sensor/voltage/clock — temperature is an activity model with a
+calibration knob (`ponytail:` real sensors drift; leave the knob).
+
+## P8 — Internal RAID/RAIN (die/channel failure protection)  *(G8)*
+
+**Goal.** XOR parity stripe across channels so a die/channel failure is recoverable.
+
+**Build.** `fw/rain.spl`: per-stripe XOR parity (RAID5-like) across the P2 channels;
+on an injected die/channel failure, reconstruct the lost page from the survivors + parity.
+
+**Tests.**
+- `rain_selftest`: write a stripe, inject a die failure, reconstruct, byte-exact recovery.
+- `rain_check.spl`: a failure during GC relocation still reconstructs (no double fault on the
+  parity path).
+- **Lean** (`Rain.lean`): XOR reconstruction correctness — `p = a⊕b⊕c ⇒ a = p⊕b⊕c` — fully
+  provable in Lean core (XOR group algebra), the strongest proof in the set.
+
+**Silicon ceiling.** Real die/plane failure modes (partial-page, RBER drift) are modeled as
+whole-unit erasure.
+
+## P9 — Bare-metal rv32 no-alloc port  *(G9 — the tracked follow-up)*
+
+**Goal.** Port the FTL/HIL/FIL to `nogc_async_mut_noalloc` (no heap, fixed arrays, no `.push`)
+and boot on `qemu-system-riscv32 -bios none`, joining the existing C NAND demo that already
+boots ("ALL RV32 NAND CHECKS PASS", `BUILD_STATUS.md`).
+
+**Build.** Replace `[i64]`/`.push` growth with fixed-capacity arrays sized at compile time;
+move state into the no-alloc tier; a `simpleos_nvme_riscv32.elf` entry.
+
+**Tests.**
+- A QEMU rv32 **system test** under `test/03_system/os/qemu/` per
+  `doc/07_guide/platform/simpleos/qemu_system_tests.md` (live boot, fail-closed, never
+  `skip()`): boots, runs the FTL self-test on-device, prints "ALL RV32 NVME FW CHECKS PASS".
+- Re-run every prior phase's `*_selftest` under the no-alloc build (parity with the host sim).
+
+**Silicon ceiling.** QEMU rv32 is not an SSD SoC — no real NAND/PCIe peripherals; this proves
+the firmware **logic** runs on a real ISA with no heap, the last step before an actual board.
+
+---
+
+## Sequencing & dependencies
+
+```
+P1 fmc ─► P2 scheduler ─► P8 rain (needs channels)
+P3 ecc   (independent)
+P4 dma   (independent) ─► P5 dram ─► P6 concurrency
+P7 power/thermal (independent, after P2 for throttle hook)
+P9 rv32  (LAST — no-alloc rewrite of P1–P8)
+```
+
+Highest value-per-effort first: **P1 (FMC) + P2 (scheduler)** close the biggest realism gap
+(hardware bus + parallelism) and unlock P8; **P3 (BCH)** and **P8 (RAIN)** add the strongest
+new proofs (Hamming bound, XOR reconstruction). P9 is the capstone.
+
+## Definition of done (per phase) & overall ceiling
+
+A phase is done when: module self-test green via `run`; its `*_check.spl` gated in the system
+spec and `doc/06_spec` regenerated at 0 stubs; its Lean proof (where applicable) `lean`-green
+with no `sorry`; `PRODUCTION_STATUS.md`/`README.md` updated; rebased + pushed. Even with all
+nine phases complete the result is a **hardware-faithful, formally-anchored simulation**, not a
+silicon-shippable binary — the honest ceiling this firmware has always stated.
