@@ -91,6 +91,20 @@ pub fn rt_cranelift_new_module(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(handle))
 }
 
+/// Create a new AOT module (raw pointer version)
+/// Args: name_ptr (i64), name_len (i64), target (i64)
+/// Returns: module handle (i64)
+pub fn rt_cranelift_new_aot_module(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() < 3 {
+        return Ok(Value::Int(0));
+    }
+    let name_ptr = value_to_i64(&args[0]);
+    let name_len = value_to_i64(&args[1]);
+    let target = value_to_i64(&args[2]);
+    let handle = unsafe { cranelift_sffi::rt_cranelift_new_aot_module(name_ptr, name_len, target) };
+    Ok(Value::Int(handle))
+}
+
 /// Finalize module (JIT: compile; AOT: finalize)
 pub fn rt_cranelift_finalize_module(args: &[Value]) -> Result<Value, CompileError> {
     if args.is_empty() {
@@ -121,6 +135,61 @@ pub fn rt_cranelift_emit_object(args: &[Value]) -> Result<Value, CompileError> {
     let path = value_to_runtime_string(&args[1]);
     let result = unsafe { cranelift_sffi::rt_cranelift_emit_object(module, path) };
     Ok(Value::Bool(result))
+}
+
+/// Declare a function in a Cranelift module.
+/// Args: module (i64), name_ptr (i64), name_len (i64), sig (i64), linkage (i64)
+pub fn rt_cranelift_declare_function(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() < 5 {
+        return Ok(Value::Int(0));
+    }
+    let module = value_to_i64(&args[0]);
+    let name_ptr = value_to_i64(&args[1]);
+    let name_len = value_to_i64(&args[2]);
+    let sig = value_to_i64(&args[3]);
+    let linkage = value_to_i64(&args[4]);
+    let handle = unsafe {
+        cranelift_sffi::rt_cranelift_declare_function(module, name_ptr, name_len, sig, linkage)
+    };
+    Ok(Value::Int(handle))
+}
+
+/// Import a declared function into the active function builder.
+/// Args: ctx (i64), func_handle (i64)
+pub fn rt_cranelift_import_function(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() < 2 {
+        return Ok(Value::Int(0));
+    }
+    let ctx = value_to_i64(&args[0]);
+    let func_handle = value_to_i64(&args[1]);
+    let func_ref = unsafe { cranelift_sffi::rt_cranelift_import_function(ctx, func_handle) };
+    Ok(Value::Int(func_ref))
+}
+
+/// Append function parameters as block params.
+/// Args: ctx (i64), block (i64)
+pub fn rt_cranelift_append_func_params(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() < 2 {
+        return Ok(Value::Nil);
+    }
+    let ctx = value_to_i64(&args[0]);
+    let block = value_to_i64(&args[1]);
+    unsafe { cranelift_sffi::rt_cranelift_append_func_params(ctx, block) };
+    Ok(Value::Nil)
+}
+
+/// Define a finished function in an AOT module.
+/// Args: module (i64), name_ptr (i64), name_len (i64), ctx (i64)
+pub fn rt_cranelift_aot_define_function(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() < 4 {
+        return Ok(Value::Bool(false));
+    }
+    let module = value_to_i64(&args[0]);
+    let name_ptr = value_to_i64(&args[1]);
+    let name_len = value_to_i64(&args[2]);
+    let ctx = value_to_i64(&args[3]);
+    let defined = unsafe { cranelift_sffi::rt_cranelift_aot_define_function(module, name_ptr, name_len, ctx) };
+    Ok(Value::Bool(defined))
 }
 
 // ============================================================================

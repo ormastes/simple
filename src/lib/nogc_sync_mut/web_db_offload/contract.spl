@@ -328,3 +328,58 @@ fn gpu_wdb_nosql_mode_admits(batch_bytes: i64, metadata_filter_cpu_owned: bool, 
         ),
         budget
     )
+
+enum GpuWdbCoarseDataPath:
+    CpuOnly
+    GpuCandidate
+
+struct GpuWdbCoarseBatchProfile:
+    kind: GpuWdbWorkKind
+    total_batch_bytes: i64
+    item_count: i64
+    data_path: GpuWdbCoarseDataPath
+    cpu_control_path: bool
+    snapshot: GpuWdbRuntimeSnapshot
+
+fn gpu_wdb_profile(kind: GpuWdbWorkKind, bytes: i64, items: i64, data_path: GpuWdbCoarseDataPath) -> GpuWdbCoarseBatchProfile:
+    GpuWdbCoarseBatchProfile(
+        kind: kind,
+        total_batch_bytes: bytes,
+        item_count: items,
+        data_path: data_path,
+        cpu_control_path: true,
+        snapshot: GpuWdbRuntimeSnapshot(queue_depth: 0, gpu_available: true, generation_current: true, cpu_fallback_available: true)
+    )
+
+fn gpu_wdb_profile_window(profile: GpuWdbCoarseBatchProfile) -> GpuWdbBatchWindow:
+    GpuWdbBatchWindow(kind: profile.kind, total_batch_bytes: profile.total_batch_bytes, item_count: profile.item_count, snapshot: profile.snapshot)
+
+fn gpu_wdb_profile_allows_gpu(profile: GpuWdbCoarseBatchProfile, budget: GpuWdbBudget) -> bool:
+    if profile.data_path == GpuWdbCoarseDataPath.CpuOnly:
+        return false
+    val plan = gpu_wdb_plan_batch(gpu_wdb_profile_window(profile), budget)
+    plan.execution.decision.path == GpuWdbDecisionPath.GpuEvidence
+
+fn gpu_wdb_ram_db_profile() -> GpuWdbCoarseBatchProfile:
+    gpu_wdb_profile(GpuWdbWorkKind.DbScanFilterProject, 8192, 64, GpuWdbCoarseDataPath.GpuCandidate)
+
+fn gpu_wdb_ssd_db_profile() -> GpuWdbCoarseBatchProfile:
+    gpu_wdb_profile(GpuWdbWorkKind.DbScanFilterProject, 16384, 128, GpuWdbCoarseDataPath.GpuCandidate)
+
+fn gpu_wdb_nosql_db_profile() -> GpuWdbCoarseBatchProfile:
+    gpu_wdb_profile(GpuWdbWorkKind.DbDocumentFilter, 8192, 64, GpuWdbCoarseDataPath.GpuCandidate)
+
+fn gpu_wdb_vector_db_profile() -> GpuWdbCoarseBatchProfile:
+    gpu_wdb_profile(GpuWdbWorkKind.DbVectorSearch, 8192, 64, GpuWdbCoarseDataPath.GpuCandidate)
+
+fn gpu_wdb_web_payload_profile(kind: GpuWdbWorkKind) -> GpuWdbCoarseBatchProfile:
+    gpu_wdb_profile(kind, 8192, 64, GpuWdbCoarseDataPath.GpuCandidate)
+
+export GpuWdbCoarseDataPath
+export GpuWdbCoarseBatchProfile
+export gpu_wdb_profile_allows_gpu
+export gpu_wdb_ram_db_profile
+export gpu_wdb_ssd_db_profile
+export gpu_wdb_nosql_db_profile
+export gpu_wdb_vector_db_profile
+export gpu_wdb_web_payload_profile

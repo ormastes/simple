@@ -146,6 +146,12 @@ impl ConstEvaluator:
         eval.init_builtin_sizes()
         eval
 
+    me find_function_by_symbol(func_sym: SymbolId) -> HirFunction?:
+        for func in self.module.functions.values():
+            if func.symbol.id == func_sym.id:
+                return Some(func)
+        nil
+
     me init_builtin_sizes():
         # Primitive type sizes
         self.type_sizes["i8"] = 1
@@ -348,9 +354,7 @@ impl ConstEvaluator:
             return Ok(self.constants[name])
 
         # Look up in module constants
-        # BUG-001 fix: Use keys()-based iteration (for (k,v) in dict is broken in compiled mode)
-        for const_key in self.module.constants.keys():
-            val const_: HirConst = self.module.constants[const_key]
+        for const_ in self.module.constants.values():
             if const_.name == name:
                 return self.eval(const_.value)
 
@@ -385,10 +389,15 @@ impl ConstEvaluator:
             return Err(ConstEvalError.NotConstant("exceeded max const call depth", span))
 
         # Look up the function in the module
-        if not self.module.functions.has(func_sym):
+        val maybe_func = self.find_function_by_symbol(func_sym)
+        if not maybe_func.?:
             return Err(ConstEvalError.NotConstant("function not found", span))
 
-        val func: HirFunction = self.module.functions[func_sym]
+        var func = self.module.functions.values()[0]
+        if val found_func = maybe_func:
+            func = found_func
+        else:
+            return Err(ConstEvalError.NotConstant("function not found", span))
 
         # Ensure function is marked const
         if not func.is_const:

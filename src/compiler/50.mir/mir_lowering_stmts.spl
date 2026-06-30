@@ -31,29 +31,30 @@ impl MirLowering:
                 self.lower_expr(expr)
 
             case Let(symbol, type_, init):
-
                 val mir_type = type_.map(self.lower_type(_)) ?? MirType.i64()
                 var b = self.builder
                 val local = b.new_local(nil, mir_type, LocalKind.Var)
                 self.builder = b
                 self.local_map[symbol] = local
 
-                val init_local = self.lower_expr(init)
-                var b2 = self.builder
-                b2.emit_copy(local, init_local)
-                self.builder = b2
+                var has_init = false
+                var init_local = local
+                if val init_expr = init:
+                    init_local = self.lower_expr(init_expr)
+                    has_init = true
+                if has_init:
+                    var b2 = self.builder
+                    b2.emit_copy(local, init_local)
+                    self.builder = b2
 
             case Assign(target, op, value):
-
                 val value_local = self.lower_expr(value)
                 self.lower_assign(target, op, value_local)
 
             case Block(block):
-
                 self.lower_block(block)
 
             case AsmAssert(spec):
-
                 self.lower_asm_assert(spec, stmt_span)
 
             case _:
@@ -134,10 +135,9 @@ impl MirLowering:
     me try_lower_bitfield_set(base: HirExpr, base_local: LocalId, field_name: text, value_local: LocalId) -> LocalId?:
         """Lower bitfield field writes before generic struct field assignment."""
         val type_sym = self.expr_type_symbol(base)
-        val sym_id = if val found_type_sym = type_sym:
-            self.symbol_id_value(found_type_sym)
-        else:
+        if not type_sym.?:
             return nil
+        val sym_id = self.symbol_id_value(type_sym.unwrap())
         if not self.bitfield_map.has(sym_id):
             return nil
 
@@ -429,48 +429,46 @@ impl MirLowering:
         """
         # Derive loop counter type from bound HirExpr types before emitting any code.
         # This preserves u64 (and other non-i64 integer) counter types end-to-end.
-        val loop_ty = if val end_expr = end:
+        var loop_ty = MirType.i64()
+        if val end_expr = end:
             if val end_type = end_expr.type_:
-                self.lower_type(end_type)
-            else:
-                MirType.i64()
+                loop_ty = self.lower_type(end_type)
         elif val start_expr = start:
             if val start_type = start_expr.type_:
-                self.lower_type(start_type)
-            else:
-                MirType.i64()
-        else:
-            MirType.i64()
+                loop_ty = self.lower_type(start_type)
 
         # Lower start value (default to typed 0)
-        val start_local = if val start_expr = start:
-            self.lower_expr(start_expr)
+        var start_local: LocalId = 0
+        if val start_expr = start:
+            start_local = self.lower_expr(start_expr)
         else:
             var b = self.builder
             val temp = b.new_temp(loop_ty)
             b.emit_const(temp, MirConstValue.Int(0), loop_ty)
             self.builder = b
-            temp
+            start_local = temp
 
         # Lower end value (default to typed 0; open-ended ranges need the iterator path)
-        val end_local = if val end_expr = end:
-            self.lower_expr(end_expr)
+        var end_local: LocalId = 0
+        if val end_expr = end:
+            end_local = self.lower_expr(end_expr)
         else:
             var b = self.builder
             val temp = b.new_temp(loop_ty)
             b.emit_const(temp, MirConstValue.Int(0), loop_ty)
             self.builder = b
-            temp
+            end_local = temp
 
         # Lower step value (default to typed 1)
-        val step_local = if val step_expr = step:
-            self.lower_expr(step_expr)
+        var step_local: LocalId = 0
+        if val step_expr = step:
+            step_local = self.lower_expr(step_expr)
         else:
             var b = self.builder
             val temp = b.new_temp(loop_ty)
             b.emit_const(temp, MirConstValue.Int(1), loop_ty)
             self.builder = b
-            temp
+            step_local = temp
 
         # Create the loop counter variable (mutable)
         var b_init = self.builder
@@ -551,13 +549,10 @@ impl MirLowering:
         """
         # Step 1: Lower the iterable expression
         val collection_local = self.lower_expr(iter)
-        val element_type = if val loop_symbol = self.symbols.get(var_):
+        var element_type = MirType.i64()
+        if val loop_symbol = self.symbols.get(var_):
             if val loop_symbol_type = loop_symbol.type_:
-                self.lower_type(loop_symbol_type)
-            else:
-                MirType.i64()
-        else:
-            MirType.i64()
+                element_type = self.lower_type(loop_symbol_type)
 
         # Step 2: Call iter() on the collection to get an iterator
         val iter_func_operand = MirOperand(kind: MirOperandKind.Const(
@@ -566,13 +561,14 @@ impl MirLowering:
         ))
         var b = self.builder
         val iter_result = b.emit_call(iter_func_operand, [mir_operand_copy(collection_local)], MirType.i64())
-        val iter_local = if val iter_value = iter_result:
+        var iter_local: LocalId = 0
+        if val iter_value = iter_result:
             self.builder = b
-            iter_value
+            iter_local = iter_value
         else:
             val temp = b.new_temp(MirType.i64())
             self.builder = b
-            temp
+            iter_local = temp
 
         # Step 3: Create loop blocks
         var b2 = self.builder
@@ -596,13 +592,14 @@ impl MirLowering:
         ))
         var b4 = self.builder
         val has_next_result = b4.emit_call(has_next_func_operand, [mir_operand_copy(iter_local)], MirType.bool())
-        val has_next_local = if val has_next_value = has_next_result:
+        var has_next_local: LocalId = 0
+        if val has_next_value = has_next_result:
             self.builder = b4
-            has_next_value
+            has_next_local = has_next_value
         else:
             val temp = b4.emit_const_bool(false)
             self.builder = b4
-            temp
+            has_next_local = temp
         var b5 = self.builder
         b5.terminate_if(mir_operand_copy(has_next_local), body_block, exit_block)
         b5.switch_to_block(body_block)
@@ -615,13 +612,14 @@ impl MirLowering:
         ))
         var b6 = self.builder
         val next_result = b6.emit_call(next_func_operand, [mir_operand_copy(iter_local)], element_type)
-        val next_local = if val next_value = next_result:
+        var next_local: LocalId = 0
+        if val next_value = next_result:
             self.builder = b6
-            next_value
+            next_local = next_value
         else:
             val temp = b6.new_temp(element_type)
             self.builder = b6
-            temp
+            next_local = temp
 
         # Bind the loop variable to the next() result
         var b7 = self.builder

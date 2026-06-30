@@ -5,9 +5,9 @@
 # Delegates instruction translation to llvm_lib_translate_expr.spl.
 
 use compiler.mir.mir_data.*
-use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock}
+use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock, SwitchCase}
 use compiler.backend.backend.llvm_lib_type_mapper.{LlvmLibTypeMapper}
-use compiler.backend.backend.llvm_lib_translate_expr.{translate_instruction, translate_terminator}
+use compiler.backend.backend.llvm_lib_translate_expr.{translate_instruction}
 use std.sffi.llvm.*
 
 # ============================================================================
@@ -20,7 +20,7 @@ pub fn translate_module_to_llvm(ctx: i64, mod_: i64, builder: i64, type_mapper: 
 
     # Pass 1: Declare all functions (forward references)
     var func_map: {text: i64} = {}
-    for sym_id, func in mir_module.functions:
+    for func in mir_module.functions.values():
         val fn_name = if func.name == "main": "__simple_main" else: func.name
         val fn_ty = build_function_type(ctx, type_mapper, func.signature)
         val llvm_fn = llvm_add_function(mod_, fn_name, fn_ty)
@@ -32,7 +32,7 @@ pub fn translate_module_to_llvm(ctx: i64, mod_: i64, builder: i64, type_mapper: 
         # SFFI rejects the legacy -1 value before LLVM sees it.
 
     # Pass 2: Compile function bodies
-    for sym_id, func in mir_module.functions:
+    for func in mir_module.functions.values():
         val llvm_fn = func_map[func.name]
         compile_function(ctx, mod_, builder, type_mapper, func, llvm_fn, func_map)
 
@@ -75,7 +75,64 @@ fn compile_function(ctx: i64, mod_: i64, builder: i64, type_mapper: LlvmLibTypeM
             translate_instruction(ctx, mod_, builder, type_mapper, inst, value_map, local_types, block_map, func_map)
 
         # Translate terminator
-        translate_terminator(ctx, mod_, builder, type_mapper, block.terminator, value_map, local_types, block_map, func_map)
+        var precomputed_cond_val: i64 = 0
+        var precomputed_final_cond: i64 = 0
+        var precomputed_then_bb: i64 = 0
+        var precomputed_else_bb: i64 = 0
+        var terminator_already_emitted = false
+        match block.terminator:
+            case Ret(value):
+                if value.?:
+                    val ret_val = translate_operand(ctx, mod_, builder, type_mapper, value.unwrap(), value_map, local_types, func_map)
+                    llvm_build_ret(builder, ret_val)
+                else:
+                    llvm_build_ret_void(builder)
+                terminator_already_emitted = true
+            case Goto(target):
+                val dest_bb = block_map[target]
+                llvm_build_br(builder, dest_bb)
+                terminator_already_emitted = true
+            case If(cond, then_target, else_target):
+                precomputed_cond_val = translate_operand(ctx, mod_, builder, type_mapper, cond, value_map, local_types, func_map)
+                val i1_ty = llvm_int1_type_in_context(ctx)
+                val cond_ty = llvm_type_of(precomputed_cond_val)
+                precomputed_final_cond = if cond_ty != i1_ty:
+                    val zero = llvm_const_int(cond_ty, 0, false)
+                    llvm_build_icmp(builder, LLVM_INT_NE, precomputed_cond_val, zero, "tobool")
+                else:
+                    precomputed_cond_val
+                precomputed_then_bb = block_map[then_target]
+                precomputed_else_bb = block_map[else_target]
+                llvm_build_cond_br(builder, precomputed_final_cond, precomputed_then_bb, precomputed_else_bb)
+                terminator_already_emitted = true
+            case Switch(value, targets, default):
+                val discr_val = translate_operand(ctx, mod_, builder, type_mapper, value, value_map, local_types, func_map)
+                val default_bb = block_map[default]
+                val switch_inst = llvm_build_switch(builder, discr_val, default_bb, targets.len())
+                for switch_case_raw in targets:
+                    val switch_case: SwitchCase = switch_case_raw
+                    val case_val = llvm_const_int(type_mapper.native_int_type(), switch_case.value, false)
+                    val case_bb = block_map[switch_case.target]
+                    llvm_add_case(switch_inst, case_val, case_bb)
+                terminator_already_emitted = true
+            case Unreachable:
+                llvm_build_unreachable(builder)
+                terminator_already_emitted = true
+            case Abort(_):
+                val abort_fn = llvm_get_named_function(mod_, "abort")
+                if abort_fn != 0:
+                    val fn_ty = llvm_global_get_value_type(abort_fn)
+                    llvm_build_call2(builder, fn_ty, abort_fn, [], "")
+                llvm_build_unreachable(builder)
+                terminator_already_emitted = true
+            case CallTerminator(dest, func, args, normal, _):
+                translate_call(ctx, mod_, builder, type_mapper, dest, func, args, value_map, local_types, func_map)
+                val normal_bb = block_map[normal]
+                llvm_build_br(builder, normal_bb)
+                terminator_already_emitted = true
+            case _: ()
+        if not terminator_already_emitted:
+            eprint("[llvm-lib] ERROR: unhandled terminator kind")
 
 # ============================================================================
 # Function Type Builder

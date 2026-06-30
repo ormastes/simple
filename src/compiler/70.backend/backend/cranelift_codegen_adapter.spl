@@ -21,6 +21,9 @@ use std.sffi.codegen.*
 
 extern fn rt_file_read_bytes(path: text) -> [u8]
 
+fn cranelift_file_read_bytes(path: text) -> [u8]:
+    rt_file_read_bytes(path)
+
 # ============================================================================
 # Cranelift Type Constants (must match cranelift_sffi.rs)
 # ============================================================================
@@ -87,15 +90,13 @@ pub fn cranelift_compile_module_direct(options: CompileOptions, module: MirModul
     print "[cranelift-direct] module"
 
     var func_handles: Dict<text, i64> = {}
-    for sym_id in module.functions.keys():
-        val func: MirFunction = module.functions[sym_id]
+    for func in module.functions.values():
         print "[cranelift-direct] declare {func.name}"
         val sig = build_signature(func.signature)
         val handle = cranelift_declare_function(cl_module, func.name, sig, CL_LINKAGE_EXPORT)
         func_handles[func.name] = handle
 
-    for sym_id in module.functions.keys():
-        val func: MirFunction = module.functions[sym_id]
+    for func in module.functions.values():
         print "[cranelift-direct] compile {func.name}"
         val result = compile_function(cl_module, func, func_handles)
         if not result:
@@ -112,7 +113,7 @@ pub fn cranelift_compile_module_direct(options: CompileOptions, module: MirModul
         return Err(compileerror_backend_error(BackendKind.Cranelift,
             "Failed to emit object file"))
 
-    val object_bytes = rt_file_read_bytes(output_path)
+    val object_bytes = cranelift_file_read_bytes(output_path)
     if object_bytes.len() == 0:
         return Err(compileerror_backend_error(BackendKind.Cranelift,
             "Emitted object file was empty or unreadable: {output_path}"))
@@ -141,15 +142,13 @@ impl Codegen for CraneliftCodegenAdapter:
 
         # First pass: declare all functions so forward references work
         var func_handles: Dict<text, i64> = {}
-        for sym_id in module.functions.keys():
-            val func: MirFunction = module.functions[sym_id]
+        for func in module.functions.values():
             val sig = build_signature(func.signature)
             val handle = cranelift_declare_function(cl_module, func.name, sig, CL_LINKAGE_EXPORT)
             func_handles[func.name] = handle
 
         # Second pass: compile each function
-        for sym_id in module.functions.keys():
-            val func: MirFunction = module.functions[sym_id]
+        for func in module.functions.values():
             val result = compile_function(cl_module, func, func_handles)
             if not result:
                 cranelift_free_module(cl_module)
@@ -165,7 +164,7 @@ impl Codegen for CraneliftCodegenAdapter:
             return Err(compileerror_backend_error(BackendKind.Cranelift,
                 "Failed to emit object file"))
 
-        val object_bytes = rt_file_read_bytes(output_path)
+        val object_bytes = cranelift_file_read_bytes(output_path)
         if object_bytes.len() == 0:
             return Err(compileerror_backend_error(BackendKind.Cranelift,
                 "Emitted object file was empty or unreadable: {output_path}"))
@@ -247,6 +246,8 @@ fn compile_function(cl_module: i64, func: MirFunction, func_handles: Dict<text, 
 
     # Allocate stack slots for all locals
     for local in func.locals:
+        if not local.?:
+            continue
         val size = local.type_.size_bytes()
         val align = local.type_.alignment()
         if size > 0:
@@ -259,6 +260,8 @@ fn compile_function(cl_module: i64, func: MirFunction, func_handles: Dict<text, 
     # Store function params into their stack slots
     var param_idx = 0
     for local in func.locals:
+        if not local.?:
+            continue
         match local.kind:
             case Arg(index):
                 val param_val = cranelift_block_param(ctx, entry_block, index)
@@ -322,7 +325,7 @@ fn compile_function(cl_module: i64, func: MirFunction, func_handles: Dict<text, 
 fn translate_instruction(
     ctx: i64,
     inst: MirInst,
-    value_map: Dict<i64, i64>,
+    mut value_map: Dict<i64, i64>,
     slot_map: Dict<i64, i64>,
     block_map: Dict<i64, i64>,
     cl_module: i64,
@@ -439,7 +442,11 @@ fn translate_instruction(
         case Call(dest, func_op, args):
             val result = translate_call(ctx, func_op, args, value_map, slot_map, cl_module, func_handles, func)
             if dest.?:
-                value_map[dest.unwrap().id] = result
+                val dest_id = dest.unwrap().id
+                value_map[dest_id] = result
+                if slot_map.has(dest_id):
+                    val addr = cranelift_stack_addr(ctx, slot_map[dest_id], 0)
+                    cranelift_store(ctx, result, addr, 0)
 
         case CallIndirect(dest, ptr, args, sig):
             val addr = translate_operand(ctx, ptr, value_map, slot_map, func)
@@ -449,7 +456,11 @@ fn translate_instruction(
                 arg_vals.push(translate_operand(ctx, arg, value_map, slot_map, func))
             val result = cranelift_call_indirect(ctx, cl_sig, addr, arg_vals.ptr(), arg_vals.len())
             if dest.?:
-                value_map[dest.unwrap().id] = result
+                val dest_id = dest.unwrap().id
+                value_map[dest_id] = result
+                if slot_map.has(dest_id):
+                    val dest_addr = cranelift_stack_addr(ctx, slot_map[dest_id], 0)
+                    cranelift_store(ctx, result, dest_addr, 0)
 
         case Intrinsic(dest, name, args):
             if name == "__simple_ssa_phi" and dest.?:
@@ -502,7 +513,7 @@ fn store_phi_incomings_for_edge(
     ctx: i64,
     pred: BlockId,
     target: BlockId,
-    value_map: Dict<i64, i64>,
+    mut value_map: Dict<i64, i64>,
     slot_map: Dict<i64, i64>,
     func: MirFunction
 ):
@@ -524,7 +535,7 @@ fn translate_terminator(
     ctx: i64,
     current_block: BlockId,
     term: MirTerminator,
-    value_map: Dict<i64, i64>,
+    mut value_map: Dict<i64, i64>,
     slot_map: Dict<i64, i64>,
     block_map: Dict<i64, i64>,
     func: MirFunction
@@ -578,7 +589,8 @@ fn translate_terminator(
         case CallTerminator(dest, func_op, args, normal, unwind):
             val result = translate_call(ctx, func_op, args, value_map, slot_map, 0, {}, func)
             if dest.?:
-                value_map[dest.unwrap().id] = result
+                val dest_id = dest.unwrap().id
+                value_map[dest_id] = result
             if block_map.has(normal.id):
                 store_phi_incomings_for_edge(ctx, current_block, normal, value_map, slot_map, func)
                 cranelift_jump(ctx, block_map[normal.id])
@@ -596,8 +608,12 @@ fn translate_operand(
 ) -> i64:
     match operand.kind:
         case Copy(local):
+            if not local.?:
+                return cranelift_iconst(ctx, CL_TYPE_I64, 0)
             load_local(ctx, local.id, value_map, slot_map, func)
         case Move(local):
+            if not local.?:
+                return cranelift_iconst(ctx, CL_TYPE_I64, 0)
             load_local(ctx, local.id, value_map, slot_map, func)
         case Const(value, type_):
             translate_const_value(ctx, value, type_)
@@ -794,6 +810,8 @@ fn translate_call(
                 case _:
                     cranelift_iconst(ctx, CL_TYPE_I64, 0)
         case Copy(local) | Move(local):
+            if not local.?:
+                return cranelift_iconst(ctx, CL_TYPE_I64, 0)
             # Indirect call through function pointer
             val addr = load_local(ctx, local.id, value_map, slot_map, func)
             val sig = cranelift_new_signature(CL_CC_SYSTEM_V)
@@ -814,14 +832,22 @@ fn method_leaf_name(name: text) -> text:
 
 fn local_type(local_id: i64, func: MirFunction) -> MirType:
     for local in func.locals:
+        if not local.?:
+            continue
         if local.id.id == local_id:
             return local.type_
     MirType.i64()
 
 fn operand_type(operand: MirOperand, func: MirFunction) -> MirType:
     match operand.kind:
-        case Copy(local): local_type(local.id, func)
-        case Move(local): local_type(local.id, func)
+        case Copy(local):
+            if not local.?:
+                return MirType.i64()
+            local_type(local.id, func)
+        case Move(local):
+            if not local.?:
+                return MirType.i64()
+            local_type(local.id, func)
         case Const(value, type_): type_
 
 fn operand_is_float(operand: MirOperand, func: MirFunction) -> bool:

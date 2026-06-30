@@ -83,6 +83,9 @@ if user.?:
     process(user)
 ```
 
+`nil` is absence, not a showable object. Treat it like `Option` with no value:
+use `if val x = maybe_value`, `.?`, `?.`, or `??` before field or method access.
+
 ---
 
 ## Error Design Patterns
@@ -198,3 +201,4 @@ Simple:  fn add(a, b):
 6. **Use validated constructors** (`fn new() -> Result<T, E>`) to prevent invalid state
 7. **Prefer `??` for defaults** over matching on `Option` when you just need a fallback value
 8. **Use `nil` in user code** -- `None` may appear in parser diagnostics or compatibility notes, but it is not the canonical public syntax
+9. **Do not expose `nil` as a display value** -- unwrap or default optional values before field access, method calls, or user-facing output

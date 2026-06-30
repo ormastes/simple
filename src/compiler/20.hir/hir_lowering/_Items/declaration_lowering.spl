@@ -27,6 +27,9 @@ use std.nogc_sync_mut.io.process_ops.{eprint}
 
 extern fn rt_env_get(key: text) -> text
 
+fn hir_lower_env_get(key: text) -> text:
+    rt_env_get(key)
+
 impl HirLowering:
     me lower_bootstrap_flat_function(decl_idx: i64) -> HirFunction:
         val span = Span.empty()
@@ -92,21 +95,21 @@ impl HirLowering:
         )
 
     me lower_function(fn_: Function) -> HirFunction:
-        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+        if (hir_lower_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
             eprint("[hir-lower] lower_function:start {fn_.name}")
         var fn_symbol_id = SymbolId(id: -1)
-        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+        if (hir_lower_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
             fn_symbol_id = bootstrap_hir_symbol_for_name(fn_.name)
         else:
             val fn_symbol_lookup = self.symbols.lookup(fn_.name)
-            if fn_symbol_lookup.?:
-                fn_symbol_id = fn_symbol_lookup.unwrap()
+            if val found_symbol = fn_symbol_lookup:
+                fn_symbol_id = found_symbol
             else:
                 fn_symbol_id = self.symbols.define(fn_.name, SymbolKind.Function, nil, fn_.span, fn_.visibility, false, nil)
         self.current_function = Some(fn_symbol_id)
-        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
+        if (hir_lower_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
             self.symbols.push_scope(ScopeKind.Function)
-        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+        if (hir_lower_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
             eprint("[hir-lower] lower_function:scope {fn_.name}")
 
         # Lower type parameters
@@ -115,12 +118,12 @@ impl HirLowering:
         while tpi < fn_.type_params.len():
             type_params = type_params.push(self.lower_type_param(fn_.type_params[tpi]))
             tpi = tpi + 1
-        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+        if (hir_lower_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
             eprint("[hir-lower] lower_function:type_params {fn_.name}")
 
         # Lower parameters
         var params: [HirParam] = []
-        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
+        if (hir_lower_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
             val fn_params = function_params(fn_)
             if fn_.is_method and not fn_.is_static and self.current_method_self_type.? and (fn_params.len() == 0 or fn_params[0].name != "self"):
                 val self_type = self.current_method_self_type.unwrap()
@@ -137,27 +140,27 @@ impl HirLowering:
             while pi < fn_params.len():
                 params = params.push(self.lower_param(fn_params[pi]))
                 pi = pi + 1
-        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+        if (hir_lower_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
             eprint("[hir-lower] lower_function:params {fn_.name}")
 
         # Lower return type — use explicit check instead of .map() ?? default
         # to avoid crash with null coalescing on Option.map result
         var return_type = HirType(kind: HirTypeKind.Unit, span: fn_.span)
-        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
+        if (hir_lower_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
             if fn_.return_type.?:
                 # Already known-present: pass the bare value straight to lower_type.
                 # Option.map/.unwrap fail on a bare struct optional in the seed
                 # interpreter (a present optional is stored as the bare payload).
                 return_type = self.lower_type(fn_.return_type)
-        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+        if (hir_lower_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
             eprint("[hir-lower] lower_function:return_type {fn_.name}")
 
         # Lower body
         val body = self.lower_hir_block(fn_.body)
-        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+        if (hir_lower_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
             eprint("[hir-lower] lower_function:body {fn_.name}")
 
-        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
+        if (hir_lower_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
             self.symbols.pop_scope()
         self.current_function = nil
 
@@ -195,7 +198,7 @@ impl HirLowering:
             visibility: effective_visibility,
             is_async: fn_.is_async,
             is_static: fn_.is_static,
-            is_public: effective_visibility.is_public(),
+            is_public: fn_.is_public,
             is_method: fn_.is_method,
             is_mutable: fn_.is_mutable,
             is_const: fn_.is_const,
@@ -236,21 +239,23 @@ impl HirLowering:
         val class_fields: [Field]
         val class_methods: Dict<text, Function>
         val class_visibility: Visibility
+        val class_is_public: bool
         val class_attributes: [Attribute]
         val class_doc_comment: text
         val class_span: Span
         match class_:
-            case Class(name, type_params, fields, methods, visibility, _, _, doc_comment, attributes, span):
+            case Class(name, type_params, fields, methods, visibility, is_public, _, doc_comment, attributes, span):
                 class_name = name
                 class_type_params = type_params
                 class_fields = fields
                 class_methods = methods
                 class_visibility = visibility
+                class_is_public = is_public
                 class_attributes = attributes
                 class_doc_comment = doc_comment
                 class_span = span
 
-        val symbol = self.symbols.lookup(class_name).unwrap()
+        val symbol = self.symbols.lookup_or_invalid(class_name)
         self.symbols.push_scope(ScopeKind.Class)
 
         var type_params: [HirTypeParam] = []
@@ -294,7 +299,7 @@ impl HirLowering:
             fields: fields,
             methods: methods,
             visibility: effective_visibility,
-            is_public: effective_visibility.is_public(),
+            is_public: class_is_public,
             doc_comment: class_doc_comment,
             span: class_span,
             layout_attr: layout_opt,
@@ -314,20 +319,22 @@ impl HirLowering:
         val struct_type_params: [TypeParam]
         val struct_fields: [Field]
         val struct_visibility: Visibility
+        val struct_is_public: bool
         val struct_attributes: [Attribute]
         val struct_doc_comment: text
         val struct_span: Span
         match struct_:
-            case Struct(name, type_params, fields, visibility, _, _, doc_comment, attributes, span):
+            case Struct(name, type_params, fields, visibility, is_public, _, doc_comment, attributes, span):
                 struct_name = name
                 struct_type_params = type_params
                 struct_fields = fields
                 struct_visibility = visibility
+                struct_is_public = is_public
                 struct_attributes = attributes
                 struct_doc_comment = doc_comment
                 struct_span = span
 
-        val symbol = self.symbols.lookup(struct_name).unwrap()
+        val symbol = self.symbols.lookup_or_invalid(struct_name)
         if custom_primitive_is_name(struct_name):
             custom_primitive_bind_symbol(struct_name, symbol.id)
 
@@ -357,7 +364,7 @@ impl HirLowering:
             type_params: type_params,
             fields: fields,
             visibility: effective_visibility,
-            is_public: effective_visibility.is_public(),
+            is_public: struct_is_public,
             doc_comment: struct_doc_comment,
             span: struct_span,
             layout_attr: layout_opt,
@@ -387,7 +394,7 @@ impl HirLowering:
             type_: type_,
             default: lowered_default,
             visibility: f.visibility,
-            is_public: f.visibility.is_public(),
+            is_public: f.is_public,
             is_volatile: f.is_volatile,
             has_bits_attr: f.has_bits,
             bits_width: f.bits,
@@ -400,18 +407,20 @@ impl HirLowering:
         val enum_type_params: [TypeParam]
         val enum_variants: [Variant]
         val enum_visibility: Visibility
+        val enum_is_public: bool
         val enum_doc_comment: text
         val enum_span: Span
         match enum_:
-            case Enum(name, type_params, variants, visibility, _, _, doc_comment, span):
+            case Enum(name, type_params, variants, visibility, is_public, _, doc_comment, span):
                 enum_name = name
                 enum_type_params = type_params
                 enum_variants = variants
                 enum_visibility = visibility
+                enum_is_public = is_public
                 enum_doc_comment = doc_comment
                 enum_span = span
 
-        val symbol = self.symbols.lookup(enum_name).unwrap()
+        val symbol = self.symbols.lookup_or_invalid(enum_name)
 
         var type_params: [HirTypeParam] = []
         for tp in enum_type_params:
@@ -430,7 +439,7 @@ impl HirLowering:
             type_params: type_params,
             variants: variants,
             visibility: effective_visibility,
-            is_public: effective_visibility.is_public(),
+            is_public: enum_is_public,
             doc_comment: enum_doc_comment,
             span: enum_span,
             is_generic_template: false,
@@ -467,20 +476,22 @@ impl HirLowering:
         val bitfield_backing_type: Type
         val bitfield_fields: [BitfieldField]
         val bitfield_visibility: Visibility
+        val bitfield_is_public: bool
         val bitfield_attributes: [Attribute]
         val bitfield_doc_comment: text
         val bitfield_span: Span
         match bf:
-            case Bitfield(name, backing_type, fields, visibility, _, _, doc_comment, attributes, span):
+            case Bitfield(name, backing_type, fields, visibility, is_public, _, doc_comment, attributes, span):
                 bitfield_name = name
                 bitfield_backing_type = backing_type
                 bitfield_fields = fields
                 bitfield_visibility = visibility
+                bitfield_is_public = is_public
                 bitfield_attributes = attributes
                 bitfield_doc_comment = doc_comment
                 bitfield_span = span
 
-        val symbol = self.symbols.lookup(bitfield_name).unwrap()
+        val symbol = self.symbols.lookup_or_invalid(bitfield_name)
 
         val backing = self.lower_type(bitfield_backing_type)
         val layout_attr = parse_layout_attrs(bitfield_attributes)
@@ -542,7 +553,7 @@ impl HirLowering:
             fields: fields,
             total_bits: bit_offset,
             visibility: effective_visibility,
-            is_public: effective_visibility.is_public(),
+            is_public: bitfield_is_public,
             doc_comment: bitfield_doc_comment,
             span: bitfield_span
         )

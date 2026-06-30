@@ -682,6 +682,14 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
         "rt_cranelift_append_block_param",
         cranelift::rt_cranelift_append_block_param
     );
+    insert_simple!(
+        "rt_cranelift_append_func_params",
+        cranelift::rt_cranelift_append_func_params
+    );
+    insert_simple!(
+        "rt_cranelift_aot_define_function",
+        cranelift::rt_cranelift_aot_define_function
+    );
     insert_simple!("rt_cranelift_band", cranelift::rt_cranelift_band);
     insert_simple!("rt_cranelift_bconst", cranelift::rt_cranelift_bconst);
     insert_simple!("rt_cranelift_begin_function", cranelift::rt_cranelift_begin_function);
@@ -698,6 +706,10 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     );
     insert_simple!("rt_cranelift_call_indirect", cranelift::rt_cranelift_call_indirect);
     insert_simple!("rt_cranelift_create_block", cranelift::rt_cranelift_create_block);
+    insert_simple!(
+        "rt_cranelift_declare_function",
+        cranelift::rt_cranelift_declare_function
+    );
     insert_simple!("rt_cranelift_define_function", cranelift::rt_cranelift_define_function);
     insert_simple!("rt_cranelift_emit_object", cranelift::rt_cranelift_emit_object);
     insert_simple!("rt_cranelift_end_function", cranelift::rt_cranelift_end_function);
@@ -724,9 +736,14 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_cranelift_ireduce", cranelift::rt_cranelift_ireduce);
     insert_simple!("rt_cranelift_ishl", cranelift::rt_cranelift_ishl);
     insert_simple!("rt_cranelift_isub", cranelift::rt_cranelift_isub);
+    insert_simple!(
+        "rt_cranelift_import_function",
+        cranelift::rt_cranelift_import_function
+    );
     insert_simple!("rt_cranelift_jump", cranelift::rt_cranelift_jump);
     insert_simple!("rt_cranelift_load", cranelift::rt_cranelift_load);
     insert_simple!("rt_cranelift_module_new", cranelift::rt_cranelift_module_new);
+    insert_simple!("rt_cranelift_new_aot_module", cranelift::rt_cranelift_new_aot_module);
     insert_simple!("rt_cranelift_new_module", cranelift::rt_cranelift_new_module);
     insert_simple!("rt_cranelift_new_signature", cranelift::rt_cranelift_new_signature);
     insert_simple!("rt_cranelift_null", cranelift::rt_cranelift_null);

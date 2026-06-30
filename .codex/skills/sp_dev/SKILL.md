@@ -233,6 +233,11 @@ the smallest reproducer and gate; only edit `src/runtime/**` when the lane is
 explicitly runtime-owned or the bug is proven there. Do not hide a
 compiler/runtime bug by normalizing an `rt_*` workaround in feature code.
 
+For nil/optional failures, fix the owner lowering/type/runtime path instead of
+making `nil` displayable or adding local `rt_*` shims. `nil` is absence like an
+empty `Option`; SPipe scenarios should assert `to_be_nil()` or unwrap/default
+before field access, method calls, or user-facing output.
+
 Before adding any new `rt_*` import, extern, wrapper, alias, runtime-backed
 fixture bypass, or direct backend field access outside `src/runtime/**`, stop
 and record the decision in the lane state:

@@ -13,6 +13,9 @@ use std.nogc_sync_mut.io.process_ops.{eprint}
 
 extern fn rt_env_get(key: text) -> text
 
+fn hir_expr_env_get(key: text) -> text:
+    rt_env_get(key)
+
 # Expression Lowering
 # ============================================================================
 
@@ -87,11 +90,11 @@ impl HirLowering:
         val host_gpu_lane = self.try_lower_host_gpu_lane_expr(e)
         if val lowered_host_gpu_lane = host_gpu_lane:
             return lowered_host_gpu_lane
-        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+        if (hir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
             eprint("[hir-lower] lower_expr:kind")
         val kind = match expr_kind_value:
             case IntLit(value):
-                if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+                if (hir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
                     eprint("[hir-lower] lower_expr:int")
                 HirExprKind.IntLit(value, nil)
 
@@ -99,9 +102,9 @@ impl HirLowering:
                 HirExprKind.FloatLit(value, nil)
 
             case StringLit(value, interps):
-                if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+                if (hir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
                     eprint("[hir-lower] lower_expr:string")
-                val hir_interps = if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+                val hir_interps = if (hir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
                     nil
                 elif interps.?:
                     self.lower_interpolation_list(interps)
@@ -110,7 +113,7 @@ impl HirLowering:
                 HirExprKind.StringLit(value, hir_interps)
 
             case BoolLit(value):
-                if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+                if (hir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
                     eprint("[hir-lower] lower_expr:bool")
                 HirExprKind.BoolLit(value)
 
@@ -140,7 +143,7 @@ impl HirLowering:
                 HirExprKind.SetLit(self.lower_expr_list(elements), nil)
 
             case Ident(name):
-                if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+                if (hir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
                     eprint("[hir-lower] lower_expr:ident {name}")
                 val symbol = self.symbols.lookup(name)
                 if val found_symbol = symbol:
@@ -176,7 +179,7 @@ impl HirLowering:
                 HirExprKind.Unary(hir_op, self.lower_hir_expr(operand))
 
             case Call(callee, args):
-                if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+                if (hir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
                     HirExprKind.Call(self.lower_hir_expr(callee), [], [])
                 else:
                     var hir_args: [HirCallArg] = []
@@ -189,7 +192,7 @@ impl HirLowering:
                     HirExprKind.Call(self.lower_hir_expr(callee), hir_args, [])
 
             case MethodCall(receiver, method, args):
-                if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+                if (hir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
                     HirExprKind.MethodCall(self.lower_hir_expr(receiver), method, [], MethodResolution.Unresolved)
                 else:
                     var hir_args: [HirCallArg] = []
@@ -286,17 +289,17 @@ impl HirLowering:
                 var hir_fields: [(text, HirExpr)] = []
                 for (name, value) in fields:
                     hir_fields = hir_fields.push((name, self.lower_hir_expr(value)))
-                val symbol = self.symbols.lookup(type_)
-                val hir_type = if val found_symbol = symbol:
-                    HirType(kind: HirTypeKind.Named(found_symbol, []), span: e.span)
+                val symbol = self.symbols.lookup_or_invalid(type_)
+                val hir_type = if symbol.is_valid():
+                    HirType(kind: HirTypeKind.Named(symbol, []), span: e.span)
                 else:
                     HirType(kind: HirTypeKind.Error, span: e.span)
                 HirExprKind.StructLit(hir_type, hir_fields)
 
             case EnumLit(enum_, variant, payload):
-                val symbol = self.symbols.lookup(enum_)
-                val hir_type = if val found_symbol = symbol:
-                    HirType(kind: HirTypeKind.Named(found_symbol, []), span: e.span)
+                val symbol = self.symbols.lookup_or_invalid(enum_)
+                val hir_type = if symbol.is_valid():
+                    HirType(kind: HirTypeKind.Named(symbol, []), span: e.span)
                 else:
                     HirType(kind: HirTypeKind.Error, span: e.span)
                 val hir_payload = payload.map(\p: match p:
@@ -456,9 +459,9 @@ impl HirLowering:
                 HirPatternKind.Array(hir_elements, rest_symbol)
 
             case Struct(type_, fields):
-                val symbol = self.symbols.lookup(type_)
-                val hir_type = if val found_symbol = symbol:
-                    HirType(kind: HirTypeKind.Named(found_symbol, []), span: p.span)
+                val symbol = self.symbols.lookup_or_invalid(type_)
+                val hir_type = if symbol.is_valid():
+                    HirType(kind: HirTypeKind.Named(symbol, []), span: p.span)
                 else:
                     HirType(kind: HirTypeKind.Error, span: p.span)
                 var hir_fields: [(text, HirPattern)] = []
@@ -467,9 +470,9 @@ impl HirLowering:
                 HirPatternKind.Struct(hir_type, hir_fields)
 
             case Enum(enum_, variant, payload):
-                val symbol = self.symbols.lookup(enum_)
-                val hir_type = if val found_symbol = symbol:
-                    HirType(kind: HirTypeKind.Named(found_symbol, []), span: p.span)
+                val symbol = self.symbols.lookup_or_invalid(enum_)
+                val hir_type = if symbol.is_valid():
+                    HirType(kind: HirTypeKind.Named(symbol, []), span: p.span)
                 else:
                     HirType(kind: HirTypeKind.Error, span: p.span)
                 val hir_payload = payload.map(\pl: match pl:
@@ -507,7 +510,7 @@ impl HirLowering:
         HirPattern(kind: kind, type_: nil, span: p.span)
 
     me lower_hir_block(b: Block) -> HirBlock:
-        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+        if (hir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
             eprint("[hir-lower] lower_block:start")
             var boot_stmts: [HirStmt] = []
             var boot_idx = 0

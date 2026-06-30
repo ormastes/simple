@@ -15,6 +15,9 @@ use compiler.core.types.{custom_primitive_bind_symbol, custom_primitive_is_name}
 
 extern fn rt_env_get(key: text) -> text
 
+fn hir_type_env_get(key: text) -> text:
+    rt_env_get(key)
+
 # Local placeholder for the module resolver port used in FR-COMPILER-003 A2.
 # The actual 85.mdsoc implementation will be wired by the A2 agent at call sites.
 # Kept here (layer 20) to avoid a layer violation (20 must not import 85).
@@ -164,7 +167,7 @@ impl HirLowering:
         ))
 
     me compute_visibility(type_name: text, declared_visibility: Visibility) -> Visibility:
-        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+        if (hir_type_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
             return Visibility.Public
         if declared_visibility != Visibility.Private:
             return declared_visibility
@@ -199,9 +202,8 @@ impl HirLowering:
                             self.error("Result type expects 2 type arguments", t.span)
                             HirTypeKind.Error
                     case _:
-                        val symbol = self.symbols.lookup(name)
-                        if symbol.?:
-                            val symbol_id = symbol.unwrap()
+                        val symbol_id = self.symbols.lookup_or_invalid(name)
+                        if symbol_id.is_valid():
                             if custom_primitive_is_name(name):
                                 custom_primitive_bind_symbol(name, symbol_id.id)
                             HirTypeKind.Named(symbol_id, hir_args)
@@ -275,7 +277,7 @@ impl HirLowering:
 
     me lower_trait_bound(bound: TraitBound) -> HirTraitBound:
         # Lookup the type parameter symbol
-        val type_param_symbol = self.symbols.lookup(bound.type_param).unwrap()
+        val type_param_symbol = self.symbols.lookup_or_invalid(bound.type_param)
 
         # Lower the trait type
         val trait_type = self.lower_type(bound.trait_)

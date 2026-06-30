@@ -36,8 +36,23 @@ use compiler.mir_opt.mir_opt.auto_vectorize (run_auto_vectorize)
 use compiler.mir_opt.mir_opt.pattern_dispatch (run_pattern_idiom_pass, run_pattern_idiom_pass_x86, run_pattern_idiom_pass_generic, run_narrow_form_pass)
 extern fn rt_env_get(key: text) -> text
 
+fn mir_opt_env_get(key: text) -> text:
+    rt_env_get(key)
+
 fn mir_opt_trace_enabled() -> bool:
-    (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1"
+    (mir_opt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1"
+
+fn mir_opt_bootstrap_enabled() -> bool:
+    if (mir_opt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+        return true
+    val native_entry = mir_opt_env_get("SIMPLE_NATIVE_BUILD_ENTRY") ?? ""
+    native_entry.ends_with("bootstrap_main.spl")
+
+fn mir_opt_is_inline_pass(pass_name: text) -> bool:
+    pass_name == "inline_small_functions" or pass_name == "inline_functions" or pass_name == "inline_aggressive"
+
+fn mir_opt_bootstrap_skip_pass(pass_name: text) -> bool:
+    mir_opt_is_inline_pass(pass_name) or pass_name == "collection_opt" or pass_name == "predicate_promote"
 use compiler.mir_opt.mir_opt.pattern.pattern_rule_pass (pattern_rule_pass_new, pattern_rule_pass_run)
 use compiler.mir_opt.mir_opt.pattern.rule_engine.{
     OptimizationRuleProvider, OptimizerProviderKind, OptimizerRuleLookupKind,
@@ -685,12 +700,10 @@ fn optimize_module(module: MirModule, level: OptLevel) -> MirModule:
     val pipeline = optimizationpipeline_for_level(level)
     pipeline_optimize(pipeline, module)
 
-extern fn rt_env_get(key: text) -> text
-
 fn mir_bulk_ops_enabled() -> bool:
     # SG-1.3: default-OFF. Set SIMPLE_MIR_BULK_OPS=1 to enable the (no-op) bulk-op
     # recognizer scaffolding on the C-backend path only.
-    rt_env_get("SIMPLE_MIR_BULK_OPS") == "1"
+    mir_opt_env_get("SIMPLE_MIR_BULK_OPS") == "1"
 
 fn apply_bulk_recognizers(module: MirModule) -> MirModule:
     # SG-1.3 SOUND bulk-copy elision (C backend + SIMPLE_MIR_BULK_OPS=1 only). For each
@@ -850,6 +863,10 @@ fn pipeline_optimize(pipeline: OptimizationPipeline, module: MirModule) -> MirMo
     var optimized_module = module
     val ctx = pipeline.target_ctx
     for pass_name in pipeline.passes:
+        if mir_opt_bootstrap_enabled() and mir_opt_bootstrap_skip_pass(pass_name):
+            if mir_opt_trace_enabled():
+                print "[mir-opt] pass:skip {pass_name}"
+            continue
         if mir_opt_trace_enabled():
             print "[mir-opt] pass:start {pass_name}"
         if pass_name == "pattern_idiom":
@@ -884,21 +901,25 @@ fn run_typed_pass_on_module(kind: PassKind, module: MirModule) -> MirModule:
     var result_module = module
     match kind:
         case DeadCodeElimination:
-            for sym in module.functions.keys():
+            for func in module.functions.values():
                 var p = create_dce_pass()
-                result_module.functions[sym] = dce_run_on_function(p, result_module.functions[sym])
+                val updated = dce_run_on_function(p, func)
+                result_module.functions[updated.symbol] = updated
         case ConstantFolding:
-            for sym in module.functions.keys():
+            for func in module.functions.values():
                 var p = create_const_fold_pass()
-                result_module.functions[sym] = cf_run_on_function(p, result_module.functions[sym])
+                val updated = cf_run_on_function(p, func)
+                result_module.functions[updated.symbol] = updated
         case CopyPropagation:
-            for sym in module.functions.keys():
+            for func in module.functions.values():
                 var p = create_copy_prop_pass()
-                result_module.functions[sym] = copypropagation_run_on_function(p, result_module.functions[sym])
+                val updated = copypropagation_run_on_function(p, func)
+                result_module.functions[updated.symbol] = updated
         case CommonSubexprElim:
-            for sym in module.functions.keys():
+            for func in module.functions.values():
                 var p = create_cse_pass()
-                result_module.functions[sym] = cse_run_on_function(p, result_module.functions[sym])
+                val updated = cse_run_on_function(p, func)
+                result_module.functions[updated.symbol] = updated
         case InlineSmallFunctions:
             var p = create_inline_small_pass()
             result_module = inline_run_on_module(p, result_module)
@@ -909,45 +930,54 @@ fn run_typed_pass_on_module(kind: PassKind, module: MirModule) -> MirModule:
             var p = create_inline_aggressive_pass()
             result_module = inline_run_on_module(p, result_module)
         case LoopInvariantMotion:
-            for sym in module.functions.keys():
+            for func in module.functions.values():
                 var p = create_loop_opt_conservative()
-                result_module.functions[sym] = loop_opt_run_on_function(p, result_module.functions[sym])
+                val updated = loop_opt_run_on_function(p, func)
+                result_module.functions[updated.symbol] = updated
         case LoopUnroll:
-            for sym in module.functions.keys():
+            for func in module.functions.values():
                 var p = create_loop_opt_pass()
-                result_module.functions[sym] = loop_opt_run_on_function(p, result_module.functions[sym])
+                val updated = loop_opt_run_on_function(p, func)
+                result_module.functions[updated.symbol] = updated
         case BoundsCheckElimination:
-            for sym in module.functions.keys():
+            for func in module.functions.values():
                 var p = create_bounds_check_elim_pass()
-                result_module.functions[sym] = bounds_check_elim_run_on_function(p, result_module.functions[sym])
+                val updated = bounds_check_elim_run_on_function(p, func)
+                result_module.functions[updated.symbol] = updated
         case StrengthReduction:
-            for sym in module.functions.keys():
+            for func in module.functions.values():
                 var p = create_strength_reduction_pass()
-                result_module.functions[sym] = strength_reduction_run_on_function(p, result_module.functions[sym])
+                val updated = strength_reduction_run_on_function(p, func)
+                result_module.functions[updated.symbol] = updated
         case CollectionOpt:
-            for sym in module.functions.keys():
+            for func in module.functions.values():
                 var p = create_collection_opt_pass()
-                result_module.functions[sym] = collection_opt_run_on_function(p, result_module.functions[sym])
+                val updated = collection_opt_run_on_function(p, func)
+                result_module.functions[updated.symbol] = updated
         case StringBuilderOpt:
-            for sym in module.functions.keys():
+            for func in module.functions.values():
                 var p = create_string_builder_opt_pass()
-                result_module.functions[sym] = string_builder_opt_run_on_function(p, result_module.functions[sym])
+                val updated = string_builder_opt_run_on_function(p, func)
+                result_module.functions[updated.symbol] = updated
         case BodyOutlining:
             # Module-level pass: outlining creates new functions
             var ol = create_outline_pass()
             result_module = outline_run_on_module(ol, result_module)
         case GeneratorStateMachine:
-            for sym in module.functions.keys():
+            for func in module.functions.values():
                 var p = create_generator_sm_pass()
-                result_module.functions[sym] = generator_sm_run_on_function(p, result_module.functions[sym])
+                val updated = generator_sm_run_on_function(p, func)
+                result_module.functions[updated.symbol] = updated
         case TailCallOptimization:
-            for sym in module.functions.keys():
+            for func in module.functions.values():
                 var p = create_tco_pass()
-                result_module.functions[sym] = tco_run_on_function(p, result_module.functions[sym])
+                val updated = tco_run_on_function(p, func)
+                result_module.functions[updated.symbol] = updated
         case GlobalValueNumbering:
-            for sym in module.functions.keys():
+            for func in module.functions.values():
                 var p = create_gvn_pass()
-                result_module.functions[sym] = gvn_run_on_function(p, result_module.functions[sym])
+                val updated = gvn_run_on_function(p, func)
+                result_module.functions[updated.symbol] = updated
         case PredicatePromote:
             result_module = run_predicate_promote(result_module)
         case AutoVectorize:
@@ -965,21 +995,25 @@ fn run_typed_pass_on_module(kind: PassKind, module: MirModule) -> MirModule:
             # bare run_pass_on_module callers without context get a no-op.
             pass_do_nothing
         case WriteCoalesce:
-            for sym in module.functions.keys():
+            for func in module.functions.values():
                 var wc_stats = OptimizationStats.create()
-                result_module.functions[sym] = optimize_write_coalesce(result_module.functions[sym], wc_stats)
+                val updated = optimize_write_coalesce(func, wc_stats)
+                result_module.functions[updated.symbol] = updated
         case ReadAheadHoist:
-            for sym in module.functions.keys():
+            for func in module.functions.values():
                 var rah_stats = OptimizationStats.create()
-                result_module.functions[sym] = optimize_read_ahead_hoist(result_module.functions[sym], rah_stats)
+                val updated = optimize_read_ahead_hoist(func, rah_stats)
+                result_module.functions[updated.symbol] = updated
         case SyscallBatch:
-            for sym in module.functions.keys():
+            for func in module.functions.values():
                 var sb_stats = OptimizationStats.create()
-                result_module.functions[sym] = optimize_syscall_batch(result_module.functions[sym], sb_stats)
+                val updated = optimize_syscall_batch(func, sb_stats)
+                result_module.functions[updated.symbol] = updated
         case TypedByteCanon:
-            for sym in module.functions.keys():
+            for func in module.functions.values():
                 var tbc = create_typed_byte_canon_pass()
-                result_module.functions[sym] = typed_byte_canon_run_on_function(tbc, result_module.functions[sym])
+                val updated = typed_byte_canon_run_on_function(tbc, func)
+                result_module.functions[updated.symbol] = updated
     result_module
 
 # ============================================================================

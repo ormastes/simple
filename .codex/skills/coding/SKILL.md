@@ -159,6 +159,8 @@ items.map(\x:
 user?.name ?? "Anonymous"      # Optional chaining + nil coalescing
 ```
 
+`nil` is absence, like an empty `Option`, not a showable value. Use `if val x = maybe_value`, `.?`, `?.`, or `??` before field access, method calls, or user-facing output.
+
 ### Operators
 
 ```simple
@@ -197,6 +199,7 @@ alias Optional = Option        # Class alias
 | `?` in names | Not allowed — `?` is operator only; use `.?` over `is_*` predicates |
 | `:=` walrus shorthand | Use `val name = expr` until real `:=` parser/runtime tests pass |
 | Native pipe-forward dispatch | Use direct calls or run native tests with `SIMPLE_NO_STUB_FALLBACK=1` |
+| `nil` display/field access | Unwrap or default first; `nil` is absence, not an object |
 
 ## Concurrency API Map
 
