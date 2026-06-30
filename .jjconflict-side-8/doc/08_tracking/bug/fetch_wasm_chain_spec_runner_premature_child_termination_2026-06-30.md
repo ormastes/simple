@@ -41,29 +41,49 @@ and instantiateStreaming memory maximum failures in browser scripts`, spec line
 ## Ruled out
 
 - **Not a per-block defect:** block 124 passes alone; the spec passes 250/250 via `simple run`.
-- **Not host OOM:** host had **119 GB free** during the failing run; no `dmesg` oom-killer event. (Child peak RSS is only ~315 MB.)
-- **Not the 120s timeout:** child stops at ~64s, well under the 120s `process_run_timeout` budget; exit code is not the timeout marker (124/-1).
+- **Spec/library reliably correct out-of-runner:** `timeout 120 simple run <spec> | cat`
+  ran **5/5 times = 250/250, exit 0** (peak RSS stable ~311-315 MB, ~104s). The
+  non-determinism does **not** live in the interpreter/library.
+- **Not host OOM:** host had **119 GB free** during the failing run; no `dmesg` oom-killer event.
+- **Not a cgroup OOM:** `memory.max` is `max` (unlimited) at every level of the
+  process's cgroup-v2 hierarchy (`user.slice` → … → `tmux-*.scope`). The child's
+  ~315 MB cannot trip a cgroup limit because there is none.
+- **Not the runner's own memory limiter:** default path has `max_mem_gb = 0` and
+  `max_procs = 0`, so `run_test_file_interpreter` takes the plain
+  `process_run_timeout` branch (no `process_run_with_limits`); the failing output
+  contains **no `Memory limit exceeded` string**, so that mechanism never fired.
+- **Not the 120s timeout:** child stops at ~64s, well under the 120s budget; exit code is not the timeout marker (124/-1).
 - **Not a pipe-buffer deadlock:** total child output is only ~21 KB (≈10.9 KB at block 122), far below the 64 KB pipe buffer.
 - **Not infix-matcher preprocessing:** the spec uses method-form `expect(x).to_equal(y)`, so `preprocess_infix_matchers_only` is a no-op (temp == original).
 - **Not the SMF/compile path:** default mode is `TestExecutionMode.Interpreter` (`run_test_file_interpreter`). (Separately, `simple compile <spec>` fails with `semantic: undefined identifier: NATIVE_PROMISE_THEN` — a distinct compile-mode resolution gap, see below.)
 
-## Root cause (narrowed)
+## Root cause — mechanism undetermined; spec proven correct out-of-runner
 
-The failure is reproducible **only** when launched through `bin/simple test`
-(the test-runner parent), never when the identical child command is run in
-isolation. The long-running (~64-104s), memory-growing child (no GC =>
-allocate-and-leak, climbing to ~315 MB RSS / higher VSZ) is being terminated
-prematurely and non-deterministically by the test-runner harness. The most
-likely mechanism is a resource monitor / watchdog in the runner
-(`src/app/test_runner_new/test_runner_resources.spl` `default_resource_limits`
-= `memory_mb_limit: 512`, `cpu_percent_limit: 200%`; `system_monitor.spl` /
-`process_monitor` `exceeds_limits`) sampling the child and killing it when a
-sampled metric (VSZ, accumulated CPU, or wall time) crosses a threshold — the
-non-deterministic stop point (111/122/123) matches sampling-race behaviour.
+The failure reproduces **only** when launched through `bin/simple test` (the
+test-runner parent), and **never** when the identical child command
+(`timeout 120 simple run <spec>`, with or without a captured pipe) is run in
+isolation (5/5 clean). The child stops non-deterministically at 111/122/123 of
+250 blocks with no `✗`, no BDD summary, no panic text, and a non-zero exit.
 
-This is a test-runner / no-GC-memory-growth interaction, not a defect in the
+The exact kill mechanism is **not confirmed**. The obvious memory explanations
+are ruled out above (no host OOM, no cgroup limit, runner memory-limiter not in
+the default branch). Remaining hypotheses, none verified:
+
+- A background sampler/monitor the test-runner parent starts for the run
+  (`test_runner_resources.spl` `default_resource_limits` memory_mb_limit 512 /
+  cpu 200%; `system_monitor.spl` / `process_monitor.exceeds_limits`) that
+  signals the child outside the `process_run_with_limits` path — would explain
+  the sampling-race-shaped non-determinism, but I did not confirm it is wired
+  into the default single-file interpreter run.
+- An output-capture / child-reaping race in `rt_process_run` under the
+  test-runner parent's process state.
+
+What is certain: this is a **test-runner / harness interaction with a
+long-running, memory-growing (no-GC) child**, not a defect in the
 `std.gc_async_mut.web.browser_session*` or `std.nogc_sync_mut.js.engine` code
-exercised by the spec.
+exercised by the spec. To confirm the mechanism, capture the failing child's
+exit status as seen by the runner (137 ⇒ SIGKILL) and check whether the runner
+spawns a monitor thread for the default interpreter path.
 
 ## Reproduction
 
