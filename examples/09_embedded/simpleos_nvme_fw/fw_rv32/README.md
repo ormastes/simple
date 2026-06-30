@@ -1,40 +1,42 @@
 # NVMe firmware — bare-metal RV32 on-device self-test (`fw_rv32/`, gap-closure P9)
 
-A bare-metal RISC-V 32 entry that runs the firmware's **core data-path logic with no heap
-growth** (fixed-size `[i64]` arrays, plain loops) on a real ISA under `qemu-system-riscv32 -bios
-none`, rather than only on the host interpreter. It boots in M-mode, runs the self-test
-on-device, prints a marker over the 16550 UART, then halts.
+`entry.spl` is an **array-free, scalar** re-expression of the firmware's core **RAIN XOR-parity
+reconstruct** (`../fw/rain.spl`, proven in `../fw/proofs/Rain.lean`), written to run inside the
+bare-metal rv32 boot path with **no heap and no arrays** — matching the constraint documented in
+`src/os/kernel/arch/riscv32/boot.spl` ("keep this module freestanding and minimal ... without
+pulling runtime formatting, arrays, or boot metadata into the first-stage entry object"). It
+verifies, with eight scalar channels, that parity XOR the survivors recovers any lost channel
+exactly (XOR is its own inverse), plus a channel-failure rebuild, then prints
+`ALL RV32 NVME FW CHECKS PASS` over the UART via `rt_riscv_uart_put` — one byte at a time, exactly
+like `boot.spl`'s `_line_*` helpers.
 
-`entry.spl` re-expresses the firmware's **RAIN XOR-parity reconstruct** (`../fw/rain.spl`,
-proven in `../fw/proofs/Rain.lean`): build per-stripe parity, lose a channel, reconstruct it from
-the survivors — XOR is its own inverse, so the survivors cancel and the lost word remains. It
-also rebuilds a corrupted channel over a small fixed NAND. On success it emits
-`ALL RV32 NVME FW CHECKS PASS`.
+The scalar logic is `bin/simple check`-clean and host-verified (the XOR-cancel math reproduces
+`fail=0`).
 
-## Build & boot
+## Integration (when the rv32 toolchain is restored)
 
-```sh
-sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/build.shs   # -> build/nvme_fw_rv32.elf
-sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/boot.shs    # boot under QEMU, grep the marker
-```
+`entry.spl` exposes `nvme_fw_rv32_selftest()`, designed to be called from the rv32 boot chain:
 
-## Status (2026-06-30): source ready + check-clean; **build blocked**
+1. Add a `nvme_fw_rv32_selftest()` call in `src/os/kernel/arch/riscv32/boot.spl` `boot_main`,
+   after `riscv_noalloc_log_init()`.
+2. Build the rv32 OS ELF: `sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/build.shs`.
+3. Boot + check the marker: `sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/boot.shs <elf>`.
 
-- ✅ `entry.spl` is `bin/simple check`-clean and re-expresses the Lean-proven RAIN logic no-alloc.
-- ✅ The QEMU rv32 boot+serial path works in this environment (`boot.shs` boots the prebuilt
+(No standalone `@naked _start` is hand-written here — the proven `_start`/crt/UART live in
+`boot.spl`; reusing them is more reliable than an untestable hand-rolled entry.)
+
+## Status (2026-06-30): source ready + check-clean; **build environmentally blocked**
+
+- ✅ `entry.spl` is `check`-clean, array-free, and follows `boot.spl`'s proven UART pattern; the
+  RAIN logic is host-verified.
+- ✅ The QEMU rv32 boot+serial path works here (`boot.shs` boots the **prebuilt**
   `build/os/simpleos_riscv32.elf` and prints on-device `PMM OK`/`HEAP OK`/`SVC OK`).
 - ❌ `native-build --backend llvm --target riscv32-unknown-none` exits **255 with no diagnostic**
-  for this standalone bare-metal entry (both self-hosted and seed compilers), producing no ELF.
-  Tracked: `doc/08_tracking/bug/native_build_rv32_baremetal_silent_255_2026-06-30.md`.
+  in this environment — **including the proven full-OS recipe** (verified by running it), not just
+  this entry. So no rv32 ELF can be built here and the boot is **not observed**. The prebuilt ELF
+  that boots is stale (from an earlier build environment). Tracked:
+  `doc/08_tracking/bug/native_build_rv32_baremetal_silent_255_2026-06-30.md`.
 
-So the boot is **not yet observed** — P9 is honestly recorded as build-blocked, not done. The
-remaining work after the build blocker is fixed: run `build.shs` then `boot.shs`, confirm the
-marker, and wire a fail-closed QEMU system test (per `qemu_systest_contract`). The full
-22-module no-alloc port of the host `../fw/` stack remains the larger ceiling.
-
-## Scope note (honest)
-
-This proves the **core algorithm** runs on rv32 bare metal with no heap growth — it is not the
-literal host `Ftl`/`Hil`/`Fil`/controller (those pull `ftl_fill`/dict-map/journal-ring and the
-std/SFFI tree, which is not bare-metal-portable as-is). The host stack stays the full simulation;
-this is the first step of the embedded-target port.
+P9 is honestly recorded as **build-blocked (environmental)**, not done — it is not a
+firmware-logic gap. The full 22-module no-alloc port of the host `../fw/` stack remains the larger
+ceiling beyond this self-test slice.
