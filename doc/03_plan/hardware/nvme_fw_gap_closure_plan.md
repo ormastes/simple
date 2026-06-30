@@ -216,7 +216,14 @@ Set Features `FEAT_POWER_MGMT`. Wire composite temp + throttle events into SMART
 **Silicon ceiling.** No real sensor/voltage/clock — temperature is an activity model with a
 calibration knob (`ponytail:` real sensors drift; leave the knob).
 
-## P8 — Internal RAID/RAIN (die/channel failure protection)  *(G8)*
+## P8 — Internal RAID/RAIN (die/channel failure protection)  *(G8)*  — ✅ DONE (2026-06-30)
+
+> Landed: `fw/rain.spl` (XOR parity stripe across the P2 channels; reconstruct a failed channel —
+> data or parity — from the survivors), `rain_selftest` (`test_fw`), `rain_check.spl` (single-channel
+> failure recovery, gated in the system spec), and `proofs/Rain.lean` — the **genuine** proof of
+> the set: for any data and any survivor combination, reconstruction recovers the exact lost word
+> (`parity = lost ⊕ s ⇒ parity ⊕ s = lost`), via Lean-core `Nat.xor` (would be false if the formula
+> were wrong). Built on P2's channel model.
 
 **Goal.** XOR parity stripe across channels so a die/channel failure is recoverable.
 

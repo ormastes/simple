@@ -14,12 +14,13 @@ extraction of the executed bytes (same approach as the sibling `emu/proofs/`).
 | `Gc.lean` | `ftl.spl` (`reclaim_block`) | A relocated page lands **outside** the victim block, so erasing the victim never destroys the current copy of a relocated LBA; a relocation is local (other LBAs untouched); and the abort path (alloc failed → no erase) is a no-op on the map. Together: whether GC succeeds or aborts, no committed data is lost. |
 | `Hooks.lean` | `sandbox.spl` + `hooks.spl` + `ftl.spl` (`policy_gc_victim`) | **Sandboxed dynamic policy hooks (req 7).** Only the four policy kinds (0..3) install; every forbidden metadata/recovery/commit domain (≥100) is rejected. The output clamps map any hook return into the safe set (priority ∈ [0,3], flag ∈ {0,1}). Flagship: the firmware only asks the untrusted hook to **score** its own CLOSED candidates, so the selected victim is always an offered candidate — CLOSED for any score function, never a FREE/OPEN/BAD block. |
 | `Fmc.lean` | `fil_fmc.spl` (FMC status state machine) | **Flash-controller register discipline (gap-closure P1).** `issue` completes a command (DONE/ERR) only from BUSY, so a completed status never appears without a prior load+issue; from BUSY, issue reaches exactly DONE or ERR; ERR is sticky under poll (read-only) and is cleared only by ack. |
+| `Rain.lean` | `rain.spl` (XOR parity reconstruction) | **Internal RAID/RAIN channel resilience (gap-closure P8).** For any data and any survivor combination, reconstructing a failed channel from the parity + survivors recovers the **exact** lost word — the survivors cancel because XOR is its own inverse (`parity = lost ⊕ s ⇒ parity ⊕ s = lost`). A genuine algebraic guarantee, not a restatement. |
 
-Run all five:
+Run all six:
 
 ```bash
 export PATH="$HOME/.elan/bin:$PATH"
-for f in Alloc Recover Gc Hooks Fmc; do lean examples/09_embedded/simpleos_nvme_fw/fw/proofs/$f.lean && echo "$f OK"; done
+for f in Alloc Recover Gc Hooks Fmc Rain; do lean examples/09_embedded/simpleos_nvme_fw/fw/proofs/$f.lean && echo "$f OK"; done
 ```
 
 They are also gated by the system spec

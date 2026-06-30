@@ -27,7 +27,7 @@ nvme_firmware_simulation_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 14 | 14 | 0 | 0 |
+| 16 | 16 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -338,6 +338,29 @@ expect(out).to_contain("PARALLELISM OK")
 
 </details>
 
+#### reconstructs a failed channel from XOR parity with no data loss (RAIN, gap-closure P8)
+
+- Write a parity stripe across the channels, then fail a channel and reconstruct
+   - Expected: code equals `0`
+- Any single channel (data or parity) is recovered exactly from the survivors
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Write a parity stripe across the channels, then fail a channel and reconstruct")
+val (out, err, code) = _run(FW + "/rain_check.spl")
+expect(code).to_equal(0)
+step("Any single channel (data or parity) is recovered exactly from the survivors")
+expect(out).to_contain("RAIN OK")
+```
+
+</details>
+
 ### NVMe firmware: Lean4 formal verification of the FTL invariants
 
 #### verifies the allocator and GC-reserve safety (Alloc.lean)
@@ -445,12 +468,33 @@ expect(out).to_contain("LEAN_OK")
 
 </details>
 
+#### verifies XOR-parity channel reconstruction (Rain.lean, gap-closure P8)
+
+- Check proofs/Rain.lean with the Lean toolchain
+   - Expected: code equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Check proofs/Rain.lean with the Lean toolchain")
+val (out, err, code) = _lean(FW + "/proofs/Rain.lean")
+expect(code).to_equal(0)
+expect(out).to_contain("LEAN_OK")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 14 |
-| Active scenarios | 14 |
+| Total scenarios | 16 |
+| Active scenarios | 16 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

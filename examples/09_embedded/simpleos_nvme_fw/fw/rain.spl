@@ -1,0 +1,88 @@
+"""
+rain — internal RAID/RAIN parity across NAND channels (gap-closure P8).
+
+Real enterprise SSDs survive a die/channel failure with internal redundancy (RAID/RAIN). We
+model the simplest sound form: one XOR parity word per stripe across the P2 channels. A stripe
+holds one data word per channel plus a parity word = XOR of all data words; if any single
+channel is lost (a data word OR the parity), it is reconstructed from the survivors.
+
+The reconstruction is exact for any survivor combination because XOR is its own inverse:
+parity = lost ⊕ (⊕ survivors), so parity ⊕ (⊕ survivors) = lost (the survivors cancel). This
+is the property proven in proofs/Rain.lean — a genuine algebraic guarantee, not a restatement.
+"""
+
+use nvme_types.*
+use fil_scheduler.*     # NUM_CHANNELS, sched_fill
+
+# XOR-fold a list of words.
+fn xor_all(words: [i64]) -> i64:
+    var acc: i64 = 0
+    var i: i64 = 0
+    while i < words.len():
+        acc = acc ^ words[i]
+        i = i + 1
+    acc
+
+# A parity stripe: one data word per channel + the parity word.
+struct Rain:
+    data:   [i64]      # length NUM_CHANNELS
+    parity: i64
+
+fn rain_new() -> Rain:
+    Rain(data: sched_fill(NUM_CHANNELS, 0), parity: 0)
+
+impl Rain:
+    # Write a stripe (one word per channel) and compute its parity.
+    me write_stripe(words: [i64]):
+        me.data = words
+        me.parity = xor_all(words)
+
+    me data_at(ch: i64) -> i64:
+        me.data[ch]
+
+    me parity_word(self) -> i64:
+        me.parity
+
+    # Reconstruct the data word on a failed channel: XOR the parity with every surviving data
+    # word. Since parity = XOR of all data words, the survivors cancel and the lost word remains.
+    me reconstruct(failed_ch: i64) -> i64:
+        var acc: i64 = me.parity
+        var ch: i64 = 0
+        while ch < NUM_CHANNELS:
+            if ch != failed_ch:
+                acc = acc ^ me.data[ch]
+            ch = ch + 1
+        acc
+
+    # If the parity channel itself is lost, it is just recomputed from the surviving data.
+    me recompute_parity() -> i64:
+        xor_all(me.data)
+
+# ── Self-test ─────────────────────────────────────────────────────────────────
+fn rain_selftest() -> i64:
+    var fail: i64 = 0
+    var r: Rain = rain_new()
+
+    # A stripe of distinct data words across the channels.
+    var words: [i64] = []
+    var i: i64 = 0
+    while i < NUM_CHANNELS:
+        val w: i64 = 0x100 + i * 7
+        words.push(w)
+        i = i + 1
+    r.write_stripe(words)
+
+    # Lose each channel in turn; reconstruction recovers the exact original word.
+    var ch: i64 = 0
+    while ch < NUM_CHANNELS:
+        val orig: i64 = 0x100 + ch * 7
+        val got: i64 = r.reconstruct(ch)
+        fail = fail + expect_eq(got, orig, "rain: reconstruct lost channel")
+        ch = ch + 1
+
+    # Losing the parity channel: parity recomputes exactly from the surviving data.
+    val p2: i64 = r.recompute_parity()
+    val p0: i64 = r.parity_word()
+    fail = fail + expect_eq(p2, p0, "rain: parity recomputed from surviving data")
+
+    fail
