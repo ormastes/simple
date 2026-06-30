@@ -16,9 +16,11 @@ port is deliberately incomplete and says so (see the plan doc for the full gap a
 
 Build the image first: `sh src/os/kernel/arch/arm32/cosmos/build.shs`.
 
-FAIL-CLOSED: missing `qemu-system-arm` or the prebuilt image records a clear host-unavailable
-/ missing-media reason and asserts it — never a faked pass, never a silent skip. Run:
-`bin/simple test test/03_system/app/nvme_firmware/nvme_cosmos_openssd_boot_spec.spl`.
+FAIL-CLOSED: this spec passes ONLY when the image genuinely boots on the Zynq emulation and
+the Cadence UART shows every required marker (banner + UART-up + honest gap list). If
+`qemu-system-arm` is absent, the prebuilt image is missing, or a marker is absent, the single
+classification assertion below goes RED — it never asserts a self-containing literal and never
+skips. Run: `bin/simple test test/03_system/app/nvme_firmware/nvme_cosmos_openssd_boot_spec.spl`.
 """
 
 use std.spec.*
@@ -45,24 +47,25 @@ describe "NVMe firmware Cosmos+ OpenSSD bring-up on QEMU xilinx-zynq-a9":
         val (qout, qerr, qcode) = _probe("command -v qemu-system-arm >/dev/null 2>&1 && echo QEMU_PRESENT || echo QEMU_ABSENT")
         val (eout, eerr, ecode) = _probe("test -f " + ELF + " && echo ELF_PRESENT || echo ELF_ABSENT")
 
+        # Single fail-closed classification (see header): GREEN only on a real Zynq boot whose
+        # Cadence UART shows the banner, the UART-up line, and the honest silicon-gap list.
+        var verdict: text = "pass"
         if qout.contains("QEMU_ABSENT"):
-            step("qemu-system-arm is not installed — record host-unavailable reason and assert it")
-            val reason = "HOST-UNAVAILABLE: qemu-system-arm is not installed on this host"
-            expect(reason).to_contain("HOST-UNAVAILABLE")
+            verdict = "host-unavailable: qemu-system-arm not installed"
         else:
             if eout.contains("ELF_ABSENT"):
-                step("The prebuilt Cosmos+ image is absent — record missing-media reason and assert it")
-                val reason = "MISSING-MEDIA: build/os/simpleos_cosmos_openssd.elf is absent (run src/os/kernel/arch/arm32/cosmos/build.shs)"
-                expect(reason).to_contain("MISSING-MEDIA")
+                verdict = "missing-media: " + ELF + " not built (run src/os/kernel/arch/arm32/cosmos/build.shs)"
             else:
                 step("Boot the Cosmos+ image on QEMU xilinx-zynq-a9 and capture the Cadence UART")
                 val (out, err, code) = _boot()
+                if not out.contains("COSMOS+ OpenSSD"):
+                    verdict = "boot-fail: COSMOS+ OpenSSD banner absent"
+                else:
+                    if not out.contains("Cadence UART"):
+                        verdict = "boot-fail: Cadence UART up-marker absent"
+                    else:
+                        if not out.contains("MISSING for silicon"):
+                            verdict = "boot-fail: honest silicon-gap list absent"
 
-                step("The Cadence UART shows the Cosmos+ OpenSSD boot banner")
-                expect(out).to_contain("COSMOS+ OpenSSD")
-
-                step("The bring-up reports the Cadence UART is up")
-                expect(out).to_contain("Cadence UART")
-
-                step("The bring-up honestly enumerates the silicon-port gaps (not a faked-complete port)")
-                expect(out).to_contain("MISSING for silicon")
+        step("Fail-closed: only a real Zynq boot with banner + UART + gap list classifies as pass")
+        expect(verdict).to_equal("pass")

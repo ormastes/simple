@@ -66,17 +66,35 @@ fn cosmos_missing_parts() -> [text]:
 fn cosmos_selftest() -> i64:
     var fail = 0
     val p = cosmos_openssd_platform()
-    if p.cores != 2:
+
+    # Real Zynq-7000 architectural invariants. Each check cross-references constants that
+    # are defined INDEPENDENTLY in the memory map above, so a typo'd address genuinely
+    # fails the test — unlike asserting that a value equals its own literal.
+
+    # The two Cadence UART instances on the Zynq PS are spaced exactly 0x1000 apart.
+    if COSMOS_UART1_BASE != COSMOS_UART0_BASE + 0x1000:
         fail = fail + 1
-    if p.uart_base != 0xE0001000:
+    # Cortex-A9 MPCore private region (PERIPHBASE = 0xF8F00000): the GIC CPU interface
+    # sits at +0x100 and the distributor at +0x1000.
+    val periphbase: u64 = 0xF8F00000
+    if COSMOS_GIC_CPU != periphbase + 0x100:
         fail = fail + 1
-    if p.nfc_base != 0x43C00000:
+    if COSMOS_GIC_DIST != periphbase + 0x1000:
         fail = fail + 1
-    # The port is explicitly INCOMPLETE: the missing-parts list must be non-empty so no
-    # one mistakes this scaffold for a finished silicon port.
-    if cosmos_missing_parts().len() < 1:
+    # The DDR load region must lie strictly below the PS peripheral aperture
+    # (UART0 @ 0xE0000000): the kernel image cannot overlap the MMIO registers.
+    if COSMOS_DDR_BASE + COSMOS_DDR_SIZE > COSMOS_UART0_BASE:
         fail = fail + 1
-    if cosmos_present_parts().len() < 6:
+    # The PL NAND-flash-controller aperture sits in the AXI GP0 PL window, above DDR —
+    # not inside the DDR image region.
+    if COSMOS_NFC_PL_BASE < COSMOS_DDR_BASE + COSMOS_DDR_SIZE:
+        fail = fail + 1
+    # The descriptor must bind the firmware-facing UART1 + PL NFC, not leave them zero.
+    if p.uart_base != COSMOS_UART1_BASE or p.nfc_base != COSMOS_NFC_PL_BASE:
+        fail = fail + 1
+    # Port-in-progress invariant: real present seams AND an honest, non-empty gap list, so
+    # no one mistakes this scaffold for a finished silicon port.
+    if cosmos_present_parts().len() < 6 or cosmos_missing_parts().len() < 1:
         fail = fail + 1
     fail
 
