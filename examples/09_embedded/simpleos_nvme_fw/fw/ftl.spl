@@ -142,6 +142,31 @@ impl Ftl:
             blk = blk + 1
         me.band.rebuild_finalize()
 
+    # Format NVM: erase all user data. Physically erase every non-retired block — this
+    # clears the pages (so they are reprogrammable) and accrues REAL wear (erase counts
+    # rise; they are never reset to zero). The bad-block table and the accumulated
+    # erase counts therefore PERSIST across a format, exactly as on real silicon; only the
+    # logical state (L2P map, band frontier, journal/WAL, sequence, read-disturb counters)
+    # resets to empty. Retired blocks are skipped and re-applied so the allocator keeps
+    # avoiding them.
+    me format():
+        var blk: i64 = 0
+        while blk < NUM_BLOCKS:
+            if not me.fil.block_bad(blk):
+                me.fil.erase(blk)
+            blk = blk + 1
+        me.map = ftl_map_new()
+        me.band = ftl_band_new()
+        me.journal = ftl_journal_new()
+        me.seq = 0
+        me.rd_disturb = ftl_fill(NUM_BLOCKS, 0)
+        blk = 0
+        while blk < NUM_BLOCKS:
+            if me.fil.block_bad(blk):
+                me.band.set_bad(blk)
+            blk = blk + 1
+        me.band.rebuild_finalize()
+
     me free_blocks() -> i64:
         me.band.free_blocks()
 
