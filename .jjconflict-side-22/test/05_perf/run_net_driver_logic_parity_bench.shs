@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+SIMPLE_BIN="${SIMPLE_BIN:-$ROOT/bin/simple}"
+BUILD_DIR="${BUILD_DIR:-$ROOT/build/perf/net_driver_logic_parity}"
+mkdir -p "$BUILD_DIR"
+
+gcc -O3 -march=native "$ROOT/test/perf/net_driver_logic_ref.c" -o "$BUILD_DIR/net_driver_logic_c"
+"$SIMPLE_BIN" compile "$ROOT/test/perf/net_driver_logic_native_bench.spl" \
+  --native \
+  --cpu native \
+  --opt-level aggressive \
+  -o "$BUILD_DIR/net_driver_logic_simple" \
+  >"$BUILD_DIR/simple-build.log" 2>&1
+
+"$BUILD_DIR/net_driver_logic_c" >"$BUILD_DIR/c.out"
+"$BUILD_DIR/net_driver_logic_simple" >"$BUILD_DIR/simple.out"
+
+awk -F, 'NR > 1 { print $1 "," $4 }' "$BUILD_DIR/c.out" >"$BUILD_DIR/c.labels"
+awk -F, 'NR > 1 { print $1 "," $4 }' "$BUILD_DIR/simple.out" >"$BUILD_DIR/simple.labels"
+
+if ! diff -u "$BUILD_DIR/c.labels" "$BUILD_DIR/simple.labels"; then
+  echo "[net-driver-logic-error] C and Simple native checksum labels differ" >&2
+  exit 1
+fi
+
+cat "$BUILD_DIR/c.out"
+cat "$BUILD_DIR/simple.out"
+echo "[net-driver-logic-ok] C and Simple native checksum labels match"

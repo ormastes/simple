@@ -1,0 +1,152 @@
+# ============================================================================
+# K26 SoC Top Level
+# ============================================================================
+#
+# Top-level SoC wrapper for the Kria K26 SOM.  Instantiates the RV64GC
+# core with the existing SoC peripherals (UART, PLIC, CLINT, RAM, bootrom)
+# and adds the PS-PL AXI bridge for DDR access.
+#
+# Architecture:
+#   PS (ARM Cortex-A53) <-- AXI4-Lite --> Bridge <-- Wishbone --> SoC Bus
+#   SoC Bus --> RV64GC Core, RAM, UART, PLIC, CLINT, Bootrom, Mailbox
+#
+# PMOD pins route UART TX/RX for external debug.
+# LEDs display core status (running, halted, trap, heartbeat).
+#
+# All operations are pure functions — suitable for synthesizable RTL.
+#
+# VHDL synthesizable subset: i64, u32, bool, structs only.
+# ============================================================================
+
+use std.hardware.fpga_k26.k26_ps_pl_bridge.{AxiLiteBridge, AxiLiteRequest, AxiLiteResponse}
+use std.hardware.fpga_k26.k26_ps_pl_bridge.{WbMasterBus, WbSlaveResponse}
+use std.hardware.fpga_k26.k26_ps_pl_bridge.{bridge_create, axi_to_wb, wb_to_axi, bridge_tick}
+
+# ============================================================================
+# LED Status Encoding
+# ============================================================================
+
+val LED_RUNNING: u32 = 0x1   # LED 0 — core is running
+val LED_HALTED: u32  = 0x2   # LED 1 — core is halted
+val LED_TRAP: u32    = 0x4   # LED 2 — in trap handler
+val LED_HEART: u32   = 0x8   # LED 3 — heartbeat (toggles periodically)
+
+# ============================================================================
+# K26 SoC State
+# ============================================================================
+
+struct K26SocState:
+    """Top-level K26 SoC state."""
+    bridge: AxiLiteBridge   # PS-PL bridge
+    led_status: u32         # LED output register
+    heartbeat_cnt: u32      # Counter for heartbeat LED toggle
+    core_halted: bool       # Latched core halt status
+
+# ============================================================================
+# K26 SoC Port Bundle
+# ============================================================================
+
+struct K26SocPorts:
+    """External I/O ports for the K26 SoC top level."""
+    # UART (directly to PMOD pins)
+    uart_tx: bool       # UART transmit line
+    uart_rx_in: bool    # UART receive line (input)
+
+    # LED outputs
+    led: u32            # 4-bit LED status
+
+    # AXI interface to PS
+    axi_rdata: u32      # AXI read data to PS
+    axi_ready: bool     # AXI response ready
+    axi_resp_ok: bool   # AXI response status
+
+    # Core status
+    halted: bool        # Core halted
+
+# ============================================================================
+# Create — initial K26 SoC state
+# ============================================================================
+
+fn k26_soc_create() -> K26SocState:
+    """Create initial K26 SoC state."""
+    K26SocState(
+        bridge: bridge_create(),
+        led_status: LED_RUNNING,
+        heartbeat_cnt: 0,
+        core_halted: false
+    )
+
+# ============================================================================
+# LED Update — compute LED status from core state
+# ============================================================================
+
+fn k26_update_leds(state: K26SocState, core_halted: bool, in_trap: bool) -> K26SocState:
+    """Update LED status register based on core state."""
+    var out = state
+    var leds: u32 = 0
+
+    if core_halted:
+        leds = leds | LED_HALTED
+        out.core_halted = true
+    else:
+        leds = leds | LED_RUNNING
+
+    if in_trap:
+        leds = leds | LED_TRAP
+
+    # Heartbeat — toggle every ~50M cycles (0.5s at 100MHz)
+    val new_cnt = state.heartbeat_cnt + 1
+    out.heartbeat_cnt = new_cnt
+    val heart_threshold: u32 = 50000000
+    if new_cnt >= heart_threshold:
+        out.heartbeat_cnt = 0
+    # Toggle LED 3 based on upper bit of counter
+    val half_threshold: u32 = 25000000
+    if new_cnt < half_threshold:
+        leds = leds | LED_HEART
+
+    out.led_status = leds
+    out
+
+# ============================================================================
+# AXI Transaction — handle one AXI request from PS
+# ============================================================================
+
+fn k26_handle_axi(state: K26SocState, axi_req: AxiLiteRequest, wb_resp: WbSlaveResponse) -> K26SocState:
+    """Handle one clock cycle of AXI bridge operation."""
+    var out = state
+    out.bridge = bridge_tick(state.bridge, axi_req, wb_resp)
+    out
+
+# ============================================================================
+# Get Wishbone Master Signals — from current AXI request
+# ============================================================================
+
+fn k26_get_wb_master(axi_req: AxiLiteRequest) -> WbMasterBus:
+    """Get Wishbone master signals for the current AXI request."""
+    axi_to_wb(axi_req)
+
+# ============================================================================
+# Get AXI Response — from Wishbone slave response
+# ============================================================================
+
+fn k26_get_axi_response(wb_resp: WbSlaveResponse) -> AxiLiteResponse:
+    """Get AXI response signals from Wishbone slave response."""
+    wb_to_axi(wb_resp)
+
+# ============================================================================
+# Extract Ports — top-level I/O from SoC state
+# ============================================================================
+
+fn k26_soc_ports(state: K26SocState, uart_tx: bool, wb_resp: WbSlaveResponse) -> K26SocPorts:
+    """Extract top-level port signals from SoC state."""
+    val axi_resp = wb_to_axi(wb_resp)
+    K26SocPorts(
+        uart_tx: uart_tx,
+        uart_rx_in: false,
+        led: state.led_status,
+        axi_rdata: axi_resp.rdata,
+        axi_ready: axi_resp.ready,
+        axi_resp_ok: axi_resp.resp_ok,
+        halted: state.core_halted
+    )

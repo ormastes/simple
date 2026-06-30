@@ -1,0 +1,163 @@
+# Async Effect System Specification
+#
+# Tests Effect type creation, EffectRunner channel behavior,
+# dispatch_effect sends to pending queue, and processing of
+# Timer, Log, FetchData, and UpdateProp effects.
+
+use common.ui.effect.{
+    Effect, EffectResult, EffectRunner,
+    new_effect_runner, new_effect_result, describe_effect
+}
+
+
+# ============================================================================
+# Effect Type Creation
+# ============================================================================
+
+describe "Effect types":
+    it "creates a FetchData effect":
+        val effect = Effect.FetchData(url: "https://example.com/api", callback_id: "eff_fetch_cb1")
+        val desc = describe_effect(effect)
+        expect desc to_contain "fetch"
+        expect desc to_contain "https://example.com/api"
+        expect desc to_contain "eff_fetch_cb1"
+
+    it "creates a Timer effect":
+        val effect = Effect.Timer(delay_ms: 500, callback_id: "eff_timer_cb1")
+        val desc = describe_effect(effect)
+        expect desc to_contain "timer"
+        expect desc to_contain "500"
+        expect desc to_contain "eff_timer_cb1"
+
+    it "creates a Log effect":
+        val effect = Effect.Log(message: "Widget mounted")
+        val desc = describe_effect(effect)
+        expect desc to_contain "log"
+        expect desc to_contain "Widget mounted"
+
+    it "creates an UpdateProp effect":
+        val effect = Effect.UpdateProp(widget_id: "eff_upw1", key: "content", value: "Updated text")
+        val desc = describe_effect(effect)
+        expect desc to_contain "update_prop"
+        expect desc to_contain "eff_upw1"
+        expect desc to_contain "content"
+        expect desc to_contain "Updated text"
+
+
+# ============================================================================
+# EffectRunner Channels
+# ============================================================================
+
+describe "EffectRunner channels":
+    it "starts with empty pending and result queues":
+        val runner = new_effect_runner()
+        expect runner.pending_count() to_equal 0
+        expect runner.result_count() to_equal 0
+
+    it "tracks log messages separately":
+        val runner = new_effect_runner()
+        expect runner.log_count() to_equal 0
+
+
+# ============================================================================
+# dispatch_effect Sends to Queue
+# ============================================================================
+
+describe "dispatch_effect":
+    it "adds effect to pending queue":
+        val runner = new_effect_runner()
+        runner.dispatch_effect(Effect.Log(message: "eff_disp_test"))
+        expect runner.pending_count() to_equal 1
+
+    it "adds multiple effects":
+        val runner = new_effect_runner()
+        runner.dispatch_effect(Effect.Log(message: "eff_disp_a"))
+        runner.dispatch_effect(Effect.Timer(delay_ms: 100, callback_id: "eff_disp_t"))
+        runner.dispatch_effect(Effect.FetchData(url: "http://test.com", callback_id: "eff_disp_f"))
+        expect runner.pending_count() to_equal 3
+
+
+# ============================================================================
+# Timer Effect Processing
+# ============================================================================
+
+describe "Timer effect processing":
+    it "processes timer and produces result":
+        val runner = new_effect_runner()
+        runner.dispatch_effect(Effect.Timer(delay_ms: 250, callback_id: "eff_tmr_cb1"))
+        runner.process_effects()
+        expect runner.pending_count() to_equal 0
+        expect runner.result_count() to_equal 1
+        val result = runner.last_result()
+        expect result != nil to_equal true
+
+
+# ============================================================================
+# Log Effect Processing
+# ============================================================================
+
+describe "Log effect processing":
+    it "processes log and records message":
+        val runner = new_effect_runner()
+        runner.dispatch_effect(Effect.Log(message: "Hello from lifecycle"))
+        runner.process_effects()
+        expect runner.log_count() to_equal 1
+        expect runner.result_count() to_equal 1
+
+    it "processes multiple log effects in order":
+        val runner = new_effect_runner()
+        runner.dispatch_effect(Effect.Log(message: "eff_log_first"))
+        runner.dispatch_effect(Effect.Log(message: "eff_log_second"))
+        runner.process_effects()
+        expect runner.log_count() to_equal 2
+        expect runner.result_count() to_equal 2
+
+
+# ============================================================================
+# UpdateProp Effect Processing
+# ============================================================================
+
+describe "UpdateProp effect processing":
+    it "processes update_prop and produces result":
+        val runner = new_effect_runner()
+        runner.dispatch_effect(Effect.UpdateProp(widget_id: "eff_up_w1", key: "label", value: "New Label"))
+        runner.process_effects()
+        expect runner.pending_count() to_equal 0
+        expect runner.result_count() to_equal 1
+        val result = runner.last_result()
+        expect result != nil to_equal true
+
+
+# ============================================================================
+# FetchData Effect Processing
+# ============================================================================
+
+describe "FetchData effect processing":
+    it "processes fetch and produces result with url":
+        val runner = new_effect_runner()
+        runner.dispatch_effect(Effect.FetchData(url: "https://api.example.com/data", callback_id: "eff_fd_cb1"))
+        runner.process_effects()
+        expect runner.pending_count() to_equal 0
+        expect runner.result_count() to_equal 1
+
+
+# ============================================================================
+# Clear Results
+# ============================================================================
+
+describe "EffectRunner clear":
+    it "clears results after processing":
+        val runner = new_effect_runner()
+        runner.dispatch_effect(Effect.Log(message: "eff_clr_test"))
+        runner.process_effects()
+        expect runner.result_count() to_equal 1
+        runner.clear_results()
+        expect runner.result_count() to_equal 0
+
+    it "clears log messages":
+        val runner = new_effect_runner()
+        runner.dispatch_effect(Effect.Log(message: "eff_clr_log"))
+        runner.process_effects()
+        expect runner.log_count() to_equal 1
+        runner.clear_log()
+        expect runner.log_count() to_equal 0

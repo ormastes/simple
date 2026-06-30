@@ -1,0 +1,98 @@
+# C Import — import_c Keyword Integration
+#
+# Parses import_c declarations, resolves C headers, and converts
+# CStruct definitions into Simple struct AST nodes with @repr(C).
+
+struct CImport:
+    header_path: text
+    struct_matches: [CImportMatch]
+    define_forwards: [CImportDefine]
+    strict_match: bool
+    span: Span
+
+struct CImportMatch:
+    simple_name: text
+    c_name: text
+    is_automatch: bool
+    strict: bool
+
+struct CImportDefine:
+    name: text
+    value: text
+
+fn c_import_default(header_path: text, span: Span) -> CImport:
+    CImport(
+        header_path: header_path,
+        struct_matches: [],
+        define_forwards: [],
+        strict_match: false,
+        span: span
+    )
+
+fn process_c_import(c_import: CImport, include_paths: [text]) -> CImportResult:
+    val resolved = resolve_c_header(c_import.header_path, include_paths)
+    if resolved == "":
+        return CImportResult(
+            structs: [],
+            extern_fns: [],
+            errors: ["header not found: " + c_import.header_path]
+        )
+
+    val source = read_c_header(resolved)
+    if source == "":
+        return CImportResult(
+            structs: [],
+            extern_fns: [],
+            errors: ["failed to read header: " + resolved]
+        )
+
+    val defines_map = build_define_map(c_import.define_forwards)
+    val parse_result = parse_c_header_with_defines(source, defines_map)
+
+    if parse_result.errors.length > 0:
+        return CImportResult(
+            structs: [],
+            extern_fns: [],
+            errors: parse_result.errors
+        )
+
+    val converted = convert_c_structs(
+        parse_result.structs,
+        c_import.struct_matches,
+        c_import.strict_match
+    )
+
+    converted
+
+struct CImportResult:
+    structs: [CImportedStruct]
+    extern_fns: [CImportedExternFn]
+    errors: [text]
+
+struct CImportedStruct:
+    name: text
+    fields: [CImportedField]
+    is_union: bool
+    layout_kind: text
+
+struct CImportedField:
+    name: text
+    simple_type: text
+    aka_name: text
+    bit_width: i32
+
+struct CImportedExternFn:
+    name: text
+    params: [(text, text)]
+    return_type: text
+
+fn build_define_map(forwards: [CImportDefine]) -> {text: text}:
+    var result: {text: text} = {}
+    for fwd in forwards:
+        result[fwd.name] = fwd.value
+    result
+
+fn read_c_header(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+
+extern fn rt_file_read_text(path: text) -> text

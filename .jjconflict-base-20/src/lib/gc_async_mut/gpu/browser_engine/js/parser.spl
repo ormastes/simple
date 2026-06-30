@@ -1,0 +1,771 @@
+"""
+# JS Parser
+
+Recursive-descent parser with Pratt precedence climbing for expressions.
+Produces AST nodes from the ast module (JsExpr / JsStmt enums).
+Covers ES5 subset: var/let/const, functions, if/else, while, for, for-in,
+return, break, continue, try/catch, switch, throw.
+"""
+
+#![allow(REQC001)]
+#![allow(REQC004)]
+#![allow(unnamed_duplicate_typed_args)]
+
+use std.gc_async_mut.gpu.browser_engine.js.lexer.{JsLex, JsTok, JsTokKind, js_tokenize}
+use std.gc_async_mut.gpu.browser_engine.js.ast.{
+    JsExpr, JsStmt, JsBinOp, JsUnaryOp, JsAssignOp,
+    JsSwitchCase, JsProgram
+}
+
+# =========================================================================
+# Parser class
+# =========================================================================
+
+pub class JsParse:
+    """Recursive-descent JS parser."""
+    _tokens: [JsTok]
+    _pos: i32
+
+    static fn new(tokens: [JsTok]) -> JsParse:
+        """Create a parser over a token list."""
+        JsParse(_tokens: tokens, _pos: 0)
+
+    me _cur() -> JsTok:
+        """Return current token."""
+        if self._pos >= self._tokens.len():
+            return JsTok.eof(0, 0)
+        self._tokens[self._pos]
+
+    me _peek_kind() -> JsTokKind:
+        """Return kind of current token."""
+        self._cur().kind
+
+    me _peek_val() -> text:
+        """Return value of current token."""
+        self._cur().value
+
+    me _eat() -> JsTok:
+        """Consume and return current token."""
+        val tok = self._cur()
+        self._pos = self._pos + 1
+        tok
+
+    me _expect_kind(kind: JsTokKind) -> JsTok:
+        """Consume a token of the expected kind, or return Invalid."""
+        val tok = self._cur()
+        self._pos = self._pos + 1
+        tok
+
+    me _expect_val(val_text: text) -> JsTok:
+        """Consume a token with the expected value."""
+        val tok = self._cur()
+        self._pos = self._pos + 1
+        tok
+
+    me _at_end() -> bool:
+        """Check if we have reached EOF."""
+        match self._peek_kind():
+            JsTokKind.Eof => true
+            _ => false
+
+    me _is_kind(kind: JsTokKind) -> bool:
+        """Check if current token is of the given kind."""
+        match self._peek_kind():
+            JsTokKind.Eof =>
+                match kind:
+                    JsTokKind.Eof => true
+                    _ => false
+            _ => self._cur().kind == kind
+
+    me _is_val(v: text) -> bool:
+        """Check if current token has the given value."""
+        self._cur().value == v
+
+    me _eat_semi():
+        """Consume a semicolon if present (ASI-like)."""
+        match self._peek_kind():
+            JsTokKind.Semi => self._eat()
+            _ => pass_do_nothing
+
+    # =====================================================================
+    # Statement parsing
+    # =====================================================================
+
+    me parse_program() -> JsProgram:
+        """Parse the entire token stream into a program."""
+        var stmts: [JsStmt] = []
+        while not self._at_end():
+            stmts.push(self._parse_stmt())
+        JsProgram.new(stmts)
+
+    me _parse_stmt() -> JsStmt:
+        """Parse a single statement."""
+        val kind = self._peek_kind()
+        val v = self._peek_val()
+
+        # Variable declaration
+        match kind:
+            JsTokKind.Keyword =>
+                if v == "var" or v == "let" or v == "const":
+                    return self._parse_var_decl()
+                if v == "function":
+                    return self._parse_func_decl()
+                if v == "return":
+                    return self._parse_return()
+                if v == "if":
+                    return self._parse_if()
+                if v == "while":
+                    return self._parse_while()
+                if v == "do":
+                    return self._parse_do_while()
+                if v == "for":
+                    return self._parse_for()
+                if v == "break":
+                    self._eat()
+                    self._eat_semi()
+                    return JsStmt.BreakStmt
+                if v == "continue":
+                    self._eat()
+                    self._eat_semi()
+                    return JsStmt.ContinueStmt
+                if v == "throw":
+                    return self._parse_throw()
+                if v == "try":
+                    return self._parse_try()
+                if v == "switch":
+                    return self._parse_switch()
+                if v == "debugger":
+                    self._eat()
+                    self._eat_semi()
+                    return JsStmt.DebuggerStmt
+                pass_do_nothing
+            JsTokKind.LBrace =>
+                return self._parse_block()
+            JsTokKind.Semi =>
+                self._eat()
+                return JsStmt.EmptyStmt
+            _ => pass_do_nothing
+
+        # Expression statement
+        val expr = self._parse_expr(0)
+        self._eat_semi()
+        JsStmt.ExprStmt(expr)
+
+    me _parse_var_decl() -> JsStmt:
+        """Parse var/let/const name = expr;"""
+        val kind_tok = self._eat()  # consume var/let/const
+        val name_tok = self._eat()  # consume identifier
+        var init: JsExpr? = nil
+        match self._peek_kind():
+            JsTokKind.Eq =>
+                self._eat()  # consume =
+                init = Some(self._parse_expr(0))
+            _ => pass_do_nothing
+        self._eat_semi()
+        JsStmt.VarDecl(kind_tok.value, name_tok.value, init)
+
+    me _parse_func_decl() -> JsStmt:
+        """Parse function name(params) { body }"""
+        self._eat()  # consume 'function'
+        val name_tok = self._eat()  # consume name
+        self._eat()  # consume (
+        val params = self._parse_param_list()
+        self._eat()  # consume )
+        self._eat()  # consume {
+        val body = self._parse_stmt_list()
+        self._eat()  # consume }
+        JsStmt.FuncDecl(name_tok.value, params, body)
+
+    me _parse_param_list() -> [text]:
+        """Parse comma-separated parameter names until )."""
+        var params: [text] = []
+        while not self._at_end():
+            match self._peek_kind():
+                JsTokKind.RParen => return params
+                JsTokKind.Comma =>
+                    self._eat()
+                _ =>
+                    val p = self._eat()
+                    params.push(p.value)
+        params
+
+    me _parse_stmt_list() -> [JsStmt]:
+        """Parse statements until } or EOF."""
+        var stmts: [JsStmt] = []
+        while not self._at_end():
+            match self._peek_kind():
+                JsTokKind.RBrace => return stmts
+                _ => stmts.push(self._parse_stmt())
+        stmts
+
+    me _parse_block() -> JsStmt:
+        """Parse { stmts }"""
+        self._eat()  # consume {
+        val stmts = self._parse_stmt_list()
+        self._eat()  # consume }
+        JsStmt.Block(stmts)
+
+    me _parse_return() -> JsStmt:
+        """Parse return [expr];"""
+        self._eat()  # consume 'return'
+        match self._peek_kind():
+            JsTokKind.Semi =>
+                self._eat()
+                return JsStmt.ReturnStmt(nil)
+            JsTokKind.RBrace =>
+                return JsStmt.ReturnStmt(nil)
+            JsTokKind.Eof =>
+                return JsStmt.ReturnStmt(nil)
+            _ => pass_do_nothing
+        val expr = self._parse_expr(0)
+        self._eat_semi()
+        JsStmt.ReturnStmt(Some(expr))
+
+    me _parse_if() -> JsStmt:
+        """Parse if (test) consequent [else alternate]"""
+        self._eat()  # consume 'if'
+        self._eat()  # consume (
+        val test = self._parse_expr(0)
+        self._eat()  # consume )
+        val consequent = self._parse_stmt()
+        var alternate: JsStmt? = nil
+        if self._is_val("else"):
+            self._eat()  # consume 'else'
+            alternate = Some(self._parse_stmt())
+        JsStmt.IfStmt(test, consequent, alternate)
+
+    me _parse_while() -> JsStmt:
+        """Parse while (test) body"""
+        self._eat()  # consume 'while'
+        self._eat()  # consume (
+        val test = self._parse_expr(0)
+        self._eat()  # consume )
+        val body = self._parse_stmt()
+        JsStmt.WhileStmt(test, body)
+
+    me _parse_do_while() -> JsStmt:
+        """Parse do body while (test);"""
+        self._eat()  # consume 'do'
+        val body = self._parse_stmt()
+        self._eat()  # consume 'while'
+        self._eat()  # consume (
+        val test = self._parse_expr(0)
+        self._eat()  # consume )
+        self._eat_semi()
+        JsStmt.DoWhileStmt(test, body)
+
+    me _parse_for() -> JsStmt:
+        """Parse for (init; test; update) body or for (x in expr) body."""
+        self._eat()  # consume 'for'
+        self._eat()  # consume (
+
+        # Check for for-in
+        if self._is_val("var") or self._is_val("let") or self._is_val("const"):
+            val kw = self._peek_val()
+            # Peek ahead: is the next-next token 'in'?
+            if self._pos + 2 < self._tokens.len() and self._tokens[self._pos + 2].value == "in":
+                self._eat()  # consume var/let/const
+                val name = self._eat().value  # consume identifier
+                self._eat()  # consume 'in'
+                val right = self._parse_expr(0)
+                self._eat()  # consume )
+                val body = self._parse_stmt()
+                return JsStmt.ForInStmt(name, right, body)
+
+        # Regular for
+        var init: JsStmt? = nil
+        match self._peek_kind():
+            JsTokKind.Semi => pass_do_nothing
+            _ =>
+                if self._is_val("var") or self._is_val("let") or self._is_val("const"):
+                    init = Some(self._parse_var_decl_no_semi())
+                else:
+                    val expr = self._parse_expr(0)
+                    init = Some(JsStmt.ExprStmt(expr))
+        self._eat()  # consume ;
+
+        var test: JsExpr? = nil
+        match self._peek_kind():
+            JsTokKind.Semi => pass_do_nothing
+            _ => test = Some(self._parse_expr(0))
+        self._eat()  # consume ;
+
+        var update: JsExpr? = nil
+        match self._peek_kind():
+            JsTokKind.RParen => pass_do_nothing
+            _ => update = Some(self._parse_expr(0))
+        self._eat()  # consume )
+
+        val body = self._parse_stmt()
+        JsStmt.ForStmt(init, test, update, body)
+
+    me _parse_var_decl_no_semi() -> JsStmt:
+        """Parse var/let/const declaration without consuming semicolon."""
+        val kind_tok = self._eat()
+        val name_tok = self._eat()
+        var init: JsExpr? = nil
+        match self._peek_kind():
+            JsTokKind.Eq =>
+                self._eat()
+                init = Some(self._parse_expr(0))
+            _ => pass_do_nothing
+        JsStmt.VarDecl(kind_tok.value, name_tok.value, init)
+
+    me _parse_throw() -> JsStmt:
+        """Parse throw expr;"""
+        self._eat()  # consume 'throw'
+        val expr = self._parse_expr(0)
+        self._eat_semi()
+        JsStmt.ThrowStmt(expr)
+
+    me _parse_try() -> JsStmt:
+        """Parse try { } catch (e) { } [finally { }]"""
+        self._eat()  # consume 'try'
+        val body = self._parse_block()
+        var catch_param = ""
+        var catch_body = JsStmt.Block([])
+        if self._is_val("catch"):
+            self._eat()  # consume 'catch'
+            self._eat()  # consume (
+            catch_param = self._eat().value  # consume param name
+            self._eat()  # consume )
+            catch_body = self._parse_block()
+        var finally_body: JsStmt? = nil
+        if self._is_val("finally"):
+            self._eat()  # consume 'finally'
+            finally_body = Some(self._parse_block())
+        JsStmt.TryCatch(body, catch_param, catch_body, finally_body)
+
+    me _parse_switch() -> JsStmt:
+        """Parse switch (expr) { case ... }"""
+        self._eat()  # consume 'switch'
+        self._eat()  # consume (
+        val disc = self._parse_expr(0)
+        self._eat()  # consume )
+        self._eat()  # consume {
+        var cases: [JsSwitchCase] = []
+        while not self._at_end():
+            match self._peek_kind():
+                JsTokKind.RBrace => break
+                _ => pass_do_nothing
+            if self._is_val("case"):
+                self._eat()  # consume 'case'
+                val test = self._parse_expr(0)
+                self._eat()  # consume :
+                var body: [JsStmt] = []
+                while not self._at_end() and not self._is_val("case") and not self._is_val("default"):
+                    match self._peek_kind():
+                        JsTokKind.RBrace => break
+                        _ => body.push(self._parse_stmt())
+                cases.push(JsSwitchCase.new(Some(test), body))
+            else if self._is_val("default"):
+                self._eat()  # consume 'default'
+                self._eat()  # consume :
+                var body: [JsStmt] = []
+                while not self._at_end() and not self._is_val("case"):
+                    match self._peek_kind():
+                        JsTokKind.RBrace => break
+                        _ => body.push(self._parse_stmt())
+                cases.push(JsSwitchCase.new(nil, body))
+            else:
+                break
+        self._eat()  # consume }
+        JsStmt.SwitchStmt(disc, cases)
+
+    # =====================================================================
+    # Expression parsing (Pratt precedence)
+    # =====================================================================
+
+    me _parse_expr(min_prec: i32) -> JsExpr:
+        """Parse an expression using Pratt precedence climbing."""
+        var left = self._parse_prefix()
+
+        while not self._at_end():
+            val prec = self._infix_prec()
+            if prec < min_prec:
+                break
+
+            val kind = self._peek_kind()
+            val v = self._peek_val()
+
+            # Assignment
+            if self._is_assign_op():
+                val op = self._parse_assign_op()
+                val right = self._parse_expr(prec)
+                left = JsExpr.Assign(op, left, right)
+            # Conditional (ternary)
+            else if v == "?":
+                self._eat()  # consume ?
+                val consequent = self._parse_expr(0)
+                self._eat()  # consume :
+                val alternate = self._parse_expr(0)
+                left = JsExpr.Conditional(left, consequent, alternate)
+            # Member access
+            else if v == ".":
+                self._eat()  # consume .
+                val prop = self._eat().value
+                left = JsExpr.MemberDot(left, prop)
+            # Computed member access
+            else if v == "[":
+                self._eat()  # consume [
+                val prop = self._parse_expr(0)
+                self._eat()  # consume ]
+                left = JsExpr.MemberBracket(left, prop)
+            # Call
+            else if v == "(":
+                self._eat()  # consume (
+                val args = self._parse_arg_list()
+                self._eat()  # consume )
+                left = JsExpr.Call(left, args)
+            # Postfix ++ --
+            else if v == "++" or v == "--":
+                val op_tok = self._eat()
+                left = JsExpr.Update(op_tok.value, false, left)
+            # Binary operator
+            else:
+                val op = self._parse_bin_op()
+                val right = self._parse_expr(prec + 1)
+                left = JsExpr.Binary(op, left, right)
+
+        left
+
+    me _parse_prefix() -> JsExpr:
+        """Parse a prefix expression (atom, unary, grouping)."""
+        val kind = self._peek_kind()
+        val v = self._peek_val()
+
+        match kind:
+            JsTokKind.Number =>
+                val tok = self._eat()
+                return JsExpr.NumLit(_parse_number_value(tok.value))
+            JsTokKind.String =>
+                val tok = self._eat()
+                return JsExpr.StrLit(tok.value)
+            JsTokKind.Boolean =>
+                val tok = self._eat()
+                return JsExpr.BoolLit(tok.value == "true")
+            JsTokKind.Null =>
+                self._eat()
+                return JsExpr.NullLit
+            JsTokKind.Ident =>
+                val tok = self._eat()
+                return JsExpr.Ident(tok.value)
+            _ => pass_do_nothing
+
+        # undefined keyword
+        if v == "undefined":
+            self._eat()
+            return JsExpr.UndefinedLit
+
+        # this keyword
+        if v == "this":
+            self._eat()
+            return JsExpr.This
+
+        # typeof operator
+        if v == "typeof":
+            self._eat()
+            val arg = self._parse_prefix()
+            return JsExpr.Typeof(arg)
+
+        # void operator
+        if v == "void":
+            self._eat()
+            val arg = self._parse_prefix()
+            return JsExpr.Unary(JsUnaryOp.Void, arg)
+
+        # new expression
+        if v == "new":
+            self._eat()  # consume 'new'
+            val callee = self._parse_prefix()
+            var args: [JsExpr] = []
+            match self._peek_kind():
+                JsTokKind.LParen =>
+                    self._eat()
+                    args = self._parse_arg_list()
+                    self._eat()  # consume )
+                _ => pass_do_nothing
+            return JsExpr.NewExpr(callee, args)
+
+        # function expression
+        if v == "function":
+            self._eat()  # consume 'function'
+            var name = ""
+            match self._peek_kind():
+                JsTokKind.Ident =>
+                    name = self._eat().value
+                _ => pass_do_nothing
+            self._eat()  # consume (
+            val params = self._parse_param_list()
+            self._eat()  # consume )
+            self._eat()  # consume {
+            val body = self._parse_stmt_list()
+            self._eat()  # consume }
+            return JsExpr.FuncExpr(name, params, body)
+
+        # Unary operators
+        if v == "-":
+            self._eat()
+            val operand = self._parse_prefix()
+            return JsExpr.Unary(JsUnaryOp.Neg, operand)
+        if v == "+":
+            self._eat()
+            val operand = self._parse_prefix()
+            return JsExpr.Unary(JsUnaryOp.Pos, operand)
+        if v == "!":
+            self._eat()
+            val operand = self._parse_prefix()
+            return JsExpr.Unary(JsUnaryOp.Not, operand)
+        if v == "~":
+            self._eat()
+            val operand = self._parse_prefix()
+            return JsExpr.Unary(JsUnaryOp.BitNot, operand)
+
+        # Prefix ++ --
+        if v == "++" or v == "--":
+            val op_tok = self._eat()
+            val operand = self._parse_prefix()
+            return JsExpr.Update(op_tok.value, true, operand)
+
+        # Grouping (parenthesized expression)
+        match kind:
+            JsTokKind.LParen =>
+                self._eat()  # consume (
+                val expr = self._parse_expr(0)
+                self._eat()  # consume )
+                return expr
+            _ => pass_do_nothing
+
+        # Array literal
+        match kind:
+            JsTokKind.LBracket =>
+                self._eat()  # consume [
+                var elements: [JsExpr] = []
+                while not self._at_end():
+                    match self._peek_kind():
+                        JsTokKind.RBracket => break
+                        _ => pass_do_nothing
+                    elements.push(self._parse_expr(0))
+                    match self._peek_kind():
+                        JsTokKind.Comma => self._eat()
+                        _ => pass_do_nothing
+                self._eat()  # consume ]
+                return JsExpr.Array(elements)
+            _ => pass_do_nothing
+
+        # Object literal
+        match kind:
+            JsTokKind.LBrace =>
+                self._eat()  # consume {
+                var keys: [text] = []
+                var values: [JsExpr] = []
+                while not self._at_end():
+                    match self._peek_kind():
+                        JsTokKind.RBrace => break
+                        _ => pass_do_nothing
+                    val key = self._eat().value
+                    self._eat()  # consume :
+                    val value = self._parse_expr(0)
+                    keys.push(key)
+                    values.push(value)
+                    match self._peek_kind():
+                        JsTokKind.Comma => self._eat()
+                        _ => pass_do_nothing
+                self._eat()  # consume }
+                return JsExpr.ObjectExpr(keys, values)
+            _ => pass_do_nothing
+
+        # Fallback: consume and return as identifier
+        val tok = self._eat()
+        JsExpr.Ident(tok.value)
+
+    me _parse_arg_list() -> [JsExpr]:
+        """Parse comma-separated arguments until )."""
+        var args: [JsExpr] = []
+        while not self._at_end():
+            match self._peek_kind():
+                JsTokKind.RParen => return args
+                _ => pass_do_nothing
+            args.push(self._parse_expr(0))
+            match self._peek_kind():
+                JsTokKind.Comma => self._eat()
+                _ => pass_do_nothing
+        args
+
+    me _infix_prec() -> i32:
+        """Return the precedence of the current infix token, or -1."""
+        val v = self._peek_val()
+        if v == "=":
+            return 2
+        if v == "+=" or v == "-=" or v == "*=" or v == "/=" or v == "%=":
+            return 2
+        if v == "?":
+            return 3
+        if v == "||":
+            return 4
+        if v == "&&":
+            return 5
+        if v == "|":
+            return 6
+        if v == "^":
+            return 7
+        if v == "&":
+            return 8
+        if v == "==" or v == "!=" or v == "===" or v == "!==":
+            return 9
+        if v == "<" or v == ">" or v == "<=" or v == ">=" or v == "instanceof" or v == "in":
+            return 10
+        if v == "<<" or v == ">>" or v == ">>>":
+            return 11
+        if v == "+" or v == "-":
+            return 12
+        if v == "*" or v == "/" or v == "%":
+            return 13
+        if v == ".":
+            return 18
+        if v == "[":
+            return 18
+        if v == "(":
+            return 18
+        if v == "++" or v == "--":
+            return 16
+        -1
+
+    me _is_assign_op() -> bool:
+        """Check if current token is an assignment operator."""
+        val v = self._peek_val()
+        v == "=" or v == "+=" or v == "-=" or v == "*=" or v == "/=" or v == "%="
+
+    me _parse_assign_op() -> JsAssignOp:
+        """Parse and consume an assignment operator."""
+        val tok = self._eat()
+        if tok.value == "=":
+            return JsAssignOp.Assign
+        if tok.value == "+=":
+            return JsAssignOp.AddAssign
+        if tok.value == "-=":
+            return JsAssignOp.SubAssign
+        if tok.value == "*=":
+            return JsAssignOp.MulAssign
+        if tok.value == "/=":
+            return JsAssignOp.DivAssign
+        JsAssignOp.ModAssign
+
+    me _parse_bin_op() -> JsBinOp:
+        """Parse and consume a binary operator token."""
+        val tok = self._eat()
+        if tok.value == "+":
+            return JsBinOp.Add
+        if tok.value == "-":
+            return JsBinOp.Sub
+        if tok.value == "*":
+            return JsBinOp.Mul
+        if tok.value == "/":
+            return JsBinOp.Div
+        if tok.value == "%":
+            return JsBinOp.Mod
+        if tok.value == "==":
+            return JsBinOp.Eq
+        if tok.value == "!=":
+            return JsBinOp.Neq
+        if tok.value == "===":
+            return JsBinOp.StrictEq
+        if tok.value == "!==":
+            return JsBinOp.StrictNeq
+        if tok.value == "<":
+            return JsBinOp.Lt
+        if tok.value == ">":
+            return JsBinOp.Gt
+        if tok.value == "<=":
+            return JsBinOp.Le
+        if tok.value == ">=":
+            return JsBinOp.Ge
+        if tok.value == "&&":
+            return JsBinOp.And
+        if tok.value == "||":
+            return JsBinOp.Or
+        if tok.value == "&":
+            return JsBinOp.BitAnd
+        if tok.value == "|":
+            return JsBinOp.BitOr
+        if tok.value == "^":
+            return JsBinOp.BitXor
+        if tok.value == "<<":
+            return JsBinOp.Shl
+        if tok.value == ">>":
+            return JsBinOp.Shr
+        if tok.value == ">>>":
+            return JsBinOp.UShr
+        if tok.value == "instanceof":
+            return JsBinOp.InstanceOf
+        if tok.value == "in":
+            return JsBinOp.In
+        JsBinOp.Add  # fallback
+
+# =========================================================================
+# Number parsing helper
+# =========================================================================
+
+fn _parse_number_value(s: text) -> f64:
+    """Parse a number string to f64. Handles integers and decimals."""
+    # Simple approach: convert digit by digit
+    var result = 0.0
+    var decimal_part = false
+    var decimal_divisor = 1.0
+    var negative = false
+    var i = 0
+    if i < s.len() and s.slice(i, i + 1) == "-":
+        negative = true
+        i = i + 1
+    while i < s.len():
+        val ch = s.slice(i, i + 1)
+        if ch == ".":
+            decimal_part = true
+            i = i + 1
+        else if ch == "e" or ch == "E":
+            break
+        else if ch >= "0" and ch <= "9":
+            val d = _digit_to_f64(ch)
+            if decimal_part:
+                decimal_divisor = decimal_divisor * 10.0
+                result = result + d / decimal_divisor
+            else:
+                result = result * 10.0 + d
+            i = i + 1
+        else:
+            break
+    if negative:
+        result = 0.0 - result
+    result
+
+fn _digit_to_f64(ch: text) -> f64:
+    """Convert a single digit character to f64."""
+    if ch == "0":
+        return 0.0
+    if ch == "1":
+        return 1.0
+    if ch == "2":
+        return 2.0
+    if ch == "3":
+        return 3.0
+    if ch == "4":
+        return 4.0
+    if ch == "5":
+        return 5.0
+    if ch == "6":
+        return 6.0
+    if ch == "7":
+        return 7.0
+    if ch == "8":
+        return 8.0
+    9.0
+
+# =========================================================================
+# Convenience function
+# =========================================================================
+
+pub fn js_parse(source: text) -> JsProgram:
+    """Parse JS source code into a program AST."""
+    val tokens = js_tokenize(source)
+    var parser = JsParse.new(tokens)
+    parser.parse_program()

@@ -1,0 +1,44 @@
+# LLM Content Authority — trust classification for LLM-generated content.
+#
+# Provides: ContentAuthority, ReleaseDecision, release_gate.
+
+use std.common.privilege.authority_token.{AuthorityLevel, TrustSource}
+
+# Describes the provenance and trust level of a piece of LLM-generated content.
+struct ContentAuthority:
+    level: AuthorityLevel
+    source_trust: TrustSource
+
+# Decision returned by release_gate.  `kind` is one of "Release", "Block", "Scrub".
+struct ReleaseDecision:
+    kind: text
+
+# Decide whether content with the given authority may be released to a reader
+# with the given clearance level.  Returns Release when the content level is
+# at or below the reader clearance; Block otherwise.
+# Revoked trust source always produces Block regardless of level.
+fn release_gate(content: ContentAuthority, reader_clearance: AuthorityLevel) -> ReleaseDecision:
+    match content.source_trust:
+        TrustSource.Revoked: return ReleaseDecision(kind: "Block")
+        _: ()
+    val content_rank = _content_level_rank(content.level)
+    val reader_rank  = _content_level_rank(reader_clearance)
+    if content_rank <= reader_rank:
+        ReleaseDecision(kind: "Release")
+    else:
+        ReleaseDecision(kind: "Block")
+
+# Content sensitivity ranking.  "Internal" means org-internal (low restriction);
+# "Secret" is the highest content restriction.  This ordering differs from
+# authority_level_rank which orders token privilege.
+fn _content_level_rank(level: AuthorityLevel) -> i64:
+    match level:
+        AuthorityLevel.Public:    0
+        AuthorityLevel.Internal:  1
+        AuthorityLevel.Read:      2
+        AuthorityLevel.Write:     3
+        AuthorityLevel.Sensitive: 4
+        AuthorityLevel.Admin:     5
+        AuthorityLevel.Secret:    6
+
+export ContentAuthority, ReleaseDecision, release_gate

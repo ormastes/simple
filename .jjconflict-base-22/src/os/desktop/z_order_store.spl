@@ -1,0 +1,111 @@
+# Z-Order Store — In-Memory Stacking + Minimize State
+#
+# Tracks per-window (z_index, minimized) for the desktop shell's taskbar
+# + focus/raise handling. Pure in-memory; **persistence across WM restart
+# is explicitly parked** (no KV service under src/os/services/ yet —
+# see doc/03_plan/wm_vertical_slice.md). On WmService restart this store
+# is empty and gets repopulated as windows re-register.
+#
+# Consumed by:
+#   * src/os/services/wm/wm_service.spl    — COMP_MINIMIZE / COMP_RESTORE / COMP_FOCUS
+#   * src/os/desktop/shell.spl             — TaskbarShell running-apps section
+
+use common.window_protocol.geometry.{WindowId}
+
+struct ZOrderEntry:
+    window_id: u64
+    z_index: i64
+    minimized: bool
+
+class ZOrderStore:
+    entries: [ZOrderEntry]
+    next_z: i64
+
+impl ZOrderStore:
+    static fn new() -> ZOrderStore:
+        ZOrderStore(entries: [], next_z: 1)
+
+    me touch(window_id: u64):
+        """Insert or refresh a window at the top of the stack."""
+        var filtered: [ZOrderEntry] = []
+        var was_minimized = false
+        for e in self.entries:
+            if e.window_id == window_id:
+                was_minimized = e.minimized
+            else:
+                filtered = filtered.push(e)
+        val top = self.next_z
+        self.next_z = top + 1
+        filtered = filtered.push(ZOrderEntry(
+            window_id: window_id,
+            z_index: top,
+            minimized: was_minimized
+        ))
+        self.entries = filtered
+
+    me focus(window_id: u64):
+        """Raise window_id to the top (unminimize if needed)."""
+        var filtered: [ZOrderEntry] = []
+        for e in self.entries:
+            if e.window_id == window_id:
+                pass_dn
+            else:
+                filtered = filtered.push(e)
+        val top = self.next_z
+        self.next_z = top + 1
+        filtered = filtered.push(ZOrderEntry(
+            window_id: window_id,
+            z_index: top,
+            minimized: false
+        ))
+        self.entries = filtered
+
+    me set_minimized(window_id: u64, minimized: bool):
+        var updated: [ZOrderEntry] = []
+        for e in self.entries:
+            if e.window_id == window_id:
+                updated = updated.push(ZOrderEntry(
+                    window_id: e.window_id,
+                    z_index: e.z_index,
+                    minimized: minimized
+                ))
+            else:
+                updated = updated.push(e)
+        self.entries = updated
+
+    me remove(window_id: u64):
+        var filtered: [ZOrderEntry] = []
+        for e in self.entries:
+            if e.window_id == window_id:
+                pass_dn
+            else:
+                filtered = filtered.push(e)
+        self.entries = filtered
+
+    fn get(window_id: u64) -> ZOrderEntry?:
+        for e in self.entries:
+            if e.window_id == window_id:
+                return e
+        return nil
+
+    fn is_minimized(window_id: u64) -> bool:
+        val e = self.get(window_id)
+        if e == nil:
+            return false
+        e.minimized
+
+    fn top_window() -> u64:
+        """Window with the highest z_index among non-minimized entries. 0 if none."""
+        var best_z: i64 = -1
+        var best_id: u64 = 0
+        for e in self.entries:
+            if not e.minimized and e.z_index > best_z:
+                best_z = e.z_index
+                best_id = e.window_id
+        best_id
+
+    fn len() -> i32:
+        self.entries.len()
+
+fn new_z_order_store() -> ZOrderStore:
+    ZOrderStore.new()

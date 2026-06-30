@@ -1,0 +1,171 @@
+# Render Pipeline — configurable multi-pass render pipeline
+#
+# Supports forward and deferred rendering with ordered render passes.
+# Each pass has a type, priority, and enable flag.
+#
+# Usage:
+#   var pipeline = RenderPipeline.forward()
+#   pipeline.add_pass(RenderPassConfig.new("custom", "post_process", 5))
+#   pipeline.set_pass_enabled("debug", false)
+#   val active = pipeline.get_active_passes()
+
+# ============================================================================
+# RenderPassConfig — configuration for a single render pass
+# ============================================================================
+
+struct RenderPassConfig:
+    name: text
+    pass_type: text
+    enabled: bool
+    priority: i32
+    clear_color: bool
+    clear_depth: bool
+
+impl RenderPassConfig:
+    static fn new(name: text, pass_type: text, priority: i32) -> RenderPassConfig:
+        """Create a render pass config. pass_type: geometry, lighting, shadow, post_process, ui, debug."""
+        RenderPassConfig(
+            name: name,
+            pass_type: pass_type,
+            enabled: true,
+            priority: priority,
+            clear_color: true,
+            clear_depth: true
+        )
+
+# ============================================================================
+# PipelineStats — summary statistics for a render pipeline
+# ============================================================================
+
+struct PipelineStats:
+    pass_count: i32
+    active_pass_count: i32
+    pipeline_type: text
+
+# ============================================================================
+# RenderPipeline — ordered collection of render passes
+# ============================================================================
+
+class RenderPipeline:
+    passes: [RenderPassConfig]
+    pipeline_type: text
+
+impl RenderPipeline:
+    static fn forward() -> RenderPipeline:
+        """Create a forward rendering pipeline with default passes."""
+        var p = RenderPipeline(
+            passes: [],
+            pipeline_type: "forward"
+        )
+        p.passes = p.passes.push(RenderPassConfig.new("geometry", "geometry", 0))
+        p.passes = p.passes.push(RenderPassConfig.new("lighting", "lighting", 1))
+        p.passes = p.passes.push(RenderPassConfig.new("post_process", "post_process", 2))
+        p.passes = p.passes.push(RenderPassConfig.new("ui", "ui", 3))
+        p.passes = p.passes.push(RenderPassConfig.new("debug", "debug", 4))
+        p
+
+    static fn deferred() -> RenderPipeline:
+        """Create a deferred rendering pipeline with default passes."""
+        var p = RenderPipeline(
+            passes: [],
+            pipeline_type: "deferred"
+        )
+        p.passes = p.passes.push(RenderPassConfig.new("geometry", "geometry", 0))
+        p.passes = p.passes.push(RenderPassConfig.new("lighting", "lighting", 1))
+        p.passes = p.passes.push(RenderPassConfig.new("shadow", "shadow", 2))
+        p.passes = p.passes.push(RenderPassConfig.new("post_process", "post_process", 3))
+        p.passes = p.passes.push(RenderPassConfig.new("ui", "ui", 4))
+        p.passes = p.passes.push(RenderPassConfig.new("debug", "debug", 5))
+        p
+
+    me add_pass(config: RenderPassConfig):
+        """Insert a render pass sorted by priority."""
+        var inserted = false
+        var result: [RenderPassConfig] = []
+        var i = 0
+        while i < self.passes.len():
+            if not inserted and config.priority < self.passes[i].priority:
+                result = result.push(config)
+                inserted = true
+            result = result.push(self.passes[i])
+            i = i + 1
+        if not inserted:
+            result = result.push(config)
+        self.passes = result
+
+    me remove_pass(name: text) -> bool:
+        """Remove a render pass by name. Returns true if found."""
+        var result: [RenderPassConfig] = []
+        var found = false
+        var i = 0
+        while i < self.passes.len():
+            if self.passes[i].name == name:
+                found = true
+            else:
+                result = result.push(self.passes[i])
+            i = i + 1
+        self.passes = result
+        found
+
+    me set_pass_enabled(name: text, enabled: bool) -> bool:
+        """Enable or disable a pass by name. Returns true if found."""
+        var found = false
+        var i = 0
+        while i < self.passes.len():
+            if self.passes[i].name == name:
+                val old = self.passes[i]
+                self.passes[i] = RenderPassConfig(
+                    name: old.name,
+                    pass_type: old.pass_type,
+                    enabled: enabled,
+                    priority: old.priority,
+                    clear_color: old.clear_color,
+                    clear_depth: old.clear_depth
+                )
+                found = true
+                i = self.passes.len()  # break
+            else:
+                i = i + 1
+        found
+
+    fn get_pass(name: text) -> RenderPassConfig?:
+        """Return the pass config with the given name, or nil if not found."""
+        var i = 0
+        while i < self.passes.len():
+            if self.passes[i].name == name:
+                return self.passes[i]
+            i = i + 1
+        nil
+
+    fn get_active_passes() -> [RenderPassConfig]:
+        """Return enabled passes sorted by priority."""
+        var result: [RenderPassConfig] = []
+        var i = 0
+        while i < self.passes.len():
+            if self.passes[i].enabled:
+                result = result.push(self.passes[i])
+            i = i + 1
+        # Already sorted by priority since self.passes is maintained sorted
+        result
+
+    fn get_stats() -> PipelineStats:
+        """Return pipeline statistics."""
+        var active = 0
+        var i = 0
+        while i < self.passes.len():
+            if self.passes[i].enabled:
+                active = active + 1
+            i = i + 1
+        PipelineStats(
+            pass_count: self.passes.len(),
+            active_pass_count: active,
+            pipeline_type: self.pipeline_type
+        )
+
+    fn pass_count() -> i32:
+        """Return total number of passes."""
+        self.passes.len()
+
+    fn is_deferred() -> bool:
+        """Check whether this is a deferred pipeline."""
+        self.pipeline_type == "deferred"

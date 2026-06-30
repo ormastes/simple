@@ -1,0 +1,71 @@
+# Driver trait — core contract every Simple-language driver satisfies.
+#
+# Signatures only; no bodies. All operations are synchronous.
+# All operations return Result<T, DriverError>; drivers never throw.
+#
+# Dispatch pattern: the kernel holds a DriverInstance enum (one variant per
+# concrete driver) and matches exhaustively — no dyn, no vtable. This matches
+# the shape already used by std.fs_driver.instance.DriverInstance.
+#
+# Pure-Simple drivers implement this trait directly. C drivers implement it
+# via an SFFI shim: the `.spl` shim holds the @driver manifest and delegates
+# each trait op to extern C functions. From the kernel's point of view both
+# look identical.
+#
+# See: doc/04_architecture/driver_architecture.md §Driver trait.
+
+use std.driver.error.{DriverError}
+use std.driver.types.{DeviceId, DriverHandle, DriverContext, IoctlCmd, ProbeResult, PowerState}
+
+trait Driver:
+    """Core synchronous driver interface — one trait, every device class.
+
+    Class-specific traits (FsDriver, GpuDriver, NetDriver, …) extend this
+    surface with their own operations; they do not replace it.
+
+    Lifecycle:
+        init / probe / attach / detach / suspend / resume
+
+    Generic I/O:
+        ioctl — class-agnostic control channel.
+
+    Identity:
+        manifest_abi_rev — the driver's expected loader ABI revision.
+    """
+
+    # --- ABI handshake ---
+
+    fn manifest_abi_rev() -> i32
+    """Return the loader ABI revision this driver was built against.
+       Kernel refuses to attach on mismatch (returns DriverError.AbiMismatch)."""
+
+    # --- Lifecycle ---
+
+    fn init(ctx: DriverContext) -> Result<(), DriverError>
+    """One-time per-driver initialization. Called once after load, before any
+       probe. Allocate per-driver state here, not per-device state."""
+
+    fn probe(dev: DeviceId) -> Result<ProbeResult, DriverError>
+    """Non-destructive check: can this driver drive this device?
+       Must not touch device state beyond what is reversible.
+       ProbeResult.Accept → kernel will follow with attach()."""
+
+    fn attach(dev: DeviceId) -> Result<DriverHandle, DriverError>
+    """Bind to the device. Allocate per-device state, map MMIO, register IRQ.
+       The returned handle is opaque to callers and closed via detach()."""
+
+    fn detach(h: DriverHandle) -> Result<(), DriverError>
+    """Release a binding created by attach(). Must unmap MMIO, unregister IRQ,
+       free per-device state. Idempotent on already-detached handles."""
+
+    fn suspend(h: DriverHandle, state: PowerState) -> Result<(), DriverError>
+    """Transition an attachment to a lower power state. Quiesce DMA, save regs."""
+
+    fn resume(h: DriverHandle) -> Result<(), DriverError>
+    """Restore an attachment from a suspended state."""
+
+    # --- Generic control channel ---
+
+    fn ioctl(h: DriverHandle, cmd: IoctlCmd) -> Result<i64, DriverError>
+    """Class-agnostic control op. Class-specific traits add typed wrappers;
+       raw ioctl is the escape hatch for commands without a typed binding."""

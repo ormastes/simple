@@ -1,0 +1,150 @@
+# CLI Utilities - Shared helpers for CLI argument processing
+# Used by all app/*/main.spl command implementations
+
+use app.io.mod (cli_get_args, cwd, file_exists, file_read, exit)
+use std.log.{error}
+
+export get_cli_args, find_manifest_path, parse_csv_fields
+export load_manifest_or_exit, parse_dependency_entry
+
+fn get_cli_args() -> [str]:
+    """
+    Extract command-line arguments, skipping program name and script path.
+
+    This helper eliminates the boilerplate pattern used across all CLI commands:
+    - Gets raw args from runtime
+    - Skips program name (args[0])
+    - Skips script path if present (args[1] ending in main.spl)
+    - Returns clean argument list for command processing
+
+    Example:
+        Raw args: ["simple_runtime", "src/app/add/main.spl", "--help", "package"]
+        Returns:  ["--help", "package"]
+    """
+    val all_args = cli_get_args()
+
+    # Skip program name and script path
+    var args: [str] = []
+    var start_idx = 1
+
+    # If second arg is the script path (ends with main.spl), skip it too
+    if all_args.len() > 1 and all_args[1].ends_with("main.spl"):
+        start_idx = 2
+
+    # Collect remaining arguments
+    var i = start_idx
+    while i < all_args.len():
+        args = args.push(all_args[i])
+        i = i + 1
+
+    args
+
+fn find_manifest_path() -> text:
+    """
+    Find the package manifest file (simple.sdn or simple.toml) in current directory.
+
+    Searches for manifest files in order of preference:
+    1. simple.sdn (preferred SDN format)
+    2. simple.toml (legacy TOML format)
+
+    Returns:
+        Path to manifest file, or empty string if not found
+
+    Used by: install, update, list, tree, lock commands
+    """
+    val cwd_path = cwd()
+    val sdn_path = "{cwd_path}/simple.sdn"
+    if file_exists(sdn_path):
+        return sdn_path
+    val toml_path = "{cwd_path}/simple.toml"
+    if file_exists(toml_path):
+        return toml_path
+    ""
+
+fn parse_csv_fields(line: text) -> [text]:
+    """
+    Parse CSV-like fields with quote and escape handling.
+
+    Supports:
+    - Comma-separated values
+    - Quoted strings (preserves spaces, commas inside quotes)
+    - Escape sequences (backslash escaping)
+
+    Example:
+        parse_csv_fields('id, "Hello, World", value')
+        Returns: ["id", "Hello, World", "value"]
+
+    Used by: feature_gen, task_gen, todo_gen, spec_coverage
+    """
+    var fields: [text] = []
+    var i = 0
+    var current = ""
+    var in_quote = false
+
+    while i < line.len():
+        val ch = line[i]
+        if in_quote:
+            if ch == "\\" and i + 1 < line.len():
+                current = current + line[i + 1]
+                i = i + 2
+                continue
+            if ch == "\"":
+                in_quote = false
+                i = i + 1
+                continue
+            current = current + ch
+        else:
+            if ch == "\"":
+                in_quote = true
+                i = i + 1
+                continue
+            if ch == ",":
+                fields.push(current.trim())
+                current = ""
+                i = i + 1
+                continue
+            current = current + ch
+        i = i + 1
+
+    fields.push(current.trim())
+    fields
+
+fn load_manifest_or_exit() -> text:
+    """
+    Load manifest file content, or print error and exit if not found.
+
+    Convenience wrapper that combines manifest finding, error checking,
+    and file reading into a single call.
+
+    Returns:
+        Manifest file content
+
+    Used by: list, tree, update commands
+    """
+    val manifest_path = find_manifest_path()
+    if manifest_path == "":
+        error("cli_util", "no simple.sdn or simple.toml found in current directory")
+        exit(1)
+    file_read(manifest_path)
+
+fn parse_dependency_entry(trimmed: text, deps: [(text, text)]) -> [(text, text)]:
+    """
+    Parse a single dependency entry line and add to deps list.
+
+    Handles lines in format: "package_name: version"
+    Validates package name (no spaces) before adding.
+
+    Example:
+        parse_dependency_entry("http: 2.0", [])
+        Returns: [("http", "2.0")]
+
+    Used by: list, tree, update dependency parsing
+    """
+    if trimmed.contains(":"):
+        val parts = trimmed.split(":")
+        if parts.len() >= 2:
+            val name = parts[0].trim()
+            val version = parts[1].trim()
+            if name != "" and not name.contains(" "):
+                return deps.push((name, version))
+    deps

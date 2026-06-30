@@ -1,0 +1,94 @@
+# Baremetal Host Communication - STLink Transport
+#
+# Wraps stlink_tools.spl for SWO (Serial Wire Output) based communication.
+
+use std.nogc_sync_mut.debug.remote.protocol.stlink_tools.StLinkToolsClient
+
+extern fn rt_command_output(cmd: text) -> text
+extern fn rt_system(cmd: text) -> i64
+
+# STLink SWO transport
+class StlinkTransport:
+    serial: text
+    swo_freq: i64
+    client: Option<StLinkToolsClient>
+    connected: bool
+    recv_buffer: text
+
+impl StlinkTransport:
+    static fn create(serial: text, swo_freq: i64) -> StlinkTransport:
+        StlinkTransport(
+            serial: serial,
+            swo_freq: swo_freq,
+            client: nil,
+            connected: false,
+            recv_buffer: ""
+        )
+
+    fn name() -> text:
+        "stlink"
+
+    fn is_connected() -> bool:
+        self.connected
+
+    me connect() -> Result<text, text>:
+        val result = StLinkToolsClient.connect(self.serial)
+        match result:
+            Ok(client):
+                self.client = Some(client)
+                # Configure SWO output
+                val swo_cmd = "st-trace --serial={self.serial} --clock={self.swo_freq}"
+                rt_system(swo_cmd)
+                self.connected = true
+                Ok("STLink connected (serial: {self.serial}, SWO freq: {self.swo_freq})")
+            Err(e):
+                Err("STLink connection failed: {e}")
+
+    me disconnect() -> Result<text, text>:
+        match self.client:
+            Some(client): client.disconnect()
+            nil: pass
+        self.client = nil
+        self.connected = false
+        Ok("STLink disconnected")
+
+    fn send(data: text) -> Result<i32, text>:
+        if not self.connected:
+            return Err("not connected")
+        # SWO is typically read-only, but semihosting write can be done via GDB
+        # For now, write through st-flash memory write
+        match self.client:
+            Some(client):
+                # Write data to a known semihosting buffer address
+                val result = client.flash_write("/dev/stdin", 0x20000000)
+                match result:
+                    Ok(_): Ok(data.len())
+                    Err(e): Err("STLink send failed: {e}")
+            nil:
+                Err("STLink client not initialized")
+
+    me receive() -> Result<text, text>:
+        if not self.connected:
+            return Err("not connected")
+        # Read SWO trace output
+        val cmd = "st-trace --serial={self.serial} --clock={self.swo_freq} 2>/dev/null"
+        val output = rt_command_output(cmd)
+        self.recv_buffer = output.trim()
+        Ok(self.recv_buffer)
+
+    fn receive_timeout(timeout_ms: i64) -> Result<text, text>:
+        self.receive()
+
+    me send_command(cmd: text) -> Result<text, text>:
+        self.send(cmd)?
+        self.receive()
+
+    fn flush() -> Result<text, text>:
+        if not self.connected:
+            return Err("not connected")
+        Ok("flushed")
+
+    fn available() -> Result<i32, text>:
+        if not self.connected:
+            return Err("not connected")
+        Ok(0)

@@ -1,0 +1,482 @@
+# Tamper-evident audit-log hash chain.
+#
+# Wraps the existing JSON line-oriented audit log with a sequence number +
+# SHA-256 hash chain. Each appended entry binds its predecessor via
+# `prev_hash`, and `entry_hash` deterministically commits seq, timestamp,
+# severity, JSON payload, and prev_hash. `audit_chain_verify` replays the
+# whole file and returns the count of valid entries — or a negative error
+# code identifying the first break.
+#
+# Phase 5 — sstack/log-lib-drivers AC-5 (audit) / AC-6e (tamper detection).
+# Architect spec: `.sstack/log-lib-drivers/state.md` §3-arch-E.
+
+use std.security.types.{AuditEntry, AuditConfig, SecurityEvent, SecuritySeverity}
+use std.security.audit_log.{format_audit_entry, severity_rank}
+use std.common.crypto.sha256.{sha256_bytes}
+use std.io_runtime.{file_exists, file_read, rt_file_write_text}
+
+# audit_log.spl already declares this extern; re-declare here for direct use
+# (Simple's resolver doesn't transitively expose `extern` decls across modules).
+extern fn rt_file_append_text(path: text, content: text) -> bool
+
+# ============================================================================
+# AuditError encoding
+# ============================================================================
+#
+# `audit_chain_verify` returns an `i64`:
+#   * positive (>=0) ⇒ count of valid entries (OK)
+#   * negative       ⇒ error variant + payload, encoded as:
+#         -((variant * MAX_SEQ) + payload)
+#     where MAX_SEQ is a large constant (1<<40) so payload up to ~1T fits.
+#
+# Variants (matches Phase 3 §E AuditError):
+#   1: Io(text)              — payload=0 (text not encoded; check is_io())
+#   2: BadJson(seq)
+#   3: ChainBreakAt(seq)
+#   4: SeqGapAt(seq)
+#   5: HashMismatchAt(seq)
+
+val AUDIT_ERR_VARIANT_SHIFT: i64 = 1099511627776   # 1 << 40
+val AUDIT_ERR_IO: i64 = 1
+val AUDIT_ERR_BAD_JSON: i64 = 2
+val AUDIT_ERR_CHAIN_BREAK_AT: i64 = 3
+val AUDIT_ERR_SEQ_GAP_AT: i64 = 4
+val AUDIT_ERR_HASH_MISMATCH_AT: i64 = 5
+
+## Tagged-class form, kept around so external callers can pattern-match.
+## `audit_chain_verify` returns `i64` for spec compatibility (`expect(...).to_equal(3)`),
+## and helpers below decode the integer into AuditError on demand.
+enum AuditError:
+    Io(message: text)
+    BadJson(seq: i64)
+    ChainBreakAt(seq: i64)
+    SeqGapAt(seq: i64)
+    HashMismatchAt(seq: i64)
+
+fn _encode_err(variant: i64, payload: i64) -> i64:
+    -((variant * AUDIT_ERR_VARIANT_SHIFT) + payload)
+
+fn _decode_variant(result: i64) -> i64:
+    if result >= 0:
+        return 0
+    val pos = -result
+    pos / AUDIT_ERR_VARIANT_SHIFT
+
+fn _decode_payload(result: i64) -> i64:
+    if result >= 0:
+        return 0
+    val pos = -result
+    pos % AUDIT_ERR_VARIANT_SHIFT
+
+# ============================================================================
+# Chain state (process-global, single-writer)
+# ============================================================================
+
+# A single global state cell. The audit chain is process-singleton: there is
+# at most one open chain file at a time. All `audit_chain_*` functions read
+# and update this state.
+var _audit_chain_path: text = ""
+var _audit_chain_next_seq: i64 = 1
+var _audit_chain_last_hash: [u8] = []
+var _audit_chain_initialized: bool = false
+var _audit_chain_fsync_each: bool = false
+
+## Initialize (or re-initialize) the chain bound to `file_path`.
+##
+## Genesis: if the file is missing or empty, `next_seq=1`,
+## `last_hash=[0u8;32]`.
+##
+## Recovery: if the file exists and is non-empty, scan only the LAST line
+## (O(1) ish — full read but constant work after that), parse its
+## `entry_hash`, set `last_hash` to it, and `next_seq = last_seq + 1`.
+fn audit_chain_init(file_path: text, fsync_each: bool):
+    _audit_chain_path = file_path
+    _audit_chain_fsync_each = fsync_each
+    _audit_chain_initialized = true
+    if not file_exists(file_path):
+        _audit_chain_next_seq = 1
+        _audit_chain_last_hash = _zero_hash()
+        return
+    val content = file_read(file_path)
+    if content.len() == 0:
+        _audit_chain_next_seq = 1
+        _audit_chain_last_hash = _zero_hash()
+        return
+    val last_line = _last_nonempty_line(content)
+    if last_line.len() == 0:
+        _audit_chain_next_seq = 1
+        _audit_chain_last_hash = _zero_hash()
+        return
+    val (seq, hash) = _extract_seq_and_hash(last_line)
+    if seq <= 0:
+        # Malformed — fall back to genesis. A subsequent verify() will catch.
+        _audit_chain_next_seq = 1
+        _audit_chain_last_hash = _zero_hash()
+        return
+    _audit_chain_next_seq = seq + 1
+    _audit_chain_last_hash = hash
+
+## Append `entry` to the chain. Mutates `entry` in-place: fills
+## `entry.seq`, `entry.prev_hash`, `entry.entry_hash`. Then writes one JSON
+## line to the chain file (the existing audit_log JSON format extended with
+## `seq`, `prev_hash_hex`, `entry_hash_hex`).
+fn audit_chain_append(entry: AuditEntry, config: AuditConfig):
+    if not _audit_chain_initialized:
+        # If user calls append without init, bind to config.log_file lazily.
+        audit_chain_init(config.log_file, false)
+
+    entry.seq = _audit_chain_next_seq
+    entry.prev_hash = _audit_chain_last_hash
+
+    val event_json = format_audit_entry(entry, config.mask_secrets)
+    val hash_input = _build_hash_input(entry.seq, entry.timestamp_ms, entry.severity, event_json, entry.prev_hash)
+    val hash = sha256_bytes(hash_input)
+
+    entry.entry_hash = hash
+
+    val line = _build_chained_line(entry, event_json)
+    rt_file_append_text(_audit_chain_path, line + "\n")
+
+    _audit_chain_last_hash = hash
+    _audit_chain_next_seq = entry.seq + 1
+
+## Verify the entire chain at `path`. Returns the count of valid entries on
+## success, or a negative AuditError-encoded value on the first break.
+fn audit_chain_verify(path: text) -> i64:
+    if not file_exists(path):
+        return _encode_err(AUDIT_ERR_IO, 0)
+    val content = file_read(path)
+    if content.len() == 0:
+        return 0
+    val lines = _split_lines(content)
+    var prev_hash = _zero_hash()
+    var expected_seq: i64 = 1
+    var count: i64 = 0
+    var i = 0
+    while i < lines.len():
+        val line = lines[i]
+        if line.len() == 0:
+            i = i + 1
+            continue
+        val (seq, ts_ms, sev_rank, event_json, parsed_prev, parsed_entry) = _parse_chained_line(line)
+        if seq <= 0:
+            return _encode_err(AUDIT_ERR_BAD_JSON, expected_seq)
+        if seq != expected_seq:
+            return _encode_err(AUDIT_ERR_SEQ_GAP_AT, seq)
+        if not _hashes_equal(parsed_prev, prev_hash):
+            return _encode_err(AUDIT_ERR_CHAIN_BREAK_AT, seq)
+        # Recompute entry_hash and compare.
+        val hash_input = _build_hash_input_raw(seq, ts_ms, sev_rank, event_json, parsed_prev)
+        val recomputed = sha256_bytes(hash_input)
+        if not _hashes_equal(recomputed, parsed_entry):
+            return _encode_err(AUDIT_ERR_CHAIN_BREAK_AT, seq)
+        prev_hash = parsed_entry
+        expected_seq = expected_seq + 1
+        count = count + 1
+        i = i + 1
+    count
+
+## Test helper: corrupt one byte in line `line_index_1based` at offset
+## `byte_offset_in_line`. Used by audit_log_hash_chain_spec.
+fn audit_chain_test_tamper_byte(path: text, line_index_1based: i64, byte_offset_in_line: i64):
+    val content = file_read(path)
+    val lines = _split_lines(content)
+    if line_index_1based < 1 or line_index_1based > lines.len():
+        return
+    val target_idx = line_index_1based - 1
+    var rebuilt = ""
+    var i = 0
+    while i < lines.len():
+        var line = lines[i]
+        if i == target_idx and line.len() > byte_offset_in_line:
+            # XOR a byte in the middle. Use char-level swap via slice.
+            val before = line.slice(0, byte_offset_in_line)
+            val orig = line.slice(byte_offset_in_line, byte_offset_in_line + 1)
+            # Pick a different printable byte: if 'A' make 'B', else 'A'.
+            var flipped = "A"
+            if orig == "A":
+                flipped = "B"
+            val after = line.slice(byte_offset_in_line + 1, line.len())
+            line = "{before}{flipped}{after}"
+        rebuilt = rebuilt + line + "\n"
+        i = i + 1
+    # Overwrite file in one shot — no shell dependency.
+    rt_file_write_text(path, rebuilt)
+
+## Test helper: returns true if `result` encodes Err(ChainBreakAt(expected_seq)).
+fn audit_chain_error_is_chain_break_at(result: i64, expected_seq: i64) -> bool:
+    if result >= 0:
+        return false
+    val variant = _decode_variant(result)
+    val payload = _decode_payload(result)
+    variant == AUDIT_ERR_CHAIN_BREAK_AT and payload == expected_seq
+
+## Test helper: true iff `hash` is the 32-byte all-zero genesis hash.
+fn audit_chain_is_zero_hash(hash: [u8]) -> bool:
+    if hash.len() != 32:
+        return false
+    var i = 0
+    while i < 32:
+        if hash[i] != 0:
+            return false
+        i = i + 1
+    true
+
+## Test helper: deterministic re-hash of an entry, used to confirm that
+## `entry.entry_hash` matches the canonical hash input.
+fn audit_chain_recompute_hash(entry: AuditEntry) -> [u8]:
+    val event_json = format_audit_entry(entry, false)
+    val hash_input = _build_hash_input(entry.seq, entry.timestamp_ms, entry.severity, event_json, entry.prev_hash)
+    sha256_bytes(hash_input)
+
+## Test helper: pure byte-for-byte hash equality check.
+fn audit_chain_hashes_equal(a: [u8], b: [u8]) -> bool:
+    _hashes_equal(a, b)
+
+# ============================================================================
+# Internal helpers
+# ============================================================================
+
+fn _zero_hash() -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < 32:
+        out.push(0)
+        i = i + 1
+    out
+
+fn _hashes_equal(a: [u8], b: [u8]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    true
+
+## Convert i64 to 8-byte big-endian list.
+fn _u64_be(value: i64) -> [u8]:
+    var out: [u8] = []
+    var i = 7
+    while i >= 0:
+        val byte = (value >> (i * 8)) & 0xFF
+        out.push(byte)
+        i = i - 1
+    out
+
+## Convert text to its UTF-8 bytes (Simple text is UTF-8 by convention).
+fn _text_bytes(t: text) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < t.len():
+        out.push(t.byte_at(i))
+        i = i + 1
+    out
+
+## Build canonical hash-input bytes for an entry whose severity is the
+## SecuritySeverity enum.
+fn _build_hash_input(seq: i64, ts_ms: i64, severity: SecuritySeverity, event_json: text, prev_hash: [u8]) -> [u8]:
+    _build_hash_input_raw(seq, ts_ms, severity_rank(severity), event_json, prev_hash)
+
+## Build canonical hash-input bytes from raw integer severity rank — used
+## by both the appender and the verifier (which only sees the rank from
+## the JSON line).
+fn _build_hash_input_raw(seq: i64, ts_ms: i64, sev_rank: i64, event_json: text, prev_hash: [u8]) -> [u8]:
+    var out: [u8] = []
+    # u64_be(seq)
+    val seq_be = _u64_be(seq)
+    var i = 0
+    while i < seq_be.len():
+        out.push(seq_be[i])
+        i = i + 1
+    # u64_be(ts_ms)
+    val ts_be = _u64_be(ts_ms)
+    i = 0
+    while i < ts_be.len():
+        out.push(ts_be[i])
+        i = i + 1
+    # u8(severity_rank)
+    out.push(sev_rank & 0xFF)
+    # event_json bytes
+    val ev_bytes = _text_bytes(event_json)
+    i = 0
+    while i < ev_bytes.len():
+        out.push(ev_bytes[i])
+        i = i + 1
+    # prev_hash bytes (32)
+    i = 0
+    while i < prev_hash.len():
+        out.push(prev_hash[i])
+        i = i + 1
+    out
+
+## Convert a 32-byte hash to lowercase hex.
+fn _hash_to_hex(hash: [u8]) -> text:
+    var out = ""
+    var i = 0
+    while i < hash.len():
+        val byte = hash[i]
+        val high = (byte >> 4) & 0xF
+        val low = byte & 0xF
+        out = out + _nibble_hex(high) + _nibble_hex(low)
+        i = i + 1
+    out
+
+fn _nibble_hex(n: i64) -> text:
+    if n == 0: return "0"
+    if n == 1: return "1"
+    if n == 2: return "2"
+    if n == 3: return "3"
+    if n == 4: return "4"
+    if n == 5: return "5"
+    if n == 6: return "6"
+    if n == 7: return "7"
+    if n == 8: return "8"
+    if n == 9: return "9"
+    if n == 10: return "a"
+    if n == 11: return "b"
+    if n == 12: return "c"
+    if n == 13: return "d"
+    if n == 14: return "e"
+    "f"
+
+## Parse a hex string back into a byte list.
+fn _hex_to_hash(hex: text) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < hex.len():
+        val high = _hex_nibble(hex.slice(i, i + 1))
+        val low = _hex_nibble(hex.slice(i + 1, i + 2))
+        out.push((high << 4) | low)
+        i = i + 2
+    out
+
+fn _hex_nibble(c: text) -> i64:
+    if c == "0": return 0
+    if c == "1": return 1
+    if c == "2": return 2
+    if c == "3": return 3
+    if c == "4": return 4
+    if c == "5": return 5
+    if c == "6": return 6
+    if c == "7": return 7
+    if c == "8": return 8
+    if c == "9": return 9
+    if c == "a" or c == "A": return 10
+    if c == "b" or c == "B": return 11
+    if c == "c" or c == "C": return 12
+    if c == "d" or c == "D": return 13
+    if c == "e" or c == "E": return 14
+    if c == "f" or c == "F": return 15
+    0
+
+## Build the line written to the chain file. Wraps the existing event JSON
+## with chain metadata. Chain envelope is JSON-flat to keep parsing trivial:
+##   {"chain":{"seq":N,"prev":"<hex32>","hash":"<hex32>","sev":S,"ts":T},"event":<existing-json>}
+fn _build_chained_line(entry: AuditEntry, event_json: text) -> text:
+    val prev_hex = _hash_to_hex(entry.prev_hash)
+    val hash_hex = _hash_to_hex(entry.entry_hash)
+    val sev = severity_rank(entry.severity)
+    "{\"chain\":{\"seq\":{entry.seq},\"prev\":\"{prev_hex}\",\"hash\":\"{hash_hex}\",\"sev\":{sev},\"ts\":{entry.timestamp_ms}},\"event\":{event_json}}"
+
+## Parse one chained line. Returns (seq, ts_ms, sev_rank, event_json, prev_hash, entry_hash).
+## On parse failure, returns seq=-1.
+fn _parse_chained_line(line: text) -> (i64, i64, i64, text, [u8], [u8]):
+    val seq = _scan_int_field(line, "\"seq\":")
+    val ts = _scan_int_field(line, "\"ts\":")
+    val sev = _scan_int_field(line, "\"sev\":")
+    val prev_hex = _scan_str_field(line, "\"prev\":\"")
+    val hash_hex = _scan_str_field(line, "\"hash\":\"")
+    val event_json = _scan_event_object(line)
+    if seq < 0 or prev_hex.len() != 64 or hash_hex.len() != 64:
+        return (-1, 0, 0, "", _zero_hash(), _zero_hash())
+    (seq, ts, sev, event_json, _hex_to_hash(prev_hex), _hex_to_hash(hash_hex))
+
+## Find a `"key":N` integer field in `line`. Returns -1 if not found.
+fn _scan_int_field(line: text, key: text) -> i64:
+    val idx = line.find(key)
+    if idx < 0:
+        return -1
+    val start = idx + key.len()
+    var end = start
+    while end < line.len():
+        val c = line.slice(end, end + 1)
+        if c == "," or c == "}":
+            break
+        end = end + 1
+    val raw = line.slice(start, end)
+    val trimmed = raw.trim()
+    if trimmed.len() == 0:
+        return -1
+    int(trimmed)
+
+## Find a `"key":"VALUE"` string field — the prefix passed in already
+## includes the opening quote.
+fn _scan_str_field(line: text, key_with_quote: text) -> text:
+    val idx = line.find(key_with_quote)
+    if idx < 0:
+        return ""
+    val start = idx + key_with_quote.len()
+    var end = start
+    while end < line.len():
+        val c = line.slice(end, end + 1)
+        if c == "\"":
+            break
+        end = end + 1
+    line.slice(start, end)
+
+## Find the `"event":{...}` sub-object and return its JSON text.
+fn _scan_event_object(line: text) -> text:
+    val key = "\"event\":"
+    val idx = line.find(key)
+    if idx < 0:
+        return ""
+    val start = idx + key.len()
+    if start >= line.len():
+        return ""
+    if line.slice(start, start + 1) != "{":
+        return ""
+    var depth = 0
+    var end = start
+    while end < line.len():
+        val c = line.slice(end, end + 1)
+        if c == "{":
+            depth = depth + 1
+        if c == "}":
+            depth = depth - 1
+            if depth == 0:
+                end = end + 1
+                break
+        end = end + 1
+    line.slice(start, end)
+
+fn _last_nonempty_line(content: text) -> text:
+    val lines = _split_lines(content)
+    var i = lines.len() - 1
+    while i >= 0:
+        if lines[i].len() > 0:
+            return lines[i]
+        i = i - 1
+    ""
+
+fn _split_lines(content: text) -> [text]:
+    var out: [text] = []
+    var start = 0
+    var i = 0
+    while i < content.len():
+        if content.slice(i, i + 1) == "\n":
+            out.push(content.slice(start, i))
+            start = i + 1
+        i = i + 1
+    if start < content.len():
+        out.push(content.slice(start, content.len()))
+    out
+
+## Extract (seq, entry_hash) from a chained line for recovery.
+fn _extract_seq_and_hash(line: text) -> (i64, [u8]):
+    val seq = _scan_int_field(line, "\"seq\":")
+    val hash_hex = _scan_str_field(line, "\"hash\":\"")
+    if seq < 0 or hash_hex.len() != 64:
+        return (-1, _zero_hash())
+    (seq, _hex_to_hash(hash_hex))

@@ -1,0 +1,222 @@
+"""
+# Capability Revoke Depth Specification (E3/E4)
+
+**Feature IDs:** #OS-E3 #OS-E4
+**Category:** Runtime
+**Difficulty:** 3/5
+**Status:** Implemented
+**Requirements:** N/A
+**Plan:** doc/03_plan/runtime/escalation_fixes_2026-06-11.md
+**Design:** N/A
+**Research:** N/A
+
+## Overview
+
+Regression spec for E3 (transitive revoke) and E4 (delegation depth).
+
+E3: grants carry provenance (token_id + parent_token_id). revoke_transitive
+    on a root token also revokes every grant derived from it.
+
+E4: CapabilityToken.depth is the remaining delegation budget. grant()
+    decrements depth; at depth=0 further delegation is DENIED.
+    Default depth for fresh grants is 2.
+"""
+
+use std.spec.{describe, it, expect}
+use os.kernel.types.task_types.{TaskId}
+use os.kernel.types.capability_types.{CapabilityToken, CapabilityKind, CapabilitySet}
+use os.kernel.ipc.capability.{CapabilityManager}
+
+# ============================================================================
+# Test Group 1: E3 — Transitive revocation
+# ============================================================================
+
+describe "CapabilityManager revoke_transitive E3":
+    """Transitive revocation walks the delegation ancestry."""
+
+    it "grant builds provenance chain: child parent_token_id links to root":
+        """After granting from task 1 to task 2, the child token's
+        parent_token_id equals the root token's token_id."""
+        var mgr = CapabilityManager.new()
+        val t1 = TaskId(id: 1)
+        val t2 = TaskId(id: 2)
+        mgr.init_task_record(t1, true)
+        # Grab the root token (FileRead) from t1's record
+        val rec1_opt = mgr._find_record(t1)
+        val rec1 = rec1_opt
+        val root_tok = rec1.caps.caps[0]
+        val root_id = root_tok.token_id
+        # Grant to t2
+        val ok = mgr.grant(t1, t2, root_tok)
+        expect(ok).to_equal(true)
+        # Find the child token in t2
+        val rec2_opt = mgr._find_record(t2)
+        val rec2 = rec2_opt
+        val child = rec2.caps.caps[0]
+        expect(child.parent_token_id).to_equal(root_id)
+
+    it "revoke_transitive removes child token from delegate after revoking root":
+        """grant root->t2, revoke_transitive(root_id): t2 check fails."""
+        var mgr = CapabilityManager.new()
+        val t1 = TaskId(id: 10)
+        val t2 = TaskId(id: 20)
+        mgr.init_task_record(t1, true)
+        val rec1_opt = mgr._find_record(t1)
+        val rec1 = rec1_opt
+        val root_tok = rec1.caps.caps[0]
+        val root_id = root_tok.token_id
+        # Confirm t1 can check FileRead before anything
+        val before = mgr.check(t1, CapabilityKind.FileRead(path_prefix: ""))
+        expect(before).to_equal(true)
+        # Grant to t2
+        mgr.grant(t1, t2, root_tok)
+        # Confirm t2 has FileRead
+        val t2_before = mgr.check(t2, CapabilityKind.FileRead(path_prefix: ""))
+        expect(t2_before).to_equal(true)
+        # Transitive revoke from root
+        val count = mgr.revoke_transitive(root_id)
+        # At least the root token was revoked
+        expect(count).to_be_greater_than(0)
+        # t2 must no longer pass the check
+        val t2_after = mgr.check(t2, CapabilityKind.FileRead(path_prefix: ""))
+        expect(t2_after).to_equal(false)
+
+    it "revoke_transitive returns count of tokens removed":
+        """Two delegations from root: revoke_transitive removes all 3 (root+2 children)."""
+        var mgr = CapabilityManager.new()
+        val t1 = TaskId(id: 1)
+        val t2 = TaskId(id: 2)
+        val t3 = TaskId(id: 3)
+        mgr.init_task_record(t1, true)
+        val rec_opt = mgr._find_record(t1)
+        val rec = rec_opt
+        val root_tok = rec.caps.caps[0]
+        val root_id = root_tok.token_id
+        mgr.grant(t1, t2, root_tok)
+        # Re-read root token (same root, depth still > 0 for t1)
+        val rec_again_opt = mgr._find_record(t1)
+        val rec_again = rec_again_opt
+        val root_tok2 = rec_again.caps.caps[0]
+        mgr.grant(t1, t3, root_tok2)
+        val count = mgr.revoke_transitive(root_id)
+        # root + 2 derived = 3
+        expect(count).to_equal(3)
+
+    it "_ensure_record deny-all default still holds for unknown principal":
+        """A task with no explicit grant passes no check (default deny)."""
+        var mgr = CapabilityManager.new()
+        val unknown = TaskId(id: 999)
+        val result = mgr.check(unknown, CapabilityKind.FileRead(path_prefix: ""))
+        expect(result).to_equal(false)
+
+# ============================================================================
+# Test Group 2: E4 — Delegation depth enforcement
+# ============================================================================
+
+describe "CapabilityManager delegation depth E4":
+    """Delegation depth is decremented on grant; exhausted depth is denied."""
+
+    it "fresh grant has default depth 2":
+        """init_task_record with full=true gives tokens with depth=2."""
+        var mgr = CapabilityManager.new()
+        val t1 = TaskId(id: 1)
+        mgr.init_task_record(t1, true)
+        val rec_opt = mgr._find_record(t1)
+        val rec = rec_opt
+        val tok = rec.caps.caps[0]
+        expect(tok.depth).to_equal(2)
+
+    it "depth decrements by 1 on each delegation":
+        """Root depth=2 → child depth=1 after one grant."""
+        var mgr = CapabilityManager.new()
+        val t1 = TaskId(id: 1)
+        val t2 = TaskId(id: 2)
+        mgr.init_task_record(t1, true)
+        val rec_opt = mgr._find_record(t1)
+        val rec = rec_opt
+        val root_tok = rec.caps.caps[0]
+        expect(root_tok.depth).to_equal(2)
+        mgr.grant(t1, t2, root_tok)
+        val rec2_opt = mgr._find_record(t2)
+        val rec2 = rec2_opt
+        val child = rec2.caps.caps[0]
+        expect(child.depth).to_equal(1)
+
+    it "depth-2 chain: root→t2→t3 works (depth reaches 0 at t3)":
+        """Two-hop delegation succeeds: root(2)→child(1)→grandchild(0)."""
+        var mgr = CapabilityManager.new()
+        val t1 = TaskId(id: 1)
+        val t2 = TaskId(id: 2)
+        val t3 = TaskId(id: 3)
+        mgr.init_task_record(t1, true)
+        val rec1_opt = mgr._find_record(t1)
+        val rec1 = rec1_opt
+        val root = rec1.caps.caps[0]
+        # First hop: t1→t2
+        val ok1 = mgr.grant(t1, t2, root)
+        expect(ok1).to_equal(true)
+        # Second hop: t2→t3 using t2's child token
+        val rec2_opt = mgr._find_record(t2)
+        val rec2 = rec2_opt
+        val child = rec2.caps.caps[0]
+        expect(child.depth).to_equal(1)
+        val ok2 = mgr.grant(t2, t3, child)
+        expect(ok2).to_equal(true)
+        # t3 gets depth=0
+        val rec3_opt = mgr._find_record(t3)
+        val rec3 = rec3_opt
+        val grandchild = rec3.caps.caps[0]
+        expect(grandchild.depth).to_equal(0)
+
+    it "delegation denied when depth is 0":
+        """A token with depth=0 cannot be delegated further."""
+        var mgr = CapabilityManager.new()
+        val t1 = TaskId(id: 1)
+        val t2 = TaskId(id: 2)
+        val t3 = TaskId(id: 3)
+        val t4 = TaskId(id: 4)
+        mgr.init_task_record(t1, true)
+        val rec1_opt = mgr._find_record(t1)
+        val rec1 = rec1_opt
+        val root = rec1.caps.caps[0]
+        # t1→t2 (depth 2→1)
+        mgr.grant(t1, t2, root)
+        val rec2_opt = mgr._find_record(t2)
+        val rec2 = rec2_opt
+        val child = rec2.caps.caps[0]
+        # t2→t3 (depth 1→0)
+        mgr.grant(t2, t3, child)
+        val rec3_opt = mgr._find_record(t3)
+        val rec3 = rec3_opt
+        val grandchild = rec3.caps.caps[0]
+        expect(grandchild.depth).to_equal(0)
+        # t3→t4 must FAIL: depth=0
+        val denied = mgr.grant(t3, t4, grandchild)
+        expect(denied).to_equal(false)
+        # t4 must have no capability
+        val t4_check = mgr.check(t4, CapabilityKind.FileRead(path_prefix: ""))
+        expect(t4_check).to_equal(false)
+
+    it "full revoke after delegation chain: all principals denied":
+        """grant root→t2→t3, revoke_transitive(root): t2 and t3 both denied."""
+        var mgr = CapabilityManager.new()
+        val t1 = TaskId(id: 1)
+        val t2 = TaskId(id: 2)
+        val t3 = TaskId(id: 3)
+        mgr.init_task_record(t1, true)
+        val rec1_opt = mgr._find_record(t1)
+        val rec1 = rec1_opt
+        val root = rec1.caps.caps[0]
+        val root_id = root.token_id
+        mgr.grant(t1, t2, root)
+        val rec2_opt = mgr._find_record(t2)
+        val rec2 = rec2_opt
+        val child = rec2.caps.caps[0]
+        mgr.grant(t2, t3, child)
+        # Revoke transitively from root
+        mgr.revoke_transitive(root_id)
+        # Both t2 and t3 must fail
+        val t2_check = mgr.check(t2, CapabilityKind.FileRead(path_prefix: ""))
+        val t3_check = mgr.check(t3, CapabilityKind.FileRead(path_prefix: ""))
+        expect(t2_check).to_equal(false)
+        expect(t3_check).to_equal(false)

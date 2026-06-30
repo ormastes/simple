@@ -1,0 +1,101 @@
+"""
+# CORS Checker
+
+CorsChecker implements same-origin policy enforcement and preflight logic
+per the Fetch specification. No network calls — pure logic.
+"""
+
+#![allow(REQC001)]
+
+use std.gc_async_mut.gpu.browser_engine.net.entity.cors_types.{PreflightResult}
+use std.gc_async_mut.gpu.browser_engine.net.entity.request_types.{FetchRequest, RequestMode}
+use std.gc_async_mut.gpu.browser_engine.net.entity.url_types.{Url, Origin}
+
+pub fn is_simple_method(method: text) -> bool:
+    """Return true if method is a CORS simple method (GET, POST, HEAD)."""
+    return (method == "GET" or method == "POST" or method == "HEAD")
+
+pub fn needs_preflight(req: FetchRequest, requester_origin: Origin) -> bool:
+    """Return true if the request requires a CORS preflight OPTIONS exchange.
+
+    Preflight is required when:
+    - The origin differs from the request target, AND
+    - The method is non-simple, OR the Content-Type is non-simple (application/json).
+    """
+    # Same-origin: no preflight needed
+    val req_scheme = req.url.scheme
+    val req_host = req.url.host
+    val req_port = req.url.port
+    val same_origin = (
+        requester_origin.scheme == req_scheme and
+        requester_origin.host == req_host and
+        requester_origin.port == req_port
+    )
+    if same_origin:
+        return false
+
+    # Non-simple method requires preflight
+    if not is_simple_method(req.method):
+        return true
+
+    # application/json Content-Type requires preflight
+    if req.headers.contains("application/json"):
+        return true
+
+    return false
+
+pub fn create_preflight(original: FetchRequest) -> FetchRequest:
+    """Build an OPTIONS preflight request for the original request."""
+    val preflight_headers = (
+        "Access-Control-Request-Method: " + original.method + "\r\n" +
+        "Access-Control-Request-Headers: content-type\r\n"
+    )
+    return FetchRequest {
+        method: "OPTIONS",
+        url: original.url,
+        headers: preflight_headers,
+        body: [],
+        mode: RequestMode.Cors,
+        credentials: original.credentials
+    }
+
+pub class CorsChecker:
+    """Validates CORS preflight responses for a given requester origin."""
+    _origin: text
+
+    static fn new(origin: text) -> CorsChecker:
+        """Create a CorsChecker for the given origin string."""
+        return CorsChecker { _origin: origin }
+
+    me fn validate_preflight(response_headers: text) -> PreflightResult:
+        """Check whether the server's preflight response permits the request.
+
+        Returns Allowed if:
+        - Access-Control-Allow-Origin matches this checker's origin (or is *), AND
+        - Access-Control-Allow-Methods contains a non-simple method (PUT/DELETE/PATCH/etc.)
+        Returns Denied otherwise.
+        """
+        # Check origin
+        val origin_ok = (
+            response_headers.contains("Access-Control-Allow-Origin: *") or
+            response_headers.contains("Access-Control-Allow-Origin: " + self._origin)
+        )
+        if not origin_ok:
+            return PreflightResult.Denied
+
+        # Check that allowed methods include a non-simple method
+        val has_non_simple = (
+            response_headers.contains("Access-Control-Allow-Methods: PUT") or
+            response_headers.contains("Access-Control-Allow-Methods: DELETE") or
+            response_headers.contains("Access-Control-Allow-Methods: PATCH") or
+            response_headers.contains("Access-Control-Allow-Methods: OPTIONS") or
+            response_headers.contains("Access-Control-Allow-Methods: CONNECT") or
+            response_headers.contains("Access-Control-Allow-Methods: TRACE") or
+            response_headers.contains(", PUT") or
+            response_headers.contains(", DELETE") or
+            response_headers.contains(", PATCH")
+        )
+        if not has_non_simple:
+            return PreflightResult.Denied
+
+        return PreflightResult.Allowed

@@ -1,0 +1,152 @@
+# RISC-V noalloc boot handoff.
+#
+# This module is deliberately byte-only: no text, arrays, formatting, Option,
+# Result, heap, PMM bitmap, or log facade. It gives the RISC-V boot ELF a real
+# cross-module handoff point while the hosted value/runtime ABI is still absent.
+#
+# Board-specific convenience wrappers (riscv_noalloc_handoff_kria,
+# riscv_noalloc_handoff_litex) delegate to the arch adapter for address
+# constants.
+# The generic riscv_noalloc_handoff_with_layout() remains the canonical path.
+
+use os.kernel.arch_adapt.riscv64_platform_memory_map.{
+    riscv64_kria_uart_base,
+    riscv64_kria_ram_base,
+    riscv64_kria_ram_size,
+    riscv64_kria_heap_start,
+    riscv64_kria_heap_size,
+    riscv64_kria_clint_base,
+    riscv64_kria_plic_base,
+    riscv64_litex_uart_base,
+    riscv64_litex_ram_base,
+    riscv64_litex_ram_size,
+    riscv64_litex_heap_start,
+    riscv64_litex_heap_size,
+    riscv64_litex_clint_base,
+    riscv64_litex_plic_base
+}
+
+# Module-level vals: kept for host/interpreter use only.
+# In baremetal LLVM targets these may be zero due to BSS clearing before
+# static initialization. Use function-local vals in baremetal callers.
+val UART0_BASE: u64 = 0x10000000
+val RISCV_RAM_BASE: u64 = 0x80000000
+val RISCV_RAM_SIZE: u64 = 134217728
+val RISCV_KERNEL_RESERVED_END: u64 = 0x80200000
+val RISCV_HEAP_SIZE: u64 = 16777216
+val RISCV_HEAP_START: u64 = 0x87000000
+
+var g_riscv_boot_hart_id: u64 = 0
+var g_riscv_boot_dtb_addr: u64 = 0
+var g_riscv_ram_base: u64 = 0
+var g_riscv_ram_size: u64 = 0
+var g_riscv_heap_start: u64 = 0
+var g_riscv_heap_end: u64 = 0
+var g_riscv_noalloc_handoff_ready: bool = false
+
+extern fn rt_riscv_uart_put(byte: u64)
+
+struct RiscvMemoryLayout:
+    uart_base: u64
+    ram_base: u64
+    ram_size: u64
+    heap_start: u64
+    heap_size: u64
+    clint_base: u64
+    plic_base: u64
+
+fn _uart_put(byte: u64):
+    rt_riscv_uart_put(byte)
+
+fn _crlf():
+    _uart_put(13)
+    _uart_put(10)
+
+fn _line_mem():
+    _uart_put(77)  # M
+    _uart_put(69)  # E
+    _uart_put(77)  # M
+    _uart_put(32)  # space
+    _uart_put(79)  # O
+    _uart_put(75)  # K
+    _crlf()
+
+fn _line_idle():
+    _uart_put(79)  # O
+    _uart_put(83)  # S
+    _uart_put(32)  # space
+    _uart_put(73)  # I
+    _uart_put(68)  # D
+    _uart_put(76)  # L
+    _uart_put(69)  # E
+    _crlf()
+
+fn riscv_noalloc_handoff(hart_id: u64, dtb_addr: u64):
+    g_riscv_boot_hart_id = hart_id
+    g_riscv_boot_dtb_addr = dtb_addr
+    g_riscv_ram_base = RISCV_RAM_BASE
+    g_riscv_ram_size = RISCV_RAM_SIZE
+    g_riscv_heap_start = RISCV_HEAP_START
+    g_riscv_heap_end = RISCV_HEAP_START + RISCV_HEAP_SIZE
+    g_riscv_noalloc_handoff_ready = true
+    _line_mem()
+
+fn riscv_noalloc_handoff_with_layout(hart_id: u64, dtb_addr: u64, ram_base: u64, ram_size: u64, heap_start: u64, heap_size: u64):
+    g_riscv_boot_hart_id = hart_id
+    g_riscv_boot_dtb_addr = dtb_addr
+    g_riscv_ram_base = ram_base
+    g_riscv_ram_size = ram_size
+    g_riscv_heap_start = heap_start
+    g_riscv_heap_end = heap_start + heap_size
+    g_riscv_noalloc_handoff_ready = true
+    _line_mem()
+
+fn riscv_noalloc_boot_idle():
+    _line_idle()
+
+fn riscv_noalloc_handoff_is_ready() -> bool:
+    g_riscv_noalloc_handoff_ready
+
+fn riscv_noalloc_heap_start() -> u64:
+    g_riscv_heap_start
+
+fn riscv_noalloc_heap_end() -> u64:
+    g_riscv_heap_end
+
+fn riscv_noalloc_handoff_kria(hart_id: u64, dtb_addr: u64):
+    """Convenience wrapper: handoff using Kria K26 memory layout.
+
+    Delegates to the RISC-V64 platform adapter for address constants and then to
+    riscv_noalloc_handoff_with_layout.
+    """
+    riscv_noalloc_handoff_with_layout(hart_id, dtb_addr, riscv64_kria_ram_base(), riscv64_kria_ram_size(), riscv64_kria_heap_start(), riscv64_kria_heap_size())
+
+fn riscv_noalloc_handoff_litex(hart_id: u64, dtb_addr: u64):
+    """Convenience wrapper: handoff using DE10-Nano / LiteX memory layout.
+
+    Delegates to the RISC-V64 platform adapter for address constants and then to
+    riscv_noalloc_handoff_with_layout.
+    """
+    riscv_noalloc_handoff_with_layout(hart_id, dtb_addr, riscv64_litex_ram_base(), riscv64_litex_ram_size(), riscv64_litex_heap_start(), riscv64_litex_heap_size())
+
+fn riscv_noalloc_layout_from_kria() -> RiscvMemoryLayout:
+    RiscvMemoryLayout(
+        uart_base: riscv64_kria_uart_base(),
+        ram_base: riscv64_kria_ram_base(),
+        ram_size: riscv64_kria_ram_size(),
+        heap_start: riscv64_kria_heap_start(),
+        heap_size: riscv64_kria_heap_size(),
+        clint_base: riscv64_kria_clint_base(),
+        plic_base: riscv64_kria_plic_base()
+    )
+
+fn riscv_noalloc_layout_from_litex() -> RiscvMemoryLayout:
+    RiscvMemoryLayout(
+        uart_base: riscv64_litex_uart_base(),
+        ram_base: riscv64_litex_ram_base(),
+        ram_size: riscv64_litex_ram_size(),
+        heap_start: riscv64_litex_heap_start(),
+        heap_size: riscv64_litex_heap_size(),
+        clint_base: riscv64_litex_clint_base(),
+        plic_base: riscv64_litex_plic_base()
+    )

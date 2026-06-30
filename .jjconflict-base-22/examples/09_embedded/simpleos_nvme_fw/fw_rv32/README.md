@@ -1,0 +1,54 @@
+# NVMe firmware — bare-metal RV32 on-device self-test (`fw_rv32/`, gap-closure P9)
+
+`entry.spl` is an **array-free, scalar** re-expression of the firmware's core **RAIN XOR-parity
+reconstruct** (`../fw/rain.spl`, proven in `../fw/proofs/Rain.lean`), written to run inside the
+bare-metal rv32 boot path with **no heap and no arrays** — matching the constraint documented in
+`src/os/kernel/arch/riscv32/boot.spl` ("keep this module freestanding and minimal ... without
+pulling runtime formatting, arrays, or boot metadata into the first-stage entry object"). It
+verifies, with eight scalar channels, that parity XOR the survivors recovers any lost channel
+exactly (XOR is its own inverse), plus a channel-failure rebuild, then prints
+`ALL RV32 NVME FW CHECKS PASS` over the UART via `rt_riscv_uart_put` — one byte at a time, exactly
+like `boot.spl`'s `_line_*` helpers.
+
+The scalar logic is `bin/simple check`-clean and host-verified (the XOR-cancel math reproduces
+`fail=0`).
+
+## Integration (when the rv32 toolchain is restored)
+
+`entry.spl` exposes `nvme_fw_rv32_selftest()`, designed to be called from the rv32 boot chain:
+
+1. Add a `nvme_fw_rv32_selftest()` call in `src/os/kernel/arch/riscv32/boot.spl` `boot_main`,
+   after `riscv_noalloc_log_init()`.
+2. Build the rv32 OS ELF: `sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/build.shs`.
+3. Boot + check the marker: `sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/boot.shs <elf>`.
+
+(No standalone `@naked _start` is hand-written here — the proven `_start`/crt/UART live in
+`boot.spl`; reusing them is more reliable than an untestable hand-rolled entry.)
+
+## Status (2026-06-30): toolchain FIXED + freestanding runtime COMPLETED; rv32 OS builds & boots
+
+- ✅ `entry.spl` is `check`-clean, array-free, and the RAIN logic is host-verified (XOR-cancel
+  reproduces `fail=0`).
+- ✅ **Toolchain fixed and on origin.** `native-build --target riscv32-unknown-none` no longer
+  exits with a silent 255: it routes to the in-process Rust LLVM handler, compiles riscv objects,
+  and links (commits `a0652371728` pure-Simple surfacing + `187c62110138` Rust cross-target
+  routing, both ancestors of `main`). The OS build resolves `src/compiler_rust/target/release/simple`
+  for any llvm build, so cross-target uses the fixed seed directly (cross-target is a seed-only
+  capability; the shared self-hosted `bin/simple` is intentionally not overwritten).
+- ✅ **Freestanding runtime completed.** The "missing `rt_native_eq`/`rt_riscv_uart_put`" claim was a
+  wrong-build artifact: those are provided by the shared freestanding runtime
+  (`src/os/kernel/arch/riscv64/boot/freestanding_runtime.c`, `#include`d by the rv32 bridge
+  `baremetal_stubs.c`), autodiscovered when the entry is `…/riscv32/boot.spl`. The real gap was three
+  primitives the compiler emits — `rt_string_char_at`, `rt_value_as_int`, `rt_array_pop` — now added
+  to that runtime (commit `5ac934cd285`, `weak` so the rv64 lane's strong defs win). The rv32 boot.spl
+  kernel links with **0 undefined runtime symbols**; the rv64 kernel still links clean.
+- ✅ **rv32 boots.** The OS fs-exec rv32 ELF (`build/os/simpleos_riscv32_smf_fs.elf`) builds fresh and
+  boots under `qemu-system-riscv32 -bios none`: `=== SimpleOS RV32 smoke boot === / SimpleOS RV32 boot
+  OK` (the trailing `TEST FAILED` is only the absent fat32 disk image).
+
+`entry.spl` remains the **standalone logic reference** for the firmware's RAIN reconstruct
+(host-verified). A standalone `native-build` of it alone still won't link — its dir has no `boot/`
+for C autodiscovery — so the bootable path is the OS build (`simple os build --arch=riscv32`, or the
+proven smoke-lane recipe), which links the shared freestanding runtime. The full 22-module no-alloc
+port of `../fw/` remains the larger ceiling. Tracked:
+`doc/08_tracking/bug/native_build_rv32_baremetal_silent_255_2026-06-30.md`.

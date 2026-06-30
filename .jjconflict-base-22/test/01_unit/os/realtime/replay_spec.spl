@@ -1,0 +1,112 @@
+use std.spipe.*
+
+# Inline replay mode constants and functions (i64 for interpreter mode)
+val RTOS_REPLAY_OFF: i64 = 0
+val RTOS_REPLAY_RECORD: i64 = 1
+val RTOS_REPLAY_REPLAY: i64 = 2
+val RTOS_REPLAY_VERIFY: i64 = 3
+val RTOS_REPLAY_CHAOS: i64 = 4
+
+var g_rtos_replay_mode: i64 = 0
+fn rtos_replay_set_mode(mode: i64):
+    g_rtos_replay_mode = mode
+fn rtos_replay_is_recording() -> bool:
+    g_rtos_replay_mode == RTOS_REPLAY_RECORD or g_rtos_replay_mode == RTOS_REPLAY_CHAOS
+fn rtos_replay_is_replaying() -> bool:
+    g_rtos_replay_mode == RTOS_REPLAY_REPLAY
+fn rtos_replay_is_verifying() -> bool:
+    g_rtos_replay_mode == RTOS_REPLAY_VERIFY
+fn rtos_replay_is_off() -> bool:
+    g_rtos_replay_mode == 0
+fn rtos_replay_mode_text() -> text:
+    if g_rtos_replay_mode == RTOS_REPLAY_OFF:
+        return "off"
+    if g_rtos_replay_mode == RTOS_REPLAY_RECORD:
+        return "record"
+    if g_rtos_replay_mode == RTOS_REPLAY_REPLAY:
+        return "replay"
+    if g_rtos_replay_mode == RTOS_REPLAY_VERIFY:
+        return "verify"
+    if g_rtos_replay_mode == RTOS_REPLAY_CHAOS:
+        return "chaos-record"
+    "unknown"
+
+# Inline simplified checkpoint (no external deps)
+class RtosCheckpoint:
+    id: i64
+    tick: i64
+    current_task: i64
+    priority_bitmap: i64
+    rng_s0: i64
+    rng_s1: i64
+
+fn checkpoint_find(arr: [RtosCheckpoint], id: i64) -> i64:
+    var i: i64 = 0
+    while i < arr.len():
+        if arr[i].id == id:
+            return i
+        i = i + 1
+    -1
+
+# ============================================================================
+# Tests
+# ============================================================================
+describe "Replay mode constants":
+    it "OFF=0 RECORD=1 REPLAY=2 VERIFY=3 CHAOS=4":
+        expect(RTOS_REPLAY_OFF).to_equal(0)
+        expect(RTOS_REPLAY_RECORD).to_equal(1)
+        expect(RTOS_REPLAY_REPLAY).to_equal(2)
+        expect(RTOS_REPLAY_VERIFY).to_equal(3)
+        expect(RTOS_REPLAY_CHAOS).to_equal(4)
+describe "Replay mode predicates":
+    it "is_recording true for RECORD and CHAOS":
+        rtos_replay_set_mode(RTOS_REPLAY_RECORD)
+        expect(rtos_replay_is_recording()).to_equal(true)
+        rtos_replay_set_mode(RTOS_REPLAY_CHAOS)
+        expect(rtos_replay_is_recording()).to_equal(true)
+
+    it "is_replaying true for REPLAY, false for RECORD":
+        rtos_replay_set_mode(RTOS_REPLAY_REPLAY)
+        expect(rtos_replay_is_replaying()).to_equal(true)
+        rtos_replay_set_mode(RTOS_REPLAY_RECORD)
+        expect(rtos_replay_is_replaying()).to_equal(false)
+    it "is_verifying true for VERIFY":
+        rtos_replay_set_mode(RTOS_REPLAY_VERIFY)
+        expect(rtos_replay_is_verifying()).to_equal(true)
+
+    it "is_off true for OFF":
+        rtos_replay_set_mode(RTOS_REPLAY_OFF)
+        expect(rtos_replay_is_off()).to_equal(true)
+describe "Replay mode text":
+    it "maps each mode to correct string":
+        rtos_replay_set_mode(RTOS_REPLAY_OFF)
+        expect(rtos_replay_mode_text()).to_equal("off")
+        rtos_replay_set_mode(RTOS_REPLAY_RECORD)
+        expect(rtos_replay_mode_text()).to_equal("record")
+        rtos_replay_set_mode(RTOS_REPLAY_CHAOS)
+        expect(rtos_replay_mode_text()).to_equal("chaos-record")
+describe "RtosCheckpoint":
+    it "constructs with all fields":
+        val cp = RtosCheckpoint(id: 1, tick: 500, current_task: 3, priority_bitmap: 15, rng_s0: 42, rng_s1: 99)
+        expect(cp.id).to_equal(1)
+        expect(cp.tick).to_equal(500)
+        expect(cp.current_task).to_equal(3)
+        expect(cp.rng_s0).to_equal(42)
+
+    it "find by id in single-element array":
+        val cp = RtosCheckpoint(id: 7, tick: 1000, current_task: 0, priority_bitmap: 3, rng_s0: 10, rng_s1: 20)
+        val arr: [RtosCheckpoint] = [cp]
+        expect(checkpoint_find(arr, 7)).to_equal(0)
+        expect(arr[0].tick).to_equal(1000)
+
+    it "find returns -1 for missing id":
+        val empty: [RtosCheckpoint] = []
+        expect(checkpoint_find(empty, 99)).to_equal(-1)
+
+    it "find returns correct index in multi-element array":
+        val cp1 = RtosCheckpoint(id: 1, tick: 10, current_task: 0, priority_bitmap: 0, rng_s0: 0, rng_s1: 0)
+        val cp2 = RtosCheckpoint(id: 2, tick: 20, current_task: 0, priority_bitmap: 0, rng_s0: 0, rng_s1: 0)
+        val arr: [RtosCheckpoint] = [cp1, cp2]
+        expect(arr.len()).to_equal(2)
+        expect(checkpoint_find(arr, 2)).to_equal(1)
+        expect(checkpoint_find(arr, 99)).to_equal(-1)

@@ -1,0 +1,204 @@
+@allow(unnamed_duplicate_typed_args) # reason: positional API -- arg order is conventional
+# EasyFix Shared Helpers
+# Line iteration, byte offset utilities, and low-level parsing helpers shared
+# across all rule implementations.
+
+use std.tooling.easy_fix.types.{EasyFix, FixConfidence, Replacement}
+
+# ============================================================================
+# Helper: Line Iteration with Context
+# ============================================================================
+
+struct LineContext:
+    """Context information for processing a source line."""
+    line: text
+    line_num: i64
+    byte_offset: i64
+    trimmed: text
+    indent: i64
+
+fn for_each_line(source: text, callback: fn(LineContext) -> [EasyFix]) -> [EasyFix]:
+    """
+    Iterate over source lines and collect fixes from callback.
+
+    Handles the common pattern of splitting source, tracking line numbers/offsets,
+    and collecting fixes. Reduces duplication in rule implementations.
+    """
+    val lines = source.split("\n")
+    var line_num = 0
+    var byte_offset = 0
+    var all_fixes: [EasyFix] = []
+
+    for line in lines:
+        line_num = line_num + 1
+        val trimmed = line.trim()
+        val indent = line.len() - trimmed.len()
+
+        val context = LineContext(
+            line: line,
+            line_num: line_num,
+            byte_offset: byte_offset,
+            trimmed: trimmed,
+            indent: indent
+        )
+
+        val line_fixes = callback(context)
+        for fix in line_fixes:
+            all_fixes.push(fix)
+
+        byte_offset = byte_offset + _text_index_len(value: line) + 1
+
+    all_fixes
+
+fn line_contexts(source: text) -> [LineContext]:
+    val lines = source.split("\n")
+    var result: [LineContext] = []
+    var line_num = 0
+    var byte_offset = 0
+    for line in lines:
+        line_num = line_num + 1
+        val trimmed = line.trim()
+        val indent = line.len() - trimmed.len()
+        result.push(LineContext(line: line, line_num: line_num, byte_offset: byte_offset, trimmed: trimmed, indent: indent))
+        byte_offset = byte_offset + _text_index_len(value: line) + 1
+    result
+
+# ============================================================================
+# Helper: compute byte offset for a given line/column (1-based)
+# ============================================================================
+
+fn byte_offset_of(source: String, target_line: Int, target_col: Int) -> Int:
+    val lines = source.split("\n")
+    var offset = 0
+    var line_num = 1
+    for line in lines:
+        if line_num == target_line:
+            return offset + target_col - 1
+        offset = offset + _text_index_len(value: line) + 1  # +1 for \n
+        line_num = line_num + 1
+    offset
+
+fn line_start_offset(source: String, target_line: Int) -> Int:
+    byte_offset_of(source: source, target_line: target_line, target_col: 1)
+
+fn line_end_offset(source: String, target_line: Int) -> Int:
+    val lines = source.split("\n")
+    var offset = 0
+    var line_num = 1
+    for line in lines:
+        if line_num == target_line:
+            return offset + _text_index_len(value: line)
+        offset = offset + _text_index_len(value: line) + 1
+        line_num = line_num + 1
+    offset
+
+# ============================================================================
+# Parsing helpers: CSV splitting, colon/paren finding, identifier helpers
+# ============================================================================
+
+fn _split_top_level_csv(text: text) -> [text]:
+    var parts: [text] = []
+    var start = 0
+    var i = 0
+    var paren_depth = 0
+    var bracket_depth = 0
+    var brace_depth = 0
+    var angle_depth = 0
+    var in_string = false
+
+    while i < text.len():
+        val ch = text.slice(i, i + 1)
+        if ch == "\"":
+            in_string = not in_string
+        elif not in_string:
+            if ch == "(":
+                paren_depth = paren_depth + 1
+            elif ch == ")":
+                paren_depth = paren_depth - 1
+            elif ch == "[":
+                bracket_depth = bracket_depth + 1
+            elif ch == "]":
+                bracket_depth = bracket_depth - 1
+            elif ch == "{":
+                brace_depth = brace_depth + 1
+            elif ch == "}":
+                brace_depth = brace_depth - 1
+            elif ch == "<":
+                angle_depth = angle_depth + 1
+            elif ch == ">":
+                angle_depth = angle_depth - 1
+            elif ch == "," and paren_depth == 0 and bracket_depth == 0 and brace_depth == 0 and angle_depth == 0:
+                parts.push(text.slice(start, i).trim())
+                start = i + 1
+        i = i + 1
+
+    val tail = text.slice(start).trim()
+    if tail != "":
+        parts.push(tail)
+    parts
+
+fn _find_top_level_colon(text: text) -> i64:
+    var i = 0
+    var paren_depth = 0
+    var bracket_depth = 0
+    var brace_depth = 0
+    var angle_depth = 0
+    var in_string = false
+
+    while i < text.len():
+        val ch = text.slice(i, i + 1)
+        if ch == "\"":
+            in_string = not in_string
+        elif not in_string:
+            if ch == "(":
+                paren_depth = paren_depth + 1
+            elif ch == ")":
+                paren_depth = paren_depth - 1
+            elif ch == "[":
+                bracket_depth = bracket_depth + 1
+            elif ch == "]":
+                bracket_depth = bracket_depth - 1
+            elif ch == "{":
+                brace_depth = brace_depth + 1
+            elif ch == "}":
+                brace_depth = brace_depth - 1
+            elif ch == "<":
+                angle_depth = angle_depth + 1
+            elif ch == ">":
+                angle_depth = angle_depth - 1
+            elif ch == ":" and paren_depth == 0 and bracket_depth == 0 and brace_depth == 0 and angle_depth == 0:
+                return i
+        i = i + 1
+    -1
+
+fn _find_matching_paren_on_line(text: text, open_paren: i64) -> i64:
+    var i = open_paren
+    var depth = 0
+    var in_string = false
+    while i < text.len():
+        val ch = text.slice(i, i + 1)
+        if ch == "\"":
+            in_string = not in_string
+        elif not in_string:
+            if ch == "(":
+                depth = depth + 1
+            elif ch == ")":
+                depth = depth - 1
+                if depth == 0:
+                    return i
+        i = i + 1
+    -1
+
+fn _is_identifier_char(ch: text) -> bool:
+    if ch == "_":
+        return true
+    (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or _is_digit_char(ch)
+
+fn _is_digit_char(ch: text) -> bool:
+    ch >= "0" and ch <= "9"
+
+fn _text_index_len(value: text) -> i64:
+    var count = 0
+    for _ch in value:
+        count = count + 1
+    count

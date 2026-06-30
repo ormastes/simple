@@ -1,0 +1,690 @@
+# File Descriptor Table — per-process FD management
+#
+# Maps integer file descriptors to IPC port handles for VFS service.
+# FD 0 = stdin, FD 1 = stdout, FD 2 = stderr (serial on baremetal).
+#
+# Async by default: FD operations internally use non-blocking IPC.
+# Sync POSIX wrappers block the calling thread until completion.
+
+val MAX_FDS: u64 = 256
+val MAX_FD_CONTEXTS: u64 = 256
+val FD_CONTEXT_SLOTS: u64 = 65536
+
+# FD entry types
+val FD_TYPE_FREE: u8 = 0
+val FD_TYPE_FILE: u8 = 1
+val FD_TYPE_PIPE_READ: u8 = 2
+val FD_TYPE_PIPE_WRITE: u8 = 3
+val FD_TYPE_SOCKET: u8 = 4
+val FD_TYPE_DEVICE: u8 = 5
+val FD_TYPE_SERIAL: u8 = 6
+
+# Open flags (POSIX O_* values)
+val O_RDONLY: u32 = 0
+val O_WRONLY: u32 = 1
+val O_RDWR: u32 = 2
+val O_CREAT: u32 = 64
+val O_TRUNC: u32 = 512
+val O_APPEND: u32 = 1024
+val O_NONBLOCK: u32 = 2048
+val O_CLOEXEC: u32 = 0x80000
+
+# Per-fd flags
+val FD_CLOEXEC: u32 = 1
+
+# Seek whence
+val SEEK_SET: u32 = 0
+val SEEK_CUR: u32 = 1
+val SEEK_END: u32 = 2
+
+# Poll event flags (POSIX-compatible)
+val POLLIN: i16 = 1
+val POLLOUT: i16 = 4
+val POLLERR: i16 = 8
+val POLLHUP: i16 = 16
+val POLLNVAL: i16 = 32
+
+# FD entry
+struct FdEntry:
+    fd_type: u8
+    flags: u32
+    ipc_port: u64      # IPC endpoint for VFS service
+    file_offset: u64   # current read/write position
+    path_hash: u64     # hash of the opened path (for debugging)
+    ref_count: u32     # for dup/dup2
+
+# Per-process FD table
+var fd_types: [u8; 256] = [0; 256]
+var fd_flags: [u32; 256] = [0; 256]
+var fd_ports: [u64; 256] = [0; 256]
+var fd_offsets: [u64; 256] = [0; 256]
+var fd_refcounts: [u32; 256] = [0; 256]
+var fd_fd_flags: [u32; 256] = [0; 256]    # per-fd flags such as FD_CLOEXEC
+var fd_objects: [u64; 256] = [0; 256]     # open-file-description id, 0 when free
+
+# Backing storage for task-scoped descriptor tables. Public fd_* arrays above
+# remain the active table for compatibility with existing POSIX helpers.
+var fd_context_initialized: [bool; 256] = [false; 256]
+var fd_context_owners: [u64; 256] = [0; 256]
+var fd_context_types: [u8; 65536] = [0; 65536]
+var fd_context_flags: [u32; 65536] = [0; 65536]
+var fd_context_ports: [u64; 65536] = [0; 65536]
+var fd_context_offsets: [u64; 65536] = [0; 65536]
+var fd_context_refcounts: [u32; 65536] = [0; 65536]
+var fd_context_fd_flags: [u32; 65536] = [0; 65536]
+var fd_context_objects: [u64; 65536] = [0; 65536]
+var fd_active_owner: u64 = 0
+var fd_context_enabled: bool = false
+
+# Open file descriptions. dup/dup2 share one object, including status flags
+# and file offset. fd_* arrays above stay as compatibility mirrors.
+var of_types: [u8; 256] = [0; 256]
+var of_flags: [u32; 256] = [0; 256]
+var of_ports: [u64; 256] = [0; 256]
+var of_offsets: [u64; 256] = [0; 256]
+var of_refcounts: [u32; 256] = [0; 256]
+var of_path_hashes: [u64; 256] = [0; 256]
+var of_ready_events: [i16; 256] = [0; 256]
+var of_read_notifs: [u64; 256] = [0; 256]
+var of_write_notifs: [u64; 256] = [0; 256]
+var of_error_notifs: [u64; 256] = [0; 256]
+var of_ready_generations: [u64; 256] = [0; 256]
+
+fn fd_table_init():
+    """Initialize FD table with stdin/stdout/stderr on serial."""
+    var i: u64 = 0
+    while i < MAX_FDS:
+        fd_types[i] = FD_TYPE_FREE
+        fd_flags[i] = 0
+        fd_ports[i] = 0
+        fd_offsets[i] = 0
+        fd_refcounts[i] = 0
+        fd_fd_flags[i] = 0
+        fd_objects[i] = 0
+        of_types[i] = FD_TYPE_FREE
+        of_flags[i] = 0
+        of_ports[i] = 0
+        of_offsets[i] = 0
+        of_refcounts[i] = 0
+        of_path_hashes[i] = 0
+        of_ready_events[i] = 0
+        of_read_notifs[i] = 0
+        of_write_notifs[i] = 0
+        of_error_notifs[i] = 0
+        of_ready_generations[i] = 0
+        i = i + 1
+    i = 0
+    while i < MAX_FD_CONTEXTS:
+        fd_context_initialized[i] = false
+        fd_context_owners[i] = 0
+        i = i + 1
+    i = 0
+    while i < FD_CONTEXT_SLOTS:
+        fd_context_types[i] = FD_TYPE_FREE
+        fd_context_flags[i] = 0
+        fd_context_ports[i] = 0
+        fd_context_offsets[i] = 0
+        fd_context_refcounts[i] = 0
+        fd_context_fd_flags[i] = 0
+        fd_context_objects[i] = 0
+        i = i + 1
+    fd_active_owner = 0
+    fd_context_enabled = false
+    fd_activate_task(0)
+
+fn _fd_find_context(owner: u64) -> u64:
+    var i: u64 = 0
+    while i < MAX_FD_CONTEXTS:
+        if fd_context_initialized[i] and fd_context_owners[i] == owner:
+            return i
+        i = i + 1
+    MAX_FD_CONTEXTS
+
+fn _fd_find_free_context() -> u64:
+    var i: u64 = 0
+    while i < MAX_FD_CONTEXTS:
+        if not fd_context_initialized[i]:
+            return i
+        i = i + 1
+    MAX_FD_CONTEXTS
+
+fn _fd_context_base_for_index(ctx: u64) -> u64:
+    ctx * MAX_FDS
+
+fn _fd_clear_active_descriptors():
+    var i: u64 = 0
+    while i < MAX_FDS:
+        fd_types[i] = FD_TYPE_FREE
+        fd_flags[i] = 0
+        fd_ports[i] = 0
+        fd_offsets[i] = 0
+        fd_refcounts[i] = 0
+        fd_fd_flags[i] = 0
+        fd_objects[i] = 0
+        i = i + 1
+
+fn _fd_store_active_context():
+    if not fd_context_enabled:
+        return
+    val ctx = _fd_find_context(fd_active_owner)
+    if ctx >= MAX_FD_CONTEXTS:
+        return
+    val base = _fd_context_base_for_index(ctx)
+    var i: u64 = 0
+    while i < MAX_FDS:
+        val dst = base + i
+        fd_context_types[dst] = fd_types[i]
+        fd_context_flags[dst] = fd_flags[i]
+        fd_context_ports[dst] = fd_ports[i]
+        fd_context_offsets[dst] = fd_offsets[i]
+        fd_context_refcounts[dst] = fd_refcounts[i]
+        fd_context_fd_flags[dst] = fd_fd_flags[i]
+        fd_context_objects[dst] = fd_objects[i]
+        i = i + 1
+
+fn _fd_load_context(owner: u64):
+    val ctx = _fd_find_context(owner)
+    if ctx >= MAX_FD_CONTEXTS:
+        return
+    val base = _fd_context_base_for_index(ctx)
+    var i: u64 = 0
+    while i < MAX_FDS:
+        val src = base + i
+        fd_types[i] = fd_context_types[src]
+        fd_flags[i] = fd_context_flags[src]
+        fd_ports[i] = fd_context_ports[src]
+        fd_offsets[i] = fd_context_offsets[src]
+        fd_refcounts[i] = fd_context_refcounts[src]
+        fd_fd_flags[i] = fd_context_fd_flags[src]
+        fd_objects[i] = fd_context_objects[src]
+        i = i + 1
+    fd_active_owner = owner
+    fd_context_enabled = true
+
+fn _fd_seed_stdio():
+    fd_set(0, FD_TYPE_SERIAL, O_RDONLY, 0)
+    fd_set(1, FD_TYPE_SERIAL, O_WRONLY, 0)
+    fd_set(2, FD_TYPE_SERIAL, O_WRONLY, 0)
+
+fn fd_activate_task(owner: u64):
+    """Make `owner` the active descriptor context for legacy fd_* helpers."""
+    if fd_context_enabled and fd_active_owner == owner and _fd_find_context(owner) < MAX_FD_CONTEXTS:
+        return
+    _fd_store_active_context()
+    val existing = _fd_find_context(owner)
+    if existing < MAX_FD_CONTEXTS:
+        _fd_load_context(owner)
+        return
+    val ctx = _fd_find_free_context()
+    if ctx >= MAX_FD_CONTEXTS:
+        fd_active_owner = owner
+        fd_context_enabled = false
+        _fd_clear_active_descriptors()
+        _fd_seed_stdio()
+        return
+    if not fd_context_initialized[ctx]:
+        fd_active_owner = owner
+        fd_context_enabled = true
+        fd_context_initialized[ctx] = true
+        fd_context_owners[ctx] = owner
+        _fd_clear_active_descriptors()
+        _fd_seed_stdio()
+        _fd_store_active_context()
+        return
+
+fn fd_current_task() -> u64:
+    """Return the task id whose descriptor table is active."""
+    fd_active_owner
+
+fn fd_task_context_exists(owner: u64) -> bool:
+    """Return whether a descriptor context exists for `owner`."""
+    _fd_find_context(owner) < MAX_FD_CONTEXTS
+
+fn _fd_object_alloc() -> u64:
+    var i: u64 = 1
+    while i < MAX_FDS:
+        if of_refcounts[i] == 0:
+            return i
+        i = i + 1
+    0
+
+fn _fd_mirror_from_object(fd: i32):
+    val idx: u64 = fd as u64
+    val obj = fd_objects[idx]
+    if obj == 0:
+        fd_types[idx] = FD_TYPE_FREE
+        fd_flags[idx] = 0
+        fd_ports[idx] = 0
+        fd_offsets[idx] = 0
+        fd_refcounts[idx] = 0
+        return
+    fd_types[idx] = of_types[obj]
+    fd_flags[idx] = of_flags[obj]
+    fd_ports[idx] = of_ports[obj]
+    fd_offsets[idx] = of_offsets[obj]
+    fd_refcounts[idx] = of_refcounts[obj]
+
+fn _fd_refresh_object_mirrors(obj: u64):
+    var i: u64 = 0
+    while i < MAX_FDS:
+        if fd_objects[i] == obj:
+            _fd_mirror_from_object(i as i32)
+        i = i + 1
+
+fn _fd_release_object_ref(obj: u64):
+    if obj == 0:
+        return
+    if of_refcounts[obj] > 0:
+        of_refcounts[obj] = of_refcounts[obj] - 1
+    if of_refcounts[obj] == 0:
+        of_types[obj] = FD_TYPE_FREE
+        of_flags[obj] = 0
+        of_ports[obj] = 0
+        of_offsets[obj] = 0
+        of_path_hashes[obj] = 0
+        of_ready_events[obj] = 0
+        of_read_notifs[obj] = 0
+        of_write_notifs[obj] = 0
+        of_error_notifs[obj] = 0
+        of_ready_generations[obj] = 0
+    else:
+        _fd_refresh_object_mirrors(obj)
+
+fn fd_alloc() -> i32:
+    """Find the lowest free FD. Returns -EMFILE if table full."""
+    var i: u64 = 0
+    while i < MAX_FDS:
+        if fd_types[i] == FD_TYPE_FREE:
+            return i as i32
+        i = i + 1
+    -24
+
+fn fd_is_valid(fd: i32) -> bool:
+    """Check if an FD is valid and allocated."""
+    if fd < 0:
+        return false
+    val idx: u64 = fd as u64
+    if idx >= MAX_FDS:
+        return false
+    fd_types[idx] != FD_TYPE_FREE
+
+fn fd_set(fd: i32, fd_type: u8, flags: u32, ipc_port: u64) -> i32:
+    """Configure an FD entry."""
+    val idx: u64 = fd as u64
+    if idx >= MAX_FDS:
+        return -9
+    if fd_objects[idx] != 0:
+        fd_close(fd)
+    val obj = _fd_object_alloc()
+    if obj == 0:
+        return -24
+    val status_flags = flags & ~O_CLOEXEC
+    of_types[obj] = fd_type
+    of_flags[obj] = status_flags
+    of_ports[obj] = ipc_port
+    of_offsets[obj] = 0
+    of_refcounts[obj] = 1
+    of_path_hashes[obj] = 0
+    of_ready_events[obj] = 0
+    of_read_notifs[obj] = 0
+    of_write_notifs[obj] = 0
+    of_error_notifs[obj] = 0
+    of_ready_generations[obj] = 0
+    fd_objects[idx] = obj
+    fd_fd_flags[idx] = if (flags & O_CLOEXEC) != 0: FD_CLOEXEC else: 0
+    _fd_mirror_from_object(fd)
+    0
+
+fn fd_close(fd: i32) -> i32:
+    """Close an FD. Returns 0 on success, -EBADF on error."""
+    if not fd_is_valid(fd):
+        return -9
+    val idx: u64 = fd as u64
+    val obj = fd_objects[idx]
+    fd_objects[idx] = 0
+    fd_fd_flags[idx] = 0
+    fd_types[idx] = FD_TYPE_FREE
+    fd_flags[idx] = 0
+    fd_ports[idx] = 0
+    fd_offsets[idx] = 0
+    fd_refcounts[idx] = 0
+    _fd_release_object_ref(obj)
+    0
+
+fn fd_dup(old_fd: i32) -> i32:
+    """Duplicate an FD. Returns new FD or -EBADF/-EMFILE."""
+    if not fd_is_valid(old_fd):
+        return -9
+    val new_fd = fd_alloc()
+    if new_fd < 0:
+        return new_fd
+    val old_idx: u64 = old_fd as u64
+    val new_idx: u64 = new_fd as u64
+    val obj = fd_objects[old_idx]
+    fd_objects[new_idx] = obj
+    fd_fd_flags[new_idx] = 0
+    of_refcounts[obj] = of_refcounts[obj] + 1
+    _fd_refresh_object_mirrors(obj)
+    new_fd
+
+fn fd_dup_from(old_fd: i32, min_fd: i32, cloexec: bool) -> i32:
+    """Duplicate old_fd to the lowest free fd >= min_fd."""
+    if not fd_is_valid(old_fd):
+        return -9
+    if min_fd < 0 or (min_fd as u64) >= MAX_FDS:
+        return -22
+    var new_fd = min_fd
+    while (new_fd as u64) < MAX_FDS:
+        if not fd_is_valid(new_fd):
+            val old_idx: u64 = old_fd as u64
+            val new_idx: u64 = new_fd as u64
+            val obj = fd_objects[old_idx]
+            fd_objects[new_idx] = obj
+            fd_fd_flags[new_idx] = if cloexec: FD_CLOEXEC else: 0
+            of_refcounts[obj] = of_refcounts[obj] + 1
+            _fd_refresh_object_mirrors(obj)
+            return new_fd
+        new_fd = new_fd + 1
+    -24
+
+fn fd_dup2(old_fd: i32, new_fd: i32) -> i32:
+    """Duplicate old_fd to new_fd, closing new_fd first if open."""
+    if not fd_is_valid(old_fd):
+        return -9
+    if new_fd < 0 or (new_fd as u64) >= MAX_FDS:
+        return -9
+    if old_fd == new_fd:
+        return new_fd
+    # Close new_fd if it's open
+    if fd_is_valid(new_fd):
+        fd_close(new_fd)
+    val old_idx: u64 = old_fd as u64
+    val new_idx: u64 = new_fd as u64
+    val obj = fd_objects[old_idx]
+    fd_objects[new_idx] = obj
+    fd_fd_flags[new_idx] = 0
+    of_refcounts[obj] = of_refcounts[obj] + 1
+    _fd_refresh_object_mirrors(obj)
+    new_fd
+
+fn fd_get_cloexec(fd: i32) -> bool:
+    """Return true when FD_CLOEXEC is set on this descriptor."""
+    if not fd_is_valid(fd):
+        return false
+    val idx: u64 = fd as u64
+    (fd_fd_flags[idx] & FD_CLOEXEC) != 0
+
+fn fd_set_cloexec(fd: i32, enabled: bool) -> i32:
+    """Set or clear FD_CLOEXEC on a descriptor."""
+    if not fd_is_valid(fd):
+        return -9
+    val idx: u64 = fd as u64
+    if enabled:
+        fd_fd_flags[idx] = fd_fd_flags[idx] | FD_CLOEXEC
+    else:
+        fd_fd_flags[idx] = fd_fd_flags[idx] & ~FD_CLOEXEC
+    0
+
+fn fd_close_on_exec() -> u32:
+    """Close every descriptor marked FD_CLOEXEC and return the close count."""
+    var closed: u32 = 0
+    var i: u64 = 0
+    while i < MAX_FDS:
+        if fd_types[i] != FD_TYPE_FREE and (fd_fd_flags[i] & FD_CLOEXEC) != 0:
+            fd_close(i as i32)
+            closed = closed + 1
+        i = i + 1
+    closed
+
+fn fd_exec_cleanup() -> u32:
+    """Apply execve descriptor cleanup rules for the current process."""
+    fd_close_on_exec()
+
+fn fd_prepare_fork() -> u32:
+    """Duplicate live descriptor references for a forked child.
+
+    The current fd table is process-global in this runtime slice, so this
+    helper records the extra child references on each inherited open file
+    description. Per-descriptor flags, including FD_CLOEXEC, remain unchanged
+    and are handled later by fd_exec_cleanup().
+    """
+    var inherited: u32 = 0
+    var i: u64 = 0
+    while i < MAX_FDS:
+        if fd_types[i] != FD_TYPE_FREE:
+            val obj = fd_objects[i]
+            if obj != 0:
+                of_refcounts[obj] = of_refcounts[obj] + 1
+                inherited = inherited + 1
+        i = i + 1
+    i = 0
+    while i < MAX_FDS:
+        if fd_objects[i] != 0:
+            _fd_mirror_from_object(i as i32)
+        i = i + 1
+    _fd_store_active_context()
+    inherited
+
+fn fd_fork_inherit() -> u32:
+    """Compatibility alias for fd_prepare_fork."""
+    fd_prepare_fork()
+
+fn fd_prepare_fork_to_task(child_owner: u64) -> u32:
+    """Clone the active descriptor table into a child task context."""
+    _fd_store_active_context()
+    fd_release_task(child_owner)
+    val child_ctx = _fd_find_free_context()
+    if child_ctx >= MAX_FD_CONTEXTS:
+        return 0u32
+    fd_context_initialized[child_ctx] = true
+    fd_context_owners[child_ctx] = child_owner
+
+    var inherited: u32 = 0
+    var i: u64 = 0
+    while i < MAX_FDS:
+        val obj = fd_objects[i]
+        if fd_types[i] != FD_TYPE_FREE and obj != 0:
+            of_refcounts[obj] = of_refcounts[obj] + 1
+            inherited = inherited + 1
+        i = i + 1
+    i = 0
+    while i < MAX_FDS:
+        if fd_objects[i] != 0:
+            _fd_mirror_from_object(i as i32)
+        i = i + 1
+
+    val child_base = _fd_context_base_for_index(child_ctx)
+    i = 0
+    while i < MAX_FDS:
+        val dst = child_base + i
+        fd_context_types[dst] = fd_types[i]
+        fd_context_flags[dst] = fd_flags[i]
+        fd_context_ports[dst] = fd_ports[i]
+        fd_context_offsets[dst] = fd_offsets[i]
+        fd_context_refcounts[dst] = fd_refcounts[i]
+        fd_context_fd_flags[dst] = fd_fd_flags[i]
+        fd_context_objects[dst] = fd_objects[i]
+        i = i + 1
+    _fd_store_active_context()
+    inherited
+
+fn fd_release_on_process_exit() -> u32:
+    """Close every live descriptor for process teardown and return count."""
+    var released: u32 = 0
+    var i: u64 = 0
+    while i < MAX_FDS:
+        if fd_types[i] != FD_TYPE_FREE:
+            fd_close(i as i32)
+            released = released + 1
+        i = i + 1
+    _fd_store_active_context()
+    released
+
+fn fd_release_task(owner: u64) -> u32:
+    """Release all descriptors for a task context, active or inactive."""
+    val ctx = _fd_find_context(owner)
+    if ctx >= MAX_FD_CONTEXTS:
+        return 0
+    if fd_context_enabled and fd_active_owner == owner:
+        val released = fd_release_on_process_exit()
+        fd_context_initialized[ctx] = false
+        fd_context_owners[ctx] = 0
+        _fd_store_active_context()
+        return released
+
+    val base = _fd_context_base_for_index(ctx)
+    var released: u32 = 0
+    var i: u64 = 0
+    while i < MAX_FDS:
+        val idx = base + i
+        val obj = fd_context_objects[idx]
+        if fd_context_types[idx] != FD_TYPE_FREE and obj != 0:
+            _fd_release_object_ref(obj)
+            released = released + 1
+        fd_context_types[idx] = FD_TYPE_FREE
+        fd_context_flags[idx] = 0
+        fd_context_ports[idx] = 0
+        fd_context_offsets[idx] = 0
+        fd_context_refcounts[idx] = 0
+        fd_context_fd_flags[idx] = 0
+        fd_context_objects[idx] = 0
+        i = i + 1
+    fd_context_initialized[ctx] = false
+    fd_context_owners[ctx] = 0
+    released
+
+fn fd_get_status_flags(fd: i32) -> u32:
+    """Return shared open-file-description status flags such as O_NONBLOCK."""
+    if not fd_is_valid(fd):
+        return 0
+    val idx: u64 = fd as u64
+    of_flags[fd_objects[idx]]
+
+fn fd_set_status_flags(fd: i32, flags: u32) -> i32:
+    """Replace shared open-file-description status flags."""
+    if not fd_is_valid(fd):
+        return -9
+    val idx: u64 = fd as u64
+    val obj = fd_objects[idx]
+    of_flags[obj] = flags & ~O_CLOEXEC
+    _fd_refresh_object_mirrors(obj)
+    0
+
+fn fd_get_offset(fd: i32) -> u64:
+    """Return the shared open-file-description offset."""
+    if not fd_is_valid(fd):
+        return 0
+    val idx: u64 = fd as u64
+    of_offsets[fd_objects[idx]]
+
+fn fd_set_offset(fd: i32, offset: u64) -> i32:
+    """Set the shared open-file-description offset."""
+    if not fd_is_valid(fd):
+        return -9
+    val idx: u64 = fd as u64
+    val obj = fd_objects[idx]
+    of_offsets[obj] = offset
+    _fd_refresh_object_mirrors(obj)
+    0
+
+fn fd_get_type(fd: i32) -> u8:
+    """Return the descriptor backend type, or FD_TYPE_FREE for invalid fds."""
+    if not fd_is_valid(fd):
+        return FD_TYPE_FREE
+    val idx: u64 = fd as u64
+    of_types[fd_objects[idx]]
+
+fn fd_get_backend_handle(fd: i32) -> u64:
+    """Return the backend handle stored on the open file description."""
+    if not fd_is_valid(fd):
+        return 0
+    val idx: u64 = fd as u64
+    of_ports[fd_objects[idx]]
+
+fn fd_get_object_id(fd: i32) -> u64:
+    """Return the shared open-file-description token for this descriptor."""
+    if not fd_is_valid(fd):
+        return 0
+    val idx: u64 = fd as u64
+    fd_objects[idx]
+
+fn fd_get_refcount(fd: i32) -> u32:
+    """Return the shared open-file-description reference count."""
+    if not fd_is_valid(fd):
+        return 0
+    val idx: u64 = fd as u64
+    of_refcounts[fd_objects[idx]]
+
+fn fd_poll_ready(fd: i32, events: i16) -> i16:
+    """Return current readiness for poll/select without blocking."""
+    if not fd_is_valid(fd):
+        return POLLNVAL
+    val idx: u64 = fd as u64
+    val obj = fd_objects[idx]
+    val fd_type = of_types[obj]
+    var revents: i16 = 0
+    if fd_type == 6 or fd_type == 1:
+        if (events & POLLIN) != 0:
+            revents = revents | POLLIN
+        if (events & POLLOUT) != 0:
+            revents = revents | POLLOUT
+        return revents
+    of_ready_events[obj] & (events | POLLERR | POLLHUP)
+
+fn fd_set_poll_notification(fd: i32, events: i16, notif_id: u64) -> i32:
+    """Attach backend wake notifications to the shared open description."""
+    if not fd_is_valid(fd):
+        return -9
+    val idx: u64 = fd as u64
+    val obj = fd_objects[idx]
+    if (events & POLLIN) != 0:
+        of_read_notifs[obj] = notif_id
+    if (events & POLLOUT) != 0:
+        of_write_notifs[obj] = notif_id
+    if (events & (POLLERR | POLLHUP)) != 0:
+        of_error_notifs[obj] = notif_id
+    0
+
+fn fd_poll_notification(fd: i32, events: i16) -> u64:
+    """Return a notification that can wake the requested poll interest."""
+    if not fd_is_valid(fd):
+        return 0
+    val idx: u64 = fd as u64
+    val obj = fd_objects[idx]
+    if (events & POLLIN) != 0 and of_read_notifs[obj] != 0:
+        return of_read_notifs[obj]
+    if (events & POLLOUT) != 0 and of_write_notifs[obj] != 0:
+        return of_write_notifs[obj]
+    if (events & (POLLERR | POLLHUP)) != 0 and of_error_notifs[obj] != 0:
+        return of_error_notifs[obj]
+    0
+
+fn fd_update_ready(fd: i32, set_events: i16, clear_events: i16) -> i32:
+    """Update readiness bits on the shared open file description."""
+    if not fd_is_valid(fd):
+        return -9
+    val idx: u64 = fd as u64
+    val obj = fd_objects[idx]
+    val before = of_ready_events[obj]
+    of_ready_events[obj] = (of_ready_events[obj] | set_events) & ~clear_events
+    if of_ready_events[obj] != before:
+        of_ready_generations[obj] = of_ready_generations[obj] + 1
+    0
+
+fn fd_update_ready_by_backend(fd_type: u8, backend_handle: u64, set_events: i16, clear_events: i16) -> u32:
+    """Update readiness for every descriptor object matching a backend handle."""
+    var updated: u32 = 0
+    var i: u64 = 0
+    while i < MAX_FDS:
+        if fd_types[i] == fd_type and fd_ports[i] == backend_handle:
+            fd_update_ready(i as i32, set_events: set_events, clear_events: clear_events)
+            updated = updated + 1
+        i = i + 1
+    updated
+
+fn fd_get_ready_generation(fd: i32) -> u64:
+    """Return the readiness generation for future edge-triggered epoll."""
+    if not fd_is_valid(fd):
+        return 0
+    val idx: u64 = fd as u64
+    of_ready_generations[fd_objects[idx]]

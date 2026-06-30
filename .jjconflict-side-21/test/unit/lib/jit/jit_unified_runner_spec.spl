@@ -1,0 +1,622 @@
+# @cover src/lib/nogc_sync_mut/jit/jit_types.spl 80%
+# @cover src/lib/nogc_sync_mut/jit/jit_backend.spl 80%
+# @cover src/lib/nogc_sync_mut/jit/jit_runner.spl 80%
+# @cover src/lib/nogc_sync_mut/jit/jit_layout.spl 60%
+"""
+# JIT Unified Local/Remote Runner Specification
+
+**Feature IDs:** #F9
+**Category:** Infrastructure
+**Status:** In Progress
+**Requirements:** N/A
+**Plan:** doc/03_plan/jit_unified_local_remote_refactor_plan_2026-03-23.md
+
+## Overview
+
+Verifies that the unified JIT runner correctly orchestrates local and remote
+execution through a single shared pipeline. Both local and remote backends
+implement the same JitBackendOps contract and are driven by the same
+jit_run() function.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| JitBackendOps | Enum-dispatched backend interface (load, verify, register, resume, halt) |
+| JitRunner | Single orchestration path for all backends |
+| JitMemoryLimits | Memory constraints that remote targets enforce, local can expand |
+| JitBinary | Compiled bytes with architecture tag |
+| JitLayoutPlan | Computed memory placement for a binary |
+| JitExecResult | Unified execution result across backends |
+"""
+
+use std.nogc_sync_mut.jit.jit_types.{
+    JitBackendKind, JitMemoryLimits, JitBinary, JitLayoutPlan, JitExecResult
+}
+use std.nogc_sync_mut.jit.jit_backend.{
+    JitBackendOps, DisconnectedBackendOps,
+    local_backend, mock_backend, disconnected_ops
+}
+use std.nogc_sync_mut.jit.jit_runner.{
+    JitRunnerConfig, jit_run, jit_run_simple, jit_run_disconnected,
+    validate_binary, plan_layout, append_halt_trampoline
+}
+use std.nogc_sync_mut.jit.jit_layout.{
+    append_halt_trampoline_arm32, append_halt_trampoline_rv32,
+    plan_binary_layout, jit_entry_pc_arm32, jit_return_pc_arm32,
+    append_halt_for_arch
+}
+use std.nogc_sync_mut.debug.remote.types.{Architecture}
+use std.nogc_sync_mut.debug.remote.exec.types.{MemoryMap}
+
+# ============================================================================
+# Test Group 1: JitBackendKind
+# ============================================================================
+
+describe "JitBackendKind":
+    """## Backend Kind -- Identifies execution backends."""
+
+    it "reports local as not remote":
+        val kind = JitBackendKind.Local
+        expect(kind.is_local()).to_equal(true)
+        expect(kind.is_remote()).to_equal(false)
+
+    it "reports OpenOCD as remote":
+        val kind = JitBackendKind.RemoteOpenOCD
+        expect(kind.is_remote()).to_equal(true)
+        expect(kind.is_local()).to_equal(false)
+
+    it "reports GDB as remote":
+        expect(JitBackendKind.RemoteGDB.is_remote()).to_equal(true)
+
+    it "reports WLink as remote":
+        expect(JitBackendKind.RemoteWLink.is_remote()).to_equal(true)
+
+    it "reports QEMU ARM as remote":
+        expect(JitBackendKind.QemuArm.is_remote()).to_equal(true)
+
+    it "reports QEMU RiscV32 as remote":
+        expect(JitBackendKind.QemuRiscV32.is_remote()).to_equal(true)
+
+    it "converts to string":
+        expect(JitBackendKind.Local.to_string()).to_equal("local")
+        expect(JitBackendKind.RemoteOpenOCD.to_string()).to_equal("remote_openocd")
+        expect(JitBackendKind.QemuRiscV32.to_string()).to_equal("qemu_rv32")
+
+# ============================================================================
+# Test Group 2: JitMemoryLimits
+# ============================================================================
+
+describe "JitMemoryLimits":
+    """## Memory Limits -- Enforces fixed memory for remote, expandable for local."""
+
+    context "local limits":
+        it "creates expandable local limits":
+            val limits = JitMemoryLimits.local()
+            expect(limits.allow_expand).to_equal(true)
+            expect(limits.fits_binary(1000000)).to_equal(true)
+
+    context "STM32H7 limits":
+        it "creates STM32H7 limits with correct addresses":
+            val limits = JitMemoryLimits.stm32h7_remote()
+            expect(limits.code_start).to_equal(0x24010000)
+            expect(limits.code_capacity).to_equal(0x00070000)
+            expect(limits.allow_expand).to_equal(false)
+
+        it "rejects binaries exceeding code capacity":
+            val limits = JitMemoryLimits.stm32h7_remote()
+            expect(limits.fits_binary(0x00070001)).to_equal(false)
+
+        it "accepts binaries within code capacity":
+            val limits = JitMemoryLimits.stm32h7_remote()
+            expect(limits.fits_binary(0x00070000)).to_equal(true)
+
+    context "QEMU limits":
+        it "creates QEMU RV32 limits":
+            val limits = JitMemoryLimits.qemu_rv32()
+            expect(limits.code_start).to_equal(0x80010000)
+            expect(limits.allow_expand).to_equal(false)
+
+        it "creates QEMU ARM limits":
+            val limits = JitMemoryLimits.qemu_arm()
+            expect(limits.code_start).to_equal(0x40010000)
+            expect(limits.allow_expand).to_equal(false)
+
+    context "CH32V307 limits":
+        it "creates CH32V307 limits":
+            val limits = JitMemoryLimits.ch32v307()
+            expect(limits.code_start).to_equal(0x20002000)
+            expect(limits.code_capacity).to_equal(0x00006000)
+
+    context "derived addresses":
+        it "computes code_end correctly":
+            val limits = JitMemoryLimits.stm32h7_remote()
+            expect(limits.code_end()).to_equal(0x24080000)
+
+        it "computes data_end correctly":
+            val limits = JitMemoryLimits.stm32h7_remote()
+            expect(limits.data_end()).to_equal(0x240C0000)
+
+# ============================================================================
+# Test Group 3: JitBinary
+# ============================================================================
+
+describe "JitBinary":
+    """## Binary -- Compiled bytes with architecture metadata."""
+
+    it "reports correct size":
+        val binary = JitBinary(
+            name: "test",
+            bytes: [0x00, 0x01, 0x02, 0x03],
+            entry_offset: 0,
+            stack_bytes: 256,
+            arch: Architecture.Arm32
+        )
+        expect(binary.size()).to_equal(4)
+
+    it "creates empty binary":
+        val binary = JitBinary.empty(Architecture.RiscV32)
+        expect(binary.size()).to_equal(0)
+        expect(binary.name).to_equal("")
+
+# ============================================================================
+# Test Group 4: JitExecResult
+# ============================================================================
+
+describe "JitExecResult":
+    """## Execution Result -- Unified result type for all backends."""
+
+    it "creates success result":
+        val result = JitExecResult.success(42, 100, "breakpoint")
+        expect(result.is_ok()).to_equal(true)
+        expect(result.return_value).to_equal(42)
+        expect(result.duration_ms).to_equal(100)
+        expect(result.halt_reason).to_equal("breakpoint")
+
+    it "creates failure result":
+        val result = JitExecResult.failure("timeout")
+        expect(result.is_ok()).to_equal(false)
+        expect(result.error).to_equal("timeout")
+
+# ============================================================================
+# Test Group 5: JitBackendOps
+# ============================================================================
+
+describe "JitBackendOps":
+    """## Backend Operations -- Enum-dispatched interface contract."""
+
+    context "local backend":
+        it "creates a local backend with expandable limits":
+            val backend = local_backend(Architecture.Arm32)
+            expect(backend.kind.is_local()).to_equal(true)
+            expect(backend.limits.allow_expand).to_equal(true)
+
+        it "load_binary succeeds on local backend":
+            val backend = local_backend(Architecture.Arm32)
+            val result = backend.load_binary(0x1000, [0x00, 0xBE])
+            expect(result.is_ok()).to_equal(true)
+
+        it "verify_binary returns true on local backend":
+            val backend = local_backend(Architecture.Arm32)
+            val result = backend.verify_binary(0x1000, [0x00, 0xBE])
+            expect(result.is_ok()).to_equal(true)
+            expect(result.unwrap()).to_equal(true)
+
+    context "mock backend":
+        it "creates a mock backend with specified kind and limits":
+            val limits = JitMemoryLimits.stm32h7_remote()
+            val backend = mock_backend(JitBackendKind.RemoteOpenOCD, Architecture.Arm32, limits)
+            expect(backend.kind.is_remote()).to_equal(true)
+            expect(backend.limits.allow_expand).to_equal(false)
+
+        it "read_register returns 42 on remote mock":
+            val limits = JitMemoryLimits.stm32h7_remote()
+            val backend = mock_backend(JitBackendKind.RemoteOpenOCD, Architecture.Arm32, limits)
+            val result = backend.read_register(0)
+            expect(result.is_ok()).to_equal(true)
+            expect(result.unwrap()).to_equal(42)
+
+        it "resume succeeds on mock backend":
+            val limits = JitMemoryLimits.stm32h7_remote()
+            val backend = mock_backend(JitBackendKind.RemoteOpenOCD, Architecture.Arm32, limits)
+            val result = backend.resume()
+            expect(result.is_ok()).to_equal(true)
+
+        it "wait_halt succeeds on mock backend":
+            val limits = JitMemoryLimits.stm32h7_remote()
+            val backend = mock_backend(JitBackendKind.RemoteOpenOCD, Architecture.Arm32, limits)
+            val result = backend.wait_halt(5000)
+            expect(result.is_ok()).to_equal(true)
+
+    context "disconnected backend":
+        it "load_binary fails on disconnected backend":
+            val limits = JitMemoryLimits.stm32h7_remote()
+            val backend = disconnected_ops(JitBackendKind.RemoteOpenOCD, Architecture.Arm32, limits)
+            val result = backend.load_binary(0x1000, [0x00])
+            expect(result.is_err()).to_equal(true)
+
+        it "resume fails on disconnected backend":
+            val limits = JitMemoryLimits.stm32h7_remote()
+            val backend = disconnected_ops(JitBackendKind.RemoteOpenOCD, Architecture.Arm32, limits)
+            val result = backend.resume()
+            expect(result.is_err()).to_equal(true)
+
+        it "read_register fails on disconnected backend":
+            val limits = JitMemoryLimits.stm32h7_remote()
+            val backend = disconnected_ops(JitBackendKind.RemoteOpenOCD, Architecture.Arm32, limits)
+            val result = backend.read_register(0)
+            expect(result.is_err()).to_equal(true)
+
+# ============================================================================
+# Test Group 6: Binary Validation
+# ============================================================================
+
+describe "Binary Validation":
+    """## Validation -- Memory overflow detection for remote targets."""
+
+    it "passes validation for local backend":
+        val limits = JitMemoryLimits.local()
+        val binary = JitBinary(
+            name: "big_binary",
+            bytes: [0x00, 0x01, 0x02, 0x03],
+            entry_offset: 0,
+            stack_bytes: 256,
+            arch: Architecture.Arm32
+        )
+        val result = validate_binary(binary, limits)
+        expect(result.is_ok()).to_equal(true)
+
+    it "passes validation for small binary on remote":
+        val limits = JitMemoryLimits.stm32h7_remote()
+        val binary = JitBinary(
+            name: "small",
+            bytes: [0x00, 0x01, 0x02, 0x03],
+            entry_offset: 0,
+            stack_bytes: 256,
+            arch: Architecture.Arm32
+        )
+        val result = validate_binary(binary, limits)
+        expect(result.is_ok()).to_equal(true)
+
+    it "fails validation for oversized binary on remote":
+        val limits = JitMemoryLimits.ch32v307()
+        var big_bytes: [i32] = []
+        var i = 0
+        while i < 25000:
+            big_bytes.push(0x00)
+            i = i + 1
+        val binary = JitBinary(
+            name: "too_big",
+            bytes: big_bytes,
+            entry_offset: 0,
+            stack_bytes: 256,
+            arch: Architecture.RiscV32
+        )
+        val result = validate_binary(binary, limits)
+        expect(result.is_err()).to_equal(true)
+
+# ============================================================================
+# Test Group 7: Halt Trampoline
+# ============================================================================
+
+describe "Halt Trampoline":
+    """## Trampoline -- Architecture-specific halt instruction appending."""
+
+    it "appends ARM32 BKPT (2 bytes)":
+        val binary = JitBinary(
+            name: "arm_test",
+            bytes: [0x00, 0x48],
+            entry_offset: 0,
+            stack_bytes: 256,
+            arch: Architecture.Arm32
+        )
+        val result = append_halt_trampoline(binary)
+        expect(result.bytes.len()).to_equal(4)
+        expect(result.bytes[2]).to_equal(0x00)
+        expect(result.bytes[3]).to_equal(0xBE)
+
+    it "appends RV32 EBREAK (4 bytes)":
+        val binary = JitBinary(
+            name: "rv32_test",
+            bytes: [0x00, 0x01, 0x02, 0x03],
+            entry_offset: 0,
+            stack_bytes: 256,
+            arch: Architecture.RiscV32
+        )
+        val result = append_halt_trampoline(binary)
+        expect(result.bytes.len()).to_equal(8)
+        expect(result.bytes[4]).to_equal(0x73)
+        expect(result.bytes[5]).to_equal(0x00)
+        expect(result.bytes[6]).to_equal(0x10)
+        expect(result.bytes[7]).to_equal(0x00)
+
+    it "preserves original binary metadata":
+        val binary = JitBinary(
+            name: "preserve_test",
+            bytes: [0x01, 0x02],
+            entry_offset: 4,
+            stack_bytes: 512,
+            arch: Architecture.Arm32
+        )
+        val result = append_halt_trampoline(binary)
+        expect(result.name).to_equal("preserve_test")
+        expect(result.entry_offset).to_equal(4)
+        expect(result.stack_bytes).to_equal(512)
+
+# ============================================================================
+# Test Group 8: Layout Planning
+# ============================================================================
+
+describe "Layout Planning":
+    """## Layout -- Shared binary placement for all backends."""
+
+    it "plans ARM32 layout within STM32H7 limits":
+        val limits = JitMemoryLimits.stm32h7_remote()
+        val binary = JitBinary(
+            name: "arm_plan",
+            bytes: [0x00, 0x48, 0x00, 0xBE],
+            entry_offset: 0,
+            stack_bytes: 256,
+            arch: Architecture.Arm32
+        )
+        val result = plan_layout(binary, limits)
+        expect(result.is_ok()).to_equal(true)
+        val plan = result.unwrap()
+        expect(plan.code_base).to_equal(0x24010000)
+        expect(plan.code_size).to_equal(4)
+        expect(plan.entry_point).to_equal(0x24010000)
+        expect(plan.stack_top).to_equal(0x240C0000)
+
+    it "plans RV32 layout within QEMU limits":
+        val limits = JitMemoryLimits.qemu_rv32()
+        val binary = JitBinary(
+            name: "rv32_plan",
+            bytes: [0x73, 0x00, 0x10, 0x00],
+            entry_offset: 0,
+            stack_bytes: 256,
+            arch: Architecture.RiscV32
+        )
+        val result = plan_layout(binary, limits)
+        expect(result.is_ok()).to_equal(true)
+        val plan = result.unwrap()
+        expect(plan.code_base).to_equal(0x80010000)
+
+    it "rejects binary that exceeds fixed memory limits":
+        val limits = JitMemoryLimits.ch32v307()
+        var big_bytes: [i32] = []
+        var i = 0
+        while i < 25000:
+            big_bytes.push(0x00)
+            i = i + 1
+        val binary = JitBinary(
+            name: "too_big",
+            bytes: big_bytes,
+            entry_offset: 0,
+            stack_bytes: 256,
+            arch: Architecture.RiscV32
+        )
+        val result = plan_layout(binary, limits)
+        expect(result.is_err()).to_equal(true)
+
+    it "succeeds with expandable local limits":
+        val limits = JitMemoryLimits.local()
+        val binary = JitBinary(
+            name: "local_plan",
+            bytes: [0x00, 0x01, 0x02, 0x03],
+            entry_offset: 0,
+            stack_bytes: 256,
+            arch: Architecture.Arm32
+        )
+        val result = plan_layout(binary, limits)
+        expect(result.is_ok()).to_equal(true)
+
+# ============================================================================
+# Test Group 9: Layout Architecture Helpers
+# ============================================================================
+
+describe "Layout Architecture Helpers":
+    """## Architecture Helpers -- Shared across all backends."""
+
+    it "appends halt trampoline for ARM32 via generic function":
+        val bytes = append_halt_for_arch([0x00, 0x48], Architecture.Arm32)
+        expect(bytes.len()).to_equal(4)
+        expect(bytes[2]).to_equal(0x00)
+        expect(bytes[3]).to_equal(0xBE)
+
+    it "appends halt trampoline for RV32 via generic function":
+        val bytes = append_halt_for_arch([0x01, 0x02, 0x03, 0x04], Architecture.RiscV32)
+        expect(bytes.len()).to_equal(8)
+        expect(bytes[4]).to_equal(0x73)
+
+    it "computes Thumb entry PC for ARM32":
+        val plan = JitLayoutPlan(
+            code_base: 0x24010000,
+            code_size: 16,
+            entry_point: 0x24010000,
+            halt_addr: 0x2401000E,
+            stack_top: 0x240C0000,
+            can_expand: false
+        )
+        expect(jit_entry_pc_arm32(plan)).to_equal(0x24010001)
+
+    it "computes Thumb return PC for ARM32":
+        val plan = JitLayoutPlan(
+            code_base: 0x24010000,
+            code_size: 16,
+            entry_point: 0x24010000,
+            halt_addr: 0x2401000E,
+            stack_top: 0x240C0000,
+            can_expand: false
+        )
+        expect(jit_return_pc_arm32(plan)).to_equal(0x2401000F)
+
+# ============================================================================
+# Test Group 10: Unified jit_run Pipeline
+# ============================================================================
+
+describe "Unified jit_run Pipeline":
+    """## Full Pipeline -- Single entry point for local and remote execution."""
+
+    context "with mock remote backend":
+        it "runs full pipeline on ARM32 mock":
+            val limits = JitMemoryLimits.stm32h7_remote()
+            val backend = mock_backend(JitBackendKind.RemoteOpenOCD, Architecture.Arm32, limits)
+            val binary = JitBinary(
+                name: "arm_test",
+                bytes: [0x00, 0x48],
+                entry_offset: 0,
+                stack_bytes: 256,
+                arch: Architecture.Arm32
+            )
+            val result = jit_run_simple(backend, binary)
+            expect(result.is_ok()).to_equal(true)
+            expect(result.return_value).to_equal(42)
+
+        it "runs full pipeline on RV32 mock":
+            val limits = JitMemoryLimits.qemu_rv32()
+            val backend = mock_backend(JitBackendKind.QemuRiscV32, Architecture.RiscV32, limits)
+            val binary = JitBinary(
+                name: "rv32_test",
+                bytes: [0x01, 0x02, 0x03, 0x04],
+                entry_offset: 0,
+                stack_bytes: 256,
+                arch: Architecture.RiscV32
+            )
+            val result = jit_run_simple(backend, binary)
+            expect(result.is_ok()).to_equal(true)
+
+        it "runs with verification enabled":
+            val limits = JitMemoryLimits.stm32h7_remote()
+            val backend = mock_backend(JitBackendKind.RemoteOpenOCD, Architecture.Arm32, limits)
+            val config = JitRunnerConfig.with_verify()
+            val binary = JitBinary(
+                name: "verify_test",
+                bytes: [0x00, 0x48],
+                entry_offset: 0,
+                stack_bytes: 256,
+                arch: Architecture.Arm32
+            )
+            val result = jit_run(backend, binary, config)
+            expect(result.is_ok()).to_equal(true)
+
+    context "with local backend":
+        it "runs full pipeline on local backend":
+            val backend = local_backend(Architecture.Arm32)
+            val binary = JitBinary(
+                name: "local_test",
+                bytes: [0x00, 0x48],
+                entry_offset: 0,
+                stack_bytes: 256,
+                arch: Architecture.Arm32
+            )
+            val result = jit_run_simple(backend, binary)
+            expect(result.is_ok()).to_equal(true)
+
+    context "error handling":
+        it "fails cleanly when binary exceeds remote memory":
+            val limits = JitMemoryLimits.ch32v307()
+            val backend = mock_backend(JitBackendKind.RemoteWLink, Architecture.RiscV32, limits)
+            var big_bytes: [i32] = []
+            var i = 0
+            while i < 25000:
+                big_bytes.push(0x00)
+                i = i + 1
+            val binary = JitBinary(
+                name: "too_big",
+                bytes: big_bytes,
+                entry_offset: 0,
+                stack_bytes: 256,
+                arch: Architecture.RiscV32
+            )
+            val result = jit_run_simple(backend, binary)
+            expect(result.is_ok()).to_equal(false)
+            expect(result.error).to_contain("too_big")
+
+        it "fails cleanly when backend is disconnected":
+            val limits = JitMemoryLimits.stm32h7_remote()
+            val backend = disconnected_ops(JitBackendKind.RemoteOpenOCD, Architecture.Arm32, limits)
+            val binary = JitBinary(
+                name: "disconnect_test",
+                bytes: [0x00, 0x48],
+                entry_offset: 0,
+                stack_bytes: 256,
+                arch: Architecture.Arm32
+            )
+            val config = JitRunnerConfig.default()
+            val result = jit_run_disconnected(backend, binary, config)
+            expect(result.is_ok()).to_equal(false)
+            expect(result.error).to_contain("load failed")
+
+    context "empty binary":
+        it "handles empty binary gracefully":
+            val backend = local_backend(Architecture.Arm32)
+            val binary = JitBinary.empty(Architecture.Arm32)
+            val result = jit_run_simple(backend, binary)
+            expect(result.is_ok()).to_equal(true)
+
+# ============================================================================
+# Test Group 11: Runner Configuration
+# ============================================================================
+
+describe "JitRunnerConfig":
+    """## Configuration -- Runner settings."""
+
+    it "creates default config":
+        val config = JitRunnerConfig.default()
+        expect(config.verify_upload).to_equal(false)
+        expect(config.timeout_ms).to_equal(5000)
+        expect(config.verbose).to_equal(false)
+
+    it "creates config with verification":
+        val config = JitRunnerConfig.with_verify()
+        expect(config.verify_upload).to_equal(true)
+        expect(config.timeout_ms).to_equal(5000)
+
+# ============================================================================
+# Test Group 12: Backend-Agnostic Contract
+# ============================================================================
+
+describe "Backend-Agnostic Contract":
+    """## Contract -- Same pipeline works for local and remote without changes."""
+
+    it "uses same pipeline for local and remote":
+        """Both local and remote backends go through identical pipeline steps."""
+        val binary = JitBinary(
+            name: "contract_test",
+            bytes: [0x00, 0x48, 0x70, 0x47],
+            entry_offset: 0,
+            stack_bytes: 256,
+            arch: Architecture.Arm32
+        )
+
+        # Local
+        val local = local_backend(Architecture.Arm32)
+        val local_result = jit_run_simple(local, binary)
+        expect(local_result.is_ok()).to_equal(true)
+
+        # Remote mock
+        val limits = JitMemoryLimits.stm32h7_remote()
+        val remote = mock_backend(JitBackendKind.RemoteOpenOCD, Architecture.Arm32, limits)
+        val remote_result = jit_run_simple(remote, binary)
+        expect(remote_result.is_ok()).to_equal(true)
+
+    it "both backends produce JitExecResult":
+        """Return type is the same regardless of backend."""
+        val binary = JitBinary(
+            name: "result_type_test",
+            bytes: [0x00, 0x48],
+            entry_offset: 0,
+            stack_bytes: 256,
+            arch: Architecture.Arm32
+        )
+
+        val local = local_backend(Architecture.Arm32)
+        val local_result = jit_run_simple(local, binary)
+
+        val limits = JitMemoryLimits.stm32h7_remote()
+        val remote = mock_backend(JitBackendKind.RemoteOpenOCD, Architecture.Arm32, limits)
+        val remote_result = jit_run_simple(remote, binary)
+
+        # Both are JitExecResult with the same fields
+        expect(local_result.halt_reason).to_contain("halt")
+        expect(remote_result.halt_reason).to_contain("halt")

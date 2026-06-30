@@ -1,0 +1,85 @@
+# Leak Check - Lightweight Entry
+#
+# Minimal command path for modes that do not need the legacy CLI/driver import
+# chain. This keeps `simple leak-check --mode=static|growth` usable from the
+# bootstrap runtime.
+
+extern fn rt_cli_get_args() -> [text]
+extern fn rt_time_now_unix_micros() -> i64
+
+use types
+use config
+use growth_runner
+use static_runner
+use reporter
+
+fn collect_leak_check_args() -> [text]:
+    val all_args = rt_cli_get_args()
+    var args: [text] = []
+    var start_idx = 1
+    if all_args.len() > 1 and all_args[1].ends_with("leak_check_light_entry.spl"):
+        start_idx = 2
+    if all_args.len() > start_idx and all_args[start_idx] == "leak-check":
+        start_idx = start_idx + 1
+    var i = start_idx
+    while i < all_args.len():
+        args.push(all_args[i])
+        i = i + 1
+    args
+
+fn finalize_light_result(cfg: LeakCheckConfig, result: LeakCheckResult) -> LeakCheckResult:
+    if result.target == "":
+        result.target = cfg.source_file
+
+    var growth_fail = false
+    var growth_warn = false
+    for event in result.growth_events:
+        if event.kind == "threshold_fail" or event.kind == "rss_budget" or event.kind == "timeout" or event.kind == "process_error":
+            growth_fail = true
+        elif event.kind == "threshold_warn":
+            growth_warn = true
+
+    if result.static_violations.len() > 0:
+        result.evidence_level = "strong"
+        result.verdict = "fail"
+        result.exit_code = 1
+    elif growth_fail:
+        result.evidence_level = "heuristic"
+        result.verdict = "fail"
+        result.exit_code = 1
+    elif growth_warn:
+        result.evidence_level = "heuristic"
+        result.verdict = "warn"
+        result.exit_code = 0
+    else:
+        if result.mode == "static":
+            result.evidence_level = "strong"
+        else:
+            result.evidence_level = "heuristic"
+        result.verdict = "pass"
+        result.exit_code = 0
+
+    result
+
+fn run_leak_check_light() -> i64:
+    val args = collect_leak_check_args()
+    val cfg = parse_leak_check_args(args)
+    if cfg.source_file == "":
+        return 0
+
+    val start_us = rt_time_now_unix_micros()
+    var result = empty_leak_check_result()
+
+    match cfg.mode:
+        case LeakCheckMode.Static:
+            result = run_static_check(cfg)
+        case LeakCheckMode.Growth:
+            result = run_growth_check(cfg)
+        case _:
+            print "Error: lightweight leak-check supports only --mode=static and --mode=growth"
+            return 1
+
+    result.duration_ms = (rt_time_now_unix_micros() - start_us) / 1000
+    result = finalize_light_result(cfg, result)
+    write_report(result, cfg)
+    result.exit_code
