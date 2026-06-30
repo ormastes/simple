@@ -1,0 +1,97 @@
+use std.spec
+use std.nogc_sync_mut.replay.semantic.scenario_correlator.{ScenarioStep, ScenarioCorrelator}
+
+describe "ScenarioCorrelator creation":
+    it "from_scenario sets scenario_name":
+        val sc = ScenarioCorrelator.from_scenario("user logs in")
+        expect(sc.scenario_name).to_equal("user logs in")
+
+    it "from_scenario starts with zero steps":
+        val sc = ScenarioCorrelator.from_scenario("checkout flow")
+        expect(sc.step_count()).to_equal(0)
+
+describe "ScenarioCorrelator add_step":
+    it "add_step increases step_count":
+        var sc = ScenarioCorrelator.from_scenario("login")
+        sc.add_step("open login page", 0, 100)
+        expect(sc.step_count()).to_equal(1)
+
+    it "add_step stores step name and event range":
+        var sc = ScenarioCorrelator.from_scenario("login")
+        sc.add_step("submit credentials", 100, 250)
+        val st = sc.get_step(0)
+        expect(st.name).to_equal("submit credentials")
+        expect(st.start_event_id).to_equal(100)
+        expect(st.end_event_id).to_equal(250)
+
+    it "multiple add_step calls maintain order":
+        var sc = ScenarioCorrelator.from_scenario("purchase")
+        sc.add_step("add to cart", 0, 50)
+        sc.add_step("checkout", 51, 200)
+        sc.add_step("confirm", 201, 300)
+        expect(sc.step_count()).to_equal(3)
+        val first = sc.get_step(0)
+        expect(first.name).to_equal("add to cart")
+        val last = sc.get_step(2)
+        expect(last.name).to_equal("confirm")
+
+describe "ScenarioCorrelator match_functions":
+    it "match_functions attaches patterns to a step":
+        var sc = ScenarioCorrelator.from_scenario("login")
+        sc.add_step("authenticate", 0, 100)
+        sc.match_functions(0, ["auth.login", "auth.verify_password"])
+        val st = sc.get_step(0)
+        expect(st.matched_functions.len()).to_equal(2)
+
+    it "match_functions does not affect other steps":
+        var sc = ScenarioCorrelator.from_scenario("multi")
+        sc.add_step("step-a", 0, 10)
+        sc.add_step("step-b", 11, 20)
+        sc.match_functions(0, ["fn_a"])
+        val sb = sc.get_step(1)
+        expect(sb.matched_functions.len()).to_equal(0)
+
+describe "ScenarioCorrelator match_objects":
+    it "match_objects attaches object ids to a step":
+        var sc = ScenarioCorrelator.from_scenario("alloc test")
+        sc.add_step("allocate user", 0, 50)
+        sc.match_objects(0, [101, 102, 103])
+        val st = sc.get_step(0)
+        expect(st.matched_objects.len()).to_equal(3)
+
+describe "ScenarioCorrelator summary":
+    it "summary contains scenario name":
+        var sc = ScenarioCorrelator.from_scenario("dashboard load")
+        val out = sc.summary()
+        expect(out).to_contain("dashboard load")
+
+    it "summary contains step count":
+        var sc = ScenarioCorrelator.from_scenario("flow")
+        sc.add_step("step one", 0, 10)
+        sc.add_step("step two", 11, 20)
+        val out = sc.summary()
+        expect(out).to_contain("2")
+
+describe "ScenarioStep to_text":
+    it "to_text contains step name":
+        val st = ScenarioStep(
+            name: "render page",
+            start_event_id: 10,
+            end_event_id: 99,
+            matched_functions: [],
+            matched_objects: []
+        )
+        val s = st.to_text()
+        expect(s).to_contain("render page")
+
+    it "to_text contains event range":
+        val st = ScenarioStep(
+            name: "submit",
+            start_event_id: 5,
+            end_event_id: 42,
+            matched_functions: [],
+            matched_objects: []
+        )
+        val s = st.to_text()
+        expect(s).to_contain("5")
+        expect(s).to_contain("42")

@@ -1,0 +1,49 @@
+# AC-13: in-repo reuse consumer (distinct from the sample apps).
+#
+# Demonstrates an external-style consumer using ONLY the public SFM API surface
+# (`std.sfm` codec + public entry points) — proving the SFM infra is reusable.
+# It builds a manifest, round-trips it through the codec, and describes the
+# loaded module via the public `sfm_resolve` path.
+
+use std.sfm.manifest.{FeatureManifest, LayerDescriptor, LayerKind, SfmSecurityLevel}
+use std.sfm.codec.{encode_sfm, decode_sfm}
+use std.sfm.loader.{SfmModule, SfmProfile, load_sfm}
+use std.sfm.authz.{AuthzContext}
+use std.sfm.version.{sfm_resolve}
+
+# Build a small two-layer manifest as a consumer would.
+fn consumer_manifest() -> FeatureManifest:
+    val cli = LayerDescriptor(role: "cli", kind: LayerKind.FrontArgParser, entry_symbol: "main", privileged: false)
+    val db = LayerDescriptor(role: "store", kind: LayerKind.BackDb, entry_symbol: "db_open", privileged: false)
+    return FeatureManifest(
+        name: "reuse-demo",
+        version: "0.1.0",
+        security_level: SfmSecurityLevel.Ordinary,
+        layers: [cli, db]
+    )
+
+# AC-13: consume the public API to describe a module. Returns a human-readable
+# summary containing the module name (and layer count), proving reuse.
+fn consumer_describe_module() -> text:
+    val m: FeatureManifest = consumer_manifest()
+    # Round-trip through the public codec to mirror a real load.
+    var smf: [u8] = []
+    var i: i32 = 0
+    while i < 4:
+        smf.append(0 as u8)
+        i = i + 1
+    smf[0] = 83 as u8
+    smf[1] = 77 as u8
+    smf[2] = 70 as u8
+    smf[3] = 0 as u8
+    val bytes: [u8] = encode_sfm(m, smf)
+    match decode_sfm(bytes):
+        Err(e):
+            return "reuse error: " + e
+        Ok((dm, dsmf)):
+            val mod = SfmModule(manifest: dm, smf_bytes: dsmf, profile: SfmProfile.Native)
+            var resolved: text = "no"
+            match sfm_resolve(mod, "cli", AuthzContext(principal: "tool", granted_trusted: false)):
+                Ok(_): resolved = "yes"
+                Err(_): resolved = "no"
+            return "name=" + dm.name + " version=" + dm.version + " layers=" + dm.layers.len().to_text() + " cli_resolved=" + resolved

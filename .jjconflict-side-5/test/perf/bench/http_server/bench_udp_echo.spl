@@ -1,0 +1,69 @@
+"""
+UDP throughput sink. Binds to port 9092, receives datagrams and counts packets/sec.
+Uses epoll + nonblocking recvfrom for maximum throughput.
+
+Benchmark client (send 1M packets):
+  for i in $(seq 1 1000000); do echo -n 'hello' | nc -u -w0 localhost 9092; done
+
+Or with socat (faster):
+  dd if=/dev/zero bs=64 count=100000 | socat - UDP:localhost:9092
+"""
+
+extern fn rt_io_udp_bind(addr: text) -> i64
+extern fn rt_io_udp_recv_from(fd: i64, size: i64) -> [u8]
+extern fn rt_io_udp_close(fd: i64) -> i64
+extern fn rt_io_udp_set_nonblocking(fd: i64, enabled: i64) -> i64
+extern fn rt_event_loop_create() -> i64
+extern fn rt_event_loop_register(epfd: i64, fd: i64, mode: i64) -> i64
+extern fn rt_event_loop_poll(epfd: i64, max_events: i64, timeout_ms: i64) -> i64
+extern fn rt_event_loop_poll_get_fd(index: i64) -> i64
+extern fn rt_time_now_micros() -> i64
+
+fn main():
+    print "UDP Throughput Sink"
+    val fd = rt_io_udp_bind("0.0.0.0:9092")
+    print "  Bound fd: {fd}"
+
+    if fd < 0:
+        print "  ERROR: bind failed"
+        return
+
+    rt_io_udp_set_nonblocking(fd, 1)
+
+    print "  Listening on udp://0.0.0.0:9092 (nonblocking)"
+    print ""
+    print "  Send test packets:"
+    print "    echo -n 'hello' | nc -u -w0 localhost 9092"
+    print ""
+
+    val epfd = rt_event_loop_create()
+    rt_event_loop_register(epfd, fd, 0)
+
+    var count: i64 = 0
+    var bytes: i64 = 0
+    var last_report: i64 = rt_time_now_micros() / 1000
+    var last_count: i64 = 0
+
+    while true:
+        val n = rt_event_loop_poll(epfd, 256, 1000)
+        var i: i64 = 0
+        while i < n:
+            val efd = rt_event_loop_poll_get_fd(i)
+            var batch: i64 = 0
+            while batch < 64:
+                val data = rt_io_udp_recv_from(efd, 65536)
+                if data.len() > 0:
+                    count = count + 1
+                    bytes = bytes + data.len()
+                else:
+                    batch = 64
+                batch = batch + 1
+            i = i + 1
+
+        val now = rt_time_now_micros() / 1000
+        val elapsed = now - last_report
+        if elapsed >= 1000:
+            val pps = count - last_count
+            print "  {pps} pkt/s | total: {count} pkts, {bytes} bytes"
+            last_report = now
+            last_count = count

@@ -1,0 +1,103 @@
+"""
+firmware — top-level NVMe controller firmware.
+
+A cooperative reactor wrapping the HIL/FTL/FIL stack: each `service()` cycle drains
+the host submission queue, then runs background garbage collection while free space
+is below the low watermark. Also exposes checkpoint and power-cycle for durability.
+"""
+
+use nvme_types.*
+use hil.*
+
+val GC_LOW_WATERMARK: i64 = 4    # background GC engages below this many free blocks
+val GC_SWEEP_MAX: i64 = 3        # bounded GC passes per maintenance sweep
+
+struct Firmware:
+    hil:   Hil
+    ticks: i64
+
+fn firmware_new() -> Firmware:
+    Firmware(hil: hil_new(), ticks: 0)
+
+impl Firmware:
+    me submit(c: NvmeCmd) -> bool:
+        me.hil.submit(c)
+
+    me completions() -> i64:
+        me.hil.completions()
+
+    me reap() -> NvmeCpl:
+        me.hil.reap()
+
+    # Drain every queued completion (discarded — used to clear the CQ between phases).
+    me reap_all():
+        var c: i64 = me.completions()
+        while c > 0:
+            var cpl: NvmeCpl = me.reap()
+            c = me.completions()
+
+    me free_blocks() -> i64:
+        me.hil.free_blocks()
+
+    # One reactor service cycle: drain host commands, then background-GC while the
+    # free-block count is below the low watermark (bounded; always terminates).
+    me service() -> i64:
+        me.ticks = me.ticks + 1
+        val processed: i64 = me.hil.run()
+        var free: i64 = me.hil.free_blocks()
+        var guard: i64 = 0
+        while (free < GC_LOW_WATERMARK and guard < NUM_BLOCKS):
+            val v: i64 = me.hil.gc()
+            if v == UNMAP:
+                guard = NUM_BLOCKS
+            else:
+                free = me.hil.free_blocks()
+                guard = guard + 1
+        processed
+
+    # Explicit bounded GC sweep (maintenance / demo). Returns blocks reclaimed.
+    me gc_sweep() -> i64:
+        var reclaimed: i64 = 0
+        var k: i64 = 0
+        while k < GC_SWEEP_MAX:
+            val v: i64 = me.hil.gc()
+            if v == UNMAP:
+                k = GC_SWEEP_MAX
+            else:
+                reclaimed = reclaimed + 1
+                k = k + 1
+        reclaimed
+
+    me checkpoint():
+        me.hil.checkpoint()
+
+    # Power-fail then power-on: lose volatile L2P, then recover committed mappings.
+    me power_cycle():
+        me.hil.crash()
+        me.hil.recover()
+
+# ── Self-test ─────────────────────────────────────────────────────────────────
+
+fn firmware_selftest() -> i64:
+    var fail: i64 = 0
+    var fw: Firmware = firmware_new()
+
+    fw.submit(cmd_make(1, OP_WRITE, 5, 1, 0x42))
+    fw.service()
+    val c1: NvmeCpl = fw.reap()
+    fail = fail + expect_eq(c1.status, SC_SUCCESS, "write serviced")
+
+    fw.submit(cmd_make(2, OP_READ, 5, 1, 0))
+    fw.service()
+    val c2: NvmeCpl = fw.reap()
+    fail = fail + expect_eq(c2.data, 0x42, "read back via reactor")
+
+    # checkpoint, power cycle, committed data survives
+    fw.checkpoint()
+    fw.power_cycle()
+    fw.submit(cmd_make(3, OP_READ, 5, 1, 0))
+    fw.service()
+    val c3: NvmeCpl = fw.reap()
+    fail = fail + expect_eq(c3.data, 0x42, "data survives power cycle")
+
+    fail

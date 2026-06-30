@@ -1,0 +1,70 @@
+use common.wine_kernel32_thread_wait.{wine_kernel32_execute_thread_wait}
+use common.wine_nt_thread_wait.{wine_nt_thread_table_new}
+
+fn _all_thread_apis() -> text:
+    "thread-create thread-join thread-detach thread-current-id thread-yield " +
+        "mutex-create mutex-lock mutex-try-lock mutex-unlock " +
+        "condvar-create condvar-wait condvar-wait-timeout condvar-signal condvar-broadcast " +
+        "tls-key-create tls-get tls-set tls-delete " +
+        "semaphore-create semaphore-wait semaphore-post " +
+        "event-create event-wait event-signal event-reset thread-fault-record"
+
+describe "Wine KERNEL32 thread/wait bridge":
+    it "executes a bounded CreateThread, WaitForSingleObject, and GetLastError sequence":
+        val result = wine_kernel32_execute_thread_wait(
+            ["CreateThread", "WaitForSingleObject", "GetLastError"],
+            wine_nt_thread_table_new(_all_thread_apis()),
+            "main",
+            7,
+            1000
+        )
+
+        expect(result.ok).to_equal(true)
+        expect(result.handle).to_equal(0x80)
+        expect(result.wait_status).to_equal("WAIT_OBJECT_0")
+        expect(result.exit_code).to_equal(7)
+        expect(result.last_error).to_equal("OK")
+        expect(result.operations).to_equal("CreateThread WaitForSingleObject GetLastError")
+
+    it "keeps thread/wait dispatch ordered and bounded":
+        val out_of_order = wine_kernel32_execute_thread_wait(
+            ["WaitForSingleObject", "CreateThread", "GetLastError"],
+            wine_nt_thread_table_new(_all_thread_apis()),
+            "main",
+            0,
+            1000
+        )
+        expect(out_of_order.ok).to_equal(false)
+        expect(out_of_order.error).to_equal("kernel32-thread-wait-sequence-expected:CreateThread")
+
+        val wrong_family = wine_kernel32_execute_thread_wait(
+            ["CreateThread", "WaitForSingleObject", "HeapFree"],
+            wine_nt_thread_table_new(_all_thread_apis()),
+            "main",
+            0,
+            1000
+        )
+        expect(wrong_family.ok).to_equal(false)
+        expect(wrong_family.error).to_equal("bridge-wrong-category:HeapFree")
+
+    it "propagates thread readiness and CreateThread errors":
+        val blocked = wine_kernel32_execute_thread_wait(
+            ["CreateThread", "WaitForSingleObject", "GetLastError"],
+            wine_nt_thread_table_new("thread-create thread-join"),
+            "main",
+            0,
+            1000
+        )
+        expect(blocked.ok).to_equal(false)
+        expect(blocked.error).to_equal("CreateThread:missing-api-thread-detach")
+
+        val invalid = wine_kernel32_execute_thread_wait(
+            ["CreateThread", "WaitForSingleObject", "GetLastError"],
+            wine_nt_thread_table_new(_all_thread_apis()),
+            "",
+            0,
+            1000
+        )
+        expect(invalid.ok).to_equal(false)
+        expect(invalid.error).to_equal("CreateThread:invalid-entrypoint")
+        expect(invalid.last_error).to_equal("ERROR_INVALID_PARAMETER")

@@ -1,0 +1,149 @@
+# @cover src/lib/nogc_sync_mut/ndarray/ndarray.spl 80%
+"""
+# NDArray Error Paths Specification
+
+**Feature IDs:** scilib-ndarray-error
+**Category:** Stdlib
+**Difficulty:** 3/5
+**Status:** Draft
+**Plan:** doc/03_plan/agent_tasks/scilib_port_ndarray.md
+**Design:** doc/05_design/scilib_port_architecture.md
+
+## Overview
+
+Tests error paths across the NDArray public API. All fallible operations
+expose a `try_*` variant that returns `Result<T, NdarrayError>` — never
+panics. Per language rule: no try/catch/throw keywords; use `?` operator
+or explicit `is_err()` checks.
+
+Tasks covered: T-NDARRAY-13 (bounds-checked indexing), T-NDARRAY-16
+(broadcast error paths), T-NDARRAY-09 (invalid constructor args).
+
+## Behavior
+
+- Out-of-bounds `try_get` → is_err() == true
+- Out-of-bounds `try_get_at` (2-D) → is_err() == true
+- `try_add` with incompatible shapes → is_err() == true
+- `try_reshape` with mismatched element count → is_err() == true
+- `try_zeros` with negative dim → is_err() == true
+- `try_gather` with out-of-range index → is_err() == true
+- `try_mask` with length mismatch → is_err() == true
+
+## Implementation Notes
+
+Error paths are TDD; these specs must fail until implementations ship.
+No skip(), no weakened assertions.
+"""
+
+use std.spipe.*
+use std.ndarray.*
+
+
+# ============================================================================
+# Test Group 1: Constructor error paths
+# ============================================================================
+
+describe "NDArray constructor error paths":
+    """
+    ## Invalid constructor arguments
+
+    `try_zeros`, `try_arange`, `try_linspace` return Err on invalid inputs.
+    """
+
+    it "try_zeros returns Err for a shape with a negative dimension":
+        val r = try_zeros(Shape.new([Index.new(-1)]))
+        expect(r.is_err()).to_equal(true)
+
+    it "try_arange returns Err when step is zero":
+        val r = try_arange(Float64.new(0.0), Float64.new(4.0), Float64.new(0.0))
+        expect(r.is_err()).to_equal(true)
+
+    it "try_linspace returns Err when n is zero":
+        val r = try_linspace(Float64.new(0.0), Float64.new(1.0), Index.new(0))
+        expect(r.is_err()).to_equal(true)
+
+
+# ============================================================================
+# Test Group 2: Indexing error paths
+# ============================================================================
+
+describe "NDArray indexing error paths":
+    """
+    ## Out-of-bounds and type errors
+
+    `try_get`, `try_get_at`, `try_gather`, `try_mask` return Err when
+    the index is out of range or the mask length mismatches.
+    """
+
+    it "try_get returns Err for index equal to length":
+        val a = array([Float64.new(1.0), Float64.new(2.0), Float64.new(3.0)])
+        val r = a.try_get(Index.new(3))
+        expect(r.is_err()).to_equal(true)
+
+    it "try_get returns Err for a negative index":
+        val a = array([Float64.new(1.0), Float64.new(2.0)])
+        val r = a.try_get(Index.new(-1))
+        expect(r.is_err()).to_equal(true)
+
+    it "try_get_at returns Err for an out-of-range row in a 2-D array":
+        val flat = [Float64.new(1.0), Float64.new(2.0),
+                    Float64.new(3.0), Float64.new(4.0)]
+        val a = array(flat).reshape(Shape.new([Index.new(2), Index.new(2)]))
+        val r = a.try_get_at([Index.new(2), Index.new(0)])
+        expect(r.is_err()).to_equal(true)
+
+    it "try_gather returns Err when an index position is out of range":
+        val a = array([Float64.new(1.0), Float64.new(2.0), Float64.new(3.0)])
+        val idx = array_i64([Int64.new(0), Int64.new(5)])
+        val r = a.try_gather(idx)
+        expect(r.is_err()).to_equal(true)
+
+    it "try_mask returns Err when mask length differs from array length":
+        val a = array([Float64.new(1.0), Float64.new(2.0), Float64.new(3.0)])
+        val m = array_bool([Bool.new(true), Bool.new(false)])
+        val r = a.try_mask(m)
+        expect(r.is_err()).to_equal(true)
+
+
+# ============================================================================
+# Test Group 3: Shape mismatch in binary ops
+# ============================================================================
+
+describe "NDArray binary op shape mismatch errors":
+    """
+    ## Incompatible shapes
+
+    `try_add` returns Err when shapes are not broadcast-compatible.
+    """
+
+    it "try_add returns Err for (2,3) + (2,) — right-align mismatch":
+        val a = array([Float64.new(1.0), Float64.new(2.0), Float64.new(3.0),
+                       Float64.new(4.0), Float64.new(5.0), Float64.new(6.0)]
+                     ).reshape(Shape.new([Index.new(2), Index.new(3)]))
+        val b = array([Float64.new(10.0), Float64.new(20.0)])
+        val r = a.try_add(b)
+        expect(r.is_err()).to_equal(true)
+
+    it "try_add returns Err for (4,) + (3,) — length mismatch":
+        val a = array([Float64.new(1.0), Float64.new(2.0),
+                       Float64.new(3.0), Float64.new(4.0)])
+        val b = array([Float64.new(1.0), Float64.new(2.0), Float64.new(3.0)])
+        val r = a.try_add(b)
+        expect(r.is_err()).to_equal(true)
+
+
+# ============================================================================
+# Test Group 4: Reshape error paths
+# ============================================================================
+
+describe "NDArray reshape error paths":
+    """
+    ## Invalid reshape
+
+    `try_reshape` returns Err when the element count does not match.
+    """
+
+    it "try_reshape returns Err when target element count does not match":
+        val a = array([Float64.new(1.0), Float64.new(2.0), Float64.new(3.0)])
+        val r = a.try_reshape(Shape.new([Index.new(2), Index.new(2)]))
+        expect(r.is_err()).to_equal(true)

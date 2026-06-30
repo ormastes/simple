@@ -1,0 +1,257 @@
+# LRU Block Cache for Filesystem I/O
+#
+# MDSOC: feature dimension, vfs layer
+# Caches recently-accessed disk sectors to reduce NVMe I/O.
+# Uses LRU eviction with dirty tracking for write-back.
+
+struct CacheEntry:
+    """A cached disk sector."""
+    lba: u64
+    data: [u8]         # Sector data (typically 512 bytes)
+    dirty: bool        # Modified since read from disk
+    valid: bool        # Entry contains valid data
+    access_count: u64  # LRU counter (higher = more recent)
+
+class BlockCache:
+    """LRU block cache for reducing disk I/O.
+
+    Sits between the filesystem driver and the block device. Caches
+    recently-read sectors in memory and tracks dirty sectors for
+    write-back. Uses a global access counter for LRU eviction.
+    """
+    entries: [CacheEntry]
+    capacity: u32       # Maximum cached entries
+    sector_size: u32
+    access_counter: u64 # Global LRU counter
+    hits: u64
+    misses: u64
+
+impl BlockCache:
+    static fn new(capacity: u32, sector_size: u32) -> BlockCache:
+        """Create a new block cache with the given capacity and sector size."""
+        var entries: [CacheEntry] = []
+        var i: u32 = 0
+        while i < capacity:
+            # Pre-allocate empty entries
+            var empty_data: [u8] = []
+            var j: u32 = 0
+            while j < sector_size:
+                empty_data.push(0)
+                j = j + 1
+            entries.push(CacheEntry(
+                lba: 0,
+                data: empty_data,
+                dirty: false,
+                valid: false,
+                access_count: 0
+            ))
+            i = i + 1
+        BlockCache(
+            entries: entries,
+            capacity: capacity,
+            sector_size: sector_size,
+            access_counter: 0,
+            hits: 0,
+            misses: 0
+        )
+
+    fn lookup(lba: u64) -> Result<[u8], text>:
+        """Look up a sector in cache. Returns data or error if not cached."""
+        var i: u32 = 0
+        while i < self.capacity:
+            val entry = self.entries[i.to_i32()]
+            if entry.valid and entry.lba == lba:
+                # Cache hit -- update access counter for LRU
+                self.access_counter = self.access_counter + 1
+                self.entries[i.to_i32()] = CacheEntry(
+                    lba: entry.lba,
+                    data: entry.data,
+                    dirty: entry.dirty,
+                    valid: true,
+                    access_count: self.access_counter
+                )
+                self.hits = self.hits + 1
+                # Return a copy of the data
+                var result: [u8] = []
+                var j: u32 = 0
+                while j < self.sector_size:
+                    result.push(entry.data[j.to_i32()])
+                    j = j + 1
+                return Result.Ok(result)
+            i = i + 1
+        self.misses = self.misses + 1
+        Result.Err("sector not in cache")
+
+    me insert(lba: u64, data: [u8]):
+        """Insert or update a sector in cache.
+
+        If the LBA is already cached, updates the data in place.
+        Otherwise evicts the least recently used entry and inserts.
+        """
+        # Check if LBA already exists in cache
+        var i: u32 = 0
+        while i < self.capacity:
+            val entry = self.entries[i.to_i32()]
+            if entry.valid and entry.lba == lba:
+                # Update existing entry
+                self.access_counter = self.access_counter + 1
+                self.entries[i.to_i32()] = CacheEntry(
+                    lba: lba,
+                    data: data,
+                    dirty: entry.dirty,
+                    valid: true,
+                    access_count: self.access_counter
+                )
+                return
+            i = i + 1
+
+        # Not found -- find a slot (prefer invalid, then LRU)
+        var target_idx = self._find_free_or_lru_index()
+        self.access_counter = self.access_counter + 1
+        self.entries[target_idx.to_i32()] = CacheEntry(
+            lba: lba,
+            data: data,
+            dirty: false,
+            valid: true,
+            access_count: self.access_counter
+        )
+
+    me mark_dirty(lba: u64):
+        """Mark a cached sector as dirty (needs write-back)."""
+        var i: u32 = 0
+        while i < self.capacity:
+            val entry = self.entries[i.to_i32()]
+            if entry.valid and entry.lba == lba:
+                self.entries[i.to_i32()] = CacheEntry(
+                    lba: entry.lba,
+                    data: entry.data,
+                    dirty: true,
+                    valid: true,
+                    access_count: entry.access_count
+                )
+                return
+            i = i + 1
+
+    fn dirty_entries() -> [CacheEntry]:
+        """Return all dirty entries for write-back."""
+        var result: [CacheEntry] = []
+        var i: u32 = 0
+        while i < self.capacity:
+            val entry = self.entries[i.to_i32()]
+            if entry.valid and entry.dirty:
+                result.push(entry)
+            i = i + 1
+        result
+
+    me flush(lba: u64):
+        """Mark a specific entry as clean after write-back."""
+        var i: u32 = 0
+        while i < self.capacity:
+            val entry = self.entries[i.to_i32()]
+            if entry.valid and entry.lba == lba:
+                self.entries[i.to_i32()] = CacheEntry(
+                    lba: entry.lba,
+                    data: entry.data,
+                    dirty: false,
+                    valid: true,
+                    access_count: entry.access_count
+                )
+                return
+            i = i + 1
+
+    me flush_all():
+        """Mark all entries as clean."""
+        var i: u32 = 0
+        while i < self.capacity:
+            val entry = self.entries[i.to_i32()]
+            if entry.valid and entry.dirty:
+                self.entries[i.to_i32()] = CacheEntry(
+                    lba: entry.lba,
+                    data: entry.data,
+                    dirty: false,
+                    valid: true,
+                    access_count: entry.access_count
+                )
+            i = i + 1
+
+    me invalidate(lba: u64):
+        """Remove a specific entry from cache."""
+        var i: u32 = 0
+        while i < self.capacity:
+            val entry = self.entries[i.to_i32()]
+            if entry.valid and entry.lba == lba:
+                self.entries[i.to_i32()] = CacheEntry(
+                    lba: 0,
+                    data: entry.data,
+                    dirty: false,
+                    valid: false,
+                    access_count: 0
+                )
+                return
+            i = i + 1
+
+    me invalidate_all():
+        """Clear the entire cache."""
+        var i: u32 = 0
+        while i < self.capacity:
+            val entry = self.entries[i.to_i32()]
+            self.entries[i.to_i32()] = CacheEntry(
+                lba: 0,
+                data: entry.data,
+                dirty: false,
+                valid: false,
+                access_count: 0
+            )
+            i = i + 1
+
+    fn _find_free_or_lru_index() -> u32:
+        """Find an invalid (free) slot, or the least recently used valid entry."""
+        var lru_idx: u32 = 0
+        var lru_count: u64 = 0xFFFFFFFFFFFFFFFF  # Max u64
+        var i: u32 = 0
+        while i < self.capacity:
+            val entry = self.entries[i.to_i32()]
+            if not entry.valid:
+                return i  # Free slot -- use immediately
+            if entry.access_count < lru_count:
+                lru_count = entry.access_count
+                lru_idx = i
+            i = i + 1
+        lru_idx
+
+    fn hit_rate() -> u64:
+        """Return cache hit rate as percentage (0-100)."""
+        val total = self.hits + self.misses
+        if total == 0:
+            return 0
+        (self.hits * 100) / total
+
+    fn entry_count() -> u32:
+        """Return the number of valid entries currently in cache."""
+        var count: u32 = 0
+        var i: u32 = 0
+        while i < self.capacity:
+            if self.entries[i.to_i32()].valid:
+                count = count + 1
+            i = i + 1
+        count
+
+    fn dirty_count() -> u32:
+        """Return the number of dirty entries needing write-back."""
+        var count: u32 = 0
+        var i: u32 = 0
+        while i < self.capacity:
+            val entry = self.entries[i.to_i32()]
+            if entry.valid and entry.dirty:
+                count = count + 1
+            i = i + 1
+        count
+
+    me insert_dirty(lba: u64, data: [u8]):
+        """Insert a sector and immediately mark it dirty.
+
+        Used by write operations that modify sector data before
+        it has been flushed to disk.
+        """
+        self.insert(lba, data)
+        self.mark_dirty(lba)

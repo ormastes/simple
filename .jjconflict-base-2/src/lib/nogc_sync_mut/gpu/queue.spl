@@ -1,0 +1,364 @@
+"""GPU Queue / Event / Task Graph (NoGC) — SYCL-parity async model.
+
+Wave 1 (W1.1/W1.3/W1.4) of
+doc/03_plan/language/gpu_fpga/sycl_parity_unified_kernel_plan_2026-06-13.md
+
+CPU-deterministic core: on backends without an async runtime binding the
+queue executes submissions synchronously in dependency order, so every
+spec runs without GPU hardware. The API is fixed here so code written
+against GpuQueue does not change when native stream bindings land.
+
+TODO(W1.1-cuda): bind GpuQueue to CudaStream/CudaEvent when backend is
+GpuBackend.Cuda so submissions overlap on hardware.
+"""
+
+use std.common.gpu.device.{Gpu, GpuBackend}
+use std.nogc_sync_mut.io.{time_now_nanos}
+
+# ============================================================================
+# GpuEvent
+# ============================================================================
+
+class GpuEvent:
+    """Completion marker for a queue submission (SYCL event equivalent).
+
+    elapsed_nanos is populated when the owning queue has profiling enabled
+    (W4.2): wall-clock on the CPU path, device timers once native bindings
+    land. 0 means profiling was off for this submission.
+    """
+    id: i64
+    queue_id: i64
+    complete: bool
+    elapsed_nanos: i64
+
+    fn is_complete() -> bool:
+        self.complete
+
+    fn elapsed_ms() -> f64:
+        (self.elapsed_nanos as f64) / 1000000.0
+
+# ============================================================================
+# Launch shape — descriptive range → prescriptive grid/block
+# ============================================================================
+
+class LaunchShape:
+    """Grid/block decomposition for a 1D range launch.
+
+    Fields are grid_dim/block_dim, not grid/block: `grid` as a named
+    constructor argument hits a parser bug — see
+    doc/08_tracking/bug/grid_identifier_named_arg_parse_failure_2026-06-13.md
+    """
+    grid_dim: i64
+    block_dim: i64
+    needs_tail_guard: bool
+
+    fn covers(n: i64) -> bool:
+        self.grid_dim * self.block_dim >= n
+
+fn launch_shape(n: i64, block_size: i64) -> LaunchShape:
+    """Compute grid/block for n work-items with the given block size.
+
+    needs_tail_guard is true when grid*block overshoots n, i.e. the kernel
+    body must keep an `if idx < n` guard (descriptive launches inject it).
+    """
+    if n <= 0 or block_size <= 0:
+        return LaunchShape(grid_dim: 0, block_dim: 0, needs_tail_guard: false)
+    val groups = (n + block_size - 1) / block_size
+    val exact = groups * block_size == n
+    LaunchShape(grid_dim: groups, block_dim: block_size, needs_tail_guard: not exact)
+
+fn default_launch_shape(n: i64) -> LaunchShape:
+    """Launch shape with the default block size of 256."""
+    launch_shape(n, 256)
+
+# ============================================================================
+# GpuQueue
+# ============================================================================
+
+class GpuQueue:
+    """Ordered submission queue bound to one device (SYCL queue equivalent).
+
+    in_order queues guarantee submission order; out-of-order queues only
+    honor explicit submit_after dependencies. On the CPU-deterministic
+    path both execute synchronously, which trivially satisfies either
+    contract while keeping results bit-identical run to run.
+    """
+    device: Gpu
+    id: i64
+    in_order: bool
+    profiling: bool
+    next_event_id: i64
+    submitted: i64
+    completed: i64
+    first_error: text
+
+    static fn create(device: Gpu) -> GpuQueue:
+        GpuQueue(device: device, id: 1, in_order: true, profiling: false, next_event_id: 1, submitted: 0, completed: 0, first_error: "")
+
+    static fn create_out_of_order(device: Gpu) -> GpuQueue:
+        GpuQueue(device: device, id: 1, in_order: false, profiling: false, next_event_id: 1, submitted: 0, completed: 0, first_error: "")
+
+    me _note_failure(eid: i64, why: text):
+        if self.first_error == "":
+            self.first_error = "submission {eid} {why}"
+
+    me enable_profiling():
+        self.profiling = true
+
+    me _elapsed_since(start: i64) -> i64:
+        if not self.profiling:
+            return 0
+        val now = time_now_nanos()
+        if now > start: now - start else: 0
+
+    me submit(work: fn() -> bool) -> GpuEvent:
+        val no_deps: [GpuEvent] = []
+        self.submit_after(work, no_deps)
+
+    me submit_after(work: fn() -> bool, deps: [GpuEvent]) -> GpuEvent:
+        """Submit work that runs after all deps complete.
+
+        Returns an incomplete event (without running the work) if any
+        dependency is incomplete or failed — fail-closed, matching the
+        backend-contract policy.
+        """
+        var deps_ok = true
+        for d in deps:
+            if not d.complete:
+                deps_ok = false
+        val eid = self.next_event_id
+        self.next_event_id = eid + 1
+        self.submitted = self.submitted + 1
+        if not deps_ok:
+            self._note_failure(eid, "blocked on incomplete dependency")
+            return GpuEvent(id: eid, queue_id: self.id, complete: false, elapsed_nanos: 0)
+        val start = if self.profiling: time_now_nanos() else: 0
+        val ok = work()
+        if ok:
+            self.completed = self.completed + 1
+        else:
+            self._note_failure(eid, "work returned failure")
+        GpuEvent(id: eid, queue_id: self.id, complete: ok, elapsed_nanos: self._elapsed_since(start))
+
+    me parallel_for(n: i64, body: fn(i64) -> bool) -> GpuEvent:
+        """Descriptive 1D launch: runs body for each index in [0, n).
+
+        SYCL parallel_for(range) equivalent: the bounds guard is implicit —
+        body is never invoked with an out-of-range index. CPU path executes
+        serially in index order.
+        """
+        val eid = self.next_event_id
+        self.next_event_id = eid + 1
+        self.submitted = self.submitted + 1
+        val start = if self.profiling: time_now_nanos() else: 0
+        var all_ok = true
+        var i = 0
+        while i < n:
+            if not body(i):
+                all_ok = false
+            i = i + 1
+        if all_ok:
+            self.completed = self.completed + 1
+        else:
+            self._note_failure(eid, "parallel_for body returned failure")
+        GpuEvent(id: eid, queue_id: self.id, complete: all_ok, elapsed_nanos: self._elapsed_since(start))
+
+    me parallel_reduce_i64(n: i64, init: i64, item: fn(i64) -> i64, combine: fn(i64, i64) -> i64) -> i64:
+        """Descriptive reduction over [0, n) (SYCL reduction equivalent, W2.4).
+
+        item(i) produces the value for index i; combine folds values into the
+        accumulator. combine must be associative — the GPU path is free to
+        reorder; the CPU path folds in index order, which makes specs
+        deterministic for any associative op.
+        """
+        self.submitted = self.submitted + 1
+        var acc = init
+        var i = 0
+        while i < n:
+            acc = combine(acc, item(i))
+            i = i + 1
+        self.completed = self.completed + 1
+        acc
+
+    me wait() -> bool:
+        """Block until all submissions complete; true if all succeeded."""
+        self.completed == self.submitted
+
+    me wait_result() -> Result<i64, text>:
+        """W4.3 error model: Ok(completed count) when every submission
+        succeeded, Err(first failure description) otherwise — device-side
+        failures surface as values, never as process aborts."""
+        if self.completed == self.submitted:
+            return Ok(self.completed)
+        Err(self.first_error)
+
+# ============================================================================
+# GpuTaskGraph — record/replay dependency graph (SYCL-graph equivalent, lite)
+# ============================================================================
+
+class GpuTaskGraph:
+    """Recorded dependency graph over labeled task nodes.
+
+    Edges are stored flat (edge_from[i] -> edge_to[i]); schedule() returns
+    a Kahn topological order and an empty array for cyclic graphs, so a
+    cycle can never silently execute.
+    """
+    labels: [text]
+    edge_from: [i64]
+    edge_to: [i64]
+
+    static fn create() -> GpuTaskGraph:
+        GpuTaskGraph(labels: [], edge_from: [], edge_to: [])
+
+    me record(label: text) -> i64:
+        val id = self.labels.len()
+        self.labels.push(label)
+        id
+
+    me depends(node: i64, dep: i64):
+        self.edge_from.push(dep)
+        self.edge_to.push(node)
+
+    fn node_count() -> i64:
+        self.labels.len()
+
+    fn schedule() -> [i64]:
+        """Topological execution order; [] when the graph is cyclic or empty."""
+        val n = self.labels.len()
+        if n == 0:
+            return []
+        var indegree: [i64] = []
+        var i = 0
+        while i < n:
+            indegree.push(0)
+            i = i + 1
+        var e = 0
+        while e < self.edge_to.len():
+            val t = self.edge_to[e]
+            indegree[t] = indegree[t] + 1
+            e = e + 1
+        var order: [i64] = []
+        var ready: [i64] = []
+        i = 0
+        while i < n:
+            if indegree[i] == 0:
+                ready.push(i)
+            i = i + 1
+        var head = 0
+        while head < ready.len():
+            val cur = ready[head]
+            head = head + 1
+            order.push(cur)
+            e = 0
+            while e < self.edge_from.len():
+                if self.edge_from[e] == cur:
+                    val t2 = self.edge_to[e]
+                    indegree[t2] = indegree[t2] - 1
+                    if indegree[t2] == 0:
+                        ready.push(t2)
+                e = e + 1
+        if order.len() != n:
+            return []
+        order
+
+    me replay_with(executor: fn(i64) -> bool) -> i64:
+        """Execute nodes in dependency order via executor(node_id).
+
+        Stops at the first failure; returns the number of nodes that ran
+        successfully (node_count() on full success, 0 for cyclic graphs).
+        """
+        val order = self.schedule()
+        var done = 0
+        for nid in order:
+            if not executor(nid):
+                return done
+            done = done + 1
+        done
+
+# ============================================================================
+# GpuAccessGraph — implicit data-dependency DAG from declared buffer
+# accesses (SYCL buffer/accessor equivalent). Tasks declare which buffer
+# ids they read and write; RAW, WAW, and WAR edges are derived
+# automatically, then build() produces a GpuTaskGraph to schedule/replay.
+# Unlike SYCL accessors the access sets are explicit data, so the derived
+# graph is inspectable and deterministic.
+# ============================================================================
+
+class GpuAccessGraph:
+    labels: [text]
+    edge_from: [i64]
+    edge_to: [i64]
+    buf_last_writer: [i64]   # indexed by buffer id; -1 = no writer yet
+    reader_buf: [i64]        # readers since last write, flattened pairs
+    reader_task: [i64]
+
+    static fn create() -> GpuAccessGraph:
+        GpuAccessGraph(labels: [], edge_from: [], edge_to: [], buf_last_writer: [], reader_buf: [], reader_task: [])
+
+    me _ensure_buf(buf: i64):
+        while self.buf_last_writer.len() <= buf:
+            self.buf_last_writer.push(-1)
+
+    me _add_edge(node: i64, dep: i64):
+        # dedup: a task pair only needs one edge
+        var k = 0
+        while k < self.edge_to.len():
+            if (self.edge_to[k] == node and\
+                self.edge_from[k] == dep):
+                return
+            k = k + 1
+        self.edge_from.push(dep)
+        self.edge_to.push(node)
+
+    me record_task(label: text, reads: [i64], writes: [i64]) -> i64:
+        """Record a task with its buffer access sets; returns the task id.
+
+        Derived edges: RAW (this task reads a buffer some earlier task
+        wrote), WAW (rewrites a written buffer), WAR (writes a buffer
+        earlier tasks read since its last write).
+        """
+        val tid = self.labels.len()
+        self.labels.push(label)
+        for b in reads:
+            self._ensure_buf(b)
+            val w = self.buf_last_writer[b]
+            if w >= 0 and w != tid:
+                self._add_edge(tid, w)
+        for b in writes:
+            self._ensure_buf(b)
+            val w2 = self.buf_last_writer[b]
+            if w2 >= 0 and w2 != tid:
+                self._add_edge(tid, w2)
+            var k = 0
+            while k < self.reader_buf.len():
+                if (self.reader_buf[k] == b and\
+                    self.reader_task[k] != tid):
+                    self._add_edge(tid, self.reader_task[k])
+                k = k + 1
+        for b in reads:
+            self.reader_buf.push(b)
+            self.reader_task.push(tid)
+        for b in writes:
+            self.buf_last_writer[b] = tid
+            var nb: [i64] = []
+            var nt: [i64] = []
+            var k2 = 0
+            while k2 < self.reader_buf.len():
+                if self.reader_buf[k2] != b:
+                    nb.push(self.reader_buf[k2])
+                    nt.push(self.reader_task[k2])
+                k2 = k2 + 1
+            self.reader_buf = nb
+            self.reader_task = nt
+        tid
+
+    fn build() -> GpuTaskGraph:
+        """Materialize the derived dependency graph for schedule/replay."""
+        GpuTaskGraph(labels: self.labels, edge_from: self.edge_from, edge_to: self.edge_to)
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export GpuEvent, GpuQueue, GpuTaskGraph, GpuAccessGraph, LaunchShape
+export launch_shape, default_launch_shape

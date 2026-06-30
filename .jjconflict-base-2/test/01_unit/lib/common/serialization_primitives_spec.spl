@@ -1,0 +1,598 @@
+# @covers src/lib/common/serialization/serialize.spl 70%
+# @covers src/lib/common/serialization/types.spl 70%
+"""
+# Serialization Primitives Coverage Specification
+
+**Feature IDs:** #SERIAL-COV-PRIMITIVES
+**Category:** Stdlib
+**Difficulty:** 2/5
+**Status:** Implemented
+
+## Overview
+
+Branch-coverage tests for serialization primitives:
+- Type constants (types.spl)
+- char_code_safe, varint encoding (serialize.spl)
+- Binary and text serialization of primitives and collections (serialize.spl)
+- String escaping/quoting/unquoting (serialize.spl)
+"""
+
+use serialization.*
+
+# ============================================================================
+# Test Group 1: Type Constants (types.spl)
+# ============================================================================
+
+describe "Type Constants":
+    """
+    ## Type Tag Values
+
+    Verify each type constant returns the expected integer tag.
+    """
+
+    it "returns correct values for all type tags":
+        expect(type_nil()).to_equal(0)
+        expect(type_bool()).to_equal(1)
+        expect(type_int()).to_equal(2)
+        expect(type_float()).to_equal(3)
+        expect(type_text()).to_equal(4)
+        expect(type_list()).to_equal(5)
+        expect(type_tuple()).to_equal(6)
+        expect(type_dict()).to_equal(7)
+        expect(type_custom()).to_equal(8)
+
+# ============================================================================
+# Test Group 2: Character Code Functions (serialize.spl)
+# ============================================================================
+
+describe "char_code_safe":
+    """
+    ## ASCII Code Lookup
+
+    Tests char_code_safe for all character classes to hit every branch.
+    """
+
+    context "printable symbols":
+        it "returns correct code for space":
+            expect(char_code_safe(" ")).to_equal(32)
+
+        it "returns correct code for exclamation":
+            expect(char_code_safe("!")).to_equal(33)
+
+        it "returns correct code for double quote":
+            expect(char_code_safe("\"")).to_equal(34)
+
+        it "returns correct code for hash":
+            expect(char_code_safe("#")).to_equal(35)
+
+        it "returns correct code for various symbols":
+            expect(char_code_safe("$")).to_equal(36)
+            expect(char_code_safe("%")).to_equal(37)
+            expect(char_code_safe("&")).to_equal(38)
+            expect(char_code_safe("'")).to_equal(39)
+            expect(char_code_safe("(")).to_equal(40)
+            expect(char_code_safe(")")).to_equal(41)
+            expect(char_code_safe("*")).to_equal(42)
+            expect(char_code_safe("+")).to_equal(43)
+            expect(char_code_safe(",")).to_equal(44)
+            expect(char_code_safe("-")).to_equal(45)
+            expect(char_code_safe(".")).to_equal(46)
+            expect(char_code_safe("/")).to_equal(47)
+
+    context "digits":
+        it "returns correct codes for all digits":
+            expect(char_code_safe("0")).to_equal(48)
+            expect(char_code_safe("1")).to_equal(49)
+            expect(char_code_safe("2")).to_equal(50)
+            expect(char_code_safe("3")).to_equal(51)
+            expect(char_code_safe("4")).to_equal(52)
+            expect(char_code_safe("5")).to_equal(53)
+            expect(char_code_safe("6")).to_equal(54)
+            expect(char_code_safe("7")).to_equal(55)
+            expect(char_code_safe("8")).to_equal(56)
+            expect(char_code_safe("9")).to_equal(57)
+
+    context "punctuation after digits":
+        it "returns correct codes for colon through at-sign":
+            expect(char_code_safe(":")).to_equal(58)
+            expect(char_code_safe(";")).to_equal(59)
+            expect(char_code_safe("<")).to_equal(60)
+            expect(char_code_safe("=")).to_equal(61)
+            expect(char_code_safe(">")).to_equal(62)
+            expect(char_code_safe("@")).to_equal(64)
+
+    context "uppercase letters":
+        it "returns correct codes for A-Z range":
+            expect(char_code_safe("A")).to_equal(65)
+            expect(char_code_safe("M")).to_equal(77)
+            expect(char_code_safe("Z")).to_equal(90)
+
+    context "lowercase letters":
+        it "returns correct codes for a-z range":
+            expect(char_code_safe("a")).to_equal(97)
+            expect(char_code_safe("m")).to_equal(109)
+            expect(char_code_safe("z")).to_equal(122)
+
+    context "bracket and brace characters":
+        it "returns correct codes for brackets and braces":
+            expect(char_code_safe("[")).to_equal(91)
+            expect(char_code_safe("\\")).to_equal(92)
+            expect(char_code_safe("]")).to_equal(93)
+            expect(char_code_safe("^")).to_equal(94)
+            expect(char_code_safe("_")).to_equal(95)
+            expect(char_code_safe("`")).to_equal(96)
+            expect(char_code_safe("{")).to_equal(123)
+            expect(char_code_safe("|")).to_equal(124)
+            expect(char_code_safe("}")).to_equal(125)
+            expect(char_code_safe("~")).to_equal(126)
+
+    context "whitespace characters":
+        it "returns correct codes for newline tab and carriage return":
+            expect(char_code_safe("\n")).to_equal(10)
+            expect(char_code_safe("\t")).to_equal(9)
+            expect(char_code_safe("\r")).to_equal(13)
+
+    context "fallback for unknown characters":
+        it "returns 0 for unrecognized input":
+            # Empty string or non-ASCII falls through to default 0
+            expect(char_code_safe("")).to_equal(0)
+
+# ============================================================================
+# Test Group 3: Varint Encoding (serialize.spl)
+# ============================================================================
+
+describe "write_varint":
+    """
+    ## Variable-Length Integer Encoding
+
+    Tests zero, positive, negative, and multi-byte varint encoding.
+    """
+
+    context "when value is zero":
+        it "returns single byte zero":
+            val result = write_varint(0)
+            expect(result.len()).to_equal(1)
+            expect(result[0]).to_equal(0)
+
+    context "when value is positive and small":
+        it "encodes small positive as single byte":
+            val result = write_varint(42)
+            expect(result.len()).to_equal(1)
+            expect(result[0]).to_equal(42)
+
+    context "when value is positive and large":
+        it "encodes values above 127 as multi-byte":
+            val result = write_varint(300)
+            expect(result.len()).to_be_greater_than(1)
+
+    context "when value is negative":
+        it "prepends 255 sign marker":
+            val result = write_varint(-42)
+            expect(result[0]).to_equal(255)
+            expect(result.len()).to_be_greater_than(1)
+
+describe "read_varint":
+    """
+    ## Variable-Length Integer Decoding
+
+    Tests roundtrip decoding for zero, positive, negative, and multi-byte values.
+    """
+
+    context "roundtrip with zero":
+        it "decodes zero correctly":
+            val encoded = write_varint(0)
+            val result = read_varint(encoded, 0)
+            expect(result.0).to_equal(0)
+
+    context "roundtrip with positive":
+        it "decodes positive correctly":
+            val encoded = write_varint(42)
+            val result = read_varint(encoded, 0)
+            expect(result.0).to_equal(42)
+
+    context "roundtrip with large positive":
+        it "decodes multi-byte positive correctly":
+            val encoded = write_varint(300)
+            val result = read_varint(encoded, 0)
+            expect(result.0).to_equal(300)
+
+    context "roundtrip with negative":
+        it "decodes negative correctly":
+            val encoded = write_varint(-42)
+            val result = read_varint(encoded, 0)
+            expect(result.0).to_equal(-42)
+
+    context "consumed bytes count":
+        it "reports correct number of consumed bytes":
+            val encoded = write_varint(42)
+            val result = read_varint(encoded, 0)
+            expect(result.1).to_equal(encoded.len())
+
+# ============================================================================
+# Test Group 4: Binary Serialization - Primitives (serialize.spl)
+# ============================================================================
+
+describe "serialize_int_bytes":
+    """
+    ## Integer Binary Serialization
+
+    Tests type tag presence and varint encoding of integers.
+    """
+
+    it "starts with int type tag":
+        val result = serialize_int_bytes(0)
+        expect(result[0]).to_equal(type_int())
+
+    it "serializes zero":
+        val result = serialize_int_bytes(0)
+        expect(result.len()).to_be_greater_than(1)
+
+    it "serializes positive integer":
+        val result = serialize_int_bytes(100)
+        expect(result[0]).to_equal(type_int())
+        expect(result.len()).to_be_greater_than(1)
+
+    it "serializes negative integer":
+        val result = serialize_int_bytes(-50)
+        expect(result[0]).to_equal(type_int())
+
+describe "serialize_bool_bytes":
+    """
+    ## Boolean Binary Serialization
+
+    Tests both true and false branches.
+    """
+
+    it "serializes true with type tag and 1":
+        val result = serialize_bool_bytes(true)
+        expect(result[0]).to_equal(type_bool())
+        expect(result[1]).to_equal(1)
+
+    it "serializes false with type tag and 0":
+        val result = serialize_bool_bytes(false)
+        expect(result[0]).to_equal(type_bool())
+        expect(result[1]).to_equal(0)
+
+describe "serialize_nil_bytes":
+    """
+    ## Nil Binary Serialization
+    """
+
+    it "returns single byte with nil type tag":
+        val result = serialize_nil_bytes()
+        expect(result.len()).to_equal(1)
+        expect(result[0]).to_equal(type_nil())
+
+describe "serialize_text_bytes":
+    """
+    ## Text Binary Serialization
+
+    Tests empty and non-empty strings.
+    """
+
+    it "serializes empty string":
+        val result = serialize_text_bytes("")
+        expect(result[0]).to_equal(type_text())
+
+    it "serializes non-empty string with correct length":
+        val result = serialize_text_bytes("abc")
+        expect(result[0]).to_equal(type_text())
+        expect(result.len()).to_be_greater_than(1)
+
+    it "serializes string with special characters":
+        val result = serialize_text_bytes("a\nb")
+        expect(result[0]).to_equal(type_text())
+
+# ============================================================================
+# Test Group 5: Text Serialization - String Escaping (serialize.spl)
+# ============================================================================
+
+describe "escape_string":
+    """
+    ## String Escaping
+
+    Tests every escape branch: quote, backslash, newline, tab, carriage return, normal.
+    """
+
+    it "escapes double quotes":
+        val result = escape_string("say \"hi\"")
+        expect(result).to_contain("\\\"")
+
+    it "escapes backslashes":
+        val result = escape_string("path\\to")
+        expect(result).to_contain("\\\\")
+
+    it "escapes newlines":
+        val result = escape_string("a\nb")
+        expect(result).to_contain("\\n")
+
+    it "escapes tabs":
+        val result = escape_string("a\tb")
+        expect(result).to_contain("\\t")
+
+    it "escapes carriage returns":
+        val result = escape_string("a\rb")
+        expect(result).to_contain("\\r")
+
+    it "passes through normal characters unchanged":
+        val result = escape_string("hello")
+        expect(result).to_equal("hello")
+
+    it "handles empty string":
+        val result = escape_string("")
+        expect(result).to_equal("")
+
+describe "unescape_string":
+    """
+    ## String Unescaping
+
+    Tests every unescape branch and roundtrip with escape_string.
+    """
+
+    it "unescapes backslash-quote to quote":
+        val result = unescape_string("say \\\"hi\\\"")
+        expect(result).to_contain("\"")
+
+    it "unescapes backslash-backslash":
+        val result = unescape_string("path\\\\to")
+        expect(result).to_contain("\\")
+
+    it "unescapes backslash-n to newline":
+        val result = unescape_string("a\\nb")
+        expect(result).to_contain("\n")
+
+    it "unescapes backslash-t to tab":
+        val result = unescape_string("a\\tb")
+        expect(result).to_contain("\t")
+
+    it "unescapes backslash-r to carriage return":
+        val result = unescape_string("a\\rb")
+        expect(result).to_contain("\r")
+
+    it "handles unknown escape sequence":
+        val result = unescape_string("a\\xb")
+        expect(result).to_equal("a\\xb")
+
+    it "handles trailing backslash at end of string":
+        val result = unescape_string("abc\\")
+        expect(result).to_equal("abc\\")
+
+    it "handles empty string":
+        val result = unescape_string("")
+        expect(result).to_equal("")
+
+    it "roundtrips with escape_string":
+        val original = "say \"hi\"\npath\\to\ttab\rreturn"
+        val roundtripped = unescape_string(escape_string(original))
+        expect(roundtripped).to_equal(original)
+
+describe "quote_string":
+    """
+    ## String Quoting
+    """
+
+    it "wraps string in double quotes":
+        val result = quote_string("hello")
+        expect(result).to_start_with("\"")
+        expect(result).to_end_with("\"")
+
+    it "escapes inner content":
+        val result = quote_string("say \"hi\"")
+        expect(result).to_start_with("\"")
+        expect(result).to_end_with("\"")
+        expect(result).to_contain("\\\"")
+
+describe "unquote_string":
+    """
+    ## String Unquoting
+
+    Tests quoted, unquoted, short, and non-quoted inputs.
+    """
+
+    it "removes quotes and unescapes":
+        val result = unquote_string("\"hello\"")
+        expect(result).to_equal("hello")
+
+    it "returns input unchanged for short strings":
+        val result = unquote_string("x")
+        expect(result).to_equal("x")
+
+    it "returns input unchanged when not quoted":
+        val result = unquote_string("hello")
+        expect(result).to_equal("hello")
+
+    it "returns empty input unchanged":
+        val result = unquote_string("")
+        expect(result).to_equal("")
+
+    it "roundtrips with quote_string":
+        val original = "hello world"
+        val roundtripped = unquote_string(quote_string(original))
+        expect(roundtripped).to_equal(original)
+
+# ============================================================================
+# Test Group 6: Text Serialization - Primitives (serialize.spl)
+# ============================================================================
+
+describe "serialize_int":
+    """
+    ## Integer Text Serialization
+    """
+
+    it "serializes positive integer":
+        expect(serialize_int(42)).to_equal("42")
+
+    it "serializes zero":
+        expect(serialize_int(0)).to_equal("0")
+
+    it "serializes negative integer":
+        expect(serialize_int(-7)).to_equal("-7")
+
+describe "serialize_bool":
+    """
+    ## Boolean Text Serialization
+
+    Both true and false branches.
+    """
+
+    it "serializes true":
+        expect(serialize_bool(true)).to_equal("true")
+
+    it "serializes false":
+        expect(serialize_bool(false)).to_equal("false")
+
+describe "serialize_nil":
+    """
+    ## Nil Text Serialization
+    """
+
+    it "returns nil string":
+        expect(serialize_nil()).to_equal("nil")
+
+describe "serialize_text":
+    """
+    ## Text Serialization
+    """
+
+    it "quotes and escapes text":
+        val result = serialize_text("hello")
+        expect(result).to_equal("\"hello\"")
+
+    it "escapes special characters in text":
+        val result = serialize_text("a\nb")
+        expect(result).to_contain("\\n")
+
+# ============================================================================
+# Test Group 7: Text Serialization - Collections (serialize.spl)
+# ============================================================================
+
+describe "serialize_list":
+    """
+    ## List Text Serialization
+
+    Tests empty list (branch: len==0) and non-empty list with separator logic.
+    """
+
+    it "serializes empty list":
+        val result = serialize_list([])
+        expect(result).to_equal("[]")
+
+    it "serializes single-item list":
+        val result = serialize_list(["42"])
+        expect(result).to_equal("[42]")
+
+    it "serializes multi-item list with commas":
+        val result = serialize_list(["1", "2", "3"])
+        expect(result).to_equal("[1, 2, 3]")
+
+describe "serialize_tuple_text":
+    """
+    ## Tuple Text Serialization
+
+    Tests empty tuple and non-empty tuple.
+    """
+
+    it "serializes empty tuple":
+        val result = serialize_tuple_text([])
+        expect(result).to_equal("()")
+
+    it "serializes single-value tuple":
+        val result = serialize_tuple_text(["42"])
+        expect(result).to_equal("(42)")
+
+    it "serializes multi-value tuple with commas":
+        val result = serialize_tuple_text(["1", "2", "3"])
+        expect(result).to_equal("(1, 2, 3)")
+
+describe "serialize_dict":
+    """
+    ## Dict Text Serialization
+
+    Tests empty dict and non-empty dict.
+    """
+
+    it "serializes empty dict":
+        val result = serialize_dict([])
+        expect(result).to_equal("{}")
+
+    it "serializes single entry":
+        val result = serialize_dict([("key", "val")])
+        expect(result).to_equal("{key: val}")
+
+    it "serializes multiple entries with commas":
+        val result = serialize_dict([("a", "1"), ("b", "2")])
+        expect(result).to_equal("{a: 1, b: 2}")
+
+# ============================================================================
+# Test Group 8: List Serialization Helpers (serialize.spl)
+# ============================================================================
+
+describe "serialize_int_list":
+    """
+    ## Integer List Serialization
+    """
+
+    it "serializes empty int list":
+        val result = serialize_int_list([])
+        expect(result).to_equal("[]")
+
+    it "serializes non-empty int list":
+        val result = serialize_int_list([1, 2, 3])
+        expect(result).to_equal("[1, 2, 3]")
+
+describe "serialize_text_list":
+    """
+    ## Text List Serialization
+    """
+
+    it "serializes empty text list":
+        val result = serialize_text_list([])
+        expect(result).to_equal("[]")
+
+    it "serializes non-empty text list":
+        val result = serialize_text_list(["a", "b"])
+        expect(result).to_equal("[\"a\", \"b\"]")
+
+describe "serialize_bool_list":
+    """
+    ## Boolean List Serialization
+    """
+
+    it "serializes empty bool list":
+        val result = serialize_bool_list([])
+        expect(result).to_equal("[]")
+
+    it "serializes non-empty bool list":
+        val result = serialize_bool_list([true, false, true])
+        expect(result).to_equal("[true, false, true]")
+
+# ============================================================================
+# Test Group 9: Binary List Serialization (serialize.spl)
+# ============================================================================
+
+describe "serialize_int_list_bytes":
+    """
+    ## Integer List Binary Serialization
+    """
+
+    it "starts with list type tag":
+        val result = serialize_int_list_bytes([1, 2])
+        expect(result[0]).to_equal(type_list())
+
+    it "serializes empty int list":
+        val result = serialize_int_list_bytes([])
+        expect(result[0]).to_equal(type_list())
+
+describe "serialize_text_list_bytes":
+    """
+    ## Text List Binary Serialization
+    """
+
+    it "starts with list type tag":
+        val result = serialize_text_list_bytes(["hello"])
+        expect(result[0]).to_equal(type_list())
+
+    it "serializes empty text list":
+        val result = serialize_text_list_bytes([])
+        expect(result[0]).to_equal(type_list())
+

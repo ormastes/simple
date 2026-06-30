@@ -1,0 +1,32 @@
+use std.spec.*
+use std.concurrent.multicore_green.{multicore_green_spawn, multicore_green_spawn_sliced, MulticoreGreenSliceResult}
+
+fn multicore_green_lcg(seed: i64) -> i64:
+    var x = seed + 1
+    for i in 0..10000:
+        x = (x * 1103515245 + 12345) % 2147483648
+    x
+
+fn multicore_green_slice_once(state: i64) -> MulticoreGreenSliceResult:
+    if state >= 1:
+        return MulticoreGreenSliceResult.completed(19)
+    MulticoreGreenSliceResult.continue_with(state + 1)
+
+describe "Multicore green facade":
+    it "joins multiple value tasks":
+        val h0 = multicore_green_spawn(\: multicore_green_lcg(0))
+        val h1 = multicore_green_spawn(\: multicore_green_lcg(1))
+        val h2 = multicore_green_spawn(\: multicore_green_lcg(2))
+        val h3 = multicore_green_spawn(\: multicore_green_lcg(3))
+
+        expect(h0.ran_inline_fallback()).to_equal(true)
+        expect(h0.used_runtime_pool()).to_equal(false)
+        val got = h0.join() + h1.join() + h2.join() + h3.join()
+        val expected = multicore_green_lcg(0) + multicore_green_lcg(1) + multicore_green_lcg(2) + multicore_green_lcg(3)
+        expect(got).to_equal(expected)
+
+    it "exposes sliced inline fallback evidence in interpreter mode":
+        val handle = multicore_green_spawn_sliced(0, multicore_green_slice_once)
+        expect(handle.ran_inline_fallback()).to_equal(true)
+        expect(handle.used_runtime_pool()).to_equal(false)
+        expect(handle.join()).to_equal(19)

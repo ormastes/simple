@@ -1,0 +1,203 @@
+# Export Parser - Public API Detection for Documentation Coverage
+#
+# Determines which functions are "public API" by scanning __init__.spl and mod.spl
+# files for export statements.
+#
+# Functions:
+# - find_module_init: Find nearest module file (__init__.spl or mod.spl)
+# - parse_exports: Extract exported names from module file
+# - is_function_exported: Check if function is in module's export list
+# - extract_export_names: Parse comma-separated names from export line
+
+use app.io.mod (file_read, file_exists, is_dir)
+use std.string.{NL}
+
+# ============================================================================
+# Module File Discovery
+# ============================================================================
+
+# Find nearest __init__.spl or mod.spl parent for a file
+# Returns the full path to the module file, or nil if not found
+fn find_module_init(file_path: text) -> text:
+    # Edge cases
+    if file_path == nil:
+        return nil
+    if file_path.len() == 0:
+        return nil
+
+    # Get directory containing the file
+    var current_dir = get_directory(file_path)
+    if current_dir == nil:
+        return nil
+
+    # Walk up directory tree looking for __init__.spl or mod.spl
+    var search_dir = current_dir
+    var iterations = 0
+    val max_iterations = 50  # Prevent infinite loops
+
+    var found_path = nil
+    var should_continue = true
+
+    for i in 0..max_iterations:
+        if not should_continue:
+            break
+
+        # Check for __init__.spl first
+        val init_path = path_join(search_dir, "__init__.spl")
+        if file_exists(init_path):
+            found_path = init_path
+            should_continue = false
+            break
+
+        # Check for mod.spl
+        val mod_path = path_join(search_dir, "mod.spl")
+        if file_exists(mod_path):
+            found_path = mod_path
+            should_continue = false
+            break
+
+        # Move up one directory
+        val parent = get_parent_directory(search_dir)
+        if parent == nil:
+            should_continue = false
+            break
+        if parent == search_dir:
+            # Reached root
+            should_continue = false
+            break
+
+        search_dir = parent
+
+    found_path
+
+# ============================================================================
+# Export Statement Parsing
+# ============================================================================
+
+# Parse export statements from a module file
+# Returns list of exported names
+fn parse_exports(module_file_path: text) -> [text]:
+    if not file_exists(module_file_path):
+        return []
+
+    val content = file_read(module_file_path)
+    val lines = content.split(NL)
+
+    var exports: [text] = []
+
+    for line in lines:
+        val trimmed = line.trim()
+
+        # Skip comments and empty lines
+        if trimmed.starts_with("#"):
+            continue
+        if trimmed.len() == 0:
+            continue
+
+        # Look for export statements
+        if trimmed.starts_with("export "):
+            val names = extract_export_names(trimmed)
+            exports = exports + names
+
+    exports
+
+# Extract names from export line
+# Example: "export Foo, Bar, baz" → ["Foo", "Bar", "baz"]
+fn extract_export_names(export_line: text) -> [text]:
+    val trimmed = export_line.trim()
+
+    # Remove "export " prefix
+    if not trimmed.starts_with("export "):
+        return []
+
+    var rest = trimmed[7:]  # Skip "export "
+    rest = rest.trim()
+
+    # Handle curly braces: export {Foo, Bar}
+    if rest.starts_with("{"):
+        val close_idx = rest.index_of("}") ?? -1
+        if close_idx > 0:
+            rest = rest[1:close_idx]
+
+    # Split by comma and trim each name
+    val parts = rest.split(",")
+    var names: [text] = []
+
+    for part in parts:
+        val name = part.trim()
+        if name.len() > 0:
+            names = names + [name]
+
+    names
+
+# ============================================================================
+# Public API Detection
+# ============================================================================
+
+# Check if a function name is exported in its module
+fn is_function_exported(func_name: text, source_file: text) -> bool:
+    # Find the module file
+    val module_file = find_module_init(source_file)
+    if module_file == nil:
+        return false
+
+    # Parse exports
+    val exports = parse_exports(module_file)
+
+    # Check if function is in exports
+    var is_exported = false
+    for export_name in exports:
+        if export_name == func_name:
+            is_exported = true
+            break
+
+    is_exported
+
+# ============================================================================
+# Path Helpers
+# ============================================================================
+
+# Get directory containing a file path
+fn get_directory(file_path: text) -> text:
+    val last_slash = file_path.last_index_of("/") ?? -1
+    if last_slash <= 0:
+        return nil
+
+    file_path[0:last_slash]
+
+# Get parent directory of a directory
+fn get_parent_directory(dir_path: text) -> text:
+    if dir_path == nil:
+        return nil
+    if dir_path == "/":
+        return nil
+    if dir_path.len() == 0:
+        return nil
+
+    # Remove trailing slash if present
+    var path = dir_path
+    if path.ends_with("/"):
+        path = path[0:path.len() - 1]
+
+    # Find last slash
+    val last_slash = path.last_index_of("/") ?? -1
+    if last_slash <= 0:
+        return nil
+
+    path[0:last_slash]
+
+# Join directory and filename
+fn path_join(dir: text, filename: text) -> text:
+    if dir.ends_with("/"):
+        dir + filename
+    else:
+        dir + "/" + filename
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export find_module_init
+export parse_exports
+export is_function_exported
+export extract_export_names

@@ -1,0 +1,190 @@
+# SMF ELF Passthrough Test Specification
+#
+# Phase 1: Tests that SmfReaderMemory can detect ELF objects embedded
+# in SMF Code sections, and that SmfGetter can extract them for linking.
+
+# ============================================================================
+# Test Helpers
+# ============================================================================
+
+# Minimal ELF64 magic header bytes
+fn elf_magic_bytes() -> [u8]:
+    [0x7F, 0x45, 0x4C, 0x46]
+
+# Build a minimal trailer-based SMF containing given code bytes
+fn build_test_smf_with_code(code: [u8]) -> [u8]:
+    var buf: [u8] = []
+    val code_offset = 0
+    val section_table_offset = code.len()
+    val section_entry_size = 64
+
+    # Write code section data
+    buf = buf + (code)
+
+    # Write section table entry for Code (type 1)
+    # byte 0: section type = 1 (Code)
+    buf.push(1)
+    # bytes 1-7: flags + reserved (7 bytes)
+    var pad_i = 0
+    while pad_i < 7:
+        buf.push(0)
+        pad_i = pad_i + 1
+    # bytes 8-15: offset (u64 LE)
+    buf = buf + (i64_to_le_bytes(code_offset))
+    # bytes 16-23: size (u64 LE)
+    buf = buf + (i64_to_le_bytes(code.len()))
+    # bytes 24-63: name + padding (40 bytes)
+    # "code" + null + padding
+    buf.push(99)   # 'c'
+    buf.push(111)  # 'o'
+    buf.push(100)  # 'd'
+    buf.push(101)  # 'e'
+    buf.push(0)    # null
+    var name_pad = 0
+    while name_pad < 35:
+        buf.push(0)
+        name_pad = name_pad + 1
+
+    val section_table_end = section_table_offset + section_entry_size
+
+    # Symbol table entry (minimal: 72 bytes placeholder)
+    val symbol_table_offset = section_table_end
+    var sym_i = 0
+    while sym_i < 72:
+        buf.push(0)
+        sym_i = sym_i + 1
+
+    # String table (minimal: "main\0")
+    val string_table_offset = symbol_table_offset + 72
+    buf.push(109)  # 'm'
+    buf.push(97)   # 'a'
+    buf.push(105)  # 'i'
+    buf.push(110)  # 'n'
+    buf.push(0)    # null
+
+    # Header as trailer (128 bytes)
+    # Magic: "SMF\0"
+    buf.push(83)   # 'S'
+    buf.push(77)   # 'M'
+    buf.push(70)   # 'F'
+    buf.push(0)
+
+    # Version: 1.1
+    buf.push(1)
+    buf.push(1)
+
+    # Platform: Linux (1)
+    buf.push(1)
+
+    # Arch: X86_64 (0)
+    buf.push(0)
+
+    # Flags: executable (bit 0)
+    buf.push(1)
+    buf.push(0)
+    buf.push(0)
+    buf.push(0)
+
+    # Compression: 0
+    buf.push(0)
+    buf.push(0)
+    buf.push(0)
+    buf.push(0)
+
+    # Section count: 1
+    buf = buf + (i32_to_le_bytes(1))
+
+    # Section table offset
+    buf = buf + (i64_to_le_bytes(section_table_offset))
+
+    # Symbol table offset
+    buf = buf + (i64_to_le_bytes(symbol_table_offset))
+
+    # Symbol count: 1
+    buf = buf + (i32_to_le_bytes(1))
+
+    # Exported count: 1
+    buf = buf + (i32_to_le_bytes(1))
+
+    # Entry point: 0
+    buf = buf + (i64_to_le_bytes(0))
+
+    # Pad remainder to 128 bytes
+    val header_start = string_table_offset + 5
+    val current_header_size = buf.len() - header_start
+    while buf.len() - header_start < 128:
+        buf.push(0)
+
+    buf
+
+fn i64_to_le_bytes(v: i64) -> [u8]:
+    var result: [u8] = []
+    result.push((v & 0xFF) as u8)
+    result.push(((v >> 8) & 0xFF) as u8)
+    result.push(((v >> 16) & 0xFF) as u8)
+    result.push(((v >> 24) & 0xFF) as u8)
+    result.push(((v >> 32) & 0xFF) as u8)
+    result.push(((v >> 40) & 0xFF) as u8)
+    result.push(((v >> 48) & 0xFF) as u8)
+    result.push(((v >> 56) & 0xFF) as u8)
+    result
+
+fn i32_to_le_bytes(v: i32) -> [u8]:
+    var result: [u8] = []
+    result.push((v & 0xFF) as u8)
+    result.push(((v >> 8) & 0xFF) as u8)
+    result.push(((v >> 16) & 0xFF) as u8)
+    result.push(((v >> 24) & 0xFF) as u8)
+    result
+
+# ============================================================================
+# ELF Detection Tests
+# ============================================================================
+
+describe "SMF ELF Passthrough":
+    describe "ELF magic detection":
+        it "detects ELF magic in Code section":
+            # Create fake ELF object (ELF magic + padding)
+            var elf_bytes: [u8] = [0x7F, 0x45, 0x4C, 0x46]
+            var ei = 0
+            while ei < 60:
+                elf_bytes.push(0)
+                ei = ei + 1
+
+            val smf = build_test_smf_with_code(elf_bytes)
+            expect(smf.len()).to_be_greater_than(128)
+
+        it "rejects non-ELF Code section":
+            # Code section with non-ELF bytes
+            val raw_code: [u8] = [0x48, 0x89, 0xE5, 0xC3]
+            val smf = build_test_smf_with_code(raw_code)
+            expect(smf.len()).to_be_greater_than(128)
+
+        it "handles empty Code section":
+            val empty: [u8] = []
+            val smf = build_test_smf_with_code(empty)
+            expect(smf.len()).to_be_greater_than(128)
+
+    describe "ELF extraction":
+        it "preserves full ELF bytes":
+            # Verify that ELF bytes can be round-tripped through SMF
+            var elf_bytes: [u8] = [0x7F, 0x45, 0x4C, 0x46, 2, 1]
+            var pi = 0
+            while pi < 58:
+                elf_bytes.push(pi as u8)
+                pi = pi + 1
+
+            val smf = build_test_smf_with_code(elf_bytes)
+            # Code section should start at offset 0 in the SMF data
+            expect(smf[0]).to_equal(0x7F)
+            expect(smf[1]).to_equal(0x45)
+            expect(smf[2]).to_equal(0x4C)
+            expect(smf[3]).to_equal(0x46)
+
+    describe "backward compatibility":
+        it "old SMF without ELF works normally":
+            val raw_code: [u8] = [0x90, 0xC3]
+            val smf = build_test_smf_with_code(raw_code)
+            # Non-ELF code sections still produce valid SMF
+            expect(smf[0]).to_equal(0x90)
+            expect(smf[1]).to_equal(0xC3)

@@ -1,0 +1,81 @@
+# Opt-in learned cardinality estimation experiment for Simple DB planning.
+#
+# The estimator never executes a query and is not wired into automatic planning.
+# Callers can compare conventional/BRIN estimates with learned observations and
+# record the resulting error against exact scan counts.
+
+struct CardinalityObservation:
+    predicate_key: text
+    estimated_rows: i64
+    actual_rows: i64
+    abs_error: i64
+
+struct LearnedCardinalityEstimator:
+    opt_in: bool
+    enabled: bool
+    observations: [CardinalityObservation]
+
+struct CardinalityEstimate:
+    predicate_key: text
+    estimated_rows: i64
+    source: text
+    observation_count: i64
+    abs_error: i64
+
+fn learned_cardinality_new(opt_in: bool) -> LearnedCardinalityEstimator:
+    LearnedCardinalityEstimator(opt_in: opt_in, enabled: opt_in, observations: [])
+
+fn learned_cardinality_estimate(estimator: LearnedCardinalityEstimator,
+                                predicate_key: text,
+                                row_count: i64,
+                                conventional_rows: i64,
+                                brin_rows: i64) -> CardinalityEstimate:
+    if not estimator.opt_in or not estimator.enabled:
+        return CardinalityEstimate(predicate_key: predicate_key, estimated_rows: cardinality_clamp(conventional_rows, row_count), source: "disabled", observation_count: 0, abs_error: 0)
+    val learned = learned_cardinality_average_for(estimator, predicate_key)
+    if learned.observation_count > 0:
+        return CardinalityEstimate(predicate_key: predicate_key, estimated_rows: cardinality_clamp(learned.estimated_rows, row_count), source: "learned", observation_count: learned.observation_count, abs_error: learned.abs_error)
+    if brin_rows >= 0:
+        return CardinalityEstimate(predicate_key: predicate_key, estimated_rows: cardinality_clamp(brin_rows, row_count), source: "brin", observation_count: 0, abs_error: 0)
+    CardinalityEstimate(predicate_key: predicate_key, estimated_rows: cardinality_clamp(conventional_rows, row_count), source: "conventional", observation_count: 0, abs_error: 0)
+
+fn learned_cardinality_record(estimator: LearnedCardinalityEstimator,
+                              estimate: CardinalityEstimate,
+                              actual_rows: i64) -> LearnedCardinalityEstimator:
+    var observations = estimator.observations
+    val err = cardinality_abs(estimate.estimated_rows - actual_rows)
+    observations.push(CardinalityObservation(
+        predicate_key: estimate.predicate_key,
+        estimated_rows: estimate.estimated_rows,
+        actual_rows: actual_rows,
+        abs_error: err
+    ))
+    LearnedCardinalityEstimator(opt_in: estimator.opt_in, enabled: estimator.enabled, observations: observations)
+
+fn learned_cardinality_average_for(estimator: LearnedCardinalityEstimator, predicate_key: text) -> CardinalityEstimate:
+    var total_actual = 0
+    var total_error = 0
+    var count = 0
+    for obs in estimator.observations:
+        if obs.predicate_key == predicate_key:
+            total_actual = total_actual + obs.actual_rows
+            total_error = total_error + obs.abs_error
+            count = count + 1
+    if count == 0:
+        return CardinalityEstimate(predicate_key: predicate_key, estimated_rows: 0, source: "none", observation_count: 0, abs_error: 0)
+    CardinalityEstimate(predicate_key: predicate_key, estimated_rows: total_actual / count, source: "learned", observation_count: count, abs_error: total_error / count)
+
+fn learned_cardinality_observation_count(estimator: LearnedCardinalityEstimator) -> i64:
+    estimator.observations.len()
+
+fn cardinality_clamp(value: i64, row_count: i64) -> i64:
+    if value < 0:
+        return 0
+    if value > row_count:
+        return row_count
+    value
+
+fn cardinality_abs(value: i64) -> i64:
+    if value < 0:
+        return 0 - value
+    value

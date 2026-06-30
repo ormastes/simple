@@ -1,0 +1,62 @@
+use std.spec
+use app.simple_portal.server.{SimplePortalServer}
+use app.simple_portal.content_db.{simple_portal_default_app_root, simple_portal_default_data_root}
+use os.apps.simple_portal.simple_portal.{simple_portal_app_id, simple_portal_exec_path}
+
+fn _server() -> SimplePortalServer:
+    val result = SimplePortalServer.new(
+        4040,
+        simple_portal_default_app_root(),
+        simple_portal_default_data_root(),
+        "dev-token"
+    )
+    result.unwrap()
+
+describe "simple_portal server":
+    it "serves the landing page from the app filesystem root":
+        val resp = _server().route_request("GET", "/", "", "")
+        expect(resp).to_start_with("HTTP/1.1 200 OK")
+        expect(resp).to_contain("Filesystem-first portal")
+        expect(resp).to_contain("Content-Security-Policy:")
+
+    it "normalizes duplicate slashes for public APIs":
+        val resp = _server().route_request("GET", "//api//portal//releases//", "", "")
+        expect(resp).to_start_with("HTTP/1.1 200 OK")
+        expect(resp).to_contain("\"releases\"")
+
+    it "rejects static path traversal":
+        val resp = _server().route_request("GET", "/static/../content/pages.db", "", "")
+        expect(resp).to_start_with("HTTP/1.1 404 Not Found")
+
+    it "rejects disallowed methods on public endpoints":
+        val resp = _server().route_request("POST", "/api/portal/pages", "{}", "")
+        expect(resp).to_start_with("HTTP/1.1 405 Method Not Allowed")
+        expect(resp).to_contain("Allow: GET, HEAD")
+
+    it "rejects unauthorized playground runs":
+        val headers = "Origin: http://localhost:4040\nX-Simple-Portal-Capability: playground.run\n"
+        val resp = _server().route_request("POST", "/api/playground/run", "{\"source\":\"print 1\"}", headers)
+        expect(resp).to_start_with("HTTP/1.1 403 Forbidden")
+
+    it "accepts authorized playground runs and returns a sandbox envelope":
+        val headers = "Origin: http://localhost:4040\nX-Simple-Portal-Capability: playground.run\nX-Simple-Portal-Token: dev-token\n"
+        val resp = _server().route_request("POST", "/api/playground/run", "{\"mode\":\"sandbox\",\"source\":\"print 1\"}", headers)
+        expect(resp).to_start_with("HTTP/1.1 202 Accepted")
+        expect(resp).to_contain("\"runner\":\"simple run --sandbox\"")
+        expect(resp).to_contain("\"sandbox\":{\"filesystem\":false,\"network\":false,\"process\":false}")
+
+    it "rejects oversized playground bodies":
+        var body = "{"
+        var i = 0
+        while i < 17000:
+            body = body + "a"
+            i = i + 1
+        body = body + "}"
+        val headers = "Origin: http://localhost:4040\nX-Simple-Portal-Capability: playground.run\nX-Simple-Portal-Token: dev-token\n"
+        val resp = _server().route_request("POST", "/api/playground/run", body, headers)
+        expect(resp).to_start_with("HTTP/1.1 413 Request Entity Too Large")
+
+describe "simple_portal app identity":
+    it "uses stable sys app paths":
+        expect(simple_portal_app_id()).to_equal("/sys/apps/simple_portal")
+        expect(simple_portal_exec_path()).to_equal("/sys/apps/simple_portal.smf")

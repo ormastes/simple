@@ -1,0 +1,424 @@
+"""SOCKS5 framing spec — RFC 1928 + RFC 1929.
+
+Test vectors:
+  - Greeting encode/decode/round-trip
+  - Greeting response encode/decode/round-trip
+  - Connect request encode/decode/round-trip: IPv4, Domain, IPv6
+  - Connect response encode/decode/round-trip: IPv4 success
+  - UserPass sub-negotiation encode + response parse
+  - Error cases: invalid version, invalid ATYP, truncated input
+
+All byte arrays are built via .push(v.to_u8()) — never [u8] literals, which
+decode as zero bytes through rt_bytes_u8_at under the interpreter.
+(See doc/08_tracking/bug/interpreter_array_push_u8_literal_lost_2026-05-02.md)
+"""
+
+use std.spipe.*
+
+use os.proxy.socks5.{
+    Socks5Method, Socks5Cmd, Socks5Atyp, Socks5Reply, Socks5Error,
+    GreetingResult, GreetingResponseResult, RequestResult, ResponseResult,
+    UserPassResponseResult,
+    socks5_build_greeting, socks5_parse_greeting,
+    socks5_build_greeting_response, socks5_parse_greeting_response,
+    socks5_build_request, socks5_parse_request,
+    socks5_build_response, socks5_parse_response,
+    socks5_userpass_request, socks5_userpass_parse_response
+}
+
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+
+# ============================================================================
+# Fixtures (module-level — feedback_it_block_var_mutation.md)
+# All byte arrays are built via .push(v.to_u8()) to dodge the interpreter
+# [u8]-literal bug.
+# ============================================================================
+
+fn _bv(values: [i64]) -> [u8]:
+    """Build a [u8] from i64 values via the interpreter-safe push path."""
+    var buf: [u8] = []
+    for v in values:
+        buf.push(v.to_u8())
+    buf
+
+fn _bytes_equal(a: [u8], b: [u8]) -> bool:
+    """Byte-exact compare via rt_bytes_u8_at."""
+    if a.len() != b.len():
+        return false
+    var i: i64 = 0
+    while i < a.len():
+        if rt_bytes_u8_at(a, i) != rt_bytes_u8_at(b, i):
+            return false
+        i = i + 1
+    true
+
+fn _ipv4_1234() -> [u8]:
+    _bv([0x01i64, 0x02i64, 0x03i64, 0x04i64])
+
+fn _ipv4_zeros() -> [u8]:
+    _bv([0x00i64, 0x00i64, 0x00i64, 0x00i64])
+
+fn _ipv6_loopback() -> [u8]:
+    # ::1 in network byte order: 15 zeros then 0x01
+    _bv([
+        0x00i64, 0x00i64, 0x00i64, 0x00i64,
+        0x00i64, 0x00i64, 0x00i64, 0x00i64,
+        0x00i64, 0x00i64, 0x00i64, 0x00i64,
+        0x00i64, 0x00i64, 0x00i64, 0x01i64
+    ])
+
+# ============================================================================
+# Greeting (client → server)
+# ============================================================================
+
+describe "SOCKS5 greeting — build":
+
+    it "encodes [NoAuth] as 0x05 0x01 0x00":
+        val wire = socks5_build_greeting([Socks5Method.NoAuth])
+        expect(wire.len().to_i64()).to_equal(3)
+        expect(rt_bytes_u8_at(wire, 0)).to_equal(0x05i64)
+        expect(rt_bytes_u8_at(wire, 1)).to_equal(0x01i64)
+        expect(rt_bytes_u8_at(wire, 2)).to_equal(0x00i64)
+
+    it "encodes [NoAuth, UserPass] as 0x05 0x02 0x00 0x02":
+        val wire = socks5_build_greeting([Socks5Method.NoAuth, Socks5Method.UserPass])
+        expect(wire.len().to_i64()).to_equal(4)
+        expect(rt_bytes_u8_at(wire, 0)).to_equal(0x05i64)
+        expect(rt_bytes_u8_at(wire, 1)).to_equal(0x02i64)
+        expect(rt_bytes_u8_at(wire, 2)).to_equal(0x00i64)
+        expect(rt_bytes_u8_at(wire, 3)).to_equal(0x02i64)
+
+describe "SOCKS5 greeting — parse":
+
+    it "parses [NoAuth] greeting":
+        val wire = _bv([0x05i64, 0x01i64, 0x00i64])
+        if val GreetingResult.Ok(methods) = socks5_parse_greeting(wire):
+            expect(methods.len().to_i64()).to_equal(1)
+        else:
+            expect(false).to_equal(true)
+
+    it "parses [NoAuth, UserPass] greeting":
+        val wire = _bv([0x05i64, 0x02i64, 0x00i64, 0x02i64])
+        if val GreetingResult.Ok(methods) = socks5_parse_greeting(wire):
+            expect(methods.len().to_i64()).to_equal(2)
+        else:
+            expect(false).to_equal(true)
+
+    it "rejects invalid version":
+        val wire = _bv([0x04i64, 0x01i64, 0x00i64])
+        if val GreetingResult.Err(reason) = socks5_parse_greeting(wire):
+            if val Socks5Error.InvalidVersion(got) = reason:
+                expect(got).to_equal(0x04i64)
+            else:
+                expect(false).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    it "rejects truncated greeting":
+        val wire = _bv([0x05i64])
+        if val GreetingResult.Err(reason) = socks5_parse_greeting(wire):
+            if val Socks5Error.UnexpectedEnd = reason:
+                expect(true).to_equal(true)
+            else:
+                expect(false).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+describe "SOCKS5 greeting — round-trip":
+
+    it "round-trips [NoAuth] byte-exact":
+        val methods = [Socks5Method.NoAuth]
+        val wire = socks5_build_greeting(methods)
+        if val GreetingResult.Ok(parsed) = socks5_parse_greeting(wire):
+            val rewire = socks5_build_greeting(parsed)
+            expect(_bytes_equal(rewire, wire)).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    it "round-trips [NoAuth, UserPass] byte-exact":
+        val methods = [Socks5Method.NoAuth, Socks5Method.UserPass]
+        val wire = socks5_build_greeting(methods)
+        if val GreetingResult.Ok(parsed) = socks5_parse_greeting(wire):
+            val rewire = socks5_build_greeting(parsed)
+            expect(_bytes_equal(rewire, wire)).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+# ============================================================================
+# Greeting response (server → client)
+# ============================================================================
+
+describe "SOCKS5 greeting response — build":
+
+    it "encodes NoAuth as 0x05 0x00":
+        val wire = socks5_build_greeting_response(Socks5Method.NoAuth)
+        expect(wire.len().to_i64()).to_equal(2)
+        expect(rt_bytes_u8_at(wire, 0)).to_equal(0x05i64)
+        expect(rt_bytes_u8_at(wire, 1)).to_equal(0x00i64)
+
+    it "encodes NoAcceptable as 0x05 0xFF":
+        val wire = socks5_build_greeting_response(Socks5Method.NoAcceptable)
+        expect(wire.len().to_i64()).to_equal(2)
+        expect(rt_bytes_u8_at(wire, 0)).to_equal(0x05i64)
+        expect(rt_bytes_u8_at(wire, 1)).to_equal(0xFFi64)
+
+describe "SOCKS5 greeting response — round-trip":
+
+    it "round-trips NoAuth byte-exact":
+        val wire = socks5_build_greeting_response(Socks5Method.NoAuth)
+        if val GreetingResponseResult.Ok(method) = socks5_parse_greeting_response(wire):
+            val rewire = socks5_build_greeting_response(method)
+            expect(_bytes_equal(rewire, wire)).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    it "round-trips NoAcceptable byte-exact":
+        val wire = socks5_build_greeting_response(Socks5Method.NoAcceptable)
+        if val GreetingResponseResult.Ok(method) = socks5_parse_greeting_response(wire):
+            val rewire = socks5_build_greeting_response(method)
+            expect(_bytes_equal(rewire, wire)).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+# ============================================================================
+# Connect request (client → server)
+# ============================================================================
+
+describe "SOCKS5 connect request — build":
+
+    it "encodes CONNECT IPv4 1.2.3.4:80 correctly":
+        # Expected: 0x05 0x01 0x00 0x01 0x01 0x02 0x03 0x04 0x00 0x50
+        val wire = socks5_build_request(
+            Socks5Cmd.Connect,
+            Socks5Atyp.Ipv4(addr: _ipv4_1234()),
+            80
+        )
+        val expected = _bv([
+            0x05i64, 0x01i64, 0x00i64, 0x01i64,
+            0x01i64, 0x02i64, 0x03i64, 0x04i64,
+            0x00i64, 0x50i64
+        ])
+        expect(wire.len().to_i64()).to_equal(10)
+        expect(_bytes_equal(wire, expected)).to_equal(true)
+
+    it "encodes CONNECT Domain 'example.com':443 correctly":
+        # Expected: 0x05 0x01 0x00 0x03 0x0B 'e'..'m' 0x01 0xBB
+        val wire = socks5_build_request(
+            Socks5Cmd.Connect,
+            Socks5Atyp.Domain(name: "example.com"),
+            443
+        )
+        # 4 prefix + 1 len + 11 domain + 2 port = 18 bytes
+        expect(wire.len().to_i64()).to_equal(18)
+        expect(rt_bytes_u8_at(wire, 0)).to_equal(0x05i64)
+        expect(rt_bytes_u8_at(wire, 1)).to_equal(0x01i64)
+        expect(rt_bytes_u8_at(wire, 2)).to_equal(0x00i64)
+        expect(rt_bytes_u8_at(wire, 3)).to_equal(0x03i64)
+        expect(rt_bytes_u8_at(wire, 4)).to_equal(0x0Bi64)   # len=11
+        # 'e' = 0x65
+        expect(rt_bytes_u8_at(wire, 5)).to_equal(0x65i64)
+        # port 443 = 0x01 0xBB
+        expect(rt_bytes_u8_at(wire, 16)).to_equal(0x01i64)
+        expect(rt_bytes_u8_at(wire, 17)).to_equal(0xBBi64)
+
+    it "encodes CONNECT IPv6 ::1:80 correctly":
+        # Expected: 0x05 0x01 0x00 0x04 + 15×0x00 + 0x01 + 0x00 0x50
+        val wire = socks5_build_request(
+            Socks5Cmd.Connect,
+            Socks5Atyp.Ipv6(addr: _ipv6_loopback()),
+            80
+        )
+        # 4 prefix + 16 addr + 2 port = 22 bytes
+        expect(wire.len().to_i64()).to_equal(22)
+        expect(rt_bytes_u8_at(wire, 3)).to_equal(0x04i64)   # ATYP=IPv6
+        # last addr byte = 0x01
+        expect(rt_bytes_u8_at(wire, 19)).to_equal(0x01i64)
+        # port 80 = 0x00 0x50
+        expect(rt_bytes_u8_at(wire, 20)).to_equal(0x00i64)
+        expect(rt_bytes_u8_at(wire, 21)).to_equal(0x50i64)
+
+describe "SOCKS5 connect request — round-trip":
+
+    it "round-trips CONNECT IPv4 byte-exact":
+        val wire = socks5_build_request(
+            Socks5Cmd.Connect,
+            Socks5Atyp.Ipv4(addr: _ipv4_1234()),
+            80
+        )
+        if val RequestResult.Ok(cmd, atyp, port) = socks5_parse_request(wire):
+            val rewire = socks5_build_request(cmd, atyp, port)
+            expect(_bytes_equal(rewire, wire)).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    it "round-trips CONNECT Domain byte-exact":
+        val wire = socks5_build_request(
+            Socks5Cmd.Connect,
+            Socks5Atyp.Domain(name: "example.com"),
+            443
+        )
+        if val RequestResult.Ok(cmd, atyp, port) = socks5_parse_request(wire):
+            val rewire = socks5_build_request(cmd, atyp, port)
+            expect(_bytes_equal(rewire, wire)).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    it "round-trips CONNECT IPv6 byte-exact":
+        val wire = socks5_build_request(
+            Socks5Cmd.Connect,
+            Socks5Atyp.Ipv6(addr: _ipv6_loopback()),
+            80
+        )
+        if val RequestResult.Ok(cmd, atyp, port) = socks5_parse_request(wire):
+            val rewire = socks5_build_request(cmd, atyp, port)
+            expect(_bytes_equal(rewire, wire)).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+# ============================================================================
+# Connect response (server → client)
+# ============================================================================
+
+describe "SOCKS5 connect response — build":
+
+    it "encodes success IPv4 0.0.0.0:0 correctly":
+        # Expected: 0x05 0x00 0x00 0x01 0x00 0x00 0x00 0x00 0x00 0x00
+        val wire = socks5_build_response(
+            Socks5Reply.Success,
+            Socks5Atyp.Ipv4(addr: _ipv4_zeros()),
+            0
+        )
+        val expected = _bv([
+            0x05i64, 0x00i64, 0x00i64, 0x01i64,
+            0x00i64, 0x00i64, 0x00i64, 0x00i64,
+            0x00i64, 0x00i64
+        ])
+        expect(wire.len().to_i64()).to_equal(10)
+        expect(_bytes_equal(wire, expected)).to_equal(true)
+
+describe "SOCKS5 connect response — round-trip":
+
+    it "round-trips success IPv4 byte-exact":
+        val wire = socks5_build_response(
+            Socks5Reply.Success,
+            Socks5Atyp.Ipv4(addr: _ipv4_zeros()),
+            0
+        )
+        if val ResponseResult.Ok(reply, atyp, port) = socks5_parse_response(wire):
+            val rewire = socks5_build_response(reply, atyp, port)
+            expect(_bytes_equal(rewire, wire)).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    it "round-trips GeneralFail Domain byte-exact":
+        val wire = socks5_build_response(
+            Socks5Reply.GeneralFail,
+            Socks5Atyp.Domain(name: "proxy.local"),
+            0
+        )
+        if val ResponseResult.Ok(reply, atyp, port) = socks5_parse_response(wire):
+            val rewire = socks5_build_response(reply, atyp, port)
+            expect(_bytes_equal(rewire, wire)).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+# ============================================================================
+# UserPass sub-negotiation (RFC 1929)
+# ============================================================================
+
+describe "SOCKS5 userpass request — build":
+
+    it "encodes user='user' pass='pass' correctly":
+        # Expected: 0x01 0x04 'u' 's' 'e' 'r' 0x04 'p' 'a' 's' 's'
+        val wire = socks5_userpass_request("user", "pass")
+        val expected = _bv([
+            0x01i64, 0x04i64,
+            0x75i64, 0x73i64, 0x65i64, 0x72i64,  # 'user'
+            0x04i64,
+            0x70i64, 0x61i64, 0x73i64, 0x73i64   # 'pass'
+        ])
+        expect(wire.len().to_i64()).to_equal(11)
+        expect(_bytes_equal(wire, expected)).to_equal(true)
+
+describe "SOCKS5 userpass response — parse":
+
+    it "parses success response (0x01 0x00) as Ok(true)":
+        val wire = _bv([0x01i64, 0x00i64])
+        if val UserPassResponseResult.Ok(success) = socks5_userpass_parse_response(wire):
+            expect(success).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    it "parses rejection response (0x01 0x01) as Ok(false)":
+        val wire = _bv([0x01i64, 0x01i64])
+        if val UserPassResponseResult.Ok(success) = socks5_userpass_parse_response(wire):
+            expect(success).to_equal(false)
+        else:
+            expect(false).to_equal(true)
+
+    it "rejects truncated userpass response":
+        val wire = _bv([0x01i64])
+        if val UserPassResponseResult.Err(reason) = socks5_userpass_parse_response(wire):
+            if val Socks5Error.UnexpectedEnd = reason:
+                expect(true).to_equal(true)
+            else:
+                expect(false).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+# ============================================================================
+# Error cases
+# ============================================================================
+
+describe "SOCKS5 error cases":
+
+    it "parse_request rejects invalid version":
+        val wire = _bv([0x04i64, 0x01i64, 0x00i64, 0x01i64, 0x01i64, 0x02i64, 0x03i64, 0x04i64, 0x00i64, 0x50i64])
+        if val RequestResult.Err(reason) = socks5_parse_request(wire):
+            if val Socks5Error.InvalidVersion(got) = reason:
+                expect(got).to_equal(0x04i64)
+            else:
+                expect(false).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    it "parse_request rejects invalid ATYP":
+        # 0x05 0x01 0x00 0x05(invalid ATYP) 0x01 0x02 0x03 0x04 0x00 0x50
+        val wire = _bv([0x05i64, 0x01i64, 0x00i64, 0x05i64, 0x01i64, 0x02i64, 0x03i64, 0x04i64, 0x00i64, 0x50i64])
+        if val RequestResult.Err(reason) = socks5_parse_request(wire):
+            if val Socks5Error.InvalidAtyp(got) = reason:
+                expect(got).to_equal(0x05i64)
+            else:
+                expect(false).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    it "parse_request rejects truncated input":
+        val wire = _bv([0x05i64, 0x01i64, 0x00i64])
+        if val RequestResult.Err(reason) = socks5_parse_request(wire):
+            if val Socks5Error.UnexpectedEnd = reason:
+                expect(true).to_equal(true)
+            else:
+                expect(false).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    it "parse_response rejects invalid version":
+        val wire = _bv([0x04i64, 0x00i64, 0x00i64, 0x01i64, 0x00i64, 0x00i64, 0x00i64, 0x00i64, 0x00i64, 0x00i64])
+        if val ResponseResult.Err(reason) = socks5_parse_response(wire):
+            if val Socks5Error.InvalidVersion(got) = reason:
+                expect(got).to_equal(0x04i64)
+            else:
+                expect(false).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    it "parse_response rejects truncated input":
+        val wire = _bv([0x05i64, 0x00i64])
+        if val ResponseResult.Err(reason) = socks5_parse_response(wire):
+            if val Socks5Error.UnexpectedEnd = reason:
+                expect(true).to_equal(true)
+            else:
+                expect(false).to_equal(true)
+        else:
+            expect(false).to_equal(true)

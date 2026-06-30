@@ -1,0 +1,156 @@
+class ClockDomain:
+    name: text
+    reset_kind: text
+    reset_active_high: bool
+    is_async_reset: bool
+    frequency_mhz: i32
+
+    me has_reset() -> bool:
+        return self.reset_kind != "none"
+
+    me is_sync_reset() -> bool:
+        return self.reset_kind == "sync"
+
+    me is_async_reset_check() -> bool:
+        return self.is_async_reset
+
+    me sensitivity_list() -> text:
+        if self.has_reset():
+            return self.name + ", " + self.name + "_reset"
+        return self.name
+
+    static fn default_domain() -> ClockDomain:
+        return ClockDomain { name: "clk", reset_kind: "sync", reset_active_high: true, is_async_reset: false, frequency_mhz: 100 }
+
+    static fn no_reset(name: text, freq: i32) -> ClockDomain:
+        return ClockDomain { name: name, reset_kind: "none", reset_active_high: false, is_async_reset: false, frequency_mhz: freq }
+
+    static fn async_reset(name: text, freq: i32) -> ClockDomain:
+        return ClockDomain { name: name, reset_kind: "async", reset_active_high: true, is_async_reset: true, frequency_mhz: freq }
+
+
+class PortBundle:
+    bundle_name: text
+    port_count: i32
+    p0_name: text
+    p0_dir: text
+    p0_width: i32
+    p1_name: text
+    p1_dir: text
+    p1_width: i32
+    p2_name: text
+    p2_dir: text
+    p2_width: i32
+    p3_name: text
+    p3_dir: text
+    p3_width: i32
+
+    me has_collision() -> bool:
+        if self.port_count >= 2:
+            if self.p0_name == self.p1_name:
+                return true
+        if self.port_count >= 3:
+            if self.p0_name == self.p2_name:
+                return true
+            if self.p1_name == self.p2_name:
+                return true
+        if self.port_count >= 4:
+            if self.p0_name == self.p3_name:
+                return true
+            if self.p1_name == self.p3_name:
+                return true
+            if self.p2_name == self.p3_name:
+                return true
+        return false
+
+    me input_count() -> i32:
+        var count = 0
+        if self.port_count >= 1:
+            if self.p0_dir == "in":
+                count = count + 1
+        if self.port_count >= 2:
+            if self.p1_dir == "in":
+                count = count + 1
+        if self.port_count >= 3:
+            if self.p2_dir == "in":
+                count = count + 1
+        if self.port_count >= 4:
+            if self.p3_dir == "in":
+                count = count + 1
+        return count
+
+    me output_count() -> i32:
+        var count = 0
+        if self.port_count >= 1:
+            if self.p0_dir == "out":
+                count = count + 1
+        if self.port_count >= 2:
+            if self.p1_dir == "out":
+                count = count + 1
+        if self.port_count >= 3:
+            if self.p2_dir == "out":
+                count = count + 1
+        if self.port_count >= 4:
+            if self.p3_dir == "out":
+                count = count + 1
+        return count
+
+    static fn empty(name: text) -> PortBundle:
+        return PortBundle { bundle_name: name, port_count: 0, p0_name: "", p0_dir: "", p0_width: 0, p1_name: "", p1_dir: "", p1_width: 0, p2_name: "", p2_dir: "", p2_width: 0, p3_name: "", p3_dir: "", p3_width: 0 }
+
+    static fn imem_bundle() -> PortBundle:
+        return PortBundle { bundle_name: "imem", port_count: 3, p0_name: "imem_addr", p0_dir: "out", p0_width: 32, p1_name: "imem_data", p1_dir: "in", p1_width: 32, p2_name: "imem_valid", p2_dir: "in", p2_width: 1, p3_name: "", p3_dir: "", p3_width: 0 }
+
+    static fn dmem_bundle() -> PortBundle:
+        return PortBundle { bundle_name: "dmem", port_count: 4, p0_name: "dmem_addr", p0_dir: "out", p0_width: 32, p1_name: "dmem_wdata", p1_dir: "out", p1_width: 32, p2_name: "dmem_rdata", p2_dir: "in", p2_width: 32, p3_name: "dmem_we", p3_dir: "out", p3_width: 1 }
+
+
+class TestbenchSpec:
+    entity_name: text
+    clock_period_ns: i32
+    reset_cycles: i32
+    sim_cycles: i32
+    has_assertions: bool
+    expected_result: text
+
+    me total_sim_ns() -> i32:
+        return self.sim_cycles * self.clock_period_ns
+
+    me has_expected() -> bool:
+        return self.expected_result != ""
+
+    static fn basic(entity: text, cycles: i32) -> TestbenchSpec:
+        return TestbenchSpec { entity_name: entity, clock_period_ns: 10, reset_cycles: 2, sim_cycles: cycles, has_assertions: false, expected_result: "" }
+
+    static fn with_check(entity: text, cycles: i32, expected: text) -> TestbenchSpec:
+        return TestbenchSpec { entity_name: entity, clock_period_ns: 10, reset_cycles: 2, sim_cycles: cycles, has_assertions: true, expected_result: expected }
+
+
+class SimulationResult:
+    entity_name: text
+    passed: bool
+    cycles_run: i32
+    failure_cycle: i32
+    failure_signal: text
+    ghdl_exit_code: i32
+
+    me is_pass() -> bool:
+        return self.passed and self.ghdl_exit_code == 0
+
+    me has_failure() -> bool:
+        return self.passed == false
+
+    me failure_message() -> text:
+        if self.has_failure():
+            return "cycle " + self.failure_cycle.to_text() + ": " + self.failure_signal
+        return "none"
+
+    static fn pass_result(entity: text, cycles: i32) -> SimulationResult:
+        return SimulationResult { entity_name: entity, passed: true, cycles_run: cycles, failure_cycle: 0, failure_signal: "", ghdl_exit_code: 0 }
+
+    static fn fail_result(entity: text, cycle: i32, signal: text) -> SimulationResult:
+        return SimulationResult { entity_name: entity, passed: false, cycles_run: cycle, failure_cycle: cycle, failure_signal: signal, ghdl_exit_code: 1 }
+
+
+fn main():
+    print("vhdl_clock_ports loaded")

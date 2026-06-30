@@ -1,0 +1,115 @@
+# @cover src/app/ui.render/capability.spl 80%
+"""
+# UI Renderer Capability Boundary
+
+## Overview
+
+Verifies that HTML renderer and CSS provider implementation modules are exposed
+through explicit renderer capabilities. The capability registry itself must not
+import implementation modules, so non-HTML and TUI closures can inspect the
+boundary without retaining HTML/CSS code.
+
+## Examples
+
+The HTML widget renderer declares `html_renderer`, CSS declares `css_provider`,
+and both are lazy capabilities. TUI rendering declares `tui_renderer` as a
+default-autoload capability because it is part of the base terminal lane.
+
+**Requirements:** doc/02_requirements/feature/low_dependency_ui_dynsmf.md
+**Requirements:** doc/02_requirements/nfr/low_dependency_ui_dynsmf.md
+**Traceability:** REQ-002, REQ-003, REQ-009, NFR-001, NFR-006
+**Plan:** doc/03_plan/sys_test/low_dependency_ui_dynsmf_dependency_gate.md
+**Design:** doc/05_design/low_dependency_ui_dynsmf.md
+**Research:** doc/01_research/local/low_dependency_ui_dynsmf.md
+"""
+
+use std.spec
+use std.io_runtime
+use app.ui.dependency_closure_gate.{UiModuleSource, ui_dependency_extract_imports, ui_dependency_imports_module}
+use app.ui.render.capability.{
+    renderer_capability_html_widgets,
+    renderer_capability_css_provider,
+    renderer_capability_tui_widgets,
+    renderer_capability_allows_module,
+    renderer_capability_is_lazy
+}
+use app.ui.render.html_widgets.{html_widget_renderer_capability}
+use app.ui.render.css.{css_provider_capability, css_component_known, css_for_component, css_for_components}
+
+fn capability_source(path: text) -> UiModuleSource:
+    UiModuleSource(name: "app.ui.render.capability", source: rt_file_read_text(path) ?? "")
+
+fn contains_text(value: text, needle: text) -> bool:
+    value.split(needle).len() > 1
+
+fn adapter_source(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+
+fn uses_css_selector_only(source: text) -> bool:
+    ui_dependency_imports_module(ui_dependency_extract_imports(source), "app.ui.render.css") and
+        contains_text(source, "css_for_components") and
+        not contains_text(source, "card_css") and
+        not contains_text(source, "grid_css") and
+        not contains_text(source, "badge_css") and
+        not contains_text(source, "metric_css") and
+        not contains_text(source, "table_css") and
+        not contains_text(source, "progress_css")
+
+describe "UI renderer capability boundary":
+    it "keeps the capability registry free of implementation imports":
+        val source = capability_source("src/app/ui.render/capability.spl")
+        val imports = ui_dependency_extract_imports(source.source)
+        expect(ui_dependency_imports_module(imports, "app.ui.render.html_widgets")).to_equal(false)
+        expect(ui_dependency_imports_module(imports, "app.ui.render.css")).to_equal(false)
+
+    it "declares HTML widgets as a lazy renderer capability":
+        val cap = html_widget_renderer_capability()
+        expect(cap.id).to_equal("html_renderer")
+        expect(cap.implementation_module).to_equal("app.ui.render.html_widgets")
+        expect(cap.artifact_id).to_equal("web_renderer")
+        expect(renderer_capability_is_lazy(cap)).to_equal(true)
+        expect(renderer_capability_allows_module(cap, "app.ui.render.html_widgets")).to_equal(true)
+
+    it "declares CSS provider as a lazy renderer capability":
+        val cap = css_provider_capability()
+        expect(cap.id).to_equal("css_provider")
+        expect(cap.implementation_module).to_equal("app.ui.render.css")
+        expect(cap.artifact_id).to_equal("web_renderer")
+        expect(renderer_capability_is_lazy(cap)).to_equal(true)
+        expect(renderer_capability_allows_module(cap, "app.ui.render.css.theme")).to_equal(true)
+
+    it "keeps TUI renderer as the base default capability":
+        val cap = renderer_capability_tui_widgets()
+        expect(cap.id).to_equal("tui_renderer")
+        expect(cap.implementation_module).to_equal("app.ui.render.tui_widgets")
+        expect(cap.artifact_id).to_equal("tui_renderer")
+        expect(cap.default_autoload).to_equal(true)
+        expect(renderer_capability_allows_module(cap, "app.ui.render.html_widgets")).to_equal(false)
+
+    it "selects CSS only for requested component styles":
+        expect(css_component_known("card")).to_equal(true)
+        expect(css_component_known("not-a-component")).to_equal(false)
+        val card_only = css_for_components(["card"])
+        expect(card_only).to_contain(".card")
+        expect(contains_text(card_only, "table {")).to_equal(false)
+        expect(contains_text(card_only, ".progress")).to_equal(false)
+
+    it "deduplicates component CSS selections and skips unknown components":
+        val selected = css_for_components(["card", "unknown", "card", "progress"])
+        expect(selected).to_contain(".card")
+        expect(selected).to_contain(".progress")
+        expect(css_for_component("unknown")).to_equal("")
+        val once = css_for_components(["card"])
+        expect(selected.len()).to_equal(once.len() + css_for_component("progress").len())
+
+    it "keeps render adapters on component-scoped CSS selection":
+        expect(uses_css_selector_only(adapter_source("src/app/test/render_adapter.spl"))).to_equal(true)
+        expect(uses_css_selector_only(adapter_source("src/app/repl/render_adapter.spl"))).to_equal(true)
+        expect(uses_css_selector_only(adapter_source("src/app/search/render_adapter.spl"))).to_equal(true)
+        expect(uses_css_selector_only(adapter_source("src/app/sim/render_adapter.spl"))).to_equal(true)
+        expect(uses_css_selector_only(adapter_source("src/app/tree/render_adapter.spl"))).to_equal(true)
+        expect(uses_css_selector_only(adapter_source("src/app/terminal/render_adapter.spl"))).to_equal(true)
+        expect(uses_css_selector_only(adapter_source("src/app/jupyter_kernel/render_adapter.spl"))).to_equal(true)
+        expect(uses_css_selector_only(adapter_source("src/lib/nogc_async_mut/lsp/render_adapter.spl"))).to_equal(true)
+        expect(uses_css_selector_only(adapter_source("src/lib/gc_async_mut/lsp/render_adapter.spl"))).to_equal(true)
+        expect(uses_css_selector_only(adapter_source("src/lib/nogc_sync_mut/lsp/render_adapter.spl"))).to_equal(true)
