@@ -27,7 +27,7 @@ nvme_firmware_simulation_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 16 | 16 | 0 | 0 |
+| 17 | 17 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -361,6 +361,29 @@ expect(out).to_contain("RAIN OK")
 
 </details>
 
+#### throttles under sustained thermal load and recovers when cool (gap-closure P7)
+
+- Drive sustained load until the device throttles and raises the SMART critical warning, then cool it
+   - Expected: code equals `0`
+- The throttle engages over the threshold and releases once the device cools — no crash
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Drive sustained load until the device throttles and raises the SMART critical warning, then cool it")
+val (out, err, code) = _run(FW + "/thermal_check.spl")
+expect(code).to_equal(0)
+step("The throttle engages over the threshold and releases once the device cools — no crash")
+expect(out).to_contain("THERMAL OK")
+```
+
+</details>
+
 ### NVMe firmware: Lean4 formal verification of the FTL invariants
 
 #### verifies the allocator and GC-reserve safety (Alloc.lean)
@@ -493,8 +516,8 @@ expect(out).to_contain("LEAN_OK")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 16 |
-| Active scenarios | 16 |
+| Total scenarios | 17 |
+| Active scenarios | 17 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

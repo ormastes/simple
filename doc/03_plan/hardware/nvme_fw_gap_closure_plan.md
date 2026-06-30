@@ -198,7 +198,17 @@ single-owner-per-mutable-resource (research §6 rule). No preemption (cooperativ
 **Silicon ceiling.** True multi-core memory ordering / cache coherence is not modeled
 (cooperative single-thread token model).
 
-## P7 — Power states + thermal throttling  *(G7)*
+## P7 — Power states + thermal throttling  *(G7)*  — ✅ DONE (2026-06-30)
+
+> Landed: `fw/power_thermal.spl` — NVMe power states (Set/Get Features FEAT_POWER_MGMT, invalid
+> rejected) + a Newtonian thermal model (heat ∝ activity scaled by power state, cooling ∝ excess
+> over ambient → equilibrium under load, decay when idle) that latches a throttle over the
+> threshold, raises the SMART critical-warning bit over the critical threshold, and counts
+> AER-reportable throttle events. Tested by `power_thermal_selftest` (`test_fw`) and
+> `thermal_check.spl` (sustained load → throttle + critical warning → cool-down recovery), the
+> latter gated in the system spec. No Lean — a threshold model has no deeper falsifiable
+> invariant. The heat/cool coefficients are an explicit calibration knob (real silicon needs
+> measured tuning).
 
 **Goal.** NVMe power states (PSDs via Get/Set Features) + a thermal model that throttles
 throughput over a threshold and reports composite temperature in SMART.
