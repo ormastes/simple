@@ -86,7 +86,12 @@ pub(super) fn eval_control_expr(
                     }
                 }
                 match flow {
-                    Control::Return(v) => return Ok(Some(v)),
+                    // A `return` inside an if/match EXPRESSION arm must propagate out of the
+                                        // function, not become the expression's value. Reuse the `?`-operator
+                                        // early-return channel (TryError), which is already caught at every
+                                        // function/method/lambda/class boundary. See bug
+                                        // interp_return_in_match_expr_swallowed_2026-06-30.
+                                        Control::Return(v) => return Err(CompileError::TryError(Box::new(v))),
                     _ => last_val.unwrap_or(Value::Nil),
                 }
             } else {
@@ -182,7 +187,12 @@ pub(super) fn eval_control_expr(
                                         Control::Next => {
                                             result = val;
                                         }
-                                        Control::Return(v) => return Ok(Some(v)),
+                                        // A `return` inside an if/match EXPRESSION arm must propagate out of the
+                                        // function, not become the expression's value. Reuse the `?`-operator
+                                        // early-return channel (TryError), which is already caught at every
+                                        // function/method/lambda/class boundary. See bug
+                                        // interp_return_in_match_expr_swallowed_2026-06-30.
+                                        Control::Return(v) => return Err(CompileError::TryError(Box::new(v))),
                                         Control::Break(..) => return Ok(Some(Value::Nil)),
                                         Control::Continue(_) => break,
                                     }
@@ -201,7 +211,12 @@ pub(super) fn eval_control_expr(
                                         Control::Next => {
                                             result = last_val.unwrap_or(Value::Nil);
                                         }
-                                        Control::Return(v) => return Ok(Some(v)),
+                                        // A `return` inside an if/match EXPRESSION arm must propagate out of the
+                                        // function, not become the expression's value. Reuse the `?`-operator
+                                        // early-return channel (TryError), which is already caught at every
+                                        // function/method/lambda/class boundary. See bug
+                                        // interp_return_in_match_expr_swallowed_2026-06-30.
+                                        Control::Return(v) => return Err(CompileError::TryError(Box::new(v))),
                                         Control::Break(..) => return Ok(Some(Value::Nil)),
                                         Control::Continue(_) => break,
                                     }
@@ -212,7 +227,12 @@ pub(super) fn eval_control_expr(
                         }
 
                         match exec_node(stmt, &mut arm_env, functions, classes, enums, impl_methods)? {
-                            Control::Return(v) => return Ok(Some(v)),
+                            // A `return` inside an if/match EXPRESSION arm must propagate out of the
+                                        // function, not become the expression's value. Reuse the `?`-operator
+                                        // early-return channel (TryError), which is already caught at every
+                                        // function/method/lambda/class boundary. See bug
+                                        // interp_return_in_match_expr_swallowed_2026-06-30.
+                                        Control::Return(v) => return Err(CompileError::TryError(Box::new(v))),
                             Control::Break(..) => return Ok(Some(Value::Nil)),
                             Control::Continue(_) => break,
                             Control::Next => {
