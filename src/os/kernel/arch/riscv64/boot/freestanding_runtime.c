@@ -388,21 +388,19 @@ __attribute__((weak)) spl_i64 rt_value_as_int(spl_i64 value) {
     return rt_index_arg(value);
 }
 
-/* Return the byte at `index` of a string as a tagged int; nil on out of bounds
- * (matches rt_array_get's bounds + negative-index convention). */
+/* Return the character at `index` as a 1-character STRING (nil on out-of-bounds
+ * or negative index). char_at is the string-returning contract; the int byte
+ * value is the separate rt_string_char_code_at. Matches the canonical
+ * core_string.spl rt_string_char_at and the sibling examples baremetal_stubs.c:
+ * byte-indexed, negative is out of bounds (no Python-style wrap — that is
+ * subscript/rt_index_get's job). */
 __attribute__((weak)) spl_i64 rt_string_char_at(spl_i64 string_value, spl_i64 index_value) {
     RtString *string = rt_as_string(string_value);
     spl_i64 index = rt_index_arg(index_value);
-    if (!string) {
+    if (!string || index < 0 || (spl_u64)index >= string->len) {
         return rt_nil();
     }
-    if (index < 0) {
-        index = (spl_i64)string->len + index;
-    }
-    if (index < 0 || (spl_u64)index >= string->len) {
-        return rt_nil();
-    }
-    return rt_int((spl_i64)(spl_u8)string->data[index]);
+    return rt_string_new((spl_i64)(spl_u64)&string->data[index], 1);
 }
 
 /* Remove and return the last element (already a tagged value); nil if empty. */
