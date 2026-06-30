@@ -9,11 +9,15 @@ Built layer-by-layer with parallel agents (Sonnet builders + Opus review gates),
 > 64 pages = 4096 pages, 3072 surfaced LBAs) and a one-byte-per-page payload stand in for a
 > real device so the entire stack runs and self-verifies on the host.
 
+> A bare-metal **rv32** re-expression (the sibling `../fw_rv32/entry.spl`, gap-closure P9) exists
+> but is build-blocked in this environment (rv32 LLVM native build broken; boot not observed), so
+> the "simulation only" scope above is unchanged.
+
 ## Run it
 
 ```bash
 bin/simple run examples/09_embedded/simpleos_nvme_fw/fw/sim_main.spl   # single-queue end-to-end demo
-bin/simple run examples/09_embedded/simpleos_nvme_fw/fw/test_fw.spl    # full self-test suite (300 checks)
+bin/simple run examples/09_embedded/simpleos_nvme_fw/fw/test_fw.spl    # full self-test suite (526 checks)
 bin/simple run examples/09_embedded/simpleos_nvme_fw/fw/nvme_main.spl  # NVMe admin/multi-IO-queue controller e2e
 ```
 
@@ -23,7 +27,7 @@ Standalone production-hardening regressions and proofs:
 bin/simple run examples/09_embedded/simpleos_nvme_fw/fw/gc_safety_check.spl   # GC data-loss guard + no write-cliff
 bin/simple run examples/09_embedded/simpleos_nvme_fw/fw/durability_check.spl  # power-loss recovery + WAL overflow
 bin/simple run examples/09_embedded/simpleos_nvme_fw/fw/wear_scrub_check.spl  # static wear-leveling + read-disturb scrub
-lean examples/09_embedded/simpleos_nvme_fw/fw/proofs/Alloc.lean              # + Recover.lean, Gc.lean (req 6)
+lean examples/09_embedded/simpleos_nvme_fw/fw/proofs/Alloc.lean              # + Recover, Gc, Hooks, Fmc, Rain .lean (6 proofs, req 6)
 ```
 
 > **Production-hardening status & acceptance bar:** `fw/PRODUCTION_STATUS.md` — production-grade
@@ -39,6 +43,11 @@ trim → **power-fail + recovery** (committed state survives, trim stays trimmed
 ## Architecture (MDSOC+ : layered domains)
 
 ```
+   CTRL ┌───────────────────────┐   nvme_admin (Identify, Create/Delete IO SQ/CQ,
+        │ admin + IO queue sets │   Get/Set Features, Get Log Page) · nvme_qset
+        │ + power / thermal     │   (round-robin) · nvme_controller · power_thermal
+        └───────────┬───────────┘   (live composite temp → SMART, gap-closure P7)
+                    │
             host NVMe SQ/CQ rings
                     │
    HIL  ┌───────────▼───────────┐   hil_queue · hil_command · fw_pool · hil
@@ -48,11 +57,11 @@ trim → **power-fail + recovery** (committed state survives, trim stays trimmed
    FTL  ┌───────────▼───────────┐   ftl_map (DFTL write-back cache) · ftl_band
         │ L2P map · log alloc · │   (log-structured allocator + valid bitmap) ·
         │ WAL · GC · recovery   │   ftl_journal (WAL+checkpoint+A/B superblock) ·
-        └───────────┬───────────┘   ftl_gc (wear victim) · ftl (write/read/trim/recover)
-   FIL  ┌───────────▼───────────┐   fil_nand (sim NAND + OOB) · fil_ecc · fil_badblock
-        │ program/read/erase +  │   · fil (ECC-verified reads, bad-block retirement)
-        │ ECC + bad-block remap │
-        └───────────────────────┘
+        └───────────┬───────────┘   ftl_gc (wear victim) · ftl (write/read/trim/recover) · rain (XOR-parity channel rebuild)
+   FIL  ┌───────────▼───────────┐   fil_nand (sim NAND + OOB) · fil_nand_device (ONFI NAND
+        │ program/read/erase +  │   device) · fil_fmc (every op via FMC register handshake;
+        │ ECC + bad-block remap │   owns the NAND device) · fil_ecc · fil_badblock
+        └───────────────────────┘   · fil (ECC-verified reads, bad-block retirement)
    firmware.spl — cooperative reactor wrapping the stack (service cycle = drain queues +
    background GC below the free-block watermark; checkpoint; power-cycle).
 ```
@@ -75,11 +84,16 @@ trim → **power-fail + recovery** (committed state survives, trim stays trimmed
 | Layer | Modules |
 |-------|---------|
 | Interface | `nvme_types` (constants, `Handle`, `NvmeCmd`/`NvmeCpl`, geometry, helpers) |
-| **FIL** | `fil_nand`, `fil_nand_device` (ONFI NAND *device*), `fil_fmc` (flash-memory-controller register driver, gap-closure P1), `fil_scheduler` (multi-channel request scheduler, gap-closure P2), `fil_ecc`, `fil_badblock`, `fil` |
+| **FIL** | `fil_nand`, `fil_nand_device` (ONFI NAND *device*), `fil_fmc` (flash-memory-controller register driver, gap-closure P1 — **wired**: every program/read/erase routes through the FMC register handshake; the `Fmc` owns `fil_nand_device`), `fil_scheduler` (multi-channel request scheduler, gap-closure P2 — **shelf**: verified model, not load-bearing; the single-threaded host sim cannot exhibit channel-level parallelism), `fil_ecc`, `fil_badblock`, `fil` |
 | **FTL** | `ftl_map`, `ftl_band`, `ftl_journal`, `ftl_gc`, `ftl`, `rain` (XOR-parity die/channel resilience, gap-closure P8 — **wired**: the FTL seals parity and rebuilds a failed channel in place via `rain_seal`/`rain_recover_channel`) |
 | **HIL + core** | `hil_queue`, `hil_command`, `fw_pool`, `hil`, `firmware` |
 | **NVMe controller front end** | `nvme_admin_types`, `nvme_admin` (admin queue: Identify, Create/Delete IO SQ/CQ, Get/Set Features, Get Log Page), `nvme_qset` (multi IO queue, round-robin), `nvme_controller`, `power_thermal` (power states + thermal throttling, gap-closure P7 — **wired**: the controller IO path drives it and SMART reports its live composite temperature) |
-| Tests | `test_fw` (all self-tests, 300 checks), `sim_main` (single-queue e2e), `nvme_main` (controller e2e) |
+| Tests | `test_fw` (all self-tests, 526 checks), `sim_main` (single-queue e2e), `nvme_main` (controller e2e) |
+
+> **Integration status (wired vs. shelf).** The authoritative wired-vs-shelf accounting is
+> `doc/03_plan/hardware/nvme_fw_gap_closure_plan.md` § "Integration status — wired vs. shelf" —
+> P1 `fil_fmc`, P7 `power_thermal`, P8 `rain` **wired**; P2 `fil_scheduler` done-but-**shelf**;
+> P3–P6 not started; P9 (`../fw_rv32/entry.spl`) build-blocked.
 
 ## Requirements coverage (from the research report)
 

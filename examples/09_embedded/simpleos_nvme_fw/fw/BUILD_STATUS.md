@@ -6,7 +6,9 @@ commit → rebase onto origin/main (adds-only) → non-force SSH push.
 
 ## Done (run-green, on origin/main)
 - `nvme_types.spl` — frozen shared interface (constants, Handle, NvmeCmd/Cpl, helpers, expect_eq).
-- **FIL complete**: `fil_nand` (sim NAND), `fil_ecc`, `fil_badblock`, **`fil.spl`** (NAND+ECC+bad-block remap, page API for FTL; `FilRead{data,lba,seq,code}`).
+- **FIL complete**: `fil_nand` (sim NAND), `fil_ecc`, `fil_badblock`, `fil_fmc` (P1 — wired into FIL),
+  `fil_scheduler` (P2 — channel scheduler, done-but-shelf), **`fil.spl`** (NAND+ECC+bad-block remap,
+  page API for FTL; `FilRead{data,lba,seq,code}`).
 - **FTL leaves**: `ftl_map` (DFTL write-back cache), `ftl_band` (log allocator + valid bitmap), `ftl_journal` (WAL+checkpoint+A/B superblock).
 - **HIL+core leaves**: `hil_queue` (SQ/CQ rings), `hil_command` (decode/validate), `fw_pool` (gen-handle task pool; accessors cid/lba/data/status/old_ppn/new_ppn/seq/phase).
 - `test_leaves.spl` runs all 9 leaf self-tests (176 assertions). `CONVENTIONS.md`, bug docs.
@@ -22,8 +24,8 @@ commit → rebase onto origin/main (adds-only) → non-force SSH push.
 
 ## Integration — COMPLETE (run-green, end-to-end verified, on origin/main)
 
-All layers implemented and verified. `test_fw.spl` = **295 self-test assertions** across 22
-modules; `sim_main.spl` = full single-queue end-to-end (128 writes → read-back → overwrite/GC →
+All layers implemented and verified. `test_fw.spl` now emits **526 `PASS:` self-test assertions**
+(gate name `ALL FIRMWARE SELF-TESTS PASS`); `sim_main.spl` = full single-queue end-to-end (128 writes → read-back → overwrite/GC →
 trim → power-fail + recovery); `nvme_main.spl` = the admin-driven controller e2e (27 asserts) —
 all green via `bin/simple run`.
 
@@ -67,19 +69,25 @@ The full-controller layer, on top of the FTL/FIL stack (legacy single-queue
 **The FIL runs on the ONFI device** (plan phase E3, done): `fil.spl` composes `NandDevice` (not the
 behavioural `fil_nand.Nand`), so every write/read/GC-erase/recovery-OOB-scan in `sim_main` and
 `nvme_main` goes through the real ONFI handshake. `fil_ecc` keeps the FIL-level ECC (the device
-reports the injected bit-flip count; FIL decides OK/FIXED/FAIL). 300 self-test assertions green.
+reports the injected bit-flip count; FIL decides OK/FIXED/FAIL). 526 `PASS:` self-test assertions
+green (gate `ALL FIRMWARE SELF-TESTS PASS`).
 
 Scope note (explicit): "full NVMe SSD fw" here = the host-runnable simulation (run-green).
-Bare-metal **rv32** boot of *this Simple firmware* is the no-alloc follow-up (`[i64]`/`.push`
-needs a heap); a self-contained C NAND/FTL demo already boots on `qemu-system-riscv32 -bios none`
-(`ALL RV32 NAND CHECKS PASS`) as current proof of the toolchain + boot path.
+P9 — bare-metal **rv32** boot of *this Simple firmware*: `fw_rv32/entry.spl` is written (an
+array-free scalar re-expression of the RAIN reconstruct), `bin/simple check`-clean and
+host-verified. But the rv32 LLVM native build is environmentally broken here — it exits 255
+silently with no diagnostic and no ELF, and the proven full-OS recipe (`--entry
+src/os/kernel/arch/riscv32/boot.spl`) fails identically; the prebuilt
+`build/os/simpleos_riscv32.elf` is stale, so the boot was NOT observed. **P9 is BUILD-BLOCKED**
+(not done). See `doc/08_tracking/bug/native_build_rv32_baremetal_silent_255_2026-06-30.md`.
 
 ## Production hardening — DONE (run-green, on origin/main)
 
 See `PRODUCTION_STATUS.md` for the acceptance bar. Landed since the initial build:
 - **Data-path correctness**: GC data-loss guard (a victim is erased only after every live page
   is relocated), a GC scratch reserve eliminating the write-cliff, and no silent journal-record
-  drop on WAL overflow. Regressions: `gc_safety_check.spl`, `durability_check.spl`.
+  drop on WAL overflow. Regressions: `gc_safety_check.spl`, `durability_check.spl`,
+  `thermal_check.spl`, `rain_ftl_check.spl`.
 - **Faithful durability**: power loss wipes all volatile DRAM (map cache + band bitmap); recovery
   replays the journal onto the flash-resident L2P, rebuilds the band, and re-applies the
   persistent bad-block table.
@@ -87,6 +95,11 @@ See `PRODUCTION_STATUS.md` for the acceptance bar. Landed since the initial buil
   mandatory admin set (Abort, Async Event Request, Format NVM, Firmware Download/Commit).
 - **Media management**: static wear-leveling (`wear_level_once`) + read-disturb scrub (`scrub_once`).
 - **Health**: SMART wired to real activity (wear, spare, media errors, unsafe shutdowns) + error log.
+- **Live thermal (P7) — WIRED**: `pt: PowerThermal` field ticked in `process_one_io` on every
+  program/read; `do_get_log(LOG_SMART)` reports the **live composite temperature** and ORs the
+  thermal critical-warning bit — replacing the former hardcoded `temperature: 313`. Proven by
+  `thermal_check.spl` (gated `THERMAL OK`), `power_thermal_selftest`, and two
+  `nvme_controller_selftest` thermal asserts.
 - **Formal (req 6) — DONE**: `proofs/{Alloc,Recover,Gc}.lean` (`lean`-checked).
 - **Policy hooks (req 7) — DONE**: sandboxed runtime policy hooks — `hooks.spl` registry
   (GC-score / QoS / hot-cold / telemetry) + `sandbox.spl` install gate (forbidden
@@ -94,7 +107,20 @@ See `PRODUCTION_STATUS.md` for the acceptance bar. Landed since the initial buil
   FTL GC victim selection, which only asks the hook to **score** its own CLOSED candidates (the
   hook never names a block). Tested by `policy_hooks_check.spl` + `hooks_selftest`/`sandbox_selftest`
   and proven by `proofs/Hooks.lean`.
+- **RAIN (req 8) — DONE**: `rain_parity` field + `rain_seal()`/`rain_recover_channel()` wired into
+  the live `Ftl` (additive — existing write/read/GC/recovery untouched). `rain_seal` snapshots
+  per-stripe XOR parity; `rain_recover_channel` rebuilds a corrupted/failed channel in place
+  (recovered = parity XOR survivors; erase the failed block; reprogram its live pages; L2P
+  unchanged). Proven by `rain_ftl_check.spl` (256 LBAs survive a whole-channel uncorrectable
+  failure, gated `RAIN-FTL OK`), the standalone `rain_check.spl` (`RAIN OK`), `ftl_rain_selftest`,
+  and `proofs/Rain.lean`.
 
-Still deferred (per the build plan): multi-channel scheduling; and the silicon-only pieces
-(real BCH/RS hardware ECC, MMIO/PCIe, persistent backing store) — see `PRODUCTION_STATUS.md`
-§ Silicon boundary and the bare-metal rv32 port note above.
+Integration status (canonical: `doc/03_plan/hardware/nvme_fw_gap_closure_plan.md` § "Integration
+status", wired-vs-shelf table): P1 `fil_fmc`, P7 `power_thermal`, and P8 `rain` are all **WIRED**
+into the live controller/FTL; P2 `fil_scheduler` **landed but stays SHELF** — channel-level
+parallelism is a model a single-threaded sim cannot exhibit, so it is not flatly deferred but cannot
+be exercised; P3–P6 are **NOT started**; P9 is **build-blocked** (rv32 note above).
+
+Silicon-only pieces remain out of scope (real BCH/RS hardware ECC, MMIO/PCIe, persistent backing
+store) — see `PRODUCTION_STATUS.md` § Silicon boundary. This is a hardware-FAITHFUL **simulation**,
+not a silicon-shippable binary; "production level" in the literal sense is NOT done.

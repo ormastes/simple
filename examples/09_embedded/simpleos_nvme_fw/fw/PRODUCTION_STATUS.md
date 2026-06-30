@@ -10,11 +10,14 @@ silicon. The simulation boundary is deliberate and unchanged:
   input never crashing the controller, power-loss recovery as a real property (volatile state
   wiped, L2P + bad-block table rebuilt from NAND), wear-leveling + read-disturb-scrub *logic*,
   SMART/health telemetry wired to real activity, the safety-critical invariants proven in
-  Lean4 (req 6), and sandboxed dynamic policy hooks (req 7: install gate, output clamps, modeled
-  fuel bound).
+  Lean4 (req 6), sandboxed dynamic policy hooks (req 7: install gate, output clamps, modeled
+  fuel bound), live SMART composite temperature from the PowerThermal model (P7), and internal
+  RAID/RAIN cross-channel XOR-parity rebuild with no logical data loss (P8).
 - Out of scope (silicon-only — tracked, not built here): real BCH/Reed–Solomon hardware ECC,
   real register MMIO / PCIe transport, a persistent backing store, and multi-channel NAND
-  timing. The bare-metal **rv32** no-alloc port remains the follow-up (see `BUILD_STATUS.md`).
+  timing. The bare-metal **rv32** no-alloc port is **written + host-verified**, but its rv32 LLVM
+  native build is **build-blocked in this environment** (silent exit 255, no ELF, boot not observed —
+  `doc/08_tracking/bug/native_build_rv32_baremetal_silent_255_2026-06-30.md`; see also `BUILD_STATUS.md`).
 
 ## Acceptance bar (the goal is met when every box is checked) — ✅ MET
 
@@ -44,11 +47,19 @@ silicon. The simulation boundary is deliberate and unchanged:
 - [x] **Media management.** Static wear-leveling (`wear_level_once`, erase-count-aware victim) and
       read-disturb scrubbing (`scrub_once`, per-block read counter) relocate data without loss
       (`wear_scrub_check.spl`, `ftl_media_mgmt_selftest`).
+  - [x] **RAID/RAIN rebuild (P8).** A whole-channel uncorrectable failure is rebuilt in place from
+        XOR parity with no logical data loss (`rain_seal`/`rain_recover_channel`;
+        `rain_ftl_check.spl` → "RAIN-FTL OK"; `ftl_rain_selftest`; `fw/proofs/Rain.lean`).
 - [x] **Health.** SMART reflects real activity (data units r/w, host cmd counts, power cycles,
       unsafe shutdowns, media errors, percent-used from erase counts, available spare from bad
       blocks, critical warning); an error log records failed commands (`nvme_controller_selftest`).
-- [x] **Formal (req 6).** `fw/proofs/{Alloc,Recover,Gc}.lean` prove the allocator/GC-reserve,
-      committed-prefix recovery, and GC data-loss-guard invariants; each checks green with `lean`.
+      The SMART composite temperature is now the **live `PowerThermal` value** (P7; was a hardcoded
+      313 K) with the thermal critical-warning bit ORed in (`thermal_check.spl` → "THERMAL OK",
+      `power_thermal_selftest`, and the two thermal assertions in `nvme_controller_selftest`).
+- [x] **Formal (req 6).** `fw/proofs/{Alloc,Recover,Gc,Hooks,Fmc,Rain}.lean` prove the
+      allocator/GC-reserve, committed-prefix recovery, GC data-loss-guard, policy-hook, FMC, and
+      RAIN cross-channel reconstruction invariants; each checks green with `lean`, and `Rain.lean`
+      proves the P8 reconstruction formula.
 - [x] **Sandboxed dynamic policy hooks (req 7).** Runtime-installable GC-score / QoS / hot-cold /
       telemetry hooks (`hooks.spl`) behind an install gate that rejects forbidden
       metadata/recovery/commit domains (`sandbox.spl`), with output clamps and a modeled fuel
@@ -60,11 +71,22 @@ silicon. The simulation boundary is deliberate and unchanged:
       `bin/simple test`; `doc/06_spec` regenerated at 0 stubs; this doc + `README`/`BUILD_STATUS`
       state the silicon boundary.
 
-**Silicon boundary (unchanged, deferred).** Real BCH/Reed–Solomon hardware ECC (the sim keeps a
+**Gap-closure vs. acceptance bar.** The acceptance bar above (req 1-7) is **MET** — that is *not* the
+same as "all gap-closure / production work is done." Per
+`doc/03_plan/hardware/nvme_fw_gap_closure_plan.md` § "Integration status": **P1** (`fil_fmc`), **P7**
+(`power_thermal`), and **P8** (`rain`) are **wired into the live controller/FTL**; **P2**
+(`fil_scheduler`) is **modeled but shelf** (a single-threaded sim cannot exhibit channel-level
+parallelism); **P3–P6** are **not started**; and **P9** (rv32 native build) is **build-blocked**
+(see the silicon boundary below).
+
+**Silicon boundary (unchanged).** Real BCH/Reed–Solomon hardware ECC (the sim keeps a
 checksum + injected-bit-error model), real register MMIO / PCIe transport, a persistent backing
 store, and multi-channel NAND timing remain out of scope; the bare-metal **rv32** no-alloc port is
-the tracked follow-up (`BUILD_STATUS.md`). "Production level" here = production-grade *logic and
-NVMe protocol compliance, simulation-validated*.
+**written + host-verified but build-blocked in this environment** — its rv32 LLVM native build exits
+255 silently with no ELF and the boot was not observed (bug filed:
+`doc/08_tracking/bug/native_build_rv32_baremetal_silent_255_2026-06-30.md`; `BUILD_STATUS.md`), so it
+is not merely deferred. "Production level" here = production-grade *logic and NVMe protocol
+compliance, simulation-validated*.
 
 **Policy-hook sandbox boundary (req 7).** The real silicon trust boundary for dynamically loaded
 policy code is cryptographic module signing + a static verifier; in-sim the boundary is the
