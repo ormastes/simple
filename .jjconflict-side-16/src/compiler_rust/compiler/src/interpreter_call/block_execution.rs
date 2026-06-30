@@ -496,7 +496,14 @@ pub(super) fn exec_block_closure_into(
                 if !handled {
                     for (pattern, cond, block) in &if_stmt.elif_branches {
                         if let Some(pattern) = pattern {
-                            let value = evaluate_expr(cond, &mut local_env, functions, classes, enums, impl_methods)?;
+                            let value = evaluate_expr(
+                                cond,
+                                &mut local_env,
+                                functions,
+                                classes,
+                                enums,
+                                impl_methods,
+                            )?;
                             let mut bindings = std::collections::HashMap::new();
                             if pattern_matches(pattern, &value, &mut bindings, enums, classes)? {
                                 for (name, val) in bindings {
@@ -513,7 +520,15 @@ pub(super) fn exec_block_closure_into(
                                 handled = true;
                                 break;
                             }
-                        } else if evaluate_expr(cond, &mut local_env, functions, classes, enums, impl_methods)?.truthy()
+                        } else if evaluate_expr(
+                            cond,
+                            &mut local_env,
+                            functions,
+                            classes,
+                            enums,
+                            impl_methods,
+                        )?
+                        .truthy()
                         {
                             last_value = exec_block_closure_mut(
                                 &block.statements,
@@ -1231,7 +1246,9 @@ fn exec_block_closure_mut(
                                 handled = true;
                                 break;
                             }
-                        } else if evaluate_expr(cond, local_env, functions, classes, enums, impl_methods)?.truthy() {
+                        } else if evaluate_expr(cond, local_env, functions, classes, enums, impl_methods)?
+                            .truthy()
+                        {
                             last_value = exec_block_closure_mut(
                                 &block.statements,
                                 local_env,

@@ -44,7 +44,7 @@ use std.gc_async_mut.web.browser_session_storage.{
     blank_page_html
 }
 use std.gc_async_mut.web.browser_session_cookies.{
-    cookie_text_for_url, parse_cookie_line, upsert_cookie
+    cookie_text_for_url, merge_cookie_text, parse_cookie_line, upsert_cookie
 }
 use std.gc_async_mut.web.browser_session_html.{
     html_to_text, expand_stylesheet_text, insert_stylesheet_sources,
@@ -820,12 +820,34 @@ impl BrowserSession:
                             drained = true
                         elif not already_emitted:
                             seen_request_ids = seen_request_ids + [request_id]
+                            # Merge any document.cookie set by the running script into
+                            # the jar so freshly set cookies attach to this request.
+                            match interpreter.host_document_cookie_value:
+                                JsValue.String(doc_cookie):
+                                    if doc_cookie != "":
+                                        val visible_before = cookie_text_for_url(self.cookies, self.current_url)
+                                        if doc_cookie != visible_before:
+                                            self.cookies = merge_cookie_text(self.cookies, doc_cookie)
+                                _: pass_dn("no document cookie to merge before draining request")
+                            # Strip any caller-supplied or raw Cookie lines, then attach
+                            # only the sanitized session cookie for this request URL.
+                            var sanitized_lines: [text] = []
+                            for header_line in headers.split("\n"):
+                                val trimmed_header = header_line.trim()
+                                if trimmed_header != "" and not trimmed_header.lower().starts_with("cookie:"):
+                                    sanitized_lines.push(trimmed_header)
+                            var request_headers = sanitized_lines.join("\n")
+                            val session_cookie = self.cookie_header_for_request(url)
+                            if session_cookie != "":
+                                if request_headers != "":
+                                    request_headers = request_headers + "\n"
+                                request_headers = request_headers + "Cookie: " + session_cookie
                             val drained_req = BrowserRequest.create(
                                 id: request_id,
                                 kind: kind,
                                 url: url,
                                 method: method,
-                                headers: headers,
+                                headers: request_headers,
                                 body: body,
                                 content_type: content_type
                             )
@@ -954,6 +976,12 @@ impl BrowserSession:
                 load.current_style_html = load.current_style_html + expanded.html
                 if expanded.sources.len() > 0:
                     load.style_sources = insert_stylesheet_sources(load.style_sources, load.next_style_idx, expanded.sources)
+            # Persist the fetched stylesheet body (and any newly inserted @import
+            # sources) back into the active load before re-entering the loader.
+            # _advance_stylesheet_loading re-unwraps self.active_load, and a
+            # method-local Option unwrap only writes back on return — without this
+            # the fetched body would be dropped on the request-pump path.
+            self.active_load = Some(load)
             return self._advance_stylesheet_loading()
         Err("no active stylesheet load")
 
@@ -967,7 +995,7 @@ impl BrowserSession:
             return self.open_html(normalized, html)
         if val Some(override_body) = pair_value(self.resource_overrides, normalized):
             return self.open_html(normalized, override_body)
-        return Err("network navigation requires begin_network_navigation for '{normalized}'")
+        return Err("network navigation is not implemented; use begin_network_navigation for '{normalized}'")
 
     me commit_navigation_html(html: text) -> Result<bool, text>:
         if not self.is_loading:
@@ -1026,7 +1054,7 @@ impl BrowserSession:
             return self.open_html(target, html)
         if val Some(override_body) = pair_value(self.resource_overrides, target):
             return self.open_html(target, override_body)
-        Err("network navigation requires begin_network_navigation for '{target}'")
+        Err("network navigation is not implemented; use begin_network_navigation for '{target}'")
 
     me add_favorite(url: text, title: text):
         val normalized = normalize_browser_url(url)

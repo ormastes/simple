@@ -44,7 +44,7 @@ use std.gc_async_mut.web.browser_session_storage.{
     blank_page_html
 }
 use std.gc_async_mut.web.browser_session_cookies.{
-    cookie_text_for_url, parse_cookie_line, upsert_cookie
+    cookie_text_for_url, merge_cookie_text, parse_cookie_line, upsert_cookie
 }
 use std.gc_async_mut.web.browser_session_html.{
     html_to_text, expand_stylesheet_text, insert_stylesheet_sources,
@@ -561,6 +561,45 @@ fn _browser_session_inline_fetch_url(html: text) -> text?:
         return nil
     Some(rest.slice(0, quote))
 
+fn _browser_session_inline_fetch_option(html: text, key: text) -> text:
+    # Anchor the option search to the fetch call's options region (after the
+    # URL argument) so a stray "body:"/"method:" elsewhere in the page (e.g. CSS
+    # or unrelated script) cannot corrupt the captured fetch method/body.
+    var fetch_marker = "window.fetch('"
+    var fetch_start = html.index_of(fetch_marker)
+    if fetch_start < 0:
+        fetch_marker = "fetch('"
+        fetch_start = html.index_of(fetch_marker)
+    if fetch_start < 0:
+        return ""
+    val url_region = html.slice(fetch_start + fetch_marker.len(), html.len())
+    val url_end = url_region.index_of("'")
+    if url_end < 0:
+        return ""
+    val options_region = url_region.slice(url_end + 1, url_region.len())
+    val marker = key + ":"
+    val pos = options_region.index_of(marker)
+    if pos < 0:
+        return ""
+    val rest = options_region.slice(pos + marker.len(), options_region.len())
+    val sq = rest.index_of("'")
+    val dq = rest.index_of("\"")
+    var qpos = -1
+    var qch = "'"
+    if sq >= 0 and (dq < 0 or sq < dq):
+        qpos = sq
+        qch = "'"
+    elif dq >= 0:
+        qpos = dq
+        qch = "\""
+    if qpos < 0:
+        return ""
+    val after = rest.slice(qpos + 1, rest.len())
+    val endq = after.index_of(qch)
+    if endq < 0:
+        return ""
+    after.slice(0, endq)
+
 class BrowserCookie:
     name: text
     value: text
@@ -704,6 +743,7 @@ impl BrowserSession:
         if pending_count == 0:
             return nil
         val req = self.pending_requests[0]
+        self.inflight_requests.push(req)
         val rest_count = pending_count - 1
         if rest_count == 0:
             self.pending_requests = []
@@ -760,6 +800,10 @@ impl BrowserSession:
                         match runtime.get_host_property(req_obj_id, "content_type"):
                             JsValue.String(v): content_type = v
                             _: pass_dn("async request keeps empty content type when absent")
+                        val is_mixed_content = (kind == "fetch" and
+                            browser_session_is_secure_context(self.current_url) and
+                            url.starts_with("http://") and
+                            not (url.starts_with("http://localhost") or url.starts_with("http://127.0.0.1")))
                         var already_emitted = false
                         for existing in self.pending_requests:
                             if existing.id == request_id:
@@ -767,19 +811,47 @@ impl BrowserSession:
                         for seen_id in seen_request_ids:
                             if seen_id == request_id:
                                 already_emitted = true
-                        if not already_emitted:
+                        if is_mixed_content and not already_emitted:
                             seen_request_ids = seen_request_ids + [request_id]
+                            val _ = interpreter.resolve_async_fetch_response(
+                                request_id, url, 0, "", "", "mixed-content:{url}"
+                            )
+                            runtime.interpreter = interpreter
+                            drained = true
+                        elif not already_emitted:
+                            seen_request_ids = seen_request_ids + [request_id]
+                            # Merge any document.cookie set by the running script into
+                            # the jar so freshly set cookies attach to this request.
+                            match interpreter.host_document_cookie_value:
+                                JsValue.String(doc_cookie):
+                                    if doc_cookie != "":
+                                        val visible_before = cookie_text_for_url(self.cookies, self.current_url)
+                                        if doc_cookie != visible_before:
+                                            self.cookies = merge_cookie_text(self.cookies, doc_cookie)
+                                _: pass_dn("no document cookie to merge before draining request")
+                            # Strip any caller-supplied or raw Cookie lines, then attach
+                            # only the sanitized session cookie for this request URL.
+                            var sanitized_lines: [text] = []
+                            for header_line in headers.split("\n"):
+                                val trimmed_header = header_line.trim()
+                                if trimmed_header != "" and not trimmed_header.lower().starts_with("cookie:"):
+                                    sanitized_lines.push(trimmed_header)
+                            var request_headers = sanitized_lines.join("\n")
+                            val session_cookie = self.cookie_header_for_request(url)
+                            if session_cookie != "":
+                                if request_headers != "":
+                                    request_headers = request_headers + "\n"
+                                request_headers = request_headers + "Cookie: " + session_cookie
                             val drained_req = BrowserRequest.create(
                                 id: request_id,
                                 kind: kind,
                                 url: url,
                                 method: method,
-                                headers: headers,
+                                headers: request_headers,
                                 body: body,
                                 content_type: content_type
                             )
                             self.pending_requests.push(drained_req)
-                            self._record_inflight(drained_req)
                             drained = true
                     nil:
                         runtime.interpreter = interpreter
@@ -817,18 +889,12 @@ impl BrowserSession:
                 self.runtime_state = Some(final_state)
                 self._refresh_current_history()
 
-    me _record_inflight(req: BrowserRequest):
-        var updated: [BrowserRequest] = []
-        for existing in self.inflight_requests:
-            if existing.id != req.id:
-                updated = updated + [existing]
-        self.inflight_requests = updated + [req]
-
     me _inflight_for(request_id: text) -> BrowserRequest?:
+        var found: BrowserRequest? = nil
         for existing in self.inflight_requests:
             if existing.id == request_id:
-                return Some(existing)
-        nil
+                found = Some(existing)
+        found
 
     me commit_network_response(response: BrowserResponse) -> Result<bool, text>:
         self._trace_guest("commit response kind={response.kind}")
@@ -873,7 +939,6 @@ impl BrowserSession:
                         content_type: ""
                     )
                     self.pending_requests.push(redirect_req)
-                    self._record_inflight(redirect_req)
                     return Ok(true)
             if val Some(state) = self.runtime_state:
                 self._apply_response_headers(response.headers)
@@ -911,6 +976,12 @@ impl BrowserSession:
                 load.current_style_html = load.current_style_html + expanded.html
                 if expanded.sources.len() > 0:
                     load.style_sources = insert_stylesheet_sources(load.style_sources, load.next_style_idx, expanded.sources)
+            # Persist the fetched stylesheet body (and any newly inserted @import
+            # sources) back into the active load before re-entering the loader.
+            # _advance_stylesheet_loading re-unwraps self.active_load, and a
+            # method-local Option unwrap only writes back on return — without this
+            # the fetched body would be dropped on the request-pump path.
+            self.active_load = Some(load)
             return self._advance_stylesheet_loading()
         Err("no active stylesheet load")
 
@@ -924,7 +995,7 @@ impl BrowserSession:
             return self.open_html(normalized, html)
         if val Some(override_body) = pair_value(self.resource_overrides, normalized):
             return self.open_html(normalized, override_body)
-        return Err("network navigation requires begin_network_navigation for '{normalized}'")
+        return Err("network navigation is not implemented; use begin_network_navigation for '{normalized}'")
 
     me commit_navigation_html(html: text) -> Result<bool, text>:
         if not self.is_loading:
@@ -983,7 +1054,7 @@ impl BrowserSession:
             return self.open_html(target, html)
         if val Some(override_body) = pair_value(self.resource_overrides, target):
             return self.open_html(target, override_body)
-        Err("network navigation requires begin_network_navigation for '{target}'")
+        Err("network navigation is not implemented; use begin_network_navigation for '{target}'")
 
     me add_favorite(url: text, title: text):
         val normalized = normalize_browser_url(url)

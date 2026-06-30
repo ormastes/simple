@@ -444,11 +444,6 @@ pub(super) fn exec_block_closure_into(
                 }
             }
             Node::If(if_stmt) => {
-                // `handled` tracks whether the main `if` (or its let-pattern) fired.
-                // When it doesn't, we MUST walk `elif_branches` before the `else`
-                // block — omitting them silently routed every `if/elif/else` chain
-                // straight to `else` (mirror of the fix noted in `exec_if`).
-                let mut handled = false;
                 if let Some(pattern) = &if_stmt.let_pattern {
                     let value = evaluate_expr(
                         &if_stmt.condition,
@@ -471,7 +466,17 @@ pub(super) fn exec_block_closure_into(
                             enums,
                             impl_methods,
                         )?;
-                        handled = true;
+                    } else if let Some(ref else_block) = if_stmt.else_block {
+                        last_value = exec_block_closure_mut(
+                            &else_block.statements,
+                            &mut local_env,
+                            functions,
+                            classes,
+                            enums,
+                            impl_methods,
+                        )?;
+                    } else {
+                        last_value = Value::Nil;
                     }
                 } else if evaluate_expr(
                     &if_stmt.condition,
@@ -491,56 +496,17 @@ pub(super) fn exec_block_closure_into(
                         enums,
                         impl_methods,
                     )?;
-                    handled = true;
-                }
-                if !handled {
-                    for (pattern, cond, block) in &if_stmt.elif_branches {
-                        if let Some(pattern) = pattern {
-                            let value = evaluate_expr(cond, &mut local_env, functions, classes, enums, impl_methods)?;
-                            let mut bindings = std::collections::HashMap::new();
-                            if pattern_matches(pattern, &value, &mut bindings, enums, classes)? {
-                                for (name, val) in bindings {
-                                    local_env.insert(name, val);
-                                }
-                                last_value = exec_block_closure_mut(
-                                    &block.statements,
-                                    &mut local_env,
-                                    functions,
-                                    classes,
-                                    enums,
-                                    impl_methods,
-                                )?;
-                                handled = true;
-                                break;
-                            }
-                        } else if evaluate_expr(cond, &mut local_env, functions, classes, enums, impl_methods)?.truthy()
-                        {
-                            last_value = exec_block_closure_mut(
-                                &block.statements,
-                                &mut local_env,
-                                functions,
-                                classes,
-                                enums,
-                                impl_methods,
-                            )?;
-                            handled = true;
-                            break;
-                        }
-                    }
-                }
-                if !handled {
-                    if let Some(ref else_block) = if_stmt.else_block {
-                        last_value = exec_block_closure_mut(
-                            &else_block.statements,
-                            &mut local_env,
-                            functions,
-                            classes,
-                            enums,
-                            impl_methods,
-                        )?;
-                    } else {
-                        last_value = Value::Nil;
-                    }
+                } else if let Some(ref else_block) = if_stmt.else_block {
+                    last_value = exec_block_closure_mut(
+                        &else_block.statements,
+                        &mut local_env,
+                        functions,
+                        classes,
+                        enums,
+                        impl_methods,
+                    )?;
+                } else {
+                    last_value = Value::Nil;
                 }
             }
             Node::For(for_stmt) => {
@@ -1177,10 +1143,6 @@ fn exec_block_closure_mut(
                 last_value = Value::Nil;
             }
             Node::If(if_stmt) => {
-                // `handled` gates the `elif_branches` walk: when neither the main
-                // `if` nor its let-pattern fires, every `elif` must be tried before
-                // the `else` block (previously they were silently skipped).
-                let mut handled = false;
                 if let Some(pattern) = &if_stmt.let_pattern {
                     let value = evaluate_expr(&if_stmt.condition, local_env, functions, classes, enums, impl_methods)?;
                     let mut bindings = std::collections::HashMap::new();
@@ -1196,7 +1158,17 @@ fn exec_block_closure_mut(
                             enums,
                             impl_methods,
                         )?;
-                        handled = true;
+                    } else if let Some(ref else_block) = if_stmt.else_block {
+                        last_value = exec_block_closure_mut(
+                            &else_block.statements,
+                            local_env,
+                            functions,
+                            classes,
+                            enums,
+                            impl_methods,
+                        )?;
+                    } else {
+                        last_value = Value::Nil;
                     }
                 } else if evaluate_expr(&if_stmt.condition, local_env, functions, classes, enums, impl_methods)?
                     .truthy()
@@ -1209,55 +1181,17 @@ fn exec_block_closure_mut(
                         enums,
                         impl_methods,
                     )?;
-                    handled = true;
-                }
-                if !handled {
-                    for (pattern, cond, block) in &if_stmt.elif_branches {
-                        if let Some(pattern) = pattern {
-                            let value = evaluate_expr(cond, local_env, functions, classes, enums, impl_methods)?;
-                            let mut bindings = std::collections::HashMap::new();
-                            if pattern_matches(pattern, &value, &mut bindings, enums, classes)? {
-                                for (name, val) in bindings {
-                                    local_env.insert(name, val);
-                                }
-                                last_value = exec_block_closure_mut(
-                                    &block.statements,
-                                    local_env,
-                                    functions,
-                                    classes,
-                                    enums,
-                                    impl_methods,
-                                )?;
-                                handled = true;
-                                break;
-                            }
-                        } else if evaluate_expr(cond, local_env, functions, classes, enums, impl_methods)?.truthy() {
-                            last_value = exec_block_closure_mut(
-                                &block.statements,
-                                local_env,
-                                functions,
-                                classes,
-                                enums,
-                                impl_methods,
-                            )?;
-                            handled = true;
-                            break;
-                        }
-                    }
-                }
-                if !handled {
-                    if let Some(ref else_block) = if_stmt.else_block {
-                        last_value = exec_block_closure_mut(
-                            &else_block.statements,
-                            local_env,
-                            functions,
-                            classes,
-                            enums,
-                            impl_methods,
-                        )?;
-                    } else {
-                        last_value = Value::Nil;
-                    }
+                } else if let Some(ref else_block) = if_stmt.else_block {
+                    last_value = exec_block_closure_mut(
+                        &else_block.statements,
+                        local_env,
+                        functions,
+                        classes,
+                        enums,
+                        impl_methods,
+                    )?;
+                } else {
+                    last_value = Value::Nil;
                 }
             }
             Node::For(for_stmt) => {

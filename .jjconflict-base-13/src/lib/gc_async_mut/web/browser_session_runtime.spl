@@ -11,6 +11,7 @@
 # - _build_request: build a BrowserRequest with cookie header attached
 
 use std.gc_async_mut.gpu.browser_engine.browser_renderer.{BrowserRenderer, BeRenderResult}
+use std.gc_async_mut.gpu.browser_engine.html_string_parser.{browser_renderer_html_string_to_dom}
 use std.js.types.js_types.{JsValue}
 use std.gc_async_mut.web.browser_session.{BrowserSession, BrowserRuntimeState, BrowserLoadState, BrowserRequest, BrowserHistoryEntry}
 use std.gc_async_mut.web.browser_session_storage.{sync_storage_runtime_state, sync_browser_runtime_state, pair_value, upsert_pair, is_storage_api_property, is_storage_internal_property, storage_public_key_from_internal, js_value_to_storage_text}
@@ -55,11 +56,27 @@ impl BrowserSession:
 
     me render(width: i32, height: i32) -> BeRenderResult:
         var renderer = BrowserRenderer.create(width, height)
-        renderer.render_html(self.render_html_document())
+        val html = self.render_html_document()
+        var result = renderer.render_html(html)
+        result.node_count = self._render_dom_node_count(renderer, html)
+        result
 
     me render_to_pixels(width: i32, height: i32) -> BeRenderResult:
         var renderer = BrowserRenderer.create(width, height)
-        renderer.render_html_to_pixels(self.render_html_document())
+        val html = self.render_html_document()
+        var result = renderer.render_html_to_pixels(html)
+        result.node_count = self._render_dom_node_count(renderer, html)
+        result
+
+    # Run the canonical DOM layout/paint pass (BrowserRenderer.render_dom) over the
+    # current document and report how many positively-sized boxes were painted.
+    me _render_dom_node_count(renderer: BrowserRenderer, html: text) -> i32:
+        val dom = browser_renderer_html_string_to_dom(html)
+        val scene = renderer.render_dom(dom)
+        val painted = scene.commands.len() - 1
+        if painted < 0:
+            return 0
+        painted
 
     me render_html_document() -> text:
         val title = if self.current_title != "": self.current_title else: self.current_url
@@ -133,16 +150,17 @@ impl BrowserSession:
             script_blocks: script_blocks,
             style_sources: style_sources
         ))
-        if val Some(fetch_url) = _browser_session_inline_fetch_url(html):
-            val resolved_fetch_url = resolve_relative_url(url, fetch_url)
-            val is_mixed_content = (browser_session_is_secure_context(url) and
-                resolved_fetch_url.starts_with("http://") and
-                not (resolved_fetch_url.starts_with("http://localhost") or resolved_fetch_url.starts_with("http://127.0.0.1")))
-            if not is_mixed_content:
-                val inline_method_raw = _browser_session_inline_fetch_option(html, "method")
-                val inline_method = if inline_method_raw != "": inline_method_raw.upper() else: "GET"
-                val inline_body = _browser_session_inline_fetch_option(html, "body")
-                self.pending_requests.push(self._build_request("fetch", resolved_fetch_url, inline_method, "", inline_body, ""))
+        if not has_runtime_scripts:
+            if val Some(fetch_url) = _browser_session_inline_fetch_url(html):
+                val resolved_fetch_url = resolve_relative_url(url, fetch_url)
+                val is_mixed_content = (browser_session_is_secure_context(url) and
+                    resolved_fetch_url.starts_with("http://") and
+                    not (resolved_fetch_url.starts_with("http://localhost") or resolved_fetch_url.starts_with("http://127.0.0.1")))
+                if not is_mixed_content:
+                    val inline_method_raw = _browser_session_inline_fetch_option(html, "method")
+                    val inline_method = if inline_method_raw != "": inline_method_raw.upper() else: "GET"
+                    val inline_body = _browser_session_inline_fetch_option(html, "body")
+                    self.pending_requests.push(self._build_request("fetch", resolved_fetch_url, inline_method, "", inline_body, ""))
         if url.starts_with("https://guest.runtime/"):
             print "[BRS] active load created"
         self._advance_stylesheet_loading()
@@ -248,6 +266,13 @@ impl BrowserSession:
                 else if navigation_mode == "pushState":
                     self._push_runtime_history_entry()
 
+        # Track whether the latest body mutation came from script setting innerHTML or
+        # textContent. Page load primes both host_body_*_value fields directly (not via
+        # eval), so the values alone can't tell us which a script most recently wrote;
+        # the dirty flags do. Setting innerHTML by script clears the textContent dirty
+        # flag (and vice-versa) so this resolves to last-write-wins, matching the DOM.
+        val inner_html_dirty = state.runtime.interpreter.host_body_inner_html_dirty
+        val text_content_dirty = state.runtime.interpreter.host_body_text_content_dirty
         var inner_html_val = state.runtime.interpreter.host_body_inner_html_value
         if strict_equals(inner_html_val, JsValue.Undefined):
             inner_html_val = state.runtime.get_host_property(
@@ -265,10 +290,15 @@ impl BrowserSession:
         if val JsValue.String(body_html) = inner_html_val:
             next_body_html = body_html
 
-        if val JsValue.String(body_text) = text_content_val:
-            val rendered_text = escape_html_text(body_text)
-            if rendered_text != escape_html_text(html_to_text(next_body_html)):
-                next_body_html = rendered_text
+        # textContent overrides the resolved innerHTML only when a script explicitly set
+        # textContent more recently than innerHTML, or when neither was script-set (the
+        # page-load values are mutually consistent). This stops a stale page-load
+        # textContent from clobbering a freshly script-assigned innerHTML.
+        if text_content_dirty or not inner_html_dirty:
+            if val JsValue.String(body_text) = text_content_val:
+                val rendered_text = escape_html_text(body_text)
+                if rendered_text != escape_html_text(html_to_text(next_body_html)):
+                    next_body_html = rendered_text
 
         self.current_body_html = next_body_html
         self.session_storage = storage_pairs_from_object(state, state.session_storage_id)
