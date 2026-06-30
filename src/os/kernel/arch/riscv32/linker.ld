@@ -46,6 +46,14 @@ SECTIONS {
         _ebss = .;
     } > RAM
 
+    /* SMP hart check-in counter. Deliberately OUTSIDE [_sbss,_ebss] so hart 0's
+     * BSS clear cannot wipe a secondary hart's atomic check-in. NOLOAD + QEMU
+     * zeroing RAM at reset means it starts at 0 before any hart runs. */
+    .smp (NOLOAD) : ALIGN(4) {
+        _smp_online_count = .;
+        . += 4;
+    } > RAM
+
     .stack (NOLOAD) : ALIGN(16) {
         _stack_bottom = .;
         . += 32K;

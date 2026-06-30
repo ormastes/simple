@@ -16,6 +16,7 @@ extern fn rt_riscv_uart_put(byte: u64)
 extern fn rt_riscv_qemu_heap_start() -> u64
 extern fn rt_riscv_qemu_heap_size() -> u64
 extern fn rt_riscv_noalloc_pmm_init_default() -> bool
+extern fn rt_rv32_smp_online_count() -> u64
 
 @section(".text.entry")
 @naked
@@ -23,6 +24,15 @@ fn _start():
     asm volatile:
         "mv      s0, a0"
         "mv      s1, a1"
+        # Every hart atomically checks in (rv32imac has the A extension). The
+        # counter lives outside [_sbss,_ebss] so hart 0's BSS clear cannot wipe it.
+        "la      t2, _smp_online_count"
+        "li      t1, 1"
+        "amoadd.w zero, t1, (t2)"
+        # Only hart 0 runs the primary boot; secondary harts park in WFI so they
+        # do not race the BSS clear / heap init.
+        "csrr    t0, mhartid"
+        "bnez    t0, .Lrv32_secondary_park"
         "la      sp, _stack_top"
         "la      t0, _sbss"
         "la      t1, _ebss"
@@ -38,6 +48,9 @@ fn _start():
         ".Lrv32_boot_halt:"
         "wfi"
         "j       .Lrv32_boot_halt"
+        ".Lrv32_secondary_park:"
+        "wfi"
+        "j       .Lrv32_secondary_park"
 
 fn _uart_put(byte: u32):
     rt_riscv_uart_put(byte as u64)
@@ -184,6 +197,41 @@ fn _line_boot_complete():
     _uart_put(101)
     _crlf()
 
+# Print "[BOOT] SMP harts: N" — N is the number of harts that checked in via the
+# atomic counter in _start. Proves multi-core boot (each core ran real code).
+fn _line_smp(n: u64):
+    _uart_put(91)   # [
+    _uart_put(66)   # B
+    _uart_put(79)   # O
+    _uart_put(79)   # O
+    _uart_put(84)   # T
+    _uart_put(93)   # ]
+    _uart_put(32)
+    _uart_put(83)   # S
+    _uart_put(77)   # M
+    _uart_put(80)   # P
+    _uart_put(32)
+    _uart_put(104)  # h
+    _uart_put(97)   # a
+    _uart_put(114)  # r
+    _uart_put(116)  # t
+    _uart_put(115)  # s
+    _uart_put(58)   # :
+    _uart_put(32)
+    _uart_put((48 + (n as u32)))   # '0'+N (N is small)
+    _crlf()
+
+# Briefly spin so secondary harts have a window to atomically check in, then
+# return the count. Re-reads the extern counter every iteration so the loop is
+# not optimized away and exits early once all 3 harts are online.
+fn _smp_wait_online() -> u64:
+    var c: u64 = rt_rv32_smp_online_count()
+    var i: u64 = 0
+    while c < 3 and i < 2000000:
+        c = rt_rv32_smp_online_count()
+        i = i + 1
+    c
+
 fn _qemu_exit_success():
     asm volatile:
         "lui     t0, 0x100"
@@ -197,6 +245,9 @@ fn boot_main(_hart_id: u32, _dtb_addr: u32):
     _line_memory_map()
     _line_ram_base()
     _line_boot_complete()
+    # Hart census early, before subsystem init: each core checked in atomically
+    # in _start, so this proves multi-core boot regardless of later subsystems.
+    _line_smp(_smp_wait_online())
     riscv_noalloc_log_init()
     riscv_noalloc_handoff(_hart_id as u64, _dtb_addr as u64)
     rt_riscv_noalloc_pmm_init_default()
