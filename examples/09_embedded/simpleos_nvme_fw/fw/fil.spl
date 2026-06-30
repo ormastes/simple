@@ -1,16 +1,16 @@
 """
 fil — Flash Interface Layer.
 
-Composes the ONFI NAND device (fil_nand_device) with ECC (fil_ecc) and the
-bad-block table (fil_badblock) into a single page-level interface for the FTL:
-ECC-verified reads, and program/erase that retire a block (bad-block table + NAND
-state) on media failure. The flash is driven through the real ONFI command/
-address/data handshake inside NandDevice; this layer stays media-agnostic.
+Composes the flash-memory controller (fil_fmc) with ECC (fil_ecc) and the bad-block table
+(fil_badblock) into a single page-level interface for the FTL: ECC-verified reads, and
+program/erase that retire a block (bad-block table + NAND state) on media failure. The flash is
+driven through the FMC register handshake (load command → issue → read result latches), exactly
+as a real firmware programs its flash controller; the NAND chips hang off the controller. This
+layer stays media-agnostic.
 """
 
 use nvme_types.*
-use fil_nand.*          # NandRead (shared read result)
-use fil_nand_device.*   # NandDevice — ONFI-driven flash chip
+use fil_fmc.*           # Fmc — flash-memory-controller register driver (owns the NAND device)
 use fil_ecc.*
 use fil_badblock.*
 
@@ -22,11 +22,11 @@ struct FilRead:
     code: i64
 
 struct Fil:
-    nand: NandDevice
-    bbt:  BadBlockTable
+    fmc: Fmc
+    bbt: BadBlockTable
 
 fn fil_new() -> Fil:
-    Fil(nand: nand_device_new(), bbt: bbt_new())
+    Fil(fmc: fmc_new(), bbt: bbt_new())
 
 impl Fil:
     # Program one page (data + OOB {lba, seq}). Retires the block on program failure.
@@ -36,35 +36,44 @@ impl Fil:
         val bad: bool = me.bbt.is_bad(blk)
         if bad:
             return NAND_BAD_BLOCK
-        val code: i64 = me.nand.program(ppn, lba, seq, data)
-        if code == NAND_PROG_FAIL:
+        me.fmc.load(fmc_cmd(FMC_OP_PROGRAM, ppn, lba, seq, data))
+        me.fmc.issue()
+        val res: FmcResult = me.fmc.out()
+        me.fmc.ack()
+        if res.code == NAND_PROG_FAIL:
             me.bbt.mark_bad(blk)
-            me.nand.set_bad(blk)
+            me.fmc.set_bad(blk)
             return NAND_PROG_FAIL
-        code
+        res.code
 
     # Read one page and verify ECC. `code` reflects the injected bit-error count:
     # 0 flips -> NAND_OK, 1 -> NAND_ECC_FIXED, >=2 -> NAND_ECC_FAIL.
     me read(ppn: i64) -> FilRead:
-        val rd: NandRead = me.nand.read_page(ppn)
-        val stored: i64 = ecc_compute(rd.data, rd.lba, rd.seq)
-        val code: i64 = ecc_check(rd.data, rd.lba, rd.seq, stored, rd.err)
-        FilRead(data: rd.data, lba: rd.lba, seq: rd.seq, code: code)
+        me.fmc.load(fmc_cmd(FMC_OP_READ, ppn, 0, 0, 0))
+        me.fmc.issue()
+        val res: FmcResult = me.fmc.out()
+        me.fmc.ack()
+        val stored: i64 = ecc_compute(res.data, res.lba, res.seq)
+        val code: i64 = ecc_check(res.data, res.lba, res.seq, stored, res.err)
+        FilRead(data: res.data, lba: res.lba, seq: res.seq, code: code)
 
     # Erase one block. Retires the block on erase failure.
     me erase(blk: i64) -> i64:
         val bad: bool = me.bbt.is_bad(blk)
         if bad:
             return NAND_BAD_BLOCK
-        val code: i64 = me.nand.erase_block(blk)
-        if code == NAND_ERASE_FAIL:
+        me.fmc.load(fmc_cmd(FMC_OP_ERASE, blk, 0, 0, 0))
+        me.fmc.issue()
+        val res: FmcResult = me.fmc.out()
+        me.fmc.ack()
+        if res.code == NAND_ERASE_FAIL:
             me.bbt.mark_bad(blk)
-            me.nand.set_bad(blk)
+            me.fmc.set_bad(blk)
             return NAND_ERASE_FAIL
-        code
+        res.code
 
     me erase_count(blk: i64) -> i64:
-        me.nand.erase_count(blk)
+        me.fmc.erase_count(blk)
 
     me block_bad(blk: i64) -> bool:
         me.bbt.is_bad(blk)
@@ -72,15 +81,15 @@ impl Fil:
     me bad_count(self) -> i64:
         me.bbt.count_bad()
 
-    # ── test hooks (forwarded to the simulated NAND) ──
+    # ── test hooks (forwarded through the controller to the simulated NAND) ──
     me inject_prog_fail(blk: i64):
-        me.nand.inject_prog_fail(blk)
+        me.fmc.inject_prog_fail(blk)
 
     me inject_erase_fail(blk: i64):
-        me.nand.inject_erase_fail(blk)
+        me.fmc.inject_erase_fail(blk)
 
     me inject_read_bitflip(ppn: i64, n: i64):
-        me.nand.inject_read_bitflip(ppn, n)
+        me.fmc.inject_read_bitflip(ppn, n)
 
 # ── Self-test ─────────────────────────────────────────────────────────────────
 

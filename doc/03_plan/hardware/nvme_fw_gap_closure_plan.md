@@ -59,7 +59,14 @@ sits below FIL.
 
 ---
 
-## P1 — Register-level Flash Memory Controller (FMC) model  *(G1)*
+## P1 — Register-level Flash Memory Controller (FMC) model  *(G1)*  — ✅ DONE (2026-06-30)
+
+> Landed: `fw/fil_fmc.spl` (`Fmc` register driver, owns the NAND device), `fil.spl` refactored to
+> drive the NAND through the load→issue→read-result→ack handshake (behavior-preserving — the full
+> 300-assertion suite + e2e mains stay green), `fil_fmc_selftest` in `test_fw`, and `proofs/Fmc.lean`
+> (status state machine, gated in the system spec). The remaining `*_check.spl`/`doc/06_spec` items
+> below were satisfied by folding the adversarial cases (sticky ERR, no-op-without-load) into
+> `fil_fmc_selftest` rather than a separate runnable.
 
 **Goal.** Replace direct `Fil`→`NandDevice` method calls with a register-MMIO handshake,
 mirroring `fmc_driver.c`: a command/address/status register file; issue → poll → complete.

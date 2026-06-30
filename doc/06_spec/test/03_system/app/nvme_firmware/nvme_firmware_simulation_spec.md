@@ -27,7 +27,7 @@ nvme_firmware_simulation_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 12 | 12 | 0 | 0 |
+| 13 | 13 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -401,12 +401,33 @@ expect(out).to_contain("LEAN_OK")
 
 </details>
 
+#### verifies the flash-controller status state machine (Fmc.lean, gap-closure P1)
+
+- Check proofs/Fmc.lean with the Lean toolchain
+   - Expected: code equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Check proofs/Fmc.lean with the Lean toolchain")
+val (out, err, code) = _lean(FW + "/proofs/Fmc.lean")
+expect(code).to_equal(0)
+expect(out).to_contain("LEAN_OK")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 12 |
-| Active scenarios | 12 |
+| Total scenarios | 13 |
+| Active scenarios | 13 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
