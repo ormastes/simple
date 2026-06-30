@@ -38,6 +38,22 @@
 | G8 | Die/channel failure resilience | none | internal RAID/RAIN parity | P8 |
 | G9 | Real embedded target | host interpreter | bare-metal SoC (rv32 no-alloc) | P9 |
 
+## Integration status — wired vs. shelf (honest accounting)
+
+A phase is only gap-closing once its module is **load-bearing** in the live firmware, not just
+green against its own self-test. Tracking that explicitly so "DONE" never means "exists beside
+the firmware":
+
+| Phase | Module | Live caller | Status |
+|-------|--------|-------------|--------|
+| P1 | `fil_fmc` | `fil.spl` (every program/read/erase routes through the FMC handshake) | **wired** |
+| P7 | `power_thermal` | `nvme_controller` (IO path ticks it; SMART reports its temperature) | **wired** |
+| P2 | `fil_scheduler` | none (the host-runnable sim executes ops synchronously — channel-level parallelism is a model the single-threaded sim cannot itself exhibit) | shelf — verified model, not load-bearing |
+| P8 | `rain` | none (parity is computed/reconstructed only by its own check) | shelf — wiring into the FTL write/recover path is the remaining work |
+
+Adding more standalone modules (P3–P6, P9) widens the shelf without closing the gap. Prefer
+wiring an existing verified module into the live path over landing a new disconnected one.
+
 ## Test discipline (applies to every phase)
 
 Follow `fw/CONVENTIONS.md`. Each new module exposes `fn <module>_selftest() -> i64`
@@ -198,7 +214,7 @@ single-owner-per-mutable-resource (research §6 rule). No preemption (cooperativ
 **Silicon ceiling.** True multi-core memory ordering / cache coherence is not modeled
 (cooperative single-thread token model).
 
-## P7 — Power states + thermal throttling  *(G7)*  — ✅ DONE (2026-06-30)
+## P7 — Power states + thermal throttling  *(G7)*  — ✅ DONE + WIRED (2026-06-30)
 
 > Landed: `fw/power_thermal.spl` — NVMe power states (Set/Get Features FEAT_POWER_MGMT, invalid
 > rejected) + a Newtonian thermal model (heat ∝ activity scaled by power state, cooling ∝ excess
@@ -209,6 +225,14 @@ single-owner-per-mutable-resource (research §6 rule). No preemption (cooperativ
 > latter gated in the system spec. No Lean — a threshold model has no deeper falsifiable
 > invariant. The heat/cool coefficients are an explicit calibration knob (real silicon needs
 > measured tuning).
+>
+> **Wired into the live controller (2026-06-30).** `PowerThermal` is now a field on
+> `NvmeController`: the live IO path (`process_one_io`) ticks it on every program/read (a write
+> burns more energy than a read), and `do_get_log(LOG_SMART)` reports the model's live composite
+> temperature and ORs its critical-warning bit into the SMART critical warning — replacing the
+> old hardcoded `temperature: 313`. Two controller-selftest assertions prove the wiring: SMART
+> temperature equals the live model's value, and a sustained write burst raises it above the idle
+> baseline. The module is no longer a standalone shelf component — it is load-bearing.
 
 **Goal.** NVMe power states (PSDs via Get/Set Features) + a thermal model that throttles
 throughput over a threshold and reports composite temperature in SMART.

@@ -78,7 +78,7 @@ trim → **power-fail + recovery** (committed state survives, trim stays trimmed
 | **FIL** | `fil_nand`, `fil_nand_device` (ONFI NAND *device*), `fil_fmc` (flash-memory-controller register driver, gap-closure P1), `fil_scheduler` (multi-channel request scheduler, gap-closure P2), `fil_ecc`, `fil_badblock`, `fil` |
 | **FTL** | `ftl_map`, `ftl_band`, `ftl_journal`, `ftl_gc`, `ftl`, `rain` (XOR-parity die/channel resilience, gap-closure P8) |
 | **HIL + core** | `hil_queue`, `hil_command`, `fw_pool`, `hil`, `firmware` |
-| **NVMe controller front end** | `nvme_admin_types`, `nvme_admin` (admin queue: Identify, Create/Delete IO SQ/CQ, Get/Set Features, Get Log Page), `nvme_qset` (multi IO queue, round-robin), `nvme_controller`, `power_thermal` (power states + thermal throttling, gap-closure P7) |
+| **NVMe controller front end** | `nvme_admin_types`, `nvme_admin` (admin queue: Identify, Create/Delete IO SQ/CQ, Get/Set Features, Get Log Page), `nvme_qset` (multi IO queue, round-robin), `nvme_controller`, `power_thermal` (power states + thermal throttling, gap-closure P7 — **wired**: the controller IO path drives it and SMART reports its live composite temperature) |
 | Tests | `test_fw` (all self-tests, 300 checks), `sim_main` (single-queue e2e), `nvme_main` (controller e2e) |
 
 ## Requirements coverage (from the research report)

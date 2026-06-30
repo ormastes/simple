@@ -22,6 +22,7 @@ use hil_command.*
 use hil_queue.*
 use fw_pool.*
 use ftl.*
+use power_thermal.*
 
 # Result of dispatching one admin command. `post` is false only for an Async Event
 # Request held outstanding (its completion is posted later, when an event is raised).
@@ -51,9 +52,10 @@ struct NvmeController:
     unsafe_shutdowns: i64   # power cycles without a clean checkpoint (SMART)
     error_count:  i64   # IO commands completed with a non-success status (error log)
     last_error:   i64   # status code of the most recent failed IO command
+    pt:           PowerThermal   # power-state + thermal model, driven by live IO (SMART temperature)
 
 fn nvme_controller_new() -> NvmeController:
-    NvmeController(aq: admin_queue_new(), qset: queue_set_new(), features: feature_store_new(), ftl: ftl_new(), pool: task_pool_new(), last_id: identify_empty(), smart: smart_empty(), reads: 0, writes: 0, power_cycles: 0, abort_count: 0, format_count: 0, aer_held_cid: -1, aer_event: 0, fw_revision: 1, fw_dl_bytes: 0, media_errors: 0, unsafe_shutdowns: 0, error_count: 0, last_error: 0)
+    NvmeController(aq: admin_queue_new(), qset: queue_set_new(), features: feature_store_new(), ftl: ftl_new(), pool: task_pool_new(), last_id: identify_empty(), smart: smart_empty(), reads: 0, writes: 0, power_cycles: 0, abort_count: 0, format_count: 0, aer_held_cid: -1, aer_event: 0, fw_revision: 1, fw_dl_bytes: 0, media_errors: 0, unsafe_shutdowns: 0, error_count: 0, last_error: 0, pt: power_thermal_new())
 
 impl NvmeController:
     # ── Admin path ───────────────────────────────────────────────────────────
@@ -175,7 +177,9 @@ impl NvmeController:
         if logid == LOG_SMART:
             val pu: i64 = smart_percent_used(me.ftl.max_erase())
             val spare: i64 = smart_avail_spare(me.ftl.bad_blocks())
-            me.smart = build_smart_log(me.reads, me.writes, me.power_cycles, me.unsafe_shutdowns, me.media_errors, pu, spare)
+            val tk: i64 = me.pt.temperature_k()      # live composite temperature, driven by IO load
+            val tc: i64 = me.pt.critical_warning()   # thermal critical-warning bit
+            me.smart = build_smart_log(me.reads, me.writes, me.power_cycles, me.unsafe_shutdowns, me.media_errors, pu, spare, tk, tc)
             return SC_SUCCESS
         if logid == LOG_ERROR or logid == LOG_FW_SLOT:
             return SC_SUCCESS
@@ -211,11 +215,13 @@ impl NvmeController:
                 me.pool.set_phase(h, PH_DONE)
                 me.pool.release(h)
                 me.writes = me.writes + 1
+                me.pt.tick(2)   # a program burns more energy than a read
             else:
                 if cmd_is_read(cmd):
                     rdata = me.ftl.read(cmd.lba)
                     status = me.ftl.read_status(cmd.lba)
                     me.reads = me.reads + 1
+                    me.pt.tick(1)
                 else:
                     if cmd_is_trim(cmd):
                         status = me.ftl.trim(cmd.lba)
@@ -377,6 +383,26 @@ fn nvme_controller_selftest() -> i64:
     if sm.data_units_written > 0:
         duw_ok = 1
     fail = fail + expect_eq(duw_ok, 1, "SMART data units written reflects activity")
+
+    # P7 wiring proof: the SMART composite temperature is produced by the live thermal
+    # model that the IO path heats — not a hardcoded constant. A sustained write burst
+    # raises it above the idle baseline, and SMART reports exactly the model's value.
+    var hb: i64 = 0
+    while hb < 40:
+        c.io_submit(1, cmd_make(130, OP_WRITE, 9, 1, 0xAB))
+        c.io_process()
+        c.io_reap(1)
+        hb = hb + 1
+    c.admin_submit(admin_get_log_cmd(42, LOG_SMART))
+    c.admin_process()
+    c.admin_reap()
+    val sm_hot: SmartLog = c.last_smart()
+    val t_live: i64 = c.pt.temperature_k()
+    fail = fail + expect_eq(sm_hot.temperature, t_live, "SMART temperature reads the live thermal model")
+    var heated: i64 = 0
+    if sm_hot.temperature > THERMAL_BASE_K:
+        heated = 1
+    fail = fail + expect_eq(heated, 1, "sustained IO load heats the device above the idle baseline")
 
     # Error log records a failed IO command (status + count).
     val ec0: i64 = c.error_log_count()
