@@ -859,6 +859,16 @@ fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<Pat
         }
     }
 
+    // Relative imports (`import ..`, `import ..sibling`) produce empty leading
+    // path segments. When they can't be resolved — e.g. a standalone file with
+    // no parent package — soft-accept them as an empty namespace (the same
+    // sentinel `unit.*` uses) instead of raising a fatal error. The compiled
+    // pipeline only warns here; this keeps the interpreter consistent so a
+    // deprecated relative import doesn't abort an otherwise-valid program.
+    if parts.first().map(|s| s.is_empty() || s.starts_with('.')).unwrap_or(false) {
+        return Ok(PathBuf::from(UNIT_OPAQUE_SENTINEL));
+    }
+
     Err(crate::error::factory::cannot_resolve_module(&parts.join(".")))
 }
 

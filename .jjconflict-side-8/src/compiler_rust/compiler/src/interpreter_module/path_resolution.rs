@@ -865,11 +865,7 @@ fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<Pat
     // sentinel `unit.*` uses) instead of raising a fatal error. The compiled
     // pipeline only warns here; this keeps the interpreter consistent so a
     // deprecated relative import doesn't abort an otherwise-valid program.
-    if parts
-        .first()
-        .map(|s| s.is_empty() || s.starts_with('.'))
-        .unwrap_or(false)
-    {
+    if parts.first().map(|s| s.is_empty() || s.starts_with('.')).unwrap_or(false) {
         return Ok(PathBuf::from(UNIT_OPAQUE_SENTINEL));
     }
 
@@ -963,7 +959,11 @@ mod tests {
         .unwrap();
         // overlay manifest + config
         fs::create_dir_all(root.join("variants")).unwrap();
-        fs::write(root.join("variants/__init__.spl"), "var:\n  order: [lib.crypto]\n").unwrap();
+        fs::write(
+            root.join("variants/__init__.spl"),
+            "var:\n  order: [lib.crypto]\n",
+        )
+        .unwrap();
         fs::create_dir_all(root.join("config")).unwrap();
         fs::write(
             root.join("config/var.sdn"),
@@ -976,11 +976,7 @@ mod tests {
             // variant file mirrors the FULL import segments (std.common.crypto.*)
             let vdir = root.join("variants/lib/crypto/openssl/std/common/crypto");
             fs::create_dir_all(&vdir).unwrap();
-            fs::write(
-                vdir.join("constant_time.spl"),
-                "# openssl\nfn marker() -> text:\n    \"openssl\"\n",
-            )
-            .unwrap();
+            fs::write(vdir.join("constant_time.spl"), "# openssl\nfn marker() -> text:\n    \"openssl\"\n").unwrap();
         }
     }
 
