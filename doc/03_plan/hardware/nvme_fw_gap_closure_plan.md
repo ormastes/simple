@@ -86,7 +86,18 @@ mirroring `fmc_driver.c`: a command/address/status register file; issue → poll
 **Silicon ceiling.** Real MMIO base addresses + ONFI NV-DDR timing are silicon; the register
 **semantics** are faithful.
 
-## P2 — Multi-channel / multi-way request scheduler  *(G2 — the largest real gap)*
+## P2 — Multi-channel / multi-way request scheduler  *(G2 — the largest real gap)*  — ✅ DONE (2026-06-30, additive)
+
+> Landed **additive / behavior-preserving** (no PPN-geometry change, so the allocator/recovery/GC
+> proofs + the 300-assertion suite stay green): `fw/fil_scheduler.spl` (`ChannelSched` over
+> NUM_CHANNELS=8; `channel_of(blk) = blk mod 8` is a *derived view*). Per-channel serialization
+> (one op per channel per step) + parallel drain (steps = deepest channel queue). Tested by
+> `fil_scheduler_selftest` (`test_fw`) and `parallelism_check.spl` (8× striped speedup; unbalanced
+> batch bounded by its deepest channel), the latter gated in the system spec. **No Lean proof** —
+> the parallelism is a step-counting model (synchronous interpreter), proven by direct count, not
+> ceremony. True channel-striped *allocation* (changing which PPN a write lands on) was
+> deliberately **not** done: in a synchronous model it buys risk (re-deriving `Alloc.lean` on the
+> ×8/call-boundary-prone band code) without real concurrency.
 
 **Goal.** N channels × M ways operating in parallel, mirroring `low_level_scheduler.c`.
 

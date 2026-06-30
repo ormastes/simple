@@ -27,7 +27,7 @@ nvme_firmware_simulation_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 13 | 13 | 0 | 0 |
+| 14 | 14 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -315,6 +315,29 @@ expect(out).to_contain("POLICY HOOKS OK")
 
 </details>
 
+#### schedules NAND ops across channels in parallel with per-channel serialization (gap-closure P2)
+
+- Stripe a write batch across the channels and drain the multi-channel scheduler
+   - Expected: code equals `0`
+- A striped batch drains in ceil(n/channels) parallel steps; an unbalanced batch is bounded by its deepest channel
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Stripe a write batch across the channels and drain the multi-channel scheduler")
+val (out, err, code) = _run(FW + "/parallelism_check.spl")
+expect(code).to_equal(0)
+step("A striped batch drains in ceil(n/channels) parallel steps; an unbalanced batch is bounded by its deepest channel")
+expect(out).to_contain("PARALLELISM OK")
+```
+
+</details>
+
 ### NVMe firmware: Lean4 formal verification of the FTL invariants
 
 #### verifies the allocator and GC-reserve safety (Alloc.lean)
@@ -426,8 +449,8 @@ expect(out).to_contain("LEAN_OK")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 13 |
-| Active scenarios | 13 |
+| Total scenarios | 14 |
+| Active scenarios | 14 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
