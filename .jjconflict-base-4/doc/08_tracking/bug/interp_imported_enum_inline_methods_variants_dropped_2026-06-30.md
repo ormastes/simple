@@ -61,6 +61,14 @@ its body mixes variants with inline `static fn` methods (SdnValue has ~15 inline
 static factory methods in its body, lines 38-207). The variants are dropped from
 the interpreter's registered enum_def during import; JIT keeps them.
 
+## Confirmed: variants absent from ALL registries (not a shadowing issue)
+
+Tried preferring whichever of `enums` / `BLOCK_SCOPED_ENUMS` / `GLOBAL_ENUMS`
+actually declares the variant — no effect. The variants are missing from every
+registry, so the imported enum's `variants` are dropped at **import/registration
+time**, not merely shadowed by a stale stub. The fix must restore variants when
+an imported enum with inline `static fn` methods is loaded.
+
 ## Suspected root cause
 
 The module-import enum registration likely processes the enum's inline methods
