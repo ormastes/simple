@@ -479,7 +479,7 @@ pub fn undefined_reference(kind: &str, value: &impl std::fmt::Debug) -> CompileE
 }
 
 /// Error when an LLVM build operation fails.
-pub fn llvm_build_failed(operation: &str, error: &impl std::fmt::Display) -> CompileError {
+pub fn llvm_build_failed(operation: &str, error: &(impl std::fmt::Display + ?Sized)) -> CompileError {
     CompileError::Semantic(format!("Failed to build {}: {}", operation, error))
 }
 
