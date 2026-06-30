@@ -27,7 +27,7 @@ nvme_firmware_simulation_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 9 | 9 | 0 | 0 |
+| 11 | 11 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -269,6 +269,29 @@ expect(out).to_contain("WEAR/SCRUB OK")
 
 </details>
 
+#### sandboxes dynamic policy hooks so a malicious hook cannot corrupt the FTL (req 7)
+
+- Install custom + evil + over-fuel GC policy hooks and exercise the install gate
+   - Expected: code equals `0`
+- A custom hook changes GC selection but loses no data; forbidden installs are rejected; over-fuel votes are discarded
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Install custom + evil + over-fuel GC policy hooks and exercise the install gate")
+val (out, err, code) = _run(FW + "/policy_hooks_check.spl")
+expect(code).to_equal(0)
+step("A custom hook changes GC selection but loses no data; forbidden installs are rejected; over-fuel votes are discarded")
+expect(out).to_contain("POLICY HOOKS OK")
+```
+
+</details>
+
 ### NVMe firmware: Lean4 formal verification of the FTL invariants
 
 #### verifies the allocator and GC-reserve safety (Alloc.lean)
@@ -334,12 +357,33 @@ expect(out).to_contain("LEAN_OK")
 
 </details>
 
+#### verifies the sandboxed policy-hook safety properties (Hooks.lean, req 7)
+
+- Check proofs/Hooks.lean with the Lean toolchain
+   - Expected: code equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Check proofs/Hooks.lean with the Lean toolchain")
+val (out, err, code) = _lean(FW + "/proofs/Hooks.lean")
+expect(code).to_equal(0)
+expect(out).to_contain("LEAN_OK")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 9 |
-| Active scenarios | 9 |
+| Total scenarios | 11 |
+| Active scenarios | 11 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
