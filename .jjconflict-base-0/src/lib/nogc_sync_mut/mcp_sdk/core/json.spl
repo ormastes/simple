@@ -176,14 +176,34 @@ fn SB_R() -> text:
 fn find_sub(haystack: text, needle: text) -> i64:
     if not haystack.contains(needle):
         return -1
-    val nlen = needle.len()
-    val hlen = haystack.len()
+    # O(n) byte scan: the literal slice compare `haystack[i:i+nlen]` was O(i)
+    # per position (UTF-8 slice), i.e. O(n^2) — slow for keys late in a large
+    # body. Byte access is O(1). Returns a CHAR index (callers substring by
+    # char): ci counts char-start bytes; ASCII keys' first byte never collides
+    # with UTF-8 multibyte bytes (all >= 0x80).
+    val hb = haystack.bytes()
+    val nb = needle.bytes()
+    val nlen = nb.len()
+    val hlen = hb.len()
     if nlen == 0:
         return 0
+    val first = nb[0].to_i64()
     var i = 0
+    var ci = -1
     while i <= hlen - nlen:
-        if haystack[i:i + nlen] == needle:
-            return i
+        val v = hb[i].to_i64()
+        if v < 128 or v >= 192:
+            ci = ci + 1
+        if v == first:
+            var j = 1
+            var matched = true
+            while j < nlen:
+                if hb[i + j].to_i64() != nb[j].to_i64():
+                    matched = false
+                    break
+                j = j + 1
+            if matched:
+                return ci
         i = i + 1
     -1
 
