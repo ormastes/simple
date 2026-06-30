@@ -48,8 +48,8 @@ the firmware":
 |-------|--------|-------------|--------|
 | P1 | `fil_fmc` | `fil.spl` (every program/read/erase routes through the FMC handshake) | **wired** |
 | P7 | `power_thermal` | `nvme_controller` (IO path ticks it; SMART reports its temperature) | **wired** |
+| P8 | `rain` | `ftl` (`rain_seal` / `rain_recover_channel`: a failed channel is rebuilt inside the live FTL, verified end-to-end through the normal read path) | **wired** |
 | P2 | `fil_scheduler` | none (the host-runnable sim executes ops synchronously — channel-level parallelism is a model the single-threaded sim cannot itself exhibit) | shelf — verified model, not load-bearing |
-| P8 | `rain` | none (parity is computed/reconstructed only by its own check) | shelf — wiring into the FTL write/recover path is the remaining work |
 
 Adding more standalone modules (P3–P6, P9) widens the shelf without closing the gap. Prefer
 wiring an existing verified module into the live path over landing a new disconnected one.
@@ -250,7 +250,7 @@ Set Features `FEAT_POWER_MGMT`. Wire composite temp + throttle events into SMART
 **Silicon ceiling.** No real sensor/voltage/clock — temperature is an activity model with a
 calibration knob (`ponytail:` real sensors drift; leave the knob).
 
-## P8 — Internal RAID/RAIN (die/channel failure protection)  *(G8)*  — ✅ DONE (2026-06-30)
+## P8 — Internal RAID/RAIN (die/channel failure protection)  *(G8)*  — ✅ DONE + WIRED (2026-06-30)
 
 > Landed: `fw/rain.spl` (XOR parity stripe across the P2 channels; reconstruct a failed channel —
 > data or parity — from the survivors), `rain_selftest` (`test_fw`), `rain_check.spl` (single-channel
@@ -258,6 +258,19 @@ calibration knob (`ponytail:` real sensors drift; leave the knob).
 > the set: for any data and any survivor combination, reconstruction recovers the exact lost word
 > (`parity = lost ⊕ s ⇒ parity ⊕ s = lost`), via Lean-core `Nat.xor` (would be false if the formula
 > were wrong). Built on P2's channel model.
+>
+> **Wired into the live FTL (2026-06-30).** The physical address space is a clean
+> NUM_GROUPS×NUM_CHANNELS block grid (`block = group·NUM_CHANNELS + channel`), so a RAIN stripe is
+> one page per channel at a fixed (group, page). `Ftl` carries a per-stripe parity word array;
+> `me.rain_seal()` snapshots parity over the current physical contents (a RAID parity-scrub pass),
+> and `me.rain_recover_channel(c)` rebuilds a corrupted/failed channel: per NAND block it computes
+> the recovered payloads from the sealed parity XOR the surviving channels, erases the failed
+> block, and reprograms its live pages in place — the L2P ppns are unchanged, so the normal read
+> path returns the original data. Proven end-to-end by `rain_ftl_check.spl` (256 known writes →
+> seal → a whole channel made uncorrectable, confirmed via `read_status` → rebuild → every LBA
+> reads back its original value) plus `ftl_rain_selftest` in `test_fw`. **Ceiling:** parity is
+> sealed on demand, not maintained on every program/erase/GC relocation — a continuously-correct
+> live parity (updated through the GC mover) is the next step; recorded here, not silently skipped.
 
 **Goal.** XOR parity stripe across channels so a die/channel failure is recoverable.
 

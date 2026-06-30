@@ -18,6 +18,7 @@ use ftl_journal.*
 use ftl_gc.*
 use sandbox.*
 use hooks.*
+use rain.*
 
 struct Ftl:
     fil:       Fil
@@ -27,9 +28,10 @@ struct Ftl:
     seq:       i64
     rd_disturb: [i64]      # per-block read counter (volatile) driving read-disturb scrub
     hooks:     PolicyHooks  # sandboxed dynamic policy hooks (req 7)
+    rain_parity: [i64]     # one XOR parity word per RAIN stripe (gap-closure P8), sealed on demand
 
 fn ftl_new() -> Ftl:
-    Ftl(fil: fil_new(), map: ftl_map_new(), band: ftl_band_new(), journal: ftl_journal_new(), seq: 0, rd_disturb: ftl_fill(NUM_BLOCKS, 0), hooks: policy_hooks_new())
+    Ftl(fil: fil_new(), map: ftl_map_new(), band: ftl_band_new(), journal: ftl_journal_new(), seq: 0, rd_disturb: ftl_fill(NUM_BLOCKS, 0), hooks: policy_hooks_new(), rain_parity: ftl_fill(rain_num_stripes(), 0))
 
 impl Ftl:
     # Write one logical block (log-structured): program a fresh physical page with OOB
@@ -198,6 +200,78 @@ impl Ftl:
     # test hook: inject NAND read bit-errors at a physical page (forwarded to FIL).
     me inject_read_bitflip(ppn: i64, n: i64):
         me.fil.inject_read_bitflip(ppn, n)
+
+    # ── Internal RAID/RAIN (die/channel failure protection, gap-closure P8) ───────
+    # Seal RAIN parity over the device's current physical contents: for every stripe
+    # (one page per channel at a fixed group+page), parity = XOR of the NUM_CHANNELS
+    # pages' data. A consistency snapshot, like a RAID parity-scrub pass; subsequent
+    # writes to a stripe make its parity stale until the next seal (the ceiling: parity
+    # is rebuilt on demand here rather than maintained on every program/erase/GC move).
+    me rain_seal():
+        var group: i64 = 0
+        while group < rain_num_groups():
+            var page: i64 = 0
+            while page < PAGES_PER_BLOCK:
+                var acc: i64 = 0
+                var c: i64 = 0
+                while c < NUM_CHANNELS:
+                    val sppn: i64 = rain_ppn(group, c, page)
+                    val rd: FilRead = me.fil.read(sppn)
+                    acc = acc ^ rd.data
+                    c = c + 1
+                me.rain_parity[group * PAGES_PER_BLOCK + page] = acc
+                page = page + 1
+            group = group + 1
+
+    # Rebuild every live page on a corrupted/failed channel from sealed parity + the
+    # surviving channels. NAND is erase-before-program, so we work one block at a time:
+    # compute the recovered payloads from the survivors (intact, on other channels) XOR
+    # the sealed parity, erase the failed block, then reprogram its live pages in place.
+    # The L2P ppns are unchanged, so the normal read path returns the original data.
+    # Returns the number of pages rebuilt.
+    me rain_recover_channel(failed: i64) -> i64:
+        # Invert the L2P (lba → ppn) so we know which physical pages are live, and for whom.
+        var rev: [i64] = ftl_fill(NUM_PAGES, UNMAP)
+        var lba: i64 = 0
+        while lba < LBA_COUNT:
+            val ppn: i64 = me.map.lookup(lba)
+            if ppn != UNMAP:
+                rev[ppn] = lba
+            lba = lba + 1
+        var rebuilt: i64 = 0
+        var group: i64 = 0
+        while group < rain_num_groups():
+            val blk: i64 = group * NUM_CHANNELS + failed
+            # 1. recovered payload per page = sealed parity XOR the surviving channels' data.
+            var rec: [i64] = ftl_fill(PAGES_PER_BLOCK, 0)
+            var page: i64 = 0
+            while page < PAGES_PER_BLOCK:
+                var acc: i64 = me.rain_parity[group * PAGES_PER_BLOCK + page]
+                var c: i64 = 0
+                while c < NUM_CHANNELS:
+                    if c != failed:
+                        val sppn: i64 = rain_ppn(group, c, page)
+                        val rd: FilRead = me.fil.read(sppn)
+                        acc = acc ^ rd.data
+                    c = c + 1
+                rec[page] = acc
+                page = page + 1
+            # 2. erase the failed block (clears the corrupted pages so they are programmable).
+            me.fil.erase(blk)
+            # 3. reprogram the block's live pages in place with the recovered payload.
+            me.seq = me.seq + 1
+            val s: i64 = me.seq
+            page = 0
+            while page < PAGES_PER_BLOCK:
+                val ppn: i64 = blk * PAGES_PER_BLOCK + page
+                val who: i64 = rev[ppn]
+                if who != UNMAP:
+                    val payload: i64 = rec[page]
+                    me.fil.program(ppn, who, s, payload)
+                    rebuilt = rebuilt + 1
+                page = page + 1
+            group = group + 1
+        rebuilt
 
     # ── Read-only introspection (migration capture) ──────────────────────────
     # Physical page currently backing a logical block (UNMAP if unmapped).
@@ -389,4 +463,38 @@ fn ftl_selftest() -> i64:
     fail = fail + expect_eq(ftl.read(163), 263, "post-GC read relocated lba163")
     fail = fail + expect_eq(ftl.erase_count(victim), 1, "gc erased + reclaimed the victim block")
 
+    fail
+
+# RAIN wired into the FTL: write known data, seal parity, lose a whole channel, rebuild it.
+fn ftl_rain_selftest() -> i64:
+    var fail: i64 = 0
+    var ftl: Ftl = ftl_new()
+    var i: i64 = 0
+    while i < 64:
+        val v: i64 = (i % 251) + 1
+        val st: i64 = ftl.write(i, v)
+        fail = fail + expect_eq(st, SC_SUCCESS, "ftl-rain: write")
+        i = i + 1
+    ftl.rain_seal()
+    val ppn0: i64 = ftl.physical_ppn(0)
+    val blk0: i64 = ppn_block(ppn0)
+    val failed: i64 = blk0 % NUM_CHANNELS
+    var corrupted: i64 = 0
+    i = 0
+    while i < 64:
+        val ppn: i64 = ftl.physical_ppn(i)
+        if ppn != UNMAP:
+            val blk: i64 = ppn_block(ppn)
+            if blk % NUM_CHANNELS == failed:
+                ftl.inject_read_bitflip(ppn, 2)
+                corrupted = corrupted + 1
+        i = i + 1
+    val rebuilt: i64 = ftl.rain_recover_channel(failed)
+    fail = fail + expect_eq(rebuilt, corrupted, "ftl-rain: all lost pages rebuilt")
+    i = 0
+    while i < 64:
+        val want: i64 = (i % 251) + 1
+        val got: i64 = ftl.read(i)
+        fail = fail + expect_eq(got, want, "ftl-rain: LBA survives channel loss")
+        i = i + 1
     fail

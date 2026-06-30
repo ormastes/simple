@@ -27,7 +27,7 @@ nvme_firmware_simulation_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 17 | 17 | 0 | 0 |
+| 18 | 18 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -361,6 +361,29 @@ expect(out).to_contain("RAIN OK")
 
 </details>
 
+#### rebuilds a failed channel inside the live FTL with no logical data loss (RAIN wired, P8)
+
+- Write known data through the FTL, seal parity, fail a whole channel, then rebuild it
+   - Expected: code equals `0`
+- Every LBA reads back its original value through the normal FTL read path after the rebuild
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Write known data through the FTL, seal parity, fail a whole channel, then rebuild it")
+val (out, err, code) = _run(FW + "/rain_ftl_check.spl")
+expect(code).to_equal(0)
+step("Every LBA reads back its original value through the normal FTL read path after the rebuild")
+expect(out).to_contain("RAIN-FTL OK")
+```
+
+</details>
+
 #### throttles under sustained thermal load and recovers when cool (gap-closure P7)
 
 - Drive sustained load until the device throttles and raises the SMART critical warning, then cool it
@@ -516,8 +539,8 @@ expect(out).to_contain("LEAN_OK")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 17 |
-| Active scenarios | 17 |
+| Total scenarios | 18 |
+| Active scenarios | 18 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
