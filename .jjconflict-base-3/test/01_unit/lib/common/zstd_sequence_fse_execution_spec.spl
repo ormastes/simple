@@ -46,93 +46,77 @@ fn _raw_block(last_block: bool, payload: [u8]) -> [u8]:
 fn _compressed_block(last_block: bool, payload: [u8]) -> [u8]:
     _block_header(last_block, 2, payload.len()) + payload
 
-fn _zstd_reverse_bitstream(bits: [i64]) -> [u8]:
-    val tail_bits = bits.len() % 8
-    var out: [u8] = []
-    var cursor = tail_bits
-    while cursor < bits.len():
-        var byte: u8 = 0u8
-        var bit_idx = 0
-        while bit_idx < 8:
-            if bits[cursor + bit_idx] == 1:
-                byte = byte | (1u8 << bit_idx.to_u8())
-            bit_idx = bit_idx + 1
-        out.push(byte)
-        cursor = cursor + 8
-    var tail: u8 = 1u8 << tail_bits.to_u8()
-    var idx = 0
-    while idx < tail_bits:
-        if bits[idx] == 1:
-            tail = tail | (1u8 << idx.to_u8())
-        idx = idx + 1
-    out.push(tail)
-    out
-
-fn _append_lsb_bits(bits: [i64], value: i64, width: i64) -> [i64]:
+# RFC 8478 sequence/FSE bitstreams are backward streams read MSB-first within
+# each byte (the same convention as the Huffman literal stream and the FSE
+# Huffman-weight stream). A fixture is expressed as the ordered list of logical
+# `(value, width)` reads the decoder performs (state inits, extra bits, and
+# state-advance low bits). `_append_msb_bits` records one read by pushing the
+# value's bits in consumed order (MSB first, since the MSB reader returns the
+# first-consumed bit as the most-significant). `_zstd_msb_backward_stream` then
+# lays the concatenated consumed-bit list into the canonical backward stream:
+# the first-consumed bit sits just under a single `1` end-marker in the last
+# byte, filling downward to bit 0 of the first byte.
+fn _append_msb_bits(bits: [i64], value: i64, width: i64) -> [i64]:
     expect(width >= 0).to_equal(true)
     expect(value >= 0).to_equal(true)
-    var limit = 1
-    var width_idx = 0
-    while width_idx < width:
-        limit = limit * 2
-        width_idx = width_idx + 1
-    expect(value < limit).to_equal(true)
     var out = bits
-    var idx = 0
-    var probe = value
-    while idx < width:
-        out.push(probe & 1)
-        probe = probe / 2
-        idx = idx + 1
+    var idx = width - 1
+    while idx >= 0:
+        out.push((value >> idx) & 1)
+        idx = idx - 1
     out
 
-fn _zstd_reverse_bitstream_from_reads(bits: [i64]) -> [u8]:
-    val tail_bits = bits.len() % 8
+fn _msb_stream_bit_at(cbits: [i64], marker_pos: i64, pos: i64) -> i64:
+    if pos == marker_pos:
+        return 1
+    if pos >= 0 and pos < marker_pos:
+        return cbits[marker_pos - 1 - pos]
+    0
+
+fn _zstd_msb_backward_stream(cbits: [i64]) -> [u8]:
+    val marker_pos = cbits.len()
+    val total_bits = marker_pos + 1
+    var num_bytes = total_bits / 8
+    if total_bits % 8 != 0:
+        num_bytes = num_bytes + 1
     var out: [u8] = []
-    var cursor = bits.len() - 8
-    while cursor >= tail_bits:
+    var j = 0
+    while j < num_bytes:
         var byte: u8 = 0u8
-        var bit_idx = 0
-        while bit_idx < 8:
-            if bits[cursor + bit_idx] == 1:
-                byte = byte | (1u8 << bit_idx.to_u8())
-            bit_idx = bit_idx + 1
+        var b = 0
+        while b < 8:
+            val pos = j * 8 + b
+            if _msb_stream_bit_at(cbits, marker_pos, pos) == 1:
+                byte = byte | (1u8 << b.to_u8())
+            b = b + 1
         out.push(byte)
-        cursor = cursor - 8
-    var tail: u8 = 1u8 << tail_bits.to_u8()
-    var idx = 0
-    while idx < tail_bits:
-        if bits[idx] == 1:
-            tail = tail | (1u8 << idx.to_u8())
-        idx = idx + 1
-    out.push(tail)
+        j = j + 1
     out
 
 describe "zstd fse/predefined sequence execution":
-    it "encodes decoder-read bitstreams for mixed fixtures explicitly":
+    it "packs decoder-read sequences into the MSB-first backward bitstream":
         var bits: [i64] = []
-        bits = _append_lsb_bits(bits, 0, 6)
-        bits = _append_lsb_bits(bits, 1, 5)
-        bits = _append_lsb_bits(bits, 2, 4)
-        bits = _append_lsb_bits(bits, 1, 1)
-        bits = _append_lsb_bits(bits, 0, 1)
-        expect(_zstd_reverse_bitstream_from_reads(bits)).to_equal([0x48u8, 0x20u8, 0x02u8])
+        bits = _append_msb_bits(bits, 0, 6)
+        bits = _append_msb_bits(bits, 1, 5)
+        bits = _append_msb_bits(bits, 2, 4)
+        bits = _append_msb_bits(bits, 1, 1)
+        bits = _append_msb_bits(bits, 0, 1)
+        expect(_zstd_msb_backward_stream(bits)).to_equal([0x4Au8, 0x00u8, 0x02u8])
 
-    it "reverses longer decoder-read bitstreams with a nontrivial tail":
+    it "packs a longer consumed-bit list with a nontrivial tail":
         val bits = [
             1, 0, 1, 0, 1,
             1, 0, 0, 1, 1, 1, 0, 0,
             1, 1, 0, 1, 1, 0, 1, 1,
             0, 1, 1, 0, 0, 1, 0, 1
         ]
-        expect(_zstd_reverse_bitstream_from_reads(bits)).to_equal([0xA6u8, 0xDBu8, 0x39u8, 0x35u8])
+        expect(_zstd_msb_backward_stream(bits)).to_equal([0x65u8, 0xDBu8, 0x9Cu8, 0x35u8])
 
     it "executes a sequence using a predefined ll table and rle offset/ml tables":
-        val bits = [
-            0, 0, 0, 0, 0, 0,
-            0, 1
-        ]
-        val sequence_stream = _zstd_reverse_bitstream(bits)
+        var bits: [i64] = []
+        bits = _append_msb_bits(bits, 0, 6)
+        bits = _append_msb_bits(bits, 2, 2)
+        val sequence_stream = _zstd_msb_backward_stream(bits)
         val payload = [
             0x00u8,
             0x01u8,
@@ -148,14 +132,10 @@ describe "zstd fse/predefined sequence execution":
         expect(decoded.unwrap()).to_equal([0x61u8, 0x62u8, 0x63u8, 0x61u8, 0x62u8, 0x63u8])
 
     it "fails closed on offset code 31 with an invalid match offset instead of unsupported-feature gating":
-        val bits = [
-            0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0
-        ]
-        val sequence_stream = _zstd_reverse_bitstream_from_reads(bits)
+        var bits: [i64] = []
+        bits = _append_msb_bits(bits, 0, 6)
+        bits = _append_msb_bits(bits, 0, 31)
+        val sequence_stream = _zstd_msb_backward_stream(bits)
         val payload = [
             0x00u8,
             0x01u8,
@@ -171,11 +151,10 @@ describe "zstd fse/predefined sequence execution":
         _expect_compression_error(decoded.unwrap_err(), "CorruptStream", "invalid match offset")
 
     it "executes a sequence using an fse-compressed ll table with a prior raw block":
-        val bits = [
-            0, 0, 0, 0, 0,
-            0, 1
-        ]
-        val sequence_stream = _zstd_reverse_bitstream(bits)
+        var bits: [i64] = []
+        bits = _append_msb_bits(bits, 0, 5)
+        bits = _append_msb_bits(bits, 2, 2)
+        val sequence_stream = _zstd_msb_backward_stream(bits)
         val payload = [
             0x00u8,
             0x01u8,
@@ -192,13 +171,12 @@ describe "zstd fse/predefined sequence execution":
         expect(decoded.unwrap()).to_equal([0x61u8, 0x62u8, 0x63u8, 0x61u8, 0x62u8, 0x63u8])
 
     it "executes two sequences using a predefined ll table with state advancement":
-        val bits = [
-            0, 0, 0, 0, 0, 0,
-            0, 0,
-            0, 0, 0, 0,
-            0, 0
-        ]
-        val sequence_stream = _zstd_reverse_bitstream_from_reads(bits)
+        var bits: [i64] = []
+        bits = _append_msb_bits(bits, 0, 6)
+        bits = _append_msb_bits(bits, 0, 2)
+        bits = _append_msb_bits(bits, 0, 4)
+        bits = _append_msb_bits(bits, 0, 2)
+        val sequence_stream = _zstd_msb_backward_stream(bits)
         val payload = [
             0x00u8,
             0x02u8,
@@ -214,13 +192,12 @@ describe "zstd fse/predefined sequence execution":
         expect(decoded.unwrap()).to_equal([0x61u8, 0x61u8, 0x61u8, 0x61u8, 0x61u8, 0x61u8, 0x61u8])
 
     it "executes two sequences using an fse-compressed ll table with state advancement":
-        val bits = [
-            0, 0, 0, 0, 0,
-            0, 0,
-            0,
-            0, 0
-        ]
-        val sequence_stream = _zstd_reverse_bitstream_from_reads(bits)
+        var bits: [i64] = []
+        bits = _append_msb_bits(bits, 0, 5)
+        bits = _append_msb_bits(bits, 0, 2)
+        bits = _append_msb_bits(bits, 0, 1)
+        bits = _append_msb_bits(bits, 0, 2)
+        val sequence_stream = _zstd_msb_backward_stream(bits)
         val payload = [
             0x00u8,
             0x02u8,
@@ -237,13 +214,12 @@ describe "zstd fse/predefined sequence execution":
         expect(decoded.unwrap()).to_equal([0x61u8, 0x61u8, 0x61u8, 0x61u8, 0x61u8, 0x61u8, 0x61u8])
 
     it "executes two sequences using a predefined offset table with state advancement":
-        val bits = [
-            0, 1, 1, 1, 0,
-            0, 0,
-            0, 1, 1, 1, 0,
-            0, 0
-        ]
-        val sequence_stream = _zstd_reverse_bitstream_from_reads(bits)
+        var bits: [i64] = []
+        bits = _append_msb_bits(bits, 14, 5)
+        bits = _append_msb_bits(bits, 0, 2)
+        bits = _append_msb_bits(bits, 14, 5)
+        bits = _append_msb_bits(bits, 0, 2)
+        val sequence_stream = _zstd_msb_backward_stream(bits)
         val payload = [
             0x00u8,
             0x02u8,
@@ -259,11 +235,10 @@ describe "zstd fse/predefined sequence execution":
         expect(decoded.unwrap()).to_equal([0x61u8, 0x61u8, 0x61u8, 0x61u8, 0x61u8, 0x61u8, 0x61u8])
 
     it "executes a sequence using a predefined match-length table":
-        val bits = [
-            1, 0, 0, 0, 0, 0,
-            0, 0
-        ]
-        val sequence_stream = _zstd_reverse_bitstream_from_reads(bits)
+        var bits: [i64] = []
+        bits = _append_msb_bits(bits, 1, 6)
+        bits = _append_msb_bits(bits, 0, 2)
+        val sequence_stream = _zstd_msb_backward_stream(bits)
         val payload = [
             0x00u8,
             0x01u8,
@@ -279,11 +254,10 @@ describe "zstd fse/predefined sequence execution":
         expect(decoded.unwrap()).to_equal([0x61u8, 0x61u8, 0x61u8, 0x61u8, 0x61u8])
 
     it "executes a sequence with predefined offset and match-length tables together":
-        val bits = [
-            0, 0, 0, 0, 0,
-            1, 0, 0, 0, 0, 0
-        ]
-        val sequence_stream = _zstd_reverse_bitstream_from_reads(bits)
+        var bits: [i64] = []
+        bits = _append_msb_bits(bits, 0, 5)
+        bits = _append_msb_bits(bits, 1, 6)
+        val sequence_stream = _zstd_msb_backward_stream(bits)
         val payload = [
             0x00u8,
             0x01u8,
@@ -299,12 +273,14 @@ describe "zstd fse/predefined sequence execution":
         expect(decoded.unwrap()).to_equal([0x61u8, 0x61u8, 0x61u8, 0x61u8, 0x61u8, 0x61u8, 0x61u8, 0x61u8])
 
     it "executes two sequences with predefined offset and match-length state advancement":
-        val bits = [
-            0, 0, 1, 1, 1, 0, 0, 0,
-            0, 0, 0, 0, 0, 1, 0, 0,
-            0, 1, 1, 1, 0, 1, 0, 0
-        ]
-        val sequence_stream = _zstd_reverse_bitstream(bits)
+        var bits: [i64] = []
+        bits = _append_msb_bits(bits, 14, 5)
+        bits = _append_msb_bits(bits, 1, 6)
+        bits = _append_msb_bits(bits, 0, 2)
+        bits = _append_msb_bits(bits, 1, 4)
+        bits = _append_msb_bits(bits, 14, 5)
+        bits = _append_msb_bits(bits, 0, 2)
+        val sequence_stream = _zstd_msb_backward_stream(bits)
         val payload = [
             0x00u8,
             0x02u8,
@@ -321,12 +297,12 @@ describe "zstd fse/predefined sequence execution":
 
     it "executes two mixed sequences with predefined ll, compressed of, and rle ml tables":
         var bits: [i64] = []
-        bits = _append_lsb_bits(bits, 0, 6)
-        bits = _append_lsb_bits(bits, 1, 5)
-        bits = _append_lsb_bits(bits, 2, 4)
-        bits = _append_lsb_bits(bits, 1, 1)
-        bits = _append_lsb_bits(bits, 1, 1)
-        val sequence_stream = _zstd_reverse_bitstream_from_reads(bits)
+        bits = _append_msb_bits(bits, 0, 6)
+        bits = _append_msb_bits(bits, 1, 5)
+        bits = _append_msb_bits(bits, 2, 4)
+        bits = _append_msb_bits(bits, 1, 1)
+        bits = _append_msb_bits(bits, 1, 1)
+        val sequence_stream = _zstd_msb_backward_stream(bits)
         val payload = [
             0x08u8,
             0x7Au8,
@@ -349,12 +325,12 @@ describe "zstd fse/predefined sequence execution":
 
     it "executes two mixed sequences with rle ll, compressed of, and predefined ml tables":
         var bits: [i64] = []
-        bits = _append_lsb_bits(bits, 1, 5)
-        bits = _append_lsb_bits(bits, 0, 6)
-        bits = _append_lsb_bits(bits, 1, 6)
-        bits = _append_lsb_bits(bits, 1, 1)
-        bits = _append_lsb_bits(bits, 0, 1)
-        val sequence_stream = _zstd_reverse_bitstream_from_reads(bits)
+        bits = _append_msb_bits(bits, 1, 5)
+        bits = _append_msb_bits(bits, 0, 6)
+        bits = _append_msb_bits(bits, 1, 6)
+        bits = _append_msb_bits(bits, 1, 1)
+        bits = _append_msb_bits(bits, 0, 1)
+        val sequence_stream = _zstd_msb_backward_stream(bits)
         val payload = [
             0x00u8,
             0x02u8,
@@ -376,18 +352,18 @@ describe "zstd fse/predefined sequence execution":
 
     it "executes three mixed sequences with repeat-offset resolution after history changes":
         var bits: [i64] = []
-        bits = _append_lsb_bits(bits, 0, 5)
-        bits = _append_lsb_bits(bits, 5, 5)
-        bits = _append_lsb_bits(bits, 0, 6)
-        bits = _append_lsb_bits(bits, 0, 3)
-        bits = _append_lsb_bits(bits, 1, 1)
-        bits = _append_lsb_bits(bits, 0, 6)
-        bits = _append_lsb_bits(bits, 23, 5)
-        bits = _append_lsb_bits(bits, 0, 1)
-        bits = _append_lsb_bits(bits, 1, 1)
-        bits = _append_lsb_bits(bits, 0, 6)
-        bits = _append_lsb_bits(bits, 0, 5)
-        val sequence_stream = _zstd_reverse_bitstream_from_reads(bits)
+        bits = _append_msb_bits(bits, 0, 5)
+        bits = _append_msb_bits(bits, 5, 5)
+        bits = _append_msb_bits(bits, 0, 6)
+        bits = _append_msb_bits(bits, 0, 3)
+        bits = _append_msb_bits(bits, 1, 1)
+        bits = _append_msb_bits(bits, 0, 6)
+        bits = _append_msb_bits(bits, 23, 5)
+        bits = _append_msb_bits(bits, 0, 1)
+        bits = _append_msb_bits(bits, 1, 1)
+        bits = _append_msb_bits(bits, 0, 6)
+        bits = _append_msb_bits(bits, 0, 5)
+        val sequence_stream = _zstd_msb_backward_stream(bits)
         val payload = [
             0x08u8,
             0x7Au8,
