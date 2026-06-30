@@ -1,0 +1,773 @@
+# TLS Shim -- Baremetal TLS Integration
+#
+# MDSOC: feature dimension, security layer
+# Status: baremetal platform shims plus explicit certificate availability gate.
+#
+# Architecture:
+#   - rt_file_read_text: @export("C") stub returns empty string on baremetal;
+#     TLS uses embedded_certs instead of filesystem certificate loading.
+#   - get_baremetal_tls_info(): returns embedded DER certificate/key material
+#     when the explicit embedded_certs availability gate is true.
+#   - Hardware entropy stubs: rt_rdrand/rt_rndr/rt_riscv_seed provide
+#     deterministic-but-nonzero values for the ChaCha20 CSPRNG seeding
+#     in src/os/crypto/random.spl. Replace with real hardware entropy
+#     when platform drivers are available.
+#   - TLS SFFI stubs: all rt_tls_* externs from std.nogc_sync_mut.io.tls_sffi
+#     are implemented as fail-closed no-ops. No live TLS stack exists on
+#     baremetal yet; stubs return -1/false/"" so callers can detect unavailability
+#     without hanging. Wire to a rustls-based netstack when available.
+#   - TLS record framing helpers: BaremetalTlsFrame + tls_frame_build/parse
+#     let future layers assemble raw TLS 1.2/1.3 records without a full stack.
+#   - Handshake state machine: TlsHandshakeState tracks progress through
+#     ClientHello → ServerHello → Certificate → Finished. All transitions
+#     are stubs that advance state counters but perform no crypto.
+#   - Cipher suite negotiation: tls_negotiate_cipher_suite returns a
+#     placeholder suite name; real negotiation deferred to live stack.
+
+use os.kernel.net.embedded_certs.{
+    get_embedded_cert_der, get_embedded_key_der, has_embedded_certs
+}
+
+@cfg(riscv64)
+use os.kernel.arch_adapt.riscv64_entropy_time.{riscv64_boot_elapsed_us, riscv64_csr_entropy_seed}
+
+# ============================================================================
+# File I/O Stub
+# ============================================================================
+
+@export("C")
+fn rt_file_read_text(path: text) -> text:
+    """Read a text file by path.
+
+    Baremetal stub: no filesystem available. Returns empty string.
+    TLS certificate loading should use embedded_certs module instead.
+    """
+    ""
+
+# ============================================================================
+# Time Source (baremetal-only)
+# ============================================================================
+
+var g_fake_time_us: i64 = 1_000_000_000  # Start at ~1000 seconds in micros
+
+@cfg(riscv64)
+@export("C")
+fn rt_time_now_unix_micros() -> i64:
+    """Return RISC-V boot-relative microseconds from the hardware timer."""
+    riscv64_boot_elapsed_us().to_i64()
+
+@cfg(riscv64)
+@export("C")
+fn rt_time_now_ms() -> i64:
+    """Return RISC-V boot-relative milliseconds from the hardware timer."""
+    rt_time_now_unix_micros() / 1000
+
+@cfg(not(riscv64))
+@export("C")
+fn rt_time_now_unix_micros() -> i64:
+    """Return current time in microseconds since epoch.
+
+    Non-RISC-V baremetal stub: returns a monotonically increasing fake clock.
+    Each call advances by 1000us (1ms).
+    TODO: wire to real RTC + hardware timer.
+    """
+    val result = g_fake_time_us
+    g_fake_time_us = g_fake_time_us + 1000
+    result
+
+@cfg(not(riscv64))
+@export("C")
+fn rt_time_now_ms() -> i64:
+    """Return current time in milliseconds from the non-RISC-V fake clock."""
+    rt_time_now_unix_micros() / 1000
+
+# ============================================================================
+# Hardware Entropy Stubs (baremetal-only)
+# ============================================================================
+#
+# The CSPRNG in src/os/crypto/random.spl uses platform-conditional externs
+# for hardware entropy:
+#   @cfg(x86_64) extern fn rt_rdrand() -> u64
+#   @cfg(arm64)  extern fn rt_rndr() -> u64
+#   @cfg(riscv64) extern fn rt_riscv_seed() -> u64
+#   @cfg(baremetal) extern fn rt_entropy_hardware_ready() -> i64
+#
+# On baremetal, these hardware instructions may not be available during early
+# boot or on all platforms. Non-RISC-V paths still provide deterministic-
+# but-nonzero stubs using a simple LCG, gated with @cfg(baremetal) to avoid
+# symbol collisions with real platform implementations on hosted builds. RISC-V
+# mixes cycle+time+instret as a best-effort fallback, but this is still not a
+# production TLS entropy source.
+# Replace with real RDRAND/RNDR/seed instructions when hardware drivers
+# are available.
+
+var g_entropy_state: u64 = 0xDEADBEEF_CAFEBABE
+
+@cfg(baremetal)
+extern fn rt_entropy_hardware_ready() -> i64
+
+fn _lcg_next() -> u64:
+    """Linear congruential generator for stub entropy.
+
+    NOT cryptographically secure. Provides nonzero, varying values so the
+    ChaCha20 CSPRNG can initialize without hanging on zero-seed.
+    TODO: replace with real hardware entropy source.
+    """
+    # Knuth LCG parameters
+    g_entropy_state = g_entropy_state * 6364136223846793005 + 1442695040888963407
+    g_entropy_state
+
+@cfg(baremetal)
+@export("C")
+fn rt_rdrand() -> u64:
+    """x86/x86_64 RDRAND stub for baremetal.
+
+    Returns deterministic pseudo-random values from LCG.
+    TODO: replace with real RDRAND instruction when running on x86 hardware.
+    """
+    _lcg_next()
+
+@cfg(baremetal)
+@export("C")
+fn rt_rndr() -> u64:
+    """ARM64 RNDR stub for baremetal.
+
+    Returns deterministic pseudo-random values from LCG.
+    TODO: replace with real RNDR instruction when running on ARM64 hardware.
+    """
+    _lcg_next()
+
+@cfg(riscv64)
+@export("C")
+fn rt_riscv_seed() -> u64:
+    """RISC-V best-effort seed from cycle+time+instret CSR jitter.
+
+    This is stronger than the old deterministic LCG placeholder, but it is not
+    a production entropy source. Replace with SBI/hardware RNG once available.
+    """
+    riscv64_csr_entropy_seed(rt_time_now_unix_micros().to_u64())
+
+@cfg(baremetal)
+fn _platform_entropy_ready() -> bool:
+    rt_entropy_hardware_ready() > 0
+
+@cfg(not(baremetal))
+fn _platform_entropy_ready() -> bool:
+    false
+
+# ============================================================================
+# Baremetal TLS Configuration
+# ============================================================================
+
+struct BaremetalTlsInfo:
+    """Holds raw DER bytes and production-readiness state for baremetal TLS."""
+    cert_der: [u8]
+    key_der: [u8]
+    available: bool
+    production_ready: bool
+    blocker: text
+
+fn baremetal_tls_platform_ready() -> bool:
+    """Return true only when baremetal entropy is production-grade."""
+    _platform_entropy_ready()
+
+fn baremetal_tls_blocker() -> text:
+    """Return the current platform blocker for enabling TLS on baremetal."""
+    if not has_embedded_certs():
+        return "missing_embedded_certificate_material"
+    if not baremetal_tls_platform_ready():
+        return "placeholder_entropy"
+    ""
+
+fn get_baremetal_tls_info() -> BaremetalTlsInfo:
+    """Get embedded TLS certificate and key info.
+
+    Returns a BaremetalTlsInfo with the embedded DER bytes when the
+    embedded_certs availability gate is true. Synthetic placeholder material
+    remains unavailable because embedded_certs only reports true for non-empty
+    offline-generated DER material.
+    """
+    if not has_embedded_certs():
+        return BaremetalTlsInfo(
+            cert_der: [],
+            key_der: [],
+            available: false,
+            production_ready: false,
+            blocker: baremetal_tls_blocker()
+        )
+    val blocker = baremetal_tls_blocker()
+    BaremetalTlsInfo(
+        cert_der: get_embedded_cert_der(),
+        key_der: get_embedded_key_der(),
+        available: true,
+        production_ready: blocker == "",
+        blocker: blocker
+    )
+
+# ============================================================================
+# TLS Record Framing (baremetal stub layer)
+# ============================================================================
+#
+# TLS 1.2 record header layout (RFC 5246 §6.2):
+#   Byte 0     : content_type  (20=ChangeCipherSpec, 21=Alert, 22=Handshake, 23=AppData)
+#   Bytes 1-2  : version       (0x0303 = TLS 1.2, 0x0304 = TLS 1.3)
+#   Bytes 3-4  : length        (big-endian u16, payload byte count)
+#   Bytes 5..  : payload
+#
+# These helpers build/parse the 5-byte record header in [u8] form so higher
+# layers can assemble raw frames without a live TLS stack.
+
+# Content-type constants (TLS record layer)
+val TLS_RT_CHANGE_CIPHER_SPEC: i64 = 20
+val TLS_RT_ALERT: i64 = 21
+val TLS_RT_HANDSHAKE: i64 = 22
+val TLS_RT_APPLICATION_DATA: i64 = 23
+
+# Version constants
+val TLS_VERSION_1_2: i64 = 0x0303
+val TLS_VERSION_1_3: i64 = 0x0304
+
+struct BaremetalTlsFrame:
+    """A parsed TLS record header with its payload."""
+    content_type: i64
+    version: i64
+    payload_len: i64
+    payload: [u8]
+    valid: bool
+
+fn tls_frame_build(content_type: i64, version: i64, payload: [u8]) -> [u8]:
+    """Build a TLS record by prepending the 5-byte header to payload.
+
+    Returns the full frame bytes: [type, ver_hi, ver_lo, len_hi, len_lo, ...payload].
+    Fails closed (returns empty) when payload exceeds the 16 KiB TLS record limit.
+    """
+    val plen = payload.len()
+    if plen > 16384:
+        return []
+    var out: [u8] = []
+    out.push(content_type.to_u8())
+    out.push(((version >> 8) & 0xFF).to_u8())
+    out.push((version & 0xFF).to_u8())
+    out.push(((plen >> 8) & 0xFF).to_u8())
+    out.push((plen & 0xFF).to_u8())
+    var i: i64 = 0
+    while i < plen:
+        out.push(payload[i.to_u64()])
+        i = i + 1
+    out
+
+fn tls_frame_parse(raw: [u8]) -> BaremetalTlsFrame:
+    """Parse the 5-byte TLS record header from raw bytes.
+
+    Returns a BaremetalTlsFrame. Sets valid=false when raw is too short
+    or the declared length exceeds the available bytes.
+    """
+    val rlen = raw.len().to_i64()
+    if rlen < 5:
+        return BaremetalTlsFrame(
+            content_type: 0, version: 0, payload_len: 0,
+            payload: [], valid: false
+        )
+    val ct = raw[0].to_i64()
+    val ver = (raw[1].to_i64() << 8) | raw[2].to_i64()
+    val plen = (raw[3].to_i64() << 8) | raw[4].to_i64()
+    if rlen < 5 + plen:
+        return BaremetalTlsFrame(
+            content_type: ct, version: ver, payload_len: plen,
+            payload: [], valid: false
+        )
+    var payload: [u8] = []
+    var i: i64 = 5
+    while i < 5 + plen:
+        payload.push(raw[i.to_u64()])
+        i = i + 1
+    BaremetalTlsFrame(
+        content_type: ct, version: ver, payload_len: plen,
+        payload: payload, valid: true
+    )
+
+# ============================================================================
+# TLS Handshake State Machine (baremetal stub)
+# ============================================================================
+#
+# Tracks server-side TLS 1.2 handshake progress through the standard phases.
+# All transition functions are stubs: they advance the state counter and record
+# the phase name, but perform no crypto or I/O.
+#
+# State constants (server-side TLS 1.2 sequence):
+val TLS_HS_IDLE: i64 = 0
+val TLS_HS_WAIT_CLIENT_HELLO: i64 = 1
+val TLS_HS_SENT_SERVER_HELLO: i64 = 2
+val TLS_HS_SENT_CERTIFICATE: i64 = 3
+val TLS_HS_SENT_SERVER_HELLO_DONE: i64 = 4
+val TLS_HS_WAIT_CLIENT_KEY_EXCHANGE: i64 = 5
+val TLS_HS_WAIT_CHANGE_CIPHER_SPEC: i64 = 6
+val TLS_HS_WAIT_FINISHED: i64 = 7
+val TLS_HS_COMPLETE: i64 = 8
+val TLS_HS_ERROR: i64 = 9
+
+struct TlsHandshakeState:
+    """Tracks baremetal TLS handshake phase and diagnostics.
+
+    Wire conn_fd to a real TCP shim fd when the live netstack arrives.
+    cipher_suite holds the negotiated suite name (stub: always placeholder).
+    error holds a non-empty description when phase == TLS_HS_ERROR.
+    """
+    conn_fd: i64
+    phase: i64
+    cipher_suite: text
+    sni_host: text
+    error: text
+
+fn tls_hs_new(conn_fd: i64) -> TlsHandshakeState:
+    """Create a fresh handshake state waiting for ClientHello."""
+    TlsHandshakeState(
+        conn_fd: conn_fd,
+        phase: TLS_HS_WAIT_CLIENT_HELLO,
+        cipher_suite: "",
+        sni_host: "",
+        error: ""
+    )
+
+fn tls_hs_phase_name(phase: i64) -> text:
+    """Return a human-readable name for a handshake phase constant."""
+    if phase == TLS_HS_IDLE: return "idle"
+    if phase == TLS_HS_WAIT_CLIENT_HELLO: return "wait_client_hello"
+    if phase == TLS_HS_SENT_SERVER_HELLO: return "sent_server_hello"
+    if phase == TLS_HS_SENT_CERTIFICATE: return "sent_certificate"
+    if phase == TLS_HS_SENT_SERVER_HELLO_DONE: return "sent_server_hello_done"
+    if phase == TLS_HS_WAIT_CLIENT_KEY_EXCHANGE: return "wait_client_key_exchange"
+    if phase == TLS_HS_WAIT_CHANGE_CIPHER_SPEC: return "wait_change_cipher_spec"
+    if phase == TLS_HS_WAIT_FINISHED: return "wait_finished"
+    if phase == TLS_HS_COMPLETE: return "complete"
+    if phase == TLS_HS_ERROR: return "error"
+    "unknown"
+
+fn tls_hs_recv_client_hello(hs: TlsHandshakeState, sni_host: text) -> TlsHandshakeState:
+    """Stub: accept ClientHello frame, record SNI, advance to ServerHello phase.
+
+    Baremetal stub: no parsing of the actual ClientHello bytes.
+    TODO: parse offered cipher suites when a real record parser is available.
+    """
+    if hs.phase != TLS_HS_WAIT_CLIENT_HELLO:
+        return TlsHandshakeState(
+            conn_fd: hs.conn_fd, phase: TLS_HS_ERROR,
+            cipher_suite: hs.cipher_suite, sni_host: hs.sni_host,
+            error: "unexpected_client_hello"
+        )
+    TlsHandshakeState(
+        conn_fd: hs.conn_fd,
+        phase: TLS_HS_SENT_SERVER_HELLO,
+        cipher_suite: hs.cipher_suite,
+        sni_host: sni_host,
+        error: ""
+    )
+
+fn tls_hs_send_certificate(hs: TlsHandshakeState) -> TlsHandshakeState:
+    """Stub: emit Certificate + ServerHelloDone, advance state.
+
+    Baremetal stub: no actual record is written to the socket.
+    TODO: call tls_frame_build(TLS_RT_HANDSHAKE, ...) and feed to TCP shim.
+    """
+    if hs.phase != TLS_HS_SENT_SERVER_HELLO:
+        return TlsHandshakeState(
+            conn_fd: hs.conn_fd, phase: TLS_HS_ERROR,
+            cipher_suite: hs.cipher_suite, sni_host: hs.sni_host,
+            error: "unexpected_send_certificate"
+        )
+    TlsHandshakeState(
+        conn_fd: hs.conn_fd,
+        phase: TLS_HS_SENT_SERVER_HELLO_DONE,
+        cipher_suite: hs.cipher_suite,
+        sni_host: hs.sni_host,
+        error: ""
+    )
+
+fn tls_hs_recv_client_key_exchange(hs: TlsHandshakeState) -> TlsHandshakeState:
+    """Stub: accept ClientKeyExchange, advance to waiting for ChangeCipherSpec.
+
+    Baremetal stub: pre-master secret extraction not implemented.
+    TODO: extract pre-master secret, derive session keys via cipher module.
+    """
+    if hs.phase != TLS_HS_SENT_SERVER_HELLO_DONE:
+        return TlsHandshakeState(
+            conn_fd: hs.conn_fd, phase: TLS_HS_ERROR,
+            cipher_suite: hs.cipher_suite, sni_host: hs.sni_host,
+            error: "unexpected_client_key_exchange"
+        )
+    TlsHandshakeState(
+        conn_fd: hs.conn_fd,
+        phase: TLS_HS_WAIT_CHANGE_CIPHER_SPEC,
+        cipher_suite: hs.cipher_suite,
+        sni_host: hs.sni_host,
+        error: ""
+    )
+
+fn tls_hs_recv_finished(hs: TlsHandshakeState) -> TlsHandshakeState:
+    """Stub: accept client Finished, mark handshake complete.
+
+    Baremetal stub: Finished MAC verification not implemented.
+    TODO: verify HMAC-SHA256 over handshake transcript when crypto is wired.
+    """
+    if (hs.phase != TLS_HS_WAIT_CHANGE_CIPHER_SPEC and
+        hs.phase != TLS_HS_WAIT_FINISHED):
+        return TlsHandshakeState(
+            conn_fd: hs.conn_fd, phase: TLS_HS_ERROR,
+            cipher_suite: hs.cipher_suite, sni_host: hs.sni_host,
+            error: "unexpected_finished"
+        )
+    TlsHandshakeState(
+        conn_fd: hs.conn_fd,
+        phase: TLS_HS_COMPLETE,
+        cipher_suite: hs.cipher_suite,
+        sni_host: hs.sni_host,
+        error: ""
+    )
+
+fn tls_hs_is_complete(hs: TlsHandshakeState) -> bool:
+    """Return true when the handshake has reached the COMPLETE phase."""
+    hs.phase == TLS_HS_COMPLETE
+
+fn tls_hs_has_error(hs: TlsHandshakeState) -> bool:
+    """Return true when the handshake is in an error state."""
+    hs.phase == TLS_HS_ERROR
+
+# ============================================================================
+# Cipher Suite Negotiation (baremetal stub)
+# ============================================================================
+#
+# Returns a placeholder suite name. Real negotiation (scanning ClientHello
+# offered suites vs. server preference list) is deferred to the live stack.
+#
+# Suite name strings follow the IANA TLS Cipher Suite Registry format.
+
+val TLS_CIPHER_PLACEHOLDER: text = "TLS_NULL_WITH_NULL_NULL"
+val TLS_CIPHER_PREFERRED: text = "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
+
+fn tls_negotiate_cipher_suite(offered: [text]) -> text:
+    """Select a cipher suite from the client-offered list.
+
+    Baremetal stub: if the preferred suite appears in the offered list, return
+    it. Otherwise return TLS_NULL_WITH_NULL_NULL to signal no agreement.
+    Callers should treat TLS_NULL_WITH_NULL_NULL as a negotiation failure.
+    TODO: implement full preference-ordered scan when crypto is available.
+    """
+    var i: i64 = 0
+    while i < offered.len().to_i64():
+        if offered[i.to_u64()] == TLS_CIPHER_PREFERRED:
+            return TLS_CIPHER_PREFERRED
+        i = i + 1
+    TLS_CIPHER_PLACEHOLDER
+
+fn tls_cipher_suite_is_valid(suite: text) -> bool:
+    """Return true when suite is not the null/placeholder sentinel."""
+    suite != TLS_CIPHER_PLACEHOLDER and suite != ""
+
+# ============================================================================
+# TLS SFFI Stubs (baremetal @export("C") implementations)
+# ============================================================================
+#
+# Each function here implements the matching extern declared in
+# src/lib/nogc_sync_mut/io/tls_sffi.spl for the SimpleOS baremetal target.
+# All stubs fail closed: no live TLS stack exists yet.
+# Follow-up: wire to a rustls-based netstack when TCP shim gains packet I/O.
+
+# --- TLS Client ---
+
+@export("C")
+fn rt_tls_client_connect(host: text, port: i64) -> i64:
+    """Open a TLS client connection to host:port.
+
+    Baremetal stub: no network stack available. Always returns -1.
+    TODO: delegate to NetstackService TLS client when live stack lands.
+    """
+    -1
+
+@export("C")
+fn rt_tls_client_connect_with_sni(host: text, port: i64, server_name: text) -> i64:
+    """Open a TLS client connection with explicit SNI hostname.
+
+    Baremetal stub: no network stack available. Always returns -1.
+    """
+    -1
+
+@export("C")
+fn rt_tls_client_write(conn: i64, data: text) -> i64:
+    """Write data to a TLS client connection.
+
+    Baremetal stub: no live connection. Returns -1 (0 bytes written).
+    """
+    -1
+
+@export("C")
+fn rt_tls_client_read(conn: i64, max_bytes: i64) -> text:
+    """Read up to max_bytes from a TLS client connection.
+
+    Baremetal stub: no live connection. Returns empty string.
+    """
+    ""
+
+@export("C")
+fn rt_tls_client_close(conn: i64) -> bool:
+    """Close a TLS client connection.
+
+    Baremetal stub: no live connection to close. Always returns false.
+    """
+    false
+
+# --- TLS Server ---
+
+@export("C")
+fn rt_tls_server_create(port: i64, cert_path: text, key_path: text) -> i64:
+    """Create a TLS server listener on port.
+
+    Baremetal stub: no network stack. Use get_baremetal_tls_info() for cert
+    material. Returns -1 until a live netstack listener is wired.
+    """
+    -1
+
+@export("C")
+fn rt_tls_server_accept(server: i64) -> i64:
+    """Accept an incoming TLS client connection on a server handle.
+
+    Baremetal stub: no live listener. Returns -1.
+    """
+    -1
+
+@export("C")
+fn rt_tls_server_write(conn: i64, data: text) -> i64:
+    """Write data to a TLS server-side client connection.
+
+    Baremetal stub: no live connection. Returns -1.
+    """
+    -1
+
+@export("C")
+fn rt_tls_server_read(conn: i64, max_bytes: i64) -> text:
+    """Read from a TLS server-side client connection.
+
+    Baremetal stub: no live connection. Returns empty string.
+    """
+    ""
+
+@export("C")
+fn rt_tls_server_close_connection(conn: i64) -> bool:
+    """Close a server-side TLS client connection.
+
+    Baremetal stub: nothing to close. Returns false.
+    """
+    false
+
+@export("C")
+fn rt_tls_server_shutdown(server: i64) -> bool:
+    """Shut down a TLS server listener.
+
+    Baremetal stub: nothing to shut down. Returns false.
+    """
+    false
+
+# --- Certificate Management ---
+
+@export("C")
+fn rt_tls_load_cert(cert_path: text) -> i64:
+    """Load a PEM certificate from path.
+
+    Baremetal stub: no filesystem. Use get_baremetal_tls_info() for embedded
+    DER material. Returns -1.
+    """
+    -1
+
+@export("C")
+fn rt_tls_load_key(key_path: text) -> i64:
+    """Load a PEM private key from path.
+
+    Baremetal stub: no filesystem. Returns -1.
+    """
+    -1
+
+@export("C")
+fn rt_tls_verify_cert(cert: i64) -> bool:
+    """Verify certificate validity.
+
+    Baremetal stub: no crypto stack. Returns false.
+    """
+    false
+
+@export("C")
+fn rt_tls_get_cert_subject(cert: i64) -> text:
+    """Return the certificate subject distinguished name.
+
+    Baremetal stub: returns empty string.
+    """
+    ""
+
+@export("C")
+fn rt_tls_get_cert_issuer(cert: i64) -> text:
+    """Return the certificate issuer distinguished name.
+
+    Baremetal stub: returns empty string.
+    """
+    ""
+
+@export("C")
+fn rt_tls_get_cert_expiry(cert: i64) -> text:
+    """Return the certificate expiry as ISO 8601 timestamp.
+
+    Baremetal stub: returns empty string.
+    """
+    ""
+
+@export("C")
+fn rt_tls_free_cert(cert: i64) -> bool:
+    """Free certificate resources.
+
+    Baremetal stub: no resources allocated. Returns false.
+    """
+    false
+
+# --- Client Configuration ---
+
+@export("C")
+fn rt_tls_client_config_new() -> i64:
+    """Allocate a new TLS client configuration object.
+
+    Baremetal stub: no config store. Returns -1.
+    """
+    -1
+
+@export("C")
+fn rt_tls_client_config_add_root_cert(config: i64, cert_path: text) -> bool:
+    """Add a root CA certificate to a client configuration.
+
+    Baremetal stub: no config store. Returns false.
+    """
+    false
+
+@export("C")
+fn rt_tls_client_config_set_alpn(config: i64, protocols: [text]) -> bool:
+    """Set ALPN protocol list on a client configuration.
+
+    Baremetal stub: no config store. Returns false.
+    """
+    false
+
+@export("C")
+fn rt_tls_client_config_enable_sni(config: i64, enabled: bool) -> bool:
+    """Enable or disable SNI on a client configuration.
+
+    Baremetal stub: no config store. Returns false.
+    """
+    false
+
+@export("C")
+fn rt_tls_client_config_set_verify_mode(config: i64, verify: bool) -> bool:
+    """Set certificate verification mode on a client configuration.
+
+    Baremetal stub: no config store. Returns false.
+    """
+    false
+
+@export("C")
+fn rt_tls_client_config_free(config: i64) -> bool:
+    """Free a TLS client configuration object.
+
+    Baremetal stub: nothing to free. Returns false.
+    """
+    false
+
+# --- Server Configuration ---
+
+@export("C")
+fn rt_tls_server_config_new(cert_path: text, key_path: text) -> i64:
+    """Allocate a new TLS server configuration object.
+
+    Baremetal stub: no config store. Use get_baremetal_tls_info() to obtain
+    embedded DER material for use when a live stack is wired. Returns -1.
+    """
+    -1
+
+@export("C")
+fn rt_tls_server_config_set_alpn(config: i64, protocols: [text]) -> bool:
+    """Set ALPN protocol list on a server configuration.
+
+    Baremetal stub: no config store. Returns false.
+    """
+    false
+
+@export("C")
+fn rt_tls_server_config_require_client_cert(config: i64, require: bool) -> bool:
+    """Require mutual TLS on a server configuration.
+
+    Baremetal stub: no config store. Returns false.
+    """
+    false
+
+@export("C")
+fn rt_tls_server_config_free(config: i64) -> bool:
+    """Free a TLS server configuration object.
+
+    Baremetal stub: nothing to free. Returns false.
+    """
+    false
+
+# --- Connection Info ---
+
+@export("C")
+fn rt_tls_get_peer_cert(conn: i64) -> i64:
+    """Return the peer certificate handle for a connection.
+
+    Baremetal stub: no live connection. Returns -1.
+    """
+    -1
+
+@export("C")
+fn rt_tls_get_protocol_version(conn: i64) -> text:
+    """Return the negotiated TLS protocol version string.
+
+    Baremetal stub: no live connection. Returns empty string.
+    """
+    ""
+
+@export("C")
+fn rt_tls_get_cipher_suite(conn: i64) -> text:
+    """Return the negotiated cipher suite name for a connection.
+
+    Baremetal stub: no live connection. Returns placeholder sentinel.
+    Callers may use tls_cipher_suite_is_valid() to detect the stub case.
+    """
+    TLS_CIPHER_PLACEHOLDER
+
+@export("C")
+fn rt_tls_get_negotiated_alpn(conn: i64) -> text:
+    """Return the negotiated ALPN protocol string for a connection.
+
+    Baremetal stub: no live connection. Returns empty string.
+    """
+    ""
+
+@export("C")
+fn rt_tls_is_handshake_complete(conn: i64) -> bool:
+    """Return true when the TLS handshake is complete on a connection.
+
+    Baremetal stub: no live connection. Returns false.
+    """
+    false
+
+# --- Utilities ---
+
+@export("C")
+fn rt_tls_generate_self_signed_cert(common_name: text, days_valid: i64, cert_out: text, key_out: text) -> bool:
+    """Generate a self-signed certificate and write PEM files.
+
+    Baremetal stub: no filesystem or crypto stack. Returns false.
+    Use get_baremetal_tls_info() to obtain offline-embedded DER material instead.
+    """
+    false
+
+@export("C")
+fn rt_tls_hash_cert(cert_path: text) -> text:
+    """Return the SHA-256 fingerprint of a certificate file.
+
+    Baremetal stub: no filesystem. Returns empty string.
+    """
+    ""

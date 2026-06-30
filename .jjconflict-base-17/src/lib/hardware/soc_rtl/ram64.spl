@@ -1,0 +1,162 @@
+# ============================================================================
+# SoC RTL RAM64 — 64-bit Synchronous RAM Model
+# ============================================================================
+#
+# Doubleword-addressable synchronous RAM with byte/halfword/word/doubleword
+# write support.  Uses [i64] dynamic array for simulation; maps to block RAM
+# in synthesis.
+#
+# Address convention: all addresses are BYTE addresses relative to RAM base.
+# Internally converted to doubleword index (addr >> 3).
+#
+# Sub-word writes use read-modify-write with byte-enable masking.
+#
+# Width encoding for ram64_write / ram64_read:
+#   1 = byte        (8-bit)
+#   2 = halfword   (16-bit)
+#   4 = word       (32-bit)
+#   8 = doubleword (64-bit)
+#
+# VHDL synthesizable subset: i64, bool, [i64], structs only.
+# ============================================================================
+
+# ============================================================================
+# RAM State
+# ============================================================================
+
+struct Ram64State:
+    """64-bit synchronous RAM state."""
+    data: [i64]   # Doubleword-addressable memory array
+    size: i64     # Size in bytes
+
+# ============================================================================
+# Create — initialize all zeros
+# ============================================================================
+
+fn ram64_init(size: i64) -> Ram64State:
+    """Create a RAM with the given byte size, all initialized to zero.
+    Internally allocates (size + 7) / 8 doublewords."""
+    val num_words = (size + 7) >> 3
+    var data: [i64] = []
+    var i: i64 = 0
+    while i < num_words:
+        data = data + [0]
+        i = i + 1
+    Ram64State(data: data, size: size)
+
+# ============================================================================
+# Read — byte/halfword/word/doubleword
+# ============================================================================
+
+fn ram64_read(ram: Ram64State, addr: i64, width: i64) -> i64:
+    """Read from RAM at the given byte address.
+
+    Width encoding:
+      1 = byte        (8-bit,  zero-extended)
+      2 = halfword   (16-bit, zero-extended)
+      4 = word       (32-bit, zero-extended)
+      8 = doubleword (64-bit)
+
+    Returns 0 for out-of-range addresses."""
+    val word_idx = addr >> 3
+    val num_words = (ram.size + 7) >> 3
+    if word_idx >= num_words:
+        return 0
+
+    val raw = ram.data[word_idx]
+    val byte_offset = addr & 7
+
+    if width == 8:
+        return raw
+
+    if width == 4:
+        val shift = byte_offset * 8
+        val shifted = raw >> shift
+        return shifted & 0xFFFFFFFF
+
+    if width == 2:
+        val shift = byte_offset * 8
+        val shifted = raw >> shift
+        return shifted & 0xFFFF
+
+    # width == 1 (byte)
+    val shift = byte_offset * 8
+    val shifted = raw >> shift
+    return shifted & 0xFF
+
+# ============================================================================
+# Write — byte/halfword/word/doubleword with read-modify-write
+# ============================================================================
+
+fn ram64_write(ram: Ram64State, addr: i64, width: i64, val_data: i64) -> Ram64State:
+    """Write to RAM at the given byte address.
+
+    Width encoding:
+      1 = byte        (8-bit)
+      2 = halfword   (16-bit)
+      4 = word       (32-bit)
+      8 = doubleword (64-bit)
+
+    Sub-word writes use read-modify-write with byte-enable masking.
+    Returns updated RAM state."""
+    val word_idx = addr >> 3
+    val num_words = (ram.size + 7) >> 3
+    if word_idx >= num_words:
+        return ram
+
+    var out = ram
+    val byte_offset = addr & 7
+
+    if width == 8:
+        out.data[word_idx] = val_data
+    else if width == 4:
+        val old_word = ram.data[word_idx]
+        val shift = byte_offset * 8
+        val mask = 0xFFFFFFFF << shift
+        val inv_mask = mask ^ -1
+        val new_data = (val_data & 0xFFFFFFFF) << shift
+        out.data[word_idx] = (old_word & inv_mask) | new_data
+    else if width == 2:
+        val old_word = ram.data[word_idx]
+        val shift = byte_offset * 8
+        val mask = 0xFFFF << shift
+        val inv_mask = mask ^ -1
+        val new_data = (val_data & 0xFFFF) << shift
+        out.data[word_idx] = (old_word & inv_mask) | new_data
+    else:
+        val old_word = ram.data[word_idx]
+        val shift = byte_offset * 8
+        val mask = 0xFF << shift
+        val inv_mask = mask ^ -1
+        val new_data = (val_data & 0xFF) << shift
+        out.data[word_idx] = (old_word & inv_mask) | new_data
+
+    out
+
+# ============================================================================
+# Bulk Load — for simulation binary loading
+# ============================================================================
+
+fn ram64_load_binary(ram: Ram64State, offset: i64, data: [i64]) -> Ram64State:
+    """Load an array of byte values (stored as i64) into RAM starting at
+    the given byte offset.  Each element of data is treated as a single byte.
+    Used for loading binary blobs (e.g. boot code) into simulated RAM.
+
+    Bytes are packed into doublewords in little-endian order."""
+    var out = ram
+    val data_len = len(data) as i64
+    var i: i64 = 0
+    while i < data_len:
+        val byte_addr = offset + i
+        val word_idx = byte_addr >> 3
+        val num_words = (ram.size + 7) >> 3
+        if word_idx < num_words:
+            val byte_off = byte_addr & 7
+            val shift = byte_off * 8
+            val mask = 0xFF << shift
+            val inv_mask = mask ^ -1
+            val old_word = out.data[word_idx]
+            val new_byte = (data[i] & 0xFF) << shift
+            out.data[word_idx] = (old_word & inv_mask) | new_byte
+        i = i + 1
+    out

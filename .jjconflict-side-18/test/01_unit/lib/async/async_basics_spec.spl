@@ -1,0 +1,202 @@
+# Async Basics Unit Tests
+#
+# **Feature ID:** #LIB-ASYNC-001
+# **Category:** Lib | Async
+# **Status:** Implemented
+#
+# Behavioral tests for Future, Poll, Runtime, gather, race, and AsyncIO.
+# Interpreter quirks:
+#   - Chained enum method calls fail; always use intermediate vars.
+#   - Future.is_ready() chains self.poll().is_ready() internally and fails;
+#     use f.poll() -> var -> is_ready() on Poll directly.
+#   - return inside it blocks not supported; avoided in all test bodies.
+
+use std.async.future.{Future}
+use std.async.poll.{Poll}
+use std.async.runtime.{Runtime, gather, race}
+use std.async.io.{AsyncIO}
+
+describe "Poll enum":
+    it "Poll.Ready carries its value":
+        val p: Poll<i64> = Poll.Ready(42)
+        val got = p.unwrap()
+        expect(got).to_equal(42)
+
+    it "Poll.Ready is_ready returns true":
+        val p: Poll<i64> = Poll.Ready(7)
+        val ready = p.is_ready()
+        assert_true(ready)
+
+    it "Poll.Pending is_ready returns false":
+        val p: Poll<i64> = Poll.Pending
+        val ready = p.is_ready()
+        assert_false(ready)
+
+    it "Poll.Pending is_pending returns true":
+        val p: Poll<i64> = Poll.Pending
+        val pending = p.is_pending()
+        assert_true(pending)
+
+    it "Poll.Ready is_pending returns false":
+        val p: Poll<i64> = Poll.Ready(1)
+        val pending = p.is_pending()
+        assert_false(pending)
+
+describe "Future construction":
+    it "from_value poll returns Poll.Ready":
+        val f = Future.from_value(42)
+        val result = f.poll()
+        val is_rdy = result.is_ready()
+        assert_true(is_rdy)
+
+    it "pending poll returns Poll.Pending":
+        val f = Future.pending<i64>()
+        val result = f.poll()
+        val is_pend = result.is_pending()
+        assert_true(is_pend)
+
+    it "from_value poll unwrap returns the value":
+        val f = Future.from_value(123)
+        val result = f.poll()
+        val value = result.unwrap()
+        expect(value).to_equal(123)
+
+    it "pending poll unwrap-ready is false":
+        val f = Future.pending<i64>()
+        val result = f.poll()
+        val is_rdy = result.is_ready()
+        assert_false(is_rdy)
+
+describe "Future map":
+    it "map over ready future transforms value":
+        val f = Future.from_value(10)
+        val mapped = f.map(\v: v * 2)
+        val result = mapped.poll()
+        val value = result.unwrap()
+        expect(value).to_equal(20)
+
+    it "map over pending future poll is pending":
+        val f = Future.pending<i64>()
+        val mapped = f.map(\v: v + 1)
+        val result = mapped.poll()
+        val is_pend = result.is_pending()
+        assert_true(is_pend)
+
+describe "Future then":
+    it "then over ready future chains correctly":
+        val f = Future.from_value(5)
+        val chained = f.then(\v: Future.from_value(v + 100))
+        val result = chained.poll()
+        val value = result.unwrap()
+        expect(value).to_equal(105)
+
+    it "then over pending future poll is pending":
+        val f = Future.pending<i64>()
+        val chained = f.then(\v: Future.from_value(v))
+        val result = chained.poll()
+        val is_pend = result.is_pending()
+        assert_true(is_pend)
+
+describe "Runtime run_once":
+    it "run_once returns false on empty runtime":
+        val rt = Runtime.new()
+        val still_going = rt.run_once()
+        assert_false(still_going)
+
+    it "run_once completes a ready task":
+        val rt = Runtime.new()
+        val task_id = rt.spawn(Future.from_value(()))
+        rt.run_once()
+        val done = rt.completed.has(task_id)
+        assert_true(done)
+
+    it "run_once does not complete a pending task":
+        val rt = Runtime.new()
+        val task_id = rt.spawn(Future.pending<()>())
+        rt.run_once()
+        val in_completed = rt.completed.has(task_id)
+        assert_false(in_completed)
+
+    it "block_on completes for immediately-ready future":
+        val rt = Runtime.new()
+        rt.block_on(Future.from_value(()))
+        # Reaching here without hanging means block_on returned
+        assert_true(true)
+
+describe "gather combinator":
+    it "gather over all-ready futures poll is ready":
+        val futures: [Future<i64>] = [
+            Future.from_value(1),
+            Future.from_value(2),
+            Future.from_value(3)
+        ]
+        val result = gather(futures)
+        val polled = result.poll()
+        val is_rdy = polled.is_ready()
+        assert_true(is_rdy)
+
+    it "gather over all-ready futures collects correct count":
+        val futures: [Future<i64>] = [
+            Future.from_value(10),
+            Future.from_value(20)
+        ]
+        val result = gather(futures)
+        val polled = result.poll()
+        val values = polled.unwrap()
+        expect(values.len()).to_equal(2)
+
+    it "gather with any pending future poll is pending":
+        val futures: [Future<i64>] = [
+            Future.from_value(1),
+            Future.pending<i64>()
+        ]
+        val result = gather(futures)
+        val polled = result.poll()
+        val is_pend = polled.is_pending()
+        assert_true(is_pend)
+
+describe "race combinator":
+    it "race returns first ready future value":
+        val futures: [Future<i64>] = [
+            Future.from_value(42),
+            Future.from_value(99)
+        ]
+        val result = race(futures)
+        val polled = result.poll()
+        val value = polled.unwrap()
+        expect(value).to_equal(42)
+
+    it "race over all-pending poll is pending":
+        val futures: [Future<i64>] = [
+            Future.pending<i64>(),
+            Future.pending<i64>()
+        ]
+        val result = race(futures)
+        val polled = result.poll()
+        val is_pend = polled.is_pending()
+        assert_true(is_pend)
+
+    it "race skips pending and finds ready":
+        val futures: [Future<i64>] = [
+            Future.pending<i64>(),
+            Future.from_value(7)
+        ]
+        val result = race(futures)
+        val polled = result.poll()
+        val value = polled.unwrap()
+        expect(value).to_equal(7)
+
+describe "AsyncIO yield_now and sleep":
+    it "yield_now poll is pending":
+        val io = AsyncIO.new()
+        val f = io.yield_now()
+        val polled = f.poll()
+        val is_pend = polled.is_pending()
+        assert_true(is_pend)
+
+    it "sleep poll is pending":
+        val io = AsyncIO.new()
+        val f = io.sleep(100)
+        val polled = f.poll()
+        val is_pend = polled.is_pending()
+        assert_true(is_pend)

@@ -1,0 +1,301 @@
+# SVIM LSP Client
+#
+# Language Server Protocol client for the SVIM TUI editor.
+# Wraps StdioTransport with JSON-RPC 2.0 protocol for communicating
+# with the Simple language server (bin/simple_lsp_server).
+#
+# The transport layer uses the existing stub pattern (inject_response
+# for testability) since rt_process_spawn_piped is not yet wired.
+
+use app.svim.core.{
+    SvimSession, BufferId, DiagnosticItem, CommandResult, EditorEvent
+}
+
+# ---------------------------------------------------------------------------
+# LSP Client State
+# ---------------------------------------------------------------------------
+
+class LspServerConfig:
+    """Configuration for connecting to an LSP server."""
+    server_command: text
+    server_args: [text]
+    root_uri: text
+    language_id: text
+
+class LspPosition:
+    """Zero-based line and character position in a document."""
+    line: i64
+    character: i64
+
+class LspRange:
+    """Range in a document defined by start and end positions."""
+    start_pos: LspPosition
+    end_pos: LspPosition
+
+class LspLocation:
+    """A location in a document (uri + range)."""
+    uri: text
+    range: LspRange
+
+class LspDiagnostic:
+    """A diagnostic message from the language server."""
+    range: LspRange
+    severity: i64
+    message: text
+    source: text
+
+class LspHoverResult:
+    """Hover information for a symbol."""
+    contents: text
+    range: LspRange?
+
+class LspCompletionItem:
+    """A single completion suggestion."""
+    label: text
+    kind: i64
+    detail: text
+    insert_text: text
+
+class LspSymbolInfo:
+    """A document symbol entry for the outline."""
+    name: text
+    kind: i64
+    range: LspRange
+    detail: text
+
+class SvimLspClient:
+    """LSP client for SVIM, managing connection state and request IDs."""
+    config: LspServerConfig
+    running: bool
+    initialized: bool
+    next_id: i64
+    send_buffer: [text]
+    recv_buffer: [text]
+    pending_diagnostics: [LspDiagnostic]
+    document_version: i64
+
+# ---------------------------------------------------------------------------
+# Construction
+# ---------------------------------------------------------------------------
+
+fn svim_lsp_config_simple() -> LspServerConfig:
+    """Default config for the Simple language server."""
+    LspServerConfig(
+        server_command: "bin/simple_lsp_server",
+        server_args: [],
+        root_uri: "file:///",
+        language_id: "simple"
+    )
+
+fn svim_lsp_client_create(config: LspServerConfig) -> SvimLspClient:
+    """Create a new LSP client with the given configuration."""
+    SvimLspClient(
+        config: config,
+        running: false,
+        initialized: false,
+        next_id: 1,
+        send_buffer: [],
+        recv_buffer: [],
+        pending_diagnostics: [],
+        document_version: 0
+    )
+
+fn svim_lsp_client_new() -> SvimLspClient:
+    """Create a new LSP client with default Simple language server config."""
+    svim_lsp_client_create(svim_lsp_config_simple())
+
+# ---------------------------------------------------------------------------
+# Transport helpers
+# ---------------------------------------------------------------------------
+
+fn _svim_lsp_next_id(client: SvimLspClient) -> i64:
+    val id = client.next_id
+    client.next_id = client.next_id + 1
+    id
+
+fn _svim_lsp_frame(json: text) -> text:
+    """Frame a JSON string with Content-Length header."""
+    val cl = str(json.len())
+    "Content-Length: " + cl + "\r\n\r\n" + json
+
+fn _svim_lsp_send(client: SvimLspClient, json: text):
+    """Queue a framed message for sending."""
+    client.send_buffer.push(_svim_lsp_frame(json))
+
+fn svim_lsp_inject_response(client: SvimLspClient, json: text):
+    """Inject a raw JSON response for testing."""
+    client.recv_buffer.push(json)
+
+fn svim_lsp_pending_sends(client: SvimLspClient) -> i64:
+    """Number of queued outbound messages."""
+    client.send_buffer.len()
+
+fn svim_lsp_drain_send(client: SvimLspClient) -> text:
+    """Pop the oldest queued send message."""
+    if client.send_buffer.len() == 0:
+        return ""
+    val msg = client.send_buffer[0]
+    var rest: [text] = []
+    var i = 1
+    while i < client.send_buffer.len():
+        rest.push(client.send_buffer[i])
+        i = i + 1
+    client.send_buffer = rest
+    msg
+
+fn svim_lsp_receive(client: SvimLspClient) -> text:
+    """Pop the oldest queued receive message."""
+    if client.recv_buffer.len() == 0:
+        return ""
+    val msg = client.recv_buffer[0]
+    var rest: [text] = []
+    var i = 1
+    while i < client.recv_buffer.len():
+        rest.push(client.recv_buffer[i])
+        i = i + 1
+    client.recv_buffer = rest
+    msg
+
+# ---------------------------------------------------------------------------
+# JSON building helpers (inline for zero-import startup)
+# ---------------------------------------------------------------------------
+
+fn _q() -> text:
+    "\""
+
+fn _esc(s: text) -> text:
+    var r = s
+    r = r.replace("\\", "\\\\")
+    r = r.replace(_q(), "\\" + _q())
+    r = r.replace("\n", "\\n")
+    r = r.replace("\r", "\\r")
+    r = r.replace("\t", "\\t")
+    r
+
+fn _js(s: text) -> text:
+    _q() + _esc(s) + _q()
+
+fn _jp(key: text, value: text) -> text:
+    _q() + key + _q() + ":" + value
+
+fn _jobj(pairs: [text]) -> text:
+    var out = "{"
+    var i = 0
+    while i < pairs.len():
+        if i > 0:
+            out = out + ","
+        out = out + pairs[i]
+        i = i + 1
+    out + "}"
+
+# ---------------------------------------------------------------------------
+# Protocol: initialize handshake
+# ---------------------------------------------------------------------------
+
+fn svim_lsp_start(client: SvimLspClient):
+    """Start the client and send the initialize request."""
+    client.running = true
+    val id = _svim_lsp_next_id(client)
+    var cap_pairs: [text] = []
+    var root_pairs: [text] = []
+    root_pairs.push(_jp("textDocument", _jobj([])))
+    val caps = _jobj(root_pairs)
+    var params_pairs: [text] = []
+    params_pairs.push(_jp("processId", "1"))
+    params_pairs.push(_jp("rootUri", _js(client.config.root_uri)))
+    params_pairs.push(_jp("capabilities", caps))
+    val params = _jobj(params_pairs)
+    var req_pairs: [text] = []
+    req_pairs.push(_jp("jsonrpc", _js("2.0")))
+    req_pairs.push(_jp("id", str(id)))
+    req_pairs.push(_jp("method", _js("initialize")))
+    req_pairs.push(_jp("params", params))
+    _svim_lsp_send(client, _jobj(req_pairs))
+
+fn svim_lsp_handle_initialize_response(client: SvimLspClient, response_json: text) -> bool:
+    """Process the initialize response and send initialized notification."""
+    # For now, accept any non-empty response as success
+    if response_json == "":
+        return false
+    client.initialized = true
+    # Send initialized notification
+    var notif_pairs: [text] = []
+    notif_pairs.push(_jp("jsonrpc", _js("2.0")))
+    notif_pairs.push(_jp("method", _js("initialized")))
+    notif_pairs.push(_jp("params", "{}"))
+    _svim_lsp_send(client, _jobj(notif_pairs))
+    true
+
+fn svim_lsp_stop(client: SvimLspClient):
+    """Send shutdown request and exit notification."""
+    if not client.running:
+        return
+    val id = _svim_lsp_next_id(client)
+    var req_pairs: [text] = []
+    req_pairs.push(_jp("jsonrpc", _js("2.0")))
+    req_pairs.push(_jp("id", str(id)))
+    req_pairs.push(_jp("method", _js("shutdown")))
+    req_pairs.push(_jp("params", "null"))
+    _svim_lsp_send(client, _jobj(req_pairs))
+    # Send exit notification
+    var exit_pairs: [text] = []
+    exit_pairs.push(_jp("jsonrpc", _js("2.0")))
+    exit_pairs.push(_jp("method", _js("exit")))
+    _svim_lsp_send(client, _jobj(exit_pairs))
+    client.running = false
+    client.initialized = false
+
+# ---------------------------------------------------------------------------
+# Protocol: document sync
+# ---------------------------------------------------------------------------
+
+fn svim_lsp_did_open(client: SvimLspClient, uri: text, content: text):
+    """Notify the server that a document was opened."""
+    if not client.initialized:
+        return
+    client.document_version = client.document_version + 1
+    var td_pairs: [text] = []
+    td_pairs.push(_jp("uri", _js(uri)))
+    td_pairs.push(_jp("languageId", _js(client.config.language_id)))
+    td_pairs.push(_jp("version", str(client.document_version)))
+    td_pairs.push(_jp("text", _js(content)))
+    var params_pairs: [text] = []
+    params_pairs.push(_jp("textDocument", _jobj(td_pairs)))
+    var notif_pairs: [text] = []
+    notif_pairs.push(_jp("jsonrpc", _js("2.0")))
+    notif_pairs.push(_jp("method", _js("textDocument/didOpen")))
+    notif_pairs.push(_jp("params", _jobj(params_pairs)))
+    _svim_lsp_send(client, _jobj(notif_pairs))
+
+fn svim_lsp_did_change(client: SvimLspClient, uri: text, content: text):
+    """Notify the server that a document changed (full sync)."""
+    if not client.initialized:
+        return
+    client.document_version = client.document_version + 1
+    var td_pairs: [text] = []
+    td_pairs.push(_jp("uri", _js(uri)))
+    td_pairs.push(_jp("version", str(client.document_version)))
+    var change_pairs: [text] = []
+    change_pairs.push(_jp("text", _js(content)))
+    var params_pairs: [text] = []
+    params_pairs.push(_jp("textDocument", _jobj(td_pairs)))
+    params_pairs.push(_jp("contentChanges", "[" + _jobj(change_pairs) + "]"))
+    var notif_pairs: [text] = []
+    notif_pairs.push(_jp("jsonrpc", _js("2.0")))
+    notif_pairs.push(_jp("method", _js("textDocument/didChange")))
+    notif_pairs.push(_jp("params", _jobj(params_pairs)))
+    _svim_lsp_send(client, _jobj(notif_pairs))
+
+fn svim_lsp_did_close(client: SvimLspClient, uri: text):
+    """Notify the server that a document was closed."""
+    if not client.initialized:
+        return
+    var td_pairs: [text] = []
+    td_pairs.push(_jp("uri", _js(uri)))
+    var params_pairs: [text] = []
+    params_pairs.push(_jp("textDocument", _jobj(td_pairs)))
+    var notif_pairs: [text] = []
+    notif_pairs.push(_jp("jsonrpc", _js("2.0")))
+    notif_pairs.push(_jp("method", _js("textDocument/didClose")))
+    notif_pairs.push(_jp("params", _jobj(params_pairs)))
+    _svim_lsp_send(client, _jobj(notif_pairs))

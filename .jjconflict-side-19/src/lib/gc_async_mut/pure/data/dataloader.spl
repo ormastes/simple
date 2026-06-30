@@ -1,0 +1,345 @@
+# Pure Simple DataLoader
+#
+# Efficient batching and shuffling for datasets
+# Zero external dependencies
+
+use std.pure.data.dataset (ArrayDataset, LabeledDataset)
+
+# ============================================================================
+# DataLoader
+# ============================================================================
+
+class DataLoader:
+    """
+    DataLoader for batching and shuffling datasets.
+
+    Features:
+    - Batching: Group samples into fixed-size batches
+    - Shuffling: Randomize sample order each epoch
+    - Drop last: Option to drop incomplete final batch
+
+    Example:
+        ```simple
+        val data = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0]]
+        val dataset = ArrayDataset(data: data)
+        val loader = DataLoader(
+            dataset: dataset,
+            batch_size: 2,
+            shuffle: false,
+            drop_last: false
+        )
+
+        for batch in loader.iter():
+            print batch.len()  # 2
+        ```
+    """
+    dataset: ArrayDataset
+    batch_size: i64
+    shuffle: bool
+    drop_last: bool
+    indices: [i64]
+    current_index: i64
+
+    fn len() -> i64:
+        """Return the number of batches."""
+        val total = self.dataset.len()
+        val batches = total / self.batch_size
+        val remainder = total % self.batch_size
+
+        if self.drop_last:
+            batches
+        else:
+            if remainder > 0:
+                batches + 1
+            else:
+                batches
+
+    fn reset():
+        """Reset the loader for a new epoch."""
+        self.current_index = 0
+        if self.shuffle:
+            self._shuffle_indices()
+
+    me _shuffle_indices():
+        """Shuffle the indices array (Fisher-Yates algorithm)."""
+        val n = self.indices.len()
+        var i = n - 1
+        while i > 0:
+            val j = self._random_int(i + 1)
+            val temp = self.indices[i]
+            self.indices[i] = self.indices[j]
+            self.indices[j] = temp
+            i = i - 1
+
+    fn _random_int(max_val: i64) -> i64:
+        """Simple random integer generator (linear congruential)."""
+        # Simple LCG: seed = (a * seed + c) mod m
+        val a = 1103515245
+        val c = 12345
+        val m = 2147483648
+        val seed_val = (a * self.current_index + c) % m
+        (seed_val % max_val)
+
+    fn next_batch() -> [f64]:
+        """
+        Get the next batch of samples.
+
+        Returns:
+            Array of flattened batch data, or empty array if done
+        """
+        if self.current_index >= self.dataset.len():
+            []
+        else:
+            self._get_batch()
+
+    me _get_batch() -> [f64]:
+        """Internal: Get current batch and advance index."""
+        val start = self.current_index
+        val dataset_len = self.dataset.len()
+        var end = start + self.batch_size
+
+        if end > dataset_len:
+            if self.drop_last:
+                []
+            else:
+                end = dataset_len
+
+        if start >= dataset_len:
+            []
+        else:
+            var batch: [f64] = []
+            var i = start
+            while i < end:
+                val idx = self.indices[i]
+                val sample = self.dataset.get_item(idx)
+                for v in sample:
+                    batch.push(v)
+                i = i + 1
+
+            self.current_index = end
+            batch
+
+    fn iter() -> DataLoaderIterator:
+        """
+        Create an iterator for the DataLoader.
+
+        Returns:
+            DataLoaderIterator that can be used in for-loops
+        """
+        self.reset()
+        DataLoaderIterator(loader: self)
+
+# ============================================================================
+# DataLoader Iterator
+# ============================================================================
+
+class DataLoaderIterator:
+    """Iterator for DataLoader batches."""
+    loader: DataLoader
+    done: bool
+
+    fn has_next() -> bool:
+        """Check if there are more batches."""
+        not self.done
+
+    me next() -> [f64]:
+        """Get the next batch."""
+        val batch = self.loader.next_batch()
+        if batch.len() == 0:
+            self.done = true
+            []
+        else:
+            batch
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+fn create_dataloader(
+    dataset: ArrayDataset,
+    batch_size: i64,
+    shuffle: bool,
+    drop_last: bool
+) -> DataLoader:
+    """
+    Create a DataLoader with the given parameters.
+
+    Args:
+        dataset: The dataset to load from
+        batch_size: Number of samples per batch
+        shuffle: Whether to shuffle samples each epoch
+        drop_last: Whether to drop the last incomplete batch
+
+    Returns:
+        Configured DataLoader instance
+    """
+    var indices: [i64] = []
+    var i = 0
+    while i < dataset.len():
+        indices.push(i)
+        i = i + 1
+
+    DataLoader(
+        dataset: dataset,
+        batch_size: batch_size,
+        shuffle: shuffle,
+        drop_last: drop_last,
+        indices: indices,
+        current_index: 0
+    )
+
+fn create_dataloader_labeled(
+    dataset: LabeledDataset,
+    batch_size: i64,
+    shuffle: bool,
+    drop_last: bool
+) -> LabeledDataLoader:
+    """
+    Create a DataLoader for labeled datasets.
+
+    Args:
+        dataset: The labeled dataset to load from
+        batch_size: Number of samples per batch
+        shuffle: Whether to shuffle samples each epoch
+        drop_last: Whether to drop the last incomplete batch
+
+    Returns:
+        Configured LabeledDataLoader instance
+    """
+    var indices: [i64] = []
+    var i = 0
+    while i < dataset.len():
+        indices.push(i)
+        i = i + 1
+
+    LabeledDataLoader(
+        dataset: dataset,
+        batch_size: batch_size,
+        shuffle: shuffle,
+        drop_last: drop_last,
+        indices: indices,
+        current_index: 0
+    )
+
+# ============================================================================
+# Labeled DataLoader
+# ============================================================================
+
+class LabeledDataLoader:
+    """DataLoader for labeled datasets (features + labels)."""
+    dataset: LabeledDataset
+    batch_size: i64
+    shuffle: bool
+    drop_last: bool
+    indices: [i64]
+    current_index: i64
+
+    fn len() -> i64:
+        """Return the number of batches."""
+        val total = self.dataset.len()
+        val batches = total / self.batch_size
+        val remainder = total % self.batch_size
+
+        if self.drop_last:
+            batches
+        else:
+            if remainder > 0:
+                batches + 1
+            else:
+                batches
+
+    fn reset():
+        """Reset the loader for a new epoch."""
+        self.current_index = 0
+        if self.shuffle:
+            self._shuffle_indices()
+
+    me _shuffle_indices():
+        """Shuffle the indices array."""
+        val n = self.indices.len()
+        var i = n - 1
+        while i > 0:
+            val j = self._random_int(i + 1)
+            val temp = self.indices[i]
+            self.indices[i] = self.indices[j]
+            self.indices[j] = temp
+            i = i - 1
+
+    fn _random_int(max_val: i64) -> i64:
+        """Simple random integer generator."""
+        val a = 1103515245
+        val c = 12345
+        val m = 2147483648
+        val seed_val = (a * self.current_index + c) % m
+        (seed_val % max_val)
+
+    fn next_batch() -> LabeledBatch:
+        """Get the next batch of features and labels."""
+        if self.current_index >= self.dataset.len():
+            LabeledBatch(features: [], labels: [])
+        else:
+            self._get_batch()
+
+    me _get_batch() -> LabeledBatch:
+        """Internal: Get current batch and advance index."""
+        val start = self.current_index
+        val dataset_len = self.dataset.len()
+        var end = start + self.batch_size
+
+        if end > dataset_len:
+            if self.drop_last:
+                LabeledBatch(features: [], labels: [])
+            else:
+                end = dataset_len
+
+        if start >= dataset_len:
+            LabeledBatch(features: [], labels: [])
+        else:
+            var features: [f64] = []
+            var labels: [f64] = []
+            var i = start
+            while i < end:
+                val idx = self.indices[i]
+                val sample = self.dataset.get_item(idx)
+                for v in sample.feature:
+                    features.push(v)
+                labels.push(sample.label)
+                i = i + 1
+
+            self.current_index = end
+            LabeledBatch(features: features, labels: labels)
+
+    fn iter() -> LabeledDataLoaderIterator:
+        """Create an iterator for the labeled DataLoader."""
+        self.reset()
+        LabeledDataLoaderIterator(loader: self)
+
+class LabeledBatch:
+    """A batch of features and labels."""
+    features: [f64]
+    labels: [f64]
+
+class LabeledDataLoaderIterator:
+    """Iterator for labeled DataLoader batches."""
+    loader: LabeledDataLoader
+    done: bool
+
+    fn has_next() -> bool:
+        """Check if there are more batches."""
+        not self.done
+
+    me next() -> LabeledBatch:
+        """Get the next batch."""
+        val batch = self.loader.next_batch()
+        if batch.features.len() == 0:
+            self.done = true
+            LabeledBatch(features: [], labels: [])
+        else:
+            batch
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export DataLoader, DataLoaderIterator, create_dataloader
+export LabeledDataLoader, LabeledDataLoaderIterator, LabeledBatch, create_dataloader_labeled

@@ -1,0 +1,125 @@
+/// Unit tests for doctest matcher
+
+use std.spec
+use std.spec.{expect}
+use std.common.doctest.matcher
+use std.common.doctest.parser.{Expected}
+
+describe "DoctestMatcher":
+    context "match_output":
+        it "matches exact output":
+            val actual = "42"
+            val expected = Expected.Output("42")
+            val result = match_output(actual, expected)
+            expect(result.is_pass()).to_equal(true)
+
+        it "matches with trailing whitespace normalization":
+            val actual = "42  \n"
+            val expected = Expected.Output("42")
+            val result = match_output(actual, expected)
+            expect(result.is_pass()).to_equal(true)
+
+        it "fails on mismatch":
+            val actual = "42"
+            val expected = Expected.Output("43")
+            val result = match_output(actual, expected)
+            expect(result.is_fail()).to_equal(true)
+            expect(result.unwrap_failure()).to_contain("mismatch")
+
+        it "matches multi-line output":
+            val actual = "line1\nline2\nline3"
+            val expected = Expected.Output("line1\nline2\nline3")
+            val result = match_output(actual, expected)
+            expect(result.is_pass()).to_equal(true)
+
+        it "matches empty output":
+            val actual = ""
+            val expected = Expected.Empty
+            val result = match_output(actual, expected)
+            expect(result.is_pass()).to_equal(true)
+
+        it "fails when expecting empty but got output":
+            val actual = "unexpected"
+            val expected = Expected.Empty
+            val result = match_output(actual, expected)
+            expect(result.is_fail()).to_equal(true)
+            expect(result.unwrap_failure()).to_contain("Expected no output")
+
+    context "match_exception":
+        it "matches exception type":
+            val result = match_exception("ValueError", "some message",
+                                    Expected.Exception("ValueError", nil))
+            expect(result.is_pass()).to_equal(true)
+
+        it "matches exception type and message":
+            val result = match_exception("ValueError", "invalid input",
+                                    Expected.Exception("ValueError", "invalid"))
+            expect(result.is_pass()).to_equal(true)
+
+        it "fails on wrong exception type":
+            val result = match_exception("TypeError", "msg",
+                                    Expected.Exception("ValueError", nil))
+            expect(result.is_fail()).to_equal(true)
+            expect(result.unwrap_failure()).to_contain("Expected ValueError")
+
+        it "fails on wrong message":
+            val result = match_exception("ValueError", "wrong message",
+                                    Expected.Exception("ValueError", "expected message"))
+            expect(result.is_fail()).to_equal(true)
+            expect(result.unwrap_failure()).to_contain("message mismatch")
+
+        it "fails when expected output but got exception":
+            val result = match_exception("ValueError", "msg", Expected.Output("42"))
+            expect(result.is_fail()).to_equal(true)
+
+    context "wildcard_match":
+        it "matches with dot wildcard":
+            expect(wildcard_match("abc", "a.c")).to_equal(true)
+            expect(wildcard_match("a1c", "a.c")).to_equal(true)
+            expect(wildcard_match("axc", "a.c")).to_equal(true)
+
+        it "matches with star wildcard":
+            expect(wildcard_match("hello world", "hello*")).to_equal(true)
+            expect(wildcard_match("hello world", "*world")).to_equal(true)
+            expect(wildcard_match("hello world", "hello*world")).to_equal(true)
+
+        it "matches UUID pattern":
+            val uuid = "550e8400-e29b-41d4-a716-446655440000"
+            val pattern = "........-....-....-....-............"
+            expect(wildcard_match(uuid, pattern)).to_equal(true)
+
+        it "matches timestamp pattern":
+            val timestamp = "1702345678"
+            val pattern = "1702*"
+            expect(wildcard_match(timestamp, pattern)).to_equal(true)
+
+        it "fails on non-matching pattern":
+            expect(wildcard_match("abc", "a.d")).to_equal(false)
+            expect(wildcard_match("hello", "world")).to_equal(false)
+
+        it "handles multiple wildcards":
+            expect(wildcard_match("ab12cd34ef", "ab..cd..ef")).to_equal(true)
+            expect(wildcard_match("prefix123suffix456", "prefix*suffix*")).to_equal(true)
+
+    context "exact_match":
+        it "matches identical strings":
+            expect(exact_match("hello", "hello")).to_equal(true)
+
+        it "normalizes whitespace":
+            expect(exact_match("hello  ", "hello")).to_equal(true)
+            expect(exact_match("hello\n", "hello")).to_equal(true)
+            expect(exact_match(" hello ", " hello")).to_equal(true)
+
+        it "fails on different strings":
+            expect(exact_match("hello", "world")).to_equal(false)
+
+    context "normalize":
+        it "strips trailing whitespace":
+            expect(normalize("hello  ")).to_equal("hello")
+            expect(normalize("hello\t\n")).to_equal("hello")
+
+        it "strips trailing whitespace from each line":
+            expect(normalize("line1  \nline2  ")).to_equal("line1\nline2")
+
+        it "trims leading whitespace":
+            expect(normalize("  hello")).to_equal("hello")

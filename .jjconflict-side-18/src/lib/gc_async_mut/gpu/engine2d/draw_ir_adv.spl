@@ -1,0 +1,279 @@
+# Engine2D advanced Draw IR executor.
+#
+# This is the first Simple2D-facing Draw IR boundary. It executes the shared
+# Draw IR contract through the existing Engine2D facade and keeps GPU selection
+# as metadata/fallback policy; real GPU plugin migration is a later backend job.
+
+use common.ui.draw_ir.{
+    DRAW_IR_COMMAND_IMAGE,
+    DRAW_IR_COMMAND_RECT,
+    DRAW_IR_COMMAND_TEXT,
+    DrawIrBatch,
+    DrawIrComposition,
+    Simple2dDrawIrCompositionPlan,
+    Simple2dDrawIrPlan,
+    simple_2d_draw_ir_adv_composition_plan,
+    simple_2d_draw_ir_adv_plan
+}
+use common.ui.draw_ir_sdn.{sdn_to_draw_ir}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.host_gpu_event_queue.{
+    Engine2dHostGpuRuntimeDispatchResult,
+    Engine2dHostGpuRuntimeDrainResult,
+    Engine2dHostGpuRuntimeQueue,
+    Engine2dHostGpuRuntimeSubmitResult
+}
+use std.gc_async_mut.gpu.engine2d.draw_ir_runtime_queue.{
+    Engine2dDrawIrPayloadSummary,
+    engine2d_draw_ir_payload_checksum,
+    engine2d_draw_ir_payload_summary,
+    engine2d_draw_ir_runtime_queue_dispatch
+}
+
+struct Engine2dDrawIrAdvResult:
+    schema: text
+    unit_id: text
+    selected_backend: text
+    fallback_required: bool
+    fallback_reason: text
+    rendered_command_count: i32
+    skipped_command_count: i32
+    pixels: [u32]
+
+struct Engine2dDrawIrRuntimeQueueResult:
+    render: Engine2dDrawIrAdvResult
+    runtime_submit: Engine2dHostGpuRuntimeSubmitResult
+    runtime_drain: Engine2dHostGpuRuntimeDrainResult
+    runtime_dispatch: Engine2dHostGpuRuntimeDispatchResult
+    queued_for_gpu: bool
+    payload: Engine2dDrawIrPayloadSummary
+
+struct Engine2dResolvedDrawIrImage:
+    image_uri: text
+    width: i32
+    height: i32
+    pixels: [u32]
+
+fn _engine2d_draw_ir_result_from_plan(plan: Simple2dDrawIrPlan, rendered: i32, skipped: i32, pixels: [u32]) -> Engine2dDrawIrAdvResult:
+    Engine2dDrawIrAdvResult(
+        schema: plan.schema,
+        unit_id: plan.batch_id,
+        selected_backend: plan.selected_backend,
+        fallback_required: plan.fallback_required,
+        fallback_reason: plan.fallback_reason,
+        rendered_command_count: rendered,
+        skipped_command_count: skipped,
+        pixels: pixels
+    )
+
+fn _engine2d_draw_ir_result_from_composition_plan(plan: Simple2dDrawIrCompositionPlan, rendered: i32, skipped: i32, pixels: [u32]) -> Engine2dDrawIrAdvResult:
+    Engine2dDrawIrAdvResult(
+        schema: plan.schema,
+        unit_id: plan.composition_id,
+        selected_backend: plan.selected_backend,
+        fallback_required: plan.fallback_required,
+        fallback_reason: plan.fallback_reason,
+        rendered_command_count: rendered,
+        skipped_command_count: skipped,
+        pixels: pixels
+    )
+
+fn _engine2d_draw_ir_supported_command(kind: text) -> bool:
+    kind == DRAW_IR_COMMAND_RECT or kind == DRAW_IR_COMMAND_TEXT
+
+fn engine2d_resolved_draw_ir_image(image_uri: text, width: i32, height: i32, pixels: [u32]) -> Engine2dResolvedDrawIrImage:
+    Engine2dResolvedDrawIrImage(image_uri: image_uri, width: width, height: height, pixels: pixels)
+
+fn _engine2d_draw_ir_resolved_image_index(images: [Engine2dResolvedDrawIrImage], image_uri: text) -> i32:
+    var index = 0
+    while index < images.len():
+        if images[index].image_uri == image_uri:
+            return index
+        index = index + 1
+    -1
+
+fn _engine2d_draw_ir_valid_resolved_image(image: Engine2dResolvedDrawIrImage) -> bool:
+    image.width > 0 and image.height > 0 and image.pixels.len() == image.width * image.height
+
+fn _engine2d_draw_ir_unsupported_command_kinds(commands: [DrawIrCommand]) -> text:
+    var kinds = ""
+    for command in commands:
+        if not _engine2d_draw_ir_supported_command(command.kind):
+            if kinds != "":
+                kinds = kinds + ","
+            kinds = kinds + command.kind
+    if kinds == "":
+        return "none"
+    kinds
+
+fn _engine2d_draw_ir_append_unsupported_reason(reason: text, unsupported_kinds: text) -> text:
+    if unsupported_kinds == "none":
+        return reason
+    val unsupported_reason = "unsupported Draw IR commands skipped: {unsupported_kinds}"
+    if reason == "":
+        return unsupported_reason
+    "{reason}; {unsupported_reason}"
+
+fn _engine2d_draw_ir_result_from_plan_with_unsupported(plan: Simple2dDrawIrPlan, rendered: i32, skipped: i32, unsupported_kinds: text, pixels: [u32]) -> Engine2dDrawIrAdvResult:
+    val has_unsupported = skipped > 0 and unsupported_kinds != "none"
+    Engine2dDrawIrAdvResult(
+        schema: plan.schema,
+        unit_id: plan.batch_id,
+        selected_backend: plan.selected_backend,
+        fallback_required: plan.fallback_required or has_unsupported,
+        fallback_reason: _engine2d_draw_ir_append_unsupported_reason(plan.fallback_reason, unsupported_kinds),
+        rendered_command_count: rendered,
+        skipped_command_count: skipped,
+        pixels: pixels
+    )
+
+fn _engine2d_draw_ir_result_from_composition_plan_with_unsupported(plan: Simple2dDrawIrCompositionPlan, rendered: i32, skipped: i32, unsupported_kinds: text, pixels: [u32]) -> Engine2dDrawIrAdvResult:
+    val has_unsupported = skipped > 0 and unsupported_kinds != "none"
+    Engine2dDrawIrAdvResult(
+        schema: plan.schema,
+        unit_id: plan.composition_id,
+        selected_backend: plan.selected_backend,
+        fallback_required: plan.fallback_required or has_unsupported,
+        fallback_reason: _engine2d_draw_ir_append_unsupported_reason(plan.fallback_reason, unsupported_kinds),
+        rendered_command_count: rendered,
+        skipped_command_count: skipped,
+        pixels: pixels
+    )
+
+fn engine2d_draw_ir_adv_batch(engine: Engine2D, batch: DrawIrBatch, gpu_available: bool) -> Engine2dDrawIrAdvResult:
+    var images: [Engine2dResolvedDrawIrImage] = []
+    engine2d_draw_ir_adv_batch_with_images(engine, batch, gpu_available, images)
+
+fn engine2d_draw_ir_adv_batch_with_images(engine: Engine2D, batch: DrawIrBatch, gpu_available: bool, images: [Engine2dResolvedDrawIrImage]) -> Engine2dDrawIrAdvResult:
+    val plan = simple_2d_draw_ir_adv_plan(batch, gpu_available)
+    if batch.embedding.clip:
+        engine.set_clip(batch.embedding.x, batch.embedding.y, batch.embedding.width, batch.embedding.height)
+    var rendered = 0
+    var skipped = 0
+    var unsupported_kinds = ""
+    for command in batch.commands:
+        val x = batch.embedding.x + command.x
+        val y = batch.embedding.y + command.y
+        if command.kind == DRAW_IR_COMMAND_RECT:
+            engine.draw_rect_filled(x, y, command.width, command.height, command.color)
+            rendered = rendered + 1
+        elif command.kind == DRAW_IR_COMMAND_TEXT:
+            engine.draw_text(x, y, command.text_value, command.color, 12)
+            rendered = rendered + 1
+        elif command.kind == DRAW_IR_COMMAND_IMAGE:
+            val image_index = _engine2d_draw_ir_resolved_image_index(images, command.image_uri)
+            if image_index >= 0 and _engine2d_draw_ir_valid_resolved_image(images[image_index]):
+                val image = images[image_index]
+                engine.draw_image_scaled(x, y, command.width, command.height, image.width, image.height, image.pixels)
+                rendered = rendered + 1
+            else:
+                skipped = skipped + 1
+                if unsupported_kinds != "":
+                    unsupported_kinds = unsupported_kinds + ","
+                unsupported_kinds = unsupported_kinds + command.kind
+        else:
+            skipped = skipped + 1
+            if unsupported_kinds != "":
+                unsupported_kinds = unsupported_kinds + ","
+            unsupported_kinds = unsupported_kinds + command.kind
+    if batch.embedding.clip:
+        engine.clear_clip()
+    if unsupported_kinds == "":
+        unsupported_kinds = "none"
+    _engine2d_draw_ir_result_from_plan_with_unsupported(plan, rendered, skipped, unsupported_kinds, engine.read_pixels())
+
+fn engine2d_draw_ir_adv_apply_runtime_dispatch(engine: Engine2D, dispatch: Engine2dHostGpuRuntimeDispatchResult) -> Engine2dDrawIrAdvResult:
+    if not dispatch.dispatched:
+        return Engine2dDrawIrAdvResult(
+            schema: "simple-draw-ir-v2",
+            unit_id: "runtime-dispatch",
+            selected_backend: "host",
+            fallback_required: true,
+            fallback_reason: dispatch.diagnostic,
+            rendered_command_count: 0,
+            skipped_command_count: 0,
+            pixels: engine.read_pixels()
+        )
+    val composition = sdn_to_draw_ir(dispatch.payload_text)
+    engine2d_draw_ir_adv_composition(engine, composition, true)
+
+fn _engine2d_draw_ir_runtime_queue_submit_dispatch(batch: DrawIrBatch, selected_backend: text, command_count: i64, packet_bytes: i64, payload: Engine2dDrawIrPayloadSummary, queue: Engine2dHostGpuRuntimeQueue) -> Engine2dDrawIrRuntimeQueueResult:
+    val dispatch_result = engine2d_draw_ir_runtime_queue_dispatch(batch, selected_backend, command_count, packet_bytes, payload, queue)
+    val render = Engine2dDrawIrAdvResult(schema: batch.schema, unit_id: batch.batch_id, selected_backend: selected_backend, fallback_required: false, fallback_reason: dispatch_result.runtime_dispatch.diagnostic, rendered_command_count: 0, skipped_command_count: 0, pixels: [])
+    Engine2dDrawIrRuntimeQueueResult(render: render, runtime_submit: dispatch_result.runtime_submit, runtime_drain: dispatch_result.runtime_drain, runtime_dispatch: dispatch_result.runtime_dispatch, queued_for_gpu: dispatch_result.queued_for_gpu, payload: dispatch_result.payload)
+
+fn engine2d_draw_ir_adv_batch_runtime_queue(engine: Engine2D, batch: DrawIrBatch, gpu_available: bool, queue: Engine2dHostGpuRuntimeQueue) -> Engine2dDrawIrRuntimeQueueResult:
+    val plan = simple_2d_draw_ir_adv_plan(batch, gpu_available)
+    val packet_bytes = plan.command_count * 64
+    val payload = engine2d_draw_ir_payload_summary(batch, packet_bytes)
+    val queue_result = _engine2d_draw_ir_runtime_queue_submit_dispatch(batch, plan.selected_backend, plan.command_count, packet_bytes, payload, queue)
+    var render = Engine2dDrawIrAdvResult(schema: batch.schema, unit_id: batch.batch_id, selected_backend: "host", fallback_required: true, fallback_reason: "runtime queue pending", rendered_command_count: 0, skipped_command_count: 0, pixels: engine.read_pixels())
+    if queue_result.queued_for_gpu:
+        render = engine2d_draw_ir_adv_apply_runtime_dispatch(engine, queue_result.runtime_dispatch)
+    else:
+        render = engine2d_draw_ir_adv_batch(engine, batch, gpu_available)
+    Engine2dDrawIrRuntimeQueueResult(render: render, runtime_submit: queue_result.runtime_submit, runtime_drain: queue_result.runtime_drain, runtime_dispatch: queue_result.runtime_dispatch, queued_for_gpu: queue_result.queued_for_gpu, payload: payload)
+
+fn engine2d_draw_ir_adv_batch_runtime_queue_dispatch_only(batch: DrawIrBatch, gpu_available: bool, queue: Engine2dHostGpuRuntimeQueue) -> Engine2dDrawIrRuntimeQueueResult:
+    val plan = simple_2d_draw_ir_adv_plan(batch, gpu_available)
+    val packet_bytes = plan.command_count * 64
+    val payload = engine2d_draw_ir_payload_summary(batch, packet_bytes)
+    _engine2d_draw_ir_runtime_queue_submit_dispatch(batch, plan.selected_backend, plan.command_count, packet_bytes, payload, queue)
+
+fn engine2d_draw_ir_adv_composition(engine: Engine2D, composition: DrawIrComposition, gpu_available: bool) -> Engine2dDrawIrAdvResult:
+    var images: [Engine2dResolvedDrawIrImage] = []
+    engine2d_draw_ir_adv_composition_with_images(engine, composition, gpu_available, images)
+
+fn engine2d_draw_ir_adv_composition_with_images(engine: Engine2D, composition: DrawIrComposition, gpu_available: bool, images: [Engine2dResolvedDrawIrImage]) -> Engine2dDrawIrAdvResult:
+    val plan = simple_2d_draw_ir_adv_composition_plan(composition, gpu_available)
+    var rendered = 0
+    var skipped = 0
+    var unsupported_kinds = ""
+    for batch in composition.batches:
+        if batch.embedding.clip:
+            engine.set_clip(batch.embedding.x, batch.embedding.y, batch.embedding.width, batch.embedding.height)
+        for command in batch.commands:
+            val x = batch.embedding.x + command.x
+            val y = batch.embedding.y + command.y
+            if command.kind == DRAW_IR_COMMAND_RECT:
+                engine.draw_rect_filled(x, y, command.width, command.height, command.color)
+                rendered = rendered + 1
+            elif command.kind == DRAW_IR_COMMAND_TEXT:
+                engine.draw_text(x, y, command.text_value, command.color, 12)
+                rendered = rendered + 1
+            elif command.kind == DRAW_IR_COMMAND_IMAGE:
+                val image_index = _engine2d_draw_ir_resolved_image_index(images, command.image_uri)
+                if image_index >= 0 and _engine2d_draw_ir_valid_resolved_image(images[image_index]):
+                    val image = images[image_index]
+                    engine.draw_image_scaled(x, y, command.width, command.height, image.width, image.height, image.pixels)
+                    rendered = rendered + 1
+                else:
+                    skipped = skipped + 1
+                    if unsupported_kinds != "":
+                        unsupported_kinds = unsupported_kinds + ","
+                    unsupported_kinds = unsupported_kinds + command.kind
+            else:
+                skipped = skipped + 1
+                if unsupported_kinds != "":
+                    unsupported_kinds = unsupported_kinds + ","
+                unsupported_kinds = unsupported_kinds + command.kind
+        if batch.embedding.clip:
+            engine.clear_clip()
+    if unsupported_kinds == "":
+        unsupported_kinds = "none"
+    _engine2d_draw_ir_result_from_composition_plan_with_unsupported(plan, rendered, skipped, unsupported_kinds, engine.read_pixels())
+
+export Engine2dDrawIrAdvResult
+export Engine2dDrawIrRuntimeQueueResult
+export Engine2dDrawIrPayloadSummary
+export Engine2dResolvedDrawIrImage
+export engine2d_draw_ir_adv_batch
+export engine2d_draw_ir_adv_batch_with_images
+export engine2d_draw_ir_adv_apply_runtime_dispatch
+export engine2d_draw_ir_adv_batch_runtime_queue
+export engine2d_draw_ir_adv_batch_runtime_queue_dispatch_only
+export engine2d_draw_ir_adv_composition
+export engine2d_draw_ir_adv_composition_with_images
+export engine2d_resolved_draw_ir_image
+export engine2d_draw_ir_payload_checksum
+export engine2d_draw_ir_payload_summary

@@ -1,0 +1,261 @@
+# Parser — ASM Target Spec, Match, and Assert Parsing
+#
+# Extracted from parser_primary.spl. Contains:
+# - parse_asm_target_spec: target spec parsing [arch, os, abi, backend >= ver]
+# - parse_int_text: simple decimal integer parser
+# - parse_asm_match: multi-target asm dispatch
+# - parse_asm_assert_expr: compile-time target guard
+
+use compiler.core.tokens.{TOK_IDENT, TOK_INT_LIT, TOK_STRING_LIT}
+use compiler.core.tokens.{TOK_KW_CASE, TOK_KW_MATCH}
+use compiler.core.tokens.{TOK_EQ, TOK_LT, TOK_GEQ}
+use compiler.core.tokens.{TOK_LPAREN, TOK_RPAREN, TOK_LBRACKET, TOK_RBRACKET}
+use compiler.core.tokens.{TOK_COLON, TOK_COMMA, TOK_PIPE}
+use compiler.core.tokens.{TOK_INDENT, TOK_DEDENT, TOK_EOF}
+use compiler.core.tokens.{TOK_UNDERSCORE}
+use compiler.core.ast.{expr_asm, expr_asm_match, expr_asm_assert}
+use compiler.core.ast.{asm_arm_new, asm_arm_is_compile_error, asm_arm_error_msg, asm_arm_asm_text}
+use compiler.core.parser.{par_kind_get, par_text_get}
+use compiler.core.parser.{parser_advance, parser_expect, parser_error, parser_skip_newlines}
+
+fn parse_asm_target_spec() -> i64:
+    """Parse target spec: [arch | arch2, os, abi, backend >= ver]
+    Returns index into asm_arm_* arena (as spec, not full arm).
+    """
+    parser_expect(TOK_LBRACKET)
+    # Parse arch(es) with pipe grouping
+    var archs: [text] = []
+    if par_kind_get() == TOK_IDENT:
+        archs.push(par_text_get())
+        parser_advance()
+        # Check for pipe groups: arch | arch2
+        for pi in 0..20:
+            if par_kind_get() == TOK_PIPE:
+                parser_advance()
+                if par_kind_get() == TOK_IDENT:
+                    archs.push(par_text_get())
+                    parser_advance()
+                else:
+                    parser_error("expected architecture name after '|'")
+            else:
+                break
+    else:
+        parser_error("expected architecture name in target spec")
+
+    # Parse optional os, abi, backend (comma-separated)
+    var os_val = ""
+    var abi_val = ""
+    var backend_val = ""
+    var ver_ops: [text] = []
+    var ver_vals: [i64] = []
+    var field_pos = 1  # 1=os, 2=abi, 3=backend
+
+    for fi in 0..3:
+        if par_kind_get() != TOK_COMMA:
+            break
+        parser_advance()
+        if par_kind_get() == TOK_UNDERSCORE:
+            # Wildcard _
+            parser_advance()
+            field_pos = field_pos + 1
+            continue
+        if par_kind_get() == TOK_IDENT:
+            val field_text = par_text_get()
+            parser_advance()
+            if field_pos == 1:
+                os_val = field_text
+            elif field_pos == 2:
+                abi_val = field_text
+            elif field_pos == 3:
+                backend_val = field_text
+                # Check for version constraints after backend
+                for vi in 0..4:
+                    if par_kind_get() == TOK_GEQ:
+                        parser_advance()
+                        if par_kind_get() == TOK_INT_LIT:
+                            ver_ops.push(">=")
+                            ver_vals.push(parse_int_text(par_text_get()))
+                            parser_advance()
+                        else:
+                            parser_error("expected version number after '>='")
+                    elif par_kind_get() == TOK_EQ:
+                        # Could be == (two tokens) or a single ==
+                        parser_advance()
+                        if par_kind_get() == TOK_EQ:
+                            parser_advance()
+                        if par_kind_get() == TOK_INT_LIT:
+                            ver_ops.push("==")
+                            ver_vals.push(parse_int_text(par_text_get()))
+                            parser_advance()
+                        else:
+                            parser_error("expected version number after '=='")
+                    elif par_kind_get() == TOK_LT:
+                        parser_advance()
+                        if par_kind_get() == TOK_INT_LIT:
+                            ver_ops.push("<")
+                            ver_vals.push(parse_int_text(par_text_get()))
+                            parser_advance()
+                        else:
+                            parser_error("expected version number after '<'")
+                    elif par_kind_get() == TOK_IDENT and par_text_get() == "~=":
+                        parser_advance()
+                        if par_kind_get() == TOK_INT_LIT:
+                            ver_ops.push("~=")
+                            ver_vals.push(parse_int_text(par_text_get()))
+                            parser_advance()
+                        else:
+                            parser_error("expected version number after '~='")
+                    else:
+                        break
+            field_pos = field_pos + 1
+        else:
+            parser_error("expected identifier or '_' in target spec")
+            break
+
+    parser_expect(TOK_RBRACKET)
+
+    val arm_idx = asm_arm_new(archs, os_val, abi_val, backend_val,
+                              ver_ops, ver_vals, "", false, "", false)
+    arm_idx
+
+fn parse_int_text(txt: text) -> i64:
+    """Parse integer from text (simple decimal)."""
+    var result = 0
+    for i in 0..txt.len():
+        val ch = txt[i]
+        if ch >= "0" and ch <= "9":
+            result = result * 10 + (ch.ord() - 48)
+    result
+
+fn parse_asm_match() -> i64:
+    """Parse asm match: block with case arms.
+
+    Syntax:
+        asm match:
+            case [spec]: asm_body
+            case _: compile_error("msg")
+    """
+    parser_skip_newlines()
+    if par_kind_get() != TOK_INDENT:
+        parser_error("expected indented block after 'asm match:'")
+        return expr_asm("", 0)
+    parser_advance()
+
+    var arm_indices: [i64] = []
+    for mi in 0..100:
+        parser_skip_newlines()
+        if par_kind_get() == TOK_DEDENT:
+            parser_advance()
+            break
+        if par_kind_get() == TOK_EOF:
+            break
+
+        # Each arm starts with 'case'
+        if par_kind_get() != TOK_KW_CASE:
+            parser_error("expected 'case' in asm match arm")
+            parser_advance()
+            continue
+
+        parser_advance()  # consume 'case'
+
+        # Check for wildcard: case _:
+        if par_kind_get() == TOK_UNDERSCORE:
+            parser_advance()
+            parser_expect(TOK_COLON)
+
+            # Parse body: either compile_error("msg") or asm lines
+            parser_skip_newlines()
+            if par_kind_get() == TOK_INDENT:
+                parser_advance()
+                parser_skip_newlines()
+
+            if par_kind_get() == TOK_IDENT and par_text_get() == "compile_error":
+                parser_advance()
+                parser_expect(TOK_LPAREN)
+                var err_msg = ""
+                if par_kind_get() == TOK_STRING_LIT:
+                    err_msg = par_text_get()
+                    parser_advance()
+                parser_expect(TOK_RPAREN)
+                val arm_idx = asm_arm_new([], "", "", "", [], [], "", true, err_msg, true)
+                arm_indices.push(arm_idx)
+                # Skip to end of arm
+                parser_skip_newlines()
+                if par_kind_get() == TOK_DEDENT:
+                    parser_advance()
+            else:
+                # Wildcard with asm body
+                var asm_lines: [text] = []
+                for ai in 0..10000:
+                    parser_skip_newlines()
+                    if par_kind_get() == TOK_DEDENT or par_kind_get() == TOK_EOF:
+                        break
+                    if par_kind_get() == TOK_KW_CASE:
+                        break
+                    if par_kind_get() == TOK_STRING_LIT:
+                        asm_lines.push(par_text_get())
+                        parser_advance()
+                    else:
+                        parser_advance()
+                val asm_text = asm_lines.join("\n")
+                val arm_idx = asm_arm_new([], "", "", "", [], [], asm_text, false, "", true)
+                arm_indices.push(arm_idx)
+                if par_kind_get() == TOK_DEDENT:
+                    parser_advance()
+            continue
+
+        # case [spec]:
+        val spec_idx = parse_asm_target_spec()
+        parser_expect(TOK_COLON)
+
+        # Parse body: either compile_error("msg") or asm lines
+        parser_skip_newlines()
+        if par_kind_get() == TOK_INDENT:
+            parser_advance()
+            parser_skip_newlines()
+
+        if par_kind_get() == TOK_IDENT and par_text_get() == "compile_error":
+            parser_advance()
+            parser_expect(TOK_LPAREN)
+            var err_msg = ""
+            if par_kind_get() == TOK_STRING_LIT:
+                err_msg = par_text_get()
+                parser_advance()
+            parser_expect(TOK_RPAREN)
+            # Update the arm to be compile_error
+            asm_arm_is_compile_error[spec_idx] = true
+            asm_arm_error_msg[spec_idx] = err_msg
+            arm_indices.push(spec_idx)
+            parser_skip_newlines()
+            if par_kind_get() == TOK_DEDENT:
+                parser_advance()
+        else:
+            # Collect asm body lines
+            var asm_lines: [text] = []
+            for ai in 0..10000:
+                parser_skip_newlines()
+                if par_kind_get() == TOK_DEDENT or par_kind_get() == TOK_EOF:
+                    break
+                if par_kind_get() == TOK_KW_CASE:
+                    break
+                if par_kind_get() == TOK_STRING_LIT:
+                    asm_lines.push(par_text_get())
+                    parser_advance()
+                else:
+                    parser_advance()
+            val asm_text = asm_lines.join("\n")
+            asm_arm_asm_text[spec_idx] = asm_text
+            arm_indices.push(spec_idx)
+            if par_kind_get() == TOK_DEDENT:
+                parser_advance()
+
+    return expr_asm_match(arm_indices, 0)
+
+fn parse_asm_assert_expr() -> i64:
+    """Parse asm assert [spec] -- compile-time target guard.
+
+    Returns an expression (value is 0/unit in interpreter).
+    Uses EXPR_ASM_MATCH with i_val=1 to distinguish from asm match.
+    """
+    val spec_idx = parse_asm_target_spec()
+    return expr_asm_assert(spec_idx, 0)

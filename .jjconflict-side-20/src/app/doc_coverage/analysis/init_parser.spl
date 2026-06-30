@@ -1,0 +1,273 @@
+# __init__.spl parser for public API detection
+# Extracts public API items from comment-based documentation in __init__.spl files
+#
+# Supports two formats:
+# 1. Export statements: export fn1, fn2, fn3
+# 2. Comment-based docs: # - function_name (as in src/std/spec/__init__.spl)
+#
+# Detects groups via section headers like "# File operations"
+
+use app.io.mod (file_exists, file_read)
+use std.string.{NL}
+
+# ============================================================================
+# Types
+# ============================================================================
+
+struct PublicApiGroup:
+    group_name: text
+    group_line: i64
+    items: [text]
+    has_group_sdoctest: bool
+    file_path: text
+
+impl PublicApiGroup:
+    static fn create(name: text, line: i64, file: text) -> PublicApiGroup:
+        var empty_items: [text] = []
+        PublicApiGroup(
+            group_name: name,
+            group_line: line,
+            items: empty_items,
+            has_group_sdoctest: false,
+            file_path: file
+        )
+
+struct PublicApiItem:
+    name: text
+    line: i64
+    file_path: text
+    is_grouped: bool
+    group_name: text
+    has_sdoctest: bool
+
+impl PublicApiItem:
+    static fn create(name: text, line: i64, file: text) -> PublicApiItem:
+        PublicApiItem(
+            name: name,
+            line: line,
+            file_path: file,
+            is_grouped: false,
+            group_name: "",
+            has_sdoctest: false
+        )
+
+# ============================================================================
+# Parse __init__.spl for Public API Documentation
+# ============================================================================
+
+fn parse_init_file(file_path: text) -> ([PublicApiGroup], [PublicApiItem]):
+    # Parse __init__.spl to extract documented public API items
+    # Returns: (groups, ungrouped_items)
+
+    if not file_exists(file_path):
+        var empty_groups: [PublicApiGroup] = []
+        var empty_items: [PublicApiItem] = []
+        return (empty_groups, empty_items)
+
+    val content = file_read(file_path)
+    val lines = content.split(NL)
+
+    var groups: [PublicApiGroup] = []
+    var ungrouped_items: [PublicApiItem] = []
+
+    var current_group = nil
+    var line_num = 0
+
+    for line in lines:
+        line_num = line_num + 1
+        val trimmed = line.trim()
+
+        # Skip empty lines
+        if trimmed.len() == 0:
+            continue
+
+        # Detect group header (comment with capital letter, no dash)
+        val is_group_header = _is_group_header(trimmed)
+        if is_group_header:
+            # Save previous group if exists
+            if current_group != nil:
+                val items_count = current_group.items.len()
+                if items_count > 0:
+                    groups.push(current_group)
+
+            # Start new group
+            val group_name = _extract_group_name(trimmed)
+            current_group = PublicApiGroup__create(group_name, line_num, file_path)
+            continue
+
+        # Detect item in group (comment with dash: "# - item_name")
+        val is_item = _is_item_line(trimmed)
+        if is_item:
+            val item_name = _extract_item_name(trimmed)
+
+            if current_group != nil:
+                # Add to current group
+                current_group.items.push(item_name)
+            else:
+                # Ungrouped item
+                val item = PublicApiItem__create(item_name, line_num, file_path)
+                ungrouped_items.push(item)
+
+            continue
+
+        # Detect standalone function mention (use std.X.{func})
+        val is_use_statement = trimmed.starts_with("use ")
+        if is_use_statement:
+            val funcs = _extract_use_functions(trimmed)
+            for func in funcs:
+                if current_group != nil:
+                    current_group.items.push(func)
+                else:
+                    val item = PublicApiItem__create(func, line_num, file_path)
+                    ungrouped_items.push(item)
+
+    # Save final group
+    if current_group != nil:
+        val items_count = current_group.items.len()
+        if items_count > 0:
+            groups.push(current_group)
+
+    (groups, ungrouped_items)
+
+fn _is_group_header(line: text) -> bool:
+    # Detect group header comment: "# File operations" or "# Public API Groups:"
+    # Must start with #, contain capital letter, and NOT contain dash
+
+    if not line.starts_with("#"):
+        return false
+
+    val has_dash = line.contains(" - ")
+    if has_dash:
+        return false
+
+    # Check for capital letter (indicates title)
+    val has_capital = _contains_capital_letter(line)
+    has_capital
+
+fn _contains_capital_letter(text: text) -> bool:
+    var i = 0
+    while i < text.len():
+        val ch = text[i:i + 1]
+        val is_cap = ch >= "A" and ch <= "Z"
+        if is_cap:
+            return true
+        i = i + 1
+    false
+
+fn _extract_group_name(line: text) -> text:
+    # Extract group name from "# File operations" or "# Public API Groups:"
+    val after_hash = line[1:]
+    val trimmed = after_hash.trim()
+
+    # Remove trailing colon if present
+    var name = trimmed
+    if name.ends_with(":"):
+        name = name[0:name.len() - 1]
+
+    name.trim()
+
+fn _is_item_line(line: text) -> bool:
+    # Detect item line: "#   - file_read" or "# - file_read"
+    if not line.starts_with("#"):
+        return false
+
+    line.contains(" - ")
+
+fn _extract_item_name(line: text) -> text:
+    # Extract "file_read" from "#   - file_read" or "# - file_read"
+    val dash_idx = line.index_of(" - ") ?? -1
+    if dash_idx < 0:
+        return ""
+
+    val after_dash = line[dash_idx + 3:]
+    val trimmed = after_dash.trim()
+
+    # Remove parentheses if present (e.g., "file_read()")
+    var name = trimmed
+    val paren_idx = name.index_of("(") ?? -1
+    if paren_idx >= 0:
+        name = name[0:paren_idx]
+
+    name.trim()
+
+fn _extract_use_functions(use_line: text) -> [text]:
+    # Extract function names from "use std.spec.{describe, it, expect}"
+    var funcs: [text] = []
+
+    # Find opening brace
+    val open_brace = use_line.index_of("{") ?? -1
+    if open_brace < 0:
+        return []
+
+    # Find closing brace
+    val close_brace = use_line.index_of("}") ?? -1
+    if close_brace < 0:
+        return []
+
+    # Extract contents
+    val start = open_brace + 1
+    val contents = use_line[start:close_brace]
+
+    # Split by comma
+    val parts = contents.split(",")
+    for part in parts:
+        val name = part.trim()
+        if name.len() > 0:
+            funcs.push(name)
+
+    funcs
+
+# ============================================================================
+# Legacy Support - Export Statement Parsing
+# ============================================================================
+
+fn parse_init_exports(init_path: text) -> [text]:
+    # Legacy function for backward compatibility
+    # Parses both export statements and comment-based API docs
+
+    val result = parse_init_file(init_path)
+    val groups = result.0
+    val items = result.1
+
+    var all_items: [text] = []
+
+    # Add all group items
+    for group in groups:
+        for item in group.items:
+            all_items.push(item)
+
+    # Add ungrouped items
+    for item in items:
+        all_items.push(item.name)
+
+    all_items
+
+# Find __init__.spl in a module directory
+fn find_module_init(module_path: text) -> text:
+    val init_path = module_path + "/__init__.spl"
+    val exists = file_exists(init_path)
+    if exists:
+        return init_path
+    return nil
+
+# Combined: find and parse
+fn get_public_api(module_path: text) -> [text]:
+    val init_path = find_module_init(module_path)
+
+    val has_init = init_path != nil
+    if has_init:
+        return parse_init_exports(init_path)
+
+    var empty: [text] = []
+    empty
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export PublicApiGroup
+export PublicApiItem
+export parse_init_file
+export parse_init_exports
+export find_module_init
+export get_public_api

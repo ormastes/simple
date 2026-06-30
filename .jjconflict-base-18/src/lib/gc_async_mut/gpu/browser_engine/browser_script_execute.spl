@@ -1,0 +1,240 @@
+pub class BrowserScriptExecutionResult:
+    scripts_collected: i64
+    scripts_executed: i64
+    scripts_denied: i64
+    console_output: [text]
+    diagnostics: [text]
+
+impl BrowserScriptExecutionResult:
+    static fn empty() -> BrowserScriptExecutionResult:
+        var co: [text] = []
+        var diagnostics: [text] = []
+        BrowserScriptExecutionResult(scripts_collected: 0, scripts_executed: 0, scripts_denied: 0, console_output: co, diagnostics: diagnostics)
+
+fn _browser_script_index_of_from(haystack: text, marker: text, start: i64) -> i64:
+    if marker == "":
+        return start
+    val haystack_len = haystack.len()
+    val marker_len = marker.len()
+    if marker_len > haystack_len:
+        return -1
+    var offset = start
+    val last_start = haystack_len - marker_len
+    while offset <= last_start:
+        var marker_idx: i64 = 0
+        var matches = true
+        while marker_idx < marker_len:
+            if haystack.char_at(offset + marker_idx) != marker.char_at(marker_idx):
+                matches = false
+                break
+            marker_idx = marker_idx + 1
+        if matches:
+            return offset
+        offset = offset + 1
+    -1
+
+fn _extract_attr(tag_text: text, attr: text) -> text:
+    val key_dq = attr + "=\""
+    val key_sq = attr + "='"
+    val lo = tag_text.lower()
+    val idx_dq = lo.index_of(key_dq)
+    val idx_sq = lo.index_of(key_sq)
+    if idx_dq >= 0:
+        val start = idx_dq + key_dq.len()
+        val end = _browser_script_index_of_from(tag_text, "\"", start)
+        if end > start:
+            return tag_text.substring(start, end)
+    if idx_sq >= 0:
+        val start = idx_sq + key_sq.len()
+        val end = _browser_script_index_of_from(tag_text, "'", start)
+        if end > start:
+            return tag_text.substring(start, end)
+    ""
+
+fn _script_type_is_browser_js(script_type: text) -> bool:
+    val ty = script_type.lower().trim()
+    ty == "" or ty == "text/javascript" or ty == "application/javascript" or ty == "module"
+
+fn _append_lines(out: [text], s: text):
+    val trimmed = s.trim()
+    if trimmed.len() > 0:
+        out.push(trimmed)
+
+fn _strip_optional_semicolon(source: text) -> text:
+    val trimmed = source.trim()
+    if trimmed.ends_with(";"):
+        return trimmed.substring(0, trimmed.len() - 1).trim()
+    trimmed
+
+fn _literal_console_log_payload(statement: text) -> text:
+    val trimmed = _strip_optional_semicolon(statement)
+    # console.log("...") form
+    if trimmed.starts_with("console.log(") and trimmed.ends_with(")"):
+        val inner = trimmed.substring(12, trimmed.len() - 1).trim()
+        if inner.len() >= 2:
+            val first = inner.substring(0, 1)
+            val last = inner.substring(inner.len() - 1, inner.len())
+            if first == "\"" and last == "\"":
+                return inner.substring(1, inner.len() - 1)
+            if first == "'" and last == "'":
+                return inner.substring(1, inner.len() - 1)
+    # print("...") form
+    if trimmed.starts_with("print(") and trimmed.ends_with(")"):
+        val inner = trimmed.substring(6, trimmed.len() - 1).trim()
+        if inner.len() >= 2:
+            val first = inner.substring(0, 1)
+            val last = inner.substring(inner.len() - 1, inner.len())
+            if first == "\"" and last == "\"":
+                return inner.substring(1, inner.len() - 1)
+            if first == "'" and last == "'":
+                return inner.substring(1, inner.len() - 1)
+    ""
+
+# Returns the string value assigned by a const/val/let/var assignment, or "" if not an assignment.
+fn _extract_assignment_value(statement: text) -> (text, text):
+    val trimmed = _strip_optional_semicolon(statement)
+    var eq_idx: i64 = trimmed.index_of(" = ")
+    if eq_idx < 0:
+        return ("", "")
+    val lhs = trimmed.substring(0, eq_idx).trim()
+    # Extract variable name: last token of lhs
+    val space = lhs.index_of(" ")
+    val var_name = if space >= 0: lhs.substring(space + 1, lhs.len()).trim() else lhs
+    val rhs = trimmed.substring(eq_idx + 3, trimmed.len()).trim()
+    if rhs.len() < 2:
+        return (var_name, "")
+    val first = rhs.substring(0, 1)
+    val last = rhs.substring(rhs.len() - 1, rhs.len())
+    if first == "\"" and last == "\"":
+        return (var_name, rhs.substring(1, rhs.len() - 1))
+    if first == "'" and last == "'":
+        return (var_name, rhs.substring(1, rhs.len() - 1))
+    (var_name, "")
+
+fn _script_host_escape_diagnostic(source: text) -> text:
+    val lo = source.lower()
+    if lo.contains("rt_process_run") or lo.contains("host.shell"):
+        return "host shell access denied"
+    if lo.contains("child_process") or lo.contains("spawn("):
+        return "child process access denied"
+    if lo.contains("require(") or lo.contains("import("):
+        return "module loader access denied"
+    if lo.contains("process.env"):
+        return "ambient environment access denied"
+    if lo.contains("fs.") or lo.contains("fs.readfile"):
+        return "filesystem access denied"
+    if lo.contains("fetch(") or lo.contains("xmlhttprequest") or lo.contains("websocket"):
+        return "network access denied"
+    ""
+
+fn _run_browser_js_source(source: text) -> (bool, [text], text):
+    val host_escape = _script_host_escape_diagnostic(source)
+    if host_escape != "":
+        return (false, [], host_escape)
+    val cr_normalized = source.replace("\r", "\n")
+    val normalized = cr_normalized.replace(";", ";\n")
+    val statements = normalized.split("\n")
+    val statement_count = statements.len()
+    var output: [text] = [""; statement_count]
+    var output_count = 0
+    # Simple single-level variable store: parallel key/value arrays
+    var var_names: [text] = [""; statement_count]
+    var var_values: [text] = [""; statement_count]
+    var var_count = 0
+    for raw in statements:
+        val statement = raw.trim()
+        if statement == "":
+            continue
+        # Try print/console.log with literal
+        val payload = _literal_console_log_payload(statement)
+        if payload != "":
+            output[output_count] = payload
+            output_count = output_count + 1
+            continue
+        # Try print(varname) — look up variable
+        val trimmed = _strip_optional_semicolon(statement)
+        if trimmed.starts_with("print(") and trimmed.ends_with(")"):
+            val inner = trimmed.substring(6, trimmed.len() - 1).trim()
+            var found_val: text = ""
+            var vi: i32 = 0
+            while vi < var_count:
+                if var_names[vi] == inner:
+                    found_val = var_values[vi]
+                vi = vi + 1
+            output[output_count] = found_val
+            output_count = output_count + 1
+            continue
+        if trimmed.starts_with("console.log(") and trimmed.ends_with(")"):
+            val inner = trimmed.substring(12, trimmed.len() - 1).trim()
+            var found_val: text = ""
+            var vi: i32 = 0
+            while vi < var_count:
+                if var_names[vi] == inner:
+                    found_val = var_values[vi]
+                vi = vi + 1
+            output[output_count] = found_val
+            output_count = output_count + 1
+            continue
+        # Try assignment: const/let/var/val name = "value"
+        val (vname, vval) = _extract_assignment_value(statement)
+        if vname != "":
+            var_names[var_count] = vname
+            var_values[var_count] = vval
+            var_count = var_count + 1
+            continue
+        # Unknown statement — skip (not deny), browser JS has many constructs
+    (true, _text_list_prefix(output, output_count), "")
+
+fn _text_list_prefix(values: [text], count: i32) -> [text]:
+    var out: [text] = [""; count]
+    var i = 0
+    while i < count:
+        out[i] = values[i]
+        i = i + 1
+    out
+
+pub fn execute_scripts_in_html(html: text) -> BrowserScriptExecutionResult:
+    var result = BrowserScriptExecutionResult.empty()
+    val lo = html.lower()
+    val html_len = html.len()
+    var search_pos: i64 = 0
+    while search_pos < html_len:
+        val tag_open = _browser_script_index_of_from(lo, "<script", search_pos)
+        if tag_open < 0:
+            return result
+        val tag_close = _browser_script_index_of_from(html, ">", tag_open)
+        if tag_close < 0:
+            return result
+        val close_idx = _browser_script_index_of_from(lo, "</script>", tag_close + 1)
+        if close_idx < 0:
+            return result
+        val open_tag = html.substring(tag_open, tag_close + 1)
+        val script_type = _extract_attr(open_tag, "type")
+        val src_attr = _extract_attr(open_tag, "src")
+        if src_attr != "":
+            result.scripts_collected = result.scripts_collected + 1
+            result.scripts_denied = result.scripts_denied + 1
+            result.diagnostics.push("external script src denied: " + src_attr)
+        else:
+            val body = html.substring(tag_close + 1, close_idx)
+            if _script_type_is_browser_js(script_type):
+                result.scripts_collected = result.scripts_collected + 1
+                val (ok, stdout_lines, diagnostic) = _run_browser_js_source(body)
+                if ok:
+                    result.scripts_executed = result.scripts_executed + 1
+                    var li: i32 = 0
+                    val stdout_count = stdout_lines.len()
+                    while li < stdout_count:
+                        val trimmed_line = stdout_lines[li].trim()
+                        if trimmed_line.len() > 0:
+                            result.console_output.push(trimmed_line)
+                        li = li + 1
+                else:
+                    result.scripts_denied = result.scripts_denied + 1
+                    result.diagnostics.push(diagnostic)
+            else:
+                result.scripts_collected = result.scripts_collected + 1
+                result.scripts_denied = result.scripts_denied + 1
+                result.diagnostics.push("unsupported script type denied: " + script_type)
+        search_pos = close_idx + 9
+    result

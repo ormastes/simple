@@ -1,0 +1,210 @@
+# Electron Simple Web Layout Bitmap Evidence
+
+- status: pass
+- reason: pass
+- scene: simple-web-layout-text-flow
+- capture mode: dom
+- DOM HTML path: build/electron_simple_web_layout_text_flow_dom_after_overlay/scene.html
+- dimensions: 96x64
+- Simple checksum: 26380092640239
+- Electron checksum: 26380092640239
+- Simple weighted checksum: 81054576483450399
+- Electron weighted checksum: 81054576483450399
+- mismatch count: 0
+- same pixels: 6144
+- Chrome extra text pixels: 0
+- Simple extra text pixels: 0
+- text color delta pixels: 0
+- surface geometry pixels: 0
+- blur/tolerance used: false
+- Electron frame us: 20743
+- HTML path: build/electron_simple_web_layout_text_flow_dom_after_overlay/scene.html
+- expected ARGB path: build/electron_simple_web_layout_text_flow_dom_after_overlay/expected-argb.json
+- captured ARGB path: build/electron_simple_web_layout_text_flow_dom_after_overlay/electron-argb.json
+- captured ARGB written: true
+
+## Raw Evidence
+- electron_simple_web_layout_status=pass
+- electron_simple_web_layout_reason=pass
+- electron_simple_web_layout_scene=simple-web-layout-text-flow
+- electron_simple_web_layout_capture_mode=dom
+- electron_simple_web_layout_dom_html_path=build/electron_simple_web_layout_text_flow_dom_after_overlay/scene.html
+- electron_simple_web_layout_width=96
+- electron_simple_web_layout_height=64
+- electron_simple_web_layout_iterations=3
+- electron_simple_web_layout_simple_checksum=26380092640239
+- electron_simple_web_layout_electron_checksum=26380092640239
+- electron_simple_web_layout_simple_weighted_checksum=81054576483450399
+- electron_simple_web_layout_electron_weighted_checksum=81054576483450399
+- electron_simple_web_layout_mismatch_count=0
+- electron_simple_web_layout_same_pixels=6144
+- electron_simple_web_layout_chrome_extra_text_pixels=0
+- electron_simple_web_layout_simple_extra_text_pixels=0
+- electron_simple_web_layout_text_color_delta_pixels=0
+- electron_simple_web_layout_surface_geometry_pixels=0
+- electron_simple_web_layout_blur_or_tolerance_used=false
+- electron_simple_web_layout_electron_frame_us=20743
+- electron_simple_web_layout_html_path=build/electron_simple_web_layout_text_flow_dom_after_overlay/scene.html
+- electron_simple_web_layout_expected_argb_path=build/electron_simple_web_layout_text_flow_dom_after_overlay/expected-argb.json
+- electron_simple_web_layout_captured_argb_path=build/electron_simple_web_layout_text_flow_dom_after_overlay/electron-argb.json
+- electron_simple_web_layout_captured_argb_written=true
+- electron_simple_web_layout_exit_code=0
+
+## Simple Output
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:2869:47
+-    |
+- 2869 |             while x + run_w < width and pixels[y * width + x + run_w] == color:
+-    |                                               ^
+- 
+- Use angle brackets: pixels<...> instead of pixels[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/gpu/engine2d/sffi_opencl.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.gpu.engine2d.sffi_opencl.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/nogc_async_mut/path.spl:138:31
+-    |
+- 138 |         if c < bp.len() and pp[c] == bp[c]:
+-    |                               ^
+- 
+- Use angle brackets: pp<...> instead of pp[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/io/oneapi_ffi.spl:3:1
+-    |
+-   3 | export use std.gc_async_mut.io.oneapi_sffi.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/io/oneapi_sffi.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.io.oneapi_sffi.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [INFO] JIT compilation failed, falling back to interpreter: HIR lowering error: Unknown type: any
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:2869:47
+-    |
+- 2869 |             while x + run_w < width and pixels[y * width + x + run_w] == color:
+-    |                                               ^
+- 
+- Use angle brackets: pixels<...> instead of pixels[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/gpu/engine2d/sffi_opencl.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.gpu.engine2d.sffi_opencl.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/nogc_async_mut/path.spl:138:31
+-    |
+- 138 |         if c < bp.len() and pp[c] == bp[c]:
+-    |                               ^
+- 
+- Use angle brackets: pp<...> instead of pp[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/io/oneapi_ffi.spl:3:1
+-    |
+-   3 | export use std.gc_async_mut.io.oneapi_sffi.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/io/oneapi_sffi.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.io.oneapi_sffi.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [memory-guard] SIMPLE_LIB=src contains 600+ .spl files — consider narrowing scope to avoid memory bloat
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.simd_provider' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.sffi_cuda' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.sffi.dynamic' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.sffi_opencl' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.simd_kernels' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.opengl_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.env.types' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.rocm_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.oneapi_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- simple_status=pass
+- simple_reason=pass
+- renderer=pure-simple-web-layout-renderer
+- scene=simple-web-layout-text-flow
+- width=96
+- height=64
+- checksum=26380092640239
+- weighted_checksum=81054576483450399
+- expected_argb_path=build/electron_simple_web_layout_text_flow_dom_after_overlay/expected-argb.json
+- blur_or_tolerance_used=false
+- simple_status=pass
+- simple_reason=pass
+- renderer=pure-simple-web-layout-renderer
+- scene=simple-web-layout-text-flow
+- width=96
+- height=64
+- checksum=26380092640239
+- weighted_checksum=81054576483450399
+- expected_argb_path=build/electron_simple_web_layout_text_flow_dom_after_overlay/expected-argb.json
+- blur_or_tolerance_used=false
+
+## Electron Output
+- [522210:0605/041815.048526:ERROR:bus.cc(407)] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+- [522210:0605/041815.048758:ERROR:bus.cc(407)] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+- [522210:0605/041815.048808:ERROR:bus.cc(407)] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+- [522210:0605/041815.048862:ERROR:bus.cc(407)] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+- [522210:0605/041815.048913:ERROR:bus.cc(407)] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+- [522210:0605/041815.088446:ERROR:bus.cc(407)] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+- [522239:0605/041815.417006:ERROR:viz_main_impl.cc(181)] Exiting GPU process due to errors during initialization
+- renderer=electron-live-capture-page
+- scene=simple-web-layout-text-flow
+- width=96
+- height=64
+- iterations=3
+- checksum=26380092640239
+- expected_checksum=26380092640239
+- weighted_checksum=81054576483450399
+- expected_weighted_checksum=81054576483450399
+- mismatch_count=0
+- frame_us=20743
+- capture_native_width=96
+- capture_native_height=64
+- capture_downsampled=false
+- captured_argb_path=build/electron_simple_web_layout_text_flow_dom_after_overlay/electron-argb.json
+- captured_argb_written=true
+- blur_or_tolerance_used=false

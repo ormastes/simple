@@ -1,0 +1,91 @@
+use std.ndarray.*
+
+fn sum(values: NDArray) -> Result<Float64, NdarrayError>:
+    values.try_sum()
+
+fn mean(values: NDArray) -> Result<Float64, NdarrayError>:
+    values.try_mean()
+
+fn variance(values: NDArray) -> Result<Float64, NdarrayError>:
+    if values.dtype != DType.F64:
+        return Err(NdarrayError.UnsupportedDType)
+    if values.len().value == 0:
+        return Err(NdarrayError.InvalidShape)
+    val avg = values.try_mean()?
+    var total = 0.0
+    var i = 0
+    while i < values.len().value:
+        val delta = values.flat_f64(i).value - avg.value
+        total = total + delta * delta
+        i = i + 1
+    Ok(Float64.new(total / values.len().value))
+
+fn stddev(values: NDArray) -> Result<Float64, NdarrayError>:
+    val var_value = variance(values)?
+    Ok(Float64.new(sqrt_f64(var_value.value)))
+
+fn zscore(values: NDArray) -> Result<NDArray, NdarrayError>:
+    if values.dtype != DType.F64:
+        return Err(NdarrayError.UnsupportedDType)
+    if values.shape.dims.len() != 1 or values.len().value == 0:
+        return Err(NdarrayError.InvalidShape)
+    val avg = values.try_mean()?
+    val scale = stddev(values)?
+    if scale.value == 0.0:
+        return Err(NdarrayError.InvalidShape)
+    var out: [Float64] = []
+    var i = 0
+    while i < values.len().value:
+        val normalized = (values.flat_f64(i).value - avg.value) / scale.value
+        out.push(Float64.new(normalized))
+        i = i + 1
+    Ok(array(out))
+
+fn median(values: NDArray) -> Result<Float64, NdarrayError>:
+    if values.dtype != DType.F64:
+        return Err(NdarrayError.UnsupportedDType)
+    if values.shape.dims.len() != 1 or values.len().value == 0:
+        return Err(NdarrayError.InvalidShape)
+    val sorted = values.try_sort()?
+    val mid = sorted.len().value / 2
+    if sorted.len().value % 2 == 1:
+        return Ok(sorted.flat_f64(mid))
+    val left = sorted.flat_f64(mid - 1).value
+    val right = sorted.flat_f64(mid).value
+    Ok(Float64.new((left + right) * 0.5))
+
+fn quantile(values: NDArray, q: Float64) -> Result<Float64, NdarrayError>:
+    if values.dtype != DType.F64:
+        return Err(NdarrayError.UnsupportedDType)
+    if values.shape.dims.len() != 1 or values.len().value == 0:
+        return Err(NdarrayError.InvalidShape)
+    if q.value < 0.0 or q.value > 1.0:
+        return Err(NdarrayError.InvalidShape)
+    val sorted = values.try_sort()?
+    if sorted.len().value == 1:
+        return Ok(sorted.flat_f64(0))
+    val scaled = q.value * ((sorted.len().value - 1) as f64)
+    val lower = floor_i64(scaled)
+    val upper = if lower + 1 < sorted.len().value: lower + 1 else: lower
+    val weight = scaled - (lower as f64)
+    val left = sorted.flat_f64(lower).value
+    val right = sorted.flat_f64(upper).value
+    Ok(Float64.new(left + (right - left) * weight))
+
+fn floor_i64(value: f64) -> i64:
+    val truncated = value as i64
+    if (truncated as f64) > value:
+        return truncated - 1
+    truncated
+
+fn sqrt_f64(value: f64) -> f64:
+    if value <= 0.0:
+        return 0.0
+    var estimate = value
+    if estimate < 1.0:
+        estimate = 1.0
+    var i = 0
+    while i < 20:
+        estimate = 0.5 * (estimate + value / estimate)
+        i = i + 1
+    estimate

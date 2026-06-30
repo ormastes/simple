@@ -1,0 +1,120 @@
+# ARM64 / host-native JIT Benchmark — pure CPU, no CUDA
+#
+# Validates that the Cranelift JIT works on any host (x86_64 or aarch64).
+# Uses a sum-of-squares loop as the hot function: pure i64 arithmetic with
+# no platform-specific intrinsics or GPU calls.
+#
+# Flow:
+#   1. Register hot_compute source with the TieredJitManager
+#   2. Warmup loop (interpreted) accumulates call counts, triggers Cranelift
+#      compilation at the tier-promotion threshold
+#   3. Measured loop runs through native host-compiled machine code
+#   4. Correctness check: native result == interpreted result
+#
+# Run:
+#   bin/simple test/perf/graphics_2d/bench_jit_arm64.spl
+#
+# Expected: Measured loop completes in well under 1 s for 2000 calls at
+# work_size=100000. Any host ISA (x86_64 or aarch64) is accepted.
+
+use compiler.interp.execution.tiered_jit.{TieredJitManager, TieredJitConfig, JitTier, default_config}
+
+extern fn rt_time_now_seconds() -> f64
+
+# Source code for the JIT-compiled hot function.
+# The TieredJitManager compiles this via Cranelift for the host ISA.
+val HOT_COMPUTE_SOURCE = "fn hot_compute(n: i64) -> i64:\n    var sum = 0\n    var i = 0\n    while i < n:\n        sum = sum + i * i\n        i = i + 1\n    sum\n"
+
+fn hot_compute(n: i64) -> i64:
+    var sum = 0
+    var i = 0
+    while i < n:
+        sum = sum + i * i
+        i = i + 1
+    sum
+
+fn tier_name(tier: JitTier) -> text:
+    if tier == JitTier.Interpreted:
+        "Interpreted (Tier 0)"
+    else if tier == JitTier.Fast:
+        "Cranelift (Tier 1)"
+    else:
+        "LLVM (Tier 2)"
+
+fn main():
+    print("=== ARM64 / Host-Native JIT Benchmark ===")
+    print("    (Cranelift auto-selects host ISA: x86_64 or aarch64)")
+    print("")
+
+    var config = default_config()
+    var jit = TieredJitManager.create(config)
+
+    jit.register_function("hot_compute", HOT_COMPUTE_SOURCE)
+
+    # --- Loop 1: Warmup — interpreted, triggers tier promotion ---
+    print("--- Loop 1: Warmup (interpreter + tier promotion) ---")
+    var warmup_calls = 128
+    var work_size = 100000
+    var t0 = rt_time_now_seconds()
+    var i = 0
+    while i < warmup_calls:
+        jit.record_call("hot_compute")
+        hot_compute(work_size)
+        i = i + 1
+    var t1 = rt_time_now_seconds()
+    var warmup_s = t1 - t0
+
+    print("  Warmup: " + warmup_calls.to_string() + " calls in " + warmup_s.to_string() + " s")
+    print("  hot_compute tier: " + tier_name(jit.get_tier("hot_compute")))
+    print("  Native available: " + jit.is_native("hot_compute").to_string())
+
+    # --- Loop 2: Measured — host-native Cranelift execution ---
+    print("")
+    print("--- Loop 2: Measured (native host execution) ---")
+    var measured_calls = 2000
+    var t2 = rt_time_now_seconds()
+    i = 0
+    if jit.is_native("hot_compute"):
+        while i < measured_calls:
+            jit.call_i64("hot_compute", work_size)
+            i = i + 1
+    else:
+        print("  WARNING: native compilation did not promote; running interpreter")
+        while i < measured_calls:
+            hot_compute(work_size)
+            i = i + 1
+    var t3 = rt_time_now_seconds()
+    var measured_s = t3 - t2
+
+    print("  Measured: " + measured_calls.to_string() + " calls in " + measured_s.to_string() + " s")
+
+    if measured_s > 0.0:
+        var us_per_call = (measured_s * 1000000.0) / measured_calls.to_f64()
+        print("  avg: " + us_per_call.to_string() + " us/call (work_size=" + work_size.to_string() + ")")
+        print("")
+        print("BENCH_RESULT fn=hot_compute backend=jit_cranelift_host"
+            + " calls=" + measured_calls.to_string()
+            + " total_s=" + measured_s.to_string()
+            + " avg_us=" + us_per_call.to_string()
+            + " work_size=" + work_size.to_string())
+    else:
+        print("  Native execution faster than timer resolution")
+        print("BENCH_RESULT fn=hot_compute backend=jit_cranelift_host calls=" + measured_calls.to_string() + " total_s=<1us")
+
+    # --- Correctness check ---
+    print("")
+    print("--- Correctness Check ---")
+    var expected = hot_compute(work_size)
+    var native_result = jit.call_i64("hot_compute", work_size)
+    print("  Interpreted result: " + expected.to_string())
+    print("  Native result:      " + native_result.to_string())
+    if expected == native_result:
+        print("  PASS: results match")
+    else:
+        print("  FAIL: result mismatch!")
+
+    print("")
+    jit.print_stats()
+    jit.cleanup()
+
+main()
