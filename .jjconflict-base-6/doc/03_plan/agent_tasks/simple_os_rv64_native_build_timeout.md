@@ -1971,3 +1971,136 @@ that preserves extern callee names into RV64 object relocations, then link
 `serial_println` to `log_raw_println` and `rt_qemu_exit_success` by real symbol
 name. Do not run QEMU until `build/os/simpleos_riscv64_smf_fs.elf` exists with
 real entry text.
+
+2026-06-30 continuation 14:
+
+- Source-worker probe
+  `build/os/native_rv64_source_worker_current_repro_20260630233949.log`
+  timed out with `status=124` after JIT rejected 55 ambiguous erased-receiver
+  method bodies and fell back to the known slow/broken interpreter path.
+- A broad erased-receiver ambiguity fallthrough experiment compiled farther but
+  was rejected as unsafe: probe
+  `build/os/native_rv64_source_worker_erased_ambiguity_fallthrough_probe_20260630234953.log`
+  segfaulted with `Entry closure files: 1`; gdb log
+  `build/os/native_rv64_source_worker_erased_ambiguity_gdb_20260630235037.log`
+  showed the crash in `getenv` with a corrupt stack. Do not restore broad
+  fallthrough.
+- `src/compiler_rust/compiler/src/codegen/instr/closures_structs.rs` now keeps
+  the hard ambiguity error for erased receivers except safe dynamic
+  `to_string`/`to_text`/`str` fallback, covered by
+  `codegen::instr::closures_structs::tests::erased_receiver_ambiguity_falls_through`.
+- Focused Rust test and release compiler rebuild passed:
+  `cargo test --release --manifest-path src/compiler_rust/Cargo.toml -p simple-compiler codegen::instr::closures_structs::tests::erased_receiver_ambiguity_falls_through -- --nocapture`
+  and `cargo build --release --manifest-path src/compiler_rust/Cargo.toml --bin simple`.
+
+Next step remains the owner fix for RV64 object relocation callee names. The
+full source-worker JIT still has real erased-receiver ambiguity debt; do not
+paper over it with broad runtime fallthrough or `SIMPLE_ALLOW_STUB_FALLBACK`.
+
+2026-06-30 continuation 15:
+
+- The small RV64 smoke/SMF FS lane now builds through the production wrapper:
+  `bin/simple os build --arch=riscv64` regenerated
+  `build/os/simpleos_riscv64_smf_fs.elf` with sane symbols
+  (`__simple_riscv_entry`, `spl_start`, `rt_riscv_uart_put`, `serial_println`,
+  `rt_qemu_exit_success`) and no `unknown_*` symbol aliases in the linked ELF.
+- `src/compiler/70.backend/backend/llvm_native_link.spl` now emits a real
+  RISC-V QEMU success exit stub for the generated link stubs by writing
+  `0x5555U` to the QEMU virt SiFive test device instead of leaving
+  `rt_qemu_exit_success` empty.
+- Direct QEMU smoke passed with clean process exit:
+  `timeout 20s qemu-system-riscv64 -machine virt -cpu rv64 -m 256M -nographic -bios default -no-reboot -kernel build/os/simpleos_riscv64_smf_fs.elf`
+  returned `status=0` and printed `FS_MOUNT_OK`, `SMF_DISCOVERY_OK`,
+  `SMF_CLI_LAUNCH_OK`, `SMF_WM_GUI_LAUNCH_OK`,
+  `NATIVE_GUI_PROCESS_RENDER_OK`, `SIMPLEOS_RISCV_SMF_FS_PASS`, and
+  `TEST PASSED`.
+
+Remaining work: this is serial smoke/SMF contract evidence only. The full RV64
+live WM framebuffer gate still needs a display-entry ELF, QMP/framebuffer
+capture, and host matrix pass.
+
+2026-07-01 continuation 16:
+
+- The host configuration matrix now exposes the clean RV64 SMF GUI serial proof
+  as its own field instead of hiding it behind the still-missing framebuffer
+  gate:
+  `simpleos_host_configuration_qemu_riscv64_smf_gui_serial_status=pass`.
+- Focused host matrix probe returned overall `fail` as expected, with
+  `qemu_riscv64_network_ports=pass`, `qemu_riscv64_smf_gui_serial=pass`,
+  `qemu_simpleos_wm_live=pass`, and `qemu_riscv64_wm_live=missing`.
+- Focused hardening matrix probe still reports `9/10`, now including
+  `simpleos_hardening_host_configuration_qemu_riscv64_smf_gui_serial_status=pass`
+  and the current blocker reason:
+  `RV64 SMF GUI serial proof exists, but no RV64 QMP/framebuffer capture proves live WM pixels`.
+- `doc/07_guide/platform/simpleos/qemu_system_tests.md` now documents the split
+  between RV64 SMF GUI serial evidence and the still-open RV64 live WM
+  framebuffer capture gate.
+
+Next step: build or route an RV64 display-entry target that holds after WM
+render readiness, then reuse QMP/equivalent capture to prove nonblank pixels.
+
+2026-07-01 continuation 17:
+
+- `examples/09_embedded/simple_os/arch/riscv64/hosted_entry.spl` no longer uses
+  unsupported `if val Some(...)` syntax for manifest size lookup; it now uses a
+  `match g_vfs_file_size(path)` expression.
+- The existing platform smoke lane `riscv64-smoke` is now exposed through the
+  QEMU scenario catalog. It routes `bin/simple os build --scenario=riscv64-smoke`
+  to `src/os/kernel/arch/riscv64/boot.spl` and
+  `build/os/simpleos_riscv64.elf`, the full boot lane that initializes
+  `riscv_noalloc_services_init(true)` and can reach RV64 virtio-gpu display
+  readiness.
+- Focused `riscv64-hosted` scenario build got past the previous parser error,
+  then timed out after the native worker's 180s budget while compiling the full
+  source closure.
+- Focused `riscv64-smoke` scenario build proved the new scenario dispatch and
+  invoked the expected full `boot.spl` native-build command, then hit the
+  outer 240s cap without producing `build/os/simpleos_riscv64.elf`.
+
+Next step: reduce or repair the full RV64 `boot.spl` native-build closure so
+`riscv64-smoke` emits `build/os/simpleos_riscv64.elf`; only then run QEMU with
+virtio-gpu/QMP capture for live RV64 WM pixels.
+
+2026-07-01 continuation 18:
+
+- `riscv64-smoke` native-build sources are now narrowed from broad
+  `src`/`examples` roots to `build/os/generated`, `src/os`, and `src/lib`.
+  The scenario still dispatches correctly to `src/os/kernel/arch/riscv64/boot.spl`,
+  but the full boot closure still hit the 240s bounded build cap.
+- Added `riscv64-display-smoke`, a smaller explicit QEMU scenario targeting
+  `examples/09_embedded/simple_os/arch/riscv64/display_entry.spl` and
+  `build/os/simpleos_riscv64_display_smoke.elf`.
+- The display-smoke entry now bypasses network, storage, `os_main`, and WM
+  userland; it initializes heap/module globals, calls the RV64 display runtime
+  directly (`rt_display_init`, `rt_display_flush_test`), logs
+  `SIMPLEOS_RISCV_DISPLAY_SMOKE_READY <width>x<height>`, and idles for QMP
+  capture.
+- Focused display-smoke build proved scenario dispatch and narrowed source
+  roots, then still hit the 240s outer cap before producing the ELF.
+
+Next step: fix native-build throughput or reduce the remaining RV64 display
+closure further until `build/os/simpleos_riscv64_display_smoke.elf` exists.
+After that, boot with virtio-gpu and QMP capture to prove nonblank RV64 pixels,
+then move from display-smoke pixels to WM-rendered pixels.
+
+2026-07-01 continuation 19:
+
+- Renamed the display-smoke entry to
+  `examples/09_embedded/simple_os/arch/riscv64/display_entry.spl` so the RV64
+  linker no longer misclassifies it as a `smoke_entry`/`spl_start` target.
+- Reduced the display entry to an extern-only probe: no `src/os` imports, no
+  module-init call, direct PMM/display runtime calls, and a C-runtime
+  `rt_riscv_wfi_forever()` halt for QMP capture.
+- Added `rt_riscv_wfi_forever()` to both the generated RV64 link stubs and the
+  real RV64 freestanding runtime.
+- Narrowed display-smoke native-build sources to `build/os/generated` plus the
+  RV64 example directory and routed the target through the existing
+  freestanding `SIMPLE_BOOT_MINIMAL=1`/`--timeout 180` profile.
+- Focused build no longer hits the 240s outer cap; it now fails in about 63s
+  before link with
+  `semantic: invalid pattern: match expression exhausted without matching any pattern`.
+
+Next step: fix the compiler/native-build match failure for the minimal
+`riscv64-unknown-none` display entry. After that, link the real RV64
+freestanding display runtime, boot with virtio-gpu, and capture nonblank QMP
+pixels before moving back to the full WM-rendered gate.

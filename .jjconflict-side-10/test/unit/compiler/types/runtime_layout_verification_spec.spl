@@ -1,0 +1,249 @@
+"""
+# Runtime Layout Verification Specification
+
+**Feature IDs:** #SFFI-LAYOUT-002
+**Category:** Compiler / Types / Layout / Runtime
+**Difficulty:** 3/5
+**Status:** Implemented
+**Requirements:** SFFI bidirectional class interop — runtime layout safety
+**Plan:** parsed-questing-goose.md
+**Design:** sffi_external_library_pattern.md
+
+## Overview
+
+Tests runtime layout verification: compute_layout_verification(),
+generate_runtime_layout_asserts(), and extract_field_offsets() for
+@export("C") types. These complement the compile-time _Static_assert
+checks with runtime assert() calls in spl_verify_layouts().
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| compute_layout_verification | Entry point for runtime verification pipeline |
+| generate_runtime_layout_asserts | Emit assert() calls for spl_verify_layouts() |
+| extract_field_offsets | Simplified name/offset/size triples |
+| FieldOffset | Lightweight offset record for tooling |
+"""
+
+use std.spec
+
+# @cover src/compiler/30.types/type_layout.spl 70%
+
+use compiler.types.type_layout.{
+    LayoutAttr, LayoutKind, FieldLayout, FieldOffset,
+    layoutattr_default_, layoutattr_c_repr, layoutattr_packed,
+    compute_layout_verification, LayoutVerification, LayoutMismatch,
+    generate_runtime_layout_asserts, extract_field_offsets
+}
+from hir_definitions import {HirField, HirExpr, HirExprKind}
+from hir_types import {HirType, HirTypeKind, SymbolId}
+from lexer import {Span}
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn empty_span() -> Span:
+    Span(start: 0, end_pos: 0, line: 1, col: 1)
+
+fn make_hir_type(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: empty_span())
+
+fn make_u8_type() -> HirType:
+    make_hir_type(HirTypeKind.Int(8, false))
+
+fn make_u16_type() -> HirType:
+    make_hir_type(HirTypeKind.Int(16, false))
+
+fn make_i32_type() -> HirType:
+    make_hir_type(HirTypeKind.Int(32, true))
+
+fn make_u32_type() -> HirType:
+    make_hir_type(HirTypeKind.Int(32, false))
+
+fn make_i64_type() -> HirType:
+    make_hir_type(HirTypeKind.Int(64, true))
+
+fn make_i8_type() -> HirType:
+    make_hir_type(HirTypeKind.Int(8, true))
+
+fn make_f64_type() -> HirType:
+    make_hir_type(HirTypeKind.Float(64))
+
+fn make_bool_type() -> HirType:
+    make_hir_type(HirTypeKind.Bool)
+
+fn dummy_expr() -> HirExpr:
+    HirExpr(
+        kind: HirExprKind.UnitLit,
+        has_type_: false,
+        type_: make_hir_type(HirTypeKind.Unit),
+        span: empty_span()
+    )
+
+fn make_field(name: text, type_: HirType) -> HirField:
+    HirField(
+        symbol: SymbolId(id: 0),
+        name: name,
+        type_: type_,
+        has_default: false,
+        default: dummy_expr(),
+        is_public: true,
+        is_volatile: false,
+        has_bits_attr: false,
+        bits_width: 0,
+        has_fixed_address: false,
+        fixed_address: 0,
+        span: empty_span()
+    )
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+describe "runtime layout verification":
+    """
+    ## Runtime Layout Verification
+
+    Tests the runtime assert generation pipeline for spl_verify_layouts().
+    """
+
+    describe "compute_layout_verification":
+        """
+        ## Layout Computation Entry Point
+
+        compute_layout_verification wraps verify_c_layout for the
+        runtime verification pipeline.
+        """
+
+        it "computes correct offsets for a simple struct":
+            # PacketHeader: u8 version, u8 flags, u16 length, u32 sequence
+            val fields = [
+                make_field("version", make_u8_type()),
+                make_field("flags", make_u8_type()),
+                make_field("length", make_u16_type()),
+                make_field("sequence", make_u32_type())
+            ]
+            val v = compute_layout_verification("PacketHeader", fields, layoutattr_c_repr())
+            expect(v.is_valid).to_equal(true)
+            expect(v.total_size).to_equal(8)
+            expect(v.alignment).to_equal(4)
+            expect(v.fields.len()).to_equal(4)
+            expect(v.fields[0].offset).to_equal(0)  # version
+            expect(v.fields[1].offset).to_equal(1)  # flags
+            expect(v.fields[2].offset).to_equal(2)  # length
+            expect(v.fields[3].offset).to_equal(4)  # sequence
+
+        it "handles alignment padding":
+            # Struct with u8 then u32: padding after u8
+            val fields = [
+                make_field("a", make_u8_type()),
+                make_field("b", make_u32_type())
+            ]
+            val v = compute_layout_verification("Padded", fields, layoutattr_c_repr())
+            expect(v.is_valid).to_equal(true)
+            expect(v.fields[0].offset).to_equal(0)  # a at 0
+            expect(v.fields[1].offset).to_equal(4)  # b at 4 (3 bytes padding)
+            expect(v.total_size).to_equal(8)
+
+        it "computes correct total size with trailing padding":
+            # Struct ending with smaller type needs padding to alignment
+            val fields = [
+                make_field("big", make_i64_type()),
+                make_field("small", make_i8_type())
+            ]
+            val v = compute_layout_verification("TailPad", fields, layoutattr_c_repr())
+            expect(v.is_valid).to_equal(true)
+            expect(v.fields[0].offset).to_equal(0)  # big at 0
+            expect(v.fields[1].offset).to_equal(8)  # small at 8
+            # Total: 9 rounded up to 16 (alignment 8)
+            expect(v.total_size).to_equal(16)
+            expect(v.alignment).to_equal(8)
+
+    describe "generate_runtime_layout_asserts":
+        """
+        ## Runtime Assert Code Generation
+
+        Generates assert() calls for sizeof and offsetof checks.
+        """
+
+        it "generates assert calls for each repr(C) type":
+            val fields = [
+                make_field("x", make_i32_type()),
+                make_field("y", make_i32_type())
+            ]
+            val v = compute_layout_verification("Point", fields, layoutattr_c_repr())
+            val asserts = generate_runtime_layout_asserts(v)
+            # Verify output contains assert(sizeof(...)) and assert(offsetof(...))
+            expect(asserts).to_contain("assert(sizeof(spl_Point)")
+            expect(asserts).to_contain("assert(offsetof(spl_Point, x)")
+            expect(asserts).to_contain("assert(offsetof(spl_Point, y)")
+            expect(asserts).to_contain("assert(_Alignof(spl_Point)")
+
+        it "includes correct numeric values in asserts":
+            val fields = [
+                make_field("a", make_u8_type()),
+                make_field("b", make_i32_type())
+            ]
+            val v = compute_layout_verification("Config", fields, layoutattr_c_repr())
+            val asserts = generate_runtime_layout_asserts(v)
+            # size should be 8, offsets 0 and 4
+            expect(asserts).to_contain("== 8")
+            expect(asserts).to_contain("== 0")
+            expect(asserts).to_contain("== 4")
+
+        it "generates mismatch description strings":
+            val fields = [
+                make_field("value", make_f64_type())
+            ]
+            val v = compute_layout_verification("Single", fields, layoutattr_c_repr())
+            val asserts = generate_runtime_layout_asserts(v)
+            expect(asserts).to_contain("spl_Single size mismatch")
+            expect(asserts).to_contain("spl_Single.value offset mismatch")
+            expect(asserts).to_contain("spl_Single alignment mismatch")
+
+        it "skips generation when no fields present":
+            val fields: [HirField] = []
+            val v = compute_layout_verification("Empty", fields, layoutattr_c_repr())
+            val asserts = generate_runtime_layout_asserts(v)
+            # Still emits sizeof and alignof for the empty struct
+            expect(asserts).to_contain("sizeof")
+            # But no offsetof lines
+            expect(asserts).to_not_contain("offsetof")
+
+    describe "extract_field_offsets":
+        """
+        ## Simplified Field Offset Extraction
+
+        Extracts FieldOffset records from LayoutVerification.
+        """
+
+        it "extracts name, offset, size for each field":
+            val fields = [
+                make_field("version", make_u8_type()),
+                make_field("flags", make_u8_type()),
+                make_field("length", make_u16_type()),
+                make_field("sequence", make_u32_type())
+            ]
+            val v = compute_layout_verification("PacketHeader", fields, layoutattr_c_repr())
+            val offsets = extract_field_offsets(v)
+            expect(offsets.len()).to_equal(4)
+            expect(offsets[0].name).to_equal("version")
+            expect(offsets[0].offset).to_equal(0)
+            expect(offsets[0].size).to_equal(1)
+            expect(offsets[1].name).to_equal("flags")
+            expect(offsets[1].offset).to_equal(1)
+            expect(offsets[1].size).to_equal(1)
+            expect(offsets[2].name).to_equal("length")
+            expect(offsets[2].offset).to_equal(2)
+            expect(offsets[2].size).to_equal(2)
+            expect(offsets[3].name).to_equal("sequence")
+            expect(offsets[3].offset).to_equal(4)
+            expect(offsets[3].size).to_equal(4)
+
+        it "returns empty list for empty struct":
+            val fields: [HirField] = []
+            val v = compute_layout_verification("Empty", fields, layoutattr_c_repr())
+            val offsets = extract_field_offsets(v)
+            expect(offsets.len()).to_equal(0)

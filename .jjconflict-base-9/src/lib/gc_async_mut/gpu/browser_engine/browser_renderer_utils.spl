@@ -1,0 +1,384 @@
+
+# Browser Renderer Utils — shared text/CSS parsing primitives
+#
+# Pure utility functions used by browser_renderer, selector_matcher,
+# style_rule_index, render_fixtures, and text_painter. This module
+# has no imports from other browser_engine renderer modules, breaking
+# circular dependency chains.
+#
+# Mirrors Blink's low-level string scanning helpers.
+
+use std.gc_async_mut.gpu.browser_engine.style.supports.{eval_supports_query}
+
+# =========================================================================
+# Character / substring search
+# =========================================================================
+
+fn browser_renderer_find_char(s: text, target: text, start: i64) -> i64:
+    var i = start
+    val slen = s.len()
+    while i < slen:
+        val c = s.char_at(i)
+        if c == target:
+            return i
+        i = i + 1
+    999999999
+
+fn br_find_str(s: text, needle: text, start: i64) -> i64:
+    """Find substring in s starting at start. Returns 999999999 if not found."""
+    val nlen = needle.len()
+    var i = start
+    val slen = s.len()
+    while i + nlen <= slen:
+        var matches = true
+        var j = 0
+        while j < nlen:
+            if s.char_at(i + j) != needle.char_at(j):
+                matches = false
+                break
+            j = j + 1
+        if matches:
+            return i
+        i = i + 1
+    999999999
+
+fn br_find_matching_paren(s: text, open_pos: i64) -> i64:
+    var depth = 1
+    var i = open_pos + 1
+    while i < s.len():
+        val ch = s.char_at(i)
+        if ch == "(":
+            depth = depth + 1
+        elif ch == ")":
+            depth = depth - 1
+            if depth == 0:
+                return i
+        i = i + 1
+    999999999
+
+fn br_find_matching_brace(text_val: text, open: i64) -> i64:
+    var depth = 0
+    var pos = open
+    while pos < text_val.len():
+        val ch = text_val.char_at(pos)
+        if ch == "{":
+            depth = depth + 1
+        elif ch == "}":
+            depth = depth - 1
+            if depth == 0:
+                return pos
+        pos = pos + 1
+    999999999
+
+# =========================================================================
+# String splitting
+# =========================================================================
+
+fn browser_renderer_split_tag_parts(s: text) -> [text]:
+    var parts: [text] = []
+    var in_quote = false
+    var quote_char = ""
+    var segment_start = -1
+    var idx_1 = 0
+    val len = s.len()
+    while idx_1 < len:
+        val ch = s.char_at(idx_1)
+        if in_quote:
+            if ch == quote_char:
+                in_quote = false
+        elif ch == "\"" or ch == "'":
+            if segment_start < 0:
+                segment_start = idx_1
+            in_quote = true
+            quote_char = ch
+        else:
+            val is_whitespace = ch == " " or ch == "\t" or ch == "\n" or ch == "\r"
+            if is_whitespace:
+                if segment_start >= 0:
+                    parts.push(s.slice(segment_start, idx_1))
+                    segment_start = -1
+            elif segment_start < 0:
+                segment_start = idx_1
+        idx_1 = idx_1 + 1
+    if segment_start >= 0:
+        parts.push(s.slice(segment_start, len))
+    parts
+
+fn browser_renderer_split_spaces(s: text) -> [text]:
+    var parts: [text] = []
+    var segment_start = -1
+    var idx_2 = 0
+    val len = s.len()
+    while idx_2 < len:
+        val ch = s.char_at(idx_2)
+        val is_whitespace = ch == " " or ch == "\t" or ch == "\n" or ch == "\r"
+        if is_whitespace:
+            if segment_start >= 0:
+                parts.push(s.slice(segment_start, idx_2))
+                segment_start = -1
+        elif segment_start < 0:
+            segment_start = idx_2
+        idx_2 = idx_2 + 1
+    if segment_start >= 0:
+        parts.push(s.slice(segment_start, len))
+    parts
+
+fn browser_renderer_split_semicolons(s: text) -> [text]:
+    var parts: [text] = []
+    var segment_start = 0
+    var idx_3 = 0
+    val len = s.len()
+    while idx_3 < len:
+        val ch = s.char_at(idx_3)
+        if ch == ";":
+            val raw = s.slice(segment_start, idx_3)
+            val trimmed = raw.trim()
+            if trimmed.len() > 0:
+                parts.push(trimmed)
+            segment_start = idx_3 + 1
+        idx_3 = idx_3 + 1
+    val tail = s.slice(segment_start, len)
+    val tail_trimmed = tail.trim()
+    if tail_trimmed.len() > 0:
+        parts.push(tail_trimmed)
+    parts
+
+# =========================================================================
+# HTML tag helpers
+# =========================================================================
+
+fn browser_renderer_is_void_element(tag: text) -> bool:
+    match tag:
+        "br" => true
+        "hr" => true
+        "img" => true
+        "input" => true
+        "meta" => true
+        "link" => true
+        _ => false
+
+fn br_tag_attr_value(tag_content: text, attr: text) -> text:
+    val parts = browser_renderer_split_tag_parts(tag_content)
+    var idx = 1
+    while idx < parts.len():
+        val part = parts[idx]
+        val eq_pos = browser_renderer_find_char(part, "=", 0)
+        if eq_pos > 0:
+            val key = part.slice(0, eq_pos).trim().lower()
+            var value = part.slice(eq_pos + 1, part.len()).trim()
+            if value.starts_with("\"") and value.ends_with("\""):
+                value = value.slice(1, value.len() - 1)
+            elif value.starts_with("'") and value.ends_with("'"):
+                value = value.slice(1, value.len() - 1)
+            if key == attr:
+                return value
+        idx = idx + 1
+    ""
+
+fn br_tag_has_attr(tag_content: text, attr: text) -> bool:
+    val parts = browser_renderer_split_tag_parts(tag_content)
+    var idx = 1
+    while idx < parts.len():
+        val part = parts[idx]
+        val eq_pos = browser_renderer_find_char(part, "=", 0)
+        var key = part.trim().lower()
+        if eq_pos > 0:
+            key = part.slice(0, eq_pos).trim().lower()
+        if key == attr:
+            return true
+        idx = idx + 1
+    false
+
+fn br_unquote_attr_value(value: text) -> text:
+    if value.len() >= 2:
+        if (value.starts_with("\"") and value.ends_with("\"")) or (value.starts_with("'") and value.ends_with("'")):
+            return value.slice(1, value.len() - 1)
+    value
+
+# =========================================================================
+# Style property helpers
+# =========================================================================
+
+fn br_merge_style_text(base_style: text, override_style: text) -> text:
+    if base_style.len() == 0:
+        return override_style
+    if override_style.len() == 0:
+        return base_style
+    base_style + ";" + override_style
+
+fn br_style_property_value(style: text, prop: text) -> text:
+    val declarations = browser_renderer_split_semicolons(style)
+    var idx = declarations.len() - 1
+    while idx >= 0:
+        val decl = declarations[idx]
+        val colon = browser_renderer_find_char(decl, ":", 0)
+        if colon > 0:
+            val key = decl.slice(0, colon).trim().lower()
+            if key == prop:
+                return decl.slice(colon + 1, decl.len()).trim()
+        idx = idx - 1
+    ""
+
+fn br_style_px_or_default(style: text, prop: text, fallback: i32) -> i32:
+    val value = br_style_property_value(style, prop)
+    if value.len() == 0:
+        return fallback
+    br_parse_px_i32(value, fallback)
+
+fn br_parse_px_i32(value: text, fallback: i32) -> i32:
+    val lower = value.trim().lower()
+    if lower.starts_with("calc("):
+        return br_parse_calc_px_i32(lower, fallback)
+    var numeric = ""
+    var idx = 0
+    while idx < lower.len():
+        val ch = lower.char_at(idx)
+        if (ch >= "0" and ch <= "9") or ch == "-":
+            numeric = numeric + ch
+        elif ch == ".":
+            return if numeric.len() > 0: numeric.to_i32() else: fallback
+        elif numeric.len() > 0:
+            return numeric.to_i32()
+        idx = idx + 1
+    if numeric.len() > 0:
+        return numeric.to_i32()
+    fallback
+
+fn br_parse_calc_px_i32(value: text, fallback: i32) -> i32:
+    val open = browser_renderer_find_char(value, "(", 0)
+    val close = browser_renderer_find_char(value, ")", open + 1)
+    if open >= 999999999 or close >= 999999999:
+        return fallback
+    val expr = value.slice(open + 1, close).trim()
+    var op = "+"
+    var op_pos = browser_renderer_find_char(expr, "+", 0)
+    if op_pos >= 999999999:
+        op = "-"
+        op_pos = browser_renderer_find_char(expr, "-", 1)
+    if op_pos >= 999999999:
+        return br_parse_px_i32(expr, fallback)
+    val left = br_parse_px_i32(expr.slice(0, op_pos).trim(), 999999999)
+    val right = br_parse_px_i32(expr.slice(op_pos + 1, expr.len()).trim(), 999999999)
+    if left >= 999999999 or right >= 999999999:
+        return fallback
+    if op == "-":
+        return left - right
+    left + right
+
+# =========================================================================
+# CSS @supports / @layer / nesting flattening
+# =========================================================================
+
+fn br_flatten_supports_blocks(css_text: text) -> text:
+    val lower = css_text.lower()
+    var out = ""
+    var pos: i64 = 0
+    while pos < css_text.len():
+        val sup_pos = br_find_str(lower, "@supports", pos)
+        if sup_pos >= 999999999:
+            out = out + css_text.slice(pos, css_text.len())
+            break
+        out = out + css_text.slice(pos, sup_pos)
+        val open = browser_renderer_find_char(css_text, "{", sup_pos + 9)
+        if open >= 999999999:
+            out = out + css_text.slice(sup_pos, css_text.len())
+            break
+        val condition = css_text.slice(sup_pos + 9, open).trim()
+        val close = br_find_matching_brace(css_text, open)
+        if close >= 999999999:
+            out = out + css_text.slice(sup_pos, css_text.len())
+            break
+        if eval_supports_query(condition):
+            val inner = css_text.slice(open + 1, close).trim()
+            if inner.len() > 0:
+                out = out + "\n" + inner + "\n"
+        pos = close + 1
+    out
+
+fn br_flatten_layer_blocks(css_text: text) -> text:
+    """Expose simple @layer wrappers and bounded nesting to flat rule scans."""
+    val lower = css_text.lower()
+    var out = ""
+    var pos: i64 = 0
+    while pos < css_text.len():
+        val layer_pos = br_find_str(lower, "@layer", pos)
+        if layer_pos >= 999999999:
+            out = out + css_text.slice(pos, css_text.len())
+            break
+        out = out + css_text.slice(pos, layer_pos)
+        val open = browser_renderer_find_char(css_text, "{", layer_pos)
+        if open >= 999999999:
+            out = out + css_text.slice(layer_pos, css_text.len())
+            break
+        val close = br_find_matching_brace(css_text, open)
+        if close >= 999999999:
+            out = out + css_text.slice(layer_pos, css_text.len())
+            break
+        val inner = css_text.slice(open + 1, close).trim()
+        if inner.len() > 0:
+            out = out + "\n" + inner + "\n"
+        pos = close + 1
+    br_flatten_simple_nested_rules(out)
+
+fn br_flatten_simple_nested_rules(css_text: text) -> text:
+    var out = ""
+    var pos: i64 = 0
+    while pos < css_text.len():
+        val open = browser_renderer_find_char(css_text, "{", pos)
+        if open >= 999999999:
+            out = out + css_text.slice(pos, css_text.len())
+            break
+        val close = br_find_matching_brace(css_text, open)
+        if close >= 999999999:
+            out = out + css_text.slice(pos, css_text.len())
+            break
+        val selector = css_text.slice(pos, open).trim()
+        val body = css_text.slice(open + 1, close)
+        if selector.len() > 0 and not selector.starts_with("@") and body.contains("&"):
+            out = out + br_flatten_one_nested_rule(selector, body)
+        else:
+            out = out + css_text.slice(pos, close + 1)
+        pos = close + 1
+    out
+
+fn br_flatten_one_nested_rule(selector: text, body: text) -> text:
+    var direct_body = ""
+    var nested_rules = ""
+    var pos: i64 = 0
+    while pos < body.len():
+        val open = browser_renderer_find_char(body, "{", pos)
+        if open >= 999999999:
+            direct_body = direct_body + body.slice(pos, body.len())
+            break
+        val nested_start = br_last_nested_selector_start(body, pos, open)
+        val close = br_find_matching_brace(body, open)
+        if close >= 999999999:
+            direct_body = direct_body + body.slice(pos, body.len())
+            break
+        val nested_selector = body.slice(nested_start, open).trim()
+        val nested_body = body.slice(open + 1, close).trim()
+        val combined = br_combine_nested_selector(selector, nested_selector)
+        direct_body = direct_body + body.slice(pos, nested_start)
+        if combined.len() > 0 and nested_body.len() > 0:
+            nested_rules = nested_rules + "\n" + combined + " " + 123.chr() + " " + nested_body + " " + 125.chr() + "\n"
+        pos = close + 1
+    val direct = direct_body.trim()
+    var out = ""
+    if direct.len() > 0:
+        out = selector + " " + 123.chr() + " " + direct + " " + 125.chr() + "\n"
+    out + nested_rules
+
+fn br_last_nested_selector_start(body: text, start: i64, nested_open: i64) -> i64:
+    var pos = nested_open - 1
+    while pos >= start:
+        val ch = body.char_at(pos)
+        if ch == ";" or ch == "}":
+            return pos + 1
+        pos = pos - 1
+    start
+
+fn br_combine_nested_selector(parent: text, nested_selector: text) -> text:
+    val nested = nested_selector.trim()
+    if nested.len() == 0 or nested.starts_with("@") or not nested.contains("&"):
+        return ""
+    nested.replace("&", parent.trim()).trim()

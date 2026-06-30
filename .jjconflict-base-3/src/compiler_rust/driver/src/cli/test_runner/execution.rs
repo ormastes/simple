@@ -130,7 +130,7 @@ fn memory_limit_bytes() -> u64 {
 
 /// Parse test output to extract pass/fail counts
 pub fn parse_test_output(output: &str) -> (usize, usize) {
-    // Look for patterns like "N examples, M failures"
+    // Look for patterns like "N example(s), M failure(s)"
     // Sum all occurrences (each describe block outputs one)
     let mut total_passed = 0;
     let mut total_failed = 0;
@@ -150,8 +150,8 @@ pub fn parse_test_output(output: &str) -> (usize, usize) {
             continue;
         }
 
-        // Pattern: "X examples, Y failures"
-        if line.contains("examples") && line.contains("failure") {
+        // Pattern: "X example(s), Y failure(s)"
+        if trimmed.contains("example") && trimmed.contains("failure") {
             // Extract numbers from cleaned line
             let parts: Vec<&str> = clean_line.split(|c: char| !c.is_numeric()).collect();
             let numbers: Vec<usize> = parts.iter().filter_map(|p| p.parse::<usize>().ok()).collect();
@@ -188,6 +188,14 @@ fn output_has_zero_pass_summary(output: &str) -> bool {
     }
 
     saw_passed_zero && saw_failed_zero
+}
+
+fn child_exit_error(exit_code: i32, passed: usize, failed: usize) -> Option<String> {
+    if exit_code != 0 && failed == 0 && passed == 0 {
+        Some(format!("Process exited with code {}", exit_code))
+    } else {
+        None
+    }
 }
 
 fn fallback_counts_from_output(
@@ -758,11 +766,7 @@ pub fn run_test_file_safe_mode(path: &Path, options: &super::types::TestOptions)
                 skipped,
                 ignored: 0,
                 duration_ms,
-                error: if exit_code != 0 && failed == 0 {
-                    Some(format!("Process exited with code {}", exit_code))
-                } else {
-                    None
-                },
+                error: child_exit_error(exit_code, passed, failed),
                 individual_results,
             };
             let result = enforce_assert_ran(result, options, 0);
@@ -1810,11 +1814,7 @@ pub fn run_test_file_smf_mode(path: &Path, cache: &BuildCache, options: &super::
                 skipped,
                 ignored: 0,
                 duration_ms,
-                error: if exit_code != 0 && failed == 0 {
-                    Some(format!("Process exited with code {}", exit_code))
-                } else {
-                    None
-                },
+                error: child_exit_error(exit_code, passed, failed),
                 individual_results,
             };
             let result = enforce_assert_ran(result, options, bdd_snapshot.len());
@@ -1941,11 +1941,7 @@ pub fn run_test_file_native_mode(
                 skipped,
                 ignored: 0,
                 duration_ms,
-                error: if exit_code != 0 && failed == 0 {
-                    Some(format!("Process exited with code {}", exit_code))
-                } else {
-                    None
-                },
+                error: child_exit_error(exit_code, passed, failed),
                 individual_results,
             };
             let result = enforce_assert_ran(result, options, 0);
@@ -2039,6 +2035,14 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_test_output_singular_example() {
+        let output = "1 example, 0 failures";
+        let (passed, failed) = parse_test_output(output);
+        assert_eq!(passed, 1);
+        assert_eq!(failed, 0);
+    }
+
+    #[test]
     fn test_parse_test_output_no_match() {
         let output = "random text";
         let (passed, failed) = parse_test_output(output);
@@ -2070,6 +2074,23 @@ mod tests {
         let (passed, failed) = parse_test_output(output);
         assert_eq!(passed, 28);
         assert_eq!(failed, 0);
+    }
+
+    #[test]
+    fn test_zero_failure_bdd_summary_does_not_create_exit_error() {
+        let output = "[INFO] JIT compilation failed, falling back to interpreter: nope\n1 example, 0 failures";
+        let (passed, failed) = parse_test_output(output);
+        assert_eq!(child_exit_error(1, passed, failed), None);
+    }
+
+    #[test]
+    fn test_nonzero_exit_without_bdd_summary_still_errors() {
+        let output = "random text";
+        let (passed, failed) = parse_test_output(output);
+        assert_eq!(
+            child_exit_error(1, passed, failed),
+            Some("Process exited with code 1".to_string())
+        );
     }
 
     #[test]

@@ -1,0 +1,157 @@
+# AudioGroup — Nested mixing hierarchy
+#
+# Provides a tree of audio groups for hierarchical volume control.
+# Each group has a parent (except root), and effective volume/mute
+# state is computed by walking the parent chain.
+#
+# Usage:
+#   var tree = AudioGroupTree.new()
+#   tree.add_group("master", "")
+#   tree.add_group("sfx", "master")
+#   tree.set_volume("master", Volume(value: 0.8))
+#   val effective = tree.get_effective_volume("sfx")
+
+use std.common.engine.units.{Volume}
+
+# ============================================================================
+# AudioGroup — A node in the mixing hierarchy
+# ============================================================================
+
+struct AudioGroup:
+    """A named audio group with parent reference and child list.
+
+    Groups form a tree for hierarchical volume/mute control.
+    A root group has parent_name == "".
+    """
+    name: text
+    parent_name: text
+    volume: Volume
+    muted: bool
+    children: [text]
+
+impl AudioGroup:
+    static fn root(name: text) -> AudioGroup:
+        """Create a root group (no parent) with default volume."""
+        AudioGroup(
+            name: name,
+            parent_name: "",
+            volume: Volume(value: 1.0),
+            muted: false,
+            children: []
+        )
+
+    static fn child(name: text, parent: text) -> AudioGroup:
+        """Create a child group under the given parent with default volume."""
+        AudioGroup(
+            name: name,
+            parent_name: parent,
+            volume: Volume(value: 1.0),
+            muted: false,
+            children: []
+        )
+
+    fn is_root() -> bool:
+        """True if this group has no parent."""
+        self.parent_name == ""
+
+# ============================================================================
+# AudioGroupTree — Manages the group hierarchy
+# ============================================================================
+
+class AudioGroupTree:
+    """Tree of AudioGroups for hierarchical volume and mute control.
+
+    Effective volume is the product of a group's volume with all ancestor
+    volumes. Effective mute is true if any ancestor is muted.
+    """
+    groups: Dict<text, AudioGroup>
+
+impl AudioGroupTree:
+    static fn new() -> AudioGroupTree:
+        """Create an empty group tree."""
+        AudioGroupTree(groups: {})
+
+    me add_group(name: text, parent: text) -> bool:
+        """Add a group to the tree. Returns false if name already exists.
+
+        If parent is "", the group is a root. Otherwise the parent must exist.
+        """
+        if val Some(existing) = self.groups.get(name):
+            return false
+
+        if parent != "":
+            if val Some(parent_group) = self.groups.get(parent):
+                # Add child name to parent's children list
+                var updated_children = parent_group.children
+                updated_children.push(name)
+                self.groups[parent] = AudioGroup(
+                    name: parent_group.name,
+                    parent_name: parent_group.parent_name,
+                    volume: parent_group.volume,
+                    muted: parent_group.muted,
+                    children: updated_children
+                )
+            else:
+                return false
+
+        if parent == "":
+            self.groups[name] = AudioGroup.root(name)
+        else:
+            self.groups[name] = AudioGroup.child(name, parent)
+        true
+
+    me set_volume(name: text, vol: Volume):
+        """Set a group's local volume."""
+        if val Some(group) = self.groups.get(name):
+            self.groups[name] = AudioGroup(
+                name: group.name,
+                parent_name: group.parent_name,
+                volume: vol,
+                muted: group.muted,
+                children: group.children
+            )
+
+    me set_muted(name: text, muted: bool):
+        """Set a group's local muted state."""
+        if val Some(group) = self.groups.get(name):
+            self.groups[name] = AudioGroup(
+                name: group.name,
+                parent_name: group.parent_name,
+                volume: group.volume,
+                muted: muted,
+                children: group.children
+            )
+
+    fn get_effective_volume(name: text) -> Volume:
+        """Compute effective volume by walking the parent chain, multiplying volumes."""
+        if val Some(group) = self.groups.get(name):
+            var result = group.volume.value
+            var current_parent = group.parent_name
+            while current_parent != "":
+                if val Some(p) = self.groups.get(current_parent):
+                    result = result * p.volume.value
+                    current_parent = p.parent_name
+                else:
+                    current_parent = ""
+            return Volume(value: result)
+        Volume(value: 0.0)
+
+    fn get_effective_muted(name: text) -> bool:
+        """True if this group or any ancestor is muted."""
+        if val Some(group) = self.groups.get(name):
+            if group.muted:
+                return true
+            var current_parent = group.parent_name
+            while current_parent != "":
+                if val Some(p) = self.groups.get(current_parent):
+                    if p.muted:
+                        return true
+                    current_parent = p.parent_name
+                else:
+                    current_parent = ""
+            return false
+        false
+
+    fn get_group(name: text) -> AudioGroup?:
+        """Look up a group by name."""
+        self.groups.get(name)

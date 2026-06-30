@@ -1,0 +1,810 @@
+# ============================================================================
+# common/compress/typed/lzma2_typed.spl — typed LZMA2/XZ frame codec (C4)
+#
+# Staged delivery:
+#   C4.1 LZMA2 uncompressed chunks (full round-trip, real verifiable output)
+#   C4.2 XZ container framing (stream header + footer magic + CRC32, round-trip)
+#   C4.3 RangeCoder scaffold (encoder/decoder, bit round-trip proven)
+#
+# Full LZMA literal/match range model deferred — see:
+#   doc/08_tracking/bug/lzma_full_range_model_deferred_2026-06-15.md
+#
+# Known language limitations worked around here:
+#   - [u8] is a value type — cannot mutate a passed-in [u8] param; all
+#     accumulation uses a local `var out: [u8] = []`
+#   - No u32: use i64 with explicit & 0xFFFFFFFF masking for 32-bit unsigned math
+#   - Reserved: gen val def exists actor assert join unit vec kernel
+#   - Generics broken; no inheritance; chained methods use intermediate var
+#   - f64 unreliable: all math is i64
+# ============================================================================
+
+use lib.common.bytes.span.{ByteSpan, ByteBuffer}
+use lib.common.bytes.checksum.{Crc32}
+
+# ============================================================================
+# C4.1 LZMA2 uncompressed chunk framing
+#
+# LZMA2 chunk layout:
+#   0x00                 = end-of-stream marker
+#   0x01 <sz_hi> <sz_lo> <data...>  = uncompressed chunk, reset dict
+#   0x02 <sz_hi> <sz_lo> <data...>  = uncompressed chunk, no dict reset
+#
+# <sz_hi> <sz_lo> encode (size - 1) as a 16-bit big-endian integer.
+# Maximum chunk payload = 65536 bytes (when sz field = 0xFFFF).
+# ============================================================================
+
+# LZMA2 chunk type control bytes (module-level i64 constants — no array types)
+val LZMA2_CTRL_UNCMPR_RESET: i64 = 0x01
+val LZMA2_CTRL_UNCMPR_NRESET: i64 = 0x02
+val LZMA2_CTRL_END: i64 = 0x00
+val LZMA2_MAX_CHUNK: i64 = 65536
+
+pub fn lzma2_compress_uncompressed(input: ByteSpan) -> ByteSpan:
+    """Emit LZMA2 uncompressed chunks covering `input`, followed by end marker.
+
+    Chunks are at most 65536 bytes each. The first chunk uses control byte
+    0x01 (uncompressed, reset dict); subsequent chunks use 0x02 (no reset).
+    The sequence is terminated by 0x00 (end-of-stream marker).
+
+    Empty input produces a single 0x00 end marker byte.
+    """
+    var out: [u8] = []
+    val n = input.len()
+
+    if n == 0:
+        out.push(LZMA2_CTRL_END.to_u8())
+        return ByteSpan.new(out)
+
+    var pos = 0
+    var first_chunk = true
+    while pos < n:
+        # Compute payload size for this chunk (capped at 65536)
+        var remaining = n - pos
+        var chunk_sz = remaining
+        if chunk_sz > LZMA2_MAX_CHUNK:
+            chunk_sz = LZMA2_MAX_CHUNK
+
+        # Control byte: 0x01 for first chunk (reset dict), 0x02 for subsequent
+        if first_chunk:
+            out.push(LZMA2_CTRL_UNCMPR_RESET.to_u8())
+            first_chunk = false
+        else:
+            out.push(LZMA2_CTRL_UNCMPR_NRESET.to_u8())
+
+        # 2-byte big-endian (chunk_sz - 1)
+        val sz_field = chunk_sz - 1
+        var sz_hi = (sz_field >> 8) & 0xFF
+        var sz_lo = sz_field & 0xFF
+        out.push(sz_hi.to_u8())
+        out.push(sz_lo.to_u8())
+
+        # Raw payload bytes
+        var i = 0
+        while i < chunk_sz:
+            out.push(input.get(pos + i))
+            i = i + 1
+
+        pos = pos + chunk_sz
+
+    # End-of-stream marker
+    out.push(LZMA2_CTRL_END.to_u8())
+    ByteSpan.new(out)
+
+pub fn lzma2_decompress(input: ByteSpan) -> ByteSpan:
+    """Parse LZMA2 uncompressed chunks and return the concatenated payload.
+
+    Handles:
+      0x00 — end-of-stream (stop)
+      0x01 — uncompressed chunk, reset dict (dict reset is a no-op here)
+      0x02 — uncompressed chunk, no dict reset
+
+    Returns the decompressed bytes as a ByteSpan.
+    On malformed chunk metadata, payload, control byte, missing end marker, or
+    trailing bytes after the end marker, returns empty.
+    """
+    var out: [u8] = []
+    var pos = 0
+    val n = input.len()
+    var seen_end = false
+    var seen_chunk = false
+
+    while pos < n:
+        var ctrl_b = input.get(pos)
+        val ctrl = ctrl_b.to_i64()
+        pos = pos + 1
+
+        if ctrl == LZMA2_CTRL_END:
+            seen_end = true
+            if pos != n:
+                return ByteSpan.empty()
+            break
+
+        if ctrl == LZMA2_CTRL_UNCMPR_RESET or ctrl == LZMA2_CTRL_UNCMPR_NRESET:
+            if ctrl == LZMA2_CTRL_UNCMPR_NRESET and not seen_chunk:
+                return ByteSpan.empty()
+            seen_chunk = true
+            # Need at least 2 more bytes for the size field
+            if pos + 1 >= n:
+                return ByteSpan.empty()
+            var hi_b = input.get(pos)
+            var lo_b = input.get(pos + 1)
+            val sz_hi = hi_b.to_i64()
+            val sz_lo = lo_b.to_i64()
+            pos = pos + 2
+            val chunk_sz = ((sz_hi << 8) | sz_lo) + 1
+
+            # Copy chunk_sz bytes of payload
+            var i = 0
+            while i < chunk_sz:
+                if pos >= n:
+                    return ByteSpan.empty()
+                out.push(input.get(pos))
+                pos = pos + 1
+                i = i + 1
+        else:
+            return ByteSpan.empty()
+
+    if not seen_end:
+        return ByteSpan.empty()
+    ByteSpan.new(out)
+
+# ============================================================================
+# C4.2 XZ container framing
+#
+# XZ stream layout (check type = None = 0x00):
+#
+#   Stream Header (12 bytes):
+#     [0..5]  magic:  FD 37 7A 58 5A 00
+#     [6..7]  stream flags: 00 00  (check type = None)
+#     [8..11] CRC32 of stream flags [6..7] (little-endian u32)
+#
+#   Block Header (12 bytes):
+#     [0]    block_header_size = 0x02  → (2+1)*4 = 12 bytes total incl CRC32
+#     [1]    block_flags = 0x00  (no comp/uncomp sizes, 1 filter)
+#     [2]    filter_id VLI = 0x21  (LZMA2)
+#     [3]    filter_props_size = 0x01
+#     [4]    props[0] = 0x00  (dict-size code 0 → 4 KB)
+#     [5..7] padding 0x00
+#     [8..11] CRC32 of bytes [0..7] (little-endian u32)
+#
+#   Block Data: raw LZMA2 chunk stream
+#
+#   Index:
+#     [0]     index_indicator = 0x00
+#     [1..]   num_records VLI = 1
+#     [..]    unpadded_size VLI  (block_header_bytes + compressed_data_bytes)
+#     [..]    uncompressed_size VLI
+#     [..]    padding to 4-byte boundary
+#     [..]    CRC32 of index bytes (little-endian u32)
+#
+#   Stream Footer (12 bytes):
+#     [0..3]  CRC32 of backward_size + stream flags (little-endian u32)
+#     [4..7]  backward_size = (index_total_bytes / 4) - 1  (little-endian u32)
+#     [8..9]  stream flags: 00 00
+#     [10..11] magic: 59 5A
+# ============================================================================
+
+pub fn xz_header_magic() -> [u8]:
+    """Return the 6-byte XZ stream header magic bytes."""
+    [0xFDu8, 0x37u8, 0x7Au8, 0x58u8, 0x5Au8, 0x00u8]
+
+pub fn xz_footer_magic() -> [u8]:
+    """Return the 2-byte XZ stream footer magic bytes."""
+    [0x59u8, 0x5Au8]
+
+pub fn xz_decode_check_magic(frame: ByteSpan) -> bool:
+    """Return true iff `frame` starts with the 6-byte XZ header magic and ends
+    with the 2-byte XZ footer magic (0x59 0x5A).
+
+    This is a format-validity smoke test; it does not fully parse the frame.
+    """
+    if frame.len() < 8:
+        return false
+    # Check header magic — break chains to avoid the chained-method parser bug
+    var b0 = frame.get(0)
+    var b1 = frame.get(1)
+    var b2 = frame.get(2)
+    var b3 = frame.get(3)
+    var b4 = frame.get(4)
+    var b5 = frame.get(5)
+    val m0 = b0.to_i64() == 0xFD
+    val m1 = b1.to_i64() == 0x37
+    val m2 = b2.to_i64() == 0x7A
+    val m3 = b3.to_i64() == 0x58
+    val m4 = b4.to_i64() == 0x5A
+    val m5 = b5.to_i64() == 0x00
+    if not (m0 and m1 and m2 and m3 and m4 and m5):
+        return false
+    # Check footer magic (last 2 bytes)
+    val n = frame.len()
+    var fn0 = frame.get(n - 2)
+    var fn1 = frame.get(n - 1)
+    val f0 = fn0.to_i64() == 0x59
+    val f1 = fn1.to_i64() == 0x5A
+    f0 and f1
+
+fn xz_index_vli_matches(frame: ByteSpan, start: i64, limit: i64, expected: i64) -> i64:
+    var pos = start
+    var value = expected
+    var done = false
+    while not done:
+        if pos >= limit:
+            return -1
+        var byte = value & 0x7F
+        value = value >> 7
+        if value > 0:
+            byte = byte | 0x80
+        else:
+            done = true
+        if frame.get(pos).to_i64() != byte:
+            return -1
+        pos = pos + 1
+    pos
+
+pub fn xz_encode(input: ByteSpan) -> ByteSpan:
+    """Produce a minimal XZ stream containing `input` as an LZMA2 uncompressed block.
+
+    Stream structure:
+      Stream Header  (12 bytes)
+      Block Header   (12 bytes)
+      Block Data     (LZMA2 uncompressed chunks)
+      Index          (variable, 4-byte aligned, CRC32-terminated)
+      Stream Footer  (12 bytes)
+
+    Check type is None (0x00) — no per-block integrity check.
+    """
+    # --- LZMA2 payload ---
+    val lzma2_data = lzma2_compress_uncompressed(input)
+    val compressed_size = lzma2_data.len()
+    val uncompressed_size = input.len()
+    val lzma2_bytes = lzma2_data.to_bytes()
+
+    # --- CRC32 of stream flags [0x00, 0x00] ---
+    # Hand-compute: CRC32 of two zero bytes.
+    # We use Crc32 from the checksum module.
+    var crc_flags_state = Crc32.new()
+    var flags_span_data: [u8] = [0x00u8, 0x00u8]
+    var flags_span = ByteSpan.new(flags_span_data)
+    crc_flags_state.update(flags_span)
+    val flags_crc = crc_flags_state.raw()
+
+    # --- Block Header (12 bytes) ---
+    # Content bytes [0..7]: size_byte=0x02, flags=0x00, filter_id=0x21,
+    #   props_size=0x01, props[0]=0x00, pad=0x00, pad=0x00, pad=0x00
+    var bh_content: [u8] = []
+    bh_content.push(0x02u8)   # header_size byte: (2+1)*4=12 total
+    bh_content.push(0x00u8)   # block_flags
+    bh_content.push(0x21u8)   # LZMA2 filter VLI
+    bh_content.push(0x01u8)   # filter_props_size=1
+    bh_content.push(0x00u8)   # props[0]: dict-size code 0 (4 KB)
+    bh_content.push(0x00u8)   # padding
+    bh_content.push(0x00u8)   # padding
+    bh_content.push(0x00u8)   # padding
+    var bh_span = ByteSpan.new(bh_content)
+    var crc_bh_state = Crc32.new()
+    crc_bh_state.update(bh_span)
+    val bh_crc = crc_bh_state.raw()
+
+    # --- Index ---
+    # index_indicator=0x00, num_records=1 (VLI), then one record:
+    #   unpadded_size VLI = block_header_total + compressed_data_size
+    #   uncompressed_size VLI
+    # then padding to 4-byte boundary, then CRC32 of index (4 bytes LE)
+    #
+    # block_header_total = 12 (8 content + 4 CRC32)
+    val block_hdr_total = 12
+    val unpadded_sz = block_hdr_total + compressed_size
+
+    var idx: [u8] = []
+    idx.push(0x00u8)   # index indicator
+
+    # VLI encode 1 (num_records)
+    idx.push(0x01u8)   # VLI 1 = single byte 0x01
+
+    # VLI encode unpadded_sz
+    var vli_v1 = unpadded_sz
+    var vli_done1 = false
+    while not vli_done1:
+        var vb = vli_v1 & 0x7F
+        vli_v1 = vli_v1 >> 7
+        if vli_v1 > 0:
+            vb = vb | 0x80
+        else:
+            vli_done1 = true
+        idx.push(vb.to_u8())
+
+    # VLI encode uncompressed_size
+    var vli_v2 = uncompressed_size
+    var vli_done2 = false
+    while not vli_done2:
+        var vb2 = vli_v2 & 0x7F
+        vli_v2 = vli_v2 >> 7
+        if vli_v2 > 0:
+            vb2 = vb2 | 0x80
+        else:
+            vli_done2 = true
+        idx.push(vb2.to_u8())
+
+    # Pad index to 4-byte boundary
+    var idx_base_len = idx.len()
+    var idx_pad = (4 - (idx_base_len & 3)) & 3
+    var pi = 0
+    while pi < idx_pad:
+        idx.push(0x00u8)
+        pi = pi + 1
+
+    var idx_span = ByteSpan.new(idx)
+    var crc_idx_state = Crc32.new()
+    crc_idx_state.update(idx_span)
+    val idx_crc = crc_idx_state.raw()
+
+    # index_total includes the 4 CRC32 bytes we will append
+    val index_total = idx.len() + 4
+
+    # --- backward_size for Stream Footer ---
+    # backward_size = (index_total / 4) - 1
+    val backward_sz = (index_total / 4) - 1
+
+    # --- Assemble the full XZ stream ---
+    var out: [u8] = []
+
+    # Stream Header (12 bytes)
+    out.push(0xFDu8)
+    out.push(0x37u8)
+    out.push(0x7Au8)
+    out.push(0x58u8)
+    out.push(0x5Au8)
+    out.push(0x00u8)
+    out.push(0x00u8)   # stream flags low
+    out.push(0x00u8)   # stream flags high
+    # CRC32 of stream flags, little-endian
+    var fc0 = flags_crc & 0xFF
+    var fc1 = (flags_crc >> 8) & 0xFF
+    var fc2 = (flags_crc >> 16) & 0xFF
+    var fc3 = (flags_crc >> 24) & 0xFF
+    out.push(fc0.to_u8())
+    out.push(fc1.to_u8())
+    out.push(fc2.to_u8())
+    out.push(fc3.to_u8())
+
+    # Block Header (8 content bytes + 4 CRC32 = 12 bytes)
+    var bhi = 0
+    while bhi < bh_content.len():
+        out.push(bh_content[bhi])
+        bhi = bhi + 1
+    var bc0 = bh_crc & 0xFF
+    var bc1 = (bh_crc >> 8) & 0xFF
+    var bc2 = (bh_crc >> 16) & 0xFF
+    var bc3 = (bh_crc >> 24) & 0xFF
+    out.push(bc0.to_u8())
+    out.push(bc1.to_u8())
+    out.push(bc2.to_u8())
+    out.push(bc3.to_u8())
+
+    # Block Data (LZMA2 chunks)
+    var di = 0
+    while di < lzma2_bytes.len():
+        out.push(lzma2_bytes[di])
+        di = di + 1
+
+    # Index bytes
+    var ii = 0
+    while ii < idx.len():
+        out.push(idx[ii])
+        ii = ii + 1
+    # Index CRC32 (4 bytes LE)
+    var ic0 = idx_crc & 0xFF
+    var ic1 = (idx_crc >> 8) & 0xFF
+    var ic2 = (idx_crc >> 16) & 0xFF
+    var ic3 = (idx_crc >> 24) & 0xFF
+    out.push(ic0.to_u8())
+    out.push(ic1.to_u8())
+    out.push(ic2.to_u8())
+    out.push(ic3.to_u8())
+
+    # Stream Footer (12 bytes)
+    # backward_size (4 bytes LE)
+    var bs0 = backward_sz & 0xFF
+    var bs1 = (backward_sz >> 8) & 0xFF
+    var bs2 = (backward_sz >> 16) & 0xFF
+    var bs3 = (backward_sz >> 24) & 0xFF
+    var footer_crc_data: [u8] = [bs0.to_u8(), bs1.to_u8(), bs2.to_u8(), bs3.to_u8(), 0x00u8, 0x00u8]
+    var footer_crc_state = Crc32.new()
+    footer_crc_state.update(ByteSpan.new(footer_crc_data))
+    val footer_crc = footer_crc_state.raw()
+    var fcrc0 = footer_crc & 0xFF
+    var fcrc1 = (footer_crc >> 8) & 0xFF
+    var fcrc2 = (footer_crc >> 16) & 0xFF
+    var fcrc3 = (footer_crc >> 24) & 0xFF
+    out.push(fcrc0.to_u8())
+    out.push(fcrc1.to_u8())
+    out.push(fcrc2.to_u8())
+    out.push(fcrc3.to_u8())
+    out.push(bs0.to_u8())
+    out.push(bs1.to_u8())
+    out.push(bs2.to_u8())
+    out.push(bs3.to_u8())
+    out.push(0x00u8)   # stream flags low
+    out.push(0x00u8)   # stream flags high
+    out.push(0x59u8)   # footer magic Y
+    out.push(0x5Au8)   # footer magic Z
+
+    ByteSpan.new(out)
+
+pub fn xz_decode(frame: ByteSpan) -> ByteSpan:
+    """Decode an XZ stream produced by xz_encode (None check type, uncompressed LZMA2).
+
+    Parses:
+      - Stream Header (12 bytes): validates magic
+      - Block Header (variable size, skip by header_size_byte)
+      - Block Data: passed to lzma2_decompress
+      - Index + Stream Footer: backward_size used to find block data length
+
+    Returns decompressed payload, or empty on format error.
+    """
+    val n = frame.len()
+    if n < 24:
+        # Minimum: 12-byte header + 12-byte footer
+        return ByteSpan.empty()
+
+    # Validate header magic
+    if not xz_decode_check_magic(frame):
+        return ByteSpan.empty()
+    if frame.get(6).to_i64() != 0 or frame.get(7).to_i64() != 0:
+        return ByteSpan.empty()
+    var flags_crc_state = Crc32.new()
+    var flags_bytes: [u8] = [0x00u8, 0x00u8]
+    flags_crc_state.update(ByteSpan.new(flags_bytes))
+    val flags_crc = flags_crc_state.raw()
+    val expected_fc0 = flags_crc & 0xFF
+    val expected_fc1 = (flags_crc >> 8) & 0xFF
+    val expected_fc2 = (flags_crc >> 16) & 0xFF
+    val expected_fc3 = (flags_crc >> 24) & 0xFF
+    if frame.get(8).to_i64() != expected_fc0 or frame.get(9).to_i64() != expected_fc1:
+        return ByteSpan.empty()
+    if frame.get(10).to_i64() != expected_fc2 or frame.get(11).to_i64() != expected_fc3:
+        return ByteSpan.empty()
+
+    # Block header starts at byte 12 (after 12-byte stream header)
+    # block_header_size_byte: (value+1)*4 = total block header bytes (incl CRC32)
+    var bh_size_b = frame.get(12)
+    val bh_size_byte = bh_size_b.to_i64()
+    val bh_total = (bh_size_byte + 1) * 4
+    if 12 + bh_total > n - 12:
+        return ByteSpan.empty()
+    val bh_content_len = bh_total - 4
+    val bh_content = frame.slice(12, bh_content_len)
+    var bh_crc_state = Crc32.new()
+    bh_crc_state.update(bh_content)
+    val bh_crc = bh_crc_state.raw()
+    if frame.get(12 + bh_content_len).to_i64() != (bh_crc & 0xFF):
+        return ByteSpan.empty()
+    if frame.get(13 + bh_content_len).to_i64() != ((bh_crc >> 8) & 0xFF):
+        return ByteSpan.empty()
+    if frame.get(14 + bh_content_len).to_i64() != ((bh_crc >> 16) & 0xFF):
+        return ByteSpan.empty()
+    if frame.get(15 + bh_content_len).to_i64() != ((bh_crc >> 24) & 0xFF):
+        return ByteSpan.empty()
+    if bh_size_byte != 0x02:
+        return ByteSpan.empty()
+    if frame.get(13).to_i64() != 0:
+        return ByteSpan.empty()
+    if frame.get(14).to_i64() != 0x21:
+        return ByteSpan.empty()
+    if frame.get(15).to_i64() != 0x01:
+        return ByteSpan.empty()
+    if frame.get(16).to_i64() != 0:
+        return ByteSpan.empty()
+    if frame.get(17).to_i64() != 0 or frame.get(18).to_i64() != 0:
+        return ByteSpan.empty()
+    if frame.get(19).to_i64() != 0:
+        return ByteSpan.empty()
+
+    # Block data starts at offset 12 + bh_total
+    val block_data_start = 12 + bh_total
+
+    # Parse backward_size from stream footer to find index size
+    # Footer layout (last 12 bytes):
+    #   [0..3] CRC32 of backward_size + stream flags
+    #   [4..7] backward_size (LE u32)
+    #   [8..9] stream flags
+    #   [10..11] footer magic 59 5A
+    val footer_start = n - 12
+    if frame.get(footer_start + 10).to_i64() != 0x59 or frame.get(footer_start + 11).to_i64() != 0x5A:
+        return ByteSpan.empty()
+    if frame.get(footer_start + 8).to_i64() != 0 or frame.get(footer_start + 9).to_i64() != 0:
+        return ByteSpan.empty()
+    val footer_crc_content = frame.slice(footer_start + 4, 6)
+    var footer_crc_state = Crc32.new()
+    footer_crc_state.update(footer_crc_content)
+    val footer_crc = footer_crc_state.raw()
+    if frame.get(footer_start).to_i64() != (footer_crc & 0xFF):
+        return ByteSpan.empty()
+    if frame.get(footer_start + 1).to_i64() != ((footer_crc >> 8) & 0xFF):
+        return ByteSpan.empty()
+    if frame.get(footer_start + 2).to_i64() != ((footer_crc >> 16) & 0xFF):
+        return ByteSpan.empty()
+    if frame.get(footer_start + 3).to_i64() != ((footer_crc >> 24) & 0xFF):
+        return ByteSpan.empty()
+    var bw0b = frame.get(footer_start + 4)
+    var bw1b = frame.get(footer_start + 5)
+    var bw2b = frame.get(footer_start + 6)
+    var bw3b = frame.get(footer_start + 7)
+    val bw0 = bw0b.to_i64()
+    val bw1 = bw1b.to_i64()
+    val bw2 = bw2b.to_i64()
+    val bw3 = bw3b.to_i64()
+    val backward_sz = bw0 | (bw1 << 8) | (bw2 << 16) | (bw3 << 24)
+    val index_total = (backward_sz + 1) * 4
+
+    # Block data occupies [block_data_start .. n - 12 - index_total)
+    val block_data_end = n - 12 - index_total
+    if block_data_end <= block_data_start:
+        return ByteSpan.empty()
+    if index_total < 4:
+        return ByteSpan.empty()
+    val index_start = block_data_end
+    val index_content_len = index_total - 4
+    val index_content = frame.slice(index_start, index_content_len)
+    var index_crc_state = Crc32.new()
+    index_crc_state.update(index_content)
+    val index_crc = index_crc_state.raw()
+    val index_crc_start = index_start + index_content_len
+    if frame.get(index_crc_start).to_i64() != (index_crc & 0xFF):
+        return ByteSpan.empty()
+    if frame.get(index_crc_start + 1).to_i64() != ((index_crc >> 8) & 0xFF):
+        return ByteSpan.empty()
+    if frame.get(index_crc_start + 2).to_i64() != ((index_crc >> 16) & 0xFF):
+        return ByteSpan.empty()
+    if frame.get(index_crc_start + 3).to_i64() != ((index_crc >> 24) & 0xFF):
+        return ByteSpan.empty()
+    if index_content_len < 2:
+        return ByteSpan.empty()
+    if frame.get(index_start).to_i64() != 0:
+        return ByteSpan.empty()
+    if frame.get(index_start + 1).to_i64() != 1:
+        return ByteSpan.empty()
+    val block_data_len = block_data_end - block_data_start
+    val block_data = frame.slice(block_data_start, block_data_len)
+
+    # Decompress the LZMA2 block data
+    val decoded = lzma2_decompress(block_data)
+    var index_pos = index_start + 2
+    index_pos = xz_index_vli_matches(frame, index_pos, index_crc_start, bh_total + block_data_len)
+    if index_pos < 0:
+        return ByteSpan.empty()
+    index_pos = xz_index_vli_matches(frame, index_pos, index_crc_start, decoded.len())
+    if index_pos < 0:
+        return ByteSpan.empty()
+    while index_pos < index_crc_start:
+        if frame.get(index_pos).to_i64() != 0:
+            return ByteSpan.empty()
+        index_pos = index_pos + 1
+    decoded
+
+# ============================================================================
+# C4.3 RangeCoder scaffold — typed encoder/decoder
+#
+# LZMA uses a binary range coder. Each bit is coded against a probability
+# model `prob` (0..2047, where 2048 means P(0)=1.0). The normalization step
+# keeps the range in [2^24, 2^32) by shifting 8 bits at a time.
+#
+# Standard LZMA constants:
+#   RC_RANGE_TOP        = 0x01000000  (2^24, normalisation threshold)
+#   RC_PROB_INIT        = 1024        (neutral probability, P(0)≈0.5)
+#   RC_SHIFT_BITS       = 5           (probability update speed)
+#   RC_BIT_MODEL_TOTAL  = 2048        (full probability range)
+#
+# All 32-bit arithmetic uses i64 with & 0xFFFFFFFF masking.
+# ============================================================================
+
+val RC_RANGE_TOP: i64 = 0x01000000
+val RC_PROB_INIT: i64 = 1024
+val RC_SHIFT_BITS: i64 = 5
+val RC_BIT_MODEL_TOTAL: i64 = 2048
+
+pub fn rc_prob_init() -> i64:
+    """Return the LZMA neutral starting probability (1024, meaning P(0) ≈ 0.5)."""
+    1024
+
+# ---------------------------------------------------------------------------
+# rc_prob_update — shared probability update for encode/decode symmetry
+# ---------------------------------------------------------------------------
+
+pub fn rc_prob_update(prob: i64, bit: i64) -> i64:
+    """Return the updated LZMA probability after coding `bit` against `prob`.
+
+    Both encoder and decoder must apply this update to keep their probability
+    tables in sync.
+      bit==0: prob += (2048 - prob) >> 5   (prob moves toward 2048)
+      bit==1: prob -= prob >> 5             (prob moves toward 0)
+    """
+    if bit == 0:
+        prob + ((RC_BIT_MODEL_TOTAL - prob) >> RC_SHIFT_BITS)
+    else:
+        prob - (prob >> RC_SHIFT_BITS)
+
+fn rc_prob_is_valid(prob: i64) -> bool:
+    prob > 0 and prob < RC_BIT_MODEL_TOTAL
+
+# ---------------------------------------------------------------------------
+# RangeEncoder
+# ---------------------------------------------------------------------------
+
+struct RangeEncoder:
+    """Typed LZMA range encoder scaffold.
+
+    Simplified design: no carry-propagation cache. Instead, we defer all output
+    to flush() and collect the final low_val bytes there. This avoids the 33-bit
+    carry complexity while keeping the normalization arithmetic identical to LZMA.
+
+    Fields:
+      range_val : current coding range (32-bit)
+      low_val   : low bound of the coding interval (33-bit: bit 32 = carry)
+      out       : accumulated output bytes (flushed at the end)
+      pending   : intermediate 32-bit snapshots during normalization
+    """
+    range_val: i64
+    low_val: i64
+    out: [u8]
+
+impl RangeEncoder:
+    static fn new() -> RangeEncoder:
+        RangeEncoder(
+            range_val: 0xFFFFFFFF,
+            low_val: 0,
+            out: []
+        )
+
+    me encode_bit(prob_in: i64, bit: i64):
+        """Encode one bit against probability `prob_in` (0..2047).
+
+        The caller must separately call rc_prob_update to advance the model.
+        low_val is kept as a 33-bit i64 so bit 32 carries correctly.
+        """
+        val bound = ((self.range_val >> 11) & 0xFFFFFFFF) * prob_in
+        if bit == 0:
+            self.range_val = bound & 0xFFFFFFFF
+        else:
+            self.low_val = self.low_val + bound
+            self.range_val = (self.range_val - bound) & 0xFFFFFFFF
+
+        # Normalize: shift out the top byte of low whenever range drops below TOP
+        while self.range_val < RC_RANGE_TOP:
+            val emit_byte = (self.low_val >> 24) & 0xFF
+            self.out.push(emit_byte.to_u8())
+            self.low_val = (self.low_val << 8) & 0x1FFFFFFFF
+            self.range_val = (self.range_val << 8) & 0xFFFFFFFF
+
+    me flush():
+        """Flush the final 5 bytes of the coding interval."""
+        var fi = 0
+        while fi < 5:
+            val emit_byte = (self.low_val >> 24) & 0xFF
+            self.out.push(emit_byte.to_u8())
+            self.low_val = (self.low_val << 8) & 0x1FFFFFFFF
+            fi = fi + 1
+
+    fn finish() -> ByteSpan:
+        """Return the encoded byte stream as a ByteSpan."""
+        ByteSpan.new(self.out)
+
+# ---------------------------------------------------------------------------
+# RangeDecoder
+# ---------------------------------------------------------------------------
+
+struct RangeDecoder:
+    """Typed LZMA range decoder scaffold.
+
+    Reads from the byte stream produced by RangeEncoder.flush().
+    Initialisation: the first 4 bytes of the stream initialise `code_val`.
+    """
+    range_val: i64
+    code_val: i64
+    data: [u8]
+    pos: i64
+
+impl RangeDecoder:
+    static fn new(encoded: ByteSpan) -> RangeDecoder:
+        """Initialise range decoder from an encoded ByteSpan.
+
+        The simplified encoder (no carry-propagation cache) emits bytes directly
+        during normalization via flush().  The first 4 bytes of the stream are the
+        initial code value (big-endian).  pos starts at 4.
+        """
+        val data = encoded.to_bytes()
+        var code: i64 = 0
+        val dn = data.len()
+        var i = 0
+        while i < 4:
+            code = (code << 8) & 0xFFFFFF00
+            if i < dn:
+                var db = data[i]
+                code = code | db.to_i64()
+            i = i + 1
+        RangeDecoder(range_val: 0xFFFFFFFF, code_val: code & 0xFFFFFFFF, data: data, pos: 4)
+
+    me read_raw_byte() -> i64:
+        """Read the next byte from the encoded stream, returning 0 at EOF."""
+        if self.pos < self.data.len():
+            var rb = self.data[self.pos]
+            val bv = rb.to_i64()
+            self.pos = self.pos + 1
+            bv
+        else:
+            0
+
+    me decode_bit(prob_in: i64) -> i64:
+        """Decode one bit against `prob_in`. Returns decoded bit (0 or 1).
+
+        The caller must separately call rc_prob_update to advance the model.
+        """
+        val bound = ((self.range_val >> 11) & 0xFFFFFFFF) * prob_in
+        var bit: i64 = 0
+        if (self.code_val & 0xFFFFFFFF) < bound:
+            self.range_val = bound & 0xFFFFFFFF
+            bit = 0
+        else:
+            self.code_val = (self.code_val - bound) & 0xFFFFFFFF
+            self.range_val = (self.range_val - bound) & 0xFFFFFFFF
+            bit = 1
+
+        # Normalize: while range < RC_RANGE_TOP, read another byte
+        while self.range_val < RC_RANGE_TOP:
+            val next_b = self.read_raw_byte()
+            self.code_val = ((self.code_val << 8) | next_b) & 0xFFFFFFFF
+            self.range_val = (self.range_val << 8) & 0xFFFFFFFF
+
+        bit
+
+# ---------------------------------------------------------------------------
+# rc_encode_bits / rc_decode_bits — convenience wrappers for bit sequences
+#
+# These drive the range coder with an evolving probability (starting at
+# prob_init) and are sufficient for the round-trip unit test.
+# ---------------------------------------------------------------------------
+
+pub fn rc_encode_bits(bits: [i64], prob_init: i64) -> ByteSpan:
+    """Encode a sequence of bits using RangeEncoder with evolving probability.
+
+    Starting probability is `prob_init`; it is updated via rc_prob_update after
+    each bit. Returns the flushed byte stream as a ByteSpan.
+    """
+    if not rc_prob_is_valid(prob_init):
+        return ByteSpan.empty()
+    var enc = RangeEncoder.new()
+    var prob = prob_init
+    var i = 0
+    while i < bits.len():
+        var b = bits[i]
+        if b != 0 and b != 1:
+            return ByteSpan.empty()
+        enc.encode_bit(prob, b)
+        prob = rc_prob_update(prob, b)
+        if not rc_prob_is_valid(prob):
+            return ByteSpan.empty()
+        i = i + 1
+    enc.flush()
+    enc.finish()
+
+pub fn rc_decode_bits(encoded: ByteSpan, count: i64, prob_init: i64) -> [i64]:
+    """Decode `count` bits from `encoded` using RangeDecoder with evolving probability.
+
+    Starting probability is `prob_init`; it is updated via rc_prob_update after
+    each bit, mirroring the encoder's probability evolution.
+    Returns the decoded bit sequence as [i64].
+    """
+    if count < 0 or not rc_prob_is_valid(prob_init):
+        return []
+    var dec = RangeDecoder.new(encoded)
+    var prob = prob_init
+    var out: [i64] = []
+    var i = 0
+    while i < count:
+        val b = dec.decode_bit(prob)
+        out.push(b)
+        prob = rc_prob_update(prob, b)
+        if not rc_prob_is_valid(prob):
+            return []
+        i = i + 1
+    out

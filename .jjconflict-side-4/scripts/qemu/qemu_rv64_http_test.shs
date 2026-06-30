@@ -20,12 +20,12 @@ REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$REPO_ROOT"
 
 # ---- defaults ----
-ELF="build/os/simpleos_riscv64.elf"
-HTTP_PORT=8080
-HTTPS_PORT=8443
-DB_PORT=15432
-BOOT_TIMEOUT=60
-SERIAL_LOG="build/qemu-rv64-serial.log"
+ELF="${ELF:-build/os/simpleos_riscv64.elf}"
+HTTP_PORT="${HTTP_PORT:-8080}"
+HTTPS_PORT="${HTTPS_PORT:-8443}"
+DB_PORT="${DB_PORT:-15432}"
+BOOT_TIMEOUT="${BOOT_TIMEOUT:-60}"
+SERIAL_LOG="${SERIAL_LOG:-build/qemu-rv64-serial.log}"
 EXPECT_DEFERRED=false
 EXPECT_HTTP_ONLY=false
 WITH_DISPLAY=false
@@ -117,6 +117,17 @@ if ! command -v qemu-system-riscv64 >/dev/null 2>&1; then
   exit 1
 fi
 
+if command -v nm >/dev/null 2>&1; then
+  UART_ADDR="$(nm -n "$ELF" 2>/dev/null | awk '$3 == "rt_riscv_uart_put" { print $1; exit }')"
+  START_ADDR="$(nm -n "$ELF" 2>/dev/null | awk '$3 == "_start" { print $1; exit }')"
+  if [ -n "$UART_ADDR" ] && [ -n "$START_ADDR" ] && [ "$UART_ADDR" = "$START_ADDR" ]; then
+    echo "error: RV64 ELF symbol sanity failed: _start aliases rt_riscv_uart_put at 0x${START_ADDR}" >&2
+    echo "  This is the known native entry-closure symbol mismatch; QEMU will only produce banner-loop evidence." >&2
+    echo "  Fix the RV64 native-build source-worker path before rerunning this live HTTP/display gate." >&2
+    exit 1
+  fi
+fi
+
 if [ "$EXPECT_DEFERRED" = "false" ] && ! command -v nc >/dev/null 2>&1; then
   echo "error: nc not found in PATH" >&2
   exit 1
@@ -147,6 +158,14 @@ cleanup() {
   fi
 }
 trap cleanup EXIT
+
+print_serial_tail() {
+  if [ -f "$SERIAL_LOG" ]; then
+    echo "--- serial log tail ---"
+    tail -n "${SERIAL_TAIL_LINES:-200}" "$SERIAL_LOG"
+    echo "--- end serial log tail ---"
+  fi
+}
 
 # ---- launch QEMU ----
 echo "[1/4] Launching QEMU RV64 with ${ELF}..."
@@ -192,9 +211,7 @@ while [ "$WAITED" -lt "$BOOT_TIMEOUT" ]; do
     [ -f "$SERIAL_LOG" ] &&
     grep -q "Network service ready" "$SERIAL_LOG" 2>/dev/null; then
     echo "FAILED: network reached ready state in deferred mode" >&2
-    echo "--- serial log ---"
-    cat "$SERIAL_LOG"
-    echo "--- end serial log ---"
+    print_serial_tail
     exit 1
   fi
   if [ "$EXPECT_DEFERRED" = "true" ] &&
@@ -212,9 +229,7 @@ while [ "$WAITED" -lt "$BOOT_TIMEOUT" ]; do
   fi
   if [ -f "$SERIAL_LOG" ] && grep -q "HTTP server deferred" "$SERIAL_LOG" 2>/dev/null; then
     echo "FAILED: HTTP server was deferred" >&2
-    echo "--- serial log ---"
-    cat "$SERIAL_LOG"
-    echo "--- end serial log ---"
+    print_serial_tail
     exit 1
   fi
   if [ -f "$SERIAL_LOG" ] &&
@@ -225,9 +240,7 @@ while [ "$WAITED" -lt "$BOOT_TIMEOUT" ]; do
 	      sleep 1
       if ! grep -q "Display service ready" "$SERIAL_LOG" 2>/dev/null; then
         echo "FAILED: display device was requested but display service did not become ready" >&2
-        echo "--- serial log ---"
-        cat "$SERIAL_LOG"
-        echo "--- end serial log ---"
+        print_serial_tail
 	        exit 1
 	      fi
 	    fi
@@ -239,9 +252,7 @@ while [ "$WAITED" -lt "$BOOT_TIMEOUT" ]; do
 	      sleep 1
       if ! grep -q "Storage service ready" "$SERIAL_LOG" 2>/dev/null; then
         echo "FAILED: storage device was requested but storage service did not become ready" >&2
-        echo "--- serial log ---"
-        cat "$SERIAL_LOG"
-        echo "--- end serial log ---"
+        print_serial_tail
 	        exit 1
 	      fi
 	    fi
@@ -253,9 +264,7 @@ while [ "$WAITED" -lt "$BOOT_TIMEOUT" ]; do
 	      sleep 1
       if ! grep -q "NVFS root superblock ready" "$SERIAL_LOG" 2>/dev/null; then
         echo "FAILED: storage device was requested but NVFS root superblock was not verified" >&2
-        echo "--- serial log ---"
-        cat "$SERIAL_LOG"
-        echo "--- end serial log ---"
+        print_serial_tail
 	        exit 1
 	      fi
 	    fi
@@ -267,9 +276,7 @@ while [ "$WAITED" -lt "$BOOT_TIMEOUT" ]; do
 	      sleep 1
       if ! grep -Eq "DB service ready|Simple DB server listening" "$SERIAL_LOG" 2>/dev/null; then
         echo "FAILED: DB server was requested but did not become ready" >&2
-        echo "--- serial log ---"
-        cat "$SERIAL_LOG"
-        echo "--- end serial log ---"
+        print_serial_tail
 	        exit 1
 	      fi
 	    fi
@@ -285,11 +292,7 @@ done
 
 if [ "$BOOTED" = "false" ]; then
   echo "FAILED: HTTP bind marker not seen within ${BOOT_TIMEOUT}s" >&2
-  if [ -f "$SERIAL_LOG" ]; then
-    echo "--- serial log ---"
-    cat "$SERIAL_LOG"
-    echo "--- end serial log ---"
-  fi
+  print_serial_tail
   exit 1
 fi
 

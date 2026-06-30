@@ -723,6 +723,12 @@ simple test --screenshot-output doc/06_spec/image/custom
 
 ### Exit Codes
 
+For child-run wrappers, `simple test` treats the parsed BDD summary line
+(`N example(s), M failure(s)`) as authoritative when present. Some interpreter
+child paths can return a stale nonzero process code after printing
+`0 failures`; do not classify those as file failures unless no BDD summary was
+parsed.
+
 | Code | Meaning |
 |------|---------|
 | 0 | All pass |

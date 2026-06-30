@@ -150,6 +150,26 @@ Boot sequence: `fpga_boot.spl` → M-mode setup → `riscv_noalloc_handoff.spl` 
 
 ---
 
+## Future Network-Capable FPGA Configuration
+
+The current FPGA lane is serial-only. A separate network-capable FPGA
+configuration is tracked as planned capacity, not live silicon evidence. It
+reuses the RISC-V service gates that already require packet TX/RX readiness
+before SSH, web, or DB service readiness can pass:
+
+| Capability | Planned gate |
+|------------|--------------|
+| SSH | RV64 SSH scenario contract with guest port 22 |
+| Web | RISC-V HTTP storage root marker |
+| DB | RV64 `--with-db` query marker |
+| Network readiness | Packet TX and RX probes before `network_ok = 1` |
+
+Do not mark the FPGA network lane as implemented until a board-specific network
+manifest, bitstream integration, and live board probe replace this planned
+capacity entry.
+
+---
+
 ## Troubleshooting
 
 | Symptom | Likely Cause | Fix |

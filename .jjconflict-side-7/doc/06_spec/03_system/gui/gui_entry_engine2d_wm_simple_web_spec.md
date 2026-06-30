@@ -68,7 +68,7 @@ render-ready marker, and captures the visible QEMU framebuffer.
   1024x768 PPM with more than 100000 non-black pixels and exact sampled colors
   for the red MMIO probe, browser header, web body bands, top command lane, and
   taskbar/background surface.
-- QMP injects a deterministic host keyboard event and a second `pmemsave`
+- QMP injects a deterministic host keyboard event with `input-send-event` and a second `pmemsave`
   proves the live framebuffer changed after guest input handling, so the
   scenario cannot pass from a static MDI screenshot alone.
 - A failed serial marker, failed QMP capture, blank framebuffer, or stale MDI
@@ -78,18 +78,18 @@ render-ready marker, and captures the visible QEMU framebuffer.
 
 Each run writes a unique artifact directory under
 `build/tmp/gui_entry_engine2d_wm_simple_web_spec_<pid>_<micros>/` containing the
-serial log and captured PPM. The QMP socket path also includes the same run id
-to avoid collisions between parallel test runs.
+serial log, captured PPM, raw pmemsave bytes, and QMP result summary. The QMP
+socket path also includes the same run id to avoid collisions between parallel
+test runs.
 
 ## Examples
 
 Run the live gate with:
 
 ```bash
-SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple \
-  src/compiler_rust/target/release/simple test \
+timeout 420s bin/simple test \
   test/03_system/gui/gui_entry_engine2d_wm_simple_web_spec.spl \
-  --mode=interpreter --timeout 420 --clean --format json
+  --mode=interpreter --clean --timeout 360 --sequential
 ```
 
 A passing capture prints `capture_method=pmemsave`, `pmem_addr=0xfd000000`,

@@ -1,0 +1,270 @@
+#![allow(primitive_api)]
+
+# RISC-V FPGA Linux Integration Spec
+#
+# Tests board profiles, lane contracts, manifest generation, and
+# RTL bundle output against the plan requirements in
+# doc/03_plan/agent_tasks/riscv_fpga_linux.md
+
+use std.io_runtime
+use std.nogc_sync_mut.spec.{describe, it, expect}
+use hardware.fpga_linux.riscv_fpga_linux.{
+    RiscvReadinessStatus, Xlen, ProofLane, QemuMachineProfile,
+    XilinxBoardProfile, RiscvFpgaLane, RiscvFpgaLinuxManifest,
+    create_default_riscv_fpga_linux_manifest,
+    create_riscv_fpga_linux_manifest_for_board,
+    generate_default_riscv_fpga_rtl_bundle,
+    generate_riscv_fpga_rtl_bundle_for_board,
+    read_generated_riscv_fpga_rtl_file
+}
+
+fn main():
+    # -----------------------------------------------------------------
+    # Readiness status
+    # -----------------------------------------------------------------
+    describe("RiscvReadinessStatus"):
+        it("serializes Contract to text"):
+            val t = RiscvReadinessStatus.Contract.to_text()
+            expect(t).to_equal("contract")
+
+        it("serializes QemuValidated to text"):
+            val t = RiscvReadinessStatus.QemuValidated.to_text()
+            expect(t).to_equal("qemu_validated")
+
+        it("serializes FpgaSynthesized to text"):
+            val t = RiscvReadinessStatus.FpgaSynthesized.to_text()
+            expect(t).to_equal("fpga_synthesized")
+
+        it("serializes HardwareBooted to text"):
+            val t = RiscvReadinessStatus.HardwareBooted.to_text()
+            expect(t).to_equal("hardware_booted")
+
+    # -----------------------------------------------------------------
+    # Xlen
+    # -----------------------------------------------------------------
+    describe("Xlen"):
+        it("returns linux policy for rv32"):
+            val p = Xlen.Rv32.linux_policy()
+            expect(p).to_equal("repo-native-rv32-linux")
+
+        it("returns linux policy for rv64"):
+            val p = Xlen.Rv64.linux_policy()
+            expect(p).to_equal("repo-native-rv64-linux")
+
+        it("returns core file name for rv32"):
+            val f = Xlen.Rv32.core_file_name()
+            expect(f).to_equal("simple_rv32gc_core.spl")
+
+        it("returns core file name for rv64"):
+            val f = Xlen.Rv64.core_file_name()
+            expect(f).to_equal("simple_rv64gc_core.vhd")
+
+    # -----------------------------------------------------------------
+    # QEMU Machine Profile
+    # -----------------------------------------------------------------
+    describe("QemuMachineProfile"):
+        it("creates rv32 default with 128M memory"):
+            val qemu = QemuMachineProfile.default_for(Xlen.Rv32)
+            val m = qemu.machine
+            val mem = qemu.memory
+            val s = qemu.smp
+            expect(m).to_equal("virt")
+            expect(mem).to_equal("128M")
+            expect(s).to_equal(1)
+
+        it("creates rv64 default with 256M memory"):
+            val qemu = QemuMachineProfile.default_for(Xlen.Rv64)
+            val mem = qemu.memory
+            val s = qemu.smp
+            expect(mem).to_equal("256M")
+            expect(s).to_equal(2)
+
+        it("selects correct qemu binary"):
+            val rv32 = QemuMachineProfile.default_for(Xlen.Rv32)
+            val rv64 = QemuMachineProfile.default_for(Xlen.Rv64)
+            val b32 = rv32.qemu_binary()
+            val b64 = rv64.qemu_binary()
+            expect(b32).to_equal("qemu-system-riscv32")
+            expect(b64).to_equal("qemu-system-riscv64")
+
+    # -----------------------------------------------------------------
+    # Xilinx Board Profile
+    # -----------------------------------------------------------------
+    describe("XilinxBoardProfile"):
+        it("creates profile with no part"):
+            val gboard = XilinxBoardProfile.generic()
+            val n = gboard.name
+            val p = gboard.part
+            expect(n).to_equal("xilinx_generic")
+            expect(p).to_equal("")
+
+        it("passes prepare validation"):
+            val gboard = XilinxBoardProfile.generic()
+            val errs = gboard.validate_for_prepare()
+            val cnt = errs.len()
+            expect(cnt).to_equal(0)
+
+        it("blocks hardware boot without part"):
+            val gboard = XilinxBoardProfile.generic()
+            val msg = gboard.validate_for_hardware_boot()
+            expect(msg).to_contain("xilinx part must be selected before hardware boot")
+
+        it("resolves mlk_s02_100t with correct part"):
+            val mlk = XilinxBoardProfile.from_id("mlk_s02_100t").ok().unwrap()
+            val p = mlk.part
+            val c = mlk.clock_hz
+            val pr = mlk.programmer
+            expect(p).to_equal("xc7a100tfgg484-2")
+            expect(c).to_equal(25000000)
+            expect(pr).to_equal("openFPGALoader")
+
+        it("mlk passes hardware boot validation"):
+            val mlk = XilinxBoardProfile.from_id("mlk_s02_100t").ok().unwrap()
+            val msg = mlk.validate_for_hardware_boot()
+            expect(msg).to_equal("")
+
+        it("returns error for unknown board"):
+            val result = XilinxBoardProfile.from_id("nonexistent")
+            val is_err = result.is_err()
+            expect(is_err).to_equal(true)
+
+    # -----------------------------------------------------------------
+    # RISC-V FPGA Lane
+    # -----------------------------------------------------------------
+    describe("RiscvFpgaLane"):
+        it("rv32 default is at Contract readiness"):
+            val rv32 = RiscvFpgaLane.rv32_default()
+            val st = rv32.readiness_status()
+            val t = st.to_text()
+            expect(t).to_equal("contract")
+
+        it("rv32 has correct proof lane"):
+            val rv32 = RiscvFpgaLane.rv32_default()
+            val pl = rv32.proof_lane()
+            val t = pl.to_text()
+            expect(t).to_equal("generated_rv32_linux")
+
+        it("rv64 has correct proof lane"):
+            val rv64 = RiscvFpgaLane.rv64_default()
+            val pl = rv64.proof_lane()
+            val t = pl.to_text()
+            expect(t).to_equal("generated_rv64_linux")
+
+        it("rv32 xlen has correct linux policy"):
+            val rv32 = RiscvFpgaLane.rv32_default()
+            val xl = rv32.xlen
+            val p = xl.linux_policy()
+            expect(p).to_equal("repo-native-rv32-linux")
+
+        it("summary token contains status and qemu id"):
+            val rv32 = RiscvFpgaLane.rv32_default()
+            val tok = rv32.summary_token()
+            expect(tok).to_contain("rv32")
+            expect(tok).to_contain("contract")
+
+    # -----------------------------------------------------------------
+    # Manifest — default dual-arch
+    # -----------------------------------------------------------------
+    describe("RiscvFpgaLinuxManifest default"):
+        it("has exactly 2 lanes"):
+            val manifest = create_default_riscv_fpga_linux_manifest()
+            val lanes = manifest.lanes
+            val cnt = lanes.len()
+            expect(cnt).to_equal(2)
+
+        it("readiness summary contains both lanes"):
+            val manifest = create_default_riscv_fpga_linux_manifest()
+            val summary = manifest.readiness_summary()
+            expect(summary).to_contain("rv32:contract:qemu_virt_rv32")
+            expect(summary).to_contain("rv64:contract:qemu_virt_rv64")
+
+    # -----------------------------------------------------------------
+    # Manifest — board-specific
+    # -----------------------------------------------------------------
+    describe("RiscvFpgaLinuxManifest for board"):
+        it("creates manifest for mlk_s02_100t"):
+            val result = create_riscv_fpga_linux_manifest_for_board("mlk_s02_100t")
+            val ok = result.is_ok()
+            expect(ok).to_equal(true)
+            val manifest = result.ok().unwrap()
+            val bn = manifest.board
+            val n = bn.name
+            expect(n).to_equal("mlk_s02_100t")
+
+        it("vivado tcl plan references constraint file"):
+            val manifest = create_riscv_fpga_linux_manifest_for_board("mlk_s02_100t").ok().unwrap()
+            val tcl = manifest.vivado_tcl_plan()
+            expect(tcl).to_contain("examples/09_embedded/fpga_riscv/constraints/mlk_s02_100t.xdc")
+
+        it("boot products manifest has correct product ids"):
+            val manifest = create_riscv_fpga_linux_manifest_for_board("mlk_s02_100t").ok().unwrap()
+            val products = manifest.board_linux_boot_products_manifest_text("/tmp/test_boot")
+            expect(products).to_contain("product_id = \"mlk_s02_100t_rv32_linux\"")
+            expect(products).to_contain("product_id = \"mlk_s02_100t_rv64_linux\"")
+
+        it("boot products contain boot script and validation"):
+            val manifest = create_riscv_fpga_linux_manifest_for_board("mlk_s02_100t").ok().unwrap()
+            val products = manifest.board_linux_boot_products_manifest_text("/tmp/test_boot")
+            expect(products).to_contain("boot_script = \"scripts/mlk_s02_100t_generated_linux_boot.shs\"")
+            expect(products).to_contain("validation_kind = \"linux-uart-markers\"")
+            expect(products).to_contain("expected_markers = \"OpenSBI|Linux version|OF: fdt|Freeing unused kernel memory|init started\"")
+
+        it("returns error for unknown board"):
+            val result = create_riscv_fpga_linux_manifest_for_board("nonexistent")
+            val is_err = result.is_err()
+            expect(is_err).to_equal(true)
+
+    # -----------------------------------------------------------------
+    # RTL Bundle Generation — default
+    # -----------------------------------------------------------------
+    describe("generate_default_riscv_fpga_rtl_bundle"):
+        it("creates bundle with manifest and readme"):
+            val result = generate_default_riscv_fpga_rtl_bundle("/tmp/test_rtl_bundle_default")
+            val ok = result.is_ok()
+            expect(ok).to_equal(true)
+            val bundle = result.ok().unwrap()
+            val mp = bundle.manifest_path
+            expect(mp).to_contain("manifest.sdn")
+            val rp = bundle.bundle_readme_path
+            expect(rp).to_contain("README.md")
+
+        it("manifest file is readable"):
+            val result = generate_default_riscv_fpga_rtl_bundle("/tmp/test_rtl_bundle_read")
+            val bundle = result.ok().unwrap()
+            val mp = bundle.manifest_path
+            val content = read_generated_riscv_fpga_rtl_file(mp)
+            expect(content).to_contain("simple-compiler-generated")
+            expect(content).to_contain("generated_rv32_linux")
+            expect(content).to_contain("generated_rv64_linux")
+
+    # -----------------------------------------------------------------
+    # RTL Bundle Generation — board-specific
+    # -----------------------------------------------------------------
+    describe("generate_riscv_fpga_rtl_bundle_for_board"):
+        it("creates bundle for mlk_s02_100t"):
+            val result = generate_riscv_fpga_rtl_bundle_for_board("/tmp/test_rtl_bundle_board", "mlk_s02_100t")
+            val ok = result.is_ok()
+            expect(ok).to_equal(true)
+            val bundle = result.ok().unwrap()
+            val mp = bundle.manifest_path
+            expect(mp).to_contain("manifest.sdn")
+
+        it("manifest references board name"):
+            val result = generate_riscv_fpga_rtl_bundle_for_board("/tmp/test_rtl_bundle_board2", "mlk_s02_100t")
+            val bundle = result.ok().unwrap()
+            val mp = bundle.manifest_path
+            val content = read_generated_riscv_fpga_rtl_file(mp)
+            expect(content).to_contain("mlk_s02_100t")
+
+        it("returns error for unknown board"):
+            val result = generate_riscv_fpga_rtl_bundle_for_board("/tmp/test_rtl_bundle_err", "nonexistent")
+            val is_err = result.is_err()
+            expect(is_err).to_equal(true)
+
+    # -----------------------------------------------------------------
+    # read_generated_riscv_fpga_rtl_file
+    # -----------------------------------------------------------------
+    describe("read_generated_riscv_fpga_rtl_file"):
+        it("returns empty string for nonexistent file"):
+            val content = read_generated_riscv_fpga_rtl_file("/tmp/nonexistent_rtl_file_12345.spl")
+            expect(content).to_equal("")

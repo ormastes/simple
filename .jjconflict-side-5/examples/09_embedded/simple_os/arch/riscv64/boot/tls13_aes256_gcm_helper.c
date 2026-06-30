@@ -395,3 +395,44 @@ spl_i64 rt_tls13_aes256_gcm_decrypt(spl_i64 key_value, spl_i64 nonce_value, spl_
     out[0] = 1U;
     return rt_copy_bytes_out(out, ct_len + 1ULL);
 }
+
+spl_i64 rt_ssh_aes256_gcm_decrypt_packet(spl_i64 key_value, spl_i64 iv_value, spl_i64 seq_value, spl_i64 packet_value) {
+    spl_u8 key[32];
+    spl_u8 iv[12];
+    spl_u8 packet[AES256_GCM_MAX_INPUT];
+    spl_u8 nonce[12];
+    spl_u8 plaintext[AES256_GCM_MAX_INPUT];
+    spl_u64 key_len = 0ULL, iv_len = 0ULL, packet_len = 0ULL;
+    spl_u64 ct_len;
+    spl_u64 payload_len;
+    spl_u64 seq = (spl_u64)seq_value;
+    spl_u64 carry;
+
+    if (!rt_copy_bytes_in(key_value, key, 32ULL, &key_len) ||
+        !rt_copy_bytes_in(iv_value, iv, 12ULL, &iv_len) ||
+        !rt_copy_bytes_in(packet_value, packet, AES256_GCM_MAX_INPUT, &packet_len) ||
+        key_len != 32ULL || iv_len != 12ULL || packet_len < 21ULL) {
+        return rt_empty_bytes();
+    }
+
+    rv_memcpy_u8(nonce, iv, 12ULL);
+    carry = seq;
+    for (spl_i64 i = 11; i >= 4; i = i - 1) {
+        spl_u64 sum = (spl_u64)nonce[i] + (carry & 0xffULL);
+        nonce[i] = (spl_u8)(sum & 0xffULL);
+        carry = (carry >> 8) + (sum >> 8);
+    }
+
+    ct_len = packet_len - 4ULL - 16ULL;
+    if (aes256_gcm_decrypt_raw(key, nonce, packet + 4ULL, ct_len, packet, 4ULL, packet + 4ULL + ct_len, plaintext) != 0) {
+        return rt_empty_bytes();
+    }
+    if (ct_len < 2ULL) {
+        return rt_empty_bytes();
+    }
+    if ((spl_u64)plaintext[0] + 1ULL > ct_len) {
+        return rt_empty_bytes();
+    }
+    payload_len = ct_len - 1ULL - (spl_u64)plaintext[0];
+    return rt_copy_bytes_out(plaintext + 1ULL, payload_len);
+}

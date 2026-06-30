@@ -90,12 +90,6 @@ static int bytes_equal_32(const spl_u8 a[32], const spl_u8 b[32]) {
     return 1;
 }
 
-static void copy_32(spl_u8 dst[32], const spl_u8 src[32]) {
-    for (spl_u64 i = 0; i < 32ULL; i = i + 1ULL) {
-        dst[i] = src[i];
-    }
-}
-
 static void clamp_x25519_scalar(spl_u8 scalar[32]) {
     scalar[0] &= 248U;
     scalar[31] &= 127U;
@@ -132,10 +126,6 @@ spl_i64 rt_tls13_x25519_shared_secret(spl_i64 scalar_value, spl_i64 point_value)
         return rt_empty_bytes();
     }
     uart_line_c("X25519 SHARED COPIED");
-    if (!bytes_equal_32(scalar, k_live_bootstrap_private_key)) {
-        uart_line_c("X25519 SHARED FIXED SCALAR");
-        copy_32(scalar, k_live_bootstrap_private_key);
-    }
     clamp_x25519_scalar(scalar);
     point[31] &= 127U;
     x25519_scalar_mult_generic_masked(out, scalar, point);

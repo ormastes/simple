@@ -913,8 +913,8 @@ spl_i64 rt_string_from_byte_array(spl_i64 array_value) {
 
 spl_i64 rt_bytes_slice(spl_i64 array_value, spl_i64 start_value, spl_i64 len_value) {
     RtArray *array = rt_as_array(array_value);
-    spl_i64 start = rt_index_arg(start_value);
-    spl_i64 len = rt_index_arg(len_value);
+    spl_i64 start = start_value;
+    spl_i64 len = len_value;
     spl_i64 out;
     if (!array || len <= 0) {
         return rt_array_new(0);
@@ -940,7 +940,7 @@ spl_i64 rt_bytes_slice(spl_i64 array_value, spl_i64 start_value, spl_i64 len_val
 
 spl_i64 rt_bytes_u8_at(spl_i64 array_value, spl_i64 index_value) {
     RtArray *array = rt_as_array(array_value);
-    spl_i64 index = rt_index_arg(index_value);
+    spl_i64 index = index_value;
     if (!array) {
         return 0;
     }
@@ -1068,6 +1068,12 @@ void log_raw_println(spl_i64 msg) {
 
 void serial_println(spl_i64 msg) {
     log_raw_println(msg);
+}
+
+void rt_riscv_wfi_forever(void) {
+    for (;;) {
+        __asm__ volatile("wfi");
+    }
 }
 
 spl_i64 rt_eprintln_str(spl_i64 msg) {
@@ -2806,6 +2812,9 @@ spl_i64 rt_boot_tcp_take_version_bytes(spl_i64 fd) {
 
 spl_i64 rt_boot_tcp_close(spl_i64 fd) {
     if (fd == 200) {
+        if (g_boot_tcp_client_open) {
+            rt_send_tcp_packet(0x11U, (const spl_u8 *)0, 0);
+        }
         g_boot_tcp_client_open = 0;
         g_boot_tcp_client_announced = 0;
         g_boot_tcp_rx_len = 0;
@@ -2879,6 +2888,7 @@ spl_i64 rt_boot_tcp_read_ssh_plain_packet_payload(spl_i64 fd) {
     spl_u32 remaining_len;
     spl_u32 payload_len;
     spl_i64 out;
+    spl_i64 *data;
     if (fd != 200 || !g_boot_tcp_client_open) {
         return rt_extern_array(rt_array_new(0));
     }
@@ -2899,9 +2909,13 @@ spl_i64 rt_boot_tcp_read_ssh_plain_packet_payload(spl_i64 fd) {
         return rt_extern_array(rt_array_new(0));
     }
     payload_len = remaining_len - padding_len;
-    out = rt_array_new((spl_i64)payload_len);
+    out = rt_byte_array_new_len(rt_int((spl_i64)payload_len));
+    data = (spl_i64 *)(spl_u64)rt_array_data_ptr(out);
+    if (!data) {
+        return rt_extern_array(rt_byte_array_new_len(rt_int(0)));
+    }
     for (spl_u32 i = 0U; i < payload_len; i = i + 1U) {
-        rt_array_push(out, rt_int((spl_i64)body[i]));
+        data[i] = rt_int((spl_i64)body[i]);
     }
     return rt_extern_array(out);
 }
@@ -2912,6 +2926,7 @@ spl_i64 rt_boot_tcp_read_ssh_encrypted_packet(spl_i64 fd) {
     spl_u32 packet_len;
     spl_u32 body_len;
     spl_i64 out;
+    spl_i64 *data;
     if (fd != 200 || !g_boot_tcp_client_open) {
         return rt_extern_array(rt_array_new(0));
     }
@@ -2929,12 +2944,16 @@ spl_i64 rt_boot_tcp_read_ssh_encrypted_packet(spl_i64 fd) {
     if (rt_boot_tcp_read_raw(body, (spl_u64)body_len) != (spl_u64)body_len) {
         return rt_extern_array(rt_array_new(0));
     }
-    out = rt_array_new((spl_i64)(4U + body_len));
+    out = rt_byte_array_new_len(rt_int((spl_i64)(4U + body_len)));
+    data = (spl_i64 *)(spl_u64)rt_array_data_ptr(out);
+    if (!data) {
+        return rt_extern_array(rt_byte_array_new_len(rt_int(0)));
+    }
     for (spl_u32 i = 0U; i < 4U; i = i + 1U) {
-        rt_array_push(out, rt_int((spl_i64)header[i]));
+        data[i] = rt_int((spl_i64)header[i]);
     }
     for (spl_u32 i = 0U; i < body_len; i = i + 1U) {
-        rt_array_push(out, rt_int((spl_i64)body[i]));
+        data[4U + i] = rt_int((spl_i64)body[i]);
     }
     return rt_extern_array(out);
 }

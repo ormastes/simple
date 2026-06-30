@@ -1,0 +1,249 @@
+"""
+# IPC Memory Grants Specification (G12)
+
+**Feature IDs:** #OS-G12
+**Category:** Runtime
+**Difficulty:** 3/5
+**Status:** Implemented
+**Requirements:** N/A
+**Plan:** N/A
+**Design:** N/A
+**Research:** N/A
+
+## Overview
+
+Tests for G12 grants + safecopy: grant issuance, monotonic IDs,
+revocation, bounds checking, and revoked-grant rejection.
+"""
+
+use std.spec.{describe, it, expect}
+use os.kernel.types.capability_types.{Grant, GRANT_R, GRANT_W, GRANT_RW}
+use os.kernel.types.vmspace_types.{ProcessVmSpace, VmArea, VMA_READ, VMA_WRITE, VMA_ANON}
+use os.kernel.ipc.capability.{GrantTable, register_task_vmspace}
+
+
+# ============================================================================
+# Test Group 1: Grant issuance and monotonic IDs
+# ============================================================================
+
+describe "GrantTable cap_grant":
+    """Tests for grant issuance and id monotonicity."""
+    it "issues first grant with id 1":
+        """First grant in a fresh table gets id 1."""
+        var tbl = GrantTable.new()
+        val gid = tbl.cap_grant(1, 2, 0x1000, 4096, GRANT_R)
+        expect(gid).to_equal(1)
+
+    it "issues monotonically increasing ids":
+        """Each cap_grant call increments the id by 1."""
+        var tbl = GrantTable.new()
+        val gid1 = tbl.cap_grant(1, 2, 0x1000, 4096, GRANT_R)
+        val gid2 = tbl.cap_grant(1, 3, 0x2000, 4096, GRANT_W)
+        val gid3 = tbl.cap_grant(1, 2, 0x3000, 4096, GRANT_RW)
+        expect(gid1).to_equal(1)
+        expect(gid2).to_equal(2)
+        expect(gid3).to_equal(3)
+
+    it "newly issued grant fields are correct":
+        """The stored grant carries grantor, grantee, vaddr, len, valid."""
+        var tbl = GrantTable.new()
+        val gid = tbl.cap_grant(10, 20, 0x5000, 512, GRANT_RW)
+        val found = tbl.find_valid(gid, 20)
+        val g = found
+        expect(g.grantor).to_equal(10)
+        expect(g.grantee).to_equal(20)
+        expect(g.vaddr).to_equal(0x5000)
+        expect(g.len).to_equal(512)
+        expect(g.valid).to_equal(true)
+
+
+# ============================================================================
+# Test Group 2: Revocation
+# ============================================================================
+
+describe "GrantTable cap_revoke":
+    """Tests for grant revocation."""
+    it "revoke returns true for a valid grant":
+        """First revoke of a valid grant succeeds."""
+        var tbl = GrantTable.new()
+        val gid = tbl.cap_grant(1, 2, 0x1000, 4096, GRANT_R)
+        val ok = tbl.cap_revoke(gid)
+        expect(ok).to_equal(true)
+
+    it "revoked grant is no longer findable":
+        """After revoke, find_valid returns nil for that grant."""
+        var tbl = GrantTable.new()
+        val gid = tbl.cap_grant(1, 2, 0x1000, 4096, GRANT_R)
+        tbl.cap_revoke(gid)
+        val found = tbl.find_valid(gid, 2)
+        expect(found).to_be_nil()
+
+    it "revoke returns false for already-revoked grant":
+        """Double-revoking the same grant returns false."""
+        var tbl = GrantTable.new()
+        val gid = tbl.cap_grant(1, 2, 0x1000, 4096, GRANT_R)
+        tbl.cap_revoke(gid)
+        val ok2 = tbl.cap_revoke(gid)
+        expect(ok2).to_equal(false)
+
+    it "revoke returns false for unknown grant_id":
+        """Revoking a non-existent id returns false."""
+        var tbl = GrantTable.new()
+        val ok = tbl.cap_revoke(9999)
+        expect(ok).to_equal(false)
+
+
+# ============================================================================
+# Test Group 3: safecopy_from — bounds and permission checks
+# ============================================================================
+
+describe "GrantTable safecopy_from":
+    """Tests for bounds-checked read through a grant."""
+    it "succeeds for in-bounds read on GRANT_R grant":
+        """Valid grantee reading within bounds returns 0."""
+        var tbl = GrantTable.new()
+        val gid = tbl.cap_grant(1, 2, 0x1000, 512, GRANT_R)
+        val rc = tbl.safecopy_from(2, gid, 0, 0x8000, 256)
+        expect(rc).to_equal(0)
+
+    it "fails with -1 when offset+len exceeds grant length":
+        """Reading past the end of the grant is rejected."""
+        var tbl = GrantTable.new()
+        val gid = tbl.cap_grant(1, 2, 0x1000, 512, GRANT_R)
+        val rc = tbl.safecopy_from(2, gid, 0, 0x8000, 513)
+        expect(rc).to_equal(-1)
+
+    it "fails with -1 when grant does not permit read":
+        """GRANT_W-only grant rejects safecopy_from."""
+        var tbl = GrantTable.new()
+        val gid = tbl.cap_grant(1, 2, 0x1000, 512, GRANT_W)
+        val rc = tbl.safecopy_from(2, gid, 0, 0x8000, 64)
+        expect(rc).to_equal(-1)
+
+    it "fails with -1 for a revoked grant":
+        """Revoked grant is rejected by safecopy_from."""
+        var tbl = GrantTable.new()
+        val gid = tbl.cap_grant(1, 2, 0x1000, 512, GRANT_R)
+        tbl.cap_revoke(gid)
+        val rc = tbl.safecopy_from(2, gid, 0, 0x8000, 64)
+        expect(rc).to_equal(-1)
+
+    it "fails with -1 when grantee does not match":
+        """Task 3 cannot use a grant issued to task 2."""
+        var tbl = GrantTable.new()
+        val gid = tbl.cap_grant(1, 2, 0x1000, 512, GRANT_R)
+        val rc = tbl.safecopy_from(3, gid, 0, 0x8000, 64)
+        expect(rc).to_equal(-1)
+
+
+# ============================================================================
+# Test Group 4: safecopy_to — bounds and permission checks
+# ============================================================================
+
+describe "GrantTable safecopy_to":
+    """Tests for bounds-checked write through a grant."""
+    it "succeeds for in-bounds write on GRANT_W grant":
+        """Valid grantee writing within bounds returns 0."""
+        var tbl = GrantTable.new()
+        val gid = tbl.cap_grant(1, 2, 0x1000, 512, GRANT_W)
+        val rc = tbl.safecopy_to(2, gid, 0, 0x9000, 128)
+        expect(rc).to_equal(0)
+
+    it "fails with -1 when dst_off+len exceeds grant length":
+        """Writing past the end of the grant is rejected."""
+        var tbl = GrantTable.new()
+        val gid = tbl.cap_grant(1, 2, 0x1000, 256, GRANT_W)
+        val rc = tbl.safecopy_to(2, gid, 200, 0x9000, 100)
+        expect(rc).to_equal(-1)
+
+    it "fails with -1 for GRANT_R grant":
+        """GRANT_R-only grant rejects safecopy_to."""
+        var tbl = GrantTable.new()
+        val gid = tbl.cap_grant(1, 2, 0x1000, 512, GRANT_R)
+        val rc = tbl.safecopy_to(2, gid, 0, 0x9000, 64)
+        expect(rc).to_equal(-1)
+
+    it "fails with -1 for a revoked grant":
+        """Revoked grant is rejected by safecopy_to."""
+        var tbl = GrantTable.new()
+        val gid = tbl.cap_grant(1, 2, 0x1000, 512, GRANT_RW)
+        tbl.cap_revoke(gid)
+        val rc = tbl.safecopy_to(2, gid, 0, 0x9000, 64)
+        expect(rc).to_equal(-1)
+
+
+# ============================================================================
+# Test Group 5: VMA-validated safecopy (MMU-walk path via physmap fallback)
+# ============================================================================
+
+describe "GrantTable safecopy_from with VMA validation":
+    """Tests exercising the VMA-walk validation path in safecopy_from."""
+
+    it "succeeds when grantor vmspace has readable VMA covering the range":
+        """Registered vmspace with VMA_READ passes VMA check and returns 0."""
+        var tbl = GrantTable.new()
+        # Grant: grantor=10, grantee=20, 0x1000 len=512 GRANT_R
+        val gid = tbl.cap_grant(10, 20, 0x1000, 512, GRANT_R)
+        # Build a vmspace for grantor (task 10) with a readable VMA
+        val area = VmArea(start: 0x1000, len: 4096, kind: VMA_ANON, flags: VMA_READ, backing: 0, backing_offset: 0)
+        var space = ProcessVmSpace(pml4: 0, id: 10, vma_count: 0, areas: [])
+        space.vma_count = 1
+        space.areas.push(area)
+        register_task_vmspace(10, space)
+        val rc = tbl.safecopy_from(20, gid, 0, 0x8000, 256)
+        expect(rc).to_equal(0)
+
+    it "returns -1 (EFAULT) when grantor vmspace has no VMA covering the source":
+        """Unmapped source page causes safecopy_from to return -1."""
+        var tbl = GrantTable.new()
+        # Grant at 0x5000 which has no registered VMA
+        val gid = tbl.cap_grant(11, 21, 0x5000, 512, GRANT_R)
+        # Register vmspace for grantor (task 11) with VMA elsewhere (0x1000)
+        val area = VmArea(start: 0x1000, len: 4096, kind: VMA_ANON, flags: VMA_READ, backing: 0, backing_offset: 0)
+        var space = ProcessVmSpace(pml4: 0, id: 11, vma_count: 0, areas: [])
+        space.vma_count = 1
+        space.areas.push(area)
+        register_task_vmspace(11, space)
+        val rc = tbl.safecopy_from(21, gid, 0, 0x8000, 64)
+        expect(rc).to_equal(-1)
+
+    it "returns -1 (EFAULT) when source VMA lacks VMA_READ flag":
+        """VMA present but write-only rejects safecopy_from."""
+        var tbl = GrantTable.new()
+        val gid = tbl.cap_grant(12, 22, 0x2000, 512, GRANT_R)
+        # VMA at 0x2000 with only VMA_WRITE (no VMA_READ)
+        val area = VmArea(start: 0x2000, len: 4096, kind: VMA_ANON, flags: VMA_WRITE, backing: 0, backing_offset: 0)
+        var space = ProcessVmSpace(pml4: 0, id: 12, vma_count: 0, areas: [])
+        space.vma_count = 1
+        space.areas.push(area)
+        register_task_vmspace(12, space)
+        val rc = tbl.safecopy_from(22, gid, 0, 0x8000, 64)
+        expect(rc).to_equal(-1)
+
+describe "GrantTable safecopy_to with VMA validation":
+    """Tests exercising the VMA-walk validation path in safecopy_to."""
+
+    it "succeeds when grantor vmspace has writable VMA covering the range":
+        """Registered vmspace with VMA_WRITE passes VMA check and returns 0."""
+        var tbl = GrantTable.new()
+        val gid = tbl.cap_grant(30, 40, 0x3000, 512, GRANT_W)
+        val area = VmArea(start: 0x3000, len: 4096, kind: VMA_ANON, flags: VMA_WRITE, backing: 0, backing_offset: 0)
+        var space = ProcessVmSpace(pml4: 0, id: 30, vma_count: 0, areas: [])
+        space.vma_count = 1
+        space.areas.push(area)
+        register_task_vmspace(30, space)
+        val rc = tbl.safecopy_to(40, gid, 0, 0x9000, 128)
+        expect(rc).to_equal(0)
+
+    it "returns -1 (EFAULT) when destination VMA lacks VMA_WRITE flag":
+        """VMA present but read-only rejects safecopy_to."""
+        var tbl = GrantTable.new()
+        val gid = tbl.cap_grant(31, 41, 0x4000, 512, GRANT_W)
+        # VMA at 0x4000 with only VMA_READ (no VMA_WRITE)
+        val area = VmArea(start: 0x4000, len: 4096, kind: VMA_ANON, flags: VMA_READ, backing: 0, backing_offset: 0)
+        var space = ProcessVmSpace(pml4: 0, id: 31, vma_count: 0, areas: [])
+        space.vma_count = 1
+        space.areas.push(area)
+        register_task_vmspace(31, space)
+        val rc = tbl.safecopy_to(41, gid, 0, 0x9000, 64)
+        expect(rc).to_equal(-1)

@@ -92,6 +92,27 @@ fn print_summary(path: text, passed: i64, failed: i64, skipped: i64, pending: i6
         print ""
         print "FAIL {path}"
 
+fn bdd_summary_counts(output: text) -> (i64, i64):
+    var pos = 0
+    var passed = -1
+    var failed = -1
+    while pos <= output.len():
+        val next = output.index_of("\n", pos) ?? -1
+        val line = if next >= 0: output[pos:next] else: output[pos:]
+        val clean = line.replace("\x1b[32m", "").replace("\x1b[31m", "").replace("\x1b[0m", "").trim()
+        if clean.contains("example") and clean.contains("failure"):
+            val comma = clean.index_of(",") ?? -1
+            if comma > 0:
+                val total = to_int(clean[0:comma].trim().split(" ")[0])
+                val rest = clean[comma + 1:].trim()
+                val failures = to_int(rest.split(" ")[0])
+                passed = total - failures
+                failed = failures
+        if next < 0:
+            break
+        pos = next + 1
+    (passed, failed)
+
 fn main() -> i64:
     val run = parse_child_run(clean_args())
     if not run.valid:
@@ -118,9 +139,10 @@ fn main() -> i64:
         print stdout
     if stderr != "":
         print stderr
-    val failed = if code == 0: 0 else: 1
-    val passed = if code == 0: 1 else: 0
+    val (bdd_passed, bdd_failed) = bdd_summary_counts(stdout + "\n" + stderr)
+    val failed = if bdd_failed >= 0: bdd_failed elif code == 0: 0 else: 1
+    val passed = if bdd_passed >= 0: bdd_passed elif code == 0: 1 else: 0
     print_summary(run.path, passed, failed, 0, 0, duration_ms)
-    if code == 0:
+    if failed == 0:
         return 0
     1

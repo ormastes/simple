@@ -1,0 +1,102 @@
+use std.spec.{describe, it, expect}
+use std.common.compress.{CompressionError}
+use std.common.compress.lzma2_xz_format.{XzBlockHeader, _xz_read_u32_le, _xz_read_u64_le, _validate_lzma_range_decoder_init, _decompress_xz_stream, _parse_xz_index, _parse_block_header, _consume_alignment_zeroes, _vli_decode}
+
+fn expect_truncated_u32(result: Result<u32, CompressionError>, message_part: text):
+    expect(result.is_err()).to_equal(true)
+    val err = result.unwrap_err()
+    match err:
+        CompressionError.TruncatedInput(message):
+            expect(message).to_contain(message_part)
+        _:
+            expect(false).to_equal(true)
+
+fn expect_truncated_u64(result: Result<u64, CompressionError>, message_part: text):
+    expect(result.is_err()).to_equal(true)
+    val err = result.unwrap_err()
+    match err:
+        CompressionError.TruncatedInput(message):
+            expect(message).to_contain(message_part)
+        _:
+            expect(false).to_equal(true)
+
+fn expect_truncated_unit(result: Result<(), CompressionError>, message_part: text):
+    expect(result.is_err()).to_equal(true)
+    val err = result.unwrap_err()
+    match err:
+        CompressionError.TruncatedInput(message):
+            expect(message).to_contain(message_part)
+        _:
+            expect(false).to_equal(true)
+
+fn expect_truncated_stream(result: Result<([u8], i64), CompressionError>, message_part: text):
+    expect(result.is_err()).to_equal(true)
+    val err = result.unwrap_err()
+    match err:
+        CompressionError.TruncatedInput(message):
+            expect(message).to_contain(message_part)
+        _:
+            expect(false).to_equal(true)
+
+fn expect_truncated_i64(result: Result<i64, CompressionError>, message_part: text):
+    expect(result.is_err()).to_equal(true)
+    val err = result.unwrap_err()
+    match err:
+        CompressionError.TruncatedInput(message):
+            expect(message).to_contain(message_part)
+        _:
+            expect(false).to_equal(true)
+
+fn expect_truncated_block_header(result: Result<XzBlockHeader, CompressionError>, message_part: text):
+    expect(result.is_err()).to_equal(true)
+    val err = result.unwrap_err()
+    match err:
+        CompressionError.TruncatedInput(message):
+            expect(message).to_contain(message_part)
+        _:
+            expect(false).to_equal(true)
+
+fn expect_truncated_vli(result: Result<(u64, i64), CompressionError>, message_part: text):
+    expect(result.is_err()).to_equal(true)
+    val err = result.unwrap_err()
+    match err:
+        CompressionError.TruncatedInput(message):
+            expect(message).to_contain(message_part)
+        _:
+            expect(false).to_equal(true)
+
+describe "XZ little-endian reader bounds validation":
+    it "rejects negative u32 offsets before indexing":
+        expect_truncated_u32(_xz_read_u32_le([0x01u8, 0x02u8, 0x03u8, 0x04u8], -1), "need 4 bytes")
+
+    it "rejects negative u64 offsets before indexing":
+        expect_truncated_u64(_xz_read_u64_le([
+            0x01u8, 0x02u8, 0x03u8, 0x04u8,
+            0x05u8, 0x06u8, 0x07u8, 0x08u8
+        ], -1), "need 8 bytes")
+
+    it "rejects negative LZMA range decoder offsets before indexing":
+        expect_truncated_unit(_validate_lzma_range_decoder_init([
+            0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8
+        ], -1), "range decoder init")
+
+    it "rejects negative XZ stream offsets before indexing":
+        expect_truncated_stream(_decompress_xz_stream([
+            0xFDu8, 0x37u8, 0x7Au8, 0x58u8, 0x5Au8, 0x00u8,
+            0x00u8, 0x01u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8
+        ], -1, CompressionSimdTier.scalar), "xz stream")
+
+    it "rejects negative XZ index offsets before indexing":
+        expect_truncated_i64(_parse_xz_index([0x00u8, 0x00u8, 0x00u8, 0x00u8], -1, [], CompressionSimdTier.scalar), "xz index")
+
+    it "rejects negative XZ block header offsets before indexing":
+        expect_truncated_block_header(_parse_block_header([0x01u8, 0x00u8, 0x00u8, 0x00u8], -1, CompressionSimdTier.scalar), "xz block header")
+
+    it "rejects negative XZ alignment offsets before indexing":
+        expect_truncated_i64(_consume_alignment_zeroes([0x00u8, 0x00u8], 0, -1, "xz alignment"), "xz alignment")
+
+    it "rejects XZ alignment ranges that move before the span start":
+        expect_truncated_i64(_consume_alignment_zeroes([0x00u8, 0x00u8], 2, 1, "xz alignment"), "xz alignment")
+
+    it "rejects negative XZ VLI offsets before indexing":
+        expect_truncated_vli(_vli_decode([0x00u8], -1), "xz vli")

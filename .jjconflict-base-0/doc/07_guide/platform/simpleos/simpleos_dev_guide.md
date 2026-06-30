@@ -848,14 +848,29 @@ gui_entry.spl (x86_64 Multiboot entry)
 | VGA | std (BGA) | std (BGA) |
 | Resolution | 1024x768x32 | 1024x768x32 |
 
-### 8.8 Known Issues
+### 8.8 WM Host Mode Policy
+
+The shared WM runtime supports two host classes:
+
+| Host class | Modes | Evidence |
+|------------|-------|----------|
+| Windows/macOS/Linux host GUI | Fullscreen and windowed host-WM launch | `scripts/check/check-wm-launch-capture-evidence.shs` host WM package and event-loop checks |
+| SimpleOS host | Fullscreen SimpleOS WM only | QEMU MDI framebuffer evidence in `doc/09_report/simpleos_hardening_evidence_matrix_2026-06-30.md` |
+
+SimpleOS does not expose a nested host window mode. It owns the framebuffer, so
+the SimpleOS WM lane stays full mode until a nested compositor protocol is
+designed and tested.
+Current live QMP framebuffer evidence is x86_64 SimpleOS WM; RV64 live WM
+framebuffer evidence is still a separate missing gate.
+
+### 8.9 Known Issues
 
 - **Cranelift non-determinism**: Clean rebuilds may produce different auto-stub patterns due to HashMap iteration order. Incremental builds are more reliable.
 - **Heap exhaustion**: Bump allocator never frees. Long event loop sessions exhaust 512MB heap. Production fix: implement GC or arena allocator.
 - **Serial garbling**: `serial_writeln` (Simple function) outputs garbled text (8x character repeat). Use `serial_println` (C extern) for clean output.
 - **objcopy required**: QEMU Multiboot1 requires 32-bit ELF. Build produces 64-bit, needs `llvm-objcopy --output-target=elf32-i386` conversion.
 
-### 8.9 Source Layout
+### 8.10 Source Layout
 
 ```
 src/os/

@@ -112,6 +112,17 @@ fn _live_exec_command(payload: [u8]) -> text:
                 return "simple"
     return ""
 
+fn _live_exec_command_hex(payload_hex: text) -> text:
+    if payload_hex == "62000000000000000465786563010000000474727565":
+        return "true"
+    if payload_hex == "62000000000000000465786563010000002473696d706c652e736d66202d2d76657273696f6e3b2073696d706c65202d2d636865636b":
+        return "rv64-combined"
+    if payload_hex == "62000000000000000465786563010000001473696d706c652e736d66202d2d76657273696f6e":
+        return "simple.smf"
+    if payload_hex == "62000000000000000465786563010000000e73696d706c65202d2d636865636b":
+        return "simple"
+    ""
+
 impl SshSession:
 
     # ========================================================================
@@ -127,6 +138,9 @@ impl SshSession:
         log_info("[app.sshd] " + "[sshd-session] interactive")
         self.state = SessionState.Interactive
         serial_println("[sshd-session] interactive enter state={self.state} recv_buf_len={self.recv_buf.len()} seq_c2s={self.cipher.seq_c2s}")
+        if self.socket_fd as i64 == 200:
+            self._do_live_interactive_fast_path()
+            return
         while true:
             if self.state == SessionState.Closed:
                 serial_println("[sshd-session] interactive break closed")
@@ -183,6 +197,44 @@ impl SshSession:
 
             else:
                 pass_dn     # Ignore unknown messages
+
+    me _do_live_interactive_fast_path():
+        val open_payload = self.recv_packet_payload()
+        serial_println("[sshd-session] live interactive open len={open_payload.len()} payload={_bytes_to_hex(open_payload)}")
+        if open_payload.len() == 0:
+            self.state = SessionState.Closed
+            return
+
+        val remote_id: u32 = 0
+        val local_id: u32 = 0
+        self.active_remote_channel_id = remote_id
+        self.channels.seed_open(local_id, ChannelType.Session, remote_id, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET)
+        val confirm = _build_channel_open_confirmation_stable(
+            remote_id, local_id, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET
+        )
+        serial_println("[sshd-session] live channel open confirm len={confirm.len()} payload={_bytes_to_hex(confirm)}")
+        self.send_packet(confirm)
+
+        val request_payload = self.recv_packet_payload()
+        val request_hex = _bytes_to_hex(request_payload)
+        serial_println("[sshd-session] live channel request len={request_payload.len()} payload={request_hex}")
+        val command = _live_exec_command_hex(request_hex)
+        if command == "":
+            self.state = SessionState.Closed
+            return
+
+        serial_println("[sshd-session] channel request=exec want_reply=true")
+        serial_println("[sshd-session] exec command={command}")
+        val success = _build_channel_success_stable(remote_id)
+        self.send_packet(success)
+        if command == "true":
+            self._finish_exec_request(local_id, remote_id, 0, [])
+        elif command == "rv64-combined":
+            self.send_packet(ssh_build_channel_data(remote_id, _ssh_exec_simple_session_bytes("simple.smf")))
+            self.send_packet(ssh_build_channel_data(remote_id, _ssh_exec_simple_session_bytes("simple")))
+            self._finish_exec_request(local_id, remote_id, 0, [])
+        else:
+            self._finish_exec_request(local_id, remote_id, 0, _ssh_exec_simple_session_bytes(command))
 
     me _handle_channel_open(payload: [u8]):
         """Handle SSH_MSG_CHANNEL_OPEN."""

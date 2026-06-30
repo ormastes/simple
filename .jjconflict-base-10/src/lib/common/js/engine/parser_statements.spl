@@ -1,0 +1,394 @@
+# JS parser — statement parsing.
+# Extension block for JsParser covering all statement forms:
+# variable declarations, control flow, try/catch, switch, class declarations,
+# destructuring patterns, and expression statements.
+
+use std.js.engine.js_error.{JsError, script_error, Logger, LogLevel, BrowserResult, BrowserError}
+use std.js.types.pair.{Pair}
+use std.js.types.js_types.JsValue
+use std.js.types.ast_types.{JsExpression, JsStatement, SwitchCase, FnParam, DestructProp, ImportSpec, ExportSpec, JsAstFactory}
+use std.js.engine.parser.{JsParser}
+
+impl JsParser:
+
+    # var/let/const declaration
+    me parse_var_declaration(kind: text) -> BrowserResult<JsStatement>:
+        self.advance()  # consume var/let/const
+
+        # Check for destructuring pattern
+        if self.check("OpenBrace") or self.check("OpenBracket"):
+            val pattern = self._parse_destruct_pattern()?
+            self.match_token("Eq")
+            val init_expr = self.parse_expression()?
+            self.match_token("Semicolon")
+            return Ok(JsAstFactory.destruct_var_decl(pattern: pattern, init: init_expr, kind: kind))
+
+        val name = self.expect("Identifier")?
+
+        var init_expr = JsAstFactory.literal(value: JsValue.Undefined)
+        if self.match_token("Eq"):
+            init_expr = self.parse_expression()?
+
+        self.match_token("Semicolon")
+        # Use LetDecl/ConstDecl for let/const to enable block scoping
+        if kind == "let":
+            return Ok(JsAstFactory.let_decl(name: name, init: init_expr))
+        if kind == "const":
+            return Ok(JsAstFactory.const_decl(name: name, init: init_expr))
+        Ok(JsAstFactory.var_decl(name: name, init: init_expr))
+
+    # Parse destructuring pattern: { a, b: c, d = 5 } or [a, b, ...rest]
+    me _parse_destruct_pattern() -> BrowserResult<JsExpression>:
+        if self.check("OpenBrace"):
+            self.advance()  # consume '{'
+            var props: [DestructProp] = []
+            if not self.check("CloseBrace"):
+                val first = self._parse_destruct_prop()?
+                props.push(first)
+                while self.match_token("Comma"):
+                    if self.check("CloseBrace"):
+                        break
+                    val prop = self._parse_destruct_prop()?
+                    props.push(prop)
+            self.expect("CloseBrace")?
+            return Ok(JsAstFactory.object_pattern(props: props))
+        else:
+            self.advance()  # consume '['
+            var elements: [JsExpression] = []
+            if not self.check("CloseBracket"):
+                # Check for rest element
+                if self.check("DotDotDot"):
+                    self.advance()
+                    val name = self.expect("Identifier")?
+                    elements.push(JsAstFactory.spread_element(argument: JsAstFactory.identifier(name: name)))
+                else:
+                    val first = self.parse_assignment()?
+                    elements.push(first)
+                while self.match_token("Comma"):
+                    if self.check("CloseBracket"):
+                        break
+                    if self.check("DotDotDot"):
+                        self.advance()
+                        val name = self.expect("Identifier")?
+                        elements.push(JsAstFactory.spread_element(argument: JsAstFactory.identifier(name: name)))
+                    else:
+                        val elem = self.parse_assignment()?
+                        elements.push(elem)
+            self.expect("CloseBracket")?
+            return Ok(JsAstFactory.array_pattern(elements: elements))
+
+    me _parse_destruct_prop() -> BrowserResult<DestructProp>:
+        val key = self.expect("Identifier")?
+        # Check for rename: { key: local_name }
+        if self.match_token("Colon"):
+            val local_name = self.expect("Identifier")?
+            var rename_default: JsExpression? = nil
+            if self.match_token("Eq"):
+                val dv = self.parse_assignment()?
+                rename_default = Some(dv)
+            return Ok(DestructProp(key: key, value: JsAstFactory.identifier(name: local_name), default_value: rename_default, is_computed: false))
+        # Check for default value: { key = default }
+        var default_val: JsExpression? = nil
+        if self.match_token("Eq"):
+            val dv = self.parse_assignment()?
+            default_val = Some(dv)
+        Ok(DestructProp(key: key, value: JsAstFactory.identifier(name: key), default_value: default_val, is_computed: false))
+
+    # function declaration
+    me parse_function_declaration() -> BrowserResult<JsStatement>:
+        self.advance()  # consume 'function'
+        val name = self.expect("Identifier")?
+        self.expect("OpenParen")?
+
+        var params: [text] = []
+        if not self.check("CloseParen"):
+            val first = self.expect("Identifier")?
+            params.push(first)
+            while self.match_token("Comma"):
+                val param = self.expect("Identifier")?
+                params.push(param)
+
+        self.expect("CloseParen")?
+        val body = self.parse_block()?
+        Ok(JsAstFactory.fn_decl(name: name, params: params, body: body))
+
+    # return statement
+    me parse_return_statement() -> BrowserResult<JsStatement>:
+        self.advance()  # consume 'return'
+        var value = JsAstFactory.literal(value: JsValue.Undefined)
+        val is_end = self.check("Semicolon") or self.check("CloseBrace") or self.is_at_end()
+        if not is_end:
+            value = self.parse_expression()?
+        self.match_token("Semicolon")
+        Ok(JsAstFactory.return_stmt(value: value))
+
+    # if / else if / else
+    me parse_if_statement() -> BrowserResult<JsStatement>:
+        self.advance()  # consume 'if'
+        self.expect("OpenParen")?
+        val cond = self.parse_expression()?
+        self.expect("CloseParen")?
+
+        var then_body: [JsStatement] = []
+        if self.check("OpenBrace"):
+            then_body = self.parse_block()?
+        else:
+            val single = self.parse_statement()?
+            then_body.push(single)
+
+        var else_body: [JsStatement] = []
+        if self.match_token("Else"):
+            if self.check("If"):
+                val else_if = self.parse_if_statement()?
+                else_body.push(else_if)
+            else if self.check("OpenBrace"):
+                else_body = self.parse_block()?
+            else:
+                val single = self.parse_statement()?
+                else_body.push(single)
+
+        Ok(JsAstFactory.if_stmt(cond: cond, then_body: then_body, else_body: else_body))
+
+    # while loop
+    me parse_while_statement() -> BrowserResult<JsStatement>:
+        self.advance()  # consume 'while'
+        self.expect("OpenParen")?
+        val cond = self.parse_expression()?
+        self.expect("CloseParen")?
+
+        var body: [JsStatement] = []
+        if self.check("OpenBrace"):
+            body = self.parse_block()?
+        else:
+            val single = self.parse_statement()?
+            body.push(single)
+
+        Ok(JsAstFactory.while_stmt(cond: cond, body: body))
+
+    # do...while loop
+    me parse_do_while_statement() -> BrowserResult<JsStatement>:
+        self.advance()  # consume 'do'
+        var body: [JsStatement] = []
+        if self.check("OpenBrace"):
+            body = self.parse_block()?
+        else:
+            body.push(self.parse_statement()?)
+        self.expect("While")?
+        self.expect("OpenParen")?
+        val cond = self.parse_expression()?
+        self.expect("CloseParen")?
+        self.match_token("Semicolon")
+        Ok(JsAstFactory.do_while(cond: cond, body: body))
+
+    # for loop — C-style, for-in, for-of
+    me parse_for_statement() -> BrowserResult<JsStatement>:
+        self.advance()  # consume 'for'
+        self.expect("OpenParen")?
+
+        # Check for for-in / for-of
+        val kind = self.current_kind
+        if kind == "Var" or kind == "Let" or kind == "Const":
+            val decl_kind = self.current_value
+            self.advance()  # consume var/let/const
+            val binding = self.expect("Identifier")?
+
+            if self.check("In"):
+                # for (var k in obj) { ... }
+                self.advance()  # consume 'in'
+                val obj_expr = self.parse_expression()?
+                self.expect("CloseParen")?
+                var body: [JsStatement] = []
+                if self.check("OpenBrace"):
+                    body = self.parse_block()?
+                else:
+                    body.push(self.parse_statement()?)
+                return Ok(JsAstFactory.for_in(binding: binding, object: obj_expr, body: body))
+
+            if self.check("Of"):
+                # for (var x of arr) { ... }
+                self.advance()  # consume 'of'
+                val iter_expr = self.parse_expression()?
+                self.expect("CloseParen")?
+                var body: [JsStatement] = []
+                if self.check("OpenBrace"):
+                    body = self.parse_block()?
+                else:
+                    body.push(self.parse_statement()?)
+                return Ok(JsAstFactory.for_of(binding: binding, iterable: iter_expr, body: body))
+
+            # C-style for: var x = init; cond; update
+            # We already consumed "var x", now need "= expr;"
+            var init_expr = JsAstFactory.literal(value: JsValue.Undefined)
+            if self.match_token("Eq"):
+                init_expr = self.parse_expression()?
+            val init_stmt = JsAstFactory.var_decl(name: binding, init: init_expr)
+            self.match_token("Semicolon")
+
+            # Condition
+            var cond = JsAstFactory.literal(value: JsValue.Boolean(v: true))
+            if not self.check("Semicolon"):
+                cond = self.parse_expression()?
+            self.expect("Semicolon")?
+
+            # Update
+            var update = JsAstFactory.literal(value: JsValue.Undefined)
+            if not self.check("CloseParen"):
+                update = self.parse_expression()?
+            self.expect("CloseParen")?
+
+            var body: [JsStatement] = []
+            if self.check("OpenBrace"):
+                body = self.parse_block()?
+            else:
+                body.push(self.parse_statement()?)
+            return Ok(JsAstFactory.for_stmt(init: init_stmt, cond: cond, update: update, body: body))
+
+        # Non-var init
+        var init_stmt = JsAstFactory.expr_stmt(expr: JsAstFactory.literal(value: JsValue.Undefined))
+        if not self.check("Semicolon"):
+            val expr = self.parse_expression()?
+            init_stmt = JsAstFactory.expr_stmt(expr: expr)
+            self.match_token("Semicolon")
+        else:
+            self.match_token("Semicolon")
+
+        var cond = JsAstFactory.literal(value: JsValue.Boolean(v: true))
+        if not self.check("Semicolon"):
+            cond = self.parse_expression()?
+        self.expect("Semicolon")?
+
+        var update = JsAstFactory.literal(value: JsValue.Undefined)
+        if not self.check("CloseParen"):
+            update = self.parse_expression()?
+        self.expect("CloseParen")?
+
+        var body: [JsStatement] = []
+        if self.check("OpenBrace"):
+            body = self.parse_block()?
+        else:
+            body.push(self.parse_statement()?)
+        Ok(JsAstFactory.for_stmt(init: init_stmt, cond: cond, update: update, body: body))
+
+    # JsExpression statement
+    me parse_expression_statement() -> BrowserResult<JsStatement>:
+        val expr = self.parse_expression()?
+        # Check for labeled statement: Identifier followed by Colon
+        val ident_name = self.ident_name(expr)
+        if ident_name != "" and self.check("Colon"):
+            self.advance()
+            val body = self.parse_statement()?
+            return Ok(JsAstFactory.labeled_stmt(label: ident_name, body: body))
+        self.match_token("Semicolon")
+        Ok(JsAstFactory.expr_stmt(expr: expr))
+
+    # try / catch / finally
+    me parse_try_statement() -> BrowserResult<JsStatement>:
+        self.advance()  # consume 'try'
+        val try_body = self.parse_block()?
+
+        var catch_body: [JsStatement] = []
+        var catch_param = ""
+        if self.match_token("Catch"):
+            if self.match_token("OpenParen"):
+                val param = self.expect("Identifier")?
+                catch_param = param
+                self.expect("CloseParen")?
+            catch_body = self.parse_block()?
+
+        var finally_body: [JsStatement] = []
+        if self.match_token("Finally"):
+            finally_body = self.parse_block()?
+
+        Ok(JsAstFactory.try_catch(try_body: try_body, catch_param: catch_param, catch_body: catch_body, finally_body: finally_body))
+
+    # switch statement with proper SwitchCase nodes
+    me parse_switch_statement() -> BrowserResult<JsStatement>:
+        self.advance()  # consume 'switch'
+        self.expect("OpenParen")?
+        val discriminant = self.parse_expression()?
+        self.expect("CloseParen")?
+        self.expect("OpenBrace")?
+
+        var cases: [SwitchCase] = []
+        while not self.check("CloseBrace") and not self.is_at_end():
+            if self.match_token("Case"):
+                val test_expr = self.parse_expression()?
+                self.expect("Colon")?
+                var case_body: [JsStatement] = []
+                while not self.check("Case") and not self.check("Default") and not self.check("CloseBrace"):
+                    val s = self.parse_statement()?
+                    case_body.push(s)
+                cases.push(SwitchCase.case_clause(test_expr, case_body))
+            else if self.match_token("Default"):
+                self.expect("Colon")?
+                var default_body: [JsStatement] = []
+                while not self.check("Case") and not self.check("CloseBrace"):
+                    val s = self.parse_statement()?
+                    default_body.push(s)
+                cases.push(SwitchCase.default_clause(default_body))
+            else:
+                self.advance()  # skip unexpected token
+
+        self.expect("CloseBrace")?
+        Ok(JsAstFactory.switch_stmt(discriminant: discriminant, cases: cases))
+
+    # throw statement
+    me parse_throw_statement() -> BrowserResult<JsStatement>:
+        self.advance()  # consume 'throw'
+        val expr = self.parse_expression()?
+        self.match_token("Semicolon")
+        Ok(JsAstFactory.throw_stmt(expr: expr))
+
+    # class declaration: class Name [extends Parent] { constructor(...) {...} method(...) {...} }
+    me parse_class_declaration() -> BrowserResult<JsStatement>:
+        self.advance()  # consume 'class'
+        var class_name = ""
+        if self.check("Identifier"):
+            class_name = self.current_value
+            self.advance()
+
+        var parent_name = ""
+        if self.match_token("Extends"):
+            if self.check("Identifier"):
+                parent_name = self.current_value
+                self.advance()
+
+        self.expect("OpenBrace")?
+
+        var empty_params: [text] = []
+        var empty_body: [JsStatement] = []
+        var constructor_decl = JsAstFactory.fn_decl(name: "constructor", params: empty_params, body: empty_body)
+        var methods: [JsStatement] = []
+
+        while not self.check("CloseBrace") and not self.is_at_end():
+            # Parse method name
+            var method_name = ""
+            if self.check("Identifier"):
+                method_name = self.current_value
+                self.advance()
+            else:
+                self.advance()
+                continue
+
+            # Parse method params
+            self.expect("OpenParen")?
+            var params: [text] = []
+            if not self.check("CloseParen"):
+                val first = self.expect("Identifier")?
+                params.push(first)
+                while self.match_token("Comma"):
+                    val param = self.expect("Identifier")?
+                    params.push(param)
+            self.expect("CloseParen")?
+
+            # Parse method body
+            val body = self.parse_block()?
+            val fn_decl = JsAstFactory.fn_decl(name: method_name, params: params, body: body)
+
+            if method_name == "constructor":
+                constructor_decl = fn_decl
+            else:
+                methods.push(fn_decl)
+
+        self.expect("CloseBrace")?
+        Ok(JsAstFactory.class_decl(name: class_name, parent_name: parent_name, constructor: constructor_decl, methods: methods))

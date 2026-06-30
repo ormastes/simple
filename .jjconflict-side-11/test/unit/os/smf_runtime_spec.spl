@@ -1,0 +1,259 @@
+use std.spipe.*
+
+# Inline class definitions for SMF runtime replacement model tests
+
+class SmfHeader:
+    magic: text
+    version: int
+    section_count: int
+    trailer_offset: int
+    is_valid: bool
+
+    me has_trailer() -> bool:
+        self.trailer_offset > 0
+
+    me validate() -> SmfHeader:
+        SmfHeader(magic: self.magic, version: self.version, section_count: self.section_count, trailer_offset: self.trailer_offset, is_valid: self.magic == "SMF1" and self.version > 0)
+
+    static fn create(ver: int, sections: int, trailer: int) -> SmfHeader:
+        SmfHeader(magic: "SMF1", version: ver, section_count: sections, trailer_offset: trailer, is_valid: false)
+
+    static fn empty() -> SmfHeader:
+        SmfHeader(magic: "", version: 0, section_count: 0, trailer_offset: 0, is_valid: false)
+
+class TrailerDetection:
+    detection_mode: text
+    confidence: int
+    fallback_used: bool
+    raw_offset: int
+
+    me is_trailer() -> bool:
+        self.detection_mode == "trailer"
+
+    me is_found() -> bool:
+        self.confidence > 0
+
+    static fn trailer(offset: int) -> TrailerDetection:
+        TrailerDetection(detection_mode: "trailer", confidence: 100, fallback_used: false, raw_offset: offset)
+
+    static fn not_found() -> TrailerDetection:
+        TrailerDetection(detection_mode: "none", confidence: 0, fallback_used: true, raw_offset: 0)
+
+class GenerationState:
+    state: text
+    module_name: text
+    generation_id: int
+    ref_count: int
+
+    me is_active() -> bool:
+        self.state == "active"
+
+    me promote() -> GenerationState:
+        GenerationState(state: "active", module_name: self.module_name, generation_id: self.generation_id, ref_count: self.ref_count)
+
+    static fn loaded(name: text, g: int) -> GenerationState:
+        GenerationState(state: "loaded", module_name: name, generation_id: g, ref_count: 0)
+
+    static fn candidate(name: text, g: int) -> GenerationState:
+        GenerationState(state: "candidate", module_name: name, generation_id: g, ref_count: 0)
+
+class CandidateMapping:
+    candidate_ref: text
+    relocation_done: bool
+    import_valid: bool
+    ready_to_swap: bool
+
+    me is_ready() -> bool:
+        self.ready_to_swap
+
+    static fn create(ref_name: text) -> CandidateMapping:
+        CandidateMapping(candidate_ref: ref_name, relocation_done: false, import_valid: false, ready_to_swap: false)
+
+class SymbolSwap:
+    old_export: text
+    new_export: text
+    swap_status: text
+    drain_count: int
+
+    me is_complete() -> bool:
+        self.swap_status == "complete"
+
+    me complete() -> SymbolSwap:
+        SymbolSwap(old_export: self.old_export, new_export: self.new_export, swap_status: "complete", drain_count: self.drain_count)
+
+    static fn create(old: text, new_ref: text) -> SymbolSwap:
+        SymbolSwap(old_export: old, new_export: new_ref, swap_status: "pending", drain_count: 0)
+
+class SmfSource:
+    source_kind: text
+    module_path: text
+    export_count: int
+    import_count: int
+
+    me is_jit() -> bool:
+        self.source_kind == "jit"
+
+    me total_symbols() -> int:
+        self.export_count + self.import_count
+
+    static fn from_file(path: text, exports: int, imports: int) -> SmfSource:
+        SmfSource(source_kind: "file", module_path: path, export_count: exports, import_count: imports)
+
+    static fn from_jit(path: text, exports: int, imports: int) -> SmfSource:
+        SmfSource(source_kind: "jit", module_path: path, export_count: exports, import_count: imports)
+
+class ImportMetadata:
+    symbol_name: text
+    required_module: text
+    is_resolved: bool
+    resolved_offset: int
+
+    me is_pending() -> bool:
+        self.is_resolved == false
+
+    me resolve(offset: int) -> ImportMetadata:
+        ImportMetadata(symbol_name: self.symbol_name, required_module: self.required_module, is_resolved: true, resolved_offset: offset)
+
+    static fn create(sym: text, mod_name: text) -> ImportMetadata:
+        ImportMetadata(symbol_name: sym, required_module: mod_name, is_resolved: false, resolved_offset: 0)
+
+class DynLoadRequest:
+    library_name: text
+    search_path: text
+    load_mode: text
+    namespace_ref: text
+
+    me is_lazy() -> bool:
+        self.load_mode == "lazy"
+
+    static fn lazy(name: text, path: text, ns: text) -> DynLoadRequest:
+        DynLoadRequest(library_name: name, search_path: path, load_mode: "lazy", namespace_ref: ns)
+
+    static fn eager(name: text, path: text, ns: text) -> DynLoadRequest:
+        DynLoadRequest(library_name: name, search_path: path, load_mode: "eager", namespace_ref: ns)
+
+class DynLoadResult:
+    library_name: text
+    success: bool
+    handle_id: int
+    error_msg: text
+
+    me is_loaded() -> bool:
+        self.success
+
+    static fn ok(name: text, handle: int) -> DynLoadResult:
+        DynLoadResult(library_name: name, success: true, handle_id: handle, error_msg: "")
+
+    static fn fail(name: text, err: text) -> DynLoadResult:
+        DynLoadResult(library_name: name, success: false, handle_id: 0, error_msg: err)
+
+class LinkNamespace:
+    namespace_name: text
+    process_id: int
+    lib_count: int
+    is_global: bool
+
+    me is_process_local() -> bool:
+        self.is_global == false
+
+    me add_lib() -> LinkNamespace:
+        LinkNamespace(namespace_name: self.namespace_name, process_id: self.process_id, lib_count: self.lib_count + 1, is_global: self.is_global)
+
+    static fn global_ns() -> LinkNamespace:
+        LinkNamespace(namespace_name: "global", process_id: 0, lib_count: 0, is_global: true)
+
+    static fn process_ns(name: text, pid: int) -> LinkNamespace:
+        LinkNamespace(namespace_name: name, process_id: pid, lib_count: 0, is_global: false)
+
+describe "SmfHeader":
+    it "test_header_create":
+        val h = SmfHeader.create(2, 5, 0)
+        expect(h.version).to_equal(2)
+        expect(h.section_count).to_equal(5)
+
+    it "test_header_trailer":
+        val h = SmfHeader.create(1, 3, 128)
+        expect(h.has_trailer()).to_equal(true)
+
+    it "test_header_validate":
+        val h = SmfHeader.create(1, 3, 0).validate()
+        expect(h.is_valid).to_equal(true)
+
+    it "test_header_empty":
+        val h = SmfHeader.empty()
+        expect(h.version).to_equal(0)
+        expect(h.is_valid == false).to_equal(true)
+
+describe "TrailerDetection":
+    it "test_detect_trailer":
+        val td = TrailerDetection.trailer(256)
+        expect(td.confidence).to_equal(100)
+
+    it "test_detect_not_found":
+        val td = TrailerDetection.not_found()
+        expect(td.detection_mode).to_equal("none")
+
+describe "GenerationState":
+    it "test_gen_loaded":
+        val gs = GenerationState.loaded("mymod", 1)
+        expect(gs.state).to_equal("loaded")
+
+    it "test_gen_candidate":
+        val gs = GenerationState.candidate("mymod", 2)
+        expect(gs.state).to_equal("candidate")
+
+    it "test_gen_promote":
+        val gs = GenerationState.candidate("mymod", 2).promote()
+        expect(gs.state).to_equal("active")
+
+describe "CandidateMapping":
+    it "test_candidate_not_ready":
+        val cm = CandidateMapping.create("ref_abc")
+        expect(cm.ready_to_swap == false).to_equal(true)
+
+describe "SymbolSwap":
+    it "test_swap_create":
+        val sw = SymbolSwap.create("old_fn", "new_fn")
+        expect(sw.swap_status).to_equal("pending")
+
+    it "test_swap_complete":
+        val sw = SymbolSwap.create("old_fn", "new_fn").complete()
+        expect(sw.swap_status).to_equal("complete")
+
+describe "SmfSource":
+    it "test_source_file":
+        val s = SmfSource.from_file("mod.smf", 10, 3)
+        expect(s.source_kind).to_equal("file")
+
+    it "test_source_jit":
+        val s = SmfSource.from_jit("mod.jit", 5, 2)
+        expect(s.source_kind).to_equal("jit")
+
+    it "test_source_total":
+        val s = SmfSource.from_file("mod.smf", 10, 3)
+        expect(s.total_symbols()).to_equal(13)
+
+describe "ImportMetadata":
+    it "test_import_pending":
+        val im = ImportMetadata.create("sym_foo", "libbar")
+        expect(im.is_resolved).to_equal(false)
+
+    it "test_import_resolve":
+        val im = ImportMetadata.create("sym_foo", "libbar").resolve(42)
+        expect(im.is_resolved).to_equal(true)
+        expect(im.resolved_offset).to_equal(42)
+
+describe "DynLoadRequest":
+    it "test_dynload_lazy":
+        val req = DynLoadRequest.lazy("libfoo.so", "/usr/lib", "ns_proc")
+        expect(req.load_mode).to_equal("lazy")
+
+describe "DynLoadResult":
+    it "test_dynload_ok":
+        val res = DynLoadResult.ok("libfoo.so", 7)
+        expect(res.success).to_equal(true)
+
+describe "LinkNamespace":
+    it "test_namespace_global":
+        val ns = LinkNamespace.global_ns()
+        expect(ns.is_global).to_equal(true)

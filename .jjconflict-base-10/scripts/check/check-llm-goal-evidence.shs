@@ -1,0 +1,583 @@
+<<<<<<< Conflict 1 of 1
++++++++ Contents of side #1
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/llm_goal_evidence}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/2026/06/llm_goal_evidence_$(date -u +%F).md}"
+OUT_ENV="$BUILD_DIR/evidence.env"
+LANE_TIMEOUT_SECONDS="${LLM_GOAL_LANE_TIMEOUT_SECONDS:-180}"
+SVLLM_LANE_TIMEOUT_SECONDS="${LLM_GOAL_SVLLM_LANE_TIMEOUT_SECONDS:-}"
+STRICT_HOST=0
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --strict-host)
+            STRICT_HOST=1
+            ;;
+        --help|-h)
+            echo "usage: sh scripts/check/check-llm-goal-evidence.shs [--strict-host]"
+            echo "  --strict-host  require full context/Ponytail replacement, live dashboard, live vLLM, native svLLM, fine-tune acceptance, and Simple/libtorch CUDA optimizer gates to pass"
+            exit 0
+            ;;
+        *)
+            echo "unknown option: $1" >&2
+            exit 2
+            ;;
+    esac
+    shift
+done
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+rm -f "$OUT_ENV" "$REPORT_PATH"
+
+lane_timeout_seconds() {
+    key="$1"
+    case "$key" in
+        svllm_local)
+            if [ -n "$SVLLM_LANE_TIMEOUT_SECONDS" ]; then
+                printf '%s\n' "$SVLLM_LANE_TIMEOUT_SECONDS"
+            elif [ "$LANE_TIMEOUT_SECONDS" -lt 120 ]; then
+                printf '%s\n' "120"
+            else
+                printf '%s\n' "$LANE_TIMEOUT_SECONDS"
+            fi
+            ;;
+        *)
+            printf '%s\n' "$LANE_TIMEOUT_SECONDS"
+            ;;
+    esac
+}
+
+run_lane() {
+    key="$1"
+    expected="$2"
+    shift 2
+    log="$BUILD_DIR/$key.log"
+    report_path="$BUILD_DIR/${key}_report.md"
+    timeout_seconds="$(lane_timeout_seconds "$key")"
+    exit_code=0
+    if command -v timeout >/dev/null 2>&1; then
+        if timeout "$timeout_seconds" env REPORT_PATH="$report_path" "$@" >"$log" 2>&1; then
+            :
+        else
+            exit_code=$?
+        fi
+    elif env REPORT_PATH="$report_path" "$@" >"$log" 2>&1; then
+        :
+    else
+        exit_code=$?
+    fi
+    if grep -F "STATUS: PASS" "$log" >/dev/null 2>&1; then
+        status="pass"
+    elif grep -F "STATUS: WARN" "$log" >/dev/null 2>&1; then
+        status="warn"
+    else
+        status="fail"
+    fi
+    if [ "$exit_code" -ne 0 ]; then
+        status="fail"
+    fi
+    eval "${key}_status=\$status"
+    eval "${key}_exit=\$exit_code"
+    eval "${key}_expected=\$expected"
+    eval "${key}_timeout_seconds=\$timeout_seconds"
+    if [ "$exit_code" -eq 124 ]; then
+        printf '%s\n' "STATUS: FAIL llm-goal-evidence-lane-timeout lane=$key seconds=$timeout_seconds" >>"$log"
+    fi
+}
+
+run_producer() {
+    log="$1"
+    shift
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "$LANE_TIMEOUT_SECONDS" "$@" >"$log" 2>&1 || true
+    else
+        exit_code=$?
+    fi
+    eval "${key}_producer_exit=\$exit_code"
+    if [ "$exit_code" -eq 124 ]; then
+        printf '%s\n' "STATUS: FAIL llm-goal-evidence-producer-timeout producer=$key seconds=$LANE_TIMEOUT_SECONDS" >>"$log"
+    fi
+}
+
+clear_evidence_env() {
+    env_path="$1"
+    rm -f "$env_path"
+}
+
+gate_hint() {
+    case "$1" in
+        context_ponytail)
+            echo "check-llm-tooling-context-ponytail-full-replacement.shs evidence with llm_tooling_context_ponytail_full_replacement_status=pass"
+            ;;
+        dashboard)
+            echo "check-llm-dashboard-live-evidence.shs evidence with llm_dashboard_live_status=pass"
+            ;;
+        vllm_host)
+            echo "local vLLM/GPU host evidence through check-llm-runtime-vllm-host-probe.shs --strict"
+            ;;
+        svllm_local)
+            echo "check-llm-runtime-svllm-native-streaming-evidence.shs evidence with svllm_native_streaming_status=pass"
+            ;;
+        torch_optimizer)
+            echo "Simple/libtorch CUDA optimizer evidence through check-llm-runtime-torch-cuda-optimizer-probe.shs --strict"
+            ;;
+        finetune_guard)
+            echo "check-llm-finetune-acceptance-evidence.shs evidence with llm_finetune_acceptance_status=pass"
+            ;;
+        public_absence)
+            echo "public absence rendering guard must pass"
+            ;;
+        *)
+            echo "see lane log"
+            ;;
+    esac
+}
+
+env_value() {
+    file="$1"
+    key="$2"
+    if [ -f "$file" ]; then
+        sed -n "s/^${key}=//p" "$file" | tail -n 1
+    fi
+}
+
+lane_required_gates() {
+    case "$1" in
+        vllm_host)
+            env_value build/llm_runtime_vllm_host_probe/evidence.env llm_runtime_vllm_host_probe_required_gates
+            ;;
+        svllm_local)
+            printf '%s\n' "native_read_range,pinned_buffer,device_staging"
+            ;;
+        torch_optimizer)
+            env_value build/llm_runtime_torch_cuda_optimizer_probe/evidence.env torch_cuda_optimizer_probe_required_gates
+            ;;
+        finetune_guard)
+            env_value build/llm_finetune_acceptance/evidence.env llm_finetune_acceptance_required_gates
+            ;;
+        *)
+            printf '%s\n' "n/a"
+            ;;
+    esac
+}
+
+lane_blocked_gates() {
+    case "$1" in
+        vllm_host)
+            env_value build/llm_runtime_vllm_host_probe/evidence.env llm_runtime_vllm_host_probe_blocked_gates
+            ;;
+        svllm_local)
+            read_range="$(env_value build/llm_runtime_svllm_native_streaming/evidence.env svllm_native_streaming_read_range_status)"
+            pinned="$(env_value build/llm_runtime_svllm_native_streaming/evidence.env svllm_native_streaming_pinned_buffer_status)"
+            staging="$(env_value build/llm_runtime_svllm_native_streaming/evidence.env svllm_native_streaming_device_staging_status)"
+            blocked=""
+            if [ "$read_range" != "ready" ] && [ -n "$read_range" ]; then blocked="native_read_range"; fi
+            if [ "$pinned" != "ready" ] && [ -n "$pinned" ]; then
+                if [ -z "$blocked" ]; then blocked="pinned_buffer"; else blocked="$blocked|pinned_buffer"; fi
+            fi
+            if [ "$staging" != "ready" ] && [ -n "$staging" ]; then
+                if [ -z "$blocked" ]; then blocked="device_staging"; else blocked="$blocked|device_staging"; fi
+            fi
+            if [ -n "$blocked" ]; then printf '%s\n' "$blocked"; else printf '%s\n' "none"; fi
+            ;;
+        torch_optimizer)
+            env_value build/llm_runtime_torch_cuda_optimizer_probe/evidence.env torch_cuda_optimizer_probe_blocked_gate
+            ;;
+        finetune_guard)
+            env_value build/llm_finetune_acceptance/evidence.env llm_finetune_acceptance_blocked_gates
+            ;;
+        *)
+            printf '%s\n' "n/a"
+            ;;
+    esac
+}
+
+lane_blocker_reason() {
+    case "$1" in
+        vllm_host)
+            env_value build/llm_runtime_vllm_host_probe/evidence.env llm_runtime_vllm_host_probe_reason
+            ;;
+        svllm_local)
+            env_value build/llm_runtime_svllm_native_streaming/evidence.env svllm_native_streaming_reason
+            ;;
+        torch_optimizer)
+            env_value build/llm_runtime_torch_cuda_optimizer_probe/evidence.env torch_cuda_optimizer_probe_reason
+            ;;
+        finetune_guard)
+            env_value build/llm_finetune_acceptance/evidence.env llm_finetune_acceptance_reason
+            ;;
+        *)
+            printf '%s\n' "n/a"
+            ;;
+    esac
+}
+
+if [ "$STRICT_HOST" -eq 1 ]; then
+    run_producer "$BUILD_DIR/context_ponytail_full_replacement.log" env -u BUILD_DIR REPORT_PATH="$BUILD_DIR/context_ponytail_full_replacement_report.md" sh scripts/check/check-llm-tooling-context-ponytail-full-replacement.shs
+    run_lane context_ponytail pass env CONTEXT_PONYTAIL_FULL_REPLACEMENT_EVIDENCE_ENV=build/llm_tooling_context_ponytail_full_replacement/evidence.env sh scripts/check/check-llm-tooling-context-ponytail-mimic.shs --strict-full-replacement
+else
+    run_lane context_ponytail pass sh scripts/check/check-llm-tooling-context-ponytail-mimic.shs
+fi
+if [ "$STRICT_HOST" -eq 1 ]; then
+    run_producer "$BUILD_DIR/dashboard_live.log" env -u BUILD_DIR REPORT_PATH="$BUILD_DIR/dashboard_live_report.md" sh scripts/check/check-llm-dashboard-live-evidence.shs
+    run_lane dashboard pass env LLM_DASHBOARD_LIVE_EVIDENCE_ENV=build/llm_dashboard_live/evidence.env sh scripts/check/check-llm-dashboard-evidence.shs --strict-live
+else
+    run_lane dashboard pass sh scripts/check/check-llm-dashboard-evidence.shs
+fi
+if [ "$STRICT_HOST" -eq 1 ]; then
+    run_lane vllm_host pass sh scripts/check/check-llm-runtime-vllm-host-probe.shs --strict
+else
+    run_lane vllm_host warn sh scripts/check/check-llm-runtime-vllm-host-probe.shs
+fi
+if [ "$STRICT_HOST" -eq 1 ]; then
+    run_producer "$BUILD_DIR/svllm_native_streaming.log" env -u BUILD_DIR REPORT_PATH="$BUILD_DIR/svllm_native_streaming_report.md" sh scripts/check/check-llm-runtime-svllm-native-streaming-evidence.shs
+    run_lane svllm_local pass env SVLLM_NATIVE_EVIDENCE_ENV=build/llm_runtime_svllm_native_streaming/evidence.env sh scripts/check/check-llm-runtime-svllm-local-readiness.shs --strict-native
+else
+    run_lane svllm_local pass sh scripts/check/check-llm-runtime-svllm-local-readiness.shs
+fi
+if [ "$STRICT_HOST" -eq 1 ]; then
+    run_lane torch_optimizer pass sh scripts/check/check-llm-runtime-torch-cuda-optimizer-probe.shs --strict
+else
+    run_lane torch_optimizer warn sh scripts/check/check-llm-runtime-torch-cuda-optimizer-probe.shs
+fi
+if [ "$STRICT_HOST" -eq 1 ]; then
+    run_producer "$BUILD_DIR/finetune_acceptance.log" env -u BUILD_DIR REPORT_PATH="$BUILD_DIR/finetune_acceptance_report.md" sh scripts/check/check-llm-finetune-acceptance-evidence.shs
+    run_lane finetune_guard pass env FINETUNE_ACCEPTANCE_EVIDENCE_ENV=build/llm_finetune_acceptance/evidence.env sh scripts/check/check-llm-finetune-guard-evidence.shs --strict-ready
+else
+    run_lane finetune_guard pass sh scripts/check/check-llm-finetune-guard-evidence.shs
+fi
+run_lane public_absence pass sh scripts/check/check-llm-tooling-public-absence-rendering.shs
+
+status="pass"
+warn_count=0
+fail_count=0
+warn_gates=""
+failed_gates=""
+failed_gate_hints=""
+for key in context_ponytail dashboard vllm_host svllm_local torch_optimizer finetune_guard public_absence; do
+    eval "lane_status=\${${key}_status}"
+    eval "expected=\${${key}_expected}"
+    if [ "$lane_status" = "fail" ]; then
+        status="fail"
+        fail_count=$((fail_count + 1))
+        if [ -z "$failed_gates" ]; then
+            failed_gates="$key"
+        else
+            failed_gates="$failed_gates|$key"
+        fi
+        hint="$(gate_hint "$key")"
+        if [ -z "$failed_gate_hints" ]; then
+            failed_gate_hints="$key:$hint"
+        else
+            failed_gate_hints="$failed_gate_hints|$key:$hint"
+        fi
+    elif [ "$lane_status" = "warn" ]; then
+        warn_count=$((warn_count + 1))
+        if [ -z "$warn_gates" ]; then
+            warn_gates="$key"
+        else
+            warn_gates="$warn_gates|$key"
+        fi
+        if [ "$expected" != "warn" ]; then
+            status="fail"
+            fail_count=$((fail_count + 1))
+            if [ -z "$failed_gates" ]; then
+                failed_gates="$key"
+            else
+                failed_gates="$failed_gates|$key"
+            fi
+            hint="$(gate_hint "$key")"
+            if [ -z "$failed_gate_hints" ]; then
+                failed_gate_hints="$key:$hint"
+            else
+                failed_gate_hints="$failed_gate_hints|$key:$hint"
+            fi
+        fi
+    elif [ "$lane_status" != "$expected" ] && [ "$expected" != "warn" ]; then
+        status="fail"
+        fail_count=$((fail_count + 1))
+        if [ -z "$failed_gates" ]; then
+            failed_gates="$key"
+        else
+            failed_gates="$failed_gates|$key"
+        fi
+        hint="$(gate_hint "$key")"
+        if [ -z "$failed_gate_hints" ]; then
+            failed_gate_hints="$key:$hint"
+        else
+            failed_gate_hints="$failed_gate_hints|$key:$hint"
+        fi
+    fi
+done
+
+{
+    printf '%s\n' "llm_goal_evidence_status=$status"
+    printf '%s\n' "llm_goal_evidence_strict_host=$STRICT_HOST"
+    printf '%s\n' "llm_goal_evidence_warn_count=$warn_count"
+    printf '%s\n' "llm_goal_evidence_fail_count=$fail_count"
+    printf '%s\n' "llm_goal_evidence_warn_gates=$warn_gates"
+    printf '%s\n' "llm_goal_evidence_failed_gates=$failed_gates"
+    printf '%s\n' "llm_goal_evidence_failed_gate_hints=$failed_gate_hints"
+    printf '%s\n' "llm_goal_evidence_lane_timeout_seconds=$LANE_TIMEOUT_SECONDS"
+    for key in context_ponytail dashboard vllm_host svllm_local torch_optimizer finetune_guard public_absence; do
+        eval "lane_status=\${${key}_status}"
+        eval "exit_code=\${${key}_exit}"
+        eval "expected=\${${key}_expected}"
+        eval "timeout_seconds=\${${key}_timeout_seconds}"
+        eval "producer_exit=\${${key}_producer_exit:-n/a}"
+        hint="$(gate_hint "$key")"
+        printf '%s\n' "llm_goal_evidence_${key}_status=$lane_status"
+        printf '%s\n' "llm_goal_evidence_${key}_expected=$expected"
+        printf '%s\n' "llm_goal_evidence_${key}_exit=$exit_code"
+        printf '%s\n' "llm_goal_evidence_${key}_producer_exit=$producer_exit"
+        printf '%s\n' "llm_goal_evidence_${key}_timeout_seconds=$timeout_seconds"
+        printf '%s\n' "llm_goal_evidence_${key}_hint=$hint"
+        required="$(lane_required_gates "$key")"
+        blocked="$(lane_blocked_gates "$key")"
+        reason="$(lane_blocker_reason "$key")"
+        if [ "$exit_code" -eq 124 ]; then
+            blocked="lane_timeout"
+            reason="lane_timeout_${timeout_seconds}s"
+        fi
+        printf '%s\n' "llm_goal_evidence_${key}_required_gates=${required:-n/a}"
+        printf '%s\n' "llm_goal_evidence_${key}_blocked_gates=${blocked:-n/a}"
+        printf '%s\n' "llm_goal_evidence_${key}_blocker_reason=${reason:-n/a}"
+    done
+} >"$OUT_ENV"
+
+{
+    printf '# LLM Goal Evidence\n\n'
+    printf '%s\n' "- status: \`$status\`"
+    if [ "$STRICT_HOST" -eq 1 ]; then
+        printf '%s\n' "- strict_host: \`true\`"
+    else
+        printf '%s\n' "- strict_host: \`false\`"
+    fi
+    printf '%s\n' "- warn_count: \`$warn_count\`"
+    printf '%s\n' "- fail_count: \`$fail_count\`"
+    if [ -n "$warn_gates" ]; then
+        printf '%s\n' "- warn_gates: \`$warn_gates\`"
+    else
+        printf '%s\n' "- warn_gates: \`none\`"
+    fi
+    if [ -n "$failed_gates" ]; then
+        printf '%s\n' "- failed_gates: \`$failed_gates\`"
+    else
+        printf '%s\n' "- failed_gates: \`none\`"
+    fi
+    if [ -n "$failed_gate_hints" ]; then
+        printf '%s\n' "- failed_gate_hints: \`$failed_gate_hints\`"
+    else
+        printf '%s\n' "- failed_gate_hints: \`none\`"
+    fi
+    printf '%s\n' "- env: \`$OUT_ENV\`"
+    printf '%s\n' "- lane_timeout_seconds: \`$LANE_TIMEOUT_SECONDS\`"
+    printf '%s\n' "- svllm_lane_timeout_seconds: \`$(lane_timeout_seconds svllm_local)\`"
+    printf '\n'
+    printf '| lane | status | expected | exit | producer_exit | timeout | log |\n'
+    printf '|------|--------|----------|------|---------------|---------|-----|\n'
+    for key in context_ponytail dashboard vllm_host svllm_local torch_optimizer finetune_guard public_absence; do
+        eval "lane_status=\${${key}_status}"
+        eval "exit_code=\${${key}_exit}"
+        eval "expected=\${${key}_expected}"
+        eval "timeout_seconds=\${${key}_timeout_seconds}"
+        eval "producer_exit=\${${key}_producer_exit:-n/a}"
+        printf '| %s | `%s` | `%s` | `%s` | `%s` | `%s` | `%s` |\n' "$key" "$lane_status" "$expected" "$exit_code" "$producer_exit" "$timeout_seconds" "$BUILD_DIR/$key.log"
+    done
+    printf '\n'
+    printf '## Strict Evidence Hints\n\n'
+    for key in context_ponytail dashboard vllm_host svllm_local torch_optimizer finetune_guard public_absence; do
+        printf '%s\n' "- $key: \`$(gate_hint "$key")\`"
+    done
+    printf '\n'
+    printf '## Blocker Details\n\n'
+    printf '| lane | required_gates | blocked_gates | reason |\n'
+    printf '|------|----------------|---------------|--------|\n'
+    for key in vllm_host svllm_local torch_optimizer finetune_guard; do
+        eval "exit_code=\${${key}_exit}"
+        required="$(lane_required_gates "$key")"
+        blocked="$(lane_blocked_gates "$key")"
+        reason="$(lane_blocker_reason "$key")"
+        if [ "$exit_code" -eq 124 ]; then
+            blocked="lane_timeout"
+            reason="lane_timeout_$(lane_timeout_seconds "$key")s"
+        fi
+        printf '| %s | `%s` | `%s` | `%s` |\n' "$key" "${required:-n/a}" "${blocked:-n/a}" "${reason:-n/a}"
+    done
+    printf '\n'
+    if [ "$STRICT_HOST" -eq 1 ]; then
+        printf 'This aggregate is strict host evidence: full context/Ponytail replacement, live dashboard operation, live vLLM serving, native svLLM streaming, fine-tune acceptance, and Simple/libtorch CUDA optimizer execution must pass through their focused strict wrappers. Any WARN or FAIL lane keeps the aggregate failed.\n'
+    else
+        printf 'This aggregate proves the current local LLM tooling evidence lanes remain reproducible. WARN lanes are expected only for host-dependent gates that are still open on this machine: live vLLM serving and Simple/libtorch CUDA optimizer execution. The context/Ponytail lane is local mimic evidence only in default mode, the dashboard lane is route/collector evidence only in default mode, the svLLM lane is local file-backed readiness only in default mode, and the fine-tune lane is guard evidence only in default mode. This report is not release-completion evidence for those live host gates; rerun with `--strict-host` on a configured host when full context/Ponytail replacement, live dashboard operation, live vLLM, native svLLM streaming, fine-tune acceptance, and Simple/libtorch CUDA optimizer gates must pass.\n'
+    fi
+} >"$REPORT_PATH"
+
+if [ "$status" = "pass" ]; then
+    echo "STATUS: PASS llm-goal-evidence warn_count=$warn_count"
+else
+    echo "STATUS: FAIL llm-goal-evidence warn_count=$warn_count fail_count=$fail_count"
+    exit 1
+fi
+%%%%%%% Changes from base to side #2
+-#!/bin/sh
+-set -eu
+-
+-ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+-cd "$ROOT_DIR"
+-
+-BUILD_DIR="${BUILD_DIR:-build/llm_goal_evidence}"
+-REPORT_PATH="${REPORT_PATH:-doc/09_report/2026/06/llm_goal_evidence_$(date -u +%F).md}"
+-OUT_ENV="$BUILD_DIR/evidence.env"
+-STRICT_HOST=0
+-
+-while [ "$#" -gt 0 ]; do
+-    case "$1" in
+-        --strict-host)
+-            STRICT_HOST=1
+-            ;;
+-        --help|-h)
+-            echo "usage: sh scripts/check/check-llm-goal-evidence.shs [--strict-host]"
+-            echo "  --strict-host  require live dashboard, live vLLM, native svLLM, fine-tune acceptance, and Simple/libtorch CUDA optimizer gates to pass"
+-            exit 0
+-            ;;
+-        *)
+-            echo "unknown option: $1" >&2
+-            exit 2
+-            ;;
+-    esac
+-    shift
+-done
+-
+-mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+-rm -f "$OUT_ENV" "$REPORT_PATH"
+-
+-run_lane() {
+-    key="$1"
+-    expected="$2"
+-    shift 2
+-    log="$BUILD_DIR/$key.log"
+-    exit_code=0
+-    if "$@" >"$log" 2>&1; then
+-        :
+-    else
+-        exit_code=$?
+-    fi
+-    if grep -F "STATUS: PASS" "$log" >/dev/null 2>&1; then
+-        status="pass"
+-    elif grep -F "STATUS: WARN" "$log" >/dev/null 2>&1; then
+-        status="warn"
+-    else
+-        status="fail"
+-    fi
+-    if [ "$exit_code" -ne 0 ]; then
+-        status="fail"
+-    fi
+-    eval "${key}_status=\$status"
+-    eval "${key}_exit=\$exit_code"
+-    eval "${key}_expected=\$expected"
+-}
+-
+-run_lane context_ponytail pass sh scripts/check/check-llm-tooling-context-ponytail-mimic.shs
+-if [ "$STRICT_HOST" -eq 1 ]; then
+-    run_lane dashboard pass sh scripts/check/check-llm-dashboard-evidence.shs --strict-live
+-else
+-    run_lane dashboard pass sh scripts/check/check-llm-dashboard-evidence.shs
+-fi
+-if [ "$STRICT_HOST" -eq 1 ]; then
+-    run_lane vllm_host pass sh scripts/check/check-llm-runtime-vllm-host-probe.shs --strict
+-else
+-    run_lane vllm_host warn sh scripts/check/check-llm-runtime-vllm-host-probe.shs
+-fi
+-if [ "$STRICT_HOST" -eq 1 ]; then
+-    run_lane svllm_local pass sh scripts/check/check-llm-runtime-svllm-local-readiness.shs --strict-native
+-else
+-    run_lane svllm_local pass sh scripts/check/check-llm-runtime-svllm-local-readiness.shs
+-fi
+-if [ "$STRICT_HOST" -eq 1 ]; then
+-    run_lane torch_optimizer pass sh scripts/check/check-llm-runtime-torch-cuda-optimizer-probe.shs --strict
+-else
+-    run_lane torch_optimizer warn sh scripts/check/check-llm-runtime-torch-cuda-optimizer-probe.shs
+-fi
+-if [ "$STRICT_HOST" -eq 1 ]; then
+-    run_lane finetune_guard pass sh scripts/check/check-llm-finetune-guard-evidence.shs --strict-ready
+-else
+-    run_lane finetune_guard pass sh scripts/check/check-llm-finetune-guard-evidence.shs
+-fi
+-run_lane public_absence pass sh scripts/check/check-llm-tooling-public-absence-rendering.shs
+-
+-status="pass"
+-warn_count=0
+-fail_count=0
+-for key in context_ponytail dashboard vllm_host svllm_local torch_optimizer finetune_guard public_absence; do
+-    eval "lane_status=\${${key}_status}"
+-    eval "expected=\${${key}_expected}"
+-    if [ "$lane_status" = "fail" ]; then
+-        status="fail"
+-        fail_count=$((fail_count + 1))
+-    elif [ "$lane_status" = "warn" ]; then
+-        warn_count=$((warn_count + 1))
+-        if [ "$expected" != "warn" ]; then
+-            status="fail"
+-            fail_count=$((fail_count + 1))
+-        fi
+-    elif [ "$lane_status" != "$expected" ] && [ "$expected" != "warn" ]; then
+-        status="fail"
+-        fail_count=$((fail_count + 1))
+-    fi
+-done
+-
+-{
+-    printf '%s\n' "llm_goal_evidence_status=$status"
+-    printf '%s\n' "llm_goal_evidence_strict_host=$STRICT_HOST"
+-    printf '%s\n' "llm_goal_evidence_warn_count=$warn_count"
+-    printf '%s\n' "llm_goal_evidence_fail_count=$fail_count"
+-    for key in context_ponytail dashboard vllm_host svllm_local torch_optimizer finetune_guard public_absence; do
+-        eval "lane_status=\${${key}_status}"
+-        eval "exit_code=\${${key}_exit}"
+-        eval "expected=\${${key}_expected}"
+-        printf '%s\n' "llm_goal_evidence_${key}_status=$lane_status"
+-        printf '%s\n' "llm_goal_evidence_${key}_expected=$expected"
+-        printf '%s\n' "llm_goal_evidence_${key}_exit=$exit_code"
+-    done
+-} >"$OUT_ENV"
+-
+-{
+-    printf '# LLM Goal Evidence\n\n'
+-    printf '%s\n' "- status: \`$status\`"
+-    if [ "$STRICT_HOST" -eq 1 ]; then
+-        printf '%s\n' "- strict_host: \`true\`"
+-    else
+-        printf '%s\n' "- strict_host: \`false\`"
+-    fi
+-    printf '%s\n' "- warn_count: \`$warn_count\`"
+-    printf '%s\n' "- fail_count: \`$fail_count\`"
+-    printf '%s\n' "- env: \`$OUT_ENV\`"
+-    printf '\n'
+-    printf '| lane | status | expected | exit | log |\n'
+-    printf '|------|--------|----------|------|-----|\n'
+-    for key in context_ponytail dashboard vllm_host svllm_local torch_optimizer finetune_guard public_absence; do
+-        eval "lane_status=\${${key}_status}"
+-        eval "exit_code=\${${key}_exit}"
+-        eval "expected=\${${key}_expected}"
+-        printf '| %s | `%s` | `%s` | `%s` | `%s` |\n' "$key" "$lane_status" "$expected" "$exit_code" "$BUILD_DIR/$key.log"
+-    done
+-    printf '\n'
+-    if [ "$STRICT_HOST" -eq 1 ]; then
+-        printf 'This aggregate is strict host evidence: live dashboard operation, live vLLM serving, native svLLM streaming, fine-tune acceptance, and Simple/libtorch CUDA optimizer execution must pass through their focused strict wrappers. Any WARN or FAIL lane keeps the aggregate failed.\n'
+-    else
+-        printf 'This aggregate proves the current local LLM tooling evidence lanes remain reproducible. WARN lanes are expected only for host-dependent gates that are still open on this machine: live vLLM serving and Simple/libtorch CUDA optimizer execution. The dashboard lane is route/collector evidence only in default mode, the svLLM lane is local file-backed readiness only in default mode, and the fine-tune lane is guard evidence only in default mode. This report is not release-completion evidence for those live host gates; rerun with `--strict-host` on a configured host when live dashboard operation, live vLLM, native svLLM streaming, fine-tune acceptance, and Simple/libtorch CUDA optimizer gates must pass.\n'
+-    fi
+-} >"$REPORT_PATH"
+-
+-if [ "$status" = "pass" ]; then
+-    echo "STATUS: PASS llm-goal-evidence warn_count=$warn_count"
+-else
+-    echo "STATUS: FAIL llm-goal-evidence warn_count=$warn_count fail_count=$fail_count"
+-    exit 1
+-fi
+>>>>>>> Conflict 1 of 1 ends

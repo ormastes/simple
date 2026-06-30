@@ -82,7 +82,7 @@ Current live completion remains blocked by RV64 pure Simple X25519/KEX evidence.
 4. Build the expected QEMU command and verify it uses `qemu-system-riscv64`.
 5. Verify the RV64 entry starts network through std RV64 facade helpers and then
    starts production `SshDaemon`.
-6. Verify the runner dispatches `rv64-ssh` through the shared OpenSSH host probe.
+6. Verify the runner dispatches `rv64-ssh` through the RV64 single-connection OpenSSH host probe.
 7. In opt-in live mode, build the RV64 SSH guest and require OpenSSH auth/exec
    plus wrong-password fail-closed evidence.
 8. Store static and live TUI captures under `doc/06_spec/tui/03_system/os/`.
@@ -226,7 +226,7 @@ expect(entry.contains("extern fn rt_net_")).to_equal(false)
 
 </details>
 
-#### routes rv64-ssh through the shared OpenSSH host probe contract
+#### routes rv64-ssh through the RV64 OpenSSH host probe contract
 
 <details>
 <summary>Executable SSpec</summary>

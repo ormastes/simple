@@ -1,0 +1,86 @@
+use std.spec
+use compiler.common.attributes.{vhdl_hardware_metadata_default}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir_instructions.{BlockId, MirBlock, MirFunction, MirInst, MirInstKind, MirOperand, MirOperandKind, MirTerminator}
+use compiler.mir.mir_types.{LocalId, LocalKind, MirLocal, MirSignature, MirType}
+use compiler.backend.backend.cranelift_gemm_fusion.{detect_gemm_add_pair}
+
+fn local(id: i64, kind: LocalKind) -> MirLocal:
+    MirLocal(id: LocalId(id: id), name: nil, type_: MirType.i64(), kind: kind, is_ghost: false)
+
+fn copy_operand(id: i64) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Copy(LocalId(id: id)))
+
+fn binop_inst(dest: i64, op: MirBinOp, left: i64, right: i64) -> MirInst:
+    MirInst(
+        kind: MirInstKind.BinOp(LocalId(id: dest), op, copy_operand(left), copy_operand(right)),
+        span: nil
+    )
+
+fn test_func(instructions: [MirInst], term: MirTerminator) -> MirFunction:
+    MirFunction(
+        symbol: SymbolId(id: 9001),
+        name: "gemm_fusion_fixture",
+        signature: MirSignature(params: [], return_type: MirType.i64(), is_variadic: false),
+        locals: [
+            local(0, LocalKind.Arg(0)),
+            local(1, LocalKind.Arg(1)),
+            local(2, LocalKind.Arg(2)),
+            local(3, LocalKind.Temp),
+            local(4, LocalKind.Temp),
+            local(5, LocalKind.Temp)
+        ],
+        blocks: [
+            MirBlock(
+                id: BlockId(id: 0),
+                label: Some("entry"),
+                instructions: instructions,
+                terminator: term
+            )
+        ],
+        entry_block: BlockId(id: 0),
+        span: Span.default(),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {},
+        layout_phase: nil,
+        is_kernel: false,
+        is_export_c: false,
+        export_name: "",
+        has_driver_manifest_attr: false,
+        driver_manifest_attr: nil,
+        has_vhdl_metadata: false,
+        vhdl_metadata: vhdl_hardware_metadata_default(),
+        has_fast_math: false
+    )
+
+describe "Cranelift GEMM-add fusion detection":
+    it "detects adjacent MatMul consumed once by BroadcastAdd":
+        val matmul = binop_inst(3, MirBinOp.MatMul, 0, 1)
+        val add = binop_inst(4, MirBinOp.BroadcastAdd, 3, 2)
+        val func = test_func([matmul, add], MirTerminator.Ret(Some(copy_operand(4))))
+
+        val plan = detect_gemm_add_pair(func, matmul, add)
+        expect(plan.?).to_equal(true)
+        if plan.?:
+            expect(plan.unwrap().dest.id).to_equal(4)
+
+    it "does not fuse when the MatMul temp has a second use":
+        val matmul = binop_inst(3, MirBinOp.MatMul, 0, 1)
+        val add = binop_inst(4, MirBinOp.BroadcastAdd, 3, 2)
+        val extra_use = MirInst(kind: MirInstKind.Copy(LocalId(id: 5), LocalId(id: 3)), span: nil)
+        val func = test_func([matmul, add, extra_use], MirTerminator.Ret(Some(copy_operand(4))))
+
+        val plan = detect_gemm_add_pair(func, matmul, add)
+        expect(plan.?).to_equal(false)
+
+    it "does not fuse non-add broadcast operations":
+        val matmul = binop_inst(3, MirBinOp.MatMul, 0, 1)
+        val sub = binop_inst(4, MirBinOp.BroadcastSub, 3, 2)
+        val func = test_func([matmul, sub], MirTerminator.Ret(Some(copy_operand(4))))
+
+        val plan = detect_gemm_add_pair(func, matmul, sub)
+        expect(plan.?).to_equal(false)
+

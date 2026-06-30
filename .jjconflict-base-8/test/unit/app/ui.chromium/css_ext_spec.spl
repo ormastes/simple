@@ -1,0 +1,190 @@
+# Feature: Chromium Shell CSS Extensions (V3, Row 5 — M8)
+# Category: UI Components
+# Status: Implemented (infrastructure only; dom.spl wiring follow-up)
+#
+# Compile-only smoke spec for the M8 CSS extensions module. Verifies
+# that parser entry points for `float`, `clear`, `outline-style`, the
+# `BoxShadow` / `Outline` value records, and the `calc()` resolver all
+# compile and return their documented codes without booting a browser.
+#
+# Real WPT score movement lands in the follow-up wiring commit that
+# routes `dom.spl::parse_declaration` through these functions.
+
+use app.ui.chromium.css_ext.{
+    BoxShadow,
+    Outline,
+    CalcValue,
+    parse_float_keyword,
+    parse_clear_keyword,
+    parse_outline_style,
+    calc_apply,
+    calc_resolve,
+    CALC_OP_ADD,
+    CALC_OP_SUB,
+    CALC_OP_MUL,
+    CALC_OP_DIV,
+    m8_marker
+}
+
+# =========================================================================
+# Test Group 1: float / clear keywords
+# =========================================================================
+
+describe "CSS ext — float / clear parsers":
+
+    it "parses the CSS 2.1 float keyword set":
+        expect(parse_float_keyword("none") == 0).to_be_true()
+        expect(parse_float_keyword("left") == 1).to_be_true()
+        expect(parse_float_keyword("right") == 2).to_be_true()
+
+    it "parses the CSS Logical Properties float keywords":
+        expect(parse_float_keyword("inline-start") == 3).to_be_true()
+        expect(parse_float_keyword("inline-end") == 4).to_be_true()
+
+    it "returns -1 for unknown float values":
+        expect(parse_float_keyword("wibble") == -1).to_be_true()
+        expect(parse_float_keyword("") == -1).to_be_true()
+
+    it "parses the full clear keyword set":
+        expect(parse_clear_keyword("none") == 0).to_be_true()
+        expect(parse_clear_keyword("left") == 1).to_be_true()
+        expect(parse_clear_keyword("right") == 2).to_be_true()
+        expect(parse_clear_keyword("both") == 3).to_be_true()
+        expect(parse_clear_keyword("inline-start") == 4).to_be_true()
+        expect(parse_clear_keyword("inline-end") == 5).to_be_true()
+
+    it "returns -1 for unknown clear values":
+        expect(parse_clear_keyword("nope") == -1).to_be_true()
+
+# =========================================================================
+# Test Group 2: box-shadow value record
+# =========================================================================
+
+describe "CSS ext — BoxShadow":
+
+    it "BoxShadow.none produces an invisible shadow":
+        val shadow = BoxShadow.none()
+        expect(not shadow.is_visible()).to_be_true()
+        expect(shadow.inset == false).to_be_true()
+
+    it "BoxShadow.new captures offsets / blur / spread / colour":
+        val shadow = BoxShadow.new(4, 6, 8, 2, 0xFF112233, false)
+        expect(shadow.offset_x_px == 4).to_be_true()
+        expect(shadow.offset_y_px == 6).to_be_true()
+        expect(shadow.blur_px == 8).to_be_true()
+        expect(shadow.spread_px == 2).to_be_true()
+        expect(shadow.is_visible()).to_be_true()
+
+    it "fully transparent shadow is not visible":
+        val shadow = BoxShadow.new(4, 4, 0, 0, 0x00112233, false)
+        expect(not shadow.is_visible()).to_be_true()
+
+    it "inset flag is preserved":
+        val shadow = BoxShadow.new(1, 1, 2, 0, 0xFF000000, true)
+        expect(shadow.inset == true).to_be_true()
+
+# =========================================================================
+# Test Group 3: outline parser + value record
+# =========================================================================
+
+describe "CSS ext — Outline":
+
+    it "parses the full outline-style keyword set":
+        expect(parse_outline_style("none") == 0).to_be_true()
+        expect(parse_outline_style("hidden") == 1).to_be_true()
+        expect(parse_outline_style("dotted") == 2).to_be_true()
+        expect(parse_outline_style("dashed") == 3).to_be_true()
+        expect(parse_outline_style("solid") == 4).to_be_true()
+        expect(parse_outline_style("double") == 5).to_be_true()
+        expect(parse_outline_style("groove") == 6).to_be_true()
+        expect(parse_outline_style("ridge") == 7).to_be_true()
+        expect(parse_outline_style("inset") == 8).to_be_true()
+        expect(parse_outline_style("outset") == 9).to_be_true()
+
+    it "returns -1 for unknown outline-style":
+        expect(parse_outline_style("") == -1).to_be_true()
+        expect(parse_outline_style("wobble") == -1).to_be_true()
+
+    it "Outline.none is invisible":
+        val o = Outline.none()
+        expect(not o.is_visible()).to_be_true()
+
+    it "Outline.new captures width / style / colour / offset":
+        val o = Outline.new(3, 4, 0xFFFF0000, 2)
+        expect(o.width_px == 3).to_be_true()
+        expect(o.offset_px == 2).to_be_true()
+        expect(o.is_visible()).to_be_true()
+
+    it "outline-style: none suppresses the outline even with width":
+        val o = Outline.new(5, 0, 0xFFFFFFFF, 0)
+        expect(not o.is_visible()).to_be_true()
+
+    it "zero width outline is invisible":
+        val o = Outline.new(0, 4, 0xFFFFFFFF, 0)
+        expect(not o.is_visible()).to_be_true()
+
+    it "transparent colour outline is invisible":
+        val o = Outline.new(2, 4, 0x00FFFFFF, 0)
+        expect(not o.is_visible()).to_be_true()
+
+# =========================================================================
+# Test Group 4: calc() resolver
+# =========================================================================
+
+describe "CSS ext — calc() resolver":
+
+    it "calc_apply handles the four operators":
+        val a = calc_apply(CALC_OP_ADD, 10, 5)
+        expect(a.ok).to_be_true()
+        expect(a.pixels == 15).to_be_true()
+        val s = calc_apply(CALC_OP_SUB, 10, 5)
+        expect(s.pixels == 5).to_be_true()
+        val m = calc_apply(CALC_OP_MUL, 10, 5)
+        expect(m.pixels == 50).to_be_true()
+        val d = calc_apply(CALC_OP_DIV, 10, 5)
+        expect(d.pixels == 2).to_be_true()
+
+    it "calc_apply reports divide-by-zero as a failed CalcValue":
+        val dz = calc_apply(CALC_OP_DIV, 10, 0)
+        expect(not dz.ok).to_be_true()
+
+    it "calc_resolve evaluates a lone value":
+        val r = calc_resolve([42], [])
+        expect(r.ok).to_be_true()
+        expect(r.pixels == 42).to_be_true()
+
+    it "calc_resolve honours operator precedence (2 + 3 * 4 == 14)":
+        val r = calc_resolve([2, 3, 4], [CALC_OP_ADD, CALC_OP_MUL])
+        expect(r.ok).to_be_true()
+        expect(r.pixels == 14).to_be_true()
+
+    it "calc_resolve walks + / - left to right (10 - 3 + 2 == 9)":
+        val r = calc_resolve([10, 3, 2], [CALC_OP_SUB, CALC_OP_ADD])
+        expect(r.ok).to_be_true()
+        expect(r.pixels == 9).to_be_true()
+
+    it "calc_resolve evaluates chained multiplications":
+        val r = calc_resolve([2, 3, 4], [CALC_OP_MUL, CALC_OP_MUL])
+        expect(r.ok).to_be_true()
+        expect(r.pixels == 24).to_be_true()
+
+    it "calc_resolve propagates divide-by-zero":
+        val r = calc_resolve([10, 0], [CALC_OP_DIV])
+        expect(not r.ok).to_be_true()
+
+    it "calc_resolve rejects mismatched operand / operator counts":
+        val r = calc_resolve([1, 2], [])
+        expect(not r.ok).to_be_true()
+
+    it "calc_resolve rejects empty operand list":
+        val r = calc_resolve([], [])
+        expect(not r.ok).to_be_true()
+
+# =========================================================================
+# Test Group 5: milestone marker
+# =========================================================================
+
+describe "CSS ext — M8 milestone marker":
+
+    it "marker reports the milestone number":
+        expect(m8_marker() == 8).to_be_true()

@@ -1,0 +1,69 @@
+#![allow(unnamed_duplicate_typed_args)]
+@allow(unnamed_duplicate_typed_args)
+# Assistant Core Task Projections
+#
+# Extracts the task-list shaping logic from the MCP entrypoint so callers can
+# reuse the same assistant session and child-task projection rules from the
+# core store layer.
+
+use std.common.json.serializer.{json_stringify}
+use std.common.json.types.{json_string, json_number, json_object}
+use std.common.json.object_ops.{json_object_set}
+use app.mcp.assistant.types.{AssistantSessionRecord, AssistantChildTaskRecord}
+use app.mcp.assistant.session_store.{assistant_store_list_sessions}
+
+# =========================================================================
+# Public Projections
+# =========================================================================
+
+fn assistant_store_session_task_json(session: AssistantSessionRecord) -> text:
+    var obj = json_object({})
+    obj = assistant_store_task_put_text(obj, "id", session.session_id)
+    obj = assistant_store_task_put_text(obj, "source", "assistant")
+    obj = assistant_store_task_put_text(obj, "kind", "assistant")
+    obj = assistant_store_task_put_text(obj, "state", session.state)
+    obj = assistant_store_task_put_text(obj, "name", session.name)
+    obj = assistant_store_task_put_text(obj, "command", session.prompt)
+    obj = assistant_store_task_put_number(obj, "created_at", session.created_at_ms)
+    obj = assistant_store_task_put_number(obj, "updated_at", session.updated_at_ms)
+    obj = assistant_store_task_put_text(obj, "last_signal", session.last_signal)
+    json_stringify(obj)
+
+fn assistant_store_child_task_json(session: AssistantSessionRecord, task: AssistantChildTaskRecord) -> text:
+    var obj = json_object({})
+    obj = assistant_store_task_put_text(obj, "id", task.task_id)
+    obj = assistant_store_task_put_text(obj, "source", "assistant")
+    obj = assistant_store_task_put_text(obj, "kind", "child_task")
+    obj = assistant_store_task_put_text(obj, "state", task.status)
+    obj = assistant_store_task_put_text(obj, "name", task.objective)
+    obj = assistant_store_task_put_text(obj, "command", session.prompt)
+    obj = assistant_store_task_put_text(obj, "session_id", session.session_id)
+    obj = assistant_store_task_put_text(obj, "parent_session_id", session.session_id)
+    obj = assistant_store_task_put_text(obj, "parent_task_id", task.parent_task_id)
+    obj = assistant_store_task_put_text(obj, "child_session_id", task.child_session_id)
+    obj = assistant_store_task_put_text(obj, "resource_policy", task.resource_policy)
+    obj = assistant_store_task_put_text(obj, "owner_kind", task.owner_kind)
+    obj = assistant_store_task_put_text(obj, "result_summary", task.result_summary)
+    obj = assistant_store_task_put_number(obj, "created_at", task.created_at_ms)
+    obj = assistant_store_task_put_number(obj, "updated_at", task.updated_at_ms)
+    json_stringify(obj)
+
+fn assistant_store_collect_task_jsons(root: text, source_filter: text) -> [text]:
+    if source_filter.trim() != "" and source_filter.trim() != "assistant":
+        return []
+    var items: [text] = []
+    for session in assistant_store_list_sessions(root):
+        items.push(assistant_store_session_task_json(session))
+        for task in session.child_tasks:
+            items.push(assistant_store_child_task_json(session, task))
+    items
+
+# =========================================================================
+# Internal Helpers
+# =========================================================================
+
+fn assistant_store_task_put_text(obj: any, key: text, value: text) -> any:
+    json_object_set(obj, key, json_string(value))
+
+fn assistant_store_task_put_number(obj: any, key: text, value: i64) -> any:
+    json_object_set(obj, key, json_number(value as f64))

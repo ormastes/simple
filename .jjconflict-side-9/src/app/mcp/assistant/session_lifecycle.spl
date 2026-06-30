@@ -1,0 +1,90 @@
+#![allow(unnamed_duplicate_typed_args)]
+@allow(unnamed_duplicate_typed_args)
+# Assistant Session Lifecycle Helpers
+#
+# Pure lifecycle helpers for normalizing session/task payloads and applying
+# state transitions. The file-backed store calls these helpers so the MCP
+# entrypoint can later delegate lifecycle shaping to the assistant core.
+
+use app.mcp.assistant.types.{
+    AssistantSessionRecord, AssistantTimelineRecord, AssistantChildTaskRecord,
+    assistant_first_non_empty, assistant_now_ms, assistant_session_summary,
+    assistant_generate_task_id, assistant_timeline_severity,
+    assistant_timeline_title, assistant_timeline_detail
+}
+
+fn assistant_store_prepare_session_record(session: AssistantSessionRecord) -> AssistantSessionRecord:
+    var normalized = session
+    if normalized.session_id.trim() == "":
+        normalized.session_id = "assistant-{assistant_now_ms()}"
+    if normalized.name.trim() == "":
+        normalized.name = normalized.session_id
+    if normalized.summary.trim() == "":
+        normalized.summary = assistant_session_summary(normalized.name, normalized.prompt, normalized.objective)
+    if normalized.objective.trim() == "":
+        normalized.objective = assistant_first_non_empty([normalized.summary, normalized.prompt, normalized.name])
+    if normalized.mode.trim() == "":
+        normalized.mode = "proactive"
+    if normalized.state.trim() == "":
+        normalized.state = "running"
+    if normalized.policy.trim() == "":
+        normalized.policy = "bounded"
+    if normalized.created_at_ms <= 0:
+        normalized.created_at_ms = assistant_now_ms()
+    if normalized.updated_at_ms <= 0:
+        normalized.updated_at_ms = normalized.created_at_ms
+    if normalized.last_event_detail.trim() == "":
+        normalized.last_event_detail = assistant_first_non_empty([normalized.summary, normalized.objective, normalized.state])
+    if normalized.last_event_kind.trim() == "":
+        normalized.last_event_kind = assistant_first_non_empty([normalized.state, "session"])
+    normalized
+
+fn assistant_store_prepare_session_transition(session: AssistantSessionRecord, new_state: text, wake_reason: text) -> AssistantSessionRecord:
+    var transitioned = session
+    if new_state.trim() != "":
+        transitioned.state = new_state
+    if wake_reason.trim() != "":
+        transitioned.last_signal = wake_reason
+    transitioned.updated_at_ms = assistant_now_ms()
+    transitioned.last_event_kind = "state"
+    transitioned.last_event_detail = transitioned.state
+    transitioned.last_event_time_ms = transitioned.updated_at_ms
+    transitioned
+
+fn assistant_store_prepare_timeline_event(session_id: text, kind: text, message: text, signal: text) -> AssistantTimelineRecord:
+    val now = assistant_now_ms()
+    AssistantTimelineRecord(
+        event_id: "assistant-{session_id}-{kind}-{now}",
+        session_id: session_id,
+        parent_session_id: "",
+        child_task_id: "",
+        timestamp_ms: now,
+        kind: kind,
+        severity: assistant_timeline_severity(kind),
+        title: assistant_timeline_title(kind, message, signal),
+        detail: assistant_timeline_detail(kind, message, signal),
+        message: message,
+        signal: signal,
+        source: "assistant",
+        correlation_id: ""
+    )
+
+fn assistant_store_prepare_child_task_record(task: AssistantChildTaskRecord, session_id: text) -> AssistantChildTaskRecord:
+    var normalized = task
+    if normalized.session_id.trim() == "":
+        normalized.session_id = session_id
+    if normalized.task_id.trim() == "":
+        normalized.task_id = assistant_generate_task_id(normalized.session_id, assistant_now_ms())
+    normalized.parent_session_id = session_id
+    normalized.updated_at_ms = assistant_now_ms()
+    if normalized.created_at_ms <= 0:
+        normalized.created_at_ms = normalized.updated_at_ms
+    if normalized.status.trim() == "":
+        normalized.status = "queued"
+    if normalized.owner_kind.trim() == "":
+        normalized.owner_kind = "assistant"
+    if normalized.resource_policy.trim() == "":
+        normalized.resource_policy = "bounded"
+    if normalized.objective.trim() == "":
+        normalized.objective = normalized.result_summary
+    normalized

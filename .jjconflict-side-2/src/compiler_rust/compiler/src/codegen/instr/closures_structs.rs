@@ -50,6 +50,10 @@ fn resolve_unique_module_qualified_import<M: Module>(ctx: &InstrContext<'_, M>, 
     }
 }
 
+fn erased_receiver_should_fall_through_ambiguous_method(receiver_ty: Option<TypeId>, method: &str) -> bool {
+    matches!(receiver_ty, None | Some(TypeId::ANY)) && matches!(method, "to_string" | "to_text" | "str")
+}
+
 pub(crate) fn compile_closure_create<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
@@ -600,6 +604,9 @@ pub(crate) fn compile_method_call_static<M: Module>(
                 return None;
             }
             if type_qualifier.is_none() && candidates.len() > 1 {
+                if erased_receiver_should_fall_through_ambiguous_method(receiver_ty, method_part) {
+                    return None;
+                }
                 let cand_names: Vec<&str> = candidates.iter().map(|(k, _)| k.as_str()).collect();
                 let message = format!(
                     "[CODEGEN-AMBIGUOUS-METHOD] in '{}' bare method '{}' has {} candidates: [{}] — refusing to pick shortest (would silently miscall). Qualify the receiver type (e.g. `var x: Type = ...`) or import only one matching method.",
@@ -834,6 +841,19 @@ pub(crate) fn compile_method_call_static<M: Module>(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn erased_receiver_ambiguity_falls_through() {
+        assert!(erased_receiver_should_fall_through_ambiguous_method(None, "to_string"));
+        assert!(erased_receiver_should_fall_through_ambiguous_method(Some(TypeId::ANY), "to_string"));
+        assert!(!erased_receiver_should_fall_through_ambiguous_method(Some(TypeId::ANY), "push"));
+        assert!(!erased_receiver_should_fall_through_ambiguous_method(Some(TypeId::I64), "to_string"));
+    }
 }
 
 /// Try to compile a builtin method call (String, Array methods)

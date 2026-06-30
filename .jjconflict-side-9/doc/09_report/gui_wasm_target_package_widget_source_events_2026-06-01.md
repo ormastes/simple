@@ -1,0 +1,202 @@
+# GUI WASM Target Package Evidence
+
+- status: fail
+- reason: host_wm-widget_matrix-package-contract-failed
+- targets: host_wm, simpleos_wm
+- artifacts: hello, widget_matrix, builder_matrix
+
+## host_wm / hello
+- status: pass
+- reason: pass
+- package path: build/gui/host-wm/hello.wasm
+- launcher: host-wm-native-wasm-window
+- runtime: host-wm:no-js:wasm32-simple-ui
+- byte size: 4380
+- WebAssembly.validate: true
+- WebAssembly.instantiate: true
+- imports: 
+- exports: simple_app_event:function,simple_app_event_probe:function,simple_app_init:function,simple_app_render:function,simple_app_render_probe:function,spl_main:function
+- simple.gui custom sections: 1
+- render markers: 7/7
+- event markers: 5/5
+- launch status: pass
+- launch calls: simple_app_event:called,simple_app_event_probe:5,simple_app_init:1,simple_app_render:called,simple_app_render_probe:8,spl_main:called
+
+## host_wm / widget_matrix
+- status: fail
+- reason: package-contract-failed
+- package path: build/gui/host-wm/widget_matrix.wasm
+- launcher: host-wm-native-wasm-window
+- runtime: host-wm:no-js:wasm32-simple-ui
+- byte size: 8397
+- WebAssembly.validate: true
+- WebAssembly.instantiate: true
+- imports: 
+- exports: simple_app_event:function,simple_app_event_probe:function,simple_app_init:function,simple_app_render:function,simple_app_render_probe:function,spl_main:function
+- simple.gui custom sections: 1
+- render markers: 13/13
+- event markers: 14/14
+- launch status: fail
+- launch calls: simple_app_event:called,simple_app_event_probe:9,simple_app_init:1,simple_app_render:called,simple_app_render_probe:19,spl_main:called
+
+## host_wm / builder_matrix
+- status: pass
+- reason: pass
+- package path: build/gui/host-wm/builder_matrix.wasm
+- launcher: host-wm-native-wasm-window
+- runtime: host-wm:no-js:wasm32-simple-ui
+- byte size: 9486
+- WebAssembly.validate: true
+- WebAssembly.instantiate: true
+- imports: 
+- exports: simple_app_event:function,simple_app_event_probe:function,simple_app_init:function,simple_app_render:function,simple_app_render_probe:function,spl_main:function
+- simple.gui custom sections: 1
+- render markers: 10/10
+- event markers: 8/8
+- launch status: pass
+- launch calls: simple_app_event:called,simple_app_event_probe:8,simple_app_init:1,simple_app_render:called,simple_app_render_probe:48,spl_main:called
+
+## simpleos_wm / hello
+- status: pass
+- reason: pass
+- package path: build/gui/simpleos-wm/hello.wasm
+- launcher: simpleos-wm-native-wasm-window
+- runtime: simpleos-wm:no-js:wasm32-simple-ui
+- byte size: 4380
+- WebAssembly.validate: true
+- WebAssembly.instantiate: true
+- imports: 
+- exports: simple_app_event:function,simple_app_event_probe:function,simple_app_init:function,simple_app_render:function,simple_app_render_probe:function,spl_main:function
+- simple.gui custom sections: 1
+- render markers: 7/7
+- event markers: 5/5
+- launch status: pass
+- launch calls: simple_app_event:called,simple_app_event_probe:5,simple_app_init:1,simple_app_render:called,simple_app_render_probe:8,spl_main:called
+
+## simpleos_wm / widget_matrix
+- status: fail
+- reason: package-contract-failed
+- package path: build/gui/simpleos-wm/widget_matrix.wasm
+- launcher: simpleos-wm-native-wasm-window
+- runtime: simpleos-wm:no-js:wasm32-simple-ui
+- byte size: 8397
+- WebAssembly.validate: true
+- WebAssembly.instantiate: true
+- imports: 
+- exports: simple_app_event:function,simple_app_event_probe:function,simple_app_init:function,simple_app_render:function,simple_app_render_probe:function,spl_main:function
+- simple.gui custom sections: 1
+- render markers: 13/13
+- event markers: 14/14
+- launch status: fail
+- launch calls: simple_app_event:called,simple_app_event_probe:9,simple_app_init:1,simple_app_render:called,simple_app_render_probe:19,spl_main:called
+
+## simpleos_wm / builder_matrix
+- status: pass
+- reason: pass
+- package path: build/gui/simpleos-wm/builder_matrix.wasm
+- launcher: simpleos-wm-native-wasm-window
+- runtime: simpleos-wm:no-js:wasm32-simple-ui
+- byte size: 9486
+- WebAssembly.validate: true
+- WebAssembly.instantiate: true
+- imports: 
+- exports: simple_app_event:function,simple_app_event_probe:function,simple_app_init:function,simple_app_render:function,simple_app_render_probe:function,spl_main:function
+- simple.gui custom sections: 1
+- render markers: 10/10
+- event markers: 8/8
+- launch status: pass
+- launch calls: simple_app_event:called,simple_app_event_probe:8,simple_app_init:1,simple_app_render:called,simple_app_render_probe:48,spl_main:called
+
+## Raw Evidence
+- gui_wasm_target_package_status=fail
+- gui_wasm_target_package_reason=host_wm-widget_matrix-package-contract-failed
+- gui_wasm_target_package_host_wm_hello_status=pass
+- gui_wasm_target_package_host_wm_hello_reason=pass
+- gui_wasm_target_package_host_wm_hello_path=build/gui/host-wm/hello.wasm
+- gui_wasm_target_package_host_wm_hello_launcher=host-wm-native-wasm-window
+- gui_wasm_target_package_host_wm_hello_runtime=host-wm:no-js:wasm32-simple-ui
+- gui_wasm_target_package_host_wm_hello_byte_size=4380
+- gui_wasm_target_package_host_wm_hello_validate=true
+- gui_wasm_target_package_host_wm_hello_instantiate=true
+- gui_wasm_target_package_host_wm_hello_imports=
+- gui_wasm_target_package_host_wm_hello_exports=simple_app_event:function,simple_app_event_probe:function,simple_app_init:function,simple_app_render:function,simple_app_render_probe:function,spl_main:function
+- gui_wasm_target_package_host_wm_hello_custom_sections=1
+- gui_wasm_target_package_host_wm_hello_render_markers=7/7
+- gui_wasm_target_package_host_wm_hello_event_markers=5/5
+- gui_wasm_target_package_host_wm_hello_launch_status=pass
+- gui_wasm_target_package_host_wm_hello_launch_calls=simple_app_event:called,simple_app_event_probe:5,simple_app_init:1,simple_app_render:called,simple_app_render_probe:8,spl_main:called
+- gui_wasm_target_package_host_wm_widget_matrix_status=fail
+- gui_wasm_target_package_host_wm_widget_matrix_reason=package-contract-failed
+- gui_wasm_target_package_host_wm_widget_matrix_path=build/gui/host-wm/widget_matrix.wasm
+- gui_wasm_target_package_host_wm_widget_matrix_launcher=host-wm-native-wasm-window
+- gui_wasm_target_package_host_wm_widget_matrix_runtime=host-wm:no-js:wasm32-simple-ui
+- gui_wasm_target_package_host_wm_widget_matrix_byte_size=8397
+- gui_wasm_target_package_host_wm_widget_matrix_validate=true
+- gui_wasm_target_package_host_wm_widget_matrix_instantiate=true
+- gui_wasm_target_package_host_wm_widget_matrix_imports=
+- gui_wasm_target_package_host_wm_widget_matrix_exports=simple_app_event:function,simple_app_event_probe:function,simple_app_init:function,simple_app_render:function,simple_app_render_probe:function,spl_main:function
+- gui_wasm_target_package_host_wm_widget_matrix_custom_sections=1
+- gui_wasm_target_package_host_wm_widget_matrix_render_markers=13/13
+- gui_wasm_target_package_host_wm_widget_matrix_event_markers=14/14
+- gui_wasm_target_package_host_wm_widget_matrix_launch_status=fail
+- gui_wasm_target_package_host_wm_widget_matrix_launch_calls=simple_app_event:called,simple_app_event_probe:9,simple_app_init:1,simple_app_render:called,simple_app_render_probe:19,spl_main:called
+- gui_wasm_target_package_host_wm_builder_matrix_status=pass
+- gui_wasm_target_package_host_wm_builder_matrix_reason=pass
+- gui_wasm_target_package_host_wm_builder_matrix_path=build/gui/host-wm/builder_matrix.wasm
+- gui_wasm_target_package_host_wm_builder_matrix_launcher=host-wm-native-wasm-window
+- gui_wasm_target_package_host_wm_builder_matrix_runtime=host-wm:no-js:wasm32-simple-ui
+- gui_wasm_target_package_host_wm_builder_matrix_byte_size=9486
+- gui_wasm_target_package_host_wm_builder_matrix_validate=true
+- gui_wasm_target_package_host_wm_builder_matrix_instantiate=true
+- gui_wasm_target_package_host_wm_builder_matrix_imports=
+- gui_wasm_target_package_host_wm_builder_matrix_exports=simple_app_event:function,simple_app_event_probe:function,simple_app_init:function,simple_app_render:function,simple_app_render_probe:function,spl_main:function
+- gui_wasm_target_package_host_wm_builder_matrix_custom_sections=1
+- gui_wasm_target_package_host_wm_builder_matrix_render_markers=10/10
+- gui_wasm_target_package_host_wm_builder_matrix_event_markers=8/8
+- gui_wasm_target_package_host_wm_builder_matrix_launch_status=pass
+- gui_wasm_target_package_host_wm_builder_matrix_launch_calls=simple_app_event:called,simple_app_event_probe:8,simple_app_init:1,simple_app_render:called,simple_app_render_probe:48,spl_main:called
+- gui_wasm_target_package_simpleos_wm_hello_status=pass
+- gui_wasm_target_package_simpleos_wm_hello_reason=pass
+- gui_wasm_target_package_simpleos_wm_hello_path=build/gui/simpleos-wm/hello.wasm
+- gui_wasm_target_package_simpleos_wm_hello_launcher=simpleos-wm-native-wasm-window
+- gui_wasm_target_package_simpleos_wm_hello_runtime=simpleos-wm:no-js:wasm32-simple-ui
+- gui_wasm_target_package_simpleos_wm_hello_byte_size=4380
+- gui_wasm_target_package_simpleos_wm_hello_validate=true
+- gui_wasm_target_package_simpleos_wm_hello_instantiate=true
+- gui_wasm_target_package_simpleos_wm_hello_imports=
+- gui_wasm_target_package_simpleos_wm_hello_exports=simple_app_event:function,simple_app_event_probe:function,simple_app_init:function,simple_app_render:function,simple_app_render_probe:function,spl_main:function
+- gui_wasm_target_package_simpleos_wm_hello_custom_sections=1
+- gui_wasm_target_package_simpleos_wm_hello_render_markers=7/7
+- gui_wasm_target_package_simpleos_wm_hello_event_markers=5/5
+- gui_wasm_target_package_simpleos_wm_hello_launch_status=pass
+- gui_wasm_target_package_simpleos_wm_hello_launch_calls=simple_app_event:called,simple_app_event_probe:5,simple_app_init:1,simple_app_render:called,simple_app_render_probe:8,spl_main:called
+- gui_wasm_target_package_simpleos_wm_widget_matrix_status=fail
+- gui_wasm_target_package_simpleos_wm_widget_matrix_reason=package-contract-failed
+- gui_wasm_target_package_simpleos_wm_widget_matrix_path=build/gui/simpleos-wm/widget_matrix.wasm
+- gui_wasm_target_package_simpleos_wm_widget_matrix_launcher=simpleos-wm-native-wasm-window
+- gui_wasm_target_package_simpleos_wm_widget_matrix_runtime=simpleos-wm:no-js:wasm32-simple-ui
+- gui_wasm_target_package_simpleos_wm_widget_matrix_byte_size=8397
+- gui_wasm_target_package_simpleos_wm_widget_matrix_validate=true
+- gui_wasm_target_package_simpleos_wm_widget_matrix_instantiate=true
+- gui_wasm_target_package_simpleos_wm_widget_matrix_imports=
+- gui_wasm_target_package_simpleos_wm_widget_matrix_exports=simple_app_event:function,simple_app_event_probe:function,simple_app_init:function,simple_app_render:function,simple_app_render_probe:function,spl_main:function
+- gui_wasm_target_package_simpleos_wm_widget_matrix_custom_sections=1
+- gui_wasm_target_package_simpleos_wm_widget_matrix_render_markers=13/13
+- gui_wasm_target_package_simpleos_wm_widget_matrix_event_markers=14/14
+- gui_wasm_target_package_simpleos_wm_widget_matrix_launch_status=fail
+- gui_wasm_target_package_simpleos_wm_widget_matrix_launch_calls=simple_app_event:called,simple_app_event_probe:9,simple_app_init:1,simple_app_render:called,simple_app_render_probe:19,spl_main:called
+- gui_wasm_target_package_simpleos_wm_builder_matrix_status=pass
+- gui_wasm_target_package_simpleos_wm_builder_matrix_reason=pass
+- gui_wasm_target_package_simpleos_wm_builder_matrix_path=build/gui/simpleos-wm/builder_matrix.wasm
+- gui_wasm_target_package_simpleos_wm_builder_matrix_launcher=simpleos-wm-native-wasm-window
+- gui_wasm_target_package_simpleos_wm_builder_matrix_runtime=simpleos-wm:no-js:wasm32-simple-ui
+- gui_wasm_target_package_simpleos_wm_builder_matrix_byte_size=9486
+- gui_wasm_target_package_simpleos_wm_builder_matrix_validate=true
+- gui_wasm_target_package_simpleos_wm_builder_matrix_instantiate=true
+- gui_wasm_target_package_simpleos_wm_builder_matrix_imports=
+- gui_wasm_target_package_simpleos_wm_builder_matrix_exports=simple_app_event:function,simple_app_event_probe:function,simple_app_init:function,simple_app_render:function,simple_app_render_probe:function,spl_main:function
+- gui_wasm_target_package_simpleos_wm_builder_matrix_custom_sections=1
+- gui_wasm_target_package_simpleos_wm_builder_matrix_render_markers=10/10
+- gui_wasm_target_package_simpleos_wm_builder_matrix_event_markers=8/8
+- gui_wasm_target_package_simpleos_wm_builder_matrix_launch_status=pass
+- gui_wasm_target_package_simpleos_wm_builder_matrix_launch_calls=simple_app_event:called,simple_app_event_probe:8,simple_app_init:1,simple_app_render:called,simple_app_render_probe:48,spl_main:called

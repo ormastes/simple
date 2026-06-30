@@ -23,7 +23,7 @@ render-ready marker, and captures the visible QEMU framebuffer.
   1024x768 PPM with more than 100000 non-black pixels and exact sampled colors
   for the red MMIO probe, browser header, web body bands, top command lane, and
   taskbar/background surface.
-- QMP injects a deterministic host keyboard event and a second `pmemsave`
+- QMP injects a deterministic host keyboard event with `input-send-event` and a second `pmemsave`
   proves the live framebuffer changed after guest input handling, so the
   scenario cannot pass from a static MDI screenshot alone.
 - A failed serial marker, failed QMP capture, blank framebuffer, or stale MDI
@@ -33,18 +33,18 @@ render-ready marker, and captures the visible QEMU framebuffer.
 
 Each run writes a unique artifact directory under
 `build/tmp/gui_entry_engine2d_wm_simple_web_spec_<pid>_<micros>/` containing the
-serial log and captured PPM. The QMP socket path also includes the same run id
-to avoid collisions between parallel test runs.
+serial log, captured PPM, raw pmemsave bytes, and QMP result summary. The QMP
+socket path also includes the same run id to avoid collisions between parallel
+test runs.
 
 ## Examples
 
 Run the live gate with:
 
 ```bash
-SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple \
-  src/compiler_rust/target/release/simple test \
-  test/system/gui_entry_engine2d_wm_simple_web_spec.spl \
-  --mode=interpreter --timeout 420 --clean --format json
+timeout 420s bin/simple test \
+  test/03_system/gui/gui_entry_engine2d_wm_simple_web_spec.spl \
+  --mode=interpreter --clean --timeout 360 --sequential
 ```
 
 A passing capture prints `capture_method=pmemsave`, `pmem_addr=0xfd000000`,
@@ -186,8 +186,9 @@ fn _qmp_input_and_assert_framebuffer_delta(qmp_socket: text, before_path: text, 
         "def hmp(cmd):\n return q(dict(execute='human-monitor-command',arguments=dict([('command-line',cmd)])))\n" +
         "def pmem(raw,ppm):\n hmp('pmemsave 0xfd000000 3145728 \"'+raw+'\"');ok=any((time.sleep(0.1) or (os.path.exists(raw) and os.path.getsize(raw)>=3145728)) for _ in range(100));mem=open(raw,'rb').read() if ok else b'';pix=bytearray();[pix.extend([mem[i+2],mem[i+1],mem[i]]) for i in range(0,1024*768*4,4)] if ok else None;open(ppm,'wb').write((b'P6\\n1024 768\\n255\\n'+bytes(pix)) if ok else b'');return mem\n" +
         "q(dict(execute='qmp_capabilities'));" +
+        "\ndef key_a():\n q(dict(execute='input-send-event',arguments=dict(events=[dict(type='key',data=dict(down=True,key=dict(type='qcode',data='a'))),dict(type='key',data=dict(down=False,key=dict(type='qcode',data='a')))])));hmp('sendkey a')\n" +
         "mem0=pmem(before_raw,before);" +
-        "hmp('sendkey a');time.sleep(1.25);" +
+        "key_a();time.sleep(1.25);" +
         "mem1=pmem(after_raw,after);" +
         "diff=sum(1 for a,b in zip(mem0,mem1) if a!=b) if len(mem0)==3145728 and len(mem1)==3145728 else 0;" +
         "sha0=hashlib.sha256(mem0).hexdigest() if mem0 else '';" +
@@ -224,8 +225,9 @@ fn _qmp_capture_and_assert_web_ppm_with_input_delta(qmp_socket: text, capture_pa
         "task=near(rgb(cap_pix,346,750),bytes([0x34,0x98,0xDB]),8) and near(rgb(cap_pix,500,740),bytes([0x17,0x20,0x2A]),8) and near(rgb(cap_pix,920,748),bytes([0x24,0x34,0x47]),8);" +
         "cap_sha=hashlib.sha256(open(capture,'rb').read()).hexdigest() if os.path.exists(capture) else '';" +
         "print('capture_method=pmemsave pmem_addr=0xfd000000 pmem_size=3145728 pmem_raw_bytes=%d ppm_dims=1024x768 nonblack=%d ppm_bytes=%d ppm_sha256=%s checks=[probe=%s,header=%s,bodyA=%s,bodyB=%s,top=%s,taskbar=%s]' % (len(cap_mem),non,os.path.getsize(capture) if os.path.exists(capture) else 0,cap_sha,probe,head,bodya,bodyb,top,task));" +
+        "\ndef key_a():\n q(dict(execute='input-send-event',arguments=dict(events=[dict(type='key',data=dict(down=True,key=dict(type='qcode',data='a'))),dict(type='key',data=dict(down=False,key=dict(type='qcode',data='a')))])));hmp('sendkey a')\n" +
         "mem0,pix0=pmem(before_raw,before);" +
-        "hmp('sendkey a');time.sleep(1.25);" +
+        "key_a();time.sleep(1.25);" +
         "mem1,pix1=pmem(after_raw,after);" +
         "diff=sum(1 for a,b in zip(mem0,mem1) if a!=b) if len(mem0)==3145728 and len(mem1)==3145728 else 0;" +
         "sha0=hashlib.sha256(mem0).hexdigest() if mem0 else '';" +
@@ -239,8 +241,7 @@ fn _qmp_capture_and_assert_web_ppm_with_input_delta(qmp_socket: text, capture_pa
         print "[gui_entry_engine2d_wm_simple_web_spec] qmp capture/input {result[0]}"
     if result[1] != "":
         print "[gui_entry_engine2d_wm_simple_web_spec] qmp capture/input stderr: {result[1]}"
-    if result[2] != 0:
-        file_write(capture_path + ".qmp_result.txt", "exit_code={result[2]}\nstdout:\n{result[0]}\nstderr:\n{result[1]}\n")
+    file_write(capture_path + ".qmp_result.txt", "exit_code={result[2]}\nstdout:\n{result[0]}\nstderr:\n{result[1]}\n")
     result[2] == 0 and file_exists(capture_path) and file_exists(before_path) and file_exists(after_path) and result[0].contains("capture_method=pmemsave") and result[0].contains("qmp_keyboard_input")
 
 fn _print_guest_diagnostics(prefix: text, serial: text, stderr: text):

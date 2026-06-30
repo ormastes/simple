@@ -1,0 +1,287 @@
+# codex-impl
+# Reusable admission scheduler for GPU web/database offload.
+
+use std.web_db_offload.contract.{
+    GpuWdbWorkKind,
+    GpuWdbBudget,
+    GpuWdbRuntimeSnapshot,
+    GpuWdbDecision,
+    GpuWdbExecutionPlan,
+    GpuWdbDecisionPath,
+    gpu_wdb_cpu,
+    gpu_wdb_reject,
+    gpu_wdb_decide,
+    gpu_wdb_gpu_library_target,
+    gpu_wdb_is_control_plane
+}
+use std.web_db_offload.library.{
+    GpuWdbLibraryRegistry,
+    gpu_wdb_library_kind_available,
+    gpu_wdb_submit_registered_batch
+}
+use std.web_db_offload.queue.{
+    GpuWdbQueueState,
+    GpuWdbQueueSubmission
+}
+
+enum GpuWdbScheduleClass:
+    Interactive
+    Batch
+    Background
+
+enum GpuWdbScheduleAction:
+    DispatchGpu
+    RunCpuFallback
+    DeferForBatch
+    RejectWork
+
+struct GpuWdbScheduleRequest:
+    kind: GpuWdbWorkKind
+    batch_bytes: i64
+    item_count: i64
+    schedule_class: GpuWdbScheduleClass
+    allow_defer: bool
+    snapshot: GpuWdbRuntimeSnapshot
+
+struct GpuWdbScheduleDecision:
+    action: GpuWdbScheduleAction
+    target: text
+    reason: text
+    decision: GpuWdbDecision
+    queue_depth_after: i64
+
+struct GpuWdbBatchAccumulator:
+    kind: GpuWdbWorkKind
+    total_batch_bytes: i64
+    item_count: i64
+    pending_count: i64
+    closed: bool
+
+struct GpuWdbBatchAccumulatorResult:
+    accepted: bool
+    should_flush: bool
+    reason: text
+    accumulator: GpuWdbBatchAccumulator
+
+struct GpuWdbBatchFlushExecution:
+    attempted: bool
+    reason: text
+    submission: GpuWdbQueueSubmission
+    accumulator_after: GpuWdbBatchAccumulator
+
+fn gpu_wdb_schedule_request(kind: GpuWdbWorkKind, batch_bytes: i64,
+                            item_count: i64, schedule_class: GpuWdbScheduleClass,
+                            allow_defer: bool,
+                            snapshot: GpuWdbRuntimeSnapshot) -> GpuWdbScheduleRequest:
+    GpuWdbScheduleRequest(
+        kind: kind,
+        batch_bytes: batch_bytes,
+        item_count: item_count,
+        schedule_class: schedule_class,
+        allow_defer: allow_defer,
+        snapshot: snapshot
+    )
+
+fn gpu_wdb_schedule_should_defer(req: GpuWdbScheduleRequest,
+                                 budget: GpuWdbBudget) -> bool:
+    if not req.allow_defer:
+        return false
+    if gpu_wdb_is_control_plane(req.kind):
+        return false
+    if req.batch_bytes <= 0 or req.item_count <= 0:
+        return false
+    if req.batch_bytes >= budget.min_gpu_batch_bytes:
+        return false
+    match req.schedule_class:
+        Interactive: false
+        Batch: true
+        Background: true
+
+fn gpu_wdb_schedule_cpu(reason: text, queue_depth: i64) -> GpuWdbScheduleDecision:
+    GpuWdbScheduleDecision(
+        action: GpuWdbScheduleAction.RunCpuFallback,
+        target: "cpu_fallback",
+        reason: reason,
+        decision: gpu_wdb_cpu(reason),
+        queue_depth_after: queue_depth
+    )
+
+fn gpu_wdb_schedule_reject(reason: text, queue_depth: i64) -> GpuWdbScheduleDecision:
+    GpuWdbScheduleDecision(
+        action: GpuWdbScheduleAction.RejectWork,
+        target: "reject",
+        reason: reason,
+        decision: gpu_wdb_reject(reason),
+        queue_depth_after: queue_depth
+    )
+
+fn gpu_wdb_schedule_defer(reason: text, queue_depth: i64) -> GpuWdbScheduleDecision:
+    GpuWdbScheduleDecision(
+        action: GpuWdbScheduleAction.DeferForBatch,
+        target: "gpu_batch_accumulator",
+        reason: reason,
+        decision: gpu_wdb_cpu(reason),
+        queue_depth_after: queue_depth
+    )
+
+fn gpu_wdb_batch_accumulator(kind: GpuWdbWorkKind) -> GpuWdbBatchAccumulator:
+    GpuWdbBatchAccumulator(
+        kind: kind,
+        total_batch_bytes: 0,
+        item_count: 0,
+        pending_count: 0,
+        closed: false
+    )
+
+fn gpu_wdb_batch_accumulator_result(accepted: bool, should_flush: bool,
+                                    reason: text,
+                                    accumulator: GpuWdbBatchAccumulator) -> GpuWdbBatchAccumulatorResult:
+    GpuWdbBatchAccumulatorResult(
+        accepted: accepted,
+        should_flush: should_flush,
+        reason: reason,
+        accumulator: accumulator
+    )
+
+fn gpu_wdb_batch_accumulator_add(accumulator: GpuWdbBatchAccumulator,
+                                 req: GpuWdbScheduleRequest,
+                                 budget: GpuWdbBudget) -> GpuWdbBatchAccumulatorResult:
+    if accumulator.closed:
+        return gpu_wdb_batch_accumulator_result(false, false, "batch-accumulator-closed", accumulator)
+    if gpu_wdb_is_control_plane(req.kind):
+        return gpu_wdb_batch_accumulator_result(false, false, "control-plane-stays-on-cpu", accumulator)
+    if req.kind != accumulator.kind:
+        return gpu_wdb_batch_accumulator_result(false, false, "batch-accumulator-kind-mismatch", accumulator)
+    if req.batch_bytes <= 0 or req.item_count <= 0:
+        return gpu_wdb_batch_accumulator_result(false, false, "batch-item-count-invalid", accumulator)
+    var next = accumulator
+    next.total_batch_bytes = next.total_batch_bytes + req.batch_bytes
+    next.item_count = next.item_count + req.item_count
+    next.pending_count = next.pending_count + 1
+    gpu_wdb_batch_accumulator_result(
+        true,
+        next.total_batch_bytes >= budget.min_gpu_batch_bytes,
+        if next.total_batch_bytes >= budget.min_gpu_batch_bytes: "batch-ready" else: "batch-accumulating",
+        next
+    )
+
+fn gpu_wdb_batch_accumulator_flush(accumulator: GpuWdbBatchAccumulator,
+                                   snapshot: GpuWdbRuntimeSnapshot) -> GpuWdbScheduleRequest:
+    gpu_wdb_schedule_request(
+        accumulator.kind,
+        accumulator.total_batch_bytes,
+        accumulator.item_count,
+        GpuWdbScheduleClass.Batch,
+        false,
+        snapshot
+    )
+
+fn gpu_wdb_batch_accumulator_reset(accumulator: GpuWdbBatchAccumulator) -> GpuWdbBatchAccumulator:
+    gpu_wdb_batch_accumulator(accumulator.kind)
+
+fn gpu_wdb_batch_flush_noop_submission(state: GpuWdbQueueState,
+                                       kind: GpuWdbWorkKind,
+                                       reason: text) -> GpuWdbQueueSubmission:
+    GpuWdbQueueSubmission(
+        accepted: false,
+        state: state,
+        execution: GpuWdbExecutionPlan(
+            kind: kind,
+            target: "reject",
+            decision: gpu_wdb_reject(reason)
+        ),
+        queue_depth_after: state.queue_depth,
+        dispatch_target: "reject",
+        pinned_host_bytes: 0,
+        stream_id: -1,
+        reason: reason
+    )
+
+fn gpu_wdb_batch_accumulator_flush_registered(accumulator: GpuWdbBatchAccumulator,
+                                             state: GpuWdbQueueState,
+                                             registry: GpuWdbLibraryRegistry,
+                                             snapshot: GpuWdbRuntimeSnapshot,
+                                             budget: GpuWdbBudget) -> GpuWdbBatchFlushExecution:
+    if accumulator.closed:
+        return GpuWdbBatchFlushExecution(
+            attempted: false,
+            reason: "batch-accumulator-closed",
+            submission: gpu_wdb_batch_flush_noop_submission(state, accumulator.kind, "batch-accumulator-closed"),
+            accumulator_after: accumulator
+        )
+    if accumulator.total_batch_bytes <= 0 or accumulator.item_count <= 0:
+        return GpuWdbBatchFlushExecution(
+            attempted: false,
+            reason: "batch-accumulator-empty",
+            submission: gpu_wdb_batch_flush_noop_submission(state, accumulator.kind, "batch-accumulator-empty"),
+            accumulator_after: accumulator
+        )
+
+    val submission = gpu_wdb_submit_registered_batch(
+        state,
+        registry,
+        accumulator.kind,
+        accumulator.total_batch_bytes,
+        accumulator.item_count,
+        snapshot.gpu_available,
+        snapshot.generation_current,
+        snapshot.cpu_fallback_available,
+        budget
+    )
+    val handled = submission.accepted or submission.execution.decision.path == GpuWdbDecisionPath.CpuFallback
+    GpuWdbBatchFlushExecution(
+        attempted: true,
+        reason: submission.reason,
+        submission: submission,
+        accumulator_after: if handled: gpu_wdb_batch_accumulator_reset(accumulator) else: accumulator
+    )
+
+fn gpu_wdb_schedule_registered(req: GpuWdbScheduleRequest,
+                               registry: GpuWdbLibraryRegistry,
+                               budget: GpuWdbBudget) -> GpuWdbScheduleDecision:
+    if req.item_count <= 0:
+        return gpu_wdb_schedule_reject("batch-item-count-invalid", req.snapshot.queue_depth)
+
+    if gpu_wdb_schedule_should_defer(req, budget):
+        return gpu_wdb_schedule_defer("batch-too-small-defer", req.snapshot.queue_depth)
+
+    val target_available = gpu_wdb_library_kind_available(registry, req.kind)
+    var snapshot = req.snapshot
+    snapshot.gpu_available = snapshot.gpu_available and target_available
+    val decision = gpu_wdb_decide(
+        GpuWdbRequest(
+            kind: req.kind,
+            batch_bytes: req.batch_bytes,
+            queue_depth: snapshot.queue_depth,
+            gpu_available: snapshot.gpu_available,
+            generation_current: snapshot.generation_current,
+            cpu_fallback_available: snapshot.cpu_fallback_available
+        ),
+        budget
+    )
+
+    if decision.path == GpuWdbDecisionPath.Reject:
+        return GpuWdbScheduleDecision(
+            action: GpuWdbScheduleAction.RejectWork,
+            target: "reject",
+            reason: decision.reason,
+            decision: decision,
+            queue_depth_after: req.snapshot.queue_depth
+        )
+
+    if decision.path == GpuWdbDecisionPath.CpuFallback:
+        return GpuWdbScheduleDecision(
+            action: GpuWdbScheduleAction.RunCpuFallback,
+            target: "cpu_fallback",
+            reason: decision.reason,
+            decision: decision,
+            queue_depth_after: req.snapshot.queue_depth
+        )
+
+    GpuWdbScheduleDecision(
+        action: GpuWdbScheduleAction.DispatchGpu,
+        target: gpu_wdb_gpu_library_target(req.kind),
+        reason: decision.reason,
+        decision: decision,
+        queue_depth_after: req.snapshot.queue_depth + 1
+    )

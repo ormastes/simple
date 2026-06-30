@@ -92,3 +92,67 @@ scripts/check/qemu-storage-audit.shs --clean # Delete QMP logs and .ppm >7 days 
 ```
 
 Serial logs and test output remain in `build/os/systest/` for diagnosis.
+
+## RV64 HTTP/Display Probe Diagnostics
+
+`scripts/qemu/qemu_rv64_http_test.shs` accepts env overrides for short,
+bounded diagnostics:
+
+```bash
+BOOT_TIMEOUT=3 SERIAL_TAIL_LINES=20 \
+  sh scripts/qemu/qemu_rv64_http_test.shs --expect-http-only --with-display --with-storage --with-db
+```
+
+On failure the wrapper prints only the serial tail. This keeps repeated RV64
+banner loops from flooding the calling session.
+
+When `nm` is available, the wrapper also fail-fast checks the RV64 ELF before
+launch. If `_start` aliases `rt_riscv_uart_put`, the artifact is the known
+native entry-closure symbol-mismatch build and QEMU evidence is not useful until
+the RV64 native-build source-worker path is fixed.
+
+## RV64 SMF GUI Serial vs Framebuffer Evidence
+
+The current-source RV64 SMF filesystem smoke is:
+
+```bash
+bin/simple os build --arch=riscv64
+timeout 20s qemu-system-riscv64 -machine virt -cpu rv64 -m 256M \
+  -nographic -bios default -no-reboot \
+  -kernel build/os/simpleos_riscv64_smf_fs.elf
+```
+
+A pass prints `SMF_WM_GUI_LAUNCH_OK`,
+`NATIVE_GUI_PROCESS_RENDER_OK`, `SIMPLEOS_RISCV_SMF_FS_PASS`, and
+`TEST PASSED`, and QEMU exits with status `0`. The host configuration matrix
+reports this as `simpleos_host_configuration_qemu_riscv64_smf_gui_serial_status=pass`.
+
+This is not RV64 live WM framebuffer evidence. The framebuffer gate remains
+open until an RV64 display-entry ELF stays alive long enough for QMP or an
+equivalent capture to prove nonblank WM pixels.
+
+The display-capable full boot lane is exposed as:
+
+```bash
+bin/simple os build --scenario=riscv64-smoke
+```
+
+That scenario routes to `src/os/kernel/arch/riscv64/boot.spl` and
+`build/os/simpleos_riscv64.elf`, the lane that calls
+`riscv_noalloc_services_init(true)` and can reach the RV64 virtio-gpu display
+service. Current evidence: the route is valid, but the full native-build still
+exceeds a 240s bounded build probe before producing the ELF.
+
+For a smaller framebuffer bring-up target, use:
+
+```bash
+bin/simple os build --scenario=riscv64-display-smoke
+```
+
+This routes to `examples/09_embedded/simple_os/arch/riscv64/display_entry.spl`
+and `build/os/simpleos_riscv64_display_smoke.elf`. The entry calls only the
+RV64 display runtime (`rt_display_init`, `rt_display_flush_test`) and then idles
+for QMP capture. Current evidence: the scenario dispatch, freestanding
+`SIMPLE_BOOT_MINIMAL` profile, and narrowed source roots are correct, but
+native-build currently fails before link with
+`semantic: invalid pattern: match expression exhausted without matching any pattern`.

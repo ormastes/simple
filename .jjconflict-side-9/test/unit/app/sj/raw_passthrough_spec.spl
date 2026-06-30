@@ -1,0 +1,92 @@
+"""
+# Raw Passthrough Specification
+#
+# Tests the raw passthrough mode for escape hatches.
+"""
+
+use std.io_runtime
+
+# --- Inline constants ---
+val LEASE_EXCLUSIVE: i64 = 0i64
+val LEASE_SHARED: i64 = 1i64
+
+# --- Inline translation types ---
+
+struct TranslationPlan:
+    classification: text
+    lease_kind: i64
+    commands: [text]
+    warning: text
+
+fn _tail(argv: [text], start: i64) -> [text]:
+    var out: [text] = []
+    var i = start
+    while i < argv.len():
+        out.push(argv[i])
+        i = i + 1i64
+    out
+
+fn _join(argv: [text]) -> text:
+    argv.join(" ")
+
+fn _raw(command: text, lease_kind: i64, warning: text) -> TranslationPlan:
+    TranslationPlan(classification: "raw_passthrough", lease_kind: lease_kind, commands: [command], warning: warning)
+
+fn _direct(command: text, lease_kind: i64) -> TranslationPlan:
+    TranslationPlan(classification: "direct_jj", lease_kind: lease_kind, commands: [command], warning: "")
+
+fn translate(argv: [text]) -> TranslationPlan:
+    if argv.len() == 0i64:
+        return _direct("jj", LEASE_SHARED)
+    if argv[0i64] == "raw" and argv.len() > 2i64:
+        val lease_kind = if argv[1i64] == "jj":
+            LEASE_SHARED
+        else:
+            LEASE_EXCLUSIVE
+        return _raw(_join(_tail(argv, 1i64)), lease_kind, "")
+    if argv[0i64] != "git":
+        return _direct("jj " + _join(argv), LEASE_EXCLUSIVE)
+    val verb = argv[1i64]
+    if verb == "lfs":
+        return _raw("git " + _join(_tail(argv, 1i64)), LEASE_SHARED, "")
+    if verb == "clean":
+        return _raw("git " + _join(_tail(argv, 1i64)), LEASE_EXCLUSIVE, "WARN[RAW]: git clean runs as a serialized raw passthrough")
+    _direct("jj " + _join(argv), LEASE_EXCLUSIVE)
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+describe "Raw Passthrough - sj raw jj":
+    it "passes through raw jj commands with shared lease":
+        val plan = translate(["raw", "jj", "op", "log"])
+        expect(plan.classification).to_equal("raw_passthrough")
+        expect(plan.commands[0i64]).to_equal("jj op log")
+        expect(plan.lease_kind).to_equal(LEASE_SHARED)
+
+    it "passes through raw git commands with exclusive lease":
+        val plan = translate(["raw", "git", "gc"])
+        expect(plan.classification).to_equal("raw_passthrough")
+        expect(plan.commands[0i64]).to_equal("git gc")
+        expect(plan.lease_kind).to_equal(LEASE_EXCLUSIVE)
+
+describe "Raw Passthrough - LFS":
+    it "routes git lfs as raw passthrough with shared lease":
+        val plan = translate(["git", "lfs", "pull"])
+        expect(plan.classification).to_equal("raw_passthrough")
+        expect(plan.commands[0i64]).to_equal("git lfs pull")
+        expect(plan.lease_kind).to_equal(LEASE_SHARED)
+
+describe "Raw Passthrough - Clean":
+    it "routes git clean as raw passthrough with warning":
+        val plan = translate(["git", "clean", "-fd"])
+        expect(plan.classification).to_equal("raw_passthrough")
+        expect(plan.commands[0i64]).to_equal("git clean -fd")
+        expect(plan.lease_kind).to_equal(LEASE_EXCLUSIVE)
+        expect(plan.warning).to_contain("WARN")
+
+describe "Raw Passthrough - Unknown Verb":
+    it "treats unknown git verbs as direct jj commands":
+        val plan = translate(["git", "unknown-verb", "arg1"])
+        expect(plan.classification).to_equal("direct_jj")
+        expect(plan.commands[0i64]).to_contain("jj")

@@ -1,0 +1,91 @@
+"""
+fil_badblock — bad-block table + spare-block allocator.
+
+Tracks which physical blocks are retired and provides a spare-block
+pool drawn from the over-provisioning region (last 8 blocks: 56..63).
+spare_next starts at 56 and advances one slot per alloc_spare call,
+skipping blocks already marked bad.  Returns UNMAP when exhausted.
+"""
+
+use nvme_types.*
+
+# ── BadBlockTable ─────────────────────────────────────────────────────────────
+struct BadBlockTable:
+    bad:        [i64]   # length NUM_BLOCKS; 0=good 1=bad
+    spare_next: i64     # next candidate spare index (starts at 56)
+
+fn bbt_new() -> BadBlockTable:
+    var bad: [i64] = []
+    var i: i64 = 0
+    while i < NUM_BLOCKS:
+        bad.push(0)
+        i = i + 1
+    BadBlockTable(bad: bad, spare_next: 56)
+
+impl BadBlockTable:
+    me mark_bad(blk: i64):
+        if blk >= 0 and blk < NUM_BLOCKS:
+            me.bad[blk] = 1
+
+    me is_bad(blk: i64) -> bool:
+        me.bad[blk] == 1
+
+    me count_bad() -> i64:
+        var n: i64 = 0
+        var i: i64 = 0
+        while i < NUM_BLOCKS:
+            if me.bad[i] == 1:
+                n = n + 1
+            i = i + 1
+        n
+
+    me alloc_spare() -> i64:
+        while me.spare_next < NUM_BLOCKS:
+            val blk: i64 = me.spare_next
+            me.spare_next = me.spare_next + 1
+            if me.bad[blk] == 0:
+                return blk
+        UNMAP
+
+# ── Self-test ──────────────────────────────────────────────────────────────────
+fn bbt_selftest() -> i64:
+    var fails: i64 = 0
+    var t = bbt_new()
+
+    # fresh table: no bad blocks
+    fails = fails + expect_eq(t.count_bad(), 0, "count_bad after new == 0")
+
+    # mark block 3 bad
+    t.mark_bad(3)
+    var is3bad: i64 = 0
+    if t.is_bad(3):
+        is3bad = 1
+    fails = fails + expect_eq(is3bad, 1, "is_bad(3) after mark_bad(3)")
+    fails = fails + expect_eq(t.count_bad(), 1, "count_bad == 1 after mark_bad(3)")
+
+    # alloc_spare: two successive calls return distinct blocks >= 56
+    val s1: i64 = t.alloc_spare()
+    var s1ok: i64 = 0
+    if s1 >= 56:
+        s1ok = 1
+    fails = fails + expect_eq(s1ok, 1, "alloc_spare s1 >= 56")
+
+    val s2: i64 = t.alloc_spare()
+    var s2ok: i64 = 0
+    if s2 >= 56:
+        s2ok = 1
+    fails = fails + expect_eq(s2ok, 1, "alloc_spare s2 >= 56")
+
+    var sdiff: i64 = 0
+    if s1 != s2:
+        sdiff = 1
+    fails = fails + expect_eq(sdiff, 1, "alloc_spare returns distinct blocks")
+
+    # mark all spare slots bad -> next alloc returns UNMAP
+    var i: i64 = 56
+    while i < NUM_BLOCKS:
+        t.mark_bad(i)
+        i = i + 1
+    fails = fails + expect_eq(t.alloc_spare(), UNMAP, "alloc_spare UNMAP when all spares bad")
+
+    fails

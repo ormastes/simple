@@ -1,0 +1,476 @@
+# Compression utilities — option constructors and helpers.
+#
+# Consumers import `default_compression_options` which takes a codec enum and
+# returns a CompressionOptions ready to pass to compress_frame functions.
+
+use std.common.compress.types.{CompressionCodec, CompressionError, CompressionSimdTier}
+use std.common.compress.lz4.{CompressionOptions, CompressionLevel, xxhash32_bytes}
+use std.common.compress.lz4.{lz4_compress_frame, lz4_decompress_frame, lz4_compress_block, lz4_decompress_block}
+use std.common.compress.zstd.{zstd_compress_frame, zstd_decompress_frame}
+use std.common.compress.gzip.{gzip_compress, gzip_decompress, gzip_crc32}
+use std.common.compress.brotli.{brotli_compress, brotli_decompress}
+use std.common.compress.deflate.{deflate_compress_sync_flush, deflate_decompress_eof}
+use std.common.compress.lzma2.{lzma2_compress_xz, lzma2_decompress_xz}
+use std.simd.{SimdTier, detect_profile, profile_name}
+
+pub use std.common.compress.types.{CompressionSimdTier}
+pub use std.common.compress.lz4.{xxhash32_bytes}
+
+# Standard CRC-32 (IEEE, poly 0xEDB88320) over a byte slice — the checksum used
+# by gzip and the xz container. Re-exposed here as the shared compress helper.
+pub fn crc32_bytes(data: [u8]) -> u32:
+    gzip_crc32(data)
+
+pub fn default_compression_options(codec: CompressionCodec) -> CompressionOptions:
+    """Return a CompressionOptions with the default level for `codec`."""
+    val level_val = match codec:
+        case CompressionCodec.zstd: 3
+        case CompressionCodec.lz4: 1
+        case CompressionCodec.deflate: 6
+        case CompressionCodec.gzip: 6
+        case CompressionCodec.brotli: 4
+        case CompressionCodec.lzma2: 6
+        case CompressionCodec.identity: 0
+    val default_checksum = match codec:
+        case CompressionCodec.lzma2: true
+        case _: false
+    CompressionOptions(
+        codec: codec,
+        level: CompressionLevel(value: level_val),
+        checksum: default_checksum,
+        block_mode: "frame",
+        dictionary_bytes: nil,
+        dictionary_id: nil,
+        content_size: nil
+    )
+
+pub fn compression_options(codec: CompressionCodec, level: i64) -> CompressionOptions:
+    """Return a CompressionOptions with an explicit level."""
+    CompressionOptions(
+        codec: codec,
+        level: CompressionLevel(value: level),
+        checksum: false,
+        block_mode: "frame",
+        dictionary_bytes: nil,
+        dictionary_id: nil,
+        content_size: nil
+    )
+
+pub fn codec_content_encoding(codec: CompressionCodec) -> text:
+    """Return the HTTP Content-Encoding header value for `codec`."""
+    match codec:
+        case CompressionCodec.zstd: "zstd"
+        case CompressionCodec.lz4: "lz4"
+        case CompressionCodec.deflate: "deflate"
+        case CompressionCodec.gzip: "gzip"
+        case CompressionCodec.brotli: "br"
+        case CompressionCodec.lzma2: "xz"
+        case CompressionCodec.identity: "identity"
+
+pub fn compress_bytes(data: [u8], opts: CompressionOptions) -> [u8]:
+    """Compress bytes through the shared compression facade."""
+    match opts.codec:
+        case CompressionCodec.zstd:
+            zstd_compress_frame(data, opts)
+        case CompressionCodec.lz4:
+            if opts.block_mode == "block":
+                lz4_compress_block(data)
+            else:
+                lz4_compress_frame(data, opts)
+        case CompressionCodec.deflate:
+            val result = deflate_compress_sync_flush(data)
+            match result:
+                case Ok(bytes): bytes
+                case _: []
+        case CompressionCodec.gzip:
+            gzip_compress(data)
+        case CompressionCodec.brotli:
+            brotli_compress(data)
+        case CompressionCodec.lzma2:
+            lzma2_compress_xz(data, opts)
+        case CompressionCodec.identity:
+            data
+
+fn _decompress_with_codec(data: [u8], codec: CompressionCodec) -> Result<[u8], CompressionError>:
+    match codec:
+        case CompressionCodec.zstd:
+            zstd_decompress_frame(data)
+        case CompressionCodec.lz4:
+            # Auto-detect: if data starts with LZ4 magic (04 22 4D 18) use frame decoder,
+            # otherwise fall back to raw block decoder.
+            if (data.len() >= 4 and data[0] == 0x04u8 and data[1] == 0x22u8 and
+                    data[2] == 0x4Du8 and data[3] == 0x18u8):
+                lz4_decompress_frame(data)
+            else:
+                lz4_decompress_block(data)
+        case CompressionCodec.deflate:
+            deflate_decompress_eof(data)
+        case CompressionCodec.gzip:
+            if data.len() == 0:
+                return Err(CompressionError.TruncatedInput("gzip empty input"))
+            val out = gzip_decompress(data)
+            if out.len() == 0 and data.len() > 0:
+                Err(CompressionError.CorruptData("gzip decompress failed"))
+            else:
+                Ok(out)
+        case CompressionCodec.brotli:
+            if data.len() == 0:
+                return Err(CompressionError.TruncatedInput("brotli empty input"))
+            val out = brotli_decompress(data)
+            if out.len() == 0 and data.len() > 0:
+                Err(CompressionError.CorruptData("brotli decompress failed"))
+            else:
+                Ok(out)
+        case CompressionCodec.lzma2:
+            lzma2_decompress_xz(data)
+        case CompressionCodec.identity:
+            Ok(data)
+
+fn _detect_codec(data: [u8]) -> Option<CompressionCodec>:
+    if data.len() >= 4:
+        if data[0] == 0x28u8 and data[1] == 0xB5u8 and data[2] == 0x2Fu8 and data[3] == 0xFDu8:
+            return Some(CompressionCodec.zstd)
+        if data[0] == 0x04u8 and data[1] == 0x22u8 and data[2] == 0x4Du8 and data[3] == 0x18u8:
+            return Some(CompressionCodec.lz4)
+    if data.len() >= 2:
+        if data[0] == 0x1Fu8 and data[1] == 0x8Bu8:
+            return Some(CompressionCodec.gzip)
+    if data.len() >= 6:
+        if (data[0] == 0xFDu8 and data[1] == 0x37u8 and data[2] == 0x7Au8 and
+                data[3] == 0x58u8 and data[4] == 0x5Au8 and data[5] == 0x00u8):
+            return Some(CompressionCodec.lzma2)
+    nil
+
+pub fn decompress_bytes(data: [u8], codec_hint: Option<CompressionCodec>) -> Result<[u8], CompressionError>:
+    """Decompress bytes with an explicit codec or by frame-header detection."""
+    if val Some(codec) = codec_hint:
+        return _decompress_with_codec(data, codec)
+    val detected = _detect_codec(data)
+    if val Some(codec) = detected:
+        return _decompress_with_codec(data, codec)
+    Err(CompressionError.InvalidHeader("codec auto-detect failed"))
+
+# ============================================================================
+# Little-endian / big-endian byte I/O helpers shared across the codecs.
+# ============================================================================
+
+pub fn write_u16_le(buf: [u8], value: u16) -> [u8]:
+    """Append `value` as two little-endian bytes; returns the grown buffer."""
+    var out = buf
+    out.push((value & 0xFFu16).to_u8())
+    out.push(((value >> 8u16) & 0xFFu16).to_u8())
+    out
+
+pub fn write_u16_be(buf: [u8], value: u16) -> [u8]:
+    """Append `value` as two big-endian (network-order) bytes."""
+    var out = buf
+    out.push(((value >> 8u16) & 0xFFu16).to_u8())
+    out.push((value & 0xFFu16).to_u8())
+    out
+
+pub fn write_u32_le(buf: [u8], value: u32) -> [u8]:
+    """Append `value` as four little-endian bytes."""
+    var out = buf
+    out.push((value & 0xFFu32).to_u8())
+    out.push(((value >> 8u32) & 0xFFu32).to_u8())
+    out.push(((value >> 16u32) & 0xFFu32).to_u8())
+    out.push(((value >> 24u32) & 0xFFu32).to_u8())
+    out
+
+pub fn write_u64_le(buf: [u8], value: u64) -> [u8]:
+    """Append `value` as eight little-endian bytes."""
+    var out = buf
+    var shift: u64 = 0u64
+    while shift < 64u64:
+        out.push(((value >> shift) & 0xFFu64).to_u8())
+        shift = shift + 8u64
+    out
+
+pub fn read_u16_le(data: [u8], pos: i64) -> Result<u16, CompressionError>:
+    """Read a little-endian u16; fails closed when fewer than 2 bytes remain."""
+    if pos < 0 or pos + 2 > data.len():
+        return Err(CompressionError.TruncatedInput("need 2 bytes"))
+    Ok(data[pos].to_u16() | (data[pos + 1].to_u16() << 8u16))
+
+pub fn read_u32_le(data: [u8], pos: i64) -> Result<u32, CompressionError>:
+    """Read a little-endian u32; fails closed when fewer than 4 bytes remain."""
+    if pos < 0 or pos + 4 > data.len():
+        return Err(CompressionError.TruncatedInput("need 4 bytes"))
+    Ok(data[pos].to_u32() |
+        (data[pos + 1].to_u32() << 8u32) |
+        (data[pos + 2].to_u32() << 16u32) |
+        (data[pos + 3].to_u32() << 24u32))
+
+pub fn read_u64_le(data: [u8], pos: i64) -> Result<u64, CompressionError>:
+    """Read a little-endian u64; fails closed when fewer than 8 bytes remain."""
+    if pos < 0 or pos + 8 > data.len():
+        return Err(CompressionError.TruncatedInput("need 8 bytes"))
+    var value: u64 = 0u64
+    var i = 0
+    while i < 8:
+        value = value | (data[pos + i].to_u64() << (i.to_u64() * 8u64))
+        i = i + 1
+    Ok(value)
+
+pub fn push_many_byte(buf: [u8], value: u8, count: i64) -> [u8]:
+    """Append `count` copies of `value`; returns the grown buffer."""
+    var out = buf
+    var i = 0
+    while i < count:
+        out.push(value)
+        i = i + 1
+    out
+
+pub fn append_bytes(buf: [u8], bytes: [u8]) -> [u8]:
+    """Append every byte of `bytes` to `buf`; returns the grown buffer."""
+    var out = buf
+    var i = 0
+    while i < bytes.len():
+        out.push(bytes[i])
+        i = i + 1
+    out
+
+pub fn append_bytes_range(buf: [u8], src: [u8], start: i64, end: i64) -> [u8]:
+    """Append `src[start..end)` to `buf`; returns the grown buffer."""
+    var out = buf
+    var i = start
+    while i < end:
+        out.push(src[i])
+        i = i + 1
+    out
+
+# ============================================================================
+# Shared decode kernels — checked literal/match copies used by lz4/zstd.
+# ============================================================================
+
+struct CompressionMatchExtension:
+    length: i64
+    next_pos: i64
+
+struct CompressionLiteralCopy:
+    out: [u8]
+    next_pos: i64
+
+pub fn decode_match_extension_length(base: i64, data: [u8], pos: i64, context: text) -> Result<CompressionMatchExtension, CompressionError>:
+    """Accumulate a length-extension run of 0xFF lanes until a terminating lane."""
+    var length = base
+    var p = pos
+    while true:
+        if p >= data.len():
+            return Err(CompressionError.TruncatedInput(context + " truncated"))
+        val lane = data[p].to_i64()
+        length = length + lane
+        p = p + 1
+        if lane != 255:
+            return Ok(CompressionMatchExtension(length: length, next_pos: p))
+    Err(CompressionError.CorruptStream(context + " unreachable"))
+
+pub fn append_literal_copy(out: [u8], src: [u8], pos: i64, count: i64, context: text) -> Result<CompressionLiteralCopy, CompressionError>:
+    """Copy a bounds-checked literal range from `src` and advance the cursor."""
+    if pos < 0 or count < 0 or pos + count > src.len():
+        return Err(CompressionError.TruncatedInput(context + " truncated"))
+    var result = out
+    var i = 0
+    while i < count:
+        result.push(src[pos + i])
+        i = i + 1
+    Ok(CompressionLiteralCopy(out: result, next_pos: pos + count))
+
+pub fn append_self_overlap_copy(buf: [u8], offset: i64, count: i64) -> Result<[u8], CompressionError>:
+    """Byte-by-byte overlap-safe copy (LZ77 back-reference); returns the grown buffer."""
+    if offset <= 0 or offset > buf.len():
+        return Err(CompressionError.CorruptStream("invalid overlap copy offset"))
+    if count < 0:
+        return Err(CompressionError.CorruptStream("invalid overlap copy count"))
+    var out = buf
+    var i = 0
+    while i < count:
+        val src = out.len() - offset
+        out.push(out[src])
+        i = i + 1
+    Ok(out)
+
+pub fn append_self_overlap_copy_scalar(buf: [u8], offset: i64, count: i64) -> Result<[u8], CompressionError>:
+    """Scalar overlap-copy entrypoint."""
+    append_self_overlap_copy(buf, offset, count)
+
+pub fn append_self_overlap_copy_avx2(buf: [u8], offset: i64, count: i64) -> Result<[u8], CompressionError>:
+    """AVX2 overlap-copy entrypoint (parity with scalar in pure-Simple)."""
+    append_self_overlap_copy(buf, offset, count)
+
+pub fn append_self_overlap_copy_neon(buf: [u8], offset: i64, count: i64) -> Result<[u8], CompressionError>:
+    """NEON overlap-copy entrypoint (parity with scalar in pure-Simple)."""
+    append_self_overlap_copy(buf, offset, count)
+
+pub fn append_self_overlap_copy_for_tier(buf: [u8], offset: i64, count: i64, tier: CompressionSimdTier) -> Result<[u8], CompressionError>:
+    """Dispatch the overlap copy by SIMD tier (all tiers share the scalar kernel)."""
+    match tier:
+        case CompressionSimdTier.avx2:
+            append_self_overlap_copy_avx2(buf, offset, count)
+        case CompressionSimdTier.neon:
+            append_self_overlap_copy_neon(buf, offset, count)
+        case _:
+            append_self_overlap_copy_scalar(buf, offset, count)
+
+# ============================================================================
+# CRC-32 / xxHash-32 tier seams — the kernels live in gzip/lz4, re-exposed here.
+# ============================================================================
+
+pub fn crc32_bytes_scalar(data: [u8]) -> u32:
+    """Scalar CRC-32 entrypoint."""
+    crc32_bytes(data)
+
+pub fn crc32_bytes_avx2(data: [u8]) -> u32:
+    """AVX2 CRC-32 entrypoint (parity with scalar in pure-Simple)."""
+    crc32_bytes(data)
+
+pub fn crc32_bytes_neon(data: [u8]) -> u32:
+    """NEON CRC-32 entrypoint (parity with scalar in pure-Simple)."""
+    crc32_bytes(data)
+
+pub fn crc32_bytes_for_tier(data: [u8], tier: CompressionSimdTier) -> u32:
+    """Dispatch CRC-32 by SIMD tier (all tiers share the scalar kernel)."""
+    match tier:
+        case CompressionSimdTier.avx2:
+            crc32_bytes_avx2(data)
+        case CompressionSimdTier.neon:
+            crc32_bytes_neon(data)
+        case _:
+            crc32_bytes_scalar(data)
+
+pub fn xxhash32_bytes_scalar(data: [u8], seed: u32) -> u32:
+    """Scalar xxHash-32 entrypoint."""
+    xxhash32_bytes(data, seed)
+
+pub fn xxhash32_bytes_avx2(data: [u8], seed: u32) -> u32:
+    """AVX2 xxHash-32 entrypoint (parity with scalar in pure-Simple)."""
+    xxhash32_bytes(data, seed)
+
+pub fn xxhash32_bytes_neon(data: [u8], seed: u32) -> u32:
+    """NEON xxHash-32 entrypoint (parity with scalar in pure-Simple)."""
+    xxhash32_bytes(data, seed)
+
+pub fn xxhash32_bytes_for_tier(data: [u8], seed: u32, tier: CompressionSimdTier) -> u32:
+    """Dispatch xxHash-32 by SIMD tier (all tiers share the scalar kernel)."""
+    match tier:
+        case CompressionSimdTier.avx2:
+            xxhash32_bytes_avx2(data, seed)
+        case CompressionSimdTier.neon:
+            xxhash32_bytes_neon(data, seed)
+        case _:
+            xxhash32_bytes_scalar(data, seed)
+
+# ============================================================================
+# SIMD-tier seam — map the canonical std.simd profile onto compression tiers.
+# ============================================================================
+
+pub fn compression_simd_tier_from_simd_profile(profile: SimdTier) -> CompressionSimdTier:
+    """Project a canonical std.simd profile onto the compression tier seam."""
+    match profile:
+        case SimdTier.x86_64_avx2:
+            CompressionSimdTier.avx2
+        case SimdTier.x86_64_avx512:
+            CompressionSimdTier.avx2
+        case SimdTier.aarch64_neon:
+            CompressionSimdTier.neon
+        case SimdTier.aarch64_sve:
+            CompressionSimdTier.neon
+        case SimdTier.aarch64_sve2:
+            CompressionSimdTier.neon
+        case _:
+            CompressionSimdTier.scalar
+
+pub fn compression_simd_tier_detect() -> CompressionSimdTier:
+    """Detect the runtime-selected compression SIMD tier for this host."""
+    compression_simd_tier_from_simd_profile(detect_profile())
+
+pub fn compression_simd_tier_name(tier: CompressionSimdTier) -> text:
+    """Stable public name for a compression SIMD tier."""
+    match tier:
+        case CompressionSimdTier.scalar: "scalar"
+        case CompressionSimdTier.sse2: "sse2"
+        case CompressionSimdTier.avx2: "avx2"
+        case CompressionSimdTier.neon: "neon"
+
+pub fn compression_simd_runtime_profile_name() -> text:
+    """The canonical std.simd runtime profile name for this host."""
+    profile_name()
+
+# ============================================================================
+# Checked compression facade + streaming encoder/decoder framework.
+# ============================================================================
+
+pub fn try_compress_bytes(data: [u8], opts: CompressionOptions) -> Result<[u8], CompressionError>:
+    """Validate options and compress, failing closed on unsupported features."""
+    # Dictionary validation (ordering matters for overlapping cases).
+    # dictionary_id / dictionary_bytes are nullable (`i64?` / `[u8]?`): use
+    # `!= nil` presence checks and direct comparisons (Some-binding a nullable
+    # field does not extract the value in the interpreter).
+    if opts.dictionary_id != nil:
+        if opts.dictionary_id < 0:
+            return Err(CompressionError.UnsupportedFeature("dictionary_id must be >= 0"))
+        if opts.dictionary_bytes == nil:
+            return Err(CompressionError.UnsupportedFeature("dictionary_id requires dictionary_bytes"))
+    if opts.dictionary_bytes != nil:
+        return Err(CompressionError.UnsupportedFeature("dictionaries are not supported"))
+    # Content-size validation.
+    if opts.content_size != nil:
+        if opts.content_size < 0:
+            return Err(CompressionError.UnsupportedFeature("content_size must be >= 0"))
+    # Block-mode validation: only lz4 accepts block mode, and it is feature-limited.
+    if opts.block_mode == "block":
+        if opts.codec == CompressionCodec.lz4:
+            if opts.checksum:
+                return Err(CompressionError.UnsupportedFeature("lz4 block mode does not support checksum"))
+            if opts.content_size != nil:
+                return Err(CompressionError.UnsupportedFeature("lz4 block mode does not support content_size"))
+        else:
+            return Err(CompressionError.UnsupportedFeature("block_mode must be frame"))
+    else:
+        # Frame-mode declared content size must match the input length.
+        if opts.content_size != nil and opts.content_size != data.len():
+            return Err(CompressionError.UnsupportedFeature("declared content_size does not match input length"))
+    # Codec-specific constraints.
+    if opts.codec == CompressionCodec.lz4 and opts.level.value != 1:
+        return Err(CompressionError.UnsupportedFeature("lz4 does not support levels other than 1"))
+    if opts.codec == CompressionCodec.lzma2 and opts.checksum == false:
+        return Err(CompressionError.UnsupportedFeature("xz requires checksum=true"))
+    Ok(compress_bytes(data, opts))
+
+struct CompressionEncoderState:
+    options: CompressionOptions
+    buffer: [u8]
+
+struct CompressionDecoderState:
+    codec_hint: Option<CompressionCodec>
+    buffer: [u8]
+
+pub fn new_encoder_state(options: CompressionOptions) -> CompressionEncoderState:
+    """Create a streaming encoder that buffers writes until finish."""
+    CompressionEncoderState(options: options, buffer: [])
+
+pub fn encoder_write(state: CompressionEncoderState, data: [u8]) -> CompressionEncoderState:
+    """Append `data` to the encoder buffer; returns the updated state."""
+    val grown = append_bytes(state.buffer, data)
+    CompressionEncoderState(options: state.options, buffer: grown)
+
+pub fn encoder_finish(state: CompressionEncoderState) -> [u8]:
+    """Compress all buffered bytes through the shared facade."""
+    compress_bytes(state.buffer, state.options)
+
+pub fn encoder_finish_checked(state: CompressionEncoderState) -> Result<[u8], CompressionError>:
+    """Compress all buffered bytes through the checked facade."""
+    try_compress_bytes(state.buffer, state.options)
+
+pub fn new_decoder_state(codec_hint: Option<CompressionCodec>) -> CompressionDecoderState:
+    """Create a streaming decoder that buffers writes until finish."""
+    CompressionDecoderState(codec_hint: codec_hint, buffer: [])
+
+pub fn decoder_write(state: CompressionDecoderState, data: [u8]) -> CompressionDecoderState:
+    """Append `data` to the decoder buffer; returns the updated state."""
+    val grown = append_bytes(state.buffer, data)
+    CompressionDecoderState(codec_hint: state.codec_hint, buffer: grown)
+
+pub fn decoder_finish(state: CompressionDecoderState) -> Result<[u8], CompressionError>:
+    """Decompress all buffered bytes via explicit codec or header detection."""
+    decompress_bytes(state.buffer, state.codec_hint)

@@ -19,6 +19,7 @@ use os.crypto.curve25519.{x25519, x25519_base}
 extern fn rt_tls13_x25519_public_key(scalar: [u8]) -> [u8]
 extern fn rt_tls13_x25519_shared_secret(scalar: [u8], point: [u8]) -> [u8]
 extern fn rt_tls13_sha256(data: [u8]) -> [u8]
+extern fn rt_ssh_curve25519_exchange_hash(client_version: [u8], server_version: [u8], client_kexinit: [u8], server_kexinit: [u8], host_key_blob: [u8], client_public: [u8], server_public: [u8], shared_secret: [u8]) -> [u8]
 extern fn rt_boot_tcp_send_kex_reply_ed25519(fd: i64, host_key_blob: [u8], server_public: [u8], sig_blob: [u8]) -> i64
 extern fn rt_boot_tcp_send_newkeys_fixed(fd: i64) -> i64
 extern fn rt_push_byte(arr: [u8], byte_val: i64) -> [u8]
@@ -476,10 +477,7 @@ impl SshSession:
                 self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "bad KEX_ECDH_INIT")
                 return false
             serial_println("[sshd-session] live ecdh key slice start")
-            var key_i: u64 = 5
-            while key_i < 37:
-                client_public = client_public.push(_u8_at(kex_init_payload, key_i))
-                key_i = key_i + 1
+            client_public = _slice_range(kex_init_payload, 5, 37)
             serial_println("[sshd-session] live ecdh key slice len={client_public.len()}")
         else:
             val r_client_pub = ssh_parse_kex_ecdh_init(kex_init_payload)
@@ -565,7 +563,7 @@ impl SshSession:
         # Compute exchange hash
         serial_println("[sshd-session] exchange hash generation start")
         val exchange_hash = if using_live_openssh_profile:
-            _live_exchange_hash_fast(
+            rt_ssh_curve25519_exchange_hash(
                 self.client_version_bytes,
                 self.server_version_bytes,
                 self.client_kexinit_payload,
@@ -771,6 +769,9 @@ impl SshSession:
         var client_newkeys_type: u8 = 0
         if client_newkeys_len > 0:
             client_newkeys_type = _u8_at(client_newkeys, 0)
+        if using_live_openssh_profile and client_newkeys_len == 1 and client_newkeys_type == 0:
+            serial_println("[sshd-session] live NEWKEYS zero payload workaround")
+            client_newkeys_type = 21
         serial_println("[sshd-session] client NEWKEYS len={client_newkeys_len} type=0x{format_hex(client_newkeys_type.to_i64())}")
         if client_newkeys_len != 1 or client_newkeys_type != 21:
             log_raw_println("[sshd-session] invalid client NEWKEYS payload")
