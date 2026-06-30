@@ -43,6 +43,15 @@ to method-table layout. Confirmed live in `ftl_journal.append` only. Bug:
    struct param (single-param `me` methods are always unaffected) — this also satisfies the
    repo's "3+ params → struct" rule.
 
+## Call-boundary: bind a method-call result before passing it
+Never pass a **method** call's result *directly* as a method argument —
+`outer.m(inner.n(...))` corrupts the inner value at the call boundary under a **nested**
+interpreter (the program runs fine standalone via `bin/simple run`, but fails deterministically
+when it runs as a `process_run` subprocess of `bin/simple test`). Bind it first:
+`val p = band.alloc_page(); band.mark_valid(p)`. (Passing a **free-function** result —
+`fw.submit(cmd_make(...))` — is fine.) Bug:
+`doc/08_tracking/bug/interp_method_call_result_as_arg_corruption_nested_2026-06-30.md`.
+
 ## Generation handles
 The object-pool stale-handle guard (`fw_pool`) must be tested by **re-acquiring a freed
 slot** (so `used==1` again) and asserting the OLD handle is rejected via **generation
