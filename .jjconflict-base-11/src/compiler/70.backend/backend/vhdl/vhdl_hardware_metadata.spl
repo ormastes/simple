@@ -1,0 +1,530 @@
+# VHDL Hardware Metadata — Typed hardware annotation, return labels, call lowering.
+#
+# Implements AC-1 (typed hardware metadata) and AC-2 (hardware call lowering)
+# for the VHDL RISC-V gap plan.
+#
+# Classes:
+#   HardwareAttr          — hardware annotation metadata preserved through IR
+#   ReturnLabel           — labeled return field for multi-output hardware
+#   HardwareCallInstance  — lowered hardware call to entity instance
+#   CallLowerResult       — result of a lowering attempt
+#   LabelValidation       — validation result for return label sets
+#   PortMapEntry          — a single formal->actual port mapping
+
+# ============================================================================
+# HardwareAttr — hardware annotation metadata preserved through IR
+# ============================================================================
+
+class HardwareAttr:
+    """Hardware annotation metadata preserved through IR lowering."""
+    kind: text
+    is_clocked: bool
+    is_generic: bool
+    entity_name: text
+    label_count: i32
+    l0_name: text
+    l0_type: text
+    l1_name: text
+    l1_type: text
+    l2_name: text
+    l2_type: text
+
+    me has_labels():
+        """Returns true if this attribute carries any port labels."""
+        return label_count > 0
+
+    me has_duplicate_label():
+        """Returns true if any two labels within label_count share the same name."""
+        if label_count < 2:
+            return false
+        if label_count >= 2:
+            if l0_name == l1_name:
+                return true
+        if label_count >= 3:
+            if l0_name == l2_name:
+                return true
+            if l1_name == l2_name:
+                return true
+        return false
+
+    me is_hardware():
+        """Returns true when kind is "hardware"."""
+        return kind == "hardware"
+
+    static fn hardware(name: text) -> HardwareAttr:
+        """Create a combinational hardware attribute."""
+        return HardwareAttr(
+            kind: "hardware",
+            is_clocked: false,
+            is_generic: false,
+            entity_name: name,
+            label_count: 0,
+            l0_name: "",
+            l0_type: "",
+            l1_name: "",
+            l1_type: "",
+            l2_name: "",
+            l2_type: ""
+        )
+
+    static fn clocked(name: text) -> HardwareAttr:
+        """Create a clocked (registered) hardware attribute."""
+        return HardwareAttr(
+            kind: "hardware",
+            is_clocked: true,
+            is_generic: false,
+            entity_name: name,
+            label_count: 0,
+            l0_name: "",
+            l0_type: "",
+            l1_name: "",
+            l1_type: "",
+            l2_name: "",
+            l2_type: ""
+        )
+
+    static fn generic_hw(name: text) -> HardwareAttr:
+        """Create a generic (parameterized) hardware attribute."""
+        return HardwareAttr(
+            kind: "hardware",
+            is_clocked: false,
+            is_generic: true,
+            entity_name: name,
+            label_count: 0,
+            l0_name: "",
+            l0_type: "",
+            l1_name: "",
+            l1_type: "",
+            l2_name: "",
+            l2_type: ""
+        )
+
+    me with_labels(n0: text, t0: text, n1: text, t1: text) -> HardwareAttr:
+        """Return a copy of this attr with 2 return labels attached."""
+        return HardwareAttr(
+            kind: self.kind,
+            is_clocked: self.is_clocked,
+            is_generic: self.is_generic,
+            entity_name: self.entity_name,
+            label_count: 2,
+            l0_name: n0,
+            l0_type: t0,
+            l1_name: n1,
+            l1_type: t1,
+            l2_name: "",
+            l2_type: ""
+        )
+
+    me with_three_labels(n0: text, t0: text, n1: text, t1: text, n2: text, t2: text) -> HardwareAttr:
+        """Return a copy of this attr with 3 return labels attached."""
+        return HardwareAttr(
+            kind: self.kind,
+            is_clocked: self.is_clocked,
+            is_generic: self.is_generic,
+            entity_name: self.entity_name,
+            label_count: 3,
+            l0_name: n0,
+            l0_type: t0,
+            l1_name: n1,
+            l1_type: t1,
+            l2_name: n2,
+            l2_type: t2
+        )
+
+    me label_name_at(idx: i32) -> text:
+        """Get label name by index."""
+        if idx == 0:
+            return self.l0_name
+        if idx == 1:
+            return self.l1_name
+        if idx == 2:
+            return self.l2_name
+        return ""
+
+    me label_type_at(idx: i32) -> text:
+        """Get label type by index."""
+        if idx == 0:
+            return self.l0_type
+        if idx == 1:
+            return self.l1_type
+        if idx == 2:
+            return self.l2_type
+        return ""
+
+# ============================================================================
+# ReturnLabel — labeled return field for multi-output hardware
+# ============================================================================
+
+class ReturnLabel:
+    """Labeled return field for multi-output hardware entities."""
+    name: text
+    type_name: text
+    bit_width: i32
+    index: i32
+    is_output: bool
+
+    me port_direction():
+        """Returns VHDL port direction string."""
+        if is_output:
+            return "out"
+        return "in"
+
+    me vhdl_type():
+        """Returns VHDL signal type string for this label."""
+        if bit_width == 1:
+            return "std_logic"
+        return "std_logic_vector(" + (bit_width - 1).to_text() + " downto 0)"
+
+    static fn output(name: text, type_n: text, width: i32, idx: i32) -> ReturnLabel:
+        """Create an output return label."""
+        return ReturnLabel(
+            name: name,
+            type_name: type_n,
+            bit_width: width,
+            index: idx,
+            is_output: true
+        )
+
+    static fn input(name: text, type_n: text, width: i32, idx: i32) -> ReturnLabel:
+        """Create an input return label."""
+        return ReturnLabel(
+            name: name,
+            type_name: type_n,
+            bit_width: width,
+            index: idx,
+            is_output: false
+        )
+
+# ============================================================================
+# HardwareCallInstance — lowered hardware call to entity instance
+# ============================================================================
+
+class HardwareCallInstance:
+    """A hardware call lowered to a VHDL entity instantiation."""
+    instance_name: text
+    entity_name: text
+    port_count: i32
+    p0_formal: text
+    p0_actual: text
+    p1_formal: text
+    p1_actual: text
+    p2_formal: text
+    p2_actual: text
+    p3_formal: text
+    p3_actual: text
+
+    me has_port(formal: text):
+        """Returns true if any mapped port formal matches the given name."""
+        if port_count >= 1:
+            if p0_formal == formal:
+                return true
+        if port_count >= 2:
+            if p1_formal == formal:
+                return true
+        if port_count >= 3:
+            if p2_formal == formal:
+                return true
+        if port_count >= 4:
+            if p3_formal == formal:
+                return true
+        return false
+
+    me is_valid():
+        """Returns true when the instance has a name, entity, and at least one port."""
+        if instance_name == "":
+            return false
+        if entity_name == "":
+            return false
+        return port_count > 0
+
+    me add_port(formal: text, actual: text) -> HardwareCallInstance:
+        """Return a copy with one more port mapping appended."""
+        var result = HardwareCallInstance(
+            instance_name: self.instance_name,
+            entity_name: self.entity_name,
+            port_count: self.port_count + 1,
+            p0_formal: self.p0_formal,
+            p0_actual: self.p0_actual,
+            p1_formal: self.p1_formal,
+            p1_actual: self.p1_actual,
+            p2_formal: self.p2_formal,
+            p2_actual: self.p2_actual,
+            p3_formal: self.p3_formal,
+            p3_actual: self.p3_actual
+        )
+        if self.port_count == 0:
+            result = HardwareCallInstance(
+                instance_name: self.instance_name,
+                entity_name: self.entity_name,
+                port_count: 1,
+                p0_formal: formal,
+                p0_actual: actual,
+                p1_formal: self.p1_formal,
+                p1_actual: self.p1_actual,
+                p2_formal: self.p2_formal,
+                p2_actual: self.p2_actual,
+                p3_formal: self.p3_formal,
+                p3_actual: self.p3_actual
+            )
+        if self.port_count == 1:
+            result = HardwareCallInstance(
+                instance_name: self.instance_name,
+                entity_name: self.entity_name,
+                port_count: 2,
+                p0_formal: self.p0_formal,
+                p0_actual: self.p0_actual,
+                p1_formal: formal,
+                p1_actual: actual,
+                p2_formal: self.p2_formal,
+                p2_actual: self.p2_actual,
+                p3_formal: self.p3_formal,
+                p3_actual: self.p3_actual
+            )
+        if self.port_count == 2:
+            result = HardwareCallInstance(
+                instance_name: self.instance_name,
+                entity_name: self.entity_name,
+                port_count: 3,
+                p0_formal: self.p0_formal,
+                p0_actual: self.p0_actual,
+                p1_formal: self.p1_formal,
+                p1_actual: self.p1_actual,
+                p2_formal: formal,
+                p2_actual: actual,
+                p3_formal: self.p3_formal,
+                p3_actual: self.p3_actual
+            )
+        if self.port_count == 3:
+            result = HardwareCallInstance(
+                instance_name: self.instance_name,
+                entity_name: self.entity_name,
+                port_count: 4,
+                p0_formal: self.p0_formal,
+                p0_actual: self.p0_actual,
+                p1_formal: self.p1_formal,
+                p1_actual: self.p1_actual,
+                p2_formal: self.p2_formal,
+                p2_actual: self.p2_actual,
+                p3_formal: formal,
+                p3_actual: actual
+            )
+        return result
+
+    me vhdl_port_map() -> text:
+        """Generate VHDL port map text for this instance."""
+        var parts = []
+        if self.port_count >= 1:
+            parts.push(self.p0_formal + " => " + self.p0_actual)
+        if self.port_count >= 2:
+            parts.push(self.p1_formal + " => " + self.p1_actual)
+        if self.port_count >= 3:
+            parts.push(self.p2_formal + " => " + self.p2_actual)
+        if self.port_count >= 4:
+            parts.push(self.p3_formal + " => " + self.p3_actual)
+        return parts.join(", ")
+
+    me vhdl_instantiation() -> text:
+        """Generate full VHDL component instantiation text."""
+        return self.instance_name + " : entity work." + self.entity_name + " port map (" + self.vhdl_port_map() + ");"
+
+    static fn create(inst: text, entity: text) -> HardwareCallInstance:
+        """Create an empty hardware call instance with no ports."""
+        return HardwareCallInstance(
+            instance_name: inst,
+            entity_name: entity,
+            port_count: 0,
+            p0_formal: "",
+            p0_actual: "",
+            p1_formal: "",
+            p1_actual: "",
+            p2_formal: "",
+            p2_actual: "",
+            p3_formal: "",
+            p3_actual: ""
+        )
+
+# ============================================================================
+# CallLowerResult — result of a lowering attempt
+# ============================================================================
+
+class CallLowerResult:
+    """Result of attempting to lower a hardware call to an entity instance."""
+    success: bool
+    instance_name: text
+    error_reason: text
+    is_indirect: bool
+    is_recursive: bool
+
+    me is_rejected():
+        """Returns true when the lowering attempt failed."""
+        return success == false
+
+    me rejection_text():
+        """Returns the error reason on failure, or "none" on success."""
+        if success == false:
+            return error_reason
+        return "none"
+
+    static fn ok(inst_name: text) -> CallLowerResult:
+        """Create a successful lowering result."""
+        return CallLowerResult(
+            success: true,
+            instance_name: inst_name,
+            error_reason: "",
+            is_indirect: false,
+            is_recursive: false
+        )
+
+    static fn reject_indirect() -> CallLowerResult:
+        """Create a failure result for indirect (function-pointer) calls."""
+        return CallLowerResult(
+            success: false,
+            instance_name: "",
+            error_reason: "indirect calls not supported",
+            is_indirect: true,
+            is_recursive: false
+        )
+
+    static fn reject_recursive() -> CallLowerResult:
+        """Create a failure result for recursive hardware calls."""
+        return CallLowerResult(
+            success: false,
+            instance_name: "",
+            error_reason: "recursion not supported in hardware",
+            is_indirect: false,
+            is_recursive: true
+        )
+
+# ============================================================================
+# LabelValidation — validation result for return label sets
+# ============================================================================
+
+class LabelValidation:
+    """Result of validating a set of return labels for a hardware entity."""
+    is_valid: bool
+    error_count: i32
+    e0_message: text
+    e1_message: text
+    has_duplicates: bool
+    has_anonymous: bool
+
+    me first_error() -> text:
+        """Returns the first error message, or empty string if valid."""
+        if self.error_count > 0:
+            return self.e0_message
+        return ""
+
+    static fn ok() -> LabelValidation:
+        """Create a passing validation result."""
+        return LabelValidation(
+            is_valid: true,
+            error_count: 0,
+            e0_message: "",
+            e1_message: "",
+            has_duplicates: false,
+            has_anonymous: false
+        )
+
+    static fn duplicate_error(dup_name: text) -> LabelValidation:
+        """Create a validation failure for duplicate label names."""
+        return LabelValidation(
+            is_valid: false,
+            error_count: 1,
+            e0_message: "duplicate return label: " + dup_name,
+            e1_message: "",
+            has_duplicates: true,
+            has_anonymous: false
+        )
+
+    static fn anonymous_error() -> LabelValidation:
+        """Create a validation failure for unlabeled same-type returns."""
+        return LabelValidation(
+            is_valid: false,
+            error_count: 1,
+            e0_message: "same-type anonymous returns require labels",
+            e1_message: "",
+            has_duplicates: false,
+            has_anonymous: true
+        )
+
+# ============================================================================
+# PortMapEntry — a single formal->actual port mapping
+# ============================================================================
+
+class PortMapEntry:
+    """A single named port map connection for hardware entity instantiation."""
+    formal_name: text
+    actual_signal: text
+    direction: text
+    bit_width: i32
+
+    me is_output():
+        """Returns true when direction is output."""
+        return self.direction == "out"
+
+    me is_input():
+        """Returns true when direction is input."""
+        return self.direction == "in"
+
+    me vhdl_signal_decl() -> text:
+        """Generate VHDL signal declaration for the actual signal."""
+        var type_str = "std_logic"
+        if self.bit_width > 1:
+            type_str = "std_logic_vector(" + (self.bit_width - 1).to_text() + " downto 0)"
+        return "signal " + self.actual_signal + " : " + type_str + ";"
+
+    me vhdl_mapping() -> text:
+        """Generate VHDL port map fragment: formal => actual."""
+        return self.formal_name + " => " + self.actual_signal
+
+    static fn input_port(formal: text, actual: text, width: i32) -> PortMapEntry:
+        """Create an input port mapping."""
+        return PortMapEntry(
+            formal_name: formal,
+            actual_signal: actual,
+            direction: "in",
+            bit_width: width
+        )
+
+    static fn output_port(formal: text, actual: text, width: i32) -> PortMapEntry:
+        """Create an output port mapping."""
+        return PortMapEntry(
+            formal_name: formal,
+            actual_signal: actual,
+            direction: "out",
+            bit_width: width
+        )
+
+# ============================================================================
+# Validation functions
+# ============================================================================
+
+fn validate_hardware_attr(attr: HardwareAttr) -> LabelValidation:
+    """Validate a hardware attribute's return labels for backend emission."""
+    if attr.has_duplicate_label():
+        var dup = ""
+        if attr.label_count >= 2:
+            if attr.l0_name == attr.l1_name:
+                dup = attr.l0_name
+        if attr.label_count >= 3:
+            if attr.l0_name == attr.l2_name:
+                dup = attr.l0_name
+            if attr.l1_name == attr.l2_name:
+                dup = attr.l1_name
+        return LabelValidation.duplicate_error(dup)
+    if attr.label_count >= 2:
+        if attr.l0_type == attr.l1_type:
+            if attr.l0_name == "" or attr.l1_name == "":
+                return LabelValidation.anonymous_error()
+    return LabelValidation.ok()
+
+fn deterministic_instance_name(entity: text, call_index: i32) -> text:
+    """Generate a deterministic VHDL instance name from entity name and call site index."""
+    return entity + "_inst" + call_index.to_text()
+
+# ============================================================================
+# Entry point
+# ============================================================================
+
+fn main():
+    print("vhdl_hardware_metadata loaded")

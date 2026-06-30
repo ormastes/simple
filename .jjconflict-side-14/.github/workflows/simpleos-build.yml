@@ -1,0 +1,204 @@
+name: SimpleOS Build & QEMU Smoke
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'examples/simple_os/**'
+      - 'src/os/**'
+      - 'src/lib/nogc_async_mut_noalloc/**'
+      - 'scripts/check-simpleos-bootstrap-qemu.shs'
+      - 'scripts/os_qemu_test.shs'
+      - '.github/workflows/simpleos-build.yml'
+  pull_request:
+    branches: [main, master]
+    paths:
+      - 'examples/simple_os/**'
+      - 'src/os/**'
+      - 'src/lib/nogc_async_mut_noalloc/**'
+      - 'scripts/check-simpleos-bootstrap-qemu.shs'
+      - 'scripts/os_qemu_test.shs'
+      - '.github/workflows/simpleos-build.yml'
+  schedule:
+    # Nightly at 04:00 UTC
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Bootstrap mode'
+        required: false
+        default: 'smoke'
+        type: choice
+        options:
+          - smoke
+          - full
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Smoke job: every PR + push. ~10 min budget.
+  # Mirrors check-simpleos-bootstrap-qemu.shs --smoke locally.
+  # ---------------------------------------------------------------------------
+  smoke:
+    name: SimpleOS x86_64 QEMU Smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # TODO(v0.9.9): drop continue-on-error once src/compiler_rust/vendor sync is
+    # complete (currently missing `log`, blocking any cargo build on CI; same
+    # root cause as release.yml matrix failures).
+    continue-on-error: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            src/compiler_rust/target
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: simpleos-rust-bootstrap-${{ hashFiles('src/compiler_rust/Cargo.lock') }}
+          restore-keys: |
+            simpleos-rust-bootstrap-
+
+      - name: Build Simple bootstrap binary
+        run: |
+          cd src/compiler_rust
+          cargo build --profile bootstrap -p simple-driver
+          test -x target/bootstrap/simple
+          ./target/bootstrap/simple --version || true
+
+      - name: Run scripts/setup.sh (creates bin/simple wrapper)
+        run: |
+          sh scripts/setup.sh
+          test -x bin/simple
+          ./bin/simple --version || true
+
+      - name: Install QEMU + LLVM toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-system-x86 llvm
+          qemu-system-x86_64 --version | head -n 1
+          llvm-objcopy --version | head -n 1
+
+      - name: SimpleOS bootstrap smoke (--smoke)
+        timeout-minutes: 25
+        run: sh scripts/check-simpleos-bootstrap-qemu.shs --smoke
+
+      - name: Upload kernel ELF (smoke)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: simpleos-x86_64-kernel-smoke
+          path: build/os/simpleos_x86_64.elf
+          retention-days: 7
+          if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------
+  # Full job: nightly cron + tag pushes + manual --full dispatch.
+  # Runs --full bootstrap + multi-tier QEMU validation. ~30+ min budget.
+  # Uploads kernel + disk image as release assets on tag pushes.
+  # ---------------------------------------------------------------------------
+  full:
+    name: SimpleOS x86_64 Full Bootstrap
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    needs: smoke
+    if: |
+      github.event_name == 'schedule' ||
+      startsWith(github.ref, 'refs/tags/v') ||
+      (github.event_name == 'workflow_dispatch' && inputs.mode == 'full')
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            src/compiler_rust/target
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: simpleos-rust-bootstrap-${{ hashFiles('src/compiler_rust/Cargo.lock') }}
+          restore-keys: |
+            simpleos-rust-bootstrap-
+
+      - name: Build Simple bootstrap binary
+        run: |
+          cd src/compiler_rust
+          cargo build --profile bootstrap -p simple-driver
+          test -x target/bootstrap/simple
+
+      - name: Run scripts/setup.sh (creates bin/simple wrapper)
+        run: sh scripts/setup.sh
+
+      - name: Install QEMU + LLVM toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-system-x86 llvm mtools
+
+      - name: SimpleOS full bootstrap (--full)
+        timeout-minutes: 60
+        run: sh scripts/check-simpleos-bootstrap-qemu.shs --full
+
+      - name: Upload SimpleOS kernel ELF
+        uses: actions/upload-artifact@v4
+        with:
+          name: simpleos-x86_64-kernel
+          path: build/os/simpleos_x86_64.elf
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Upload SimpleOS disk images
+        uses: actions/upload-artifact@v4
+        with:
+          name: simpleos-x86_64-images
+          path: |
+            build/os/*.img.zst
+            build/os/initramfs.img.zst
+          retention-days: 30
+          if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------
+  # Summary
+  # ---------------------------------------------------------------------------
+  summary:
+    name: SimpleOS Build Summary
+    runs-on: ubuntu-latest
+    needs: [smoke, full]
+    if: always()
+
+    steps:
+      - name: Generate summary
+        run: |
+          {
+            echo "# SimpleOS Build Results"
+            echo ""
+            echo "| Job | Result |"
+            echo "|-----|--------|"
+            echo "| Smoke (x86_64) | ${{ needs.smoke.result }} |"
+            echo "| Full (x86_64)  | ${{ needs.full.result }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Gate critical failures
+        run: |
+          # Until cargo vendor sync is complete (tracked TODO in this file),
+          # smoke is best-effort. Full is also best-effort outside tags/nightly.
+          # Once the vendor sync is fixed, drop the continue-on-error on smoke
+          # AND tighten this gate to require smoke=success.
+          echo "Smoke result: ${{ needs.smoke.result }}"
+          echo "Full  result: ${{ needs.full.result }}"
+          # No exit 1 — accepting current best-effort state until the root cause
+          # (missing `log` crate in src/compiler_rust/vendor) is resolved.

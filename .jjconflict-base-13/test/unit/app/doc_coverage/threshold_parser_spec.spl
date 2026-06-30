@@ -1,0 +1,234 @@
+# Threshold Config Parser Tests
+# Tests for SDN config file parsing
+
+use std.spec.{describe, it, expect}
+use doc_coverage.thresholds.config_parser.{parse_threshold_config}
+use doc_coverage.thresholds.types.{threshold_config_get}
+use app.io.mod.{cwd}
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+fn fixture_path(relative_path: text) -> text:
+    val base = cwd()
+    "{base}/test/fixtures/doc_coverage/{relative_path}"
+
+# ============================================================================
+# Tests for parse_threshold_config
+# ============================================================================
+
+describe "parse_threshold_config default behavior":
+    it "returns default config when file does not exist":
+        val config = parse_threshold_config("/nonexistent/path/config.sdn")
+
+        val default_threshold = config.default_threshold
+        expect(default_threshold).to_equal(70)
+
+    it "returns default values for non-existent file":
+        val config = parse_threshold_config("/tmp/missing_config.sdn")
+
+        val enforce = config.enforce
+        val fail_on_below = config.fail_on_below
+
+        expect(enforce).to_equal(false)
+        expect(fail_on_below).to_equal(false)
+
+describe "parse_threshold_config from test fixture":
+    it "parses default_threshold value":
+        val config_path = fixture_path("test_config.sdn")
+        val config = parse_threshold_config(config_path)
+
+        val default_threshold = config.default_threshold
+        expect(default_threshold).to_equal(70)
+
+    it "parses enforce flag":
+        val config_path = fixture_path("test_config.sdn")
+        val config = parse_threshold_config(config_path)
+
+        val enforce = config.enforce
+        expect(enforce).to_equal(true)
+
+    it "parses fail_on_below_threshold flag":
+        val config_path = fixture_path("test_config.sdn")
+        val config = parse_threshold_config(config_path)
+
+        val fail_on_below = config.fail_on_below
+        expect(fail_on_below).to_equal(false)
+
+    it "parses scope thresholds":
+        val config_path = fixture_path("test_config.sdn")
+        val config = parse_threshold_config(config_path)
+
+        val scope_count = config.scope_names.len()
+        val has_scopes = scope_count > 0
+
+        expect(has_scopes).to_equal(true)
+
+    it "parses std scope threshold correctly":
+        val config_path = fixture_path("test_config.sdn")
+        val config = parse_threshold_config(config_path)
+
+        val std_threshold = threshold_config_get(config, "src/std/")
+        expect(std_threshold).to_equal(90)
+
+    it "parses core scope threshold correctly":
+        val config_path = fixture_path("test_config.sdn")
+        val config = parse_threshold_config(config_path)
+
+        val core_threshold = threshold_config_get(config, "src/core/")
+        expect(core_threshold).to_equal(75)
+
+    it "parses lib scope threshold correctly":
+        val config_path = fixture_path("test_config.sdn")
+        val config = parse_threshold_config(config_path)
+
+        val lib_threshold = threshold_config_get(config, "src/lib/")
+        expect(lib_threshold).to_equal(80)
+
+    it "parses app scope threshold correctly":
+        val config_path = fixture_path("test_config.sdn")
+        val config = parse_threshold_config(config_path)
+
+        val app_threshold = threshold_config_get(config, "src/app/")
+        expect(app_threshold).to_equal(50)
+
+    it "parses compiler scope threshold correctly":
+        val config_path = fixture_path("test_config.sdn")
+        val config = parse_threshold_config(config_path)
+
+        val compiler_threshold = threshold_config_get(config, "src/compiler/")
+        expect(compiler_threshold).to_equal(60)
+
+    it "parses exclusion patterns":
+        val config_path = fixture_path("test_config.sdn")
+        val config = parse_threshold_config(config_path)
+
+        val exclusion_count = config.exclusions.len()
+        val has_exclusions = exclusion_count > 0
+
+        expect(has_exclusions).to_equal(true)
+
+    it "includes test exclusion pattern":
+        val config_path = fixture_path("test_config.sdn")
+        val config = parse_threshold_config(config_path)
+
+        var has_test_pattern = false
+        for pattern in config.exclusions:
+            if pattern.contains("test"):
+                has_test_pattern = true
+
+        expect(has_test_pattern).to_equal(true)
+
+    it "includes deprecated exclusion pattern":
+        val config_path = fixture_path("test_config.sdn")
+        val config = parse_threshold_config(config_path)
+
+        var has_deprecated_pattern = false
+        for pattern in config.exclusions:
+            if pattern.contains("deprecated"):
+                has_deprecated_pattern = true
+
+        expect(has_deprecated_pattern).to_equal(true)
+
+# ============================================================================
+# Tests for threshold_config_get
+# ============================================================================
+
+describe "threshold_config_get lookup":
+    it "returns default threshold for unknown scope":
+        val config_path = fixture_path("test_config.sdn")
+        val config = parse_threshold_config(config_path)
+
+        val unknown_threshold = threshold_config_get(config, "unknown/path/")
+        val default_value = config.default_threshold
+
+        expect(unknown_threshold).to_equal(default_value)
+
+    it "matches scope prefix correctly":
+        val config_path = fixture_path("test_config.sdn")
+        val config = parse_threshold_config(config_path)
+
+        val file_threshold = threshold_config_get(config, "src/std/string.spl")
+        expect(file_threshold).to_equal(90)
+
+    it "handles multiple scope lookups":
+        val config_path = fixture_path("test_config.sdn")
+        val config = parse_threshold_config(config_path)
+
+        val std_val = threshold_config_get(config, "src/std/test.spl")
+        val core_val = threshold_config_get(config, "src/core/test.spl")
+        val lib_val = threshold_config_get(config, "src/lib/test.spl")
+
+        val std_correct = std_val == 90
+        val core_correct = core_val == 75
+        val lib_correct = lib_val == 80
+
+        expect(std_correct).to_equal(true)
+        expect(core_correct).to_equal(true)
+        expect(lib_correct).to_equal(true)
+
+# ============================================================================
+# Tests for edge cases
+# ============================================================================
+
+describe "parse_threshold_config edge cases":
+    it "handles empty scope names array":
+        val config = parse_threshold_config("/nonexistent/config.sdn")
+
+        val scope_count = config.scope_names.len()
+        expect(scope_count).to_equal(0)
+
+    it "handles empty exclusions array":
+        val config = parse_threshold_config("/nonexistent/config.sdn")
+
+        val exclusion_count = config.exclusions.len()
+        expect(exclusion_count).to_equal(0)
+
+    it "default threshold is reasonable value":
+        val config = parse_threshold_config("/nonexistent/config.sdn")
+
+        val threshold = config.default_threshold
+        val is_reasonable = threshold >= 0 and threshold <= 100
+
+        expect(is_reasonable).to_equal(true)
+
+# ============================================================================
+# Integration Tests
+# ============================================================================
+
+describe "parse_threshold_config integration":
+    it "parses complete config file correctly":
+        val config_path = fixture_path("test_config.sdn")
+        val config = parse_threshold_config(config_path)
+
+        val has_default = config.default_threshold > 0
+        val has_scopes = config.scope_names.len() > 0
+        val has_exclusions = config.exclusions.len() > 0
+
+        expect(has_default).to_equal(true)
+        expect(has_scopes).to_equal(true)
+        expect(has_exclusions).to_equal(true)
+
+    it "all scope thresholds are valid percentages":
+        val config_path = fixture_path("test_config.sdn")
+        val config = parse_threshold_config(config_path)
+
+        var all_valid = true
+        var i = 0
+        while i < config.scope_values.len():
+            val threshold = config.scope_values[i]
+            if threshold < 0 or threshold > 100:
+                all_valid = false
+            i = i + 1
+
+        expect(all_valid).to_equal(true)
+
+    it "scope names and values have matching lengths":
+        val config_path = fixture_path("test_config.sdn")
+        val config = parse_threshold_config(config_path)
+
+        val names_len = config.scope_names.len()
+        val values_len = config.scope_values.len()
+
+        expect(names_len).to_equal(values_len)

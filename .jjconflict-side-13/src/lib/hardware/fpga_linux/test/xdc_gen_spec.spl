@@ -1,0 +1,136 @@
+#![allow(primitive_api)]
+
+# XDC Constraint File Generator Spec
+#
+# Tests pin assignments, clock constraints, timing constraints,
+# and board-specific XDC generation.
+
+use std.io_runtime
+use std.nogc_sync_mut.spec.{describe, it, expect}
+use hardware.fpga_linux.xdc_gen.{
+    PinAssignment, ClockConstraint, TimingConstraint, TimingConstraintKind,
+    XdcDocument, generate_mlk_s02_100t_xdc, generate_xdc_for_board
+}
+
+fn main():
+    # -----------------------------------------------------------------
+    # Pin Assignment
+    # -----------------------------------------------------------------
+    describe("PinAssignment"):
+        it("serializes to XDC with PACKAGE_PIN and IOSTANDARD"):
+            val pin = PinAssignment.create("sys_clk", "R4", "LVCMOS33")
+            val xdc = pin.to_xdc()
+            expect(xdc).to_contain("set_property PACKAGE_PIN R4 [get_ports sys_clk]")
+            expect(xdc).to_contain("set_property IOSTANDARD LVCMOS33 [get_ports sys_clk]")
+
+        it("includes comment when provided"):
+            val pin = PinAssignment.with_comment("led[0]", "N16", "LVCMOS33", "LED 0")
+            val xdc = pin.to_xdc()
+            expect(xdc).to_contain("# LED 0")
+
+    # -----------------------------------------------------------------
+    # Clock Constraint
+    # -----------------------------------------------------------------
+    describe("ClockConstraint"):
+        it("generates create_clock from Hz"):
+            val clock = ClockConstraint.from_hz("sys_clk", 25000000, "R4")
+            val xdc = clock.to_xdc()
+            expect(xdc).to_contain("create_clock")
+            expect(xdc).to_contain("-name sys_clk")
+            expect(xdc).to_contain("[get_ports R4]")
+
+        it("calculates period from frequency"):
+            val clock = ClockConstraint.from_hz("clk", 100000000, "P1")
+            expect(clock.period_ns).to_equal(10)
+
+        it("handles 25 MHz"):
+            val clock = ClockConstraint.from_hz("clk", 25000000, "P1")
+            expect(clock.period_ns).to_equal(40)
+
+    # -----------------------------------------------------------------
+    # Timing Constraint
+    # -----------------------------------------------------------------
+    describe("TimingConstraint"):
+        it("generates set_max_delay"):
+            val tc = TimingConstraint(
+                kind: TimingConstraintKind.MaxDelay,
+                from_pin: "clk_gen/clk_out",
+                to_pin: "cpu/data_in",
+                value_ns: 10,
+                comment: ""
+            )
+            val xdc = tc.to_xdc()
+            expect(xdc).to_contain("set_max_delay")
+            expect(xdc).to_contain("10.000")
+
+        it("generates set_false_path"):
+            val tc = TimingConstraint(
+                kind: TimingConstraintKind.FalsePath,
+                from_pin: "async_in",
+                to_pin: "sync_out",
+                value_ns: 0,
+                comment: "CDC crossing"
+            )
+            val xdc = tc.to_xdc()
+            expect(xdc).to_contain("set_false_path")
+            expect(xdc).to_contain("# CDC crossing")
+
+    # -----------------------------------------------------------------
+    # XDC Document
+    # -----------------------------------------------------------------
+    describe("XdcDocument"):
+        it("creates empty document with board name"):
+            val doc = XdcDocument.create("test_board")
+            expect(doc.board_name).to_equal("test_board")
+            expect(doc.pins.len()).to_equal(0)
+
+        it("serializes complete document to XDC text"):
+            var doc = XdcDocument.create("test_board")
+            doc.add_clock(ClockConstraint.from_hz("clk", 50000000, "P1"))
+            doc.add_pin(PinAssignment.create("led", "A1", "LVCMOS33"))
+            val xdc = doc.to_xdc()
+            expect(xdc).to_contain("## XDC Constraints for test_board")
+            expect(xdc).to_contain("## Clock Constraints")
+            expect(xdc).to_contain("create_clock")
+            expect(xdc).to_contain("## Pin Assignments")
+            expect(xdc).to_contain("PACKAGE_PIN A1")
+
+    # -----------------------------------------------------------------
+    # MLK-S02-100T Board XDC
+    # -----------------------------------------------------------------
+    describe("MLK-S02-100T XDC"):
+        it("generates correct system clock"):
+            val doc = generate_mlk_s02_100t_xdc()
+            val xdc = doc.to_xdc()
+            expect(xdc).to_contain("sys_clk")
+            expect(xdc).to_contain("R4")
+            expect(xdc).to_contain("create_clock")
+
+        it("includes UART pins"):
+            val doc = generate_mlk_s02_100t_xdc()
+            val xdc = doc.to_xdc()
+            expect(xdc).to_contain("uart_txd")
+            expect(xdc).to_contain("uart_rxd")
+
+        it("includes LED pins"):
+            val doc = generate_mlk_s02_100t_xdc()
+            val xdc = doc.to_xdc()
+            expect(xdc).to_contain("led[0]")
+            expect(xdc).to_contain("led[3]")
+
+        it("includes reset button"):
+            val doc = generate_mlk_s02_100t_xdc()
+            val xdc = doc.to_xdc()
+            expect(xdc).to_contain("sys_rst_n")
+
+    # -----------------------------------------------------------------
+    # Board lookup
+    # -----------------------------------------------------------------
+    describe("generate_xdc_for_board"):
+        it("resolves mlk_s02_100t"):
+            val result = generate_xdc_for_board("mlk_s02_100t")
+            expect(result.is_ok()).to_equal(true)
+
+        it("returns error for unknown board"):
+            val result = generate_xdc_for_board("nonexistent")
+            expect(result.is_err()).to_equal(true)

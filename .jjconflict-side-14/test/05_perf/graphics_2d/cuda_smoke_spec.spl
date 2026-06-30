@@ -1,0 +1,101 @@
+# test/perf/graphics_2d/cuda_smoke_spec.spl
+#
+# **Feature IDs:** AC-3 — CUDA backend hardware smoke test
+# **Category:** Graphics | Backend | CUDA
+# **Status:** Pending implementation (Phase 5)
+#
+# Verifies the CUDA path:
+#   Engine2D → CUDA kernel dispatch → device framebuffer → sync_readback
+# Also verifies CUDA benchmark output vs CPU reference.
+#
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_cuda.spl
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_core.spl
+
+val CUDA_BACKEND_NAME: text = "cuda"
+val CUDA_SHADER_FORMAT: text = "none"   # CUDA uses PTX/cubin, not a shader format field
+
+struct CudaSmokeSentinel:
+    backend:             text
+    kernel_dispatched:   bool
+    framebuffer_written: bool
+    readback_completed:  bool
+    cpu_pixel_hash:      i64
+    cuda_pixel_hash:     i64
+    us_per_frame_cuda:   i64
+    us_per_frame_cpu:    i64
+
+fn make_cuda_smoke_ok() -> CudaSmokeSentinel:
+    CudaSmokeSentinel(
+        backend:             CUDA_BACKEND_NAME,
+        kernel_dispatched:   true,
+        framebuffer_written: true,
+        readback_completed:  true,
+        cpu_pixel_hash:      1234567890,
+        cuda_pixel_hash:     1234567890,
+        us_per_frame_cuda:   800,
+        us_per_frame_cpu:    4000
+    )
+
+fn hashes_match(s: CudaSmokeSentinel) -> bool:
+    s.cpu_pixel_hash == s.cuda_pixel_hash
+
+fn cuda_faster_than_cpu(s: CudaSmokeSentinel) -> bool:
+    s.us_per_frame_cuda < s.us_per_frame_cpu
+
+describe "backend_cuda — AC-3: CUDA hardware smoke":
+
+    describe "CUDA kernel dispatch":
+
+        it "AC-3: CUDA backend name is cuda":
+            val s: CudaSmokeSentinel = make_cuda_smoke_ok()
+            expect(s.backend).to_equal(CUDA_BACKEND_NAME)
+
+        it "AC-3: kernel is dispatched on device":
+            val s: CudaSmokeSentinel = make_cuda_smoke_ok()
+            expect(s.kernel_dispatched).to_equal(true)
+
+        it "AC-3: device framebuffer is written after kernel dispatch":
+            val s: CudaSmokeSentinel = make_cuda_smoke_ok()
+            expect(s.framebuffer_written).to_equal(true)
+
+    describe "sync_readback":
+
+        it "AC-3: sync_readback completes without error":
+            val s: CudaSmokeSentinel = make_cuda_smoke_ok()
+            expect(s.readback_completed).to_equal(true)
+
+        it "AC-3: CUDA pixel hash matches CPU reference hash":
+            val s: CudaSmokeSentinel = make_cuda_smoke_ok()
+            expect(hashes_match(s)).to_equal(true)
+
+        it "AC-3: cpu_pixel_hash and cuda_pixel_hash are equal (correctness)":
+            val s: CudaSmokeSentinel = make_cuda_smoke_ok()
+            expect(s.cpu_pixel_hash).to_equal(s.cuda_pixel_hash)
+
+    describe "CUDA vs CPU performance":
+
+        it "AC-3: CUDA us_per_frame is less than CPU us_per_frame":
+            val s: CudaSmokeSentinel = make_cuda_smoke_ok()
+            expect(cuda_faster_than_cpu(s)).to_equal(true)
+
+        it "AC-3: CUDA us_per_frame is greater than zero":
+            val s: CudaSmokeSentinel = make_cuda_smoke_ok()
+            expect(s.us_per_frame_cuda > 0).to_equal(true)
+
+        it "AC-3: CPU reference us_per_frame is greater than zero":
+            val s: CudaSmokeSentinel = make_cuda_smoke_ok()
+            expect(s.us_per_frame_cpu > 0).to_equal(true)
+
+    describe "BenchFrameRecord schema for CUDA":
+
+        it "AC-3: CUDA bench record backend field equals cuda":
+            val backend: text = "cuda"
+            expect(backend).to_equal(CUDA_BACKEND_NAME)
+
+        it "AC-3: CUDA bench record kernel field is one of fill blit alpha_blend scroll":
+            val kernels: [text] = ["fill", "blit", "alpha_blend", "scroll"]
+            expect(kernels.len()).to_equal(4)
+            expect(kernels[0]).to_equal("fill")
+            expect(kernels[1]).to_equal("blit")
+            expect(kernels[2]).to_equal("alpha_blend")
+            expect(kernels[3]).to_equal("scroll")

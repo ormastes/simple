@@ -1,0 +1,195 @@
+# AssetBrowserPanel — grid/list view of project assets
+#
+# Navigates project asset directories, shows thumbnails,
+# and emits events for opening/instantiating assets.
+
+use std.nogc_sync_mut.editor.typed_event_bus.{EditorEvent, EventQueue}
+
+# ============================================================================
+# AssetType
+# ============================================================================
+
+enum AssetType:
+    TextureAsset
+    AudioAsset
+    SceneAsset
+    ScriptAsset
+    UnknownAsset
+
+# ============================================================================
+# AssetEntry — one file or directory in the browser
+# ============================================================================
+
+struct AssetEntry:
+    name: text
+    path: text
+    asset_type: AssetType
+    size_bytes: i64
+    is_directory: bool
+
+impl AssetEntry:
+    static fn file(name: text, path: text, asset_type: AssetType, size: i64) -> AssetEntry:
+        AssetEntry(
+            name: name,
+            path: path,
+            asset_type: asset_type,
+            size_bytes: size,
+            is_directory: false
+        )
+
+    static fn directory(name: text, path: text) -> AssetEntry:
+        AssetEntry(
+            name: name,
+            path: path,
+            asset_type: AssetType.UnknownAsset,
+            size_bytes: 0,
+            is_directory: true
+        )
+
+# ============================================================================
+# detect_asset_type — classify file by extension
+# ============================================================================
+
+fn detect_asset_type(filename: text) -> AssetType:
+    if filename.ends_with(".png"):
+        return AssetType.TextureAsset
+    if filename.ends_with(".jpg"):
+        return AssetType.TextureAsset
+    if filename.ends_with(".bmp"):
+        return AssetType.TextureAsset
+    if filename.ends_with(".wav"):
+        return AssetType.AudioAsset
+    if filename.ends_with(".ogg"):
+        return AssetType.AudioAsset
+    if filename.ends_with(".mp3"):
+        return AssetType.AudioAsset
+    if filename.ends_with(".sdn"):
+        return AssetType.SceneAsset
+    if filename.ends_with(".spl"):
+        return AssetType.ScriptAsset
+    AssetType.UnknownAsset
+
+# ============================================================================
+# BrowseViewMode
+# ============================================================================
+
+enum BrowseViewMode:
+    GridView
+    ListView
+
+# ============================================================================
+# AssetBrowserPanel
+# ============================================================================
+
+class AssetBrowserPanel:
+    current_path: text
+    entries: [AssetEntry]
+    selected_index: i32
+    view_mode: BrowseViewMode
+    event_queue: EventQueue
+    scroll_offset: f64
+    search_filter: text
+
+impl AssetBrowserPanel:
+    static fn new(root_path: text) -> AssetBrowserPanel:
+        AssetBrowserPanel(
+            current_path: root_path,
+            entries: [],
+            selected_index: -1,
+            view_mode: BrowseViewMode.GridView,
+            event_queue: EventQueue.new(),
+            scroll_offset: 0.0,
+            search_filter: ""
+        )
+
+    me set_entries(entries: [AssetEntry]):
+        self.entries = entries
+        self.selected_index = -1
+        self.scroll_offset = 0.0
+
+    me select_entry(index: i32):
+        if index >= 0 and index < self.entries.len():
+            self.selected_index = index
+
+    me open_selected():
+        if self.selected_index < 0 or self.selected_index >= self.entries.len():
+            return
+        val entry = self.entries[self.selected_index]
+        if entry.is_directory:
+            # Navigate into the directory
+            self.current_path = entry.path
+            self.entries = []
+            self.selected_index = -1
+            self.scroll_offset = 0.0
+            return
+
+        # Emit asset-opened event based on type
+        match entry.asset_type:
+            AssetType.TextureAsset =>
+                self.event_queue.push(EditorEvent.AssetOpened(
+                    asset_path: entry.path,
+                    asset_type: "texture"
+                ))
+            AssetType.AudioAsset =>
+                self.event_queue.push(EditorEvent.AssetOpened(
+                    asset_path: entry.path,
+                    asset_type: "audio"
+                ))
+            AssetType.SceneAsset =>
+                self.event_queue.push(EditorEvent.AssetOpened(
+                    asset_path: entry.path,
+                    asset_type: "scene"
+                ))
+            AssetType.ScriptAsset =>
+                self.event_queue.push(EditorEvent.AssetOpened(
+                    asset_path: entry.path,
+                    asset_type: "script"
+                ))
+            AssetType.UnknownAsset =>
+                self.event_queue.push(EditorEvent.AssetOpened(
+                    asset_path: entry.path,
+                    asset_type: "unknown"
+                ))
+
+    me navigate_up():
+        # Go to parent directory by stripping the last path component
+        var last_slash = -1
+        var i = 0
+        val path_len = self.current_path.len()
+        while i < path_len:
+            val ch = self.current_path.char_at(i)
+            if ch == "/":
+                last_slash = i
+            i = i + 1
+        if last_slash > 0:
+            self.current_path = self.current_path.substring(0, last_slash)
+            self.entries = []
+            self.selected_index = -1
+            self.scroll_offset = 0.0
+
+    me toggle_view_mode():
+        match self.view_mode:
+            BrowseViewMode.GridView =>
+                self.view_mode = BrowseViewMode.ListView
+            BrowseViewMode.ListView =>
+                self.view_mode = BrowseViewMode.GridView
+
+    me set_search(filter: text):
+        self.search_filter = filter
+
+    fn filtered_entries(self) -> [AssetEntry]:
+        if self.search_filter == "":
+            return self.entries
+        var result: [AssetEntry] = []
+        for entry in self.entries:
+            if entry.name.contains(self.search_filter):
+                result = result.push(entry)
+        result
+
+    fn entry_count(self) -> i32:
+        self.entries.len()
+
+    me scroll_by(delta: f64):
+        self.scroll_offset = self.scroll_offset + delta
+        if self.scroll_offset < 0.0:
+            self.scroll_offset = 0.0

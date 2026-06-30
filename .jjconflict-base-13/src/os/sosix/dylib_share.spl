@@ -1,0 +1,168 @@
+# SOSIX shared library handle passing between processes.
+#
+# Tracks cross-process dylib handle grants. This is a capability table only;
+# the actual dynamic loader lives elsewhere.
+
+use os.kernel.errno.{EBADF, EINVAL, ENOMEM}
+
+val SOSIX_MAX_DYLIB_GRANTS: u64 = 32
+val SOSIX_DYLIB_HANDLE_SLOT_BITS: u64 = 16
+val SOSIX_DYLIB_HANDLE_SLOT_MASK: u64 = 0xFFFF
+val SOSIX_DYLIB_NO_HANDLE: u64 = 0xFFFFFFFFFFFFFFFF
+val SOSIX_DYLIB_PATH_MAX: u64 = 256
+
+val SOSIX_DYLIB_GRANT_FREE: u8 = 0
+val SOSIX_DYLIB_GRANT_ACTIVE: u8 = 1
+val SOSIX_DYLIB_GRANT_REVOKED: u8 = 2
+
+var sosix_dylib_grant_active: [bool; 32]
+var sosix_dylib_grant_state: [u8; 32]
+var sosix_dylib_grant_owner: [u64; 32]
+var sosix_dylib_grant_borrower: [u64; 32]
+var sosix_dylib_grant_base_addr: [u64; 32]
+var sosix_dylib_grant_size: [u64; 32]
+var sosix_dylib_grant_generations: [u64; 32]
+# Packed path bytes: [slot_index * SOSIX_DYLIB_PATH_MAX + byte_index]
+var sosix_dylib_grant_path_len: [u64; 32]
+var sosix_dylib_grant_path: [u8; 8192]
+
+fn sosix_dylib_share_init():
+    """Initialize the SOSIX dylib handle grant table."""
+    var i: u64 = 0
+    while i < SOSIX_MAX_DYLIB_GRANTS:
+        sosix_dylib_grant_active[i] = false
+        sosix_dylib_grant_state[i] = SOSIX_DYLIB_GRANT_FREE
+        sosix_dylib_grant_owner[i] = 0
+        sosix_dylib_grant_borrower[i] = 0
+        sosix_dylib_grant_base_addr[i] = 0
+        sosix_dylib_grant_size[i] = 0
+        sosix_dylib_grant_generations[i] = 0
+        sosix_dylib_grant_path_len[i] = 0
+        i = i + 1
+    i = 0
+    while i < SOSIX_MAX_DYLIB_GRANTS * SOSIX_DYLIB_PATH_MAX:
+        sosix_dylib_grant_path[i] = 0
+        i = i + 1
+
+fn _sosix_dylib_handle_slot(handle: u64) -> u64:
+    handle & SOSIX_DYLIB_HANDLE_SLOT_MASK
+
+fn _sosix_dylib_handle_generation(handle: u64) -> u64:
+    handle >> SOSIX_DYLIB_HANDLE_SLOT_BITS
+
+fn _sosix_dylib_make_handle(slot: u64) -> u64:
+    (sosix_dylib_grant_generations[slot] << SOSIX_DYLIB_HANDLE_SLOT_BITS) | slot
+
+fn _sosix_dylib_grant_valid(handle: u64) -> bool:
+    if handle == SOSIX_DYLIB_NO_HANDLE:
+        return false
+    val slot = _sosix_dylib_handle_slot(handle)
+    if slot >= SOSIX_MAX_DYLIB_GRANTS:
+        return false
+    if not sosix_dylib_grant_active[slot]:
+        return false
+    sosix_dylib_grant_generations[slot] == _sosix_dylib_handle_generation(handle)
+
+fn sosix_dylib_grant_create(owner_pid: u64, borrower_pid: u64, base_addr: u64, size: u64, path: [u8]) -> i64:
+    """Grant a dylib handle from owner to borrower.
+
+    Returns a handle (>=0) on success, or a negated errno on failure.
+    """
+    if owner_pid == 0:
+        return 0 - EINVAL as i64
+    if size == 0:
+        return 0 - EINVAL as i64
+    if path.len() > SOSIX_DYLIB_PATH_MAX:
+        return 0 - EINVAL as i64
+    var i: u64 = 0
+    while i < SOSIX_MAX_DYLIB_GRANTS:
+        if not sosix_dylib_grant_active[i]:
+            sosix_dylib_grant_active[i] = true
+            sosix_dylib_grant_state[i] = SOSIX_DYLIB_GRANT_ACTIVE
+            sosix_dylib_grant_owner[i] = owner_pid
+            sosix_dylib_grant_borrower[i] = borrower_pid
+            sosix_dylib_grant_base_addr[i] = base_addr
+            sosix_dylib_grant_size[i] = size
+            val path_base = i * SOSIX_DYLIB_PATH_MAX
+            var pi: u64 = 0
+            while pi < path.len().to_u64():
+                sosix_dylib_grant_path[path_base + pi] = path[pi]
+                pi = pi + 1
+            sosix_dylib_grant_path_len[i] = path.len().to_u64()
+            return _sosix_dylib_make_handle(i) as i64
+        i = i + 1
+    0 - ENOMEM as i64
+
+fn sosix_dylib_grant_base(handle: u64) -> u64:
+    """Return the mapped base address of the granted dylib, or 0 on invalid handle."""
+    if not _sosix_dylib_grant_valid(handle):
+        return 0
+    sosix_dylib_grant_base_addr[_sosix_dylib_handle_slot(handle)]
+
+fn sosix_dylib_grant_size(handle: u64) -> u64:
+    """Return the size in bytes of the granted dylib mapping, or 0 on invalid handle."""
+    if not _sosix_dylib_grant_valid(handle):
+        return 0
+    sosix_dylib_grant_size[_sosix_dylib_handle_slot(handle)]
+
+fn sosix_dylib_grant_path_len(handle: u64) -> i64:
+    """Return the path byte length for the granted dylib, or negated errno."""
+    if not _sosix_dylib_grant_valid(handle):
+        return 0 - EBADF as i64
+    sosix_dylib_grant_path_len[_sosix_dylib_handle_slot(handle)] as i64
+
+fn sosix_dylib_grant_path_byte(handle: u64, index: u64) -> i64:
+    """Return one byte of the dylib path, or negated errno on bad handle/index."""
+    if not _sosix_dylib_grant_valid(handle):
+        return 0 - EBADF as i64
+    val slot = _sosix_dylib_handle_slot(handle)
+    if index >= sosix_dylib_grant_path_len[slot]:
+        return 0 - EINVAL as i64
+    sosix_dylib_grant_path[slot * SOSIX_DYLIB_PATH_MAX + index] as i64
+
+fn sosix_dylib_grant_is_active(handle: u64) -> bool:
+    """Return true if the grant is active (not revoked)."""
+    if not _sosix_dylib_grant_valid(handle):
+        return false
+    sosix_dylib_grant_state[_sosix_dylib_handle_slot(handle)] == SOSIX_DYLIB_GRANT_ACTIVE
+
+fn sosix_dylib_grant_revoke(handle: u64) -> i64:
+    """Revoke a dylib grant without releasing the slot.
+
+    Returns 0 on success, negated errno on failure.
+    """
+    if not _sosix_dylib_grant_valid(handle):
+        return 0 - EBADF as i64
+    val slot = _sosix_dylib_handle_slot(handle)
+    if sosix_dylib_grant_state[slot] != SOSIX_DYLIB_GRANT_ACTIVE:
+        return 0 - EINVAL as i64
+    sosix_dylib_grant_state[slot] = SOSIX_DYLIB_GRANT_REVOKED
+    0
+
+fn sosix_dylib_grant_close(handle: u64) -> i64:
+    """Release a dylib grant slot.
+
+    Returns 0 on success, negated errno on failure.
+    """
+    if not _sosix_dylib_grant_valid(handle):
+        return 0 - EBADF as i64
+    val slot = _sosix_dylib_handle_slot(handle)
+    sosix_dylib_grant_active[slot] = false
+    sosix_dylib_grant_state[slot] = SOSIX_DYLIB_GRANT_FREE
+    sosix_dylib_grant_owner[slot] = 0
+    sosix_dylib_grant_borrower[slot] = 0
+    sosix_dylib_grant_base_addr[slot] = 0
+    sosix_dylib_grant_size[slot] = 0
+    sosix_dylib_grant_path_len[slot] = 0
+    sosix_dylib_grant_generations[slot] = sosix_dylib_grant_generations[slot] + 1
+    0
+
+fn sosix_dylib_grant_handle_slot(handle: u64) -> i64:
+    if not _sosix_dylib_grant_valid(handle):
+        return 0 - EBADF as i64
+    _sosix_dylib_handle_slot(handle) as i64
+
+fn sosix_dylib_grant_handle_generation(handle: u64) -> i64:
+    if not _sosix_dylib_grant_valid(handle):
+        return 0 - EBADF as i64
+    _sosix_dylib_handle_generation(handle) as i64

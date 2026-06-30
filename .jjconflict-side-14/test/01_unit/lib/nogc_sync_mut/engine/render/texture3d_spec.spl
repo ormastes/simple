@@ -1,0 +1,218 @@
+use std.spec
+use std.nogc_sync_mut.engine.render.texture3d.{
+    TextureCache3D, texture_cache_new, texture_cache_upload,
+    texture_cache_get, texture_cache_evict
+}
+use std.nogc_sync_mut.engine.render.texture_atlas3d.{
+    AtlasRect, TextureAtlas3D, atlas_new, atlas_pack, atlas_lookup
+}
+use std.nogc_sync_mut.engine.render.backend3d.{
+    PipelineHandle, BufferHandle, TextureHandle, RenderPassHandle,
+    PipelineDesc3D, TextureFormat3D
+}
+use std.nogc_sync_mut.engine.render.material3d.{Material3D, MaterialType3D, material_bind}
+use std.nogc_sync_mut.engine.render.software_backend3d.{SoftwareRenderBackend3D}
+use std.nogc_sync_mut.engine.render.capability3d.{RenderBackendKind3D}
+
+# ============================================================================
+# Module-level helpers
+# ============================================================================
+
+fn make_software_backend_inited() -> SoftwareRenderBackend3D:
+    var backend = SoftwareRenderBackend3D.create()
+    val _ = backend.init(320, 240)
+    backend
+
+fn make_2x2_rgba_pixels() -> [u8]:
+    # 2x2 RGBA pixels = 16 bytes
+    [255, 0, 0, 255,   0, 255, 0, 255,
+     0, 0, 255, 255,   255, 255, 0, 255]
+
+fn make_4x4_rgba_pixels() -> [u8]:
+    # 4x4 RGBA pixels = 64 bytes, all white
+    [255, 255, 255, 255,  255, 255, 255, 255,  255, 255, 255, 255,  255, 255, 255, 255,
+     255, 255, 255, 255,  255, 255, 255, 255,  255, 255, 255, 255,  255, 255, 255, 255,
+     255, 255, 255, 255,  255, 255, 255, 255,  255, 255, 255, 255,  255, 255, 255, 255,
+     255, 255, 255, 255,  255, 255, 255, 255,  255, 255, 255, 255,  255, 255, 255, 255]
+
+fn make_render_pass(backend: SoftwareRenderBackend3D) -> RenderPassHandle:
+    val color_tex = backend.create_texture(320, 240, TextureFormat3D.Rgba8Unorm)
+    val depth_tex = backend.create_texture(320, 240, TextureFormat3D.Depth32Float)
+    backend.begin_render_pass(color_tex, depth_tex)
+
+fn make_pipeline_desc() -> PipelineDesc3D:
+    PipelineDesc3D(
+        vertex_shader_spirv: [],
+        fragment_shader_spirv: [],
+        vertex_shader_wgsl: "",
+        fragment_shader_wgsl: "",
+        vertex_stride: 32,
+        cull_back_faces: true,
+        depth_write: true,
+        depth_test: true
+    )
+
+# ============================================================================
+# Stream F — texture3d.spl specs
+# AC-7
+# ============================================================================
+
+describe "Stream F: TextureCache3D":
+
+    describe "texture_cache_new":
+        it "AC-7: new cache has no entries":
+            val cache = texture_cache_new()
+            expect(cache.ids.length).to_equal(0)
+
+        it "AC-7: new cache next_id starts at 0":
+            val cache = texture_cache_new()
+            expect(cache.next_id).to_equal(0)
+
+    describe "texture_cache_upload":
+        it "AC-7: upload returns an id >= 0":
+            var cache = texture_cache_new()
+            var backend = make_software_backend_inited()
+            val pixels = make_2x2_rgba_pixels()
+            val id = texture_cache_upload(cache, backend, 2, 2, TextureFormat3D.Rgba8Unorm, pixels)
+            expect(id).to_be_greater_than(-1)
+
+        it "AC-7: upload increments cache entry count by 1":
+            var cache = texture_cache_new()
+            var backend = make_software_backend_inited()
+            val pixels = make_2x2_rgba_pixels()
+            val _ = texture_cache_upload(cache, backend, 2, 2, TextureFormat3D.Rgba8Unorm, pixels)
+            expect(cache.ids.length).to_equal(1)
+
+        it "AC-7: two uploads produce distinct ids":
+            var cache = texture_cache_new()
+            var backend = make_software_backend_inited()
+            val pixels = make_2x2_rgba_pixels()
+            val id1 = texture_cache_upload(cache, backend, 2, 2, TextureFormat3D.Rgba8Unorm, pixels)
+            val id2 = texture_cache_upload(cache, backend, 2, 2, TextureFormat3D.Rgba8Unorm, pixels)
+            val distinct = id1 != id2
+            expect(distinct).to_equal(true)
+
+    describe "texture_cache_get":
+        it "AC-7: get returns valid TextureHandle for uploaded id":
+            var cache = texture_cache_new()
+            var backend = make_software_backend_inited()
+            val pixels = make_2x2_rgba_pixels()
+            val id = texture_cache_upload(cache, backend, 2, 2, TextureFormat3D.Rgba8Unorm, pixels)
+            val handle = texture_cache_get(cache, id)
+            expect(handle.id).to_be_greater_than(-1)
+
+        it "AC-7: get for unknown id returns invalid handle":
+            val cache = texture_cache_new()
+            val handle = texture_cache_get(cache, 9999)
+            expect(handle.id).to_equal(-1)
+
+    describe "texture_cache_evict":
+        it "AC-7: evict removes entry from cache":
+            var cache = texture_cache_new()
+            var backend = make_software_backend_inited()
+            val pixels = make_2x2_rgba_pixels()
+            val id = texture_cache_upload(cache, backend, 2, 2, TextureFormat3D.Rgba8Unorm, pixels)
+            texture_cache_evict(cache, id)
+            val handle = texture_cache_get(cache, id)
+            expect(handle.id).to_equal(-1)
+
+# ============================================================================
+# Stream F — texture_atlas3d.spl specs
+# AC-7
+# ============================================================================
+
+describe "Stream F: TextureAtlas3D":
+
+    describe "atlas_new":
+        it "AC-7: atlas texture handle is valid after creation":
+            var backend = make_software_backend_inited()
+            val atlas = atlas_new(backend, 512, 512)
+            expect(atlas.atlas_texture.id).to_be_greater_than(-1)
+
+        it "AC-7: atlas starts with no rects":
+            var backend = make_software_backend_inited()
+            val atlas = atlas_new(backend, 512, 512)
+            expect(atlas.rects.length).to_equal(0)
+
+        it "AC-7: atlas stores correct width and height":
+            var backend = make_software_backend_inited()
+            val atlas = atlas_new(backend, 512, 512)
+            expect(atlas.atlas_width).to_equal(512)
+            expect(atlas.atlas_height).to_equal(512)
+
+    describe "atlas_pack":
+        it "AC-7: pack returns rect with non-zero width and height":
+            var backend = make_software_backend_inited()
+            var atlas = atlas_new(backend, 512, 512)
+            val pixels = make_4x4_rgba_pixels()
+            val rect = atlas_pack(atlas, backend, 100, pixels, 4, 4)
+            expect(rect.width).to_equal(4)
+            expect(rect.height).to_equal(4)
+
+        it "AC-7: pack returns uv coords in range 0.0..1.0":
+            var backend = make_software_backend_inited()
+            var atlas = atlas_new(backend, 512, 512)
+            val pixels = make_4x4_rgba_pixels()
+            val rect = atlas_pack(atlas, backend, 101, pixels, 4, 4)
+            expect(rect.u0).to_be_greater_than(-1.0)
+            expect(rect.u1).to_be_less_than(2.0)
+
+        it "AC-7: pack stores rect in atlas rects list":
+            var backend = make_software_backend_inited()
+            var atlas = atlas_new(backend, 512, 512)
+            val pixels = make_4x4_rgba_pixels()
+            val _ = atlas_pack(atlas, backend, 102, pixels, 4, 4)
+            expect(atlas.rects.length).to_equal(1)
+
+    describe "atlas_lookup":
+        it "AC-7: lookup returns same rect as pack":
+            var backend = make_software_backend_inited()
+            var atlas = atlas_new(backend, 512, 512)
+            val pixels = make_4x4_rgba_pixels()
+            val packed = atlas_pack(atlas, backend, 200, pixels, 4, 4)
+            val found = atlas_lookup(atlas, 200)
+            expect(found.width).to_equal(packed.width)
+            expect(found.height).to_equal(packed.height)
+
+        it "AC-7: lookup unknown id returns zero-size rect":
+            var backend = make_software_backend_inited()
+            val atlas = atlas_new(backend, 512, 512)
+            val found = atlas_lookup(atlas, 9999)
+            expect(found.width).to_equal(0)
+            expect(found.height).to_equal(0)
+
+# ============================================================================
+# Stream F — material_bind specs
+# AC-7
+# ============================================================================
+
+describe "Stream F: material_bind":
+
+    describe "material_bind calls correct texture slot bindings":
+        it "AC-7: material_bind does not crash with valid albedo texture":
+            var backend = make_software_backend_inited()
+            var cache = texture_cache_new()
+            val pixels = make_2x2_rgba_pixels()
+            val tex_id = texture_cache_upload(cache, backend, 2, 2, TextureFormat3D.Rgba8Unorm, pixels)
+            val mat = Material3D.pbr_with_texture(tex_id)
+            backend.begin_frame()
+            val rph = make_render_pass(backend)
+            val desc = make_pipeline_desc()
+            val pip = backend.create_pipeline(desc)
+            material_bind(mat, cache, backend, rph)
+            backend.end_render_pass(rph)
+            backend.end_frame()
+            expect(backend.active_pass.pass_id).to_equal(-1)
+            expect(backend.textures.length).to_equal(3)
+
+        it "AC-7: material_bind with no texture does not crash":
+            var backend = make_software_backend_inited()
+            var cache = texture_cache_new()
+            val mat = Material3D.phong()
+            backend.begin_frame()
+            val rph = make_render_pass(backend)
+            material_bind(mat, cache, backend, rph)
+            backend.end_render_pass(rph)
+            backend.end_frame()
+            expect(backend.active_pass.pass_id).to_equal(-1)
+            expect(backend.textures.length).to_equal(2)

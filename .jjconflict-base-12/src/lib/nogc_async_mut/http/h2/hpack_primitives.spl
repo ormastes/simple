@@ -1,0 +1,158 @@
+# HPACK Primitives — RFC 7541 §5
+#
+# Shared encoding/decoding primitives for HPACK (HTTP/2 header compression).
+# Both h2_hpack.spl and future QPACK migrations should use these.
+#
+# Scope:
+#   - Prefixed integer encode/decode (RFC 7541 §5.1)
+#   - String literal encode/decode (RFC 7541 §5.2)
+#     H=0 (raw) only — H=1 Huffman not supported (returns Err on decode)
+#
+# Depends on: nothing in this codebase (pure RFC 7541 §5 arithmetic)
+
+# ============================================================================
+# Result types
+# ============================================================================
+
+class HpackIntOk:
+    """Successful prefixed integer decode."""
+    value: i64
+    consumed: i64   # bytes consumed from the input buffer
+
+enum HpackIntResult:
+    """Result of decoding a prefixed integer."""
+    Ok(HpackIntOk)
+    Err(msg: text)
+
+class HpackStringOk:
+    """Successful string literal decode."""
+    value: text
+    consumed: i64   # bytes consumed (including H+length prefix)
+
+enum HpackStringResult:
+    """Result of decoding a string literal."""
+    Ok(HpackStringOk)
+    Err(msg: text)
+
+# ============================================================================
+# Prefixed integer encoding — RFC 7541 §5.1
+#
+# An integer I is encoded with N prefix bits in the first byte:
+#   - If I < 2^N - 1: store I directly in the low N bits.
+#   - Else: set all N prefix bits to 1, then encode I - (2^N - 1) in
+#     continuation bytes using 7-bit chunks with bit 7 = continuation flag.
+# ============================================================================
+
+pub fn hpack_encode_int(value: i64, prefix_bits: i64, prefix_byte: i64) -> [u8]:
+    """Encode integer `value` using HPACK prefixed-integer encoding.
+
+    prefix_bits: number of low bits in the first byte available for the value (1..8).
+    prefix_byte: the high bits of the first byte (already shifted into position).
+    Returns encoded bytes.
+    """
+    val max_prefix = (1 << prefix_bits) - 1
+    var out: [u8] = []
+    if value < max_prefix:
+        out.push((prefix_byte | value) & 0xff)
+        return out
+    out.push((prefix_byte | max_prefix) & 0xff)
+    var remaining = value - max_prefix
+    loop:
+        if remaining < 128:
+            out.push(remaining & 0x7f)
+            break
+        out.push((remaining & 0x7f) | 0x80)
+        remaining = remaining >> 7
+    return out
+
+pub fn hpack_decode_int(buf: [u8], offset: i64, prefix_bits: i64) -> HpackIntResult:
+    """Decode a prefixed integer from `buf` starting at `offset`.
+
+    prefix_bits: number of low bits in the first byte used for the value (1..8).
+    Returns Ok(value, consumed) or Err.
+    """
+    if offset < 0:
+        return HpackIntResult.Err("negative offset")
+    if prefix_bits < 1 or prefix_bits > 8:
+        return HpackIntResult.Err("invalid prefix bit width")
+    if offset >= buf.len():
+        return HpackIntResult.Err("offset past end of buffer")
+    val max_prefix = (1 << prefix_bits) - 1
+    val first = buf[offset] & max_prefix
+    if first < max_prefix:
+        return HpackIntResult.Ok(HpackIntOk(value: first, consumed: 1))
+    # Multi-byte continuation
+    var value = max_prefix
+    var shift = 0
+    var pos = offset + 1
+    loop:
+        if pos >= buf.len():
+            return HpackIntResult.Err("prefixed integer truncated")
+        val b = buf[pos] & 0xff
+        value = value + ((b & 0x7f) << shift)
+        pos = pos + 1
+        if (b & 0x80) == 0:
+            break
+        shift = shift + 7
+        if shift > 56:
+            return HpackIntResult.Err("prefixed integer overflow")
+    return HpackIntResult.Ok(HpackIntOk(value: value, consumed: pos - offset))
+
+# ============================================================================
+# String literal encoding — RFC 7541 §5.2
+#
+# Wire format: H(1 bit) + Length(7-bit prefixed int) + String data
+#   H=0: raw octets (this implementation)
+#   H=1: Huffman-encoded (not supported — decode returns Err)
+# ============================================================================
+
+pub fn hpack_encode_string_raw(s: text) -> [u8]:
+    """Encode string `s` as a raw (H=0) HPACK string literal.
+
+    Format: 0x00 high bit (H=0) + 7-bit prefixed length + raw bytes.
+    """
+    val slen = s.len()
+    # H=0 means high bit = 0; prefix_byte=0x00, prefix_bits=7
+    var out = hpack_encode_int(slen, 7, 0x00)
+    var i = 0
+    while i < slen:
+        val c = s[i]
+        out.push(c & 0xff)
+        i = i + 1
+    return out
+
+pub fn hpack_decode_string(buf: [u8], offset: i64) -> HpackStringResult:
+    """Decode an HPACK string literal from `buf` at `offset`.
+
+    H=0: raw octets.
+    H=1: Huffman-encoded (not supported — returns Err).
+    Returns Ok(value, consumed) or Err.
+    """
+    if offset < 0:
+        return HpackStringResult.Err("negative offset")
+    if offset >= buf.len():
+        return HpackStringResult.Err("offset past end of buffer")
+    val first_byte = buf[offset] & 0xff
+    val is_huffman = (first_byte & 0x80) != 0
+    if is_huffman:
+        return HpackStringResult.Err("Huffman-encoded strings not yet supported")
+    # Decode 7-bit prefixed length (H bit already checked above)
+    val len_result = hpack_decode_int(buf, offset, 7)
+    match len_result:
+        case Err(msg):
+            return HpackStringResult.Err(msg)
+        case Ok(ok):
+            val str_len = ok.value
+            val header_consumed = ok.consumed
+            val start = offset + header_consumed
+            val end = start + str_len
+            if end > buf.len():
+                return HpackStringResult.Err("string literal truncated")
+            # Build text from raw bytes
+            var result = ""
+            var i = start
+            while i < end:
+                result = result + buf[i].to_text()
+                i = i + 1
+            val total_consumed = header_consumed + str_len
+            return HpackStringResult.Ok(HpackStringOk(value: result, consumed: total_consumed))

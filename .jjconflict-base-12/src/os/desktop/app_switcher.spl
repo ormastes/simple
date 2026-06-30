@@ -1,0 +1,159 @@
+# App Switcher — Card carousel for switching between windows
+#
+# Shows horizontally scrolling cards of open windows.
+# Activated by keyboard shortcut, dismissed on selection.
+#
+# MDSOC: feature dimension, desktop layer
+
+use std.window_protocol.geometry.{WindowId, Px}
+
+# ============================================================================
+# App Card
+# ============================================================================
+
+struct AppCard:
+    """A single card in the app switcher representing an open window."""
+    window_id: WindowId
+    title: text
+    x: Px
+    y: Px
+    width: Px
+    height: Px
+
+# ============================================================================
+# App Switcher
+# ============================================================================
+
+class AppSwitcher:
+    """Card-based app switcher (Cmd+Tab / Alt+Tab style).
+
+    Displays a horizontal carousel of cards for all open windows.
+    Activated by a keyboard shortcut, dismissed on selection or cancel.
+    """
+    cards: [AppCard]
+    visible: bool
+    selected_index: i64
+    screen_width: Px
+    screen_height: Px
+
+impl AppSwitcher:
+
+    static fn create(screen_w: Px, screen_h: Px) -> AppSwitcher:
+        """Create an empty, hidden app switcher."""
+        AppSwitcher(
+            cards: [],
+            visible: false,
+            selected_index: 0,
+            screen_width: screen_w,
+            screen_height: screen_h
+        )
+
+    me show(window_ids: [WindowId], titles: [text]):
+        """Build cards from active windows and show the switcher.
+
+        window_ids and titles must be parallel arrays of the same length.
+        """
+        var new_cards: [AppCard] = []
+        var i: i64 = 0
+        while i < window_ids.len():
+            val wid = window_ids[i]
+            val title_str = if i < titles.len(): titles[i] else: "Window {wid.value}"
+            new_cards = new_cards.push(AppCard(
+                window_id: wid,
+                title: title_str,
+                x: Px(value: 0), y: Px(value: 0),
+                width: Px(value: 0), height: Px(value: 0)
+            ))
+            i = i + 1
+
+        self.cards = new_cards
+        self.selected_index = 0
+        self.visible = true
+        self._layout_cards()
+
+    me hide():
+        """Hide the app switcher and clear cards."""
+        self.visible = false
+        self.cards = []
+        self.selected_index = 0
+
+    me select_next():
+        """Move selection to next card (wraps around)."""
+        if self.cards.len() == 0:
+            return
+        self.selected_index = (self.selected_index + 1) % self.cards.len()
+
+    me select_prev():
+        """Move selection to previous card (wraps around)."""
+        if self.cards.len() == 0:
+            return
+        self.selected_index = self.selected_index - 1
+        if self.selected_index < 0:
+            self.selected_index = self.cards.len() - 1
+
+    fn get_selected_window_id() -> WindowId?:
+        """Return window ID of the selected card, or nil if none."""
+        if self.cards.len() == 0:
+            return nil
+        if self.selected_index < 0 or self.selected_index >= self.cards.len():
+            return nil
+        self.cards[self.selected_index].window_id
+
+    fn is_visible() -> bool:
+        """Return whether the switcher is currently visible."""
+        self.visible
+
+    me close_selected() -> WindowId?:
+        """Remove the selected card and return its window ID for closing.
+
+        Returns nil if no card is selected.
+        """
+        if self.cards.len() == 0:
+            return nil
+        if self.selected_index < 0 or self.selected_index >= self.cards.len():
+            return nil
+
+        val closed_id = self.cards[self.selected_index].window_id
+
+        # Remove the card
+        var new_cards: [AppCard] = []
+        var i: i64 = 0
+        while i < self.cards.len():
+            if i != self.selected_index:
+                new_cards = new_cards.push(self.cards[i])
+            i = i + 1
+        self.cards = new_cards
+
+        # Adjust selection index
+        if self.cards.len() == 0:
+            self.selected_index = 0
+            self.hide()
+        elif self.selected_index >= self.cards.len():
+            self.selected_index = self.cards.len() - 1
+
+        self._layout_cards()
+        closed_id
+
+    me _layout_cards():
+        """Compute card positions — centered horizontally, vertically centered on screen."""
+        val card_w: i64 = 160
+        val card_h: i64 = 120
+        val gap: i64 = 16
+        val total_w = self.cards.len() * card_w + (self.cards.len() - 1) * gap
+        val sw = self.screen_width.value.to_i64()
+        val sh = self.screen_height.value.to_i64()
+        val start_x = (sw - total_w) / 2
+        val center_y = (sh - card_h) / 2
+
+        var i: i64 = 0
+        while i < self.cards.len():
+            val card = self.cards[i]
+            self.cards[i] = AppCard(
+                window_id: card.window_id,
+                title: card.title,
+                x: Px(value: (start_x + i * (card_w + gap)).to_i32()),
+                y: Px(value: center_y.to_i32()),
+                width: Px(value: card_w.to_i32()),
+                height: Px(value: card_h.to_i32())
+            )
+            i = i + 1

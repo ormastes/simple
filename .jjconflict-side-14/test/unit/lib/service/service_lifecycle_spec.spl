@@ -1,0 +1,133 @@
+"""
+# Service Lifecycle Specification
+#
+# Tests PID file creation, liveness checks, and cleanup.
+"""
+
+use std.io_runtime
+
+extern fn rt_getpid() -> i64
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_mkdir_p(path: text) -> bool
+extern fn rt_process_exists(pid: i64) -> bool
+extern fn rt_time_now_unix_micros() -> i64
+
+# --- Inline lifecycle types ---
+
+struct PidFileState:
+    path: text
+    pid: i64
+    acquired: bool
+
+fn _parent_dir(path: text) -> text:
+    val parts = path.split("/")
+    if parts.len() <= 1i64:
+        return "."
+    var out: [text] = []
+    var i = 0i64
+    while i < parts.len() - 1i64:
+        out.push(parts[i])
+        i = i + 1i64
+    out.join("/")
+
+fn acquire_pid_file(path: text) -> PidFileState:
+    val parent = _parent_dir(path)
+    rt_mkdir_p(parent)
+    if rt_file_exists(path):
+        val existing_pid = read_pid_file(path)
+        if existing_pid > 0i64 and rt_process_exists(existing_pid):
+            return PidFileState(path: path, pid: -1i64, acquired: false)
+        rt_file_delete(path)
+    val pid = rt_getpid()
+    val timestamp = rt_time_now_unix_micros()
+    val content = "{pid}\n{timestamp}"
+    if rt_file_write_text(path, content):
+        return PidFileState(path: path, pid: pid, acquired: true)
+    PidFileState(path: path, pid: -1i64, acquired: false)
+
+fn release_pid_file(state: PidFileState):
+    if state.acquired and rt_file_exists(state.path):
+        rt_file_delete(state.path)
+
+fn read_pid_file(path: text) -> i64:
+    val content = rt_file_read_text(path)
+    if content.len() == 0i64:
+        return -1i64
+    val lines = content.split("\n")
+    if lines.len() == 0i64:
+        return -1i64
+    val pid_str = lines[0i64].trim()
+    if pid_str.len() == 0i64:
+        return -1i64
+    pid_str.to_i64() ?? -1i64
+
+fn is_daemon_alive(pid_path: text) -> bool:
+    if not rt_file_exists(pid_path):
+        return false
+    val pid = read_pid_file(pid_path)
+    if pid <= 0i64:
+        return false
+    rt_process_exists(pid)
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+describe "Service Lifecycle - PID File":
+    it "acquires PID file on first attempt":
+        val path = "/tmp/sj-test-lifecycle-{rt_time_now_unix_micros()}.pid"
+        val state = acquire_pid_file(path)
+        expect(state.acquired).to_equal(true)
+        expect(state.pid).to_be_greater_than(0i64)
+        # Cleanup
+        release_pid_file(state)
+
+    it "writes current PID to file":
+        val path = "/tmp/sj-test-lifecycle-pid-{rt_time_now_unix_micros()}.pid"
+        val state = acquire_pid_file(path)
+        val written_pid = read_pid_file(path)
+        expect(written_pid).to_equal(rt_getpid())
+        release_pid_file(state)
+
+    it "rejects second acquisition while first is alive":
+        val path = "/tmp/sj-test-lifecycle-dup-{rt_time_now_unix_micros()}.pid"
+        val first = acquire_pid_file(path)
+        val second = acquire_pid_file(path)
+        expect(first.acquired).to_equal(true)
+        expect(second.acquired).to_equal(false)
+        release_pid_file(first)
+
+    it "releases PID file and allows re-acquisition":
+        val path = "/tmp/sj-test-lifecycle-reacq-{rt_time_now_unix_micros()}.pid"
+        val first = acquire_pid_file(path)
+        release_pid_file(first)
+        val second = acquire_pid_file(path)
+        expect(second.acquired).to_equal(true)
+        release_pid_file(second)
+
+    it "PID file does not exist after release":
+        val path = "/tmp/sj-test-lifecycle-cleanup-{rt_time_now_unix_micros()}.pid"
+        val state = acquire_pid_file(path)
+        release_pid_file(state)
+        expect(rt_file_exists(path)).to_equal(false)
+
+describe "Service Lifecycle - Liveness Check":
+    it "reports alive for current process PID file":
+        val path = "/tmp/sj-test-alive-{rt_time_now_unix_micros()}.pid"
+        val state = acquire_pid_file(path)
+        expect(is_daemon_alive(path)).to_equal(true)
+        release_pid_file(state)
+
+    it "reports not alive for missing PID file":
+        val path = "/tmp/sj-test-nofile-{rt_time_now_unix_micros()}.pid"
+        expect(is_daemon_alive(path)).to_equal(false)
+
+    it "reports not alive for stale PID file":
+        val path = "/tmp/sj-test-stale-{rt_time_now_unix_micros()}.pid"
+        # Write a PID that definitely does not exist (99999999)
+        rt_file_write_text(path, "99999999\n0")
+        expect(is_daemon_alive(path)).to_equal(false)
+        rt_file_delete(path)

@@ -1,0 +1,200 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+PROOF_PATH="${SIMPLE_ELECTRON_PROOF_PATH:-build/electron_shell_envelope.json}"
+SCREENSHOT_PATH="${SIMPLE_ELECTRON_SCREENSHOT_PATH:-${PROOF_PATH}.png}"
+REPORT_PATH="${SIMPLE_ELECTRON_REPORT_PATH:-${PROOF_PATH}.report.md}"
+WIDTH="${SIMPLE_ELECTRON_SMOKE_WIDTH:-1280}"
+HEIGHT="${SIMPLE_ELECTRON_SMOKE_HEIGHT:-720}"
+TIMEOUT_SECS="${SIMPLE_ELECTRON_SMOKE_TIMEOUT_SECS:-60}"
+VALIDATOR="scripts/check/validate-electron-live-smoke-proof.js"
+VALIDATION_ENV="${PROOF_PATH}.validation.env"
+
+have() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+value_of() {
+    key="$1"
+    file="$2"
+    sed -n "s/^${key}=//p" "$file" 2>/dev/null | tail -n 1
+}
+
+write_report() {
+    smoke_status="$1"
+    smoke_reason="$2"
+    mkdir -p "$(dirname "$REPORT_PATH")"
+    {
+        echo "# Electron Live Smoke"
+        echo
+        echo "- status: $smoke_status"
+        echo "- reason: $smoke_reason"
+        echo "- proof: $PROOF_PATH"
+        echo "- validation: $VALIDATION_ENV"
+        echo "- browser: engine=$(value_of electron_live_smoke_browser_engine "$VALIDATION_ENV") electron=$(value_of electron_live_smoke_electron_process_version "$VALIDATION_ENV") chrome=$(value_of electron_live_smoke_chrome_process_version "$VALIDATION_ENV")"
+        echo "- proof source: $(value_of electron_live_smoke_proof_source "$VALIDATION_ENV") file=$(value_of electron_live_smoke_proof_source_file_status "$VALIDATION_ENV") artifact=$(value_of electron_live_smoke_proof_source_artifact_status "$VALIDATION_ENV") symlink=$(value_of electron_live_smoke_proof_symlink_status "$VALIDATION_ENV") hardlink=$(value_of electron_live_smoke_proof_hardlink_status "$VALIDATION_ENV")"
+        echo "- render: html=$(value_of electron_live_smoke_body_html_length "$VALIDATION_ENV") css=$(value_of electron_live_smoke_css_length "$VALIDATION_ENV") app=$(value_of electron_live_smoke_app_element_present "$VALIDATION_ENV") text=$(value_of electron_live_smoke_body_text_length "$VALIDATION_ENV")"
+        echo "- performance/animation: performance_now=$(value_of electron_live_smoke_performance_now_available "$VALIDATION_ENV") delta_ms=$(value_of electron_live_smoke_performance_now_delta_ms "$VALIDATION_ENV") animation=$(value_of electron_live_smoke_animation_frame_available "$VALIDATION_ENV") frames=$(value_of electron_live_smoke_animation_frame_count "$VALIDATION_ENV") css=$(value_of electron_live_smoke_css_animation_probe "$VALIDATION_ENV")"
+        echo "- event dispatch: available=$(value_of electron_live_smoke_event_dispatch_available "$VALIDATION_ENV") count=$(value_of electron_live_smoke_event_dispatch_count "$VALIDATION_ENV") type=$(value_of electron_live_smoke_event_dispatch_type "$VALIDATION_ENV") detail=$(value_of electron_live_smoke_event_dispatch_detail "$VALIDATION_ENV") error=$(value_of electron_live_smoke_event_dispatch_error "$VALIDATION_ENV") input_to_paint_ms=$(value_of electron_live_smoke_event_dispatch_to_paint_ms "$VALIDATION_ENV")"
+        echo "- screenshot artifact: path=$(value_of electron_live_smoke_screenshot_path "$VALIDATION_ENV") file=$(value_of electron_live_smoke_screenshot_file_status "$VALIDATION_ENV") artifact=$(value_of electron_live_smoke_screenshot_artifact_status "$VALIDATION_ENV") size=$(value_of electron_live_smoke_screenshot_actual_size_bytes "$VALIDATION_ENV")/$(value_of electron_live_smoke_screenshot_size_bytes "$VALIDATION_ENV") dimensions=$(value_of electron_live_smoke_screenshot_width "$VALIDATION_ENV")x$(value_of electron_live_smoke_screenshot_height "$VALIDATION_ENV") checksum=$(value_of electron_live_smoke_screenshot_pixel_checksum "$VALIDATION_ENV") nontransparent=$(value_of electron_live_smoke_screenshot_nontransparent_pixel_count "$VALIDATION_ENV") colors=$(value_of electron_live_smoke_screenshot_distinct_color_count "$VALIDATION_ENV") error=$(value_of electron_live_smoke_screenshot_error "$VALIDATION_ENV")"
+        echo "- blur_or_tolerance_used: $(value_of electron_live_smoke_blur_or_tolerance_used "$VALIDATION_ENV")"
+        echo
+        echo "## Evidence"
+        if [ -f "$VALIDATION_ENV" ]; then
+            sed 's/^/- /' "$VALIDATION_ENV"
+        fi
+    } >"$REPORT_PATH"
+}
+
+emit_blank_validation_rows() {
+    echo "electron_live_smoke_target=electron"
+    echo "electron_live_smoke_proof_symlink_status=not-run"
+    echo "electron_live_smoke_proof_hardlink_status=not-run"
+    echo "electron_live_smoke_surface_id=main"
+    echo "electron_live_smoke_proof_source=src/app/ui.electron/bridge.js:electronLiveSmokeProofScript"
+    echo "electron_live_smoke_proof_source_file_status=not-run"
+    echo "electron_live_smoke_proof_source_size_bytes="
+    echo "electron_live_smoke_proof_source_actual_size_bytes="
+    echo "electron_live_smoke_proof_source_file_reason=not-run"
+    echo "electron_live_smoke_proof_source_artifact_status=not-run"
+    echo "electron_live_smoke_browser_engine=chromium"
+    echo "electron_live_smoke_electron_user_agent="
+    echo "electron_live_smoke_electron_process_version="
+    echo "electron_live_smoke_chrome_process_version="
+    echo "electron_live_smoke_width=$WIDTH"
+    echo "electron_live_smoke_height=$HEIGHT"
+    echo "electron_live_smoke_body_html_length="
+    echo "electron_live_smoke_css_length="
+    echo "electron_live_smoke_app_element_present="
+    echo "electron_live_smoke_body_text_length="
+    echo "electron_live_smoke_body_text_sample="
+    echo "electron_live_smoke_performance_now_available="
+    echo "electron_live_smoke_performance_now_delta_ms="
+    echo "electron_live_smoke_animation_frame_available="
+    echo "electron_live_smoke_animation_frame_count="
+    echo "electron_live_smoke_css_animation_probe="
+    echo "electron_live_smoke_event_dispatch_available="
+    echo "electron_live_smoke_event_dispatch_count="
+    echo "electron_live_smoke_event_dispatch_type="
+    echo "electron_live_smoke_event_dispatch_detail="
+    echo "electron_live_smoke_event_dispatch_error="
+    echo "electron_live_smoke_event_dispatch_to_paint_ms="
+    echo "electron_live_smoke_screenshot_path=$SCREENSHOT_PATH"
+    echo "electron_live_smoke_screenshot_file_status=not-run"
+    echo "electron_live_smoke_screenshot_size_bytes="
+    echo "electron_live_smoke_screenshot_actual_size_bytes="
+    echo "electron_live_smoke_screenshot_file_reason=not-run"
+    echo "electron_live_smoke_screenshot_artifact_status=not-run"
+    echo "electron_live_smoke_screenshot_width="
+    echo "electron_live_smoke_screenshot_height="
+    echo "electron_live_smoke_screenshot_bitmap_byte_count="
+    echo "electron_live_smoke_screenshot_pixel_checksum="
+    echo "electron_live_smoke_screenshot_nontransparent_pixel_count="
+    echo "electron_live_smoke_screenshot_distinct_color_count="
+    echo "electron_live_smoke_screenshot_error="
+    echo "electron_live_smoke_blur_or_tolerance_used="
+}
+
+mkdir -p "$(dirname "$PROOF_PATH")" "$(dirname "$REPORT_PATH")"
+rm -f "$VALIDATION_ENV" "$REPORT_PATH"
+
+if [ "${SKIP_ELECTRON_LIVE_SMOKE:-0}" = "1" ]; then
+    echo "electron_live_smoke=skipped"
+    echo "reason=SKIP_ELECTRON_LIVE_SMOKE"
+    {
+        echo "electron_live_smoke_validation_status=skipped"
+        echo "electron_live_smoke_validation_reason=SKIP_ELECTRON_LIVE_SMOKE"
+        emit_blank_validation_rows
+    } >"$VALIDATION_ENV"
+    cat "$VALIDATION_ENV"
+    write_report skipped SKIP_ELECTRON_LIVE_SMOKE
+    exit 0
+fi
+
+for required in node npm xvfb-run; do
+    if ! have "$required"; then
+        echo "electron_live_smoke=unavailable"
+        echo "error=missing_command:$required"
+        {
+            echo "electron_live_smoke_validation_status=unavailable"
+            echo "electron_live_smoke_validation_reason=missing_command:$required"
+            emit_blank_validation_rows
+        } >"$VALIDATION_ENV"
+        cat "$VALIDATION_ENV"
+        write_report unavailable "missing_command:$required"
+        exit 1
+    fi
+done
+
+if [ ! -f "tools/electron-shell/package.json" ]; then
+    echo "electron_live_smoke=unavailable"
+    echo "error=missing_tools/electron-shell/package.json"
+    {
+        echo "electron_live_smoke_validation_status=unavailable"
+        echo "electron_live_smoke_validation_reason=missing_tools/electron-shell/package.json"
+        emit_blank_validation_rows
+    } >"$VALIDATION_ENV"
+    cat "$VALIDATION_ENV"
+    write_report unavailable "missing_tools/electron-shell/package.json"
+    exit 1
+fi
+
+if [ ! -f "$VALIDATOR" ]; then
+    echo "electron_live_smoke=unavailable"
+    echo "error=missing_validator:$VALIDATOR"
+    {
+        echo "electron_live_smoke_validation_status=unavailable"
+        echo "electron_live_smoke_validation_reason=missing_validator:$VALIDATOR"
+        emit_blank_validation_rows
+    } >"$VALIDATION_ENV"
+    cat "$VALIDATION_ENV"
+    write_report unavailable "missing_validator:$VALIDATOR"
+    exit 1
+fi
+
+rm -f "$PROOF_PATH" "$SCREENSHOT_PATH"
+
+run_smoke() {
+    SIMPLE_ELECTRON_PROOF_PATH="../../$PROOF_PATH" \
+    SIMPLE_ELECTRON_SCREENSHOT_PATH="../../$SCREENSHOT_PATH" \
+        xvfb-run -a --server-args="-screen 0 ${WIDTH}x${HEIGHT}x24" \
+        npm --prefix tools/electron-shell run live-smoke
+}
+
+if have timeout; then
+    timeout "$TIMEOUT_SECS" env SIMPLE_ELECTRON_PROOF_PATH="../../$PROOF_PATH" \
+        SIMPLE_ELECTRON_SCREENSHOT_PATH="../../$SCREENSHOT_PATH" \
+        xvfb-run -a --server-args="-screen 0 ${WIDTH}x${HEIGHT}x24" \
+        npm --prefix tools/electron-shell run live-smoke
+else
+    run_smoke
+fi
+
+if [ ! -s "$PROOF_PATH" ]; then
+    echo "electron_live_smoke=fail"
+    echo "reason=missing-proof-file"
+    {
+        echo "electron_live_smoke_validation_status=fail"
+        echo "electron_live_smoke_validation_reason=missing-proof-file"
+        emit_blank_validation_rows
+    } >"$VALIDATION_ENV"
+    cat "$VALIDATION_ENV"
+    write_report fail missing-proof-file
+    exit 1
+fi
+
+set +e
+node "$VALIDATOR" "$PROOF_PATH" "$WIDTH" "$HEIGHT" >"$VALIDATION_ENV"
+validator_code=$?
+set -e
+cat "$VALIDATION_ENV"
+if [ "$validator_code" -ne 0 ]; then
+    echo "electron_live_smoke=fail proof=$PROOF_PATH validation=$VALIDATION_ENV"
+    write_report fail "$(value_of electron_live_smoke_validation_reason "$VALIDATION_ENV")"
+    exit "$validator_code"
+fi
+echo "electron_live_smoke=pass proof=$PROOF_PATH validation=$VALIDATION_ENV"
+write_report pass pass

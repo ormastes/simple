@@ -1,0 +1,137 @@
+# @cover doc/03_plan/ui/draw_ir/draw_io_sdn_draw_ir_plan.md 80%
+# @cover src/app/ui.test_api/handler.spl 60%
+# @cover src/lib/nogc_sync_mut/ui_test/sgtti.spl 60%
+# codex-system-test
+"""
+# Draw IR Inspection Contract
+
+## Overview
+
+Red-phase source-contract coverage for Draw IR Phases 4-6. These scenarios
+spell out the endpoint, producer-enrichment, and `expect_draw` surfaces before
+implementation work starts. They are intentionally concrete assertions rather
+than synthetic fail-only cases.
+
+**Requirements:** N/A
+
+Requirement IDs in this red-phase spec are local contract labels derived from
+the active Draw IR inspection plan.
+
+**Plan:** doc/03_plan/ui/draw_ir/draw_io_sdn_draw_ir_plan.md
+
+**Design:** doc/04_architecture/ui/ui_test_architecture.md
+
+**Research:** doc/01_research/ui/draw_ir/draw_io_sdn_draw_ir.md
+
+## Syntax
+
+The spec is a source-contract gate. It reads the planned implementation files
+and asserts that the named API, protocol, and enrichment markers exist. Before
+implementation, execution is expected to fail on the missing markers while
+syntax checking remains green.
+
+## Examples
+
+- `/api/test/draw-ir` and related routes must appear in `ui.test_api`.
+- `X-UI-Protocol-Version` must advertise the optional Protocol-v2 extension.
+- `expect_draw` must live in the UI test helper layer and run inside normal
+  `std.spec` scenarios.
+- WM and web producers must expose hit/clip/content geometry and computed style
+  markers before endpoint behavior is considered implemented.
+"""
+
+use std.spec.{describe, it, expect}
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+
+val PLAN_PATH: text = "doc/03_plan/ui/draw_ir/draw_io_sdn_draw_ir_plan.md"
+val SHARED_CONTRACT_PATH: text = "doc/04_architecture/ui/shared_ui_contract.md"
+val UI_TEST_HANDLER_PATH: text = "src/app/ui.test_api/handler.spl"
+val UI_TEST_DRIVER_PATH: text = "src/lib/nogc_sync_mut/ui_test/sgtti.spl"
+val WM_DRAW_IR_PATH: text = "src/lib/common/ui/window_scene_draw_ir.spl"
+val WEB_LAYOUT_PATH: text = "src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl"
+
+fn _read(path: text) -> text:
+    if rt_file_exists(path):
+        return rt_file_read_text(path)
+    ""
+
+fn _has(source: text, needle: text) -> bool:
+    source.contains(needle)
+
+fn _has_any2(source: text, a: text, b: text) -> bool:
+    _has(source, a) or _has(source, b)
+
+describe "Draw IR inspection contract":
+
+    describe "REQ-DRAW-INSPECT-001: Protocol-v2 endpoint surface":
+        it "should keep the endpoint family named in the implementation plan":
+            val plan = _read(PLAN_PATH)
+            expect(_has(plan, "/api/test/draw-ir")).to_equal(true)
+            expect(_has(plan, "/api/test/draw-ir?id=")).to_equal(true)
+            expect(_has(plan, "/api/test/draw-ir/diff")).to_equal(true)
+            expect(_has(plan, "/api/test/draw-ir/layout?id=")).to_equal(true)
+
+        it "should add concrete draw-ir route handling to ui.test_api":
+            val handler = _read(UI_TEST_HANDLER_PATH)
+            expect(_has(handler, "/api/test/draw-ir")).to_equal(true)
+            expect(_has_any2(handler, "draw_ir", "draw-ir")).to_equal(true)
+
+        it "should advertise Protocol v2 separately from the v1 API":
+            val handler = _read(UI_TEST_HANDLER_PATH)
+            expect(_has(handler, "X-UI-Protocol-Version")).to_equal(true)
+            expect(_has_any2(handler, "Protocol v2", "\"2\"")).to_equal(true)
+
+        it "should guard draw-ir inspection behind an explicit capability":
+            val handler = _read(UI_TEST_HANDLER_PATH)
+            expect(_has_any2(handler, "capability", "CAPABILITY")).to_equal(true)
+            expect(_has_any2(handler, "draw_ir", "draw-ir")).to_equal(true)
+
+    describe "REQ-DRAW-INSPECT-002: Producer enrichment":
+        it "should enrich WM Draw IR with hit and clip rectangles":
+            val source = _read(WM_DRAW_IR_PATH)
+            expect(_has(source, "hit_rect")).to_equal(true)
+            expect(_has(source, "clip_rect")).to_equal(true)
+
+        it "should enrich WM Draw IR with z-index style":
+            val source = _read(WM_DRAW_IR_PATH)
+            expect(_has_any2(source, "z-index", "z_index")).to_equal(true)
+
+        it "should enrich web Draw IR with computed style and box rectangles":
+            val source = _read(WEB_LAYOUT_PATH)
+            expect(_has(source, "computed_style")).to_equal(true)
+            expect(_has(source, "content_rect")).to_equal(true)
+            expect(_has(source, "hit_rect")).to_equal(true)
+
+    describe "REQ-DRAW-INSPECT-003: expect_draw helper":
+        it "should expose expect_draw from the UI test helper layer":
+            val source = _read(UI_TEST_DRIVER_PATH)
+            expect(_has(source, "expect_draw")).to_equal(true)
+
+        it "should keep expect_draw inside normal std.spec scenarios":
+            val plan = _read(PLAN_PATH)
+            expect(_has(plan, "inside normal SPipe specs")).to_equal(true)
+            expect(_has(plan, "use std.spec")).to_equal(true)
+
+        it "should cover geometry, hit rect, css, parent, and kind assertions":
+            val plan = _read(PLAN_PATH)
+            expect(_has(plan, "geometry")).to_equal(true)
+            expect(_has(plan, "hit_rect")).to_equal(true)
+            expect(_has(plan, "css")).to_equal(true)
+            expect(_has(plan, "parent")).to_equal(true)
+            expect(_has(plan, "kind")).to_equal(true)
+
+    describe "REQ-DRAW-INSPECT-004: v1 compatibility guardrails":
+        it "should document Protocol v2 without replacing v1 element endpoints":
+            val contract = _read(SHARED_CONTRACT_PATH)
+            expect(_has(contract, "Protocol v2")).to_equal(true)
+            expect(_has(contract, "/api/test/draw-ir")).to_equal(true)
+            expect(_has(contract, "/api/test/elements")).to_equal(true)
+
+        it "should reject empty source as satisfying the endpoint contract":
+            expect(_has("", "/api/test/draw-ir")).to_equal(false)
+
+        it "should detect a synthetic Protocol v2 header marker":
+            val sample = "headers[\"X-UI-Protocol-Version\"] = \"2\""
+            expect(_has(sample, "X-UI-Protocol-Version")).to_equal(true)

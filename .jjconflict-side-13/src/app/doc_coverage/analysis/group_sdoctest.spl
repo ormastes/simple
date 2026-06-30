@@ -1,0 +1,314 @@
+# Group Detection Integration for Exported Items
+#
+# Identifies which exported items form groups based on existing group comment detection.
+# Provides sdoctest coverage analysis for item groups.
+
+use app.io.mod (file_read, file_exists)
+use app.doc_coverage.analysis.group_comment_detection (detect_variable_groups)
+use app.test_runner_new.sdoctest.extractor (extract_sdoctest_blocks)
+use std.string.{NL}
+
+# =========================================================================
+# Item Group Definition
+# =========================================================================
+
+struct ItemGroup:
+    comment: text           # Group comment text
+    items: [text]          # Item names in group
+    has_sdoctest: bool     # Whether group has sdoctest
+    line_start: i64        # Starting line in source
+    line_end: i64          # Ending line in source
+
+impl ItemGroup:
+    static fn create(comment_text: text, item_names: [text], start: i64, end_val: i64) -> ItemGroup:
+        ItemGroup(
+            comment: comment_text,
+            items: item_names,
+            has_sdoctest: false,
+            line_start: start,
+            line_end: end_val
+        )
+
+# =========================================================================
+# Group Detection Result
+# =========================================================================
+
+struct GroupDetectionResult:
+    groups: [ItemGroup]
+    individual_items: [text]  # Items not in any group
+
+impl GroupDetectionResult:
+    static fn create(item_groups: [ItemGroup], individual: [text]) -> GroupDetectionResult:
+        GroupDetectionResult(
+            groups: item_groups,
+            individual_items: individual
+        )
+
+# =========================================================================
+# Export Group Detection
+# =========================================================================
+
+fn detect_export_groups(exports: [text], source_path: text) -> GroupDetectionResult:
+    # Steps:
+    # 1. Read source file
+    # 2. For each export, find its declaration line
+    # 3. Use existing group_comment_detection logic to identify groups
+    # 4. Separate grouped vs individual exports
+
+    if not file_exists(source_path):
+        return GroupDetectionResult__create([], exports)
+
+    val source = file_read(source_path)
+    val lines = source.split(NL)
+
+    # Find declaration lines for each export
+    var export_lines: [i64] = []
+    var i = 0
+    while i < exports.len():
+        val export_name = exports[i]
+        val line_num = _find_declaration_line(export_name, lines)
+        export_lines.push(line_num)
+        i = i + 1
+
+    # Group consecutive exports
+    var groups: [ItemGroup] = []
+    var individual: [text] = []
+
+    var current_group_items: [text] = []
+    var current_group_start = -1
+    var current_group_end = -1
+
+    var j = 0
+    while j < exports.len():
+        val export_name = exports[j]
+        val line_num = export_lines[j]
+
+        # Skip if declaration not found
+        if line_num < 0:
+            individual.push(export_name)
+            j = j + 1
+            continue
+
+        # Check if consecutive with previous
+        val is_first = current_group_items.len() == 0
+        if is_first:
+            # Start new group
+            current_group_items.push(export_name)
+            current_group_start = line_num
+            current_group_end = line_num
+        else:
+            # Check if consecutive
+            val prev_line = current_group_end
+            val is_consecutive_item = is_consecutive_export(exports, j - 1, j, source)
+            val line_diff = line_num - prev_line
+            val close_enough = line_diff <= 3  # Allow 2 empty lines between
+
+            if is_consecutive_item and close_enough:
+                # Add to current group
+                current_group_items.push(export_name)
+                current_group_end = line_num
+            else:
+                # Finalize previous group
+                if current_group_items.len() >= 2:
+                    # Create group
+                    val comment = _extract_group_comment(current_group_start, lines)
+                    val group = ItemGroup__create(comment, current_group_items, current_group_start, current_group_end)
+                    groups.push(group)
+                elif current_group_items.len() == 1:
+                    # Single item, add to individual
+                    individual.push(current_group_items[0])
+
+                # Start new group
+                current_group_items = []
+                current_group_items.push(export_name)
+                current_group_start = line_num
+                current_group_end = line_num
+
+        j = j + 1
+
+    # Finalize last group
+    if current_group_items.len() >= 2:
+        val comment = _extract_group_comment(current_group_start, lines)
+        val group = ItemGroup__create(comment, current_group_items, current_group_start, current_group_end)
+        groups.push(group)
+    elif current_group_items.len() == 1:
+        individual.push(current_group_items[0])
+
+    GroupDetectionResult__create(groups, individual)
+
+fn _find_declaration_line(name: text, lines: [text]) -> i64:
+    # Find line number (1-indexed) where item is declared
+    # Looks for: "fn name", "struct name", "class name", "enum name", "val name", "var name"
+
+    var line_num = 0
+    var i = 0
+    while i < lines.len():
+        val line = lines[i]
+        val trimmed = line.trim()
+        line_num = i + 1
+
+        # Check various declaration patterns
+        val fn_match = trimmed.starts_with("fn {name}(") or trimmed.starts_with("fn {name}:")
+        val struct_match = trimmed.starts_with("struct {name}")
+        val class_match = trimmed.starts_with("class {name}")
+        val enum_match = trimmed.starts_with("enum {name}")
+        val val_match = trimmed.starts_with("val {name} ") or trimmed.starts_with("val {name}:")
+        val var_match = trimmed.starts_with("var {name} ") or trimmed.starts_with("var {name}:")
+
+        val any_match = fn_match or struct_match or class_match or enum_match or val_match or var_match
+        if any_match:
+            return line_num
+
+        i = i + 1
+
+    -1  # Not found
+
+fn _extract_group_comment(start_line: i64, lines: [text]) -> text:
+    # Extract comment before start_line (1-indexed)
+    # Looks 1-2 lines before
+
+    val start_idx = start_line - 1
+
+    # Check line immediately before
+    if start_idx > 0:
+        val prev_idx = start_idx - 1
+        val prev_line = lines[prev_idx]
+        val prev_trimmed = prev_line.trim()
+
+        if prev_trimmed.starts_with("#"):
+            return prev_trimmed
+
+    # Check 2 lines before
+    if start_idx > 1:
+        val prev2_idx = start_idx - 2
+        val prev2_line = lines[prev2_idx]
+        val prev2_trimmed = prev2_line.trim()
+
+        if prev2_trimmed.starts_with("#"):
+            return prev2_trimmed
+
+    ""
+
+# =========================================================================
+# SDoctest Coverage Check
+# =========================================================================
+
+fn check_group_sdoctest(group: ItemGroup, sdoctest_blocks: [text]) -> bool:
+    # Check if ANY item in group has sdoctest coverage
+    # Look in sdoctest blocks for mentions of group items
+
+    var i = 0
+    while i < group.items.len():
+        val item_name = group.items[i]
+
+        # Check if item appears in any block
+        var j = 0
+        var found = false
+        while j < sdoctest_blocks.len():
+            val block_code = sdoctest_blocks[j]
+            if block_code.contains(item_name):
+                found = true
+                break
+            j = j + 1
+
+        if found:
+            return true
+
+        i = i + 1
+
+    false
+
+# =========================================================================
+# Consecutive Export Check
+# =========================================================================
+
+fn is_consecutive_export(exports: [text], idx1: i64, idx2: i64, source: text) -> bool:
+    # Check if two exports are consecutive in source
+    # Used to detect groups
+
+    if idx1 < 0 or idx2 < 0:
+        return false
+    if idx1 >= exports.len() or idx2 >= exports.len():
+        return false
+
+    val name1 = exports[idx1]
+    val name2 = exports[idx2]
+
+    val lines = source.split(NL)
+
+    # Find line numbers
+    val line1 = _find_declaration_line(name1, lines)
+    val line2 = _find_declaration_line(name2, lines)
+
+    if line1 < 0 or line2 < 0:
+        return false
+
+    # Check if close enough (within 3 lines)
+    val diff = line2 - line1
+    val abs_diff = if diff < 0: -diff else: diff
+    abs_diff <= 3
+
+# =========================================================================
+# Enhance Groups with SDoctest Coverage
+# =========================================================================
+
+fn enhance_groups_with_sdoctest(groups: [ItemGroup], sdoctest_blocks: [text]) -> [ItemGroup]:
+    # Update groups with sdoctest coverage information
+    var enhanced: [ItemGroup] = []
+
+    var i = 0
+    while i < groups.len():
+        val group = groups[i]
+        val has_test = check_group_sdoctest(group, sdoctest_blocks)
+
+        val enhanced_group = ItemGroup(
+            comment: group.comment,
+            items: group.items,
+            has_sdoctest: has_test,
+            line_start: group.line_start,
+            line_end: group.line_end
+        )
+
+        enhanced.push(enhanced_group)
+        i = i + 1
+
+    enhanced
+
+# =========================================================================
+# Load SDoctest Blocks Helper
+# =========================================================================
+
+fn load_sdoctest_blocks_for_module(module_path: text) -> [text]:
+    # Load sdoctest code blocks from related markdown documentation
+    # Returns array of code block strings
+
+    # Try to find related markdown files
+    # For now, just extract from README.md and common doc locations
+    var blocks: [text] = []
+
+    # Extract from README.md
+    val readme_path = "README.md"
+    if file_exists(readme_path):
+        val readme_blocks = extract_sdoctest_blocks(readme_path)
+        var i = 0
+        while i < readme_blocks.len():
+            val block = readme_blocks[i]
+            blocks.push(block.code)
+            i = i + 1
+
+    # Extract from doc/guide/*.md
+    # Note: In production would use shell to find files
+    # For simplicity, just return what we have
+    blocks
+
+# =========================================================================
+# Exports
+# =========================================================================
+
+export ItemGroup
+export GroupDetectionResult
+export detect_export_groups
+export check_group_sdoctest
+export is_consecutive_export
+export enhance_groups_with_sdoctest
+export load_sdoctest_blocks_for_module

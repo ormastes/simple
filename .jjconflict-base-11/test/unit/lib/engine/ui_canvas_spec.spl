@@ -1,0 +1,159 @@
+# UI Canvas System Tests
+
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.engine.ui.canvas.{Anchor, UIRect, UIElement, UICanvas}
+use std.nogc_sync_mut.engine.ui.widgets.{create_label, create_button, create_panel, create_progress_bar, create_image}
+
+describe "Anchor":
+    it "creates top_left anchor":
+        val a = Anchor.top_left()
+        expect(a.min_x).to_equal(0.0)
+        expect(a.min_y).to_equal(0.0)
+        expect(a.max_x).to_equal(0.0)
+        expect(a.max_y).to_equal(0.0)
+
+    it "creates center anchor":
+        val a = Anchor.center()
+        expect(a.min_x).to_equal(0.5)
+        expect(a.min_y).to_equal(0.5)
+
+    it "creates stretch anchor":
+        val a = Anchor.stretch()
+        expect(a.min_x).to_equal(0.0)
+        expect(a.max_x).to_equal(1.0)
+        expect(a.max_y).to_equal(1.0)
+
+    it "creates top_right anchor":
+        val a = Anchor.top_right()
+        expect(a.min_x).to_equal(1.0)
+        expect(a.min_y).to_equal(0.0)
+
+describe "UIRect":
+    it "detects point inside rect":
+        val r = UIRect(x: 10.0, y: 20.0, width: 100.0, height: 50.0)
+        expect(r.contains_point(50.0, 40.0)).to_equal(true)
+
+    it "detects point outside rect":
+        val r = UIRect(x: 10.0, y: 20.0, width: 100.0, height: 50.0)
+        expect(r.contains_point(5.0, 40.0)).to_equal(false)
+        expect(r.contains_point(50.0, 80.0)).to_equal(false)
+
+    it "computes center":
+        val r = UIRect(x: 10.0, y: 20.0, width: 100.0, height: 50.0)
+        expect(r.center_x()).to_equal(60.0)
+        expect(r.center_y()).to_equal(45.0)
+
+describe "UIElement":
+    it "creates element with defaults":
+        val elem = UIElement.new("title", "label", 200.0, 40.0)
+        expect(elem.name).to_equal("title")
+        expect(elem.element_type).to_equal("label")
+        expect(elem.width).to_equal(200.0)
+        expect(elem.height).to_equal(40.0)
+        expect(elem.visible).to_equal(true)
+        expect(elem.parent_index).to_equal(-1)
+
+describe "UICanvas":
+    it "creates canvas with dimensions":
+        val canvas = UICanvas.new(1920.0, 1080.0, "screen")
+        expect(canvas.element_count()).to_equal(0)
+
+    it "adds elements and returns index":
+        var canvas = UICanvas.new(800.0, 600.0, "screen")
+        val idx0 = canvas.add_element(UIElement.new("a", "label", 100.0, 30.0))
+        val idx1 = canvas.add_element(UIElement.new("b", "button", 120.0, 40.0))
+        expect(idx0).to_equal(0)
+        expect(idx1).to_equal(1)
+        expect(canvas.element_count()).to_equal(2)
+
+    it "finds element by name":
+        var canvas = UICanvas.new(800.0, 600.0, "screen")
+        canvas.add_element(UIElement.new("header", "label", 100.0, 30.0))
+        canvas.add_element(UIElement.new("footer", "label", 100.0, 30.0))
+        expect(canvas.find_by_name("footer")).to_equal(1)
+        expect(canvas.find_by_name("missing")).to_equal(-1)
+
+    it "sets parent-child relationship":
+        var canvas = UICanvas.new(800.0, 600.0, "screen")
+        canvas.add_element(UIElement.new("parent", "panel", 400.0, 300.0))
+        canvas.add_element(UIElement.new("child", "label", 100.0, 30.0))
+        val ok = canvas.set_parent(1, 0)
+        expect(ok).to_equal(true)
+
+    it "rejects invalid parent index":
+        var canvas = UICanvas.new(800.0, 600.0, "screen")
+        canvas.add_element(UIElement.new("only", "label", 100.0, 30.0))
+        val ok = canvas.set_parent(0, 5)
+        expect(ok).to_equal(false)
+
+    it "toggles visibility":
+        var canvas = UICanvas.new(800.0, 600.0, "screen")
+        canvas.add_element(UIElement.new("a", "label", 100.0, 30.0))
+        canvas.add_element(UIElement.new("b", "label", 100.0, 30.0))
+        canvas.set_visible(1, false)
+        val visible = canvas.get_visible_elements()
+        expect(visible.len()).to_equal(1)
+
+    it "sets content":
+        var canvas = UICanvas.new(800.0, 600.0, "screen")
+        canvas.add_element(UIElement.new("score", "label", 100.0, 30.0))
+        canvas.set_content(0, "Score: 42")
+        if val Some(elem) = canvas.get_element(0):
+            expect(elem.content).to_equal("Score: 42")
+
+    it "computes rect with top_left anchor":
+        var canvas = UICanvas.new(800.0, 600.0, "screen")
+        var elem = UIElement.new("box", "panel", 200.0, 100.0)
+        elem.offset_x = 50.0
+        elem.offset_y = 30.0
+        canvas.add_element(elem)
+        val rect = canvas.compute_rect(0)
+        expect(rect.x).to_equal(50.0)
+        expect(rect.y).to_equal(30.0)
+        expect(rect.width).to_equal(200.0)
+        expect(rect.height).to_equal(100.0)
+
+    it "computes rect with center anchor":
+        var canvas = UICanvas.new(800.0, 600.0, "screen")
+        var elem = UIElement.new("centered", "panel", 100.0, 50.0)
+        elem.anchor = Anchor.center()
+        canvas.add_element(elem)
+        val rect = canvas.compute_rect(0)
+        expect(rect.x).to_equal(400.0)
+        expect(rect.y).to_equal(300.0)
+
+    it "clears all elements":
+        var canvas = UICanvas.new(800.0, 600.0, "screen")
+        canvas.add_element(UIElement.new("a", "label", 100.0, 30.0))
+        canvas.add_element(UIElement.new("b", "button", 120.0, 40.0))
+        expect(canvas.element_count()).to_equal(2)
+        canvas.clear()
+        expect(canvas.element_count()).to_equal(0)
+
+describe "Widgets":
+    it "creates label with content":
+        val label = create_label("title", "Hello", 10.0, 20.0, 200.0, 30.0)
+        expect(label.name).to_equal("title")
+        expect(label.element_type).to_equal("label")
+        expect(label.content).to_equal("Hello")
+        expect(label.offset_x).to_equal(10.0)
+        expect(label.offset_y).to_equal(20.0)
+
+    it "creates button":
+        val btn = create_button("ok", "OK", 5.0, 10.0, 100.0, 40.0)
+        expect(btn.element_type).to_equal("button")
+        expect(btn.content).to_equal("OK")
+
+    it "creates panel":
+        val panel = create_panel("bg", 0.0, 0.0, 800.0, 600.0)
+        expect(panel.element_type).to_equal("panel")
+
+    it "creates progress bar":
+        val bar = create_progress_bar("hp", 10.0, 10.0, 200.0, 20.0)
+        expect(bar.element_type).to_equal("progress_bar")
+        expect(bar.content).to_equal("0")
+
+    it "creates image":
+        val img = create_image("logo", "logo.png", 0.0, 0.0, 64.0, 64.0)
+        expect(img.element_type).to_equal("image")
+        expect(img.content).to_equal("logo.png")
