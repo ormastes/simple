@@ -374,6 +374,47 @@ spl_i64 rt_array_get_text(spl_i64 collection, spl_i64 index_value) {
     return rt_array_get(collection, index_value);
 }
 
+/* Untag a tagged runtime value to its raw integer payload (mirrors the hosted
+ * rt_value_as_int in compiler_rust value_ops.rs). Reuses rt_index_arg so an
+ * already-raw value passes through unchanged.
+ *
+ * These three are `weak`: the per-arch examples baremetal_stubs.c already
+ * provides strong rt_array_pop/rt_string_char_at for the riscv64 lane (which
+ * links both that file and this one), so a strong definition here would be a
+ * duplicate symbol. Weak lets the arch-specific strong def win where present
+ * and supplies the implementation for lanes (e.g. the rv32 boot.spl kernel,
+ * which links only this runtime) that would otherwise be undefined. */
+__attribute__((weak)) spl_i64 rt_value_as_int(spl_i64 value) {
+    return rt_index_arg(value);
+}
+
+/* Return the byte at `index` of a string as a tagged int; nil on out of bounds
+ * (matches rt_array_get's bounds + negative-index convention). */
+__attribute__((weak)) spl_i64 rt_string_char_at(spl_i64 string_value, spl_i64 index_value) {
+    RtString *string = rt_as_string(string_value);
+    spl_i64 index = rt_index_arg(index_value);
+    if (!string) {
+        return rt_nil();
+    }
+    if (index < 0) {
+        index = (spl_i64)string->len + index;
+    }
+    if (index < 0 || (spl_u64)index >= string->len) {
+        return rt_nil();
+    }
+    return rt_int((spl_i64)(spl_u8)string->data[index]);
+}
+
+/* Remove and return the last element (already a tagged value); nil if empty. */
+__attribute__((weak)) spl_i64 rt_array_pop(spl_i64 array_value) {
+    RtArray *array = rt_as_array(array_value);
+    if (!array || array->len == 0) {
+        return rt_nil();
+    }
+    array->len = array->len - 1;
+    return array->data[array->len];
+}
+
 spl_i64 rt_array_new_with_cap_u64(spl_i64 capacity_value) {
     return rt_array_new(capacity_value);
 }
