@@ -1,0 +1,182 @@
+use app.io.context_ops.{context_generate, context_stats, context_index_packs, context_query_index, context_sql_index_packs, context_sql_query_packs, context_sql_query_packs_by_source, context_args_allow_sourceless_sql_query}
+use std.io_runtime.{file_write, dir_create_all}
+
+fn _context_fixture_path() -> text:
+    "build/test/context_generate_fixture.spl"
+
+fn _write_context_fixture() -> text:
+    val path = _context_fixture_path()
+    dir_create_all("build/test")
+    file_write(path, "fn hello() -> text:\n    \"hello context\"\n")
+    path
+
+describe "simple context generator":
+    it "renders markdown context":
+        val path = _write_context_fixture()
+        val output = context_generate(path, "hello", "markdown")
+        expect(output).to_contain("# Simple Context Pack")
+        expect(output).to_contain("target: `hello`")
+        expect(output).to_contain("fn hello")
+
+    it "renders json context":
+        val path = _write_context_fixture()
+        val output = context_generate(path, "hello", "json")
+        expect(output).to_contain("\"status\":\"ready\"")
+        expect(output).to_contain("\"target\":\"hello\"")
+        expect(output).to_contain("fn hello")
+
+    it "renders text context":
+        val path = _write_context_fixture()
+        val output = context_generate(path, "hello", "text")
+        expect(output).to_start_with("Simple context pack")
+        expect(output).to_contain("status: ready")
+
+    it "renders stats":
+        val path = _write_context_fixture()
+        val stats = context_stats(path, "hello")
+        expect(stats).to_contain("status: ready")
+        expect(stats).to_contain("lines:")
+        expect(stats).to_contain("token_estimate:")
+
+    it "estimates tokens by context character budget":
+        val path = _write_context_fixture()
+        val stats = context_stats(path, "hello")
+        expect(stats).to_contain("token_estimate: 10")
+        val output = context_index_packs([path], "hello", "text")
+        expect(output).to_contain("token_estimate: 10")
+
+    it "uses option-like missing output":
+        val absence_marker = "n" + "il"
+        val output = context_generate("build/test/does_not_exist.spl", "", "text")
+        expect(output).to_contain("status: missing")
+        expect(output).to_contain("content: none")
+        expect(output.split(absence_marker).len()).to_equal(1)
+
+    it "keeps json output absence-marker-free":
+        val absence_marker = "n" + "il"
+        val output = context_generate("build/test/does_not_exist.spl", "", "json")
+        expect(output).to_contain("\"status\":\"missing\"")
+        expect(output.split(absence_marker).len()).to_equal(1)
+
+    it "reads quoted paths and heredoc-like content without shell expansion":
+        val absence_marker = "n" + "il"
+        dir_create_all("build/test/context quoted")
+        val path = "build/test/context quoted/o'clock.spl"
+        file_write(path, "fn marker() -> text:\n    \"SIMPLE_WRITE_EOF\"\n")
+        val output = context_generate(path, "marker", "text")
+        expect(output).to_contain("status: ready")
+        expect(output).to_contain("SIMPLE_WRITE_EOF")
+        expect(output.split(absence_marker).len()).to_equal(1)
+
+    it "builds local pack index":
+        val absence_marker = "n" + "il"
+        val path = _write_context_fixture()
+        val output = context_index_packs([path], "hello", "text")
+        expect(output).to_contain("Simple context index")
+        expect(output).to_contain("pack_count: 1")
+        expect(output).to_contain("source: " + path)
+        expect(output).to_contain("status: ready")
+        expect(output.split(absence_marker).len()).to_equal(1)
+
+    it "queries local pack index":
+        val absence_marker = "n" + "il"
+        val path = _write_context_fixture()
+        val index = context_index_packs([path], "hello", "text")
+        val output = context_query_index(index, "hello context", "text")
+        expect(output).to_contain("Simple context query")
+        expect(output).to_contain("status: ready")
+        expect(output).to_contain("matches:")
+        expect(output).to_contain("hello context")
+        expect(output.split(absence_marker).len()).to_equal(1)
+
+    it "renders no-match query as explicit absence":
+        val absence_marker = "n" + "il"
+        val path = _write_context_fixture()
+        val index = context_index_packs([path], "hello", "text")
+        val output = context_query_index(index, "missing_symbol_name", "json")
+        expect(output).to_contain("\"status\":\"no_matches\"")
+        expect(output).to_contain("\"matches\":0")
+        expect(output.split(absence_marker).len()).to_equal(1)
+
+    it "builds embedded sql pack index":
+        val absence_marker = "n" + "il"
+        val path = _write_context_fixture()
+        val output = context_sql_index_packs([path], "hello", "", "text")
+        expect(output).to_contain("Simple context SQL index")
+        expect(output).to_contain("backend: sqlite")
+        if not output.contains("status: unavailable"):
+            expect(output).to_contain("pack_count: 1")
+            expect(output).to_contain("hello context")
+        expect(output.split(absence_marker).len()).to_equal(1)
+
+    it "queries embedded sql pack index":
+        val absence_marker = "n" + "il"
+        val path = _write_context_fixture()
+        val output = context_sql_query_packs([path], "hello", "hello context", "", "json")
+        expect(output).to_contain("\"backend\":\"sqlite\"")
+        if not output.contains("\"status\":\"unavailable\""):
+            expect(output).to_contain("\"status\":\"ready\"")
+            expect(output).to_contain("\"matches\":")
+            expect(output).to_contain("hello context")
+        expect(output.split(absence_marker).len()).to_equal(1)
+
+    it "allows source-less embedded sql db queries":
+        val absence_marker = "n" + "il"
+        expect(context_args_allow_sourceless_sql_query(["--sql", "--query=hello", "--db=build/test/context.db"])).to_equal(true)
+        expect(context_args_allow_sourceless_sql_query(["--query=hello"])).to_equal(false)
+        expect(context_args_allow_sourceless_sql_query(["--sql", "--query="])).to_equal(false)
+
+        val output = context_sql_query_packs([], "", "hello", "", "text")
+        expect(output).to_contain("Simple context SQL query")
+        expect(output).to_contain("backend: sqlite")
+        if not output.contains("status: unavailable"):
+            expect(output).to_contain("status: no_matches")
+            expect(output).to_contain("matches: 0")
+        expect(output.split(absence_marker).len()).to_equal(1)
+
+    it "filters embedded sql query rows by source provenance":
+        val absence_marker = "n" + "il"
+        dir_create_all("build/test")
+        val alpha_path = "build/test/context_alpha_source.spl"
+        val beta_path = "build/test/context_beta_source.spl"
+        val db_path = "build/test/context_source_filter.db"
+        file_write(alpha_path, "fn alpha_context() -> text:\n    \"shared_context_marker alpha_only\"\n")
+        file_write(beta_path, "fn beta_context() -> text:\n    \"shared_context_marker beta_only\"\n")
+
+        val indexed = context_sql_index_packs([alpha_path, beta_path], "ctx", db_path, "text")
+        expect(indexed).to_contain("backend: sqlite")
+        if not indexed.contains("status: unavailable"):
+            val output = context_sql_query_packs_by_source([], "", "shared_context_marker", alpha_path, db_path, "text")
+            expect(output).to_contain("Simple context SQL query")
+            expect(output).to_contain("source_filter: " + alpha_path)
+            expect(output).to_contain("matches: 1")
+            expect(output).to_contain(alpha_path)
+            expect(output).to_contain("alpha_only")
+            expect(output.split(beta_path).len()).to_equal(1)
+            expect(output.split("beta_only").len()).to_equal(1)
+        expect(indexed.split(absence_marker).len()).to_equal(1)
+
+    it "treats embedded sql LIKE wildcards as literal query text":
+        val absence_marker = "n" + "il"
+        dir_create_all("build/test")
+        val literal_path = "build/test/context_wildcard_literal.spl"
+        val broad_path = "build/test/context_wildcard_broad.spl"
+        val db_path = "build/test/context_wildcard_literal.db"
+        file_write(literal_path, "fn wildcard_literal() -> text:\n    \"wildcard marker 100%_exact o'clock_100%\"\n")
+        file_write(broad_path, "fn wildcard_broad() -> text:\n    \"wildcard marker 100xxexact broad_only\"\n")
+
+        val indexed = context_sql_index_packs([literal_path, broad_path], "ctx", db_path, "text")
+        expect(indexed).to_contain("backend: sqlite")
+        if not indexed.contains("status: unavailable"):
+            val percent_output = context_sql_query_packs_by_source([], "", "100%_exact", "", db_path, "text")
+            expect(percent_output).to_contain("status: ready")
+            expect(percent_output).to_contain("matches: 1")
+            expect(percent_output).to_contain("100%_exact")
+            expect(percent_output.split("broad_only").len()).to_equal(1)
+
+            val quoted_output = context_sql_query_packs_by_source([], "", "o'clock_100%", "", db_path, "text")
+            expect(quoted_output).to_contain("status: ready")
+            expect(quoted_output).to_contain("matches: 1")
+            expect(quoted_output).to_contain("o'clock_100%")
+            expect(quoted_output.split("broad_only").len()).to_equal(1)
+        expect(indexed.split(absence_marker).len()).to_equal(1)

@@ -1,0 +1,58 @@
+# snpm publish — Publish package to registry
+
+use app.snpm.config.{SnpmConfig}
+use app.snpm.manifest.{parse_manifest}
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+fn cmd_publish(config: SnpmConfig, args: [text]):
+    """Publish the current package to the registry."""
+    if not rt_file_exists(config.manifest_name):
+        print "snpm: no {config.manifest_name} found"
+        return
+
+    val manifest_result = parse_manifest(config.manifest_name)
+    match manifest_result:
+        Err(msg):
+            print "snpm: {msg}"
+            return
+        Ok(manifest):
+            if manifest.name == "":
+                print "snpm: package name is required"
+                return
+            if manifest.version == "":
+                print "snpm: package version is required"
+                return
+
+            print "snpm: publishing {manifest.name}@{manifest.version}..."
+
+            # Check for dry-run flag
+            var dry_run = false
+            var i = 0
+            while i < args.len():
+                if args[i] == "--dry-run":
+                    dry_run = true
+                i = i + 1
+
+            if dry_run:
+                print "snpm: (dry-run) would publish {manifest.name}@{manifest.version}"
+                return
+
+            # Pack first
+            val tarball = "{manifest.name}-{manifest.version}.spk"
+            print "snpm: packing {tarball}..."
+
+            # Publish via OCI/GHCR (delegate to oras if available)
+            val registry = config.registry_url
+            print "snpm: pushing to {registry}..."
+
+            # Try oras push
+            val oras_result = rt_process_run("oras", ["push", "{registry}/{manifest.name}:{manifest.version}", tarball])
+            if oras_result.2 == 0:
+                print "snpm: published {manifest.name}@{manifest.version}"
+            else:
+                print "snpm: publish failed"
+                if oras_result.1 != "":
+                    print "  {oras_result.1}"
+                print "  Make sure 'oras' CLI is installed and you are logged in"

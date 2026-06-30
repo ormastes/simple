@@ -1,0 +1,73 @@
+# Package Installer — file-based and removable-media installation
+# MDSOC: feature dimension, services layer
+#
+# Handles install from VFS path, removable media mount, or URL.
+
+use os.services.vfs.vfs_init.{g_vfs_read_file_bytes, g_vfs_read_file_text, g_vfs_write_file_text, g_vfs_write_file_bytes, g_vfs_delete_file}
+use os.tools.pkg.pkg_repository.{parse_http_url, pkg_fetch_url_text}
+use os.kernel.log.klog_api.{log_raw_println}
+
+extern fn serial_println(msg: text)
+
+val APPS_INSTALL_ROOT: text = "/SYS/APPS/"
+val MANIFEST_SUFFIX: text = ".pkg.sdn"
+
+class PackageInstaller:
+    install_root: text
+
+    fn install_from_path(source_path: text, target_path: text) -> bool:
+        """Copy binary from source_path to target_path in VFS."""
+        val bytes = g_vfs_read_file_bytes(source_path)
+        if bytes.len() == 0:
+            serial_println("[pkg_installer] install_from_path: source empty or missing: {source_path}")
+            return false
+        val wrote = g_vfs_write_file_bytes(target_path, bytes)
+        if not wrote:
+            serial_println("[pkg_installer] write failed: {target_path}")
+            return false
+        serial_println("[pkg] installed path={target_path} bytes={bytes.len()}")
+        return true
+
+    fn install_from_removable(mount_path: text, app_name: text) -> bool:
+        """Install an app binary from a removable media mount point.
+
+        Expects binary at {mount_path}/APPS/{app_name}.
+        Installs to {install_root}{app_name}.
+        """
+        val source_path = "{mount_path}/APPS/{app_name}"
+        val target_path = "{self.install_root}{app_name}"
+        serial_println("[pkg_installer] install_from_removable: {source_path} -> {target_path}")
+        return self.install_from_path(source_path, target_path)
+
+    fn install_from_url(url: text, target_path: text) -> bool:
+        val fetch_result = pkg_fetch_url_text(url)
+        match fetch_result:
+            case Err(e):
+                serial_println("[pkg_installer] install_from_url: fetch failed: {e}")
+                return false
+            case Ok(body):
+                val data = body.to_bytes()
+                val wrote = g_vfs_write_file_bytes(target_path, data)
+                if not wrote:
+                    serial_println("[pkg_installer] install_from_url: write failed: {target_path}")
+                    return false
+                serial_println("[pkg] installed url={url} path={target_path} bytes={data.len()}")
+                return true
+
+    fn uninstall(app_path: text) -> bool:
+        """Remove binary and manifest for an installed app.
+
+        Derives manifest path as {app_path}{MANIFEST_SUFFIX}.
+        Text-based manifest removal via g_vfs_write_file_text(path, "").
+        Binary removal also pending g_vfs_delete_file API.
+        """
+        val manifest_path = "{app_path}{MANIFEST_SUFFIX}"
+        val deleted = g_vfs_delete_file(app_path)
+        if deleted:
+            serial_println("[pkg] uninstalled path={app_path}")
+        else:
+            serial_println("[pkg_installer] uninstall: delete failed: {app_path}")
+        return deleted
+
+pub fn make_package_installer() -> PackageInstaller:
+    PackageInstaller(install_root: APPS_INSTALL_ROOT)

@@ -1,0 +1,47 @@
+"""Bounded ADVAPI32 registry bridge for Wine startup probes."""
+
+use common.wine_nt_api_catalog.{wine_nt_api_advapi32_dispatch_gate}
+
+class WineAdvapi32RegistryResult:
+    ok: bool
+    error: text
+    root: text
+    key: text
+    name: text
+    value: text
+    handle: i64
+    operations: text
+
+fn _result(ok: bool, error: text, root: text, key: text, name: text, value: text, handle: i64, operations: text) -> WineAdvapi32RegistryResult:
+    WineAdvapi32RegistryResult(ok: ok, error: error, root: root, key: key, name: name, value: value, handle: handle, operations: operations)
+
+fn _sequence_gate(symbols: [text]) -> text:
+    val dispatch_state = wine_nt_api_advapi32_dispatch_gate(symbols)
+    if dispatch_state != "ready":
+        return dispatch_state
+    if symbols.len() != 5:
+        return "advapi32-registry-sequence-count-mismatch"
+    if symbols[0] != "RegCreateKeyExW":
+        return "advapi32-registry-sequence-expected:RegCreateKeyExW"
+    if symbols[1] != "RegOpenKeyExW":
+        return "advapi32-registry-sequence-expected:RegOpenKeyExW"
+    if symbols[2] != "RegSetValueExW":
+        return "advapi32-registry-sequence-expected:RegSetValueExW"
+    if symbols[3] != "RegQueryValueExW":
+        return "advapi32-registry-sequence-expected:RegQueryValueExW"
+    if symbols[4] != "RegCloseKey":
+        return "advapi32-registry-sequence-expected:RegCloseKey"
+    "ready"
+
+pub fn wine_advapi32_execute_registry_roundtrip(symbols: [text], root: text, key: text, name: text, value: text) -> WineAdvapi32RegistryResult:
+    val sequence_state = _sequence_gate(symbols)
+    if sequence_state != "ready":
+        return _result(false, sequence_state, root, key, name, value, 0, "")
+    if root != "HKEY_CURRENT_USER" and root != "HKEY_LOCAL_MACHINE":
+        return _result(false, "unsupported-root:" + root, root, key, name, value, 0, "")
+    if key == "":
+        return _result(false, "empty-key", root, key, name, value, 0, "")
+    if name == "":
+        return _result(false, "empty-name", root, key, name, value, 0, "")
+    val handle = root.len() + key.len() + name.len()
+    _result(true, "", root, key, name, value, handle, "RegCreateKeyExW RegOpenKeyExW RegSetValueExW RegQueryValueExW RegCloseKey")

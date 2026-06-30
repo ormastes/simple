@@ -1,0 +1,228 @@
+# IPv6 -- Internet Protocol version 6 (RFC 8200)
+#
+# MDSOC: feature dimension, network layer.
+# 40-byte fixed header. First 32-bit word packs:
+#   version(4) / traffic_class(8) / flow_label(20).
+#
+# Header layout:
+#   word0: version(4) traffic_class(8) flow_label(20)
+#   word1: payload_len(16) next_header(8) hop_limit(8)
+#   src:   16 bytes (Ipv6Addr)
+#   dst:   16 bytes (Ipv6Addr)
+#
+# Consumes the foundation Ipv6Addr directly (never a netstack-local copy).
+
+use std.common.net.byte_cursor.{ByteReader, ByteWriter}
+use std.common.net.addr.{Ipv6Addr}
+
+# ============================================================================
+# NextHeader / protocol constants (shared with IPv4 protocol field).
+# Integer constants, NOT a payload-carrying enum -- dispatch via if/else.
+# ============================================================================
+
+val NEXT_HEADER_HOPBYHOP: u8 = 0
+val NEXT_HEADER_ICMPV4: u8 = 1
+val NEXT_HEADER_IGMP: u8 = 2
+val NEXT_HEADER_TCP: u8 = 6
+val NEXT_HEADER_UDP: u8 = 17
+val NEXT_HEADER_IPV6_ROUTE: u8 = 43
+val NEXT_HEADER_IPV6_FRAG: u8 = 44
+val NEXT_HEADER_ESP: u8 = 50
+val NEXT_HEADER_AH: u8 = 51
+val NEXT_HEADER_ICMPV6: u8 = 58
+val NEXT_HEADER_NONE: u8 = 59
+val NEXT_HEADER_DESTOPTS: u8 = 60
+val NEXT_HEADER_SCTP: u8 = 132
+val NEXT_HEADER_DCCP: u8 = 33
+
+val IPV6_HEADER_SIZE: u64 = 40
+val IPV6_VERSION: u8 = 6
+
+# Is this next-header value an IPv6 extension header (i.e. continue the chain)?
+fn ipv6_is_ext_header(nh: u8) -> bool:
+    (nh == NEXT_HEADER_HOPBYHOP
+        or nh == NEXT_HEADER_IPV6_ROUTE
+        or nh == NEXT_HEADER_IPV6_FRAG
+        or nh == NEXT_HEADER_DESTOPTS
+        or nh == NEXT_HEADER_AH
+        or nh == NEXT_HEADER_ESP)
+
+# ============================================================================
+# Ipv6Header
+# ============================================================================
+
+struct Ipv6Header:
+    """Parsed IPv6 fixed (40-byte) header."""
+    version: u8           # always 6
+    traffic_class: u8
+    flow_label: u32       # 20-bit
+    payload_len: u16
+    next_header: u8
+    hop_limit: u8
+    src: Ipv6Addr
+    dst: Ipv6Addr
+
+# ============================================================================
+# Generic extension-header chain element
+# ============================================================================
+
+struct Ipv6ExtHeader:
+    """One element of the IPv6 extension-header chain."""
+    next_header: u8
+    hdr_ext_len: u8      # in 8-octet units, NOT counting the first 8 octets
+    data: [u8]           # the remaining bytes of this ext header (after the 2-byte preamble)
+
+# ============================================================================
+# Build
+# ============================================================================
+
+fn ipv6_build_header(h: Ipv6Header) -> [u8]:
+    """Serialize an Ipv6Header to its 40 wire bytes (big-endian)."""
+    var w = ByteWriter.new()
+    # word0: (version<<28) | (traffic_class<<20) | flow_label(20)
+    val v: u32 = h.version.to_u32()
+    val tc: u32 = h.traffic_class.to_u32()
+    val fl: u32 = h.flow_label & 0xFFFFF
+    val word0: u32 = (v << 28) | (tc << 20) | fl
+    w.write_u32(word0)
+    # word1: payload_len(16) next_header(8) hop_limit(8)
+    w.write_u16(h.payload_len)
+    w.write_u8(h.next_header)
+    w.write_u8(h.hop_limit)
+    # src + dst
+    w.write_bytes(h.src.to_bytes())
+    w.write_bytes(h.dst.to_bytes())
+    w.to_bytes()
+
+# ============================================================================
+# Parse
+# ============================================================================
+
+fn ipv6_parse_header(data: [u8]) -> Result<Ipv6Header, text>:
+    """Parse a 40-byte IPv6 fixed header from raw bytes."""
+    if data.len() < IPV6_HEADER_SIZE:
+        return Err("IPv6 header too short: {data.len()} < {IPV6_HEADER_SIZE}")
+    var r = ByteReader.new(data)
+    val word0 = r.read_u32()?
+    val version: u8 = ((word0 >> 28) & 0xF).to_u8()
+    val traffic_class: u8 = ((word0 >> 20) & 0xFF).to_u8()
+    val flow_label: u32 = word0 & 0xFFFFF
+    val payload_len = r.read_u16()?
+    val next_header = r.read_u8()?
+    val hop_limit = r.read_u8()?
+    val src_bytes = r.read_bytes(16)?
+    val dst_bytes = r.read_bytes(16)?
+    val src = Ipv6Addr.from_bytes(src_bytes)?
+    val dst = Ipv6Addr.from_bytes(dst_bytes)?
+    Ok(Ipv6Header(
+        version: version,
+        traffic_class: traffic_class,
+        flow_label: flow_label,
+        payload_len: payload_len,
+        next_header: next_header,
+        hop_limit: hop_limit,
+        src: src,
+        dst: dst
+    ))
+
+# ============================================================================
+# Extension header chain skip
+# ============================================================================
+
+# Parse a single extension header starting at `data[off..]`.
+# Returns (ext_header, next_offset). Each ext header is:
+#   next_header(1) hdr_ext_len(1) <data: 6 + hdr_ext_len*8 bytes>
+# so its total length is 8 + hdr_ext_len*8 octets.
+fn ipv6_parse_ext_header(data: [u8], off: u64) -> Result<Ipv6ExtHeader, text>:
+    if off + 2 > data.len():
+        return Err("IPv6 ext header truncated preamble")
+    val next_header = data[off]
+    val hdr_ext_len = data[off + 1]
+    val total: u64 = 8 + hdr_ext_len.to_u64() * 8
+    if off + total > data.len():
+        return Err("IPv6 ext header truncated body")
+    var body: [u8] = []
+    var i: u64 = off + 2
+    val end: u64 = off + total
+    while i < end:
+        body.push(data[i])
+        i = i + 1
+    Ok(Ipv6ExtHeader(next_header: next_header, hdr_ext_len: hdr_ext_len, data: body))
+
+# Walk the extension-header chain following the fixed header, returning the
+# offset (into the full packet, counting the 40-byte header) of the first
+# upper-layer payload and the upper-layer protocol value. `first_next` is the
+# header's next_header field; `data` is the full packet bytes.
+fn ipv6_skip_ext_headers(data: [u8], first_next: u8) -> Result<u64, text>:
+    var nh = first_next
+    var off: u64 = IPV6_HEADER_SIZE
+    while ipv6_is_ext_header(nh):
+        if off + 2 > data.len():
+            return Err("IPv6 ext chain truncated")
+        val this_nh = data[off]
+        val hdr_ext_len = data[off + 1]
+        val total: u64 = 8 + hdr_ext_len.to_u64() * 8
+        nh = this_nh
+        off = off + total
+        if off > data.len():
+            return Err("IPv6 ext chain overruns packet")
+    Ok(off)
+
+# ============================================================================
+# Pseudo-header checksum helper (RFC 8200 / 4443)
+#
+# Used by ICMPv6 and TCP/UDP-over-v6. Computes the standard one's-complement
+# internet checksum over the IPv6 pseudo-header followed by the upper-layer
+# message:
+#   src(16) dst(16) upper_layer_len(u32) zero(3) next_header(1) <message...>
+#
+# FLAG: promote to src/lib/common/net once a second consumer (TCP/UDP-over-v6)
+# lands -- it is host-agnostic and pure.
+# ============================================================================
+
+fn ipv6_pseudo_checksum(src: Ipv6Addr, dst: Ipv6Addr, next_header: u8, message: [u8]) -> u16:
+    """One's-complement checksum over the IPv6 pseudo-header + message."""
+    var buf: [u8] = []
+    # src + dst (16 bytes each)
+    var sb = src.to_bytes()
+    var i: u64 = 0
+    while i < sb.len():
+        buf.push(sb[i])
+        i = i + 1
+    var db = dst.to_bytes()
+    i = 0
+    while i < db.len():
+        buf.push(db[i])
+        i = i + 1
+    # upper-layer length (u32, == message length)
+    val ulen: u32 = message.len().to_u32()
+    buf.push(((ulen >> 24) & 0xFF).to_u8())
+    buf.push(((ulen >> 16) & 0xFF).to_u8())
+    buf.push(((ulen >> 8) & 0xFF).to_u8())
+    buf.push((ulen & 0xFF).to_u8())
+    # 3 zero bytes + next_header
+    buf.push(0)
+    buf.push(0)
+    buf.push(0)
+    buf.push(next_header)
+    # message
+    i = 0
+    while i < message.len():
+        buf.push(message[i])
+        i = i + 1
+    ipv6_internet_checksum(buf)
+
+# Standard one's-complement internet checksum over a byte buffer.
+fn ipv6_internet_checksum(data: [u8]) -> u16:
+    var sum: u32 = 0
+    var i: u64 = 0
+    while i + 1 < data.len():
+        val word: u32 = (data[i].to_u32() << 8) | data[i + 1].to_u32()
+        sum = sum + word
+        i = i + 2
+    if i < data.len():
+        sum = sum + (data[i].to_u32() << 8)
+    while (sum >> 16) > 0:
+        sum = (sum & 0xFFFF) + (sum >> 16)
+    val result: u16 = (~sum & 0xFFFF).to_u16()
+    result

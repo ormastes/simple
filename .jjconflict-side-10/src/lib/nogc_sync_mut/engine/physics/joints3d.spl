@@ -1,0 +1,206 @@
+#![allow(unnamed_duplicate_typed_args)]
+@allow(primitive_api)
+# Physics System — 3D Joint Constraints
+#
+# Pure Simple joint constraints for 3D. Joints connect two physics bodies
+# with position correction solved iteratively each physics step.
+#
+# Supported joint types:
+#   0 = ball_socket — bodies rotate freely around anchor point
+#   1 = fixed (weld) — bodies locked relative to each other
+#   2 = spring (distance) — spring force between bodies
+#
+# Usage:
+#   val jid = physics_add_ball_socket_3d(world, body_a, body_b, Vec3(x: 0.0, y: 0.0, z: 0.0))
+#   physics_remove_joint_3d(world, jid)
+
+use std.common.engine.ids.{NodeId}
+use std.common.engine.math3d.{Vec3, _sqrt}
+use std.nogc_sync_mut.engine.physics.body3d.{InternalBody3D}
+use std.nogc_sync_mut.engine.physics.world3d.{PhysicsWorld3D, Joint3D}
+
+# ============================================================================
+# JointId3D — Opaque handle to a physics joint
+# ============================================================================
+
+struct JointId3D:
+    handle: i64
+
+impl JointId3D:
+    fn is_valid() -> bool:
+        self.handle >= 0
+
+    static fn invalid() -> JointId3D:
+        JointId3D(handle: -1)
+
+# ============================================================================
+# Joint Creation Functions
+# ============================================================================
+
+fn physics_add_ball_socket_3d(world: PhysicsWorld3D, node_a: NodeId, node_b: NodeId, anchor: Vec3) -> JointId3D:
+    """Add a ball-socket joint between two bodies at the given anchor point."""
+    val idx_a = world._find_body_index(node_a)
+    val idx_b = world._find_body_index(node_b)
+    if idx_a < 0 or idx_b < 0:
+        return JointId3D.invalid()
+
+    val joint = Joint3D(
+        joint_type: 0,
+        node_a: node_a,
+        node_b: node_b,
+        anchor: anchor,
+        rest_length: 0.0,
+        stiffness: 1.0,
+        damping: 0.0,
+        offset: Vec3.zero()
+    )
+    val id = world.joint_storage.add(joint)
+    JointId3D(handle: id)
+
+fn physics_add_fixed_3d(world: PhysicsWorld3D, node_a: NodeId, node_b: NodeId) -> JointId3D:
+    """Add a fixed (weld) joint between two bodies — locks relative position."""
+    val idx_a = world._find_body_index(node_a)
+    val idx_b = world._find_body_index(node_b)
+    if idx_a < 0 or idx_b < 0:
+        return JointId3D.invalid()
+
+    val pb_a = world.bodies[idx_a]
+    val pb_b = world.bodies[idx_b]
+    val ib_a = world.internal_bodies[pb_a.body_index]
+    val ib_b = world.internal_bodies[pb_b.body_index]
+    val offset = ib_b.position.sub(ib_a.position)
+
+    val joint = Joint3D(
+        joint_type: 1,
+        node_a: node_a,
+        node_b: node_b,
+        anchor: Vec3.zero(),
+        rest_length: 0.0,
+        stiffness: 1.0,
+        damping: 0.0,
+        offset: offset
+    )
+    val id = world.joint_storage.add(joint)
+    JointId3D(handle: id)
+
+fn physics_add_spring_3d(world: PhysicsWorld3D, node_a: NodeId, node_b: NodeId, rest_length: f64, stiffness: f64, damping: f64) -> JointId3D:
+    """Add a spring (distance) joint between two bodies."""
+    val idx_a = world._find_body_index(node_a)
+    val idx_b = world._find_body_index(node_b)
+    if idx_a < 0 or idx_b < 0:
+        return JointId3D.invalid()
+
+    val joint = Joint3D(
+        joint_type: 2,
+        node_a: node_a,
+        node_b: node_b,
+        anchor: Vec3.zero(),
+        rest_length: rest_length,
+        stiffness: stiffness,
+        damping: damping,
+        offset: Vec3.zero()
+    )
+    val id = world.joint_storage.add(joint)
+    JointId3D(handle: id)
+
+# ============================================================================
+# Joint Removal
+# ============================================================================
+
+fn physics_remove_joint_3d(world: PhysicsWorld3D, joint_id: JointId3D) -> bool:
+    """Remove a joint from the physics world."""
+    if not joint_id.is_valid():
+        return false
+    world.joint_storage.remove(joint_id.handle)
+
+# ============================================================================
+# Joint Solver — called each physics step by the user
+# ============================================================================
+
+fn solve_joints_3d(world: PhysicsWorld3D, dt: f64):
+    """Iteratively solve all joints. Call after world.step() for joint constraints.
+    Uses 4 solver iterations for stability."""
+    var iteration = 0
+    while iteration < 4:
+        var i = 0
+        while i < world.joint_storage.joints.len():
+            val joint = world.joint_storage.joints[i]
+            _solve_single_joint_3d(world, joint, dt)
+            i = i + 1
+        iteration = iteration + 1
+
+fn _solve_single_joint_3d(world: PhysicsWorld3D, joint: Joint3D, dt: f64):
+    val idx_a = world._find_body_index(joint.node_a)
+    val idx_b = world._find_body_index(joint.node_b)
+    if idx_a < 0 or idx_b < 0:
+        return
+
+    val pb_a = world.bodies[idx_a]
+    val pb_b = world.bodies[idx_b]
+    val ib_a = world.internal_bodies[pb_a.body_index]
+    val ib_b = world.internal_bodies[pb_b.body_index]
+
+    if joint.joint_type == 0:
+        _solve_ball_socket(ib_a, ib_b, joint.anchor)
+    elif joint.joint_type == 1:
+        _solve_fixed_3d(ib_a, ib_b, joint.offset)
+    elif joint.joint_type == 2:
+        _solve_spring_3d(ib_a, ib_b, joint.rest_length, joint.stiffness, joint.damping, dt)
+
+fn _solve_ball_socket(body_a: InternalBody3D, body_b: InternalBody3D, anchor: Vec3):
+    """Keep both bodies connected at the anchor point."""
+    val total_inv = body_a.inv_mass + body_b.inv_mass
+    if total_inv == 0.0:
+        return
+
+    # Weighted midpoint based on inverse masses
+    val mid = Vec3(
+        x: (body_a.position.x * body_b.inv_mass + body_b.position.x * body_a.inv_mass) / total_inv,
+        y: (body_a.position.y * body_b.inv_mass + body_b.position.y * body_a.inv_mass) / total_inv,
+        z: (body_a.position.z * body_b.inv_mass + body_b.position.z * body_a.inv_mass) / total_inv
+    )
+
+    if body_a.inv_mass > 0.0:
+        body_a.position = mid
+    if body_b.inv_mass > 0.0:
+        body_b.position = mid
+
+fn _solve_fixed_3d(body_a: InternalBody3D, body_b: InternalBody3D, offset: Vec3):
+    """Maintain initial relative offset between bodies."""
+    val target_pos = body_a.position.add(offset)
+    val error = body_b.position.sub(target_pos)
+
+    if body_a.inv_mass == 0.0:
+        # A is static, move B to target
+        body_b.position = target_pos
+    else:
+        val correction = error.mul_scalar(0.5)
+        if body_a.inv_mass > 0.0:
+            body_a.position = body_a.position.add(correction)
+        if body_b.inv_mass > 0.0:
+            body_b.position = body_b.position.sub(correction)
+
+fn _solve_spring_3d(body_a: InternalBody3D, body_b: InternalBody3D, rest_length: f64, stiffness: f64, damping: f64, dt: f64):
+    """Apply spring force: F = -k * (x - rest) - d * v_along."""
+    val delta = body_b.position.sub(body_a.position)
+    val current_length = delta.length()
+
+    if current_length < 0.0000001:
+        return
+
+    val dir = Vec3(x: delta.x / current_length, y: delta.y / current_length, z: delta.z / current_length)
+
+    # Spring force: F = k * (current - rest)
+    val spring_force = (current_length - rest_length) * stiffness
+
+    # Damping force: F = d * relative_velocity_along_spring
+    val rel_vel = body_b.velocity.sub(body_a.velocity)
+    val vel_along = rel_vel.dot(dir)
+    val damping_force = vel_along * damping
+
+    val total_force = spring_force + damping_force
+    val force = dir.mul_scalar(total_force)
+    val neg_force = dir.mul_scalar(-total_force)
+
+    body_a.apply_force(force)
+    body_b.apply_force(neg_force)

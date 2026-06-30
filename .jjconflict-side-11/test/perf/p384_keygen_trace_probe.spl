@@ -1,0 +1,95 @@
+use os.crypto.p384.{_gx, _gy, _jac_inf, _jac_double, _jac_add_mixed, _point_cselect, _to_affine}
+
+extern fn rt_cli_get_args() -> [text]
+extern fn rt_cli_exit(code: i64)
+extern fn rt_time_now_nanos() -> i64
+
+fn _make_key(seed: u8) -> [u8]:
+    var k: [u8] = []
+    var i: u64 = 0
+    while i < 48:
+        val v: u8 = ((seed.to_u64() + i * 7 + 3) & 0xFF).to_u8()
+        k.push(v)
+        i = i + 1
+    k
+
+fn _parse_u64(arg: text) -> u64:
+    var out: u64 = 0
+    var i: i64 = 0
+    while i < arg.len():
+        val ch = arg[i]
+        if ch < "0" or ch > "9":
+            return 0
+        out = out * 10 + (ch.ord().to_u64() - "0".ord().to_u64())
+        i = i + 1
+    out
+
+fn _arg_value(flag: text) -> text:
+    val args = rt_cli_get_args() ?? []
+    var i: i64 = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == flag and i + 1 < args.len():
+            return args[i + 1]
+        elif arg.starts_with("{flag}="):
+            return arg.slice(flag.len() + 1, arg.len())
+        i = i + 1
+    ""
+
+fn _arg_bool(flag: text) -> bool:
+    val value = _arg_value(flag)
+    value == "1" or value == "true" or value == "yes"
+
+fn _trace_bits(bits: u64, focus_bit: u64, run_affine: bool):
+    val scalar = _make_key(0x6B)
+    val gx = _gx()
+    val gy = _gy()
+    var acc = _jac_inf()
+    val run_start = rt_time_now_nanos()
+    var global_bit: u64 = 0
+    var i: u64 = 0
+    while i < 48 and global_bit < bits:
+        val byte_val: u64 = scalar[i].to_u64()
+        var bit: u64 = 0
+        while bit < 8 and global_bit < bits:
+            val trace = global_bit == focus_bit
+            if trace:
+                print "TRACE bit={global_bit} before_double inf={acc.inf}"
+            val double_start = rt_time_now_nanos()
+            acc = _jac_double(acc)
+            val double_elapsed = rt_time_now_nanos() - double_start
+            if trace:
+                print "TRACE bit={global_bit} after_double inf={acc.inf} ns={double_elapsed}"
+            val bit_set: u64 = (byte_val >> (7 - bit)) & 1
+            val add_start = rt_time_now_nanos()
+            val candidate = _jac_add_mixed(acc, gx, gy)
+            val add_elapsed = rt_time_now_nanos() - add_start
+            if trace:
+                print "TRACE bit={global_bit} after_add bit_set={bit_set} cand_inf={candidate.inf} ns={add_elapsed}"
+            val select_start = rt_time_now_nanos()
+            acc = _point_cselect(acc, candidate, bit_set)
+            val select_elapsed = rt_time_now_nanos() - select_start
+            if trace:
+                print "TRACE bit={global_bit} after_select inf={acc.inf} ns={select_elapsed}"
+            global_bit = global_bit + 1
+            bit = bit + 1
+        i = i + 1
+    val run_elapsed = rt_time_now_nanos() - run_start
+    print "PASS loop bits={bits} completed_bits={global_bit} inf={acc.inf} ns={run_elapsed}"
+    if run_affine:
+        print "TRACE before_affine bits={bits} inf={acc.inf}"
+        val affine_start = rt_time_now_nanos()
+        val (_ax, _ay) = _to_affine(acc)
+        val affine_elapsed = rt_time_now_nanos() - affine_start
+        print "PASS affine bits={bits} ns={affine_elapsed}"
+
+fn main():
+    val bits_value = _arg_value("--bits")
+    val bits = if bits_value == "" { 384u64 } else { _parse_u64(bits_value) }
+    val focus_value = _arg_value("--focus-bit")
+    val focus_bit = if focus_value == "" { bits } else { _parse_u64(focus_value) }
+    val run_affine = _arg_bool("--affine")
+    print "p384_keygen_trace_probe start bits={bits} focus_bit={focus_bit} affine={run_affine}"
+    _trace_bits(bits, focus_bit, run_affine)
+    print "PASS p384_keygen_trace_probe"
+    rt_cli_exit(0)

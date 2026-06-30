@@ -1,0 +1,25 @@
+# CMake toolchain — FreeBSD x86 (i386) (Clang cross-compile)
+set(CMAKE_SYSTEM_NAME FreeBSD)
+set(CMAKE_SYSTEM_PROCESSOR i386)
+
+set(CMAKE_C_COMPILER clang)
+set(CMAKE_CXX_COMPILER clang++)
+
+# Sysroot: /opt/sysroots/freebsd-x86 (local) or /tmp/freebsd-i386-sysroot (CI)
+if(EXISTS /opt/sysroots/freebsd-x86/usr/include)
+    set(FREEBSD_SYSROOT /opt/sysroots/freebsd-x86)
+elseif(EXISTS /tmp/freebsd-i386-sysroot/usr/include)
+    set(FREEBSD_SYSROOT /tmp/freebsd-i386-sysroot)
+else()
+    message(FATAL_ERROR "FreeBSD i386 sysroot not found. Install at /opt/sysroots/freebsd-x86 or /tmp/freebsd-i386-sysroot")
+endif()
+
+set(CMAKE_C_FLAGS "--target=i686-unknown-freebsd13 --sysroot=${FREEBSD_SYSROOT}")
+set(CMAKE_CXX_FLAGS "--target=i686-unknown-freebsd13 --sysroot=${FREEBSD_SYSROOT}")
+set(CMAKE_ASM_FLAGS "--target=i686-unknown-freebsd13 --sysroot=${FREEBSD_SYSROOT}")
+set(CMAKE_EXE_LINKER_FLAGS "--target=i686-unknown-freebsd13 --sysroot=${FREEBSD_SYSROOT} -fuse-ld=lld")
+
+set(CMAKE_FIND_ROOT_PATH "${FREEBSD_SYSROOT}")
+set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)

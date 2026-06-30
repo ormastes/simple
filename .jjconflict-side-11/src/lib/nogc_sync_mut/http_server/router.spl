@@ -1,0 +1,210 @@
+# HTTP Router — Lightweight Embedded Web Server
+#
+# Part of std.nogc_sync_mut.http_server
+# Full standalone example: examples/06_io/simple_web_server/
+# Design: doc/05_design/simple_web_server_lib_api.md
+
+use std.nogc_sync_mut.http_server.types.{
+    HttpRequest, HttpResponse, HttpMethod, HttpStatus, http_method_to_text
+}
+
+# =============================================================================
+# Route Definition
+# =============================================================================
+
+class Route:
+    method: HttpMethod
+    pattern: text
+    is_prefix: bool
+    handler: fn(HttpRequest) -> HttpResponse
+
+# =============================================================================
+# Router
+# =============================================================================
+
+class Router:
+    routes: [Route]
+    prefix_routes: [Route]
+    not_found_handler: fn(HttpRequest) -> HttpResponse
+
+    static fn new() -> Router:
+        Router(
+            routes: [],
+            prefix_routes: [],
+            not_found_handler: default_not_found
+        )
+
+    fn get(path: text, handler: fn(HttpRequest) -> HttpResponse):
+        self.route(HttpMethod.Get, path, handler)
+
+    fn post(path: text, handler: fn(HttpRequest) -> HttpResponse):
+        self.route(HttpMethod.Post, path, handler)
+
+    fn put(path: text, handler: fn(HttpRequest) -> HttpResponse):
+        self.route(HttpMethod.Put, path, handler)
+
+    fn delete(path: text, handler: fn(HttpRequest) -> HttpResponse):
+        self.route(HttpMethod.Delete, path, handler)
+
+    fn head(path: text, handler: fn(HttpRequest) -> HttpResponse):
+        self.route(HttpMethod.Head, path, handler)
+
+    fn options(path: text, handler: fn(HttpRequest) -> HttpResponse):
+        self.route(HttpMethod.Options, path, handler)
+
+    fn route(method: HttpMethod, path: text, handler: fn(HttpRequest) -> HttpResponse):
+        self.routes.push(Route(
+            method: method,
+            pattern: path,
+            is_prefix: false,
+            handler: handler
+        ))
+
+    fn mount(prefix: text, handler: fn(HttpRequest) -> HttpResponse):
+        self.prefix_routes.push(Route(
+            method: HttpMethod.Get,
+            pattern: prefix,
+            is_prefix: true,
+            handler: handler
+        ))
+
+    fn set_not_found(handler: fn(HttpRequest) -> HttpResponse):
+        self.not_found_handler = handler
+
+    fn dispatch(req: HttpRequest) -> HttpResponse:
+        # AC-3: reject path traversal before any handler sees the request.
+        if not path_is_safe(req.path):
+            return HttpResponse.error(HttpStatus.BadRequest, "400 Bad Request: unsafe path")
+
+        for r in self.routes:
+            if method_matches(r.method, req.method) and match_route_pattern(r.pattern, req.path):
+                return r.handler(req)
+
+        for r in self.prefix_routes:
+            if req.path.starts_with(r.pattern):
+                return r.handler(req)
+
+        return self.not_found_handler(req)
+
+# =============================================================================
+# Route Pattern Matching
+# =============================================================================
+
+fn method_matches(route_method: HttpMethod, req_method: HttpMethod) -> bool:
+    return http_method_to_text(route_method) == http_method_to_text(req_method)
+
+fn match_route_pattern(pattern: text, path: text) -> bool:
+    if pattern == path:
+        return true
+
+    val pattern_parts = pattern.split("/")
+    val path_parts = path.split("/")
+
+    if pattern_parts.len() != path_parts.len():
+        return false
+
+    var i = 0
+    while i < pattern_parts.len():
+        val pp = pattern_parts[i]
+        val rp = path_parts[i]
+
+        if pp.starts_with(":"):
+            i = i + 1
+            continue
+        if pp == "*":
+            i = i + 1
+            continue
+        if pp != rp:
+            return false
+        i = i + 1
+
+    return true
+
+fn extract_route_params(pattern: text, path: text) -> [(text, text)]:
+    var params: [(text, text)] = []
+    val pattern_parts = pattern.split("/")
+    val path_parts = path.split("/")
+
+    if pattern_parts.len() != path_parts.len():
+        return params
+
+    var i = 0
+    while i < pattern_parts.len():
+        val pp = pattern_parts[i]
+        val rp = path_parts[i]
+
+        if pp.starts_with(":"):
+            val param_name = pp.slice(1, pp.len())
+            params.push((param_name, rp))
+
+        i = i + 1
+
+    return params
+
+fn default_not_found(req: HttpRequest) -> HttpResponse:
+    HttpResponse.not_found()
+
+# =============================================================================
+# Path Safety (AC-3)
+# =============================================================================
+
+# path_is_safe returns false when the path contains traversal sequences that
+# could escape the document root.  Checked patterns:
+#   - ".." as a path segment (/../, /..%2f, etc.)
+#   - URL-encoded dot sequences (%2e%2e)
+#   - Double slash (//)
+#   - Absolute path injection (scheme: or \\ on Windows-style paths)
+#
+# This is a defence-in-depth guard.  Callers should also normalise paths
+# before serving files from disk.
+fn _decode_traversal_escapes(lower: text) -> text:
+    # Decode only the escapes relevant to traversal so encoded forms like
+    # "..%2f", "%2e%2e/", ".%2e\" are checked in their effective shape.
+    var out = lower.replace("%2e", ".")
+    out = out.replace("%2f", "/")
+    out = out.replace("%5c", "\\")
+    out
+
+fn _has_dotdot_segment(p: text) -> bool:
+    # ".." as a full path segment (slash or backslash separated)
+    if p.contains("/../"):
+        return true
+    if p.ends_with("/.."):
+        return true
+    if p.starts_with("../"):
+        return true
+    if p == "..":
+        return true
+    if p.contains("\\.."):
+        return true
+    if p.contains("..\\"):
+        return true
+    false
+
+fn path_is_safe(path: text) -> bool:
+    val lower = path.to_lower()
+    # Check both the raw path and its traversal-decoded form, so "..%2f",
+    # "%2f..", and fully/partially encoded dot-dot segments all fail closed
+    # while legitimate names like "file..txt" or "/foo.%2ebar" stay allowed.
+    val decoded = _decode_traversal_escapes(lower)
+
+    if _has_dotdot_segment(lower):
+        return false
+    if _has_dotdot_segment(decoded):
+        return false
+
+    # Double slash — often used to bypass naive prefix checks
+    if lower.contains("//"):
+        return false
+    if decoded.contains("//"):
+        return false
+
+    # Null byte injection
+    if lower.contains("\0"):
+        return false
+    if lower.contains("%00"):
+        return false
+
+    return true
+
+export path_is_safe

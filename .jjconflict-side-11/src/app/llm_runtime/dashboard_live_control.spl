@@ -1,0 +1,258 @@
+use app.llm_runtime.manifest.{LlmRuntimeManifest}
+use app.llm_runtime.live_environment.{llm_runtime_vllm_live_environment_evidence}
+use app.llm_runtime.serve_plan.{llm_runtime_static_serve_plan}
+use app.llm_runtime.live_request_plan.{llm_runtime_vllm_models_request_plan}
+use app.mcp.main_lazy_json.{LB, RB, jp, js}
+
+pub class LlmRuntimeDashboardControlExecution:
+    action: text
+    status: text
+    reason: text
+    pid: i64
+    running_status: text
+    endpoint_status: text
+    models_status: text
+    models_reason: text
+    http_status: i64
+    started_pid: i64
+    stopped_pid: i64
+    requires_runtime_executor: bool
+    evidence_jsonl: text
+
+pub class LlmRuntimeDashboardLiveBoundary:
+    action: text
+    boundary_status: text
+    reason: text
+    dashboard_route_status: text
+    live_executor_status: text
+    process_access: text
+    http_access: text
+    acceptance_status: text
+    evidence_jsonl: text
+
+pub fn llm_runtime_dashboard_live_boundary(action: text, vllm_available: bool, gpu_available: bool) -> LlmRuntimeDashboardLiveBoundary:
+    val normalized = action.trim().to_lower()
+    if normalized == "preflight":
+        if vllm_available and gpu_available:
+            return _live_boundary(normalized, "intent-only", "preflight_plans_without_side_effects", "pure_dashboard_route", "not_required", "not_used", "not_used", "not_live_evidence")
+        return _live_boundary(normalized, "blocked", _control_environment_reason(vllm_available, gpu_available), "pure_dashboard_route", "not_required", "not_used", "not_used", "not_live_evidence")
+    if normalized == "start" or normalized == "poll" or normalized == "probe" or normalized == "stop":
+        if vllm_available and gpu_available:
+            return _live_boundary(normalized, "executor-required", "live_executor_required", "pure_dashboard_route", "runtime_owner_required", "runtime_owner_only", "runtime_owner_only", "not_live_evidence")
+        return _live_boundary(normalized, "blocked", _control_environment_reason(vllm_available, gpu_available), "pure_dashboard_route", "not_required", "not_used", "not_used", "not_live_evidence")
+    _live_boundary(normalized, "rejected", "unknown_action", "pure_dashboard_route", "not_required", "not_used", "not_used", "not_live_evidence")
+
+pub fn llm_runtime_dashboard_live_boundary_jsonl(action: text, vllm_available: bool, gpu_available: bool) -> text:
+    llm_runtime_dashboard_live_boundary(action, vllm_available, gpu_available).evidence_jsonl
+
+pub fn llm_runtime_execute_dashboard_control(manifest: LlmRuntimeManifest, action: text, pid: i64, vllm_available: bool, gpu_available: bool) -> LlmRuntimeDashboardControlExecution:
+    val normalized = action.trim().to_lower()
+    if normalized == "preflight":
+        return llm_runtime_dashboard_control_preflight(manifest, normalized, vllm_available, gpu_available)
+    if normalized == "start":
+        val environment = llm_runtime_vllm_live_environment_evidence(vllm_available, gpu_available, "")
+        if environment.status == "skipped":
+            return _execution_result(normalized, "skipped", environment.reason, -1, "not_started", "not_checked", "not_fetched", "environment_skipped", 0, -1, -1)
+        val serve_plan = llm_runtime_static_serve_plan(manifest)
+        if serve_plan.status != "planned":
+            return _execution_result(normalized, "not_started", serve_plan.reason, -1, "not_started", "not_checked", "not_fetched", "serve_not_planned", 0, -1, -1)
+        return _execution_result(normalized, "planned", "live_executor_required", -1, "not_started", "not_checked", "not_fetched", "probe_not_run", 0, -1, -1)
+    if normalized == "poll":
+        if pid <= 0:
+            return _execution_result(normalized, "not_ready", "invalid_pid", pid, "not_running", "not_checked", "not_fetched", "poll_not_run", 0, -1, -1)
+        return _execution_result(normalized, "planned", "live_executor_required", pid, "unknown_until_polled", "not_checked", "not_fetched", "probe_not_run", 0, -1, -1)
+    if normalized == "probe":
+        val environment = llm_runtime_vllm_live_environment_evidence(vllm_available, gpu_available, "")
+        if environment.status == "skipped":
+            return _execution_result(normalized, "skipped", environment.reason, pid, "not_started", "not_checked", "not_fetched", "environment_skipped", 0, -1, -1)
+        if pid <= 0:
+            return _execution_result(normalized, "not_ready", "invalid_pid", pid, "not_running", "not_checked", "not_fetched", "probe_not_run", 0, -1, -1)
+        val models_plan = llm_runtime_vllm_models_request_plan(manifest)
+        if models_plan.status != "planned":
+            return _execution_result(normalized, "not_ready", models_plan.reason, pid, "unknown_until_polled", models_plan.endpoint_status, "not_fetched", "models_probe_not_planned", 0, -1, -1)
+        return _execution_result(normalized, "planned", "live_executor_required", pid, "unknown_until_polled", models_plan.endpoint_status, "not_fetched", "probe_not_run", 0, -1, -1)
+    if normalized == "stop":
+        if pid <= 0:
+            return _execution_result(normalized, "not_stopped", "invalid_pid", pid, "not_running", "not_checked", "not_fetched", "stop_only", 0, -1, pid)
+        return _execution_result(normalized, "planned", "live_executor_required", pid, "unknown_until_polled", "not_checked", "not_fetched", "stop_only", 0, -1, -1)
+    _execution_result(normalized, "rejected", "unknown_action", pid, "not_checked", "not_checked", "not_fetched", "action_not_supported", 0, -1, -1)
+
+pub fn llm_runtime_dashboard_control_execution_jsonl_event(result: LlmRuntimeDashboardControlExecution) -> text:
+    _dashboard_control_execution_jsonl_event(result.action, result.status, result.reason, result.pid, result.running_status, result.endpoint_status, result.models_status, result.models_reason, result.http_status, result.started_pid, result.stopped_pid, result.requires_runtime_executor)
+
+pub fn llm_runtime_execute_dashboard_control_jsonl(manifest: LlmRuntimeManifest, action: text, pid: i64, vllm_available: bool, gpu_available: bool) -> text:
+    val normalized = action.trim().to_lower()
+    if normalized == "preflight":
+        return _control_preflight_jsonl(manifest, normalized, vllm_available, gpu_available)
+    if normalized == "start":
+        val environment_reason = _control_environment_reason(vllm_available, gpu_available)
+        if environment_reason != "local_vllm_gpu_ready":
+            return _dashboard_control_execution_jsonl_event(normalized, "skipped", environment_reason, -1, "not_started", "not_checked", "not_fetched", "environment_skipped", 0, -1, -1, false)
+        val serve_reason = _control_serve_reason(manifest)
+        if serve_reason != "static_serve_plan_only":
+            return _dashboard_control_execution_jsonl_event(normalized, "not_started", serve_reason, -1, "not_started", "not_checked", "not_fetched", "serve_not_planned", 0, -1, -1, false)
+        return _dashboard_control_execution_jsonl_event(normalized, "planned", "live_executor_required", -1, "not_started", "not_checked", "not_fetched", "probe_not_run", 0, -1, -1, true)
+    if normalized == "poll":
+        if pid <= 0:
+            return _dashboard_control_execution_jsonl_event(normalized, "not_ready", "invalid_pid", pid, "not_running", "not_checked", "not_fetched", "poll_not_run", 0, -1, -1, false)
+        return _dashboard_control_execution_jsonl_event(normalized, "planned", "live_executor_required", pid, "unknown_until_polled", "not_checked", "not_fetched", "probe_not_run", 0, -1, -1, true)
+    if normalized == "probe":
+        val environment_reason = _control_environment_reason(vllm_available, gpu_available)
+        if environment_reason != "local_vllm_gpu_ready":
+            return _dashboard_control_execution_jsonl_event(normalized, "skipped", environment_reason, pid, "not_started", "not_checked", "not_fetched", "environment_skipped", 0, -1, -1, false)
+        if pid <= 0:
+            return _dashboard_control_execution_jsonl_event(normalized, "not_ready", "invalid_pid", pid, "not_running", "not_checked", "not_fetched", "probe_not_run", 0, -1, -1, false)
+        val endpoint_status = _control_endpoint_status(manifest.endpoint)
+        val models_reason = _control_models_plan_reason(endpoint_status)
+        if models_reason != "live_request_plan_only":
+            return _dashboard_control_execution_jsonl_event(normalized, "not_ready", models_reason, pid, "unknown_until_polled", endpoint_status, "not_fetched", "models_probe_not_planned", 0, -1, -1, false)
+        return _dashboard_control_execution_jsonl_event(normalized, "planned", "live_executor_required", pid, "unknown_until_polled", endpoint_status, "not_fetched", "probe_not_run", 0, -1, -1, true)
+    if normalized == "stop":
+        if pid <= 0:
+            return _dashboard_control_execution_jsonl_event(normalized, "not_stopped", "invalid_pid", pid, "not_running", "not_checked", "not_fetched", "stop_only", 0, -1, pid, false)
+        return _dashboard_control_execution_jsonl_event(normalized, "planned", "live_executor_required", pid, "unknown_until_polled", "not_checked", "not_fetched", "stop_only", 0, -1, -1, true)
+    _dashboard_control_execution_jsonl_event(normalized, "rejected", "unknown_action", pid, "not_checked", "not_checked", "not_fetched", "action_not_supported", 0, -1, -1, false)
+
+fn _control_preflight_jsonl(manifest: LlmRuntimeManifest, action: text, vllm_available: bool, gpu_available: bool) -> text:
+    val environment_reason = _control_environment_reason(vllm_available, gpu_available)
+    if environment_reason != "local_vllm_gpu_ready":
+        return _dashboard_control_execution_jsonl_event(action, "skipped", environment_reason, -1, "not_started", "not_checked", "not_fetched", "environment_skipped", 0, -1, -1, false)
+    val serve_reason = _control_serve_reason(manifest)
+    if serve_reason != "static_serve_plan_only":
+        return _dashboard_control_execution_jsonl_event(action, "not_started", serve_reason, -1, "not_started", "not_checked", "not_fetched", "serve_not_planned", 0, -1, -1, false)
+    val endpoint_status = _control_endpoint_status(manifest.endpoint)
+    val models_reason = _control_models_plan_reason(endpoint_status)
+    if models_reason != "live_request_plan_only":
+        return _dashboard_control_execution_jsonl_event(action, "not_ready", models_reason, -1, "not_started", endpoint_status, "not_fetched", "models_probe_not_planned", 0, -1, -1, false)
+    _dashboard_control_execution_jsonl_event(action, "planned", "serve_and_models_probe_planned", -1, "not_started", endpoint_status, "not_fetched", "probe_not_run", 0, -1, -1, false)
+
+fn _control_environment_reason(vllm_available: bool, gpu_available: bool) -> text:
+    if vllm_available and gpu_available:
+        return "local_vllm_gpu_ready"
+    if not vllm_available and not gpu_available:
+        return "missing_local_vllm_and_gpu"
+    if not vllm_available:
+        return "missing_local_vllm"
+    "missing_local_gpu"
+
+fn _control_serve_reason(manifest: LlmRuntimeManifest) -> text:
+    if manifest.base_model.trim() == "":
+        return "missing_base_model"
+    val endpoint_status = _control_endpoint_status(manifest.endpoint)
+    if endpoint_status == "missing":
+        return "missing_endpoint"
+    if endpoint_status == "invalid":
+        return "invalid_endpoint"
+    if manifest.invalid_adapter_count > 0:
+        return "invalid_adapter_entry"
+    if manifest.dynamic_lora == "blocked":
+        return "dynamic_lora_requires_trusted_mode"
+    "static_serve_plan_only"
+
+fn _control_endpoint_status(endpoint: text) -> text:
+    val value = endpoint.trim()
+    if value == "":
+        return "missing"
+    if value.starts_with("http://") or value.starts_with("https://"):
+        if value.contains(" "):
+            return "invalid"
+        return "configured"
+    "invalid"
+
+fn _control_models_plan_reason(endpoint_status: text) -> text:
+    if endpoint_status == "missing":
+        return "missing_endpoint"
+    if endpoint_status == "invalid":
+        return "invalid_endpoint"
+    "live_request_plan_only"
+
+fn llm_runtime_dashboard_control_preflight(manifest: LlmRuntimeManifest, action: text, vllm_available: bool, gpu_available: bool) -> LlmRuntimeDashboardControlExecution:
+    val environment = llm_runtime_vllm_live_environment_evidence(vllm_available, gpu_available, "")
+    if environment.status == "skipped":
+        return _execution_result(action, "skipped", environment.reason, -1, "not_started", "not_checked", "not_fetched", "environment_skipped", 0, -1, -1)
+    val serve_plan = llm_runtime_static_serve_plan(manifest)
+    if serve_plan.status != "planned":
+        return _execution_result(action, "not_started", serve_plan.reason, -1, "not_started", "not_checked", "not_fetched", "serve_not_planned", 0, -1, -1)
+    val models_plan = llm_runtime_vllm_models_request_plan(manifest)
+    if models_plan.status != "planned":
+        return _execution_result(action, "not_ready", models_plan.reason, -1, "not_started", models_plan.endpoint_status, "not_fetched", "models_probe_not_planned", 0, -1, -1)
+    _execution_result(action, "planned", "serve_and_models_probe_planned", -1, "not_started", models_plan.endpoint_status, "not_fetched", "probe_not_run", 0, -1, -1)
+
+fn _execution_result(action: text, status: text, reason: text, pid: i64, running_status: text, endpoint_status: text, models_status: text, models_reason: text, http_status: i64, started_pid: i64, stopped_pid: i64) -> LlmRuntimeDashboardControlExecution:
+    LlmRuntimeDashboardControlExecution(
+        action: action,
+        status: status,
+        reason: reason,
+        pid: pid,
+        running_status: running_status,
+        endpoint_status: endpoint_status,
+        models_status: models_status,
+        models_reason: models_reason,
+        http_status: http_status,
+        started_pid: started_pid,
+        stopped_pid: stopped_pid,
+        requires_runtime_executor: _requires_runtime_executor(action, status),
+        evidence_jsonl: _dashboard_control_execution_jsonl_event(action, status, reason, pid, running_status, endpoint_status, models_status, models_reason, http_status, started_pid, stopped_pid, _requires_runtime_executor(action, status))
+    )
+
+fn _live_boundary(action: text, boundary_status: text, reason: text, dashboard_route_status: text, live_executor_status: text, process_access: text, http_access: text, acceptance_status: text) -> LlmRuntimeDashboardLiveBoundary:
+    val result = LlmRuntimeDashboardLiveBoundary(
+        action: action,
+        boundary_status: boundary_status,
+        reason: reason,
+        dashboard_route_status: dashboard_route_status,
+        live_executor_status: live_executor_status,
+        process_access: process_access,
+        http_access: http_access,
+        acceptance_status: acceptance_status,
+        evidence_jsonl: ""
+    )
+    result.evidence_jsonl = _live_boundary_jsonl_event(result)
+    result
+
+fn _live_boundary_jsonl_event(result: LlmRuntimeDashboardLiveBoundary) -> text:
+    LB() +
+    jp("event", js("llm_runtime_vllm_dashboard_live_boundary")) +
+    "," + jp("action", js(result.action)) +
+    "," + jp("boundary_status", js(result.boundary_status)) +
+    "," + jp("reason", js(result.reason)) +
+    "," + jp("dashboard_route_status", js(result.dashboard_route_status)) +
+    "," + jp("live_executor_status", js(result.live_executor_status)) +
+    "," + jp("process_access", js(result.process_access)) +
+    "," + jp("http_access", js(result.http_access)) +
+    "," + jp("acceptance_status", js(result.acceptance_status)) +
+    RB() + "\n"
+
+fn _json_bool(value: bool) -> text:
+    if value:
+        return "true"
+    "false"
+
+fn _requires_runtime_executor(action: text, status: text) -> bool:
+    status == "planned" and action != "preflight"
+
+fn _public_pid(pid: i64) -> i64:
+    if pid <= 0:
+        return 0
+    pid
+
+fn _dashboard_control_execution_jsonl_event(action: text, status: text, reason: text, pid: i64, running_status: text, endpoint_status: text, models_status: text, models_reason: text, http_status: i64, started_pid: i64, stopped_pid: i64, requires_runtime_executor: bool) -> text:
+    LB() +
+    jp("event", js("llm_runtime_vllm_dashboard_control_execution")) +
+    "," + jp("action", js(action)) +
+    "," + jp("status", js(status)) +
+    "," + jp("reason", js(reason)) +
+    "," + jp("pid", str(_public_pid(pid))) +
+    "," + jp("running", js(running_status)) +
+    "," + jp("endpoint", js(endpoint_status)) +
+    "," + jp("models_status", js(models_status)) +
+    "," + jp("models_reason", js(models_reason)) +
+    "," + jp("http_status", str(http_status)) +
+    "," + jp("started_pid", str(_public_pid(started_pid))) +
+    "," + jp("stopped_pid", str(_public_pid(stopped_pid))) +
+    "," + jp("requires_runtime_executor", _json_bool(requires_runtime_executor)) +
+    RB() + "\n"
+
+export LlmRuntimeDashboardControlExecution, LlmRuntimeDashboardLiveBoundary
+export llm_runtime_execute_dashboard_control, llm_runtime_execute_dashboard_control_jsonl, llm_runtime_dashboard_control_execution_jsonl_event
+export llm_runtime_dashboard_live_boundary, llm_runtime_dashboard_live_boundary_jsonl

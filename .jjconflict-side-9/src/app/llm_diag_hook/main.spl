@@ -1,0 +1,155 @@
+# LLM diagnostics hook entrypoint.
+# Startup-light hook wrapper with shared log/progress preflight paths.
+
+use std.cli.cli_util (get_cli_args)
+use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
+use std.log.{error}
+use app.io.env_ops.{env_get as hook_env_get}
+
+extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_stdin_read_line() -> text?
+extern fn rt_file_append_text(path: text, content: text) -> bool
+
+val TOOL_NAME = "LLM Diagnostics Hook"
+val TOOL_VERSION = "0.1.0"
+
+fn main() -> i64:
+    val raw_args = get_cli_args()
+    val log_opts = parse_log_options(raw_args)
+    if not log_opts.valid:
+        error("llm-diag-hook", log_opts.error)
+        return 1
+
+    val args = hook_clean_log_args(raw_args)
+    if args.len() > 0 and (args[0] == "--help" or args[0] == "-h" or args[0] == "help"):
+        print_help_with_progress(log_opts.progress)
+        return 0
+    if args.len() > 0 and (args[0] == "--version" or args[0] == "-v"):
+        if log_opts.log_mode == "json":
+            print "{\"command\":\"llm-diag-hook\",\"status\":\"ok\",\"version\":\"{TOOL_VERSION}\"}"
+        else:
+            print "{TOOL_NAME} v{TOOL_VERSION}"
+        return 0
+
+    val unknown = hook_first_unknown_option(args)
+    if unknown != "":
+        val message = "Unknown llm-diag-hook option: {unknown}"
+        if log_opts.log_mode == "json":
+            print "{\"command\":\"llm-diag-hook\",\"status\":\"error\",\"message\":\"{message}\"}"
+        else:
+            error("llm-diag-hook", message)
+        return 1
+
+    val json = read_hook_stdin_text()
+    if json.len() == 0:
+        if log_opts.log_mode == "json":
+            print "{\"command\":\"llm-diag-hook\",\"status\":\"ready\",\"tool\":\"{TOOL_NAME}\",\"version\":\"{TOOL_VERSION}\"}"
+        elif log_opts.progress != "none":
+            val progress = render_progress(log_opts.progress, 1, 1, "llm-diag-hook")
+            if progress != "":
+                print progress
+        return 0
+
+    val log_path = get_log_path()
+    if log_path.len() == 0:
+        return 0
+
+    val now = rt_time_now_unix_micros()
+    val event_name = hook_extract_str(json, "hook_event_name")
+    val session_id = hook_extract_str(json, "session_id")
+    val line = build_log_line(now, event_name, session_id, json)
+    val _ok = rt_file_append_text(log_path, line + "\n")
+
+    if log_opts.log_mode == "json":
+        print "{\"command\":\"llm-diag-hook\",\"status\":\"logged\",\"event\":\"{event_name}\",\"session_id\":\"{session_id}\"}"
+    0
+
+fn print_help():
+    print "{TOOL_NAME}"
+    print ""
+    print "Usage: llm_diag_hook [options]"
+    print ""
+    print "Reads Claude Code hook JSON from stdin and appends one JSONL event."
+    print ""
+    print "Options:"
+    print "  -h, --help          Show this help message"
+    print "  -v, --version       Show version information"
+    print ""
+    print "Environment:"
+    print "  LLM_DIAG_LOG        JSONL output path"
+    print ""
+    print "Shared log options:"
+    for line in log_options_help():
+        print "  {line}"
+
+fn print_help_with_progress(progress_mode: text):
+    val progress = render_progress(progress_mode, 0, 1, "usage")
+    if progress != "":
+        print progress
+    print_help()
+
+fn read_hook_stdin_text() -> text:
+    rt_stdin_read_line() ?? ""
+
+fn get_log_path() -> text:
+    val env_path = hook_env_get("LLM_DIAG_LOG")
+    if env_path.len() > 0:
+        return env_path
+    val home = hook_env_get("HOME")
+    if home.len() > 0:
+        return home + "/.claude/diagnostics/session.jsonl"
+    ""
+
+fn build_log_line(timestamp: i64, event_name: text, session_id: text, raw_json: text) -> text:
+    var parts: [text] = []
+    parts.push("{\"ts\":")
+    parts.push(timestamp.to_text())
+    parts.push(",\"event\":\"")
+    parts.push(event_name)
+    parts.push("\",\"sid\":\"")
+    parts.push(session_id)
+    parts.push("\",\"data\":")
+    parts.push(raw_json)
+    parts.push("}")
+    parts.join("")
+
+fn hook_extract_str(json: text, key: text) -> text:
+    val marker = "\"" + key + "\":\""
+    val parts = json.split(marker)
+    if parts.len() < 2:
+        val spaced = "\"" + key + "\": \""
+        val spaced_parts = json.split(spaced)
+        if spaced_parts.len() < 2:
+            return ""
+        return spaced_parts[1].split("\"")[0]
+    parts[1].split("\"")[0]
+
+fn hook_first_unknown_option(args: [text]) -> text:
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg.starts_with("-"):
+            return arg
+        i = i + 1
+    ""
+
+fn hook_is_log_option(arg: text) -> bool:
+    arg == "--human" or arg == "--llm" or arg == "--json" or
+        arg == "--tui" or arg == "--stdout" or arg == "--quiet" or
+        arg == "--verbose" or arg == "--dots" or arg == "--count" or
+        arg == "--no-progress" or arg == "--log-mode" or arg == "--surface" or
+        arg == "--progress" or arg.starts_with("--log-mode=") or
+        arg.starts_with("--surface=") or arg.starts_with("--progress=")
+
+fn hook_clean_log_args(args: [text]) -> [text]:
+    var cleaned: [text] = []
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if hook_is_log_option(arg):
+            if arg == "--log-mode" or arg == "--surface" or arg == "--progress":
+                i = i + 1
+        else:
+            cleaned.push(arg)
+        i = i + 1
+    cleaned

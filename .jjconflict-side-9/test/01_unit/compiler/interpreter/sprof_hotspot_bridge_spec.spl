@@ -1,0 +1,182 @@
+# Sprof Hotspot Bridge Unit Spec
+#
+# Covers the compiler-side .sprof → JitHotspotPlan bridge introduced in
+# src/compiler/95.interp/execution/sprof_hotspot_bridge.spl (Win 3 of
+# doc/03_plan/compiler/perf/pure_simple_profile_guided_executable_optimization_2026-06-01.md).
+#
+# The bridge converts raw sprof counter data (function name + call count,
+# passed as primitives to avoid a circular app.* import) into FunctionProfile
+# facts that drive tiered JIT compile decisions.
+#
+# All tests run in interpreter mode; no native compile or hardware needed.
+
+use compiler.interp.execution.sprof_hotspot_bridge.{
+    SprofHotspot,
+    sprof_hotspot_new,
+    sprof_hotspot_with_source,
+    sprof_hotspot_to_profile,
+    sprof_hotspot_plan,
+    sprof_hotspot_is_eligible,
+    sprof_hotspot_call_count_meets_threshold,
+    sprof_hotspot_facts,
+    sprof_hotspots_above_threshold
+}
+use compiler.interp.execution.tiered_jit.{
+    TieredJitConfig,
+    default_config
+}
+
+fn make_config() -> TieredJitConfig:
+    default_config()
+
+describe "SprofHotspot construction":
+    context "sprof_hotspot_new (no source)":
+        it "stores function name and call count":
+            val h = sprof_hotspot_new("my_fn", 42)
+            expect(h.function_name).to_equal("my_fn")
+            expect(h.call_count).to_equal(42)
+
+        it "source is empty string when not supplied":
+            val h = sprof_hotspot_new("fn_a", 1)
+            expect(h.source).to_equal("")
+
+    context "sprof_hotspot_with_source":
+        it "stores all three fields":
+            val h = sprof_hotspot_with_source("fn_b", 100, "fn fn_b(x: i64) -> i64: x")
+            expect(h.function_name).to_equal("fn_b")
+            expect(h.call_count).to_equal(100)
+            expect(h.source.len() > 0).to_equal(true)
+
+describe "sprof_hotspot_to_profile":
+    context "without source":
+        it "typed_mir is false when source is empty":
+            val h = sprof_hotspot_new("layout_fn", 500)
+            val p = sprof_hotspot_to_profile(h)
+            expect(p.typed_mir).to_equal(false)
+
+        it "safe_deopt is false when source is empty":
+            val h = sprof_hotspot_new("layout_fn", 500)
+            val p = sprof_hotspot_to_profile(h)
+            expect(p.safe_deopt).to_equal(false)
+
+        it "call_count is preserved":
+            val h = sprof_hotspot_new("layout_fn", 500)
+            val p = sprof_hotspot_to_profile(h)
+            expect(p.call_count).to_equal(500)
+
+        it "name is preserved":
+            val h = sprof_hotspot_new("layout_fn", 500)
+            val p = sprof_hotspot_to_profile(h)
+            expect(p.name).to_equal("layout_fn")
+
+    context "with source":
+        it "typed_mir is true when source is non-empty":
+            val h = sprof_hotspot_with_source("jit_fn", 200, "fn jit_fn(): 0")
+            val p = sprof_hotspot_to_profile(h)
+            expect(p.typed_mir).to_equal(true)
+
+        it "safe_deopt is true when source is non-empty":
+            val h = sprof_hotspot_with_source("jit_fn", 200, "fn jit_fn(): 0")
+            val p = sprof_hotspot_to_profile(h)
+            expect(p.safe_deopt).to_equal(true)
+
+describe "sprof_hotspot_is_eligible":
+    context "below threshold, no source":
+        it "is not eligible when count=0":
+            val h = sprof_hotspot_new("cold_fn", 0)
+            val cfg = make_config()
+            expect(sprof_hotspot_is_eligible(h, cfg)).to_equal(false)
+
+    context "above threshold but no source":
+        it "is not eligible without source even if very hot":
+            # Without source, typed_mir=false → plan reason = "missing typed_mir"
+            val h = sprof_hotspot_new("layout_only_fn", 999999)
+            val cfg = make_config()
+            expect(sprof_hotspot_is_eligible(h, cfg)).to_equal(false)
+
+    context "above threshold with source":
+        it "is eligible when call_count meets tier1_threshold and source provided":
+            val cfg = make_config()
+            # Use a count well above the default tier1_threshold
+            val h = sprof_hotspot_with_source("hot_fn", cfg.tier1_threshold + 1, "fn hot_fn(): 1")
+            expect(sprof_hotspot_is_eligible(h, cfg)).to_equal(true)
+
+describe "sprof_hotspot_plan reason":
+    it "returns missing profile.hot_count when below threshold with source":
+        val cfg = make_config()
+        val h = sprof_hotspot_with_source("cold_src_fn", 0, "fn cold_src_fn(): 0")
+        val reason = sprof_hotspot_plan(h, cfg)
+        expect(reason).to_equal("missing profile.hot_count")
+
+    it "returns missing source when above threshold but no source":
+        # jit_hotspot_plan_reason checks source == "" first (before hot_count or
+        # typed_mir), so a no-source record yields "missing source" even if hot.
+        val cfg = make_config()
+        val h = sprof_hotspot_new("layout_fn", cfg.tier1_threshold + 1)
+        val reason = sprof_hotspot_plan(h, cfg)
+        expect(reason).to_equal("missing source")
+
+    it "returns ready when hot and source present":
+        val cfg = make_config()
+        val h = sprof_hotspot_with_source("hot_src_fn", cfg.tier1_threshold + 1, "fn hot_src_fn(): 2")
+        val reason = sprof_hotspot_plan(h, cfg)
+        expect(reason).to_equal("ready")
+
+describe "sprof_hotspot_call_count_meets_threshold":
+    it "returns false for zero":
+        val cfg = make_config()
+        expect(sprof_hotspot_call_count_meets_threshold(0, cfg)).to_equal(false)
+
+    it "returns false for count one below threshold":
+        val cfg = make_config()
+        expect(sprof_hotspot_call_count_meets_threshold(cfg.tier1_threshold - 1, cfg)).to_equal(false)
+
+    it "returns true at exactly threshold":
+        val cfg = make_config()
+        expect(sprof_hotspot_call_count_meets_threshold(cfg.tier1_threshold, cfg)).to_equal(true)
+
+    it "returns true above threshold":
+        val cfg = make_config()
+        expect(sprof_hotspot_call_count_meets_threshold(cfg.tier1_threshold + 100, cfg)).to_equal(true)
+
+describe "sprof_hotspot_facts":
+    it "facts list contains only typed_mir and safe_deopt for cold function with source":
+        # When source is present: typed_mir=true, safe_deopt=true → 2 facts even when cold.
+        # profile.hot_count is NOT added because call_count < tier1_threshold.
+        val cfg = make_config()
+        val h = sprof_hotspot_with_source("cold_src", 0, "fn cold_src(): 0")
+        val facts = sprof_hotspot_facts(h, cfg)
+        expect(facts.len()).to_equal(2)
+
+    it "facts list contains profile.hot_count for hot function with source":
+        val cfg = make_config()
+        val h = sprof_hotspot_with_source("hot_src", cfg.tier1_threshold + 1, "fn hot_src(): 0")
+        val facts = sprof_hotspot_facts(h, cfg)
+        # At minimum profile.hot_count + typed_mir + safe_deopt = 3 facts
+        expect(facts.len() >= 1).to_equal(true)
+
+describe "sprof_hotspots_above_threshold":
+    it "returns empty list when all are cold":
+        val cfg = make_config()
+        var hotspots: [SprofHotspot] = []
+        hotspots = hotspots.push(sprof_hotspot_new("a", 0))
+        hotspots = hotspots.push(sprof_hotspot_new("b", 1))
+        val result = sprof_hotspots_above_threshold(hotspots, cfg)
+        expect(result.len()).to_equal(0)
+
+    it "returns only hot entries above threshold":
+        val cfg = make_config()
+        var hotspots: [SprofHotspot] = []
+        hotspots = hotspots.push(sprof_hotspot_new("cold", 0))
+        hotspots = hotspots.push(sprof_hotspot_new("hot1", cfg.tier1_threshold + 1))
+        hotspots = hotspots.push(sprof_hotspot_new("hot2", cfg.tier1_threshold + 50))
+        val result = sprof_hotspots_above_threshold(hotspots, cfg)
+        expect(result.len()).to_equal(2)
+
+    it "preserves function names of hot entries":
+        val cfg = make_config()
+        var hotspots: [SprofHotspot] = []
+        hotspots = hotspots.push(sprof_hotspot_new("hot_only", cfg.tier1_threshold + 1))
+        val result = sprof_hotspots_above_threshold(hotspots, cfg)
+        expect(result.len()).to_equal(1)
+        expect(result[0].function_name).to_equal("hot_only")

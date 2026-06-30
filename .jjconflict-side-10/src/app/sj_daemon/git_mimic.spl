@@ -1,0 +1,96 @@
+"""
+# sj daemon — git to jj translation table
+"""
+
+use std.io_runtime
+use std.service.lease_manager.{LEASE_EXCLUSIVE, LEASE_SHARED}
+use app.sj_daemon.submodule_policy
+
+struct TranslationPlan:
+    classification: text
+    lease_kind: i64
+    commands: [text]
+    warning: text
+
+fn _tail(argv: [text], start: i64) -> [text]:
+    var out: [text] = []
+    var i = start
+    while i < argv.len():
+        out.push(argv[i])
+        i = i + 1i64
+    out
+
+fn _join(argv: [text]) -> text:
+    argv.join(" ")
+
+fn _direct(command: text, lease_kind: i64) -> TranslationPlan:
+    TranslationPlan(classification: "direct_jj", lease_kind: lease_kind, commands: [command], warning: "")
+
+fn _raw(command: text, lease_kind: i64, warning: text) -> TranslationPlan:
+    TranslationPlan(classification: "raw_passthrough", lease_kind: lease_kind, commands: [command], warning: warning)
+
+fn translate(argv: [text]) -> TranslationPlan:
+    if argv.len() == 0i64:
+        return _direct("jj", LEASE_SHARED)
+    if argv[0i64] == "raw" and argv.len() > 2i64:
+        val lease_kind = if argv[1i64] == "jj":
+            LEASE_SHARED
+        else:
+            LEASE_EXCLUSIVE
+        return _raw(_join(_tail(argv, 1i64)), lease_kind, "")
+    if argv[0i64] != "git":
+        return _direct("jj " + _join(argv), LEASE_EXCLUSIVE)
+
+    val verb = argv[1i64]
+    if verb == "status":
+        return _direct("jj status", LEASE_SHARED)
+    if verb == "log":
+        return _direct("jj " + _join(_tail(argv, 1i64)), LEASE_SHARED)
+    if verb == "diff":
+        return _direct("jj diff", LEASE_SHARED)
+    if verb == "blame" and argv.len() > 2i64:
+        return _direct("jj file annotate " + _join(_tail(argv, 2i64)), LEASE_SHARED)
+    if verb == "branch" and argv.len() > 2i64 and argv[2i64] == "--list":
+        return _direct("jj bookmark list", LEASE_SHARED)
+    if verb == "checkout" and argv.len() > 2i64 and argv[2i64] != "-b":
+        return _direct("jj new " + _join(_tail(argv, 2i64)), LEASE_EXCLUSIVE)
+    if verb == "checkout" and argv.len() > 3i64 and argv[2i64] == "-b":
+        val branch = argv[3i64]
+        val base = if argv.len() > 4i64:
+            "jj new " + _join(_tail(argv, 4i64))
+        else:
+            "jj new"
+        return TranslationPlan(
+            classification: "multi_step",
+            lease_kind: LEASE_EXCLUSIVE,
+            commands: [base, "jj bookmark create {branch} -r @"],
+            warning: ""
+        )
+    if verb == "commit" and argv.len() > 2i64 and argv[2i64] == "--amend":
+        return _direct("jj describe " + _join(_tail(argv, 2i64)), LEASE_EXCLUSIVE)
+    if verb == "commit":
+        return TranslationPlan(
+            classification: "multi_step",
+            lease_kind: LEASE_EXCLUSIVE,
+            commands: ["jj describe " + _join(_tail(argv, 2i64)), "jj new"],
+            warning: ""
+        )
+    if verb == "pull":
+        return TranslationPlan(
+            classification: "multi_step",
+            lease_kind: LEASE_EXCLUSIVE,
+            commands: ["jj git fetch", "jj rebase -d main@origin"],
+            warning: ""
+        )
+    if verb == "lfs":
+        return _raw("git " + _join(_tail(argv, 1i64)), LEASE_SHARED, "")
+    if verb == "clean":
+        return _raw("git " + _join(_tail(argv, 1i64)), LEASE_EXCLUSIVE, "WARN[RAW]: git clean runs as a serialized raw passthrough")
+    if verb == "submodule":
+        val sub = classify_submodule(argv)
+        return _raw("git " + _join(_tail(argv, 1i64)), sub.lease_kind, sub.warning)
+    if verb == "push" and argv.len() > 2i64 and argv[2i64] == "--bookmark" and argv.len() > 3i64:
+        return _direct("jj git push --bookmark " + argv[3i64], LEASE_EXCLUSIVE)
+    if verb == "push" and argv.len() > 2i64 and argv[2i64] == "--via-worktree":
+        return _raw("git push --via-worktree", LEASE_EXCLUSIVE, "")
+    _raw("git " + _join(_tail(argv, 1i64)), LEASE_EXCLUSIVE, "")

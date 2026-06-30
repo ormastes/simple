@@ -1,0 +1,45 @@
+"""
+# sj daemon — forbidden verb policy
+"""
+
+use std.io_runtime
+
+struct PolicyResult:
+    allowed: bool
+    exit_code: i64
+    message: text
+
+fn policy_allow() -> PolicyResult:
+    PolicyResult(allowed: true, exit_code: 0i64, message: "")
+
+fn policy_forbid(message: text) -> PolicyResult:
+    PolicyResult(allowed: false, exit_code: 1i64, message: message)
+
+fn _has_arg(argv: [text], needle: text) -> bool:
+    var i = 0i64
+    while i < argv.len():
+        if argv[i] == needle:
+            return true
+        i = i + 1i64
+    false
+
+fn check_forbidden(argv: [text]) -> PolicyResult:
+    if argv.len() < 2i64:
+        return policy_allow()
+    if argv[0i64] != "git":
+        return policy_allow()
+
+    val verb = argv[1i64]
+    if verb == "rebase" and _has_arg(argv, "-i"):
+        return policy_forbid("ERROR[FORBIDDEN]: git rebase -i is not supported here. Use sj split, sj squash --into, or sj rebase --onto instead.")
+    if verb == "push" and (_has_arg(argv, "--force") or _has_arg(argv, "-f")):
+        return policy_forbid("ERROR[FORBIDDEN]: force-push is prohibited. To move a bookmark backward use: jj bookmark move <name> --to <rev> --allow-backwards then: sj git push origin <name>")
+    if verb == "push" and argv.len() == 2i64 and not _has_arg(argv, "--bookmark") and not _has_arg(argv, "--via-worktree"):
+        return policy_forbid("ERROR[FORBIDDEN]: bare 'sj git push' is ambiguous in a jj repo. The project push pattern is: jj bookmark set main -r @- && sj git push origin main")
+    if verb == "checkout" and argv.len() == 2i64:
+        return policy_forbid("ERROR[FORBIDDEN]: bare 'git checkout' with no arguments is not meaningful in a jj-managed repo. Use sj git checkout <rev> or sj git checkout -b <branch> [base]")
+    if verb == "filter-branch":
+        return policy_forbid("ERROR[FORBIDDEN]: git filter-branch rewrites history outside jj's operation log. Use sj raw git filter-branch only if you accept the risk.")
+    if verb == "stash":
+        return policy_forbid("ERROR[FORBIDDEN]: use 'jj new -m wip-<topic>' instead - jj's working-copy-as-commit makes stash unnecessary")
+    policy_allow()

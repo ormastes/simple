@@ -1,0 +1,164 @@
+"""ML Linear Models — pure consumer layer.
+
+Provides LinearRegression and Ridge regression model types.
+These are *consumer* types: they hold fitted coefficients and
+provide prediction/scoring.  They do NOT implement a matrix
+solver.  Callers obtain coefficients externally (e.g. via
+std.linalg.solve / linalg.gesv) and inject them via the
+set_coef / set_intercept mutators.
+
+Import path: use std.common.science_math.ml_linear.{LinearRegression, Ridge, ml_predict, ml_mse}
+"""
+
+# ---------------------------------------------------------------------------
+# LinearRegression — holds β and intercept after external solve.
+# ---------------------------------------------------------------------------
+
+pub class LinearRegression:
+    """Simple OLS linear regression consumer.
+
+    Coefficients are provided externally (the normal equation
+    (XᵀX)β = Xᵀy must be solved by the linalg layer).
+    """
+    _coef: [f64]
+    _intercept: f64
+    _is_fitted: bool
+
+    static fn new() -> LinearRegression:
+        """Create an unfitted model."""
+        LinearRegression(
+            _coef: [],
+            _intercept: 0.0,
+            _is_fitted: false
+        )
+
+    me set_coef(coef: [f64], intercept: f64):
+        """Inject fitted coefficients.  Called after linalg.solve."""
+        self._coef = coef
+        self._intercept = intercept
+        self._is_fitted = true
+
+    fn is_fitted() -> bool:
+        """True after set_coef has been called."""
+        self._is_fitted
+
+    fn coef() -> [f64]:
+        """Return coefficient vector (empty if not fitted)."""
+        self._coef
+
+    fn intercept() -> f64:
+        """Return intercept scalar."""
+        self._intercept
+
+    fn predict(x_row: [f64]) -> f64:
+        """Predict for a single row (dot product + intercept).
+
+        Length of x_row must match coef length; no length guard
+        in interpreter mode (keep it simple for consumer layer).
+        """
+        var acc = self._intercept
+        var i = 0
+        while i < x_row.len():
+            acc = acc + x_row[i] * self._coef[i]
+            i = i + 1
+        acc
+
+    fn predict_batch(xs: [[f64]]) -> [f64]:
+        """Predict for a list of rows."""
+        var results: [f64] = []
+        var i = 0
+        while i < xs.len():
+            val p = self.predict(xs[i])
+            results = results + [p]
+            i = i + 1
+        results
+
+
+# ---------------------------------------------------------------------------
+# Ridge — same consumer pattern; alpha stored for documentation purposes.
+# ---------------------------------------------------------------------------
+
+pub class Ridge:
+    """Ridge regression consumer (L2-regularised OLS).
+
+    Coefficients come from linalg.solve applied to (XᵀX + αI)β = Xᵀy.
+    The caller sets alpha and solves externally; this class only stores
+    and applies the result.
+    """
+    _coef: [f64]
+    _intercept: f64
+    _is_fitted: bool
+    _alpha: f64
+
+    static fn new(alpha: f64) -> Ridge:
+        """Create an unfitted Ridge model with regularisation strength alpha."""
+        Ridge(
+            _coef: [],
+            _intercept: 0.0,
+            _is_fitted: false,
+            _alpha: alpha
+        )
+
+    me set_coef(coef: [f64], intercept: f64):
+        """Inject fitted coefficients."""
+        self._coef = coef
+        self._intercept = intercept
+        self._is_fitted = true
+
+    fn is_fitted() -> bool:
+        self._is_fitted
+
+    fn alpha() -> f64:
+        self._alpha
+
+    fn coef() -> [f64]:
+        self._coef
+
+    fn intercept() -> f64:
+        self._intercept
+
+    fn predict(x_row: [f64]) -> f64:
+        """Predict for a single row."""
+        var acc = self._intercept
+        var i = 0
+        while i < x_row.len():
+            acc = acc + x_row[i] * self._coef[i]
+            i = i + 1
+        acc
+
+    fn predict_batch(xs: [[f64]]) -> [f64]:
+        """Predict for a list of rows."""
+        var results: [f64] = []
+        var i = 0
+        while i < xs.len():
+            val p = self.predict(xs[i])
+            results = results + [p]
+            i = i + 1
+        results
+
+
+# ---------------------------------------------------------------------------
+# Shared helpers (free functions operating on [f64])
+# ---------------------------------------------------------------------------
+
+pub fn ml_predict_linear(coef: [f64], intercept: f64, x_row: [f64]) -> f64:
+    """Dot product of coef and x_row plus intercept."""
+    var acc = intercept
+    var i = 0
+    while i < coef.len():
+        acc = acc + coef[i] * x_row[i]
+        i = i + 1
+    acc
+
+pub fn ml_mse(y_true: [f64], y_pred: [f64]) -> f64:
+    """Mean squared error between two equal-length slices."""
+    val n = y_true.len()
+    if n == 0:
+        return 0.0
+    var s = 0.0
+    var i = 0
+    while i < n:
+        val d = y_true[i] - y_pred[i]
+        s = s + d * d
+        i = i + 1
+    s / n.to_f64()

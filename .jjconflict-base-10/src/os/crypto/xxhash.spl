@@ -1,0 +1,332 @@
+# XXHash64 — Pure Simple Implementation
+#
+# Fast non-cryptographic hash by Yann Collet (public domain).
+# Reference: https://github.com/Cyan4973/xxHash/blob/dev/doc/xxhash_spec.md
+#
+# Two modes:
+#   xxhash64       — one-shot hash for a complete byte slice
+#   xxhash64_init / xxhash64_update / xxhash64_finalize — streaming API
+#
+# All u64 arithmetic wraps naturally (no masking needed in Simple).
+# ============================================================================
+
+# ============================================================================
+# Constants — standard XXHash64 primes
+# ============================================================================
+
+extern fn rt_typed_bytes_u32_le_at(buf: [u8], off: u64) -> u64
+extern fn rt_typed_bytes_u64_le_at(buf: [u8], off: u64) -> u64
+extern fn rt_bytes_u32_le_at(buf: [u8], off: u64) -> u64
+extern fn rt_bytes_u64_le_at(buf: [u8], off: u64) -> u64
+
+fn _xxh64_prime1() -> u64:
+    0x9E3779B185EBCA87
+
+fn _xxh64_prime2() -> u64:
+    0xC2B2AE3D27D4EB4F
+
+fn _xxh64_prime3() -> u64:
+    0x165667B19E3779F9
+
+fn _xxh64_prime4() -> u64:
+    0x85EBCA77C2B2AE63
+
+fn _xxh64_prime5() -> u64:
+    0x27D4EB2F165667C5
+
+# ============================================================================
+# Bit helpers
+# ============================================================================
+
+fn _xxh64_rotl(x: u64, n: u64) -> u64:
+    (x << n) | (x >> (64 - n))
+
+fn _xxh64_load_u64_le(buf: [u8], off: u64) -> u64:
+    rt_typed_bytes_u64_le_at(buf, off)
+
+fn _xxh64_load_u32_le(buf: [u8], off: u64) -> u64:
+    rt_typed_bytes_u32_le_at(buf, off)
+
+# ============================================================================
+# Accumulator round
+# ============================================================================
+
+fn _xxh64_round(acc: u64, input: u64) -> u64:
+    var v: u64 = acc + (input * _xxh64_prime2())
+    v = _xxh64_rotl(v, 31)
+    v * _xxh64_prime1()
+
+fn _xxh64_merge_round(acc: u64, input: u64) -> u64:
+    var v: u64 = acc ^ _xxh64_round(0, input)
+    v = v * _xxh64_prime1() + _xxh64_prime4()
+    v
+
+# ============================================================================
+# Finalization — avalanche mix
+# ============================================================================
+
+fn _xxh64_avalanche(h: u64) -> u64:
+    var v: u64 = h
+    v = v ^ (v >> 33)
+    v = v * _xxh64_prime2()
+    v = v ^ (v >> 29)
+    v = v * _xxh64_prime3()
+    v = v ^ (v >> 32)
+    v
+
+# ============================================================================
+# Finalize remaining bytes (< 32) after accumulator merge
+# ============================================================================
+
+fn _xxh64_finalize_tail(h_in: u64, data: [u8], off: u64, remaining: u64) -> u64:
+    var h: u64 = h_in
+    var pos: u64 = off
+    var left: u64 = remaining
+
+    # Process 8-byte chunks
+    while left >= 8:
+        val k: u64 = _xxh64_round(0, _xxh64_load_u64_le(data, pos))
+        h = h ^ k
+        h = _xxh64_rotl(h, 27) * _xxh64_prime1() + _xxh64_prime4()
+        pos = pos + 8
+        left = left - 8
+
+    # Process 4-byte chunk
+    if left >= 4:
+        val k4: u64 = _xxh64_load_u32_le(data, pos)
+        h = h ^ (k4 * _xxh64_prime1())
+        h = _xxh64_rotl(h, 23) * _xxh64_prime2() + _xxh64_prime3()
+        pos = pos + 4
+        left = left - 4
+
+    # Process remaining bytes one at a time
+    while left > 0:
+        val b: u64 = data[pos].to_u64()
+        h = h ^ (b * _xxh64_prime5())
+        h = _xxh64_rotl(h, 11) * _xxh64_prime1()
+        pos = pos + 1
+        left = left - 1
+
+    _xxh64_avalanche(h)
+
+# ============================================================================
+# One-shot API
+# ============================================================================
+
+fn xxhash64(data: [u8], seed: u64) -> u64:
+    val p1: u64 = 0x9E3779B185EBCA87
+    val p2: u64 = 0xC2B2AE3D27D4EB4F
+    val p3: u64 = 0x165667B19E3779F9
+    val p4: u64 = 0x85EBCA77C2B2AE63
+    val p5: u64 = 0x27D4EB2F165667C5
+    val total_len: u64 = data.len().to_u64()
+    var h: u64 = 0
+    var pos: u64 = 0
+
+    if total_len >= 32:
+        # Initialize four accumulators
+        var v1: u64 = seed + p1 + p2
+        var v2: u64 = seed + p2
+        var v3: u64 = seed
+        var v4: u64 = seed - p1
+
+        # Process 32-byte stripes
+        val stripe_end: u64 = total_len - 31
+        while pos < stripe_end:
+            val x1: u64 = rt_typed_bytes_u64_le_at(data, pos)
+            val r1: u64 = v1 + (x1 * p2)
+            v1 = (r1 << 31) | (r1 >> 33)
+            v1 = v1 * p1
+
+            val ppos2 = pos + 8
+            val x2: u64 = rt_typed_bytes_u64_le_at(data, ppos2)
+            val r2: u64 = v2 + (x2 * p2)
+            v2 = (r2 << 31) | (r2 >> 33)
+            v2 = v2 * p1
+
+            val ppos3 = pos + 16
+            val x3: u64 = rt_typed_bytes_u64_le_at(data, ppos3)
+            val r3: u64 = v3 + (x3 * p2)
+            v3 = (r3 << 31) | (r3 >> 33)
+            v3 = v3 * p1
+
+            val ppos4 = pos + 24
+            val x4: u64 = rt_typed_bytes_u64_le_at(data, ppos4)
+            val r4: u64 = v4 + (x4 * p2)
+            v4 = (r4 << 31) | (r4 >> 33)
+            v4 = v4 * p1
+            pos = pos + 32
+
+        # Merge accumulators
+        h = ((v1 << 1) | (v1 >> 63)) + ((v2 << 7) | (v2 >> 57)) + ((v3 << 12) | (v3 >> 52)) + ((v4 << 18) | (v4 >> 46))
+        val v1p: u64 = v1 * p2
+        var m1: u64 = (v1p << 31) | (v1p >> 33)
+        h = (h ^ (m1 * p1)) * p1 + p4
+        val v2p: u64 = v2 * p2
+        var m2: u64 = (v2p << 31) | (v2p >> 33)
+        h = (h ^ (m2 * p1)) * p1 + p4
+        val v3p: u64 = v3 * p2
+        var m3: u64 = (v3p << 31) | (v3p >> 33)
+        h = (h ^ (m3 * p1)) * p1 + p4
+        val v4p: u64 = v4 * p2
+        var m4: u64 = (v4p << 31) | (v4p >> 33)
+        h = (h ^ (m4 * p1)) * p1 + p4
+    else:
+        h = seed + p5
+
+    h = h + total_len
+
+    # Process remaining bytes
+    while pos + 8 <= total_len:
+        val k8: u64 = rt_typed_bytes_u64_le_at(data, pos)
+        val k8p: u64 = k8 * p2
+        val k_round: u64 = ((k8p << 31) | (k8p >> 33)) * p1
+        h = h ^ k_round
+        h = ((h << 27) | (h >> 37)) * p1 + p4
+        pos = pos + 8
+
+    if pos + 4 <= total_len:
+        val k4: u64 = rt_typed_bytes_u32_le_at(data, pos)
+        h = h ^ (k4 * p1)
+        h = ((h << 23) | (h >> 41)) * p2 + p3
+        pos = pos + 4
+
+    while pos < total_len:
+        h = h ^ (data[pos].to_u64() * p5)
+        h = ((h << 11) | (h >> 53)) * p1
+        pos = pos + 1
+
+    h = h ^ (h >> 33)
+    h = h * p2
+    h = h ^ (h >> 29)
+    h = h * p3
+    h ^ (h >> 32)
+
+# ============================================================================
+# Streaming API — state layout
+#
+# State is a [u64] array with the following layout:
+#   [0]  = v1  (accumulator 1)
+#   [1]  = v2  (accumulator 2)
+#   [2]  = v3  (accumulator 3)
+#   [3]  = v4  (accumulator 4)
+#   [4]  = total_len (bytes hashed so far)
+#   [5]  = buf_len   (bytes buffered, 0..31)
+#   [6]  = seed
+#
+# A separate [u8] buffer of up to 32 bytes is carried alongside.
+# Since Simple functions return a single value, the streaming API
+# packs both into a [u64] array where indices 7..38 hold buffered
+# bytes (one byte per slot for simplicity).
+# ============================================================================
+
+fn xxhash64_init(seed: u64) -> [u64]:
+    var state: [u64] = []
+    # Accumulators
+    state.push(seed + _xxh64_prime1() + _xxh64_prime2())  # [0] v1
+    state.push(seed + _xxh64_prime2())                     # [1] v2
+    state.push(seed)                                        # [2] v3
+    state.push(seed - _xxh64_prime1())                     # [3] v4
+    state.push(0)                                           # [4] total_len
+    state.push(0)                                           # [5] buf_len
+    state.push(seed)                                        # [6] seed
+    # [7..38] buffer slots (32 bytes max)
+    var i: u64 = 0
+    while i < 32:
+        state.push(0)
+        i = i + 1
+    state
+
+fn _xxh64_buf_to_u8(state: [u64], buf_len: u64) -> [u8]:
+    var buf: [u8] = []
+    var i: u64 = 0
+    while i < buf_len:
+        buf.push(state[7 + i].to_u8())
+        i = i + 1
+    buf
+
+fn xxhash64_update(state: [u64], data: [u8]) -> [u64]:
+    var v1: u64 = state[0]
+    var v2: u64 = state[1]
+    var v3: u64 = state[2]
+    var v4: u64 = state[3]
+    var total_len: u64 = state[4]
+    var buf_len: u64 = state[5]
+    val seed: u64 = state[6]
+
+    val data_len: u64 = data.len().to_u64()
+    total_len = total_len + data_len
+    var data_pos: u64 = 0
+
+    # If we have buffered data, try to fill the 32-byte buffer first
+    if buf_len > 0:
+        val need: u64 = 32 - buf_len
+        val fill: u64 = if data_len < need: data_len else: need
+        var fi: u64 = 0
+        while fi < fill:
+            state[7 + buf_len + fi] = data[fi].to_u64()
+            fi = fi + 1
+        buf_len = buf_len + fill
+        data_pos = fill
+
+        if buf_len == 32:
+            # Buffer full — process it as one stripe
+            val buf: [u8] = _xxh64_buf_to_u8(state, 32)
+            v1 = _xxh64_round(v1, _xxh64_load_u64_le(buf, 0))
+            v2 = _xxh64_round(v2, _xxh64_load_u64_le(buf, 8))
+            v3 = _xxh64_round(v3, _xxh64_load_u64_le(buf, 16))
+            v4 = _xxh64_round(v4, _xxh64_load_u64_le(buf, 24))
+            buf_len = 0
+
+    # Process remaining complete 32-byte stripes from data
+    val data_remaining: u64 = data_len - data_pos
+    if data_remaining >= 32:
+        val stripe_end: u64 = data_pos + data_remaining - 31
+        while data_pos < stripe_end:
+            v1 = _xxh64_round(v1, _xxh64_load_u64_le(data, data_pos))
+            v2 = _xxh64_round(v2, _xxh64_load_u64_le(data, data_pos + 8))
+            v3 = _xxh64_round(v3, _xxh64_load_u64_le(data, data_pos + 16))
+            v4 = _xxh64_round(v4, _xxh64_load_u64_le(data, data_pos + 24))
+            data_pos = data_pos + 32
+
+    # Buffer leftover bytes
+    while data_pos < data_len:
+        state[7 + buf_len] = data[data_pos].to_u64()
+        buf_len = buf_len + 1
+        data_pos = data_pos + 1
+
+    # Write back state
+    state[0] = v1
+    state[1] = v2
+    state[2] = v3
+    state[3] = v4
+    state[4] = total_len
+    state[5] = buf_len
+    state
+
+fn xxhash64_finalize(state: [u64]) -> u64:
+    val v1: u64 = state[0]
+    val v2: u64 = state[1]
+    val v3: u64 = state[2]
+    val v4: u64 = state[3]
+    val total_len: u64 = state[4]
+    val buf_len: u64 = state[5]
+    val seed: u64 = state[6]
+
+    var h: u64 = 0
+
+    if total_len >= 32:
+        # Merge the four accumulators
+        h = _xxh64_rotl(v1, 1) + _xxh64_rotl(v2, 7) + _xxh64_rotl(v3, 12) + _xxh64_rotl(v4, 18)
+        h = _xxh64_merge_round(h, v1)
+        h = _xxh64_merge_round(h, v2)
+        h = _xxh64_merge_round(h, v3)
+        h = _xxh64_merge_round(h, v4)
+    else:
+        h = seed + _xxh64_prime5()
+
+    h = h + total_len
+
+    # Extract buffered tail bytes and finalize
+    val tail: [u8] = _xxh64_buf_to_u8(state, buf_len)
+    _xxh64_finalize_tail(h, tail, 0, buf_len)
