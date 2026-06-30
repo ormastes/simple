@@ -4,7 +4,7 @@
 - wrapper_path: `scripts/check/check-llm-runtime-torch-cuda-optimizer-probe.shs`
 - wrapper_sha256: `f8aa92c5ff24d9fd3a65c95957599c6885a25754018396d62e824e810f5c804a`
 - probe_path: `src/app/test/torch_cuda_optimizer_probe.spl`
-- probe_sha256: `0de6f54f85ff6dea2314fee437b50065eff27a95b9b1d9cdeec81c3922dade01`
+- probe_sha256: `7f32aba5718724281261bd90a3380e4ce9f473bfe965cff7d21332b67b09e645`
 - probe_command_sha256: `fc6c7792072dfddfbfd24fa8f2fa495f3a5649dc20b90082f74d4cefb4ed5463`
 - status: `fail`
 - reason: `tensor_creation_returned_null_handle`
@@ -12,8 +12,8 @@
 - blocked_gate: `tensor_creation`
 - blocked_gates: `tensor_creation`
 - primary_blocked_gate: `tensor_creation`
-- log_size: `92333`
-- log_sha256: `e6bda5240ae0e8f806924fec8ff1e5300005e470a3981d9c97ea5d4cab2eb86b`
+- log_size: `91659`
+- log_sha256: `5bad8c155b1e6df4d449e54d6550518e78f9aa4d0f43d2a9d22e03ece23cffd8`
 - status_line_count: `1`
 - required_gates_line_count: `1`
 - torch_available_line_count: `1`
@@ -59,7 +59,7 @@
 - surface_manifest: `build/llm_runtime_torch_cuda_optimizer_probe/torch_cuda_optimizer_surface_manifest.tsv`
 - surface_manifest_count: `22`
 - surface_manifest_size: `2704`
-- surface_manifest_sha256: `95545d08093877e21ec56e85d56e7154b235e6f512889d0515b2361ec8fdff88`
+- surface_manifest_sha256: `76009d8f50b0e5657adc092190f266c4465d5135a91e805fe0fe5da4cfe55d12`
 - torch_available: `true`
 - cuda_available: `true`
 - parameter_is_cuda: `missing`
