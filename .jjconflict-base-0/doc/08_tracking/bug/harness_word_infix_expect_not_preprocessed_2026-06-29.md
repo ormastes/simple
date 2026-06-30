@@ -51,6 +51,21 @@ describe "infix":
 `bin/simple run` and `bin/simple test` both ✗ the infix it-block; the
 preprocessed temp (`.spipe_matchers_*`) passes 3/3 under both run and test.
 
+## Precise root cause (dispatch, 2026-06-30)
+
+`bin/simple test <file>.spl` does NOT reach the Rust `run_test_file`
+(which preprocesses at execution.rs:534/801). `main.rs` routing:
+`test_should_use_light_daemon_client(args)` returns true when any arg
+`!starts_with('-') && ends_with(".spl")` (main.rs:206-210), so a single-file
+`test` dispatches to **`src/app/test_runner_new/test_runner_client.spl`** →
+light daemon → spawns `bin/simple run <spec>` via `process_run` (no preprocess;
+`run` is the seed and never rewrites infix). The pure-Simple rewriter
+`spipe_rewrite_infix_expect_line` DOES exist (`test_runner_execute.spl:228`) but
+is not applied on the client/daemon spawn path. So the fix is **pure-Simple**
+(no seed rebuild): preprocess each spec (apply `spipe_rewrite_infix_expect_line`
+to a temp) before the `bin/simple run <spec>` spawn in the client/daemon runner,
+mirroring the Rust `preprocess_matchers_only`.
+
 ## Fix (highest-leverage, deferred — scope-expanding)
 
 Wire `preprocess_matchers_only` into the dispatch `bin/simple test <single-file>`

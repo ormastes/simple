@@ -30,6 +30,54 @@ write-back) are fixed. The literal "fix ALL" is blocked by: unbuilt features
 (Wine), deliberately-removed-API stale specs (approval to delete), and a
 heterogeneous individual tail — no third silver bullet.
 
+## Update #2 — "fix all" goal continuation: clean library bugs + harness finding
+
+Banked clean, verified library fixes (each spec 0 failures after):
+- **`persistent_map.from_dict`** — iterated `for k in d:` (which yields
+  `(key,value)` tuples) and did `result.set(k, d[k])`, dropping every entry.
+  Fixed to `d.keys()`. 64 examples → 0 failures.
+- **`math_repr._greek_unicode`** — `to_pretty()` left omicron/partial/varepsilon/
+  vartheta/varkappa/varphi/varpi unconverted. Added them. tokenizer spec → 0.
+- (encoding msgpack/bson/cbor from Update #1.)
+
+**Major harness finding (filed:
+`doc/08_tracking/bug/harness_word_infix_expect_not_preprocessed_2026-06-29.md`):**
+legacy word-infix `expect X to_equal Y` (4251 uses / 155 files) only works when
+the harness rewrites it to method form. `bin/simple run` AND `bin/simple test
+<single-file>` both SKIP that rewrite, so the matcher is dropped:
+- falsy-call subjects → **false-RED** (e.g. privilege/group, principal, id_path —
+  the libraries are correct);
+- everything else → silent **false-GREEN** (assertion never runs).
+So this sweep's `run`-based PASS counts are inflated by hollow greens and the
+fail counts include legacy-syntax artifacts. **Highest-leverage next step:** wire
+`preprocess_matchers_only` into the single-file `test` dispatch, then RE-MEASURE
+with `bin/simple test` (a `run` sweep can't validate word-infix). NOTE: doing so
+will convert current false-greens into real (possibly failing) assertions.
+
+**Residual — full triage of the 40 "genuine-fixable" candidates (clean-bug pool
+is now EXHAUSTED):**
+- FIXED (clean library bugs): encoding msgpack/bson/cbor, persistent_map.from_dict,
+  math_repr greek. (5 this session.)
+- **Unbuilt feature / changed API (NOT bugs)** — reclassified after reading source:
+  - `web/browser_session_*` redirect/HEAD/303/307: NO redirect-follow, HEAD-strip,
+    or 30x logic exists anywhere in the module — test-first HTTP semantics never
+    built (same class as wine).
+  - `win_fs/acl`: test wants `acl_check(WindowRecord, AuthorityToken, FsOp) -> bool`;
+    module has `acl_check(caller: text, acl: text) -> AclDecision`. Richer API unbuilt.
+- **Test-side issues (library correct):**
+  - `ds_utils_stack_queue`: `pop() -> T?` returns `Some(3)`; test does
+    `expect(pop()).to_equal(3)` without unwrapping → `Some(3) != 3`. Test bug.
+  - privilege/group/principal/id_path + many others: word-infix harness gap (above).
+- **Deep codec/compiler internals (real, multi-step each):** zstd_*/hpack/huffman,
+  js_jit_optimizer, diagnostics/simple_formatter, module_import diagnostics.
+- **Interpreter limitation:** fault_detection_enhanced relies on module-global
+  mutation from a fn called in an it-block (writeback not persisted in BDD context).
+
+No shared root remains; no append-helper or matcher shortcut applies. Closing the
+rest requires feature implementation, approved test edits, or seed/harness work
+(the word-infix fix, which will *raise* the measured failure count by exposing
+false-greens — must be done deliberately and re-measured with `bin/simple test`).
+
 ## Fixes landed (verified)
 1. **BDD matcher bug** (seed, commit `62cea5b`, rebuilt+deployed) — `expect(falsy_call()).to_matcher()`
    false-failed ("expected call result to be truthy"). Monotonic `BDD_MATCHER_RAN` flag.

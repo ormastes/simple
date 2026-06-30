@@ -89,7 +89,7 @@ impl MirTextCodegen for MirToLlvm:
         var local_i = 0
         while local_i < body.locals.len():
             val local = body.locals[local_i]
-            val llvm_ty = self.type_mapper.map_type(local.type_)
+            val llvm_ty = self.llvm_type_text(local.type_)
             self.local_types[local.id.id] = llvm_ty
             local_i = local_i + 1
         if bootstrap_debug:
@@ -111,7 +111,7 @@ impl MirTextCodegen for MirToLlvm:
         if bootstrap_debug:
             print "[mir-to-llvm] function:params {name}"
 
-        val ret_ty = self.type_mapper.map_type(body.return_ty)
+        val ret_ty = self.llvm_type_text(body.return_ty)
         self.current_return_type = ret_ty
         if bootstrap_debug:
             print "[mir-to-llvm] function:return {name}"
@@ -267,7 +267,7 @@ impl MirTextCodegen for MirToLlvm:
                                 case Const(const_value, const_type):
                                     match const_value:
                                         case Int(v):
-                                            self.builder.emit_ret(self.type_mapper.map_type(const_type), "{v}")
+                                            self.builder.emit_ret(self.llvm_type_text(const_type), "{v}")
                                             return
                                         case _:
                                             ()
@@ -342,7 +342,7 @@ impl MirTextCodegen for MirToLlvm:
 
     me translate_const(dest: LocalId, value: MirConstValue, ty: MirType):
         val dest_name = self.get_local(dest.id)
-        val llvm_ty = self.type_mapper.map_type(ty)
+        val llvm_ty = self.llvm_type_text(ty)
 
         match value:
             case Int(v):
@@ -592,7 +592,11 @@ impl MirTextCodegen for MirToLlvm:
     fn get_local_type(id: i64) -> text:
         """Get LLVM type for a local variable, falling back to native int type."""
         match self.local_types.get(id):
-            case Some(ty): ty
+            case Some(ty):
+                if ty == nil:
+                    self.native_int()
+                else:
+                    ty
             case nil: self.native_int()
 
     fn get_operand_type(operand: MirOperand) -> text:
@@ -603,7 +607,9 @@ impl MirTextCodegen for MirToLlvm:
             case Move(local):
                 self.get_local_type(self.local_id_value(local))
             case Const(value, type_):
-                self.type_mapper.map_type(type_)
+                self.llvm_type_text(type_)
+            case _:
+                self.native_int()
 
     fn local_id_value(local: LocalId) -> i64:
         match local:
@@ -619,7 +625,7 @@ impl MirTextCodegen for MirToLlvm:
 
     me translate_alloc(dest: LocalId, ty: MirType):
         val dest_name = self.get_local(dest.id)
-        val llvm_ty = self.type_mapper.map_type(ty)
+        val llvm_ty = self.llvm_type_text(ty)
         self.builder.emit_alloca(dest_name, llvm_ty)
 
     me translate_load(dest: LocalId, ptr: MirOperand):
