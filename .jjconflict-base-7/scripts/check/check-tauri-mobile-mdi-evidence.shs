@@ -1,0 +1,165 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)"
+BUILD_DIR="${BUILD_DIR:-$ROOT_DIR/build/tauri_android_mdi}"
+SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
+SIMPLE_BIN_STATUS=pass
+is_rust_seed_simple() {
+    case "$1" in
+        "$ROOT_DIR"/src/compiler_rust/*|src/compiler_rust/*|*/src/compiler_rust/*|./src/compiler_rust/*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+if [ "${SIMPLE_BIN:-}" = "" ]; then
+    SIMPLE_BIN_SOURCE="missing-self-hosted"
+    for candidate in "$ROOT_DIR"/release/*/simple "$ROOT_DIR"/bin/release/*/simple "$ROOT_DIR"/build/bootstrap/stage3/simple "$ROOT_DIR"/bin/simple; do
+        if [ -x "$candidate" ]; then
+            SIMPLE_BIN="$candidate"
+            SIMPLE_BIN_SOURCE="repo-self-hosted-fallback"
+            break
+        fi
+    done
+    if [ "${SIMPLE_BIN:-}" = "" ] && [ "${ALLOW_PATH_SIMPLE_BIN:-0}" = "1" ] && command -v simple >/dev/null 2>&1; then
+        SIMPLE_BIN="$(command -v simple)"
+        SIMPLE_BIN_SOURCE="path-opt-in"
+    fi
+else
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
+fi
+SIMPLE_BIN="${SIMPLE_BIN:-}"
+if [ "$SIMPLE_BIN" = "" ]; then
+    SIMPLE_BIN_STATUS=missing
+elif is_rust_seed_simple "$SIMPLE_BIN"; then
+    SIMPLE_BIN_STATUS=forbidden
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-rust-seed-forbidden"
+elif [ ! -x "$SIMPLE_BIN" ]; then
+    SIMPLE_BIN_STATUS=missing
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-missing"
+fi
+export SIMPLE_BIN SIMPLE_BIN_SOURCE SIMPLE_BIN_STATUS
+SMOKE_SOURCE="$ROOT_DIR/examples/06_io/ui/tauri_mobile_mdi_smoke.spl"
+ANDROID_APK="$ROOT_DIR/tools/tauri-shell/src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk"
+
+# ABI-aware: the Android emulator ABI depends on the host (arm64-v8a on Apple
+# Silicon, x86_64 on Intel/CI). Derive the packaged ABI from the APK itself
+# instead of hard-coding x86_64, and map it to the cross-compiled runtime triple.
+# Override with ANDROID_ABI=arm64-v8a|x86_64 if needed.
+if [ -n "${ANDROID_ABI:-}" ]; then
+    abi="$ANDROID_ABI"
+elif [ -f "$ANDROID_APK" ]; then
+    abi="$(unzip -l "$ANDROID_APK" 2>/dev/null \
+        | grep -oE 'lib/[a-z0-9_-]+/libsimple_mobile_runtime_exec\.so' \
+        | head -1 | cut -d/ -f2)"
+fi
+abi="${abi:-arm64-v8a}"
+case "$abi" in
+    arm64-v8a) ANDROID_TRIPLE="aarch64-linux-android" ;;
+    x86_64)    ANDROID_TRIPLE="x86_64-linux-android" ;;
+    armeabi-v7a) ANDROID_TRIPLE="armv7-linux-androideabi" ;;
+    x86)       ANDROID_TRIPLE="i686-linux-android" ;;
+    *)         ANDROID_TRIPLE="aarch64-linux-android" ;;
+esac
+ANDROID_RUNTIME="$ROOT_DIR/src/compiler_rust/target/$ANDROID_TRIPLE/release/simple"
+ANDROID_SCREENSHOT="${ANDROID_SCREENSHOT:-$BUILD_DIR/android_emulator_screenshot_live_mdi_final.png}"
+ANDROID_LOGCAT="${ANDROID_LOGCAT:-$BUILD_DIR/emulator_logcat_live_mdi_final.txt}"
+IOS_MDI_EVIDENCE="$ROOT_DIR/scripts/check/check-tauri-ios-mobile-mdi-evidence.shs"
+
+mkdir -p "$BUILD_DIR"
+
+fail() {
+    echo "status=fail"
+    echo "reason=$1"
+    echo "tauri_mobile_mdi_simple_bin=$SIMPLE_BIN"
+    echo "tauri_mobile_mdi_simple_bin_source=$SIMPLE_BIN_SOURCE"
+    echo "tauri_mobile_mdi_simple_bin_status=$SIMPLE_BIN_STATUS"
+    exit 1
+}
+
+pass_line() {
+    echo "$1=pass"
+}
+
+echo "tauri_mobile_mdi_simple_bin=$SIMPLE_BIN"
+echo "tauri_mobile_mdi_simple_bin_source=$SIMPLE_BIN_SOURCE"
+echo "tauri_mobile_mdi_simple_bin_status=$SIMPLE_BIN_STATUS"
+
+if [ "$SIMPLE_BIN_STATUS" = "forbidden" ]; then
+    fail "simple-bin-forbidden"
+fi
+if [ "$SIMPLE_BIN_STATUS" != "pass" ]; then
+    fail "host Simple runtime missing: $SIMPLE_BIN"
+fi
+
+test -x "$SIMPLE_BIN" || fail "host Simple runtime missing: $SIMPLE_BIN"
+test -f "$SMOKE_SOURCE" || fail "mobile MDI smoke source missing: $SMOKE_SOURCE"
+
+"$SIMPLE_BIN" check "$SMOKE_SOURCE" > "$BUILD_DIR/mobile_mdi_smoke_check.log" 2>&1 \
+    || fail "mobile MDI smoke source check failed"
+pass_line "smoke_source_check"
+
+"$SIMPLE_BIN" run "$SMOKE_SOURCE" --mode=interpreter --clean \
+    > "$BUILD_DIR/mobile_mdi_smoke_run.out" 2> "$BUILD_DIR/mobile_mdi_smoke_run.err" \
+    || fail "mobile MDI smoke source run failed"
+
+open_count="$(grep -c '"type":"openWindow"' "$BUILD_DIR/mobile_mdi_smoke_run.out" || true)"
+if [ "$open_count" -lt 4 ]; then
+    fail "mobile MDI smoke emitted $open_count openWindow messages, expected at least 4"
+fi
+grep -q 'simple-picture' "$BUILD_DIR/mobile_mdi_smoke_run.out" \
+    || fail "mobile MDI smoke output missing taskbar/icon image marker"
+pass_line "smoke_source_ipc"
+
+test -x "$ANDROID_RUNTIME" || fail "Android $ANDROID_TRIPLE Simple runtime missing: $ANDROID_RUNTIME"
+pass_line "android_runtime_artifact"
+
+test -f "$ANDROID_APK" || fail "Android APK missing: $ANDROID_APK"
+unzip -l "$ANDROID_APK" | grep -q "lib/$abi/libsimple_mobile_runtime_exec.so" \
+    || fail "Android APK missing packaged native Simple runtime (lib/$abi/)"
+pass_line "android_apk_runtime_packaging"
+
+test -s "$ANDROID_SCREENSHOT" || fail "Android live MDI screenshot missing: $ANDROID_SCREENSHOT"
+test -s "$ANDROID_LOGCAT" || fail "Android live MDI logcat missing: $ANDROID_LOGCAT"
+"$SIMPLE_BIN" run "$ROOT_DIR/scripts/check/ios_mdi_probe_server.spl" --mode=interpreter --validate-screenshot \
+    "$ANDROID_SCREENSHOT" android_live_mdi_screenshot \
+    || fail "Android live MDI screenshot PNG validation failed"
+"$SIMPLE_BIN" run "$ROOT_DIR/scripts/check/ios_mdi_probe_server.spl" --mode=interpreter --validate-android-mdi-screenshot \
+    "$ANDROID_SCREENSHOT" \
+    || fail "Android live MDI screenshot semantic validation failed"
+
+"$SIMPLE_BIN" run "$ROOT_DIR/scripts/check/ios_mdi_probe_server.spl" --mode=interpreter --validate-android-log \
+    "$ANDROID_LOGCAT" \
+    || fail "Android live MDI logcat semantic validation failed"
+
+echo "android_screenshot=$ANDROID_SCREENSHOT"
+echo "android_logcat=$ANDROID_LOGCAT"
+
+SIMPLE_BIN="$SIMPLE_BIN" SIMPLE_BIN_SOURCE="$SIMPLE_BIN_SOURCE" sh "$IOS_MDI_EVIDENCE" --self-test > "$BUILD_DIR/ios_mdi_probe_self_test.log" 2>&1 \
+    || fail "iOS MDI probe self-test failed"
+pass_line "ios_mdi_probe_self_test"
+
+SIMPLE_BIN="$SIMPLE_BIN" SIMPLE_BIN_SOURCE="$SIMPLE_BIN_SOURCE" sh "$IOS_MDI_EVIDENCE" --browser-self-test > "$BUILD_DIR/ios_mdi_probe_browser_self_test.log" 2>&1 \
+    || fail "iOS MDI probe browser self-test failed"
+pass_line "ios_mdi_probe_browser_self_test"
+
+SIMPLE_BIN="$SIMPLE_BIN" SIMPLE_BIN_SOURCE="$SIMPLE_BIN_SOURCE" sh "$IOS_MDI_EVIDENCE" --tauri-url-self-test > "$BUILD_DIR/ios_mdi_probe_tauri_url_self_test.log" 2>&1 \
+    || fail "iOS MDI probe Tauri URL-mode self-test failed"
+pass_line "ios_mdi_probe_tauri_url_self_test"
+
+if [ "$(uname -s)" = "Darwin" ] && command -v xcrun >/dev/null 2>&1 && command -v xcodebuild >/dev/null 2>&1; then
+    echo "ios_tooling=available"
+else
+    echo "ios_tooling=unavailable"
+    echo "ios_reason=xcrun/xcodebuild require macOS with Xcode; current host $(uname -s)"
+fi
+
+doc_spec_count="$(find "$ROOT_DIR/doc/06_spec" -name '*_spec.spl' | wc -l | tr -d ' ')"
+echo "doc06_spec_spl_count=$doc_spec_count"
+if [ "$doc_spec_count" != "0" ]; then
+    fail "doc/06_spec contains executable .spl specs"
+fi
+
+echo "status=pass"
+echo "tauri_mobile_mdi_simple_bin=$SIMPLE_BIN"
+echo "tauri_mobile_mdi_simple_bin_source=$SIMPLE_BIN_SOURCE"
+echo "tauri_mobile_mdi_simple_bin_status=$SIMPLE_BIN_STATUS"

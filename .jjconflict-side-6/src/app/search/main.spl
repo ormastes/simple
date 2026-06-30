@@ -1,0 +1,129 @@
+# Simple CLI - search command
+# Search the package registry index
+
+use std.cli.cli_util (get_cli_args)
+use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
+use app.package.registry.config (default_config)
+use app.package.registry.index (search_packages)
+use std.log.{error}
+
+fn print_help():
+    print "Usage: simple search <query> [options]"
+    print ""
+    print "Search the Simple package registry."
+    print ""
+    print "Options:"
+    print "  --limit=N     Max results (default: 20)"
+    print "  --json        Output as JSON"
+    for line in log_options_help():
+        print "  {line}"
+    print "  -h, --help    Show this help"
+    print ""
+    print "Examples:"
+    print "  simple search http"
+    print "  simple search json --limit=5"
+
+fn print_error(msg: text):
+    error("search", msg)
+
+fn parse_limit_or_default(value: text) -> i64:
+    val trimmed = value.trim()
+    if trimmed == "":
+        return 20
+    for ch in trimmed:
+        if ch < "0" or ch > "9":
+            return 20
+    val parsed = trimmed.to_int() ?? 20
+    if parsed <= 0:
+        return 20
+    parsed
+
+fn _is_log_option(arg: text) -> bool:
+    arg == "--human" or arg == "--llm" or arg == "--json" or
+        arg == "--tui" or arg == "--stdout" or arg == "--quiet" or
+        arg == "--verbose" or arg == "--dots" or arg == "--count" or
+        arg == "--no-progress" or arg == "--log-mode" or arg == "--surface" or
+        arg == "--progress" or arg.starts_with("--log-mode=") or
+        arg.starts_with("--surface=") or arg.starts_with("--progress=")
+
+fn _print_json_results(query: text, results: [SearchResult]):
+    var parts: [text] = []
+    var i = 0
+    while i < results.len():
+        val result = results[i]
+        parts.push("{\"name\":\"{result.name}\",\"description\":\"{result.description}\",\"latest_version\":\"{result.latest_version}\"}")
+        i = i + 1
+    print "{\"query\":\"{query}\",\"count\":{results.len()},\"results\":[" + parts.join(",") + "]}"
+
+fn main() -> i64:
+    val args = get_cli_args()
+
+    var query = ""
+    var limit = 20
+    var as_json = false
+    val log_opts = parse_log_options(args)
+    if not log_opts.valid:
+        print_error(log_opts.error)
+        return 1
+
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "-h" or arg == "--help":
+            print_help()
+            return 0
+        elif arg.starts_with("--limit="):
+            limit = parse_limit_or_default(arg[8:])
+        elif arg == "--json" or arg == "--log-mode=json":
+            as_json = true
+        elif arg == "--log-mode" or arg == "--surface" or arg == "--progress":
+            i = i + 1
+        elif _is_log_option(arg):
+            pass
+        elif arg == "search":
+            pass
+        elif query == "":
+            query = arg
+        i = i + 1
+
+    if log_opts.log_mode == "json":
+        as_json = true
+
+    if query == "":
+        print_error("search requires a query argument")
+        print ""
+        print_help()
+        return 1
+
+    val config = default_config()
+    val all_results = search_packages(config, query)
+    var results: [SearchResult] = []
+    var ri = 0
+    while ri < all_results.len() and results.len() < limit:
+        results.push(all_results[ri])
+        ri = ri + 1
+
+    if as_json:
+        _print_json_results(query, results)
+        return 0
+
+    if log_opts.progress != "summary":
+        val progress_line = render_progress(log_opts.progress, results.len(), results.len(), "search")
+        if progress_line != "":
+            print progress_line
+
+    if results.len() == 0:
+        print "No packages found matching '{query}'"
+        return 0
+
+    print "Packages matching '{query}':"
+    print ""
+
+    for result in results:
+        print "  {result.name} ({result.latest_version})"
+        if result.description != "":
+            print "    {result.description}"
+        print ""
+
+    print "{results.len()} package(s) found"
+    return 0

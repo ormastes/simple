@@ -1,0 +1,301 @@
+# Variant Resolution Overlay — manifest model + candidate-root ordering
+#
+# Resolver-only overlay selecting platform / hardware / library / renderer
+# implementations. Source imports stable module names; SDN config selects the
+# active variant. No new language grammar: `var` stays the mutable-variable
+# keyword and `variants/` is a filesystem/resolver root, never a public namespace
+# (`use var.*` / `use variants.*` are rejected by the resolver).
+#
+# On-disk overlay root is `variants/` (the name the Rust resolver already uses for
+# the SIMD axis); the SDN vocabulary (`var:`, groups, policy) is unchanged from
+# the canonical spec. See doc/02_requirements/feature/var_resolution_rules.md and
+# doc/03_plan/compiler/module_resolution/var_resolution_plan.md.
+#
+# This module holds the pure model + ordering/validation algorithm. The
+# bootstrap-safe line-based manifest reader and resolver hook are separate
+# increments (H2 / Phase 4).
+
+# A variant group: a selectable axis with a closed value set.
+struct VarGroup:
+    name: text            # "platform", "hw", "lib.crypto"
+    values: [text]        # selectable values; MUST contain `default`
+    select_default: text  # "auto" | a concrete value | the global default
+
+# The parsed `variants/__init__.spl` manifest.
+struct VarManifest:
+    version: i64
+    global_default: text  # canonical default value name, e.g. "default"
+    order: [text]         # group names, highest precedence first
+    groups: [VarGroup]
+
+# An active selection (group -> chosen value) from config/CLI/env/detection.
+struct VarSelection:
+    group: text
+    value: text
+
+# "lib.crypto" -> "lib/crypto" (dotted group name -> nested directory).
+fn var_group_dir(group: text) -> text:
+    group.replace(".", "/")
+
+# Look up the active value for a group; falls back to the global default.
+fn var_selection_for(selections: [VarSelection], group: text, global_default: text) -> text:
+    for s in selections:
+        if s.group == group:
+            return s.value
+    global_default
+
+# Build the candidate variant roots for a resolution, most-specific first.
+#
+# Order (Node "default-last" rule, spec §5):
+#   1. all SELECTED roots, in manifest `order`
+#   2. all GROUP-DEFAULT roots, in manifest `order`
+#   3. the global default root (`<overlay>/default`)
+# `src` fallback is left to the existing resolver, which runs after these.
+#
+# All selected roots precede all default roots, so a high-precedence group's
+# default never hides a lower-precedence group's selection. The linear `order`
+# also breaks selected-vs-selected ties deterministically (earlier group wins).
+fn var_candidate_roots(overlay_root: text, manifest: VarManifest, selections: [VarSelection]) -> [text]:
+    var selected: [text] = []
+    var defaults: [text] = []
+    for gname in manifest.order:
+        val value = var_selection_for(selections, gname, manifest.global_default)
+        val gdir = var_group_dir(gname)
+        if value != manifest.global_default and value != "auto":
+            selected.push("{overlay_root}/{gdir}/{value}")
+        defaults.push("{overlay_root}/{gdir}/{manifest.global_default}")
+    var roots: [text] = []
+    for r in selected:
+        roots.push(r)
+    for r in defaults:
+        roots.push(r)
+    roots.push("{overlay_root}/{manifest.global_default}")
+    roots
+
+# The ordered list of absolute candidate file paths a module resolves to under
+# the variant roots — `<root>/<segs>.spl` then `<root>/<segs>/__init__.spl` for
+# each root, in precedence order. Pure (no I/O); the caller does the existence
+# check (the live hook via `resolve_from_base`, the `simple var resolve` preview
+# via a filesystem probe). The first candidate that exists wins, so this list is
+# the single source of truth for variant precedence.
+fn var_module_candidates(project_root: text, var_roots: [text], segments: [text]) -> [text]:
+    val rel = segments.join("/")
+    var out: [text] = []
+    for root in var_roots:
+        out.push("{project_root}/{root}/{rel}.spl")
+        out.push("{project_root}/{root}/{rel}/__init__.spl")
+    out
+
+# Find a group by name; nil if absent.
+fn var_find_group(manifest: VarManifest, name: text) -> VarGroup?:
+    for g in manifest.groups:
+        if g.name == name:
+            return g
+    nil
+
+# Whether a group's value set contains a given value.
+fn var_group_has_value(group: VarGroup, value: text) -> bool:
+    for v in group.values:
+        if v == value:
+            return true
+    false
+
+# ----------------------------------------------------------------------------
+# Bootstrap-safe manifest reader (H2)
+#
+# Parses `variants/__init__.spl` with a minimal line-based reader — NOT the full
+# SDN parser, which the module resolver precedes in the bootstrap chain (the DI
+# loader uses the same line-based approach for the same reason). Accepts the
+# canonical manifest shape: top-level `version`/`default`/`order`, and one
+# `<group>: { values: [...], select_default: <v> }` line per group under
+# `groups:`. Unrecognised lines (`policy:`, comments, blanks) are ignored.
+# ----------------------------------------------------------------------------
+
+# Extract the first `[a, b, c]` list found in a line.
+fn var_extract_list(raw: text) -> [text]:
+    val after_open = raw.split("[")
+    if after_open.len() < 2:
+        return []
+    val inner = after_open[1].split("]")[0]
+    var out: [text] = []
+    for tok in inner.split(","):
+        val t = tok.trim()
+        if t.len() > 0:
+            out.push(t)
+    out
+
+# Read a scalar field `key: value` from within an inline object line, stopping at
+# the next `,` or `}`. Returns "" when absent.
+fn var_extract_field(raw: text, key: text) -> text:
+    val parts = raw.split("{key}:")
+    if parts.len() < 2:
+        return ""
+    var rest = parts[1].trim()
+    rest = rest.split(",")[0]
+    rest = rest.split("}")[0]
+    rest.trim()
+
+# Read the scalar after a top-level `key:` (whole-line form).
+fn var_line_scalar(line: text) -> text:
+    val parts = line.split(":")
+    if parts.len() < 2:
+        return ""
+    parts[1].trim()
+
+# Parse manifest text into a VarManifest.
+fn var_parse_manifest(source: text) -> VarManifest:
+    var version = 1
+    var global_default = "default"
+    var order: [text] = []
+    var groups: [VarGroup] = []
+    for raw in source.split("\n"):
+        val line = raw.trim()
+        if line.len() == 0 or line.starts_with("#"):
+            continue
+        # A group entry: `<name>: { values: [...], select_default: <v> }`
+        if line.contains("values:") and line.contains("{"):
+            val name = line.split(":")[0].trim()
+            val values = var_extract_list(line)
+            var sd = var_extract_field(line, "select_default")
+            if sd.len() == 0:
+                sd = global_default
+            groups.push(VarGroup(name: name, values: values, select_default: sd))
+            continue
+        if line.starts_with("version:"):
+            version = var_line_scalar(line).to_i64()
+            continue
+        if line.starts_with("default:"):
+            global_default = var_line_scalar(line)
+            continue
+        if line.starts_with("order:"):
+            order = var_extract_list(line)
+            continue
+    VarManifest(version: version, global_default: global_default, order: order, groups: groups)
+
+# ----------------------------------------------------------------------------
+# Project config reader — config/var.sdn (spec §4)
+#
+# Bootstrap-safe line reader (no full SDN parser). Extracts the active profile's
+# selections as `[VarSelection]` (the `config_profile` precedence layer). Profile
+# entries are one inline object per line:
+#   <profile>: { platform: auto, hw: auto, lib.crypto: default }
+# ----------------------------------------------------------------------------
+
+# Parse the `{ k: v, ... }` inline object on a profile line into selections.
+fn var_parse_inline_pairs(line: text) -> [VarSelection]:
+    val after_brace = line.split("{")
+    if after_brace.len() < 2:
+        return []
+    val inner = after_brace[1].split("}")[0]
+    var out: [VarSelection] = []
+    for pair in inner.split(","):
+        val kv = pair.split(":")
+        if kv.len() >= 2:
+            out.push(VarSelection(group: kv[0].trim(), value: kv[1].trim()))
+    out
+
+# Selections for the active profile from a config/var.sdn body. `profile_override`
+# (from CLI `--var-profile`) wins over the file's `profile:` line; "" = use the file.
+fn var_config_selections(source: text, profile_override: text) -> [VarSelection]:
+    var active = profile_override
+    if active.len() == 0:
+        for raw in source.split("\n"):
+            val line = raw.trim()
+            if line.starts_with("profile:"):
+                active = var_line_scalar(line)
+    var out: [VarSelection] = []
+    if active.len() == 0:
+        return out
+    for raw in source.split("\n"):
+        val line = raw.trim()
+        if line.starts_with("{active}:") and line.contains("{"):
+            out = var_parse_inline_pairs(line)
+    out
+
+# ----------------------------------------------------------------------------
+# Active-selection precedence (spec §4)
+#
+# Resolves each manifest group to a concrete value using the precedence:
+#   CLI override > env override > config profile > manifest select_default
+#   > host detection (for `auto`) > global default.
+# Pure logic; the resolver/CLI layer supplies the inputs.
+# ----------------------------------------------------------------------------
+
+# Inputs gathered by the CLI/resolver layer, already parsed into selections.
+struct VarSources:
+    cli: [VarSelection]            # --var key=value
+    env: [VarSelection]            # SIMPLE_VAR_*
+    config_profile: [VarSelection] # active config/var.sdn profile
+    host_platform: text            # detected host platform (for `auto`)
+    host_arch: text                # detected host arch (for `auto`)
+
+# First explicit value for a group across the precedence-ordered source lists.
+fn var_lookup_override(sources: VarSources, group: text) -> text?:
+    for s in sources.cli:
+        if s.group == group:
+            return s.value
+    for s in sources.env:
+        if s.group == group:
+            return s.value
+    for s in sources.config_profile:
+        if s.group == group:
+            return s.value
+    nil
+
+# Map an `auto` value to a detected host value; "" when the group is not
+# host-detectable (caller falls back to the global default).
+fn var_detect_auto(group: text, sources: VarSources) -> text:
+    if group == "platform":
+        return sources.host_platform
+    if group == "hw":
+        return sources.host_arch
+    ""
+
+# Resolve every group to a concrete value, applying full precedence.
+fn var_resolve_selections(manifest: VarManifest, sources: VarSources) -> [VarSelection]:
+    var out: [VarSelection] = []
+    for g in manifest.groups:
+        var value = match var_lookup_override(sources, g.name):
+            Some(v): v
+            nil: g.select_default
+        if value == "auto":
+            val detected = var_detect_auto(g.name, sources)
+            value = if detected.len() > 0: detected else: manifest.global_default
+        out.push(VarSelection(group: g.name, value: value))
+    out
+
+# Fail-closed manifest + selection validation. Returns the list of violated
+# diagnostic codes (empty == valid).
+#   E-VAR001 unknown variant group        (selection names a group not in manifest)
+#   E-VAR002 unknown variant value        (selection value not in the group's set)
+#   E-VAR003 selected variant requires missing default (group lacks `default`)
+#   E-VAR004 ambiguous provider at same rank (duplicate group in `order`)
+fn var_validate(manifest: VarManifest, selections: [VarSelection]) -> [text]:
+    var errors: [text] = []
+
+    # E-VAR003: every group must contain the global default value.
+    for g in manifest.groups:
+        if not var_group_has_value(g, manifest.global_default):
+            errors.push("E-VAR003")
+
+    # E-VAR004: a group must not appear twice in `order` (no same-rank ambiguity).
+    var seen: [text] = []
+    for name in manifest.order:
+        var dup = false
+        for s in seen:
+            if s == name:
+                dup = true
+        if dup:
+            errors.push("E-VAR004")
+        seen.push(name)
+
+    # E-VAR001 / E-VAR002: selections must reference known groups and values.
+    for sel in selections:
+        match var_find_group(manifest, sel.group):
+            Some(g):
+                if not var_group_has_value(g, sel.value):
+                    errors.push("E-VAR002")
+            nil:
+                errors.push("E-VAR001")
+
+    errors

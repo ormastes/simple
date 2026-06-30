@@ -1,0 +1,67 @@
+# Self-contained Simple → HTML generator for mobile GUI surfaces.
+#
+# The existing mobile GUI entries (hello_wasm_gui.spl) HARD-CODE their HTML body
+# string. This module lets Simple build the same markup from a small, clean node
+# model and render it to HTML — so the UI is genuinely generated, not pasted.
+# It deliberately does NOT depend on the stubbed widget_store_ops registry; it is
+# a leaf model (tag + attrs + text + children) that any GUI entry can assemble.
+
+use std.text
+
+struct HtmlAttr:
+    key: text
+    value: text
+
+struct HtmlNode:
+    tag: text
+    attrs: [HtmlAttr]
+    text_content: text
+    children: [HtmlNode]
+    self_closing: bool
+
+fn html_node(tag: text, attrs: [HtmlAttr], children: [HtmlNode]) -> HtmlNode:
+    HtmlNode(tag: tag, attrs: attrs, text_content: "", children: children, self_closing: false)
+
+fn html_leaf(tag: text, attrs: [HtmlAttr], text_content: text) -> HtmlNode:
+    HtmlNode(tag: tag, attrs: attrs, text_content: text_content, children: [], self_closing: false)
+
+fn html_void(tag: text, attrs: [HtmlAttr]) -> HtmlNode:
+    HtmlNode(tag: tag, attrs: attrs, text_content: "", children: [], self_closing: true)
+
+fn attr(key: text, value: text) -> HtmlAttr:
+    HtmlAttr(key: key, value: value)
+
+# Minimal, correct HTML text/attribute escaping.
+fn html_gen_escape_text(value: text) -> text:
+    var out = value.replace("&", "&amp;")
+    out = out.replace("<", "&lt;")
+    out = out.replace(">", "&gt;")
+    return out
+
+fn html_gen_escape_attr(value: text) -> text:
+    var out = html_gen_escape_text(value)
+    out = out.replace("\"", "&quot;")
+    return out
+
+fn _render_attrs(attrs: [HtmlAttr]) -> text:
+    var out = ""
+    for a in attrs:
+        out = out + " " + a.key + "=\"" + html_gen_escape_attr(a.value) + "\""
+    return out
+
+# Recursively render a node tree to an HTML string.
+fn html_node_render(node: HtmlNode) -> text:
+    val open = "<" + node.tag + _render_attrs(node.attrs)
+    if node.self_closing:
+        return open + ">"
+    var inner = html_gen_escape_text(node.text_content)
+    for child in node.children:
+        inner = inner + html_node_render(child)
+    return open + ">" + inner + "</" + node.tag + ">"
+
+# Wrap a body fragment + css into a full mobile document.
+fn html_gen_document(title: text, body_html: text, css: text) -> text:
+    "<!doctype html><html><head><meta charset=\"utf-8\">" +
+    "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">" +
+    "<title>" + html_gen_escape_text(title) + "</title><style>" + css + "</style></head>" +
+    "<body>" + body_html + "</body></html>"

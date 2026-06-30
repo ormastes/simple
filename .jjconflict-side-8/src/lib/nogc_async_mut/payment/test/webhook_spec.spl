@@ -1,0 +1,115 @@
+use std.spec
+use std.io_runtime
+
+enum WebhookProvider:
+    Stripe
+    PayPal
+    BTCPay
+    Local
+    UnknownProvider
+
+enum WebhookEventType:
+    PaymentAuthorized
+    PaymentCaptured
+    PaymentFailed
+    PaymentRefunded
+    PaymentVoided
+    PaymentDisputed
+    InvoicePaid
+    InvoiceExpired
+    UnknownEvent
+
+struct WebhookEvent:
+    val provider: WebhookProvider
+    val event_type: WebhookEventType
+    val transaction_id: text
+    val amount_cents: int
+    val currency: text
+    val raw_payload: text
+    val timestamp: text
+
+struct WebhookResult:
+    val accepted: bool
+    val event: WebhookEvent
+    val error_message: text
+
+struct WebhookConfig:
+    val stripe_signing_secret: text
+    val paypal_webhook_id: text
+    val btcpay_secret: text
+
+fn new_webhook_config() -> WebhookConfig:
+    return WebhookConfig { stripe_signing_secret: "", paypal_webhook_id: "", btcpay_secret: "" }
+
+fn _empty_event() -> WebhookEvent:
+    return WebhookEvent { provider: WebhookProvider.UnknownProvider, event_type: WebhookEventType.UnknownEvent, transaction_id: "", amount_cents: 0, currency: "", raw_payload: "", timestamp: "" }
+
+fn _map_stripe_event(event_type: text) -> WebhookEventType:
+    if event_type == "payment_intent.succeeded": return WebhookEventType.PaymentCaptured
+    if event_type == "payment_intent.payment_failed": return WebhookEventType.PaymentFailed
+    if event_type == "charge.refunded": return WebhookEventType.PaymentRefunded
+    if event_type == "charge.dispute.created": return WebhookEventType.PaymentDisputed
+    if event_type == "payment_intent.canceled": return WebhookEventType.PaymentVoided
+    return WebhookEventType.UnknownEvent
+
+fn _map_paypal_event(event_type: text) -> WebhookEventType:
+    if event_type == "PAYMENT.CAPTURE.COMPLETED": return WebhookEventType.PaymentCaptured
+    if event_type == "PAYMENT.CAPTURE.DENIED": return WebhookEventType.PaymentFailed
+    if event_type == "PAYMENT.CAPTURE.REFUNDED": return WebhookEventType.PaymentRefunded
+    if event_type == "CHECKOUT.ORDER.APPROVED": return WebhookEventType.PaymentAuthorized
+    return WebhookEventType.UnknownEvent
+
+fn _map_btcpay_event(event_type: text) -> WebhookEventType:
+    if event_type == "InvoiceSettled": return WebhookEventType.InvoicePaid
+    if event_type == "InvoiceExpired": return WebhookEventType.InvoiceExpired
+    if event_type == "InvoiceProcessing": return WebhookEventType.PaymentAuthorized
+    if event_type == "InvoiceInvalid": return WebhookEventType.PaymentFailed
+    return WebhookEventType.UnknownEvent
+
+describe "Webhook handler — payment event dispatch":
+
+    describe "Stripe event mapping":
+        it "maps payment_intent.succeeded to PaymentCaptured":
+            expect _map_stripe_event("payment_intent.succeeded") == WebhookEventType.PaymentCaptured
+
+        it "maps payment_intent.payment_failed to PaymentFailed":
+            expect _map_stripe_event("payment_intent.payment_failed") == WebhookEventType.PaymentFailed
+
+        it "maps charge.refunded to PaymentRefunded":
+            expect _map_stripe_event("charge.refunded") == WebhookEventType.PaymentRefunded
+
+        it "maps charge.dispute.created to PaymentDisputed":
+            expect _map_stripe_event("charge.dispute.created") == WebhookEventType.PaymentDisputed
+
+        it "maps unknown event to UnknownEvent":
+            expect _map_stripe_event("some.unknown.event") == WebhookEventType.UnknownEvent
+
+    describe "PayPal event mapping":
+        it "maps PAYMENT.CAPTURE.COMPLETED to PaymentCaptured":
+            expect _map_paypal_event("PAYMENT.CAPTURE.COMPLETED") == WebhookEventType.PaymentCaptured
+
+        it "maps CHECKOUT.ORDER.APPROVED to PaymentAuthorized":
+            expect _map_paypal_event("CHECKOUT.ORDER.APPROVED") == WebhookEventType.PaymentAuthorized
+
+        it "maps PAYMENT.CAPTURE.REFUNDED to PaymentRefunded":
+            expect _map_paypal_event("PAYMENT.CAPTURE.REFUNDED") == WebhookEventType.PaymentRefunded
+
+    describe "BTCPay event mapping":
+        it "maps InvoiceSettled to InvoicePaid":
+            expect _map_btcpay_event("InvoiceSettled") == WebhookEventType.InvoicePaid
+
+        it "maps InvoiceExpired to InvoiceExpired":
+            expect _map_btcpay_event("InvoiceExpired") == WebhookEventType.InvoiceExpired
+
+        it "maps InvoiceProcessing to PaymentAuthorized":
+            expect _map_btcpay_event("InvoiceProcessing") == WebhookEventType.PaymentAuthorized
+
+        it "maps InvoiceInvalid to PaymentFailed":
+            expect _map_btcpay_event("InvoiceInvalid") == WebhookEventType.PaymentFailed
+
+    describe "webhook config":
+        it "creates empty config":
+            val cfg = new_webhook_config()
+            expect cfg.stripe_signing_secret == ""
+            expect cfg.paypal_webhook_id == ""
+            expect cfg.btcpay_secret == ""

@@ -1,0 +1,164 @@
+#![allow(unnamed_duplicate_typed_args)]
+# Glass Effects Pure -- Glassmorphism via CompositorBackend trait
+#
+# Pure Simple implementation of glass effects that works on all backends
+# (hosted winit, browser engine, framebuffer, GPU).
+# Replaces C FFI rt_gui_* calls with CompositorBackend trait methods.
+#
+# Same API as glass_effects.spl but takes a CompositorBackend parameter
+# instead of calling extern C functions directly.
+#
+# D2 Phase 1 (2026-04-14): glass primitives moved from CompositorBackend
+# to the optional CompositorGlassCapable subtrait. This module routes
+# through `glass_dispatch` helpers so that callers whose active backend
+# opts out of glass (Engine2d, Gpu in Phase 1) silently degrade to
+# opaque fills.
+
+use os.compositor.display_backend.{CompositorBackend}
+use os.compositor.glass_dispatch.{cap_blend_rect, cap_blur_region, cap_gradient_v}
+use common.ui.glass_numeric_tokens.{GLASS_DARK_SURFACE, GLASS_DARK_SURFACE_A, GLASS_DARK_BORDER, GLASS_DARK_BORDER_A, GLASS_DARK_SHADOW_A, GLASS_DARK_ACCENT, GLASS_DARK_ACCENT2, GLASS_DARK_BG_TOP, GLASS_DARK_BG_BOT, GLASS_LIGHT_SURFACE, GLASS_LIGHT_SURFACE_A, GLASS_LIGHT_BORDER, GLASS_LIGHT_BORDER_A, GLASS_LIGHT_SHADOW_A, GLASS_LIGHT_ACCENT, GLASS_LIGHT_ACCENT2, GLASS_LIGHT_BG_TOP, GLASS_LIGHT_BG_BOT, GLASS_BLUR_SURFACE, GLASS_SHADOW_OFFSET, GLASS_SHADOW_BLUR, GLASS_OBSIDIAN_SURFACE, GLASS_OBSIDIAN_SURFACE_A, GLASS_OBSIDIAN_BORDER, GLASS_OBSIDIAN_BORDER_A, GLASS_OBSIDIAN_ACCENT, GLASS_OBSIDIAN_ACCENT2, GLASS_OBSIDIAN_SHADOW_A, GLASS_OBSIDIAN_BG_TOP, GLASS_OBSIDIAN_BG_BOT}
+
+# ============================================================================
+# Glass Configuration
+# ============================================================================
+#
+# Factory methods source their numeric values from `glass_numeric_tokens.spl`
+# (the canonical single source of truth for both compositor + widget themes —
+# AC-7 of #GUI-THEME-SHARING). The token table is u64; we narrow at the
+# struct-field type (u32 colors, u8 alphas, i32/u32 dimensions) since the
+# CompositorBackend trait operates in those widths.
+
+struct GlassConfig:
+    surface_color: u32
+    surface_alpha: u8
+    blur_radius: u32
+    border_color: u32
+    border_alpha: u8
+    shadow_offset: i32
+    shadow_blur: u32
+    shadow_alpha: u8
+    accent_color: u32
+    accent2_color: u32
+    bg_top: u32
+    bg_bottom: u32
+
+impl GlassConfig:
+    static fn dark() -> GlassConfig:
+        GlassConfig(
+            surface_color: GLASS_DARK_SURFACE.to_u32(),
+            surface_alpha: GLASS_DARK_SURFACE_A.to_u8(),
+            blur_radius: GLASS_BLUR_SURFACE.to_u32(),
+            border_color: GLASS_DARK_BORDER.to_u32(),
+            border_alpha: GLASS_DARK_BORDER_A.to_u8(),
+            shadow_offset: GLASS_SHADOW_OFFSET.to_i32(),
+            shadow_blur: GLASS_SHADOW_BLUR.to_u32(),
+            shadow_alpha: GLASS_DARK_SHADOW_A.to_u8(),
+            accent_color: GLASS_DARK_ACCENT.to_u32(),
+            accent2_color: GLASS_DARK_ACCENT2.to_u32(),
+            bg_top: GLASS_DARK_BG_TOP.to_u32(),
+            bg_bottom: GLASS_DARK_BG_BOT.to_u32()
+        )
+
+    static fn light() -> GlassConfig:
+        GlassConfig(
+            surface_color: GLASS_LIGHT_SURFACE.to_u32(),
+            surface_alpha: GLASS_LIGHT_SURFACE_A.to_u8(),
+            blur_radius: GLASS_BLUR_SURFACE.to_u32(),
+            border_color: GLASS_LIGHT_BORDER.to_u32(),
+            border_alpha: GLASS_LIGHT_BORDER_A.to_u8(),
+            shadow_offset: GLASS_SHADOW_OFFSET.to_i32(),
+            shadow_blur: GLASS_SHADOW_BLUR.to_u32(),
+            shadow_alpha: GLASS_LIGHT_SHADOW_A.to_u8(),
+            accent_color: GLASS_LIGHT_ACCENT.to_u32(),
+            accent2_color: GLASS_LIGHT_ACCENT2.to_u32(),
+            bg_top: GLASS_LIGHT_BG_TOP.to_u32(),
+            bg_bottom: GLASS_LIGHT_BG_BOT.to_u32()
+        )
+
+    static fn obsidian_dark() -> GlassConfig:
+        GlassConfig(
+            surface_color: GLASS_OBSIDIAN_SURFACE.to_u32(),
+            surface_alpha: GLASS_OBSIDIAN_SURFACE_A.to_u8(),
+            blur_radius: GLASS_BLUR_SURFACE.to_u32(),
+            border_color: GLASS_OBSIDIAN_BORDER.to_u32(),
+            border_alpha: GLASS_OBSIDIAN_BORDER_A.to_u8(),
+            shadow_offset: GLASS_SHADOW_OFFSET.to_i32(),
+            shadow_blur: GLASS_SHADOW_BLUR.to_u32(),
+            shadow_alpha: GLASS_OBSIDIAN_SHADOW_A.to_u8(),
+            accent_color: GLASS_OBSIDIAN_ACCENT.to_u32(),
+            accent2_color: GLASS_OBSIDIAN_ACCENT2.to_u32(),
+            bg_top: GLASS_OBSIDIAN_BG_TOP.to_u32(),
+            bg_bottom: GLASS_OBSIDIAN_BG_BOT.to_u32()
+        )
+
+# ============================================================================
+# Wrapper Functions (CompositorBackend-routed)
+# ============================================================================
+
+fn glass_fill_pure(backend: CompositorBackend, x: i32, y: i32, w: i32, h: i32, color: u32, alpha: u8):
+    """Blend-fill a rectangle with the given color and alpha."""
+    cap_blend_rect(backend, x, y, w, h, color, alpha)
+
+fn glass_blur_pure(backend: CompositorBackend, x: i32, y: i32, w: i32, h: i32, radius: u32):
+    """Apply a box blur to the rectangle region."""
+    cap_blur_region(backend, x, y, w, h, radius)
+
+fn glass_gradient_v_pure(backend: CompositorBackend, x: i32, y: i32, w: i32, h: i32, c1: u32, c2: u32):
+    """Draw a vertical gradient from c1 (top) to c2 (bottom)."""
+    cap_gradient_v(backend, x, y, w, h, c1, c2)
+
+fn glass_shadow_pure(backend: CompositorBackend, x: i32, y: i32, w: i32, h: i32, config: GlassConfig):
+    """Draw a drop shadow below the rectangle using config parameters.
+
+    Renders a semi-transparent black rectangle offset by shadow_offset,
+    then blurs it to create a soft shadow effect.
+    """
+    val sx = x + config.shadow_offset
+    val sy = y + config.shadow_offset
+    cap_blend_rect(backend, sx, sy, w, h, 0x00000000, config.shadow_alpha)
+    cap_blur_region(backend, sx, sy, w + config.shadow_offset, h + config.shadow_offset, config.shadow_blur)
+
+fn glass_solid_fill_pure(backend: CompositorBackend, x: i32, y: i32, w: i32, h: i32, color: u32):
+    """Opaque solid fill for a rectangle."""
+    backend.fill_rect(x, y, w, h, color)
+
+fn draw_glass_rect_pure(backend: CompositorBackend, x: i32, y: i32, w: i32, h: i32, config: GlassConfig):
+    """Draw a full glass rectangle: shadow + blur + blend + border.
+
+    Renders the complete glassmorphism effect in the correct order:
+    1. Drop shadow behind the rect
+    2. Box blur of the background content
+    3. Semi-transparent surface fill
+    4. 1px semi-transparent border
+    """
+    # 1. Drop shadow
+    glass_shadow_pure(backend, x, y, w, h, config)
+    # 2. Blur background behind the glass surface
+    glass_blur_pure(backend, x, y, w, h, config.blur_radius)
+    # 3. Semi-transparent surface fill
+    glass_fill_pure(backend, x, y, w, h, config.surface_color, config.surface_alpha)
+    # 4. Border
+    draw_glass_border_pure(backend, x, y, w, h, config)
+
+fn draw_glass_border_pure(backend: CompositorBackend, x: i32, y: i32, w: i32, h: i32, config: GlassConfig):
+    """Draw a 1px semi-transparent border around the rectangle."""
+    val bcolor = config.border_color
+    val balpha = config.border_alpha
+    # Top edge
+    cap_blend_rect(backend, x, y, w, 1, bcolor, balpha)
+    # Bottom edge
+    if h > 1:
+        cap_blend_rect(backend, x, y + h - 1, w, 1, bcolor, balpha)
+    # Left edge
+    cap_blend_rect(backend, x, y, 1, h, bcolor, balpha)
+    # Right edge
+    if w > 1:
+        cap_blend_rect(backend, x + w - 1, y, 1, h, bcolor, balpha)
+
+fn glass_begin_frame_pure(backend: CompositorBackend, w: i32, h: i32):
+    """Begin a new glass compositing frame by clearing the entire surface."""
+    backend.clear(0x00000000)
+
+fn glass_present_pure(backend: CompositorBackend):
+    """Present the completed glass frame to the display."""
+    backend.present()

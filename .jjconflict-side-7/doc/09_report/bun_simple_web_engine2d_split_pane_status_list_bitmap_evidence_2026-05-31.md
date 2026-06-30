@@ -1,0 +1,282 @@
+# Simple Web Engine2D JS Bitmap Evidence
+
+- status: pass
+- reason: pass
+- baseline runtime: bun
+- scene: simple-web-engine2d-split-pane-status-list
+- dimensions: 96x64
+- iterations per trial: 200
+- trials: 2
+- simple checksum: 26296404319380
+- baseline checksum: 26296404319380
+- simple weighted checksum: 80789881624687138
+- baseline weighted checksum: 80789881624687138
+- mismatch count: 0
+- blur/tolerance used: false
+- optimized path: static-pixel-cache
+- simple cache hits: 200
+- simple cache stores: 1
+- best simple frame us: 5
+- best baseline frame us: 489
+
+## Simple Output
+- ## trial 1
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/nogc_async_mut/gpu/engine2d/simd_provider.spl:3:1
+-    |
+-   3 | export use std.nogc_sync_mut.gpu.engine2d.simd_provider.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/io/opengl_sffi.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.io.opengl_sffi.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/nogc_async_mut/path.spl:138:31
+-    |
+- 138 |         if c < bp.len() and pp[c] == bp[c]:
+-    |                               ^
+- 
+- Use angle brackets: pp<...> instead of pp[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/io/rocm_sffi.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.io.rocm_sffi.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [INFO] JIT compilation failed, falling back to interpreter: HIR lowering error: Unknown type: any
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/nogc_async_mut/gpu/engine2d/simd_provider.spl:3:1
+-    |
+-   3 | export use std.nogc_sync_mut.gpu.engine2d.simd_provider.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/io/opengl_sffi.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.io.opengl_sffi.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/nogc_async_mut/path.spl:138:31
+-    |
+- 138 |         if c < bp.len() and pp[c] == bp[c]:
+-    |                               ^
+- 
+- Use angle brackets: pp<...> instead of pp[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/io/rocm_sffi.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.io.rocm_sffi.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [memory-guard] SIMPLE_LIB=src contains 600+ .spl files — consider narrowing scope to avoid memory bloat
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.simd_provider' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.sffi_opencl' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.sffi.dynamic' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.simd_kernels' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.opengl_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.env.types' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.rocm_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- renderer=pure-simple-web-engine2d-cache
+- scene=simple-web-engine2d-split-pane-status-list
+- width=96
+- height=64
+- iterations=200
+- checksum=26296404319380
+- weighted_checksum=80789881624687138
+- total_checksum=5259280863876000
+- frame_us=5
+- backend_name=software
+- optimized_path=static-pixel-cache
+- cache_hits=200
+- cache_stores=1
+- blur_or_tolerance_used=false
+- renderer=pure-simple-web-engine2d-cache
+- scene=simple-web-engine2d-split-pane-status-list
+- width=96
+- height=64
+- iterations=200
+- checksum=26296404319380
+- weighted_checksum=80789881624687138
+- total_checksum=5259280863876000
+- frame_us=5
+- backend_name=software
+- optimized_path=static-pixel-cache
+- cache_hits=200
+- cache_stores=1
+- blur_or_tolerance_used=false
+- ## trial 2
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/nogc_async_mut/gpu/engine2d/simd_provider.spl:3:1
+-    |
+-   3 | export use std.nogc_sync_mut.gpu.engine2d.simd_provider.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/io/opengl_sffi.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.io.opengl_sffi.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/nogc_async_mut/path.spl:138:31
+-    |
+- 138 |         if c < bp.len() and pp[c] == bp[c]:
+-    |                               ^
+- 
+- Use angle brackets: pp<...> instead of pp[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/io/rocm_sffi.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.io.rocm_sffi.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [INFO] JIT compilation failed, falling back to interpreter: HIR lowering error: Unknown type: any
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/nogc_async_mut/gpu/engine2d/simd_provider.spl:3:1
+-    |
+-   3 | export use std.nogc_sync_mut.gpu.engine2d.simd_provider.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/io/opengl_sffi.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.io.opengl_sffi.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/nogc_async_mut/path.spl:138:31
+-    |
+- 138 |         if c < bp.len() and pp[c] == bp[c]:
+-    |                               ^
+- 
+- Use angle brackets: pp<...> instead of pp[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/io/rocm_sffi.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.io.rocm_sffi.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [memory-guard] SIMPLE_LIB=src contains 600+ .spl files — consider narrowing scope to avoid memory bloat
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.simd_provider' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.sffi_opencl' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.sffi.dynamic' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.simd_kernels' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.opengl_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.env.types' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.rocm_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- renderer=pure-simple-web-engine2d-cache
+- scene=simple-web-engine2d-split-pane-status-list
+- width=96
+- height=64
+- iterations=200
+- checksum=26296404319380
+- weighted_checksum=80789881624687138
+- total_checksum=5259280863876000
+- frame_us=5
+- backend_name=software
+- optimized_path=static-pixel-cache
+- cache_hits=200
+- cache_stores=1
+- blur_or_tolerance_used=false
+- renderer=pure-simple-web-engine2d-cache
+- scene=simple-web-engine2d-split-pane-status-list
+- width=96
+- height=64
+- iterations=200
+- checksum=26296404319380
+- weighted_checksum=80789881624687138
+- total_checksum=5259280863876000
+- frame_us=5
+- backend_name=software
+- optimized_path=static-pixel-cache
+- cache_hits=200
+- cache_stores=1
+- blur_or_tolerance_used=false
+
+## Baseline Output
+- ## trial 1
+- renderer=bun-simple-web-engine2d-baseline
+- scene=simple-web-engine2d-split-pane-status-list
+- width=96
+- height=64
+- iterations=200
+- checksum=26296404319380
+- weighted_checksum=80789881624687138
+- total_checksum=5259280863876000
+- frame_us=500
+- blur_or_tolerance_used=false
+- ## trial 2
+- renderer=bun-simple-web-engine2d-baseline
+- scene=simple-web-engine2d-split-pane-status-list
+- width=96
+- height=64
+- iterations=200
+- checksum=26296404319380
+- weighted_checksum=80789881624687138
+- total_checksum=5259280863876000
+- frame_us=489
+- blur_or_tolerance_used=false

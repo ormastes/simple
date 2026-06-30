@@ -1,0 +1,198 @@
+"""
+# SQL Transaction Specification
+
+**Feature IDs:** #DB-005
+**Category:** Stdlib
+**Difficulty:** 3/5
+**Status:** Implemented
+**Requirements:** N/A
+**Plan:** N/A
+**Design:** N/A
+**Research:** N/A
+
+## Overview
+
+Tests for Transaction: begin/commit persistence, begin/rollback reversion,
+savepoint/rollback_to nested transactions, and error behavior after
+commit/rollback.
+"""
+
+use std.database.sql.types.{DbValue, DbRow, DbError}
+use std.database.sql.connection.{Database}
+
+# ============================================================================
+# Transaction — ACID transaction support
+# ============================================================================
+
+describe "Transaction":
+    """
+    ## Transaction Lifecycle
+
+    Transaction wraps SQLite BEGIN/COMMIT/ROLLBACK with typed error handling
+    and savepoint support for nested rollback.
+    """
+
+    context "commit":
+        it "persists data after commit":
+            var db = Database.memory()?
+            db.exec("CREATE TABLE tx1 (id INTEGER, val TEXT)", [])?
+
+            var tx = db.begin()?
+            tx.execute("INSERT INTO tx1 VALUES (1, 'committed')")?
+            tx.commit()?
+
+            # Data should persist after commit
+            val rows = db.query("SELECT val FROM tx1 WHERE id = 1", [])?
+            expect(rows.len()).to_equal(1)
+
+        it "persists multiple inserts after commit":
+            var db = Database.memory()?
+            db.exec("CREATE TABLE tx2 (id INTEGER)", [])?
+
+            var tx = db.begin()?
+            tx.execute("INSERT INTO tx2 VALUES (1)")?
+            tx.execute("INSERT INTO tx2 VALUES (2)")?
+            tx.execute("INSERT INTO tx2 VALUES (3)")?
+            tx.commit()?
+
+            val rows = db.query("SELECT id FROM tx2", [])?
+            expect(rows.len()).to_equal(3)
+
+    context "rollback":
+        it "reverts data after rollback":
+            var db = Database.memory()?
+            db.exec("CREATE TABLE tx3 (id INTEGER, val TEXT)", [])?
+
+            # Insert before transaction
+            db.exec("INSERT INTO tx3 VALUES (1, 'before')", [])?
+
+            # Start transaction, insert, then rollback
+            var tx = db.begin()?
+            tx.execute("INSERT INTO tx3 VALUES (2, 'rolled_back')")?
+            tx.rollback()?
+
+            # Only the pre-transaction row should remain
+            val rows = db.query("SELECT id FROM tx3", [])?
+            expect(rows.len()).to_equal(1)
+
+        it "reverts updates after rollback":
+            var db = Database.memory()?
+            db.exec("CREATE TABLE tx4 (id INTEGER, val TEXT)", [])?
+            db.exec("INSERT INTO tx4 VALUES (1, 'original')", [])?
+
+            var tx = db.begin()?
+            tx.execute("UPDATE tx4 SET val = 'changed' WHERE id = 1")?
+            tx.rollback()?
+
+            # Value should be unchanged
+            val rows = db.query("SELECT val FROM tx4 WHERE id = 1", [])?
+            expect(rows.len()).to_equal(1)
+
+    context "savepoint":
+        it "rolls back to savepoint without ending transaction":
+            var db = Database.memory()?
+            db.exec("CREATE TABLE tx5 (id INTEGER, val TEXT)", [])?
+
+            var tx = db.begin()?
+
+            # Insert first row
+            tx.execute("INSERT INTO tx5 VALUES (1, 'keep')")?
+
+            # Create savepoint, insert second row, then rollback to savepoint
+            tx.savepoint("sp1")?
+            tx.execute("INSERT INTO tx5 VALUES (2, 'discard')")?
+            tx.rollback_to("sp1")?
+
+            # Insert third row after rollback
+            tx.execute("INSERT INTO tx5 VALUES (3, 'also_keep')")?
+            tx.commit()?
+
+            # Should have rows 1 and 3 but not 2
+            val rows = db.query("SELECT id FROM tx5 ORDER BY id", [])?
+            expect(rows.len()).to_equal(2)
+
+        it "releases savepoint on success":
+            var db = Database.memory()?
+            db.exec("CREATE TABLE tx6 (id INTEGER)", [])?
+
+            var tx = db.begin()?
+            tx.savepoint("sp_release")?
+            tx.execute("INSERT INTO tx6 VALUES (1)")?
+            tx.release_savepoint("sp_release")?
+            tx.commit()?
+
+            val rows = db.query("SELECT id FROM tx6", [])?
+            expect(rows.len()).to_equal(1)
+
+    context "query within transaction":
+        it "reads inserted data within transaction":
+            var db = Database.memory()?
+            db.exec("CREATE TABLE tx7 (id INTEGER, val TEXT)", [])?
+
+            var tx = db.begin()?
+            tx.execute("INSERT INTO tx7 VALUES (1, 'inside_tx')")?
+
+            val rows = tx.query("SELECT val FROM tx7 WHERE id = 1")?
+            expect(rows.len()).to_equal(1)
+
+            tx.commit()?
+
+    context "error after completion":
+        it "returns error on commit after commit":
+            var db = Database.memory()?
+            db.exec("CREATE TABLE tx8 (id INTEGER)", [])?
+
+            var tx = db.begin()?
+            tx.execute("INSERT INTO tx8 VALUES (1)")?
+            tx.commit()?
+
+            val result = tx.commit()
+            expect(result.is_err()).to_equal(true)
+
+        it "returns error on rollback after commit":
+            var db = Database.memory()?
+            db.exec("CREATE TABLE tx9 (id INTEGER)", [])?
+
+            var tx = db.begin()?
+            tx.commit()?
+
+            val result = tx.rollback()
+            expect(result.is_err()).to_equal(true)
+
+        it "returns error on execute after rollback":
+            var db = Database.memory()?
+            db.exec("CREATE TABLE tx10 (id INTEGER)", [])?
+
+            var tx = db.begin()?
+            tx.rollback()?
+
+            val result = tx.execute("INSERT INTO tx10 VALUES (1)")
+            expect(result.is_err()).to_equal(true)
+
+        it "returns error on query after rollback":
+            var db = Database.memory()?
+            db.exec("CREATE TABLE tx11 (id INTEGER)", [])?
+
+            var tx = db.begin()?
+            tx.rollback()?
+
+            val result = tx.query("SELECT * FROM tx11")
+            expect(result.is_err()).to_equal(true)
+
+    context "is_active":
+        it "is active after begin":
+            var db = Database.memory()?
+            var tx = db.begin()?
+            expect(tx.is_active()).to_equal(true)
+
+        it "is not active after commit":
+            var db = Database.memory()?
+            var tx = db.begin()?
+            tx.commit()?
+            expect(tx.is_active()).to_equal(false)
+
+        it "is not active after rollback":
+            var db = Database.memory()?
+            var tx = db.begin()?
+            tx.rollback()?
+            expect(tx.is_active()).to_equal(false)

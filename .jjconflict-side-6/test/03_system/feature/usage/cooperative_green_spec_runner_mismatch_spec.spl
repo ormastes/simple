@@ -1,0 +1,103 @@
+"""
+# Cooperative Green Spec Runner Regression
+
+**Feature IDs:** #green-cooperative-spec-runner-regression
+**Category:** Test Runner / Cooperative Green
+**Status:** Regression Coverage
+
+## Overview
+
+This SSpec guards the interpreter-mode runner contract for green/cooperative
+queue APIs. The same minimal green-thread queue logic must pass under both
+`simple run` and `simple test`, so later runner/cache changes cannot re-open
+the earlier mismatch.
+
+## Requirements
+
+**Requirements:** doc/02_requirements/feature/multicore_green.md
+
+## Plan
+
+**Plan:** doc/03_plan/sys_test/multicore_green.md
+
+## Design
+
+**Design:** N/A
+
+## Research
+
+**Research:** doc/08_tracking/bug/green_thread_direct_runtime_blockers_2026-06-06.md
+
+## Syntax
+
+```sh
+./src/compiler_rust/target/debug/simple test test/03_system/feature/usage/cooperative_green_spec_runner_mismatch_spec.spl --mode=interpreter --clean
+```
+"""
+
+use std.spec.{describe, it, expect, step}
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+val BUILD_DIR: text = "build/test/cooperative_green_spec_runner_mismatch"
+val RUN_PATH: text = BUILD_DIR + "/green_probe_run.spl"
+val SPEC_PATH: text = BUILD_DIR + "/green_probe_spec.spl"
+val SIMPLE_BIN: text = "./src/compiler_rust/target/debug/simple"
+
+fn shell(command: text) -> (text, i64):
+    val (stdout, stderr, code) = rt_process_run("/bin/sh", ["-c", command])
+    (stdout + stderr, code)
+
+fn run_probe_source() -> text:
+    [
+        "use std.concurrent.green_thread.{green_spawn_value, green_run_one}\n",
+        "fn main():\n",
+        "    val handle = green_spawn_value(23)\n",
+        "    if handle.is_done():\n",
+        "        print(\"green_run_probe_fail=done_before\\n\")\n",
+        "        return\n",
+        "    if not green_run_one():\n",
+        "        print(\"green_run_probe_fail=run_one_false\\n\")\n",
+        "        return\n",
+        "    if not handle.is_done():\n",
+        "        print(\"green_run_probe_fail=done_after\\n\")\n",
+        "        return\n",
+        "    if handle.join() != 23:\n",
+        "        print(\"green_run_probe_fail=join\\n\")\n",
+        "        return\n",
+        "    print(\"green_run_probe_pass=true\\n\")\n"
+    ].join("")
+
+fn spec_probe_source() -> text:
+    [
+        "use std.spec.{describe, it, expect}\n",
+        "use std.concurrent.green_thread.{green_spawn_value, green_run_one}\n",
+        "describe \"green runner probe\":\n",
+        "    it \"keeps direct value scheduling green under simple test\":\n",
+        "        val handle = green_spawn_value(23)\n",
+        "        expect(handle.is_done()).to_equal(false)\n",
+        "        expect(green_run_one()).to_equal(true)\n",
+        "        expect(handle.is_done()).to_equal(true)\n",
+        "        expect(handle.join()).to_equal(23)\n"
+    ].join("")
+
+describe "cooperative green spec runner regression":
+    it "keeps direct value scheduling aligned between simple run and simple test":
+        step("Write the direct-run and SSpec probe fixtures")
+        val (mkdir_out, mkdir_code) = shell("mkdir -p " + BUILD_DIR)
+        expect(mkdir_out.len()).to_be_greater_than(-1)
+        expect(mkdir_code).to_equal(0)
+        expect(rt_file_write_text(RUN_PATH, run_probe_source())).to_equal(true)
+        expect(rt_file_write_text(SPEC_PATH, spec_probe_source())).to_equal(true)
+
+        step("Verify the green-thread probe passes under simple run")
+        val (run_out, run_code) = shell(SIMPLE_BIN + " run " + RUN_PATH)
+        expect(run_out).to_contain("green_run_probe_pass=true")
+        expect(run_code).to_equal(0)
+
+        step("Verify the same green-thread probe also passes under simple test")
+        val (test_out, test_code) = shell(SIMPLE_BIN + " test " + SPEC_PATH + " --mode=interpreter --clean")
+        expect(test_out).to_contain("PASSED")
+        expect(test_out).to_contain("green_probe_spec")
+        expect(test_code).to_equal(0)

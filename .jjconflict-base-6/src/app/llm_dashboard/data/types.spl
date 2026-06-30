@@ -1,0 +1,349 @@
+pub enum TaskKind:
+    Loop
+    Schedule
+    Daemon
+    RemoteControl
+    Job
+
+pub enum TaskState:
+    Pending
+    Active
+    Paused
+    Completed
+    Failed
+    Cancelled
+
+pub enum LLMProvider:
+    Claude
+    Codex
+    Gemini
+    Unknown(text)
+
+pub enum AgentActivity:
+    Idle
+    Thinking
+    Finished
+    Error(text)
+    Reading(text)
+    Writing(text)
+    Searching(text)
+    WebFetch(text)
+    ToolUse(text)
+    SubAgentSpawn(text)
+
+pub enum RoomKind:
+    Research
+    Code
+    Skills
+    Server
+    Chat
+    TestLab
+    Tasks
+
+pub struct ManagedTask:
+    id: text
+    kind: TaskKind
+    name: text
+    title: text
+    command: text
+    state: TaskState
+    pid: i64
+    exit_code: i64
+    start_time: text
+    interval_seconds: i64
+    cron_expr: text
+    last_run_time: i64
+    next_run_time: i64
+    run_count: i64
+    total_tokens: i64
+    created_at: i64
+    agent_id: text
+
+    fn new(id: text, kind: TaskKind, title: text, command: text) -> ManagedTask:
+        ManagedTask(
+            id: id,
+            kind: kind,
+            name: title,
+            title: title,
+            command: command,
+            state: TaskState.Pending,
+            pid: -1,
+            exit_code: -1,
+            start_time: "",
+            interval_seconds: 0,
+            cron_expr: "",
+            last_run_time: 0,
+            next_run_time: 0,
+            run_count: 0,
+            total_tokens: 0,
+            created_at: 0,
+            agent_id: ""
+        )
+
+pub struct AgentNode:
+    id: text
+    provider: LLMProvider
+    model: text
+    activity: AgentActivity
+    parent_id: text
+    input_tokens: i64
+    output_tokens: i64
+    cache_read_tokens: i64
+    cache_create_tokens: i64
+    last_active: i64
+
+    static fn new(id: text, provider: LLMProvider, model: text) -> AgentNode:
+        AgentNode(
+            id: id,
+            provider: provider,
+            model: model,
+            activity: AgentActivity.Idle,
+            parent_id: "",
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_read_tokens: 0,
+            cache_create_tokens: 0,
+            last_active: 0
+        )
+
+pub struct LLMStatus:
+    provider: LLMProvider
+    connected: bool
+    model: text
+    tokens_used: i64
+    cache_read_tokens: i64
+    cache_create_tokens: i64
+    estimated_cost_cents: i64
+    active_agents: i64
+    last_heartbeat: i64
+
+    static fn disconnected(provider: LLMProvider) -> LLMStatus:
+        LLMStatus(
+            provider: provider,
+            connected: false,
+            model: "",
+            tokens_used: 0,
+            cache_read_tokens: 0,
+            cache_create_tokens: 0,
+            estimated_cost_cents: 0,
+            active_agents: 0,
+            last_heartbeat: 0
+        )
+
+pub struct FileActivity:
+    agent_id: text
+    path: text
+    operation: text
+    timestamp: i64
+
+    static fn new(agent_id: text, path: text, operation: text, timestamp: i64) -> FileActivity:
+        FileActivity(agent_id: agent_id, path: path, operation: operation, timestamp: timestamp)
+
+pub struct URLActivity:
+    agent_id: text
+    url: text
+    domain: text
+    page_name: text
+    timestamp: i64
+
+    static fn new(agent_id: text, url: text, timestamp: i64) -> URLActivity:
+        val parts = extract_domain_and_page(url)
+        URLActivity(agent_id: agent_id, url: url, domain: parts.0, page_name: parts.1, timestamp: timestamp)
+
+pub struct ActivityEntry:
+    agent_id: text
+    room: RoomKind
+    tool_name: text
+    summary: text
+    timestamp: i64
+
+    static fn new(agent_id: text, room: RoomKind, tool_name: text, summary: text, timestamp: i64) -> ActivityEntry:
+        ActivityEntry(agent_id: agent_id, room: room, tool_name: tool_name, summary: summary, timestamp: timestamp)
+
+pub struct AgentMessage:
+    parent_id: text
+    child_id: text
+    direction: text
+    content: text
+    timestamp: i64
+
+    static fn new(parent_id: text, child_id: text, direction: text, content: text, timestamp: i64) -> AgentMessage:
+        AgentMessage(parent_id: parent_id, child_id: child_id, direction: direction, content: content, timestamp: timestamp)
+
+pub struct McpStats:
+    server_name: text
+    call_count: i64
+    last_tool: text
+    last_call_time: i64
+    total_latency_ms: i64
+
+    static fn new(server_name: text) -> McpStats:
+        McpStats(server_name: server_name, call_count: 0, last_tool: "", last_call_time: 0, total_latency_ms: 0)
+
+pub fn task_kind_name(kind: TaskKind) -> text:
+    match kind:
+        case TaskKind.Loop:
+            "loop"
+        case TaskKind.Schedule:
+            "schedule"
+        case TaskKind.Daemon:
+            "daemon"
+        case TaskKind.RemoteControl:
+            "remote"
+        case TaskKind.Job:
+            "job"
+
+pub fn task_state_name(state: TaskState) -> text:
+    match state:
+        case TaskState.Pending:
+            "pending"
+        case TaskState.Active:
+            "active"
+        case TaskState.Paused:
+            "paused"
+        case TaskState.Completed:
+            "done"
+        case TaskState.Failed:
+            "failed"
+        case TaskState.Cancelled:
+            "cancelled"
+
+pub fn provider_name(provider: LLMProvider) -> text:
+    match provider:
+        case LLMProvider.Claude: "Claude"
+        case LLMProvider.Codex: "Codex"
+        case LLMProvider.Gemini: "Gemini"
+        case LLMProvider.Unknown(name): name
+
+pub fn provider_from_text(value: text) -> LLMProvider:
+    val lower = value.lower()
+    if lower.contains("claude"):
+        return LLMProvider.Claude
+    if lower.contains("codex") or lower.contains("openai") or lower.contains("gpt"):
+        return LLMProvider.Codex
+    if lower.contains("gemini"):
+        return LLMProvider.Gemini
+    LLMProvider.Unknown(value)
+
+pub fn room_name(room: RoomKind) -> text:
+    match room:
+        case RoomKind.Research: "Research"
+        case RoomKind.Code: "Code"
+        case RoomKind.Skills: "Skills"
+        case RoomKind.Server: "Server"
+        case RoomKind.Chat: "Chat"
+        case RoomKind.TestLab: "Test Lab"
+        case RoomKind.Tasks: "Tasks"
+
+pub fn tool_to_room(tool_name: text) -> RoomKind:
+    val lower = tool_name.lower()
+    if lower.contains("web") or lower.contains("grep") or lower.contains("glob"):
+        return RoomKind.Research
+    if lower.contains("read") or lower.contains("write") or lower.contains("edit"):
+        return RoomKind.Code
+    if lower.contains("skill"):
+        return RoomKind.Skills
+    if lower.starts_with("mcp__"):
+        return RoomKind.Server
+    if lower.contains("agent"):
+        return RoomKind.Chat
+    RoomKind.Code
+
+pub fn activity_label(activity: AgentActivity) -> text:
+    match activity:
+        case AgentActivity.Idle: "idle"
+        case AgentActivity.Thinking: "thinking"
+        case AgentActivity.Finished: "done"
+        case AgentActivity.Error(message): "error"
+        case AgentActivity.Reading(path): "read"
+        case AgentActivity.Writing(path): "write"
+        case AgentActivity.Searching(query): "search"
+        case AgentActivity.WebFetch(url): "web"
+        case AgentActivity.ToolUse(tool): tool
+        case AgentActivity.SubAgentSpawn(child): "spawn"
+
+pub fn format_tokens(tokens: i64) -> text:
+    if tokens >= 1_000_000:
+        return "{tokens / 1_000_000}M"
+    if tokens >= 1_000:
+        return "{tokens / 1_000}K"
+    "{tokens}"
+
+pub fn total_tokens(agent: AgentNode) -> i64:
+    agent.input_tokens + agent.output_tokens + agent.cache_read_tokens + agent.cache_create_tokens
+
+pub fn cache_efficiency_pct(agent: AgentNode) -> i64:
+    val total = total_tokens(agent)
+    if total <= 0:
+        return 0
+    (agent.cache_read_tokens * 100) / total
+
+pub fn format_timestamp(timestamp: i64) -> text:
+    if timestamp <= 0:
+        return "--:--"
+    val seconds = timestamp % 86_400
+    val hour = seconds / 3600
+    val minute = (seconds % 3600) / 60
+    val h = if hour < 10: "0{hour}" else: "{hour}"
+    val m = if minute < 10: "0{minute}" else: "{minute}"
+    "{h}:{m}"
+
+pub fn truncate_text(value: text, max_len: i64) -> text:
+    if max_len <= 0:
+        return ""
+    if value.len() <= max_len:
+        return value
+    if max_len <= 3:
+        return value.slice(0, max_len)
+    value.slice(0, max_len - 3) + "..."
+
+pub fn shorten_path(path: text, max_len: i64) -> text:
+    if path.len() <= max_len:
+        return path
+    if max_len <= 4:
+        return path.slice(0, max_len)
+    "..." + path.slice(path.len() - (max_len - 3), path.len())
+
+pub fn unique_texts(values: [text]) -> [text]:
+    var result: [text] = []
+    for value in values:
+        var seen = false
+        for existing in result:
+            if existing == value:
+                seen = true
+        if not seen:
+            result.push(value)
+    result
+
+pub fn extract_domain_and_page(url: text) -> (text, text):
+    var rest = url
+    val scheme_parts = rest.split("://")
+    if scheme_parts.len() > 1:
+        rest = scheme_parts[1]
+    val slash_parts = rest.split("/")
+    val domain = if slash_parts.len() > 0: slash_parts[0] else: rest
+    var page = ""
+    if slash_parts.len() > 1:
+        page = "/" + slash_parts[1]
+    (domain, page)
+
+pub fn mcp_server_name(tool_name: text) -> text:
+    if not tool_name.starts_with("mcp__"):
+        return ""
+    val parts = tool_name.split("__")
+    if parts.len() >= 2:
+        return parts[1]
+    ""
+
+pub fn mcp_avg_latency(stats: McpStats) -> i64:
+    if stats.call_count <= 0:
+        return 0
+    stats.total_latency_ms / stats.call_count
+
+export TaskKind, TaskState, ManagedTask
+export LLMProvider, AgentActivity, RoomKind, AgentNode, LLMStatus
+export FileActivity, URLActivity, ActivityEntry, AgentMessage, McpStats
+export task_kind_name, task_state_name, provider_name, provider_from_text
+export room_name, tool_to_room, activity_label, format_tokens, total_tokens
+export cache_efficiency_pct, format_timestamp, truncate_text, shorten_path
+export unique_texts, extract_domain_and_page, mcp_server_name, mcp_avg_latency

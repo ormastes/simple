@@ -1,0 +1,42 @@
+# AC-8: runtime log-level changer exposed as an SFM front-end layer.
+#
+# Wraps the unified `std.log` facade: `sfm_set_log_level` changes the active
+# level at runtime, `sfm_get_log_level` reads it back (reliable get(set)==set
+# round-trip), and `sfm_log_emit` is an in-call-flow gate — it READS the level
+# then decides whether to emit, so observability does not lag a prior set under
+# the interpreter's module-global staleness.
+
+use std.sfm.manifest.{FeatureManifest, LayerDescriptor, LayerKind, SfmSecurityLevel}
+use std.log.{log_set_level, log_get_level, log_info, SUBSYS_CLI, LOG_OFF}
+
+# AC-8: change the active log level at runtime.
+fn sfm_set_log_level(level: i64):
+    log_set_level(level)
+
+# AC-8: read the active log level back (round-trip stable under interpreter).
+fn sfm_get_log_level() -> i64:
+    return log_get_level()
+
+# AC-8: in-call-flow emission gate. Reads the live level, then decides whether
+# the message at `level` is visible. Returns true iff it was emitted (visible).
+fn sfm_log_emit(level: i64, msg: text) -> bool:
+    val active: i64 = log_get_level()
+    if level >= active and level < LOG_OFF:
+        log_info(SUBSYS_CLI, msg)
+        return true
+    return false
+
+# AC-8: feature manifest declaring this log-level changer as a front-end layer.
+fn log_level_manifest(version: text) -> FeatureManifest:
+    val cli = LayerDescriptor(
+        role: "cli",
+        kind: LayerKind.FrontArgParser,
+        entry_symbol: "sfm_set_log_level",
+        privileged: false
+    )
+    return FeatureManifest(
+        name: "sfm-log-level",
+        version: version,
+        security_level: SfmSecurityLevel.Ordinary,
+        layers: [cli]
+    )

@@ -1,0 +1,286 @@
+# Draw IR baseline diff helpers.
+#
+# This compares two typed Draw IR compositions by stable component_id. It is
+# deliberately pure so UI test endpoints, SGTTI helpers, and offline baselines
+# can share the same semantics.
+
+use common.ui.draw_ir.{
+    DRAW_IR_COMMAND_TEXT,
+    DrawIrCommand,
+    DrawIrComposition,
+    DrawIrRect
+}
+
+struct DrawIrNodeDiff:
+    component_id: text
+    state: text
+    dx: i32
+    dy: i32
+    dwidth: i32
+    dheight: i32
+    color_changed: bool
+    text_changed: bool
+    style_changed: bool
+    border_changed: bool
+    hit_rect_changed: bool
+    text_bounds_changed: bool
+
+struct DrawIrDiffReport:
+    baseline_id: text
+    current_id: text
+    node_count: i32
+    changed_count: i32
+    added_count: i32
+    removed_count: i32
+    diffs: [DrawIrNodeDiff]
+
+fn _draw_ir_find_command(composition: DrawIrComposition, component_id: text) -> DrawIrCommand?:
+    for batch in composition.batches:
+        for command in batch.commands:
+            if command.component_id == component_id:
+                return command
+    nil
+
+fn _draw_ir_rect_changed(a: DrawIrRect, b: DrawIrRect) -> bool:
+    if a.present != b.present:
+        return true
+    if a.x != b.x or a.y != b.y:
+        return true
+    a.width != b.width or a.height != b.height
+
+fn _draw_ir_style_value(command: DrawIrCommand, key: text) -> text?:
+    for prop in command.computed_style:
+        if prop.key == key:
+            return prop.value
+    nil
+
+fn _draw_ir_style_changed(a: DrawIrCommand, b: DrawIrCommand) -> bool:
+    if a.computed_style.len() != b.computed_style.len():
+        return true
+    for prop in a.computed_style:
+        val other = _draw_ir_style_value(b, prop.key)
+        if other == nil:
+            return true
+        if other != prop.value:
+            return true
+    false
+
+fn _draw_ir_geometry_changed(a: DrawIrCommand, b: DrawIrCommand) -> bool:
+    a.x != b.x or a.y != b.y or a.width != b.width or a.height != b.height
+
+fn _draw_ir_node_changed(a: DrawIrCommand, b: DrawIrCommand) -> bool:
+    if a.kind != b.kind:
+        return true
+    if _draw_ir_geometry_changed(a, b):
+        return true
+    if a.color != b.color or a.text_value != b.text_value:
+        return true
+    if _draw_ir_style_changed(a, b):
+        return true
+    if _draw_ir_rect_changed(a.border_rect, b.border_rect):
+        return true
+    _draw_ir_rect_changed(a.hit_rect, b.hit_rect)
+
+fn _draw_ir_changed_diff(baseline: DrawIrCommand, current: DrawIrCommand) -> DrawIrNodeDiff:
+    val geometry_changed = _draw_ir_geometry_changed(baseline, current)
+    val changed = _draw_ir_node_changed(baseline, current)
+    DrawIrNodeDiff(
+        component_id: current.component_id,
+        state: if changed: "changed" else: "unchanged",
+        dx: current.x - baseline.x,
+        dy: current.y - baseline.y,
+        dwidth: current.width - baseline.width,
+        dheight: current.height - baseline.height,
+        color_changed: current.color != baseline.color,
+        text_changed: current.text_value != baseline.text_value,
+        style_changed: _draw_ir_style_changed(baseline, current),
+        border_changed: _draw_ir_rect_changed(baseline.border_rect, current.border_rect),
+        hit_rect_changed: _draw_ir_rect_changed(baseline.hit_rect, current.hit_rect),
+        text_bounds_changed: geometry_changed and (baseline.kind == DRAW_IR_COMMAND_TEXT or current.kind == DRAW_IR_COMMAND_TEXT)
+    )
+
+fn _draw_ir_added_diff(current: DrawIrCommand) -> DrawIrNodeDiff:
+    DrawIrNodeDiff(
+        component_id: current.component_id,
+        state: "added",
+        dx: current.x,
+        dy: current.y,
+        dwidth: current.width,
+        dheight: current.height,
+        color_changed: true,
+        text_changed: current.text_value != "",
+        style_changed: current.computed_style.len() > 0,
+        border_changed: current.border_rect.present,
+        hit_rect_changed: current.hit_rect.present,
+        text_bounds_changed: current.kind == DRAW_IR_COMMAND_TEXT
+    )
+
+fn _draw_ir_removed_diff(baseline: DrawIrCommand) -> DrawIrNodeDiff:
+    DrawIrNodeDiff(
+        component_id: baseline.component_id,
+        state: "removed",
+        dx: 0 - baseline.x,
+        dy: 0 - baseline.y,
+        dwidth: 0 - baseline.width,
+        dheight: 0 - baseline.height,
+        color_changed: true,
+        text_changed: baseline.text_value != "",
+        style_changed: baseline.computed_style.len() > 0,
+        border_changed: baseline.border_rect.present,
+        hit_rect_changed: baseline.hit_rect.present,
+        text_bounds_changed: baseline.kind == DRAW_IR_COMMAND_TEXT
+    )
+
+fn _draw_ir_count_changed(diffs: [DrawIrNodeDiff]) -> i32:
+    var count = 0
+    for diff in diffs:
+        if diff.state == "changed":
+            count = count + 1
+    count
+
+fn _draw_ir_count_state(diffs: [DrawIrNodeDiff], state: text) -> i32:
+    var count = 0
+    for diff in diffs:
+        if diff.state == state:
+            count = count + 1
+    count
+
+fn _draw_ir_diff_placeholder() -> DrawIrNodeDiff:
+    DrawIrNodeDiff(
+        component_id: "",
+        state: "",
+        dx: 0,
+        dy: 0,
+        dwidth: 0,
+        dheight: 0,
+        color_changed: false,
+        text_changed: false,
+        style_changed: false,
+        border_changed: false,
+        hit_rect_changed: false,
+        text_bounds_changed: false
+    )
+
+fn _draw_ir_diff_count(baseline: DrawIrComposition, current: DrawIrComposition) -> i32:
+    var count = 0
+    for batch in current.batches:
+        for command in batch.commands:
+            count = count + 1
+    for batch in baseline.batches:
+        for command in batch.commands:
+            if _draw_ir_find_command(current, command.component_id) == nil:
+                count = count + 1
+    count
+
+fn _draw_ir_diff_report(
+    baseline: DrawIrComposition,
+    current: DrawIrComposition,
+    diffs: [DrawIrNodeDiff],
+    write_idx: i32,
+    changed_count: i32,
+    added_count: i32,
+    removed_count: i32
+) -> DrawIrDiffReport:
+    if write_idx == diffs.len():
+        return DrawIrDiffReport(
+            baseline_id: baseline.composition_id,
+            current_id: current.composition_id,
+            node_count: write_idx,
+            changed_count: changed_count,
+            added_count: added_count,
+            removed_count: removed_count,
+            diffs: diffs
+        )
+    if write_idx == 0:
+        return DrawIrDiffReport(
+            baseline_id: baseline.composition_id,
+            current_id: current.composition_id,
+            node_count: 0,
+            changed_count: changed_count,
+            added_count: added_count,
+            removed_count: removed_count,
+            diffs: []
+        )
+    var compact: [DrawIrNodeDiff] = [diffs[0]; write_idx]
+    var idx = 0
+    while idx < write_idx:
+        compact[idx] = diffs[idx]
+        idx = idx + 1
+    DrawIrDiffReport(
+        baseline_id: baseline.composition_id,
+        current_id: current.composition_id,
+        node_count: write_idx,
+        changed_count: changed_count,
+        added_count: added_count,
+        removed_count: removed_count,
+        diffs: compact
+    )
+
+fn draw_ir_diff_compositions(baseline: DrawIrComposition, current: DrawIrComposition) -> DrawIrDiffReport:
+    val diff_count = _draw_ir_diff_count(baseline, current)
+    if diff_count == 0:
+        return DrawIrDiffReport(
+            baseline_id: baseline.composition_id,
+            current_id: current.composition_id,
+            node_count: 0,
+            changed_count: 0,
+            added_count: 0,
+            removed_count: 0,
+            diffs: []
+        )
+    var diffs: [DrawIrNodeDiff] = [_draw_ir_diff_placeholder(); diff_count]
+    var write_idx = 0
+    var changed_count = 0
+    var added_count = 0
+    var removed_count = 0
+    for batch in current.batches:
+        for command in batch.commands:
+            val base = _draw_ir_find_command(baseline, command.component_id)
+            val diff = if base == nil:
+                _draw_ir_added_diff(command)
+            else:
+                _draw_ir_changed_diff(base, command)
+            if diff.state == "changed":
+                changed_count = changed_count + 1
+            else if diff.state == "added":
+                added_count = added_count + 1
+            if write_idx >= diff_count:
+                return _draw_ir_diff_report(baseline, current, diffs, write_idx, changed_count, added_count, removed_count)
+            diffs[write_idx] = diff
+            write_idx = write_idx + 1
+    for batch in baseline.batches:
+        for command in batch.commands:
+            if _draw_ir_find_command(current, command.component_id) == nil:
+                val diff = _draw_ir_removed_diff(command)
+                removed_count = removed_count + 1
+                if write_idx >= diff_count:
+                    return _draw_ir_diff_report(baseline, current, diffs, write_idx, changed_count, added_count, removed_count)
+                diffs[write_idx] = diff
+                write_idx = write_idx + 1
+    if write_idx != diff_count:
+        return _draw_ir_diff_report(baseline, current, diffs, write_idx, changed_count, added_count, removed_count)
+    _draw_ir_diff_report(baseline, current, diffs, write_idx, changed_count, added_count, removed_count)
+
+fn _draw_ir_diff_bool_json(value: bool) -> text:
+    if value: "true" else: "false"
+
+fn _draw_ir_diff_escape_json(value: text) -> text:
+    var escaped = value.replace("\\", "\\\\")
+    escaped = escaped.replace("\"", "\\\"")
+    escaped = escaped.replace("\n", "\\n")
+    escaped.replace("\t", "\\t")
+
+fn _draw_ir_node_diff_to_json(diff: DrawIrNodeDiff) -> text:
+    "{\"id\":\"{_draw_ir_diff_escape_json(diff.component_id)}\",\"state\":\"{_draw_ir_diff_escape_json(diff.state)}\",\"dx\":{diff.dx},\"dy\":{diff.dy},\"dwidth\":{diff.dwidth},\"dheight\":{diff.dheight},\"color_changed\":{_draw_ir_diff_bool_json(diff.color_changed)},\"text_changed\":{_draw_ir_diff_bool_json(diff.text_changed)},\"style_changed\":{_draw_ir_diff_bool_json(diff.style_changed)},\"border_changed\":{_draw_ir_diff_bool_json(diff.border_changed)},\"hit_rect_changed\":{_draw_ir_diff_bool_json(diff.hit_rect_changed)},\"text_bounds_changed\":{_draw_ir_diff_bool_json(diff.text_bounds_changed)}}"
+
+fn draw_ir_diff_report_to_json(report: DrawIrDiffReport) -> text:
+    var nodes = "["
+    var first = true
+    for diff in report.diffs:
+        if first:
+            first = false
+        else:
+            nodes = "{nodes},"
+        nodes = "{nodes}{_draw_ir_node_diff_to_json(diff)}"
+    nodes = "{nodes}]"
+    "{\"baseline_id\":\"{_draw_ir_diff_escape_json(report.baseline_id)}\",\"current_id\":\"{_draw_ir_diff_escape_json(report.current_id)}\",\"node_count\":{report.node_count},\"changed_count\":{report.changed_count},\"added_count\":{report.added_count},\"removed_count\":{report.removed_count},\"nodes\":{nodes}}"

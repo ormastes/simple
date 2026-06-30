@@ -1,0 +1,123 @@
+# Sprof Hotspot Bridge — pure-Simple profile data → JIT hotspot plan
+#
+# Converts raw .sprof counter data (function name + call count, passed as
+# primitive text/i64 to avoid importing from app.*) into FunctionProfile and
+# JitHotspotPlan facts that drive the tiered JIT compile decision.
+#
+# Design: sprof records arrive as (function_name: text, call_count: i64).
+# Source text is empty for externally-profiled functions (JIT cannot re-
+# specialize without it, so eligible=false unless source is supplied).
+#
+# This bridge satisfies Win 3 of the compiler_perf_codegen plan:
+#   doc/03_plan/compiler/perf/pure_simple_profile_guided_executable_optimization_2026-06-01.md
+# The existing profile_layout_cli.spl (app layer) loads .sprof records and
+# builds layout manifests; this bridge wires the *compiler* JIT layer so the
+# same counts feed hotspot compile decisions without a circular import.
+
+use compiler.interp.execution.tiered_jit.{
+    FunctionProfile, JitTier, TieredJitConfig,
+    jit_hotspot_plan_from_profile,
+    jit_var_optimization_facts_none,
+    default_config
+}
+
+# ============================================================================
+# SprofHotspot — lightweight sprof record held on the compiler side
+# ============================================================================
+
+pub struct SprofHotspot:
+    """A compiler-side sprof counter record: function name + observed count."""
+    function_name: text
+    call_count: i64
+    source: text
+
+# ============================================================================
+# Factory helpers
+# ============================================================================
+
+pub fn sprof_hotspot_new(function_name: text, call_count: i64) -> SprofHotspot:
+    """Create a hotspot record without source (layout-only, not JIT-specializable)."""
+    SprofHotspot(
+        function_name: function_name,
+        call_count: call_count,
+        source: ""
+    )
+
+pub fn sprof_hotspot_with_source(function_name: text, call_count: i64, source: text) -> SprofHotspot:
+    """Create a hotspot record with JIT source for potential specialization."""
+    SprofHotspot(
+        function_name: function_name,
+        call_count: call_count,
+        source: source
+    )
+
+# ============================================================================
+# Conversion: SprofHotspot → FunctionProfile → JitHotspotPlan
+# ============================================================================
+
+pub fn sprof_hotspot_to_profile(h: SprofHotspot) -> FunctionProfile:
+    """Convert a compiler-side sprof record to a FunctionProfile for JIT planning.
+
+    typed_mir and safe_deopt are set to true when source is provided (the
+    compiler has full type information for its own source). When source is
+    empty (external profile), they are false — the plan will be ineligible
+    but the call_count is still recorded for layout/ordering decisions.
+    """
+    val has_source = h.source.len() > 0
+    FunctionProfile(
+        name: h.function_name,
+        call_count: h.call_count,
+        tier: JitTier.Interpreted,
+        compile_time_ms: 0.0,
+        source: h.source,
+        typed_mir: has_source,
+        safe_deopt: has_source,
+        hotspot_specialized_source: "",
+        hotspot_semantic_proof: false,
+        var_facts: jit_var_optimization_facts_none()
+    )
+
+pub fn sprof_hotspot_plan(h: SprofHotspot, config: TieredJitConfig) -> text:
+    """Return the eligibility reason for a sprof-derived hotspot plan.
+
+    Returns "ready" when the function is hot and has source; returns the
+    blocking reason otherwise. Callers use this to decide whether to
+    enqueue a JIT compile.
+    """
+    val profile = sprof_hotspot_to_profile(h)
+    val plan = jit_hotspot_plan_from_profile(profile, config, profile.typed_mir, profile.safe_deopt)
+    plan.reason
+
+pub fn sprof_hotspot_is_eligible(h: SprofHotspot, config: TieredJitConfig) -> bool:
+    """Returns true if this sprof record meets the hotspot threshold and has source."""
+    val profile = sprof_hotspot_to_profile(h)
+    val plan = jit_hotspot_plan_from_profile(profile, config, profile.typed_mir, profile.safe_deopt)
+    plan.eligible
+
+pub fn sprof_hotspot_call_count_meets_threshold(call_count: i64, config: TieredJitConfig) -> bool:
+    """Predicate: does a raw call count meet the tier-1 JIT threshold?
+
+    Used by the layout bridge to decide whether to promote a sprof symbol
+    to the hot segment without needing a full FunctionProfile.
+    """
+    call_count >= config.tier1_threshold
+
+pub fn sprof_hotspot_facts(h: SprofHotspot, config: TieredJitConfig) -> [text]:
+    """Return the fact list for a sprof-derived hotspot (e.g. ["profile.hot_count"])."""
+    val profile = sprof_hotspot_to_profile(h)
+    val plan = jit_hotspot_plan_from_profile(profile, config, profile.typed_mir, profile.safe_deopt)
+    plan.facts
+
+pub fn sprof_hotspots_above_threshold(hotspots: [SprofHotspot], config: TieredJitConfig) -> [SprofHotspot]:
+    """Filter a list of sprof records to those meeting the tier-1 threshold.
+
+    Returns a new array (arrays are value types in Simple).
+    """
+    var result: [SprofHotspot] = []
+    var i = 0
+    while i < hotspots.len():
+        val h = hotspots[i]
+        if sprof_hotspot_call_count_meets_threshold(h.call_count, config):
+            result = result.push(h)
+        i = i + 1
+    result

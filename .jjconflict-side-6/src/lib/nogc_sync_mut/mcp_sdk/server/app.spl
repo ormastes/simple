@@ -1,0 +1,231 @@
+# MCP SDK - McpServer Facade (A4)
+#
+# Declarative MCP server: registry + transport + serve loop in one place.
+# Apps call mcp_server_init / mcp_server_tool to configure, then mcp_serve.
+#
+# Design rules:
+#   D2 — initialize answers from static metadata; schemas NOT built until tools/list
+#   D3 — no timeouts; read_message() blocks / returns nil on EOF
+#   D5 — no rt_* externs here
+#
+# Interpreter note: match Some(x): assignment to outer var silently fails;
+# use dedicated unwrap helpers (direct return) or == nil guards instead.
+
+use std.mcp_sdk.core.json.{LB, RB, jp, js, jo3, escape_json}
+use std.mcp_sdk.core.jsonrpc.{jsonrpc_result, jsonrpc_error, error_code_method_not_found}
+use std.mcp_sdk.core.types.{make_tool_result}
+use std.mcp_sdk.server.registry.{registry_register, registry_list_json, registry_call, registry_reset}
+use std.mcp_sdk.server.method_detect.{has_method}
+use std.mcp_sdk.transport.transport.{Transport}
+
+# --- Module-level server metadata ---
+
+var APP_SERVER_NAME = ""
+var APP_SERVER_VERSION = ""
+
+# Cached initialize result (static, no schemas)
+var APP_INIT_CACHE = ""
+
+# Protocol version used in initialize responses
+fn app_protocol_version() -> text:
+    "2025-06-18"
+
+# --- Option unwrap helpers (return-based to avoid outer-var binding bug) ---
+
+fn app_unwrap_text(opt: text?) -> text:
+    match opt:
+        Some(v): return v
+        nil: return ""
+
+# --- Low-level JSON field extraction (no index_of match binding) ---
+
+# Find the byte position of needle in haystack by walking characters.
+# Returns -1 if not found.
+fn app_find(haystack: text, needle: text) -> i64:
+    if not haystack.contains(needle):
+        return -1
+    val nlen = needle.len()
+    val hlen = haystack.len()
+    var i = 0
+    while i <= hlen - nlen:
+        if haystack[i:i + nlen] == needle:
+            return i
+        i = i + 1
+    -1
+
+# Extract a raw JSON value for key without relying on match-binding.
+# Returns "" if not found.
+fn app_extract_after(s: text, search: text) -> text:
+    val pos = app_find(s, search)
+    if pos < 0:
+        return ""
+    s.substring(pos + search.len())
+
+# Extract a JSON string value for a key: "key":"value" → value (unquoted).
+fn app_extract_str(msg: text, key: text) -> text:
+    val search = "\"" + key + "\":\""
+    val after = app_extract_after(msg, search)
+    if after == "":
+        return ""
+    var end = 0
+    var escaped = false
+    while end < after.len():
+        val ch = after[end:end + 1]
+        if escaped:
+            escaped = false
+            end = end + 1
+        elif ch == "\\":
+            escaped = true
+            end = end + 1
+        elif ch == "\"":
+            return after.substring(0, end)
+        else:
+            end = end + 1
+    after
+
+# Extract the raw JSON-RPC id (number or quoted string) for use in responses.
+fn app_extract_id(msg: text) -> text:
+    val after = app_extract_after(msg, "\"id\":")
+    if after == "":
+        return "null"
+    val trimmed = after.trim()
+    if trimmed == "":
+        return "null"
+    var end = 0
+    while end < trimmed.len():
+        val ch = trimmed[end:end + 1]
+        if ch == "," or ch == "}" or ch == "]":
+            return trimmed.substring(0, end).trim()
+        end = end + 1
+    trimmed.trim()
+
+# Extract a JSON object value for a key: "key":{...} → the {...} text.
+fn app_extract_obj(msg: text, key: text) -> text:
+    val search = "\"" + key + "\":"
+    val after = app_extract_after(msg, search)
+    if after == "":
+        return ""
+    val trimmed = after.trim()
+    if not trimmed.starts_with(LB()):
+        return ""
+    var depth = 0
+    var pos = 0
+    while pos < trimmed.len():
+        val ch = trimmed[pos:pos + 1]
+        if ch == LB():
+            depth = depth + 1
+        elif ch == RB():
+            depth = depth - 1
+            if depth == 0:
+                return trimmed.substring(0, pos + 1)
+        pos = pos + 1
+    ""
+
+# --- Configuration ---
+
+# Set server name and version; clears cached init response.
+fn mcp_server_init(name: text, version: text):
+    APP_SERVER_NAME = name
+    APP_SERVER_VERSION = version
+    APP_INIT_CACHE = ""
+
+# Register one tool — delegates to the lazy registry.
+fn mcp_server_tool(
+    name: text,
+    description: text,
+    schema_builder: fn() -> text,
+    handler: fn(text) -> text
+):
+    registry_register(name, description, schema_builder, handler)
+
+# --- Initialize response builder ---
+
+fn app_build_init_result() -> text:
+    if APP_INIT_CACHE != "":
+        return APP_INIT_CACHE
+    # Capabilities: tools capability signalled (empty object = enabled)
+    val tools_cap = LB() + RB()
+    val caps = LB() + jp("tools", tools_cap) + RB()
+    val info = LB() + jp("name", js(APP_SERVER_NAME)) + "," + jp("version", js(APP_SERVER_VERSION)) + RB()
+    val result = jo3(
+        jp("protocolVersion", js(app_protocol_version())),
+        jp("capabilities", caps),
+        jp("serverInfo", info)
+    )
+    APP_INIT_CACHE = result
+    result
+
+# --- Single-message dispatch ---
+
+# Dispatch one JSON-RPC message. Returns nil for notifications (no response).
+fn mcp_server_handle(msg: text) -> text?:
+    val id = app_extract_id(msg)
+
+    if has_method(msg, "initialize"):
+        val result = app_build_init_result()
+        return Some(jsonrpc_result(id, result))
+
+    if has_method(msg, "notifications/initialized"):
+        return nil
+
+    if has_method(msg, "tools/list"):
+        # Extract optional cursor from params
+        var cursor = ""
+        val params = app_extract_obj(msg, "params")
+        if params != "":
+            val c = app_extract_str(params, "cursor")
+            cursor = c
+        # registry_list_json returns a full JSON-RPC envelope
+        return Some(registry_list_json(id, cursor))
+
+    if has_method(msg, "tools/call"):
+        val params = app_extract_obj(msg, "params")
+        var tool_name = ""
+        var args_raw = "{}"
+        if params != "":
+            tool_name = app_extract_str(params, "name")
+            val a = app_extract_obj(params, "arguments")
+            if a != "":
+                args_raw = a
+        val handler_result = registry_call(tool_name, args_raw)
+        return Some(make_tool_result(id, handler_result))
+
+    # Swallow all other notifications silently
+    if msg.contains("\"method\":\"notifications/"):
+        return nil
+
+    # Unknown method → JSON-RPC error -32601
+    Some(jsonrpc_error(id, error_code_method_not_found(), "Method not found"))
+
+# --- Serve loop ---
+
+# Read messages from t until EOF (read_message returns nil), dispatch each,
+# write non-nil responses back. No timeouts (design rule D3).
+fn mcp_serve(t: Transport):
+    var running = true
+    while running:
+        val msg_opt = t.read_message()
+        if msg_opt == nil:
+            running = false
+        else:
+            val msg = app_unwrap_text(msg_opt)
+            val resp_opt = mcp_server_handle(msg)
+            if resp_opt != nil:
+                val resp = app_unwrap_text(resp_opt)
+                t.write_message(resp)
+
+# --- Reset (for test isolation) ---
+
+fn mcp_server_reset():
+    APP_SERVER_NAME = ""
+    APP_SERVER_VERSION = ""
+    APP_INIT_CACHE = ""
+    registry_reset()
+
+# --- Exports ---
+
+export mcp_server_init
+export mcp_server_tool
+export mcp_server_handle
+export mcp_serve
+export mcp_server_reset
