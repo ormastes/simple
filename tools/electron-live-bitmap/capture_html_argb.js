@@ -798,6 +798,8 @@ async function main() {
     fs.writeFileSync(proofPath, JSON.stringify({
       status: "pass",
       reason: "pass",
+      proof_source: "tools/electron-live-bitmap/capture_html_argb.js",
+      captured_argb_path: outputPath,
       width,
       height,
       native_width: result.nativeWidth,
