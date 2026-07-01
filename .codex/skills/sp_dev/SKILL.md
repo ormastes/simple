@@ -52,6 +52,11 @@ complete when workflow/tooling behavior changed and the matching guide, skill,
 agent, command, or generated/manual spec docs are still stale. Update the docs
 first, then run focused verification evidence once.
 
+For SPipe MCP registration, use `bin/release/simple spipe-mcp serve` or
+`bin/spipe_mcp_server`. The launcher defaults to the source entrypoint and only
+uses native `spipe_mcp` artifacts by explicit env opt-in after parser and stdio
+smokes pass.
+
 For recent unfinished-plan cleanup lanes, use
 `doc/07_guide/infra/recent_plan_cleanup.md`. Keep the cleanup matrix under
 `doc/03_plan/agent_tasks/` with sidecar lanes/`N/A`, merge owner, and final

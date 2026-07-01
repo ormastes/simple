@@ -52,6 +52,11 @@ workflow/tooling behavior changed but the matching guide, skill, agent,
 command, or generated/manual spec docs are stale. The documentation freshness
 gate is part of completion, not a release follow-up.
 
+For SPipe MCP registration, use `bin/release/simple spipe-mcp serve` or
+`bin/spipe_mcp_server`. The launcher defaults to the source entrypoint and only
+uses native `spipe_mcp` artifacts by explicit env opt-in after parser and stdio
+smokes pass.
+
 Check or install that wiring with:
 
 ```bash
