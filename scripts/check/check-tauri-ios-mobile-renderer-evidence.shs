@@ -8,6 +8,7 @@ PROBE_HELPER="$ROOT_DIR/scripts/check/ios_mdi_probe_server.spl"
 MDI_PROOF_NORMALIZER="$ROOT_DIR/scripts/check/normalize-tauri-mobile-mdi-proof.js"
 SIMPLE_BIN="${SIMPLE_BIN:-$ROOT_DIR/src/compiler_rust/target/release/simple}"
 SCREENSHOT="${IOS_RENDERER_SCREENSHOT:-$BUILD_DIR/ios_renderer.png}"
+PREPROOF_SCREENSHOT="$BUILD_DIR/ios_renderer_preproof.png"
 LOG_STREAM="$BUILD_DIR/ios_renderer_log_stream.txt"
 IOS_DEV_LOG="$BUILD_DIR/ios_renderer_tauri_dev.log"
 MDI_PROOF_JSON="$BUILD_DIR/ios_renderer_mdi_proof.json"
@@ -62,6 +63,99 @@ if unique < 16:
     sys.exit(1)
 
 print(f"{label}=pass width={width} height={height} unique_colors={unique}")
+PY
+        code=$?
+        cat "$validation_log"
+        return "$code"
+    fi
+
+    cat "$validation_log" 2>/dev/null || true
+    return 1
+}
+
+validate_ios_mdi_screenshot_png() {
+    path="$1"
+    label="$2"
+    validation_log="$BUILD_DIR/ios_mdi_screenshot_validation.log"
+
+    if "$SIMPLE_BIN" run "$PROBE_HELPER" --mode=interpreter --validate-probe-mdi-screenshot "$path" "$label" > "$validation_log" 2>&1; then
+        cat "$validation_log"
+        return 0
+    fi
+
+    if command -v python3 >/dev/null 2>&1; then
+        SCREENSHOT_PATH="$path" SCREENSHOT_LABEL="$label" python3 - <<'PY' > "$validation_log" 2>&1
+import os
+import sys
+
+path = os.environ["SCREENSHOT_PATH"]
+label = os.environ["SCREENSHOT_LABEL"]
+try:
+    from PIL import Image
+except Exception as exc:
+    print(f"pillow unavailable: {exc}", file=sys.stderr)
+    sys.exit(2)
+
+try:
+    image = Image.open(path).convert("RGB")
+except Exception as exc:
+    print(f"failed to open screenshot: {exc}", file=sys.stderr)
+    sys.exit(1)
+
+width, height = image.size
+if width < 300 or height < 300:
+    print(f"MDI screenshot dimensions invalid: {width}x{height}", file=sys.stderr)
+    sys.exit(1)
+
+pixels = image.load()
+total = width * height
+dark = bright = accent = taskbar_accent = 0
+dark_rows = 0
+taskbar_y = (height * 3) // 4
+for y in range(height):
+    row_dark = 0
+    for x in range(width):
+        r8, g8, b8 = pixels[x, y]
+        r = r8 / 255.0
+        g = g8 / 255.0
+        b = b8 / 255.0
+        is_dark = r < 0.176 and g < 0.216 and b < 0.255
+        is_bright = r > 0.862 and g > 0.862 and b > 0.862
+        is_accent = (
+            (r > 0.745 and g < 0.392 and b < 0.392)
+            or (r > 0.705 and g > 0.470 and b < 0.313)
+            or (g > 0.549 and r < 0.392 and b < 0.470)
+            or (b > 0.549 and r < 0.666 and g < 0.784)
+        )
+        if is_dark:
+            dark += 1
+            row_dark += 1
+        if is_bright:
+            bright += 1
+        if is_accent:
+            accent += 1
+            if y >= taskbar_y:
+                taskbar_accent += 1
+    if row_dark >= max(1, width // 4):
+        dark_rows += 1
+
+if dark < max(2000, total // 5):
+    print(f"MDI screenshot missing dark desktop/window coverage: dark_pixels={dark}", file=sys.stderr)
+    sys.exit(1)
+if bright < max(1000, total // 100):
+    print(f"MDI screenshot missing bright window/control pixels: bright_pixels={bright}", file=sys.stderr)
+    sys.exit(1)
+if accent < 100:
+    print(f"MDI screenshot missing accent/icon pixels: accent_pixels={accent}", file=sys.stderr)
+    sys.exit(1)
+if taskbar_accent < 100:
+    print(f"MDI screenshot missing taskbar accent pixels: taskbar_accent={taskbar_accent}", file=sys.stderr)
+    sys.exit(1)
+if dark_rows < max(80, height // 3):
+    print(f"MDI screenshot missing sustained dark rows: dark_rows={dark_rows}", file=sys.stderr)
+    sys.exit(1)
+
+print(f"{label}=pass width={width} height={height} dark_pixels={dark} bright_pixels={bright} accent_pixels={accent} taskbar_accent_pixels={taskbar_accent} dark_rows={dark_rows}")
 PY
         code=$?
         cat "$validation_log"
@@ -196,6 +290,13 @@ done
 
 grep -q '\[tauri-shell\] render, html_len=' "$IOS_DEV_LOG" "$LOG_STREAM" 2>/dev/null \
     || fail "Tauri iOS render log not observed within ${TIMEOUT_SECS}s"
+
+xcrun simctl io "$SIM_UDID" screenshot "$PREPROOF_SCREENSHOT" > "$BUILD_DIR/ios_preproof_screenshot.log" 2>&1 \
+    || fail "failed to capture iOS pre-proof simulator screenshot"
+test -s "$PREPROOF_SCREENSHOT" || fail "iOS pre-proof simulator screenshot is empty: $PREPROOF_SCREENSHOT"
+validate_ios_mdi_screenshot_png "$PREPROOF_SCREENSHOT" ios_mobile_renderer_preproof_mdi_screenshot \
+    || fail "iOS renderer screenshot missing live MDI foreground layout"
+
 mdi_end=$(( $(date +%s) + TIMEOUT_SECS ))
 while [ "$(date +%s)" -lt "$mdi_end" ]; do
     if grep -q '\[tauri-shell\] mdi proof:' "$IOS_DEV_LOG" "$LOG_STREAM" 2>/dev/null; then
@@ -212,6 +313,8 @@ test -s "$SCREENSHOT" || fail "iOS simulator screenshot is empty: $SCREENSHOT"
 
 validate_screenshot_png "$SCREENSHOT" ios_mobile_renderer_screenshot \
     || fail "iOS mobile renderer screenshot PNG validation failed"
+validate_ios_mdi_screenshot_png "$SCREENSHOT" ios_mobile_renderer_mdi_screenshot \
+    || fail "iOS mobile renderer screenshot missing live MDI layout"
 
 grep -Eiq 'Metal|CAMetalLayer|MTL|AGX|IOGPU|-framework Metal' "$IOS_DEV_LOG" "$LOG_STREAM" \
     || fail "iOS renderer log missing Metal marker"
@@ -220,6 +323,7 @@ echo "ios_tooling=available"
 echo "ios_simulator=$SIM_UDID"
 echo "ios_simulator_name=$SIM_NAME"
 echo "ios_screenshot=$SCREENSHOT"
+echo "ios_preproof_screenshot=$PREPROOF_SCREENSHOT"
 echo "ios_log_stream=$LOG_STREAM"
 echo "ios_dev_log=$IOS_DEV_LOG"
 node "$MDI_PROOF_NORMALIZER" ios "$MDI_PROOF_JSON" "$LOG_STREAM" "$IOS_DEV_LOG"

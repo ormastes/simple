@@ -846,6 +846,9 @@ fn maybe_write_tauri_mdi_proof(app: &AppHandle) {
         let js = r#"
             (function() {
                 var proofFallbackUrl = __SIMPLE_MDI_PROOF_FALLBACK_URL__;
+                function nav(kind, query) {
+                    try { window.location.href = 'simple-proof://' + kind + (query ? '?' + query : ''); } catch (_err) {}
+                }
                 function beacon(url) {
                     try {
                         window.__SIMPLE_TAURI_MDI_PROOF_BEACONS__ = window.__SIMPLE_TAURI_MDI_PROOF_BEACONS__ || [];
@@ -854,188 +857,142 @@ fn maybe_write_tauri_mdi_proof(app: &AppHandle) {
                         img.src = url;
                     } catch (_err) {}
                 }
-                function proofError(err) {
-                    if (proofFallbackUrl) {
-                        var message = err && (err.stack || err.message || String(err)) || 'unknown';
-                        beacon(proofFallbackUrl.replace('/mdi-proof', '/mdi-proof-error') + '?message=' + encodeURIComponent(message) + '&t=' + Date.now());
-                    }
-                    proofNavigate('error', 'message=' + encodeURIComponent(err && (err.stack || err.message || String(err)) || 'unknown'));
+                function fail(err) {
+                    var message = encodeURIComponent(err && (err.stack || err.message || String(err)) || 'unknown');
+                    if (proofFallbackUrl) beacon(proofFallbackUrl.replace('/mdi-proof', '/mdi-proof-error') + '?message=' + message + '&t=' + Date.now());
+                    nav('error', 'message=' + message);
                 }
-                function proofNavigate(kind, query) {
+                function visible(el, minWidth, minHeight) {
+                    if (!el) return false;
+                    var rect = el.getBoundingClientRect();
+                    var style = window.getComputedStyle(el);
+                    return rect.width >= minWidth && rect.height >= minHeight && style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
+                }
+                function routeProof() {
                     try {
-                        window.location.href = 'simple-proof://' + kind + (query ? '?' + query : '');
-                    } catch (_err) {}
-                }
-                if (proofFallbackUrl) {
-                    beacon(proofFallbackUrl + '-ping?phase=eval&t=' + Date.now());
-                }
-                proofNavigate('ping', 'phase=eval&t=' + Date.now());
-                window.__SIMPLE_TAURI_RUN_MDI_PROOF__ = function() {
-                try {
-                var wm = window.__SIMPLE_TAURI_WM__;
-                var dragMoved = false;
-                var bodyClickRouted = false;
-                var bodyInputRouted = false;
-                var bodyKeyRouted = false;
-                var appActionControlFound = false;
-                var appInputControlFound = false;
-                var eventSequence = [];
-                var performanceNowAvailable = !!(window.performance && typeof window.performance.now === 'function');
-                var performanceStart = performanceNowAvailable ? window.performance.now() : 0;
-                var inputStart = performanceStart;
-                var taskbarItems = Array.from(document.querySelectorAll('#dock .tab-bar-item'));
-                var taskbarIcons = Array.from(document.querySelectorAll('#dock .tab-bar-icon'));
-                var taskbarIconsVisible = taskbarIcons.length >= 4 && taskbarIcons.every(function(icon) {
-                    var rect = icon.getBoundingClientRect();
-                    var style = window.getComputedStyle(icon);
-                    return rect.width >= 18 && rect.height >= 18 && style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
-                });
-                var taskbarLabelsVisible = taskbarItems.length >= 4 && taskbarItems.every(function(item) {
-                    var label = item.querySelector('.tab-bar-label');
-                    if (!label) return false;
-                    var rect = label.getBoundingClientRect();
-                    var style = window.getComputedStyle(label);
-                    return rect.width >= 20 && rect.height >= 10 && style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
-                });
-                if (wm && wm.windows && wm.windows.terminal) {
-                    var terminal = wm.windows.terminal.win;
-                    var body = wm.windows.terminal.body;
-                    var titlebar = terminal.querySelector('.wm-titlebar');
-                    var beforeLeft = parseInt(terminal.style.left || '0', 10) || 0;
-                    var beforeTop = parseInt(terminal.style.top || '0', 10) || 0;
-                    if (titlebar && typeof PointerEvent === 'function') {
-                        titlebar.dispatchEvent(new PointerEvent('pointerdown', { pointerId: 37, clientX: beforeLeft + 12, clientY: beforeTop + 12, bubbles: true }));
-                        document.dispatchEvent(new PointerEvent('pointermove', { pointerId: 37, clientX: beforeLeft + 72, clientY: beforeTop + 42, bubbles: true }));
-                        document.dispatchEvent(new PointerEvent('pointerup', { pointerId: 37, clientX: beforeLeft + 72, clientY: beforeTop + 42, bubbles: true }));
-                    }
-                    var afterPointerLeft = parseInt(terminal.style.left || '0', 10) || 0;
-                    var afterPointerTop = parseInt(terminal.style.top || '0', 10) || 0;
-                    if (titlebar && !(afterPointerLeft > beforeLeft && afterPointerTop > beforeTop)) {
-                        titlebar.dispatchEvent(new MouseEvent('mousedown', { button: 0, clientX: beforeLeft + 12, clientY: beforeTop + 12, bubbles: true }));
-                        document.dispatchEvent(new MouseEvent('mousemove', { button: 0, clientX: beforeLeft + 72, clientY: beforeTop + 42, bubbles: true }));
-                        document.dispatchEvent(new MouseEvent('mouseup', { button: 0, clientX: beforeLeft + 72, clientY: beforeTop + 42, bubbles: true }));
-                    }
-                    var afterLeft = parseInt(terminal.style.left || '0', 10) || 0;
-                    var afterTop = parseInt(terminal.style.top || '0', 10) || 0;
-                    dragMoved = afterLeft > beforeLeft && afterTop > beforeTop;
-                    if (dragMoved) eventSequence.push('window_drag:move');
-                    if (body) {
-                        var appButton = body.querySelector('[data-action]');
-                        appActionControlFound = !!appButton;
-                        if (appButton) {
-                            var actionName = appButton.getAttribute('data-action') || '';
-                            appButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-                            bodyClickRouted = !!(wm.lastEvent && wm.lastEvent.kind === 'action' && wm.lastEvent.windowId === 'terminal' && wm.lastEvent.action === actionName);
-                            if (bodyClickRouted) eventSequence.push('app_action:body_click');
-                        }
-
-                        var appInput = body.querySelector('input[data-target-id], textarea[data-target-id], select[data-target-id], [contenteditable][data-target-id]');
-                        appInputControlFound = !!appInput;
-                        if (appInput) {
-                            var targetId = appInput.getAttribute('data-target-id') || appInput.id || '';
-                            if (appInput.isContentEditable) {
-                                appInput.textContent = 'ok';
-                            } else {
-                                appInput.value = 'ok';
+                        if (proofFallbackUrl) beacon(proofFallbackUrl + '-ping?phase=eval&t=' + Date.now());
+                        nav('ping', 'phase=eval&t=' + Date.now());
+                        var wm = window.__SIMPLE_TAURI_WM__;
+                        var seq = [];
+                        var dragMoved = false;
+                        var clickRouted = false;
+                        var inputRouted = false;
+                        var keyRouted = false;
+                        var actionFound = false;
+                        var inputFound = false;
+                        var perf = !!(window.performance && typeof window.performance.now === 'function');
+                        var start = perf ? window.performance.now() : 0;
+                        var inputStart = start;
+                        if (wm && wm.windows && wm.windows.terminal) {
+                            var entry = wm.windows.terminal;
+                            var win = entry.win;
+                            var body = entry.body;
+                            var titlebar = win && win.querySelector ? win.querySelector('.wm-titlebar') : null;
+                            var left0 = parseInt((win && win.style.left) || '0', 10) || 0;
+                            var top0 = parseInt((win && win.style.top) || '0', 10) || 0;
+                            if (titlebar && typeof PointerEvent === 'function') {
+                                titlebar.dispatchEvent(new PointerEvent('pointerdown', { pointerId: 37, clientX: left0 + 12, clientY: top0 + 12, bubbles: true }));
+                                document.dispatchEvent(new PointerEvent('pointermove', { pointerId: 37, clientX: left0 + 72, clientY: top0 + 42, bubbles: true }));
+                                document.dispatchEvent(new PointerEvent('pointerup', { pointerId: 37, clientX: left0 + 72, clientY: top0 + 42, bubbles: true }));
                             }
-                            appInput.dispatchEvent(new Event('input', { bubbles: true }));
-                            bodyInputRouted = !!(wm.lastEvent && wm.lastEvent.kind === 'input' && wm.lastEvent.windowId === 'terminal' && wm.lastEvent.targetId === targetId && wm.lastEvent.value === 'ok');
-                            if (bodyInputRouted) eventSequence.push('app_input:body_input');
+                            if (titlebar && !((parseInt(win.style.left || '0', 10) || 0) > left0 && (parseInt(win.style.top || '0', 10) || 0) > top0)) {
+                                titlebar.dispatchEvent(new MouseEvent('mousedown', { button: 0, clientX: left0 + 12, clientY: top0 + 12, bubbles: true }));
+                                document.dispatchEvent(new MouseEvent('mousemove', { button: 0, clientX: left0 + 72, clientY: top0 + 42, bubbles: true }));
+                                document.dispatchEvent(new MouseEvent('mouseup', { button: 0, clientX: left0 + 72, clientY: top0 + 42, bubbles: true }));
+                            }
+                            dragMoved = (parseInt(win.style.left || '0', 10) || 0) > left0 && (parseInt(win.style.top || '0', 10) || 0) > top0;
+                            if (dragMoved) seq.push('window_drag:move');
+                            if (body) {
+                                var button = body.querySelector('[data-action]');
+                                actionFound = !!button;
+                                if (button) {
+                                    var action = button.getAttribute('data-action') || '';
+                                    button.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+                                    clickRouted = !!(wm.lastEvent && wm.lastEvent.kind === 'action' && wm.lastEvent.windowId === 'terminal' && wm.lastEvent.action === action);
+                                    if (clickRouted) seq.push('app_action:body_click');
+                                }
+                                var input = body.querySelector('input[data-target-id],textarea[data-target-id],select[data-target-id],[contenteditable][data-target-id]');
+                                inputFound = !!input;
+                                if (input) {
+                                    var targetId = input.getAttribute('data-target-id') || input.id || '';
+                                    if (input.isContentEditable) input.textContent = 'ok'; else input.value = 'ok';
+                                    input.dispatchEvent(new Event('input', { bubbles: true }));
+                                    inputRouted = !!(wm.lastEvent && wm.lastEvent.kind === 'input' && wm.lastEvent.windowId === 'terminal' && wm.lastEvent.targetId === targetId && wm.lastEvent.value === 'ok');
+                                    if (inputRouted) seq.push('app_input:body_input');
+                                }
+                                body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+                                keyRouted = !!(wm.lastEvent && wm.lastEvent.kind === 'key' && wm.lastEvent.windowId === 'terminal' && wm.lastEvent.key === 'Enter');
+                                if (keyRouted) seq.push('app_key:body_key');
+                            }
                         }
-                        body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
-                        bodyKeyRouted = !!(wm.lastEvent && wm.lastEvent.kind === 'key' && wm.lastEvent.windowId === 'terminal' && wm.lastEvent.key === 'Enter');
-                        if (bodyKeyRouted) eventSequence.push('app_key:body_key');
+                        var css = document.createElement('div');
+                        css.style.cssText = 'position:absolute;left:-9999px;top:-9999px;width:4px;height:4px;animation:simpleMdiProof 1s linear infinite';
+                        document.body.appendChild(css);
+                        var cssOk = false;
+                        try { cssOk = window.getComputedStyle(css).animationName !== 'none'; } catch (_err) {}
+                        css.remove();
+                        var items = Array.from(document.querySelectorAll('#dock .tab-bar-item'));
+                        var icons = Array.from(document.querySelectorAll('#dock .tab-bar-icon'));
+                        var labelsOk = items.length >= 4 && items.every(function(item) { return visible(item.querySelector('.tab-bar-label'), 20, 10); });
+                        var iconsOk = icons.length >= 4 && icons.every(function(icon) { return visible(icon, 18, 18); });
+                        var invoke = window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke
+                            ? window.__TAURI_INTERNALS__.invoke
+                            : (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke ? window.__TAURI__.core.invoke : null);
+                        function report(frames) {
+                            var now = perf ? window.performance.now() : 0;
+                            var vw = Math.round(window.innerWidth || document.documentElement.clientWidth || 0);
+                            var vh = Math.round(window.innerHeight || document.documentElement.clientHeight || 0);
+                            var proof = {
+                                count: wm ? Object.keys(wm.windows || {}).length : 0,
+                                hasDesktop: !!document.getElementById('wm-desktop'),
+                                imageCount: document.querySelectorAll('img.simple-picture').length,
+                                sourceWindowCount: document.querySelectorAll('.wm-window').length,
+                                hasDragRuntime: !!(wm && wm.bindDrag),
+                                hasDragEvents: !!(wm && wm.notifyMove),
+                                dragMoved: dragMoved,
+                                hasWindowEventRuntime: !!(wm && wm.bindWindowEvents && wm.sendWindowAction && wm.sendWindowKey && wm.sendWindowInput && wm.sendWindowMouse),
+                                appActionControlFound: actionFound,
+                                appInputControlFound: inputFound,
+                                bodyClickRouted: clickRouted,
+                                bodyInputRouted: inputRouted,
+                                bodyKeyRouted: keyRouted,
+                                taskbarItemCount: items.length,
+                                taskbarIconCount: icons.length,
+                                taskbarIconsVisible: iconsOk,
+                                taskbarLabelsVisible: labelsOk,
+                                viewportWidth: vw,
+                                viewportHeight: vh,
+                                devicePixelRatio: Number(window.devicePixelRatio || 1),
+                                screenOrientation: vh >= vw ? 'portrait' : 'landscape',
+                                performanceNowAvailable: perf,
+                                performanceNowDeltaMs: perf ? Math.max(0.1, now - start) : 0,
+                                inputToPaintMs: perf ? Math.max(0.1, now - inputStart) : 0,
+                                animationFrameAvailable: typeof window.requestAnimationFrame === 'function',
+                                animationFrameCount: frames,
+                                cssAnimationProbe: cssOk,
+                                eventSequence: seq,
+                                htmlRenderable: document.body.innerHTML.indexOf('simple-app-window') >= 0 && document.body.innerHTML.indexOf('<pre class=\"simple-app-pre\">') >= 0
+                            };
+                            if (invoke) invoke('report_mdi_proof', { proof: proof }).catch(function(_err) {});
+                            if (proofFallbackUrl && typeof window.fetch === 'function') window.fetch(proofFallbackUrl, { method: 'POST', body: JSON.stringify(proof) }).catch(function(_err) {});
+                            if (proofFallbackUrl) beacon(proofFallbackUrl + '?proof=' + encodeURIComponent(JSON.stringify(proof)) + '&t=' + Date.now());
+                            nav('mdi', 'proof=' + encodeURIComponent(JSON.stringify(proof)) + '&t=' + Date.now());
+                        }
+                        if (typeof window.requestAnimationFrame === 'function') {
+                            window.requestAnimationFrame(function() { window.requestAnimationFrame(function() { report(2); }); });
+                        } else {
+                            report(0);
+                        }
+                    } catch (err) {
+                        fail(err);
                     }
                 }
-                var cssProbe = document.createElement('div');
-                cssProbe.style.cssText = 'position:absolute;left:-9999px;top:-9999px;width:4px;height:4px;animation:simpleMdiProof 1s linear infinite';
-                document.body.appendChild(cssProbe);
-                var cssAnimationProbe = false;
-                try {
-                    cssAnimationProbe = window.getComputedStyle(cssProbe).animationName !== 'none';
-                } catch (_err) {
-                    cssAnimationProbe = false;
-                }
-                cssProbe.remove();
-                var invoke = window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke
-                    ? window.__TAURI_INTERNALS__.invoke
-                    : (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke ? window.__TAURI__.core.invoke : null);
-                function report(animationFrameCount) {
-                    var now = performanceNowAvailable ? window.performance.now() : 0;
-                    var viewportWidth = Math.round(window.innerWidth || document.documentElement.clientWidth || 0);
-                    var viewportHeight = Math.round(window.innerHeight || document.documentElement.clientHeight || 0);
-                    var proof = {
-                            count: window.__SIMPLE_TAURI_WM__ ? Object.keys(window.__SIMPLE_TAURI_WM__.windows || {}).length : 0,
-                            hasDesktop: !!document.getElementById('wm-desktop'),
-                            imageCount: document.querySelectorAll('img.simple-picture').length,
-                            sourceWindowCount: document.querySelectorAll('.wm-window').length,
-                            hasDragRuntime: !!(wm && wm.bindDrag),
-                            hasDragEvents: !!(wm && wm.notifyMove),
-                            dragMoved: dragMoved,
-                            hasWindowEventRuntime: !!(wm && wm.bindWindowEvents && wm.sendWindowAction && wm.sendWindowKey && wm.sendWindowInput && wm.sendWindowMouse),
-                            appActionControlFound: appActionControlFound,
-                            appInputControlFound: appInputControlFound,
-                            bodyClickRouted: bodyClickRouted,
-                            bodyInputRouted: bodyInputRouted,
-                            bodyKeyRouted: bodyKeyRouted,
-                            taskbarItemCount: taskbarItems.length,
-                            taskbarIconCount: taskbarIcons.length,
-                            taskbarIconsVisible: taskbarIconsVisible,
-                            taskbarLabelsVisible: taskbarLabelsVisible,
-                            viewportWidth: viewportWidth,
-                            viewportHeight: viewportHeight,
-                            devicePixelRatio: Number(window.devicePixelRatio || 1),
-                            screenOrientation: viewportHeight >= viewportWidth ? 'portrait' : 'landscape',
-                            performanceNowAvailable: performanceNowAvailable,
-                            performanceNowDeltaMs: performanceNowAvailable ? Math.max(0.1, now - performanceStart) : 0,
-                            inputToPaintMs: performanceNowAvailable ? Math.max(0.1, now - inputStart) : 0,
-                            animationFrameAvailable: typeof window.requestAnimationFrame === 'function',
-                            animationFrameCount: animationFrameCount,
-                            cssAnimationProbe: cssAnimationProbe,
-                            eventSequence: eventSequence,
-                            htmlRenderable: document.body.innerHTML.indexOf('simple-app-window') >= 0 && document.body.innerHTML.indexOf('<pre class="simple-app-pre">') >= 0
-                    };
-                    if (invoke) {
-                        invoke('report_mdi_proof', { proof: proof });
-                    }
-                    if (proofFallbackUrl && typeof window.fetch === 'function') {
-                        window.fetch(proofFallbackUrl, {
-                            method: 'POST',
-                            body: JSON.stringify(proof)
-                        }).catch(function(_err) {});
-                    }
-                    if (proofFallbackUrl) {
-                        beacon(proofFallbackUrl + '?proof=' + encodeURIComponent(JSON.stringify(proof)) + '&t=' + Date.now());
-                    }
-                    proofNavigate('mdi', 'proof=' + encodeURIComponent(JSON.stringify(proof)) + '&t=' + Date.now());
-                }
-                function scheduleReport() {
-                    if (typeof window.requestAnimationFrame === 'function') {
-                        window.requestAnimationFrame(function() {
-                            window.requestAnimationFrame(function() {
-                                report(2);
-                            });
-                        });
-                    } else {
-                        report(0);
-                    }
-                }
-                if (invoke || proofFallbackUrl) {
-                    scheduleReport();
-                }
-                } catch (err) {
-                    proofError(err);
-                }
-                };
+                window.__SIMPLE_TAURI_RUN_MDI_PROOF__ = routeProof;
                 if (!window.__SIMPLE_TAURI_MDI_PROOF_DELAYED__) {
                     window.__SIMPLE_TAURI_MDI_PROOF_DELAYED__ = true;
-                    window.setTimeout(function() {
-                        if (window.__SIMPLE_TAURI_RUN_MDI_PROOF__) {
-                            window.__SIMPLE_TAURI_RUN_MDI_PROOF__();
-                        }
-                    }, 2600);
+                    window.setTimeout(routeProof, 2600);
                 }
-                window.__SIMPLE_TAURI_RUN_MDI_PROOF__();
+                routeProof();
             })();
         "#
         .replace("__SIMPLE_MDI_PROOF_FALLBACK_URL__", &fallback_url);
@@ -2447,7 +2404,8 @@ mod tests {
         assert!(src.contains("simple-proof://"));
         assert!(src.contains(".on_navigation(move |url|"));
         assert!(src.contains("handle_mdi_proof_navigation(url, &proof_navigation_handle)"));
-        assert!(src.contains("window.__SIMPLE_TAURI_RUN_MDI_PROOF__ = function()"));
+        assert!(src.contains("function routeProof()"));
+        assert!(src.contains("window.__SIMPLE_TAURI_RUN_MDI_PROOF__ = routeProof"));
         assert!(src.contains("window.__SIMPLE_TAURI_MDI_PROOF_DELAYED__"));
         assert!(src.contains("window.setTimeout(function()"));
         assert!(src.contains("}, 2600);"));
@@ -2464,8 +2422,8 @@ mod tests {
         assert!(src.contains("new Image()"));
         assert!(src.contains("window.__SIMPLE_TAURI_MDI_PROOF_BEACONS__"));
         assert!(src.contains("encodeURIComponent(JSON.stringify(proof))"));
-        assert!(src.contains("proofNavigate('mdi', 'proof=' + encodeURIComponent(JSON.stringify(proof))"));
-        assert!(src.contains("if (invoke || proofFallbackUrl)"));
+        assert!(src.contains("nav('mdi', 'proof=' + encodeURIComponent(JSON.stringify(proof))"));
+        assert!(src.contains("routeProof();"));
         assert!(src.contains(r#".env("SIMPLE_UI_BACKEND", "tauri")"#));
         assert!(src.contains("SIMPLE_EXECUTION_MODE"));
         assert!(src.contains("SIMPLE_TIMEOUT_SECONDS"));

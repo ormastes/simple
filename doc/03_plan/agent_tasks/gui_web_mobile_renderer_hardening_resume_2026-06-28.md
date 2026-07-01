@@ -981,3 +981,40 @@ Security/local-network exception for `127.0.0.1`/`localhost` and prove the
 top-level ping arrives, or replace the loopback fallback with a Tauri/iOS-native
 proof path such as a custom protocol/navigation handler or the existing served
 URL/probe harness while keeping the strict normalized `MdiProof` rows.
+
+## 2026-07-02 iOS Foreground/Layout Gate
+
+Follow-up found an earlier iOS evidence weakness before the proof callback:
+
+- The MDI smoke subprocess emits all four `openWindow` rows and
+  `[tauri-shell] render, html_len=...`, but a simulator screenshot captured
+  immediately after the render marker can still show SpringBoard with the
+  Simple app icon instead of the Tauri WKWebView scene.
+- `build/goal-ios-preproof-layout-gate/stdout.env` failed quickly with
+  `reason=iOS renderer screenshot missing live MDI foreground layout`.
+  The semantic screenshot validator reported
+  `MDI screenshot missing dark desktop/window coverage: dark_pixels=133583`,
+  and `build/tauri_ios_mobile_renderer/ios_renderer_preproof.png` visually
+  shows the iOS home screen.
+- The iOS wrapper now captures `ios_renderer_preproof.png` after the render
+  marker and validates MDI-specific dark/bright/accent/taskbar coverage before
+  waiting for `[tauri-shell] mdi proof:`. This prevents background app logs from
+  being mistaken for live WKWebView renderer/layout evidence.
+- The compact proof script still parses locally and preserves the strict
+  normalized DOM/event proof fields, but live iOS proof delivery remains
+  incomplete until the app is foregrounded and the proof callback can be
+  observed.
+
+Focused checks passed after this hardening:
+
+- `cargo build --package simple-tauri-shell --manifest-path tools/tauri-shell/src-tauri/Cargo.toml --target aarch64-apple-ios-sim --lib --no-default-features`
+- `cargo test --manifest-path tools/tauri-shell/src-tauri/Cargo.toml tauri_mdi_bootstrap_has_drag_and_desktop_root`
+- `SIMPLE_LIB=src /Users/ormastes/simple/bin/simple test test/03_system/gui/tauri_mobile_renderer_parity_evidence_spec.spl --mode=interpreter --clean`
+- `sh -n scripts/check/check-tauri-ios-mobile-renderer-evidence.shs`
+
+Next work should focus on the iOS foreground/window lifecycle first, not proof
+transport. The wrapper now has the required evidence gate to distinguish:
+
+1. render logs exist but the simulator is still on SpringBoard;
+2. the Tauri WKWebView scene is foreground and semantically MDI-rendered;
+3. strict DOM/event `MdiProof` callback delivery succeeds.
