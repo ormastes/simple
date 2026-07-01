@@ -910,3 +910,39 @@ Next work should focus only on the iOS proof callback path: either make the
 Tauri command invoke reachable from iOS WKWebView proof JS or route iOS MDI
 proof through the existing URL/probe proof path without weakening the aggregate
 MDI detail rows.
+
+## 2026-07-02 iOS WKWebView Proof Transport Fallback
+
+Follow-up work made the proof script retry from inside the WebView and added a
+proof-mode localhost fallback transport:
+
+- `maybe_write_tauri_mdi_proof` now installs
+  `window.__SIMPLE_TAURI_RUN_MDI_PROOF__` and schedules one in-page delayed
+  retry so DOM/taskbar/bridge state is recomputed inside WKWebView.
+- The Tauri shell starts a localhost-only `/mdi-proof` receiver in proof mode.
+  The WebView sends the same live `MdiProof` JSON over both POST/fetch and a
+  GET image beacon fallback, so the data remains live DOM/event/viewport proof
+  rather than a Rust-side synthetic payload.
+- Focused checks passed:
+  `cargo check --manifest-path tools/tauri-shell/src-tauri/Cargo.toml`,
+  `cargo test --manifest-path tools/tauri-shell/src-tauri/Cargo.toml tauri_mdi_bootstrap_has_drag_and_desktop_root`,
+  `SIMPLE_LIB=src /Users/ormastes/simple/bin/simple test test/03_system/gui/tauri_mobile_renderer_parity_evidence_spec.spl --mode=interpreter --clean`,
+  and `git diff --check`.
+
+Live aggregate reruns were capped after two attempts this turn:
+
+- `build/goal-tauri-mobile-webview-delayed-proof/` still failed with
+  `tauri_mobile_renderer_parity_reason=Tauri iOS MDI proof log not observed within 120s`.
+- `build/goal-tauri-mobile-loopback-proof/` also failed with the same reason,
+  but the iOS log now shows the fallback listener starting:
+  `[tauri-shell] mdi proof loopback listening on http://127.0.0.1:60136/mdi-proof`.
+- Android remains green in the same aggregate:
+  `tauri_mobile_renderer_parity_android_status=pass`,
+  `tauri_mobile_renderer_parity_android_mdi_proof_status=pass`, and
+  `tauri_mobile_renderer_parity_android_mdi_event_status=pass`.
+
+The remaining iOS question is now narrower: WKWebView still does not deliver
+the proof payload to Rust. The next live run should test the image-beacon GET
+fallback; if it still does not hit the loopback receiver, inspect WKWebView
+cleartext/local-network policy or switch the iOS proof lane to the existing
+served URL/probe path while preserving the strict normalized MDI rows.

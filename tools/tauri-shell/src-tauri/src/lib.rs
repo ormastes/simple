@@ -8,11 +8,12 @@
 
 use std::env;
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 
 use serde::Deserialize;
@@ -23,6 +24,7 @@ include!(concat!(env!("OUT_DIR"), "/mobile_runtime_assets.rs"));
 static MDI_OPEN_WINDOW_COUNT: AtomicUsize = AtomicUsize::new(0);
 static MDI_IMAGE_COUNT: AtomicUsize = AtomicUsize::new(0);
 static MDI_RENDER_HTML_LEN: AtomicUsize = AtomicUsize::new(0);
+static MDI_PROOF_LOOPBACK_URL: OnceLock<String> = OnceLock::new();
 
 #[derive(Debug, Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -598,6 +600,146 @@ fn eval_tauri_mdi_message(app: &AppHandle, msg_json: String) {
     }
 }
 
+fn mdi_proof_loopback_url(app: &AppHandle) -> Option<String> {
+    if let Some(url) = MDI_PROOF_LOOPBACK_URL.get() {
+        return Some(url.clone());
+    }
+
+    let listener = match TcpListener::bind(("127.0.0.1", 0)) {
+        Ok(listener) => listener,
+        Err(err) => {
+            eprintln!("[tauri-shell] mdi proof loopback bind failed: {}", err);
+            return None;
+        }
+    };
+    let port = match listener.local_addr() {
+        Ok(addr) => addr.port(),
+        Err(err) => {
+            eprintln!("[tauri-shell] mdi proof loopback addr failed: {}", err);
+            return None;
+        }
+    };
+    let url = format!("http://127.0.0.1:{}/mdi-proof", port);
+    let handle = app.clone();
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            match stream {
+                Ok(stream) => handle_mdi_proof_loopback_connection(stream, &handle),
+                Err(err) => eprintln!("[tauri-shell] mdi proof loopback accept failed: {}", err),
+            }
+        }
+    });
+    eprintln!("[tauri-shell] mdi proof loopback listening on {}", url);
+    let _ = MDI_PROOF_LOOPBACK_URL.set(url.clone());
+    Some(url)
+}
+
+fn handle_mdi_proof_loopback_connection(mut stream: TcpStream, app: &AppHandle) {
+    let cloned = match stream.try_clone() {
+        Ok(cloned) => cloned,
+        Err(err) => {
+            eprintln!("[tauri-shell] mdi proof loopback clone failed: {}", err);
+            return;
+        }
+    };
+    let mut reader = BufReader::new(cloned);
+    let mut request = String::new();
+    if reader.read_line(&mut request).is_err() {
+        return;
+    }
+    let target = request.split_whitespace().nth(1).unwrap_or("");
+    if request.starts_with("GET ") && target.starts_with("/mdi-proof?") {
+        loop {
+            let mut line = String::new();
+            if reader.read_line(&mut line).is_err() || line.trim_end_matches(['\r', '\n']).is_empty() {
+                break;
+            }
+        }
+        if let Some(encoded) = target
+            .trim_start_matches("/mdi-proof?")
+            .split('&')
+            .find_map(|part| part.strip_prefix("proof="))
+        {
+            match percent_decode(encoded).and_then(|body| serde_json::from_slice::<MdiProof>(&body).ok()) {
+                Some(proof) => {
+                    report_mdi_proof(proof, app.clone());
+                    let _ = stream.write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n");
+                }
+                None => {
+                    let _ = stream.write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n");
+                }
+            }
+        } else {
+            let _ = stream.write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n");
+        }
+        return;
+    }
+    if !request.starts_with("POST /mdi-proof ") {
+        let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
+        return;
+    }
+
+    let mut content_length = 0usize;
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line).is_err() {
+            return;
+        }
+        let trimmed = line.trim_end_matches(['\r', '\n']);
+        if trimmed.is_empty() {
+            break;
+        }
+        if let Some((name, value)) = trimmed.split_once(':') {
+            if name.eq_ignore_ascii_case("content-length") {
+                content_length = value.trim().parse::<usize>().unwrap_or(0);
+            }
+        }
+    }
+
+    if content_length == 0 || content_length > 64 * 1024 {
+        let _ = stream.write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n");
+        return;
+    }
+    let mut body = vec![0u8; content_length];
+    if reader.read_exact(&mut body).is_err() {
+        let _ = stream.write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n");
+        return;
+    }
+    match serde_json::from_slice::<MdiProof>(&body) {
+        Ok(proof) => {
+            report_mdi_proof(proof, app.clone());
+            let _ = stream.write_all(
+                b"HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: 0\r\n\r\n",
+            );
+        }
+        Err(err) => {
+            eprintln!("[tauri-shell] mdi proof loopback parse failed: {}", err);
+            let _ = stream.write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n");
+        }
+    }
+}
+
+fn percent_decode(encoded: &str) -> Option<Vec<u8>> {
+    let bytes = encoded.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            if i + 2 >= bytes.len() {
+                return None;
+            }
+            let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok()?;
+            let value = u8::from_str_radix(hex, 16).ok()?;
+            out.push(value);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    Some(out)
+}
+
 fn maybe_write_tauri_mdi_proof(app: &AppHandle) {
     let proof_requested = env::var("SIMPLE_TAURI_MDI_PROOF_PATH").is_ok() || cfg!(mobile);
     if !proof_requested {
@@ -608,8 +750,12 @@ fn maybe_write_tauri_mdi_proof(app: &AppHandle) {
         return;
     }
     if let Some(win) = app.get_webview_window("main") {
+        let fallback_url = mdi_proof_loopback_url(app)
+            .and_then(|url| serde_json::to_string(&url).ok())
+            .unwrap_or_else(|| "null".to_string());
         let js = r#"
             (function() {
+                window.__SIMPLE_TAURI_RUN_MDI_PROOF__ = function() {
                 var wm = window.__SIMPLE_TAURI_WM__;
                 var dragMoved = false;
                 var bodyClickRouted = false;
@@ -698,12 +844,12 @@ fn maybe_write_tauri_mdi_proof(app: &AppHandle) {
                 var invoke = window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke
                     ? window.__TAURI_INTERNALS__.invoke
                     : (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke ? window.__TAURI__.core.invoke : null);
+                var proofFallbackUrl = __SIMPLE_MDI_PROOF_FALLBACK_URL__;
                 function report(animationFrameCount) {
                     var now = performanceNowAvailable ? window.performance.now() : 0;
                     var viewportWidth = Math.round(window.innerWidth || document.documentElement.clientWidth || 0);
                     var viewportHeight = Math.round(window.innerHeight || document.documentElement.clientHeight || 0);
-                    invoke('report_mdi_proof', {
-                        proof: {
+                    var proof = {
                             count: window.__SIMPLE_TAURI_WM__ ? Object.keys(window.__SIMPLE_TAURI_WM__.windows || {}).length : 0,
                             hasDesktop: !!document.getElementById('wm-desktop'),
                             imageCount: document.querySelectorAll('img.simple-picture').length,
@@ -733,10 +879,24 @@ fn maybe_write_tauri_mdi_proof(app: &AppHandle) {
                             cssAnimationProbe: cssAnimationProbe,
                             eventSequence: eventSequence,
                             htmlRenderable: document.body.innerHTML.indexOf('simple-app-window') >= 0 && document.body.innerHTML.indexOf('<pre class="simple-app-pre">') >= 0
-                        }
-                    });
+                    };
+                    if (invoke) {
+                        invoke('report_mdi_proof', { proof: proof });
+                    }
+                    if (proofFallbackUrl && typeof window.fetch === 'function') {
+                        window.fetch(proofFallbackUrl, {
+                            method: 'POST',
+                            body: JSON.stringify(proof)
+                        }).catch(function(_err) {});
+                    }
+                    if (proofFallbackUrl) {
+                        try {
+                            var img = new Image();
+                            img.src = proofFallbackUrl + '?proof=' + encodeURIComponent(JSON.stringify(proof)) + '&t=' + Date.now();
+                        } catch (_err) {}
+                    }
                 }
-                if (invoke) {
+                function scheduleReport() {
                     if (typeof window.requestAnimationFrame === 'function') {
                         window.requestAnimationFrame(function() {
                             window.requestAnimationFrame(function() {
@@ -747,9 +907,23 @@ fn maybe_write_tauri_mdi_proof(app: &AppHandle) {
                         report(0);
                     }
                 }
+                if (invoke) {
+                    scheduleReport();
+                }
+                };
+                if (!window.__SIMPLE_TAURI_MDI_PROOF_DELAYED__) {
+                    window.__SIMPLE_TAURI_MDI_PROOF_DELAYED__ = true;
+                    window.setTimeout(function() {
+                        if (window.__SIMPLE_TAURI_RUN_MDI_PROOF__) {
+                            window.__SIMPLE_TAURI_RUN_MDI_PROOF__();
+                        }
+                    }, 2600);
+                }
+                window.__SIMPLE_TAURI_RUN_MDI_PROOF__();
             })();
-        "#;
-        let _ = win.eval(js);
+        "#
+        .replace("__SIMPLE_MDI_PROOF_FALLBACK_URL__", &fallback_url);
+        let _ = win.eval(&js);
         let handle = app.clone();
         thread::spawn(move || {
             thread::sleep(std::time::Duration::from_millis(2600));
@@ -2148,6 +2322,18 @@ mod tests {
         assert!(src.contains("taskbarIconCount: taskbarIcons.length"));
         assert!(src.contains("taskbarIconsVisible: taskbarIconsVisible"));
         assert!(src.contains("taskbarLabelsVisible: taskbarLabelsVisible"));
+        assert!(src.contains("window.__SIMPLE_TAURI_RUN_MDI_PROOF__ = function()"));
+        assert!(src.contains("window.__SIMPLE_TAURI_MDI_PROOF_DELAYED__"));
+        assert!(src.contains("window.setTimeout(function()"));
+        assert!(src.contains("}, 2600);"));
+        assert!(src.contains("fn mdi_proof_loopback_url(app: &AppHandle) -> Option<String>"));
+        assert!(src.contains("POST /mdi-proof "));
+        assert!(src.contains("GET ") && src.contains("/mdi-proof?"));
+        assert!(src.contains("fn percent_decode(encoded: &str) -> Option<Vec<u8>>"));
+        assert!(src.contains("var proofFallbackUrl = __SIMPLE_MDI_PROOF_FALLBACK_URL__;"));
+        assert!(src.contains("window.fetch(proofFallbackUrl"));
+        assert!(src.contains("new Image()"));
+        assert!(src.contains("encodeURIComponent(JSON.stringify(proof))"));
         assert!(src.contains(r#".env("SIMPLE_UI_BACKEND", "tauri")"#));
         assert!(src.contains("SIMPLE_EXECUTION_MODE"));
         assert!(src.contains("SIMPLE_TIMEOUT_SECONDS"));
