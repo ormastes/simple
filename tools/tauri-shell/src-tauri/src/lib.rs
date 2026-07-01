@@ -764,6 +764,51 @@ fn handle_mdi_proof_loopback_connection(mut stream: TcpStream, app: &AppHandle) 
     }
 }
 
+fn handle_mdi_proof_navigation(url: &tauri::Url, app: &AppHandle) -> bool {
+    if url.scheme() != "simple-proof" {
+        return true;
+    }
+
+    let kind = url.host_str().unwrap_or("");
+    eprintln!("[tauri-shell] mdi proof navigation {}", url);
+    match kind {
+        "ping" => {
+            let phase = url
+                .query_pairs()
+                .find_map(|(name, value)| (name == "phase").then(|| value.into_owned()))
+                .unwrap_or_else(|| "unknown".to_string());
+            eprintln!("[tauri-shell] mdi proof navigation ping phase={}", phase);
+        }
+        "error" => {
+            let message = url
+                .query_pairs()
+                .find_map(|(name, value)| (name == "message").then(|| value.into_owned()))
+                .unwrap_or_else(|| "unknown".to_string());
+            eprintln!("[tauri-shell] mdi proof navigation js error: {}", message);
+        }
+        "mdi" => {
+            if let Some(proof_json) = url
+                .query_pairs()
+                .find_map(|(name, value)| (name == "proof").then(|| value.into_owned()))
+            {
+                match serde_json::from_str::<MdiProof>(&proof_json) {
+                    Ok(proof) => report_mdi_proof(proof, app.clone()),
+                    Err(err) => eprintln!(
+                        "[tauri-shell] mdi proof navigation parse failed: {}",
+                        err
+                    ),
+                }
+            } else {
+                eprintln!("[tauri-shell] mdi proof navigation missing proof payload");
+            }
+        }
+        _ => {
+            eprintln!("[tauri-shell] mdi proof navigation unknown kind={}", kind);
+        }
+    }
+    false
+}
+
 fn percent_decode(encoded: &str) -> Option<Vec<u8>> {
     let bytes = encoded.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
@@ -814,10 +859,17 @@ fn maybe_write_tauri_mdi_proof(app: &AppHandle) {
                         var message = err && (err.stack || err.message || String(err)) || 'unknown';
                         beacon(proofFallbackUrl.replace('/mdi-proof', '/mdi-proof-error') + '?message=' + encodeURIComponent(message) + '&t=' + Date.now());
                     }
+                    proofNavigate('error', 'message=' + encodeURIComponent(err && (err.stack || err.message || String(err)) || 'unknown'));
+                }
+                function proofNavigate(kind, query) {
+                    try {
+                        window.location.href = 'simple-proof://' + kind + (query ? '?' + query : '');
+                    } catch (_err) {}
                 }
                 if (proofFallbackUrl) {
                     beacon(proofFallbackUrl + '-ping?phase=eval&t=' + Date.now());
                 }
+                proofNavigate('ping', 'phase=eval&t=' + Date.now());
                 window.__SIMPLE_TAURI_RUN_MDI_PROOF__ = function() {
                 try {
                 var wm = window.__SIMPLE_TAURI_WM__;
@@ -955,6 +1007,7 @@ fn maybe_write_tauri_mdi_proof(app: &AppHandle) {
                     if (proofFallbackUrl) {
                         beacon(proofFallbackUrl + '?proof=' + encodeURIComponent(JSON.stringify(proof)) + '&t=' + Date.now());
                     }
+                    proofNavigate('mdi', 'proof=' + encodeURIComponent(JSON.stringify(proof)) + '&t=' + Date.now());
                 }
                 function scheduleReport() {
                     if (typeof window.requestAnimationFrame === 'function') {
@@ -2028,7 +2081,10 @@ pub fn run() {
                 WebviewUrl::App("index.html".into())
             };
 
-            let builder = WebviewWindowBuilder::new(app, "main", url);
+            let proof_navigation_handle = app.handle().clone();
+            let builder = WebviewWindowBuilder::new(app, "main", url).on_navigation(move |url| {
+                handle_mdi_proof_navigation(url, &proof_navigation_handle)
+            });
             #[cfg(desktop)]
             let builder = builder
                 .title("Simple Window Manager")
@@ -2387,6 +2443,10 @@ mod tests {
         assert!(src.contains("taskbarLabelsVisible: taskbarLabelsVisible"));
         assert!(src.contains("fn eval_webview_js_on_main(win: &tauri::WebviewWindow"));
         assert!(src.contains("dispatcher.run_on_main_thread"));
+        assert!(src.contains("fn handle_mdi_proof_navigation(url: &tauri::Url, app: &AppHandle) -> bool"));
+        assert!(src.contains("simple-proof://"));
+        assert!(src.contains(".on_navigation(move |url|"));
+        assert!(src.contains("handle_mdi_proof_navigation(url, &proof_navigation_handle)"));
         assert!(src.contains("window.__SIMPLE_TAURI_RUN_MDI_PROOF__ = function()"));
         assert!(src.contains("window.__SIMPLE_TAURI_MDI_PROOF_DELAYED__"));
         assert!(src.contains("window.setTimeout(function()"));
@@ -2404,6 +2464,7 @@ mod tests {
         assert!(src.contains("new Image()"));
         assert!(src.contains("window.__SIMPLE_TAURI_MDI_PROOF_BEACONS__"));
         assert!(src.contains("encodeURIComponent(JSON.stringify(proof))"));
+        assert!(src.contains("proofNavigate('mdi', 'proof=' + encodeURIComponent(JSON.stringify(proof))"));
         assert!(src.contains("if (invoke || proofFallbackUrl)"));
         assert!(src.contains(r#".env("SIMPLE_UI_BACKEND", "tauri")"#));
         assert!(src.contains("SIMPLE_EXECUTION_MODE"));
