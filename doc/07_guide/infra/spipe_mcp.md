@@ -87,6 +87,8 @@ rows have that path as their parent prefix.
 rows starting with `d` as directories.
 `git status` output extracts standard status paths including modified, new,
 deleted, renamed, and both-modified rows.
+`git diff` output extracts the destination path from `diff --git a/... b/...`
+headers.
 Path leaves render as `kind=file`; non-path output remains `kind=line` and can
 still be grouped by explicit log level.
 
