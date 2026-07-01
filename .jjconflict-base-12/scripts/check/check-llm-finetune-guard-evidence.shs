@@ -1,0 +1,111 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+SIMPLE_BIN="${SIMPLE_BIN:-release/x86_64-unknown-linux-gnu/simple}"
+BUILD_DIR="${BUILD_DIR:-build/llm_finetune_guard_evidence}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/2026/06/llm_finetune_guard_evidence_$(date -u +%F).md}"
+OUT_ENV="$BUILD_DIR/evidence.env"
+DATA_FILE=".spipe/llm-finetune-process/data/llm_backed_app_server_dry_run_retry2_fixed_format_sample.jsonl"
+RETRY6_ATTEMPT="llm_backed_app_server_dry_run_retry6"
+RETRY7_ATTEMPT="llm_backed_app_server_dry_run_retry7"
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+rm -f "$OUT_ENV" "$REPORT_PATH"
+
+run_check() {
+    key="$1"
+    log="$2"
+    shift 2
+    if "$@" >"$log" 2>&1; then
+        eval "${key}_status=pass"
+        eval "${key}_exit=0"
+    else
+        code=$?
+        eval "${key}_status=fail"
+        eval "${key}_exit=$code"
+    fi
+}
+
+expect_log() {
+    key="$1"
+    log="$2"
+    needle="$3"
+    if grep -F "$needle" "$log" >/dev/null 2>&1; then
+        eval "${key}_status=pass"
+    else
+        eval "${key}_status=fail"
+    fi
+}
+
+DATA_LOG="$BUILD_DIR/fixed_format_data_quality.log"
+RETRY6_DIRECT_LOG="$BUILD_DIR/retry6_direct_gate.log"
+RETRY7_DIRECT_LOG="$BUILD_DIR/retry7_direct_gate.log"
+RETRY6_SPEC_LOG="$BUILD_DIR/retry6_spec.log"
+RETRY7_SPEC_LOG="$BUILD_DIR/retry7_spec.log"
+
+run_check data_quality "$DATA_LOG" \
+    .spipe/llm-finetune-process/scripts/check_fixed_format_data_quality.shs "$DATA_FILE"
+
+run_check retry6_direct_exit "$RETRY6_DIRECT_LOG" \
+    .spipe/llm-finetune-process/scripts/check_retry6_training_eval_gate.shs "$RETRY6_ATTEMPT"
+expect_log retry6_direct_status "$RETRY6_DIRECT_LOG" "STATUS: WARN retry6-training-eval-gate"
+expect_log retry6_direct_result "$RETRY6_DIRECT_LOG" "result=BLOCKED_UPSTREAM_LICENSED_DATA_NOT_READY"
+
+run_check retry7_direct_exit "$RETRY7_DIRECT_LOG" \
+    .spipe/llm-finetune-process/scripts/check_retry7_acceptance_gate.shs "$RETRY7_ATTEMPT"
+expect_log retry7_direct_status "$RETRY7_DIRECT_LOG" "STATUS: WARN retry7-acceptance-gate"
+expect_log retry7_direct_result "$RETRY7_DIRECT_LOG" "result=BLOCKED_RETRY6_NOT_READY"
+
+run_check retry6_spec "$RETRY6_SPEC_LOG" \
+    "$SIMPLE_BIN" test test/03_system/tools/spipe/llm_finetune_retry6_training_eval_gate_spec.spl --mode=interpreter --clean
+run_check retry7_spec "$RETRY7_SPEC_LOG" \
+    "$SIMPLE_BIN" test test/03_system/tools/spipe/llm_finetune_retry7_acceptance_gate_spec.spl --mode=interpreter --clean
+
+status="pass"
+for key in \
+    data_quality \
+    retry6_direct_exit retry6_direct_status retry6_direct_result \
+    retry7_direct_exit retry7_direct_status retry7_direct_result \
+    retry6_spec retry7_spec
+do
+    eval "value=\${${key}_status}"
+    if [ "$value" != "pass" ]; then
+        status="fail"
+    fi
+done
+
+{
+    printf '%s\n' "llm_finetune_guard_evidence_status=$status"
+    printf '%s\n' "llm_finetune_guard_data_quality_status=$data_quality_status"
+    printf '%s\n' "llm_finetune_guard_retry6_direct_exit_status=$retry6_direct_exit_status"
+    printf '%s\n' "llm_finetune_guard_retry6_direct_status=$retry6_direct_status_status"
+    printf '%s\n' "llm_finetune_guard_retry6_direct_result_status=$retry6_direct_result_status"
+    printf '%s\n' "llm_finetune_guard_retry7_direct_exit_status=$retry7_direct_exit_status"
+    printf '%s\n' "llm_finetune_guard_retry7_direct_status=$retry7_direct_status_status"
+    printf '%s\n' "llm_finetune_guard_retry7_direct_result_status=$retry7_direct_result_status"
+    printf '%s\n' "llm_finetune_guard_retry6_spec_status=$retry6_spec_status"
+    printf '%s\n' "llm_finetune_guard_retry7_spec_status=$retry7_spec_status"
+} >"$OUT_ENV"
+
+{
+    printf '# LLM Fine-Tune Guard Evidence\n\n'
+    printf '%s\n' "- status: \`$status\`"
+    printf '%s\n' "- fixed_format_data_quality: \`$data_quality_status\` exit=\`$data_quality_exit\` log=\`$DATA_LOG\`"
+    printf '%s\n' "- retry6_direct_gate: exit=\`$retry6_direct_exit_status\` expected_status=\`$retry6_direct_status_status\` expected_result=\`$retry6_direct_result_status\` log=\`$RETRY6_DIRECT_LOG\`"
+    printf '%s\n' "- retry7_direct_gate: exit=\`$retry7_direct_exit_status\` expected_status=\`$retry7_direct_status_status\` expected_result=\`$retry7_direct_result_status\` log=\`$RETRY7_DIRECT_LOG\`"
+    printf '%s\n' "- retry6_spec: \`$retry6_spec_status\` exit=\`$retry6_spec_exit\` log=\`$RETRY6_SPEC_LOG\`"
+    printf '%s\n' "- retry7_spec: \`$retry7_spec_status\` exit=\`$retry7_spec_exit\` log=\`$RETRY7_SPEC_LOG\`"
+    printf '%s\n' "- env: \`$OUT_ENV\`"
+    printf '\n'
+    printf 'This evidence proves the local fine-tune process guards: fixed-format sample quality passes, retry6 remains blocked before licensed data/model/eval evidence, and retry7 remains blocked before retry6 target-eval plus normal-review evidence. It is not model training, target-eval, safety, deployment, or release-handoff proof.\n'
+} >"$REPORT_PATH"
+
+if [ "$status" = "pass" ]; then
+    echo "STATUS: PASS llm-finetune-guard-evidence"
+else
+    echo "STATUS: FAIL llm-finetune-guard-evidence"
+    exit 1
+fi

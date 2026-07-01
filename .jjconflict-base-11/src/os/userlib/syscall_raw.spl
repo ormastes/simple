@@ -1,0 +1,127 @@
+# Raw syscall invocation for SimpleOS.
+#
+# Register convention:
+# - x86_64: rax = id, rdi/rsi/rdx/r10/r8 = args, result in rax
+# - riscv64: a7 = id, a0-a4 = args, result in a0
+# - riscv32: a7 = id, a0-a4 = args, result in a0
+@cfg(x86_64)
+extern fn rt_x86_syscall(id: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> i64
+
+@cfg(x86_64)
+fn syscall(id: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> i64:
+    # The Simple `asm volatile:` block below was the original implementation
+    # but the baremetal native-build lowers it to a no-op stub (returns a
+    # constant), so no `syscall` instruction reaches the CPU. Delegate to the
+    # C-ABI extern `rt_x86_syscall` in baremetal_stubs.c which emits the
+    # real instruction. Restore the inline asm here once the compiler lowers
+    # `asm volatile:` correctly in the freestanding build.
+    rt_x86_syscall(id, arg0, arg1, arg2, arg3, arg4)
+
+@cfg(riscv64)
+fn syscall(id: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> i64:
+    var result: i64 = 0
+    asm volatile {
+        "mv a7, {id}"
+        "mv a0, {arg0}"
+        "mv a1, {arg1}"
+        "mv a2, {arg2}"
+        "mv a3, {arg3}"
+        "mv a4, {arg4}"
+        "ecall"
+        "mv {out}, a0"
+        in(reg) id
+        in(reg) arg0
+        in(reg) arg1
+        in(reg) arg2
+        in(reg) arg3
+        in(reg) arg4
+        out(reg) result
+    }
+    result
+
+@cfg(riscv32)
+fn syscall(id: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> i64:
+    val id32 = id as u32
+    val arg032 = arg0 as u32
+    val arg132 = arg1 as u32
+    val arg232 = arg2 as u32
+    val arg332 = arg3 as u32
+    val arg432 = arg4 as u32
+    var result32: u32 = 0
+    asm volatile {
+        "mv a7, {id}"
+        "mv a0, {arg0}"
+        "mv a1, {arg1}"
+        "mv a2, {arg2}"
+        "mv a3, {arg3}"
+        "mv a4, {arg4}"
+        "ecall"
+        "mv {out}, a0"
+        in(reg) id32
+        in(reg) arg032
+        in(reg) arg132
+        in(reg) arg232
+        in(reg) arg332
+        in(reg) arg432
+        out(reg) result32
+    }
+    # Zero-extend to avoid sign-extending heap pointers (bit 31 set)
+    # Only sign-extend small negative values (error codes: -1..-255)
+    if result32 > 0xFFFFFF00:
+        (result32 as i32) as i64
+    else:
+        result32 as u64 as i64
+
+# ============================================================================
+# spm-winfs-llm-suite (AC-3 / AC-4) — privilege + SPM + window wrappers.
+#
+# The byte-slice arguments travel through the existing 5-arg syscall as a
+# (ptr, len) pair in arg0 / arg1. A real raw-pointer helper is not yet
+# exposed in userland; callers pass `0 as u64` for the ptr until the pipe
+# is wired — this keeps dispatch exercisable in tests without crashing on
+# a real kernel run (kernel returns EINVAL for a null ptr).
+# ============================================================================
+
+fn sys_priv_check(id_path_bytes: [u8]) -> bool:
+    val rc = syscall(110 as u64, 0 as u64, id_path_bytes.len() as u64, 0 as u64, 0 as u64, 0 as u64)
+    rc != 0 as i64
+
+fn sys_win_register(record_bytes: [u8]) -> u64:
+    val rc = syscall(111 as u64, 0 as u64, record_bytes.len() as u64, 0 as u64, 0 as u64, 0 as u64)
+    if rc < 0 as i64:
+        return 0 as u64
+    rc as u64
+
+fn sys_approval_request(intent_bytes: [u8]) -> [u8]:
+    val _ = syscall(112 as u64, 0 as u64, intent_bytes.len() as u64, 0 as u64, 0 as u64, 0 as u64)
+    []
+
+fn sys_spm_send(req_bytes: [u8]) -> [u8]:
+    val _ = syscall(113 as u64, 0 as u64, req_bytes.len() as u64, 0 as u64, 0 as u64, 0 as u64)
+    []
+
+fn sys_spm_listen() -> [u8]:
+    val _ = syscall(114 as u64, 0 as u64, 0 as u64, 0 as u64, 0 as u64, 0 as u64)
+    []
+
+fn sys_spm_claim() -> i64:
+    syscall(115 as u64, 0 as u64, 0 as u64, 0 as u64, 0 as u64, 0 as u64)
+
+# ============================================================================
+# POSIX fd/readiness syscall wrappers.
+# ============================================================================
+
+fn sys_pipe(fd_pair_ptr: u64) -> i64:
+    syscall(62 as u64, fd_pair_ptr, 0 as u64, 0 as u64, 0 as u64, 0 as u64)
+
+fn sys_dup2(old_fd: i32, new_fd: i32) -> i64:
+    syscall(63 as u64, old_fd as u64, new_fd as u64, 0 as u64, 0 as u64, 0 as u64)
+
+fn sys_dup(old_fd: i32) -> i64:
+    syscall(64 as u64, old_fd as u64, 0 as u64, 0 as u64, 0 as u64, 0 as u64)
+
+fn sys_poll(pollfds_ptr: u64, nfds: u64, timeout_ms: i64) -> i64:
+    syscall(68 as u64, pollfds_ptr, nfds, timeout_ms as u64, 0 as u64, 0 as u64)
+
+fn sys_fcntl(fd: i32, cmd: i32, arg: u64) -> i64:
+    syscall(69 as u64, fd as u64, cmd as u64, arg, 0 as u64, 0 as u64)

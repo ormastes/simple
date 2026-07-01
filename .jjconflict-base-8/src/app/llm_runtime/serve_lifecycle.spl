@@ -16,13 +16,16 @@ pub fn llm_runtime_start_vllm_serve(manifest: LlmRuntimeManifest) -> LlmRuntimeS
     val plan = llm_runtime_static_serve_plan(manifest)
     if plan.status != "planned":
         return _lifecycle_result("not_started", plan.reason, -1, "not_started", plan.binary, plan.command_preview)
-    val pid = process_spawn_async("vllm", _serve_args(manifest))
-    llm_runtime_vllm_serve_lifecycle_from_pid(pid, plan.command_preview)
+    val pid = process_spawn_async(plan.binary, _serve_args(manifest))
+    _serve_lifecycle_from_pid(pid, plan.binary, plan.command_preview)
 
 pub fn llm_runtime_vllm_serve_lifecycle_from_pid(pid: i64, command_preview: text) -> LlmRuntimeServeLifecycleResult:
+    _serve_lifecycle_from_pid(pid, "vllm", command_preview)
+
+fn _serve_lifecycle_from_pid(pid: i64, binary: text, command_preview: text) -> LlmRuntimeServeLifecycleResult:
     if pid <= 0:
-        return _lifecycle_result("error", "spawn_failed", pid, "not_running", "vllm", command_preview)
-    _lifecycle_result("started", "process_spawned", pid, "unknown_until_polled", "vllm", command_preview)
+        return _lifecycle_result("error", "spawn_failed", pid, "not_running", binary, command_preview)
+    _lifecycle_result("started", "process_spawned", pid, "unknown_until_polled", binary, command_preview)
 
 pub fn llm_runtime_vllm_serve_running_status(pid: i64) -> text:
     if pid <= 0:
@@ -50,6 +53,18 @@ pub fn llm_runtime_serve_lifecycle_jsonl_event(result: LlmRuntimeServeLifecycleR
     RB() + "\n"
 
 fn _serve_args(manifest: LlmRuntimeManifest) -> [text]:
+    if manifest.backend == "sglang":
+        var sglang_args = ["-m", "sglang.launch_server", "--model-path", manifest.base_model]
+        if manifest.tensor_parallel_size > 0:
+            sglang_args.push("--tp")
+            sglang_args.push(manifest.tensor_parallel_size.to_text())
+        if manifest.data_parallel_size > 0:
+            sglang_args.push("--dp")
+            sglang_args.push(manifest.data_parallel_size.to_text())
+        if manifest.memory_fraction_static.trim() != "":
+            sglang_args.push("--mem-fraction-static")
+            sglang_args.push(manifest.memory_fraction_static.trim())
+        return sglang_args
     var args = ["serve", manifest.base_model]
     if manifest.lora_adapters.len() > 0:
         args.push("--enable-lora")

@@ -1,0 +1,700 @@
+
+# ============================================================================
+# common/compress/typed/deflate_typed.spl — DEFLATE (RFC 1951) + gzip codec
+#
+# Implements:
+#   deflate_stored(input: ByteSpan) -> ByteBuffer   BTYPE=00 stored blocks
+#   inflate_stored(input: ByteSpan) -> ByteBuffer   decompress stored blocks
+#   deflate_fixed(input: ByteSpan) -> ByteBuffer    BTYPE=01 fixed-Huffman (literals only)
+#   inflate_fixed(input: ByteSpan) -> ByteBuffer    decompress fixed-Huffman
+#   deflate_lz77_tokens(input: ByteSpan) -> [LzToken]  LZ77 tokeniser
+#   gzip_compress(input: ByteSpan) -> ByteBuffer    gzip frame (CM=8)
+#   gzip_decompress(input: ByteSpan) -> ByteBuffer  parse+verify gzip
+#
+# Bit ordering: DEFLATE is LSB-first throughout (RFC 1951 §3.1.1).
+# Non-Huffman fields (BFINAL/BTYPE, LEN/NLEN, extra bits) go into an LSB writer.
+# Huffman codes are canonical (MSB-first by value in RFC 1951).
+# Emitting them on an LSB wire requires bit-reversal before put_bits.
+# Decoding reads bits one at a time, accumulating MSB-first to match canonical codes.
+#
+# gzip header: magic 1f 8b, CM=8, FLG=0, MTIME=0 (4 bytes), XFL=0, OS=255.
+# gzip trailer: CRC32(uncompressed) LE 4 bytes, ISIZE (len mod 2^32) LE 4 bytes.
+#
+# NOTE: deflate_fixed emits literals-only (no LZ77) for interpreter performance.
+# Use deflate_lz77_tokens separately for match tokenisation.
+# ============================================================================
+
+use lib.common.compress.typed.types.{LzToken, HuffTable}
+use lib.common.bytes.bits.{BitWriter, BitReader}
+use lib.common.bytes.checksum.{Crc32}
+use lib.common.bytes.span.{ByteSpan, ByteBuffer}
+use lib.common.bytes.window.{RingWindow}
+
+# ----------------------------------------------------------------------------
+# Helper: bit-reverse the low `n` bits of `v`
+# DEFLATE Huffman codes have MSB-first canonical values but are packed
+# LSB-first into the byte stream. Reversing before put_bits achieves this.
+# ----------------------------------------------------------------------------
+fn deflate_reverse_bits(v: i64, n: i64) -> i64:
+    var result = 0
+    var i = 0
+    while i < n:
+        result = (result << 1) | ((v >> i) & 1)
+        i = i + 1
+    result
+
+# ============================================================================
+# Fixed Huffman table builders (RFC 1951 §3.2.6)
+# ============================================================================
+
+# Build the fixed literal/length code table (288 symbols):
+#   sym 0..143  -> code length 8
+#   sym 144..255 -> code length 9
+#   sym 256..279 -> code length 7
+#   sym 280..287 -> code length 8
+fn deflate_fixed_litlen_table() -> HuffTable:
+    var lengths: [i64] = []
+    var i = 0
+    while i < 288:
+        var cl = 8
+        if i >= 144 and i <= 255:
+            cl = 9
+        if i >= 256 and i <= 279:
+            cl = 7
+        if i >= 280 and i <= 287:
+            cl = 8
+        lengths.push(cl)
+        i = i + 1
+    HuffTable.from_code_lengths(lengths)
+
+# Build the fixed distance code table (32 symbols, all length 5)
+fn deflate_fixed_dist_table() -> HuffTable:
+    var lengths: [i64] = []
+    var i = 0
+    while i < 32:
+        lengths.push(5)
+        i = i + 1
+    HuffTable.from_code_lengths(lengths)
+
+# ============================================================================
+# Length/distance tables (RFC 1951 §3.2.5)
+# ============================================================================
+
+fn deflate_length_base(code: i64) -> i64:
+    val bases: [i64] = [3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258]
+    val idx = code - 257
+    if idx < 0 or idx >= 29:
+        return 3
+    bases[idx]
+
+fn deflate_length_extra(code: i64) -> i64:
+    val extras: [i64] = [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0]
+    val idx = code - 257
+    if idx < 0 or idx >= 29:
+        return 0
+    extras[idx]
+
+fn deflate_dist_base(code: i64) -> i64:
+    val bases: [i64] = [1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577]
+    if code < 0 or code >= 30:
+        return 1
+    bases[code]
+
+fn deflate_dist_extra(code: i64) -> i64:
+    val extras: [i64] = [0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13]
+    if code < 0 or code >= 30:
+        return 0
+    extras[code]
+
+fn deflate_encode_length_sym(length: i64) -> i64:
+    var sym = 257
+    while sym < 285:
+        val nb = deflate_length_base(sym + 1)
+        if length < nb:
+            return sym
+        sym = sym + 1
+    285
+
+fn deflate_encode_dist_sym(dist: i64) -> i64:
+    var sym = 0
+    while sym < 29:
+        val nb = deflate_dist_base(sym + 1)
+        if dist < nb:
+            return sym
+        sym = sym + 1
+    29
+
+# ============================================================================
+# LZ77 tokeniser using RingWindow
+# Returns a flat [LzToken] array for the input.
+# NOTE: Kept as a standalone exported function; deflate_fixed uses literal-only
+# path for interpreter performance (the JIT rejects nested-loop functions
+# cross-module). Call this separately if LZ77 matches are needed.
+# ============================================================================
+
+fn deflate_lz77_tokens(input: ByteSpan) -> [LzToken]:
+    """LZ77 tokeniser. Scans the sliding window (32 KB) for back-references
+    of length >= 3 (RFC 1951). Returns a mix of Literal and Match tokens."""
+    var tokens: [LzToken] = []
+    var win = RingWindow.new(32768)
+    var pos = 0
+    val n = input.len()
+    while pos < n:
+        val ws = win.size()
+        var best_len = 0
+        var best_dist = 0
+        var d = 1
+        while d <= ws:
+            var ml = 0
+            var stop = 0
+            while ml < 258 and (pos + ml) < n and stop == 0:
+                var ld = d - ml
+                if ld < 1:
+                    ld = 1
+                val hb = win.at_distance(ld)
+                val ib = input.get(pos + ml)
+                if hb != ib:
+                    stop = 1
+                else:
+                    ml = ml + 1
+            if ml > best_len:
+                best_len = ml
+                best_dist = d
+            d = d + 1
+        if best_len >= 3:
+            tokens.push(LzToken.Match(distance: best_dist, length: best_len))
+            var k = 0
+            while k < best_len:
+                win.push(input.get(pos + k))
+                k = k + 1
+            pos = pos + best_len
+        else:
+            val b = input.get(pos).to_i64()
+            tokens.push(LzToken.Literal(b: b))
+            win.push(input.get(pos))
+            pos = pos + 1
+    tokens
+
+# ============================================================================
+# STORED blocks (BTYPE=00) — simplest baseline
+# ============================================================================
+
+fn deflate_stored(input: ByteSpan) -> ByteBuffer:
+    """Compress input as one or more DEFLATE stored blocks (BTYPE=00).
+    Each block holds up to 65535 bytes."""
+    var out = ByteBuffer.new()
+    val n = input.len()
+    val max_block = 65535
+    var pos = 0
+    var emitted = 0
+    while emitted == 0:
+        val remaining = n - pos
+        var block_len = remaining
+        if block_len > max_block:
+            block_len = max_block
+        val is_last = (pos + block_len) >= n
+        var header = 0
+        if is_last:
+            header = 1
+        out.push_byte(header)
+        out.push_byte(block_len & 0xFF)
+        out.push_byte((block_len >> 8) & 0xFF)
+        val nlen = (block_len ^ 0xFFFF) & 0xFFFF
+        out.push_byte(nlen & 0xFF)
+        out.push_byte((nlen >> 8) & 0xFF)
+        var i = 0
+        while i < block_len:
+            out.push_u8(input.get(pos + i))
+            i = i + 1
+        pos = pos + block_len
+        if is_last:
+            emitted = 1
+    out
+
+fn inflate_stored(input: ByteSpan) -> ByteBuffer:
+    """Decompress stored DEFLATE blocks."""
+    var out = ByteBuffer.new()
+    var pos = 0
+    val n = input.len()
+    var done = 0
+    var saw_final = false
+    while pos < n and done == 0:
+        val header = input.get(pos).to_i64()
+        val bfinal = header & 1
+        val btype = (header >> 1) & 3
+        pos = pos + 1
+        if btype == 0:
+            if pos + 4 > n:
+                return ByteBuffer.new()
+            val bl_lo = input.get(pos).to_i64()
+            val bl_hi = input.get(pos + 1).to_i64()
+            val bl = bl_lo | (bl_hi << 8)
+            val nlen_lo = input.get(pos + 2).to_i64()
+            val nlen_hi = input.get(pos + 3).to_i64()
+            val nlen = nlen_lo | (nlen_hi << 8)
+            if ((bl ^ 0xFFFF) & 0xFFFF) != nlen:
+                return ByteBuffer.new()
+            pos = pos + 4
+            var i = 0
+            while i < bl and pos + i < n:
+                out.push_u8(input.get(pos + i))
+                i = i + 1
+            if i < bl:
+                return ByteBuffer.new()
+            pos = pos + bl
+        else:
+            return ByteBuffer.new()
+        if bfinal == 1:
+            saw_final = true
+            done = 1
+    if not saw_final:
+        return ByteBuffer.new()
+    if pos != n:
+        return ByteBuffer.new()
+    out
+
+# ============================================================================
+# FIXED Huffman blocks (BTYPE=01) — literals-only path for interpreter speed
+# Emits all input bytes as literal symbols (no LZ77 matching).
+# For LZ77-compressed output, use deflate_lz77_tokens separately.
+# ============================================================================
+
+fn deflate_fixed_emit_literal(sym: i64, w: BitWriter):
+    """Emit one fixed-Huffman literal/length code to an LSB BitWriter.
+    Hardcoded per RFC 1951 §3.2.6 — no table construction needed.
+    Codes are reversed (MSB-first canonical → LSB-first wire)."""
+    if sym >= 0 and sym <= 143:
+        # 8-bit codes: canonical = 0x30 + sym (48..191)
+        # reversed: deflate_reverse_bits(0x30 + sym, 8)
+        val canonical = 48 + sym
+        val rev = deflate_reverse_bits(canonical, 8)
+        w.put_bits(rev, 8)
+    else:
+        if sym >= 144 and sym <= 255:
+            # 9-bit codes: canonical = 0x190 + (sym - 144) (400..511)
+            val canonical = 400 + (sym - 144)
+            val rev = deflate_reverse_bits(canonical, 9)
+            w.put_bits(rev, 9)
+        else:
+            if sym >= 256 and sym <= 279:
+                # 7-bit codes: canonical = sym - 256 (0..23)
+                val canonical = sym - 256
+                val rev = deflate_reverse_bits(canonical, 7)
+                w.put_bits(rev, 7)
+            else:
+                if sym >= 280 and sym <= 287:
+                    # 8-bit codes: canonical = 0xC0 + (sym - 280) (192..199)
+                    val canonical = 192 + (sym - 280)
+                    val rev = deflate_reverse_bits(canonical, 8)
+                    w.put_bits(rev, 8)
+
+fn deflate_fixed(input: ByteSpan) -> ByteBuffer:
+    """Compress input as a single DEFLATE fixed-Huffman block (BTYPE=01).
+    Emits all bytes as literals (no back-references).
+    Hardcoded encode — no HuffTable construction for speed.
+    NOTE: deflate_fixed_emit_literal is inlined here to avoid passing the
+    BitWriter local as a cross-module argument, which triggers the interpreter's
+    local-slot aliasing bug when called repeatedly from test/ subdirectory specs."""
+    var w = BitWriter.lsb()
+
+    # BFINAL=1, BTYPE=01: 3 bits LSB-first
+    w.put_bits(1, 1)
+    w.put_bits(1, 1)
+    w.put_bits(0, 1)
+
+    val n = input.len()
+    var pos = 0
+    while pos < n:
+        val sym = input.get(pos).to_i64()
+        # Inline of deflate_fixed_emit_literal(sym, w):
+        if sym >= 0 and sym <= 143:
+            val canonical = 48 + sym
+            val rev = deflate_reverse_bits(canonical, 8)
+            w.put_bits(rev, 8)
+        else:
+            if sym >= 144 and sym <= 255:
+                val canonical = 400 + (sym - 144)
+                val rev = deflate_reverse_bits(canonical, 9)
+                w.put_bits(rev, 9)
+            else:
+                if sym >= 256 and sym <= 279:
+                    val canonical = sym - 256
+                    val rev = deflate_reverse_bits(canonical, 7)
+                    w.put_bits(rev, 7)
+                else:
+                    if sym >= 280 and sym <= 287:
+                        val canonical = 192 + (sym - 280)
+                        val rev = deflate_reverse_bits(canonical, 8)
+                        w.put_bits(rev, 8)
+        pos = pos + 1
+
+    # End-of-block: sym 256 → 7-bit canonical=0 → reversed=0
+    w.put_bits(0, 7)
+
+    w.align()
+    w.finish()
+
+fn inflate_fixed_decode_litlen(r: BitReader) -> i64:
+    """Decode one fixed-Huffman literal/length symbol from an LSB BitReader.
+    RFC 1951 §3.2.6 fixed codes (reversed for LSB wire):
+      7-bit codes  0b0000000..0b0010111 → sym 256..279  (read: low 7 bits, add 256 if < 24 else subtract 24... use range check)
+      8-bit codes  0b00110000..0b10111111 → sym 0..143
+      8-bit codes  0b11000000..0b11000111 → sym 280..287
+      9-bit codes  0b110010000..0b111111111 → sym 144..255
+    Fast path using prefix bits accumulated from LSB reader (MSB-first accumulation):
+      After 1 bit: not enough to decode; need at least 7.
+      After 7 bits: if acc in [0..23] → sym = 256 + acc; done.
+      Otherwise read 1 more bit (8 total):
+        acc8 = (acc << 1) | next_bit
+        if acc8 in [48..191] → sym = acc8 - 48; done.
+        if acc8 in [192..199] → sym = 280 + (acc8 - 192); done.
+        Otherwise read 1 more bit (9 total):
+          acc9 = (acc8 << 1) | next_bit
+          if acc9 in [400..511] → sym = 144 + (acc9 - 400); done.
+    Returns -1 on EOF."""
+    # Read 7 bits MSB-first from LSB stream
+    var acc = 0
+    var i = 0
+    while i < 7:
+        if r.eof():
+            return -1
+        val bit = r.read_bits(1)
+        acc = (acc << 1) | bit
+        i = i + 1
+    # 7-bit codes: 0..23 → sym 256..279
+    if acc >= 0 and acc <= 23:
+        return 256 + acc
+    # Need 8th bit
+    if r.eof():
+        return -1
+    val b8 = r.read_bits(1)
+    val acc8 = (acc << 1) | b8
+    # 8-bit codes 48..191 → sym 0..143
+    if acc8 >= 48 and acc8 <= 191:
+        return acc8 - 48
+    # 8-bit codes 192..199 → sym 280..287
+    if acc8 >= 192 and acc8 <= 199:
+        return 280 + (acc8 - 192)
+    # Need 9th bit
+    if r.eof():
+        return -1
+    val b9 = r.read_bits(1)
+    val acc9 = (acc8 << 1) | b9
+    # 9-bit codes 400..511 → sym 144..255
+    if acc9 >= 400 and acc9 <= 511:
+        return 144 + (acc9 - 400)
+    return -1
+
+fn inflate_fixed_decode_dist(r: BitReader) -> i64:
+    """Decode one fixed-Huffman distance symbol (5 bits, all same length).
+    RFC 1951: distance codes are 5-bit, read MSB-first from LSB stream.
+    Code value 0..29 maps to distance code sym 0..29 directly."""
+    if r.eof():
+        return -1
+    var acc = 0
+    var i = 0
+    while i < 5:
+        if r.eof():
+            return -1
+        val bit = r.read_bits(1)
+        acc = (acc << 1) | bit
+        i = i + 1
+    if acc >= 0 and acc <= 29:
+        return acc
+    return -1
+
+fn inflate_fixed_litlen_sym(r: BitReader) -> i64:
+    """Decode one fixed-Huffman literal/length symbol from an LSB BitReader.
+    Hardcoded per RFC 1951 §3.2.6. Returns -1 on EOF."""
+    var acc7 = 0
+    var bi = 0
+    while bi < 7:
+        if r.eof():
+            return -1
+        val bv = r.read_bits(1)
+        acc7 = (acc7 << 1) | bv
+        bi = bi + 1
+    if acc7 >= 0 and acc7 <= 23:
+        return 256 + acc7
+    if r.eof():
+        return -1
+    val b8 = r.read_bits(1)
+    val acc8 = (acc7 << 1) | b8
+    if acc8 >= 48 and acc8 <= 191:
+        return acc8 - 48
+    if acc8 >= 192 and acc8 <= 199:
+        return 280 + (acc8 - 192)
+    if r.eof():
+        return -1
+    val b9 = r.read_bits(1)
+    val acc9 = (acc8 << 1) | b9
+    if acc9 >= 400 and acc9 <= 511:
+        return 144 + (acc9 - 400)
+    return -1
+
+fn inflate_fixed_read_dist(r: BitReader) -> i64:
+    """Read one 5-bit fixed-Huffman distance code (MSB-first from LSB stream)."""
+    var dacc = 0
+    var dj = 0
+    while dj < 5:
+        if r.eof():
+            return -1
+        val db = r.read_bits(1)
+        dacc = (dacc << 1) | db
+        dj = dj + 1
+    if dacc >= 0 and dacc <= 29:
+        return dacc
+    return -1
+
+fn inflate_fixed_copy_match(out: ByteBuffer, history: [u8], hist_len: i64, dist: i64, mlen: i64):
+    """Copy `mlen` bytes from `history` at `dist` bytes back into `out`.
+    Handles overlapping copies (distance < length)."""
+    var k = 0
+    while k < mlen:
+        val current = out.freeze()
+        val idx = current.len() - dist
+        var b = 0
+        if idx >= 0 and idx < current.len():
+            b = current.get(idx).to_i64()
+        out.push_byte(b)
+        k = k + 1
+
+fn inflate_fixed(input: ByteSpan) -> ByteBuffer:
+    """Decompress a DEFLATE fixed-Huffman block.
+    inflate_fixed_litlen_sym and inflate_fixed_read_dist are inlined here
+    to avoid passing BitReader as a cross-module argument, which triggers
+    the interpreter's local-slot aliasing bug in test/ subdirectory specs.
+    Uses out itself as history for LZ77 back-references."""
+    var r = BitReader.lsb(input.to_bytes())
+    val bfinal = r.read_bits(1)
+    val btype_b0 = r.read_bits(1)
+    val btype_b1 = r.read_bits(1)
+    val btype = btype_b0 | (btype_b1 << 1)
+    var out = ByteBuffer.new()
+    if bfinal != 1:
+        return out
+    if btype != 1:
+        return out
+    var done = 0
+    var saw_end = false
+    while done == 0 and r.eof() == false:
+        # Inline inflate_fixed_litlen_sym: decode one lit/len symbol
+        var sym = -1
+        var acc7 = 0
+        var bi7 = 0
+        while bi7 < 7:
+            if r.eof():
+                sym = -1
+                bi7 = 99
+            else:
+                val bv7 = r.read_bits(1)
+                acc7 = (acc7 << 1) | bv7
+                bi7 = bi7 + 1
+        if bi7 < 99:
+            if acc7 >= 0 and acc7 <= 23:
+                sym = 256 + acc7
+            else:
+                if r.eof():
+                    sym = -1
+                else:
+                    val b8 = r.read_bits(1)
+                    val acc8 = (acc7 << 1) | b8
+                    if acc8 >= 48 and acc8 <= 191:
+                        sym = acc8 - 48
+                    else:
+                        if acc8 >= 192 and acc8 <= 199:
+                            sym = 280 + (acc8 - 192)
+                        else:
+                            if r.eof():
+                                sym = -1
+                            else:
+                                val b9 = r.read_bits(1)
+                                val acc9 = (acc8 << 1) | b9
+                                if acc9 >= 400 and acc9 <= 511:
+                                    sym = 144 + (acc9 - 400)
+        # End inline inflate_fixed_litlen_sym
+        if sym < 0:
+            return ByteBuffer.new()
+        if sym == 256:
+            saw_end = true
+            done = 1
+        else:
+            if sym < 256:
+                out.push_byte(sym)
+            else:
+                val lsym = sym
+                val lextra = deflate_length_extra(lsym)
+                val lbase = deflate_length_base(lsym)
+                var mlen = lbase
+                if lextra > 0:
+                    mlen = mlen + r.read_bits(lextra)
+                # Inline inflate_fixed_read_dist: decode one 5-bit distance code
+                var dsym = -1
+                var dacc = 0
+                var dj = 0
+                while dj < 5:
+                    if r.eof():
+                        dsym = -1
+                        dj = 99
+                    else:
+                        val db = r.read_bits(1)
+                        dacc = (dacc << 1) | db
+                        dj = dj + 1
+                if dj < 99 and dacc >= 0 and dacc <= 29:
+                    dsym = dacc
+                # End inline inflate_fixed_read_dist
+                if dsym < 0:
+                    return ByteBuffer.new()
+                val dextra = deflate_dist_extra(dsym)
+                val dbase = deflate_dist_base(dsym)
+                var dist = dbase
+                if dextra > 0:
+                    dist = dist + r.read_bits(dextra)
+                val hist_sp = out.freeze()
+                val hist_len = hist_sp.len()
+                if dist <= 0 or dist > hist_len:
+                    return ByteBuffer.new()
+                var k = 0
+                while k < mlen:
+                    val current = out.freeze()
+                    val idx = current.len() - dist
+                    var bv = 0
+                    if idx >= 0 and idx < current.len():
+                        bv = current.get(idx).to_i64()
+                    out.push_byte(bv)
+                    k = k + 1
+    if not saw_end:
+        return ByteBuffer.new()
+    out
+
+# ============================================================================
+# gzip frame (RFC 1952)
+# ============================================================================
+
+fn gzip_compress(input: ByteSpan) -> ByteBuffer:
+    """Wrap a DEFLATE fixed-Huffman stream in a gzip frame.
+    Header: 1f 8b 08 00 00 00 00 00 00 ff (10 bytes)
+    Body: deflate_fixed stream
+    Trailer: CRC32(input) LE 4 bytes + ISIZE LE 4 bytes."""
+    var out = ByteBuffer.new()
+
+    # 10-byte gzip header
+    out.push_byte(0x1f)
+    out.push_byte(0x8b)
+    out.push_byte(0x08)
+    out.push_byte(0x00)
+    out.push_byte(0x00)
+    out.push_byte(0x00)
+    out.push_byte(0x00)
+    out.push_byte(0x00)
+    out.push_byte(0x00)
+    out.push_byte(0xff)
+
+    # Deflate body
+    val body = deflate_fixed(input)
+    val body_sp = body.freeze()
+    out.push_span(body_sp)
+
+    # CRC32 of uncompressed input, little-endian
+    var crc = Crc32.new()
+    crc.update(input)
+    val crc_val = crc.raw()
+    out.push_byte(crc_val & 0xFF)
+    out.push_byte((crc_val >> 8) & 0xFF)
+    out.push_byte((crc_val >> 16) & 0xFF)
+    out.push_byte((crc_val >> 24) & 0xFF)
+
+    # ISIZE = input length mod 2^32, little-endian
+    val isize = input.len() & 0xFFFFFFFF
+    out.push_byte(isize & 0xFF)
+    out.push_byte((isize >> 8) & 0xFF)
+    out.push_byte((isize >> 16) & 0xFF)
+    out.push_byte((isize >> 24) & 0xFF)
+
+    out
+
+fn gzip_decompress(input: ByteSpan) -> ByteBuffer:
+    """Parse a gzip frame, decompress body, verify CRC32 and ISIZE.
+    Returns uncompressed data, or empty ByteBuffer on error."""
+    var out = ByteBuffer.new()
+    val n = input.len()
+    if n < 18:
+        return out
+
+    val id1 = input.get(0).to_i64()
+    val id2 = input.get(1).to_i64()
+    if id1 != 0x1f or id2 != 0x8b:
+        return out
+
+    val cm = input.get(2).to_i64()
+    if cm != 8:
+        return out
+
+    val flg = input.get(3).to_i64()
+    if (flg & 0xE0) != 0:
+        return out
+    var header_end = 10
+
+    # Skip optional header fields
+    if (flg & 4) != 0:
+        if header_end + 2 > n:
+            return out
+        val xlen = input.get(header_end).to_i64() | (input.get(header_end + 1).to_i64() << 8)
+        header_end = header_end + 2 + xlen
+        if header_end > n:
+            return out
+    if (flg & 8) != 0:
+        while header_end < n and input.get(header_end).to_i64() != 0:
+            header_end = header_end + 1
+        if header_end >= n:
+            return out
+        header_end = header_end + 1
+    if (flg & 16) != 0:
+        while header_end < n and input.get(header_end).to_i64() != 0:
+            header_end = header_end + 1
+        if header_end >= n:
+            return out
+        header_end = header_end + 1
+    if (flg & 2) != 0:
+        if header_end + 2 > n:
+            return out
+        val header_bytes = input.slice(0, header_end)
+        var header_crc = Crc32.new()
+        header_crc.update(header_bytes)
+        val computed_header_crc = header_crc.raw() & 0xFFFF
+        val stored_header_crc = input.get(header_end).to_i64() | (input.get(header_end + 1).to_i64() << 8)
+        if computed_header_crc != stored_header_crc:
+            return out
+        header_end = header_end + 2
+
+    if n < header_end + 8:
+        return out
+    val trailer_start = n - 8
+    val body_sp = input.slice(header_end, trailer_start - header_end)
+
+    out = inflate_fixed(body_sp)
+
+    # Verify CRC32
+    val crc_b0 = input.get(trailer_start).to_i64()
+    val crc_b1 = input.get(trailer_start + 1).to_i64()
+    val crc_b2 = input.get(trailer_start + 2).to_i64()
+    val crc_b3 = input.get(trailer_start + 3).to_i64()
+    val stored_crc = crc_b0 | (crc_b1 << 8) | (crc_b2 << 16) | (crc_b3 << 24)
+    var crc = Crc32.new()
+    val out_sp = out.freeze()
+    crc.update(out_sp)
+    val computed_crc = crc.raw()
+    if computed_crc != stored_crc:
+        return ByteBuffer.new()
+
+    # Verify ISIZE
+    val is_b0 = input.get(trailer_start + 4).to_i64()
+    val is_b1 = input.get(trailer_start + 5).to_i64()
+    val is_b2 = input.get(trailer_start + 6).to_i64()
+    val is_b3 = input.get(trailer_start + 7).to_i64()
+    val stored_isize = is_b0 | (is_b1 << 8) | (is_b2 << 16) | (is_b3 << 24)
+    val actual_isize = out_sp.len() & 0xFFFFFFFF
+    if actual_isize != stored_isize:
+        return ByteBuffer.new()
+
+    out

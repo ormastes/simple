@@ -1,0 +1,139 @@
+"""MSF container parser specification tests.
+
+Tests magic checking, msf_parse() error paths, and msf_parse_header()
+with hand-crafted MSF data. The bytes_to_u32_le extern is now available.
+"""
+
+use std.debug.formats.pdb_constants.{MSF_MAGIC_LEN}
+use std.debug.formats.msf_parser.{msf_parse, msf_parse_header, msf_stream_count, msf_stream_size}
+
+fn check_msf_magic(data: [u8]) -> bool:
+    if data.len() < MSF_MAGIC_LEN:
+        return false
+    val expected: [i64] = [
+        0x4d, 0x69, 0x63, 0x72, 0x6f, 0x73, 0x6f, 0x66,
+        0x74, 0x20, 0x43, 0x2f, 0x43, 0x2b, 0x2b, 0x20,
+        0x4d, 0x53, 0x46, 0x20, 0x37, 0x2e, 0x30, 0x30,
+        0x0d, 0x0a, 0x1a, 0x44, 0x53, 0x00, 0x00, 0x00,
+    ]
+    var i = 0
+    while i < expected.len():
+        if (data[i] as i64) != expected[i]:
+            return false
+        i = i + 1
+    true
+
+describe "MSF Magic Check":
+    it "rejects empty data":
+        val data: [u8] = []
+        expect(check_msf_magic(data)).to_equal(false)
+
+    it "rejects truncated data":
+        val data: [u8] = [0x4d, 0x69, 0x63, 0x72]
+        expect(check_msf_magic(data)).to_equal(false)
+
+    it "rejects non-MSF data":
+        var data: [u8] = []
+        var i = 0
+        while i < 64:
+            data = data.push(0x00)
+            i = i + 1
+        expect(check_msf_magic(data)).to_equal(false)
+
+    it "accepts valid MSF magic":
+        val data: [u8] = [
+            0x4d, 0x69, 0x63, 0x72, 0x6f, 0x73, 0x6f, 0x66,
+            0x74, 0x20, 0x43, 0x2f, 0x43, 0x2b, 0x2b, 0x20,
+            0x4d, 0x53, 0x46, 0x20, 0x37, 0x2e, 0x30, 0x30,
+            0x0d, 0x0a, 0x1a, 0x44, 0x53, 0x00, 0x00, 0x00,
+        ]
+        expect(check_msf_magic(data)).to_equal(true)
+
+    it "MSF_MAGIC_LEN is 32":
+        expect(MSF_MAGIC_LEN).to_equal(32)
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn u32_le(v: i64) -> [u8]:
+    [
+        (v & 0xff) as u8,
+        ((v >> 8) & 0xff) as u8,
+        ((v >> 16) & 0xff) as u8,
+        ((v >> 24) & 0xff) as u8,
+    ]
+
+fn concat_bytes(a: [u8], b: [u8]) -> [u8]:
+    var result = a
+    for byte in b:
+        result = result.push(byte)
+    result
+
+fn zeros(n: i64) -> [u8]:
+    var result: [u8] = []
+    var i = 0
+    while i < n:
+        result = result.push(0x00)
+        i = i + 1
+    result
+
+fn msf_magic_bytes() -> [u8]:
+    [
+        0x4d, 0x69, 0x63, 0x72, 0x6f, 0x73, 0x6f, 0x66,
+        0x74, 0x20, 0x43, 0x2f, 0x43, 0x2b, 0x2b, 0x20,
+        0x4d, 0x53, 0x46, 0x20, 0x37, 0x2e, 0x30, 0x30,
+        0x0d, 0x0a, 0x1a, 0x44, 0x53, 0x00, 0x00, 0x00,
+    ]
+
+# ============================================================================
+# msf_parse Error Paths
+# ============================================================================
+
+describe "msf_parse error paths":
+    it "rejects empty data":
+        val result = msf_parse([])
+        expect(result.is_err()).to_equal(true)
+
+    it "rejects data with bad magic":
+        var data = zeros(128)
+        val result = msf_parse(data)
+        expect(result.is_err()).to_equal(true)
+        expect(result.err()!).to_contain("magic")
+
+    it "rejects truncated header (magic only, no fields)":
+        val data = msf_magic_bytes()
+        val result = msf_parse(data)
+        expect(result.is_err()).to_equal(true)
+
+# ============================================================================
+# msf_parse_header
+# ============================================================================
+
+describe "msf_parse_header":
+    it "rejects bad magic":
+        val result = msf_parse_header(zeros(64))
+        expect(result.is_err()).to_equal(true)
+
+    it "rejects truncated header":
+        val data = msf_magic_bytes()
+        val result = msf_parse_header(data)
+        expect(result.is_err()).to_equal(true)
+        expect(result.err()!).to_contain("truncated")
+
+    # NOTE: Positive header-parsing test is omitted because BinaryReader.skip()
+    # does not advance the read position in interpreter mode, causing read_u32
+    # after skip to return None (page_size becomes 0). Full header and
+    # msf_parse happy-path tests require compiled mode.
+
+    it "rejects data with valid magic but zero page_size due to skip limitation":
+        # In interpreter mode, skip() doesn't advance BinaryReader position,
+        # so read_u32 returns None -> ?? 0 -> page_size=0 -> Err
+        var data = msf_magic_bytes()
+        data = concat_bytes(data, u32_le(0))
+        data = concat_bytes(data, u32_le(1))
+        data = concat_bytes(data, u32_le(1))
+        data = concat_bytes(data, u32_le(0))
+        data = concat_bytes(data, u32_le(0))
+        val result = msf_parse_header(data)
+        expect(result.is_err()).to_equal(true)

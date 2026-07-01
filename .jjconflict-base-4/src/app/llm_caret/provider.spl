@@ -3,7 +3,9 @@
 # Routes requests to the correct backend based on provider name.
 # Uses if/elif routing (no dynamic dispatch).
 
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+use app.io.mod.{process_run}
+use app.llm_caret.opencode_cli.{opencode_cli_send}
+
 extern fn rt_http_request(method: text, url: text, headers: text, body: text) -> (i64, text, text)
 
 # ============================================================================
@@ -131,10 +133,12 @@ fn new_llm_error(provider: text, error_msg: text) -> LLMResponse:
 # ============================================================================
 
 fn list_providers() -> [text]:
-    ["claude_cli", "claude_api", "openai", "openai_compat", "local_torch"]
+    ["claude_cli", "opencode_cli", "claude_api", "openai", "openai_compat", "local_torch"]
 
 fn is_valid_provider(provider: text) -> bool:
     if provider == "claude_cli":
+        return true
+    if provider == "opencode_cli":
         return true
     if provider == "claude_api":
         return true
@@ -156,6 +160,8 @@ fn dispatch_send(provider: text, prompt: text, model: text, api_key: text, base_
 
     if provider == "claude_cli":
         return _dispatch_claude_cli(cli_path, prompt, model, system_prompt, session_id, max_turns, max_tokens)
+    elif provider == "opencode_cli":
+        return _dispatch_opencode_cli(cli_path, prompt, model, session_id)
     elif provider == "claude_api":
         return _dispatch_claude_api(api_key, base_url, model, messages_json, system_prompt, max_tokens)
     elif provider == "openai":
@@ -164,6 +170,21 @@ fn dispatch_send(provider: text, prompt: text, model: text, api_key: text, base_
         return _dispatch_compat(base_url, api_key, model, messages_json, max_tokens)
     else:
         return new_llm_error(provider, "provider not implemented: " + provider)
+
+fn _dispatch_opencode_cli(cli_path: text, prompt: text, model: text, session_id: text) -> LLMResponse:
+    val resp = opencode_cli_send(cli_path, prompt, model, session_id, "", [])
+    LLMResponse(
+        content: resp.content,
+        model: resp.model,
+        provider: "opencode_cli",
+        session_id: resp.session_id,
+        stop_reason: resp.stop_reason,
+        input_tokens: resp.input_tokens,
+        output_tokens: resp.output_tokens,
+        error: resp.error,
+        is_error: resp.is_error,
+        raw: resp.raw
+    )
 
 # ============================================================================
 # Claude CLI dispatch
@@ -190,7 +211,7 @@ fn _dispatch_claude_cli(cli_path: text, prompt: text, model: text, system_prompt
     if path == "":
         path = "claude"
     val args = _build_cli_args(prompt, model, system_prompt, session_id, max_turns, max_tokens)
-    val result = rt_process_run(path, args)
+    val result = process_run(path, args)
     val stdout = result.0 ?? ""
     val stderr = result.1 ?? ""
     val exit_code = result.2

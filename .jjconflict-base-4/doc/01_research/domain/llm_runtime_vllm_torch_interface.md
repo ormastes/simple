@@ -41,3 +41,33 @@ boundary and LoRA as an artifact boundary. Dynamic LoRA loading, full PEFT/TRL
 training orchestration, and custom Torch model execution should remain later
 lanes until the static serving/readiness path is verified.
 
+## 2026-07-01 Continuation: OpenCode and SGLang
+
+<!-- codex-research -->
+
+OpenCode's documented non-interactive surface is `opencode run [message..]`
+with `--model`, `--session`, `--attach`, `--format`, `--dir`, and `--auto`
+flags, while `opencode serve`/`web` create attachable headless servers:
+https://opencode.ai/docs/cli/
+
+OpenCode issue traffic also shows the failure mode this lane must defend
+against: headless agent processes and their children can hang or survive
+interrupts, so a Simple wrapper needs explicit pid readback plus a kill path
+routed through the owner process facade, not shell-based name killing.
+
+SGLang exposes a server launch surface with `python -m sglang.launch_server`,
+`--model-path`, tensor parallel `--tp`, data parallel `--dp`, and memory tuning
+through `--mem-fraction-static`:
+https://github.com/sgl-project/sglang/blob/main/docs/advanced_features/server_arguments.md
+
+vLLM remains the default Simple serving backend because its OpenAI-compatible
+server and LoRA serving contracts are already modeled here. Its docs expose
+static LoRA serving through `--enable-lora --lora-modules name=path`, dynamic
+LoRA APIs that should stay trusted-only, and `/v1/models`/`/health` evidence
+endpoints:
+https://docs.vllm.ai/en/stable/features/lora/
+https://docs.vllm.ai/en/stable/serving/online_serving/
+
+Implication for this continuation: keep OpenCode as a Claude-like CLI provider
+with explicit spawn/kill evidence, and borrow SGLang's backend/parallelism
+manifest shape without replacing the existing vLLM default.

@@ -1,0 +1,63 @@
+use compiler.core.ast.{ast_reset, module_get_decls, decl_get_body, decl_get_tag, decl_get_name}
+use compiler.frontend.flat_ast_bridge.{flat_ast_to_module}
+use compiler.core.parser.{parser_init_with_path, parser_has_errors}
+use compiler.core.parser_decls.{parse_module_body}
+
+fn rv64_boot_call_source() -> text:
+    "extern fn rt_riscv_qemu_heap_start() -> u64\n" +
+    "extern fn rt_riscv_qemu_heap_size() -> u64\n" +
+    "fn _boot_banner():\n" +
+    "    pass_dn\n" +
+    "fn riscv_noalloc_log_init():\n" +
+    "    pass_dn\n" +
+    "fn riscv_noalloc_handoff(hart_id: u64, dtb_addr: u64):\n" +
+    "    pass_dn\n" +
+    "fn rt_riscv_noalloc_pmm_init(a: u64, b: u64, c: u64, d: u64):\n" +
+    "    pass_dn\n" +
+    "fn riscv_noalloc_heap_init(start: u64, size: u64):\n" +
+    "    pass_dn\n" +
+    "fn boot_main(hart_id: u64, dtb_addr: u64):\n" +
+    "    _boot_banner()\n" +
+    "    riscv_noalloc_log_init()\n" +
+    "    riscv_noalloc_handoff(hart_id, dtb_addr)\n" +
+    "    rt_riscv_noalloc_pmm_init(\n" +
+    "        rt_riscv_qemu_heap_start(),\n" +
+    "        rt_riscv_qemu_heap_size(),\n" +
+    "        rt_riscv_qemu_heap_start(),\n" +
+    "        rt_riscv_qemu_heap_size()\n" +
+    "    )\n" +
+    "    riscv_noalloc_heap_init(rt_riscv_qemu_heap_start(), rt_riscv_qemu_heap_size())\n"
+
+fn parse_rv64_boot_call_decls() -> [i64]:
+    ast_reset()
+    parser_init_with_path(rv64_boot_call_source(), "")
+    parse_module_body()
+    if parser_has_errors():
+        panic("rv64 boot call parser produced errors")
+    module_get_decls()
+
+describe "RV64 boot call parser":
+    it "parses the boot_main nested call sequence":
+        val decls = parse_rv64_boot_call_decls()
+
+        expect(decls.len()).to_equal(8)
+        val boot = decls[7]
+        expect(decl_get_tag(boot)).to_equal(1)
+        expect(decl_get_name(boot)).to_equal("boot_main")
+        expect(decl_get_body(boot).len()).to_equal(5)
+
+    it "bridges the boot_main nested call sequence":
+        ast_reset()
+        parser_init_with_path(rv64_boot_call_source(), "")
+        parse_module_body()
+        val decls = module_get_decls()
+        expect(decls.len()).to_equal(8)
+        expect(decl_get_tag(decls[7])).to_equal(1)
+        expect(decl_get_name(decls[7])).to_equal("boot_main")
+
+        val module = flat_ast_to_module("src/os/kernel/arch/riscv64/boot.spl")
+        if not module.functions.contains("boot_main"):
+            panic("missing boot_main function after flat bridge")
+        val boot = module.functions["boot_main"] ?? panic("missing boot_main function")
+
+        expect(boot.body.stmts.len()).to_equal(5)

@@ -72,6 +72,24 @@ training primitives only when a later lane explicitly enters training.
 - Torch/SFFI owner modules must provide ABI/loader readiness; app probes should
   consume that evidence instead of reaching around owner boundaries.
 
+## 2026-07-01 Continuation MDSOC Notes
+
+<!-- codex-design -->
+
+- CLI provider capsule: `src/app/llm_caret` owns Claude/OpenCode style
+  argument construction, response classification, and pid kill evidence. It may
+  use `app.io.mod` process facades, but must not add local raw
+  `rt_process_*` externs.
+- Runtime serving capsule: `src/app/llm_runtime` owns backend-neutral manifest
+  fields and sanitized serve-plan JSONL. vLLM remains the default backend;
+  SGLang support starts as backend metadata and command-preview planning only.
+- Cross-cutting kill behavior: pid validation and process kill evidence belongs
+  at the provider/runtime owner boundary. Dashboard or UI layers can render the
+  evidence, but must not kill by process name or shell command.
+- SGLang-derived knobs (`backend`, tensor/data parallel sizing, memory fraction)
+  are feature-transform metadata over the existing serve plan, not a separate
+  serving subsystem.
+
 ## Deferred
 
 - PEFT/TRL training orchestration.

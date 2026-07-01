@@ -31,3 +31,8 @@ Selection source: user requested the first implementation option.
 - NFR-010: Torch/svLLM placeholder hardening shall fail closed with explicit
   unavailable or unsupported status strings and remain usable in clean
   workspaces that lack libtorch, CUDA, vLLM, and NVFS native streaming support.
+- NFR-011: CLI-provider kill support shall use pid-scoped owner process facades,
+  not shell `kill`, process-name matching, or raw `rt_process_*` shortcuts in
+  app provider modules.
+- NFR-012: SGLang-derived serve metadata shall be plan/evidence only until a
+  focused host proof verifies a live SGLang endpoint.

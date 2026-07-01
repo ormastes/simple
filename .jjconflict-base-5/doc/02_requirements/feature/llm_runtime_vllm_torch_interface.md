@@ -39,6 +39,16 @@ Selection source: user requested the first implementation option.
 - REQ-012: Torch/svLLM owner-module readiness shall expose explicit unavailable
   or unsupported statuses for placeholder or host-missing capabilities, including
   dynamic Torch SFFI tensor operations and svLLM streaming readiness.
+- REQ-013: The LLM Caret provider surface shall support an OpenCode CLI backend
+  shaped like the Claude CLI wrapper: deterministic argument construction,
+  JSON/raw response classification, provider registration, and no subprocess
+  calls in unit-only helper tests.
+- REQ-014: Claude-like CLI providers that can spawn long-running agent work
+  shall expose pid-based kill evidence through the owner process facade, with
+  invalid pids rejected before any signal is attempted.
+- REQ-015: The runtime serve manifest and serve-plan evidence shall keep vLLM as
+  the default backend while allowing SGLang-derived backend metadata for
+  `sglang`, tensor/data parallel sizing, and static memory-fraction intent.
 
 ## Deferred
 
@@ -51,3 +61,6 @@ Selection source: user requested the first implementation option.
 - Full svLLM streaming through native NVFS scheduling, pinned-buffer
   registration, and device staging.
 - Live CUDA optimizer execution against a local libtorch/CUDA installation.
+- Full OpenCode server attach/session management beyond non-interactive
+  `opencode run` and pid kill evidence.
+- Host-proven SGLang serving and OpenAI-compatible endpoint parity.

@@ -1,0 +1,131 @@
+# WASM Codegen Adapter
+#
+# Wraps WebAssembly code generation to implement the Codegen trait.
+# Produces structured WAT output with type, function, and export sections.
+# Full MIR-to-opcode translation is deferred until MirToWat is available.
+
+use compiler.mir.mir_data.{MirModule, MirFunction}
+use compiler.mir.mir_types.{MirType, MirTypeKind, MirSignature}
+use compiler.backend.backend.backend_types.{BackendKind, CodegenTarget, CompileOptions, CompileError}
+use compiler.backend.codegen_types.{Codegen, CodegenOutput, CodegenOutputKind}
+
+# ============================================================================
+# WAT Type Helpers
+# ============================================================================
+
+fn mir_type_to_wat(ty: MirType) -> text:
+    # Stub: map MIR types to WAT primitive value types.
+    # TODO [backend][P2]: handle Ptr/Ref as i32 (wasm32) vs i64 (wasm64)
+    match ty.kind:
+        case I32 | U32: "i32"
+        case I64 | U64: "i64"
+        case F32: "f32"
+        case F64: "f64"
+        case Bool | I8 | U8 | I16 | U16 | Char: "i32"
+        case _: "i32"  # default stub: treat unknown types as i32
+
+fn emit_wat_type_section(sig: MirSignature) -> text:
+    # Emit a single WAT type entry: (type (func (param ...) (result ...)))
+    var params_str = ""
+    var pi = 0
+    while pi < sig.params.len():
+        val wt = mir_type_to_wat(sig.params[pi])
+        if pi == 0:
+            params_str = "(param {wt})"
+        else:
+            params_str = "{params_str} (param {wt})"
+        pi = pi + 1
+
+    val has_result = sig.return_type.kind != MirTypeKind.Unit
+    if has_result:
+        val ret_wt = mir_type_to_wat(sig.return_type)
+        if params_str == "":
+            "(type (func (result {ret_wt})))"
+        else:
+            "(type (func {params_str} (result {ret_wt})))"
+    else:
+        if params_str == "":
+            "(type (func))"
+        else:
+            "(type (func {params_str}))"
+
+fn emit_wat_func_entry(type_idx: i64, fn_name: text) -> text:
+    # Emit: (func $name (type N) unreachable)
+    # TODO [backend][P2]: replace unreachable with real instruction translation
+    "  (func ${fn_name} (type {type_idx})\n    unreachable)"
+
+fn emit_wat_export_entry(fn_name: text) -> text:
+    # Emit: (export "name" (func $name))
+    "  (export \"{fn_name}\" (func ${fn_name}))"
+
+# ============================================================================
+# WASM Codegen Adapter
+# ============================================================================
+
+class WasmCodegenAdapter:
+    """Adapts WebAssembly generation to the Codegen trait interface."""
+    options: CompileOptions
+
+impl Codegen for WasmCodegenAdapter:
+    fn backend_kind() -> BackendKind: BackendKind.Wasm
+    fn backend_name() -> text: "wasm"
+
+    fn supports_target(target: CodegenTarget) -> bool:
+        match target:
+            case Wasm32: true
+            case _: false
+
+    fn output_kind() -> CodegenOutputKind: CodegenOutputKind.TextSource
+
+    fn compile_module(module: MirModule) -> Result<CodegenOutput, CompileError>:
+        # Build WAT sections by iterating MirModule functions.
+        # TODO [backend][P2]: integrate MirToWat for real opcode emission.
+        var type_entries = ""
+        var func_entries = ""
+        var export_entries = ""
+        var type_idx: i64 = 0
+
+        for sym_id in module.functions.keys():
+            val func = module.functions[sym_id]
+
+            # Type section entry
+            val type_entry = emit_wat_type_section(func.signature)
+            if type_entries == "":
+                type_entries = "  {type_entry}"
+            else:
+                type_entries = "{type_entries}\n  {type_entry}"
+
+            # Function section entry (body stub with unreachable)
+            val func_entry = emit_wat_func_entry(type_idx, func.name)
+            if func_entries == "":
+                func_entries = func_entry
+            else:
+                func_entries = "{func_entries}\n{func_entry}"
+
+            # Export section: emit for C-exported functions or all public functions
+            if func.is_export_c:
+                val export_sym = if func.export_name != "": func.export_name else: func.name
+                val export_entry = emit_wat_export_entry(export_sym)
+                if export_entries == "":
+                    export_entries = export_entry
+                else:
+                    export_entries = "{export_entries}\n{export_entry}"
+
+            type_idx = type_idx + 1
+
+        # Assemble final WAT module
+        var wat = "(module\n"
+        if type_entries != "":
+            wat = "{wat}{type_entries}\n"
+        if func_entries != "":
+            wat = "{wat}{func_entries}\n"
+        if export_entries != "":
+            wat = "{wat}{export_entries}\n"
+        wat = "{wat})"
+
+        Ok(CodegenOutput.text(module.name, wat))
+
+# ============================================================================
+# Exports
+# ============================================================================
+
