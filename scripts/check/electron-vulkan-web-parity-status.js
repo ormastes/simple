@@ -3,6 +3,7 @@ const fs = require("fs");
 
 const electronPath = process.argv[2] || "";
 const vulkanPath = process.argv[3] || "";
+const electronProofPath = process.argv[4] || "";
 
 function emit(key, value) {
   console.log(`${key}=${value === undefined || value === null ? "" : value}`);
@@ -29,8 +30,58 @@ function pixelArray(value) {
   return Array.isArray(value) ? value : [];
 }
 
+function gpuAux(info) {
+  if (info && info.gpu && info.gpu.auxAttributes) return info.gpu.auxAttributes;
+  if (info && info.auxAttributes) return info.auxAttributes;
+  return {};
+}
+
+function electronVulkanProof(electron, proof) {
+  const featureStatus = proof && proof.gpu_feature_status
+    ? proof.gpu_feature_status
+    : (electron && electron.gpuFeatureStatus ? electron.gpuFeatureStatus : {});
+  const browserGpuInfo = proof && proof.browser_target_gpu_info
+    ? proof.browser_target_gpu_info
+    : (electron && electron.browserTargetGpuInfo ? electron.browserTargetGpuInfo : {});
+  const appGpuInfo = proof && proof.gpu_info
+    ? proof.gpu_info
+    : (electron && electron.gpuInfo ? electron.gpuInfo : {});
+  const gpuInfo = browserGpuInfo && !browserGpuInfo.error ? browserGpuInfo : appGpuInfo;
+  const aux = gpuAux(gpuInfo);
+  const appAux = gpuAux(appGpuInfo);
+  const vulkan = String(featureStatus.vulkan || "");
+  const gpuCompositing = String(featureStatus.gpu_compositing || "");
+  const displayType = String(aux.displayType || "");
+  const glParts = String(aux.glImplementationParts || appAux.glImplementationParts || "");
+  const skiaBackend = String(aux.skiaBackendType || appAux.skiaBackendType || "");
+  const glRenderer = String(aux.glRenderer || appAux.glRenderer || "");
+  const browserStatus = proof && proof.browser_target_gpu_info_status
+    ? String(proof.browser_target_gpu_info_status)
+    : (browserGpuInfo && !browserGpuInfo.error ? "pass" : "not-run");
+  const hardware = Boolean(aux.hardwareSupportsVulkan || appAux.hardwareSupportsVulkan);
+  const mentionsVulkan = /vulkan/i.test(`${displayType} ${glParts} ${skiaBackend} ${glRenderer}`);
+  const enabled = /enabled/i.test(vulkan);
+  const gpuEnabled = /enabled/i.test(gpuCompositing);
+  const browserInfoOk = browserStatus === "pass";
+  return {
+    status: enabled && gpuEnabled && hardware && mentionsVulkan && browserInfoOk ? "pass" : "fail",
+    reason: enabled && gpuEnabled && hardware && mentionsVulkan && browserInfoOk
+      ? "electron-vulkan-backed"
+      : (!enabled ? `electron-vulkan-${vulkan || "unknown"}` : (!gpuEnabled ? "electron-gpu-compositing-disabled" : (!hardware ? "electron-vulkan-hardware-missing" : (!mentionsVulkan ? "electron-vulkan-metadata-missing" : "electron-browser-gpu-info-not-proven")))),
+    vulkan,
+    gpuCompositing,
+    browserStatus,
+    displayType,
+    glParts,
+    skiaBackend,
+    glRenderer,
+    hardware,
+  };
+}
+
 const electron = readJson(electronPath, "electron");
 const vulkan = readJson(vulkanPath, "vulkan");
+const electronProof = electronProofPath ? readJson(electronProofPath, "electron-proof") : null;
 const electronPixels = pixelArray(electron.pixels);
 const vulkanPixels = pixelArray(vulkan.pixels);
 const electronWidth = Number(electron.width || 0);
@@ -48,6 +99,24 @@ const common = {
   electron_vulkan_web_parity_windows_compare_vulkan_pixels: vulkanPixels.length,
   electron_vulkan_web_parity_windows_compare_vulkan_backend: vulkanBackend,
 };
+
+if (electronProofPath) {
+  const electronProofStatus = electronVulkanProof(electron, electronProof);
+  common.electron_vulkan_web_parity_windows_compare_electron_proof = electronProofPath;
+  common.electron_vulkan_web_parity_windows_compare_electron_vulkan_status = electronProofStatus.status;
+  common.electron_vulkan_web_parity_windows_compare_electron_vulkan_reason = electronProofStatus.reason;
+  common.electron_vulkan_web_parity_windows_compare_electron_vulkan = electronProofStatus.vulkan;
+  common.electron_vulkan_web_parity_windows_compare_electron_gpu_compositing = electronProofStatus.gpuCompositing;
+  common.electron_vulkan_web_parity_windows_compare_electron_browser_target_gpu_info_status = electronProofStatus.browserStatus;
+  common.electron_vulkan_web_parity_windows_compare_electron_display_type = electronProofStatus.displayType;
+  common.electron_vulkan_web_parity_windows_compare_electron_gl_implementation_parts = electronProofStatus.glParts;
+  common.electron_vulkan_web_parity_windows_compare_electron_skia_backend_type = electronProofStatus.skiaBackend;
+  common.electron_vulkan_web_parity_windows_compare_electron_gl_renderer = electronProofStatus.glRenderer;
+  common.electron_vulkan_web_parity_windows_compare_electron_hardware_supports_vulkan = electronProofStatus.hardware ? "true" : "false";
+  if (electronProofStatus.status !== "pass") {
+    finish("fail", electronProofStatus.reason, 2, common);
+  }
+}
 
 if (vulkanBackend !== "vulkan") {
   finish("fail", "vulkan-backend-not-proven", 2, common);
