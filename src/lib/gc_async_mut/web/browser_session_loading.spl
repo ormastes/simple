@@ -16,7 +16,7 @@ use std.gc_async_mut.web.browser_session_storage.{pair_value, upsert_pair}
 use std.gc_async_mut.web.browser_session_url.{resolve_relative_url}
 use std.gc_async_mut.web.browser_session_cookies.{parse_cookie_line, upsert_cookie}
 use std.gc_async_mut.web.browser_session_html.{
-    expand_stylesheet_text, insert_stylesheet_sources, _guest_runtime_probe_url
+    expand_stylesheet_text, insert_stylesheet_sources, _guest_runtime_probe_url, html_to_text
 }
 use std.gc_async_mut.web.browser_session_modules.{
     extract_module_dependency_urls, transform_module_source
@@ -276,8 +276,13 @@ impl BrowserSession:
         if val Some(state) = self.runtime_state:
             var runtime = state.runtime
             runtime.set_host_property(state.body_id, "innerHTML", JsValue.String(v: value))
+            # Keep the body text content consistent with the explicitly set innerHTML so the
+            # post-load runtime sync does not clobber this evidence with stale empty textContent.
+            val text_value = html_to_text(value)
+            runtime.set_host_property(state.body_id, "textContent", JsValue.String(v: text_value))
             var interpreter = runtime.interpreter
             interpreter.host_body_inner_html_value = JsValue.String(v: value)
+            interpreter.host_body_text_content_value = JsValue.String(v: text_value)
             runtime.interpreter = interpreter
             state.runtime = runtime
             self.runtime_state = Some(state)
@@ -456,6 +461,12 @@ impl BrowserSession:
                             load.style_sources = insert_stylesheet_sources(load.style_sources, load.next_style_idx, expanded.sources)
                             style_source_count = load.style_sources.len()
                         continue
+                    # Persist the advanced cursor before suspending on the network
+                    # request. A method-local Option unwrap only writes back on
+                    # return, but the resumed _commit_style_response re-unwraps
+                    # self.active_load directly — without this it would observe a
+                    # stale next_style_idx and re-issue the same request forever.
+                    self.active_load = Some(load)
                     self.pending_requests.push(self._build_request("style", resolved, "GET", "", "", ""))
                     return Ok(true)
             if not self.runtime_enabled:
@@ -464,6 +475,12 @@ impl BrowserSession:
                 self._finalize_active_load(load)
                 self.active_load = nil
                 return Ok(true)
+            # Persist the accumulated stylesheet state back into the active load
+            # before delegating to script loading. Method-local unwraps of
+            # `self.active_load` only write back on return, so the nested
+            # `_advance_script_loading` re-unwrap would otherwise observe a stale
+            # load with empty `current_style_html`.
+            self.active_load = Some(load)
         self._trace_guest("styles complete")
         self._advance_script_loading()
 

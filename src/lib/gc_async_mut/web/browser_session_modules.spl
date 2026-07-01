@@ -105,6 +105,16 @@ fn transform_import_statement(module_url: text, stmt: text) -> text:
     val named_open = find_text(stmt, "{", 0)
     val named_close = find_text(stmt, "}", named_open + 1)
     if named_open >= 0 and named_close > named_open and (from_idx_for_named < 0 or named_close < from_idx_for_named):
+        # A leading default import may precede the named group:
+        # `import Foo, { a, b } from '...'`. Emit the default binding first.
+        val clause_brace = find_text(clause, "{", 0)
+        if clause_brace > 0:
+            var default_part = clause.slice(0, clause_brace).trim()
+            if default_part.ends_with(","):
+                default_part = default_part.slice(0, default_part.len() - 1).trim()
+            val default_name = normalize_module_binding_name(default_part)
+            if default_name != "":
+                out = out + "var {default_name} = {module_prop_access(resolved_ref, \"default\")};\n"
         val inner = stmt.slice(named_open + 1, named_close)
         for named in split_text(inner, ","):
             val named_trimmed = named.trim()
@@ -154,15 +164,17 @@ fn transform_export_statement(module_url: text, stmt: text, module_cache: [Pair<
     if trimmed.starts_with("export default function "):
         val decl = trimmed.slice(15, trimmed.len()).trim()
         val name = normalize_module_binding_name(declared_function_name(decl))
+        val fn_expr = function_decl_to_expr(decl)
         if name == "":
-            return "function __simple_default_export" + decl.slice(8, decl.len()) + "\n__simple_module.default = __simple_default_export;\n"
-        return decl + "\n__simple_module.default = " + name + ";\n"
+            return "__simple_module.default = " + fn_expr + ";\n"
+        return "var " + name + " = " + fn_expr + ";\n__simple_module.default = " + name + ";\n"
     if trimmed.starts_with("export default class "):
         val decl = trimmed.slice(15, trimmed.len()).trim()
         val name = normalize_module_binding_name(declared_class_name(decl))
+        val class_expr = class_decl_to_function_expr(decl)
         if name == "":
-            return "class __simple_default_export" + decl.slice(5, decl.len()) + "\n__simple_module.default = __simple_default_export;\n"
-        return decl + "\n__simple_module.default = " + name + ";\n"
+            return "__simple_module.default = " + class_expr + ";\n"
+        return "var " + name + " = " + class_expr + ";\n__simple_module.default = " + name + ";\n"
     if trimmed.starts_with("export default "):
         val expr = trimmed.slice(15, trimmed.len()).trim()
         return "__simple_module.default = {expr};\n"
@@ -172,14 +184,16 @@ fn transform_export_statement(module_url: text, stmt: text, module_cache: [Pair<
         if name == "":
             return decl + "\n"
         val export_ref = module_prop_access("__simple_module", name)
-        return decl + "\n{export_ref} = {name};\n"
+        val fn_expr = function_decl_to_expr(decl)
+        return "var {name} = {fn_expr};\n{export_ref} = {name};\n"
     if trimmed.starts_with("export class "):
         val decl = trimmed.slice(7, trimmed.len()).trim()
         val name = normalize_module_binding_name(declared_class_name(decl))
         if name == "":
             return decl + "\n"
         val export_ref = module_prop_access("__simple_module", name)
-        return decl + "\n{export_ref} = {name};\n"
+        val class_expr = class_decl_to_function_expr(decl)
+        return "var {name} = {class_expr};\n{export_ref} = {name};\n"
     if trimmed.starts_with("export const ") or trimmed.starts_with("export let ") or trimmed.starts_with("export var "):
         val decl = trimmed.slice(7, trimmed.len()).trim()
         val kind = module_variable_decl_kind(decl)
@@ -249,7 +263,11 @@ fn transform_export_statement(module_url: text, stmt: text, module_cache: [Pair<
             for exported in module_exported_names(dep_source, false):
                 val export_ref = module_prop_access("__simple_module", exported)
                 val source_ref = module_prop_access(resolved_ref, exported)
-                out = out + "if (" + export_ref + " == undefined) " + export_ref + " = " + source_ref + ";\n"
+                # Local (already-assigned) exports take precedence over star
+                # re-exports. The JS subset drops mutations made inside an `if`
+                # body, so use a logical-or assignment instead of an `if` guard:
+                # keep the existing value when present, else pull from the dep.
+                out = out + export_ref + " = " + export_ref + " || " + source_ref + ";\n"
         return out
     if trimmed.starts_with("export {"):
         val open = find_text(trimmed, "{", 0)
@@ -349,6 +367,39 @@ fn is_module_symbol_char(ch: text) -> bool:
 fn transform_simple_class_export(decl: text, class_name: text) -> text:
     val body = extract_constructor_body(decl)
     "function {class_name}() { {body} }\n"
+
+# Rewrite a `function name(args) { body }` declaration into an anonymous
+# function expression `function(args) { body }`. The browser-session JS subset
+# cannot reference a hoisted function declaration by bare name as a value (e.g.
+# `module.default = name`), but a function expression bound to a `var` works, so
+# module exports route every function/class through expression form.
+fn function_decl_to_expr(decl: text) -> text:
+    val open = find_text(decl, "(", 0)
+    if open < 0:
+        return decl
+    "function" + decl.slice(open, decl.len())
+
+# Constructor parameter list for a `class X { constructor(params) { body } }`.
+fn class_constructor_params(decl: text) -> text:
+    val ctor = find_text(decl, "constructor", 0)
+    if ctor < 0:
+        return ""
+    val open = find_text(decl, "(", ctor)
+    if open < 0:
+        return ""
+    val close = find_text(decl, ")", open + 1)
+    if close <= open:
+        return ""
+    decl.slice(open + 1, close)
+
+# Rewrite a `class X { constructor(params) { body } }` declaration into a
+# constructor function expression `function(params) { body }`. Methods beyond
+# the constructor are not represented; module class exports in the supported
+# subset are constructor-only.
+fn class_decl_to_function_expr(decl: text) -> text:
+    val params = class_constructor_params(decl)
+    val body = extract_constructor_body(decl)
+    "function(" + params + ") \{ " + body + " \}"
 
 fn extract_constructor_body(decl: text) -> text:
     val ctor = find_text(decl, "constructor", 0)

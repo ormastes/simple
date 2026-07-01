@@ -40,6 +40,15 @@ thread_local! {
     // still preserving "a passing matcher must not clear a real prior failure".
     pub(crate) static BDD_EXPECT_PROVISIONAL: RefCell<bool> = const { RefCell::new(false) };
 
+    // Set true (monotonically within an example) whenever a `.to_*()` matcher
+    // runs on an expect receiver. Reset only at example start. The provisional
+    // clear in interpreter_method/mod.rs proved unreliable for chained
+    // `expect(falsy_call()).to_equal(x)` — provisional is re-set after the
+    // matcher clears it, so a passing matcher on a falsy call result still
+    // false-failed. This monotonic flag is immune to that re-set: at example
+    // end a hollow-call provisional failure is suppressed iff a matcher ran.
+    pub(crate) static BDD_MATCHER_RAN: RefCell<bool> = const { RefCell::new(false) };
+
     // TEST-010: Shared examples registry - maps name to block
     pub(crate) static BDD_SHARED_EXAMPLES: RefCell<HashMap<String, Value>> = RefCell::new(HashMap::new());
 
@@ -627,6 +636,7 @@ pub(super) fn eval_bdd_builtin(
 
             BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = false);
             BDD_EXPECT_PROVISIONAL.with(|cell| *cell.borrow_mut() = false);
+            BDD_MATCHER_RAN.with(|cell| *cell.borrow_mut() = false);
             BDD_FAILURE_MSG.with(|cell| *cell.borrow_mut() = None);
             BDD_INSIDE_IT.with(|cell| *cell.borrow_mut() = true);
 
@@ -692,7 +702,12 @@ pub(super) fn eval_bdd_builtin(
                     // counts as a failure.
                     let hard_failed = BDD_EXPECT_FAILED.with(|cell| *cell.borrow());
                     let provisional = BDD_EXPECT_PROVISIONAL.with(|cell| *cell.borrow());
-                    let failed = hard_failed || provisional;
+                    // A provisional hollow-call failure only stands if NO matcher
+                    // ran on the expect — a matcher means the call result was
+                    // actually checked (and may legitimately be falsy, e.g.
+                    // `expect(returns_zero()).to_equal(0)`).
+                    let matcher_ran = BDD_MATCHER_RAN.with(|cell| *cell.borrow());
+                    let failed = hard_failed || (provisional && !matcher_ran);
                     let failure_msg = BDD_FAILURE_MSG.with(|cell| cell.borrow().clone());
 
                     if failed {
@@ -766,72 +781,82 @@ pub(super) fn eval_bdd_builtin(
             }
             let arg_expr = &args[0].value;
             // Comparison-form: `expect a == b`, `expect a != b`, `expect a > b`, …
-            if let Expr::Binary { op, left, right } = arg_expr {
-                let left_val = evaluate_expr(left, env, functions, classes, enums, impl_methods)?;
-                let right_val = evaluate_expr(right, env, functions, classes, enums, impl_methods)?;
-                let (matched, op_word) = match op {
-                    // Bridge `nil` (Value::Nil) and `Option::None`: the language's
-                    // `==` treats an empty optional as equal to `nil` (see
-                    // interpreter/expr/ops.rs BinOp::Eq via is_nil_like), but Rust
-                    // `Value::eq` sees distinct variants. Without this bridge,
-                    // `expect(opt == nil).to_equal(true)` / `expect(opt != nil)...`
-                    // over a `-> T?` return silently failed. Operates on the
-                    // already-evaluated values (no re-eval / side effects).
-                    BinOp::Eq => {
-                        let m = if left_val.is_nil_like() || right_val.is_nil_like() {
-                            left_val.is_nil_like() && right_val.is_nil_like()
-                        } else {
-                            left_val == right_val
-                        };
-                        (m, "equal")
-                    }
-                    BinOp::NotEq => {
-                        let m = if left_val.is_nil_like() || right_val.is_nil_like() {
-                            !(left_val.is_nil_like() && right_val.is_nil_like())
-                        } else {
-                            left_val != right_val
-                        };
-                        (m, "not equal")
-                    }
-                    // Ordered comparisons (<, <=, >, >=): defer to the
-                    // standard binary-expr evaluator and check truthiness on
-                    // the resulting Bool — this avoids re-implementing
-                    // ordering semantics for every Value variant.
-                    _ => {
-                        let op_sym = match op {
-                            BinOp::Lt => "<",
-                            BinOp::LtEq => "<=",
-                            BinOp::Gt => ">",
-                            BinOp::GtEq => ">=",
-                            _ => "?",
-                        };
-                        let value = evaluate_expr(arg_expr, env, functions, classes, enums, impl_methods)?;
-                        if !value.truthy() {
-                            BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = true);
-                            BDD_FAILURE_MSG.with(|cell| {
-                                *cell.borrow_mut() = Some(format!(
-                                    "expected {} {} {} to hold",
-                                    left_val.to_display_string(),
-                                    op_sym,
-                                    right_val.to_display_string(),
-                                ));
-                            });
+            // Only genuine comparison operators are handled here. Arithmetic /
+            // bitwise binaries like `expect(0 * 0).to_equal(0)` are ordinary
+            // subject expressions whose chained `.to_*()` matcher is
+            // authoritative — they must fall through to the general path rather
+            // than be truthiness-checked here (a falsy result like 0 wrongly
+            // failed with "expected 0 ? 0 to hold").
+            let is_cmp_form = matches!(arg_expr, Expr::Binary { op, .. }
+                if matches!(op, BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::LtEq | BinOp::Gt | BinOp::GtEq));
+            if is_cmp_form {
+                if let Expr::Binary { op, left, right } = arg_expr {
+                    let left_val = evaluate_expr(left, env, functions, classes, enums, impl_methods)?;
+                    let right_val = evaluate_expr(right, env, functions, classes, enums, impl_methods)?;
+                    let (matched, op_word) = match op {
+                        // Bridge `nil` (Value::Nil) and `Option::None`: the language's
+                        // `==` treats an empty optional as equal to `nil` (see
+                        // interpreter/expr/ops.rs BinOp::Eq via is_nil_like), but Rust
+                        // `Value::eq` sees distinct variants. Without this bridge,
+                        // `expect(opt == nil).to_equal(true)` / `expect(opt != nil)...`
+                        // over a `-> T?` return silently failed. Operates on the
+                        // already-evaluated values (no re-eval / side effects).
+                        BinOp::Eq => {
+                            let m = if left_val.is_nil_like() || right_val.is_nil_like() {
+                                left_val.is_nil_like() && right_val.is_nil_like()
+                            } else {
+                                left_val == right_val
+                            };
+                            (m, "equal")
                         }
-                        return Ok(Some(value));
+                        BinOp::NotEq => {
+                            let m = if left_val.is_nil_like() || right_val.is_nil_like() {
+                                !(left_val.is_nil_like() && right_val.is_nil_like())
+                            } else {
+                                left_val != right_val
+                            };
+                            (m, "not equal")
+                        }
+                        // Ordered comparisons (<, <=, >, >=): defer to the
+                        // standard binary-expr evaluator and check truthiness on
+                        // the resulting Bool — this avoids re-implementing
+                        // ordering semantics for every Value variant.
+                        _ => {
+                            let op_sym = match op {
+                                BinOp::Lt => "<",
+                                BinOp::LtEq => "<=",
+                                BinOp::Gt => ">",
+                                BinOp::GtEq => ">=",
+                                _ => "?",
+                            };
+                            let value = evaluate_expr(arg_expr, env, functions, classes, enums, impl_methods)?;
+                            if !value.truthy() {
+                                BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = true);
+                                BDD_FAILURE_MSG.with(|cell| {
+                                    *cell.borrow_mut() = Some(format!(
+                                        "expected {} {} {} to hold",
+                                        left_val.to_display_string(),
+                                        op_sym,
+                                        right_val.to_display_string(),
+                                    ));
+                                });
+                            }
+                            return Ok(Some(value));
+                        }
+                    };
+                    if !matched {
+                        BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = true);
+                        BDD_FAILURE_MSG.with(|cell| {
+                            *cell.borrow_mut() = Some(format!(
+                                "expected {} to {} {}",
+                                left_val.to_display_string(),
+                                op_word,
+                                right_val.to_display_string(),
+                            ));
+                        });
                     }
-                };
-                if !matched {
-                    BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = true);
-                    BDD_FAILURE_MSG.with(|cell| {
-                        *cell.borrow_mut() = Some(format!(
-                            "expected {} to {} {}",
-                            left_val.to_display_string(),
-                            op_word,
-                            right_val.to_display_string(),
-                        ));
-                    });
+                    return Ok(Some(Value::Bool(matched)));
                 }
-                return Ok(Some(Value::Bool(matched)));
             }
             // General `expect <expr>` / method-form receiver path.
             // Do NOT eagerly mark failure for plain identifiers/literals — the
@@ -1684,6 +1709,7 @@ pub fn clear_bdd_state() {
     BDD_COUNTS.with(|cell| *cell.borrow_mut() = (0, 0));
     BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = false);
     BDD_EXPECT_PROVISIONAL.with(|cell| *cell.borrow_mut() = false);
+    BDD_MATCHER_RAN.with(|cell| *cell.borrow_mut() = false);
     BDD_INSIDE_IT.with(|cell| *cell.borrow_mut() = false);
     BDD_FAILURE_MSG.with(|cell| *cell.borrow_mut() = None);
     BDD_SHARED_EXAMPLES.with(|cell| cell.borrow_mut().clear());

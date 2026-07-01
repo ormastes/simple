@@ -4956,6 +4956,15 @@ impl JsInterpreter:
         if rejected:
             self._settle_promise(target_promise_id, source_value, true)
             return
+        val response_obj_id = _get_obj_id(source_value)
+        if response_obj_id >= 0:
+            var content_type = self._response_content_type(response_obj_id)
+            var ct_essence = content_type
+            if ct_essence.contains(";"):
+                ct_essence = ct_essence.split(";").get(0).trim()
+            if ct_essence.lower() != "application/wasm":
+                self._settle_promise(target_promise_id, JsValue.String(v: "unsupported-wasm-content-type:" + ct_essence), true)
+                return
         var body = ""
         match source_value:
             JsValue.Object(response_id):
@@ -5176,8 +5185,12 @@ impl JsInterpreter:
                 match bound_import:
                     JsValue.Function(id):
                         self.set_object_property(module_id, "__simple_wasm_single_bound_import", bound_import)
+                        # Expose the single bound import on the exports object so that
+                        # invoking the synthetic export via the exports receiver forwards
+                        # to it. Defined functions (wasm index >= import count) forward to
+                        # the import through their body; re-exported imports map directly.
+                        self.set_object_property(exports_id, "__simple_wasm_single_bound_import", bound_import)
                         if exported_wasm_index >= 0 and exported_wasm_index < function_import_count:
-                            self.set_object_property(exports_id, "__simple_wasm_single_bound_import", bound_import)
                             var fn_ids = self.wasm_export_fn_ids
                             var bound_imports = self.wasm_export_bound_imports
                             fn_ids.push(fn_id)
@@ -8206,7 +8219,11 @@ impl JsInterpreter:
         match _simple_fetch_state(promise_id, self.object_store):
             "pending": JsValue.Object(id: next_promise_id)
             _:
-                self._settle_already_settled_promise_then(promise_id, on_fulfilled, on_rejected, next_promise_id)
+                # Per JS semantics, `.then` on an already-settled promise must defer
+                # the reaction to the microtask queue rather than run it synchronously.
+                # Enqueue the appended handler so it runs at the next microtask drain,
+                # consistent with the pending-promise settlement path.
+                self.pending_promise_tasks = self.pending_promise_tasks + [PendingPromiseTask.create(promise_id, handler_id)]
                 JsValue.Object(id: next_promise_id)
 
     me _settle_already_settled_promise_then(promise_id: i64, on_fulfilled: i64, on_rejected: i64, next_promise_id: i64):
@@ -8267,6 +8284,20 @@ impl JsInterpreter:
             _:
                 self._run_promise_task(promise_id, handler_id)
                 JsValue.Object(id: next_promise_id)
+
+    me _promise_global_object() -> JsValue:
+        if self.host_promise_id >= 0:
+            return JsValue.Object(id: self.host_promise_id)
+        val promise_ctor_id = self.create_object()
+        self._define_method_on(promise_ctor_id, "resolve", NATIVE_PROMISE_RESOLVE)
+        self._define_method_on(promise_ctor_id, "reject", NATIVE_PROMISE_REJECT)
+        val proto_id = self.create_object()
+        self._define_method_on(proto_id, "then", NATIVE_PROMISE_THEN)
+        self._define_method_on(proto_id, "catch", NATIVE_PROMISE_CATCH)
+        self._define_method_on(proto_id, "finally", NATIVE_PROMISE_FINALLY)
+        self.set_object_property(promise_ctor_id, "prototype", JsValue.Object(id: proto_id))
+        self.host_promise_id = promise_ctor_id
+        JsValue.Object(id: promise_ctor_id)
 
     me _native_promise_resolve(arg_vals: [JsValue]) -> JsValue:
         val value = if arg_vals.len() > 0: arg_vals.get(0) else: JsValue.Undefined

@@ -21,6 +21,19 @@ struct SystemConfigProfile:
     bootloader: text
     standard_library: text
 
+struct SimpleOsHostConfig:
+    name: text
+    machine: text
+    arch: text
+    serial_console: bool
+    network_services: [text]
+    gui_backend: text
+    wm_modes: [text]
+    binary_launch: text
+    optimization_profile: text
+    filesystem_binary_paths: [text]
+    check_commands: [text]
+
 struct CliCommand:
     name: text
     executable: text
@@ -106,6 +119,79 @@ fn drawer_selected_path(state: DrawerState) -> text:
 
 fn default_system_config() -> SystemConfigProfile:
     SystemConfigProfile(theme: "dark_glass", font: "JetBrains Mono", service_manager: "OpenRC", bootloader: "Limine", standard_library: "musl")
+
+fn simpleos_host_configs() -> [SimpleOsHostConfig]:
+    [
+        SimpleOsHostConfig(
+            name: "fpga-serial",
+            machine: "fpga",
+            arch: "riscv64",
+            serial_console: true,
+            network_services: [],
+            gui_backend: "none",
+            wm_modes: [],
+            binary_launch: "base-filesystem",
+            optimization_profile: "simpleos-host-aggressive",
+            filesystem_binary_paths: ["/usr/bin/simple", "/usr/bin/simple.smf", "/SYS/APPS/SIMPLSTC.SMF"],
+            check_commands: ["sh scripts/fpga/check_kv260_telnet_serial_system.shs"]
+        ),
+        SimpleOsHostConfig(
+            name: "qemu-network-gui",
+            machine: "qemu",
+            arch: "riscv64",
+            serial_console: true,
+            network_services: ["ssh", "web", "db"],
+            gui_backend: "vulkan",
+            wm_modes: ["full"],
+            binary_launch: "base-filesystem",
+            optimization_profile: "simpleos-host-aggressive",
+            filesystem_binary_paths: ["/usr/bin/simple", "/usr/bin/simple.smf", "/SYS/APPS/SIMPLSTC.SMF"],
+            check_commands: [
+                "bin/simple-interp os test-scenario rv64-ssh",
+                "sh scripts/qemu/qemu_rv64_http_test.shs --expect-http-only --with-display --with-storage",
+                "sh scripts/qemu/check_simpleos_rv64_db_server.shs --artifacts <dir>",
+                "SIMPLEOS_DESKTOP_QMP_TARGET=wm-simple-web bin/simple-interp run src/app/test/simpleos_desktop_qmp_launch.spl"
+            ]
+        ),
+        SimpleOsHostConfig(
+            name: "fpga-network",
+            machine: "fpga",
+            arch: "riscv64",
+            serial_console: true,
+            network_services: ["ssh", "web", "db"],
+            gui_backend: "none",
+            wm_modes: [],
+            binary_launch: "base-filesystem",
+            optimization_profile: "simpleos-host-aggressive",
+            filesystem_binary_paths: ["/usr/bin/simple", "/usr/bin/simple.smf", "/SYS/APPS/SIMPLSTC.SMF"],
+            check_commands: ["sh scripts/fpga/check_kv260_simple_rv64_network.shs --artifacts <dir>"]
+        )
+    ]
+
+fn simpleos_host_config(name: text) -> Result<SimpleOsHostConfig, text>:
+    for config in simpleos_host_configs():
+        if config.name == name:
+            return Ok(config)
+    Err("unknown SimpleOS host config: {name}")
+
+fn wm_modes_for_host(host_os: text) -> [text]:
+    if host_os == "simpleos":
+        return ["full"]
+    if host_os == "windows" or host_os == "macos" or host_os == "linux":
+        return ["full", "window"]
+    []
+
+pub fn wm_mode_allowed_for_host(host_os: text, wm_mode: text) -> bool:
+    if wm_mode == "":
+        return true
+    val effective_host = if host_os == "": "linux" else: host_os
+    wm_modes_for_host(effective_host).contains(wm_mode)
+
+pub fn wm_mode_validation_error(host_os: text, wm_mode: text) -> text:
+    if wm_mode_allowed_for_host(host_os, wm_mode):
+        return ""
+    val effective_host = if host_os == "": "linux" else: host_os
+    "wm mode '{wm_mode}' is not available on host '{effective_host}'"
 
 fn primary_cli_commands() -> [CliCommand]:
     [

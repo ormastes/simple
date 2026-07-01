@@ -12,7 +12,7 @@
 
 use common.string_builder.{StringBuilder}
 use std.gc_async_mut.web.browser_session.{BrowserStylesheetSource, BrowserStylesheetExpansion}
-use std.gc_async_mut.web.browser_session_url.{find_text, resolve_relative_url}
+use std.gc_async_mut.web.browser_session_url.{find_text, resolve_relative_url, collapse_url_dot_segments}
 
 fn extract_title_text(html: text) -> text:
     val start = find_text(html, "<title>", 0)
@@ -45,6 +45,8 @@ fn html_to_text(html: text) -> text:
     var in_tag = false
     var tag_buf = ""
     var hidden_text_tag = ""
+    var closed_details = false
+    var details_in_summary = false
     var ruby_text_tag = ""
     var ruby_annotation_text = ""
     var edit_text_tag = ""
@@ -63,6 +65,14 @@ fn html_to_text(html: text) -> text:
             if hidden_text_tag != "":
                 if closing and tag_name == hidden_text_tag:
                     hidden_text_tag = ""
+            else if closed_details:
+                if not closing and tag_name == "summary":
+                    details_in_summary = true
+                else if closing and tag_name == "summary":
+                    details_in_summary = false
+                else if closing and tag_name == "details":
+                    closed_details = false
+                    details_in_summary = false
             else if ruby_text_tag != "":
                 if closing and tag_name == "rt":
                     val annotation = ruby_annotation_text.trim()
@@ -90,6 +100,13 @@ fn html_to_text(html: text) -> text:
             else if not closing and (tag_name == "ins" or tag_name == "del"):
                 edit_text_tag = tag_name
                 edit_text_value = ""
+            else if not closing and tag_name == "details":
+                if not has_tag_attr(tag_buf, "open"):
+                    closed_details = true
+                    details_in_summary = false
+            else if not closing and tag_name == "dialog":
+                if not has_tag_attr(tag_buf, "open"):
+                    hidden_text_tag = "dialog"
             else if not closing and html_tag_hides_text(tag_name):
                 hidden_text_tag = tag_name
             else if not closing and html_tag_breaks_before(tag_name):
@@ -140,6 +157,8 @@ fn html_to_text(html: text) -> text:
         else if in_tag:
             tag_buf = tag_buf + ch
         else if hidden_text_tag != "":
+            pass
+        else if closed_details and not details_in_summary:
             pass
         else if ruby_text_tag == "rt":
             ruby_annotation_text = ruby_annotation_text + ch
@@ -398,7 +417,7 @@ fn extract_css_import_sources(base_url: text, css_text: text) -> [BrowserStylesh
         val stmt = css_text.slice(at, semi + 1)
         val href = extract_css_import_href(stmt)
         if href != "":
-            sources[write_idx] = BrowserStylesheetSource.external(resolve_relative_url(base_url, href))
+            sources[write_idx] = BrowserStylesheetSource.external(collapse_url_dot_segments(resolve_relative_url(base_url, href)))
             write_idx = write_idx + 1
         pos = semi + 1
     sources

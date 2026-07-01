@@ -1480,17 +1480,14 @@ pub(super) fn eval_op_expr(
                             width: *width,
                         }
                     } else {
+                        // Wrapping negation, consistent with the rest of i64
+                        // arithmetic (which wraps: max+1 → i64::MIN, a+a → -2).
+                        // Only i64::MIN differs: wrapping_neg(MIN) == MIN, which
+                        // makes the literal `-9223372036854775808` (i64::MIN,
+                        // whose magnitude 2^63 overflows i64) evaluate correctly
+                        // instead of raising "integer negation overflow".
                         let int_value = val.as_int()?;
-                        let Some(negated) = int_value.checked_neg() else {
-                            let ctx = ErrorContext::new()
-                                .with_code(codes::INVALID_OPERATION)
-                                .with_help("integer negation overflow is reported as an error instead of panicking");
-                            return Err(CompileError::semantic_with_context(
-                                format!("integer negation overflow for `{}`", int_value),
-                                ctx,
-                            ));
-                        };
-                        Value::Int(negated)
+                        Value::Int(int_value.wrapping_neg())
                     }
                 }
                 UnaryOp::Not => Value::Bool(!val.truthy()),

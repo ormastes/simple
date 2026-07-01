@@ -105,19 +105,23 @@ fn zstd_huf_weights_to_symbols(weights: [i64]) -> Result<[ZstdHufSymbolInfo], Co
         return Err(CompressionError.CorruptStream("zstd huf has no present symbols"))
     if non_zero < 2:
         return Err(CompressionError.CorruptStream("zstd huf needs at least two present symbols"))
-    if not has_weight_one:
-        return Err(CompressionError.CorruptStream("zstd huf requires at least one weight of 1"))
     # Per RFC 8478 §4.2.1.1, Max_Number_of_Bits is the smallest L such that
     # sum(2^(w-1)) == 2^L. This is generally L >= max_weight (with equality
     # only when at least one symbol has the maximum codeword length); when
     # the weights complete to a strictly larger power of two, max_bits
     # exceeds max_weight and `bits = max_bits + 1 - w`, not max_weight + 1 - w.
+    # Detect oversubscription/incompleteness (weight_sum not a clean power of
+    # two) before the at-least-one-weight-of-1 check: an oversubscribed set
+    # such as [2,2,2,2,2] has no weight of 1, and the sum mismatch is the
+    # precise root cause that callers assert on.
     if not _zstd_huf_is_power_of_two(weight_sum):
         val next_target = _zstd_huf_next_power_of_two(weight_sum)
         val gap = next_target - weight_sum
         if _zstd_huf_is_power_of_two(gap):
             return Err(CompressionError.CorruptStream("zstd huf weight sum incomplete"))
         return Err(CompressionError.CorruptStream("zstd huf weight sum oversubscribed"))
+    if not has_weight_one:
+        return Err(CompressionError.CorruptStream("zstd huf requires at least one weight of 1"))
     val max_bits = _zstd_huf_log2_exact(weight_sum)
     if max_bits < max_weight:
         return Err(CompressionError.CorruptStream("zstd huf weight sum below max weight"))
@@ -640,6 +644,50 @@ fn zstd_huf_expand_decode_table(entries: [ZstdHufCanonicalEntry], table_bits: i6
         var fill = 0
         while fill < fill_count:
             val slot_idx = (base | (fill.to_u32() << entry.bits.to_u32())).to_i64()
+            if slot_idx < 0 or slot_idx >= table_size:
+                return Err(CompressionError.CorruptStream("zstd huf decode table slot"))
+            val current = table[slot_idx]
+            if current.bits != 0:
+                return Err(CompressionError.CorruptStream("zstd huf decode table collision"))
+            table[slot_idx] = ZstdHufDecodeEntry(symbol: entry.symbol, bits: entry.bits)
+            fill = fill + 1
+        i = i + 1
+    i = 0
+    while i < table.len():
+        if table[i].bits == 0:
+            return Err(CompressionError.CorruptStream("zstd huf decode table incomplete"))
+        i = i + 1
+    Ok(table)
+
+# Build a Huffman decode table indexed by an MSB-first backward bit reader, as
+# real zstd frames require (RFC 8478 §4.2.2 / Annex A). Unlike
+# `zstd_huf_expand_decode_table` (which reverses each canonical code for the
+# Simple-internal LSB reader), here each canonical code is placed left-aligned
+# at `code << (table_bits - bits)` and spans `2^(table_bits - bits)` contiguous
+# slots, so peeking `table_bits` bits MSB-first indexes directly to the symbol.
+fn zstd_huf_expand_decode_table_msb(entries: [ZstdHufCanonicalEntry], table_bits: i64) -> Result<[ZstdHufDecodeEntry], CompressionError>:
+    if table_bits <= 0 or table_bits > ZSTD_HUF_MAX_BITS:
+        return Err(CompressionError.CorruptStream("zstd huf decode table width"))
+    val table_size = 1 << table_bits
+    var table: [ZstdHufDecodeEntry] = []
+    var slot = 0
+    while slot < table_size:
+        table.push(ZstdHufDecodeEntry(symbol: -1, bits: 0))
+        slot = slot + 1
+    var i = 0
+    while i < entries.len():
+        val entry = entries[i]
+        if entry.symbol < 0 or entry.symbol >= ZSTD_HUF_MAX_SYMBOLS:
+            return Err(CompressionError.CorruptStream("zstd huf decode table symbol"))
+        if entry.bits <= 0 or entry.bits > table_bits:
+            return Err(CompressionError.CorruptStream("zstd huf decode table entry width"))
+        if entry.code >= (1u32 << entry.bits.to_u32()):
+            return Err(CompressionError.CorruptStream("zstd huf decode table code width"))
+        val base = (entry.code.to_i64() << (table_bits - entry.bits))
+        val fill_count = 1 << (table_bits - entry.bits)
+        var fill = 0
+        while fill < fill_count:
+            val slot_idx = base + fill
             if slot_idx < 0 or slot_idx >= table_size:
                 return Err(CompressionError.CorruptStream("zstd huf decode table slot"))
             val current = table[slot_idx]

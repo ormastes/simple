@@ -1,5 +1,7 @@
 use std.spec.*
 use std.gc_async_mut.web.browser_session.{BrowserSession, BrowserResponse}
+use std.gc_async_mut.web.browser_session_loading.*
+use std.gc_async_mut.web.browser_session_runtime.*
 use std.js.types.js_types.{JsValue}
 
 fn _display_js(v: JsValue) -> text:
@@ -627,3 +629,30 @@ describe "BrowserSession async fetch":
                         fail("Expected rejected Promise.finally transport commit to reject")
             nil:
                 fail("Expected pending fetch request for rejected Promise.finally chain")
+
+    it "loads a linked stylesheet body through the request pump":
+        var session = BrowserSession.new()
+        session.open_html(
+            "https://example.com/index.html",
+            "<html><head><link rel='stylesheet' href='/site.css'></head><body>styled</body></html>"
+        )
+        match session.take_pending_request():
+            Some(request) =>
+                expect(request.kind).to_equal("style")
+                expect(request.url).to_equal("https://example.com/site.css")
+                val commit_result = session.commit_network_response(BrowserResponse.create(
+                    request_id: request.id,
+                    kind: "style",
+                    url: request.url,
+                    status: 200,
+                    headers: "",
+                    body: "body { background: rgb(4, 5, 6); }",
+                    error: ""
+                ))
+                match commit_result:
+                    Ok(_) =>
+                        expect(session.current_style_html).to_contain("background: rgb(4, 5, 6);")
+                    Err(e) =>
+                        fail("Expected pump-delivered stylesheet body to commit: {e}")
+            nil:
+                fail("Expected a pending stylesheet request after linking an unregistered stylesheet")

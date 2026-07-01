@@ -1,19 +1,22 @@
 # Win FS ACL — access control check for the /win filesystem tree.
 #
-# Provides: AclDecision, acl_check.
+# Provides: acl_check.
 
-enum AclDecision:
-    Allow
-    Deny(reason: text)
+use std.common.privilege.id_path.{id_path_prefix_match}
+use std.common.privilege.authority_token.{AuthorityToken, TrustSource}
+use std.common.win_fs.window_record.{WindowRecord}
+use std.common.win_fs.fs_encoder.{FsOp}
 
-# Check whether a caller identified by caller_id_path may access a resource
-# guarded by acl_id_path. Returns Allow if acl_id_path is empty (public) or
-# if caller_id_path has acl_id_path as a prefix.
-fn acl_check(caller_id_path: text, acl_id_path: text) -> AclDecision:
-    if acl_id_path == "":
-        return AclDecision.Allow
-    if caller_id_path == acl_id_path:
-        return AclDecision.Allow
-    if caller_id_path.starts_with(acl_id_path):
-        return AclDecision.Allow
-    AclDecision.Deny(reason: "caller {caller_id_path} not in acl {acl_id_path}")
+# Decide whether `token` may perform `op` on the resource guarded by `rec`.
+#
+# A record is accessible when the token's id_path covers (is a prefix of, or
+# equal to) the record's required acl_id_path. An empty acl_id_path is public.
+# Revoked tokens are always denied regardless of clearance.
+fn acl_check(rec: WindowRecord, token: AuthorityToken, op: FsOp) -> bool:
+    if token.trust_source == TrustSource.Revoked:
+        return false
+    if rec.acl_id_path.path == "":
+        return true
+    id_path_prefix_match(token.id_path, rec.acl_id_path)
+
+export acl_check

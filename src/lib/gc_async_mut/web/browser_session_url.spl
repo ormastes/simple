@@ -53,6 +53,72 @@ fn resolve_relative_url(base_url: text, href: text) -> text:
         return href
     base_dir(base_url) + href
 
+# Collapse "." and ".." segments in a URL's path per RFC 3986 remove_dot_segments,
+# leaving scheme/host (origin) and any query/fragment tail untouched.
+# Applied selectively by callers (e.g. CSS @import resolution) that want
+# normalised URLs; resolve_relative_url itself preserves raw joins because
+# other consumers (JS module dependency extraction) assert on the unnormalised
+# form.
+fn collapse_url_dot_segments(url: text) -> text:
+    val origin = url_origin(url)
+    val rest = url.slice(origin.len(), url.len())
+    # Split off query/fragment so we only normalise the path portion.
+    var cut = rest.len()
+    val q = find_text(rest, "?", 0)
+    if q >= 0 and q < cut:
+        cut = q
+    val h = find_text(rest, "#", 0)
+    if h >= 0 and h < cut:
+        cut = h
+    val path = rest.slice(0, cut)
+    val tail = rest.slice(cut, rest.len())
+    origin + remove_dot_segments(path) + tail
+
+# RFC 3986 §5.2.4 remove_dot_segments operating on a path string.
+fn remove_dot_segments(path: text) -> text:
+    var input = path
+    var output = ""
+    while input.len() > 0:
+        if input.starts_with("../"):
+            input = input.slice(3, input.len())
+        elif input.starts_with("./"):
+            input = input.slice(2, input.len())
+        elif input.starts_with("/./"):
+            input = "/" + input.slice(3, input.len())
+        elif input == "/.":
+            input = "/"
+        elif input.starts_with("/../"):
+            input = "/" + input.slice(4, input.len())
+            output = _drop_last_segment(output)
+        elif input == "/..":
+            input = "/"
+            output = _drop_last_segment(output)
+        elif input == "." or input == "..":
+            input = ""
+        else:
+            # Move the first path segment (leading "/" plus chars up to next "/").
+            var seg_end = input.len()
+            var i = 0
+            if input.starts_with("/"):
+                i = 1
+            while i < input.len():
+                if input.slice(i, i + 1) == "/":
+                    seg_end = i
+                    i = input.len()
+                else:
+                    i = i + 1
+            output = output + input.slice(0, seg_end)
+            input = input.slice(seg_end, input.len())
+    output
+
+fn _drop_last_segment(output: text) -> text:
+    var idx = output.len() - 1
+    while idx >= 0:
+        if output.slice(idx, idx + 1) == "/":
+            return output.slice(0, idx)
+        idx = idx - 1
+    ""
+
 fn url_protocol(url: text) -> text:
     if url.starts_with("https://"):
         return "https:"
