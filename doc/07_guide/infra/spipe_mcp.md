@@ -82,10 +82,10 @@ parsed output, `spipe_context_sql_get` to retrieve one source, and
 `spipe_context_sql_search` to search stored parsed context by query and optional
 source filter.
 
-For stored sources, `spipe_context_raw` prepends the matching `@parent` chain
-before exact raw lines, so a middle slice still carries command and file/dir
-context. Direct raw CLI mode remains exact raw output because it has no stored
-tree.
+`spipe_context_raw` prepends the matching `@parent` chain before exact raw
+lines, so a middle slice still carries command and file/dir context. If callers
+pass raw text directly, SPipe parses that text first and renders the same parent
+context.
 
 ## Current Boundary
 
