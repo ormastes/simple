@@ -27,7 +27,7 @@ macos_metal_render_log_compare_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 18 | 18 | 0 | 0 |
+| 19 | 19 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -86,7 +86,14 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/macos_metal_render_log_compa
    must be single regular files, not live symlinks, broken symlinks, or
    hardlinked aliases. A status-only row, browser-metadata row, or env-only
    claimed magic is diagnostic, not native GPU-capture proof.
-5. Run `scripts/check/check-macos-metal-render-log-compare.shs` and consume the
+5. If Tauri iOS evidence is part of the host completion gate, run
+   `scripts/check/check-tauri-mobile-renderer-parity-evidence.shs`, keep
+   `build/tauri_mobile_renderer_parity_evidence/evidence.env`, and set
+   `MACOS_METAL_RENDER_LOG_REQUIRE_TAURI_IOS=1`. Strict Tauri mode requires
+   Tauri2/WKWebView, expected GPU backend `metal`, the `[tauri-shell] render`
+   marker, Metal runtime markers, WKWebView Metal context rows, a coherent
+   render-log source artifact, and no fallback/failure markers.
+6. Run `scripts/check/check-macos-metal-render-log-compare.shs` and consume the
    normalized `macos_metal_render_log_compare_*` keys from the output env.
 
 ## Evidence Contract
@@ -107,6 +114,9 @@ It also requires Engine2D framebuffer readback evidence:
 - The generated readback, framebuffer readback, and browser backing input env
   files must be single regular files, not symlinks or hardlinks to stale or
   shared evidence.
+- Input envs, browser backing sources, ARGB artifacts, and strict GPU-capture
+  artifacts emit explicit file-reason rows alongside file-status and
+  artifact-status rows for downstream gate diagnostics.
 
 Browser evidence must prove Metal backing and exact pairwise ARGB comparison:
 
@@ -143,6 +153,18 @@ Browser evidence must prove Metal backing and exact pairwise ARGB comparison:
 - ARGB artifact paths beside the browser env file must be regular files, not
   symlinks or hardlinks to artifacts outside the evidence directory.
 
+Tauri iOS evidence is optional by default and diagnostic unless strict mode is
+enabled:
+
+- `macos_metal_render_log_compare_tauri_ios_backend=tauri2-wkwebview`
+- `macos_metal_render_log_compare_tauri_ios_expected_gpu_backend=metal`
+- `macos_metal_render_log_compare_tauri_ios_render_log_validation_status=pass`
+- `macos_metal_render_log_compare_tauri_ios_render_log_metal_marker_status=pass`
+- `macos_metal_render_log_compare_tauri_ios_render_log_tauri_context_status=pass`
+- `macos_metal_render_log_compare_tauri_ios_render_log_metal_context_status=pass`
+- `macos_metal_render_log_compare_tauri_ios_render_log_coherent_source_artifact_status=pass`
+- `macos_metal_render_log_compare_tauri_ios_metal_log_status=pass`
+
 ## Failure Semantics
 
 The gate is fail-closed. A screenshot, cached bitmap, non-pairwise comparison,
@@ -156,7 +178,8 @@ Structured blockers are emitted through
 generated Metal readback, Engine2D framebuffer readback, browser Metal backing,
 pairwise ARGB diff, ARGB source evidence, and Xcode GPU capture.
 The compare output also emits the raw Electron/Chrome/browser backing statuses,
-pairwise diff lane statuses, and ARGB source reasons used to make the decision.
+pairwise diff lane statuses, ARGB source reasons, and Tauri iOS/WKWebView Metal
+render-log rows used to make the decision.
 
 ## Host Notes
 
@@ -172,6 +195,7 @@ The wrapper writes:
 - `build/macos-metal-render-log-compare/simple.srl.env`
 - `build/macos-metal-render-log-compare/chrome.srl.env`
 - `build/macos-metal-render-log-compare/electron.srl.env`
+- `build/macos-metal-render-log-compare/tauri-ios.srl.env`
 - `build/macos-metal-render-log-compare/compare.srl.env`
 
 The source logs use `simple-render-log-v1`, set
@@ -231,6 +255,9 @@ macos_metal_render_log_compare_pairwise_status=pass
     hardlink to another capture artifact.
 24. Reject symlinked or hardlinked Metal input env files before treating their
     rows as native/rendering proof.
+25. Reject missing Tauri iOS/WKWebView Metal render-log evidence when strict
+    Tauri mode is enabled, while keeping missing Tauri rows diagnostic by
+    default.
 
 ## Scenarios
 
@@ -254,7 +281,7 @@ macos_metal_render_log_compare_pairwise_status=pass
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 211 lines folded for reproduction.
+Runnable source: 260 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -272,9 +299,13 @@ expect(code).to_equal(0)
 val evidence = file_read("build/test-macos-metal-render-log-pass/out/evidence.env")
 expect(evidence).to_contain("macos_metal_render_log_compare_status=pass")
 expect(evidence).to_contain("macos_metal_render_log_compare_required_api=metal")
+expect(evidence).to_contain("macos_metal_render_log_compare_generated_readback_env_file_reason=pass")
 expect(evidence).to_contain("macos_metal_render_log_compare_generated_readback_env_artifact_status=pass")
+expect(evidence).to_contain("macos_metal_render_log_compare_framebuffer_readback_env_file_reason=pass")
 expect(evidence).to_contain("macos_metal_render_log_compare_framebuffer_readback_env_artifact_status=pass")
+expect(evidence).to_contain("macos_metal_render_log_compare_browser_env_file_reason=pass")
 expect(evidence).to_contain("macos_metal_render_log_compare_browser_env_artifact_status=pass")
+expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_env_file_reason=pass")
 expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_env_artifact_status=pass")
 expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_status=pass")
 expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_tool=xcode-gpu-frame-capture")
@@ -282,10 +313,19 @@ expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_tool_rea
 expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_artifact=build/test-macos-metal-render-log-pass/frame.gputrace")
 expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_artifact_resolved=build/test-macos-metal-render-log-pass/frame.gputrace")
 expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_artifact_file_status=pass")
+expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_artifact_file_reason=pass")
 expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_artifact_status=pass")
 expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_artifact_magic=XCODE-GPUTRACE")
 expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_artifact_claimed_magic=XCODE-GPUTRACE")
 expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_artifact_claimed_magic_reason=pass")
+expect(evidence).to_contain("macos_metal_render_log_compare_tauri_ios_env=build/tauri_mobile_renderer_parity_evidence/evidence.env")
+expect(evidence).to_contain("macos_metal_render_log_compare_tauri_ios_env_file_status=missing")
+expect(evidence).to_contain("macos_metal_render_log_compare_tauri_ios_status=missing")
+expect(evidence).to_contain("macos_metal_render_log_compare_tauri_ios_backend=tauri2-wkwebview")
+expect(evidence).to_contain("macos_metal_render_log_compare_tauri_ios_expected_gpu_backend=metal")
+expect(evidence).to_contain("macos_metal_render_log_compare_tauri_ios_render_log_validation_status=missing")
+expect(evidence).to_contain("macos_metal_render_log_compare_tauri_ios_render_log_validation_reason=missing-tauri-mobile-renderer-parity-evidence")
+expect(evidence).to_contain("macos_metal_render_log_compare_tauri_ios_gate_status=not-required")
 expect(evidence).to_contain("macos_metal_render_log_compare_blocked_gate_count=0")
 expect(evidence).to_contain("macos_metal_render_log_compare_blocked_gates=")
 expect(evidence).to_contain("macos_metal_render_log_compare_generated_readback_gate_status=pass")
@@ -301,8 +341,10 @@ expect(evidence).to_contain("macos_metal_render_log_compare_chrome_browser_backi
 expect(evidence).to_contain("macos_metal_render_log_compare_browser_backing_status=pass")
 expect(evidence).to_contain("macos_metal_render_log_compare_electron_browser_backing_gpu_compositing=enabled")
 expect(evidence).to_contain("macos_metal_render_log_compare_electron_browser_backing_source_file_status=pass")
+expect(evidence).to_contain("macos_metal_render_log_compare_electron_browser_backing_source_file_reason=pass")
 expect(evidence).to_contain("macos_metal_render_log_compare_electron_browser_backing_source_artifact_status=pass")
 expect(evidence).to_contain("macos_metal_render_log_compare_chrome_browser_backing_source_file_status=pass")
+expect(evidence).to_contain("macos_metal_render_log_compare_chrome_browser_backing_source_file_reason=pass")
 expect(evidence).to_contain("macos_metal_render_log_compare_chrome_browser_backing_source_artifact_status=pass")
 expect(evidence).to_contain("macos_metal_render_log_compare_chrome_browser_backing_gl_implementation_parts=metal")
 expect(evidence).to_contain("macos_metal_render_log_compare_pixel_comparison_status=pass")
@@ -318,6 +360,7 @@ expect(evidence).to_contain("macos_metal_render_log_compare_chrome_argb_reason=p
 expect(evidence).to_contain("macos_metal_render_log_compare_electron_argb_reason=pass")
 expect(evidence).to_contain("macos_metal_render_log_compare_simple_argb_artifact_reason=pass")
 expect(evidence).to_contain("macos_metal_render_log_compare_simple_argb_artifact_file_status=pass")
+expect(evidence).to_contain("macos_metal_render_log_compare_simple_argb_artifact_file_reason=pass")
 expect(evidence).to_contain("macos_metal_render_log_compare_simple_argb_artifact_status=pass")
 expect(evidence).to_contain("macos_metal_render_log_compare_simple_argb_artifact_format=argb-u32")
 expect(evidence).to_contain("macos_metal_render_log_compare_simple_argb_artifact_width=4")
@@ -326,12 +369,28 @@ expect(evidence).to_contain("macos_metal_render_log_compare_simple_argb_artifact
 expect(evidence).to_contain("macos_metal_render_log_compare_simple_argb_artifact_nonblank_pixel_count=12")
 expect(evidence).to_contain("macos_metal_render_log_compare_simple_argb_artifact_checksum=12")
 expect(evidence).to_contain("macos_metal_render_log_compare_chrome_argb_artifact_reason=pass")
+expect(evidence).to_contain("macos_metal_render_log_compare_chrome_argb_artifact_file_reason=pass")
 expect(evidence).to_contain("macos_metal_render_log_compare_chrome_argb_artifact_status=pass")
 expect(evidence).to_contain("macos_metal_render_log_compare_electron_argb_artifact_reason=pass")
+expect(evidence).to_contain("macos_metal_render_log_compare_electron_argb_artifact_file_reason=pass")
 expect(evidence).to_contain("macos_metal_render_log_compare_electron_argb_artifact_status=pass")
 expect(evidence).to_contain("macos_metal_render_log_compare_argb_viewport_reason=pass")
 expect(evidence).to_contain("macos_metal_render_log_compare_argb_checksum_reason=pass")
 expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_gate_status=pass")
+expect(evidence).to_contain("macos_metal_render_log_compare_tauri_ios_log=build/test-macos-metal-render-log-pass/out/tauri-ios.srl.env")
+expect(evidence).to_contain("macos_metal_render_log_compare_require_tauri_ios=0")
+
+val report = file_read("build/test-macos-metal-render-log-pass/out/report.md")
+expect(report).to_contain("- gate summary: generated=pass framebuffer=pass browser=pass pairwise=pass argb=pass gpu_capture=pass")
+expect(report).to_contain("- Electron Metal backing: pass detail=pass source=pass artifact=pass/pass gpu=enabled display=Metal skia=Metal")
+expect(report).to_contain("- Chrome Metal backing: pass detail=pass source=pass artifact=pass/pass gpu=enabled display=Metal skia=Metal")
+expect(report).to_contain("- Tauri iOS WKWebView Metal render-log: missing (missing-tauri-mobile-renderer-parity-evidence; backend=tauri2-wkwebview expected_gpu=metal gate=not-required)")
+expect(report).to_contain("- pairwise ARGB: mode=pairwise-argb-diff electron_chrome=pass electron_simple=pass chrome_simple=pass viewport=pass checksum=pass")
+expect(report).to_contain("- Simple ARGB artifact: pass/pass reason=pass format=argb-u32 size=4x3 nonblank=12 checksum=12")
+expect(report).to_contain("- Chrome ARGB artifact: pass/pass reason=pass format=argb-u32 size=4x3 nonblank=12 checksum=12")
+expect(report).to_contain("- Electron ARGB artifact: pass/pass reason=pass format=argb-u32 size=4x3 nonblank=12 checksum=12")
+expect(report).to_contain("- Xcode GPU capture: status=pass tool=xcode-gpu-frame-capture tool_reason=pass artifact=pass/pass magic=XCODE-GPUTRACE claimed=XCODE-GPUTRACE claimed_reason=pass")
+
 val simple_log = file_read("build/test-macos-metal-render-log-pass/out/simple.srl.env")
 expect(simple_log).to_contain("simple_render_log_platform=macos")
 expect(simple_log).to_contain("simple_render_log_native_api=metal")
@@ -340,6 +399,12 @@ expect(simple_log).to_contain("simple_render_log_original_capture_tool=xcode-gpu
 expect(simple_log).to_contain("simple_render_log_original_native_log_format=xcode-gputrace")
 expect(simple_log).to_contain("simple_render_log_original_native_log_source=build/test-macos-metal-render-log-pass/generated.env")
 expect(simple_log).to_contain("simple_render_log_artifact_magic=XCODE-GPUTRACE")
+
+val tauri_log = file_read("build/test-macos-metal-render-log-pass/out/tauri-ios.srl.env")
+expect(tauri_log).to_contain("simple_render_log_platform=ios")
+expect(tauri_log).to_contain("simple_render_log_native_api=metal")
+expect(tauri_log).to_contain("simple_render_log_source=tauri-ios-wkwebview")
+expect(tauri_log).to_contain("simple_render_log_status=missing")
 
 val missing_electron_source_command = command.replace("macos_metal_electron_browser_backing_source=test/fixtures/render_log/macos_metal_browser_backing_source.env", "macos_metal_electron_browser_backing_source=build/test-macos-metal-render-log-pass/missing-electron-source.json")
 val missing_source_command = missing_electron_source_command.replace("macos_metal_chrome_browser_backing_source=test/fixtures/render_log/macos_metal_browser_backing_source.env", "macos_metal_chrome_browser_backing_source=build/test-macos-metal-render-log-pass/missing-chrome-source.json") + " || true"
@@ -351,8 +416,10 @@ expect(missing_source_evidence).to_contain("macos_metal_render_log_compare_statu
 expect(missing_source_evidence).to_contain("electron-metal-source-missing")
 expect(missing_source_evidence).to_contain("chrome-metal-source-missing")
 expect(missing_source_evidence).to_contain("macos_metal_render_log_compare_electron_browser_backing_source_file_status=missing")
+expect(missing_source_evidence).to_contain("macos_metal_render_log_compare_electron_browser_backing_source_file_reason=missing")
 expect(missing_source_evidence).to_contain("macos_metal_render_log_compare_electron_browser_backing_source_artifact_status=fail")
 expect(missing_source_evidence).to_contain("macos_metal_render_log_compare_chrome_browser_backing_source_file_status=missing")
+expect(missing_source_evidence).to_contain("macos_metal_render_log_compare_chrome_browser_backing_source_file_reason=missing")
 expect(missing_source_evidence).to_contain("macos_metal_render_log_compare_chrome_browser_backing_source_artifact_status=fail")
 
 val empty_source_base_command = command.replace("rm -rf build/test-macos-metal-render-log-pass && mkdir -p build/test-macos-metal-render-log-pass && " + _argb_artifacts_command("build/test-macos-metal-render-log-pass") + " && ", "rm -rf build/test-macos-metal-render-log-pass && mkdir -p build/test-macos-metal-render-log-pass && " + _argb_artifacts_command("build/test-macos-metal-render-log-pass") + " && : > build/test-macos-metal-render-log-pass/empty-electron-source.json && : > build/test-macos-metal-render-log-pass/empty-chrome-source.json && ")
@@ -366,8 +433,10 @@ expect(empty_source_evidence).to_contain("macos_metal_render_log_compare_status=
 expect(empty_source_evidence).to_contain("electron-metal-source-empty")
 expect(empty_source_evidence).to_contain("chrome-metal-source-empty")
 expect(empty_source_evidence).to_contain("macos_metal_render_log_compare_electron_browser_backing_source_file_status=empty")
+expect(empty_source_evidence).to_contain("macos_metal_render_log_compare_electron_browser_backing_source_file_reason=empty")
 expect(empty_source_evidence).to_contain("macos_metal_render_log_compare_electron_browser_backing_source_artifact_status=fail")
 expect(empty_source_evidence).to_contain("macos_metal_render_log_compare_chrome_browser_backing_source_file_status=empty")
+expect(empty_source_evidence).to_contain("macos_metal_render_log_compare_chrome_browser_backing_source_file_reason=empty")
 expect(empty_source_evidence).to_contain("macos_metal_render_log_compare_chrome_browser_backing_source_artifact_status=fail")
 
 val symlink_source_base_command = command.replace("rm -rf build/test-macos-metal-render-log-pass && mkdir -p build/test-macos-metal-render-log-pass && " + _argb_artifacts_command("build/test-macos-metal-render-log-pass") + " && ", "rm -rf build/test-macos-metal-render-log-pass build/test-macos-metal-render-log-pass-external && mkdir -p build/test-macos-metal-render-log-pass build/test-macos-metal-render-log-pass-external && " + _argb_artifacts_command("build/test-macos-metal-render-log-pass") + " && cp test/fixtures/render_log/macos_metal_browser_backing_source.env build/test-macos-metal-render-log-pass-external/source.env && ln -s ../test-macos-metal-render-log-pass-external/source.env build/test-macos-metal-render-log-pass/electron-source.env && ln -s ../test-macos-metal-render-log-pass-external/source.env build/test-macos-metal-render-log-pass/chrome-source.env && ")
@@ -381,8 +450,10 @@ expect(symlink_source_evidence).to_contain("macos_metal_render_log_compare_statu
 expect(symlink_source_evidence).to_contain("electron-metal-source-symlink")
 expect(symlink_source_evidence).to_contain("chrome-metal-source-symlink")
 expect(symlink_source_evidence).to_contain("macos_metal_render_log_compare_electron_browser_backing_source_file_status=symlink")
+expect(symlink_source_evidence).to_contain("macos_metal_render_log_compare_electron_browser_backing_source_file_reason=symlink")
 expect(symlink_source_evidence).to_contain("macos_metal_render_log_compare_electron_browser_backing_source_artifact_status=fail")
 expect(symlink_source_evidence).to_contain("macos_metal_render_log_compare_chrome_browser_backing_source_file_status=symlink")
+expect(symlink_source_evidence).to_contain("macos_metal_render_log_compare_chrome_browser_backing_source_file_reason=symlink")
 expect(symlink_source_evidence).to_contain("macos_metal_render_log_compare_chrome_browser_backing_source_artifact_status=fail")
 expect(symlink_source_evidence).to_contain("macos_metal_render_log_compare_browser_backing_gate_status=fail")
 
@@ -397,8 +468,10 @@ expect(hardlink_source_evidence).to_contain("macos_metal_render_log_compare_stat
 expect(hardlink_source_evidence).to_contain("electron-metal-source-hardlink")
 expect(hardlink_source_evidence).to_contain("chrome-metal-source-hardlink")
 expect(hardlink_source_evidence).to_contain("macos_metal_render_log_compare_electron_browser_backing_source_file_status=hardlink")
+expect(hardlink_source_evidence).to_contain("macos_metal_render_log_compare_electron_browser_backing_source_file_reason=hardlink")
 expect(hardlink_source_evidence).to_contain("macos_metal_render_log_compare_electron_browser_backing_source_artifact_status=fail")
 expect(hardlink_source_evidence).to_contain("macos_metal_render_log_compare_chrome_browser_backing_source_file_status=hardlink")
+expect(hardlink_source_evidence).to_contain("macos_metal_render_log_compare_chrome_browser_backing_source_file_reason=hardlink")
 expect(hardlink_source_evidence).to_contain("macos_metal_render_log_compare_chrome_browser_backing_source_artifact_status=fail")
 expect(hardlink_source_evidence).to_contain("macos_metal_render_log_compare_browser_backing_gate_status=fail")
 
@@ -413,8 +486,10 @@ expect(nonregular_source_evidence).to_contain("macos_metal_render_log_compare_st
 expect(nonregular_source_evidence).to_contain("electron-metal-source-not-regular")
 expect(nonregular_source_evidence).to_contain("chrome-metal-source-not-regular")
 expect(nonregular_source_evidence).to_contain("macos_metal_render_log_compare_electron_browser_backing_source_file_status=not-regular")
+expect(nonregular_source_evidence).to_contain("macos_metal_render_log_compare_electron_browser_backing_source_file_reason=not-regular")
 expect(nonregular_source_evidence).to_contain("macos_metal_render_log_compare_electron_browser_backing_source_artifact_status=fail")
 expect(nonregular_source_evidence).to_contain("macos_metal_render_log_compare_chrome_browser_backing_source_file_status=not-regular")
+expect(nonregular_source_evidence).to_contain("macos_metal_render_log_compare_chrome_browser_backing_source_file_reason=not-regular")
 expect(nonregular_source_evidence).to_contain("macos_metal_render_log_compare_chrome_browser_backing_source_artifact_status=fail")
 expect(nonregular_source_evidence).to_contain("macos_metal_render_log_compare_browser_backing_gate_status=fail")
 
@@ -467,6 +542,7 @@ expect(missing_argb_evidence).to_contain("macos_metal_render_log_compare_status=
 expect(missing_argb_evidence).to_contain("electron-argb-artifact-missing")
 expect(missing_argb_evidence).to_contain("macos_metal_render_log_compare_electron_argb_artifact_reason=electron-argb-artifact-missing")
 expect(missing_argb_evidence).to_contain("macos_metal_render_log_compare_electron_argb_artifact_file_status=missing")
+expect(missing_argb_evidence).to_contain("macos_metal_render_log_compare_electron_argb_artifact_file_reason=missing")
 expect(missing_argb_evidence).to_contain("macos_metal_render_log_compare_electron_argb_artifact_status=fail")
 expect(missing_argb_evidence).to_contain("macos_metal_render_log_compare_argb_source_gate_status=fail")
 ```
@@ -482,7 +558,7 @@ expect(missing_argb_evidence).to_contain("macos_metal_render_log_compare_argb_so
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -502,6 +578,7 @@ val evidence = file_read(root + "/out/evidence.env")
 expect(evidence).to_contain("macos_metal_render_log_compare_status=fail")
 expect(evidence).to_contain("macos_metal_render_log_compare_simple_argb_artifact_reason=simple-argb-artifact-missing")
 expect(evidence).to_contain("macos_metal_render_log_compare_simple_argb_artifact_file_status=missing")
+expect(evidence).to_contain("macos_metal_render_log_compare_simple_argb_artifact_file_reason=missing")
 expect(evidence).to_contain("macos_metal_render_log_compare_simple_argb_artifact_status=fail")
 expect(evidence).to_contain("macos_metal_render_log_compare_argb_source_gate_status=fail")
 ```
@@ -556,7 +633,7 @@ expect(evidence).to_contain("macos_metal_render_log_compare_argb_source_gate_sta
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 23 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -579,6 +656,7 @@ expect(evidence).to_contain("macos_metal_render_log_compare_status=fail")
 expect(evidence).to_contain("simple-argb-artifact-symlink")
 expect(evidence).to_contain("macos_metal_render_log_compare_simple_argb_artifact_reason=simple-argb-artifact-symlink")
 expect(evidence).to_contain("macos_metal_render_log_compare_simple_argb_artifact_file_status=symlink")
+expect(evidence).to_contain("macos_metal_render_log_compare_simple_argb_artifact_file_reason=symlink")
 expect(evidence).to_contain("macos_metal_render_log_compare_simple_argb_artifact_status=fail")
 expect(evidence).to_contain("macos_metal_render_log_compare_chrome_argb_artifact_reason=pass")
 expect(evidence).to_contain("macos_metal_render_log_compare_electron_argb_artifact_reason=pass")
@@ -597,7 +675,7 @@ expect(evidence).to_contain("macos_metal_render_log_compare_argb_source_gate_sta
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 23 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -620,6 +698,7 @@ expect(evidence).to_contain("macos_metal_render_log_compare_status=fail")
 expect(evidence).to_contain("simple-argb-artifact-hardlink")
 expect(evidence).to_contain("macos_metal_render_log_compare_simple_argb_artifact_reason=simple-argb-artifact-hardlink")
 expect(evidence).to_contain("macos_metal_render_log_compare_simple_argb_artifact_file_status=hardlink")
+expect(evidence).to_contain("macos_metal_render_log_compare_simple_argb_artifact_file_reason=hardlink")
 expect(evidence).to_contain("macos_metal_render_log_compare_simple_argb_artifact_status=fail")
 expect(evidence).to_contain("macos_metal_render_log_compare_chrome_argb_artifact_reason=pass")
 expect(evidence).to_contain("macos_metal_render_log_compare_electron_argb_artifact_reason=pass")
@@ -868,6 +947,42 @@ expect(chrome_log).to_contain("simple_render_log_nonblank_status=fail")
 
 </details>
 
+#### requires Tauri iOS WKWebView Metal render-log evidence in strict Tauri mode
+
+-  argb artifacts command
+   - Expected: code equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 19 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val command = "rm -rf build/test-macos-metal-render-log-strict-tauri-ios && mkdir -p build/test-macos-metal-render-log-strict-tauri-ios && " +
+    _argb_artifacts_command("build/test-macos-metal-render-log-strict-tauri-ios") + " && " +
+    "cp test/fixtures/render_log/macos_metal_browser_backing_source.env build/test-macos-metal-render-log-strict-tauri-ios/electron-source.env && " +
+    "cp test/fixtures/render_log/macos_metal_browser_backing_source.env build/test-macos-metal-render-log-strict-tauri-ios/chrome-source.env && " +
+    "printf 'metal_generated_2d_readback_status=pass\\nmetal_generated_2d_readback_module_verified=true\\nmetal_generated_2d_readback_submit_attempted=true\\nmetal_generated_2d_readback_readback_available=true\\nmetal_generated_2d_readback_expected_checksum=7\\nmetal_generated_2d_readback_actual_checksum=7\\n' > build/test-macos-metal-render-log-strict-tauri-ios/generated.env && " +
+    "printf 'metal_engine2d_framebuffer_readback_status=pass\\nmetal_engine2d_framebuffer_gpu_readback_available=true\\nmetal_engine2d_framebuffer_blur_or_tolerance_used=false\\n' > build/test-macos-metal-render-log-strict-tauri-ios/framebuffer.env && " +
+    "printf 'macos_metal_electron_browser_backing_status=pass\\nmacos_metal_chrome_browser_backing_status=pass\\nmacos_metal_browser_backing_status=pass\\nmacos_metal_electron_browser_backing_reason=electron-metal-backed\\nmacos_metal_electron_browser_backing_gpu_compositing=enabled\\nmacos_metal_electron_browser_backing_display_type=Metal\\nmacos_metal_electron_browser_backing_gl_implementation_parts=metal\\nmacos_metal_electron_browser_backing_skia_backend_type=Metal\\nmacos_metal_electron_browser_backing_gl_renderer=Apple GPU\\nmacos_metal_electron_browser_backing_source=build/test-macos-metal-render-log-strict-tauri-ios/electron-source.env\\nmacos_metal_chrome_browser_backing_reason=chrome-metal-backed\\nmacos_metal_chrome_browser_backing_gpu_compositing=enabled\\nmacos_metal_chrome_browser_backing_display_type=Metal\\nmacos_metal_chrome_browser_backing_gl_implementation_parts=metal\\nmacos_metal_chrome_browser_backing_skia_backend_type=Metal\\nmacos_metal_chrome_browser_backing_gl_renderer=Apple GPU\\nmacos_metal_chrome_browser_backing_source=build/test-macos-metal-render-log-strict-tauri-ios/chrome-source.env\\nmacos_metal_pixel_comparison_status=pass\\nmacos_metal_pixel_comparison_mode=pairwise-argb-diff\\nmacos_metal_electron_chrome_pairwise_diff_status=pass\\nmacos_metal_electron_simple_pairwise_diff_status=pass\\nmacos_metal_chrome_simple_pairwise_diff_status=pass\\nmacos_metal_simple_argb_width=4\\nmacos_metal_simple_argb_height=3\\nmacos_metal_simple_argb_nonblank_pixel_count=12\\nmacos_metal_simple_argb_checksum=12\\nmacos_metal_chrome_argb_width=4\\nmacos_metal_chrome_argb_height=3\\nmacos_metal_chrome_argb_nonblank_pixel_count=12\\nmacos_metal_chrome_argb_checksum=12\\nmacos_metal_electron_argb_width=4\\nmacos_metal_electron_argb_height=3\\nmacos_metal_electron_argb_nonblank_pixel_count=12\\nmacos_metal_electron_argb_checksum=12\\n' > build/test-macos-metal-render-log-strict-tauri-ios/browser.env && " +
+    "BUILD_DIR=build/test-macos-metal-render-log-strict-tauri-ios/out METAL_GENERATED_2D_READBACK_ENV=build/test-macos-metal-render-log-strict-tauri-ios/generated.env METAL_ENGINE2D_FRAMEBUFFER_READBACK_ENV=build/test-macos-metal-render-log-strict-tauri-ios/framebuffer.env MACOS_METAL_BROWSER_ENV=build/test-macos-metal-render-log-strict-tauri-ios/browser.env TAURI_MOBILE_RENDERER_PARITY_ENV=build/test-macos-metal-render-log-strict-tauri-ios/missing-tauri-mobile.env MACOS_METAL_RENDER_LOG_REQUIRE_TAURI_IOS=1 sh scripts/check/check-macos-metal-render-log-compare.shs || true"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val evidence = file_read("build/test-macos-metal-render-log-strict-tauri-ios/out/evidence.env")
+expect(evidence).to_contain("macos_metal_render_log_compare_status=unavailable")
+expect(evidence).to_contain("missing-tauri-mobile-renderer-parity-env")
+expect(evidence).to_contain("macos_metal_render_log_compare_tauri_ios_env_file_status=missing")
+expect(evidence).to_contain("macos_metal_render_log_compare_tauri_ios_render_log_validation_status=missing")
+expect(evidence).to_contain("macos_metal_render_log_compare_tauri_ios_gate_status=fail")
+expect(evidence).to_contain("macos_metal_render_log_compare_require_tauri_ios=1")
+expect(evidence).to_contain("macos_metal_render_log_compare_blocked_gates=tauri-ios-wkwebview-metal-render-log")
+```
+
+</details>
+
 #### requires Xcode GPU capture evidence in strict Metal mode
 
 <details>
@@ -904,7 +1019,7 @@ expect(evidence).to_contain("macos_metal_render_log_compare_blocked_gates=browse
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -925,6 +1040,7 @@ expect(evidence).to_contain("macos-metal-gpu-capture-artifact-file-missing")
 expect(evidence).to_contain("macos-metal-gpu-capture-magic-missing")
 expect(evidence).to_contain("macos-metal-gpu-capture-claimed-magic-missing")
 expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_artifact_file_status=missing")
+expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_artifact_file_reason=missing")
 expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_artifact_claimed_magic_reason=macos-metal-gpu-capture-claimed-magic-missing")
 expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_gate_status=fail")
 expect(evidence).to_contain("macos_metal_render_log_compare_blocked_gates=browser-metal-backing,xcode-gpu-capture")
@@ -951,7 +1067,7 @@ expect(evidence).to_contain("macos_metal_render_log_compare_blocked_gates=browse
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 118 lines folded for reproduction.
+Runnable source: 122 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -970,6 +1086,7 @@ val evidence = file_read("build/test-macos-metal-render-log-bad-capture-magic/ou
 expect(evidence).to_contain("macos_metal_render_log_compare_status=fail")
 expect(evidence).to_contain("macos-metal-gpu-capture-magic-NOPE")
 expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_artifact_file_status=pass")
+expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_artifact_file_reason=pass")
 expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_artifact_magic=NOPE")
 expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_artifact_claimed_magic=XCODE-GPUTRACE")
 expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_artifact_claimed_magic_reason=pass")
@@ -1031,6 +1148,7 @@ val symlink_capture_evidence = file_read("build/test-macos-metal-render-log-syml
 expect(symlink_capture_evidence).to_contain("macos_metal_render_log_compare_status=fail")
 expect(symlink_capture_evidence).to_contain("macos-metal-gpu-capture-artifact-file-symlink")
 expect(symlink_capture_evidence).to_contain("macos_metal_render_log_compare_gpu_capture_artifact_file_status=symlink")
+expect(symlink_capture_evidence).to_contain("macos_metal_render_log_compare_gpu_capture_artifact_file_reason=symlink")
 expect(symlink_capture_evidence).to_contain("macos_metal_render_log_compare_gpu_capture_artifact_status=fail")
 expect(symlink_capture_evidence).to_contain("macos_metal_render_log_compare_gpu_capture_artifact_magic=XCODE-GPUTRACE")
 expect(symlink_capture_evidence).to_contain("macos_metal_render_log_compare_gpu_capture_gate_status=fail")
@@ -1051,6 +1169,7 @@ val hardlink_capture_evidence = file_read("build/test-macos-metal-render-log-har
 expect(hardlink_capture_evidence).to_contain("macos_metal_render_log_compare_status=fail")
 expect(hardlink_capture_evidence).to_contain("macos-metal-gpu-capture-artifact-file-hardlink")
 expect(hardlink_capture_evidence).to_contain("macos_metal_render_log_compare_gpu_capture_artifact_file_status=hardlink")
+expect(hardlink_capture_evidence).to_contain("macos_metal_render_log_compare_gpu_capture_artifact_file_reason=hardlink")
 expect(hardlink_capture_evidence).to_contain("macos_metal_render_log_compare_gpu_capture_artifact_status=fail")
 expect(hardlink_capture_evidence).to_contain("macos_metal_render_log_compare_gpu_capture_artifact_magic=XCODE-GPUTRACE")
 expect(hardlink_capture_evidence).to_contain("macos_metal_render_log_compare_gpu_capture_gate_status=fail")
@@ -1070,6 +1189,7 @@ val broken_symlink_capture_evidence = file_read("build/test-macos-metal-render-l
 expect(broken_symlink_capture_evidence).to_contain("macos_metal_render_log_compare_status=fail")
 expect(broken_symlink_capture_evidence).to_contain("macos-metal-gpu-capture-artifact-file-symlink")
 expect(broken_symlink_capture_evidence).to_contain("macos_metal_render_log_compare_gpu_capture_artifact_file_status=symlink")
+expect(broken_symlink_capture_evidence).to_contain("macos_metal_render_log_compare_gpu_capture_artifact_file_reason=symlink")
 expect(broken_symlink_capture_evidence).to_contain("macos_metal_render_log_compare_gpu_capture_artifact_status=fail")
 expect(broken_symlink_capture_evidence).to_contain("macos_metal_render_log_compare_gpu_capture_artifact_magic=")
 expect(broken_symlink_capture_evidence).to_contain("macos_metal_render_log_compare_gpu_capture_gate_status=fail")
@@ -1082,7 +1202,7 @@ expect(broken_symlink_capture_evidence).to_contain("macos_metal_render_log_compa
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 34 lines folded for reproduction.
+Runnable source: 38 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1102,12 +1222,16 @@ expect(evidence).to_contain("missing-metal-generated-2d-readback-env")
 expect(evidence).to_contain("missing-metal-engine2d-framebuffer-env")
 expect(evidence).to_contain("missing-macos-metal-browser-env")
 expect(evidence).to_contain("macos_metal_render_log_compare_generated_readback_env_file_status=missing")
+expect(evidence).to_contain("macos_metal_render_log_compare_generated_readback_env_file_reason=missing")
 expect(evidence).to_contain("macos_metal_render_log_compare_generated_readback_env_artifact_status=fail")
 expect(evidence).to_contain("macos_metal_render_log_compare_framebuffer_readback_env_file_status=missing")
+expect(evidence).to_contain("macos_metal_render_log_compare_framebuffer_readback_env_file_reason=missing")
 expect(evidence).to_contain("macos_metal_render_log_compare_framebuffer_readback_env_artifact_status=fail")
 expect(evidence).to_contain("macos_metal_render_log_compare_browser_env_file_status=missing")
+expect(evidence).to_contain("macos_metal_render_log_compare_browser_env_file_reason=missing")
 expect(evidence).to_contain("macos_metal_render_log_compare_browser_env_artifact_status=fail")
 expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_env_file_status=missing")
+expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_env_file_reason=missing")
 expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_env_artifact_status=fail")
 expect(evidence).to_contain("macos_metal_render_log_compare_blocked_gate_count=8")
 expect(evidence).to_contain("macos_metal_render_log_compare_blocked_gates=metal-generated-readback-env,metal-framebuffer-readback-env,macos-metal-browser-env,metal-generated-readback,metal-framebuffer-readback,browser-metal-backing,pairwise-argb-diff,argb-source-evidence")
@@ -1134,7 +1258,7 @@ expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_status=u
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 30 lines folded for reproduction.
+Runnable source: 33 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1159,10 +1283,13 @@ expect(evidence).to_contain("metal-generated-readback-env-file-symlink")
 expect(evidence).to_contain("metal-framebuffer-readback-env-file-hardlink")
 expect(evidence).to_contain("macos-metal-browser-env-file-hardlink")
 expect(evidence).to_contain("macos_metal_render_log_compare_generated_readback_env_file_status=symlink")
+expect(evidence).to_contain("macos_metal_render_log_compare_generated_readback_env_file_reason=symlink")
 expect(evidence).to_contain("macos_metal_render_log_compare_generated_readback_env_artifact_status=fail")
 expect(evidence).to_contain("macos_metal_render_log_compare_framebuffer_readback_env_file_status=hardlink")
+expect(evidence).to_contain("macos_metal_render_log_compare_framebuffer_readback_env_file_reason=hardlink")
 expect(evidence).to_contain("macos_metal_render_log_compare_framebuffer_readback_env_artifact_status=fail")
 expect(evidence).to_contain("macos_metal_render_log_compare_browser_env_file_status=hardlink")
+expect(evidence).to_contain("macos_metal_render_log_compare_browser_env_file_reason=hardlink")
 expect(evidence).to_contain("macos_metal_render_log_compare_browser_env_artifact_status=fail")
 expect(evidence).to_contain("macos_metal_render_log_compare_generated_readback_gate_status=fail")
 expect(evidence).to_contain("macos_metal_render_log_compare_framebuffer_readback_gate_status=fail")
@@ -1181,7 +1308,7 @@ expect(evidence).to_contain("macos_metal_render_log_compare_blocked_gates=metal-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1202,6 +1329,7 @@ expect(evidence).to_contain("macos-metal-gpu-capture-tool-browser-gpu-metadata")
 expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_tool=browser-gpu-metadata")
 expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_tool_reason=macos-metal-gpu-capture-tool-browser-gpu-metadata")
 expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_artifact_file_status=pass")
+expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_artifact_file_reason=pass")
 expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_artifact_magic=XCODE-GPUTRACE")
 expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_gate_status=fail")
 expect(evidence).to_contain("macos_metal_render_log_compare_blocked_gates=browser-metal-backing,xcode-gpu-capture")
@@ -1213,8 +1341,8 @@ expect(evidence).to_contain("macos_metal_render_log_compare_blocked_gates=browse
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 18 |
-| Active scenarios | 18 |
+| Total scenarios | 19 |
+| Active scenarios | 19 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
