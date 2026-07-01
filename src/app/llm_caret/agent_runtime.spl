@@ -1,0 +1,49 @@
+# LLM Caret - Agent plan runtime launcher
+
+use app.io.mod.{process_spawn_async, process_is_running, process_kill}
+use app.llm_caret.agent_plan.{AgentLaunchPlan}
+
+struct AgentProcess:
+    agent_id: text
+    status: text
+    reason: text
+    pid: i64
+
+pub fn agent_command_for_provider(provider: text, claude_path: text, codex_path: text, opencode_path: text) -> text:
+    if provider == "codex":
+        if codex_path != "":
+            return codex_path
+        return "codex"
+    if provider == "opencode_cli":
+        if opencode_path != "":
+            return opencode_path
+        return "opencode"
+    if claude_path != "":
+        return claude_path
+    "claude"
+
+pub fn launch_agent_plan(agent_id: text, plan: AgentLaunchPlan, claude_path: text, codex_path: text, opencode_path: text) -> AgentProcess:
+    if plan.provider == "team":
+        return AgentProcess(agent_id: agent_id, status: "not_started", reason: "team_plan_not_executable", pid: -1)
+    val cmd = agent_command_for_provider(plan.provider, claude_path, codex_path, opencode_path)
+    val pid = process_spawn_async(cmd, plan.argv)
+    if pid <= 0:
+        return AgentProcess(agent_id: agent_id, status: "error", reason: "spawn_failed", pid: pid)
+    AgentProcess(agent_id: agent_id, status: "started", reason: "process_spawned", pid: pid)
+
+pub fn agent_process_status(proc: AgentProcess) -> AgentProcess:
+    if proc.pid <= 0:
+        return AgentProcess(agent_id: proc.agent_id, status: "not_running", reason: "invalid_pid", pid: proc.pid)
+    if process_is_running(proc.pid):
+        return AgentProcess(agent_id: proc.agent_id, status: "running", reason: "process_running", pid: proc.pid)
+    AgentProcess(agent_id: proc.agent_id, status: "not_running", reason: "process_exited", pid: proc.pid)
+
+pub fn stop_agent_process(proc: AgentProcess) -> AgentProcess:
+    if proc.pid <= 0:
+        return AgentProcess(agent_id: proc.agent_id, status: "not_stopped", reason: "invalid_pid", pid: proc.pid)
+    if process_kill(proc.pid):
+        return AgentProcess(agent_id: proc.agent_id, status: "stopped", reason: "process_killed", pid: proc.pid)
+    AgentProcess(agent_id: proc.agent_id, status: "error", reason: "process_kill_failed", pid: proc.pid)
+
+export AgentProcess
+export agent_command_for_provider, launch_agent_plan, agent_process_status, stop_agent_process

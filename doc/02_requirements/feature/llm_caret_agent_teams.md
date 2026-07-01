@@ -7,3 +7,4 @@ Date: 2026-07-01
 - REQ-003: Provide a pure low-agent review planner that includes tracked changed files, including per-agent change sets and review guidance.
 - REQ-004: Provide pure Claude advisor and Codex goal planners that encode the requested advisor/goal text without live subprocess execution.
 - REQ-005: Keep the API testable without Claude, Codex, OpenCode, network, or a live process registry.
+- REQ-006: Provide explicit agent, skill, MCP server, and plugin capability lists so plans can mirror SPipe-style agent/skill/tool handoffs.

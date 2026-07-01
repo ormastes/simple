@@ -22,7 +22,7 @@ and ship handoff:
 
 ## LLM Caret Agent Teams
 
-When `$sp_dev` is used for LLM Caret agent/team/advisor/goal work, check `doc/07_guide/app/llm/llm_caret_agent_teams.md` and `src/app/llm_caret/agent_plan.spl` first. Treat the existing feature as static prompt/argv planning; do not claim live supervisor, automatic file-change tracking, or team chat unless a later lane implements and verifies them.
+When `$sp_dev` is used for LLM Caret agent/team/advisor/goal work, check `doc/07_guide/app/llm/llm_caret_agent_teams.md` and `src/app/llm_caret/agent_plan.spl` first. Treat the existing feature as static prompt/argv planning with explicit agent, skill, MCP server, and plugin capability lists; do not claim live supervisor, automatic filesystem diff capture, plugin install, MCP discovery, or team chat unless a later lane implements and verifies them.
 
 ## Dispatch
 

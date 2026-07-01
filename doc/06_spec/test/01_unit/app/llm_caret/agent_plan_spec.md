@@ -27,7 +27,7 @@ agent_plan_spec
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+| 9 | 9 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -57,6 +57,27 @@ expect(plan.prompt).to_contain("Task: implement slice")
 expect(contains(plan.argv, "--model")).to_equal(true)
 expect(contains(plan.argv, "--resume")).to_equal(true)
 expect(contains(plan.argv, "--max-turns")).to_equal(true)
+```
+
+</details>
+
+#### builds agent skill mcp plugin capability prompt
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val req = AgentLaunchRequest(provider: "claude_cli", agent_md_path: ".claude/agents/spipe/dev.md", skill_path: ".codex/skills/sp_dev/SKILL.md", task_desc: "plan agents", model: "", session_id: "", extra_args: [])
+val caps = AgentCapabilitySet(agent_paths: [".claude/agents/spipe/dev.md"], skill_paths: [".codex/skills/sp_dev/SKILL.md"], mcp_servers: ["simple-mcp"], plugins: ["ponytail"])
+val plan = build_agent_capability_launch_plan(req, caps)
+expect(plan.mode).to_equal("agent_capabilities")
+expect(plan.prompt).to_contain("Agents:")
+expect(plan.prompt).to_contain("- simple-mcp")
+expect(plan.prompt).to_contain("- ponytail")
+expect(plan.summary).to_equal("agent-capabilities:1:1:1:1")
 ```
 
 </details>
@@ -120,6 +141,60 @@ expect(plan.summary).to_equal("agent-change-review:3")
 
 </details>
 
+#### tracks changed files by agent fingerprint
+
+- AgentFileFingerprint
+- AgentFileFingerprint
+- AgentFileFingerprint
+- AgentFileFingerprint
+   - Expected: changes.len() equals `2`
+   - Expected: changes[0].agent_id equals `spark`
+   - Expected: changes[0].changed_files.len() equals `2`
+   - Expected: changes[1].agent_id equals `haiku`
+   - Expected: changes[1].changed_files[0] equals `doc/old.md`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val before = [
+    AgentFileFingerprint(agent_id: "spark", path: "src/a.spl", fingerprint: "1"),
+    AgentFileFingerprint(agent_id: "haiku", path: "doc/old.md", fingerprint: "1")
+]
+val after = [
+    AgentFileFingerprint(agent_id: "spark", path: "src/a.spl", fingerprint: "2"),
+    AgentFileFingerprint(agent_id: "spark", path: "test/new.spl", fingerprint: "1")
+]
+val changes = track_agent_file_changes(before, after)
+expect(changes.len()).to_equal(2)
+expect(changes[0].agent_id).to_equal("spark")
+expect(changes[0].changed_files.len()).to_equal(2)
+expect(changes[1].agent_id).to_equal("haiku")
+expect(changes[1].changed_files[0]).to_equal("doc/old.md")
+```
+
+</details>
+
+#### resolves provider commands for launch
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(agent_command_for_provider("codex", "", "", "")).to_equal("codex")
+expect(agent_command_for_provider("claude_cli", "claude-dev", "", "")).to_equal("claude-dev")
+expect(agent_command_for_provider("opencode_cli", "", "", "opencode-dev")).to_equal("opencode-dev")
+```
+
+</details>
+
 #### builds a claude advisor plan
 
 <details>
@@ -174,8 +249,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 9 |
+| Active scenarios | 9 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

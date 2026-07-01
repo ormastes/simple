@@ -55,6 +55,12 @@ description: Implement a feature end-to-end. Self-sufficient — if research, re
   `doc/06_spec`, `.codex/skills/`, `.agents/skills/`, `.claude/skills/`,
   `.claude/agents/spipe/`, and `.gemini/commands/` instructions before `$verify`; stale process docs are
   implementation work, not release cleanup.
+- For LLM Caret agent/team/advisor/goal work, use
+  `doc/07_guide/app/llm/llm_caret_agent_teams.md` and
+  `src/app/llm_caret/agent_plan.spl` as the canonical static planning surface.
+  It supports explicit agent, skill, MCP server, and plugin capability lists;
+  live supervisors, plugin install, MCP discovery, filesystem diff capture, and
+  team chat require separate verified lanes.
 - Do not mark implementation complete when workflow/tooling tests pass but the
   matching guide, skill, SPipe-agent, command, or generated/manual spec docs are
   stale. Documentation freshness is part of completion.

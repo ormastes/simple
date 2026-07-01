@@ -6,16 +6,23 @@ Date: 2026-07-01
 
 `AgentLaunchRequest` stores provider, agent markdown path, skill path, task,
 model, session id, and extra args. `AgentLaunchPlan` stores provider, mode,
-prompt, argv, and summary. `AgentReviewRequest` stores reviewer, changed files,
-and guidance.
+prompt, argv, and summary. `AgentCapabilitySet` stores explicit agent files,
+skill files, MCP servers, and plugins. `AgentReviewRequest` stores reviewer,
+changed files, and guidance. `AgentFileFingerprint` stores caller-supplied
+before/after fingerprints by agent and file path. `AgentProcess` stores the
+minimal launcher PID/status result.
 
 ## Builders
 
 - Single-agent launch: builds one prompt with agent, skill, and task fields.
+- Capability launch: adds SPipe-like agent, skill, MCP, and plugin lists.
 - Team launch: concatenates member launch prompts and records interaction mode.
 - Low-agent review: lists changed files supplied by caller; no filesystem scan.
+- File-change tracking: compares caller-supplied before/after fingerprints.
 - Claude advisor: returns provider `claude_cli`, mode `advisor`.
 - Codex goal: returns provider `codex`, mode `goal`.
+- Runtime launcher: resolves `claude`, `codex`, or `opencode` command names and
+  spawns a single already-built plan through `app.io.mod`.
 
 ## Errors
 
@@ -24,5 +31,7 @@ prompt text so callers/tests can catch missing configuration.
 
 ## Verification
 
-`test/01_unit/app/llm_caret/agent_plan_spec.spl` covers all builders with pure
-assertions. Live launch, cancellation, and diff capture need later specs.
+`test/01_unit/app/llm_caret/agent_plan_spec.spl` covers builders, fingerprint
+tracking, and provider command resolution with pure assertions. Persistent live
+teams, cancellation policy, plugin install, MCP discovery, and filesystem diff
+capture need later specs.

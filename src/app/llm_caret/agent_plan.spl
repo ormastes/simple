@@ -25,6 +25,17 @@ struct AgentFileChangeSet:
     agent_id: text
     changed_files: [text]
 
+struct AgentFileFingerprint:
+    agent_id: text
+    path: text
+    fingerprint: text
+
+struct AgentCapabilitySet:
+    agent_paths: [text]
+    skill_paths: [text]
+    mcp_servers: [text]
+    plugins: [text]
+
 fn _provider_or_default(provider: text) -> text:
     if provider == "":
         return "claude_cli"
@@ -51,6 +62,13 @@ fn _base_argv(provider: text, prompt: text, model: text, session_id: text, extra
 fn _agent_prompt(req: AgentLaunchRequest) -> text:
     "Agent: " + req.agent_md_path + "\nSkill: " + req.skill_path + "\nTask: " + req.task_desc
 
+fn _append_lines(label: text, values: [text]) -> text:
+    var result = label + ":"
+    for value in values:
+        if value != "":
+            result = result + "\n- " + value
+    result
+
 pub fn build_agent_launch_plan(req: AgentLaunchRequest) -> AgentLaunchPlan:
     val provider = _provider_or_default(req.provider)
     val prompt = _agent_prompt(req)
@@ -60,6 +78,17 @@ pub fn build_agent_launch_plan(req: AgentLaunchRequest) -> AgentLaunchPlan:
         prompt: prompt,
         argv: _base_argv(provider, prompt, req.model, req.session_id, req.extra_args),
         summary: "agent:" + req.agent_md_path
+    )
+
+pub fn build_agent_capability_launch_plan(req: AgentLaunchRequest, caps: AgentCapabilitySet) -> AgentLaunchPlan:
+    val provider = _provider_or_default(req.provider)
+    val prompt = _agent_prompt(req) + "\n" + _append_lines("Agents", caps.agent_paths) + "\n" + _append_lines("Skills", caps.skill_paths) + "\n" + _append_lines("MCP", caps.mcp_servers) + "\n" + _append_lines("Plugins", caps.plugins)
+    AgentLaunchPlan(
+        provider: provider,
+        mode: "agent_capabilities",
+        prompt: prompt,
+        argv: _base_argv(provider, prompt, req.model, req.session_id, req.extra_args),
+        summary: "agent-capabilities:" + caps.agent_paths.len().to_text() + ":" + caps.skill_paths.len().to_text() + ":" + caps.mcp_servers.len().to_text() + ":" + caps.plugins.len().to_text()
     )
 
 pub fn build_agent_team_plan(requests: [AgentLaunchRequest], interaction_mode: text) -> AgentLaunchPlan:
@@ -104,6 +133,47 @@ pub fn build_agent_change_review_plan(changes: [AgentFileChangeSet], guidance: t
         summary: "agent-change-review:" + count.to_text()
     )
 
+fn _fingerprint_for(files: [AgentFileFingerprint], agent_id: text, path: text) -> text:
+    for file in files:
+        if file.agent_id == agent_id and file.path == path:
+            return file.fingerprint
+    ""
+
+fn _has_change(changes: [AgentFileChangeSet], agent_id: text, path: text) -> bool:
+    for change in changes:
+        if change.agent_id == agent_id:
+            for changed in change.changed_files:
+                if changed == path:
+                    return true
+    false
+
+fn _add_agent_change(changes: [AgentFileChangeSet], agent_id: text, path: text) -> [AgentFileChangeSet]:
+    if path == "" or _has_change(changes, agent_id, path):
+        return changes
+    var result: [AgentFileChangeSet] = []
+    var added = false
+    for change in changes:
+        if change.agent_id == agent_id:
+            result = result + [AgentFileChangeSet(agent_id: change.agent_id, changed_files: change.changed_files + [path])]
+            added = true
+        else:
+            result = result + [change]
+    if not added:
+        result = result + [AgentFileChangeSet(agent_id: agent_id, changed_files: [path])]
+    result
+
+pub fn track_agent_file_changes(before: [AgentFileFingerprint], after: [AgentFileFingerprint]) -> [AgentFileChangeSet]:
+    var changes: [AgentFileChangeSet] = []
+    for file in after:
+        val old_fp = _fingerprint_for(before, file.agent_id, file.path)
+        if old_fp == "" or old_fp != file.fingerprint:
+            changes = _add_agent_change(changes, file.agent_id, file.path)
+    for file in before:
+        val new_fp = _fingerprint_for(after, file.agent_id, file.path)
+        if new_fp == "":
+            changes = _add_agent_change(changes, file.agent_id, file.path)
+    changes
+
 pub fn build_claude_advisor_plan(topic: text, context: text) -> AgentLaunchPlan:
     val prompt = "Advisor topic: " + topic + "\nContext: " + context
     AgentLaunchPlan(
@@ -124,5 +194,5 @@ pub fn build_codex_goal_plan(objective: text, context: text) -> AgentLaunchPlan:
         summary: "goal:" + objective
     )
 
-export AgentLaunchRequest, AgentLaunchPlan, AgentReviewRequest, AgentFileChangeSet
-export build_agent_launch_plan, build_agent_team_plan, build_low_agent_review_plan, build_agent_change_review_plan, build_claude_advisor_plan, build_codex_goal_plan
+export AgentLaunchRequest, AgentLaunchPlan, AgentReviewRequest, AgentFileChangeSet, AgentFileFingerprint, AgentCapabilitySet
+export build_agent_launch_plan, build_agent_capability_launch_plan, build_agent_team_plan, build_low_agent_review_plan, build_agent_change_review_plan, track_agent_file_changes, build_claude_advisor_plan, build_codex_goal_plan

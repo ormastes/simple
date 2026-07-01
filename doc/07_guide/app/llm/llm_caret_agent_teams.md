@@ -7,12 +7,13 @@ Use `src/app/llm_caret/agent_plan.spl` for static agent/team request planning.
 Supported builders:
 
 - `build_agent_launch_plan` for one agent markdown path, skill path, task, provider, model, session, and extra args.
+- `build_agent_capability_launch_plan` for explicit agent files, skill files, MCP servers, and plugins, mirroring SPipe handoffs.
 - `build_agent_team_plan` for a group of launch requests plus an interaction mode such as `btw-side`.
 - `build_low_agent_review_plan` for reviewer guidance plus caller-supplied changed files or per-agent change sets.
 - `build_claude_advisor_plan` for Claude advisor prompts.
 - `build_codex_goal_plan` for Codex goal prompts.
 
-This surface does not launch processes, scan diffs, persist teams, or provide a chat bus. Callers pass tracked files explicitly and hand the resulting prompt/argv to existing provider wrappers.
+This surface does not install plugins, discover MCP servers, scan diffs, persist teams, or provide a chat bus. Callers pass capabilities and tracked files explicitly, then hand the resulting prompt/argv to existing provider wrappers.
 
 Default verification:
 

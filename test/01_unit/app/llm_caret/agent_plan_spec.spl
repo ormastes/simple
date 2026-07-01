@@ -25,6 +25,17 @@ struct AgentFileChangeSet:
     agent_id: text
     changed_files: [text]
 
+struct AgentFileFingerprint:
+    agent_id: text
+    path: text
+    fingerprint: text
+
+struct AgentCapabilitySet:
+    agent_paths: [text]
+    skill_paths: [text]
+    mcp_servers: [text]
+    plugins: [text]
+
 fn _provider_or_default(provider: text) -> text:
     if provider == "":
         return "claude_cli"
@@ -51,10 +62,22 @@ fn _base_argv(provider: text, prompt: text, model: text, session_id: text, extra
 fn _agent_prompt(req: AgentLaunchRequest) -> text:
     "Agent: " + req.agent_md_path + "\nSkill: " + req.skill_path + "\nTask: " + req.task_desc
 
+fn _append_lines(label: text, values: [text]) -> text:
+    var result = label + ":"
+    for value in values:
+        if value != "":
+            result = result + "\n- " + value
+    result
+
 fn build_agent_launch_plan(req: AgentLaunchRequest) -> AgentLaunchPlan:
     val provider = _provider_or_default(req.provider)
     val prompt = _agent_prompt(req)
     AgentLaunchPlan(provider: provider, mode: "agent", prompt: prompt, argv: _base_argv(provider, prompt, req.model, req.session_id, req.extra_args), summary: "agent:" + req.agent_md_path)
+
+fn build_agent_capability_launch_plan(req: AgentLaunchRequest, caps: AgentCapabilitySet) -> AgentLaunchPlan:
+    val provider = _provider_or_default(req.provider)
+    val prompt = _agent_prompt(req) + "\n" + _append_lines("Agents", caps.agent_paths) + "\n" + _append_lines("Skills", caps.skill_paths) + "\n" + _append_lines("MCP", caps.mcp_servers) + "\n" + _append_lines("Plugins", caps.plugins)
+    AgentLaunchPlan(provider: provider, mode: "agent_capabilities", prompt: prompt, argv: _base_argv(provider, prompt, req.model, req.session_id, req.extra_args), summary: "agent-capabilities:" + caps.agent_paths.len().to_text() + ":" + caps.skill_paths.len().to_text() + ":" + caps.mcp_servers.len().to_text() + ":" + caps.plugins.len().to_text())
 
 fn build_agent_team_plan(requests: [AgentLaunchRequest], interaction_mode: text) -> AgentLaunchPlan:
     var prompt = "Team interaction: " + interaction_mode
@@ -86,6 +109,60 @@ fn build_agent_change_review_plan(changes: [AgentFileChangeSet], guidance: text)
         summary: "agent-change-review:" + count.to_text()
     )
 
+fn _fingerprint_for(files: [AgentFileFingerprint], agent_id: text, path: text) -> text:
+    for file in files:
+        if file.agent_id == agent_id and file.path == path:
+            return file.fingerprint
+    ""
+
+fn _has_change(changes: [AgentFileChangeSet], agent_id: text, path: text) -> bool:
+    for change in changes:
+        if change.agent_id == agent_id:
+            for changed in change.changed_files:
+                if changed == path:
+                    return true
+    false
+
+fn _add_agent_change(changes: [AgentFileChangeSet], agent_id: text, path: text) -> [AgentFileChangeSet]:
+    if path == "" or _has_change(changes, agent_id, path):
+        return changes
+    var result: [AgentFileChangeSet] = []
+    var added = false
+    for change in changes:
+        if change.agent_id == agent_id:
+            result = result + [AgentFileChangeSet(agent_id: change.agent_id, changed_files: change.changed_files + [path])]
+            added = true
+        else:
+            result = result + [change]
+    if not added:
+        result = result + [AgentFileChangeSet(agent_id: agent_id, changed_files: [path])]
+    result
+
+fn track_agent_file_changes(before: [AgentFileFingerprint], after: [AgentFileFingerprint]) -> [AgentFileChangeSet]:
+    var changes: [AgentFileChangeSet] = []
+    for file in after:
+        val old_fp = _fingerprint_for(before, file.agent_id, file.path)
+        if old_fp == "" or old_fp != file.fingerprint:
+            changes = _add_agent_change(changes, file.agent_id, file.path)
+    for file in before:
+        val new_fp = _fingerprint_for(after, file.agent_id, file.path)
+        if new_fp == "":
+            changes = _add_agent_change(changes, file.agent_id, file.path)
+    changes
+
+fn agent_command_for_provider(provider: text, claude_path: text, codex_path: text, opencode_path: text) -> text:
+    if provider == "codex":
+        if codex_path != "":
+            return codex_path
+        return "codex"
+    if provider == "opencode_cli":
+        if opencode_path != "":
+            return opencode_path
+        return "opencode"
+    if claude_path != "":
+        return claude_path
+    "claude"
+
 fn build_claude_advisor_plan(topic: text, context: text) -> AgentLaunchPlan:
     val prompt = "Advisor topic: " + topic + "\nContext: " + context
     AgentLaunchPlan(provider: "claude_cli", mode: "advisor", prompt: prompt, argv: _base_argv("claude_cli", prompt, "", "", []), summary: "advisor:" + topic)
@@ -113,6 +190,16 @@ describe "LLM Caret agent plans":
         expect(contains(plan.argv, "--resume")).to_equal(true)
         expect(contains(plan.argv, "--max-turns")).to_equal(true)
 
+    it "builds agent skill mcp plugin capability prompt":
+        val req = AgentLaunchRequest(provider: "claude_cli", agent_md_path: ".claude/agents/spipe/dev.md", skill_path: ".codex/skills/sp_dev/SKILL.md", task_desc: "plan agents", model: "", session_id: "", extra_args: [])
+        val caps = AgentCapabilitySet(agent_paths: [".claude/agents/spipe/dev.md"], skill_paths: [".codex/skills/sp_dev/SKILL.md"], mcp_servers: ["simple-mcp"], plugins: ["ponytail"])
+        val plan = build_agent_capability_launch_plan(req, caps)
+        expect(plan.mode).to_equal("agent_capabilities")
+        expect(plan.prompt).to_contain("Agents:")
+        expect(plan.prompt).to_contain("- simple-mcp")
+        expect(plan.prompt).to_contain("- ponytail")
+        expect(plan.summary).to_equal("agent-capabilities:1:1:1:1")
+
     it "builds a team plan":
         val a = AgentLaunchRequest(provider: "claude_cli", agent_md_path: "agent-a.md", skill_path: "skill-a.md", task_desc: "research", model: "", session_id: "", extra_args: [])
         val b = AgentLaunchRequest(provider: "codex", agent_md_path: "agent-b.md", skill_path: "skill-b.md", task_desc: "review", model: "", session_id: "", extra_args: [])
@@ -138,6 +225,27 @@ describe "LLM Caret agent plans":
         expect(plan.prompt).to_contain("Agent: spark")
         expect(plan.prompt).to_contain("Agent: haiku")
         expect(plan.summary).to_equal("agent-change-review:3")
+
+    it "tracks changed files by agent fingerprint":
+        val before = [
+            AgentFileFingerprint(agent_id: "spark", path: "src/a.spl", fingerprint: "1"),
+            AgentFileFingerprint(agent_id: "haiku", path: "doc/old.md", fingerprint: "1")
+        ]
+        val after = [
+            AgentFileFingerprint(agent_id: "spark", path: "src/a.spl", fingerprint: "2"),
+            AgentFileFingerprint(agent_id: "spark", path: "test/new.spl", fingerprint: "1")
+        ]
+        val changes = track_agent_file_changes(before, after)
+        expect(changes.len()).to_equal(2)
+        expect(changes[0].agent_id).to_equal("spark")
+        expect(changes[0].changed_files.len()).to_equal(2)
+        expect(changes[1].agent_id).to_equal("haiku")
+        expect(changes[1].changed_files[0]).to_equal("doc/old.md")
+
+    it "resolves provider commands for launch":
+        expect(agent_command_for_provider("codex", "", "", "")).to_equal("codex")
+        expect(agent_command_for_provider("claude_cli", "claude-dev", "", "")).to_equal("claude-dev")
+        expect(agent_command_for_provider("opencode_cli", "", "", "opencode-dev")).to_equal("opencode-dev")
 
     it "builds a claude advisor plan":
         val plan = build_claude_advisor_plan("architecture", "compare options")
