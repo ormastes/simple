@@ -592,3 +592,21 @@ The MCP transport spec explicitly says:
 - Parser auto-discovery: train scorer on tool output patterns
 - Minimality debt tracking: historical complexity trends
 - Hook telemetry: cross-client hook analytics
+
+## Current Implementation
+
+- Common API: `src/lib/nogc_sync_mut/spipe/tree_context.spl`
+- MCP executable: `src/app/spipe_mcp/main.spl`
+- Hook normalization: `src/lib/nogc_sync_mut/spipe/hook_event.spl`
+- Ponytail helpers: `src/lib/nogc_sync_mut/spipe/minimality.spl`
+- Codebase ingest: `src/lib/nogc_sync_mut/spipe/codebase_ingest.spl`
+
+The parser renders `@ctx`, `@source`, optional log-level `@group` sections,
+per-node `@parent` chains, `@node` entries, and `@more raw=...` pointers.
+Stored raw middle-context retrieval prepends parent context before exact raw
+lines.
+
+## Checks
+
+- `bin/release/simple check src/app/spipe_mcp src/lib/nogc_sync_mut/spipe`
+- `bin/release/simple test test/01_unit/lib/nogc_sync_mut/spipe/tree_context_spec.spl --mode=interpreter`

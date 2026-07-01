@@ -862,4 +862,15 @@ mod tests {
             assert!(resolve_runtime_symbol(symbol).unwrap_or(0) != 0, "{symbol}");
         }
     }
+
+    #[test]
+    fn resolves_cranelift_aot_runtime_symbols() {
+        for symbol in [
+            "rt_cranelift_new_aot_module",
+            "rt_cranelift_aot_define_function",
+            "rt_cranelift_emit_object",
+        ] {
+            assert!(resolve_runtime_symbol(symbol).unwrap_or(0) != 0, "{symbol}");
+        }
+    }
 }
