@@ -8,6 +8,7 @@ Date: 2026-07-01
 - Implement `src/app/llm_caret/agent_files.spl`.
 - Implement `src/app/llm_caret/agent_vcs.spl`.
 - Implement `src/app/llm_caret/agent_discovery.spl`.
+- Implement `src/app/llm_caret/agent_mailbox.spl`.
 - Implement `src/app/llm_caret/agent_runtime.spl`.
 - Add `test/01_unit/app/llm_caret/agent_plan_spec.spl`.
 - Update LLM Caret guide and skills with the static-planning contract.

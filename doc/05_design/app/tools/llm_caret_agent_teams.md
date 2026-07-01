@@ -14,7 +14,7 @@ minimal launcher PID/status result. `AgentTeamProcess` stores a non-persistent
 set of per-agent process records. `AgentVcsChangeResult` stores the result of a
 VCS changed-file discovery command. `AgentDiscoverySet` stores parsed MCP
 server and plugin names. `AgentTeamMessage` stores explicit team transcript
-entries.
+entries. `AgentTeamMailbox` stores an in-memory team transcript.
 
 ## Builders
 
@@ -28,6 +28,8 @@ entries.
 - VCS discovery: runs `jj diff --name-only` by default and parses unique paths.
 - Capability discovery: parses simple JSON/YAML-like manifest names and builds
   plugin install argv lists without running an installer.
+- Team mailbox: appends `btw`/`side` messages and returns per-agent inbox,
+  channel-filtered, or full transcript views.
 - Claude advisor: returns provider `claude_cli`, mode `advisor`.
 - Codex goal: returns provider `codex`, mode `goal`.
 - Runtime launcher: resolves `claude`, `codex`, or `opencode` command names and
@@ -44,6 +46,7 @@ prompt text so callers/tests can catch missing configuration.
 
 `test/01_unit/app/llm_caret/agent_plan_spec.spl` covers builders, fingerprint
 tracking, manifest parsing, install argv planning, and provider command
-resolution with pure assertions. Persistent live team supervisors, cancellation
-policy, plugin install execution, MCP registry discovery, live message buses,
-and background VCS watchers need later specs.
+resolution with pure assertions. `agent_mailbox_spec.spl` covers `btw`/`side`
+message routing. Persistent live team supervisors, cancellation policy, plugin
+install execution, MCP registry discovery, live message buses, and background
+VCS watchers need later specs.

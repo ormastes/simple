@@ -13,3 +13,4 @@ Date: 2026-07-01
 - REQ-009: Provide a minimal team launcher that starts a list of single-agent requests and returns per-agent process records without persisting a supervisor.
 - REQ-010: Provide a VCS changed-file discovery helper that defaults to `jj diff --name-only` and returns per-agent changed-file records.
 - REQ-011: Provide simple MCP/plugin manifest parsers and plugin install argument planning so agent handoffs can be populated consistently with SPipe without performing live installs.
+- REQ-012: Provide a pure team mailbox for `btw` and `side` messages with per-agent inbox and channel filtering.

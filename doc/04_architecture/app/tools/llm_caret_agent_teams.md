@@ -14,6 +14,7 @@ Date: 2026-07-01
 | File snapshot node | `src/app/llm_caret/agent_files.spl` | public helper over app I/O facade |
 | VCS discovery node | `src/app/llm_caret/agent_vcs.spl` | public helper over app process facade |
 | Capability discovery node | `src/app/llm_caret/agent_discovery.spl` | public pure manifest parser |
+| Team mailbox node | `src/app/llm_caret/agent_mailbox.spl` | public pure message queue |
 | Runtime launcher | `src/app/llm_caret/agent_runtime.spl` | public wrapper over process facade |
 | Provider wrappers | `src/app/llm_caret/*_cli.spl` | sibling consumers of prompt/argv outputs |
 | CLI/app callers | future `src/app/**` | consume only exported planner APIs |
@@ -27,6 +28,7 @@ Date: 2026-07-01
 - `agent_files.spl` snapshots existing paths with `file_exists` and `file_hash_sha256` from `app.io.mod`.
 - `agent_vcs.spl` runs `jj diff --name-only` or caller-supplied VCS args through `app.io.mod.process_run`.
 - `agent_discovery.spl` parses small MCP/plugin manifest text and builds plugin install argv lists without executing them.
+- `agent_mailbox.spl` appends caller-supplied `btw` and `side` messages and filters transcript views by agent or channel.
 - `agent_runtime.spl` spawns already-built single-agent plans and can launch a caller-supplied request list as one non-persistent team result.
 - Provider wrappers do not read agent markdown or track files; they only receive prompt/argv from callers.
 - File diff capture and live process supervision remain outside this node.
@@ -57,6 +59,10 @@ component "Review caller" -> "agent_plan.spl" : changed files + guidance
 - `parse_plugin_manifest(manifest) -> [text]`
 - `discover_agent_capabilities(mcp_manifests, plugin_manifests) -> AgentDiscoverySet`
 - `build_plugin_install_args(plugin, installer, extra_args) -> [text]`
+- `AgentTeamMailbox`, `new_agent_team_mailbox`, `post_btw_message`, `post_side_message`
+- `agent_team_inbox(mailbox, agent_id) -> [AgentTeamMessage]`
+- `agent_team_channel(mailbox, channel) -> [AgentTeamMessage]`
+- `agent_team_transcript(mailbox) -> [AgentTeamMessage]`
 - `launch_agent_plan(agent_id, plan, claude_path, codex_path, opencode_path) -> AgentProcess`
 - `launch_agent_team(team_id, requests, claude_path, codex_path, opencode_path) -> AgentTeamProcess`
 - `summarize_agent_team(team_id, processes) -> AgentTeamProcess`
@@ -68,6 +74,7 @@ component "Review caller" -> "agent_plan.spl" : changed files + guidance
 | LLM Caret planner | `AgentLaunchPlan` | exported structs/functions | prompt/argv only |
 | Capability handoff | `AgentCapabilitySet`, `AgentDiscoverySet` | explicit agents/skills/MCP/plugins plus manifest parsing | no live registry or install execution |
 | Team transcript | `AgentTeamMessage` | explicit btw/side entries | no live bus |
+| Team mailbox | `AgentTeamMailbox` | pure inbox/channel views | no persistence or transport |
 | File snapshots | `AgentFileFingerprint` | existing-file hashes | no VCS scanning |
 | VCS discovery | `AgentVcsChangeResult` | changed file list | no background watcher |
 | Runtime launcher | `AgentProcess`, `AgentTeamProcess` | PID/status wrapper | no registry or supervisor |

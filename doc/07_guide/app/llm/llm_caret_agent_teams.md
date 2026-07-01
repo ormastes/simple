@@ -14,16 +14,19 @@ Supported builders:
 - `snapshot_agent_files` plus `detect_agent_file_changes` for existing caller-supplied files; this hashes files through `app.io.mod`.
 - `discover_agent_vcs_changes` for `jj diff --name-only` changed-file discovery through `app.io.mod.process_run`.
 - `parse_mcp_manifest`, `parse_plugin_manifest`, `discover_agent_capabilities`, and `build_plugin_install_args` for manifest-backed MCP/plugin handoff setup without live installs.
+- `new_agent_team_mailbox`, `post_btw_message`, `post_side_message`, `agent_team_inbox`, `agent_team_channel`, and `agent_team_transcript` for pure team message exchange.
 - `launch_agent_team` for starting a caller-supplied list of single-agent requests and returning per-agent process records.
 - `build_claude_advisor_plan` for Claude advisor prompts.
 - `build_codex_goal_plan` for Codex goal prompts.
 
-This surface does not execute plugin installs, query a live MCP registry, watch VCS state continuously, persist team supervision, or provide a live chat bus. Callers pass capabilities, manifests, file paths, and team transcript entries explicitly, then hand the resulting prompt/argv to existing provider wrappers.
+This surface does not execute plugin installs, query a live MCP registry, watch VCS state continuously, persist team supervision, or provide a live chat bus. Callers pass capabilities, manifests, file paths, and team mailbox/transcript entries explicitly, then hand the resulting prompt/argv to existing provider wrappers.
 
 Default verification:
 
 ```bash
 bin/release/simple test test/01_unit/app/llm_caret/agent_plan_spec.spl --mode=interpreter
+bin/release/simple test test/01_unit/app/llm_caret/agent_mailbox_spec.spl --mode=interpreter
 bin/release/simple check src/app/llm_caret/agent_plan.spl
 bin/release/simple check src/app/llm_caret/agent_discovery.spl
+bin/release/simple check src/app/llm_caret/agent_mailbox.spl
 ```

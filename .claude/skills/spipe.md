@@ -62,7 +62,7 @@ sh scripts/setup/install-spipe-dev-command.shs --apply
 
 ## LLM Caret Agent Teams
 
-For LLM Caret agent/team/advisor/goal work, start with `src/app/llm_caret/agent_plan.spl`, `src/app/llm_caret/agent_files.spl`, `src/app/llm_caret/agent_vcs.spl`, `src/app/llm_caret/agent_discovery.spl`, `src/app/llm_caret/agent_runtime.spl`, and `doc/07_guide/app/llm/llm_caret_agent_teams.md`. The current supported surface is static prompt/argv planning, existing-file hash snapshots, `jj diff --name-only` changed-file discovery, simple MCP/plugin manifest parsing, plugin install argv planning, non-persistent team launch, and explicit agent, skill, MCP server, and plugin capability lists; persistent live teams, background VCS watching, plugin install execution, live MCP registry discovery, and cross-agent chat require separate requirements.
+For LLM Caret agent/team/advisor/goal work, start with `src/app/llm_caret/agent_plan.spl`, `src/app/llm_caret/agent_files.spl`, `src/app/llm_caret/agent_vcs.spl`, `src/app/llm_caret/agent_discovery.spl`, `src/app/llm_caret/agent_mailbox.spl`, `src/app/llm_caret/agent_runtime.spl`, and `doc/07_guide/app/llm/llm_caret_agent_teams.md`. The current supported surface is static prompt/argv planning, existing-file hash snapshots, `jj diff --name-only` changed-file discovery, simple MCP/plugin manifest parsing, plugin install argv planning, pure `btw`/`side` team mailbox routing, non-persistent team launch, and explicit agent, skill, MCP server, and plugin capability lists; persistent live teams, background VCS watching, plugin install execution, live MCP registry discovery, and cross-agent transport require separate requirements.
 
 ## Quick references in the same directory
 

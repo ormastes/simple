@@ -22,7 +22,7 @@ and ship handoff:
 
 ## LLM Caret Agent Teams
 
-When `$sp_dev` is used for LLM Caret agent/team/advisor/goal work, check `doc/07_guide/app/llm/llm_caret_agent_teams.md`, `src/app/llm_caret/agent_plan.spl`, `src/app/llm_caret/agent_files.spl`, `src/app/llm_caret/agent_vcs.spl`, `src/app/llm_caret/agent_discovery.spl`, and `src/app/llm_caret/agent_runtime.spl` first. Treat the existing feature as static prompt/argv planning with existing-file hash snapshots, `jj diff --name-only` changed-file discovery, simple MCP/plugin manifest parsing, plugin install argv planning, non-persistent team launch, and explicit agent, skill, MCP server, and plugin capability lists; do not claim persistent live supervisor, background VCS watching, plugin install execution, live MCP registry discovery, or team chat unless a later lane implements and verifies them.
+When `$sp_dev` is used for LLM Caret agent/team/advisor/goal work, check `doc/07_guide/app/llm/llm_caret_agent_teams.md`, `src/app/llm_caret/agent_plan.spl`, `src/app/llm_caret/agent_files.spl`, `src/app/llm_caret/agent_vcs.spl`, `src/app/llm_caret/agent_discovery.spl`, `src/app/llm_caret/agent_mailbox.spl`, and `src/app/llm_caret/agent_runtime.spl` first. Treat the existing feature as static prompt/argv planning with existing-file hash snapshots, `jj diff --name-only` changed-file discovery, simple MCP/plugin manifest parsing, plugin install argv planning, pure `btw`/`side` team mailbox routing, non-persistent team launch, and explicit agent, skill, MCP server, and plugin capability lists; do not claim persistent live supervisor, background VCS watching, plugin install execution, live MCP registry discovery, or live team transport unless a later lane implements and verifies them.
 
 ## Dispatch
 

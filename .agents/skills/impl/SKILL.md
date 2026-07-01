@@ -61,11 +61,14 @@ description: Implement a feature end-to-end. Self-sufficient — if research, re
   plus `src/app/llm_caret/agent_files.spl` for existing-file hash snapshots,
   `src/app/llm_caret/agent_vcs.spl` for `jj diff --name-only` changed-file
   discovery, `src/app/llm_caret/agent_discovery.spl` for simple MCP/plugin
-  manifest parsing plus plugin install argv planning, and
+  manifest parsing plus plugin install argv planning,
+  `src/app/llm_caret/agent_mailbox.spl` for pure `btw`/`side` mailbox routing,
+  and
   `src/app/llm_caret/agent_runtime.spl` for non-persistent launch wrappers. It
   supports explicit agent, skill, MCP server, and plugin capability lists; live
   supervisors, plugin install execution, live MCP registry discovery,
-  background VCS watching, and team chat require separate verified lanes.
+  background VCS watching, and live team transport require separate verified
+  lanes.
 - Do not mark implementation complete when workflow/tooling tests pass but the
   matching guide, skill, SPipe-agent, command, or generated/manual spec docs are
   stale. Documentation freshness is part of completion.
