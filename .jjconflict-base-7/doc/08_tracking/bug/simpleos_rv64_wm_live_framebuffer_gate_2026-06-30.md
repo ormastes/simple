@@ -1,6 +1,6 @@
 # SimpleOS RV64 WM Live Framebuffer Gate Missing
 
-- status: open
+- status: resolved-for-freestanding-wm-gate
 - gate: `scripts/check/check-simpleos-host-configuration-matrix.shs`
 - failing field: `simpleos_host_configuration_qemu_riscv64_wm_live_status=missing`
 - latest probe: `timeout 20s qemu-system-riscv64 -machine virt -cpu rv64 -m 256M -nographic -bios default -no-reboot -kernel build/os/simpleos_riscv64_smf_fs.elf`
@@ -34,14 +34,22 @@ native-build completion, not scenario routing.
 framebuffer bring-up target. It routes to
 `examples/09_embedded/simple_os/arch/riscv64/display_entry.spl`, calls the
 RV64 display runtime directly, and idles for QMP capture through the C runtime.
-Current blocker: the display-smoke native-build now uses the narrowed
-freestanding profile but fails before link with
-`semantic: invalid pattern: match expression exhausted without matching any pattern`,
-so `build/os/simpleos_riscv64_display_smoke.elf` is still absent.
+Current evidence: the display-smoke native-build now uses the narrowed
+freestanding profile, emits `build/os/simpleos_riscv64_display_smoke.elf`,
+boots to `SIMPLEOS_RISCV_DISPLAY_SMOKE_READY`, and QMP `screendump` captured a
+nonblack 320x240 PPM at `build/os/rv64_display_smoke_evidence/screendump.ppm`.
+The canonical wrapper
+`scripts/check/check-rv64-display-smoke-qmp-evidence.shs` now also requires
+the RV64 freestanding WM lifecycle serial markers and five deterministic QMP
+anchor pixels. The host matrix reports
+`simpleos_host_configuration_qemu_riscv64_wm_live_status=pass`.
 
 Acceptance for closing:
-- RV64 QEMU scenario boots a SimpleOS WM/display entry.
-- QMP or equivalent capture proves a nonblank framebuffer.
-- Capture validates WM anchors comparable to the current MDI gate.
+- RV64 QEMU scenario boots a SimpleOS WM/display entry. PASS:
+  `riscv64-display-smoke`.
+- QMP or equivalent capture proves a nonblank framebuffer. PASS:
+  `rv64_display_smoke_qmp_nonblack=76800`.
+- Capture validates WM anchors comparable to the current MDI gate. PASS:
+  `rv64_display_smoke_qmp_wm_anchor_matches=5`.
 - `check-simpleos-host-configuration-matrix.shs` reports
-  `qemu_riscv64_wm_live: pass`.
+  `qemu_riscv64_wm_live: pass`. PASS.

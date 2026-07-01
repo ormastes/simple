@@ -1,0 +1,181 @@
+#!/usr/bin/env sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/os/rv64_display_smoke_evidence}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/rv64_display_smoke_qmp_evidence_$(date -u +%F).md}"
+ELF="${RV64_DISPLAY_SMOKE_ELF:-build/os/simpleos_riscv64_display_smoke.elf}"
+QEMU_BIN="${QEMU_BIN:-qemu-system-riscv64}"
+DO_BUILD="${RV64_DISPLAY_SMOKE_BUILD:-auto}"
+SOCK="$BUILD_DIR/qmp.sock"
+SERIAL="$BUILD_DIR/serial.log"
+PPM="$BUILD_DIR/screendump.ppm"
+ERR="$BUILD_DIR/qemu.stderr.log"
+PIDFILE="$BUILD_DIR/qemu.pid"
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+rm -f "$SOCK" "$SERIAL" "$PPM" "$ERR" "$PIDFILE"
+
+status=fail
+reason=not-run
+ready=0
+lifecycle=0
+width=0
+height=0
+nonblack=0
+anchor_matches=0
+anchor_names=
+
+finish() {
+    {
+        echo "# RV64 Display-Smoke QMP Evidence"
+        echo
+        echo "- status: $status"
+        echo "- reason: $reason"
+        echo "- elf: $ELF"
+        echo "- serial_log: $SERIAL"
+        echo "- screendump_ppm: $PPM"
+        echo "- ready: $ready"
+        echo "- lifecycle_markers: $lifecycle"
+        echo "- width: $width"
+        echo "- height: $height"
+        echo "- nonblack: $nonblack"
+        echo "- wm_anchor_matches: $anchor_matches"
+        echo "- wm_anchor_names: $anchor_names"
+    } >"$REPORT_PATH"
+
+    echo "rv64_display_smoke_qmp_status=$status"
+    echo "rv64_display_smoke_qmp_reason=$reason"
+    echo "rv64_display_smoke_qmp_elf=$ELF"
+    echo "rv64_display_smoke_qmp_serial_log=$SERIAL"
+    echo "rv64_display_smoke_qmp_ppm=$PPM"
+    echo "rv64_display_smoke_qmp_ready=$ready"
+    echo "rv64_display_smoke_qmp_lifecycle_markers=$lifecycle"
+    echo "rv64_display_smoke_qmp_width=$width"
+    echo "rv64_display_smoke_qmp_height=$height"
+    echo "rv64_display_smoke_qmp_nonblack=$nonblack"
+    echo "rv64_display_smoke_qmp_wm_anchor_matches=$anchor_matches"
+    echo "rv64_display_smoke_qmp_wm_anchor_names=$anchor_names"
+    echo "rv64_display_smoke_qmp_report=$REPORT_PATH"
+}
+
+cleanup() {
+    if [ -f "$PIDFILE" ]; then
+        kill "$(cat "$PIDFILE")" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT INT TERM
+
+if ! command -v "$QEMU_BIN" >/dev/null 2>&1; then
+    reason=missing-qemu
+    finish
+    exit 1
+fi
+
+if [ "$DO_BUILD" = 1 ] || { [ "$DO_BUILD" = auto ] && [ ! -f "$ELF" ]; }; then
+    if ! timeout 240s bin/simple os build --scenario=riscv64-display-smoke >"$BUILD_DIR/build.log" 2>&1; then
+        reason=build-failed
+        finish
+        exit 1
+    fi
+fi
+
+if [ ! -f "$ELF" ]; then
+    reason=missing-elf
+    finish
+    exit 1
+fi
+
+"$QEMU_BIN" -machine virt -cpu rv64 -m 256M \
+    -serial file:"$SERIAL" -display none -no-reboot -bios default \
+    -kernel "$ROOT_DIR/$ELF" \
+    -global virtio-mmio.force-legacy=false \
+    -device virtio-gpu-pci,disable-modern=on,disable-legacy=off \
+    -qmp unix:"$SOCK",server=on,wait=off \
+    -pidfile "$PIDFILE" -daemonize 2>"$ERR"
+
+for _ in $(seq 1 50); do
+    if grep -Fq SIMPLEOS_RISCV_DISPLAY_SMOKE_READY "$SERIAL" 2>/dev/null; then
+        ready=1
+        break
+    fi
+    sleep 0.2
+done
+
+if grep -Fq "[wm-demo] wm-service-ready" "$SERIAL" \
+    && grep -Fq "[e2d-demo] engine-core-ready" "$SERIAL" \
+    && grep -Fq "[web-demo] pixels-ready expected=" "$SERIAL" \
+    && grep -Fq "[mdi-demo] shared-mdi-ready surfaces=5" "$SERIAL" \
+    && grep -Fq "[mdi-demo] windows-ready count=5" "$SERIAL" \
+    && grep -Fq "[integrated-demo] render-ready" "$SERIAL" \
+    && grep -Fq "TEST PASSED" "$SERIAL"; then
+    lifecycle=1
+fi
+
+PY_OUT="$(python3 - "$SOCK" "$PPM" <<'PY'
+import json, os, pathlib, socket, sys, time
+
+sock, out = sys.argv[1], sys.argv[2]
+s = socket.socket(socket.AF_UNIX)
+s.settimeout(5)
+s.connect(sock)
+f = s.makefile("rwb", buffering=0)
+f.readline()
+for obj in [
+    {"execute": "qmp_capabilities"},
+    {"execute": "human-monitor-command", "arguments": {"command-line": "screendump " + os.path.abspath(out)}},
+]:
+    f.write(json.dumps(obj).encode() + b"\n")
+    f.flush()
+    f.readline()
+for _ in range(50):
+    if os.path.exists(out) and os.path.getsize(out) > 0:
+        break
+    time.sleep(0.1)
+
+data = pathlib.Path(out).read_bytes() if os.path.exists(out) else b""
+parts = data.split(None, 4)
+ok = len(parts) >= 5 and parts[0] == b"P6" and parts[3] == b"255"
+w = int(parts[1]) if ok else 0
+h = int(parts[2]) if ok else 0
+payload = parts[4] if ok else b""
+need = w * h * 3
+samples = {
+    "top": (10, 10, (31, 41, 55)),
+    "header": (30, 40, (79, 70, 229)),
+    "bodyA": (30, 70, (248, 250, 252)),
+    "bodyB": (180, 70, (15, 118, 110)),
+    "taskbar": (160, 225, (34, 197, 94)),
+}
+matched = []
+for name, (x, y, expected) in samples.items():
+    i = (y * w + x) * 3
+    got = tuple(payload[i:i + 3]) if ok and i + 3 <= len(payload) else ()
+    if got == expected:
+        matched.append(name)
+nonblack = sum(1 for i in range(0, min(len(payload), need), 3) if payload[i:i + 3] != b"\0\0\0") if ok else 0
+print(f"width={w}")
+print(f"height={h}")
+print(f"nonblack={nonblack}")
+print(f"anchor_matches={len(matched)}")
+print("anchor_names=" + ",".join(matched))
+PY
+)"
+
+width="$(printf '%s\n' "$PY_OUT" | sed -n 's/^width=//p' | tail -n 1)"
+height="$(printf '%s\n' "$PY_OUT" | sed -n 's/^height=//p' | tail -n 1)"
+nonblack="$(printf '%s\n' "$PY_OUT" | sed -n 's/^nonblack=//p' | tail -n 1)"
+anchor_matches="$(printf '%s\n' "$PY_OUT" | sed -n 's/^anchor_matches=//p' | tail -n 1)"
+anchor_names="$(printf '%s\n' "$PY_OUT" | sed -n 's/^anchor_names=//p' | tail -n 1)"
+
+if [ "$ready" = 1 ] && [ "$lifecycle" = 1 ] && [ "$nonblack" -gt 0 ] && [ "$anchor_matches" -eq 5 ]; then
+    status=pass
+    reason=rv64-display-smoke-qmp-wm-lifecycle-pass
+else
+    reason=rv64-display-smoke-qmp-wm-lifecycle-failed
+fi
+
+finish
+[ "$status" = pass ]

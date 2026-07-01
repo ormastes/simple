@@ -56,14 +56,18 @@ typedef struct RtEnum {
     spl_i64 payload;
 } RtEnum;
 
+#ifndef SIMPLE_RUNTIME_NO_ENTRY
 __asm__(
     ".section .text.entry,\"ax\",@progbits\n"
     ".globl _start\n"
     "_start:\n"
     "j __simple_entry_start\n"
 );
+#endif
 
+#ifndef SIMPLE_RUNTIME_NO_WEAK_HEAP
 extern spl_i64 kernel__boot__riscv_noalloc_heap__riscv_noalloc_heap_alloc(spl_i64 size) __attribute__((weak));
+#endif
 
 static spl_u64 g_freestanding_heap_next = 0x87000000ULL;
 static spl_u64 g_freestanding_heap_limit = 0x88000000ULL;
@@ -79,12 +83,14 @@ void *rt_alloc(spl_i64 size) {
     if (size <= 0) {
         return (void *)0;
     }
+#ifndef SIMPLE_RUNTIME_NO_WEAK_HEAP
     if (kernel__boot__riscv_noalloc_heap__riscv_noalloc_heap_alloc) {
         boot_alloc = (void *)(spl_u64)kernel__boot__riscv_noalloc_heap__riscv_noalloc_heap_alloc(size);
         if (boot_alloc) {
             return boot_alloc;
         }
     }
+#endif
     bytes = rt_align8((spl_u64)size);
     next = rt_align8(g_freestanding_heap_next);
     if (next + bytes > g_freestanding_heap_limit) {
@@ -1061,6 +1067,20 @@ void log_raw_println(spl_i64 msg) {
     }
     if (text) {
         uart_write_bytes(text->data, text->len);
+    }
+    uart_put_byte(13);
+    uart_put_byte(10);
+}
+
+void rt_cstr_println(const char *msg) {
+    if (!msg) {
+        uart_put_byte(13);
+        uart_put_byte(10);
+        return;
+    }
+    while (*msg) {
+        uart_put_byte((spl_u8)*msg);
+        msg = msg + 1;
     }
     uart_put_byte(13);
     uart_put_byte(10);
@@ -3247,6 +3267,32 @@ static void rt_gpu_fill_test_pattern(void) {
     }
 }
 
+static void rt_gpu_fill_rect(spl_u32 x, spl_u32 y, spl_u32 w, spl_u32 h, spl_u32 color) {
+    volatile spl_u32 *fb = (volatile spl_u32 *)g_rt_gpu_fb;
+    spl_u32 max_x = x + w;
+    spl_u32 max_y = y + h;
+    if (max_x > RT_GPU_WIDTH) {
+        max_x = RT_GPU_WIDTH;
+    }
+    if (max_y > RT_GPU_HEIGHT) {
+        max_y = RT_GPU_HEIGHT;
+    }
+    for (spl_u32 py = y; py < max_y; py = py + 1U) {
+        for (spl_u32 px = x; px < max_x; px = px + 1U) {
+            fb[(spl_u64)py * RT_GPU_WIDTH + px] = color;
+        }
+    }
+}
+
+static void rt_gpu_fill_wm_anchor_scene(void) {
+    rt_gpu_fill_rect(0U, 0U, RT_GPU_WIDTH, RT_GPU_HEIGHT, 0xff101418U);
+    rt_gpu_fill_rect(0U, 0U, RT_GPU_WIDTH, 24U, 0xff1f2937U);
+    rt_gpu_fill_rect(24U, 36U, 128U, 20U, 0xff4f46e5U);
+    rt_gpu_fill_rect(24U, 56U, 128U, 72U, 0xfff8fafcU);
+    rt_gpu_fill_rect(168U, 48U, 112U, 88U, 0xff0f766eU);
+    rt_gpu_fill_rect(0U, 212U, RT_GPU_WIDTH, 28U, 0xff22c55eU);
+}
+
 spl_i64 rt_display_init(void) {
     spl_i64 count = rt_pci_device_count();
     for (spl_i64 i = 0; i < count; i = i + 1) {
@@ -3325,6 +3371,14 @@ spl_i64 rt_display_flush_test(void) {
         return -1;
     }
     rt_gpu_fill_test_pattern();
+    return rt_gpu_cmd_transfer_flush();
+}
+
+spl_i64 rt_display_flush_wm_anchor_test(void) {
+    if (!g_rt_display_ready || !g_rt_gpu_fb) {
+        return -1;
+    }
+    rt_gpu_fill_wm_anchor_scene();
     return rt_gpu_cmd_transfer_flush();
 }
 

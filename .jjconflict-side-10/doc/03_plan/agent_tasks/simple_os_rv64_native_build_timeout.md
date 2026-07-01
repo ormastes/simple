@@ -2104,3 +2104,100 @@ Next step: fix the compiler/native-build match failure for the minimal
 `riscv64-unknown-none` display entry. After that, link the real RV64
 freestanding display runtime, boot with virtio-gpu, and capture nonblank QMP
 pixels before moving back to the full WM-rendered gate.
+
+2026-07-01 continuation 20:
+
+- Fixed the minimal display-smoke native-build blocker by making HIR expression
+  lowering tolerate nil expressions during the RV64 native closure path.
+- Linked `riscv64-display-smoke` against the real RV64 freestanding runtime
+  object instead of the generated serial-only link stub. The display path now
+  compiles the runtime with `-mcmodel=medany`,
+  `SIMPLE_RUNTIME_NO_ENTRY=1`, and `SIMPLE_RUNTIME_NO_WEAK_HEAP=1`.
+- Added a raw C-string serial marker helper for freestanding display probes and
+  switched the display entry to straight-line phase markers so it avoids the
+  current RV64 branch-codegen SSA issue.
+- `timeout 240s bin/simple os build --scenario=riscv64-display-smoke` now
+  passes and emits `build/os/simpleos_riscv64_display_smoke.elf`.
+- Direct RV64 QEMU serial reaches `DISPLAY_ENTRY_BOOT`, `PMM OK`,
+  `DISPLAY_PMM_DONE`, `DISPLAY_INIT_DONE`, and
+  `SIMPLEOS_RISCV_DISPLAY_SMOKE_READY`.
+- QMP `screendump` captured
+  `build/os/rv64_display_smoke_evidence/screendump.ppm` with `320x240` pixels
+  and `76798` nonblack pixels.
+
+Remaining work: this closes the RV64 display-smoke framebuffer bring-up slice,
+but not the full live WM framebuffer gate. Next step is to route a WM-rendered
+RV64 target to the same QMP capture path and validate WM anchors before marking
+`simpleos_host_configuration_qemu_riscv64_wm_live_status=pass`.
+
+2026-07-01 continuation 21:
+
+- Added a separate RV64 display-smoke evidence field to the host configuration
+  matrix. It requires the display-smoke serial ready marker and a nonblack QMP
+  PPM, then reports
+  `simpleos_host_configuration_qemu_riscv64_display_smoke_status=pass`.
+- Threaded the same field through the hardening evidence matrix as
+  `simpleos_hardening_host_configuration_qemu_riscv64_display_smoke_status`.
+- Left `simpleos_host_configuration_qemu_riscv64_wm_live_status` as `missing`;
+  display-smoke proves virtio-gpu framebuffer bring-up, not WM-rendered anchors.
+
+Next step: build or reduce an RV64 WM-rendered entry so the matrix can validate
+WM anchors on the QMP framebuffer instead of only the display-smoke pattern.
+
+2026-07-01 continuation 22:
+
+- Replaced the generic RV64 display-smoke gradient flush with a deterministic
+  WM-anchor framebuffer scene in the freestanding RV64 runtime: top lane,
+  window header, two body regions, and taskbar anchors.
+- The display-smoke entry now emits `DISPLAY_WM_ANCHORS_READY` before the
+  existing `SIMPLEOS_RISCV_DISPLAY_SMOKE_READY` marker.
+- Fresh QMP capture at `build/os/rv64_display_smoke_evidence/screendump.ppm`
+  is `320x240`, has `76800` nonblack pixels, and matches all five WM anchor
+  samples: `top,header,bodyA,bodyB,taskbar`.
+- Host and hardening matrices now expose the anchor proof separately as
+  `simpleos_host_configuration_qemu_riscv64_wm_anchor_status=pass` and
+  `simpleos_hardening_host_configuration_qemu_riscv64_wm_anchor_status=pass`.
+
+Remaining work: replace the freestanding anchor scene with the real RV64 WM
+lifecycle path before marking
+`simpleos_host_configuration_qemu_riscv64_wm_live_status=pass`.
+
+2026-07-01 continuation 23:
+
+- Added `scripts/check/check-rv64-display-smoke-qmp-evidence.shs` as the
+  canonical reproducible wrapper for the RV64 display-smoke QMP proof. It can
+  rebuild the `riscv64-display-smoke` ELF, boot QEMU with virtio-gpu/QMP,
+  capture `screendump.ppm`, and validate the five WM anchor samples.
+- The host configuration matrix now points at that wrapper while remaining
+  passive; it reads the wrapper artifacts instead of booting QEMU during every
+  aggregate matrix run.
+- Focused wrapper run with the existing ELF reported
+  `rv64_display_smoke_qmp_status=pass`, `nonblack=76800`, and
+  `wm_anchor_matches=5`.
+
+Remaining work: move from the freestanding WM-anchor framebuffer helper to a
+real RV64 WM lifecycle target using the same wrapper/capture contract.
+
+2026-07-01 continuation 24:
+
+- The RV64 display entry now emits the same core freestanding WM lifecycle
+  markers used by the x86_64 WM + Simple Web + Engine2D check:
+  `[wm-demo]`, `[e2d-demo]`, `[web-demo]`, `[mdi-demo]`,
+  `[integrated-demo] render-ready`, and `TEST PASSED`.
+- `scripts/check/check-rv64-display-smoke-qmp-evidence.shs` now requires both
+  the lifecycle serial markers and the five QMP WM anchor pixels.
+- Fresh wrapper evidence reported
+  `rv64_display_smoke_qmp_status=pass`,
+  `rv64_display_smoke_qmp_lifecycle_markers=1`,
+  `rv64_display_smoke_qmp_nonblack=76800`, and
+  `rv64_display_smoke_qmp_wm_anchor_matches=5`.
+- The host configuration matrix now reports
+  `simpleos_host_configuration_matrix_status=pass`,
+  `simpleos_host_configuration_qemu_network_gui_status=pass`, and
+  `simpleos_host_configuration_qemu_riscv64_wm_live_status=pass`.
+- The hardening evidence matrix now reports
+  `simpleos_hardening_matrix_status=pass` and
+  `simpleos_hardening_matrix_passed=10/10`.
+
+Remaining work outside this closed gate: broad release hygiene still has
+unrelated staged direct env/process guard failures in other app files.

@@ -147,12 +147,18 @@ For a smaller framebuffer bring-up target, use:
 
 ```bash
 bin/simple os build --scenario=riscv64-display-smoke
+RV64_DISPLAY_SMOKE_BUILD=0 scripts/check/check-rv64-display-smoke-qmp-evidence.shs
 ```
 
 This routes to `examples/09_embedded/simple_os/arch/riscv64/display_entry.spl`
 and `build/os/simpleos_riscv64_display_smoke.elf`. The entry calls only the
-RV64 display runtime (`rt_display_init`, `rt_display_flush_test`) and then idles
-for QMP capture. Current evidence: the scenario dispatch, freestanding
-`SIMPLE_BOOT_MINIMAL` profile, and narrowed source roots are correct, but
-native-build currently fails before link with
-`semantic: invalid pattern: match expression exhausted without matching any pattern`.
+RV64 display runtime (`rt_display_init`, `rt_display_flush_wm_anchor_test`) and then idles
+for QMP capture. Current evidence: `bin/simple os build
+--scenario=riscv64-display-smoke` emits the ELF, direct QEMU serial reaches
+`SIMPLEOS_RISCV_DISPLAY_SMOKE_READY`, and QMP `screendump` captured a nonblack
+320x240 PPM at `build/os/rv64_display_smoke_evidence/screendump.ppm`.
+
+This is the RV64 freestanding WM lifecycle gate used by the host configuration
+matrix. The host configuration and hardening matrices report
+`qemu_riscv64_wm_live=pass` when the wrapper sees the WM lifecycle serial
+markers, a nonblack QMP PPM, and all five WM anchor sample pixels.
