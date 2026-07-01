@@ -60,8 +60,10 @@ responses through the same stdio oracle.
 
 - Full completion audit against the broad SPipe MCP objective before marking
   the overall goal done.
-- Rebuild/deploy the installed release shortcut when the broader lane moves
-  from source-mode evidence to release packaging.
+- Rebuild/deploy the installed release shortcut after
+  `doc/08_tracking/bug/spipe_mcp_release_shortcut_native_segfault_2026-07-01.md`
+  is fixed. Source wiring is present, but the checked-in release binary is stale
+  and a fresh native CLI build currently segfaults on app subcommands.
 
 Sidecar lanes: N/A for this first common API patch.
 Merge owner: Codex.
