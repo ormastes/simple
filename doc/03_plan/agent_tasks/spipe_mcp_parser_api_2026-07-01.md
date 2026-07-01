@@ -25,6 +25,8 @@
   the whole pack through MCP.
 - Added durable SQLite context tools: `spipe_context_sql_put`,
   `spipe_context_sql_get`, and `spipe_context_sql_search`.
+- Added `bin/spipe_mcp_server` as the common MCP launcher; it prefers the native
+  SPipe MCP artifact and falls back to `src/app/spipe_mcp/main.spl`.
 - Added `simple spipe-mcp ...` CLI dispatch wiring for common source-mode use;
   the installed release binary needs rebuild before the shortcut is live there.
 - Added focused unit coverage.
@@ -60,12 +62,10 @@ responses through the same stdio oracle.
 
 - Full completion audit against the broad SPipe MCP objective before marking
   the overall goal done.
-- Rebuild/deploy the installed release shortcut with the native SPipe MCP
-  artifact staged as `build/bootstrap/mcp-package/spipe_mcp` or exposed through
-  `SIMPLE_SPIPE_MCP_BINARY`. `simple spipe-mcp parsers` and
-  `simple spipe-mcp minimality-check --task='add date picker'` pass through
-  that delegate path; the broader monolithic CLI app-subcommand crash remains a
-  separate native CLI bug.
+- Rebuild/deploy the installed top-level `simple spipe-mcp ...` shortcut when
+  the release binary is refreshed. Common MCP registration can use
+  `bin/spipe_mcp_server` now; the broader monolithic CLI app-subcommand crash
+  remains a separate native CLI bug.
 
 Sidecar lanes: N/A for this first common API patch.
 Merge owner: Codex.

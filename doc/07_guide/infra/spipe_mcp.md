@@ -21,6 +21,9 @@ renders in tree/path order with `level_detected=false`.
 ## CLI
 
 ```bash
+bin/spipe_mcp_server
+bin/spipe_mcp_server serve
+bin/spipe_mcp_server parsers
 bin/release/simple run src/app/spipe_mcp/main.spl
 bin/release/simple run src/app/spipe_mcp/main.spl serve
 bin/release/simple run src/app/spipe_mcp/main.spl parsers
@@ -65,6 +68,11 @@ bin/release/simple run src/app/cli/main.spl spipe-mcp parsers
 ```
 
 No args and `serve` run the MCP stdio server. Logs must stay off stdout.
+For MCP client registration, prefer `bin/spipe_mcp_server`; `serve` uses the
+proven Simple source entrypoint by default, while CLI subcommands use the native
+SPipe MCP artifact when present and otherwise fall back to source mode. Set
+`SIMPLE_SPIPE_MCP_PREFER_NATIVE_SERVE=1` only after a native stdio protocol
+probe passes.
 `simple spipe-mcp ...` is the canonical shortcut when the native SPipe MCP
 entrypoint is available through `SIMPLE_SPIPE_MCP_BINARY` or
 `build/bootstrap/mcp-package/spipe_mcp`; the top-level CLI delegates to that
