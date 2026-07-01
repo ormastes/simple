@@ -813,6 +813,8 @@ async function main() {
       native_height: result.nativeHeight,
       downsampled: result.downsampled,
       captured_argb_written: Boolean(outputPath),
+      png_output_path: pngOutputPath,
+      png_written: Boolean(pngOutputPath),
       geometry_written: Boolean(geometryOutputPath && geometry),
       blur_or_tolerance_used: false,
       gpu_feature_status: gpuFeatureStatus,
