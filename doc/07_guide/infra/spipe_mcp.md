@@ -49,9 +49,9 @@ bin/release/simple run src/app/spipe_mcp/main.spl hook-rules --provider=codex
 bin/release/simple run src/app/spipe_mcp/main.spl hook-render --provider=codex --event=tool_start -f output.txt
 bin/release/simple run src/app/spipe_mcp/main.spl codebase-profile
 bin/release/simple run src/app/spipe_mcp/main.spl codebase-pack --root=. --include=src/app/spipe_mcp/main.spl --ignore='.git/**,build/**'
-bin/release/simple run src/app/spipe_mcp/main.spl getCodebase --root=. --include=src/app/spipe_mcp/main.spl --ignore='.git/**,build/**'
+bin/release/simple run src/app/spipe_mcp/main.spl getCodebase --path=. --include=src/app/spipe_mcp/main.spl --ignore='.git/**,build/**'
 bin/release/simple run src/app/spipe_mcp/main.spl codebase-pack-local --root=. --include=src/app/spipe_mcp/main.spl --ignore='.git/**,build/**'
-bin/release/simple run src/app/spipe_mcp/main.spl codebase-pack-remote --root=https://github.com/example/repo
+bin/release/simple run src/app/spipe_mcp/main.spl codebase-pack-remote --repository=https://github.com/example/repo
 bin/release/simple run src/app/spipe_mcp/main.spl getRemoteCodebase --root=https://github.com/example/repo
 bin/release/simple run src/app/spipe_mcp/main.spl codebase-save --source-id=codebase:1 -f repomix.txt
 bin/release/simple run src/app/spipe_mcp/main.spl saveCodebase --source-id=codebase:1 -f repomix.txt
@@ -131,12 +131,12 @@ For codebase-mcp compatibility, `getCodebase`, `getRemoteCodebase`, and
 save tools. MCP calls may use either SPipe snake_case arguments
 (`source_id`, `include_patterns`, `ignore_patterns`, `timeout_ms`) or
 codebase-mcp-style camelCase arguments (`sourceId`, `includePatterns`,
-`ignorePatterns`, `timeoutMs`), with `cwd` or `repo` accepted as aliases for
-`root`.
+`ignorePatterns`, `timeoutMs`), with `cwd`, `repo`, `path`, or `repository`
+accepted as aliases for `root`.
 Existing packed output may be supplied as `text`, `packed_text`, or `packedText`.
 The CLI accepts the same compatibility spellings as flags, for example
-`--cwd`, `--repo`, `--sourceId`, `--includePatterns`, `--ignorePatterns`, and
-`--timeoutMs`.
+`--cwd`, `--repo`, `--path`, `--repository`, `--sourceId`,
+`--includePatterns`, `--ignorePatterns`, and `--timeoutMs`.
 Existing XML RepoMix input with `<file path=...>` is matched as
 `repomix_xml`; markdown-style packs use `repomix_markdown`.
 RepoMix file markers render as file nodes, so codebase packs can be searched
