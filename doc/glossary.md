@@ -19,6 +19,14 @@ Key paths:
 - **Operator guide:** `doc/07_guide/app/mcp/mcp.md`
 - **Plan trace:** `doc/03_plan/agent_tasks/llm_tooling_context_ponytail_mimic.md`
 
+## LLM Caret
+Primitive Claude-like LLM app layer under `src/app/llm_caret/`.
+
+It provides chat state, provider dispatch, Claude CLI/API, OpenAI/OpenAI-compatible,
+local torch, and OpenCode wrappers. It is not a full Claude Code CLI replacement
+yet: there is no registered top-level `simple llm` command, no agent/tool loop,
+and no direct `goal` or `advisor` command surface.
+
 ## Crate
 Package and module are used in many different meaning across different languages.
 Crate is simple.sdn exist deployment package unit.
