@@ -8,6 +8,7 @@ MANIFEST_PATH="${MANIFEST_PATH:-tools/electron-live-bitmap/simple_web_layout_cap
 BUILD_DIR="${BUILD_DIR:-build/electron_simple_web_layout_manifest_evidence}"
 REPORT_PATH="${REPORT_PATH:-doc/09_report/electron_simple_web_layout_manifest_evidence_$(date -u +%F).md}"
 TIMEOUT_SECS="${ELECTRON_BITMAP_TIMEOUT_SECS:-60}"
+RESUME_CASES="${ELECTRON_LAYOUT_MANIFEST_RESUME:-0}"
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
 rm -f "$BUILD_DIR/evidence.env" "$REPORT_PATH"
@@ -36,15 +37,34 @@ case_count=0
 pass_count=0
 fail_count=0
 tracked_count=0
+resumed_count=0
+rerun_count=0
 
 {
     echo "# Electron Simple Web Layout Manifest Evidence"
     echo
     echo "- manifest: $MANIFEST_PATH"
     echo "- timeout seconds: $TIMEOUT_SECS"
+    echo "- resume cases: $RESUME_CASES"
     echo
     echo "## Cases"
 } >"$REPORT_PATH"
+
+can_resume_case() {
+    file="$1"
+    scene="$2"
+    width="$3"
+    height="$4"
+    [ "$RESUME_CASES" = "1" ] || return 1
+    [ -s "$file" ] || return 1
+    [ "$(field_of electron_simple_web_layout_scene "$file")" = "$scene" ] || return 1
+    [ "$(field_of electron_simple_web_layout_width "$file")" = "$width" ] || return 1
+    [ "$(field_of electron_simple_web_layout_height "$file")" = "$height" ] || return 1
+    [ "$(field_of electron_simple_web_layout_status "$file")" != "" ] || return 1
+    [ "$(field_of electron_simple_web_layout_mismatch_count "$file")" != "" ] || return 1
+    [ "$(field_of electron_simple_web_layout_blur_or_tolerance_used "$file")" != "" ] || return 1
+    return 0
+}
 
 while IFS='|' read -r case_id scene width height policy description; do
     case "$case_id" in
@@ -53,16 +73,24 @@ while IFS='|' read -r case_id scene width height policy description; do
     case_count=$((case_count + 1))
     case_dir="$BUILD_DIR/$case_id"
     case_report="$case_dir/report.md"
+    env_file="$case_dir/evidence.env"
     mkdir -p "$case_dir"
     rm -f "$case_dir/stdout.log" "$case_dir/stderr.log"
 
-    set +e
-    BUILD_DIR="$case_dir" REPORT_PATH="$case_report" ELECTRON_BITMAP_SCENE="$scene" ELECTRON_BITMAP_WIDTH="$width" ELECTRON_BITMAP_HEIGHT="$height" ELECTRON_BITMAP_TIMEOUT_SECS="$TIMEOUT_SECS" \
-        sh scripts/check/check-electron-simple-web-layout-bitmap-evidence.shs >"$case_dir/stdout.log" 2>"$case_dir/stderr.log"
-    exit_code=$?
-    set -e
+    case_resumed=false
+    if can_resume_case "$env_file" "$scene" "$width" "$height"; then
+        exit_code="$(field_of electron_simple_web_layout_exit_code "$env_file")"
+        case_resumed=true
+        resumed_count=$((resumed_count + 1))
+    else
+        rerun_count=$((rerun_count + 1))
+        set +e
+        BUILD_DIR="$case_dir" REPORT_PATH="$case_report" ELECTRON_BITMAP_SCENE="$scene" ELECTRON_BITMAP_WIDTH="$width" ELECTRON_BITMAP_HEIGHT="$height" ELECTRON_BITMAP_TIMEOUT_SECS="$TIMEOUT_SECS" \
+            sh scripts/check/check-electron-simple-web-layout-bitmap-evidence.shs >"$case_dir/stdout.log" 2>"$case_dir/stderr.log"
+        exit_code=$?
+        set -e
+    fi
 
-    env_file="$case_dir/evidence.env"
     case_status="$(field_of electron_simple_web_layout_status "$env_file")"
     case_reason="$(field_of electron_simple_web_layout_reason "$env_file")"
     mismatch_count="$(field_of electron_simple_web_layout_mismatch_count "$env_file")"
@@ -191,6 +219,7 @@ while IFS='|' read -r case_id scene width height policy description; do
 
     {
         echo "- $case_id: status=$case_status reason=$case_reason policy=$policy exit=$exit_code mismatch=$mismatch_count blur_or_tolerance=$blur_used"
+        echo "  - resumed: $case_resumed"
         echo "  - scene: $scene"
         echo "  - dimensions: ${width}x${height}"
         echo "  - report: $case_report"
@@ -203,6 +232,7 @@ while IFS='|' read -r case_id scene width height policy description; do
         echo "electron_simple_web_layout_manifest_${case_id}_policy=$policy"
         echo "electron_simple_web_layout_manifest_${case_id}_status=$case_status"
         echo "electron_simple_web_layout_manifest_${case_id}_reason=$case_reason"
+        echo "electron_simple_web_layout_manifest_${case_id}_resumed=$case_resumed"
         echo "electron_simple_web_layout_manifest_${case_id}_mismatch_count=$mismatch_count"
         echo "electron_simple_web_layout_manifest_${case_id}_blur_or_tolerance_used=$blur_used"
         echo "electron_simple_web_layout_manifest_${case_id}_report=$case_report"
@@ -218,6 +248,8 @@ done <"$MANIFEST_PATH"
     echo "electron_simple_web_layout_manifest_pass_count=$pass_count"
     echo "electron_simple_web_layout_manifest_tracked_count=$tracked_count"
     echo "electron_simple_web_layout_manifest_fail_count=$fail_count"
+    echo "electron_simple_web_layout_manifest_resumed_count=$resumed_count"
+    echo "electron_simple_web_layout_manifest_rerun_count=$rerun_count"
 } >>"$BUILD_DIR/evidence.env"
 
 {
@@ -230,6 +262,8 @@ done <"$MANIFEST_PATH"
     echo "- exact pass: $pass_count"
     echo "- tracked: $tracked_count"
     echo "- fail: $fail_count"
+    echo "- resumed: $resumed_count"
+    echo "- rerun: $rerun_count"
     echo
     echo "## Raw Evidence"
     sed 's/^/- /' "$BUILD_DIR/evidence.env"

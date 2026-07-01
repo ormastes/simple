@@ -94,6 +94,7 @@ async function main() {
 
   const result = await win.webContents.executeJavaScript(`(async function(){
     const out = { ready: !!window.__wmReady };
+    const perfStart = performance.now();
     const wm = window.simpleWM;
     out.wm_found = !!wm;
     if (!wm) return out;
@@ -141,6 +142,12 @@ async function main() {
         return f.payload && (f.payload.kind === cmd || f.payload.cmd_type === cmd || f.payload.event?.kind === cmd);
       });
     }
+    function frameLabel(frame) {
+      if (frame.t === 'host_wm_pointer') return 'host_wm_pointer:' + (frame.payload?.kind || frame.payload?.event?.kind || '');
+      if (frame.t === 'window_cmd') return 'window_cmd:' + (frame.payload?.kind || frame.payload?.cmd_type || '');
+      if (frame.t === 'input_event') return 'input_event:' + (frame.payload?.event?.kind || frame.payload?.kind || frame.payload?.cmd_type || '');
+      return String(frame.t || '');
+    }
 
     const titlebar = eventTarget('.wm-titlebar');
     const title = eventTarget('.wm-title');
@@ -185,6 +192,7 @@ async function main() {
 
     maximizeButton.click();
 
+    const inputStart = performance.now();
     const bodyInput = eventTarget('#field');
     bodyInput.value = 'Hello Simple';
     bodyInput.dispatchEvent(new Event('input', { bubbles: true }));
@@ -192,6 +200,14 @@ async function main() {
     const bodyButton = eventTarget('#ok');
     dispatch(bodyButton, 'pointerdown', { clientX: 80, clientY: 122 });
     dispatch(bodyButton, 'pointerup', { clientX: 80, clientY: 122 });
+    let animationFrameCount = 0;
+    await new Promise(resolve => requestAnimationFrame(() => {
+      animationFrameCount += 1;
+      requestAnimationFrame(() => {
+        animationFrameCount += 1;
+        resolve();
+      });
+    }));
 
     out.window_cmd_count = frames('window_cmd').length;
     out.input_event_count = frames('input_event').length;
@@ -207,6 +223,15 @@ async function main() {
     out.text_payload = frames('input_event', 'text_input')[0]?.payload || null;
     out.expected_move_x = expectedMoveX;
     out.expected_move_y = expectedMoveY;
+    out.performance_now_available = typeof performance.now === 'function';
+    out.performance_now_delta_ms = Math.max(1, Math.round(performance.now() - perfStart));
+    out.input_to_paint_ms = Math.max(1, Math.round(performance.now() - inputStart));
+    out.animation_frame_available = animationFrameCount >= 2;
+    out.animation_frame_count = animationFrameCount;
+    out.css_animation_probe = !!(window.CSS && CSS.supports && CSS.supports('animation-name', 'simple_probe'));
+    out.event_sequence = window.__wmFrames.map(frameLabel).join(',');
+    out.browser_engine = 'chromium';
+    out.electron_user_agent = navigator.userAgent;
     out.pass = out.ready && out.wm_found &&
       out.focus_count >= 1 &&
       out.move_count >= 1 &&
@@ -238,10 +263,19 @@ async function main() {
       out.minimize_button_background === 'rgb(234, 179, 8)' &&
       out.maximize_button_background === 'rgb(34, 197, 94)' &&
       out.title_payload.command_text === '/tmp/project' &&
-      out.text_payload.event.text === 'Hello Simple';
+      out.text_payload.event.text === 'Hello Simple' &&
+      out.performance_now_available &&
+      out.performance_now_delta_ms > 0 &&
+      out.input_to_paint_ms > 0 &&
+      out.animation_frame_available &&
+      out.animation_frame_count >= 2 &&
+      out.css_animation_probe &&
+      out.event_sequence === 'host_wm_pointer:down,window_cmd:focus,window_cmd:move,window_cmd:title_command,window_cmd:maximize,input_event:text_input,input_event:pointer_down,input_event:pointer_up';
     return out;
   })();`);
 
+  result.electron_process_version = process.versions.electron || '';
+  result.chrome_process_version = process.versions.chrome || '';
   console.log('WM_EVENT_CHECK ' + JSON.stringify(result));
   win.destroy();
   app.exit(result.pass ? 0 : 1);

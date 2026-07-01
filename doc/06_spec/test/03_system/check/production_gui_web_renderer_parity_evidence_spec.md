@@ -27,7 +27,7 @@ production_gui_web_renderer_parity_evidence_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 7 | 7 | 0 | 0 |
+| 8 | 8 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -136,6 +136,32 @@ expect(evidence).to_contain("production_gui_web_renderer_parity_matrix_status=ti
 expect(evidence).to_contain("production_gui_web_renderer_parity_matrix_reason=matrix-timeout")
 expect(evidence).to_contain("production_gui_web_renderer_parity_matrix_timed_out=true")
 expect(evidence).to_contain("production_gui_web_renderer_parity_matrix_timeout_secs=1")
+```
+
+</details>
+
+#### resumes completed Electron layout manifest cases from matching evidence
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-electron-simple-web-layout-manifest-resume"
+val command = "rm -rf " + root + " && mkdir -p " + root + "/out/resumed && " +
+    "printf 'resumed|resume-scene|17|19|exact|resume fixture\\n' > " + root + "/manifest.txt && " +
+    "printf 'electron_simple_web_layout_status=pass\\nelectron_simple_web_layout_reason=pass\\nelectron_simple_web_layout_scene=resume-scene\\nelectron_simple_web_layout_width=17\\nelectron_simple_web_layout_height=19\\nelectron_simple_web_layout_mismatch_count=0\\nelectron_simple_web_layout_blur_or_tolerance_used=false\\nelectron_simple_web_layout_exit_code=0\\n' > " + root + "/out/resumed/evidence.env && " +
+    "MANIFEST_PATH=" + root + "/manifest.txt BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md ELECTRON_LAYOUT_MANIFEST_RESUME=1 sh scripts/check/check-electron-simple-web-layout-manifest-evidence.shs"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val evidence = file_read(root + "/out/evidence.env")
+expect(evidence).to_contain("electron_simple_web_layout_manifest_status=pass")
+expect(evidence).to_contain("electron_simple_web_layout_manifest_resumed_count=1")
+expect(evidence).to_contain("electron_simple_web_layout_manifest_rerun_count=0")
+expect(evidence).to_contain("electron_simple_web_layout_manifest_resumed_resumed=true")
 ```
 
 </details>
@@ -269,8 +295,8 @@ expect(evidence).to_contain("production_gui_web_renderer_parity_surface_manifest
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 7 |
-| Active scenarios | 7 |
+| Total scenarios | 8 |
+| Active scenarios | 8 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

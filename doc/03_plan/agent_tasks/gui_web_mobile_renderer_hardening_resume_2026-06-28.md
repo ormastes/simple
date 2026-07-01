@@ -142,6 +142,59 @@ current artifacts, not from stale reports or branch-memory:
    - Do not commit from the current checkout until the mixed dirty files and
      oversized untracked vendor libraries are scoped.
 
+## Production GUI/Web Metal Aggregate Pass (2026-07-02)
+
+Current scoped worktree:
+`/tmp/simple-mac-metal-materialize` on
+`codex/tauri-mobile-renderer-parity-2026-06-26`.
+
+Current production aggregate evidence:
+`build/goal-production-gui-web-parity-current/evidence.env`.
+
+The aggregate was rerun with:
+
+```sh
+BUILD_ROOT=build/goal-production-gui-web-parity-current \
+REPORT_PATH=build/goal-production-gui-web-parity-current/report-after-event.md \
+SIMPLE_BIN=/Users/ormastes/simple/bin/simple \
+PRODUCTION_GUI_WEB_RENDERER_PARITY_SUBCHECK_TIMEOUT_SECS=300 \
+PRODUCTION_GUI_WEB_RENDERER_PARITY_LAYOUT_MANIFEST_RESUME=1 \
+sh scripts/check/check-production-gui-web-renderer-parity-evidence.shs
+```
+
+Observed pass rows:
+
+- `production_gui_web_renderer_parity_status=pass`
+- `production_gui_web_renderer_parity_layout_manifest_status=pass`
+- `layout_electron_simple_web_layout_manifest_resumed_count=50`
+- `layout_electron_simple_web_layout_manifest_rerun_count=0`
+- `production_gui_web_renderer_parity_surface_manifest_status=pass`
+- `production_gui_web_renderer_parity_backend_status=pass`
+- `production_gui_web_renderer_parity_font_offload_status=pass`
+- `production_gui_web_renderer_parity_font_offload_metal_payload_status=pass`
+- `production_gui_web_renderer_parity_metal_readback_status=pass`
+- `production_gui_web_renderer_parity_metal_render_log_status=pass`
+- `production_gui_web_renderer_parity_metal_render_log_blocked_gate_count=0`
+- `production_gui_web_renderer_parity_event_routing_status=pass`
+- `production_gui_web_renderer_parity_event_routing_validation_status=pass`
+- `production_gui_web_renderer_parity_event_routing_proof_source_artifact_status=pass`
+
+Supporting hardening added in this slice:
+
+- `check-electron-simple-web-layout-manifest-evidence.shs` now honors
+  `ELECTRON_LAYOUT_MANIFEST_RESUME=1` and reuses only matching scene/viewport
+  per-case evidence.
+- `check-wm-browser-event-routing-evidence.shs` runs Electron natively on macOS
+  instead of requiring Linux `xvfb-run`, and emits the validation,
+  proof-source, timing, animation, browser identity, and version rows required
+  by the production aggregate.
+
+This completes the desktop/macOS production GUI/Web Metal aggregate gate for
+the current scoped artifacts. The full persistent mobile renderer hardening goal
+still requires current Tauri iOS/WKWebView Metal and Android/WebView Vulkan
+evidence from `check-tauri-mobile-renderer-parity-evidence.shs` before the
+overall lane can be marked complete.
+
 ## Renderer Commit Reconciliation Snapshot
 
 This snapshot covers only renderer evidence commits relevant to the mac
