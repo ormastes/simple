@@ -42,6 +42,7 @@ shortcut for the same app entrypoint.
 - `spipe_tree_parser_list`
 - `spipe_tree_match_parser`
 - `spipe_tree_parse`
+- `spipe_tree_render`
 - `spipe_context_put`
 - `spipe_context_get`
 - `spipe_context_search`
@@ -66,9 +67,9 @@ The minimality tools are deterministic Ponytail gates. They flag obvious
 `yagni`, `native`, `stdlib`, `dependency`, and `shrink` cases and list
 `ponytail:` debt markers. They do not replace normal LLM review.
 
-The hook tools normalize Claude, Codex, Gemini, and generic provider event
+The hook tools normalize Claude, Codex, Gemini, Cursor, and generic provider event
 names into SPipe phases such as `pre_tool`, `post_tool`, `pre_prompt`,
-`post_turn`, `post_edit`, and `pre_commit`.
+`post_turn`, `pre_edit`, `post_edit`, and `pre_commit`.
 
 The codebase tools run RepoMix with a fixed argv vector
 `npx -y repomix <root> --stdout --style markdown --include <patterns> --ignore
