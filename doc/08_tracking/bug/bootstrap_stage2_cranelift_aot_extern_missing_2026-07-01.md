@@ -113,6 +113,50 @@ No fresh Stage2 binary was produced within the cap. The current deploy blocker
 is Stage2 bootstrap build duration/progress, not missing worker launcher,
 missing Cranelift AOT resolver symbols, or the Stage4 bootstrap-mode leak.
 
+## 2026-07-01 Stage2 Rust-Handler Route
+
+`native-build` is classified as a pure-Simple tool, so its normal command-table
+env override path is skipped. The Rust seed already has an in-process
+`handle_native_build` implementation, and the bootstrap Stage2 build is exactly
+the place where the interpreted pure-Simple worker is too slow. The driver now
+honors `SIMPLE_NATIVE_BUILD_RUST=1` for `native-build`, and Stage2 sets that
+env var when invoking the Rust seed. Normal host `simple native-build` behavior
+is unchanged.
+
+Focused proof after rebuilding `src/compiler_rust/target/bootstrap/simple`:
+
+```sh
+timeout 180 env RUST_LOG=error SIMPLE_BINARY=src/compiler_rust/target/bootstrap/simple \
+  SIMPLE_NATIVE_BUILD_RUST=1 src/compiler_rust/target/bootstrap/simple native-build \
+  --timeout 300 --backend cranelift --source src/compiler --source src/app \
+  --source src/lib --entry-closure --entry src/app/cli/bootstrap_main.spl \
+  --runtime-path "$PWD/src/compiler_rust/target/bootstrap" \
+  -o /tmp/spipe_stage2_direct.bin
+```
+
+Result: linked a 6.6 MB Stage2 bootstrap compiler in 1.7 seconds and
+`/tmp/spipe_stage2_direct.bin --help` printed the bootstrap compiler help.
+
+The same Rust-handler route is now used for seed-backed Stage4 and Stage5.
+Direct Stage4 proof:
+
+```sh
+timeout 240 env -u SIMPLE_BOOTSTRAP RUST_LOG=error \
+  SIMPLE_BINARY=src/compiler_rust/target/bootstrap/simple \
+  SIMPLE_NATIVE_BUILD_RUST=1 LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
+  src/compiler_rust/target/bootstrap/simple native-build \
+  --timeout 300 --backend cranelift --source src/compiler --source src/app \
+  --source src/lib --entry-closure --entry src/app/cli/main.spl \
+  --runtime-path "$PWD/src/compiler_rust/target/bootstrap" \
+  -o /tmp/spipe_stage4_direct.bin
+```
+
+Result: linked a 42 MB full CLI in 166.7 seconds. `--help` prints the full CLI
+help and includes `simple spipe-mcp [serve|parsers|...]`. Runtime smoke is still
+blocked: `-c 'print(1+1)'` and `spipe-mcp parsers` exit 248 with no output. The
+current deploy blocker is a Stage4 generated-binary runtime failure, not
+Stage2/Stage4 native-build duration.
+
 Older revisions may need a temporary `bin/simple` wrapper to the rebuilt
 bootstrap seed while running the staged worker; current bootstrap runs pass the
 active stage compiler through `SIMPLE_BINARY` instead.

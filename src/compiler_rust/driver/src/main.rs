@@ -145,7 +145,9 @@ fn dispatch_command(entry: &CommandEntry, ctx: &CommandContext) -> i32 {
     // A cross/bare-metal target can only be honored by the in-process Rust LLVM handler,
     // which parses --target/--linker-script and registers RISCV/AArch64 codegen. Route only
     // these; host builds (no --target) stay on the pure-Simple path, keeping it the default.
-    if entry.name == "native-build" && native_build_wants_cross_target(ctx.args) {
+    if entry.name == "native-build"
+        && (native_build_wants_cross_target(ctx.args) || std::env::var("SIMPLE_NATIVE_BUILD_RUST").is_ok())
+    {
         return run_rust_handler(&entry.rust_handler, ctx);
     }
 

@@ -336,6 +336,7 @@ else
   rm -rf .simple/native_cache/
   run_logged stage2-native-build env RUST_LOG="${RUST_LOG:-error}" \
     SIMPLE_BINARY="${seed_bin}" \
+    SIMPLE_NATIVE_BUILD_RUST=1 \
     "${seed_bin}" native-build \
     --timeout "${native_timeout}" \
     --backend cranelift \
@@ -438,6 +439,7 @@ mkdir -p "${full_dir}"
 rm -rf .simple/native_cache/
 run_logged stage4-native-build env -u SIMPLE_BOOTSTRAP RUST_LOG="${RUST_LOG:-error}" \
   SIMPLE_BINARY="${stage_for_build}" \
+  SIMPLE_NATIVE_BUILD_RUST=1 \
   LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
   "${stage_for_build}" native-build \
   --timeout "${native_timeout}" \
@@ -486,6 +488,7 @@ if [ "${build_mcp}" -eq 1 ]; then
     set +e
     env -u SIMPLE_BOOTSTRAP RUST_LOG="${RUST_LOG:-error}" \
       SIMPLE_BINARY="${stage_for_build}" \
+      SIMPLE_NATIVE_BUILD_RUST=1 \
       LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
       "${stage_for_build}" native-build \
       --timeout "${native_timeout}" \
