@@ -9,6 +9,7 @@ extern spl_i64 rt_byte_array_new_len(spl_i64 len_value);
 extern spl_i64 rt_array_len(spl_i64 array_value);
 extern spl_i64 rt_array_get(spl_i64 collection, spl_i64 index_value);
 extern spl_i64 rt_array_data_ptr(spl_i64 collection);
+extern signed char rt_array_push(spl_i64 array_value, spl_i64 value);
 
 #define AES256_GCM_MAX_INPUT 4096ULL
 
@@ -45,6 +46,14 @@ static spl_i64 rt_copy_bytes_out(const spl_u8 *in, spl_u64 len) {
     }
     for (spl_u64 i = 0ULL; i < len; i = i + 1ULL) {
         data[i] = rt_int((spl_i64)in[i]);
+    }
+    return out;
+}
+
+static spl_i64 rt_copy_bytes_out_pushed(const spl_u8 *in, spl_u64 len) {
+    spl_i64 out = rt_byte_array_new_len(rt_int(0));
+    for (spl_u64 i = 0ULL; i < len; i = i + 1ULL) {
+        rt_array_push(out, rt_int((spl_i64)in[i]));
     }
     return out;
 }
@@ -434,7 +443,7 @@ spl_i64 rt_ssh_aes256_gcm_decrypt_packet(spl_i64 key_value, spl_i64 iv_value, sp
         return rt_empty_bytes();
     }
     payload_len = ct_len - 1ULL - (spl_u64)plaintext[0];
-    return rt_copy_bytes_out(plaintext + 1ULL, payload_len);
+    return rt_copy_bytes_out_pushed(plaintext + 1ULL, payload_len);
 }
 
 spl_i64 rt_ssh_aes256_gcm_decrypt_packet_payload_len(spl_i64 key_value, spl_i64 iv_value, spl_i64 seq_value, spl_i64 packet_value) {
