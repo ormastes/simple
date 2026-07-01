@@ -21,10 +21,35 @@ use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 
 include!(concat!(env!("OUT_DIR"), "/mobile_runtime_assets.rs"));
 
+macro_rules! eprintln {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        let mut stderr = std::io::stderr().lock();
+        let _ = writeln!(&mut stderr, $($arg)*);
+    }};
+}
+
 static MDI_OPEN_WINDOW_COUNT: AtomicUsize = AtomicUsize::new(0);
 static MDI_IMAGE_COUNT: AtomicUsize = AtomicUsize::new(0);
 static MDI_RENDER_HTML_LEN: AtomicUsize = AtomicUsize::new(0);
 static MDI_PROOF_LOOPBACK_URL: OnceLock<String> = OnceLock::new();
+
+#[cfg(mobile)]
+unsafe extern "C" {
+    fn signal(sig: i32, handler: usize) -> usize;
+}
+
+#[cfg(mobile)]
+fn ignore_mobile_sigpipe() {
+    const SIGPIPE: i32 = 13;
+    const SIG_IGN: usize = 1;
+    unsafe {
+        let _ = signal(SIGPIPE, SIG_IGN);
+    }
+}
+
+#[cfg(not(mobile))]
+fn ignore_mobile_sigpipe() {}
 
 #[derive(Debug, Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1825,6 +1850,8 @@ fn inline_shell_document_script(html: &str) -> String {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    ignore_mobile_sigpipe();
+
     // Check for external URL mode (e.g. --url http://localhost:3000)
     let external_url = resolve_external_url();
     let shared_wm_requested = shared_wm_requested();
