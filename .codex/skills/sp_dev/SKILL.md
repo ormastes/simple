@@ -57,6 +57,10 @@ For SPipe MCP registration, use `bin/release/simple spipe-mcp serve` or
 uses native `spipe_mcp` artifacts by explicit env opt-in after parser and stdio
 smokes pass.
 
+For Claude-like LLM app work, the primitive app layer is **LLM Caret** at
+`src/app/llm_caret/`; it is not yet a registered `simple llm` CLI or full
+Claude Code replacement with goal/advisor/tool-loop semantics.
+
 For recent unfinished-plan cleanup lanes, use
 `doc/07_guide/infra/recent_plan_cleanup.md`. Keep the cleanup matrix under
 `doc/03_plan/agent_tasks/` with sidecar lanes/`N/A`, merge owner, and final

@@ -57,6 +57,10 @@ For SPipe MCP registration, use `bin/release/simple spipe-mcp serve` or
 uses native `spipe_mcp` artifacts by explicit env opt-in after parser and stdio
 smokes pass.
 
+For Claude-like LLM app work, the primitive app layer is **LLM Caret** at
+`src/app/llm_caret/`; it is not yet a registered `simple llm` CLI or full
+Claude Code replacement with goal/advisor/tool-loop semantics.
+
 Check or install that wiring with:
 
 ```bash

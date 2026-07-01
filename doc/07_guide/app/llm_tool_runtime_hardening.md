@@ -6,10 +6,22 @@ Date: 2026-07-01
 
 This guide covers the selected A+A lane for the LLM tool runtime hardening work:
 
+- LLM Caret (`src/app/llm_caret/`) as the primitive Claude-like LLM app layer
 - OpenCode as a Claude-CLI-like provider surface in `llm_caret`
 - PID-based OpenCode lifecycle helpers
 - static vLLM and SGLang serve-plan metadata
 - deterministic unit/check/docgen verification
+
+## LLM Caret Status
+
+The primitive Claude-like app layer is named **LLM Caret** and lives at
+`src/app/llm_caret/`. It provides chat state, provider dispatch, Claude CLI/API,
+OpenAI/OpenAI-compatible, local torch, and OpenCode wrappers.
+
+It is not a Claude Code CLI replacement yet: there is no registered top-level
+`simple llm` command, no agent/tool loop, and no direct `goal` or `advisor`
+command surface. Add those only when a lane explicitly selects a real CLI
+contract.
 
 ## OpenCode CLI
 
