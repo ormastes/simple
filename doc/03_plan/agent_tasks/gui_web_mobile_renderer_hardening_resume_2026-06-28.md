@@ -946,3 +946,38 @@ the proof payload to Rust. The next live run should test the image-beacon GET
 fallback; if it still does not hit the loopback receiver, inspect WKWebView
 cleartext/local-network policy or switch the iOS proof lane to the existing
 served URL/probe path while preserving the strict normalized MDI rows.
+
+## 2026-07-02 iOS Main-Thread Eval and Beacon Diagnosis
+
+Follow-up narrowed the iOS proof failure again:
+
+- MDI message eval and proof eval now dispatch through
+  `WebviewWindow::run_on_main_thread`, which makes WKWebView accept the evals
+  on iOS. The live iOS logs show `mdi message eval OK` and
+  `mdi proof eval OK`.
+- The proof fallback now emits a top-level `/mdi-proof-ping` image beacon before
+  any DOM/event probing and can report `/mdi-proof-error` if later JavaScript
+  throws.
+- Focused checks passed:
+  `cargo check --manifest-path tools/tauri-shell/src-tauri/Cargo.toml`,
+  `cargo test --manifest-path tools/tauri-shell/src-tauri/Cargo.toml tauri_mdi_bootstrap_has_drag_and_desktop_root`,
+  `SIMPLE_LIB=src /Users/ormastes/simple/bin/simple test test/03_system/gui/tauri_mobile_renderer_parity_evidence_spec.spl --mode=interpreter --clean`,
+  and `git diff --check`.
+
+Live iOS-only attempts were capped at three fix/verify cycles this turn:
+
+- `build/goal-ios-proof-fallback-fix/` showed no loopback ping because the first
+  fallback still only scheduled reports when the Tauri invoke bridge existed.
+- `build/goal-ios-main-thread-proof/` showed `mdi proof eval OK` after
+  main-thread dispatch, but still no `/mdi-proof` request.
+- `build/goal-ios-proof-top-level-beacon/` showed `mdi proof eval OK` and no
+  top-level `/mdi-proof-ping` request, so the remaining likely blocker is iOS
+  WKWebView policy blocking page-origin HTTP/image traffic to loopback from the
+  `tauri://localhost` app-scheme page, or an equivalent WebKit network policy
+  that does not surface as a JavaScript exception in the captured logs.
+
+Next work should avoid another blind rerun. Either add an iOS App Transport
+Security/local-network exception for `127.0.0.1`/`localhost` and prove the
+top-level ping arrives, or replace the loopback fallback with a Tauri/iOS-native
+proof path such as a custom protocol/navigation handler or the existing served
+URL/probe harness while keeping the strict normalized `MdiProof` rows.
