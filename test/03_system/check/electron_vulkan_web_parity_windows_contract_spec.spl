@@ -36,6 +36,9 @@ OS=Windows_NT EVWP_WORK=build/windows-electron-vulkan-web-parity \
   and GPU sandbox disablement explicitly.
 - Windows Electron launch flag overrides must retain the required Vulkan flags
   or fail before Electron capture starts.
+- Windows frame request overrides must be positive integer dimensions, a
+  decimal uint32 ARGB value, and a six-digit RGB hex value before any renderer
+  launches.
 - The compare step fails closed when the Simple-rendered JSON does not report
   `backend` as `vulkan`.
 - The compare helper rejects dimension mismatches and pixel-buffer length
@@ -134,6 +137,8 @@ The wrapper separates absence from failure:
 - `reason=electron-json-missing` protects the browser reference side.
 - `reason=electron-vulkan-launch-flags-missing` protects against an override
   removing required Chromium Vulkan launch flags.
+- `reason=invalid-frame-request` protects against malformed requested frame
+  dimensions or colors reaching renderer launch.
 - `reason=electron-capture-failed` protects against an Electron subprocess
   crash being reported only as an unstructured shell failure.
 - `reason=simple-vulkan-render-failed` protects against a Simple renderer
@@ -226,6 +231,10 @@ describe "Windows Electron Vulkan web parity wrapper":
         expect(script).to_contain("electron_vulkan_web_parity_windows_simple_render_exit_code")
         expect(script).to_contain("electron-capture-failed")
         expect(script).to_contain("simple-vulkan-render-failed")
+        expect(script).to_contain("is_positive_int")
+        expect(script).to_contain("is_uint32_dec")
+        expect(script).to_contain("is_rgb_hex")
+        expect(script).to_contain("invalid-frame-request")
         expect(script).to_contain("--use-angle=vulkan")
         expect(script).to_contain("--use-vulkan")
         expect(script).to_contain("--enable-features=Vulkan,DefaultANGLEVulkan,VulkanFromANGLE")
@@ -306,6 +315,20 @@ describe "Windows Electron Vulkan web parity wrapper":
         expect(stdout).to_contain("electron_vulkan_web_parity_windows_reason=electron-vulkan-launch-flags-missing")
         expect(stdout).to_contain("electron_vulkan_web_parity_windows_electron_launch_flags=--no-sandbox")
         expect(stdout).to_contain("electron_vulkan_web_parity_windows_simple_bin_version=Simple Language v1.0.0-beta")
+
+    it "rejects invalid Windows frame request overrides before renderer launch":
+        val root = "build/test-electron-vulkan-web-parity-windows-invalid-frame-request"
+        val command = "rm -rf " + root + " && mkdir -p " + root + " && printf '%s\\n' '#!/bin/sh' 'if [ \"$1\" = \"--version\" ]; then echo \"Simple Language v1.0.0-beta\"; exit 0; fi' 'exit 0' > " + root + "/fake-simple && chmod +x " + root + "/fake-simple && OS=Windows_NT SIMPLE_BIN=$PWD/" + root + "/fake-simple EVWP_WIDTH=0 EVWP_HEIGHT=48 EVWP_BG_DEC=4280435814 EVWP_BG_HEX=224466 EVWP_WORK=" + root + "/work sh scripts/check/check-electron-vulkan-web-parity-windows.shs"
+        val (stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+
+        expect(code).to_equal(1)
+        expect(stdout).to_contain("electron_vulkan_web_parity_windows_status=fail")
+        expect(stdout).to_contain("electron_vulkan_web_parity_windows_reason=invalid-frame-request")
+        expect(stdout).to_contain("electron_vulkan_web_parity_windows_width=0")
+        expect(stdout).to_contain("electron_vulkan_web_parity_windows_height=48")
+        expect(stdout).to_contain("electron_vulkan_web_parity_windows_simple_bin_version=Simple Language v1.0.0-beta")
+        expect(stdout.contains("electron_vulkan_web_parity_windows_electron_capture_exit_code=")).to_equal(false)
+        expect(stdout.contains("electron_vulkan_web_parity_windows_simple_render_exit_code=")).to_equal(false)
 
     it "accepts pixel exact Vulkan JSON":
         val root = "build/test-electron-vulkan-web-parity-windows-compare-pass"
