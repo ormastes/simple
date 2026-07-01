@@ -94,7 +94,10 @@ and byte count only; use
 `spipe_codebase_search` or `spipe_codebase_get` to inspect the stored tree.
 For codebase-mcp compatibility, `getCodebase`, `getRemoteCodebase`, and
 `saveCodebase` are aliases for the local pack, remote pack, and metadata-only
-save tools.
+save tools. MCP calls may use either SPipe snake_case arguments
+(`include_patterns`, `ignore_patterns`, `timeout_ms`) or codebase-mcp-style
+camelCase arguments (`includePatterns`, `ignorePatterns`, `timeoutMs`), with
+`cwd` or `repo` accepted as aliases for `root`.
 Existing XML RepoMix input with `<file path=...>` is matched as
 `repomix_xml`; markdown-style packs use `repomix_markdown`.
 RepoMix file markers render as file nodes, so codebase packs can be searched
