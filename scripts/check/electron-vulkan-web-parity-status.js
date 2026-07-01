@@ -4,6 +4,8 @@ const fs = require("fs");
 const electronPath = process.argv[2] || "";
 const vulkanPath = process.argv[3] || "";
 const electronProofPath = process.argv[4] || "";
+const expectedWidth = Number(process.argv[5] || 0);
+const expectedHeight = Number(process.argv[6] || 0);
 
 function emit(key, value) {
   console.log(`${key}=${value === undefined || value === null ? "" : value}`);
@@ -96,6 +98,8 @@ const vulkanRequestedBackend = String(vulkan.requested_backend || "");
 const vulkanPixelCount = Number(vulkan.pixel_count || 0);
 
 const common = {
+  electron_vulkan_web_parity_windows_compare_expected_width: expectedWidth,
+  electron_vulkan_web_parity_windows_compare_expected_height: expectedHeight,
   electron_vulkan_web_parity_windows_compare_electron_width: electronWidth,
   electron_vulkan_web_parity_windows_compare_electron_height: electronHeight,
   electron_vulkan_web_parity_windows_compare_vulkan_width: vulkanWidth,
@@ -148,12 +152,20 @@ if (electronWidth !== vulkanWidth || electronHeight !== vulkanHeight) {
   finish("fail", "frame-shape-mismatch", 2, common);
 }
 
+if ((expectedWidth > 0 && electronWidth !== expectedWidth) || (expectedHeight > 0 && electronHeight !== expectedHeight)) {
+  finish("fail", "frame-size-not-requested", 2, common);
+}
+
 if (electronPixels.length === 0 || vulkanPixels.length === 0) {
   finish("fail", "empty-pixel-buffer", 2, common);
 }
 
 if (electronPixels.length !== vulkanPixels.length) {
   finish("fail", "pixel-buffer-length-mismatch", 2, common);
+}
+
+if (electronPixels.length !== electronWidth * electronHeight || vulkanPixels.length !== vulkanWidth * vulkanHeight) {
+  finish("fail", "pixel-buffer-shape-mismatch", 2, common);
 }
 
 if (vulkanPixelCount !== vulkanPixels.length) {
