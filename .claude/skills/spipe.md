@@ -59,6 +59,11 @@ sh scripts/setup/install-spipe-dev-command.shs --check
 sh scripts/setup/install-spipe-dev-command.shs --apply
 ```
 
+
+## LLM Caret Agent Teams
+
+For LLM Caret agent/team/advisor/goal work, start with `src/app/llm_caret/agent_plan.spl` and `doc/07_guide/app/llm/llm_caret_agent_teams.md`. The current supported surface is static prompt/argv planning only; live process teams, automatic diff capture, and cross-agent chat require separate requirements.
+
 ## Quick references in the same directory
 
 - [`.claude/agents/spipe/research.md`](../agents/spipe/research.md) — SPipe research phase

@@ -19,6 +19,11 @@ and ship handoff:
 /sp_dev <description of what to build or fix>
 ```
 
+
+## LLM Caret Agent Teams
+
+When `$sp_dev` is used for LLM Caret agent/team/advisor/goal work, check `doc/07_guide/app/llm/llm_caret_agent_teams.md` and `src/app/llm_caret/agent_plan.spl` first. Treat the existing feature as static prompt/argv planning; do not claim live supervisor, automatic file-change tracking, or team chat unless a later lane implements and verifies them.
+
 ## Dispatch
 
 Start with the SPipe dev agent instructions in `.claude/agents/spipe/dev.md`.

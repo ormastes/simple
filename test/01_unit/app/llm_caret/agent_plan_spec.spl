@@ -1,0 +1,153 @@
+# LLM Caret agent planning spec
+
+struct AgentLaunchRequest:
+    provider: text
+    agent_md_path: text
+    skill_path: text
+    task_desc: text
+    model: text
+    session_id: text
+    extra_args: [text]
+
+struct AgentLaunchPlan:
+    provider: text
+    mode: text
+    prompt: text
+    argv: [text]
+    summary: text
+
+struct AgentReviewRequest:
+    reviewer: text
+    changed_files: [text]
+    guidance: text
+
+struct AgentFileChangeSet:
+    agent_id: text
+    changed_files: [text]
+
+fn _provider_or_default(provider: text) -> text:
+    if provider == "":
+        return "claude_cli"
+    provider
+
+fn _append_if_non_empty(args: [text], flag: text, value: text) -> [text]:
+    if value == "":
+        return args
+    args + [flag, value]
+
+fn _base_argv(provider: text, prompt: text, model: text, session_id: text, extra_args: [text]) -> [text]:
+    var args: [text] = []
+    if provider == "codex":
+        args = ["exec", prompt]
+    else:
+        args = ["-p", prompt, "--output-format", "json"]
+    args = _append_if_non_empty(args, "--model", model)
+    args = _append_if_non_empty(args, "--resume", session_id)
+    for arg in extra_args:
+        if arg != "":
+            args = args + [arg]
+    args
+
+fn _agent_prompt(req: AgentLaunchRequest) -> text:
+    "Agent: " + req.agent_md_path + "\nSkill: " + req.skill_path + "\nTask: " + req.task_desc
+
+fn build_agent_launch_plan(req: AgentLaunchRequest) -> AgentLaunchPlan:
+    val provider = _provider_or_default(req.provider)
+    val prompt = _agent_prompt(req)
+    AgentLaunchPlan(provider: provider, mode: "agent", prompt: prompt, argv: _base_argv(provider, prompt, req.model, req.session_id, req.extra_args), summary: "agent:" + req.agent_md_path)
+
+fn build_agent_team_plan(requests: [AgentLaunchRequest], interaction_mode: text) -> AgentLaunchPlan:
+    var prompt = "Team interaction: " + interaction_mode
+    var count = 0
+    for req in requests:
+        count = count + 1
+        prompt = prompt + "\n\nMember " + count.to_text() + "\n" + _agent_prompt(req)
+    AgentLaunchPlan(provider: "team", mode: "team", prompt: prompt, argv: ["team", interaction_mode, count.to_text()], summary: "team:" + count.to_text())
+
+fn build_low_agent_review_plan(req: AgentReviewRequest) -> AgentLaunchPlan:
+    var prompt = "Reviewer: " + req.reviewer + "\nGuidance: " + req.guidance + "\nChanged files:"
+    for path in req.changed_files:
+        prompt = prompt + "\n- " + path
+    AgentLaunchPlan(provider: "claude_cli", mode: "review", prompt: prompt, argv: _base_argv("claude_cli", prompt, "", "", []), summary: "review:" + req.changed_files.len().to_text())
+
+fn build_agent_change_review_plan(changes: [AgentFileChangeSet], guidance: text) -> AgentLaunchPlan:
+    var prompt = "Guidance: " + guidance + "\nAgent file changes:"
+    var count = 0
+    for change in changes:
+        prompt = prompt + "\nAgent: " + change.agent_id
+        for path in change.changed_files:
+            count = count + 1
+            prompt = prompt + "\n- " + path
+    AgentLaunchPlan(
+        provider: "claude_cli",
+        mode: "agent_change_review",
+        prompt: prompt,
+        argv: _base_argv("claude_cli", prompt, "", "", []),
+        summary: "agent-change-review:" + count.to_text()
+    )
+
+fn build_claude_advisor_plan(topic: text, context: text) -> AgentLaunchPlan:
+    val prompt = "Advisor topic: " + topic + "\nContext: " + context
+    AgentLaunchPlan(provider: "claude_cli", mode: "advisor", prompt: prompt, argv: _base_argv("claude_cli", prompt, "", "", []), summary: "advisor:" + topic)
+
+fn build_codex_goal_plan(objective: text, context: text) -> AgentLaunchPlan:
+    val prompt = "Goal: " + objective + "\nContext: " + context
+    AgentLaunchPlan(provider: "codex", mode: "goal", prompt: prompt, argv: _base_argv("codex", prompt, "", "", []), summary: "goal:" + objective)
+
+fn contains(items: [text], needle: text) -> bool:
+    for item in items:
+        if item == needle:
+            return true
+    false
+
+describe "LLM Caret agent plans":
+    it "builds a single agent launch plan":
+        val req = AgentLaunchRequest(provider: "", agent_md_path: ".claude/agents/spipe/dev.md", skill_path: ".codex/skills/sp_dev/SKILL.md", task_desc: "implement slice", model: "sonnet", session_id: "s1", extra_args: ["--max-turns", "3"])
+        val plan = build_agent_launch_plan(req)
+        expect(plan.provider).to_equal("claude_cli")
+        expect(plan.mode).to_equal("agent")
+        expect(plan.prompt).to_contain("Agent: .claude/agents/spipe/dev.md")
+        expect(plan.prompt).to_contain("Skill: .codex/skills/sp_dev/SKILL.md")
+        expect(plan.prompt).to_contain("Task: implement slice")
+        expect(contains(plan.argv, "--model")).to_equal(true)
+        expect(contains(plan.argv, "--resume")).to_equal(true)
+        expect(contains(plan.argv, "--max-turns")).to_equal(true)
+
+    it "builds a team plan":
+        val a = AgentLaunchRequest(provider: "claude_cli", agent_md_path: "agent-a.md", skill_path: "skill-a.md", task_desc: "research", model: "", session_id: "", extra_args: [])
+        val b = AgentLaunchRequest(provider: "codex", agent_md_path: "agent-b.md", skill_path: "skill-b.md", task_desc: "review", model: "", session_id: "", extra_args: [])
+        val plan = build_agent_team_plan([a, b], "btw-side")
+        expect(plan.mode).to_equal("team")
+        expect(plan.prompt).to_contain("Team interaction: btw-side")
+        expect(plan.prompt).to_contain("Member 2")
+        expect(plan.summary).to_equal("team:2")
+
+    it "builds a low agent review plan with tracked files":
+        val req = AgentReviewRequest(reviewer: "normal", changed_files: ["src/a.spl", "doc/b.md"], guidance: "review file changes")
+        val plan = build_low_agent_review_plan(req)
+        expect(plan.mode).to_equal("review")
+        expect(plan.prompt).to_contain("- src/a.spl")
+        expect(plan.prompt).to_contain("- doc/b.md")
+        expect(plan.summary).to_equal("review:2")
+
+    it "builds a per-agent change review plan":
+        val a = AgentFileChangeSet(agent_id: "spark", changed_files: ["src/a.spl"])
+        val b = AgentFileChangeSet(agent_id: "haiku", changed_files: ["doc/b.md", "test/c.spl"])
+        val plan = build_agent_change_review_plan([a, b], "review each agent")
+        expect(plan.mode).to_equal("agent_change_review")
+        expect(plan.prompt).to_contain("Agent: spark")
+        expect(plan.prompt).to_contain("Agent: haiku")
+        expect(plan.summary).to_equal("agent-change-review:3")
+
+    it "builds a claude advisor plan":
+        val plan = build_claude_advisor_plan("architecture", "compare options")
+        expect(plan.provider).to_equal("claude_cli")
+        expect(plan.mode).to_equal("advisor")
+        expect(plan.prompt).to_contain("Advisor topic: architecture")
+
+    it "builds a codex goal plan":
+        val plan = build_codex_goal_plan("finish feature", "preserve scope")
+        expect(plan.provider).to_equal("codex")
+        expect(plan.mode).to_equal("goal")
+        expect(plan.argv[0]).to_equal("exec")
+        expect(plan.prompt).to_contain("Goal: finish feature")
