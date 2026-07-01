@@ -24,6 +24,8 @@ const expectedPngSha256Provided = process.argv.length > 13 && process.argv[13] !
 const expectedPngSha256 = String(process.argv[13] || "");
 const expectedCapturedArgbSha256Provided = process.argv.length > 14 && process.argv[14] !== "";
 const expectedCapturedArgbSha256 = String(process.argv[14] || "");
+const expectedVulkanRunIdProvided = process.argv.length > 15 && process.argv[15] !== "";
+const expectedVulkanRunId = String(process.argv[15] || "");
 
 function emit(key, value) {
   console.log(`${key}=${value === undefined || value === null ? "" : value}`);
@@ -235,6 +237,7 @@ const vulkanReason = String(vulkan.reason || "");
 const vulkanProducer = String(vulkan.producer || "");
 const vulkanRequestedBackend = String(vulkan.requested_backend || "");
 const vulkanExecutionMode = String(vulkan.execution_mode || "");
+const vulkanRunId = String(vulkan.run_id || "");
 const vulkanPixelCount = Number(vulkan.pixel_count || 0);
 
 const common = {
@@ -255,6 +258,7 @@ const common = {
   electron_vulkan_web_parity_windows_compare_vulkan_producer: vulkanProducer,
   electron_vulkan_web_parity_windows_compare_vulkan_requested_backend: vulkanRequestedBackend,
   electron_vulkan_web_parity_windows_compare_vulkan_execution_mode: vulkanExecutionMode,
+  electron_vulkan_web_parity_windows_compare_vulkan_run_id: vulkanRunId,
   electron_vulkan_web_parity_windows_compare_vulkan_backend: vulkanBackend,
   electron_vulkan_web_parity_windows_compare_vulkan_pixel_count: vulkanPixelCount,
 };
@@ -331,6 +335,10 @@ if (vulkanRequestedBackend !== "vulkan") {
 
 if (vulkanExecutionMode !== "interpret") {
   finish("fail", "vulkan-execution-mode-not-proven", 2, common);
+}
+
+if (expectedVulkanRunIdProvided && vulkanRunId !== expectedVulkanRunId) {
+  finish("fail", "vulkan-run-id-mismatch", 2, common);
 }
 
 if (vulkanBackend !== "vulkan") {

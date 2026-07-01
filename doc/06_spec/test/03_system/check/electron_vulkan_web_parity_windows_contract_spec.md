@@ -27,7 +27,7 @@ electron_vulkan_web_parity_windows_contract_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 47 | 47 | 0 | 0 |
+| 48 | 48 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -83,6 +83,8 @@ OS=Windows_NT EVWP_WORK=build/windows-electron-vulkan-web-parity \
   pure-Simple app path.
 - The pure-Simple Vulkan renderer JSON records `execution_mode=interpret`, and
   the comparator rejects artifacts that do not prove that mode.
+- The pure-Simple Vulkan renderer JSON records a wrapper-generated `run_id`,
+  and Windows comparison rejects Simple artifacts from a different invocation.
 - Windows execution rejects a selected Simple binary that is not a Windows
   `.exe`, so host shell wrappers cannot masquerade as Windows evidence.
 - Windows execution allows an explicit Electron binary override for setup
@@ -177,6 +179,7 @@ On a Windows host that reaches frame comparison it also emits:
 - `electron_vulkan_web_parity_windows_electron_json`
 - `electron_vulkan_web_parity_windows_electron_proof_json`
 - `electron_vulkan_web_parity_windows_vulkan_json`
+- `electron_vulkan_web_parity_windows_vulkan_run_id`
 - `electron_vulkan_web_parity_windows_compare_exit_code`
 
 ## Completion Boundary
@@ -238,6 +241,8 @@ The wrapper separates absence from failure:
   fallback renderers masquerading as Vulkan-backed GUI evidence.
 - `reason=vulkan-execution-mode-not-proven` protects against a Simple renderer
   artifact produced outside the required interpreter mode.
+- `reason=vulkan-run-id-mismatch` protects against a stale Simple Vulkan JSON
+  artifact from a different wrapper invocation.
 - `reason=electron-vulkan-*` or `reason=electron-*-missing` protects against
   Chromium software or non-Vulkan fallback masquerading as browser-side Vulkan
   evidence.
@@ -303,7 +308,7 @@ The spec contains:
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 148 lines folded for reproduction.
+Runnable source: 156 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -336,7 +341,7 @@ expect(script).to_contain("vulkan-json-missing")
 expect(script).to_contain("electron-proof-missing")
 expect(script).to_contain("ELECTRON_CAPTURE_PROOF_PATH")
 expect(script).to_contain("ELECTRON_CAPTURE_REMOTE_DEBUGGING_PORT")
-expect(script).to_contain("rm -f \"$ELECTRON_JSON\" \"$ELECTRON_PROOF\" \"$VULKAN_JSON\"")
+expect(script).to_contain("rm -f \"$ELECTRON_JSON\" \"$ELECTRON_PROOF\" \"$ELECTRON_PNG\" \"$VULKAN_JSON\"")
 expect(script).to_contain("electron_vulkan_web_parity_windows_electron_launch_flags")
 expect(script).to_contain("require_electron_flag")
 expect(script).to_contain("electron-vulkan-launch-flags-missing")
@@ -371,6 +376,8 @@ expect(helper).to_contain("vulkan-producer-not-proven")
 expect(helper).to_contain("vulkan-requested-backend-not-proven")
 expect(helper).to_contain("vulkan-execution-mode-not-proven")
 expect(helper).to_contain("electron_vulkan_web_parity_windows_compare_vulkan_execution_mode")
+expect(helper).to_contain("vulkan-run-id-mismatch")
+expect(helper).to_contain("electron_vulkan_web_parity_windows_compare_vulkan_run_id")
 expect(helper).to_contain("electron-producer-not-proven")
 expect(helper).to_contain("electron_vulkan_web_parity_windows_compare_electron_producer")
 expect(helper).to_contain("vulkan-backend-not-proven")
@@ -448,9 +455,15 @@ val wrapper = file_read("scripts/check/check-electron-vulkan-web-parity-windows.
 expect(wrapper).to_contain("ELECTRON_JSON_SHA256=$(node -e")
 expect(wrapper).to_contain("ELECTRON_PNG_SHA256=$(node -e")
 expect(wrapper).to_contain("\"$ELECTRON_PNG\" \"$ELECTRON_PNG_SHA256\" \"$ELECTRON_JSON_SHA256\"")
+expect(wrapper).to_contain("EVWP_RUN_ID=$(node -e")
+expect(wrapper).to_contain("EVWP_RUN_ID=\"$EVWP_RUN_ID\"")
+expect(wrapper).to_contain("\"$ELECTRON_JSON_SHA256\" \"$EVWP_RUN_ID\"")
+expect(wrapper).to_contain("electron_vulkan_web_parity_windows_vulkan_run_id")
 val producer = file_read("src/app/test/electron_vulkan_web_parity.spl")
 expect(producer).to_contain("simple-engine2d-vulkan")
 expect(producer).to_contain("\\\"execution_mode\\\":\\\"")
+expect(producer).to_contain("\\\"run_id\\\":\\\"")
+expect(producer).to_contain("EVWP_RUN_ID")
 expect(producer).to_contain("SIMPLE_EXECUTION_MODE")
 expect(producer).to_contain("vulkan-prime-init-failed")
 expect(producer).to_contain("vulkan-engine-create-failed")
@@ -680,15 +693,15 @@ expect(stdout.contains("electron_vulkan_web_parity_windows_compare_exit_code="))
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val root = "build/test-electron-vulkan-web-parity-windows-compare-exit-pass"
 val electron_json = "\"{\\\"producer\\\":\\\"electron-chromium-capture\\\",\\\"width\\\":2,\\\"height\\\":2,\\\"pixels\\\":[4280435814,4280435814,4280435814,4280435814]}\""
 val proof_json = "\"{\\\"status\\\":\\\"pass\\\",\\\"proof_source\\\":\\\"tools/electron-live-bitmap/capture_html_argb.js\\\",\\\"html_path\\\":\\\"$ELECTRON_CAPTURE_HTML\\\",\\\"html_sha256\\\":\\\"$ELECTRON_CAPTURE_EXPECTED_HTML_SHA256\\\",\\\"captured_argb_written\\\":true,\\\"png_output_path\\\":\\\"$ELECTRON_CAPTURE_PNG_OUTPUT\\\",\\\"png_sha256\\\":\\\"2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881\\\",\\\"png_written\\\":true,\\\"blur_or_tolerance_used\\\":false,\\\"native_width\\\":2,\\\"native_height\\\":2,\\\"downsampled\\\":false,\\\"captured_argb_path\\\":\\\"" + root + "/work/electron.json\\\",\\\"captured_argb_sha256\\\":\\\"5a464492695efc7a165cca1e5b005890feac03062647d4e2c0c5180f47fd8dae\\\",\\\"remote_debugging_port\\\":\\\"45678\\\",\\\"width\\\":2,\\\"height\\\":2,\\\"gpu_feature_status\\\":{\\\"vulkan\\\":\\\"enabled\\\",\\\"gpu_compositing\\\":\\\"enabled\\\"},\\\"browser_target_gpu_info_status\\\":\\\"pass\\\",\\\"browser_target_gpu_info\\\":{\\\"gpu\\\":{\\\"auxAttributes\\\":{\\\"hardwareSupportsVulkan\\\":true,\\\"displayType\\\":\\\"Vulkan\\\",\\\"glImplementationParts\\\":\\\"angle=vulkan\\\",\\\"skiaBackendType\\\":\\\"Vulkan\\\",\\\"glRenderer\\\":\\\"Vulkan\\\"}}}}}}}\""
-val vulkan_json = "\"{\\\"status\\\":\\\"pass\\\",\\\"reason\\\":\\\"pass\\\",\\\"producer\\\":\\\"simple-engine2d-vulkan\\\",\\\"requested_backend\\\":\\\"vulkan\\\",\\\"execution_mode\\\":\\\"interpret\\\",\\\"backend\\\":\\\"vulkan\\\",\\\"pixel_count\\\":4,\\\"width\\\":2,\\\"height\\\":2,\\\"pixels\\\":[4280435814,4280435814,4280435814,4280435814]}\""
-val command = "rm -rf " + root + " && mkdir -p " + root + " tools/electron-shell/node_modules/.bin && : > " + root + "/vulkan-1.dll && printf '%s\\n' '#!/bin/sh' 'printf \"%s\\\\n\" " + electron_json + " > \"$ELECTRON_CAPTURE_OUTPUT\"' 'printf \"%s\\\\n\" " + proof_json + " > \"$ELECTRON_CAPTURE_PROOF_PATH\"' 'if [ -n \"$ELECTRON_CAPTURE_PNG_OUTPUT\" ]; then printf x > \"$ELECTRON_CAPTURE_PNG_OUTPUT\"; fi' 'exit 0' > tools/electron-shell/node_modules/.bin/electron.cmd && chmod +x tools/electron-shell/node_modules/.bin/electron.cmd && printf '%s\\n' '#!/bin/sh' 'if [ \"$1\" = \"--version\" ]; then echo \"Simple Language v1.0.0-beta\"; exit 0; fi' 'printf \"%s\\\\n\" " + vulkan_json + " > \"$EVWP_OUTPUT\"' 'exit 0' > " + root + "/fake-simple.exe && chmod +x " + root + "/fake-simple.exe && OS=Windows_NT SIMPLE_BIN=$PWD/" + root + "/fake-simple.exe EVWP_VULKAN_DLL=$PWD/" + root + "/vulkan-1.dll EVWP_WIDTH=2 EVWP_HEIGHT=2 EVWP_BG_DEC=4280435814 EVWP_BG_HEX=224466 EVWP_ELECTRON_CDP_PORT=45678 EVWP_WORK=" + root + "/work sh scripts/check/check-electron-vulkan-web-parity-windows.shs > " + root + "/stdout.txt 2> " + root + "/stderr.txt; code=$?; rm -f tools/electron-shell/node_modules/.bin/electron.cmd; exit $code"
+val vulkan_json = "'printf \"%s\\\\n\" \"{\\\"status\\\":\\\"pass\\\",\\\"reason\\\":\\\"pass\\\",\\\"producer\\\":\\\"simple-engine2d-vulkan\\\",\\\"requested_backend\\\":\\\"vulkan\\\",\\\"execution_mode\\\":\\\"interpret\\\",\\\"run_id\\\":\\\"$EVWP_RUN_ID\\\",\\\"backend\\\":\\\"vulkan\\\",\\\"pixel_count\\\":4,\\\"width\\\":2,\\\"height\\\":2,\\\"pixels\\\":[4280435814,4280435814,4280435814,4280435814]}\" > \"$EVWP_OUTPUT\"'"
+val command = "rm -rf " + root + " && mkdir -p " + root + " tools/electron-shell/node_modules/.bin && : > " + root + "/vulkan-1.dll && printf '%s\\n' '#!/bin/sh' 'printf \"%s\\\\n\" " + electron_json + " > \"$ELECTRON_CAPTURE_OUTPUT\"' 'printf \"%s\\\\n\" " + proof_json + " > \"$ELECTRON_CAPTURE_PROOF_PATH\"' 'if [ -n \"$ELECTRON_CAPTURE_PNG_OUTPUT\" ]; then printf x > \"$ELECTRON_CAPTURE_PNG_OUTPUT\"; fi' 'exit 0' > tools/electron-shell/node_modules/.bin/electron.cmd && chmod +x tools/electron-shell/node_modules/.bin/electron.cmd && printf '%s\\n' '#!/bin/sh' 'if [ \"$1\" = \"--version\" ]; then echo \"Simple Language v1.0.0-beta\"; exit 0; fi' " + vulkan_json + " 'exit 0' > " + root + "/fake-simple.exe && chmod +x " + root + "/fake-simple.exe && OS=Windows_NT SIMPLE_BIN=$PWD/" + root + "/fake-simple.exe EVWP_VULKAN_DLL=$PWD/" + root + "/vulkan-1.dll EVWP_WIDTH=2 EVWP_HEIGHT=2 EVWP_BG_DEC=4280435814 EVWP_BG_HEX=224466 EVWP_ELECTRON_CDP_PORT=45678 EVWP_WORK=" + root + "/work sh scripts/check/check-electron-vulkan-web-parity-windows.shs > " + root + "/stdout.txt 2> " + root + "/stderr.txt; code=$?; rm -f tools/electron-shell/node_modules/.bin/electron.cmd; exit $code"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 val stdout = file_read(root + "/stdout.txt")
 
@@ -696,6 +709,8 @@ expect(code).to_equal(0)
 expect(stdout).to_contain("electron_vulkan_web_parity_windows_status=pass")
 expect(stdout).to_contain("electron_vulkan_web_parity_windows_reason=pixel-exact-vulkan")
 expect(stdout).to_contain("electron_vulkan_web_parity_windows_compare_exit_code=0")
+expect(stdout).to_contain("electron_vulkan_web_parity_windows_vulkan_run_id=")
+expect(stdout).to_contain("electron_vulkan_web_parity_windows_compare_vulkan_run_id=")
 expect(stdout).to_contain("electron_vulkan_web_parity_windows_electron_bin=")
 expect(stdout).to_contain("electron_vulkan_web_parity_windows_electron_bin_status=pass")
 expect(stdout).to_contain("electron_vulkan_web_parity_windows_vulkan_loader=")
@@ -719,8 +734,8 @@ Reproduction: this block contains the complete executable scenario source.
 val root = "build/test-electron-vulkan-web-parity-windows-compare-exit-mismatch"
 val electron_json = "\"{\\\"producer\\\":\\\"electron-chromium-capture\\\",\\\"width\\\":2,\\\"height\\\":2,\\\"pixels\\\":[4280435814,4280435814,4280435814,4280435814]}\""
 val proof_json = "\"{\\\"status\\\":\\\"pass\\\",\\\"proof_source\\\":\\\"tools/electron-live-bitmap/capture_html_argb.js\\\",\\\"html_path\\\":\\\"$ELECTRON_CAPTURE_HTML\\\",\\\"html_sha256\\\":\\\"$ELECTRON_CAPTURE_EXPECTED_HTML_SHA256\\\",\\\"captured_argb_written\\\":true,\\\"png_output_path\\\":\\\"$ELECTRON_CAPTURE_PNG_OUTPUT\\\",\\\"png_sha256\\\":\\\"2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881\\\",\\\"png_written\\\":true,\\\"blur_or_tolerance_used\\\":false,\\\"native_width\\\":2,\\\"native_height\\\":2,\\\"downsampled\\\":false,\\\"captured_argb_path\\\":\\\"" + root + "/work/electron.json\\\",\\\"captured_argb_sha256\\\":\\\"5a464492695efc7a165cca1e5b005890feac03062647d4e2c0c5180f47fd8dae\\\",\\\"remote_debugging_port\\\":\\\"45678\\\",\\\"width\\\":2,\\\"height\\\":2,\\\"gpu_feature_status\\\":{\\\"vulkan\\\":\\\"enabled\\\",\\\"gpu_compositing\\\":\\\"enabled\\\"},\\\"browser_target_gpu_info_status\\\":\\\"pass\\\",\\\"browser_target_gpu_info\\\":{\\\"gpu\\\":{\\\"auxAttributes\\\":{\\\"hardwareSupportsVulkan\\\":true,\\\"displayType\\\":\\\"Vulkan\\\",\\\"glImplementationParts\\\":\\\"angle=vulkan\\\",\\\"skiaBackendType\\\":\\\"Vulkan\\\",\\\"glRenderer\\\":\\\"Vulkan\\\"}}}}}}}\""
-val vulkan_json = "\"{\\\"status\\\":\\\"pass\\\",\\\"reason\\\":\\\"pass\\\",\\\"producer\\\":\\\"simple-engine2d-vulkan\\\",\\\"requested_backend\\\":\\\"vulkan\\\",\\\"execution_mode\\\":\\\"interpret\\\",\\\"backend\\\":\\\"vulkan\\\",\\\"pixel_count\\\":4,\\\"width\\\":2,\\\"height\\\":2,\\\"pixels\\\":[4280435814,4280435814,4280435814,4280435815]}\""
-val command = "rm -rf " + root + " && mkdir -p " + root + " tools/electron-shell/node_modules/.bin && printf '%s\\n' '#!/bin/sh' 'printf \"%s\\\\n\" " + electron_json + " > \"$ELECTRON_CAPTURE_OUTPUT\"' 'printf \"%s\\\\n\" " + proof_json + " > \"$ELECTRON_CAPTURE_PROOF_PATH\"' 'if [ -n \"$ELECTRON_CAPTURE_PNG_OUTPUT\" ]; then printf x > \"$ELECTRON_CAPTURE_PNG_OUTPUT\"; fi' 'exit 0' > tools/electron-shell/node_modules/.bin/electron.cmd && chmod +x tools/electron-shell/node_modules/.bin/electron.cmd && printf '%s\\n' '#!/bin/sh' 'if [ \"$1\" = \"--version\" ]; then echo \"Simple Language v1.0.0-beta\"; exit 0; fi' 'printf \"%s\\\\n\" " + vulkan_json + " > \"$EVWP_OUTPUT\"' 'exit 0' > " + root + "/fake-simple.exe && chmod +x " + root + "/fake-simple.exe && OS=Windows_NT SIMPLE_BIN=$PWD/" + root + "/fake-simple.exe EVWP_WIDTH=2 EVWP_HEIGHT=2 EVWP_BG_DEC=4280435814 EVWP_BG_HEX=224466 EVWP_ELECTRON_CDP_PORT=45678 EVWP_WORK=" + root + "/work sh scripts/check/check-electron-vulkan-web-parity-windows.shs; code=$?; rm -f tools/electron-shell/node_modules/.bin/electron.cmd; exit $code"
+val vulkan_json = "'printf \"%s\\\\n\" \"{\\\"status\\\":\\\"pass\\\",\\\"reason\\\":\\\"pass\\\",\\\"producer\\\":\\\"simple-engine2d-vulkan\\\",\\\"requested_backend\\\":\\\"vulkan\\\",\\\"execution_mode\\\":\\\"interpret\\\",\\\"run_id\\\":\\\"$EVWP_RUN_ID\\\",\\\"backend\\\":\\\"vulkan\\\",\\\"pixel_count\\\":4,\\\"width\\\":2,\\\"height\\\":2,\\\"pixels\\\":[4280435814,4280435814,4280435814,4280435815]}\" > \"$EVWP_OUTPUT\"'"
+val command = "rm -rf " + root + " && mkdir -p " + root + " tools/electron-shell/node_modules/.bin && : > " + root + "/vulkan-1.dll && printf '%s\\n' '#!/bin/sh' 'printf \"%s\\\\n\" " + electron_json + " > \"$ELECTRON_CAPTURE_OUTPUT\"' 'printf \"%s\\\\n\" " + proof_json + " > \"$ELECTRON_CAPTURE_PROOF_PATH\"' 'if [ -n \"$ELECTRON_CAPTURE_PNG_OUTPUT\" ]; then printf x > \"$ELECTRON_CAPTURE_PNG_OUTPUT\"; fi' 'exit 0' > tools/electron-shell/node_modules/.bin/electron.cmd && chmod +x tools/electron-shell/node_modules/.bin/electron.cmd && printf '%s\\n' '#!/bin/sh' 'if [ \"$1\" = \"--version\" ]; then echo \"Simple Language v1.0.0-beta\"; exit 0; fi' " + vulkan_json + " 'exit 0' > " + root + "/fake-simple.exe && chmod +x " + root + "/fake-simple.exe && OS=Windows_NT SIMPLE_BIN=$PWD/" + root + "/fake-simple.exe EVWP_VULKAN_DLL=$PWD/" + root + "/vulkan-1.dll EVWP_WIDTH=2 EVWP_HEIGHT=2 EVWP_BG_DEC=4280435814 EVWP_BG_HEX=224466 EVWP_ELECTRON_CDP_PORT=45678 EVWP_WORK=" + root + "/work sh scripts/check/check-electron-vulkan-web-parity-windows.shs; code=$?; rm -f tools/electron-shell/node_modules/.bin/electron.cmd; exit $code"
 val (stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 
 expect(code).to_equal(2)
@@ -1356,6 +1371,28 @@ expect(stdout).to_contain("electron_vulkan_web_parity_windows_compare_vulkan_exe
 
 </details>
 
+#### rejects Simple Vulkan JSON from a different wrapper run
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-electron-vulkan-web-parity-windows-compare-run-id"
+val vulkan_json = "'{\"status\":\"pass\",\"reason\":\"pass\",\"producer\":\"simple-engine2d-vulkan\",\"requested_backend\":\"vulkan\",\"execution_mode\":\"interpret\",\"run_id\":\"stale-run\",\"backend\":\"vulkan\",\"pixel_count\":4,\"width\":2,\"height\":2,\"pixels\":[1,2,3,4]}'"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && printf '%s\\n' '{\"producer\":\"electron-chromium-capture\",\"width\":2,\"height\":2,\"pixels\":[1,2,3,4]}' > " + root + "/electron.json && printf '%s\\n' " + vulkan_json + " > " + root + "/vulkan.json && node scripts/check/electron-vulkan-web-parity-status.js " + root + "/electron.json " + root + "/vulkan.json '' 2 2 '' '' '' '' '' '' '' '' expected-run"
+val (stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+
+expect(code).to_equal(2)
+expect(stdout).to_contain("electron_vulkan_web_parity_windows_status=fail")
+expect(stdout).to_contain("electron_vulkan_web_parity_windows_reason=vulkan-run-id-mismatch")
+expect(stdout).to_contain("electron_vulkan_web_parity_windows_compare_vulkan_run_id=stale-run")
+```
+
+</details>
+
 #### rejects failed Simple Vulkan render status
 
 <details>
@@ -1538,8 +1575,8 @@ expect(stdout).to_contain("electron_vulkan_web_parity_windows_compare_invalid_vu
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 47 |
-| Active scenarios | 47 |
+| Total scenarios | 48 |
+| Active scenarios | 48 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
