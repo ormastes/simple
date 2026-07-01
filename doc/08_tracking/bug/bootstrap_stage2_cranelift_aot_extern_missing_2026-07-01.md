@@ -74,7 +74,26 @@ several minutes with no new stage output and was stopped to avoid a runaway.
 The next deploy attempt should start from a fresh workspace or update the
 native-build worker monitor/launcher path first.
 
-Local linked workspaces may also need a temporary `bin/simple` wrapper to the
-rebuilt bootstrap seed while running the staged worker; the repo monitor kills
-long `bin/simple run ...native_build_worker...` commands after about 60 seconds
-unless the process argv is renamed or the monitor allowlist is updated.
+## 2026-07-01 Worker Launcher Update
+
+`native_build_main.spl` already honors `SIMPLE_BINARY` before falling back to
+`bin/simple`. The bootstrap script now sets `SIMPLE_BINARY` to the active stage
+compiler for Stage2, Stage3, Stage4, and Stage5 native-build worker launches.
+This removes the need for a temporary `bin/simple` wrapper in linked workspaces
+and avoids the host monitor rule that kills long `bin/simple run
+...native_build_worker...` commands.
+
+Focused proof:
+
+```sh
+sh -n scripts/bootstrap/bootstrap-from-scratch.sh
+timeout 35 sh scripts/bootstrap/bootstrap-from-scratch.sh --pure-simple --native-timeout=1 --no-mcp
+```
+
+The bounded probe reaches Stage2 and the worker exits through the expected
+one-second timeout path instead of failing with `bin/simple: No such file or
+directory`.
+
+Older revisions may need a temporary `bin/simple` wrapper to the rebuilt
+bootstrap seed while running the staged worker; current bootstrap runs pass the
+active stage compiler through `SIMPLE_BINARY` instead.

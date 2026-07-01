@@ -334,7 +334,9 @@ else
   mkdir -p "${output_dir}/stage2/${PLATFORM}"
   echo "Stage 2: seed → bootstrap_main.spl"
   rm -rf .simple/native_cache/
-  run_logged stage2-native-build env RUST_LOG="${RUST_LOG:-error}" "${seed_bin}" native-build \
+  run_logged stage2-native-build env RUST_LOG="${RUST_LOG:-error}" \
+    SIMPLE_BINARY="${seed_bin}" \
+    "${seed_bin}" native-build \
     --timeout "${native_timeout}" \
     --backend cranelift \
     --source src/compiler --source src/app --source src/lib \
@@ -354,6 +356,7 @@ else
   stage3_ok=0
   set +e
   env RUST_LOG="${RUST_LOG:-error}" \
+    SIMPLE_BINARY="${output_dir}/stage2/${PLATFORM}/simple" \
     LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
     "${output_dir}/stage2/${PLATFORM}/simple" native-build \
     --timeout "${native_timeout}" \
@@ -434,6 +437,7 @@ full_dir="${output_dir}/full/${PLATFORM}"
 mkdir -p "${full_dir}"
 rm -rf .simple/native_cache/
 run_logged stage4-native-build env -u SIMPLE_BOOTSTRAP RUST_LOG="${RUST_LOG:-error}" \
+  SIMPLE_BINARY="${stage_for_build}" \
   LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
   "${stage_for_build}" native-build \
   --timeout "${native_timeout}" \
@@ -481,6 +485,7 @@ if [ "${build_mcp}" -eq 1 ]; then
     rm -rf .simple/native_cache/
     set +e
     env -u SIMPLE_BOOTSTRAP RUST_LOG="${RUST_LOG:-error}" \
+      SIMPLE_BINARY="${stage_for_build}" \
       LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
       "${stage_for_build}" native-build \
       --timeout "${native_timeout}" \
