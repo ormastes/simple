@@ -41,6 +41,12 @@ generated-manual shape, or verification contracts, refresh the matching
 `.claude/skills`, `.claude/agents/spipe`, and `.gemini/commands` instructions
 before accepting PASS.
 
+For SPipe dev lanes that produce requirement option docs, selected options must
+be resolved before completion: write the final feature and NFR requirement docs,
+delete the unchosen `*_options.md` files, and update the matching
+`doc/07_guide` page. Do not accept a verify PASS while "Pending Selection"
+option docs remain for the active feature slug.
+
 Do not mark a goal, SPipe phase, verify report, or ship lane complete when
 workflow/tooling behavior changed but the matching guide, skill, agent,
 command, or generated/manual spec docs are stale. The documentation freshness

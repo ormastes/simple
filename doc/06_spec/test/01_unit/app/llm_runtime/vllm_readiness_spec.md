@@ -310,21 +310,11 @@ remove_file_if_exists(adapter_path)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 23 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val manifest = llm_runtime_manifest_with_backend(
-    "sglang",
-    "/mnt/private-models/customer-a",
-    "http://127.0.0.1:30000/v1",
-    "",
-    [],
-    "disabled",
-    2,
-    1,
-    "0.7"
-)
+val manifest = sglang_ready_manifest()
 val plan = llm_runtime_static_serve_plan(manifest)
 
 expect(plan.status).to_equal("planned")
@@ -333,10 +323,16 @@ expect(plan.backend).to_equal("sglang")
 expect(plan.binary).to_equal("python")
 expect(plan.base_model).to_equal("redacted")
 expect(plan.command_preview).to_contain("sglang.launch_server")
+expect(plan.command_preview).to_contain("--host configured")
+expect(plan.command_preview).to_contain("--port configured")
 expect(plan.command_preview).to_contain("--tp 2")
 expect(plan.command_preview).to_contain("--dp 1")
 expect(plan.command_preview).to_contain("--mem-fraction-static 0.7")
+expect(plan.command_preview.split("--endpoint").len()).to_equal(1)
 expect(plan.command_preview.split("/mnt/private-models").len()).to_equal(1)
+val args = llm_runtime_sglang_serve_args("base", "127.0.0.1", "30000", 2, 1, "0.7")
+expect(args.join(" ")).to_contain("--host 127.0.0.1 --port 30000")
+expect(args.join(" ")).to_contain("--dp 1")
 ```
 
 </details>
@@ -350,7 +346,7 @@ Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val manifest = llm_runtime_manifest_with_backend("unknown", "base", "http://127.0.0.1:8000/v1", "", [], "disabled", 0, 0, "")
+val manifest = unsupported_backend_manifest()
 val plan = llm_runtime_static_serve_plan(manifest)
 
 expect(plan.status).to_equal("blocked")

@@ -41,6 +41,22 @@ pub fn llm_runtime_static_serve_plan(manifest: LlmRuntimeManifest) -> LlmRuntime
 pub fn llm_runtime_serve_plan_jsonl_event(plan: LlmRuntimeServePlan) -> text:
     _serve_plan_jsonl_event(plan.status, plan.reason, plan.binary, plan.backend, plan.base_model, plan.endpoint_status, plan.command_preview, plan.lora_adapter_count, plan.dynamic_lora_status)
 
+pub fn llm_runtime_sglang_serve_args(base_model: text, host: text, port: text, tensor_parallel_size: i64, data_parallel_size: i64, memory_fraction_static: text) -> [text]:
+    var args = ["-m", "sglang.launch_server", "--model-path", base_model, "--host", host]
+    if port.trim() != "":
+        args.push("--port")
+        args.push(port)
+    if tensor_parallel_size > 0:
+        args.push("--tp")
+        args.push(tensor_parallel_size.to_text())
+    if data_parallel_size > 0:
+        args.push("--dp")
+        args.push(data_parallel_size.to_text())
+    if memory_fraction_static.trim() != "":
+        args.push("--mem-fraction-static")
+        args.push(memory_fraction_static.trim())
+    args
+
 fn _serve_plan_jsonl_event(status: text, reason: text, binary: text, backend: text, base_model: text, endpoint_status: text, command_preview: text, lora_adapter_count: i64, dynamic_lora_status: text) -> text:
     LB() +
     jp("event", js("llm_runtime_vllm_serve_plan")) +
@@ -123,17 +139,7 @@ fn _command_preview(status: text, backend: text, base_model: text, endpoint_stat
     if status == "blocked":
         return "blocked"
     if backend == "sglang":
-        var sglang_parts = ["python", "-m", "sglang.launch_server", "--model-path", base_model, "--host", endpoint_status, "--port", endpoint_status]
-        if tensor_parallel_size > 0:
-            sglang_parts.push("--tp")
-            sglang_parts.push(tensor_parallel_size.to_text())
-        if data_parallel_size > 0:
-            sglang_parts.push("--dp-size")
-            sglang_parts.push(data_parallel_size.to_text())
-        if memory_fraction_static.trim() != "":
-            sglang_parts.push("--mem-fraction-static")
-            sglang_parts.push(memory_fraction_static.trim())
-        return sglang_parts.join(" ")
+        return (["python"] + llm_runtime_sglang_serve_args(base_model, endpoint_status, endpoint_status, tensor_parallel_size, data_parallel_size, memory_fraction_static)).join(" ")
     var parts = ["vllm", "serve", base_model, "--endpoint", endpoint_status]
     if adapter_count > 0:
         parts.push("--enable-lora")
@@ -165,4 +171,4 @@ fn _looks_sensitive(value: text) -> bool:
     lower.contains("token") or lower.contains("apikey") or lower.contains("api_key") or lower.contains("password") or lower.contains("secret") or lower.contains("@") or value.contains("/") or value.starts_with("~") or value.contains("\\")
 
 export LlmRuntimeServePlan
-export llm_runtime_static_serve_plan, llm_runtime_serve_plan_jsonl_event
+export llm_runtime_static_serve_plan, llm_runtime_serve_plan_jsonl_event, llm_runtime_sglang_serve_args

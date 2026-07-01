@@ -64,7 +64,7 @@ expect(args[args.len() - 1]).to_equal("fix the test")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -122,7 +122,7 @@ expect(opencode_cli_running_status(-1)).to_equal("not_running")
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/llm_caret/opencode_cli_spec.spl` |
-| Updated | 2026-07-01 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview

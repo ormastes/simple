@@ -40,6 +40,13 @@ mirrored manual doc, read it as an operator manual, and fix step names,
 captures, `@inline`/`@prev` visibility, and helper names until the primary flow
 is understandable without opening the source spec.
 
+When `$sp_dev` creates requirement option docs, do not leave them as the final
+state. After the user selects feature and NFR options, write the final
+`doc/02_requirements/feature/<feature>.md` and
+`doc/02_requirements/nfr/<feature>.md`, delete unchosen `*_options.md` files,
+and refresh the matching `doc/07_guide` page before verification. A lane with
+selected options but lingering "Pending Selection" docs is not complete.
+
 Completion gate: do not mark a goal, SPipe phase, verify report, or ship lane
 complete when workflow/tooling behavior changed and the matching guide, skill,
 agent, command, or generated/manual spec docs are still stale. Update the docs

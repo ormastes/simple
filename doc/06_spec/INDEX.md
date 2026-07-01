@@ -7,8 +7,7 @@
 - **Total Features:** 1
 - **Complete Documentation:** 1 (100%)
 - **Stubs Remaining:** 0
-- **Total Lines:** 21
-- **Warnings:** 1
+- **Total Lines:** 150
 
 ---
 
@@ -16,5 +15,5 @@
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [MCP Context/Ponytail Dispatch Execution Specification](test/02_integration/app/mcp_context_ponytail_dispatch_spec.md) | Minimal | N/A | 7 | 20% | 21 lines |
+| [Vllm Readiness Specification](test/01_unit/app/llm_runtime/vllm_readiness_spec.md) | Partial | N/A | 15 | 60% | 150 lines |
 

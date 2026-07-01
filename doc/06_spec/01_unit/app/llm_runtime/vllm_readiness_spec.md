@@ -28,7 +28,7 @@ vllm_readiness_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 13 | 13 | 0 | 0 |
+| 15 | 15 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -305,6 +305,57 @@ remove_file_if_exists(adapter_path)
 
 </details>
 
+#### builds sanitized SGLang serve-plan metadata without starting a server
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 19 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val manifest = sglang_ready_manifest()
+val plan = llm_runtime_static_serve_plan(manifest)
+
+expect(plan.status).to_equal("planned")
+expect(plan.reason).to_equal("static_serve_plan_only")
+expect(plan.backend).to_equal("sglang")
+expect(plan.binary).to_equal("python")
+expect(plan.base_model).to_equal("redacted")
+expect(plan.command_preview).to_contain("sglang.launch_server")
+expect(plan.command_preview).to_contain("--host configured")
+expect(plan.command_preview).to_contain("--port configured")
+expect(plan.command_preview).to_contain("--tp 2")
+expect(plan.command_preview).to_contain("--dp 1")
+expect(plan.command_preview).to_contain("--mem-fraction-static 0.7")
+expect(plan.command_preview.split("--endpoint").len()).to_equal(1)
+expect(plan.command_preview.split("/mnt/private-models").len()).to_equal(1)
+val args = llm_runtime_sglang_serve_args("base", "127.0.0.1", "30000", 2, 1, "0.7")
+expect(args.join(" ")).to_contain("--host 127.0.0.1 --port 30000")
+expect(args.join(" ")).to_contain("--dp 1")
+```
+
+</details>
+
+#### blocks unsupported serving backends
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val manifest = unsupported_backend_manifest()
+val plan = llm_runtime_static_serve_plan(manifest)
+
+expect(plan.status).to_equal("blocked")
+expect(plan.reason).to_equal("unsupported_backend")
+expect(plan.command_preview).to_equal("blocked")
+```
+
+</details>
+
 #### redacts relative model paths in probe and serve-plan output
 
 <details>
@@ -375,8 +426,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 13 |
-| Active scenarios | 13 |
+| Total scenarios | 15 |
+| Active scenarios | 15 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
