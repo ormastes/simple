@@ -238,6 +238,7 @@ const vulkanHeight = Number(vulkan.height || 0);
 const vulkanBackend = String(vulkan.backend || "");
 const vulkanStatus = String(vulkan.status || "");
 const vulkanReason = String(vulkan.reason || "");
+const vulkanSchema = String(vulkan.schema || "");
 const vulkanProducer = String(vulkan.producer || "");
 const vulkanEntrypoint = String(vulkan.entrypoint || "");
 const vulkanRequestedBackend = String(vulkan.requested_backend || "");
@@ -268,6 +269,7 @@ const common = {
   electron_vulkan_web_parity_windows_compare_vulkan_pixels: vulkanPixels.length,
   electron_vulkan_web_parity_windows_compare_vulkan_status: vulkanStatus,
   electron_vulkan_web_parity_windows_compare_vulkan_reason: vulkanReason,
+  electron_vulkan_web_parity_windows_compare_vulkan_schema: vulkanSchema,
   electron_vulkan_web_parity_windows_compare_vulkan_producer: vulkanProducer,
   electron_vulkan_web_parity_windows_compare_vulkan_entrypoint: vulkanEntrypoint,
   electron_vulkan_web_parity_windows_compare_vulkan_requested_backend: vulkanRequestedBackend,
@@ -337,6 +339,10 @@ if (electronProofPath) {
 
 if (vulkanStatus !== "pass") {
   finish("fail", "vulkan-render-status-not-pass", 2, common);
+}
+
+if (vulkanSchema !== "simple-engine2d-vulkan-parity-v1") {
+  finish("fail", "vulkan-schema-not-proven", 2, common);
 }
 
 if (vulkanProducer !== "simple-engine2d-vulkan") {
