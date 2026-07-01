@@ -29,6 +29,9 @@
   SPipe MCP artifact and falls back to `src/app/spipe_mcp/main.spl`.
 - Added `simple spipe-mcp ...` CLI dispatch wiring for common source-mode use;
   the installed release binary needs rebuild before the shortcut is live there.
+- Moved the old `simple_pipe` compatibility surface for context/codebase/Ponytail
+  to a SPipe MCP handoff; Simple MCP keeps `simple_search` and the named
+  Simple-specific `simple_context`/`simple_ponytail` compatibility tools.
 - Added focused unit coverage.
 
 ## Acceptance Evidence

@@ -3,8 +3,9 @@
 
 ## Overview
 
-This focused check proves `simple_pipe surface=codebase` uses the existing
-embedded-SQL context DB and still includes the Simple LSP symbol view.
+This focused check proves `simple_pipe surface=codebase` no longer duplicates
+language-neutral codebase/context behavior in Simple MCP. It hands callers to
+SPipe MCP, while Simple-specific code search remains local.
 
 **Requirements:** doc/02_requirements/feature/llm_tooling_context_ponytail_mimic.md
 """
@@ -15,36 +16,36 @@ use app.io.context_ops.{context_sql_index_packs}
 use app.mcp.main_dispatch.{dispatch_tool_content}
 
 describe "MCP simple_pipe codebase":
-    it "queries the context DB and includes LSP workspace symbols":
+    it "hands codebase context to SPipe MCP":
         dir_create_all("build/test/mcp_simple_pipe_codebase")
         val source_path = "src/app/mcp/main_lazy_query_tools.spl"
         val db_path = "build/test/mcp_simple_pipe_codebase/codebase.db"
         val index_output = context_sql_index_packs([source_path], "ctx", db_path, "text")
         expect(index_output).to_contain("status: ready")
 
-        val args = "{\"surface\":\"codebase\",\"sql\":\"true\",\"query\":\"handle_simple_pipe_codebase\",\"db\":\"" + db_path + "\",\"requester\":\"" + source_path + "\",\"format\":\"text\"}"
+        val args = "{\"surface\":\"codebase\",\"sql\":\"true\",\"query\":\"handle_simple_pipe\",\"db\":\"" + db_path + "\",\"requester\":\"" + source_path + "\",\"format\":\"text\"}"
         val response = dispatch_tool_content("simple_pipe", args)
-        expect(response).to_contain("-- simple_pipe codebase query=handle_simple_pipe_codebase --")
-        expect(response).to_contain("mode: hybrid-codebase-db-search-plus-lsp")
-        expect(response).to_contain("--- Codebase DB query ---")
-        expect(response).to_contain("--- Codebase text search")
-        expect(response).to_contain("--- LSP workspace symbols ---")
-        expect(response).to_contain("handle_simple_pipe_codebase")
+        expect(response).to_contain("status: moved")
+        expect(response).to_contain("owner: spipe-mcp")
+        expect(response).to_contain("server: bin/spipe_mcp_server")
+        expect(response).to_contain("query: handle_simple_pipe")
+        expect(response).to_contain("getCodebase")
+        expect(response).to_contain("saveCodebase")
 
-    it "shows focused LSP symbols first when codebase search is broad":
+    it "keeps Simple source search local":
         dir_create_all("build/test/mcp_simple_pipe_codebase/broad")
         var paths: [text] = []
         var i = 0
         while i < 60:
             val path = "build/test/mcp_simple_pipe_codebase/broad/broad_" + str(i) + ".spl"
-            file_write(path, "fn broad_marker_" + str(i) + "() -> text:\n    \"handle_simple_pipe_codebase broad marker\"\n")
+            file_write(path, "fn broad_marker_" + str(i) + "() -> text:\n    \"handle_simple_pipe broad marker\"\n")
             paths = paths.push(path)
             i = i + 1
         val db_path = "build/test/mcp_simple_pipe_codebase/broad.db"
         val index_output = context_sql_index_packs(paths, "ctx", db_path, "text")
         expect(index_output).to_contain("status: ready")
 
-        val args = "{\"surface\":\"codebase\",\"sql\":\"true\",\"query\":\"handle_simple_pipe_codebase\",\"db\":\"" + db_path + "\",\"requester\":\"src/app/mcp/main_lazy_query_tools.spl\",\"format\":\"text\"}"
+        val args = "{\"surface\":\"search\",\"query\":\"handle_simple_pipe\",\"requester\":\"src/app/mcp/main_lazy_query_tools.spl\",\"format\":\"text\"}"
         val response = dispatch_tool_content("simple_pipe", args)
-        expect(response).to_contain("note: codebase search returned many matches; showing LSP workspace symbols first")
-        expect(response).to_contain("--- LSP workspace symbols ---")
+        expect(response).to_contain("-- simple_search query=handle_simple_pipe")
+        expect(response).to_contain("handle_simple_pipe")

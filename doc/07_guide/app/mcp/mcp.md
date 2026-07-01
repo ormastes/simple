@@ -284,13 +284,14 @@ bin/simple_mcp_server
 | `simple_completions` | Completions | file, line |
 | `simple_type_at` | Type at position | file, line |
 
-### Analysis (6 tools)
+### Analysis (7 tools)
 
 | Tool | Description |
 |------|-------------|
 | `simple_api` | Module API (optional: module, query, visibility) |
 | `simple_dependencies` | Dependency graph |
 | `simple_api_diff` | API surface diff (required: file) |
+| `simple_pipe` | SPipe MCP handoff for context/codebase/Ponytail; Simple search fallback |
 | `simple_context` | Context pack or SQL context query |
 | `simple_ponytail` | Over-engineering audit or simplification report |
 | `simple_search` | Code search (required: query) |
@@ -325,6 +326,13 @@ context/compiler graph directly.
 Language-neutral command output, log, file-tree, RepoMix, and parent-chain raw
 context belongs to SPipe MCP (`src/app/spipe_mcp/main.spl`). Keep
 `simple_context` for Simple source context-pack compatibility.
+
+`simple_pipe` is now a compatibility handoff for those language-neutral
+surfaces. `surface=context`, `surface=codebase`, and Ponytail/audit surfaces
+return the SPipe MCP owner and tool names (`bin/spipe_mcp_server`,
+`spipe_context_*`, `spipe_codebase_*`, and `spipe_minimality_*`). Use
+`surface=search` when the requested operation is Simple source symbol/text
+search and should remain inside Simple MCP.
 
 The SQL-backed context path uses the existing `app.io.sqlite_sffi` facade. In
 interpreter mode the compiler provides a narrow `rt_sqlite_*` subset for context

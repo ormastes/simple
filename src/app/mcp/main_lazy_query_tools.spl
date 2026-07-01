@@ -343,146 +343,32 @@ fn handle_simple_pipe(id: text, body: text) -> text:
             surface = "context"
 
     if surface == "spipe" or surface == "pipe":
-        if file == "" and query == "":
-            return make_tool_result(id, "simple_pipe\nstatus: ready\nspipe: linked\nsurfaces: context, codebase, ponytail, search\nspec_docs: doc/06_spec\n")
-        surface = "context"
+        return make_tool_result(id, _simple_pipe_spipe_handoff("status", query))
 
     if surface == "context":
-        return handle_simple_context(id, body)
+        return make_tool_result(id, _simple_pipe_spipe_handoff("context", query))
     if surface == "codebase":
-        return handle_simple_pipe_codebase(id, body)
+        return make_tool_result(id, _simple_pipe_spipe_handoff("codebase", query))
     if surface == "search":
         return handle_simple_search(id, body)
     if surface == "ponytail" or surface == "audit" or surface == "review" or surface == "simplification" or surface == "simplify":
-        return handle_simple_ponytail(id, body)
+        return make_tool_result(id, _simple_pipe_spipe_handoff("ponytail", query))
     make_tool_error(id, -32602, "Invalid surface: " + surface)
 
-fn _simple_pipe_nonempty_line_count(value: text) -> i64:
-    var count: i64 = 0
-    for line in value.split("\n"):
-        if line.trim() != "":
-            count = count + 1
-    count
-
-fn _simple_pipe_search_text(query: text, kind: text, scope: text, file: text) -> text:
-    var search_dir = "src/"
-    if scope == "test":
-        search_dir = "test/"
-    elif scope == "all":
-        search_dir = "."
-    elif scope == "lib":
-        search_dir = "src/lib/"
-    elif scope == "compiler":
-        search_dir = "src/compiler/"
-    elif scope == "app":
-        search_dir = "src/app/"
-
-    var cmd = ""
-    if kind == "fn" or kind == "function":
-        cmd = "timeout 15 rg -n --glob '*.spl' '^ *fn " + query + "' " + search_dir + " 2>/dev/null | head -51"
-    elif kind == "class":
-        cmd = "timeout 15 rg -n --glob '*.spl' '^ *class " + query + "' " + search_dir + " 2>/dev/null | head -51"
-    elif kind == "struct":
-        cmd = "timeout 15 rg -n --glob '*.spl' '^ *struct " + query + "' " + search_dir + " 2>/dev/null | head -51"
-    elif kind == "enum":
-        cmd = "timeout 15 rg -n --glob '*.spl' '^ *enum " + query + "' " + search_dir + " 2>/dev/null | head -51"
-    elif kind == "import" or kind == "use":
-        cmd = "timeout 15 rg -n --glob '*.spl' 'use.*" + query + "|import.*" + query + "' " + search_dir + " 2>/dev/null | head -51"
-    elif kind == "type":
-        cmd = "timeout 15 rg -n --glob '*.spl' '^ *(type|alias|class|struct|enum) " + query + "' " + search_dir + " 2>/dev/null | head -51"
-    else:
-        cmd = "timeout 15 rg -n --glob '*.spl' '" + query + "' " + search_dir + " 2>/dev/null | head -51"
-
-    if file != "":
-        cmd = "timeout 10 rg -n '" + query + "' " + file + " 2>/dev/null | head -51"
-
-    var out = ""
-    var _u: i64 = 0
-    (out, _u) = shell_cmd(cmd)
+fn _simple_pipe_spipe_handoff(surface: text, query: text) -> text:
+    var out = "simple_pipe\n"
+    out = out + "status: moved\n"
+    out = out + "owner: spipe-mcp\n"
+    out = out + "server: bin/spipe_mcp_server\n"
+    out = out + "surface: " + surface + "\n"
+    if query != "":
+        out = out + "query: " + query + "\n"
+    out = out + "tools:\n"
+    out = out + "- context: spipe_context_put, spipe_context_search, spipe_context_get_raw\n"
+    out = out + "- codebase: spipe_codebase_pack, getCodebase, getRemoteCodebase, saveCodebase\n"
+    out = out + "- ponytail: spipe_minimality_check, spipe_minimality_review, spipe_minimality_debt\n"
+    out = out + "- search: use simple_search for Simple source symbols\n"
     out
-
-fn _simple_pipe_workspace_symbols(query: text, kind: text, requester: text) -> text:
-    var effective_requester = requester
-    if effective_requester == "":
-        effective_requester = "src/"
-    var cmd = "timeout 20 " + _mcp_find_simple_binary() + " run src/app/cli/query.spl lsp-workspace-symbols-json --query " + query + " --requester " + effective_requester + " 2>&1"
-    val (out, exit_code) = shell_cmd(cmd)
-    var result = "-- simple_pipe lsp workspace_symbols exit=" + str(exit_code)
-    if kind != "":
-        result = result + " kind=" + kind
-    result = result + " --\n"
-    result + out
-
-fn _simple_pipe_context_sql_query(query: text, db_path: text, source_filter: text, format: text) -> text:
-    var args = ["context", "--sql", "--query=" + query]
-    if db_path != "":
-        args.push("--db=" + db_path)
-    if source_filter != "":
-        args.push("--source-filter=" + source_filter)
-    if format == "json":
-        args.push("--json")
-    else:
-        args.push("--text")
-    val (out, err, exit_code) = process_run_timeout(_mcp_find_simple_binary(), args, 15000)
-    "-- simple_pipe codebase db exit=" + str(exit_code) + " --\n" + out + err
-
-fn handle_simple_pipe_codebase(id: text, body: text) -> text:
-    val query = extract_field(body, "query")
-    val kind = extract_field(body, "kind")
-    val scope = extract_field(body, "scope")
-    val file = extract_field(body, "file")
-    val requester = extract_field(body, "requester")
-    val sql = extract_field(body, "sql")
-    val db_path = extract_field(body, "db")
-    val source_filter = extract_field(body, "source_filter")
-    var format = extract_field(body, "format")
-    if format == "":
-        format = "text"
-    if query == "":
-        if file != "":
-            return handle_simple_context(id, body)
-        return make_tool_error(id, -32602, "Missing required parameter: query")
-
-    val sql_enabled = sql == "true" or sql == "1" or sql == "yes" or db_path != ""
-    var db_out = ""
-    var db_count: i64 = 0
-    if sql_enabled:
-        db_out = _simple_pipe_context_sql_query(query, db_path, source_filter, format)
-        db_count = _simple_pipe_nonempty_line_count(db_out)
-    val search_out = _simple_pipe_search_text(query, kind, scope, file)
-    val search_count = _simple_pipe_nonempty_line_count(search_out)
-    val lsp_out = _simple_pipe_workspace_symbols(query, kind, requester)
-    val has_lsp = lsp_out.contains("\"name\"") or lsp_out.contains("\"path\"") or lsp_out.contains("\"file\"")
-    val broad_count = search_count + db_count
-
-    var out_parts: [text] = []
-    out_parts.push("-- simple_pipe codebase query=" + query + " --\n")
-    if sql_enabled:
-        out_parts.push("mode: hybrid-codebase-db-search-plus-lsp\n")
-    else:
-        out_parts.push("mode: hybrid-codebase-search-plus-lsp\n")
-    if broad_count >= 50 and has_lsp:
-        out_parts.push("note: codebase search returned many matches; showing LSP workspace symbols first. Ask with surface=search for raw search results.\n\n")
-        out_parts.push("--- LSP workspace symbols ---\n")
-        out_parts.push(lsp_out)
-        if sql_enabled:
-            out_parts.push("\n--- Codebase DB query sample ---\n")
-            out_parts.push(db_out)
-        out_parts.push("\n--- Codebase text search sample ---\n")
-        out_parts.push(search_out)
-    else:
-        if sql_enabled:
-            out_parts.push("--- Codebase DB query ---\n")
-            out_parts.push(db_out)
-            out_parts.push("\n")
-        out_parts.push("--- Codebase text search ---\n")
-        if search_out.trim() == "":
-            out_parts.push("No codebase search results.\n")
-        else:
-            out_parts.push(search_out)
-        out_parts.push("\n--- LSP workspace symbols ---\n")
-        out_parts.push(lsp_out)
-    make_tool_result(id, out_parts.join(""))
 
 # simple_search — Language-aware code search
 fn handle_simple_search(id: text, body: text) -> text:

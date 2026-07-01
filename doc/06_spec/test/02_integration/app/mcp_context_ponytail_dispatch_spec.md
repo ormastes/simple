@@ -29,7 +29,7 @@ mcp_context_ponytail_dispatch_spec -> lib
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 7 | 7 | 0 | 0 |
+| 11 | 11 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -199,6 +199,77 @@ expect(response).to_contain("source: src/app/mcp/main_dispatch.spl")
 
 </details>
 
+#### simple_pipe
+
+#### advertises a SPipe MCP handoff front door
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val response = lower_make_tools_list("\"lower-list-pipe\"")
+expect(response).to_contain("\"name\":\"simple_pipe\"")
+expect(response).to_contain("SPipe MCP handoff for context/codebase/Ponytail")
+```
+
+</details>
+
+#### hands context to SPipe MCP through the app MCP dispatcher
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val args = """{"surface":"context","file":"src/app/mcp/main_dispatch.spl","target":"dispatch_tool","format":"text"}"""
+val response = dispatch_tool_content("simple_pipe", args)
+expect(response).to_contain("owner: spipe-mcp")
+expect(response).to_contain("server: bin/spipe_mcp_server")
+expect(response).to_contain("spipe_context_put")
+```
+
+</details>
+
+#### hands Ponytail/minimality to SPipe MCP through lower MCP
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val args = """{"mode":"ponytail","file":"src/lib/nogc_async_mut/mcp/main_lazy.spl","format":"text"}"""
+val response = lower_handle_simple_pipe("lower-pipe-ponytail", args)
+expect(response).to_contain("owner: spipe-mcp")
+expect(response).to_contain("spipe_minimality_check")
+expect(response).to_contain("spipe_minimality_review")
+```
+
+</details>
+
+#### reports the SPipe MCP handoff without requiring a file
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val response = dispatch_tool_content("simple_pipe", """{"surface":"spipe"}""")
+expect(response).to_contain("simple_pipe")
+expect(response).to_contain("status: moved")
+expect(response).to_contain("server: bin/spipe_mcp_server")
+```
+
+</details>
+
 #### lower MCP
 
 #### advertises simple_context and simple_ponytail through the lower MCP tools list
@@ -206,12 +277,13 @@ expect(response).to_contain("source: src/app/mcp/main_dispatch.spl")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val response = lower_make_tools_list("\"lower-list-1\"")
 expect(response).to_contain("\"id\":\"lower-list-1\"")
+expect(response).to_contain("\"name\":\"simple_pipe\"")
 expect(response).to_contain("\"name\":\"simple_context\"")
 expect(response).to_contain("\"name\":\"simple_ponytail\"")
 expect(response).to_contain("\"inputSchema\"")
@@ -261,8 +333,8 @@ expect(response).to_contain("source: src/lib/nogc_async_mut/mcp/main_lazy.spl")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 7 |
-| Active scenarios | 7 |
+| Total scenarios | 11 |
+| Active scenarios | 11 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
