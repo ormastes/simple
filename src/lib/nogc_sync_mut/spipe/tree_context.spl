@@ -1,0 +1,397 @@
+# SPipe common context tree parser.
+#
+# Language-neutral parser API for command output, logs, file trees, and packed
+# text. It keeps raw text addressable while rendering parent chains beside
+# selected nodes so mid-context snippets remain understandable.
+
+struct SourceBlob:
+    id: text
+    kind: text
+    uri: text
+    command: text
+    cwd: text
+    raw_text: text
+
+struct TreeNode:
+    id: text
+    source_id: text
+    parent_id: text
+    kind: text
+    name: text
+    path: text
+    depth: i64
+    start_line: i64
+    end_line: i64
+    level_norm: text
+    level_raw: text
+    level_present: bool
+    level_confidence: text
+    text: text
+    summary: text
+
+struct TreeDoc:
+    source: SourceBlob
+    parser_name: text
+    level_detected: bool
+    nodes: [TreeNode]
+
+struct ContextStore:
+    docs: [TreeDoc]
+
+fn spipe_source_blob(id: text, kind: text, command: text, raw_text: text) -> SourceBlob:
+    SourceBlob(id: id, kind: kind, uri: "", command: command, cwd: "", raw_text: raw_text)
+
+fn spipe_parser_names() -> [text]:
+    [
+        "generic_text",
+        "generic_log_level",
+        "file_tree",
+        "find",
+        "ls",
+        "tree",
+        "rg",
+        "grep",
+        "git_status",
+        "git_diff",
+        "git_log",
+        "gcc_clang",
+        "ld_linker",
+        "cmake",
+        "ninja",
+        "make",
+        "pytest",
+        "ctest",
+        "cargo",
+        "npm",
+        "journalctl",
+        "systemctl",
+        "repomix_markdown",
+        "repomix_xml",
+        "markdown_headings"
+    ]
+
+fn spipe_match_parser(source_kind: text, command: text, raw_text: text) -> text:
+    val c = command.to_lower()
+    val k = source_kind.to_lower()
+    val sample = raw_text[0:_min_i64(raw_text.len(), 4096)].to_lower()
+    if k == "repomix" or sample.contains("<file path=") or sample.contains("## file:"):
+        return "repomix_markdown"
+    if c.contains("git diff") or sample.starts_with("diff --git "):
+        return "git_diff"
+    if c.contains("git status") or sample.contains("changes not staged"):
+        return "git_status"
+    if c.contains("git log"):
+        return "git_log"
+    if c.contains("journalctl"):
+        return "journalctl"
+    if c.contains("systemctl"):
+        return "systemctl"
+    if c.contains("pytest"):
+        return "pytest"
+    if c.contains("ctest"):
+        return "ctest"
+    if c.contains("cargo"):
+        return "cargo"
+    if c.contains("npm"):
+        return "npm"
+    if c.contains("cmake"):
+        return "cmake"
+    if c.contains("ninja"):
+        return "ninja"
+    if c == "make" or c.contains(" make ") or c.ends_with("/make"):
+        return "make"
+    if c.contains("gcc") or c.contains("clang") or sample.contains("undefined reference"):
+        return "gcc_clang"
+    if c.contains(" ld") or c.ends_with("/ld"):
+        return "ld_linker"
+    if c.contains("rg ") or c.ends_with("/rg"):
+        return "rg"
+    if c.contains("grep"):
+        return "grep"
+    if c.contains("find "):
+        return "find"
+    if c.contains("tree"):
+        return "tree"
+    if c.contains("ls"):
+        return "ls"
+    if _looks_like_file_tree(raw_text):
+        return "file_tree"
+    if _has_explicit_level(raw_text, true):
+        return "generic_log_level"
+    "generic_text"
+
+fn spipe_parse_text(source_kind: text, command: text, raw_text: text) -> TreeDoc:
+    val source = spipe_source_blob("src:1", source_kind, command, raw_text)
+    spipe_parse_source(source)
+
+fn spipe_parse_source(source: SourceBlob) -> TreeDoc:
+    val parser_name = spipe_match_parser(source.kind, source.command, source.raw_text)
+    val lines = source.raw_text.split("\n")
+    val level_detected = _has_explicit_level(source.raw_text, _parser_allows_compiler_levels(parser_name))
+    var nodes: [TreeNode] = []
+    var command_parent = TreeNode(id: "p0", source_id: source.id, parent_id: "", kind: "command", name: source.command, path: "", depth: 0, start_line: 1, end_line: lines.len(), level_norm: "NONE", level_raw: "", level_present: false, level_confidence: "none", text: source.command, summary: source.command)
+    nodes.push(command_parent)
+    var i = 0
+    while i < lines.len():
+        val line_no = i + 1
+        val line = lines[i]
+        if line == "" and i + 1 == lines.len():
+            i = i + 1
+            continue
+        val path = _detect_path(line, parser_name)
+        val depth = if path == "" then 1 else _path_depth(path) + 1
+        val level = _detect_level(line, _parser_allows_compiler_levels(parser_name))
+        val kind = if path == "" then "line" else if line.ends_with("/") then "dir" else "log"
+        nodes.push(TreeNode(
+            id: "n{line_no}",
+            source_id: source.id,
+            parent_id: "p0",
+            kind: kind,
+            name: _basename(path),
+            path: path,
+            depth: depth,
+            start_line: line_no,
+            end_line: line_no,
+            level_norm: level[0],
+            level_raw: level[1],
+            level_present: level[2] == "true",
+            level_confidence: level[3],
+            text: line,
+            summary: line.trim()
+        ))
+        i = i + 1
+    TreeDoc(source: source, parser_name: parser_name, level_detected: level_detected, nodes: nodes)
+
+fn spipe_context_store_new() -> ContextStore:
+    ContextStore(docs: [])
+
+fn spipe_context_put(store: ContextStore, source: SourceBlob) -> ContextStore:
+    var docs = store.docs
+    docs.push(spipe_parse_source(source))
+    ContextStore(docs: docs)
+
+fn spipe_context_get(store: ContextStore, source_id: text) -> text:
+    for doc in store.docs:
+        if doc.source.id == source_id:
+            return spipe_render_tree(doc)
+    ""
+
+fn spipe_context_search(store: ContextStore, query: text) -> text:
+    val q = query.to_lower()
+    var parts: [text] = []
+    for doc in store.docs:
+        if doc.source.raw_text.to_lower().contains(q) or doc.source.command.to_lower().contains(q):
+            parts.push(spipe_render_tree(doc))
+    parts.join("\n")
+
+fn spipe_context_raw(store: ContextStore, source_id: text, start_line: i64, end_line: i64, before: i64, after: i64) -> text:
+    for doc in store.docs:
+        if doc.source.id == source_id:
+            return spipe_raw_range(doc.source.raw_text, source_id, start_line, end_line, before, after)
+    ""
+
+fn spipe_render_tree(doc: TreeDoc) -> text:
+    var parts: [text] = []
+    parts.push("@ctx v=1 render=tree-log parser=\"{doc.parser_name}\"")
+    val level_state = if doc.level_detected then "true" else "false"
+    parts.push("@source id={doc.source.id} cmd=\"{doc.source.command}\" level_detected={level_state} raw_available=true")
+    if doc.level_detected:
+        val fatal = _render_level_group(doc, "FATAL")
+        if fatal != "":
+            parts.push(fatal)
+        val error = _render_level_group(doc, "ERROR")
+        if error != "":
+            parts.push(error)
+        val warn = _render_level_group(doc, "WARN")
+        if warn != "":
+            parts.push(warn)
+        val info = _render_level_group(doc, "INFO")
+        if info != "":
+            parts.push(info)
+        val debug = _render_level_group(doc, "DEBUG")
+        if debug != "":
+            parts.push(debug)
+        val trace = _render_level_group(doc, "TRACE")
+        if trace != "":
+            parts.push(trace)
+        val none = _render_level_group(doc, "NONE")
+        if none != "":
+            parts.push(none)
+    else:
+        val rendered_nodes = _render_nodes(doc, "ALL")
+        if rendered_nodes != "":
+            parts.push(rendered_nodes)
+    parts.push("@more raw=raw:{doc.source.id} lines=all")
+    parts.join("\n")
+
+fn spipe_raw_range(raw_text: text, source_id: text, start_line: i64, end_line: i64, before: i64, after: i64) -> text:
+    val lines = raw_text.split("\n")
+    var start = start_line - before
+    if start < 1:
+        start = 1
+    var finish = end_line + after
+    if finish > lines.len():
+        finish = lines.len()
+    var parts: [text] = []
+    parts.push("@raw id={source_id} range=L{start}-L{finish} mode=exact")
+    var i = start
+    while i <= finish:
+        parts.push("| " + lines[i - 1])
+        i = i + 1
+    parts.join("\n")
+
+fn _render_level_group(doc: TreeDoc, level: text) -> text:
+    val count = _count_level(doc.nodes, level)
+    if count == 0:
+        return ""
+    var parts: [text] = []
+    parts.push("")
+    parts.push("@group level={level} count={count}")
+    val nodes = _render_nodes(doc, level)
+    if nodes != "":
+        parts.push(nodes)
+    parts.join("\n")
+
+fn _render_nodes(doc: TreeDoc, level: text) -> text:
+    var parts: [text] = []
+    var i = 0
+    while i < doc.nodes.len():
+        val node = doc.nodes[i]
+        if node.kind == "command":
+            i = i + 1
+            continue
+        if level != "ALL" and node.level_norm != level:
+            i = i + 1
+            continue
+        val parent_chain = _render_parent_chain(doc, node)
+        if parent_chain != "":
+            parts.push(parent_chain)
+        val raw = "raw:{doc.source.id}#L{node.start_line}-L{node.end_line}"
+        parts.push("@node id={node.id} d={node.depth} kind={node.kind} level={node.level_norm} level_raw=\"{node.level_raw}\" conf={node.level_confidence} lines={node.start_line}-{node.end_line} raw={raw}")
+        parts.push("| " + node.text)
+        i = i + 1
+    parts.join("\n")
+
+fn _render_parent_chain(doc: TreeDoc, node: TreeNode) -> text:
+    var parts: [text] = []
+    parts.push("@parent d=0 kind=command text=\"{doc.source.command}\"")
+    if node.path == "":
+        return parts.join("\n")
+    val dirs = _dirs_for_path(node.path)
+    var d = 0
+    while d < dirs.len():
+        parts.push("@parent d={d + 1} kind=dir path=\"{dirs[d]}\"")
+        d = d + 1
+    if node.kind != "dir":
+        parts.push("@parent d={dirs.len() + 1} kind=file path=\"{node.path}\"")
+    parts.join("\n")
+
+fn _detect_level(line: text, compiler_mode: bool) -> [text]:
+    val t = line.trim()
+    val up = t.to_upper()
+    if up.starts_with("[TRACE]"):
+        return ["TRACE", "[TRACE]", "true", "exact"]
+    if up.starts_with("[DEBUG]"):
+        return ["DEBUG", "[DEBUG]", "true", "exact"]
+    if up.starts_with("[INFO]"):
+        return ["INFO", "[INFO]", "true", "exact"]
+    if up.starts_with("[WARN]") or up.starts_with("[WARNING]"):
+        return ["WARN", t.split("]")[0] + "]", "true", "exact"]
+    if up.starts_with("[ERROR]") or up.starts_with("[ERR]"):
+        return ["ERROR", t.split("]")[0] + "]", "true", "exact"]
+    if up.starts_with("[FATAL]"):
+        return ["FATAL", "[FATAL]", "true", "exact"]
+    val first = t.split(" ")[0].to_upper()
+    if first == "TRACE" or first == "DEBUG" or first == "INFO" or first == "WARN" or first == "WARNING" or first == "ERROR" or first == "ERR" or first == "FATAL":
+        return [_norm_level(first), first, "true", "exact"]
+    if compiler_mode and t.starts_with("error:"):
+        return ["ERROR", "error:", "true", "parser"]
+    if compiler_mode and t.starts_with("warning:"):
+        return ["WARN", "warning:", "true", "parser"]
+    ["NONE", "", "false", "none"]
+
+fn _has_explicit_level(raw_text: text, compiler_mode: bool) -> bool:
+    for line in raw_text.split("\n"):
+        val level = _detect_level(line, compiler_mode)
+        if level[2] == "true":
+            return true
+    false
+
+fn _parser_allows_compiler_levels(name: text) -> bool:
+    name == "gcc_clang" or name == "ld_linker" or name == "cmake" or name == "ninja" or name == "make" or name == "cargo" or name == "npm" or name == "pytest" or name == "ctest"
+
+fn _detect_path(line: text, parser_name: text) -> text:
+    val t = _strip_level_prefix(line.trim())
+    if parser_name == "find" or parser_name == "file_tree":
+        if t.starts_with("./"):
+            return t[2:]
+        if t.starts_with("/"):
+            return t
+    if parser_name == "tree":
+        val cleaned = t.replace("├── ", "").replace("└── ", "").replace("│   ", "").trim()
+        if cleaned != t:
+            return cleaned
+    val parts = t.split(":")
+    if parts.len() > 1 and (parts[0].contains("/") or parts[0].contains(".")):
+        return parts[0]
+    ""
+
+fn _strip_level_prefix(line: text) -> text:
+    var t = line
+    if t.starts_with("[") and t.contains("]"):
+        val parts = t.split("]")
+        if parts.len() > 1:
+            t = parts[1].trim()
+    val first = t.split(" ")[0].to_upper()
+    if first == "TRACE" or first == "DEBUG" or first == "INFO" or first == "WARN" or first == "WARNING" or first == "ERROR" or first == "ERR" or first == "FATAL":
+        return t[first.len():].trim()
+    t
+
+fn _looks_like_file_tree(raw_text: text) -> bool:
+    raw_text.contains("├── ") or raw_text.contains("└── ") or raw_text.contains("\n./")
+
+fn _norm_level(level: text) -> text:
+    if level == "WARNING":
+        return "WARN"
+    if level == "ERR":
+        return "ERROR"
+    level
+
+fn _count_level(nodes: [TreeNode], level: text) -> i64:
+    var count = 0
+    for node in nodes:
+        if node.kind != "command" and node.level_norm == level:
+            count = count + 1
+    count
+
+fn _path_depth(path: text) -> i64:
+    if path == "":
+        return 0
+    path.split("/").len()
+
+fn _dirs_for_path(path: text) -> [text]:
+    var dirs: [text] = []
+    val parts = path.split("/")
+    var cur = ""
+    var i = 0
+    while i + 1 < parts.len():
+        if cur == "":
+            cur = parts[i]
+        else:
+            cur = cur + "/" + parts[i]
+        if cur != "":
+            dirs.push(cur)
+        i = i + 1
+    dirs
+
+fn _basename(path: text) -> text:
+    if path == "":
+        return ""
+    val parts = path.split("/")
+    parts[parts.len() - 1]
+
+fn _min_i64(a: i64, b: i64) -> i64:
+    if a < b:
+        a
+    else:
+        b

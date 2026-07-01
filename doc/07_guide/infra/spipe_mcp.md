@@ -1,0 +1,83 @@
+# SPipe MCP Parser API
+
+`std.nogc_sync_mut.spipe.tree_context` is the common language-neutral parser
+surface for SPipe MCP, context-mode style storage, and CLI-tool output parsing.
+
+## API
+
+- `spipe_source_blob(id, kind, command, raw_text)` creates raw context.
+- `spipe_match_parser(kind, command, raw_text)` returns the best parser name.
+- `spipe_parse_source(source)` and `spipe_parse_text(kind, command, raw_text)`
+  build a `TreeDoc`.
+- `spipe_render_tree(doc)` renders compact `@ctx`, `@parent`, `@node`, and
+  `raw:<source>#Lx-Ly` pointers.
+- `spipe_context_store_new`, `spipe_context_put`, `spipe_context_get`,
+  `spipe_context_search`, and `spipe_context_raw` provide the minimal store and
+  exact raw-line retrieval API.
+
+Log levels are grouped only when explicit levels are detected. Plain output
+renders in tree/path order with `level_detected=false`.
+
+## CLI
+
+```bash
+bin/release/simple run src/app/spipe_mcp/main.spl
+bin/release/simple run src/app/spipe_mcp/main.spl serve
+bin/release/simple run src/app/spipe_mcp/main.spl parsers
+bin/release/simple run src/app/spipe_mcp/main.spl match --command='git diff' -f output.txt
+bin/release/simple run src/app/spipe_mcp/main.spl parse --command='simple build' -f output.txt
+bin/release/simple run src/app/spipe_mcp/main.spl raw -f output.txt --start=10 --end=12 --before=2 --after=2
+```
+
+No args and `serve` run the MCP stdio server. Logs must stay off stdout.
+
+## MCP Tools
+
+- `spipe_tree_parser_list`
+- `spipe_tree_match_parser`
+- `spipe_tree_parse`
+- `spipe_context_put`
+- `spipe_context_get`
+- `spipe_context_search`
+- `spipe_context_raw`
+- `spipe_context_sql_put`
+- `spipe_context_sql_get`
+- `spipe_context_sql_search`
+- `spipe_minimality_check`
+- `spipe_minimality_review`
+- `spipe_minimality_debt`
+- `spipe_hook_event`
+- `spipe_hook_rules`
+- `spipe_hook_render`
+- `spipe_codebase_profile`
+- `spipe_codebase_ingest`
+- `spipe_codebase_search`
+- `spipe_codebase_get`
+- `spipe_codebase_save`
+
+The minimality tools are deterministic Ponytail gates. They flag obvious
+`yagni`, `native`, `stdlib`, `dependency`, and `shrink` cases and list
+`ponytail:` debt markers. They do not replace normal LLM review.
+
+The hook tools normalize Claude, Codex, Gemini, and generic provider event
+names into SPipe phases such as `pre_tool`, `post_tool`, `pre_prompt`,
+`post_turn`, `post_edit`, and `pre_commit`.
+
+The codebase tools ingest existing RepoMix/codebase-mcp output, index it in the
+session-local tree store, and expose the focused Simple MCP include/ignore
+profile. They do not run `npx repomix`; process execution must stay argv-safe
+when added.
+
+The SQL context tools persist the rendered parent-chain tree into the existing
+Simple context SQLite table. Use `spipe_context_sql_put` with `db_path` to save
+parsed output, `spipe_context_sql_get` to retrieve one source, and
+`spipe_context_sql_search` to search stored parsed context by query and optional
+source filter.
+
+## Current Boundary
+
+This patch adds the common parser/store API, executable wrapper, minimal MCP
+stdio server, deterministic Ponytail minimality tools, and hook normalization.
+It also ingests existing RepoMix/codebase-mcp output and can persist parsed
+context through the existing SQLite context database. Argv-safe RepoMix
+execution should reuse this API instead of adding new parser models.

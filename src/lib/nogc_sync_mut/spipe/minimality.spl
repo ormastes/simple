@@ -1,0 +1,101 @@
+# SPipe Ponytail minimality gate.
+#
+# Rule-based on purpose: MCP tools need deterministic, cheap findings. Full LLM
+# review can consume this output, not hide behind it.
+
+fn spipe_minimality_check(task: text, context: text, mode: text) -> text:
+    val t = (task + "\n" + context).to_lower()
+    val actual_mode = if mode == "" then "full" else mode
+    var decision = "custom"
+    var reason = "minimum custom code may be needed"
+    var replace: [text] = []
+    var guards: [text] = []
+
+    if _has_any(t, ["maybe later", "future-proof", "for later", "just in case", "extensible"]):
+        decision = "yagni"
+        reason = "speculative flexibility found"
+        replace.push("- speculative hooks/configuration")
+        replace.push("+ concrete behavior required now")
+    elif _has_any(t, ["date picker", "datepicker", "calendar picker"]):
+        decision = "native"
+        reason = "browser has native date input"
+        replace.push("- custom DatePicker component")
+        replace.push("+ <input type=\"date\">")
+        guards.push("keep validation")
+        guards.push("keep accessible label")
+    elif _has_any(t, ["cache class", "custom cache", "ttl cache"]):
+        decision = "stdlib"
+        reason = "standard cache helper should be checked before custom cache"
+        replace.push("- custom cache class")
+        replace.push("+ stdlib/cache helper if available")
+    elif _has_any(t, ["new dependency", "add dependency", "npm install", "pip install"]):
+        decision = "dependency"
+        reason = "dependency requested; check existing codebase, stdlib, and platform first"
+        replace.push("- new dependency")
+        replace.push("+ existing helper or small local function")
+    elif _has_any(t, ["factory", "provider", "adapter", "interface"]):
+        decision = "shrink"
+        reason = "abstraction words found; keep only if there are multiple real implementations"
+        replace.push("- one-implementation abstraction")
+        replace.push("+ direct function or struct")
+    else:
+        guards.push("keep validation at trust boundaries")
+        guards.push("keep data-loss error handling")
+        guards.push("keep security checks")
+
+    _render_minimality("check", actual_mode, task, decision, reason, replace, guards)
+
+fn spipe_minimality_review(diff_or_text: text, mode: text) -> text:
+    val actual_mode = if mode == "" then "full" else mode
+    var findings: [text] = []
+    val lines = diff_or_text.split("\n")
+    var line_no = 0
+    for line in lines:
+        line_no = line_no + 1
+        val l = line.to_lower()
+        if _has_any(l, ["future-proof", "just in case", "for later"]):
+            findings.push("yagni:L{line_no}: cut speculative flexibility")
+        elif _has_any(l, ["factory", "provider", "adapter", "interface"]):
+            findings.push("shrink:L{line_no}: avoid one-implementation abstraction")
+        elif _has_any(l, ["new dependency", "npm install", "pip install"]):
+            findings.push("dependency:L{line_no}: check existing helper/stdlib first")
+        elif _has_any(l, ["cache class", "custom cache"]):
+            findings.push("stdlib:L{line_no}: prefer stdlib/cache helper when enough")
+        elif _has_any(l, ["datepicker", "date picker"]):
+            findings.push("native:L{line_no}: prefer <input type=\"date\"> for browser UI")
+    if findings.len() == 0:
+        findings.push("ok: no obvious ponytail findings")
+    "@minimality v=1 kind=review mode=\"{actual_mode}\"\n" + findings.join("\n")
+
+fn spipe_minimality_debt(text_body: text) -> text:
+    var findings: [text] = []
+    val lines = text_body.split("\n")
+    var line_no = 0
+    for line in lines:
+        line_no = line_no + 1
+        if line.to_lower().contains("ponytail:"):
+            findings.push("debt:L{line_no}: " + line.trim())
+    if findings.len() == 0:
+        return "@minimality v=1 kind=debt count=0\nok: no ponytail debt markers"
+    "@minimality v=1 kind=debt count={findings.len()}\n" + findings.join("\n")
+
+fn _render_minimality(kind: text, mode: text, task: text, decision: text, reason: text, replace: [text], guards: [text]) -> text:
+    var parts: [text] = []
+    parts.push("@minimality v=1 kind={kind} mode=\"{mode}\" task=\"{task}\"")
+    parts.push("@decision rung={decision}")
+    parts.push("@reason " + reason)
+    if replace.len() > 0:
+        parts.push("@replace")
+        for item in replace:
+            parts.push(item)
+    if guards.len() > 0:
+        parts.push("@guards keep")
+        for item in guards:
+            parts.push("- " + item)
+    parts.join("\n")
+
+fn _has_any(s: text, needles: [text]) -> bool:
+    for needle in needles:
+        if s.contains(needle):
+            return true
+    false

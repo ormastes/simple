@@ -271,6 +271,53 @@ fn context_sql_index_packs(paths: [text], target: text, db_path: text, format: t
         return "# Simple Context SQL Index\n\n- status: ready\n- backend: sqlite\n- pack_count: " + str(pack_count) + "\n\n```text\n" + rendered + "\n```"
     "Simple context SQL index\nstatus: ready\nbackend: sqlite\npack_count: " + str(pack_count) + "\n\n" + rendered
 
+fn context_sql_put_pack(source: text, target: text, content: text, db_path: text, format: text) -> text:
+    val trimmed_source = source.trim()
+    if trimmed_source == "":
+        if format == "json":
+            return "{\"status\":\"missing_source\",\"backend\":\"sqlite\",\"source\":\"\",\"content\":\"\"}"
+        return "Simple context SQL put\nstatus: missing_source\nbackend: sqlite\nsource: \ncontent: none"
+
+    val db = _context_sql_open(db_path)
+    if not db.is_valid:
+        if format == "json":
+            return "{\"status\":\"unavailable\",\"backend\":\"sqlite\",\"source\":\"" + _context_json_escape(trimmed_source) + "\",\"content\":\"\"}"
+        return "Simple context SQL put\nstatus: unavailable\nbackend: sqlite\nsource: " + trimmed_source + "\ncontent: none"
+
+    val normalized_target = _context_normalize_target(trimmed_source, target)
+    sqlite_execute(db, _context_sql_schema())
+    sqlite_execute(db, "DELETE FROM context_packs WHERE source = " + _context_sql_literal(trimmed_source))
+    sqlite_insert(
+        db,
+        "context_packs",
+        ["source", "target", "status", "lines", "token_estimate", "content"],
+        [trimmed_source, normalized_target, "ready", str(_context_line_count(content)), str(_context_token_estimate(content)), content],
+    )
+    sqlite_close(db)
+
+    if format == "json":
+        return "{\"status\":\"ready\",\"backend\":\"sqlite\",\"source\":\"" + _context_json_escape(trimmed_source) + "\",\"target\":\"" + _context_json_escape(normalized_target) + "\"}"
+    "Simple context SQL put\nstatus: ready\nbackend: sqlite\nsource: " + trimmed_source + "\ntarget: " + normalized_target
+
+fn context_sql_get_pack(source: text, db_path: text, format: text) -> text:
+    val trimmed_source = source.trim()
+    if trimmed_source == "":
+        if format == "json":
+            return "{\"status\":\"missing_source\",\"backend\":\"sqlite\",\"source\":\"\",\"matches\":0,\"content\":\"\"}"
+        return "Simple context SQL get\nstatus: missing_source\nbackend: sqlite\nsource: \nmatches: 0\ncontent: none"
+
+    val db = _context_sql_open(db_path)
+    if not db.is_valid:
+        if format == "json":
+            return "{\"status\":\"unavailable\",\"backend\":\"sqlite\",\"source\":\"" + _context_json_escape(trimmed_source) + "\",\"matches\":0,\"content\":\"\"}"
+        return "Simple context SQL get\nstatus: unavailable\nbackend: sqlite\nsource: " + trimmed_source + "\nmatches: 0\ncontent: none"
+
+    sqlite_execute(db, _context_sql_schema())
+    val rows = sqlite_query_all(db, "SELECT source, target, status, lines, token_estimate, content FROM context_packs WHERE source = " + _context_sql_literal(trimmed_source) + " ORDER BY id")
+    val rendered = _context_sql_render_rows_filtered(rows, "", trimmed_source, format)
+    sqlite_close(db)
+    rendered
+
 fn context_sql_query_packs_by_source(paths: [text], target: text, query: text, source_filter: text, db_path: text, format: text) -> text:
     val trimmed_query = query.trim()
     if trimmed_query == "":

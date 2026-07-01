@@ -1,0 +1,38 @@
+use std.nogc_sync_mut.spipe.tree_context.{spipe_parse_text, spipe_render_tree, spipe_raw_range, spipe_match_parser, spipe_context_store_new, spipe_context_put, spipe_context_get, spipe_context_search, spipe_context_raw, spipe_source_blob}
+
+fn test_level_grouping_and_raw_pointers():
+    val raw = "[ERROR] src/app/mcp/main.spl:441: undefined symbol\nplain line"
+    val doc = spipe_parse_text("command_output", "simple build", raw)
+    val rendered = spipe_render_tree(doc)
+    assert(rendered.contains("@group level=ERROR count=1"))
+    assert(rendered.contains("@group level=NONE count=1"))
+    assert(rendered.contains("@parent d=1 kind=dir path=\"src\""))
+    assert(rendered.contains("raw=raw:src:1#L1-L1"))
+
+fn test_no_level_skips_grouping():
+    val doc = spipe_parse_text("command_output", "find .", "./src/app\n./src/lib")
+    val rendered = spipe_render_tree(doc)
+    assert(rendered.contains("level_detected=false"))
+    assert(not rendered.contains("@group level="))
+
+fn test_raw_context_exact_lines():
+    val raw = "a\nb\nc\nd"
+    val out = spipe_raw_range(raw, "exec:9", 2, 2, 1, 1)
+    assert(out.contains("@raw id=exec:9 range=L1-L3 mode=exact"))
+    assert(out.contains("| a"))
+    assert(out.contains("| c"))
+
+fn test_parser_matcher_common_ubuntu_tools():
+    assert(spipe_match_parser("command_output", "rg TODO src", "src/a:1:TODO").to_string() == "rg")
+    assert(spipe_match_parser("command_output", "git diff", "diff --git a/a b/a").to_string() == "git_diff")
+
+fn test_context_store_get_search_and_raw():
+    var store = spipe_context_store_new()
+    store = spipe_context_put(store, spipe_source_blob("exec:7", "command_output", "simple build", "[ERROR] src/main.spl:1: no\nok"))
+    val got = spipe_context_get(store, "exec:7")
+    assert(got.contains("@source id=exec:7"))
+    assert(got.contains("@parent d=1 kind=dir path=\"src\""))
+    val found = spipe_context_search(store, "no")
+    assert(found.contains("@group level=ERROR count=1"))
+    val raw = spipe_context_raw(store, "exec:7", 1, 1, 0, 1)
+    assert(raw.contains("@raw id=exec:7 range=L1-L2 mode=exact"))

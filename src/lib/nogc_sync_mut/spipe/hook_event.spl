@@ -1,0 +1,108 @@
+# SPipe hook event normalization.
+
+struct HookEvent:
+    id: text
+    client: text
+    phase: text
+    event: text
+    tool_name: text
+    cwd: text
+    repo: text
+    files: [text]
+    diff: text
+    prompt_excerpt: text
+    raw_payload: text
+
+fn spipe_hook_normalize(provider: text, event: text, raw_payload: text, tool_name: text, cwd: text, repo: text, files_csv: text, diff: text, prompt_excerpt: text) -> HookEvent:
+    val client = spipe_hook_normalize_provider(provider)
+    HookEvent(
+        id: _hook_id(client, event, tool_name),
+        client: client,
+        phase: spipe_hook_phase(client, event),
+        event: event,
+        tool_name: tool_name,
+        cwd: cwd,
+        repo: repo,
+        files: _csv(files_csv),
+        diff: diff,
+        prompt_excerpt: prompt_excerpt,
+        raw_payload: raw_payload
+    )
+
+fn spipe_hook_normalize_provider(provider: text) -> text:
+    val p = provider.to_lower().trim()
+    if p.contains("claude"):
+        return "claude"
+    if p.contains("codex") or p.contains("openai") or p.contains("gpt"):
+        return "codex"
+    if p.contains("gemini") or p.contains("google"):
+        return "gemini"
+    if p == "":
+        return "generic"
+    p
+
+fn spipe_hook_phase(client: text, event: text) -> text:
+    val e = event.to_lower()
+    if e == "pretooluse" or e == "tool_start" or e == "pre_tool":
+        return "pre_tool"
+    if e == "posttooluse" or e == "tool_finish" or e == "post_tool":
+        return "post_tool"
+    if e == "posttoolusefailure" or e == "tool_error" or e == "tool_failure":
+        return "post_tool"
+    if e == "userpromptsubmit" or e == "prompt_submit":
+        return "pre_prompt"
+    if e == "sessionstart" or e == "session_start":
+        return "session_start"
+    if e == "sessionend" or e == "session_end" or e == "stop":
+        return "session_end"
+    if e == "turn_finish":
+        return "post_turn"
+    if e == "precommit" or e == "pre_commit":
+        return "pre_commit"
+    if e == "postedit" or e == "post_edit":
+        return "post_edit"
+    "generic"
+
+fn spipe_hook_render(event: HookEvent) -> text:
+    var parts: [text] = []
+    parts.push("@hook v=1 id=\"{event.id}\" client={event.client} phase={event.phase} event=\"{event.event}\"")
+    if event.tool_name != "":
+        parts.push("@tool name=\"{event.tool_name}\"")
+    if event.cwd != "" or event.repo != "":
+        parts.push("@workspace cwd=\"{event.cwd}\" repo=\"{event.repo}\"")
+    if event.files.len() > 0:
+        parts.push("@files " + event.files.join(" "))
+    if event.prompt_excerpt != "":
+        parts.push("@prompt " + event.prompt_excerpt)
+    if event.diff != "":
+        parts.push("@diff lines=" + event.diff.split("\n").len().to_string())
+    if event.raw_payload != "":
+        parts.push("@raw_payload present=true")
+    parts.join("\n")
+
+fn spipe_hook_event(provider: text, event: text, raw_payload: text, tool_name: text, cwd: text, repo: text, files_csv: text, diff: text, prompt_excerpt: text) -> text:
+    spipe_hook_render(spipe_hook_normalize(provider, event, raw_payload, tool_name, cwd, repo, files_csv, diff, prompt_excerpt))
+
+fn spipe_hook_rules(provider: text) -> text:
+    val p = spipe_hook_normalize_provider(provider)
+    if p == "claude":
+        return "PreToolUse=pre_tool\nPostToolUse=post_tool\nPostToolUseFailure=post_tool\nUserPromptSubmit=pre_prompt\nSessionStart=session_start\nSessionEnd=session_end\nStop=session_end"
+    if p == "codex":
+        return "session_start=session_start\ntool_start=pre_tool\ntool_finish=post_tool\nturn_finish=post_turn\nsession_end=session_end"
+    if p == "gemini":
+        return "session_start=session_start\ntool_start=pre_tool\ntool_finish=post_tool\nprompt_submit=pre_prompt\nsession_end=session_end"
+    "pre_tool=pre_tool\npost_tool=post_tool\npre_prompt=pre_prompt\npost_edit=post_edit\npre_commit=pre_commit"
+
+fn _hook_id(client: text, event: text, tool_name: text) -> text:
+    var key = client + ":" + event
+    if tool_name != "":
+        key = key + ":" + tool_name
+    key.replace(" ", "_")
+
+fn _csv(value: text) -> [text]:
+    var out: [text] = []
+    for item in value.split(","):
+        val clean = item.trim()
+        if clean != "":
+            out.push(clean)
+    out

@@ -1,0 +1,389 @@
+# SPipe MCP entrypoint.
+
+use std.cli.cli_util.{get_cli_args}
+use app.io.context_ops.{context_sql_get_pack, context_sql_put_pack, context_sql_query_packs_by_source}
+use std.io.{file_read, file_exists}
+use std.nogc_sync_mut.spipe.codebase_ingest.{spipe_codebase_get, spipe_codebase_ingest, spipe_codebase_profile, spipe_codebase_save_text, spipe_codebase_search, spipe_codebase_validate_patterns}
+use std.nogc_sync_mut.spipe.hook_event.{spipe_hook_event, spipe_hook_rules}
+use std.nogc_sync_mut.spipe.minimality.{spipe_minimality_check, spipe_minimality_debt, spipe_minimality_review}
+use std.nogc_sync_mut.spipe.tree_context.{ContextStore, spipe_context_get, spipe_context_put, spipe_context_raw, spipe_context_search, spipe_context_store_new, spipe_parse_source, spipe_parse_text, spipe_render_tree, spipe_match_parser, spipe_parser_names, spipe_raw_range, spipe_source_blob}
+use std.mcp_sdk.core.json.{LB, RB, jp, js, jo1, jo2, jo3, escape_json, extract_json_value}
+use std.mcp_sdk.server.app.{app_extract_id, app_extract_obj, app_extract_str}
+use std.mcp_sdk.server.method_detect.{has_method}
+
+extern fn stdin_read_char() -> text
+extern fn print_raw(s: text)
+
+var _SPIPE_TRANSPORT_MODE = "framed"
+var _SPIPE_STORE = spipe_context_store_new()
+
+fn print_help():
+    print "Usage: spipe_mcp <command> [options]"
+    print ""
+    print "Commands:"
+    print "  serve                   Run MCP stdio server (default with no args)"
+    print "  parsers                 List parser names"
+    print "  match --command=CMD -f FILE"
+    print "  parse --command=CMD -f FILE"
+    print "  raw -f FILE --start=N --end=N [--before=N] [--after=N]"
+    print "  minimality-check --task=TEXT [-f FILE]"
+    print "  hook-event --provider=codex --event=tool_start [--tool=NAME]"
+    print "  codebase-profile"
+
+fn _value(args: [text], name: text, default_value: text) -> text:
+    val prefix = name + "="
+    var i = 0
+    while i < args.len():
+        if args[i].starts_with(prefix):
+            return args[i][prefix.len():]
+        if args[i] == name and i + 1 < args.len():
+            return args[i + 1]
+        i = i + 1
+    default_value
+
+fn _read_file_arg(args: [text]) -> text:
+    val path = _value(args, "-f", "")
+    if path == "" or not file_exists(path):
+        return ""
+    file_read(path)
+
+fn _to_i64(value: text, default_value: i64) -> i64:
+    if value == "":
+        return default_value
+    for ch in value:
+        if ch < "0" or ch > "9":
+            return default_value
+    int(value)
+
+fn _json_unescape(value: text) -> text:
+    var out = value
+    out = out.replace("\\n", "\n")
+    out = out.replace("\\r", "\r")
+    out = out.replace("\\t", "\t")
+    out = out.replace("\\\"", "\"")
+    out = out.replace("\\\\", "\\")
+    out
+
+fn _arg_str(args_raw: text, key: text, default_value: text) -> text:
+    val value = app_extract_str(args_raw, key)
+    if value == "":
+        return default_value
+    _json_unescape(value)
+
+fn _arg_i64(args_raw: text, key: text, default_value: i64) -> i64:
+    val raw = _arg_str(args_raw, key, "")
+    if raw != "":
+        return _to_i64(raw, default_value)
+    val value = extract_json_value(args_raw, key)
+    if value == "null" or value == "":
+        return default_value
+    _to_i64(value, default_value)
+
+fn _json_result(id: text, result: text) -> text:
+    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
+
+fn _json_error(id: text, code: i64, message: text) -> text:
+    val err = jo2(jp("code", str(code)), jp("message", js(message)))
+    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("error", err))
+
+fn _tool_text_result(id: text, content: text) -> text:
+    val text_obj = jo2(jp("type", js("text")), jp("text", js(escape_json(content))))
+    _json_result(id, jo1(jp("content", "[" + text_obj + "]")))
+
+fn _tool_schema(props: text, required: text) -> text:
+    "{\"type\":\"object\",\"properties\":" + props + ",\"required\":" + required + "}"
+
+fn _tool_def(name: text, desc: text, props: text, required: text) -> text:
+    var obj = LB()
+    obj = obj + jp("name", js(name))
+    obj = obj + "," + jp("description", js(desc))
+    obj = obj + "," + jp("inputSchema", _tool_schema(props, required))
+    obj = obj + RB()
+    obj
+
+fn _spipe_tools_list_payload() -> text:
+    val text_prop = "{\"type\":\"string\"}"
+    val int_prop = "{\"type\":\"integer\"}"
+    val common_props = "{\"source_kind\":" + text_prop + ",\"command\":" + text_prop + ",\"text\":" + text_prop + "}"
+    val raw_props = "{\"source_id\":" + text_prop + ",\"text\":" + text_prop + ",\"start_line\":" + int_prop + ",\"end_line\":" + int_prop + ",\"before\":" + int_prop + ",\"after\":" + int_prop + "}"
+    val sql_context_props = "{\"source_id\":" + text_prop + ",\"source_kind\":" + text_prop + ",\"command\":" + text_prop + ",\"text\":" + text_prop + ",\"db_path\":" + text_prop + "}"
+    val minimality_props = "{\"task\":" + text_prop + ",\"text\":" + text_prop + ",\"mode\":" + text_prop + "}"
+    val hook_props = "{\"provider\":" + text_prop + ",\"event\":" + text_prop + ",\"raw_payload\":" + text_prop + ",\"tool_name\":" + text_prop + ",\"cwd\":" + text_prop + ",\"repo\":" + text_prop + ",\"files\":" + text_prop + ",\"diff\":" + text_prop + ",\"prompt_excerpt\":" + text_prop + "}"
+    val codebase_ingest_props = "{\"source_id\":" + text_prop + ",\"text\":" + text_prop + ",\"include_patterns\":" + text_prop + ",\"ignore_patterns\":" + text_prop + "}"
+    var tools: [text] = []
+    tools.push(_tool_def("spipe_tree_parser_list", "List SPipe parser names.", "{}", "[]"))
+    tools.push(_tool_def("spipe_tree_match_parser", "Return the best parser for source kind, command, and text.", common_props, "[\"text\"]"))
+    tools.push(_tool_def("spipe_tree_parse", "Parse text into compact parent-chain tree output.", common_props, "[\"text\"]"))
+    tools.push(_tool_def("spipe_context_put", "Store raw text and parsed tree in this MCP session.", "{\"source_id\":" + text_prop + ",\"source_kind\":" + text_prop + ",\"command\":" + text_prop + ",\"text\":" + text_prop + "}", "[\"source_id\",\"text\"]"))
+    tools.push(_tool_def("spipe_context_get", "Render a stored tree by source id.", "{\"source_id\":" + text_prop + "}", "[\"source_id\"]"))
+    tools.push(_tool_def("spipe_context_search", "Search stored raw text and return matching rendered trees.", "{\"query\":" + text_prop + "}", "[\"query\"]"))
+    tools.push(_tool_def("spipe_context_raw", "Return exact raw lines with optional before/after context.", raw_props, "[\"source_id\",\"start_line\",\"end_line\"]"))
+    tools.push(_tool_def("spipe_context_sql_put", "Persist parsed parent-chain context in a SQLite context database.", sql_context_props, "[\"source_id\",\"text\",\"db_path\"]"))
+    tools.push(_tool_def("spipe_context_sql_get", "Read persisted parsed context by source id from a SQLite context database.", "{\"source_id\":" + text_prop + ",\"db_path\":" + text_prop + "}", "[\"source_id\",\"db_path\"]"))
+    tools.push(_tool_def("spipe_context_sql_search", "Search persisted parsed context in a SQLite context database.", "{\"query\":" + text_prop + ",\"source_filter\":" + text_prop + ",\"db_path\":" + text_prop + "}", "[\"query\",\"db_path\"]"))
+    tools.push(_tool_def("spipe_minimality_check", "Run deterministic Ponytail minimality gate.", minimality_props, "[\"task\"]"))
+    tools.push(_tool_def("spipe_minimality_review", "Review text or diff for obvious Ponytail findings.", minimality_props, "[\"text\"]"))
+    tools.push(_tool_def("spipe_minimality_debt", "List ponytail: debt markers from text.", "{\"text\":" + text_prop + "}", "[\"text\"]"))
+    tools.push(_tool_def("spipe_hook_event", "Normalize a provider hook event into the SPipe hook model.", hook_props, "[\"provider\",\"event\"]"))
+    tools.push(_tool_def("spipe_hook_rules", "List provider hook event-to-phase mappings.", "{\"provider\":" + text_prop + "}", "[\"provider\"]"))
+    tools.push(_tool_def("spipe_hook_render", "Render a normalized hook event. Alias of spipe_hook_event.", hook_props, "[\"provider\",\"event\"]"))
+    tools.push(_tool_def("spipe_codebase_profile", "Return focused Simple MCP RepoMix include/ignore profile.", "{}", "[]"))
+    tools.push(_tool_def("spipe_codebase_ingest", "Ingest existing RepoMix/codebase-mcp output into the SPipe context tree.", codebase_ingest_props, "[\"source_id\",\"text\"]"))
+    tools.push(_tool_def("spipe_codebase_search", "Search ingested codebase trees.", "{\"query\":" + text_prop + "}", "[\"query\"]"))
+    tools.push(_tool_def("spipe_codebase_get", "Render an ingested codebase tree by source id.", "{\"source_id\":" + text_prop + "}", "[\"source_id\"]"))
+    tools.push(_tool_def("spipe_codebase_save", "Return save metadata for existing packed text; filesystem writes stay app-owned.", "{\"source_id\":" + text_prop + ",\"text\":" + text_prop + "}", "[\"source_id\",\"text\"]"))
+    jo1(jp("tools", "[" + tools.join(",") + "]"))
+
+fn _spipe_initialize_payload() -> text:
+    val caps = jo1(jp("tools", LB() + RB()))
+    val info = jo2(jp("name", js("spipe-mcp")), jp("version", js("0.1.0")))
+    jo3(jp("protocolVersion", js("2025-06-18")), jp("capabilities", caps), jp("serverInfo", info))
+
+fn _dispatch_tool(id: text, tool_name: text, args_raw: text) -> text:
+    if tool_name == "spipe_tree_parser_list":
+        return _tool_text_result(id, spipe_parser_names().join("\n"))
+    if tool_name == "spipe_tree_match_parser":
+        val kind = _arg_str(args_raw, "source_kind", "command_output")
+        val command = _arg_str(args_raw, "command", "")
+        val raw = _arg_str(args_raw, "text", _arg_str(args_raw, "raw_text", ""))
+        return _tool_text_result(id, spipe_match_parser(kind, command, raw))
+    if tool_name == "spipe_tree_parse":
+        val kind = _arg_str(args_raw, "source_kind", "command_output")
+        val command = _arg_str(args_raw, "command", "")
+        val raw = _arg_str(args_raw, "text", _arg_str(args_raw, "raw_text", ""))
+        return _tool_text_result(id, spipe_render_tree(spipe_parse_text(kind, command, raw)))
+    if tool_name == "spipe_context_put":
+        val source_id = _arg_str(args_raw, "source_id", "src:1")
+        val kind = _arg_str(args_raw, "source_kind", "command_output")
+        val command = _arg_str(args_raw, "command", "")
+        val raw = _arg_str(args_raw, "text", _arg_str(args_raw, "raw_text", ""))
+        _SPIPE_STORE = spipe_context_put(_SPIPE_STORE, spipe_source_blob(source_id, kind, command, raw))
+        return _tool_text_result(id, "stored " + source_id)
+    if tool_name == "spipe_context_get":
+        val source_id = _arg_str(args_raw, "source_id", "")
+        return _tool_text_result(id, spipe_context_get(_SPIPE_STORE, source_id))
+    if tool_name == "spipe_context_search":
+        val query = _arg_str(args_raw, "query", "")
+        return _tool_text_result(id, spipe_context_search(_SPIPE_STORE, query))
+    if tool_name == "spipe_context_raw":
+        val source_id = _arg_str(args_raw, "source_id", "")
+        val raw = _arg_str(args_raw, "text", _arg_str(args_raw, "raw_text", ""))
+        val start_line = _arg_i64(args_raw, "start_line", _arg_i64(args_raw, "startLine", 1))
+        val end_line = _arg_i64(args_raw, "end_line", _arg_i64(args_raw, "endLine", start_line))
+        val before = _arg_i64(args_raw, "before", _arg_i64(args_raw, "contextBefore", 0))
+        val after = _arg_i64(args_raw, "after", _arg_i64(args_raw, "contextAfter", 0))
+        if raw != "":
+            return _tool_text_result(id, spipe_raw_range(raw, source_id, start_line, end_line, before, after))
+        return _tool_text_result(id, spipe_context_raw(_SPIPE_STORE, source_id, start_line, end_line, before, after))
+    if tool_name == "spipe_context_sql_put":
+        val source_id = _arg_str(args_raw, "source_id", "")
+        val kind = _arg_str(args_raw, "source_kind", "command_output")
+        val command = _arg_str(args_raw, "command", "")
+        val raw = _arg_str(args_raw, "text", _arg_str(args_raw, "raw_text", ""))
+        val db_path = _arg_str(args_raw, "db_path", "")
+        val rendered = spipe_render_tree(spipe_parse_source(spipe_source_blob(source_id, kind, command, raw)))
+        return _tool_text_result(id, context_sql_put_pack(source_id, "spipe-tree", rendered, db_path, "text"))
+    if tool_name == "spipe_context_sql_get":
+        return _tool_text_result(id, context_sql_get_pack(_arg_str(args_raw, "source_id", ""), _arg_str(args_raw, "db_path", ""), "text"))
+    if tool_name == "spipe_context_sql_search":
+        return _tool_text_result(id, context_sql_query_packs_by_source([], "", _arg_str(args_raw, "query", ""), _arg_str(args_raw, "source_filter", ""), _arg_str(args_raw, "db_path", ""), "text"))
+    if tool_name == "spipe_minimality_check":
+        val task = _arg_str(args_raw, "task", "")
+        val raw = _arg_str(args_raw, "text", "")
+        val mode = _arg_str(args_raw, "mode", "full")
+        return _tool_text_result(id, spipe_minimality_check(task, raw, mode))
+    if tool_name == "spipe_minimality_review":
+        val raw = _arg_str(args_raw, "text", _arg_str(args_raw, "diff", ""))
+        val mode = _arg_str(args_raw, "mode", "full")
+        return _tool_text_result(id, spipe_minimality_review(raw, mode))
+    if tool_name == "spipe_minimality_debt":
+        val raw = _arg_str(args_raw, "text", "")
+        return _tool_text_result(id, spipe_minimality_debt(raw))
+    if tool_name == "spipe_hook_rules":
+        return _tool_text_result(id, spipe_hook_rules(_arg_str(args_raw, "provider", "generic")))
+    if tool_name == "spipe_hook_event" or tool_name == "spipe_hook_render":
+        val provider = _arg_str(args_raw, "provider", "generic")
+        val event = _arg_str(args_raw, "event", "")
+        val raw_payload = _arg_str(args_raw, "raw_payload", _arg_str(args_raw, "raw", ""))
+        val hook_tool_name = _arg_str(args_raw, "tool_name", _arg_str(args_raw, "tool", ""))
+        val cwd = _arg_str(args_raw, "cwd", "")
+        val repo = _arg_str(args_raw, "repo", "")
+        val files = _arg_str(args_raw, "files", "")
+        val diff = _arg_str(args_raw, "diff", "")
+        val prompt_excerpt = _arg_str(args_raw, "prompt_excerpt", _arg_str(args_raw, "prompt", ""))
+        return _tool_text_result(id, spipe_hook_event(provider, event, raw_payload, hook_tool_name, cwd, repo, files, diff, prompt_excerpt))
+    if tool_name == "spipe_codebase_profile":
+        return _tool_text_result(id, spipe_codebase_profile())
+    if tool_name == "spipe_codebase_ingest":
+        val source_id = _arg_str(args_raw, "source_id", "codebase:1")
+        val packed = _arg_str(args_raw, "text", _arg_str(args_raw, "packed_text", ""))
+        val include_status = spipe_codebase_validate_patterns(_arg_str(args_raw, "include_patterns", ""))
+        val ignore_status = spipe_codebase_validate_patterns(_arg_str(args_raw, "ignore_patterns", ""))
+        if include_status != "ok":
+            return _tool_text_result(id, include_status)
+        if ignore_status != "ok":
+            return _tool_text_result(id, ignore_status)
+        _SPIPE_STORE = spipe_codebase_ingest(_SPIPE_STORE, source_id, packed)
+        return _tool_text_result(id, "ingested " + source_id)
+    if tool_name == "spipe_codebase_search":
+        return _tool_text_result(id, spipe_codebase_search(_SPIPE_STORE, _arg_str(args_raw, "query", "")))
+    if tool_name == "spipe_codebase_get":
+        return _tool_text_result(id, spipe_codebase_get(_SPIPE_STORE, _arg_str(args_raw, "source_id", "")))
+    if tool_name == "spipe_codebase_save":
+        return _tool_text_result(id, spipe_codebase_save_text(_arg_str(args_raw, "source_id", "codebase:1"), _arg_str(args_raw, "text", "")))
+    _tool_text_result(id, "unknown tool: " + tool_name)
+
+fn _read_line() -> text:
+    var result = ""
+    while true:
+        val ch = stdin_read_char()
+        if ch == "":
+            return result
+        result = result + ch
+        if ch == "\n":
+            return result
+
+fn _read_chars(count: i64) -> text:
+    var result = ""
+    var i = 0
+    while i < count:
+        val ch = stdin_read_char()
+        if ch == "":
+            break
+        result = result + ch
+        i = i + 1
+    result
+
+fn _strip_line_end(line: text) -> text:
+    val n = line.len()
+    if n >= 2 and line.substring(n - 2, n) == "\r\n":
+        return line.substring(0, n - 2)
+    if n >= 1 and line.substring(n - 1, n) == "\n":
+        return line.substring(0, n - 1)
+    if n >= 1 and line.substring(n - 1, n) == "\r":
+        return line.substring(0, n - 1)
+    line
+
+fn _parse_decimal(s: text) -> i64:
+    var result: i64 = 0
+    for ch in s:
+        if ch < "0" or ch > "9":
+            return result
+        result = result * 10 + int(ch)
+    result
+
+fn _read_message() -> text:
+    var content_length = 0
+    while true:
+        var line = _read_line()
+        if line == "":
+            if content_length > 0:
+                break
+            return ""
+        if line == "\r\n" or line == "\r" or line == "\n":
+            if content_length > 0:
+                break
+            continue
+        line = _strip_line_end(line)
+        if line.starts_with(LB()):
+            _SPIPE_TRANSPORT_MODE = "jsonl"
+            return line
+        if line.starts_with("Content-Length:"):
+            content_length = _parse_decimal(line.replace("Content-Length:", "").trim())
+    if content_length <= 0:
+        return ""
+    _read_chars(content_length)
+
+fn _write_message(body: text):
+    if _SPIPE_TRANSPORT_MODE == "jsonl":
+        print_raw(body + "\n")
+        return
+    val nl = "\n"
+    print_raw("Content-Length: " + str(body.len()) + "\r" + nl + "\r" + nl)
+    print_raw(body)
+
+fn _serve() -> i64:
+    while true:
+        val msg = _read_message()
+        if msg == "":
+            return 0
+        val response = spipe_mcp_handle_message(msg)
+        if response != "":
+            _write_message(response)
+    0
+
+fn spipe_mcp_handle_message(msg: text) -> text:
+    if has_method(msg, "initialize"):
+        return _json_result(app_extract_id(msg), _spipe_initialize_payload())
+    if has_method(msg, "notifications/initialized") or has_method(msg, "initialized"):
+        return ""
+    if has_method(msg, "tools/list"):
+        return _json_result(app_extract_id(msg), _spipe_tools_list_payload())
+    if has_method(msg, "tools/call"):
+        val id = app_extract_id(msg)
+        val params = app_extract_obj(msg, "params")
+        val tool_name = app_extract_str(params, "name")
+        var args_raw = app_extract_obj(params, "arguments")
+        if args_raw == "":
+            args_raw = "{}"
+        return _dispatch_tool(id, tool_name, args_raw)
+    if has_method(msg, "shutdown"):
+        return _json_result(app_extract_id(msg), "null")
+    _json_error(app_extract_id(msg), -32601, "Method not found")
+
+fn main() -> i64:
+    val args = get_cli_args()
+    if args.len() == 0 or args[0] == "serve":
+        return _serve()
+    if args[0] == "-h" or args[0] == "--help":
+        print_help()
+        return 0
+    val cmd = args[0]
+    if cmd == "parsers":
+        for name in spipe_parser_names():
+            print name
+        return 0
+    val command = _value(args, "--command", "")
+    val raw = _read_file_arg(args)
+    if raw == "":
+        print "spipe_mcp: missing readable -f FILE"
+        return 1
+    if cmd == "match":
+        print spipe_match_parser("command_output", command, raw)
+        return 0
+    if cmd == "parse":
+        val doc = spipe_parse_text("command_output", command, raw)
+        print spipe_render_tree(doc)
+        return 0
+    if cmd == "raw":
+        val start_line = _to_i64(_value(args, "--start", "1"), 1)
+        val end_line = _to_i64(_value(args, "--end", start_line.to_string()), start_line)
+        val before = _to_i64(_value(args, "--before", "0"), 0)
+        val after = _to_i64(_value(args, "--after", "0"), 0)
+        print spipe_raw_range(raw, "file:1", start_line, end_line, before, after)
+        return 0
+    if cmd == "minimality-check":
+        val task = _value(args, "--task", "")
+        val mode = _value(args, "--mode", "full")
+        print spipe_minimality_check(task, raw, mode)
+        return 0
+    if cmd == "hook-event":
+        print spipe_hook_event(
+            _value(args, "--provider", "generic"),
+            _value(args, "--event", ""),
+            raw,
+            _value(args, "--tool", ""),
+            _value(args, "--cwd", ""),
+            _value(args, "--repo", ""),
+            _value(args, "--files", ""),
+            _value(args, "--diff", ""),
+            _value(args, "--prompt", "")
+        )
+        return 0
+    if cmd == "codebase-profile":
+        print spipe_codebase_profile()
+        return 0
+    print_help()
+    1
+
+export spipe_mcp_handle_message
