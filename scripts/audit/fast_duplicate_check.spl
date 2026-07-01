@@ -1,9 +1,10 @@
 # Fast exact line-window duplicate gate for Simple source trees.
+# Facades kept to the lightweight io submodules (not the app.io hub) so the
+# gate keeps its ~24ms cold start.
 
-extern fn rt_cli_get_args() -> [text]
-extern fn rt_file_read_text(path: text) -> text
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
-extern fn rt_exit(code: i32) -> void
+use std.nogc_sync_mut.io.file_ops.{file_read_text}
+use std.nogc_sync_mut.io.process_ops.{process_run}
+use std.nogc_sync_mut.sffi.cli.{cli_get_args, cli_exit}
 
 struct FastDupConfig:
     path: text
@@ -128,7 +129,7 @@ fn collect_files(config: FastDupConfig) -> [text]:
         return [config.path]
 
     val command = "find " + shell_quote(config.path) + " -name '*.spl' 2>/dev/null | sort"
-    val result = rt_process_run("/bin/sh", ["-c", command])
+    val result = process_run("/bin/sh", ["-c", command])
     var files: [text] = []
     if result.2 != 0:
         return files
@@ -175,7 +176,7 @@ fn add_block(buckets: [FastDupBucket], key: text, block: FastDupBlock) -> [FastD
 fn find_duplicate_buckets(files: [text], min_lines: i64) -> [FastDupBucket]:
     var buckets: [FastDupBucket] = []
     for path in files:
-        val source = rt_file_read_text(path) ?? ""
+        val source = file_read_text(path)
         val lines = source.split("\n")
         if lines.len() < min_lines:
             continue
@@ -273,7 +274,7 @@ fn print_json_report(buckets: [FastDupBucket], file_count: i64, min_lines: i64):
     print("  ]")
     print("}")
 
-val config = parse_args(normalize_args(rt_cli_get_args()))
+val config = parse_args(normalize_args(cli_get_args()))
 val files = collect_files(config)
 val buckets = find_duplicate_buckets(files, config.min_lines)
 if config.output_format == "json":
@@ -282,5 +283,5 @@ else:
     print_text_report(buckets, files.len(), config.min_lines)
 
 if duplicate_count(buckets) > config.max_allowed:
-    rt_exit(1)
-rt_exit(0)
+    cli_exit(1)
+cli_exit(0)

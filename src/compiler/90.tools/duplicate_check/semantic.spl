@@ -286,18 +286,6 @@ fn _tokenize_doc(text_val: text) -> {text: i64}:
         freq[lower] = existing + 1
     freq
 
-fn _extract_dir(file_path: text) -> text:
-    val bytes = file_path.bytes()
-    var last_slash = -1
-    var i = 0
-    while i < bytes.len():
-        if bytes[i] == 47:
-            last_slash = i
-        i = i + 1
-    if last_slash > 0:
-        return file_path[0:last_slash]
-    file_path
-
 fn run_semantic_analysis_local(target_path: text, config: DuplicationConfig) -> SemanticReport:
     val all_entries = extract_docs_from_directory(target_path, config.exclude_patterns)
     if all_entries.len() == 0:
@@ -319,43 +307,54 @@ fn run_semantic_analysis_local(target_path: text, config: DuplicationConfig) -> 
         val sig = feature_signature(fv, 5)
         sigs.push(sig)
 
-    var dir_to_indices: {text: text} = {}
+    # Bucket by shared signature token (inverted index), NOT by directory —
+    # semantic clones usually live in different directories. Comparing only
+    # inside token buckets keeps this near-linear instead of global O(n²).
+    var token_to_indices: {text: text} = {}
     var gi = 0
     while gi < documented.len():
-        val dir = _extract_dir(documented[gi].file_path)
-        if dir_to_indices.has(dir):
-            dir_to_indices[dir] = dir_to_indices[dir] + "," + "{gi}"
-        else:
-            dir_to_indices[dir] = "{gi}"
+        if fvecs[gi].magnitude != 0.0:
+            for tok in sigs[gi].split(","):
+                if tok.len() > 0:
+                    if token_to_indices.has(tok):
+                        token_to_indices[tok] = token_to_indices[tok] + "," + "{gi}"
+                    else:
+                        token_to_indices[tok] = "{gi}"
         gi = gi + 1
 
     var matches: [SemanticMatch] = []
     val threshold = config.semantic_threshold
+    # Dedup: a pair sharing multiple signature tokens lands in multiple buckets.
+    var seen_pairs: {text: bool} = {}
 
-    for dir in dir_to_indices.keys():
-        val idx_strs = dir_to_indices[dir].split(",")
+    for tok in token_to_indices.keys():
+        val idx_strs = token_to_indices[tok].split(",")
         var indices: [i64] = []
         for s in idx_strs:
             indices.push(int(s))
 
+        # ponytail: cap giant buckets (a common token like "value"); raise if it
+        # ever drops a real clone — a genuine pair shares 5 tokens, so it also
+        # lands in 4 other, smaller buckets.
+        if indices.len() > 400:
+            continue
+
         var pi = 0
         while pi < indices.len():
             val i = indices[pi]
-            if fvecs[i].magnitude == 0.0:
-                pi = pi + 1
-                continue
             var pj = pi + 1
             while pj < indices.len():
                 val j = indices[pj]
-                if fvecs[j].magnitude == 0.0:
-                    pj = pj + 1
-                    continue
                 if documented[i].file_path == documented[j].file_path:
                     pj = pj + 1
                     continue
-                if not signatures_share_token(sigs[i], sigs[j]):
+                val lo = if i < j: i else: j
+                val hi = if i < j: j else: i
+                val pair_key = "{lo}-{hi}"
+                if seen_pairs.has(pair_key):
                     pj = pj + 1
                     continue
+                seen_pairs[pair_key] = true
                 val sim = cosine_similarity(fvecs[i], fvecs[j])
                 if sim >= threshold:
                     matches.push(make_semantic_match(documented[i], documented[j], sim, ""))

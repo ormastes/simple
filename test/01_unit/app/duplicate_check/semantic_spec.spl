@@ -4,7 +4,7 @@ use compiler.tools.duplicate_check.doc_extractor.{DocEntry, extract_docs_from_fi
 use compiler.tools.duplicate_check.config.{default_config}
 use compiler.tools.duplicate_check.ollama_client.{EmbeddingResult, parse_embedding_response, parse_float_safe}
 use compiler.tools.duplicate_check.embedding_cache.{EmbeddingCacheManager, EmbeddingCacheEntry, load_embedding_cache, save_embedding_cache, get_cached, lookup_cached, set_cached, csv_to_floats, floats_to_csv}
-use compiler.tools.duplicate_check.semantic.{SemanticMatch, SemanticReport, cosine_similarity_dense, run_semantic_analysis, text_similarity}
+use compiler.tools.duplicate_check.semantic.{SemanticMatch, SemanticReport, cosine_similarity_dense, run_semantic_analysis, run_semantic_analysis_local, text_similarity}
 use compiler.tools.duplicate_check.semantic_formatter.{format_match_line, severity_label}
 
 extern fn rt_file_write_text(path: text, content: text) -> bool
@@ -252,6 +252,21 @@ describe "semantic - entrypoint extraction":
         expect(report.total_items > 0).to_equal(true)
         expect(report.items_with_docs > 0).to_equal(true)
         expect(report.used_fallback).to_equal(true)
+
+describe "semantic - local cross-directory":
+    it "detects a semantic clone whose two copies live in different directories":
+        # Regression: local semantic mode used to bucket candidates by directory,
+        # so a doc/signature clone split across two dirs was never compared.
+        var config = default_config()
+        config.exclude_patterns = []
+        config.semantic_threshold = 0.60
+
+        val report = run_semantic_analysis_local("test/fixtures/duplicate_check/crossdir", config)
+
+        expect(report.matches.len()).to_be_greater_than(0)
+        val m = report.matches[0]
+        val cross_dir = m.entry_a.file_path != m.entry_b.file_path
+        expect(cross_dir).to_equal(true)
 
 # ============================================================================
 # Formatter Tests
