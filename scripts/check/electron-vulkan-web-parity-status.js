@@ -6,7 +6,8 @@ const vulkanPath = process.argv[3] || "";
 const electronProofPath = process.argv[4] || "";
 const expectedWidth = Number(process.argv[5] || 0);
 const expectedHeight = Number(process.argv[6] || 0);
-const expectedArgb = Number(process.argv[7] || 0);
+const expectedArgbProvided = process.argv.length > 7 && process.argv[7] !== "";
+const expectedArgb = expectedArgbProvided ? Number(process.argv[7]) : 0;
 
 function emit(key, value) {
   console.log(`${key}=${value === undefined || value === null ? "" : value}`);
@@ -174,7 +175,7 @@ if (vulkanPixelCount !== vulkanPixels.length) {
   finish("fail", "vulkan-pixel-count-mismatch", 2, common);
 }
 
-if (expectedArgb > 0) {
+if (expectedArgbProvided) {
   for (let i = 0; i < electronPixels.length; i += 1) {
     if ((electronPixels[i] >>> 0) !== (expectedArgb >>> 0) || (vulkanPixels[i] >>> 0) !== (expectedArgb >>> 0)) {
       finish("fail", "frame-color-not-requested", 2, {

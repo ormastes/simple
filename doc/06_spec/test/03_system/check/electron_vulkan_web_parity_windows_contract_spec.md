@@ -27,7 +27,7 @@ electron_vulkan_web_parity_windows_contract_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 16 | 16 | 0 | 0 |
+| 17 | 17 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -227,7 +227,7 @@ The spec contains:
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 50 lines folded for reproduction.
+Runnable source: 51 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -274,6 +274,7 @@ expect(helper).to_contain("frame-shape-mismatch")
 expect(helper).to_contain("frame-size-not-requested")
 expect(helper).to_contain("pixel-buffer-shape-mismatch")
 expect(helper).to_contain("frame-color-not-requested")
+expect(helper).to_contain("expectedArgbProvided")
 expect(helper).to_contain("pixel-buffer-length-mismatch")
 expect(helper).to_contain("pixel-exact-vulkan")
 val producer = file_read("src/app/test/electron_vulkan_web_parity.spl")
@@ -417,6 +418,28 @@ val (stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(0)
 expect(stdout).to_contain("electron_vulkan_web_parity_windows_status=pass")
 expect(stdout).to_contain("electron_vulkan_web_parity_windows_compare_expected_argb=7")
+```
+
+</details>
+
+#### enforces requested black zero background color
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-electron-vulkan-web-parity-windows-compare-color-zero"
+val vulkan_json = "'{\"status\":\"pass\",\"reason\":\"pass\",\"producer\":\"simple-engine2d-vulkan\",\"requested_backend\":\"vulkan\",\"backend\":\"vulkan\",\"pixel_count\":4,\"width\":2,\"height\":2,\"pixels\":[1,1,1,1]}'"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && printf '%s\\n' '{\"width\":2,\"height\":2,\"pixels\":[1,1,1,1]}' > " + root + "/electron.json && printf '%s\\n' " + vulkan_json + " > " + root + "/vulkan.json && node scripts/check/electron-vulkan-web-parity-status.js " + root + "/electron.json " + root + "/vulkan.json '' 2 2 0"
+val (stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+
+expect(code).to_equal(2)
+expect(stdout).to_contain("electron_vulkan_web_parity_windows_status=fail")
+expect(stdout).to_contain("electron_vulkan_web_parity_windows_reason=frame-color-not-requested")
+expect(stdout).to_contain("electron_vulkan_web_parity_windows_compare_expected_argb=0")
 ```
 
 </details>
@@ -630,8 +653,8 @@ expect(stdout).to_contain("electron_vulkan_web_parity_windows_compare_color_elec
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 16 |
-| Active scenarios | 16 |
+| Total scenarios | 17 |
+| Active scenarios | 17 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
