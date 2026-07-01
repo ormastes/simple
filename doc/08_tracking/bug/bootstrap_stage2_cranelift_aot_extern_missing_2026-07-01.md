@@ -151,11 +151,23 @@ timeout 240 env -u SIMPLE_BOOTSTRAP RUST_LOG=error \
   -o /tmp/spipe_stage4_direct.bin
 ```
 
-Result: linked a 42 MB full CLI in 166.7 seconds. `--help` prints the full CLI
-help and includes `simple spipe-mcp [serve|parsers|...]`. Runtime smoke is still
-blocked: `-c 'print(1+1)'` and `spipe-mcp parsers` exit 248 with no output. The
-current deploy blocker is a Stage4 generated-binary runtime failure, not
-Stage2/Stage4 native-build duration.
+Initial result: linked a 42 MB full CLI in 166.7 seconds. `--help` printed the
+full CLI help and included `simple spipe-mcp [serve|parsers|...]`, but both
+`-c 'print(1+1)'` and `spipe-mcp parsers` exited 248 with no output because
+those paths used nested file/code runner hooks.
+
+The `spipe-mcp` CLI wrapper now calls `app.spipe_mcp.main.spipe_mcp_run(args)`
+directly instead of routing through `cli_run_file("src/app/spipe_mcp/main.spl",
+...)`. Rebuilding the Stage4 binary then proves:
+
+```sh
+/tmp/spipe_stage4_direct.bin spipe-mcp parsers
+```
+
+returns parser names with exit 0. The current deploy blocker is now the broader
+Stage4 generated-binary `-c 'print(1+1)'` smoke, which still exits 248 with no
+output; the bootstrap script correctly refuses to deploy a general `bin/simple`
+that cannot run code snippets.
 
 Older revisions may need a temporary `bin/simple` wrapper to the rebuilt
 bootstrap seed while running the staged worker; current bootstrap runs pass the
