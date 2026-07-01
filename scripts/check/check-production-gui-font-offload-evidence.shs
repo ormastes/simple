@@ -12,6 +12,8 @@ SIMPLE_OUT="$BUILD_DIR/simple.out"
 ENV_PATH="$BUILD_DIR/evidence.env"
 TIMEOUT_SECS="${PRODUCTION_GUI_FONT_EVIDENCE_TIMEOUT_SECS:-60}"
 KILL_SECS="${PRODUCTION_GUI_FONT_EVIDENCE_KILL_SECS:-5}"
+METAL_FONT_PAYLOAD_SCRIPT="${PRODUCTION_GUI_FONT_METAL_PAYLOAD_SCRIPT:-scripts/check/check-macos-metal-font-glyph-payload-evidence.shs}"
+RUN_METAL_FONT_PAYLOAD="${PRODUCTION_GUI_FONT_RUN_METAL_PAYLOAD:-auto}"
 
 VECTOR_RUNTIME_READY="${VECTOR_FONT_RUNTIME_READY:-false}"
 VECTOR_MODULE_READY="${VECTOR_FONT_MODULE_READY:-false}"
@@ -64,6 +66,46 @@ run_simple_with_timeout() {
         "$@"
     fi
 }
+
+metal_payload_status=skipped
+metal_payload_reason=not-requested
+metal_payload_report=""
+metal_payload_env="$BUILD_DIR/metal_font_payload/evidence.env"
+metal_payload_exports="$BUILD_DIR/metal_font_payload_exports.env"
+
+run_metal_font_payload() {
+    if [ "$RUN_METAL_FONT_PAYLOAD" = "0" ] || [ "$RUN_METAL_FONT_PAYLOAD" = "false" ]; then
+        return 0
+    fi
+    if [ ! -f "$METAL_FONT_PAYLOAD_SCRIPT" ]; then
+        metal_payload_status=unavailable
+        metal_payload_reason=missing-metal-font-payload-script
+        return 0
+    fi
+    mkdir -p "$BUILD_DIR/metal_font_payload"
+    set +e
+    BUILD_DIR="$BUILD_DIR/metal_font_payload" REPORT_PATH="$BUILD_DIR/metal_font_payload/report.md" SIMPLE_BIN="$SIMPLE_BIN" \
+        sh "$METAL_FONT_PAYLOAD_SCRIPT" >"$BUILD_DIR/metal_font_payload/stdout.env" 2>"$BUILD_DIR/metal_font_payload/stderr.log"
+    payload_code=$?
+    set -e
+    if [ -s "$metal_payload_env" ]; then
+        metal_payload_status="$(sed -n 's/^macos_metal_font_glyph_payload_status=//p' "$metal_payload_env" | tail -n 1)"
+        metal_payload_reason="$(sed -n 's/^macos_metal_font_glyph_payload_reason=//p' "$metal_payload_env" | tail -n 1)"
+        metal_payload_report="$BUILD_DIR/metal_font_payload/report.md"
+        grep '^METAL_.*_FONT_' "$metal_payload_env" >"$metal_payload_exports" 2>/dev/null || true
+        if [ -s "$metal_payload_exports" ]; then
+            set -a
+            . "$metal_payload_exports"
+            set +a
+        fi
+    else
+        metal_payload_status=unavailable
+        metal_payload_reason=metal-font-payload-no-evidence
+    fi
+    return 0
+}
+
+run_metal_font_payload
 
 cat >"$SIMPLE_SRC" <<SIMPLE_EOF
 module production_gui_font_offload_evidence
@@ -232,6 +274,9 @@ bitmap_ready="$(value_of production_gui_font_offload_bitmap_production_ready)"
 {
     echo "production_gui_font_offload_status=$status"
     echo "production_gui_font_offload_reason=$reason"
+    echo "production_gui_font_offload_metal_payload_status=$metal_payload_status"
+    echo "production_gui_font_offload_metal_payload_reason=$metal_payload_reason"
+    echo "production_gui_font_offload_metal_payload_report=$metal_payload_report"
     echo "production_gui_font_offload_vector_backend=$vector_backend"
     echo "production_gui_font_offload_vector_status=$vector_status"
     echo "production_gui_font_offload_vector_reason=$vector_reason"
@@ -270,6 +315,9 @@ bitmap_ready="$(value_of production_gui_font_offload_bitmap_production_ready)"
     echo
     echo "- status: $status"
     echo "- reason: $reason"
+    echo "- Metal payload status: $metal_payload_status"
+    echo "- Metal payload reason: $metal_payload_reason"
+    echo "- Metal payload report: $metal_payload_report"
     echo "- vector backend: $vector_backend"
     echo "- vector offload status: $vector_status"
     echo "- vector offload reason: $vector_reason"

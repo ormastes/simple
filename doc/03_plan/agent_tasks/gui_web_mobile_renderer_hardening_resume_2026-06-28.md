@@ -564,6 +564,37 @@ explicitly scope font offload out of the production parity acceptance criteria.
 Do not mark `production_gui_web_renderer_parity_status=pass` from synthetic
 payloads alone.
 
+### macOS Metal Font Payload Producer (2026-07-02)
+
+Follow-up implementation added a native Metal producer for the font payload
+contract:
+
+- `check-macos-metal-font-glyph-payload-evidence.shs` runs
+  `metal_font_glyph_payload_harness.spl`.
+- The harness compiles a small Metal compute kernel, dispatches it, waits for
+  command-buffer completion, downloads the buffer, verifies checksum `2064`, and
+  emits `METAL_VECTOR_FONT_GLYPH_*` plus `METAL_BITMAP_FONT_GLYPH_*` rows.
+- `check-production-gui-font-offload-evidence.shs` runs that producer by
+  default and exports only those `METAL_*_FONT_*` rows into the production font
+  evidence process.
+
+Observed focused result on macOS:
+
+- `macos_metal_font_glyph_payload_status=pass`
+- `macos_metal_font_glyph_payload_submit_attempted=true`
+- `macos_metal_font_glyph_payload_readback_available=true`
+- `macos_metal_font_glyph_payload_actual_checksum=2064`
+- `production_gui_font_offload_status=pass`
+- `production_gui_font_offload_metal_payload_status=pass`
+- `production_gui_font_offload_vector_metal_hits=1`
+- `production_gui_font_offload_bitmap_metal_hits=1`
+- vector and bitmap CPU fallback hits are `0`.
+
+Remaining completion requirement: rerun the full production GUI/Web aggregate
+without fixture overrides and verify `production_gui_web_renderer_parity_status=pass`
+plus the event-routing and mobile Tauri iOS/Android gates. The font blocker is
+now resolved at the focused wrapper level on this macOS host.
+
 ## Existing Canonical Artifacts
 
 - Feature requirements:

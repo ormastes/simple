@@ -1,0 +1,121 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/macos_metal_font_glyph_payload}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/macos_metal_font_glyph_payload_$(date -u +%F).md}"
+SIMPLE_BIN="${SIMPLE_BIN:-bin/simple}"
+HARNESS_SPL="${HARNESS_SPL:-scripts/check/metal_font_glyph_payload_harness.spl}"
+ENV_PATH="$BUILD_DIR/evidence.env"
+OUT_PATH="$BUILD_DIR/harness.out"
+ERR_PATH="$BUILD_DIR/harness.err"
+TIMEOUT_SECS="${MACOS_METAL_FONT_GLYPH_PAYLOAD_TIMEOUT_SECS:-60}"
+KILL_SECS="${MACOS_METAL_FONT_GLYPH_PAYLOAD_KILL_SECS:-5}"
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+rm -f "$ENV_PATH" "$OUT_PATH" "$ERR_PATH" "$REPORT_PATH"
+
+emit_env() {
+    status="$1"
+    reason="$2"
+    submit="$3"
+    readback="$4"
+    {
+        echo "macos_metal_font_glyph_payload_status=$status"
+        echo "macos_metal_font_glyph_payload_reason=$reason"
+        echo "macos_metal_font_glyph_payload_platform=$(uname -s 2>/dev/null || printf unknown)"
+        echo "macos_metal_font_glyph_payload_harness=$HARNESS_SPL"
+        echo "macos_metal_font_glyph_payload_submit_attempted=$submit"
+        echo "macos_metal_font_glyph_payload_readback_available=$readback"
+        echo "macos_metal_font_glyph_payload_expected_checksum=2064"
+        echo "macos_metal_font_glyph_payload_actual_checksum=0"
+    } >"$ENV_PATH"
+}
+
+value_of() {
+    key="$1"
+    sed -n "s/^${key}=//p" "$OUT_PATH" 2>/dev/null | tail -n 1
+}
+
+run_bound() {
+    if command -v timeout >/dev/null 2>&1; then
+        timeout -k "$KILL_SECS" "$TIMEOUT_SECS" "$@"
+    else
+        "$@"
+    fi
+}
+
+if [ "$(uname -s 2>/dev/null || printf unknown)" != "Darwin" ]; then
+    emit_env unavailable metal-requires-macos false false
+elif [ ! -x "$SIMPLE_BIN" ] && [ ! -f "$SIMPLE_BIN" ]; then
+    emit_env unavailable missing-simple-bin false false
+elif [ ! -f "$HARNESS_SPL" ]; then
+    emit_env unavailable missing-metal-font-glyph-payload-harness false false
+else
+    set +e
+    SIMPLE_EXECUTION_MODE="${SIMPLE_EXECUTION_MODE:-interpret}" SIMPLE_LIB="${SIMPLE_LIB:-src}" \
+        run_bound "$SIMPLE_BIN" run "$HARNESS_SPL" --mode=interpreter --clean >"$OUT_PATH" 2>"$ERR_PATH"
+    code=$?
+    set -e
+
+    if [ "$code" -eq 124 ] || [ "$code" -eq 137 ] || [ "$code" -eq 143 ]; then
+        emit_env unavailable metal-font-glyph-payload-timeout false false
+    else
+        status="$(value_of metal_font_glyph_payload_status)"
+        reason="$(value_of metal_font_glyph_payload_reason)"
+        submit="$(value_of metal_font_glyph_payload_submit_attempted)"
+        readback="$(value_of metal_font_glyph_payload_readback_available)"
+        expected="$(value_of metal_font_glyph_payload_expected_checksum)"
+        actual="$(value_of metal_font_glyph_payload_actual_checksum)"
+        status="${status:-unavailable}"
+        reason="${reason:-metal-font-glyph-payload-harness-failed}"
+        submit="${submit:-false}"
+        readback="${readback:-false}"
+        expected="${expected:-2064}"
+        actual="${actual:-0}"
+        {
+            echo "macos_metal_font_glyph_payload_status=$status"
+            echo "macos_metal_font_glyph_payload_reason=$reason"
+            echo "macos_metal_font_glyph_payload_platform=$(uname -s 2>/dev/null || printf unknown)"
+            echo "macos_metal_font_glyph_payload_harness=$HARNESS_SPL"
+            echo "macos_metal_font_glyph_payload_submit_attempted=$submit"
+            echo "macos_metal_font_glyph_payload_readback_available=$readback"
+            echo "macos_metal_font_glyph_payload_expected_checksum=$expected"
+            echo "macos_metal_font_glyph_payload_actual_checksum=$actual"
+            grep '^METAL_.*_FONT_' "$OUT_PATH" 2>/dev/null || true
+        } >"$ENV_PATH"
+    fi
+fi
+
+{
+    echo "# macOS Metal Font Glyph Payload Evidence"
+    echo
+    echo "- status: $(sed -n 's/^macos_metal_font_glyph_payload_status=//p' "$ENV_PATH" | tail -n 1)"
+    echo "- reason: $(sed -n 's/^macos_metal_font_glyph_payload_reason=//p' "$ENV_PATH" | tail -n 1)"
+    echo "- submit_attempted: $(sed -n 's/^macos_metal_font_glyph_payload_submit_attempted=//p' "$ENV_PATH" | tail -n 1)"
+    echo "- readback_available: $(sed -n 's/^macos_metal_font_glyph_payload_readback_available=//p' "$ENV_PATH" | tail -n 1)"
+    echo "- expected_checksum: $(sed -n 's/^macos_metal_font_glyph_payload_expected_checksum=//p' "$ENV_PATH" | tail -n 1)"
+    echo "- actual_checksum: $(sed -n 's/^macos_metal_font_glyph_payload_actual_checksum=//p' "$ENV_PATH" | tail -n 1)"
+    echo
+    echo "This report proves the production font payload contract through a native Metal"
+    echo "compute dispatch, command-buffer completion, buffer download, and checksum"
+    echo "verification before exporting METAL_*_FONT_GLYPH_* rows."
+    echo
+    echo "## Evidence"
+    sed 's/^/- /' "$ENV_PATH"
+    if [ -s "$ERR_PATH" ]; then
+        echo
+        echo "## Harness stderr"
+        sed 's/^/    /' "$ERR_PATH"
+    fi
+} >"$REPORT_PATH"
+
+cat "$ENV_PATH"
+echo "report_path=$REPORT_PATH"
+
+if grep -q '^macos_metal_font_glyph_payload_status=pass$' "$ENV_PATH"; then
+    exit 0
+fi
+exit 1

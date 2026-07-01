@@ -27,7 +27,7 @@ generated_2d_native_readback_wrappers_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 2 | 2 | 0 | 0 |
+| 3 | 3 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -74,6 +74,10 @@ BUILD_DIR=build/test-metal-generated-2d-readback \
 REPORT_PATH=build/test-metal-generated-2d-readback/report.md \
 sh scripts/check/check-metal-generated-2d-readback.shs
 
+BUILD_DIR=build/test-macos-metal-font-glyph-payload \
+REPORT_PATH=build/test-macos-metal-font-glyph-payload/report.md \
+sh scripts/check/check-macos-metal-font-glyph-payload-evidence.shs
+
 BUILD_DIR=build/test-rocm-generated-2d-readback \
 REPORT_PATH=build/test-rocm-generated-2d-readback/report.md \
 sh scripts/check/check-rocm-generated-2d-readback.shs
@@ -85,6 +89,8 @@ Each wrapper writes direct evidence keys such as:
 metal_generated_2d_readback_status=unavailable
 metal_generated_2d_readback_readback_available=false
 metal_generated_2d_readback_required_path='Metal source -> metallib -> MTLDevice -> compute pipeline -> command buffer/encoder -> submit -> wait -> buffer readback -> per-op checksums'
+macos_metal_font_glyph_payload_status=unavailable
+macos_metal_font_glyph_payload_readback_available=false
 rocm_generated_2d_readback_status=unavailable
 rocm_generated_2d_readback_readback_available=false
 rocm_generated_2d_readback_required_path='HIP source -> HSACO -> ROCm loader -> device/module/kernel handles -> launch -> synchronize -> host readback -> per-op checksums'
@@ -100,6 +106,8 @@ A native pass must report `status=pass`, `submit_attempted=true`, and
 
 - Metal evidence includes runtime, tool, module, submit, readback, checksum,
   and operation keys.
+- macOS Metal font payload evidence includes submit, readback, checksum, and
+  exported METAL_*_FONT_GLYPH_* payload rows on native pass.
 - ROCm/HIP evidence includes loader, probe, module, submit, readback, checksum,
   and operation keys.
 - Unavailable evidence must report `readback_available=false`.
@@ -141,6 +149,42 @@ if status == "pass":
     expect(_value_of(evidence, "metal_generated_2d_readback_copy_checksum")).to_equal(_value_of(evidence, "metal_generated_2d_readback_copy_expected"))
     expect(_value_of(evidence, "metal_generated_2d_readback_alpha_checksum")).to_equal(_value_of(evidence, "metal_generated_2d_readback_alpha_expected"))
     expect(_value_of(evidence, "metal_generated_2d_readback_scroll_checksum")).to_equal(_value_of(evidence, "metal_generated_2d_readback_scroll_expected"))
+else:
+    expect(status).to_equal("unavailable")
+    expect(readback).to_equal("false")
+    expect(reason.len()).to_be_greater_than(0)
+```
+
+</details>
+
+#### writes macOS Metal font glyph payload evidence
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 23 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val evidence = _run_wrapper("build/test-macos-metal-font-glyph-payload", "scripts/check/check-macos-metal-font-glyph-payload-evidence.shs")
+expect(evidence).to_contain("macos_metal_font_glyph_payload_status=")
+expect(evidence).to_contain("macos_metal_font_glyph_payload_reason=")
+expect(evidence).to_contain("macos_metal_font_glyph_payload_submit_attempted=")
+expect(evidence).to_contain("macos_metal_font_glyph_payload_readback_available=")
+expect(evidence).to_contain("macos_metal_font_glyph_payload_expected_checksum=2064")
+
+val status = _value_of(evidence, "macos_metal_font_glyph_payload_status")
+val readback = _value_of(evidence, "macos_metal_font_glyph_payload_readback_available")
+val submit = _value_of(evidence, "macos_metal_font_glyph_payload_submit_attempted")
+val reason = _value_of(evidence, "macos_metal_font_glyph_payload_reason")
+if status == "pass":
+    expect(submit).to_equal("true")
+    expect(readback).to_equal("true")
+    expect(_value_of(evidence, "macos_metal_font_glyph_payload_actual_checksum")).to_equal("2064")
+    expect(evidence).to_contain("METAL_VECTOR_FONT_STATUS=pass")
+    expect(evidence).to_contain("METAL_VECTOR_FONT_GLYPH_0_PIXELS=16,0,192,255,64,0")
+    expect(evidence).to_contain("METAL_BITMAP_FONT_STATUS=pass")
+    expect(evidence).to_contain("METAL_BITMAP_FONT_GLYPH_0_PIXELS=16,0,192,255,64,0")
 else:
     expect(status).to_equal("unavailable")
     expect(readback).to_equal("false")
@@ -192,8 +236,8 @@ else:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 2 |
-| Active scenarios | 2 |
+| Total scenarios | 3 |
+| Active scenarios | 3 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
