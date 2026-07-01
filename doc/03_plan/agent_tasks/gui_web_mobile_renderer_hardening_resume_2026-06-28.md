@@ -537,26 +537,32 @@ GUI/Web parity is still blocked by font offload readiness:
 Follow-up hardening in the isolated worktree made the font evidence contract
 Metal-aware without weakening the gate:
 
-- `check-production-gui-font-offload-evidence.shs` accepts
-  `VECTOR_FONT_METAL_HITS` and passes it into `VectorFontAcceleratorStats`.
-- The wrapper emits vector accelerator counters for attempts, Metal, CUDA,
-  OpenCL, CPU fallback, returned glyphs, and returned glyph pixels.
+- `check-production-gui-font-offload-evidence.shs` now runs the real
+  `rasterize_vector_accelerated` and `rasterize_bitmap_accelerated` paths.
+- Metal proof is consumed through the existing
+  `METAL_VECTOR_FONT_GLYPH_*` and `METAL_BITMAP_FONT_GLYPH_*` payloads, so the
+  rasterizer records `vector_font_accelerator_stats()` and
+  `bitmap_font_accelerator_stats()` before the production evidence is assembled.
+- The wrapper emits vector and bitmap accelerator counters for attempts, Metal,
+  CUDA, OpenCL, CPU fallback, returned glyphs, and returned glyph pixels.
 - `check-production-gui-web-renderer-parity-evidence.shs` forwards those rows
   into the normalized production aggregate namespace.
 
 Focused evidence:
 
 - Default production font evidence remains fail-closed with Metal selected but
-  no runtime/readback proof.
-- Injected Metal glyph/readback evidence passes with
+  no Metal glyph payload or runtime/readback proof.
+- Env-backed Metal glyph/readback evidence passes only after the rasterizers
+  accept matching checksum-verified payloads, with
   `production_gui_font_offload_vector_metal_hits=1`,
+  `production_gui_font_offload_bitmap_metal_hits=1`,
   `production_gui_font_offload_vector_readback_status=vector-font-glyph-readback-matched`,
   and `production_gui_font_offload_bitmap_readback_status=gpu-glyph-raster-readback-matched`.
 
-Next concrete step: wire real macOS Metal glyph/readback counters into the
-production font wrapper or explicitly scope font offload out of the production
-parity acceptance criteria. Do not mark
-`production_gui_web_renderer_parity_status=pass` from injected evidence alone.
+Next concrete step: wire a real macOS Metal font producer into those payloads or
+explicitly scope font offload out of the production parity acceptance criteria.
+Do not mark `production_gui_web_renderer_parity_status=pass` from synthetic
+payloads alone.
 
 ## Existing Canonical Artifacts
 

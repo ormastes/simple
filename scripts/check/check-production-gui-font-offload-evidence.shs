@@ -17,14 +17,6 @@ VECTOR_RUNTIME_READY="${VECTOR_FONT_RUNTIME_READY:-false}"
 VECTOR_MODULE_READY="${VECTOR_FONT_MODULE_READY:-false}"
 VECTOR_BACKEND_SUBMIT_OK="${VECTOR_FONT_BACKEND_SUBMIT_OK:-false}"
 VECTOR_READBACK_AVAILABLE="${VECTOR_FONT_READBACK_AVAILABLE:-false}"
-VECTOR_ACCEL_ATTEMPTS="${VECTOR_FONT_ACCEL_ATTEMPTS:-0}"
-VECTOR_METAL_HITS="${VECTOR_FONT_METAL_HITS:-0}"
-VECTOR_CUDA_HITS="${VECTOR_FONT_CUDA_HITS:-0}"
-VECTOR_OPENCL_HITS="${VECTOR_FONT_OPENCL_HITS:-0}"
-VECTOR_CPU_FALLBACK_HITS="${VECTOR_FONT_CPU_FALLBACK_HITS:-1}"
-VECTOR_GPU_RETURNED_GLYPHS="${VECTOR_FONT_GPU_RETURNED_GLYPHS:-0}"
-VECTOR_GPU_RETURNED_GLYPH_PIXELS="${VECTOR_FONT_GPU_RETURNED_GLYPH_PIXELS:-0}"
-VECTOR_REASON="${VECTOR_FONT_REASON:-font-device-readback-unavailable}"
 
 BITMAP_RUNTIME_READY="${BITMAP_FONT_RUNTIME_READY:-false}"
 BITMAP_MODULE_READY="${BITMAP_FONT_MODULE_READY:-false}"
@@ -78,7 +70,15 @@ module production_gui_font_offload_evidence
 
 use std.gpu.engine2d.vector_font_offload.{vector_font_glyph_pixels_checksum, vector_font_preferred_offload_evidence, vector_font_preferred_glyph_readback_evidence}
 use std.gpu.engine2d.bitmap_font_offload.{bitmap_font_preferred_offload_evidence, bitmap_glyph_raster_mask_checksum, bitmap_glyph_raster_preferred_mask_readback_evidence}
-use std.nogc_sync_mut.text_layout.font_rasterizer.{VectorFontAcceleratorStats}
+use std.nogc_sync_mut.text_layout.font_rasterizer.{
+    bitmap_font_accelerator_stats,
+    rasterize_bitmap_accelerated,
+    rasterize_vector_accelerated,
+    reset_bitmap_font_raster_stats,
+    reset_vector_font_raster_stats,
+    vector_font_accelerator_stats
+}
+use std.nogc_sync_mut.text_layout.font_vector_data.{vf_glyph_commands}
 
 fn bool_text(v: bool) -> text:
     if v:
@@ -92,27 +92,47 @@ fn overall_status(vector_ready: bool, bitmap_ready: bool, vector_status: text, b
         return "unavailable"
     "fail"
 
+fn alpha_mask(pixels: [u8]) -> [u32]:
+    var bits: [u32] = []
+    var idx = 0
+    while idx < pixels.len():
+        if pixels[idx].to_i64() > 0:
+            bits.push(1u32)
+        else:
+            bits.push(0u32)
+        idx = idx + 1
+    bits
+
 fn main() -> i32:
     val candidates = $FONT_CANDIDATES_SIMPLE
-    val vector_pixels = [0u8, 64u8, 255u8, 128u8]
+    val vector_codepoint: i32 = 77
+    val vector_font_size: i32 = 24
+    reset_vector_font_raster_stats()
+    val vector_glyph = rasterize_vector_accelerated(vf_glyph_commands(vector_codepoint), vector_codepoint, vector_font_size)
+    val vector_pixels = vector_glyph.pixels
     val vector_checksum = vector_font_glyph_pixels_checksum(vector_pixels)
-    val vector_accel = VectorFontAcceleratorStats(
-        attempts: $VECTOR_ACCEL_ATTEMPTS,
-        metal_hits: $VECTOR_METAL_HITS,
-        cuda_hits: $VECTOR_CUDA_HITS,
-        opencl_hits: $VECTOR_OPENCL_HITS,
-        cpu_fallback_hits: $VECTOR_CPU_FALLBACK_HITS,
-        gpu_returned_glyphs: $VECTOR_GPU_RETURNED_GLYPHS,
-        gpu_returned_glyph_pixels: $VECTOR_GPU_RETURNED_GLYPH_PIXELS,
-        unavailable_reason: "$VECTOR_REASON"
-    )
-    val vector_offload = vector_font_preferred_offload_evidence(candidates, 4, 1, $VECTOR_RUNTIME_READY, $VECTOR_MODULE_READY, 4096, vector_accel)
-    val vector_readback = vector_font_preferred_glyph_readback_evidence(candidates, 4, 1, 4096, 7, 11, $VECTOR_RUNTIME_READY, $VECTOR_BACKEND_SUBMIT_OK, $VECTOR_READBACK_AVAILABLE, vector_accel, vector_pixels, vector_checksum)
+    val vector_accel = vector_font_accelerator_stats()
+    val vector_gpu_ready = vector_accel.gpu_returned_glyphs > 0 and vector_accel.gpu_returned_glyph_pixels > 0
+    val vector_runtime_ready = $VECTOR_RUNTIME_READY or vector_gpu_ready
+    val vector_module_ready = $VECTOR_MODULE_READY or vector_gpu_ready
+    val vector_submit_ok = $VECTOR_BACKEND_SUBMIT_OK or vector_gpu_ready
+    val vector_readback_available = $VECTOR_READBACK_AVAILABLE or vector_gpu_ready
+    val vector_offload = vector_font_preferred_offload_evidence(candidates, vector_glyph.width.to_i64(), vector_glyph.height.to_i64(), vector_runtime_ready, vector_module_ready, 4096, vector_accel)
+    val vector_readback = vector_font_preferred_glyph_readback_evidence(candidates, vector_glyph.width.to_i64(), vector_glyph.height.to_i64(), 4096, 7, 11, vector_runtime_ready, vector_submit_ok, vector_readback_available, vector_accel, vector_pixels, vector_checksum)
 
-    val bitmap_bits = [1u32, 0u32, 1u32, 0u32]
-    val bitmap_checksum = bitmap_glyph_raster_mask_checksum(bitmap_bits, 2, 2, 0xff224466u32)
-    val bitmap_offload = bitmap_font_preferred_offload_evidence(candidates, 2, 2, $BITMAP_RUNTIME_READY, $BITMAP_MODULE_READY, 4096)
-    val bitmap_readback = bitmap_glyph_raster_preferred_mask_readback_evidence(candidates, bitmap_bits, 2, 2, 0xff224466u32, 4096, 7, 11, $BITMAP_RUNTIME_READY, $BITMAP_BACKEND_SUBMIT_OK, $BITMAP_READBACK_AVAILABLE, bitmap_checksum)
+    reset_bitmap_font_raster_stats()
+    val bitmap_glyph = rasterize_bitmap_accelerated(vector_codepoint, vector_font_size)
+    val bitmap_stats = bitmap_font_accelerator_stats()
+    val bitmap_bits = alpha_mask(bitmap_glyph.pixels)
+    val bitmap_color = 0xff224466u32
+    val bitmap_checksum = bitmap_glyph_raster_mask_checksum(bitmap_bits, bitmap_glyph.width.to_i64(), bitmap_glyph.height.to_i64(), bitmap_color)
+    val bitmap_gpu_ready = bitmap_stats.gpu_returned_glyphs > 0 and bitmap_stats.gpu_returned_glyph_pixels > 0
+    val bitmap_runtime_ready = $BITMAP_RUNTIME_READY or bitmap_gpu_ready
+    val bitmap_module_ready = $BITMAP_MODULE_READY or bitmap_gpu_ready
+    val bitmap_submit_ok = $BITMAP_BACKEND_SUBMIT_OK or bitmap_gpu_ready
+    val bitmap_readback_available = $BITMAP_READBACK_AVAILABLE or bitmap_gpu_ready
+    val bitmap_offload = bitmap_font_preferred_offload_evidence(candidates, bitmap_glyph.width.to_i64(), bitmap_glyph.height.to_i64(), bitmap_runtime_ready, bitmap_module_ready, 4096)
+    val bitmap_readback = bitmap_glyph_raster_preferred_mask_readback_evidence(candidates, bitmap_bits, bitmap_glyph.width.to_i64(), bitmap_glyph.height.to_i64(), bitmap_color, 4096, 7, 11, bitmap_runtime_ready, bitmap_submit_ok, bitmap_readback_available, bitmap_checksum)
 
     val status = overall_status(vector_readback.production_ready, bitmap_readback.production_ready, vector_readback.status_code, bitmap_readback.status_code)
     var reason = "font-device-readback-unavailable"
@@ -126,6 +146,13 @@ fn main() -> i32:
     print "production_gui_font_offload_vector_backend={vector_offload.backend_name}"
     print "production_gui_font_offload_vector_status={vector_offload.status_code}"
     print "production_gui_font_offload_vector_reason={vector_offload.reason}"
+    print "production_gui_font_offload_vector_accel_attempts={vector_accel.attempts}"
+    print "production_gui_font_offload_vector_metal_hits={vector_accel.metal_hits}"
+    print "production_gui_font_offload_vector_cuda_hits={vector_accel.cuda_hits}"
+    print "production_gui_font_offload_vector_opencl_hits={vector_accel.opencl_hits}"
+    print "production_gui_font_offload_vector_cpu_fallback_hits={vector_accel.cpu_fallback_hits}"
+    print "production_gui_font_offload_vector_gpu_returned_glyphs={vector_accel.gpu_returned_glyphs}"
+    print "production_gui_font_offload_vector_gpu_returned_glyph_pixels={vector_accel.gpu_returned_glyph_pixels}"
     print "production_gui_font_offload_vector_readback_status={vector_readback.status_code}"
     print "production_gui_font_offload_vector_readback_reason={vector_readback.reason}"
     print "production_gui_font_offload_vector_production_ready={bool_text(vector_readback.production_ready)}"
@@ -134,6 +161,13 @@ fn main() -> i32:
     print "production_gui_font_offload_bitmap_backend={bitmap_offload.backend_name}"
     print "production_gui_font_offload_bitmap_status={bitmap_offload.status_code}"
     print "production_gui_font_offload_bitmap_reason={bitmap_offload.reason}"
+    print "production_gui_font_offload_bitmap_accel_attempts={bitmap_stats.attempts}"
+    print "production_gui_font_offload_bitmap_metal_hits={bitmap_stats.metal_hits}"
+    print "production_gui_font_offload_bitmap_cuda_hits={bitmap_stats.cuda_hits}"
+    print "production_gui_font_offload_bitmap_opencl_hits={bitmap_stats.opencl_hits}"
+    print "production_gui_font_offload_bitmap_cpu_fallback_hits={bitmap_stats.cpu_fallback_hits}"
+    print "production_gui_font_offload_bitmap_gpu_returned_glyphs={bitmap_stats.gpu_returned_glyphs}"
+    print "production_gui_font_offload_bitmap_gpu_returned_glyph_pixels={bitmap_stats.gpu_returned_glyph_pixels}"
     print "production_gui_font_offload_bitmap_readback_status={bitmap_readback.status_code}"
     print "production_gui_font_offload_bitmap_readback_reason={bitmap_readback.reason}"
     print "production_gui_font_offload_bitmap_production_ready={bool_text(bitmap_readback.production_ready)}"
@@ -171,12 +205,26 @@ reason="$(value_of production_gui_font_offload_reason)"
 vector_backend="$(value_of production_gui_font_offload_vector_backend)"
 vector_status="$(value_of production_gui_font_offload_vector_status)"
 vector_reason="$(value_of production_gui_font_offload_vector_reason)"
+vector_accel_attempts="$(value_of production_gui_font_offload_vector_accel_attempts)"
+vector_metal_hits="$(value_of production_gui_font_offload_vector_metal_hits)"
+vector_cuda_hits="$(value_of production_gui_font_offload_vector_cuda_hits)"
+vector_opencl_hits="$(value_of production_gui_font_offload_vector_opencl_hits)"
+vector_cpu_fallback_hits="$(value_of production_gui_font_offload_vector_cpu_fallback_hits)"
+vector_gpu_returned_glyphs="$(value_of production_gui_font_offload_vector_gpu_returned_glyphs)"
+vector_gpu_returned_glyph_pixels="$(value_of production_gui_font_offload_vector_gpu_returned_glyph_pixels)"
 vector_readback_status="$(value_of production_gui_font_offload_vector_readback_status)"
 vector_readback_reason="$(value_of production_gui_font_offload_vector_readback_reason)"
 vector_ready="$(value_of production_gui_font_offload_vector_production_ready)"
 bitmap_backend="$(value_of production_gui_font_offload_bitmap_backend)"
 bitmap_status="$(value_of production_gui_font_offload_bitmap_status)"
 bitmap_reason="$(value_of production_gui_font_offload_bitmap_reason)"
+bitmap_accel_attempts="$(value_of production_gui_font_offload_bitmap_accel_attempts)"
+bitmap_metal_hits="$(value_of production_gui_font_offload_bitmap_metal_hits)"
+bitmap_cuda_hits="$(value_of production_gui_font_offload_bitmap_cuda_hits)"
+bitmap_opencl_hits="$(value_of production_gui_font_offload_bitmap_opencl_hits)"
+bitmap_cpu_fallback_hits="$(value_of production_gui_font_offload_bitmap_cpu_fallback_hits)"
+bitmap_gpu_returned_glyphs="$(value_of production_gui_font_offload_bitmap_gpu_returned_glyphs)"
+bitmap_gpu_returned_glyph_pixels="$(value_of production_gui_font_offload_bitmap_gpu_returned_glyph_pixels)"
 bitmap_readback_status="$(value_of production_gui_font_offload_bitmap_readback_status)"
 bitmap_readback_reason="$(value_of production_gui_font_offload_bitmap_readback_reason)"
 bitmap_ready="$(value_of production_gui_font_offload_bitmap_production_ready)"
@@ -187,13 +235,13 @@ bitmap_ready="$(value_of production_gui_font_offload_bitmap_production_ready)"
     echo "production_gui_font_offload_vector_backend=$vector_backend"
     echo "production_gui_font_offload_vector_status=$vector_status"
     echo "production_gui_font_offload_vector_reason=$vector_reason"
-    echo "production_gui_font_offload_vector_accel_attempts=$VECTOR_ACCEL_ATTEMPTS"
-    echo "production_gui_font_offload_vector_metal_hits=$VECTOR_METAL_HITS"
-    echo "production_gui_font_offload_vector_cuda_hits=$VECTOR_CUDA_HITS"
-    echo "production_gui_font_offload_vector_opencl_hits=$VECTOR_OPENCL_HITS"
-    echo "production_gui_font_offload_vector_cpu_fallback_hits=$VECTOR_CPU_FALLBACK_HITS"
-    echo "production_gui_font_offload_vector_gpu_returned_glyphs=$VECTOR_GPU_RETURNED_GLYPHS"
-    echo "production_gui_font_offload_vector_gpu_returned_glyph_pixels=$VECTOR_GPU_RETURNED_GLYPH_PIXELS"
+    echo "production_gui_font_offload_vector_accel_attempts=$vector_accel_attempts"
+    echo "production_gui_font_offload_vector_metal_hits=$vector_metal_hits"
+    echo "production_gui_font_offload_vector_cuda_hits=$vector_cuda_hits"
+    echo "production_gui_font_offload_vector_opencl_hits=$vector_opencl_hits"
+    echo "production_gui_font_offload_vector_cpu_fallback_hits=$vector_cpu_fallback_hits"
+    echo "production_gui_font_offload_vector_gpu_returned_glyphs=$vector_gpu_returned_glyphs"
+    echo "production_gui_font_offload_vector_gpu_returned_glyph_pixels=$vector_gpu_returned_glyph_pixels"
     echo "production_gui_font_offload_vector_readback_status=$vector_readback_status"
     echo "production_gui_font_offload_vector_readback_reason=$vector_readback_reason"
     echo "production_gui_font_offload_vector_production_ready=$vector_ready"
@@ -202,6 +250,13 @@ bitmap_ready="$(value_of production_gui_font_offload_bitmap_production_ready)"
     echo "production_gui_font_offload_bitmap_backend=$bitmap_backend"
     echo "production_gui_font_offload_bitmap_status=$bitmap_status"
     echo "production_gui_font_offload_bitmap_reason=$bitmap_reason"
+    echo "production_gui_font_offload_bitmap_accel_attempts=$bitmap_accel_attempts"
+    echo "production_gui_font_offload_bitmap_metal_hits=$bitmap_metal_hits"
+    echo "production_gui_font_offload_bitmap_cuda_hits=$bitmap_cuda_hits"
+    echo "production_gui_font_offload_bitmap_opencl_hits=$bitmap_opencl_hits"
+    echo "production_gui_font_offload_bitmap_cpu_fallback_hits=$bitmap_cpu_fallback_hits"
+    echo "production_gui_font_offload_bitmap_gpu_returned_glyphs=$bitmap_gpu_returned_glyphs"
+    echo "production_gui_font_offload_bitmap_gpu_returned_glyph_pixels=$bitmap_gpu_returned_glyph_pixels"
     echo "production_gui_font_offload_bitmap_readback_status=$bitmap_readback_status"
     echo "production_gui_font_offload_bitmap_readback_reason=$bitmap_readback_reason"
     echo "production_gui_font_offload_bitmap_production_ready=$bitmap_ready"
@@ -218,19 +273,26 @@ bitmap_ready="$(value_of production_gui_font_offload_bitmap_production_ready)"
     echo "- vector backend: $vector_backend"
     echo "- vector offload status: $vector_status"
     echo "- vector offload reason: $vector_reason"
-    echo "- vector accel attempts: $VECTOR_ACCEL_ATTEMPTS"
-    echo "- vector Metal hits: $VECTOR_METAL_HITS"
-    echo "- vector CUDA hits: $VECTOR_CUDA_HITS"
-    echo "- vector OpenCL hits: $VECTOR_OPENCL_HITS"
-    echo "- vector CPU fallback hits: $VECTOR_CPU_FALLBACK_HITS"
-    echo "- vector GPU returned glyphs: $VECTOR_GPU_RETURNED_GLYPHS"
-    echo "- vector GPU returned glyph pixels: $VECTOR_GPU_RETURNED_GLYPH_PIXELS"
+    echo "- vector accel attempts: $vector_accel_attempts"
+    echo "- vector Metal hits: $vector_metal_hits"
+    echo "- vector CUDA hits: $vector_cuda_hits"
+    echo "- vector OpenCL hits: $vector_opencl_hits"
+    echo "- vector CPU fallback hits: $vector_cpu_fallback_hits"
+    echo "- vector GPU returned glyphs: $vector_gpu_returned_glyphs"
+    echo "- vector GPU returned glyph pixels: $vector_gpu_returned_glyph_pixels"
     echo "- vector readback status: $vector_readback_status"
     echo "- vector readback reason: $vector_readback_reason"
     echo "- vector production ready: $vector_ready"
     echo "- bitmap backend: $bitmap_backend"
     echo "- bitmap offload status: $bitmap_status"
     echo "- bitmap offload reason: $bitmap_reason"
+    echo "- bitmap accel attempts: $bitmap_accel_attempts"
+    echo "- bitmap Metal hits: $bitmap_metal_hits"
+    echo "- bitmap CUDA hits: $bitmap_cuda_hits"
+    echo "- bitmap OpenCL hits: $bitmap_opencl_hits"
+    echo "- bitmap CPU fallback hits: $bitmap_cpu_fallback_hits"
+    echo "- bitmap GPU returned glyphs: $bitmap_gpu_returned_glyphs"
+    echo "- bitmap GPU returned glyph pixels: $bitmap_gpu_returned_glyph_pixels"
     echo "- bitmap readback status: $bitmap_readback_status"
     echo "- bitmap readback reason: $bitmap_readback_reason"
     echo "- bitmap production ready: $bitmap_ready"
