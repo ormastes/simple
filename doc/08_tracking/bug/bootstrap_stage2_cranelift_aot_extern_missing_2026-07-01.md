@@ -94,6 +94,25 @@ The bounded probe reaches Stage2 and the worker exits through the expected
 one-second timeout path instead of failing with `bin/simple: No such file or
 directory`.
 
+## 2026-07-01 Bounded Deploy Probe
+
+After the launcher fix, a bounded deploy probe:
+
+```sh
+timeout 300 sh scripts/bootstrap/bootstrap-from-scratch.sh --pure-simple --native-timeout=3600 --no-mcp
+```
+
+still remained in Stage2 until the outer 300-second cap exited with code 124.
+The Stage2 log showed the correct worker launcher:
+
+```text
+SIMPLE_BINARY=src/compiler_rust/target/bootstrap/simple src/compiler_rust/target/bootstrap/simple native-build ...
+```
+
+No fresh Stage2 binary was produced within the cap. The current deploy blocker
+is Stage2 bootstrap build duration/progress, not missing worker launcher,
+missing Cranelift AOT resolver symbols, or the Stage4 bootstrap-mode leak.
+
 Older revisions may need a temporary `bin/simple` wrapper to the rebuilt
 bootstrap seed while running the staged worker; current bootstrap runs pass the
 active stage compiler through `SIMPLE_BINARY` instead.
