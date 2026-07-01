@@ -166,6 +166,8 @@ summary rows.
 `ninja` output extracts the first quoted path from `ninja: error:` rows.
 `make` output extracts paths from GNU Make bracketed error rows such as
 `[path:line: target]`.
+`shell` output extracts script paths from `path: line N:` and
+`bash: path: line N:` style diagnostics.
 `ctest` output extracts whitespace-delimited `path:line` tokens from failure
 rows.
 `ld` output skips the linker executable prefix and extracts the referenced
