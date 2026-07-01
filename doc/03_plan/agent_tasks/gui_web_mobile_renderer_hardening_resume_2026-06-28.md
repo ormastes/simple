@@ -790,3 +790,32 @@ emulator from the normal macOS Android SDK locations, and rebuilds stale/missing
 Android APKs only when the arm64 Simple runtime artifact is available. The
 remaining completion blockers are live iOS render-log observation and producing
 or supplying the Android arm64 Simple runtime before rerunning the aggregate.
+
+## 2026-07-02 Runtime/Validator Follow-Up
+
+The missing mobile runtime artifacts were produced locally:
+
+- `src/compiler_rust/target/aarch64-apple-ios-sim/release/simple`
+- `tools/tauri-shell/src-tauri/ios_runtime_aarch64_sim.bin`
+- `src/compiler_rust/target/aarch64-linux-android/release/simple`
+
+The aggregate now has validator scripts for iOS render/Metal/WKWebView log proof
+and Android render/Vulkan log proof. The Android evidence wrapper also clears
+logcat after APK install and before launching `com.simple.ui`, preventing
+unrelated package-install/system crashes from being treated as renderer crashes.
+
+Live rerun in `build/goal-tauri-mobile-after-validator-fix/evidence.env`:
+
+- `tauri_mobile_renderer_parity_ios_status=pass`
+- `tauri_mobile_renderer_parity_ios_render_log_validation_status=pass`
+- `tauri_mobile_renderer_parity_ios_metal_log_status=pass`
+- `tauri_mobile_renderer_parity_android_status=pass`
+- `tauri_mobile_renderer_parity_android_render_log_validation_status=pass`
+- `tauri_mobile_renderer_parity_android_vulkan_log_status=pass`
+- aggregate remains `fail` with
+  `tauri_mobile_renderer_parity_reason=ios-screenshot-artifact-proof-missing`
+  because live iOS/Android MDI proof rows are still empty.
+
+Next work should connect the existing live MDI proof flow to the aggregate rows
+(`*_mdi_proof_json`, render/event/capture/performance/latency/animation detail)
+rather than relaxing the mobile completion gate.
