@@ -26,6 +26,10 @@ const expectedCapturedArgbSha256Provided = process.argv.length > 14 && process.a
 const expectedCapturedArgbSha256 = String(process.argv[14] || "");
 const expectedVulkanRunIdProvided = process.argv.length > 15 && process.argv[15] !== "";
 const expectedVulkanRunId = String(process.argv[15] || "");
+const expectedVulkanJsonPathProvided = process.argv.length > 16 && process.argv[16] !== "";
+const expectedVulkanJsonPath = String(process.argv[16] || "");
+const expectedVulkanJsonSha256Provided = process.argv.length > 17 && process.argv[17] !== "";
+const expectedVulkanJsonSha256 = String(process.argv[17] || "");
 
 function emit(key, value) {
   console.log(`${key}=${value === undefined || value === null ? "" : value}`);
@@ -252,6 +256,8 @@ const common = {
   electron_vulkan_web_parity_windows_compare_expected_png_path: expectedPngPath,
   electron_vulkan_web_parity_windows_compare_expected_png_sha256: expectedPngSha256,
   electron_vulkan_web_parity_windows_compare_expected_vulkan_run_id: expectedVulkanRunId,
+  electron_vulkan_web_parity_windows_compare_expected_vulkan_json_path: expectedVulkanJsonPath,
+  electron_vulkan_web_parity_windows_compare_expected_vulkan_json_sha256: expectedVulkanJsonSha256,
   electron_vulkan_web_parity_windows_compare_electron_producer: electronProducer,
   electron_vulkan_web_parity_windows_compare_electron_width: electronWidth,
   electron_vulkan_web_parity_windows_compare_electron_height: electronHeight,
@@ -345,6 +351,17 @@ if (vulkanExecutionMode !== "interpret") {
 
 if (expectedVulkanRunIdProvided && vulkanRunId !== expectedVulkanRunId) {
   finish("fail", "vulkan-run-id-mismatch", 2, common);
+}
+
+if (expectedVulkanJsonPathProvided && vulkanPath !== expectedVulkanJsonPath) {
+  finish("fail", "vulkan-json-path-mismatch", 2, common);
+}
+
+if (expectedVulkanJsonSha256Provided) {
+  const actualVulkanJsonSha256 = require("crypto").createHash("sha256").update(fs.readFileSync(vulkanPath)).digest("hex");
+  if (actualVulkanJsonSha256 !== expectedVulkanJsonSha256) {
+    finish("fail", "vulkan-json-sha256-mismatch", 2, common);
+  }
 }
 
 if (vulkanBackend !== "vulkan") {
