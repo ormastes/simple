@@ -120,7 +120,9 @@ names into SPipe phases such as `pre_tool`, `post_tool`, `pre_prompt`,
 `post_turn`, `pre_edit`, `post_edit`, and `pre_commit`.
 MCP hook calls accept snake_case or camelCase names for hook payload fields,
 including `raw_payload`/`rawPayload`, `tool_name`/`toolName`, and
-`prompt_excerpt`/`promptExcerpt`.
+`prompt_excerpt`/`promptExcerpt`. CLI hook calls mirror common spellings such as
+`--tool`, `--toolName`, `--tool-name`, `--prompt`, `--promptExcerpt`, and
+`--prompt-excerpt`.
 
 The codebase tools run RepoMix with a fixed argv vector. Local packs use
 `npx -y repomix <root> --stdout --style markdown --include <patterns> --ignore
