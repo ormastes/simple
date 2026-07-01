@@ -80,6 +80,7 @@ Parser and capture commands accept `--source-kind=K`, `--sourceKind=K`, or
 - `spipe_context_get_raw`
 - `spipe_context_sql_put`
 - `spipe_context_sql_get`
+- `spipe_context_sql_get_tree`
 - `spipe_context_sql_search`
 - `spipe_exec_capture`
 - `spipe_exec_parse`
@@ -188,10 +189,11 @@ Search tools accept `query`, `q`, or `searchText`; the CLI mirrors those as
 `--query`, `--q`, or `--searchText`. The CLI accepts the same aliases as
 `--dbPath`, `--sourceFilter`, and `--sourceId`.
 
-The explicit MCP names `spipe_context_put_raw`, `spipe_context_get_tree`, and
-`spipe_context_get_raw` are aliases for `spipe_context_put`,
-`spipe_context_get`, and `spipe_context_raw`, matching context-mode naming while
-keeping the original compact names stable.
+The explicit MCP names `spipe_context_put_raw`, `spipe_context_get_tree`,
+`spipe_context_get_raw`, and `spipe_context_sql_get_tree` are aliases for
+`spipe_context_put`, `spipe_context_get`, `spipe_context_raw`, and
+`spipe_context_sql_get`, matching context-mode naming while keeping the original
+compact names stable.
 
 `spipe_context_raw` and `spipe_context_get_raw` prepend the matching `@parent`
 chain before exact raw lines, so a middle slice still carries command and
