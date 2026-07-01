@@ -1363,7 +1363,22 @@ The current canonical evidence contract is:
   downstream reports can distinguish Simple Metal readback from missing
   Electron/Chrome Metal browser proof. Simple Metal readback proves the Simple
   backend only; Electron/Chrome Metal-backed browser comparison is proven only
-  by the macOS Metal render-log compare rows.
+  by the macOS Metal render-log compare rows. Use
+  `scripts/check/check-macos-metal-browser-backing-evidence.shs` on macOS to
+  create `build/macos-metal-browser-backing/evidence.env`: it renders the stable
+  `css_boxes.html` fixture through Simple Metal, Chrome DevTools with GPU
+  enabled, and local Electron Chromium, writes scoped Metal GPU metadata source
+  files, and emits exact `pairwise-argb-diff` rows for Simple/Chrome/Electron
+  ARGB artifacts. Then run
+  `scripts/check/check-macos-metal-render-log-compare.shs` to validate the
+  full normalized Metal log contract. The production parity wrapper forwards
+  the compare's Tauri iOS/WKWebView rows, including
+  `production_gui_web_renderer_parity_metal_render_log_require_tauri_ios`,
+  `production_gui_web_renderer_parity_metal_render_log_tauri_ios_env_file_status`,
+  and
+  `production_gui_web_renderer_parity_metal_render_log_tauri_ios_env_artifact_status`,
+  so strict mobile requirements are visible in the top-level evidence instead
+  of only in the nested compare env.
   Font offload
   `unavailable` is recorded but does not satisfy the production parity wrapper.
   A font pass must also carry

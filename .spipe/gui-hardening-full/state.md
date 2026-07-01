@@ -939,3 +939,106 @@ implementation-evidence-in-progress
   proving the channel-open dispatcher fast path in the next live run, then
   daemon return-to-accept for `simple`, `simple.smf`, and bad-auth probes, plus
   real RenderDoc `.rdc` captures and physical KV260 serial/network proof.
+- rv64-ssh-build-regression: The next bounded live retry did not reach QEMU
+  because `SIMPLE_BIN=bin/simple` leaked into the RV64 child native-build and
+  selected a compiler path that failed to link freestanding boot C symbols such
+  as `rt_storage_read_probe`, `rt_string_char_code_at`,
+  `rt_boot_tcp_bind_port`, and `rt_boot_tcp_accept_timeout`. Patched the QEMU
+  build wrapper so RV64 live-helper targets keep using
+  `src/compiler_rust/target/bootstrap/simple` for the child native-build unless
+  `SIMPLE_BINARY` is explicitly set. Verified `SIMPLE_BIN=bin/simple
+  SIMPLE_OS_BUILD_BACKEND=cranelift SIMPLE_LIB=src bin/simple os build
+  --scenario=rv64-ssh` now builds `build/os/simpleos_riscv64_ssh_live.elf`
+  successfully and logs the bootstrap child compiler. Updated the SSpec prose to
+  guest port `2222`, added a static assertion for the child-compiler contract,
+  added the missing sys-test plan, reran focused Simple checks, non-live SSpec
+  6/6, and SPipe docgen. No second live QEMU probe was run after this build fix.
+- rv64-ssh-host-probe-portability: The next bounded live retry reached the RV64
+  image build, QEMU boot, and `[sshd] SSH daemon listening on port 2222`, proving
+  the child-build compiler selection fix moved the lane forward. The host probe
+  then failed before any OpenSSH connection with `rv64-combined-exit=127` and
+  `bash: line 1: setsid: command not found` on macOS. Patched
+  `src/os/ssh_qemu_contract.spl` so x64 and RV64 SSH probes set `setsid_cmd`
+  only when `command -v setsid` succeeds, otherwise invoking `ssh` directly with
+  the existing `SSH_ASKPASS_REQUIRE=force` environment. Added static SSpec
+  assertions for the portable host-probe contract and reran focused checks,
+  non-live RV64 SSpec 6/6, RV64 image build, and SPipe docgen. No second live
+  QEMU probe was run after this host-probe portability fix.
+- rv64-ssh-accept-readiness: The next bounded live retry built the RV64 image,
+  booted QEMU, reached `[sshd] SSH daemon listening on port 2222` and
+  `[sshd] accept loop start`, and launched OpenSSH without the macOS `setsid`
+  failure. OpenSSH established TCP to `127.0.0.1:2222` but timed out during
+  banner exchange; the guest serial log did not show `[sshd] accepted client`
+  or version exchange. Patched the shared SSH host probe to wait for the daemon
+  accept-loop marker, print `[ssh-host] accept-ready=...`, and add a bounded
+  one-second settle before OpenSSH starts, so the next live run tests guest
+  accept/RX behavior after the real readiness boundary. No second live QEMU
+  probe was run after this readiness patch.
+- rv64-ssh-rx-virtqueue-ordering: The next bounded live retry proved the host
+  probe now waits for `[sshd] accept loop start` and logs
+  `[ssh-host] accept-ready=1`, but OpenSSH still established TCP to
+  `127.0.0.1:2222` and timed out during banner exchange. Guest serial still did
+  not show `BTCP SYN` or `[sshd] accepted client`, so the current blocker is
+  below SSH in the RV64 VirtIO RX / boot TCP accept path. Patched the RV64
+  freestanding runtime to add explicit `__sync_synchronize()` ordering around
+  virtqueue avail-ring publication and used-ring polling, and added bounded
+  `BTCP ARP` / `BTCP IPv4` diagnostics reset on each boot TCP bind. This should
+  let the next live run distinguish no RX delivery from ARP/TCP filtering while
+  also fixing a plausible weak-memory descriptor publication bug. No second
+  live QEMU probe was run after this runtime patch.
+- rv64-ssh-rx-ipv4-classification: The next bounded live retry rebuilt the RV64
+  image with the virtqueue ordering patch and proved the guest receives network
+  traffic after accept-loop readiness: serial showed `BTCP ARP` and two
+  `BTCP IPv4` frames before OpenSSH timed out during banner exchange. It still
+  did not show `BTCP SYN` or `[sshd] accepted client`, so RX delivery is now
+  proven and the unresolved blocker is TCP classification/filtering before SYN
+  handling. Patched the RV64 boot TCP runtime to emit bounded diagnostics for
+  non-TCP IPv4 protocol bytes (`BTCP IPP xx`) and TCP destination/flags
+  (`BTCP TCP d=hhhh f=hh`) and reset that diagnostic counter on each boot TCP
+  bind. No second live QEMU probe was run after this diagnostic patch.
+- continue-metal-log-hardening: Hardened production GUI/web parity Metal
+  render-log aggregation with an exact-once SSpec assertion for
+  `production_gui_web_renderer_parity_metal_render_log_tauri_ios_gate_status`.
+  The current wrapper source already emits the row once; the focused fixture now
+  fails if duplicate Tauri iOS Metal gate rows reappear. Focused SSpec passed
+  19/19, SPipe docgen regenerated the mirrored manual with 0 stubs, shell
+  syntax passed, SPipe command wiring passed, generated-spec layout count
+  remained `0`, `git diff --check` passed, and direct-env-runtime guard passed
+  for working and staged scopes. Full mac GUI/Metal completion remains open
+  pending live macOS Metal render-log evidence for Simple, Electron/Chrome
+  Metal-backed browser comparison, and any required Tauri iOS/WKWebView Metal
+  render-log proof.
+- continue-macos-metal-browser-proof: Added
+  `scripts/check/check-macos-metal-browser-backing-evidence.shs` and wired it
+  into the production GUI/web parity Metal render-log path before
+  `check-macos-metal-render-log-compare.shs`. Live Darwin/arm64 evidence now
+  passes generated Metal readback, Engine2D framebuffer readback, Electron
+  ANGLE Metal backing, Chrome ANGLE Metal backing, exact Simple/Chrome/Electron
+  `pairwise-argb-diff` on the stable `css_boxes.html` fixture, ARGB source
+  validation, and the strict macOS Metal render-log compare with
+  `macos_metal_render_log_compare_status=pass`,
+  `macos_metal_render_log_compare_blocked_gate_count=0`, and
+  `macos_metal_render_log_compare_required_api=metal`. Tauri iOS/WKWebView
+  Metal rows remain diagnostic in the default compare
+  (`macos_metal_render_log_compare_tauri_ios_gate_status=not-required`);
+  strict Tauri iOS completion still requires live
+  `check-tauri-mobile-renderer-parity-evidence.shs` evidence and
+  `MACOS_METAL_RENDER_LOG_REQUIRE_TAURI_IOS=1`.
+- continue-strict-tauri-ios-forwarding: Ran the strict macOS Metal compare with
+  `MACOS_METAL_RENDER_LOG_REQUIRE_TAURI_IOS=1`. Desktop Metal evidence still
+  proves generated readback, framebuffer readback, Chrome/Electron Metal
+  backing, pairwise ARGB, and ARGB source gates, but strict mode reports
+  `macos_metal_render_log_compare_status=unavailable`,
+  `macos_metal_render_log_compare_tauri_ios_gate_status=fail`,
+  `macos_metal_render_log_compare_blocked_gates=tauri-ios-wkwebview-metal-render-log`,
+  and missing `build/tauri_mobile_renderer_parity_evidence/evidence.env`.
+  Hardened the production parity wrapper to forward the compare's strict Tauri
+  mode and env artifact diagnostics:
+  `production_gui_web_renderer_parity_metal_render_log_require_tauri_ios`,
+  `production_gui_web_renderer_parity_metal_render_log_tauri_ios_env_file_status`,
+  and
+  `production_gui_web_renderer_parity_metal_render_log_tauri_ios_env_artifact_status`.
+  Focused production SSpec passed 19/19 after the forwarding change and the
+  mirrored manual regenerated with 0 stubs. Full completion remains open until
+  live Tauri iOS/WKWebView Metal renderer parity evidence exists and strict
+  compare passes.
