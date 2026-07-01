@@ -10,13 +10,15 @@ prompt, argv, and summary. `AgentCapabilitySet` stores explicit agent files,
 skill files, MCP servers, and plugins. `AgentReviewRequest` stores reviewer,
 changed files, and guidance. `AgentFileFingerprint` stores caller-supplied
 before/after fingerprints by agent and file path. `AgentProcess` stores the
-minimal launcher PID/status result.
+minimal launcher PID/status result. `AgentTeamMessage` stores explicit team
+transcript entries.
 
 ## Builders
 
 - Single-agent launch: builds one prompt with agent, skill, and task fields.
 - Capability launch: adds SPipe-like agent, skill, MCP, and plugin lists.
 - Team launch: concatenates member launch prompts and records interaction mode.
+- Team interaction: renders caller-supplied `btw` and `side` transcript entries.
 - Low-agent review: lists changed files supplied by caller; no filesystem scan.
 - File-change tracking: compares caller-supplied before/after fingerprints.
 - Claude advisor: returns provider `claude_cli`, mode `advisor`.
@@ -33,5 +35,5 @@ prompt text so callers/tests can catch missing configuration.
 
 `test/01_unit/app/llm_caret/agent_plan_spec.spl` covers builders, fingerprint
 tracking, and provider command resolution with pure assertions. Persistent live
-teams, cancellation policy, plugin install, MCP discovery, and filesystem diff
-capture need later specs.
+teams, cancellation policy, plugin install, MCP discovery, live message buses,
+and filesystem diff capture need later specs.

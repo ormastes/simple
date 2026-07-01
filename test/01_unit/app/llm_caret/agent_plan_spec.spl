@@ -36,6 +36,12 @@ struct AgentCapabilitySet:
     mcp_servers: [text]
     plugins: [text]
 
+struct AgentTeamMessage:
+    from_agent: text
+    to_agent: text
+    channel: text
+    body: text
+
 fn _provider_or_default(provider: text) -> text:
     if provider == "":
         return "claude_cli"
@@ -86,6 +92,17 @@ fn build_agent_team_plan(requests: [AgentLaunchRequest], interaction_mode: text)
         count = count + 1
         prompt = prompt + "\n\nMember " + count.to_text() + "\n" + _agent_prompt(req)
     AgentLaunchPlan(provider: "team", mode: "team", prompt: prompt, argv: ["team", interaction_mode, count.to_text()], summary: "team:" + count.to_text())
+
+fn build_agent_team_interaction_plan(messages: [AgentTeamMessage], interaction_mode: text) -> AgentLaunchPlan:
+    var prompt = "Team interaction: " + interaction_mode
+    var count = 0
+    for msg in messages:
+        count = count + 1
+        prompt = prompt + "\n" + msg.channel + ": " + msg.from_agent + " -> " + msg.to_agent + "\n" + msg.body
+    AgentLaunchPlan(provider: "team", mode: "team_interaction", prompt: prompt, argv: ["team-interaction", interaction_mode, count.to_text()], summary: "team-interaction:" + interaction_mode + ":" + count.to_text())
+
+fn build_btw_side_interaction_plan(messages: [AgentTeamMessage]) -> AgentLaunchPlan:
+    build_agent_team_interaction_plan(messages, "btw-side")
 
 fn build_low_agent_review_plan(req: AgentReviewRequest) -> AgentLaunchPlan:
     var prompt = "Reviewer: " + req.reviewer + "\nGuidance: " + req.guidance + "\nChanged files:"
@@ -208,6 +225,15 @@ describe "LLM Caret agent plans":
         expect(plan.prompt).to_contain("Team interaction: btw-side")
         expect(plan.prompt).to_contain("Member 2")
         expect(plan.summary).to_equal("team:2")
+
+    it "builds btw side team interaction transcript":
+        val btw = AgentTeamMessage(from_agent: "lead", to_agent: "spark", channel: "btw", body: "check docs")
+        val side = AgentTeamMessage(from_agent: "spark", to_agent: "lead", channel: "side", body: "docs updated")
+        val plan = build_btw_side_interaction_plan([btw, side])
+        expect(plan.mode).to_equal("team_interaction")
+        expect(plan.prompt).to_contain("btw: lead -> spark")
+        expect(plan.prompt).to_contain("side: spark -> lead")
+        expect(plan.summary).to_equal("team-interaction:btw-side:2")
 
     it "builds a low agent review plan with tracked files":
         val req = AgentReviewRequest(reviewer: "normal", changed_files: ["src/a.spl", "doc/b.md"], guidance: "review file changes")

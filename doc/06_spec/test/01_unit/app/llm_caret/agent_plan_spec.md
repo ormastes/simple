@@ -27,7 +27,7 @@ agent_plan_spec
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 9 | 9 | 0 | 0 |
+| 10 | 10 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -98,6 +98,26 @@ expect(plan.mode).to_equal("team")
 expect(plan.prompt).to_contain("Team interaction: btw-side")
 expect(plan.prompt).to_contain("Member 2")
 expect(plan.summary).to_equal("team:2")
+```
+
+</details>
+
+#### builds btw side team interaction transcript
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val btw = AgentTeamMessage(from_agent: "lead", to_agent: "spark", channel: "btw", body: "check docs")
+val side = AgentTeamMessage(from_agent: "spark", to_agent: "lead", channel: "side", body: "docs updated")
+val plan = build_btw_side_interaction_plan([btw, side])
+expect(plan.mode).to_equal("team_interaction")
+expect(plan.prompt).to_contain("btw: lead -> spark")
+expect(plan.prompt).to_contain("side: spark -> lead")
+expect(plan.summary).to_equal("team-interaction:btw-side:2")
 ```
 
 </details>
@@ -249,8 +269,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 9 |
-| Active scenarios | 9 |
+| Total scenarios | 10 |
+| Active scenarios | 10 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

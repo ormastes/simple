@@ -19,6 +19,7 @@ Date: 2026-07-01
 
 - `agent_plan.spl` owns agent/team/review/advisor/goal request structs and deterministic prompt construction.
 - `AgentCapabilitySet` owns the SPipe-like explicit agent, skill, MCP server, and plugin handoff lists.
+- `AgentTeamMessage` owns deterministic team transcript entries with `btw` and `side` channels supplied by callers.
 - `track_agent_file_changes` compares caller-supplied before/after fingerprints by agent.
 - `agent_runtime.spl` spawns only already-built single-agent plans and rejects synthetic team plans.
 - Provider wrappers do not read agent markdown or track files; they only receive prompt/argv from callers.
@@ -37,6 +38,8 @@ component "Review caller" -> "agent_plan.spl" : changed files + guidance
 - `build_agent_launch_plan(req) -> AgentLaunchPlan`
 - `build_agent_capability_launch_plan(req, caps) -> AgentLaunchPlan`
 - `build_agent_team_plan(requests, interaction_mode) -> AgentLaunchPlan`
+- `build_agent_team_interaction_plan(messages, interaction_mode) -> AgentLaunchPlan`
+- `build_btw_side_interaction_plan(messages) -> AgentLaunchPlan`
 - `build_low_agent_review_plan(req) -> AgentLaunchPlan`
 - `build_claude_advisor_plan(topic, context) -> AgentLaunchPlan`
 - `build_codex_goal_plan(objective, context) -> AgentLaunchPlan`
@@ -48,5 +51,6 @@ component "Review caller" -> "agent_plan.spl" : changed files + guidance
 |---|---|---|---|
 | LLM Caret planner | `AgentLaunchPlan` | exported structs/functions | prompt/argv only |
 | Capability handoff | `AgentCapabilitySet` | explicit agents/skills/MCP/plugins | no discovery or install |
+| Team transcript | `AgentTeamMessage` | explicit btw/side entries | no live bus |
 | Runtime launcher | `AgentProcess` | PID/status wrapper | no registry or supervisor |
 | Provider wrappers | prompt/argv | no private planner state | no direct file tracking |
