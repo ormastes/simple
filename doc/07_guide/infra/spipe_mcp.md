@@ -89,6 +89,7 @@ rows starting with `d` as directories.
 deleted, renamed, and both-modified rows.
 `git diff` output extracts the destination path from `diff --git a/... b/...`
 headers.
+`git log --name-only` style output extracts standalone path rows.
 Path leaves render as `kind=file`; non-path output remains `kind=line` and can
 still be grouped by explicit log level.
 
