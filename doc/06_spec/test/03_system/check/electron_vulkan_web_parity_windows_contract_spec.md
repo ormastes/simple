@@ -1006,7 +1006,7 @@ expect(stdout).to_contain("electron_vulkan_web_parity_windows_compare_electron_p
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1019,6 +1019,8 @@ val (stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(2)
 expect(stdout).to_contain("electron_vulkan_web_parity_windows_status=fail")
 expect(stdout).to_contain("electron_vulkan_web_parity_windows_reason=electron-proof-html-sha256-mismatch")
+expect(stdout).to_contain("electron_vulkan_web_parity_windows_compare_expected_html_path=" + root + "/page.html")
+expect(stdout).to_contain("electron_vulkan_web_parity_windows_compare_expected_html_sha256=expected-hash")
 expect(stdout).to_contain("electron_vulkan_web_parity_windows_compare_electron_proof_html_sha256=stale-hash")
 ```
 
@@ -1029,7 +1031,7 @@ expect(stdout).to_contain("electron_vulkan_web_parity_windows_compare_electron_p
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1042,6 +1044,7 @@ val (stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(2)
 expect(stdout).to_contain("electron_vulkan_web_parity_windows_status=fail")
 expect(stdout).to_contain("electron_vulkan_web_parity_windows_reason=electron-proof-png-sha256-mismatch")
+expect(stdout).to_contain("electron_vulkan_web_parity_windows_compare_expected_png_sha256=expected-png")
 expect(stdout).to_contain("electron_vulkan_web_parity_windows_compare_electron_proof_png_sha256=stale-png")
 ```
 
@@ -1052,7 +1055,7 @@ expect(stdout).to_contain("electron_vulkan_web_parity_windows_compare_electron_p
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1065,6 +1068,7 @@ val (stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(2)
 expect(stdout).to_contain("electron_vulkan_web_parity_windows_status=fail")
 expect(stdout).to_contain("electron_vulkan_web_parity_windows_reason=electron-proof-captured-argb-sha256-mismatch")
+expect(stdout).to_contain("electron_vulkan_web_parity_windows_compare_expected_captured_argb_sha256=expected-argb")
 expect(stdout).to_contain("electron_vulkan_web_parity_windows_compare_electron_proof_captured_argb_sha256=stale-argb")
 ```
 
