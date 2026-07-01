@@ -428,6 +428,62 @@ Mac GUI/Web Metal completion until production parity reaches
 rows, and the macOS render-log compare reaches
 `macos_metal_render_log_compare_status=pass` with `blocked_gate_count=0`.
 
+### Native Metal Source Env Refresh (2026-07-02)
+
+Current scoped result: two of the three source envs now have current macOS
+evidence; the remaining blocker is the browser-backed Metal/ARGB env.
+
+Commands and rows:
+
+- `SIMPLE_BIN=/Users/ormastes/simple/bin/simple
+  REPORT_PATH=build/mac-gui-metal-current-audit/metal-generated-readback/report.md
+  sh scripts/check/check-metal-generated-2d-readback.shs`
+  emitted:
+  - `metal_generated_2d_readback_status=pass`
+  - `metal_generated_2d_readback_reason=gpu-readback-verified`
+  - `metal_generated_2d_readback_module_verified=true`
+  - `metal_generated_2d_readback_submit_attempted=true`
+  - `metal_generated_2d_readback_readback_available=true`
+  - `metal_generated_2d_readback_actual_checksum=2935174976`
+  - `metal_generated_2d_readback_expected_checksum=2935174976`
+- `SIMPLE_BIN=/Users/ormastes/simple/bin/simple
+  REPORT_PATH=build/mac-gui-metal-current-audit/metal-framebuffer-readback/report.md
+  sh scripts/check/check-metal-engine2d-framebuffer-readback-evidence.shs`
+  emitted:
+  - `metal_engine2d_framebuffer_readback_status=pass`
+  - `metal_engine2d_framebuffer_readback_reason=raw-metal-framebuffer-download-proven`
+  - `metal_engine2d_framebuffer_readback_spec_status=pass`
+  - `metal_engine2d_framebuffer_gpu_readback_available=true`
+  - `metal_engine2d_framebuffer_blur_or_tolerance_used=false`
+- Rerunning
+  `BUILD_DIR=build/mac-gui-metal-current-audit/macos-metal-render-log-compare-after-native
+  REPORT_PATH=build/mac-gui-metal-current-audit/macos-metal-render-log-compare-after-native/report.md
+  sh scripts/check/check-macos-metal-render-log-compare.shs`
+  emitted:
+  - `macos_metal_render_log_compare_status=unavailable`
+  - `macos_metal_render_log_compare_generated_readback_gate_status=pass`
+  - `macos_metal_render_log_compare_generated_checksum_reason=pass`
+  - `macos_metal_render_log_compare_framebuffer_readback_gate_status=pass`
+  - `macos_metal_render_log_compare_browser_backing_gate_status=fail`
+  - `macos_metal_render_log_compare_pairwise_gate_status=fail`
+  - `macos_metal_render_log_compare_argb_source_gate_status=fail`
+  - `macos_metal_render_log_compare_blocked_gate_count=4`
+  - `macos_metal_render_log_compare_blocked_gates=macos-metal-browser-env,browser-metal-backing,pairwise-argb-diff,argb-source-evidence`
+
+Implementation note: the generated readback pass path now emits the singular
+`metal_generated_2d_readback_actual_checksum` and
+`metal_generated_2d_readback_expected_checksum` aliases consumed by
+`check-macos-metal-render-log-compare.shs`; the per-op checksum rows remain the
+stronger readback proof.
+
+Next concrete evidence step: implement or run a current
+`build/macos-metal-browser-backing/evidence.env` producer that captures
+Electron and Chrome browser GPU metadata showing Metal backing, writes
+per-browser source proof files, writes Simple/Chrome/Electron ARGB artifacts for
+the same scene, and emits exact pairwise ARGB diff rows. The render-log compare
+must not be marked complete until that env is present and the rerun reaches
+`blocked_gate_count=0`.
+
 ## Existing Canonical Artifacts
 
 - Feature requirements:
