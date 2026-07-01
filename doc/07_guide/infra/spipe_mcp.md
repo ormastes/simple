@@ -63,7 +63,7 @@ After the release binary is rebuilt, `simple spipe-mcp ...` is the canonical
 shortcut for the same app entrypoint.
 Parser and capture commands accept `--source-kind=K`, `--sourceKind=K`, or
 `--kind=K`; the default is `command_output`. MCP calls may use `source_kind` or
-`sourceKind`.
+`sourceKind`, and raw text may be supplied as `text`, `raw_text`, or `rawText`.
 
 ## MCP Tools
 
@@ -129,6 +129,7 @@ save tools. MCP calls may use either SPipe snake_case arguments
 (`include_patterns`, `ignore_patterns`, `timeout_ms`) or codebase-mcp-style
 camelCase arguments (`includePatterns`, `ignorePatterns`, `timeoutMs`), with
 `cwd` or `repo` accepted as aliases for `root`.
+Existing packed output may be supplied as `text`, `packed_text`, or `packedText`.
 The CLI accepts the same compatibility spellings as flags, for example
 `--cwd`, `--repo`, `--includePatterns`, `--ignorePatterns`, and `--timeoutMs`.
 Existing XML RepoMix input with `<file path=...>` is matched as
