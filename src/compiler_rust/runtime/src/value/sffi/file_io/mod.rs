@@ -34,7 +34,7 @@ pub mod mmap;
 pub mod path;
 
 // Re-export all public functions for compatibility
-pub use metadata::{rt_file_exists, rt_file_stat};
+pub use metadata::{rt_file_exists, rt_dir_exists, rt_file_stat};
 pub use file_ops::{
     rt_file_canonicalize, rt_file_read_text, rt_file_read_text_rv, rt_file_write_text, rt_file_copy, rt_file_remove,
     rt_file_size, rt_file_hash_sha256, rt_file_fsync, rt_file_fsync_cached, rt_file_rename, rt_file_read_lines,

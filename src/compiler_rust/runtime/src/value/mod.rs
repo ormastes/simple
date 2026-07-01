@@ -143,6 +143,7 @@ pub use collections::{
     rt_typed_words_u64_at, rt_typed_words_u64_data_at, rt_typed_words_u64_data_at_checked, rt_typed_words_u64_push,
     rt_typed_words_u64_push_known_at, rt_typed_words_u64_push_known_data_at, rt_typed_words_u64_raw_data_at,
     rt_typed_words_u64_set, rt_typed_words_u64_store_known_data_at, rt_typed_words_u64_unchecked,
+    text_dot_from_char_code,
 };
 pub use utf8_kernels::{
     rt_rank_query, rt_rank_select_build, rt_rank_select_free, rt_select_query, rt_swi_build, rt_swi_byte_to_char,
@@ -327,9 +328,9 @@ pub use sffi::{rt_clear_stdin, rt_has_mock_stdin, rt_read_stdin_char, rt_read_st
 
 // Re-export print SFFI functions
 pub use sffi::{
-    rt_eprint_str, rt_eprint_value, rt_eprintln_str, rt_eprintln_value, rt_print_str, rt_print_value, rt_println_str,
-    rt_println_value, rt_raw_u64_to_string, rt_stderr_flush, rt_stderr_write, rt_stdout_flush, rt_stdout_write,
-    rt_value_format_string, rt_value_to_string,
+    print_raw, rt_eprint_str, rt_eprint_value, rt_eprintln_str, rt_eprintln_value, rt_print_str, rt_print_value,
+    rt_println_str, rt_println_value, rt_raw_u64_to_string, rt_stderr_flush, rt_stderr_write, rt_stdout_flush,
+    rt_stdout_write, rt_value_format_string, rt_value_to_string, stdin_read_char,
 };
 
 // Re-export log SFFI functions
@@ -371,6 +372,7 @@ pub use cli_sffi::{
 pub use sffi::{
     // Metadata
     rt_file_exists,
+    rt_dir_exists,
     rt_file_stat,
     // File ops
     rt_file_canonicalize,

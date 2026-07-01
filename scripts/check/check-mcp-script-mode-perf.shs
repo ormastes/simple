@@ -1,9 +1,10 @@
 #!/bin/sh
 set -eu
 
-RUNS="${RUNS:-5}"
+RUNS="${RUNS:-9}"
 STRICT="${MCP_SCRIPT_PERF_STRICT:-0}"
 USE_SMF="${MCP_SCRIPT_PERF_USE_SMF:-0}"
+SIMPLE_BIN="${MCP_SCRIPT_PERF_SIMPLE_BIN:-bin/simple}"
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT INT TERM
 
@@ -15,30 +16,54 @@ tools='{"jsonrpc":"2.0","id":"2","method":"tools/list","params":{}}'
 } >"$TMPDIR/in"
 
 cat >"$TMPDIR/mcp.py" <<'PY'
-import sys
-sys.stdin.buffer.read()
+import json, sys
+data = sys.stdin.buffer.read()
+pos = 0
+msgs = []
+while pos < len(data):
+    header_end = data.find(b"\r\n\r\n", pos)
+    if header_end < 0:
+        break
+    header = data[pos:header_end].decode()
+    length = int(header.split("Content-Length:", 1)[1].strip())
+    body_start = header_end + 4
+    msg = json.loads(data[body_start:body_start + length])
+    msgs.append(msg)
+    pos = body_start + length
 tools = ",".join(
     '{"name":"tool%d","description":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx","inputSchema":{"type":"object","properties":{}}}' % i
     for i in range(50)
 )
-frames = [
-    '{"jsonrpc":"2.0","id":"1","result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{}},"serverInfo":{"name":"python3","version":"1"}}}',
-    '{"jsonrpc":"2.0","id":"2","result":{"tools":[%s]}}' % tools,
-]
+frames = []
+for msg in msgs:
+    if msg.get("method") == "initialize":
+        frames.append('{"jsonrpc":"2.0","id":"%s","result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{}},"serverInfo":{"name":"python3","version":"1"}}}' % msg.get("id"))
+    elif msg.get("method") == "tools/list":
+        frames.append('{"jsonrpc":"2.0","id":"%s","result":{"tools":[%s]}}' % (msg.get("id"), tools))
 for frame in frames:
     data = frame.encode()
     sys.stdout.buffer.write(("Content-Length: %d\r\n\r\n" % len(data)).encode() + data)
 PY
 
 cat >"$TMPDIR/mcp.js" <<'JS'
-await Bun.stdin.text();
+const input = await Bun.stdin.text();
+let offset = 0;
+const msgs = [];
+while (offset < input.length) {
+  const headerEnd = input.indexOf("\r\n\r\n", offset);
+  if (headerEnd < 0) break;
+  const header = input.slice(offset, headerEnd);
+  const length = Number(header.split("Content-Length:")[1].trim());
+  const bodyStart = headerEnd + 4;
+  msgs.push(JSON.parse(input.slice(bodyStart, bodyStart + length)));
+  offset = bodyStart + length;
+}
 const tools = Array.from({length: 50}, (_, i) =>
   `{"name":"tool${i}","description":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx","inputSchema":{"type":"object","properties":{}}}`
 ).join(",");
-const frames = [
-  '{"jsonrpc":"2.0","id":"1","result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{}},"serverInfo":{"name":"bun","version":"1"}}}',
-  `{"jsonrpc":"2.0","id":"2","result":{"tools":[${tools}]}}`,
-];
+const frames = msgs.map((msg) => msg.method === "initialize"
+  ? `{"jsonrpc":"2.0","id":"${msg.id}","result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{}},"serverInfo":{"name":"bun","version":"1"}}}`
+  : `{"jsonrpc":"2.0","id":"${msg.id}","result":{"tools":[${tools}]}}`);
 for (const frame of frames) {
   process.stdout.write(`Content-Length: ${Buffer.byteLength(frame)}\r\n\r\n${frame}`);
 }
@@ -80,8 +105,8 @@ fi
 if [ "$USE_SMF" = "1" ]; then
   simple_mcp_entry="${MCP_SCRIPT_PERF_MCP_SMF:-build/mcp-script/simple_mcp_server.smf}"
   simple_lsp_entry="${MCP_SCRIPT_PERF_LSP_SMF:-build/mcp-script/simple_lsp_mcp_server.smf}"
-  simple_mcp_ms="$(median_ms simple_mcp_smf env SIMPLE_MCP_TOOL_SET=core SIMPLE_LIB=src bin/simple "$simple_mcp_entry")"
-  simple_lsp_ms="$(median_ms simple_lsp_smf env SIMPLE_LIB=src bin/simple "$simple_lsp_entry")"
+  simple_mcp_ms="$(median_ms simple_mcp_smf env SIMPLE_MCP_TOOL_SET=core SIMPLE_LIB=src "$SIMPLE_BIN" "$simple_mcp_entry")"
+  simple_lsp_ms="$(median_ms simple_lsp_smf env SIMPLE_LIB=src "$SIMPLE_BIN" "$simple_lsp_entry")"
 else
   simple_mcp_ms="$(median_ms simple_mcp env SIMPLE_MCP_TOOL_SET=core SIMPLE_MCP_ALLOW_SOURCE_FALLBACK=1 bin/simple_mcp_server)"
   simple_lsp_ms="$(median_ms simple_lsp bin/simple_lsp_mcp_server)"

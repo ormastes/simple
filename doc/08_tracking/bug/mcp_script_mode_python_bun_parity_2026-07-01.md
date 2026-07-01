@@ -38,9 +38,31 @@ The remaining gap is cold Simple source/interpreter startup and MCP app import
 work, not stdio framing size. The LSP MCP path is closer but still slower than
 the Python/Bun comparator on this host.
 
-The architecture-preserving fast path is checked SMF execution, but MCP SMF
-artifacts currently fail relocation on `rt_dir_exists`; see
+The architecture-preserving fast path is checked SMF execution. The first SMF
+relocation blockers (`rt_dir_exists`, raw stdio, `text.from_char_code`) are
+fixed in source, and bootstrap SMF initialize/tools-list now runs without
+stderr. Deployed `bin/simple` cannot yet be refreshed because Stage 4
+native-build fails with `cannot parse '0.0' as i64`; see
 `doc/08_tracking/bug/mcp_smf_script_artifact_missing_rt_dir_exists_2026-07-01.md`.
+
+2026-07-01 follow-up: bootstrap SMF initialize/tools-list now runs cleanly.
+The source of the remaining gap was eager full-dispatch startup. The SMF path
+now uses a core dispatcher for the core advertised tool set and keeps heavy
+tool families out of startup.
+
+```text
+MCP_SCRIPT_PERF_STRICT=1 sh scripts/check/check-mcp-script-mode-perf.shs
+python3_mcp_median_ms=35
+bun_mcp_median_ms=40
+simple_mcp_script_median_ms=29
+simple_lsp_mcp_script_median_ms=30
+mcp_script_perf_status=pass
+```
+
+The wrappers prefer checked SMF artifacts when present and fall back to source
+mode when `SIMPLE_MCP_DISABLE_SMF=1` / `SIMPLE_LSP_MCP_DISABLE_SMF=1` is set.
+The source MCP entrypoint keeps full dispatch for fallback; the checked MCP SMF
+artifact currently carries the core-dispatch fast path.
 
 ## Verification target
 

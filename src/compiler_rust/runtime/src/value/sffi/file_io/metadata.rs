@@ -20,6 +20,20 @@ pub unsafe extern "C" fn rt_file_exists(path_ptr: *const u8, path_len: u64) -> b
     }
 }
 
+/// Check if a path exists and is a directory.
+#[no_mangle]
+pub unsafe extern "C" fn rt_dir_exists(path_ptr: *const u8, path_len: u64) -> bool {
+    if path_ptr.is_null() {
+        return false;
+    }
+
+    let path_bytes = std::slice::from_raw_parts(path_ptr, path_len as usize);
+    match std::str::from_utf8(path_bytes) {
+        Ok(path_str) => Path::new(path_str).is_dir(),
+        Err(_) => false,
+    }
+}
+
 /// Get file modification time in seconds since epoch.
 #[no_mangle]
 pub unsafe extern "C" fn rt_file_stat(path_ptr: *const u8, path_len: u64) -> i64 {

@@ -28,7 +28,6 @@ var _MCP_TRANSPORT_MODE = "framed"
 fn _mcp_error(scope: text, msg: text):
     stderr_write("[error] " + scope + ": " + msg + "\n")
     stderr_flush()
-use std.mcp_sdk.server.app.{app_extract_id, app_extract_str, app_extract_obj}
 use std.mcp_sdk.server.method_detect.{has_method}
 
 fn _mcp_find_simple_binary() -> text:
@@ -160,7 +159,7 @@ fn mcp_get_cli_args() -> [text]:
     var start_idx = 1
     if raw_args.len() > 2 and raw_args[1] == "run" and raw_args[2].ends_with(".spl"):
         start_idx = 3
-    elif raw_args.len() > 1 and raw_args[1].ends_with(".spl"):
+    elif raw_args.len() > 1 and (raw_args[1].ends_with(".spl") or raw_args[1].ends_with(".smf")):
         start_idx = 2
     var i = start_idx
     while i < raw_args.len():
@@ -270,7 +269,7 @@ fn _mcp_initialize_result() -> text:
 
 # Extract JSON-RPC id from message, with sensible fallbacks.
 fn _mcp_extract_id(msg: text, method: text) -> text:
-    val parsed = app_extract_id(msg)
+    val parsed = extract_id(msg)
     if parsed != "" and parsed != "null":
         return parsed
     if method == "initialize":
@@ -380,8 +379,21 @@ fn main() -> i64:
         return 1
 
     val args_log_stripped = mcp_clean_log_args(raw_args)
-    # Initialise active tool set from env var + argv before stripping the flag.
-    _mcp_init_tool_set(args_log_stripped)
+    val env_set = env_get("SIMPLE_MCP_TOOL_SET") ?? ""
+    if env_set == "auto" or env_set == "core" or env_set == "all":
+        _MCP_TOOL_SET = env_set
+    elif env_set != "":
+        _MCP_TOOL_SET = "auto"
+    var set_i = 0
+    while set_i < args_log_stripped.len():
+        val set_arg = args_log_stripped[set_i]
+        if set_arg.starts_with("--tool-set="):
+            val v = set_arg.replace("--tool-set=", "")
+            if v == "auto" or v == "core" or v == "all":
+                _MCP_TOOL_SET = v
+            else:
+                _MCP_TOOL_SET = "auto"
+        set_i = set_i + 1
     val args = mcp_strip_tool_set_args(args_log_stripped)
     if args.len() > 0 and (args[0] == "--help" or args[0] == "-h" or args[0] == "help"):
         print_help_with_progress(log_opts.progress)
@@ -415,11 +427,6 @@ fn main() -> i64:
             print progress
         return 0
 
-    # Initialize server metadata. Tool metadata and calls are routed through
-    # the static table below; native builds cannot safely register closure
-    # handlers into the generic SDK registry.
-    mcp_server_init(SERVER_NAME, SERVER_VERSION)
-
     # Serve loop — uses direct stdio framing to avoid native Optional transport
     # issues that can stop after the first framed request.
     while true:
@@ -437,13 +444,13 @@ fn main() -> i64:
             response = make_json_result(id, _mcp_initialize_result())
         elif has_method(msg, "tools/call"):
             val id = _mcp_extract_id(msg, "tools/call")
-            val params = app_extract_obj(msg, "params")
+            val params = extract_field_raw(msg, "params")
             var tool_name = ""
             var args_raw = "{}"
-            if params != "":
-                tool_name = app_extract_str(params, "name")
-                val extracted_args = app_extract_obj(params, "arguments")
-                if extracted_args != "":
+            if params != "" and params != "null":
+                tool_name = extract_field(params, "name")
+                val extracted_args = extract_field_raw(params, "arguments")
+                if extracted_args != "" and extracted_args != "null":
                     args_raw = extracted_args
             response = dispatch_tool(id, tool_name, args_raw)
         elif has_method(msg, "tools/list"):

@@ -623,12 +623,23 @@ pub(super) fn eval_builtin(
             match val {
                 Value::Int(n) => Ok(Some(Value::Int(n))),
                 Value::Float(f) => Ok(Some(Value::Int(f as i64))),
-                Value::Str(s) => s.parse::<i64>().map(Value::Int).map(Some).map_err(|_| {
-                    let ctx = ErrorContext::new()
-                        .with_code(codes::TYPE_MISMATCH)
-                        .with_help("string must contain a valid integer");
-                    CompileError::semantic_with_context(format!("cannot parse '{}' as i64", s), ctx)
-                }),
+                Value::Str(s) => match s.trim().parse::<i64>() {
+                    Ok(n) => Ok(Some(Value::Int(n))),
+                    // Tolerate float-form numeric strings ("0.0") by truncating,
+                    // consistent with int(float) above. Only a non-numeric string errors.
+                    Err(_) => match s.trim().parse::<f64>() {
+                        Ok(f) => Ok(Some(Value::Int(f as i64))),
+                        Err(_) => {
+                            let ctx = ErrorContext::new()
+                                .with_code(codes::TYPE_MISMATCH)
+                                .with_help("string must contain a valid integer");
+                            Err(CompileError::semantic_with_context(
+                                format!("cannot parse '{}' as i64", s),
+                                ctx,
+                            ))
+                        }
+                    },
+                },
                 Value::Bool(b) => Ok(Some(Value::Int(if b { 1 } else { 0 }))),
                 _ => {
                     let ctx = ErrorContext::new()

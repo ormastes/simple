@@ -458,6 +458,9 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_string_to_upper",
     "rt_string_to_lower",
     "rt_string_to_int",
+    "stdin_read_char",
+    "print_raw",
+    "text_dot_from_char_code",
     "rt_len",
     "rt_string_find",
     "rt_string_rfind",
@@ -866,6 +869,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_is_debug_mode_enabled",
     // File I/O operations - metadata
     "rt_file_exists",
+    "rt_dir_exists",
     "rt_file_stat",
     // File I/O operations - file ops
     "rt_file_canonicalize",

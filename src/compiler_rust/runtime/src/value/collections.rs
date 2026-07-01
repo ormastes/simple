@@ -1700,6 +1700,17 @@ pub extern "C" fn rt_string_char_code_at(string: RuntimeValue, index: i64) -> i6
     }
 }
 
+/// Compiled symbol for `text.from_char_code(code)`.
+#[no_mangle]
+pub extern "C" fn text_dot_from_char_code(code: i64) -> RuntimeValue {
+    let Some(ch) = char::from_u32(code as u32) else {
+        return RuntimeValue::NIL;
+    };
+    let mut buf = [0u8; 4];
+    let s = ch.encode_utf8(&mut buf);
+    unsafe { rt_string_new(s.as_ptr(), s.len() as u64) }
+}
+
 #[no_mangle]
 pub extern "C" fn rt_text_find(haystack: RuntimeValue, needle: RuntimeValue, start: i64) -> i64 {
     if start < 0 {

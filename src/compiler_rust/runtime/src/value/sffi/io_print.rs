@@ -166,6 +166,12 @@ pub extern "C" fn stdout_write(data: i64) -> i64 {
     0
 }
 
+/// Legacy alias used by source-level `extern fn print_raw(data: text)`.
+#[no_mangle]
+pub extern "C" fn print_raw(data: i64) -> i64 {
+    stdout_write(data)
+}
+
 /// Runtime-prefixed stdout alias used by native-built entry closures.
 #[no_mangle]
 pub extern "C" fn rt_stdout_write(data: i64) -> i64 {

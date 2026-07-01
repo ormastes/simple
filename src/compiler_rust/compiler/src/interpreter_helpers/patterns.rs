@@ -522,7 +522,14 @@ fn bind_let_pattern_element(pat: &Pattern, val: Value, is_mutable: bool, env: &m
     match pat {
         Pattern::Identifier(name) => {
             env.insert(name.clone(), val);
-            if !is_mutable {
+            // A local `val` binding must not const-poison a name that is also a
+            // mutable module-level global. CONST_NAMES is a process-global set
+            // with no scope cleanup, so a local `val arm_body` would otherwise
+            // permanently mark the module-global `var arm_body` as const and make
+            // later `arm_body = []` reassignments fail "cannot assign to const".
+            // Only track names that are not module globals (the collision case is
+            // legitimately mutable and enforced by the compiler's semantic phase).
+            if !is_mutable && !MODULE_GLOBALS.with(|cell| cell.borrow().contains_key(name)) {
                 CONST_NAMES.with(|cell| cell.borrow_mut().insert(name.clone()));
             }
         }

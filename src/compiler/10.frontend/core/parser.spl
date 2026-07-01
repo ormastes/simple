@@ -300,6 +300,20 @@ fn parser_skip_newlines_and_semicolons():
 
 # ===== Type Annotation Parsing =====
 
+# Absorb a postfix `?`/`??` optional suffix after a non-named base type so that
+# `[T]?`, `(T, T)?`, `{K: V}?`, `fn(...)?` parse like the named-type `i64?`
+# shorthand (which is inlined in the named branch below). Returns TYPE_OPTION
+# when a suffix is present, else the base type unchanged.
+fn parser_absorb_optional_suffix(base: i64) -> i64:
+    if par_kind_get() != 130 and par_kind_get() != 132:
+        return base
+    for _qi in 0..12:
+        if par_kind_get() == 130 or par_kind_get() == 132:
+            parser_advance()
+        else:
+            break
+    TYPE_OPTION
+
 fn parser_parse_type() -> i64:
     # dyn Trait -- dynamic dispatch type (parsed as named type)
     if par_kind_get() == 199:
@@ -437,15 +451,15 @@ fn parser_parse_type() -> i64:
         val any_nested = is_nested or is_nested2
         val any_nested2 = any_nested or is_nested3
         val any_nested3 = any_nested2 or is_nested4
+        var arr_type = TYPE_ARRAY_I64
         if any_nested3:
-            return TYPE_ARRAY_ANY
-        if elem_type == TYPE_I64:
-            return TYPE_ARRAY_I64
-        if elem_type == TYPE_TEXT:
-            return TYPE_ARRAY_TEXT
-        if elem_type == TYPE_BOOL:
-            return TYPE_ARRAY_BOOL
-        return TYPE_ARRAY_I64
+            arr_type = TYPE_ARRAY_ANY
+        elif elem_type == TYPE_TEXT:
+            arr_type = TYPE_ARRAY_TEXT
+        elif elem_type == TYPE_BOOL:
+            arr_type = TYPE_ARRAY_BOOL
+        # absorb optional suffix: [T]? -> Option
+        return parser_absorb_optional_suffix(arr_type)
     # Function type: fn(T, T) -> T
     if par_kind_get() == 20:
         parser_advance()
@@ -463,7 +477,7 @@ fn parser_parse_type() -> i64:
         if par_kind_get() == 167:
             parser_advance()
             parser_parse_type()
-        return TYPE_FN
+        return parser_absorb_optional_suffix(TYPE_FN)
     # Tuple type: (T, T)
     if par_kind_get() == 140:
         parser_advance()
@@ -477,7 +491,7 @@ fn parser_parse_type() -> i64:
                     break
                 parser_parse_type()
         parser_expect(141)
-        return TYPE_ANY
+        return parser_absorb_optional_suffix(TYPE_ANY)
     # Dict type: {K: V}
     if par_kind_get() == 142:
         parser_advance()
@@ -487,7 +501,7 @@ fn parser_parse_type() -> i64:
                 parser_advance()
                 parser_parse_type()
         parser_expect(143)
-        return TYPE_DICT
+        return parser_absorb_optional_suffix(TYPE_DICT)
     parser_error("expected type annotation")
     TYPE_VOID
 
