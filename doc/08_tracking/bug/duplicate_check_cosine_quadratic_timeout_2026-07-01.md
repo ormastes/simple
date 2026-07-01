@@ -26,10 +26,19 @@ groups in <30s), so the logic is correct; only the scaling is the problem.
 
 ## Root cause
 
-`refine_groups_with_similarity` / the pairwise loop in
-`_Detector/similarity_grouping.spl` compares every candidate block against every
-other block. Block count grows with file size, so comparisons grow
-quadratically, and the interpreter-bound cosine path cannot keep up.
+Not the pairwise loop — that is already bounded in
+`build_similarity_adjacency` (`max_total_comparisons = 7000`,
+`max_comparisons_per_block = 36`, and `sample_blocks_for_similarity` caps
+analyzed blocks at 320).
+
+The blow-up is upstream, in block extraction. `scan_duplicate_blocks` special-
+cases cosine (`similarity_grouping.spl:271-273`): it sets
+`candidate_files = files` and `repeated_hashes = {}`, so
+`find_duplicates_in_file_with_hash_filter` runs with an empty hash filter and
+emits *every* sliding-window block from *every* file (≈800 blocks from two
+short files). Pass 2 extraction and `group_exact_blocks` over that unfiltered
+block set — interpreter-bound — is what SIGTERMs on a medium directory before
+sampling/pairwise even begins.
 
 ## Not caused by
 
@@ -39,9 +48,14 @@ touched `semantic.spl`'s local path; the cosine path (`features.spl`,
 
 ## Fix direction (not yet done)
 
-Bucket cosine candidates before the pairwise step — reuse the same
-signature-token inverted-index idea now used in `run_semantic_analysis_local`
-(compare only blocks that share a top-weighted token), and/or cap per-bucket
-size. That turns the dominant cost from O(n²) to near-linear for the common
-case. Token mode (the fast exact gate) is unaffected and remains the default
-lexical path.
+Cap the extracted-block set for cosine the way the pairwise step is already
+capped. Options, cheapest first:
+- keep a hash pre-filter for cosine too (don't zero out `repeated_hashes`),
+  scanning only files/blocks that already collide, OR
+- apply `sample_blocks_for_similarity`'s 320-block cap (or a per-file block cap)
+  *before* Pass 2 extraction, not just before the pairwise loop.
+
+Not a mechanical reuse of the semantic inverted-index fix — that fix is in the
+`semantic.spl` doc path; this is a different code path (lexical block
+extraction). Token mode (the fast exact line-window gate) is unaffected and
+remains the default lexical path.
