@@ -815,6 +815,7 @@ async function main() {
       captured_argb_written: Boolean(outputPath),
       png_output_path: pngOutputPath,
       png_written: Boolean(pngOutputPath),
+      png_sha256: pngOutputPath ? sha256File(pngOutputPath) : "",
       geometry_written: Boolean(geometryOutputPath && geometry),
       blur_or_tolerance_used: false,
       gpu_feature_status: gpuFeatureStatus,
