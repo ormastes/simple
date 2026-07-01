@@ -81,6 +81,8 @@ OS=Windows_NT EVWP_WORK=build/windows-electron-vulkan-web-parity \
 - Windows dependency skips use stable `status/reason` fields.
 - Windows execution forces `SIMPLE_EXECUTION_MODE=interpret` for the
   pure-Simple app path.
+- Windows Electron launch flags request Vulkan, ANGLE Vulkan, GPU rasterization,
+  and GPU sandbox disablement explicitly.
 - The compare step fails closed when the Simple-rendered JSON does not report
   `backend` as `vulkan`.
 - The compare helper rejects dimension mismatches and pixel-buffer length
@@ -100,6 +102,7 @@ The wrapper always emits:
 - `electron_vulkan_web_parity_windows_host_os`
 - `electron_vulkan_web_parity_windows_width`
 - `electron_vulkan_web_parity_windows_height`
+- `electron_vulkan_web_parity_windows_electron_launch_flags`
 
 On a Windows host that reaches frame comparison it also emits:
 
@@ -190,7 +193,7 @@ The spec contains:
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 28 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -207,6 +210,12 @@ expect(script).to_contain("vulkan-json-missing")
 expect(script).to_contain("electron-proof-missing")
 expect(script).to_contain("ELECTRON_CAPTURE_PROOF_PATH")
 expect(script).to_contain("ELECTRON_CAPTURE_REMOTE_DEBUGGING_PORT")
+expect(script).to_contain("electron_vulkan_web_parity_windows_electron_launch_flags")
+expect(script).to_contain("--use-angle=vulkan")
+expect(script).to_contain("--use-vulkan")
+expect(script).to_contain("--enable-features=Vulkan,DefaultANGLEVulkan,VulkanFromANGLE")
+expect(script).to_contain("--disable-gpu-sandbox")
+expect(script).to_contain("--enable-gpu-rasterization")
 expect(script).to_contain("electron_vulkan_web_parity_windows_electron_proof_json")
 expect(script).to_contain("scripts/check/electron-vulkan-web-parity-status.js")
 val helper = file_read("scripts/check/electron-vulkan-web-parity-status.js")
