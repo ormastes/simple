@@ -144,6 +144,13 @@ const common = {
   electron_vulkan_web_parity_windows_compare_vulkan_pixel_count: vulkanPixelCount,
 };
 
+if (!validPositiveInteger(electron.width) ||
+    !validPositiveInteger(electron.height) ||
+    !validPositiveInteger(vulkan.width) ||
+    !validPositiveInteger(vulkan.height)) {
+  finish("fail", "frame-metadata-invalid", 2, common);
+}
+
 if (electronProofPath) {
   const electronProofStatus = electronVulkanProof(electron, electronProof);
   common.electron_vulkan_web_parity_windows_compare_electron_proof = electronProofPath;
