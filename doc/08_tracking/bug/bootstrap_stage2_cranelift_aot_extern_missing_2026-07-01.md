@@ -172,3 +172,26 @@ that cannot run code snippets.
 Older revisions may need a temporary `bin/simple` wrapper to the rebuilt
 bootstrap seed while running the staged worker; current bootstrap runs pass the
 active stage compiler through `SIMPLE_BINARY` instead.
+
+## 2026-07-01 Stage4 `-c` Follow-Up
+
+Focused diagnostics on the rebuilt Stage4 full CLI:
+
+```sh
+strace -f -e getpid,execve,openat,write,exit_group \
+  /tmp/spipe_stage4_direct.bin -c 'print(1+1)'
+```
+
+showed the generated binary exiting with code 248 immediately after `getpid()`,
+before opening files, writing diagnostics, or executing a child process. Copying
+the Rust seed to `/tmp/simple_seed` did not change the result. Removing driver
+delegation forced the staged in-process fallback, but that path segfaulted
+after `getpid()`, so it is not a valid deploy workaround.
+
+Attempted `rt_cli_run_code` native-all hook wiring also did not resolve this:
+the rebuilt Stage4 binary still showed `rt_cli_run_code` unresolved in `nm`, so
+calling it directly from Simple caused a segfault. That experiment was reverted.
+
+Safe retained fix: `_cli_driver_binary()` now returns `""` when `bin/simple`
+does not exist instead of returning a missing candidate path. This avoids a
+bad delegation target but does not close the Stage4 `-c` deploy gate.
