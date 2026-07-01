@@ -113,6 +113,8 @@ save tools. MCP calls may use either SPipe snake_case arguments
 (`include_patterns`, `ignore_patterns`, `timeout_ms`) or codebase-mcp-style
 camelCase arguments (`includePatterns`, `ignorePatterns`, `timeoutMs`), with
 `cwd` or `repo` accepted as aliases for `root`.
+The CLI accepts the same compatibility spellings as flags, for example
+`--cwd`, `--repo`, `--includePatterns`, `--ignorePatterns`, and `--timeoutMs`.
 Existing XML RepoMix input with `<file path=...>` is matched as
 `repomix_xml`; markdown-style packs use `repomix_markdown`.
 RepoMix file markers render as file nodes, so codebase packs can be searched
@@ -151,6 +153,7 @@ parsed output, `spipe_context_sql_get` to retrieve one source, and
 `spipe_context_sql_search` to search stored parsed context by query and optional
 source filter. MCP callers may use `db` or `dbPath` as aliases for `db_path`,
 and `sourceFilter` as an alias for `source_filter`.
+The CLI accepts the same aliases as `--dbPath` and `--sourceFilter`.
 
 The explicit MCP names `spipe_context_put_raw`, `spipe_context_get_tree`, and
 `spipe_context_get_raw` are aliases for `spipe_context_put`,
