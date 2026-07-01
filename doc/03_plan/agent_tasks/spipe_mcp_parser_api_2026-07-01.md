@@ -60,10 +60,12 @@ responses through the same stdio oracle.
 
 - Full completion audit against the broad SPipe MCP objective before marking
   the overall goal done.
-- Rebuild/deploy the installed release shortcut after
-  `doc/08_tracking/bug/spipe_mcp_release_shortcut_native_segfault_2026-07-01.md`
-  is fixed. Source wiring is present, but the checked-in release binary is stale
-  and a fresh native CLI build currently segfaults on app subcommands.
+- Rebuild/deploy the installed release shortcut with the native SPipe MCP
+  artifact staged as `build/bootstrap/mcp-package/spipe_mcp` or exposed through
+  `SIMPLE_SPIPE_MCP_BINARY`. `simple spipe-mcp parsers` and
+  `simple spipe-mcp minimality-check --task='add date picker'` pass through
+  that delegate path; the broader monolithic CLI app-subcommand crash remains a
+  separate native CLI bug.
 
 Sidecar lanes: N/A for this first common API patch.
 Merge owner: Codex.

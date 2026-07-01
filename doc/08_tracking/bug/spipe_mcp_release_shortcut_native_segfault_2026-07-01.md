@@ -1,15 +1,16 @@
 # Bug: SPipe MCP Release Shortcut Native Binary Segfaults
 
 Date: 2026-07-01
-Status: open
+Status: fixed
 Severity: P1 for release shortcut deployment
 
 ## Summary
 
-`simple spipe-mcp ...` is wired in source, but the checked-in release binary is
-stale and a freshly native-built CLI binary segfaults when dispatching app
-subcommands. Do not deploy the rebuilt binary until the native app-subcommand
-crash is fixed.
+`simple spipe-mcp ...` is wired in source. A freshly native-built monolithic CLI
+still segfaults when it imports and dispatches several app subcommands
+in-process, but SPipe MCP has a working native entrypoint. The release shortcut
+now delegates to an explicit/package SPipe MCP binary instead of importing the
+app into the CLI binary.
 
 ## Evidence
 
@@ -71,13 +72,36 @@ That narrows the bug to top-level native CLI app-subcommand dispatch or native
 codegen for the `src/app/cli/main.spl` import path, not the SPipe MCP parser
 library or `src/app/spipe_mcp/main.spl` entrypoint.
 
-## Next Step
-
-Debug native app-subcommand dispatch from `src/app/cli/main.spl` through
-`src/app/io/_CliCommands/run_commands.spl`. After that is fixed, rebuild the
-release binary and re-run:
+Fixed shortcut behavior:
 
 ```sh
-bin/release/simple spipe-mcp parsers
-bin/release/simple spipe-mcp minimality-check --task='add date picker'
+bin/release/simple native-build --source src/compiler --source src/app --source src/lib \
+  --entry-closure --entry src/app/cli/main.spl \
+  -o build/spipe_mcp_shortcut_fix/simple
+
+bin/release/simple native-build --source src/compiler --source src/app --source src/lib \
+  --entry-closure --entry src/app/spipe_mcp/main.spl \
+  -o build/spipe_mcp_shortcut_fix/spipe_mcp
+
+SIMPLE_SPIPE_MCP_BINARY=build/spipe_mcp_shortcut_fix/spipe_mcp \
+  build/spipe_mcp_shortcut_fix/simple spipe-mcp parsers
+# exit 0, prints parser names
+
+SIMPLE_SPIPE_MCP_BINARY=build/spipe_mcp_shortcut_fix/spipe_mcp \
+  build/spipe_mcp_shortcut_fix/simple spipe-mcp minimality-check --task='add date picker'
+# exit 0, prints native-date minimality guidance
 ```
+
+The package artifact lookup also works when the native SPipe MCP binary is
+staged at `build/bootstrap/mcp-package/spipe_mcp`:
+
+```sh
+build/spipe_mcp_shortcut_fix/simple spipe-mcp parsers
+# exit 0, prints parser names
+```
+
+## Remaining Native CLI Bug
+
+The broader monolithic CLI native app-subcommand crash still exists outside the
+SPipe MCP shortcut and should be tracked separately before converting other
+app subcommands back to in-process native imports.
