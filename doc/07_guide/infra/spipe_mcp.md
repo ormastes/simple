@@ -81,13 +81,13 @@ The hook tools normalize Claude, Codex, Gemini, Cursor, and generic provider eve
 names into SPipe phases such as `pre_tool`, `post_tool`, `pre_prompt`,
 `post_turn`, `pre_edit`, `post_edit`, and `pre_commit`.
 
-The codebase tools run RepoMix with a fixed argv vector
+The codebase tools run RepoMix with a fixed argv vector. Local packs use
 `npx -y repomix <root> --stdout --style markdown --include <patterns> --ignore
-<patterns>`, ingest existing RepoMix/codebase-mcp output, index it in the
-session-local tree store, and expose the focused Simple MCP include/ignore
-profile. `spipe_codebase_pack_local` and `spipe_codebase_pack_remote` are
-aliases of `spipe_codebase_pack`; pass a local path or RepoMix-supported URL as
-`root`. Pack tools return status and byte count only; use
+<patterns>`; remote packs use `npx -y repomix --remote <root> --stdout --style
+markdown --include <patterns> --ignore <patterns>`. They ingest existing
+RepoMix/codebase-mcp output, index it in the session-local tree store, and
+expose the focused Simple MCP include/ignore profile. Pack tools return status
+and byte count only; use
 `spipe_codebase_search` or `spipe_codebase_get` to inspect the stored tree.
 Existing XML RepoMix input with `<file path=...>` is matched as
 `repomix_xml`; markdown-style packs use `repomix_markdown`.
