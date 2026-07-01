@@ -27,7 +27,7 @@ electron_vulkan_web_parity_windows_contract_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 27 | 27 | 0 | 0 |
+| 28 | 28 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -81,6 +81,8 @@ OS=Windows_NT EVWP_WORK=build/windows-electron-vulkan-web-parity \
 - Windows dependency skips use stable `status/reason` fields.
 - Windows execution forces `SIMPLE_EXECUTION_MODE=interpret` for the
   pure-Simple app path.
+- Windows execution allows an explicit Electron binary override for setup
+  diagnostics without changing renderer semantics.
 - Windows Electron launch flags request Vulkan, ANGLE Vulkan, GPU rasterization,
   and GPU sandbox disablement explicitly.
 - Windows Electron launch flag overrides must retain the required Vulkan flags
@@ -93,6 +95,8 @@ OS=Windows_NT EVWP_WORK=build/windows-electron-vulkan-web-parity \
 - Windows execution records the resolved `vulkan-1.dll` loader path and skips
   before renderer launch when an explicit or standard Windows loader path is
   missing.
+- Windows dependency skips for Electron and Node are reported before Vulkan
+  loader absence so operator setup errors are not masked.
 - The compare step fails closed when the Simple-rendered JSON does not report
   `backend` as `vulkan`.
 - The compare helper rejects dimension mismatches and pixel-buffer length
@@ -268,7 +272,7 @@ The spec contains:
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 71 lines folded for reproduction.
+Runnable source: 72 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -286,6 +290,7 @@ expect(script).to_contain("simple-bin-forbidden")
 expect(script).to_contain("simple-bin-probe-failed")
 expect(script).to_contain("simple-bin-version-not-simple")
 expect(script).to_contain("requires-windows")
+expect(script).to_contain("EVWP_ELECTRON_BIN")
 expect(script).to_contain("electron-missing")
 expect(script).to_contain("node-missing")
 expect(script).to_contain("SIMPLE_EXECUTION_MODE=interpret")
@@ -380,7 +385,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val root = "build/test-electron-vulkan-web-parity-windows-vulkan-loader-missing"
 val missing_loader = "$PWD/" + root + "/missing-vulkan-1.dll"
-val command = "rm -rf " + root + " && mkdir -p " + root + " && printf '%s\\n' '#!/bin/sh' 'if [ \"$1\" = \"--version\" ]; then echo \"Simple Language v1.0.0-beta\"; exit 0; fi' 'exit 0' > " + root + "/fake-simple && chmod +x " + root + "/fake-simple && OS=Windows_NT SIMPLE_BIN=$PWD/" + root + "/fake-simple EVWP_VULKAN_DLL=" + missing_loader + " EVWP_WORK=" + root + "/work sh scripts/check/check-electron-vulkan-web-parity-windows.shs"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && printf '%s\\n' '#!/bin/sh' 'exit 0' > " + root + "/fake-electron && chmod +x " + root + "/fake-electron && printf '%s\\n' '#!/bin/sh' 'if [ \"$1\" = \"--version\" ]; then echo \"Simple Language v1.0.0-beta\"; exit 0; fi' 'exit 0' > " + root + "/fake-simple && chmod +x " + root + "/fake-simple && OS=Windows_NT SIMPLE_BIN=$PWD/" + root + "/fake-simple EVWP_ELECTRON_BIN=$PWD/" + root + "/fake-electron EVWP_VULKAN_DLL=" + missing_loader + " EVWP_WORK=" + root + "/work sh scripts/check/check-electron-vulkan-web-parity-windows.shs"
 val (stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 
 expect(code).to_equal(0)
@@ -391,6 +396,29 @@ expect(stdout).to_contain(root + "/missing-vulkan-1.dll")
 expect(stdout).to_contain("electron_vulkan_web_parity_windows_vulkan_loader_status=missing")
 expect(stdout.contains("electron_vulkan_web_parity_windows_electron_capture_exit_code=")).to_equal(false)
 expect(stdout.contains("electron_vulkan_web_parity_windows_simple_render_exit_code=")).to_equal(false)
+```
+
+</details>
+
+#### reports missing Electron before Vulkan loader absence
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-electron-vulkan-web-parity-windows-electron-before-loader"
+val missing_loader = "$PWD/" + root + "/missing-vulkan-1.dll"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && printf '%s\\n' '#!/bin/sh' 'if [ \"$1\" = \"--version\" ]; then echo \"Simple Language v1.0.0-beta\"; exit 0; fi' 'exit 0' > " + root + "/fake-simple && chmod +x " + root + "/fake-simple && OS=Windows_NT SIMPLE_BIN=$PWD/" + root + "/fake-simple EVWP_ELECTRON_BIN=$PWD/" + root + "/missing-electron EVWP_VULKAN_DLL=" + missing_loader + " EVWP_WORK=" + root + "/work sh scripts/check/check-electron-vulkan-web-parity-windows.shs"
+val (stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+
+expect(code).to_equal(0)
+expect(stdout).to_contain("electron_vulkan_web_parity_windows_status=skip")
+expect(stdout).to_contain("electron_vulkan_web_parity_windows_reason=electron-missing")
+expect(stdout).to_contain("electron_vulkan_web_parity_windows_vulkan_loader=" + missing_loader)
+expect(stdout).to_contain("electron_vulkan_web_parity_windows_vulkan_loader_status=unknown")
 ```
 
 </details>
@@ -957,8 +985,8 @@ expect(stdout).to_contain("electron_vulkan_web_parity_windows_compare_invalid_vu
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 27 |
-| Active scenarios | 27 |
+| Total scenarios | 28 |
+| Active scenarios | 28 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
