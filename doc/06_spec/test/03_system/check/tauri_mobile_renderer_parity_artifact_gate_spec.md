@@ -138,16 +138,11 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_mobile_renderer_parity
 - The aggregate requires Android render-log validator rows to identify the
   coherent Vulkan-backed WebView render-log source path and byte size.
 - The aggregate re-checks the coherent Android render-log source as a regular
-<<<<<<< Conflict 1 of 1
-+++++++ Contents of side #1
   file artifact and rejects missing, symlinked, hardlinked, or byte-size-
   mismatched paths.
-%%%%%%% Changes from base to side #2
-   file artifact and rejects missing, symlinked, or byte-size-mismatched paths.
-+- Android evidence must include a foreground marker proving `com.simple.ui`
-+  remained the active app while the render-log and screenshot evidence were
-+  captured.
->>>>>>> Conflict 1 of 1 ends
+- Android evidence must include a foreground marker proving `com.simple.ui`
+  remained the active app while the render-log and screenshot evidence were
+  captured.
 
 ## Scenarios
 
@@ -162,7 +157,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_mobile_renderer_parity
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 123 lines folded for reproduction.
+Runnable source: 124 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -666,7 +661,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val root = "build/test-tauri-mobile-artifact-gate-aliased-lane-env"
 val command = _run_aggregate_command(root, "present", "present", "png", "png")
-    .replace("BUILD_DIR=" + root + "/out REPORT_PATH=", "mkdir -p " + root + "/out && printf 'status=pass\\nreason=forged\\n' > " + root + "/forged-ios.env && ln -s ../forged-ios.env " + root + "/out/ios.out && printf 'status=pass\\nreason=forged\\n' > " + root + "/forged-android.env && ln " + root + "/forged-android.env " + root + "/out/android.out && BUILD_DIR=" + root + "/out REPORT_PATH=")
+    .replace("PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=", "mkdir -p " + root + "/out && printf 'status=pass\\nreason=forged\\n' > " + root + "/forged-ios.env && ln -s ../forged-ios.env " + root + "/out/ios.out && printf 'status=pass\\nreason=forged\\n' > " + root + "/forged-android.env && ln " + root + "/forged-android.env " + root + "/out/android.out && PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=")
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(1)
 
@@ -815,13 +810,11 @@ val android = file_read(root + "-android/stdout.env")
 step("Confirm aggregate validates the MDI proof JSON artifact itself")
 expect(ios).to_contain("tauri_mobile_renderer_parity_status=fail")
 expect(ios).to_contain("tauri_mobile_renderer_parity_reason=ios-mdi-proof-json-invalid")
-expect(ios).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_file_reason=row-mismatch")
 expect(ios).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_file_status=fail")
 expect(ios).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_file_reason=invalid-json")
 expect(ios).to_contain("tauri_mobile_renderer_parity_ios_mdi_event_status=pass")
 expect(android).to_contain("tauri_mobile_renderer_parity_status=fail")
 expect(android).to_contain("tauri_mobile_renderer_parity_reason=android-mdi-proof-json-invalid")
-expect(android).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_file_reason=row-mismatch")
 expect(android).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_file_status=fail")
 expect(android).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_file_reason=contract-missing")
 expect(android).to_contain("tauri_mobile_renderer_parity_android_mdi_animation_status=pass")
@@ -853,13 +846,11 @@ val android = file_read(root + "-android/stdout.env")
 step("Confirm MDI proof artifacts are bound to normalized mobile rows")
 expect(ios).to_contain("tauri_mobile_renderer_parity_status=fail")
 expect(ios).to_contain("tauri_mobile_renderer_parity_reason=ios-mdi-proof-json-invalid")
-expect(ios).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_file_reason=row-mismatch")
 expect(ios).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_file_status=fail")
 expect(ios).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_file_reason=row-mismatch")
 expect(ios).to_contain("tauri_mobile_renderer_parity_ios_mdi_performance_now_delta_ms=1.5")
 expect(android).to_contain("tauri_mobile_renderer_parity_status=fail")
 expect(android).to_contain("tauri_mobile_renderer_parity_reason=android-mdi-proof-json-invalid")
-expect(android).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_file_reason=row-mismatch")
 expect(android).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_file_status=fail")
 expect(android).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_file_reason=row-mismatch")
 expect(android).to_contain("tauri_mobile_renderer_parity_android_mdi_animation_frame_count=3")
@@ -1051,7 +1042,7 @@ expect(android).to_contain("tauri_mobile_renderer_parity_android_mdi_animation_s
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1085,7 +1076,7 @@ expect(android).to_contain("tauri_mobile_renderer_parity_android_mdi_animation_f
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1118,7 +1109,7 @@ expect(android).to_contain("tauri_mobile_renderer_parity_android_mdi_interaction
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1154,7 +1145,7 @@ expect(android).to_contain("tauri_mobile_renderer_parity_android_mdi_capture_scr
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1190,7 +1181,7 @@ expect(android).to_contain("tauri_mobile_renderer_parity_android_mdi_input_to_pa
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
