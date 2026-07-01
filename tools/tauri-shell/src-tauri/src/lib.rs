@@ -237,13 +237,17 @@ fn mdi_proof_json_from_url(url: &tauri::Url) -> Option<String> {
     Some(serde_json::Value::Object(object).to_string())
 }
 
-fn record_mdi_proof_json(proof_json: String, app: Option<&AppHandle>) {
+fn record_mdi_proof_json(proof_json: String, _app: Option<&AppHandle>) {
     eprintln!("[tauri-shell] mdi proof: {}", proof_json);
     if let Ok(path) = env::var("SIMPLE_TAURI_MDI_PROOF_PATH") {
-        let _ = fs::write(path, proof_json);
-        if let Some(app) = app {
-            app.exit(0);
+        if fs::metadata(&path)
+            .map(|metadata| metadata.len() > 0)
+            .unwrap_or(false)
+        {
+            eprintln!("[tauri-shell] mdi proof write skipped reason=already-recorded");
+            return;
         }
+        let _ = fs::write(path, proof_json);
     }
 }
 
@@ -718,6 +722,7 @@ fn maybe_write_tauri_mdi_proof(app: &AppHandle) {
                 var inputToPaintMs = 0;
                 var animationFrameAvailable = typeof window.requestAnimationFrame === 'function';
                 var animationFrameCount = 0;
+                var proofRetryCount = 0;
                 var cssAnimationProbe = false;
                 var viewportWidth = Math.max(document.documentElement ? document.documentElement.clientWidth : 0, window.innerWidth || 0);
                 var viewportHeight = Math.max(document.documentElement ? document.documentElement.clientHeight : 0, window.innerHeight || 0);
@@ -857,6 +862,23 @@ fn maybe_write_tauri_mdi_proof(app: &AppHandle) {
                         animationFrameCount: animationFrameCount,
                         cssAnimationProbe: cssAnimationProbe
                     };
+                    var proofIncomplete = (
+                        proof.count < 4 ||
+                        proof.imageCount < 1 ||
+                        proof.sourceWindowCount < 4 ||
+                        proof.taskbarItemCount < 4 ||
+                        proof.taskbarIconCount < 4 ||
+                        !proof.hasDesktop ||
+                        !proof.hasSimpleSmokeText ||
+                        !proof.htmlRenderable
+                    );
+                    if (proofIncomplete) {
+                        if (proofRetryCount < 20) {
+                            proofRetryCount += 1;
+                            window.setTimeout(finish, 100);
+                        }
+                        return;
+                    }
                     if (proofFetchUrl && typeof fetch === 'function') {
                         var params = new URLSearchParams();
                         Object.keys(proof).forEach(function(key) {
@@ -865,14 +887,16 @@ fn maybe_write_tauri_mdi_proof(app: &AppHandle) {
                         });
                         fetch(proofFetchUrl + '?' + params.toString()).catch(function() {});
                     }
-                    try {
-                        var navParams = new URLSearchParams();
-                        Object.keys(proof).forEach(function(key) {
-                            var value = proof[key];
-                            navParams.set(key, Array.isArray(value) ? value.join('|') : String(value));
-                        });
-                        window.location.href = 'simple-mdi-proof://capture?' + navParams.toString();
-                    } catch (_) {}
+                    if (!proofFetchUrl && !invoke) {
+                        try {
+                            var navParams = new URLSearchParams();
+                            Object.keys(proof).forEach(function(key) {
+                                var value = proof[key];
+                                navParams.set(key, Array.isArray(value) ? value.join('|') : String(value));
+                            });
+                            window.location.href = 'simple-mdi-proof://capture?' + navParams.toString();
+                        } catch (_) {}
+                    }
                     if (invoke) {
                         invoke('report_mdi_proof', { proof: proof }).catch(function() {});
                     }
@@ -1740,8 +1764,22 @@ fn inline_shell_document_script(html: &str) -> String {
 // Shared entry point for desktop and mobile
 // ---------------------------------------------------------------------------
 
+#[cfg(target_os = "ios")]
+fn ignore_ios_sigpipe() {
+    // The iOS simulator can close diagnostic stdio pipes while the app remains
+    // valid. Do not let later stderr/stdout writes terminate the GUI process.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+    }
+}
+
+#[cfg(not(target_os = "ios"))]
+fn ignore_ios_sigpipe() {}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    ignore_ios_sigpipe();
+
     // Check for external URL mode (e.g. --url http://localhost:3000)
     let external_url = resolve_external_url();
     let shared_wm_requested = shared_wm_requested();
