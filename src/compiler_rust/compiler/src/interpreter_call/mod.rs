@@ -37,11 +37,22 @@ type ImplMethods = HashMap<String, Vec<Arc<FunctionDef>>>;
 
 const METHOD_SELF: &str = "self";
 
+/// Cached `SIMPLE_DEBUG_OVERLOAD_SELECT` flag. This is read on the hot overload-
+/// resolution path (per candidate, per param, and recursively per array element),
+/// where calling `std::env::var_os` every time is pathologically slow — it locks
+/// the process environment and allocates on each call, which stalled interpreted
+/// native-build for minutes. The flag never changes during a run, so read it once.
+fn debug_overload_select() -> bool {
+    use std::sync::OnceLock;
+    static FLAG: OnceLock<bool> = OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var_os("SIMPLE_DEBUG_OVERLOAD_SELECT").is_some())
+}
+
 fn value_type_matches_name(value: &Value, expected: &str) -> bool {
     let matched = value.type_name() == expected
         || value.matches_type(expected)
         || matches!((value, expected), (Value::Str(_), "text"));
-    if std::env::var_os("SIMPLE_DEBUG_OVERLOAD_SELECT").is_some() {
+    if debug_overload_select() {
         println!(
             "[type-match] expected={expected} runtime={} display={} matched={matched}",
             value.type_name(),
@@ -69,7 +80,7 @@ fn overload_score(func: &FunctionDef, values: &[Value]) -> Option<usize> {
         return None;
     }
 
-    let debug_overloads = std::env::var_os("SIMPLE_DEBUG_OVERLOAD_SELECT").is_some();
+    let debug_overloads = debug_overload_select();
     let mut score = 0usize;
     for (param, value) in func.params.iter().zip(values.iter()) {
         if debug_overloads {
@@ -137,7 +148,7 @@ where
         })
         .collect();
 
-    if std::env::var_os("SIMPLE_DEBUG_OVERLOAD_SELECT").is_some() {
+    if debug_overload_select() {
         if let Ok(mut file) = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
