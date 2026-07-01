@@ -25,6 +25,15 @@ security, and guarded-write gates for release handoff.
 Durable-store readiness is intentionally blocked until the example has a
 supported durable storage facade.
 
+## Unified Business Suite (UBS) Integration
+
+Core MDSOC modules now integrated:
+- **Kernel**: event_log, projection, commit_loop — append-only ledger + balanced-entry invariant
+- **Dimensions**: money (nominal, no coercion), time, location, identity, approval, permission
+- **Tests**: event_log_spec, projection_spec, commit_loop_spec, dimensions_spec, money_spec
+
+See `doc/unified_business_suite_mdsoc.md` for full MDSOC architecture and feature catalog.
+
 Run:
 
 ```bash
