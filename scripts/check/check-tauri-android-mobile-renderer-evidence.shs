@@ -2,6 +2,7 @@
 set -eu
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)"
+TAURI_DIR="$ROOT_DIR/tools/tauri-shell"
 BUILD_DIR="$ROOT_DIR/build/tauri_android_mobile_renderer"
 APK="${ANDROID_APK:-$ROOT_DIR/tools/tauri-shell/src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk}"
 SCREENSHOT="${ANDROID_RENDERER_SCREENSHOT:-$BUILD_DIR/android_renderer.png}"
@@ -9,6 +10,7 @@ LOGCAT="$BUILD_DIR/android_renderer_logcat.txt"
 TIMEOUT_SECS="${ANDROID_RENDERER_TIMEOUT_SECS:-120}"
 ADB="${ADB:-adb}"
 EMULATOR="${EMULATOR:-emulator}"
+ANDROID_RUNTIME_AARCH64="${SIMPLE_ANDROID_RUNTIME_AARCH64:-$ROOT_DIR/src/compiler_rust/target/aarch64-linux-android/release/simple}"
 PACKAGE_NAME="${ANDROID_PACKAGE_NAME:-com.simple.ui}"
 HWUI_RENDERER="${ANDROID_RENDERER_HWUI_RENDERER-}"
 EMULATOR_GPU_MODE="${ANDROID_EMULATOR_GPU_MODE:-host}"
@@ -69,11 +71,61 @@ PY
 
 mkdir -p "$BUILD_DIR"
 
+find_tool() {
+    configured="$1"
+    shift
+    if command -v "$configured" >/dev/null 2>&1; then
+        command -v "$configured"
+        return 0
+    fi
+    for candidate in "$@"; do
+        if [ -x "$candidate" ]; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+    echo "$configured"
+}
+
+ADB="$(find_tool "$ADB" \
+    "${ANDROID_HOME:-}/platform-tools/adb" \
+    "${ANDROID_SDK_ROOT:-}/platform-tools/adb" \
+    "${HOME:-}/Library/Android/sdk/platform-tools/adb")"
+EMULATOR="$(find_tool "$EMULATOR" \
+    "${ANDROID_HOME:-}/emulator/emulator" \
+    "${ANDROID_SDK_ROOT:-}/emulator/emulator" \
+    "${HOME:-}/Library/Android/sdk/emulator/emulator")"
+
+build_apk_if_missing() {
+    if [ -f "$APK" ] && apk_has_arm64_runtime; then
+        return 0
+    fi
+    command -v cargo >/dev/null 2>&1 || fail "Android APK missing and cargo not found: $APK"
+    command -v npm >/dev/null 2>&1 || fail "Android APK missing and npm not found: $APK"
+    test -d "$TAURI_DIR" || fail "Android APK missing and Tauri shell missing: $TAURI_DIR"
+    test -x "$ANDROID_RUNTIME_AARCH64" \
+        || fail "Android APK missing and aarch64 Simple runtime missing: $ANDROID_RUNTIME_AARCH64"
+    (
+        cd "$TAURI_DIR"
+        npm install > "$BUILD_DIR/android_npm_install.log" 2>&1 &&
+        export PATH="$TAURI_DIR/node_modules/.bin:$PATH" &&
+        export SIMPLE_ANDROID_RUNTIME_AARCH64="$ANDROID_RUNTIME_AARCH64" &&
+        sh "$TAURI_DIR/scripts/build-ui-bundle.shs" > "$BUILD_DIR/android_build_ui_bundle.log" 2>&1 &&
+        npm run prepare:dist > "$BUILD_DIR/android_prepare_dist.log" 2>&1 &&
+        cargo tauri android build --debug --target aarch64 > "$BUILD_DIR/android_build_apk.log" 2>&1
+    ) || fail "Android APK build failed; see $BUILD_DIR/android_build_apk.log"
+}
+
+apk_has_arm64_runtime() {
+    test -f "$APK" \
+        && unzip -l "$APK" | grep -q 'lib/arm64-v8a/libsimple_mobile_runtime_exec\.so'
+}
+
 command -v "$ADB" >/dev/null 2>&1 || fail "adb not found"
 command -v "$EMULATOR" >/dev/null 2>&1 || true
+build_apk_if_missing
 test -f "$APK" || fail "Android APK missing: $APK"
-unzip -l "$APK" | grep -q 'lib/arm64-v8a/libsimple_mobile_runtime_exec\.so' \
-    || fail "Android APK missing arm64-v8a packaged Simple runtime"
+apk_has_arm64_runtime || fail "Android APK missing arm64-v8a packaged Simple runtime"
 
 DEVICE_SERIAL="${ANDROID_SERIAL:-}"
 if [ -z "$DEVICE_SERIAL" ]; then

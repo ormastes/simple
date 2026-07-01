@@ -194,6 +194,15 @@ Metal log markers, and live Android emulator rendering with Vulkan/skiavk log
 markers plus screenshot proof. Evidence is written to
 `doc/09_report/tauri_mobile_renderer_parity_evidence_<date>.md`.
 
+2026-07-02 wrapper bootstrap note: the aggregate delegates to platform wrappers
+that install `tools/tauri-shell` npm dependencies before invoking Tauri. The iOS
+wrapper adds `tools/tauri-shell/node_modules/.bin` to `PATH` before
+`cargo tauri ios dev`; the Android wrapper discovers `adb`/`emulator` from
+`ANDROID_HOME`, `ANDROID_SDK_ROOT`, or the default macOS SDK path and rebuilds a
+stale/missing debug APK only when the arm64 Simple runtime artifact is available
+at `SIMPLE_ANDROID_RUNTIME_AARCH64` or
+`src/compiler_rust/target/aarch64-linux-android/release/simple`.
+
 2026-06-26 status: pass. iOS simulator Metal-backed Tauri2/WKWebView rendering
 passes with a nonblank mobile UI screenshot and Metal markers. Android arm64
 runtime and APK packaging pass, and the Android emulator host-Vulkan lane passes

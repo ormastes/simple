@@ -109,7 +109,10 @@ sh scripts/check/check-tauri-ios-mobile-renderer-evidence.shs
 The script selects an available iPhone simulator, launches the bundled Tauri2
 app without an external dev server, waits for the Simple render/eval log, takes
 a simulator screenshot, validates that the PNG is nonblank, and requires Metal
-log markers. On 2026-06-26 this passed on iPhone 17 Pro with
+log markers. It installs `tools/tauri-shell` npm dependencies and prepends
+`tools/tauri-shell/node_modules/.bin` to `PATH` before running
+`cargo tauri ios dev`, so Xcode script phases can find the local `tauri`
+command. On 2026-06-26 this passed on iPhone 17 Pro with
 `ios_render_log_status=pass`, `ios_layout_status=pass`, and
 `ios_metal_log_status=pass`.
 

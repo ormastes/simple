@@ -767,3 +767,26 @@ Completion requires all of the following evidence in the current workspace:
   spec or wrapper that owns the behavior.
 - The branch ignores the later `origin/main` crash-lane evidence commits without
   an explicit reconciliation decision.
+
+## 2026-07-02 Mobile Bootstrap Rerun
+
+Desktop production GUI/Web parity evidence remains green in
+`build/goal-production-gui-web-parity-current/evidence.env`, including the
+Metal render-log gate. A mobile aggregate rerun with explicit host Simple and
+Android SDK tools reached the live mobile wrappers but still failed:
+
+- `tauri_mobile_renderer_parity_status=fail`
+- `tauri_mobile_renderer_parity_reason=Tauri iOS render log not observed within 120s`
+- `tauri_mobile_renderer_parity_ios_status=fail`
+- `tauri_mobile_renderer_parity_android_status=fail`
+- Android initially built the debug APK, but the package lacked
+  `lib/arm64-v8a/libsimple_mobile_runtime_exec.so` because the local
+  `src/compiler_rust/target/aarch64-linux-android/release/simple` runtime was
+  not present.
+
+Wrapper hardening in this lane now installs local Tauri npm dependencies for
+iOS, puts `tools/tauri-shell/node_modules/.bin` on `PATH`, discovers adb and
+emulator from the normal macOS Android SDK locations, and rebuilds stale/missing
+Android APKs only when the arm64 Simple runtime artifact is available. The
+remaining completion blockers are live iOS render-log observation and producing
+or supplying the Android arm64 Simple runtime before rerunning the aggregate.

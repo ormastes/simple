@@ -79,10 +79,17 @@ sh scripts/check/check-tauri-android-mobile-renderer-evidence.shs
 
 The evidence script installs the APK, launches `com.simple.ui/.MainActivity`,
 captures logcat and a screenshot, and fails closed on `F/DEBUG`, `Fatal signal`,
-`VulkanManager`, `Headless UI completed`, and subprocess parse failures. By
-default it starts a no-window emulator with `-gpu host`, leaves Android's HWUI
-renderer unchanged, and reads `build/tauri_android_mobile_renderer/emulator.out`
-as supporting Vulkan evidence. Override `ANDROID_RENDERER_HWUI_RENDERER`,
+`VulkanManager`, `Headless UI completed`, and subprocess parse failures. If the
+debug APK is missing or stale and lacks
+`lib/arm64-v8a/libsimple_mobile_runtime_exec.so`, the script installs local npm
+dependencies, rebuilds the UI bundle, runs `npm run prepare:dist`, and invokes
+`cargo tauri android build --debug --target aarch64`. That auto-build requires a
+packaged Simple runtime from `SIMPLE_ANDROID_RUNTIME_AARCH64` or
+`src/compiler_rust/target/aarch64-linux-android/release/simple`; otherwise it
+fails before producing another APK without the runtime. By default it starts a
+no-window emulator with `-gpu host`, leaves Android's HWUI renderer unchanged,
+and reads `build/tauri_android_mobile_renderer/emulator.out` as supporting
+Vulkan evidence. Override `ANDROID_RENDERER_HWUI_RENDERER`,
 `ANDROID_EMULATOR_GPU_MODE`, or `ANDROID_RENDERER_GPU_LOG` when testing another
 device/emulator lane.
 
