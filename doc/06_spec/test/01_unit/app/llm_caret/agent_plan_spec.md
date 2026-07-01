@@ -27,7 +27,7 @@ agent_plan_spec
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 13 | 13 | 0 | 0 |
+| 15 | 15 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -235,6 +235,44 @@ expect(changes.changed_files[1]).to_equal("doc/b.md")
 
 </details>
 
+#### discovers mcp and plugin names from manifests
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val mcp_json = "{\"name\":\"io.github.simple-mcp\",\"packages\":[{\"identifier\":\"@simple-lang/mcp-server\"}]},"
+val plugin_sdn = "plugin:\n  name: spipe\n  mcp: mcp/server.js\n"
+val mcp = parse_mcp_manifest(mcp_json)
+val plugins = parse_plugin_manifest(plugin_sdn)
+expect(mcp.len()).to_equal(2)
+expect(mcp[0]).to_equal("io.github.simple-mcp")
+expect(mcp[1]).to_equal("@simple-lang/mcp-server")
+expect(plugins[0]).to_equal("spipe")
+```
+
+</details>
+
+#### builds plugin install args
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val args = build_plugin_install_args("ponytail", "", ["--local"])
+expect(args[0]).to_equal("install-plugin")
+expect(args[1]).to_equal("ponytail")
+expect(args[2]).to_equal("--local")
+```
+
+</details>
+
 #### resolves provider commands for launch
 
 <details>
@@ -324,8 +362,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 13 |
-| Active scenarios | 13 |
+| Total scenarios | 15 |
+| Active scenarios | 15 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

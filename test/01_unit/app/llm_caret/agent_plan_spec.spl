@@ -59,6 +59,10 @@ struct AgentVcsChangeResult:
     reason: text
     changes: AgentFileChangeSet
 
+struct AgentDiscoverySet:
+    mcp_servers: [text]
+    plugins: [text]
+
 fn _provider_or_default(provider: text) -> text:
     if provider == "":
         return "claude_cli"
@@ -208,6 +212,52 @@ fn parse_vcs_changed_files(agent_id: text, stdout: text) -> AgentFileChangeSet:
         files = _add_unique(files, line.trim())
     AgentFileChangeSet(agent_id: agent_id, changed_files: files)
 
+fn _between(text_value: text, left: text, right: text) -> text:
+    val parts = text_value.split(left)
+    if parts.len() < 2:
+        return ""
+    val rest = parts[1]
+    val end_parts = rest.split(right)
+    if end_parts.len() == 0:
+        return ""
+    end_parts[0].trim()
+
+fn _line_value(manifest: text, key: text) -> text:
+    for line in manifest.split("\n"):
+        val trimmed = line.trim()
+        if trimmed.starts_with(key + ":"):
+            return trimmed.substring((key + ":").len()).trim()
+    ""
+
+fn parse_mcp_manifest(manifest: text) -> [text]:
+    var servers: [text] = []
+    servers = _add_unique(servers, _between(manifest, "\"name\":\"", "\""))
+    servers = _add_unique(servers, _between(manifest, "\"name\": \"", "\""))
+    servers = _add_unique(servers, _between(manifest, "\"identifier\":\"", "\""))
+    servers = _add_unique(servers, _between(manifest, "\"identifier\": \"", "\""))
+    servers = _add_unique(servers, _line_value(manifest, "mcp"))
+    servers
+
+fn parse_plugin_manifest(manifest: text) -> [text]:
+    var plugins: [text] = []
+    plugins = _add_unique(plugins, _between(manifest, "\"name\":\"", "\""))
+    plugins = _add_unique(plugins, _between(manifest, "\"name\": \"", "\""))
+    plugins = _add_unique(plugins, _line_value(manifest, "name"))
+    plugins
+
+fn build_plugin_install_args(plugin: text, installer: text, extra_args: [text]) -> [text]:
+    var args: [text] = []
+    if installer != "":
+        args = args + [installer]
+    else:
+        args = args + ["install-plugin"]
+    if plugin != "":
+        args = args + [plugin]
+    for arg in extra_args:
+        if arg != "":
+            args = args + [arg]
+    args
+
 fn agent_command_for_provider(provider: text, claude_path: text, codex_path: text, opencode_path: text) -> text:
     if provider == "codex":
         if codex_path != "":
@@ -336,6 +386,22 @@ describe "LLM Caret agent plans":
         expect(changes.changed_files.len()).to_equal(2)
         expect(changes.changed_files[0]).to_equal("src/a.spl")
         expect(changes.changed_files[1]).to_equal("doc/b.md")
+
+    it "discovers mcp and plugin names from manifests":
+        val mcp_json = "{\"name\":\"io.github.simple-mcp\",\"packages\":[{\"identifier\":\"@simple-lang/mcp-server\"}]},"
+        val plugin_sdn = "plugin:\n  name: spipe\n  mcp: mcp/server.js\n"
+        val mcp = parse_mcp_manifest(mcp_json)
+        val plugins = parse_plugin_manifest(plugin_sdn)
+        expect(mcp.len()).to_equal(2)
+        expect(mcp[0]).to_equal("io.github.simple-mcp")
+        expect(mcp[1]).to_equal("@simple-lang/mcp-server")
+        expect(plugins[0]).to_equal("spipe")
+
+    it "builds plugin install args":
+        val args = build_plugin_install_args("ponytail", "", ["--local"])
+        expect(args[0]).to_equal("install-plugin")
+        expect(args[1]).to_equal("ponytail")
+        expect(args[2]).to_equal("--local")
 
     it "resolves provider commands for launch":
         expect(agent_command_for_provider("codex", "", "", "")).to_equal("codex")

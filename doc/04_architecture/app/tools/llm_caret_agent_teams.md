@@ -13,6 +13,7 @@ Date: 2026-07-01
 | Common request node | `src/app/llm_caret/agent_plan.spl` | public to LLM Caret callers |
 | File snapshot node | `src/app/llm_caret/agent_files.spl` | public helper over app I/O facade |
 | VCS discovery node | `src/app/llm_caret/agent_vcs.spl` | public helper over app process facade |
+| Capability discovery node | `src/app/llm_caret/agent_discovery.spl` | public pure manifest parser |
 | Runtime launcher | `src/app/llm_caret/agent_runtime.spl` | public wrapper over process facade |
 | Provider wrappers | `src/app/llm_caret/*_cli.spl` | sibling consumers of prompt/argv outputs |
 | CLI/app callers | future `src/app/**` | consume only exported planner APIs |
@@ -25,6 +26,7 @@ Date: 2026-07-01
 - `track_agent_file_changes` compares caller-supplied before/after fingerprints by agent.
 - `agent_files.spl` snapshots existing paths with `file_exists` and `file_hash_sha256` from `app.io.mod`.
 - `agent_vcs.spl` runs `jj diff --name-only` or caller-supplied VCS args through `app.io.mod.process_run`.
+- `agent_discovery.spl` parses small MCP/plugin manifest text and builds plugin install argv lists without executing them.
 - `agent_runtime.spl` spawns already-built single-agent plans and can launch a caller-supplied request list as one non-persistent team result.
 - Provider wrappers do not read agent markdown or track files; they only receive prompt/argv from callers.
 - File diff capture and live process supervision remain outside this node.
@@ -51,6 +53,10 @@ component "Review caller" -> "agent_plan.spl" : changed files + guidance
 - `detect_agent_file_changes(before, after) -> [AgentFileChangeSet]`
 - `discover_agent_vcs_changes(agent_id, vcs_path, args) -> AgentVcsChangeResult`
 - `parse_vcs_changed_files(agent_id, stdout) -> AgentFileChangeSet`
+- `parse_mcp_manifest(manifest) -> [text]`
+- `parse_plugin_manifest(manifest) -> [text]`
+- `discover_agent_capabilities(mcp_manifests, plugin_manifests) -> AgentDiscoverySet`
+- `build_plugin_install_args(plugin, installer, extra_args) -> [text]`
 - `launch_agent_plan(agent_id, plan, claude_path, codex_path, opencode_path) -> AgentProcess`
 - `launch_agent_team(team_id, requests, claude_path, codex_path, opencode_path) -> AgentTeamProcess`
 - `summarize_agent_team(team_id, processes) -> AgentTeamProcess`
@@ -60,7 +66,7 @@ component "Review caller" -> "agent_plan.spl" : changed files + guidance
 | Raw layer | common request node | public to parent | public to next-layer sibling |
 |---|---|---|---|
 | LLM Caret planner | `AgentLaunchPlan` | exported structs/functions | prompt/argv only |
-| Capability handoff | `AgentCapabilitySet` | explicit agents/skills/MCP/plugins | no discovery or install |
+| Capability handoff | `AgentCapabilitySet`, `AgentDiscoverySet` | explicit agents/skills/MCP/plugins plus manifest parsing | no live registry or install execution |
 | Team transcript | `AgentTeamMessage` | explicit btw/side entries | no live bus |
 | File snapshots | `AgentFileFingerprint` | existing-file hashes | no VCS scanning |
 | VCS discovery | `AgentVcsChangeResult` | changed file list | no background watcher |
