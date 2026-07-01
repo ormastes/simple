@@ -269,16 +269,16 @@ listed above once. Do not apply the patch in the shared checkout.
 ### Applied 3-Way Probe Conflict Triage (2026-07-02)
 
 The 3-way patch was applied in `/tmp/simple-mac-metal-reconcile-probe` only.
-It stopped with unresolved conflicts and left the main checkout untouched. The
-disposable worktree has these unmerged files:
+It originally stopped with unresolved conflicts and left the main checkout
+untouched. The disposable worktree conflict triage now has these results:
 
 | File | Conflict blocks | First conflict line | Resolution priority |
 | --- | ---: | ---: | --- |
-| `scripts/check/check-gui-renderdoc-feature-coverage-status.shs` | 49 | 75 | First: this is the aggregate forwarder and the largest semantic merge. |
-| `test/03_system/check/gui_renderdoc_feature_coverage_status_spec.spl` | 20 | 227 | Resolve with the aggregate script so rows and expectations stay paired. |
-| `test/03_system/check/renderdoc_electron_html_gate_spec.spl` | 9 | 72 | Resolve after Electron RenderDoc gate rows are stable. |
-| `test/03_system/check/electron_live_smoke_proof_validator_spec.spl` | 7 | 2 | Resolve after live-smoke proof schema is selected. |
-| `test/03_system/gui/tauri_mobile_renderer_parity_evidence_spec.spl` | 5 | 6 | Resolve after mobile production-Metal dependency rows are selected. |
+| `scripts/check/check-gui-renderdoc-feature-coverage-status.shs` | 0 | resolved | Resolved in disposable worktree: kept the richer `origin/main` aggregate surface and preserved this branch's top-level Electron GPU-process exit passthrough rows and report summary. `sh -n` passed and the file is staged in the disposable worktree. |
+| `test/03_system/check/gui_renderdoc_feature_coverage_status_spec.spl` | 0 | resolved | Resolved with the aggregate script: kept the expanded `origin/main` aggregate expectations and retained assertions for `electron_renderdoc_gate_gpu_process_exit_*` rows. `/Users/ormastes/simple/bin/simple check` passed and the file is staged in the disposable worktree. |
+| `test/03_system/check/renderdoc_electron_html_gate_spec.spl` | 0 | resolved | Resolved in disposable worktree: kept the `origin/main` superset that preserves GPU-process crash diagnostics and adds launch metadata plus source-contract freshness checks. `/Users/ormastes/simple/bin/simple check` passed and the file is staged in the disposable worktree. |
+| `test/03_system/check/electron_live_smoke_proof_validator_spec.spl` | 0 | resolved | Resolved in disposable worktree: kept the comprehensive `origin/main` validator coverage for complete live proof, proof-source/proof-JSON provenance, Chromium/Electron process versions, screenshot artifact integrity, event/perf/animation rows, strict numeric/boolean typing, and early wrapper diagnostics; updated metadata to this resume plan and requirement/design docs. `/Users/ormastes/simple/bin/simple check` passed and the file is staged in the disposable worktree. |
+| `test/03_system/gui/tauri_mobile_renderer_parity_evidence_spec.spl` | 0 | resolved | Resolved in disposable worktree: kept the richer `origin/main` mobile evidence coverage, retained explicit MDI interaction-latency assertions, and restored production Metal render-log fixture rows plus forwarded `tauri_mobile_renderer_parity_production_metal_render_log_*` expectations. `/Users/ormastes/simple/bin/simple check` passed and the file is staged in the disposable worktree. |
 | `scripts/check/check-gui-widget-renderdoc-goal-status.shs` | 0 | resolved | Resolved in disposable worktree: kept `origin/main` Electron launch exit/timeout/metadata rows in both env output and Markdown report. `sh -n` passed and the file is staged in the disposable worktree. |
 | `test/03_system/check/macos_metal_render_log_compare_spec.spl` | 0 | resolved | Resolved in disposable worktree: kept the comprehensive controlled-fixture spec from `origin/main`, updated its metadata to this mac/mobile resume plan and requirement/design docs, and confirmed it still asserts gate summary, backing, pairwise ARGB, artifact, and Xcode capture report rows. `/Users/ormastes/simple/bin/simple check` passed and the file is staged in the disposable worktree. |
 | `scripts/check/check-production-gui-web-renderer-parity-evidence.shs` | 0 | resolved | Resolved in disposable worktree: kept `origin/main` Simple binary provenance rows and preserved this branch's 300-second subcheck timeout default. `sh -n` passed and the file is staged in the disposable worktree. |
@@ -290,16 +290,91 @@ Cleanly patched files in the disposable worktree:
 - `scripts/check/check-renderdoc-electron-html-gate.shs`
 - `scripts/check/check-tauri-mobile-renderer-parity-evidence.shs`
 - `test/03_system/check/gui_widget_renderdoc_goal_status_spec.spl`
+  (`/Users/ormastes/simple/bin/simple check` passed)
 - `test/03_system/check/production_gui_web_renderer_parity_gate_spec.spl`
+  (`/Users/ormastes/simple/bin/simple check` passed)
 
-Remaining unresolved files in `/tmp/simple-mac-metal-reconcile-probe`: 5.
+Remaining unresolved files in `/tmp/simple-mac-metal-reconcile-probe`: 0.
 
-Next concrete integration step: resolve
-`scripts/check/check-gui-renderdoc-feature-coverage-status.shs` and
-`test/03_system/check/gui_renderdoc_feature_coverage_status_spec.spl` together
-inside the disposable worktree, then run only
-`gui_renderdoc_feature_coverage_status_spec.spl` before moving to the smaller
-conflict pairs.
+Aggregate merge result: the resolved aggregate keeps the `origin/main` evidence
+surface, including browser-backing source/provenance rows, Electron launch
+metadata, ARGB artifact file/status rows, GUI showcase 4K/8K perf rows, and
+macOS Metal blocked-gate forwarding. It also preserves this branch's top-level
+Electron GPU-process crash diagnostics:
+`electron_renderdoc_gate_gpu_process_exit_status`,
+`electron_renderdoc_gate_gpu_process_exit_count`,
+`electron_renderdoc_gate_gpu_process_exit_codes`, and
+`electron_renderdoc_gate_gpu_process_exit_reason`, sourced from the
+`rdoc_electron_html_gate_gpu_process_exit_*` rows emitted by
+`check-renderdoc-electron-html-gate.shs`. The already-present
+`gui_widget_renderdoc_goal_electron_gate_gpu_process_exit_*` rows remain covered
+by the aggregate spec.
+
+Focused probe checks passed:
+
+- `sh -n` for the touched shell wrappers:
+  `check-gui-renderdoc-feature-coverage-status.shs`,
+  `check-gui-widget-renderdoc-goal-status.shs`,
+  `check-production-gui-web-renderer-parity-evidence.shs`,
+  `check-renderdoc-electron-html-gate.shs`,
+  `check-tauri-mobile-renderer-parity-evidence.shs`,
+  `check-electron-live-smoke.shs`, and
+  `check-macos-metal-render-log-compare.shs`.
+- `/Users/ormastes/simple/bin/simple check` for
+  `macos_metal_render_log_compare_spec.spl`,
+  `electron_live_smoke_proof_validator_spec.spl`,
+  `gui_renderdoc_feature_coverage_status_spec.spl`,
+  `renderdoc_electron_html_gate_spec.spl`,
+  `tauri_mobile_renderer_parity_evidence_spec.spl`,
+  `production_gui_web_renderer_parity_gate_spec.spl`, and
+  `gui_widget_renderdoc_goal_status_spec.spl`.
+
+Next concrete integration step: decide whether to materialize the staged
+disposable-worktree reconciliation into the feature branch, or continue using
+the probe as evidence while resolving any remaining broader `origin/main`
+renderer commit equivalence questions.
+
+### Current-Tip Materialization Worktree (2026-07-02)
+
+The staged disposable probe reconciliation was materialized onto the current
+feature tip in a clean worktree:
+
+- Worktree: `/tmp/simple-mac-metal-materialize`
+- Base commit: `04990d735c6b3e275fd7cd58a67c54a08ddba038`
+  (`docs(gui): record renderer hardening reconciliation plan`)
+- Patch source: staged diff from `/tmp/simple-mac-metal-reconcile-probe`
+- Apply result: `git apply --index --3way` applied all 10 scoped renderer files
+  cleanly with no conflicts.
+- Materialized files:
+  - `scripts/check/check-gui-renderdoc-feature-coverage-status.shs`
+  - `scripts/check/check-gui-widget-renderdoc-goal-status.shs`
+  - `scripts/check/check-production-gui-web-renderer-parity-evidence.shs`
+  - `scripts/check/check-renderdoc-electron-html-gate.shs`
+  - `test/03_system/check/electron_live_smoke_proof_validator_spec.spl`
+  - `test/03_system/check/gui_renderdoc_feature_coverage_status_spec.spl`
+  - `test/03_system/check/macos_metal_render_log_compare_spec.spl`
+  - `test/03_system/check/production_gui_web_renderer_parity_gate_spec.spl`
+  - `test/03_system/check/renderdoc_electron_html_gate_spec.spl`
+  - `test/03_system/gui/tauri_mobile_renderer_parity_evidence_spec.spl`
+
+Materialized current-tip checks passed:
+
+- `sh -n` for all touched shell wrappers listed above.
+- `git diff --check --cached` in `/tmp/simple-mac-metal-materialize`.
+- Conflict-marker scan across the resolved renderer scripts/specs.
+- `/Users/ormastes/simple/bin/simple check` for:
+  `macos_metal_render_log_compare_spec.spl`,
+  `electron_live_smoke_proof_validator_spec.spl`,
+  `gui_renderdoc_feature_coverage_status_spec.spl`,
+  `renderdoc_electron_html_gate_spec.spl`,
+  `tauri_mobile_renderer_parity_evidence_spec.spl`,
+  `production_gui_web_renderer_parity_gate_spec.spl`, and
+  `gui_widget_renderdoc_goal_status_spec.spl`.
+
+Next concrete integration step: commit or otherwise promote the staged
+materialized worktree changes from `/tmp/simple-mac-metal-materialize` onto the
+feature branch, then run the mandatory generated-spec layout and direct-env
+guards before final verification.
 
 ## Existing Canonical Artifacts
 
