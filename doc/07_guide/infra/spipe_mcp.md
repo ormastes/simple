@@ -223,7 +223,7 @@ line 1.
 `scripts/smoke/spipe_mcp_protocol_smoke.spl` is the focused live protocol
 oracle. It sends JSONL `initialize`, `tools/list`, `spipe_context_put`, and
 `spipe_context_search` requests through the stdio server and checks the rendered
-level group, parent chain, and raw pointer.
+level group, parent chain, raw pointer, and absence of non-MCP stdout banners.
 
 ## Current Boundary
 
