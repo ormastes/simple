@@ -91,6 +91,8 @@ OS=Windows_NT EVWP_WORK=build/windows-electron-vulkan-web-parity \
   frames that do not prove Vulkan-backed GPU compositing.
 - Electron capture and Simple Vulkan render subprocess failures emit stable
   `status=fail` rows instead of falling out through shell `set -e`.
+- Windows execution probes the selected Simple binary before Electron startup
+  and records version provenance for pure-Simple evidence.
 
 ## Evidence Rows
 
@@ -101,6 +103,8 @@ The wrapper emits these common rows for every terminal status:
 - `electron_vulkan_web_parity_windows_simple_bin`
 - `electron_vulkan_web_parity_windows_simple_bin_source`
 - `electron_vulkan_web_parity_windows_simple_bin_status`
+- `electron_vulkan_web_parity_windows_simple_bin_probe_exit_code`
+- `electron_vulkan_web_parity_windows_simple_bin_version`
 - `electron_vulkan_web_parity_windows_host_os`
 - `electron_vulkan_web_parity_windows_width`
 - `electron_vulkan_web_parity_windows_height`
@@ -206,7 +210,7 @@ The spec contains:
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 41 lines folded for reproduction.
+Runnable source: 45 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -215,6 +219,8 @@ val script = file_read("scripts/check/check-electron-vulkan-web-parity-windows.s
 expect(script).to_contain("electron_vulkan_web_parity_windows_status")
 expect(script).to_contain("electron_vulkan_web_parity_windows_reason")
 expect(script).to_contain("simple-bin-forbidden")
+expect(script).to_contain("simple-bin-probe-failed")
+expect(script).to_contain("simple-bin-version-not-simple")
 expect(script).to_contain("requires-windows")
 expect(script).to_contain("electron-missing")
 expect(script).to_contain("node-missing")
@@ -224,6 +230,8 @@ expect(script).to_contain("electron-proof-missing")
 expect(script).to_contain("ELECTRON_CAPTURE_PROOF_PATH")
 expect(script).to_contain("ELECTRON_CAPTURE_REMOTE_DEBUGGING_PORT")
 expect(script).to_contain("electron_vulkan_web_parity_windows_electron_launch_flags")
+expect(script).to_contain("electron_vulkan_web_parity_windows_simple_bin_probe_exit_code")
+expect(script).to_contain("electron_vulkan_web_parity_windows_simple_bin_version")
 expect(script).to_contain("electron_vulkan_web_parity_windows_electron_capture_exit_code")
 expect(script).to_contain("electron_vulkan_web_parity_windows_simple_render_exit_code")
 expect(script).to_contain("electron-capture-failed")
@@ -279,17 +287,18 @@ expect(_stdout).to_contain("electron_vulkan_web_parity_windows_simple_bin_status
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val root = "build/test-electron-vulkan-web-parity-windows-electron-fail"
-val command = "rm -rf " + root + " && mkdir -p " + root + " tools/electron-shell/node_modules/.bin && printf '%s\\n' '#!/bin/sh' 'exit 7' > tools/electron-shell/node_modules/.bin/electron && chmod +x tools/electron-shell/node_modules/.bin/electron && printf '%s\\n' '#!/bin/sh' 'exit 0' > " + root + "/fake-simple && chmod +x " + root + "/fake-simple && OS=Windows_NT SIMPLE_BIN=$PWD/" + root + "/fake-simple EVWP_WORK=" + root + "/work sh scripts/check/check-electron-vulkan-web-parity-windows.shs; code=$?; rm -f tools/electron-shell/node_modules/.bin/electron; exit $code"
+val command = "rm -rf " + root + " && mkdir -p " + root + " tools/electron-shell/node_modules/.bin && printf '%s\\n' '#!/bin/sh' 'exit 7' > tools/electron-shell/node_modules/.bin/electron && chmod +x tools/electron-shell/node_modules/.bin/electron && printf '%s\\n' '#!/bin/sh' 'if [ \"$1\" = \"--version\" ]; then echo \"Simple Language v1.0.0-beta\"; exit 0; fi' 'exit 0' > " + root + "/fake-simple && chmod +x " + root + "/fake-simple && OS=Windows_NT SIMPLE_BIN=$PWD/" + root + "/fake-simple EVWP_WORK=" + root + "/work sh scripts/check/check-electron-vulkan-web-parity-windows.shs; code=$?; rm -f tools/electron-shell/node_modules/.bin/electron; exit $code"
 val (stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 
 expect(code).to_equal(1)
 expect(stdout).to_contain("electron_vulkan_web_parity_windows_status=fail")
 expect(stdout).to_contain("electron_vulkan_web_parity_windows_reason=electron-capture-failed")
+expect(stdout).to_contain("electron_vulkan_web_parity_windows_simple_bin_version=Simple Language v1.0.0-beta")
 expect(stdout).to_contain("electron_vulkan_web_parity_windows_electron_capture_exit_code=7")
 ```
 
@@ -300,19 +309,20 @@ expect(stdout).to_contain("electron_vulkan_web_parity_windows_electron_capture_e
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val root = "build/test-electron-vulkan-web-parity-windows-simple-render-fail"
 val electron_json = "'{\"width\":2,\"height\":2,\"pixels\":[1,2,3,4]}'"
 val proof_json = "'{\"gpu_feature_status\":{\"vulkan\":\"enabled\",\"gpu_compositing\":\"enabled\"},\"browser_target_gpu_info_status\":\"pass\",\"browser_target_gpu_info\":{\"gpu\":{\"auxAttributes\":{\"hardwareSupportsVulkan\":true,\"displayType\":\"Vulkan\",\"glImplementationParts\":\"angle=vulkan\",\"skiaBackendType\":\"Vulkan\",\"glRenderer\":\"Vulkan\"}}}}}'"
-val command = "rm -rf " + root + " && mkdir -p " + root + " tools/electron-shell/node_modules/.bin && printf '%s\\n' '#!/bin/sh' 'printf \"%s\\\\n\" " + electron_json + " > \"$ELECTRON_CAPTURE_OUTPUT\"' 'printf \"%s\\\\n\" " + proof_json + " > \"$ELECTRON_CAPTURE_PROOF_PATH\"' 'exit 0' > tools/electron-shell/node_modules/.bin/electron && chmod +x tools/electron-shell/node_modules/.bin/electron && printf '%s\\n' '#!/bin/sh' 'exit 9' > " + root + "/fake-simple && chmod +x " + root + "/fake-simple && OS=Windows_NT SIMPLE_BIN=$PWD/" + root + "/fake-simple EVWP_WORK=" + root + "/work sh scripts/check/check-electron-vulkan-web-parity-windows.shs; code=$?; rm -f tools/electron-shell/node_modules/.bin/electron; exit $code"
+val command = "rm -rf " + root + " && mkdir -p " + root + " tools/electron-shell/node_modules/.bin && printf '%s\\n' '#!/bin/sh' 'printf \"%s\\\\n\" " + electron_json + " > \"$ELECTRON_CAPTURE_OUTPUT\"' 'printf \"%s\\\\n\" " + proof_json + " > \"$ELECTRON_CAPTURE_PROOF_PATH\"' 'exit 0' > tools/electron-shell/node_modules/.bin/electron && chmod +x tools/electron-shell/node_modules/.bin/electron && printf '%s\\n' '#!/bin/sh' 'if [ \"$1\" = \"--version\" ]; then echo \"Simple Language v1.0.0-beta\"; exit 0; fi' 'exit 9' > " + root + "/fake-simple && chmod +x " + root + "/fake-simple && OS=Windows_NT SIMPLE_BIN=$PWD/" + root + "/fake-simple EVWP_WORK=" + root + "/work sh scripts/check/check-electron-vulkan-web-parity-windows.shs; code=$?; rm -f tools/electron-shell/node_modules/.bin/electron; exit $code"
 val (stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 
 expect(code).to_equal(1)
 expect(stdout).to_contain("electron_vulkan_web_parity_windows_status=fail")
 expect(stdout).to_contain("electron_vulkan_web_parity_windows_reason=simple-vulkan-render-failed")
+expect(stdout).to_contain("electron_vulkan_web_parity_windows_simple_bin_probe_exit_code=0")
 expect(stdout).to_contain("electron_vulkan_web_parity_windows_electron_capture_exit_code=0")
 expect(stdout).to_contain("electron_vulkan_web_parity_windows_simple_render_exit_code=9")
 ```
