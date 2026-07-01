@@ -1,0 +1,45 @@
+use common.wine_kernel32_startup_info.{
+    WineKernel32StartupInfo,
+    wine_kernel32_execute_startup_info,
+    wine_kernel32_startup_info_default
+}
+
+describe "Wine KERNEL32 startup info bridge":
+    it "executes bounded startup info and standard handle discovery":
+        val result = wine_kernel32_execute_startup_info(
+            ["GetStartupInfoW", "GetStdHandle", "GetStdHandle", "GetStdHandle"],
+            wine_kernel32_startup_info_default()
+        )
+
+        expect(result.ok).to_equal(true)
+        expect(result.show_window).to_equal(1)
+        expect(result.std_input).to_equal(-10)
+        expect(result.std_output).to_equal(-11)
+        expect(result.std_error).to_equal(-12)
+        expect(result.desktop).to_equal("winsta0\\default")
+        expect(result.operations).to_equal("GetStartupInfoW GetStdHandle GetStdHandle GetStdHandle")
+
+    it "keeps startup info dispatch ordered and bounded":
+        val out_of_order = wine_kernel32_execute_startup_info(
+            ["GetStdHandle", "GetStartupInfoW", "GetStdHandle", "GetStdHandle"],
+            wine_kernel32_startup_info_default()
+        )
+        expect(out_of_order.ok).to_equal(false)
+        expect(out_of_order.error).to_equal("kernel32-startup-info-sequence-expected:GetStartupInfoW")
+
+        val wrong_family = wine_kernel32_execute_startup_info(
+            ["GetStartupInfoW", "GetStdHandle", "GetStdHandle", "HeapAlloc"],
+            wine_kernel32_startup_info_default()
+        )
+        expect(wrong_family.ok).to_equal(false)
+        expect(wrong_family.error).to_equal("bridge-wrong-category:HeapAlloc")
+
+    it "rejects invalid standard handle models":
+        val info = WineKernel32StartupInfo(show_window: 1, std_input: -10, std_output: 99, std_error: -12, desktop: "winsta0\\default", title: "SimpleOS Wine")
+        val result = wine_kernel32_execute_startup_info(
+            ["GetStartupInfoW", "GetStdHandle", "GetStdHandle", "GetStdHandle"],
+            info
+        )
+
+        expect(result.ok).to_equal(false)
+        expect(result.error).to_equal("GetStdHandle:invalid-stdout")
