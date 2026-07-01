@@ -111,7 +111,7 @@ Parser and capture commands accept `--source-kind=K`, `--sourceKind=K`, or
 - `saveCodebase`
 
 The minimality tools are deterministic Ponytail gates. They flag obvious
-`yagni`, `native`, `stdlib`, `dependency`, and `shrink` cases and list
+`delete`, `yagni`, `native`, `stdlib`, `dependency`, and `shrink` cases and list
 `ponytail:` debt markers. They do not replace normal LLM review.
 
 The execution tools are context aliases for already-captured output:
