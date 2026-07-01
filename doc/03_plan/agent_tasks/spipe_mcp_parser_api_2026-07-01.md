@@ -25,6 +25,8 @@
   the whole pack through MCP.
 - Added durable SQLite context tools: `spipe_context_sql_put`,
   `spipe_context_sql_get`, and `spipe_context_sql_search`.
+- Added `simple spipe-mcp ...` CLI dispatch wiring for common source-mode use;
+  the installed release binary needs rebuild before the shortcut is live there.
 - Added focused unit coverage.
 
 ## Remaining

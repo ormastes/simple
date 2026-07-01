@@ -29,9 +29,12 @@ bin/release/simple run src/app/spipe_mcp/main.spl parse --command='simple build'
 bin/release/simple run src/app/spipe_mcp/main.spl raw -f output.txt --start=10 --end=12 --before=2 --after=2
 bin/release/simple run src/app/spipe_mcp/main.spl codebase-profile
 bin/release/simple run src/app/spipe_mcp/main.spl codebase-pack --root=. --include=src/app/spipe_mcp/main.spl --ignore='.git/**,build/**'
+bin/release/simple run src/app/cli/main.spl spipe-mcp parsers
 ```
 
 No args and `serve` run the MCP stdio server. Logs must stay off stdout.
+After the release binary is rebuilt, `simple spipe-mcp ...` is the canonical
+shortcut for the same app entrypoint.
 
 ## MCP Tools
 
