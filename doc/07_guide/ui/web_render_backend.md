@@ -107,6 +107,21 @@ in `gui_web_2d_vulkan_simple_bin_selection_reason`. RenderDoc proof requires
 `.rdc` files with `RDOC` magic for the Electron, original Chrome, and Simple
 capture lanes.
 
+For macOS Metal render-log verification, first materialize the browser backing
+input env instead of hand-writing rows:
+
+```bash
+sh scripts/check/check-macos-metal-browser-backing-evidence.shs
+sh scripts/check/check-macos-metal-render-log-compare.shs
+```
+
+`check-macos-metal-browser-backing-evidence.shs` writes
+`build/macos-metal-browser-backing/evidence.env`, separate Chrome/Electron
+source proof files, and Simple/Chrome/Electron ARGB artifacts. It remains
+fail-closed: Chrome/Electron screenshots that lack scoped Metal GPU metadata, a
+Simple renderer failure, missing ARGB artifacts, or any nonzero pairwise ARGB
+diff keep the Metal render-log aggregate failed.
+
 For host/GPU lane event-flow and less-ms evidence around
 `target.later(...) gpu \:`, use
 `doc/09_report/perf/host_gpu_lane_event_flow_perf_evidence_2026-06-14.md`.

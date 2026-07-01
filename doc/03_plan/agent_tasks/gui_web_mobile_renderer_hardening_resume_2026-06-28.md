@@ -484,6 +484,45 @@ the same scene, and emits exact pairwise ARGB diff rows. The render-log compare
 must not be marked complete until that env is present and the rerun reaches
 `blocked_gate_count=0`.
 
+### Browser Metal Backing Producer Refresh (2026-07-02)
+
+Current scoped result: `scripts/check/check-macos-metal-browser-backing-evidence.shs`
+now materializes the browser backing env consumed by the macOS Metal render-log
+gate. This removes the missing-browser-env blocker but does not complete the
+Metal proof.
+
+Observed rows from
+`BUILD_DIR=build/macos-metal-browser-backing
+REPORT_PATH=build/macos-metal-browser-backing/report.md
+sh scripts/check/check-macos-metal-browser-backing-evidence.shs`:
+
+- `macos_metal_browser_backing_status=unavailable`
+- `macos_metal_electron_browser_backing_status=unavailable`
+- `macos_metal_electron_browser_backing_reason=electron-metal-metadata-missing`
+- `macos_metal_chrome_browser_backing_status=unavailable`
+- `macos_metal_chrome_browser_backing_reason=chrome-metal-metadata-missing`
+- `macos_metal_electron_chrome_pairwise_diff_status=pass`
+- `macos_metal_electron_simple_pairwise_diff_status=missing-artifact`
+- `macos_metal_chrome_simple_pairwise_diff_status=missing-artifact`
+- Chrome and Electron ARGB artifacts are present, nonblank, 96x64, and share
+  checksum `26298616811520`.
+- Simple ARGB is missing because the current Simple web renderer probe exits
+  before writing pixels.
+
+Rerunning `check-macos-metal-render-log-compare.shs` after that producer emitted:
+
+- `macos_metal_render_log_compare_status=fail`
+- `macos_metal_render_log_compare_browser_env_file_status=pass`
+- `macos_metal_render_log_compare_browser_env_artifact_status=pass`
+- `macos_metal_render_log_compare_blocked_gate_count=3`
+- `macos_metal_render_log_compare_blocked_gates=browser-metal-backing,pairwise-argb-diff,argb-source-evidence`
+
+Next concrete evidence step: add scoped Chrome/Electron GPU metadata collection
+that records real Metal rows, then fix or route around the current Simple web
+renderer `simple_web_render_html_to_pixels` failure so the Simple ARGB artifact
+is produced from the same scene. Do not mark the macOS GUI/Metal checklist done
+until those rows pass and the aggregate reaches `blocked_gate_count=0`.
+
 ## Existing Canonical Artifacts
 
 - Feature requirements:

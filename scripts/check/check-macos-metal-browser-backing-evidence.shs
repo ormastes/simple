@@ -1,0 +1,387 @@
+#!/bin/sh
+# Produce fail-closed macOS Metal browser-backing and pairwise ARGB evidence.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/macos-metal-browser-backing}"
+REPORT_PATH="${REPORT_PATH:-$BUILD_DIR/report.md}"
+SIMPLE_BIN="${SIMPLE_BIN:-/Users/ormastes/simple/bin/simple}"
+WIDTH="${MACOS_METAL_BROWSER_WIDTH:-96}"
+HEIGHT="${MACOS_METAL_BROWSER_HEIGHT:-64}"
+TIMEOUT_SECS="${MACOS_METAL_BROWSER_TIMEOUT_SECS:-45}"
+HTML_PATH="${MACOS_METAL_BROWSER_HTML:-$BUILD_DIR/scene.html}"
+SIMPLE_ARGB="$BUILD_DIR/simple.argb.json"
+CHROME_ARGB="$BUILD_DIR/chrome.argb.json"
+ELECTRON_ARGB="$BUILD_DIR/electron.argb.json"
+SIMPLE_OUT="$BUILD_DIR/simple.out"
+CHROME_OUT="$BUILD_DIR/chrome.out"
+ELECTRON_OUT="$BUILD_DIR/electron.out"
+CHROME_SOURCE="$BUILD_DIR/chrome-source.env"
+ELECTRON_SOURCE="$BUILD_DIR/electron-source.env"
+OUT_ENV="$BUILD_DIR/evidence.env"
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+rm -f "$SIMPLE_ARGB" "$CHROME_ARGB" "$ELECTRON_ARGB" "$SIMPLE_OUT" "$CHROME_OUT" "$ELECTRON_OUT" "$CHROME_SOURCE" "$ELECTRON_SOURCE" "$OUT_ENV" "$REPORT_PATH"
+
+have() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+run_bound() {
+    if have timeout; then
+        timeout "$TIMEOUT_SECS" "$@"
+    elif have gtimeout; then
+        gtimeout "$TIMEOUT_SECS" "$@"
+    else
+        "$@"
+    fi
+}
+
+find_chrome() {
+    if [ -n "${MACOS_METAL_CHROME_BIN:-}" ]; then
+        [ -x "$MACOS_METAL_CHROME_BIN" ] && printf '%s\n' "$MACOS_METAL_CHROME_BIN" || printf '%s\n' ""
+        return
+    fi
+    for candidate in \
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+        "/usr/bin/google-chrome" \
+        "/usr/bin/chromium" \
+        "/usr/bin/chromium-browser"; do
+        [ -n "$candidate" ] && [ -x "$candidate" ] && printf '%s\n' "$candidate" && return
+    done
+    for name in google-chrome google-chrome-stable chromium chromium-browser; do
+        if command -v "$name" >/dev/null 2>&1; then
+            command -v "$name"
+            return
+        fi
+    done
+    printf '%s\n' ""
+}
+
+find_electron() {
+    if [ -n "${MACOS_METAL_ELECTRON_BIN:-}" ]; then
+        [ -x "$MACOS_METAL_ELECTRON_BIN" ] && printf '%s\n' "$MACOS_METAL_ELECTRON_BIN" || printf '%s\n' ""
+        return
+    fi
+    for candidate in \
+        "tools/electron-shell/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron" \
+        "/Users/ormastes/simple/tools/electron-shell/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron" \
+        "tools/electron-shell/node_modules/.bin/electron"; do
+        [ -n "$candidate" ] && [ -x "$candidate" ] && printf '%s\n' "$candidate" && return
+    done
+    printf '%s\n' ""
+}
+
+field_of() {
+    key="$1"
+    file="$2"
+    sed -n "s/^${key}=//p" "$file" 2>/dev/null | tail -n 1
+}
+
+write_default_html() {
+    if [ -n "${MACOS_METAL_BROWSER_HTML:-}" ] && [ -f "$HTML_PATH" ]; then
+        return
+    fi
+    cat >"$HTML_PATH" <<'HTML'
+<!doctype html>
+<html>
+<body style="margin:0;background:#112233">
+  <div style="position:absolute;left:0;top:0;width:48px;height:32px;background:#445566"></div>
+  <div style="position:absolute;left:48px;top:0;width:48px;height:32px;background:#22c55e"></div>
+  <div style="position:absolute;left:0;top:32px;width:96px;height:32px;background:#0f172a"></div>
+</body>
+</html>
+HTML
+}
+
+write_simple_probe() {
+    cat >"$BUILD_DIR/render_simple_metal_browser_scene.spl" <<SIMPLE
+extern fn rt_file_read_text(path: text) -> text
+use std.nogc_sync_mut.sffi.io.{file_write_text}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_html_to_pixels}
+
+val HTML_PATH: text = "$HTML_PATH"
+val OUT_PATH: text = "$SIMPLE_ARGB"
+val WIDTH: i32 = $WIDTH
+val HEIGHT: i32 = $HEIGHT
+
+fn checksum(pixels: [u32]) -> i64:
+    var sum: i64 = 0
+    var i = 0
+    while i < pixels.len():
+        sum = sum + pixels[i].to_i64()
+        i = i + 1
+    sum
+
+fn main():
+    val html = rt_file_read_text(HTML_PATH).unwrap()
+    val pixels = simple_web_render_html_to_pixels(html, WIDTH, HEIGHT)
+    var json = "{\"width\":" + WIDTH.to_text() + ",\"height\":" + HEIGHT.to_text() + ",\"format\":\"argb-u32\",\"producer\":\"pure-simple-web-engine2d\",\"pixels\":["
+    var i = 0
+    while i < pixels.len():
+        if i > 0:
+            json = json + ","
+        json = json + pixels[i].to_i64().to_text()
+        i = i + 1
+    json = json + "]}"
+    file_write_text(OUT_PATH, json)
+    print "checksum={checksum(pixels)}"
+
+main()
+SIMPLE
+}
+
+argb_stats() {
+    path="$1"
+    prefix="$2"
+    node - "$path" "$prefix" <<'NODE'
+const fs = require("fs");
+const file = process.argv[2] || "";
+const prefix = process.argv[3] || "argb";
+function emit(key, value) {
+  console.log(`${prefix}_${key}=${value === undefined || value === null ? "" : value}`);
+}
+try {
+  const payload = JSON.parse(fs.readFileSync(file, "utf8"));
+  const pixels = Array.isArray(payload.pixels) ? payload.pixels : [];
+  let checksum = 0n;
+  let nonblank = 0;
+  for (const raw of pixels) {
+    const value = Number(raw) >>> 0;
+    checksum += BigInt(value);
+    if (((value >>> 24) & 255) !== 0 && value !== 0xffffffff) nonblank += 1;
+  }
+  emit("status", payload.format === "argb-u32" && pixels.length > 0 && nonblank > 0 ? "pass" : "fail");
+  emit("width", Number.isSafeInteger(payload.width) ? payload.width : "");
+  emit("height", Number.isSafeInteger(payload.height) ? payload.height : "");
+  emit("format", payload.format || "");
+  emit("pixel_count", pixels.length);
+  emit("nonblank_pixel_count", nonblank);
+  emit("checksum", checksum.toString());
+} catch (_err) {
+  emit("status", "missing");
+  emit("width", "");
+  emit("height", "");
+  emit("format", "");
+  emit("pixel_count", 0);
+  emit("nonblank_pixel_count", 0);
+  emit("checksum", "");
+}
+NODE
+}
+
+diff_status() {
+    left="$1"
+    right="$2"
+    out="$3"
+    if [ ! -s "$left" ] || [ ! -s "$right" ]; then
+        printf '%s\n' "missing-artifact"
+        return
+    fi
+    if ! node tools/pixel_compare/diff_argb.js "$left" "$right" >"$out" 2>&1; then
+        printf '%s\n' "diff-tool-failed"
+        return
+    fi
+    differing="$(sed -n 's/^differing=\([0-9][0-9]*\).*/\1/p' "$out" | tail -n 1)"
+    if [ "$differing" = "0" ]; then
+        printf '%s\n' "pass"
+    else
+        printf '%s\n' "fail"
+    fi
+}
+
+copy_source_or_unavailable() {
+    src="$1"
+    dst="$2"
+    prefix="$3"
+    if [ -n "$src" ] && [ -s "$src" ]; then
+        cp "$src" "$dst"
+        return
+    fi
+    {
+        echo "${prefix}_status=unavailable"
+        echo "${prefix}_reason=metadata-not-collected"
+        echo "${prefix}_gpu_compositing=unknown"
+        echo "${prefix}_display_type=unknown"
+        echo "${prefix}_gl_implementation_parts=unknown"
+        echo "${prefix}_skia_backend_type=unknown"
+        echo "${prefix}_gl_renderer=unknown"
+    } >"$dst"
+}
+
+metadata_status() {
+    source="$1"
+    prefix="$2"
+    gpu="$(field_of "${prefix}_gpu_compositing" "$source")"
+    display="$(field_of "${prefix}_display_type" "$source")"
+    gl_parts="$(field_of "${prefix}_gl_implementation_parts" "$source")"
+    skia="$(field_of "${prefix}_skia_backend_type" "$source")"
+    renderer="$(field_of "${prefix}_gl_renderer" "$source")"
+    metadata="$display $gl_parts $skia $renderer"
+    if ! printf '%s\n' "$gpu" | grep -Eiq 'enabled'; then
+        printf '%s\n' "fail"
+    elif printf '%s\n' "$metadata" | grep -Eiq 'swiftshader|llvmpipe|opengl|vulkan|direct3d|d3d|software|disabled'; then
+        printf '%s\n' "fail"
+    elif printf '%s\n' "$metadata" | grep -Eiq 'metal|mtl|apple gpu|apple m[0-9]|agx'; then
+        printf '%s\n' "pass"
+    else
+        printf '%s\n' "fail"
+    fi
+}
+
+write_default_html
+
+simple_status="unavailable"
+simple_reason="not-run"
+if [ -x "$SIMPLE_BIN" ]; then
+    write_simple_probe
+    set +e
+    SIMPLE_LIB="${SIMPLE_LIB:-$ROOT_DIR/src}" run_bound "$SIMPLE_BIN" run "$BUILD_DIR/render_simple_metal_browser_scene.spl" --mode=interpreter --clean >"$SIMPLE_OUT" 2>&1
+    simple_code=$?
+    set -e
+    if [ "$simple_code" -eq 0 ] && [ -s "$SIMPLE_ARGB" ]; then
+        simple_status="pass"
+        simple_reason="pass"
+    else
+        simple_status="unavailable"
+        simple_reason="simple-render-failed"
+    fi
+else
+    simple_reason="missing-simple-bin"
+fi
+
+chrome_bin="$(find_chrome)"
+chrome_status="unavailable"
+chrome_reason="missing-chrome-bin"
+if [ -n "$chrome_bin" ] && have node; then
+    set +e
+    CHROME_CAPTURE_BIN="$chrome_bin" CHROME_CAPTURE_HTML="$HTML_PATH" CHROME_CAPTURE_WIDTH="$WIDTH" CHROME_CAPTURE_HEIGHT="$HEIGHT" CHROME_CAPTURE_OUTPUT="$CHROME_ARGB" CHROME_CAPTURE_DISABLE_GPU=0 CHROME_CAPTURE_EXTRA_ARGS="--use-angle=metal --enable-gpu --disable-software-rasterizer" \
+        run_bound node tools/chrome-live-bitmap/capture_html_argb.js >"$CHROME_OUT" 2>&1
+    chrome_code=$?
+    set -e
+    if [ "$chrome_code" -eq 0 ] && [ -s "$CHROME_ARGB" ]; then
+        chrome_status="pass"
+        chrome_reason="pass"
+    else
+        chrome_reason="chrome-capture-failed"
+    fi
+fi
+
+electron_bin="$(find_electron)"
+electron_status="unavailable"
+electron_reason="missing-electron-bin"
+if [ -n "$electron_bin" ] && have node; then
+    set +e
+    ELECTRON_CAPTURE_HTML="$HTML_PATH" ELECTRON_CAPTURE_WIDTH="$WIDTH" ELECTRON_CAPTURE_HEIGHT="$HEIGHT" ELECTRON_CAPTURE_OUTPUT="$ELECTRON_ARGB" \
+        run_bound "$electron_bin" --force-device-scale-factor=1 --high-dpi-support=1 --force-color-profile=srgb --use-angle=metal --enable-gpu --disable-software-rasterizer tools/electron-live-bitmap/capture_html_argb.js >"$ELECTRON_OUT" 2>&1
+    electron_code=$?
+    set -e
+    if [ "$electron_code" -eq 0 ] && [ -s "$ELECTRON_ARGB" ]; then
+        electron_status="pass"
+        electron_reason="pass"
+    else
+        electron_reason="electron-capture-failed"
+    fi
+fi
+
+copy_source_or_unavailable "${MACOS_METAL_CHROME_BROWSER_BACKING_SOURCE:-}" "$CHROME_SOURCE" "macos_metal_chrome_browser_backing"
+copy_source_or_unavailable "${MACOS_METAL_ELECTRON_BROWSER_BACKING_SOURCE:-}" "$ELECTRON_SOURCE" "macos_metal_electron_browser_backing"
+
+chrome_metadata_status="$(metadata_status "$CHROME_SOURCE" macos_metal_chrome_browser_backing)"
+electron_metadata_status="$(metadata_status "$ELECTRON_SOURCE" macos_metal_electron_browser_backing)"
+
+argb_stats "$SIMPLE_ARGB" simple >"$BUILD_DIR/simple-stats.env"
+argb_stats "$CHROME_ARGB" chrome >"$BUILD_DIR/chrome-stats.env"
+argb_stats "$ELECTRON_ARGB" electron >"$BUILD_DIR/electron-stats.env"
+
+simple_argb_status="$(field_of simple_status "$BUILD_DIR/simple-stats.env")"
+chrome_argb_status="$(field_of chrome_status "$BUILD_DIR/chrome-stats.env")"
+electron_argb_status="$(field_of electron_status "$BUILD_DIR/electron-stats.env")"
+
+ec_diff="$(diff_status "$ELECTRON_ARGB" "$CHROME_ARGB" "$BUILD_DIR/electron-chrome.diff.txt")"
+es_diff="$(diff_status "$ELECTRON_ARGB" "$SIMPLE_ARGB" "$BUILD_DIR/electron-simple.diff.txt")"
+cs_diff="$(diff_status "$CHROME_ARGB" "$SIMPLE_ARGB" "$BUILD_DIR/chrome-simple.diff.txt")"
+
+pixel_status="pass"
+if [ "$ec_diff" != "pass" ] || [ "$es_diff" != "pass" ] || [ "$cs_diff" != "pass" ]; then
+    pixel_status="fail"
+fi
+
+electron_backing_status="unavailable"
+electron_backing_reason="$electron_reason"
+if [ "$electron_status" = "pass" ] && [ "$electron_metadata_status" = "pass" ]; then
+    electron_backing_status="pass"
+    electron_backing_reason="electron-metal-backed"
+elif [ "$electron_status" = "pass" ]; then
+    electron_backing_reason="electron-metal-metadata-missing"
+fi
+
+chrome_backing_status="unavailable"
+chrome_backing_reason="$chrome_reason"
+if [ "$chrome_status" = "pass" ] && [ "$chrome_metadata_status" = "pass" ]; then
+    chrome_backing_status="pass"
+    chrome_backing_reason="chrome-metal-backed"
+elif [ "$chrome_status" = "pass" ]; then
+    chrome_backing_reason="chrome-metal-metadata-missing"
+fi
+
+browser_status="unavailable"
+browser_reason="browser-metal-metadata-or-pixels-incomplete"
+if [ "$electron_backing_status" = "pass" ] && [ "$chrome_backing_status" = "pass" ] && [ "$pixel_status" = "pass" ] &&
+    [ "$simple_argb_status" = "pass" ] && [ "$chrome_argb_status" = "pass" ] && [ "$electron_argb_status" = "pass" ]; then
+    browser_status="pass"
+    browser_reason="pass"
+fi
+
+{
+    echo "macos_metal_browser_backing_status=$browser_status"
+    echo "macos_metal_browser_backing_reason=$browser_reason"
+    echo "macos_metal_browser_backing_width=$WIDTH"
+    echo "macos_metal_browser_backing_height=$HEIGHT"
+    echo "macos_metal_browser_backing_html=$HTML_PATH"
+    echo "macos_metal_electron_browser_backing_status=$electron_backing_status"
+    echo "macos_metal_electron_browser_backing_reason=$electron_backing_reason"
+    grep '^macos_metal_electron_browser_backing_' "$ELECTRON_SOURCE" | grep -v '_status=' | grep -v '_reason=' || true
+    echo "macos_metal_electron_browser_backing_source=$ELECTRON_SOURCE"
+    echo "macos_metal_chrome_browser_backing_status=$chrome_backing_status"
+    echo "macos_metal_chrome_browser_backing_reason=$chrome_backing_reason"
+    grep '^macos_metal_chrome_browser_backing_' "$CHROME_SOURCE" | grep -v '_status=' | grep -v '_reason=' || true
+    echo "macos_metal_chrome_browser_backing_source=$CHROME_SOURCE"
+    echo "macos_metal_pixel_comparison_status=$pixel_status"
+    echo "macos_metal_pixel_comparison_mode=pairwise-argb-diff"
+    echo "macos_metal_electron_chrome_pairwise_diff_status=$ec_diff"
+    echo "macos_metal_electron_simple_pairwise_diff_status=$es_diff"
+    echo "macos_metal_chrome_simple_pairwise_diff_status=$cs_diff"
+    echo "macos_metal_simple_argb_path=simple.argb.json"
+    echo "macos_metal_simple_argb_width=$(field_of simple_width "$BUILD_DIR/simple-stats.env")"
+    echo "macos_metal_simple_argb_height=$(field_of simple_height "$BUILD_DIR/simple-stats.env")"
+    echo "macos_metal_simple_argb_nonblank_pixel_count=$(field_of simple_nonblank_pixel_count "$BUILD_DIR/simple-stats.env")"
+    echo "macos_metal_simple_argb_checksum=$(field_of simple_checksum "$BUILD_DIR/simple-stats.env")"
+    echo "macos_metal_chrome_argb_path=chrome.argb.json"
+    echo "macos_metal_chrome_argb_width=$(field_of chrome_width "$BUILD_DIR/chrome-stats.env")"
+    echo "macos_metal_chrome_argb_height=$(field_of chrome_height "$BUILD_DIR/chrome-stats.env")"
+    echo "macos_metal_chrome_argb_nonblank_pixel_count=$(field_of chrome_nonblank_pixel_count "$BUILD_DIR/chrome-stats.env")"
+    echo "macos_metal_chrome_argb_checksum=$(field_of chrome_checksum "$BUILD_DIR/chrome-stats.env")"
+    echo "macos_metal_electron_argb_path=electron.argb.json"
+    echo "macos_metal_electron_argb_width=$(field_of electron_width "$BUILD_DIR/electron-stats.env")"
+    echo "macos_metal_electron_argb_height=$(field_of electron_height "$BUILD_DIR/electron-stats.env")"
+    echo "macos_metal_electron_argb_nonblank_pixel_count=$(field_of electron_nonblank_pixel_count "$BUILD_DIR/electron-stats.env")"
+    echo "macos_metal_electron_argb_checksum=$(field_of electron_checksum "$BUILD_DIR/electron-stats.env")"
+} >"$OUT_ENV"
+
+{
+    echo "# macOS Metal Browser Backing Evidence"
+    echo
+    echo "- status: $browser_status"
+    echo "- reason: $browser_reason"
+    echo "- simple: $simple_status/$simple_reason"
+    echo "- chrome: capture=$chrome_status metadata=$chrome_metadata_status source=$CHROME_SOURCE"
+    echo "- electron: capture=$electron_status metadata=$electron_metadata_status source=$ELECTRON_SOURCE"
+    echo "- pairwise: electron_chrome=$ec_diff electron_simple=$es_diff chrome_simple=$cs_diff"
+    echo "- artifacts: $SIMPLE_ARGB $CHROME_ARGB $ELECTRON_ARGB"
+} >"$REPORT_PATH"
+
+cat "$OUT_ENV"
+[ "$browser_status" = "pass" ]

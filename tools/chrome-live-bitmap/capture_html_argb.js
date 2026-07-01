@@ -15,6 +15,11 @@ const expectedPath = process.env.CHROME_CAPTURE_EXPECTED_ARGB_PATH || "";
 const proofPath = process.env.CHROME_CAPTURE_PROOF_PATH || "";
 const geometryOutputPath = process.env.CHROME_CAPTURE_GEOMETRY_OUTPUT || "";
 const chromeBin = process.env.CHROME_CAPTURE_BIN || findChromeBinary();
+const disableGpu = !/^(0|false|no)$/i.test(process.env.CHROME_CAPTURE_DISABLE_GPU || "1");
+const extraArgs = (process.env.CHROME_CAPTURE_EXTRA_ARGS || "")
+  .split(/\s+/)
+  .map(s => s.trim())
+  .filter(Boolean);
 let activeChromeChild = null;
 
 function terminateActiveChromeChild() {
@@ -430,15 +435,16 @@ async function captureViaDevTools(fileUrl) {
   const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), "simple-chrome-cdp-profile-"));
   const args = [
     "--headless=new",
-    "--disable-gpu",
     "--no-sandbox",
     "--force-device-scale-factor=1",
     "--force-color-profile=srgb",
     `--window-size=${width},${height}`,
     "--remote-debugging-port=0",
     `--user-data-dir=${userDataDir}`,
-    fileUrl,
   ];
+  if (disableGpu) args.push("--disable-gpu");
+  args.push(...extraArgs);
+  args.push(fileUrl);
   const start = process.hrtime.bigint();
   const child = childProcess.spawn(chromeBin, args, { stdio: ["ignore", "ignore", "pipe"] });
   activeChromeChild = child;
@@ -514,14 +520,15 @@ if (geometryOutputPath) {
 } else {
   const args = [
     "--headless=new",
-    "--disable-gpu",
     "--no-sandbox",
     "--force-device-scale-factor=1",
     "--force-color-profile=srgb",
     `--window-size=${width},${height}`,
     `--screenshot=${pngPath}`,
-    fileUrl,
   ];
+  if (disableGpu) args.push("--disable-gpu");
+  args.push(...extraArgs);
+  args.push(fileUrl);
   const start = process.hrtime.bigint();
   const run = childProcess.spawnSync(chromeBin, args, { encoding: "utf8", timeout: Number(process.env.CHROME_CAPTURE_TIMEOUT_MS || 20000) });
   elapsedUs = Number((process.hrtime.bigint() - start) / 1000n);

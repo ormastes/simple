@@ -1,0 +1,148 @@
+# macOS Metal browser-backing evidence producer
+
+> Validates that the browser-backing producer for the macOS Metal render-log gate creates the canonical env file and fails closed when live renderer inputs are unavailable.
+
+<!-- sdn-diagram:id=macos_metal_browser_backing_evidence_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=macos_metal_browser_backing_evidence_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+macos_metal_browser_backing_evidence_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=macos_metal_browser_backing_evidence_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 1 | 1 | 0 | 0 |
+
+<details>
+<summary>Full Scenario Manual</summary>
+
+# macOS Metal browser-backing evidence producer
+
+Validates that the browser-backing producer for the macOS Metal render-log gate creates the canonical env file and fails closed when live renderer inputs are unavailable.
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Other |
+| Status | Active |
+| Requirements | doc/02_requirements/feature/production_gui_web_renderer_parity_hardening.md |
+| Plan | doc/03_plan/agent_tasks/gui_web_mobile_renderer_hardening_resume_2026-06-28.md |
+| Design | doc/05_design/ui/misc/production_gui_web_renderer_parity_hardening.md |
+| Research | N/A |
+| Source | `test/03_system/check/macos_metal_browser_backing_evidence_spec.spl` |
+| Updated | 2026-06-01 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Validates that the browser-backing producer for the macOS Metal render-log gate
+creates the canonical env file and fails closed when live renderer inputs are
+unavailable.
+
+**Plan:** doc/03_plan/agent_tasks/gui_web_mobile_renderer_hardening_resume_2026-06-28.md
+**Requirements:** doc/02_requirements/feature/production_gui_web_renderer_parity_hardening.md
+**Research:** N/A
+**Design:** doc/05_design/ui/misc/production_gui_web_renderer_parity_hardening.md
+
+## Syntax
+
+```sh
+SIMPLE_LIB=src bin/simple test test/03_system/check/macos_metal_browser_backing_evidence_spec.spl --mode=interpreter --clean
+```
+
+## Operator Flow
+
+1. Run `scripts/check/check-macos-metal-browser-backing-evidence.shs`.
+2. Consume `build/macos-metal-browser-backing/evidence.env` from
+   `scripts/check/check-macos-metal-render-log-compare.shs`.
+3. Treat unavailable browser metadata, missing Simple ARGB, or nonzero pairwise
+   ARGB diff as completion blockers.
+
+## Scenarios
+
+### macOS Metal browser-backing evidence producer
+
+#### writes canonical unavailable rows instead of passing without live inputs
+
+- Run the producer with missing browser and Simple binaries
+   - Expected: code equals `0`
+- Confirm the env is present and fail-closed
+- Confirm the operator report names the blocker
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 29 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Run the producer with missing browser and Simple binaries")
+val command = "rm -rf build/test-macos-metal-browser-backing-unavailable && " +
+    "mkdir -p build/test-macos-metal-browser-backing-unavailable && " +
+    "BUILD_DIR=build/test-macos-metal-browser-backing-unavailable " +
+    "REPORT_PATH=build/test-macos-metal-browser-backing-unavailable/report.md " +
+    "SIMPLE_BIN=/missing/simple " +
+    "MACOS_METAL_CHROME_BIN=/missing/chrome " +
+    "MACOS_METAL_ELECTRON_BIN=/missing/electron " +
+    "sh scripts/check/check-macos-metal-browser-backing-evidence.shs || true"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+step("Confirm the env is present and fail-closed")
+val evidence = file_read("build/test-macos-metal-browser-backing-unavailable/evidence.env")
+expect(evidence).to_contain("macos_metal_browser_backing_status=unavailable")
+expect(evidence).to_contain("macos_metal_electron_browser_backing_status=unavailable")
+expect(evidence).to_contain("macos_metal_chrome_browser_backing_status=unavailable")
+expect(evidence).to_contain("macos_metal_pixel_comparison_status=fail")
+expect(evidence).to_contain("macos_metal_pixel_comparison_mode=pairwise-argb-diff")
+expect(evidence).to_contain("macos_metal_electron_simple_pairwise_diff_status=missing-artifact")
+expect(evidence).to_contain("macos_metal_chrome_simple_pairwise_diff_status=missing-artifact")
+expect(evidence).to_contain("macos_metal_simple_argb_path=simple.argb.json")
+expect(evidence).to_contain("macos_metal_chrome_argb_path=chrome.argb.json")
+expect(evidence).to_contain("macos_metal_electron_argb_path=electron.argb.json")
+
+step("Confirm the operator report names the blocker")
+val report = file_read("build/test-macos-metal-browser-backing-unavailable/report.md")
+expect(report).to_contain("- status: unavailable")
+expect(report).to_contain("- pairwise: electron_chrome=missing-artifact electron_simple=missing-artifact chrome_simple=missing-artifact")
+```
+
+</details>
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 1 |
+| Active scenarios | 1 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
+
+## Related Documentation
+
+- **Requirements:** [doc/02_requirements/feature/production_gui_web_renderer_parity_hardening.md](doc/02_requirements/feature/production_gui_web_renderer_parity_hardening.md)
+- **Plan:** [doc/03_plan/agent_tasks/gui_web_mobile_renderer_hardening_resume_2026-06-28.md](doc/03_plan/agent_tasks/gui_web_mobile_renderer_hardening_resume_2026-06-28.md)
+- **Design:** [doc/05_design/ui/misc/production_gui_web_renderer_parity_hardening.md](doc/05_design/ui/misc/production_gui_web_renderer_parity_hardening.md)
+
+
+</details>

@@ -4,24 +4,16 @@
 
 ## Quick Stats
 
-- **Total Features:** 4
-- **Complete Documentation:** 3 (75%)
-- **Stubs Remaining:** 1
-- **Total Lines:** 234
-- **Warnings:** 3
+- **Total Features:** 1
+- **Complete Documentation:** 1 (100%)
+- **Stubs Remaining:** 0
+- **Total Lines:** 26
+- **Warnings:** 1
 
 ---
 
-## Other (3 features)
+## Other (1 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [HTML/CSS RenderDoc goal status gate](test/03_system/check/html_css_renderdoc_goal_status_spec.md) | Minimal | N/A | 2 | 20% | 32 lines |
-| [Chrome opacity rounding policy specification](test/03_system/check/chrome_opacity_rounding_policy_spec.md) | Minimal | N/A | 3 | 20% | 32 lines |
-| [GUI RenderDoc feature coverage status gate](test/03_system/check/gui_renderdoc_feature_coverage_status_spec.md) | Minimal | N/A | 2 | 20% | 33 lines |
-
-## Standard Library (1 features)
-
-| Feature | Status | Difficulty | Tests | Coverage | Details |
-|---------|--------|------------|-------|----------|----------|
-| [Widget Html Children Specification](test/01_unit/lib/common/ui/widget_html_children_spec.md) | Auto-generated | N/A | 2 | 0% | 137 lines |
+| [macOS Metal browser-backing evidence producer](test/03_system/check/macos_metal_browser_backing_evidence_spec.md) | Minimal | N/A | 1 | 20% | 26 lines |
