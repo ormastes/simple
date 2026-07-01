@@ -27,7 +27,7 @@ agent_plan_spec
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 12 | 12 | 0 | 0 |
+| 13 | 13 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -217,6 +217,24 @@ expect(snap[1].path).to_equal("doc/b.md")
 
 </details>
 
+#### parses vcs changed files for an agent
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val changes = parse_vcs_changed_files("spark", "src/a.spl\n\n doc/b.md \nsrc/a.spl\n")
+expect(changes.agent_id).to_equal("spark")
+expect(changes.changed_files.len()).to_equal(2)
+expect(changes.changed_files[0]).to_equal("src/a.spl")
+expect(changes.changed_files[1]).to_equal("doc/b.md")
+```
+
+</details>
+
 #### resolves provider commands for launch
 
 <details>
@@ -306,8 +324,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 12 |
-| Active scenarios | 12 |
+| Total scenarios | 13 |
+| Active scenarios | 13 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

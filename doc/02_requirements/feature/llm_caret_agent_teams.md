@@ -11,3 +11,4 @@ Date: 2026-07-01
 - REQ-007: Provide a deterministic team interaction transcript planner with explicit `btw` and `side` message channels.
 - REQ-008: Provide a small filesystem snapshot helper that records existing file hashes per agent through the app I/O facade.
 - REQ-009: Provide a minimal team launcher that starts a list of single-agent requests and returns per-agent process records without persisting a supervisor.
+- REQ-010: Provide a VCS changed-file discovery helper that defaults to `jj diff --name-only` and returns per-agent changed-file records.

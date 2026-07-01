@@ -54,6 +54,11 @@ struct AgentTeamProcess:
     reason: text
     processes: [AgentProcess]
 
+struct AgentVcsChangeResult:
+    status: text
+    reason: text
+    changes: AgentFileChangeSet
+
 fn _provider_or_default(provider: text) -> text:
     if provider == "":
         return "claude_cli"
@@ -189,6 +194,20 @@ fn snapshot_agent_files_from_existing(agent_id: text, paths: [text], existing_pa
             i = i + 1
     result
 
+fn _add_unique(items: [text], item: text) -> [text]:
+    if item == "":
+        return items
+    for existing in items:
+        if existing == item:
+            return items
+    items + [item]
+
+fn parse_vcs_changed_files(agent_id: text, stdout: text) -> AgentFileChangeSet:
+    var files: [text] = []
+    for line in stdout.split("\n"):
+        files = _add_unique(files, line.trim())
+    AgentFileChangeSet(agent_id: agent_id, changed_files: files)
+
 fn agent_command_for_provider(provider: text, claude_path: text, codex_path: text, opencode_path: text) -> text:
     if provider == "codex":
         if codex_path != "":
@@ -310,6 +329,13 @@ describe "LLM Caret agent plans":
         expect(snap[0].agent_id).to_equal("spark")
         expect(snap[0].fingerprint).to_equal("sha-a")
         expect(snap[1].path).to_equal("doc/b.md")
+
+    it "parses vcs changed files for an agent":
+        val changes = parse_vcs_changed_files("spark", "src/a.spl\n\n doc/b.md \nsrc/a.spl\n")
+        expect(changes.agent_id).to_equal("spark")
+        expect(changes.changed_files.len()).to_equal(2)
+        expect(changes.changed_files[0]).to_equal("src/a.spl")
+        expect(changes.changed_files[1]).to_equal("doc/b.md")
 
     it "resolves provider commands for launch":
         expect(agent_command_for_provider("codex", "", "", "")).to_equal("codex")

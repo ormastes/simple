@@ -11,7 +11,8 @@ skill files, MCP servers, and plugins. `AgentReviewRequest` stores reviewer,
 changed files, and guidance. `AgentFileFingerprint` stores caller-supplied
 before/after fingerprints by agent and file path. `AgentProcess` stores the
 minimal launcher PID/status result. `AgentTeamProcess` stores a non-persistent
-set of per-agent process records. `AgentTeamMessage` stores explicit team
+set of per-agent process records. `AgentVcsChangeResult` stores the result of a
+VCS changed-file discovery command. `AgentTeamMessage` stores explicit team
 transcript entries.
 
 ## Builders
@@ -23,6 +24,7 @@ transcript entries.
 - Low-agent review: lists changed files supplied by caller; no filesystem scan.
 - File-change tracking: compares caller-supplied before/after fingerprints.
 - File snapshot: records hashes for existing caller-supplied file paths only.
+- VCS discovery: runs `jj diff --name-only` by default and parses unique paths.
 - Claude advisor: returns provider `claude_cli`, mode `advisor`.
 - Codex goal: returns provider `codex`, mode `goal`.
 - Runtime launcher: resolves `claude`, `codex`, or `opencode` command names and
@@ -40,4 +42,4 @@ prompt text so callers/tests can catch missing configuration.
 `test/01_unit/app/llm_caret/agent_plan_spec.spl` covers builders, fingerprint
 tracking, and provider command resolution with pure assertions. Persistent live
 team supervisors, cancellation policy, plugin install, MCP discovery, live message buses,
-and VCS-wide diff capture need later specs.
+and background VCS watchers need later specs.
