@@ -23,7 +23,7 @@ Date: 2026-07-01
 - `AgentTeamMessage` owns deterministic team transcript entries with `btw` and `side` channels supplied by callers.
 - `track_agent_file_changes` compares caller-supplied before/after fingerprints by agent.
 - `agent_files.spl` snapshots existing paths with `file_exists` and `file_hash_sha256` from `app.io.mod`.
-- `agent_runtime.spl` spawns only already-built single-agent plans and rejects synthetic team plans.
+- `agent_runtime.spl` spawns already-built single-agent plans and can launch a caller-supplied request list as one non-persistent team result.
 - Provider wrappers do not read agent markdown or track files; they only receive prompt/argv from callers.
 - File diff capture and live process supervision remain outside this node.
 
@@ -48,6 +48,8 @@ component "Review caller" -> "agent_plan.spl" : changed files + guidance
 - `snapshot_agent_files(agent_id, paths) -> [AgentFileFingerprint]`
 - `detect_agent_file_changes(before, after) -> [AgentFileChangeSet]`
 - `launch_agent_plan(agent_id, plan, claude_path, codex_path, opencode_path) -> AgentProcess`
+- `launch_agent_team(team_id, requests, claude_path, codex_path, opencode_path) -> AgentTeamProcess`
+- `summarize_agent_team(team_id, processes) -> AgentTeamProcess`
 
 ## Matrix
 
@@ -57,5 +59,5 @@ component "Review caller" -> "agent_plan.spl" : changed files + guidance
 | Capability handoff | `AgentCapabilitySet` | explicit agents/skills/MCP/plugins | no discovery or install |
 | Team transcript | `AgentTeamMessage` | explicit btw/side entries | no live bus |
 | File snapshots | `AgentFileFingerprint` | existing-file hashes | no VCS scanning |
-| Runtime launcher | `AgentProcess` | PID/status wrapper | no registry or supervisor |
+| Runtime launcher | `AgentProcess`, `AgentTeamProcess` | PID/status wrapper | no registry or supervisor |
 | Provider wrappers | prompt/argv | no private planner state | no direct file tracking |

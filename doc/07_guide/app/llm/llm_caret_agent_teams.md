@@ -12,10 +12,11 @@ Supported builders:
 - `build_btw_side_interaction_plan` for caller-supplied `btw` and `side` team transcript entries.
 - `build_low_agent_review_plan` for reviewer guidance plus caller-supplied changed files or per-agent change sets.
 - `snapshot_agent_files` plus `detect_agent_file_changes` for existing caller-supplied files; this hashes files through `app.io.mod`.
+- `launch_agent_team` for starting a caller-supplied list of single-agent requests and returning per-agent process records.
 - `build_claude_advisor_plan` for Claude advisor prompts.
 - `build_codex_goal_plan` for Codex goal prompts.
 
-This surface does not install plugins, discover MCP servers, scan VCS diffs, persist teams, or provide a live chat bus. Callers pass capabilities, file paths, and team transcript entries explicitly, then hand the resulting prompt/argv to existing provider wrappers.
+This surface does not install plugins, discover MCP servers, scan VCS diffs, persist team supervision, or provide a live chat bus. Callers pass capabilities, file paths, and team transcript entries explicitly, then hand the resulting prompt/argv to existing provider wrappers.
 
 Default verification:
 

@@ -10,7 +10,8 @@ prompt, argv, and summary. `AgentCapabilitySet` stores explicit agent files,
 skill files, MCP servers, and plugins. `AgentReviewRequest` stores reviewer,
 changed files, and guidance. `AgentFileFingerprint` stores caller-supplied
 before/after fingerprints by agent and file path. `AgentProcess` stores the
-minimal launcher PID/status result. `AgentTeamMessage` stores explicit team
+minimal launcher PID/status result. `AgentTeamProcess` stores a non-persistent
+set of per-agent process records. `AgentTeamMessage` stores explicit team
 transcript entries.
 
 ## Builders
@@ -26,6 +27,8 @@ transcript entries.
 - Codex goal: returns provider `codex`, mode `goal`.
 - Runtime launcher: resolves `claude`, `codex`, or `opencode` command names and
   spawns a single already-built plan through `app.io.mod`.
+- Team launcher: builds each single-agent plan, launches it, and returns one
+  in-memory summary; it does not persist or supervise after the call.
 
 ## Errors
 
@@ -36,5 +39,5 @@ prompt text so callers/tests can catch missing configuration.
 
 `test/01_unit/app/llm_caret/agent_plan_spec.spl` covers builders, fingerprint
 tracking, and provider command resolution with pure assertions. Persistent live
-teams, cancellation policy, plugin install, MCP discovery, live message buses,
+team supervisors, cancellation policy, plugin install, MCP discovery, live message buses,
 and VCS-wide diff capture need later specs.

@@ -18,9 +18,10 @@ Add a small LLM Caret agent-planning surface that builds deterministic Claude/Co
 - AC-6: Agent launch plans can carry explicit agent, skill, MCP server, and plugin capability lists in the same handoff style as SPipe.
 - AC-7: Team interaction plans can render explicit `btw` and `side` transcript entries without a live message bus.
 - AC-8: A file snapshot helper records existing caller-supplied file hashes per agent through the app I/O facade.
+- AC-9: A minimal team launcher starts a list of single-agent requests and returns per-agent process records without persisting a supervisor.
 
 ## Scope Exclusions
-Persistent process registry, live cross-agent chat bus, plugin install, MCP discovery, and VCS-wide diff capture are out of this slice. The API accepts changed-file paths/fingerprints, capability lists, and team transcript messages supplied by the caller.
+Persistent process registry, live cross-agent chat bus, plugin install, MCP discovery, and VCS-wide diff capture are out of this slice. The API accepts changed-file paths/fingerprints, capability lists, team transcript messages, and team launch request lists supplied by the caller.
 
 ## Cooperative Review
 Sidecars: N/A for implementation because this slice is two small modules and one unit spec. Merge owner: Codex. Final reviewer: normal/highest-capability Codex review before done. Shared interfaces: `AgentLaunchRequest`, `AgentLaunchPlan`, `AgentCapabilitySet`, `AgentFileFingerprint`, `AgentTeamMessage`, `build_agent_launch_plan`, `build_agent_capability_launch_plan`, `build_agent_team_plan`, `build_btw_side_interaction_plan`, `track_agent_file_changes`, `build_low_agent_review_plan`, `build_agent_change_review_plan`, `build_claude_advisor_plan`, `build_codex_goal_plan`. Manual step helpers: `step("Build a single agent launch plan")`, `step("Build a team plan")`, `step("Build a low-agent review plan")`.
@@ -57,7 +58,7 @@ impl-verified
 ### Public API
 - `AgentLaunchRequest`, `AgentLaunchPlan`, `AgentReviewRequest`, `AgentFileChangeSet`, `AgentFileFingerprint`, `AgentCapabilitySet`, `AgentTeamMessage`
 - `build_agent_launch_plan`, `build_agent_capability_launch_plan`, `build_agent_team_plan`, `build_agent_team_interaction_plan`, `build_btw_side_interaction_plan`, `track_agent_file_changes`, `build_low_agent_review_plan`, `build_agent_change_review_plan`, `build_claude_advisor_plan`, `build_codex_goal_plan`
-- `AgentProcess`, `agent_command_for_provider`, `launch_agent_plan`, `agent_process_status`, `stop_agent_process`
+- `AgentProcess`, `AgentTeamProcess`, `agent_command_for_provider`, `launch_agent_plan`, `launch_agent_team`, `summarize_agent_team`, `agent_team_status`, `stop_agent_team`, `agent_process_status`, `stop_agent_process`
 - `snapshot_agent_files`, `detect_agent_file_changes`
 
 ### Requirement Coverage
@@ -69,6 +70,7 @@ impl-verified
 - REQ-006 -> `AgentCapabilitySet`, `build_agent_capability_launch_plan`
 - REQ-007 -> `AgentTeamMessage`, `build_btw_side_interaction_plan`
 - REQ-008 -> `snapshot_agent_files`, `detect_agent_file_changes`
+- REQ-009 -> `launch_agent_team`, `summarize_agent_team`
 
 <!-- sdn-diagram:id=llm-caret-agent-plan-state -->
 ```sdn
@@ -78,7 +80,7 @@ component "agent_plan" -> "Provider wrapper" : prompt + argv
 
 ## Implementation Evidence
 
-- `bin/release/simple test test/01_unit/app/llm_caret/agent_plan_spec.spl --mode=interpreter` PASS, 11 tests.
+- `bin/release/simple test test/01_unit/app/llm_caret/agent_plan_spec.spl --mode=interpreter` PASS, 12 tests.
 - `bin/release/simple check src/app/llm_caret/agent_plan.spl` PASS.
 - `bin/release/simple check src/app/llm_caret/agent_files.spl` PASS.
 - `bin/release/simple check src/app/llm_caret/agent_runtime.spl` PASS.

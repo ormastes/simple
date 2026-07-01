@@ -1,13 +1,19 @@
 # LLM Caret - Agent plan runtime launcher
 
 use app.io.mod.{process_spawn_async, process_is_running, process_kill}
-use app.llm_caret.agent_plan.{AgentLaunchPlan}
+use app.llm_caret.agent_plan.{AgentLaunchPlan, AgentLaunchRequest, build_agent_launch_plan}
 
 struct AgentProcess:
     agent_id: text
     status: text
     reason: text
     pid: i64
+
+struct AgentTeamProcess:
+    team_id: text
+    status: text
+    reason: text
+    processes: [AgentProcess]
 
 pub fn agent_command_for_provider(provider: text, claude_path: text, codex_path: text, opencode_path: text) -> text:
     if provider == "codex":
@@ -31,6 +37,39 @@ pub fn launch_agent_plan(agent_id: text, plan: AgentLaunchPlan, claude_path: tex
         return AgentProcess(agent_id: agent_id, status: "error", reason: "spawn_failed", pid: pid)
     AgentProcess(agent_id: agent_id, status: "started", reason: "process_spawned", pid: pid)
 
+pub fn summarize_agent_team(team_id: text, processes: [AgentProcess]) -> AgentTeamProcess:
+    var started = 0
+    for proc in processes:
+        if proc.status == "started" or proc.status == "running":
+            started = started + 1
+    var status = "error"
+    if processes.len() == 0:
+        status = "empty"
+    elif started == processes.len():
+        status = "started"
+    elif started > 0:
+        status = "partial"
+    AgentTeamProcess(team_id: team_id, status: status, reason: "started:" + started.to_text() + "/" + processes.len().to_text(), processes: processes)
+
+pub fn launch_agent_team(team_id: text, requests: [AgentLaunchRequest], claude_path: text, codex_path: text, opencode_path: text) -> AgentTeamProcess:
+    var processes: [AgentProcess] = []
+    for req in requests:
+        val plan = build_agent_launch_plan(req)
+        processes = processes + [launch_agent_plan(req.agent_md_path, plan, claude_path, codex_path, opencode_path)]
+    summarize_agent_team(team_id, processes)
+
+pub fn agent_team_status(team: AgentTeamProcess) -> AgentTeamProcess:
+    var processes: [AgentProcess] = []
+    for proc in team.processes:
+        processes = processes + [agent_process_status(proc)]
+    summarize_agent_team(team.team_id, processes)
+
+pub fn stop_agent_team(team: AgentTeamProcess) -> AgentTeamProcess:
+    var processes: [AgentProcess] = []
+    for proc in team.processes:
+        processes = processes + [stop_agent_process(proc)]
+    summarize_agent_team(team.team_id, processes)
+
 pub fn agent_process_status(proc: AgentProcess) -> AgentProcess:
     if proc.pid <= 0:
         return AgentProcess(agent_id: proc.agent_id, status: "not_running", reason: "invalid_pid", pid: proc.pid)
@@ -45,5 +84,5 @@ pub fn stop_agent_process(proc: AgentProcess) -> AgentProcess:
         return AgentProcess(agent_id: proc.agent_id, status: "stopped", reason: "process_killed", pid: proc.pid)
     AgentProcess(agent_id: proc.agent_id, status: "error", reason: "process_kill_failed", pid: proc.pid)
 
-export AgentProcess
-export agent_command_for_provider, launch_agent_plan, agent_process_status, stop_agent_process
+export AgentProcess, AgentTeamProcess
+export agent_command_for_provider, launch_agent_plan, launch_agent_team, summarize_agent_team, agent_team_status, stop_agent_team, agent_process_status, stop_agent_process

@@ -42,6 +42,18 @@ struct AgentTeamMessage:
     channel: text
     body: text
 
+struct AgentProcess:
+    agent_id: text
+    status: text
+    reason: text
+    pid: i64
+
+struct AgentTeamProcess:
+    team_id: text
+    status: text
+    reason: text
+    processes: [AgentProcess]
+
 fn _provider_or_default(provider: text) -> text:
     if provider == "":
         return "claude_cli"
@@ -190,6 +202,20 @@ fn agent_command_for_provider(provider: text, claude_path: text, codex_path: tex
         return claude_path
     "claude"
 
+fn summarize_agent_team(team_id: text, processes: [AgentProcess]) -> AgentTeamProcess:
+    var started = 0
+    for proc in processes:
+        if proc.status == "started" or proc.status == "running":
+            started = started + 1
+    var status = "error"
+    if processes.len() == 0:
+        status = "empty"
+    elif started == processes.len():
+        status = "started"
+    elif started > 0:
+        status = "partial"
+    AgentTeamProcess(team_id: team_id, status: status, reason: "started:" + started.to_text() + "/" + processes.len().to_text(), processes: processes)
+
 fn build_claude_advisor_plan(topic: text, context: text) -> AgentLaunchPlan:
     val prompt = "Advisor topic: " + topic + "\nContext: " + context
     AgentLaunchPlan(provider: "claude_cli", mode: "advisor", prompt: prompt, argv: _base_argv("claude_cli", prompt, "", "", []), summary: "advisor:" + topic)
@@ -289,6 +315,14 @@ describe "LLM Caret agent plans":
         expect(agent_command_for_provider("codex", "", "", "")).to_equal("codex")
         expect(agent_command_for_provider("claude_cli", "claude-dev", "", "")).to_equal("claude-dev")
         expect(agent_command_for_provider("opencode_cli", "", "", "opencode-dev")).to_equal("opencode-dev")
+
+    it "summarizes team process launch state":
+        val a = AgentProcess(agent_id: "a", status: "started", reason: "process_spawned", pid: 10)
+        val b = AgentProcess(agent_id: "b", status: "error", reason: "spawn_failed", pid: -1)
+        val team = summarize_agent_team("team-1", [a, b])
+        expect(team.status).to_equal("partial")
+        expect(team.reason).to_equal("started:1/2")
+        expect(team.processes.len()).to_equal(2)
 
     it "builds a claude advisor plan":
         val plan = build_claude_advisor_plan("architecture", "compare options")

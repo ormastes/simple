@@ -62,7 +62,7 @@ sh scripts/setup/install-spipe-dev-command.shs --apply
 
 ## LLM Caret Agent Teams
 
-For LLM Caret agent/team/advisor/goal work, start with `src/app/llm_caret/agent_plan.spl`, `src/app/llm_caret/agent_files.spl`, and `doc/07_guide/app/llm/llm_caret_agent_teams.md`. The current supported surface is static prompt/argv planning, existing-file hash snapshots, and explicit agent, skill, MCP server, and plugin capability lists; live process teams, VCS-wide diff capture, plugin install, MCP discovery, and cross-agent chat require separate requirements.
+For LLM Caret agent/team/advisor/goal work, start with `src/app/llm_caret/agent_plan.spl`, `src/app/llm_caret/agent_files.spl`, `src/app/llm_caret/agent_runtime.spl`, and `doc/07_guide/app/llm/llm_caret_agent_teams.md`. The current supported surface is static prompt/argv planning, existing-file hash snapshots, non-persistent team launch, and explicit agent, skill, MCP server, and plugin capability lists; persistent live teams, VCS-wide diff capture, plugin install, MCP discovery, and cross-agent chat require separate requirements.
 
 ## Quick references in the same directory
 

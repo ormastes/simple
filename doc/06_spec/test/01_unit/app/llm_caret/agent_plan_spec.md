@@ -27,7 +27,7 @@ agent_plan_spec
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 11 | 11 | 0 | 0 |
+| 12 | 12 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -233,6 +233,25 @@ expect(agent_command_for_provider("opencode_cli", "", "", "opencode-dev")).to_eq
 
 </details>
 
+#### summarizes team process launch state
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val a = AgentProcess(agent_id: "a", status: "started", reason: "process_spawned", pid: 10)
+val b = AgentProcess(agent_id: "b", status: "error", reason: "spawn_failed", pid: -1)
+val team = summarize_agent_team("team-1", [a, b])
+expect(team.status).to_equal("partial")
+expect(team.reason).to_equal("started:1/2")
+expect(team.processes.len()).to_equal(2)
+```
+
+</details>
+
 #### builds a claude advisor plan
 
 <details>
@@ -287,8 +306,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 11 |
-| Active scenarios | 11 |
+| Total scenarios | 12 |
+| Active scenarios | 12 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
