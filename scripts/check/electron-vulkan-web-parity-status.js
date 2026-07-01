@@ -73,6 +73,9 @@ function electronVulkanProof(electron, proof, expectedPort, expectedCapturePath,
   const proofCapturedArgbPath = String((proof && proof.captured_argb_path) || "");
   const proofWidth = proof ? proof.width : undefined;
   const proofHeight = proof ? proof.height : undefined;
+  const proofNativeWidth = proof ? proof.native_width : undefined;
+  const proofNativeHeight = proof ? proof.native_height : undefined;
+  const proofDownsampled = proof ? proof.downsampled : undefined;
   const proofRemoteDebuggingPort = String((proof && proof.remote_debugging_port) || "");
   const proofCapturedArgbWritten = proof && proof.captured_argb_written === true;
   const captureSourceOk = proofSource === "tools/electron-live-bitmap/capture_html_argb.js";
@@ -80,6 +83,10 @@ function electronVulkanProof(electron, proof, expectedPort, expectedCapturePath,
   const proofDimensionsOk = proof &&
     proofWidth === electron.width &&
     proofHeight === electron.height;
+  const proofNativeDimensionsOk = proof &&
+    proofNativeWidth === electron.width &&
+    proofNativeHeight === electron.height;
+  const proofNotDownsampled = proof && proofDownsampled === false;
   const remoteDebuggingPortOk = !expectedPort || proofRemoteDebuggingPort === expectedPort;
   const capturedArgbPathOk = !expectedCapturePath || proofCapturedArgbPath === expectedCapturePath;
   const htmlPathOk = !expectedSourceHtmlPath || proofHtmlPath === expectedSourceHtmlPath;
@@ -112,7 +119,7 @@ function electronVulkanProof(electron, proof, expectedPort, expectedCapturePath,
   const browserInfoOk = browserStatus === "pass";
   const backed = proofStatusOk && captureSourceOk && htmlPathOk && htmlSha256Ok &&
     proofCapturedArgbWritten && capturedArgbPathOk &&
-    proofDimensionsOk && remoteDebuggingPortOk &&
+    proofDimensionsOk && proofNativeDimensionsOk && proofNotDownsampled && remoteDebuggingPortOk &&
     enabled && gpuEnabled && hardware && mentionsVulkan && browserInfoOk;
   let reason = "electron-vulkan-backed";
   if (!proofStatusOk) reason = "electron-proof-status-not-pass";
@@ -122,6 +129,8 @@ function electronVulkanProof(electron, proof, expectedPort, expectedCapturePath,
   else if (!proofCapturedArgbWritten) reason = "electron-proof-argb-not-written";
   else if (!capturedArgbPathOk) reason = "electron-proof-captured-argb-path-mismatch";
   else if (!proofDimensionsOk) reason = "electron-proof-frame-mismatch";
+  else if (!proofNativeDimensionsOk) reason = "electron-proof-native-frame-mismatch";
+  else if (!proofNotDownsampled) reason = "electron-proof-downsampled";
   else if (!remoteDebuggingPortOk) reason = "electron-proof-remote-debugging-port-mismatch";
   else if (!enabled) reason = `electron-vulkan-${vulkan || "unknown"}`;
   else if (!gpuEnabled) reason = "electron-gpu-compositing-disabled";
@@ -139,6 +148,9 @@ function electronVulkanProof(electron, proof, expectedPort, expectedCapturePath,
     proofCapturedArgbWritten,
     proofWidth: proofWidth === undefined ? "" : proofWidth,
     proofHeight: proofHeight === undefined ? "" : proofHeight,
+    proofNativeWidth: proofNativeWidth === undefined ? "" : proofNativeWidth,
+    proofNativeHeight: proofNativeHeight === undefined ? "" : proofNativeHeight,
+    proofDownsampled: proofDownsampled === undefined ? "" : proofDownsampled,
     proofRemoteDebuggingPort,
     vulkan,
     gpuCompositing,
@@ -230,6 +242,9 @@ if (electronProofPath) {
   common.electron_vulkan_web_parity_windows_compare_electron_proof_captured_argb_written = electronProofStatus.proofCapturedArgbWritten ? "true" : "false";
   common.electron_vulkan_web_parity_windows_compare_electron_proof_width = electronProofStatus.proofWidth;
   common.electron_vulkan_web_parity_windows_compare_electron_proof_height = electronProofStatus.proofHeight;
+  common.electron_vulkan_web_parity_windows_compare_electron_proof_native_width = electronProofStatus.proofNativeWidth;
+  common.electron_vulkan_web_parity_windows_compare_electron_proof_native_height = electronProofStatus.proofNativeHeight;
+  common.electron_vulkan_web_parity_windows_compare_electron_proof_downsampled = electronProofStatus.proofDownsampled;
   common.electron_vulkan_web_parity_windows_compare_electron_proof_remote_debugging_port = electronProofStatus.proofRemoteDebuggingPort;
   common.electron_vulkan_web_parity_windows_compare_electron_vulkan_status = electronProofStatus.status;
   common.electron_vulkan_web_parity_windows_compare_electron_vulkan_reason = electronProofStatus.reason;
