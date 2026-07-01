@@ -526,6 +526,38 @@ browser/readback evidence slice. The broader GUI/Web/Mobile hardening goal still
 requires production parity and mobile Tauri iOS/Android evidence before the full
 plan is done.
 
+### Production Font Offload Evidence Contract (2026-07-02)
+
+The production aggregate now reaches the Metal render-log comparison, but full
+GUI/Web parity is still blocked by font offload readiness:
+
+- `production_gui_web_renderer_parity_font_offload_status=unavailable`
+- `production_gui_web_renderer_parity_font_offload_reason=vector-font-gpu-glyph-return-missing;runtime-unavailable`
+
+Follow-up hardening in the isolated worktree made the font evidence contract
+Metal-aware without weakening the gate:
+
+- `check-production-gui-font-offload-evidence.shs` accepts
+  `VECTOR_FONT_METAL_HITS` and passes it into `VectorFontAcceleratorStats`.
+- The wrapper emits vector accelerator counters for attempts, Metal, CUDA,
+  OpenCL, CPU fallback, returned glyphs, and returned glyph pixels.
+- `check-production-gui-web-renderer-parity-evidence.shs` forwards those rows
+  into the normalized production aggregate namespace.
+
+Focused evidence:
+
+- Default production font evidence remains fail-closed with Metal selected but
+  no runtime/readback proof.
+- Injected Metal glyph/readback evidence passes with
+  `production_gui_font_offload_vector_metal_hits=1`,
+  `production_gui_font_offload_vector_readback_status=vector-font-glyph-readback-matched`,
+  and `production_gui_font_offload_bitmap_readback_status=gpu-glyph-raster-readback-matched`.
+
+Next concrete step: wire real macOS Metal glyph/readback counters into the
+production font wrapper or explicitly scope font offload out of the production
+parity acceptance criteria. Do not mark
+`production_gui_web_renderer_parity_status=pass` from injected evidence alone.
+
 ## Existing Canonical Artifacts
 
 - Feature requirements:
