@@ -343,13 +343,15 @@ feature tip in a clean worktree:
 - Base commit: `04990d735c6b3e275fd7cd58a67c54a08ddba038`
   (`docs(gui): record renderer hardening reconciliation plan`)
 - Patch source: staged diff from `/tmp/simple-mac-metal-reconcile-probe`
-- Apply result: `git apply --index --3way` applied all 10 scoped renderer files
+- Apply result: `git apply --index --3way` applied all scoped renderer files
   cleanly with no conflicts.
 - Materialized files:
+  - `doc/03_plan/agent_tasks/gui_web_mobile_renderer_hardening_resume_2026-06-28.md`
   - `scripts/check/check-gui-renderdoc-feature-coverage-status.shs`
   - `scripts/check/check-gui-widget-renderdoc-goal-status.shs`
   - `scripts/check/check-production-gui-web-renderer-parity-evidence.shs`
   - `scripts/check/check-renderdoc-electron-html-gate.shs`
+  - `scripts/lib/render-log-common.shs`
   - `test/03_system/check/electron_live_smoke_proof_validator_spec.spl`
   - `test/03_system/check/gui_renderdoc_feature_coverage_status_spec.spl`
   - `test/03_system/check/macos_metal_render_log_compare_spec.spl`
@@ -371,10 +373,60 @@ Materialized current-tip checks passed:
   `production_gui_web_renderer_parity_gate_spec.spl`, and
   `gui_widget_renderdoc_goal_status_spec.spl`.
 
-Next concrete integration step: commit or otherwise promote the staged
-materialized worktree changes from `/tmp/simple-mac-metal-materialize` onto the
-feature branch, then run the mandatory generated-spec layout and direct-env
-guards before final verification.
+Materialized commit:
+
+- `9c0806d432dbfbd8f2d74c15df7ae30f2e19fed1`
+  (`test(gui): materialize renderer metal reconciliation`)
+- Remote ref verified:
+  `refs/heads/codex/tauri-mobile-renderer-parity-2026-06-26`.
+
+### Current Evidence Audit (2026-07-02)
+
+Current scoped audit result: **not complete**. The branch sync/reconciliation
+commit exists on GitHub, but the Mac GUI/Metal checklist still lacks current
+passing evidence artifacts.
+
+Findings:
+
+- `scripts/check/check-macos-metal-render-log-compare.shs` could not run until
+  the missing canonical helper `scripts/lib/render-log-common.shs` was restored
+  from the `origin/main` helper surface.
+- Fresh command:
+  `BUILD_DIR=build/mac-gui-metal-current-audit/macos-metal-render-log-compare
+  REPORT_PATH=build/mac-gui-metal-current-audit/macos-metal-render-log-compare/report.md
+  sh scripts/check/check-macos-metal-render-log-compare.shs`
+  emitted:
+  - `macos_metal_render_log_compare_status=unavailable`
+  - `macos_metal_render_log_compare_required_api=metal`
+  - `macos_metal_render_log_compare_generated_readback_gate_status=fail`
+  - `macos_metal_render_log_compare_framebuffer_readback_gate_status=fail`
+  - `macos_metal_render_log_compare_browser_backing_gate_status=fail`
+  - `macos_metal_render_log_compare_pairwise_gate_status=fail`
+  - `macos_metal_render_log_compare_argb_source_gate_status=fail`
+  - `macos_metal_render_log_compare_blocked_gate_count=8`
+  - missing source envs:
+    `build/metal_generated_2d_readback/evidence.env`,
+    `build/metal_engine2d_framebuffer_readback_evidence/evidence.env`, and
+    `build/macos-metal-browser-backing/evidence.env`.
+- Fresh command:
+  `BUILD_ROOT=build/mac-gui-metal-current-audit/production-gui-web-parity
+  REPORT_PATH=build/mac-gui-metal-current-audit/production-gui-web-parity/report.md
+  PRODUCTION_GUI_WEB_RENDERER_PARITY_SUBCHECK_TIMEOUT_SECS=120
+  sh scripts/check/check-production-gui-web-renderer-parity-evidence.shs`
+  emitted:
+  - `production_gui_web_renderer_parity_status=fail`
+  - `production_gui_web_renderer_parity_reason=electron-layout-manifest-failed`
+  - `production_gui_web_renderer_parity_matrix_status=pass`
+  - `production_gui_web_renderer_parity_layout_manifest_status=timeout`
+  - no current `surface_manifest`, `backend_status`,
+    `backend_same_frame_readback`, or `metal_readback_status` rows were emitted.
+
+Next concrete evidence step: produce the three Metal source envs above from
+live current macOS artifacts, then rerun the two wrappers once. Do not claim
+Mac GUI/Web Metal completion until production parity reaches
+`production_gui_web_renderer_parity_status=pass` with exact backend/readback
+rows, and the macOS render-log compare reaches
+`macos_metal_render_log_compare_status=pass` with `blocked_gate_count=0`.
 
 ## Existing Canonical Artifacts
 
