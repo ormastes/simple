@@ -1,0 +1,42 @@
+# Live JSONL protocol smoke for `src/app/spipe_mcp/main.spl serve`.
+
+use app.io.mod.{file_write, process_run, exit}
+
+fn shell_quote(value: text) -> text:
+    "'" + value.replace("'", "'\"'\"'") + "'"
+
+fn fail(message: text, detail: text):
+    print("STATUS: FAIL spipe_mcp_protocol_smoke " + message)
+    if detail != "":
+        print(detail)
+    exit(1)
+
+fn require_contains(haystack: text, needle: text, message: text):
+    if not haystack.contains(needle):
+        fail(message, haystack)
+
+val initialize = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"spipe-smoke\",\"version\":\"1\"}}}"
+val tools_list = "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{}}"
+val context_put = "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"spipe_context_put\",\"arguments\":{\"source_id\":\"exec:smoke\",\"source_kind\":\"command_output\",\"command\":\"simple build\",\"text\":\"[ERROR] src/app/main.spl:1: bad\\nok\"}}}"
+val context_search = "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",\"params\":{\"name\":\"spipe_context_search\",\"arguments\":{\"query\":\"bad\"}}}"
+
+val input_path = "/tmp/spipe_mcp_protocol_smoke.jsonl"
+val input = initialize + "\n" + tools_list + "\n" + context_put + "\n" + context_search + "\n"
+
+if not file_write(input_path, input):
+    fail("input-write-failed", input_path)
+
+val command = "timeout 20 bin/release/simple run src/app/spipe_mcp/main.spl serve < " + shell_quote(input_path)
+val result = process_run("/bin/sh", ["-c", command])
+if result.2 != 0:
+    fail("server-exit-" + result.2.to_string(), "STDOUT:\n" + result.0 + "\nSTDERR:\n" + result.1)
+
+require_contains(result.0, "\"protocolVersion\"", "missing-initialize-response")
+require_contains(result.0, "\"spipe_context_put\"", "missing-tools-list")
+require_contains(result.0, "stored exec:smoke", "missing-context-put-result")
+require_contains(result.0, "@group level=ERROR count=1", "missing-level-group")
+require_contains(result.0, "@parent d=1 kind=dir path=", "missing-parent-chain")
+require_contains(result.0, "raw=raw:exec:smoke#L1-L1", "missing-raw-pointer")
+
+print("STATUS: PASS spipe_mcp_protocol_smoke")
+exit(0)

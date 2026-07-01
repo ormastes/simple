@@ -60,6 +60,7 @@ bin/release/simple run src/app/spipe_mcp/main.spl codebase-search --query=main.s
 bin/release/simple run src/app/spipe_mcp/main.spl codebase-get --source-id=codebase:1 -f repomix.txt
 bin/release/simple run src/app/spipe_mcp/main.spl codebase-save --source-id=codebase:1 -f repomix.txt
 bin/release/simple run src/app/spipe_mcp/main.spl saveCodebase --source-id=codebase:1 -f repomix.txt
+bin/release/simple run scripts/smoke/spipe_mcp_protocol_smoke.spl
 bin/release/simple run src/app/cli/main.spl spipe-mcp parsers
 ```
 
@@ -218,6 +219,11 @@ Raw-context calls accept either `start_line`/`end_line`/`before`/`after` or
 `startLine`/`endLine`/`contextBefore`/`contextAfter`; the CLI mirrors those
 camelCase aliases as flags. If no range is provided, raw context defaults to
 line 1.
+
+`scripts/smoke/spipe_mcp_protocol_smoke.spl` is the focused live protocol
+oracle. It sends JSONL `initialize`, `tools/list`, `spipe_context_put`, and
+`spipe_context_search` requests through the stdio server and checks the rendered
+level group, parent chain, and raw pointer.
 
 ## Current Boundary
 
