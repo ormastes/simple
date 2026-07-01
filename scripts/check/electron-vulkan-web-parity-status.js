@@ -44,6 +44,13 @@ function validUint32(value) {
   return Number.isInteger(value) && value >= 0 && value <= 0xFFFFFFFF;
 }
 
+function invalidPixelIndex(values) {
+  for (let i = 0; i < values.length; i += 1) {
+    if (!validUint32(values[i])) return i;
+  }
+  return -1;
+}
+
 function gpuAux(info) {
   if (info && info.gpu && info.gpu.auxAttributes) return info.gpu.auxAttributes;
   if (info && info.auxAttributes) return info.auxAttributes;
@@ -193,6 +200,16 @@ if (electronPixels.length !== electronWidth * electronHeight || vulkanPixels.len
 
 if (vulkanPixelCount !== vulkanPixels.length) {
   finish("fail", "vulkan-pixel-count-mismatch", 2, common);
+}
+
+const invalidElectronPixel = invalidPixelIndex(electronPixels);
+const invalidVulkanPixel = invalidPixelIndex(vulkanPixels);
+if (invalidElectronPixel !== -1 || invalidVulkanPixel !== -1) {
+  finish("fail", "pixel-buffer-values-invalid", 2, {
+    ...common,
+    electron_vulkan_web_parity_windows_compare_invalid_electron_pixel_index: invalidElectronPixel,
+    electron_vulkan_web_parity_windows_compare_invalid_vulkan_pixel_index: invalidVulkanPixel,
+  });
 }
 
 if (expectedArgbProvided) {
