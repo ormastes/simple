@@ -27,7 +27,7 @@ electron_vulkan_web_parity_windows_contract_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 24 | 24 | 0 | 0 |
+| 25 | 25 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -149,6 +149,7 @@ On a Windows host that reaches frame comparison it also emits:
 - `electron_vulkan_web_parity_windows_electron_json`
 - `electron_vulkan_web_parity_windows_electron_proof_json`
 - `electron_vulkan_web_parity_windows_vulkan_json`
+- `electron_vulkan_web_parity_windows_compare_exit_code`
 
 ## Completion Boundary
 
@@ -260,7 +261,7 @@ The spec contains:
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 66 lines folded for reproduction.
+Runnable source: 67 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -300,6 +301,7 @@ expect(script).to_contain("--enable-features=Vulkan,DefaultANGLEVulkan,VulkanFro
 expect(script).to_contain("--disable-gpu-sandbox")
 expect(script).to_contain("--enable-gpu-rasterization")
 expect(script).to_contain("electron_vulkan_web_parity_windows_electron_proof_json")
+expect(script).to_contain("electron_vulkan_web_parity_windows_compare_exit_code")
 expect(script).to_contain("scripts/check/electron-vulkan-web-parity-status.js")
 val helper = file_read("scripts/check/electron-vulkan-web-parity-status.js")
 expect(helper).to_contain("vulkan-render-status-not-pass")
@@ -382,7 +384,7 @@ expect(stdout).to_contain("electron_vulkan_web_parity_windows_electron_capture_e
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -398,6 +400,33 @@ expect(stdout).to_contain("electron_vulkan_web_parity_windows_reason=simple-vulk
 expect(stdout).to_contain("electron_vulkan_web_parity_windows_simple_bin_probe_exit_code=0")
 expect(stdout).to_contain("electron_vulkan_web_parity_windows_electron_capture_exit_code=0")
 expect(stdout).to_contain("electron_vulkan_web_parity_windows_simple_render_exit_code=9")
+expect(stdout.contains("electron_vulkan_web_parity_windows_compare_exit_code=")).to_equal(false)
+```
+
+</details>
+
+#### reports comparator exit code on Windows comparison pass
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-electron-vulkan-web-parity-windows-compare-exit-pass"
+val electron_json = "'{\"width\":2,\"height\":2,\"pixels\":[4280435814,4280435814,4280435814,4280435814]}'"
+val proof_json = "'{\"gpu_feature_status\":{\"vulkan\":\"enabled\",\"gpu_compositing\":\"enabled\"},\"browser_target_gpu_info_status\":\"pass\",\"browser_target_gpu_info\":{\"gpu\":{\"auxAttributes\":{\"hardwareSupportsVulkan\":true,\"displayType\":\"Vulkan\",\"glImplementationParts\":\"angle=vulkan\",\"skiaBackendType\":\"Vulkan\",\"glRenderer\":\"Vulkan\"}}}}}'"
+val vulkan_json = "'{\"status\":\"pass\",\"reason\":\"pass\",\"producer\":\"simple-engine2d-vulkan\",\"requested_backend\":\"vulkan\",\"backend\":\"vulkan\",\"pixel_count\":4,\"width\":2,\"height\":2,\"pixels\":[4280435814,4280435814,4280435814,4280435814]}'"
+val command = "rm -rf " + root + " && mkdir -p " + root + " tools/electron-shell/node_modules/.bin && printf '%s\\n' '#!/bin/sh' 'printf \"%s\\\\n\" " + electron_json + " > \"$ELECTRON_CAPTURE_OUTPUT\"' 'printf \"%s\\\\n\" " + proof_json + " > \"$ELECTRON_CAPTURE_PROOF_PATH\"' 'exit 0' > tools/electron-shell/node_modules/.bin/electron && chmod +x tools/electron-shell/node_modules/.bin/electron && printf '%s\\n' '#!/bin/sh' 'if [ \"$1\" = \"--version\" ]; then echo \"Simple Language v1.0.0-beta\"; exit 0; fi' 'printf \"%s\\\\n\" " + vulkan_json + " > \"$EVWP_OUTPUT\"' 'exit 0' > " + root + "/fake-simple && chmod +x " + root + "/fake-simple && OS=Windows_NT SIMPLE_BIN=$PWD/" + root + "/fake-simple EVWP_WIDTH=2 EVWP_HEIGHT=2 EVWP_BG_DEC=4280435814 EVWP_BG_HEX=224466 EVWP_WORK=" + root + "/work sh scripts/check/check-electron-vulkan-web-parity-windows.shs; code=$?; rm -f tools/electron-shell/node_modules/.bin/electron; exit $code"
+val (stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+
+expect(code).to_equal(0)
+expect(stdout).to_contain("electron_vulkan_web_parity_windows_status=pass")
+expect(stdout).to_contain("electron_vulkan_web_parity_windows_reason=pixel-exact-vulkan")
+expect(stdout).to_contain("electron_vulkan_web_parity_windows_compare_exit_code=0")
+expect(stdout).to_contain("electron_vulkan_web_parity_windows_electron_json=" + root + "/work/electron.json")
+expect(stdout).to_contain("electron_vulkan_web_parity_windows_vulkan_json=" + root + "/work/vulkan.json")
 ```
 
 </details>
@@ -861,8 +890,8 @@ expect(stdout).to_contain("electron_vulkan_web_parity_windows_compare_invalid_vu
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 24 |
-| Active scenarios | 24 |
+| Total scenarios | 25 |
+| Active scenarios | 25 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
