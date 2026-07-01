@@ -61,8 +61,9 @@ bin/release/simple run src/app/cli/main.spl spipe-mcp parsers
 No args and `serve` run the MCP stdio server. Logs must stay off stdout.
 After the release binary is rebuilt, `simple spipe-mcp ...` is the canonical
 shortcut for the same app entrypoint.
-Parser and capture commands accept `--source-kind=K` or `--kind=K`; the default
-is `command_output`.
+Parser and capture commands accept `--source-kind=K`, `--sourceKind=K`, or
+`--kind=K`; the default is `command_output`. MCP calls may use `source_kind` or
+`sourceKind`.
 
 ## MCP Tools
 
