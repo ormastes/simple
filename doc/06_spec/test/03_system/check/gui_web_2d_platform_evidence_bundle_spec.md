@@ -79,7 +79,8 @@ sh scripts/check/check-gui-web-2d-platform-evidence-bundle.shs
   pixel-exact comparison status.
 - The Windows Electron/Vulkan parity gate also requires lowercase 64-hex
   SHA-256 rows for the selected Windows Simple binary, Electron launcher,
-  Vulkan loader, and generated Electron/proof/PNG/Vulkan artifacts.
+  Vulkan loader, generated Electron/proof/PNG/Vulkan artifacts, and artifact
+  manifest proof.
 - The Windows Electron/Vulkan parity gate requires requested frame metadata,
   Electron and Vulkan producer rows, the pure-Simple Vulkan entrypoint row,
   matching captured dimensions, and pixel counts equal to the requested frame
