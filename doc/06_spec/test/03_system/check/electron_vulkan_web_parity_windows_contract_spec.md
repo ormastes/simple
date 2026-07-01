@@ -27,7 +27,7 @@ electron_vulkan_web_parity_windows_contract_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 8 | 8 | 0 | 0 |
+| 9 | 9 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -193,7 +193,7 @@ The spec contains:
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 28 lines folded for reproduction.
+Runnable source: 37 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -219,12 +219,21 @@ expect(script).to_contain("--enable-gpu-rasterization")
 expect(script).to_contain("electron_vulkan_web_parity_windows_electron_proof_json")
 expect(script).to_contain("scripts/check/electron-vulkan-web-parity-status.js")
 val helper = file_read("scripts/check/electron-vulkan-web-parity-status.js")
+expect(helper).to_contain("vulkan-render-status-not-pass")
+expect(helper).to_contain("vulkan-producer-not-proven")
+expect(helper).to_contain("vulkan-requested-backend-not-proven")
 expect(helper).to_contain("vulkan-backend-not-proven")
+expect(helper).to_contain("vulkan-pixel-count-mismatch")
 expect(helper).to_contain("electron-vulkan-backed")
 expect(helper).to_contain("electron-browser-gpu-info-not-proven")
 expect(helper).to_contain("frame-shape-mismatch")
 expect(helper).to_contain("pixel-buffer-length-mismatch")
 expect(helper).to_contain("pixel-exact-vulkan")
+val producer = file_read("src/app/test/electron_vulkan_web_parity.spl")
+expect(producer).to_contain("simple-engine2d-vulkan")
+expect(producer).to_contain("vulkan-prime-init-failed")
+expect(producer).to_contain("vulkan-engine-create-failed")
+expect(producer).to_contain("vulkan-pixel-count-mismatch")
 ```
 
 </details>
@@ -253,18 +262,21 @@ expect(_stdout).to_contain("electron_vulkan_web_parity_windows_simple_bin_status
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val root = "build/test-electron-vulkan-web-parity-windows-compare-pass"
-val command = "rm -rf " + root + " && mkdir -p " + root + " && printf '%s\\n' '{\"width\":2,\"height\":2,\"pixels\":[1,2,3,4]}' > " + root + "/electron.json && printf '%s\\n' '{\"width\":2,\"height\":2,\"backend\":\"vulkan\",\"pixels\":[1,2,3,4]}' > " + root + "/vulkan.json && node scripts/check/electron-vulkan-web-parity-status.js " + root + "/electron.json " + root + "/vulkan.json"
+val vulkan_json = "'{\"status\":\"pass\",\"reason\":\"pass\",\"producer\":\"simple-engine2d-vulkan\",\"requested_backend\":\"vulkan\",\"backend\":\"vulkan\",\"pixel_count\":4,\"width\":2,\"height\":2,\"pixels\":[1,2,3,4]}'"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && printf '%s\\n' '{\"width\":2,\"height\":2,\"pixels\":[1,2,3,4]}' > " + root + "/electron.json && printf '%s\\n' " + vulkan_json + " > " + root + "/vulkan.json && node scripts/check/electron-vulkan-web-parity-status.js " + root + "/electron.json " + root + "/vulkan.json"
 val (stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 
 expect(code).to_equal(0)
 expect(stdout).to_contain("electron_vulkan_web_parity_windows_status=pass")
 expect(stdout).to_contain("electron_vulkan_web_parity_windows_reason=pixel-exact-vulkan")
 expect(stdout).to_contain("electron_vulkan_web_parity_windows_compare_mismatches=0")
+expect(stdout).to_contain("electron_vulkan_web_parity_windows_compare_vulkan_status=pass")
+expect(stdout).to_contain("electron_vulkan_web_parity_windows_compare_vulkan_producer=simple-engine2d-vulkan")
 expect(stdout).to_contain("electron_vulkan_web_parity_windows_compare_vulkan_backend=vulkan")
 ```
 
@@ -275,13 +287,14 @@ expect(stdout).to_contain("electron_vulkan_web_parity_windows_compare_vulkan_bac
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val root = "build/test-electron-vulkan-web-parity-windows-browser-proof"
 val proof = "'{\"gpu_feature_status\":{\"vulkan\":\"enabled\",\"gpu_compositing\":\"enabled\"},\"browser_target_gpu_info_status\":\"pass\",\"browser_target_gpu_info\":{\"gpu\":{\"auxAttributes\":{\"hardwareSupportsVulkan\":true,\"displayType\":\"Vulkan\",\"glImplementationParts\":\"angle=vulkan\",\"skiaBackendType\":\"Vulkan\",\"glRenderer\":\"Vulkan\"}}}}}}'"
-val command = "rm -rf " + root + " && mkdir -p " + root + " && printf '%s\\n' '{\"width\":2,\"height\":2,\"pixels\":[1,2,3,4]}' > " + root + "/electron.json && printf '%s\\n' '{\"width\":2,\"height\":2,\"backend\":\"vulkan\",\"pixels\":[1,2,3,4]}' > " + root + "/vulkan.json && printf '%s\\n' " + proof + " > " + root + "/electron-proof.json && printf '}' >> " + root + "/electron-proof.json && node scripts/check/electron-vulkan-web-parity-status.js " + root + "/electron.json " + root + "/vulkan.json " + root + "/electron-proof.json"
+val vulkan_json = "'{\"status\":\"pass\",\"reason\":\"pass\",\"producer\":\"simple-engine2d-vulkan\",\"requested_backend\":\"vulkan\",\"backend\":\"vulkan\",\"pixel_count\":4,\"width\":2,\"height\":2,\"pixels\":[1,2,3,4]}'"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && printf '%s\\n' '{\"width\":2,\"height\":2,\"pixels\":[1,2,3,4]}' > " + root + "/electron.json && printf '%s\\n' " + vulkan_json + " > " + root + "/vulkan.json && printf '%s\\n' " + proof + " > " + root + "/electron-proof.json && printf '}' >> " + root + "/electron-proof.json && node scripts/check/electron-vulkan-web-parity-status.js " + root + "/electron.json " + root + "/vulkan.json " + root + "/electron-proof.json"
 val (stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 
 expect(code).to_equal(0)
@@ -298,13 +311,14 @@ expect(stdout).to_contain("electron_vulkan_web_parity_windows_compare_electron_h
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val root = "build/test-electron-vulkan-web-parity-windows-browser-proof-fail"
 val proof = "'{\"gpu_feature_status\":{\"vulkan\":\"disabled_software\",\"gpu_compositing\":\"enabled\"},\"browser_target_gpu_info_status\":\"pass\",\"browser_target_gpu_info\":{\"gpu\":{\"auxAttributes\":{\"hardwareSupportsVulkan\":true,\"displayType\":\"SwiftShader\",\"glImplementationParts\":\"angle=swiftshader\",\"skiaBackendType\":\"Software\",\"glRenderer\":\"SwiftShader\"}}}}}}'"
-val command = "rm -rf " + root + " && mkdir -p " + root + " && printf '%s\\n' '{\"width\":2,\"height\":2,\"pixels\":[1,2,3,4]}' > " + root + "/electron.json && printf '%s\\n' '{\"width\":2,\"height\":2,\"backend\":\"vulkan\",\"pixels\":[1,2,3,4]}' > " + root + "/vulkan.json && printf '%s\\n' " + proof + " > " + root + "/electron-proof.json && printf '}' >> " + root + "/electron-proof.json && node scripts/check/electron-vulkan-web-parity-status.js " + root + "/electron.json " + root + "/vulkan.json " + root + "/electron-proof.json"
+val vulkan_json = "'{\"status\":\"pass\",\"reason\":\"pass\",\"producer\":\"simple-engine2d-vulkan\",\"requested_backend\":\"vulkan\",\"backend\":\"vulkan\",\"pixel_count\":4,\"width\":2,\"height\":2,\"pixels\":[1,2,3,4]}'"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && printf '%s\\n' '{\"width\":2,\"height\":2,\"pixels\":[1,2,3,4]}' > " + root + "/electron.json && printf '%s\\n' " + vulkan_json + " > " + root + "/vulkan.json && printf '%s\\n' " + proof + " > " + root + "/electron-proof.json && printf '}' >> " + root + "/electron-proof.json && node scripts/check/electron-vulkan-web-parity-status.js " + root + "/electron.json " + root + "/vulkan.json " + root + "/electron-proof.json"
 val (stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 
 expect(code).to_equal(2)
@@ -320,12 +334,13 @@ expect(stdout).to_contain("electron_vulkan_web_parity_windows_compare_electron_v
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val root = "build/test-electron-vulkan-web-parity-windows-compare-mismatch"
-val command = "rm -rf " + root + " && mkdir -p " + root + " && printf '%s\\n' '{\"width\":2,\"height\":2,\"pixels\":[1,2,3,4]}' > " + root + "/electron.json && printf '%s\\n' '{\"width\":2,\"height\":2,\"backend\":\"vulkan\",\"pixels\":[1,2,3,5]}' > " + root + "/vulkan.json && node scripts/check/electron-vulkan-web-parity-status.js " + root + "/electron.json " + root + "/vulkan.json"
+val vulkan_json = "'{\"status\":\"pass\",\"reason\":\"pass\",\"producer\":\"simple-engine2d-vulkan\",\"requested_backend\":\"vulkan\",\"backend\":\"vulkan\",\"pixel_count\":4,\"width\":2,\"height\":2,\"pixels\":[1,2,3,5]}'"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && printf '%s\\n' '{\"width\":2,\"height\":2,\"pixels\":[1,2,3,4]}' > " + root + "/electron.json && printf '%s\\n' " + vulkan_json + " > " + root + "/vulkan.json && node scripts/check/electron-vulkan-web-parity-status.js " + root + "/electron.json " + root + "/vulkan.json"
 val (stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 
 expect(code).to_equal(1)
@@ -341,12 +356,13 @@ expect(stdout).to_contain("electron_vulkan_web_parity_windows_compare_mismatches
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val root = "build/test-electron-vulkan-web-parity-windows-compare-non-vulkan"
-val command = "rm -rf " + root + " && mkdir -p " + root + " && printf '%s\\n' '{\"width\":2,\"height\":2,\"pixels\":[1,2,3,4]}' > " + root + "/electron.json && printf '%s\\n' '{\"width\":2,\"height\":2,\"backend\":\"software\",\"pixels\":[1,2,3,4]}' > " + root + "/vulkan.json && node scripts/check/electron-vulkan-web-parity-status.js " + root + "/electron.json " + root + "/vulkan.json"
+val vulkan_json = "'{\"status\":\"pass\",\"reason\":\"pass\",\"producer\":\"simple-engine2d-vulkan\",\"requested_backend\":\"vulkan\",\"backend\":\"software\",\"pixel_count\":4,\"width\":2,\"height\":2,\"pixels\":[1,2,3,4]}'"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && printf '%s\\n' '{\"width\":2,\"height\":2,\"pixels\":[1,2,3,4]}' > " + root + "/electron.json && printf '%s\\n' " + vulkan_json + " > " + root + "/vulkan.json && node scripts/check/electron-vulkan-web-parity-status.js " + root + "/electron.json " + root + "/vulkan.json"
 val (stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 
 expect(code).to_equal(2)
@@ -357,23 +373,47 @@ expect(stdout).to_contain("electron_vulkan_web_parity_windows_compare_vulkan_bac
 
 </details>
 
+#### rejects failed Simple Vulkan render status
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-electron-vulkan-web-parity-windows-compare-render-fail"
+val vulkan_json = "'{\"status\":\"fail\",\"reason\":\"vulkan-prime-init-failed\",\"producer\":\"simple-engine2d-vulkan\",\"requested_backend\":\"vulkan\",\"backend\":\"\",\"pixel_count\":0,\"width\":2,\"height\":2,\"pixels\":[]}'"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && printf '%s\\n' '{\"width\":2,\"height\":2,\"pixels\":[1,2,3,4]}' > " + root + "/electron.json && printf '%s\\n' " + vulkan_json + " > " + root + "/vulkan.json && node scripts/check/electron-vulkan-web-parity-status.js " + root + "/electron.json " + root + "/vulkan.json"
+val (stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+
+expect(code).to_equal(2)
+expect(stdout).to_contain("electron_vulkan_web_parity_windows_status=fail")
+expect(stdout).to_contain("electron_vulkan_web_parity_windows_reason=vulkan-render-status-not-pass")
+expect(stdout).to_contain("electron_vulkan_web_parity_windows_compare_vulkan_reason=vulkan-prime-init-failed")
+```
+
+</details>
+
 #### rejects frame shape and pixel length mismatches
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val shape_root = "build/test-electron-vulkan-web-parity-windows-compare-shape"
-val shape_command = "rm -rf " + shape_root + " && mkdir -p " + shape_root + " && printf '%s\\n' '{\"width\":2,\"height\":2,\"pixels\":[1,2,3,4]}' > " + shape_root + "/electron.json && printf '%s\\n' '{\"width\":4,\"height\":1,\"backend\":\"vulkan\",\"pixels\":[1,2,3,4]}' > " + shape_root + "/vulkan.json && node scripts/check/electron-vulkan-web-parity-status.js " + shape_root + "/electron.json " + shape_root + "/vulkan.json"
+val shape_json = "'{\"status\":\"pass\",\"reason\":\"pass\",\"producer\":\"simple-engine2d-vulkan\",\"requested_backend\":\"vulkan\",\"backend\":\"vulkan\",\"pixel_count\":4,\"width\":4,\"height\":1,\"pixels\":[1,2,3,4]}'"
+val shape_command = "rm -rf " + shape_root + " && mkdir -p " + shape_root + " && printf '%s\\n' '{\"width\":2,\"height\":2,\"pixels\":[1,2,3,4]}' > " + shape_root + "/electron.json && printf '%s\\n' " + shape_json + " > " + shape_root + "/vulkan.json && node scripts/check/electron-vulkan-web-parity-status.js " + shape_root + "/electron.json " + shape_root + "/vulkan.json"
 val (shape_stdout, _shape_stderr, shape_code) = process_run("/bin/sh", ["-c", shape_command])
 expect(shape_code).to_equal(2)
 expect(shape_stdout).to_contain("electron_vulkan_web_parity_windows_reason=frame-shape-mismatch")
 
 val length_root = "build/test-electron-vulkan-web-parity-windows-compare-length"
-val length_command = "rm -rf " + length_root + " && mkdir -p " + length_root + " && printf '%s\\n' '{\"width\":2,\"height\":2,\"pixels\":[1,2,3,4]}' > " + length_root + "/electron.json && printf '%s\\n' '{\"width\":2,\"height\":2,\"backend\":\"vulkan\",\"pixels\":[1,2,3]}' > " + length_root + "/vulkan.json && node scripts/check/electron-vulkan-web-parity-status.js " + length_root + "/electron.json " + length_root + "/vulkan.json"
+val length_json = "'{\"status\":\"pass\",\"reason\":\"pass\",\"producer\":\"simple-engine2d-vulkan\",\"requested_backend\":\"vulkan\",\"backend\":\"vulkan\",\"pixel_count\":3,\"width\":2,\"height\":2,\"pixels\":[1,2,3]}'"
+val length_command = "rm -rf " + length_root + " && mkdir -p " + length_root + " && printf '%s\\n' '{\"width\":2,\"height\":2,\"pixels\":[1,2,3,4]}' > " + length_root + "/electron.json && printf '%s\\n' " + length_json + " > " + length_root + "/vulkan.json && node scripts/check/electron-vulkan-web-parity-status.js " + length_root + "/electron.json " + length_root + "/vulkan.json"
 val (length_stdout, _length_stderr, length_code) = process_run("/bin/sh", ["-c", length_command])
 expect(length_code).to_equal(2)
 expect(length_stdout).to_contain("electron_vulkan_web_parity_windows_reason=pixel-buffer-length-mismatch")
@@ -385,8 +425,8 @@ expect(length_stdout).to_contain("electron_vulkan_web_parity_windows_reason=pixe
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 8 |
-| Active scenarios | 8 |
+| Total scenarios | 9 |
+| Active scenarios | 9 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

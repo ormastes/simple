@@ -89,6 +89,11 @@ const electronHeight = Number(electron.height || 0);
 const vulkanWidth = Number(vulkan.width || 0);
 const vulkanHeight = Number(vulkan.height || 0);
 const vulkanBackend = String(vulkan.backend || "");
+const vulkanStatus = String(vulkan.status || "");
+const vulkanReason = String(vulkan.reason || "");
+const vulkanProducer = String(vulkan.producer || "");
+const vulkanRequestedBackend = String(vulkan.requested_backend || "");
+const vulkanPixelCount = Number(vulkan.pixel_count || 0);
 
 const common = {
   electron_vulkan_web_parity_windows_compare_electron_width: electronWidth,
@@ -97,7 +102,12 @@ const common = {
   electron_vulkan_web_parity_windows_compare_vulkan_height: vulkanHeight,
   electron_vulkan_web_parity_windows_compare_electron_pixels: electronPixels.length,
   electron_vulkan_web_parity_windows_compare_vulkan_pixels: vulkanPixels.length,
+  electron_vulkan_web_parity_windows_compare_vulkan_status: vulkanStatus,
+  electron_vulkan_web_parity_windows_compare_vulkan_reason: vulkanReason,
+  electron_vulkan_web_parity_windows_compare_vulkan_producer: vulkanProducer,
+  electron_vulkan_web_parity_windows_compare_vulkan_requested_backend: vulkanRequestedBackend,
   electron_vulkan_web_parity_windows_compare_vulkan_backend: vulkanBackend,
+  electron_vulkan_web_parity_windows_compare_vulkan_pixel_count: vulkanPixelCount,
 };
 
 if (electronProofPath) {
@@ -118,6 +128,18 @@ if (electronProofPath) {
   }
 }
 
+if (vulkanStatus !== "pass") {
+  finish("fail", "vulkan-render-status-not-pass", 2, common);
+}
+
+if (vulkanProducer !== "simple-engine2d-vulkan") {
+  finish("fail", "vulkan-producer-not-proven", 2, common);
+}
+
+if (vulkanRequestedBackend !== "vulkan") {
+  finish("fail", "vulkan-requested-backend-not-proven", 2, common);
+}
+
 if (vulkanBackend !== "vulkan") {
   finish("fail", "vulkan-backend-not-proven", 2, common);
 }
@@ -132,6 +154,10 @@ if (electronPixels.length === 0 || vulkanPixels.length === 0) {
 
 if (electronPixels.length !== vulkanPixels.length) {
   finish("fail", "pixel-buffer-length-mismatch", 2, common);
+}
+
+if (vulkanPixelCount !== vulkanPixels.length) {
+  finish("fail", "vulkan-pixel-count-mismatch", 2, common);
 }
 
 let mismatches = 0;
