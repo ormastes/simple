@@ -352,6 +352,7 @@ cleanup() {
     if [ -n "${IOS_DEV_PID:-}" ]; then
         kill "$IOS_DEV_PID" 2>/dev/null || true
     fi
+    rm -f "$TAURI_DIR/src-tauri/mobile_probe_entry.txt" "$TAURI_DIR/src-tauri/mobile_entry_source.spl" "$TAURI_DIR/src-tauri/mobile_mdi_proof_url.txt"
 }
 trap cleanup EXIT INT TERM
 
@@ -359,6 +360,9 @@ sleep 1
 kill -0 "$SERVER_PID" 2>/dev/null || fail "iOS MDI probe server failed to start; see $SERVER_LOG"
 
 cd "$TAURI_DIR"
+printf 'mdi-smoke\n' > "$TAURI_DIR/src-tauri/mobile_probe_entry.txt"
+cp "$SMOKE_SOURCE" "$TAURI_DIR/src-tauri/mobile_entry_source.spl"
+printf 'http://127.0.0.1:%s/proof\n' "$PORT" > "$TAURI_DIR/src-tauri/mobile_mdi_proof_url.txt"
 npm run prepare:dist > "$BUILD_DIR/ios_prepare_dist.log" 2>&1 \
     || fail "npm prepare:dist failed; see $BUILD_DIR/ios_prepare_dist.log"
 if [ ! -d "src-tauri/gen/apple" ]; then
@@ -380,6 +384,19 @@ SIMPLE_TAURI_MDI_PROOF_PATH="$PROOF_JSON" \
 SIMPLE_DASHBOARD_URL="http://127.0.0.1:$PORT/ios_mdi_probe.html" \
     cargo tauri ios dev --no-watch --no-dev-server --no-dev-server-wait "$SIM_DEVICE_NAME" > "$IOS_DEV_LOG" 2>&1 &
 IOS_DEV_PID=$!
+
+launch_end=$(( $(date +%s) + 45 ))
+launch_status=fail
+while [ "$(date +%s)" -lt "$launch_end" ]; do
+    if xcrun simctl launch "$SIM_UDID" com.simple.ui > "$BUILD_DIR/ios_manual_launch.log" 2>&1; then
+        launch_status=pass
+        break
+    fi
+    sleep 2
+done
+if [ "$launch_status" != "pass" ]; then
+    fail "failed to foreground com.simple.ui in iOS simulator; see $BUILD_DIR/ios_manual_launch.log"
+fi
 
 end=$(( $(date +%s) + TIMEOUT_SECS ))
 while [ "$(date +%s)" -lt "$end" ]; do

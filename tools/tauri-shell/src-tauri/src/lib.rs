@@ -29,6 +29,8 @@ struct MdiProof {
     count: usize,
     has_desktop: bool,
     image_count: usize,
+    source_window_count: usize,
+    has_simple_smoke_text: bool,
     has_drag_runtime: bool,
     has_drag_events: bool,
     drag_moved: bool,
@@ -38,6 +40,7 @@ struct MdiProof {
     body_click_routed: bool,
     body_input_routed: bool,
     body_key_routed: bool,
+    event_sequence: Vec<String>,
     taskbar_item_count: usize,
     taskbar_icon_count: usize,
     taskbar_icons_visible: bool,
@@ -45,6 +48,8 @@ struct MdiProof {
     html_renderable: bool,
     viewport_width: u32,
     viewport_height: u32,
+    device_pixel_ratio: f64,
+    screen_orientation: String,
     performance_now_available: bool,
     performance_now_delta_ms: f64,
     input_to_paint_ms: f64,
@@ -188,6 +193,60 @@ fn html_escape(text: &str) -> String {
         .replace('\'', "&#39;")
 }
 
+fn js_string_or_null(value: Option<&str>) -> String {
+    value
+        .map(|text| format!("{:?}", text))
+        .unwrap_or_else(|| "null".to_string())
+}
+
+fn mdi_proof_value(key: &str, value: &str) -> serde_json::Value {
+    if key == "eventSequence" {
+        return serde_json::Value::Array(
+            value
+                .split('|')
+                .filter(|item| !item.is_empty())
+                .map(|item| serde_json::Value::String(item.to_string()))
+                .collect(),
+        );
+    }
+    if value == "true" {
+        return serde_json::Value::Bool(true);
+    }
+    if value == "false" {
+        return serde_json::Value::Bool(false);
+    }
+    if let Ok(number) = value.parse::<i64>() {
+        return serde_json::Value::Number(number.into());
+    }
+    if let Ok(number) = value.parse::<f64>() {
+        if let Some(number) = serde_json::Number::from_f64(number) {
+            return serde_json::Value::Number(number);
+        }
+    }
+    serde_json::Value::String(value.to_string())
+}
+
+fn mdi_proof_json_from_url(url: &tauri::Url) -> Option<String> {
+    if url.scheme() != "simple-mdi-proof" {
+        return None;
+    }
+    let mut object = serde_json::Map::new();
+    for (key, value) in url.query_pairs() {
+        object.insert(key.to_string(), mdi_proof_value(&key, &value));
+    }
+    Some(serde_json::Value::Object(object).to_string())
+}
+
+fn record_mdi_proof_json(proof_json: String, app: Option<&AppHandle>) {
+    eprintln!("[tauri-shell] mdi proof: {}", proof_json);
+    if let Ok(path) = env::var("SIMPLE_TAURI_MDI_PROOF_PATH") {
+        let _ = fs::write(path, proof_json);
+        if let Some(app) = app {
+            app.exit(0);
+        }
+    }
+}
+
 fn shell_input_message(event_type: &str, key: &str, value: &str, x: f64, y: f64) -> ShellMessage {
     shell_input_message_for("main", event_type, "", key, value, x, y, 0.0, 0.0, "")
 }
@@ -290,7 +349,7 @@ fn tauri_mdi_init_script() -> &'static str {
             if (!document.getElementById('simple-tauri-wm-style')) {
                 var style = document.createElement('style');
                 style.id = 'simple-tauri-wm-style';
-                style.textContent = '#wm-desktop{position:fixed;inset:0;overflow:hidden;z-index:10000;pointer-events:none}.wm-window{position:absolute;display:flex;flex-direction:column;background:#111827;color:#e5e7eb;border:1px solid rgba(255,255,255,.18);box-shadow:0 18px 45px rgba(0,0,0,.42);border-radius:8px;overflow:hidden;pointer-events:auto}.wm-titlebar{height:32px;display:flex;align-items:center;gap:10px;padding:0 10px;background:#0f172a;border-bottom:1px solid rgba(255,255,255,.12);user-select:none;cursor:grab;touch-action:none}.wm-titlebar:active{cursor:grabbing}.wm-traffic-lights{display:flex;gap:6px}.wm-traffic-lights button{width:13px;height:13px;border-radius:50%;border:0;font-size:0;padding:0;cursor:pointer}.wm-traffic-lights button[data-action=close]{background:#ff5f57}.wm-traffic-lights button[data-action=minimize]{background:#febc2e}.wm-traffic-lights button[data-action=maximize]{background:#28c840}.wm-title{font:600 12px system-ui,sans-serif;color:#e5e7eb;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.wm-titlebar-widgets{display:flex;align-items:center;gap:6px;margin-left:auto}.wm-titlebar-widgets [data-simple-titlebar-widget]{min-height:24px}.wm-body{flex:1;min-height:0;overflow:auto;background:#0b0d10;pointer-events:auto}.wm-body *{pointer-events:auto}';
+                style.textContent = '#wm-desktop{position:fixed;inset:0 0 58px 0;overflow:hidden;z-index:10000;pointer-events:none}.wm-window{position:absolute;display:flex;flex-direction:column;background:#111827;color:#e5e7eb;border:1px solid rgba(255,255,255,.18);box-shadow:0 18px 45px rgba(0,0,0,.42);border-radius:8px;overflow:hidden;pointer-events:auto}.wm-titlebar{height:32px;display:flex;align-items:center;gap:10px;padding:0 10px;background:#0f172a;border-bottom:1px solid rgba(255,255,255,.12);user-select:none;cursor:grab;touch-action:none}.wm-titlebar:active{cursor:grabbing}.wm-traffic-lights{display:flex;gap:6px}.wm-traffic-lights button{width:13px;height:13px;border-radius:50%;border:0;font-size:0;padding:0;cursor:pointer}.wm-traffic-lights button[data-action=close]{background:#ff5f57}.wm-traffic-lights button[data-action=minimize]{background:#febc2e}.wm-traffic-lights button[data-action=maximize]{background:#28c840}.wm-title{font:600 12px system-ui,sans-serif;color:#e5e7eb;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.wm-titlebar-widgets{display:flex;align-items:center;gap:6px;margin-left:auto}.wm-titlebar-widgets [data-simple-titlebar-widget]{min-height:24px}.wm-body{flex:1;min-height:0;overflow:auto;background:#0b0d10;pointer-events:auto}.wm-body *{pointer-events:auto}#dock{position:fixed;left:0;right:0;bottom:0;height:58px;z-index:10001;display:flex;align-items:center;gap:8px;padding:7px 10px;background:rgba(5,8,13,.94);border-top:1px solid rgba(255,255,255,.16);box-sizing:border-box}.tab-bar-item{min-width:58px;height:42px;display:flex;align-items:center;gap:6px;padding:4px 8px;border:1px solid rgba(255,255,255,.18);border-radius:8px;background:#172033;color:#e5e7eb}.tab-bar-icon{width:22px;height:22px;border-radius:6px;background:#38bdf8;color:#031018;display:flex;align-items:center;justify-content:center;font:700 12px system-ui,sans-serif}.tab-bar-label{font:600 11px system-ui,sans-serif;color:#e5e7eb;max-width:72px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}';
                 document.head.appendChild(style);
             }
             var desktop = document.getElementById('wm-desktop');
@@ -299,6 +358,13 @@ fn tauri_mdi_init_script() -> &'static str {
                 desktop.id = 'wm-desktop';
                 document.body.appendChild(desktop);
             }
+            var dock = document.getElementById('dock');
+            if (!dock) {
+                dock = document.createElement('nav');
+                dock.id = 'dock';
+                dock.setAttribute('aria-label', 'Open windows');
+                document.body.appendChild(dock);
+            }
             if (!window.__SIMPLE_TAURI_WM__) {
                 window.__SIMPLE_TAURI_WM__ = {
                     windows: {},
@@ -306,9 +372,11 @@ fn tauri_mdi_init_script() -> &'static str {
                     drag: null,
                     lastEvent: null,
                     invoke: function(name, payload) {
-                        var inv = window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke
-                            ? window.__TAURI_INTERNALS__.invoke
-                            : (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke ? window.__TAURI__.core.invoke : null);
+                        var inv = window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke
+                            ? window.__TAURI__.core.invoke
+                            : (window.__TAURI__ && window.__TAURI__.tauri && window.__TAURI__.tauri.invoke
+                                ? window.__TAURI__.tauri.invoke
+                                : (window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke ? window.__TAURI_INTERNALS__.invoke : null));
                         if (inv) inv(name, payload || {});
                     },
                     elementId: function(el) {
@@ -478,6 +546,31 @@ fn tauri_mdi_init_script() -> &'static str {
                         var top = parseInt(win.style.top || '0', 10) || 0;
                         this.invoke('send_action', { name: 'wm_move:' + id + ':' + left + ':' + top });
                     },
+                    ensureDockItem: function(id, titleText) {
+                        var itemId = 'dock-item-' + id;
+                        var item = document.getElementById(itemId);
+                        if (!item) {
+                            item = document.createElement('button');
+                            item.id = itemId;
+                            item.className = 'tab-bar-item';
+                            item.type = 'button';
+                            item.dataset.windowId = id;
+                            var icon = document.createElement('span');
+                            icon.className = 'tab-bar-icon';
+                            icon.textContent = (titleText || id || '?').substring(0, 1).toUpperCase();
+                            var label = document.createElement('span');
+                            label.className = 'tab-bar-label';
+                            label.textContent = titleText || id;
+                            item.appendChild(icon);
+                            item.appendChild(label);
+                            var self = this;
+                            item.addEventListener('click', function() { self.focus(id); });
+                            dock.appendChild(item);
+                        } else {
+                            var label = item.querySelector('.tab-bar-label');
+                            if (label) label.textContent = titleText || id;
+                        }
+                    },
                     receiveMessage: function(msg) {
                         if (!msg || !msg.type) return;
                         if (msg.type === 'openWindow') {
@@ -520,6 +613,7 @@ fn tauri_mdi_init_script() -> &'static str {
                                 existing.body.innerHTML = msg.html || '';
                                 existing.title.textContent = msg.title || id;
                             }
+                            this.ensureDockItem(id, msg.title || id);
                             this.mountTitlebarWidgets(existing);
                             this.focus(id);
                         } else if (msg.type === 'renderWindow' && this.windows[msg.windowId]) {
@@ -538,15 +632,28 @@ fn tauri_mdi_init_script() -> &'static str {
 
 fn eval_tauri_mdi_message(app: &AppHandle, msg_json: String) {
     if let Some(win) = app.get_webview_window("main") {
+        let msg_kind = serde_json::from_str::<serde_json::Value>(&msg_json)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("type")
+                    .and_then(|kind| kind.as_str())
+                    .map(|kind| kind.to_string())
+            })
+            .unwrap_or_else(|| "unknown".to_string());
         let js = format!(
             "{}\nwindow.__SIMPLE_TAURI_WM__.receiveMessage({});",
             tauri_mdi_init_script(),
             msg_json
         );
-        let _ = win.eval(&js);
+        match win.eval(&js) {
+            Ok(_) => eprintln!("[tauri-shell] mdi eval OK type={}", msg_kind),
+            Err(e) => eprintln!("[tauri-shell] mdi eval FAIL type={} err={}", msg_kind, e),
+        }
         if cfg!(mobile) {
             let handle = app.clone();
             let delayed_msg = msg_json;
+            let delayed_kind = msg_kind;
             thread::spawn(move || {
                 thread::sleep(std::time::Duration::from_millis(1800));
                 if let Some(win) = handle.get_webview_window("main") {
@@ -555,10 +662,26 @@ fn eval_tauri_mdi_message(app: &AppHandle, msg_json: String) {
                         tauri_mdi_init_script(),
                         delayed_msg
                     );
-                    let _ = win.eval(&js);
+                    match win.eval(&js) {
+                        Ok(_) => {
+                            eprintln!("[tauri-shell] delayed mdi eval OK type={}", delayed_kind)
+                        }
+                        Err(e) => eprintln!(
+                            "[tauri-shell] delayed mdi eval FAIL type={} err={}",
+                            delayed_kind, e
+                        ),
+                    }
+                    maybe_write_tauri_mdi_proof(&handle);
+                } else {
+                    eprintln!(
+                        "[tauri-shell] delayed mdi eval skipped type={} reason=missing-main-window",
+                        delayed_kind
+                    );
                 }
             });
         }
+    } else {
+        eprintln!("[tauri-shell] mdi eval skipped reason=missing-main-window");
     }
 }
 
@@ -572,8 +695,14 @@ fn maybe_write_tauri_mdi_proof(app: &AppHandle) {
         return;
     }
     if let Some(win) = app.get_webview_window("main") {
+        eprintln!(
+            "[tauri-shell] mdi proof eval requested count={} proof_url={:?}",
+            count, MOBILE_MDI_PROOF_URL
+        );
+        let proof_url = js_string_or_null(MOBILE_MDI_PROOF_URL);
         let js = r#"
             (function() {
+                var proofFetchUrl = __SIMPLE_TAURI_MDI_PROOF_URL__;
                 var wm = window.__SIMPLE_TAURI_WM__;
                 var dragMoved = false;
                 var bodyClickRouted = false;
@@ -688,45 +817,65 @@ fn maybe_write_tauri_mdi_proof(app: &AppHandle) {
                         }
                     }
                 }
-                var invoke = window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke
-                    ? window.__TAURI_INTERNALS__.invoke
-                    : (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke ? window.__TAURI__.core.invoke : null);
+                var invoke = window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke
+                    ? window.__TAURI__.core.invoke
+                    : (window.__TAURI__ && window.__TAURI__.tauri && window.__TAURI__.tauri.invoke
+                        ? window.__TAURI__.tauri.invoke
+                        : (window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke ? window.__TAURI_INTERNALS__.invoke : null));
                 var finish = function() {
                     performanceNowDeltaMs = performanceNowAvailable ? Math.max(0, window.performance.now() - perfStart) : 0;
                     inputToPaintMs = performanceNowAvailable && inputToPaintStart > 0 ? Math.max(0, window.performance.now() - inputToPaintStart) : 0;
-                    if (!invoke) return;
-                    invoke('report_mdi_proof', {
-                        proof: {
-                            count: window.__SIMPLE_TAURI_WM__ ? Object.keys(window.__SIMPLE_TAURI_WM__.windows || {}).length : 0,
-                            hasDesktop: !!document.getElementById('wm-desktop'),
-                            imageCount: document.querySelectorAll('img.simple-picture').length,
-                            hasDragRuntime: !!(wm && wm.bindDrag),
-                            hasDragEvents: !!(wm && wm.notifyMove),
-                            dragMoved: dragMoved,
-                            hasWindowEventRuntime: !!(wm && wm.bindWindowEvents && wm.sendWindowAction && wm.sendWindowKey && wm.sendWindowInput && wm.sendWindowMouse),
-                            appActionControlFound: appActionControlFound,
-                            appInputControlFound: appInputControlFound,
-                            bodyClickRouted: bodyClickRouted,
-                            bodyInputRouted: bodyInputRouted,
-                            bodyKeyRouted: bodyKeyRouted,
-                            eventSequence: eventSequence,
-                            taskbarItemCount: taskbarItems.length,
-                            taskbarIconCount: taskbarIcons.length,
-                            taskbarIconsVisible: taskbarIconsVisible,
-                            taskbarLabelsVisible: taskbarLabelsVisible,
-                            htmlRenderable: document.body.innerHTML.indexOf('simple-app-window') >= 0 && document.body.innerHTML.indexOf('<pre class="simple-app-pre">') >= 0,
-                            viewportWidth: viewportWidth,
-                            viewportHeight: viewportHeight,
-                            devicePixelRatio: devicePixelRatio,
-                            screenOrientation: screenOrientation,
-                            performanceNowAvailable: performanceNowAvailable,
-                            performanceNowDeltaMs: performanceNowDeltaMs,
-                            inputToPaintMs: inputToPaintMs,
-                            animationFrameAvailable: animationFrameAvailable,
-                            animationFrameCount: animationFrameCount,
-                            cssAnimationProbe: cssAnimationProbe
-                        }
-                    });
+                    var proof = {
+                        count: window.__SIMPLE_TAURI_WM__ ? Object.keys(window.__SIMPLE_TAURI_WM__.windows || {}).length : 0,
+                        hasDesktop: !!document.getElementById('wm-desktop'),
+                        imageCount: document.querySelectorAll('img.simple-picture').length,
+                        sourceWindowCount: document.querySelectorAll('.wm-window[data-surface-id]').length,
+                        hasSimpleSmokeText: document.body.innerText.indexOf('Tauri mobile MDI smoke') >= 0,
+                        hasDragRuntime: !!(wm && wm.bindDrag),
+                        hasDragEvents: !!(wm && wm.notifyMove),
+                        dragMoved: dragMoved,
+                        hasWindowEventRuntime: !!(wm && wm.bindWindowEvents && wm.sendWindowAction && wm.sendWindowKey && wm.sendWindowInput && wm.sendWindowMouse),
+                        appActionControlFound: appActionControlFound,
+                        appInputControlFound: appInputControlFound,
+                        bodyClickRouted: bodyClickRouted,
+                        bodyInputRouted: bodyInputRouted,
+                        bodyKeyRouted: bodyKeyRouted,
+                        eventSequence: eventSequence,
+                        taskbarItemCount: taskbarItems.length,
+                        taskbarIconCount: taskbarIcons.length,
+                        taskbarIconsVisible: taskbarIconsVisible,
+                        taskbarLabelsVisible: taskbarLabelsVisible,
+                        htmlRenderable: document.body.innerHTML.indexOf('simple-app-window') >= 0 && document.body.innerHTML.indexOf('<pre class="simple-app-pre">') >= 0,
+                        viewportWidth: viewportWidth,
+                        viewportHeight: viewportHeight,
+                        devicePixelRatio: devicePixelRatio,
+                        screenOrientation: screenOrientation,
+                        performanceNowAvailable: performanceNowAvailable,
+                        performanceNowDeltaMs: performanceNowDeltaMs,
+                        inputToPaintMs: inputToPaintMs,
+                        animationFrameAvailable: animationFrameAvailable,
+                        animationFrameCount: animationFrameCount,
+                        cssAnimationProbe: cssAnimationProbe
+                    };
+                    if (proofFetchUrl && typeof fetch === 'function') {
+                        var params = new URLSearchParams();
+                        Object.keys(proof).forEach(function(key) {
+                            var value = proof[key];
+                            params.set(key, Array.isArray(value) ? value.join('|') : String(value));
+                        });
+                        fetch(proofFetchUrl + '?' + params.toString()).catch(function() {});
+                    }
+                    try {
+                        var navParams = new URLSearchParams();
+                        Object.keys(proof).forEach(function(key) {
+                            var value = proof[key];
+                            navParams.set(key, Array.isArray(value) ? value.join('|') : String(value));
+                        });
+                        window.location.href = 'simple-mdi-proof://capture?' + navParams.toString();
+                    } catch (_) {}
+                    if (invoke) {
+                        invoke('report_mdi_proof', { proof: proof }).catch(function() {});
+                    }
                 };
                 if (animationFrameAvailable) {
                     window.requestAnimationFrame(function() {
@@ -740,14 +889,26 @@ fn maybe_write_tauri_mdi_proof(app: &AppHandle) {
                     finish();
                 }
             })();
-        "#;
-        let _ = win.eval(js);
+        "#
+        .replace("__SIMPLE_TAURI_MDI_PROOF_URL__", &proof_url);
+        match win.eval(&js) {
+            Ok(_) => eprintln!("[tauri-shell] mdi proof eval OK"),
+            Err(e) => eprintln!("[tauri-shell] mdi proof eval FAIL err={}", e),
+        }
         if cfg!(mobile) {
             let handle = app.clone();
+            let delayed_js = js.clone();
             thread::spawn(move || {
                 thread::sleep(std::time::Duration::from_millis(2600));
                 if let Some(win) = handle.get_webview_window("main") {
-                    let _ = win.eval(js);
+                    match win.eval(&delayed_js) {
+                        Ok(_) => eprintln!("[tauri-shell] delayed mdi proof eval OK"),
+                        Err(e) => eprintln!("[tauri-shell] delayed mdi proof eval FAIL err={}", e),
+                    }
+                } else {
+                    eprintln!(
+                        "[tauri-shell] delayed mdi proof eval skipped reason=missing-main-window"
+                    );
                 }
             });
         }
@@ -756,6 +917,8 @@ fn maybe_write_tauri_mdi_proof(app: &AppHandle) {
             count,
             has_desktop: true,
             image_count: MDI_IMAGE_COUNT.load(Ordering::SeqCst),
+            source_window_count: count,
+            has_simple_smoke_text: false,
             has_drag_runtime: true,
             has_drag_events: true,
             drag_moved: false,
@@ -765,6 +928,7 @@ fn maybe_write_tauri_mdi_proof(app: &AppHandle) {
             body_click_routed: false,
             body_input_routed: false,
             body_key_routed: false,
+            event_sequence: Vec::new(),
             taskbar_item_count: 0,
             taskbar_icon_count: 0,
             taskbar_icons_visible: false,
@@ -772,6 +936,8 @@ fn maybe_write_tauri_mdi_proof(app: &AppHandle) {
             html_renderable: false,
             viewport_width: 0,
             viewport_height: 0,
+            device_pixel_ratio: 0.0,
+            screen_orientation: String::new(),
             performance_now_available: false,
             performance_now_delta_ms: 0.0,
             input_to_paint_ms: 0.0,
@@ -1190,11 +1356,7 @@ fn send_resize(width: u32, height: u32, state: tauri::State<'_, Arc<SimpleProces
 #[tauri::command]
 fn report_mdi_proof(proof: MdiProof, app: AppHandle) {
     let proof_json = serde_json::to_string(&proof).unwrap_or_default();
-    eprintln!("[tauri-shell] mdi proof: {}", proof_json);
-    if let Ok(path) = env::var("SIMPLE_TAURI_MDI_PROOF_PATH") {
-        let _ = fs::write(path, proof_json);
-        app.exit(0);
-    }
+    record_mdi_proof_json(proof_json, Some(&app));
 }
 
 // ---------------------------------------------------------------------------
@@ -1433,7 +1595,8 @@ fn prepare_bundled_mobile_entry() -> Result<Option<String>, String> {
 }
 
 fn prefer_bundled_mobile_mdi_entry() -> bool {
-    option_env!("SIMPLE_TAURI_MOBILE_PROBE_ENTRY") == Some("mdi-smoke")
+    MOBILE_PROBE_ENTRY == Some("mdi-smoke")
+        || option_env!("SIMPLE_TAURI_MOBILE_PROBE_ENTRY") == Some("mdi-smoke")
         || env::var("SIMPLE_TAURI_MOBILE_PROBE_ENTRY").as_deref() == Ok("mdi-smoke")
 }
 
@@ -1807,7 +1970,14 @@ pub fn run() {
                 WebviewUrl::App("index.html".into())
             };
 
-            let builder = WebviewWindowBuilder::new(app, "main", url);
+            let proof_nav_app = app.handle().clone();
+            let builder = WebviewWindowBuilder::new(app, "main", url).on_navigation(move |url| {
+                if let Some(proof_json) = mdi_proof_json_from_url(url) {
+                    record_mdi_proof_json(proof_json, Some(&proof_nav_app));
+                    return false;
+                }
+                true
+            });
             #[cfg(not(mobile))]
             let builder = {
                 let (width, height) = desktop_window_size();

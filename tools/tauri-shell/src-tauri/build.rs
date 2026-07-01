@@ -84,6 +84,33 @@ fn runtime_include_line_with_file_default(
     }
 }
 
+fn string_include_line_with_file_default(
+    var: &str,
+    const_name: &str,
+    default_filename: &str,
+) -> String {
+    println!("cargo:rerun-if-env-changed={}", var);
+    let value = match env::var(var) {
+        Ok(value) if !value.trim().is_empty() => Some(value.trim().to_string()),
+        _ => {
+            let default_path = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap_or_default())
+                .join(default_filename);
+            println!("cargo:rerun-if-changed={}", default_path.display());
+            fs::read_to_string(default_path)
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        }
+    };
+    match value {
+        Some(value) => format!(
+            "pub const {}: Option<&'static str> = Some({:?});\n",
+            const_name, value
+        ),
+        None => format!("pub const {}: Option<&'static str> = None;\n", const_name),
+    }
+}
+
 fn write_mobile_runtime_assets(out_dir: &Path) {
     let generated = [
         runtime_include_line("SIMPLE_ANDROID_RUNTIME_AARCH64", "ANDROID_RUNTIME_AARCH64"),
@@ -97,7 +124,21 @@ fn write_mobile_runtime_assets(out_dir: &Path) {
             "ios_runtime_aarch64_sim.bin",
         ),
         runtime_include_line("SIMPLE_IOS_RUNTIME_X86_64_SIM", "IOS_RUNTIME_X86_64_SIM"),
-        runtime_include_line("SIMPLE_MOBILE_ENTRY_SOURCE", "MOBILE_ENTRY_SOURCE"),
+        runtime_include_line_with_file_default(
+            "SIMPLE_MOBILE_ENTRY_SOURCE",
+            "MOBILE_ENTRY_SOURCE",
+            "mobile_entry_source.spl",
+        ),
+        string_include_line_with_file_default(
+            "SIMPLE_TAURI_MOBILE_PROBE_ENTRY",
+            "MOBILE_PROBE_ENTRY",
+            "mobile_probe_entry.txt",
+        ),
+        string_include_line_with_file_default(
+            "SIMPLE_TAURI_MDI_PROOF_URL",
+            "MOBILE_MDI_PROOF_URL",
+            "mobile_mdi_proof_url.txt",
+        ),
         ui_bundle_include_line("MOBILE_UI_BUNDLE"),
     ]
     .join("");
