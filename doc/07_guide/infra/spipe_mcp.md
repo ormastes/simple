@@ -74,6 +74,9 @@ shortcut for the same app entrypoint.
 - `spipe_context_sql_put`
 - `spipe_context_sql_get`
 - `spipe_context_sql_search`
+- `spipe_exec_capture`
+- `spipe_exec_parse`
+- `spipe_exec_search`
 - `spipe_minimality_check`
 - `spipe_minimality_review`
 - `spipe_minimality_debt`
@@ -95,6 +98,11 @@ shortcut for the same app entrypoint.
 The minimality tools are deterministic Ponytail gates. They flag obvious
 `yagni`, `native`, `stdlib`, `dependency`, and `shrink` cases and list
 `ponytail:` debt markers. They do not replace normal LLM review.
+
+The execution tools are context aliases for already-captured output:
+`spipe_exec_capture` stores supplied command text, `spipe_exec_parse` renders a
+tree for supplied command text, and `spipe_exec_search` searches captured
+execution text. They do not spawn shell commands.
 
 The hook tools normalize Claude, Codex, Gemini, Cursor, and generic provider event
 names into SPipe phases such as `pre_tool`, `post_tool`, `pre_prompt`,
