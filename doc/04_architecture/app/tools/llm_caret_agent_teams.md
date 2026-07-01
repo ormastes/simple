@@ -11,6 +11,7 @@ Date: 2026-07-01
 | Layer | Path | Visibility |
 |---|---|---|
 | Common request node | `src/app/llm_caret/agent_plan.spl` | public to LLM Caret callers |
+| File snapshot node | `src/app/llm_caret/agent_files.spl` | public helper over app I/O facade |
 | Runtime launcher | `src/app/llm_caret/agent_runtime.spl` | public wrapper over process facade |
 | Provider wrappers | `src/app/llm_caret/*_cli.spl` | sibling consumers of prompt/argv outputs |
 | CLI/app callers | future `src/app/**` | consume only exported planner APIs |
@@ -21,6 +22,7 @@ Date: 2026-07-01
 - `AgentCapabilitySet` owns the SPipe-like explicit agent, skill, MCP server, and plugin handoff lists.
 - `AgentTeamMessage` owns deterministic team transcript entries with `btw` and `side` channels supplied by callers.
 - `track_agent_file_changes` compares caller-supplied before/after fingerprints by agent.
+- `agent_files.spl` snapshots existing paths with `file_exists` and `file_hash_sha256` from `app.io.mod`.
 - `agent_runtime.spl` spawns only already-built single-agent plans and rejects synthetic team plans.
 - Provider wrappers do not read agent markdown or track files; they only receive prompt/argv from callers.
 - File diff capture and live process supervision remain outside this node.
@@ -43,6 +45,8 @@ component "Review caller" -> "agent_plan.spl" : changed files + guidance
 - `build_low_agent_review_plan(req) -> AgentLaunchPlan`
 - `build_claude_advisor_plan(topic, context) -> AgentLaunchPlan`
 - `build_codex_goal_plan(objective, context) -> AgentLaunchPlan`
+- `snapshot_agent_files(agent_id, paths) -> [AgentFileFingerprint]`
+- `detect_agent_file_changes(before, after) -> [AgentFileChangeSet]`
 - `launch_agent_plan(agent_id, plan, claude_path, codex_path, opencode_path) -> AgentProcess`
 
 ## Matrix
@@ -52,5 +56,6 @@ component "Review caller" -> "agent_plan.spl" : changed files + guidance
 | LLM Caret planner | `AgentLaunchPlan` | exported structs/functions | prompt/argv only |
 | Capability handoff | `AgentCapabilitySet` | explicit agents/skills/MCP/plugins | no discovery or install |
 | Team transcript | `AgentTeamMessage` | explicit btw/side entries | no live bus |
+| File snapshots | `AgentFileFingerprint` | existing-file hashes | no VCS scanning |
 | Runtime launcher | `AgentProcess` | PID/status wrapper | no registry or supervisor |
 | Provider wrappers | prompt/argv | no private planner state | no direct file tracking |

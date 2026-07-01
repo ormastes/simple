@@ -5,6 +5,7 @@ Date: 2026-07-01
 ## Tasks
 
 - Implement `src/app/llm_caret/agent_plan.spl`.
+- Implement `src/app/llm_caret/agent_files.spl`.
 - Implement `src/app/llm_caret/agent_runtime.spl`.
 - Add `test/01_unit/app/llm_caret/agent_plan_spec.spl`.
 - Update LLM Caret guide and skills with the static-planning contract.
@@ -16,5 +17,5 @@ Final reviewer: normal/highest-capability Codex review.
 
 ## Deferred
 
-Persistent process teams, automatic filesystem diff capture, plugin install,
+Persistent process teams, VCS-wide diff capture, plugin install,
 MCP discovery, and team message transport need separate implementation tasks.

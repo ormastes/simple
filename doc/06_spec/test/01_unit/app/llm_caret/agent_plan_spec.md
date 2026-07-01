@@ -27,7 +27,7 @@ agent_plan_spec
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 10 | 10 | 0 | 0 |
+| 11 | 11 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -199,6 +199,24 @@ expect(changes[1].changed_files[0]).to_equal("doc/old.md")
 
 </details>
 
+#### snapshots existing agent files only
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val snap = snapshot_agent_files_from_existing("spark", ["src/a.spl", "", "missing.spl", "doc/b.md"], ["src/a.spl", "doc/b.md"], ["sha-a", "sha-b"])
+expect(snap.len()).to_equal(2)
+expect(snap[0].agent_id).to_equal("spark")
+expect(snap[0].fingerprint).to_equal("sha-a")
+expect(snap[1].path).to_equal("doc/b.md")
+```
+
+</details>
+
 #### resolves provider commands for launch
 
 <details>
@@ -269,8 +287,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 10 |
-| Active scenarios | 10 |
+| Total scenarios | 11 |
+| Active scenarios | 11 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

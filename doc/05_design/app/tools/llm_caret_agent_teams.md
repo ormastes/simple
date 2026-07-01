@@ -21,6 +21,7 @@ transcript entries.
 - Team interaction: renders caller-supplied `btw` and `side` transcript entries.
 - Low-agent review: lists changed files supplied by caller; no filesystem scan.
 - File-change tracking: compares caller-supplied before/after fingerprints.
+- File snapshot: records hashes for existing caller-supplied file paths only.
 - Claude advisor: returns provider `claude_cli`, mode `advisor`.
 - Codex goal: returns provider `codex`, mode `goal`.
 - Runtime launcher: resolves `claude`, `codex`, or `opencode` command names and
@@ -36,4 +37,4 @@ prompt text so callers/tests can catch missing configuration.
 `test/01_unit/app/llm_caret/agent_plan_spec.spl` covers builders, fingerprint
 tracking, and provider command resolution with pure assertions. Persistent live
 teams, cancellation policy, plugin install, MCP discovery, live message buses,
-and filesystem diff capture need later specs.
+and VCS-wide diff capture need later specs.

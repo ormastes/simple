@@ -57,9 +57,10 @@ description: Implement a feature end-to-end. Self-sufficient — if research, re
   implementation work, not release cleanup.
 - For LLM Caret agent/team/advisor/goal work, use
   `doc/07_guide/app/llm/llm_caret_agent_teams.md` and
-  `src/app/llm_caret/agent_plan.spl` as the canonical static planning surface.
+  `src/app/llm_caret/agent_plan.spl` as the canonical static planning surface,
+  plus `src/app/llm_caret/agent_files.spl` for existing-file hash snapshots.
   It supports explicit agent, skill, MCP server, and plugin capability lists;
-  live supervisors, plugin install, MCP discovery, filesystem diff capture, and
+  live supervisors, plugin install, MCP discovery, VCS-wide diff capture, and
   team chat require separate verified lanes.
 - Do not mark implementation complete when workflow/tooling tests pass but the
   matching guide, skill, SPipe-agent, command, or generated/manual spec docs are

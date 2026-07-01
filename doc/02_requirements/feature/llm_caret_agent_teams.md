@@ -9,3 +9,4 @@ Date: 2026-07-01
 - REQ-005: Keep the API testable without Claude, Codex, OpenCode, network, or a live process registry.
 - REQ-006: Provide explicit agent, skill, MCP server, and plugin capability lists so plans can mirror SPipe-style agent/skill/tool handoffs.
 - REQ-007: Provide a deterministic team interaction transcript planner with explicit `btw` and `side` message channels.
+- REQ-008: Provide a small filesystem snapshot helper that records existing file hashes per agent through the app I/O facade.
