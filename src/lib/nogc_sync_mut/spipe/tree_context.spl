@@ -59,6 +59,7 @@ fn spipe_parser_names() -> [text]:
         "cmake",
         "ninja",
         "make",
+        "python_traceback",
         "pytest",
         "ctest",
         "cargo",
@@ -92,6 +93,8 @@ fn spipe_match_parser(source_kind: text, command: text, raw_text: text) -> text:
         return "journalctl"
     if c.contains("systemctl"):
         return "systemctl"
+    if c.contains("python") or sample.contains("traceback (most recent call last):"):
+        return "python_traceback"
     if c.contains("pytest"):
         return "pytest"
     if c.contains("ctest"):
@@ -352,6 +355,8 @@ fn _detect_level(line: text, compiler_mode: bool) -> [text]:
         return ["ERROR", "error:", "true", "parser"]
     if compiler_mode and t.starts_with("warning:"):
         return ["WARN", "warning:", "true", "parser"]
+    if compiler_mode and _looks_like_python_error_line(t):
+        return ["ERROR", t.split(":")[0] + ":", "true", "parser"]
     if compiler_mode and (t.starts_with("E:") or t.starts_with("Err:")):
         return ["ERROR", t.split(" ")[0], "true", "parser"]
     if compiler_mode and t.starts_with("W:"):
@@ -366,7 +371,7 @@ fn _has_explicit_level(raw_text: text, compiler_mode: bool) -> bool:
     false
 
 fn _parser_allows_compiler_levels(name: text) -> bool:
-    name == "gcc_clang" or name == "ld_linker" or name == "cmake" or name == "ninja" or name == "make" or name == "cargo" or name == "npm" or name == "apt" or name == "dpkg" or name == "pytest" or name == "ctest"
+    name == "gcc_clang" or name == "ld_linker" or name == "cmake" or name == "ninja" or name == "make" or name == "python_traceback" or name == "cargo" or name == "npm" or name == "apt" or name == "dpkg" or name == "pytest" or name == "ctest"
 
 fn _detect_path(line: text, parser_name: text) -> text:
     val t = _strip_level_prefix(line.trim())
@@ -385,6 +390,8 @@ fn _detect_path(line: text, parser_name: text) -> text:
         return _git_diff_path(line)
     if parser_name == "git_log":
         return _plain_path_line(t)
+    if parser_name == "python_traceback":
+        return _python_traceback_path(t)
     if parser_name == "pytest":
         return _pytest_path(t)
     if parser_name == "cargo":
@@ -470,6 +477,22 @@ fn _pytest_path(line: text) -> text:
     val test_id = parts[1]
     val path_parts = test_id.split("::")
     _plain_path_line(path_parts[0])
+
+fn _python_traceback_path(line: text) -> text:
+    val t = line.trim()
+    if not t.starts_with("File \""):
+        return ""
+    val parts = t.split("\"")
+    if parts.len() > 1:
+        return parts[1].trim()
+    ""
+
+fn _looks_like_python_error_line(line: text) -> bool:
+    val t = line.trim()
+    if not t.contains(":"):
+        return false
+    val first = t.split(":")[0]
+    first.ends_with("Error") or first.ends_with("Exception")
 
 fn _rust_location_path(line: text) -> text:
     val t = line.trim()

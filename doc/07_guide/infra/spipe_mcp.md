@@ -154,6 +154,8 @@ deleted, renamed, and both-modified rows.
 `git diff` output extracts the destination path from `diff --git a/... b/...`
 headers.
 `git log --name-only` style output extracts standalone path rows.
+Python tracebacks extract `File "path", line N` frames and group final
+`Error`/`Exception` rows as parser-confirmed errors.
 `pytest` output extracts paths from `FAILED path::test` and `ERROR path::test`
 summary rows.
 `cargo` output extracts Rust diagnostic locations from `--> path:line:col`.
