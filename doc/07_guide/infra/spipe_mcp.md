@@ -95,6 +95,7 @@ summary rows.
 `cargo` output extracts Rust diagnostic locations from `--> path:line:col`.
 `npm` output extracts simple Node stack rows such as `at path:line:col`.
 `cmake` output extracts file paths from `CMake Error/Warning at path:line`.
+`ninja` output extracts the first quoted path from `ninja: error:` rows.
 Path leaves render as `kind=file`; non-path output remains `kind=line` and can
 still be grouped by explicit log level.
 
