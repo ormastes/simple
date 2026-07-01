@@ -93,6 +93,7 @@ headers.
 `pytest` output extracts paths from `FAILED path::test` and `ERROR path::test`
 summary rows.
 `cargo` output extracts Rust diagnostic locations from `--> path:line:col`.
+`npm` output extracts simple Node stack rows such as `at path:line:col`.
 Path leaves render as `kind=file`; non-path output remains `kind=line` and can
 still be grouped by explicit log level.
 
