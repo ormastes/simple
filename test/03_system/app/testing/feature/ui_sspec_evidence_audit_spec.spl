@@ -20,6 +20,92 @@ state evidence markers.
 
 The spec reads source and generated manual files directly. It is an audit of the
 SPipe evidence contract, not a replacement for the behavior specs it references.
+
+## Manual Resolution
+
+Generated system manuals have existed in two layouts:
+
+```text
+doc/06_spec/test/03_system/...
+doc/06_spec/03_system/...
+```
+
+The audit accepts either layout for existing manuals. This keeps the audit
+focused on whether the executable spec has a mirrored manual, not on forcing a
+repo-wide manual migration during an unrelated feature lane. New feature lanes
+should still generate manuals through `simple spipe-docgen <spec> --output
+doc/06_spec --no-index` and record the exact generated path in their system test
+plan.
+
+## Examples
+
+Manual pair check:
+
+```text
+spec:   test/03_system/app/browser/feature/browser_session_ui_access_controls_spec.spl
+manual: doc/06_spec/test/03_system/app/browser/feature/browser_session_ui_access_controls_spec.md
+alt:    doc/06_spec/03_system/app/browser/feature/browser_session_ui_access_controls_spec.md
+```
+
+Evidence marker check:
+
+```text
+source spec contains: ui_access_snapshot
+generated manual contains: ### TUI Captures
+generated manual contains: browser_ui_access_snapshot.txt
+```
+
+## Pass Criteria
+
+- Every audited executable SSpec file exists.
+- The paired generated manual exists in either accepted layout.
+- The generated manual has enough content to be useful, not only a stub.
+- The generated manual traces back to the executable source path.
+- Required source evidence markers remain present in authoritative specs.
+- Required generated-manual evidence markers remain present in mirrored docs.
+- The audit writes a small TUI capture proving manual and evidence policy.
+
+## Failure Signals
+
+- A generated manual is missing in both accepted layouts.
+- A generated manual is shorter than the useful-manual threshold.
+- A generated manual no longer references its executable source path.
+- A source behavior spec loses required UI access, Draw IR, SGTTI, or TUI
+  marker text.
+- A generated manual loses its `### TUI Captures` or equivalent evidence
+  marker.
+
+## Traceability
+
+| Audit area | Scenario | Evidence |
+|---|---|---|
+| Mirrored manuals | keeps UI-facing app specs mirrored into generated manuals | Each executable SSpec has a generated Markdown manual |
+| Source markers | keeps concrete UI evidence markers in the authoritative behavior specs | Source specs keep UI access, Draw IR, SGTTI, and contract markers |
+| Manual markers | keeps generated UI manuals useful instead of stub-only | Generated manuals keep capture and scenario text markers |
+
+## Operator Flow
+
+1. Run the behavior specs that own the UI feature evidence.
+2. Regenerate each changed manual with `spipe-docgen`.
+3. Run this audit spec.
+4. If a manual is missing, regenerate that manual before changing the audit.
+5. If a source marker is missing, fix the behavior spec before changing the
+   audit.
+6. If a manual exists only in the legacy no-`test/` layout, the audit accepts it
+   and the next lane can migrate the path deliberately.
+
+## Maintenance Notes
+
+Add a spec to this audit only when it is a critical UI-facing app scenario whose
+manual and visible evidence must remain release-blocking. Do not add every
+small unit or pure helper spec. For a new TUI feature, prefer a focused behavior
+SSpec first, then add it here only if losing that generated manual would make
+operator evidence materially worse.
+
+The accepted dual-layout behavior is intentionally narrow: it only rewrites
+`doc/06_spec/test/...` to `doc/06_spec/...` when the first path is absent. It
+does not search the whole repository, infer names, or accept unrelated manuals.
+That keeps the audit deterministic and cheap.
 """
 # @evidence-display: embed_tui
 
@@ -37,22 +123,34 @@ fn _file_state(path: text) -> text:
         return "present"
     return "missing"
 
+fn _manual_path(path: text) -> text:
+    if _file_state(path) == "present":
+        return path
+    val old_prefix = "doc/06_spec/test/"
+    if path.starts_with(old_prefix):
+        val without_test = "doc/06_spec/" + path.substring(old_prefix.len())
+        if _file_state(without_test) == "present":
+            return without_test
+    path
+
 fn _manual_state(path: text, source_path: text) -> text:
+    val actual_path = _manual_path(path)
     val (out, _err, code) = rt_process_run("/bin/sh", [
         "-c",
-        "test -f '" + path + "' && test $(wc -l < '" + path + "') -ge 40"
+        "test -f '" + actual_path + "' && test $(wc -l < '" + actual_path + "') -ge 40"
     ])
     if code != 0:
         return "short"
-    val text = rt_file_read_text(path)
+    val text = rt_file_read_text(actual_path)
     if not text.contains(source_path):
         return "untraced"
     return "complete"
 
 fn _marker_state(path: text, marker: text) -> text:
-    if _file_state(path) != "present":
+    val actual_path = _manual_path(path)
+    if _file_state(actual_path) != "present":
         return "missing"
-    val text = rt_file_read_text(path)
+    val text = rt_file_read_text(actual_path)
     if text.contains(marker):
         return "present"
     return "absent"

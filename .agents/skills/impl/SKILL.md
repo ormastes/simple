@@ -63,7 +63,9 @@ description: Implement a feature end-to-end. Self-sufficient — if research, re
   discovery, `src/app/llm_caret/agent_discovery.spl` for simple MCP/plugin
   manifest parsing plus plugin install argv planning,
   `src/app/llm_caret/agent_mailbox.spl` for pure `btw`/`side` mailbox routing,
-  and
+  `src/app/llm_caret/agent_tui.spl` plus
+  `test/03_system/app/llm_caret/feature/llm_caret_agent_tui_handoff_spec.spl`
+  for TUI-readable SSpec handoff evidence, and
   `src/app/llm_caret/agent_runtime.spl` for non-persistent launch wrappers. It
   supports explicit agent, skill, MCP server, and plugin capability lists; live
   supervisors, plugin install execution, live MCP registry discovery,

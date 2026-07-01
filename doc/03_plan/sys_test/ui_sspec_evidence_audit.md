@@ -8,11 +8,16 @@ It also checks that the UI testing surfaces cover browser UI access, Draw IR
 inspection, SGTTI shared state, IDE Office TUI feature checks, and the
 test-runner debug TUI capture path.
 
+Generated manuals are accepted in either current layout:
+`doc/06_spec/test/03_system/...` or the legacy mirrored
+`doc/06_spec/03_system/...`. New specs should record the exact generated path
+in their own system test plan.
+
 ## Requirements
 
 | Requirement | Evidence |
 |-------------|----------|
-| REQ-UI-SSPEC-001 | Core UI app feature specs have mirrored generated manuals. |
+| REQ-UI-SSPEC-001 | Core UI app feature specs have mirrored generated manuals in an accepted `doc/06_spec` layout. |
 | REQ-UI-SSPEC-002 | Browser, Draw IR, SGTTI, IDE, and test-runner debug TUI specs expose concrete UI evidence mechanisms. |
 | REQ-UI-SSPEC-003 | Generated manuals are non-stub scenario manuals with source traceability. |
 

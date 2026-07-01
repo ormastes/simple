@@ -14,7 +14,8 @@ minimal launcher PID/status result. `AgentTeamProcess` stores a non-persistent
 set of per-agent process records. `AgentVcsChangeResult` stores the result of a
 VCS changed-file discovery command. `AgentDiscoverySet` stores parsed MCP
 server and plugin names. `AgentTeamMessage` stores explicit team transcript
-entries. `AgentTeamMailbox` stores an in-memory team transcript.
+entries. `AgentTeamMailbox` stores an in-memory team transcript. TUI renderers
+return plain text for operator/system-test visibility.
 
 ## Builders
 
@@ -30,6 +31,8 @@ entries. `AgentTeamMailbox` stores an in-memory team transcript.
   plugin install argv lists without running an installer.
 - Team mailbox: appends `btw`/`side` messages and returns per-agent inbox,
   channel-filtered, or full transcript views.
+- TUI rendering: converts capability handoffs, team mailboxes, and filtered
+  inboxes into deterministic text sections.
 - Claude advisor: returns provider `claude_cli`, mode `advisor`.
 - Codex goal: returns provider `codex`, mode `goal`.
 - Runtime launcher: resolves `claude`, `codex`, or `opencode` command names and
@@ -47,6 +50,7 @@ prompt text so callers/tests can catch missing configuration.
 `test/01_unit/app/llm_caret/agent_plan_spec.spl` covers builders, fingerprint
 tracking, manifest parsing, install argv planning, and provider command
 resolution with pure assertions. `agent_mailbox_spec.spl` covers `btw`/`side`
-message routing. Persistent live team supervisors, cancellation policy, plugin
-install execution, MCP registry discovery, live message buses, and background
-VCS watchers need later specs.
+message routing. `test/03_system/app/llm_caret/feature/llm_caret_agent_tui_handoff_spec.spl`
+covers TUI-visible handoff and team-message output. Persistent live team
+supervisors, cancellation policy, plugin install execution, MCP registry
+discovery, live message buses, and background VCS watchers need later specs.

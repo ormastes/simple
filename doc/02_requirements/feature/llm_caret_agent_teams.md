@@ -14,3 +14,4 @@ Date: 2026-07-01
 - REQ-010: Provide a VCS changed-file discovery helper that defaults to `jj diff --name-only` and returns per-agent changed-file records.
 - REQ-011: Provide simple MCP/plugin manifest parsers and plugin install argument planning so agent handoffs can be populated consistently with SPipe without performing live installs.
 - REQ-012: Provide a pure team mailbox for `btw` and `side` messages with per-agent inbox and channel filtering.
+- REQ-013: Provide a TUI-readable handoff surface and executable SSpec system test for agent, skill, MCP, plugin, and team-message visibility.
