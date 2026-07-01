@@ -137,6 +137,7 @@ const vulkan = readJson(vulkanPath, "vulkan");
 const electronProof = electronProofPath ? readJson(electronProofPath, "electron-proof") : null;
 const electronPixels = pixelArray(electron.pixels);
 const vulkanPixels = pixelArray(vulkan.pixels);
+const electronProducer = String(electron.producer || "");
 const electronWidth = Number(electron.width || 0);
 const electronHeight = Number(electron.height || 0);
 const vulkanWidth = Number(vulkan.width || 0);
@@ -153,6 +154,7 @@ const common = {
   electron_vulkan_web_parity_windows_compare_expected_width: expectedWidth,
   electron_vulkan_web_parity_windows_compare_expected_height: expectedHeight,
   electron_vulkan_web_parity_windows_compare_expected_argb: expectedArgb,
+  electron_vulkan_web_parity_windows_compare_electron_producer: electronProducer,
   electron_vulkan_web_parity_windows_compare_electron_width: electronWidth,
   electron_vulkan_web_parity_windows_compare_electron_height: electronHeight,
   electron_vulkan_web_parity_windows_compare_vulkan_width: vulkanWidth,
@@ -173,6 +175,10 @@ if (!validPositiveInteger(electron.width) ||
     !validPositiveInteger(vulkan.width) ||
     !validPositiveInteger(vulkan.height)) {
   finish("fail", "frame-metadata-invalid", 2, common);
+}
+
+if (electronProducer !== "electron-chromium-capture") {
+  finish("fail", "electron-producer-not-proven", 2, common);
 }
 
 if (electronProofPath) {
