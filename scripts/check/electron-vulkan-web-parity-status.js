@@ -205,6 +205,10 @@ if (electronPixels.length !== electronWidth * electronHeight || vulkanPixels.len
   finish("fail", "pixel-buffer-shape-mismatch", 2, common);
 }
 
+if (!validPositiveInteger(vulkan.pixel_count)) {
+  finish("fail", "vulkan-pixel-count-metadata-invalid", 2, common);
+}
+
 if (vulkanPixelCount !== vulkanPixels.length) {
   finish("fail", "vulkan-pixel-count-mismatch", 2, common);
 }

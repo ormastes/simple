@@ -27,7 +27,7 @@ electron_vulkan_web_parity_windows_contract_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 20 | 20 | 0 | 0 |
+| 21 | 21 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -101,6 +101,8 @@ OS=Windows_NT EVWP_WORK=build/windows-electron-vulkan-web-parity \
   arguments before they can weaken comparison checks.
 - The compare helper rejects pixel values that are not unsigned 32-bit
   integers before JavaScript coercion can make them compare equal.
+- The compare helper rejects malformed Simple `pixel_count` metadata before
+  JavaScript coercion can make it match the pixel array length.
 - Windows execution records Electron GPU proof and rejects Electron/Chromium
   frames that do not prove Vulkan-backed GPU compositing.
 - Electron capture and Simple Vulkan render subprocess failures emit stable
@@ -203,6 +205,8 @@ The wrapper separates absence from failure:
   dimensions or colors disabling the requested-frame evidence checks.
 - `reason=pixel-buffer-values-invalid` protects against non-uint32 pixel values
   being coerced into valid-looking ARGB samples.
+- `reason=vulkan-pixel-count-metadata-invalid` protects against non-integer or
+  string Simple pixel-count metadata being accepted as proof.
 - `reason=pixel-buffer-length-mismatch` protects against truncated or padded
   capture artifacts.
 
@@ -239,7 +243,7 @@ The spec contains:
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 57 lines folded for reproduction.
+Runnable source: 58 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -280,6 +284,7 @@ expect(helper).to_contain("vulkan-producer-not-proven")
 expect(helper).to_contain("vulkan-requested-backend-not-proven")
 expect(helper).to_contain("vulkan-backend-not-proven")
 expect(helper).to_contain("vulkan-pixel-count-mismatch")
+expect(helper).to_contain("vulkan-pixel-count-metadata-invalid")
 expect(helper).to_contain("electron-vulkan-backed")
 expect(helper).to_contain("electron-browser-gpu-info-not-proven")
 expect(helper).to_contain("frame-shape-mismatch")
@@ -686,6 +691,27 @@ expect(stdout).to_contain("electron_vulkan_web_parity_windows_reason=pixel-buffe
 
 </details>
 
+#### rejects malformed Simple pixel count metadata
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-electron-vulkan-web-parity-windows-compare-pixel-count-metadata"
+val vulkan_json = "'{\"status\":\"pass\",\"reason\":\"pass\",\"producer\":\"simple-engine2d-vulkan\",\"requested_backend\":\"vulkan\",\"backend\":\"vulkan\",\"pixel_count\":\"4\",\"width\":2,\"height\":2,\"pixels\":[1,2,3,4]}'"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && printf '%s\\n' '{\"width\":2,\"height\":2,\"pixels\":[1,2,3,4]}' > " + root + "/electron.json && printf '%s\\n' " + vulkan_json + " > " + root + "/vulkan.json && node scripts/check/electron-vulkan-web-parity-status.js " + root + "/electron.json " + root + "/vulkan.json '' 2 2"
+val (stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+
+expect(code).to_equal(2)
+expect(stdout).to_contain("electron_vulkan_web_parity_windows_status=fail")
+expect(stdout).to_contain("electron_vulkan_web_parity_windows_reason=vulkan-pixel-count-metadata-invalid")
+```
+
+</details>
+
 #### rejects frames that match each other with the wrong requested color
 
 <details>
@@ -735,8 +761,8 @@ expect(stdout).to_contain("electron_vulkan_web_parity_windows_compare_invalid_vu
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 20 |
-| Active scenarios | 20 |
+| Total scenarios | 21 |
+| Active scenarios | 21 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
