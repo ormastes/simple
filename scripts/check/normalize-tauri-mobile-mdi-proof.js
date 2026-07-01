@@ -35,6 +35,7 @@ function parseJsonText(text) {
 }
 
 function proofFromSources() {
+  const candidates = [];
   for (const source of sourcePaths) {
     const text = readIfFile(source);
     if (!text) continue;
@@ -43,13 +44,22 @@ function proofFromSources() {
       const marker = line.match(/mdi proof:\s*(\{.*\})/);
       if (marker) {
         const parsed = parseJsonText(marker[1]);
-        if (parsed) {
-          fs.mkdirSync(path.dirname(proofPath), { recursive: true });
-          fs.writeFileSync(proofPath, `${JSON.stringify(parsed)}\n`);
-          return parsed;
-        }
+        if (parsed) candidates.push(parsed);
       }
     }
+  }
+  for (const parsed of candidates) {
+    if (strictProofPass(parsed)) {
+      fs.mkdirSync(path.dirname(proofPath), { recursive: true });
+      fs.writeFileSync(proofPath, `${JSON.stringify(parsed)}\n`);
+      return parsed;
+    }
+  }
+  if (candidates.length > 0) {
+    const parsed = candidates[0];
+    fs.mkdirSync(path.dirname(proofPath), { recursive: true });
+    fs.writeFileSync(proofPath, `${JSON.stringify(parsed)}\n`);
+    return parsed;
   }
   const direct = readIfFile(proofPath);
   if (direct) {
@@ -88,10 +98,46 @@ function eventSequenceText(value) {
   return value.map((entry) => String(entry).replace(/[\r\n]/g, ' ')).join(',');
 }
 
+const expectedEventSequence = 'window_drag:move,app_action:body_click,app_input:body_input,app_key:body_key';
+function strictProofPass(candidate) {
+  if (!candidate) return false;
+  return (
+    integerAtLeast(candidate.imageCount, 1) &&
+    candidate.htmlRenderable === true &&
+    integerAtLeast(candidate.count, 4) &&
+    candidate.hasDesktop === true &&
+    candidate.hasDragRuntime === true &&
+    candidate.hasDragEvents === true &&
+    candidate.dragMoved === true &&
+    candidate.hasWindowEventRuntime === true &&
+    candidate.appActionControlFound === true &&
+    candidate.appInputControlFound === true &&
+    candidate.bodyClickRouted === true &&
+    candidate.bodyInputRouted === true &&
+    candidate.bodyKeyRouted === true &&
+    eventSequenceText(candidate.eventSequence) === expectedEventSequence &&
+    integerAtLeast(candidate.taskbarItemCount, 4) &&
+    integerAtLeast(candidate.taskbarIconCount, 4) &&
+    candidate.taskbarIconsVisible === true &&
+    candidate.taskbarLabelsVisible === true &&
+    integerAtLeast(candidate.viewportWidth, 300) &&
+    integerAtLeast(candidate.viewportHeight, 300) &&
+    typeof candidate.devicePixelRatio === 'number' &&
+    Number.isFinite(candidate.devicePixelRatio) &&
+    candidate.devicePixelRatio > 0 &&
+    (candidate.screenOrientation === 'portrait' || candidate.screenOrientation === 'landscape') &&
+    candidate.performanceNowAvailable === true &&
+    positiveAtMost(candidate.performanceNowDeltaMs, 1000) &&
+    positiveAtMost(candidate.inputToPaintMs, 1000) &&
+    candidate.animationFrameAvailable === true &&
+    integerAtLeast(candidate.animationFrameCount, 2) &&
+    candidate.cssAnimationProbe === true
+  );
+}
+
 const proof = proofFromSources();
 if (!proof) die('proof-json-missing');
 
-const expectedEventSequence = 'window_drag:move,app_action:body_click,app_input:body_input,app_key:body_key';
 const renderPass = integerAtLeast(proof.imageCount, 1) && proof.htmlRenderable === true;
 const eventPass =
   integerAtLeast(proof.count, 4) &&

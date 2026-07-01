@@ -1018,3 +1018,23 @@ transport. The wrapper now has the required evidence gate to distinguish:
 1. render logs exist but the simulator is still on SpringBoard;
 2. the Tauri WKWebView scene is foreground and semantically MDI-rendered;
 3. strict DOM/event `MdiProof` callback delivery succeeds.
+
+## 2026-07-02 iOS Strict Capture Gate Pass
+
+Follow-up after sync fixed the remaining iOS false-negative:
+
+- The wrapper no longer captures on the first `render, html_len=` marker. That
+  marker can arrive before all four MDI windows are visually present.
+- It now waits for a strict proof-shaped log row with rendered HTML,
+  `imageCount >= 1`, `sourceWindowCount >= 4`, and `dragMoved=true`, then
+  immediately captures and preserves that validated frame as the canonical
+  `ios_renderer.png`.
+- The proof normalizer now scans all proof rows and selects a strict passing
+  proof if one exists. This prevents later delayed fallback probes, after the
+  source window HTML has disappeared, from overwriting a valid first proof.
+- `build/goal-ios-strict-capture/stdout.env` passed with:
+  `ios_mobile_renderer_mdi_screenshot=pass`,
+  `ios_mdi_proof_status=pass`,
+  `ios_render_log_status=pass`,
+  `ios_layout_status=pass`,
+  `ios_metal_log_status=pass`, and `status=pass`.

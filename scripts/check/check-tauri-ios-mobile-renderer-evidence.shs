@@ -166,6 +166,11 @@ PY
     return 1
 }
 
+strict_mdi_proof_observed() {
+    grep '\[tauri-shell\] mdi proof:' "$IOS_DEV_LOG" "$LOG_STREAM" 2>/dev/null |
+        grep -Eq '"imageCount":[1-9][0-9]*.*"sourceWindowCount":[4-9][0-9]*.*"dragMoved":true.*"htmlRenderable":true'
+}
+
 mkdir -p "$BUILD_DIR"
 rm -f "$MDI_PROOF_JSON"
 
@@ -282,14 +287,16 @@ IOS_DEV_PID=$!
 
 end=$(( $(date +%s) + TIMEOUT_SECS ))
 while [ "$(date +%s)" -lt "$end" ]; do
-    if grep -q '\[tauri-shell\] render, html_len=' "$IOS_DEV_LOG" "$LOG_STREAM" 2>/dev/null; then
+    if strict_mdi_proof_observed; then
         break
     fi
-    sleep 2
+    sleep 1
 done
 
 grep -q '\[tauri-shell\] render, html_len=' "$IOS_DEV_LOG" "$LOG_STREAM" 2>/dev/null \
     || fail "Tauri iOS render log not observed within ${TIMEOUT_SECS}s"
+strict_mdi_proof_observed \
+    || fail "Tauri iOS strict MDI proof log not observed within ${TIMEOUT_SECS}s"
 
 xcrun simctl io "$SIM_UDID" screenshot "$PREPROOF_SCREENSHOT" > "$BUILD_DIR/ios_preproof_screenshot.log" 2>&1 \
     || fail "failed to capture iOS pre-proof simulator screenshot"
@@ -297,18 +304,10 @@ test -s "$PREPROOF_SCREENSHOT" || fail "iOS pre-proof simulator screenshot is em
 validate_ios_mdi_screenshot_png "$PREPROOF_SCREENSHOT" ios_mobile_renderer_preproof_mdi_screenshot \
     || fail "iOS renderer screenshot missing live MDI foreground layout"
 
-mdi_end=$(( $(date +%s) + TIMEOUT_SECS ))
-while [ "$(date +%s)" -lt "$mdi_end" ]; do
-    if grep -q '\[tauri-shell\] mdi proof:' "$IOS_DEV_LOG" "$LOG_STREAM" 2>/dev/null; then
-        break
-    fi
-    sleep 2
-done
-grep -q '\[tauri-shell\] mdi proof:' "$IOS_DEV_LOG" "$LOG_STREAM" 2>/dev/null \
-    || fail "Tauri iOS MDI proof log not observed within ${TIMEOUT_SECS}s"
-
-xcrun simctl io "$SIM_UDID" screenshot "$SCREENSHOT" > "$BUILD_DIR/ios_screenshot.log" 2>&1 \
-    || fail "failed to capture iOS simulator screenshot"
+if [ "$SCREENSHOT" != "$PREPROOF_SCREENSHOT" ]; then
+    cp "$PREPROOF_SCREENSHOT" "$SCREENSHOT" \
+        || fail "failed to preserve validated iOS MDI screenshot: $SCREENSHOT"
+fi
 test -s "$SCREENSHOT" || fail "iOS simulator screenshot is empty: $SCREENSHOT"
 
 validate_screenshot_png "$SCREENSHOT" ios_mobile_renderer_screenshot \
