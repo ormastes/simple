@@ -77,6 +77,8 @@ profile. `spipe_codebase_pack` returns status and byte count only; use
 `spipe_codebase_search` or `spipe_codebase_get` to inspect the stored tree.
 Existing XML RepoMix input with `<file path=...>` is matched as
 `repomix_xml`; markdown-style packs use `repomix_markdown`.
+RepoMix file markers render as file nodes, so codebase packs can be searched
+and retrieved by actual source path.
 Plain markdown sources or heading-shaped text use `markdown_headings`.
 `tree` command output keeps a small path stack so nested entries render parent
 directories such as `src/app` instead of isolated leaf names; rows with deeper
