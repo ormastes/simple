@@ -126,12 +126,14 @@ and byte count only; use
 For codebase-mcp compatibility, `getCodebase`, `getRemoteCodebase`, and
 `saveCodebase` are aliases for the local pack, remote pack, and metadata-only
 save tools. MCP calls may use either SPipe snake_case arguments
-(`include_patterns`, `ignore_patterns`, `timeout_ms`) or codebase-mcp-style
-camelCase arguments (`includePatterns`, `ignorePatterns`, `timeoutMs`), with
-`cwd` or `repo` accepted as aliases for `root`.
+(`source_id`, `include_patterns`, `ignore_patterns`, `timeout_ms`) or
+codebase-mcp-style camelCase arguments (`sourceId`, `includePatterns`,
+`ignorePatterns`, `timeoutMs`), with `cwd` or `repo` accepted as aliases for
+`root`.
 Existing packed output may be supplied as `text`, `packed_text`, or `packedText`.
 The CLI accepts the same compatibility spellings as flags, for example
-`--cwd`, `--repo`, `--includePatterns`, `--ignorePatterns`, and `--timeoutMs`.
+`--cwd`, `--repo`, `--sourceId`, `--includePatterns`, `--ignorePatterns`, and
+`--timeoutMs`.
 Existing XML RepoMix input with `<file path=...>` is matched as
 `repomix_xml`; markdown-style packs use `repomix_markdown`.
 RepoMix file markers render as file nodes, so codebase packs can be searched
@@ -183,6 +185,7 @@ keeping the original compact names stable.
 chain before exact raw lines, so a middle slice still carries command and
 file/dir context. If callers pass raw text directly, SPipe parses that text first
 and renders the same parent context.
+Context tools accept `source_id` or `sourceId`.
 Raw-context calls accept either `start_line`/`end_line`/`before`/`after` or
 `startLine`/`endLine`/`contextBefore`/`contextAfter`; the CLI mirrors those
 camelCase aliases as flags. If no range is provided, raw context defaults to
