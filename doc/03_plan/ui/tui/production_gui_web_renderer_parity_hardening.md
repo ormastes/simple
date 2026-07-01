@@ -111,6 +111,11 @@
   Metal framebuffer readback gates; this is separate from browser-capture
   parity and must remain logged as backend/readback evidence, not as a browser
   capture substitute.
+- When Simple Metal framebuffer readback is present, the production wrapper now
+  runs the macOS Metal render-log compare even if the generic backend row is a
+  fallback. The log must expose Electron/Chrome Metal browser backing,
+  pairwise ARGB, ARGB source, and blocked-gate rows instead of silently
+  reporting `backend-not-metal`.
 - The aggregate production wrapper is still not complete on macOS because the
   Tauri surface row requires live Tauri capture. The current Tauri/Chrome
   manifest wrapper only implements the Linux X11/Xvfb Tauri capture backend;

@@ -1349,6 +1349,18 @@ The current canonical evidence contract is:
   GUI/web hardening failure. On Darwin, the same subcheck remains strict and
   must prove the raw Metal framebuffer download path, the interpreter spec, and
   `blur_or_tolerance_used=false`.
+  The parent production wrapper now runs the macOS Metal render-log compare
+  whenever `production_gui_web_renderer_parity_metal_readback_status=pass`,
+  even if the generic backend row still reports a fallback such as
+  `production_gui_web_renderer_parity_backend_metal_resolved=vulkan-unavailable`.
+  This keeps the log from hiding Electron/Chrome Metal-backed browser gaps
+  behind `backend-not-metal`: the forwarded rows include
+  `production_gui_web_renderer_parity_metal_render_log_backend_resolved`,
+  `production_gui_web_renderer_parity_metal_render_log_metal_readback_status`,
+  the browser backing gate, pairwise gate, ARGB source gate, and blocked-gate
+  count. Simple Metal readback proves the Simple backend only; Electron/Chrome
+  Metal-backed browser comparison is proven only by the macOS Metal render-log
+  compare rows.
   Font offload
   `unavailable` is recorded but does not satisfy the production parity wrapper.
   A font pass must also carry
