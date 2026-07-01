@@ -49,9 +49,12 @@ shortcut for the same app entrypoint.
 - `spipe_tree_parse`
 - `spipe_tree_render`
 - `spipe_context_put`
+- `spipe_context_put_raw`
 - `spipe_context_get`
+- `spipe_context_get_tree`
 - `spipe_context_search`
 - `spipe_context_raw`
+- `spipe_context_get_raw`
 - `spipe_context_sql_put`
 - `spipe_context_sql_get`
 - `spipe_context_sql_search`
@@ -124,10 +127,15 @@ parsed output, `spipe_context_sql_get` to retrieve one source, and
 `spipe_context_sql_search` to search stored parsed context by query and optional
 source filter.
 
-`spipe_context_raw` prepends the matching `@parent` chain before exact raw
-lines, so a middle slice still carries command and file/dir context. If callers
-pass raw text directly, SPipe parses that text first and renders the same parent
-context.
+The explicit MCP names `spipe_context_put_raw`, `spipe_context_get_tree`, and
+`spipe_context_get_raw` are aliases for `spipe_context_put`,
+`spipe_context_get`, and `spipe_context_raw`, matching context-mode naming while
+keeping the original compact names stable.
+
+`spipe_context_raw` and `spipe_context_get_raw` prepend the matching `@parent`
+chain before exact raw lines, so a middle slice still carries command and
+file/dir context. If callers pass raw text directly, SPipe parses that text first
+and renders the same parent context.
 
 ## Current Boundary
 
