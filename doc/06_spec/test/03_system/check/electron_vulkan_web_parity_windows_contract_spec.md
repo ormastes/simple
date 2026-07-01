@@ -88,6 +88,8 @@ OS=Windows_NT EVWP_WORK=build/windows-electron-vulkan-web-parity \
 - Windows frame request overrides must be positive integer dimensions, a
   decimal uint32 ARGB value, and a six-digit RGB hex value before any renderer
   launches.
+- Terminal evidence rows include the requested RGB hex and ARGB decimal color
+  used by the Electron HTML page and pure-Simple Vulkan renderer.
 - The compare step fails closed when the Simple-rendered JSON does not report
   `backend` as `vulkan`.
 - The compare helper rejects dimension mismatches and pixel-buffer length
@@ -131,6 +133,8 @@ The wrapper emits these common rows for every terminal status:
 - `electron_vulkan_web_parity_windows_host_os`
 - `electron_vulkan_web_parity_windows_width`
 - `electron_vulkan_web_parity_windows_height`
+- `electron_vulkan_web_parity_windows_bg_hex`
+- `electron_vulkan_web_parity_windows_bg_dec`
 
 On a Windows host that reaches Electron launch it also emits:
 
@@ -256,7 +260,7 @@ The spec contains:
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 64 lines folded for reproduction.
+Runnable source: 66 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -264,6 +268,8 @@ val script = file_read("scripts/check/check-electron-vulkan-web-parity-windows.s
 
 expect(script).to_contain("electron_vulkan_web_parity_windows_status")
 expect(script).to_contain("electron_vulkan_web_parity_windows_reason")
+expect(script).to_contain("electron_vulkan_web_parity_windows_bg_hex")
+expect(script).to_contain("electron_vulkan_web_parity_windows_bg_dec")
 expect(script).to_contain("simple-bin-forbidden")
 expect(script).to_contain("simple-bin-probe-failed")
 expect(script).to_contain("simple-bin-version-not-simple")
@@ -333,7 +339,7 @@ expect(producer).to_contain("vulkan-pixel-count-mismatch")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -343,6 +349,8 @@ expect(code).to_equal(0)
 expect(_stdout).to_contain("electron_vulkan_web_parity_windows_status=skip")
 expect(_stdout).to_contain("electron_vulkan_web_parity_windows_reason=requires-windows")
 expect(_stdout).to_contain("electron_vulkan_web_parity_windows_simple_bin_status=pass")
+expect(_stdout).to_contain("electron_vulkan_web_parity_windows_bg_hex=224466")
+expect(_stdout).to_contain("electron_vulkan_web_parity_windows_bg_dec=4280435814")
 ```
 
 </details>
@@ -421,7 +429,7 @@ expect(stdout).to_contain("electron_vulkan_web_parity_windows_simple_bin_version
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -434,6 +442,8 @@ expect(stdout).to_contain("electron_vulkan_web_parity_windows_status=fail")
 expect(stdout).to_contain("electron_vulkan_web_parity_windows_reason=invalid-frame-request")
 expect(stdout).to_contain("electron_vulkan_web_parity_windows_width=0")
 expect(stdout).to_contain("electron_vulkan_web_parity_windows_height=48")
+expect(stdout).to_contain("electron_vulkan_web_parity_windows_bg_hex=224466")
+expect(stdout).to_contain("electron_vulkan_web_parity_windows_bg_dec=4280435814")
 expect(stdout).to_contain("electron_vulkan_web_parity_windows_simple_bin_version=Simple Language v1.0.0-beta")
 expect(stdout.contains("electron_vulkan_web_parity_windows_electron_capture_exit_code=")).to_equal(false)
 expect(stdout.contains("electron_vulkan_web_parity_windows_simple_render_exit_code=")).to_equal(false)
