@@ -100,6 +100,8 @@ summary rows.
 `ninja` output extracts the first quoted path from `ninja: error:` rows.
 `make` output extracts paths from GNU Make bracketed error rows such as
 `[path:line: target]`.
+`ctest` output extracts whitespace-delimited `path:line` tokens from failure
+rows.
 Path leaves render as `kind=file`; non-path output remains `kind=line` and can
 still be grouped by explicit log level.
 
