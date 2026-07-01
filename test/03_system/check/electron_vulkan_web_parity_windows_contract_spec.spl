@@ -41,6 +41,9 @@ OS=Windows_NT EVWP_WORK=build/windows-electron-vulkan-web-parity \
   launches.
 - Terminal evidence rows include the requested RGB hex and ARGB decimal color
   used by the Electron HTML page and pure-Simple Vulkan renderer.
+- Windows execution records the resolved `vulkan-1.dll` loader path and skips
+  before renderer launch when an explicit or standard Windows loader path is
+  missing.
 - The compare step fails closed when the Simple-rendered JSON does not report
   `backend` as `vulkan`.
 - The compare helper rejects dimension mismatches and pixel-buffer length
@@ -86,6 +89,8 @@ The wrapper emits these common rows for every terminal status:
 - `electron_vulkan_web_parity_windows_height`
 - `electron_vulkan_web_parity_windows_bg_hex`
 - `electron_vulkan_web_parity_windows_bg_dec`
+- `electron_vulkan_web_parity_windows_vulkan_loader`
+- `electron_vulkan_web_parity_windows_vulkan_loader_status`
 
 On a Windows host that reaches Electron launch it also emits:
 
@@ -144,6 +149,8 @@ The wrapper separates absence from failure:
   removing required Chromium Vulkan launch flags.
 - `reason=invalid-frame-request` protects against malformed requested frame
   dimensions or colors reaching renderer launch.
+- `reason=vulkan-loader-missing` protects against running the Windows evidence
+  gate without the Vulkan loader required by both renderer paths.
 - `reason=electron-capture-failed` protects against an Electron subprocess
   crash being reported only as an unstructured shell failure.
 - `reason=simple-vulkan-render-failed` protects against a Simple renderer
@@ -218,6 +225,10 @@ describe "Windows Electron Vulkan web parity wrapper":
         expect(script).to_contain("electron_vulkan_web_parity_windows_reason")
         expect(script).to_contain("electron_vulkan_web_parity_windows_bg_hex")
         expect(script).to_contain("electron_vulkan_web_parity_windows_bg_dec")
+        expect(script).to_contain("electron_vulkan_web_parity_windows_vulkan_loader")
+        expect(script).to_contain("electron_vulkan_web_parity_windows_vulkan_loader_status")
+        expect(script).to_contain("probe_vulkan_loader")
+        expect(script).to_contain("vulkan-loader-missing")
         expect(script).to_contain("simple-bin-forbidden")
         expect(script).to_contain("simple-bin-probe-failed")
         expect(script).to_contain("simple-bin-version-not-simple")
@@ -289,6 +300,22 @@ describe "Windows Electron Vulkan web parity wrapper":
         expect(_stdout).to_contain("electron_vulkan_web_parity_windows_simple_bin_status=pass")
         expect(_stdout).to_contain("electron_vulkan_web_parity_windows_bg_hex=224466")
         expect(_stdout).to_contain("electron_vulkan_web_parity_windows_bg_dec=4280435814")
+        expect(_stdout).to_contain("electron_vulkan_web_parity_windows_vulkan_loader_status=unknown")
+
+    it "skips Windows execution when explicit Vulkan loader is missing":
+        val root = "build/test-electron-vulkan-web-parity-windows-vulkan-loader-missing"
+        val missing_loader = "$PWD/" + root + "/missing-vulkan-1.dll"
+        val command = "rm -rf " + root + " && mkdir -p " + root + " && printf '%s\\n' '#!/bin/sh' 'if [ \"$1\" = \"--version\" ]; then echo \"Simple Language v1.0.0-beta\"; exit 0; fi' 'exit 0' > " + root + "/fake-simple && chmod +x " + root + "/fake-simple && OS=Windows_NT SIMPLE_BIN=$PWD/" + root + "/fake-simple EVWP_VULKAN_DLL=" + missing_loader + " EVWP_WORK=" + root + "/work sh scripts/check/check-electron-vulkan-web-parity-windows.shs"
+        val (stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+
+        expect(code).to_equal(0)
+        expect(stdout).to_contain("electron_vulkan_web_parity_windows_status=skip")
+        expect(stdout).to_contain("electron_vulkan_web_parity_windows_reason=vulkan-loader-missing")
+        expect(stdout).to_contain("electron_vulkan_web_parity_windows_vulkan_loader=")
+        expect(stdout).to_contain(root + "/missing-vulkan-1.dll")
+        expect(stdout).to_contain("electron_vulkan_web_parity_windows_vulkan_loader_status=missing")
+        expect(stdout.contains("electron_vulkan_web_parity_windows_electron_capture_exit_code=")).to_equal(false)
+        expect(stdout.contains("electron_vulkan_web_parity_windows_simple_render_exit_code=")).to_equal(false)
 
     it "reports Electron capture subprocess failures as structured rows":
         val root = "build/test-electron-vulkan-web-parity-windows-electron-fail"
@@ -321,7 +348,7 @@ describe "Windows Electron Vulkan web parity wrapper":
         val electron_json = "\"{\\\"width\\\":2,\\\"height\\\":2,\\\"pixels\\\":[4280435814,4280435814,4280435814,4280435814]}\""
         val proof_json = "\"{\\\"gpu_feature_status\\\":{\\\"vulkan\\\":\\\"enabled\\\",\\\"gpu_compositing\\\":\\\"enabled\\\"},\\\"browser_target_gpu_info_status\\\":\\\"pass\\\",\\\"browser_target_gpu_info\\\":{\\\"gpu\\\":{\\\"auxAttributes\\\":{\\\"hardwareSupportsVulkan\\\":true,\\\"displayType\\\":\\\"Vulkan\\\",\\\"glImplementationParts\\\":\\\"angle=vulkan\\\",\\\"skiaBackendType\\\":\\\"Vulkan\\\",\\\"glRenderer\\\":\\\"Vulkan\\\"}}}}}}}\""
         val vulkan_json = "\"{\\\"status\\\":\\\"pass\\\",\\\"reason\\\":\\\"pass\\\",\\\"producer\\\":\\\"simple-engine2d-vulkan\\\",\\\"requested_backend\\\":\\\"vulkan\\\",\\\"backend\\\":\\\"vulkan\\\",\\\"pixel_count\\\":4,\\\"width\\\":2,\\\"height\\\":2,\\\"pixels\\\":[4280435814,4280435814,4280435814,4280435814]}\""
-        val command = "rm -rf " + root + " && mkdir -p " + root + " tools/electron-shell/node_modules/.bin && printf '%s\\n' '#!/bin/sh' 'printf \"%s\\\\n\" " + electron_json + " > \"$ELECTRON_CAPTURE_OUTPUT\"' 'printf \"%s\\\\n\" " + proof_json + " > \"$ELECTRON_CAPTURE_PROOF_PATH\"' 'exit 0' > tools/electron-shell/node_modules/.bin/electron && chmod +x tools/electron-shell/node_modules/.bin/electron && printf '%s\\n' '#!/bin/sh' 'if [ \"$1\" = \"--version\" ]; then echo \"Simple Language v1.0.0-beta\"; exit 0; fi' 'printf \"%s\\\\n\" " + vulkan_json + " > \"$EVWP_OUTPUT\"' 'exit 0' > " + root + "/fake-simple && chmod +x " + root + "/fake-simple && OS=Windows_NT SIMPLE_BIN=$PWD/" + root + "/fake-simple EVWP_WIDTH=2 EVWP_HEIGHT=2 EVWP_BG_DEC=4280435814 EVWP_BG_HEX=224466 EVWP_WORK=" + root + "/work sh scripts/check/check-electron-vulkan-web-parity-windows.shs > " + root + "/stdout.txt 2> " + root + "/stderr.txt; code=$?; rm -f tools/electron-shell/node_modules/.bin/electron; exit $code"
+        val command = "rm -rf " + root + " && mkdir -p " + root + " tools/electron-shell/node_modules/.bin && : > " + root + "/vulkan-1.dll && printf '%s\\n' '#!/bin/sh' 'printf \"%s\\\\n\" " + electron_json + " > \"$ELECTRON_CAPTURE_OUTPUT\"' 'printf \"%s\\\\n\" " + proof_json + " > \"$ELECTRON_CAPTURE_PROOF_PATH\"' 'exit 0' > tools/electron-shell/node_modules/.bin/electron && chmod +x tools/electron-shell/node_modules/.bin/electron && printf '%s\\n' '#!/bin/sh' 'if [ \"$1\" = \"--version\" ]; then echo \"Simple Language v1.0.0-beta\"; exit 0; fi' 'printf \"%s\\\\n\" " + vulkan_json + " > \"$EVWP_OUTPUT\"' 'exit 0' > " + root + "/fake-simple && chmod +x " + root + "/fake-simple && OS=Windows_NT SIMPLE_BIN=$PWD/" + root + "/fake-simple EVWP_VULKAN_DLL=$PWD/" + root + "/vulkan-1.dll EVWP_WIDTH=2 EVWP_HEIGHT=2 EVWP_BG_DEC=4280435814 EVWP_BG_HEX=224466 EVWP_WORK=" + root + "/work sh scripts/check/check-electron-vulkan-web-parity-windows.shs > " + root + "/stdout.txt 2> " + root + "/stderr.txt; code=$?; rm -f tools/electron-shell/node_modules/.bin/electron; exit $code"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
         val stdout = file_read(root + "/stdout.txt")
 
@@ -329,6 +356,9 @@ describe "Windows Electron Vulkan web parity wrapper":
         expect(stdout).to_contain("electron_vulkan_web_parity_windows_status=pass")
         expect(stdout).to_contain("electron_vulkan_web_parity_windows_reason=pixel-exact-vulkan")
         expect(stdout).to_contain("electron_vulkan_web_parity_windows_compare_exit_code=0")
+        expect(stdout).to_contain("electron_vulkan_web_parity_windows_vulkan_loader=")
+        expect(stdout).to_contain(root + "/vulkan-1.dll")
+        expect(stdout).to_contain("electron_vulkan_web_parity_windows_vulkan_loader_status=pass")
         expect(stdout).to_contain("electron_vulkan_web_parity_windows_electron_json=" + root + "/work/electron.json")
         expect(stdout).to_contain("electron_vulkan_web_parity_windows_vulkan_json=" + root + "/work/vulkan.json")
 
