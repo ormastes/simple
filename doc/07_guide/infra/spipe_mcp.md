@@ -69,14 +69,14 @@ bin/release/simple run src/app/cli/main.spl spipe-mcp parsers
 
 No args and `serve` run the MCP stdio server. Logs must stay off stdout.
 For MCP client registration, prefer `bin/spipe_mcp_server`; `serve` uses the
-proven Simple source entrypoint by default, while CLI subcommands use the native
-SPipe MCP artifact when present and otherwise fall back to source mode. Set
-`SIMPLE_SPIPE_MCP_PREFER_NATIVE_SERVE=1` only after a native stdio protocol
-probe passes.
-`simple spipe-mcp ...` is the canonical shortcut when the native SPipe MCP
-entrypoint is available through `SIMPLE_SPIPE_MCP_BINARY` or
-`build/bootstrap/mcp-package/spipe_mcp`; the top-level CLI delegates to that
-binary instead of importing the app in-process.
+proven Simple source entrypoint by default for both stdio and CLI subcommands,
+so source changes are visible even when an older native `spipe_mcp` artifact is
+present. Set `SIMPLE_SPIPE_MCP_BINARY=/path/to/spipe_mcp` for an explicit native
+deployment, or `SIMPLE_SPIPE_MCP_PREFER_NATIVE=1` only after the native parser
+and stdio protocol probes pass.
+`simple spipe-mcp ...` is the canonical shortcut; the top-level wrapper hands it
+to `bin/spipe_mcp_server` and keeps every other `simple` command on the stable
+release runtime.
 Parser and capture commands accept `--source-kind=K`, `--sourceKind=K`, or
 `--kind=K`; the default is `command_output`. MCP calls may use `source_kind` or
 `sourceKind`, and raw text may be supplied as `text`, `raw_text`, or `rawText`.

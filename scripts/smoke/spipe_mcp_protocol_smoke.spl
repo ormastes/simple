@@ -54,7 +54,7 @@ val input = initialize + "\n" + tools_list + "\n" + context_put + "\n" + context
 if not file_write(input_path, input):
     fail("input-write-failed", input_path)
 
-val command = "timeout 20 bin/release/simple run src/app/spipe_mcp/main.spl serve < " + shell_quote(input_path)
+val command = "SIMPLE_LOG=warn RUST_LOG=warn timeout 20 bin/release/simple spipe-mcp serve < " + shell_quote(input_path)
 val result = process_run("/bin/sh", ["-c", command])
 if result.2 != 0:
     fail("server-exit-" + result.2.to_string(), "STDOUT:\n" + result.0 + "\nSTDERR:\n" + result.1)
@@ -102,11 +102,27 @@ val no_level_path = "/tmp/spipe_mcp_protocol_smoke_nolevel.jsonl"
 val no_level_input = no_level_parse + "\n"
 if not file_write(no_level_path, no_level_input):
     fail("no-level-input-write-failed", no_level_path)
-val no_level_result = process_run("/bin/sh", ["-c", "timeout 20 bin/release/simple run src/app/spipe_mcp/main.spl serve < " + shell_quote(no_level_path)])
+val no_level_result = process_run("/bin/sh", ["-c", "SIMPLE_LOG=warn RUST_LOG=warn timeout 20 bin/release/simple spipe-mcp serve < " + shell_quote(no_level_path)])
 if no_level_result.2 != 0:
     fail("no-level-server-exit-" + no_level_result.2.to_string(), "STDOUT:\n" + no_level_result.0 + "\nSTDERR:\n" + no_level_result.1)
 require_contains(no_level_result.0, "level_detected=false", "isolated-no-level-detection")
 require_not_contains(no_level_result.0, "@group level=", "isolated-no-level-group")
+
+val match_path = "/tmp/spipe_mcp_protocol_smoke_apt.txt"
+if not file_write(match_path, "E: Sub-process /usr/bin/dpkg returned an error code (1)\n"):
+    fail("apt-match-input-write-failed", match_path)
+val match_result = process_run("/bin/sh", ["-c", "timeout 20 bin/release/simple spipe-mcp match --command='apt install simple' -f " + shell_quote(match_path)])
+if match_result.2 != 0:
+    fail("apt-match-exit-" + match_result.2.to_string(), "STDOUT:\n" + match_result.0 + "\nSTDERR:\n" + match_result.1)
+require_contains(match_result.0, "apt", "missing-launcher-apt-parser")
+
+val parsers_result = process_run("/bin/sh", ["-c", "timeout 20 bin/release/simple spipe-mcp parsers"])
+if parsers_result.2 != 0:
+    fail("parser-list-exit-" + parsers_result.2.to_string(), "STDOUT:\n" + parsers_result.0 + "\nSTDERR:\n" + parsers_result.1)
+require_contains(parsers_result.0, "dpkg", "missing-launcher-dpkg-parser")
+require_contains(parsers_result.0, "rsync", "missing-launcher-rsync-parser")
+require_contains(parsers_result.0, "journalctl", "missing-launcher-journalctl-parser")
+require_contains(parsers_result.0, "systemctl", "missing-launcher-systemctl-parser")
 
 print("STATUS: PASS spipe_mcp_protocol_smoke")
 exit(0)

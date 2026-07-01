@@ -25,10 +25,11 @@
   the whole pack through MCP.
 - Added durable SQLite context tools: `spipe_context_sql_put`,
   `spipe_context_sql_get`, and `spipe_context_sql_search`.
-- Added `bin/spipe_mcp_server` as the common MCP launcher; it prefers the native
-  SPipe MCP artifact and falls back to `src/app/spipe_mcp/main.spl`.
-- Added `simple spipe-mcp ...` CLI dispatch wiring for common source-mode use;
-  the installed release binary needs rebuild before the shortcut is live there.
+- Added `bin/spipe_mcp_server` as the common MCP launcher; it defaults to the
+  proven source entrypoint and only uses native artifacts by explicit env opt-in.
+- Added `simple spipe-mcp ...` CLI dispatch wiring; `bin/release/simple`
+  now hands that shortcut to `bin/spipe_mcp_server` while all other commands
+  keep using the stable release runtime.
 - Moved the old `simple_pipe` compatibility surface for context/codebase/Ponytail
   to a SPipe MCP handoff; Simple MCP keeps `simple_search` and the named
   Simple-specific `simple_context`/`simple_ponytail` compatibility tools.
@@ -61,14 +62,21 @@ Additional live protocol evidence now covers SQL context put/get/search,
 codebase `saveCodebase`, hook normalization, and JSON-RPC unknown-method error
 responses through the same stdio oracle.
 
+## Completion Audit
+
+- Spark sidecar review checked the broad SPipe MCP objective and found the main
+  gap was launcher-level parser-family breadth evidence. The protocol smoke now
+  asserts `bin/release/simple spipe-mcp match` returns the apt parser and that
+  the launcher parser list includes dpkg, rsync, journalctl, and systemctl.
+- Normal review checked the wrapper shortcut and docs. The MCP stdio smoke now
+  runs through `bin/release/simple spipe-mcp serve`, proving the common
+  registration path rather than only the raw source entrypoint.
+- The broader monolithic native CLI app-subcommand crash remains a separate
+  native CLI bug; common MCP registration uses `bin/spipe_mcp_server`.
+
 ## Remaining
 
-- Full completion audit against the broad SPipe MCP objective before marking
-  the overall goal done.
-- Rebuild/deploy the installed top-level `simple spipe-mcp ...` shortcut when
-  the release binary is refreshed. Common MCP registration can use
-  `bin/spipe_mcp_server` now; the broader monolithic CLI app-subcommand crash
-  remains a separate native CLI bug.
+- None for this first common API patch.
 
 Sidecar lanes: N/A for this first common API patch.
 Merge owner: Codex.

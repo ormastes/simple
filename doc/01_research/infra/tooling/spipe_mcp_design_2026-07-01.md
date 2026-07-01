@@ -528,7 +528,7 @@ Final practical setup for `.mcp.json`:
       "command": "/bin/sh",
       "args": [
         "-lc",
-        "cd '/absolute/path/to/simple' && exec node 'bin/mcp_stdio_bridge.js' -- 'bin/simple' run 'src/app/spipe_mcp/main.spl'"
+        "cd '/absolute/path/to/simple' && exec node 'bin/mcp_stdio_bridge.js' -- 'bin/release/simple' spipe-mcp serve"
       ],
       "env": {
         "SIMPLE_LOG": "error",
@@ -540,7 +540,11 @@ Final practical setup for `.mcp.json`:
 }
 ```
 
-**Note:** Current Simple install script uses source-mode workaround (`bin/simple run ...`) because native MCP binaries documented as failing real `tools/call`. Mirror that for spipe-mcp until native MCP execution is verified.
+**Note:** `bin/release/simple spipe-mcp serve` delegates to
+`bin/spipe_mcp_server`, which defaults to the proven source entrypoint and only
+uses a native `spipe_mcp` artifact when explicitly requested with
+`SIMPLE_SPIPE_MCP_BINARY` or `SIMPLE_SPIPE_MCP_PREFER_NATIVE=1` after parser and
+stdio probes pass.
 
 ## Acceptance Tests
 
