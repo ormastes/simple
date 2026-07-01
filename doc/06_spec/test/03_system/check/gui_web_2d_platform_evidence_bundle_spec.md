@@ -27,7 +27,7 @@ gui_web_2d_platform_evidence_bundle_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 15 | 15 | 0 | 0 |
+| 16 | 16 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -76,9 +76,9 @@ sh scripts/check/check-gui-web-2d-platform-evidence-bundle.shs
 - The Windows Electron/Vulkan parity gate requires Electron proof path, hash,
   no-tolerance, native-size, browser-GPU-info, and GPU-compositing evidence
   rows in addition to the pixel-exact comparison status.
-- The Windows Electron/Vulkan parity gate also requires non-empty SHA-256 rows
-  for the selected Windows Simple binary, Electron launcher, Vulkan loader, and
-  generated Electron/proof/PNG/Vulkan artifacts.
+- The Windows Electron/Vulkan parity gate also requires lowercase 64-hex
+  SHA-256 rows for the selected Windows Simple binary, Electron launcher,
+  Vulkan loader, and generated Electron/proof/PNG/Vulkan artifacts.
 - A present failed platform row is reported as failed, not missing.
 - A present platform env with missing required gate keys is reported as failed,
   not missing.
@@ -296,6 +296,27 @@ expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_missing_gate_co
 expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_failed_gate_count=0")
 expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_remaining_gate_count=0")
 expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_proven_gates=linux-vulkan-renderdoc|macos-metal-xcode-gpu-capture|windows-d3d12-pix|windows-electron-vulkan-parity|ios-tauri-wkwebview-metal|android-tauri-webview-vulkan|retained-4k-8k-current-source|full-html-css|production-gui-web-parity|cross-platform-freshness")
+```
+
+</details>
+
+#### rejects malformed Windows Vulkan SHA-256 evidence rows
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val command = "rm -rf build/test-gui-web-2d-platform-evidence-bundle-windows-vulkan-bad-hash && mkdir -p build/test-gui-web-2d-platform-evidence-bundle-windows-vulkan-bad-hash/env && printf 'linux_vulkan_render_log_compare_status=pass\\nmacos_metal_render_log_compare_status=pass\\nwindows_d3d12_render_log_compare_status=pass\\nelectron_vulkan_web_parity_windows_status=pass\\nelectron_vulkan_web_parity_windows_reason=pixel-exact-vulkan\\nelectron_vulkan_web_parity_windows_host_os=Windows_NT\\nelectron_vulkan_web_parity_windows_simple_bin_status=pass\\nelectron_vulkan_web_parity_windows_simple_bin_kind=windows-exe\\nelectron_vulkan_web_parity_windows_simple_bin_sha256=not-a-sha256\\nelectron_vulkan_web_parity_windows_electron_bin_status=pass\\nelectron_vulkan_web_parity_windows_electron_bin_kind=windows-cmd\\nelectron_vulkan_web_parity_windows_electron_bin_sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\\nelectron_vulkan_web_parity_windows_vulkan_loader_status=pass\\nelectron_vulkan_web_parity_windows_vulkan_loader_sha256=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\\nelectron_vulkan_web_parity_windows_electron_capture_exit_code=0\\nelectron_vulkan_web_parity_windows_simple_render_exit_code=0\\nelectron_vulkan_web_parity_windows_compare_exit_code=0\\nelectron_vulkan_web_parity_windows_electron_json_sha256=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\\nelectron_vulkan_web_parity_windows_electron_proof_json_sha256=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\\nelectron_vulkan_web_parity_windows_electron_png_sha256=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\\nelectron_vulkan_web_parity_windows_vulkan_json_sha256=1111111111111111111111111111111111111111111111111111111111111111\\nelectron_vulkan_web_parity_windows_vulkan_run_id=run-1\\nelectron_vulkan_web_parity_windows_compare_vulkan_run_id=run-1\\nelectron_vulkan_web_parity_windows_compare_vulkan_backend=vulkan\\nelectron_vulkan_web_parity_windows_compare_vulkan_execution_mode=interpret\\nelectron_vulkan_web_parity_windows_compare_electron_vulkan_status=pass\\nelectron_vulkan_web_parity_windows_compare_electron_vulkan_reason=electron-vulkan-backed\\nelectron_vulkan_web_parity_windows_compare_electron_hardware_supports_vulkan=true\\nelectron_vulkan_web_parity_windows_compare_electron_proof_status=pass\\nelectron_vulkan_web_parity_windows_compare_electron_proof_source=tools/electron-live-bitmap/capture_html_argb.js\\nelectron_vulkan_web_parity_windows_compare_electron_proof_html_path=page.html\\nelectron_vulkan_web_parity_windows_compare_electron_proof_html_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\nelectron_vulkan_web_parity_windows_compare_electron_proof_captured_argb_path=electron.json\\nelectron_vulkan_web_parity_windows_compare_electron_proof_captured_argb_sha256=2222222222222222222222222222222222222222222222222222222222222222\\nelectron_vulkan_web_parity_windows_compare_electron_proof_captured_argb_written=true\\nelectron_vulkan_web_parity_windows_compare_electron_proof_png_path=electron.png\\nelectron_vulkan_web_parity_windows_compare_electron_proof_png_sha256=3333333333333333333333333333333333333333333333333333333333333333\\nelectron_vulkan_web_parity_windows_compare_electron_proof_png_written=true\\nelectron_vulkan_web_parity_windows_compare_electron_proof_blur_or_tolerance_used=false\\nelectron_vulkan_web_parity_windows_compare_electron_proof_gpu_feature_status_matches_capture=true\\nelectron_vulkan_web_parity_windows_compare_electron_proof_browser_gpu_info_matches_capture=true\\nelectron_vulkan_web_parity_windows_compare_electron_proof_width=64\\nelectron_vulkan_web_parity_windows_compare_electron_proof_height=48\\nelectron_vulkan_web_parity_windows_compare_electron_proof_native_width=64\\nelectron_vulkan_web_parity_windows_compare_electron_proof_native_height=48\\nelectron_vulkan_web_parity_windows_compare_electron_proof_downsampled=false\\nelectron_vulkan_web_parity_windows_compare_electron_proof_remote_debugging_port=34001\\nelectron_vulkan_web_parity_windows_compare_electron_gpu_compositing=enabled\\nelectron_vulkan_web_parity_windows_compare_electron_browser_target_gpu_info_status=pass\\nelectron_vulkan_web_parity_windows_compare_mismatches=0\\n' > build/test-gui-web-2d-platform-evidence-bundle-windows-vulkan-bad-hash/env/native.env && BUILD_DIR=build/test-gui-web-2d-platform-evidence-bundle-windows-vulkan-bad-hash/out REPORT_PATH=build/test-gui-web-2d-platform-evidence-bundle-windows-vulkan-bad-hash/report.md NATIVE_RENDER_LOG_PLATFORM_MATRIX_ENV=build/test-gui-web-2d-platform-evidence-bundle-windows-vulkan-bad-hash/env/native.env TAURI_MOBILE_RENDERER_PARITY_ENV=build/test-gui-web-2d-platform-evidence-bundle-windows-vulkan-bad-hash/missing/mobile.env GUI_SHOWCASE_4K_200FPS_ENV=build/test-gui-web-2d-platform-evidence-bundle-windows-vulkan-bad-hash/missing/4k.env GUI_SHOWCASE_8K_200FPS_ENV=build/test-gui-web-2d-platform-evidence-bundle-windows-vulkan-bad-hash/missing/8k.env HTML_CSS_FULL_RENDERING_GOAL_ENV=build/test-gui-web-2d-platform-evidence-bundle-windows-vulkan-bad-hash/missing/html.env PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=build/test-gui-web-2d-platform-evidence-bundle-windows-vulkan-bad-hash/missing/production.env GUI_WEB_2D_PLATFORM_FRESHNESS_ENV=build/test-gui-web-2d-platform-evidence-bundle-windows-vulkan-bad-hash/missing/fresh.env sh scripts/check/check-gui-web-2d-platform-evidence-bundle.shs"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read("build/test-gui-web-2d-platform-evidence-bundle-windows-vulkan-bad-hash/out/evidence.env")
+expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_status=fail")
+expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_failed_gates=windows-electron-vulkan-parity")
+expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_windows_electron_vulkan_parity_status=fail")
 ```
 
 </details>
@@ -588,8 +609,8 @@ expect(evidence).to_contain("gui_web_2d_platform_evidence_bundle_cross_platform_
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 15 |
-| Active scenarios | 15 |
+| Total scenarios | 16 |
+| Active scenarios | 16 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
