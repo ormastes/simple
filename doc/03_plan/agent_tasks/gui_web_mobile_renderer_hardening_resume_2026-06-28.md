@@ -487,41 +487,44 @@ must not be marked complete until that env is present and the rerun reaches
 ### Browser Metal Backing Producer Refresh (2026-07-02)
 
 Current scoped result: `scripts/check/check-macos-metal-browser-backing-evidence.shs`
-now materializes the browser backing env consumed by the macOS Metal render-log
-gate. This removes the missing-browser-env blocker but does not complete the
-Metal proof.
+now materializes passing browser backing evidence consumed by the macOS Metal
+render-log gate. The wrapper captures live Chrome and Electron ARGB artifacts,
+writes per-browser scoped GPU source env files plus raw JSON sidecars, and
+requires all Simple/Chrome/Electron pairwise ARGB diffs to be exact.
 
 Observed rows from
 `BUILD_DIR=build/macos-metal-browser-backing
 REPORT_PATH=build/macos-metal-browser-backing/report.md
 sh scripts/check/check-macos-metal-browser-backing-evidence.shs`:
 
-- `macos_metal_browser_backing_status=unavailable`
-- `macos_metal_electron_browser_backing_status=unavailable`
-- `macos_metal_electron_browser_backing_reason=electron-metal-metadata-missing`
-- `macos_metal_chrome_browser_backing_status=unavailable`
-- `macos_metal_chrome_browser_backing_reason=chrome-metal-metadata-missing`
+- `macos_metal_browser_backing_status=pass`
+- `macos_metal_electron_browser_backing_status=pass`
+- `macos_metal_electron_browser_backing_gpu_compositing=enabled`
+- `macos_metal_electron_browser_backing_gl_implementation_parts=(gl=egl-angle,angle=metal)`
+- `macos_metal_chrome_browser_backing_status=pass`
+- `macos_metal_chrome_browser_backing_gpu_compositing=enabled`
+- `macos_metal_chrome_browser_backing_skia_backend_type=GraphiteDawnMetal`
 - `macos_metal_electron_chrome_pairwise_diff_status=pass`
-- `macos_metal_electron_simple_pairwise_diff_status=missing-artifact`
-- `macos_metal_chrome_simple_pairwise_diff_status=missing-artifact`
-- Chrome and Electron ARGB artifacts are present, nonblank, 96x64, and share
-  checksum `26298616811520`.
-- Simple ARGB is missing because the current Simple web renderer probe exits
-  before writing pixels.
+- `macos_metal_electron_simple_pairwise_diff_status=pass`
+- `macos_metal_chrome_simple_pairwise_diff_status=pass`
+- Simple, Chrome, and Electron ARGB artifacts are present, nonblank, 96x64, and
+  share checksum `26305055459328`.
 
 Rerunning `check-macos-metal-render-log-compare.shs` after that producer emitted:
 
-- `macos_metal_render_log_compare_status=fail`
+- `macos_metal_render_log_compare_status=pass`
 - `macos_metal_render_log_compare_browser_env_file_status=pass`
 - `macos_metal_render_log_compare_browser_env_artifact_status=pass`
-- `macos_metal_render_log_compare_blocked_gate_count=3`
-- `macos_metal_render_log_compare_blocked_gates=browser-metal-backing,pairwise-argb-diff,argb-source-evidence`
+- `macos_metal_render_log_compare_browser_backing_gate_status=pass`
+- `macos_metal_render_log_compare_pairwise_gate_status=pass`
+- `macos_metal_render_log_compare_argb_source_gate_status=pass`
+- `macos_metal_render_log_compare_blocked_gate_count=0`
+- `macos_metal_render_log_compare_blocked_gates=`
 
-Next concrete evidence step: add scoped Chrome/Electron GPU metadata collection
-that records real Metal rows, then fix or route around the current Simple web
-renderer `simple_web_render_html_to_pixels` failure so the Simple ARGB artifact
-is produced from the same scene. Do not mark the macOS GUI/Metal checklist done
-until those rows pass and the aggregate reaches `blocked_gate_count=0`.
+Mac GUI/Web Metal render-log comparison is now proven for the local macOS
+browser/readback evidence slice. The broader GUI/Web/Mobile hardening goal still
+requires production parity and mobile Tauri iOS/Android evidence before the full
+plan is done.
 
 ## Existing Canonical Artifacts
 

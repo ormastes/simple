@@ -117,10 +117,12 @@ sh scripts/check/check-macos-metal-render-log-compare.shs
 
 `check-macos-metal-browser-backing-evidence.shs` writes
 `build/macos-metal-browser-backing/evidence.env`, separate Chrome/Electron
-source proof files, and Simple/Chrome/Electron ARGB artifacts. It remains
-fail-closed: Chrome/Electron screenshots that lack scoped Metal GPU metadata, a
-Simple renderer failure, missing ARGB artifacts, or any nonzero pairwise ARGB
-diff keep the Metal render-log aggregate failed.
+source proof files, raw GPU metadata sidecars, and Simple/Chrome/Electron ARGB
+artifacts. Chrome metadata comes from CDP `SystemInfo.getInfo`; Electron
+metadata is sampled after the capture so `gpu_compositing` reflects the rendered
+page. The wrapper remains fail-closed: Chrome/Electron screenshots that lack
+scoped Metal GPU metadata, a Simple renderer failure, missing ARGB artifacts, or
+any nonzero pairwise ARGB diff keep the Metal render-log aggregate failed.
 
 For host/GPU lane event-flow and less-ms evidence around
 `target.later(...) gpu \:`, use

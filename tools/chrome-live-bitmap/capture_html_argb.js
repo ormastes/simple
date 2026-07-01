@@ -14,6 +14,8 @@ const outputPath = process.env.CHROME_CAPTURE_OUTPUT || "";
 const expectedPath = process.env.CHROME_CAPTURE_EXPECTED_ARGB_PATH || "";
 const proofPath = process.env.CHROME_CAPTURE_PROOF_PATH || "";
 const geometryOutputPath = process.env.CHROME_CAPTURE_GEOMETRY_OUTPUT || "";
+const gpuSourceEnvPath = process.env.CHROME_CAPTURE_GPU_SOURCE_ENV || "";
+const gpuSourcePrefix = process.env.CHROME_CAPTURE_GPU_SOURCE_PREFIX || "chrome_capture_gpu";
 const chromeBin = process.env.CHROME_CAPTURE_BIN || findChromeBinary();
 const disableGpu = !/^(0|false|no)$/i.test(process.env.CHROME_CAPTURE_DISABLE_GPU || "1");
 const extraArgs = (process.env.CHROME_CAPTURE_EXTRA_ARGS || "")
@@ -113,6 +115,33 @@ function fail(reason) {
   console.log(`chrome_capture_status=unavailable`);
   console.log(`chrome_capture_reason=${reason}`);
   process.exit(1);
+}
+
+function writeGpuSourceEnv(gpuInfo, sourcePath, prefix) {
+  if (!sourcePath) return;
+  const gpu = gpuInfo && gpuInfo.gpu ? gpuInfo.gpu : {};
+  const aux = gpu.auxAttributes || {};
+  const featureStatus = gpu.featureStatus || {};
+  const devices = Array.isArray(gpu.devices) ? gpu.devices : [];
+  const device = devices[0] || {};
+  const gpuCompositing = featureStatus.gpu_compositing || featureStatus.compositing || "";
+  const displayType = aux.displayType || aux.display_type || aux.glImplementation || "";
+  const glParts = aux.glImplementationParts || aux.gl_implementation_parts || aux.glImplementation || "";
+  const skiaBackend = aux.skiaBackendType || aux.skia_backend_type || aux.skiaBackend || "";
+  const renderer = aux.glRenderer || aux.gl_renderer || device.deviceString || device.vendorString || "";
+  const rawJsonPath = `${sourcePath}.json`;
+  fs.mkdirSync(path.dirname(sourcePath), { recursive: true });
+  fs.writeFileSync(rawJsonPath, JSON.stringify(gpuInfo || {}, null, 2));
+  fs.writeFileSync(sourcePath, [
+    `${prefix}_gpu_compositing=${gpuCompositing}`,
+    `${prefix}_display_type=${displayType}`,
+    `${prefix}_gl_implementation_parts=${glParts}`,
+    `${prefix}_skia_backend_type=${skiaBackend}`,
+    `${prefix}_gl_renderer=${renderer}`,
+    `${prefix}_system_info_status=${gpuInfo ? "pass" : "unavailable"}`,
+    `${prefix}_raw_json_path=${rawJsonPath}`,
+    "",
+  ].join("\n"));
 }
 
 function readUInt32(buffer, offset) {
@@ -470,7 +499,18 @@ async function captureViaDevTools(fileUrl) {
     });
   });
   let conn;
+  let browserConn;
   try {
+    let gpuInfo = null;
+    try {
+      browserConn = await connectWebSocket(endpoint);
+      gpuInfo = await cdpSend(browserConn, 1, "SystemInfo.getInfo");
+    } catch (_err) {
+      gpuInfo = null;
+    } finally {
+      if (browserConn) browserConn.socket.destroy();
+    }
+    writeGpuSourceEnv(gpuInfo, gpuSourceEnvPath, gpuSourcePrefix);
     const page = await fetchPageTarget(endpoint, timeoutMs);
     conn = await connectWebSocket(page.webSocketDebuggerUrl);
     let id = 1;

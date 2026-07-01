@@ -28,6 +28,9 @@ const auditSelectors = (process.env.ELECTRON_CAPTURE_AUDIT_SELECTORS || "")
   .filter(Boolean);
 const auditOutputPath = process.env.ELECTRON_CAPTURE_AUDIT_OUTPUT || "";
 const geometryOutputPath = process.env.ELECTRON_CAPTURE_GEOMETRY_OUTPUT || "";
+const gpuSourceEnvPath = process.env.ELECTRON_CAPTURE_GPU_SOURCE_ENV || "";
+const gpuSourcePrefix = process.env.ELECTRON_CAPTURE_GPU_SOURCE_PREFIX || "electron_capture_gpu";
+const enableMetalGpu = /^(1|true|yes)$/i.test(process.env.ELECTRON_CAPTURE_ENABLE_METAL_GPU || "");
 const contrastMinX100 = Number(process.env.ELECTRON_CAPTURE_CONTRAST_MIN_X100 || 450);
 const touchMinPx = Number(process.env.ELECTRON_CAPTURE_TOUCH_MIN_PX || 44);
 const failOnAudit = /^(1|true|yes)$/i.test(process.env.ELECTRON_CAPTURE_FAIL_ON_AUDIT || "");
@@ -47,6 +50,34 @@ function parseMediaFeatures(value) {
       return { name, value: featureValue };
     })
     .filter(Boolean);
+}
+
+function writeGpuSourceEnv(gpuFeatureStatus, gpuInfo, sourcePath, prefix) {
+  if (!sourcePath) return;
+  const info = gpuInfo || {};
+  const aux = info.auxAttributes || {};
+  const featureStatus = gpuFeatureStatus || info.featureStatus || {};
+  const devices = Array.isArray(info.gpuDevice) ? info.gpuDevice :
+    (Array.isArray(info.devices) ? info.devices : []);
+  const device = devices[0] || {};
+  const gpuCompositing = featureStatus.gpu_compositing || featureStatus.compositing || "";
+  const displayType = aux.displayType || aux.display_type || aux.glImplementation || "";
+  const glParts = aux.glImplementationParts || aux.gl_implementation_parts || aux.glImplementation || "";
+  const skiaBackend = aux.skiaBackendType || aux.skia_backend_type || aux.skiaBackend || "";
+  const renderer = aux.glRenderer || aux.gl_renderer || device.deviceString || device.vendorString || "";
+  const rawJsonPath = `${sourcePath}.json`;
+  fs.mkdirSync(path.dirname(sourcePath), { recursive: true });
+  fs.writeFileSync(rawJsonPath, JSON.stringify({ gpuFeatureStatus, gpuInfo }, null, 2));
+  fs.writeFileSync(sourcePath, [
+    `${prefix}_gpu_compositing=${gpuCompositing}`,
+    `${prefix}_display_type=${displayType}`,
+    `${prefix}_gl_implementation_parts=${glParts}`,
+    `${prefix}_skia_backend_type=${skiaBackend}`,
+    `${prefix}_gl_renderer=${renderer}`,
+    `${prefix}_system_info_status=${gpuInfo ? "pass" : "unavailable"}`,
+    `${prefix}_raw_json_path=${rawJsonPath}`,
+    "",
+  ].join("\n"));
 }
 
 async function applyEmulatedMediaFeatures(win, features) {
@@ -462,7 +493,29 @@ async function main() {
     process.exit(1);
   }
 
+  if (enableMetalGpu) {
+    app.commandLine.appendSwitch("use-angle", "metal");
+    app.commandLine.appendSwitch("enable-gpu");
+    app.commandLine.appendSwitch("enable-gpu-compositing");
+    app.commandLine.appendSwitch("enable-accelerated-2d-canvas");
+    app.commandLine.appendSwitch("disable-software-rasterizer");
+    app.commandLine.appendSwitch("ignore-gpu-blocklist");
+  }
+
   await app.whenReady();
+  let gpuFeatureStatus = null;
+  let gpuInfo = null;
+  try {
+    gpuFeatureStatus = app.getGPUFeatureStatus();
+  } catch (_err) {
+    gpuFeatureStatus = null;
+  }
+  try {
+    gpuInfo = await app.getGPUInfo("complete");
+  } catch (_err) {
+    gpuInfo = null;
+  }
+  writeGpuSourceEnv(gpuFeatureStatus, gpuInfo, gpuSourceEnvPath, gpuSourcePrefix);
   const win = new BrowserWindow({
     show: false,
     useContentSize: true,
@@ -487,6 +540,17 @@ async function main() {
   const geometry = geometryOutputPath ? await collectGeometry(win) : null;
   const image = await win.capturePage({ x: 0, y: 0, width, height });
   const result = bitmapToLogicalArgb(image);
+  try {
+    gpuFeatureStatus = app.getGPUFeatureStatus();
+  } catch (_err) {
+    gpuFeatureStatus = gpuFeatureStatus || null;
+  }
+  try {
+    gpuInfo = await app.getGPUInfo("complete");
+  } catch (_err) {
+    gpuInfo = gpuInfo || null;
+  }
+  writeGpuSourceEnv(gpuFeatureStatus, gpuInfo, gpuSourceEnvPath, gpuSourcePrefix);
 
   const payload = {
     width,
