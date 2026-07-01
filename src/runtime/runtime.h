@@ -476,6 +476,7 @@ void        rt_prefetch_wait(void);                /* FFI alias */
 const char* rt_file_read_text(const char* path);
 int64_t     rt_file_read_text_rv(int64_t path);
 int         rt_file_exists(const char* path);
+int         rt_dir_exists(const char* path);
 int         rt_file_write(const char* path, const char* content);
 int         rt_file_write_text(const char* path, const char* content);
 int         rt_file_append(const char* path, const char* content);

@@ -1333,6 +1333,7 @@ void spl_prefetch_wait(void) {}
 
 const char* rt_file_read_text(const char* path) { return spl_file_read(path); }
 int         rt_file_exists(const char* path)    { return spl_file_exists(path); }
+int         rt_dir_exists(const char* path)     { return rt_is_dir(path) ? 1 : 0; }
 int         rt_file_write(const char* path, const char* content) {
     if (!path) return 0;
     FILE* f = fopen(path, "w");

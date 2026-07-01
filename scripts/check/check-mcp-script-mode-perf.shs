@@ -3,6 +3,7 @@ set -eu
 
 RUNS="${RUNS:-5}"
 STRICT="${MCP_SCRIPT_PERF_STRICT:-0}"
+USE_SMF="${MCP_SCRIPT_PERF_USE_SMF:-0}"
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT INT TERM
 
@@ -50,8 +51,17 @@ median_ms() {
   : >"$TMPDIR/$label.samples"
   while [ "$i" -lt "$RUNS" ]; do
     start="$(date +%s%3N)"
+    set +e
     "$@" <"$TMPDIR/in" >"$TMPDIR/out" 2>"$TMPDIR/err"
+    rc=$?
+    set -e
     end="$(date +%s%3N)"
+    if [ "$rc" -ne 0 ]; then
+      echo "${label}_command_failed_rc=$rc" >&2
+      sed -n '1,20p' "$TMPDIR/err" >&2
+      printf '%s\n' 999999
+      return 0
+    fi
     printf '%s\n' "$((end - start))" >>"$TMPDIR/$label.samples"
     i=$((i + 1))
   done
@@ -67,10 +77,18 @@ if command -v bun >/dev/null 2>&1; then
   bun_ms="$(median_ms bun bun "$TMPDIR/mcp.js")"
 fi
 
-simple_mcp_ms="$(median_ms simple_mcp env SIMPLE_MCP_TOOL_SET=core SIMPLE_MCP_ALLOW_SOURCE_FALLBACK=1 bin/simple_mcp_server)"
-simple_lsp_ms="$(median_ms simple_lsp bin/simple_lsp_mcp_server)"
+if [ "$USE_SMF" = "1" ]; then
+  simple_mcp_entry="${MCP_SCRIPT_PERF_MCP_SMF:-build/mcp-script/simple_mcp_server.smf}"
+  simple_lsp_entry="${MCP_SCRIPT_PERF_LSP_SMF:-build/mcp-script/simple_lsp_mcp_server.smf}"
+  simple_mcp_ms="$(median_ms simple_mcp_smf env SIMPLE_MCP_TOOL_SET=core SIMPLE_LIB=src bin/simple "$simple_mcp_entry")"
+  simple_lsp_ms="$(median_ms simple_lsp_smf env SIMPLE_LIB=src bin/simple "$simple_lsp_entry")"
+else
+  simple_mcp_ms="$(median_ms simple_mcp env SIMPLE_MCP_TOOL_SET=core SIMPLE_MCP_ALLOW_SOURCE_FALLBACK=1 bin/simple_mcp_server)"
+  simple_lsp_ms="$(median_ms simple_lsp bin/simple_lsp_mcp_server)"
+fi
 
 echo "mcp_script_perf_runs=$RUNS"
+echo "mcp_script_perf_mode=$([ "$USE_SMF" = "1" ] && printf smf || printf source)"
 echo "python3_mcp_median_ms=${python_ms:-missing}"
 echo "bun_mcp_median_ms=${bun_ms:-missing}"
 echo "simple_mcp_script_median_ms=$simple_mcp_ms"

@@ -38,7 +38,17 @@ The remaining gap is cold Simple source/interpreter startup and MCP app import
 work, not stdio framing size. The LSP MCP path is closer but still slower than
 the Python/Bun comparator on this host.
 
+The architecture-preserving fast path is checked SMF execution, but MCP SMF
+artifacts currently fail relocation on `rt_dir_exists`; see
+`doc/08_tracking/bug/mcp_smf_script_artifact_missing_rt_dir_exists_2026-07-01.md`.
+
 ## Verification target
 
 `MCP_SCRIPT_PERF_STRICT=1 sh scripts/check/check-mcp-script-mode-perf.shs`
 must pass on a normal developer host with `python3` and `bun` installed.
+
+After the SMF relocation blocker is fixed, also run:
+
+```bash
+MCP_SCRIPT_PERF_USE_SMF=1 MCP_SCRIPT_PERF_STRICT=1 sh scripts/check/check-mcp-script-mode-perf.shs
+```
