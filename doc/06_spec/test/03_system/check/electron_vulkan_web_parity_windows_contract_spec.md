@@ -27,7 +27,7 @@ electron_vulkan_web_parity_windows_contract_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 44 | 44 | 0 | 0 |
+| 46 | 46 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -303,7 +303,7 @@ The spec contains:
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 142 lines folded for reproduction.
+Runnable source: 144 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -404,6 +404,7 @@ expect(helper).to_contain("electron-proof-png-sha256-mismatch")
 expect(helper).to_contain("proofBlurOrToleranceUsed")
 expect(helper).to_contain("featureStatusMatchesCapture")
 expect(helper).to_contain("browserGpuInfoMatchesCapture")
+expect(helper).to_contain("browserTargetGpuInfoPresent")
 expect(helper).to_contain("proofNativeDimensionsOk")
 expect(helper).to_contain("proofNotDownsampled")
 expect(helper).to_contain("proofRemoteDebuggingPort")
@@ -421,6 +422,7 @@ expect(helper).to_contain("pixel-buffer-values-invalid")
 expect(helper).to_contain("invalidPixelIndex")
 expect(helper).to_contain("validPositiveInteger")
 expect(helper).to_contain("validUint32")
+expect(helper).to_contain("jsonObject")
 expect(helper).to_contain("pixel-buffer-length-mismatch")
 expect(helper).to_contain("pixel-exact-vulkan")
 val capture = file_read("tools/electron-live-bitmap/capture_html_argb.js")
@@ -1169,6 +1171,52 @@ expect(stdout).to_contain("electron_vulkan_web_parity_windows_compare_electron_h
 
 </details>
 
+#### rejects app GPU metadata without browser target GPU info
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-electron-vulkan-web-parity-windows-browser-proof-browser-info-missing"
+val proof = "'{\"status\":\"pass\",\"proof_source\":\"tools/electron-live-bitmap/capture_html_argb.js\",\"html_path\":\"$ELECTRON_CAPTURE_HTML\",\"html_sha256\":\"$ELECTRON_CAPTURE_EXPECTED_HTML_SHA256\",\"captured_argb_written\":true,\"png_output_path\":\"$ELECTRON_CAPTURE_PNG_OUTPUT\",\"png_sha256\":\"2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881\",\"png_written\":true,\"blur_or_tolerance_used\":false,\"native_width\":2,\"native_height\":2,\"downsampled\":false,\"width\":2,\"height\":2,\"gpu_feature_status\":{\"vulkan\":\"enabled\",\"gpu_compositing\":\"enabled\"},\"browser_target_gpu_info_status\":\"pass\",\"gpu_info\":{\"auxAttributes\":{\"hardwareSupportsVulkan\":true,\"displayType\":\"Vulkan\",\"glImplementationParts\":\"angle=vulkan\",\"skiaBackendType\":\"Vulkan\",\"glRenderer\":\"Vulkan\"}}}}'"
+val vulkan_json = "'{\"status\":\"pass\",\"reason\":\"pass\",\"producer\":\"simple-engine2d-vulkan\",\"requested_backend\":\"vulkan\",\"execution_mode\":\"interpret\",\"backend\":\"vulkan\",\"pixel_count\":4,\"width\":2,\"height\":2,\"pixels\":[1,2,3,4]}'"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && printf '%s\\n' '{\"producer\":\"electron-chromium-capture\",\"width\":2,\"height\":2,\"pixels\":[1,2,3,4]}' > " + root + "/electron.json && printf '%s\\n' " + vulkan_json + " > " + root + "/vulkan.json && printf '%s\\n' " + proof + " > " + root + "/electron-proof.json && printf '}' >> " + root + "/electron-proof.json && node scripts/check/electron-vulkan-web-parity-status.js " + root + "/electron.json " + root + "/vulkan.json " + root + "/electron-proof.json"
+val (stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+
+expect(code).to_equal(2)
+expect(stdout).to_contain("electron_vulkan_web_parity_windows_status=fail")
+expect(stdout).to_contain("electron_vulkan_web_parity_windows_reason=electron-browser-gpu-info-not-proven")
+expect(stdout).to_contain("electron_vulkan_web_parity_windows_compare_electron_browser_target_gpu_info_status=pass")
+```
+
+</details>
+
+#### rejects non object browser target GPU info
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-electron-vulkan-web-parity-windows-browser-proof-browser-info-string"
+val proof = "'{\"status\":\"pass\",\"proof_source\":\"tools/electron-live-bitmap/capture_html_argb.js\",\"html_path\":\"$ELECTRON_CAPTURE_HTML\",\"html_sha256\":\"$ELECTRON_CAPTURE_EXPECTED_HTML_SHA256\",\"captured_argb_written\":true,\"png_output_path\":\"$ELECTRON_CAPTURE_PNG_OUTPUT\",\"png_sha256\":\"2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881\",\"png_written\":true,\"blur_or_tolerance_used\":false,\"native_width\":2,\"native_height\":2,\"downsampled\":false,\"width\":2,\"height\":2,\"gpu_feature_status\":{\"vulkan\":\"enabled\",\"gpu_compositing\":\"enabled\"},\"browser_target_gpu_info_status\":\"pass\",\"browser_target_gpu_info\":\"vulkan\",\"gpu_info\":{\"auxAttributes\":{\"hardwareSupportsVulkan\":true,\"displayType\":\"Vulkan\",\"glImplementationParts\":\"angle=vulkan\",\"skiaBackendType\":\"Vulkan\",\"glRenderer\":\"Vulkan\"}}}}'"
+val vulkan_json = "'{\"status\":\"pass\",\"reason\":\"pass\",\"producer\":\"simple-engine2d-vulkan\",\"requested_backend\":\"vulkan\",\"execution_mode\":\"interpret\",\"backend\":\"vulkan\",\"pixel_count\":4,\"width\":2,\"height\":2,\"pixels\":[1,2,3,4]}'"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && printf '%s\\n' '{\"producer\":\"electron-chromium-capture\",\"width\":2,\"height\":2,\"pixels\":[1,2,3,4]}' > " + root + "/electron.json && printf '%s\\n' " + vulkan_json + " > " + root + "/vulkan.json && printf '%s\\n' " + proof + " > " + root + "/electron-proof.json && printf '}' >> " + root + "/electron-proof.json && node scripts/check/electron-vulkan-web-parity-status.js " + root + "/electron.json " + root + "/vulkan.json " + root + "/electron-proof.json"
+val (stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+
+expect(code).to_equal(2)
+expect(stdout).to_contain("electron_vulkan_web_parity_windows_status=fail")
+expect(stdout).to_contain("electron_vulkan_web_parity_windows_reason=electron-browser-gpu-info-not-proven")
+expect(stdout).to_contain("electron_vulkan_web_parity_windows_compare_electron_browser_target_gpu_info_status=pass")
+```
+
+</details>
+
 #### rejects Electron GPU proof from an unexpected capture source
 
 <details>
@@ -1463,8 +1511,8 @@ expect(stdout).to_contain("electron_vulkan_web_parity_windows_compare_invalid_vu
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 44 |
-| Active scenarios | 44 |
+| Total scenarios | 46 |
+| Active scenarios | 46 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

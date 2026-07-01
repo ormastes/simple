@@ -73,6 +73,10 @@ function jsonSame(a, b) {
   return JSON.stringify(a || {}) === JSON.stringify(b || {});
 }
 
+function jsonObject(value) {
+  return value && typeof value === "object" && !Array.isArray(value);
+}
+
 function electronVulkanProof(electron, proof, expectedPort, expectedCapturePath, expectedSourceHtmlPath, expectedSourceHtmlSha256, expectedVisualPngPath, expectedVisualPngSha256) {
   const proofSource = String((proof && proof.proof_source) || "");
   const proofStatus = String((proof && proof.status) || "");
@@ -109,8 +113,9 @@ function electronVulkanProof(electron, proof, expectedPort, expectedCapturePath,
   const noBlurOrTolerance = proof && proofBlurOrToleranceUsed === false;
   const proofFeatureStatus = proof && proof.gpu_feature_status ? proof.gpu_feature_status : {};
   const electronFeatureStatus = electron && electron.gpuFeatureStatus ? electron.gpuFeatureStatus : null;
-  const proofBrowserGpuInfo = proof && proof.browser_target_gpu_info ? proof.browser_target_gpu_info : {};
-  const electronBrowserGpuInfo = electron && electron.browserTargetGpuInfo ? electron.browserTargetGpuInfo : null;
+  const proofBrowserGpuInfo = jsonObject(proof && proof.browser_target_gpu_info) ? proof.browser_target_gpu_info : {};
+  const electronBrowserGpuInfo = jsonObject(electron && electron.browserTargetGpuInfo) ? electron.browserTargetGpuInfo : null;
+  const browserTargetGpuInfoPresent = Object.keys(proofBrowserGpuInfo).length > 0 && !proofBrowserGpuInfo.error;
   const featureStatusMatchesCapture = !electronFeatureStatus || jsonSame(proofFeatureStatus, electronFeatureStatus);
   const browserGpuInfoMatchesCapture = !electronBrowserGpuInfo || jsonSame(proofBrowserGpuInfo, electronBrowserGpuInfo);
   const featureStatus = proof && proof.gpu_feature_status
@@ -143,7 +148,7 @@ function electronVulkanProof(electron, proof, expectedPort, expectedCapturePath,
     proofCapturedArgbWritten && capturedArgbPathOk && pngPathOk && pngWrittenOk && noBlurOrTolerance &&
     pngSha256Ok && featureStatusMatchesCapture && browserGpuInfoMatchesCapture &&
     proofDimensionsOk && proofNativeDimensionsOk && proofNotDownsampled && remoteDebuggingPortOk &&
-    enabled && gpuEnabled && hardware && mentionsVulkan && browserInfoOk;
+    enabled && gpuEnabled && hardware && mentionsVulkan && browserInfoOk && browserTargetGpuInfoPresent;
   let reason = "electron-vulkan-backed";
   if (!proofStatusOk) reason = "electron-proof-status-not-pass";
   else if (!captureSourceOk) reason = "electron-proof-source-invalid";
@@ -165,7 +170,7 @@ function electronVulkanProof(electron, proof, expectedPort, expectedCapturePath,
   else if (!gpuEnabled) reason = "electron-gpu-compositing-disabled";
   else if (!hardware) reason = "electron-vulkan-hardware-missing";
   else if (!mentionsVulkan) reason = "electron-vulkan-metadata-missing";
-  else if (!browserInfoOk) reason = "electron-browser-gpu-info-not-proven";
+  else if (!browserInfoOk || !browserTargetGpuInfoPresent) reason = "electron-browser-gpu-info-not-proven";
   return {
     status: backed ? "pass" : "fail",
     reason,
