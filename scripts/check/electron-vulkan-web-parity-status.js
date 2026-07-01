@@ -79,7 +79,7 @@ function electronVulkanProof(electron, proof) {
   const browserStatus = proof && proof.browser_target_gpu_info_status
     ? String(proof.browser_target_gpu_info_status)
     : (browserGpuInfo && !browserGpuInfo.error ? "pass" : "not-run");
-  const hardware = Boolean(aux.hardwareSupportsVulkan || appAux.hardwareSupportsVulkan);
+  const hardware = aux.hardwareSupportsVulkan === true || appAux.hardwareSupportsVulkan === true;
   const mentionsVulkan = /vulkan/i.test(`${displayType} ${glParts} ${skiaBackend} ${glRenderer}`);
   const enabled = /^enabled/i.test(vulkan);
   const gpuEnabled = /^enabled/i.test(gpuCompositing);
