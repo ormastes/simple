@@ -68,6 +68,7 @@ function electronVulkanProof(electron, proof, expectedPort, expectedCapturePath)
   const proofWidth = proof ? proof.width : undefined;
   const proofHeight = proof ? proof.height : undefined;
   const proofRemoteDebuggingPort = String((proof && proof.remote_debugging_port) || "");
+  const proofCapturedArgbWritten = proof && proof.captured_argb_written === true;
   const captureSourceOk = proofSource === "tools/electron-live-bitmap/capture_html_argb.js";
   const proofStatusOk = proofStatus === "pass";
   const proofDimensionsOk = proof &&
@@ -101,12 +102,13 @@ function electronVulkanProof(electron, proof, expectedPort, expectedCapturePath)
   const enabled = /^enabled/i.test(vulkan);
   const gpuEnabled = /^enabled/i.test(gpuCompositing);
   const browserInfoOk = browserStatus === "pass";
-  const backed = proofStatusOk && captureSourceOk && capturedArgbPathOk &&
+  const backed = proofStatusOk && captureSourceOk && proofCapturedArgbWritten && capturedArgbPathOk &&
     proofDimensionsOk && remoteDebuggingPortOk &&
     enabled && gpuEnabled && hardware && mentionsVulkan && browserInfoOk;
   let reason = "electron-vulkan-backed";
   if (!proofStatusOk) reason = "electron-proof-status-not-pass";
   else if (!captureSourceOk) reason = "electron-proof-source-invalid";
+  else if (!proofCapturedArgbWritten) reason = "electron-proof-argb-not-written";
   else if (!capturedArgbPathOk) reason = "electron-proof-captured-argb-path-mismatch";
   else if (!proofDimensionsOk) reason = "electron-proof-frame-mismatch";
   else if (!remoteDebuggingPortOk) reason = "electron-proof-remote-debugging-port-mismatch";
@@ -121,6 +123,7 @@ function electronVulkanProof(electron, proof, expectedPort, expectedCapturePath)
     proofSource,
     proofStatus,
     proofCapturedArgbPath,
+    proofCapturedArgbWritten,
     proofWidth: proofWidth === undefined ? "" : proofWidth,
     proofHeight: proofHeight === undefined ? "" : proofHeight,
     proofRemoteDebuggingPort,
@@ -207,6 +210,7 @@ if (electronProofPath) {
   common.electron_vulkan_web_parity_windows_compare_electron_proof_source = electronProofStatus.proofSource;
   common.electron_vulkan_web_parity_windows_compare_electron_proof_status = electronProofStatus.proofStatus;
   common.electron_vulkan_web_parity_windows_compare_electron_proof_captured_argb_path = electronProofStatus.proofCapturedArgbPath;
+  common.electron_vulkan_web_parity_windows_compare_electron_proof_captured_argb_written = electronProofStatus.proofCapturedArgbWritten ? "true" : "false";
   common.electron_vulkan_web_parity_windows_compare_electron_proof_width = electronProofStatus.proofWidth;
   common.electron_vulkan_web_parity_windows_compare_electron_proof_height = electronProofStatus.proofHeight;
   common.electron_vulkan_web_parity_windows_compare_electron_proof_remote_debugging_port = electronProofStatus.proofRemoteDebuggingPort;
