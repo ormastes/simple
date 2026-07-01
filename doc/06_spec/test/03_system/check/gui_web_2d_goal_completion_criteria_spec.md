@@ -27,7 +27,7 @@ gui_web_2d_goal_completion_criteria_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 9 | 9 | 0 | 0 |
+| 10 | 10 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -152,8 +152,6 @@ macOS Metal requires:
 - browser backing, Electron/Chrome pairwise, Electron/Simple pairwise, and
   Chrome/Simple pairwise statuses `pass`
 - Simple, Chrome, and Electron ARGB source and artifact reasons `pass`
-- generated readback, framebuffer readback, and ARGB source gate statuses
-  `pass`
 - GPU capture status `pass`
 - GPU capture artifact file status `pass`
 - GPU capture artifact magic `XCODE-GPUTRACE`
@@ -168,10 +166,8 @@ Windows D3D12 requires:
 - blocked gate count `0`
 - pairwise status `pass`
 - PIX status `pass`
-- PIX artifact file status `pass`
 - PIX artifact magic and file magic `PIX`
 - GPU debugger status `pass`
-- GPU debugger artifact file status `pass`
 - non-empty GPU debugger artifact path
 
 ## Remaining Placeholders
@@ -237,6 +233,10 @@ RenderDoc, iOS, Android, or production GUI evidence was captured.
 - Windows D3D12 completion on a Windows GUI host proves native D3D12/DXGI
   readback, browser/gui backing, pairwise equivalence, verified PIX artifact
   file/magic evidence, and verified GPU debugger artifact files.
+- Windows Electron/Vulkan parity completion on a Windows GUI host proves real
+  Electron/Chromium Vulkan backing and pure-Simple Engine2D Vulkan output for
+  the same wrapper invocation, including pixel-exact ARGB comparison and a
+  matching run id.
 - 4K and 8K showcase completion proves current-source retained rows at 200 FPS
   with timing, RSS, checksum/readback, viewport, native binary provenance,
   retained mode, redraw count, frame avg/p50/p95 under the 5 ms 200 FPS budget,
@@ -257,23 +257,6 @@ RenderDoc, iOS, Android, or production GUI evidence was captured.
 - macOS Metal and Windows D3D12 completion require zero hidden blocked gates;
   a passing summary cannot mask a blocked native readback, browser backing,
   pairwise, GPU capture, PIX, or GPU debugger lane.
-<<<<<<< Conflict 1 of 3
-%%%%%%% Changes from base to side #1
--- Tauri mobile completion proves iOS Tauri2/WKWebView Metal evidence and
--  Android Tauri2/WebView Vulkan evidence with screenshot artifacts plus MDI
--  event, capture, performance, animation proof, live render `html_len`, Android
--  foreground execution, desktop production backend `device_readback`, and
--  production Metal render-log gates.
-+- Tauri mobile completion on native/emulator mobile hosts proves iOS
-+  Tauri2/WKWebView Metal evidence and Android Tauri2/WebView Vulkan evidence
-+  with screenshot artifacts plus MDI event sequence, capture, performance,
-+  animation proof, live render `html_len`, render-log validation env/source
-+  identity, Android foreground execution, desktop production backend
-+  `device_readback`, and production Metal render-log gates.
-+- Cross-platform freshness completion requires Linux, macOS, Windows, iOS, and
-+  Android evidence reports to be fresh for the same source, runtime,
-+  browser/WebView/Electron, graphics SDK/driver, and runbook revisions.
-+++++++ Contents of side #2
 - Tauri mobile completion on native/emulator mobile hosts proves iOS
   Tauri2/WKWebView Metal evidence and Android Tauri2/WebView Vulkan evidence
   with screenshot artifacts plus MDI event sequence, capture, performance,
@@ -283,20 +266,6 @@ RenderDoc, iOS, Android, or production GUI evidence was captured.
 - Cross-platform freshness completion requires Linux, macOS, Windows, iOS, and
   Android evidence reports to be fresh for the same source, runtime,
   browser/WebView/Electron, graphics SDK/driver, and runbook revisions.
-  The criterion must keep both canonical wrappers visible:
-  `scripts/check/check-gui-renderdoc-feature-coverage-status.shs` for the
-  desktop native matrix and
-  `scripts/check/check-tauri-mobile-renderer-parity-evidence.shs` for the
-  mobile parity matrix. The headless preparation wrapper
-  `scripts/check/check-gui-web-2d-headless-handoff-prep.shs` runs the
-  source-level required-gate checker and five-platform handoff SSpec together.
-  The executable helper also checks the desktop
-  `native_gui_platform_verification_required_platforms` key and mobile
-  `tauri_mobile_renderer_parity_*_status` keys so final freshness cannot be
-  reduced to plan prose. The helper also requires
-  `test/03_system/check/gui_web_2d_five_platform_handoff_contract_spec.spl` to
-  stay listed in the active plan.
->>>>>>> Conflict 1 of 3 ends
 
 ## Scenarios
 
@@ -358,6 +327,26 @@ Reproduction: this block contains the complete executable scenario source.
 # completion_gate_witness:windows-d3d12
 step("Verify Windows D3D12 readback, browser/gui backing, pairwise equivalence, verified PIX files, and verified debugger files")
 expect(verify_windows_d3d12_completion()).to_equal("pass")
+```
+
+</details>
+
+#### requires Windows Electron Vulkan parity with pure Simple backed Vulkan
+
+- Verify Windows Electron Vulkan backing and pure-Simple Vulkan JSON from the same run id
+   - Expected: verify_windows_electron_vulkan_parity_completion() equals `pass`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# completion_gate_witness:windows-electron-vulkan-parity
+step("Verify Windows Electron Vulkan backing and pure-Simple Vulkan JSON from the same run id")
+expect(verify_windows_electron_vulkan_parity_completion()).to_equal("pass")
 ```
 
 </details>
@@ -435,24 +424,16 @@ Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-<<<<<<< Conflict 2 of 3
-+++++++ Contents of side #1
 # completion_gate_witness:tauri-mobile-ios-android
 # completion_gate_witness:tauri-mobile-event-sequence
 # completion_gate_witness:tauri-mobile-render-dev-log-sources
 # completion_gate_witness:android-foreground-marker
 step("Verify iOS and Android Tauri mobile renderer parity includes live screenshots, GPU markers, complete MDI proof, event sequence, and source identity")
-%%%%%%% Changes from base to side #2
--step("Verify iOS and Android Tauri mobile renderer parity includes live screenshots, GPU markers, and complete MDI proof")
-+step("Verify iOS and Android Tauri mobile renderer parity includes live screenshots, GPU markers, complete MDI proof, event sequence, and source identity")
->>>>>>> Conflict 2 of 3 ends
 expect(verify_tauri_mobile_renderer_completion()).to_equal("pass")
 ```
 
 </details>
 
-<<<<<<< Conflict 3 of 3
-+++++++ Contents of side #1
 #### requires cross-platform freshness criteria before any final completion claim
 
 - Verify Linux, macOS, Windows, iOS, and Android evidence freshness remains an explicit completion gate
@@ -478,27 +459,6 @@ expect(verify_cross_platform_freshness_criteria()).to_equal("pass")
 
 </details>
 
-%%%%%%% Changes from base to side #2
-+#### requires cross-platform freshness criteria before any final completion claim
-+
-+- Verify Linux, macOS, Windows, iOS, and Android evidence freshness remains an explicit completion gate
-+   - Expected: verify_cross_platform_freshness_criteria() equals `pass`
-+
-+
-+<details>
-+<summary>Executable SSpec</summary>
-+
-+Runnable source: 2 lines folded for reproduction.
-+Reproduction: this block contains the complete executable scenario source.
-+
-+```simple
-+step("Verify Linux, macOS, Windows, iOS, and Android evidence freshness remains an explicit completion gate")
-+expect(verify_cross_platform_freshness_criteria()).to_equal("pass")
-+```
-+
-+</details>
-+
->>>>>>> Conflict 3 of 3 ends
 #### requires parallel-agent work to have Spark or fallback output and higher-capability review
 
 - Verify sidecar outputs are reviewed before any broad completion claim is accepted
@@ -523,8 +483,8 @@ expect(verify_parallel_agent_review_completion()).to_equal("pass")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 9 |
-| Active scenarios | 9 |
+| Total scenarios | 10 |
+| Active scenarios | 10 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
