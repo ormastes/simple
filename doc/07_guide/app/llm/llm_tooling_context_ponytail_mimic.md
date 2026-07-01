@@ -1,7 +1,7 @@
 # LLM Tooling Context/Ponytail Guide
 
-Operator guide for the in-repo `simple_context` and `simple_ponytail`
-replacement surfaces.
+Operator guide for the in-repo `simple_pipe`, `simple_context`, and
+`simple_ponytail` replacement surfaces.
 
 ## Purpose
 
@@ -26,6 +26,9 @@ The shared surfaces are:
 
 - `simple context` CLI for local pack generation, stats, index, query, and
   embedded-SQL context query operations
+- app MCP `simple_pipe` as the SPipe-linked front door for codebase, context,
+  search, and Ponytail audit/simplification operations
+- lower MCP `simple_pipe`
 - app MCP `simple_context`
 - lower MCP `simple_context`
 - app MCP `simple_ponytail`
@@ -33,12 +36,17 @@ The shared surfaces are:
 
 For codebase-memory MCP usage, use the existing MCP Resource Manager and
 analysis tools rather than adding a separate current/external memory MCP. The
-production repo-local surface is read-only MCP resources plus `simple_context`
-for bounded context packs, local index/query, and embedded-SQL context query.
+production repo-local surface is read-only MCP resources plus `simple_pipe`
+for SPipe-linked access to bounded context packs, local index/query,
+embedded-SQL context query, codebase search, and Ponytail audit/simplification.
 Use `simple_search`, `simple_workspace_symbols`, `simple_references`,
 `simple_hover`, `simple_api`, and `simple_dependencies` as supporting lookup
 tools. `simple_codebase` or "simple codebase" is operator shorthand for this
 surface; it is not a separate tool.
+
+`simple_pipe` accepts `surface` values including `spipe`, `context`,
+`codebase`, `search`, `ponytail`, `audit`, and `simplification`. Existing
+`simple_context` and `simple_ponytail` remain compatibility surfaces.
 
 `simple_context` accepts a source file for normal pack generation. For
 persisted embedded-SQL queries, source-less calls are valid only when SQL mode
@@ -125,7 +133,8 @@ That checker writes
 `llm_tooling_context_ponytail_full_replacement_status=pass` when the checked-in
 operator guide, requirements, architecture, app MCP, lower MCP, embedded-SQL
 source-less query, source filtering, and Ponytail audit/simplification surfaces
-all converge on Simple-owned `simple_context` and `simple_ponytail` contracts.
+all converge on the Simple-owned `simple_pipe` front door plus compatibility
+`simple_context` and `simple_ponytail` contracts.
 The same env records
 `llm_tooling_context_ponytail_full_replacement_execution_lower_context_status`,
 `llm_tooling_context_ponytail_full_replacement_execution_lower_ponytail_status`,

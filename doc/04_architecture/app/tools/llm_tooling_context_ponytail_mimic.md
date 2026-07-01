@@ -8,9 +8,10 @@ Use the existing `simple context` CLI as the first replacement seam. Do not add 
 daemon, external service, or new plugin surface until context generation and
 stats are implemented and verified.
 
-The replacement contract is the shared `simple_context` and `simple_ponytail`
-tool surface in app MCP and lower MCP. Existing callers should converge on that
-surface instead of a parallel context-mode or ponytail plugin path. For
+The replacement contract is the shared `simple_pipe` tool surface in app MCP
+and lower MCP, backed by the compatibility `simple_context` and
+`simple_ponytail` handlers. Existing callers should converge on that surface
+instead of a parallel context-mode or ponytail plugin path. For
 `simple_context`, `file` remains required except for the persisted SQL query
 shape where `sql=true` and `query` is non-empty; invalid source-less calls must
 return the normal missing-file tool error instead of implicit defaults.
@@ -86,9 +87,10 @@ Files:
 - `src/app/mcp/main_dispatch.spl`
 - `src/app/mcp/main_static_tools.spl`
 
-The app MCP surface already exposes context-style query behavior. Ponytail
-should be exposed through the same registry/dispatch path when the existing
-handler is verified, rather than as a separate plugin runtime.
+The app MCP surface exposes context-style query behavior and Ponytail through
+the same registry/dispatch path. `simple_pipe` is the SPipe-linked front door;
+the split tools remain compatibility entries rather than a separate plugin
+runtime.
 
 ## Absence Policy
 

@@ -45,8 +45,12 @@ Selected option: Option A, Context Pack First.
   subprocess.
 - REQ-016: A focused full-replacement evidence gate shall prove the checked-in
   operator, CLI, app MCP, lower MCP, dashboard-adjacent, embedded-SQL, and
-  Ponytail surfaces converge on Simple-owned `simple_context` and
-  `simple_ponytail` contracts.
+  Ponytail surfaces converge on the Simple-owned `simple_pipe` front door plus
+  compatibility `simple_context` and `simple_ponytail` contracts.
+- REQ-017: App MCP and lower MCP `simple_pipe` shall provide one SPipe-linked
+  front door for codebase search, bounded context, embedded-SQL context query,
+  and Ponytail audit/simplification operations while preserving the existing
+  split tool names for compatibility.
 
 ## Deferred
 

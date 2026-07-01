@@ -29,8 +29,10 @@ generator.
 
 ## Second Implementation Slice
 
-Expose the existing app MCP `simple_ponytail` handler through the same query
-tool registry used by `simple_context`.
+Expose `simple_pipe` as the SPipe-linked app MCP front door over codebase,
+context, search, and Ponytail operations. Keep the existing app MCP
+`simple_context` and `simple_ponytail` handlers as compatibility entries in
+the same query tool registry.
 
 Expected edits:
 
@@ -139,7 +141,9 @@ persisted context databases to be queried without a dummy file path.
 
 ## MCP Context Index/Query Options Slice
 
-App MCP `simple_context` exposes the existing CLI-backed context storage
+App MCP `simple_pipe` dispatches to the existing CLI-backed context storage,
+codebase search, and Ponytail audit/simplification handlers according to its
+`surface`/`mode` selector. App MCP `simple_context` exposes the context storage
 surface without importing the large context/compiler graph into source-mode MCP.
 The tool schema accepts `file`, optional `target`, `format`, `index`, `query`,
 `sql`, `db`, and `source_filter`. `handle_simple_context` validates the same
@@ -153,7 +157,8 @@ index/query. The only source-less accepted shape is `sql=true` with a non-empty
 --db=<path>`.
 
 App MCP `simple_ponytail` also advertises the existing `mode` selector so
-clients can discover `audit` and `simplification` through metadata.
+clients can discover `audit` and `simplification` through metadata. The
+`simple_pipe` front door accepts `mode=ponytail` as the short audit spelling.
 
 Interpreter mode implements the existing `rt_sqlite_*` facade in
 `sffi_db.rs`. The supported SQL subset is intentionally narrow: create table,
