@@ -295,6 +295,10 @@ function bitmapToLogicalArgb(image) {
   return { pixels, nativeWidth: nw, nativeHeight: nh, downsampled: true };
 }
 
+function sha256File(filePath) {
+  return crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
+}
+
 async function collectAudit(win, selectors, mediaFeatures) {
   if (!selectors.length) return null;
   return win.webContents.executeJavaScript(`
@@ -681,6 +685,7 @@ async function main() {
   win.setContentSize(width, height);
 
   const absHtml = path.resolve(htmlPath);
+  const htmlSha256 = sha256File(absHtml);
   try {
     if (forceDataUrl) {
       stage("before-load-data-url");
@@ -799,6 +804,8 @@ async function main() {
       status: "pass",
       reason: "pass",
       proof_source: "tools/electron-live-bitmap/capture_html_argb.js",
+      html_path: absHtml,
+      html_sha256: htmlSha256,
       captured_argb_path: outputPath,
       width,
       height,

@@ -27,7 +27,7 @@ electron_vulkan_web_parity_windows_contract_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 39 | 39 | 0 | 0 |
+| 40 | 40 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -303,7 +303,7 @@ The spec contains:
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 103 lines folded for reproduction.
+Runnable source: 112 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -358,7 +358,9 @@ expect(script).to_contain("--enable-gpu-rasterization")
 expect(script).to_contain("electron_vulkan_web_parity_windows_electron_proof_json")
 expect(script).to_contain("electron_vulkan_web_parity_windows_compare_exit_code")
 expect(script).to_contain("scripts/check/electron-vulkan-web-parity-status.js")
-expect(script).to_contain("\"$BG_DEC\" \"$ELECTRON_CDP_PORT\" \"$ELECTRON_JSON\"")
+expect(script).to_contain("HTML_SHA256=$(node -e")
+expect(script).to_contain("ELECTRON_CAPTURE_EXPECTED_HTML_SHA256=\"$HTML_SHA256\"")
+expect(script).to_contain("\"$BG_DEC\" \"$ELECTRON_CDP_PORT\" \"$ELECTRON_JSON\" \"$ABS_HTML\" \"$HTML_SHA256\"")
 val helper = file_read("scripts/check/electron-vulkan-web-parity-status.js")
 expect(helper).to_contain("vulkan-render-status-not-pass")
 expect(helper).to_contain("vulkan-producer-not-proven")
@@ -372,12 +374,16 @@ expect(helper).to_contain("vulkan-pixel-count-mismatch")
 expect(helper).to_contain("vulkan-pixel-count-metadata-invalid")
 expect(helper).to_contain("electron-vulkan-backed")
 expect(helper).to_contain("electron-proof-source-invalid")
+expect(helper).to_contain("electron-proof-html-path-mismatch")
+expect(helper).to_contain("electron-proof-html-sha256-mismatch")
 expect(helper).to_contain("electron-proof-argb-not-written")
 expect(helper).to_contain("electron-proof-captured-argb-path-mismatch")
 expect(helper).to_contain("electron-proof-frame-mismatch")
 expect(helper).to_contain("electron-proof-remote-debugging-port-mismatch")
 expect(helper).to_contain("electron-proof-status-not-pass")
 expect(helper).to_contain("proof_source")
+expect(helper).to_contain("proofHtmlPath")
+expect(helper).to_contain("proofHtmlSha256")
 expect(helper).to_contain("proofCapturedArgbWritten")
 expect(helper).to_contain("proofCapturedArgbPath")
 expect(helper).to_contain("proofRemoteDebuggingPort")
@@ -400,6 +406,9 @@ expect(helper).to_contain("pixel-exact-vulkan")
 val capture = file_read("tools/electron-live-bitmap/capture_html_argb.js")
 expect(capture).to_contain("producer: \"electron-chromium-capture\"")
 expect(capture).to_contain("proof_source: \"tools/electron-live-bitmap/capture_html_argb.js\"")
+expect(capture).to_contain("html_path: absHtml")
+expect(capture).to_contain("html_sha256: htmlSha256")
+expect(capture).to_contain("sha256File(absHtml)")
 expect(capture).to_contain("captured_argb_path: outputPath")
 expect(capture).to_contain("captured_argb_written: Boolean(outputPath)")
 expect(capture).to_contain("remote_debugging_port: remoteDebuggingPort")
@@ -547,7 +556,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val root = "build/test-electron-vulkan-web-parity-windows-simple-render-fail"
 val electron_json = "'{\"producer\":\"electron-chromium-capture\",\"width\":2,\"height\":2,\"pixels\":[1,2,3,4]}'"
-val proof_json = "\"{\\\"status\\\":\\\"pass\\\",\\\"proof_source\\\":\\\"tools/electron-live-bitmap/capture_html_argb.js\\\",\\\"captured_argb_written\\\":true,\\\"captured_argb_path\\\":\\\"" + root + "/work/electron.json\\\",\\\"remote_debugging_port\\\":\\\"45678\\\",\\\"width\\\":2,\\\"height\\\":2,\\\"gpu_feature_status\\\":{\\\"vulkan\\\":\\\"enabled\\\",\\\"gpu_compositing\\\":\\\"enabled\\\"},\\\"browser_target_gpu_info_status\\\":\\\"pass\\\",\\\"browser_target_gpu_info\\\":{\\\"gpu\\\":{\\\"auxAttributes\\\":{\\\"hardwareSupportsVulkan\\\":true,\\\"displayType\\\":\\\"Vulkan\\\",\\\"glImplementationParts\\\":\\\"angle=vulkan\\\",\\\"skiaBackendType\\\":\\\"Vulkan\\\",\\\"glRenderer\\\":\\\"Vulkan\\\"}}}}}}}\""
+val proof_json = "\"{\\\"status\\\":\\\"pass\\\",\\\"proof_source\\\":\\\"tools/electron-live-bitmap/capture_html_argb.js\\\",\\\"html_path\\\":\\\"$ELECTRON_CAPTURE_HTML\\\",\\\"html_sha256\\\":\\\"$ELECTRON_CAPTURE_EXPECTED_HTML_SHA256\\\",\\\"captured_argb_written\\\":true,\\\"captured_argb_path\\\":\\\"" + root + "/work/electron.json\\\",\\\"remote_debugging_port\\\":\\\"45678\\\",\\\"width\\\":2,\\\"height\\\":2,\\\"gpu_feature_status\\\":{\\\"vulkan\\\":\\\"enabled\\\",\\\"gpu_compositing\\\":\\\"enabled\\\"},\\\"browser_target_gpu_info_status\\\":\\\"pass\\\",\\\"browser_target_gpu_info\\\":{\\\"gpu\\\":{\\\"auxAttributes\\\":{\\\"hardwareSupportsVulkan\\\":true,\\\"displayType\\\":\\\"Vulkan\\\",\\\"glImplementationParts\\\":\\\"angle=vulkan\\\",\\\"skiaBackendType\\\":\\\"Vulkan\\\",\\\"glRenderer\\\":\\\"Vulkan\\\"}}}}}}}\""
 val command = "rm -rf " + root + " && mkdir -p " + root + " tools/electron-shell/node_modules/.bin && printf '%s\\n' '#!/bin/sh' 'printf \"%s\\\\n\" " + electron_json + " > \"$ELECTRON_CAPTURE_OUTPUT\"' 'printf \"%s\\\\n\" " + proof_json + " > \"$ELECTRON_CAPTURE_PROOF_PATH\"' 'exit 0' > tools/electron-shell/node_modules/.bin/electron.cmd && chmod +x tools/electron-shell/node_modules/.bin/electron.cmd && printf '%s\\n' '#!/bin/sh' 'if [ \"$1\" = \"--version\" ]; then echo \"Simple Language v1.0.0-beta\"; exit 0; fi' 'exit 9' > " + root + "/fake-simple.exe && chmod +x " + root + "/fake-simple.exe && OS=Windows_NT SIMPLE_BIN=$PWD/" + root + "/fake-simple.exe EVWP_WORK=" + root + "/work sh scripts/check/check-electron-vulkan-web-parity-windows.shs; code=$?; rm -f tools/electron-shell/node_modules/.bin/electron.cmd; exit $code"
 val (stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 
@@ -572,7 +581,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val root = "build/test-electron-vulkan-web-parity-windows-stale-electron-json"
-val command = "rm -rf " + root + " && mkdir -p " + root + "/work tools/electron-shell/node_modules/.bin && : > " + root + "/vulkan-1.dll && printf '%s\\n' '{\"producer\":\"electron-chromium-capture\",\"width\":2,\"height\":2,\"pixels\":[4280435814,4280435814,4280435814,4280435814]}' > " + root + "/work/electron.json && printf '%s\\n' '{\"status\":\"pass\",\"proof_source\":\"tools/electron-live-bitmap/capture_html_argb.js\",\"captured_argb_written\":true,\"width\":2,\"height\":2,\"gpu_feature_status\":{\"vulkan\":\"enabled\",\"gpu_compositing\":\"enabled\"},\"browser_target_gpu_info_status\":\"pass\",\"browser_target_gpu_info\":{\"gpu\":{\"auxAttributes\":{\"hardwareSupportsVulkan\":true,\"displayType\":\"Vulkan\",\"glImplementationParts\":\"angle=vulkan\",\"skiaBackendType\":\"Vulkan\",\"glRenderer\":\"Vulkan\"}}}}}' > " + root + "/work/electron_proof.json && printf '%s\\n' '#!/bin/sh' 'exit 0' > tools/electron-shell/node_modules/.bin/electron.cmd && chmod +x tools/electron-shell/node_modules/.bin/electron.cmd && printf '%s\\n' '#!/bin/sh' 'if [ \"$1\" = \"--version\" ]; then echo \"Simple Language v1.0.0-beta\"; exit 0; fi' 'exit 0' > " + root + "/fake-simple.exe && chmod +x " + root + "/fake-simple.exe && OS=Windows_NT SIMPLE_BIN=$PWD/" + root + "/fake-simple.exe EVWP_VULKAN_DLL=$PWD/" + root + "/vulkan-1.dll EVWP_WIDTH=2 EVWP_HEIGHT=2 EVWP_BG_DEC=4280435814 EVWP_BG_HEX=224466 EVWP_WORK=" + root + "/work sh scripts/check/check-electron-vulkan-web-parity-windows.shs; code=$?; rm -f tools/electron-shell/node_modules/.bin/electron.cmd; exit $code"
+val command = "rm -rf " + root + " && mkdir -p " + root + "/work tools/electron-shell/node_modules/.bin && : > " + root + "/vulkan-1.dll && printf '%s\\n' '{\"producer\":\"electron-chromium-capture\",\"width\":2,\"height\":2,\"pixels\":[4280435814,4280435814,4280435814,4280435814]}' > " + root + "/work/electron.json && printf '%s\\n' '{\"status\":\"pass\",\"proof_source\":\"tools/electron-live-bitmap/capture_html_argb.js\",\"html_path\":\"$ELECTRON_CAPTURE_HTML\",\"html_sha256\":\"$ELECTRON_CAPTURE_EXPECTED_HTML_SHA256\",\"captured_argb_written\":true,\"width\":2,\"height\":2,\"gpu_feature_status\":{\"vulkan\":\"enabled\",\"gpu_compositing\":\"enabled\"},\"browser_target_gpu_info_status\":\"pass\",\"browser_target_gpu_info\":{\"gpu\":{\"auxAttributes\":{\"hardwareSupportsVulkan\":true,\"displayType\":\"Vulkan\",\"glImplementationParts\":\"angle=vulkan\",\"skiaBackendType\":\"Vulkan\",\"glRenderer\":\"Vulkan\"}}}}}' > " + root + "/work/electron_proof.json && printf '%s\\n' '#!/bin/sh' 'exit 0' > tools/electron-shell/node_modules/.bin/electron.cmd && chmod +x tools/electron-shell/node_modules/.bin/electron.cmd && printf '%s\\n' '#!/bin/sh' 'if [ \"$1\" = \"--version\" ]; then echo \"Simple Language v1.0.0-beta\"; exit 0; fi' 'exit 0' > " + root + "/fake-simple.exe && chmod +x " + root + "/fake-simple.exe && OS=Windows_NT SIMPLE_BIN=$PWD/" + root + "/fake-simple.exe EVWP_VULKAN_DLL=$PWD/" + root + "/vulkan-1.dll EVWP_WIDTH=2 EVWP_HEIGHT=2 EVWP_BG_DEC=4280435814 EVWP_BG_HEX=224466 EVWP_WORK=" + root + "/work sh scripts/check/check-electron-vulkan-web-parity-windows.shs; code=$?; rm -f tools/electron-shell/node_modules/.bin/electron.cmd; exit $code"
 val (stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 
 expect(code).to_equal(1)
@@ -617,7 +626,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val root = "build/test-electron-vulkan-web-parity-windows-stale-vulkan-json"
 val electron_json = "\"{\\\"producer\\\":\\\"electron-chromium-capture\\\",\\\"width\\\":2,\\\"height\\\":2,\\\"pixels\\\":[4280435814,4280435814,4280435814,4280435814]}\""
-val proof_json = "\"{\\\"status\\\":\\\"pass\\\",\\\"proof_source\\\":\\\"tools/electron-live-bitmap/capture_html_argb.js\\\",\\\"captured_argb_written\\\":true,\\\"captured_argb_path\\\":\\\"" + root + "/work/electron.json\\\",\\\"remote_debugging_port\\\":\\\"45678\\\",\\\"width\\\":2,\\\"height\\\":2,\\\"gpu_feature_status\\\":{\\\"vulkan\\\":\\\"enabled\\\",\\\"gpu_compositing\\\":\\\"enabled\\\"},\\\"browser_target_gpu_info_status\\\":\\\"pass\\\",\\\"browser_target_gpu_info\\\":{\\\"gpu\\\":{\\\"auxAttributes\\\":{\\\"hardwareSupportsVulkan\\\":true,\\\"displayType\\\":\\\"Vulkan\\\",\\\"glImplementationParts\\\":\\\"angle=vulkan\\\",\\\"skiaBackendType\\\":\\\"Vulkan\\\",\\\"glRenderer\\\":\\\"Vulkan\\\"}}}}}}}\""
+val proof_json = "\"{\\\"status\\\":\\\"pass\\\",\\\"proof_source\\\":\\\"tools/electron-live-bitmap/capture_html_argb.js\\\",\\\"html_path\\\":\\\"$ELECTRON_CAPTURE_HTML\\\",\\\"html_sha256\\\":\\\"$ELECTRON_CAPTURE_EXPECTED_HTML_SHA256\\\",\\\"captured_argb_written\\\":true,\\\"captured_argb_path\\\":\\\"" + root + "/work/electron.json\\\",\\\"remote_debugging_port\\\":\\\"45678\\\",\\\"width\\\":2,\\\"height\\\":2,\\\"gpu_feature_status\\\":{\\\"vulkan\\\":\\\"enabled\\\",\\\"gpu_compositing\\\":\\\"enabled\\\"},\\\"browser_target_gpu_info_status\\\":\\\"pass\\\",\\\"browser_target_gpu_info\\\":{\\\"gpu\\\":{\\\"auxAttributes\\\":{\\\"hardwareSupportsVulkan\\\":true,\\\"displayType\\\":\\\"Vulkan\\\",\\\"glImplementationParts\\\":\\\"angle=vulkan\\\",\\\"skiaBackendType\\\":\\\"Vulkan\\\",\\\"glRenderer\\\":\\\"Vulkan\\\"}}}}}}}\""
 val command = "rm -rf " + root + " && mkdir -p " + root + "/work tools/electron-shell/node_modules/.bin && : > " + root + "/vulkan-1.dll && printf '%s\\n' '{\"status\":\"pass\",\"reason\":\"pass\",\"producer\":\"simple-engine2d-vulkan\",\"requested_backend\":\"vulkan\",\"execution_mode\":\"interpret\",\"backend\":\"vulkan\",\"pixel_count\":4,\"width\":2,\"height\":2,\"pixels\":[4280435814,4280435814,4280435814,4280435814]}' > " + root + "/work/vulkan.json && printf '%s\\n' '#!/bin/sh' 'printf \"%s\\\\n\" " + electron_json + " > \"$ELECTRON_CAPTURE_OUTPUT\"' 'printf \"%s\\\\n\" " + proof_json + " > \"$ELECTRON_CAPTURE_PROOF_PATH\"' 'exit 0' > tools/electron-shell/node_modules/.bin/electron.cmd && chmod +x tools/electron-shell/node_modules/.bin/electron.cmd && printf '%s\\n' '#!/bin/sh' 'if [ \"$1\" = \"--version\" ]; then echo \"Simple Language v1.0.0-beta\"; exit 0; fi' 'exit 0' > " + root + "/fake-simple.exe && chmod +x " + root + "/fake-simple.exe && OS=Windows_NT SIMPLE_BIN=$PWD/" + root + "/fake-simple.exe EVWP_VULKAN_DLL=$PWD/" + root + "/vulkan-1.dll EVWP_WIDTH=2 EVWP_HEIGHT=2 EVWP_BG_DEC=4280435814 EVWP_BG_HEX=224466 EVWP_WORK=" + root + "/work sh scripts/check/check-electron-vulkan-web-parity-windows.shs; code=$?; rm -f tools/electron-shell/node_modules/.bin/electron.cmd; exit $code"
 val (stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 
@@ -641,7 +650,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val root = "build/test-electron-vulkan-web-parity-windows-compare-exit-pass"
 val electron_json = "\"{\\\"producer\\\":\\\"electron-chromium-capture\\\",\\\"width\\\":2,\\\"height\\\":2,\\\"pixels\\\":[4280435814,4280435814,4280435814,4280435814]}\""
-val proof_json = "\"{\\\"status\\\":\\\"pass\\\",\\\"proof_source\\\":\\\"tools/electron-live-bitmap/capture_html_argb.js\\\",\\\"captured_argb_written\\\":true,\\\"captured_argb_path\\\":\\\"" + root + "/work/electron.json\\\",\\\"remote_debugging_port\\\":\\\"45678\\\",\\\"width\\\":2,\\\"height\\\":2,\\\"gpu_feature_status\\\":{\\\"vulkan\\\":\\\"enabled\\\",\\\"gpu_compositing\\\":\\\"enabled\\\"},\\\"browser_target_gpu_info_status\\\":\\\"pass\\\",\\\"browser_target_gpu_info\\\":{\\\"gpu\\\":{\\\"auxAttributes\\\":{\\\"hardwareSupportsVulkan\\\":true,\\\"displayType\\\":\\\"Vulkan\\\",\\\"glImplementationParts\\\":\\\"angle=vulkan\\\",\\\"skiaBackendType\\\":\\\"Vulkan\\\",\\\"glRenderer\\\":\\\"Vulkan\\\"}}}}}}}\""
+val proof_json = "\"{\\\"status\\\":\\\"pass\\\",\\\"proof_source\\\":\\\"tools/electron-live-bitmap/capture_html_argb.js\\\",\\\"html_path\\\":\\\"$ELECTRON_CAPTURE_HTML\\\",\\\"html_sha256\\\":\\\"$ELECTRON_CAPTURE_EXPECTED_HTML_SHA256\\\",\\\"captured_argb_written\\\":true,\\\"captured_argb_path\\\":\\\"" + root + "/work/electron.json\\\",\\\"remote_debugging_port\\\":\\\"45678\\\",\\\"width\\\":2,\\\"height\\\":2,\\\"gpu_feature_status\\\":{\\\"vulkan\\\":\\\"enabled\\\",\\\"gpu_compositing\\\":\\\"enabled\\\"},\\\"browser_target_gpu_info_status\\\":\\\"pass\\\",\\\"browser_target_gpu_info\\\":{\\\"gpu\\\":{\\\"auxAttributes\\\":{\\\"hardwareSupportsVulkan\\\":true,\\\"displayType\\\":\\\"Vulkan\\\",\\\"glImplementationParts\\\":\\\"angle=vulkan\\\",\\\"skiaBackendType\\\":\\\"Vulkan\\\",\\\"glRenderer\\\":\\\"Vulkan\\\"}}}}}}}\""
 val vulkan_json = "\"{\\\"status\\\":\\\"pass\\\",\\\"reason\\\":\\\"pass\\\",\\\"producer\\\":\\\"simple-engine2d-vulkan\\\",\\\"requested_backend\\\":\\\"vulkan\\\",\\\"execution_mode\\\":\\\"interpret\\\",\\\"backend\\\":\\\"vulkan\\\",\\\"pixel_count\\\":4,\\\"width\\\":2,\\\"height\\\":2,\\\"pixels\\\":[4280435814,4280435814,4280435814,4280435814]}\""
 val command = "rm -rf " + root + " && mkdir -p " + root + " tools/electron-shell/node_modules/.bin && : > " + root + "/vulkan-1.dll && printf '%s\\n' '#!/bin/sh' 'printf \"%s\\\\n\" " + electron_json + " > \"$ELECTRON_CAPTURE_OUTPUT\"' 'printf \"%s\\\\n\" " + proof_json + " > \"$ELECTRON_CAPTURE_PROOF_PATH\"' 'exit 0' > tools/electron-shell/node_modules/.bin/electron.cmd && chmod +x tools/electron-shell/node_modules/.bin/electron.cmd && printf '%s\\n' '#!/bin/sh' 'if [ \"$1\" = \"--version\" ]; then echo \"Simple Language v1.0.0-beta\"; exit 0; fi' 'printf \"%s\\\\n\" " + vulkan_json + " > \"$EVWP_OUTPUT\"' 'exit 0' > " + root + "/fake-simple.exe && chmod +x " + root + "/fake-simple.exe && OS=Windows_NT SIMPLE_BIN=$PWD/" + root + "/fake-simple.exe EVWP_VULKAN_DLL=$PWD/" + root + "/vulkan-1.dll EVWP_WIDTH=2 EVWP_HEIGHT=2 EVWP_BG_DEC=4280435814 EVWP_BG_HEX=224466 EVWP_ELECTRON_CDP_PORT=45678 EVWP_WORK=" + root + "/work sh scripts/check/check-electron-vulkan-web-parity-windows.shs > " + root + "/stdout.txt 2> " + root + "/stderr.txt; code=$?; rm -f tools/electron-shell/node_modules/.bin/electron.cmd; exit $code"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
@@ -673,7 +682,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val root = "build/test-electron-vulkan-web-parity-windows-compare-exit-mismatch"
 val electron_json = "\"{\\\"producer\\\":\\\"electron-chromium-capture\\\",\\\"width\\\":2,\\\"height\\\":2,\\\"pixels\\\":[4280435814,4280435814,4280435814,4280435814]}\""
-val proof_json = "\"{\\\"status\\\":\\\"pass\\\",\\\"proof_source\\\":\\\"tools/electron-live-bitmap/capture_html_argb.js\\\",\\\"captured_argb_written\\\":true,\\\"captured_argb_path\\\":\\\"" + root + "/work/electron.json\\\",\\\"remote_debugging_port\\\":\\\"45678\\\",\\\"width\\\":2,\\\"height\\\":2,\\\"gpu_feature_status\\\":{\\\"vulkan\\\":\\\"enabled\\\",\\\"gpu_compositing\\\":\\\"enabled\\\"},\\\"browser_target_gpu_info_status\\\":\\\"pass\\\",\\\"browser_target_gpu_info\\\":{\\\"gpu\\\":{\\\"auxAttributes\\\":{\\\"hardwareSupportsVulkan\\\":true,\\\"displayType\\\":\\\"Vulkan\\\",\\\"glImplementationParts\\\":\\\"angle=vulkan\\\",\\\"skiaBackendType\\\":\\\"Vulkan\\\",\\\"glRenderer\\\":\\\"Vulkan\\\"}}}}}}}\""
+val proof_json = "\"{\\\"status\\\":\\\"pass\\\",\\\"proof_source\\\":\\\"tools/electron-live-bitmap/capture_html_argb.js\\\",\\\"html_path\\\":\\\"$ELECTRON_CAPTURE_HTML\\\",\\\"html_sha256\\\":\\\"$ELECTRON_CAPTURE_EXPECTED_HTML_SHA256\\\",\\\"captured_argb_written\\\":true,\\\"captured_argb_path\\\":\\\"" + root + "/work/electron.json\\\",\\\"remote_debugging_port\\\":\\\"45678\\\",\\\"width\\\":2,\\\"height\\\":2,\\\"gpu_feature_status\\\":{\\\"vulkan\\\":\\\"enabled\\\",\\\"gpu_compositing\\\":\\\"enabled\\\"},\\\"browser_target_gpu_info_status\\\":\\\"pass\\\",\\\"browser_target_gpu_info\\\":{\\\"gpu\\\":{\\\"auxAttributes\\\":{\\\"hardwareSupportsVulkan\\\":true,\\\"displayType\\\":\\\"Vulkan\\\",\\\"glImplementationParts\\\":\\\"angle=vulkan\\\",\\\"skiaBackendType\\\":\\\"Vulkan\\\",\\\"glRenderer\\\":\\\"Vulkan\\\"}}}}}}}\""
 val vulkan_json = "\"{\\\"status\\\":\\\"pass\\\",\\\"reason\\\":\\\"pass\\\",\\\"producer\\\":\\\"simple-engine2d-vulkan\\\",\\\"requested_backend\\\":\\\"vulkan\\\",\\\"execution_mode\\\":\\\"interpret\\\",\\\"backend\\\":\\\"vulkan\\\",\\\"pixel_count\\\":4,\\\"width\\\":2,\\\"height\\\":2,\\\"pixels\\\":[4280435814,4280435814,4280435814,4280435815]}\""
 val command = "rm -rf " + root + " && mkdir -p " + root + " tools/electron-shell/node_modules/.bin && printf '%s\\n' '#!/bin/sh' 'printf \"%s\\\\n\" " + electron_json + " > \"$ELECTRON_CAPTURE_OUTPUT\"' 'printf \"%s\\\\n\" " + proof_json + " > \"$ELECTRON_CAPTURE_PROOF_PATH\"' 'exit 0' > tools/electron-shell/node_modules/.bin/electron.cmd && chmod +x tools/electron-shell/node_modules/.bin/electron.cmd && printf '%s\\n' '#!/bin/sh' 'if [ \"$1\" = \"--version\" ]; then echo \"Simple Language v1.0.0-beta\"; exit 0; fi' 'printf \"%s\\\\n\" " + vulkan_json + " > \"$EVWP_OUTPUT\"' 'exit 0' > " + root + "/fake-simple.exe && chmod +x " + root + "/fake-simple.exe && OS=Windows_NT SIMPLE_BIN=$PWD/" + root + "/fake-simple.exe EVWP_WIDTH=2 EVWP_HEIGHT=2 EVWP_BG_DEC=4280435814 EVWP_BG_HEX=224466 EVWP_ELECTRON_CDP_PORT=45678 EVWP_WORK=" + root + "/work sh scripts/check/check-electron-vulkan-web-parity-windows.shs; code=$?; rm -f tools/electron-shell/node_modules/.bin/electron.cmd; exit $code"
 val (stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
@@ -859,7 +868,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val root = "build/test-electron-vulkan-web-parity-windows-browser-proof"
-val proof = "'{\"status\":\"pass\",\"proof_source\":\"tools/electron-live-bitmap/capture_html_argb.js\",\"captured_argb_written\":true,\"width\":2,\"height\":2,\"gpu_feature_status\":{\"vulkan\":\"enabled\",\"gpu_compositing\":\"enabled\"},\"browser_target_gpu_info_status\":\"pass\",\"browser_target_gpu_info\":{\"gpu\":{\"auxAttributes\":{\"hardwareSupportsVulkan\":true,\"displayType\":\"Vulkan\",\"glImplementationParts\":\"angle=vulkan\",\"skiaBackendType\":\"Vulkan\",\"glRenderer\":\"Vulkan\"}}}}}}'"
+val proof = "'{\"status\":\"pass\",\"proof_source\":\"tools/electron-live-bitmap/capture_html_argb.js\",\"html_path\":\"$ELECTRON_CAPTURE_HTML\",\"html_sha256\":\"$ELECTRON_CAPTURE_EXPECTED_HTML_SHA256\",\"captured_argb_written\":true,\"width\":2,\"height\":2,\"gpu_feature_status\":{\"vulkan\":\"enabled\",\"gpu_compositing\":\"enabled\"},\"browser_target_gpu_info_status\":\"pass\",\"browser_target_gpu_info\":{\"gpu\":{\"auxAttributes\":{\"hardwareSupportsVulkan\":true,\"displayType\":\"Vulkan\",\"glImplementationParts\":\"angle=vulkan\",\"skiaBackendType\":\"Vulkan\",\"glRenderer\":\"Vulkan\"}}}}}}'"
 val vulkan_json = "'{\"status\":\"pass\",\"reason\":\"pass\",\"producer\":\"simple-engine2d-vulkan\",\"requested_backend\":\"vulkan\",\"execution_mode\":\"interpret\",\"backend\":\"vulkan\",\"pixel_count\":4,\"width\":2,\"height\":2,\"pixels\":[1,2,3,4]}'"
 val command = "rm -rf " + root + " && mkdir -p " + root + " && printf '%s\\n' '{\"producer\":\"electron-chromium-capture\",\"width\":2,\"height\":2,\"pixels\":[1,2,3,4]}' > " + root + "/electron.json && printf '%s\\n' " + vulkan_json + " > " + root + "/vulkan.json && printf '%s\\n' " + proof + " > " + root + "/electron-proof.json && printf '}' >> " + root + "/electron-proof.json && node scripts/check/electron-vulkan-web-parity-status.js " + root + "/electron.json " + root + "/vulkan.json " + root + "/electron-proof.json"
 val (stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
@@ -883,7 +892,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val root = "build/test-electron-vulkan-web-parity-windows-browser-proof-port-fail"
-val proof = "'{\"status\":\"pass\",\"proof_source\":\"tools/electron-live-bitmap/capture_html_argb.js\",\"captured_argb_written\":true,\"remote_debugging_port\":\"11111\",\"width\":2,\"height\":2,\"gpu_feature_status\":{\"vulkan\":\"enabled\",\"gpu_compositing\":\"enabled\"},\"browser_target_gpu_info_status\":\"pass\",\"browser_target_gpu_info\":{\"gpu\":{\"auxAttributes\":{\"hardwareSupportsVulkan\":true,\"displayType\":\"Vulkan\",\"glImplementationParts\":\"angle=vulkan\",\"skiaBackendType\":\"Vulkan\",\"glRenderer\":\"Vulkan\"}}}}}}'"
+val proof = "'{\"status\":\"pass\",\"proof_source\":\"tools/electron-live-bitmap/capture_html_argb.js\",\"html_path\":\"$ELECTRON_CAPTURE_HTML\",\"html_sha256\":\"$ELECTRON_CAPTURE_EXPECTED_HTML_SHA256\",\"captured_argb_written\":true,\"remote_debugging_port\":\"11111\",\"width\":2,\"height\":2,\"gpu_feature_status\":{\"vulkan\":\"enabled\",\"gpu_compositing\":\"enabled\"},\"browser_target_gpu_info_status\":\"pass\",\"browser_target_gpu_info\":{\"gpu\":{\"auxAttributes\":{\"hardwareSupportsVulkan\":true,\"displayType\":\"Vulkan\",\"glImplementationParts\":\"angle=vulkan\",\"skiaBackendType\":\"Vulkan\",\"glRenderer\":\"Vulkan\"}}}}}}'"
 val vulkan_json = "'{\"status\":\"pass\",\"reason\":\"pass\",\"producer\":\"simple-engine2d-vulkan\",\"requested_backend\":\"vulkan\",\"execution_mode\":\"interpret\",\"backend\":\"vulkan\",\"pixel_count\":4,\"width\":2,\"height\":2,\"pixels\":[1,2,3,4]}'"
 val command = "rm -rf " + root + " && mkdir -p " + root + " && printf '%s\\n' '{\"producer\":\"electron-chromium-capture\",\"width\":2,\"height\":2,\"pixels\":[1,2,3,4]}' > " + root + "/electron.json && printf '%s\\n' " + vulkan_json + " > " + root + "/vulkan.json && printf '%s\\n' " + proof + " > " + root + "/electron-proof.json && printf '}' >> " + root + "/electron-proof.json && node scripts/check/electron-vulkan-web-parity-status.js " + root + "/electron.json " + root + "/vulkan.json " + root + "/electron-proof.json 2 2 '' 45678"
 val (stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
@@ -920,6 +929,29 @@ expect(stdout).to_contain("electron_vulkan_web_parity_windows_compare_electron_p
 
 </details>
 
+#### rejects Electron GPU proof from a different HTML source hash
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-electron-vulkan-web-parity-windows-browser-proof-html-hash-fail"
+val proof = "'{\"status\":\"pass\",\"proof_source\":\"tools/electron-live-bitmap/capture_html_argb.js\",\"html_path\":\"" + root + "/page.html\",\"html_sha256\":\"stale-hash\",\"captured_argb_written\":true,\"width\":2,\"height\":2,\"gpu_feature_status\":{\"vulkan\":\"enabled\",\"gpu_compositing\":\"enabled\"},\"browser_target_gpu_info_status\":\"pass\",\"browser_target_gpu_info\":{\"gpu\":{\"auxAttributes\":{\"hardwareSupportsVulkan\":true,\"displayType\":\"Vulkan\",\"glImplementationParts\":\"angle=vulkan\",\"skiaBackendType\":\"Vulkan\",\"glRenderer\":\"Vulkan\"}}}}}}'"
+val vulkan_json = "'{\"status\":\"pass\",\"reason\":\"pass\",\"producer\":\"simple-engine2d-vulkan\",\"requested_backend\":\"vulkan\",\"execution_mode\":\"interpret\",\"backend\":\"vulkan\",\"pixel_count\":4,\"width\":2,\"height\":2,\"pixels\":[1,2,3,4]}'"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && printf '%s\\n' '{\"producer\":\"electron-chromium-capture\",\"width\":2,\"height\":2,\"pixels\":[1,2,3,4]}' > " + root + "/electron.json && printf '%s\\n' " + vulkan_json + " > " + root + "/vulkan.json && printf '%s\\n' " + proof + " > " + root + "/electron-proof.json && printf '}' >> " + root + "/electron-proof.json && node scripts/check/electron-vulkan-web-parity-status.js " + root + "/electron.json " + root + "/vulkan.json " + root + "/electron-proof.json 2 2 '' '' '' " + root + "/page.html expected-hash"
+val (stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+
+expect(code).to_equal(2)
+expect(stdout).to_contain("electron_vulkan_web_parity_windows_status=fail")
+expect(stdout).to_contain("electron_vulkan_web_parity_windows_reason=electron-proof-html-sha256-mismatch")
+expect(stdout).to_contain("electron_vulkan_web_parity_windows_compare_electron_proof_html_sha256=stale-hash")
+```
+
+</details>
+
 #### rejects Electron GPU proof from a different ARGB output path
 
 <details>
@@ -930,7 +962,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val root = "build/test-electron-vulkan-web-parity-windows-browser-proof-path-fail"
-val proof = "'{\"status\":\"pass\",\"proof_source\":\"tools/electron-live-bitmap/capture_html_argb.js\",\"captured_argb_written\":true,\"captured_argb_path\":\"stale/electron.json\",\"width\":2,\"height\":2,\"gpu_feature_status\":{\"vulkan\":\"enabled\",\"gpu_compositing\":\"enabled\"},\"browser_target_gpu_info_status\":\"pass\",\"browser_target_gpu_info\":{\"gpu\":{\"auxAttributes\":{\"hardwareSupportsVulkan\":true,\"displayType\":\"Vulkan\",\"glImplementationParts\":\"angle=vulkan\",\"skiaBackendType\":\"Vulkan\",\"glRenderer\":\"Vulkan\"}}}}}}'"
+val proof = "'{\"status\":\"pass\",\"proof_source\":\"tools/electron-live-bitmap/capture_html_argb.js\",\"html_path\":\"$ELECTRON_CAPTURE_HTML\",\"html_sha256\":\"$ELECTRON_CAPTURE_EXPECTED_HTML_SHA256\",\"captured_argb_written\":true,\"captured_argb_path\":\"stale/electron.json\",\"width\":2,\"height\":2,\"gpu_feature_status\":{\"vulkan\":\"enabled\",\"gpu_compositing\":\"enabled\"},\"browser_target_gpu_info_status\":\"pass\",\"browser_target_gpu_info\":{\"gpu\":{\"auxAttributes\":{\"hardwareSupportsVulkan\":true,\"displayType\":\"Vulkan\",\"glImplementationParts\":\"angle=vulkan\",\"skiaBackendType\":\"Vulkan\",\"glRenderer\":\"Vulkan\"}}}}}}'"
 val vulkan_json = "'{\"status\":\"pass\",\"reason\":\"pass\",\"producer\":\"simple-engine2d-vulkan\",\"requested_backend\":\"vulkan\",\"execution_mode\":\"interpret\",\"backend\":\"vulkan\",\"pixel_count\":4,\"width\":2,\"height\":2,\"pixels\":[1,2,3,4]}'"
 val command = "rm -rf " + root + " && mkdir -p " + root + " && printf '%s\\n' '{\"producer\":\"electron-chromium-capture\",\"width\":2,\"height\":2,\"pixels\":[1,2,3,4]}' > " + root + "/electron.json && printf '%s\\n' " + vulkan_json + " > " + root + "/vulkan.json && printf '%s\\n' " + proof + " > " + root + "/electron-proof.json && printf '}' >> " + root + "/electron-proof.json && node scripts/check/electron-vulkan-web-parity-status.js " + root + "/electron.json " + root + "/vulkan.json " + root + "/electron-proof.json 2 2 '' '' " + root + "/electron.json"
 val (stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
@@ -954,7 +986,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val root = "build/test-electron-vulkan-web-parity-windows-browser-proof-fail"
-val proof = "'{\"status\":\"pass\",\"proof_source\":\"tools/electron-live-bitmap/capture_html_argb.js\",\"captured_argb_written\":true,\"width\":2,\"height\":2,\"gpu_feature_status\":{\"vulkan\":\"disabled_software\",\"gpu_compositing\":\"enabled\"},\"browser_target_gpu_info_status\":\"pass\",\"browser_target_gpu_info\":{\"gpu\":{\"auxAttributes\":{\"hardwareSupportsVulkan\":true,\"displayType\":\"SwiftShader\",\"glImplementationParts\":\"angle=swiftshader\",\"skiaBackendType\":\"Software\",\"glRenderer\":\"SwiftShader\"}}}}}}'"
+val proof = "'{\"status\":\"pass\",\"proof_source\":\"tools/electron-live-bitmap/capture_html_argb.js\",\"html_path\":\"$ELECTRON_CAPTURE_HTML\",\"html_sha256\":\"$ELECTRON_CAPTURE_EXPECTED_HTML_SHA256\",\"captured_argb_written\":true,\"width\":2,\"height\":2,\"gpu_feature_status\":{\"vulkan\":\"disabled_software\",\"gpu_compositing\":\"enabled\"},\"browser_target_gpu_info_status\":\"pass\",\"browser_target_gpu_info\":{\"gpu\":{\"auxAttributes\":{\"hardwareSupportsVulkan\":true,\"displayType\":\"SwiftShader\",\"glImplementationParts\":\"angle=swiftshader\",\"skiaBackendType\":\"Software\",\"glRenderer\":\"SwiftShader\"}}}}}}'"
 val vulkan_json = "'{\"status\":\"pass\",\"reason\":\"pass\",\"producer\":\"simple-engine2d-vulkan\",\"requested_backend\":\"vulkan\",\"execution_mode\":\"interpret\",\"backend\":\"vulkan\",\"pixel_count\":4,\"width\":2,\"height\":2,\"pixels\":[1,2,3,4]}'"
 val command = "rm -rf " + root + " && mkdir -p " + root + " && printf '%s\\n' '{\"producer\":\"electron-chromium-capture\",\"width\":2,\"height\":2,\"pixels\":[1,2,3,4]}' > " + root + "/electron.json && printf '%s\\n' " + vulkan_json + " > " + root + "/vulkan.json && printf '%s\\n' " + proof + " > " + root + "/electron-proof.json && printf '}' >> " + root + "/electron-proof.json && node scripts/check/electron-vulkan-web-parity-status.js " + root + "/electron.json " + root + "/vulkan.json " + root + "/electron-proof.json"
 val (stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
@@ -977,7 +1009,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val root = "build/test-electron-vulkan-web-parity-windows-browser-proof-substring-fail"
-val proof = "'{\"status\":\"pass\",\"proof_source\":\"tools/electron-live-bitmap/capture_html_argb.js\",\"captured_argb_written\":true,\"width\":2,\"height\":2,\"gpu_feature_status\":{\"vulkan\":\"not_enabled\",\"gpu_compositing\":\"enabled\"},\"browser_target_gpu_info_status\":\"pass\",\"browser_target_gpu_info\":{\"gpu\":{\"auxAttributes\":{\"hardwareSupportsVulkan\":true,\"displayType\":\"Vulkan\",\"glImplementationParts\":\"angle=vulkan\",\"skiaBackendType\":\"Vulkan\",\"glRenderer\":\"Vulkan\"}}}}}}'"
+val proof = "'{\"status\":\"pass\",\"proof_source\":\"tools/electron-live-bitmap/capture_html_argb.js\",\"html_path\":\"$ELECTRON_CAPTURE_HTML\",\"html_sha256\":\"$ELECTRON_CAPTURE_EXPECTED_HTML_SHA256\",\"captured_argb_written\":true,\"width\":2,\"height\":2,\"gpu_feature_status\":{\"vulkan\":\"not_enabled\",\"gpu_compositing\":\"enabled\"},\"browser_target_gpu_info_status\":\"pass\",\"browser_target_gpu_info\":{\"gpu\":{\"auxAttributes\":{\"hardwareSupportsVulkan\":true,\"displayType\":\"Vulkan\",\"glImplementationParts\":\"angle=vulkan\",\"skiaBackendType\":\"Vulkan\",\"glRenderer\":\"Vulkan\"}}}}}}'"
 val vulkan_json = "'{\"status\":\"pass\",\"reason\":\"pass\",\"producer\":\"simple-engine2d-vulkan\",\"requested_backend\":\"vulkan\",\"execution_mode\":\"interpret\",\"backend\":\"vulkan\",\"pixel_count\":4,\"width\":2,\"height\":2,\"pixels\":[1,2,3,4]}'"
 val command = "rm -rf " + root + " && mkdir -p " + root + " && printf '%s\\n' '{\"producer\":\"electron-chromium-capture\",\"width\":2,\"height\":2,\"pixels\":[1,2,3,4]}' > " + root + "/electron.json && printf '%s\\n' " + vulkan_json + " > " + root + "/vulkan.json && printf '%s\\n' " + proof + " > " + root + "/electron-proof.json && printf '}' >> " + root + "/electron-proof.json && node scripts/check/electron-vulkan-web-parity-status.js " + root + "/electron.json " + root + "/vulkan.json " + root + "/electron-proof.json"
 val (stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
@@ -1000,7 +1032,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val root = "build/test-electron-vulkan-web-parity-windows-browser-proof-hardware-string-fail"
-val proof = "'{\"status\":\"pass\",\"proof_source\":\"tools/electron-live-bitmap/capture_html_argb.js\",\"captured_argb_written\":true,\"width\":2,\"height\":2,\"gpu_feature_status\":{\"vulkan\":\"enabled\",\"gpu_compositing\":\"enabled\"},\"browser_target_gpu_info_status\":\"pass\",\"browser_target_gpu_info\":{\"gpu\":{\"auxAttributes\":{\"hardwareSupportsVulkan\":\"false\",\"displayType\":\"Vulkan\",\"glImplementationParts\":\"angle=vulkan\",\"skiaBackendType\":\"Vulkan\",\"glRenderer\":\"Vulkan\"}}}}}}'"
+val proof = "'{\"status\":\"pass\",\"proof_source\":\"tools/electron-live-bitmap/capture_html_argb.js\",\"html_path\":\"$ELECTRON_CAPTURE_HTML\",\"html_sha256\":\"$ELECTRON_CAPTURE_EXPECTED_HTML_SHA256\",\"captured_argb_written\":true,\"width\":2,\"height\":2,\"gpu_feature_status\":{\"vulkan\":\"enabled\",\"gpu_compositing\":\"enabled\"},\"browser_target_gpu_info_status\":\"pass\",\"browser_target_gpu_info\":{\"gpu\":{\"auxAttributes\":{\"hardwareSupportsVulkan\":\"false\",\"displayType\":\"Vulkan\",\"glImplementationParts\":\"angle=vulkan\",\"skiaBackendType\":\"Vulkan\",\"glRenderer\":\"Vulkan\"}}}}}}'"
 val vulkan_json = "'{\"status\":\"pass\",\"reason\":\"pass\",\"producer\":\"simple-engine2d-vulkan\",\"requested_backend\":\"vulkan\",\"execution_mode\":\"interpret\",\"backend\":\"vulkan\",\"pixel_count\":4,\"width\":2,\"height\":2,\"pixels\":[1,2,3,4]}'"
 val command = "rm -rf " + root + " && mkdir -p " + root + " && printf '%s\\n' '{\"producer\":\"electron-chromium-capture\",\"width\":2,\"height\":2,\"pixels\":[1,2,3,4]}' > " + root + "/electron.json && printf '%s\\n' " + vulkan_json + " > " + root + "/vulkan.json && printf '%s\\n' " + proof + " > " + root + "/electron-proof.json && printf '}' >> " + root + "/electron-proof.json && node scripts/check/electron-vulkan-web-parity-status.js " + root + "/electron.json " + root + "/vulkan.json " + root + "/electron-proof.json"
 val (stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
@@ -1046,7 +1078,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val root = "build/test-electron-vulkan-web-parity-windows-browser-proof-frame-fail"
-val proof = "'{\"status\":\"pass\",\"proof_source\":\"tools/electron-live-bitmap/capture_html_argb.js\",\"captured_argb_written\":true,\"width\":3,\"height\":2,\"gpu_feature_status\":{\"vulkan\":\"enabled\",\"gpu_compositing\":\"enabled\"},\"browser_target_gpu_info_status\":\"pass\",\"browser_target_gpu_info\":{\"gpu\":{\"auxAttributes\":{\"hardwareSupportsVulkan\":true,\"displayType\":\"Vulkan\",\"glImplementationParts\":\"angle=vulkan\",\"skiaBackendType\":\"Vulkan\",\"glRenderer\":\"Vulkan\"}}}}}}'"
+val proof = "'{\"status\":\"pass\",\"proof_source\":\"tools/electron-live-bitmap/capture_html_argb.js\",\"html_path\":\"$ELECTRON_CAPTURE_HTML\",\"html_sha256\":\"$ELECTRON_CAPTURE_EXPECTED_HTML_SHA256\",\"captured_argb_written\":true,\"width\":3,\"height\":2,\"gpu_feature_status\":{\"vulkan\":\"enabled\",\"gpu_compositing\":\"enabled\"},\"browser_target_gpu_info_status\":\"pass\",\"browser_target_gpu_info\":{\"gpu\":{\"auxAttributes\":{\"hardwareSupportsVulkan\":true,\"displayType\":\"Vulkan\",\"glImplementationParts\":\"angle=vulkan\",\"skiaBackendType\":\"Vulkan\",\"glRenderer\":\"Vulkan\"}}}}}}'"
 val vulkan_json = "'{\"status\":\"pass\",\"reason\":\"pass\",\"producer\":\"simple-engine2d-vulkan\",\"requested_backend\":\"vulkan\",\"execution_mode\":\"interpret\",\"backend\":\"vulkan\",\"pixel_count\":4,\"width\":2,\"height\":2,\"pixels\":[1,2,3,4]}'"
 val command = "rm -rf " + root + " && mkdir -p " + root + " && printf '%s\\n' '{\"producer\":\"electron-chromium-capture\",\"width\":2,\"height\":2,\"pixels\":[1,2,3,4]}' > " + root + "/electron.json && printf '%s\\n' " + vulkan_json + " > " + root + "/vulkan.json && printf '%s\\n' " + proof + " > " + root + "/electron-proof.json && printf '}' >> " + root + "/electron-proof.json && node scripts/check/electron-vulkan-web-parity-status.js " + root + "/electron.json " + root + "/vulkan.json " + root + "/electron-proof.json"
 val (stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
@@ -1307,8 +1339,8 @@ expect(stdout).to_contain("electron_vulkan_web_parity_windows_compare_invalid_vu
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 39 |
-| Active scenarios | 39 |
+| Total scenarios | 40 |
+| Active scenarios | 40 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
