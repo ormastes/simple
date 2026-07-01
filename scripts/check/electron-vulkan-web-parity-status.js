@@ -146,6 +146,7 @@ const vulkanStatus = String(vulkan.status || "");
 const vulkanReason = String(vulkan.reason || "");
 const vulkanProducer = String(vulkan.producer || "");
 const vulkanRequestedBackend = String(vulkan.requested_backend || "");
+const vulkanExecutionMode = String(vulkan.execution_mode || "");
 const vulkanPixelCount = Number(vulkan.pixel_count || 0);
 
 const common = {
@@ -162,6 +163,7 @@ const common = {
   electron_vulkan_web_parity_windows_compare_vulkan_reason: vulkanReason,
   electron_vulkan_web_parity_windows_compare_vulkan_producer: vulkanProducer,
   electron_vulkan_web_parity_windows_compare_vulkan_requested_backend: vulkanRequestedBackend,
+  electron_vulkan_web_parity_windows_compare_vulkan_execution_mode: vulkanExecutionMode,
   electron_vulkan_web_parity_windows_compare_vulkan_backend: vulkanBackend,
   electron_vulkan_web_parity_windows_compare_vulkan_pixel_count: vulkanPixelCount,
 };
@@ -205,6 +207,10 @@ if (vulkanProducer !== "simple-engine2d-vulkan") {
 
 if (vulkanRequestedBackend !== "vulkan") {
   finish("fail", "vulkan-requested-backend-not-proven", 2, common);
+}
+
+if (vulkanExecutionMode !== "interpret") {
+  finish("fail", "vulkan-execution-mode-not-proven", 2, common);
 }
 
 if (vulkanBackend !== "vulkan") {

@@ -10,6 +10,7 @@
 #   EVWP_WIDTH   surface width  (default 64)
 #   EVWP_HEIGHT  surface height (default 48)
 #   EVWP_OUTPUT  output JSON path (default /tmp/ecap/vulkan.json)
+#   SIMPLE_EXECUTION_MODE must be interpret for the Windows parity wrapper
 
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend}
@@ -23,20 +24,22 @@ fn env_or(name: text, fallback: text) -> text:
         return fallback
     v
 
-fn write_failure(out: text, w: i32, h: i32, reason: text) -> bool:
+fn write_failure(out: text, w: i32, h: i32, reason: text, execution_mode: text) -> bool:
     var sb = "{\"status\":\"fail\",\"reason\":\"" + reason + "\""
     sb = sb + ",\"producer\":\"simple-engine2d-vulkan\""
     sb = sb + ",\"requested_backend\":\"vulkan\""
+    sb = sb + ",\"execution_mode\":\"" + execution_mode + "\""
     sb = sb + ",\"backend\":\"\""
     sb = sb + ",\"pixel_count\":0"
     sb = sb + ",\"width\":" + w.to_text() + ",\"height\":" + h.to_text()
     sb = sb + ",\"pixels\":[]}"
     rt_file_write_bytes(out, sb.bytes())
 
-fn write_success(out: text, w: i32, h: i32, backend_name: text, px: [u32]) -> bool:
+fn write_success(out: text, w: i32, h: i32, backend_name: text, px: [u32], execution_mode: text) -> bool:
     var sb = "{\"status\":\"pass\",\"reason\":\"pass\""
     sb = sb + ",\"producer\":\"simple-engine2d-vulkan\""
     sb = sb + ",\"requested_backend\":\"vulkan\""
+    sb = sb + ",\"execution_mode\":\"" + execution_mode + "\""
     sb = sb + ",\"backend\":\"" + backend_name + "\""
     sb = sb + ",\"pixel_count\":" + px.len().to_text()
     sb = sb + ",\"width\":" + w.to_text() + ",\"height\":" + h.to_text()
@@ -55,13 +58,14 @@ fn main() -> i64:
     val w = env_or("EVWP_WIDTH", "64").to_i64().to_i32()
     val h = env_or("EVWP_HEIGHT", "48").to_i64().to_i32()
     val out = env_or("EVWP_OUTPUT", "/tmp/ecap/vulkan.json")
+    val execution_mode = env_or("SIMPLE_EXECUTION_MODE", "")
 
     # Prime the real Vulkan device, then render the page background through the
     # Vulkan-backed Engine2D surface (an opaque page background is a deterministic
     # full-surface fill, so it matches a real browser's solid background).
     var prime = VulkanBackend.create()
     if not prime.init(w, h):
-        val wrote = write_failure(out, w, h, "vulkan-prime-init-failed")
+        val wrote = write_failure(out, w, h, "vulkan-prime-init-failed", execution_mode)
         print("status=fail reason=vulkan-prime-init-failed wrote=" + wrote.to_text() + "\n")
         return 2
 
@@ -69,23 +73,23 @@ fn main() -> i64:
     var eng = match r:
         Ok(value): value
         Err(message):
-            val wrote = write_failure(out, w, h, "vulkan-engine-create-failed")
+            val wrote = write_failure(out, w, h, "vulkan-engine-create-failed", execution_mode)
             print("status=fail reason=vulkan-engine-create-failed detail=" + message + " wrote=" + wrote.to_text() + "\n")
             return 2
     val backend_name = eng.backend_name()
     if backend_name != "vulkan":
-        val wrote = write_failure(out, w, h, "vulkan-backend-not-proven")
+        val wrote = write_failure(out, w, h, "vulkan-backend-not-proven", execution_mode)
         print("status=fail reason=vulkan-backend-not-proven backend=" + backend_name + " wrote=" + wrote.to_text() + "\n")
         return 2
     eng.clear(bg)
     val px = eng.read_pixels()
     val expected_pixels = w.to_i64() * h.to_i64()
     if px.len() == 0 or px.len().to_i64() != expected_pixels:
-        val wrote = write_failure(out, w, h, "vulkan-pixel-count-mismatch")
+        val wrote = write_failure(out, w, h, "vulkan-pixel-count-mismatch", execution_mode)
         print("status=fail reason=vulkan-pixel-count-mismatch pixels=" + px.len().to_text() + " expected=" + expected_pixels.to_text() + " wrote=" + wrote.to_text() + "\n")
         return 2
 
-    val ok = write_success(out, w, h, backend_name, px)
+    val ok = write_success(out, w, h, backend_name, px, execution_mode)
     if not ok:
         print("status=fail reason=vulkan-json-write-failed backend=" + backend_name + " pixels=" + px.len().to_text() + "\n")
         return 2
