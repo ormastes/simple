@@ -53,6 +53,27 @@ so the bootstrap script refuses to deploy it:
 error: stage4 binary failed smoke test (-c 'print(1+1)' -> '')
 ```
 
+## 2026-07-01 Stage4 Update
+
+The Stage4 tiny-binary cause was the deploy script exporting
+`SIMPLE_BOOTSTRAP=1` globally and then reusing that environment for full app
+native builds. Stage4 and Stage5 now run their native-build commands with
+`SIMPLE_BOOTSTRAP` unset so `src/app/cli/main.spl` and MCP entries do not route
+through the bootstrap-main-only driver path.
+
+Focused proof:
+
+```sh
+sh -n scripts/bootstrap/bootstrap-from-scratch.sh
+bin/release/simple check src/app/spipe_mcp/main.spl src/lib/nogc_sync_mut/spipe/tree_context.spl
+```
+
+Full deploy was not re-proven in the isolated
+`simple-spipe-mcp-parser-cli-20260701` workspace: Stage2 consumed CPU for
+several minutes with no new stage output and was stopped to avoid a runaway.
+The next deploy attempt should start from a fresh workspace or update the
+native-build worker monitor/launcher path first.
+
 Local linked workspaces may also need a temporary `bin/simple` wrapper to the
 rebuilt bootstrap seed while running the staged worker; the repo monitor kills
 long `bin/simple run ...native_build_worker...` commands after about 60 seconds

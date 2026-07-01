@@ -433,7 +433,7 @@ echo "Stage 4: compiling full CLI (main.spl) with bootstrap compiler..."
 full_dir="${output_dir}/full/${PLATFORM}"
 mkdir -p "${full_dir}"
 rm -rf .simple/native_cache/
-run_logged stage4-native-build env RUST_LOG="${RUST_LOG:-error}" \
+run_logged stage4-native-build env -u SIMPLE_BOOTSTRAP RUST_LOG="${RUST_LOG:-error}" \
   LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
   "${stage_for_build}" native-build \
   --timeout "${native_timeout}" \
@@ -480,7 +480,7 @@ if [ "${build_mcp}" -eq 1 ]; then
     echo "  Stage 5${mcp_stage}: ${mcp_name}"
     rm -rf .simple/native_cache/
     set +e
-    env RUST_LOG="${RUST_LOG:-error}" \
+    env -u SIMPLE_BOOTSTRAP RUST_LOG="${RUST_LOG:-error}" \
       LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
       "${stage_for_build}" native-build \
       --timeout "${native_timeout}" \
