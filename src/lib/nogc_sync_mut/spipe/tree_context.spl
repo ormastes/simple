@@ -63,6 +63,8 @@ fn spipe_parser_names() -> [text]:
         "ctest",
         "cargo",
         "npm",
+        "apt",
+        "dpkg",
         "journalctl",
         "systemctl",
         "repomix_markdown",
@@ -98,6 +100,10 @@ fn spipe_match_parser(source_kind: text, command: text, raw_text: text) -> text:
         return "cargo"
     if c.contains("npm"):
         return "npm"
+    if c.contains("apt-get") or c.contains("apt ") or c.ends_with("/apt"):
+        return "apt"
+    if c.contains("dpkg"):
+        return "dpkg"
     if c.contains("cmake"):
         return "cmake"
     if c.contains("ninja"):
@@ -346,6 +352,10 @@ fn _detect_level(line: text, compiler_mode: bool) -> [text]:
         return ["ERROR", "error:", "true", "parser"]
     if compiler_mode and t.starts_with("warning:"):
         return ["WARN", "warning:", "true", "parser"]
+    if compiler_mode and (t.starts_with("E:") or t.starts_with("Err:")):
+        return ["ERROR", t.split(" ")[0], "true", "parser"]
+    if compiler_mode and t.starts_with("W:"):
+        return ["WARN", "W:", "true", "parser"]
     ["NONE", "", "false", "none"]
 
 fn _has_explicit_level(raw_text: text, compiler_mode: bool) -> bool:
@@ -356,7 +366,7 @@ fn _has_explicit_level(raw_text: text, compiler_mode: bool) -> bool:
     false
 
 fn _parser_allows_compiler_levels(name: text) -> bool:
-    name == "gcc_clang" or name == "ld_linker" or name == "cmake" or name == "ninja" or name == "make" or name == "cargo" or name == "npm" or name == "pytest" or name == "ctest"
+    name == "gcc_clang" or name == "ld_linker" or name == "cmake" or name == "ninja" or name == "make" or name == "cargo" or name == "npm" or name == "apt" or name == "dpkg" or name == "pytest" or name == "ctest"
 
 fn _detect_path(line: text, parser_name: text) -> text:
     val t = _strip_level_prefix(line.trim())
@@ -381,6 +391,8 @@ fn _detect_path(line: text, parser_name: text) -> text:
         return _rust_location_path(t)
     if parser_name == "npm":
         return _node_stack_path(t)
+    if parser_name == "apt" or parser_name == "dpkg":
+        return _first_local_path_token(t)
     if parser_name == "cmake":
         return _cmake_path(t)
     if parser_name == "ninja":
@@ -537,6 +549,20 @@ fn _ld_path(line: text) -> text:
         if (candidate.contains("/") or candidate.contains(".")) and _basename(candidate) != "ld":
             return candidate
         i = i + 1
+    ""
+
+fn _first_local_path_token(line: text) -> text:
+    for token in line.trim().split(" "):
+        var candidate = token.trim()
+        candidate = candidate.replace("(", "")
+        candidate = candidate.replace(")", "")
+        candidate = candidate.replace(",", "")
+        if candidate.ends_with(":"):
+            candidate = candidate[0:candidate.len() - 1]
+        if candidate.starts_with("http://") or candidate.starts_with("https://"):
+            candidate = ""
+        if candidate.starts_with("/") or candidate.starts_with("./") or (candidate.contains("/") and candidate.contains(".")):
+            return candidate
     ""
 
 fn _repomix_xml_path(line: text) -> text:
