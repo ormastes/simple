@@ -224,10 +224,11 @@ line 1.
 oracle. It sends JSONL `initialize`, `tools/list`, `spipe_context_put`,
 `spipe_context_search`, `spipe_context_get_raw`, `spipe_codebase_ingest`,
 `spipe_codebase_search`, `spipe_codebase_get`, `spipe_minimality_check`, and
-`spipe_hook_event` requests through the stdio server and checks the rendered
-level group, parent chain, raw pointer, exact raw lines, codebase file nodes,
-Ponytail native-date guidance, normalized hook fields, and absence of non-MCP
-stdout banners.
+`spipe_hook_event` requests plus SQL context and codebase alias calls through
+the stdio server. It checks the rendered level group, parent chain, raw pointer,
+exact raw lines, codebase file nodes, Ponytail native-date guidance, normalized
+hook fields, SQL put/get/search, codebase alias rejection/save behavior, and
+absence of non-MCP stdout banners.
 
 ## Current Boundary
 
