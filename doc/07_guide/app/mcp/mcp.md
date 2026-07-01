@@ -322,6 +322,10 @@ generation still requires a source file. These fields are forwarded to the
 existing `context` CLI subprocess so source-mode MCP does not import the large
 context/compiler graph directly.
 
+Language-neutral command output, log, file-tree, RepoMix, and parent-chain raw
+context belongs to SPipe MCP (`src/app/spipe_mcp/main.spl`). Keep
+`simple_context` for Simple source context-pack compatibility.
+
 The SQL-backed context path uses the existing `app.io.sqlite_sffi` facade. In
 interpreter mode the compiler provides a narrow `rt_sqlite_*` subset for context
 indexing/querying: open/close, create table, delete, prepared insert/bind,
@@ -341,6 +345,9 @@ compatibility, `review` is accepted as an alias for `audit`, and `simplify` is
 accepted as an alias for `simplification`; responses report the canonical mode.
 JSON responses expose both `audit` and `report` fields so older audit clients
 and newer generic report clients can read the same result.
+
+Language-neutral Ponytail gates (`spipe_minimality_check`,
+`spipe_minimality_review`, and `spipe_minimality_debt`) live in SPipe MCP.
 
 ### UI Access (11 tools)
 

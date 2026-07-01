@@ -32,6 +32,7 @@ The shared surfaces are:
 - app MCP `simple_context`
 - lower MCP `simple_context`
 - app MCP `simple_ponytail`
+- SPipe MCP for language-neutral command/log/tree context and minimality gates
 - dashboard tooling artifact panel
 
 For codebase-memory MCP usage, use the existing MCP Resource Manager and
@@ -92,6 +93,10 @@ shortcuts.
 `simple_ponytail` should stay on the existing app MCP registry and dispatch
 path. Dashboard rendering consumes the shared collector output and reports
 audit/simplification status with explicit absence text.
+
+Use SPipe MCP (`spipe_minimality_check`, `spipe_minimality_review`, and
+`spipe_minimality_debt`) for language-neutral Ponytail gates that do not need
+the Simple file audit path.
 
 Do not add a second Ponytail app runtime unless the existing handler boundary is
 proven insufficient and the lane plan records the rejected shortcut.
