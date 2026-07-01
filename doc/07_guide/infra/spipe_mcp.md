@@ -28,6 +28,9 @@ bin/release/simple run src/app/spipe_mcp/main.spl match --command='git diff' -f 
 bin/release/simple run src/app/spipe_mcp/main.spl parse --command='simple build' -f output.txt
 bin/release/simple run src/app/spipe_mcp/main.spl render --command='simple build' -f output.txt
 bin/release/simple run src/app/spipe_mcp/main.spl raw -f output.txt --start=10 --end=12 --before=2 --after=2
+bin/release/simple run src/app/spipe_mcp/main.spl sql-put --db=build/spipe.db --source-id=exec:1 --command='simple build' -f output.txt
+bin/release/simple run src/app/spipe_mcp/main.spl sql-get --db=build/spipe.db --source-id=exec:1
+bin/release/simple run src/app/spipe_mcp/main.spl sql-search --db=build/spipe.db --query=ERROR --source-filter=exec:1
 bin/release/simple run src/app/spipe_mcp/main.spl codebase-profile
 bin/release/simple run src/app/spipe_mcp/main.spl codebase-pack --root=. --include=src/app/spipe_mcp/main.spl --ignore='.git/**,build/**'
 bin/release/simple run src/app/cli/main.spl spipe-mcp parsers
