@@ -33,6 +33,8 @@ bin/release/simple run src/app/spipe_mcp/main.spl sql-get --db=build/spipe.db --
 bin/release/simple run src/app/spipe_mcp/main.spl sql-search --db=build/spipe.db --query=ERROR --source-filter=exec:1
 bin/release/simple run src/app/spipe_mcp/main.spl codebase-profile
 bin/release/simple run src/app/spipe_mcp/main.spl codebase-pack --root=. --include=src/app/spipe_mcp/main.spl --ignore='.git/**,build/**'
+bin/release/simple run src/app/spipe_mcp/main.spl codebase-pack-local --root=. --include=src/app/spipe_mcp/main.spl --ignore='.git/**,build/**'
+bin/release/simple run src/app/spipe_mcp/main.spl codebase-pack-remote --root=https://github.com/example/repo
 bin/release/simple run src/app/cli/main.spl spipe-mcp parsers
 ```
 
@@ -61,6 +63,8 @@ shortcut for the same app entrypoint.
 - `spipe_hook_render`
 - `spipe_codebase_profile`
 - `spipe_codebase_pack`
+- `spipe_codebase_pack_local`
+- `spipe_codebase_pack_remote`
 - `spipe_codebase_ingest`
 - `spipe_codebase_search`
 - `spipe_codebase_get`
@@ -78,7 +82,9 @@ The codebase tools run RepoMix with a fixed argv vector
 `npx -y repomix <root> --stdout --style markdown --include <patterns> --ignore
 <patterns>`, ingest existing RepoMix/codebase-mcp output, index it in the
 session-local tree store, and expose the focused Simple MCP include/ignore
-profile. `spipe_codebase_pack` returns status and byte count only; use
+profile. `spipe_codebase_pack_local` and `spipe_codebase_pack_remote` are
+aliases of `spipe_codebase_pack`; pass a local path or RepoMix-supported URL as
+`root`. Pack tools return status and byte count only; use
 `spipe_codebase_search` or `spipe_codebase_get` to inspect the stored tree.
 Existing XML RepoMix input with `<file path=...>` is matched as
 `repomix_xml`; markdown-style packs use `repomix_markdown`.
