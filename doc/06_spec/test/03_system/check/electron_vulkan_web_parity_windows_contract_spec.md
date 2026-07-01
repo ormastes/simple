@@ -142,6 +142,9 @@ OS=Windows_NT EVWP_WORK=build/windows-electron-vulkan-web-parity \
   run.
 - Windows execution probes the selected Simple binary before Electron startup
   and records version provenance for pure-Simple evidence.
+- Windows execution records SHA-256 provenance for the selected Simple binary,
+  Electron launcher, Vulkan loader, and generated Electron/proof/PNG/Vulkan
+  artifacts.
 
 ## Evidence Rows
 
@@ -155,6 +158,7 @@ The wrapper emits these common rows for every terminal status:
 - `electron_vulkan_web_parity_windows_simple_bin_kind`
 - `electron_vulkan_web_parity_windows_simple_bin_probe_exit_code`
 - `electron_vulkan_web_parity_windows_simple_bin_version`
+- `electron_vulkan_web_parity_windows_simple_bin_sha256`
 - `electron_vulkan_web_parity_windows_host_os`
 - `electron_vulkan_web_parity_windows_width`
 - `electron_vulkan_web_parity_windows_height`
@@ -163,8 +167,10 @@ The wrapper emits these common rows for every terminal status:
 - `electron_vulkan_web_parity_windows_electron_bin`
 - `electron_vulkan_web_parity_windows_electron_bin_status`
 - `electron_vulkan_web_parity_windows_electron_bin_kind`
+- `electron_vulkan_web_parity_windows_electron_bin_sha256`
 - `electron_vulkan_web_parity_windows_vulkan_loader`
 - `electron_vulkan_web_parity_windows_vulkan_loader_status`
+- `electron_vulkan_web_parity_windows_vulkan_loader_sha256`
 
 On a Windows host that reaches Electron launch it also emits:
 
@@ -177,8 +183,12 @@ On a Windows host that reaches Electron launch it also emits:
 On a Windows host that reaches frame comparison it also emits:
 
 - `electron_vulkan_web_parity_windows_electron_json`
+- `electron_vulkan_web_parity_windows_electron_json_sha256`
 - `electron_vulkan_web_parity_windows_electron_proof_json`
+- `electron_vulkan_web_parity_windows_electron_proof_json_sha256`
+- `electron_vulkan_web_parity_windows_electron_png_sha256`
 - `electron_vulkan_web_parity_windows_vulkan_json`
+- `electron_vulkan_web_parity_windows_vulkan_json_sha256`
 - `electron_vulkan_web_parity_windows_vulkan_run_id`
 - `electron_vulkan_web_parity_windows_compare_exit_code`
 
@@ -308,7 +318,7 @@ The spec contains:
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 156 lines folded for reproduction.
+Runnable source: 166 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -347,6 +357,7 @@ expect(script).to_contain("require_electron_flag")
 expect(script).to_contain("electron-vulkan-launch-flags-missing")
 expect(script).to_contain("electron_vulkan_web_parity_windows_simple_bin_probe_exit_code")
 expect(script).to_contain("electron_vulkan_web_parity_windows_simple_bin_version")
+expect(script).to_contain("electron_vulkan_web_parity_windows_simple_bin_sha256")
 expect(script).to_contain("electron_vulkan_web_parity_windows_electron_capture_exit_code")
 expect(script).to_contain("electron_vulkan_web_parity_windows_simple_render_exit_code")
 expect(script).to_contain("electron-capture-failed")
@@ -362,6 +373,8 @@ expect(script).to_contain("--disable-gpu-sandbox")
 expect(script).to_contain("--enable-gpu-rasterization")
 expect(script).to_contain("electron_vulkan_web_parity_windows_electron_proof_json")
 expect(script).to_contain("electron_vulkan_web_parity_windows_electron_png")
+expect(script).to_contain("electron_vulkan_web_parity_windows_electron_bin_sha256")
+expect(script).to_contain("electron_vulkan_web_parity_windows_vulkan_loader_sha256")
 expect(script).to_contain("electron_vulkan_web_parity_windows_compare_exit_code")
 expect(script).to_contain("scripts/check/electron-vulkan-web-parity-status.js")
 expect(script).to_contain("ELECTRON_PNG=\"$WORK/electron.png\"")
@@ -453,8 +466,15 @@ expect(capture).to_contain("downsampled: result.downsampled")
 expect(capture).to_contain("remote_debugging_port: remoteDebuggingPort")
 val wrapper = file_read("scripts/check/check-electron-vulkan-web-parity-windows.shs")
 expect(wrapper).to_contain("ELECTRON_JSON_SHA256=$(node -e")
+expect(wrapper).to_contain("ELECTRON_PROOF_SHA256=$(node -e")
 expect(wrapper).to_contain("ELECTRON_PNG_SHA256=$(node -e")
+expect(wrapper).to_contain("VULKAN_JSON_SHA256=$(node -e")
 expect(wrapper).to_contain("\"$ELECTRON_PNG\" \"$ELECTRON_PNG_SHA256\" \"$ELECTRON_JSON_SHA256\"")
+expect(wrapper).to_contain("electron_vulkan_web_parity_windows_electron_json_sha256")
+expect(wrapper).to_contain("electron_vulkan_web_parity_windows_electron_proof_json_sha256")
+expect(wrapper).to_contain("electron_vulkan_web_parity_windows_electron_png_sha256")
+expect(wrapper).to_contain("electron_vulkan_web_parity_windows_vulkan_json_sha256")
+expect(wrapper).to_contain("sha256_file")
 expect(wrapper).to_contain("EVWP_RUN_ID=$(node -e")
 expect(wrapper).to_contain("EVWP_RUN_ID=\"$EVWP_RUN_ID\"")
 expect(wrapper).to_contain("\"$ELECTRON_JSON_SHA256\" \"$EVWP_RUN_ID\"")
@@ -477,7 +497,7 @@ expect(producer).to_contain("vulkan-pixel-count-mismatch")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -488,6 +508,7 @@ expect(_stdout).to_contain("electron_vulkan_web_parity_windows_status=skip")
 expect(_stdout).to_contain("electron_vulkan_web_parity_windows_reason=requires-windows")
 expect(_stdout).to_contain("electron_vulkan_web_parity_windows_simple_bin_status=pass")
 expect(_stdout).to_contain("electron_vulkan_web_parity_windows_simple_bin_kind=non-windows-exe")
+expect(_stdout).to_contain("electron_vulkan_web_parity_windows_simple_bin_sha256=")
 expect(_stdout).to_contain("electron_vulkan_web_parity_windows_bg_hex=224466")
 expect(_stdout).to_contain("electron_vulkan_web_parity_windows_bg_dec=4280435814")
 expect(_stdout).to_contain("electron_vulkan_web_parity_windows_electron_bin_status=unknown")
