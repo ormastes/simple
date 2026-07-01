@@ -182,7 +182,8 @@ file/dir context. If callers pass raw text directly, SPipe parses that text firs
 and renders the same parent context.
 Raw-context calls accept either `start_line`/`end_line`/`before`/`after` or
 `startLine`/`endLine`/`contextBefore`/`contextAfter`; the CLI mirrors those
-camelCase aliases as flags.
+camelCase aliases as flags. If no range is provided, raw context defaults to
+line 1.
 
 ## Current Boundary
 
