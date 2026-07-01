@@ -22,6 +22,8 @@ const expectedPngPathProvided = process.argv.length > 12 && process.argv[12] !==
 const expectedPngPath = String(process.argv[12] || "");
 const expectedPngSha256Provided = process.argv.length > 13 && process.argv[13] !== "";
 const expectedPngSha256 = String(process.argv[13] || "");
+const expectedCapturedArgbSha256Provided = process.argv.length > 14 && process.argv[14] !== "";
+const expectedCapturedArgbSha256 = String(process.argv[14] || "");
 
 function emit(key, value) {
   console.log(`${key}=${value === undefined || value === null ? "" : value}`);
@@ -77,12 +79,13 @@ function jsonObject(value) {
   return value && typeof value === "object" && !Array.isArray(value);
 }
 
-function electronVulkanProof(electron, proof, expectedPort, expectedCapturePath, expectedSourceHtmlPath, expectedSourceHtmlSha256, expectedVisualPngPath, expectedVisualPngSha256) {
+function electronVulkanProof(electron, proof, expectedPort, expectedCapturePath, expectedSourceHtmlPath, expectedSourceHtmlSha256, expectedVisualPngPath, expectedVisualPngSha256, expectedCaptureSha256) {
   const proofSource = String((proof && proof.proof_source) || "");
   const proofStatus = String((proof && proof.status) || "");
   const proofHtmlPath = String((proof && proof.html_path) || "");
   const proofHtmlSha256 = String((proof && proof.html_sha256) || "");
   const proofCapturedArgbPath = String((proof && proof.captured_argb_path) || "");
+  const proofCapturedArgbSha256 = String((proof && proof.captured_argb_sha256) || "");
   const proofPngOutputPath = String((proof && proof.png_output_path) || "");
   const proofPngSha256 = String((proof && proof.png_sha256) || "");
   const proofPngWritten = proof && proof.png_written === true;
@@ -105,6 +108,7 @@ function electronVulkanProof(electron, proof, expectedPort, expectedCapturePath,
   const proofNotDownsampled = proof && proofDownsampled === false;
   const remoteDebuggingPortOk = !expectedPort || proofRemoteDebuggingPort === expectedPort;
   const capturedArgbPathOk = !expectedCapturePath || proofCapturedArgbPath === expectedCapturePath;
+  const capturedArgbSha256Ok = !expectedCaptureSha256 || proofCapturedArgbSha256 === expectedCaptureSha256;
   const htmlPathOk = !expectedSourceHtmlPath || proofHtmlPath === expectedSourceHtmlPath;
   const htmlSha256Ok = !expectedSourceHtmlSha256 || proofHtmlSha256 === expectedSourceHtmlSha256;
   const pngPathOk = !expectedVisualPngPath || proofPngOutputPath === expectedVisualPngPath;
@@ -145,7 +149,7 @@ function electronVulkanProof(electron, proof, expectedPort, expectedCapturePath,
   const gpuEnabled = /^enabled/i.test(gpuCompositing);
   const browserInfoOk = browserStatus === "pass";
   const backed = proofStatusOk && captureSourceOk && htmlPathOk && htmlSha256Ok &&
-    proofCapturedArgbWritten && capturedArgbPathOk && pngPathOk && pngWrittenOk && noBlurOrTolerance &&
+    proofCapturedArgbWritten && capturedArgbPathOk && capturedArgbSha256Ok && pngPathOk && pngWrittenOk && noBlurOrTolerance &&
     pngSha256Ok && featureStatusMatchesCapture && browserGpuInfoMatchesCapture &&
     proofDimensionsOk && proofNativeDimensionsOk && proofNotDownsampled && remoteDebuggingPortOk &&
     enabled && gpuEnabled && hardware && mentionsVulkan && browserInfoOk && browserTargetGpuInfoPresent;
@@ -156,6 +160,7 @@ function electronVulkanProof(electron, proof, expectedPort, expectedCapturePath,
   else if (!htmlSha256Ok) reason = "electron-proof-html-sha256-mismatch";
   else if (!proofCapturedArgbWritten) reason = "electron-proof-argb-not-written";
   else if (!capturedArgbPathOk) reason = "electron-proof-captured-argb-path-mismatch";
+  else if (!capturedArgbSha256Ok) reason = "electron-proof-captured-argb-sha256-mismatch";
   else if (!pngPathOk) reason = "electron-proof-png-path-mismatch";
   else if (!pngWrittenOk) reason = "electron-proof-png-not-written";
   else if (!pngSha256Ok) reason = "electron-proof-png-sha256-mismatch";
@@ -179,6 +184,7 @@ function electronVulkanProof(electron, proof, expectedPort, expectedCapturePath,
     proofHtmlPath,
     proofHtmlSha256,
     proofCapturedArgbPath,
+    proofCapturedArgbSha256,
     proofCapturedArgbWritten,
     proofPngOutputPath,
     proofPngSha256,
@@ -273,7 +279,8 @@ if (electronProofPath) {
     expectedHtmlPathProvided ? expectedHtmlPath : "",
     expectedHtmlSha256Provided ? expectedHtmlSha256 : "",
     expectedPngPathProvided ? expectedPngPath : "",
-    expectedPngSha256Provided ? expectedPngSha256 : ""
+    expectedPngSha256Provided ? expectedPngSha256 : "",
+    expectedCapturedArgbSha256Provided ? expectedCapturedArgbSha256 : ""
   );
   common.electron_vulkan_web_parity_windows_compare_electron_proof = electronProofPath;
   common.electron_vulkan_web_parity_windows_compare_electron_proof_source = electronProofStatus.proofSource;
@@ -281,6 +288,7 @@ if (electronProofPath) {
   common.electron_vulkan_web_parity_windows_compare_electron_proof_html_path = electronProofStatus.proofHtmlPath;
   common.electron_vulkan_web_parity_windows_compare_electron_proof_html_sha256 = electronProofStatus.proofHtmlSha256;
   common.electron_vulkan_web_parity_windows_compare_electron_proof_captured_argb_path = electronProofStatus.proofCapturedArgbPath;
+  common.electron_vulkan_web_parity_windows_compare_electron_proof_captured_argb_sha256 = electronProofStatus.proofCapturedArgbSha256;
   common.electron_vulkan_web_parity_windows_compare_electron_proof_captured_argb_written = electronProofStatus.proofCapturedArgbWritten ? "true" : "false";
   common.electron_vulkan_web_parity_windows_compare_electron_proof_png_path = electronProofStatus.proofPngOutputPath;
   common.electron_vulkan_web_parity_windows_compare_electron_proof_png_sha256 = electronProofStatus.proofPngSha256;

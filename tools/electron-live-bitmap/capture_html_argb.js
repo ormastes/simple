@@ -807,6 +807,7 @@ async function main() {
       html_path: absHtml,
       html_sha256: htmlSha256,
       captured_argb_path: outputPath,
+      captured_argb_sha256: outputPath ? sha256File(outputPath) : "",
       width,
       height,
       native_width: result.nativeWidth,
