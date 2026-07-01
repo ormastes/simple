@@ -31,16 +31,18 @@ use app.test_daemon.session_scheduler.{schedule_session_tests, schedule_summary,
 # use test_runner_container.container_detect_runtime
 # use test_runner_coverage.{setup_coverage, collect_coverage, print_coverage_summary, generate_coverage_reports, check_coverage_threshold, get_coverage_threshold, print_coverage_delta}
 # GROUP 4: Database & feature tracking
-# use test_db_compat.{TestDatabase, load_test_db_compat, micros_to_rfc3339}  # Using compatibility layer
+use std.test_runner.test_db_compat.{TestDatabase, load_test_db_compat}
+use std.test_runner.test_runner_helpers.{update_test_database}
 # use test_db_types.*
 # use std.database.feature.{FeatureDatabase, load_feature_database, create_feature_database, FeatureStatus}
 # GROUP 5: Doc generation & sdoctest
-# use doc_generator.generate_all_docs
+use std.test_runner.doc_generator.{generate_test_result_md}
+use std.io.{file_atomic_write}
 # use rust_test_runner.{run_rust_tests, RustTestResult}
 use std.test_runner.sdoctest.config.load_sdoctest_config
 use std.test_runner.sdoctest.runner.{run_sdoctest_mode, print_sdoctest_summary}
+use std.test_runner.doctest_runner.{run_spl_doctest_mode}
 # use sdoctest.types.{SdoctestRunResult, SdoctestFileResult, BlockStatus}
-# use doctest_runner.{run_spl_doctests_same_file, discover_spl_doctest_files}
 # use sdoctest.result_db.write_sdoctest_db
 # use sdoctest.doc_gen.generate_sdoctest_report
 # Change-detection cache for incremental test runs
@@ -796,19 +798,45 @@ fn main() -> i64:
     propagate_env_vars(options)
 
     var exit_code = 0
+    var db: Result<TestDatabase, text> = Err("not_run")
 
     # Run spec tests with self-protection enabled in run_tests()
     if run_spec:
         print "Simple Test Runner v0.8.1"
         print ""
 
+        val run_start = time_now_unix_micros()
         val result = run_tests(options)
+        val run_end = time_now_unix_micros()
 
         val result_files = result.files
         report_free_mem("AFTER_RUN_{result_files.len()}_files")
         print_summary(result, options.format)
 
+        # Persist test results to database and regenerate reports
+        if not options.list and not options.no_db:
+            db = update_test_database(result, run_start, run_end)
+
         if not result.is_ok():
+            exit_code = 1
+
+    # spl_doctest execution (complement to sdoctest)
+    var spl_doctest_passed = 0
+    var spl_doctest_failed = 0
+    var spl_doctest_skipped = 0
+    var spl_doctest_ok = true
+    if config.run_spl_doctests:
+        print "=== Running SPL Doctests ==="
+        print ""
+        val spl_doctest_result = run_spl_doctest_mode(options, config)
+        spl_doctest_passed = spl_doctest_result.passed
+        spl_doctest_failed = spl_doctest_result.failed
+        spl_doctest_skipped = spl_doctest_result.skipped
+        spl_doctest_ok = spl_doctest_result.is_ok()
+        print "SPL Doctest: {spl_doctest_passed} passed, {spl_doctest_failed} failed, {spl_doctest_skipped} skipped"
+        print ""
+
+        if not spl_doctest_ok:
             exit_code = 1
 
     if run_sdoc:
@@ -817,6 +845,14 @@ fn main() -> i64:
         print_sdoctest_summary(sdoctest_result)
         if not sdoctest_result.is_ok():
             exit_code = 1
+
+    # Generate test_result.md from database
+    match db:
+        Ok(database):
+            if not options.list and not options.no_db:
+                val md_content = generate_test_result_md(database)
+                file_atomic_write("doc/08_tracking/test/test_result.md", md_content)
+        Err(_): ()  # Silent failure; database may not have been attempted
 
     exit_code
 
