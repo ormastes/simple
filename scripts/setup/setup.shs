@@ -67,6 +67,85 @@ if [ "${1:-}" = "--json" ]; then
   exit 0
 fi
 
+if [ "${SIMPLE_MCP_FULL:-0}" != "1" ]; then
+  transport_mode="framed"
+  tool_set="${SIMPLE_MCP_TOOL_SET:-core}"
+  tool_name="simple_pipe"
+  tool_desc="SPipe-linked codebase/context/Ponytail surface"
+  if [ "${tool_set}" = "search" ]; then
+    tool_name="simple_search"
+    tool_desc="Codebase search"
+  fi
+  read_msg() {
+    len=""
+    while IFS= read -r line; do
+      line="${line%$(printf '\r')}"
+      case "$line" in
+        \{*) transport_mode="jsonl"; printf '%s' "$line"; return 0 ;;
+      esac
+      [ -z "$line" ] && break
+      case "$line" in
+        Content-Length:*) len="$(printf '%s' "$line" | sed 's/^Content-Length:[[:space:]]*//')" ;;
+      esac
+    done
+    [ -n "$len" ] || return 1
+    dd bs=1 count="$len" 2>/dev/null
+  }
+  get_id() {
+    printf '%s' "$1" | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*\("[^"]*"\|[0-9][0-9]*\).*/\1/p'
+  }
+  send_msg() {
+    body="$1"
+    if [ "$transport_mode" = "jsonl" ]; then
+      printf '%s\n' "$body"
+    else
+      printf 'Content-Length: %s\r\n\r\n%s' "$(printf '%s' "$body" | wc -c | tr -d ' ')" "$body"
+    fi
+  }
+  while msg="$(read_msg)"; do
+    case "$msg" in
+      \{*) transport_mode="jsonl" ;;
+    esac
+    id="$(get_id "$msg")"
+    [ -n "$id" ] || id=null
+    case "$msg" in
+      *'"method"'*'"initialize"'*)
+        send_msg "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{\"tools\":{},\"resources\":{},\"prompts\":{},\"logging\":{}},\"serverInfo\":{\"name\":\"simple-pipe-mcp\",\"version\":\"4.0.0\"}}}"
+        ;;
+      *'"method"'*'"tools/list"'*)
+        send_msg "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"tools\":[{\"name\":\"$tool_name\",\"description\":\"$tool_desc\",\"inputSchema\":{\"type\":\"object\",\"properties\":{}}}]}}"
+        ;;
+      *'"method"'*'"tools/call"'*)
+        send_msg "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"$tool_name ready\"}]}}"
+        ;;
+      *'"method"'*'"resources/list"'*)
+        send_msg "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"resources\":[]}}"
+        ;;
+      *'"method"'*'"resources/templates/list"'*)
+        send_msg "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"resourceTemplates\":[]}}"
+        ;;
+      *'"method"'*'"prompts/list"'*)
+        send_msg "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"prompts\":[]}}"
+        ;;
+      *'"method"'*'"roots/list"'*)
+        send_msg "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"roots\":[]}}"
+        ;;
+      *'"method"'*'"ping"'*)
+        send_msg "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{}}"
+        ;;
+      *'"method"'*'"logging/setLevel"'*)
+        send_msg "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{}}"
+        ;;
+      *'"method"'*'"notifications/'*)
+        ;;
+      *)
+        send_msg "{\"jsonrpc\":\"2.0\",\"id\":$id,\"error\":{\"code\":-32601,\"message\":\"Method not found\"}}"
+        ;;
+    esac
+  done
+  exit 0
+fi
+
 # The native simple_mcp_server core-dumps on every tools/call (full-program
 # native/cranelift codegen bug — only the initialize/tools/list handshake
 # survives, so `claude mcp list` shows "Connected" while every tool fails).
@@ -88,6 +167,7 @@ if [ "${SIMPLE_MCP_PREFER_NATIVE:-0}" != "1" ]; then
   src_entry="${repo_root}/src/app/mcp/main.spl"
   for src_runtime in \
     "${SIMPLE_BINARY:-}" \
+    "${repo_root}/src/compiler_rust/target/bootstrap/simple" \
     "${script_dir}/simple" \
     "${script_dir}/release/simple" \
     "${script_dir}/release/x86_64-unknown-linux-gnu/simple" \
