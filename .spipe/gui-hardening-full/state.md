@@ -922,3 +922,20 @@ implementation-evidence-in-progress
   main preserved the scalar payload-length helper, synthesized OpenSSH payload
   paths, and the disconnect fast path, while correcting the generated spec
   contract to the current host `2222` to guest daemon port `22` forwarding.
+- rv64-ssh-correction: Corrected the rebased RV64 SSH lane back to the live
+  contract proven by the current QEMU command: host port `2222` forwards to
+  guest daemon port `2222`. Restored the scenario catalog/disks rows, RV64 live
+  entry, SSH host-probe ready marker, daemon listen log, and socket facade bind
+  special case to port `2222`; removed stale jj conflict markers while keeping
+  the AES-256 scalar payload-length route, synthesized OpenSSH payloads, seq-4
+  channel-open dispatcher fast path, and seq-8 disconnect fast path.
+- rv64-ssh-verify: Focused Simple checks pass for the RV64 SSH session/helper/KEX
+  files, SSH contract, socket facade, daemon, scenario catalog/disks, live entry,
+  and live SSpec. C syntax checks pass for the freestanding runtime and AES
+  helper. The non-live RV64 SSH SSpec passes 6/6, SPipe docgen regenerated the
+  manual, and `bin/simple os build --scenario=rv64-ssh` rebuilt
+  `build/os/simpleos_riscv64_ssh_live.elf` with cranelift. No second live QEMU
+  retry was run after the dispatcher channel-open patch. Remaining blockers are
+  proving the channel-open dispatcher fast path in the next live run, then
+  daemon return-to-accept for `simple`, `simple.smf`, and bad-auth probes, plus
+  real RenderDoc `.rdc` captures and physical KV260 serial/network proof.

@@ -428,6 +428,10 @@ spl_i64 rt_array_new_with_cap_u64(spl_i64 capacity_value) {
     return rt_array_new(capacity_value);
 }
 
+spl_i64 rt_array_new_with_cap(spl_i64 capacity_value) {
+    return rt_array_new(capacity_value);
+}
+
 spl_i64 rt_array_push(spl_i64 array_value, spl_i64 value) {
     RtArray *array = rt_as_array(array_value);
     spl_i64 *new_data;
