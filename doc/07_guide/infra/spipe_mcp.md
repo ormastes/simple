@@ -134,7 +134,8 @@ The SQL context tools persist the rendered parent-chain tree into the existing
 Simple context SQLite table. Use `spipe_context_sql_put` with `db_path` to save
 parsed output, `spipe_context_sql_get` to retrieve one source, and
 `spipe_context_sql_search` to search stored parsed context by query and optional
-source filter.
+source filter. MCP callers may use `db` or `dbPath` as aliases for `db_path`,
+and `sourceFilter` as an alias for `source_filter`.
 
 The explicit MCP names `spipe_context_put_raw`, `spipe_context_get_tree`, and
 `spipe_context_get_raw` are aliases for `spipe_context_put`,
