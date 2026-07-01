@@ -162,6 +162,7 @@ summary rows.
 `npm` output extracts simple Node stack rows such as `at path:line:col`.
 `apt`/`dpkg` output extracts local package-manager paths and treats `E:`,
 `W:`, and `Err:` prefixes as parser-confirmed levels.
+`journalctl`/`systemctl` output extracts systemd unit names and unit file paths.
 `cmake` output extracts file paths from `CMake Error/Warning at path:line`.
 `ninja` output extracts the first quoted path from `ninja: error:` rows.
 `make` output extracts paths from GNU Make bracketed error rows such as
