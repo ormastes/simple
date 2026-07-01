@@ -83,6 +83,8 @@ OS=Windows_NT EVWP_WORK=build/windows-electron-vulkan-web-parity \
   pure-Simple app path.
 - Windows execution allows an explicit Electron binary override for setup
   diagnostics without changing renderer semantics.
+- Terminal evidence rows include the selected Electron binary path and whether
+  it was present before renderer launch.
 - Windows Electron launch flags request Vulkan, ANGLE Vulkan, GPU rasterization,
   and GPU sandbox disablement explicitly.
 - Windows Electron launch flag overrides must retain the required Vulkan flags
@@ -142,6 +144,8 @@ The wrapper emits these common rows for every terminal status:
 - `electron_vulkan_web_parity_windows_height`
 - `electron_vulkan_web_parity_windows_bg_hex`
 - `electron_vulkan_web_parity_windows_bg_dec`
+- `electron_vulkan_web_parity_windows_electron_bin`
+- `electron_vulkan_web_parity_windows_electron_bin_status`
 - `electron_vulkan_web_parity_windows_vulkan_loader`
 - `electron_vulkan_web_parity_windows_vulkan_loader_status`
 
@@ -272,7 +276,7 @@ The spec contains:
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 72 lines folded for reproduction.
+Runnable source: 74 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -282,6 +286,8 @@ expect(script).to_contain("electron_vulkan_web_parity_windows_status")
 expect(script).to_contain("electron_vulkan_web_parity_windows_reason")
 expect(script).to_contain("electron_vulkan_web_parity_windows_bg_hex")
 expect(script).to_contain("electron_vulkan_web_parity_windows_bg_dec")
+expect(script).to_contain("electron_vulkan_web_parity_windows_electron_bin")
+expect(script).to_contain("electron_vulkan_web_parity_windows_electron_bin_status")
 expect(script).to_contain("electron_vulkan_web_parity_windows_vulkan_loader")
 expect(script).to_contain("electron_vulkan_web_parity_windows_vulkan_loader_status")
 expect(script).to_contain("probe_vulkan_loader")
@@ -357,7 +363,7 @@ expect(producer).to_contain("vulkan-pixel-count-mismatch")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -369,6 +375,7 @@ expect(_stdout).to_contain("electron_vulkan_web_parity_windows_reason=requires-w
 expect(_stdout).to_contain("electron_vulkan_web_parity_windows_simple_bin_status=pass")
 expect(_stdout).to_contain("electron_vulkan_web_parity_windows_bg_hex=224466")
 expect(_stdout).to_contain("electron_vulkan_web_parity_windows_bg_dec=4280435814")
+expect(_stdout).to_contain("electron_vulkan_web_parity_windows_electron_bin_status=unknown")
 expect(_stdout).to_contain("electron_vulkan_web_parity_windows_vulkan_loader_status=unknown")
 ```
 
@@ -405,7 +412,7 @@ expect(stdout.contains("electron_vulkan_web_parity_windows_simple_render_exit_co
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -417,6 +424,9 @@ val (stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(0)
 expect(stdout).to_contain("electron_vulkan_web_parity_windows_status=skip")
 expect(stdout).to_contain("electron_vulkan_web_parity_windows_reason=electron-missing")
+expect(stdout).to_contain("electron_vulkan_web_parity_windows_electron_bin=")
+expect(stdout).to_contain(root + "/missing-electron")
+expect(stdout).to_contain("electron_vulkan_web_parity_windows_electron_bin_status=missing")
 expect(stdout).to_contain("electron_vulkan_web_parity_windows_vulkan_loader=" + missing_loader)
 expect(stdout).to_contain("electron_vulkan_web_parity_windows_vulkan_loader_status=unknown")
 ```
@@ -476,7 +486,7 @@ expect(stdout.contains("electron_vulkan_web_parity_windows_compare_exit_code="))
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -492,6 +502,8 @@ expect(code).to_equal(0)
 expect(stdout).to_contain("electron_vulkan_web_parity_windows_status=pass")
 expect(stdout).to_contain("electron_vulkan_web_parity_windows_reason=pixel-exact-vulkan")
 expect(stdout).to_contain("electron_vulkan_web_parity_windows_compare_exit_code=0")
+expect(stdout).to_contain("electron_vulkan_web_parity_windows_electron_bin=")
+expect(stdout).to_contain("electron_vulkan_web_parity_windows_electron_bin_status=pass")
 expect(stdout).to_contain("electron_vulkan_web_parity_windows_vulkan_loader=")
 expect(stdout).to_contain(root + "/vulkan-1.dll")
 expect(stdout).to_contain("electron_vulkan_web_parity_windows_vulkan_loader_status=pass")
