@@ -228,7 +228,9 @@ oracle. It sends JSONL `initialize`, `tools/list`, `spipe_context_put`,
 the stdio server. It checks the rendered level group, parent chain, raw pointer,
 exact raw lines, codebase file nodes, Ponytail native-date guidance, normalized
 hook fields, SQL put/get/search, codebase alias rejection/save behavior, and
-absence of non-MCP stdout banners.
+absence of non-MCP stdout banners. It also checks a no-level parser call and an
+unknown-method JSON-RPC error path while compiler/runtime diagnostics stay on
+stderr.
 
 ## Current Boundary
 

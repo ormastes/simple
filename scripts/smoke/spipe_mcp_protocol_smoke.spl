@@ -15,6 +15,10 @@ fn require_contains(haystack: text, needle: text, message: text):
     if not haystack.contains(needle):
         fail(message, haystack)
 
+fn require_not_contains(haystack: text, needle: text, message: text):
+    if haystack.contains(needle):
+        fail(message, haystack)
+
 fn require_jsonrpc_stdout(stdout: text):
     var count = 0
     for raw_line in stdout.split("\n"):
@@ -23,7 +27,7 @@ fn require_jsonrpc_stdout(stdout: text):
             count = count + 1
             if not line.starts_with("{") or not line.contains("\"jsonrpc\""):
                 fail("non-mcp-stdout", stdout)
-    if count != 15:
+    if count != 17:
         fail("unexpected-response-count-" + count.to_string(), stdout)
 
 val initialize = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"spipe-smoke\",\"version\":\"1\"}}}"
@@ -41,9 +45,11 @@ val sql_get = "{\"jsonrpc\":\"2.0\",\"id\":12,\"method\":\"tools/call\",\"params
 val sql_search = "{\"jsonrpc\":\"2.0\",\"id\":13,\"method\":\"tools/call\",\"params\":{\"name\":\"spipe_context_sql_search\",\"arguments\":{\"db_path\":\"build/spipe_mcp_protocol_smoke.db\",\"query\":\"failed\",\"sourceId\":\"sql:smoke\"}}}"
 val codebase_alias_reject = "{\"jsonrpc\":\"2.0\",\"id\":14,\"method\":\"tools/call\",\"params\":{\"name\":\"getCodebase\",\"arguments\":{\"root\":\"src/**; rm -rf /\"}}}"
 val codebase_save_alias = "{\"jsonrpc\":\"2.0\",\"id\":15,\"method\":\"tools/call\",\"params\":{\"name\":\"saveCodebase\",\"arguments\":{\"sourceId\":\"codebase:alias\",\"codebase\":\"abc\"}}}"
+val no_level_parse = "{\"jsonrpc\":\"2.0\",\"id\":16,\"method\":\"tools/call\",\"params\":{\"name\":\"spipe_tree_parse\",\"arguments\":{\"source_id\":\"exec:nolevel\",\"source_kind\":\"command_output\",\"command\":\"find src\",\"text\":\"src/app/main.spl\"}}}"
+val unknown_method = "{\"jsonrpc\":\"2.0\",\"id\":17,\"method\":\"spipe/nope\",\"params\":{}}"
 
 val input_path = "/tmp/spipe_mcp_protocol_smoke.jsonl"
-val input = initialize + "\n" + tools_list + "\n" + context_put + "\n" + context_search + "\n" + context_raw + "\n" + codebase_ingest + "\n" + codebase_search + "\n" + codebase_get + "\n" + minimality_check + "\n" + hook_event + "\n" + sql_put + "\n" + sql_get + "\n" + sql_search + "\n" + codebase_alias_reject + "\n" + codebase_save_alias + "\n"
+val input = initialize + "\n" + tools_list + "\n" + context_put + "\n" + context_search + "\n" + context_raw + "\n" + codebase_ingest + "\n" + codebase_search + "\n" + codebase_get + "\n" + minimality_check + "\n" + hook_event + "\n" + sql_put + "\n" + sql_get + "\n" + sql_search + "\n" + codebase_alias_reject + "\n" + codebase_save_alias + "\n" + no_level_parse + "\n" + unknown_method + "\n"
 
 if not file_write(input_path, input):
     fail("input-write-failed", input_path)
@@ -82,6 +88,25 @@ require_contains(result.0, "invalid: root", "missing-codebase-alias-reject")
 require_contains(result.0, "@codebase_save v=1", "missing-codebase-save-alias")
 require_contains(result.0, "codebase:alias", "missing-codebase-save-alias-source")
 require_contains(result.0, "bytes=3", "missing-codebase-save-alias-bytes")
+require_contains(result.0, "\"id\":16", "missing-no-level-response")
+require_contains(result.0, "@source id=src:1", "missing-no-level-source")
+require_contains(result.0, "level_detected=false", "missing-no-level-detection")
+require_contains(result.0, "src/app/main.spl", "missing-no-level-path")
+require_contains(result.0, "\"id\":17", "missing-error-response")
+require_contains(result.0, "\"error\"", "missing-jsonrpc-error")
+require_contains(result.0, "Method not found", "missing-method-not-found")
+require_not_contains(result.0, "STATUS: PASS", "status-leaked-to-mcp-stdout")
+require_contains(result.1, "WARN", "missing-stderr-diagnostics")
+
+val no_level_path = "/tmp/spipe_mcp_protocol_smoke_nolevel.jsonl"
+val no_level_input = no_level_parse + "\n"
+if not file_write(no_level_path, no_level_input):
+    fail("no-level-input-write-failed", no_level_path)
+val no_level_result = process_run("/bin/sh", ["-c", "timeout 20 bin/release/simple run src/app/spipe_mcp/main.spl serve < " + shell_quote(no_level_path)])
+if no_level_result.2 != 0:
+    fail("no-level-server-exit-" + no_level_result.2.to_string(), "STDOUT:\n" + no_level_result.0 + "\nSTDERR:\n" + no_level_result.1)
+require_contains(no_level_result.0, "level_detected=false", "isolated-no-level-detection")
+require_not_contains(no_level_result.0, "@group level=", "isolated-no-level-group")
 
 print("STATUS: PASS spipe_mcp_protocol_smoke")
 exit(0)
