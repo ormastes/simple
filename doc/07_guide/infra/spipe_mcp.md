@@ -114,6 +114,9 @@ execution text. They do not spawn shell commands.
 The hook tools normalize Claude, Codex, Gemini, Cursor, and generic provider event
 names into SPipe phases such as `pre_tool`, `post_tool`, `pre_prompt`,
 `post_turn`, `pre_edit`, `post_edit`, and `pre_commit`.
+MCP hook calls accept snake_case or camelCase names for hook payload fields,
+including `raw_payload`/`rawPayload`, `tool_name`/`toolName`, and
+`prompt_excerpt`/`promptExcerpt`.
 
 The codebase tools run RepoMix with a fixed argv vector. Local packs use
 `npx -y repomix <root> --stdout --style markdown --include <patterns> --ignore
