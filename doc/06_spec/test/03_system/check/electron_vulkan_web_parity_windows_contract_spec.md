@@ -27,7 +27,7 @@ electron_vulkan_web_parity_windows_contract_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 21 | 21 | 0 | 0 |
+| 22 | 22 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -105,6 +105,8 @@ OS=Windows_NT EVWP_WORK=build/windows-electron-vulkan-web-parity \
   JavaScript coercion can make it match the pixel array length.
 - Windows execution records Electron GPU proof and rejects Electron/Chromium
   frames that do not prove Vulkan-backed GPU compositing.
+- Electron GPU feature statuses must start with `enabled`; strings that merely
+  contain `enabled` are rejected.
 - Electron capture and Simple Vulkan render subprocess failures emit stable
   `status=fail` rows instead of falling out through shell `set -e`.
 - Windows execution probes the selected Simple binary before Electron startup
@@ -189,6 +191,8 @@ The wrapper separates absence from failure:
 - `reason=electron-vulkan-*` or `reason=electron-*-missing` protects against
   Chromium software or non-Vulkan fallback masquerading as browser-side Vulkan
   evidence.
+- `reason=electron-vulkan-not_enabled` protects against substring matches in
+  browser GPU feature status values.
 - `reason=pixel-mismatch` protects the visual parity oracle.
 - `reason=frame-shape-mismatch` protects against comparing different viewport
   sizes.
@@ -243,7 +247,7 @@ The spec contains:
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 58 lines folded for reproduction.
+Runnable source: 59 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -286,6 +290,7 @@ expect(helper).to_contain("vulkan-backend-not-proven")
 expect(helper).to_contain("vulkan-pixel-count-mismatch")
 expect(helper).to_contain("vulkan-pixel-count-metadata-invalid")
 expect(helper).to_contain("electron-vulkan-backed")
+expect(helper).to_contain("^enabled")
 expect(helper).to_contain("electron-browser-gpu-info-not-proven")
 expect(helper).to_contain("frame-shape-mismatch")
 expect(helper).to_contain("frame-size-not-requested")
@@ -535,6 +540,29 @@ expect(stdout).to_contain("electron_vulkan_web_parity_windows_compare_electron_v
 
 </details>
 
+#### rejects misleading Electron GPU proof status substrings
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-electron-vulkan-web-parity-windows-browser-proof-substring-fail"
+val proof = "'{\"gpu_feature_status\":{\"vulkan\":\"not_enabled\",\"gpu_compositing\":\"enabled\"},\"browser_target_gpu_info_status\":\"pass\",\"browser_target_gpu_info\":{\"gpu\":{\"auxAttributes\":{\"hardwareSupportsVulkan\":true,\"displayType\":\"Vulkan\",\"glImplementationParts\":\"angle=vulkan\",\"skiaBackendType\":\"Vulkan\",\"glRenderer\":\"Vulkan\"}}}}}}'"
+val vulkan_json = "'{\"status\":\"pass\",\"reason\":\"pass\",\"producer\":\"simple-engine2d-vulkan\",\"requested_backend\":\"vulkan\",\"backend\":\"vulkan\",\"pixel_count\":4,\"width\":2,\"height\":2,\"pixels\":[1,2,3,4]}'"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && printf '%s\\n' '{\"width\":2,\"height\":2,\"pixels\":[1,2,3,4]}' > " + root + "/electron.json && printf '%s\\n' " + vulkan_json + " > " + root + "/vulkan.json && printf '%s\\n' " + proof + " > " + root + "/electron-proof.json && printf '}' >> " + root + "/electron-proof.json && node scripts/check/electron-vulkan-web-parity-status.js " + root + "/electron.json " + root + "/vulkan.json " + root + "/electron-proof.json"
+val (stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+
+expect(code).to_equal(2)
+expect(stdout).to_contain("electron_vulkan_web_parity_windows_status=fail")
+expect(stdout).to_contain("electron_vulkan_web_parity_windows_reason=electron-vulkan-not_enabled")
+expect(stdout).to_contain("electron_vulkan_web_parity_windows_compare_electron_vulkan_status=fail")
+```
+
+</details>
+
 #### rejects pixel mismatches
 
 <details>
@@ -761,8 +789,8 @@ expect(stdout).to_contain("electron_vulkan_web_parity_windows_compare_invalid_vu
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 21 |
-| Active scenarios | 21 |
+| Total scenarios | 22 |
+| Active scenarios | 22 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
