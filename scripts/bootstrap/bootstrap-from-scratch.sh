@@ -41,6 +41,9 @@ Options:
   --verbose          Accepted for compatibility
   --jobs=<n>         Accepted for compatibility
   --no-mcp           Skip MCP server builds (Stage 5)
+  --native-timeout=<seconds>
+                     Pass a longer timeout to staged native-build workers
+                     (default: native-build default)
   --keep-artifacts   Accepted for compatibility; artifacts are kept
   --no-verify        Accepted for compatibility; hash verification still runs
   --help             Show this help
@@ -55,6 +58,7 @@ target=""
 verbose=0
 jobs=""
 pure_simple=0
+native_timeout="${BOOTSTRAP_NATIVE_TIMEOUT:-}"
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -82,6 +86,9 @@ while [ "$#" -gt 0 ]; do
     --no-mcp)
       build_mcp=0
       ;;
+    --native-timeout=*)
+      native_timeout=${1#*=}
+      ;;
     --keep-artifacts|--no-verify)
       ;;
     --help|-h)
@@ -96,6 +103,10 @@ while [ "$#" -gt 0 ]; do
   esac
   shift
 done
+
+if [ -z "${native_timeout}" ]; then
+  native_timeout=1800
+fi
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_root=$(CDPATH= cd -- "${script_dir}/../.." && pwd)
@@ -324,6 +335,7 @@ else
   echo "Stage 2: seed → bootstrap_main.spl"
   rm -rf .simple/native_cache/
   run_logged stage2-native-build env RUST_LOG="${RUST_LOG:-error}" "${seed_bin}" native-build \
+    --timeout "${native_timeout}" \
     --backend cranelift \
     --source src/compiler --source src/app --source src/lib \
     --entry-closure \
@@ -344,6 +356,7 @@ else
   env RUST_LOG="${RUST_LOG:-error}" \
     LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
     "${output_dir}/stage2/${PLATFORM}/simple" native-build \
+    --timeout "${native_timeout}" \
     --backend "${backend}" \
     --source src/compiler --source src/app --source src/lib \
     --entry-closure \
@@ -423,6 +436,7 @@ rm -rf .simple/native_cache/
 run_logged stage4-native-build env RUST_LOG="${RUST_LOG:-error}" \
   LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
   "${stage_for_build}" native-build \
+  --timeout "${native_timeout}" \
   --backend "${stage4_backend}" \
   --source src/compiler --source src/app --source src/lib \
   --entry-closure \
@@ -469,6 +483,7 @@ if [ "${build_mcp}" -eq 1 ]; then
     env RUST_LOG="${RUST_LOG:-error}" \
       LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
       "${stage_for_build}" native-build \
+      --timeout "${native_timeout}" \
       --backend "${stage4_backend}" \
       --source src/compiler --source src/app --source src/lib \
       --entry-closure \
