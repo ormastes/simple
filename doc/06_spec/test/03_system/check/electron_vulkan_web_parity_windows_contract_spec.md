@@ -27,7 +27,7 @@ electron_vulkan_web_parity_windows_contract_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 11 | 11 | 0 | 0 |
+| 12 | 12 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -83,6 +83,8 @@ OS=Windows_NT EVWP_WORK=build/windows-electron-vulkan-web-parity \
   pure-Simple app path.
 - Windows Electron launch flags request Vulkan, ANGLE Vulkan, GPU rasterization,
   and GPU sandbox disablement explicitly.
+- Windows Electron launch flag overrides must retain the required Vulkan flags
+  or fail before Electron capture starts.
 - The compare step fails closed when the Simple-rendered JSON does not report
   `backend` as `vulkan`.
 - The compare helper rejects dimension mismatches and pixel-buffer length
@@ -161,6 +163,8 @@ The wrapper separates absence from failure:
 - `reason=simple-bin-forbidden` protects the pure-Simple requirement by
   rejecting the Rust bootstrap seed.
 - `reason=electron-json-missing` protects the browser reference side.
+- `reason=electron-vulkan-launch-flags-missing` protects against an override
+  removing required Chromium Vulkan launch flags.
 - `reason=electron-capture-failed` protects against an Electron subprocess
   crash being reported only as an unstructured shell failure.
 - `reason=simple-vulkan-render-failed` protects against a Simple renderer
@@ -210,7 +214,7 @@ The spec contains:
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 45 lines folded for reproduction.
+Runnable source: 47 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -230,6 +234,8 @@ expect(script).to_contain("electron-proof-missing")
 expect(script).to_contain("ELECTRON_CAPTURE_PROOF_PATH")
 expect(script).to_contain("ELECTRON_CAPTURE_REMOTE_DEBUGGING_PORT")
 expect(script).to_contain("electron_vulkan_web_parity_windows_electron_launch_flags")
+expect(script).to_contain("require_electron_flag")
+expect(script).to_contain("electron-vulkan-launch-flags-missing")
 expect(script).to_contain("electron_vulkan_web_parity_windows_simple_bin_probe_exit_code")
 expect(script).to_contain("electron_vulkan_web_parity_windows_simple_bin_version")
 expect(script).to_contain("electron_vulkan_web_parity_windows_electron_capture_exit_code")
@@ -325,6 +331,28 @@ expect(stdout).to_contain("electron_vulkan_web_parity_windows_reason=simple-vulk
 expect(stdout).to_contain("electron_vulkan_web_parity_windows_simple_bin_probe_exit_code=0")
 expect(stdout).to_contain("electron_vulkan_web_parity_windows_electron_capture_exit_code=0")
 expect(stdout).to_contain("electron_vulkan_web_parity_windows_simple_render_exit_code=9")
+```
+
+</details>
+
+#### rejects Electron flag overrides without Vulkan requirements
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-electron-vulkan-web-parity-windows-bad-flags"
+val command = "rm -rf " + root + " && mkdir -p " + root + " tools/electron-shell/node_modules/.bin && printf '%s\\n' '#!/bin/sh' 'exit 7' > tools/electron-shell/node_modules/.bin/electron && chmod +x tools/electron-shell/node_modules/.bin/electron && printf '%s\\n' '#!/bin/sh' 'if [ \"$1\" = \"--version\" ]; then echo \"Simple Language v1.0.0-beta\"; exit 0; fi' 'exit 0' > " + root + "/fake-simple && chmod +x " + root + "/fake-simple && OS=Windows_NT SIMPLE_BIN=$PWD/" + root + "/fake-simple EVWP_ELECTRON_VULKAN_FLAGS='--no-sandbox' EVWP_WORK=" + root + "/work sh scripts/check/check-electron-vulkan-web-parity-windows.shs; code=$?; rm -f tools/electron-shell/node_modules/.bin/electron; exit $code"
+val (stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+
+expect(code).to_equal(1)
+expect(stdout).to_contain("electron_vulkan_web_parity_windows_status=fail")
+expect(stdout).to_contain("electron_vulkan_web_parity_windows_reason=electron-vulkan-launch-flags-missing")
+expect(stdout).to_contain("electron_vulkan_web_parity_windows_electron_launch_flags=--no-sandbox")
+expect(stdout).to_contain("electron_vulkan_web_parity_windows_simple_bin_version=Simple Language v1.0.0-beta")
 ```
 
 </details>
@@ -497,8 +525,8 @@ expect(length_stdout).to_contain("electron_vulkan_web_parity_windows_reason=pixe
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 11 |
-| Active scenarios | 11 |
+| Total scenarios | 12 |
+| Active scenarios | 12 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
