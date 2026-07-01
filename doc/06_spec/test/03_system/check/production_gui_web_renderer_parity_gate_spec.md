@@ -27,7 +27,7 @@ production_gui_web_renderer_parity_gate_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 12 | 12 | 0 | 0 |
+| 13 | 13 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -189,7 +189,7 @@ Negative contract fixtures:
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 115 lines folded for reproduction.
+Runnable source: 122 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -259,6 +259,13 @@ expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_me
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_metal_readback_spec_status=pass-when-metal-readback-status-pass")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_metal_readback_available=true-when-metal-readback-status-pass")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_metal_readback_blur_or_tolerance_used=false")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_metal_render_log_status=pass-when-metal-readback-status-pass")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_metal_render_log_required_api=metal")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_metal_render_log_metal_readback_status=pass")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_metal_render_log_browser_backing_gate_status=pass")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_metal_render_log_pairwise_gate_status=pass")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_metal_render_log_argb_source_gate_status=pass")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_metal_render_log_blocked_gate_count=0")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_event_routing_status=pass")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_event_routing_proof_symlink_status=pass")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_event_routing_proof_source=tools/web-render-backend/wm_event_check.js")
@@ -384,6 +391,36 @@ expect(evidence).to_contain("production_gui_web_renderer_parity_gate_matrix_stat
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_matrix_reason=matrix-timeout")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_matrix_timed_out=true")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_matrix_timeout_secs=3")
+```
+
+</details>
+
+#### forwards macOS Metal render-log blocker diagnostics
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 17 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val command = "rm -rf build/test-production-gui-web-renderer-parity-gate-metal-log-blockers && mkdir -p build/test-production-gui-web-renderer-parity-gate-metal-log-blockers/source && printf 'production_gui_web_renderer_parity_status=fail\\nproduction_gui_web_renderer_parity_reason=metal-render-log-compare-failed\\nproduction_gui_web_renderer_parity_metal_readback_status=pass\\nproduction_gui_web_renderer_parity_metal_readback_spec_status=pass\\nproduction_gui_web_renderer_parity_metal_readback_available=true\\nproduction_gui_web_renderer_parity_metal_readback_blur_or_tolerance_used=false\\nproduction_gui_web_renderer_parity_metal_render_log_status=unavailable\\nproduction_gui_web_renderer_parity_metal_render_log_reason=missing-macos-metal-browser-env\\nproduction_gui_web_renderer_parity_metal_render_log_required_api=metal\\nproduction_gui_web_renderer_parity_metal_render_log_backend_resolved=vulkan-unavailable\\nproduction_gui_web_renderer_parity_metal_render_log_metal_readback_status=pass\\nproduction_gui_web_renderer_parity_metal_render_log_generated_readback_gate_status=pass\\nproduction_gui_web_renderer_parity_metal_render_log_framebuffer_readback_gate_status=pass\\nproduction_gui_web_renderer_parity_metal_render_log_browser_backing_gate_status=missing\\nproduction_gui_web_renderer_parity_metal_render_log_pairwise_gate_status=missing\\nproduction_gui_web_renderer_parity_metal_render_log_argb_source_gate_status=missing\\nproduction_gui_web_renderer_parity_metal_render_log_gpu_capture_gate_status=not-required\\nproduction_gui_web_renderer_parity_metal_render_log_blocked_gate_count=3\\nproduction_gui_web_renderer_parity_metal_render_log_blocked_gates=browser-metal-backing,pairwise-argb-diff,argb-source-evidence\\nproduction_gui_web_renderer_parity_metal_render_log_pairwise_status=unavailable\\nproduction_gui_web_renderer_parity_metal_render_log_gpu_capture_status=unavailable\\nproduction_gui_web_renderer_parity_metal_render_log_gpu_capture_tool=xcode-gpu-frame-capture\\n' > build/test-production-gui-web-renderer-parity-gate-metal-log-blockers/source/evidence.env && PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=build/test-production-gui-web-renderer-parity-gate-metal-log-blockers/source/evidence.env BUILD_DIR=build/test-production-gui-web-renderer-parity-gate-metal-log-blockers/out REPORT_PATH=build/test-production-gui-web-renderer-parity-gate-metal-log-blockers/report.md sh scripts/check/check-production-gui-web-renderer-parity-gate.shs || true"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val evidence = file_read("build/test-production-gui-web-renderer-parity-gate-metal-log-blockers/out/evidence.env")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_status=fail")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_reason=metal-render-log-compare-failed")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_metal_readback_status=pass")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_metal_render_log_status=unavailable")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_metal_render_log_reason=missing-macos-metal-browser-env")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_metal_render_log_backend_resolved=vulkan-unavailable")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_metal_render_log_metal_readback_status=pass")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_metal_render_log_browser_backing_gate_status=missing")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_metal_render_log_pairwise_gate_status=missing")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_metal_render_log_argb_source_gate_status=missing")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_metal_render_log_blocked_gate_count=3")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_metal_render_log_blocked_gates=browser-metal-backing,pairwise-argb-diff,argb-source-evidence")
 ```
 
 </details>
@@ -864,8 +901,8 @@ expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_me
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 12 |
-| Active scenarios | 12 |
+| Total scenarios | 13 |
+| Active scenarios | 13 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

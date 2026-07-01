@@ -1358,9 +1358,12 @@ The current canonical evidence contract is:
   `production_gui_web_renderer_parity_metal_render_log_backend_resolved`,
   `production_gui_web_renderer_parity_metal_render_log_metal_readback_status`,
   the browser backing gate, pairwise gate, ARGB source gate, and blocked-gate
-  count. Simple Metal readback proves the Simple backend only; Electron/Chrome
-  Metal-backed browser comparison is proven only by the macOS Metal render-log
-  compare rows.
+  count. The gate wrapper re-emits the same values with the
+  `production_gui_web_renderer_parity_gate_metal_render_log_*` prefix so
+  downstream reports can distinguish Simple Metal readback from missing
+  Electron/Chrome Metal browser proof. Simple Metal readback proves the Simple
+  backend only; Electron/Chrome Metal-backed browser comparison is proven only
+  by the macOS Metal render-log compare rows.
   Font offload
   `unavailable` is recorded but does not satisfy the production parity wrapper.
   A font pass must also carry
