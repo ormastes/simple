@@ -22,6 +22,10 @@ This agent CREATES the initial state file. All subsequent agents read and append
      `.agents/skills/`, `.claude/skills/`, `.claude/agents/spipe/`, and
      `.gemini/commands/` docs are updated and generated SSpec docs read as
      operator manuals.
+   - If the request involves agent, skill, MCP, or plugin handoff, include an
+     AC that uses the canonical SPipe/LLM Caret capability fields
+     `agent_paths`, `skill_paths`, `mcp_servers`, and `plugins`; do not create
+     alternate names for the same four groups.
 6. Add `## Cooperative Review`: for broad lanes, list lower-model sidecars
    (Codex Spark, Claude Haiku, or Claude Sonnet), merge owner, final
    normal/highest-capability reviewer, shared interface names, manual

@@ -132,6 +132,10 @@
   `--sql`/`--db` behavior, `--source-filter`/MCP `source_filter`,
   file-optional SQL query shape, embedded SQLite facade boundary, explicit
   absence statuses, and public-absence guard.
+- **Capability docs fresh:** Agent, skill, MCP, or plugin handoff changes must
+  use canonical `AgentCapabilitySet` field names in state, manuals, guides,
+  prompts, and review notes: `agent_paths`, `skill_paths`, `mcp_servers`, and
+  `plugins`.
 - **Cooperative review complete:** Broad lanes must finish the recorded
   lower-model sidecars or mark them `N/A`, then pass normal/highest-capability
   review before PASS

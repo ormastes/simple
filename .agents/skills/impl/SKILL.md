@@ -65,12 +65,18 @@ description: Implement a feature end-to-end. Self-sufficient — if research, re
   `src/app/llm_caret/agent_mailbox.spl` for pure `btw`/`side` mailbox routing,
   `src/app/llm_caret/agent_tui.spl` plus
   `test/03_system/app/llm_caret/feature/llm_caret_agent_tui_handoff_spec.spl`
-  for TUI-readable SSpec handoff evidence, and
+  for TUI-readable SSpec handoff evidence,
+  `src/app/llm_caret/agent_tmux.spl` plus
+  `test/03_system/app/llm_caret/feature/llm_caret_embedded_tmux_tui_spec.spl`
+  for embedded tmux-style process panes with caller-supplied CPU/memory usage,
+  and
   `src/app/llm_caret/agent_runtime.spl` for non-persistent launch wrappers. It
-  supports explicit agent, skill, MCP server, and plugin capability lists; live
-  supervisors, plugin install execution, live MCP registry discovery,
-  background VCS watching, and live team transport require separate verified
-  lanes.
+  supports explicit agent, skill, MCP server, and plugin capability lists using
+  the canonical `AgentCapabilitySet` field names `agent_paths`, `skill_paths`,
+  `mcp_servers`, and `plugins`; live
+  supervisors, plugin install execution, live MCP registry discovery, live
+  process sampling, background VCS watching, and live team transport require
+  separate verified lanes.
 - Do not mark implementation complete when workflow/tooling tests pass but the
   matching guide, skill, SPipe-agent, command, or generated/manual spec docs are
   stale. Documentation freshness is part of completion.
