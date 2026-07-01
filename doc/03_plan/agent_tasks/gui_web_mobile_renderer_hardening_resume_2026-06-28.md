@@ -865,3 +865,48 @@ standard renderer marker:
 Next work should make mobile MDI shell initialization emit the same
 `[tauri-shell] render, html_len=` marker that the renderer validators require,
 then rerun the aggregate once and inspect the normalized MDI rows.
+
+## 2026-07-02 MDI Render Marker and Android Proof Closure
+
+Follow-up hardening made the bundled MDI smoke path emit the same standard
+renderer marker as normal render envelopes:
+
+- `openWindow` and `renderWindow` handling now updates cumulative MDI HTML
+  length and logs `[tauri-shell] render, html_len=...`.
+- The mobile MDI shell now renders a real `#dock` with `.tab-bar-item`,
+  `.tab-bar-icon`, and `.tab-bar-label` nodes so the live proof can validate
+  taskbar item/icon counts and visibility.
+- The delayed proof eval is requested outside the Rust `mobile` cfg so simulator
+  dev builds are not skipped when the cfg differs from Android.
+- MDI proof JSON is cleared per wrapper run, and the normalizer prefers the
+  newest log proof over any stale proof JSON file.
+- The iOS renderer wrapper cleans the `simple-tauri-shell` crate before
+  proof-mode `cargo tauri ios dev` so proof-flag/source changes are not hidden
+  by stale native artifacts.
+
+Focused verification passed again:
+
+- `node --check scripts/check/normalize-tauri-mobile-mdi-proof.js`
+- `sh -n scripts/check/check-tauri-ios-mobile-renderer-evidence.shs`
+- `sh -n scripts/check/check-tauri-android-mobile-renderer-evidence.shs`
+- `cargo check --manifest-path tools/tauri-shell/src-tauri/Cargo.toml`
+- `SIMPLE_LIB=src /Users/ormastes/simple/bin/simple test test/03_system/gui/tauri_mobile_renderer_parity_evidence_spec.spl --mode=interpreter --clean`
+
+Latest live aggregate evidence is in
+`build/goal-tauri-mobile-after-proof-rebuild/`:
+
+- `tauri_mobile_renderer_parity_android_status=pass`
+- `tauri_mobile_renderer_parity_android_render_log_validation_status=pass`
+- `tauri_mobile_renderer_parity_android_mdi_proof_status=pass`
+- `tauri_mobile_renderer_parity_android_mdi_event_status=pass`
+- `tauri_mobile_renderer_parity_android_mdi_capture_status=pass`
+- aggregate remains `fail` with
+  `tauri_mobile_renderer_parity_reason=Tauri iOS MDI proof log not observed within 120s`
+
+The iOS log now proves the MDI smoke entry and render markers:
+`simple-mobile-mdi-smoke.spl`, four `openWindow` messages, and
+`[tauri-shell] render, html_len=...`. It still lacks `[tauri-shell] mdi proof:`.
+Next work should focus only on the iOS proof callback path: either make the
+Tauri command invoke reachable from iOS WKWebView proof JS or route iOS MDI
+proof through the existing URL/probe proof path without weakening the aggregate
+MDI detail rows.

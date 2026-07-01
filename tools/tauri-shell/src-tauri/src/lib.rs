@@ -22,6 +22,7 @@ include!(concat!(env!("OUT_DIR"), "/mobile_runtime_assets.rs"));
 
 static MDI_OPEN_WINDOW_COUNT: AtomicUsize = AtomicUsize::new(0);
 static MDI_IMAGE_COUNT: AtomicUsize = AtomicUsize::new(0);
+static MDI_RENDER_HTML_LEN: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Debug, Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -294,7 +295,7 @@ fn tauri_mdi_init_script() -> &'static str {
             if (!document.getElementById('simple-tauri-wm-style')) {
                 var style = document.createElement('style');
                 style.id = 'simple-tauri-wm-style';
-                style.textContent = '#wm-desktop{position:fixed;inset:0;overflow:hidden;z-index:10000;pointer-events:none}.wm-window{position:absolute;display:flex;flex-direction:column;background:#111827;color:#e5e7eb;border:1px solid rgba(255,255,255,.18);box-shadow:0 18px 45px rgba(0,0,0,.42);border-radius:8px;overflow:hidden;pointer-events:auto}.wm-titlebar{height:32px;display:flex;align-items:center;gap:10px;padding:0 10px;background:#0f172a;border-bottom:1px solid rgba(255,255,255,.12);user-select:none;cursor:grab;touch-action:none}.wm-titlebar:active{cursor:grabbing}.wm-traffic-lights{display:flex;gap:6px}.wm-traffic-lights button{width:13px;height:13px;border-radius:50%;border:0;font-size:0;padding:0;cursor:pointer}.wm-traffic-lights button[data-action=close]{background:#ff5f57}.wm-traffic-lights button[data-action=minimize]{background:#febc2e}.wm-traffic-lights button[data-action=maximize]{background:#28c840}.wm-title{font:600 12px system-ui,sans-serif;color:#e5e7eb;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.wm-titlebar-widgets{display:flex;align-items:center;gap:6px;margin-left:auto}.wm-titlebar-widgets [data-simple-titlebar-widget]{min-height:24px}.wm-body{flex:1;min-height:0;overflow:auto;background:#0b0d10;pointer-events:auto}.wm-body *{pointer-events:auto}';
+                style.textContent = '#wm-desktop{position:fixed;inset:0;overflow:hidden;z-index:10000;pointer-events:none}.wm-window{position:absolute;display:flex;flex-direction:column;background:#111827;color:#e5e7eb;border:1px solid rgba(255,255,255,.18);box-shadow:0 18px 45px rgba(0,0,0,.42);border-radius:8px;overflow:hidden;pointer-events:auto}.wm-titlebar{height:32px;display:flex;align-items:center;gap:10px;padding:0 10px;background:#0f172a;border-bottom:1px solid rgba(255,255,255,.12);user-select:none;cursor:grab;touch-action:none}.wm-titlebar:active{cursor:grabbing}.wm-traffic-lights{display:flex;gap:6px}.wm-traffic-lights button{width:13px;height:13px;border-radius:50%;border:0;font-size:0;padding:0;cursor:pointer}.wm-traffic-lights button[data-action=close]{background:#ff5f57}.wm-traffic-lights button[data-action=minimize]{background:#febc2e}.wm-traffic-lights button[data-action=maximize]{background:#28c840}.wm-title{font:600 12px system-ui,sans-serif;color:#e5e7eb;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.wm-titlebar-widgets{display:flex;align-items:center;gap:6px;margin-left:auto}.wm-titlebar-widgets [data-simple-titlebar-widget]{min-height:24px}.wm-body{flex:1;min-height:0;overflow:auto;background:#0b0d10;pointer-events:auto}.wm-body *{pointer-events:auto}#dock{position:fixed;left:8px;right:8px;bottom:8px;z-index:10001;display:flex;justify-content:center;gap:10px;padding:8px;border:1px solid rgba(255,255,255,.16);border-radius:18px;background:rgba(10,14,18,.84);pointer-events:auto}.tab-bar-item{min-width:58px;display:flex;flex-direction:column;align-items:center;gap:3px;color:#e5e7eb;font:11px system-ui,sans-serif}.tab-bar-icon{width:24px;height:24px;border-radius:8px;background:#2b6f62;display:flex;align-items:center;justify-content:center;color:#fff;font-weight:700}.tab-bar-label{max-width:64px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}';
                 document.head.appendChild(style);
             }
             var desktop = document.getElementById('wm-desktop');
@@ -356,6 +357,34 @@ fn tauri_mdi_init_script() -> &'static str {
                             slot.appendChild(clone);
                         });
                         existing.titlebar.appendChild(slot);
+                    },
+                    renderDock: function() {
+                        var dock = document.getElementById('dock');
+                        if (!dock) {
+                            dock = document.createElement('nav');
+                            dock.id = 'dock';
+                            dock.setAttribute('aria-label', 'Window taskbar');
+                            document.body.appendChild(dock);
+                        }
+                        var ids = Object.keys(this.windows || {});
+                        dock.innerHTML = '';
+                        for (var i = 0; i < ids.length; i++) {
+                            var id = ids[i];
+                            var existing = this.windows[id];
+                            var item = document.createElement('button');
+                            item.className = 'tab-bar-item';
+                            item.dataset.windowId = id;
+                            item.dataset.action = 'focus:' + id;
+                            var icon = document.createElement('span');
+                            icon.className = 'tab-bar-icon';
+                            icon.textContent = (existing && existing.title && existing.title.textContent ? existing.title.textContent : id).substring(0, 1).toUpperCase();
+                            var label = document.createElement('span');
+                            label.className = 'tab-bar-label';
+                            label.textContent = existing && existing.title ? existing.title.textContent : id;
+                            item.appendChild(icon);
+                            item.appendChild(label);
+                            dock.appendChild(item);
+                        }
                     },
                     bindDrag: function(id, win, titlebar) {
                         var self = this;
@@ -525,13 +554,16 @@ fn tauri_mdi_init_script() -> &'static str {
                                 existing.title.textContent = msg.title || id;
                             }
                             this.mountTitlebarWidgets(existing);
+                            this.renderDock();
                             this.focus(id);
                         } else if (msg.type === 'renderWindow' && this.windows[msg.windowId]) {
                             this.windows[msg.windowId].body.innerHTML = msg.html || '';
                             this.mountTitlebarWidgets(this.windows[msg.windowId]);
+                            this.renderDock();
                         } else if (msg.type === 'closeWindow' && this.windows[msg.windowId]) {
                             this.windows[msg.windowId].win.remove();
                             delete this.windows[msg.windowId];
+                            this.renderDock();
                         }
                     }
                 };
@@ -718,15 +750,14 @@ fn maybe_write_tauri_mdi_proof(app: &AppHandle) {
             })();
         "#;
         let _ = win.eval(js);
-        if cfg!(mobile) {
-            let handle = app.clone();
-            thread::spawn(move || {
-                thread::sleep(std::time::Duration::from_millis(2600));
-                if let Some(win) = handle.get_webview_window("main") {
-                    let _ = win.eval(js);
-                }
-            });
-        }
+        let handle = app.clone();
+        thread::spawn(move || {
+            thread::sleep(std::time::Duration::from_millis(2600));
+            if let Some(win) = handle.get_webview_window("main") {
+                let _ = win.eval(js);
+                eprintln!("[tauri-shell] delayed mdi proof eval requested");
+            }
+        });
     } else {
         let proof = MdiProof {
             count,
@@ -1055,6 +1086,8 @@ fn handle_subprocess_message(msg: SubprocessMessage, app: &AppHandle) {
         } => {
             eprintln!("[tauri-shell] openWindow id={} title={}", window_id, title);
             MDI_OPEN_WINDOW_COUNT.fetch_add(1, Ordering::SeqCst);
+            let total_html_len = MDI_RENDER_HTML_LEN.fetch_add(html.len(), Ordering::SeqCst) + html.len();
+            eprintln!("[tauri-shell] render, html_len={}", total_html_len);
             if html.contains("<img") {
                 MDI_IMAGE_COUNT.fetch_add(1, Ordering::SeqCst);
             }
@@ -1073,6 +1106,8 @@ fn handle_subprocess_message(msg: SubprocessMessage, app: &AppHandle) {
             maybe_write_tauri_mdi_proof(app);
         }
         SubprocessMessage::RenderWindow { window_id, html } => {
+            let total_html_len = MDI_RENDER_HTML_LEN.fetch_add(html.len(), Ordering::SeqCst) + html.len();
+            eprintln!("[tauri-shell] render, html_len={}", total_html_len);
             let msg_json = serde_json::json!({
                 "type": "renderWindow",
                 "windowId": window_id,
@@ -2074,6 +2109,8 @@ mod tests {
                 assert_eq!(y, 20);
                 assert_eq!(width, 300);
                 assert_eq!(height, 200);
+                let marker_len = html.len();
+                assert!(marker_len > 0);
             }
             _ => panic!("expected openWindow message"),
         }

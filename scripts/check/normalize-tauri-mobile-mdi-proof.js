@@ -35,11 +35,6 @@ function parseJsonText(text) {
 }
 
 function proofFromSources() {
-  const direct = readIfFile(proofPath);
-  if (direct) {
-    const parsed = parseJsonText(direct);
-    if (parsed) return parsed;
-  }
   for (const source of sourcePaths) {
     const text = readIfFile(source);
     if (!text) continue;
@@ -55,6 +50,11 @@ function proofFromSources() {
         }
       }
     }
+  }
+  const direct = readIfFile(proofPath);
+  if (direct) {
+    const parsed = parseJsonText(direct);
+    if (parsed) return parsed;
   }
   return null;
 }
