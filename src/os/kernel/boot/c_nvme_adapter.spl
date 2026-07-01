@@ -1,0 +1,55 @@
+# Vestigial boot block adapter — link-clean stub.
+#
+# This adapter historically wrapped a baremetal C NVMe bridge (simpleos_nvme_*).
+# Those C symbols were phantom externs with NO definition on any target and
+# broke the riscv64gc-unknown-none link (and the arm64 closure) with
+# "undefined symbol: simpleos_nvme_init / _read_sector / _write_sector".
+# The boot_fs NVFS/DBFS probe path that uses this adapter has therefore never
+# functioned on rv64.
+#
+# Real rv64 storage is served by the freestanding virtio-blk PCI driver
+# (rt_storage_*) in src/os/kernel/arch/riscv64/boot/freestanding_runtime.c,
+# driven by riscv_services.spl — a path completely independent of this adapter.
+# os_main tolerates a failed/unmounted boot_fs probe (it logs and continues),
+# so reducing this adapter to an honest, extern-free stub restores the
+# known-booting behavior while making the closure link cleanly on every target.
+#
+# This adapter intentionally references NO platform externs. It reports the C
+# bridge as unavailable rather than faking sector I/O. If a live boot_fs NVFS
+# mount is wanted on rv64, freestanding_runtime.c must export a sector
+# read/write wrapper for this adapter to back onto (out of scope here).
+#
+# The class name and two-field constructor are preserved so the out-of-tree
+# callers (boot_fs.spl, boot_fs_mount.spl) compile unchanged.
+#
+# MDSOC: feature dimension, kernel boot layer.
+
+use os.services.block_device.{BlockDevice}
+
+class CNvmeBlockAdapterFs:
+    """Vestigial boot block adapter; C NVMe bridge is unavailable (link-clean stub)."""
+    sector_buf_addr: u64
+    ready: bool
+
+impl CNvmeBlockAdapterFs:
+    static fn new() -> CNvmeBlockAdapterFs:
+        CNvmeBlockAdapterFs(sector_buf_addr: 0, ready: false)
+
+    me init_c_bridge() -> bool:
+        """C NVMe bridge has no backing on any target; report unavailable."""
+        false
+
+    me init() -> Result<bool, text>:
+        """C NVMe bridge has no backing on any target; report unavailable."""
+        Result.Err("CNvmeBlockAdapterFs: C NVMe bridge unavailable")
+
+impl BlockDevice for CNvmeBlockAdapterFs:
+    me read_sector(lba: u64) -> Result<[u8], text>:
+        Result.Err("CNvmeBlockAdapterFs: C NVMe bridge unavailable")
+
+    me write_sector(lba: u64, data: [u8]) -> Result<bool, text>:
+        Result.Err("CNvmeBlockAdapterFs: C NVMe bridge unavailable")
+
+    me fn sector_size() -> u32:
+        val default_sector_size: u32 = 512
+        default_sector_size
