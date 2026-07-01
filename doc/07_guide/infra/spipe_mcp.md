@@ -77,6 +77,7 @@ profile. `spipe_codebase_pack` returns status and byte count only; use
 `spipe_codebase_search` or `spipe_codebase_get` to inspect the stored tree.
 Existing XML RepoMix input with `<file path=...>` is matched as
 `repomix_xml`; markdown-style packs use `repomix_markdown`.
+Plain markdown sources or heading-shaped text use `markdown_headings`.
 
 The SQL context tools persist the rendered parent-chain tree into the existing
 Simple context SQLite table. Use `spipe_context_sql_put` with `db_path` to save
