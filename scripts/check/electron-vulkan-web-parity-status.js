@@ -67,6 +67,10 @@ function gpuAux(info) {
   return {};
 }
 
+function jsonSame(a, b) {
+  return JSON.stringify(a || {}) === JSON.stringify(b || {});
+}
+
 function electronVulkanProof(electron, proof, expectedPort, expectedCapturePath, expectedSourceHtmlPath, expectedSourceHtmlSha256, expectedVisualPngPath) {
   const proofSource = String((proof && proof.proof_source) || "");
   const proofStatus = String((proof && proof.status) || "");
@@ -99,6 +103,12 @@ function electronVulkanProof(electron, proof, expectedPort, expectedCapturePath,
   const pngPathOk = !expectedVisualPngPath || proofPngOutputPath === expectedVisualPngPath;
   const pngWrittenOk = !expectedVisualPngPath || proofPngWritten;
   const noBlurOrTolerance = proof && proofBlurOrToleranceUsed === false;
+  const proofFeatureStatus = proof && proof.gpu_feature_status ? proof.gpu_feature_status : {};
+  const electronFeatureStatus = electron && electron.gpuFeatureStatus ? electron.gpuFeatureStatus : null;
+  const proofBrowserGpuInfo = proof && proof.browser_target_gpu_info ? proof.browser_target_gpu_info : {};
+  const electronBrowserGpuInfo = electron && electron.browserTargetGpuInfo ? electron.browserTargetGpuInfo : null;
+  const featureStatusMatchesCapture = !electronFeatureStatus || jsonSame(proofFeatureStatus, electronFeatureStatus);
+  const browserGpuInfoMatchesCapture = !electronBrowserGpuInfo || jsonSame(proofBrowserGpuInfo, electronBrowserGpuInfo);
   const featureStatus = proof && proof.gpu_feature_status
     ? proof.gpu_feature_status
     : (electron && electron.gpuFeatureStatus ? electron.gpuFeatureStatus : {});
@@ -127,6 +137,7 @@ function electronVulkanProof(electron, proof, expectedPort, expectedCapturePath,
   const browserInfoOk = browserStatus === "pass";
   const backed = proofStatusOk && captureSourceOk && htmlPathOk && htmlSha256Ok &&
     proofCapturedArgbWritten && capturedArgbPathOk && pngPathOk && pngWrittenOk && noBlurOrTolerance &&
+    featureStatusMatchesCapture && browserGpuInfoMatchesCapture &&
     proofDimensionsOk && proofNativeDimensionsOk && proofNotDownsampled && remoteDebuggingPortOk &&
     enabled && gpuEnabled && hardware && mentionsVulkan && browserInfoOk;
   let reason = "electron-vulkan-backed";
@@ -139,6 +150,8 @@ function electronVulkanProof(electron, proof, expectedPort, expectedCapturePath,
   else if (!pngPathOk) reason = "electron-proof-png-path-mismatch";
   else if (!pngWrittenOk) reason = "electron-proof-png-not-written";
   else if (!noBlurOrTolerance) reason = "electron-proof-tolerance-used";
+  else if (!featureStatusMatchesCapture) reason = "electron-proof-gpu-feature-status-mismatch";
+  else if (!browserGpuInfoMatchesCapture) reason = "electron-proof-browser-gpu-info-mismatch";
   else if (!proofDimensionsOk) reason = "electron-proof-frame-mismatch";
   else if (!proofNativeDimensionsOk) reason = "electron-proof-native-frame-mismatch";
   else if (!proofNotDownsampled) reason = "electron-proof-downsampled";
@@ -160,6 +173,8 @@ function electronVulkanProof(electron, proof, expectedPort, expectedCapturePath,
     proofPngOutputPath,
     proofPngWritten,
     proofBlurOrToleranceUsed: proofBlurOrToleranceUsed === undefined ? "" : proofBlurOrToleranceUsed,
+    featureStatusMatchesCapture,
+    browserGpuInfoMatchesCapture,
     proofWidth: proofWidth === undefined ? "" : proofWidth,
     proofHeight: proofHeight === undefined ? "" : proofHeight,
     proofNativeWidth: proofNativeWidth === undefined ? "" : proofNativeWidth,
@@ -258,6 +273,8 @@ if (electronProofPath) {
   common.electron_vulkan_web_parity_windows_compare_electron_proof_png_path = electronProofStatus.proofPngOutputPath;
   common.electron_vulkan_web_parity_windows_compare_electron_proof_png_written = electronProofStatus.proofPngWritten ? "true" : "false";
   common.electron_vulkan_web_parity_windows_compare_electron_proof_blur_or_tolerance_used = electronProofStatus.proofBlurOrToleranceUsed;
+  common.electron_vulkan_web_parity_windows_compare_electron_proof_gpu_feature_status_matches_capture = electronProofStatus.featureStatusMatchesCapture ? "true" : "false";
+  common.electron_vulkan_web_parity_windows_compare_electron_proof_browser_gpu_info_matches_capture = electronProofStatus.browserGpuInfoMatchesCapture ? "true" : "false";
   common.electron_vulkan_web_parity_windows_compare_electron_proof_width = electronProofStatus.proofWidth;
   common.electron_vulkan_web_parity_windows_compare_electron_proof_height = electronProofStatus.proofHeight;
   common.electron_vulkan_web_parity_windows_compare_electron_proof_native_width = electronProofStatus.proofNativeWidth;

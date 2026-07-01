@@ -27,7 +27,7 @@ electron_vulkan_web_parity_windows_contract_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 42 | 42 | 0 | 0 |
+| 43 | 43 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -303,7 +303,7 @@ The spec contains:
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 132 lines folded for reproduction.
+Runnable source: 136 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -385,6 +385,8 @@ expect(helper).to_contain("electron-proof-captured-argb-path-mismatch")
 expect(helper).to_contain("electron-proof-png-path-mismatch")
 expect(helper).to_contain("electron-proof-png-not-written")
 expect(helper).to_contain("electron-proof-tolerance-used")
+expect(helper).to_contain("electron-proof-gpu-feature-status-mismatch")
+expect(helper).to_contain("electron-proof-browser-gpu-info-mismatch")
 expect(helper).to_contain("electron-proof-frame-mismatch")
 expect(helper).to_contain("electron-proof-native-frame-mismatch")
 expect(helper).to_contain("electron-proof-downsampled")
@@ -398,6 +400,8 @@ expect(helper).to_contain("proofCapturedArgbPath")
 expect(helper).to_contain("proofPngOutputPath")
 expect(helper).to_contain("proofPngWritten")
 expect(helper).to_contain("proofBlurOrToleranceUsed")
+expect(helper).to_contain("featureStatusMatchesCapture")
+expect(helper).to_contain("browserGpuInfoMatchesCapture")
 expect(helper).to_contain("proofNativeDimensionsOk")
 expect(helper).to_contain("proofNotDownsampled")
 expect(helper).to_contain("proofRemoteDebuggingPort")
@@ -1019,6 +1023,30 @@ expect(stdout).to_contain("electron_vulkan_web_parity_windows_compare_electron_p
 
 </details>
 
+#### rejects Electron GPU proof that disagrees with captured GPU metadata
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-electron-vulkan-web-parity-windows-browser-proof-gpu-metadata-mismatch"
+val electron_json = "'{\"producer\":\"electron-chromium-capture\",\"width\":2,\"height\":2,\"gpuFeatureStatus\":{\"vulkan\":\"disabled_software\",\"gpu_compositing\":\"enabled\"},\"pixels\":[1,2,3,4]}'"
+val proof = "'{\"status\":\"pass\",\"proof_source\":\"tools/electron-live-bitmap/capture_html_argb.js\",\"html_path\":\"$ELECTRON_CAPTURE_HTML\",\"html_sha256\":\"$ELECTRON_CAPTURE_EXPECTED_HTML_SHA256\",\"captured_argb_written\":true,\"png_output_path\":\"$ELECTRON_CAPTURE_PNG_OUTPUT\",\"png_written\":true,\"blur_or_tolerance_used\":false,\"native_width\":2,\"native_height\":2,\"downsampled\":false,\"width\":2,\"height\":2,\"gpu_feature_status\":{\"vulkan\":\"enabled\",\"gpu_compositing\":\"enabled\"},\"browser_target_gpu_info_status\":\"pass\",\"browser_target_gpu_info\":{\"gpu\":{\"auxAttributes\":{\"hardwareSupportsVulkan\":true,\"displayType\":\"Vulkan\",\"glImplementationParts\":\"angle=vulkan\",\"skiaBackendType\":\"Vulkan\",\"glRenderer\":\"Vulkan\"}}}}}}'"
+val vulkan_json = "'{\"status\":\"pass\",\"reason\":\"pass\",\"producer\":\"simple-engine2d-vulkan\",\"requested_backend\":\"vulkan\",\"execution_mode\":\"interpret\",\"backend\":\"vulkan\",\"pixel_count\":4,\"width\":2,\"height\":2,\"pixels\":[1,2,3,4]}'"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && printf '%s\\n' " + electron_json + " > " + root + "/electron.json && printf '%s\\n' " + vulkan_json + " > " + root + "/vulkan.json && printf '%s\\n' " + proof + " > " + root + "/electron-proof.json && printf '}' >> " + root + "/electron-proof.json && node scripts/check/electron-vulkan-web-parity-status.js " + root + "/electron.json " + root + "/vulkan.json " + root + "/electron-proof.json"
+val (stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+
+expect(code).to_equal(2)
+expect(stdout).to_contain("electron_vulkan_web_parity_windows_status=fail")
+expect(stdout).to_contain("electron_vulkan_web_parity_windows_reason=electron-proof-gpu-feature-status-mismatch")
+expect(stdout).to_contain("electron_vulkan_web_parity_windows_compare_electron_proof_gpu_feature_status_matches_capture=false")
+```
+
+</details>
+
 #### rejects Electron GPU proof from a different ARGB output path
 
 <details>
@@ -1406,8 +1434,8 @@ expect(stdout).to_contain("electron_vulkan_web_parity_windows_compare_invalid_vu
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 42 |
-| Active scenarios | 42 |
+| Total scenarios | 43 |
+| Active scenarios | 43 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
