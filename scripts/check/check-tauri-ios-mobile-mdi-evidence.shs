@@ -4,6 +4,10 @@ set -eu
 ROOT_DIR="$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)"
 TAURI_DIR="$ROOT_DIR/tools/tauri-shell"
 BUILD_DIR="${BUILD_DIR:-$ROOT_DIR/build/tauri_ios_mdi}"
+case "$BUILD_DIR" in
+    /*) ;;
+    *) BUILD_DIR="$ROOT_DIR/$BUILD_DIR" ;;
+esac
 PROBE_HELPER="$ROOT_DIR/scripts/check/ios_mdi_probe_server.spl"
 ELECTRON_PROBE_RUNNER="$ROOT_DIR/scripts/check/ios_mdi_probe_electron_self_test.js"
 SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
@@ -16,13 +20,29 @@ is_rust_seed_simple() {
 }
 if [ "${SIMPLE_BIN:-}" = "" ]; then
     SIMPLE_BIN_SOURCE="missing-self-hosted"
-    for candidate in "$ROOT_DIR"/release/*/simple "$ROOT_DIR"/bin/release/*/simple "$ROOT_DIR"/build/bootstrap/stage3/simple "$ROOT_DIR"/bin/simple; do
+    for candidate in "$ROOT_DIR"/bin/simple "$ROOT_DIR"/build/bootstrap/stage3/simple; do
         if [ -x "$candidate" ]; then
             SIMPLE_BIN="$candidate"
             SIMPLE_BIN_SOURCE="repo-self-hosted-fallback"
             break
         fi
     done
+    if [ "${SIMPLE_BIN:-}" = "" ]; then
+        case "$(uname -s):$(uname -m)" in
+            Darwin:arm64) host_release_glob="$ROOT_DIR/release/aarch64-apple-darwin*/simple" ;;
+            Darwin:x86_64) host_release_glob="$ROOT_DIR/release/x86_64-apple-darwin*/simple" ;;
+            Linux:arm64|Linux:aarch64) host_release_glob="$ROOT_DIR/release/aarch64-unknown-linux-gnu/simple" ;;
+            Linux:x86_64) host_release_glob="$ROOT_DIR/release/x86_64-unknown-linux-gnu/simple" ;;
+            *) host_release_glob="" ;;
+        esac
+        for candidate in $host_release_glob; do
+            if [ -x "$candidate" ]; then
+                SIMPLE_BIN="$candidate"
+                SIMPLE_BIN_SOURCE="repo-host-release-fallback"
+                break
+            fi
+        done
+    fi
     if [ "${SIMPLE_BIN:-}" = "" ] && [ "${ALLOW_PATH_SIMPLE_BIN:-0}" = "1" ] && command -v simple >/dev/null 2>&1; then
         SIMPLE_BIN="$(command -v simple)"
         SIMPLE_BIN_SOURCE="path-opt-in"
@@ -43,6 +63,10 @@ fi
 export SIMPLE_BIN SIMPLE_BIN_SOURCE SIMPLE_BIN_STATUS
 SMOKE_SOURCE="$ROOT_DIR/examples/06_io/ui/tauri_mobile_mdi_smoke.spl"
 SCREENSHOT="${IOS_MDI_SCREENSHOT:-$BUILD_DIR/ios_simulator_mdi.png}"
+case "$SCREENSHOT" in
+    /*) ;;
+    *) SCREENSHOT="$ROOT_DIR/$SCREENSHOT" ;;
+esac
 LOG_STREAM="$BUILD_DIR/ios_simulator_log_stream.txt"
 IOS_DEV_LOG="$BUILD_DIR/ios_tauri_dev.log"
 SERVER_LOG="$BUILD_DIR/ios_mdi_probe_server.log"
@@ -351,6 +375,8 @@ xcrun simctl spawn "$SIM_UDID" log stream --style compact \
     > "$LOG_STREAM" 2>&1 &
 LOG_PID=$!
 
+SIMPLE_TAURI_MOBILE_PROBE_ENTRY=mdi-smoke \
+SIMPLE_TAURI_MDI_PROOF_PATH="$PROOF_JSON" \
 SIMPLE_DASHBOARD_URL="http://127.0.0.1:$PORT/ios_mdi_probe.html" \
     cargo tauri ios dev --no-watch --no-dev-server --no-dev-server-wait "$SIM_DEVICE_NAME" > "$IOS_DEV_LOG" 2>&1 &
 IOS_DEV_PID=$!
@@ -371,10 +397,18 @@ test -s "$PROOF_JSON" || fail "iOS MDI probe proof not observed within ${TIMEOUT
 "$SIMPLE_BIN" run "$PROBE_HELPER" --mode=interpreter --validate "$PROOF_JSON" "$LOG_STREAM" "$IOS_DEV_LOG"
 "$SIMPLE_BIN" run "$PROBE_HELPER" --mode=interpreter --validate-screenshot "$SCREENSHOT"
 "$SIMPLE_BIN" run "$PROBE_HELPER" --mode=interpreter --validate-probe-mdi-screenshot "$SCREENSHOT" ios_mdi_probe_simulator_screenshot_semantic
-grep -q 'external_url: Some' "$IOS_DEV_LOG" \
-    || fail "Tauri iOS log missing external_url marker; see $IOS_DEV_LOG"
-grep -q 'ios_mdi_probe.html' "$IOS_DEV_LOG" \
-    || fail "Tauri iOS log missing probe URL marker; see $IOS_DEV_LOG"
+if ! grep -q 'external_url: Some' "$IOS_DEV_LOG" || ! grep -q 'ios_mdi_probe.html' "$IOS_DEV_LOG"; then
+    grep -q 'simple-mobile-mdi-smoke.spl' "$IOS_DEV_LOG" "$LOG_STREAM" \
+        || fail "Tauri iOS log missing bundled MDI smoke entry marker; see $IOS_DEV_LOG"
+    grep -q 'openWindow id=terminal' "$IOS_DEV_LOG" "$LOG_STREAM" \
+        || fail "Tauri iOS log missing terminal openWindow marker; see $IOS_DEV_LOG"
+    grep -q 'openWindow id=files' "$IOS_DEV_LOG" "$LOG_STREAM" \
+        || fail "Tauri iOS log missing files openWindow marker; see $IOS_DEV_LOG"
+    grep -q 'openWindow id=tasks' "$IOS_DEV_LOG" "$LOG_STREAM" \
+        || fail "Tauri iOS log missing tasks openWindow marker; see $IOS_DEV_LOG"
+    grep -q 'openWindow id=settings' "$IOS_DEV_LOG" "$LOG_STREAM" \
+        || fail "Tauri iOS log missing settings openWindow marker; see $IOS_DEV_LOG"
+fi
 
 echo "ios_tooling=available"
 echo "ios_simulator=$SIM_UDID"

@@ -1432,6 +1432,11 @@ fn prepare_bundled_mobile_entry() -> Result<Option<String>, String> {
     Ok(Some(entry_path.to_string_lossy().into_owned()))
 }
 
+fn prefer_bundled_mobile_mdi_entry() -> bool {
+    option_env!("SIMPLE_TAURI_MOBILE_PROBE_ENTRY") == Some("mdi-smoke")
+        || env::var("SIMPLE_TAURI_MOBILE_PROBE_ENTRY").as_deref() == Ok("mdi-smoke")
+}
+
 // Extracts the embedded UI source bundle (gzip tar) to a cache directory and
 // returns its root path. The bundle is laid out as `<root>/src/{app,lib,os,type}/...`
 // plus `<root>/widget_showcase_mobile.ui.sdn`, so the on-device invocation
@@ -1602,6 +1607,21 @@ pub fn run() {
     // repo-relative desktop path; the embedded source bundle overrides it with an
     // absolute `<bundleRoot>/src/...` entry so find_project_root resolves on device.
     let mut ui_main_path = "src/app/ui/main.spl".to_string();
+    if entry_file.is_none() && prefer_bundled_mobile_mdi_entry() {
+        match prepare_bundled_mobile_entry() {
+            Ok(path) => entry_file = path,
+            Err(err) => {
+                eprintln!(
+                    "[tauri-shell] bundled mobile MDI entry extraction failed: {}",
+                    err
+                );
+                startup_error = Some(format!(
+                    "Bundled mobile MDI entry extraction failed.\n\n{}",
+                    err
+                ));
+            }
+        }
+    }
     // Prefer the embedded real-pipeline source bundle (renders the widget showcase
     // via the genuine render_html_tree path) over the hard-coded smoke entry.
     if entry_file.is_none() {

@@ -4,6 +4,10 @@ set -eu
 ROOT_DIR="$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)"
 TAURI_DIR="$ROOT_DIR/tools/tauri-shell"
 BUILD_DIR="${BUILD_DIR:-$ROOT_DIR/build/tauri_ios_mobile_renderer}"
+case "$BUILD_DIR" in
+    /*) ;;
+    *) BUILD_DIR="$ROOT_DIR/$BUILD_DIR" ;;
+esac
 PROBE_HELPER="$ROOT_DIR/scripts/check/ios_mdi_probe_server.spl"
 MDI_PROOF_VALIDATOR="$ROOT_DIR/scripts/check/validate-tauri-mobile-mdi-proof.js"
 IOS_RENDER_LOG_VALIDATOR="$ROOT_DIR/scripts/check/validate-tauri-ios-render-log-proof.js"
@@ -17,13 +21,29 @@ is_rust_seed_simple() {
 }
 if [ "${SIMPLE_BIN:-}" = "" ]; then
     SIMPLE_BIN_SOURCE="missing-self-hosted"
-    for candidate in "$ROOT_DIR"/release/*/simple "$ROOT_DIR"/bin/release/*/simple "$ROOT_DIR"/build/bootstrap/stage3/simple "$ROOT_DIR"/bin/simple; do
+    for candidate in "$ROOT_DIR"/bin/simple "$ROOT_DIR"/build/bootstrap/stage3/simple; do
         if [ -x "$candidate" ]; then
             SIMPLE_BIN="$candidate"
             SIMPLE_BIN_SOURCE="repo-self-hosted-fallback"
             break
         fi
     done
+    if [ "${SIMPLE_BIN:-}" = "" ]; then
+        case "$(uname -s):$(uname -m)" in
+            Darwin:arm64) host_release_glob="$ROOT_DIR/release/aarch64-apple-darwin*/simple" ;;
+            Darwin:x86_64) host_release_glob="$ROOT_DIR/release/x86_64-apple-darwin*/simple" ;;
+            Linux:arm64|Linux:aarch64) host_release_glob="$ROOT_DIR/release/aarch64-unknown-linux-gnu/simple" ;;
+            Linux:x86_64) host_release_glob="$ROOT_DIR/release/x86_64-unknown-linux-gnu/simple" ;;
+            *) host_release_glob="" ;;
+        esac
+        for candidate in $host_release_glob; do
+            if [ -x "$candidate" ]; then
+                SIMPLE_BIN="$candidate"
+                SIMPLE_BIN_SOURCE="repo-host-release-fallback"
+                break
+            fi
+        done
+    fi
     if [ "${SIMPLE_BIN:-}" = "" ] && [ "${ALLOW_PATH_SIMPLE_BIN:-0}" = "1" ] && command -v simple >/dev/null 2>&1; then
         SIMPLE_BIN="$(command -v simple)"
         SIMPLE_BIN_SOURCE="path-opt-in"
@@ -43,6 +63,10 @@ elif [ ! -x "$SIMPLE_BIN" ]; then
 fi
 export SIMPLE_BIN SIMPLE_BIN_SOURCE SIMPLE_BIN_STATUS
 SCREENSHOT="${IOS_RENDERER_SCREENSHOT:-$BUILD_DIR/ios_renderer.png}"
+case "$SCREENSHOT" in
+    /*) ;;
+    *) SCREENSHOT="$ROOT_DIR/$SCREENSHOT" ;;
+esac
 LOG_STREAM="$BUILD_DIR/ios_renderer_log_stream.txt"
 IOS_DEV_LOG="$BUILD_DIR/ios_renderer_tauri_dev.log"
 MDI_PROOF_JSON="$BUILD_DIR/ios_mdi_proof.json"
@@ -242,6 +266,7 @@ emit_unavailable_ios_diagnostics() {
     emit_existing_or_default ios_render_log_coherent_source_size_bytes "" "$IOS_RENDER_LOG_VALIDATION_ENV"
     emit_ios_render_log_coherent_source_artifact_rows
     emit_existing_or_default ios_render_log_marker_status "$diagnostic_status" "$IOS_RENDER_LOG_VALIDATION_ENV"
+    emit_existing_or_default ios_render_log_marker_source missing "$IOS_RENDER_LOG_VALIDATION_ENV"
     emit_existing_or_default ios_render_log_html_len "" "$IOS_RENDER_LOG_VALIDATION_ENV"
     emit_existing_or_default ios_render_log_metal_marker_status "$diagnostic_status" "$IOS_RENDER_LOG_VALIDATION_ENV"
     emit_existing_or_default ios_render_log_fallback_marker_status "$diagnostic_status" "$IOS_RENDER_LOG_VALIDATION_ENV"
@@ -454,30 +479,41 @@ xcrun simctl spawn "$SIM_UDID" log stream --style compact \
 LOG_PID=$!
 
 cleanup() {
-    kill "$LOG_PID" 2>/dev/null || true
+    if [ -n "${LOG_PID:-}" ]; then
+        kill "$LOG_PID" 2>/dev/null || true
+    fi
     if [ -n "${IOS_DEV_PID:-}" ]; then
         kill "$IOS_DEV_PID" 2>/dev/null || true
     fi
 }
 trap cleanup EXIT INT TERM
 
-cargo tauri ios dev --no-watch --no-dev-server --no-dev-server-wait "$SIM_DEVICE_NAME" > "$IOS_DEV_LOG" 2>&1 &
+SIMPLE_TAURI_MDI_PROOF_PATH="$MDI_PROOF_JSON" \
+    cargo tauri ios dev --no-watch --no-dev-server --no-dev-server-wait "$SIM_DEVICE_NAME" > "$IOS_DEV_LOG" 2>&1 &
 IOS_DEV_PID=$!
 
 end=$(( $(date +%s) + TIMEOUT_SECS ))
 while [ "$(date +%s)" -lt "$end" ]; do
-    if grep -q '\[tauri-shell\] render, html_len=' "$IOS_DEV_LOG" "$LOG_STREAM" 2>/dev/null; then
+    if grep -Eq '\[tauri-shell\] render, html_len=|\[tauri-shell\] raw stdout: \{"type":"render"' "$IOS_DEV_LOG" "$LOG_STREAM" 2>/dev/null; then
         break
     fi
     sleep 2
 done
 
-grep -q '\[tauri-shell\] render, html_len=' "$IOS_DEV_LOG" "$LOG_STREAM" 2>/dev/null \
+grep -Eq '\[tauri-shell\] render, html_len=|\[tauri-shell\] raw stdout: \{"type":"render"' "$IOS_DEV_LOG" "$LOG_STREAM" 2>/dev/null \
     || fail "Tauri iOS render log not observed within ${TIMEOUT_SECS}s"
 
 xcrun simctl io "$SIM_UDID" screenshot "$SCREENSHOT" > "$BUILD_DIR/ios_screenshot.log" 2>&1 \
     || fail "failed to capture iOS simulator screenshot"
 test -s "$SCREENSHOT" || fail "iOS simulator screenshot is empty: $SCREENSHOT"
+
+mdi_end=$(( $(date +%s) + 10 ))
+while [ "$(date +%s)" -lt "$mdi_end" ]; do
+    if [ -s "$MDI_PROOF_JSON" ] || grep -q '\[tauri-shell\] mdi proof:' "$IOS_DEV_LOG" "$LOG_STREAM" 2>/dev/null; then
+        break
+    fi
+    sleep 1
+done
 
 validate_screenshot_png "$SCREENSHOT" ios_mobile_renderer_screenshot \
     || fail "iOS mobile renderer screenshot PNG validation failed"
@@ -491,6 +527,13 @@ fi
 if [ "$ios_screenshot_pixel_diversity_status" != "pass" ]; then
     fail "ios-screenshot-pixel-diversity-failed"
 fi
+
+kill "$LOG_PID" 2>/dev/null || true
+wait "$LOG_PID" 2>/dev/null || true
+LOG_PID=""
+kill "$IOS_DEV_PID" 2>/dev/null || true
+wait "$IOS_DEV_PID" 2>/dev/null || true
+IOS_DEV_PID=""
 
 node "$IOS_RENDER_LOG_VALIDATOR" "$IOS_DEV_LOG" "$LOG_STREAM" > "$IOS_RENDER_LOG_VALIDATION_ENV" \
     || {
@@ -531,6 +574,7 @@ if [ "$ios_render_log_coherent_source_file_status" != "pass" ] || [ "$ios_render
     fi
 fi
 ios_render_log_marker_status="$(value_of ios_render_log_marker_status "$IOS_RENDER_LOG_VALIDATION_ENV")"
+ios_render_log_marker_source="$(value_of ios_render_log_marker_source "$IOS_RENDER_LOG_VALIDATION_ENV")"
 ios_render_log_metal_marker_status="$(value_of ios_render_log_metal_marker_status "$IOS_RENDER_LOG_VALIDATION_ENV")"
 ios_render_log_fallback_marker_status="$(value_of ios_render_log_fallback_marker_status "$IOS_RENDER_LOG_VALIDATION_ENV")"
 ios_render_log_tauri_context_status="$(value_of ios_render_log_tauri_context_status "$IOS_RENDER_LOG_VALIDATION_ENV")"
@@ -651,6 +695,7 @@ echo "ios_render_log_coherent_source_file_status=$ios_render_log_coherent_source
 echo "ios_render_log_coherent_source_file_reason=$ios_render_log_coherent_source_file_reason"
 echo "ios_render_log_coherent_source_artifact_status=$ios_render_log_coherent_source_artifact_status"
 echo "ios_render_log_marker_status=$ios_render_log_marker_status"
+echo "ios_render_log_marker_source=$ios_render_log_marker_source"
 echo "ios_render_log_metal_marker_status=$ios_render_log_metal_marker_status"
 echo "ios_render_log_fallback_marker_status=$ios_render_log_fallback_marker_status"
 echo "ios_render_log_tauri_context_status=$ios_render_log_tauri_context_status"
