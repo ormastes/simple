@@ -2,8 +2,9 @@
 
 use std.cli.cli_util.{get_cli_args}
 use app.io.context_ops.{context_sql_get_pack, context_sql_put_pack, context_sql_query_packs_by_source}
+use app.io.mod.{process_run_timeout}
 use std.io.{file_read, file_exists}
-use std.nogc_sync_mut.spipe.codebase_ingest.{spipe_codebase_get, spipe_codebase_ingest, spipe_codebase_profile, spipe_codebase_save_text, spipe_codebase_search, spipe_codebase_validate_patterns}
+use std.nogc_sync_mut.spipe.codebase_ingest.{spipe_codebase_get, spipe_codebase_ingest, spipe_codebase_profile, spipe_codebase_save_text, spipe_codebase_search, spipe_codebase_simple_ignore_profile, spipe_codebase_simple_include_profile, spipe_codebase_validate_patterns}
 use std.nogc_sync_mut.spipe.hook_event.{spipe_hook_event, spipe_hook_rules}
 use std.nogc_sync_mut.spipe.minimality.{spipe_minimality_check, spipe_minimality_debt, spipe_minimality_review}
 use std.nogc_sync_mut.spipe.tree_context.{ContextStore, spipe_context_get, spipe_context_put, spipe_context_raw, spipe_context_search, spipe_context_store_new, spipe_parse_source, spipe_parse_text, spipe_render_tree, spipe_match_parser, spipe_parser_names, spipe_raw_range, spipe_source_blob}
@@ -29,6 +30,7 @@ fn print_help():
     print "  minimality-check --task=TEXT [-f FILE]"
     print "  hook-event --provider=codex --event=tool_start [--tool=NAME]"
     print "  codebase-profile"
+    print "  codebase-pack [--root=PATH] [--source-id=ID]"
 
 fn _value(args: [text], name: text, default_value: text) -> text:
     val prefix = name + "="
@@ -54,6 +56,14 @@ fn _to_i64(value: text, default_value: i64) -> i64:
         if ch < "0" or ch > "9":
             return default_value
     int(value)
+
+fn _safe_cli_value(value: text) -> bool:
+    not value.contains(";") and not value.contains("|") and not value.contains("&&") and not value.contains("`") and not value.contains("$(") and not value.contains(">") and not value.contains("<")
+
+fn _short_text(value: text, limit: i64) -> text:
+    if value.len() <= limit:
+        return value
+    value.substring(0, limit) + "...(truncated)"
 
 fn _json_unescape(value: text) -> text:
     var out = value
@@ -110,6 +120,7 @@ fn _spipe_tools_list_payload() -> text:
     val minimality_props = "{\"task\":" + text_prop + ",\"text\":" + text_prop + ",\"mode\":" + text_prop + "}"
     val hook_props = "{\"provider\":" + text_prop + ",\"event\":" + text_prop + ",\"raw_payload\":" + text_prop + ",\"tool_name\":" + text_prop + ",\"cwd\":" + text_prop + ",\"repo\":" + text_prop + ",\"files\":" + text_prop + ",\"diff\":" + text_prop + ",\"prompt_excerpt\":" + text_prop + "}"
     val codebase_ingest_props = "{\"source_id\":" + text_prop + ",\"text\":" + text_prop + ",\"include_patterns\":" + text_prop + ",\"ignore_patterns\":" + text_prop + "}"
+    val codebase_pack_props = "{\"source_id\":" + text_prop + ",\"root\":" + text_prop + ",\"include_patterns\":" + text_prop + ",\"ignore_patterns\":" + text_prop + ",\"timeout_ms\":" + int_prop + "}"
     var tools: [text] = []
     tools.push(_tool_def("spipe_tree_parser_list", "List SPipe parser names.", "{}", "[]"))
     tools.push(_tool_def("spipe_tree_match_parser", "Return the best parser for source kind, command, and text.", common_props, "[\"text\"]"))
@@ -128,6 +139,7 @@ fn _spipe_tools_list_payload() -> text:
     tools.push(_tool_def("spipe_hook_rules", "List provider hook event-to-phase mappings.", "{\"provider\":" + text_prop + "}", "[\"provider\"]"))
     tools.push(_tool_def("spipe_hook_render", "Render a normalized hook event. Alias of spipe_hook_event.", hook_props, "[\"provider\",\"event\"]"))
     tools.push(_tool_def("spipe_codebase_profile", "Return focused Simple MCP RepoMix include/ignore profile.", "{}", "[]"))
+    tools.push(_tool_def("spipe_codebase_pack", "Run RepoMix through argv-safe process execution and ingest stdout into the SPipe context tree.", codebase_pack_props, "[]"))
     tools.push(_tool_def("spipe_codebase_ingest", "Ingest existing RepoMix/codebase-mcp output into the SPipe context tree.", codebase_ingest_props, "[\"source_id\",\"text\"]"))
     tools.push(_tool_def("spipe_codebase_search", "Search ingested codebase trees.", "{\"query\":" + text_prop + "}", "[\"query\"]"))
     tools.push(_tool_def("spipe_codebase_get", "Render an ingested codebase tree by source id.", "{\"source_id\":" + text_prop + "}", "[\"source_id\"]"))
@@ -214,6 +226,26 @@ fn _dispatch_tool(id: text, tool_name: text, args_raw: text) -> text:
         return _tool_text_result(id, spipe_hook_event(provider, event, raw_payload, hook_tool_name, cwd, repo, files, diff, prompt_excerpt))
     if tool_name == "spipe_codebase_profile":
         return _tool_text_result(id, spipe_codebase_profile())
+    if tool_name == "spipe_codebase_pack":
+        val source_id = _arg_str(args_raw, "source_id", "codebase:repomix")
+        val root = _arg_str(args_raw, "root", ".")
+        val include_patterns = _arg_str(args_raw, "include_patterns", spipe_codebase_simple_include_profile())
+        val ignore_patterns = _arg_str(args_raw, "ignore_patterns", spipe_codebase_simple_ignore_profile())
+        val timeout_ms = _arg_i64(args_raw, "timeout_ms", 120000)
+        if not _safe_cli_value(root) or root.starts_with("-"):
+            return _tool_text_result(id, "invalid: root")
+        val include_status = spipe_codebase_validate_patterns(include_patterns)
+        val ignore_status = spipe_codebase_validate_patterns(ignore_patterns)
+        if include_status != "ok":
+            return _tool_text_result(id, include_status)
+        if ignore_status != "ok":
+            return _tool_text_result(id, ignore_status)
+        val args = ["-y", "repomix", root, "--stdout", "--style", "markdown", "--include", include_patterns, "--ignore", ignore_patterns]
+        val (stdout, stderr, exit_code) = process_run_timeout("npx", args, timeout_ms)
+        if exit_code != 0:
+            return _tool_text_result(id, "status: failed\ncommand: npx -y repomix\nexit_code: " + str(exit_code) + "\nstderr: " + _short_text(stderr, 1000))
+        _SPIPE_STORE = spipe_codebase_ingest(_SPIPE_STORE, source_id, stdout)
+        return _tool_text_result(id, "status: ready\nsource_id: " + source_id + "\nbytes: " + str(stdout.len()))
     if tool_name == "spipe_codebase_ingest":
         val source_id = _arg_str(args_raw, "source_id", "codebase:1")
         val packed = _arg_str(args_raw, "text", _arg_str(args_raw, "packed_text", ""))
@@ -343,6 +375,33 @@ fn main() -> i64:
         for name in spipe_parser_names():
             print name
         return 0
+    if cmd == "codebase-profile":
+        print spipe_codebase_profile()
+        return 0
+    if cmd == "codebase-pack":
+        val source_id = _value(args, "--source-id", "codebase:repomix")
+        val root = _value(args, "--root", ".")
+        val include_patterns = _value(args, "--include", spipe_codebase_simple_include_profile())
+        val ignore_patterns = _value(args, "--ignore", spipe_codebase_simple_ignore_profile())
+        val timeout_ms = _to_i64(_value(args, "--timeout-ms", "120000"), 120000)
+        if not _safe_cli_value(root) or root.starts_with("-"):
+            print "invalid: root"
+            return 2
+        val include_status = spipe_codebase_validate_patterns(include_patterns)
+        val ignore_status = spipe_codebase_validate_patterns(ignore_patterns)
+        if include_status != "ok":
+            print include_status
+            return 2
+        if ignore_status != "ok":
+            print ignore_status
+            return 2
+        val pack_args = ["-y", "repomix", root, "--stdout", "--style", "markdown", "--include", include_patterns, "--ignore", ignore_patterns]
+        val (stdout, stderr, exit_code) = process_run_timeout("npx", pack_args, timeout_ms)
+        if exit_code != 0:
+            print "status: failed\ncommand: npx -y repomix\nexit_code: " + str(exit_code) + "\nstderr: " + _short_text(stderr, 1000)
+            return 1
+        print spipe_codebase_save_text(source_id, stdout)
+        return 0
     val command = _value(args, "--command", "")
     val raw = _read_file_arg(args)
     if raw == "":
@@ -379,9 +438,6 @@ fn main() -> i64:
             _value(args, "--diff", ""),
             _value(args, "--prompt", "")
         )
-        return 0
-    if cmd == "codebase-profile":
-        print spipe_codebase_profile()
         return 0
     print_help()
     1

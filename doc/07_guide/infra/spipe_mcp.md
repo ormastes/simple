@@ -27,6 +27,8 @@ bin/release/simple run src/app/spipe_mcp/main.spl parsers
 bin/release/simple run src/app/spipe_mcp/main.spl match --command='git diff' -f output.txt
 bin/release/simple run src/app/spipe_mcp/main.spl parse --command='simple build' -f output.txt
 bin/release/simple run src/app/spipe_mcp/main.spl raw -f output.txt --start=10 --end=12 --before=2 --after=2
+bin/release/simple run src/app/spipe_mcp/main.spl codebase-profile
+bin/release/simple run src/app/spipe_mcp/main.spl codebase-pack --root=. --include=src/app/spipe_mcp/main.spl --ignore='.git/**,build/**'
 ```
 
 No args and `serve` run the MCP stdio server. Logs must stay off stdout.
@@ -50,6 +52,7 @@ No args and `serve` run the MCP stdio server. Logs must stay off stdout.
 - `spipe_hook_rules`
 - `spipe_hook_render`
 - `spipe_codebase_profile`
+- `spipe_codebase_pack`
 - `spipe_codebase_ingest`
 - `spipe_codebase_search`
 - `spipe_codebase_get`
@@ -63,10 +66,12 @@ The hook tools normalize Claude, Codex, Gemini, and generic provider event
 names into SPipe phases such as `pre_tool`, `post_tool`, `pre_prompt`,
 `post_turn`, `post_edit`, and `pre_commit`.
 
-The codebase tools ingest existing RepoMix/codebase-mcp output, index it in the
+The codebase tools run RepoMix with a fixed argv vector
+`npx -y repomix <root> --stdout --style markdown --include <patterns> --ignore
+<patterns>`, ingest existing RepoMix/codebase-mcp output, index it in the
 session-local tree store, and expose the focused Simple MCP include/ignore
-profile. They do not run `npx repomix`; process execution must stay argv-safe
-when added.
+profile. `spipe_codebase_pack` returns status and byte count only; use
+`spipe_codebase_search` or `spipe_codebase_get` to inspect the stored tree.
 
 The SQL context tools persist the rendered parent-chain tree into the existing
 Simple context SQLite table. Use `spipe_context_sql_put` with `db_path` to save
@@ -79,5 +84,6 @@ source filter.
 This patch adds the common parser/store API, executable wrapper, minimal MCP
 stdio server, deterministic Ponytail minimality tools, and hook normalization.
 It also ingests existing RepoMix/codebase-mcp output and can persist parsed
-context through the existing SQLite context database. Argv-safe RepoMix
-execution should reuse this API instead of adding new parser models.
+context through the existing SQLite context database. RepoMix execution stays
+behind the app-owned process facade and uses argv-safe arguments instead of a
+shell command string.

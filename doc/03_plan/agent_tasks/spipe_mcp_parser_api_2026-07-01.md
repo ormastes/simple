@@ -20,14 +20,16 @@
 - Added codebase-mcp compatibility ingest tools: `spipe_codebase_profile`,
   `spipe_codebase_ingest`, `spipe_codebase_search`, `spipe_codebase_get`, and
   `spipe_codebase_save` metadata.
+- Added `spipe_codebase_pack` and `codebase-pack`, using the app process facade
+  to run RepoMix with a fixed argv vector and ingest stdout without returning
+  the whole pack through MCP.
+- Added durable SQLite context tools: `spipe_context_sql_put`,
+  `spipe_context_sql_get`, and `spipe_context_sql_search`.
 - Added focused unit coverage.
 
 ## Remaining
 
-- Add durable SQL/FTS storage for context-mode retrieval.
-- Add RepoMix/codebase pack execution using argv-safe process APIs; current
-  code ingests existing packed text and rejects shell metacharacters in pattern
-  arguments.
+- Full completion audit against the broad SPipe MCP objective.
 
 Sidecar lanes: N/A for this first common API patch.
 Merge owner: Codex.
