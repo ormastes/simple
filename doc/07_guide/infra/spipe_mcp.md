@@ -55,6 +55,9 @@ bin/release/simple run src/app/spipe_mcp/main.spl getCodebase --path=. --include
 bin/release/simple run src/app/spipe_mcp/main.spl codebase-pack-local --root=. --include=src/app/spipe_mcp/main.spl --ignore='.git/**,build/**'
 bin/release/simple run src/app/spipe_mcp/main.spl codebase-pack-remote --repository=https://github.com/example/repo
 bin/release/simple run src/app/spipe_mcp/main.spl getRemoteCodebase --root=https://github.com/example/repo
+bin/release/simple run src/app/spipe_mcp/main.spl codebase-ingest --source-id=codebase:1 -f repomix.txt
+bin/release/simple run src/app/spipe_mcp/main.spl codebase-search --query=main.spl --source-id=codebase:1 -f repomix.txt
+bin/release/simple run src/app/spipe_mcp/main.spl codebase-get --source-id=codebase:1 -f repomix.txt
 bin/release/simple run src/app/spipe_mcp/main.spl codebase-save --source-id=codebase:1 -f repomix.txt
 bin/release/simple run src/app/spipe_mcp/main.spl saveCodebase --source-id=codebase:1 -f repomix.txt
 bin/release/simple run src/app/cli/main.spl spipe-mcp parsers
@@ -132,6 +135,8 @@ RepoMix/codebase-mcp output, index it in the session-local tree store, and
 expose the focused Simple MCP include/ignore profile. Pack tools return status
 and byte count only; use
 `spipe_codebase_search` or `spipe_codebase_get` to inspect the stored tree.
+The CLI mirrors ingest/search/get over a supplied packed-output file because
+standalone CLI invocations do not share MCP session memory.
 For codebase-mcp compatibility, `getCodebase`, `getRemoteCodebase`, and
 `saveCodebase` are aliases for the local pack, remote pack, and metadata-only
 save tools. MCP calls may use either SPipe snake_case arguments
