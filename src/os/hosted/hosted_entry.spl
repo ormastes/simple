@@ -26,12 +26,15 @@ extern fn rt_winit_event_free(ev: i64)
 extern fn rt_winit_window_free(win: i64)
 extern fn rt_winit_event_loop_free(el: i64)
 extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_env_get(key: text) -> text?
 
 val WINDOW_WIDTH: i32 = 1024
 val WINDOW_HEIGHT: i32 = 720
 val WINDOW_TITLE: text = "SimpleOS Shared Hosted WM"
 
 val EVT_CLOSE: i64 = 3
+val EVT_FOCUS: i64 = 5
+val EVT_UNFOCUS: i64 = 6
 val EVT_KEY: i64 = 10
 val EVT_MOUSE_BUTTON: i64 = 20
 val EVT_MOUSE_MOVE: i64 = 21
@@ -41,6 +44,28 @@ val KEY_TAB: i64 = 9
 val KEY_M: i64 = 77
 val KEY_R: i64 = 82
 val KEY_W: i64 = 87
+val HOSTED_CREATE_WEB_WINDOW: i64 = 14
+
+fn _live_proof_mode() -> bool:
+    (rt_env_get("SIMPLE_HOSTED_WM_LIVE_PROOF") ?? "") == "1"
+
+fn _seed_live_proof_surface(comp: HostCompositor) -> HostCompositor:
+    var out = comp
+    out.apply_bridge_request(
+        101,
+        101,
+        HOSTED_CREATE_WEB_WINDOW,
+        0,
+        "Terminal",
+        58,
+        76,
+        180,
+        96,
+        "simple$ live proof",
+        101,
+        "terminal"
+    )
+    out
 
 fn main() -> i64:
     print "SimpleOS shared hosted WM ({WINDOW_WIDTH}x{WINDOW_HEIGHT})"
@@ -61,13 +86,24 @@ fn main() -> i64:
         rt_winit_event_loop_free(el)
         return 1
 
+    val live_proof = _live_proof_mode()
     var comp = HostCompositor.new(backend, Size(width: WINDOW_WIDTH.to_u64(), height: WINDOW_HEIGHT.to_u64()))
-    seed_host_compositor_shared_mdi(comp)
+    if live_proof:
+        comp = _seed_live_proof_surface(comp)
+        print "[hosted-wm] live-proof-mode enabled=true"
+    else:
+        comp = seed_host_compositor_shared_mdi(comp)
+    print "[hosted-wm] windows-ready count={comp.windows.len()}"
     comp.render_frame()
     print "[hosted-wm] frame-presented renderer=simple-web host=linux-windowed width={WINDOW_WIDTH} height={WINDOW_HEIGHT}"
     print "Frame presented: shared lifecycle windows + Simple Web MDI content"
 
     var running = true
+    var warmup_frames: i64 = 0
+    var mouse_move_events: i64 = 0
+    var mouse_button_events: i64 = 0
+    var focus_events: i64 = 0
+    var key_events: i64 = 0
     val end_at = rt_time_now_unix_micros() + 300000000
     while running and rt_time_now_unix_micros() < end_at:
         var dirty = false
@@ -76,18 +112,28 @@ fn main() -> i64:
             val kind = rt_winit_event_get_type(ev)
             if kind == EVT_CLOSE:
                 running = false
+            elif kind == EVT_FOCUS or kind == EVT_UNFOCUS:
+                focus_events = focus_events + 1
+                print "[hosted-wm] event focus count={focus_events} focused={kind == EVT_FOCUS}"
             elif kind == EVT_MOUSE_MOVE:
                 val (mx, my) = rt_winit_event_mouse_moved(ev)
                 comp.pointer_move(mx, my)
+                mouse_move_events = mouse_move_events + 1
+                if mouse_move_events <= 3:
+                    print "[hosted-wm] event mouse_move count={mouse_move_events} x={mx} y={my}"
                 dirty = true
             elif kind == EVT_MOUSE_BUTTON:
                 val (button, pressed) = rt_winit_event_mouse_button(ev)
                 if button == 0:
                     comp.handle_left_button(pressed)
+                    mouse_button_events = mouse_button_events + 1
+                    print "[hosted-wm] event mouse_button count={mouse_button_events} button={button} pressed={pressed}"
                     dirty = true
             elif kind == EVT_KEY:
                 val (scan_code, keycode, pressed_key) = rt_winit_event_keyboard_input(ev)
                 if pressed_key:
+                    key_events = key_events + 1
+                    print "[hosted-wm] event key count={key_events} keycode={keycode}"
                     if keycode == KEY_ESCAPE:
                         running = false
                     elif keycode == KEY_TAB:
@@ -103,8 +149,12 @@ fn main() -> i64:
                     dirty = true
             rt_winit_event_free(ev)
             ev = rt_winit_event_loop_poll_events(el, 1)
-        if dirty:
+        if dirty or warmup_frames < 12:
             comp.render_frame()
+            if warmup_frames < 12:
+                warmup_frames = warmup_frames + 1
+                if warmup_frames == 12:
+                    print "[hosted-wm] warmup-frames-presented count={warmup_frames}"
 
     backend.free()
     rt_winit_window_free(win)
