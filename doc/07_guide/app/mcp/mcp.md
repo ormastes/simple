@@ -298,6 +298,8 @@ bin/simple_mcp_server
 For codebase-memory MCP usage, the production surface is the existing read-only
 MCP resources plus these analysis tools. Do not add a separate memory MCP
 server for repo-local code context unless this surface is proven insufficient.
+`simple_codebase` or "simple codebase" is operator shorthand for this surface,
+not a separate MCP tool.
 
 `simple_context` shares the `src/app/context` implementation with the CLI. The
 CLI accepts:

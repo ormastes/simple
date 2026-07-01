@@ -3,6 +3,22 @@
 ## Sub-Glossaries
 - [Simple Feature Module (SFM)](simple_feature_module_glossary.md) — `.sfm` feature-module format, layers, DI/AOP, security level, profiles, VERSION.md ([tldr](simple_feature_module_glossary_tldr.md)).
 
+## Simple Codebase
+Operator shorthand for the production codebase-memory MCP surface. It is not a
+separate `simple_codebase` tool today. Use the existing read-only MCP Resource
+Manager plus `simple_context` for bounded context packs, local index/query, and
+embedded-SQL context query. Supporting lookup tools are `simple_search`,
+`simple_workspace_symbols`, `simple_references`, `simple_hover`, `simple_api`,
+and `simple_dependencies`.
+
+Key paths:
+
+- **MCP resources:** `src/lib/nogc_async_mut/mcp/resources.spl`
+- **MCP context handlers:** `src/app/mcp/main_lazy_query_tools.spl`,
+  `src/lib/nogc_async_mut/mcp/main_lazy_query_tools.spl`
+- **Operator guide:** `doc/07_guide/app/mcp/mcp.md`
+- **Plan trace:** `doc/03_plan/agent_tasks/llm_tooling_context_ponytail_mimic.md`
+
 ## Crate
 Package and module are used in many different meaning across different languages.
 Crate is simple.sdn exist deployment package unit.

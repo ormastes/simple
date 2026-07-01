@@ -37,7 +37,8 @@ production repo-local surface is read-only MCP resources plus `simple_context`
 for bounded context packs, local index/query, and embedded-SQL context query.
 Use `simple_search`, `simple_workspace_symbols`, `simple_references`,
 `simple_hover`, `simple_api`, and `simple_dependencies` as supporting lookup
-tools.
+tools. `simple_codebase` or "simple codebase" is operator shorthand for this
+surface; it is not a separate tool.
 
 `simple_context` accepts a source file for normal pack generation. For
 persisted embedded-SQL queries, source-less calls are valid only when SQL mode

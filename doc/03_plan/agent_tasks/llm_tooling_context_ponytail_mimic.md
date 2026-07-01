@@ -153,6 +153,8 @@ Scope:
 
 - Treat the production codebase-memory MCP feature as the existing MCP
   resource/context surface, not a new external memory server.
+- Document `simple_codebase` / "simple codebase" as operator shorthand for
+  this existing surface, not as a separate tool implementation.
 - Use `src/lib/nogc_async_mut/mcp/resources.spl` for read-only codebase
   resources and `simple_context` for bounded file, local-index, and
   embedded-SQL context queries.
