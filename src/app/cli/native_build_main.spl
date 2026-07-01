@@ -1,8 +1,28 @@
 # Lightweight entrypoint for `simple native-build`.
 
 use std.cli.cli_util.{get_cli_args}
-use app.io.env_ops.{env_get}
+use app.io.env_ops.{env_get, env_set}
 use app.io.process_ops.{process_run_timeout}
+
+extern fn rt_file_exists(path: text) -> bool
+
+# Resolve the compiler binary used to run the native-build worker. The old
+# `SIMPLE_BINARY -> SIMPLE_BIN -> "bin/simple"` chain could hand an empty/
+# unexecutable argv[0] to the worker during bootstrap (`timeout: failed to run
+# command 'run'`). Validate each candidate exists, and fall back to the running
+# executable (/proc/self/exe = the seed when this runs under `simple run`).
+fn resolve_simple_binary() -> text:
+    val from_binary = env_get("SIMPLE_BINARY")
+    if from_binary != "" and rt_file_exists(from_binary):
+        return from_binary
+    val from_bin = env_get("SIMPLE_BIN")
+    if from_bin != "" and rt_file_exists(from_bin):
+        return from_bin
+    if rt_file_exists("bin/simple"):
+        return "bin/simple"
+    if rt_file_exists("/proc/self/exe"):
+        return "/proc/self/exe"
+    "bin/simple"
 
 val OUTPUT_LIMIT = 12000
 
@@ -96,11 +116,11 @@ fn main() -> i64:
     var worker_args = ["run", "src/app/cli/native_build_worker.spl"]
     for arg in args:
         worker_args.push(arg)
-    var simple_bin = env_get("SIMPLE_BINARY")
-    if simple_bin == "":
-        simple_bin = env_get("SIMPLE_BIN")
-    if simple_bin == "":
-        simple_bin = "bin/simple"
+    val simple_bin = resolve_simple_binary()
+    # Propagate the resolved absolute/validated binary so the worker (and any
+    # child it spawns) inherit a runnable SIMPLE_BINARY instead of re-deriving
+    # an empty one.
+    env_set("SIMPLE_BINARY", simple_bin)
     val (stdout, stderr, code) = process_run_timeout(simple_bin, worker_args, native_build_timeout_ms(args))
     print_bounded(stdout)
     if code != 0:
