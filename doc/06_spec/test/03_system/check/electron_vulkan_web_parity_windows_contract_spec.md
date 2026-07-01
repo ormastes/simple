@@ -27,7 +27,7 @@ electron_vulkan_web_parity_windows_contract_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 2 | 2 | 0 | 0 |
+| 6 | 6 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -83,6 +83,8 @@ OS=Windows_NT EVWP_WORK=build/windows-electron-vulkan-web-parity \
   pure-Simple app path.
 - The compare step fails closed when the Simple-rendered JSON does not report
   `backend` as `vulkan`.
+- The compare helper rejects dimension mismatches and pixel-buffer length
+  mismatches before claiming pixel-exact parity.
 
 ## Evidence Rows
 
@@ -144,6 +146,10 @@ The wrapper separates absence from failure:
 - `reason=vulkan-backend-not-proven` protects against CPU, software, or other
   fallback renderers masquerading as Vulkan-backed GUI evidence.
 - `reason=pixel-mismatch` protects the visual parity oracle.
+- `reason=frame-shape-mismatch` protects against comparing different viewport
+  sizes.
+- `reason=pixel-buffer-length-mismatch` protects against truncated or padded
+  capture artifacts.
 
 ## Relationship To Other Gates
 
@@ -163,6 +169,9 @@ The spec contains:
   comparison.
 - A real local wrapper run that proves non-Windows hosts produce a structured
   skip while preserving Simple binary provenance.
+- Direct synthetic JSON comparison runs that prove pass, pixel mismatch,
+  non-Vulkan backend, frame shape mismatch, and pixel-buffer length mismatch
+  behavior without requiring a Windows GPU.
 
 ## Scenarios
 
@@ -173,7 +182,7 @@ The spec contains:
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -187,8 +196,12 @@ expect(script).to_contain("electron-missing")
 expect(script).to_contain("node-missing")
 expect(script).to_contain("SIMPLE_EXECUTION_MODE=interpret")
 expect(script).to_contain("vulkan-json-missing")
-expect(script).to_contain("v.backend!==\"vulkan\"")
-expect(script).to_contain("vulkan-backend-not-proven")
+expect(script).to_contain("scripts/check/electron-vulkan-web-parity-status.js")
+val helper = file_read("scripts/check/electron-vulkan-web-parity-status.js")
+expect(helper).to_contain("vulkan-backend-not-proven")
+expect(helper).to_contain("frame-shape-mismatch")
+expect(helper).to_contain("pixel-buffer-length-mismatch")
+expect(helper).to_contain("pixel-exact-vulkan")
 ```
 
 </details>
@@ -212,12 +225,100 @@ expect(_stdout).to_contain("electron_vulkan_web_parity_windows_simple_bin_status
 
 </details>
 
+#### accepts pixel exact Vulkan JSON
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-electron-vulkan-web-parity-windows-compare-pass"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && printf '%s\\n' '{\"width\":2,\"height\":2,\"pixels\":[1,2,3,4]}' > " + root + "/electron.json && printf '%s\\n' '{\"width\":2,\"height\":2,\"backend\":\"vulkan\",\"pixels\":[1,2,3,4]}' > " + root + "/vulkan.json && node scripts/check/electron-vulkan-web-parity-status.js " + root + "/electron.json " + root + "/vulkan.json"
+val (stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+
+expect(code).to_equal(0)
+expect(stdout).to_contain("electron_vulkan_web_parity_windows_status=pass")
+expect(stdout).to_contain("electron_vulkan_web_parity_windows_reason=pixel-exact-vulkan")
+expect(stdout).to_contain("electron_vulkan_web_parity_windows_compare_mismatches=0")
+expect(stdout).to_contain("electron_vulkan_web_parity_windows_compare_vulkan_backend=vulkan")
+```
+
+</details>
+
+#### rejects pixel mismatches
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-electron-vulkan-web-parity-windows-compare-mismatch"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && printf '%s\\n' '{\"width\":2,\"height\":2,\"pixels\":[1,2,3,4]}' > " + root + "/electron.json && printf '%s\\n' '{\"width\":2,\"height\":2,\"backend\":\"vulkan\",\"pixels\":[1,2,3,5]}' > " + root + "/vulkan.json && node scripts/check/electron-vulkan-web-parity-status.js " + root + "/electron.json " + root + "/vulkan.json"
+val (stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+
+expect(code).to_equal(1)
+expect(stdout).to_contain("electron_vulkan_web_parity_windows_status=fail")
+expect(stdout).to_contain("electron_vulkan_web_parity_windows_reason=pixel-mismatch")
+expect(stdout).to_contain("electron_vulkan_web_parity_windows_compare_mismatches=1")
+```
+
+</details>
+
+#### rejects non Vulkan Simple backend JSON
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-electron-vulkan-web-parity-windows-compare-non-vulkan"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && printf '%s\\n' '{\"width\":2,\"height\":2,\"pixels\":[1,2,3,4]}' > " + root + "/electron.json && printf '%s\\n' '{\"width\":2,\"height\":2,\"backend\":\"software\",\"pixels\":[1,2,3,4]}' > " + root + "/vulkan.json && node scripts/check/electron-vulkan-web-parity-status.js " + root + "/electron.json " + root + "/vulkan.json"
+val (stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+
+expect(code).to_equal(2)
+expect(stdout).to_contain("electron_vulkan_web_parity_windows_status=fail")
+expect(stdout).to_contain("electron_vulkan_web_parity_windows_reason=vulkan-backend-not-proven")
+expect(stdout).to_contain("electron_vulkan_web_parity_windows_compare_vulkan_backend=software")
+```
+
+</details>
+
+#### rejects frame shape and pixel length mismatches
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val shape_root = "build/test-electron-vulkan-web-parity-windows-compare-shape"
+val shape_command = "rm -rf " + shape_root + " && mkdir -p " + shape_root + " && printf '%s\\n' '{\"width\":2,\"height\":2,\"pixels\":[1,2,3,4]}' > " + shape_root + "/electron.json && printf '%s\\n' '{\"width\":4,\"height\":1,\"backend\":\"vulkan\",\"pixels\":[1,2,3,4]}' > " + shape_root + "/vulkan.json && node scripts/check/electron-vulkan-web-parity-status.js " + shape_root + "/electron.json " + shape_root + "/vulkan.json"
+val (shape_stdout, _shape_stderr, shape_code) = process_run("/bin/sh", ["-c", shape_command])
+expect(shape_code).to_equal(2)
+expect(shape_stdout).to_contain("electron_vulkan_web_parity_windows_reason=frame-shape-mismatch")
+
+val length_root = "build/test-electron-vulkan-web-parity-windows-compare-length"
+val length_command = "rm -rf " + length_root + " && mkdir -p " + length_root + " && printf '%s\\n' '{\"width\":2,\"height\":2,\"pixels\":[1,2,3,4]}' > " + length_root + "/electron.json && printf '%s\\n' '{\"width\":2,\"height\":2,\"backend\":\"vulkan\",\"pixels\":[1,2,3]}' > " + length_root + "/vulkan.json && node scripts/check/electron-vulkan-web-parity-status.js " + length_root + "/electron.json " + length_root + "/vulkan.json"
+val (length_stdout, _length_stderr, length_code) = process_run("/bin/sh", ["-c", length_command])
+expect(length_code).to_equal(2)
+expect(length_stdout).to_contain("electron_vulkan_web_parity_windows_reason=pixel-buffer-length-mismatch")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 2 |
-| Active scenarios | 2 |
+| Total scenarios | 6 |
+| Active scenarios | 6 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
