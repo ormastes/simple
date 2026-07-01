@@ -98,6 +98,31 @@
     tracked as known-divergent). Manifest gate: 16 exact + 2 tracked + 0 fail.
 - Include the layout manifest in the aggregate production renderer parity gate.
 
+## Current State -- 2026-07-02
+
+- Pushed `fix(gui): harden renderer parity evidence` to `origin/main`.
+- Generated-GUI Electron matrix is exact for `80x64`, `96x72`, `128x96`, and
+  `160x120`: `mismatch_count=0`, matching checksums, and
+  `blur_or_tolerance_used=false`.
+- Electron layout manifest passes 50 cases: 36 exact, 14 tracked, 0 failures.
+- Chrome-backed web layout capture runs on macOS through the Chrome live bitmap
+  lane and preserves the tracked text/HTML residuals without tolerance.
+- Simple backend/Metal evidence is represented by the production backend and
+  Metal framebuffer readback gates; this is separate from browser-capture
+  parity and must remain logged as backend/readback evidence, not as a browser
+  capture substitute.
+- The aggregate production wrapper is still not complete on macOS because the
+  Tauri surface row requires live Tauri capture. The current Tauri/Chrome
+  manifest wrapper only implements the Linux X11/Xvfb Tauri capture backend;
+  on Darwin it must report
+  `macos-wkwebview-snapshot-backend-unimplemented` with backend
+  `macos-wkwebview-snapshot-unimplemented`, while Chrome may still report
+  `chrome-live-bitmap`.
+- iOS Tauri/WKWebView Metal remains a separate live platform lane. Completion
+  requires fresh iOS simulator/device screenshot, Metal/WebKit provenance, MDI
+  proof, and render-log source identity; the desktop Chrome/Electron lanes do
+  not satisfy it.
+
 ## Current State -- 2026-06-11
 
 - Pushed `fix(gui): preserve native html layout box array lengths` and
