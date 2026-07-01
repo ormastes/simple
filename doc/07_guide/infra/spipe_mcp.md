@@ -207,7 +207,8 @@ compact names stable.
 chain before exact raw lines, so a middle slice still carries command and
 file/dir context. If callers pass raw text directly, SPipe parses that text first
 and renders the same parent context.
-Context tools accept `source_id` or `sourceId`.
+Context tools accept `source_id` or `sourceId`; CLI raw-context calls mirror
+that as `--source-id` or `--sourceId`.
 Raw-context calls accept either `start_line`/`end_line`/`before`/`after` or
 `startLine`/`endLine`/`contextBefore`/`contextAfter`; the CLI mirrors those
 camelCase aliases as flags. If no range is provided, raw context defaults to
