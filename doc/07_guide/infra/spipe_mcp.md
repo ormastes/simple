@@ -221,10 +221,11 @@ camelCase aliases as flags. If no range is provided, raw context defaults to
 line 1.
 
 `scripts/smoke/spipe_mcp_protocol_smoke.spl` is the focused live protocol
-oracle. It sends JSONL `initialize`, `tools/list`, `spipe_context_put`, and
-`spipe_context_search`/`spipe_context_get_raw` requests through the stdio server
-and checks the rendered level group, parent chain, raw pointer, exact raw lines,
-and absence of non-MCP stdout banners.
+oracle. It sends JSONL `initialize`, `tools/list`, `spipe_context_put`,
+`spipe_context_search`, `spipe_context_get_raw`, `spipe_codebase_ingest`,
+`spipe_codebase_search`, and `spipe_codebase_get` requests through the stdio
+server and checks the rendered level group, parent chain, raw pointer, exact raw
+lines, codebase file nodes, and absence of non-MCP stdout banners.
 
 ## Current Boundary
 
