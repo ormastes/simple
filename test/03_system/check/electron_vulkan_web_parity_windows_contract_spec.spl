@@ -40,10 +40,12 @@ OS=Windows_NT EVWP_WORK=build/windows-electron-vulkan-web-parity \
   mismatches before claiming pixel-exact parity.
 - Windows execution records Electron GPU proof and rejects Electron/Chromium
   frames that do not prove Vulkan-backed GPU compositing.
+- Electron capture and Simple Vulkan render subprocess failures emit stable
+  `status=fail` rows instead of falling out through shell `set -e`.
 
 ## Evidence Rows
 
-The wrapper always emits:
+The wrapper emits these common rows for every terminal status:
 
 - `electron_vulkan_web_parity_windows_status`
 - `electron_vulkan_web_parity_windows_reason`
@@ -53,7 +55,14 @@ The wrapper always emits:
 - `electron_vulkan_web_parity_windows_host_os`
 - `electron_vulkan_web_parity_windows_width`
 - `electron_vulkan_web_parity_windows_height`
+
+On a Windows host that reaches Electron launch it also emits:
+
 - `electron_vulkan_web_parity_windows_electron_launch_flags`
+- `electron_vulkan_web_parity_windows_electron_capture_exit_code` after the
+  Electron capture is attempted.
+- `electron_vulkan_web_parity_windows_simple_render_exit_code` after the
+  Simple Vulkan render is attempted.
 
 On a Windows host that reaches frame comparison it also emits:
 
@@ -99,6 +108,10 @@ The wrapper separates absence from failure:
 - `reason=simple-bin-forbidden` protects the pure-Simple requirement by
   rejecting the Rust bootstrap seed.
 - `reason=electron-json-missing` protects the browser reference side.
+- `reason=electron-capture-failed` protects against an Electron subprocess
+  crash being reported only as an unstructured shell failure.
+- `reason=simple-vulkan-render-failed` protects against a Simple renderer
+  subprocess failure being reported only as an unstructured shell failure.
 - `reason=vulkan-json-missing` protects the Simple Vulkan renderer side.
 - `reason=vulkan-backend-not-proven` protects against CPU, software, or other
   fallback renderers masquerading as Vulkan-backed GUI evidence.
@@ -158,6 +171,10 @@ describe "Windows Electron Vulkan web parity wrapper":
         expect(script).to_contain("ELECTRON_CAPTURE_PROOF_PATH")
         expect(script).to_contain("ELECTRON_CAPTURE_REMOTE_DEBUGGING_PORT")
         expect(script).to_contain("electron_vulkan_web_parity_windows_electron_launch_flags")
+        expect(script).to_contain("electron_vulkan_web_parity_windows_electron_capture_exit_code")
+        expect(script).to_contain("electron_vulkan_web_parity_windows_simple_render_exit_code")
+        expect(script).to_contain("electron-capture-failed")
+        expect(script).to_contain("simple-vulkan-render-failed")
         expect(script).to_contain("--use-angle=vulkan")
         expect(script).to_contain("--use-vulkan")
         expect(script).to_contain("--enable-features=Vulkan,DefaultANGLEVulkan,VulkanFromANGLE")
@@ -189,6 +206,29 @@ describe "Windows Electron Vulkan web parity wrapper":
         expect(_stdout).to_contain("electron_vulkan_web_parity_windows_status=skip")
         expect(_stdout).to_contain("electron_vulkan_web_parity_windows_reason=requires-windows")
         expect(_stdout).to_contain("electron_vulkan_web_parity_windows_simple_bin_status=pass")
+
+    it "reports Electron capture subprocess failures as structured rows":
+        val root = "build/test-electron-vulkan-web-parity-windows-electron-fail"
+        val command = "rm -rf " + root + " && mkdir -p " + root + " tools/electron-shell/node_modules/.bin && printf '%s\\n' '#!/bin/sh' 'exit 7' > tools/electron-shell/node_modules/.bin/electron && chmod +x tools/electron-shell/node_modules/.bin/electron && printf '%s\\n' '#!/bin/sh' 'exit 0' > " + root + "/fake-simple && chmod +x " + root + "/fake-simple && OS=Windows_NT SIMPLE_BIN=$PWD/" + root + "/fake-simple EVWP_WORK=" + root + "/work sh scripts/check/check-electron-vulkan-web-parity-windows.shs; code=$?; rm -f tools/electron-shell/node_modules/.bin/electron; exit $code"
+        val (stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+
+        expect(code).to_equal(1)
+        expect(stdout).to_contain("electron_vulkan_web_parity_windows_status=fail")
+        expect(stdout).to_contain("electron_vulkan_web_parity_windows_reason=electron-capture-failed")
+        expect(stdout).to_contain("electron_vulkan_web_parity_windows_electron_capture_exit_code=7")
+
+    it "reports Simple Vulkan render subprocess failures as structured rows":
+        val root = "build/test-electron-vulkan-web-parity-windows-simple-render-fail"
+        val electron_json = "'{\"width\":2,\"height\":2,\"pixels\":[1,2,3,4]}'"
+        val proof_json = "'{\"gpu_feature_status\":{\"vulkan\":\"enabled\",\"gpu_compositing\":\"enabled\"},\"browser_target_gpu_info_status\":\"pass\",\"browser_target_gpu_info\":{\"gpu\":{\"auxAttributes\":{\"hardwareSupportsVulkan\":true,\"displayType\":\"Vulkan\",\"glImplementationParts\":\"angle=vulkan\",\"skiaBackendType\":\"Vulkan\",\"glRenderer\":\"Vulkan\"}}}}}'"
+        val command = "rm -rf " + root + " && mkdir -p " + root + " tools/electron-shell/node_modules/.bin && printf '%s\\n' '#!/bin/sh' 'printf \"%s\\\\n\" " + electron_json + " > \"$ELECTRON_CAPTURE_OUTPUT\"' 'printf \"%s\\\\n\" " + proof_json + " > \"$ELECTRON_CAPTURE_PROOF_PATH\"' 'exit 0' > tools/electron-shell/node_modules/.bin/electron && chmod +x tools/electron-shell/node_modules/.bin/electron && printf '%s\\n' '#!/bin/sh' 'exit 9' > " + root + "/fake-simple && chmod +x " + root + "/fake-simple && OS=Windows_NT SIMPLE_BIN=$PWD/" + root + "/fake-simple EVWP_WORK=" + root + "/work sh scripts/check/check-electron-vulkan-web-parity-windows.shs; code=$?; rm -f tools/electron-shell/node_modules/.bin/electron; exit $code"
+        val (stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+
+        expect(code).to_equal(1)
+        expect(stdout).to_contain("electron_vulkan_web_parity_windows_status=fail")
+        expect(stdout).to_contain("electron_vulkan_web_parity_windows_reason=simple-vulkan-render-failed")
+        expect(stdout).to_contain("electron_vulkan_web_parity_windows_electron_capture_exit_code=0")
+        expect(stdout).to_contain("electron_vulkan_web_parity_windows_simple_render_exit_code=9")
 
     it "accepts pixel exact Vulkan JSON":
         val root = "build/test-electron-vulkan-web-parity-windows-compare-pass"
