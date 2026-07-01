@@ -295,6 +295,10 @@ bin/simple_mcp_server
 | `simple_ponytail` | Over-engineering audit or simplification report |
 | `simple_search` | Code search (required: query) |
 
+For codebase-memory MCP usage, the production surface is the existing read-only
+MCP resources plus these analysis tools. Do not add a separate memory MCP
+server for repo-local code context unless this surface is proven insufficient.
+
 `simple_context` shares the `src/app/context` implementation with the CLI. The
 CLI accepts:
 

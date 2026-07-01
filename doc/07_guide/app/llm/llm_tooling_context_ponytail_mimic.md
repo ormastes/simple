@@ -31,6 +31,14 @@ The shared surfaces are:
 - app MCP `simple_ponytail`
 - dashboard tooling artifact panel
 
+For codebase-memory MCP usage, use the existing MCP Resource Manager and
+analysis tools rather than adding a separate current/external memory MCP. The
+production repo-local surface is read-only MCP resources plus `simple_context`
+for bounded context packs, local index/query, and embedded-SQL context query.
+Use `simple_search`, `simple_workspace_symbols`, `simple_references`,
+`simple_hover`, `simple_api`, and `simple_dependencies` as supporting lookup
+tools.
+
 `simple_context` accepts a source file for normal pack generation. For
 persisted embedded-SQL queries, source-less calls are valid only when SQL mode
 is enabled and the query is non-empty.

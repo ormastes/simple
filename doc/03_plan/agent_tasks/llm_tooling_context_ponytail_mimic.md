@@ -143,6 +143,32 @@ Tasks:
    internet fetch, external vector store, or third-party plugin parity.
    Status: done.
 
+## Lane 3A: Codebase Memory MCP Usage
+
+Owner: Codex
+
+Status: documented on 2026-07-01.
+
+Scope:
+
+- Treat the production codebase-memory MCP feature as the existing MCP
+  resource/context surface, not a new external memory server.
+- Use `src/lib/nogc_async_mut/mcp/resources.spl` for read-only codebase
+  resources and `simple_context` for bounded file, local-index, and
+  embedded-SQL context queries.
+- Keep `simple_search`, `simple_workspace_symbols`, `simple_references`,
+  `simple_hover`, `simple_api`, and `simple_dependencies` as supporting lookup
+  tools.
+- Do not plan a separate current/external MCP memory path unless these
+  Simple-owned surfaces are proven insufficient.
+
+Usage check:
+
+- `scripts/check/check-llm-tooling-context-ponytail-full-replacement.shs`
+  remains the focused replacement-surface check because it proves app MCP,
+  lower MCP, `simple_context`, and source-less SQL context dispatch.
+- `doc/07_guide/app/mcp/mcp.md` is the operator source for production usage.
+
 ## Sidecars
 
 - Spark/explorer: context surface discovery. Status: completed on 2026-06-25;

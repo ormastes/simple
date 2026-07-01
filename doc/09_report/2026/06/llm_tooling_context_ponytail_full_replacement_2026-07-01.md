@@ -11,7 +11,7 @@
 - mimic_status: `pass`
 - mimic_env: `build/llm_tooling_context_ponytail_full_replacement/mimic/evidence.env`
 - mimic_env_size: `1518`
-- mimic_env_sha256: `5d54ddec784af0d44ead4d615d61c84d33f92d8e1379500cf66a0765bacdb464`
+- mimic_env_sha256: `4186c7c8f9cd688416a3d26ba5d2202b59b3b136a0d0b40240dfed2595a92d6d`
 - mimic_log_size: `48`
 - mimic_log_sha256: `39121936f29d4d543d55c593965da75296ab8a08ba4dacf35d347126919c6b85`
 - execution_spec_status: `pass`
@@ -23,11 +23,11 @@
 - execution_lower_ponytail_status: `pass`
 - execution_spec_log: `build/llm_tooling_context_ponytail_full_replacement/mcp_context_ponytail_dispatch_spec.log`
 - execution_spec_log_size: `1458`
-- execution_spec_log_sha256: `ead3b4875816fe131fa338faa957a0e740fac20734ef777ca2361fef1ec3bc06`
+- execution_spec_log_sha256: `451d516b61799cfc90affcf093b2e065b10cd2ccd0e3bd9ace4260d1c9b8a620`
 - surface_manifest: `build/llm_tooling_context_ponytail_full_replacement/replacement_surface_manifest.tsv`
 - surface_manifest_count: `15`
 - surface_manifest_size: `1901`
-- surface_manifest_sha256: `4267f270a81ddf71902a2f27f25a0f99902636d6a1ac8d9f6b859624af5585a1`
+- surface_manifest_sha256: `93311cfd8e1b383bdd22ddd3c46980a26d1db2db021a4766587ecae6c48db7f0`
 - failures: `none`
 - next_action: `strict context/Ponytail full-replacement evidence is ready`
 - env: `build/llm_tooling_context_ponytail_full_replacement/evidence.env`
