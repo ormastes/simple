@@ -28,7 +28,9 @@ simple duplicate-check src/ --format json
 ```
 
 Modes:
-- `semantic` is the default and looks for documentation/concept duplication.
+- `semantic` is the default and looks for documentation/concept duplication. It
+  compares candidates across the whole scanned tree, so a clone whose copies
+  live in different directories is still reported.
 - `token` finds concrete lexical duplication and honors `--min-lines` and `--min-tokens`.
 - `cosine` finds fuzzy lexical near-duplicates and honors `--similarity-threshold`, `--min-lines`, and `--min-tokens`.
 
