@@ -85,6 +85,8 @@ children are classified as directories even when `tree` omits trailing slashes.
 rows have that path as their parent prefix.
 `ls -l` output extracts ordinary entry names from permission rows and marks
 rows starting with `d` as directories.
+`git status` output extracts standard status paths including modified, new,
+deleted, renamed, and both-modified rows.
 Path leaves render as `kind=file`; non-path output remains `kind=line` and can
 still be grouped by explicit log level.
 
