@@ -37,7 +37,9 @@ bin/release/simple run src/app/spipe_mcp/main.spl sql-put --db=build/spipe.db --
 bin/release/simple run src/app/spipe_mcp/main.spl sql-get --db=build/spipe.db --source-id=exec:1
 bin/release/simple run src/app/spipe_mcp/main.spl sql-search --db=build/spipe.db --query=ERROR --source-filter=exec:1
 bin/release/simple run src/app/spipe_mcp/main.spl context-sql-put --db=build/spipe.db --source-id=exec:1 --command='simple build' -f output.txt
+bin/release/simple run src/app/spipe_mcp/main.spl context-sql-put-raw --db=build/spipe.db --source-id=exec:1 --command='simple build' -f output.txt
 bin/release/simple run src/app/spipe_mcp/main.spl context-sql-get --db=build/spipe.db --source-id=exec:1
+bin/release/simple run src/app/spipe_mcp/main.spl context-sql-get-tree --db=build/spipe.db --source-id=exec:1
 bin/release/simple run src/app/spipe_mcp/main.spl context-sql-search --db=build/spipe.db --query=ERROR --source-filter=exec:1
 bin/release/simple run src/app/spipe_mcp/main.spl exec-capture --db=build/spipe.db --source-id=exec:1 --command='simple build' -f output.txt
 bin/release/simple run src/app/spipe_mcp/main.spl exec-parse --command='simple build' -f output.txt
