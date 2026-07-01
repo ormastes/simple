@@ -63,12 +63,13 @@ Skip if exist. See `design` skill for details.
 - Do not mark the implementation goal complete if the changed workflow/tooling
   behavior is only proven by tests. The guide/skill/SPipe-agent doc freshness
   gate is part of completion, not a release follow-up.
-- For `simple_context` or context-mode changes, keep the MCP/tooling guide and
-  mirrored generated manuals current. SQL-backed context paths must document the
+- For `simple_context`, SPipe MCP language-neutral context/parser, or
+  context-mode changes, keep the MCP/tooling guide and mirrored generated
+  manuals current. SQL-backed context paths must document the
   `--sql`/`--db`/`--source-filter` CLI flags, MCP `source_filter`, the
   file-optional `sql=true` plus non-empty `query` contract, the embedded SQLite
-  facade boundary, explicit absence statuses, and the required public-absence
-  guard.
+  facade boundary, explicit absence statuses, SPipe parser/raw parent-chain
+  behavior, and the required public-absence guard.
 - Do not leave primary manual output dominated by raw test code. Executable
   SPipe should be folded detail; visible content should be scenario steps and
   typed evidence.

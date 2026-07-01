@@ -58,11 +58,13 @@ description: Implement a feature end-to-end. Self-sufficient — if research, re
 - Do not mark implementation complete when workflow/tooling tests pass but the
   matching guide, skill, SPipe-agent, command, or generated/manual spec docs are
   stale. Documentation freshness is part of completion.
-- For `simple_context` or context-mode changes, keep the MCP/tooling guide and
-  mirrored generated manuals current. SQL-backed context paths must document the
+- For `simple_context`, SPipe MCP language-neutral context/parser, or
+  context-mode changes, keep the MCP/tooling guide and mirrored generated
+  manuals current. SQL-backed context paths must document the
   `--sql`/`--db`/`--source-filter` CLI flags, MCP `source_filter`, the
   file-optional `sql=true` plus non-empty `query` contract, embedded SQLite
-  facade boundary, explicit absence statuses, and public-absence guard.
+  facade boundary, explicit absence statuses, SPipe parser/raw parent-chain
+  behavior, and public-absence guard.
 - Executable specs must stay under `test/`; generated/manual docs mirror that
   path under `doc/06_spec` after stripping the leading `test/` segment and must
   be `.md` only. Require

@@ -159,9 +159,11 @@ not create, rewrite, or weaken SPipe after verification.
   `.claude/agents/spipe/`, or `.gemini/commands/` instructions behind
 - Do not mark the agent goal complete before that workflow/tooling doc
   freshness gate is satisfied or explicitly recorded as `N/A`
-- For `simple_context` or context-mode changes, verify the MCP/tooling guide,
-  generated manuals, and skill/command docs mention any new `--sql`/`--db`
-  behavior, `--source-filter`/MCP `source_filter`, file-optional SQL query
-  shape, embedded SQLite facade boundary, and explicit absence statuses. Run
+- For `simple_context`, SPipe MCP language-neutral context/parser, or
+  context-mode changes, verify the MCP/tooling guide, generated manuals, and
+  skill/command docs mention any new `--sql`/`--db` behavior,
+  `--source-filter`/MCP `source_filter`, file-optional SQL query shape,
+  embedded SQLite facade boundary, explicit absence statuses, and SPipe
+  parser/raw parent-chain behavior when changed. Run
   `scripts/check/check-llm-tooling-public-absence-rendering.shs`.
 - Do not mark PASS for compiler/core/lib or MCP/LSP work unless the matching smoke checks passed

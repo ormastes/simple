@@ -233,10 +233,12 @@ STATUS: FAIL (5 failures must be fixed before release)
 - If workflow/tooling changes left stale `doc/07_guide`, `doc/06_spec`,
   `.codex/skills/`, `.agents/skills/`, `.claude/skills/`,
   `.claude/agents/spipe/`, or `.gemini/commands/` instructions behind, do not mark verification PASS
-- For `simple_context` or context-mode changes, verify the MCP/tooling guide,
-  generated manuals, and skill/command docs mention any new `--sql`/`--db`
-  behavior, `--source-filter`/MCP `source_filter`, file-optional SQL query
-  shape, embedded SQLite facade boundary, and explicit absence statuses. Run
+- For `simple_context`, SPipe MCP language-neutral context/parser, or
+  context-mode changes, verify the MCP/tooling guide, generated manuals, and
+  skill/command docs mention any new `--sql`/`--db` behavior,
+  `--source-filter`/MCP `source_filter`, file-optional SQL query shape,
+  embedded SQLite facade boundary, explicit absence statuses, and SPipe
+  parser/raw parent-chain behavior when changed. Run
   `scripts/check/check-llm-tooling-public-absence-rendering.shs`.
 - Do not mark PASS for scenario-oriented specs whose mirrored `doc/06_spec`
   output reads like raw test mechanics instead of an operator/user manual
