@@ -6,6 +6,7 @@ const vulkanPath = process.argv[3] || "";
 const electronProofPath = process.argv[4] || "";
 const expectedWidth = Number(process.argv[5] || 0);
 const expectedHeight = Number(process.argv[6] || 0);
+const expectedArgb = Number(process.argv[7] || 0);
 
 function emit(key, value) {
   console.log(`${key}=${value === undefined || value === null ? "" : value}`);
@@ -100,6 +101,7 @@ const vulkanPixelCount = Number(vulkan.pixel_count || 0);
 const common = {
   electron_vulkan_web_parity_windows_compare_expected_width: expectedWidth,
   electron_vulkan_web_parity_windows_compare_expected_height: expectedHeight,
+  electron_vulkan_web_parity_windows_compare_expected_argb: expectedArgb,
   electron_vulkan_web_parity_windows_compare_electron_width: electronWidth,
   electron_vulkan_web_parity_windows_compare_electron_height: electronHeight,
   electron_vulkan_web_parity_windows_compare_vulkan_width: vulkanWidth,
@@ -170,6 +172,20 @@ if (electronPixels.length !== electronWidth * electronHeight || vulkanPixels.len
 
 if (vulkanPixelCount !== vulkanPixels.length) {
   finish("fail", "vulkan-pixel-count-mismatch", 2, common);
+}
+
+if (expectedArgb > 0) {
+  for (let i = 0; i < electronPixels.length; i += 1) {
+    if ((electronPixels[i] >>> 0) !== (expectedArgb >>> 0) || (vulkanPixels[i] >>> 0) !== (expectedArgb >>> 0)) {
+      finish("fail", "frame-color-not-requested", 2, {
+        ...common,
+        electron_vulkan_web_parity_windows_compare_expected_argb: expectedArgb >>> 0,
+        electron_vulkan_web_parity_windows_compare_color_mismatch_index: i,
+        electron_vulkan_web_parity_windows_compare_color_electron: electronPixels[i] >>> 0,
+        electron_vulkan_web_parity_windows_compare_color_vulkan: vulkanPixels[i] >>> 0,
+      });
+    }
+  }
 }
 
 let mismatches = 0;
