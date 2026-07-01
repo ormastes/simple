@@ -30,10 +30,10 @@ fn print_help():
     print "  raw|context-raw|context-get-raw -f FILE --start=N --end=N [--source-kind=K] [--before=N] [--after=N]"
     print "  sql-put|context-sql-put --db=PATH --source-id=ID [--sourceId=ID] [--command=CMD] [--source-kind=K] -f FILE"
     print "  sql-get|context-sql-get --db=PATH --source-id=ID [--sourceId=ID]"
-    print "  sql-search|context-sql-search --db=PATH --query=TEXT [--source-filter=ID]"
+    print "  sql-search|context-sql-search --db=PATH --query=TEXT [--q=TEXT] [--searchText=TEXT] [--source-filter=ID]"
     print "  exec-capture --db=PATH --source-id=ID [--sourceId=ID] [--command=CMD] [--source-kind=K] -f FILE"
     print "  exec-parse [--command=CMD] [--source-kind=K] -f FILE"
-    print "  exec-search --db=PATH --query=TEXT [--source-filter=ID]"
+    print "  exec-search --db=PATH --query=TEXT [--q=TEXT] [--searchText=TEXT] [--source-filter=ID]"
     print "  minimality-check --task=TEXT [-f FILE]"
     print "  minimality-review [-f FILE]"
     print "  minimality-debt [-f FILE]"
@@ -115,6 +115,9 @@ fn _arg_text(args_raw: text) -> text:
 fn _arg_packed_text(args_raw: text) -> text:
     _arg_str(args_raw, "text", _arg_str(args_raw, "packed_text", _arg_str(args_raw, "packedText", _arg_str(args_raw, "codebase", ""))))
 
+fn _arg_query(args_raw: text) -> text:
+    _arg_str(args_raw, "query", _arg_str(args_raw, "q", _arg_str(args_raw, "searchText", "")))
+
 fn _json_result(id: text, result: text) -> text:
     jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
 
@@ -144,11 +147,12 @@ fn _spipe_tools_list_payload() -> text:
     val source_kind_props = "\"source_kind\":" + text_prop + ",\"sourceKind\":" + text_prop
     val raw_text_props = "\"text\":" + text_prop + ",\"raw_text\":" + text_prop + ",\"rawText\":" + text_prop
     val packed_text_props = "\"text\":" + text_prop + ",\"packed_text\":" + text_prop + ",\"packedText\":" + text_prop
+    val query_props = "\"query\":" + text_prop + ",\"q\":" + text_prop + ",\"searchText\":" + text_prop
     val common_props = "{" + source_kind_props + ",\"command\":" + text_prop + "," + raw_text_props + "}"
     val raw_props = "{" + source_id_props + "," + source_kind_props + "," + raw_text_props + ",\"start_line\":" + int_prop + ",\"startLine\":" + int_prop + ",\"end_line\":" + int_prop + ",\"endLine\":" + int_prop + ",\"before\":" + int_prop + ",\"contextBefore\":" + int_prop + ",\"after\":" + int_prop + ",\"contextAfter\":" + int_prop + "}"
     val sql_context_props = "{" + source_id_props + "," + source_kind_props + ",\"command\":" + text_prop + "," + raw_text_props + ",\"db_path\":" + text_prop + ",\"db\":" + text_prop + ",\"dbPath\":" + text_prop + "}"
     val sql_context_get_props = "{" + source_id_props + ",\"db_path\":" + text_prop + ",\"db\":" + text_prop + ",\"dbPath\":" + text_prop + "}"
-    val sql_context_search_props = "{\"query\":" + text_prop + ",\"source_filter\":" + text_prop + ",\"sourceFilter\":" + text_prop + ",\"db_path\":" + text_prop + ",\"db\":" + text_prop + ",\"dbPath\":" + text_prop + "}"
+    val sql_context_search_props = "{" + query_props + ",\"source_filter\":" + text_prop + ",\"sourceFilter\":" + text_prop + ",\"db_path\":" + text_prop + ",\"db\":" + text_prop + ",\"dbPath\":" + text_prop + "}"
     val minimality_props = "{\"task\":" + text_prop + ",\"text\":" + text_prop + ",\"mode\":" + text_prop + "}"
     val hook_props = "{\"provider\":" + text_prop + ",\"event\":" + text_prop + ",\"raw_payload\":" + text_prop + ",\"tool_name\":" + text_prop + ",\"cwd\":" + text_prop + ",\"repo\":" + text_prop + ",\"files\":" + text_prop + ",\"diff\":" + text_prop + ",\"prompt_excerpt\":" + text_prop + "}"
     val codebase_ingest_props = "{" + source_id_props + "," + packed_text_props + ",\"include_patterns\":" + text_prop + ",\"includePatterns\":" + text_prop + ",\"ignore_patterns\":" + text_prop + ",\"ignorePatterns\":" + text_prop + "}"
@@ -163,7 +167,7 @@ fn _spipe_tools_list_payload() -> text:
     tools.push(_tool_def("spipe_context_put_raw", "Store raw text and parsed tree in this MCP session. Alias of spipe_context_put.", "{" + source_id_props + "," + source_kind_props + ",\"command\":" + text_prop + "," + raw_text_props + "}", "[]"))
     tools.push(_tool_def("spipe_context_get", "Render a stored tree by source id.", "{" + source_id_props + "}", "[]"))
     tools.push(_tool_def("spipe_context_get_tree", "Render a stored tree by source id. Alias of spipe_context_get.", "{" + source_id_props + "}", "[]"))
-    tools.push(_tool_def("spipe_context_search", "Search stored raw text and return matching rendered trees.", "{\"query\":" + text_prop + "}", "[\"query\"]"))
+    tools.push(_tool_def("spipe_context_search", "Search stored raw text and return matching rendered trees.", "{" + query_props + "}", "[]"))
     tools.push(_tool_def("spipe_context_raw", "Return exact raw lines with optional before/after context.", raw_props, "[]"))
     tools.push(_tool_def("spipe_context_get_raw", "Return exact raw lines with optional before/after context. Alias of spipe_context_raw.", raw_props, "[]"))
     tools.push(_tool_def("spipe_context_sql_put", "Persist parsed parent-chain context in a SQLite context database.", sql_context_props, "[]"))
@@ -171,7 +175,7 @@ fn _spipe_tools_list_payload() -> text:
     tools.push(_tool_def("spipe_context_sql_search", "Search persisted parsed context in a SQLite context database.", sql_context_search_props, "[]"))
     tools.push(_tool_def("spipe_exec_capture", "Capture supplied command output into the SPipe context store.", "{" + source_id_props + "," + source_kind_props + ",\"command\":" + text_prop + "," + raw_text_props + "}", "[]"))
     tools.push(_tool_def("spipe_exec_parse", "Parse supplied command output into compact parent-chain tree output.", common_props, "[]"))
-    tools.push(_tool_def("spipe_exec_search", "Search captured execution output and return matching rendered trees.", "{\"query\":" + text_prop + "}", "[\"query\"]"))
+    tools.push(_tool_def("spipe_exec_search", "Search captured execution output and return matching rendered trees.", "{" + query_props + "}", "[]"))
     tools.push(_tool_def("spipe_minimality_check", "Run deterministic Ponytail minimality gate.", minimality_props, "[\"task\"]"))
     tools.push(_tool_def("spipe_minimality_review", "Review text or diff for obvious Ponytail findings.", minimality_props, "[\"text\"]"))
     tools.push(_tool_def("spipe_minimality_debt", "List ponytail: debt markers from text.", "{\"text\":" + text_prop + "}", "[\"text\"]"))
@@ -185,7 +189,7 @@ fn _spipe_tools_list_payload() -> text:
     tools.push(_tool_def("getCodebase", "codebase-mcp compatibility alias of spipe_codebase_pack_local.", codebase_pack_props, "[]"))
     tools.push(_tool_def("getRemoteCodebase", "codebase-mcp compatibility alias of spipe_codebase_pack_remote.", codebase_pack_props, "[]"))
     tools.push(_tool_def("spipe_codebase_ingest", "Ingest existing RepoMix/codebase-mcp output into the SPipe context tree.", codebase_ingest_props, "[]"))
-    tools.push(_tool_def("spipe_codebase_search", "Search ingested codebase trees.", "{\"query\":" + text_prop + "}", "[\"query\"]"))
+    tools.push(_tool_def("spipe_codebase_search", "Search ingested codebase trees.", "{" + query_props + "}", "[]"))
     tools.push(_tool_def("spipe_codebase_get", "Render an ingested codebase tree by source id.", "{" + source_id_props + "}", "[]"))
     tools.push(_tool_def("spipe_codebase_save", "Return save metadata for existing packed text; filesystem writes stay app-owned.", codebase_save_props, "[]"))
     tools.push(_tool_def("saveCodebase", "codebase-mcp compatibility alias of spipe_codebase_save.", codebase_save_props, "[]"))
@@ -220,7 +224,7 @@ fn _dispatch_tool(id: text, tool_name: text, args_raw: text) -> text:
         val source_id = _arg_source_id(args_raw, "")
         return _tool_text_result(id, spipe_context_get(_SPIPE_STORE, source_id))
     if tool_name == "spipe_context_search" or tool_name == "spipe_exec_search":
-        val query = _arg_str(args_raw, "query", "")
+        val query = _arg_query(args_raw)
         return _tool_text_result(id, spipe_context_search(_SPIPE_STORE, query))
     if tool_name == "spipe_context_raw" or tool_name == "spipe_context_get_raw":
         val source_id = _arg_source_id(args_raw, "")
@@ -244,7 +248,7 @@ fn _dispatch_tool(id: text, tool_name: text, args_raw: text) -> text:
     if tool_name == "spipe_context_sql_get":
         return _tool_text_result(id, context_sql_get_pack(_arg_source_id(args_raw, ""), _arg_str(args_raw, "db_path", _arg_str(args_raw, "db", _arg_str(args_raw, "dbPath", ""))), "text"))
     if tool_name == "spipe_context_sql_search":
-        return _tool_text_result(id, context_sql_query_packs_by_source([], "", _arg_str(args_raw, "query", ""), _arg_str(args_raw, "source_filter", _arg_str(args_raw, "sourceFilter", "")), _arg_str(args_raw, "db_path", _arg_str(args_raw, "db", _arg_str(args_raw, "dbPath", ""))), "text"))
+        return _tool_text_result(id, context_sql_query_packs_by_source([], "", _arg_query(args_raw), _arg_str(args_raw, "source_filter", _arg_str(args_raw, "sourceFilter", "")), _arg_str(args_raw, "db_path", _arg_str(args_raw, "db", _arg_str(args_raw, "dbPath", ""))), "text"))
     if tool_name == "spipe_minimality_check":
         val task = _arg_str(args_raw, "task", "")
         val raw = _arg_str(args_raw, "text", "")
@@ -304,7 +308,7 @@ fn _dispatch_tool(id: text, tool_name: text, args_raw: text) -> text:
         _SPIPE_STORE = spipe_codebase_ingest(_SPIPE_STORE, source_id, packed)
         return _tool_text_result(id, "ingested " + source_id)
     if tool_name == "spipe_codebase_search":
-        return _tool_text_result(id, spipe_codebase_search(_SPIPE_STORE, _arg_str(args_raw, "query", "")))
+        return _tool_text_result(id, spipe_codebase_search(_SPIPE_STORE, _arg_query(args_raw)))
     if tool_name == "spipe_codebase_get":
         return _tool_text_result(id, spipe_codebase_get(_SPIPE_STORE, _arg_source_id(args_raw, "")))
     if tool_name == "spipe_codebase_save" or tool_name == "saveCodebase":
@@ -454,7 +458,7 @@ fn spipe_mcp_run(args: [text]) -> i64:
         print context_sql_get_pack(_value(args, "--source-id", _value(args, "--sourceId", "")), _value(args, "--db", _value(args, "--db-path", _value(args, "--dbPath", ""))), "text")
         return 0
     if cmd == "sql-search" or cmd == "context-sql-search" or cmd == "exec-search":
-        print context_sql_query_packs_by_source([], "", _value(args, "--query", ""), _value(args, "--source-filter", _value(args, "--sourceFilter", "")), _value(args, "--db", _value(args, "--db-path", _value(args, "--dbPath", ""))), "text")
+        print context_sql_query_packs_by_source([], "", _value(args, "--query", _value(args, "--q", _value(args, "--searchText", ""))), _value(args, "--source-filter", _value(args, "--sourceFilter", "")), _value(args, "--db", _value(args, "--db-path", _value(args, "--dbPath", ""))), "text")
         return 0
     if cmd == "hook-rules":
         print spipe_hook_rules(_value(args, "--provider", "generic"))
