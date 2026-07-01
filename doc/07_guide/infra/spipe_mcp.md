@@ -27,6 +27,7 @@ bin/release/simple run src/app/spipe_mcp/main.spl parsers
 bin/release/simple run src/app/spipe_mcp/main.spl tree-parser-list
 bin/release/simple run src/app/spipe_mcp/main.spl match --command='git diff' -f output.txt
 bin/release/simple run src/app/spipe_mcp/main.spl tree-match-parser --command='git diff' -f output.txt
+bin/release/simple run src/app/spipe_mcp/main.spl tree-match-parser --source-kind=repomix --command='repomix' -f output.md
 bin/release/simple run src/app/spipe_mcp/main.spl parse --command='simple build' -f output.txt
 bin/release/simple run src/app/spipe_mcp/main.spl render --command='simple build' -f output.txt
 bin/release/simple run src/app/spipe_mcp/main.spl tree-render --command='simple build' -f output.txt
@@ -60,6 +61,8 @@ bin/release/simple run src/app/cli/main.spl spipe-mcp parsers
 No args and `serve` run the MCP stdio server. Logs must stay off stdout.
 After the release binary is rebuilt, `simple spipe-mcp ...` is the canonical
 shortcut for the same app entrypoint.
+Parser and capture commands accept `--source-kind=K` or `--kind=K`; the default
+is `command_output`.
 
 ## MCP Tools
 
