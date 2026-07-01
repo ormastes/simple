@@ -171,6 +171,22 @@ add read timeouts to transport reads, and never route script startup through
 compile/JIT as a workaround for a slow fast path — fix the fast path or file
 a bug.
 
+## 2026-07-01 — script-mode parity gate
+
+Codex, Claude, and Gemini should launch the repo MCP scripts, but the scripts
+must not force `SIMPLE_MCP_TOOL_SET=all`; `auto` is the fast default and keeps
+dispatch callable. The focused diagnostic is:
+
+```bash
+sh scripts/check/check-mcp-script-mode-perf.shs
+MCP_SCRIPT_PERF_STRICT=1 sh scripts/check/check-mcp-script-mode-perf.shs
+```
+
+Current local result is still a fail against Python/Bun cold-stdio comparators:
+`simple_mcp` source/script median ~365 ms, `simple_lsp_mcp` ~60 ms, Python3
+~26 ms, Bun ~34 ms. Track the remaining gap in
+`doc/08_tracking/bug/mcp_script_mode_python_bun_parity_2026-07-01.md`.
+
 ## 2026-06-13 — core-default + dynload upgrade
 
 The tools list now defaults to an `auto` mode that cuts handshake time by

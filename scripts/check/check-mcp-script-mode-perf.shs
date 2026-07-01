@@ -1,0 +1,96 @@
+#!/bin/sh
+set -eu
+
+RUNS="${RUNS:-5}"
+STRICT="${MCP_SCRIPT_PERF_STRICT:-0}"
+TMPDIR="$(mktemp -d)"
+trap 'rm -rf "$TMPDIR"' EXIT INT TERM
+
+init='{"jsonrpc":"2.0","id":"1","method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"bench","version":"1"}}}'
+tools='{"jsonrpc":"2.0","id":"2","method":"tools/list","params":{}}'
+{
+  printf 'Content-Length: %s\r\n\r\n%s' "${#init}" "$init"
+  printf 'Content-Length: %s\r\n\r\n%s' "${#tools}" "$tools"
+} >"$TMPDIR/in"
+
+cat >"$TMPDIR/mcp.py" <<'PY'
+import sys
+sys.stdin.buffer.read()
+tools = ",".join(
+    '{"name":"tool%d","description":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx","inputSchema":{"type":"object","properties":{}}}' % i
+    for i in range(50)
+)
+frames = [
+    '{"jsonrpc":"2.0","id":"1","result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{}},"serverInfo":{"name":"python3","version":"1"}}}',
+    '{"jsonrpc":"2.0","id":"2","result":{"tools":[%s]}}' % tools,
+]
+for frame in frames:
+    data = frame.encode()
+    sys.stdout.buffer.write(("Content-Length: %d\r\n\r\n" % len(data)).encode() + data)
+PY
+
+cat >"$TMPDIR/mcp.js" <<'JS'
+await Bun.stdin.text();
+const tools = Array.from({length: 50}, (_, i) =>
+  `{"name":"tool${i}","description":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx","inputSchema":{"type":"object","properties":{}}}`
+).join(",");
+const frames = [
+  '{"jsonrpc":"2.0","id":"1","result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{}},"serverInfo":{"name":"bun","version":"1"}}}',
+  `{"jsonrpc":"2.0","id":"2","result":{"tools":[${tools}]}}`,
+];
+for (const frame of frames) {
+  process.stdout.write(`Content-Length: ${Buffer.byteLength(frame)}\r\n\r\n${frame}`);
+}
+JS
+
+median_ms() {
+  label="$1"
+  shift
+  i=0
+  : >"$TMPDIR/$label.samples"
+  while [ "$i" -lt "$RUNS" ]; do
+    start="$(date +%s%3N)"
+    "$@" <"$TMPDIR/in" >"$TMPDIR/out" 2>"$TMPDIR/err"
+    end="$(date +%s%3N)"
+    printf '%s\n' "$((end - start))" >>"$TMPDIR/$label.samples"
+    i=$((i + 1))
+  done
+  sort -n "$TMPDIR/$label.samples" | sed -n "$(((RUNS + 1) / 2))p"
+}
+
+python_ms=""
+bun_ms=""
+if command -v python3 >/dev/null 2>&1; then
+  python_ms="$(median_ms python3 python3 "$TMPDIR/mcp.py")"
+fi
+if command -v bun >/dev/null 2>&1; then
+  bun_ms="$(median_ms bun bun "$TMPDIR/mcp.js")"
+fi
+
+simple_mcp_ms="$(median_ms simple_mcp env SIMPLE_MCP_TOOL_SET=core SIMPLE_MCP_ALLOW_SOURCE_FALLBACK=1 bin/simple_mcp_server)"
+simple_lsp_ms="$(median_ms simple_lsp bin/simple_lsp_mcp_server)"
+
+echo "mcp_script_perf_runs=$RUNS"
+echo "python3_mcp_median_ms=${python_ms:-missing}"
+echo "bun_mcp_median_ms=${bun_ms:-missing}"
+echo "simple_mcp_script_median_ms=$simple_mcp_ms"
+echo "simple_lsp_mcp_script_median_ms=$simple_lsp_ms"
+
+status=pass
+if [ -n "$python_ms" ] && [ "$simple_mcp_ms" -gt "$python_ms" ]; then
+  status=fail
+fi
+if [ -n "$bun_ms" ] && [ "$simple_mcp_ms" -gt "$bun_ms" ]; then
+  status=fail
+fi
+if [ -n "$python_ms" ] && [ "$simple_lsp_ms" -gt "$python_ms" ]; then
+  status=fail
+fi
+if [ -n "$bun_ms" ] && [ "$simple_lsp_ms" -gt "$bun_ms" ]; then
+  status=fail
+fi
+
+echo "mcp_script_perf_status=$status"
+if [ "$status" != "pass" ] && [ "$STRICT" = "1" ]; then
+  exit 1
+fi
