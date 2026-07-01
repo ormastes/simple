@@ -79,7 +79,8 @@ Existing XML RepoMix input with `<file path=...>` is matched as
 `repomix_xml`; markdown-style packs use `repomix_markdown`.
 Plain markdown sources or heading-shaped text use `markdown_headings`.
 `tree` command output keeps a small path stack so nested entries render parent
-directories such as `src/app` instead of isolated leaf names.
+directories such as `src/app` instead of isolated leaf names; rows with deeper
+children are classified as directories even when `tree` omits trailing slashes.
 
 The SQL context tools persist the rendered parent-chain tree into the existing
 Simple context SQLite table. Use `spipe_context_sql_put` with `db_path` to save
