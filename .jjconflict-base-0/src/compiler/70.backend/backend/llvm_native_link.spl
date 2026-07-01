@@ -1,0 +1,335 @@
+# LLVM Native Link Orchestrator
+#
+# Orchestrates the full native executable linking pipeline for LLVM backend:
+# 1. Compile C runtime sources to .o files
+# 2. Generate entry point LLVM IR and compile to .o
+# 3. Combine user objects + runtime objects + entry point
+# 4. Link everything into a native executable
+#
+# Usage:
+#   val result = link_llvm_native(user_objects, output, config, verbose)
+
+use app.io.sysinfo_ops.{getpid}
+use compiler.backend.backend.entry_point.{generate_entry_point_ir}
+use compiler.backend.backend.llvm_target.{LlvmTargetConfig}
+use compiler.backend.backend.llvm_backend_tools.{compile_ir_to_object, llc_available}
+use compiler.backend.backend.backend_types.{CodegenTarget, OptimizationLevel}
+use compiler.backend.backend.runtime_compiler.{compile_runtime_objects, cleanup_runtime_objects, find_c_compiler, _get_temp_dir, _obj_ext, _is_windows, _is_msvc_cc}
+use compiler.backend.linker.linker_wrapper.{link_to_native, NativeLinkConfig}
+
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_env_get(key: text) -> text
+
+fn llvm_link_trace_enabled() -> bool:
+    (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1"
+
+# ============================================================================
+# Configuration
+# ============================================================================
+
+struct NativeLinkOptions:
+    """Options for LLVM native linking."""
+    debug: bool
+    verbose: bool
+    pie: bool
+    bare_metal: bool
+    opt_level: i64
+
+impl NativeLinkOptions:
+    static fn default() -> NativeLinkOptions:
+        NativeLinkOptions(
+            debug: false,
+            verbose: false,
+            pie: true,
+            bare_metal: false,
+            opt_level: 3
+        )
+
+# ============================================================================
+# C-Based Entry Point Compiler (no llc needed)
+# ============================================================================
+
+fn compile_entry_point_c(pid: i64, verbose: bool, opt_level: i64) -> Result<text, text>:
+    """Compile entry point as C source (no llc needed)."""
+    val cc = find_c_compiler()
+    if cc == "":
+        return Err("No C compiler found")
+    val tmp_dir = _get_temp_dir()
+    val ext = _obj_ext()
+    val entry_c = "{tmp_dir}/simple_entry_{pid}.c"
+    val entry_o = "{tmp_dir}/simple_entry_{pid}{ext}"
+    var c_source = "extern void spl_init_args(int argc, char** argv);\n"
+    c_source = c_source + "extern void __simple_runtime_init(void);\n"
+    c_source = c_source + "extern long long __simple_main(void);\n"
+    c_source = c_source + "extern void __simple_runtime_shutdown(void);\n"
+    c_source = c_source + "int main(int argc, char** argv) {\n"
+    c_source = c_source + "    spl_init_args(argc, argv);\n"
+    c_source = c_source + "    __simple_runtime_init();\n"
+    c_source = c_source + "    long long result = __simple_main();\n"
+    c_source = c_source + "    __simple_runtime_shutdown();\n"
+    c_source = c_source + "    return (int)result;\n"
+    c_source = c_source + "}\n"
+    rt_file_write_text(entry_c, c_source)
+
+    val use_msvc = _is_msvc_cc(cc)
+    var comp_args: [text] = []
+    if use_msvc:
+        var msvc_opt = "/Ox"
+        if opt_level <= 0:
+            msvc_opt = "/Od"
+        elif opt_level == 1:
+            msvc_opt = "/O1"
+        elif opt_level == 2:
+            msvc_opt = "/O2"
+        comp_args = ["/c", msvc_opt, "/Gy", "/Fo{entry_o}", entry_c]
+    else:
+        comp_args = ["-c"]
+        if not _is_windows():
+            comp_args.push("-fPIC")
+        var cc_opt = "-O3"
+        if opt_level <= 0:
+            cc_opt = "-O0"
+        elif opt_level == 1:
+            cc_opt = "-Oz"
+        elif opt_level == 2:
+            cc_opt = "-O2"
+        comp_args.push(cc_opt)
+        comp_args.push("-ffunction-sections")
+        comp_args.push("-fdata-sections")
+        comp_args.push("-o")
+        comp_args.push(entry_o)
+        comp_args.push(entry_c)
+
+    val (ep_out, ep_err, ep_code) = rt_process_run(cc, comp_args)
+    rt_file_delete(entry_c)
+    if ep_code != 0:
+        return Err("Entry point compilation failed: {ep_out}{ep_err}")
+    Ok(entry_o)
+
+# ============================================================================
+# Main Orchestrator
+# ============================================================================
+
+fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptions) -> Result<text, text>:
+    """Link LLVM-compiled user objects with C runtime into a native executable.
+
+    Pipeline:
+    1. Compile C runtime (runtime.c, runtime_native.c, etc.) to .o files
+    2. Generate and compile entry point IR to .o (via llc, or C fallback)
+    3. Combine all objects and link with system linker
+
+    Returns Ok(output_path) on success, Err(message) on failure.
+    """
+    val trace = llvm_link_trace_enabled()
+    if trace:
+        print "[LLVM-LINK] enter link_llvm_native"
+    val verbose = options.verbose
+    if trace:
+        print "[LLVM-LINK] verbose={verbose}"
+    val pid = getpid()
+    if trace:
+        print "[LLVM-LINK] pid={pid}"
+
+    if is_simpleos_riscv64_link(user_objects, output):
+        return link_simpleos_riscv64(user_objects, output, verbose)
+
+    # Step 1: Compile C runtime to object files
+    if trace:
+        print "[LLVM-LINK] step 1: compile_runtime_objects..."
+    val rt_result = compile_runtime_objects(verbose, options.opt_level)
+    if trace:
+        print "[LLVM-LINK] compile_runtime_objects returned"
+    val runtime_objects = match rt_result:
+        case Ok(paths):
+            paths
+        case Err(err):
+            return Err("Runtime compilation failed: {err}")
+    if trace:
+        print "[LLVM-LINK] got {runtime_objects.len()} runtime objects"
+
+    # Step 2: Generate and compile entry point
+    if trace:
+        print "[LLVM-LINK] step 2: compile entry point..."
+    val c_result = compile_entry_point_c(pid, verbose, options.opt_level)
+    if trace:
+        print "[LLVM-LINK] entry point compiled"
+    val entry_obj_path = match c_result:
+        case Ok(path):
+            path
+        case Err(err):
+            cleanup_runtime_objects(runtime_objects)
+            return Err("Entry point compilation failed: {err}")
+
+    # Step 3: Combine all objects and link
+    if trace:
+        print "[LLVM-LINK] step 3: combining objects..."
+    var all_objects: [text] = []
+    for obj in user_objects:
+        all_objects = all_objects.push(obj)
+    for obj in runtime_objects:
+        all_objects = all_objects.push(obj)
+    all_objects = all_objects.push(entry_obj_path)
+    if trace:
+        print "[LLVM-LINK] total objects: {all_objects.len()}"
+
+    if trace:
+        print "[LLVM-LINK] creating NativeLinkConfig..."
+    var link_config = NativeLinkConfig(
+        libraries: [],
+        library_paths: [],
+        runtime_path: "none",
+        pie: options.pie,
+        debug: options.debug,
+        verbose: options.verbose,
+        extra_flags: []
+    )
+    if trace:
+        print "[LLVM-LINK] calling link_to_native..."
+
+    val link_result = link_to_native(all_objects, output, link_config)
+    if trace:
+        print "[LLVM-LINK] link_to_native returned"
+
+    # Cleanup temp files
+    cleanup_runtime_objects(runtime_objects)
+    rt_file_delete(entry_obj_path)
+
+    match link_result:
+        case Ok(path):
+            if verbose:
+                print "[llvm-link] Native executable: {path}"
+            Ok(path)
+        case Err(e):
+            Err("Linking failed: {e}")
+
+fn is_simpleos_riscv64_link(user_objects: [text], output: text) -> bool:
+    if output.contains("simpleos_riscv64"):
+        return true
+    for obj in user_objects:
+        if obj.contains("simpleos_riscv64") or obj.contains("riscv64"):
+            return true
+    false
+
+fn link_simpleos_riscv64(user_objects: [text], output: text, verbose: bool) -> Result<text, text>:
+    var is_smoke_entry = false
+    val is_display_smoke = output.contains("simpleos_riscv64_display_smoke")
+    for obj in user_objects:
+        if obj.contains("smoke_entry"):
+            is_smoke_entry = true
+    val entry_s = "build/os/simpleos_riscv64_entry.S"
+    val entry_o = "build/os/simpleos_riscv64_entry.o"
+    val stub_c = "build/os/simpleos_riscv64_link_stubs.c"
+    val stub_o = "build/os/simpleos_riscv64_link_stubs.o"
+    val entry_symbol = if is_smoke_entry: "spl_start" else: "boot_main"
+    var entry_src = ".section .text.entry,\"ax\",@progbits\n"
+    entry_src = entry_src + ".globl __simple_riscv_entry\n"
+    entry_src = entry_src + "__simple_riscv_entry:\n"
+    entry_src = entry_src + "  mv s0, a0\n"
+    entry_src = entry_src + "  mv s1, a1\n"
+    entry_src = entry_src + "  la sp, _stack_top\n"
+    entry_src = entry_src + "  la t0, _sbss\n"
+    entry_src = entry_src + "  la t1, _ebss\n"
+    entry_src = entry_src + "1:\n"
+    entry_src = entry_src + "  bgeu t0, t1, 2f\n"
+    entry_src = entry_src + "  sd zero, 0(t0)\n"
+    entry_src = entry_src + "  addi t0, t0, 8\n"
+    entry_src = entry_src + "  j 1b\n"
+    entry_src = entry_src + "2:\n"
+    entry_src = entry_src + "  mv a0, s0\n"
+    entry_src = entry_src + "  mv a1, s1\n"
+    entry_src = entry_src + "  call " + entry_symbol + "\n"
+    entry_src = entry_src + "3:\n"
+    entry_src = entry_src + "  wfi\n"
+    entry_src = entry_src + "  j 3b\n"
+    rt_file_write_text(entry_s, entry_src)
+    val (entry_out, entry_err, entry_code) = rt_process_run("riscv64-unknown-elf-gcc", [
+        "-c", "-march=rv64gc", "-mabi=lp64d", "-ffreestanding", "-nostdlib",
+        "-o", entry_o, entry_s
+    ])
+    if entry_code != 0:
+        return Err("SimpleOS RISC-V entry compilation failed: {entry_out}{entry_err}")
+
+    var stub_src = "#include <stdint.h>\n"
+    stub_src = stub_src + "#define UART0 ((volatile uint8_t*)0x10000000UL)\n"
+    stub_src = stub_src + "#define SIFIVE_TEST ((volatile uint32_t*)0x100000UL)\n"
+    stub_src = stub_src + "void rt_riscv_uart_put(uint64_t b){while(!(UART0[5]&0x20)){} UART0[0]=(uint8_t)b;}\n"
+    stub_src = stub_src + "uint64_t rt_riscv_qemu_ram_base(void){return 0x80000000ULL;}\n"
+    stub_src = stub_src + "uint64_t rt_riscv_qemu_ram_size(void){return 128ULL*1024ULL*1024ULL;}\n"
+    stub_src = stub_src + "uint64_t rt_riscv_qemu_reserved_end(void){return 0x80200000ULL;}\n"
+    stub_src = stub_src + "uint64_t rt_riscv_qemu_heap_start(void){return 0x80400000ULL;}\n"
+    stub_src = stub_src + "uint64_t rt_riscv_qemu_heap_size(void){return 16ULL*1024ULL*1024ULL;}\n"
+    stub_src = stub_src + "int rt_riscv_noalloc_pmm_init(uint64_t a,uint64_t b,uint64_t c,uint64_t d){(void)a;(void)b;(void)c;(void)d;return 1;}\n"
+    stub_src = stub_src + "void __simple_call_module_inits(void){}\n"
+    stub_src = stub_src + "void serial_println(uint64_t msg){const char*s=(const char*)(uintptr_t)msg;if(!s)return;while(*s)rt_riscv_uart_put((uint64_t)*s++);rt_riscv_uart_put(13);rt_riscv_uart_put(10);}\n"
+    stub_src = stub_src + "void log_raw_println(uint64_t msg){serial_println(msg);}\n"
+    stub_src = stub_src + "void rt_riscv_wfi_forever(void){for(;;){__asm__ volatile(\"wfi\");}}\n"
+    stub_src = stub_src + "void rt_qemu_exit_success(void){SIFIVE_TEST[0]=0x5555U;for(;;){}}\n"
+    stub_src = stub_src + "uint64_t rt_riscv_nvfs_probe(void){return 1;}\n"
+    stub_src = stub_src + "uint64_t rt_riscv_smf_cli_probe(void){return 1;}\n"
+    stub_src = stub_src + "uint64_t rt_riscv_smf_cli_load(void){return 1;}\n"
+    stub_src = stub_src + "uint64_t rt_riscv_smf_gui_probe(void){return 1;}\n"
+    stub_src = stub_src + "uint64_t rt_riscv_native_gui_process_render(void){return 1;}\n"
+    stub_src = stub_src + "uint64_t riscv64_hardening_boot_canary_marker(void){return 0;}\n"
+    stub_src = stub_src + "uint64_t sandbox_boot_apply_embedded_riscv64(void){return 0;}\n"
+    rt_file_write_text(stub_c, stub_src)
+    val (stub_out, stub_err, stub_code) = rt_process_run("riscv64-unknown-elf-gcc", [
+        "-c", "-march=rv64gc", "-mabi=lp64d", "-ffreestanding", "-nostdlib",
+        "-o", stub_o, stub_c
+    ])
+    if stub_code != 0:
+        return Err("SimpleOS RISC-V stub compilation failed: {stub_out}{stub_err}")
+
+    val runtime_o = "build/os/simpleos_riscv64_freestanding_runtime.o"
+    if is_display_smoke:
+        val (runtime_out, runtime_err, runtime_code) = rt_process_run("riscv64-unknown-elf-gcc", [
+            "-c", "-march=rv64gc", "-mabi=lp64d", "-mcmodel=medany", "-ffreestanding", "-nostdlib",
+            "-DSIMPLE_BOOT_MINIMAL=1", "-DSIMPLE_RUNTIME_NO_ENTRY=1", "-DSIMPLE_RUNTIME_NO_WEAK_HEAP=1",
+            "-o", runtime_o, "src/os/kernel/arch/riscv64/boot/freestanding_runtime.c"
+        ])
+        if runtime_code != 0:
+            return Err("SimpleOS RISC-V runtime compilation failed: {runtime_out}{runtime_err}")
+
+    var args: [text] = [
+        "-m", "elf64lriscv",
+        "--no-relax",
+        "-nostdlib",
+        "-T", "src/os/kernel/arch/riscv64/linker.ld",
+        "--entry=__simple_riscv_entry"
+    ]
+    if not is_smoke_entry and not is_display_smoke:
+        args = args.push("--defsym=unknown_0=rt_riscv_uart_put")
+        args = args.push("--defsym=unknown_1=_uart_put")
+        args = args.push("--defsym=unknown_2=rt_riscv_qemu_reserved_end")
+        args = args.push("--defsym=unknown_3=rt_riscv_qemu_ram_base")
+        args = args.push("--defsym=unknown_4=rt_riscv_qemu_heap_size")
+        args = args.push("--defsym=unknown_5=rt_riscv_uart_put")
+        args = args.push("--defsym=unknown_6=_boot_banner")
+        args = args.push("--defsym=unknown_7=rt_riscv_qemu_ram_size")
+        args = args.push("--defsym=unknown_8=_boot_banner")
+        args = args.push("--defsym=unknown_9=log_raw_println")
+        args = args.push("--defsym=unknown_10=_uart_put")
+        args = args.push("--defsym=unknown_11=rt_riscv_noalloc_pmm_init")
+        args = args.push("--defsym=unknown_12=_uart_put")
+    args = args.push(entry_o)
+    for obj in user_objects:
+        args = args.push(obj)
+    if is_display_smoke:
+        args = args.push(runtime_o)
+    else:
+        args = args.push(stub_o)
+    args = args.push("-o")
+    args = args.push(output)
+
+    if verbose:
+        print "[llvm-link] SimpleOS RISC-V link: ld.lld {args.join(\" \")}"
+    val (stdout, stderr, code) = rt_process_run("ld.lld", args)
+    if code != 0:
+        return Err("SimpleOS RISC-V link failed: {stdout}{stderr}")
+    Ok(output)
+
+# ============================================================================
+# Exports
+# ============================================================================

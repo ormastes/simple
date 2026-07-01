@@ -1,0 +1,356 @@
+use std.spipe.*
+
+# ============================================================================
+# Self-contained spec for portable_simd_fp_modules
+# All classes are replicated inline — no imports from src/ modules.
+# ============================================================================
+
+# --- TargetFamily enum ---
+enum TargetFamily:
+    x86_64
+    x86_32
+    aarch64
+    riscv64
+    riscv32
+    wasm32
+    unknown
+
+fn family_from_arch(arch: text) -> TargetFamily:
+    if arch == "x86_64":
+        return TargetFamily.x86_64
+    elif arch == "riscv64":
+        return TargetFamily.riscv64
+    elif arch == "riscv32":
+        return TargetFamily.riscv32
+    elif arch == "aarch64":
+        return TargetFamily.aarch64
+    elif arch == "wasm32":
+        return TargetFamily.wasm32
+    else:
+        return TargetFamily.unknown
+
+# --- NumericCaps ---
+struct NumericCaps:
+    arch: text
+    pointer_bits: int
+    has_hw_float: bool
+    has_double: bool
+    has_simd_128: bool
+    has_simd_256: bool
+    has_int_simd: bool
+    has_fma: bool
+    simd_needs_probe: bool
+
+impl NumericCaps:
+    static fn scalar_only(arch: text, ptr_bits: int) -> NumericCaps:
+        NumericCaps(arch: arch, pointer_bits: ptr_bits, has_hw_float: false, has_double: false, has_simd_128: false, has_simd_256: false, has_int_simd: false, has_fma: false, simd_needs_probe: false)
+
+    static fn x86_64_baseline() -> NumericCaps:
+        NumericCaps(arch: "x86_64", pointer_bits: 64, has_hw_float: true, has_double: true, has_simd_128: true, has_simd_256: false, has_int_simd: true, has_fma: false, simd_needs_probe: true)
+
+    fn supports_vectorization() -> bool:
+        self.has_simd_128 == true or self.has_simd_256 == true
+
+    fn max_simd_bits() -> int:
+        if self.has_simd_256 == true:
+            return 256
+        elif self.has_simd_128 == true:
+            return 128
+        else:
+            return 0
+
+    fn describe() -> text:
+        val simd_bits = self.max_simd_bits()
+        val fp_str = if self.has_hw_float == true: "hw-fp" else: "sw-fp"
+        val simd_str = if simd_bits > 0: "simd-" + simd_bits.to_text() else: "scalar"
+        return self.arch + " ptr=" + self.pointer_bits.to_text() + "b " + fp_str + " " + simd_str
+
+# --- TargetSpec + CapRegistryEntry ---
+struct TargetSpec:
+    arch: text
+    os: text
+    pointer_width: int
+    float_support: bool
+    vector_support: bool
+    is_baremetal: bool
+
+impl TargetSpec:
+    static fn linux_x86_64() -> TargetSpec:
+        TargetSpec(arch: "x86_64", os: "linux", pointer_width: 64, float_support: true, vector_support: true, is_baremetal: false)
+
+    static fn riscv64_linux() -> TargetSpec:
+        TargetSpec(arch: "riscv64", os: "linux", pointer_width: 64, float_support: true, vector_support: false, is_baremetal: false)
+
+    static fn riscv32_baremetal() -> TargetSpec:
+        TargetSpec(arch: "riscv32", os: "none", pointer_width: 32, float_support: false, vector_support: false, is_baremetal: true)
+
+struct CapRegistryEntry:
+    arch: text
+    os: text
+    pointer_width: int
+    has_hw_float: bool
+    has_simd_128: bool
+    has_simd_256: bool
+    has_int_simd: bool
+    has_fma: bool
+    simd_needs_probe: bool
+    diagnostic: text
+
+impl CapRegistryEntry:
+    static fn derive(spec: TargetSpec) -> CapRegistryEntry:
+        val is_x86 = spec.arch == "x86_64" or spec.arch == "x86_32"
+        val is_rv = spec.arch == "riscv64" or spec.arch == "riscv32"
+        val s128 = if is_x86 == true and spec.float_support == true: true
+                   elif spec.vector_support == true: true
+                   else: false
+        val probe = if is_x86 == true and spec.vector_support == true: true else: false
+        val int_simd = if is_x86 == true and spec.float_support == true: true
+                       elif spec.vector_support == true: true
+                       else: false
+        val fma = if spec.arch == "aarch64": true else: false
+        val diag = if spec.float_support == false and is_rv == true:
+                       "riscv integer-only: no FP or SIMD"
+                   elif probe == true:
+                       "x86 AVX2/AVX512 availability requires CPUID probe at runtime"
+                   else:
+                       "ok"
+        CapRegistryEntry(arch: spec.arch, os: spec.os, pointer_width: spec.pointer_width, has_hw_float: spec.float_support, has_simd_128: s128, has_simd_256: false, has_int_simd: int_simd, has_fma: fma, simd_needs_probe: probe, diagnostic: diag)
+
+    fn is_ok() -> bool:
+        self.diagnostic == "ok"
+
+# --- LoweringFamily enum ---
+enum LoweringFamily:
+    scalar_fallback
+    x86_sse2
+    x86_avx
+    riscv_fd
+    riscv_v
+    unsupported
+
+fn lowering_family_name(fam: LoweringFamily) -> text:
+    match fam:
+        case LoweringFamily.scalar_fallback: return "scalar_fallback"
+        case LoweringFamily.x86_sse2: return "x86_sse2"
+        case LoweringFamily.x86_avx: return "x86_avx"
+        case LoweringFamily.riscv_fd: return "riscv_fd"
+        case LoweringFamily.riscv_v: return "riscv_v"
+        case LoweringFamily.unsupported: return "unsupported"
+        case _: return "unknown"
+
+# --- LoweringConfig ---
+struct LoweringConfig:
+    enable_scalar_fp: bool
+    enable_vector_simd: bool
+    enable_target_lowering: bool
+
+impl LoweringConfig:
+    static fn all_enabled() -> LoweringConfig:
+        LoweringConfig(enable_scalar_fp: true, enable_vector_simd: true, enable_target_lowering: true)
+
+    static fn scalar_only() -> LoweringConfig:
+        LoweringConfig(enable_scalar_fp: true, enable_vector_simd: false, enable_target_lowering: false)
+
+    static fn no_fp() -> LoweringConfig:
+        LoweringConfig(enable_scalar_fp: false, enable_vector_simd: false, enable_target_lowering: false)
+
+    fn any_enabled() -> bool:
+        self.enable_scalar_fp == true or self.enable_vector_simd == true or self.enable_target_lowering == true
+
+# --- LoweringSelection ---
+struct LoweringSelection:
+    arch: text
+    chosen_family: LoweringFamily
+    scalar_fp_active: bool
+    vector_simd_active: bool
+    diagnostic: text
+
+impl LoweringSelection:
+    static fn select(arch: text, has_float: bool, has_simd: bool, needs_probe: bool, cfg: LoweringConfig) -> LoweringSelection:
+        val fp_active = cfg.enable_scalar_fp == true and has_float == true
+        val simd_active = cfg.enable_vector_simd == true and has_simd == true
+        val fam = if arch == "x86_64" and simd_active == true and needs_probe == false:
+                      LoweringFamily.x86_avx
+                  elif arch == "x86_64" and simd_active == true:
+                      LoweringFamily.x86_sse2
+                  elif arch == "riscv64" and simd_active == true:
+                      LoweringFamily.riscv_v
+                  elif arch == "riscv64" and fp_active == true:
+                      LoweringFamily.riscv_fd
+                  else:
+                      LoweringFamily.scalar_fallback
+        val diag = if cfg.enable_vector_simd == true and has_simd == false:
+                       "vector_simd requested but unavailable for " + arch + "; falling back"
+                   elif cfg.enable_scalar_fp == true and has_float == false:
+                       "scalar_fp requested but no hardware FP on " + arch + "; integer-only mode"
+                   else:
+                       "ok"
+        LoweringSelection(arch: arch, chosen_family: fam, scalar_fp_active: fp_active, vector_simd_active: simd_active, diagnostic: diag)
+
+    fn is_ok() -> bool:
+        self.diagnostic == "ok"
+
+    fn family_name() -> text:
+        lowering_family_name(self.chosen_family)
+
+# --- FpTier enum ---
+enum FpTier:
+    none_tier
+    soft_fp
+    hard_fp_sp
+    hard_fp_dp
+    hard_fp_simd
+
+fn fp_tier_name(tier: FpTier) -> text:
+    match tier:
+        case FpTier.none_tier: return "none"
+        case FpTier.soft_fp: return "soft-fp"
+        case FpTier.hard_fp_sp: return "hard-fp-sp"
+        case FpTier.hard_fp_dp: return "hard-fp-dp"
+        case FpTier.hard_fp_simd: return "hard-fp-simd"
+        case _: return "unknown"
+
+# --- FpProfile ---
+struct FpProfile:
+    arch: text
+    tier: FpTier
+    sp_width: int
+    dp_width: int
+    has_fma: bool
+    has_denorm: bool
+
+impl FpProfile:
+    static fn for_x86_64() -> FpProfile:
+        FpProfile(arch: "x86_64", tier: FpTier.hard_fp_simd, sp_width: 128, dp_width: 128, has_fma: false, has_denorm: true)
+
+    static fn for_riscv64_fd() -> FpProfile:
+        FpProfile(arch: "riscv64", tier: FpTier.hard_fp_dp, sp_width: 64, dp_width: 64, has_fma: true, has_denorm: true)
+
+    static fn for_riscv32_int() -> FpProfile:
+        FpProfile(arch: "riscv32", tier: FpTier.none_tier, sp_width: 0, dp_width: 0, has_fma: false, has_denorm: false)
+
+    fn tier_name() -> text:
+        fp_tier_name(self.tier)
+
+    fn has_any_fp() -> bool:
+        self.tier == FpTier.none_tier == false
+
+    fn describe() -> text:
+        return self.arch + " fp=" + self.tier_name() + " sp=" + self.sp_width.to_text() + " dp=" + self.dp_width.to_text()
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+describe "NumericCaps":
+    context "scalar_only":
+        it "has no vectorization":
+            val c = NumericCaps.scalar_only("riscv32", 32)
+            expect(c.supports_vectorization() == false).to_equal(true)
+
+        it "max_simd_bits is zero":
+            val c = NumericCaps.scalar_only("riscv32", 32)
+            expect(c.max_simd_bits()).to_equal(0)
+
+        it "pointer_bits is preserved":
+            val c = NumericCaps.scalar_only("riscv32", 32)
+            expect(c.pointer_bits).to_equal(32)
+
+    context "x86_64_baseline":
+        it "supports vectorization via simd_128":
+            val c = NumericCaps.x86_64_baseline()
+            expect(c.supports_vectorization()).to_equal(true)
+
+        it "max_simd_bits is 128 when only sse2":
+            val c = NumericCaps.x86_64_baseline()
+            expect(c.max_simd_bits()).to_equal(128)
+
+        it "describe includes hw-fp":
+            val c = NumericCaps.x86_64_baseline()
+            val d = c.describe()
+            expect(d).to_equal("x86_64 ptr=64b hw-fp simd-128")
+
+describe "TargetFamily":
+    it "x86_64 arch maps to x86_64 family":
+        val f = family_from_arch("x86_64")
+        expect(f == TargetFamily.x86_64).to_equal(true)
+
+    it "riscv32 arch maps to riscv32 family":
+        val f = family_from_arch("riscv32")
+        expect(f == TargetFamily.riscv32).to_equal(true)
+
+    it "unknown arch maps to unknown family":
+        val f = family_from_arch("mips")
+        expect(f == TargetFamily.unknown).to_equal(true)
+
+describe "CapRegistryEntry":
+    context "linux_x86_64":
+        it "has simd_needs_probe true":
+            val spec = TargetSpec.linux_x86_64()
+            val entry = CapRegistryEntry.derive(spec)
+            expect(entry.simd_needs_probe).to_equal(true)
+
+        it "has simd_128 true":
+            val spec = TargetSpec.linux_x86_64()
+            val entry = CapRegistryEntry.derive(spec)
+            expect(entry.has_simd_128).to_equal(true)
+
+        it "is_ok is false due to probe diagnostic":
+            val spec = TargetSpec.linux_x86_64()
+            val entry = CapRegistryEntry.derive(spec)
+            expect(entry.is_ok() == false).to_equal(true)
+
+    context "riscv32_baremetal":
+        it "has no simd_128":
+            val spec = TargetSpec.riscv32_baremetal()
+            val entry = CapRegistryEntry.derive(spec)
+            expect(entry.has_simd_128 == false).to_equal(true)
+
+        it "is_ok is false for integer-only riscv":
+            val spec = TargetSpec.riscv32_baremetal()
+            val entry = CapRegistryEntry.derive(spec)
+            expect(entry.is_ok() == false).to_equal(true)
+
+describe "LoweringSelection":
+    it "x86_64 with simd and probe selects x86_sse2":
+        val cfg = LoweringConfig.all_enabled()
+        val sel = LoweringSelection.select("x86_64", true, true, true, cfg)
+        expect(sel.family_name()).to_equal("x86_sse2")
+
+    it "x86_64 with simd and no probe selects x86_avx":
+        val cfg = LoweringConfig.all_enabled()
+        val sel = LoweringSelection.select("x86_64", true, true, false, cfg)
+        expect(sel.family_name()).to_equal("x86_avx")
+
+    it "riscv64 with fp only selects riscv_fd":
+        val cfg = LoweringConfig.all_enabled()
+        val sel = LoweringSelection.select("riscv64", true, false, false, cfg)
+        expect(sel.family_name()).to_equal("riscv_fd")
+
+    it "scalar_only config disables vector_simd":
+        val cfg = LoweringConfig.scalar_only()
+        val sel = LoweringSelection.select("x86_64", true, true, false, cfg)
+        expect(sel.vector_simd_active == false).to_equal(true)
+
+    it "missing simd emits fallback diagnostic":
+        val cfg = LoweringConfig.all_enabled()
+        val sel = LoweringSelection.select("riscv32", false, false, false, cfg)
+        expect(sel.is_ok() == false).to_equal(true)
+
+describe "FpProfile":
+    it "x86_64 profile tier is hard_fp_simd":
+        val fp = FpProfile.for_x86_64()
+        expect(fp.tier_name()).to_equal("hard-fp-simd")
+
+    it "riscv64 fd profile has fma":
+        val fp = FpProfile.for_riscv64_fd()
+        expect(fp.has_fma).to_equal(true)
+
+    it "riscv32 integer profile has no fp":
+        val fp = FpProfile.for_riscv32_int()
+        expect(fp.has_any_fp() == false).to_equal(true)
+
+    it "riscv64 fd describe includes dp=64":
+        val fp = FpProfile.for_riscv64_fd()
+        val d = fp.describe()
+        expect(d).to_equal("riscv64 fp=hard-fp-dp sp=64 dp=64")

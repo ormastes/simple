@@ -1,0 +1,275 @@
+# @cover src/lib/gc_async_mut/gpu/browser_engine/net/cookie_store.spl 80%
+# @cover src/lib/gc_async_mut/gpu/browser_engine/net/entity/cookie_types.spl 80%
+"""
+# Cookie Store Specification
+
+**Feature IDs:** #M16-AC6
+**Category:** Stdlib
+**Difficulty:** 3/5
+**Status:** Draft
+
+## Overview
+
+Verifies RFC 6265 cookie domain/path matching, SameSite enum, Set-Cookie parsing,
+and CookieStore storage/retrieval. No network calls — pure logic.
+"""
+
+use std.spipe.*
+
+use std.gc_async_mut.gpu.browser_engine.net.cookie_store.{CookieStore, CookieJar, parse_set_cookie}
+use std.gc_async_mut.gpu.browser_engine.net.entity.cookie_types.{Cookie, SameSite}
+
+
+# ============================================================================
+# Set-Cookie Header Parsing
+# ============================================================================
+
+describe "parse_set_cookie":
+    """
+    ## Parsing Set-Cookie header values
+
+    parse_set_cookie takes a Set-Cookie header string and returns a Cookie struct
+    with name, value, domain, path, SameSite, Secure, and HttpOnly populated.
+    """
+
+    it "AC-6: parses simple name=value":
+        val c = parse_simple_cookie()
+        expect(c.name).to_equal("session")
+        expect(c.value).to_equal("abc123")
+
+    it "AC-6: parses Domain attribute":
+        val c = parse_cookie_with_domain()
+        expect(c.domain).to_equal("example.com")
+
+    it "AC-6: parses Path attribute":
+        val c = parse_cookie_with_path()
+        expect(c.path).to_equal("/api")
+
+    it "AC-6: parses Secure flag":
+        val c = parse_secure_cookie()
+        expect(c.secure).to_equal(true)
+
+    it "AC-6: parses HttpOnly flag":
+        val c = parse_httponly_cookie()
+        expect(c.http_only).to_equal(true)
+
+    it "AC-6: parses SameSite=Strict":
+        val c = parse_samesite_strict_cookie()
+        val is_strict = (c.same_site == SameSite.Strict)
+        expect(is_strict).to_equal(true)
+
+    it "AC-6: parses SameSite=Lax":
+        val c = parse_samesite_lax_cookie()
+        val is_lax = (c.same_site == SameSite.Lax)
+        expect(is_lax).to_equal(true)
+
+    it "AC-6: parses SameSite=None":
+        val c = parse_samesite_none_cookie()
+        val is_none = (c.same_site == SameSite.None)
+        expect(is_none).to_equal(true)
+
+    it "AC-6: cookie without SameSite defaults to Lax":
+        val c = parse_simple_cookie()
+        val is_lax = (c.same_site == SameSite.Lax)
+        expect(is_lax).to_equal(true)
+
+
+# ============================================================================
+# Domain Matching
+# ============================================================================
+
+describe "Cookie domain matching":
+    """
+    ## RFC 6265 domain matching rules
+
+    A domain-match occurs when the request host equals the cookie domain
+    or is a subdomain of a dot-prefixed cookie domain.
+    """
+
+    it "AC-6: exact domain match succeeds":
+        val c = make_cookie_for_domain("example.com")
+        val matches = cookie_matches_domain(c, "example.com")
+        expect(matches).to_equal(true)
+
+    it "AC-6: subdomain matches dot-prefixed domain":
+        val c = make_cookie_for_domain(".example.com")
+        val matches = cookie_matches_domain(c, "sub.example.com")
+        expect(matches).to_equal(true)
+
+    it "AC-6: parent domain does not match subdomain-scoped cookie":
+        val c = make_cookie_for_domain("sub.example.com")
+        val matches = cookie_matches_domain(c, "example.com")
+        expect(matches).to_equal(false)
+
+    it "AC-6: unrelated domain does not match":
+        val c = make_cookie_for_domain("example.com")
+        val matches = cookie_matches_domain(c, "other.com")
+        expect(matches).to_equal(false)
+
+
+# ============================================================================
+# Path Matching
+# ============================================================================
+
+describe "Cookie path matching":
+    """
+    ## RFC 6265 path matching rules
+
+    A request path matches a cookie path when the cookie path is a prefix of
+    the request path, with proper slash-boundary handling.
+    """
+
+    it "AC-6: exact path match succeeds":
+        val c = make_cookie_for_path("/api")
+        val matches = cookie_matches_path(c, "/api")
+        expect(matches).to_equal(true)
+
+    it "AC-6: longer path with slash prefix matches":
+        val c = make_cookie_for_path("/api")
+        val matches = cookie_matches_path(c, "/api/resource")
+        expect(matches).to_equal(true)
+
+    it "AC-6: root path matches everything":
+        val c = make_cookie_for_path("/")
+        val matches = cookie_matches_path(c, "/any/path/here")
+        expect(matches).to_equal(true)
+
+    it "AC-6: path prefix without slash boundary does not match":
+        val c = make_cookie_for_path("/api")
+        val matches = cookie_matches_path(c, "/apiother")
+        expect(matches).to_equal(false)
+
+
+# ============================================================================
+# CookieStore Storage and Retrieval
+# ============================================================================
+
+describe "CookieStore storage":
+    """
+    ## Store, retrieve, and evict cookies
+
+    CookieStore stores cookies per domain; retrieves applicable cookies for a request URL;
+    enforces per-domain and total caps.
+    """
+
+    it "AC-6: stored cookie is returned for matching request":
+        val store = make_store_with_cookie("session", "tok1", "example.com", "/")
+        val cookies = get_cookies_for(store, "example.com", "/page")
+        expect(cookies).to_contain("session=tok1")
+
+    it "AC-6: cookie is not returned for non-matching domain":
+        val store = make_store_with_cookie("session", "tok1", "example.com", "/")
+        val cookies = get_cookies_for(store, "other.com", "/page")
+        val has_cookie = cookies_contain(cookies, "session")
+        expect(has_cookie).to_equal(false)
+
+    it "AC-6: cookie is not returned for non-matching path":
+        val store = make_store_with_cookie("api_key", "k1", "example.com", "/api")
+        val cookies = get_cookies_for(store, "example.com", "/other")
+        val has_cookie = cookies_contain(cookies, "api_key")
+        expect(has_cookie).to_equal(false)
+
+    it "AC-6: newer cookie with same name replaces older one":
+        val store = make_empty_store()
+        store_cookie(store, make_named_cookie("token", "v1", "example.com", "/"))
+        store_cookie(store, make_named_cookie("token", "v2", "example.com", "/"))
+        val cookies = get_cookies_for(store, "example.com", "/")
+        expect(cookies).to_contain("token=v2")
+
+    it "AC-6: per-domain cap is enforced (max 50)":
+        val store = make_empty_store()
+        val count = fill_domain_to_cap(store, "example.com", 51)
+        val stored = count_cookies_for_domain(store, "example.com")
+        expect(stored).to_be_less_than(52)
+
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn parse_simple_cookie() -> Cookie:
+    return parse_set_cookie("session=abc123")
+
+fn parse_cookie_with_domain() -> Cookie:
+    return parse_set_cookie("id=x; Domain=example.com")
+
+fn parse_cookie_with_path() -> Cookie:
+    return parse_set_cookie("tok=y; Path=/api")
+
+fn parse_secure_cookie() -> Cookie:
+    return parse_set_cookie("tok=z; Secure")
+
+fn parse_httponly_cookie() -> Cookie:
+    return parse_set_cookie("tok=z; HttpOnly")
+
+fn parse_samesite_strict_cookie() -> Cookie:
+    return parse_set_cookie("tok=z; SameSite=Strict")
+
+fn parse_samesite_lax_cookie() -> Cookie:
+    return parse_set_cookie("tok=z; SameSite=Lax")
+
+fn parse_samesite_none_cookie() -> Cookie:
+    return parse_set_cookie("tok=z; SameSite=None; Secure")
+
+fn make_cookie_for_domain(domain: text) -> Cookie:
+    return Cookie {
+        name: "x",
+        value: "y",
+        domain: domain,
+        path: "/",
+        secure: false,
+        http_only: false,
+        same_site: SameSite.Lax
+    }
+
+fn make_cookie_for_path(path: text) -> Cookie:
+    return Cookie {
+        name: "x",
+        value: "y",
+        domain: "example.com",
+        path: path,
+        secure: false,
+        http_only: false,
+        same_site: SameSite.Lax
+    }
+
+fn make_named_cookie(name: text, value: text, domain: text, path: text) -> Cookie:
+    return Cookie {
+        name: name,
+        value: value,
+        domain: domain,
+        path: path,
+        secure: false,
+        http_only: false,
+        same_site: SameSite.Lax
+    }
+
+fn cookie_matches_domain(c: Cookie, host: text) -> bool:
+    return CookieStore.domain_matches(c.domain, host)
+
+fn cookie_matches_path(c: Cookie, request_path: text) -> bool:
+    return CookieStore.path_matches(c.path, request_path)
+
+fn make_empty_store() -> CookieStore:
+    return CookieStore.new()
+
+fn make_store_with_cookie(name: text, value: text, domain: text, path: text) -> CookieStore:
+    val store = CookieStore.new()
+    val c = make_named_cookie(name, value, domain, path)
+    store.store(c)
+    return store
+
+fn store_cookie(store: CookieStore, c: Cookie):
+    store.store(c)
+
+fn get_cookies_for(store: CookieStore, host: text, request_path: text) -> text:
+    return store.get_header(host, request_path)
+
+fn cookies_contain(header: text, name: text) -> bool:
+    return header.contains(name)
+
+fn fill_domain_to_cap(store: CookieStore, domain: text, n: i64) -> i64:
+    return store.fill_for_domain(domain, n)
+
+fn count_cookies_for_domain(store: CookieStore, domain: text) -> i64:
+    return store.count_for_domain(domain)

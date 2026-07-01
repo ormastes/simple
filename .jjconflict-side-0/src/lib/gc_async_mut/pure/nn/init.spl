@@ -1,0 +1,294 @@
+# Pure Simple Weight Initialization
+#
+# Implements common neural network weight initialization strategies
+# Zero external dependencies
+#
+# NOTE: This module uses generics (PureTensor<f64>) and will only work
+# in compiled mode, not in the interpreter (runtime parser limitation).
+
+use std.pure.tensor.{PureTensor, tensor_from_data, tensor_zeros, tensor_ones}
+
+# ============================================================================
+# Private Helpers
+# ============================================================================
+
+fn _init_sqrt(x: f64) -> f64:
+    """Square root via Newton's method (15 iterations)."""
+    if x <= 0.0:
+        return 0.0
+    var guess = x
+    var i = 0
+    while i < 15:
+        guess = (guess + x / guess) / 2.0
+        i = i + 1
+    guess
+
+fn _init_abs(x: f64) -> f64:
+    """Absolute value."""
+    if x < 0.0: 0.0 - x else: x
+
+fn _init_lcg_next(seed: i64) -> i64:
+    """Linear congruential generator (LCG) PRNG step.
+
+    Uses constants from Numerical Recipes: a=1664525, c=1013904223.
+    Returns next seed value.
+    """
+    val a = 1664525
+    val c = 1013904223
+    val m = 2147483647  # 2^31 - 1
+    var result = seed * a + c
+    # Keep positive
+    if result < 0:
+        result = 0 - result
+    result = result % m
+    result
+
+fn _init_fan_in_out(t: PureTensor<f64>) -> [i64]:
+    """Compute fan_in and fan_out from tensor shape.
+
+    For 2D [out, in]: fan_in=in, fan_out=out
+    For 4D [out, in, kH, kW]: fan_in=in*kH*kW, fan_out=out*kH*kW
+    For 1D [size]: fan_in=size, fan_out=size
+
+    Returns:
+        [fan_in, fan_out]
+    """
+    val ndim = t.shape.len()
+    if ndim == 1:
+        return [t.shape[0], t.shape[0]]
+    if ndim == 2:
+        return [t.shape[1], t.shape[0]]
+    # ndim >= 3: convolutional kernel
+    var receptive_field = 1
+    var i = 2
+    while i < ndim:
+        receptive_field = receptive_field * t.shape[i]
+        i = i + 1
+    val fan_in = t.shape[1] * receptive_field
+    val fan_out = t.shape[0] * receptive_field
+    [fan_in, fan_out]
+
+fn _init_gain_for(nonlinearity: text) -> f64:
+    """Lookup recommended gain for given nonlinearity.
+
+    Supported: 'linear', 'sigmoid', 'tanh', 'relu', 'leaky_relu'
+    """
+    if nonlinearity == "linear":
+        return 1.0
+    if nonlinearity == "sigmoid":
+        return 1.0
+    if nonlinearity == "tanh":
+        return 5.0 / 3.0
+    if nonlinearity == "relu":
+        return _init_sqrt(2.0)
+    if nonlinearity == "leaky_relu":
+        return _init_sqrt(2.0 / 1.01)
+    # Default
+    1.0
+
+# ============================================================================
+# Initialization Functions
+# ============================================================================
+
+fn init_zeros(t: PureTensor<f64>) -> PureTensor<f64>:
+    """Fill tensor with zeros, preserving shape.
+
+    Args:
+        t - Template tensor (only shape is used)
+
+    Returns:
+        New tensor with same shape, filled with 0.0
+    """
+    tensor_zeros(t.shape)
+
+fn init_ones(t: PureTensor<f64>) -> PureTensor<f64>:
+    """Fill tensor with ones, preserving shape.
+
+    Args:
+        t - Template tensor (only shape is used)
+
+    Returns:
+        New tensor with same shape, filled with 1.0
+    """
+    tensor_ones(t.shape)
+
+fn init_constant(t: PureTensor<f64>, value: f64) -> PureTensor<f64>:
+    """Fill tensor with a constant value, preserving shape.
+
+    Args:
+        t - Template tensor (only shape is used)
+        value - Constant to fill with
+
+    Returns:
+        New tensor with same shape, filled with value
+    """
+    var numel = 1
+    for dim in t.shape:
+        numel = numel * dim
+    var data: [f64] = []
+    var i = 0
+    while i < numel:
+        data.push(value)
+        i = i + 1
+    tensor_from_data(data, t.shape)
+
+fn init_uniform(t: PureTensor<f64>, low: f64, high: f64) -> PureTensor<f64>:
+    """Fill tensor with deterministic pseudo-uniform values in [low, high).
+
+    Uses LCG PRNG seeded from element index for reproducibility.
+
+    Args:
+        t - Template tensor (only shape is used)
+        low - Lower bound (inclusive)
+        high - Upper bound (exclusive)
+
+    Returns:
+        New tensor with same shape, filled with pseudo-uniform values
+    """
+    var numel = 1
+    for dim in t.shape:
+        numel = numel * dim
+    var data: [f64] = []
+    var seed = 42
+    val range_val = high - low
+    var i = 0
+    while i < numel:
+        seed = _init_lcg_next(seed)
+        # Map seed to [0, 1) then scale to [low, high)
+        val u = (seed % 1000000) / 1000000.0
+        data.push(low + u * range_val)
+        i = i + 1
+    tensor_from_data(data, t.shape)
+
+fn init_normal(t: PureTensor<f64>, mean_val: f64, std_val: f64) -> PureTensor<f64>:
+    """Fill tensor with deterministic pseudo-normal values.
+
+    Uses Box-Muller approximation with LCG PRNG for reproducibility.
+
+    Args:
+        t - Template tensor (only shape is used)
+        mean_val - Mean of the distribution
+        std_val - Standard deviation of the distribution
+
+    Returns:
+        New tensor with same shape, filled with pseudo-normal values
+    """
+    var numel = 1
+    for dim in t.shape:
+        numel = numel * dim
+    var data: [f64] = []
+    var seed = 137
+    var i = 0
+    while i < numel:
+        # Generate two uniform samples for Box-Muller
+        seed = _init_lcg_next(seed)
+        val u1_raw = (seed % 1000000) / 1000000.0
+        # Clamp u1 away from 0 to avoid log(0)
+        val u1 = if u1_raw < 0.001: 0.001 else: u1_raw
+        seed = _init_lcg_next(seed)
+        val u2 = (seed % 1000000) / 1000000.0
+
+        # Box-Muller approximation: approximate sqrt(-2*ln(u1)) * cos(2*pi*u2)
+        # Using simplified approximation: (u1 + u2 + u3 ... - 6) for sum of 12 uniforms
+        # Simpler: use the pair directly with linear approximation
+        # z = (u1 - 0.5 + u2 - 0.5) * sqrt(12/2) ~ normal(0,1) for central limit
+        seed = _init_lcg_next(seed)
+        val u3 = (seed % 1000000) / 1000000.0
+        seed = _init_lcg_next(seed)
+        val u4 = (seed % 1000000) / 1000000.0
+
+        # Sum of 4 uniforms -> approximate normal via central limit theorem
+        val z = (u1 + u2 + u3 + u4 - 2.0) * _init_sqrt(3.0)
+        data.push(mean_val + z * std_val)
+        i = i + 1
+    tensor_from_data(data, t.shape)
+
+fn init_xavier_uniform(t: PureTensor<f64>, gain: f64) -> PureTensor<f64>:
+    """Xavier/Glorot uniform initialization.
+
+    Fills tensor with values from U(-a, a) where:
+        a = gain * sqrt(6 / (fan_in + fan_out))
+
+    Args:
+        t - Template tensor (shape determines fan_in/fan_out)
+        gain - Scaling factor (1.0 for linear, sqrt(2) for ReLU)
+
+    Returns:
+        New tensor with Xavier uniform initialization
+    """
+    val fans = _init_fan_in_out(t)
+    val fan_in = fans[0]
+    val fan_out = fans[1]
+    val a = gain * _init_sqrt(6.0 / (fan_in + fan_out))
+    init_uniform(t, 0.0 - a, a)
+
+fn init_xavier_normal(t: PureTensor<f64>, gain: f64) -> PureTensor<f64>:
+    """Xavier/Glorot normal initialization.
+
+    Fills tensor with values from N(0, std^2) where:
+        std = gain * sqrt(2 / (fan_in + fan_out))
+
+    Args:
+        t - Template tensor (shape determines fan_in/fan_out)
+        gain - Scaling factor (1.0 for linear, sqrt(2) for ReLU)
+
+    Returns:
+        New tensor with Xavier normal initialization
+    """
+    val fans = _init_fan_in_out(t)
+    val fan_in = fans[0]
+    val fan_out = fans[1]
+    val std = gain * _init_sqrt(2.0 / (fan_in + fan_out))
+    init_normal(t, 0.0, std)
+
+fn init_kaiming_uniform(t: PureTensor<f64>, mode: text, nonlinearity: text) -> PureTensor<f64>:
+    """Kaiming/He uniform initialization.
+
+    Fills tensor with values from U(-bound, bound) where:
+        bound = gain * sqrt(3 / fan)
+    fan is fan_in (mode='fan_in') or fan_out (mode='fan_out')
+
+    Args:
+        t - Template tensor (shape determines fan)
+        mode - 'fan_in' (default) or 'fan_out'
+        nonlinearity - 'relu', 'leaky_relu', 'linear', etc.
+
+    Returns:
+        New tensor with Kaiming uniform initialization
+    """
+    val fans = _init_fan_in_out(t)
+    val fan = if mode == "fan_out": fans[1] else: fans[0]
+    val gain = _init_gain_for(nonlinearity)
+    val bound = gain * _init_sqrt(3.0 / fan)
+    init_uniform(t, 0.0 - bound, bound)
+
+fn init_kaiming_normal(t: PureTensor<f64>, mode: text, nonlinearity: text) -> PureTensor<f64>:
+    """Kaiming/He normal initialization.
+
+    Fills tensor with values from N(0, std^2) where:
+        std = gain / sqrt(fan)
+    fan is fan_in (mode='fan_in') or fan_out (mode='fan_out')
+
+    Args:
+        t - Template tensor (shape determines fan)
+        mode - 'fan_in' (default) or 'fan_out'
+        nonlinearity - 'relu', 'leaky_relu', 'linear', etc.
+
+    Returns:
+        New tensor with Kaiming normal initialization
+    """
+    val fans = _init_fan_in_out(t)
+    val fan = if mode == "fan_out": fans[1] else: fans[0]
+    val gain = _init_gain_for(nonlinearity)
+    val std = gain / _init_sqrt(fan)
+    init_normal(t, 0.0, std)
+
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export init_zeros, init_ones, init_constant
+export init_uniform, init_normal
+export init_xavier_uniform, init_xavier_normal
+export init_kaiming_uniform, init_kaiming_normal

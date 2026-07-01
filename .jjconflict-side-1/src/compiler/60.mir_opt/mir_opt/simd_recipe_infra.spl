@@ -1,0 +1,265 @@
+"""SIMD Recipe Infrastructure
+
+Recipe metadata, vector width routing, fast_math policy, and SimdAutoApplyContext
+for the SIMD auto-application pass.
+"""
+
+# ============================================================================
+# SimdRecipeEntry
+# ============================================================================
+
+class SimdRecipeEntry:
+    """One SIMD recipe with legality, cost, and feature constraints."""
+    recipe_id: text
+    op_pattern: text
+    vector_width: i64
+    legality: text
+    cost_estimate: i64
+    fast_math_sensitive: bool
+    target_features: text
+
+    static fn create(id: text, op: text, width: i64, legal: text, cost: i64, fm: bool, feats: text) -> SimdRecipeEntry:
+        SimdRecipeEntry(recipe_id: id, op_pattern: op, vector_width: width, legality: legal, cost_estimate: cost, fast_math_sensitive: fm, target_features: feats)
+
+    fn is_legal_for(has_fast_math: bool, available_features: text) -> bool:
+        if self.legality == "never":
+            return false
+        if self.legality == "fast_math_only" and has_fast_math == false:
+            return false
+        if self.target_features == "":
+            return true
+        if self.target_features.contains(","):
+            val comma = self.target_features.index_of(",")
+            val first = self.target_features.slice(0, comma)
+            val rest  = self.target_features.slice(comma + 1, self.target_features.len())
+            return available_features.contains(first) and available_features.contains(rest)
+        available_features.contains(self.target_features)
+
+    fn summary() -> text:
+        "recipe=" + self.recipe_id + " op=" + self.op_pattern + " width=" + self.vector_width.to_text() +
+        " legality=" + self.legality + " cost=" + self.cost_estimate.to_text() +
+        " fm=" + self.fast_math_sensitive.to_text() + " feats=[" + self.target_features + "]"
+
+# ============================================================================
+# SimdRecipeTable — flat, max 16 entries
+# ============================================================================
+
+class SimdRecipeTable:
+    """Flat table of up to 16 SIMD recipes."""
+    count: i64
+    r0_id: text   r0_op: text   r0_width: i64   r0_legality: text   r0_cost: i64   r0_fm: bool   r0_feats: text
+    r1_id: text   r1_op: text   r1_width: i64   r1_legality: text   r1_cost: i64   r1_fm: bool   r1_feats: text
+    r2_id: text   r2_op: text   r2_width: i64   r2_legality: text   r2_cost: i64   r2_fm: bool   r2_feats: text
+    r3_id: text   r3_op: text   r3_width: i64   r3_legality: text   r3_cost: i64   r3_fm: bool   r3_feats: text
+    r4_id: text   r4_op: text   r4_width: i64   r4_legality: text   r4_cost: i64   r4_fm: bool   r4_feats: text
+    r5_id: text   r5_op: text   r5_width: i64   r5_legality: text   r5_cost: i64   r5_fm: bool   r5_feats: text
+    r6_id: text   r6_op: text   r6_width: i64   r6_legality: text   r6_cost: i64   r6_fm: bool   r6_feats: text
+    r7_id: text   r7_op: text   r7_width: i64   r7_legality: text   r7_cost: i64   r7_fm: bool   r7_feats: text
+    r8_id: text   r8_op: text   r8_width: i64   r8_legality: text   r8_cost: i64   r8_fm: bool   r8_feats: text
+    r9_id: text   r9_op: text   r9_width: i64   r9_legality: text   r9_cost: i64   r9_fm: bool   r9_feats: text
+    r10_id: text  r10_op: text  r10_width: i64  r10_legality: text  r10_cost: i64  r10_fm: bool  r10_feats: text
+    r11_id: text  r11_op: text  r11_width: i64  r11_legality: text  r11_cost: i64  r11_fm: bool  r11_feats: text
+    r12_id: text  r12_op: text  r12_width: i64  r12_legality: text  r12_cost: i64  r12_fm: bool  r12_feats: text
+    r13_id: text  r13_op: text  r13_width: i64  r13_legality: text  r13_cost: i64  r13_fm: bool  r13_feats: text
+    r14_id: text  r14_op: text  r14_width: i64  r14_legality: text  r14_cost: i64  r14_fm: bool  r14_feats: text
+    r15_id: text  r15_op: text  r15_width: i64  r15_legality: text  r15_cost: i64  r15_fm: bool  r15_feats: text
+
+    static fn create() -> SimdRecipeTable:
+        val e = ""
+        SimdRecipeTable(count: 0,
+            r0_id: e,  r0_op: e,  r0_width: 0,  r0_legality: e,  r0_cost: 0,  r0_fm: false,  r0_feats: e,
+            r1_id: e,  r1_op: e,  r1_width: 0,  r1_legality: e,  r1_cost: 0,  r1_fm: false,  r1_feats: e,
+            r2_id: e,  r2_op: e,  r2_width: 0,  r2_legality: e,  r2_cost: 0,  r2_fm: false,  r2_feats: e,
+            r3_id: e,  r3_op: e,  r3_width: 0,  r3_legality: e,  r3_cost: 0,  r3_fm: false,  r3_feats: e,
+            r4_id: e,  r4_op: e,  r4_width: 0,  r4_legality: e,  r4_cost: 0,  r4_fm: false,  r4_feats: e,
+            r5_id: e,  r5_op: e,  r5_width: 0,  r5_legality: e,  r5_cost: 0,  r5_fm: false,  r5_feats: e,
+            r6_id: e,  r6_op: e,  r6_width: 0,  r6_legality: e,  r6_cost: 0,  r6_fm: false,  r6_feats: e,
+            r7_id: e,  r7_op: e,  r7_width: 0,  r7_legality: e,  r7_cost: 0,  r7_fm: false,  r7_feats: e,
+            r8_id: e,  r8_op: e,  r8_width: 0,  r8_legality: e,  r8_cost: 0,  r8_fm: false,  r8_feats: e,
+            r9_id: e,  r9_op: e,  r9_width: 0,  r9_legality: e,  r9_cost: 0,  r9_fm: false,  r9_feats: e,
+            r10_id: e, r10_op: e, r10_width: 0, r10_legality: e, r10_cost: 0, r10_fm: false, r10_feats: e,
+            r11_id: e, r11_op: e, r11_width: 0, r11_legality: e, r11_cost: 0, r11_fm: false, r11_feats: e,
+            r12_id: e, r12_op: e, r12_width: 0, r12_legality: e, r12_cost: 0, r12_fm: false, r12_feats: e,
+            r13_id: e, r13_op: e, r13_width: 0, r13_legality: e, r13_cost: 0, r13_fm: false, r13_feats: e,
+            r14_id: e, r14_op: e, r14_width: 0, r14_legality: e, r14_cost: 0, r14_fm: false, r14_feats: e,
+            r15_id: e, r15_op: e, r15_width: 0, r15_legality: e, r15_cost: 0, r15_fm: false, r15_feats: e)
+
+    me add(id: text, op: text, width: i64, legal: text, cost: i64, fm: bool, feats: text) -> text:
+        if self.count >= 16: return "error: table full"
+        val s = self.count
+        if s == 0:  self.r0_id = id   self.r0_op = op   self.r0_width = width   self.r0_legality = legal   self.r0_cost = cost   self.r0_fm = fm   self.r0_feats = feats
+        elif s == 1:  self.r1_id = id   self.r1_op = op   self.r1_width = width   self.r1_legality = legal   self.r1_cost = cost   self.r1_fm = fm   self.r1_feats = feats
+        elif s == 2:  self.r2_id = id   self.r2_op = op   self.r2_width = width   self.r2_legality = legal   self.r2_cost = cost   self.r2_fm = fm   self.r2_feats = feats
+        elif s == 3:  self.r3_id = id   self.r3_op = op   self.r3_width = width   self.r3_legality = legal   self.r3_cost = cost   self.r3_fm = fm   self.r3_feats = feats
+        elif s == 4:  self.r4_id = id   self.r4_op = op   self.r4_width = width   self.r4_legality = legal   self.r4_cost = cost   self.r4_fm = fm   self.r4_feats = feats
+        elif s == 5:  self.r5_id = id   self.r5_op = op   self.r5_width = width   self.r5_legality = legal   self.r5_cost = cost   self.r5_fm = fm   self.r5_feats = feats
+        elif s == 6:  self.r6_id = id   self.r6_op = op   self.r6_width = width   self.r6_legality = legal   self.r6_cost = cost   self.r6_fm = fm   self.r6_feats = feats
+        elif s == 7:  self.r7_id = id   self.r7_op = op   self.r7_width = width   self.r7_legality = legal   self.r7_cost = cost   self.r7_fm = fm   self.r7_feats = feats
+        elif s == 8:  self.r8_id = id   self.r8_op = op   self.r8_width = width   self.r8_legality = legal   self.r8_cost = cost   self.r8_fm = fm   self.r8_feats = feats
+        elif s == 9:  self.r9_id = id   self.r9_op = op   self.r9_width = width   self.r9_legality = legal   self.r9_cost = cost   self.r9_fm = fm   self.r9_feats = feats
+        elif s == 10: self.r10_id = id  self.r10_op = op  self.r10_width = width  self.r10_legality = legal  self.r10_cost = cost  self.r10_fm = fm  self.r10_feats = feats
+        elif s == 11: self.r11_id = id  self.r11_op = op  self.r11_width = width  self.r11_legality = legal  self.r11_cost = cost  self.r11_fm = fm  self.r11_feats = feats
+        elif s == 12: self.r12_id = id  self.r12_op = op  self.r12_width = width  self.r12_legality = legal  self.r12_cost = cost  self.r12_fm = fm  self.r12_feats = feats
+        elif s == 13: self.r13_id = id  self.r13_op = op  self.r13_width = width  self.r13_legality = legal  self.r13_cost = cost  self.r13_fm = fm  self.r13_feats = feats
+        elif s == 14: self.r14_id = id  self.r14_op = op  self.r14_width = width  self.r14_legality = legal  self.r14_cost = cost  self.r14_fm = fm  self.r14_feats = feats
+        elif s == 15: self.r15_id = id  self.r15_op = op  self.r15_width = width  self.r15_legality = legal  self.r15_cost = cost  self.r15_fm = fm  self.r15_feats = feats
+        self.count = self.count + 1
+        "ok"
+
+    fn _entry(s: i64) -> SimdRecipeEntry:
+        if s == 0:  return SimdRecipeEntry.create(self.r0_id,  self.r0_op,  self.r0_width,  self.r0_legality,  self.r0_cost,  self.r0_fm,  self.r0_feats)
+        if s == 1:  return SimdRecipeEntry.create(self.r1_id,  self.r1_op,  self.r1_width,  self.r1_legality,  self.r1_cost,  self.r1_fm,  self.r1_feats)
+        if s == 2:  return SimdRecipeEntry.create(self.r2_id,  self.r2_op,  self.r2_width,  self.r2_legality,  self.r2_cost,  self.r2_fm,  self.r2_feats)
+        if s == 3:  return SimdRecipeEntry.create(self.r3_id,  self.r3_op,  self.r3_width,  self.r3_legality,  self.r3_cost,  self.r3_fm,  self.r3_feats)
+        if s == 4:  return SimdRecipeEntry.create(self.r4_id,  self.r4_op,  self.r4_width,  self.r4_legality,  self.r4_cost,  self.r4_fm,  self.r4_feats)
+        if s == 5:  return SimdRecipeEntry.create(self.r5_id,  self.r5_op,  self.r5_width,  self.r5_legality,  self.r5_cost,  self.r5_fm,  self.r5_feats)
+        if s == 6:  return SimdRecipeEntry.create(self.r6_id,  self.r6_op,  self.r6_width,  self.r6_legality,  self.r6_cost,  self.r6_fm,  self.r6_feats)
+        if s == 7:  return SimdRecipeEntry.create(self.r7_id,  self.r7_op,  self.r7_width,  self.r7_legality,  self.r7_cost,  self.r7_fm,  self.r7_feats)
+        if s == 8:  return SimdRecipeEntry.create(self.r8_id,  self.r8_op,  self.r8_width,  self.r8_legality,  self.r8_cost,  self.r8_fm,  self.r8_feats)
+        if s == 9:  return SimdRecipeEntry.create(self.r9_id,  self.r9_op,  self.r9_width,  self.r9_legality,  self.r9_cost,  self.r9_fm,  self.r9_feats)
+        if s == 10: return SimdRecipeEntry.create(self.r10_id, self.r10_op, self.r10_width, self.r10_legality, self.r10_cost, self.r10_fm, self.r10_feats)
+        if s == 11: return SimdRecipeEntry.create(self.r11_id, self.r11_op, self.r11_width, self.r11_legality, self.r11_cost, self.r11_fm, self.r11_feats)
+        if s == 12: return SimdRecipeEntry.create(self.r12_id, self.r12_op, self.r12_width, self.r12_legality, self.r12_cost, self.r12_fm, self.r12_feats)
+        if s == 13: return SimdRecipeEntry.create(self.r13_id, self.r13_op, self.r13_width, self.r13_legality, self.r13_cost, self.r13_fm, self.r13_feats)
+        if s == 14: return SimdRecipeEntry.create(self.r14_id, self.r14_op, self.r14_width, self.r14_legality, self.r14_cost, self.r14_fm, self.r14_feats)
+        SimdRecipeEntry.create(self.r15_id, self.r15_op, self.r15_width, self.r15_legality, self.r15_cost, self.r15_fm, self.r15_feats)
+
+    fn find_best(op: text, max_width: i64, has_fast_math: bool, features: text) -> text:
+        var best_id: text = ""
+        var best_cost: i64 = 999999
+        var i: i64 = 0
+        while i < self.count:
+            val e = self._entry(i)
+            if e.op_pattern == op and (e.vector_width == 0 or e.vector_width <= max_width) and e.is_legal_for(has_fast_math, features):
+                if e.cost_estimate < best_cost:
+                    best_cost = e.cost_estimate
+                    best_id = e.recipe_id
+            i = i + 1
+        best_id
+
+    fn legal_count_for(features: text) -> i64:
+        var n: i64 = 0
+        var i: i64 = 0
+        while i < self.count:
+            if self._entry(i).is_legal_for(false, features):
+                n = n + 1
+            i = i + 1
+        n
+
+    fn report() -> text:
+        var out: text = "SimdRecipeTable count=" + self.count.to_text() + "\n"
+        var i: i64 = 0
+        while i < self.count:
+            out = out + "  [" + i.to_text() + "] " + self._entry(i).summary() + "\n"
+            i = i + 1
+        out
+
+# ============================================================================
+# VectorWidthRouter
+# ============================================================================
+
+class VectorWidthRouter:
+    """Maps a target architecture to its SIMD width capabilities."""
+    target_arch: text
+    max_fixed_width: i64
+    has_scalable: bool
+    scalable_min_bits: i64
+    simd_level: text
+
+    static fn x86_64_sse2() -> VectorWidthRouter:
+        VectorWidthRouter(target_arch: "x86_64", max_fixed_width: 128, has_scalable: false, scalable_min_bits: 0, simd_level: "sse2")
+
+    static fn x86_64_avx2() -> VectorWidthRouter:
+        VectorWidthRouter(target_arch: "x86_64", max_fixed_width: 256, has_scalable: false, scalable_min_bits: 0, simd_level: "avx2")
+
+    static fn x86_64_avx512() -> VectorWidthRouter:
+        VectorWidthRouter(target_arch: "x86_64", max_fixed_width: 512, has_scalable: false, scalable_min_bits: 0, simd_level: "avx512")
+
+    static fn aarch64_neon() -> VectorWidthRouter:
+        VectorWidthRouter(target_arch: "aarch64", max_fixed_width: 128, has_scalable: false, scalable_min_bits: 0, simd_level: "neon")
+
+    static fn aarch64_sve(min_bits: i64) -> VectorWidthRouter:
+        VectorWidthRouter(target_arch: "aarch64", max_fixed_width: min_bits, has_scalable: true, scalable_min_bits: min_bits, simd_level: "sve")
+
+    static fn riscv64_rvv(min_bits: i64) -> VectorWidthRouter:
+        VectorWidthRouter(target_arch: "riscv64", max_fixed_width: min_bits, has_scalable: true, scalable_min_bits: min_bits, simd_level: "rvv")
+
+    fn effective_width(requested: i64) -> i64:
+        if requested <= self.max_fixed_width: return requested
+        self.max_fixed_width
+
+    fn can_vectorize(op_width: i64) -> bool:
+        op_width <= self.max_fixed_width or self.has_scalable
+
+    fn feature_string() -> text:
+        self.simd_level
+
+    fn summary() -> text:
+        "arch=" + self.target_arch + " max_fixed=" + self.max_fixed_width.to_text() +
+        " scalable=" + self.has_scalable.to_text() + " level=" + self.simd_level
+
+# ============================================================================
+# FastMathPolicy
+# ============================================================================
+
+class FastMathPolicy:
+    """Controls which floating-point transformations are permitted."""
+    enabled: bool
+    allow_reassociate: bool
+    allow_reciprocal: bool
+    allow_contract: bool
+    allow_approx_func: bool
+    deny_precision_loss: bool
+
+    static fn disabled() -> FastMathPolicy:
+        FastMathPolicy(enabled: false, allow_reassociate: false, allow_reciprocal: false, allow_contract: false, allow_approx_func: false, deny_precision_loss: true)
+
+    static fn reduction_only() -> FastMathPolicy:
+        FastMathPolicy(enabled: true, allow_reassociate: true, allow_reciprocal: false, allow_contract: true, allow_approx_func: false, deny_precision_loss: true)
+
+    static fn full() -> FastMathPolicy:
+        FastMathPolicy(enabled: true, allow_reassociate: true, allow_reciprocal: true, allow_contract: true, allow_approx_func: true, deny_precision_loss: false)
+
+    fn permits_reorder() -> bool:
+        self.allow_reassociate
+
+    fn permits_reduction_transform() -> bool:
+        self.allow_reassociate and self.allow_contract
+
+    fn permits_precision_loss() -> bool:
+        self.allow_approx_func and self.deny_precision_loss == false
+
+    fn validate_recipe(fast_math_sensitive: bool) -> text:
+        if fast_math_sensitive == false: return ""
+        if self.enabled == false: return "denied: recipe requires fast_math but policy is disabled"
+        if self.allow_reassociate == false: return "denied: recipe requires reassociation but policy forbids it"
+        ""
+
+# ============================================================================
+# SimdAutoApplyContext
+# ============================================================================
+
+class SimdAutoApplyContext:
+    """Combines router, policy, and recipe table for one auto-apply session."""
+    router: VectorWidthRouter
+    policy: FastMathPolicy
+    table: SimdRecipeTable
+    applied_count: i64
+    skipped_count: i64
+
+    static fn create(router: VectorWidthRouter, policy: FastMathPolicy) -> SimdAutoApplyContext:
+        SimdAutoApplyContext(router: router, policy: policy, table: SimdRecipeTable.create(), applied_count: 0, skipped_count: 0)
+
+    me try_apply(op: text) -> text:
+        val rid = self.table.find_best(op, self.router.max_fixed_width, self.policy.enabled, self.router.feature_string())
+        if rid == "":
+            self.skipped_count = self.skipped_count + 1
+            return ""
+        self.applied_count = self.applied_count + 1
+        rid
+
+    fn stats() -> text:
+        "SimdAutoApplyContext applied=" + self.applied_count.to_text() +
+        " skipped=" + self.skipped_count.to_text() + " router=[" + self.router.summary() + "]"
+
+export SimdRecipeEntry, SimdRecipeTable, VectorWidthRouter, FastMathPolicy, SimdAutoApplyContext

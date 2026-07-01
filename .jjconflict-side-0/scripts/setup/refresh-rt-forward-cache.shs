@@ -1,0 +1,72 @@
+#!/bin/sh
+set -eu
+
+repo_root="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cache_dir="${SIMPLE_RT_FORWARD_CACHE_DIR:-${repo_root}/.simple/cache/rt-forward}"
+cache_file="${cache_dir}/stdio.sdn"
+tmp_file="${cache_file}.tmp"
+
+mkdir -p "$cache_dir"
+
+stdio_path="${repo_root}/src/lib/nogc_sync_mut/mcp_sdk/transport/stdio.spl"
+runtime_path="${repo_root}/src/runtime/runtime_native.c"
+
+hash_file() {
+    if [ -f "$1" ]; then
+        cksum "$1" | awk '{print $1 ":" $2}'
+    else
+        printf '%s\n' 'missing'
+    fi
+}
+
+runtime_hash="$(hash_file "$runtime_path")"
+stdio_hash="$(hash_file "$stdio_path")"
+
+check_cache() {
+    if [ ! -f "$cache_file" ]; then
+        printf '%s\n' "rt_forward_cache=${cache_file}"
+        printf '%s\n' "rt_forward_cache_valid=false"
+        printf '%s\n' "rt_forward_cache_reason=missing_cache"
+        return 1
+    fi
+    if ! grep -q "runtime_hash: \"${runtime_hash}\"" "$cache_file"; then
+        printf '%s\n' "rt_forward_cache=${cache_file}"
+        printf '%s\n' "rt_forward_cache_valid=false"
+        printf '%s\n' "rt_forward_cache_reason=stale_runtime_hash"
+        return 1
+    fi
+    if ! grep -q "stdio_hash: \"${stdio_hash}\"" "$cache_file"; then
+        printf '%s\n' "rt_forward_cache=${cache_file}"
+        printf '%s\n' "rt_forward_cache_valid=false"
+        printf '%s\n' "rt_forward_cache_reason=stale_stdio_hash"
+        return 1
+    fi
+    printf '%s\n' "rt_forward_cache=${cache_file}"
+    printf '%s\n' "rt_forward_cache_valid=true"
+    printf '%s\n' "rt_forward_cache_reason=ok"
+}
+
+case "${1:-}" in
+    --check)
+        check_cache
+        exit $?
+        ;;
+esac
+
+cat > "$tmp_file" <<EOF
+rt_forward_cache {
+  version: 1
+  runtime_hash: "$runtime_hash"
+  stdio_hash: "$stdio_hash"
+  forwards: [
+    { std: "std.mcp_sdk.transport.stdio.mcp_stdio_read_line", rt: "rt_stdin_read_line_text", return: "text" },
+    { std: "std.mcp_sdk.transport.stdio.mcp_stdio_read_bytes", rt: "rt_stdin_read_chars_text", args: ["i64"], return: "text" },
+    { std: "std.mcp_sdk.transport.stdio.mcp_stdio_read_message", rt: "rt_stdin_read_mcp_message_text", return: "text" },
+    { std: "std.mcp_sdk.transport.stdio.mcp_stdio_is_json_lines", rt: "cached_transport_mode", return: "bool" }
+  ]
+}
+EOF
+
+mv "$tmp_file" "$cache_file"
+printf 'rt_forward_cache=%s\n' "$cache_file"
+printf 'rt_forward_cache_valid=true\n'

@@ -1,0 +1,201 @@
+# T32 Native (t32rem) Full Flow Tests
+# Tests config -> adapter -> trace -> coverage -> flash -> reset for T32 Native.
+# T32 connects to its own JTAG target (Lauterbach Power Debug II), NOT STM32 boards.
+
+# --- Local simulation of T32 Native session ---
+
+class T32NativeSession:
+    target_name: text
+    t32_cfg: text
+    t32_port: i32
+    state: text
+    flashed: bool
+    trace_data: text
+    coverage_data: text
+    last_practice_cmd: text
+
+impl T32NativeSession:
+    static fn for_t32_target() -> T32NativeSession:
+        T32NativeSession(
+            target_name: "T32 Power Debug",
+            t32_cfg: "t32_startup.cmm",
+            t32_port: 20000,
+            state: "disconnected",
+            flashed: false,
+            trace_data: "",
+            coverage_data: "",
+            last_practice_cmd: ""
+        )
+
+    me connect() -> Result<text, text>:
+        self.state = "connected"
+        Ok("t32rem connected on port {self.t32_port}")
+
+    me system_reset() -> Result<text, text>:
+        if self.state == "disconnected":
+            return Err("not connected")
+        self.state = "halted"
+        Ok("SYStem.Up")
+
+    me flash_program(elf_path: text) -> Result<text, text>:
+        if self.state == "disconnected":
+            return Err("not connected")
+        self.flashed = true
+        self.state = "halted"
+        Ok("FLASH.ReProgram {elf_path}")
+
+    me halt() -> Result<text, text>:
+        if self.state != "running":
+            return Err("target not running")
+        self.state = "halted"
+        Ok("Break")
+
+    me resume() -> Result<text, text>:
+        if self.state != "halted":
+            return Err("target not halted")
+        self.state = "running"
+        Ok("Go")
+
+    me single_step() -> Result<text, text>:
+        if self.state != "halted":
+            return Err("target not halted")
+        Ok("Step")
+
+    me trace_capture(duration_ms: i32) -> Result<text, text>:
+        if self.state == "disconnected":
+            return Err("not connected")
+        self.trace_data = "Trace.Arm; Trace.List duration={duration_ms}ms"
+        Ok(self.trace_data)
+
+    me coverage_collect(module: text) -> Result<text, text>:
+        if self.state == "disconnected":
+            return Err("not connected")
+        self.coverage_data = "COVerage.ListFunc {module}"
+        Ok(self.coverage_data)
+
+    me read_memory(addr: i64, size: i32) -> Result<text, text>:
+        if self.state != "halted":
+            return Err("target must be halted")
+        Ok("Data.dump 0x{addr} ++{size}")
+
+    me read_register(name: text) -> Result<text, text>:
+        if self.state != "halted":
+            return Err("target must be halted")
+        Ok("Register({name})")
+
+    me set_breakpoint(location: text) -> Result<text, text>:
+        if self.state == "disconnected":
+            return Err("not connected")
+        Ok("Break.Set {location}")
+
+    me disconnect():
+        self.state = "disconnected"
+
+# --- T32 Power Debug via T32 Native Tests ---
+
+describe "T32 Power Debug T32 Native config":
+    it "has correct T32 config":
+        val s = T32NativeSession.for_t32_target()
+        expect(s.t32_cfg).to_equal("t32_startup.cmm")
+
+    it "has T32 port 20000":
+        val s = T32NativeSession.for_t32_target()
+        expect(s.t32_port).to_equal(20000)
+
+    it "target name is T32 Power Debug":
+        val s = T32NativeSession.for_t32_target()
+        expect(s.target_name).to_equal("T32 Power Debug")
+
+describe "T32 Power Debug T32 Native flash and reset":
+    it "connect then flash succeeds":
+        var s = T32NativeSession.for_t32_target()
+        s.connect()
+        s.flash_program("target_app.elf")
+        expect(s.flashed).to_equal(true)
+        expect(s.state).to_equal("halted")
+
+    it "system reset transitions to halted":
+        var s = T32NativeSession.for_t32_target()
+        s.connect()
+        s.system_reset()
+        expect(s.state).to_equal("halted")
+
+    it "flash without connect fails":
+        var s = T32NativeSession.for_t32_target()
+        val result = s.flash_program("app.elf")
+        expect(s.flashed).to_equal(false)
+
+describe "T32 Power Debug T32 Native trace and coverage":
+    it "trace capture returns trace data":
+        var s = T32NativeSession.for_t32_target()
+        s.connect()
+        s.trace_capture(500)
+        expect(s.trace_data).to_contain("Trace.Arm")
+        expect(s.trace_data).to_contain("500ms")
+
+    it "coverage collect returns coverage data":
+        var s = T32NativeSession.for_t32_target()
+        s.connect()
+        s.coverage_collect("main")
+        expect(s.coverage_data).to_contain("COVerage.ListFunc")
+        expect(s.coverage_data).to_contain("main")
+
+    it "trace capture when disconnected fails":
+        var s = T32NativeSession.for_t32_target()
+        val result = s.trace_capture(1000)
+        expect(s.trace_data).to_equal("")
+
+describe "T32 Power Debug T32 Native debug ops":
+    it "halt from running":
+        var s = T32NativeSession.for_t32_target()
+        s.connect()
+        s.flash_program("app.elf")
+        s.resume()
+        s.halt()
+        expect(s.state).to_equal("halted")
+
+    it "resume from halted":
+        var s = T32NativeSession.for_t32_target()
+        s.connect()
+        s.flash_program("app.elf")
+        s.resume()
+        expect(s.state).to_equal("running")
+
+    it "single step while halted":
+        var s = T32NativeSession.for_t32_target()
+        s.connect()
+        s.flash_program("app.elf")
+        s.single_step()
+        expect(s.state).to_equal("halted")
+
+    it "read memory while halted":
+        var s = T32NativeSession.for_t32_target()
+        s.connect()
+        s.flash_program("app.elf")
+        val mem = s.read_memory(0x08000000, 16)
+        expect(s.state).to_equal("halted")
+
+    it "read register while halted":
+        var s = T32NativeSession.for_t32_target()
+        s.connect()
+        s.flash_program("app.elf")
+        val reg = s.read_register("pc")
+        expect(s.state).to_equal("halted")
+
+    it "set breakpoint":
+        var s = T32NativeSession.for_t32_target()
+        s.connect()
+        s.set_breakpoint("main\\10")
+        expect(s.state).to_equal("connected")
+
+    it "full debug cycle: flash -> resume -> halt -> step":
+        var s = T32NativeSession.for_t32_target()
+        s.connect()
+        s.flash_program("target_app.elf")
+        expect(s.state).to_equal("halted")
+        s.resume()
+        expect(s.state).to_equal("running")
+        s.halt()
+        expect(s.state).to_equal("halted")
+        s.single_step()
+        expect(s.state).to_equal("halted")
