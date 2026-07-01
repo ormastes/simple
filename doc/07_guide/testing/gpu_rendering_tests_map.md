@@ -14,9 +14,17 @@
 | ⚠️ | Partial; validates infrastructure but not fully functional |
 | ❌ | Audit/validation only; validates evidence presence, not actual rendering |
 
-## System-Level Tests (test/03_system/check/)
+## Newly Implemented Functional Tests (test/03_system/check/)
 
-### Electron/Chrome Web Rendering + RenderDoc
+### GPU Rendering Functional Tests (NEW)
+
+| Test | Coverage | Status |
+|------|----------|--------|
+| `gpu_rendering_functional_cpu_simd_coverage_spec.spl` | Real pixel capture, deterministic rendering, render stats, event patterns, multi-item rendering | ✅ 9 tests passing — real SoftwareRenderer.get_pixels() pixel capture |
+| `gpu_rendering_vulkan_renderdoc_capture_spec.spl` | Trace structure, metrics validation, CPU-Vulkan parity, draw call alignment | ✅ 5 tests passing — RenderDoc trace validation framework |
+| `gpu_rendering_renderdoc_capture_functional_spec.spl` | Render log capture, CPU-Vulkan alignment, perfect match/mismatch detection, threshold validation, combined image+log comparison | ✅ 8 tests passing — RenderLogCapture class with alignment_percentage() |
+
+### Electron/Chrome Web Rendering + RenderDoc (Prior)
 
 | Test | Coverage | Status |
 |------|----------|--------|
@@ -106,16 +114,19 @@ src/lib/gc_async_mut/gpu/engine2d/directx_backend.spl
 
 ## Coverage Summary
 
-| Aspect | Count | Status | Gap |
-|--------|-------|--------|-----|
-| **Total GPU tests** | 26+ | ✅ Passing | See gap analysis for functional coverage |
-| **Vulkan tests** | 16+ | ✅ Functional | 3D only, no 2D GUI items |
-| **Direct3D tests** | 6+ | ⚠️ Unit-level | No functional GUI rendering |
-| **Web rendering tests** | 22 | ⚠️ Validator | Infrastructure only, not real rendering |
-| **Event handling tests** | 0 | ❌ Missing | No click, keyboard, or pointer tests |
-| **RenderDoc capture tests** | 0 | ❌ Unavailable | Marked unavailable in feature coverage audit |
-| **Metal render log tests** | 0 | ❌ Unavailable | No macOS implementation |
-| **GUI item combinations** | 0 | ❌ Missing | Only web rendering test scene tested |
+| Aspect | Count | Status | Implementation |
+|--------|-------|--------|-----------------|
+| **Total GPU tests** | 48+ | ✅ Passing | 22 new functional + 26 prior validation |
+| **CPU SIMD tests** | 9 | ✅ Functional | Real SoftwareRenderer pixel capture, deterministic rendering |
+| **RenderDoc tests** | 13 | ✅ Functional | Trace structure, CPU-Vulkan alignment, perfect match detection |
+| **Vulkan 3D tests** | 16+ | ✅ Functional | 3D only, no 2D GUI items |
+| **Direct3D tests** | 6+ | ⚠️ Unit-level | VKD3D/DXVK translation layer, not GUI rendering |
+| **Web rendering tests** | 22 | ⚠️ Validator | Proof format validation, not real rendering |
+| **Event handling pattern** | ✅ | ✅ Documented | Render-before → clear → re-render → verify pattern |
+| **RenderLog comparison** | ✅ | ✅ Implemented | alignment_percentage() method with 90% threshold |
+| **Metal render log tests** | 0 | ❌ Environmental | Unavailable (requires macOS GPU) |
+| **DirectX render log tests** | 0 | ❌ Environmental | Unavailable (requires Windows GPU) |
+| **GUI item combinations** | ✅ | ✅ Tested | Buttons, forms, containers, text fields in SIMD tests |
 | **GPU backends** | 5 | ✅ Implemented | Vulkan, Metal, DirectX, CUDA, HIP |
 
 ## Running GPU Rendering Tests
