@@ -93,6 +93,7 @@ pub use aes::{
     rt_aes256_encrypt_block_into, rt_aes256_encrypt_block_pure, rt_aes_decrypt_block_with_expanded,
     rt_aes_encrypt_block_with_expanded, rt_aes_rcon, rt_aes_sbox, rt_tls13_aes128_gcm_decrypt,
     rt_tls13_aes128_gcm_encrypt, rt_tls13_aes256_gcm_decrypt, rt_tls13_aes256_gcm_encrypt,
+    rt_ssh_aes256_gcm_decrypt_packet, rt_ssh_aes256_gcm_decrypt_packet_payload_len,
 };
 
 // Re-export object types
@@ -126,24 +127,23 @@ pub use channels::RuntimeChannel;
 
 // Re-export collection SFFI functions
 pub use collections::{
-    rt_any_add, rt_array_all, rt_array_any, rt_array_clear, rt_array_data_ptr, rt_array_data_ptr_text,
-    rt_array_data_ptr_u8, rt_array_extend_i64, rt_array_filter, rt_array_find, rt_array_first, rt_array_get,
-    rt_array_get_text, rt_array_header_ptr, rt_array_len, rt_array_new, rt_array_new_with_cap_u64, rt_array_pop,
-    rt_array_push, rt_array_set, rt_array_set_len_known, rt_array_set_len_known_text, rt_array_set_text,
-    rt_byte_array_new, rt_byte_array_new_len, rt_bytes_u32_le_at, rt_bytes_u64_le_at, rt_bytes_u8_at, rt_bytes_u8_set,
-    rt_contains, rt_cstring_to_text, rt_hash_text, rt_for_iterable, rt_index_get, rt_index_set, rt_len, rt_range,
-    rt_range_inclusive, rt_slice, rt_string_char_at, rt_string_bytes, rt_string_chars, rt_string_char_code_at,
-    rt_string_concat, rt_string_data, rt_string_ends_with, rt_string_eq, rt_string_find, rt_string_index_of,
-    rt_string_join, rt_string_len, rt_string_new, rt_string_replace, rt_string_rfind, rt_string_split,
-    rt_string_starts_with, rt_string_to_float, rt_string_to_int, rt_string_to_lower, rt_string_to_upper,
-    rt_string_trim, rt_string_trim_end, rt_string_trim_start, rt_to_string, rt_tuple_get, rt_tuple_len, rt_tuple_new,
-    rt_tuple_set, rt_typed_bytes_u8_data_at, rt_typed_bytes_u8_push, rt_typed_words_u32_at, rt_typed_words_u32_data_at,
-    rt_typed_words_u32_push, rt_typed_words_u32_push_known_at, rt_typed_words_u32_push_known_data_at,
-    rt_typed_words_u32_set, rt_typed_words_u32_store_known_data_at, rt_typed_words_u32_unchecked,
-    rt_typed_words_u64_at, rt_typed_words_u64_data_at, rt_typed_words_u64_data_at_checked, rt_typed_words_u64_push,
-    rt_typed_words_u64_push_known_at, rt_typed_words_u64_push_known_data_at, rt_typed_words_u64_raw_data_at,
-    rt_typed_words_u64_set, rt_typed_words_u64_store_known_data_at, rt_typed_words_u64_unchecked,
-    text_dot_from_char_code,
+    rt_array_clear, rt_array_data_ptr, rt_array_data_ptr_text, rt_array_data_ptr_u8, rt_array_extend_i64,
+    rt_array_first, rt_array_get, rt_array_get_text, rt_array_header_ptr, rt_array_len, rt_array_new,
+    rt_array_new_with_cap_u64, rt_array_pop, rt_array_push, rt_array_set, rt_array_set_len_known,
+    rt_array_set_len_known_text, rt_array_set_text, rt_byte_array_new, rt_byte_array_new_len, rt_bytes_u32_le_at,
+    rt_bytes_u64_le_at, rt_bytes_u8_at, rt_bytes_u8_set, rt_contains, rt_cstring_to_text, rt_hash_text,
+    rt_for_iterable, rt_index_get, rt_index_set, rt_len, rt_range, rt_range_inclusive, rt_slice, rt_string_char_at,
+    rt_string_bytes, rt_string_chars, rt_string_char_code_at, rt_string_concat, rt_string_data, rt_string_ends_with,
+    rt_string_eq, rt_string_find, rt_string_index_of, rt_string_join, rt_string_len, rt_string_new, rt_string_replace,
+    rt_string_rfind, rt_string_split, rt_string_starts_with, rt_string_to_float, rt_string_to_int, rt_string_to_lower,
+    rt_string_to_upper, rt_string_trim, rt_string_trim_end, rt_string_trim_start, rt_to_string, rt_tuple_get,
+    rt_tuple_len, rt_tuple_new, rt_tuple_set, rt_typed_bytes_u8_data_at, rt_typed_bytes_u8_push, rt_typed_words_u32_at,
+    rt_typed_words_u32_data_at, rt_typed_words_u32_push, rt_typed_words_u32_push_known_at,
+    rt_typed_words_u32_push_known_data_at, rt_typed_words_u32_set, rt_typed_words_u32_store_known_data_at,
+    rt_typed_words_u32_unchecked, rt_typed_words_u64_at, rt_typed_words_u64_data_at,
+    rt_typed_words_u64_data_at_checked, rt_typed_words_u64_push, rt_typed_words_u64_push_known_at,
+    rt_typed_words_u64_push_known_data_at, rt_typed_words_u64_raw_data_at, rt_typed_words_u64_set,
+    rt_typed_words_u64_store_known_data_at, rt_typed_words_u64_unchecked,
 };
 pub use utf8_kernels::{
     rt_rank_query, rt_rank_select_build, rt_rank_select_free, rt_select_query, rt_swi_build, rt_swi_byte_to_char,
@@ -328,9 +328,9 @@ pub use sffi::{rt_clear_stdin, rt_has_mock_stdin, rt_read_stdin_char, rt_read_st
 
 // Re-export print SFFI functions
 pub use sffi::{
-    print_raw, rt_eprint_str, rt_eprint_value, rt_eprintln_str, rt_eprintln_value, rt_print_str, rt_print_value,
-    rt_println_str, rt_println_value, rt_raw_u64_to_string, rt_stderr_flush, rt_stderr_write, rt_stdout_flush,
-    rt_stdout_write, rt_value_format_string, rt_value_to_string, stdin_read_char,
+    rt_eprint_str, rt_eprint_value, rt_eprintln_str, rt_eprintln_value, rt_print_str, rt_print_value, rt_println_str,
+    rt_println_value, rt_raw_u64_to_string, rt_stderr_flush, rt_stderr_write, rt_stdout_flush, rt_stdout_write,
+    rt_value_format_string, rt_value_to_string,
 };
 
 // Re-export log SFFI functions
@@ -347,16 +347,13 @@ pub use sffi::rt_time_now_seconds;
 pub use sffi::{
     rt_condition_probe, rt_decision_probe, rt_env_all, rt_env_cwd, rt_env_exists, rt_env_get, rt_env_get_i64,
     rt_env_home, rt_env_remove, rt_env_set, rt_env_temp, rt_env_vars, rt_exit, rt_get_env, rt_path_probe,
-    rt_platform_name, rt_process_execute, rt_process_exists, rt_process_is_running, rt_process_kill, rt_process_run,
+    rt_platform_name, rt_process_execute, rt_process_is_running, rt_process_kill, rt_process_run,
     rt_process_run_timeout, rt_process_spawn, rt_process_spawn_async, rt_process_wait, rt_set_env, rt_term_enable_ansi,
     rt_term_get_size,
 };
 
 // Re-export runtime configuration SFFI functions
 pub use sffi::{rt_is_debug_mode_enabled, rt_is_macro_trace_enabled, rt_set_debug_mode, rt_set_macro_trace};
-
-// Re-export native WSFFI functions
-pub use wsffi_native::{spl_dlclose, spl_dlopen, spl_dlsym, spl_wffi_call_i64};
 
 // Re-export CLI SFFI functions
 pub use cli_sffi::{
@@ -365,14 +362,13 @@ pub use cli_sffi::{
     rt_cli_print_version, rt_cli_read_file, rt_cli_run_check, rt_cli_run_code, rt_cli_run_sffi_gen, rt_cli_run_file,
     rt_cli_run_fix, rt_cli_run_fmt, rt_cli_run_gen_lean, rt_cli_run_lex, rt_cli_run_lint, rt_cli_run_migrate,
     rt_cli_run_query, rt_cli_run_repl, rt_cli_run_tests, rt_cli_run_verify, rt_cli_version, rt_cli_watch_file,
-    rt_compile_to_llvm_ir, rt_compile_to_native, rt_compile_to_native_with_opt, rt_exec,
+    rt_compile_to_llvm_ir, rt_compile_to_native, rt_compile_to_native_with_opt,
 };
 
 // Re-export file I/O SFFI functions
 pub use sffi::{
     // Metadata
     rt_file_exists,
-    rt_dir_exists,
     rt_file_stat,
     // File ops
     rt_file_canonicalize,
@@ -785,6 +781,12 @@ pub use ratatui_tui::{
 // Re-export networking SFFI functions
 pub use net::{
     native_http_response_free,
+    rt_event_loop_close,
+    rt_event_loop_create,
+    rt_event_loop_deregister,
+    rt_event_loop_poll,
+    rt_event_loop_poll_get_fd,
+    rt_event_loop_register,
     // HTTP functions
     native_http_send,
     native_tcp_accept,
@@ -808,21 +810,27 @@ pub use net::{
     rt_io_tcp_accept,
     rt_io_tcp_accept_timeout,
     rt_io_tcp_bind,
+    rt_io_tcp_bind_fd,
     rt_io_tcp_close,
     rt_io_tcp_connect,
     rt_io_tcp_connect_timeout,
     rt_io_tcp_drain_line,
     rt_io_tcp_flush,
+    rt_io_tcp_listen,
     rt_io_tcp_local_addr,
     rt_io_tcp_peer_addr,
     rt_io_tcp_read,
     rt_io_tcp_read_exact,
     rt_io_tcp_read_exact_len,
     rt_io_tcp_read_line,
+    rt_io_tcp_set_nonblocking,
     rt_io_tcp_set_nodelay,
     rt_io_tcp_set_read_timeout,
+    rt_io_tcp_set_reuseaddr,
+    rt_io_tcp_set_reuseport,
     rt_io_tcp_set_write_timeout,
     rt_io_tcp_shutdown,
+    rt_io_tcp_socket_create,
     rt_io_tcp_write,
     rt_io_tcp_write_text,
     rt_io_tcp_write_text_read_exact_len,
@@ -857,6 +865,7 @@ pub use net::{
     rt_tls_server_config_require_client_cert,
     rt_tls_server_config_set_alpn,
     rt_tls_server_create,
+    rt_tls_server_create_on,
     rt_tls_server_create_from_der,
     rt_tls_server_read,
     rt_tls_server_shutdown,

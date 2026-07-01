@@ -1190,6 +1190,42 @@ pub fn aes256_gcm_decrypt_bytes(
     AesGcmDecryptOutcome::Plaintext(plaintext)
 }
 
+pub fn ssh_aes256_gcm_decrypt_packet_bytes(key: &[u8], iv: &[u8], seq: i64, packet: &[u8]) -> Option<Vec<u8>> {
+    if key.len() != AES256_KEY_LEN || iv.len() != 12 || packet.len() < 21 {
+        return None;
+    }
+    let body_len = packet.len().checked_sub(20)?;
+    if body_len == 0 {
+        return None;
+    }
+    let mut nonce = [0u8; 12];
+    nonce.copy_from_slice(iv);
+    let mut carry = seq as u64;
+    for idx in (4..=11).rev() {
+        if carry == 0 {
+            break;
+        }
+        let sum = nonce[idx] as u64 + (carry & 0xff);
+        nonce[idx] = (sum & 0xff) as u8;
+        carry = (carry >> 8) + (sum >> 8);
+    }
+    let aad = &packet[..4];
+    let ciphertext = &packet[4..4 + body_len];
+    let tag = &packet[4 + body_len..4 + body_len + AES_BLOCK_LEN];
+    let body = match aes256_gcm_decrypt_bytes(key, &nonce, ciphertext, aad, tag) {
+        AesGcmDecryptOutcome::Plaintext(body) => body,
+        AesGcmDecryptOutcome::InvalidInput | AesGcmDecryptOutcome::TagMismatch => return None,
+    };
+    if body.is_empty() {
+        return None;
+    }
+    let padding_len = body[0] as usize;
+    if 1 + padding_len > body.len() {
+        return None;
+    }
+    Some(body[1..body.len() - padding_len].to_vec())
+}
+
 /// Encode an `AesGcmDecryptOutcome` into the status-prefixed `[u8]` shape used
 /// by the runtime decrypt fast-path:
 ///   - `[]`        -> invalid input (caller falls back)
@@ -1260,6 +1296,50 @@ pub extern "C" fn rt_tls13_aes256_gcm_decrypt(
     };
     let outcome = aes256_gcm_decrypt_bytes(&key_bytes, &nonce_bytes, &ct_bytes, &aad_bytes, &tag_bytes);
     runtime_array_from_bytes(&encode_decrypt_outcome(outcome))
+}
+
+#[no_mangle]
+pub extern "C" fn rt_ssh_aes256_gcm_decrypt_packet(
+    key: RuntimeValue,
+    iv: RuntimeValue,
+    seq: i64,
+    packet: RuntimeValue,
+) -> RuntimeValue {
+    let Some(key_bytes) = runtime_array_to_bytes(key) else {
+        return empty_runtime_array();
+    };
+    let Some(iv_bytes) = runtime_array_to_bytes(iv) else {
+        return empty_runtime_array();
+    };
+    let Some(packet_bytes) = runtime_array_to_bytes(packet) else {
+        return empty_runtime_array();
+    };
+    let Some(payload) = ssh_aes256_gcm_decrypt_packet_bytes(&key_bytes, &iv_bytes, seq, &packet_bytes) else {
+        return empty_runtime_array();
+    };
+    runtime_array_from_bytes(&payload)
+}
+
+#[no_mangle]
+pub extern "C" fn rt_ssh_aes256_gcm_decrypt_packet_payload_len(
+    key: RuntimeValue,
+    iv: RuntimeValue,
+    seq: i64,
+    packet: RuntimeValue,
+) -> i64 {
+    let Some(key_bytes) = runtime_array_to_bytes(key) else {
+        return -1;
+    };
+    let Some(iv_bytes) = runtime_array_to_bytes(iv) else {
+        return -1;
+    };
+    let Some(packet_bytes) = runtime_array_to_bytes(packet) else {
+        return -1;
+    };
+    let Some(payload) = ssh_aes256_gcm_decrypt_packet_bytes(&key_bytes, &iv_bytes, seq, &packet_bytes) else {
+        return -1;
+    };
+    payload.len() as i64
 }
 
 #[cfg(test)]

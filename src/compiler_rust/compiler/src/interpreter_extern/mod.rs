@@ -328,14 +328,6 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     );
     insert_simple!("rt_host_gpu_queue_reset", host_gpu_lane::rt_host_gpu_queue_reset);
     insert_simple!("rt_host_gpu_queue_emit", host_gpu_lane::rt_host_gpu_queue_emit);
-    insert_simple!(
-        "rt_host_gpu_queue_emit_payload",
-        host_gpu_lane::rt_host_gpu_queue_emit_payload
-    );
-    insert_simple!(
-        "rt_host_gpu_queue_emit_payload_text",
-        host_gpu_lane::rt_host_gpu_queue_emit_payload_text
-    );
     insert_simple!("rt_host_gpu_queue_drain", host_gpu_lane::rt_host_gpu_queue_drain);
     insert_simple!("rt_host_gpu_queue_submit", host_gpu_lane::rt_host_gpu_queue_submit);
     insert_simple!("rt_host_gpu_queue_complete", host_gpu_lane::rt_host_gpu_queue_complete);
@@ -366,6 +358,10 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!(
         "rt_host_gpu_queue_last_device_time_us",
         host_gpu_lane::rt_host_gpu_queue_last_device_time_us
+    );
+    insert_simple!(
+        "rt_host_gpu_queue_emit_payload_text",
+        host_gpu_lane::rt_host_gpu_queue_emit_payload_text
     );
     insert_simple!(
         "rt_host_gpu_queue_last_payload_size",
@@ -682,14 +678,6 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
         "rt_cranelift_append_block_param",
         cranelift::rt_cranelift_append_block_param
     );
-    insert_simple!(
-        "rt_cranelift_append_func_params",
-        cranelift::rt_cranelift_append_func_params
-    );
-    insert_simple!(
-        "rt_cranelift_aot_define_function",
-        cranelift::rt_cranelift_aot_define_function
-    );
     insert_simple!("rt_cranelift_band", cranelift::rt_cranelift_band);
     insert_simple!("rt_cranelift_bconst", cranelift::rt_cranelift_bconst);
     insert_simple!("rt_cranelift_begin_function", cranelift::rt_cranelift_begin_function);
@@ -706,10 +694,6 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     );
     insert_simple!("rt_cranelift_call_indirect", cranelift::rt_cranelift_call_indirect);
     insert_simple!("rt_cranelift_create_block", cranelift::rt_cranelift_create_block);
-    insert_simple!(
-        "rt_cranelift_declare_function",
-        cranelift::rt_cranelift_declare_function
-    );
     insert_simple!("rt_cranelift_define_function", cranelift::rt_cranelift_define_function);
     insert_simple!("rt_cranelift_emit_object", cranelift::rt_cranelift_emit_object);
     insert_simple!("rt_cranelift_end_function", cranelift::rt_cranelift_end_function);
@@ -736,14 +720,9 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_cranelift_ireduce", cranelift::rt_cranelift_ireduce);
     insert_simple!("rt_cranelift_ishl", cranelift::rt_cranelift_ishl);
     insert_simple!("rt_cranelift_isub", cranelift::rt_cranelift_isub);
-    insert_simple!(
-        "rt_cranelift_import_function",
-        cranelift::rt_cranelift_import_function
-    );
     insert_simple!("rt_cranelift_jump", cranelift::rt_cranelift_jump);
     insert_simple!("rt_cranelift_load", cranelift::rt_cranelift_load);
     insert_simple!("rt_cranelift_module_new", cranelift::rt_cranelift_module_new);
-    insert_simple!("rt_cranelift_new_aot_module", cranelift::rt_cranelift_new_aot_module);
     insert_simple!("rt_cranelift_new_module", cranelift::rt_cranelift_new_module);
     insert_simple!("rt_cranelift_new_signature", cranelift::rt_cranelift_new_signature);
     insert_simple!("rt_cranelift_null", cranelift::rt_cranelift_null);
@@ -922,33 +901,6 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_db_iget_int", sffi_db::rt_db_iget_int_fn);
     insert_simple!("rt_db_iupdate_int", sffi_db::rt_db_iupdate_int_fn);
     insert_simple!("rt_db_idelete", sffi_db::rt_db_idelete_fn);
-    insert_simple!("rt_sqlite_open", sffi_db::rt_sqlite_open_fn);
-    insert_simple!("rt_sqlite_open_memory", sffi_db::rt_sqlite_open_memory_fn);
-    insert_simple!("rt_sqlite_close", sffi_db::rt_sqlite_close_fn);
-    insert_simple!("rt_sqlite_execute", sffi_db::rt_sqlite_execute_fn);
-    insert_simple!("rt_sqlite_execute_batch", sffi_db::rt_sqlite_execute_batch_fn);
-    insert_simple!("rt_sqlite_query", sffi_db::rt_sqlite_query_fn);
-    insert_simple!("rt_sqlite_query_next", sffi_db::rt_sqlite_query_next_fn);
-    insert_simple!("rt_sqlite_query_done", sffi_db::rt_sqlite_query_done_fn);
-    insert_simple!("rt_sqlite_column_count", sffi_db::rt_sqlite_column_count_fn);
-    insert_simple!("rt_sqlite_column_name", sffi_db::rt_sqlite_column_name_fn);
-    insert_simple!("rt_sqlite_column_text", sffi_db::rt_sqlite_column_text_fn);
-    insert_simple!("rt_sqlite_column_int", sffi_db::rt_sqlite_column_int_fn);
-    insert_simple!("rt_sqlite_column_float", sffi_db::rt_sqlite_column_float_fn);
-    insert_simple!("rt_sqlite_column_type", sffi_db::rt_sqlite_column_type_fn);
-    insert_simple!("rt_sqlite_prepare", sffi_db::rt_sqlite_prepare_fn);
-    insert_simple!("rt_sqlite_bind_text", sffi_db::rt_sqlite_bind_text_fn);
-    insert_simple!("rt_sqlite_bind_int", sffi_db::rt_sqlite_bind_int_fn);
-    insert_simple!("rt_sqlite_bind_float", sffi_db::rt_sqlite_bind_float_fn);
-    insert_simple!("rt_sqlite_bind_null", sffi_db::rt_sqlite_bind_null_fn);
-    insert_simple!("rt_sqlite_reset", sffi_db::rt_sqlite_reset_fn);
-    insert_simple!("rt_sqlite_finalize", sffi_db::rt_sqlite_finalize_fn);
-    insert_simple!("rt_sqlite_begin", sffi_db::rt_sqlite_begin_fn);
-    insert_simple!("rt_sqlite_commit", sffi_db::rt_sqlite_commit_fn);
-    insert_simple!("rt_sqlite_rollback", sffi_db::rt_sqlite_rollback_fn);
-    insert_simple!("rt_sqlite_last_insert_rowid", sffi_db::rt_sqlite_last_insert_rowid_fn);
-    insert_simple!("rt_sqlite_changes", sffi_db::rt_sqlite_changes_fn);
-    insert_simple!("rt_sqlite_error_message", sffi_db::rt_sqlite_error_message_fn);
     insert_simple!("rt_diagram_clear", diagram::rt_diagram_clear);
     insert_simple!("rt_diagram_disable", diagram::rt_diagram_disable);
     insert_simple!("rt_diagram_enable", diagram::rt_diagram_enable);
@@ -999,7 +951,6 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_env_get_var", env_sffi::rt_env_get_var);
     insert_simple!("rt_env_has_var", env_sffi::rt_env_has_var);
     insert_simple!("rt_env_home", system::rt_env_home);
-    insert_simple!("sys_env_bool", system::sys_env_bool);
     insert_simple!("rt_env_new_handle", env_sffi::rt_env_new);
     insert_simple!("rt_env_pop_scope", env_sffi::rt_env_pop_scope);
     insert_simple!("rt_env_push_scope", env_sffi::rt_env_push_scope);
@@ -1139,7 +1090,6 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_function_not_found", sffi_value::rt_function_not_found_fn);
     insert_simple!("rt_get_concurrent_backend", concurrency::rt_get_concurrent_backend);
     insert_simple!("rt_get_cwd", file_io::rt_get_cwd);
-    insert_simple!("rt_get_host_target_code", file_io::rt_get_host_target_code);
     insert_simple!("rt_getpid", file_io::rt_getpid);
     insert_simple!("rt_gui_get_glyph_8x16", conversion::rt_gui_get_glyph_8x16_fn);
     insert_simple!("rt_intern_symbol", file_io::rt_intern_symbol);
@@ -1628,48 +1578,15 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_tls13_aes128_gcm_encrypt", simd::rt_tls13_aes128_gcm_encrypt);
     insert_simple!("rt_tls13_aes256_gcm_decrypt", simd::rt_tls13_aes256_gcm_decrypt);
     insert_simple!("rt_tls13_aes256_gcm_encrypt", simd::rt_tls13_aes256_gcm_encrypt);
+    insert_simple!("rt_ssh_aes256_gcm_decrypt_packet", simd::rt_ssh_aes256_gcm_decrypt_packet);
+    insert_simple!("rt_ssh_aes256_gcm_decrypt_packet_payload_len", simd::rt_ssh_aes256_gcm_decrypt_packet_payload_len);
     insert_simple!("rt_tls13_ed25519_verify", signatures::rt_ed25519_verify);
     insert_simple!("rt_torch_available", torch::rt_torch_available);
-    insert_simple!("rt_torch_autograd_backward", torch::rt_torch_autograd_backward);
-    insert_simple!("rt_torch_autograd_grad", torch::rt_torch_autograd_grad);
-    insert_simple!(
-        "rt_torch_autograd_no_grad_begin",
-        torch::rt_torch_autograd_no_grad_begin
-    );
-    insert_simple!(
-        "rt_torch_autograd_no_grad_end",
-        torch::rt_torch_autograd_no_grad_end
-    );
-    insert_simple!(
-        "rt_torch_autograd_set_requires_grad",
-        torch::rt_torch_autograd_set_requires_grad
-    );
-    insert_simple!("rt_torch_autograd_zero_grad", torch::rt_torch_autograd_zero_grad);
     insert_simple!("rt_torch_cuda_available", torch::rt_torch_cuda_available);
     insert_simple!("rt_torch_clone", torch::rt_torch_clone);
     insert_simple!("rt_torch_copy_data_to_cpu", torch::rt_torch_copy_data_to_cpu);
     insert_simple!("rt_torch_free", torch::rt_torch_free);
     insert_simple!("rt_torch_tensor", torch::rt_torch_tensor);
-    insert_simple!("rt_torch_tensor_from_data", torch::rt_torch_tensor_from_data);
-    insert_simple!("rt_torch_torchtensor_add", torch::rt_torch_torchtensor_add);
-    insert_simple!(
-        "rt_torch_torchtensor_add_scalar",
-        torch::rt_torch_torchtensor_add_scalar
-    );
-    insert_simple!("rt_torch_torchtensor_cuda", torch::rt_torch_torchtensor_cuda);
-    insert_simple!("rt_torch_torchtensor_device", torch::rt_torch_torchtensor_device);
-    insert_simple!("rt_torch_torchtensor_free", torch::rt_torch_torchtensor_free);
-    insert_simple!("rt_torch_torchtensor_is_cuda", torch::rt_torch_torchtensor_is_cuda);
-    insert_simple!("rt_torch_torchtensor_mul", torch::rt_torch_torchtensor_mul);
-    insert_simple!(
-        "rt_torch_torchtensor_mul_scalar",
-        torch::rt_torch_torchtensor_mul_scalar
-    );
-    insert_simple!("rt_torch_torchtensor_ndim", torch::rt_torch_torchtensor_ndim);
-    insert_simple!("rt_torch_torchtensor_numel", torch::rt_torch_torchtensor_numel);
-    insert_simple!("rt_torch_torchtensor_shape", torch::rt_torch_torchtensor_shape);
-    insert_simple!("rt_torch_torchtensor_sub", torch::rt_torch_torchtensor_sub);
-    insert_simple!("rt_torch_torchtensor_sum", torch::rt_torch_torchtensor_sum);
     insert_simple!("rt_torch_to_cpu", torch::rt_torch_to_cpu);
     insert_simple!("rt_torch_to_cuda", torch::rt_torch_to_cuda);
     insert_simple!("rt_typed_bytes_u32_le_at", sffi_array::rt_bytes_u32_le_at_fn);
@@ -1764,39 +1681,11 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_vulkan_end_compute", gpu::rt_vulkan_end_compute_fn);
     insert_simple!("rt_vulkan_free_buffer", gpu::rt_vulkan_free_buffer_fn);
     insert_simple!("rt_vulkan_get_device", gpu::rt_vulkan_get_device_fn);
-    insert_simple!(
-        "rt_vulkan_get_renderdoc_device_pointer",
-        gpu::rt_vulkan_get_renderdoc_device_pointer_fn
-    );
     insert_simple!("rt_vulkan_get_last_error", gpu::rt_vulkan_get_last_error_fn);
     insert_simple!("rt_vulkan_init", gpu::rt_vulkan_init_fn);
     insert_simple!("rt_renderdoc_available", gpu::rt_renderdoc_available_fn);
-    insert_simple!(
-        "rt_renderdoc_set_capture_file_path_template",
-        gpu::rt_renderdoc_set_capture_file_path_template_fn
-    );
-    insert_simple!(
-        "rt_renderdoc_capture_file_path_template_from_env",
-        gpu::rt_renderdoc_capture_file_path_template_from_env_fn
-    );
-    insert_simple!(
-        "rt_renderdoc_configure_capture_file_path_template_from_env",
-        gpu::rt_renderdoc_configure_capture_file_path_template_from_env_fn
-    );
-    insert_simple!(
-        "rt_renderdoc_is_frame_capturing",
-        gpu::rt_renderdoc_is_frame_capturing_fn
-    );
     insert_simple!("rt_renderdoc_start_capture", gpu::rt_renderdoc_start_capture_fn);
-    insert_simple!(
-        "rt_renderdoc_start_capture_for_device",
-        gpu::rt_renderdoc_start_capture_for_device_fn
-    );
     insert_simple!("rt_renderdoc_end_capture", gpu::rt_renderdoc_end_capture_fn);
-    insert_simple!(
-        "rt_renderdoc_end_capture_for_device",
-        gpu::rt_renderdoc_end_capture_for_device_fn
-    );
     insert_simple!("rt_renderdoc_num_captures", gpu::rt_renderdoc_num_captures_fn);
     insert_simple!("rt_vulkan_is_available", gpu::rt_vulkan_is_available_fn);
     insert_simple!("rt_vulkan_push_constants", gpu::rt_vulkan_push_constants_fn);
@@ -2246,8 +2135,6 @@ pub(crate) fn call_extern_function_with_values(
         return match name {
             "rt_host_gpu_queue_reset" => host_gpu_lane::rt_host_gpu_queue_reset(evaluated),
             "rt_host_gpu_queue_emit" => host_gpu_lane::rt_host_gpu_queue_emit(evaluated),
-            "rt_host_gpu_queue_emit_payload" => host_gpu_lane::rt_host_gpu_queue_emit_payload(evaluated),
-            "rt_host_gpu_queue_emit_payload_text" => host_gpu_lane::rt_host_gpu_queue_emit_payload_text(evaluated),
             "rt_host_gpu_queue_drain" => host_gpu_lane::rt_host_gpu_queue_drain(evaluated),
             "rt_host_gpu_queue_submit" => host_gpu_lane::rt_host_gpu_queue_submit(evaluated),
             "rt_host_gpu_queue_complete" => host_gpu_lane::rt_host_gpu_queue_complete(evaluated),
@@ -2258,6 +2145,7 @@ pub(crate) fn call_extern_function_with_values(
             "rt_host_gpu_queue_last_status" => host_gpu_lane::rt_host_gpu_queue_last_status(evaluated),
             "rt_host_gpu_queue_last_backend_handle" => host_gpu_lane::rt_host_gpu_queue_last_backend_handle(evaluated),
             "rt_host_gpu_queue_last_device_time_us" => host_gpu_lane::rt_host_gpu_queue_last_device_time_us(evaluated),
+            "rt_host_gpu_queue_emit_payload_text" => host_gpu_lane::rt_host_gpu_queue_emit_payload_text(evaluated),
             "rt_host_gpu_queue_last_payload_size" => host_gpu_lane::rt_host_gpu_queue_last_payload_size(evaluated),
             "rt_host_gpu_queue_last_payload_hash" => host_gpu_lane::rt_host_gpu_queue_last_payload_hash(evaluated),
             "rt_host_gpu_queue_last_payload_text" => host_gpu_lane::rt_host_gpu_queue_last_payload_text(evaluated),

@@ -918,3 +918,7 @@ implementation-evidence-in-progress
   selected `*_simple_bin` and `*_simple_bin_source` (`explicit-env`,
   `in-tree-release`, `repo-bin`, `path-opt-in`, or `default-missing`) so PATH
   opt-in evidence remains auditable.
+- rv64-ssh-sync: Rebasing the RV64 SSH AES-256-GCM live-proof lane onto current
+  main preserved the scalar payload-length helper, synthesized OpenSSH payload
+  paths, and the disconnect fast path, while correcting the generated spec
+  contract to the current host `2222` to guest daemon port `22` forwarding.

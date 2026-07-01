@@ -17,7 +17,7 @@ pub struct AbiVersion {
 
 impl AbiVersion {
     /// Current ABI version of the runtime.
-    pub const CURRENT: Self = Self { major: 1, minor: 6 };
+    pub const CURRENT: Self = Self { major: 1, minor: 5 };
 
     /// Create a new ABI version.
     pub const fn new(major: u16, minor: u16) -> Self {
@@ -146,7 +146,6 @@ pub const CORE_REQUIRED_RUNTIME_SYMBOLS: &[&str] = &[
     "rt_string_len",
     "rt_string_data",
     "rt_string_concat",
-    "rt_any_add",
     "rt_string_builder_new",
     "rt_string_builder_push",
     "rt_string_builder_finish",
@@ -180,7 +179,6 @@ pub const CORE_REQUIRED_RUNTIME_SYMBOLS: &[&str] = &[
     "rt_value_float",
     "rt_value_bool",
     "rt_value_nil",
-    "rt_value_as_int",
     "rt_panic",
 ];
 
@@ -436,10 +434,10 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_index_set",
     "rt_slice",
     "rt_contains",
+    "rt_len",
     // String operations
     "rt_string_new",
     "rt_string_concat",
-    "rt_any_add",
     "rt_string_builder_new",
     "rt_string_builder_push",
     "rt_string_builder_finish",
@@ -458,10 +456,6 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_string_to_upper",
     "rt_string_to_lower",
     "rt_string_to_int",
-    "stdin_read_char",
-    "print_raw",
-    "text_dot_from_char_code",
-    "rt_len",
     "rt_string_find",
     "rt_string_rfind",
     "rt_string_index_of",
@@ -472,6 +466,10 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_utf8_validate",
     "rt_utf8_find_invalid",
     "rt_text_count_codepoints",
+    // Time operations backed by src/runtime/runtime_time.c
+    "rt_time_now_nanos",
+    "rt_time_now_micros",
+    "rt_time_now_unix_micros",
     "rt_swi_build",
     "rt_swi_char_to_byte",
     "rt_swi_byte_to_char",
@@ -495,75 +493,6 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_value_float",
     "rt_value_bool",
     "rt_value_nil",
-    "rt_value_as_int",
-    // Cranelift self-hosting SFFI
-    "rt_cranelift_module_new",
-    "rt_cranelift_new_module",
-    "rt_cranelift_new_aot_module",
-    "rt_cranelift_finalize_module",
-    "rt_cranelift_free_module",
-    "rt_cranelift_new_signature",
-    "rt_cranelift_sig_add_param",
-    "rt_cranelift_sig_set_return",
-    "rt_cranelift_declare_function",
-    "rt_cranelift_import_function",
-    "rt_cranelift_begin_function",
-    "rt_cranelift_end_function",
-    "rt_cranelift_define_function",
-    "rt_cranelift_aot_define_function",
-    "rt_cranelift_create_block",
-    "rt_cranelift_switch_to_block",
-    "rt_cranelift_seal_block",
-    "rt_cranelift_seal_all_blocks",
-    "rt_cranelift_iconst",
-    "rt_cranelift_fconst",
-    "rt_cranelift_bconst",
-    "rt_cranelift_null",
-    "rt_cranelift_iadd",
-    "rt_cranelift_isub",
-    "rt_cranelift_imul",
-    "rt_cranelift_sdiv",
-    "rt_cranelift_udiv",
-    "rt_cranelift_srem",
-    "rt_cranelift_urem",
-    "rt_cranelift_fadd",
-    "rt_cranelift_fsub",
-    "rt_cranelift_fmul",
-    "rt_cranelift_fdiv",
-    "rt_cranelift_band",
-    "rt_cranelift_bor",
-    "rt_cranelift_bxor",
-    "rt_cranelift_bnot",
-    "rt_cranelift_ishl",
-    "rt_cranelift_sshr",
-    "rt_cranelift_ushr",
-    "rt_cranelift_icmp",
-    "rt_cranelift_fcmp",
-    "rt_cranelift_load",
-    "rt_cranelift_store",
-    "rt_cranelift_stack_slot",
-    "rt_cranelift_stack_addr",
-    "rt_cranelift_jump",
-    "rt_cranelift_brif",
-    "rt_cranelift_return",
-    "rt_cranelift_return_void",
-    "rt_cranelift_trap",
-    "rt_cranelift_call",
-    "rt_cranelift_call_indirect",
-    "rt_cranelift_sextend",
-    "rt_cranelift_uextend",
-    "rt_cranelift_ireduce",
-    "rt_cranelift_fcvt_to_sint",
-    "rt_cranelift_fcvt_to_uint",
-    "rt_cranelift_fcvt_from_sint",
-    "rt_cranelift_fcvt_from_uint",
-    "rt_cranelift_bitcast",
-    "rt_cranelift_append_block_param",
-    "rt_cranelift_block_param",
-    "rt_cranelift_append_func_params",
-    "rt_cranelift_get_function_ptr",
-    "rt_cranelift_call_function_ptr",
-    "rt_cranelift_emit_object",
     // Object operations
     "rt_object_new",
     "rt_object_field_get",
@@ -591,9 +520,6 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_dyn_torch_tensor_from_bits_1d",
     "rt_memset",
     "rt_memcpy",
-    "rt_memory_barrier",
-    "rt_load_barrier",
-    "rt_store_barrier",
     // Async/concurrency operations
     "rt_wait",
     "rt_future_new",
@@ -684,11 +610,6 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_process_wait",
     "rt_process_kill",
     "rt_process_execute",
-    "rt_exec",
-    "spl_dlopen",
-    "spl_dlsym",
-    "spl_dlclose",
-    "spl_wffi_call_i64",
     "rt_pty_open",
     "rt_pty_spawn",
     "rt_io_tcp_socket_create",
@@ -719,8 +640,12 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_io_tcp_set_read_timeout",
     "rt_io_tcp_set_write_timeout",
     "rt_io_tcp_shutdown",
-    "rt_value_as_float",
-    "rt_value_as_int",
+    "rt_event_loop_create",
+    "rt_event_loop_register",
+    "rt_event_loop_deregister",
+    "rt_event_loop_poll",
+    "rt_event_loop_poll_get_fd",
+    "rt_event_loop_close",
     "rt_value_raw_i64",
     "rt_tls_client_connect",
     "rt_tls_client_connect_with_sni",
@@ -869,7 +794,6 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_is_debug_mode_enabled",
     // File I/O operations - metadata
     "rt_file_exists",
-    "rt_dir_exists",
     "rt_file_stat",
     // File I/O operations - file ops
     "rt_file_canonicalize",
@@ -989,12 +913,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_process_exists",
     "rt_hostname",
     "rt_system_cpu_count",
-    "rt_time_now_unix",
-    "rt_time_now_nanos",
-    "rt_time_now_micros",
-    "rt_time_now_unix_micros",
     "rt_time_now_monotonic_ms",
-    "rt_sleep_ms",
     // High-performance collections (HashMap)
     "rt_hashmap_new",
     "rt_hashmap_insert",
@@ -1133,6 +1052,8 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     // TLS / X25519 helpers used by the baremetal SSH guest lane
     "rt_tls13_x25519_public_key",
     "rt_tls13_x25519_shared_secret",
+    "rt_ed25519_sign_seed",
+    "rt_tls13_ed25519_sign",
     "rt_ssh_userauth_password_only_failure_payload",
     // Signal handling
     "rt_signal_install",
@@ -1209,9 +1130,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_arena_new",
     "rt_arena_reset",
     "rt_arena_used",
-    "rt_array_all",
     "rt_array_all_truthy",
-    "rt_array_any",
     "rt_array_any_truthy",
     "rt_array_concat",
     "rt_array_copy",
@@ -1221,8 +1140,6 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_array_enumerate",
     "rt_array_extend_i64",
     "rt_array_fill",
-    "rt_array_filter",
-    "rt_array_find",
     "rt_array_flatten",
     "rt_array_free",
     "rt_array_header_ptr",
@@ -1548,6 +1465,11 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_host_gpu_queue_in_flight_count",
     "rt_host_gpu_queue_last_status",
     "rt_host_gpu_queue_last_backend_handle",
+    "rt_host_gpu_queue_last_device_time_us",
+    "rt_host_gpu_queue_emit_payload_text",
+    "rt_host_gpu_queue_last_payload_size",
+    "rt_host_gpu_queue_last_payload_hash",
+    "rt_host_gpu_queue_last_payload_text",
     "rt_handle_free",
     "rt_handle_get",
     "rt_handle_is_valid",
@@ -1593,6 +1515,8 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_mutex_new",
     "rt_mutex_try_lock",
     "rt_mutex_unlock",
+    "rt_native_profile_count",
+    "rt_native_profile_event",
     "rt_net_free_addr_string",
     "rt_object_class_id",
     "rt_object_field_count",
@@ -1761,8 +1685,12 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_thread_local_new",
     "rt_thread_local_set",
     "rt_tls13_aes128_gcm_decrypt",
+    "rt_ssh_aes256_gcm_decrypt_packet",
+    "rt_ssh_aes256_gcm_decrypt_packet_payload_len",
     "rt_tls13_aes256_gcm_decrypt",
     "rt_tls13_aes256_gcm_encrypt",
+    "rt_ed25519_sign_seed",
+    "rt_tls13_ed25519_sign",
     "rt_tls_clear",
     "rt_tls_client_config_add_root_cert",
     "rt_tls_client_config_enable_sni",
@@ -1931,9 +1859,8 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_file_delete", // -> rt_file_remove
     "rt_print",       // -> rt_print_value
     "rt_println",     // -> rt_println_value
-    "rt_get_args",
-    "sys_get_args", // -> rt_get_args
-    "sys_exit",     // -> rt_exit
+    "sys_get_args",   // -> rt_get_args
+    "sys_exit",       // -> rt_exit
 ];
 
 #[cfg(test)]
@@ -1980,11 +1907,9 @@ mod tests {
         assert!(RUNTIME_SYMBOL_NAMES.len() > 10);
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_array_new"));
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_byte_array_new"));
-        assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_println_value"));
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_len"));
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_time_now_unix_micros"));
-        assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_sleep_ms"));
-        assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_get_args"));
+        assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_println_value"));
     }
 
     #[test]

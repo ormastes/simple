@@ -7,13 +7,14 @@
 - **Total Features:** 1
 - **Complete Documentation:** 1 (100%)
 - **Stubs Remaining:** 0
-- **Total Lines:** 150
+- **Total Lines:** 133
+- **Warnings:** 1
 
 ---
 
-## Application (1 features)
+## System (1 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Vllm Readiness Specification](test/01_unit/app/llm_runtime/vllm_readiness_spec.md) | Partial | N/A | 15 | 60% | 150 lines |
+| [RV64 Live SSH Login in QEMU Specification](test/03_system/os/rv64_ssh_live_login_in_qemu_spec.md) | Static PASS; live opt-in tracks post-decrypt service-request boundary | N/A | 6 | 60% | 133 lines |
 
