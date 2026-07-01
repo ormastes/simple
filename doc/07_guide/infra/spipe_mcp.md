@@ -182,10 +182,11 @@ Simple context SQLite table. Use `spipe_context_sql_put` with `db_path` to save
 parsed output, `spipe_context_sql_get` to retrieve one source, and
 `spipe_context_sql_search` to search stored parsed context by query and optional
 source filter. MCP callers may use `db` or `dbPath` as aliases for `db_path`,
-and `sourceFilter` as an alias for `source_filter`.
+and `sourceFilter`, `source_id`, or `sourceId` as aliases for
+`source_filter` on SQL search.
 Search tools accept `query`, `q`, or `searchText`; the CLI mirrors those as
 `--query`, `--q`, or `--searchText`. The CLI accepts the same aliases as
-`--dbPath` and `--sourceFilter`.
+`--dbPath`, `--sourceFilter`, and `--sourceId`.
 
 The explicit MCP names `spipe_context_put_raw`, `spipe_context_get_tree`, and
 `spipe_context_get_raw` are aliases for `spipe_context_put`,
