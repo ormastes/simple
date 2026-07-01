@@ -102,6 +102,8 @@ summary rows.
 `[path:line: target]`.
 `ctest` output extracts whitespace-delimited `path:line` tokens from failure
 rows.
+`ld` output skips the linker executable prefix and extracts the referenced
+path-like field from colon-delimited diagnostics.
 Path leaves render as `kind=file`; non-path output remains `kind=line` and can
 still be grouped by explicit log level.
 
