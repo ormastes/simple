@@ -52,6 +52,18 @@ fn ui_bundle_include_line(const_name: &str) -> String {
     }
 }
 
+fn mobile_mdi_proof_entry_line() -> String {
+    println!("cargo:rerun-if-env-changed=SIMPLE_MOBILE_MDI_PROOF_ENTRY");
+    let flag_path = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap_or_default())
+        .join("mobile_mdi_proof_entry.flag");
+    println!("cargo:rerun-if-changed={}", flag_path.display());
+    let enabled = matches!(
+        env::var("SIMPLE_MOBILE_MDI_PROOF_ENTRY").as_deref(),
+        Ok("1") | Ok("true") | Ok("yes")
+    ) || flag_path.exists();
+    format!("pub const MOBILE_MDI_PROOF_ENTRY: bool = {};\n", enabled)
+}
+
 // Like runtime_include_line, but falls back to a sibling file when the env var
 // is unset. iOS builds run cargo through Xcode, which sanitizes the environment
 // so build.rs never sees SIMPLE_IOS_RUNTIME_* — embedding the runtime from a
@@ -97,8 +109,13 @@ fn write_mobile_runtime_assets(out_dir: &Path) {
             "ios_runtime_aarch64_sim.bin",
         ),
         runtime_include_line("SIMPLE_IOS_RUNTIME_X86_64_SIM", "IOS_RUNTIME_X86_64_SIM"),
-        runtime_include_line("SIMPLE_MOBILE_ENTRY_SOURCE", "MOBILE_ENTRY_SOURCE"),
+        runtime_include_line_with_file_default(
+            "SIMPLE_MOBILE_ENTRY_SOURCE",
+            "MOBILE_ENTRY_SOURCE",
+            "../../../examples/06_io/ui/tauri_mobile_mdi_smoke.spl",
+        ),
         ui_bundle_include_line("MOBILE_UI_BUNDLE"),
+        mobile_mdi_proof_entry_line(),
     ]
     .join("");
 

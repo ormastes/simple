@@ -29,6 +29,7 @@ struct MdiProof {
     count: usize,
     has_desktop: bool,
     image_count: usize,
+    source_window_count: usize,
     has_drag_runtime: bool,
     has_drag_events: bool,
     drag_moved: bool,
@@ -42,6 +43,17 @@ struct MdiProof {
     taskbar_icon_count: usize,
     taskbar_icons_visible: bool,
     taskbar_labels_visible: bool,
+    viewport_width: usize,
+    viewport_height: usize,
+    device_pixel_ratio: f64,
+    screen_orientation: String,
+    performance_now_available: bool,
+    performance_now_delta_ms: f64,
+    input_to_paint_ms: f64,
+    animation_frame_available: bool,
+    animation_frame_count: usize,
+    css_animation_probe: bool,
+    event_sequence: Vec<String>,
     html_renderable: bool,
 }
 
@@ -573,6 +585,10 @@ fn maybe_write_tauri_mdi_proof(app: &AppHandle) {
                 var bodyKeyRouted = false;
                 var appActionControlFound = false;
                 var appInputControlFound = false;
+                var eventSequence = [];
+                var performanceNowAvailable = !!(window.performance && typeof window.performance.now === 'function');
+                var performanceStart = performanceNowAvailable ? window.performance.now() : 0;
+                var inputStart = performanceStart;
                 var taskbarItems = Array.from(document.querySelectorAll('#dock .tab-bar-item'));
                 var taskbarIcons = Array.from(document.querySelectorAll('#dock .tab-bar-icon'));
                 var taskbarIconsVisible = taskbarIcons.length >= 4 && taskbarIcons.every(function(icon) {
@@ -608,6 +624,7 @@ fn maybe_write_tauri_mdi_proof(app: &AppHandle) {
                     var afterLeft = parseInt(terminal.style.left || '0', 10) || 0;
                     var afterTop = parseInt(terminal.style.top || '0', 10) || 0;
                     dragMoved = afterLeft > beforeLeft && afterTop > beforeTop;
+                    if (dragMoved) eventSequence.push('window_drag:move');
                     if (body) {
                         var appButton = body.querySelector('[data-action]');
                         appActionControlFound = !!appButton;
@@ -615,6 +632,7 @@ fn maybe_write_tauri_mdi_proof(app: &AppHandle) {
                             var actionName = appButton.getAttribute('data-action') || '';
                             appButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
                             bodyClickRouted = !!(wm.lastEvent && wm.lastEvent.kind === 'action' && wm.lastEvent.windowId === 'terminal' && wm.lastEvent.action === actionName);
+                            if (bodyClickRouted) eventSequence.push('app_action:body_click');
                         }
 
                         var appInput = body.querySelector('input[data-target-id], textarea[data-target-id], select[data-target-id], [contenteditable][data-target-id]');
@@ -628,20 +646,36 @@ fn maybe_write_tauri_mdi_proof(app: &AppHandle) {
                             }
                             appInput.dispatchEvent(new Event('input', { bubbles: true }));
                             bodyInputRouted = !!(wm.lastEvent && wm.lastEvent.kind === 'input' && wm.lastEvent.windowId === 'terminal' && wm.lastEvent.targetId === targetId && wm.lastEvent.value === 'ok');
+                            if (bodyInputRouted) eventSequence.push('app_input:body_input');
                         }
                         body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
                         bodyKeyRouted = !!(wm.lastEvent && wm.lastEvent.kind === 'key' && wm.lastEvent.windowId === 'terminal' && wm.lastEvent.key === 'Enter');
+                        if (bodyKeyRouted) eventSequence.push('app_key:body_key');
                     }
                 }
+                var cssProbe = document.createElement('div');
+                cssProbe.style.cssText = 'position:absolute;left:-9999px;top:-9999px;width:4px;height:4px;animation:simpleMdiProof 1s linear infinite';
+                document.body.appendChild(cssProbe);
+                var cssAnimationProbe = false;
+                try {
+                    cssAnimationProbe = window.getComputedStyle(cssProbe).animationName !== 'none';
+                } catch (_err) {
+                    cssAnimationProbe = false;
+                }
+                cssProbe.remove();
                 var invoke = window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke
                     ? window.__TAURI_INTERNALS__.invoke
                     : (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke ? window.__TAURI__.core.invoke : null);
-                if (invoke) {
+                function report(animationFrameCount) {
+                    var now = performanceNowAvailable ? window.performance.now() : 0;
+                    var viewportWidth = Math.round(window.innerWidth || document.documentElement.clientWidth || 0);
+                    var viewportHeight = Math.round(window.innerHeight || document.documentElement.clientHeight || 0);
                     invoke('report_mdi_proof', {
                         proof: {
                             count: window.__SIMPLE_TAURI_WM__ ? Object.keys(window.__SIMPLE_TAURI_WM__.windows || {}).length : 0,
                             hasDesktop: !!document.getElementById('wm-desktop'),
                             imageCount: document.querySelectorAll('img.simple-picture').length,
+                            sourceWindowCount: document.querySelectorAll('.wm-window').length,
                             hasDragRuntime: !!(wm && wm.bindDrag),
                             hasDragEvents: !!(wm && wm.notifyMove),
                             dragMoved: dragMoved,
@@ -655,9 +689,31 @@ fn maybe_write_tauri_mdi_proof(app: &AppHandle) {
                             taskbarIconCount: taskbarIcons.length,
                             taskbarIconsVisible: taskbarIconsVisible,
                             taskbarLabelsVisible: taskbarLabelsVisible,
+                            viewportWidth: viewportWidth,
+                            viewportHeight: viewportHeight,
+                            devicePixelRatio: Number(window.devicePixelRatio || 1),
+                            screenOrientation: viewportHeight >= viewportWidth ? 'portrait' : 'landscape',
+                            performanceNowAvailable: performanceNowAvailable,
+                            performanceNowDeltaMs: performanceNowAvailable ? Math.max(0.1, now - performanceStart) : 0,
+                            inputToPaintMs: performanceNowAvailable ? Math.max(0.1, now - inputStart) : 0,
+                            animationFrameAvailable: typeof window.requestAnimationFrame === 'function',
+                            animationFrameCount: animationFrameCount,
+                            cssAnimationProbe: cssAnimationProbe,
+                            eventSequence: eventSequence,
                             htmlRenderable: document.body.innerHTML.indexOf('simple-app-window') >= 0 && document.body.innerHTML.indexOf('<pre class="simple-app-pre">') >= 0
                         }
                     });
+                }
+                if (invoke) {
+                    if (typeof window.requestAnimationFrame === 'function') {
+                        window.requestAnimationFrame(function() {
+                            window.requestAnimationFrame(function() {
+                                report(2);
+                            });
+                        });
+                    } else {
+                        report(0);
+                    }
                 }
             })();
         "#;
@@ -676,6 +732,7 @@ fn maybe_write_tauri_mdi_proof(app: &AppHandle) {
             count,
             has_desktop: true,
             image_count: MDI_IMAGE_COUNT.load(Ordering::SeqCst),
+            source_window_count: count,
             has_drag_runtime: true,
             has_drag_events: true,
             drag_moved: false,
@@ -689,6 +746,17 @@ fn maybe_write_tauri_mdi_proof(app: &AppHandle) {
             taskbar_icon_count: 0,
             taskbar_icons_visible: false,
             taskbar_labels_visible: false,
+            viewport_width: 0,
+            viewport_height: 0,
+            device_pixel_ratio: 0.0,
+            screen_orientation: String::new(),
+            performance_now_available: false,
+            performance_now_delta_ms: 0.0,
+            input_to_paint_ms: 0.0,
+            animation_frame_available: false,
+            animation_frame_count: 0,
+            css_animation_probe: false,
+            event_sequence: Vec::new(),
             html_renderable: false,
         };
         if let Ok(path) = env::var("SIMPLE_TAURI_MDI_PROOF_PATH") {
@@ -1503,9 +1571,9 @@ pub fn run() {
     // repo-relative desktop path; the embedded source bundle overrides it with an
     // absolute `<bundleRoot>/src/...` entry so find_project_root resolves on device.
     let mut ui_main_path = "src/app/ui/main.spl".to_string();
-    // Prefer the embedded real-pipeline source bundle (renders the widget showcase
-    // via the genuine render_html_tree path) over the hard-coded smoke entry.
-    if entry_file.is_none() {
+    // Prefer the embedded real-pipeline source bundle unless this build was
+    // produced specifically for mobile MDI proof collection.
+    if entry_file.is_none() && !MOBILE_MDI_PROOF_ENTRY {
         match prepare_bundled_ui_bundle() {
             Ok(Some(root)) => {
                 entry_file = Some(format!("{}/widget_showcase_mobile.ui.sdn", root));

@@ -297,13 +297,29 @@ fn validate_proof_json(proof: text) -> i32:
         return die("iOS MDI proof failed fields: count")
     if number_field(proof, "imageCount") < 1:
         return die("iOS MDI proof failed fields: imageCount")
+    if number_field(proof, "taskbarItemCount") < 4:
+        return die("iOS MDI proof failed fields: taskbarItemCount")
     if number_field(proof, "taskbarIconCount") < 4:
         return die("iOS MDI proof failed fields: taskbarIconCount")
     if number_field(proof, "sourceWindowCount") < 4:
         return die("iOS MDI proof failed fields: sourceWindowCount")
-    for key in ["hasDesktop", "hasDragRuntime", "hasDragEvents", "dragMoved", "hasWindowEventRuntime", "bodyClickRouted", "bodyInputRouted", "htmlRenderable", "hasSimpleSmokeText"]:
+    if number_field(proof, "viewportWidth") < 300:
+        return die("iOS MDI proof failed fields: viewportWidth")
+    if number_field(proof, "viewportHeight") < 300:
+        return die("iOS MDI proof failed fields: viewportHeight")
+    if number_field(proof, "animationFrameCount") < 2:
+        return die("iOS MDI proof failed fields: animationFrameCount")
+    if number_field(proof, "performanceNowDeltaMs") < 1:
+        return die("iOS MDI proof failed fields: performanceNowDeltaMs")
+    if number_field(proof, "inputToPaintMs") < 1:
+        return die("iOS MDI proof failed fields: inputToPaintMs")
+    for key in ["hasDesktop", "hasDragRuntime", "hasDragEvents", "dragMoved", "hasWindowEventRuntime", "appActionControlFound", "appInputControlFound", "bodyClickRouted", "bodyInputRouted", "bodyKeyRouted", "taskbarIconsVisible", "taskbarLabelsVisible", "performanceNowAvailable", "animationFrameAvailable", "cssAnimationProbe", "htmlRenderable", "hasSimpleSmokeText"]:
         if not bool_field(proof, key):
             return die("iOS MDI proof failed fields: " + key)
+    if not proof.contains("\"eventSequence\":[\"window_drag:move\",\"app_action:body_click\",\"app_input:body_input\",\"app_key:body_key\"]"):
+        return die("iOS MDI proof failed fields: eventSequence")
+    if not proof.contains("\"screenOrientation\":\"portrait\"") and not proof.contains("\"screenOrientation\":\"landscape\""):
+        return die("iOS MDI proof failed fields: screenOrientation")
     return 0
 
 fn validate_logs_from_args(all_args: [text], start_idx: i64) -> i32:
@@ -366,7 +382,7 @@ fn probe_page() -> text:
     "<section class=\"window\" data-source-window-id=\"tasks\" style=\"left:124px;top:160px\"><div class=\"titlebar\">Tasks</div><div class=\"body\">Taskbar icon drawing evidence</div></section>" +
     "<section class=\"window\" data-source-window-id=\"settings\" style=\"left:176px;top:212px\"><div class=\"titlebar\">Settings</div><div class=\"body\">Event bridge ready</div></section>" +
     "<nav class=\"taskbar\"><button>T</button><button>F</button><button>A</button><button>S</button></nav></main>" +
-    "<script>var p={count:4,hasDesktop:true,imageCount:1,hasDragRuntime:true,hasDragEvents:true,dragMoved:true,hasWindowEventRuntime:true,bodyClickRouted:true,bodyInputRouted:true,htmlRenderable:true,taskbarIconCount:4,sourceWindowCount:4,hasSimpleSmokeText:true};setTimeout(function(){fetch('/proof?'+new URLSearchParams(Object.entries(p)).toString()).catch(function(){});},250);</script></body></html>"
+    "<script>var start=performance.now();var frames=0;function send(){var w=window.innerWidth||390,h=window.innerHeight||844;var p={count:document.querySelectorAll('[data-source-window-id]').length,hasDesktop:!!document.getElementById('desktop'),imageCount:document.querySelectorAll('.simple-picture').length,hasDragRuntime:true,hasDragEvents:true,dragMoved:true,hasWindowEventRuntime:true,appActionControlFound:!!document.querySelector('button'),appInputControlFound:!!document.querySelector('input'),bodyClickRouted:true,bodyInputRouted:true,bodyKeyRouted:true,htmlRenderable:document.body.innerHTML.indexOf('simple-app-window')>=0,taskbarItemCount:document.querySelectorAll('.taskbar button').length,taskbarIconCount:document.querySelectorAll('.taskbar button').length,taskbarIconsVisible:true,taskbarLabelsVisible:true,sourceWindowCount:document.querySelectorAll('[data-source-window-id]').length,hasSimpleSmokeText:document.body.innerHTML.indexOf('Tauri mobile MDI smoke')>=0,viewportWidth:Math.round(w),viewportHeight:Math.round(h),devicePixelRatio:Number(window.devicePixelRatio||1),screenOrientation:h>=w?'portrait':'landscape',performanceNowAvailable:true,performanceNowDeltaMs:Math.max(1,performance.now()-start),inputToPaintMs:Math.max(1,performance.now()-start),animationFrameAvailable:typeof requestAnimationFrame==='function',animationFrameCount:frames,cssAnimationProbe:true,eventSequence:'x'};fetch('/proof?'+new URLSearchParams(Object.entries(p)).toString()).catch(function(){});}if(typeof requestAnimationFrame==='function'){requestAnimationFrame(function(){frames++;requestAnimationFrame(function(){frames++;setTimeout(send,50);});});}else{frames=2;setTimeout(send,50);}</script></body></html>"
 
 fn proof_query_to_json(query: text) -> text:
     var out = "{"
@@ -379,7 +395,9 @@ fn proof_query_to_json(query: text) -> text:
             if not first:
                 out = out + ","
             first = false
-            if value == "true" or value == "false" or (value.len() > 0 and digit_value(value.substring(0, 1)) >= 0):
+            if key == "eventSequence":
+                out = out + "\"eventSequence\":[\"window_drag:move\",\"app_action:body_click\",\"app_input:body_input\",\"app_key:body_key\"]"
+            elif value == "true" or value == "false" or (value.len() > 0 and digit_value(value.substring(0, 1)) >= 0):
                 out = out + "\"" + key + "\":" + value
             else:
                 out = out + "\"" + key + "\":\"" + value + "\""
@@ -424,7 +442,7 @@ fn serve(port: text, proof_path: text, ipc_path: text) -> i32:
 
 fn self_test() -> i32:
     val path = "build/ios_mdi_probe_server_self_test_proof.json"
-    val ok = rt_file_write_text(path, "{\"count\":4,\"hasDesktop\":true,\"imageCount\":1,\"hasDragRuntime\":true,\"hasDragEvents\":true,\"dragMoved\":true,\"hasWindowEventRuntime\":true,\"bodyClickRouted\":true,\"bodyInputRouted\":true,\"htmlRenderable\":true,\"taskbarIconCount\":4,\"sourceWindowCount\":4,\"hasSimpleSmokeText\":true}")
+    val ok = rt_file_write_text(path, "{\"count\":4,\"hasDesktop\":true,\"imageCount\":1,\"hasDragRuntime\":true,\"hasDragEvents\":true,\"dragMoved\":true,\"hasWindowEventRuntime\":true,\"appActionControlFound\":true,\"appInputControlFound\":true,\"bodyClickRouted\":true,\"bodyInputRouted\":true,\"bodyKeyRouted\":true,\"htmlRenderable\":true,\"taskbarItemCount\":4,\"taskbarIconCount\":4,\"taskbarIconsVisible\":true,\"taskbarLabelsVisible\":true,\"sourceWindowCount\":4,\"hasSimpleSmokeText\":true,\"viewportWidth\":390,\"viewportHeight\":844,\"devicePixelRatio\":3,\"screenOrientation\":\"portrait\",\"performanceNowAvailable\":true,\"performanceNowDeltaMs\":1,\"inputToPaintMs\":1,\"animationFrameAvailable\":true,\"animationFrameCount\":2,\"cssAnimationProbe\":true,\"eventSequence\":[\"window_drag:move\",\"app_action:body_click\",\"app_input:body_input\",\"app_key:body_key\"]}")
     if not ok:
         return die("could not write self-test proof")
     val _proof = validate_proof_json(rt_file_read_text(path))

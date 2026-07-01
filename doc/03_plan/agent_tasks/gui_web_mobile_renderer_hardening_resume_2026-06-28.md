@@ -819,3 +819,49 @@ Live rerun in `build/goal-tauri-mobile-after-validator-fix/evidence.env`:
 Next work should connect the existing live MDI proof flow to the aggregate rows
 (`*_mdi_proof_json`, render/event/capture/performance/latency/animation detail)
 rather than relaxing the mobile completion gate.
+
+## 2026-07-02 MDI Proof Row Normalization
+
+This lane added strict mobile MDI proof normalization and wired the default
+mobile renderer wrappers toward the MDI smoke entry:
+
+- `scripts/check/normalize-tauri-mobile-mdi-proof.js` validates the live proof
+  JSON and emits the aggregate `ios_mdi_*` / `android_mdi_*` detail rows only
+  when render, event routing, viewport, performance, input-to-paint, and
+  animation evidence all pass.
+- The Tauri shell `MdiProof` payload now includes viewport, DPR,
+  orientation, performance.now timing, input-to-paint timing,
+  requestAnimationFrame count, CSS animation probe, event sequence, taskbar
+  visibility, and source-window count.
+- The iOS probe server self-test and standalone iOS MDI wrapper use the same
+  stricter proof contract.
+- The iOS and Android renderer evidence wrappers set a build-time proof flag so
+  mobile evidence mode runs `examples/06_io/ui/tauri_mobile_mdi_smoke.spl`
+  instead of the widget showcase bundle; Android also rebuilds the APK when the
+  Tauri shell/build script/smoke source is newer than the packaged APK.
+
+Focused verification passed:
+
+- `node --check scripts/check/normalize-tauri-mobile-mdi-proof.js`
+- `sh -n scripts/check/check-tauri-ios-mobile-renderer-evidence.shs`
+- `sh -n scripts/check/check-tauri-android-mobile-renderer-evidence.shs`
+- `SIMPLE_LIB=src /Users/ormastes/simple/bin/simple check scripts/check/ios_mdi_probe_server.spl --mode=interpreter`
+- `cargo check --manifest-path tools/tauri-shell/src-tauri/Cargo.toml`
+- `SIMPLE_LIB=src /Users/ormastes/simple/bin/simple test test/03_system/gui/tauri_mobile_renderer_parity_evidence_spec.spl --mode=interpreter --clean`
+
+Live aggregate verification was capped after three runs to avoid a runaway
+loop. The latest evidence directory is
+`build/goal-tauri-mobile-after-proof-flag/`. The proof flag succeeded in
+switching iOS to the MDI smoke entry; the iOS dev log shows
+`simple-mobile-mdi-smoke.spl` and four `openWindow` messages. The aggregate
+still fails before row normalization because MDI smoke mode does not emit the
+standard renderer marker:
+
+- `tauri_mobile_renderer_parity_status=fail`
+- `tauri_mobile_renderer_parity_reason=Tauri iOS render log not observed within 120s`
+- `tauri_mobile_renderer_parity_ios_status=fail`
+- `tauri_mobile_renderer_parity_android_status=fail`
+
+Next work should make mobile MDI shell initialization emit the same
+`[tauri-shell] render, html_len=` marker that the renderer validators require,
+then rerun the aggregate once and inspect the normalized MDI rows.
