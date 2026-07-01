@@ -4,6 +4,8 @@ const fs = require("fs");
 const electronPath = process.argv[2] || "";
 const vulkanPath = process.argv[3] || "";
 const electronProofPath = process.argv[4] || "";
+const expectedWidthProvided = process.argv.length > 5 && process.argv[5] !== "";
+const expectedHeightProvided = process.argv.length > 6 && process.argv[6] !== "";
 const expectedWidth = Number(process.argv[5] || 0);
 const expectedHeight = Number(process.argv[6] || 0);
 const expectedArgbProvided = process.argv.length > 7 && process.argv[7] !== "";
@@ -32,6 +34,14 @@ function readJson(path, label) {
 
 function pixelArray(value) {
   return Array.isArray(value) ? value : [];
+}
+
+function validPositiveInteger(value) {
+  return Number.isInteger(value) && value > 0;
+}
+
+function validUint32(value) {
+  return Number.isInteger(value) && value >= 0 && value <= 0xFFFFFFFF;
 }
 
 function gpuAux(info) {
@@ -81,6 +91,16 @@ function electronVulkanProof(electron, proof) {
     glRenderer,
     hardware,
   };
+}
+
+if ((expectedWidthProvided && !validPositiveInteger(expectedWidth)) ||
+    (expectedHeightProvided && !validPositiveInteger(expectedHeight)) ||
+    (expectedArgbProvided && !validUint32(expectedArgb))) {
+  finish("fail", "expected-frame-args-invalid", 2, {
+    electron_vulkan_web_parity_windows_compare_expected_width: process.argv[5] || "",
+    electron_vulkan_web_parity_windows_compare_expected_height: process.argv[6] || "",
+    electron_vulkan_web_parity_windows_compare_expected_argb: process.argv[7] || "",
+  });
 }
 
 const electron = readJson(electronPath, "electron");

@@ -27,7 +27,7 @@ electron_vulkan_web_parity_windows_contract_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 17 | 17 | 0 | 0 |
+| 18 | 18 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -95,6 +95,8 @@ OS=Windows_NT EVWP_WORK=build/windows-electron-vulkan-web-parity \
   declared frame shape.
 - The compare helper rejects frames whose pixels do not match the requested
   solid background ARGB value, even when both renderers agree with each other.
+- The compare helper rejects malformed expected width, height, or ARGB
+  arguments before they can weaken comparison checks.
 - Windows execution records Electron GPU proof and rejects Electron/Chromium
   frames that do not prove Vulkan-backed GPU compositing.
 - Electron capture and Simple Vulkan render subprocess failures emit stable
@@ -191,6 +193,8 @@ The wrapper separates absence from failure:
   pixel arrays do not match their declared width and height.
 - `reason=frame-color-not-requested` protects against a same-color pair of
   frames being accepted when both used the wrong requested page background.
+- `reason=expected-frame-args-invalid` protects against malformed expected
+  dimensions or colors disabling the requested-frame evidence checks.
 - `reason=pixel-buffer-length-mismatch` protects against truncated or padded
   capture artifacts.
 
@@ -227,7 +231,7 @@ The spec contains:
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 51 lines folded for reproduction.
+Runnable source: 54 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -275,6 +279,9 @@ expect(helper).to_contain("frame-size-not-requested")
 expect(helper).to_contain("pixel-buffer-shape-mismatch")
 expect(helper).to_contain("frame-color-not-requested")
 expect(helper).to_contain("expectedArgbProvided")
+expect(helper).to_contain("expected-frame-args-invalid")
+expect(helper).to_contain("validPositiveInteger")
+expect(helper).to_contain("validUint32")
 expect(helper).to_contain("pixel-buffer-length-mismatch")
 expect(helper).to_contain("pixel-exact-vulkan")
 val producer = file_read("src/app/test/electron_vulkan_web_parity.spl")
@@ -440,6 +447,27 @@ expect(code).to_equal(2)
 expect(stdout).to_contain("electron_vulkan_web_parity_windows_status=fail")
 expect(stdout).to_contain("electron_vulkan_web_parity_windows_reason=frame-color-not-requested")
 expect(stdout).to_contain("electron_vulkan_web_parity_windows_compare_expected_argb=0")
+```
+
+</details>
+
+#### rejects malformed expected frame arguments
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-electron-vulkan-web-parity-windows-compare-invalid-expected"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && node scripts/check/electron-vulkan-web-parity-status.js " + root + "/missing-electron.json " + root + "/missing-vulkan.json '' bad 2 7"
+val (stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+
+expect(code).to_equal(2)
+expect(stdout).to_contain("electron_vulkan_web_parity_windows_status=fail")
+expect(stdout).to_contain("electron_vulkan_web_parity_windows_reason=expected-frame-args-invalid")
+expect(stdout).to_contain("electron_vulkan_web_parity_windows_compare_expected_width=bad")
 ```
 
 </details>
@@ -653,8 +681,8 @@ expect(stdout).to_contain("electron_vulkan_web_parity_windows_compare_color_elec
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 17 |
-| Active scenarios | 17 |
+| Total scenarios | 18 |
+| Active scenarios | 18 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
