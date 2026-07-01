@@ -55,6 +55,7 @@
 - GUI/web/2D 8K retained perf native artifacts: alias_src unavailable; native_bin unavailable; native_bin_executable unavailable; native_bin_format fail (unknown); native_build_log unavailable
 - Production surface host:
 - Production Tauri surface capture: missing (missing-tauri-capture-evidence)
+- Tauri iOS WKWebView Metal render-log: missing (missing-tauri-mobile-renderer-parity-evidence; backend tauri2-wkwebview)
 - Production Chrome surface capture: missing (missing-chrome-capture-evidence)
 - Production macOS Metal render-log: missing (missing-metal-render-log-evidence)
 - blocked completion gates: 16
@@ -243,13 +244,13 @@
 - web_wm_modern_shell_evidence_env=build/test-artifacts/02_integration/app/ui/web_wm_modern_shell_evidence/evidence.env
 - web_wm_modern_shell_evidence_status=environment-unavailable
 - web_wm_modern_shell_evidence_reason=simple-runtime-unavailable
-- web_wm_modern_shell_evidence_html_path=build/gui-renderdoc-feature-coverage-static-cache/web-wm-modern-shell-evidence-397e33ba34d4523a/simple_wm_modern_preview.html
-- web_wm_modern_shell_evidence_argb_path=build/gui-renderdoc-feature-coverage-static-cache/web-wm-modern-shell-evidence-397e33ba34d4523a/simple_wm_modern_preview_argb.json
-- web_wm_modern_shell_evidence_png_path=build/gui-renderdoc-feature-coverage-static-cache/web-wm-modern-shell-evidence-397e33ba34d4523a/simple_wm_modern_preview.png
-- web_wm_modern_shell_evidence_audit_path=build/gui-renderdoc-feature-coverage-static-cache/web-wm-modern-shell-evidence-397e33ba34d4523a/simple_wm_modern_preview_audit.json
-- web_wm_modern_shell_evidence_interaction_path=build/gui-renderdoc-feature-coverage-static-cache/web-wm-modern-shell-evidence-397e33ba34d4523a/simple_wm_modern_preview_interaction.json
-- web_wm_modern_shell_evidence_interaction_png_path=build/gui-renderdoc-feature-coverage-static-cache/web-wm-modern-shell-evidence-397e33ba34d4523a/simple_wm_modern_preview_after_interaction.png
-- web_wm_modern_shell_evidence_interaction_log_path=build/gui-renderdoc-feature-coverage-static-cache/web-wm-modern-shell-evidence-397e33ba34d4523a/electron_interaction.log
+- web_wm_modern_shell_evidence_html_path=build/gui-renderdoc-feature-coverage-static-cache/web-wm-modern-shell-evidence-49246783b0cf52ec/simple_wm_modern_preview.html
+- web_wm_modern_shell_evidence_argb_path=build/gui-renderdoc-feature-coverage-static-cache/web-wm-modern-shell-evidence-49246783b0cf52ec/simple_wm_modern_preview_argb.json
+- web_wm_modern_shell_evidence_png_path=build/gui-renderdoc-feature-coverage-static-cache/web-wm-modern-shell-evidence-49246783b0cf52ec/simple_wm_modern_preview.png
+- web_wm_modern_shell_evidence_audit_path=build/gui-renderdoc-feature-coverage-static-cache/web-wm-modern-shell-evidence-49246783b0cf52ec/simple_wm_modern_preview_audit.json
+- web_wm_modern_shell_evidence_interaction_path=build/gui-renderdoc-feature-coverage-static-cache/web-wm-modern-shell-evidence-49246783b0cf52ec/simple_wm_modern_preview_interaction.json
+- web_wm_modern_shell_evidence_interaction_png_path=build/gui-renderdoc-feature-coverage-static-cache/web-wm-modern-shell-evidence-49246783b0cf52ec/simple_wm_modern_preview_after_interaction.png
+- web_wm_modern_shell_evidence_interaction_log_path=build/gui-renderdoc-feature-coverage-static-cache/web-wm-modern-shell-evidence-49246783b0cf52ec/electron_interaction.log
 - web_wm_modern_shell_evidence_html_file_status=missing
 - web_wm_modern_shell_evidence_argb_file_status=missing
 - web_wm_modern_shell_evidence_png_file_status=missing
@@ -304,12 +305,12 @@
 - html_css_readiness_answer=implemented-html-css-ready-full-css-incomplete
 - native_render_log_platform_matrix_status=incomplete
 - native_render_log_platform_matrix_reason=missing-or-failing-native-render-log-platforms
-- native_render_log_platform_matrix_source_revision=@  2fbf0ce00e16 │ ~
+- native_render_log_platform_matrix_source_revision=@  4930d82b3d9a │ ~
 - native_render_log_platform_matrix_runtime_build=
 - native_render_log_platform_matrix_browser_webview_electron_revision=
 - native_render_log_platform_matrix_graphics_sdk_driver=
 - native_render_log_platform_matrix_runbook_version=
-- gui_web_2d_evidence_source_revision=@  2fbf0ce00e16 │ ~
+- gui_web_2d_evidence_source_revision=@  4930d82b3d9a │ ~
 - gui_web_2d_evidence_runtime_build=
 - gui_web_2d_evidence_browser_webview_electron_revision=
 - gui_web_2d_evidence_graphics_sdk_driver=
@@ -689,6 +690,30 @@
 - production_gui_web_renderer_parity_existing_layout_pass_count=
 - production_gui_web_renderer_parity_existing_layout_tracked_count=
 - production_gui_web_renderer_parity_existing_layout_fail_count=
+- tauri_mobile_renderer_parity_existing_env=
+- tauri_mobile_renderer_parity_existing_status=missing
+- tauri_mobile_renderer_parity_existing_reason=missing-tauri-mobile-renderer-parity-evidence
+- tauri_mobile_renderer_parity_ios_status=missing
+- tauri_mobile_renderer_parity_ios_reason=missing-tauri-mobile-renderer-parity-evidence
+- tauri_mobile_renderer_parity_ios_tauri_backend=tauri2-wkwebview
+- tauri_mobile_renderer_parity_ios_expected_gpu_backend=metal
+- tauri_mobile_renderer_parity_ios_render_log_status=missing
+- tauri_mobile_renderer_parity_ios_render_log_validation_status=missing
+- tauri_mobile_renderer_parity_ios_render_log_validation_reason=missing-tauri-mobile-renderer-parity-evidence
+- tauri_mobile_renderer_parity_ios_render_log_marker_status=missing
+- tauri_mobile_renderer_parity_ios_render_log_metal_marker_status=missing
+- tauri_mobile_renderer_parity_ios_render_log_tauri_context_status=missing
+- tauri_mobile_renderer_parity_ios_render_log_metal_context_status=missing
+- tauri_mobile_renderer_parity_ios_render_log_fallback_marker_status=missing
+- tauri_mobile_renderer_parity_ios_render_log_failure_marker_status=missing
+- tauri_mobile_renderer_parity_ios_render_log_html_len=
+- tauri_mobile_renderer_parity_ios_render_log_source_coherence_status=missing
+- tauri_mobile_renderer_parity_ios_render_log_coherent_source_file_status=missing
+- tauri_mobile_renderer_parity_ios_render_log_coherent_source_file_reason=missing-tauri-mobile-renderer-parity-evidence
+- tauri_mobile_renderer_parity_ios_render_log_coherent_source_artifact_status=missing
+- tauri_mobile_renderer_parity_ios_metal_log_status=missing
+- tauri_mobile_renderer_parity_ios_screenshot_file_status=missing
+- tauri_mobile_renderer_parity_ios_screenshot_artifact_status=missing
 - production_gui_web_renderer_parity_gate_command=PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=build/production_gui_web_renderer_parity_evidence/evidence.env sh scripts/check/check-production-gui-web-renderer-parity-gate.shs
 - production_gui_web_renderer_parity_gate_exit_code=1
 - production_gui_web_renderer_parity_gate_status=unavailable

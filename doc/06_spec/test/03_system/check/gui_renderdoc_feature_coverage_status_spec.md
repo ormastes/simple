@@ -390,7 +390,7 @@ checksum, and exact geometry is downgraded to `fail`.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 982 lines folded for reproduction.
+Runnable source: 1006 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -543,6 +543,29 @@ expect(evidence).to_contain("navigation_bar:widget-navigation-bar")
 expect(evidence).to_contain("segmented_control:widget-segmented-control")
 expect(evidence).to_contain("empty_state:widget-empty-state")
 expect(evidence).to_contain("production_gui_web_renderer_parity_command=ELECTRON_BITMAP_TIMEOUT_SECS=20 sh scripts/check/check-production-gui-web-renderer-parity-evidence.shs")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_existing_env=")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_existing_status=")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_existing_reason=")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_status=")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_reason=")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_tauri_backend=")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_expected_gpu_backend=")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_status=")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_validation_status=")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_validation_reason=")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_marker_status=")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_metal_marker_status=")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_tauri_context_status=")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_metal_context_status=")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_fallback_marker_status=")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_failure_marker_status=")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_source_coherence_status=")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_coherent_source_file_status=")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_coherent_source_file_reason=")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_coherent_source_artifact_status=")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_metal_log_status=")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_screenshot_file_status=")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_screenshot_artifact_status=")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_command=PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=build/production_gui_web_renderer_parity_evidence/evidence.env sh scripts/check/check-production-gui-web-renderer-parity-gate.shs")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_status=")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_reason=")
@@ -1369,6 +1392,7 @@ expect(report).to_contain("- Production GUI/web parity source env: build/product
 expect(report).to_contain("- GUI/web/2D 8K retained perf:")
 expect(report).to_contain("- Production surface host:")
 expect(report).to_contain("- Production Tauri surface capture:")
+expect(report).to_contain("- Tauri iOS WKWebView Metal render-log:")
 expect(report).to_contain("- Production Chrome surface capture:")
 expect(report).to_contain("- blocked completion gates:")
 expect(report).to_contain("- blocked gate list:")
