@@ -68,10 +68,13 @@ shortcut for the same app entrypoint.
 - `spipe_codebase_pack`
 - `spipe_codebase_pack_local`
 - `spipe_codebase_pack_remote`
+- `getCodebase`
+- `getRemoteCodebase`
 - `spipe_codebase_ingest`
 - `spipe_codebase_search`
 - `spipe_codebase_get`
 - `spipe_codebase_save`
+- `saveCodebase`
 
 The minimality tools are deterministic Ponytail gates. They flag obvious
 `yagni`, `native`, `stdlib`, `dependency`, and `shrink` cases and list
@@ -89,6 +92,9 @@ RepoMix/codebase-mcp output, index it in the session-local tree store, and
 expose the focused Simple MCP include/ignore profile. Pack tools return status
 and byte count only; use
 `spipe_codebase_search` or `spipe_codebase_get` to inspect the stored tree.
+For codebase-mcp compatibility, `getCodebase`, `getRemoteCodebase`, and
+`saveCodebase` are aliases for the local pack, remote pack, and metadata-only
+save tools.
 Existing XML RepoMix input with `<file path=...>` is matched as
 `repomix_xml`; markdown-style packs use `repomix_markdown`.
 RepoMix file markers render as file nodes, so codebase packs can be searched
