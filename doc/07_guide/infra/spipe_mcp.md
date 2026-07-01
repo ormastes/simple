@@ -98,6 +98,8 @@ summary rows.
 `npm` output extracts simple Node stack rows such as `at path:line:col`.
 `cmake` output extracts file paths from `CMake Error/Warning at path:line`.
 `ninja` output extracts the first quoted path from `ninja: error:` rows.
+`make` output extracts paths from GNU Make bracketed error rows such as
+`[path:line: target]`.
 Path leaves render as `kind=file`; non-path output remains `kind=line` and can
 still be grouped by explicit log level.
 
