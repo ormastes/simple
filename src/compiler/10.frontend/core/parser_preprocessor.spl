@@ -338,11 +338,37 @@ fn _pp_preprocess_conditionals(source: text) -> text:
     var final_lines: [text] = []
     var skip_until_dedent: bool = false
     var skip_indent: i64 = -1
+    var skip_until_close_brace: bool = false
+    var brace_depth: i64 = 0
     var i: i64 = 0
     for _ in out_lines:
         if i >= out_lines.len(): break
         val ol = out_lines[i]
         val ot = ol.trim()
+
+        if skip_until_close_brace:
+            # Multi-line brace-delimited declaration (e.g. a multi-line
+            # `use module.{...}` import) gated by a false @cfg — blank every
+            # continuation line until the braces opened by the declaration
+            # line close back to depth 0.
+            var opens: i64 = 0
+            var closes: i64 = 0
+            var bi: i64 = 0
+            for _ in ol:
+                if bi >= ol.len(): break
+                val bc = ol[bi]
+                if bc == "{":
+                    opens = opens + 1
+                elif bc == "}":
+                    closes = closes + 1
+                bi = bi + 1
+            brace_depth = brace_depth + opens - closes
+            final_lines.push("")
+            i = i + 1
+            if brace_depth <= 0:
+                skip_until_close_brace = false
+                brace_depth = 0
+            continue
 
         if skip_until_dedent:
             if ot == "":
@@ -403,6 +429,29 @@ fn _pp_preprocess_conditionals(source: text) -> text:
                     if next_trimmed.ends_with(":"):
                         skip_until_dedent = true
                         skip_indent = next_indent
+                    elif next_trimmed.ends_with("{") and not next_trimmed.ends_with("}"):
+                        # Multi-line brace-delimited declaration (e.g. a
+                        # multi-line `use module.{ a, b, c }` import spanning
+                        # several lines). @cfg does not otherwise gate `use`
+                        # statements at all — the import-closure walker would
+                        # still see the (now-syntactically-broken) dangling
+                        # continuation lines as unconditional imports. Track
+                        # brace depth and blank through the matching close.
+                        var opens0: i64 = 0
+                        var closes0: i64 = 0
+                        var oi: i64 = 0
+                        for _ in next_line:
+                            if oi >= next_line.len(): break
+                            val oc = next_line[oi]
+                            if oc == "{":
+                                opens0 = opens0 + 1
+                            elif oc == "}":
+                                closes0 = closes0 + 1
+                            oi = oi + 1
+                        val depth0 = opens0 - closes0
+                        if depth0 > 0:
+                            skip_until_close_brace = true
+                            brace_depth = depth0
             i = i + 1
             continue
 

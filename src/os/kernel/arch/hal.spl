@@ -10,12 +10,30 @@
 # Compile-time arch selection: @cfg(x86_64), @cfg(arm64), etc.
 # Only the active arch's function body is compiled into the final binary.
 #
-# NOTE: @cfg does NOT gate `use` statements — the import closure walker
-# pulls all imported modules regardless of @cfg guards. To avoid leaking
-# foreign-arch inline-asm into simple_asm_blocks.c, all non-x86_64 use
-# lines have been removed. Non-x86_64 @cfg function bodies are also removed
-# since their symbols are no longer imported. Other arch owners must add
-# their imports back when building for their target.
+# NOTE: root-caused 2026-07-02 (see doc/03_plan/compiler/backend/
+# arm32_x86_32_native_backend_plan.md risks section). The per-declaration
+# @cfg preprocessor (parser_preprocessor.spl _pp_preprocess_conditionals) only
+# blanked a single following line when a condition was false, so a multi-line
+# `use module.{ a, b, c }` import (opening brace on the @cfg'd line, closing
+# brace on a later line) left its continuation lines as dangling unconditional
+# source. That is now fixed: the preprocessor tracks brace depth through the
+# matching close, so `@cfg(arm64)` above a multi-line `use {...}` block is
+# correctly stripped/kept per-arch. This was independent of, and not caused or
+# fixed by, the 2026-07-02 @cfg-activation fix (frontend.spl bare-name
+# collision) — that commit only affects function-body stripping via the
+# interpreter path.
+#
+# Remaining, separate risk: native-project "full-scan" discovery
+# (compiler_rust/.../native_project/discovery.rs discover_files_full_scan)
+# compiles every .spl file under the given --source dirs regardless of
+# reachability or @cfg, and inline-asm collection
+# (native_project/inline_asm_emit.rs collected_inline_asm_blocks) is a global
+# list with no per-arch filtering — so once per-arch `use` lines are re-added
+# below, a whole-tree native kernel build could still pull in another arch's
+# inline-asm blocks into simple_asm_blocks.c for a single-target compile.
+# Prefer --entry-closure discovery (discover_reachable_files) for native
+# kernel builds, and re-add per-arch imports incrementally, verifying with a
+# QEMU boot per arch, rather than reinstating all of them at once.
 
 use os.kernel.boot.ports.{BootOutputPort}
 use os.kernel.types.memory_types.{PhysAddr, VirtAddr, VmFlags}
