@@ -52,7 +52,7 @@ val R_RISCV_CALL_PLT = rv64_encode_contract().call_plt_reloc
 # Load Immediate Helper
 # ============================================================================
 
-# Encode LI rd, imm - loads immediates that fit the current LUI+ADDI path.
+# Encode LI rd, imm - loads signed 32-bit values and unsigned 32-bit constants.
 # For small values (fits in 12-bit signed): ADDI rd, x0, imm
 # For 32-bit values: LUI + ADDI
 fn encode_li_riscv64(code: [i64], rd: i64, imm: i64) -> [i64]:
@@ -68,7 +68,18 @@ fn encode_li_riscv64(code: [i64], rd: i64, imm: i64) -> [i64]:
             result = riscv_emit_u32_le(result, enc)
             return result
 
-    if imm < -2147483648 or imm > 2147483647:
+    if imm > 2147483647 and imm <= 4294967295:
+        val high = imm / 2048
+        val low = imm % 2048
+        result = encode_li_riscv64(result, rd, high)
+        val slli_enc = riscv_encode_i_type(11, rd, 1, rd, 0x13)
+        result = riscv_emit_u32_le(result, slli_enc)
+        if low != 0:
+            val addi_enc = riscv_encode_i_type(low, rd, 0, rd, 0x13)
+            result = riscv_emit_u32_le(result, addi_enc)
+        return result
+
+    if imm < -2147483648 or imm > 4294967295:
         return riscv_emit_u32_le(result, 0x00000013)
 
     # 32-bit range: use LUI + ADDI
