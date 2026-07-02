@@ -32,6 +32,7 @@ static PFN_vkGetPhysicalDeviceQueueFamilyProperties2KHR real_vkGetPhysicalDevice
 static PFN_vkEnumerateDeviceExtensionProperties real_vkEnumerateDeviceExtensionProperties;
 static PFN_vkEnumerateInstanceLayerProperties real_vkEnumerateInstanceLayerProperties;
 static PFN_vkEnumerateInstanceExtensionProperties real_vkEnumerateInstanceExtensionProperties;
+static PFN_vkEnumerateInstanceVersion real_vkEnumerateInstanceVersion;
 static PFN_vkGetDeviceProcAddr real_vkGetDeviceProcAddr;
 static PFN_vkGetInstanceProcAddr real_vkGetInstanceProcAddr;
 typedef int (*egl_swap_buffers_fn_t)(void *, void *);
@@ -109,6 +110,8 @@ static uint32_t vk_enum_device_extension_last_count;
 static uint64_t vk_enum_instance_layer_count;
 static uint64_t vk_enum_instance_extension_count;
 static uint64_t proc_trace_count;
+static uint64_t gipa_trace_count;
+static uint64_t gdpa_trace_count;
 
 static int env_enabled(const char *name);
 static uint64_t env_u64(const char *name, uint64_t fallback);
@@ -140,6 +143,7 @@ VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceQueueFamilyProperties2KHR(VkPhysic
 VKAPI_ATTR VkResult VKAPI_CALL vkEnumerateDeviceExtensionProperties(VkPhysicalDevice physicalDevice, const char *pLayerName, uint32_t *pPropertyCount, VkExtensionProperties *pProperties);
 VKAPI_ATTR VkResult VKAPI_CALL vkEnumerateInstanceLayerProperties(uint32_t *pPropertyCount, VkLayerProperties *pProperties);
 VKAPI_ATTR VkResult VKAPI_CALL vkEnumerateInstanceExtensionProperties(const char *pLayerName, uint32_t *pPropertyCount, VkExtensionProperties *pProperties);
+VKAPI_ATTR VkResult VKAPI_CALL vkEnumerateInstanceVersion(uint32_t *pApiVersion);
 
 struct library_lookup {
     const char *needle;
@@ -166,10 +170,159 @@ static void trace_proc_name(const char *source, const char *name) {
     log_line(buf);
 }
 
+static void trace_vulkan_proc_name(const char *source, const char *name) {
+    if (!env_enabled("RDOC_AUTOCAPTURE_TRACE_PROC_NAMES")) return;
+    uint64_t max = env_u64("RDOC_AUTOCAPTURE_TRACE_VK_PROC_NAMES_MAX", 160);
+    uint64_t *count = strcmp(source, "gdpa") == 0 ? &gdpa_trace_count : &gipa_trace_count;
+    if (*count >= max) return;
+    (*count)++;
+    char buf[256];
+    snprintf(buf, sizeof(buf), "rdoc_autocapture_vkproc_%s=%s", source, name ? name : "(null)");
+    log_line(buf);
+}
+
+static void trace_vulkan_proc_result(const char *source, const char *name, PFN_vkVoidFunction result) {
+    if (!env_enabled("RDOC_AUTOCAPTURE_TRACE_PROC_NAMES")) return;
+    char buf[320];
+    snprintf(buf, sizeof(buf),
+        "rdoc_autocapture_vkproc_%s_result=%s found:%u",
+        source,
+        name ? name : "(null)",
+        result ? 1U : 0U);
+    log_line(buf);
+}
+
 static void sanitize_log_value(char *text) {
     if (!text) return;
     for (char *p = text; *p; p++) {
         if (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') *p = '_';
+    }
+}
+
+static void log_physical_device_properties2(const VkPhysicalDeviceProperties2 *props) {
+    if (!props) return;
+    char name[VK_MAX_PHYSICAL_DEVICE_NAME_SIZE];
+    snprintf(name, sizeof(name), "%s", props->properties.deviceName);
+    sanitize_log_value(name);
+    char buf[768];
+    snprintf(buf, sizeof(buf),
+        "rdoc_autocapture_physical_device_properties2=index:%llu type:%u vendor:%u device:%u api:%u driver:%u name:%s",
+        (unsigned long long)vk_get_physical_device_properties2_count,
+        (unsigned int)props->properties.deviceType,
+        (unsigned int)props->properties.vendorID,
+        (unsigned int)props->properties.deviceID,
+        (unsigned int)props->properties.apiVersion,
+        (unsigned int)props->properties.driverVersion,
+        name);
+    log_line(buf);
+
+    const VkBaseOutStructure *node = (const VkBaseOutStructure *)props->pNext;
+    unsigned int depth = 0;
+    while (node && depth < 16) {
+        snprintf(buf, sizeof(buf),
+            "rdoc_autocapture_physical_device_properties2_pnext=index:%llu depth:%u stype:%u",
+            (unsigned long long)vk_get_physical_device_properties2_count,
+            depth,
+            (unsigned int)node->sType);
+        log_line(buf);
+        if (node->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES) {
+            const VkPhysicalDeviceDriverProperties *driver = (const VkPhysicalDeviceDriverProperties *)node;
+            char driver_name[VK_MAX_DRIVER_NAME_SIZE];
+            char driver_info[VK_MAX_DRIVER_INFO_SIZE];
+            snprintf(driver_name, sizeof(driver_name), "%s", driver->driverName);
+            snprintf(driver_info, sizeof(driver_info), "%s", driver->driverInfo);
+            sanitize_log_value(driver_name);
+            sanitize_log_value(driver_info);
+            snprintf(buf, sizeof(buf),
+                "rdoc_autocapture_physical_device_driver_properties=index:%llu driver_id:%u name:%s info:%s conformance:%u.%u.%u.%u",
+                (unsigned long long)vk_get_physical_device_properties2_count,
+                (unsigned int)driver->driverID,
+                driver_name,
+                driver_info,
+                (unsigned int)driver->conformanceVersion.major,
+                (unsigned int)driver->conformanceVersion.minor,
+                (unsigned int)driver->conformanceVersion.subminor,
+                (unsigned int)driver->conformanceVersion.patch);
+            log_line(buf);
+        } else if (node->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES) {
+            const VkPhysicalDeviceVulkan12Properties *v12 = (const VkPhysicalDeviceVulkan12Properties *)node;
+            char driver_name[VK_MAX_DRIVER_NAME_SIZE];
+            char driver_info[VK_MAX_DRIVER_INFO_SIZE];
+            snprintf(driver_name, sizeof(driver_name), "%s", v12->driverName);
+            snprintf(driver_info, sizeof(driver_info), "%s", v12->driverInfo);
+            sanitize_log_value(driver_name);
+            sanitize_log_value(driver_info);
+            snprintf(buf, sizeof(buf),
+                "rdoc_autocapture_physical_device_vulkan12_properties=index:%llu driver_id:%u name:%s info:%s conformance:%u.%u.%u.%u",
+                (unsigned long long)vk_get_physical_device_properties2_count,
+                (unsigned int)v12->driverID,
+                driver_name,
+                driver_info,
+                (unsigned int)v12->conformanceVersion.major,
+                (unsigned int)v12->conformanceVersion.minor,
+                (unsigned int)v12->conformanceVersion.subminor,
+                (unsigned int)v12->conformanceVersion.patch);
+            log_line(buf);
+        }
+        node = node->pNext;
+        depth++;
+    }
+}
+
+static void log_extension_properties(
+    const char *kind,
+    uint64_t call_index,
+    const char *layer_name,
+    VkResult result,
+    const uint32_t *count,
+    const VkExtensionProperties *props) {
+    char layer[128];
+    snprintf(layer, sizeof(layer), "%s", layer_name ? layer_name : "(null)");
+    sanitize_log_value(layer);
+    char buf[512];
+    snprintf(buf, sizeof(buf),
+        "rdoc_autocapture_%s_extensions=index:%llu result:%d count:%u layer:%s populated:%u",
+        kind,
+        (unsigned long long)call_index,
+        (int)result,
+        count ? (unsigned int)*count : 0,
+        layer,
+        props ? 1U : 0U);
+    log_line(buf);
+    if (!props || !count) return;
+    uint32_t max = (uint32_t)env_u64("RDOC_AUTOCAPTURE_TRACE_EXTENSION_NAMES_MAX", 64);
+    uint32_t limit = *count < max ? *count : max;
+    for (uint32_t i = 0; i < limit; i++) {
+        char name[VK_MAX_EXTENSION_NAME_SIZE];
+        snprintf(name, sizeof(name), "%s", props[i].extensionName);
+        sanitize_log_value(name);
+        snprintf(buf, sizeof(buf),
+            "rdoc_autocapture_%s_extension=index:%llu ordinal:%u spec:%u name:%s",
+            kind,
+            (unsigned long long)call_index,
+            (unsigned int)i,
+            (unsigned int)props[i].specVersion,
+            name);
+        log_line(buf);
+    }
+}
+
+static void log_string_list(const char *kind, const char *const *names, uint32_t count) {
+    char buf[512];
+    snprintf(buf, sizeof(buf), "rdoc_autocapture_%s_count=%u", kind, (unsigned int)count);
+    log_line(buf);
+    uint32_t max = (uint32_t)env_u64("RDOC_AUTOCAPTURE_TRACE_CREATE_INFO_NAMES_MAX", 64);
+    uint32_t limit = count < max ? count : max;
+    for (uint32_t i = 0; i < limit; i++) {
+        char name[VK_MAX_EXTENSION_NAME_SIZE];
+        snprintf(name, sizeof(name), "%s", names && names[i] ? names[i] : "(null)");
+        sanitize_log_value(name);
+        snprintf(buf, sizeof(buf),
+            "rdoc_autocapture_%s=ordinal:%u name:%s",
+            kind,
+            (unsigned int)i,
+            name);
+        log_line(buf);
     }
 }
 
@@ -894,7 +1047,24 @@ VKAPI_ATTR VkResult VKAPI_CALL vkEnumerateInstanceExtensionProperties(
     }
     vk_enum_instance_extension_count++;
     if (!real_vkEnumerateInstanceExtensionProperties) return VK_ERROR_INITIALIZATION_FAILED;
-    return real_vkEnumerateInstanceExtensionProperties(pLayerName, pPropertyCount, pProperties);
+    VkResult result = real_vkEnumerateInstanceExtensionProperties(pLayerName, pPropertyCount, pProperties);
+    log_extension_properties("instance", vk_enum_instance_extension_count, pLayerName, result, pPropertyCount, pProperties);
+    return result;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL vkEnumerateInstanceVersion(uint32_t *pApiVersion) {
+    if (!real_vkEnumerateInstanceVersion) {
+        real_vkEnumerateInstanceVersion = (PFN_vkEnumerateInstanceVersion)real_next_symbol("vkEnumerateInstanceVersion");
+    }
+    if (!real_vkEnumerateInstanceVersion) return VK_ERROR_INITIALIZATION_FAILED;
+    VkResult result = real_vkEnumerateInstanceVersion(pApiVersion);
+    char buf[256];
+    snprintf(buf, sizeof(buf),
+        "rdoc_autocapture_instance_version=result:%d version:%u",
+        (int)result,
+        pApiVersion ? (unsigned int)*pApiVersion : 0U);
+    log_line(buf);
+    return result;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateInstance(
@@ -905,8 +1075,16 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateInstance(
         real_vkCreateInstance = (PFN_vkCreateInstance)real_next_symbol("vkCreateInstance");
     }
     vk_create_instance_count++;
+    if (pCreateInfo) {
+        log_string_list("create_instance_extension", pCreateInfo->ppEnabledExtensionNames, pCreateInfo->enabledExtensionCount);
+        log_string_list("create_instance_layer", pCreateInfo->ppEnabledLayerNames, pCreateInfo->enabledLayerCount);
+    }
     if (!real_vkCreateInstance) return VK_ERROR_INITIALIZATION_FAILED;
-    return real_vkCreateInstance(pCreateInfo, pAllocator, pInstance);
+    VkResult result = real_vkCreateInstance(pCreateInfo, pAllocator, pInstance);
+    char buf[256];
+    snprintf(buf, sizeof(buf), "rdoc_autocapture_create_instance_result=%d instance:%u", (int)result, pInstance && *pInstance ? 1U : 0U);
+    log_line(buf);
+    return result;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateDevice(
@@ -973,7 +1151,10 @@ VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceProperties2(
         real_vkGetPhysicalDeviceProperties2 = (PFN_vkGetPhysicalDeviceProperties2)real_next_symbol("vkGetPhysicalDeviceProperties2");
     }
     vk_get_physical_device_properties2_count++;
-    if (real_vkGetPhysicalDeviceProperties2) real_vkGetPhysicalDeviceProperties2(physicalDevice, pProperties);
+    if (real_vkGetPhysicalDeviceProperties2) {
+        real_vkGetPhysicalDeviceProperties2(physicalDevice, pProperties);
+        log_physical_device_properties2(pProperties);
+    }
 }
 
 VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceProperties2KHR(
@@ -983,7 +1164,10 @@ VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceProperties2KHR(
         real_vkGetPhysicalDeviceProperties2KHR = (PFN_vkGetPhysicalDeviceProperties2KHR)real_next_symbol("vkGetPhysicalDeviceProperties2KHR");
     }
     vk_get_physical_device_properties2_count++;
-    if (real_vkGetPhysicalDeviceProperties2KHR) real_vkGetPhysicalDeviceProperties2KHR(physicalDevice, pProperties);
+    if (real_vkGetPhysicalDeviceProperties2KHR) {
+        real_vkGetPhysicalDeviceProperties2KHR(physicalDevice, pProperties);
+        log_physical_device_properties2(pProperties);
+    }
 }
 
 VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceFeatures2(
@@ -1062,6 +1246,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkEnumerateDeviceExtensionProperties(
     vk_enum_device_extension_return_count++;
     vk_enum_device_extension_last_result = (int)result;
     if (pPropertyCount) vk_enum_device_extension_last_count = *pPropertyCount;
+    log_extension_properties("device", vk_enum_device_extension_count, pLayerName, result, pPropertyCount, pProperties);
     return result;
 }
 
@@ -1069,6 +1254,7 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(
     VkDevice device,
     const char *pName) {
     trace_proc_name("gdpa", pName);
+    trace_vulkan_proc_name("gdpa", pName);
     if (!real_vkGetDeviceProcAddr) {
         real_vkGetDeviceProcAddr = (PFN_vkGetDeviceProcAddr)real_next_symbol("vkGetDeviceProcAddr");
     }
@@ -1108,13 +1294,16 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(
         return (PFN_vkVoidFunction)vkCreateDevice;
     }
     if (!real_vkGetDeviceProcAddr) return NULL;
-    return real_vkGetDeviceProcAddr(device, pName);
+    PFN_vkVoidFunction result = real_vkGetDeviceProcAddr(device, pName);
+    trace_vulkan_proc_result("gdpa", pName, result);
+    return result;
 }
 
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(
     VkInstance instance,
     const char *pName) {
     trace_proc_name("gipa", pName);
+    trace_vulkan_proc_name("gipa", pName);
     if (!real_vkGetInstanceProcAddr) {
         real_vkGetInstanceProcAddr = (PFN_vkGetInstanceProcAddr)real_next_symbol("vkGetInstanceProcAddr");
     }
@@ -1133,6 +1322,10 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(
     if (pName && strcmp(pName, "vkCreateInstance") == 0) {
         log_line("rdoc_autocapture_wrap=vkCreateInstance");
         return (PFN_vkVoidFunction)vkCreateInstance;
+    }
+    if (pName && strcmp(pName, "vkEnumerateInstanceVersion") == 0) {
+        log_line("rdoc_autocapture_wrap=vkEnumerateInstanceVersion");
+        return (PFN_vkVoidFunction)vkEnumerateInstanceVersion;
     }
     if (pName && strcmp(pName, "vkCreateDevice") == 0) {
         log_line("rdoc_autocapture_wrap=vkCreateDevice-instance");
@@ -1195,7 +1388,9 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(
         return (PFN_vkVoidFunction)vkQueuePresentKHR;
     }
     if (!real_vkGetInstanceProcAddr) return NULL;
-    return real_vkGetInstanceProcAddr(instance, pName);
+    PFN_vkVoidFunction result = real_vkGetInstanceProcAddr(instance, pName);
+    trace_vulkan_proc_result("gipa", pName, result);
+    return result;
 }
 
 void *dlsym(void *handle, const char *symbol) {
@@ -1348,6 +1543,13 @@ void *dlsym(void *handle, const char *symbol) {
         }
         log_line("rdoc_autocapture_dlsym=vkCreateInstance");
         return (void *)vkCreateInstance;
+    }
+    if (symbol && strcmp(symbol, "vkEnumerateInstanceVersion") == 0) {
+        if (!real_vkEnumerateInstanceVersion) {
+            real_vkEnumerateInstanceVersion = (PFN_vkEnumerateInstanceVersion)real_dlsym_lookup(handle, symbol);
+        }
+        log_line("rdoc_autocapture_dlsym=vkEnumerateInstanceVersion");
+        return (void *)vkEnumerateInstanceVersion;
     }
     if (symbol && strcmp(symbol, "vkCreateDevice") == 0) {
         if (!real_vkCreateDevice) {

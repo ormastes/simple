@@ -49,9 +49,19 @@ impl InterpreterBackendImpl:
         #      a garbage text (len == -1), so a name compare never matches.
         #   2. `Dict<SymbolId, HirFunction>.has()/[]` (a struct-keyed Dict) fails
         #      to find an entry that is present.
-        # The symbol table (`Symbol.name`, `Symbol.id.id`) reads correctly, so we
-        # resolve main's numeric SymbolId there, then linear-scan the function
-        # values comparing `fn_.symbol.id` (never touching the broken name/has).
+        # ROOT CAUSE (iteration 9): the seed erases `Dict<K,V>` to `ANY`
+        # (`type_resolver.rs`: `"Dict" => TypeId::ANY`), so `module.functions`
+        # has type ANY and `module.functions.values()` yields elements typed ANY
+        # (`mod.rs`: `"keys"|"values" => TypeId::ANY`). Field access on an
+        # ANY-typed receiver whose field name is defined in more than one struct
+        # (`name`/`symbol`/`body`/`span` are ubiquitous) falls to the seed's
+        # "most-fields-wins" global field resolver (`access.rs`), which picks the
+        # WRONG struct's field index -> garbage reads (`.name.len()==-1`,
+        # `.symbol==null`) and stubs out this function. The runtime pointer is
+        # correct; only the static field-index resolution is wrong. Binding each
+        # element to a typed local `val f: HirFunction = ...` restores the real
+        # struct type so field access resolves the correct index (proven with a
+        # minimal field-name-collision repro, iteration 9).
         var has_main = false
         var main_id: i64 = -1
         for sym_id in module.symbols.symbols.keys():
@@ -62,21 +72,18 @@ impl InterpreterBackendImpl:
                 main_id = sym.id.id
 
         var main_fn_opt: HirFunction? = None
-        var _fn_total = 0
         for fn_ in module.functions.values():
-            val fsym = fn_.symbol
-            ctx.env.define_global(fsym, Value.Function(FunctionValue(symbol: fsym, name: fn_.name)))
-            _fn_total = _fn_total + 1
-            if has_main:
-                main_fn_opt = Some(fn_)
+            val f: HirFunction = fn_
+            val fsym = f.symbol
+            ctx.env.define_global(fsym, Value.Function(FunctionValue(symbol: fsym, name: f.name)))
+            if has_main and f.symbol.id == main_id:
+                main_fn_opt = Some(f)
 
-        eprint("[FX] has_main=" + (if has_main: "T" else: "F") + " total=" + _fn_total.to_string())
         if has_main:
             match main_fn_opt:
                 case Some(main_fn):
-                    eprint("[FX] pre-call body_stmts=" + main_fn.body.stmts.len().to_string())
-                    val result = self.call_hir_function(main_fn, [], ctx)?
-                    eprint("[FX] post-call")
+                    val mf: HirFunction = main_fn
+                    val result = self.call_hir_function(mf, [], ctx)?
                     Ok(BackendResult.Value(result))
                 case None:
                     Ok(BackendResult.Unit)

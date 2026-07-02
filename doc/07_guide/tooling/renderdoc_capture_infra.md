@@ -1695,8 +1695,15 @@ to call
 RenderDoc's in-application capture API from inside the GPU process. Current
 Linux evidence records `rdoc_autocapture_loaded=1` and confirms Chromium asks
 `dlsym` for `vkGetInstanceProcAddr`, enumerates physical devices, and reads
-device properties. If the summary shows
+device properties, including `vk_get_physical_device_properties2` on current
+Chrome evidence. The shim logs `rdoc_autocapture_physical_device_properties2`
+and the requested `rdoc_autocapture_physical_device_properties2_pnext` chain;
+on the current Linux host Chromium asks for physical-device ID plus driver
+properties, RenderDoc reports the NVIDIA driver identity, and the layer-active
+path still stops before queue-family, device-extension, and logical-device
+queries. If the summary shows
 `vk_get_physical_device_queue_family:0`,
+`vk_get_physical_device_queue_family2:0`,
 `vk_enum_device_extension:0`, and `vk_create_device:0`, Chromium stopped before
 logical device selection in the hooked GPU process. If the same run with
 `RDOC_GPU_LAUNCHER_CLEAR_RENDERDOC_LAYER=1` reaches `vk_create_device`,

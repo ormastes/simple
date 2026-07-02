@@ -200,6 +200,27 @@ rdoc_autocapture_physical_device_properties=index:1 type:2 vendor:4318 device:87
 rdoc_autocapture_physical_device_properties=index:2 type:2 vendor:4318 device:7682 api:4210688 driver:2434761728 name:NVIDIA_TITAN_RTX
 rdoc_autocapture_physical_device_properties=index:3 type:4 vendor:65541 device:0 api:4202496 driver:104865800 name:llvmpipe_(LLVM_20.1.2,_256_bits)
 
+build/renderdoc/chrome-gpu-autocapture-query2-boundary-20260702/html/evidence.env
+rdoc_gpu_autocapture_vk_get_physical_device_properties_count=3
+rdoc_gpu_autocapture_vk_get_physical_device_properties2_count=3
+rdoc_gpu_autocapture_vk_get_physical_device_features2_count=0
+rdoc_gpu_autocapture_vk_get_physical_device_queue_family_count=0
+rdoc_gpu_autocapture_vk_get_physical_device_queue_family2_count=0
+rdoc_gpu_autocapture_vk_enum_device_extension_count=0
+
+build/renderdoc/chrome-gpu-autocapture-properties2-pnext-xvfb-20260702/html/evidence.env
+rdoc_chrome_display_mode=gpu-autocapture
+
+build/renderdoc/chrome-gpu-autocapture-properties2-pnext-xvfb-20260702/html/gpu-launcher.log
+rdoc_autocapture_physical_device_properties2=index:1 type:2 vendor:4318 device:8752 api:4210688 driver:2434761728 name:NVIDIA_RTX_A6000
+rdoc_autocapture_physical_device_properties2_pnext=index:1 depth:0 stype:1000071004
+rdoc_autocapture_physical_device_properties2_pnext=index:1 depth:1 stype:1000196000
+rdoc_autocapture_physical_device_driver_properties=index:1 driver_id:4 name:NVIDIA info:580.126.16 conformance:1.4.1.3
+rdoc_autocapture_physical_device_properties2=index:2 type:2 vendor:4318 device:7682 api:4210688 driver:2434761728 name:NVIDIA_TITAN_RTX
+rdoc_autocapture_physical_device_driver_properties=index:2 driver_id:4 name:NVIDIA info:580.126.16 conformance:1.4.1.3
+rdoc_autocapture_physical_device_properties2=index:3 type:4 vendor:65541 device:0 api:4202496 driver:104865800 name:llvmpipe_(LLVM_20.1.2,_256_bits)
+rdoc_autocapture_physical_device_driver_properties=index:3 driver_id:13 name:llvmpipe info:Mesa_25.2.8-0ubuntu0.24.04.2_(LLVM_20.1.2) conformance:1.3.1.1
+
 build/renderdoc/chrome-gpu-autocapture-clear-layer-20260702/html/evidence.env
 rdoc_gpu_launcher_clear_renderdoc_layer=1
 rdoc_gpu_autocapture_vk_create_device_count=2
@@ -270,9 +291,12 @@ instance discovery. The delay trigger sees a live Vulkan instance pointer and
 can call `TriggerCapture()`, while the full autocapture shim reaches the
 RenderDoc API. With the RenderDoc Vulkan layer active, the GPU process
 enumerates three physical devices and reads their properties, but even a
-30 second diagnostic still sees no queue-family query, device-extension query,
-`vkCreateDevice`, queue submit/present, EGL swap, or successful EGL initialize
-event in the hooked Chromium GPU process. Clearing the RenderDoc layer while
+30 second diagnostic still sees no features2 query, queue-family query,
+queue-family2 query, device-extension query, `vkCreateDevice`, queue
+submit/present, EGL swap, or successful EGL initialize event in the hooked
+Chromium GPU process. A focused follow-up confirmed ANGLE calls
+`vkGetPhysicalDeviceProperties2` three times before that stop. Clearing the
+RenderDoc layer while
 leaving the shim active immediately reaches `vkCreateDevice`, submit, and
 present, proving Chromium and the shim can see the device/frame boundary.
 Clearing only `VK_INSTANCE_LAYERS` still blocks, and clearing only
