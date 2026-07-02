@@ -817,23 +817,23 @@ fn build_rv32_string_const_module() -> MirModule:
     functions[SymbolId.new(0)] = func
     MirModule(name: "rv32_string_const", functions: functions, statics: {}, constants: {}, types: {})
 
-fn build_rv32_zero_const_module() -> MirModule:
+fn build_rv32_int_const_module(name: text, value: i64) -> MirModule:
     val i32_type = MirType(kind: MirTypeKind.I32)
     val locals = [
         MirLocal(id: LocalId(id: 0), name: Some("_return"), type_: i32_type, kind: LocalKind.Return),
-        MirLocal(id: LocalId(id: 1), name: Some("zero"), type_: i32_type, kind: LocalKind.Temp)
+        MirLocal(id: LocalId(id: 1), name: Some("value"), type_: i32_type, kind: LocalKind.Temp)
     ]
     val entry = MirBlock(
         id: BlockId.new(0),
         label: Some("entry"),
         instructions: [
-            MirInst(kind: MirInstKind.Const(LocalId(id: 1), MirConstValue.Zero, i32_type), span: nil)
+            MirInst(kind: MirInstKind.Const(LocalId(id: 1), MirConstValue.Int(value), i32_type), span: nil)
         ],
         terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1)))))
     )
     val func = MirFunction(
         symbol: SymbolId.new(0),
-        name: "rv32_zero_const",
+        name: name,
         signature: MirSignature(params: [], return_type: i32_type, is_variadic: false),
         locals: locals,
         blocks: [entry],
@@ -846,7 +846,13 @@ fn build_rv32_zero_const_module() -> MirModule:
     )
     var functions: Dict<SymbolId, MirFunction> = {}
     functions[SymbolId.new(0)] = func
-    MirModule(name: "rv32_zero_const", functions: functions, statics: {}, constants: {}, types: {})
+    MirModule(name: name, functions: functions, statics: {}, constants: {}, types: {})
+
+fn build_rv32_zero_const_module() -> MirModule:
+    build_rv32_int_const_module("rv32_zero_const", 0)
+
+fn build_rv32_32bit_wrapped_const_module() -> MirModule:
+    build_rv32_int_const_module("rv32_32bit_wrapped_const", 4294967295)
 
 fn entry_block(module: MachModule) -> MachBlock:
     module.functions[0].blocks[1]
@@ -974,6 +980,11 @@ describe "Isel Riscv32":
     it "materializes RV32 zero constants as LI zero":
         val block = entry_block(isel_module_riscv32(build_rv32_zero_const_module()))
         expect(nth_imm(block, RV_OP_LI, 0)).to_equal(0)
+        expect(has_opcode(block, RV_OP_NOP)).to_equal(false)
+
+    it "sign-extends RV32 32-bit integer constants":
+        val block = entry_block(isel_module_riscv32(build_rv32_32bit_wrapped_const_module()))
+        expect(nth_imm(block, RV_OP_LI, 0)).to_equal(-1)
         expect(has_opcode(block, RV_OP_NOP)).to_equal(false)
 
     it "selects RV32 JAL for MIR goto terminators":
