@@ -33,40 +33,18 @@ impl VhdlBackend:
                 false
 
     fn process_local_name(local: LocalId) -> Result<text, CompileError>:
-        val name = match self.local_to_vhdl(local):
-            case Ok(result): result
-            case Err(err): return Err(err)
-        val ty = match self.local_type(local):
-            case Ok(result): result
-            case Err(err): return Err(err)
-        match ty.kind:
-            case _:
-                Ok("v_{name}")
+        # Var/Temp locals are already declared as architecture-level signals
+        # by compile_function's "Declare internal signals" pass (see
+        # emit_local_signal_declaration), so process bodies reference them
+        # by their plain signal name via signal assignment (`<=`), not as
+        # separate "v_"-prefixed process variables. See
+        # doc/08_tracking/bug/vhdl_backend_spec_remaining_failures_2026-07-02.md.
+        self.local_to_vhdl(local)
 
     fn process_operand_to_vhdl(operand: MirOperand) -> Result<text, CompileError>:
         match operand.kind:
             case Copy(local) | Move(local):
-                val ty = match self.local_type(local):
-                    case Ok(result): result
-                    case Err(err): return Err(err)
-                match ty.kind:
-                    case I8 | I16 | I32 | I64 | U8 | U16 | U32 | U64 | Bool | Array(_, _) | Struct(_) | Enum(_):
-                        val name = match self.local_to_vhdl(local):
-                            case Ok(result): result
-                            case Err(err): return Err(err)
-                        if name == "result_out":
-                            Ok(name)
-                        else:
-                            val kind = match self.local_kind(local):
-                                case Ok(result): result
-                                case Err(err): return Err(err)
-                            match kind:
-                                case Arg(_):
-                                    Ok(name)
-                                case _:
-                                    Ok("v_{name}")
-                    case _:
-                        self.local_to_vhdl(local)
+                self.local_to_vhdl(local)
             case Const(value, ty):
                 self.const_value_to_vhdl(value, ty)
 
@@ -84,26 +62,24 @@ impl VhdlBackend:
             case Return:
                 builder.emit_signal_assign("result_out", expr)
             case Var | Temp:
+                # Var/Temp locals are declared as architecture-level signals
+                # (see emit_local_signal_declaration), so assign to them with
+                # `<=`, not as separate process-local `variable`s.
                 val dest_name = match self.process_local_name(dest):
                     case Ok(result): result
                     case Err(err): return Err(err)
-                builder.emit_var_assign(dest_name, expr)
+                builder.emit_signal_assign(dest_name, expr)
             case Arg(_):
                 return Err(self.backend_error("Synthesizable VHDL process cannot assign function argument local {dest.id}"))
         Ok(())
 
     fn compile_function_control_process(builder: VhdlBuilder, func: MirFunction) -> Result<(), CompileError>:
+        # Var/Temp locals already got a `signal ... : ...;` declaration in
+        # the architecture's declarative region from compile_function's
+        # "Declare internal signals" pass, so this process body does not
+        # redeclare them as process-local variables (see
+        # process_local_name/emit_process_dest_assign).
         builder.emit_process_begin(Some("comb"), ["all"])
-        for local in func.locals:
-            match local.kind:
-                case Var | Temp:
-                    val vhdl_type = match self.local_object_type_to_vhdl(local, Some(func.span)):
-                        case Ok(result): result
-                        case Err(err): return Err(err)
-                    val name = self.default_local_name(local)
-                    builder.emit_process_var("v_{name}", vhdl_type, nil)
-                case _:
-                    ()
         builder.emit_process_body_begin()
         match self.compile_control_block(builder, func.entry_block, []):
             case Ok(_): pass
@@ -364,6 +340,36 @@ impl VhdlBackend:
                         next_handled = self.mark_return_chain_handled(target, next_handled)
                 case _:
                     ()
+        next_handled
+
+    fn mark_process_body_chain_handled(id: BlockId, handled: Dict<i64, bool>) -> Dict<i64, bool>:
+        """Mark a VhdlProcess instruction's body block, and every block
+        transitively reachable from it via Goto/If/Switch, as already
+        compiled -- so compile_function's top-level block loop (which walks
+        every entry in func.blocks) does not also try to recompile them
+        through the entity-level (non-process) instruction/terminator
+        codegen. Without this, blocks owned by a wrapped combinational/
+        clocked process were silently visited a second time, incorrectly,
+        by the plain block loop. See
+        doc/08_tracking/bug/vhdl_backend_spec_remaining_failures_2026-07-02.md.
+        """
+        if handled.get(id.id).?:
+            return handled
+        var next_handled = handled.set(id.id, true)
+        if not self.active_blocks.has(id.id):
+            return next_handled
+        match self.active_blocks[id.id].terminator:
+            case Goto(target):
+                next_handled = self.mark_process_body_chain_handled(target, next_handled)
+            case If(_, then_, else_):
+                next_handled = self.mark_process_body_chain_handled(then_, next_handled)
+                next_handled = self.mark_process_body_chain_handled(else_, next_handled)
+            case Switch(_, targets, default):
+                for target in targets:
+                    next_handled = self.mark_process_body_chain_handled(target.target, next_handled)
+                next_handled = self.mark_process_body_chain_handled(default, next_handled)
+            case _:
+                ()
         next_handled
 
     fn compile_block_instructions(builder: VhdlBuilder, block: MirBlock) -> Result<(), CompileError>:
