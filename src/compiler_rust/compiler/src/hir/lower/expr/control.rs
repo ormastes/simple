@@ -324,9 +324,27 @@ impl Lowerer {
             condition
         };
 
+        // Generate payload extraction statements so enum payload bindings are
+        // actually initialized. Expression-position matches previously emitted
+        // no extraction at all — `case Copy(local): local.id` compiled with
+        // `local` left nil (shared helper with statement-position lowering).
+        let binding_stmts = self.build_pattern_binding_stmts(&arm.pattern, subject_idx, subject_ty, &bindings, ctx);
+
         // Lower the arm body with bindings in scope
         let then_branch = self.lower_match_arm_body(&arm.body, ctx)?;
         let then_ty = then_branch.ty;
+        let then_branch = if binding_stmts.is_empty() {
+            then_branch
+        } else {
+            // Prepend the binding initializations, preserving the arm value as
+            // the block result (same shape lower_do_block produces).
+            let mut stmts = binding_stmts;
+            stmts.push(crate::hir::HirStmt::Expr(then_branch));
+            HirExpr {
+                kind: HirExprKind::Block(stmts),
+                ty: then_ty,
+            }
+        };
 
         // Restore context (remove pattern bindings from name scope only)
         // Keep locals in ctx.locals so they get proper indices in the final function.

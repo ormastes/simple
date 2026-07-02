@@ -257,7 +257,7 @@ impl Lowerer {
                     };
 
                     // 3. Generate pattern condition (rt_is_some for Some, etc.)
-                    let condition = self.lower_pattern_condition_stmt(subject_idx, subject_ty, pattern, ctx)?;
+                    let condition = self.if_let_pattern_condition(subject_idx, subject_ty, pattern, ctx)?;
 
                     // 4. Extract + register bindings
                     let bindings = self.extract_pattern_bindings(pattern, subject_ty);
@@ -370,7 +370,7 @@ impl Lowerer {
                             };
 
                             let elif_condition =
-                                self.lower_pattern_condition_stmt(elif_subject_idx, elif_subject_ty, ep, ctx)?;
+                                self.if_let_pattern_condition(elif_subject_idx, elif_subject_ty, ep, ctx)?;
 
                             let elif_bindings = self.extract_pattern_bindings(ep, elif_subject_ty);
                             let elif_mutability = if matches!(ep, Pattern::MutIdentifier(_)) {
@@ -979,77 +979,23 @@ impl Lowerer {
         Ok(result)
     }
 
-    /// Lower match arms to a chain of If-Else statements
-    fn lower_match_arms_stmt(
+    /// Build payload-extraction `Let` statements for enum pattern bindings in a
+    /// match arm. Shared by statement-position (`lower_match_arms_stmt`) and
+    /// expression-position (`lower_match_arms`) match lowering — the latter
+    /// previously emitted NO extraction, leaving payload bindings nil in
+    /// compiled code. Or-patterns (`case Copy(x) | Move(x)`) are normalized to
+    /// their first alternative: every alternative must bind the same names,
+    /// the same invariant `collect_pattern_bindings` relies on.
+    pub(crate) fn build_pattern_binding_stmts(
         &mut self,
+        arm_pattern: &Pattern,
         subject_idx: usize,
         subject_ty: TypeId,
-        arms: &[ast::MatchArm],
+        bindings: &[(String, TypeId)],
         ctx: &mut FunctionContext,
-    ) -> LowerResult<Vec<HirStmt>> {
-        if arms.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let arm = &arms[0];
-        let remaining_arms = &arms[1..];
-
-        // Check if this is a wildcard pattern (always matches)
-        // But: if subject is an enum and the identifier matches a variant name,
-        // treat it as an enum pattern, not a binding.
-        if matches!(&arm.pattern, Pattern::Wildcard) {
-            return self.lower_block(&arm.body, ctx);
-        }
-        if let Pattern::Identifier(name) = &arm.pattern {
-            let is_enum_variant = if let Some(HirType::Enum {
-                variants,
-                name: enum_name,
-                ..
-            }) = self.module.types.get(subject_ty)
-            {
-                variants.iter().any(|(vn, _)| vn == name)
-            } else {
-                false
-            };
-            if !is_enum_variant {
-                // Plain binding pattern - always matches
-                return self.lower_block(&arm.body, ctx);
-            }
-            // Otherwise fall through to treat as enum pattern
-        }
-
-        // Generate the condition for this pattern
-        let condition = self.lower_pattern_condition_stmt(subject_idx, subject_ty, &arm.pattern, ctx)?;
-
-        // Extract pattern bindings and add them to context
-        // This needs to happen after pattern condition but before guard/body
-        let bindings = self.extract_pattern_bindings(&arm.pattern, subject_ty);
-        for (name, ty) in &bindings {
-            ctx.add_local(name.clone(), *ty, Mutability::Immutable);
-        }
-
-        // Handle guard expression if present (bindings are now in scope)
-        let final_condition = if let Some(guard) = &arm.guard {
-            let guard_hir = self.lower_expr(guard, ctx)?;
-            HirExpr {
-                kind: HirExprKind::Binary {
-                    op: BinOp::And,
-                    left: Box::new(condition),
-                    right: Box::new(guard_hir),
-                },
-                ty: TypeId::BOOL,
-            }
-        } else {
-            condition
-        };
-
-        // Generate payload extraction statements for enum bindings.
-        // Or-patterns (`case Copy(x) | Move(x)`) require every alternative to bind
-        // the same names, so extraction is generated from the FIRST alternative
-        // (mirroring collect_pattern_bindings). Without this, or-pattern bindings
-        // were declared but never initialized — the arm body saw nil.
-        let binding_pattern: &Pattern = match &arm.pattern {
-            Pattern::Or(alternatives) => alternatives.first().unwrap_or(&arm.pattern),
+    ) -> Vec<HirStmt> {
+        let binding_pattern: &Pattern = match arm_pattern {
+            Pattern::Or(alternatives) => alternatives.first().unwrap_or(arm_pattern),
             other => other,
         };
         let mut binding_stmts = Vec::new();
@@ -1187,6 +1133,76 @@ impl Lowerer {
                 }
             }
         }
+        binding_stmts
+    }
+
+    /// Lower match arms to a chain of If-Else statements
+    fn lower_match_arms_stmt(
+        &mut self,
+        subject_idx: usize,
+        subject_ty: TypeId,
+        arms: &[ast::MatchArm],
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<Vec<HirStmt>> {
+        if arms.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let arm = &arms[0];
+        let remaining_arms = &arms[1..];
+
+        // Check if this is a wildcard pattern (always matches)
+        // But: if subject is an enum and the identifier matches a variant name,
+        // treat it as an enum pattern, not a binding.
+        if matches!(&arm.pattern, Pattern::Wildcard) {
+            return self.lower_block(&arm.body, ctx);
+        }
+        if let Pattern::Identifier(name) = &arm.pattern {
+            let is_enum_variant = if let Some(HirType::Enum {
+                variants,
+                name: enum_name,
+                ..
+            }) = self.module.types.get(subject_ty)
+            {
+                variants.iter().any(|(vn, _)| vn == name)
+            } else {
+                false
+            };
+            if !is_enum_variant {
+                // Plain binding pattern - always matches
+                return self.lower_block(&arm.body, ctx);
+            }
+            // Otherwise fall through to treat as enum pattern
+        }
+
+        // Generate the condition for this pattern
+        let condition = self.lower_pattern_condition_stmt(subject_idx, subject_ty, &arm.pattern, ctx)?;
+
+        // Extract pattern bindings and add them to context
+        // This needs to happen after pattern condition but before guard/body
+        let bindings = self.extract_pattern_bindings(&arm.pattern, subject_ty);
+        for (name, ty) in &bindings {
+            ctx.add_local(name.clone(), *ty, Mutability::Immutable);
+        }
+
+        // Handle guard expression if present (bindings are now in scope)
+        let final_condition = if let Some(guard) = &arm.guard {
+            let guard_hir = self.lower_expr(guard, ctx)?;
+            HirExpr {
+                kind: HirExprKind::Binary {
+                    op: BinOp::And,
+                    left: Box::new(condition),
+                    right: Box::new(guard_hir),
+                },
+                ty: TypeId::BOOL,
+            }
+        } else {
+            condition
+        };
+
+        // Generate payload extraction statements for enum bindings (shared with
+        // expression-position match arm lowering in expr/control.rs).
+        let binding_stmts = self.build_pattern_binding_stmts(&arm.pattern, subject_idx, subject_ty, &bindings, ctx);
 
         // Lower the arm body with bindings in scope
         let mut then_block = Vec::new();
@@ -1211,6 +1227,43 @@ impl Lowerer {
         };
 
         Ok(vec![if_stmt])
+    }
+
+    /// Generate the branch condition for an `if val` / `if var` (and their
+    /// `elif` forms) binding.
+    ///
+    /// A plain-identifier binding (`if val x = opt:`) is a nil/Some check, not
+    /// an unconditional match: it must mirror the pure-Simple parser desugar
+    /// `val x = EXPR; if x != nil: ...`. The shared
+    /// [`Self::lower_pattern_condition_stmt`] returns `Bool(true)` for a plain
+    /// identifier — correct for a `match` catch-all arm, but wrong here (it made
+    /// `if val x = none_option:` always take the then-branch and bind nil).
+    /// Constructor patterns (`Some(x)`, `Ok(v)`, …) still go through the shared
+    /// pattern-condition logic (rt_is_some / discriminant checks).
+    fn if_let_pattern_condition(
+        &mut self,
+        subject_idx: usize,
+        subject_ty: TypeId,
+        pattern: &Pattern,
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<HirExpr> {
+        if matches!(pattern, Pattern::Identifier(_) | Pattern::MutIdentifier(_)) {
+            return Ok(HirExpr {
+                kind: HirExprKind::Binary {
+                    op: BinOp::NotEq,
+                    left: Box::new(HirExpr {
+                        kind: HirExprKind::Local(subject_idx),
+                        ty: subject_ty,
+                    }),
+                    right: Box::new(HirExpr {
+                        kind: HirExprKind::Nil,
+                        ty: TypeId::NIL,
+                    }),
+                },
+                ty: TypeId::BOOL,
+            });
+        }
+        self.lower_pattern_condition_stmt(subject_idx, subject_ty, pattern, ctx)
     }
 
     /// Generate a condition expression for pattern matching
