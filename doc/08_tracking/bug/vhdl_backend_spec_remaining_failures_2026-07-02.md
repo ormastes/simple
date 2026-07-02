@@ -440,3 +440,156 @@ of these fixes ended up bundled into anonymous `wip: working-copy snapshot
 descriptive message; where that happened it's called out explicitly, and the
 actual file content was re-verified (not just trusted from `jj log`) after each
 such event.
+
+## Follow-on pass (2026-07-02): the `parse_bitfield_decl` bug is FIXED — a
+## separate, deeper VHDL hardware-lowering gap is the actual remaining blocker
+
+The empty-`bf_name`/mis-resolved-`backing_type` parser bug described above is
+now **fully fixed**, and the fix is general (not bitfield-specific). Root
+causes, all confirmed via isolated standalone repros run through
+`src/compiler_rust/target/bootstrap/simple`:
+
+1. **Lexer discarded in-memory source for any parse under a synthetic/virtual
+   path.** `lex_init_with_path` (`10.frontend/core/lexer.spl`) cleared
+   `SIMPLE_BOOTSTRAP_LEX_SOURCE` (the parser's offset-based token-text cache)
+   whenever a non-empty `source_path` was given, assuming a re-read from disk
+   via `SIMPLE_BOOTSTRAP_LEX_PATH` would always succeed. Every test in this
+   suite parses in-memory source under a path like `"testdata/foo.spl"` that
+   doesn't exist on disk, so the re-read silently returned `""`, and every
+   `par_text_get()` call for the rest of that parse returned an empty string —
+   this is what produced the empty `bf_name` (and would equally corrupt *any*
+   identifier read during a synthetic-path parse, not just bitfields). Fixed:
+   always keep the caller-supplied source as the cache's source of truth.
+
+2. **`parser_parse_type()` had no fallback for fixed-width integer primitives**
+   (`u8`/`u16`/`u32`/`u64`/`i8`/.../`i64`) — they aren't registered as named
+   types, so lookups fell through to `TYPE_VOID`. This silently produced
+   Unit-typed locals/casts/fields/params for *any* code using `x as u32`,
+   `fn f(n: u32)`, or a bitfield's backing/field types — again general, not
+   bitfield-specific. Fixed: fall back to `TYPE_I64` when
+   `primitive_integer_bit_width_from_name(type_name) > 0`.
+
+3. Two bitfield-local hardening fixes in `parse_bitfield_decl`: validate the
+   backing/field type from the raw captured name (not a round-tripped type-tag
+   name) and apply the same `TYPE_I64` fallback locally.
+
+With these three fixed, `parse_bitfield_decl` produces a correct name and
+backing type. Continuing to trace the same 7 tests through HIR/MIR lowering
+uncovered four more general, previously-unknown, severe bugs (all now fixed,
+all confirmed via isolated repros comparing bitfield vs. plain non-bitfield
+code, so none of them are bitfield-specific):
+
+4. **`expr as Type` cast expressions were silently dropped end-to-end.** The
+   frontend `ExprKind` enum (`10.frontend/parser_types_expr.spl`) had no
+   `Cast` variant at all; `convert_flat_expr` (`_FlatAstBridge/convert_nodes.spl`)
+   had no `EXPR_CAST` case; HIR lowering (`20.hir/hir_lowering/expressions.spl`)
+   had no `Cast` case; MIR lowering (`50.mir/_MirLoweringExpr/expr_dispatch.spl`)
+   had no `Cast` case. Every cast anywhere in real-frontend-parsed code
+   (`inst.opcode as u32`, etc.) silently became a no-op `NilLit`. Added the
+   missing case at all four layers.
+
+5. **MIR lowering never handled `HirExprKind.NamedVar`** — only the name-less
+   `Var(symbol)` variant (`50.mir/_MirLoweringExpr/expr_dispatch.spl`). HIR
+   lowering's `case Ident(name):` always produces `NamedVar(symbol, name)`, so
+   *any* local-variable reference lowered through the real
+   `parse_full_frontend → HirLowering → MirLowering` pipeline (as opposed to
+   hand-built MIR fixtures, which every other passing test in this file uses)
+   silently resolved to `nil`. Added the missing case.
+
+6. **`parse_val_decl_stmt`/`parse_var_decl_stmt` corrupted every plain-identifier
+   binding name to the literal string `"Ident"`** (`10.frontend/core/parser_stmts.spl`).
+   A "is this a soft-keyword-as-identifier?" check did
+   `keyword_lookup(tok_kind_name(kind)) == kind`; for a plain identifier,
+   `tok_kind_name(TOK_IDENT)` is the string `"Ident"`, and
+   `keyword_lookup("Ident")` trivially returns `TOK_IDENT` again via its
+   documented "not a real keyword" fallback — a false positive that fired for
+   *every* `val`/`var` declaration, not just soft keywords. This is a
+   severe, general bug: it would corrupt the name of essentially any local
+   variable declared via `val`/`var` in code compiled through the real
+   frontend. Fixed the two sites feeding `parse_bitfield_decl`'s call chain;
+   **9 more occurrences of the identical broken pattern remain** elsewhere in
+   the parser (`parser_stmts.spl` for-loop/destructure bindings, `fn_struct_decls.spl:88`,
+   `parser_expr.spl` ×3, `parser.spl:344`, `parser_decls_use.spl:43`) —
+   deliberately left unfixed here (out of this task's scope/risk budget) and
+   should be tracked as a dedicated follow-up bug, since it's a strictly
+   larger blast radius than bitfields.
+
+7. **`expr_type_symbol` (`50.mir/_MirLowering/function_lowering.spl`) mishandled
+   a genuinely-nil `expr.type_`** via `if val ty = expr.type_:` (branch taken
+   even when nil, then crashing on `ty.kind`) — the same interpreter defect
+   class already documented above for `Dict.get()`. Fixed with an explicit
+   nil-check.
+
+Two test-fixture bugs (not compiler bugs) were also corrected, matching the
+"test used undocumented/incorrect syntax" pattern already established above:
+- Bare-integer bitfield field widths (`opcode: 7`) instead of the documented
+  `uN` syntax (`opcode: u7`) — 6 fixture blocks in
+  `test/01_unit/compiler/backend/vhdl_backend_spec.spl` corrected.
+- `BitfieldType.new(raw)` construction instead of the documented direct-call
+  constructor syntax `BitfieldType(raw)` (see `Flags(0x06)` in
+  `test/01_unit/compiler/mir/bitfield_mir_spec.spl`) — all 7 occurrences
+  corrected. Confirmed via an isolated trace that `BitfieldType(raw)` lowers
+  to clean, entirely `I64`-typed MIR locals (no stray `Unit` temp), while
+  `.new(raw)` still does not (HIR lowering hardcodes
+  `MethodResolution.Unresolved` for every method call — no resolution pass is
+  wired into this pipeline; see `35.semantics/resolve_strategies.spl`'s
+  `MethodResolver`, whose only consumer, `test/01_unit/compiler/semantics/resolve_spec.spl`,
+  has all its real test bodies commented out).
+- One stale text-match assertion in
+  `test/01_unit/compiler/parser/bitfield_pure_simple_spec.spl` (`"val backing_type
+  = parser_parse_type()"`) was updated to `"var backing_type = ..."` — a direct,
+  necessary consequence of fix #3 above (the variable must be reassignable for
+  the `TYPE_I64` fallback), not a hidden regression.
+
+### Actual remaining blocker (NEW finding, not the original parser bug)
+
+`test/01_unit/compiler/backend/vhdl_backend_spec.spl` is still **40/48** after
+all of the above — unchanged in raw count, but for a completely different
+reason than previously believed. All 7 bitfield tests now parse and
+HIR/MIR-lower correctly (verified locals are cleanly typed, no `TYPE_VOID`/
+`Unit` garbage). The failures are now a **VHDL hardware-synthesis backend
+limitation**, confirmed via direct source inspection, not a parser or generic
+MIR-lowering bug:
+
+- The bitfield-read test ("lowers hardware bitfield reads...") now fails with
+  a *different*, more accurate error: `"Synthesizable VHDL backend does not
+  support generic Call lowering for `Rv32Instruction`; only planned pure
+  combinational helpers can be called"` (`vhdl_validation.spl:241` /
+  `vhdl_codegen_helpers.spl:192,194,209`). MIR lowering has no special case
+  recognizing `BitfieldType(raw_value)` as an identity/pass-through
+  construction (the way `try_lower_bitfield_get` already special-cases
+  bitfield *field reads* before falling to generic struct-field access, in
+  `50.mir/_MirLoweringExpr/switch_operators_calls.spl`) — it lowers to a
+  generic MIR `Call`, which the `@hardware`-function synthesis validator
+  correctly rejects since arbitrary calls aren't synthesizable.
+- The 6 bitfield-write tests still fail with the original `"Unit local
+  signal"` error — the field-write path (`inst.opcode = next_opcode` via
+  `HirStmtKind.Assign` targeting a `Field` expr) has its own, not-yet-traced
+  source of a stray `Unit`-typed MIR local, structurally separate from the
+  now-understood read/construction path.
+- `mir_bitfield.spl` (`50.mir/mir_bitfield.spl`) looks like it was meant to
+  provide exactly this "recognize a bitfield type and lower construction/
+  access to bit ops" support (`is_bitfield_type`, `BITFIELD_REGISTRY`,
+  `BitfieldMirLower`), but it is **not wired into the pipeline at all** — its
+  registry is never populated by `parse_bitfield_decl` or anything in the real
+  HIR/MIR lowering path (confirmed via grep: nothing writes to
+  `BITFIELD_REGISTRY`). It appears to be an orphaned/earlier design that
+  predates (and doesn't match) the `bitfield`-keyword parser actually in use.
+
+This is real, additional feature work in the VHDL backend/MIR lowering (making
+`bitfield`-keyword constructors and field-write targets synthesis-aware,
+analogous to the existing field-read special case), not a parser bug — out of
+scope for a `parse_bitfield_decl` fix. Recommended next step for whoever picks
+this up: add a `try_lower_bitfield_construct`-style special case in
+`expr_dispatch.spl`/`switch_operators_calls.spl` for `Call(Ident(bitfield_type_name),
+[single_raw_arg])`, and trace the field-write `Assign` path the same way
+`try_lower_bitfield_get` was traced for reads.
+
+### Updated regression gate (this pass)
+- `test/01_unit/compiler/parser/bitfield_pure_simple_spec.spl` — 4/4 (after
+  updating the stale text-match assertion above)
+- `test/01_unit/compiler/mir/bitfield_mir_spec.spl` — 2/2
+- `test/01_unit/compiler/frontend/parser_spec.spl` — 3/3
+- `test/01_unit/compiler/backend/vhdl_constraints_spec.spl` — 5/5
+- `test/01_unit/compiler/backend/vhdl_backend_spec.spl` — 40/48 (unchanged
+  count; see above for why)
