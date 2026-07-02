@@ -197,6 +197,21 @@ fn rv64_jalr_module() -> MachModule:
     val func = MachFunction(name: "rv64_jalr", blocks: [block], frame_size: 0, num_virtual_regs: 0, used_callee_saved: [])
     MachModule(name: "rv64_jalr", functions: [func], data_sections: [], extern_symbols: [])
 
+fn rv64_malformed_operand_module() -> MachModule:
+    val block = MachBlock(
+        label: "entry",
+        insts: [
+            new_mach_inst(RV_OP_MV, [op_imm(7), op_sym("bad_reg")]),
+            new_mach_inst(RV_OP_LI, [op_sym("bad_dest"), op_label(1)]),
+            new_mach_inst(RV_OP_LD, [op_label(1), op_imm(99)]),
+            new_mach_inst(RV_OP_SD, [op_sym("bad_value"), op_label(1)])
+        ],
+        block_id: 0,
+        offset: 0
+    )
+    val func = MachFunction(name: "rv64_malformed_operand", blocks: [block], frame_size: 0, num_virtual_regs: 0, used_callee_saved: [])
+    MachModule(name: "rv64_malformed_operand", functions: [func], data_sections: [], extern_symbols: [])
+
 describe "Encode Riscv64":
     it "shares the Linux call relocation and ABI contract":
         val contract = riscv_linux_target_contract(CodegenTarget.Riscv64)
@@ -262,6 +277,11 @@ describe "Encode Riscv64":
     it "encodes RV64 JALR signed immediates":
         val encoded = encode_module_riscv64(rv64_jalr_module())
         expect(encoded[0].code).to_equal([0xE7, 0x00, 0xC1, 0xFF])
+
+    it "keeps RV64 malformed data operands inert":
+        val encoded = encode_module_riscv64(rv64_malformed_operand_module())
+        expect(encoded[0].code).to_equal([0x13, 0x00, 0x00, 0x00, 0x13, 0x00, 0x00, 0x00, 0x03, 0x30, 0x00, 0x00, 0x23, 0x30, 0x00, 0x00])
+        expect(encoded[0].relocations.len()).to_equal(0)
 
     it "expands RV64 LI as ADDI or LUI plus ADDI":
         expect(encode_li_riscv64([], 1, 42)).to_equal([0x93, 0x00, 0xA0, 0x02])
