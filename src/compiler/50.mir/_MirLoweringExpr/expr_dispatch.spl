@@ -137,7 +137,6 @@ impl MirLowering:
         val nil_expr = HirExpr(kind: HirExprKind.NilLit, has_type_: true, type_: HirType(kind: HirTypeKind.Unit, span: nil_span), span: nil_span)
         val expr_value = expr ?? nil_expr
 
-        print "[DEBUG-EXPRKIND] {expr_value.kind}"
         match expr_value.kind:
             case IntLit(value, _):
 
@@ -194,6 +193,25 @@ impl MirLowering:
                     val err_tmp = b_err.new_temp(MirType.i64())
                     self.builder = b_err
                     err_tmp
+
+            case NamedVar(symbol, name):
+                # Same lookup as Var -- HirLowering's `case Ident(name):` (in
+                # hir_lowering/expressions.spl) produces NamedVar(symbol, name)
+                # for every resolved identifier reference, but this dispatch
+                # only had a case for the name-less Var(symbol) variant. Every
+                # other test in this suite builds MIR fixtures directly
+                # (bypassing real source -> HIR -> MIR lowering), so this
+                # never got exercised until real frontend parsing was used;
+                # falling through to the `case _:` catch-all silently
+                # returned nil for any local variable reference.
+                if self.local_map.has(symbol.id):
+                    self.local_map[symbol.id]
+                else:
+                    self.error("undefined variable: {name}", Some(expr_value.span))
+                    var b_err2 = self.builder
+                    val err_tmp2 = b_err2.new_temp(MirType.i64())
+                    self.builder = b_err2
+                    err_tmp2
 
             case Binary(op, left, right):
 
@@ -358,7 +376,6 @@ impl MirLowering:
 
             # Field access: obj.field_name
             case Field(base, field_name, resolved):
-                print "[DEBUG-FIELD] field={field_name}"
                 val base_local = self.lower_expr(base)
                 val bitfield_result = self.try_lower_bitfield_get(base, base_local, field_name)
                 if val bitfield_local = bitfield_result:
@@ -369,6 +386,15 @@ impl MirLowering:
                     field_type = self.lower_type(expr_type)
                 var b = self.builder
                 val result = b.emit_get_field(mir_operand_copy(base_local), field_idx, field_type)
+                self.builder = b
+                result
+
+            # Type cast: expr as Type
+            case Cast(operand, target):
+                val operand_local = self.lower_expr(operand)
+                val mir_target = self.lower_type(target)
+                var b = self.builder
+                val result = b.emit_cast(mir_operand_copy(operand_local), mir_target)
                 self.builder = b
                 result
 

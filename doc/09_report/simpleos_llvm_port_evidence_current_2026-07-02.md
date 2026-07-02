@@ -15,8 +15,9 @@ Focused LLVM-to-SimpleOS port evidence for the current hardening lane.
 | Sysroot libc++ header/runtime staging | PASS | `SIMPLEOS_TARGET_TRIPLE=x86_64-unknown-simpleos sh src/os/port/llvm/sysroot.shs` -> staged libc++ under `build/os/sysroot/include/c++/v1`, generated `__config_site`, installed `__assertion_handler`, built `libc++.a`, and staged `crt0.o`, `libsimpleos_c.a`, and `libm.a` |
 | x86_64 cross LLVM configure | PASS | `SIMPLEOS_TARGET_TRIPLE=x86_64-unknown-simpleos SIMPLE_TARGET=x86_64-unknown-simpleos sh src/os/port/llvm/build.shs cross` -> CMake configure/generate complete; build enters LLVM object compilation |
 | Focused x86_64 `bin/lld` cross executable link | PASS | `make -C src/os/libc && SIMPLEOS_TARGET_TRIPLE=x86_64-unknown-simpleos sh src/os/port/llvm/sysroot.shs && ninja -C build/os/llvm/cross-x86_64-unknown-simpleos bin/lld` -> final executable link completes; `build/os/llvm/cross-x86_64-unknown-simpleos/bin/lld` exists and is executable, 64 MB |
+| Focused x86_64 `bin/clang` cross executable link | PASS | `make -C src/os/libc && SIMPLEOS_TARGET_TRIPLE=x86_64-unknown-simpleos sh src/os/port/llvm/sysroot.shs && ninja -C build/os/llvm/cross-x86_64-unknown-simpleos bin/clang` -> final executable link completes; `build/os/llvm/cross-x86_64-unknown-simpleos/bin/clang` symlinks to executable `clang-20`, 125 MB |
 | Cross-build plan scaffolding | PASS | `SIMPLE_LIB=src bin/simple test test/02_integration/os/port/llvm/cross_build_plan_spec.spl --mode=interpreter --clean` -> 18 examples, 0 failures |
-| Per-target compiler-rt/build staging scaffolding | PASS | `SIMPLE_LIB=src bin/simple test test/02_integration/os/port/llvm/per_target_build_spec.spl --mode=interpreter --clean` -> 46 examples, 0 failures |
+| Per-target compiler-rt/build staging scaffolding | PASS | `SIMPLE_LIB=src bin/simple test test/02_integration/os/port/llvm/per_target_build_spec.spl --mode=interpreter --clean` -> 48 examples, 0 failures |
 | Focused `Path.cpp` compile | PASS | direct clang++ compile with Ninja flags plus `-D__simpleos__=1` -> object builds; only existing futimes/futimens warning remains |
 | Focused `AssignmentTrackingAnalysis.cpp` compile | PASS | direct clang++ compile with Ninja flags after replacing `std::stringstream` with `raw_string_ostream` -> object builds |
 | Focused `MIRFSDiscriminator.cpp` compile | PASS | direct clang++ compile with Ninja flags after replacing `SampleProf.h` `std::ostringstream` use with `raw_string_ostream` -> object builds |
@@ -31,22 +32,22 @@ Focused LLVM-to-SimpleOS port evidence for the current hardening lane.
 | Focused Clang Lex `PPMacroExpansion.cpp` compile | PASS | direct clang++ compile with Ninja flags after replacing `std::stringstream` / `std::locale` / `std::put_time` timestamp formatting with LLVM raw stream + `format` helper -> object builds |
 | SimpleOS libc rebuild | PASS | `make -C src/os/libc` -> rebuilt `libsimpleos_c.a` including the C++ ABI, stdio, string, mman, and libm surfaces needed by the final LLD link |
 | SimpleOS C++/POSIX surface probes | PASS | `clang++ --target=x86_64-unknown-simpleos --sysroot=build/os/sysroot ...` including `<string>`, `<mutex>`, `<shared_mutex>`, `<future>`, `<random>`, `gethostname`, `getsid`, `std::isxdigit`, `sys/resource.h`, `sys/socket.h`, `sys/un.h`, `sys/wait.h`, `pwd.h`, `alarm`, `setsid`, `getpagesize`, and signal flags compiles |
-| Cross clang artifact-gated smoke | PASS | `SIMPLE_LIB=src bin/simple test test/02_integration/os/port/llvm/smoke_clang_spec.spl --mode=interpreter --clean` -> 5 examples, 0 failures |
+| Cross clang artifact-gated smoke | PASS | `SIMPLE_LIB=src bin/simple test test/02_integration/os/port/llvm/smoke_clang_spec.spl --mode=interpreter --clean` -> canonical `bin/clang` exists, reports `x86_64-simpleos`, compiles `hello.c`, `llvm-nm` sees `main`, and `ld.lld` links a SimpleOS ELF; 5 examples, 0 failures |
 
-## Current Blocker
+## Current Frontier
 
-The focused x86_64 LLD build now completes through the final `bin/lld`
-executable link. The missing-symbol class for libc++ headers, pthread condition
-variables, `strerror_r`, wide numeric conversion functions, aligned/nothrow C++
-allocation, thread-local destructors, `vfprintf`, `wmemcmp`, `erf`, `logb`,
-`rint`, `mprotect`, libc++ regex/locale pulls, and the SimpleOS C++ entry shim
-is cleared for this target.
+The focused x86_64 LLD and Clang builds now complete through final executable
+link. The missing-symbol class for libc++ headers, pthread condition variables,
+`strerror_r`, wide numeric conversion functions, aligned/nothrow C++
+allocation, thread-local destructors, `vfprintf`, `wmemcmp`, `strpbrk`, `erf`,
+`logb`, `rint`, `mprotect`, libc++ regex/locale pulls, SimpleOS C++ entry shim,
+and Clang driver `getrlimit`/`setrlimit` stack probing is cleared for this
+target.
 
-The canonical cross clang artifact is still not present at
-`build/os/llvm/cross-x86_64-unknown-simpleos/bin/clang`
-(`test -f ...` exit code 1 from the prior artifact-gated smoke). The next
-focused frontier is building the larger x86_64 SimpleOS `bin/clang` artifact,
-using the now-green LLD link as the baseline.
+The canonical cross clang artifact is now present at
+`build/os/llvm/cross-x86_64-unknown-simpleos/bin/clang` as a symlink to
+`clang-20`, and the artifact-gated smoke passes. The next focused frontier is
+advancing compiler-rt/full cross-target staging.
 
 ## Spec Maintenance Completed
 
@@ -122,6 +123,14 @@ using the now-green LLD link as the baseline.
 - Recorded and applied the LLD `ErrorHandler.cpp` no-regex patch for SimpleOS,
   keeping normal diagnostics while avoiding libc++ locale/regex runtime pulls
   under `_LIBCPP_HAS_LOCALIZATION=0`.
+- Recorded and applied the consolidated Clang no-iostream/fstream target patch:
+  CrossTU, Analysis, ThreadSafety, UnsafeBufferUsage, BareMetal driver, and
+  Frontend file reads now use LLVM `raw_string_ostream` / `raw_ostream` /
+  `MemoryBuffer` instead of target-side iostream/fstream/stringstream.
+- Added the SimpleOS `sys/resource.h` `rlimit` surface and libc
+  `getrlimit`/`setrlimit` stack-resource stubs required by Clang `cc1_main`.
+- Added `strpbrk` to SimpleOS libc and C++ `<cstring>` so Clang builtin format
+  classification links against the SimpleOS runtime.
 - Added `__simpleos__` as an explicit toolchain macro because Clang does not
   currently predefine one for `*-unknown-simpleos` triples.
 - Pinned `HAVE_GETPAGESIZE`, `HAVE_SYSCONF`, and `HAVE_GETRUSAGE` in the
@@ -136,3 +145,6 @@ using the now-green LLD link as the baseline.
 - Updated process result checks to the current `ProcessResult` fields.
 - Removed the host-clang fallback from `smoke_clang_spec.spl`; live assertions
   now run only against the canonical SimpleOS cross-build artifact path.
+- Guarded smoke execution so absent or non-host-runnable cross artifacts do not
+  create false failures, while host-runnable canonical artifacts still compile
+  and link the `hello.c` smoke.

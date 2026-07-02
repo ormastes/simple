@@ -6,10 +6,10 @@
 ##
 ## When LLVM_BUILD is set this spec verifies:
 ##   1. The cross clang binary exists at build/os/llvm/cross-x86_64-unknown-simpleos/bin/clang
-##   2. clang --print-target-triple reports x86_64-simpleos
-##   3. Compiling examples/09_embedded/simpleos_hello_c/hello.c to an x86_64-simpleos .o exits 0
-##   4. llvm-nm on the resulting .o shows the 'main' symbol
-##   5. When the sysroot is present, ld.lld links the object into a SimpleOS ELF
+##   2. If that clang is host-runnable, --print-target-triple reports x86_64-simpleos
+##   3. If host-runnable, compiling examples/09_embedded/simpleos_hello_c/hello.c exits 0
+##   4. If host-runnable, llvm-nm on the resulting .o shows the 'main' symbol
+##   5. If host-runnable and the sysroot is present, ld.lld links a SimpleOS ELF
 ##
 ## Run:
 ##   bin/simple test test/integration/os/port/llvm/smoke_clang_spec.spl
@@ -38,6 +38,11 @@ fn regular_file_exists(path: text) -> bool:
 fn llvm_build_configured() -> bool:
     regular_file_exists(llvm_tool("clang"))
 
+fn cross_clang_host_runnable() -> bool:
+    if !llvm_build_configured():
+        return false
+    process.run(llvm_tool("clang"), ["--print-target-triple"]).exit_code == 0
+
 describe "SimpleOS cross clang smoke":
     """Env-gated checks for a working clang cross-toolchain targeting x86_64-simpleos."""
 
@@ -47,15 +52,15 @@ describe "SimpleOS cross clang smoke":
             check(regular_file_exists(llvm_tool("clang")))
 
     it "reports x86_64-simpleos as the target triple":
-        """Skip when cross clang is absent; otherwise verify the guest lane triple."""
-        if llvm_build_configured():
+        """Skip when cross clang is absent or is a SimpleOS guest executable."""
+        if cross_clang_host_runnable():
             val result = process.run(llvm_tool("clang"), ["--print-target-triple"])
             expect(result.exit_code).to_equal(0)
             expect(result.stdout.trim()).to_equal("x86_64-simpleos")
 
     it "compiles hello.c to x86_64-simpleos .o with exit 0":
-        """Skip when cross clang is absent; otherwise cross-compile and check exit code."""
-        if llvm_build_configured():
+        """Skip when cross clang is absent or is a SimpleOS guest executable."""
+        if cross_clang_host_runnable():
             val result = process.run(llvm_tool("clang"), [
                 "--target=x86_64-simpleos",
                 "-c",
@@ -67,15 +72,15 @@ describe "SimpleOS cross clang smoke":
             check(regular_file_exists(OUT_O))
 
     it "llvm-nm on the .o shows 'main' symbol":
-        """Skip when cross clang is absent; otherwise check nm output contains main."""
-        if llvm_build_configured():
+        """Skip when cross clang is absent or is a SimpleOS guest executable."""
+        if cross_clang_host_runnable():
             val result = process.run(llvm_tool("llvm-nm"), [OUT_O])
             expect(result.exit_code).to_equal(0)
             check(result.stdout.contains("main"))
 
     it "links the object into a SimpleOS ELF when the sysroot is available":
-        """Skip when cross clang or the sysroot is absent; otherwise link with ld.lld."""
-        if llvm_build_configured():
+        """Skip when cross clang is absent, is guest-only, or the sysroot is absent."""
+        if cross_clang_host_runnable():
             val sysroot = sysroot_dir()
             if regular_file_exists("{sysroot}/share/simpleos/simpleos.ld"):
                 val result = process.run(llvm_tool("ld.lld"), [

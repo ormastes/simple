@@ -509,6 +509,28 @@ fn filter_smf_inputs(files: [text]) -> [text]:
             smfs.push(f)
     smfs
 
+fn _cc_fallback_runtime_lib_args(config: NativeLinkConfig) -> [text]:
+    """Runtime library link args for the cc fallback path.
+
+    The direct-linker path links -lsimple_compiler for runtime symbols
+    (rt_getpid, rt_cli_get_args, rt_platform_name, ...); the fallback must
+    stay complete too or entry closures referencing io_runtime externs fail
+    with undefined rt_* symbols. Prefer the static archive: the shared
+    library's dynamic export list is incomplete (e.g. rt_time_now_unix_micros
+    is absent) and static linking avoids an rpath into the build tree."""
+    var runtime_dir = config.runtime_path
+    if runtime_dir == "":
+        runtime_dir = find_runtime_lib_dir()
+    if runtime_dir == "" or runtime_dir == "none":
+        return []
+    var args: [text] = ["-L", runtime_dir]
+    if file_exists("{runtime_dir}/libsimple_compiler.a"):
+        args.push("-l:libsimple_compiler.a")
+    else:
+        args.push("-lsimple_compiler")
+        args.push("-Wl,-rpath,{runtime_dir}")
+    args
+
 fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) -> Result:
     # SimpleOS targets must NEVER reach this function. SimpleOS has no
     # fork/exec, so subprocess cc is unavailable — in-process LLD is the
@@ -549,14 +571,19 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         val err_msg = if stderr != "": stderr else: "Unknown linking error"
         return Err("cc linking failed: {err_msg}")
     elif os_name == "freebsd":
-        val args = [
-            obj0,
-            "-lc", "-lpthread",
-            "-Wl,--as-needed", "-lm", "-lSDL2", "-Wl,--no-as-needed",
-            "-Wl,--allow-multiple-definition",
-            "-Wl,--gc-sections",
-            "-o", output
-        ]
+        var args: [text] = [obj0]
+        for flag in _cc_fallback_runtime_lib_args(config):
+            args.push(flag)
+        args.push("-lc")
+        args.push("-lpthread")
+        args.push("-Wl,--as-needed")
+        args.push("-lm")
+        args.push("-lSDL2")
+        args.push("-Wl,--no-as-needed")
+        args.push("-Wl,--allow-multiple-definition")
+        args.push("-Wl,--gc-sections")
+        args.push("-o")
+        args.push(output)
         val (stdout, stderr, code) = process_run("cc", args)
         if code == 0:
             return Ok(output)
@@ -566,6 +593,8 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         var args: [text] = ["-fuse-ld=lld"]
         for obj in object_files:
             args.push(obj)
+        for flag in _cc_fallback_runtime_lib_args(config):
+            args.push(flag)
         args.push("-lc")
         args.push("-lpthread")
         args.push("-ldl")

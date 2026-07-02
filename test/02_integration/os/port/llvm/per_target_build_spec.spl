@@ -29,9 +29,11 @@ val COVERAGE_MAPPING_PATCH = "src/os/port/llvm/patches/0013-llvm-coverage-mappin
 val TEXTAPI_DYLIBREADER_PATCH = "src/os/port/llvm/patches/0014-llvm-textapi-dylibreader-no-iostream-hex-formatting.patch.md"
 val CLANG_PPMACROEXPANSION_PATCH = "src/os/port/llvm/patches/0015-clang-lex-ppmacroexpansion-no-put-time.patch.md"
 val LLD_ERRORHANDLER_PATCH = "src/os/port/llvm/patches/0016-lld-errorhandler-no-regex.patch.md"
+val CLANG_NO_IOSTREAM_PATCH = "src/os/port/llvm/patches/0017-clang-no-iostream-fstream.patch.md"
 val LLVM_TOOLCHAIN = "src/os/toolchain/llvm/simpleos_cross_toolchain.cmake"
 val CXXABI_C = "src/os/libc/simpleos_cxxabi.c"
 val LIBC_C = "src/os/libc/simpleos_libc.c"
+val PROCESS_WAIT_C = "src/os/libc/simpleos_process_wait.c"
 val STRING_EXT_C = "src/os/libc/simpleos_string_ext.c"
 val MATH_EXT_C = "src/os/libc/simpleos_math_ext.c"
 val CTYPE_H = "src/os/libc/include/ctype.h"
@@ -165,6 +167,12 @@ describe "SimpleOS LLVM per-target build (A4/A5)":
         check(src.contains("compiler-rt)"))
         check(src.contains("stage3_compiler_rt"))
 
+    it "build.shs lets compiler-rt derive the default target triple":
+        val src = build_shs_src()
+        check(src.contains("-UCOMPILER_RT_DEFAULT_TARGET_TRIPLE"))
+        check(!src.contains("-DCOMPILER_RT_DEFAULT_TARGET_TRIPLE"))
+        check(src.contains("-DCMAKE_C_COMPILER_TARGET=\"$TRIPLE\""))
+
     it "build.shs maps armv7 to LLVM ARM":
         val src = build_shs_src()
         check(src.contains("armv7-*)"))
@@ -289,10 +297,23 @@ describe "SimpleOS LLVM per-target build (A4/A5)":
         val mman = process.run("cat", [SYS_MMAN_H]).stdout
         check(stdio.contains("vfprintf"))
         check(string.contains("wmemcmp"))
+        check(string.contains("strpbrk"))
         check(math.contains("logb"))
         check(math.contains("erf"))
         check(math.contains("rint"))
         check(mman.contains("mprotect"))
+
+    it "SimpleOS libc exposes Clang driver rlimit declarations":
+        val resource = process.run("cat", [SYS_RESOURCE_H]).stdout
+        val process_wait = process.run("cat", [PROCESS_WAIT_C]).stdout
+        check(resource.contains("RLIMIT_STACK"))
+        check(resource.contains("typedef unsigned long rlim_t"))
+        check(resource.contains("RLIM_INFINITY"))
+        check(resource.contains("struct rlimit"))
+        check(resource.contains("getrlimit"))
+        check(resource.contains("setrlimit"))
+        check(process_wait.contains("int getrlimit"))
+        check(process_wait.contains("int setrlimit"))
 
     it "SimpleOS libc implements final LLD link runtime surface":
         val cxxabi = process.run("cat", [CXXABI_C]).stdout
@@ -306,6 +327,7 @@ describe "SimpleOS LLVM per-target build (A4/A5)":
         check(libc.contains("int vfprintf"))
         check(libc.contains("int mprotect"))
         check(string_ext.contains("int wmemcmp"))
+        check(string_ext.contains("char *strpbrk"))
         check(math_ext.contains("double logb"))
         check(math_ext.contains("double erf"))
         check(math_ext.contains("double rint"))
@@ -399,3 +421,16 @@ describe "SimpleOS LLVM per-target build (A4/A5)":
         check(src.contains("std::regex"))
         check(src.contains("ErrorHandler.cpp"))
         check(src.contains("__simpleos__"))
+
+    it "records no-iostream/fstream Clang target patch":
+        val src = process.run("cat", [CLANG_NO_IOSTREAM_PATCH]).stdout
+        check(src.contains("_LIBCPP_HAS_LOCALIZATION=0"))
+        check(src.contains("CrossTranslationUnit.cpp"))
+        check(src.contains("IssueHash.cpp"))
+        check(src.contains("ThreadSafetyCommon.h"))
+        check(src.contains("UnsafeBufferUsage.cpp"))
+        check(src.contains("BareMetal.cpp"))
+        check(src.contains("LayoutOverrideSource.cpp"))
+        check(src.contains("CompilerInvocation.cpp"))
+        check(src.contains("MemoryBuffer"))
+        check(src.contains("raw_string_ostream"))

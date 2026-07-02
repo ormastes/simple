@@ -115,6 +115,17 @@ size_t strcspn(const char *s, const char *reject) {
     return count;
 }
 
+char *strpbrk(const char *s, const char *accept) {
+    for (; *s; s++) {
+        const char *a = accept;
+        while (*a) {
+            if (*s == *a) return (char *)s;
+            a++;
+        }
+    }
+    return NULL;
+}
+
 /* ====================================================================
  * 3. strtok / strtok_r
  * ==================================================================== */

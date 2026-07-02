@@ -56,6 +56,7 @@ char  *strtok(char *str, const char *delim);
 char  *strtok_r(char *str, const char *delim, char **saveptr);
 size_t strspn(const char *s, const char *accept);
 size_t strcspn(const char *s, const char *reject);
+char  *strpbrk(const char *s, const char *accept);
 
 /* Reverse memory search */
 void *memrchr(const void *s, int c, size_t n);
