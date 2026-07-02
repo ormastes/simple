@@ -1,0 +1,156 @@
+# browser_interaction_capture.spl — Capture-backed browser scroll + low-res
+# text evidence for the Simple web render path (master plan W4 / G2.3 / G2.4).
+#
+# Renders offscreen only (pure-Simple layout renderer, cpu_simd backend):
+#   1. A long page at scroll offsets 0 and 120: asserts the marker row shifted
+#      up by exactly 120 px and both framebuffers are viewport-sized.
+#   2. A text-heavy page at 640x480 and 800x600 for the readability oracle.
+#
+# Prints key=value evidence lines; exits 0 only when every check passes.
+# Usage: bin/simple run src/app/test/browser_interaction_capture.spl [out_dir]
+
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_engine2d_presenter.{simple_web_layout_render_html_pixels_at_scroll}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_html_to_pixels_with_engine2d_backend}
+use common.image.ppm_decode.{encode_ppm_p6}
+use std.nogc_sync_mut.sffi.io.{file_write_bytes}
+use std.sffi.cli.{cli_get_args}
+
+# Marker row background: #ff00aa, unique in the page.
+val MARKER_COLOR: u32 = 0xFFFF00AAu32
+
+# @step: Build long scroll page (content ~550px, viewport 360px)
+fn long_page_html() -> text:
+    var html = "<html><head><style>"
+    html = html + "body { margin: 0; background-color: #ffffff; } "
+    html = html + ".filler { height: 100px; background-color: #eeeeee; margin: 0; } "
+    html = html + ".marker { height: 16px; background-color: #ff00aa; margin: 0; } "
+    html = html + "h1 { color: #111111; }"
+    html = html + "</style></head><body>"
+    html = html + "<h1>Scroll evidence page</h1>"
+    html = html + "<div class='filler'>Section one filler content for scrolling.</div>"
+    html = html + "<div class='filler'>Section two filler content for scrolling.</div>"
+    html = html + "<div class='marker'></div>"
+    html = html + "<div class='filler'>Section three filler content below marker.</div>"
+    html = html + "<div class='filler'>Section four filler content below marker.</div>"
+    html = html + "<div class='filler'>Section five filler content below marker.</div>"
+    html = html + "</body></html>"
+    html
+
+# @step: Build text-heavy page for low-res readability
+fn text_page_html() -> text:
+    var html = "<html><head><style>"
+    html = html + "body { margin: 16px; background-color: #ffffff; } "
+    html = html + ".para { color: #222222; font-size: 16px; margin: 8px; } "
+    html = html + "h1 { color: #111111; }"
+    html = html + "</style></head><body>"
+    html = html + "<h1>Low resolution readability evidence</h1>"
+    # ponytail: 4 short paragraphs, not a full article — interpreter glyph paint
+    # costs ~60ms/glyph; this is the smallest corpus the oracle still passes on.
+    var i = 0
+    while i < 4:
+        html = html + "<p class='para'>The quick brown fox jumps over the lazy dog while vexed zebras watch. Paragraph {i} keeps glyph ink measurable.</p>"
+        i = i + 1
+    html = html + "</body></html>"
+    html
+
+# @step: Find first row where at least half the pixels match the marker color
+fn find_marker_row(pixels: [u32], width: i32, height: i32) -> i32:
+    var y: i32 = 0
+    while y < height:
+        var count: i32 = 0
+        var x: i32 = 0
+        while x < width:
+            if pixels[y * width + x] == MARKER_COLOR:
+                count = count + 1
+            x = x + 1
+        if count * 2 >= width:
+            return y
+        y = y + 1
+    -1
+
+# @step: Write ARGB pixels as binary P6 PPM
+fn write_ppm(path: text, pixels: [u32], width: i32, height: i32) -> bool:
+    val bytes = encode_ppm_p6(width.to_u32(), height.to_u32(), pixels)
+    file_write_bytes(path, bytes)
+
+fn main() -> i64:
+    val args = cli_get_args()
+    var out_dir = "build/browser-interaction"
+    if args.len() >= 1 and args[0] != "":
+        out_dir = args[0]
+
+    var all_pass = true
+
+    # ---- G2.4 scroll evidence -------------------------------------------
+    val scroll_w: i32 = 480
+    val scroll_h: i32 = 360
+    val scroll_amount: i32 = 120
+    val page = long_page_html()
+
+    val px0 = simple_web_layout_render_html_pixels_at_scroll(page, scroll_w, scroll_h, "cpu_simd", 0)
+    val px1 = simple_web_layout_render_html_pixels_at_scroll(page, scroll_w, scroll_h, "cpu_simd", scroll_amount)
+    val expected_count = scroll_w * scroll_h
+    print "scroll_viewport={scroll_w}x{scroll_h}"
+    print "scroll_offset_px={scroll_amount}"
+    print "scroll_pixels_offset0={px0.len()}"
+    print "scroll_pixels_offset120={px1.len()}"
+    if px0.len() != expected_count or px1.len() != expected_count:
+        all_pass = false
+        print "scroll_status=fail"
+        print "scroll_reason=framebuffer_not_viewport_sized"
+    else:
+        val y0 = find_marker_row(px0, scroll_w, scroll_h)
+        val y1 = find_marker_row(px1, scroll_w, scroll_h)
+        print "scroll_marker_y_offset0={y0}"
+        print "scroll_marker_y_offset120={y1}"
+        val shift = y0 - y1
+        print "scroll_marker_shift={shift}"
+        if y0 >= 0 and y1 >= 0 and shift == scroll_amount:
+            print "scroll_status=pass"
+        else:
+            all_pass = false
+            print "scroll_status=fail"
+            print "scroll_reason=marker_shift_mismatch"
+
+    val p0_path = "{out_dir}/scroll_offset0.ppm"
+    val p1_path = "{out_dir}/scroll_offset120.ppm"
+    if write_ppm(p0_path, px0, scroll_w, scroll_h):
+        print "scroll_ppm_offset0={p0_path}"
+    else:
+        all_pass = false
+        print "scroll_ppm_offset0="
+    if write_ppm(p1_path, px1, scroll_w, scroll_h):
+        print "scroll_ppm_offset120={p1_path}"
+    else:
+        all_pass = false
+        print "scroll_ppm_offset120="
+
+    # ---- G2.3 low-res text evidence --------------------------------------
+    val text_page = text_page_html()
+    val low_w: i32 = 640
+    val low_h: i32 = 480
+    val px_low = simple_web_render_html_to_pixels_with_engine2d_backend(text_page, low_w, low_h, "cpu_simd")
+    print "lowres_640x480_pixels={px_low.len()}"
+    val low_path = "{out_dir}/lowres_640x480.ppm"
+    if px_low.len() == low_w * low_h and write_ppm(low_path, px_low, low_w, low_h):
+        print "lowres_640x480_ppm={low_path}"
+    else:
+        all_pass = false
+        print "lowres_640x480_ppm="
+
+    val mid_w: i32 = 800
+    val mid_h: i32 = 600
+    val px_mid = simple_web_render_html_to_pixels_with_engine2d_backend(text_page, mid_w, mid_h, "cpu_simd")
+    print "lowres_800x600_pixels={px_mid.len()}"
+    val mid_path = "{out_dir}/lowres_800x600.ppm"
+    if px_mid.len() == mid_w * mid_h and write_ppm(mid_path, px_mid, mid_w, mid_h):
+        print "lowres_800x600_ppm={mid_path}"
+    else:
+        all_pass = false
+        print "lowres_800x600_ppm="
+
+    if all_pass:
+        print "capture_overall=pass"
+        return 0
+    print "capture_overall=fail"
+    1
