@@ -64,8 +64,17 @@ impl InterpreterBackendImpl:
         # minimal field-name-collision repro, iteration 9).
         var has_main = false
         var main_id: i64 = -1
-        for sym_id in module.symbols.symbols.keys():
-            val sym = module.symbols.symbols[sym_id]
+        # Iterate .values() (not .keys()+re-index) and bind each element to a
+        # typed local `val sym: Symbol`. `module.symbols.symbols` is a
+        # Dict<i64, Symbol>, but the seed erases Dict<K,V> to ANY, so both
+        # .keys()/[] re-index elements and .values() elements come out ANY-typed.
+        # Field access (`sym.id`/`sym.name`/`sym.id.id`) on an ANY receiver hits
+        # the seed's most-fields-wins resolver and reads the WRONG struct's field
+        # index -> a nil slot -> "field access on nil receiver" trap (iteration
+        # 10). The typed binding restores the real Symbol type so field indices
+        # resolve correctly (same idiom as the functions.values() loop below).
+        for sym_ in module.symbols.symbols.values():
+            val sym: Symbol = sym_
             ctx.env.define_global(sym.id, Value.Function(FunctionValue(symbol: sym.id, name: sym.name)))
             if sym.name == "main":
                 has_main = true

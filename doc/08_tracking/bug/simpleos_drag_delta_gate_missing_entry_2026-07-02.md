@@ -219,3 +219,24 @@ cannot reach a `pass` end-to-end on this host until the `app.io.cli_ops` /
   falls back to the interpreter before native-build work begins. The remaining
   QMP build timeout is therefore a native-build worker/JIT coverage problem,
   not remaining source-root or scene-size bloat.
+- `src/app/cli/native_build_main.spl` now launches
+  `src/app/cli/native_build_worker.spl` with `--mode=interpreter`, avoiding the
+  host-JIT attempt when native-build starts the worker. A focused source-entry
+  help smoke passed, and the SimpleOS binary-contract spec now asserts this
+  launcher contract. A bounded 85s patched-source launcher probe no longer
+  reports `[INFO] JIT compilation failed` or `CODEGEN BODY`; it still times out
+  before producing a binary because the interpreted worker loads the compiler
+  and LLVM import graph. The wm-simple-web target keeps the larger 870s worker
+  timeout for the live QMP path.
+- The native-build worker now imports
+  `app.io._CliCompile.compile_targets.{cli_native_build}` directly instead of
+  the broad `app.io.cli_compile` facade, and both split compile modules no
+  longer self-import that facade. The launcher also exports
+  `SIMPLE_EXECUTION_MODE=interpret` around the worker process and restores the
+  previous value afterward, because the forwarded `--mode=interpreter` argument
+  alone does not reliably suppress the source-run JIT attempt. A focused
+  `--list-optimizations` smoke passed through the patched launcher without the
+  previous `[INFO] JIT compilation failed` line. A verbose 85s build probe now
+  reaches real native-build phase markers (`Entry`, `Source dirs`, and
+  `Entry closure files: 1`) before timing out, so the current blocker has moved
+  past host-JIT startup and into the actual native-build/codegen duration.
