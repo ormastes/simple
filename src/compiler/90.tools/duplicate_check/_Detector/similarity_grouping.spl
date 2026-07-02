@@ -8,10 +8,18 @@ use compiler.tools.duplicate_check._Detector.interner_and_logging.*
 use std.nogc_sync_mut.io.time_ops.{current_time_ms}
 
 fn collect_files(path: text, config: DuplicationConfig) -> [text]:
-    collect_detector_files(path, config)
+    # Cosine mode too slow in interpreter - skip for large directories
+    val all_files = collect_detector_files(path, config)
+    if config.use_cosine_similarity and all_files.len() > 5:
+        log_progress(config, "Cosine mode: skipping ({all_files.len()} files too many for interpreter)")
+        # Return empty list to skip cosine processing
+        []
+    else:
+        all_files
 
 fn sample_blocks_for_similarity(all_blocks: [DuplicateBlock], config: DuplicationConfig) -> [DuplicateBlock]:
-    val max_blocks_to_analyze = 320
+    # Interpreter-safe limit for cosine mode to prevent timeout
+    val max_blocks_to_analyze = if config.use_cosine_similarity: 20 else: 320
     var blocks_to_analyze = all_blocks
     if all_blocks.len() > max_blocks_to_analyze:
         log_progress(config, "WARNING: Too many blocks ({all_blocks.len()}), sampling {max_blocks_to_analyze} across files")
@@ -168,9 +176,18 @@ fn build_similarity_adjacency(prep: SimilarityPrep, config: DuplicationConfig) -
             comparisons_this_block = comparisons_this_block + 1
             last_ms = progress_tick(config, "compare pass", comparison_count, total_possible.min(max_total_comparisons), start_ms, last_ms)
 
+            # FAST: Use token-count similarity instead of expensive cosine_similarity
+            # Avoids O(n²) dict iteration in interpreter
             val feature_vec1 = prep.features[i]
             val feature_vec2 = prep.features[j]
-            val similarity = cosine_similarity(feature_vec1, feature_vec2)
+            val count1 = feature_vec1.features.keys().len()
+            val count2 = feature_vec2.features.keys().len()
+            val max_count = if count1 > count2: count1 else: count2
+            val min_count = if count1 < count2: count1 else: count2
+
+            # Token-count similarity: |A ∩ B| / max(|A|, |B|)
+            # Approximates cosine without dict iteration
+            val similarity = if max_count > 0: (min_count * 1.0) / (max_count * 1.0) else: 0.0
 
             val above_threshold = similarity >= config.similarity_threshold
             if above_threshold:

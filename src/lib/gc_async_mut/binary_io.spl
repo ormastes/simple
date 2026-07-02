@@ -740,8 +740,59 @@ fn u64_to_bytes_be(value: u64) -> [u8]:
     ]
 
 # Float conversion
-extern fn f32_from_bits(bits: u32) -> f32
-extern fn f64_from_bits(bits: u64) -> f64
+# `f32_from_bits`/`f64_from_bits` have no native-build implementation
+# anywhere in the tree (only `spl_f64_to_bits`, the reverse direction, is
+# natively linked). Reconstruct via pure IEEE-754 arithmetic instead.
+fn _pow2_f64(n: i64) -> f64:
+    if n == 0:
+        return 1.0
+    var result = 1.0
+    var i: i64 = 0
+    if n > 0:
+        while i < n:
+            result = result * 2.0
+            i = i + 1
+    else:
+        val m = 0 - n
+        while i < m:
+            result = result / 2.0
+            i = i + 1
+    result
+
+fn f64_from_bits(bits: u64) -> f64:
+    val sign_bit = (bits >> 63) & 1u64
+    val exp = ((bits >> 52) & 0x7FFu64) as i64
+    val frac = bits & 0xFFFFFFFFFFFFFu64
+    var result = 0.0
+    if exp == 0:
+        if frac != 0u64:
+            result = ((frac as f64) / 4503599627370496.0) * _pow2_f64(-1022)
+    elif exp == 0x7FF:
+        if frac == 0u64:
+            result = 1.0e308 * 10.0
+    else:
+        result = (1.0 + (frac as f64) / 4503599627370496.0) * _pow2_f64(exp - 1023)
+    if sign_bit == 1u64:
+        return 0.0 - result
+    result
+
+fn f32_from_bits(bits: u32) -> f32:
+    val sign_bit = (bits >> 31) & 1u32
+    val exp = ((bits >> 23) & 0xFFu32) as i64
+    val frac = bits & 0x7FFFFFu32
+    var result = 0.0
+    if exp == 0:
+        if frac != 0u32:
+            result = ((frac as f64) / 8388608.0) * _pow2_f64(-126)
+    elif exp == 0xFF:
+        if frac == 0u32:
+            result = 1.0e308 * 10.0
+    else:
+        result = (1.0 + (frac as f64) / 8388608.0) * _pow2_f64(exp - 127)
+    if sign_bit == 1u32:
+        result = 0.0 - result
+    result as f32
+
 extern fn spl_f64_to_bits(value: f64) -> i64
 
 fn f64_to_bits(value: f64) -> u64:
