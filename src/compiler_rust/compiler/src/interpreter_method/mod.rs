@@ -241,6 +241,8 @@ pub(crate) fn evaluate_method_call(
             | "to_include"
             | "to_be_truthy"
             | "to_be_falsy"
+            | "to_be_true"
+            | "to_be_false"
             | "to_be_nil"
             | "to_be_none"
             | "to_be_greater_than"
@@ -325,6 +327,36 @@ pub(crate) fn evaluate_method_call(
             if !matched {
                 BDD_EXPECT_FAILED.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = true);
                 let failure_msg = format!("expected {} to be falsy", recv_val.to_display_string());
+                BDD_FAILURE_MSG
+                    .with(|cell: &std::cell::RefCell<Option<String>>| *cell.borrow_mut() = Some(failure_msg));
+            }
+            return Ok(Value::Bool(matched));
+        }
+        "to_be_true" => {
+            // Strict equality (not just truthy) — mirrors
+            // ExpectHelper.to_be_true in src/lib/nogc_sync_mut/spec.spl
+            // (`self.value != true` fails), unlike `to_be_truthy` which
+            // accepts any truthy value.
+            let matched = recv_val == Value::Bool(true);
+            use crate::interpreter::interpreter_call::{BDD_EXPECT_FAILED, BDD_FAILURE_MSG};
+            if !matched {
+                BDD_EXPECT_FAILED.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = true);
+                let failure_msg = format!("expected true, got {}", recv_val.to_display_string());
+                BDD_FAILURE_MSG
+                    .with(|cell: &std::cell::RefCell<Option<String>>| *cell.borrow_mut() = Some(failure_msg));
+            }
+            return Ok(Value::Bool(matched));
+        }
+        "to_be_false" => {
+            // Strict equality (not just falsy) — mirrors
+            // ExpectHelper.to_be_false in src/lib/nogc_sync_mut/spec.spl
+            // (`self.value != false` fails), unlike `to_be_falsy` which
+            // accepts any falsy value.
+            let matched = recv_val == Value::Bool(false);
+            use crate::interpreter::interpreter_call::{BDD_EXPECT_FAILED, BDD_FAILURE_MSG};
+            if !matched {
+                BDD_EXPECT_FAILED.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = true);
+                let failure_msg = format!("expected false, got {}", recv_val.to_display_string());
                 BDD_FAILURE_MSG
                     .with(|cell: &std::cell::RefCell<Option<String>>| *cell.borrow_mut() = Some(failure_msg));
             }
