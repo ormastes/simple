@@ -34,13 +34,19 @@ fn optimize_write_coalesce(func: MirFunction, mut stats: OptimizationStats) -> M
                 case GetElementPtr(dest, base, indices):
                     match base.kind:
                         case Copy(local) | Move(local):
-                            gep_base[dest.id] = local.id
+                            # Guard: seed JIT Dict<i64,_> corruption can hand back a
+                            # nil-payload operand here (doc/08_tracking/bug/
+                            # seed_jit_int_keyed_dict_broken_2026-07-02.md). `local` is
+                            # never semantically nil for a real Copy/Move operand; skip
+                            # rather than crash so bootstrap surfaces the next issue.
+                            if local.?:
+                                gep_base[dest.id] = local.id
                         case _:
                             pass
                 case Store(ptr, value):
                     match ptr.kind:
                         case Copy(local) | Move(local):
-                            if gep_base.has(local.id):
+                            if local.? and gep_base.has(local.id):
                                 val base_id = gep_base[local.id]
                                 val prev = base_store_count[base_id] ?? 0
                                 base_store_count[base_id] = prev + 1
@@ -68,14 +74,16 @@ fn optimize_write_coalesce(func: MirFunction, mut stats: OptimizationStats) -> M
                     case GetElementPtr(dest, base, indices):
                         match base.kind:
                             case Copy(local) | Move(local):
-                                gep_base2[dest.id] = local.id
+                                # Guard: see seed JIT Dict<i64,_> corruption note above.
+                                if local.?:
+                                    gep_base2[dest.id] = local.id
                             case _:
                                 pass
                         new_insts = new_insts.push(inst)
                     case Store(ptr, value):
                         match ptr.kind:
                             case Copy(local) | Move(local):
-                                if gep_base2.has(local.id):
+                                if local.? and gep_base2.has(local.id):
                                     val base_id: i64 = gep_base2[local.id] ?? 0
                                     val sc: i64 = base_store_count[base_id] ?? 0
                                     if sc >= 2 and not hint_emitted.has(base_id):
@@ -292,13 +300,19 @@ fn count_write_coalesce(func: MirFunction) -> i64:
                 case GetElementPtr(dest, base, indices):
                     match base.kind:
                         case Copy(local) | Move(local):
-                            gep_base[dest.id] = local.id
+                            # Guard: seed JIT Dict<i64,_> corruption can hand back a
+                            # nil-payload operand here (doc/08_tracking/bug/
+                            # seed_jit_int_keyed_dict_broken_2026-07-02.md). `local` is
+                            # never semantically nil for a real Copy/Move operand; skip
+                            # rather than crash so bootstrap surfaces the next issue.
+                            if local.?:
+                                gep_base[dest.id] = local.id
                         case _:
                             pass
                 case Store(ptr, value):
                     match ptr.kind:
                         case Copy(local) | Move(local):
-                            if gep_base.has(local.id):
+                            if local.? and gep_base.has(local.id):
                                 val base_id = gep_base[local.id]
                                 val prev = base_store_count[base_id] ?? 0
                                 base_store_count[base_id] = prev + 1
