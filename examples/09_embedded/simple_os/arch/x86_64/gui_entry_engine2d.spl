@@ -31,6 +31,45 @@ extern fn rt_fb_blit_array32(dst_addr: u64, dst_stride_pixels: u64,
 var g_qemu_input_repainted: u64 = 0
 var g_qemu_mouse_initialized: u64 = 0
 
+# WM window-0 geometry — the "picked" window that the boot-time fullscreen
+# demo maximizes and restores. Non-fullscreen geometry is a fixed constant
+# (matches the original hardcoded window-0 rect); the fullscreen rect is the
+# full framebuffer read back from _fb_w()/_fb_h() at toggle time.
+#
+# NOTE: this is intentionally NOT module-`var` global state. A module-level
+# `var g_win0_w: i32 = 236` (or any nonzero-initialized primitive global in
+# this --entry-closure freestanding wrapper profile) reads back as
+# uninitialized garbage at boot, and even a subsequent plain literal
+# reassignment (`g_win0_w = 1024`) reads back corrupted (value>>3, e.g. 1024
+# read back as 128) — a genuine Cranelift freestanding-global codegen bug,
+# not something introduced here. See
+# doc/08_tracking/bug/freestanding_wrapper_profile_i32_global_var_shifted_2026-07-02.md.
+# The fullscreen/restore toggle below threads its state through locals and
+# function parameters instead, which read/write correctly in this profile.
+fn _win0_default_x() -> i32:
+    58
+
+fn _win0_default_y() -> i32:
+    76
+
+fn _win0_default_w() -> i32:
+    236
+
+fn _win0_default_h() -> i32:
+    142
+
+fn _fullscreen_hold_iters() -> u64:
+    # I/O-port-delay spin (same idiom as _capture_settle_window) sized to
+    # give an external QMP client real wall-clock time to connect and
+    # pmemsave the framebuffer while window 0 is maximized.
+    15000000u64
+
+fn _fullscreen_hold():
+    var iter: u64 = 0
+    while iter < _fullscreen_hold_iters():
+        rt_port_outb(0x80u16, 0u8)
+        iter = iter + 1
+
 fn _fb_w() -> i32:
     1024
 
@@ -126,11 +165,14 @@ fn _draw_mouse_cursor(engine, x: i32, y: i32):
     engine.draw_rect_filled(x + 12, y + 20, 6, 2, 0xFFFFFFFF)
 
 fn _present_mdi_scene_input_fb(fb_addr: u64, stride: i32, app_count: i64):
+    # Only ever called after the boot-time fullscreen demo has restored
+    # window 0 (see spl_start), so window 0 always draws at its default rect
+    # here.
     _fill_rect_fb(fb_addr, stride, 0, 0, _fb_w(), _fb_h(), 0xFF0A2540u32)
     _draw_command_lane_fb(fb_addr, stride)
     _draw_taskbar_fb(fb_addr, stride)
     _draw_launcher_fb(fb_addr, stride, app_count, 0xFF1E293Bu32, 0xFF16A085u32)
-    _draw_window_fb(fb_addr, stride, 58, 76, 236, 142, 0xFF1E293Bu32, 0xFF243447u32)
+    _draw_window_fb(fb_addr, stride, _win0_default_x(), _win0_default_y(), _win0_default_w(), _win0_default_h(), 0xFF1E293Bu32, 0xFF243447u32)
     _draw_window_fb(fb_addr, stride, 276, 120, 256, 154, 0xFF1E293Bu32, 0xFF243447u32)
     _draw_web_demo_panel_fb(fb_addr, stride, 280, 152, 248, 118)
     _draw_window_fb(fb_addr, stride, 220, 176, 278, 150, 0xFF1E293Bu32, 0xFF16A085u32)
@@ -443,18 +485,29 @@ fn _draw_mouse_cursor_fb(fb_addr: u64, stride: i32, x: i32, y: i32):
     _fill_rect_fb(fb_addr, stride, x + 8, y + 18, 8, 2, 0xFFFFFFFFu32)
     _fill_rect_fb(fb_addr, stride, x + 12, y + 20, 6, 2, 0xFFFFFFFFu32)
 
-fn _present_mdi_scene_direct_fb(fb_addr: u64, stride: i32, app_count: i64):
+fn _present_mdi_scene_direct_fb(fb_addr: u64, stride: i32, app_count: i64, win0_fullscreen: u64):
+    """Renders the boot-time MDI desktop scene.
+
+    win0_fullscreen selects window 0's rect: its saved default (58,76,236,142)
+    when 0, or the full framebuffer (0,0,_fb_w(),_fb_h()) when 1 — the WM
+    fullscreen/maximize toggle used by the boot-time demo in spl_start().
+    """
     _fill_rect_fb(fb_addr, stride, 0, 0, _fb_w(), _fb_h(), 0xFF0A2540u32)
     _draw_command_lane_fb(fb_addr, stride)
     _draw_taskbar_fb(fb_addr, stride)
     _draw_launcher_fb(fb_addr, stride, app_count, 0xFF1E293Bu32, 0xFF3498DBu32)
-    _draw_window_fb(fb_addr, stride, 58, 76, 236, 142, 0xFF1E293Bu32, 0xFF243447u32)
+    if win0_fullscreen == 0u64:
+        _draw_window_fb(fb_addr, stride, _win0_default_x(), _win0_default_y(), _win0_default_w(), _win0_default_h(), 0xFF1E293Bu32, 0xFF243447u32)
     _draw_window_fb(fb_addr, stride, 276, 120, 256, 154, 0xFF1E293Bu32, 0xFF243447u32)
     _draw_web_demo_panel_fb(fb_addr, stride, 280, 152, 248, 118)
     _draw_window_fb(fb_addr, stride, 150, 256, 278, 150, 0xFF1E293Bu32, 0xFF2050A0u32)
     _draw_web_demo_panel_fb(fb_addr, stride, 154, 288, 270, 114)
     _draw_window_fb(fb_addr, stride, 486, 250, 238, 142, 0xFF1E293Bu32, 0xFF243447u32)
     _draw_window_fb(fb_addr, stride, 642, 82, 202, 138, 0xFF1E293Bu32, 0xFF243447u32)
+    if win0_fullscreen == 1u64:
+        # Maximized: draw window 0 last so it visually covers the desktop,
+        # matching a real WM's topmost-when-fullscreen stacking behavior.
+        _draw_window_fb(fb_addr, stride, 0, 0, _fb_w(), _fb_h(), 0xFF1E293Bu32, 0xFF243447u32)
     _draw_mouse_cursor_fb(fb_addr, stride, 794, 366)
 
 fn _read_pixel_fb(fb_addr: u64, stride: i32, x: i32, y: i32) -> u32:
@@ -496,7 +549,7 @@ fn spl_start():
     _draw_command_lane_pixels(pixels, _fb_w())
     _draw_taskbar_pixels(pixels, _fb_w())
     _draw_launcher_pixels(pixels, _fb_w(), app_count, 0xFF1E293Bu32, 0xFF3498DBu32)
-    _draw_window_pixels(pixels, _fb_w(), 58, 76, 236, 142, 0xFF1E293Bu32, 0xFF243447u32)
+    _draw_window_pixels(pixels, _fb_w(), _win0_default_x(), _win0_default_y(), _win0_default_w(), _win0_default_h(), 0xFF1E293Bu32, 0xFF243447u32)
     _draw_window_pixels(pixels, _fb_w(), 276, 120, 256, 154, 0xFF1E293Bu32, 0xFF243447u32)
     _draw_web_demo_panel_pixels(pixels, _fb_w(), 280, 152, 248, 118)
     _draw_window_pixels(pixels, _fb_w(), 150, 256, 278, 150, 0xFF1E293Bu32, 0xFF2050A0u32)
@@ -505,13 +558,28 @@ fn spl_start():
     _draw_window_pixels(pixels, _fb_w(), 642, 82, 202, 138, 0xFF1E293Bu32, 0xFF243447u32)
     _draw_mouse_cursor_pixels(pixels, _fb_w(), 794, 366)
     rt_fb_blit_array32(fb_addr, _fb_w().to_u64(), pixels, _fb_w().to_u64(), _fb_w().to_u64(), _fb_h().to_u64())
-    _present_mdi_scene_direct_fb(fb_addr, _fb_w(), app_count)
+    _present_mdi_scene_direct_fb(fb_addr, _fb_w(), app_count, 0u64)
     serial_println("[backend-evidence] present=framebuffer-blit+direct-mmio-commit source=engine2d-mdi-pixels")
     serial_println("[mdi-demo] shared-mdi-ready surfaces={_surface_count()}")
     serial_println("[mdi-demo] top-command-lane-ready")
     serial_println("[mdi-demo] taskbar-ready")
     serial_println("[mdi-demo] html-renderable window=browser renderer=simple-web-qemu-panel-contract pixels={web_pixel_count} checksum={web_checksum}")
     serial_println("[mdi-demo] windows-ready count={_surface_count()}")
+
+    # WM fullscreen: maximize window 0 to cover the full framebuffer, hold
+    # long enough for an external QMP client to capture the maximized state,
+    # then restore to its prior geometry and capture the restored state.
+    # Size is read back from _fb_w()/_fb_h() (the WM's own source of truth
+    # for the desktop resolution) into locals right before printing, not a
+    # hardcoded constant.
+    val fs_w: i32 = _fb_w()
+    val fs_h: i32 = _fb_h()
+    _present_mdi_scene_direct_fb(fb_addr, _fb_w(), app_count, 1u64)
+    serial_println("[wm-demo] fullscreen-enter window=0 size={fs_w}x{fs_h}")
+    _fullscreen_hold()
+    _present_mdi_scene_direct_fb(fb_addr, _fb_w(), app_count, 0u64)
+    serial_println("[wm-demo] fullscreen-exit window=0 restored=true")
+
     _fill_rect_fb(fb_addr, _fb_w(), 0, 0, 32, 1, 0xFFFF0000u32)
     val probe_px = _read_pixel_fb(fb_addr, _fb_w(), 10, 0)
     val top_px = _read_pixel_fb(fb_addr, _fb_w(), 500, 20)
