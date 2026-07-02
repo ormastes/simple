@@ -111,8 +111,8 @@ function buildAtlasPage(bgCss) {
       y += ROW_H;
     }
   }
-  const html = `<html><head><style>body{margin:0;background:${bgCss};}</style></head><body>${body}</body></html>`;
-  return { html, entries, height: y };
+  const html = `<html><head><style>body{margin:0;background:${bgCss};min-height:${y + 100}px;}</style></head><body>${body}</body></html>`;
+  return { html, entries, height: y + 100 };
 }
 
 function buildMeasurePage() {

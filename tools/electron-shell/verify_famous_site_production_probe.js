@@ -431,7 +431,7 @@ if (!fs.existsSync(reportPath)) {
   if (dropTextLineInkDifferenceForTest) {
     const marker = text.indexOf("text_line_ink_delta:");
     if (marker >= 0) {
-      text = text.slice(0, marker) + text.slice(marker).replace("different_pixels: 808", "different_pixels: 0");
+      text = text.slice(0, marker) + text.slice(marker).replace("different_pixels: 2", "different_pixels: 0");
     }
   }
   const chromeRel = matchText(text, /chrome_ppm:\s*"([^"]+)"/);
@@ -467,14 +467,16 @@ if (!fs.existsSync(reportPath)) {
   result.textLineInkDeltaCount = parseIntField(text, /text_line_ink_delta:\s*\(text_line_ink_delta count:\s*([0-9]+)/);
   const textLineInkEntries = parseTextLineInkEntries(text);
   if (corruptTextLineInkPositionForTest && textLineInkEntries.length > 0) {
-    textLineInkEntries[0].x += 8;
+    textLineInkEntries[0].x += 64;
   }
   result.textLineInkDetails = compareTextLineInk(parseSimpleLayoutLineWidths(text), textLineInkEntries);
   const regionPixelCounts = lineInkRegionPixelCounts(chromePath, simplePath, textLineInkEntries);
   result.textLineInkDetails.allRegionCountsMatch = regionPixelCounts.allRegionCountsMatch;
   result.textLineInkDetails.regionPixelCounts = regionPixelCounts.counts;
   result.textLineInkDetails.unexplainedDifferentPixels = result.differentPixels - result.textLineInkDetails.differentPixelsTotal;
-  result.residualDifference = hideResidualDifferenceForTest ? { count: 0, first: null } : residualDifferenceDetails(chromePath, simplePath, textLineInkEntries);
+  // The hide/stale test flag replaces the computed residual diagnostics with a
+  // stale stub so the consistency check against unexplained divergence fires.
+  result.residualDifference = hideResidualDifferenceForTest ? { count: 1, first: null } : residualDifferenceDetails(chromePath, simplePath, textLineInkEntries);
   result.expectedGlyphCompositingSignature = {
     kind: "per_line_missing_ink_v1",
     lineCount: result.textLineInkDeltaCount,
@@ -496,7 +498,7 @@ if (!fs.existsSync(reportPath)) {
   result.chromeGlyphCompositingParity = result.parityStatus === "exact";
   result.promotionRequiredDifferentPixels = result.parityStatus === "exact" ? 0 : result.differentPixels;
   if (result.rendererMode !== "production") failures.push("report is not renderer_mode production");
-  if (result.productionRenderStrategy !== "famous_site_block_only_pending_glyph_compositing") failures.push("missing or unexpected production render strategy");
+  if (result.productionRenderStrategy !== "famous_site_calibrated_lcd_glyph_compositing_v1") failures.push("missing or unexpected production render strategy");
   if (!result.hasExactField) failures.push("missing exact acceptance result field");
   if (!result.hasAcceptedField) failures.push("missing accepted acceptance result field");
   if (!simpleRel.endsWith("/simple.production.ppm")) failures.push("simple_ppm does not use production artifact path");
@@ -510,11 +512,11 @@ if (!fs.existsSync(reportPath)) {
   if (result.chromeTextLineCount <= 0) failures.push("text geometry delta did not report Chrome text lines");
   if (result.chromeCanvasMetricCount <= 0) failures.push("text geometry delta did not report Chrome canvas metrics");
   if (result.simpleGeometryLineCount <= 0) failures.push("text geometry delta did not report Simple text lines");
-  if (result.differentPixels <= 1000 || result.differentPixels >= 6000) failures.push("production divergence is outside bounded evidence range");
+  if (result.differentPixels <= 0 || result.differentPixels >= 100) failures.push("production divergence is outside bounded evidence range");
   if (result.differentPixels > result.maxDifferentPixels) failures.push("production probe regressed above current focused baseline");
   if (!result.textRegionDelta) failures.push("missing production text region delta diagnostics");
-  if (result.textRegionDelta && result.textRegionDelta.divBox.differentPixels <= 0) failures.push("production div-box text delta did not report differences");
-  if (result.textRegionDelta && (!result.textRegionDelta.overflowText || result.textRegionDelta.overflowText.differentPixels <= 0)) failures.push("production overflow text delta did not report differences");
+  if (result.textRegionDelta && result.textRegionDelta.divBox.differentPixels > result.maxDifferentPixels) failures.push("production div-box text delta regressed above focused baseline");
+  if (result.textRegionDelta && result.textRegionDelta.overflowText && result.textRegionDelta.overflowText.differentPixels > result.maxDifferentPixels) failures.push("production overflow text delta regressed above focused baseline");
   if (!result.hasTextInkDelta) failures.push("missing production text ink delta diagnostics");
   if (!result.hasTextLineInkDelta) failures.push("missing production per-line text ink delta diagnostics");
   if (!result.hasGlyphCompositingSignature) failures.push("missing glyph compositing diagnostic signature");
@@ -524,17 +526,13 @@ if (!fs.existsSync(reportPath)) {
   if (result.hasTextLineInkDelta && !result.textLineInkDetails.textMatchesLayout) failures.push("per-line text ink entries do not match Simple layout line text");
   if (result.hasTextLineInkDelta && !result.textLineInkDetails.widthMatchesLayout) failures.push("per-line text ink entries do not match Simple layout line widths");
   if (result.hasTextLineInkDelta && !result.textLineInkDetails.regionNamesSequential) failures.push("per-line text ink regions are not sequential");
-  if (result.hasTextLineInkDelta && !result.textLineInkDetails.allLinesHaveDifferences) failures.push("per-line text ink entries did not report differences for every line");
-  if (result.hasTextLineInkDelta && !result.textLineInkDetails.allLinesHaveChromeBlackPixels) failures.push("per-line text ink entries did not report Chrome glyph pixels for every line");
   if (result.hasTextLineInkDelta && !result.textLineInkDetails.allRegionCountsMatch) failures.push("per-line text ink region geometry does not match production pixels");
   if (result.hasTextLineInkDelta && result.textLineInkDetails.unexplainedDifferentPixels < 0) failures.push("per-line text ink differences exceed production divergence");
   if (result.hasTextLineInkDelta && result.textLineInkDetails.unexplainedDifferentPixels > 1) failures.push("per-line text ink diagnostics do not account for production divergence");
   if (result.hasTextLineInkDelta && result.residualDifference.count !== result.textLineInkDetails.unexplainedDifferentPixels) failures.push("residual pixel diagnostics do not match unexplained production divergence");
   if (result.hasTextLineInkDelta && result.textLineInkDetails.unexplainedDifferentPixels > 0 && !result.residualDifference.first) failures.push("residual pixel diagnostics did not report the first residual pixel");
-  if (result.hasTextInkDelta && result.textInkDelta.divBoxChromeExactBlackPixels <= 0) failures.push("text ink delta did not report div-box exact black glyph pixels");
-  if (result.hasTextInkDelta && result.textInkDelta.overflowChromeExactBlackPixels <= 0) failures.push("text ink delta did not report overflow exact black glyph pixels");
-  if (result.hasTextInkDelta && result.textInkDelta.divBoxSimpleBackgroundMismatchPixels <= 0) failures.push("text ink delta did not report div-box background mismatches");
-  if (result.hasTextInkDelta && result.textInkDelta.overflowSimpleBackgroundMismatchPixels <= 0) failures.push("text ink delta did not report overflow background mismatches");
+  if (result.hasTextInkDelta && result.textInkDelta.divBoxDifferentPixels > result.maxDifferentPixels) failures.push("text ink delta div-box differences regressed above focused baseline");
+  if (result.hasTextInkDelta && result.textInkDelta.overflowDifferentPixels > result.maxDifferentPixels) failures.push("text ink delta overflow differences regressed above focused baseline");
 }
 
 result.status = failures.length === 0 ? "PASS" : "FAIL";
