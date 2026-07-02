@@ -892,7 +892,7 @@ else:
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -901,6 +901,9 @@ expect(scenario_name_or_missing("x64-gpu-2d")).to_equal("x64-gpu-2d")
 val target = scenario_target(scenario)
 expect(target.entry).to_equal("examples/09_embedded/simple_os/arch/x86_64/gpu_test_entry.spl")
 expect(target.output).to_equal("build/os/simpleos_gpu_test_x86_64.elf")
+expect(os_native_build_sources(target)).to_equal(["build/os/generated", "src/os", "src/lib", "examples/09_embedded/simple_os"])
+expect(os_native_build_env_prefix(target, "")).to_contain("SIMPLE_BOOTSTRAP=1")
+expect(os_native_build_env_prefix(target, "")).to_contain("SIMPLE_ALLOW_FREESTANDING_STUBS=1")
 val cmd = build_scenario_command(scenario, target.output)
 expect(cmd).to_contain("virtio-gpu,disable-modern=on,disable-legacy=off")
 expect(cmd).to_contain("-vga")
@@ -1021,7 +1024,7 @@ else:
 | Category | Hardware & OS |
 | Status | Active |
 | Source | `test/01_unit/os/qemu_runner_spec.spl` |
-| Updated | 2026-07-02 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview

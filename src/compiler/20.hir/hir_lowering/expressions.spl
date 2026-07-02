@@ -559,34 +559,35 @@ impl HirLowering:
 
         self.symbols.push_scope(ScopeKind.Block)
 
+        # Extract the block's trailing value (last statement, if an expression)
+        # from the FRESH `lower_hir_stmt` return value during the loop, NOT by
+        # re-indexing the `stmts` array afterward. The seed erases `[HirStmt]`
+        # elements to ANY, and matching `last.kind` on an ANY array element
+        # mis-extracts the `Expr(expr)` enum payload -> a GARBAGE HirExpr pointer
+        # (observed 0x1800000007), silently dropping the `-c` "print(...)" body
+        # (iteration 10). A direct function return is not ANY-erased, so matching
+        # `lowered.kind` in-loop resolves the payload correctly. Also avoids the
+        # intermediate `Option<HirExpr>` + `if val v = ...` Some-unwrap the seed
+        # miscompiles.
         var stmts: [HirStmt] = []
-        for s in b.stmts:
-            val lowered = self.lower_hir_stmt(s)
-            stmts = stmts.push(lowered)
-
-        self.symbols.pop_scope()
-
-        # Check if last statement is an expression (for block value).
-        #
-        # This deliberately avoids an intermediate `Option<HirExpr>`. The seed
-        # miscompiles the Some-payload unwrap `if val v = someOption`, binding a
-        # nil `v` even when the option is `Some(realExpr)`. That produced a
-        # HirBlock with `has=true, value=nil`, so the synthetic `-c` main body's
-        # trailing `print(...)` expression lowered to a nil HirExpr and was later
-        # dropped / nil-dereferenced (iteration 10). Instead track a plain `has`
-        # bool + a directly-assigned `HirExpr` and construct the block from those.
-        # `last` is a typed local so `last.kind` field access resolves correctly.
         var block_has_value = false
         var block_value_expr: HirExpr = HirExpr(kind: HirExprKind.NilLit, type_: nil, span: b.span)
-        if stmts.len() > 0:
-            val last: HirStmt = stmts[stmts.len() - 1]
-            match last.kind:
-                case Expr(expr):
-                    block_has_value = true
-                    block_value_expr = expr
-                    stmts = stmts[0:stmts.len() - 1]  # Remove last stmt
-                case _:
-                    pass_do_nothing
+        val stmt_count = b.stmts.len()
+        var stmt_idx = 0
+        while stmt_idx < stmt_count:
+            val lowered = self.lower_hir_stmt(b.stmts[stmt_idx])
+            if stmt_idx == stmt_count - 1:
+                match lowered.kind:
+                    case Expr(expr):
+                        block_has_value = true
+                        block_value_expr = expr
+                    case _:
+                        stmts = stmts.push(lowered)
+            else:
+                stmts = stmts.push(lowered)
+            stmt_idx = stmt_idx + 1
+
+        self.symbols.pop_scope()
 
         # HirBlock desugars Option<value> into has + value. The `has` flag MUST
         # be set: MIR lower_block gates the tail value on `block.has`, so without
