@@ -39,6 +39,88 @@ fn rv32_linux_contract() -> RiscvTargetContract:
 # RV32 word size derived from the shared ILP32D contract.
 val RV32_WORD_SIZE = rv32_linux_contract().pointer_bits / 8
 
+fn rv32_imm12_fits(value: i64) -> bool:
+    value >= -2048 and value <= 2047
+
+fn rv32_adjust_sp(delta: i64) -> [MachInst]:
+    if rv32_imm12_fits(delta):
+        [new_mach_inst(RV_OP_ADDI, [op_phys(RV_X2), op_phys(RV_X2), op_imm(delta)])]
+    else:
+        [
+            new_mach_inst(RV_OP_LI, [op_phys(RV_X31), op_imm(delta)]),
+            new_mach_inst(RV_OP_ADD, [op_phys(RV_X2), op_phys(RV_X2), op_phys(RV_X31)])
+        ]
+
+fn rv32_set_fp(frame_size: i64) -> [MachInst]:
+    if rv32_imm12_fits(frame_size):
+        [new_mach_inst(RV_OP_ADDI, [op_phys(RV_X8), op_phys(RV_X2), op_imm(frame_size)])]
+    else:
+        [
+            new_mach_inst(RV_OP_LI, [op_phys(RV_X31), op_imm(frame_size)]),
+            new_mach_inst(RV_OP_ADD, [op_phys(RV_X8), op_phys(RV_X2), op_phys(RV_X31)])
+        ]
+
+fn rv32_store_stack(reg: i64, offset: i64) -> [MachInst]:
+    if rv32_imm12_fits(offset):
+        [new_mach_inst(RV_OP_SW, [op_phys(reg), op_mem(physical_reg(RV_X2), offset)])]
+    else:
+        [
+            new_mach_inst(RV_OP_LI, [op_phys(RV_X31), op_imm(offset)]),
+            new_mach_inst(RV_OP_ADD, [op_phys(RV_X31), op_phys(RV_X2), op_phys(RV_X31)]),
+            new_mach_inst(RV_OP_SW, [op_phys(reg), op_mem(physical_reg(RV_X31), 0)])
+        ]
+
+fn rv32_load_stack(reg: i64, offset: i64) -> [MachInst]:
+    if rv32_imm12_fits(offset):
+        [new_mach_inst(RV_OP_LW, [op_phys(reg), op_mem(physical_reg(RV_X2), offset)])]
+    else:
+        [
+            new_mach_inst(RV_OP_LI, [op_phys(RV_X31), op_imm(offset)]),
+            new_mach_inst(RV_OP_ADD, [op_phys(RV_X31), op_phys(RV_X2), op_phys(RV_X31)]),
+            new_mach_inst(RV_OP_LW, [op_phys(reg), op_mem(physical_reg(RV_X31), 0)])
+        ]
+
+fn rv32_patch_prologue(block: MachBlock, frame_size: i64) -> MachBlock:
+    var insts: [MachInst] = []
+    for inst in rv32_adjust_sp(0 - frame_size):
+        insts.push(inst)
+    for inst in rv32_store_stack(RV_X1, frame_size - RV32_WORD_SIZE):
+        insts.push(inst)
+    for inst in rv32_store_stack(RV_X8, frame_size - (RV32_WORD_SIZE * 2)):
+        insts.push(inst)
+    for inst in rv32_set_fp(frame_size):
+        insts.push(inst)
+    for i in 4..block.insts.len():
+        insts.push(block.insts[i])
+    MachBlock(label: block.label, insts: insts, block_id: block.block_id, offset: block.offset)
+
+fn rv32_patch_epilogue(block: MachBlock, frame_size: i64) -> MachBlock:
+    if block.insts.len() < 4:
+        return block
+    val tail = block.insts.len() - 4
+    if block.insts[tail + 3].opcode != RV_OP_RET:
+        return block
+    var insts: [MachInst] = []
+    for i in 0..tail:
+        insts.push(block.insts[i])
+    for inst in rv32_load_stack(RV_X1, frame_size - RV32_WORD_SIZE):
+        insts.push(inst)
+    for inst in rv32_load_stack(RV_X8, frame_size - (RV32_WORD_SIZE * 2)):
+        insts.push(inst)
+    for inst in rv32_adjust_sp(frame_size):
+        insts.push(inst)
+    insts.push(new_mach_inst(RV_OP_RET, []))
+    MachBlock(label: block.label, insts: insts, block_id: block.block_id, offset: block.offset)
+
+fn rv32_patch_frame(func: MachFunction, frame_size: i64) -> MachFunction:
+    var blocks: [MachBlock] = []
+    for i in 0..func.blocks.len():
+        if i == 0:
+            blocks.push(rv32_patch_prologue(func.blocks[i], frame_size))
+        else:
+            blocks.push(rv32_patch_epilogue(func.blocks[i], frame_size))
+    MachFunction(name: func.name, blocks: blocks, frame_size: frame_size, num_virtual_regs: func.num_virtual_regs, used_callee_saved: func.used_callee_saved)
+
 # ============================================================================
 # Operand Lowering
 # ============================================================================
@@ -176,7 +258,7 @@ fn rv32_isel_function(ctx: ISelContext, func: MirFunction) -> ISelFuncResult:
     val stack_align = rv32_linux_contract().stack_align_bytes
     if frame_size % stack_align != 0:
         frame_size = frame_size + (stack_align - (frame_size % stack_align))
-    mach_func = mach_func_set_frame_size(mach_func, frame_size)
+    mach_func = rv32_patch_frame(mach_func, frame_size)
 
     # Propagate context back
     val out_ctx = ISelContext(
