@@ -238,13 +238,14 @@ Current result on this Linux host:
 2026-06-05 SimpleOS hardening matrix refresh:
 
 1. `scripts/check/check-simpleos-hardening-evidence-matrix.shs` now points at
-   the current QEMU/GTK, layered GUI/WebRenderer/Engine2D, CPU SIMD, and shared
-   WM evidence reports.
+   the current QEMU/GTK, layered GUI/WebRenderer/Engine2D, CPU SIMD, shared
+   WM, RV64 display-smoke QMP, and latest available production GUI/WebRenderer
+   parity evidence reports unless a caller overrides the report paths.
 2. Latest matrix evidence is
-   `doc/09_report/simpleos_hardening_evidence_matrix_2026-06-05.md`: all
-   `9/9` artifact rows pass, including the QEMU host counterpart, GUI SMF
-   artifact contract, live MDI framebuffer rows, and production
-   Electron/Tauri/Chrome/WebRenderer parity.
+   `doc/09_report/simpleos_hardening_evidence_matrix_current_2026-07-02.md`:
+   all `10/10` artifact rows pass, including the QEMU host counterpart, GUI
+   SMF artifact contract, live MDI framebuffer rows, RV64 display-smoke QMP,
+   and production Electron/Tauri/Chrome/WebRenderer parity.
 3. The aggregate matrix status is now `pass`: the QEMU guest Simple paint
    marker supplies `simple_frame_cycles` and `iterations`, while the host
    GTK/GL baseline supplies the GTK timing field. The release gate is
