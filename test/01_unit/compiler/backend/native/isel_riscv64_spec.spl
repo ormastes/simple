@@ -362,6 +362,37 @@ fn build_large_alloc_module(name: text) -> MirModule:
     val large_type = MirType(kind: MirTypeKind.Array(i64_type, 300))
     build_alloc_cast_module_with_type(name, large_type)
 
+fn build_large_alloc_return_module(name: text) -> MirModule:
+    val i64_type = MirType(kind: MirTypeKind.I64)
+    val unit_type = MirType(kind: MirTypeKind.Unit)
+    val large_type = MirType(kind: MirTypeKind.Array(i64_type, 300))
+    val locals = [
+        MirLocal(id: LocalId(id: 0), name: Some("_return"), type_: unit_type, kind: LocalKind.Return),
+        MirLocal(id: LocalId(id: 1), name: Some("ptr"), type_: large_type, kind: LocalKind.Temp)
+    ]
+    val entry = MirBlock(
+        id: BlockId.new(0),
+        label: Some("entry"),
+        instructions: [MirInst(kind: MirInstKind.Alloc(LocalId(id: 1), large_type), span: nil)],
+        terminator: MirTerminator.Ret(nil)
+    )
+    val func = MirFunction(
+        symbol: SymbolId.new(0),
+        name: name,
+        signature: MirSignature(params: [], return_type: unit_type, is_variadic: false),
+        locals: locals,
+        blocks: [entry],
+        entry_block: BlockId.new(0),
+        span: Span(start: 0, end: 0, line: 1, col: 1),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {}
+    )
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[SymbolId.new(0)] = func
+    MirModule(name: name, functions: functions, statics: {}, constants: {}, types: {})
+
 fn build_nop_inst_module(name: text) -> MirModule:
     val unit_type = MirType(kind: MirTypeKind.Unit)
     val locals = [
@@ -1007,6 +1038,15 @@ fn has_li_imm(block: MachBlock, imm: i64) -> bool:
                 case _: ()
     false
 
+fn has_large_stack_load(block: MachBlock, opcode: i64, reg: i64) -> bool:
+    for i in 0..block.insts.len():
+        if i + 2 < block.insts.len():
+            if block.insts[i].opcode == RV_OP_LI and operand_imm(block.insts[i].operands[1]) > 2047:
+                if block.insts[i + 1].opcode == RV_OP_ADD and block.insts[i + 2].opcode == opcode:
+                    if operand_reg_id(block.insts[i + 2].operands[0]) == reg and mem_offset(block.insts[i + 2].operands[1]) == 0:
+                        return true
+    false
+
 fn last_dest_reg(block: MachBlock, opcode: i64) -> i64:
     var found = -1
     for inst in block.insts:
@@ -1105,6 +1145,12 @@ describe "Isel Riscv64":
         expect(operand_reg_id(block.insts[1].operands[0])).to_equal(RV_X2)
         expect(block.insts[4].opcode).to_equal(RV_OP_SD)
         expect(mem_offset(block.insts[4].operands[1])).to_equal(0)
+
+    it "materializes large RV64 epilogue frame offsets":
+        val block = entry_block(isel_module_riscv64(build_large_alloc_return_module("rv64_large_frame_epilogue")))
+        expect(has_large_stack_load(block, RV_OP_LD, RV_X1)).to_equal(true)
+        expect(has_large_stack_load(block, RV_OP_LD, RV_X8)).to_equal(true)
+        expect(count_opcode(block, RV_OP_RET)).to_equal(1)
 
     it "uses 64-bit load and store opcodes for RV64 memory":
         val block = entry_block(isel_module_riscv64(build_memory_module("rv64_memory")))
