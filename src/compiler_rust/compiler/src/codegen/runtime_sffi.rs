@@ -348,6 +348,11 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // =========================================================================
     RuntimeFuncSpec::new("rt_string_new", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_concat", &[I64, I64], &[I64]),
+    // ANY+ANY dynamic add: two RuntimeValue args, one RuntimeValue return (all
+    // i64-sized). Emitted by MIR lowering for ANY-typed operands. Without this
+    // spec, get_runtime_return_type() returns None so the call's result is never
+    // captured — the native/.smf path silently yields 0 for erased addition.
+    RuntimeFuncSpec::new("rt_any_add", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_builder_new", &[], &[I64]),
     RuntimeFuncSpec::new("rt_string_builder_push", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_builder_finish", &[I64], &[I64]),
