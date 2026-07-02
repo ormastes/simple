@@ -417,3 +417,105 @@ reproduces even off a non-array, freshly-typed function return. Conclusion: no
 `.spl`-level restructuring recovers the payload; the seed must stop erasing
 enum/variant types to ANY (or refuse ambiguous payload offsets). Stops here for
 iteration 10.
+
+---
+
+## Iteration 11 (2026-07-02) — TWO handoff misattributions corrected; real root is ANY method/field dispatch, not enum-payload extraction
+
+No `-c`→`2`. But two load-bearing claims from iterations 9/10 were **disproven**
+by primary evidence, which redirects iteration 12 away from a dead end.
+
+### Correction 1: enum-payload extraction is NOT layout-misrouted
+`src/compiler_rust/.../codegen/instr/pattern.rs` `compile_pattern_bind` (line
+~104) emits `rt_enum_payload` **uniformly** — it never branches on scrutinee
+static type. So "when scrutinee is ANY, pattern compilation picks a wrong
+static-layout extraction strategy" (the pinned iteration-11 premise) is **false**.
+`rt_enum_discriminant`/`rt_enum_payload` are always used. Any garbage payload is
+therefore produced **upstream** (the value fed to `rt_enum_new`/read from a field
+was already garbage), not by the match extraction.
+
+### Correction 2: `lower_hir_block` is NOT on the `-c` path
+`SIMPLE_UNSTUB_HIR=1 SIMPLE_BOOTSTRAP=1 <stage4> -c "print(1+1)"` prints **no**
+`[hir-lower]` (the boot-branch eprints at `hir_lowering/expressions.spl:534`
+never fire), and `run hello.spl` under the same env prints only `[frontend]
+parsed` — never `[hir-lower]`. So iteration-10's fixes #3/#4 and "the wall"
+(`lowered.kind` garbage in `lower_hir_block`) target a function the `-c` path
+**does not execute**. Adding `val lowered: HirStmt = ...` there (built as
+`stage4_fix21`, full trace) changed **nothing** (`-c` still silent; **0**
+`SIMPLE_TRACE_FIELD_GET` hits for `kind` in `expressions.spl`). Reverted — tree
+clean.
+
+### The actual `-c` path and the real root cause (documented in-code)
+`-c` runs: driver single-file lowering (`src/compiler/80.driver/driver.spl:465-477`,
+gated `SIMPLE_UNSTUB_HIR=1`) → `lowering.lower_module` → `lower_function` →
+`SymbolTable.lookup` (`src/compiler/20.hir/hir_types.spl:264`) → `scope.symbols.get(name)`
+(line 276, a `Dict.get` on an ANY-erased Dict). The driver comment (lines 454-464)
+and the `get_symbol` rename comment (`hir_types.spl:305-313`) both record the
+mechanism: **method dispatch on an ANY/Dict receiver resolves `.get(text)` by
+name+arity across ALL structs and can bind a user-defined `get(text)` method
+instead of builtin `Dict.get`.** The primary collider (`SymbolTable.get(id:
+SymbolId?)`) was already renamed to `get_symbol`, but `get(module_name: text)`
+(`70.backend/linker/smf_getter.spl:199`) and `get(path: text)`
+(`99.loader/loader/smf_cache.spl:269`) still match `.get(text)` and can be
+mis-dispatched. This is the **same ANY-erasure class as iterations 8/9** (Dict→ANY,
+`.values()`/`.get()`→ANY) but at **method dispatch**, and it has the twin `.spl`
+bind that neither workaround is clean: `.get()` risks the user-method collision;
+`.contains()`+`[]` re-fetch hits the interpreter's "silently yields nil" Dict
+defect (comment at `hir_types.spl:270-275`).
+
+### Reproducers status
+- `rep9.spl` (real `Expr`/`ExprKind`/`StmtKind`): **no longer reproduces** — prints
+  `made se / extracted / OK NO CRASH`, rc=0 (Layer-3 fix cleared it). It is a
+  **stale gate**; do not treat its passing as meaningful.
+- Hand-made `scratchpad/enumrepro.spl` (inferred method return) and
+  `enumtyped.spl` (explicit `val x: T =`), both with a larger `kind`-field decoy:
+  **both extract `PAYLOAD_OK`**. So neither method-return ANY-erasure NOR the
+  decoy triggers it for hand-made types — the bug needs the full self-host context
+  (cross-module `get(text)` colliders + the real Dict-typed symbol tables).
+
+### DECISIVE ROOT CAUSE (minimal 1.4s repro) — `Dict.get()` drops the `Option` wrapper
+The `get`-name collision above is a red herring: the control `scratchpad/getnocollide.spl`
+(NO user `get` method anywhere) **still fails**. The true, minimally-isolated bug:
+
+```
+scratchpad/getval2.spl (seed native-build, 1.4s):
+  var d: Dict<text,i64> = {}; d["hello"] = 42
+  d["hello"]  == 42  -> "INDEX_OK"      (index path: correct)
+  match d.get("hello"): case Some(v): v == 42  -> "GET_WRONG"  (BUG)
+```
+
+`d[key]` (index) returns 42 correctly; `d.get(key)` matched as `Some(v)` yields the
+**wrong** `v`. Mechanism: `Dict<K,V>` erases to `TypeId::ANY` (type_resolver.rs:426),
+so `.get()` lowers via the ANY-method path to the raw runtime builtin
+`rt_dict_get` — **`int64_t rt_dict_get(int64_t dict, int64_t key)` (runtime_native.c:2154)
+returns the bare stored value, NOT a tagged `Option`.** No `Some`/`None` wrapping is
+synthesized, but the language types `.get()` as `Option<V>` and user code does
+`match r: case Some(v)`. So the match reads a raw value as if it were an
+`rt_enum_new(Some, payload)` object → wrong/garbage payload. (Same family as the
+iteration-7 note "`.get()`→`Some(payload)`→field-access corrupts"; index `d[k]` works
+because it returns the raw value directly with no Option contract.)
+
+Why this is THE `-c` blocker: stage4's interpreter backend (`interpreter.spl` and
+`interpreter_calls.spl`), compiled to native, resolves symbols/functions via
+`Dict.get(...)`+`match Some/None` throughout. With `.get()` returning a bare value
+instead of `Option`, those matches silently misfire → `main` body/print never runs →
+silent `-c`. This also explains driver.spl's SymbolTable.lookup fragility.
+
+### Recommendation for iteration 12 (fix the seed)
+Make the ANY/Dict `.get()` lowering honor the `Option<V>` contract. Options:
+1. **HIR/codegen**: when lowering a `.get(k)` method call on an ANY/Dict receiver,
+   emit `if rt_dict_contains(d,k): Some(rt_dict_get(d,k)) else: None` (real
+   `rt_enum_new` Some/None), instead of a bare `rt_dict_get`. Locate the ANY
+   container-method lowering (`hir/lower/expr/mod.rs` `is_any` block maps
+   `"get"|"remove" => TypeId::ANY`; the call target/codegen is in
+   `codegen/instr/calls.rs` / `runtime_sffi.rs`). Mirror how the stdlib
+   concretely-typed `Dict.get` wraps.
+2. Or add a runtime `rt_dict_get_opt` returning a tagged Option and route `.get()`
+   to it. Watch the payload boxing: index unboxes ints; the Some payload must use
+   the same box/unbox convention so `v == 42` holds.
+
+**Fast gate (all ~1.4s seed native-build, self-contained):**
+`scratchpad/getval2.spl` must print `INDEX_OK` + `GET_OK` (currently `GET_WRONG`).
+Then rebuild stage4 (fast path) and test `SIMPLE_UNSTUB_HIR=1 <stage4> -c "print(1+1)"`.
+`stage4_fix20`/`stage4_fix21` are equivalent for `-c` (both silent; the iteration-10
+`lower_hir_block` annotation was reverted — that function is not on the `-c` path).
