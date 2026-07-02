@@ -6,9 +6,26 @@
 use std.platform (is_windows, normalize_path, join_path)
 use compiler.backend.linker.link (LinkConfig, LinkError, LinkErrorKind, Linker)
 
-extern fn shell(cmd: text) -> text
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_env_get(key: text) -> text
+
+struct MsvcShellResult:
+    stdout: text
+    stderr: text
+    exit_code: i64
+
+# Windows shell command execution (cmd.exe). Named distinctly from other
+# `shell` helpers in the standard library (e.g. std.io_runtime.shell) to
+# avoid colliding with them in the interpreter's process-wide function
+# table, where identically-named top-level fns silently overwrite each
+# other on load ("last write wins") and previously also caused a bogus
+# `extern fn shell` declared here to shadow ANY same-named local function
+# in ANY module, anywhere in the program (see msvc_shell_naming bug).
+fn msvc_shell(cmd: text) -> MsvcShellResult:
+    val (stdout, stderr, code) = rt_process_run("cmd", ["/C", cmd])
+    MsvcShellResult(stdout: stdout, stderr: stderr, exit_code: code)
+
 # ===========================================================================
 # Windows Library Names
 # ===========================================================================
@@ -117,7 +134,7 @@ impl MsvcLinker:
 
         # Execute linker
         val cmd = "\"{link_exe}\" {args_str}"
-        val result = shell(cmd)
+        val result = msvc_shell(cmd)
 
         if result.exit_code != 0:
             return Err(LinkError(kind: LinkErrorKind.OutputFailed, message: result.stderr, symbol: nil, location: nil))
@@ -185,7 +202,7 @@ fn find_visual_studio() -> text?:
 
     # Query for latest Visual Studio installation
     val cmd = "\"{vswhere}\" -latest -property installationPath"
-    val result = shell(cmd)
+    val result = msvc_shell(cmd)
 
     if result.exit_code != 0 or result.stdout.trim() == "":
         return nil
@@ -200,7 +217,7 @@ fn find_link_exe() -> text?:
         case Some(vs_path):
             # Search for link.exe in VC\Tools\MSVC\*\bin\Hostx64\x64\
             val pattern = "{vs_path}\\VC\\Tools\\MSVC\\*\\bin\\Hostx64\\x64\\link.exe"
-            val result = shell("dir /b /s \"{vs_path}\\VC\\Tools\\MSVC\" 2>nul | findstr link.exe")
+            val result = msvc_shell("dir /b /s \"{vs_path}\\VC\\Tools\\MSVC\" 2>nul | findstr link.exe")
 
             if result.exit_code == 0:
                 val lines = result.stdout.split("\n")
@@ -213,7 +230,7 @@ fn find_link_exe() -> text?:
             pass
 
     # Try to find in PATH
-    val path_result = shell("where link.exe 2>nul")
+    val path_result = msvc_shell("where link.exe 2>nul")
     if path_result.exit_code == 0:
         val link_path = path_result.stdout.trim()
         if link_path != "" and rt_file_exists(link_path):
@@ -234,7 +251,7 @@ fn find_msvc_crt_paths() -> [text]:
     match vs_opt:
         case Some(vs_path):
             val msvc_base = "{vs_path}\\VC\\Tools\\MSVC"
-            val result = shell("dir /b \"{msvc_base}\" 2>nul")
+            val result = msvc_shell("dir /b \"{msvc_base}\" 2>nul")
             if result.exit_code == 0:
                 val versions = result.stdout.trim().split("\n")
                 if versions.len() > 0:
@@ -249,7 +266,7 @@ fn find_msvc_crt_paths() -> [text]:
 
     # 2. Windows SDK: Windows Kits\10\Lib\<ver>\ucrt\x64 and um\x64
     val sdk_base = "C:\\Program Files (x86)\\Windows Kits\\10\\Lib"
-    val sdk_result = shell("dir /b \"{sdk_base}\" 2>nul")
+    val sdk_result = msvc_shell("dir /b \"{sdk_base}\" 2>nul")
     if sdk_result.exit_code == 0:
         val sdk_versions = sdk_result.stdout.trim().split("\n")
         if sdk_versions.len() > 0:
@@ -283,7 +300,7 @@ impl LldLinkLinker:
 
     fn link(output: text, object_files: [text]) -> Result<(), LinkError>:
         # Find lld-link
-        val lld_result = shell("where lld-link 2>nul")
+        val lld_result = msvc_shell("where lld-link 2>nul")
         if lld_result.exit_code != 0:
             return Err(LinkError(kind: LinkErrorKind.InternalError, message: "lld-link not found", symbol: nil, location: nil))
 
@@ -295,7 +312,7 @@ impl LldLinkLinker:
 
         # Execute linker
         val cmd = "\"{lld_link}\" {args_str}"
-        val result = shell(cmd)
+        val result = msvc_shell(cmd)
 
         if result.exit_code != 0:
             return Err(LinkError(kind: LinkErrorKind.OutputFailed, message: result.stderr, symbol: nil, location: nil))
@@ -304,7 +321,7 @@ impl LldLinkLinker:
 
 # Check if lld-link is available
 fn is_lld_link_available() -> bool:
-    val result = shell("where lld-link 2>nul")
+    val result = msvc_shell("where lld-link 2>nul")
     result.exit_code == 0
 
 # ===========================================================================
