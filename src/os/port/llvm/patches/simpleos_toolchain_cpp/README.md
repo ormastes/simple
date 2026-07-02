@@ -45,8 +45,10 @@ Under `clang/lib/Driver/ToolChains/` on the `simpleos` branch:
      matches what A5 stages into
      `build/os/sysroot/lib/clang/<ver>/lib/<triple>/`.
    - `Linker::ConstructJob`: add a private `Tool` that invokes `ld.lld`
-     with `-T <sysroot>/lib/simpleos.lds`, the crt0 object from the
-     sysroot, and `-lsimpleos_c -lclang_rt.builtins-<arch>`.
+     with `-T <sysroot>/share/simpleos/simpleos.ld`, the crt0 object from the
+     sysroot, `-L <sysroot>/lib`,
+     `-L <sysroot>/lib/clang/<ver>/lib/<triple>`, and
+     `-lsimpleos_c -lclang_rt.builtins-<arch>`.
    - Recognised triples: `x86_64-unknown-simpleos`,
      `aarch64-unknown-simpleos`, `riscv64gc-unknown-simpleos`,
      `riscv32imac-unknown-simpleos`.
@@ -80,7 +82,7 @@ SIMPLE_TARGET=x86_64-unknown-simpleos \
 With the ToolChain class in place, the resulting
 `build/os/llvm/cross-x86_64-unknown-simpleos/bin/clang` auto-finds the
 staged builtins at
-`build/os/sysroot/lib/clang/19/lib/x86_64-unknown-simpleos/`.
+`build/os/sysroot/lib/clang/20/lib/x86_64-unknown-simpleos/`.
 
 ## Out-of-scope for this directory
 

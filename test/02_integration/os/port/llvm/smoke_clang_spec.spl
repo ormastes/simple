@@ -10,6 +10,8 @@
 ##   3. If host-runnable, compiling examples/09_embedded/simpleos_hello_c/hello.c exits 0
 ##   4. If host-runnable, llvm-nm on the resulting .o shows the 'main' symbol
 ##   5. If host-runnable and the sysroot is present, ld.lld links a SimpleOS ELF
+##   6. If host-runnable and the sysroot is present, clang driver links a
+##      compiler-rt builtins user.
 ##
 ## Run:
 ##   bin/simple test test/integration/os/port/llvm/smoke_clang_spec.spl
@@ -21,6 +23,9 @@ use std.spec
 val HELLO_C = "examples/09_embedded/simpleos_hello_c/hello.c"
 val OUT_O   = "/tmp/smoke_clang_hello.o"
 val OUT_ELF = "/tmp/smoke_clang_hello.elf"
+val DRIVER_ELF = "/tmp/smoke_clang_driver_hello.elf"
+val BUILTINS_C = "/tmp/smoke_clang_builtins_probe.c"
+val BUILTINS_ELF = "/tmp/smoke_clang_builtins_probe.elf"
 val TRIPLE_TXT = "/tmp/smoke_clang_triple.txt"
 val LLVM_BIN = "build/os/llvm/cross-x86_64-unknown-simpleos/bin"
 
@@ -108,3 +113,32 @@ describe "SimpleOS cross clang smoke":
                 ])
                 expect(result.exit_code).to_equal(0)
                 check(regular_file_exists(OUT_ELF))
+
+    it "driver compiles and links hello.c through canonical clang":
+        """Skip when cross clang is absent, is guest-only, or the sysroot is absent."""
+        if cross_clang_host_runnable():
+            val sysroot = sysroot_dir()
+            if regular_file_exists("{sysroot}/share/simpleos/simpleos.ld"):
+                val result = process.run(llvm_tool("clang"), [
+                    "--target=x86_64-unknown-simpleos",
+                    HELLO_C,
+                    "-o", DRIVER_ELF,
+                ])
+                expect(result.exit_code).to_equal(0)
+                check(regular_file_exists(DRIVER_ELF))
+
+    it "driver links compiler-rt builtins from the staged resource dir":
+        """Skip when cross clang is absent, is guest-only, or the sysroot is absent."""
+        if cross_clang_host_runnable():
+            val sysroot = sysroot_dir()
+            if regular_file_exists("{sysroot}/share/simpleos/simpleos.ld"):
+                val source = "__int128 div128(__int128 a,__int128 b){return a/b;} int main(void){return (int)div128(((__int128)1<<80),3);}"
+                val write = process.run("sh", ["-c", "printf '%s\n' '{source}' > {BUILTINS_C}"])
+                expect(write.exit_code).to_equal(0)
+                val result = process.run(llvm_tool("clang"), [
+                    "--target=x86_64-unknown-simpleos",
+                    BUILTINS_C,
+                    "-o", BUILTINS_ELF,
+                ])
+                expect(result.exit_code).to_equal(0)
+                check(regular_file_exists(BUILTINS_ELF))

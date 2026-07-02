@@ -18,7 +18,88 @@ Pattern for 1–2: the compiled stage4 mis-executes *compact* `.spl` forms;
 restructuring (nested ifs, intermediate vars, field-access instead of wide
 positional destructure) clears each site.
 
-## Layer 3 (OPEN — root-caused 2026-07-02, iteration 5): enum struct-payload extraction returns inline garbage
+## Layer 3 (FIXED 2026-07-02, iteration 6): qualified enum pattern whose variant name collides with a struct type
+
+### Root cause (isolated in iteration 6)
+Not a runtime enum-layout offset issue. Construction (`EnumWith`/`rt_enum_new`)
+was always correct. The divergence is in the seed's HIR pattern-binding
+lowering: `build_pattern_binding_stmts`
+(`src/compiler_rust/compiler/src/hir/lower/stmt_lowering.rs`) looked up the
+pattern's **variant name** as a type, and if a struct/class of that name existed
+it lowered the payload binding as a **positional struct FieldAccess (byte offset
+0 on the enum object)** instead of `rt_enum_payload`. That heuristic is only
+meant for the parser's *unqualified* ambiguous form
+(`Pattern::Enum{name:"_", variant:"ClassName"}`). For a **qualified** pattern
+`case StmtKind.Expr(pe)` where `enum StmtKind: Expr(Expr)` collides with `struct
+Expr`, it read the enum header at offset 0 → corrupt payload pointer → SIGSEGV
+on first field access.
+
+Minimal (non-frontend) repro: hand-made `struct MyExpr` + `enum MyStmt:
+MyExpr(MyExpr)` matched as `case MyStmt.MyExpr(pe)` (scratchpad `t6.spl`).
+Previous iterations' hand-made types never reproduced because their variant
+names did not collide with a struct name.
+
+Isolation matrix (all `seed native-build`, ~4 s each): `t1` direct field match
+(no enum), `t2` multi-arg/array-payload variant, `t3` `StmtKind.Throw(Expr)`
+(non-colliding variant, same payload type) — **all pass**; only the
+struct-named variant `StmtKind.Expr(Expr)` crashed. `t4` proved the discriminant
+was correct; MIR dump showed the working case emits `Call rt_enum_payload` while
+the colliding case emits `FieldGet byte_offset:0`.
+
+### Fix (committed)
+Gate the class/struct-destructure path on `enum_name == "_"`. Qualified patterns
+(real enum type name) are unambiguously enum variants and always use
+`rt_enum_payload`. One-file change in `stmt_lowering.rs`. rep9.spl / t6.spl now
+print "OK NO CRASH" / "TAGOK"; t1–t5 still pass.
+
+## Layer 4 (FIXED 2026-07-02, iteration 6): `effective_visibility` homonym mis-resolved during HIR lowering
+
+After Layer 3, the chain advanced to a **controlled** trap (rc=132 SIGILL,
+"runtime error: field access on nil receiver") in
+`common.dependency.visibility.effective_visibility` ← `compute_visibility`
+(`hir_lowering/types.spl:179`) ← `lower_function`. `types.spl` imports the
+intended 3-arg `common.visibility.effective_visibility(text,text,bool)->bool`
+(line 12) **and** `Visibility` from `common.dependency.visibility` (line 13).
+The seed's name resolution leaked the 4-arg homonym
+`common.dependency.visibility.effective_visibility(DirManifest,text,
+ModuleContents,SymbolId)->Visibility` into scope and bound the call to it,
+passing `false` where a `ModuleContents` was expected → nil `self.symbols` in
+`ModuleContents.symbol_visibility` → trap.
+
+Fix (committed): the 4-arg dependency copy has **zero callers in the pure-Simple
+compiler** (compiler call sites are all 3-arg; 4-arg callers live only in the
+Rust seed tree + `src/lib` dependency_tracker). Renamed it to
+`dir_effective_visibility` (+ its export in `dependency/__init__.spl`) to
+dissolve the collision. **Underlying seed bug (records for a future seed fix):**
+same-named free functions in sibling modules are not disambiguated by explicit
+`use` — importing only `Visibility` from a module leaks its other public
+symbols into name resolution and can shadow an explicitly-imported homonym.
+
+## Layer 5 (OPEN — root-caused 2026-07-02, iteration 6): `Dict<SymbolId, HirFunction>` indexing nil-derefs on 2nd key in interpreter `process_module`
+
+After Layers 3+4, the chain advanced into the interpreter backend. `-c
+"print(1+1)"` now fully completes frontend + HIR lowering; crash moved to:
+
+```
+#0 backend.interpreter.InterpreterBackendImpl.process_module   (interpreter.spl:50)
+#1 driver.driver_types.CompileContext.create_outlined_4
+#2 driver.driver.CompilerDriver.interpret_pipeline → .interpret → .compile
+```
+
+Instrumented trace (markers PM:0..PM:8) shows the **first** iteration of
+`for symbol in module.functions.keys(): val fn_ = module.functions[symbol]`
+completes (fn_ bound, define_global ok), and the crash is on the **second**
+iteration at `val fn_ = module.functions[symbol]` (before the next marker) —
+i.e. the `Dict<SymbolId, HirFunction>` index operation itself nil-derefs for the
+2nd key returned by `.keys()`. Same family as the known struct-keyed-Dict hazard
+noted at `driver.spl:456` (`SymbolTable.symbols[raw]` garbage-id nil-deref).
+Next step (iteration 7): inspect the seed's `Dict` get/keys codegen for struct
+keys (`SymbolId`) — hashing/equality or the keys()-iterator producing a
+bad/nil key on the 2nd element. NOTE: plain `-c` (without `SIMPLE_UNSTUB_HIR`)
+is currently a silent no-op (stubbed), so reaching "2" requires this interpreter
+path to work.
+
+## Layer 3 (historical, superseded by the Layer 3 fix above): enum struct-payload extraction returns inline garbage
 
 ### Symptom
 `SIMPLE_UNSTUB_HIR=1 <stage4> -c "print(1+1)"` → rc=139 SIGSEGV.
