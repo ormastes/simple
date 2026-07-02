@@ -253,3 +253,19 @@ cannot reach a `pass` end-to-end on this host until the `app.io.cli_ops` /
   native-build probe with `--opt-level=none --timeout 210` still timed out after
   `Entry closure files: 1`. The timeout is therefore in native codegen/linking
   for the freestanding entry, not MIR optimization level alone.
+- Follow-up found one concrete linker gap in that phase: the LLVM native linker
+  only diverted RISC-V SimpleOS outputs to a freestanding linker, so
+  `x86_64-unknown-none` could still fall through to the hosted C-runtime link
+  path. Added an x86_64 SimpleOS branch that links the user object with the
+  existing `crt0.s`, `baremetal_stubs.c`, `type_stubs.c`, `auto_stubs.c`, and
+  `linker.ld` assets. The focused SimpleOS contract now asserts this wiring.
+  A direct `--emit-object` trace probe still timed out before useful phase
+  output, and `bin/simple check` on `llvm_native_link.spl` exited 255 after
+  loader warnings without a diagnostic, so live native-build evidence remains
+  open.
+- The pure Simple native-build parser now consumes `--cpu` and
+  `--linker-script`, exports `SIMPLE_NATIVE_BUILD_LINKER_SCRIPT`, and the
+  x86_64 freestanding linker uses that script with the existing x86_64 linker
+  script as fallback. This keeps the QEMU runner's emitted
+  `--linker-script <path>` argument truthful instead of relying only on the
+  hardcoded fallback.

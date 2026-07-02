@@ -566,13 +566,21 @@ impl HirLowering:
 
         self.symbols.pop_scope()
 
-        # Check if last statement is an expression (for block value)
+        # Check if last statement is an expression (for block value).
+        # `last` MUST be a typed local: the seed erases `[HirStmt]` elements to
+        # ANY, and `last.kind`'s enum-payload extraction (`case Expr(expr)`) on an
+        # ANY receiver mis-resolves, binding a nil `expr`. That produced
+        # `value = Some(nil)` -> a HirBlock with `has=true, value=nil`, so the
+        # interpreter/MIR later dereferenced a nil trailing-value expr (the `-c`
+        # "print(...)" body silently vanished / trapped, iteration 10). Binding
+        # `val last: HirStmt` restores the real struct type so `.kind` resolves.
         val value: HirExpr? = if stmts.len() > 0:
-            val last = stmts[stmts.len() - 1]
+            val last: HirStmt = stmts[stmts.len() - 1]
             match last.kind:
                 case Expr(expr):
+                    val block_tail_expr: HirExpr = expr
                     stmts = stmts[0:stmts.len() - 1]  # Remove last stmt
-                    Some(expr)
+                    Some(block_tail_expr)
                 case _:
                     nil
         else:

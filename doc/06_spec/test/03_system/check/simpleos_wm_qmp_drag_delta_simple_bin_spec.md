@@ -103,7 +103,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/simpleos_wm_qmp_drag_delta_s
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 29 lines folded for reproduction.
+Runnable source: 35 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -128,12 +128,18 @@ expect(script).to_contain("wm-simple-web-build-timeout")
 val native_build_main = file_read("src/app/cli/native_build_main.spl")
 expect(native_build_main).to_contain("[\"run\", \"src/app/cli/native_build_worker.spl\", \"--mode=interpreter\"]")
 expect(native_build_main).to_contain("env_set(\"SIMPLE_EXECUTION_MODE\", \"interpret\")")
+val compile_targets = file_read("src/app/io/_CliCompile/compile_targets.spl")
+expect(compile_targets).to_contain("linker_script = args[j]")
+expect(compile_targets).to_contain("env_set(\"SIMPLE_NATIVE_BUILD_LINKER_SCRIPT\", linker_script)")
+expect(compile_targets).to_contain("env_set(\"SIMPLE_NATIVE_BUILD_LINKER_SCRIPT\", old_linker_script)")
+expect(compile_targets).to_contain("elif a == \"--cpu\"")
 val native_build_worker = file_read("src/app/cli/native_build_worker.spl")
 expect(native_build_worker).to_contain("use app.io._CliCompile.compile_targets.")
 expect(native_build_worker).to_contain("cli_native_build")
 val llvm_native_link = file_read("src/compiler/70.backend/backend/llvm_native_link.spl")
 expect(llvm_native_link).to_contain("is_simpleos_x86_64_link")
 expect(llvm_native_link).to_contain("link_simpleos_x86_64")
+expect(llvm_native_link).to_contain("SIMPLE_NATIVE_BUILD_LINKER_SCRIPT")
 expect(llvm_native_link).to_contain("examples/09_embedded/simple_os/arch/x86_64/linker.ld")
 expect(llvm_native_link).to_contain("examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c")
 ```
