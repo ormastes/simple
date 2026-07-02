@@ -12,6 +12,7 @@ SIMPLE_LIB_CONFIGURED="${SIMPLE_LIB:-src}"
 CHILD_TIMEOUT="${PRODUCTION_GUI_FONT_RUNTIME_CHILD_TIMEOUT_SECS:-240}"
 ENV_PATH="$BUILD_DIR/evidence.env"
 VECTOR_SCRIPT="${PRODUCTION_GUI_FONT_RUNTIME_VECTOR_SCRIPT:-scripts/check/check-vector-font-compute-evidence.shs}"
+METAL_SCRIPT="${PRODUCTION_GUI_FONT_RUNTIME_METAL_SCRIPT:-scripts/check/check-metal-generated-2d-readback.shs}"
 CUDA_SCRIPT="${PRODUCTION_GUI_FONT_RUNTIME_CUDA_SCRIPT:-scripts/check/check-cuda-generated-2d-readback.shs}"
 OPENCL_SCRIPT="${PRODUCTION_GUI_FONT_RUNTIME_OPENCL_SCRIPT:-scripts/check/check-opencl-generated-2d-readback.shs}"
 
@@ -25,16 +26,43 @@ is_rust_seed_simple() {
     esac
 }
 
+is_host_compatible_simple() {
+    path="$1"
+    [ -x "$path" ] || return 1
+    if ! command -v file >/dev/null 2>&1; then
+        return 0
+    fi
+    description="$(file "$path" 2>/dev/null || true)"
+    case "$(uname -s 2>/dev/null || echo unknown)" in
+        Darwin)
+            case "$description" in
+                *ELF*|*PE32*) return 1 ;;
+            esac
+            ;;
+        Linux|FreeBSD)
+            case "$description" in
+                *Mach-O*|*PE32*) return 1 ;;
+            esac
+            ;;
+        CYGWIN*|MINGW*|MSYS*|Windows_NT)
+            case "$description" in
+                *ELF*|*Mach-O*) return 1 ;;
+            esac
+            ;;
+    esac
+    return 0
+}
+
 if [ -z "${SIMPLE_BIN+x}" ]; then
     SIMPLE_BIN_SOURCE="default-missing"
     for candidate in \
-        "release"/*/simple \
         "bin/release"/*/simple \
         "build/bootstrap/stage3/simple" \
         "bin/simple" \
-        "./bin/simple"
+        "./bin/simple" \
+        "release"/*/simple
     do
-        if [ -x "$candidate" ]; then
+        if is_host_compatible_simple "$candidate"; then
             SIMPLE_BIN="$candidate"
             SIMPLE_BIN_SOURCE="repo-self-hosted-fallback"
             break
@@ -55,6 +83,9 @@ elif is_rust_seed_simple "$SIMPLE_BIN"; then
 elif [ ! -x "$SIMPLE_BIN" ]; then
     SIMPLE_BIN_STATUS=missing
     SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-missing"
+elif ! is_host_compatible_simple "$SIMPLE_BIN"; then
+    SIMPLE_BIN_STATUS=incompatible
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-host-incompatible"
 fi
 
 field_of() {
@@ -96,7 +127,7 @@ emit_missing_simple() {
         append_env production_gui_font_runtime_simple_bin_source "$SIMPLE_BIN_SOURCE"
         append_env production_gui_font_runtime_simple_bin_status "$SIMPLE_BIN_STATUS"
         append_env production_gui_font_runtime_selected_backend ""
-        append_env production_gui_font_runtime_candidates_simple '["cuda", "opencl", "cpu_simd", "software", "cpu"]'
+        append_env production_gui_font_runtime_candidates_simple '["metal", "cuda", "opencl", "cpu_simd", "software", "cpu"]'
         append_env production_gui_font_runtime_vector_runtime_ready false
         append_env production_gui_font_runtime_vector_module_ready false
         append_env production_gui_font_runtime_vector_backend_submit_ok false
@@ -120,6 +151,9 @@ emit_missing_simple() {
 readback_status() {
     backend="$1"
     case "$backend" in
+        metal)
+            field_of metal_generated_2d_readback_status "$BUILD_DIR/metal/evidence.env"
+            ;;
         cuda)
             field_of cuda_generated_2d_readback_status "$BUILD_DIR/cuda/evidence.env"
             ;;
@@ -135,6 +169,9 @@ readback_status() {
 readback_submit() {
     backend="$1"
     case "$backend" in
+        metal)
+            field_of metal_generated_2d_readback_submit_attempted "$BUILD_DIR/metal/evidence.env"
+            ;;
         cuda)
             field_of cuda_generated_2d_readback_submit_attempted "$BUILD_DIR/cuda/evidence.env"
             ;;
@@ -150,6 +187,9 @@ readback_submit() {
 readback_available() {
     backend="$1"
     case "$backend" in
+        metal)
+            field_of metal_generated_2d_readback_readback_available "$BUILD_DIR/metal/evidence.env"
+            ;;
         cuda)
             field_of cuda_generated_2d_readback_readback_available "$BUILD_DIR/cuda/evidence.env"
             ;;
@@ -171,12 +211,20 @@ backend_has_readback_pass() {
 
 select_backend() {
     vector_reason="$1"
+    if printf '%s\n' "$vector_reason" | grep -Fq "metal" && backend_has_readback_pass metal; then
+        printf '%s\n' metal
+        return 0
+    fi
     if printf '%s\n' "$vector_reason" | grep -Fq "cuda" && backend_has_readback_pass cuda; then
         printf '%s\n' cuda
         return 0
     fi
     if printf '%s\n' "$vector_reason" | grep -Fq "opencl" && backend_has_readback_pass opencl; then
         printf '%s\n' opencl
+        return 0
+    fi
+    if backend_has_readback_pass metal; then
+        printf '%s\n' metal
         return 0
     fi
     if backend_has_readback_pass cuda; then
@@ -195,6 +243,7 @@ if [ "$SIMPLE_BIN_STATUS" != "pass" ]; then
 fi
 
 run_child vector "$VECTOR_SCRIPT"
+run_child metal "$METAL_SCRIPT"
 run_child cuda "$CUDA_SCRIPT"
 run_child opencl "$OPENCL_SCRIPT"
 
@@ -230,8 +279,13 @@ elif [ -z "$selected_backend" ]; then
 fi
 
 case "$selected_backend" in
+    metal)
+        candidates='["metal", "cuda", "opencl", "cpu_simd", "software", "cpu"]'
+        cuda_hits="${vector_cuda_hits:-0}"
+        opencl_hits="${vector_opencl_hits:-0}"
+        ;;
     cuda)
-        candidates='["cuda", "cpu_simd", "software", "cpu"]'
+        candidates='["cuda", "opencl", "cpu_simd", "software", "cpu"]'
         cuda_hits="${vector_cuda_hits:-1}"
         opencl_hits=0
         ;;
@@ -241,7 +295,7 @@ case "$selected_backend" in
         opencl_hits="${vector_opencl_hits:-1}"
         ;;
     *)
-        candidates='["cuda", "opencl", "cpu_simd", "software", "cpu"]'
+        candidates='["metal", "cuda", "opencl", "cpu_simd", "software", "cpu"]'
         cuda_hits="${vector_cuda_hits:-0}"
         opencl_hits="${vector_opencl_hits:-0}"
         ;;
@@ -256,6 +310,7 @@ esac
     append_env production_gui_font_runtime_selected_backend "$selected_backend"
     append_env production_gui_font_runtime_candidates_simple "$candidates"
     append_env production_gui_font_runtime_vector_source_env "$vector_env"
+    append_env production_gui_font_runtime_metal_source_env "$BUILD_DIR/metal/evidence.env"
     append_env production_gui_font_runtime_cuda_source_env "$BUILD_DIR/cuda/evidence.env"
     append_env production_gui_font_runtime_opencl_source_env "$BUILD_DIR/opencl/evidence.env"
     append_env production_gui_font_runtime_vector_runtime_ready "$([ "$status" = pass ] && echo true || echo false)"
@@ -273,6 +328,9 @@ esac
     append_env production_gui_font_runtime_bitmap_module_ready "$([ "$status" = pass ] && echo true || echo false)"
     append_env production_gui_font_runtime_bitmap_backend_submit_ok "$([ "$status" = pass ] && echo true || echo false)"
     append_env production_gui_font_runtime_bitmap_readback_available "$([ "$status" = pass ] && echo true || echo false)"
+    append_env production_gui_font_runtime_metal_status "$(readback_status metal)"
+    append_env production_gui_font_runtime_metal_submit_attempted "$(readback_submit metal)"
+    append_env production_gui_font_runtime_metal_readback_available "$(readback_available metal)"
     append_env production_gui_font_runtime_cuda_status "$(readback_status cuda)"
     append_env production_gui_font_runtime_cuda_submit_attempted "$(readback_submit cuda)"
     append_env production_gui_font_runtime_cuda_readback_available "$(readback_available cuda)"
@@ -288,6 +346,7 @@ esac
     echo "- reason: $reason"
     echo "- selected_backend: $selected_backend"
     echo "- vector_source: $vector_env"
+    echo "- metal_source: $BUILD_DIR/metal/evidence.env"
     echo "- cuda_source: $BUILD_DIR/cuda/evidence.env"
     echo "- opencl_source: $BUILD_DIR/opencl/evidence.env"
 } >"$REPORT_PATH"

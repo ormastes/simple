@@ -1,35 +1,35 @@
 # Production GUI Web Renderer Parity Evidence
 
-- status: fail
-- reason: font-offload-evidence-failed
-- simple binary: bin/release/aarch64-apple-darwin-macho/simple (repo-self-hosted-fallback)
+- status: pass
+- reason: pass
+- simple binary: bin/simple (explicit-env)
 - electron matrix: pass
 - electron CSS/layout manifest: pass
 - Tauri/Chrome surface manifest: pass
 - Surface ARGB artifacts: pass (tauri 50/0; chrome 50/0)
 - backend-executed CPU SIMD/Metal parity: pass
 - backend sample count: 3
-- backend total elapsed us min/avg/max: 2235 / 2469 / 2931
-- backend total pixels/s min/avg/max: 87342 / 105355 / 114541
-- font offload/readback: unavailable
-- vector font readback: 
-- bitmap font readback: 
+- backend total elapsed us min/avg/max: 2213 / 2441 / 2880
+- backend total pixels/s min/avg/max: 88888 / 106455 / 115680
+- font offload/readback: pass
+- vector font readback: vector-font-glyph-readback-matched
+- bitmap font readback: gpu-glyph-raster-readback-matched
 - raw Metal framebuffer readback: pass
 - macOS Metal render-log compare: pass
 - Metal render-log gates: generated=pass framebuffer=pass browser=pass pairwise=pass argb_source=pass gpu_capture=not-required blocked=0
-- Electron event routing: 
-- Electron event proof source:  /  / 
-- Electron performance/animation: performance.now  / input-to-paint  ms / requestAnimationFrame  / CSS animation 
-- Electron performance/animation detail: perf= delta_ms= input_to_paint_ms= animation= frames= css=
+- Electron event routing: pass
+- Electron event proof source: pass / pass / pass
+- Electron performance/animation: performance.now true / input-to-paint 14.399999618530273 ms / requestAnimationFrame 2 / CSS animation true
+- Electron performance/animation detail: perf=true delta_ms=22.699999809265137 input_to_paint_ms=14.399999618530273 animation=true frames=2 css=true
 - blur/tolerance used: false
 
 ## Raw Evidence
-- production_gui_web_renderer_parity_status=fail
-- production_gui_web_renderer_parity_reason=font-offload-evidence-failed
-- production_gui_web_renderer_parity_source_revision=8c60c1deb5e0
-- gui_web_2d_evidence_source_revision=8c60c1deb5e0
-- production_gui_web_renderer_parity_simple_bin=bin/release/aarch64-apple-darwin-macho/simple
-- production_gui_web_renderer_parity_simple_bin_source=repo-self-hosted-fallback
+- production_gui_web_renderer_parity_status=pass
+- production_gui_web_renderer_parity_reason=pass
+- production_gui_web_renderer_parity_source_revision=f7db7aa0ca02
+- gui_web_2d_evidence_source_revision=f7db7aa0ca02
+- production_gui_web_renderer_parity_simple_bin=bin/simple
+- production_gui_web_renderer_parity_simple_bin_source=explicit-env
 - production_gui_web_renderer_parity_simple_bin_status=pass
 - production_gui_web_renderer_parity_matrix_exit_code=0
 - production_gui_web_renderer_parity_matrix_status=pass
@@ -10490,15 +10490,15 @@
 - production_gui_web_renderer_parity_backend_readback_source=software_reference
 - production_gui_web_renderer_parity_backend_blur_or_tolerance_used=false
 - production_gui_web_renderer_parity_backend_sample_count=3
-- production_gui_web_renderer_parity_backend_total_elapsed_us_min=2235
-- production_gui_web_renderer_parity_backend_total_elapsed_us_avg=2469
-- production_gui_web_renderer_parity_backend_total_elapsed_us_max=2931
-- production_gui_web_renderer_parity_backend_total_pixels_per_second_min=87342
-- production_gui_web_renderer_parity_backend_total_pixels_per_second_avg=105355
-- production_gui_web_renderer_parity_backend_total_pixels_per_second_max=114541
+- production_gui_web_renderer_parity_backend_total_elapsed_us_min=2213
+- production_gui_web_renderer_parity_backend_total_elapsed_us_avg=2441
+- production_gui_web_renderer_parity_backend_total_elapsed_us_max=2880
+- production_gui_web_renderer_parity_backend_total_pixels_per_second_min=88888
+- production_gui_web_renderer_parity_backend_total_pixels_per_second_avg=106455
+- production_gui_web_renderer_parity_backend_total_pixels_per_second_max=115680
 - production_gui_web_renderer_parity_backend_timing_status=pass
-- production_gui_web_renderer_parity_backend_simple_bin=bin/release/aarch64-apple-darwin-macho/simple
-- production_gui_web_renderer_parity_backend_simple_bin_source=repo-self-hosted-fallback
+- production_gui_web_renderer_parity_backend_simple_bin=bin/simple
+- production_gui_web_renderer_parity_backend_simple_bin_source=explicit-env
 - production_gui_web_renderer_parity_backend_simple_bin_status=pass
 - production_gui_web_renderer_parity_backend_report=build/production_gui_web_renderer_parity_evidence/backend_executed/report.md
 - backend_production_gui_backend_status=pass
@@ -10541,66 +10541,80 @@
 - backend_production_gui_backend_metal_gpu_rect_pixel=0
 - backend_production_gui_backend_tolerance_used=false
 - backend_production_gui_backend_exact_backend_parity=true
-- backend_production_gui_backend_software_render_elapsed_us=481
-- backend_production_gui_backend_cpu_simd_render_elapsed_us=421
-- backend_production_gui_backend_metal_render_elapsed_us=882
-- backend_production_gui_backend_total_elapsed_us=2931
-- backend_production_gui_backend_software_pixels_per_second=532224
-- backend_production_gui_backend_cpu_simd_pixels_per_second=608076
-- backend_production_gui_backend_metal_pixels_per_second=290249
-- backend_production_gui_backend_total_pixels_per_second=87342
+- backend_production_gui_backend_software_render_elapsed_us=476
+- backend_production_gui_backend_cpu_simd_render_elapsed_us=416
+- backend_production_gui_backend_metal_render_elapsed_us=846
+- backend_production_gui_backend_total_elapsed_us=2880
+- backend_production_gui_backend_software_pixels_per_second=537815
+- backend_production_gui_backend_cpu_simd_pixels_per_second=615384
+- backend_production_gui_backend_metal_pixels_per_second=302600
+- backend_production_gui_backend_total_pixels_per_second=88888
 - backend_production_gui_backend_timing_budget_us=250000
 - backend_production_gui_backend_timing_budget_status=pass
 - backend_production_gui_backend_timing_budget_reason=within-render-budget
 - backend_production_gui_backend_sample_count=3
-- backend_production_gui_backend_total_elapsed_us_min=2235
-- backend_production_gui_backend_total_elapsed_us_avg=2469
-- backend_production_gui_backend_total_elapsed_us_max=2931
-- backend_production_gui_backend_total_pixels_per_second_min=87342
-- backend_production_gui_backend_total_pixels_per_second_avg=105355
-- backend_production_gui_backend_total_pixels_per_second_max=114541
-- backend_production_gui_backend_simple_bin=bin/release/aarch64-apple-darwin-macho/simple
-- backend_production_gui_backend_simple_bin_source=repo-self-hosted-fallback
+- backend_production_gui_backend_total_elapsed_us_min=2213
+- backend_production_gui_backend_total_elapsed_us_avg=2441
+- backend_production_gui_backend_total_elapsed_us_max=2880
+- backend_production_gui_backend_total_pixels_per_second_min=88888
+- backend_production_gui_backend_total_pixels_per_second_avg=106455
+- backend_production_gui_backend_total_pixels_per_second_max=115680
+- backend_production_gui_backend_simple_bin=bin/simple
+- backend_production_gui_backend_simple_bin_source=explicit-env
 - backend_production_gui_backend_simple_bin_status=pass
 - backend_production_gui_backend_blur_or_tolerance_used=false
 - backend_production_gui_backend_evidence_log=build/production_gui_web_renderer_parity_evidence/backend_executed/evidence.log
-- production_gui_web_renderer_parity_font_offload_exit_code=1
-- production_gui_web_renderer_parity_font_offload_status=unavailable
-- production_gui_web_renderer_parity_font_offload_reason=simple-font-offload-evidence-failed
+- production_gui_web_renderer_parity_font_offload_exit_code=0
+- production_gui_web_renderer_parity_font_offload_status=pass
+- production_gui_web_renderer_parity_font_offload_reason=vector-and-bitmap-font-readback-matched
 - production_gui_web_renderer_parity_font_offload_timed_out=false
 - production_gui_web_renderer_parity_font_offload_timeout_secs=180
-- production_gui_web_renderer_parity_font_offload_simple_bin=bin/release/aarch64-apple-darwin-macho/simple
-- production_gui_web_renderer_parity_font_offload_simple_bin_source=repo-self-hosted-fallback
+- production_gui_web_renderer_parity_font_offload_simple_bin=bin/simple
+- production_gui_web_renderer_parity_font_offload_simple_bin_source=explicit-env
 - production_gui_web_renderer_parity_font_offload_simple_bin_status=pass
 - production_gui_web_renderer_parity_font_offload_runtime_evidence_env=build/production_gui_web_renderer_parity_evidence/font_offload/runtime/evidence.env
-- production_gui_web_renderer_parity_font_offload_runtime_evidence_status=unavailable
-- production_gui_web_renderer_parity_font_offload_vector_backend=
-- production_gui_web_renderer_parity_font_offload_vector_status=unavailable
-- production_gui_web_renderer_parity_font_offload_vector_reason=
-- production_gui_web_renderer_parity_font_offload_vector_readback_status=
-- production_gui_web_renderer_parity_font_offload_vector_readback_reason=
-- production_gui_web_renderer_parity_font_offload_vector_production_ready=
-- production_gui_web_renderer_parity_font_offload_vector_expected_checksum=
-- production_gui_web_renderer_parity_font_offload_vector_actual_checksum=
-- production_gui_web_renderer_parity_font_offload_bitmap_backend=
-- production_gui_web_renderer_parity_font_offload_bitmap_status=unavailable
-- production_gui_web_renderer_parity_font_offload_bitmap_reason=
-- production_gui_web_renderer_parity_font_offload_bitmap_readback_status=
-- production_gui_web_renderer_parity_font_offload_bitmap_readback_reason=
-- production_gui_web_renderer_parity_font_offload_bitmap_production_ready=
-- production_gui_web_renderer_parity_font_offload_bitmap_expected_checksum=
-- production_gui_web_renderer_parity_font_offload_bitmap_actual_checksum=
+- production_gui_web_renderer_parity_font_offload_runtime_evidence_status=pass
+- production_gui_web_renderer_parity_font_offload_vector_backend=metal
+- production_gui_web_renderer_parity_font_offload_vector_status=gpu-glyph-returned
+- production_gui_web_renderer_parity_font_offload_vector_reason=metal-vector-font-glyph-pixels-returned
+- production_gui_web_renderer_parity_font_offload_vector_readback_status=vector-font-glyph-readback-matched
+- production_gui_web_renderer_parity_font_offload_vector_readback_reason=vector-font-gpu-readback-matched
+- production_gui_web_renderer_parity_font_offload_vector_production_ready=true
+- production_gui_web_renderer_parity_font_offload_vector_expected_checksum=1415
+- production_gui_web_renderer_parity_font_offload_vector_actual_checksum=1415
+- production_gui_web_renderer_parity_font_offload_bitmap_backend=metal
+- production_gui_web_renderer_parity_font_offload_bitmap_status=gpu-raster-plan-without-readback
+- production_gui_web_renderer_parity_font_offload_bitmap_reason=bitmap-font-gpu-raster-kernel-ready-readback-required
+- production_gui_web_renderer_parity_font_offload_bitmap_readback_status=gpu-glyph-raster-readback-matched
+- production_gui_web_renderer_parity_font_offload_bitmap_readback_reason=bitmap-glyph-raster-gpu-readback-matched
+- production_gui_web_renderer_parity_font_offload_bitmap_production_ready=true
+- production_gui_web_renderer_parity_font_offload_bitmap_expected_checksum=17121743266
+- production_gui_web_renderer_parity_font_offload_bitmap_actual_checksum=17121743266
 - production_gui_web_renderer_parity_font_offload_report=build/production_gui_web_renderer_parity_evidence/font_offload/report.md
 - production_gui_web_renderer_parity_font_offload_blocker_doc=doc/08_tracking/bug/production_gui_font_offload_runtime_readback_2026-06-23.md
-- font_production_gui_font_offload_status=unavailable
-- font_production_gui_font_offload_reason=simple-font-offload-evidence-failed
-- font_production_gui_font_offload_simple_bin=bin/release/aarch64-apple-darwin-macho/simple
-- font_production_gui_font_offload_simple_bin_source=repo-self-hosted-fallback
+- font_production_gui_font_offload_status=pass
+- font_production_gui_font_offload_reason=vector-and-bitmap-font-readback-matched
+- font_production_gui_font_offload_simple_bin=bin/simple
+- font_production_gui_font_offload_simple_bin_source=explicit-env
 - font_production_gui_font_offload_simple_bin_status=pass
 - font_production_gui_font_offload_runtime_evidence_env=build/production_gui_web_renderer_parity_evidence/font_offload/runtime/evidence.env
-- font_production_gui_font_offload_runtime_evidence_status=unavailable
-- font_production_gui_font_offload_vector_status=unavailable
-- font_production_gui_font_offload_bitmap_status=unavailable
+- font_production_gui_font_offload_runtime_evidence_status=pass
+- font_production_gui_font_offload_vector_backend=metal
+- font_production_gui_font_offload_vector_status=gpu-glyph-returned
+- font_production_gui_font_offload_vector_reason=metal-vector-font-glyph-pixels-returned
+- font_production_gui_font_offload_vector_readback_status=vector-font-glyph-readback-matched
+- font_production_gui_font_offload_vector_readback_reason=vector-font-gpu-readback-matched
+- font_production_gui_font_offload_vector_production_ready=true
+- font_production_gui_font_offload_vector_expected_checksum=1415
+- font_production_gui_font_offload_vector_actual_checksum=1415
+- font_production_gui_font_offload_bitmap_backend=metal
+- font_production_gui_font_offload_bitmap_status=gpu-raster-plan-without-readback
+- font_production_gui_font_offload_bitmap_reason=bitmap-font-gpu-raster-kernel-ready-readback-required
+- font_production_gui_font_offload_bitmap_readback_status=gpu-glyph-raster-readback-matched
+- font_production_gui_font_offload_bitmap_readback_reason=bitmap-glyph-raster-gpu-readback-matched
+- font_production_gui_font_offload_bitmap_production_ready=true
+- font_production_gui_font_offload_bitmap_expected_checksum=17121743266
+- font_production_gui_font_offload_bitmap_actual_checksum=17121743266
 - font_production_gui_font_offload_report=build/production_gui_web_renderer_parity_evidence/font_offload/report.md
 - font_production_gui_font_offload_blocker_doc=doc/08_tracking/bug/production_gui_font_offload_runtime_readback_2026-06-23.md
 - production_gui_web_renderer_parity_metal_readback_exit_code=0
@@ -10611,8 +10625,8 @@
 - production_gui_web_renderer_parity_metal_readback_spec_status=pass
 - production_gui_web_renderer_parity_metal_readback_available=true
 - production_gui_web_renderer_parity_metal_readback_blur_or_tolerance_used=false
-- production_gui_web_renderer_parity_metal_readback_simple_bin=bin/release/aarch64-apple-darwin-macho/simple
-- production_gui_web_renderer_parity_metal_readback_simple_bin_source=repo-self-hosted-fallback
+- production_gui_web_renderer_parity_metal_readback_simple_bin=bin/simple
+- production_gui_web_renderer_parity_metal_readback_simple_bin_source=explicit-env
 - production_gui_web_renderer_parity_metal_readback_simple_bin_status=pass
 - production_gui_web_renderer_parity_metal_readback_report=build/production_gui_web_renderer_parity_evidence/metal_readback/report.md
 - metal_metal_engine2d_framebuffer_readback_status=pass
@@ -10622,8 +10636,8 @@
 - metal_metal_engine2d_framebuffer_readback_sffi=src/lib/nogc_sync_mut/io/metal_sffi.spl
 - metal_metal_engine2d_framebuffer_readback_spec=test/02_integration/rendering/metal_engine2d_readback_spec.spl
 - metal_metal_engine2d_framebuffer_readback_spec_status=pass
-- metal_metal_engine2d_framebuffer_readback_simple_bin=bin/release/aarch64-apple-darwin-macho/simple
-- metal_metal_engine2d_framebuffer_readback_simple_bin_source=repo-self-hosted-fallback
+- metal_metal_engine2d_framebuffer_readback_simple_bin=bin/simple
+- metal_metal_engine2d_framebuffer_readback_simple_bin_source=explicit-env
 - metal_metal_engine2d_framebuffer_readback_simple_bin_status=pass
 - metal_metal_engine2d_framebuffer_gpu_download_path_present=true
 - metal_metal_engine2d_framebuffer_gpu_completeness_guard_present=true
@@ -10809,22 +10823,133 @@
 - metal_render_log_macos_metal_render_log_compare_gpu_capture_artifact_claimed_magic_reason=not-required
 - metal_render_log_macos_metal_render_log_compare_require_gpu_capture=0
 - metal_render_log_macos_metal_render_log_compare_require_tauri_ios=0
-
-## 2026-07-02 WKWebView Surface Follow-Up
-
-- status: production aggregate still fails, but the previous Tauri/Chrome surface blocker is cleared
-- aggregate reason: `font-offload-evidence-failed`
-- surface evidence: `build/production_gui_web_renderer_parity_evidence/tauri_chrome_manifest/evidence.env`
-- surface status: `pass`
-- Tauri backend: `macos-wkwebview-snapshot`
-- Tauri live capture: `true`
-- Tauri pass/tracked/fail: `36` / `14` / `0`
-- Tauri mismatch count: `0`
-- Tauri ARGB artifact pass/fail: `50` / `0`
-- Chrome capture: `pass`
-- Chrome live capture: `true`
-- Chrome ARGB artifact pass: `50`
-- fake capture allowed: `false`
-- blur/tolerance used: `false`
-- Metal render-log status: `pass`, blocked gate count `0`
-- remaining blocker: font runtime evidence is unavailable because vector font compute is not passing; nested evidence reports missing vector font CUDA/OpenCL kernels, CUDA readback `missing-verified-ptx`, and OpenCL readback `missing-opencl-runtime-loader`.
+- production_gui_web_renderer_parity_event_routing_exit_code=0
+- production_gui_web_renderer_parity_event_routing_status=pass
+- production_gui_web_renderer_parity_event_routing_reason=pass
+- production_gui_web_renderer_parity_event_routing_validation_status=pass
+- production_gui_web_renderer_parity_event_routing_validation_reason=pass
+- production_gui_web_renderer_parity_event_routing_proof_symlink_status=pass
+- production_gui_web_renderer_parity_event_routing_timed_out=false
+- production_gui_web_renderer_parity_event_routing_timeout_secs=180
+- production_gui_web_renderer_parity_event_routing_ready=true
+- production_gui_web_renderer_parity_event_routing_wm_found=true
+- production_gui_web_renderer_parity_event_routing_focus_count=1
+- production_gui_web_renderer_parity_event_routing_move_count=1
+- production_gui_web_renderer_parity_event_routing_maximize_count=1
+- production_gui_web_renderer_parity_event_routing_title_command_count=1
+- production_gui_web_renderer_parity_event_routing_text_input_count=1
+- production_gui_web_renderer_parity_event_routing_pointer_down_count=1
+- production_gui_web_renderer_parity_event_routing_pointer_up_count=1
+- production_gui_web_renderer_parity_event_routing_performance_now_available=true
+- production_gui_web_renderer_parity_event_routing_performance_now_delta_ms=22.699999809265137
+- production_gui_web_renderer_parity_event_routing_input_to_paint_ms=14.399999618530273
+- production_gui_web_renderer_parity_event_routing_animation_frame_available=true
+- production_gui_web_renderer_parity_event_routing_animation_frame_count=2
+- production_gui_web_renderer_parity_event_routing_css_animation_probe=true
+- production_gui_web_renderer_parity_event_routing_event_sequence=host_wm_pointer:down,window_cmd:focus,window_cmd:move,window_cmd:title_command,window_cmd:maximize,input_event:text_input,input_event:pointer_down,input_event:pointer_up
+- production_gui_web_renderer_parity_event_routing_title_text=Terminal
+- production_gui_web_renderer_parity_event_routing_title_context_text=terminal
+- production_gui_web_renderer_parity_event_routing_traffic_button_count=3
+- production_gui_web_renderer_parity_event_routing_title_input_tag=input
+- production_gui_web_renderer_parity_event_routing_titlebar_height=34px
+- production_gui_web_renderer_parity_event_routing_titlebar_display=flex
+- production_gui_web_renderer_parity_event_routing_titlebar_cursor=grab
+- production_gui_web_renderer_parity_event_routing_titlebar_background=rgb(229, 231, 235)
+- production_gui_web_renderer_parity_event_routing_title_color=rgb(17, 24, 39)
+- production_gui_web_renderer_parity_event_routing_title_font_weight=700
+- production_gui_web_renderer_parity_event_routing_title_input_min_width=142px
+- production_gui_web_renderer_parity_event_routing_title_input_width=144.562px
+- production_gui_web_renderer_parity_event_routing_title_input_width_px=144.562
+- production_gui_web_renderer_parity_event_routing_title_input_height=24px
+- production_gui_web_renderer_parity_event_routing_title_input_cursor=text
+- production_gui_web_renderer_parity_event_routing_title_input_background=rgb(241, 245, 249)
+- production_gui_web_renderer_parity_event_routing_close_button_background=rgb(239, 68, 68)
+- production_gui_web_renderer_parity_event_routing_minimize_button_background=rgb(234, 179, 8)
+- production_gui_web_renderer_parity_event_routing_maximize_button_background=rgb(34, 197, 94)
+- production_gui_web_renderer_parity_event_routing_expected_move_x=86
+- production_gui_web_renderer_parity_event_routing_expected_move_y=86
+- production_gui_web_renderer_parity_event_routing_move_payload_x=86
+- production_gui_web_renderer_parity_event_routing_move_payload_y=86
+- production_gui_web_renderer_parity_event_routing_move_payload_source=native_event
+- production_gui_web_renderer_parity_event_routing_move_payload_window_id_hint=win1
+- production_gui_web_renderer_parity_event_routing_title_command_text=/tmp/project
+- production_gui_web_renderer_parity_event_routing_text_input_text=Hello Simple
+- production_gui_web_renderer_parity_event_routing_proof_source=tools/web-render-backend/wm_event_check.js
+- production_gui_web_renderer_parity_event_routing_proof_source_file_status=pass
+- production_gui_web_renderer_parity_event_routing_proof_source_size_bytes=14039
+- production_gui_web_renderer_parity_event_routing_proof_source_actual_size_bytes=14039
+- production_gui_web_renderer_parity_event_routing_proof_source_file_reason=pass
+- production_gui_web_renderer_parity_event_routing_proof_source_artifact_status=pass
+- production_gui_web_renderer_parity_event_routing_browser_engine=chromium
+- production_gui_web_renderer_parity_event_routing_electron_user_agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.7871.46 Electron/43.0.0 Safari/537.36
+- production_gui_web_renderer_parity_event_routing_electron_process_version=43.0.0
+- production_gui_web_renderer_parity_event_routing_chrome_process_version=150.0.7871.46
+- production_gui_web_renderer_parity_event_routing_result_path=build/production_gui_web_renderer_parity_evidence/event_routing/wm-event-check.json
+- production_gui_web_renderer_parity_event_routing_blur_or_tolerance_used=false
+- production_gui_web_renderer_parity_event_routing_report=build/production_gui_web_renderer_parity_evidence/event_routing/report.md
+- event_wm_browser_event_routing_status=pass
+- event_wm_browser_event_routing_reason=pass
+- event_wm_browser_event_routing_validation_status=pass
+- event_wm_browser_event_routing_validation_reason=pass
+- event_wm_browser_event_routing_proof_symlink_status=pass
+- event_wm_browser_event_routing_proof_hardlink_status=pass
+- event_wm_browser_event_routing_target=electron
+- event_wm_browser_event_routing_surface_id=wm-browser-event-routing
+- event_wm_browser_event_routing_proof_source=tools/web-render-backend/wm_event_check.js
+- event_wm_browser_event_routing_proof_source_file_status=pass
+- event_wm_browser_event_routing_proof_source_size_bytes=14039
+- event_wm_browser_event_routing_proof_source_actual_size_bytes=14039
+- event_wm_browser_event_routing_proof_source_file_reason=pass
+- event_wm_browser_event_routing_proof_source_artifact_status=pass
+- event_wm_browser_event_routing_browser_engine=chromium
+- event_wm_browser_event_routing_electron_user_agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.7871.46 Electron/43.0.0 Safari/537.36
+- event_wm_browser_event_routing_electron_process_version=43.0.0
+- event_wm_browser_event_routing_chrome_process_version=150.0.7871.46
+- event_wm_browser_event_routing_result_path=build/production_gui_web_renderer_parity_evidence/event_routing/wm-event-check.json
+- event_wm_browser_event_routing_ready=true
+- event_wm_browser_event_routing_wm_found=true
+- event_wm_browser_event_routing_window_cmd_count=4
+- event_wm_browser_event_routing_input_event_count=3
+- event_wm_browser_event_routing_focus_count=1
+- event_wm_browser_event_routing_move_count=1
+- event_wm_browser_event_routing_maximize_count=1
+- event_wm_browser_event_routing_title_command_count=1
+- event_wm_browser_event_routing_text_input_count=1
+- event_wm_browser_event_routing_pointer_down_count=1
+- event_wm_browser_event_routing_pointer_up_count=1
+- event_wm_browser_event_routing_event_sequence=host_wm_pointer:down,window_cmd:focus,window_cmd:move,window_cmd:title_command,window_cmd:maximize,input_event:text_input,input_event:pointer_down,input_event:pointer_up
+- event_wm_browser_event_routing_performance_now_available=true
+- event_wm_browser_event_routing_performance_now_delta_ms=22.699999809265137
+- event_wm_browser_event_routing_input_to_paint_ms=14.399999618530273
+- event_wm_browser_event_routing_animation_frame_available=true
+- event_wm_browser_event_routing_animation_frame_count=2
+- event_wm_browser_event_routing_css_animation_probe=true
+- event_wm_browser_event_routing_title_text=Terminal
+- event_wm_browser_event_routing_title_context_text=terminal
+- event_wm_browser_event_routing_traffic_button_count=3
+- event_wm_browser_event_routing_title_input_tag=input
+- event_wm_browser_event_routing_titlebar_height=34px
+- event_wm_browser_event_routing_titlebar_display=flex
+- event_wm_browser_event_routing_titlebar_cursor=grab
+- event_wm_browser_event_routing_titlebar_background=rgb(229, 231, 235)
+- event_wm_browser_event_routing_title_color=rgb(17, 24, 39)
+- event_wm_browser_event_routing_title_font_weight=700
+- event_wm_browser_event_routing_title_input_min_width=142px
+- event_wm_browser_event_routing_title_input_width=144.562px
+- event_wm_browser_event_routing_title_input_width_px=144.562
+- event_wm_browser_event_routing_title_input_height=24px
+- event_wm_browser_event_routing_title_input_cursor=text
+- event_wm_browser_event_routing_title_input_background=rgb(241, 245, 249)
+- event_wm_browser_event_routing_close_button_background=rgb(239, 68, 68)
+- event_wm_browser_event_routing_minimize_button_background=rgb(234, 179, 8)
+- event_wm_browser_event_routing_maximize_button_background=rgb(34, 197, 94)
+- event_wm_browser_event_routing_expected_move_x=86
+- event_wm_browser_event_routing_expected_move_y=86
+- event_wm_browser_event_routing_move_payload_x=86
+- event_wm_browser_event_routing_move_payload_y=86
+- event_wm_browser_event_routing_move_payload_source=native_event
+- event_wm_browser_event_routing_move_payload_window_id_hint=win1
+- event_wm_browser_event_routing_title_command_text=/tmp/project
+- event_wm_browser_event_routing_text_input_text=Hello Simple
+- event_wm_browser_event_routing_blur_or_tolerance_used=false
+- event_wm_browser_event_routing_exit_code=0

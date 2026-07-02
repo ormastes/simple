@@ -27,7 +27,7 @@ production_gui_font_runtime_evidence_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 2 | 2 | 0 | 0 |
+| 3 | 3 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -133,12 +133,37 @@ expect(runtime_env).to_contain("production_gui_font_runtime_bitmap_readback_avai
 
 </details>
 
+#### selects Metal when vector glyph pixels and Metal generated readback both pass
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-production-gui-font-runtime-metal-pass"
+val (_setup_out, _setup_err, setup_code) = process_run("/bin/sh", ["-c", write_metal_pass_fixtures(root)])
+expect(setup_code).to_equal(0)
+
+val (_runtime_out, _runtime_err, runtime_code) = process_run("/bin/sh", ["-c", runtime_command(root)])
+expect(runtime_code).to_equal(0)
+val runtime_env = file_read(root + "/runtime/evidence.env")
+expect(runtime_env).to_contain("production_gui_font_runtime_status=pass")
+expect(runtime_env).to_contain("production_gui_font_runtime_selected_backend=metal")
+expect(runtime_env).to_contain("production_gui_font_runtime_candidates_simple=[\"metal\", \"cuda\", \"opencl\", \"cpu_simd\", \"software\", \"cpu\"]")
+expect(runtime_env).to_contain("production_gui_font_runtime_metal_status=pass")
+expect(runtime_env).to_contain("production_gui_font_runtime_metal_readback_available=true")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 2 |
-| Active scenarios | 2 |
+| Total scenarios | 3 |
+| Active scenarios | 3 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
