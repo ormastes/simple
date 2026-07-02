@@ -624,9 +624,16 @@ pub(super) fn eval_op_expr(
             // Helper to determine if we should use float arithmetic.
             // `use_f32` is true when both sides are f32-kind (neither is f64);
             // `use_float` covers both — true if any side is float-kind.
-            if let (Value::Int(left), Value::Int(right)) = (&left_val, &right_val) {
-                if let Some(value) = fast_int_binop(op, *left, *right)? {
-                    return Ok(Some(value));
+            // Skip the int fast-path when this is newtype arithmetic: it must
+            // fall through to the `result = match op {...}` handling below so
+            // the raw Int result gets re-wrapped into the newtype Object (see
+            // "Re-wrap newtype" below). Otherwise `a + b` on i64 newtypes
+            // returns a bare i64 instead of Object { class, value }.
+            if newtype_wrap_class.is_none() {
+                if let (Value::Int(left), Value::Int(right)) = (&left_val, &right_val) {
+                    if let Some(value) = fast_int_binop(op, *left, *right)? {
+                        return Ok(Some(value));
+                    }
                 }
             }
 
