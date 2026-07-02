@@ -435,6 +435,12 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_slice",
     "rt_contains",
     "rt_len",
+    // ANY+ANY dynamic add (tag-dispatched string-concat vs. integer add).
+    // Emitted by MIR lowering (lowering_expr_ops.rs) whenever both operands are
+    // ANY-typed (untyped params / erased receivers, e.g. inside the Simple Web
+    // HTML layout renderer). Must be force-kept or `native`/`.smf` execution of
+    // erased-add code fails to load with "Undefined symbol: rt_any_add".
+    "rt_any_add",
     // String operations
     "rt_string_new",
     "rt_string_concat",
