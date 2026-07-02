@@ -15,11 +15,40 @@ extern void simpleos_epoll_on_fd_close_token(int fd, uint64_t ofd_token);
 #define SYS_DUP2 63
 #define SYS_DUP  64
 
+static int running_on_linux_host(void) {
+    uint64_t cs;
+    __asm__ volatile ("mov %%cs, %0" : "=r"(cs));
+    return cs == 0x33;
+}
+
+static int64_t linux_syscall1(int64_t id, int64_t a0) {
+    int64_t r;
+    __asm__ volatile("syscall"
+                     : "=a"(r)
+                     : "a"(id), "D"(a0)
+                     : "rcx", "r11", "memory");
+    return r;
+}
+
+static int64_t linux_syscall2(int64_t id, int64_t a0, int64_t a1) {
+    int64_t r;
+    __asm__ volatile("syscall"
+                     : "=a"(r)
+                     : "a"(id), "D"(a0), "S"(a1)
+                     : "rcx", "r11", "memory");
+    return r;
+}
+
 static int simpleos_valid_fd_flags(int flags) {
     return (flags & ~(O_CLOEXEC | O_NONBLOCK)) == 0;
 }
 
 int pipe(int pipefd[2]) {
+    if (running_on_linux_host()) {
+        long ret = (long)linux_syscall1(22, (long)(uintptr_t)pipefd);
+        if (ret < 0) { errno = (int)(-ret); return -1; }
+        return 0;
+    }
     long ret = (long)simpleos_syscall(SYS_PIPE,
                                       (long)(uintptr_t)pipefd, 0, 0, 0, 0);
     if (ret < 0) { errno = (int)(-ret); return -1; }
@@ -52,6 +81,11 @@ int pipe2(int pipefd[2], int flags) {
 }
 
 int dup2(int oldfd, int newfd) {
+    if (running_on_linux_host()) {
+        long ret = (long)linux_syscall2(33, (long)oldfd, (long)newfd);
+        if (ret < 0) { errno = (int)(-ret); return -1; }
+        return (int)ret;
+    }
     int replaced_ofd = -1;
     if (oldfd != newfd) {
         int saved_errno = errno;
@@ -68,6 +102,11 @@ int dup2(int oldfd, int newfd) {
 }
 
 int dup(int oldfd) {
+    if (running_on_linux_host()) {
+        long ret = (long)linux_syscall1(32, (long)oldfd);
+        if (ret < 0) { errno = (int)(-ret); return -1; }
+        return (int)ret;
+    }
     long ret = (long)simpleos_syscall(SYS_DUP, (long)oldfd, 0, 0, 0, 0);
     if (ret < 0) { errno = (int)(-ret); return -1; }
     return (int)ret;

@@ -20,7 +20,47 @@ extern int64_t simpleos_syscall(int64_t id, int64_t a0, int64_t a1,
 
 extern char **environ;
 
+static int running_on_linux_host(void) {
+    uint64_t cs;
+    __asm__ volatile ("mov %%cs, %0" : "=r"(cs));
+    return cs == 0x33;
+}
+
+static int64_t linux_syscall0(int64_t id) {
+    int64_t r;
+    __asm__ volatile("syscall"
+                     : "=a"(r)
+                     : "a"(id)
+                     : "rcx", "r11", "memory");
+    return r;
+}
+
+static int64_t linux_syscall3(int64_t id, int64_t a0, int64_t a1, int64_t a2) {
+    int64_t r;
+    __asm__ volatile("syscall"
+                     : "=a"(r)
+                     : "a"(id), "D"(a0), "S"(a1), "d"(a2)
+                     : "rcx", "r11", "memory");
+    return r;
+}
+
+static int64_t linux_syscall4(int64_t id, int64_t a0, int64_t a1, int64_t a2,
+                              int64_t a3) {
+    register int64_t r10 __asm__("r10") = a3;
+    int64_t r;
+    __asm__ volatile("syscall"
+                     : "=a"(r)
+                     : "a"(id), "D"(a0), "S"(a1), "d"(a2), "r"(r10)
+                     : "rcx", "r11", "memory");
+    return r;
+}
+
 pid_t fork(void) {
+    if (running_on_linux_host()) {
+        long ret = (long)linux_syscall0(57);
+        if (ret < 0) { errno = (int)(-ret); return -1; }
+        return (pid_t)ret;
+    }
     long ret = (long)simpleos_syscall(SYS_FORK, 0, 0, 0, 0, 0);
     if (ret < 0) { errno = (int)(-ret); return -1; }
     return (pid_t)ret;
@@ -29,6 +69,14 @@ pid_t fork(void) {
 int execve(const char *path, char *const argv[], char *const envp[]) {
     if (!path) {
         errno = EFAULT;
+        return -1;
+    }
+    if (running_on_linux_host()) {
+        long ret = (long)linux_syscall3(59, (long)(uintptr_t)path,
+                                        (long)(uintptr_t)argv,
+                                        (long)(uintptr_t)envp);
+        if (ret < 0) errno = (int)(-ret);
+        else errno = EIO;
         return -1;
     }
     (void)argv;
@@ -50,6 +98,13 @@ int execvp(const char *file, char *const argv[]) {
 }
 
 pid_t simpleos_waitpid(pid_t pid, int *wstatus, int options) {
+    if (running_on_linux_host()) {
+        long ret = (long)linux_syscall4(61, (long)pid,
+                                        (long)(uintptr_t)wstatus,
+                                        (long)options, 0);
+        if (ret < 0) { errno = (int)(-ret); return -1; }
+        return (pid_t)ret;
+    }
     int status_buf = 0;
     long ret = (long)simpleos_syscall(SYS_WAIT, (long)pid,
                                       (long)(uintptr_t)&status_buf,
