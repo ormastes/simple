@@ -585,7 +585,133 @@ this up: add a `try_lower_bitfield_construct`-style special case in
 [single_raw_arg])`, and trace the field-write `Assign` path the same way
 `try_lower_bitfield_get` was traced for reads.
 
-### Updated regression gate (this pass)
+## Follow-on pass (task #65, 2026-07-02): `try_lower_bitfield_construct` added,
+## but a DEEPER, previously-undocumented frontend/AST-bridge gap is the actual
+## blocker for all 7 tests -- `Module.bitfields` is never populated for real
+## `bitfield`-keyword source
+
+Implemented the recommended `try_lower_bitfield_construct` special case exactly
+as described above: `MirLowering.try_lower_bitfield_construct`/
+`try_lower_bitfield_construct_for_symbol` (new, in
+`50.mir/_MirLoweringExpr/switch_operators_calls.spl`), wired into `lower_call`
+before the generic GPU-intrinsic/direct/indirect-call dispatch. For a
+single-arg `Call` whose callee resolves (via `Var`/`NamedVar`'s `SymbolId`) to
+a key present in `self.bitfield_map`, it returns the lowered raw argument's
+`LocalId` directly (bitfield construction is a bit-identical pass-through at
+the value level -- no MIR `Call` is emitted, so the `@hardware` synthesis
+validator's "no generic Call lowering" rejection no longer applies to
+`BitfieldType(raw)` construction sites).
+
+This code is correct and does not regress anything (full regression gate
+re-run below, all still green), but it did **not** move the suite off
+**40/48**, because instrumentation (temporary `eprint` tracing, removed before
+committing) proved `self.bitfield_map` is **always empty** for every one of
+the 7 real-frontend bitfield tests -- `try_lower_bitfield_construct_for_symbol`
+correctly resolves `sym_id=1` for `Rv32Instruction`/`Status`/`Flags`/`Control`
+in their respective single-bitfield test modules, but `self.bitfield_map.has(1)`
+is `false` in every case, because `self.bitfield_map` is populated (in MIR
+`_MirLowering/module_lowering.spl`) from `module.bitfields.values()` (the HIR
+module's `bitfields: Dict<SymbolId, HirBitfield>`), and that dict is itself
+populated (in HIR `hir_lowering/_Items/module_lowering.spl`) from the
+**frontend** `Module.bitfields: Dict<text, Bitfield>` -- which instrumentation
+confirmed has **`count=0`** for every one of these 7 tests, before any HIR/MIR
+lowering runs at all.
+
+Root cause, traced to the frontend AST-bridge assembly step
+(`10.frontend/_FlatAstBridge/module_assembly.spl`): a struct-tagged decl
+(`tag_text == "3"`) is only bridged into `Module.bitfields` (as opposed to the
+ordinary `Module.structs`) when `decl_is_packed[idx] == 1` (lines ~150-183).
+But `parse_bitfield_decl` (`10.frontend/core/_ParserDecls/bitfield_aop_arch_decls.spl:171`)
+builds its declaration via:
+```
+decl_struct_def(bf_name, field_names, field_types, field_defaults, field_bits, 0)
+```
+`decl_struct_def`'s 6th parameter is `span_id: i64` (confirmed via its
+signature in `10.frontend/core/_Ast/decl_nodes.spl:297`), **not** `is_packed`
+-- and **nothing anywhere in the codebase ever sets `decl_is_packed[idx] = 1`**
+(confirmed via exhaustive grep for `decl_is_packed[` and for any
+`decl_set_packed`-style setter -- none exists). Every `bitfield Name(u32): ...`
+declaration is therefore bridged as an **ordinary struct** (named `Name`, with
+a synthetic `__raw` field of the backing type plus one field per named
+bitfield member), and `Module.bitfields` stays permanently empty for *any*
+source using the `bitfield` keyword. This is a distinct, deeper bug than the
+`parse_bitfield_decl` name/backing-type parsing bug fixed earlier in this same
+doc -- that fix made the parser produce a *correct struct*, not a correct
+*bitfield registration*, because the is_packed hand-off was never wired in the
+first place (this looks like genuinely dead/unfinished code, not a regression).
+
+A second, compounding correctness bug was found in the same dead code path
+while tracing this: `parse_bitfield_decl`'s field-list construction
+(lines ~155-163) only pushes a field into `field_names`/`field_types`/
+`field_bits` `if not is_underscore` -- i.e. **reserved (`_: uN`) fields are
+dropped entirely**, not merely unnamed. Even if `decl_is_packed` were wired up
+naively by reusing `module_assembly.spl`'s existing (also-currently-dead)
+is_packed branch as-is, the resulting `Bitfield.fields` list would be missing
+every reserved field, which would make
+`MirLowering.bitfield_total_width`/`bitfield_field_result_type`
+(`50.mir/_MirLoweringExpr/expr_dispatch.spl:125`, which sums `bit_width` over
+exactly this `fields` list) compute the wrong total packed width for any
+bitfield with reserved padding (e.g. `Status(u8): ready: bool, mode: u3, _: u4`
+would compute total width 4, not 8) -- silently breaking the
+preserved-high/preserved-low slice boundaries this suite's write tests assert
+on. Any real fix needs to either (a) still emit reserved fields into the
+bridged `Bitfield.fields` list (marked `is_reserved: true`, matching what
+`HirBitfieldField`'s `is_reserved` field already expects and what
+`try_lower_bitfield_set`/`get` already correctly skip via `if ... or
+is_reserved: continue`), or (b) thread the backing type's real bit width
+through some other channel that doesn't depend on summing the visible-fields
+list.
+
+This is confirmed, scoped, additional **frontend/AST-bridge wiring** work --
+not a VHDL backend or generic MIR-lowering bug (the read/write lowering logic
+in `mir_lowering_stmts.spl`, `switch_operators_calls.spl`, and now
+`try_lower_bitfield_construct` all look structurally correct and ready to run
+correctly the moment `self.bitfield_map` is actually populated) -- genuinely
+larger than this pass's scope/risk budget to also fix blind (it touches the
+flat-AST decl-tag bridge shared by every `struct`/`class`/`bitfield`
+declaration in the codebase, not just the 7 tests in this file). Recommended
+next steps for whoever picks this up:
+1. Add a `decl_set_packed(idx: i64, value: i64)` setter next to
+   `decl_is_packed` in `10.frontend/core/_Ast/decl_nodes.spl`, and call
+   `decl_set_packed(idx, 1)` in `parse_bitfield_decl` using the `i64` index
+   `decl_struct_def(...)` already returns.
+2. Fix `module_assembly.spl`'s is_packed branch (lines ~153-183) to (a) skip
+   the synthetic `__raw` field at index 0 when building `bf_fields`, and
+   (b) derive `backing_type` from the real backing type tag (`f_types[0]`)
+   rather than leaving it `Type(kind: TypeKind.Infer, ...)`.
+3. Fix `parse_bitfield_decl` to also emit reserved (`_: uN`) fields (as
+   `is_reserved: true` entries, not dropped) so packed width and per-field bit
+   offsets stay correct.
+4. Re-run this suite -- `try_lower_bitfield_construct` (already implemented,
+   this pass) should make the bitfield-read test pass immediately once
+   `bitfield_map` is populated; the 6 write tests should then exercise the
+   already-implemented `try_lower_bitfield_set` VHDL slice/concat logic in
+   `mir_lowering_stmts.spl` (also structurally ready, unverified against real
+   parses pending this fix).
+
+### rv32 decode helpers test: still BLOCKED (missing feature), unchanged
+`RiscvFpgaLane.rv32_default().hardware_source_spl()` still does not exist
+anywhere in the codebase (re-confirmed this pass). Out of scope for a bitfield
+lowering fix regardless of the above -- this is a feature-authoring task
+(writing a literal RV32I decode/writeback/branch/store/exec pipeline as a
+Simple source-string generator matching ~40 exact structural assertions), not
+a bug fix, and would also remain blocked by the frontend gap above (it
+declares and uses `bitfield` types) even once written.
+
+### Updated regression gate (this pass, task #65)
+- `test/01_unit/compiler/parser/bitfield_pure_simple_spec.spl` — 4/4 (no change)
+- `test/01_unit/compiler/mir/bitfield_mir_spec.spl` — 2/2 (no change)
+- `test/01_unit/compiler/backend/vhdl_constraints_spec.spl` — 5/5 (no change)
+- `test/01_unit/compiler/backend/vhdl_testbench_spec.spl` — 5/5 (no change)
+- `test/01_unit/compiler/backend/vhdl_abi_spec.spl` — 5/5 (no change)
+- `test/01_unit/compiler/backend/vhdl_builder_spec.spl` — 4/4 (no change)
+- `test/01_unit/compiler/backend/vhdl_type_mapper_spec.spl` — 6/6 (no change)
+- `test/01_unit/compiler/backend/vhdl_backend_spec.spl` — 40/48 (unchanged
+  count; `try_lower_bitfield_construct` added and verified correct/inert
+  pending the frontend fix above -- see full writeup above for why this pass
+  could not close the remaining 8)
+
+### Updated regression gate (previous pass)
 - `test/01_unit/compiler/parser/bitfield_pure_simple_spec.spl` — 4/4 (after
   updating the stale text-match assertion above)
 - `test/01_unit/compiler/mir/bitfield_mir_spec.spl` — 2/2
