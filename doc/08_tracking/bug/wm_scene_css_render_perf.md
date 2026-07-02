@@ -54,20 +54,57 @@ minutes long — unusable for a live compositor present loop.
 - Raising the cap is not viable today: even the current cap admits a ~6 s
   render.
 
-## Fix directions (not done here)
+## Native fast path added (2026-07-03) — CSS chrome now renders above the cap
 
-- Profile `web_render_pixel_backend` / `simple_web_html_layout_renderer` to
-  find the ~6 s fixed cost (likely style extraction / `compute_styles` /
-  `apply_decls` over the very large chrome stylesheet).
-- Cache the parsed stylesheet + computed style tree across presents (chrome CSS
-  is static; only element geometry changes frame to frame).
-- Or JIT/native-compile the CSS raster hot path so the cap can be raised to
-  cover desktop resolutions.
+The dominant cost above the cap was **not** the CSS engine itself but the
+per-op interpreted framebuffer mirror inside Engine2D/backends (see
+`doc/08_tracking/bug/engine2d_interpreted_mirror_dominates_render_2026-07-03.md`).
+That mirror is now bypassed by a no-mirror native fast path:
 
-## Workaround in place
+- `Engine2D.create_with_backend_fast()` shrinks the Metal CPU mirror to 1x1 so
+  draw ops forward to the GPU only, and `read_pixels()` downloads the GPU
+  framebuffer in a single FFI hop (`rt_metal_buffer_download` ptr +
+  `rt_bytes_from_raw`, packed to `[u32]` with no per-element FFI).
+- `simple_web_layout_render_html_pixels_engine2d()` runs the real layout Draw IR
+  (`simple_web_layout_render_html_draw_ir`) on that fast engine.
+- `render_scene_to_backend`, above `WM_SCENE_CSS_RENDER_PIXEL_CAP`, now routes
+  `scene_to_html(scene)` through that entry **first** (only when Metal is
+  available), falling back to the themed direct-rect rasterizer otherwise. The
+  `<= cap` CSS path is unchanged.
+
+### Measured (M4, interpreter, 1024x768, 12-window WM scene)
+
+| stage                       | native fast path |
+|-----------------------------|------------------|
+| layout + Draw IR generation | ~1.0 s (per-node; unchanged, not mirror-bound) |
+| Engine2D fast create (Metal)| ~0.30 s          |
+| clear                       | ~0.01 s          |
+| **exec + one-shot readback**| **~1.4 s**       |
+| **total (entry)**           | **~2.7 s**       |
+
+The `exec + readback` cost meets the ≤2 s target (down from ~28 s: exec 17.9 s +
+readback 10.1 s on the mirror path). Total including layout Draw IR generation is
+~2.7 s; the remaining ~1 s is the layout pass (per-node, resolution-independent),
+tracked separately from the mirror bug. Correctness: bit-exact vs the software
+mirror for well-formed in-bounds rect scenes (evidence gate below); off-canvas
+border clamping and GPU 5x7 vs CPU text remain small GPU-vs-CPU discrepancies not
+covered by the cpu-metal primitive parity gate.
+
+Evidence: `scripts/check/check-engine2d-nomirror-fast-render-evidence.shs`
+(harness `test/02_integration/rendering/engine2d_nomirror_fast_render_run.spl`).
+
+## Fix directions (remaining)
+
+- Reduce the ~1 s layout Draw IR generation (per-node cost) — cache parsed
+  stylesheet + computed style tree across presents (chrome CSS is static).
+- GPU-side rectangular clip + text parity so sub-framebuffer clips and text are
+  bit-exact under the fast path (today a sub-framebuffer clip falls back to the
+  mirror; the full-framebuffer clip the layout emits is a no-op and stays GPU).
+
+## Workaround still in place for non-Metal / sub-cap
 
 `src/os/compositor/wm_scene.spl`:
-- `WM_SCENE_CSS_RENDER_PIXEL_CAP = 10000` gates the CSS path.
-- The `render_scene_to_backend` fallback now rasterizes the actual
-  `SceneElement` rects (painter's order, theme desktop background base) so
-  themed chrome still appears above the cap.
+- `WM_SCENE_CSS_RENDER_PIXEL_CAP = 10000` still gates the interpreted CSS path.
+- Above the cap, when Metal is unavailable, `render_scene_to_backend` rasterizes
+  the actual `SceneElement` rects (painter's order, theme desktop background
+  base) so themed chrome still appears.

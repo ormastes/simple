@@ -6,6 +6,7 @@ use common.ui.window_scene.{SharedWmScene, shared_wm_scene_chrome}
 use os.compositor.wm_action_applier.{WmLifecycleWindowState, wm_lifecycle_motion_contract}
 use os.compositor.web_render_surface.{compositor_render_html_pixels}
 use common.ui.wm_chrome_theme.{wm_chrome_theme}
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{simple_web_layout_render_html_pixels_engine2d, engine2d_fast_metal_available}
 
 class SceneElement:
     kind: text
@@ -469,6 +470,17 @@ fn render_scene_to_backend(scene: WmSceneSpec, backend) -> [u32]:
         val simple_pixels = compositor_render_html_pixels(req, html)
         if simple_pixels.len() == total:
             return simple_pixels
+    # Above the CSS pixel cap: the pure-Simple CSS engine is too slow per present,
+    # but the same chrome HTML can be laid out and rasterized on the GPU via the
+    # native no-mirror Engine2D fast path (layout Draw IR -> Metal -> one-shot
+    # readback, ~1.4s exec+readback at 1024x768 vs minutes interpreted). Only take
+    # it when Metal is genuinely available; otherwise fall through to the themed
+    # direct-rect rasterizer. Behaviour at/below the cap is unchanged.
+    if total > WM_SCENE_CSS_RENDER_PIXEL_CAP and engine2d_fast_metal_available():
+        val fast_html = scene_to_html(scene)
+        val fast_pixels = simple_web_layout_render_html_pixels_engine2d(fast_html, scene.width, scene.height, "metal")
+        if fast_pixels.len() == total:
+            return fast_pixels
     # Fallback for real resolutions: rasterize the actual scene elements as
     # solid rects (painter's order) instead of a near-blank fill, so themed WM
     # chrome still appears when the CSS engine is skipped for cost.

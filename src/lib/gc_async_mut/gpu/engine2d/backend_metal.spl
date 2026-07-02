@@ -23,7 +23,15 @@ use std.gc_async_mut.io.metal_sffi.{
 extern fn rt_alloc(size: i64) -> i64
 extern fn rt_free(ptr: i64) -> i64
 extern fn rt_ptr_write_i32(ptr: i64, offset: i64, value: i64) -> i64
-extern fn rt_ptr_read_i64(ptr: i64, offset: i64) -> i64
+
+# Build a packed Simple [u8] array from a raw host pointer in one FFI hop. Used
+# for GPU framebuffer readback: rt_metal_buffer_download copies device->host into
+# an rt_alloc'd raw buffer (one FFI), then rt_bytes_from_raw marshals that whole
+# region into a Simple array by return value (which the interpreter DOES reflect,
+# unlike Rust writing into a passed-in array — array out-params are not reflected
+# under the interpreter). The remaining [u8]->[u32] pack is pure interpreter
+# arithmetic with no per-element FFI, so the ~10s/393k-call read loop is gone.
+extern fn rt_bytes_from_raw(ptr: i64, len: i64) -> [u8]
 
 # High-resolution (antialiased) text uses the VGA 8x16 glyph provider — the same
 # glyph source the shared font rasterizer uses — as a coverage field that is
@@ -93,9 +101,6 @@ fn metal_host_free(ptr: i64) -> i64:
 
 fn metal_host_write_i32(ptr: i64, offset: i64, value: i64) -> i64:
     rt_ptr_write_i32(ptr, offset, value)
-
-fn metal_host_read_i64(ptr: i64, offset: i64) -> i64:
-    rt_ptr_read_i64(ptr, offset)
 
 enum MetalErrorKind:
     NotAvailable
@@ -380,10 +385,21 @@ impl RenderBackend for MetalBackend:
         self.gpu_frame_complete = false
     me set_clip(x: i32, y: i32, w: i32, h: i32):
         self.mirror.set_clip(x, y, w, h)
-        self.gpu_frame_complete = false
+        # A clip covering the whole framebuffer is a no-op: honoring vs ignoring
+        # it changes no pixels. Keep the GPU framebuffer authoritative instead of
+        # poisoning gpu_frame_complete (which would force the no-mirror fast path
+        # back to the shrunken 1x1 CPU mirror). The layout Draw IR always emits a
+        # full-framebuffer clip, so this is the common case. Real sub-framebuffer
+        # clips can't be honored by the compute kernels yet, so those still
+        # invalidate the GPU frame and fall back to the (full) mirror.
+        val covers_all = (x <= 0) and (y <= 0) and ((x + w) >= self.w) and ((y + h) >= self.h)
+        if not covers_all:
+            self.gpu_frame_complete = false
     me clear_clip():
         self.mirror.clear_clip()
-        self.gpu_frame_complete = false
+        # Removing a (full-framebuffer or absent) clip leaves the GPU framebuffer
+        # authoritative; nothing was GPU-clipped, so do not poison the frame. If a
+        # real sub-clip had been set, gpu_frame_complete is already false.
     me set_mask(mask_pixels: [u8], w: i32, h: i32):
         self.mirror.set_mask(mask_pixels, w, h)
         self.gpu_frame_complete = false
@@ -393,7 +409,16 @@ impl RenderBackend for MetalBackend:
     me present():
         self.mirror.present()
     fn read_pixels() -> [u32]:
-        self.read_pixels_with_source().pixels
+        # Fast path: when the GPU framebuffer is the source of truth, download it
+        # in one FFI hop and return the pixels directly, skipping the O(n)
+        # Simple-side checksum that read_pixels_with_source() computes for
+        # evidence rows. Callers that only need pixels (draw-IR executor, web
+        # render entries) pay neither the checksum nor a per-element copy loop.
+        if self.gpu_frame_complete:
+            val gpu_pixels = self.read_pixels_gpu_only()
+            if gpu_pixels.len() == (self.w * self.h):
+                return gpu_pixels
+        self.mirror.read_pixels()
 
     fn read_pixels_with_source() -> Engine2DReadback:
         if self.gpu_frame_complete:
@@ -415,25 +440,35 @@ impl MetalBackend:
         if not self.initialized or self.d_framebuffer == 0:
             return []
         val total_i32 = self.w * self.h
-        val total_pixels = _metal_i64(total_i32)
-        val byte_size = total_pixels * 4
-        val host = metal_host_alloc(byte_size + 8)
+        if total_i32 <= 0:
+            return []
+        val byte_size = _metal_i64(total_i32) * 4
+        val host = metal_host_alloc(byte_size)
         if host == 0:
             return []
+        # One FFI hop copies the whole GPU framebuffer to host memory...
         val ok = metal_buffer_download_ptr(host, self.d_framebuffer, byte_size)
         if ok == 0:
             metal_host_free(host)
             return []
-        var pixels: [u32] = [0u32; total_i32]
-        var i: i64 = 0
-        while i < total_pixels:
-            val pair = metal_host_read_i64(host, i * 4)
-            pixels[i as i32] = (pair & 0xFFFFFFFF) as u32
-            i = i + 1
-            if i < total_pixels:
-                pixels[i as i32] = ((pair >> 32) & 0xFFFFFFFF) as u32
-                i = i + 1
+        # ...one more FFI hop marshals it into a packed Simple [u8] array (return
+        # value, which the interpreter reflects)...
+        val bytes = rt_bytes_from_raw(host, byte_size)
         metal_host_free(host)
+        if bytes.len().to_i64() < byte_size:
+            return []
+        # ...then reconstruct u32 pixels with pure interpreter arithmetic (no FFI
+        # per element). Little-endian: byte 0 is the low byte of the pixel.
+        var pixels: [u32] = [0u32; total_i32]
+        var i = 0
+        while i < total_i32:
+            val base = i * 4
+            val b0 = bytes[base] as u32
+            val b1 = bytes[base + 1] as u32
+            val b2 = bytes[base + 2] as u32
+            val b3 = bytes[base + 3] as u32
+            pixels[i] = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+            i = i + 1
         pixels
 
     # Shrink the CPU software mirror to 1x1 so it costs nothing. At native Retina
