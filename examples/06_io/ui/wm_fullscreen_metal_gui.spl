@@ -1,0 +1,198 @@
+# wm_fullscreen_metal_gui.spl — Windowed <-> fullscreen WM demo on the Metal GPU
+# lane in a real on-screen winit window.
+#
+# Proves the macOS host Simple WM app supports BOTH windowed and fullscreen modes
+# with genuine GPU render evidence:
+#   - opens a real window (windowed), renders >=2 Metal GPU frames
+#     (gpu_frame_complete=true), logs `[wm-fullscreen] mode=windowed size=WxH`.
+#   - calls set_fullscreen(true), verifies is_fullscreen() and that the window
+#     inner size grew (read back from the real winit API, not assumed), renders
+#     >=2 more GPU frames, logs `[wm-fullscreen] mode=fullscreen size=WxH`.
+#   - returns to windowed, verifies is_fullscreen()==false, logs
+#     `[wm-fullscreen] restored=true`, exits 0.
+#
+# All state transitions are verified from real API readback. The Metal backend
+# renders at a fixed resolution; the runtime upscales when the window is larger
+# (fullscreen), so gpu_frame_complete=true stays a true GPU-lane marker while the
+# window size reported by winit changes for real.
+#
+# Launch (real window, macOS):
+#   SIMPLE_GUI_RUN_SKIP_NUDGE=1 scripts/gui/macos-gui-run.shs \
+#     examples/06_io/ui/wm_fullscreen_metal_gui.spl
+# Driven end-to-end by:
+#   scripts/check/check-macos-wm-fullscreen-metal-evidence.shs
+
+use std.gpu.engine2d.backend_metal.{MetalBackend}
+use std.io.window_winit.{WinitLoop, WinitWindow, WinitInput, winit_loop_new, winit_loop_free, winit_window_new, winit_window_free, winit_present_rgba, winit_poll_input, winit_window_set_fullscreen, winit_window_is_fullscreen, winit_window_get_size}
+
+use std.io_runtime.{env_get}
+
+val W: i32 = 320
+val H: i32 = 200
+
+fn pack(src: [u32]) -> [i64]:
+    var out: [i64] = [0; src.len()]
+    var i = 0
+    while i < src.len():
+        out[i] = src[i].to_i64() & 0xFFFFFF
+        i = i + 1
+    out
+
+# Render one Metal GPU frame into `b`, present it to the window (the runtime
+# upscales when the window is larger than the render buffer), and report GPU
+# completeness read back from the backend.
+fn render_and_present(b: MetalBackend, win: WinitWindow, phase: text, frame: i32) -> bool:
+    b.clear(0xFF14141Cu32)
+    b.draw_rect_filled(24, 24, W - 48, 60, 0xFF2D6CDFu32)
+    b.draw_text(40, 44, "WM FULLSCREEN DEMO", 0xFFFFFFFFu32, 8)
+    b.draw_text(40, 110, phase, 0xFFB0C4DEu32, 6)
+    # Frame-progress bar. Keep it aligned inside the border frame drawn below
+    # (interior x 20..300, y 20..180): clamp the growing width so the bar never
+    # crosses the right edge, and size/place it to clear the bottom edge.
+    val bar_max_w = W - 80
+    var bar_w = 180 + frame * 16
+    if bar_w > bar_max_w:
+        bar_w = bar_max_w
+    b.draw_rect_filled(40, 148, bar_w, 24, 0xFFE5533Du32)
+    b.draw_rect(20, 20, W - 40, H - 40, 0xFF00E5FFu32)
+    b.present()
+
+    # Strict GPU lane: capture completeness BEFORE any shutdown.
+    val frame_complete = b.gpu_frame_complete
+    val pixels = b.read_pixels_gpu_only()
+    if not frame_complete:
+        print "frame {frame} phase={phase} FAIL gpu_frame_complete=false (software mirror fallback)"
+        return false
+    if pixels.len() < W * H:
+        print "frame {frame} phase={phase} FAIL GPU readback short ({pixels.len()} of {W * H})"
+        return false
+
+    val packed = pack(pixels)
+    winit_present_rgba(win, W.to_i64(), H.to_i64(), packed)
+    print "frame {frame} phase={phase} gpu_frame_complete=true pixels={pixels.len()}"
+    return true
+
+fn cleanup(b: MetalBackend, win: WinitWindow, lp: WinitLoop):
+    b.shutdown()
+    winit_window_free(win)
+    winit_loop_free(lp)
+
+fn main() -> i64:
+    print "WM Fullscreen Metal GUI — windowed <-> fullscreen, real window + Metal GPU"
+
+    if (env_get("SIMPLE_GUI") ?? "") != "1":
+        print "[wm-fullscreen] error=no-gui-requested (launch via macos-gui-run.shs / gate)"
+        return 2
+
+    val lp = winit_loop_new()
+    if not lp.is_valid:
+        print "[wm-fullscreen] error=no-gui-runtime"
+        return 1
+    val win = winit_window_new(lp, W.to_i64(), H.to_i64(), "WM Fullscreen Metal")
+    if not win.is_valid:
+        print "[wm-fullscreen] error=window-create-failed"
+        winit_loop_free(lp)
+        return 1
+
+    var b = MetalBackend.create()
+    if not b.init(W, H):
+        print "[wm-fullscreen] error=metal-init-failed"
+        winit_window_free(win)
+        winit_loop_free(lp)
+        return 1
+
+    # ---------------------------------------------------------------------
+    # Phase 1: windowed — render >=2 GPU frames.
+    # ---------------------------------------------------------------------
+    var ok = true
+    var f = 0
+    while f < 3:
+        if not render_and_present(b, win, "windowed", f):
+            ok = false
+        val poll_win = winit_poll_input(lp)
+        f = f + 1
+    if not ok:
+        print "[wm-fullscreen] error=windowed-gpu-frame-incomplete"
+        cleanup(b, win, lp)
+        return 1
+
+    val (win_w, win_h) = winit_window_get_size(win)
+    print "[wm-fullscreen] mode=windowed size={win_w}x{win_h}"
+
+    # ---------------------------------------------------------------------
+    # Phase 2: fullscreen — set, then verify from real API readback.
+    # ---------------------------------------------------------------------
+    val applied = winit_window_set_fullscreen(win, true)
+    if not applied:
+        print "[wm-fullscreen] error=set-fullscreen-failed"
+        cleanup(b, win, lp)
+        return 1
+
+    # macOS fullscreen resize is asynchronous: pump + present until the real
+    # window inner size reflects the transition. Verified from readback only.
+    var fs_w: i64 = win_w
+    var fs_h: i64 = win_h
+    var settle = 0
+    while settle < 60:
+        val poll_settle = winit_poll_input(lp)
+        val settle_frame = render_and_present(b, win, "fullscreen-settle", 0)
+        val (cw, ch) = winit_window_get_size(win)
+        fs_w = cw
+        fs_h = ch
+        if cw > win_w:
+            settle = 1000
+        else:
+            settle = settle + 1
+
+    val is_fs = winit_window_is_fullscreen(win)
+    print "[wm-fullscreen] is_fullscreen={is_fs}"
+    print "[wm-fullscreen] mode=fullscreen size={fs_w}x{fs_h}"
+
+    if not is_fs:
+        print "[wm-fullscreen] error=is-fullscreen-false-after-set"
+        cleanup(b, win, lp)
+        return 1
+    if fs_w <= win_w:
+        print "[wm-fullscreen] error=fullscreen-size-did-not-grow (was {win_w}, now {fs_w})"
+        cleanup(b, win, lp)
+        return 1
+
+    # Dwell in fullscreen: keep rendering GPU frames so an external gate has time
+    # to screen-capture the real fullscreen window. Every frame re-emits
+    # gpu_frame_complete=true, so this also satisfies the >=2 fullscreen-frame
+    # requirement (windowed already emitted >=2).
+    var d = 0
+    while d < 5:
+        val poll_dwell = winit_poll_input(lp)
+        if not render_and_present(b, win, "fullscreen", d):
+            ok = false
+        d = d + 1
+    if not ok:
+        print "[wm-fullscreen] error=fullscreen-gpu-frame-incomplete"
+        cleanup(b, win, lp)
+        return 1
+
+    # ---------------------------------------------------------------------
+    # Phase 3: restore to windowed — verify is_fullscreen() clears.
+    # ---------------------------------------------------------------------
+    val restored = winit_window_set_fullscreen(win, false)
+    var r = 0
+    while r < 4:
+        val poll_restore = winit_poll_input(lp)
+        val restore_frame = render_and_present(b, win, "restored", 0)
+        r = r + 1
+
+    val is_fs_after = winit_window_is_fullscreen(win)
+    val (rw, rh) = winit_window_get_size(win)
+    print "[wm-fullscreen] restored_size={rw}x{rh} is_fullscreen_after={is_fs_after}"
+
+    if restored and not is_fs_after:
+        print "[wm-fullscreen] restored=true"
+    else:
+        print "[wm-fullscreen] restored=false"
+        cleanup(b, win, lp)
+        return 1
+
+    print "[wm-fullscreen] done windowed={win_w}x{win_h} fullscreen={fs_w}x{fs_h}"
+    cleanup(b, win, lp)
+    return 0
