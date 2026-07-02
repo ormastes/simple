@@ -125,7 +125,21 @@ impl HirLowering:
         var params: [HirParam] = []
         if (hir_lower_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
             val fn_params = function_params(fn_)
-            if fn_.is_method and not fn_.is_static and self.current_method_self_type.? and (fn_params.len() == 0 or fn_params[0].name != "self"):
+            # Compute the implicit-`self` condition with nested checks + an
+            # intermediate bool rather than one compound `A and B and C and
+            # (D or E)` expression: the cranelift backend mis-lowered the fused
+            # form, nil-checking the boolean result of the `(len()==0 or
+            # [0].name != ...)` sub-expression as if it were a heap pointer,
+            # trapping with "field access on nil receiver" (SIGILL) even for a
+            # plain non-method `fn main()`. Short-circuiting via nested ifs keeps
+            # the array-indexing operand out of the fused boolean entirely.
+            var needs_implicit_self = false
+            if fn_.is_method and not fn_.is_static and self.current_method_self_type.?:
+                if fn_params.len() == 0:
+                    needs_implicit_self = true
+                elif fn_params[0].name != "self":
+                    needs_implicit_self = true
+            if needs_implicit_self:
                 val self_type = self.current_method_self_type.unwrap()
                 val self_symbol = self.symbols.define("self", SymbolKind.Parameter, Some(self_type), fn_.span, Visibility.Private, false, nil)
                 params = params.push(HirParam(
@@ -142,18 +156,26 @@ impl HirLowering:
                 pi = pi + 1
         if (hir_lower_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
             eprint("[hir-lower] lower_function:params {fn_.name}")
+        if (hir_lower_env_get("SIMPLE_T59") ?? "") == "1":
+            eprint("[T59] post-params {fn_.name}")
 
         # Lower return type — use explicit check instead of .map() ?? default
         # to avoid crash with null coalescing on Option.map result
         var return_type = HirType(kind: HirTypeKind.Unit, span: fn_.span)
+        if (hir_lower_env_get("SIMPLE_T59") ?? "") == "1":
+            eprint("[T59] pre-returntype {fn_.name}")
         if (hir_lower_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
-            if fn_.return_type.?:
-                # Already known-present: pass the bare value straight to lower_type.
-                # Option.map/.unwrap fail on a bare struct optional in the seed
-                # interpreter (a present optional is stored as the bare payload).
+            # Gate on has_return_type, not `return_type.?`: return_type is a
+            # non-optional Type whose placeholder for an omitted annotation is a
+            # bare `Infer` node, so `.?` is always true and we would lower that
+            # Infer placeholder — which segfaults in lower_type_list. A function
+            # without an explicit return type keeps the default Unit result.
+            if fn_.has_return_type:
                 return_type = self.lower_type(fn_.return_type)
         if (hir_lower_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
             eprint("[hir-lower] lower_function:return_type {fn_.name}")
+        if (hir_lower_env_get("SIMPLE_T59") ?? "") == "1":
+            eprint("[T59] post-returntype pre-body {fn_.name}")
 
         # Lower body
         val body = self.lower_hir_block(fn_.body)
