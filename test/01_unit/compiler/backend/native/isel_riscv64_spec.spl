@@ -10,7 +10,7 @@ use compiler.backend.native.{RV64_WORD_SIZE}
 use compiler.backend.native.mach_inst.{
     MachModule, MachBlock, MachReg, MachRegKind, Operand, OperandKind,
     RV_OP_ADD, RV_OP_ADDI, RV_OP_AND, RV_OP_AUIPC, RV_OP_BEQ, RV_OP_BNE, RV_OP_DIV, RV_OP_JAL, RV_OP_JALR, RV_OP_LI, RV_OP_MUL, RV_OP_NEG, RV_OP_NOP, RV_OP_NOT, RV_OP_OR, RV_OP_REM, RV_OP_ROL, RV_OP_ROR, RV_OP_CLZ, RV_OP_CTZ, RV_OP_REV8, RV_OP_SEQZ, RV_OP_SLL, RV_OP_SLT, RV_OP_SNEZ, RV_OP_SRA, RV_OP_SUB, RV_OP_XOR,
-    RV_OP_LD, RV_OP_SD, RV_OP_LW, RV_OP_SW, RV_OP_CALL, RV_OP_MV,
+    RV_OP_LD, RV_OP_SD, RV_OP_LW, RV_OP_SW, RV_OP_CALL, RV_OP_MV, RV_OP_RET, RV_X10,
     reg_id, operand_get_reg
 }
 use compiler.common.diagnostics.span.{Span}
@@ -956,6 +956,13 @@ fn nth_imm(block: MachBlock, opcode: i64, nth: i64) -> i64:
             seen = seen + 1
     -999
 
+fn last_dest_reg(block: MachBlock, opcode: i64) -> i64:
+    var found = -1
+    for inst in block.insts:
+        if inst.opcode == opcode:
+            found = reg_id(operand_get_reg(inst.operands[0]))
+    found
+
 describe "Isel Riscv64":
     it "uses the shared LP64D contract word size":
         val contract = riscv_linux_target_contract(CodegenTarget.Riscv64)
@@ -979,6 +986,11 @@ describe "Isel Riscv64":
         val block = entry_block(isel_module_riscv64(build_memory_module("rv64_fields")))
         expect(nth_mem_offset(block, RV_OP_LD, 1)).to_equal(2 * RV64_WORD_SIZE)
         expect(nth_mem_offset(block, RV_OP_SD, 1)).to_equal(3 * RV64_WORD_SIZE)
+
+    it "moves RV64 return values into a0 before RET":
+        val block = entry_block(isel_module_riscv64(build_memory_module("rv64_return_value")))
+        expect(last_dest_reg(block, RV_OP_MV)).to_equal(RV_X10)
+        expect(count_opcode(block, RV_OP_RET)).to_equal(1)
 
     it "selects RV64 arithmetic opcodes for MIR binary ops":
         val block = entry_block(isel_module_riscv64(build_binop_module("rv64_binop")))

@@ -5,7 +5,7 @@ use compiler.backend.backend.backend_types.{CodegenTarget}
 use compiler.backend.backend.riscv_target.{riscv_linux_target_contract}
 use compiler.backend.backend.native.isel_riscv32.{isel_module_riscv32}
 use compiler.backend.native.{RV32_WORD_SIZE}
-use compiler.backend.native.mach_inst.{MachModule, MachBlock, Operand, OperandKind, RV_OP_ADD, RV_OP_ADDI, RV_OP_AND, RV_OP_AUIPC, RV_OP_BEQ, RV_OP_BNE, RV_OP_DIV, RV_OP_JAL, RV_OP_JALR, RV_OP_LI, RV_OP_MUL, RV_OP_NEG, RV_OP_NOP, RV_OP_NOT, RV_OP_OR, RV_OP_REM, RV_OP_SEQZ, RV_OP_SLL, RV_OP_SLT, RV_OP_SNEZ, RV_OP_SRA, RV_OP_SUB, RV_OP_XOR, RV_OP_LW, RV_OP_SW, RV_OP_LD, RV_OP_SD, RV_OP_CALL, RV_OP_MV}
+use compiler.backend.native.mach_inst.{MachModule, MachBlock, Operand, OperandKind, RV_OP_ADD, RV_OP_ADDI, RV_OP_AND, RV_OP_AUIPC, RV_OP_BEQ, RV_OP_BNE, RV_OP_DIV, RV_OP_JAL, RV_OP_JALR, RV_OP_LI, RV_OP_MUL, RV_OP_NEG, RV_OP_NOP, RV_OP_NOT, RV_OP_OR, RV_OP_REM, RV_OP_RET, RV_OP_SEQZ, RV_OP_SLL, RV_OP_SLT, RV_OP_SNEZ, RV_OP_SRA, RV_OP_SUB, RV_OP_XOR, RV_OP_LW, RV_OP_SW, RV_OP_LD, RV_OP_SD, RV_OP_CALL, RV_OP_MV, RV_X10, reg_id, operand_get_reg}
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_types.{SymbolId}
 
@@ -910,6 +910,14 @@ fn nth_imm(block: MachBlock, opcode: i64, nth: i64) -> i64:
                     case _: return -999
             seen = seen + 1
     -999
+
+fn last_dest_reg(block: MachBlock, opcode: i64) -> i64:
+    var found = -1
+    for inst in block.insts:
+        if inst.opcode == opcode:
+            found = reg_id(operand_get_reg(inst.operands[0]))
+    found
+
 describe "Isel Riscv32":
     it "uses the shared ILP32D contract word size":
         val contract = riscv_linux_target_contract(CodegenTarget.Riscv32)
@@ -934,6 +942,11 @@ describe "Isel Riscv32":
         val block = entry_block(isel_module_riscv32(build_rv32_memory_module()))
         expect(nth_mem_offset(block, RV_OP_LW, 1)).to_equal(2 * RV32_WORD_SIZE)
         expect(nth_mem_offset(block, RV_OP_SW, 1)).to_equal(3 * RV32_WORD_SIZE)
+
+    it "moves RV32 return values into a0 before RET":
+        val block = entry_block(isel_module_riscv32(build_rv32_memory_module()))
+        expect(last_dest_reg(block, RV_OP_MV)).to_equal(RV_X10)
+        expect(count_opcode(block, RV_OP_RET)).to_equal(1)
 
     it "selects RV32 address arithmetic for MIR get-element-pointer":
         val block = entry_block(isel_module_riscv32(build_rv32_gep_module()))
