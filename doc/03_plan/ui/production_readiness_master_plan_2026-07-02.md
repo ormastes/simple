@@ -228,8 +228,26 @@ is Xvfb-only by default; `check-gui-low-res-readability.shs` is offscreen
   `jit_lowering_clamp_f_engine_color` (nested-fn root cause),
   `jit_lowering_module_alias_and_panic`, `parser_step_decorator_string_form`,
   `bootstrap_pure_simple_stage2_stall_yoon_note`,
-  `physics_world3d_sphere_collision_not_detected` (fixed same day)
+  `physics_world3d_sphere_collision_not_detected` (fixed same day),
+  `interp_static_fn_new_hijacks_named_ctor` (P1),
+  `engine3d_ext_impl_blocks_never_imported`,
+  `cranelift_f32_trig_wrapper_codegen`, `interp_for_over_list_generic`
   (all 2026-07-02).
+
+### Gate → evidence ledger (G6.4, as of 2026-07-02 evening)
+
+| Gate | Status | Reproducer | Evidence |
+|------|--------|-----------|----------|
+| G1.3 low-res readability | PASS | `scripts/check/check-gui-low-res-readability.shs` + `test/03_system/check/gui_low_res_readability_spec.spl` | `build/gui-low-res-readability/res_*/capture.ppm` |
+| G1.5 GUI events (showcase) | PASS (synthetic events) | `test/03_system/gui/showcase_event_spec.spl` | before/after PPMs via `SHOWCASE_BEFORE_PPM`/`AFTER_PPM` |
+| G1.5/G1.6 game2d events+animation | PASS (headless replay) | `test/03_system/game2d/game2d_event_replay_spec.spl` | frame_hash oracles in-spec |
+| G4.1 3D depth-correct render | PASS (CPU backend) | `examples/11_advanced/game3d_smoke/main.spl` | `build/game3d_smoke.ppm` |
+| G4.3 3D motion + camera | PASS | `examples/11_advanced/game3d_rolling/main.spl` | `build/game3d_rolling_*.ppm` (4) |
+| G4.4 HUD over 3D | PASS (direct blit; LayerTree bridge blocked by interp bugs) | `examples/11_advanced/game3d_hud/main.spl` | `build/game3d_hud.ppm` |
+| G1.1 real window via Vulkan | NOT RUN (live-display ban; needs Xvfb window run) | `scripts/gui/linux-gui-run.shs` | — |
+| G3.2/G4.2 60s play session | BLOCKED (stale binary: interpreter-only, >280s/frame native gates) | — | — |
+| G2.2 glyph parity | IN PROGRESS (W3 lane) | `test/03_system/gui/wm_compare/famous_site_production_probe_spec.spl` | — |
+| G5.2 Android emulator capture | BLOCKED on host (no SDK); validator specs green | `test/03_system/check/tauri_android_render_log_validator_spec.spl` | — |
 
 ## Current state (audited 2026-07-02)
 
