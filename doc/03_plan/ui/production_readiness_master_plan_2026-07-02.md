@@ -218,6 +218,12 @@ is Xvfb-only by default; `check-gui-low-res-readability.shs` is offscreen
   mutating methods, real input API in pool/stacking. Every example now
   reaches the stale-binary wall (missing `rt_len`/`rt_math_sin` in the
   deployed runtime symbol table) and nothing else.
+- **W7 host assessment:** the 9 Tauri check specs pass locally (validator
+  path, e.g. tauri_android_render_log_validator_spec 13/13), but this host
+  has no Android SDK/adb/emulator (`ANDROID_HOME` unset). Per G5.2 the
+  emulator leg cannot run here; the gate falls to the checked-in build
+  artifact + WebView-equivalent proof, and needs a host/CI with the SDK
+  for the adb-capture leg. Recorded, not skipped.
 - Bugs recorded: `interp_module_alias_time_shadowed_builtin`,
   `jit_lowering_clamp_f_engine_color` (nested-fn root cause),
   `jit_lowering_module_alias_and_panic`, `parser_step_decorator_string_form`,
