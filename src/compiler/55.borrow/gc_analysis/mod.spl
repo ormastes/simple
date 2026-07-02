@@ -108,9 +108,9 @@ class GcSafetyAnalyzer:
     static fn create(config: GcSafetyConfig) -> GcSafetyAnalyzer:
         GcSafetyAnalyzer(
             config: config,
-            #  # DESUGARED: root_analysis: nil
-            #  # DESUGARED: barrier_analysis: nil
-            #  # DESUGARED: escape_analysis: nil
+            root_analysis: RootAnalysis.create(\t: false),
+            barrier_analysis: BarrierAnalysis.create(GcStrategy.StopTheWorld, \t: false),
+            escape_analysis: EscapeAnalysis.create(),
             gc_types: []
         )
 
@@ -126,25 +126,25 @@ class GcSafetyAnalyzer:
     me analyze_function(func: MirBody) -> GcSafetyReport:
         """Analyze a MIR function for GC safety."""
         # Initialize analyses
-        self.root_analysis = rootanalysis_create(self.is_gc_type(_1))
+        self.root_analysis = RootAnalysis.create(self.is_gc_type(_1))
         self.barrier_analysis = BarrierAnalysis.create(
             self.config.gc_strategy,
-            self.is_gc_type(_1
-        ))
-        self.escape_analysis = escapeanalysis_create()
+            self.is_gc_type(_1)
+        )
+        self.escape_analysis = EscapeAnalysis.create()
 
         # Process function
         self.process_function(func)
 
         # Run analyses
         if self.config.enable_root_tracking:
-            self.root_analysis_value_verify_gc_points(root_analysis_value)
+            self.root_analysis.verify_gc_points()
 
         if self.config.enable_barrier_analysis:
-            self.barrier_analysis_value_analyze(barrier_analysis_value)
+            self.barrier_analysis.analyze()
 
         if self.config.enable_escape_analysis:
-            self.escape_analysis_value_finalize(escape_analysis_value)
+            self.escape_analysis.finalize()
 
         # Build report
         self.build_report(func.name)
@@ -163,51 +163,47 @@ class GcSafetyAnalyzer:
 
     me process_instruction(inst: MirInst, point: i64):
         """Process a single MIR instruction."""
-        val root_analysis = self.root_analysis_value
-        val barrier_analysis = self.barrier_analysis_value
-        val escape_analysis = self.escape_analysis_value
-
         match inst.kind:
             # Allocation
             case Alloc(dest, ty, size):
                 val type_id = self.type_to_id(ty)
-                escape_analysis_record_allocation(escape_analysis, point, type_id, dest.id)
+                self.escape_analysis.record_allocation(point, type_id, dest.id)
 
                 if self.is_gc_type(type_id):
-                    root_analysis_record_gc_point(root_analysis, GcPoint.allocation(point))
-                    root_analysis_record_root(root_analysis, point, GcRoot.local(dest.id, type_id))
+                    self.root_analysis.record_gc_point(GcPoint.allocation(point))
+                    self.root_analysis.record_root(point, GcRoot.local(dest.id, type_id))
 
             # Copy/Move
             case Copy(dest, src):
-                escape_analysis_record_copy(escape_analysis, src.id, dest.id)
+                self.escape_analysis.record_copy(src.id, dest.id)
 
             case Move(dest, src):
-                escape_analysis_record_copy(escape_analysis, src.id, dest.id)
+                self.escape_analysis.record_copy(src.id, dest.id)
 
             # Field operations
             case SetField(base, field_idx, value):
                 val base_id = self.operand_local(base)
                 val value_id = self.operand_local(value)
 
-                if base_id.?:
-                    if has_value_id:
-                    escape_analysis.record_field_store(
-                        base_id_value,
-                        field_idx,
-                        value_id_value,
-                        base_id_value  # Use base local as type proxy
-                    )
+                if val base_id_v = base_id.?:
+                    if val value_id_v = value_id.?:
+                        self.escape_analysis.record_field_store(
+                            base_id_v,
+                            field_idx,
+                            value_id_v,
+                            base_id_v  # Use base local as type proxy
+                        )
 
-                    # Record write site for barrier analysis
-                    barrier_analysis.record_write(WriteSite.field_write(
-                        point, 0, field_idx, 0
-                    ))
+                        # Record write site for barrier analysis
+                        self.barrier_analysis.record_write(WriteSite.field_write(
+                            point, 0, field_idx, 0
+                        ))
 
             case GetField(dest, base, field_idx):
                 val base_id = self.operand_local(base)
-                if has_base_id:
-                    escape_analysis.record_field_load(
-                        base_id_value,
+                if val base_id_v = base_id.?:
+                    self.escape_analysis.record_field_load(
+                        base_id_v,
                         field_idx,
                         dest.id,
                         0
@@ -215,20 +211,18 @@ class GcSafetyAnalyzer:
 
             # Call (potential GC point)
             case Call(dest, callee, args, _):
-                root_analysis_record_gc_point(root_analysis, GcPoint.call(point))
+                self.root_analysis.record_gc_point(GcPoint.call(point))
 
                 # Arguments may escape
                 for arg in args:
                     val arg_id = self.operand_local(arg)
-                    if has_arg_id:
-                        escape_analysis_record_call_arg(escape_analysis, arg_id_value)
+                    if val arg_id_v = arg_id.?:
+                        self.escape_analysis.record_call_arg(arg_id_v)
 
             case _:
 
     me process_terminator(term: MirTerminator, point: i64):
         """Process a block terminator."""
-        val escape_analysis = self.escape_analysis_value
-
         match term.kind:
             case Return:
                 # Return value escapes
@@ -260,19 +254,19 @@ class GcSafetyAnalyzer:
 
     fn build_report(func_name: text) -> GcSafetyReport:
         """Build analysis report."""
-        val root = self.root_analysis_value
-        val barrier = self.barrier_analysis_value
-        val escape = self.escape_analysis_value
+        val root = self.root_analysis
+        val barrier = self.barrier_analysis
+        val escape = self.escape_analysis
 
         GcSafetyReport(
             function_name: func_name,
-            root_errors: root_get_errors(root),
-            barrier_errors: barrier_get_errors(barrier),
-            gc_points: root_get_gc_points(root),
-            barrier_requirements: barrier_get_requirements(barrier),
+            root_errors: root.get_errors(),
+            barrier_errors: barrier.get_errors(),
+            gc_points: root.get_gc_points(),
+            barrier_requirements: barrier.get_requirements(),
             stack_eligible_allocations: escape.stack_eligible,
             total_allocations: escape.total_allocations,
-            escape_ratio: escape_stack_allocation_ratio(escape)
+            escape_ratio: escape.stack_allocation_ratio()
         )
 
 # ============================================================================
