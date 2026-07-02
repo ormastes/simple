@@ -13,8 +13,14 @@
 #   - a `[wm-fullscreen] restored=true` marker,
 #   - >= 4 `gpu_frame_complete=true` GPU-lane markers (>=2 windowed + >=2 fs),
 #   - fullscreen size strictly greater than windowed size (read back from the
-#     real winit API by the app, not assumed).
-# During the fullscreen dwell it takes a real screenshot with `screencapture`.
+#     real winit API by the app, not assumed),
+#   - both native-resolution re-render modes:
+#       `[wm-fullscreen] scale_mode=fit screen=SWxSH content=CWxCH offset=OXxOY`
+#       `[wm-fullscreen] scale_mode=no-resize screen=SWxSH content=320x200 offset=0x0`
+#     fit must preserve the 320:200 aspect (within rounding) and match the screen
+#     on the binding axis; no-resize must keep 320x200 anchored top-left (0,0).
+# During each mode's hold it takes a real screenshot with `screencapture`
+# (fullscreen_fit.png / fullscreen_noresize.png).
 # Without Screen Recording permission `screencapture` returns wallpaper-only; the
 # gate reports capture=unverified in that case rather than failing — the log
 # markers are the hard gate.
@@ -28,15 +34,17 @@ cd "$ROOT_DIR"
 
 BUILD_DIR="${BUILD_DIR:-build/wm_fullscreen_metal_evidence}"
 APP_SPL="${WM_FULLSCREEN_APP:-examples/06_io/ui/wm_fullscreen_metal_gui.spl}"
-TIMEOUT_SECS="${WM_FULLSCREEN_TIMEOUT_SECS:-180}"
+TIMEOUT_SECS="${WM_FULLSCREEN_TIMEOUT_SECS:-360}"
 REPORT="$BUILD_DIR/report.md"
 APP_LOG="$BUILD_DIR/app.log"
 APP_ERR="$BUILD_DIR/app.err"
 FS_PNG="$BUILD_DIR/fullscreen.png"
+FS_FIT_PNG="$BUILD_DIR/fullscreen_fit.png"
+FS_NORES_PNG="$BUILD_DIR/fullscreen_noresize.png"
 APP_DIR="$BUILD_DIR/SimpleGui.app"
 
 mkdir -p "$BUILD_DIR"
-rm -f "$REPORT" "$APP_LOG" "$APP_ERR" "$FS_PNG"
+rm -f "$REPORT" "$APP_LOG" "$APP_ERR" "$FS_PNG" "$FS_FIT_PNG" "$FS_NORES_PNG"
 
 HOST_OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
 
@@ -50,6 +58,15 @@ RESTORED=false
 CAPTURE_STATUS=unverified
 CAPTURE_BYTES=0
 GUI_BIN=""
+FIT_CONTENT=""
+FIT_OFFSET=""
+FIT_SCREEN=""
+NORES_CONTENT=""
+NORES_OFFSET=""
+FIT_CAPTURE_STATUS=unverified
+FIT_CAPTURE_BYTES=0
+NORES_CAPTURE_STATUS=unverified
+NORES_CAPTURE_BYTES=0
 
 write_report() {
     {
@@ -67,6 +84,17 @@ write_report() {
         echo "wm_fullscreen_metal_capture_status=$CAPTURE_STATUS"
         echo "wm_fullscreen_metal_capture_path=$FS_PNG"
         echo "wm_fullscreen_metal_capture_bytes=$CAPTURE_BYTES"
+        echo "wm_fullscreen_metal_fit_screen=$FIT_SCREEN"
+        echo "wm_fullscreen_metal_fit_content=$FIT_CONTENT"
+        echo "wm_fullscreen_metal_fit_offset=$FIT_OFFSET"
+        echo "wm_fullscreen_metal_fit_capture_path=$FS_FIT_PNG"
+        echo "wm_fullscreen_metal_fit_capture_status=$FIT_CAPTURE_STATUS"
+        echo "wm_fullscreen_metal_fit_capture_bytes=$FIT_CAPTURE_BYTES"
+        echo "wm_fullscreen_metal_noresize_content=$NORES_CONTENT"
+        echo "wm_fullscreen_metal_noresize_offset=$NORES_OFFSET"
+        echo "wm_fullscreen_metal_noresize_capture_path=$FS_NORES_PNG"
+        echo "wm_fullscreen_metal_noresize_capture_status=$NORES_CAPTURE_STATUS"
+        echo "wm_fullscreen_metal_noresize_capture_bytes=$NORES_CAPTURE_BYTES"
         echo "wm_fullscreen_metal_app_log=$APP_LOG"
     } >"$REPORT"
 }
@@ -147,6 +175,10 @@ cat > "$APP_DIR/Contents/Info.plist" <<PLIST
     <key>SIMPLE_EXECUTION_MODE</key><string>interpret</string>
     <key>SIMPLE_LIB</key><string>${SIMPLE_LIB:-$ROOT_DIR/src}</string>
     <key>SIMPLE_TIMEOUT_SECONDS</key><string>0</string>
+    <!-- Native-res fullscreen re-render packs two ~1.8M-pixel framebuffers under
+         the interpreter (well past the default 10M-operation cap) and holds each
+         mode on a wall-clock busy-poll loop. Disable the op limit for this run. -->
+    <key>SIMPLE_EXECUTION_LIMIT</key><string>0</string>
     <!-- The pure-Simple platform detector reads OSTYPE; a .app child process does
          not inherit the interactive shell's OSTYPE, so is_macos() would be false
          and Metal would refuse. OSTYPE=darwin is the true OS on this host. -->
@@ -169,11 +201,22 @@ open -n --stdout "$APP_LOG" --stderr "$APP_ERR" "$APP_DIR" --args run "$ABS_SPL"
 # -------------------------------------------------------------------------
 deadline=$(($(date +%s) + TIMEOUT_SECS))
 captured=0
+captured_fit=0
+captured_nores=0
 while [ "$(date +%s)" -lt "$deadline" ]; do
     if [ "$captured" -eq 0 ] && grep -q "\[wm-fullscreen\] mode=fullscreen" "$APP_LOG" 2>/dev/null; then
         # Screenshot the full screen during the fullscreen dwell window.
         screencapture -x "$FS_PNG" >/dev/null 2>&1 || true
         captured=1
+    fi
+    # Capture each native-res mode during its hold window (triggered by marker).
+    if [ "$captured_fit" -eq 0 ] && grep -q "\[wm-fullscreen\] scale_mode=fit " "$APP_LOG" 2>/dev/null; then
+        screencapture -x "$FS_FIT_PNG" >/dev/null 2>&1 || true
+        captured_fit=1
+    fi
+    if [ "$captured_nores" -eq 0 ] && grep -q "\[wm-fullscreen\] scale_mode=no-resize " "$APP_LOG" 2>/dev/null; then
+        screencapture -x "$FS_NORES_PNG" >/dev/null 2>&1 || true
+        captured_nores=1
     fi
     if grep -q "\[wm-fullscreen\] done\|\[wm-fullscreen\] error=" "$APP_LOG" 2>/dev/null; then
         break
@@ -194,6 +237,31 @@ GFC_COUNT="$(grep -c "gpu_frame_complete=true" "$APP_LOG" 2>/dev/null || true)"
 if grep -q "\[wm-fullscreen\] restored=true" "$APP_LOG" 2>/dev/null; then
     RESTORED=true
 fi
+
+# Native-res mode markers.
+FIT_LINE="$(grep '\[wm-fullscreen\] scale_mode=fit ' "$APP_LOG" 2>/dev/null | tail -1)"
+NORES_LINE="$(grep '\[wm-fullscreen\] scale_mode=no-resize ' "$APP_LOG" 2>/dev/null | tail -1)"
+FIT_SCREEN="$(printf '%s' "$FIT_LINE" | sed -n 's/.*screen=\([0-9]*x[0-9]*\).*/\1/p')"
+FIT_CONTENT="$(printf '%s' "$FIT_LINE" | sed -n 's/.*content=\([0-9]*x[0-9]*\).*/\1/p')"
+FIT_OFFSET="$(printf '%s' "$FIT_LINE" | sed -n 's/.*offset=\([0-9-]*x[0-9-]*\).*/\1/p')"
+NORES_CONTENT="$(printf '%s' "$NORES_LINE" | sed -n 's/.*content=\([0-9]*x[0-9]*\).*/\1/p')"
+NORES_OFFSET="$(printf '%s' "$NORES_LINE" | sed -n 's/.*offset=\([0-9-]*x[0-9-]*\).*/\1/p')"
+
+capture_status_for() {
+    _f="$1"
+    if [ -f "$_f" ]; then
+        _b="$(wc -c <"$_f" | tr -d ' ')"
+        if [ "${_b:-0}" -gt 1024 ]; then
+            printf '%s %s\n' captured-unverified "$_b"
+        else
+            printf '%s %s\n' unverified "$_b"
+        fi
+    else
+        printf '%s %s\n' unverified 0
+    fi
+}
+set -- $(capture_status_for "$FS_FIT_PNG"); FIT_CAPTURE_STATUS="$1"; FIT_CAPTURE_BYTES="$2"
+set -- $(capture_status_for "$FS_NORES_PNG"); NORES_CAPTURE_STATUS="$1"; NORES_CAPTURE_BYTES="$2"
 
 if [ -f "$FS_PNG" ]; then
     CAPTURE_BYTES="$(wc -c <"$FS_PNG" | tr -d ' ')"
@@ -242,9 +310,57 @@ if [ "$FS_AREA" -le "$WIN_AREA" ]; then
     fail "fullscreen-area-not-larger-win=$WINDOWED_SIZE-fs=$FULLSCREEN_SIZE"
 fi
 
+# -------------------------------------------------------------------------
+# Native-res re-render: both scale modes must be present and correct.
+# The source buffer is W=320,H=200; fit must preserve that aspect and match the
+# screen on the binding axis, no-resize must keep the original 320x200 at (0,0).
+# -------------------------------------------------------------------------
+SRC_W=320
+SRC_H=200
+if [ -z "$FIT_CONTENT" ]; then
+    fail "missing-scale-mode-fit-marker"
+fi
+if [ -z "$NORES_CONTENT" ]; then
+    fail "missing-scale-mode-no-resize-marker"
+fi
+
+CW="${FIT_CONTENT%x*}"
+CH="${FIT_CONTENT#*x}"
+if [ -z "$CW" ] || [ -z "$CH" ]; then
+    fail "unparseable-fit-content-$FIT_CONTENT"
+fi
+# Aspect preserved within rounding: |CW*H - CH*W| small (a stretched full-screen
+# content fails this and the binding-axis xor below).
+ASPECT_DIFF=$((CW * SRC_H - CH * SRC_W))
+[ "$ASPECT_DIFF" -lt 0 ] && ASPECT_DIFF=$((-ASPECT_DIFF))
+ASPECT_TOL=$(((SRC_W + SRC_H) * 2))
+if [ "$ASPECT_DIFF" -gt "$ASPECT_TOL" ]; then
+    fail "fit-aspect-not-preserved-content=$FIT_CONTENT-diff=$ASPECT_DIFF-tol=$ASPECT_TOL"
+fi
+# Content must equal the screen on exactly one (the binding) axis and be <= on
+# the other (letterbox). Guards against both stretch and under-fill.
+FIT_BINDS_X=0
+FIT_BINDS_Y=0
+[ "$CW" = "$FS_W" ] && FIT_BINDS_X=1
+[ "$CH" = "$FS_H" ] && FIT_BINDS_Y=1
+if [ "$FIT_BINDS_X" -eq 0 ] && [ "$FIT_BINDS_Y" -eq 0 ]; then
+    fail "fit-content-does-not-touch-screen-content=$FIT_CONTENT-screen=${FS_W}x${FS_H}"
+fi
+if [ "$CW" -gt "$FS_W" ] || [ "$CH" -gt "$FS_H" ]; then
+    fail "fit-content-exceeds-screen-content=$FIT_CONTENT-screen=${FS_W}x${FS_H}"
+fi
+
+# no-resize: original element sizes, left-top anchored.
+if [ "$NORES_CONTENT" != "${SRC_W}x${SRC_H}" ]; then
+    fail "no-resize-content-not-original-$NORES_CONTENT"
+fi
+if [ "$NORES_OFFSET" != "0x0" ]; then
+    fail "no-resize-offset-not-top-left-$NORES_OFFSET"
+fi
+
 STATUS=pass
-REASON="windowed+fullscreen+restored proven; gpu_frame_complete=$GFC_COUNT; $WINDOWED_SIZE -> $FULLSCREEN_SIZE"
+REASON="windowed+fullscreen+restored proven; native-res fit=$FIT_CONTENT no-resize=$NORES_CONTENT; gpu_frame_complete=$GFC_COUNT; $WINDOWED_SIZE -> $FULLSCREEN_SIZE"
 write_report
-echo "wm-fullscreen-metal-evidence: PASS ($WINDOWED_SIZE -> $FULLSCREEN_SIZE, gpu_frame_complete=$GFC_COUNT, capture=$CAPTURE_STATUS)"
+echo "wm-fullscreen-metal-evidence: PASS ($WINDOWED_SIZE -> $FULLSCREEN_SIZE, fit=$FIT_CONTENT no-resize=$NORES_CONTENT, gpu_frame_complete=$GFC_COUNT, capture=$CAPTURE_STATUS)"
 cat "$REPORT"
 exit 0
