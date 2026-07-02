@@ -72,7 +72,7 @@ if(NOT CMAKE_CXX_FLAGS MATCHES "(^| )-isystem ${SIMPLEOS_SYSROOT}/include( |$)")
 endif()
 
 # Linker flags — use lld and append sysroot runtime archives after target libs.
-set(SIMPLEOS_LINKER_FLAGS "-fuse-ld=lld -nostdlib -Wl,-no-pie -Wl,--defsym,__bss_end=_end ${SIMPLEOS_SYSROOT}/lib/crt0.o -L${SIMPLEOS_SYSROOT}/lib")
+set(SIMPLEOS_LINKER_FLAGS "-fuse-ld=lld -nostdlib -Wl,-no-pie -Wl,--export-dynamic -Wl,--defsym,__bss_end=_end ${SIMPLEOS_SYSROOT}/lib/crt0.o -L${SIMPLEOS_SYSROOT}/lib")
 set(SIMPLEOS_CXX_LINK_RUNTIME "-Wl,--start-group -lc++ -lsimpleos_c -lm -Wl,--end-group")
 set(CMAKE_EXE_LINKER_FLAGS_INIT    "${SIMPLEOS_LINKER_FLAGS}")
 set(CMAKE_SHARED_LINKER_FLAGS_INIT "${SIMPLEOS_LINKER_FLAGS}")

@@ -50,26 +50,39 @@ impl MirLowering:
                         # value of type 'nil'" the first time a real
                         # (non-flat-bootstrap) function body reached this path.
                         val mir_type = if type_.?: self.lower_type(type_) else: MirType.i64()
-                        var b = self.builder
-                        val local = b.new_local(nil, mir_type, LocalKind.Var)
-                        self.builder = b
-                        self.local_map[symbol.id] = local
 
+                        # Lower the initializer first so a bitfield-construct
+                        # pass-through can be aliased directly, without first
+                        # materializing an intermediate I64 local.
                         var has_init = false
-                        var init_local = local
+                        var init_local = LocalId(id: 0)
                         if val init_expr = init:
                             init_local = self.lower_expr(init_expr)
                             has_init = true
-                        if has_init:
-                            var b2 = self.builder
-                            b2.emit_copy(local, init_local)
-                            self.builder = b2
-                            # Propagate bitfield-construction tracking so
-                            # `x.field` on the bound name resolves (see
-                            # bitfield_value_syms in mir_lowering_types.spl).
-                            val bf_sym = self.bitfield_value_syms.get(init_local.id)
-                            if bf_sym != nil:
-                                self.bitfield_value_syms[local.id] = bf_sym
+
+                        # Bitfield construction (`val inst = BitfieldType(raw)`)
+                        # is a bit-identical identity pass-through: alias the
+                        # binding straight to the source local instead of
+                        # emitting a fresh I64 temp + Copy, so downstream slices
+                        # read the source signal directly (imem_rdata(6 downto 0),
+                        # not sig_N(6 downto 0)). bitfield_value_syms is only
+                        # populated for real bitfield types, so non-bitfield
+                        # code always takes the ordinary new_local + Copy path.
+                        val bf_sym = if has_init:
+                            self.bitfield_value_syms.get(init_local.id)
+                        else:
+                            nil
+                        if bf_sym != nil:
+                            self.local_map[symbol.id] = init_local
+                        else:
+                            var b = self.builder
+                            val local = b.new_local(nil, mir_type, LocalKind.Var)
+                            self.builder = b
+                            self.local_map[symbol.id] = local
+                            if has_init:
+                                var b2 = self.builder
+                                b2.emit_copy(local, init_local)
+                                self.builder = b2
 
                     case Assign(target, op, value):
                         val value_local = self.lower_expr(value)

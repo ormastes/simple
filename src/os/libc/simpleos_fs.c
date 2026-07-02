@@ -441,6 +441,11 @@ off_t lseek(int fd, off_t offset, int whence) {
 }
 
 int ftruncate(int fd, off_t length) {
+    if (running_on_linux_host()) {
+        int64_t r = linux_syscall2(77, fd, (int64_t)length);
+        if (r < 0) { errno = (int)(-r); return -1; }
+        return 0;
+    }
     int64_t r = simpleos_syscall(43, fd, (int64_t)length, 0, 0, 0);
     if (r < 0) { errno = (int)(-r); return -1; }
     return 0;
