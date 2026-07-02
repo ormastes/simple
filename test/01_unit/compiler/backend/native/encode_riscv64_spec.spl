@@ -4,7 +4,7 @@ use compiler.backend.backend.backend_types.{CodegenTarget}
 use compiler.backend.backend.riscv_target.{riscv_linux_target_contract}
 use compiler.backend.native.{R_RISCV_CALL_PLT, encode_module_riscv64}
 use compiler.backend.native.encode_riscv64.{encode_li_riscv64}
-use compiler.backend.native.mach_inst.{MachBlock, MachFunction, MachModule, RV_OP_ADD, RV_OP_AND, RV_OP_BEQ, RV_OP_BGE, RV_OP_BLT, RV_OP_BNE, RV_OP_CALL, RV_OP_CLZ, RV_OP_CTZ, RV_OP_DIV, RV_OP_JAL, RV_OP_JALR, RV_OP_LD, RV_OP_LI, RV_OP_MUL, RV_OP_MV, RV_OP_NEG, RV_OP_NOP, RV_OP_NOT, RV_OP_OR, RV_OP_REM, RV_OP_RET, RV_OP_REV8, RV_OP_ROL, RV_OP_ROR, RV_OP_SD, RV_OP_SEQZ, RV_OP_SLL, RV_OP_SLT, RV_OP_SLTU, RV_OP_SNEZ, RV_OP_SRA, RV_OP_SRL, RV_OP_SUB, RV_OP_XOR, RV_X1, RV_X2, RV_X3, new_mach_inst, op_imm, op_label, op_mem, op_phys, op_sym, physical_reg}
+use compiler.backend.native.mach_inst.{MachBlock, MachFunction, MachModule, RV_OP_ADD, RV_OP_ADDI, RV_OP_AND, RV_OP_AUIPC, RV_OP_BEQ, RV_OP_BGE, RV_OP_BLT, RV_OP_BNE, RV_OP_CALL, RV_OP_CLZ, RV_OP_CTZ, RV_OP_DIV, RV_OP_JAL, RV_OP_JALR, RV_OP_LD, RV_OP_LI, RV_OP_LUI, RV_OP_MUL, RV_OP_MV, RV_OP_NEG, RV_OP_NOP, RV_OP_NOT, RV_OP_OR, RV_OP_REM, RV_OP_RET, RV_OP_REV8, RV_OP_ROL, RV_OP_ROR, RV_OP_SD, RV_OP_SEQZ, RV_OP_SLL, RV_OP_SLT, RV_OP_SLTU, RV_OP_SNEZ, RV_OP_SRA, RV_OP_SRL, RV_OP_SUB, RV_OP_XOR, RV_X1, RV_X2, RV_X3, new_mach_inst, op_imm, op_label, op_mem, op_phys, op_sym, physical_reg}
 use compiler.backend.native.riscv_encoding.{
     riscv_emit_u32_le, riscv_encode_b_type, riscv_encode_i_type, riscv_encode_j_type, riscv_encode_r_type, riscv_encode_s_type, riscv_encode_u_type,
     emit_rol_riscv64, emit_ror_riscv64,
@@ -137,6 +137,21 @@ fn rv64_pseudo_control_module() -> MachModule:
     val func = MachFunction(name: "rv64_pseudo_control", blocks: [block], frame_size: 0, num_virtual_regs: 0, used_callee_saved: [])
     MachModule(name: "rv64_pseudo_control", functions: [func], data_sections: [], extern_symbols: [])
 
+fn rv64_imm_upper_module() -> MachModule:
+    val block = MachBlock(
+        label: "entry",
+        insts: [
+            new_mach_inst(RV_OP_ADDI, [op_phys(RV_X1), op_phys(RV_X2), op_imm(-4)]),
+            new_mach_inst(RV_OP_LUI, [op_phys(RV_X1), op_imm(0x12345)]),
+            new_mach_inst(RV_OP_AUIPC, [op_phys(RV_X1), op_imm(0x12345)]),
+            new_mach_inst(RV_OP_AUIPC, [op_phys(RV_X1), op_sym("upper_target")])
+        ],
+        block_id: 0,
+        offset: 0
+    )
+    val func = MachFunction(name: "rv64_imm_upper", blocks: [block], frame_size: 0, num_virtual_regs: 0, used_callee_saved: [])
+    MachModule(name: "rv64_imm_upper", functions: [func], data_sections: [], extern_symbols: ["upper_target"])
+
 fn rv64_bitmanip_module() -> MachModule:
     val block = MachBlock(
         label: "entry",
@@ -213,6 +228,14 @@ describe "Encode Riscv64":
     it "encodes RV64 MV LI and RET MachInst words":
         val encoded = encode_module_riscv64(rv64_pseudo_control_module())
         expect(encoded[0].code).to_equal([0x93, 0x00, 0x01, 0x00, 0x93, 0x00, 0xA0, 0x02, 0x67, 0x80, 0x00, 0x00])
+
+    it "encodes RV64 immediate upper MachInst words":
+        val encoded = encode_module_riscv64(rv64_imm_upper_module())
+        expect(encoded[0].code).to_equal([0x93, 0x00, 0xC1, 0xFF, 0xB7, 0x50, 0x34, 0x12, 0x97, 0x50, 0x34, 0x12, 0x97, 0x00, 0x00, 0x00])
+        expect(encoded[0].relocations.len()).to_equal(1)
+        expect(encoded[0].relocations[0].offset).to_equal(12)
+        expect(encoded[0].relocations[0].symbol_name).to_equal("upper_target")
+        expect(encoded[0].relocations[0].reloc_type).to_equal(R_RISCV_CALL_PLT)
 
     it "encodes RV64 bitmanip MachInst words":
         val encoded = encode_module_riscv64(rv64_bitmanip_module())
