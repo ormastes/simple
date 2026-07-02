@@ -79,6 +79,16 @@ impl VhdlBackend:
                     val declare_result = self.emit_local_signal_declaration(builder, local, Some(func.span))
                     if declare_result.is_err():
                         return Err(declare_result.unwrap_err())
+                case Return:
+                    # Tuple-ABI functions route the return value through an
+                    # internal "return_value" signal (see default_local_name)
+                    # before splitting it across the per-field output ports
+                    # below; that signal needs its own declaration since it
+                    # isn't one of the entity's ports.
+                    if self.active_return_abi.is_tuple:
+                        val declare_result = self.emit_local_signal_declaration(builder, local, Some(func.span))
+                        if declare_result.is_err():
+                            return Err(declare_result.unwrap_err())
                 case _:
                     ()
 
@@ -128,6 +138,18 @@ impl VhdlBackend:
                         val term_result = self.compile_terminator(builder, block.terminator)
                         if term_result.is_err():
                             return Err(term_result.unwrap_err())
+
+        if self.active_return_abi.is_tuple:
+            for local in func.locals:
+                match local.kind:
+                    case Return:
+                        val return_name = match self.local_to_vhdl(local.id):
+                            case Ok(result): result
+                            case Err(err): return Err(err)
+                        for field in self.active_return_abi.fields:
+                            builder.emit_signal_assign(field.name, "{return_name}.f{field.index}")
+                    case _:
+                        ()
 
         builder.emit_architecture_end("rtl")
 
