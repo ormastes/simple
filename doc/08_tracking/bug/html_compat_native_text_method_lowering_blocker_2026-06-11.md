@@ -1,6 +1,20 @@
 # html_compat native text method lowering blocker
 
 Date: 2026-06-11
+Status: Open (native renderer execution still blocked as of 2026-07-02)
+
+## Verification 2026-07-02
+
+The blocker persists for full renderer-driven specs compiled natively. Both
+`test/03_system/gui/wm_compare/html_compat_geometry_probe_spec.spl` and the new
+`test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_flex_grow_weighted_spec.spl`
+pass under the default interpreter runner but fail immediately (subprocess
+crash) under `bin/simple test --mode=native`. This is the same native
+text-method / string-runtime lowering gap in the HTML layout renderer closure,
+not a layout-geometry defect: interpreter-mode probes produce the correct
+weighted flex-grow widths (400px 1:2:1 -> 100/200/100; 240px fixed+1:2 ->
+40/67/133) and correct wrap-reverse ordering. No compiler hack applied; the
+gap is left for a dedicated native string-lowering fix.
 
 ## Summary
 
