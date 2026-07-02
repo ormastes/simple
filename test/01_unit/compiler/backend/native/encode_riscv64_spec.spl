@@ -4,7 +4,7 @@ use compiler.backend.backend.backend_types.{CodegenTarget}
 use compiler.backend.backend.riscv_target.{riscv_linux_target_contract}
 use compiler.backend.native.{R_RISCV_CALL_PLT, encode_module_riscv64}
 use compiler.backend.native.encode_riscv64.{encode_li_riscv64}
-use compiler.backend.native.mach_inst.{MachBlock, MachFunction, MachModule, RV_OP_BEQ, RV_OP_JAL, RV_OP_NOP, RV_X1, RV_X2, new_mach_inst, op_label, op_phys}
+use compiler.backend.native.mach_inst.{MachBlock, MachFunction, MachModule, RV_OP_ADD, RV_OP_BEQ, RV_OP_JAL, RV_OP_MUL, RV_OP_NOP, RV_OP_SRA, RV_OP_SUB, RV_X1, RV_X2, RV_X3, new_mach_inst, op_label, op_phys}
 use compiler.backend.native.riscv_encoding.{
     riscv_emit_u32_le, riscv_encode_b_type, riscv_encode_i_type, riscv_encode_j_type, riscv_encode_r_type, riscv_encode_s_type, riscv_encode_u_type,
     emit_rol_riscv64, emit_ror_riscv64,
@@ -40,6 +40,21 @@ fn rv64_forward_patch_module() -> MachModule:
     val func = MachFunction(name: "rv64_forward_patch", blocks: [start, target], frame_size: 0, num_virtual_regs: 0, used_callee_saved: [])
     MachModule(name: "rv64_forward_patch", functions: [func], data_sections: [], extern_symbols: [])
 
+fn rv64_alu_module() -> MachModule:
+    val block = MachBlock(
+        label: "entry",
+        insts: [
+            new_mach_inst(RV_OP_ADD, [op_phys(RV_X1), op_phys(RV_X2), op_phys(RV_X3)]),
+            new_mach_inst(RV_OP_SUB, [op_phys(RV_X1), op_phys(RV_X2), op_phys(RV_X3)]),
+            new_mach_inst(RV_OP_MUL, [op_phys(RV_X1), op_phys(RV_X2), op_phys(RV_X3)]),
+            new_mach_inst(RV_OP_SRA, [op_phys(RV_X1), op_phys(RV_X2), op_phys(RV_X3)])
+        ],
+        block_id: 0,
+        offset: 0
+    )
+    val func = MachFunction(name: "rv64_alu", blocks: [block], frame_size: 0, num_virtual_regs: 0, used_callee_saved: [])
+    MachModule(name: "rv64_alu", functions: [func], data_sections: [], extern_symbols: [])
+
 describe "Encode Riscv64":
     it "shares the Linux call relocation and ABI contract":
         val contract = riscv_linux_target_contract(CodegenTarget.Riscv64)
@@ -55,6 +70,10 @@ describe "Encode Riscv64":
     it "encodes RV64 R-type ADD and SUB words":
         expect(riscv_emit_u32_le([], riscv_encode_r_type(0, 3, 2, 0, 1, 0x33))).to_equal([0xB3, 0x00, 0x31, 0x00])
         expect(riscv_emit_u32_le([], riscv_encode_r_type(0x20, 3, 2, 0, 1, 0x33))).to_equal([0xB3, 0x00, 0x31, 0x40])
+
+    it "encodes RV64 ALU MachInst funct fields":
+        val encoded = encode_module_riscv64(rv64_alu_module())
+        expect(encoded[0].code).to_equal([0xB3, 0x00, 0x31, 0x00, 0xB3, 0x00, 0x31, 0x40, 0xB3, 0x00, 0x31, 0x02, 0xB3, 0x50, 0x31, 0x40])
 
     it "expands RV64 LI as ADDI or LUI plus ADDI":
         expect(encode_li_riscv64([], 1, 42)).to_equal([0x93, 0x00, 0xA0, 0x02])
