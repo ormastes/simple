@@ -996,6 +996,16 @@ implementation-evidence-in-progress
   non-TCP IPv4 protocol bytes (`BTCP IPP xx`) and TCP destination/flags
   (`BTCP TCP d=hhhh f=hh`) and reset that diagnostic counter on each boot TCP
   bind. No second live QEMU probe was run after this diagnostic patch.
+- rv64-ssh-bind-port-fix: The next bounded live retry with TCP classification
+  diagnostics proved the guest receives the OpenSSH SYN on the expected forwarded
+  port: serial showed `BTCP TCP d=08ae f=02` twice, where `0x08ae` is guest port
+  `2222`. The daemon still did not log `BTCP SYN` because
+  `SshDaemon.start()` logged `self.port` but hardcoded the boot-local TCP bind
+  to `0.0.0.0:22`, so the runtime listener rejected the 2222 SYNs before the
+  SYN branch. Patched `src/os/apps/sshd/sshd.spl` to bind
+  `0.0.0.0:{self.port}` and added an SSpec regression assertion forbidding the
+  hardcoded `:22` boot bind. No second live QEMU probe was run after this port
+  binding fix.
 - continue-metal-log-hardening: Hardened production GUI/web parity Metal
   render-log aggregation with an exact-once SSpec assertion for
   `production_gui_web_renderer_parity_metal_render_log_tauri_ios_gate_status`.
@@ -1042,3 +1052,16 @@ implementation-evidence-in-progress
   mirrored manual regenerated with 0 stubs. Full completion remains open until
   live Tauri iOS/WKWebView Metal renderer parity evidence exists and strict
   compare passes.
+- rv64-ssh-version-byte-index-fix: The next bounded RV64 SSH live retry after
+  the configured-port bind fix proved forward progress through TCP accept and
+  outbound SSH banner delivery. Serial showed `BTCP SYN`,
+  `[sshd] accepted client fd=200`, `[sshd-session] version exchange start`,
+  and `[rt-net] banner send raw-fast rc=22`; OpenSSH reported remote protocol
+  `SSH-2.0-SimpleOS_1.0` and then sent `SSH2_MSG_KEXINIT`. The new blocker is
+  inbound version-line byte reconstruction: guest serial logged
+  `version raw bytes len=20 hex=0000000000000000000000000000000000000000`
+  followed by `BTCP VER TIMEOUT` and invalid empty text. Patched the RV64
+  freestanding runtime so `rt_bytes_u8_at` normalizes the Simple integer index
+  with `rt_index_arg(index_value)`, matching normal array indexing and allowing
+  SSH helpers such as `_u8_at(data, 1)` to read returned `[u8]` arrays
+  correctly. No second live QEMU probe was run after this byte-index fix.
