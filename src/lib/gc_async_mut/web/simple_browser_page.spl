@@ -12,7 +12,7 @@ use gc_async_mut.gpu.browser_engine.dom_accessors.{
     be_dom_get_attr}
 use gc_async_mut.gpu.browser_engine.layout.{BeLayoutBox, layout_tree,
     layout_get_x, layout_get_y, layout_get_width, layout_get_height,
-    layout_get_children}
+    layout_get_children, hit_test_anchor, first_anchor_box}
 use common.render_scene.scene.{RenderScene, SceneCommand, render_scene}
 use common.string_builder.{StringBuilder}
 
@@ -473,6 +473,108 @@ fn simple_browser_submit_request(page: SimpleBrowserPageState, form_key: text, s
 fn simple_browser_submit_get_url(page: SimpleBrowserPageState, form_key: text, submit_action: text) -> text:
     simple_browser_submit_request(page, form_key, submit_action, "GET").url
 
+# =========================================================================
+# Navigation model: layout-layer hit-testing + a simple back/forward history.
+# =========================================================================
+
+class SimpleBrowserHistory:
+    """Back/forward navigation stacks with the current URL.
+
+    `back` is oldest-first; `forward` is a stack whose last entry is the most
+    recently un-visited page. Returned by value from every transition to dodge
+    the compiled free-fn arg-mutation caveat noted above.
+    """
+    back: [text]
+    current: text
+    forward: [text]
+
+fn simple_browser_history_new(url: text) -> SimpleBrowserHistory:
+    SimpleBrowserHistory(back: [], current: url, forward: [])
+
+fn _drop_last(items: [text]) -> [text]:
+    val count = items.len()
+    if count <= 1:
+        return []
+    var out: [text] = [""; count - 1]
+    var i = 0
+    while i < count - 1:
+        out[i] = items[i]
+        i = i + 1
+    out
+
+fn simple_browser_history_navigate(hist: SimpleBrowserHistory, url: text) -> SimpleBrowserHistory:
+    """Push the current URL onto the back stack, clear forward, go to url."""
+    if url == "" or url == hist.current:
+        return hist
+    var new_back = hist.back
+    new_back = new_back.push(hist.current)
+    SimpleBrowserHistory(back: new_back, current: url, forward: [])
+
+fn simple_browser_history_can_back(hist: SimpleBrowserHistory) -> bool:
+    hist.back.len() > 0
+
+fn simple_browser_history_can_forward(hist: SimpleBrowserHistory) -> bool:
+    hist.forward.len() > 0
+
+fn simple_browser_history_back(hist: SimpleBrowserHistory) -> SimpleBrowserHistory:
+    val n = hist.back.len()
+    if n == 0:
+        return hist
+    val prev = hist.back[n - 1]
+    var new_forward = hist.forward
+    new_forward = new_forward.push(hist.current)
+    SimpleBrowserHistory(back: _drop_last(hist.back), current: prev, forward: new_forward)
+
+fn simple_browser_history_forward(hist: SimpleBrowserHistory) -> SimpleBrowserHistory:
+    val n = hist.forward.len()
+    if n == 0:
+        return hist
+    val next = hist.forward[n - 1]
+    var new_back = hist.back
+    new_back = new_back.push(hist.current)
+    SimpleBrowserHistory(back: new_back, current: next, forward: _drop_last(hist.forward))
+
+fn simple_browser_resolve_url(base_url: text, href: text) -> text:
+    """Resolve href against base_url (relative, absolute, /path, #frag, ?query)."""
+    _resolve_relative_url(base_url, href)
+
+fn simple_browser_anchor_href_at(html: text, base_url: text, x: i32, y: i32, viewport_w: i32, viewport_h: i32) -> text:
+    """Hit-test (x, y) against the layout of `html` using the layout-layer
+    `hit_test_anchor`. Returns the resolved absolute href of the enclosing
+    anchor, or "" when the point lands on no anchor."""
+    val dom = html_tree_builder_build(html)
+    val layout = layout_tree(dom, viewport_w.to_f64(), viewport_h.to_f64())
+    match hit_test_anchor(layout, dom, x.to_f64(), y.to_f64()):
+        Some(anchor):
+            val href = be_dom_get_attr(anchor, "href")
+            if href == "":
+                return ""
+            return _resolve_relative_url(base_url, href)
+        _:
+            return ""
+
+fn simple_browser_first_anchor_center(html: text, viewport_w: i32, viewport_h: i32) -> (i32, i32):
+    """Return the center point of the first anchor's layout box, or (-1,-1)."""
+    val dom = html_tree_builder_build(html)
+    val layout = layout_tree(dom, viewport_w.to_f64(), viewport_h.to_f64())
+    match first_anchor_box(layout, dom):
+        Some(box):
+            val cx = (layout_get_x(box) + layout_get_width(box) / 2.0).to_i32()
+            val cy = (layout_get_y(box) + layout_get_height(box) / 2.0).to_i32()
+            return (cx, cy)
+        _:
+            return (-1, -1)
+
+export SimpleBrowserHistory
+export simple_browser_history_new
+export simple_browser_history_navigate
+export simple_browser_history_back
+export simple_browser_history_forward
+export simple_browser_history_can_back
+export simple_browser_history_can_forward
+export simple_browser_resolve_url
+export simple_browser_anchor_href_at
+export simple_browser_first_anchor_center
 export SimpleBrowserPageState
 export SimpleBrowserTarget
 export SimpleBrowserField

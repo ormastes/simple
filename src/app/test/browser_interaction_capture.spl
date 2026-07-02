@@ -11,8 +11,13 @@
 
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_engine2d_presenter.{simple_web_layout_render_html_pixels_at_scroll}
 use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_html_to_pixels_with_engine2d_backend}
+use std.gc_async_mut.web.simple_browser_page.{
+    simple_browser_history_new, simple_browser_history_navigate,
+    simple_browser_history_back, simple_browser_history_forward,
+    simple_browser_history_can_back, simple_browser_history_can_forward,
+    simple_browser_anchor_href_at, simple_browser_first_anchor_center}
 use common.image.ppm_decode.{encode_ppm_p6}
-use std.nogc_sync_mut.sffi.io.{file_write_bytes}
+use std.nogc_sync_mut.sffi.io.{file_write_bytes, file_read_text}
 use std.sffi.cli.{cli_get_args}
 
 # Marker row background: #ff00aa, unique in the page.
@@ -72,6 +77,27 @@ fn find_marker_row(pixels: [u32], width: i32, height: i32) -> i32:
 fn write_ppm(path: text, pixels: [u32], width: i32, height: i32) -> bool:
     val bytes = encode_ppm_p6(width.to_u32(), height.to_u32(), pixels)
     file_write_bytes(path, bytes)
+
+# @step: Count pixels exactly matching a color (page-identity marker)
+fn count_color(pixels: [u32], color: u32) -> i32:
+    var c: i32 = 0
+    var i = 0
+    while i < pixels.len():
+        if pixels[i] == color:
+            c = c + 1
+        i = i + 1
+    c
+
+# @step: Count differing pixels between two framebuffers
+fn pixels_differ(a: [u32], b: [u32]) -> i32:
+    var d: i32 = 0
+    val n = if a.len() < b.len(): a.len() else: b.len()
+    var i = 0
+    while i < n:
+        if a[i] != b[i]:
+            d = d + 1
+        i = i + 1
+    d
 
 fn main() -> i64:
     val args = cli_get_args()
@@ -148,6 +174,85 @@ fn main() -> i64:
     else:
         all_pass = false
         print "lowres_800x600_ppm="
+
+    # ---- G2.4 link-click + back/forward navigation ----------------------
+    # Two-page local corpus: page A has a full-width anchor to page B (green).
+    # Hit-test the anchor's layout box (layout-layer hit_test_anchor), resolve
+    # its href relative to the file:// base, drive a back/forward history, and
+    # render both pages to prove distinct framebuffers each way.
+    val nav_w: i32 = 400
+    val nav_h: i32 = 300
+    val a_path = "test/03_system/gui/browser_nav_corpus/page_a.html"
+    val base_a = "file://" + a_path
+    val a_html = file_read_text(a_path)
+    val marker_a: u32 = 0xFFDDDDDDu32
+    val marker_b: u32 = 0xFF00CC66u32
+
+    if a_html == "":
+        all_pass = false
+        print "link_click_status=fail"
+        print "link_click_reason=fixture_a_unreadable"
+    else:
+        val (cx, cy) = simple_browser_first_anchor_center(a_html, nav_w, nav_h)
+        print "link_click_anchor_center={cx},{cy}"
+        val href = simple_browser_anchor_href_at(a_html, base_a, cx, cy, nav_w, nav_h)
+        print "link_click_href={href}"
+        # Negative control: a point far below the anchor resolves to no link.
+        val miss = simple_browser_anchor_href_at(a_html, base_a, cx, cy + 900, nav_w, nav_h)
+        print "link_click_miss_href={miss}"
+
+        val b_path = if href.starts_with("file://"): href.substring(7, href.len()) else: ""
+        val b_html = if b_path != "": file_read_text(b_path) else: ""
+
+        var hist = simple_browser_history_new(base_a)
+        hist = simple_browser_history_navigate(hist, href)
+        val after_click_url = hist.current
+        val back_hist = simple_browser_history_back(hist)
+        val after_back_url = back_hist.current
+        val fwd_hist = simple_browser_history_forward(back_hist)
+        val after_forward_url = fwd_hist.current
+        print "link_click_after_click_url={after_click_url}"
+        print "link_click_after_back_url={after_back_url}"
+        print "link_click_after_forward_url={after_forward_url}"
+
+        val pxA = simple_web_layout_render_html_pixels_at_scroll(a_html, nav_w, nav_h, "cpu_simd", 0)
+        val pxB = simple_web_layout_render_html_pixels_at_scroll(b_html, nav_w, nav_h, "cpu_simd", 0)
+        val a_marker = count_color(pxA, marker_a)
+        val b_marker = count_color(pxB, marker_b)
+        val diff = pixels_differ(pxA, pxB)
+        print "link_click_a_marker_pixels={a_marker}"
+        print "link_click_b_marker_pixels={b_marker}"
+        print "link_click_diff_pixels={diff}"
+
+        # Evidence PPMs for each navigation state (renders are deterministic:
+        # after-back reuses A's framebuffer, after-forward reuses B's).
+        val _r0 = write_ppm("{out_dir}/nav_a_initial.ppm", pxA, nav_w, nav_h)
+        val _r1 = write_ppm("{out_dir}/nav_b_after_click.ppm", pxB, nav_w, nav_h)
+        val _r2 = write_ppm("{out_dir}/nav_a_after_back.ppm", pxA, nav_w, nav_h)
+        val _r3 = write_ppm("{out_dir}/nav_b_after_forward.ppm", pxB, nav_w, nav_h)
+        print "link_click_ppm_a_initial={out_dir}/nav_a_initial.ppm"
+        print "link_click_ppm_b_after_click={out_dir}/nav_b_after_click.ppm"
+        print "link_click_ppm_a_after_back={out_dir}/nav_a_after_back.ppm"
+        print "link_click_ppm_b_after_forward={out_dir}/nav_b_after_forward.ppm"
+
+        val threshold: i32 = 500
+        val hit_ok = cx >= 0 and href.ends_with("page_b.html") and miss == ""
+        val load_ok = b_html != ""
+        val history_ok = after_click_url == href and after_back_url == base_a and after_forward_url == href
+        val pixels_ok = a_marker > threshold and b_marker > threshold and diff > threshold
+        if hit_ok and load_ok and history_ok and pixels_ok:
+            print "link_click_status=pass"
+        else:
+            all_pass = false
+            print "link_click_status=fail"
+            if not hit_ok:
+                print "link_click_reason=hit_test_or_resolve_failed"
+            elif not load_ok:
+                print "link_click_reason=target_page_unreadable"
+            elif not history_ok:
+                print "link_click_reason=history_transition_mismatch"
+            else:
+                print "link_click_reason=render_evidence_below_threshold"
 
     if all_pass:
         print "capture_overall=pass"

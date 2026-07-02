@@ -119,14 +119,70 @@ fn layout_flex(node: BeDomNode, container: BeLayoutBox, style: StyleProps, paren
 fn layout_text(node: BeDomNode, container: BeLayoutBox, style: StyleProps) -> BeLayoutBox:
     container
 
-fn hit_test(box: BeLayoutBox, x: f64, y: f64) -> BeDomNode?:
+fn _box_contains(box: BeLayoutBox, x: f64, y: f64) -> bool:
+    """Point-in-box test in absolute layout coordinates."""
+    x >= box.x and y >= box.y and x <= box.x + box.width and y <= box.y + box.height
+
+fn _lockstep_count(box: BeLayoutBox, node: BeDomNode) -> i64:
+    """Child count shared by the layout box and its DOM node (layout_node
+    emits one child box per DOM child, in order)."""
+    var n = box.children.len()
+    if node.children.len() < n:
+        n = node.children.len()
+    n
+
+fn hit_test(box: BeLayoutBox, node: BeDomNode, x: f64, y: f64) -> BeDomNode?:
+    """Return the deepest DOM node whose layout box contains (x, y).
+
+    Walks the layout box tree and DOM tree in lockstep (layout_node builds
+    box.children[i] from node.children[i]), preferring the last (topmost)
+    matching child. Returns nil when the point falls outside `box`.
+    """
+    if not _box_contains(box, x, y):
+        return nil
+    val n = _lockstep_count(box, node)
+    var i = n - 1
+    while i >= 0:
+        val found = hit_test(box.children[i], node.children[i], x, y)
+        if found.?:
+            return found
+        i = i - 1
+    Some(node)
+
+fn hit_test_anchor(box: BeLayoutBox, node: BeDomNode, x: f64, y: f64) -> BeDomNode?:
+    """Return the innermost enclosing <a> node whose subtree contains the
+    deepest box at (x, y), or nil when the hit is not inside any anchor."""
+    if not _box_contains(box, x, y):
+        return nil
+    val n = _lockstep_count(box, node)
+    var i = n - 1
+    while i >= 0:
+        val found = hit_test_anchor(box.children[i], node.children[i], x, y)
+        if found.?:
+            return found
+        i = i - 1
+    if node.tag_name == "a":
+        return Some(node)
+    nil
+
+fn first_anchor_box(box: BeLayoutBox, node: BeDomNode) -> BeLayoutBox?:
+    """Return the layout box of the first <a> element in document order."""
+    if node.tag_name == "a":
+        return Some(box)
+    val n = _lockstep_count(box, node)
+    var i = 0
+    while i < n:
+        val found = first_anchor_box(box.children[i], node.children[i])
+        if found.?:
+            return found
+        i = i + 1
     nil
 
 export layout_tree, layout_node, layout_to_scene, paint_box
 export layout_block
 export layout_flex
 export layout_text
-export hit_test
+export hit_test, hit_test_anchor, first_anchor_box
 export layout_get_x, layout_get_y, layout_get_width, layout_get_height
 export layout_get_node, layout_get_children
 export RenderScene
