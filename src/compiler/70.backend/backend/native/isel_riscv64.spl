@@ -551,22 +551,38 @@ fn rv_isel_store(ctx: ISelContext, ptr: MirOperand, value: MirOperand) -> ISelIn
 fn rv_isel_get_field(ctx: ISelContext, dest: LocalId, base: MirOperand, field: i64) -> ISelInstResult:
     val base_low = rv_lower_operand(ctx, base)
     val dest_op = local_vreg_op(dest.id)
-    val offset = field * 8
+    val offset = field * RV64_WORD_SIZE
     var insts = base_low.insts
+    var current_ctx = base_low.ctx
     # LD dest, offset(base)
-    insts.push(new_mach_inst(RV_OP_LD, [dest_op, op_mem(operand_get_reg(base_low.result), offset)]))
-    ISelInstResult(insts: insts, ctx: base_low.ctx)
+    if rv64_imm12_fits(offset):
+        insts.push(new_mach_inst(RV_OP_LD, [dest_op, op_mem(operand_get_reg(base_low.result), offset)]))
+    else:
+        current_ctx = isel_alloc_vreg(current_ctx)
+        val addr = op_reg(virtual_reg(isel_get_vreg(current_ctx)))
+        insts.push(new_mach_inst(RV_OP_LI, [addr, op_imm(offset)]))
+        insts.push(new_mach_inst(RV_OP_ADD, [addr, base_low.result, addr]))
+        insts.push(new_mach_inst(RV_OP_LD, [dest_op, op_mem(operand_get_reg(addr), 0)]))
+    ISelInstResult(insts: insts, ctx: current_ctx)
 
 fn rv_isel_set_field(ctx: ISelContext, base: MirOperand, field: i64, value: MirOperand) -> ISelInstResult:
     val base_low = rv_lower_operand(ctx, base)
     val val_low = rv_lower_operand(base_low.ctx, value)
-    val offset = field * 8
+    val offset = field * RV64_WORD_SIZE
     var insts = base_low.insts
     for ai in val_low.insts:
         insts.push(ai)
+    var current_ctx = val_low.ctx
     # SD value, offset(base)
-    insts.push(new_mach_inst(RV_OP_SD, [val_low.result, op_mem(operand_get_reg(base_low.result), offset)]))
-    ISelInstResult(insts: insts, ctx: val_low.ctx)
+    if rv64_imm12_fits(offset):
+        insts.push(new_mach_inst(RV_OP_SD, [val_low.result, op_mem(operand_get_reg(base_low.result), offset)]))
+    else:
+        current_ctx = isel_alloc_vreg(current_ctx)
+        val addr = op_reg(virtual_reg(isel_get_vreg(current_ctx)))
+        insts.push(new_mach_inst(RV_OP_LI, [addr, op_imm(offset)]))
+        insts.push(new_mach_inst(RV_OP_ADD, [addr, base_low.result, addr]))
+        insts.push(new_mach_inst(RV_OP_SD, [val_low.result, op_mem(operand_get_reg(addr), 0)]))
+    ISelInstResult(insts: insts, ctx: current_ctx)
 
 fn rv_isel_get_element_ptr(ctx: ISelContext, dest: LocalId, base: MirOperand, indices: [MirOperand]) -> ISelInstResult:
     var insts: [MachInst] = []

@@ -47,6 +47,42 @@ fn build_rv32_memory_module() -> MirModule:
     functions[SymbolId.new(0)] = func
     MirModule(name: "rv32_memory", functions: functions, statics: {}, constants: {}, types: {})
 
+fn build_rv32_large_field_module() -> MirModule:
+    val i32_type = MirType(kind: MirTypeKind.I32)
+    val locals = [
+        MirLocal(id: LocalId(id: 0), name: Some("_return"), type_: i32_type, kind: LocalKind.Return),
+        MirLocal(id: LocalId(id: 1), name: Some("base"), type_: i32_type, kind: LocalKind.Temp),
+        MirLocal(id: LocalId(id: 2), name: Some("value"), type_: i32_type, kind: LocalKind.Temp),
+        MirLocal(id: LocalId(id: 3), name: Some("loaded"), type_: i32_type, kind: LocalKind.Temp)
+    ]
+    val entry = MirBlock(
+        id: BlockId.new(0),
+        label: Some("entry"),
+        instructions: [
+            MirInst(kind: MirInstKind.Const(LocalId(id: 1), MirConstValue.Int(4096), i32_type), span: nil),
+            MirInst(kind: MirInstKind.Const(LocalId(id: 2), MirConstValue.Int(7), i32_type), span: nil),
+            MirInst(kind: MirInstKind.GetField(LocalId(id: 3), MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))), 600), span: nil),
+            MirInst(kind: MirInstKind.SetField(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))), 601, MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2)))), span: nil)
+        ],
+        terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 3)))))
+    )
+    val func = MirFunction(
+        symbol: SymbolId.new(0),
+        name: "rv32_large_field",
+        signature: MirSignature(params: [], return_type: i32_type, is_variadic: false),
+        locals: locals,
+        blocks: [entry],
+        entry_block: BlockId.new(0),
+        span: Span(start: 0, end: 0, line: 1, col: 1),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {}
+    )
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[SymbolId.new(0)] = func
+    MirModule(name: "rv32_large_field", functions: functions, statics: {}, constants: {}, types: {})
+
 fn build_rv32_gep_module() -> MirModule:
     val i32_type = MirType(kind: MirTypeKind.I32)
     val locals = [
@@ -1127,6 +1163,15 @@ describe "Isel Riscv32":
         expect(nth_mem_base_reg(block, RV_OP_LW, 1)).to_equal(1)
         expect(nth_operand_reg(block, RV_OP_SW, 1, 0)).to_equal(2)
         expect(nth_mem_base_reg(block, RV_OP_SW, 1)).to_equal(1)
+
+    it "materializes RV32 out-of-range field offsets":
+        val block = entry_block(isel_module_riscv32(build_rv32_large_field_module()))
+        expect(has_li_imm(block, 600 * RV32_WORD_SIZE)).to_equal(true)
+        expect(has_li_imm(block, 601 * RV32_WORD_SIZE)).to_equal(true)
+        expect(nth_mem_offset(block, RV_OP_LW, 0)).to_equal(0)
+        expect(nth_mem_base_reg(block, RV_OP_LW, 0)).to_be_greater_than(31)
+        expect(nth_mem_offset(block, RV_OP_SW, 0)).to_equal(0)
+        expect(nth_mem_base_reg(block, RV_OP_SW, 0)).to_be_greater_than(31)
 
     it "moves RV32 return values into a0 before RET":
         val block = entry_block(isel_module_riscv32(build_rv32_memory_module()))
