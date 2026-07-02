@@ -269,3 +269,8 @@ cannot reach a `pass` end-to-end on this host until the `app.io.cli_ops` /
   script as fallback. This keeps the QEMU runner's emitted
   `--linker-script <path>` argument truthful instead of relying only on the
   hardcoded fallback.
+- The default wm-simple-web QMP build now selects LLVM for
+  `build/os/simpleos_wm_simple_web_check_32.elf`, so the live evidence lane
+  exercises the x86_64 SimpleOS LLVM linker instead of falling through the
+  generic x86_64 Cranelift default. The environment override still wins for
+  explicit Cranelift diagnostics.

@@ -427,7 +427,7 @@ bin/simple run examples/09_embedded/simple_os/build.spl -- --arch=x86_32
 bin/simple run examples/09_embedded/simple_os/build.spl -- --arch=i686
 ```
 
-The x86_32 lane uses `qemu-system-i386`, an ELF32 linker mode, and freestanding C/ASM boot support under `examples/09_embedded/simple_os/arch/x86_32/boot/`. The QEMU runner chooses LLVM for this lane by default because the current Cranelift object backend cannot initialize an i686 freestanding target. The selected `simple` binary must be built with the Rust `llvm` feature and a discoverable LLVM 18 installation, for example by setting `LLVM_SYS_180_PREFIX` before running `cargo build --features llvm`.
+The x86_32 lane uses `qemu-system-i386`, an ELF32 linker mode, and freestanding C/ASM boot support under `examples/09_embedded/simple_os/arch/x86_32/boot/`. The QEMU runner chooses LLVM for this lane by default because the current Cranelift object backend cannot initialize an i686 freestanding target. The `wm-simple-web` QMP check target (`build/os/simpleos_wm_simple_web_check_32.elf`) also defaults to LLVM so the live GUI evidence path exercises the x86_64 SimpleOS LLVM linker. The selected `simple` binary must be built with the Rust `llvm` feature and a discoverable LLVM 18 installation, for example by setting `LLVM_SYS_180_PREFIX` before running `cargo build --features llvm`.
 
 ### 4.8 Native Build Config
 

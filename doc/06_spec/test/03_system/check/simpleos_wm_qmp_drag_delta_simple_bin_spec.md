@@ -103,7 +103,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/simpleos_wm_qmp_drag_delta_s
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 35 lines folded for reproduction.
+Runnable source: 38 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -128,6 +128,9 @@ expect(script).to_contain("wm-simple-web-build-timeout")
 val native_build_main = file_read("src/app/cli/native_build_main.spl")
 expect(native_build_main).to_contain("[\"run\", \"src/app/cli/native_build_worker.spl\", \"--mode=interpreter\"]")
 expect(native_build_main).to_contain("env_set(\"SIMPLE_EXECUTION_MODE\", \"interpret\")")
+val runner_targets = file_read("src/os/_QemuRunner/runner_targets.spl")
+expect(runner_targets).to_contain("if target.output == \"build/os/simpleos_wm_simple_web_check_32.elf\":")
+expect(runner_targets).to_contain("return \"llvm\"")
 val compile_targets = file_read("src/app/io/_CliCompile/compile_targets.spl")
 expect(compile_targets).to_contain("linker_script = args[j]")
 expect(compile_targets).to_contain("env_set(\"SIMPLE_NATIVE_BUILD_LINKER_SCRIPT\", linker_script)")

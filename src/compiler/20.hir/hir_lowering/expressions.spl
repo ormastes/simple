@@ -567,31 +567,33 @@ impl HirLowering:
         self.symbols.pop_scope()
 
         # Check if last statement is an expression (for block value).
-        # `last` MUST be a typed local: the seed erases `[HirStmt]` elements to
-        # ANY, and `last.kind`'s enum-payload extraction (`case Expr(expr)`) on an
-        # ANY receiver mis-resolves, binding a nil `expr`. That produced
-        # `value = Some(nil)` -> a HirBlock with `has=true, value=nil`, so the
-        # interpreter/MIR later dereferenced a nil trailing-value expr (the `-c`
-        # "print(...)" body silently vanished / trapped, iteration 10). Binding
-        # `val last: HirStmt` restores the real struct type so `.kind` resolves.
-        val value: HirExpr? = if stmts.len() > 0:
+        #
+        # This deliberately avoids an intermediate `Option<HirExpr>`. The seed
+        # miscompiles the Some-payload unwrap `if val v = someOption`, binding a
+        # nil `v` even when the option is `Some(realExpr)`. That produced a
+        # HirBlock with `has=true, value=nil`, so the synthetic `-c` main body's
+        # trailing `print(...)` expression lowered to a nil HirExpr and was later
+        # dropped / nil-dereferenced (iteration 10). Instead track a plain `has`
+        # bool + a directly-assigned `HirExpr` and construct the block from those.
+        # `last` is a typed local so `last.kind` field access resolves correctly.
+        var block_has_value = false
+        var block_value_expr: HirExpr = HirExpr(kind: HirExprKind.NilLit, type_: nil, span: b.span)
+        if stmts.len() > 0:
             val last: HirStmt = stmts[stmts.len() - 1]
             match last.kind:
                 case Expr(expr):
-                    val block_tail_expr: HirExpr = expr
+                    block_has_value = true
+                    block_value_expr = expr
                     stmts = stmts[0:stmts.len() - 1]  # Remove last stmt
-                    Some(block_tail_expr)
                 case _:
-                    nil
-        else:
-            nil
+                    pass_do_nothing
 
         # HirBlock desugars Option<value> into has + value. The `has` flag MUST
         # be set: MIR lower_block gates the tail value on `block.has`, so without
         # it the extracted last expression-statement is silently dropped (every
         # function body lowered to an empty MIR block in the AOT/native path).
-        if val v = value:
-            HirBlock(stmts: stmts, has: true, value: v, span: b.span)
+        if block_has_value:
+            HirBlock(stmts: stmts, has: true, value: block_value_expr, span: b.span)
         else:
             HirBlock(stmts: stmts, has: false, value: HirExpr(kind: HirExprKind.NilLit, type_: nil, span: b.span), span: b.span)
 
