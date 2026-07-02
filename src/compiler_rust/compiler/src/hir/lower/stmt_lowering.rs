@@ -1043,13 +1043,21 @@ impl Lowerer {
             condition
         };
 
-        // Generate payload extraction statements for enum bindings
+        // Generate payload extraction statements for enum bindings.
+        // Or-patterns (`case Copy(x) | Move(x)`) require every alternative to bind
+        // the same names, so extraction is generated from the FIRST alternative
+        // (mirroring collect_pattern_bindings). Without this, or-pattern bindings
+        // were declared but never initialized — the arm body saw nil.
+        let binding_pattern: &Pattern = match &arm.pattern {
+            Pattern::Or(alternatives) => alternatives.first().unwrap_or(&arm.pattern),
+            other => other,
+        };
         let mut binding_stmts = Vec::new();
         if let Pattern::Enum {
             payload: Some(payload_patterns),
             variant: enum_variant,
             ..
-        } = &arm.pattern
+        } = binding_pattern
         {
             // Build a map from binding name to its resolved type
             // (computed by extract_pattern_bindings using enum variant field types)

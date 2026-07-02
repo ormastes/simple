@@ -336,21 +336,6 @@ impl CowEnv {
         None
     }
 
-    /// DEBUG ONLY: list all visible variable names in this scope (overlay + base, minus tombstones).
-    pub fn debug_keys(&self) -> Vec<String> {
-        let mut keys: std::collections::HashSet<String> = self.overlay.keys().cloned().collect();
-        if let Some(base) = &self.base {
-            for k in base.keys() {
-                if !self.tombstones.contains(k) {
-                    keys.insert(k.clone());
-                }
-            }
-        }
-        let mut v: Vec<String> = keys.into_iter().collect();
-        v.sort();
-        v
-    }
-
     /// Remove a key. Returns the removed value if any.
     pub fn remove(&mut self, key: &str) -> Option<Value> {
         if let Some(v) = self.overlay.remove(key) {

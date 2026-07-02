@@ -860,13 +860,6 @@ pub(super) fn eval_call_expr(
                     }
                 }
                 _ => {
-                    if std::env::var("SIMPLE_DEBUG_NIL_FIELD").is_ok() {
-                        let self_type = env.get("self").map(|v| v.type_name()).unwrap_or("<no self>");
-                        eprintln!(
-                            "[debug-nil-field] field={:?} receiver_expr={:?} self_type={} scope_keys={:?}",
-                            field, receiver, self_type, env.debug_keys()
-                        );
-                    }
                     let ctx = ErrorContext::new()
                         .with_code(codes::UNDEFINED_FIELD)
                         .with_help("field access requires an object, array, dict, or enum value");
