@@ -7,6 +7,17 @@ use compiler.backend.native.encode_riscv32.{ELF32_EI_CLASS, ELF32_HEADER_SIZE, R
 use compiler.backend.native.mach_inst.{MachBlock, MachFunction, MachModule, RV_OP_ADD, RV_OP_ADDI, RV_OP_AND, RV_OP_AUIPC, RV_OP_BEQ, RV_OP_BGE, RV_OP_BLT, RV_OP_BNE, RV_OP_CALL, RV_OP_DIV, RV_OP_JAL, RV_OP_JALR, RV_OP_LD, RV_OP_LI, RV_OP_LUI, RV_OP_LW, RV_OP_MUL, RV_OP_MV, RV_OP_NEG, RV_OP_NOP, RV_OP_NOT, RV_OP_OR, RV_OP_REM, RV_OP_RET, RV_OP_SD, RV_OP_SEQZ, RV_OP_SLL, RV_OP_SLT, RV_OP_SLTU, RV_OP_SNEZ, RV_OP_SRA, RV_OP_SRL, RV_OP_SUB, RV_OP_SW, RV_OP_XOR, RV_X1, RV_X2, RV_X3, new_mach_inst, op_imm, op_label, op_mem, op_phys, op_sym, physical_reg}
 use compiler.backend.native.riscv_encoding.{riscv_emit_u32_le, riscv_encode_b_type, riscv_encode_i_type, riscv_encode_j_type, riscv_encode_r_type, riscv_encode_s_type, riscv_encode_u_type, riscv_offset_fits_branch, riscv_offset_fits_jal, riscv_operand_is_imm, riscv_operand_is_imm_or_label, riscv_operand_is_imm_or_sym, riscv_operand_is_jal_imm, riscv_operand_is_label, riscv_operand_is_mem, riscv_operand_is_reg, riscv_operand_is_signed_12_imm, riscv_operand_is_u20_imm, riscv_operand_mem_offset_is_signed_12}
 
+fn riscv_expected_nops(count: i64) -> [i64]:
+    var code: [i64] = []
+    var i = 0
+    while i < count:
+        code.push(0x13)
+        code.push(0x00)
+        code.push(0x00)
+        code.push(0x00)
+        i = i + 1
+    code
+
 fn rv32_backward_patch_module() -> MachModule:
     val start = MachBlock(label: "start", insts: [new_mach_inst(RV_OP_NOP, [])], block_id: 0, offset: 0)
     val back = MachBlock(
@@ -331,9 +342,13 @@ fn rv32_malformed_operand_module() -> MachModule:
             new_mach_inst(RV_OP_AUIPC, [op_label(1), op_label(2)]),
             new_mach_inst(RV_OP_AUIPC, [op_phys(-1), op_imm(0)]),
             new_mach_inst(RV_OP_LW, [op_label(1), op_imm(99)]),
+            new_mach_inst(RV_OP_LW, [op_phys(-1), op_mem(physical_reg(RV_X2), 0)]),
             new_mach_inst(RV_OP_SW, [op_sym("bad_value"), op_label(1)]),
+            new_mach_inst(RV_OP_SW, [op_phys(-1), op_mem(physical_reg(RV_X2), 0)]),
             new_mach_inst(RV_OP_LD, [op_label(1), op_imm(99)]),
+            new_mach_inst(RV_OP_LD, [op_phys(-1), op_mem(physical_reg(RV_X2), 0)]),
             new_mach_inst(RV_OP_SD, [op_sym("bad_value"), op_label(1)]),
+            new_mach_inst(RV_OP_SD, [op_phys(-1), op_mem(physical_reg(RV_X2), 0)]),
             new_mach_inst(RV_OP_LW, [op_phys(RV_X1), op_mem(physical_reg(99), 0)]),
             new_mach_inst(RV_OP_LW, [op_phys(RV_X1), op_mem(physical_reg(-1), 0)]),
             new_mach_inst(RV_OP_AUIPC, [op_phys(RV_X1), op_imm(1048576)]),
@@ -428,7 +443,7 @@ describe "Encode Riscv32":
 
     it "keeps RV32 malformed data operands inert":
         val encoded = encode_module_rv32(rv32_malformed_operand_module())
-        expect(encoded[0].code).to_equal([0x13, 0x00, 0x00, 0x00, 0x13, 0x00, 0x00, 0x00, 0x13, 0x00, 0x00, 0x00, 0x13, 0x00, 0x00, 0x00, 0x13, 0x00, 0x00, 0x00, 0x13, 0x00, 0x00, 0x00, 0x13, 0x00, 0x00, 0x00, 0x13, 0x00, 0x00, 0x00, 0x13, 0x00, 0x00, 0x00, 0x13, 0x00, 0x00, 0x00, 0x13, 0x00, 0x00, 0x00, 0x13, 0x00, 0x00, 0x00, 0x13, 0x00, 0x00, 0x00, 0x13, 0x00, 0x00, 0x00, 0x13, 0x00, 0x00, 0x00, 0x13, 0x00, 0x00, 0x00])
+        expect(encoded[0].code).to_equal(riscv_expected_nops(20))
         expect(encoded[0].relocations.len()).to_equal(0)
 
     it "expands RV32 LI as ADDI or LUI plus ADDI":
@@ -547,7 +562,7 @@ describe "Encode Riscv32":
 
     it "keeps RV32 malformed common operands inert":
         val encoded = encode_module_rv32(rv32_malformed_common_operand_module())
-        expect(encoded[0].code).to_equal([0x13, 0x00, 0x00, 0x00, 0x13, 0x00, 0x00, 0x00, 0x13, 0x00, 0x00, 0x00, 0x13, 0x00, 0x00, 0x00, 0x13, 0x00, 0x00, 0x00, 0x13, 0x00, 0x00, 0x00, 0x13, 0x00, 0x00, 0x00, 0x13, 0x00, 0x00, 0x00, 0x13, 0x00, 0x00, 0x00, 0x13, 0x00, 0x00, 0x00, 0x13, 0x00, 0x00, 0x00, 0x13, 0x00, 0x00, 0x00, 0x13, 0x00, 0x00, 0x00, 0x13, 0x00, 0x00, 0x00, 0x13, 0x00, 0x00, 0x00, 0x13, 0x00, 0x00, 0x00])
+        expect(encoded[0].code).to_equal(riscv_expected_nops(16))
         expect(encoded[0].relocations.len()).to_equal(0)
 
     it "keeps RV32 short data operands inert":
