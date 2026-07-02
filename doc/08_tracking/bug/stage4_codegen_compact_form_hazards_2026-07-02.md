@@ -284,3 +284,70 @@ seed cranelift fix for struct payload/field offsets (see rep9 "Next step").
 - Any probe that reads a nested field on a `.values()`-iterated `HirFunction`
   (`fn_.symbol.id`, `fn_.name` in `+`/interpolation) either returns garbage or
   traps `field access on nil receiver` — do not build diagnostics on those.
+
+---
+
+## Iteration 9 (2026-07-02) — ROOT CAUSE FOUND + FIXED: Dict type-erasure → ANY element → wrong field index on name-collision
+
+**This was NOT a struct store/load representation bug.** The runtime pointer
+stored in the dict is correct. The bug is entirely in the seed's **static
+field-index resolution** for field access on an `ANY`-typed receiver.
+
+### Root cause chain
+1. The seed **erases `Dict<K,V>` to `ANY`**:
+   `compiler_rust/.../hir/lower/type_resolver.rs:426` → `"Dict" => Ok(TypeId::ANY)`.
+   There is no `HirType::Dict{key,value}` variant; the value type `V` is not
+   tracked anywhere.
+2. Therefore `module.functions` has type `ANY`, and
+   `module.functions.values()` returns `ANY`:
+   `compiler_rust/.../hir/lower/expr/mod.rs:962` →
+   `"keys"|"values"|"items"|"entries" => Some(TypeId::ANY)`.
+3. The `for fn_ in ....values()` loop variable is thus `ANY`. Field access
+   `fn_.name` / `fn_.symbol` on an `ANY` receiver goes through
+   `hir/lower/expr/access.rs` `get_field_info(ANY, field)` → `CannotInferFieldType`
+   → falls to the **"most-fields-wins" global field resolver** (search all struct
+   defs for a struct containing a field of that name, pick the one with the most
+   fields). `name`/`symbol`/`body`/`span` are defined in *dozens* of structs, so
+   the resolver returns some **other** struct's field index → wrong byte offset on
+   the real `HirFunction` pointer → `name.len()==-1`, `symbol==null`,
+   `body.stmts.len()==0`, and the enclosing function gets **stubbed** (silent `-c`).
+
+### Why prior isolation missed it
+- **Not struct size / boxing threshold.** Structs use flat `i*8` layout; the
+  pointer is fine.
+- **Renaming duplicate `HirFunction` structs didn't help** because the resolver
+  matches by **field NAME across ALL structs**, not by struct name.
+- **iteration-7's 7 dict repros passed** because their value-struct field names
+  (`id`, `name` on the *only* struct with that field) did **not collide** with a
+  larger struct — the global resolver returned the correct index by luck. The
+  missing shape property is **field-name collision with a larger struct**, not
+  size, nesting, or key type.
+
+### Minimal repro (`scratchpad/colrepro.spl`, ~1.3 s seed native-build)
+`struct Fnv{symbol,name,body}` (name @ idx 1) + `struct BigDecoy{name,a,b,c,d,e}`
+(name @ idx 0, more fields) + `Dict<SymbolId,Fnv>`; `for fn_ in d.values():
+say(fn_.name)`. **Prints nothing** (main stubbed). Remove `BigDecoy`
+(`scratchpad/nodecoy.spl`) → prints correctly. Confirms the trigger is the
+colliding decoy, and the reader path is otherwise correct.
+
+### Fix (`.spl`-side, seed already supports it; committed ee1b0919c7a)
+No feasible small **seed** fix: making `.values()` return `[V]` requires adding a
+typed `HirType::Dict` variant and threading K/V through the whole type system
+(large, risky). Instead, bind each element to a **typed local** so the field
+access resolves against the real struct type:
+```spl
+for fn_ in module.functions.values():
+    val f: HirFunction = fn_          # re-types ANY -> HirFunction
+    ... f.symbol ... f.name ...       # correct field indices
+```
+Proven on `scratchpad/colfix_a.spl` (adds `val f: Fnv = fn_`) → prints
+correctly despite the decoy. (Typed for-loop vars `for x: T in ...` are NOT
+grammar-supported — `colfix_b.spl` fails to parse.) Applied to
+`src/compiler/70.backend/backend/interpreter.spl` `process_module`.
+
+### General hazard (records for future work)
+Any `d.values()` / `d.get()` / `d[k]` result whose field name is shared with a
+larger struct silently reads the wrong field across the **whole** compiler. A
+real seed fix (typed Dict, or having the global resolver refuse ambiguous
+name-only matches instead of guessing) would eliminate the class. Until then,
+bind dict-derived struct values to a typed local before field access.

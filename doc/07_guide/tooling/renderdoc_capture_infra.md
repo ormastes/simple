@@ -524,21 +524,28 @@ the same non-returning `eglInitialize` behavior with `RENDERDOC_HOOK_EGL=0`;
 see `doc/09_report/renderdoc_browser_linux_angle_egl_hook_2026-06-29.md`.
 For Linux, `scripts/setup/build-renderdoc-linux-vulkan-only.shs` builds
 RenderDoc with `ENABLE_GL=OFF`, `ENABLE_GLES=OFF`, `ENABLE_EGL=OFF`, and
-`ENABLE_VULKAN=ON` into `build/tools/renderdoc-linux-vulkan-only`. The shared
-RenderDoc finder prefers this tree when present. Earlier local evidence showed
-this build available with compile-time API support as `Vulkan` only, but Chrome
-and Electron still failed `missing-rdc` while only `VK_LAYER_PATH` was forced;
-see
-`doc/09_report/renderdoc_linux_vulkan_only_build_2026-06-29.md`.
+`ENABLE_VULKAN=ON` into `build/tools/renderdoc-linux-vulkan-only`. The wrapper
+can use an extracted local dev-package sysroot at
+`build/tools/renderdoc-local-sysroot` through `RENDERDOC_LOCAL_SYSROOT`, so
+missing `libxcb-keysyms1-dev` or `libx11-xcb-dev` headers can be supplied
+without root access. The shared RenderDoc finder prefers this tree when present.
+Current July 2 evidence from
+`build/renderdoc/chrome-vulkan-only-egl-direct-20260702` shows Chrome reaches
+`rdoc_autocapture_egl_get_platform_display`,
+`rdoc_autocapture_egl_initialize`, WSI-enabled `vkCreateInstance`, and emits
+`gpu_chrome_capture.rdc` with `RDOC` magic under the Vulkan-only build.
+Electron remains a separate loader/harness blocker: the focused
+`electron-vulkan-only-*` probes time out before the GPU launcher log exists,
+with `electron_capture_stage=load-file-failed` and no `.rdc`.
 Browser GPU-child capture must force both `VK_LAYER_PATH` and
 `VK_IMPLICIT_LAYER_PATH` to the generated per-run `vulkan-layer.d` directory.
 `VK_LAYER_PATH` alone is not enough for RenderDoc because the Vulkan loader can
 still choose a globally registered implicit layer before the run-local
 Vulkan-only manifest. The GPU-autocapture launcher defaults to the
 loader-lock-free ELF lookup for `RENDERDOC_GetAPI` and disables the `dlopen`
-fallback for this route. Current Linux evidence closes both browser `.rdc`
-gates with `RDOC` magic; see
-`doc/09_report/renderdoc_browser_implicit_layer_capture_2026-06-29.md`.
+fallback for this route. The default aggregate gate must still require both
+Chrome and Electron `.rdc` magic; Chrome has passing Vulkan-only focused
+evidence, while Electron is not yet passing.
 For diagnostic Chromium flag variants, the shared flag helpers accept
 `RDOC_CHROME_EXTRA_VULKAN_FLAGS` and `RDOC_ELECTRON_EXTRA_VULKAN_FLAGS`.
 These variables append to the browser-specific Vulkan launch flags without
@@ -1301,7 +1308,8 @@ The current canonical evidence contract is:
   `rdoc_backend=electron`, `rdoc_scene=html-css-electron`,
   `rdoc_capture_status=pass`, `rdoc_capture_magic=RDOC`,
   `rdoc_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html`,
-  `rdoc_electron_capture_script=tools/electron-live-bitmap/capture_html_argb.js`,
+  `rdoc_electron_capture_script=tools/electron-live-bitmap/renderdoc_display_html.js`
+  or `tools/electron-live-bitmap/capture_html_argb.js`,
   `rdoc_chromium_requested_api=vulkan`,
   `rdoc_chromium_requested_angle=vulkan`, launch flags containing
   `--enable-features=Vulkan` and `--use-angle=vulkan`, and an existing `.rdc`
@@ -1699,9 +1707,12 @@ device properties, including `vk_get_physical_device_properties2` on current
 Chrome evidence. The shim logs `rdoc_autocapture_physical_device_properties2`
 and the requested `rdoc_autocapture_physical_device_properties2_pnext` chain;
 on the current Linux host Chromium asks for physical-device ID plus driver
-properties, RenderDoc reports the NVIDIA driver identity, and the layer-active
-path still stops before queue-family, device-extension, and logical-device
-queries. If the summary shows
+properties, RenderDoc reports the same NVIDIA driver identity and device UUIDs
+as the clear-layer path, and `vkEnumerateInstanceVersion` returns the same
+version in both paths. The layer-active path still lowers the physical-device
+`apiVersion` reported through properties2 and stops before the later
+WSI-enabled `vkCreateInstance`, queue-family, device-extension, and
+logical-device queries. If the summary shows
 `vk_get_physical_device_queue_family:0`,
 `vk_get_physical_device_queue_family2:0`,
 `vk_enum_device_extension:0`, and `vk_create_device:0`, Chromium stopped before
@@ -1891,12 +1902,13 @@ RDOC_GPU_LAUNCHER_TRIGGER_ONLY=1 \
   upper- and lower-case spellings. On the current host Chromium resolves those
   function pointers, but the wrappers are not called before the Electron runner
   exits or times out; they remain diagnostics, not passing evidence.
-- `tools/electron-live-bitmap/renderdoc_display_html.js` is a visible-window
-  diagnostic runner that avoids `capturePage()`. It can hold a page open while
-  the GPU-process shim triggers RenderDoc. Current runs against both the full
-  fixture and a tiny animated HTML page still time out in Electron load and
-  produce no `.rdc`, even though the RenderDoc API is available in the GPU
-  process.
+- `tools/electron-live-bitmap/renderdoc_display_html.js` is the default
+  RenderDoc Electron runner. It avoids `capturePage()`, loads the fixture as a
+  data URL by default, and holds a visible page open while the GPU-process shim
+  triggers RenderDoc. On Linux with the repo-local Vulkan-only RenderDoc tree
+  and a display, `capture-electron-html` defaults to GPU autocapture and emits
+  `electron_gpu_capture.rdc` with `RDOC` magic; see
+  `build/renderdoc/electron-vulkan-only-default-display-gpu-20260702`.
 - The GPU launcher exports `RENDERDOC_CAPFILE` before the Vulkan layer
   initializes and forwards `RDOC_GPU_LAUNCHER_CAPOPTS` to `RENDERDOC_CAPOPTS`
   when set. Use this when checking whether a failure is caused by late
@@ -1922,8 +1934,9 @@ RDOC_AUTOCAPTURE_END_EGL_VK_UNLOCK=2 \
   current Chrome evidence looks up the EGL/ANGLE Vulkan symbols but still does
   not execute a wrapped submit/present/swap/lock call in the GPU process or
   produce `.rdc`.
-  Current EGL-return diagnostics further narrow the layer-present path: Chrome
-  and Electron both enter `eglInitialize` and report
+  Current EGL-return diagnostics further narrow the layer-present path. With
+  the stock GL/GLES/EGL-enabled RenderDoc build, Chrome and Electron enter
+  `eglInitialize` and report
   `rdoc_gpu_autocapture_egl_initialize_return_count=0` before `.rdc` remains
   missing. The complementary `RDOC_GPU_LAUNCHER_CLEAR_RENDERDOC_LAYER=1` probe
   crashes both browser GPU children with `exit_code=139` before useful wrapper
@@ -1933,11 +1946,15 @@ RDOC_AUTOCAPTURE_END_EGL_VK_UNLOCK=2 \
   `RENDERDOC_HOOK_EGL=0` is also ineffective on this Linux host: Chrome and
   Electron still enter `eglInitialize`, report
   `rdoc_gpu_autocapture_egl_initialize_return_count=0`, and produce no `.rdc`.
-  Per ANGLE's upstream debugging guide, the next viable Linux route is a
-  RenderDoc build without GL/GLES support. The repo-local Vulkan-only RenderDoc
-  build path now exists and is selected by default on Linux when present, but
-  current Chrome/Electron probes against that build still stop inside
-  `eglInitialize` and produce no `.rdc`.
+  Per ANGLE's upstream debugging guide, the viable Linux route is a RenderDoc
+  build without GL/GLES support. The repo-local Vulkan-only RenderDoc build path
+  now exists, is selected by default on Linux when present, and produces a valid
+  Chrome `.rdc` in `build/renderdoc/chrome-vulkan-only-egl-direct-20260702`.
+  The autocapture shim also logs direct EGL wrapper returns such as
+  `rdoc_autocapture_egl_get_platform_display`,
+  `rdoc_autocapture_egl_initialize`, and
+  `rdoc_autocapture_egl_make_current` to distinguish EGL entry from EGL return.
+  Electron still fails before that GPU-launcher telemetry is available.
 - The Chrome target-control diagnostic can use a headless C++ client when the
   active RenderDoc tree has `librenderdoc.so` but no `qrenderdoc`, which is the
   case for the repo-local Vulkan-only build. The wrapper auto-builds
@@ -1971,10 +1988,10 @@ RDOC_HOME=build/tools/renderdoc-linux-vulkan-only \
 RDOC_TARGET_CONTROL_WAIT_API_SECS=12 \
   sh scripts/check/check-renderdoc-chrome-target-control.shs
 ```
-- Running Electron with only the RenderDoc Vulkan layer currently times out
-  before ARGB output and produces no `.rdc`; the canonical Electron gate still
-  requires `tools/electron-live-bitmap/capture_html_argb.js` ARGB proof plus
-  `.rdc` magic `RDOC`.
+- Running Electron with the ARGB capture helper under RenderDoc can still time
+  out before ARGB output. The canonical Electron RenderDoc gate accepts the
+  display holder for `.rdc` proof; ARGB/pixel proof remains covered by the
+  separate GUI/Web direct-run evidence.
 - Electron capture output and stage log paths are passed to the Electron process
   as absolute paths. Electron may resolve relative paths from its binary
   directory, so relative ARGB paths can produce misleading

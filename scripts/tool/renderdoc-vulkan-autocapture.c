@@ -115,6 +115,7 @@ static uint64_t gdpa_trace_count;
 
 static int env_enabled(const char *name);
 static uint64_t env_u64(const char *name, uint64_t fallback);
+static void hex_bytes(char *out, size_t out_size, const uint8_t *bytes, size_t byte_count);
 static uintptr_t find_loaded_symbol_no_loader_lock(const char *library_hint, const char *symbol);
 static int is_egl_intercept_symbol(const char *name);
 void eglLockVulkanQueueANGLE(void *display);
@@ -244,6 +245,23 @@ static void log_physical_device_properties2(const VkPhysicalDeviceProperties2 *p
                 (unsigned int)driver->conformanceVersion.subminor,
                 (unsigned int)driver->conformanceVersion.patch);
             log_line(buf);
+        } else if (node->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES) {
+            const VkPhysicalDeviceIDProperties *id = (const VkPhysicalDeviceIDProperties *)node;
+            char device_uuid[VK_UUID_SIZE * 2 + 1];
+            char driver_uuid[VK_UUID_SIZE * 2 + 1];
+            char device_luid[VK_LUID_SIZE * 2 + 1];
+            hex_bytes(device_uuid, sizeof(device_uuid), id->deviceUUID, VK_UUID_SIZE);
+            hex_bytes(driver_uuid, sizeof(driver_uuid), id->driverUUID, VK_UUID_SIZE);
+            hex_bytes(device_luid, sizeof(device_luid), id->deviceLUID, VK_LUID_SIZE);
+            snprintf(buf, sizeof(buf),
+                "rdoc_autocapture_physical_device_id_properties=index:%llu device_uuid:%s driver_uuid:%s luid:%s node_mask:%u luid_valid:%u",
+                (unsigned long long)vk_get_physical_device_properties2_count,
+                device_uuid,
+                driver_uuid,
+                device_luid,
+                (unsigned int)id->deviceNodeMask,
+                (unsigned int)id->deviceLUIDValid);
+            log_line(buf);
         } else if (node->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES) {
             const VkPhysicalDeviceVulkan12Properties *v12 = (const VkPhysicalDeviceVulkan12Properties *)node;
             char driver_name[VK_MAX_DRIVER_NAME_SIZE];
@@ -305,6 +323,18 @@ static void log_extension_properties(
             name);
         log_line(buf);
     }
+}
+
+static void hex_bytes(char *out, size_t out_size, const uint8_t *bytes, size_t byte_count) {
+    static const char hex[] = "0123456789abcdef";
+    if (!out || out_size == 0) return;
+    size_t limit = byte_count;
+    if (limit * 2 + 1 > out_size) limit = (out_size - 1) / 2;
+    for (size_t i = 0; i < limit; i++) {
+        out[i * 2] = hex[(bytes[i] >> 4) & 0xf];
+        out[i * 2 + 1] = hex[bytes[i] & 0xf];
+    }
+    out[limit * 2] = '\0';
 }
 
 static void log_string_list(const char *kind, const char *const *names, uint32_t count) {
@@ -955,7 +985,11 @@ int eglMakeCurrent(void *display, void *draw, void *read, void *context) {
         real_eglMakeCurrent = (egl_make_current_fn_t)real_next_symbol("eglMakeCurrent");
     }
     egl_make_current_count++;
-    return real_eglMakeCurrent ? real_eglMakeCurrent(display, draw, read, context) : 0;
+    int result = real_eglMakeCurrent ? real_eglMakeCurrent(display, draw, read, context) : 0;
+    char buf[256];
+    snprintf(buf, sizeof(buf), "rdoc_autocapture_egl_make_current=result:%d", result);
+    log_line(buf);
+    return result;
 }
 
 void *eglCreateWindowSurface(void *display, void *config, void *native_window, const void *attrib_list) {
@@ -963,7 +997,11 @@ void *eglCreateWindowSurface(void *display, void *config, void *native_window, c
         real_eglCreateWindowSurface = (egl_create_window_surface_fn_t)real_next_symbol("eglCreateWindowSurface");
     }
     egl_create_window_surface_count++;
-    return real_eglCreateWindowSurface ? real_eglCreateWindowSurface(display, config, native_window, attrib_list) : NULL;
+    void *result = real_eglCreateWindowSurface ? real_eglCreateWindowSurface(display, config, native_window, attrib_list) : NULL;
+    char buf[256];
+    snprintf(buf, sizeof(buf), "rdoc_autocapture_egl_create_window_surface=result:%u", result ? 1U : 0U);
+    log_line(buf);
+    return result;
 }
 
 void *eglCreatePlatformWindowSurface(void *display, void *config, void *native_window, const void *attrib_list) {
@@ -971,7 +1009,11 @@ void *eglCreatePlatformWindowSurface(void *display, void *config, void *native_w
         real_eglCreatePlatformWindowSurface = (egl_create_window_surface_fn_t)real_next_symbol("eglCreatePlatformWindowSurface");
     }
     egl_create_platform_window_surface_count++;
-    return real_eglCreatePlatformWindowSurface ? real_eglCreatePlatformWindowSurface(display, config, native_window, attrib_list) : NULL;
+    void *result = real_eglCreatePlatformWindowSurface ? real_eglCreatePlatformWindowSurface(display, config, native_window, attrib_list) : NULL;
+    char buf[256];
+    snprintf(buf, sizeof(buf), "rdoc_autocapture_egl_create_platform_window_surface=result:%u", result ? 1U : 0U);
+    log_line(buf);
+    return result;
 }
 
 void *eglGetDisplay(void *native_display) {
@@ -979,7 +1021,11 @@ void *eglGetDisplay(void *native_display) {
         real_eglGetDisplay = (egl_get_display_fn_t)real_next_symbol("eglGetDisplay");
     }
     egl_get_display_count++;
-    return real_eglGetDisplay ? real_eglGetDisplay(native_display) : NULL;
+    void *result = real_eglGetDisplay ? real_eglGetDisplay(native_display) : NULL;
+    char buf[256];
+    snprintf(buf, sizeof(buf), "rdoc_autocapture_egl_get_display=result:%u", result ? 1U : 0U);
+    log_line(buf);
+    return result;
 }
 
 void *eglGetPlatformDisplay(unsigned int platform, void *native_display, const void *attrib_list) {
@@ -987,7 +1033,11 @@ void *eglGetPlatformDisplay(unsigned int platform, void *native_display, const v
         real_eglGetPlatformDisplay = (egl_get_platform_display_fn_t)real_next_symbol("eglGetPlatformDisplay");
     }
     egl_get_platform_display_count++;
-    return real_eglGetPlatformDisplay ? real_eglGetPlatformDisplay(platform, native_display, attrib_list) : NULL;
+    void *result = real_eglGetPlatformDisplay ? real_eglGetPlatformDisplay(platform, native_display, attrib_list) : NULL;
+    char buf[256];
+    snprintf(buf, sizeof(buf), "rdoc_autocapture_egl_get_platform_display=platform:%u result:%u", platform, result ? 1U : 0U);
+    log_line(buf);
+    return result;
 }
 
 int eglInitialize(void *display, int *major, int *minor) {
@@ -1009,6 +1059,14 @@ int eglInitialize(void *display, int *major, int *minor) {
     if (real_eglGetError) {
         egl_initialize_last_error = real_eglGetError();
     }
+    char buf[256];
+    snprintf(buf, sizeof(buf),
+        "rdoc_autocapture_egl_initialize=result:%d major:%d minor:%d error:%d",
+        result,
+        major ? *major : -1,
+        minor ? *minor : -1,
+        egl_initialize_last_error);
+    log_line(buf);
     return result;
 }
 
@@ -1017,7 +1075,11 @@ int eglChooseConfig(void *display, const int *attrib_list, void *configs, int co
         real_eglChooseConfig = (egl_choose_config_fn_t)real_next_symbol("eglChooseConfig");
     }
     egl_choose_config_count++;
-    return real_eglChooseConfig ? real_eglChooseConfig(display, attrib_list, configs, config_size, num_config) : 0;
+    int result = real_eglChooseConfig ? real_eglChooseConfig(display, attrib_list, configs, config_size, num_config) : 0;
+    char buf[256];
+    snprintf(buf, sizeof(buf), "rdoc_autocapture_egl_choose_config=result:%d count:%d", result, num_config ? *num_config : -1);
+    log_line(buf);
+    return result;
 }
 
 int eglGetError(void) {
