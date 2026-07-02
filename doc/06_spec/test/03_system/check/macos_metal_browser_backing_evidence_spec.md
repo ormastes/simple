@@ -75,6 +75,9 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/macos_metal_browser_backing_
   and pairwise ARGB diff status rows consumed by the strict compare wrapper.
 - The stable default fixture avoids font raster differences so exact pairwise
   ARGB comparison can prove renderer equivalence without blur or tolerance.
+- Electron capture uses offscreen OSR exact-sRGB mode on macOS so
+  `BrowserWindow.capturePage()` does not inherit the display compositor's ICC
+  transform while GPU browser-backing metadata is still collected separately.
 
 ## Operator Notes
 
@@ -91,7 +94,8 @@ Metal render-log contract.
 2. The producer renders the same fixture through Chrome with GPU enabled and a
    DevTools geometry output so `SystemInfo.getInfo` is available.
 3. The producer renders the same fixture through the repo-local Electron binary
-   under `tools/electron-shell/node_modules/.bin/electron`.
+   under `tools/electron-shell/node_modules/.bin/electron` with offscreen paint
+   enabled for exact sRGB pixels.
 4. The producer writes `chrome-source.env` and `electron-source.env` with
    `macos_metal_chrome_browser_backing_*` and
    `macos_metal_electron_browser_backing_*` metadata rows.
@@ -125,6 +129,8 @@ Metal render-log contract.
 - `macos_metal_electron_simple_pairwise_diff_status=pass`
 - `macos_metal_chrome_simple_pairwise_diff_status=pass`
 - `macos_metal_simple_argb_backend=metal`
+- `macos_metal_electron_capture_compositor_mode=offscreen-osr-exact-srgb`
+- `macos_metal_electron_capture_offscreen_paint=true`
 
 ## Failure Modes
 
@@ -139,6 +145,9 @@ Metal render-log contract.
 - Exact pixel equality is required. The default fixture intentionally avoids
   font rasterization so this remains a backend/rendering proof instead of a font
   antialiasing comparison.
+- Electron must use offscreen OSR exact-sRGB capture for the ARGB artifact.
+  Windowed `capturePage()` on macOS can be color-managed through the display
+  compositor and produce deterministic but non-sRGB fixture colors.
 - The strict compare wrapper owns final pass/fail semantics; this producer only
   creates the browser evidence input.
 
@@ -158,7 +167,7 @@ inputs to `check-macos-metal-render-log-compare.shs`.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 23 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -169,6 +178,7 @@ expect(script).to_contain("PIXEL_BACKEND=metal")
 expect(script).to_contain("CHROME_CAPTURE_DISABLE_GPU=false")
 expect(script).to_contain("CHROME_CAPTURE_GEOMETRY_OUTPUT")
 expect(script).to_contain("ELECTRON_CAPTURE_REMOTE_DEBUGGING_PORT")
+expect(script).to_contain("ELECTRON_CAPTURE_OFFSCREEN_PAINT=1")
 expect(script).to_contain("tools/electron-shell/node_modules/.bin/electron")
 expect(script).to_contain("macos_metal_browser_backing_status")
 expect(script).to_contain("macos_metal_electron_browser_backing_status")
@@ -178,6 +188,9 @@ expect(script).to_contain("pairwise-argb-diff")
 expect(script).to_contain("macos_metal_electron_chrome_pairwise_diff_status")
 expect(script).to_contain("macos_metal_electron_simple_pairwise_diff_status")
 expect(script).to_contain("macos_metal_chrome_simple_pairwise_diff_status")
+expect(script).to_contain("macos_metal_electron_capture_compositor_mode")
+expect(script).to_contain("offscreen-osr-exact-srgb")
+expect(script).to_contain("macos_metal_electron_capture_offscreen_paint")
 expect(script).to_contain("macos_metal_")
 expect(script).to_contain("browser_backing")
 expect(script).to_contain("gpu_compositing=")

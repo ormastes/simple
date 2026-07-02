@@ -66,3 +66,22 @@ dev-done
   Android is unavailable because `adb` is missing, and the aggregate correctly
   remains failed with `desktop-production-parity-source-not-pass` until the
   production parity blockers are resolved.
+- implementation: Fixed the macOS Metal browser-backing ARGB mismatch by routing
+  the Electron artifact capture through the existing offscreen OSR exact-sRGB
+  path. The previous windowed `BrowserWindow.capturePage()` path produced
+  deterministic display-compositor ICC-shifted fixture colors on macOS
+  (`#2563eb` captured as `#3662e3`), while offscreen paint preserves the same
+  sRGB solid colors as Chrome and Simple. The wrapper now emits
+  `macos_metal_electron_capture_compositor_mode=offscreen-osr-exact-srgb` and
+  `macos_metal_electron_capture_offscreen_paint=true`.
+- evidence: `BUILD_DIR=build/macos-metal-browser-backing-after-offscreen-fix`
+  `check-macos-metal-browser-backing-evidence.shs` passed with
+  `macos_metal_pixel_comparison_status=pass`, all three pairwise diff rows
+  `pass`, and identical Simple/Chrome/Electron ARGB checksums
+  `329775811848360`. The strict Metal render-log compare then passed with
+  `macos_metal_render_log_compare_status=pass` and
+  `blocked_gate_count=0`. The production aggregate now forwards
+  `production_gui_web_renderer_parity_metal_render_log_status=pass` and
+  `production_gui_web_renderer_parity_metal_render_log_blocked_gate_count=0`,
+  but the full production parity status remains failed on the existing
+  `electron-layout-manifest-failed` timeout and surface/font evidence gaps.

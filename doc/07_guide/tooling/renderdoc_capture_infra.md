@@ -1372,9 +1372,12 @@ The current canonical evidence contract is:
   `scripts/check/check-macos-metal-browser-backing-evidence.shs` on macOS to
   create `build/macos-metal-browser-backing/evidence.env`: it renders the stable
   `css_boxes.html` fixture through Simple Metal, Chrome DevTools with GPU
-  enabled, and local Electron Chromium, writes scoped Metal GPU metadata source
-  files, and emits exact `pairwise-argb-diff` rows for Simple/Chrome/Electron
-  ARGB artifacts. Then run
+  enabled, and local Electron Chromium. Electron ARGB capture uses offscreen OSR
+  exact-sRGB mode (`macos_metal_electron_capture_compositor_mode=offscreen-osr-exact-srgb`)
+  so macOS display-compositor ICC transforms cannot alter the solid-color
+  fixture, while Electron browser target GPU metadata still proves Metal backing.
+  The wrapper writes scoped Metal GPU metadata source files and emits exact
+  `pairwise-argb-diff` rows for Simple/Chrome/Electron ARGB artifacts. Then run
   `scripts/check/check-macos-metal-render-log-compare.shs` to validate the
   full normalized Metal log contract. The production parity wrapper forwards
   the compare's Tauri iOS/WKWebView rows, including
