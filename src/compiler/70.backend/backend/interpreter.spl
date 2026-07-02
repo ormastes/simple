@@ -14,10 +14,6 @@ use compiler.backend.backend.interpreter_calls.*
 
 extern fn rt_host_gpu_lane_event(lane_code: i64, phase_code: i64) -> i64
 extern fn rt_host_gpu_queue_emit(lane_code: i64, kind_code: i64, payload_size: i64, backend_handle: i64) -> i64
-extern fn rt_eprintln_str(s: text, n: i64)
-
-fn _pm_trace(s: text):
-    rt_eprintln_str(s, s.len())
 
 # ============================================================================
 # Interpreter Backend Implementation
@@ -47,21 +43,22 @@ impl InterpreterBackendImpl:
         val env = Environment.new()
         val ctx = EvalContext(env: env, module: module, backend: self)
 
-        # Iterate functions using .keys() which returns original key objects
+        # Iterate functions via .values() and derive each key from the
+        # function's own `symbol` field. `module.functions.keys()` can yield a
+        # nil first element for the single-file / synthetic-main HIR module
+        # (the seed's struct-keyed-Dict keys() path returns a null SymbolId for
+        # this module shape), which then nil-derefs at `symbol.id`. The stored
+        # HirFunction values are always valid and carry the same SymbolId in
+        # `fn_.symbol`, so keying off the value avoids the bad key entirely.
         var has_main = false
-        var main_symbol_id: i64 = 0
-        for symbol in module.functions.keys():
-            _pm_trace("PM iter")
-            val kid = symbol.id
-            _pm_trace("PM kid ok")
-            val fn_ = module.functions[symbol]
-            _pm_trace("PM idx ok")
+        var main_fn_opt: HirFunction? = None
+        for fn_ in module.functions.values():
+            val symbol = fn_.symbol
             val nm = fn_.name
-            _pm_trace("PM name ok {nm}")
             ctx.env.define_global(symbol, Value.Function(FunctionValue(symbol: symbol, name: nm)))
             if nm == "main":
                 has_main = true
-                main_symbol_id = kid
+                main_fn_opt = Some(fn_)
 
         # Also register builtins from symbol table
         for sym_id in module.symbols.symbols.keys():
@@ -69,9 +66,12 @@ impl InterpreterBackendImpl:
             ctx.env.define_global(sym.id, Value.Function(FunctionValue(symbol: sym.id, name: sym.name)))
 
         if has_main:
-            val main_symbol = SymbolId(id: main_symbol_id)
-            val result = self.call_hir_function(module.functions[main_symbol], [], ctx)?
-            Ok(BackendResult.Value(result))
+            match main_fn_opt:
+                case Some(main_fn):
+                    val result = self.call_hir_function(main_fn, [], ctx)?
+                    Ok(BackendResult.Value(result))
+                case None:
+                    Ok(BackendResult.Unit)
         else:
             Ok(BackendResult.Unit)
 

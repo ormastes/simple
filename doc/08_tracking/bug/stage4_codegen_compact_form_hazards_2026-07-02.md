@@ -86,18 +86,67 @@ After Layers 3+4, the chain advanced into the interpreter backend. `-c
 #2 driver.driver.CompilerDriver.interpret_pipeline → .interpret → .compile
 ```
 
-Instrumented trace (markers PM:0..PM:8) shows the **first** iteration of
-`for symbol in module.functions.keys(): val fn_ = module.functions[symbol]`
-completes (fn_ bound, define_global ok), and the crash is on the **second**
-iteration at `val fn_ = module.functions[symbol]` (before the next marker) —
-i.e. the `Dict<SymbolId, HirFunction>` index operation itself nil-derefs for the
-2nd key returned by `.keys()`. Same family as the known struct-keyed-Dict hazard
-noted at `driver.spl:456` (`SymbolTable.symbols[raw]` garbage-id nil-deref).
-Next step (iteration 7): inspect the seed's `Dict` get/keys codegen for struct
-keys (`SymbolId`) — hashing/equality or the keys()-iterator producing a
-bad/nil key on the 2nd element. NOTE: plain `-c` (without `SIMPLE_UNSTUB_HIR`)
-is currently a silent no-op (stubbed), so reaching "2" requires this interpreter
-path to work.
+### Iteration 7 (2026-07-02): re-diagnosed — nil is the **key from `.keys()`**, worked around in `.spl` (crash CLEARED)
+
+The iteration-6 marker theory ("2nd `module.functions[symbol]` index nil-derefs")
+was **imprecise**. Corrected findings:
+
+- **Exact fault (gdb, break on `rt_eprintln_str` before the `fields.rs:35`
+  nil-guard `ud2`):** frame #1 is `process_module`, first loop, **first
+  iteration**. A reordered-instrumentation build (`val kid = symbol.id` moved to
+  the loop top) printed `PM iter` then trapped **before** `PM kid ok` — i.e.
+  **`symbol` itself (the key yielded by `module.functions.keys()`) is a nil
+  pointer**, trapping at `symbol.id` (FieldGet offset 0). In the original code
+  this surfaces at `main_symbol_id = symbol.id` (only taken for the `main`
+  entry), matching the disassembly's offset-0 load.
+- **The seed's struct-keyed-Dict codegen is NOT the bug.** Seven `seed
+  native-build` repros (~2 s each) exercised `Dict<SymbolId{id:i64}, V>` with:
+  distinct keys, an `id:0` key, keys read from a value's struct field
+  (`d[f.symbol]=f`), a two-module `SymbolId` name collision (`{id:i64}` vs
+  `{name:text}`), collision **plus** `symbol.id`, and an **empty** dict — all
+  round-trip `keys()`/index/`symbol.id` correctly (empty → `[]`, no nil). The nil
+  key only appears for the **real** `HirModule.functions`; the minimal shape was
+  not isolated this pass.
+- **`hir_fn.symbol` is provably non-nil at insert** (`declaration_lowering.spl`
+  `lower_function`: `fn_symbol_id` starts `SymbolId(id:-1)`, then
+  lookup-or-`define`), so the value carries a good `SymbolId` even though
+  `keys()` yields nil.
+
+**Fix applied (iteration 7, `.spl`-side, `interpreter.spl` `process_module`,
+committed):** iterate `module.functions.values()` and derive the key from each
+function's own `fn_.symbol`; capture the `main` `HirFunction` directly
+(`main_fn_opt`) and call it in the tail instead of re-indexing
+`module.functions[SymbolId(id: main_symbol_id)]`. **Result:** `run hello.spl`
+(fn main: print(1+1)) goes from **rc=132 SIGILL → rc=0** — the nil-deref crash is
+cleared. The underlying seed `keys()`-returns-nil bug for this module shape
+remains **open** (needs the still-unisolated minimal repro).
+
+### Separately found (iteration 7): `.get()`→`Some(payload)`→field-access corrupts (Layer-3 family)
+
+Cheap repro `dvc` (scratchpad): `match d.get(k): case Some(fn_): use fn_.name`
+traps with the same "field access on nil receiver", while identical logic via
+`val fn_ = d[k]` (index, non-optional) works (`dvb`). Extracting a **struct
+payload from the `Some(...)` optional** returned by `Dict.get` yields a corrupt
+pointer — same enum struct-payload family as historical Layer 3. Not on the `-c`
+path (interpreter uses `[]`), but a real seed codegen bug.
+
+NOTE: plain `-c` (without `SIMPLE_UNSTUB_HIR`) is currently a silent no-op
+(stubbed), so reaching "2" requires this interpreter path to work.
+
+## Layer 6 (OPEN — iteration 7): interpreter runs `main` cleanly but prints nothing
+
+After the Layer-5 fix, `SIMPLE_UNSTUB_HIR=1 <stage4> run hello.spl` (`fn main():
+print(1+1)`) and `-c "print(1+1)"` no longer crash — `run` now exits **rc=0**
+(was rc=132) — but produce **no stdout** ("2" never appears; `print(42)` also
+silent; not a flush issue — `stdbuf -o0` unchanged). So either
+`module.functions.values()` is empty for the synthetic-main module (⇒ `has_main`
+false ⇒ `BackendResult.Unit`, `main` never called) — which would also explain
+the nil `keys()` element (degenerate dict for this shape) — or `main` is called
+but the interpreter's `print`/`println` builtin does not reach real stdout.
+Next step (iteration 8): instrument `process_module` to log
+`module.functions.values().len()` + whether `has_main`/`call_hir_function(main)`
+are reached; if `main` runs, trace the `print` builtin in
+`interpreter_calls.spl`. Rebuild is incremental (~2.5 min, seed unchanged).
 
 ## Layer 3 (historical, superseded by the Layer 3 fix above): enum struct-payload extraction returns inline garbage
 
