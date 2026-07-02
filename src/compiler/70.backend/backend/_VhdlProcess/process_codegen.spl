@@ -44,7 +44,7 @@ impl VhdlBackend:
     fn process_operand_to_vhdl(operand: MirOperand) -> Result<text, CompileError>:
         match operand.kind:
             case Copy(local) | Move(local):
-                self.local_to_vhdl(local)
+                self.local_operand_expr(local)
             case Const(value, ty):
                 self.const_value_to_vhdl(value, ty)
 
@@ -208,6 +208,8 @@ impl VhdlBackend:
                 self.emit_process_dest_assign(builder, dest, expr)
 
             case Cast(dest, operand, target) | Bitcast(dest, operand, target):
+                if self.active_inline_exprs.has(dest.id):
+                    return Ok(())
                 val src_name = match self.process_operand_to_vhdl(operand):
                     case Ok(result): result
                     case Err(err): return Err(err)
@@ -264,6 +266,8 @@ impl VhdlBackend:
                         return Err(self.backend_error("Synthesizable VHDL process field set requires local base"))
 
             case VhdlResize(dest, operand, new_width, signed):
+                if self.active_inline_exprs.has(dest.id):
+                    return Ok(())
                 val src_name = match self.process_operand_to_vhdl(operand):
                     case Ok(result): result
                     case Err(err): return Err(err)
@@ -273,6 +277,8 @@ impl VhdlBackend:
                 self.emit_process_dest_assign(builder, dest, expr)
 
             case VhdlSlice(dest, signal, hi, lo):
+                if self.active_inline_exprs.has(dest.id):
+                    return Ok(())
                 val src_name = match self.process_operand_to_vhdl(signal):
                     case Ok(result): result
                     case Err(err): return Err(err)
@@ -287,13 +293,10 @@ impl VhdlBackend:
                 self.emit_process_dest_assign(builder, dest, cast)
 
             case VhdlConcat(dest, parts):
-                var part_names: [text] = []
-                for part in parts:
-                    val part_name = match self.process_operand_to_vhdl(part):
-                        case Ok(result): result
-                        case Err(err): return Err(err)
-                    part_names = part_names.push(part_name)
-                self.emit_process_dest_assign(builder, dest, part_names.join(" & "))
+                val joined = match self.concat_parts_to_vhdl(parts):
+                    case Ok(result): result
+                    case Err(err): return Err(err)
+                self.emit_process_dest_assign(builder, dest, joined)
 
             case VhdlSignalAssign(target, value, delay_ns):
                 if delay_ns.?:
