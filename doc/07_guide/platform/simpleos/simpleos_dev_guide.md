@@ -493,6 +493,9 @@ bin/simple os test --scenario=x64-desktop-disk
 
 bin/simple os build --scenario=x64-nvme-fat32
 bin/simple os test --scenario=x64-nvme-fat32
+
+bin/simple os build --scenario=x64-gpu-2d
+bin/simple os run --scenario=x64-gpu-2d
 ```
 
 `x64-desktop-disk` first looks for a release disk image, then uses the
@@ -507,6 +510,11 @@ sh scripts/os/make_os_disk.shs 64 build/os/fat32-x86_64.img
 That `.shs` entrypoint populates the FAT32 image with host filesystem tools:
 `mtools` is preferred because it works on macOS and Linux without root, and
 Linux loop mount is the fallback.
+
+`x64-gpu-2d` routes to
+`examples/09_embedded/simple_os/arch/x86_64/gpu_test_entry.spl`, emits
+`build/os/simpleos_gpu_test_x86_64.elf`, and launches QEMU with the
+`virtio-gpu` device plus `-vga none`.
 
 `x64-nvme-fat32` is the focused filesystem contract lane. It binds to
 `examples/09_embedded/simple_os/arch/x86_64/fs_test_entry.spl` and always uses

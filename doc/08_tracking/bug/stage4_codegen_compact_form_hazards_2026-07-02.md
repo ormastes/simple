@@ -351,3 +351,58 @@ larger struct silently reads the wrong field across the **whole** compiler. A
 real seed fix (typed Dict, or having the global resolver refuse ambiguous
 name-only matches instead of guessing) would eliminate the class. Until then,
 bind dict-derived struct values to a typed local before field access.
+
+---
+
+## Iteration 10 (2026-07-02) — `-c "print(1+1)"` under `SIMPLE_UNSTUB_HIR=1`: crash chain advanced 6 stages, hits an ANY enum-payload wall
+
+Goal: make `SIMPLE_UNSTUB_HIR=1 simple -c "print(1+1)"` print `2`. Started from
+"runtime error: field access on nil receiver" (SIGILL, rc=132). gdb on the
+native stage4 binary (cranelift) localized each stage precisely (no probes
+needed — `bt`, `info registers`, `x/gx` on the tagged/masked object pointers).
+
+### Crash chain fixed this iteration (all committed, durable)
+1. **`5634403261b2`** `interpreter.spl process_module` symbols loop iterated
+   `module.symbols.symbols.keys()` + re-index. Switched to `.values()` + typed
+   `val sym: Symbol` (mirrors the functions loop). (Was not the live crash, but
+   the same hazard.)
+2. **`a352c91b7773`** process_module found main via `f.symbol.id == main_id`, but
+   single-file lowering leaves the synthetic `-c` main's `HirFunction.symbol`
+   (boxed SymbolId at offset 0) **nil** (`*rcx==0`), so the chained deref trapped.
+   Match main by `f.name == "main"` instead (name field is populated). Dropped
+   `main_id`.
+3. **`52a368001a21`** `eval_block`: HirBlock desugars `value: HirExpr?` to
+   `has: bool` + `value: HirExpr`. Lowering emitted `has=true, value=nil`, so
+   `block.value.?`(=`has`) was true and `eval_expr(nil)` trapped on `.kind`.
+   Guarded the unwrapped expr against nil.
+4. **`b2f181a7ad88`** + **`fdbf758444af`** `hir_lowering/expressions.spl
+   lower_hir_block`: the trailing-value extraction `match last.kind: case
+   Expr(expr): Some(expr)` then `if val v = value:` produced the nil value.
+   Typed-bound `val last: HirStmt` and removed the intermediate `Option<HirExpr>`
+   + `if val v = value` Some-unwrap (a documented seed miscompile) in favor of a
+   plain `has` bool + direct `HirExpr` assignment.
+5. **`0f11fbe7506b`** `mono/monomorphize_integration.spl scan_expr`: with the
+   trailing value now populated, the monomorphization pass (run inside
+   `interpret_file`'s `compile()` before interpretation) walked it and trapped on
+   a nil/garbage sub-node. Guard: `if expr == nil: return`.
+
+### The wall (root cause, NOT yet fixed)
+After fix #4/#5, `eval_block`'s `block.value` is **non-nil but a garbage pointer**
+(`0x1800000007`; real HIR exprs are `0x27xxxxx`). i.e. `case Expr(expr)` on a
+typed `last.kind` still binds a **garbage** `expr`, so `-c` runs to `rc=0`
+**silently** (no `2`). The seed erases `[HirStmt]` elements and `HirStmtKind` to
+ANY and **mis-extracts the enum payload** (`case Expr(expr)`) — reading the
+Expr variant's HirExpr from the wrong offset. **The typed-binding idiom (proven
+on the minimal struct-field repro in iteration 9) does NOT fix enum-payload
+extraction**, and no `.spl`-level annotation observed here recovers the real
+expr. Multi-statement `-c` bodies (`print(1)\nprint(2)`) SIGSEGV (rc=139) in the
+`exec_stmt` path — a parallel landmine.
+
+### Recommendation
+Reaching `2` requires a **seed (Rust) fix** to the ANY type erasure — either a
+typed `HirType::Dict`/array element type threaded through, or making enum-payload
+and field resolution refuse ambiguous ANY receivers instead of guessing an
+offset. The pure-Simple workarounds advanced the crash 6 stages but cannot
+un-garbage an ANY-mis-extracted enum payload. The `SIMPLE_UNSTUB_HIR` default
+stays the empty-HIR stub (untouched); default `-c`/lint/`--version` remain
+healthy (verified rc=0, no regression). Binaries: `scratchpad/stage4_fix15..19`.

@@ -27,7 +27,7 @@ qemu_runner_spec -> os
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 30 | 30 | 0 | 0 |
+| 31 | 31 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -887,6 +887,28 @@ else:
 
 </details>
 
+#### routes the x64 GPU 2D scenario to the virtio-gpu test target
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val scenario = scenario_x64_gpu_2d()
+expect(scenario_name_or_missing("x64-gpu-2d")).to_equal("x64-gpu-2d")
+val target = scenario_target(scenario)
+expect(target.entry).to_equal("examples/09_embedded/simple_os/arch/x86_64/gpu_test_entry.spl")
+expect(target.output).to_equal("build/os/simpleos_gpu_test_x86_64.elf")
+val cmd = build_scenario_command(scenario, target.output)
+expect(cmd).to_contain("virtio-gpu,disable-modern=on,disable-legacy=off")
+expect(cmd).to_contain("-vga")
+expect(cmd).to_contain("none")
+```
+
+</details>
+
 #### delegates physical NVMe perf scenario serial acceptance to the real hardware gate
 
 <details>
@@ -1011,8 +1033,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 30 |
-| Active scenarios | 30 |
+| Total scenarios | 31 |
+| Active scenarios | 31 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
