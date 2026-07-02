@@ -24,7 +24,7 @@ use compiler.backend.backend.backend_types.{CodegenTarget}
 use compiler.backend.backend.riscv_target.{RiscvTargetContract, riscv_linux_target_contract}
 use compiler.backend.native.operand_utils.{get_phys_reg_id, get_mem_base_id, get_mem_offset, get_imm_value, get_label_id, get_sym_name}
 use compiler.backend.native.encode_common.{encode_module_with}
-use compiler.backend.native.riscv_encoding.{riscv_emit_u32_le, riscv_encode_r_type, riscv_encode_i_type, riscv_encode_s_type, riscv_encode_b_type, riscv_encode_u_type, riscv_encode_j_type, riscv_alu_funct7, riscv_alu_funct3, riscv_branch_funct3, riscv_operand_is_imm, riscv_operand_is_imm_or_label, riscv_operand_is_imm_or_sym, riscv_operand_is_label, riscv_operand_is_mem, riscv_operand_is_reg, riscv_encode_common_inst}
+use compiler.backend.native.riscv_encoding.{riscv_emit_u32_le, riscv_encode_r_type, riscv_encode_i_type, riscv_encode_s_type, riscv_encode_b_type, riscv_encode_u_type, riscv_encode_j_type, riscv_alu_funct7, riscv_alu_funct3, riscv_branch_funct3, riscv_operand_is_imm, riscv_operand_is_imm_or_label, riscv_operand_is_imm_or_sym, riscv_operand_is_jal_imm, riscv_operand_is_label, riscv_operand_is_mem, riscv_operand_is_reg, riscv_operand_is_signed_12_imm, riscv_operand_is_u20_imm, riscv_operand_mem_offset_is_signed_12, riscv_encode_common_inst}
 
 # ============================================================================
 # ELF32 Constants for RISC-V 32-bit
@@ -178,8 +178,11 @@ fn encode_inst_rv32(ectx: Rv32EncodeContext, inst: MachInst) -> Rv32EncodeContex
                     code = riscv_emit_u32_le(code, enc)
                     relocs.push(EncodedReloc(offset: reloc_offset, symbol_name: name, reloc_type: RV32_R_RISCV_CALL_PLT, addend: 0))
                 case OperandKind.Imm(v):
-                    val enc = riscv_encode_u_type(v, rd, 0x17)
-                    code = riscv_emit_u32_le(code, enc)
+                    if riscv_operand_is_u20_imm(inst.operands[1]):
+                        val enc = riscv_encode_u_type(v, rd, 0x17)
+                        code = riscv_emit_u32_le(code, enc)
+                    else:
+                        code = riscv_emit_u32_le(code, 0x00000013)
                 case _:
                     val enc = riscv_encode_u_type(0, rd, 0x17)
                     code = riscv_emit_u32_le(code, enc)
@@ -189,7 +192,7 @@ fn encode_inst_rv32(ectx: Rv32EncodeContext, inst: MachInst) -> Rv32EncodeContex
 
     elif inst.opcode == RV_OP_LW:
         # LW rd, offset(rs1): I-type funct3=0x2, opcode=0x03
-        if inst.operands.len() < 2 or not riscv_operand_is_reg(inst.operands[0]) or not riscv_operand_is_mem(inst.operands[1]):
+        if inst.operands.len() < 2 or not riscv_operand_is_reg(inst.operands[0]) or not riscv_operand_is_mem(inst.operands[1]) or not riscv_operand_mem_offset_is_signed_12(inst.operands[1]):
             code = riscv_emit_u32_le(code, 0x00000013)
         else:
             val rd = get_phys_reg_id(inst.operands[0])
@@ -200,7 +203,7 @@ fn encode_inst_rv32(ectx: Rv32EncodeContext, inst: MachInst) -> Rv32EncodeContex
 
     elif inst.opcode == RV_OP_SW:
         # SW rs2, offset(rs1): S-type funct3=0x2, opcode=0x23
-        if inst.operands.len() < 2 or not riscv_operand_is_reg(inst.operands[0]) or not riscv_operand_is_mem(inst.operands[1]):
+        if inst.operands.len() < 2 or not riscv_operand_is_reg(inst.operands[0]) or not riscv_operand_is_mem(inst.operands[1]) or not riscv_operand_mem_offset_is_signed_12(inst.operands[1]):
             code = riscv_emit_u32_le(code, 0x00000013)
         else:
             val rs2 = get_phys_reg_id(inst.operands[0])
@@ -212,7 +215,7 @@ fn encode_inst_rv32(ectx: Rv32EncodeContext, inst: MachInst) -> Rv32EncodeContex
     elif inst.opcode == RV_OP_LD:
         # On RV32, LD is not a native instruction. Treat as LW for compatibility.
         # This handles cases where MIR still emits LD even when targeting RV32.
-        if inst.operands.len() < 2 or not riscv_operand_is_reg(inst.operands[0]) or not riscv_operand_is_mem(inst.operands[1]):
+        if inst.operands.len() < 2 or not riscv_operand_is_reg(inst.operands[0]) or not riscv_operand_is_mem(inst.operands[1]) or not riscv_operand_mem_offset_is_signed_12(inst.operands[1]):
             code = riscv_emit_u32_le(code, 0x00000013)
         else:
             val rd = get_phys_reg_id(inst.operands[0])
@@ -224,7 +227,7 @@ fn encode_inst_rv32(ectx: Rv32EncodeContext, inst: MachInst) -> Rv32EncodeContex
     elif inst.opcode == RV_OP_SD:
         # On RV32, SD is not a native instruction. Treat as SW for compatibility.
         # This handles cases where MIR still emits SD even when targeting RV32.
-        if inst.operands.len() < 2 or not riscv_operand_is_reg(inst.operands[0]) or not riscv_operand_is_mem(inst.operands[1]):
+        if inst.operands.len() < 2 or not riscv_operand_is_reg(inst.operands[0]) or not riscv_operand_is_mem(inst.operands[1]) or not riscv_operand_mem_offset_is_signed_12(inst.operands[1]):
             code = riscv_emit_u32_le(code, 0x00000013)
         else:
             val rs2 = get_phys_reg_id(inst.operands[0])
@@ -246,15 +249,18 @@ fn encode_inst_rv32(ectx: Rv32EncodeContext, inst: MachInst) -> Rv32EncodeContex
                     code = riscv_emit_u32_le(code, enc)
                     pending.push(Rv32PendingJump(code_offset: jump_offset, target_block: block_id, jump_kind: RV32_JUMP_JAL))
                 case Imm(v):
-                    val enc = riscv_encode_j_type(v, rd, 0x6F)
-                    code = riscv_emit_u32_le(code, enc)
+                    if riscv_operand_is_jal_imm(inst.operands[1]):
+                        val enc = riscv_encode_j_type(v, rd, 0x6F)
+                        code = riscv_emit_u32_le(code, enc)
+                    else:
+                        code = riscv_emit_u32_le(code, 0x00000013)
                 case _:
                     val enc = riscv_encode_j_type(0, rd, 0x6F)
                     code = riscv_emit_u32_le(code, enc)
 
     elif inst.opcode == RV_OP_JALR:
         # JALR rd, rs1, imm12: I-type funct3=0x0, opcode=0x67
-        if inst.operands.len() < 3 or not riscv_operand_is_reg(inst.operands[0]) or not riscv_operand_is_reg(inst.operands[1]) or not riscv_operand_is_imm(inst.operands[2]):
+        if inst.operands.len() < 3 or not riscv_operand_is_reg(inst.operands[0]) or not riscv_operand_is_reg(inst.operands[1]) or not riscv_operand_is_signed_12_imm(inst.operands[2]):
             code = riscv_emit_u32_le(code, 0x00000013)
         else:
             val rd = get_phys_reg_id(inst.operands[0])
