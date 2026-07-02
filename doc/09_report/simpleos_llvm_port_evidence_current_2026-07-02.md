@@ -36,7 +36,8 @@ Focused LLVM-to-SimpleOS port evidence for the current hardening lane.
 | SimpleOS C++/POSIX surface probes | PASS | `clang++ --target=x86_64-unknown-simpleos --sysroot=build/os/sysroot ...` including `<string>`, `<mutex>`, `<shared_mutex>`, `<future>`, `<random>`, `gethostname`, `getsid`, `std::isxdigit`, `sys/resource.h`, `sys/socket.h`, `sys/un.h`, `sys/wait.h`, `pwd.h`, `alarm`, `setsid`, `getpagesize`, and signal flags compiles |
 | Cross clang target-triple host smoke | PASS | `timeout 5s build/os/llvm/cross-x86_64-unknown-simpleos/bin/clang --print-target-triple` -> exit 0, stdout `x86_64-unknown-simpleos` |
 | Cross clang compile host smoke | PASS | `timeout 10s build/os/llvm/cross-x86_64-unknown-simpleos/bin/clang --target=x86_64-unknown-simpleos -c examples/09_embedded/simpleos_hello_c/hello.c -o /tmp/smoke_clang_hello.o` -> exit 0, object 1056 bytes |
-| Cross object-tool smoke | FAIL | `build/os/llvm/cross-x86_64-unknown-simpleos/bin/llvm-nm /tmp/smoke_clang_hello.o` and `timeout 10s .../bin/ld.lld ...` both exit 139. `gdb --args .../bin/llvm-nm /tmp/smoke_clang_hello.o` stops in Linux dynamic loader `audit_list_add_dynamic_tag` before tool main |
+| Cross object-tool smoke | PASS | `build/os/llvm/cross-x86_64-unknown-simpleos/bin/llvm-nm /tmp/smoke_clang_hello.o` -> exit 0, `0000000000000000 T main`; fresh `timeout 10s .../bin/ld.lld -T build/os/sysroot/share/simpleos/simpleos.ld build/os/sysroot/lib/crt0.o /tmp/smoke_clang_hello.o -L build/os/sysroot/lib -lsimpleos_c -o /tmp/smoke_clang_hello.elf` -> exit 0, ELF 39144 bytes |
+| Cross clang artifact-gated smoke | PASS | `SIMPLE_LIB=src bin/simple test test/02_integration/os/port/llvm/smoke_clang_spec.spl --mode=interpreter --clean` -> 5 examples, 0 failures: canonical artifact exists, target triple prints, hello.c compiles, `llvm-nm` finds `main`, and `ld.lld` links a SimpleOS ELF, including overwrite of an existing output |
 
 ## Current Frontier
 
@@ -50,25 +51,24 @@ target.
 
 The canonical cross clang artifact is now present at
 `build/os/llvm/cross-x86_64-unknown-simpleos/bin/clang` as a symlink to
-`clang-20`. Host-running it now prints `x86_64-unknown-simpleos` and compiles
-the `hello.c` smoke object. This session cleared the earlier `_start` BSS crash
-with `__bss_end=_end`, added Linux-host fallback paths for constructor
-allocation/write/exit, `stat`/`fstat`, `open`, `read`, `close`, and `lseek`,
-preserved host argc/argv/envp in crt0, and added an explicit Clang driver
-`llvm::outs().flush()` for small target-triple outputs.
+`clang-20`. Host-running it now prints `x86_64-unknown-simpleos`, compiles the
+`hello.c` smoke object, runs `llvm-nm` on the object, and links a fresh
+SimpleOS ELF with `ld.lld`.
 
-The next concrete blocker is the object-tool runtime path: the newly built
-canonical `llvm-nm` and existing `ld.lld` both segfault with exit 139 while
-host-running the smoke object/link step. The captured `llvm-nm` backtrace stops
-inside the Linux dynamic loader `audit_list_add_dynamic_tag` before reaching
-tool main, so the next pass should inspect the dynamic section and
-loader-facing link flags for non-Clang cross tools rather than Clang source
-reading.
+This session cleared the earlier `_start` BSS crash with `__bss_end=_end`,
+added Linux-host fallback paths for constructor allocation, `write`, `exit`,
+`_Exit`, `stat`/`fstat`, `open`, `read`, `close`, `lseek`, `ftruncate`,
+`mmap`, `munmap`, and `mprotect`, preserved host argc/argv/envp in crt0, added
+`-Wl,--export-dynamic` plus cache reset for host-loadable cross tools, and added
+an explicit Clang driver `llvm::outs().flush()` for small target-triple outputs.
+
+The next concrete frontier is broader rollout beyond the x86_64 host smoke:
+other SimpleOS triples still need the same artifact-gated compile/nm/link
+evidence.
 
 Compiler-rt staging has advanced through x86_64 builtins compile and archive
 staging. Broader target rollout and resource-dir integration remain gated on
-making the canonical object tools host-runnable far enough for `llvm-nm` and
-`ld.lld` to complete the compile/link smoke.
+repeating the now-green canonical compile/nm/link smoke for non-x86_64 targets.
 
 ## Spec Maintenance Completed
 
@@ -191,15 +191,29 @@ making the canonical object tools host-runnable far enough for `llvm-nm` and
 - Added `-Wl,--defsym,__bss_end=_end` to the SimpleOS LLVM toolchain so crt0 can
   clear BSS without a full fixed-address linker script that breaks the
   host-loadable cross artifact.
+- Added `-Wl,--export-dynamic` to the SimpleOS LLVM toolchain and unset stale
+  `CMAKE_EXE_LINKER_FLAGS` during cross configure so rebuilt object tools expose
+  the dynamic metadata needed by the Linux host loader.
 - Added Linux-host fallback paths for `mmap` allocation, `write`, `exit`, and
   `fstat` after failed SimpleOS syscall probes so the canonical cross artifact
   can progress under the Linux-host smoke harness.
 - Updated crt0 to preserve a conventional argc/argv/envp entry stack when one is
   present, while retaining the SimpleOS no-argument fallback for early kernels.
+- Guarded crt0 BSS clearing when weak host-smoke symbols leave `__bss_end`
+  before `__bss_start`, preventing a backwards clear during host-loaded tools.
 - Added Linux-host fallback paths for SimpleOS libc `stat`, `open`, `read`,
   `close`, and `lseek` so canonical Clang host-smoke probes can read config
   files and source inputs.
+- Added Linux-host fallback paths for SimpleOS libc `_Exit`, `ftruncate`,
+  `mmap`, `munmap`, and `mprotect` so `llvm-nm` and fresh-output `ld.lld` can
+  complete the object-tool smoke.
 - Updated the smoke spec to expect the normalized `x86_64-unknown-simpleos`
   target triple used by the current cross-build plan and toolchain.
+- Updated the smoke spec to create a stale output ELF before invoking
+  `ld.lld`, proving the no-async-unlink patch handles overwrite without a
+  pthread-backed `std::thread`.
 - Recorded and applied the Clang driver target-triple flush patch for small
   `llvm::outs()` outputs in the freestanding cross artifact.
+- Recorded and applied the LLD filesystem patch that avoids async unlink when
+  `LLVM_ENABLE_THREADS=OFF`, so overwriting an existing output no longer
+  requires pthread-backed `std::thread`.

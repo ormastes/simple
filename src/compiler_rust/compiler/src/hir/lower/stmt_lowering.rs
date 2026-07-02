@@ -1002,6 +1002,7 @@ impl Lowerer {
         if let Pattern::Enum {
             payload: Some(payload_patterns),
             variant: enum_variant,
+            name: enum_name,
             ..
         } = binding_pattern
         {
@@ -1013,14 +1014,28 @@ impl Lowerer {
             // over a class instance. The parser emits class-name patterns this way because it
             // cannot distinguish enum variants from class names at parse time.
             // For these, we use FieldAccess (positional field index) instead of rt_enum_payload.
-            let class_struct_fields: Option<Vec<(String, TypeId)>> =
+            //
+            // This heuristic must only fire for the *unqualified* form (`name == "_"`).
+            // A qualified pattern like `EnumType.Variant(pe)` carries the real enum type
+            // name and is unambiguously an enum variant — even when the variant name
+            // happens to collide with a struct/class type of the same name (e.g.
+            // `enum StmtKind: Expr(Expr)` matched as `case StmtKind.Expr(pe)`). Without
+            // this guard, the variant-name lookup below finds the struct `Expr` and
+            // mis-lowers the payload binding as a struct FieldAccess at offset 0 (reading
+            // the enum header) instead of `rt_enum_payload`, producing a corrupt payload
+            // pointer that SIGSEGVs on first field access. See
+            // doc/08_tracking/bug/stage4_codegen_compact_form_hazards_2026-07-02.md.
+            let class_struct_fields: Option<Vec<(String, TypeId)>> = if enum_name == "_" {
                 self.module.types.lookup(enum_variant.as_str()).and_then(|tid| {
                     if let Some(HirType::Struct { fields, .. }) = self.module.types.get(tid) {
                         Some(fields.clone())
                     } else {
                         None
                     }
-                });
+                })
+            } else {
+                None
+            };
 
             for (i, p) in payload_patterns.iter().enumerate() {
                 if let Pattern::Identifier(name) | Pattern::MutIdentifier(name) = p {

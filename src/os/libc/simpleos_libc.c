@@ -102,6 +102,25 @@ static int64_t linux_syscall3(int64_t id, int64_t a0, int64_t a1, int64_t a2) {
 #endif
 }
 
+static int64_t linux_syscall6(int64_t id, int64_t a0, int64_t a1, int64_t a2,
+                              int64_t a3, int64_t a4, int64_t a5) {
+#if defined(__x86_64__)
+    register int64_t r10 __asm__("r10") = a3;
+    register int64_t r8 __asm__("r8") = a4;
+    register int64_t r9 __asm__("r9") = a5;
+    long ret;
+    __asm__ volatile("syscall"
+                     : "=a"(ret)
+                     : "a"(id), "D"(a0), "S"(a1), "d"(a2),
+                       "r"(r10), "r"(r8), "r"(r9)
+                     : "rcx", "r11", "memory");
+    return ret;
+#else
+    (void)id; (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -ENOSYS;
+#endif
+}
+
 /* ====================================================================
  * 2. Errno
  * ==================================================================== */
@@ -125,6 +144,16 @@ static int set_errno(int64_t r) {
 #endif
 
 void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset) {
+    if (running_on_linux_host()) {
+        int64_t r = linux_syscall6(9, (int64_t)(uintptr_t)addr, (int64_t)length,
+                                   (int64_t)prot, (int64_t)flags, (int64_t)fd,
+                                   (int64_t)offset);
+        if (r < 0) {
+            errno = (int)(-r);
+            return MAP_FAILED;
+        }
+        return (void *)(uintptr_t)r;
+    }
     (void)flags; (void)fd; (void)offset;
     int64_t r = simpleos_syscall(10, (int64_t)(uintptr_t)addr, (int64_t)length,
                                   (int64_t)prot, 0, 0);
@@ -136,6 +165,12 @@ void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset)
 }
 
 int munmap(void *addr, size_t length) {
+    if (running_on_linux_host()) {
+        int64_t r = linux_syscall3(11, (int64_t)(uintptr_t)addr,
+                                   (int64_t)length, 0);
+        if (r < 0) return set_errno(r);
+        return 0;
+    }
     int64_t r = simpleos_syscall(11, (int64_t)(uintptr_t)addr, (int64_t)length,
                                   0, 0, 0);
     if (r < 0) return set_errno(r);
@@ -143,6 +178,12 @@ int munmap(void *addr, size_t length) {
 }
 
 int mprotect(void *addr, size_t length, int prot) {
+    if (running_on_linux_host()) {
+        int64_t r = linux_syscall3(10, (int64_t)(uintptr_t)addr,
+                                   (int64_t)length, (int64_t)prot);
+        if (r < 0) return set_errno(r);
+        return 0;
+    }
     int64_t r = simpleos_syscall(12, (int64_t)(uintptr_t)addr, (int64_t)length,
                                   (int64_t)prot, 0, 0);
     if (r < 0) return set_errno(r);
