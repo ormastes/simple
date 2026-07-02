@@ -4,7 +4,7 @@ use compiler.backend.backend.backend_types.{CodegenTarget}
 use compiler.backend.backend.riscv_target.{riscv_linux_target_contract}
 use compiler.backend.native.{R_RISCV_CALL_PLT, encode_module_riscv64}
 use compiler.backend.native.encode_riscv64.{encode_li_riscv64}
-use compiler.backend.native.mach_inst.{MachBlock, MachFunction, MachModule, RV_OP_ADD, RV_OP_BEQ, RV_OP_JAL, RV_OP_LD, RV_OP_MUL, RV_OP_NOP, RV_OP_SD, RV_OP_SRA, RV_OP_SUB, RV_X1, RV_X2, RV_X3, new_mach_inst, op_label, op_mem, op_phys, physical_reg}
+use compiler.backend.native.mach_inst.{MachBlock, MachFunction, MachModule, RV_OP_ADD, RV_OP_BEQ, RV_OP_CALL, RV_OP_JAL, RV_OP_LD, RV_OP_MUL, RV_OP_NOP, RV_OP_SD, RV_OP_SRA, RV_OP_SUB, RV_X1, RV_X2, RV_X3, new_mach_inst, op_label, op_mem, op_phys, op_sym, physical_reg}
 use compiler.backend.native.riscv_encoding.{
     riscv_emit_u32_le, riscv_encode_b_type, riscv_encode_i_type, riscv_encode_j_type, riscv_encode_r_type, riscv_encode_s_type, riscv_encode_u_type,
     emit_rol_riscv64, emit_ror_riscv64,
@@ -68,6 +68,11 @@ fn rv64_memory_offset_module() -> MachModule:
     val func = MachFunction(name: "rv64_memory_offset", blocks: [block], frame_size: 0, num_virtual_regs: 0, used_callee_saved: [])
     MachModule(name: "rv64_memory_offset", functions: [func], data_sections: [], extern_symbols: [])
 
+fn rv64_symbol_call_module() -> MachModule:
+    val block = MachBlock(label: "entry", insts: [new_mach_inst(RV_OP_CALL, [op_sym("callee")])], block_id: 0, offset: 0)
+    val func = MachFunction(name: "rv64_symbol_call", blocks: [block], frame_size: 0, num_virtual_regs: 0, used_callee_saved: [])
+    MachModule(name: "rv64_symbol_call", functions: [func], data_sections: [], extern_symbols: ["callee"])
+
 describe "Encode Riscv64":
     it "shares the Linux call relocation and ABI contract":
         val contract = riscv_linux_target_contract(CodegenTarget.Riscv64)
@@ -91,6 +96,15 @@ describe "Encode Riscv64":
     it "encodes RV64 negative load and store offsets":
         val encoded = encode_module_riscv64(rv64_memory_offset_module())
         expect(encoded[0].code).to_equal([0x83, 0x30, 0x81, 0xFF, 0x23, 0x38, 0x31, 0xFE])
+
+    it "encodes RV64 symbol calls with CALL_PLT relocation":
+        val encoded = encode_module_riscv64(rv64_symbol_call_module())
+        expect(encoded[0].code).to_equal([0x97, 0x00, 0x00, 0x00, 0xE7, 0x80, 0x00, 0x00])
+        expect(encoded[0].relocations.len()).to_equal(1)
+        expect(encoded[0].relocations[0].offset).to_equal(0)
+        expect(encoded[0].relocations[0].symbol_name).to_equal("callee")
+        expect(encoded[0].relocations[0].reloc_type).to_equal(R_RISCV_CALL_PLT)
+        expect(encoded[0].relocations[0].addend).to_equal(0)
 
     it "expands RV64 LI as ADDI or LUI plus ADDI":
         expect(encode_li_riscv64([], 1, 42)).to_equal([0x93, 0x00, 0xA0, 0x02])
