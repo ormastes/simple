@@ -1,17 +1,175 @@
 # Office Render Adapter
-# Unified render adapter for the office suite. Routes render requests to the
-# appropriate sub-app (word, sheets, slides, mail, planner) and converts
-# each sub-app's UI tree into a shared RenderResult with text and HTML output.
+#
+# Unified render adapter for the office suite. Routes a render request to the
+# surface named by `config.adapter_name` (word / sheets / slides), builds a
+# representative demo document for that surface, and renders it through the
+# surface's real model->HTML renderer wrapped in a complete, styled HTML5 page.
+#
+# Unknown or empty adapter names render the suite index: a landing page listing
+# every LibreOffice-branded application. All styling is inline (no <style>
+# selector blocks) because `{`/`}` collide with Simple string interpolation, so
+# inline styles keep the page a pure model->CSS->HTML transform.
 
 use app.ui.render.types.{RenderConfig, RenderResult}
-use app.office.theme.{office_theme}
+use app.office.word.html_render.{render_document_html}
+use app.office.slides.html_render.{render_slide_html}
+use app.office.slides.slide.{Slide, blank_slide, add_text_box}
+use app.office.sheets.spreadsheet.{Sheet}
+use app.office.sheets.cell.{cell_display_text}
+use common.rich_text.attributed_text.{RichDocument, DocBlock, BlockKind, TextSpan, InlineStyle}
+use app.office.libreoffice.{libreoffice_apps, libreoffice_suite_name}
+
+# =========================================================================
+# Accent per surface
+# =========================================================================
+
+fn _surface_accent(component: text) -> text:
+    """Brand accent color for a surface, matching the LibreOffice family."""
+    if component == "word" or component == "writer":
+        return "#2b579a"
+    if component == "sheets" or component == "excel" or component == "calc":
+        return "#217346"
+    if component == "slides" or component == "ppt" or component == "impress":
+        return "#b7472a"
+    "#1f2937"
+
+fn _normalize_surface(adapter_name: text) -> text:
+    """Map any accepted alias to a canonical surface key."""
+    val n = adapter_name.lower()
+    if n == "writer" or n == "word":
+        return "word"
+    if n == "calc" or n == "excel" or n == "sheets":
+        return "sheets"
+    if n == "impress" or n == "ppt" or n == "slides":
+        return "slides"
+    n
+
+# =========================================================================
+# Demo models
+# =========================================================================
+
+fn _text_span(s: text) -> TextSpan:
+    TextSpan(text: s, style: InlineStyle.Normal)
+
+fn _block(kind: BlockKind, s: text) -> DocBlock:
+    DocBlock(kind: kind, spans: [_text_span(s)])
+
+fn office_demo_document() -> RichDocument:
+    """A representative Writer document exercising headings, body, quote, bullets."""
+    var doc = RichDocument.new("Quarterly Business Review")
+    doc.blocks.push(_block(BlockKind.Heading1, "Quarterly Business Review"))
+    doc.blocks.push(_block(BlockKind.Paragraph, "Simple Office reached production readiness this quarter across the Writer, Calc and Impress surfaces, sharing one style substrate."))
+    doc.blocks.push(_block(BlockKind.Heading2, "Highlights"))
+    doc.blocks.push(_block(BlockKind.BulletItem, "Unified HTML export across every surface"))
+    doc.blocks.push(_block(BlockKind.BulletItem, "Shared office style resolver for consistent typography"))
+    doc.blocks.push(_block(BlockKind.BulletItem, "Deterministic, testable render pipeline"))
+    doc.blocks.push(_block(BlockKind.Quote, "The best office document is the one that renders the same everywhere."))
+    doc.blocks.push(_block(BlockKind.CodeBlock, "simple office render word --format html"))
+    doc
+
+fn office_demo_slide() -> Slide:
+    """A representative Impress slide with a title and supporting body."""
+    var s = blank_slide("demo_slide")
+    s = add_text_box(s, "title", "Simple Office", 60, 60, 840, 120)
+    s = add_text_box(s, "subtitle", "A production-ready office suite", 60, 220, 840, 80)
+    s = add_text_box(s, "body", "Writer - Calc - Impress on one shared style substrate", 60, 340, 840, 120)
+    s
+
+fn office_demo_sheet() -> Sheet:
+    """A representative Calc budget sheet."""
+    var sh = Sheet.new("Budget")
+    sh.set_value("A1", "Item")
+    sh.set_value("B1", "Q1")
+    sh.set_value("C1", "Q2")
+    sh.set_value("A2", "Revenue")
+    sh.set_value("B2", "1200")
+    sh.set_value("C2", "1488")
+    sh.set_value("A3", "Costs")
+    sh.set_value("B3", "800")
+    sh.set_value("C3", "920")
+    sh.set_value("A4", "Profit")
+    sh.set_value("B4", "400")
+    sh.set_value("C4", "568")
+    sh
+
+# =========================================================================
+# Sheet -> HTML table
+# =========================================================================
+
+fn _sheet_cell_html(sheet: Sheet, ref_str: text, header: bool) -> text:
+    val display = cell_display_text(sheet.get_cell(ref_str))
+    if header:
+        return "<th style=\"border: 1px solid #d0d7de; padding: 6px 12px; background: #f6f8fa; text-align: left;\">{display}</th>"
+    "<td style=\"border: 1px solid #d0d7de; padding: 6px 12px;\">{display}</td>"
+
+fn render_sheet_html(sheet: Sheet) -> text:
+    """Render a fixed 3-column x 4-row demo grid as a styled HTML table."""
+    val cols = ["A", "B", "C"]
+    var out = "<table style=\"border-collapse: collapse; font-family: -apple-system, Segoe UI, sans-serif; font-size: 14px;\">"
+    var row = 1
+    while row <= 4:
+        out = "{out}<tr>"
+        for col in cols:
+            val ref_str = "{col}{row}"
+            out = "{out}{_sheet_cell_html(sheet, ref_str, row == 1)}"
+        out = "{out}</tr>"
+        row = row + 1
+    "{out}</table>"
+
+# =========================================================================
+# Full-page HTML wrapper
+# =========================================================================
+
+fn _html_page(title: text, accent: text, body: text) -> text:
+    val head = "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>{title}</title></head>"
+    val body_style = "margin: 0; font-family: -apple-system, Segoe UI, Roboto, sans-serif; background: #f3f4f6; color: #1f2937;"
+    val header = "<header style=\"background: {accent}; color: #ffffff; padding: 16px 32px; font-size: 20px; font-weight: 600;\">{title}</header>"
+    val main_open = "<main style=\"max-width: 1000px; margin: 24px auto; background: #ffffff; padding: 32px; box-shadow: 0 1px 4px rgba(0,0,0,0.12); border-radius: 8px;\">"
+    "{head}<body style=\"{body_style}\">{header}{main_open}{body}</main></body></html>"
+
+fn _suite_index_body() -> text:
+    var out = "<p>Select an application:</p><ul style=\"line-height: 1.9; font-size: 15px;\">"
+    for app in libreoffice_apps():
+        out = "{out}<li><strong>{app.libre_name}</strong> &mdash; {app.description}</li>"
+    "{out}</ul>"
+
+# =========================================================================
+# Public entry
+# =========================================================================
+
+fn _render_body_for(surface: text) -> text:
+    if surface == "word":
+        return render_document_html(office_demo_document())
+    if surface == "sheets":
+        return render_sheet_html(office_demo_sheet())
+    if surface == "slides":
+        return render_slide_html(office_demo_slide())
+    _suite_index_body()
+
+fn _title_for(surface: text) -> text:
+    if surface == "word":
+        return "{libreoffice_suite_name()} Writer"
+    if surface == "sheets":
+        return "{libreoffice_suite_name()} Calc"
+    if surface == "slides":
+        return "{libreoffice_suite_name()} Impress"
+    "{libreoffice_suite_name()} Suite"
 
 fn office_render(config: RenderConfig) -> RenderResult:
-    val theme = office_theme(config.adapter_name, false)
+    """Render the requested office surface to a complete, styled HTML page.
+
+    Routes by `config.adapter_name`; empty/unknown names render the suite index.
+    `text_output` carries a one-line summary; `html_output` carries the page."""
+    val surface = _normalize_surface(config.adapter_name)
+    val accent = _surface_accent(surface)
+    val body = _render_body_for(surface)
+    val title = _title_for(surface)
+    val page = _html_page(title, accent, body)
+    val label = if surface == "word" or surface == "sheets" or surface == "slides": surface else: "suite"
     RenderResult(
-        format: "text",
-        text_output: "Office: {config.adapter_name}",
-        html_output: "",
+        format: "html",
+        text_output: "Office render: {title} ({label}, {page.len()} bytes)",
+        html_output: page,
         metadata: {},
         warnings: []
     )

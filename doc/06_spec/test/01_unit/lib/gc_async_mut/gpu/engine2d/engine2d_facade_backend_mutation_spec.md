@@ -27,7 +27,7 @@ engine2d_facade_backend_mutation_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 4 | 4 | 0 | 0 |
+| 8 | 8 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -70,8 +70,9 @@ reaches the SIMD fill provider by checking the fill hit counter.
 
 The spec intentionally avoids direct `SoftwareBackend` or `CpuBackend` calls.
 All rendering commands go through `Engine2D.clear`,
-`Engine2D.draw_rect_filled`, `Engine2D.draw_image`, `Engine2D.set_clip`,
-`Engine2D.set_mask`, `Engine2D.present`, and
+`Engine2D.draw_rect_filled`, `Engine2D.draw_image`,
+`Engine2D.draw_image_scaled`, `Engine2D.draw_image_transform`,
+`Engine2D.set_clip`, `Engine2D.set_mask`, `Engine2D.present`, and
 `Engine2D.read_pixels`.
 
 **Requirements:** N/A
@@ -129,6 +130,40 @@ expect_draw_image_clip_mask("software")
 
 </details>
 
+#### software backend draw_image_scaled honors facade clip and mask state
+
+- expect draw image scaled clip mask
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect_draw_image_scaled_clip_mask("software")
+```
+
+</details>
+
+#### software backend draw_image_transform honors facade clip and mask state
+
+- expect draw image transform clip mask
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect_draw_image_transform_clip_mask("software")
+```
+
+</details>
+
 #### cpu_simd backend preserves pixels and records SIMD fill use
 
 - reset simd hits
@@ -176,12 +211,46 @@ expect_draw_image_clip_mask("cpu_simd")
 
 </details>
 
+#### cpu_simd backend draw_image_scaled honors facade clip and mask state
+
+- expect draw image scaled clip mask
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect_draw_image_scaled_clip_mask("cpu_simd")
+```
+
+</details>
+
+#### cpu_simd backend draw_image_transform honors facade clip and mask state
+
+- expect draw image transform clip mask
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect_draw_image_transform_clip_mask("cpu_simd")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
+| Total scenarios | 8 |
+| Active scenarios | 8 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

@@ -5,7 +5,7 @@
 
 ## Executive Summary
 
-**48 GPU rendering tests exist and pass** ✅ including **22 new functional tests** with real pixel capture and render log comparison.
+**48+ GPU rendering tests exist and pass** ✅ including **22 new functional tests** with real pixel capture and render log comparison.
 Current Linux RenderDoc/Vulkan evidence is tracked separately in
 `doc/09_report/linux_renderdoc_simpleos_hardening_evidence_current_2026-07-02.md`.
 
@@ -15,6 +15,7 @@ Current Linux RenderDoc/Vulkan evidence is tracked separately in
 | **Image Capture** | ✅ Implemented | Real SoftwareRenderer.get_pixels() pixel capture (9 tests) |
 | **Render Log Capture** | ✅ Implemented | RenderLogCapture class with CPU-Vulkan alignment (8 tests) |
 | **RenderDoc Traces** | ✅ Linux evidence | Pure-Simple render log tests exist; current Linux Simple/Chrome/Electron `.rdc` artifacts have `RDOC` magic in the 2026-07-02 combined report |
+| **Engine2D facade/backend mutation** | ✅ Implemented | Software + CPU SIMD facade clip/mask coverage for image, scaled image, and transformed image; Vulkan draw_image device readback; generic web renderer backend parity |
 | **Event Handling** | ⚠️ Documented | Pattern demonstrated in CPU SIMD tests; event→render→verify chain |
 | **Metal Render Logs** | ❌ Environmental | Unavailable (requires macOS GPU) |
 | **DirectX Render Logs** | ❌ Environmental | Unavailable (requires Windows GPU) |
@@ -24,7 +25,21 @@ Current Linux RenderDoc/Vulkan evidence is tracked separately in
 
 ---
 
-## Newly Implemented Functional Tests (22 tests)
+## Current Functional Evidence
+
+### Engine2D Facade, Vulkan, and Backend Parity (25 tests) ✅
+- **Files:**
+  - `test/01_unit/lib/gc_async_mut/gpu/engine2d/engine2d_facade_backend_mutation_spec.spl`
+  - `test/01_unit/lib/gc_async_mut/gpu/engine2d/vulkan_compute_oracle_spec.spl`
+  - `test/01_unit/lib/gc_async_mut/gpu/browser_engine/web_renderer_backend_parity_spec.spl`
+- **What it does:** Proves the public Engine2D facade preserves software and
+  CPU SIMD mutations, clip/mask state reaches `draw_image`,
+  `draw_image_scaled`, and `draw_image_transform`, Vulkan `draw_image` writes
+  source pixels into device-backed framebuffer readback, and web-renderer
+  backend selection preserves the generic layout fixture.
+- **Evidence:** 8 facade examples, 7 Vulkan oracle examples, and 10 backend
+  parity examples; see
+  `doc/09_report/linux_renderdoc_simpleos_hardening_evidence_current_2026-07-02.md`.
 
 ### CPU SIMD Real Pixel Capture (9 tests) ✅
 - **File:** `test/03_system/check/gpu_rendering_functional_cpu_simd_coverage_spec.spl`

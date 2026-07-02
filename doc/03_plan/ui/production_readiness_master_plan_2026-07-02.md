@@ -203,21 +203,23 @@ is Xvfb-only by default; `check-gui-low-res-readability.shs` is offscreen
   Oracle is polarity-aware (dark theme). The G1.3 layout gap is closed:
   the showcase grid is now adaptive (column-major flow, rows from available
   height) and all 18 cells fit unclipped at 640x480 (visually verified).
-- **W5 unblocked, not done:** breakout starts headless after fixing the
-  `as time` alias interpreter bug; all JIT HIR lowering blockers on the game
-  path are fixed (nested fn, module aliases, panic intrinsic, fn/me mutability
-  in game2d backends, 15 physics `mut` params). Remaining: deployed
-  `bin/simple` predates `rt_len` in the JIT runtime symbol table → still
-  interpreter-only (one frame > 280 s). Fix in progress: pure-Simple bootstrap
-  redeploy (host cannot rebuild the Rust seed — LLVM Polly missing).
+- **W5 unblocked, not done:** breakout now has focused production, milestone
+  capture, and window-capture specs under `test/03_system/game2d/`. The old
+  stale-`rt_len` note is superseded by the current blockers:
+  `bin/simple run` still SIGSEGVs in the Cranelift JIT on `LoopDriver.step`
+  (`doc/08_tracking/bug/jit_game2d_backend_method_dispatch_sigsegv_2026-07-02.md`),
+  and this host's available binaries expose no real window externs
+  (`doc/08_tracking/bug/game2d_no_window_externs_in_host_binaries_2026-07-03.md`).
+  `breakout_window_capture_spec.spl` records the host block cleanly: 1/1 pass
+  on 2026-07-02.
 - **G4 narrowphase fixed:** PhysicsWorld3D never dispatched Sphere-Box;
   wired the existing `collide_sphere_aabb_3d` for both orderings.
   physics2 suite 37/37 (also repaired 4 stale specs: RawHandle ctor,
   wrong raycast import path).
-- **All game2d examples JIT-lowerable:** alias→direct imports, fn→me on
-  mutating methods, real input API in pool/stacking. Every example now
-  reaches the stale-binary wall (missing `rt_len`/`rt_math_sin` in the
-  deployed runtime symbol table) and nothing else.
+- **All game2d examples JIT-lowerable up to runtime dispatch:** alias→direct
+  imports, fn→me on mutating methods, real input API in pool/stacking. The
+  remaining run blocker is method dispatch in the co-compiled JIT unit, not
+  stale `rt_len`/`rt_math_sin` symbol presence.
 - **W7 host assessment:** the 9 Tauri check specs pass locally (validator
   path, e.g. tauri_android_render_log_validator_spec 13/13), but this host
   has no Android SDK/adb/emulator (`ANDROID_HOME` unset). Per G5.2 the
@@ -246,7 +248,7 @@ is Xvfb-only by default; `check-gui-low-res-readability.shs` is offscreen
 | G4.4 HUD over 3D | PASS (direct blit; LayerTree bridge blocked by interp bugs) | `examples/11_advanced/game3d_hud/main.spl` | `build/game3d_hud.ppm` |
 | G1.1 real window via Vulkan | NOT RUN (live-display ban; needs Xvfb window run) | `scripts/gui/linux-gui-run.shs` | — |
 | G4.2 3D game 60s session | PASS on seed binary (rollball: win+lose autopilot, 3600 fixed steps each, 10 gates; PERF-GAP recorded: frame_p95 ≈2.9 s vs 33 ms target — cranelift f32-trig fallback forces interpreted raster) | `scripts/check/check-game3d-rollball.shs` + `test/03_system/game3d/rollball_production_spec.spl` | `build/game3d-rollball/*.ppm` (11) |
-| G3.2 2D game 60s session | IN PROGRESS (W5b lane: SDL backend wiring + complete breakout) | — | — |
+| G3.2/G3.3 2D game breakout | IN PROGRESS (headless production/capture specs exist; real-window leg records host block) | `scripts/check/check-game2d-breakout.shs` + `test/03_system/game2d/breakout_*_spec.spl` | `build/game2d-breakout/*` when the full wrapper is run; current cheap host-block proof: `breakout_window_capture_spec.spl` 1/1 |
 | G2.2 glyph parity | PASS (differentPixels 2717→3; calibrated LCD compositing; caveat: Chrome-calibrated atlas, not an independent rasterizer) | `node tools/electron-shell/verify_famous_site_production_probe.js` (authoritative; see runner P1 bug) + probe/corpus specs | `test/09_baselines/famous_site_corpus/site_0_google/*` |
 | G2.3 browser low-res text | PASS | `scripts/check/check-browser-interaction.shs` + `test/03_system/gui/browser_interaction_spec.spl` | `build/browser-interaction/lowres_*.ppm` |
 | G2.4 scroll | PASS (marker shifts exactly 120px) | same check script/spec | `build/browser-interaction/scroll_offset*.ppm` |

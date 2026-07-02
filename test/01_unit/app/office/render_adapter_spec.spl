@@ -1,0 +1,67 @@
+"""Office render adapter spec.
+
+Verifies the unified render adapter routes each surface (Writer / Calc /
+Impress) to its real model->HTML renderer wrapped in a complete, styled HTML5
+page, and that unknown/empty adapter names fall back to the suite index.
+"""
+
+use std.spec
+use app.ui.render.types.{RenderConfig}
+use app.office.render_adapter.{office_render, render_sheet_html, office_demo_sheet, office_demo_document, office_demo_slide}
+use app.office.word.html_render.{render_document_html}
+use app.office.slides.html_render.{render_slide_html}
+
+fn _render(surface: text) -> text:
+    var cfg = RenderConfig.html_export()
+    cfg.adapter_name = surface
+    val result = office_render(cfg)
+    result.html_output
+
+describe "office render adapter: full-page HTML export":
+    """Each surface renders a complete, self-contained HTML document."""
+
+    it "renders Writer with a doctype, title bar, and document article":
+        val html = _render("word")
+        expect(html).to_start_with("<!DOCTYPE html>")
+        expect(html).to_contain("LibreOffice Writer")
+        expect(html).to_contain("<article class=\"document\">")
+        expect(html).to_contain("Quarterly Business Review")
+        expect(html).to_end_with("</html>")
+
+    it "renders Calc as a styled HTML table with the budget grid":
+        val html = _render("sheets")
+        expect(html).to_contain("LibreOffice Calc")
+        expect(html).to_contain("<table")
+        expect(html).to_contain("Revenue")
+        expect(html).to_contain("Profit")
+
+    it "renders Impress as a slide section":
+        val html = _render("slides")
+        expect(html).to_contain("LibreOffice Impress")
+        expect(html).to_contain("<section class=\"slide\"")
+        expect(html).to_contain("Simple Office")
+
+    it "falls back to the suite index for unknown adapter names":
+        val html = _render("")
+        expect(html).to_contain("LibreOffice Suite")
+        expect(html).to_contain("Writer")
+        expect(html).to_contain("Calc")
+        expect(html).to_contain("Impress")
+
+    it "accepts LibreOffice aliases (writer/calc/impress)":
+        expect(_render("writer")).to_contain("LibreOffice Writer")
+        expect(_render("calc")).to_contain("LibreOffice Calc")
+        expect(_render("impress")).to_contain("LibreOffice Impress")
+
+describe "office render adapter: surface renderers reuse real models":
+    """The demo models feed the same renderers the live surfaces use."""
+
+    it "renders the demo sheet table from cell display values":
+        val table = render_sheet_html(office_demo_sheet())
+        expect(table).to_start_with("<table")
+        expect(table).to_contain("<th")
+        expect(table).to_contain("1200")
+
+    it "produces a non-empty document and slide from the demo builders":
+        expect(render_document_html(office_demo_document())).to_contain("Highlights")
+        expect(render_slide_html(office_demo_slide())).to_contain("production-ready")

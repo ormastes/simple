@@ -46,7 +46,10 @@
 - draw_image_clip_rect_readback_status: pass
 - draw_image_mask_readback_status: pass
 - software_facade_draw_image_clip_mask_status: pass
+- software_facade_draw_image_transform_clip_mask_status: pass
 - cpu_simd_facade_draw_image_clip_mask_status: pass
+- cpu_simd_facade_draw_image_scaled_clip_mask_status: pass
+- cpu_simd_facade_draw_image_transform_clip_mask_status: pass
 - web_renderer_backend_parity_spec: `test/01_unit/lib/gc_async_mut/gpu/browser_engine/web_renderer_backend_parity_spec.spl`
 - web_renderer_backend_parity_status: pass
 - web_renderer_backend_parity_examples: 10

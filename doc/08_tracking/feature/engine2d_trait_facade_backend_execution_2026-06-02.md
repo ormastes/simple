@@ -72,6 +72,12 @@ criteria are now covered by executable unit evidence:
   preserves the same colors and records SIMD fill hits through the facade path.
 - The same spec proves the public CPU SIMD facade path also honors
   `Engine2D.set_clip` and `Engine2D.set_mask` for `Engine2D.draw_image`.
+- The same spec proves software and CPU SIMD facade paths also preserve
+  clip/mask state for `Engine2D.draw_image_scaled`, which routes through the
+  shared `draw_image` backend contract.
+- The same spec proves software and CPU SIMD facade paths also preserve
+  clip/mask state for `Engine2D.draw_image_transform`, which routes through the
+  shared transformed-image emulator and backend `draw_image` contract.
 - `doc/06_spec/test/01_unit/lib/gc_async_mut/gpu/engine2d/engine2d_facade_backend_mutation_spec.md`
   is the generated manual for the focused facade evidence.
 - `doc/09_report/cpu_simd_engine2d_evidence_current_2026-07-02.md` proves the

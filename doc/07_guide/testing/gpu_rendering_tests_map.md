@@ -20,6 +20,9 @@
 
 | Test | Coverage | Status |
 |------|----------|--------|
+| `test/01_unit/lib/gc_async_mut/gpu/engine2d/engine2d_facade_backend_mutation_spec.spl` | Public Engine2D facade mutation/readback for software + CPU SIMD, including clip/mask through image, scaled image, and transformed image | ✅ 8 tests passing — real facade `read_pixels()` assertions |
+| `test/01_unit/lib/gc_async_mut/gpu/engine2d/vulkan_compute_oracle_spec.spl` | Vulkan clear/rect/draw_image device readback, clipped draw_image, clip rect, mask, and cross-backend wrappers | ✅ 7 tests passing — Vulkan-backed readback oracle |
+| `test/01_unit/lib/gc_async_mut/gpu/browser_engine/web_renderer_backend_parity_spec.spl` | CPU, CPU SIMD, Metal-on-Vulkan, CUDA fallback, OpenCL fallback, and Vulkan generic layout parity | ✅ 10 tests passing — backend selection parity |
 | `gpu_rendering_functional_cpu_simd_coverage_spec.spl` | Real pixel capture, deterministic rendering, render stats, event patterns, multi-item rendering | ✅ 9 tests passing — real SoftwareRenderer.get_pixels() pixel capture |
 | `gpu_rendering_vulkan_renderdoc_capture_spec.spl` | Trace structure, metrics validation, CPU-Vulkan parity, draw call alignment | ✅ 5 tests passing — RenderDoc trace validation framework |
 | `gpu_rendering_renderdoc_capture_functional_spec.spl` | Render log capture, CPU-Vulkan alignment, perfect match/mismatch detection, threshold validation, combined image+log comparison | ✅ 8 tests passing — RenderLogCapture class with alignment_percentage() |
@@ -117,7 +120,7 @@ src/lib/gc_async_mut/gpu/engine2d/directx_backend.spl
 
 | Aspect | Count | Status | Implementation |
 |--------|-------|--------|-----------------|
-| **Total GPU tests** | 48+ | ✅ Passing | 22 new functional + 26 prior validation |
+| **Total GPU tests** | 73+ | ✅ Passing | Engine2D 2D backend evidence + 22 functional + 26 prior validation |
 | **CPU SIMD tests** | 9 | ✅ Functional | Real SoftwareRenderer pixel capture, deterministic rendering |
 | **RenderDoc tests** | 13 | ✅ Functional | Trace structure, CPU-Vulkan alignment, perfect match detection |
 | **Vulkan 3D tests** | 16+ | ✅ Functional | 3D only, no 2D GUI items |
