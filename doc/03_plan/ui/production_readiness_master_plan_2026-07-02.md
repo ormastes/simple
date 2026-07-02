@@ -190,6 +190,30 @@ passes live; breakout example fails (`semantic: too many arguments for class
 RawHandle constructor`); JIT falls back on `EngineColor.to_rgba8`
 (`Unknown variable: clamp_f`) and `Game.update` (`Unknown variable: g`).
 
+### Recovery session status (2026-07-02 afternoon)
+
+The first execution session crashed at 13:53: a GUI check ran against the
+live desktop display and the resulting Xwayland death logged out the whole
+session (all W-agents killed mid-work). Guards added: `linux-gui-run.shs`
+is Xvfb-only by default; `check-gui-low-res-readability.shs` is offscreen
+(`SIMPLE_GUI=0` + `SHOWCASE_PPM`). Recovered state:
+
+- **W2 GREEN:** low-res readability check + SPipe spec pass at 640x480 /
+  800x600 / 1280x720 (`test/03_system/check/gui_low_res_readability_spec.spl`).
+  Oracle is polarity-aware (dark theme). Known gap for W1: showcase layout is
+  fixed-size and clips bottom rows at 640x480 — needs adaptive layout (G1.3).
+- **W5 unblocked, not done:** breakout starts headless after fixing the
+  `as time` alias interpreter bug; all JIT HIR lowering blockers on the game
+  path are fixed (nested fn, module aliases, panic intrinsic, fn/me mutability
+  in game2d backends, 15 physics `mut` params). Remaining: deployed
+  `bin/simple` predates `rt_len` in the JIT runtime symbol table → still
+  interpreter-only (one frame > 280 s). Fix in progress: pure-Simple bootstrap
+  redeploy (host cannot rebuild the Rust seed — LLVM Polly missing).
+- Bugs recorded: `interp_module_alias_time_shadowed_builtin`,
+  `jit_lowering_clamp_f_engine_color` (nested-fn root cause),
+  `jit_lowering_module_alias_and_panic`, `parser_step_decorator_string_form`
+  (all 2026-07-02).
+
 ## Current state (audited 2026-07-02)
 
 ### Vulkan / engine
