@@ -120,6 +120,13 @@ int munmap(void *addr, size_t length) {
     return 0;
 }
 
+int mprotect(void *addr, size_t length, int prot) {
+    int64_t r = simpleos_syscall(12, (int64_t)(uintptr_t)addr, (int64_t)length,
+                                  (int64_t)prot, 0, 0);
+    if (r < 0) return set_errno(r);
+    return 0;
+}
+
 /* ====================================================================
  * 5. String operations
  * ==================================================================== */
@@ -521,6 +528,13 @@ int fprintf(FILE *stream, const char *fmt, ...) {
     va_start(ap, fmt);
     int n = vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
+    if (n > 0) write(stream->fd, buf, (size_t)(n > 1024 ? 1024 : n));
+    return n;
+}
+
+int vfprintf(FILE *stream, const char *fmt, va_list ap) {
+    char buf[1024];
+    int n = vsnprintf(buf, sizeof(buf), fmt, ap);
     if (n > 0) write(stream->fd, buf, (size_t)(n > 1024 ? 1024 : n));
     return n;
 }

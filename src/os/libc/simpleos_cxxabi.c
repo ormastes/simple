@@ -133,6 +133,50 @@ void _ZdaPvm(void *ptr, unsigned long size) {
     free(ptr);
 }
 
+void *_ZnwmSt11align_val_t(unsigned long size, unsigned long align) {
+    (void)align;
+    return _Znwm(size);
+}
+
+void _ZdlPvmSt11align_val_t(void *ptr, unsigned long size, unsigned long align) {
+    (void)size;
+    (void)align;
+    free(ptr);
+}
+
+void *_ZnwmRKSt9nothrow_t(unsigned long size, const void *tag) {
+    (void)tag;
+    return malloc(size);
+}
+
+void *_ZnamRKSt9nothrow_t(unsigned long size, const void *tag) {
+    (void)tag;
+    return malloc(size);
+}
+
+void _ZdlPvRKSt9nothrow_t(void *ptr, const void *tag) {
+    (void)tag;
+    free(ptr);
+}
+
+void _ZdaPvRKSt9nothrow_t(void *ptr, const void *tag) {
+    (void)tag;
+    free(ptr);
+}
+
+int __cxa_thread_atexit(void (*destructor)(void *), void *arg, void *dso_handle) {
+    return __cxa_atexit(destructor, arg, dso_handle);
+}
+
+extern int _Z4mainiPPc(int, char **) __attribute__((weak));
+extern int _Z4mainv(void) __attribute__((weak));
+
+__attribute__((weak)) int main(int argc, char **argv) {
+    if (_Z4mainiPPc) return _Z4mainiPPc(argc, argv);
+    if (_Z4mainv) return _Z4mainv();
+    return 0;
+}
+
 /* ====================================================================
  * 6. .init_array support -- called from CRT0 startup
  * ==================================================================== */

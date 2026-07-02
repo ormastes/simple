@@ -21,6 +21,7 @@ void *memmove(void *dest, const void *src, size_t n);
 void *memset(void *s, int c, size_t n);
 int   memcmp(const void *s1, const void *s2, size_t n);
 void *memchr(const void *s, int c, size_t n);
+int   wmemcmp(const wchar_t *s1, const wchar_t *s2, size_t n);
 
 /* String length */
 size_t strlen(const char *s);

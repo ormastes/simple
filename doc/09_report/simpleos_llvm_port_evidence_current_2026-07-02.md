@@ -12,9 +12,9 @@ Focused LLVM-to-SimpleOS port evidence for the current hardening lane.
 | Cross-build subset plan CLI | PASS | `SIMPLE_LIB=src bin/simple run src/os/port/llvm/build.spl -- --cross --targets x86_64-unknown-simpleos,armv7-unknown-simpleos --print-plan` -> 2 targets; `--target armv7-unknown-simpleos --print-plan` -> 1 target |
 | Host tblgen tools | PASS | `sh src/os/port/llvm/build.shs host-tools` -> built `build/os/llvm/host-tools/bin/llvm-tblgen` and `clang-tblgen` |
 | Cross-build status CLI | PASS | `SIMPLE_LIB=src bin/simple run src/os/port/llvm/build.spl -- --cross --status` -> host-tools BUILT, sysroot READY; cross targets and compiler-rt targets NOT BUILT |
-| Sysroot libc++ header staging | PASS | `sh src/os/port/llvm/sysroot.shs` -> staged libc++ under `build/os/sysroot/include/c++/v1`, generated `__config_site`, installed `__assertion_handler`; header count 1849 |
+| Sysroot libc++ header/runtime staging | PASS | `SIMPLEOS_TARGET_TRIPLE=x86_64-unknown-simpleos sh src/os/port/llvm/sysroot.shs` -> staged libc++ under `build/os/sysroot/include/c++/v1`, generated `__config_site`, installed `__assertion_handler`, built `libc++.a`, and staged `crt0.o`, `libsimpleos_c.a`, and `libm.a` |
 | x86_64 cross LLVM configure | PASS | `SIMPLEOS_TARGET_TRIPLE=x86_64-unknown-simpleos SIMPLE_TARGET=x86_64-unknown-simpleos sh src/os/port/llvm/build.shs cross` -> CMake configure/generate complete; build enters LLVM object compilation |
-| x86_64 cross LLVM object build | FAIL | same command after regenerating/continuing the x86_64 build dir -> Support, Core, CodeGen, Analysis, MC, TextAPI, LLD common, and many Clang Basic/Lex objects build; `lib/liblldCommon.a` links; build reaches 1688/2534 before stopping at `tools/clang/lib/Lex/CMakeFiles/obj.clangLex.dir/PPMacroExpansion.cpp.o` because `__TIMESTAMP__` used `std::stringstream`, `std::locale`, and `std::put_time` |
+| Focused x86_64 `bin/lld` cross executable link | FAIL | `ninja -C build/os/llvm/cross-x86_64-unknown-simpleos bin/lld` -> all requested LLD/LLVM objects and static archives build, final executable link is reached, and runtime archives are linked after LLVM archives; remaining failures are missing ABI/libc++/libm entry points |
 | Cross-build plan scaffolding | PASS | `SIMPLE_LIB=src bin/simple test test/02_integration/os/port/llvm/cross_build_plan_spec.spl --mode=interpreter --clean` -> 18 examples, 0 failures |
 | Per-target compiler-rt/build staging scaffolding | PASS | `SIMPLE_LIB=src bin/simple test test/02_integration/os/port/llvm/per_target_build_spec.spl --mode=interpreter --clean` -> 43 examples, 0 failures |
 | Focused `Path.cpp` compile | PASS | direct clang++ compile with Ninja flags plus `-D__simpleos__=1` -> object builds; only existing futimes/futimens warning remains |
@@ -37,24 +37,36 @@ Focused LLVM-to-SimpleOS port evidence for the current hardening lane.
 
 The canonical cross clang artifact is not present at
 `build/os/llvm/cross-x86_64-unknown-simpleos/bin/clang`
-(`test -f ...` exit code 1). Host tblgen tools now exist, libc++ headers are
-staged into the SimpleOS sysroot, and the x86_64 cross stage now gets through
-CMake configure/generate into object compilation.
+(`test -f ...` exit code 1). Host tblgen tools exist, libc++ headers and a
+minimal libc++ runtime archive are staged into the SimpleOS sysroot, and the
+focused x86_64 LLD build now reaches the final `bin/lld` executable link.
+
+The previous missing-symbol class for libc++ headers, pthread condition
+variables, `strerror_r`, and wide numeric conversion functions is cleared.
+The latest final-link probe fails on the next ABI/runtime surface:
 
 ```text
-PPMacroExpansion.cpp:
-std::stringstream TmpStream;
-TmpStream.imbue(std::locale("C"));
-TmpStream << std::put_time(TM, "%a %b %e %T %Y");
+undefined symbol: main
+undefined symbol: operator new(unsigned long, std::align_val_t)
+undefined symbol: operator delete(void*, unsigned long, std::align_val_t)
+undefined symbol: operator new(unsigned long, std::nothrow_t const&)
+undefined symbol: std::__...::locale::locale()
+undefined symbol: std::__...::ctype<char>::id
+undefined symbol: std::__...::collate<char>::id
+undefined symbol: __cxa_thread_atexit
+undefined symbol: vfprintf
+undefined symbol: wmemcmp
+undefined symbol: erf
+undefined symbol: logb
+undefined symbol: rint
 ```
 
-The remaining blocker class is now libc++ no-localization formatting coverage
-in later Clang objects, not LLVM Support/POSIX bring-up. The latest probe
-validates that LLD common clears and `lib/liblldCommon.a` links, then stops at
-Clang Lex `PPMacroExpansion.cpp`. The focused object compile now passes after
-formatting `__TIMESTAMP__` through LLVM raw streams; the next cross-build probe
-should validate whether Clang Lex continues or exposes the next missing
-libc/LLVM surface.
+The relocation failures from PIE-style linking are cleared by forwarding
+`-Wl,-no-pie` through the SimpleOS LLVM toolchain. The next focused work should
+add the smallest owned runtime/ABI surface for aligned and nothrow allocation,
+thread-local destructors, missing stdio/wide/m lib functions, and either
+SimpleOS C++ entry handling or an upstream target hook so C++ `main` resolves
+for SimpleOS executables.
 
 ## Spec Maintenance Completed
 
@@ -71,6 +83,11 @@ libc/LLVM surface.
 - Staged libc++ headers into `include/c++/v1`, generated the minimal libc++
   config/assertion handler, and added SimpleOS C header shims needed by LLVM
   (`ctype.h`, `inttypes.h`, `bits/types/mbstate_t.h`, `machine/endian.h`).
+- Staged a minimal libc++ runtime archive into `build/os/sysroot/lib/libc++.a`
+  and linked SimpleOS runtime archives after LLVM target archives via
+  `CMAKE_CXX_STANDARD_LIBRARIES`.
+- Added `-Wl,-no-pie` to the SimpleOS LLVM toolchain so the static SimpleOS
+  startup/runtime objects are linked as a non-PIE executable.
 - Marked the LLVM CMake toolchain as Unix-style for LLVM Support so generated
   config exposes POSIX file/path APIs such as `file_status::getSize` and
   `EnvPathSeparator`.

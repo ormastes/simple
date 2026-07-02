@@ -191,6 +191,15 @@ void *memrchr(const void *s, int c, size_t n) {
     return NULL;
 }
 
+int wmemcmp(const wchar_t *s1, const wchar_t *s2, size_t n) {
+    while (n--) {
+        if (*s1 != *s2) return *s1 < *s2 ? -1 : 1;
+        s1++;
+        s2++;
+    }
+    return 0;
+}
+
 /* ====================================================================
  * 6. strlcpy / strlcat — BSD string functions (used by LLVM)
  * ==================================================================== */

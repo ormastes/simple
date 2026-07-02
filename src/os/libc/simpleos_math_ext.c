@@ -274,6 +274,30 @@ double log10(double x) {
     return log(x) / LN10;
 }
 
+double logb(double x) {
+    double_bits db;
+    db.f = x < 0.0 ? -x : x;
+    uint64_t exp_bits = (db.u >> 52) & 0x7FF;
+    if (exp_bits == 0) {
+        if ((db.u & 0x000FFFFFFFFFFFFFULL) == 0) {
+            return -_make_double(0x7FF0000000000000ULL);
+        }
+        return -1022.0;
+    }
+    if (exp_bits == 0x7FF) return x * x;
+    return (double)((int)exp_bits - 1023);
+}
+
+double erf(double x) {
+    int neg = x < 0.0;
+    if (neg) x = -x;
+    double t = 1.0 / (1.0 + 0.3275911 * x);
+    double y = 1.0 - (((((1.061405429 * t - 1.453152027) * t)
+        + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t
+        * exp(-x * x);
+    return neg ? -y : y;
+}
+
 /* ====================================================================
  * 5. Power function
  * ==================================================================== */
@@ -329,6 +353,10 @@ double floor(double x) {
 
 double round(double x) {
     return (x >= 0.0) ? floor(x + 0.5) : ceil(x - 0.5);
+}
+
+double rint(double x) {
+    return round(x);
 }
 
 double trunc(double x) {
