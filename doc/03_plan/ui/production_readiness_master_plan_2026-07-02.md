@@ -249,7 +249,9 @@ is Xvfb-only by default; `check-gui-low-res-readability.shs` is offscreen
 | G2.2 glyph parity | PASS (differentPixels 2717→3; calibrated LCD compositing; caveat: Chrome-calibrated atlas, not an independent rasterizer) | `node tools/electron-shell/verify_famous_site_production_probe.js` (authoritative; see runner P1 bug) + probe/corpus specs | `test/09_baselines/famous_site_corpus/site_0_google/*` |
 | G2.3 browser low-res text | PASS | `scripts/check/check-browser-interaction.shs` + `test/03_system/gui/browser_interaction_spec.spl` | `build/browser-interaction/lowres_*.ppm` |
 | G2.4 scroll | PASS (marker shifts exactly 120px) | same check script/spec | `build/browser-interaction/scroll_offset*.ppm` |
-| G2.4 link-click/back-forward | GAP (no hit-test/navigation model: layout hit_test is a nil stub, no href handling, no history) | — | lane gap list in W4 result |
+| G2.4 link-click/back-forward | PASS (lockstep hit-test + history; click→back→forward pixel round-trip A/B pages) | same check script/spec (9/9) | `build/browser-interaction/nav_*.ppm` (4) |
+| G2.5 cross-app glyph consistency | HONEST-GAP gate (47/88 chars diverge, advance 6*scale vs 5*scale; unification blocked by exact-pixel baselines — see bug cross_app_glyph_rasterization_diverges) | `scripts/check/check-cross-app-glyph-consistency.shs` + `test/03_system/check/cross_app_glyph_consistency_spec.spl` (5/5) | `build/cross-app-glyph-consistency/*` |
+| G1.1 showcase Vulkan render | PASS via SIMPLE_GUI_BACKEND=vulkan (spec 6/6 w/ seed); live-window capture leg `unavailable_no_winit` (no rt_winit in current binaries — flips to pass when winit-linked binary deploys) | `scripts/check/check-gui-vulkan-window.shs` + `test/03_system/check/gui_vulkan_window_spec.spl` | `build/gui-window-evidence/*` |
 | G5.2 Android emulator capture | BLOCKED on host (no SDK); validator specs green | `test/03_system/check/tauri_android_render_log_validator_spec.spl` | — |
 
 ## Current state (audited 2026-07-02)
