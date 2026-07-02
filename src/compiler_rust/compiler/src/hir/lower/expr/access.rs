@@ -307,13 +307,27 @@ impl Lowerer {
                 }
 
                 if !has_known_method {
+                    // ROOT FIX (bug #62): when the field NAME is globally
+                    // ambiguous (defined in more than one struct), the
+                    // owner guess below is receiver-type-blind ("most
+                    // fields wins") and its field TYPE must not be
+                    // trusted. `scope.symbols` (Scope, Dict<text,SymbolId>)
+                    // was typed via HirModule.symbols: SymbolTable — the
+                    // 21-field winner — which then qualified the erased
+                    // dict call `scope.symbols.get(name)` as
+                    // `SymbolTable.get(SymbolId?)` in MIR method dispatch
+                    // and segfaulted the stage4 binary on a text key.
+                    // Keep the index heuristic (unchanged behaviour) but
+                    // degrade the expression type to ANY so method
+                    // dispatch stays bare and tag-dispatches at runtime.
+                    let ambiguous_field = self.is_ambiguous_global_field(field);
                     if let Some((field_index, field_ty, _count, _sname)) = self.resolve_global_field_info(field) {
                         return Ok(HirExpr {
                             kind: HirExprKind::FieldAccess {
                                 receiver: recv_hir,
                                 field_index,
                             },
-                            ty: field_ty,
+                            ty: if ambiguous_field { TypeId::ANY } else { field_ty },
                         });
                     }
                     let mut best: Option<(usize, TypeId, usize)> = None;
@@ -335,7 +349,7 @@ impl Lowerer {
                                 receiver: recv_hir,
                                 field_index,
                             },
-                            ty: field_ty,
+                            ty: if ambiguous_field { TypeId::ANY } else { field_ty },
                         });
                     }
                     if std::env::var("SIMPLE_DEBUG_FIELD_FAIL").is_ok() {
@@ -793,6 +807,53 @@ impl Lowerer {
                 },
                 ty: elem_ty,
             });
+        }
+
+        // ROOT FIX (bug #62 companion): `Dict<K, V>` erases to TypeId::ANY in
+        // resolve_type, so indexing a dict-typed FIELD lost the declared value
+        // type V — `val scope = self.scopes[id]` (scopes: Dict<i64, Scope>)
+        // came out as Any. Downstream, the receiver-type-blind global
+        // field-name heuristic then guessed the wrong owner for
+        // `scope.symbols` (both wrong field index AND wrong type), which
+        // mis-qualified erased dict method calls onto same-named user methods
+        // and segfaulted the stage4 binary. Recover V from the receiver's
+        // DECLARED field type: when the receiver is `base.field` with a named
+        // base struct, look up the field's AST type in the global struct defs
+        // and, when it is Dict<K, V>, resolve V as the element type.
+        let mut elem_ty = elem_ty;
+        if elem_ty == TypeId::ANY {
+            if let Expr::FieldAccess { field, .. } = receiver {
+                if let HirExprKind::FieldAccess {
+                    receiver: base_hir, ..
+                } = &recv_hir.kind
+                {
+                    let base_name = self
+                        .module
+                        .types
+                        .get_type_name(base_hir.ty)
+                        .map(|s| s.to_string());
+                    if let Some(base_name) = base_name {
+                        let dict_value_ast = self.global_struct_defs.as_ref().and_then(|defs| {
+                            defs.get(&base_name)?
+                                .iter()
+                                .find(|(fname, _)| fname == field)
+                                .and_then(|(_, fty)| match fty {
+                                    simple_parser::Type::Generic { name, args }
+                                        if name == "Dict" && args.len() == 2 =>
+                                    {
+                                        Some(args[1].clone())
+                                    }
+                                    _ => None,
+                                })
+                        });
+                        if let Some(value_ast) = dict_value_ast {
+                            if let Ok(vty) = self.resolve_type(&value_ast) {
+                                elem_ty = vty;
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         Ok(HirExpr {
