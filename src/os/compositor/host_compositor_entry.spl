@@ -6,6 +6,8 @@ use os.compositor.hosted_backend_cocoa.{HostedCocoaBackend}
 use os.compositor.hosted_backend_win32.{HostedWin32Backend}
 use os.compositor.simple_web_window_renderer.{render_simple_web_app_content}
 use common.ui.wm_chrome_theme.{wm_chrome_theme}
+use common.color.convert.{int_to_hex}
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{simple_web_layout_render_html_pixels_engine2d, engine2d_fast_metal_available}
 use os.compositor.wm_action_applier.{WmLifecycleWindowState, WmPointerInteractionState, apply_wm_action_to_lifecycle_windows, wm_action_from_bridge_request, wm_destroy_action, wm_focus_action, wm_lifecycle_hit_taskbar, wm_lifecycle_left_button, wm_lifecycle_pointer_move, wm_taskbar_dock_width, wm_taskbar_item_width, wm_taskbar_item_x}
 use os.services.wm.wm_service.{WmService}
 use os.services.wm.wm_world.{WmAction}
@@ -14,6 +16,20 @@ use os.userlib.ipc_protocol.{COMP_MINIMIZE, COMP_RESTORE}
 extern fn rt_sleep_ms(ms: i64)
 
 val HOST_WM_IDLE_SLEEP_MS: i32 = 16
+
+# When true, render_frame() always uses the direct-draw chrome path and never
+# the fast CSS/GUI-web lane, regardless of Metal availability. Lets callers pin
+# the historical byte-identical direct chrome contract (e.g. deterministic unit
+# tests on Metal-capable hosts, or a config that disables GPU chrome).
+var _host_chrome_force_direct: bool = false
+
+fn host_wm_force_direct_chrome(enabled: bool):
+    """Pin (or release) the direct-draw chrome path for render_frame()."""
+    _host_chrome_force_direct = enabled
+
+fn host_wm_chrome_force_direct() -> bool:
+    """True when render_frame() is pinned to the direct-draw chrome path."""
+    _host_chrome_force_direct
 
 enum HostBackendKind:
     Browser
@@ -145,6 +161,11 @@ class HostCompositor:
     resize_start_h: i32
     pointer_x: i32
     pointer_y: i32
+    # Cache for the CSS/GUI-web chrome render lane (see render_frame). The key
+    # is host_chrome_scene_fingerprint(); the pixels are the last full-scene
+    # chrome rasterization. Empty key means "no cached chrome yet".
+    _chrome_cache_key: text
+    _chrome_cache_pixels: [u32]
 
     static fn new(backend: CompositorBackend, size: Size) -> HostCompositor:
         HostCompositor(
@@ -165,7 +186,9 @@ class HostCompositor:
             resize_start_w: 0,
             resize_start_h: 0,
             pointer_x: 0,
-            pointer_y: 0
+            pointer_y: 0,
+            _chrome_cache_key: "",
+            _chrome_cache_pixels: []
         )
 
     me resize(width: i32, height: i32):
@@ -174,6 +197,53 @@ class HostCompositor:
 
     me render_frame():
         val theme = wm_chrome_theme()
+        val total = if self.width > 0 and self.height > 0: self.width * self.height else: 0
+        # Fast CSS/GUI-web chrome lane: express the WM chrome (desktop backdrop,
+        # window bodies, titlebars, close buttons, titles) as ONE HTML/CSS
+        # document whose element colors come from wm_chrome_theme(), rasterize it
+        # on the native Engine2D fast path (Metal -> one-shot readback), blit the
+        # chrome pixels, then compose each window's HTML content on top exactly as
+        # before. This routes the chrome through the same web render lane as the
+        # window content — the "single HTML/CSS representation for WM UI".
+        #
+        # Caching contract: the CSS chrome pixels are re-rendered ONLY when the
+        # chrome-relevant scene state changes — window list / geometry / focus /
+        # minimized / desktop size / theme colors, hashed by
+        # host_chrome_scene_fingerprint(). On an unchanged fingerprint the cached
+        # buffer is reused (a cheap full-frame blit), so a settled desktop costs
+        # one blit per present instead of a full ~1.4s CSS render. Window content
+        # is NOT part of the fingerprint (it is redrawn every frame regardless),
+        # so content updates never invalidate the chrome cache.
+        #
+        # Incremental-frame policy: during an active drag/resize every frame's
+        # geometry differs, which would force a full ~1.4s CSS re-render per frame
+        # (unusably slow for a 60fps interaction). While self.dragging /
+        # self.resizing is set we therefore skip the fast lane and direct-draw the
+        # chrome; the CSS chrome re-renders once on the next settled frame.
+        if total > 0 and not _host_chrome_force_direct and not self.dragging and not self.resizing and engine2d_fast_metal_available():
+            val fp = host_chrome_scene_fingerprint(self.windows, self.width, self.height)
+            if fp != self._chrome_cache_key or self._chrome_cache_pixels.len() != total:
+                val html = host_chrome_scene_html(self.windows, self.width, self.height)
+                val chrome_px = simple_web_layout_render_html_pixels_engine2d(html, self.width, self.height, "metal")
+                if chrome_px.len() == total:
+                    self._chrome_cache_pixels = chrome_px
+                    self._chrome_cache_key = fp
+            if self._chrome_cache_key == fp and self._chrome_cache_pixels.len() == total:
+                self.backend.blit_pixels(0, 0, self.width, self.height, self._chrome_cache_pixels)
+                var fi = 0
+                while fi < self.windows.len():
+                    val fwin = self.windows[fi]
+                    if not fwin.minimized:
+                        val fcx = fwin.x + 4
+                        val fcy = fwin.y + 28
+                        val fcw = fwin.w - 8
+                        val fch = fwin.h - 32
+                        render_simple_web_app_content(self.backend, fwin.title, fcx, fcy, fcw, fch, fwin.content)
+                    fi = fi + 1
+                self.backend.present()
+                return
+        # Fallback (Metal unavailable, or active drag/resize): direct-draw the
+        # chrome. BYTE-IDENTICAL to the historical host compositor chrome contract.
         self.backend.clear(theme.compositor_bg)
         var i = 0
         while i < self.windows.len():
@@ -529,3 +599,55 @@ fn host_taskbar_dock_width(screen_width: i32, count: i32) -> i32:
 
 fn host_taskbar_item_x(screen_width: i32, count: i32, index: i32) -> i32:
     wm_taskbar_item_x(screen_width, count, index)
+
+# Convert an opaque ARGB u32 (as stored in WmChromeColors) to a CSS "#RRGGBB"
+# hex string. The alpha byte is dropped: the host chrome colors are all opaque
+# (0xFF..) and the CSS engine rasterizes #RRGGBB back to the same 0xFF ARGB u32,
+# so the fast-lane chrome pixels are byte-identical to the direct-draw colors.
+fn _argb_to_css_hex(color: u32) -> text:
+    val r = ((color / 65536u32) % 256u32).to_i64()
+    val g = ((color / 256u32) % 256u32).to_i64()
+    val b = (color % 256u32).to_i64()
+    "#" + int_to_hex(r) + int_to_hex(g) + int_to_hex(b)
+
+# Build the host WM chrome as a single HTML/CSS document. Element geometry and
+# colors mirror the direct-draw chrome in render_frame() exactly (desktop
+# backdrop = compositor_bg, window body = host_window_body, titlebar = accent,
+# close button = close_button, title/close glyph text = text_primary), so the
+# CSS-rasterized chrome is visually identical to the historical direct output
+# for the default theme. Colors flow from wm_chrome_theme() — the single source
+# of truth — so an installed theme reskins the chrome automatically.
+fn host_chrome_scene_html(windows: [HostedWindow], width: i32, height: i32) -> text:
+    val theme = wm_chrome_theme()
+    val bg_hex = _argb_to_css_hex(theme.compositor_bg)
+    val body_hex = _argb_to_css_hex(theme.host_window_body)
+    val accent_hex = _argb_to_css_hex(theme.accent)
+    val close_hex = _argb_to_css_hex(theme.close_button)
+    val text_hex = _argb_to_css_hex(theme.text_primary)
+    var body = ""
+    for win in windows:
+        if not win.minimized:
+            val close_x = win.x + win.w - 24
+            val title_x = win.x + 8
+            val title_y = win.y + 4
+            val close_text_x = win.x + win.w - 17
+            val title_w = if win.w - 40 > 0: win.w - 40 else: 0
+            body = body + "<div style='position:absolute;left:{win.x}px;top:{win.y}px;width:{win.w}px;height:{win.h}px;background:{body_hex}'></div>"
+            body = body + "<div style='position:absolute;left:{win.x}px;top:{win.y}px;width:{win.w}px;height:24px;background:{accent_hex}'></div>"
+            body = body + "<div style='position:absolute;left:{title_x}px;top:{title_y}px;width:{title_w}px;height:16px;color:{text_hex};font:12px monospace;overflow:hidden;white-space:nowrap'>{win.title}</div>"
+            body = body + "<div style='position:absolute;left:{close_x}px;top:{win.y}px;width:24px;height:24px;background:{close_hex}'></div>"
+            body = body + "<div style='position:absolute;left:{close_text_x}px;top:{title_y}px;width:16px;height:16px;color:{text_hex};font:12px monospace'>X</div>"
+    "<!DOCTYPE html><html><head><style>body{{margin:0;width:{width}px;height:{height}px;background:{bg_hex}}}</style></head><body>" + body + "</body></html>"
+
+# Fingerprint the chrome-relevant scene state so render_frame() can reuse the
+# cached CSS chrome pixels on unchanged scenes. Deliberately excludes window
+# content (redrawn every frame) but includes size, theme colors, and every
+# window's id/geometry/minimized/focused/title.
+fn host_chrome_scene_fingerprint(windows: [HostedWindow], width: i32, height: i32) -> text:
+    val theme = wm_chrome_theme()
+    var fp = "{width}x{height}|{theme.compositor_bg}|{theme.host_window_body}|{theme.accent}|{theme.close_button}|{theme.text_primary}#"
+    for win in windows:
+        val minf = if win.minimized: 1 else: 0
+        val focf = if win.focused: 1 else: 0
+        fp = fp + "{win.id}:{win.x},{win.y},{win.w},{win.h},{minf},{focf},{win.title};"
+    fp
