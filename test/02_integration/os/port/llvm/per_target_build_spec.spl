@@ -14,14 +14,44 @@ use std.spec
 
 val BUILD_SPL = "src/os/port/llvm/build.spl"
 val BUILD_SHS = "src/os/port/llvm/build.shs"
+val SYSROOT_SHS = "src/os/port/llvm/sysroot.shs"
 val RT_CMAKE  = "src/os/port/llvm/compiler_rt_cmake.cmake"
 val TOOLCHAIN_README = "src/os/port/llvm/patches/simpleos_toolchain_cpp/README.md"
+val RAW_OS_OSTREAM_PATCH = "src/os/port/llvm/patches/0005-llvm-support-raw-os-ostream-no-localization.patch.md"
+val PATH_MAIN_EXECUTABLE_PATCH = "src/os/port/llvm/patches/0006-llvm-support-simpleos-path-main-executable.patch.md"
+val ASSIGNMENT_TRACKING_PATCH = "src/os/port/llvm/patches/0007-llvm-codegen-assignment-tracking-no-sstream.patch.md"
+val SAMPLE_PROF_PATCH = "src/os/port/llvm/patches/0008-llvm-profiledata-sampleprof-no-sstream.patch.md"
+val INSTRUMENTATION_HEX_PATCH = "src/os/port/llvm/patches/0009-llvm-instrumentation-no-iostream-hex-formatting.patch.md"
+val MEMPROF_HEX_PATCH = "src/os/port/llvm/patches/0010-llvm-memprof-no-iostream-nodeid-formatting.patch.md"
+val IMPORT_STATS_PATCH = "src/os/port/llvm/patches/0011-llvm-analysis-import-stats-no-iostream-precision.patch.md"
+val LLVM_TOOLCHAIN = "src/os/toolchain/llvm/simpleos_cross_toolchain.cmake"
+val CTYPE_H = "src/os/libc/include/ctype.h"
+val INTTYPES_H = "src/os/libc/include/inttypes.h"
+val MBSTATE_H = "src/os/libc/include/bits/types/mbstate_t.h"
+val SYSEXITS_H = "src/os/libc/include/sysexits.h"
+val PTHREAD_H = "src/os/libc/include/pthread.h"
+val WCHAR_H = "src/os/libc/include/wchar.h"
+val SCHED_H = "src/os/libc/include/sched.h"
+val UNISTD_H = "src/os/libc/include/unistd.h"
+val SYS_RESOURCE_H = "src/os/libc/include/sys/resource.h"
+val SYS_TIME_H = "src/os/libc/include/sys/time.h"
+val PWD_H = "src/os/libc/include/pwd.h"
+val SYS_SOCKET_H = "src/os/libc/include/sys/socket.h"
+val SYS_UN_H = "src/os/libc/include/sys/un.h"
+val SYS_FILE_H = "src/os/libc/include/sys/file.h"
+val SYS_STATVFS_H = "src/os/libc/include/sys/statvfs.h"
 
 fn build_spl_src() -> text:
     process.run("cat", [BUILD_SPL]).stdout
 
 fn build_shs_src() -> text:
     process.run("cat", [BUILD_SHS]).stdout
+
+fn sysroot_shs_src() -> text:
+    process.run("cat", [SYSROOT_SHS]).stdout
+
+fn llvm_toolchain_src() -> text:
+    process.run("cat", [LLVM_TOOLCHAIN]).stdout
 
 fn rt_cmake_src() -> text:
     process.run("cat", [RT_CMAKE]).stdout
@@ -103,6 +133,10 @@ describe "SimpleOS LLVM per-target build (A4/A5)":
         check(src.contains("SIMPLEOS_TARGET_TRIPLE"))
         check(src.contains("SIMPLE_TARGET"))
 
+    it "build.spl uses std.process run for staged shell calls":
+        val src = build_spl_src()
+        check(src.contains("process.run(\"sh\", [\"src/os/port/llvm/build.shs\", stage])"))
+
     it "build.shs uses per-triple CROSS_DIR / RT_DIR":
         val src = build_shs_src()
         check(src.contains("CROSS_DIR="))
@@ -112,6 +146,83 @@ describe "SimpleOS LLVM per-target build (A4/A5)":
         val src = build_shs_src()
         check(src.contains("compiler-rt)"))
         check(src.contains("stage3_compiler_rt"))
+
+    it "build.shs maps armv7 to LLVM ARM":
+        val src = build_shs_src()
+        check(src.contains("armv7-*)"))
+        check(src.contains("LLVM_ARCH=\"ARM\""))
+
+    it "build.shs preflights SimpleOS C++ standard headers":
+        val src = build_shs_src()
+        check(src.contains("check_cxx_runtime_headers"))
+        check(src.contains("#include <iosfwd>"))
+        check(src.contains("SimpleOS C++ standard headers are not available"))
+
+    it "sysroot.shs stages libc++ headers":
+        val src = sysroot_shs_src()
+        check(src.contains("libcxx/include"))
+        check(src.contains("include/c++/v1"))
+        check(src.contains("__config_site"))
+        check(src.contains("__assertion_handler"))
+        check(src.contains("_LIBCPP_HAS_THREADS 1"))
+        check(src.contains("_LIBCPP_HAS_THREAD_API_PTHREAD 1"))
+        check(src.contains("_LIBCPP_HAS_RANDOM_DEVICE 1"))
+        check(src.contains("_LIBCPP_HAS_LOCALIZATION 0"))
+        check(src.contains("_LIBCPP_HAS_WIDE_CHARACTERS 1"))
+
+    it "LLVM toolchain searches libc++ before C headers":
+        val src = llvm_toolchain_src()
+        check(src.contains("include/c++/v1"))
+        check(src.contains("-isystem"))
+
+    it "LLVM toolchain advertises Unix-style support for SimpleOS":
+        val src = llvm_toolchain_src()
+        check(src.contains("set(CMAKE_SYSTEM_NAME Linux)"))
+        check(src.contains("target triple and sysroot as SimpleOS"))
+        check(src.contains("Unix-style Support library"))
+        check(src.contains("HAVE_GETPAGESIZE 1"))
+        check(src.contains("HAVE_SYSCONF 1"))
+        check(src.contains("HAVE_GETRUSAGE 1"))
+
+    it "SimpleOS libc has C++ port support headers":
+        check(regular_file_exists(CTYPE_H))
+        check(regular_file_exists(INTTYPES_H))
+        check(regular_file_exists(MBSTATE_H))
+        check(regular_file_exists(SYSEXITS_H))
+        check(regular_file_exists(SCHED_H))
+        check(regular_file_exists(SYS_RESOURCE_H))
+        check(regular_file_exists(SYS_TIME_H))
+        check(regular_file_exists(PWD_H))
+        check(regular_file_exists(SYS_SOCKET_H))
+        check(regular_file_exists(SYS_UN_H))
+        check(regular_file_exists(SYS_FILE_H))
+        check(regular_file_exists(SYS_STATVFS_H))
+
+    it "SimpleOS wchar header exposes libc++ wide support declarations":
+        val src = process.run("cat", [WCHAR_H]).stdout
+        check(src.contains("#include <stdio.h>"))
+        check(src.contains("#include <time.h>"))
+        check(src.contains("wcschr"))
+        check(src.contains("wmemchr"))
+
+    it "SimpleOS pthread header exposes rwlocks for libc++":
+        val src = process.run("cat", [PTHREAD_H]).stdout
+        check(src.contains("pthread_rwlock_t"))
+        check(src.contains("pthread_rwlock_rdlock"))
+        check(src.contains("pthread_rwlock_wrlock"))
+        check(src.contains("PTHREAD_MUTEX_RECURSIVE"))
+        check(src.contains("pthread_mutexattr_settype"))
+        check(src.contains("pthread_cond_timedwait"))
+
+    it "SimpleOS libc exposes next LLVM Support C/POSIX declarations":
+        val ctype = process.run("cat", [CTYPE_H]).stdout
+        val unistd = process.run("cat", [UNISTD_H]).stdout
+        check(ctype.contains("isxdigit"))
+        check(unistd.contains("gethostname"))
+        check(unistd.contains("getsid"))
+        check(unistd.contains("alarm"))
+        check(unistd.contains("getpagesize"))
+        check(unistd.contains("_SC_PAGE_SIZE"))
 
     it "build.shs stages builtins into resource dir":
         val src = build_shs_src()
@@ -137,3 +248,39 @@ describe "SimpleOS LLVM per-target build (A4/A5)":
 
     it "SimpleOS ToolChain README exists":
         check(regular_file_exists(TOOLCHAIN_README))
+
+    it "records raw_os_ostream no-localization LLVM Support patch":
+        val src = process.run("cat", [RAW_OS_OSTREAM_PATCH]).stdout
+        check(src.contains("_LIBCPP_HAS_LOCALIZATION"))
+        check(src.contains("raw_os_ostream"))
+
+    it "records SimpleOS LLVM Support Path patch":
+        val src = process.run("cat", [PATH_MAIN_EXECUTABLE_PATCH]).stdout
+        check(src.contains("__simpleos__"))
+        check(src.contains("GetMainExecutable"))
+
+    it "records no-sstream AssignmentTrackingAnalysis patch":
+        val src = process.run("cat", [ASSIGNMENT_TRACKING_PATCH]).stdout
+        check(src.contains("raw_string_ostream"))
+        check(src.contains("AssignmentTrackingAnalysis.cpp"))
+
+    it "records no-sstream SampleProf patch":
+        val src = process.run("cat", [SAMPLE_PROF_PATCH]).stdout
+        check(src.contains("raw_string_ostream"))
+        check(src.contains("SampleProf.h"))
+
+    it "records no-iostream instrumentation hex formatting patch":
+        val src = process.run("cat", [INSTRUMENTATION_HEX_PATCH]).stdout
+        check(src.contains("utohexstr"))
+        check(src.contains("InstrOrderFile.cpp"))
+        check(src.contains("AddressSanitizer.cpp"))
+
+    it "records no-iostream MemProf node id formatting patch":
+        val src = process.run("cat", [MEMPROF_HEX_PATCH]).stdout
+        check(src.contains("Twine::utohexstr"))
+        check(src.contains("MemProfContextDisambiguation.cpp"))
+
+    it "records no-iostream imported function stats formatting patch":
+        val src = process.run("cat", [IMPORT_STATS_PATCH]).stdout
+        check(src.contains("format(\"%.4g\""))
+        check(src.contains("ImportedFunctionsInliningStatistics.cpp"))

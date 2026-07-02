@@ -1,4 +1,4 @@
-# Engine2D CPU SIMD — genuine NEON on aarch64
+# Engine2D CPU SIMD — genuine AVX2/NEON row kernels
 
 The CPU ("software") engine2d backend's hot pixel-row kernels are backed by
 real SIMD instructions, not scalar loops that merely *report* `has_neon`. On
@@ -48,7 +48,11 @@ scalar-pretending-to-be-NEON false-greens:
 
 The gate (`scripts/check/check-cpu-simd-engine2d-evidence.shs`) reports
 `native_simd_executed`, `native_simd_bit_exact`, and `native_simd_hits`.
-Verified result on Apple aarch64: `executed=true bit_exact=true hits=2`.
+Current Linux x86_64 evidence:
+`doc/09_report/cpu_simd_engine2d_evidence_current_2026-07-02.md` reports
+`feature=avx2`, `executed=true`, `bit_exact=true`, `hits=2`, and zero mismatch
+counts for fill, copy, alpha, scroll, and the 192-pixel diagram. Prior Apple
+aarch64 evidence remains in `doc/09_report/cpu_simd_engine2d_evidence_2026-06-09.md`.
 
 ## Interpreter vs AOT
 
@@ -83,7 +87,7 @@ provides.
   `(sa,s,d)` blend combos). This is the only gate that exercises the **C** path
   directly; the others run in the interpreter (Rust seed shim).
 - `scripts/check/check-cpu-simd-engine2d-evidence.shs` — interpreter evidence
-  (NEON executed + bit-exact). Its skip-guard checks the
+  (AVX2/NEON executed + bit-exact on capable hosts). Its skip-guard checks the
   `engine2d_simd_fill_row_u32_api` facade so a binary without the new externs
   skips cleanly rather than crashing.
 

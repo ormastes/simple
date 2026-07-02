@@ -53,6 +53,7 @@ esac
 case "$TRIPLE" in
     x86_64-*)   LLVM_ARCH="X86" ;;
     aarch64-*)  LLVM_ARCH="AArch64" ;;
+    armv7-*)    LLVM_ARCH="ARM" ;;
     riscv64*)   LLVM_ARCH="RISCV" ;;
     riscv32*)   LLVM_ARCH="RISCV" ;;
     *)
@@ -92,6 +93,24 @@ ensure_libc() {
     fi
 }
 
+check_cxx_runtime_headers() {
+    mkdir -p "$BUILD_DIR"
+    probe="$BUILD_DIR/.cxx-runtime-check-$TRIPLE.cpp"
+    probe_obj="$BUILD_DIR/.cxx-runtime-check-$TRIPLE.o"
+    probe_err="$BUILD_DIR/.cxx-runtime-check-$TRIPLE.err"
+    printf '#include <iosfwd>\nint main() { return 0; }\n' > "$probe"
+    if ! clang++ --target="$TRIPLE" --sysroot="$SYSROOT" \
+        -ffreestanding -nostdlib -fno-exceptions -fno-rtti \
+        -isystem "$SYSROOT/include/c++/v1" -isystem "$SYSROOT/include" \
+        -std=c++17 -c "$probe" -o "$probe_obj" \
+        > /dev/null 2>"$probe_err"; then
+        echo "[llvm] ERROR: SimpleOS C++ standard headers are not available for $TRIPLE"
+        echo "[llvm] LLVM/Clang is C++; stage 'cross' needs a SimpleOS libc++/libstdc++ header/runtime plan before it can configure."
+        cat "$probe_err"
+        exit 1
+    fi
+}
+
 # Stage 1: Build host LLVM tools (tblgen, etc.)
 # These run on the host during cross-compilation
 stage1_host_tools() {
@@ -117,10 +136,13 @@ stage2_cross_llvm() {
     echo "[llvm] Stage 2: Cross-compiling LLVM for SimpleOS target $TRIPLE..."
 
     # Ensure sysroot exists before cross-compile
-    if [ ! -d "$SYSROOT/lib" ]; then
+    if [ ! -d "$SYSROOT/lib" ] \
+        || [ ! -f "$SYSROOT/include/c++/v1/iosfwd" ] \
+        || [ ! -f "$SYSROOT/include/sys/statvfs.h" ]; then
         echo "[llvm] Building sysroot first..."
         sh "$SCRIPT_DIR/sysroot.shs"
     fi
+    check_cxx_runtime_headers
 
     # Verify host tools are available
     if [ ! -f "$BUILD_DIR/host-tools/bin/llvm-tblgen" ]; then

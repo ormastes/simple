@@ -17,6 +17,8 @@
 
 #define MAP_FAILED ((void *)-1)
 
+#define MADV_DONTNEED 4
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -24,6 +26,7 @@ extern "C" {
 void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset);
 int munmap(void *addr, size_t length);
 int mprotect(void *addr, size_t length, int prot);
+int madvise(void *addr, size_t length, int advice);
 
 #ifdef __cplusplus
 }

@@ -3,7 +3,7 @@
 This guide records host setup for the GUI/Web/2D Vulkan comparison lane. Use it
 with `scripts/setup/setup-gui-web-2d-vulkan-env.shs`.
 
-## Current 2026-06-28 Completion Status
+## Current 2026-07-02 Completion Status
 
 Older Linux rows in this guide are historical setup and diagnostic evidence.
 They do not prove current final completion. Final Linux completion requires a
@@ -11,6 +11,11 @@ fresh aggregate run with source-aligned evidence, current Chrome/Electron/Simple
 artifacts, and real RenderDoc `.rdc` files with `RDOC` magic for every required
 RenderDoc gate. Browser backing, direct ARGB comparison, or retained 4K/8K
 performance rows are supporting evidence only until the `.rdc` gates pass.
+The current retained aggregate is
+`doc/09_report/linux_vulkan_render_log_compare_current_2026-07-02.md`: Simple
+Vulkan, browser backing, pairwise ARGB diff, and Simple RenderDoc pass, but
+`renderdoc-chrome-rdc,renderdoc-electron-rdc` remain blocked by Chromium GPU
+process exit code `139` under RenderDoc and missing browser `.rdc` artifacts.
 
 ## Windows Status
 

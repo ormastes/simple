@@ -45,6 +45,10 @@ typedef struct {
     unsigned char __data[48];
 } pthread_cond_t;
 
+typedef struct {
+    unsigned char __data[56];
+} pthread_rwlock_t;
+
 typedef unsigned int pthread_key_t;
 
 typedef int pthread_once_t;
@@ -60,6 +64,10 @@ typedef struct {
 typedef struct {
     unsigned char __data[8];
 } pthread_condattr_t;
+
+typedef struct {
+    unsigned char __data[8];
+} pthread_rwlockattr_t;
 
 /* Signal set — 64-bit bitmask */
 typedef struct {

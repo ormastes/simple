@@ -44,6 +44,7 @@ long long strtoll(const char *nptr, char **endptr, int base);
 unsigned long long strtoull(const char *nptr, char **endptr, int base);
 double    strtod(const char *nptr, char **endptr);
 float     strtof(const char *nptr, char **endptr);
+long double strtold(const char *nptr, char **endptr);
 
 /* Environment */
 char *getenv(const char *name);

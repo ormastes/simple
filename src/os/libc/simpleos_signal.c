@@ -118,3 +118,8 @@ int kill(pid_t pid, int sig) {
 int raise(int sig) {
     return kill(getpid(), sig);
 }
+
+char *strsignal(int sig) {
+    (void)sig;
+    return (char *)"Signal";
+}

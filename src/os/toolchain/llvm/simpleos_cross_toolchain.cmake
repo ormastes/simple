@@ -32,7 +32,10 @@ else()
     message(FATAL_ERROR "Unsupported SIMPLEOS_TARGET_TRIPLE: ${SIMPLEOS_TARGET_TRIPLE}")
 endif()
 
-set(CMAKE_SYSTEM_NAME Generic)
+# LLVM gates POSIX file/path support on CMake's UNIX platform model. Keep the
+# target triple and sysroot as SimpleOS, but use the Linux model so LLVM selects
+# its Unix-style Support library declarations and implementations.
+set(CMAKE_SYSTEM_NAME Linux)
 
 # Use host clang for cross-compilation
 set(CMAKE_C_COMPILER clang)
@@ -50,8 +53,14 @@ endif()
 set(CMAKE_SYSROOT "${SIMPLEOS_SYSROOT}")
 
 # Target flags
-set(CMAKE_C_FLAGS_INIT   "--target=${SIMPLEOS_TARGET_TRIPLE} --sysroot=${SIMPLEOS_SYSROOT} -ffreestanding -nostdlib -fno-exceptions -fno-rtti -I${SIMPLEOS_SYSROOT}/include")
-set(CMAKE_CXX_FLAGS_INIT "--target=${SIMPLEOS_TARGET_TRIPLE} --sysroot=${SIMPLEOS_SYSROOT} -ffreestanding -nostdlib -fno-exceptions -fno-rtti -I${SIMPLEOS_SYSROOT}/include")
+set(CMAKE_C_FLAGS_INIT   "--target=${SIMPLEOS_TARGET_TRIPLE} --sysroot=${SIMPLEOS_SYSROOT} -D__simpleos__=1 -ffreestanding -nostdlib -fno-exceptions -fno-rtti -I${SIMPLEOS_SYSROOT}/include")
+set(CMAKE_CXX_FLAGS_INIT "--target=${SIMPLEOS_TARGET_TRIPLE} --sysroot=${SIMPLEOS_SYSROOT} -D__simpleos__=1 -ffreestanding -nostdlib -fno-exceptions -fno-rtti -isystem ${SIMPLEOS_SYSROOT}/include/c++/v1 -isystem ${SIMPLEOS_SYSROOT}/include")
+if(NOT CMAKE_C_FLAGS MATCHES "(^| )-D__simpleos__=1( |$)")
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -D__simpleos__=1" CACHE STRING "" FORCE)
+endif()
+if(NOT CMAKE_CXX_FLAGS MATCHES "(^| )-D__simpleos__=1( |$)")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -D__simpleos__=1" CACHE STRING "" FORCE)
+endif()
 
 # Linker flags — use lld, link against sysroot
 set(CMAKE_EXE_LINKER_FLAGS_INIT    "-fuse-ld=lld -L${SIMPLEOS_SYSROOT}/lib -nostdlib")
@@ -60,6 +69,13 @@ set(CMAKE_SHARED_LINKER_FLAGS_INIT "-fuse-ld=lld -L${SIMPLEOS_SYSROOT}/lib -nost
 # Don't try to compile test programs (they'll fail without full libc)
 set(CMAKE_C_COMPILER_WORKS TRUE)
 set(CMAKE_CXX_COMPILER_WORKS TRUE)
+
+# These symbols are provided by the SimpleOS sysroot, but CMake's freestanding
+# cross checks do not link normal test executables reliably enough to discover
+# them.
+set(HAVE_GETPAGESIZE 1 CACHE INTERNAL "")
+set(HAVE_SYSCONF 1 CACHE INTERNAL "")
+set(HAVE_GETRUSAGE 1 CACHE INTERNAL "")
 
 # Static linking only
 set(BUILD_SHARED_LIBS OFF)

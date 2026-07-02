@@ -19,6 +19,7 @@ extern "C" {
 #define S_IFCHR  0020000  /* character device */
 #define S_IFBLK  0060000  /* block device */
 #define S_IFIFO  0010000  /* FIFO (named pipe) */
+#define S_IFSOCK 0140000  /* socket */
 
 /* File type test macros */
 #define S_ISREG(m)  (((m) & S_IFMT) == S_IFREG)
@@ -27,6 +28,7 @@ extern "C" {
 #define S_ISCHR(m)  (((m) & S_IFMT) == S_IFCHR)
 #define S_ISBLK(m)  (((m) & S_IFMT) == S_IFBLK)
 #define S_ISFIFO(m) (((m) & S_IFMT) == S_IFIFO)
+#define S_ISSOCK(m) (((m) & S_IFMT) == S_IFSOCK)
 
 /* Permission bits */
 #define S_IRUSR  0400   /* owner read */
@@ -64,6 +66,8 @@ int fstat(int fd, struct stat *buf);
 int lstat(const char *path, struct stat *buf);
 int mkdir(const char *path, mode_t mode);
 int chmod(const char *path, mode_t mode);
+int fchmod(int fd, mode_t mode);
+mode_t umask(mode_t mask);
 
 #ifdef __cplusplus
 }

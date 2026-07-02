@@ -97,6 +97,40 @@ gid_t getgid(void)  { return 0; }
 uid_t geteuid(void) { return 0; }
 gid_t getegid(void) { return 0; }
 
+pid_t setsid(void) {
+    return getpid();
+}
+
+pid_t getsid(pid_t pid) {
+    (void)pid;
+    errno = ESRCH;
+    return -1;
+}
+
+int gethostname(char *name, size_t len) {
+    const char host[] = "simpleos";
+    if (!name || len == 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    strncpy(name, host, len);
+    name[len - 1] = '\0';
+    return 0;
+}
+
+int getpagesize(void) {
+    return 4096;
+}
+
+unsigned int alarm(unsigned int seconds) {
+    (void)seconds;
+    return 0;
+}
+
+void _exit(int status) {
+    exit(status);
+}
+
 /* ====================================================================
  * 3. Sleep
  * ==================================================================== */
@@ -117,9 +151,11 @@ int usleep(useconds_t usec) {
 
 long sysconf(int name) {
     switch (name) {
+    case _SC_ARG_MAX:          return _POSIX_ARG_MAX;
+    case _SC_GETPW_R_SIZE_MAX: return 1024;
     case _SC_PAGESIZE:         return 4096;
     case _SC_NPROCESSORS_CONF: return 1;
-    case 84:                   return 1;   /* _SC_NPROCESSORS_ONLN */
+    case _SC_NPROCESSORS_ONLN: return 1;
     default:
         errno = EINVAL;
         return -1;

@@ -236,36 +236,6 @@ pub(super) fn handle_command(
                 window_state.window.request_redraw();
             }
         }
-        RuntimeCommand::SetFullscreen {
-            window_id,
-            fullscreen,
-            response,
-        } => {
-            let result = if let Some(window_state) = state.windows.get(&window_id) {
-                // Window mutations must run on the event-loop/main thread (macOS).
-                if fullscreen {
-                    window_state
-                        .window
-                        .set_fullscreen(Some(Fullscreen::Borderless(None)));
-                } else {
-                    window_state.window.set_fullscreen(None);
-                }
-                // Report the (best-effort) size after the transition; on macOS the
-                // resize may still be settling, so the authoritative width/height is
-                // also refreshed from Present/Resized handling. Update the persisted
-                // fullscreen flag immediately so is_fullscreen() reflects the request.
-                let size = window_state.window.inner_size();
-                if let Some(runtime) = WINDOW_STATES.lock().get_mut(&window_id) {
-                    runtime.fullscreen = fullscreen;
-                    runtime.width = size.width.max(1);
-                    runtime.height = size.height.max(1);
-                }
-                Ok((size.width.max(1), size.height.max(1)))
-            } else {
-                Err(format!("invalid window handle: {window_id}"))
-            };
-            let _ = response.send(result);
-        }
         RuntimeCommand::Exit => {
             state.windows.clear();
             target.exit();

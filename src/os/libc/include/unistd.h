@@ -28,7 +28,13 @@ extern "C" {
 
 /* sysconf names */
 #define _SC_PAGESIZE         30
+#define _SC_PAGE_SIZE        _SC_PAGESIZE
+#define _SC_ARG_MAX          0
+#define _SC_GETPW_R_SIZE_MAX 70
 #define _SC_NPROCESSORS_CONF 83
+#define _SC_NPROCESSORS_ONLN 84
+
+#define _POSIX_ARG_MAX 4096
 
 /* File I/O */
 ssize_t read(int fd, void *buf, size_t count);
@@ -47,6 +53,9 @@ int  access(const char *path, int mode);
 int  unlink(const char *path);
 int  rmdir(const char *path);
 int  isatty(int fd);
+int  symlink(const char *target, const char *linkpath);
+int  link(const char *oldpath, const char *newpath);
+ssize_t readlink(const char *path, char *buf, size_t bufsiz);
 
 /* Directory */
 char *getcwd(char *buf, size_t size);
@@ -59,12 +68,19 @@ int   execv(const char *path, char *const argv[]);
 int   execvp(const char *file, char *const argv[]);
 pid_t getpid(void);
 pid_t getppid(void);
+pid_t setsid(void);
+pid_t getsid(pid_t pid);
+int   gethostname(char *name, size_t len);
+int   getpagesize(void);
+unsigned int alarm(unsigned int seconds);
+void  _exit(int status) __attribute__((noreturn));
 
 /* User / group */
 uid_t getuid(void);
 gid_t getgid(void);
 uid_t geteuid(void);
 gid_t getegid(void);
+int   fchown(int fd, uid_t owner, gid_t group);
 
 /* Sleep */
 unsigned int sleep(unsigned int seconds);

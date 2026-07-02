@@ -10,6 +10,7 @@ extern "C" {
 #endif
 
 #include <sys/types.h>
+#include <sys/resource.h>
 
 #define WNOHANG    1
 #define WUNTRACED  2
@@ -25,6 +26,7 @@ extern "C" {
 
 pid_t wait(int *wstatus);
 pid_t waitpid(pid_t pid, int *wstatus, int options);
+pid_t wait4(pid_t pid, int *wstatus, int options, struct rusage *usage);
 
 #ifdef __cplusplus
 }

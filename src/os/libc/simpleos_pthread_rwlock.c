@@ -3,8 +3,7 @@
  * exokernel. All operations return 0 (success); there is nothing to lock.
  */
 
-typedef struct { int _opaque; } pthread_rwlock_t;
-typedef int pthread_rwlockattr_t;
+#include "include/pthread.h"
 
 int pthread_rwlock_init(pthread_rwlock_t *rwlock, const pthread_rwlockattr_t *attr) {
     (void)rwlock; (void)attr;

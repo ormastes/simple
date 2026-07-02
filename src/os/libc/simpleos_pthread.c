@@ -84,6 +84,10 @@ int pthread_cond_destroy(pthread_cond_t *cond)   { (void)cond; return 0; }
 
 int pthread_mutexattr_init(pthread_mutexattr_t *attr)    { (void)attr; return 0; }
 int pthread_mutexattr_destroy(pthread_mutexattr_t *attr) { (void)attr; return 0; }
+int pthread_mutexattr_settype(pthread_mutexattr_t *attr, int type) {
+    (void)attr; (void)type;
+    return 0;
+}
 
 int pthread_condattr_init(pthread_condattr_t *attr)    { (void)attr; return 0; }
 int pthread_condattr_destroy(pthread_condattr_t *attr) { (void)attr; return 0; }

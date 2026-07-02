@@ -8,7 +8,16 @@
 use std.fs
 use std.process
 use std.text
-use std.cli
+use std.cli.cli_util.{get_cli_args}
+
+extern fn rt_env_get(key: text) -> text
+extern fn rt_env_set(key: text, value: text) -> bool
+
+fn env_get(key: text) -> text:
+    rt_env_get(key) ?? ""
+
+fn env_set(key: text, value: text) -> bool:
+    rt_env_set(key, value)
 
 val SUPPORTED_TARGETS = [
     "x86_64-simpleos",
@@ -196,7 +205,9 @@ fn main():
     print "=== SimpleOS LLVM Build Script ==="
     check_prerequisites()
 
-    val args = cli.args()
+    var args = get_cli_args()
+    if args.len() > 0 and args[0] == "--":
+        args = args.slice(1, args.len())
 
     # Dispatch to cross-build mode if requested
     if args.len() > 0 and args[0] == "--cross":
@@ -247,7 +258,7 @@ class CrossBuildConfig:
 impl CrossBuildConfig:
     static fn default() -> CrossBuildConfig:
         CrossBuildConfig(
-            llvm_src: "{process.env("HOME")}/llvm-project",
+            llvm_src: "{env_get("HOME")}/llvm-project",
             build_dir: "build/os/llvm",
             sysroot_dir: "build/os/sysroot",
             target_triple: "x86_64-unknown-simpleos"
@@ -259,6 +270,8 @@ fn cross_llvm_arch_for(triple: text) -> text:
         "X86"
     else if triple.starts_with("aarch64"):
         "AArch64"
+    else if triple.starts_with("armv7"):
+        "ARM"
     else if triple.starts_with("riscv"):
         "RISCV"
     else:
@@ -268,11 +281,17 @@ fn cross_selected_targets() -> [text]:
     """Resolve which triples to build.
 
     Honours the SIMPLE_TARGET env override: when set (non-empty) only that
-    triple is returned, otherwise the full CROSS_SUPPORTED_TARGETS list.
+    triple, or a comma-separated list of triples, is returned. Otherwise the
+    full CROSS_SUPPORTED_TARGETS list is used.
     """
-    val override = process.env("SIMPLE_TARGET")
+    val override = env_get("SIMPLE_TARGET") ?? ""
     if override != "":
-        return [override]
+        var selected: [text] = []
+        for target in override.split(","):
+            val trimmed = target.trim()
+            if trimmed != "":
+                selected.push(trimmed)
+        return selected
     CROSS_SUPPORTED_TARGETS
 
 fn cross_build_print_plan():
@@ -350,15 +369,9 @@ fn cross_build_stage_for_target(stage: text, triple: text) -> bool:
         return true
 
     print "[cross] Running stage '{stage}' for target {triple}"
-    val env = [
-        "SIMPLEOS_TARGET_TRIPLE={triple}",
-        "SIMPLE_TARGET={triple}",
-    ]
-    val result = process.run_with_env(
-        "sh",
-        ["src/os/port/llvm/build.shs", stage],
-        env,
-    )
+    env_set("SIMPLEOS_TARGET_TRIPLE", triple)
+    env_set("SIMPLE_TARGET", triple)
+    val result = process.run("sh", ["src/os/port/llvm/build.shs", stage])
     if result.exit_code != 0:
         print "[cross] Stage '{stage}' failed for {triple}:"
         print result.stderr
@@ -502,9 +515,9 @@ fn cross_build_main(args: [text]):
 
     # Propagate --target / --targets to SIMPLE_TARGET so cross_selected_targets() sees it.
     if target_triple != "":
-        process.set_env("SIMPLE_TARGET", target_triple)
+        env_set("SIMPLE_TARGET", target_triple)
     else if targets_csv != "":
-        process.set_env("SIMPLE_TARGET", targets_csv)
+        env_set("SIMPLE_TARGET", targets_csv)
 
     if show_status:
         print cross_build_status()
@@ -545,7 +558,7 @@ fn cross_build_main(args: [text]):
 
     # Full build (default or --all). --all simply clears any single-target filter.
     if want_all:
-        process.set_env("SIMPLE_TARGET", "")
+        env_set("SIMPLE_TARGET", "")
 
     var config = CrossBuildConfig.default()
     config = CrossBuildConfig(

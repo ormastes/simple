@@ -52,6 +52,9 @@ extern "C" {
 /* sigaction flags */
 #define SA_RESTART  0x10000000
 #define SA_SIGINFO  0x00000004
+#define SA_NODEFER  0x40000000
+#define SA_RESETHAND 0x80000000
+#define SA_ONSTACK  0x08000000
 
 struct sigaction {
     void (*sa_handler)(int);
@@ -81,6 +84,7 @@ int sigismember(const sigset_t *set, int signum);
 #define SIG_SETMASK 2
 
 int sigprocmask(int how, const sigset_t *set, sigset_t *oldset);
+char *strsignal(int sig);
 
 #ifdef __cplusplus
 }

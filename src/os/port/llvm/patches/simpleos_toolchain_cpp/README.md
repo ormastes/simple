@@ -38,8 +38,9 @@ Under `clang/lib/Driver/ToolChains/` on the `simpleos` branch:
    (`return ToolChain::RLT_CompilerRT;`).
 
 2. **`SimpleOS.cpp`** — implements the above. Key points:
-   - `AddClangSystemIncludeArgs`: prepend `<sysroot>/include` and
-     `<sysroot>/include/c++/v1` (when libc++ is later enabled).
+   - `AddClangSystemIncludeArgs`: prepend `<sysroot>/include/c++/v1` and
+     `<sysroot>/include`. `sysroot.shs` stages libc++ headers into that
+     `c++/v1` directory from `$LLVM_SRC/libcxx/include`.
    - `getCompilerRTPath`: return `<resource-dir>/lib/<triple>/`, which
      matches what A5 stages into
      `build/os/sysroot/lib/clang/<ver>/lib/<triple>/`.

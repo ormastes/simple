@@ -528,16 +528,15 @@ Current 2026-06-26 browser capture findings:
   `build/renderdoc/chrome-gpu-use-gl-angle/html/evidence.env`,
   `build/renderdoc/electron-gpu-use-gl-angle/electron-html/evidence.env`, and
   `doc/09_report/renderdoc_browser_use_gl_angle_2026-06-29.md`.
-- 2026-06-29 The Linux browser `.rdc` blocker is resolved for the GPU-child
-  autocapture route by forcing the Vulkan implicit layer search path to the
-  per-run Vulkan-only RenderDoc manifest. The previous runs set only
-  `VK_LAYER_PATH`, which let the Vulkan loader select the globally registered
-  `/opt/renderdoc` implicit layer. The helpers now export
-  `VK_IMPLICIT_LAYER_PATH` beside `VK_LAYER_PATH` and default GPU autocapture to
-  the loader-lock-free ELF RenderDoc API lookup. Fresh Chrome and Electron
-  evidence both emit valid `RDOC` artifacts, and the focused Linux render-log
-  aggregate reports `linux_vulkan_render_log_compare_renderdoc_gate_status=pass`.
-  Evidence:
+- 2026-06-29 Superseded by the 2026-07-02 Linux aggregate: this GPU-child
+  autocapture route appeared resolved after forcing the Vulkan implicit layer
+  search path to the per-run Vulkan-only RenderDoc manifest, but it is not
+  current completion proof. The current canonical Chrome and Electron browser
+  evidence files exist and both fail the `.rdc` artifact gate; keep
+  `renderdoc-chrome-rdc,renderdoc-electron-rdc` blocked until fresh aggregate
+  evidence reports `linux_vulkan_render_log_compare_renderdoc_gate_status=pass`
+  with `RDOC` magic for both browser artifacts. Historical evidence from the
+  superseded run:
   `build/renderdoc/chrome-implicit-layer-default-autocapture/html/evidence.env`,
   `build/renderdoc/electron-implicit-layer-default-autocapture/electron-html/evidence.env`,
   `build/renderdoc/chrome-implicit-layer-default-gate/evidence.env`,
@@ -692,3 +691,12 @@ Next Linux verification criteria:
 - Current top-level compare remains failed with only
   `renderdoc-chrome-rdc,renderdoc-electron-rdc` blocked. Evidence:
   `doc/09_report/linux_vulkan_render_log_compare_current_2026-07-02.md`.
+- Current blocking keys:
+  `linux_vulkan_render_log_compare_status=fail`,
+  `linux_vulkan_render_log_compare_blocked_gates=renderdoc-chrome-rdc,renderdoc-electron-rdc`,
+  `linux_vulkan_render_log_compare_renderdoc_chrome_reason=chromium-gpu-process-segv-in-renderdoc`,
+  `linux_vulkan_render_log_compare_renderdoc_chrome_gpu_process_exit_codes=139`,
+  `linux_vulkan_render_log_compare_renderdoc_chrome_gpu_process_exit_renderdoc_stack_status=fail`,
+  `linux_vulkan_render_log_compare_renderdoc_chrome_artifact_magic=missing`,
+  `linux_vulkan_render_log_compare_renderdoc_electron_gpu_process_exit_codes=139`,
+  and `linux_vulkan_render_log_compare_renderdoc_electron_artifact_magic=missing`.

@@ -15,6 +15,8 @@
 #include <locale.h>
 #include <wchar.h>
 #include <dlfcn.h>
+#include <sys/stat.h>
+#include <sys/mman.h>
 
 /* ========== stdio extras ========== */
 off_t ftello(FILE *f) { return (off_t)ftell(f); }
@@ -43,6 +45,55 @@ int putenv(char *string) {
     int rc = setenv(string, eq + 1, 1);
     *eq = '=';
     return rc;
+}
+
+int symlink(const char *target, const char *linkpath) {
+    (void)target;
+    (void)linkpath;
+    errno = ENOSYS;
+    return -1;
+}
+
+int link(const char *oldpath, const char *newpath) {
+    (void)oldpath;
+    (void)newpath;
+    errno = ENOSYS;
+    return -1;
+}
+
+ssize_t readlink(const char *path, char *buf, size_t bufsiz) {
+    (void)path;
+    (void)buf;
+    (void)bufsiz;
+    errno = ENOSYS;
+    return -1;
+}
+
+int fchmod(int fd, mode_t mode) {
+    (void)fd;
+    (void)mode;
+    errno = ENOSYS;
+    return -1;
+}
+
+int fchown(int fd, uid_t owner, gid_t group) {
+    (void)fd;
+    (void)owner;
+    (void)group;
+    errno = ENOSYS;
+    return -1;
+}
+
+mode_t umask(mode_t mask) {
+    (void)mask;
+    return 0;
+}
+
+int madvise(void *addr, size_t length, int advice) {
+    (void)addr;
+    (void)length;
+    (void)advice;
+    return 0;
 }
 
 /* ========== time: gmtime_r / localtime_r ========== */
@@ -83,6 +134,49 @@ size_t wcslen(const wchar_t *s) {
 int wcscmp(const wchar_t *a, const wchar_t *b) {
     while (*a && *a == *b) { a++; b++; }
     return (*a < *b) ? -1 : (*a > *b) ? 1 : 0;
+}
+
+wchar_t *wcschr(const wchar_t *s, wchar_t c) {
+    while (*s) {
+        if (*s == c) return (wchar_t *)s;
+        s++;
+    }
+    return c == 0 ? (wchar_t *)s : NULL;
+}
+
+wchar_t *wcsrchr(const wchar_t *s, wchar_t c) {
+    const wchar_t *last = NULL;
+    do {
+        if (*s == c) last = s;
+    } while (*s++);
+    return (wchar_t *)last;
+}
+
+wchar_t *wcspbrk(const wchar_t *s, const wchar_t *accept) {
+    for (; *s; s++) {
+        for (const wchar_t *a = accept; *a; a++) {
+            if (*s == *a) return (wchar_t *)s;
+        }
+    }
+    return NULL;
+}
+
+wchar_t *wcsstr(const wchar_t *haystack, const wchar_t *needle) {
+    if (!*needle) return (wchar_t *)haystack;
+    for (; *haystack; haystack++) {
+        const wchar_t *h = haystack;
+        const wchar_t *n = needle;
+        while (*h && *n && *h == *n) { h++; n++; }
+        if (!*n) return (wchar_t *)haystack;
+    }
+    return NULL;
+}
+
+wchar_t *wmemchr(const wchar_t *s, wchar_t c, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        if (s[i] == c) return (wchar_t *)&s[i];
+    }
+    return NULL;
 }
 
 size_t mbstowcs(wchar_t *dst, const char *src, size_t n) {

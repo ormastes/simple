@@ -8,6 +8,7 @@
 
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <sys/resource.h>
 #include <stdio.h>
 #include <errno.h>
 
@@ -19,6 +20,17 @@ pid_t waitpid(pid_t pid, int *wstatus, int options) {
 
 pid_t wait(int *wstatus) {
     return waitpid((pid_t)-1, wstatus, 0);
+}
+
+pid_t wait4(pid_t pid, int *wstatus, int options, struct rusage *usage) {
+    if (usage) {
+        usage->ru_utime.tv_sec = 0;
+        usage->ru_utime.tv_usec = 0;
+        usage->ru_stime.tv_sec = 0;
+        usage->ru_stime.tv_usec = 0;
+        usage->ru_maxrss = 0;
+    }
+    return waitpid(pid, wstatus, options);
 }
 
 FILE *popen(const char *command, const char *type) {
@@ -37,4 +49,16 @@ int system(const char *command) {
     if (!command) return 0;
     errno = ENOSYS;
     return -1;
+}
+
+int getrusage(int who, struct rusage *usage) {
+    (void)who;
+    if (usage) {
+        usage->ru_utime.tv_sec = 0;
+        usage->ru_utime.tv_usec = 0;
+        usage->ru_stime.tv_sec = 0;
+        usage->ru_stime.tv_usec = 0;
+        usage->ru_maxrss = 0;
+    }
+    return 0;
 }
