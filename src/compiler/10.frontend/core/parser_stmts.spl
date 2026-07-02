@@ -7,7 +7,7 @@
 use compiler.core.tokens.{tok_kind_name, keyword_lookup}
 use compiler.core.tokens.{TOK_INT_LIT, TOK_STRING_LIT}
 use compiler.core.tokens.{TOK_IDENT}
-use compiler.core.tokens.{TOK_KW_VAL, TOK_KW_VAR}
+use compiler.core.tokens.{TOK_KW_VAL, TOK_KW_VAR, TOK_KW_FN}
 use compiler.core.tokens.{TOK_KW_IF, TOK_KW_ELIF, TOK_KW_ELSE}
 use compiler.core.tokens.{TOK_KW_FOR, TOK_KW_WHILE, TOK_KW_IN}
 use compiler.core.tokens.{TOK_KW_MATCH, TOK_KW_CASE}
@@ -430,6 +430,30 @@ fn parse_statement() -> i64:
             args1.push(print_arg)
             val call1 = expr_call(callee1, args1, 0)
             return stmt_expr_stmt(call1, 0)
+
+    # G_named_nested_fn: `fn NAME(...): body` as a STATEMENT — a named nested
+    # fn declared inside another fn's body (only anonymous `fn(...): ...`
+    # lambdas parsed here before this fix). Distinguished from the anonymous
+    # lambda-as-expression-statement form by the token right after `fn`: an
+    # identifier (name) here vs. `(` there (handled by parse_fn_lambda_after_kw
+    # via parse_expr's primary-expr fallback below).
+    # Desugars to `val NAME = fn(...): body` (a local binding of the lambda).
+    # Seed-semantics note (verified with bin/simple run on the Rust seed):
+    # named nested fns work when called normally (interpreter resolves by
+    # name; JIT/HIR lowering falls back to the interpreter for this shape),
+    # but self-recursive calls fail seed-wide ("function X not found" — the
+    # seed never pre-binds the name before evaluating the body). This
+    # desugar matches that: it supports the non-recursive case only.
+    if par_kind_get() == TOK_KW_FN:
+        parser_advance()  # consume fn
+        if par_kind_get() == TOK_IDENT:
+            val nested_fn_name = par_text_get()
+            parser_advance()  # consume name
+            val nested_lambda = parse_fn_lambda_after_kw()
+            return stmt_val_decl(nested_fn_name, 0, nested_lambda, 0)
+        # fn(...): ... with no name — anonymous lambda expression statement.
+        val anon_lambda = parse_fn_lambda_after_kw()
+        return stmt_expr_stmt(anon_lambda, 0)
 
     # Expression statement (including assignment and walrus)
     # Note: Walrus operator handled inline during expression parsing
