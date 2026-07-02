@@ -9,7 +9,8 @@ use compiler.backend.backend.native.isel_riscv64.{isel_module_riscv64, rv_select
 use compiler.backend.native.{RV64_WORD_SIZE}
 use compiler.backend.native.mach_inst.{
     MachModule, MachBlock, MachReg, MachRegKind, Operand, OperandKind,
-    RV_OP_NOP, RV_OP_ROL, RV_OP_ROR, RV_OP_CLZ, RV_OP_CTZ, RV_OP_REV8,
+    RV_OP_ADD, RV_OP_ADDI, RV_OP_AND, RV_OP_AUIPC, RV_OP_BEQ, RV_OP_BNE, RV_OP_DIV, RV_OP_JAL, RV_OP_JALR, RV_OP_LI, RV_OP_MUL, RV_OP_NEG, RV_OP_NOP, RV_OP_NOT, RV_OP_OR, RV_OP_REM, RV_OP_ROL, RV_OP_ROR, RV_OP_CLZ, RV_OP_CTZ, RV_OP_REV8, RV_OP_SEQZ, RV_OP_SLL, RV_OP_SLT, RV_OP_SNEZ, RV_OP_SRA, RV_OP_SUB, RV_OP_XOR,
+    RV_OP_LD, RV_OP_SD, RV_OP_LW, RV_OP_SW, RV_OP_CALL, RV_OP_MV,
     reg_id, operand_get_reg
 }
 use compiler.common.diagnostics.span.{Span}
@@ -58,6 +59,843 @@ fn build_intrinsic_module(name: text, intrinsic_name: text, arity: i64) -> MirMo
     functions[SymbolId.new(0)] = func
     MirModule(name: name, functions: functions, statics: {}, constants: {}, types: {})
 
+fn build_memory_module(name: text) -> MirModule:
+    val i64_type = MirType(kind: MirTypeKind.I64)
+    val locals = [
+        MirLocal(id: LocalId(id: 0), name: Some("_return"), type_: i64_type, kind: LocalKind.Return),
+        MirLocal(id: LocalId(id: 1), name: Some("base"), type_: i64_type, kind: LocalKind.Temp),
+        MirLocal(id: LocalId(id: 2), name: Some("value"), type_: i64_type, kind: LocalKind.Temp),
+        MirLocal(id: LocalId(id: 3), name: Some("loaded"), type_: i64_type, kind: LocalKind.Temp)
+    ]
+    val entry = MirBlock(
+        id: BlockId.new(0),
+        label: Some("entry"),
+        instructions: [
+            MirInst(kind: MirInstKind.Const(LocalId(id: 1), MirConstValue.Int(4096), i64_type), span: nil),
+            MirInst(kind: MirInstKind.Const(LocalId(id: 2), MirConstValue.Int(7), i64_type), span: nil),
+            MirInst(kind: MirInstKind.Load(LocalId(id: 3), MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1)))), span: nil),
+            MirInst(kind: MirInstKind.Store(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))), MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2)))), span: nil),
+            MirInst(kind: MirInstKind.GetField(LocalId(id: 3), MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))), 2), span: nil),
+            MirInst(kind: MirInstKind.SetField(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))), 3, MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2)))), span: nil)
+        ],
+        terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 3)))))
+    )
+    val func = MirFunction(
+        symbol: SymbolId.new(0),
+        name: name,
+        signature: MirSignature(params: [], return_type: i64_type, is_variadic: false),
+        locals: locals,
+        blocks: [entry],
+        entry_block: BlockId.new(0),
+        span: Span(start: 0, end: 0, line: 1, col: 1),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {}
+    )
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[SymbolId.new(0)] = func
+    MirModule(name: name, functions: functions, statics: {}, constants: {}, types: {})
+
+fn build_gep_module(name: text) -> MirModule:
+    val i64_type = MirType(kind: MirTypeKind.I64)
+    val locals = [
+        MirLocal(id: LocalId(id: 0), name: Some("_return"), type_: i64_type, kind: LocalKind.Return),
+        MirLocal(id: LocalId(id: 1), name: Some("base"), type_: i64_type, kind: LocalKind.Temp),
+        MirLocal(id: LocalId(id: 2), name: Some("index"), type_: i64_type, kind: LocalKind.Temp),
+        MirLocal(id: LocalId(id: 3), name: Some("addr"), type_: i64_type, kind: LocalKind.Temp),
+        MirLocal(id: LocalId(id: 4), name: Some("same_addr"), type_: i64_type, kind: LocalKind.Temp)
+    ]
+    val entry = MirBlock(
+        id: BlockId.new(0),
+        label: Some("entry"),
+        instructions: [
+            MirInst(kind: MirInstKind.Const(LocalId(id: 1), MirConstValue.Int(4096), i64_type), span: nil),
+            MirInst(kind: MirInstKind.Const(LocalId(id: 2), MirConstValue.Int(3), i64_type), span: nil),
+            MirInst(kind: MirInstKind.GetElementPtr(LocalId(id: 3), MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))), [MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2)))]), span: nil),
+            MirInst(kind: MirInstKind.GetElementPtr(LocalId(id: 4), MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))), []), span: nil)
+        ],
+        terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 4)))))
+    )
+    val func = MirFunction(
+        symbol: SymbolId.new(0),
+        name: name,
+        signature: MirSignature(params: [], return_type: i64_type, is_variadic: false),
+        locals: locals,
+        blocks: [entry],
+        entry_block: BlockId.new(0),
+        span: Span(start: 0, end: 0, line: 1, col: 1),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {}
+    )
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[SymbolId.new(0)] = func
+    MirModule(name: name, functions: functions, statics: {}, constants: {}, types: {})
+
+fn build_call_module(name: text) -> MirModule:
+    val i64_type = MirType(kind: MirTypeKind.I64)
+    val func_type = MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: i64_type, is_variadic: false)))
+    var locals = [
+        MirLocal(id: LocalId(id: 0), name: Some("_return"), type_: i64_type, kind: LocalKind.Return),
+        MirLocal(id: LocalId(id: 11), name: Some("result"), type_: i64_type, kind: LocalKind.Temp)
+    ]
+    var instructions: [MirInst] = []
+    var args: [MirOperand] = []
+    for i in 0..10:
+        val id = i + 1
+        val local = LocalId(id: id)
+        locals.push(MirLocal(id: local, name: Some("arg{id}"), type_: i64_type, kind: LocalKind.Temp))
+        instructions.push(MirInst(kind: MirInstKind.Const(local, MirConstValue.Int(id), i64_type), span: nil))
+        args.push(MirOperand(kind: MirOperandKind.Copy(local)))
+    val func_op = MirOperand(kind: MirOperandKind.Const(MirConstValue.Str("callee"), func_type))
+    instructions.push(MirInst(kind: MirInstKind.Call(Some(LocalId(id: 11)), func_op, args), span: nil))
+    val entry = MirBlock(
+        id: BlockId.new(0),
+        label: Some("entry"),
+        instructions: instructions,
+        terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 11)))))
+    )
+    val func = MirFunction(
+        symbol: SymbolId.new(0),
+        name: name,
+        signature: MirSignature(params: [], return_type: i64_type, is_variadic: false),
+        locals: locals,
+        blocks: [entry],
+        entry_block: BlockId.new(0),
+        span: Span(start: 0, end: 0, line: 1, col: 1),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {}
+    )
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[SymbolId.new(0)] = func
+    MirModule(name: name, functions: functions, statics: {}, constants: {}, types: {})
+
+fn build_void_call_module(name: text) -> MirModule:
+    val i64_type = MirType(kind: MirTypeKind.I64)
+    val unit_type = MirType(kind: MirTypeKind.Unit)
+    val func_type = MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: i64_type, is_variadic: false)))
+    val locals = [
+        MirLocal(id: LocalId(id: 0), name: Some("_return"), type_: unit_type, kind: LocalKind.Return),
+        MirLocal(id: LocalId(id: 1), name: Some("arg1"), type_: i64_type, kind: LocalKind.Temp)
+    ]
+    val func_op = MirOperand(kind: MirOperandKind.Const(MirConstValue.Str("void_callee"), func_type))
+    val entry = MirBlock(
+        id: BlockId.new(0),
+        label: Some("entry"),
+        instructions: [
+            MirInst(kind: MirInstKind.Const(LocalId(id: 1), MirConstValue.Int(7), i64_type), span: nil),
+            MirInst(kind: MirInstKind.Call(nil, func_op, [MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1)))]), span: nil)
+        ],
+        terminator: MirTerminator.Ret(nil)
+    )
+    val func = MirFunction(
+        symbol: SymbolId.new(0),
+        name: name,
+        signature: MirSignature(params: [], return_type: unit_type, is_variadic: false),
+        locals: locals,
+        blocks: [entry],
+        entry_block: BlockId.new(0),
+        span: Span(start: 0, end: 0, line: 1, col: 1),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {}
+    )
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[SymbolId.new(0)] = func
+    MirModule(name: name, functions: functions, statics: {}, constants: {}, types: {})
+
+fn build_unsupported_call_target_module(name: text) -> MirModule:
+    val i64_type = MirType(kind: MirTypeKind.I64)
+    val unit_type = MirType(kind: MirTypeKind.Unit)
+    val func_type = MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: unit_type, is_variadic: false)))
+    val locals = [
+        MirLocal(id: LocalId(id: 0), name: Some("_return"), type_: unit_type, kind: LocalKind.Return),
+        MirLocal(id: LocalId(id: 1), name: Some("ignored_result"), type_: i64_type, kind: LocalKind.Temp)
+    ]
+    val func_op = MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(42), func_type))
+    val entry = MirBlock(
+        id: BlockId.new(0),
+        label: Some("entry"),
+        instructions: [MirInst(kind: MirInstKind.Call(Some(LocalId(id: 1)), func_op, []), span: nil)],
+        terminator: MirTerminator.Ret(nil)
+    )
+    val func = MirFunction(
+        symbol: SymbolId.new(0),
+        name: name,
+        signature: MirSignature(params: [], return_type: unit_type, is_variadic: false),
+        locals: locals,
+        blocks: [entry],
+        entry_block: BlockId.new(0),
+        span: Span(start: 0, end: 0, line: 1, col: 1),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {}
+    )
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[SymbolId.new(0)] = func
+    MirModule(name: name, functions: functions, statics: {}, constants: {}, types: {})
+
+fn build_indirect_call_module(name: text) -> MirModule:
+    val i64_type = MirType(kind: MirTypeKind.I64)
+    val func_type = MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: i64_type, is_variadic: false)))
+    val locals = [
+        MirLocal(id: LocalId(id: 0), name: Some("_return"), type_: i64_type, kind: LocalKind.Return),
+        MirLocal(id: LocalId(id: 1), name: Some("callee_ptr"), type_: func_type, kind: LocalKind.Temp),
+        MirLocal(id: LocalId(id: 2), name: Some("copy_result"), type_: i64_type, kind: LocalKind.Temp),
+        MirLocal(id: LocalId(id: 3), name: Some("move_result"), type_: i64_type, kind: LocalKind.Temp)
+    ]
+    val entry = MirBlock(
+        id: BlockId.new(0),
+        label: Some("entry"),
+        instructions: [
+            MirInst(kind: MirInstKind.Call(Some(LocalId(id: 2)), MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))), []), span: nil),
+            MirInst(kind: MirInstKind.Call(Some(LocalId(id: 3)), MirOperand(kind: MirOperandKind.Move(LocalId(id: 1))), []), span: nil)
+        ],
+        terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 3)))))
+    )
+    val func = MirFunction(
+        symbol: SymbolId.new(0),
+        name: name,
+        signature: MirSignature(params: [], return_type: i64_type, is_variadic: false),
+        locals: locals,
+        blocks: [entry],
+        entry_block: BlockId.new(0),
+        span: Span(start: 0, end: 0, line: 1, col: 1),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {}
+    )
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[SymbolId.new(0)] = func
+    MirModule(name: name, functions: functions, statics: {}, constants: {}, types: {})
+
+fn build_call_indirect_module(name: text) -> MirModule:
+    val i64_type = MirType(kind: MirTypeKind.I64)
+    val sig = MirSignature(params: [], return_type: i64_type, is_variadic: false)
+    val func_type = MirType(kind: MirTypeKind.FuncPtr(sig))
+    val locals = [
+        MirLocal(id: LocalId(id: 0), name: Some("_return"), type_: i64_type, kind: LocalKind.Return),
+        MirLocal(id: LocalId(id: 1), name: Some("callee_ptr"), type_: func_type, kind: LocalKind.Temp),
+        MirLocal(id: LocalId(id: 2), name: Some("result"), type_: i64_type, kind: LocalKind.Temp)
+    ]
+    val entry = MirBlock(
+        id: BlockId.new(0),
+        label: Some("entry"),
+        instructions: [
+            MirInst(kind: MirInstKind.CallIndirect(Some(LocalId(id: 2)), MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))), [], sig), span: nil)
+        ],
+        terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2)))))
+    )
+    val func = MirFunction(
+        symbol: SymbolId.new(0),
+        name: name,
+        signature: sig,
+        locals: locals,
+        blocks: [entry],
+        entry_block: BlockId.new(0),
+        span: Span(start: 0, end: 0, line: 1, col: 1),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {}
+    )
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[SymbolId.new(0)] = func
+    MirModule(name: name, functions: functions, statics: {}, constants: {}, types: {})
+
+fn build_alloc_cast_module(name: text) -> MirModule:
+    val i64_type = MirType(kind: MirTypeKind.I64)
+    val unit_type = MirType(kind: MirTypeKind.Unit)
+    val locals = [
+        MirLocal(id: LocalId(id: 0), name: Some("_return"), type_: unit_type, kind: LocalKind.Return),
+        MirLocal(id: LocalId(id: 1), name: Some("ptr"), type_: i64_type, kind: LocalKind.Temp),
+        MirLocal(id: LocalId(id: 2), name: Some("value"), type_: i64_type, kind: LocalKind.Temp),
+        MirLocal(id: LocalId(id: 3), name: Some("casted"), type_: i64_type, kind: LocalKind.Temp)
+    ]
+    val entry = MirBlock(
+        id: BlockId.new(0),
+        label: Some("entry"),
+        instructions: [
+            MirInst(kind: MirInstKind.Alloc(LocalId(id: 1), i64_type), span: nil),
+            MirInst(kind: MirInstKind.Const(LocalId(id: 2), MirConstValue.Int(7), i64_type), span: nil),
+            MirInst(kind: MirInstKind.Cast(LocalId(id: 3), MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2))), i64_type), span: nil)
+        ],
+        terminator: MirTerminator.Unreachable
+    )
+    val func = MirFunction(
+        symbol: SymbolId.new(0),
+        name: name,
+        signature: MirSignature(params: [], return_type: unit_type, is_variadic: false),
+        locals: locals,
+        blocks: [entry],
+        entry_block: BlockId.new(0),
+        span: Span(start: 0, end: 0, line: 1, col: 1),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {}
+    )
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[SymbolId.new(0)] = func
+    MirModule(name: name, functions: functions, statics: {}, constants: {}, types: {})
+
+fn build_nop_inst_module(name: text) -> MirModule:
+    val unit_type = MirType(kind: MirTypeKind.Unit)
+    val locals = [
+        MirLocal(id: LocalId(id: 0), name: Some("_return"), type_: unit_type, kind: LocalKind.Return)
+    ]
+    val entry = MirBlock(
+        id: BlockId.new(0),
+        label: Some("entry"),
+        instructions: [MirInst(kind: MirInstKind.Nop, span: nil)],
+        terminator: MirTerminator.Ret(nil)
+    )
+    val func = MirFunction(
+        symbol: SymbolId.new(0),
+        name: name,
+        signature: MirSignature(params: [], return_type: unit_type, is_variadic: false),
+        locals: locals,
+        blocks: [entry],
+        entry_block: BlockId.new(0),
+        span: Span(start: 0, end: 0, line: 1, col: 1),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {}
+    )
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[SymbolId.new(0)] = func
+    MirModule(name: name, functions: functions, statics: {}, constants: {}, types: {})
+
+fn build_unsupported_inst_module(name: text) -> MirModule:
+    val i64_type = MirType(kind: MirTypeKind.I64)
+    val locals = [
+        MirLocal(id: LocalId(id: 0), name: Some("_return"), type_: i64_type, kind: LocalKind.Return),
+        MirLocal(id: LocalId(id: 1), name: Some("value"), type_: i64_type, kind: LocalKind.Temp),
+        MirLocal(id: LocalId(id: 2), name: Some("bits"), type_: i64_type, kind: LocalKind.Temp)
+    ]
+    val entry = MirBlock(
+        id: BlockId.new(0),
+        label: Some("entry"),
+        instructions: [
+            MirInst(kind: MirInstKind.Const(LocalId(id: 1), MirConstValue.Int(7), i64_type), span: nil),
+            MirInst(kind: MirInstKind.Bitcast(LocalId(id: 2), MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))), i64_type), span: nil)
+        ],
+        terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2)))))
+    )
+    val func = MirFunction(
+        symbol: SymbolId.new(0),
+        name: name,
+        signature: MirSignature(params: [], return_type: i64_type, is_variadic: false),
+        locals: locals,
+        blocks: [entry],
+        entry_block: BlockId.new(0),
+        span: Span(start: 0, end: 0, line: 1, col: 1),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {}
+    )
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[SymbolId.new(0)] = func
+    MirModule(name: name, functions: functions, statics: {}, constants: {}, types: {})
+
+fn build_unsupported_ops_module(name: text) -> MirModule:
+    val i64_type = MirType(kind: MirTypeKind.I64)
+    val locals = [
+        MirLocal(id: LocalId(id: 0), name: Some("_return"), type_: i64_type, kind: LocalKind.Return),
+        MirLocal(id: LocalId(id: 1), name: Some("left"), type_: i64_type, kind: LocalKind.Temp),
+        MirLocal(id: LocalId(id: 2), name: Some("right"), type_: i64_type, kind: LocalKind.Temp),
+        MirLocal(id: LocalId(id: 3), name: Some("pow"), type_: i64_type, kind: LocalKind.Temp),
+        MirLocal(id: LocalId(id: 4), name: Some("transpose"), type_: i64_type, kind: LocalKind.Temp)
+    ]
+    val value = MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1)))
+    val entry = MirBlock(
+        id: BlockId.new(0),
+        label: Some("entry"),
+        instructions: [
+            MirInst(kind: MirInstKind.Const(LocalId(id: 1), MirConstValue.Int(7), i64_type), span: nil),
+            MirInst(kind: MirInstKind.Const(LocalId(id: 2), MirConstValue.Int(2), i64_type), span: nil),
+            MirInst(kind: MirInstKind.BinOp(LocalId(id: 3), MirBinOp.Pow, value, MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2)))), span: nil),
+            MirInst(kind: MirInstKind.UnaryOp(LocalId(id: 4), MirUnaryOp.Transpose, value), span: nil)
+        ],
+        terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1)))))
+    )
+    val func = MirFunction(
+        symbol: SymbolId.new(0),
+        name: name,
+        signature: MirSignature(params: [], return_type: i64_type, is_variadic: false),
+        locals: locals,
+        blocks: [entry],
+        entry_block: BlockId.new(0),
+        span: Span(start: 0, end: 0, line: 1, col: 1),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {}
+    )
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[SymbolId.new(0)] = func
+    MirModule(name: name, functions: functions, statics: {}, constants: {}, types: {})
+
+fn build_unsupported_const_module(name: text) -> MirModule:
+    val i64_type = MirType(kind: MirTypeKind.I64)
+    val bool_type = MirType(kind: MirTypeKind.Bool)
+    val locals = [
+        MirLocal(id: LocalId(id: 0), name: Some("_return"), type_: i64_type, kind: LocalKind.Return),
+        MirLocal(id: LocalId(id: 1), name: Some("tuple_const"), type_: i64_type, kind: LocalKind.Temp),
+        MirLocal(id: LocalId(id: 2), name: Some("bool_true"), type_: bool_type, kind: LocalKind.Temp),
+        MirLocal(id: LocalId(id: 3), name: Some("bool_false"), type_: bool_type, kind: LocalKind.Temp)
+    ]
+    val entry = MirBlock(
+        id: BlockId.new(0),
+        label: Some("entry"),
+        instructions: [
+            MirInst(kind: MirInstKind.Const(LocalId(id: 2), MirConstValue.Bool(true), bool_type), span: nil),
+            MirInst(kind: MirInstKind.Const(LocalId(id: 3), MirConstValue.Bool(false), bool_type), span: nil),
+            MirInst(kind: MirInstKind.Const(LocalId(id: 1), MirConstValue.Tuple([]), i64_type), span: nil)
+        ],
+        terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1)))))
+    )
+    val func = MirFunction(
+        symbol: SymbolId.new(0),
+        name: name,
+        signature: MirSignature(params: [], return_type: i64_type, is_variadic: false),
+        locals: locals,
+        blocks: [entry],
+        entry_block: BlockId.new(0),
+        span: Span(start: 0, end: 0, line: 1, col: 1),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {}
+    )
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[SymbolId.new(0)] = func
+    MirModule(name: name, functions: functions, statics: {}, constants: {}, types: {})
+
+fn build_binop_module(name: text) -> MirModule:
+    val i64_type = MirType(kind: MirTypeKind.I64)
+    val locals = [
+        MirLocal(id: LocalId(id: 0), name: Some("_return"), type_: i64_type, kind: LocalKind.Return),
+        MirLocal(id: LocalId(id: 1), name: Some("left"), type_: i64_type, kind: LocalKind.Temp),
+        MirLocal(id: LocalId(id: 2), name: Some("right"), type_: i64_type, kind: LocalKind.Temp),
+        MirLocal(id: LocalId(id: 3), name: Some("sum"), type_: i64_type, kind: LocalKind.Temp),
+        MirLocal(id: LocalId(id: 4), name: Some("diff"), type_: i64_type, kind: LocalKind.Temp),
+        MirLocal(id: LocalId(id: 5), name: Some("product"), type_: i64_type, kind: LocalKind.Temp),
+        MirLocal(id: LocalId(id: 6), name: Some("eq"), type_: i64_type, kind: LocalKind.Temp),
+        MirLocal(id: LocalId(id: 7), name: Some("ne"), type_: i64_type, kind: LocalKind.Temp),
+        MirLocal(id: LocalId(id: 8), name: Some("lt"), type_: i64_type, kind: LocalKind.Temp),
+        MirLocal(id: LocalId(id: 9), name: Some("le"), type_: i64_type, kind: LocalKind.Temp),
+        MirLocal(id: LocalId(id: 10), name: Some("gt"), type_: i64_type, kind: LocalKind.Temp),
+        MirLocal(id: LocalId(id: 11), name: Some("ge"), type_: i64_type, kind: LocalKind.Temp),
+        MirLocal(id: LocalId(id: 12), name: Some("div"), type_: i64_type, kind: LocalKind.Temp),
+        MirLocal(id: LocalId(id: 13), name: Some("rem"), type_: i64_type, kind: LocalKind.Temp),
+        MirLocal(id: LocalId(id: 14), name: Some("and"), type_: i64_type, kind: LocalKind.Temp),
+        MirLocal(id: LocalId(id: 15), name: Some("or"), type_: i64_type, kind: LocalKind.Temp),
+        MirLocal(id: LocalId(id: 16), name: Some("xor"), type_: i64_type, kind: LocalKind.Temp),
+        MirLocal(id: LocalId(id: 17), name: Some("shl"), type_: i64_type, kind: LocalKind.Temp),
+        MirLocal(id: LocalId(id: 18), name: Some("shr"), type_: i64_type, kind: LocalKind.Temp)
+    ]
+    val entry = MirBlock(
+        id: BlockId.new(0),
+        label: Some("entry"),
+        instructions: [
+            MirInst(kind: MirInstKind.Const(LocalId(id: 1), MirConstValue.Int(9), i64_type), span: nil),
+            MirInst(kind: MirInstKind.Const(LocalId(id: 2), MirConstValue.Int(4), i64_type), span: nil),
+            MirInst(kind: MirInstKind.BinOp(LocalId(id: 3), MirBinOp.Add, MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))), MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2)))), span: nil),
+            MirInst(kind: MirInstKind.BinOp(LocalId(id: 4), MirBinOp.Sub, MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))), MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2)))), span: nil),
+            MirInst(kind: MirInstKind.BinOp(LocalId(id: 5), MirBinOp.Mul, MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))), MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2)))), span: nil),
+            MirInst(kind: MirInstKind.BinOp(LocalId(id: 6), MirBinOp.Eq, MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))), MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2)))), span: nil),
+            MirInst(kind: MirInstKind.BinOp(LocalId(id: 7), MirBinOp.Ne, MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))), MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2)))), span: nil),
+            MirInst(kind: MirInstKind.BinOp(LocalId(id: 8), MirBinOp.Lt, MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))), MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2)))), span: nil),
+            MirInst(kind: MirInstKind.BinOp(LocalId(id: 9), MirBinOp.Le, MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))), MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2)))), span: nil),
+            MirInst(kind: MirInstKind.BinOp(LocalId(id: 10), MirBinOp.Gt, MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))), MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2)))), span: nil),
+            MirInst(kind: MirInstKind.BinOp(LocalId(id: 11), MirBinOp.Ge, MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))), MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2)))), span: nil),
+            MirInst(kind: MirInstKind.BinOp(LocalId(id: 12), MirBinOp.Div, MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))), MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2)))), span: nil),
+            MirInst(kind: MirInstKind.BinOp(LocalId(id: 13), MirBinOp.Rem, MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))), MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2)))), span: nil),
+            MirInst(kind: MirInstKind.BinOp(LocalId(id: 14), MirBinOp.BitAnd, MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))), MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2)))), span: nil),
+            MirInst(kind: MirInstKind.BinOp(LocalId(id: 15), MirBinOp.BitOr, MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))), MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2)))), span: nil),
+            MirInst(kind: MirInstKind.BinOp(LocalId(id: 16), MirBinOp.BitXor, MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))), MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2)))), span: nil),
+            MirInst(kind: MirInstKind.BinOp(LocalId(id: 17), MirBinOp.Shl, MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))), MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2)))), span: nil),
+            MirInst(kind: MirInstKind.BinOp(LocalId(id: 18), MirBinOp.Shr, MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))), MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2)))), span: nil)
+        ],
+        terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 5)))))
+    )
+    val func = MirFunction(
+        symbol: SymbolId.new(0),
+        name: name,
+        signature: MirSignature(params: [], return_type: i64_type, is_variadic: false),
+        locals: locals,
+        blocks: [entry],
+        entry_block: BlockId.new(0),
+        span: Span(start: 0, end: 0, line: 1, col: 1),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {}
+    )
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[SymbolId.new(0)] = func
+    MirModule(name: name, functions: functions, statics: {}, constants: {}, types: {})
+
+fn build_copy_move_module(name: text) -> MirModule:
+    val i64_type = MirType(kind: MirTypeKind.I64)
+    val unit_type = MirType(kind: MirTypeKind.Unit)
+    val locals = [
+        MirLocal(id: LocalId(id: 0), name: Some("_return"), type_: unit_type, kind: LocalKind.Return),
+        MirLocal(id: LocalId(id: 1), name: Some("src"), type_: i64_type, kind: LocalKind.Temp),
+        MirLocal(id: LocalId(id: 2), name: Some("copy_dest"), type_: i64_type, kind: LocalKind.Temp),
+        MirLocal(id: LocalId(id: 3), name: Some("move_dest"), type_: i64_type, kind: LocalKind.Temp)
+    ]
+    val entry = MirBlock(
+        id: BlockId.new(0),
+        label: Some("entry"),
+        instructions: [
+            MirInst(kind: MirInstKind.Const(LocalId(id: 1), MirConstValue.Int(7), i64_type), span: nil),
+            MirInst(kind: MirInstKind.Copy(LocalId(id: 2), LocalId(id: 1)), span: nil),
+            MirInst(kind: MirInstKind.Move(LocalId(id: 3), LocalId(id: 2)), span: nil)
+        ],
+        terminator: MirTerminator.Unreachable
+    )
+    val func = MirFunction(
+        symbol: SymbolId.new(0),
+        name: name,
+        signature: MirSignature(params: [], return_type: unit_type, is_variadic: false),
+        locals: locals,
+        blocks: [entry],
+        entry_block: BlockId.new(0),
+        span: Span(start: 0, end: 0, line: 1, col: 1),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {}
+    )
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[SymbolId.new(0)] = func
+    MirModule(name: name, functions: functions, statics: {}, constants: {}, types: {})
+
+fn build_goto_module(name: text) -> MirModule:
+    val i64_type = MirType(kind: MirTypeKind.I64)
+    val locals = [
+        MirLocal(id: LocalId(id: 0), name: Some("_return"), type_: i64_type, kind: LocalKind.Return),
+        MirLocal(id: LocalId(id: 1), name: Some("value"), type_: i64_type, kind: LocalKind.Temp)
+    ]
+    val entry = MirBlock(
+        id: BlockId.new(0),
+        label: Some("entry"),
+        instructions: [],
+        terminator: MirTerminator.Goto(BlockId.new(1))
+    )
+    val target = MirBlock(
+        id: BlockId.new(1),
+        label: Some("target"),
+        instructions: [
+            MirInst(kind: MirInstKind.Const(LocalId(id: 1), MirConstValue.Int(1), i64_type), span: nil)
+        ],
+        terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1)))))
+    )
+    val func = MirFunction(
+        symbol: SymbolId.new(0),
+        name: name,
+        signature: MirSignature(params: [], return_type: i64_type, is_variadic: false),
+        locals: locals,
+        blocks: [entry, target],
+        entry_block: BlockId.new(0),
+        span: Span(start: 0, end: 0, line: 1, col: 1),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {}
+    )
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[SymbolId.new(0)] = func
+    MirModule(name: name, functions: functions, statics: {}, constants: {}, types: {})
+
+fn build_if_module(name: text) -> MirModule:
+    val i64_type = MirType(kind: MirTypeKind.I64)
+    val locals = [
+        MirLocal(id: LocalId(id: 0), name: Some("_return"), type_: i64_type, kind: LocalKind.Return),
+        MirLocal(id: LocalId(id: 1), name: Some("cond"), type_: i64_type, kind: LocalKind.Temp)
+    ]
+    val entry = MirBlock(
+        id: BlockId.new(0),
+        label: Some("entry"),
+        instructions: [
+            MirInst(kind: MirInstKind.Const(LocalId(id: 1), MirConstValue.Int(1), i64_type), span: nil)
+        ],
+        terminator: MirTerminator.If(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))), BlockId.new(1), BlockId.new(2))
+    )
+    val then_block = MirBlock(
+        id: BlockId.new(1),
+        label: Some("then"),
+        instructions: [],
+        terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1)))))
+    )
+    val else_block = MirBlock(
+        id: BlockId.new(2),
+        label: Some("else"),
+        instructions: [],
+        terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1)))))
+    )
+    val func = MirFunction(
+        symbol: SymbolId.new(0),
+        name: name,
+        signature: MirSignature(params: [], return_type: i64_type, is_variadic: false),
+        locals: locals,
+        blocks: [entry, then_block, else_block],
+        entry_block: BlockId.new(0),
+        span: Span(start: 0, end: 0, line: 1, col: 1),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {}
+    )
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[SymbolId.new(0)] = func
+    MirModule(name: name, functions: functions, statics: {}, constants: {}, types: {})
+
+fn build_switch_module(name: text) -> MirModule:
+    val i64_type = MirType(kind: MirTypeKind.I64)
+    val locals = [
+        MirLocal(id: LocalId(id: 0), name: Some("_return"), type_: i64_type, kind: LocalKind.Return),
+        MirLocal(id: LocalId(id: 1), name: Some("value"), type_: i64_type, kind: LocalKind.Temp)
+    ]
+    val entry = MirBlock(
+        id: BlockId.new(0),
+        label: Some("entry"),
+        instructions: [
+            MirInst(kind: MirInstKind.Const(LocalId(id: 1), MirConstValue.Int(2), i64_type), span: nil)
+        ],
+        terminator: MirTerminator.Switch(
+            MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))),
+            [SwitchCase(value: 2, target: BlockId.new(1))],
+            BlockId.new(2)
+        )
+    )
+    val matched = MirBlock(
+        id: BlockId.new(1),
+        label: Some("matched"),
+        instructions: [],
+        terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1)))))
+    )
+    val default_block = MirBlock(
+        id: BlockId.new(2),
+        label: Some("default"),
+        instructions: [],
+        terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1)))))
+    )
+    val func = MirFunction(
+        symbol: SymbolId.new(0),
+        name: name,
+        signature: MirSignature(params: [], return_type: i64_type, is_variadic: false),
+        locals: locals,
+        blocks: [entry, matched, default_block],
+        entry_block: BlockId.new(0),
+        span: Span(start: 0, end: 0, line: 1, col: 1),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {}
+    )
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[SymbolId.new(0)] = func
+    MirModule(name: name, functions: functions, statics: {}, constants: {}, types: {})
+
+fn build_unreachable_module(name: text) -> MirModule:
+    val i64_type = MirType(kind: MirTypeKind.I64)
+    val locals = [
+        MirLocal(id: LocalId(id: 0), name: Some("_return"), type_: i64_type, kind: LocalKind.Return)
+    ]
+    val entry = MirBlock(
+        id: BlockId.new(0),
+        label: Some("entry"),
+        instructions: [],
+        terminator: MirTerminator.Unreachable
+    )
+    val func = MirFunction(
+        symbol: SymbolId.new(0),
+        name: name,
+        signature: MirSignature(params: [], return_type: i64_type, is_variadic: false),
+        locals: locals,
+        blocks: [entry],
+        entry_block: BlockId.new(0),
+        span: Span(start: 0, end: 0, line: 1, col: 1),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {}
+    )
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[SymbolId.new(0)] = func
+    MirModule(name: name, functions: functions, statics: {}, constants: {}, types: {})
+
+fn build_abort_module(name: text) -> MirModule:
+    val i64_type = MirType(kind: MirTypeKind.I64)
+    val locals = [
+        MirLocal(id: LocalId(id: 0), name: Some("_return"), type_: i64_type, kind: LocalKind.Return)
+    ]
+    val entry = MirBlock(
+        id: BlockId.new(0),
+        label: Some("entry"),
+        instructions: [],
+        terminator: MirTerminator.Abort("rv64 abort")
+    )
+    val func = MirFunction(
+        symbol: SymbolId.new(0),
+        name: name,
+        signature: MirSignature(params: [], return_type: i64_type, is_variadic: false),
+        locals: locals,
+        blocks: [entry],
+        entry_block: BlockId.new(0),
+        span: Span(start: 0, end: 0, line: 1, col: 1),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {}
+    )
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[SymbolId.new(0)] = func
+    MirModule(name: name, functions: functions, statics: {}, constants: {}, types: {})
+
+fn build_unary_module(name: text) -> MirModule:
+    val i64_type = MirType(kind: MirTypeKind.I64)
+    val locals = [
+        MirLocal(id: LocalId(id: 0), name: Some("_return"), type_: i64_type, kind: LocalKind.Return),
+        MirLocal(id: LocalId(id: 1), name: Some("value"), type_: i64_type, kind: LocalKind.Temp),
+        MirLocal(id: LocalId(id: 2), name: Some("neg"), type_: i64_type, kind: LocalKind.Temp),
+        MirLocal(id: LocalId(id: 3), name: Some("not"), type_: i64_type, kind: LocalKind.Temp),
+        MirLocal(id: LocalId(id: 4), name: Some("bitnot"), type_: i64_type, kind: LocalKind.Temp)
+    ]
+    val value = MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1)))
+    val entry = MirBlock(
+        id: BlockId.new(0),
+        label: Some("entry"),
+        instructions: [
+            MirInst(kind: MirInstKind.Const(LocalId(id: 1), MirConstValue.Int(7), i64_type), span: nil),
+            MirInst(kind: MirInstKind.UnaryOp(LocalId(id: 2), MirUnaryOp.Neg, value), span: nil),
+            MirInst(kind: MirInstKind.UnaryOp(LocalId(id: 3), MirUnaryOp.Not, value), span: nil),
+            MirInst(kind: MirInstKind.UnaryOp(LocalId(id: 4), MirUnaryOp.BitNot, value), span: nil)
+        ],
+        terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 4)))))
+    )
+    val func = MirFunction(
+        symbol: SymbolId.new(0),
+        name: name,
+        signature: MirSignature(params: [], return_type: i64_type, is_variadic: false),
+        locals: locals,
+        blocks: [entry],
+        entry_block: BlockId.new(0),
+        span: Span(start: 0, end: 0, line: 1, col: 1),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {}
+    )
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[SymbolId.new(0)] = func
+    MirModule(name: name, functions: functions, statics: {}, constants: {}, types: {})
+
+fn build_string_const_module(name: text) -> MirModule:
+    val i64_type = MirType(kind: MirTypeKind.I64)
+    val locals = [
+        MirLocal(id: LocalId(id: 0), name: Some("_return"), type_: i64_type, kind: LocalKind.Return),
+        MirLocal(id: LocalId(id: 1), name: Some("text_ptr"), type_: i64_type, kind: LocalKind.Temp)
+    ]
+    val entry = MirBlock(
+        id: BlockId.new(0),
+        label: Some("entry"),
+        instructions: [
+            MirInst(kind: MirInstKind.Const(LocalId(id: 1), MirConstValue.Str("rv64 text"), i64_type), span: nil)
+        ],
+        terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1)))))
+    )
+    val func = MirFunction(
+        symbol: SymbolId.new(0),
+        name: name,
+        signature: MirSignature(params: [], return_type: i64_type, is_variadic: false),
+        locals: locals,
+        blocks: [entry],
+        entry_block: BlockId.new(0),
+        span: Span(start: 0, end: 0, line: 1, col: 1),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {}
+    )
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[SymbolId.new(0)] = func
+    MirModule(name: name, functions: functions, statics: {}, constants: {}, types: {})
+
+fn build_zero_const_module(name: text) -> MirModule:
+    val i64_type = MirType(kind: MirTypeKind.I64)
+    val locals = [
+        MirLocal(id: LocalId(id: 0), name: Some("_return"), type_: i64_type, kind: LocalKind.Return),
+        MirLocal(id: LocalId(id: 1), name: Some("zero"), type_: i64_type, kind: LocalKind.Temp)
+    ]
+    val entry = MirBlock(
+        id: BlockId.new(0),
+        label: Some("entry"),
+        instructions: [
+            MirInst(kind: MirInstKind.Const(LocalId(id: 1), MirConstValue.Zero, i64_type), span: nil)
+        ],
+        terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1)))))
+    )
+    val func = MirFunction(
+        symbol: SymbolId.new(0),
+        name: name,
+        signature: MirSignature(params: [], return_type: i64_type, is_variadic: false),
+        locals: locals,
+        blocks: [entry],
+        entry_block: BlockId.new(0),
+        span: Span(start: 0, end: 0, line: 1, col: 1),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {}
+    )
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[SymbolId.new(0)] = func
+    MirModule(name: name, functions: functions, statics: {}, constants: {}, types: {})
+
+fn build_large_int_const_module(name: text) -> MirModule:
+    val i64_type = MirType(kind: MirTypeKind.I64)
+    val locals = [
+        MirLocal(id: LocalId(id: 0), name: Some("_return"), type_: i64_type, kind: LocalKind.Return),
+        MirLocal(id: LocalId(id: 1), name: Some("value"), type_: i64_type, kind: LocalKind.Temp)
+    ]
+    val entry = MirBlock(
+        id: BlockId.new(0),
+        label: Some("entry"),
+        instructions: [
+            MirInst(kind: MirInstKind.Const(LocalId(id: 1), MirConstValue.Int(4294967295), i64_type), span: nil)
+        ],
+        terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1)))))
+    )
+    val func = MirFunction(
+        symbol: SymbolId.new(0),
+        name: name,
+        signature: MirSignature(params: [], return_type: i64_type, is_variadic: false),
+        locals: locals,
+        blocks: [entry],
+        entry_block: BlockId.new(0),
+        span: Span(start: 0, end: 0, line: 1, col: 1),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {}
+    )
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[SymbolId.new(0)] = func
+    MirModule(name: name, functions: functions, statics: {}, constants: {}, types: {})
+
 fn entry_block(module: MachModule) -> MachBlock:
     module.functions[0].blocks[1]
 
@@ -66,6 +904,57 @@ fn find_opcode(block: MachBlock, opcode: i64) -> i64:
         if block.insts[i].opcode == opcode:
             return i
     -1
+
+fn has_opcode(block: MachBlock, opcode: i64) -> bool:
+    find_opcode(block, opcode) >= 0
+
+fn count_opcode(block: MachBlock, opcode: i64) -> i64:
+    var count = 0
+    for inst in block.insts:
+        if inst.opcode == opcode:
+            count = count + 1
+    count
+
+fn first_operand_count(block: MachBlock, opcode: i64) -> i64:
+    for inst in block.insts:
+        if inst.opcode == opcode:
+            return inst.operands.len()
+    -1
+
+fn count_opcode_after_first(block: MachBlock, marker_opcode: i64, opcode: i64) -> i64:
+    var seen_marker = false
+    var count = 0
+    for inst in block.insts:
+        if seen_marker and inst.opcode == opcode:
+            count = count + 1
+        if inst.opcode == marker_opcode:
+            seen_marker = true
+    count
+
+fn mem_offset(op: Operand) -> i64:
+    match op.kind:
+        case Mem(_, offset): offset
+        case _: -1
+
+fn nth_mem_offset(block: MachBlock, opcode: i64, nth: i64) -> i64:
+    var seen = 0
+    for inst in block.insts:
+        if inst.opcode == opcode:
+            if seen == nth:
+                return mem_offset(inst.operands[1])
+            seen = seen + 1
+    -1
+
+fn nth_imm(block: MachBlock, opcode: i64, nth: i64) -> i64:
+    var seen = 0
+    for inst in block.insts:
+        if inst.opcode == opcode:
+            if seen == nth:
+                match inst.operands[1].kind:
+                    case Imm(value): return value
+                    case _: return -999
+            seen = seen + 1
+    -999
 
 describe "Isel Riscv64":
     it "uses the shared LP64D contract word size":
@@ -79,7 +968,160 @@ describe "Isel Riscv64":
         expect(contract.abi_text()).to_equal("lp64d")
         expect(contract.arg_register_count).to_equal(8)
 
+    it "uses 64-bit load and store opcodes for RV64 memory":
+        val block = entry_block(isel_module_riscv64(build_memory_module("rv64_memory")))
+        expect(has_opcode(block, RV_OP_LD)).to_equal(true)
+        expect(has_opcode(block, RV_OP_SD)).to_equal(true)
+        expect(has_opcode(block, RV_OP_LW)).to_equal(false)
+        expect(has_opcode(block, RV_OP_SW)).to_equal(false)
+
+    it "uses RV64 word-size offsets for field access":
+        val block = entry_block(isel_module_riscv64(build_memory_module("rv64_fields")))
+        expect(nth_mem_offset(block, RV_OP_LD, 1)).to_equal(2 * RV64_WORD_SIZE)
+        expect(nth_mem_offset(block, RV_OP_SD, 1)).to_equal(3 * RV64_WORD_SIZE)
+
+    it "selects RV64 arithmetic opcodes for MIR binary ops":
+        val block = entry_block(isel_module_riscv64(build_binop_module("rv64_binop")))
+        expect(has_opcode(block, RV_OP_ADD)).to_equal(true)
+        expect(has_opcode(block, RV_OP_SUB)).to_equal(true)
+        expect(has_opcode(block, RV_OP_MUL)).to_equal(true)
+
+    it "selects RV64 comparison opcodes for MIR binary ops":
+        val block = entry_block(isel_module_riscv64(build_binop_module("rv64_binop")))
+        expect(has_opcode(block, RV_OP_SLT)).to_equal(true)
+        expect(has_opcode(block, RV_OP_SEQZ)).to_equal(true)
+        expect(has_opcode(block, RV_OP_SNEZ)).to_equal(true)
+
+    it "selects RV64 bitwise, shift, div, and rem opcodes":
+        val block = entry_block(isel_module_riscv64(build_binop_module("rv64_binop")))
+        expect(has_opcode(block, RV_OP_DIV)).to_equal(true)
+        expect(has_opcode(block, RV_OP_REM)).to_equal(true)
+        expect(has_opcode(block, RV_OP_AND)).to_equal(true)
+        expect(has_opcode(block, RV_OP_OR)).to_equal(true)
+        expect(has_opcode(block, RV_OP_XOR)).to_equal(true)
+        expect(has_opcode(block, RV_OP_SLL)).to_equal(true)
+        expect(has_opcode(block, RV_OP_SRA)).to_equal(true)
+
+    it "selects RV64 MV for MIR copy and move instructions":
+        val block = entry_block(isel_module_riscv64(build_copy_move_module("rv64_copy_move")))
+        expect(count_opcode(block, RV_OP_MV)).to_equal(3)
+
+    it "materializes RV64 string constants as data references":
+        val module = isel_module_riscv64(build_string_const_module("rv64_string_const"))
+        val block = entry_block(module)
+        expect(module.data_sections.len()).to_equal(1)
+        expect(has_opcode(block, RV_OP_AUIPC)).to_equal(true)
+        expect(has_opcode(block, RV_OP_ADDI)).to_equal(true)
+        expect(has_opcode(block, RV_OP_MV)).to_equal(true)
+
+    it "materializes RV64 zero constants as LI zero":
+        val block = entry_block(isel_module_riscv64(build_zero_const_module("rv64_zero_const")))
+        expect(nth_imm(block, RV_OP_LI, 0)).to_equal(0)
+        expect(has_opcode(block, RV_OP_NOP)).to_equal(false)
+
+    it "preserves RV64 large integer constants":
+        val block = entry_block(isel_module_riscv64(build_large_int_const_module("rv64_large_int_const")))
+        expect(nth_imm(block, RV_OP_LI, 0)).to_equal(4294967295)
+        expect(has_opcode(block, RV_OP_NOP)).to_equal(false)
+
+    it "selects RV64 JAL for MIR goto terminators":
+        val block = entry_block(isel_module_riscv64(build_goto_module("rv64_goto")))
+        expect(has_opcode(block, RV_OP_JAL)).to_equal(true)
+
+    it "selects RV64 branch and jump opcodes for MIR if terminators":
+        val block = entry_block(isel_module_riscv64(build_if_module("rv64_if")))
+        expect(has_opcode(block, RV_OP_BNE)).to_equal(true)
+        expect(has_opcode(block, RV_OP_JAL)).to_equal(true)
+
+    it "selects RV64 compare and default jump opcodes for MIR switch terminators":
+        val block = entry_block(isel_module_riscv64(build_switch_module("rv64_switch")))
+        expect(has_opcode(block, RV_OP_LI)).to_equal(true)
+        expect(has_opcode(block, RV_OP_BEQ)).to_equal(true)
+        expect(has_opcode(block, RV_OP_JAL)).to_equal(true)
+
+    it "selects RV64 NOP for MIR unreachable terminators":
+        val block = entry_block(isel_module_riscv64(build_unreachable_module("rv64_unreachable")))
+        expect(has_opcode(block, RV_OP_NOP)).to_equal(true)
+
+    it "fails closed with RV64 NOP for unsupported terminators":
+        val block = entry_block(isel_module_riscv64(build_abort_module("rv64_abort")))
+        expect(count_opcode(block, RV_OP_NOP)).to_equal(1)
+
+    it "selects RV64 unary opcodes":
+        val block = entry_block(isel_module_riscv64(build_unary_module("rv64_unary")))
+        expect(has_opcode(block, RV_OP_NEG)).to_equal(true)
+        expect(count_opcode(block, RV_OP_NOT)).to_equal(2)
+
+    it "uses RV64 word-size stack slots for call arguments after a7":
+        val module = isel_module_riscv64(build_call_module("rv64_call"))
+        val block = entry_block(module)
+        expect(has_opcode(block, RV_OP_CALL)).to_equal(true)
+        expect(module.extern_symbols).to_contain("callee")
+        expect(nth_mem_offset(block, RV_OP_SD, 0)).to_equal(0)
+        expect(nth_mem_offset(block, RV_OP_SD, 1)).to_equal(RV64_WORD_SIZE)
+
+    it "does not move a return register for RV64 void calls":
+        val module = isel_module_riscv64(build_void_call_module("rv64_void_call"))
+        val block = entry_block(module)
+        expect(has_opcode(block, RV_OP_CALL)).to_equal(true)
+        expect(module.extern_symbols).to_contain("void_callee")
+        expect(count_opcode_after_first(block, RV_OP_CALL, RV_OP_MV)).to_equal(0)
+
+    it "fails closed with RV64 NOP for unsupported call targets":
+        val block = entry_block(isel_module_riscv64(build_unsupported_call_target_module("rv64_unsupported_call_target")))
+        expect(count_opcode(block, RV_OP_NOP)).to_equal(1)
+        expect(has_opcode(block, RV_OP_CALL)).to_equal(false)
+        expect(has_opcode(block, RV_OP_JALR)).to_equal(false)
+        expect(count_opcode_after_first(block, RV_OP_NOP, RV_OP_MV)).to_equal(0)
+
+    it "selects RV64 JALR for MIR indirect calls":
+        val block = entry_block(isel_module_riscv64(build_indirect_call_module("rv64_indirect_call")))
+        expect(count_opcode(block, RV_OP_JALR)).to_equal(2)
+        expect(has_opcode(block, RV_OP_CALL)).to_equal(false)
+
+    it "selects RV64 JALR for MIR CallIndirect instructions":
+        val block = entry_block(isel_module_riscv64(build_call_indirect_module("rv64_call_indirect")))
+        expect(count_opcode(block, RV_OP_JALR)).to_equal(1)
+        expect(has_opcode(block, RV_OP_CALL)).to_equal(false)
+
+    it "selects RV64 stack allocation and cast opcodes":
+        val block = entry_block(isel_module_riscv64(build_alloc_cast_module("rv64_alloc_cast")))
+        expect(has_opcode(block, RV_OP_ADDI)).to_equal(true)
+        expect(count_opcode(block, RV_OP_MV)).to_be_greater_than(1)
+
+    it "selects RV64 NOP for MIR nop instructions":
+        val block = entry_block(isel_module_riscv64(build_nop_inst_module("rv64_nop_inst")))
+        expect(count_opcode(block, RV_OP_NOP)).to_equal(1)
+
+    it "fails closed with RV64 NOP for unsupported MIR instructions":
+        val block = entry_block(isel_module_riscv64(build_unsupported_inst_module("rv64_unsupported_inst")))
+        expect(count_opcode(block, RV_OP_NOP)).to_equal(1)
+
+    it "fails closed with RV64 NOP for unsupported arithmetic ops":
+        val block = entry_block(isel_module_riscv64(build_unsupported_ops_module("rv64_unsupported_ops")))
+        expect(count_opcode(block, RV_OP_NOP)).to_equal(2)
+
+    it "fails closed with RV64 NOP for unsupported MIR constants":
+        val block = entry_block(isel_module_riscv64(build_unsupported_const_module("rv64_unsupported_const")))
+        expect(nth_imm(block, RV_OP_LI, 0)).to_equal(1)
+        expect(nth_imm(block, RV_OP_LI, 1)).to_equal(0)
+        expect(count_opcode(block, RV_OP_NOP)).to_equal(1)
+        expect(count_opcode(block, RV_OP_MV)).to_equal(3)
+
 describe "RV64 native ISel scalar bitmanip":
+    it "selects RV64 address arithmetic for MIR get-element-pointer":
+        val block = entry_block(isel_module_riscv64(build_gep_module("rv64_gep_checked")))
+        expect(count_opcode(block, RV_OP_MUL)).to_equal(1)
+        expect(count_opcode(block, RV_OP_ADD)).to_equal(1)
+        expect(first_operand_count(block, RV_OP_MUL)).to_equal(3)
+        expect(first_operand_count(block, RV_OP_ADD)).to_equal(3)
+        expect(has_opcode(block, RV_OP_NOP)).to_equal(false)
+
+    it "selects RV64 JALR for MIR CallIndirect instructions":
+        val block = entry_block(isel_module_riscv64(build_call_indirect_module("rv64_call_indirect_checked")))
+        expect(count_opcode(block, RV_OP_JALR)).to_equal(1)
+        expect(has_opcode(block, RV_OP_CALL)).to_equal(false)
+
     it "selects rotates and unary bitmanip helpers":
         val rol = rv_select_scalar_bitmanip(new_isel_context(), virt_operand(7), BIT_ROTATE_LEFT, [virt_operand(3), virt_operand(4)])
         expect(rol.insts.len()).to_equal(1)
@@ -124,3 +1166,7 @@ describe "RV64 native ISel scalar bitmanip":
 
         val bswap_block = entry_block(isel_module_riscv64(build_intrinsic_module("bswap_test", BIT_BSWAP, 1)))
         expect(find_opcode(bswap_block, RV_OP_REV8) >= 0).to_equal(true)
+
+    it "fails closed with RV64 NOP for unsupported MIR intrinsics":
+        val block = entry_block(isel_module_riscv64(build_intrinsic_module("unsupported_intrinsic_test", "bit_popcount", 1)))
+        expect(count_opcode(block, RV_OP_NOP)).to_equal(1)
