@@ -334,6 +334,12 @@ pub(crate) fn compile_method_call_static<M: Module>(
             ("has" | "contains" | "contains_key" | "has_key", 1) => true,
             // dict removal — rt_dict_remove (no-op for non-dicts)
             ("remove", 1) => true,
+            // substring search — rt_string_find (rt_core_as_string NULL-checks
+            // the receiver tag and returns -1 for non-strings, so it is safe
+            // for erased receivers). Without this, `clean.find(" #")` in
+            // check_wide_public_text bound by name-suffix to the unique linked
+            // MutSlice.find and segfaulted `stage4 lint <any file>` (bug #62).
+            ("find", 1) => true,
             // length — rt_len (array/string/dict/tuple)
             ("len" | "length", 0) => true,
             _ => false,
