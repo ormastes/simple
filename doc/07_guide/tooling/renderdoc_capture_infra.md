@@ -1396,11 +1396,27 @@ The current canonical evidence contract is:
   to create that env through
   `scripts/check/check-production-gui-font-runtime-evidence.shs`. The runtime
   producer fails closed unless current vector-font compute evidence reports GPU
-  returned glyphs and the selected CUDA/OpenCL generated-2D readback proof
-  reports submit plus readback availability. It also emits
+  returned glyphs and the selected Metal/CUDA/OpenCL generated-2D readback
+  proof reports submit plus readback availability. On macOS, the Metal vector
+  font producer emits `metal-vector-font-glyph-pixels-returned` and
+  `production_gui_font_runtime_metal_*` rows after GPU glyph pixel readback;
+  the wrapper forces interpreter mode for generated Simple CPU-oracle runs so
+  JIT `spl_dlopen` failures cannot mask the backend proof. It also emits
   `production_gui_font_runtime_candidates_simple` so the font wrapper evaluates
   the backend that actually produced the source proof. Direct env-only
   readiness values are diagnostic inputs, not production completion evidence.
+  Mobile renderer parity is checked with
+  `scripts/check/check-tauri-mobile-renderer-parity-evidence.shs`. The Android
+  lane uses `scripts/check/check-tauri-android-mobile-renderer-evidence.shs`,
+  prepares `mobile_probe_entry.txt` with `mdi-smoke`, copies
+  `examples/06_io/ui/tauri_mobile_mdi_smoke.spl` into the Tauri mobile entry,
+  regenerates the UI bundle, runs `npm run prepare:dist`, and builds the debug
+  APK by default before installing it on a live device or emulator. Completion
+  requires the Android screenshot artifact, Vulkan/skiavk render-log marker,
+  foreground `com.simple.ui` proof, and MDI event/capture/performance/animation
+  rows all to pass. The Android wrapper freezes the background logcat stream
+  before validator source-size checks, so a growing log cannot invalidate a real
+  proof as a size mismatch.
   The Tauri/Chrome surface manifest must prove live Electron, Tauri, and Chrome
   captures, 50 Tauri and 50 Chrome cases, 36 pass cases plus 14 tracked
   divergence cases for each browser surface, 0 fail cases, 0 mismatch counts,

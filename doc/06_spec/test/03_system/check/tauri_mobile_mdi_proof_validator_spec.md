@@ -100,9 +100,9 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_mobile_mdi_proof_valid
 - Render proof must include an explicit rendered image count and HTML render
   marker; event routing alone is not enough to prove the mobile MDI surface
   actually rendered.
-- Event proof emits individual routed click/input/key, drag, window-runtime,
-  control-discovery, and taskbar-visibility rows rather than only a coarse
-  event status.
+- Event proof emits an ordered routed-event sequence plus individual routed
+  click/input/key, drag, window-runtime, control-discovery, and
+  taskbar-visibility rows rather than only a coarse event status.
 - Render counts, event counts, viewport dimensions, device pixel ratio,
   performance timing deltas, and animation-frame counts must be real JSON
   numbers; stringified, fractional, unsafe, or exponential integer values do not
@@ -133,7 +133,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_mobile_mdi_proof_valid
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 52 lines folded for reproduction.
+Runnable source: 59 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -154,10 +154,12 @@ expect(evidence).to_contain("ios_mdi_proof_marker_source_count=1")
 expect(evidence).to_contain("ios_mdi_proof_missing_source_count=0")
 expect(evidence).to_contain("ios_mdi_proof_symlink_source_count=0")
 expect(evidence).to_contain("ios_mdi_proof_hardlink_source_count=0")
+expect(evidence).to_contain("ios_mdi_proof_duplicate_source_count=0")
 expect(evidence).to_contain("ios_mdi_proof_empty_source_count=0")
+expect(evidence).to_contain("ios_mdi_proof_nonregular_source_count=0")
 expect(evidence).to_contain("ios_mdi_proof_marker_source_path=" + root + "/device.log")
-expect(evidence).to_contain("ios_mdi_proof_marker_source_size_bytes=656")
-expect(evidence).to_contain("ios_mdi_proof_marker_source_actual_size_bytes=656")
+expect(evidence).to_contain("ios_mdi_proof_marker_source_size_bytes=759")
+expect(evidence).to_contain("ios_mdi_proof_marker_source_actual_size_bytes=759")
 expect(evidence).to_contain("ios_mdi_proof_marker_source_file_status=pass")
 expect(evidence).to_contain("ios_mdi_proof_marker_source_file_reason=pass")
 expect(evidence).to_contain("ios_mdi_proof_window_count=4")
@@ -177,6 +179,7 @@ expect(evidence).to_contain("ios_mdi_event_app_input_control_found=true")
 expect(evidence).to_contain("ios_mdi_event_body_click_routed=true")
 expect(evidence).to_contain("ios_mdi_event_body_input_routed=true")
 expect(evidence).to_contain("ios_mdi_event_body_key_routed=true")
+expect(evidence).to_contain("ios_mdi_event_sequence=window_drag:move,app_action:body_click,app_input:body_input,app_key:body_key")
 expect(evidence).to_contain("ios_mdi_event_taskbar_icons_visible=true")
 expect(evidence).to_contain("ios_mdi_event_taskbar_labels_visible=true")
 expect(evidence).to_contain("ios_mdi_capture_status=pass")
@@ -207,7 +210,7 @@ expect(evidence).to_contain("ios_mdi_css_animation_probe=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -228,7 +231,9 @@ expect(evidence).to_contain("ios_mdi_proof_marker_source_count=1")
 expect(evidence).to_contain("ios_mdi_proof_missing_source_count=1")
 expect(evidence).to_contain("ios_mdi_proof_symlink_source_count=0")
 expect(evidence).to_contain("ios_mdi_proof_hardlink_source_count=0")
+expect(evidence).to_contain("ios_mdi_proof_duplicate_source_count=0")
 expect(evidence).to_contain("ios_mdi_proof_empty_source_count=0")
+expect(evidence).to_contain("ios_mdi_proof_nonregular_source_count=0")
 ```
 
 </details>
@@ -243,7 +248,7 @@ expect(evidence).to_contain("ios_mdi_proof_empty_source_count=0")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -265,7 +270,9 @@ expect(evidence).to_contain("ios_mdi_proof_marker_source_count=1")
 expect(evidence).to_contain("ios_mdi_proof_missing_source_count=0")
 expect(evidence).to_contain("ios_mdi_proof_symlink_source_count=0")
 expect(evidence).to_contain("ios_mdi_proof_hardlink_source_count=0")
+expect(evidence).to_contain("ios_mdi_proof_duplicate_source_count=0")
 expect(evidence).to_contain("ios_mdi_proof_empty_source_count=1")
+expect(evidence).to_contain("ios_mdi_proof_nonregular_source_count=0")
 ```
 
 </details>
@@ -280,7 +287,7 @@ expect(evidence).to_contain("ios_mdi_proof_empty_source_count=1")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -302,6 +309,7 @@ expect(evidence).to_contain("ios_mdi_proof_marker_source_count=1")
 expect(evidence).to_contain("ios_mdi_proof_missing_source_count=0")
 expect(evidence).to_contain("ios_mdi_proof_symlink_source_count=1")
 expect(evidence).to_contain("ios_mdi_proof_hardlink_source_count=0")
+expect(evidence).to_contain("ios_mdi_proof_duplicate_source_count=0")
 expect(evidence).to_contain("ios_mdi_proof_empty_source_count=0")
 expect(evidence).to_contain("ios_mdi_proof_nonregular_source_count=0")
 ```
@@ -310,13 +318,16 @@ expect(evidence).to_contain("ios_mdi_proof_nonregular_source_count=0")
 
 #### rejects hardlinked requested mobile MDI proof log source paths
 
+-  proof log command
+- " && " +  proof log command
+   - Expected: code equals `1`
 - Confirm a valid companion MDI proof log cannot hide a hardlinked requested source
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -348,6 +359,8 @@ expect(evidence).to_contain("android_mdi_proof_nonregular_source_count=0")
 
 #### rejects duplicate requested mobile MDI proof log source paths
 
+-  proof log command
+   - Expected: code equals `1`
 - Confirm the same requested log artifact cannot satisfy multiple source channels
 
 
@@ -413,6 +426,7 @@ expect(evidence).to_contain("android_mdi_proof_marker_source_count=1")
 expect(evidence).to_contain("android_mdi_proof_missing_source_count=0")
 expect(evidence).to_contain("android_mdi_proof_symlink_source_count=0")
 expect(evidence).to_contain("android_mdi_proof_hardlink_source_count=0")
+expect(evidence).to_contain("android_mdi_proof_duplicate_source_count=0")
 expect(evidence).to_contain("android_mdi_proof_empty_source_count=0")
 expect(evidence).to_contain("android_mdi_proof_nonregular_source_count=1")
 ```
@@ -430,7 +444,7 @@ expect(evidence).to_contain("android_mdi_proof_nonregular_source_count=1")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -452,7 +466,9 @@ expect(evidence).to_contain("ios_mdi_proof_marker_source_count=2")
 expect(evidence).to_contain("ios_mdi_proof_missing_source_count=0")
 expect(evidence).to_contain("ios_mdi_proof_symlink_source_count=0")
 expect(evidence).to_contain("ios_mdi_proof_hardlink_source_count=0")
+expect(evidence).to_contain("ios_mdi_proof_duplicate_source_count=0")
 expect(evidence).to_contain("ios_mdi_proof_empty_source_count=0")
+expect(evidence).to_contain("ios_mdi_proof_nonregular_source_count=0")
 ```
 
 </details>
@@ -467,7 +483,7 @@ expect(evidence).to_contain("ios_mdi_proof_empty_source_count=0")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -490,6 +506,7 @@ expect(evidence).to_contain("ios_mdi_proof_missing_source_count=0")
 expect(evidence).to_contain("ios_mdi_proof_symlink_source_count=0")
 expect(evidence).to_contain("ios_mdi_proof_hardlink_source_count=0")
 expect(evidence).to_contain("ios_mdi_proof_empty_source_count=0")
+expect(evidence).to_contain("ios_mdi_proof_nonregular_source_count=0")
 expect(device_log).to_contain("[tauri-shell] mdi proof:")
 ```
 
@@ -505,7 +522,7 @@ expect(device_log).to_contain("[tauri-shell] mdi proof:")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -546,7 +563,7 @@ expect(device_log).to_contain("[tauri-shell] mdi proof:")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -572,6 +589,7 @@ expect(evidence).to_contain("android_mdi_proof_missing_source_count=0")
 expect(evidence).to_contain("android_mdi_proof_symlink_source_count=0")
 expect(evidence).to_contain("android_mdi_proof_hardlink_source_count=0")
 expect(evidence).to_contain("android_mdi_proof_empty_source_count=0")
+expect(evidence).to_contain("android_mdi_proof_nonregular_source_count=0")
 expect(external).to_contain("{\"stale\":true}")
 ```
 
@@ -587,7 +605,7 @@ expect(external).to_contain("{\"stale\":true}")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 23 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -629,7 +647,7 @@ expect(external).to_contain("{\"stale\":true}")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -662,8 +680,8 @@ expect(evidence).to_contain("ios_mdi_proof_nonregular_source_count=0")
 -  proof log command
    - Expected: code equals `1`
 - Confirm bad prefixes cannot mint platform-specific MDI proof rows
-   - Expected: evidence does not contain `ios-simulator_mdi_proof_status`
-   - Expected: evidence does not contain `ios_mdi_proof_status`
+- expect not
+- expect not
 
 
 <details>
@@ -737,7 +755,7 @@ expect(html).to_contain("android_mdi_event_status=pass")
 -  proof log command
    - Expected: code equals `1`
 - Confirm missing delta does not default to zero
-   - Expected: evidence does not contain `ios_mdi_performance_now_delta_ms=0`
+- expect not
 
 
 <details>
@@ -815,7 +833,7 @@ expect(slow).to_contain("ios_mdi_performance_now_delta_ms=1001")
 -  proof log command
    - Expected: code equals `1`
 - Confirm mobile MDI proof requires structured input-to-paint timing
-   - Expected: string_latency does not contain `ios_mdi_input_to_paint_ms=2.5`
+- expect not
 
 
 <details>
@@ -866,7 +884,7 @@ expect(slow).to_contain("android_mdi_input_to_paint_ms=1001")
 -  proof log command
 -  proof log command
    - Expected: code equals `1`
-   - Expected: viewport does not contain `ios_mdi_capture_viewport_width=0`
+- expect not
 
 
 <details>
@@ -910,8 +928,8 @@ expect(orientation).to_contain("android_mdi_capture_screen_orientation=")
 -  proof log command
    - Expected: code equals `1`
 - Confirm fractional event counts are not accepted as routed-event proof
-   - Expected: windows does not contain `ios_mdi_proof_window_count=4.5`
-   - Expected: taskbar does not contain `android_mdi_event_taskbar_item_count=4.5`
+- expect not
+- expect not
 
 
 <details>
@@ -949,6 +967,7 @@ expect_not(taskbar.contains("android_mdi_event_taskbar_item_count=4.5"))
 
 -  proof log command
 -  proof log command
+-  proof log command
    - Expected: code equals `1`
 - Confirm individual event-route diagnostics survive validation
 
@@ -956,7 +975,7 @@ expect_not(taskbar.contains("android_mdi_event_taskbar_item_count=4.5"))
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -965,21 +984,28 @@ val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
     _proof_log_command(root + "/body.log", "p.bodyClickRouted=false") +
     " && node scripts/check/validate-tauri-mobile-mdi-proof.js ios " + root + "/body.json " + root + "/body.log > " + root + "/body.env; " +
     _proof_log_command(root + "/taskbar.log", "p.taskbarLabelsVisible=false") +
-    " && node scripts/check/validate-tauri-mobile-mdi-proof.js android " + root + "/taskbar.json " + root + "/taskbar.log > " + root + "/taskbar.env"
+    " && node scripts/check/validate-tauri-mobile-mdi-proof.js android " + root + "/taskbar.json " + root + "/taskbar.log > " + root + "/taskbar.env; " +
+    _proof_log_command(root + "/sequence.log", "p.eventSequence=[\"app_action:body_click\",\"window_drag:move\",\"app_input:body_input\",\"app_key:body_key\"]") +
+    " && node scripts/check/validate-tauri-mobile-mdi-proof.js ios " + root + "/sequence.json " + root + "/sequence.log > " + root + "/sequence.env"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(1)
 
 val body = file_read(root + "/body.env")
 val taskbar = file_read(root + "/taskbar.env")
+val sequence = file_read(root + "/sequence.env")
 step("Confirm individual event-route diagnostics survive validation")
 expect(body).to_contain("ios_mdi_proof_status=fail")
 expect(body).to_contain("ios_mdi_event_status=fail")
 expect(body).to_contain("ios_mdi_event_body_click_routed=false")
 expect(body).to_contain("ios_mdi_event_body_input_routed=true")
+expect(body).to_contain("ios_mdi_event_sequence=window_drag:move,app_action:body_click,app_input:body_input,app_key:body_key")
 expect(taskbar).to_contain("android_mdi_proof_status=fail")
 expect(taskbar).to_contain("android_mdi_event_status=fail")
 expect(taskbar).to_contain("android_mdi_event_taskbar_labels_visible=false")
 expect(taskbar).to_contain("android_mdi_event_taskbar_icons_visible=true")
+expect(sequence).to_contain("ios_mdi_proof_status=fail")
+expect(sequence).to_contain("ios_mdi_event_status=fail")
+expect(sequence).to_contain("ios_mdi_event_sequence=app_action:body_click,window_drag:move,app_input:body_input,app_key:body_key")
 ```
 
 </details>
@@ -992,11 +1018,11 @@ expect(taskbar).to_contain("android_mdi_event_taskbar_icons_visible=true")
 -  proof log command
    - Expected: code equals `1`
 - Confirm mobile string booleans remain malformed diagnostics
-   - Expected: event does not contain `ios_mdi_event_body_click_routed=false`
-   - Expected: html does not contain `android_mdi_render_html_renderable=false`
-   - Expected: perf does not contain `ios_mdi_performance_now_available=false`
-   - Expected: animation does not contain `android_mdi_animation_frame_available=false`
-   - Expected: animation does not contain `android_mdi_css_animation_probe=false`
+- expect not
+- expect not
+- expect not
+- expect not
+- expect not
 
 
 <details>
@@ -1053,8 +1079,8 @@ expect_not(animation.contains("android_mdi_css_animation_probe=false"))
 -  proof log command
    - Expected: code equals `1`
 - Confirm fractional capture and animation values are not accepted as proof
-   - Expected: viewport does not contain `ios_mdi_capture_viewport_width=390.5`
-   - Expected: animation does not contain `android_mdi_animation_frame_count=2.5`
+- expect not
+- expect not
 
 
 <details>
@@ -1101,15 +1127,15 @@ expect_not(animation.contains("android_mdi_animation_frame_count=2.5"))
 -  proof log command
    - Expected: code equals `1`
 - Confirm exponential integer fields produce typed fail-closed rows
-   - Expected: count does not contain `Cannot convert`
-   - Expected: viewport does not contain `1e+21`
-   - Expected: animation does not contain `Cannot convert`
+- expect not
+- expect not
+- expect not
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 31 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1157,14 +1183,14 @@ expect_not(animation.contains("Cannot convert"))
 -  proof log command
    - Expected: code equals `1`
 - Confirm stringified numeric mobile proof values are rejected
-   - Expected: image does not contain `ios_mdi_render_image_count=1`
-   - Expected: windows does not contain `ios_mdi_proof_window_count=4`
-   - Expected: taskbar does not contain `android_mdi_event_taskbar_icon_count=4`
-   - Expected: viewport does not contain `android_mdi_capture_viewport_width=390`
-   - Expected: dpr does not contain `android_mdi_capture_device_pixel_ratio=3`
-   - Expected: performance does not contain `ios_mdi_performance_now_delta_ms=1.25`
-   - Expected: latency does not contain `ios_mdi_input_to_paint_ms=2.5`
-   - Expected: animation does not contain `android_mdi_animation_frame_count=2`
+- expect not
+- expect not
+- expect not
+- expect not
+- expect not
+- expect not
+- expect not
+- expect not
 
 
 <details>
@@ -1250,7 +1276,7 @@ expect_not(animation.contains("android_mdi_animation_frame_count=2"))
 
 -  proof log command
    - Expected: code equals `1`
-   - Expected: evidence does not contain `android_mdi_animation_frame_count=0`
+- expect not
 
 
 <details>
@@ -1355,7 +1381,7 @@ expect(evidence).to_contain("ios_mdi_animation_status=pass")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 44 lines folded for reproduction.
+Runnable source: 72 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1388,6 +1414,9 @@ expect(android).to_contain("android_mdi_proof_marker_source_size_bytes")
 expect(android).to_contain("android_mdi_proof_marker_source_actual_size_bytes")
 expect(android).to_contain("android_mdi_proof_marker_source_file_status")
 expect(android).to_contain("android_mdi_proof_marker_source_file_reason")
+expect(android).to_contain("printf 'mdi-smoke\\n' > \"$TAURI_DIR/src-tauri/mobile_probe_entry.txt\"")
+expect(android).to_contain("cp \"$SMOKE_SOURCE\" \"$TAURI_DIR/src-tauri/mobile_entry_source.spl\"")
+expect(android).to_contain("SIMPLE_TAURI_MOBILE_PROBE_ENTRY=mdi-smoke")
 expect(ios).to_contain("ios_mdi_capture_device_pixel_ratio")
 expect(android).to_contain("android_mdi_capture_device_pixel_ratio")
 expect(shell).to_contain("devicePixelRatio")

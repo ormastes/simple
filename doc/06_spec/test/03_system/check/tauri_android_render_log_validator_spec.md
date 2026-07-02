@@ -518,7 +518,7 @@ expect(angle).to_contain("android_render_log_failure_marker_status=fail")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 78 lines folded for reproduction.
+Runnable source: 81 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -538,6 +538,9 @@ expect(direct).to_contain("validate-tauri-android-render-log-proof.js")
 expect(direct).to_contain("android_render_log.validation.env")
 expect(direct).to_contain("cat \"$RENDER_LOG_VALIDATION_ENV\"")
 expect(direct).to_contain("android_mdi_proof.validation.env")
+expect(direct).to_contain("android_tauri_build.log")
+expect(direct).to_contain("TAURI_ANDROID_RENDERER_BUILD_APK")
+expect(direct).to_contain("wait \"$LOGCAT_PID\"")
 expect(direct).to_contain("android_screenshot_file_status=$android_screenshot_file_status")
 expect(direct).to_contain("android_screenshot_file_reason=$android_screenshot_file_reason")
 expect(direct).to_contain("android_screenshot_artifact_status=$android_screenshot_artifact_status")

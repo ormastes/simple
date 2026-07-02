@@ -162,3 +162,40 @@ dev-done
   CUDA readback `missing-verified-ptx`, and OpenCL readback
   `missing-opencl-runtime-loader`. This is the current remaining production
   parity blocker after the macOS WKWebView/Metal surface work.
+- implementation: Added macOS Metal vector/bitmap font readback to the
+  production font runtime/offload evidence path. The vector-font compute wrapper
+  now produces real Metal glyph pixel readback with
+  `metal-vector-font-glyph-pixels-returned`, the production runtime wrapper
+  accepts Metal generated-2D readback as the selected backend proof, and the
+  font offload wrapper consumes the resulting vector and bitmap readback rows.
+- evidence: Live font evidence passed in
+  `build/font-runtime-metal-after-fix/report.md` and
+  `build/font-offload-metal-after-fix/report.md`: runtime selected backend
+  `metal`, vector glyph readback returned 4 glyphs and 912 glyph pixels,
+  vector readback status `vector-font-glyph-readback-matched`, bitmap readback
+  status `gpu-glyph-raster-readback-matched`, and both vector/bitmap production
+  readiness rows were `true`.
+- evidence: Fresh full desktop production aggregate passed in
+  `doc/09_report/production_gui_web_renderer_parity_evidence_2026-07-02.md`
+  with `production_gui_web_renderer_parity_status=pass`, layout/surface/backend
+  gates `pass`, Tauri and Chrome live capture `true`, font offload `pass`,
+  Metal readback `pass`, Metal render-log `pass`, blocked Metal gates `0`, and
+  event routing `pass`.
+- implementation: Hardened Android mobile renderer evidence after the desktop
+  sync. The Android wrapper now honors an overridable build dir, prepares the
+  same bundled `mdi-smoke` entry used by iOS, regenerates the Tauri UI bundle,
+  runs `npm run prepare:dist`, builds the debug APK by default, launches a live
+  emulator/device, and freezes logcat before source-size validation so a growing
+  log cannot invalidate real marker evidence.
+- evidence: Focused Android evidence passed in
+  `build/tauri_android_mobile_renderer_after_log_freeze`: live emulator
+  `emulator-5554`, screenshot `1080x2400`, render-log validation `pass`,
+  Vulkan marker `pass`, foreground marker `pass`, MDI proof `pass`, event
+  status `pass`, capture status `pass`, performance status `pass`, and
+  animation status `pass`.
+- evidence: Full mobile aggregate passed in
+  `build/tauri_mobile_renderer_parity_after_android_mdi_fix/report.md` with
+  `tauri_mobile_renderer_parity_status=pass`, desktop production source
+  `pass`, iOS WKWebView/Metal render-log/layout/screenshot/MDI proof all
+  `pass`, and Android WebView/Vulkan render-log/layout/screenshot/MDI proof all
+  `pass`.

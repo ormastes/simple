@@ -7,7 +7,7 @@
 - **Total Features:** 2
 - **Complete Documentation:** 2 (100%)
 - **Stubs Remaining:** 0
-- **Total Lines:** 90
+- **Total Lines:** 116
 - **Warnings:** 2
 
 ---
@@ -16,6 +16,6 @@
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Tauri Simple Web layout proof validator](test/03_system/check/tauri_simple_web_layout_proof_validator_spec.md) | Partial | N/A | 20 | 40% | 60 lines |
-| [Tauri/Chrome Simple Web layout manifest evidence](test/03_system/check/tauri_chrome_simple_web_layout_manifest_evidence_spec.md) | Minimal | N/A | 1 | 20% | 30 lines |
+| [Tauri mobile MDI proof validator](test/03_system/check/tauri_mobile_mdi_proof_validator_spec.md) | Partial | N/A | 29 | 40% | 70 lines |
+| [Tauri Android render-log validator](test/03_system/check/tauri_android_render_log_validator_spec.md) | Minimal | N/A | 13 | 20% | 46 lines |
 
