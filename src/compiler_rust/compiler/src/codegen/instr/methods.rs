@@ -323,7 +323,12 @@ pub(crate) fn compile_builtin_method<M: Module>(
         | ("String", "contains")
         | ("string", "contains") => {
             let arg_val = ctx.get_vreg(&args[0])?;
-            let result_i8 = call_runtime_2(ctx, builder, "rt_contains", receiver_val, arg_val);
+            // Box the search value so an int key/element matches what `get`/`set`
+            // (which wrap_value the key) stored — a raw i64 would hash/compare as
+            // a bogus tagged value and `Dict<i64,_>.has(k)` would always miss.
+            // wrap_value is a no-op for already-boxed heap args (e.g. substrings).
+            let wrapped_arg = wrap_value(ctx, builder, args[0], arg_val);
+            let result_i8 = call_runtime_2(ctx, builder, "rt_contains", receiver_val, wrapped_arg);
             Some(super::helpers::safe_extend_to_i64(builder, result_i8))
         }
         ("String", "parse_f64")

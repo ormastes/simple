@@ -67,8 +67,14 @@ pub(crate) fn inline_runtime_len_value(
     let is_heap_string = builder.ins().icmp_imm(IntCC::Equal, object_type, 1);
     let is_string = builder.ins().bor(is_core_string, is_heap_string);
     let is_array = builder.ins().icmp_imm(IntCC::Equal, object_type, 2);
-    // RuntimeString and RuntimeArray both store len at offset 8.
-    let has_len = builder.ins().bor(is_string, is_array);
+    // RuntimeDict (object_type 0x03) shares the {header, len, capacity} header
+    // layout, so its entry count is likewise stored at offset 8. Without this
+    // case `d.len()`/`d.is_empty()` on an untyped-receiver dict fall through to
+    // the -1 sentinel under the Cranelift JIT fast path.
+    let is_dict = builder.ins().icmp_imm(IntCC::Equal, object_type, 3);
+    // RuntimeString, RuntimeArray and RuntimeDict all store len at offset 8.
+    let has_len_str_arr = builder.ins().bor(is_string, is_array);
+    let has_len = builder.ins().bor(has_len_str_arr, is_dict);
     builder.ins().brif(has_len, len_block, &[], done_block, &[invalid]);
     builder.seal_block(type_block);
 

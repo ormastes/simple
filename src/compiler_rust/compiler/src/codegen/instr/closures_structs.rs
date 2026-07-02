@@ -1240,7 +1240,12 @@ fn try_compile_builtin_method_call<M: Module>(
     // INT tag is 0, so a left shift by 3 suffices. Done inline, NOT via
     // wrap_value/rt_box_int, which is not linked into native AOT builds and would
     // `call 0x0`. String/heap keys are left as-is (matched by content at runtime).
-    let box_dict_key = matches!(runtime_func, "rt_index_get" | "rt_dict_remove");
+    // rt_contains backs `has`/`contains_key`/`in`: for a dict it hash-looks-up
+    // the key, so an int key must be tag-boxed to match how `d[k] = v` stored it
+    // (otherwise `d.has(1)` misses every int key). Boxing is also correct for
+    // Array.contains(int) and String.contains(int_char), whose runtime paths
+    // compare against tagged RuntimeValues / call `.is_int()`.
+    let box_dict_key = matches!(runtime_func, "rt_index_get" | "rt_dict_remove" | "rt_contains");
     let key_is_int = matches!(
         ctx.vreg_types.get(args.first().unwrap_or(&receiver)).copied(),
         Some(
