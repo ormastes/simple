@@ -234,6 +234,8 @@ fn rv_isel_inst(ctx: ISelContext, inst: MirInst) -> ISelInstResult:
             rv_isel_load(ctx, dest, ptr)
         case Store(ptr, value):
             rv_isel_store(ctx, ptr, value)
+        case GetElementPtr(dest, base, indices):
+            rv_isel_get_element_ptr(ctx, dest, base, indices)
         case Intrinsic(dest, name, args):
             rv_isel_intrinsic(ctx, dest, name, args)
         case Call(dest, func_op, args):
@@ -474,6 +476,28 @@ fn rv_isel_set_field(ctx: ISelContext, base: MirOperand, field: i64, value: MirO
     # SD value, offset(base)
     insts.push(new_mach_inst(RV_OP_SD, [val_low.result, op_mem(operand_get_reg(base_low.result), offset)]))
     ISelInstResult(insts: insts, ctx: val_low.ctx)
+
+fn rv_isel_get_element_ptr(ctx: ISelContext, dest: LocalId, base: MirOperand, indices: [MirOperand]) -> ISelInstResult:
+    var insts: [MachInst] = []
+    var current_ctx = ctx
+    val base_low = rv_lower_operand(current_ctx, base)
+    current_ctx = base_low.ctx
+    for ai in base_low.insts:
+        insts.push(ai)
+    val dest_op = local_vreg_op(dest.id)
+    if indices.len() > 0:
+        val idx_low = rv_lower_operand(current_ctx, indices[0])
+        current_ctx = idx_low.ctx
+        for ai in idx_low.insts:
+            insts.push(ai)
+        current_ctx = isel_alloc_vreg(current_ctx)
+        val tmp_op = op_reg(virtual_reg(isel_get_vreg(current_ctx)))
+        insts.push(new_mach_inst(RV_OP_LI, [tmp_op, op_imm(RV64_WORD_SIZE)]))
+        insts.push(new_mach_inst(RV_OP_MUL, [tmp_op, tmp_op, idx_low.result]))
+        insts.push(new_mach_inst(RV_OP_ADD, [dest_op, base_low.result, tmp_op]))
+    else:
+        insts.push(new_mach_inst(RV_OP_MV, [dest_op, base_low.result]))
+    ISelInstResult(insts: insts, ctx: current_ctx)
 
 fn rv_isel_alloc(ctx: ISelContext, dest: LocalId, type_: MirType) -> ISelInstResult:
     val size = type_.size_bytes()
