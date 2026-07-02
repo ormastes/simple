@@ -105,3 +105,33 @@ cannot reach a `pass` end-to-end on this host until the `app.io.cli_ops` /
   (report written to
   `doc/09_report/simpleos_wm_qmp_drag_delta_evidence_2026-07-02.md`, untracked,
   not added to git per repo convention).
+
+## Linux follow-up: 2026-07-02
+- Entry path remains fixed and the gate now invokes
+  `src/app/test/simpleos_desktop_qmp_launch.spl`.
+- The wrapper now distinguishes an empty launcher entry
+  (`guest-entry-not-reported`) from a reported path that is missing on disk
+  (`guest-entry-source-missing`).
+- Live evidence at `build/simpleos-wm-qmp-drag-delta-long/evidence.env` reached
+  the real `wm-simple-web` launcher and validated the guest input contract:
+  `qemu_wm_drag_delta_guest_input_contract_status=pass`.
+- Current blocker is earlier than QEMU drag injection: the self-hosted native
+  build of `examples/09_embedded/simple_os/arch/x86_64/gui_entry_engine2d.spl`
+  timed out at `900000` ms. The wrapper now reports this as
+  `wm-simple-web-build-timeout` instead of the generic
+  `wm-simple-web-build-failed` when the launch log contains the native-build
+  timeout signature.
+- The timed-out command used `--log on`; the QMP wrapper now defaults
+  `SIMPLE_OS_LOG_MODE=off` for the launcher, matching the sibling fullscreen
+  evidence wrapper for this same kernel while preserving explicit env
+  overrides for diagnostics.
+- A follow-up live run with the log-off default still timed out before QEMU:
+  `build/simpleos-wm-qmp-drag-delta-logoff/evidence.env` reports
+  `qemu_wm_drag_delta_reason=wm-simple-web-build-timeout`,
+  `qemu_wm_drag_delta_launcher_reason=wm-simple-web-build-timeout`, and
+  `qemu_wm_drag_delta_guest_input_contract_status=pass`.
+- The failed live runs left orphaned `native_build_worker.spl` processes for
+  `build/os/simpleos_wm_simple_web_check_32.elf`. Those stale workers were
+  stopped, and the OS runner now passes `--timeout 870` to this target's
+  native-build worker so it should report through `simple native-build` before
+  the outer 900s OS build timeout kills the supervisor.

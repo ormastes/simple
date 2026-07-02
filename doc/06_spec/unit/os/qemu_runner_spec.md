@@ -704,6 +704,23 @@ expect(rt_env_set("SIMPLE_OS_LOG_MODE", "on")).to_equal(true)
 
 </details>
 
+#### bounds wm simple web worker timeout below the OS build timeout
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val target = get_wm_simple_web_check_target()
+val args = os_native_build_args(target, "cranelift")
+expect(args).to_contain("--timeout")
+expect(args).to_contain("870")
+```
+
+</details>
+
 #### looks up RISC-V SMF scenarios by name
 
 <details>
