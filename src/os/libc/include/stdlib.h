@@ -18,6 +18,9 @@ extern "C" {
 #define EXIT_SUCCESS 0
 #define EXIT_FAILURE 1
 #define RAND_MAX     2147483647
+#define MB_CUR_MAX   1
+
+typedef struct __simpleos_locale *locale_t;
 
 /* Memory allocation */
 void *malloc(size_t size);
@@ -45,6 +48,13 @@ unsigned long long strtoull(const char *nptr, char **endptr, int base);
 double    strtod(const char *nptr, char **endptr);
 float     strtof(const char *nptr, char **endptr);
 long double strtold(const char *nptr, char **endptr);
+float     strtof_l(const char *nptr, char **endptr, locale_t locale);
+double    strtod_l(const char *nptr, char **endptr, locale_t locale);
+long double strtold_l(const char *nptr, char **endptr, locale_t locale);
+long long strtoll_l(const char *nptr, char **endptr, int base, locale_t locale);
+unsigned long long strtoull_l(const char *nptr, char **endptr, int base,
+                              locale_t locale);
+int mbtowc(wchar_t *pwc, const char *s, size_t n);
 
 /* Environment */
 char *getenv(const char *name);

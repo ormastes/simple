@@ -59,27 +59,7 @@ int pthread_mutex_unlock(pthread_mutex_t *mutex)   { (void)mutex; return 0; }
 int pthread_mutex_destroy(pthread_mutex_t *mutex)  { (void)mutex; return 0; }
 
 /* ====================================================================
- * 3. Condition variables — no-ops
- * ==================================================================== */
-
-int pthread_cond_init(pthread_cond_t *cond,
-                      const pthread_condattr_t *attr) {
-    (void)attr;
-    if (cond) memset(cond, 0, sizeof(*cond));
-    return 0;
-}
-
-int pthread_cond_wait(pthread_cond_t *cond, pthread_mutex_t *mutex) {
-    (void)cond; (void)mutex;
-    return 0;
-}
-
-int pthread_cond_signal(pthread_cond_t *cond)    { (void)cond; return 0; }
-int pthread_cond_broadcast(pthread_cond_t *cond) { (void)cond; return 0; }
-int pthread_cond_destroy(pthread_cond_t *cond)   { (void)cond; return 0; }
-
-/* ====================================================================
- * 4. Mutex and condition attributes — stubs
+ * 3. Mutex attributes — stubs
  * ==================================================================== */
 
 int pthread_mutexattr_init(pthread_mutexattr_t *attr)    { (void)attr; return 0; }
@@ -89,11 +69,8 @@ int pthread_mutexattr_settype(pthread_mutexattr_t *attr, int type) {
     return 0;
 }
 
-int pthread_condattr_init(pthread_condattr_t *attr)    { (void)attr; return 0; }
-int pthread_condattr_destroy(pthread_condattr_t *attr) { (void)attr; return 0; }
-
 /* ====================================================================
- * 5. Once — simple flag-based implementation
+ * 4. Once — simple flag-based implementation
  * ==================================================================== */
 
 int pthread_once(pthread_once_t *once_control, void (*init_routine)(void)) {
@@ -105,7 +82,7 @@ int pthread_once(pthread_once_t *once_control, void (*init_routine)(void)) {
 }
 
 /* ====================================================================
- * 6. Thread-local storage — static array (single-threaded)
+ * 5. Thread-local storage — static array (single-threaded)
  * ==================================================================== */
 
 #define MAX_KEYS 64
@@ -142,7 +119,7 @@ int pthread_setspecific(pthread_key_t key, const void *value) {
 }
 
 /* ====================================================================
- * 7. Thread attributes — stubs
+ * 6. Thread attributes — stubs
  * ==================================================================== */
 
 int pthread_attr_init(pthread_attr_t *attr)    { (void)attr; return 0; }

@@ -25,13 +25,21 @@ val INSTRUMENTATION_HEX_PATCH = "src/os/port/llvm/patches/0009-llvm-instrumentat
 val MEMPROF_HEX_PATCH = "src/os/port/llvm/patches/0010-llvm-memprof-no-iostream-nodeid-formatting.patch.md"
 val IMPORT_STATS_PATCH = "src/os/port/llvm/patches/0011-llvm-analysis-import-stats-no-iostream-precision.patch.md"
 val MC_NO_SSTREAM_PATCH = "src/os/port/llvm/patches/0012-llvm-mc-no-sstream.patch.md"
+val COVERAGE_MAPPING_PATCH = "src/os/port/llvm/patches/0013-llvm-coverage-mapping-no-sstream.patch.md"
+val TEXTAPI_DYLIBREADER_PATCH = "src/os/port/llvm/patches/0014-llvm-textapi-dylibreader-no-iostream-hex-formatting.patch.md"
+val CLANG_PPMACROEXPANSION_PATCH = "src/os/port/llvm/patches/0015-clang-lex-ppmacroexpansion-no-put-time.patch.md"
 val LLVM_TOOLCHAIN = "src/os/toolchain/llvm/simpleos_cross_toolchain.cmake"
 val CTYPE_H = "src/os/libc/include/ctype.h"
 val INTTYPES_H = "src/os/libc/include/inttypes.h"
+val LOCALE_H = "src/os/libc/include/locale.h"
 val MBSTATE_H = "src/os/libc/include/bits/types/mbstate_t.h"
+val STDLIB_H = "src/os/libc/include/stdlib.h"
+val STRING_H = "src/os/libc/include/string.h"
 val SYSEXITS_H = "src/os/libc/include/sysexits.h"
+val TIME_H = "src/os/libc/include/time.h"
 val PTHREAD_H = "src/os/libc/include/pthread.h"
 val WCHAR_H = "src/os/libc/include/wchar.h"
+val WCTYPE_H = "src/os/libc/include/wctype.h"
 val SCHED_H = "src/os/libc/include/sched.h"
 val UNISTD_H = "src/os/libc/include/unistd.h"
 val SYS_RESOURCE_H = "src/os/libc/include/sys/resource.h"
@@ -41,6 +49,7 @@ val SYS_SOCKET_H = "src/os/libc/include/sys/socket.h"
 val SYS_UN_H = "src/os/libc/include/sys/un.h"
 val SYS_FILE_H = "src/os/libc/include/sys/file.h"
 val SYS_STATVFS_H = "src/os/libc/include/sys/statvfs.h"
+val SYS_UTSNAME_H = "src/os/libc/include/sys/utsname.h"
 
 fn build_spl_src() -> text:
     process.run("cat", [BUILD_SPL]).stdout
@@ -158,23 +167,35 @@ describe "SimpleOS LLVM per-target build (A4/A5)":
         check(src.contains("check_cxx_runtime_headers"))
         check(src.contains("#include <iosfwd>"))
         check(src.contains("SimpleOS C++ standard headers are not available"))
+        check(src.contains("sys/utsname.h"))
 
     it "sysroot.shs stages libc++ headers":
         val src = sysroot_shs_src()
         check(src.contains("libcxx/include"))
+        check(src.contains("build_libcxx_runtime"))
+        check(src.contains("libc++.a"))
         check(src.contains("include/c++/v1"))
         check(src.contains("__config_site"))
         check(src.contains("__assertion_handler"))
         check(src.contains("_LIBCPP_HAS_THREADS 1"))
+        check(src.contains("_LIBCPP_HAS_CLOCK_GETTIME 1"))
         check(src.contains("_LIBCPP_HAS_THREAD_API_PTHREAD 1"))
         check(src.contains("_LIBCPP_HAS_RANDOM_DEVICE 1"))
         check(src.contains("_LIBCPP_HAS_LOCALIZATION 0"))
         check(src.contains("_LIBCPP_HAS_WIDE_CHARACTERS 1"))
+        check(src.contains("_LIBCPP_PROVIDES_DEFAULT_RUNE_TABLE 1"))
+        check(src.contains("_LIBCPP_PSTL_BACKEND_SERIAL"))
 
     it "LLVM toolchain searches libc++ before C headers":
         val src = llvm_toolchain_src()
         check(src.contains("include/c++/v1"))
         check(src.contains("-isystem"))
+        check(src.contains("SIMPLEOS_CXX_LINK_RUNTIME"))
+        check(src.contains("CMAKE_CXX_STANDARD_LIBRARIES"))
+        check(src.contains("crt0.o"))
+        check(src.contains("-lc++"))
+        check(src.contains("-lsimpleos_c"))
+        check(src.contains("-lm"))
 
     it "LLVM toolchain advertises Unix-style support for SimpleOS":
         val src = llvm_toolchain_src()
@@ -188,8 +209,12 @@ describe "SimpleOS LLVM per-target build (A4/A5)":
     it "SimpleOS libc has C++ port support headers":
         check(regular_file_exists(CTYPE_H))
         check(regular_file_exists(INTTYPES_H))
+        check(regular_file_exists(LOCALE_H))
         check(regular_file_exists(MBSTATE_H))
+        check(regular_file_exists(STDLIB_H))
+        check(regular_file_exists(STRING_H))
         check(regular_file_exists(SYSEXITS_H))
+        check(regular_file_exists(TIME_H))
         check(regular_file_exists(SCHED_H))
         check(regular_file_exists(SYS_RESOURCE_H))
         check(regular_file_exists(SYS_TIME_H))
@@ -198,6 +223,29 @@ describe "SimpleOS LLVM per-target build (A4/A5)":
         check(regular_file_exists(SYS_UN_H))
         check(regular_file_exists(SYS_FILE_H))
         check(regular_file_exists(SYS_STATVFS_H))
+        check(regular_file_exists(SYS_UTSNAME_H))
+        check(regular_file_exists(WCTYPE_H))
+
+    it "SimpleOS libc exposes libc++ C-locale fallback declarations":
+        val ctype = process.run("cat", [CTYPE_H]).stdout
+        val locale = process.run("cat", [LOCALE_H]).stdout
+        val stdlib = process.run("cat", [STDLIB_H]).stdout
+        val string = process.run("cat", [STRING_H]).stdout
+        val time = process.run("cat", [TIME_H]).stdout
+        val wchar = process.run("cat", [WCHAR_H]).stdout
+        val wctype = process.run("cat", [WCTYPE_H]).stdout
+        check(ctype.contains("isascii"))
+        check(ctype.contains("isprint_l"))
+        check(locale.contains("LC_COLLATE_MASK"))
+        check(locale.contains("newlocale"))
+        check(stdlib.contains("strtod_l"))
+        check(stdlib.contains("mbtowc"))
+        check(string.contains("strcoll_l"))
+        check(time.contains("strftime_l"))
+        check(wchar.contains("mbsrtowcs"))
+        check(wchar.contains("wcsxfrm_l"))
+        check(wctype.contains("iswspace_l"))
+        check(wctype.contains("towlower_l"))
 
     it "SimpleOS wchar header exposes libc++ wide support declarations":
         val src = process.run("cat", [WCHAR_H]).stdout
@@ -292,3 +340,19 @@ describe "SimpleOS LLVM per-target build (A4/A5)":
         check(src.contains("MCPseudoProbe.cpp"))
         check(src.contains("AsmParser.cpp"))
         check(src.contains("MasmParser.cpp"))
+
+    it "records no-sstream coverage mapping patch":
+        val src = process.run("cat", [COVERAGE_MAPPING_PATCH]).stdout
+        check(src.contains("raw_string_ostream"))
+        check(src.contains("CoverageMapping.h"))
+
+    it "records no-iostream TextAPI DylibReader UUID formatting patch":
+        val src = process.run("cat", [TEXTAPI_DYLIBREADER_PATCH]).stdout
+        check(src.contains("format_hex_no_prefix"))
+        check(src.contains("DylibReader.cpp"))
+
+    it "records no-put-time Clang PPMacroExpansion timestamp patch":
+        val src = process.run("cat", [CLANG_PPMACROEXPANSION_PATCH]).stdout
+        check(src.contains("formatTimestamp"))
+        check(src.contains("PPMacroExpansion.cpp"))
+        check(src.contains("std::put_time"))

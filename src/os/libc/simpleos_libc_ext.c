@@ -124,6 +124,76 @@ char *setlocale(int category, const char *locale) {
 
 struct lconv *localeconv(void) { return &_c_lconv; }
 
+locale_t uselocale(locale_t locale) {
+    (void)locale;
+    return LC_GLOBAL_LOCALE;
+}
+
+locale_t newlocale(int category_mask, const char *locale, locale_t base) {
+    (void)category_mask;
+    (void)locale;
+    (void)base;
+    return LC_GLOBAL_LOCALE;
+}
+
+void freelocale(locale_t locale) {
+    (void)locale;
+}
+
+float strtof_l(const char *nptr, char **endptr, locale_t locale) {
+    (void)locale;
+    return strtof(nptr, endptr);
+}
+
+double strtod_l(const char *nptr, char **endptr, locale_t locale) {
+    (void)locale;
+    return strtod(nptr, endptr);
+}
+
+long double strtold(const char *nptr, char **endptr) {
+    return (long double)strtod(nptr, endptr);
+}
+
+long double strtold_l(const char *nptr, char **endptr, locale_t locale) {
+    (void)locale;
+    return strtold(nptr, endptr);
+}
+
+long long strtoll_l(const char *nptr, char **endptr, int base, locale_t locale) {
+    (void)locale;
+    return strtoll(nptr, endptr, base);
+}
+
+unsigned long long strtoull_l(const char *nptr, char **endptr, int base,
+                              locale_t locale) {
+    (void)locale;
+    return strtoull(nptr, endptr, base);
+}
+
+int strcoll(const char *s1, const char *s2) {
+    return strcmp(s1, s2);
+}
+
+size_t strxfrm(char *dest, const char *src, size_t n) {
+    size_t len = strlen(src);
+    if (dest && n > 0) {
+        size_t copy = len < n - 1 ? len : n - 1;
+        memcpy(dest, src, copy);
+        dest[copy] = '\0';
+    }
+    return len;
+}
+
+int strcoll_l(const char *s1, const char *s2, locale_t locale) {
+    (void)locale;
+    return strcoll(s1, s2);
+}
+
+size_t strxfrm_l(char *dest, const char *src, size_t n, locale_t locale) {
+    (void)locale;
+    return strxfrm(dest, src, n);
+}
+
 /* ========== wide char ========== */
 size_t wcslen(const wchar_t *s) {
     size_t n = 0;
@@ -198,6 +268,254 @@ size_t wcstombs(char *dst, const wchar_t *src, size_t n) {
     }
     if (dst && i < n) dst[i] = 0;
     return i;
+}
+
+wint_t btowc(int c) {
+    if (c == EOF) return WEOF;
+    unsigned char ch = (unsigned char)c;
+    return ch <= 0x7F ? (wint_t)ch : WEOF;
+}
+
+int wctob(wint_t c) {
+    return c <= 0x7F ? (int)c : EOF;
+}
+
+size_t mbrtowc(wchar_t *pwc, const char *s, size_t n, mbstate_t *ps) {
+    (void)ps;
+    if (!s) return 0;
+    if (n == 0) return (size_t)-2;
+    unsigned char ch = (unsigned char)*s;
+    if (ch == 0) {
+        if (pwc) *pwc = 0;
+        return 0;
+    }
+    if (ch > 0x7F) { errno = EILSEQ; return (size_t)-1; }
+    if (pwc) *pwc = (wchar_t)ch;
+    return 1;
+}
+
+size_t wcrtomb(char *s, wchar_t wc, mbstate_t *ps) {
+    (void)ps;
+    if (!s) return 1;
+    if ((unsigned int)wc > 0x7F) { errno = EILSEQ; return (size_t)-1; }
+    *s = (char)wc;
+    return 1;
+}
+
+size_t mbsnrtowcs(wchar_t *dst, const char **src, size_t nms, size_t len,
+                  mbstate_t *ps) {
+    (void)ps;
+    if (!src || !*src) return 0;
+    const char *s = *src;
+    size_t i = 0;
+    while (i < len && i < nms && s[i]) {
+        unsigned char ch = (unsigned char)s[i];
+        if (ch > 0x7F) { errno = EILSEQ; return (size_t)-1; }
+        if (dst) dst[i] = (wchar_t)ch;
+        i++;
+    }
+    if (i < nms && s[i] == '\0') {
+        if (dst && i < len) dst[i] = 0;
+        *src = NULL;
+    } else {
+        *src = s + i;
+    }
+    return i;
+}
+
+size_t wcsnrtombs(char *dst, const wchar_t **src, size_t nwc, size_t len,
+                  mbstate_t *ps) {
+    (void)ps;
+    if (!src || !*src) return 0;
+    const wchar_t *s = *src;
+    size_t i = 0;
+    while (i < len && i < nwc && s[i]) {
+        if ((unsigned int)s[i] > 0x7F) { errno = EILSEQ; return (size_t)-1; }
+        if (dst) dst[i] = (char)s[i];
+        i++;
+    }
+    if (i < nwc && s[i] == 0) {
+        if (dst && i < len) dst[i] = '\0';
+        *src = NULL;
+    } else {
+        *src = s + i;
+    }
+    return i;
+}
+
+static char *simpleos_wcs_to_ascii_alloc(const wchar_t *src) {
+    size_t len = wcslen(src);
+    char *buf = (char *)malloc(len + 1);
+    if (!buf) return NULL;
+    for (size_t i = 0; i < len; i++) {
+        if ((unsigned int)src[i] > 0x7F) {
+            free(buf);
+            errno = EILSEQ;
+            return NULL;
+        }
+        buf[i] = (char)src[i];
+    }
+    buf[len] = '\0';
+    return buf;
+}
+
+static void simpleos_set_wide_end(const wchar_t *src, wchar_t **endptr,
+                                  char *buf, char *narrow_end) {
+    if (endptr) *endptr = (wchar_t *)(src + (narrow_end ? narrow_end - buf : 0));
+}
+
+double wcstod(const wchar_t *nptr, wchar_t **endptr) {
+    char *buf = simpleos_wcs_to_ascii_alloc(nptr);
+    if (!buf) { if (endptr) *endptr = (wchar_t *)nptr; return 0.0; }
+    char *end = NULL;
+    double value = strtod(buf, &end);
+    simpleos_set_wide_end(nptr, endptr, buf, end);
+    free(buf);
+    return value;
+}
+
+float wcstof(const wchar_t *nptr, wchar_t **endptr) {
+    char *buf = simpleos_wcs_to_ascii_alloc(nptr);
+    if (!buf) { if (endptr) *endptr = (wchar_t *)nptr; return 0.0f; }
+    char *end = NULL;
+    float value = strtof(buf, &end);
+    simpleos_set_wide_end(nptr, endptr, buf, end);
+    free(buf);
+    return value;
+}
+
+long double wcstold(const wchar_t *nptr, wchar_t **endptr) {
+    char *buf = simpleos_wcs_to_ascii_alloc(nptr);
+    if (!buf) { if (endptr) *endptr = (wchar_t *)nptr; return 0.0L; }
+    char *end = NULL;
+    long double value = strtold(buf, &end);
+    simpleos_set_wide_end(nptr, endptr, buf, end);
+    free(buf);
+    return value;
+}
+
+long wcstol(const wchar_t *nptr, wchar_t **endptr, int base) {
+    char *buf = simpleos_wcs_to_ascii_alloc(nptr);
+    if (!buf) { if (endptr) *endptr = (wchar_t *)nptr; return 0; }
+    char *end = NULL;
+    long value = strtol(buf, &end, base);
+    simpleos_set_wide_end(nptr, endptr, buf, end);
+    free(buf);
+    return value;
+}
+
+long long wcstoll(const wchar_t *nptr, wchar_t **endptr, int base) {
+    char *buf = simpleos_wcs_to_ascii_alloc(nptr);
+    if (!buf) { if (endptr) *endptr = (wchar_t *)nptr; return 0; }
+    char *end = NULL;
+    long long value = strtoll(buf, &end, base);
+    simpleos_set_wide_end(nptr, endptr, buf, end);
+    free(buf);
+    return value;
+}
+
+unsigned long wcstoul(const wchar_t *nptr, wchar_t **endptr, int base) {
+    char *buf = simpleos_wcs_to_ascii_alloc(nptr);
+    if (!buf) { if (endptr) *endptr = (wchar_t *)nptr; return 0; }
+    char *end = NULL;
+    unsigned long value = strtoul(buf, &end, base);
+    simpleos_set_wide_end(nptr, endptr, buf, end);
+    free(buf);
+    return value;
+}
+
+unsigned long long wcstoull(const wchar_t *nptr, wchar_t **endptr, int base) {
+    char *buf = simpleos_wcs_to_ascii_alloc(nptr);
+    if (!buf) { if (endptr) *endptr = (wchar_t *)nptr; return 0; }
+    char *end = NULL;
+    unsigned long long value = strtoull(buf, &end, base);
+    simpleos_set_wide_end(nptr, endptr, buf, end);
+    free(buf);
+    return value;
+}
+
+int vswprintf(wchar_t *s, size_t n, const wchar_t *format, va_list ap) {
+    char *fmt = simpleos_wcs_to_ascii_alloc(format);
+    if (!fmt) return -1;
+    char buf[1024];
+    int rc = vsnprintf(buf, sizeof(buf), fmt, ap);
+    free(fmt);
+    if (rc < 0) return rc;
+    size_t limit = n > 0 ? n - 1 : 0;
+    size_t copy = (size_t)rc < limit ? (size_t)rc : limit;
+    for (size_t i = 0; i < copy; i++) s[i] = (wchar_t)(unsigned char)buf[i];
+    if (n > 0) s[copy] = 0;
+    return rc;
+}
+
+int swprintf(wchar_t *s, size_t n, const wchar_t *format, ...) {
+    va_list ap;
+    va_start(ap, format);
+    int rc = vswprintf(s, n, format, ap);
+    va_end(ap);
+    return rc;
+}
+
+int mbtowc(wchar_t *pwc, const char *s, size_t n) {
+    size_t rc = mbrtowc(pwc, s, n, NULL);
+    return rc == (size_t)-1 || rc == (size_t)-2 ? -1 : (int)rc;
+}
+
+size_t mbrlen(const char *s, size_t n, mbstate_t *ps) {
+    return mbrtowc(NULL, s, n, ps);
+}
+
+size_t mbsrtowcs(wchar_t *dst, const char **src, size_t len, mbstate_t *ps) {
+    if (!src || !*src) return 0;
+    return mbsnrtowcs(dst, src, strlen(*src) + 1, len, ps);
+}
+
+int wcscoll(const wchar_t *s1, const wchar_t *s2) {
+    return wcscmp(s1, s2);
+}
+
+size_t wcsxfrm(wchar_t *dest, const wchar_t *src, size_t n) {
+    size_t len = wcslen(src);
+    if (dest && n > 0) {
+        size_t copy = len < n - 1 ? len : n - 1;
+        for (size_t i = 0; i < copy; i++) dest[i] = src[i];
+        dest[copy] = 0;
+    }
+    return len;
+}
+
+int wcscoll_l(const wchar_t *s1, const wchar_t *s2, locale_t locale) {
+    (void)locale;
+    return wcscoll(s1, s2);
+}
+
+size_t wcsxfrm_l(wchar_t *dest, const wchar_t *src, size_t n,
+                 locale_t locale) {
+    (void)locale;
+    return wcsxfrm(dest, src, n);
+}
+
+size_t strftime_l(char *s, size_t max, const char *format, const struct tm *tm,
+                  locale_t locale) {
+    (void)locale;
+    return strftime(s, max, format, tm);
+}
+
+int vasprintf(char **strp, const char *fmt, va_list ap) {
+    if (!strp) { errno = EINVAL; return -1; }
+    char *buf = (char *)malloc(4096);
+    if (!buf) return -1;
+    int n = vsnprintf(buf, 4096, fmt, ap);
+    if (n < 0) { free(buf); return -1; }
+    *strp = buf;
+    return n;
+}
+
+int vsscanf(const char *str, const char *fmt, va_list ap) {
+    (void)str;
+    (void)fmt;
+    (void)ap;
+    return 0;
 }
 
 /* ========== dlfcn: libc self namespace + dynamic-loader syscall hooks ===== */

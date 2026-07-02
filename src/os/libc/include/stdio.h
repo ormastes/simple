@@ -41,11 +41,13 @@ int vprintf(const char *fmt, va_list ap);
 int vfprintf(FILE *stream, const char *fmt, va_list ap);
 int vsprintf(char *str, const char *fmt, va_list ap);
 int vsnprintf(char *str, size_t size, const char *fmt, va_list ap);
+int vasprintf(char **strp, const char *fmt, va_list ap);
 
 /* Formatted input */
 int scanf(const char *fmt, ...);
 int fscanf(FILE *stream, const char *fmt, ...);
 int sscanf(const char *str, const char *fmt, ...);
+int vsscanf(const char *str, const char *fmt, va_list ap);
 
 /* Character / string I/O */
 int   puts(const char *s);

@@ -54,6 +54,9 @@ struct tm *localtime_r(const time_t *timep, struct tm *result);
 struct tm *gmtime_r(const time_t *timep, struct tm *result);
 
 size_t strftime(char *s, size_t max, const char *format, const struct tm *tm);
+typedef struct __simpleos_locale *locale_t;
+size_t strftime_l(char *s, size_t max, const char *format, const struct tm *tm,
+                  locale_t locale);
 
 int clock_gettime(clockid_t clk_id, struct timespec *tp);
 int gettimeofday(struct timeval *tv, void *tz);

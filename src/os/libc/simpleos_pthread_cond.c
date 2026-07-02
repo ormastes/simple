@@ -8,14 +8,9 @@
  * in profiling.
  */
 
-#ifndef ETIMEDOUT
-#define ETIMEDOUT 110
-#endif
-
-typedef struct { int _opaque; } pthread_cond_t;
-typedef struct { int _opaque; } pthread_mutex_t;
-typedef int pthread_condattr_t;
-struct timespec;
+#include "include/pthread.h"
+#include "include/errno.h"
+#include "include/time.h"
 
 int pthread_cond_init(pthread_cond_t *cond, const pthread_condattr_t *attr) {
     (void)cond; (void)attr;

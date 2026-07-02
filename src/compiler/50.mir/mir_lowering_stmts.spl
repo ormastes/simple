@@ -19,46 +19,64 @@ use compiler.mir.mir_lowering_types.{MirLowering, MirError}
 impl MirLowering:
     me lower_stmt(stmt: HirStmt):
         """Lower HIR statement to MIR."""
-        val stmt_kind: HirStmtKind
-        val stmt_span: Span
+        # NOTE: previously declared `val stmt_kind: HirStmtKind` / `val
+        # stmt_span: Span` without an initializer and assigned them inside
+        # the `case HirStmt(kind, span):` arm below, then matched on
+        # stmt_kind in a SECOND, separate match statement. That pattern was
+        # found to be broken in the interpreter: stmt_kind ends up bound to
+        # an unresolved placeholder that matches no real HirStmtKind
+        # pattern, so every statement silently fell through to the
+        # catch-all no-op arm (confirmed by isolated repro -- see
+        # doc/08_tracking/bug/vhdl_backend_spec_remaining_failures_2026-07-02.md).
+        # Fixed by nesting the stmt_kind match directly inside the
+        # HirStmt(kind, span) arm instead of round-tripping through
+        # pre-declared, later-assigned `val`s.
         match stmt:
             case HirStmt(kind, span):
-                stmt_kind = kind
-                stmt_span = span
+                match kind:
+                    case Expr(expr):
+                        self.lower_expr(expr)
 
-        match stmt_kind:
-            case Expr(expr):
-                self.lower_expr(expr)
+                    case Let(symbol, type_, init):
+                        # NOTE: avoid Option.map()/.unwrap() here -- the seed
+                        # interpreter mishandles .map() on a "present" struct
+                        # optional (see declaration_lowering.spl lower_function
+                        # and function_lowering.spl lower_function for the
+                        # same documented workaround). type_ is nil for any
+                        # `val x = ...` without an explicit type annotation;
+                        # .map() was calling lower_type(_) with that nil
+                        # payload instead of short-circuiting, producing
+                        # "undefined field 'kind': cannot access field on
+                        # value of type 'nil'" the first time a real
+                        # (non-flat-bootstrap) function body reached this path.
+                        val mir_type = if type_.?: self.lower_type(type_) else: MirType.i64()
+                        var b = self.builder
+                        val local = b.new_local(nil, mir_type, LocalKind.Var)
+                        self.builder = b
+                        self.local_map[symbol.id] = local
 
-            case Let(symbol, type_, init):
-                val mir_type = type_.map(self.lower_type(_)) ?? MirType.i64()
-                var b = self.builder
-                val local = b.new_local(nil, mir_type, LocalKind.Var)
-                self.builder = b
-                self.local_map[symbol.id] = local
+                        var has_init = false
+                        var init_local = local
+                        if val init_expr = init:
+                            init_local = self.lower_expr(init_expr)
+                            has_init = true
+                        if has_init:
+                            var b2 = self.builder
+                            b2.emit_copy(local, init_local)
+                            self.builder = b2
 
-                var has_init = false
-                var init_local = local
-                if val init_expr = init:
-                    init_local = self.lower_expr(init_expr)
-                    has_init = true
-                if has_init:
-                    var b2 = self.builder
-                    b2.emit_copy(local, init_local)
-                    self.builder = b2
+                    case Assign(target, op, value):
+                        val value_local = self.lower_expr(value)
+                        self.lower_assign(target, op, value_local)
 
-            case Assign(target, op, value):
-                val value_local = self.lower_expr(value)
-                self.lower_assign(target, op, value_local)
+                    case Block(block):
+                        self.lower_block(block)
 
-            case Block(block):
-                self.lower_block(block)
+                    case AsmAssert(spec):
+                        self.lower_asm_assert(spec, span)
 
-            case AsmAssert(spec):
-                self.lower_asm_assert(spec, stmt_span)
-
-            case _:
-                ()
+                    case _:
+                        ()
 
     me lower_assign(target: HirExpr, op: HirAssignOp?, value_local: LocalId):
         """Lower assignment."""

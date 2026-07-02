@@ -21,6 +21,8 @@ SYSROOT="$REPO_ROOT/build/os/sysroot"
 LIBC_DIR="$REPO_ROOT/src/os/libc"
 LLVM_BUILD="$REPO_ROOT/build/os/llvm"
 LLVM_SRC="${LLVM_SRC:-$HOME/llvm-project}"
+TRIPLE="${SIMPLEOS_TARGET_TRIPLE:-${SIMPLE_TARGET:-x86_64-unknown-simpleos}}"
+LIBCXX_BUILD="$REPO_ROOT/build/os/libcxx-$TRIPLE"
 
 echo "[sysroot] Building SimpleOS sysroot at $SYSROOT ..."
 
@@ -50,6 +52,7 @@ if [ -d "$LLVM_SRC/libcxx/include" ]; then
     cp -R "$LLVM_SRC/libcxx/include/"* "$SYSROOT/include/c++/v1/"
     cat > "$SYSROOT/include/c++/v1/__config_site" << 'CONFIGEOF'
 #define _LIBCPP_HAS_THREADS 1
+#define _LIBCPP_HAS_CLOCK_GETTIME 1
 #define _LIBCPP_HAS_MONOTONIC_CLOCK 1
 #define _LIBCPP_HAS_THREAD_API_PTHREAD 1
 #define _LIBCPP_HAS_THREAD_API_EXTERNAL 0
@@ -57,6 +60,8 @@ if [ -d "$LLVM_SRC/libcxx/include" ]; then
 #define _LIBCPP_HAS_RANDOM_DEVICE 1
 #define _LIBCPP_HAS_LOCALIZATION 0
 #define _LIBCPP_HAS_WIDE_CHARACTERS 1
+#define _LIBCPP_PROVIDES_DEFAULT_RUNE_TABLE 1
+#define _LIBCPP_PSTL_BACKEND_SERIAL 1
 #define _LIBCPP_HARDENING_MODE_DEFAULT (1 << 1)
 CONFIGEOF
     if [ -f "$LLVM_SRC/libcxx/vendor/llvm/default_assertion_handler.in" ]; then
@@ -80,6 +85,52 @@ fi
 
 cp "$LIBC_DIR/libsimpleos_c.a" "$SYSROOT/lib/"
 echo "[sysroot] Installed libsimpleos_c.a"
+cp "$LIBC_DIR/libsimpleos_c.a" "$SYSROOT/lib/libm.a"
+echo "[sysroot] Installed libm.a"
+
+# -- libc++ runtime ----------------------------------------------------------
+
+build_libcxx_runtime() {
+    if [ ! -d "$LLVM_SRC/libcxx/src" ]; then
+        echo "[sysroot] NOTE: libc++ sources not found at $LLVM_SRC/libcxx/src"
+        return
+    fi
+
+    echo "[sysroot] Building libc++.a for $TRIPLE..."
+    mkdir -p "$LIBCXX_BUILD"
+
+    CXX="${CXX:-clang++}"
+    AR="${AR:-llvm-ar}"
+    if ! command -v "$AR" >/dev/null 2>&1; then
+        AR=ar
+    fi
+
+    LIBCXX_FLAGS="--target=$TRIPLE --sysroot=$SYSROOT -std=c++23 -ffreestanding -nostdlib -nostdinc++ -fno-exceptions -fno-rtti -fvisibility=hidden -fvisibility-inlines-hidden -fsized-deallocation -D__simpleos__=1 -DLIBC_NAMESPACE=__llvm_libc -D_LIBCPP_BUILDING_LIBRARY -D_LIBCPP_BUILDING_HAS_NO_ABI_LIBRARY -D_LIBCPP_REMOVE_TRANSITIVE_INCLUDES -D_LIBCPP_DISABLE_VISIBILITY_ANNOTATIONS= -D_LIBCPP_PSTL_BACKEND_SERIAL=1 -D_LIBCPP_HAS_CLOCK_GETTIME=1 -I$LLVM_SRC/libcxx/src -I$LLVM_SRC/libc -isystem $SYSROOT/include/c++/v1 -isystem $SYSROOT/include"
+
+    for src in \
+        algorithm.cpp any.cpp bind.cpp call_once.cpp charconv.cpp chrono.cpp \
+        error_category.cpp exception.cpp expected.cpp \
+        filesystem/filesystem_clock.cpp filesystem/filesystem_error.cpp \
+        filesystem/path.cpp functional.cpp hash.cpp memory.cpp \
+        memory_resource.cpp new_handler.cpp new_helpers.cpp optional.cpp \
+        print.cpp random.cpp random_shuffle.cpp ryu/d2fixed.cpp ryu/d2s.cpp \
+        ryu/f2s.cpp stdexcept.cpp string.cpp system_error.cpp typeinfo.cpp \
+        valarray.cpp variant.cpp vector.cpp verbose_abort.cpp \
+        atomic.cpp barrier.cpp condition_variable_destructor.cpp \
+        condition_variable.cpp future.cpp mutex_destructor.cpp mutex.cpp \
+        shared_mutex.cpp thread.cpp
+    do
+        obj="$LIBCXX_BUILD/$(printf '%s' "$src" | tr '/.' '__').o"
+        mkdir -p "$(dirname "$obj")"
+        "$CXX" $LIBCXX_FLAGS -c "$LLVM_SRC/libcxx/src/$src" -o "$obj"
+    done
+
+    rm -f "$SYSROOT/lib/libc++.a"
+    "$AR" rcs "$SYSROOT/lib/libc++.a" "$LIBCXX_BUILD"/*.o
+    echo "[sysroot] Installed libc++.a"
+}
+
+build_libcxx_runtime
 
 # -- CRT objects ------------------------------------------------------------
 

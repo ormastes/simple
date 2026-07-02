@@ -64,6 +64,16 @@ char *strerror(int errnum) {
     }
 }
 
+int strerror_r(int errnum, char *buf, size_t buflen) {
+    if (!buf || buflen == 0) return 22;
+    const char *msg = strerror(errnum);
+    size_t len = strlen(msg);
+    size_t copy = len < buflen - 1 ? len : buflen - 1;
+    memcpy(buf, msg, copy);
+    buf[copy] = '\0';
+    return len < buflen ? 0 : 34;
+}
+
 /* ====================================================================
  * 2. String concatenation / span
  * ==================================================================== */

@@ -12,11 +12,11 @@ Focused LLVM-to-SimpleOS port evidence for the current hardening lane.
 | Cross-build subset plan CLI | PASS | `SIMPLE_LIB=src bin/simple run src/os/port/llvm/build.spl -- --cross --targets x86_64-unknown-simpleos,armv7-unknown-simpleos --print-plan` -> 2 targets; `--target armv7-unknown-simpleos --print-plan` -> 1 target |
 | Host tblgen tools | PASS | `sh src/os/port/llvm/build.shs host-tools` -> built `build/os/llvm/host-tools/bin/llvm-tblgen` and `clang-tblgen` |
 | Cross-build status CLI | PASS | `SIMPLE_LIB=src bin/simple run src/os/port/llvm/build.spl -- --cross --status` -> host-tools BUILT, sysroot READY; cross targets and compiler-rt targets NOT BUILT |
-| Sysroot libc++ header staging | PASS | `sh src/os/port/llvm/sysroot.shs` -> staged libc++ under `build/os/sysroot/include/c++/v1`, generated `__config_site`, installed `__assertion_handler`; header count 1847 |
+| Sysroot libc++ header staging | PASS | `sh src/os/port/llvm/sysroot.shs` -> staged libc++ under `build/os/sysroot/include/c++/v1`, generated `__config_site`, installed `__assertion_handler`; header count 1849 |
 | x86_64 cross LLVM configure | PASS | `SIMPLEOS_TARGET_TRIPLE=x86_64-unknown-simpleos SIMPLE_TARGET=x86_64-unknown-simpleos sh src/os/port/llvm/build.shs cross` -> CMake configure/generate complete; build enters LLVM object compilation |
-| x86_64 cross LLVM object build | FAIL | same command after regenerating/continuing the x86_64 build dir -> `LLVM_ON_UNIX` is defined; libc++ `std::wstring`, mutex, shared mutex, future, and `std::random_device` declarations are visible; POSIX process/signal/socket/userdb gaps from the prior run are cleared; `raw_os_ostream.cpp`, `Path.cpp`, `AssignmentTrackingAnalysis.cpp`, `MIRFSDiscriminator.cpp`, `MIRSampleProfile.cpp`, `InstrOrderFile.cpp`, `AddressSanitizer.cpp`, `MemProfContextDisambiguation.cpp`, `ImportedFunctionsInliningStatistics.cpp`, `MCPseudoProbe.cpp`, and `MCParser/AsmParser.cpp` compile; `lib/libLLVMSupport.a` links; build reaches LLVM MC/MCParser object wave 33/1809 before the current blocker |
+| x86_64 cross LLVM object build | FAIL | same command after regenerating/continuing the x86_64 build dir -> Support, Core, CodeGen, Analysis, MC, TextAPI, LLD common, and many Clang Basic/Lex objects build; `lib/liblldCommon.a` links; build reaches 1688/2534 before stopping at `tools/clang/lib/Lex/CMakeFiles/obj.clangLex.dir/PPMacroExpansion.cpp.o` because `__TIMESTAMP__` used `std::stringstream`, `std::locale`, and `std::put_time` |
 | Cross-build plan scaffolding | PASS | `SIMPLE_LIB=src bin/simple test test/02_integration/os/port/llvm/cross_build_plan_spec.spl --mode=interpreter --clean` -> 18 examples, 0 failures |
-| Per-target compiler-rt/build staging scaffolding | PASS | `SIMPLE_LIB=src bin/simple test test/02_integration/os/port/llvm/per_target_build_spec.spl --mode=interpreter --clean` -> 39 examples, 0 failures |
+| Per-target compiler-rt/build staging scaffolding | PASS | `SIMPLE_LIB=src bin/simple test test/02_integration/os/port/llvm/per_target_build_spec.spl --mode=interpreter --clean` -> 43 examples, 0 failures |
 | Focused `Path.cpp` compile | PASS | direct clang++ compile with Ninja flags plus `-D__simpleos__=1` -> object builds; only existing futimes/futimens warning remains |
 | Focused `AssignmentTrackingAnalysis.cpp` compile | PASS | direct clang++ compile with Ninja flags after replacing `std::stringstream` with `raw_string_ostream` -> object builds |
 | Focused `MIRFSDiscriminator.cpp` compile | PASS | direct clang++ compile with Ninja flags after replacing `SampleProf.h` `std::ostringstream` use with `raw_string_ostream` -> object builds |
@@ -24,7 +24,12 @@ Focused LLVM-to-SimpleOS port evidence for the current hardening lane.
 | Focused `MemProfContextDisambiguation.cpp` compile | PASS | direct clang++ compile with Ninja flags after replacing iostream node id formatting with `Twine::utohexstr` -> object builds |
 | Focused `ImportedFunctionsInliningStatistics.cpp` compile | PASS | direct clang++ compile with Ninja flags after replacing `stringstream` / `setprecision` with `raw_string_ostream` and LLVM `format("%.4g", ...)` -> object builds |
 | Focused LLVM MC no-sstream compile | PASS | direct clang++ compile with Ninja flags for `MCPseudoProbe.cpp`, `MCParser/AsmParser.cpp`, and `MCParser/MasmParser.cpp` after replacing `std::ostringstream` with `raw_string_ostream` -> objects build |
-| SimpleOS libc rebuild | PASS | `make -C src/os/libc` -> rebuilt `libsimpleos_c.a`; existing `SIZE_MAX` macro warning remains |
+| Focused coverage mapping no-sstream compile | PASS | direct clang++ compile with Ninja flags for `CoverageMappingWriter.cpp`, `CoverageMappingReader.cpp`, and `CoverageMapping.cpp` after replacing `CoverageMapping.h` `std::ostringstream` helpers with `raw_string_ostream` -> objects build |
+| Focused `Host.cpp` target-parser compile | PASS | direct clang++ compile with Ninja flags after adding SimpleOS `sys/utsname.h` and `uname` libc stub -> object builds |
+| Focused TextAPI `DylibReader.cpp` compile | PASS | direct clang++ compile with Ninja flags after replacing iostream UUID hex formatting with LLVM `format_hex_no_prefix` -> object builds |
+| Focused LLD `ErrorHandler.cpp` compile | PASS | direct clang++ compile with Ninja flags after adding SimpleOS C/ASCII locale fallback declarations/stubs, `wctype.h`, and libc++ default rune table config -> object builds |
+| Focused Clang Lex `PPMacroExpansion.cpp` compile | PASS | direct clang++ compile with Ninja flags after replacing `std::stringstream` / `std::locale` / `std::put_time` timestamp formatting with LLVM raw stream + `format` helper -> object builds |
+| SimpleOS libc rebuild | PASS | `make -C src/os/libc` -> rebuilt `libsimpleos_c.a` including `simpleos_utsname.o` |
 | SimpleOS C++/POSIX surface probes | PASS | `clang++ --target=x86_64-unknown-simpleos --sysroot=build/os/sysroot ...` including `<string>`, `<mutex>`, `<shared_mutex>`, `<future>`, `<random>`, `gethostname`, `getsid`, `std::isxdigit`, `sys/resource.h`, `sys/socket.h`, `sys/un.h`, `sys/wait.h`, `pwd.h`, `alarm`, `setsid`, `getpagesize`, and signal flags compiles |
 | Cross clang artifact-gated smoke | PASS | `SIMPLE_LIB=src bin/simple test test/02_integration/os/port/llvm/smoke_clang_spec.spl --mode=interpreter --clean` -> 5 examples, 0 failures |
 
@@ -37,16 +42,19 @@ staged into the SimpleOS sysroot, and the x86_64 cross stage now gets through
 CMake configure/generate into object compilation.
 
 ```text
-MasmParser.cpp: implicit instantiation of undefined template
-'std::basic_ostringstream<char>'
+PPMacroExpansion.cpp:
+std::stringstream TmpStream;
+TmpStream.imbue(std::locale("C"));
+TmpStream << std::put_time(TM, "%a %b %e %T %Y");
 ```
 
-The remaining blocker class is now libc++ no-localization iostream coverage in
-later LLVM objects, not LLVM Support/POSIX bring-up. `Path.cpp` clears and
-`lib/libLLVMSupport.a` links. After the last build probe, LLVM MC formatting in
-`MCParser/MasmParser.cpp` was patched to use `raw_string_ostream`; the next
-cross-build probe should validate whether that clears the current MC parser
-object wave or exposes the next no-localization iostream use.
+The remaining blocker class is now libc++ no-localization formatting coverage
+in later Clang objects, not LLVM Support/POSIX bring-up. The latest probe
+validates that LLD common clears and `lib/liblldCommon.a` links, then stops at
+Clang Lex `PPMacroExpansion.cpp`. The focused object compile now passes after
+formatting `__TIMESTAMP__` through LLVM raw streams; the next cross-build probe
+should validate whether Clang Lex continues or exposes the next missing
+libc/LLVM surface.
 
 ## Spec Maintenance Completed
 
@@ -96,6 +104,20 @@ object wave or exposes the next no-localization iostream use.
 - Recorded and applied LLVM MC patch notes for replacing `std::ostringstream`
   with `raw_string_ostream` in `MCPseudoProbe.cpp`, `MCParser/AsmParser.cpp`,
   and `MCParser/MasmParser.cpp`.
+- Recorded and applied LLVM coverage mapping patch notes for replacing MCDC
+  helper `std::ostringstream` uses with `raw_string_ostream`.
+- Added the minimal SimpleOS `sys/utsname.h` header and `uname` libc stub used
+  by LLVM `TargetParser/Unix/Host.inc`.
+- Recorded and applied LLVM TextAPI DylibReader patch notes for replacing
+  iostream UUID hex formatting with LLVM `format_hex_no_prefix`.
+- Added the minimal SimpleOS C/ASCII locale declarations/stubs needed by
+  libc++ regex and LLD `ErrorHandler.cpp`: `locale_t`, `LC_*_MASK`,
+  `newlocale`/`freelocale`/`uselocale`, `*_l` numeric/string/time/ctype
+  wrappers, multibyte/wide conversion helpers, `wctype.h`, and libc++ default
+  rune table config.
+- Recorded and applied Clang Lex patch notes for replacing `std::put_time` and
+  `std::stringstream` `__TIMESTAMP__` formatting with LLVM raw streams plus
+  fixed C-locale weekday/month names in `PPMacroExpansion.cpp`.
 - Added `__simpleos__` as an explicit toolchain macro because Clang does not
   currently predefine one for `*-unknown-simpleos` triples.
 - Pinned `HAVE_GETPAGESIZE`, `HAVE_SYSCONF`, and `HAVE_GETRUSAGE` in the

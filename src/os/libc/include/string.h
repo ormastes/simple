@@ -37,6 +37,11 @@ int strcmp(const char *s1, const char *s2);
 int strncmp(const char *s1, const char *s2, size_t n);
 int strcasecmp(const char *s1, const char *s2);
 int strncasecmp(const char *s1, const char *s2, size_t n);
+int strcoll(const char *s1, const char *s2);
+size_t strxfrm(char *dest, const char *src, size_t n);
+typedef struct __simpleos_locale *locale_t;
+int strcoll_l(const char *s1, const char *s2, locale_t locale);
+size_t strxfrm_l(char *dest, const char *src, size_t n, locale_t locale);
 
 /* String concatenation */
 char *strcat(char *dest, const char *src);
@@ -60,6 +65,7 @@ size_t strlcat(char *dst, const char *src, size_t dstsize);
 
 /* Error string */
 char *strerror(int errnum);
+int strerror_r(int errnum, char *buf, size_t buflen);
 
 #ifdef __cplusplus
 }

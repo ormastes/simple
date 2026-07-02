@@ -62,9 +62,15 @@ if(NOT CMAKE_CXX_FLAGS MATCHES "(^| )-D__simpleos__=1( |$)")
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -D__simpleos__=1" CACHE STRING "" FORCE)
 endif()
 
-# Linker flags — use lld, link against sysroot
-set(CMAKE_EXE_LINKER_FLAGS_INIT    "-fuse-ld=lld -L${SIMPLEOS_SYSROOT}/lib -nostdlib")
-set(CMAKE_SHARED_LINKER_FLAGS_INIT "-fuse-ld=lld -L${SIMPLEOS_SYSROOT}/lib -nostdlib")
+# Linker flags — use lld and append sysroot runtime archives after target libs.
+set(SIMPLEOS_LINKER_FLAGS "-fuse-ld=lld -nostdlib ${SIMPLEOS_SYSROOT}/lib/crt0.o -L${SIMPLEOS_SYSROOT}/lib")
+set(SIMPLEOS_CXX_LINK_RUNTIME "-Wl,--start-group -lc++ -lsimpleos_c -lm -Wl,--end-group")
+set(CMAKE_EXE_LINKER_FLAGS_INIT    "${SIMPLEOS_LINKER_FLAGS}")
+set(CMAKE_SHARED_LINKER_FLAGS_INIT "${SIMPLEOS_LINKER_FLAGS}")
+set(CMAKE_EXE_LINKER_FLAGS "${SIMPLEOS_LINKER_FLAGS}" CACHE STRING "" FORCE)
+set(CMAKE_SHARED_LINKER_FLAGS "${SIMPLEOS_LINKER_FLAGS}" CACHE STRING "" FORCE)
+set(CMAKE_C_STANDARD_LIBRARIES "-Wl,--start-group -lsimpleos_c -lm -Wl,--end-group" CACHE STRING "" FORCE)
+set(CMAKE_CXX_STANDARD_LIBRARIES "${SIMPLEOS_CXX_LINK_RUNTIME}" CACHE STRING "" FORCE)
 
 # Don't try to compile test programs (they'll fail without full libc)
 set(CMAKE_C_COMPILER_WORKS TRUE)
