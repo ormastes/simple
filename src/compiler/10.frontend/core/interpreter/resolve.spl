@@ -204,13 +204,194 @@ fn resolve_function(decl_id: i64):
         rl_register(pname)
     # Prescan body for all local names (detects shadowing)
     resolve_prescan_stmts(d_node.body_stmts)
+    # Demote captured-and-mutated names off the fast path (escape analysis).
+    var ki: i64 = 0
+    while ki < rl_keys.len():
+        if esc_contains(rl_keys[ki]):
+            rl_shadowed[ki] = true
+        ki = ki + 1
     # Walk expressions to set slot indices
     for sid in d_node.body_stmts:
         resolve_stmt(sid)
     # Cache for use at call time
     fn_slot_cache_current(decl_id)
 
+# ===== Escape Analysis (captured-variable demotion) =====
+# A local variable that is assigned inside a NESTED function or lambda cannot be
+# a LOAD_FAST slot: the nested call updates the shared scope hash map, but the
+# enclosing frame's fast-local cache is never refreshed, so the enclosing scope
+# keeps reading the stale slot. Any such name is demoted to the slow (scope hash
+# map) path so cross-call mutations are observed. Demotion is always correct —
+# it only forgoes an optimization — so over-approximation is safe.
+#
+# A name "escapes" when it is assigned:
+#   - inside any lambda body (EXPR_LAMBDA), or
+#   - inside a function where it is not one of that function's own locals/params
+#     (i.e. a captured outer variable, including hoisted nested named fns).
+
+var esc_names: [text] = []
+var esc_buckets: [i64] = []
+var esc_nexts: [i64] = []
+var esc_in_lambda: bool = false
+
+# Current-function local set (params + declared locals), rebuilt per function.
+var cl_names: [text] = []
+var cl_buckets: [i64] = []
+var cl_nexts: [i64] = []
+
+fn esc_reset_all():
+    esc_names = []
+    esc_buckets = rl_make_buckets()
+    esc_nexts = []
+    esc_in_lambda = false
+
+fn esc_add(name: text):
+    if name == "": return
+    val bucket = hm_hash_text(name) % RL_HM_SIZE
+    var idx = esc_buckets[bucket]
+    while idx != -1:
+        if esc_names[idx] == name: return
+        idx = esc_nexts[idx]
+    val new_idx = esc_names.len()
+    esc_names.push(name)
+    esc_nexts.push(esc_buckets[bucket])
+    esc_buckets[bucket] = new_idx
+
+fn esc_contains(name: text) -> bool:
+    if esc_names.len() == 0: return false
+    val bucket = hm_hash_text(name) % RL_HM_SIZE
+    var idx = esc_buckets[bucket]
+    while idx != -1:
+        if esc_names[idx] == name: return true
+        idx = esc_nexts[idx]
+    false
+
+fn cl_reset():
+    cl_names = []
+    cl_buckets = rl_make_buckets()
+    cl_nexts = []
+
+fn cl_add(name: text):
+    if name == "": return
+    val bucket = hm_hash_text(name) % RL_HM_SIZE
+    var idx = cl_buckets[bucket]
+    while idx != -1:
+        if cl_names[idx] == name: return
+        idx = cl_nexts[idx]
+    val new_idx = cl_names.len()
+    cl_names.push(name)
+    cl_nexts.push(cl_buckets[bucket])
+    cl_buckets[bucket] = new_idx
+
+fn cl_contains(name: text) -> bool:
+    if cl_names.len() == 0: return false
+    val bucket = hm_hash_text(name) % RL_HM_SIZE
+    var idx = cl_buckets[bucket]
+    while idx != -1:
+        if cl_names[idx] == name: return true
+        idx = cl_nexts[idx]
+    false
+
+fn esc_collect_locals(stmts: [i64]):
+    for sid in stmts:
+        val s_node = stmt_get(sid)
+        val tag = s_node.tag
+        if tag == STMT_VAL_DECL or tag == STMT_VAR_DECL:
+            if s_node.name != "": cl_add(s_node.name)
+        elif tag == STMT_FOR:
+            val iter_name = s_node.name
+            if iter_name != "":
+                if iter_name.starts_with("("):
+                    val inner = iter_name[1:iter_name.len() - 1]
+                    for tname in inner.split(","):
+                        cl_add(tname)
+                else:
+                    cl_add(iter_name)
+            esc_collect_locals(s_node.body)
+        elif tag == STMT_IF:
+            esc_collect_locals(s_node.body)
+            esc_collect_locals(s_node.else_body)
+        elif tag == STMT_WHILE:
+            esc_collect_locals(s_node.body)
+        elif tag == STMT_BLOCK:
+            esc_collect_locals(s_node.body)
+
+fn esc_note_assign_target(target_eid: i64):
+    if target_eid < 0: return
+    if expr_get(target_eid).tag != EXPR_IDENT: return
+    val nm = expr_get(target_eid).s_val
+    if esc_in_lambda:
+        esc_add(nm)
+    elif cl_contains(nm) == false:
+        esc_add(nm)
+
+fn esc_walk_expr(eid: i64):
+    if eid < 0: return
+    val e = expr_get(eid)
+    val tag = e.tag
+    if tag == EXPR_ASSIGN or tag == EXPR_COMPOUND_ASSIGN:
+        esc_note_assign_target(e.left)
+    if tag == EXPR_LAMBDA:
+        val prev = esc_in_lambda
+        esc_in_lambda = true
+        for beid in e.stmts:
+            esc_walk_expr(beid)
+        esc_in_lambda = prev
+        return
+    if e.left >= 0: esc_walk_expr(e.left)
+    if e.right >= 0: esc_walk_expr(e.right)
+    for arg_eid in e.args:
+        esc_walk_expr(arg_eid)
+    for seid in e.stmts:
+        esc_walk_expr(seid)
+
+fn esc_walk_stmt(sid: i64):
+    if sid < 0: return
+    val s_node = stmt_get(sid)
+    val tag = s_node.tag
+    if tag == STMT_ASSIGN or tag == STMT_COMPOUND_ASSIGN:
+        esc_note_assign_target(s_node.expr_idx)
+        for veid in s_node.body:
+            esc_walk_expr(veid)
+        return
+    if tag == STMT_VAL_DECL or tag == STMT_VAR_DECL or tag == EVAL_STMT_LAZY_VAL_DECL:
+        for veid in s_node.body:
+            esc_walk_expr(veid)
+        return
+    if tag == STMT_EXPR or tag == STMT_RETURN:
+        esc_walk_expr(s_node.expr_idx)
+        return
+    # Control flow / other: expr_idx is a condition/scrutinee, body holds stmts.
+    if s_node.expr_idx >= 0:
+        esc_walk_expr(s_node.expr_idx)
+    for cs in s_node.body:
+        esc_walk_stmt(cs)
+    for cs in s_node.else_body:
+        esc_walk_stmt(cs)
+
+fn esc_analyze_function(decl_id: i64):
+    val d_node = decl_get(decl_id)
+    cl_reset()
+    for pname in d_node.param_names:
+        cl_add(pname)
+    esc_collect_locals(d_node.body_stmts)
+    esc_in_lambda = false
+    for sid in d_node.body_stmts:
+        esc_walk_stmt(sid)
+
+fn esc_analyze_module():
+    esc_reset_all()
+    var did: i64 = 0
+    val total = decl_count()
+    while did < total:
+        if decl_get(did).tag == DECL_FN:
+            esc_analyze_function(did)
+        did = did + 1
+
 fn resolve_module_locals():
+    # Pass 0: collect names captured-and-mutated across function/lambda
+    # boundaries so they can be kept off the LOAD_FAST fast path.
+    esc_analyze_module()
     # Walk all declarations, resolve functions
     var did: i64 = 0
     val total = decl_count()
