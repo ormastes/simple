@@ -149,7 +149,23 @@ impl HirLowering:
                     eprint("[hir-lower] lower_expr:ident {name}")
                 val symbol = self.symbols.lookup(name)
                 if val found_symbol = symbol:
-                    HirExprKind.NamedVar(found_symbol, name)
+                    # NOTE: `if val found_symbol = symbol:` is not sufficient
+                    # here -- same class of bug fixed in 413d121a011 for MIR
+                    # `if val ... .type_:` sites: the seed interpreter's
+                    # `if val` presence check can still enter this true
+                    # branch with `found_symbol` bound to nil when the
+                    # lookup actually failed. Downstream consumers of
+                    # HirExprKind.NamedVar (e.g. MIR lowering's `symbol.id`
+                    # access) assume `symbol` is never nil, so a redundant
+                    # explicit nil re-check here avoids constructing a
+                    # NamedVar with a nil symbol and crashing later with
+                    # "undefined field 'id': cannot access field on value
+                    # of type 'nil'".
+                    if found_symbol == nil:
+                        self.error("unresolved name: {name}", e.span)
+                        HirExprKind.Error
+                    else:
+                        HirExprKind.NamedVar(found_symbol, name)
                 else:
                     self.error("unresolved name: {name}", e.span)
                     HirExprKind.Error
