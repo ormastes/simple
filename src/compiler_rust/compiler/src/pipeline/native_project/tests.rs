@@ -396,6 +396,58 @@ fn test_object_cache_key_separates_configured_active_tiers_without_override() {
 }
 
 #[test]
+fn test_compiler_fingerprint_is_stable_within_process() {
+    // The fingerprint is cached in a OnceLock, so repeated calls in the same
+    // process (same running exe) must return the exact same value -- this is
+    // what keeps cache hits working across repeated builds with an unchanged
+    // compiler binary.
+    let a = compiler_fingerprint();
+    let b = compiler_fingerprint();
+    assert_eq!(a, b);
+}
+
+#[test]
+fn test_object_cache_key_includes_compiler_fingerprint() {
+    // Reproduce the pre-fix key formula (content, is_entry, backend, no_mangle,
+    // module_prefix, SIMPLE_NATIVE_CPU, simd tier -- no compiler fingerprint)
+    // and confirm the real key differs because the fingerprint is folded in.
+    // Without this, a seed codegen fix that doesn't touch any .spl source text
+    // would silently keep reusing objects built by the old binary.
+    use std::hash::{Hash, Hasher};
+    let content = "fn main(): return 42";
+    let is_entry = true;
+    let backend = "cranelift";
+    let no_mangle = false;
+    let module_prefix = "app__main";
+
+    let mut legacy_hasher = std::collections::hash_map::DefaultHasher::new();
+    content.hash(&mut legacy_hasher);
+    is_entry.hash(&mut legacy_hasher);
+    backend.hash(&mut legacy_hasher);
+    no_mangle.hash(&mut legacy_hasher);
+    module_prefix.hash(&mut legacy_hasher);
+    std::env::var("SIMPLE_NATIVE_CPU").unwrap_or_default().hash(&mut legacy_hasher);
+    active_simd_tier_name().hash(&mut legacy_hasher);
+    let legacy_key = legacy_hasher.finish();
+
+    let real_key = object_cache_key(content, is_entry, backend, no_mangle, module_prefix);
+
+    // A real process's compiler_fingerprint() is a SipHash over actual exe
+    // bytes (or exe metadata), astronomically unlikely to be exactly zero,
+    // so folding it in must change the key relative to the legacy formula.
+    assert_ne!(
+        real_key, legacy_key,
+        "object_cache_key must differ from the pre-fingerprint formula, or a \
+         rebuilt compiler binary would silently reuse stale cached objects"
+    );
+
+    // Cache hits for an unchanged binary must still work: identical inputs in
+    // the same process produce identical keys.
+    let real_key_again = object_cache_key(content, is_entry, backend, no_mangle, module_prefix);
+    assert_eq!(real_key, real_key_again);
+}
+
+#[test]
 fn test_incremental_cache_dir_default() {
     let builder = NativeProjectBuilder::new(PathBuf::from("/project"), PathBuf::from("/project/bin/simple"));
     let cache_dir = builder.cache_dir().to_string_lossy().replace('\\', "/");

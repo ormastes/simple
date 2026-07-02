@@ -1124,6 +1124,48 @@ pub(crate) fn content_hash(content: &str) -> u64 {
     hasher.finish()
 }
 
+/// Fingerprint of the currently running compiler executable.
+///
+/// Computed once per process (via `OnceLock`) and mixed into every object
+/// cache key. The `.simple/native_cache/objects` cache keys on source content
+/// only, so when the *compiler itself* changes (a codegen fix to the seed),
+/// the generated object for identical source text can silently differ from
+/// what's already cached under the old key — but the cache never notices,
+/// because nothing about the compiler binary was ever part of the key. That
+/// forced every agent to pass `--clean` after any seed rebuild.
+///
+/// This hashes the full bytes of `std::env::current_exe()`, so it changes
+/// deterministically whenever the compiler binary changes and stays stable
+/// (and cache hits keep working) across repeated builds with the same
+/// binary. Falls back to mtime+size if the exe can't be read (e.g. sandboxed
+/// environments), and to a constant if neither is available.
+fn compiler_fingerprint() -> u64 {
+    static FINGERPRINT: OnceLock<u64> = OnceLock::new();
+    *FINGERPRINT.get_or_init(|| {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        match std::env::current_exe() {
+            Ok(exe) => match std::fs::read(&exe) {
+                Ok(bytes) => {
+                    bytes.hash(&mut hasher);
+                }
+                Err(_) => {
+                    if let Ok(meta) = std::fs::metadata(&exe) {
+                        meta.len().hash(&mut hasher);
+                        if let Ok(modified) = meta.modified() {
+                            modified.hash(&mut hasher);
+                        }
+                    }
+                }
+            },
+            Err(_) => {
+                "unknown-compiler-exe".hash(&mut hasher);
+            }
+        }
+        hasher.finish()
+    })
+}
+
 /// Compute the object cache key for a module.
 ///
 /// The generated object is not determined by source text alone: entry modules
@@ -1142,6 +1184,12 @@ pub(crate) fn content_hash(content: &str) -> u64 {
 /// CPU profile also affects object code. A freestanding x86_64 build for
 /// QEMU's baseline CPU must not reuse cached host-feature objects that contain
 /// BMI/AVX instructions.
+///
+/// The running compiler's own fingerprint (see `compiler_fingerprint`) is
+/// also mixed in: identical source compiled by two different compiler
+/// binaries (e.g. before/after a seed codegen fix) must not collide on the
+/// same cached `.o`, or codegen changes get silently masked by stale cache
+/// hits.
 pub(crate) fn object_cache_key(
     content: &str,
     is_entry: bool,
@@ -1158,6 +1206,7 @@ pub(crate) fn object_cache_key(
     module_prefix.hash(&mut hasher);
     std::env::var("SIMPLE_NATIVE_CPU").unwrap_or_default().hash(&mut hasher);
     active_simd_tier_name().hash(&mut hasher);
+    compiler_fingerprint().hash(&mut hasher);
     hasher.finish()
 }
 
