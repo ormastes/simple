@@ -290,65 +290,48 @@ pub(crate) fn compile_method_call_static<M: Module>(
             return Ok(());
         }
     }
-    // Bare `.has(...)` is the Dict/Set/Array membership builtin idiom (same
-    // policy as the suffix-search guard below, which already refuses
-    // name-suffix binding for it). Route it to tag-dispatched rt_contains
-    // BEFORE any name-based resolution: the cross-module use_map/import_map
-    // fallback (`raw.ends_with(".has")`) would otherwise bind a Dict-field
-    // receiver to whatever imported `Type.has` method exists — e.g.
-    // `manifest.entries.has(path)` in smf_manifest_find dispatched to
-    // SuffixRegistry.has and segfaulted the stage4 binary (2026-06-10).
-    // Receivers with a known static type emit a qualified "Type.has"
-    // func_name and never take this path.
-    if lookup_name == "has" {
-        if let Some(result) = try_compile_builtin_method_call(ctx, builder, receiver, "has", args)? {
-            if let Some(d) = dest {
-                ctx.vreg_values.insert(*d, result);
-            }
-            return Ok(());
-        }
-    }
-    // Bare `.len()` gets the same treatment as bare `.has(...)`: it is
-    // overwhelmingly the builtin Array/String/Dict length idiom on a receiver
-    // whose static type was lost (e.g. a for-loop binder). Name-suffix binding
-    // would dispatch it to whatever unique `Type_dot_len` method happens to be
-    // linked in — e.g. std ListIter.len in the stage4 CLI closure, which
-    // segfaulted `stage4 lint <any file>` from check_short_grammar_refactor's
-    // `line.len()` (2026-06-11). rt_len tag-dispatches safely at runtime;
-    // receivers with a known static type emit a qualified "Type.len" and never
-    // take this path.
-    if (lookup_name == "len" || lookup_name == "length") && args.is_empty() {
-        if let Some(result) = try_compile_builtin_method_call(ctx, builder, receiver, "len", args)? {
-            if let Some(d) = dest {
-                ctx.vreg_values.insert(*d, result);
-            }
-            return Ok(());
-        }
-    }
-    // Bare `.get(key)` gets the same treatment as bare `.has`/`.len`: it is the
-    // Dict/Array element-access idiom on a receiver whose static type was lost
-    // (e.g. `Dict<K,V>` erases to TypeId::ANY, so HIR emits a bare MethodCall).
-    // Name-suffix binding would otherwise dispatch it to whatever unique
-    // `Type.get` method is linked in — e.g. `sendfile_pending.get(fd)` bound to
-    // StaticCompressionCache.get and segfaulted the native HTTP server
-    // (2026-06-17). rt_index_get tag-dispatches at runtime (array OR dict),
-    // returning nil for a miss; receivers with a known static type emit a
-    // qualified "Type.get" and never take this path.
-    if lookup_name == "get" && args.len() == 1 {
-        if let Some(result) = try_compile_builtin_method_call(ctx, builder, receiver, "get", args)? {
-            if let Some(d) = dest {
-                ctx.vreg_values.insert(*d, result);
-            }
-            return Ok(());
-        }
-    }
-    // Bare `.remove(key)` on a type-erased `Dict<K,V>` receiver: route to the
-    // tag-dispatched rt_dict_remove (no-op for non-dicts) instead of failing
-    // name resolution ("function not found"). Without it `sendfile_pending`/
-    // `sendfile_open_files` entries are never cleared, so a reused fd reads a
-    // stale entry. Receivers with a known static type emit a qualified name.
-    if lookup_name == "remove" && args.len() == 1 {
-        if let Some(result) = try_compile_builtin_method_call(ctx, builder, receiver, "remove", args)? {
+    // ROOT FIX (bug #62, 2026-07-02): receiver-type-aware dispatch for the
+    // builtin Dict/Array/String idioms whose static type was ERASED.
+    //
+    // `Dict<K,V>` (and `Set`) resolve to `TypeId::ANY` in the HIR type
+    // resolver (src/hir/lower/type_resolver.rs:426), so a call like
+    // `scope.symbols.get(name)` / `scope.symbols.contains(name)` reaches codegen
+    // as a BARE (dot-less) `MethodCallStatic` — the receiver carries no type to
+    // qualify the name. The name-suffix resolution below (lines ~454+) is
+    // receiver-type-BLIND: it binds a bare method to any unique `Type_dot_<m>`
+    // symbol linked into the module. That silently miscalls a builtin dict op
+    // onto a same-named USER struct method (last-write / shortest-name wins) and
+    // segfaults the self-hosted binary — e.g. `scope.symbols.get(name)` bound to
+    // `SymbolTable.get(id: SymbolId?)` (bare-name collision on `get`),
+    // `manifest.entries.has(path)` → `SuffixRegistry.has` (2026-06-10),
+    // `line.len()` → `ListIter.len` (2026-06-11), `sendfile_pending.get(fd)` →
+    // `StaticCompressionCache.get` (2026-06-17).
+    //
+    // The correct dispatch is by RECEIVER TYPE: for a bare (type-erased) receiver
+    // these idioms are the builtin collection operations, which the runtime
+    // implements with TAG-DISPATCHED functions (rt_index_get / rt_contains /
+    // rt_dict_remove / rt_len) that inspect the receiver's runtime tag and are
+    // safe on any value (nil/miss for non-collections). Route them to the builtin
+    // BEFORE any name-based resolution so a builtin always wins over a same-named
+    // user method here. Receivers whose static type IS known emit a qualified
+    // "Type.<method>" name and never take this path (`lookup_name.contains('.')`
+    // is false only for erased receivers). Arity is gated so a genuine user
+    // method with a different signature (e.g. `get()` / `get(a, b)`) still falls
+    // through to normal resolution when the builtin does not apply.
+    let bare_builtin_collection = !lookup_name.contains('.')
+        && match (lookup_name, args.len()) {
+            // element access — rt_index_get (array OR dict, nil on miss)
+            ("get", 1) => true,
+            // membership — rt_contains (array/dict/string; 0 for anything else)
+            ("has" | "contains" | "contains_key" | "has_key", 1) => true,
+            // dict removal — rt_dict_remove (no-op for non-dicts)
+            ("remove", 1) => true,
+            // length — rt_len (array/string/dict/tuple)
+            ("len" | "length", 0) => true,
+            _ => false,
+        };
+    if bare_builtin_collection {
+        if let Some(result) = try_compile_builtin_method_call(ctx, builder, receiver, lookup_name, args)? {
             if let Some(d) = dest {
                 ctx.vreg_values.insert(*d, result);
             }
