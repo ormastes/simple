@@ -821,6 +821,19 @@ pub(super) fn eval_bdd_builtin(
                         // standard binary-expr evaluator and check truthiness on
                         // the resulting Bool — this avoids re-implementing
                         // ordering semantics for every Value variant.
+                        //
+                        // A false ordered comparison marks only a PROVISIONAL
+                        // failure, never a hard one, because a chained matcher
+                        // like `expect(5 < 3).to_equal(false)` is authoritative:
+                        // the `.to_*()` arm clears the provisional flag and
+                        // records its own result (a passing matcher does NOT
+                        // clear a hard BDD_EXPECT_FAILED — see
+                        // interpreter_method/mod.rs).  Hard-failing here
+                        // false-reddened every `expect(a < b).to_equal(false)`
+                        // even though the assertion passes.  A bare
+                        // `expect a < b` with no matcher still fails: at example
+                        // end a standing provisional with no matcher_ran counts
+                        // as a failure (mirrors the call-expr path below).
                         _ => {
                             let op_sym = match op {
                                 BinOp::Lt => "<",
@@ -831,7 +844,7 @@ pub(super) fn eval_bdd_builtin(
                             };
                             let value = evaluate_expr(arg_expr, env, functions, classes, enums, impl_methods)?;
                             if !value.truthy() {
-                                BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = true);
+                                BDD_EXPECT_PROVISIONAL.with(|cell| *cell.borrow_mut() = true);
                                 BDD_FAILURE_MSG.with(|cell| {
                                     *cell.borrow_mut() = Some(format!(
                                         "expected {} {} {} to hold",
