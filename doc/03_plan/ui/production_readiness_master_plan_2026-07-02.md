@@ -200,8 +200,9 @@ is Xvfb-only by default; `check-gui-low-res-readability.shs` is offscreen
 
 - **W2 GREEN:** low-res readability check + SPipe spec pass at 640x480 /
   800x600 / 1280x720 (`test/03_system/check/gui_low_res_readability_spec.spl`).
-  Oracle is polarity-aware (dark theme). Known gap for W1: showcase layout is
-  fixed-size and clips bottom rows at 640x480 — needs adaptive layout (G1.3).
+  Oracle is polarity-aware (dark theme). The G1.3 layout gap is closed:
+  the showcase grid is now adaptive (column-major flow, rows from available
+  height) and all 18 cells fit unclipped at 640x480 (visually verified).
 - **W5 unblocked, not done:** breakout starts headless after fixing the
   `as time` alias interpreter bug; all JIT HIR lowering blockers on the game
   path are fixed (nested fn, module aliases, panic intrinsic, fn/me mutability
