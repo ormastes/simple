@@ -8,7 +8,7 @@
 #include <bits/types/mbstate_t.h>
 
 #ifndef __cplusplus
-typedef int wchar_t;
+typedef __WCHAR_TYPE__ wchar_t;
 #endif
 typedef unsigned int wint_t;
 #define WEOF ((wint_t)-1)

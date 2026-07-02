@@ -26,20 +26,12 @@ use os.compositor.host_compositor_entry.{
     host_compositor_pointer_move,
     host_wm_surface_failure_reason,
     host_wm_content_renderer_name,
-    host_wm_force_direct_chrome,
-    host_wm_chrome_force_direct,
-    host_chrome_scene_html,
-    host_chrome_scene_fingerprint,
-    HostedWindow,
     simpleos_gui_adapter_display_path_name,
     simpleos_gui_adapter_content_renderer_name,
     init_host_wm,
 }
 use os.services.wm.wm_service.{WmService}
 use os.userlib.ipc_protocol.{COMP_CREATE_WINDOW, COMP_DESTROY_WINDOW, COMP_UPDATE_TREE, COMP_FOCUS, COMP_RESIZE, COMP_MOVE, COMP_SET_TITLE, COMP_MINIMIZE, COMP_MAXIMIZE, COMP_RESTORE}
-use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{simple_web_layout_render_html_pixels_engine2d}
-use common.ui.wm_chrome_theme.{wm_chrome_theme}
-use common.color.convert.{int_to_hex}
 
 var _fake_present_count: i64 = 0
 var _capture_present_count: i64 = 0
@@ -310,10 +302,6 @@ describe "HostWmHandle loop behavior":
         expect(_fake_present_count).to_equal(1)
 
     it "renders hosted windows through the Simple Web app content path":
-        # Pin the direct-draw chrome contract: this test validates the
-        # byte-identical fallback path (clear + fill_rect + draw_text), which
-        # must stay unchanged regardless of Metal availability.
-        host_wm_force_direct_chrome(true)
         _capture_present_count = 0
         _capture_blue_count = 0
         _capture_white_count = 0
@@ -325,12 +313,10 @@ describe "HostWmHandle loop behavior":
         val comp = HostCompositor.new(backend, Size.wh(80, 70))
         comp.apply_bridge_request(1, 77, COMP_CREATE_WINDOW.to_i64(), 0, "Terminal", 8, 8, 40, 52, "ready", 900, "/sys/apps/terminal")
         comp.render_frame()
-        host_wm_force_direct_chrome(false)
         expect(_capture_present_count).to_equal(1)
         expect(_capture_blue_count).to_be_greater_than(0)
         expect(_capture_white_count).to_be_greater_than(0)
-        # Direct-draw fallback rasterizes chrome via fill_rect, not blit.
-        expect(_capture_blit_count).to_equal(0)
+        expect(_capture_blit_count).to_be_greater_than(0)
         expect(_capture_clear_color).to_equal(0xFF0F172Au32)
 
     it "records compositor resize dimensions":
@@ -537,8 +523,6 @@ describe "HostCompositor hosted window state":
 describe "SimpleOS GUI adapter proof":
 
     it "delivers display app events and input through the shared WM path":
-        # Pin the direct-draw chrome contract for the deterministic adapter proof.
-        host_wm_force_direct_chrome(true)
         _capture_present_count = 0
         _capture_blue_count = 0
         _capture_engine_title_count = 0
@@ -555,7 +539,6 @@ describe "SimpleOS GUI adapter proof":
         adapter.deliver_pointer_move(180, 145)
         adapter.deliver_left_button(false)
         adapter.render_framebuffer_frame()
-        host_wm_force_direct_chrome(false)
 
         expect(simpleos_gui_adapter_display_path_name(adapter)).to_equal("simpleos-framebuffer")
         expect(simpleos_gui_adapter_content_renderer_name(adapter)).to_equal(WEB_RENDER_TARGET_SIMPLE_WEB)
@@ -568,54 +551,3 @@ describe "SimpleOS GUI adapter proof":
         expect(_capture_present_count).to_equal(1)
         expect(_capture_blue_count).to_be_greater_than(0)
         expect(_capture_clear_color).to_equal(0xFF0F172Au32)
-
-fn _spec_argb_hex(color: u32) -> text:
-    val r = ((color / 65536u32) % 256u32).to_i64()
-    val g = ((color / 256u32) % 256u32).to_i64()
-    val b = (color % 256u32).to_i64()
-    "#" + int_to_hex(r) + int_to_hex(g) + int_to_hex(b)
-
-fn _spec_window(id: i64, title: text, x: i32, y: i32, w: i32, h: i32, content: text) -> HostedWindow:
-    HostedWindow(id: id, owner_port: 0, title: title, x: x, y: y, w: w, h: h, content: content, process_id: 0, app_id: "/sys/apps/x", minimized: false, focused: true)
-
-describe "host chrome CSS/GUI-web lane":
-
-    it "pins the direct-draw chrome contract when force-direct is set":
-        host_wm_force_direct_chrome(true)
-        expect(host_wm_chrome_force_direct()).to_equal(true)
-        host_wm_force_direct_chrome(false)
-        expect(host_wm_chrome_force_direct()).to_equal(false)
-
-    it "expresses window chrome as themed HTML/CSS driven by wm_chrome_theme":
-        val theme = wm_chrome_theme()
-        val win = _spec_window(1, "Terminal", 10, 12, 120, 80, "hi")
-        val html = host_chrome_scene_html([win], 200, 150)
-        expect(html.contains(_spec_argb_hex(theme.accent))).to_equal(true)
-        expect(html.contains(_spec_argb_hex(theme.host_window_body))).to_equal(true)
-        expect(html.contains(_spec_argb_hex(theme.close_button))).to_equal(true)
-        expect(html.contains(_spec_argb_hex(theme.compositor_bg))).to_equal(true)
-        expect(html.contains("Terminal")).to_equal(true)
-
-    it "fingerprints geometry and theme but not window content":
-        val base = _spec_window(1, "Terminal", 10, 12, 120, 80, "one")
-        val moved = _spec_window(1, "Terminal", 20, 12, 120, 80, "one")
-        val recontent = _spec_window(1, "Terminal", 10, 12, 120, 80, "two")
-        val fp_base = host_chrome_scene_fingerprint([base], 200, 150)
-        expect(fp_base == host_chrome_scene_fingerprint([base], 200, 150)).to_equal(true)
-        expect(fp_base != host_chrome_scene_fingerprint([moved], 200, 150)).to_equal(true)
-        expect(fp_base == host_chrome_scene_fingerprint([recontent], 200, 150)).to_equal(true)
-
-    it "rasterizes chrome pixels matching theme colors at expected coordinates":
-        val theme = wm_chrome_theme()
-        val w = 120
-        val h = 80
-        val win = _spec_window(1, "Terminal", 10, 10, 90, 60, "hi")
-        val html = host_chrome_scene_html([win], w, h)
-        val px = simple_web_layout_render_html_pixels_engine2d(html, w, h, "metal")
-        expect(px.len()).to_equal(w * h)
-        # Titlebar interior (left of the title text) rasterizes to the accent color.
-        expect(px[(win.y + 2) * w + (win.x + 2)]).to_equal(theme.accent)
-        # Window body below the titlebar rasterizes to host_window_body.
-        expect(px[(win.y + 40) * w + (win.x + 2)]).to_equal(theme.host_window_body)
-        # Desktop backdrop outside any window rasterizes to compositor_bg.
-        expect(px[0]).to_equal(theme.compositor_bg)

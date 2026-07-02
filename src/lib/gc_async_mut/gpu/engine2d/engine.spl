@@ -153,33 +153,6 @@ class Engine2D:
                 sw.init(width, height)
                 Engine2D(backend: sw, baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "software")
 
-    static fn create_with_backend_fast(width: i32, height: i32, backend_name: text) -> Engine2D:
-        """Create an engine in native-only ("no mirror") fast mode.
-
-        For the Metal backend this shrinks the CPU software mirror to 1x1 so draw
-        ops stop re-rasterizing the full framebuffer under the interpreter (the
-        per-op mirror was the entire render cost — see
-        doc/08_tracking/bug/engine2d_interpreted_mirror_dominates_render_2026-07-03.md).
-        Draw ops forward to the GPU only, and read_pixels() downloads the GPU
-        framebuffer in one FFI hop.
-
-        IMPORTANT: the caller must issue a clear() before drawing so the GPU
-        framebuffer is initialized and gpu_frame_complete becomes true; otherwise
-        readback falls back to the 1x1 mirror.
-
-        Backends other than Metal have no native framebuffer to read back from
-        (their surface lives in a Simple [u32] array with per-op interpreted
-        marshalling), so this transparently falls back to the normal
-        create_with_backend() path for them — correct, but not accelerated.
-        """
-        val requested_backend = backend_canonical_name(backend_name)
-        if requested_backend == "metal":
-            var metal = MetalBackend.create()
-            if metal.init(width, height):
-                metal.use_gpu_only()
-                return Engine2D(backend: metal, baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "metal")
-        Engine2D.create_with_backend(width, height, backend_name)
-
     static fn create_requested_backend(width: i32, height: i32, backend_name: text) -> Result<Engine2D, text>:
         """Create one canonical backend without silently falling back."""
         val requested_backend = backend_canonical_name(backend_name)
@@ -837,17 +810,7 @@ class Engine2D:
             self.backend.present()
 
     fn read_pixels() -> [u32]:
-        # Checksum-free readback: delegate straight to the backend's read_pixels
-        # (which, for the Metal GPU-only/native path, is a single-FFI download
-        # returning the [u32] framebuffer). read_pixels_with_source() still
-        # computes the O(n) Simple checksum for evidence rows; callers that only
-        # need pixels avoid that cost here.
-        if val Some(vg) = self.virtio_gpu_backend:
-            return vg.read_pixels()
-        elif val Some(bm) = self.baremetal_backend:
-            return bm.read_pixels()
-        else:
-            return self.backend.read_pixels()
+        self.read_pixels_with_source().pixels
 
     fn read_pixels_with_source() -> Engine2DReadback:
         """Read the framebuffer contents as a flat u32 array."""

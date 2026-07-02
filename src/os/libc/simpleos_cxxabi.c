@@ -252,12 +252,17 @@ extern int64_t simpleos_syscall(int64_t, int64_t, int64_t, int64_t,
                                  int64_t, int64_t);
 
 static int running_on_linux_host(void) {
+#if defined(__x86_64__)
     uint64_t cs;
     __asm__ volatile ("mov %%cs, %0" : "=r"(cs));
     return cs == 0x33;
+#else
+    return 0;
+#endif
 }
 
 static int64_t linux_syscall1(int64_t id, int64_t a0) {
+#if defined(__x86_64__)
     int64_t r;
     __asm__ volatile (
         "syscall"
@@ -265,6 +270,11 @@ static int64_t linux_syscall1(int64_t id, int64_t a0) {
         : "a"(id), "D"(a0)
         : "rcx", "r11", "memory");
     return r;
+#else
+    (void)id;
+    (void)a0;
+    return -38;
+#endif
 }
 
 void _Exit(int status) {

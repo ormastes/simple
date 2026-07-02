@@ -4,6 +4,7 @@
 #include <sys/types.h>
 
 struct statvfs {
+    unsigned long f_type;
     unsigned long f_bsize;
     unsigned long f_frsize;
     unsigned long f_blocks;

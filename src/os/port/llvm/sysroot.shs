@@ -22,6 +22,7 @@ LIBC_DIR="$REPO_ROOT/src/os/libc"
 LLVM_BUILD="$REPO_ROOT/build/os/llvm"
 LLVM_SRC="${LLVM_SRC:-$HOME/llvm-project}"
 TRIPLE="${SIMPLEOS_TARGET_TRIPLE:-${SIMPLE_TARGET:-x86_64-unknown-simpleos}}"
+LIBC_BUILD="$REPO_ROOT/build/os/libc-$TRIPLE"
 LIBCXX_BUILD="$REPO_ROOT/build/os/libcxx-$TRIPLE"
 
 echo "[sysroot] Building SimpleOS sysroot at $SYSROOT ..."
@@ -72,21 +73,176 @@ else
     echo "[sysroot] NOTE: libc++ headers not found at $LLVM_SRC/libcxx/include"
 fi
 
+install_compiler_builtins_seed() {
+    case "$TRIPLE" in
+        aarch64-*)
+            for candidate in \
+                /usr/lib/android-sdk/ndk/*/toolchains/llvm/prebuilt/linux-x86_64/lib/clang/*/lib/baremetal/libclang_rt.builtins-aarch64.a \
+                /usr/lib/gcc-cross/aarch64-linux-gnu/*/libgcc.a
+            do
+                if [ -f "$candidate" ]; then
+                    cp "$candidate" "$SYSROOT/lib/libclang_rt.builtins-aarch64.a"
+                    echo "[sysroot] Installed aarch64 compiler builtins seed"
+                    return
+                fi
+            done
+            echo "[sysroot] NOTE: aarch64 compiler builtins seed not found"
+            ;;
+    esac
+}
+
 # Count headers for verification
 HEADER_COUNT=$(find "$SYSROOT/include" -name "*.h" -o -name "*.hpp" 2>/dev/null | wc -l | tr -d ' ')
 echo "[sysroot] Installed $HEADER_COUNT headers"
 
 # -- Libc -------------------------------------------------------------------
 
-if [ ! -f "$LIBC_DIR/libsimpleos_c.a" ]; then
-    echo "[sysroot] Building SimpleOS libc..."
-    (cd "$LIBC_DIR" && make)
-fi
+build_libc_runtime() {
+    case "$TRIPLE" in
+        x86_64-*)
+            if [ ! -f "$LIBC_DIR/libsimpleos_c.a" ]; then
+                echo "[sysroot] Building SimpleOS libc..."
+                (cd "$LIBC_DIR" && make)
+            fi
+            cp "$LIBC_DIR/libsimpleos_c.a" "$SYSROOT/lib/libsimpleos_c.a"
+            cp "$LIBC_DIR/simpleos_crt0.o" "$SYSROOT/lib/crt0.o"
+            ;;
+        aarch64-*)
+            echo "[sysroot] Building SimpleOS libc for $TRIPLE..."
+            mkdir -p "$LIBC_BUILD"
+            CC="${CC:-clang}"
+            AR="${AR:-llvm-ar}"
+            if ! command -v "$AR" >/dev/null 2>&1; then
+                AR=ar
+            fi
+            CFLAGS="--target=$TRIPLE --sysroot=$SYSROOT -ffreestanding -nostdlib -fno-builtin -fno-stack-protector -fno-exceptions -fno-unwind-tables -fno-asynchronous-unwind-tables -O2 -Wall -Wextra -Wno-unused-parameter -D__simpleos__=1 -I$LIBC_DIR/include"
+            for src in \
+                simpleos_libc.c simpleos_math.c simpleos_math_ext.c simpleos_fs.c \
+                simpleos_pthread.c simpleos_alloc.c simpleos_process.c \
+                simpleos_string_ext.c simpleos_stdlib_ext.c \
+                simpleos_time.c simpleos_printf_float.c simpleos_cxxabi.c \
+                simpleos_dlmalloc.c simpleos_signal.c simpleos_libc_ext.c \
+                simpleos_poll.c simpleos_process_wait.c \
+                simpleos_pthread_rwlock.c simpleos_pthread_cond.c \
+                simpleos_sched.c simpleos_epoll.c simpleos_eventfd.c \
+                simpleos_timerfd.c simpleos_signalfd.c simpleos_inotify.c \
+                simpleos_fs_walk.c simpleos_glob_stub.c simpleos_pwd_stub.c \
+                simpleos_strfmon.c simpleos_fork.c simpleos_ipc.c \
+                simpleos_socket.c simpleos_filelock.c simpleos_statvfs.c \
+                simpleos_utsname.c
+            do
+                "$CC" $CFLAGS -c "$LIBC_DIR/$src" -o "$LIBC_BUILD/${src%.c}.o"
+            done
+            cat > "$LIBC_BUILD/simpleos_crt0_aarch64.S" << 'ASMEOF'
+.section .text
+.global _start
+.type _start, %function
+_start:
+    adrp x0, __bss_start
+    add  x0, x0, :lo12:__bss_start
+    adrp x1, __bss_end
+    add  x1, x1, :lo12:__bss_end
+    cmp  x0, x1
+    b.hs 1f
+0:
+    strb wzr, [x0], #1
+    cmp  x0, x1
+    b.lo 0b
+1:
+    bl __libc_init_array
+    mov x0, #0
+    mov x1, #0
+    mov x2, #0
+    bl main
+    bl exit
+2:
+    b 2b
+.size _start, . - _start
+.weak __bss_start
+.weak __bss_end
+ASMEOF
+            cat > "$LIBC_BUILD/simpleos_syscall_aarch64.S" << 'ASMEOF'
+.section .text
+.global simpleos_syscall
+.type simpleos_syscall, %function
+simpleos_syscall:
+    mov x8, x0
+    mov x0, x1
+    mov x1, x2
+    mov x2, x3
+    mov x3, x4
+    mov x4, x5
+    svc #0
+    ret
+.size simpleos_syscall, . - simpleos_syscall
 
-cp "$LIBC_DIR/libsimpleos_c.a" "$SYSROOT/lib/"
+.global __clear_cache
+.type __clear_cache, %function
+__clear_cache:
+    ret
+.size __clear_cache, . - __clear_cache
+ASMEOF
+            cat > "$LIBC_BUILD/simpleos_setjmp_aarch64.S" << 'ASMEOF'
+.section .text
+.global setjmp
+.type setjmp, %function
+setjmp:
+    stp x19, x20, [x0, #0]
+    stp x21, x22, [x0, #16]
+    stp x23, x24, [x0, #32]
+    stp x29, x30, [x0, #48]
+    mov x1, sp
+    str x1, [x0, #64]
+    mov x0, #0
+    ret
+.size setjmp, . - setjmp
+
+.global _setjmp
+.type _setjmp, %function
+_setjmp:
+    b setjmp
+.size _setjmp, . - _setjmp
+
+.global longjmp
+.type longjmp, %function
+longjmp:
+    ldp x19, x20, [x0, #0]
+    ldp x21, x22, [x0, #16]
+    ldp x23, x24, [x0, #32]
+    ldp x29, x30, [x0, #48]
+    ldr x2, [x0, #64]
+    mov sp, x2
+    mov x0, x1
+    cmp x0, #0
+    cinc x0, x0, eq
+    ret
+.size longjmp, . - longjmp
+
+.global _longjmp
+.type _longjmp, %function
+_longjmp:
+    b longjmp
+.size _longjmp, . - _longjmp
+ASMEOF
+            "$CC" --target="$TRIPLE" -ffreestanding -nostdlib -c "$LIBC_BUILD/simpleos_crt0_aarch64.S" -o "$LIBC_BUILD/simpleos_crt0.o"
+            "$CC" --target="$TRIPLE" -ffreestanding -nostdlib -c "$LIBC_BUILD/simpleos_syscall_aarch64.S" -o "$LIBC_BUILD/simpleos_syscall.o"
+            "$CC" --target="$TRIPLE" -ffreestanding -nostdlib -c "$LIBC_BUILD/simpleos_setjmp_aarch64.S" -o "$LIBC_BUILD/simpleos_setjmp.o"
+            rm -f "$SYSROOT/lib/libsimpleos_c.a"
+            "$AR" rcs "$SYSROOT/lib/libsimpleos_c.a" "$LIBC_BUILD"/*.o
+            cp "$LIBC_BUILD/simpleos_crt0.o" "$SYSROOT/lib/crt0.o"
+            ;;
+        *)
+            echo "[sysroot] ERROR: libc runtime build is not wired for $TRIPLE" >&2
+            exit 1
+            ;;
+    esac
+}
+
+build_libc_runtime
 echo "[sysroot] Installed libsimpleos_c.a"
-cp "$LIBC_DIR/libsimpleos_c.a" "$SYSROOT/lib/libm.a"
+cp "$SYSROOT/lib/libsimpleos_c.a" "$SYSROOT/lib/libm.a"
 echo "[sysroot] Installed libm.a"
+install_compiler_builtins_seed
 
 # -- libc++ runtime ----------------------------------------------------------
 
@@ -134,12 +290,7 @@ build_libcxx_runtime
 
 # -- CRT objects ------------------------------------------------------------
 
-if [ -f "$LIBC_DIR/simpleos_crt0.o" ]; then
-    cp "$LIBC_DIR/simpleos_crt0.o" "$SYSROOT/lib/crt0.o"
-    echo "[sysroot] Installed crt0.o"
-else
-    echo "[sysroot] WARNING: simpleos_crt0.o not found — build libc first"
-fi
+echo "[sysroot] Installed crt0.o"
 
 # -- Compiler-rt builtins (if available) ------------------------------------
 

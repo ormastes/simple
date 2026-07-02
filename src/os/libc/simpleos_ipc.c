@@ -16,27 +16,44 @@ extern void simpleos_epoll_on_fd_close_token(int fd, uint64_t ofd_token);
 #define SYS_DUP  64
 
 static int running_on_linux_host(void) {
+#if defined(__x86_64__)
     uint64_t cs;
     __asm__ volatile ("mov %%cs, %0" : "=r"(cs));
     return cs == 0x33;
+#else
+    return 0;
+#endif
 }
 
 static int64_t linux_syscall1(int64_t id, int64_t a0) {
+#if defined(__x86_64__)
     int64_t r;
     __asm__ volatile("syscall"
                      : "=a"(r)
                      : "a"(id), "D"(a0)
                      : "rcx", "r11", "memory");
     return r;
+#else
+    (void)id;
+    (void)a0;
+    return -38;
+#endif
 }
 
 static int64_t linux_syscall2(int64_t id, int64_t a0, int64_t a1) {
+#if defined(__x86_64__)
     int64_t r;
     __asm__ volatile("syscall"
                      : "=a"(r)
                      : "a"(id), "D"(a0), "S"(a1)
                      : "rcx", "r11", "memory");
     return r;
+#else
+    (void)id;
+    (void)a0;
+    (void)a1;
+    return -38;
+#endif
 }
 
 static int simpleos_valid_fd_flags(int flags) {

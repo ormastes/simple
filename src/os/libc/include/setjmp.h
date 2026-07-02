@@ -11,8 +11,8 @@
 extern "C" {
 #endif
 
-/* jmp_buf stores callee-saved registers + stack pointer + return address */
-typedef uint64_t jmp_buf[8];
+/* jmp_buf stores the platform callee-saved state used by setjmp.S. */
+typedef uint64_t jmp_buf[16];
 
 int  setjmp(jmp_buf env);
 void longjmp(jmp_buf env, int val) __attribute__((noreturn));

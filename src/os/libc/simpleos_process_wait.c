@@ -64,7 +64,7 @@ int getrusage(int who, struct rusage *usage) {
 }
 
 int getrlimit(int resource, struct rlimit *rlim) {
-    if (resource != RLIMIT_STACK) {
+    if (resource != RLIMIT_DATA && resource != RLIMIT_STACK && resource != RLIMIT_CORE) {
         errno = EINVAL;
         return -1;
     }
@@ -77,7 +77,7 @@ int getrlimit(int resource, struct rlimit *rlim) {
 
 int setrlimit(int resource, const struct rlimit *rlim) {
     (void)rlim;
-    if (resource != RLIMIT_STACK) {
+    if (resource != RLIMIT_DATA && resource != RLIMIT_STACK && resource != RLIMIT_CORE) {
         errno = EINVAL;
         return -1;
     }

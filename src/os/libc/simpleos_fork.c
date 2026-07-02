@@ -21,31 +21,49 @@ extern int64_t simpleos_syscall(int64_t id, int64_t a0, int64_t a1,
 extern char **environ;
 
 static int running_on_linux_host(void) {
+#if defined(__x86_64__)
     uint64_t cs;
     __asm__ volatile ("mov %%cs, %0" : "=r"(cs));
     return cs == 0x33;
+#else
+    return 0;
+#endif
 }
 
 static int64_t linux_syscall0(int64_t id) {
+#if defined(__x86_64__)
     int64_t r;
     __asm__ volatile("syscall"
                      : "=a"(r)
                      : "a"(id)
                      : "rcx", "r11", "memory");
     return r;
+#else
+    (void)id;
+    return -38;
+#endif
 }
 
 static int64_t linux_syscall3(int64_t id, int64_t a0, int64_t a1, int64_t a2) {
+#if defined(__x86_64__)
     int64_t r;
     __asm__ volatile("syscall"
                      : "=a"(r)
                      : "a"(id), "D"(a0), "S"(a1), "d"(a2)
                      : "rcx", "r11", "memory");
     return r;
+#else
+    (void)id;
+    (void)a0;
+    (void)a1;
+    (void)a2;
+    return -38;
+#endif
 }
 
 static int64_t linux_syscall4(int64_t id, int64_t a0, int64_t a1, int64_t a2,
                               int64_t a3) {
+#if defined(__x86_64__)
     register int64_t r10 __asm__("r10") = a3;
     int64_t r;
     __asm__ volatile("syscall"
@@ -53,6 +71,14 @@ static int64_t linux_syscall4(int64_t id, int64_t a0, int64_t a1, int64_t a2,
                      : "a"(id), "D"(a0), "S"(a1), "d"(a2), "r"(r10)
                      : "rcx", "r11", "memory");
     return r;
+#else
+    (void)id;
+    (void)a0;
+    (void)a1;
+    (void)a2;
+    (void)a3;
+    return -38;
+#endif
 }
 
 pid_t fork(void) {
