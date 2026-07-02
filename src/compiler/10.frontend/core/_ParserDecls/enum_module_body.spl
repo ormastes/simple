@@ -14,6 +14,7 @@ use compiler.core.ast.{DECL_CE, decl_ce_block}
 use compiler.core.ast.{decl_fn, decl_extern_fn, decl_struct_def}
 use compiler.core.ast.{decl_val_binding, decl_lazy_val_binding, decl_var_binding}
 use compiler.core.ast.{decl_use_import, decl_export_names, decl_enum_def, decl_set_lazy}
+use compiler.core.ast.{decl_set_hardware, decl_set_clocked_args}
 use compiler.core.ast.{decl_impl_block}
 use compiler.core.ast.{decl_set_comptime}
 use compiler.core.ast.{decl_set_visibility_text}
@@ -241,6 +242,12 @@ fn parser_decorator_arg_text(raw: text) -> text:
             return raw.substring(1, raw.len() - 1)
     raw
 
+# Pending @hardware/@clocked annotations: they stack ahead of the fn decl
+# (each decorator is consumed by its own module-body loop iteration), so the
+# flags must survive until the fn itself is parsed.
+var PENDING_HARDWARE: i64 = 0
+var PENDING_CLOCKED_ARGS: [text] = []
+
 fn parse_module_body():
     for i in 0..100000:
         parser_skip_newlines_and_semicolons()
@@ -268,6 +275,11 @@ fn parse_module_body():
                 parser_error("expected 'fn' after 'async'")
         elif par_kind_get() == 20:
             val d = parse_fn_decl(0)  # 0 = not async
+            if PENDING_HARDWARE == 1:
+                decl_set_hardware(d, 1)
+                decl_set_clocked_args(d, PENDING_CLOCKED_ARGS)
+                PENDING_HARDWARE = 0
+                PENDING_CLOCKED_ARGS = []
             module_add_decl(d)
         elif par_kind_get() == 25:
             parser_advance()
@@ -419,11 +431,20 @@ fn parse_module_body():
                             parser_advance()
                         if par_kind_get() == 160:
                             parser_advance()
+                    elif decorator_name == "clocked":
+                        if par_kind_get() == 6:
+                            PENDING_CLOCKED_ARGS.push(par_text_get())
+                        parser_advance()
                     else:
                         parser_advance()
                 parser_expect(141)
             parser_skip_newlines_and_semicolons()
-            if decorator_name == "gpu_kernel" or decorator_name == "gpu":
+            if decorator_name == "hardware":
+                PENDING_HARDWARE = 1
+            elif decorator_name == "clocked":
+                # Args already collected into PENDING_CLOCKED_ARGS above.
+                pass_dn
+            elif decorator_name == "gpu_kernel" or decorator_name == "gpu":
                 if par_kind_get() == 20 or par_kind_get() == 34:
                     val d = parse_fn_decl(0)
                     decl_is_gpu_kernel[d] = 1
