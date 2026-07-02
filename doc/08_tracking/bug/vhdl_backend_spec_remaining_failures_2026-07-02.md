@@ -744,18 +744,36 @@ gaps:
   `unsigned(31 downto 0)`. Faithful uN typing through flat parser → bridge →
   HIR `Int(width, unsigned)` is new type-system infrastructure — a
   well-defined follow-up, not a bitfield-specific bug.
-- **6 write tests**: still `Unit local signal`. `try_lower_bitfield_set` has
-  the same `bitfield_type_sym_for` fallback wired but the write path was not
-  re-traced after the attribute threading landed; next session should dump
-  the write-test MIR the same way the read path was traced (temp debug spec
-  in the backend test dir printing `inst.kind` per block) to find the stray
-  Unit temp's producer.
+- **6 write tests**: ~~still `Unit local signal`~~ **FIXED in pass 3
+  (write-path re-trace, same day)**. Root cause was another end-to-end
+  expression-drop, the exact same pattern as the `EXPR_CAST` bug (#4 in the
+  earlier pass): the flat parser emits `target = value` as an **expression**
+  statement (`stmt_expr_stmt(expr_assign(...))`, `parser_stmts.spl:313`),
+  never `STMT_ASSIGN` — and `convert_flat_expr` had **no `EXPR_ASSIGN`
+  case**, so every field/index assignment in real-parsed code silently
+  became `NilLit` (the whole `inst.opcode = next_opcode` statement vanished
+  from MIR; the stray Unit temp was the NilLit-statement residue). Fixed at
+  two layers: (a) `convert_nodes.spl` — added the `EXPR_ASSIGN` bridge case
+  (target in LEFT, value in RIGHT → `ExprKind.Assign`); (b) HIR
+  `statements.spl` `StmtKind.Expr` case — routes an `ExprKind.Assign`
+  payload into `HirStmtKind.Assign`, reusing MIR's existing assignment
+  lowering (incl. `try_lower_bitfield_set`). Verified by MIR dump: the
+  low-edge write test now produces exactly the spec's expected shape —
+  `VhdlSlice(_, src, 31, 7)` + `Cast(bits(7))` + `VhdlConcat([high, casted])`
+  + `Copy(inst <- concat)`. All 7 bitfield tests now compile through the
+  entire pipeline (zero `Unit local signal` / crash errors); every remaining
+  failure is "expected false to equal true" on **VHDL text assertions
+  only** — i.e. all 7 now converge on the single remaining gap: the uN
+  type-tag infrastructure (u32 params typed I64 → 64-bit ports/widths in
+  rendered VHDL). Fix that and this suite should go 40/48 → 47/48 (the rv32
+  helpers test additionally needs the missing `hardware_source_spl()`
+  feature).
 
-Regression gate after this pass (all green, no regressions):
-`vhdl_backend_spec` 40/48 (unchanged count), `bitfield_mir_spec` 2/2,
-`bitfield_pure_simple_spec` 4/4, `frontend/parser_spec` 3/3 (struct-heavy
-decl-bridge regression check), `vhdl_constraints_spec` 5/5,
-`vhdl_abi_spec` 5/5.
+Regression gate after pass 3 (all green, no regressions):
+`vhdl_backend_spec` 40/48 (all failures now text-assertion-only),
+`bitfield_mir_spec` 2/2, `bitfield_pure_simple_spec` 4/4,
+`frontend/parser_spec` 3/3 (struct-heavy decl-bridge regression check).
+Prior pass also: `vhdl_constraints_spec` 5/5, `vhdl_abi_spec` 5/5.
 
 ### rv32 decode helpers test: still BLOCKED (missing feature), unchanged
 `RiscvFpgaLane.rv32_default().hardware_source_spl()` still does not exist
