@@ -362,8 +362,12 @@ pub use cli_sffi::{
     rt_cli_print_version, rt_cli_read_file, rt_cli_run_check, rt_cli_run_code, rt_cli_run_sffi_gen, rt_cli_run_file,
     rt_cli_run_fix, rt_cli_run_fmt, rt_cli_run_gen_lean, rt_cli_run_lex, rt_cli_run_lint, rt_cli_run_migrate,
     rt_cli_run_query, rt_cli_run_repl, rt_cli_run_tests, rt_cli_run_verify, rt_cli_version, rt_cli_watch_file,
-    rt_compile_to_llvm_ir, rt_compile_to_native, rt_compile_to_native_with_opt,
+    rt_compile_to_llvm_ir, rt_compile_to_native, rt_compile_to_native_with_opt, rt_exec,
 };
+
+// Re-export dynamic-loading / WFFI SFFI functions (unix only)
+#[cfg(unix)]
+pub use wsffi_native::{spl_dlclose, spl_dlopen, spl_dlsym, spl_wffi_call_f64, spl_wffi_call_i64};
 
 // Re-export file I/O SFFI functions
 pub use sffi::{
