@@ -35,6 +35,16 @@ fn rv32_forward_patch_module() -> MachModule:
     val func = MachFunction(name: "rv32_forward_patch", blocks: [start, target], frame_size: 0, num_virtual_regs: 0, used_callee_saved: [])
     MachModule(name: "rv32_forward_patch", functions: [func], data_sections: [], extern_symbols: [])
 
+fn rv32_far_branch_module() -> MachModule:
+    val start = MachBlock(label: "start", insts: [new_mach_inst(RV_OP_BEQ, [op_phys(RV_X1), op_phys(RV_X2), op_label(2)])], block_id: 0, offset: 0)
+    var padding_insts = [new_mach_inst(RV_OP_NOP, [])]
+    for i in 0..1023:
+        padding_insts.push(new_mach_inst(RV_OP_NOP, []))
+    val padding = MachBlock(label: "padding", insts: padding_insts, block_id: 1, offset: 0)
+    val target = MachBlock(label: "target", insts: [new_mach_inst(RV_OP_NOP, [])], block_id: 2, offset: 0)
+    val func = MachFunction(name: "rv32_far_branch", blocks: [start, padding, target], frame_size: 0, num_virtual_regs: 0, used_callee_saved: [])
+    MachModule(name: "rv32_far_branch", functions: [func], data_sections: [], extern_symbols: [])
+
 fn rv32_malformed_jump_module() -> MachModule:
     val block = MachBlock(
         label: "entry",
@@ -425,6 +435,14 @@ describe "Encode Riscv32":
     it "patches RV32 forward branch and jump labels":
         val encoded = encode_module_rv32(rv32_forward_patch_module())
         expect(encoded[0].code).to_equal([0x63, 0x84, 0x20, 0x00, 0xEF, 0x00, 0x40, 0x00, 0x13, 0x00, 0x00, 0x00])
+
+    it "keeps RV32 out-of-range resolved branches inert":
+        val encoded = encode_module_rv32(rv32_far_branch_module())
+        expect(encoded[0].code.len()).to_equal(4104)
+        expect(encoded[0].code[0]).to_equal(0x13)
+        expect(encoded[0].code[1]).to_equal(0x00)
+        expect(encoded[0].code[2]).to_equal(0x00)
+        expect(encoded[0].code[3]).to_equal(0x00)
 
     it "keeps RV32 malformed branch and jump targets inert":
         val encoded = encode_module_rv32(rv32_malformed_jump_module())

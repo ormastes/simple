@@ -18,7 +18,7 @@ use compiler.backend.backend.backend_types.{CodegenTarget}
 use compiler.backend.backend.riscv_target.{RiscvTargetContract, riscv_linux_target_contract}
 use compiler.backend.native.operand_utils.{get_phys_reg_id, get_mem_base_id, get_mem_offset, get_imm_value, get_label_id, get_sym_name}
 use compiler.backend.native.encode_common.{encode_module_with}
-use compiler.backend.native.riscv_encoding.{riscv_emit_u32_le, riscv_encode_r_type, riscv_encode_i_type, riscv_encode_s_type, riscv_encode_b_type, riscv_encode_u_type, riscv_encode_j_type, riscv_alu_funct7, riscv_alu_funct3, riscv_branch_funct3, emit_rol_riscv64, emit_ror_riscv64, emit_clz_riscv64, emit_ctz_riscv64, emit_rev8_riscv64, riscv_operand_is_imm, riscv_operand_is_imm_or_label, riscv_operand_is_imm_or_sym, riscv_operand_is_jal_imm, riscv_operand_is_label, riscv_operand_is_mem, riscv_operand_is_reg, riscv_operand_is_signed_12_imm, riscv_operand_is_u20_imm, riscv_operand_mem_offset_is_signed_12, riscv_encode_common_inst}
+use compiler.backend.native.riscv_encoding.{riscv_emit_u32_le, riscv_encode_r_type, riscv_encode_i_type, riscv_encode_s_type, riscv_encode_b_type, riscv_encode_u_type, riscv_encode_j_type, riscv_alu_funct7, riscv_alu_funct3, riscv_branch_funct3, emit_rol_riscv64, emit_ror_riscv64, emit_clz_riscv64, emit_ctz_riscv64, emit_rev8_riscv64, riscv_offset_fits_branch, riscv_offset_fits_jal, riscv_operand_is_imm, riscv_operand_is_imm_or_label, riscv_operand_is_imm_or_sym, riscv_operand_is_jal_imm, riscv_operand_is_label, riscv_operand_is_mem, riscv_operand_is_reg, riscv_operand_is_signed_12_imm, riscv_operand_is_u20_imm, riscv_operand_mem_offset_is_signed_12, riscv_encode_common_inst}
 
 # ============================================================================
 # Encode Context
@@ -343,12 +343,24 @@ fn patch_jump_riscv64(code: [i64], byte_offset: i64, rel_offset: i64, kind: i64)
 
     var new_inst = old_inst
     if kind == JUMP_JAL:
+        if not riscv_offset_fits_jal(rel_offset):
+            patched[byte_offset] = 0x13
+            patched[byte_offset + 1] = 0x00
+            patched[byte_offset + 2] = 0x00
+            patched[byte_offset + 3] = 0x00
+            return patched
         # J-type: re-encode with the displacement
         # Extract rd and opcode from existing instruction
         val rd = (old_inst / 128) % 32
         val opcode = old_inst % 128
         new_inst = riscv_encode_j_type(rel_offset, rd, opcode)
     elif kind == JUMP_BRANCH:
+        if not riscv_offset_fits_branch(rel_offset):
+            patched[byte_offset] = 0x13
+            patched[byte_offset + 1] = 0x00
+            patched[byte_offset + 2] = 0x00
+            patched[byte_offset + 3] = 0x00
+            return patched
         # B-type: re-encode with the displacement
         # Extract rs1, rs2, funct3, opcode from existing instruction
         val rs1 = (old_inst / 32768) % 32
