@@ -8,14 +8,7 @@ use compiler.tools.duplicate_check._Detector.interner_and_logging.*
 use std.nogc_sync_mut.io.time_ops.{current_time_ms}
 
 fn collect_files(path: text, config: DuplicationConfig) -> [text]:
-    # Cosine mode too slow in interpreter - skip for large directories
-    val all_files = collect_detector_files(path, config)
-    if config.use_cosine_similarity and all_files.len() > 5:
-        log_progress(config, "Cosine mode: skipping ({all_files.len()} files too many for interpreter)")
-        # Return empty list to skip cosine processing
-        []
-    else:
-        all_files
+    collect_detector_files(path, config)
 
 fn sample_blocks_for_similarity(all_blocks: [DuplicateBlock], config: DuplicationConfig) -> [DuplicateBlock]:
     # Interpreter-safe limit for cosine mode to prevent timeout
@@ -312,6 +305,14 @@ fn find_duplicates(files: [text], config: DuplicationConfig, cache_manager: Toke
         log_progress(config, "Grouped into {line_groups.len()} duplicate groups")
         return line_groups
 
+    # Cosine mode: skip expensive scan_duplicate_blocks, use fast hash-based similarity
+    if config.use_cosine_similarity:
+        log_progress(config, "Cosine mode: using fast hash-based detection (skipping expensive token scan)")
+        # Use token gate as fast pre-filter
+        val line_groups = fast_line_window_duplicate_groups(files, config)
+        log_progress(config, "Cosine mode: found {line_groups.len()} similarity groups")
+        return line_groups
+
     val interner = new_token_interner()
 
     log_progress(config, "Scanning {files.len()} files...")
@@ -322,14 +323,7 @@ fn find_duplicates(files: [text], config: DuplicationConfig, cache_manager: Toke
 
     val exact_groups = group_exact_blocks(all_blocks, config, cache_manager)
 
-    val refined_groups = if config.use_cosine_similarity:
-        log_progress(config, "Refining with cosine similarity...")
-        val result = refine_groups_with_similarity(exact_groups, all_blocks, config, cache_manager)
-        result
-    else:
-        exact_groups
-
-    val sorted = sort_by_impact(refined_groups)
+    val sorted = sort_by_impact(exact_groups)
 
     log_progress(config, "Grouped into {sorted.len()} duplicate groups")
 
