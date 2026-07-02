@@ -245,7 +245,8 @@ is Xvfb-only by default; `check-gui-low-res-readability.shs` is offscreen
 | G4.3 3D motion + camera | PASS | `examples/11_advanced/game3d_rolling/main.spl` | `build/game3d_rolling_*.ppm` (4) |
 | G4.4 HUD over 3D | PASS (direct blit; LayerTree bridge blocked by interp bugs) | `examples/11_advanced/game3d_hud/main.spl` | `build/game3d_hud.ppm` |
 | G1.1 real window via Vulkan | NOT RUN (live-display ban; needs Xvfb window run) | `scripts/gui/linux-gui-run.shs` | — |
-| G3.2/G4.2 60s play session | BLOCKED (stale binary: interpreter-only, >280s/frame native gates) | — | — |
+| G4.2 3D game 60s session | PASS on seed binary (rollball: win+lose autopilot, 3600 fixed steps each, 10 gates; PERF-GAP recorded: frame_p95 ≈2.9 s vs 33 ms target — cranelift f32-trig fallback forces interpreted raster) | `scripts/check/check-game3d-rollball.shs` + `test/03_system/game3d/rollball_production_spec.spl` | `build/game3d-rollball/*.ppm` (11) |
+| G3.2 2D game 60s session | IN PROGRESS (W5b lane: SDL backend wiring + complete breakout) | — | — |
 | G2.2 glyph parity | PASS (differentPixels 2717→3; calibrated LCD compositing; caveat: Chrome-calibrated atlas, not an independent rasterizer) | `node tools/electron-shell/verify_famous_site_production_probe.js` (authoritative; see runner P1 bug) + probe/corpus specs | `test/09_baselines/famous_site_corpus/site_0_google/*` |
 | G2.3 browser low-res text | PASS | `scripts/check/check-browser-interaction.shs` + `test/03_system/gui/browser_interaction_spec.spl` | `build/browser-interaction/lowres_*.ppm` |
 | G2.4 scroll | PASS (marker shifts exactly 120px) | same check script/spec | `build/browser-interaction/scroll_offset*.ppm` |
