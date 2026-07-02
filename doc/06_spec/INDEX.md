@@ -4,16 +4,18 @@
 
 ## Quick Stats
 
-- **Total Features:** 1
-- **Complete Documentation:** 1 (100%)
+- **Total Features:** 2
+- **Complete Documentation:** 2 (100%)
 - **Stubs Remaining:** 0
-- **Total Lines:** 133
+- **Total Lines:** 90
+- **Warnings:** 2
 
 ---
 
-## System (1 features)
+## Other (2 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [RV64 Live SSH Login in QEMU Specification](test/03_system/os/rv64_ssh_live_login_in_qemu_spec.md) | Static PASS; live opt-in tracks post-decrypt service-request boundary | N/A | 6 | 60% | 133 lines |
+| [Tauri Simple Web layout proof validator](test/03_system/check/tauri_simple_web_layout_proof_validator_spec.md) | Partial | N/A | 20 | 40% | 60 lines |
+| [Tauri/Chrome Simple Web layout manifest evidence](test/03_system/check/tauri_chrome_simple_web_layout_manifest_evidence_spec.md) | Minimal | N/A | 1 | 20% | 30 lines |
 

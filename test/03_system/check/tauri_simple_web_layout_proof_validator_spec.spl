@@ -44,6 +44,12 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_simple_web_layout_proo
   count, and include nonzero pixels.
 - Captured ARGB pixels must be real JSON numeric uint32 values; string,
   fractional, or out-of-range values are not valid screenshot readback proof.
+- The validator accepts a wrapper-supplied expected ARGB producer so macOS
+  WKWebView snapshots and Linux X11 window screenshots can share the same proof
+  contract without relaxing provenance.
+- The raw RGBA converter applies the deterministic macOS WKWebView expected
+  overlay profile for known fixture-scoped WebKit raster differences while
+  keeping blur/tolerance disabled.
 - Checksum proof rows must match the recomputed captured ARGB artifact
   checksum, not only each other.
 - Requested viewport, ARGB readback dimensions, frame timing, overlay counts,
@@ -104,6 +110,41 @@ describe "Tauri Simple Web layout proof validator":
         expect(evidence).to_contain("tauri_simple_web_layout_blur_or_tolerance_used=false")
         expect(evidence).to_contain("tauri_simple_web_layout_expected_profile=webkitgtk")
         expect(evidence).to_contain("tauri_simple_web_layout_expected_overlay_pixel_count=12")
+
+    it "accepts macOS WKWebView snapshot producer when the wrapper requires it":
+        val root = "build/test-tauri-layout-validator-macos-producer"
+        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+            _proof_command(root + "/proof.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"captured.json\"),JSON.stringify({width:96,height:64,format:\"argb-u32\",producer:\"macos-wkwebview-snapshot\",pixels:Array(96*64).fill(4294967295)}));p.expected_profile=\"none\";p.expected_overlay_pixel_count=0") +
+            " && TAURI_SIMPLE_WEB_LAYOUT_EXPECTED_PRODUCER=macos-wkwebview-snapshot node scripts/check/validate-tauri-simple-web-layout-proof.js " + root + "/proof.json > " + root + "/evidence.env"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(0)
+
+        val evidence = file_read(root + "/evidence.env")
+        step("Inspect macOS WKWebView ARGB producer provenance")
+        expect(evidence).to_contain("tauri_simple_web_layout_validation_status=pass")
+        expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_producer=macos-wkwebview-snapshot")
+        expect(evidence).to_contain("tauri_simple_web_layout_expected_profile=none")
+        expect(evidence).to_contain("tauri_simple_web_layout_expected_overlay_pixel_count=0")
+
+    it "applies macOS WKWebView expected overlay without tolerance":
+        val root = "build/test-tauri-layout-validator-wkwebview-overlay"
+        val command = "rm -rf " + root + " && mkdir -p " + root + "/css_box_matrix && " +
+            "node -e 'const fs=require(\"fs\");const helper=require(\"./tools/tauri-live-bitmap/webkitgtk_expected_overlays\");const w=96,h=64;const expectedPath=\"" + root + "/css_box_matrix/expected.json\";const base=Array(w*h).fill(4294967295);fs.writeFileSync(expectedPath,JSON.stringify({width:w,height:h,format:\"argb-u32\",producer:\"fixture\",pixels:base}));const pixels=helper.applyTauriExpectedOverlay(expectedPath,base,\"wkwebview\").pixels;const raw=Buffer.alloc(w*h*4);for(let i=0;i<pixels.length;i++){const p=pixels[i]>>>0;raw[i*4]=(p>>>16)&255;raw[i*4+1]=(p>>>8)&255;raw[i*4+2]=p&255;raw[i*4+3]=(p>>>24)&255;}fs.writeFileSync(\"" + root + "/raw.rgba\",raw);' && " +
+            "TAURI_CAPTURE_RAW_RGBA=" + root + "/raw.rgba TAURI_CAPTURE_WIDTH=96 TAURI_CAPTURE_HEIGHT=64 TAURI_CAPTURE_OUTPUT=" + root + "/captured.json TAURI_CAPTURE_EXPECTED_ARGB_PATH=" + root + "/css_box_matrix/expected.json TAURI_CAPTURE_EXPECTED_PROFILE=wkwebview TAURI_CAPTURE_PRODUCER=macos-wkwebview-snapshot TAURI_CAPTURE_PROOF_PATH=" + root + "/proof.json TAURI_CAPTURE_FRAME_US=1250 node tools/tauri-live-bitmap/raw_rgba_to_argb.js > " + root + "/convert.env && " +
+            "TAURI_SIMPLE_WEB_LAYOUT_EXPECTED_PRODUCER=macos-wkwebview-snapshot node scripts/check/validate-tauri-simple-web-layout-proof.js " + root + "/proof.json > " + root + "/evidence.env"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(0)
+
+        val evidence = file_read(root + "/evidence.env")
+        val converted = file_read(root + "/convert.env")
+        step("Confirm WKWebView overlay is exact-profile evidence, not tolerance")
+        expect(converted).to_contain("mismatch_count=0")
+        expect(converted).to_contain("blur_or_tolerance_used=false")
+        expect(evidence).to_contain("tauri_simple_web_layout_validation_status=pass")
+        expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_producer=macos-wkwebview-snapshot")
+        expect(evidence).to_contain("tauri_simple_web_layout_expected_profile=tauri-wkwebview-macos:css_box_matrix")
+        expect(evidence).to_contain("tauri_simple_web_layout_expected_overlay_pixel_count=43")
+        expect(evidence).to_contain("tauri_simple_web_layout_blur_or_tolerance_used=false")
 
     it "rejects large checksum values that differ past JavaScript number precision":
         val root = "build/test-tauri-layout-validator-large-checksum"

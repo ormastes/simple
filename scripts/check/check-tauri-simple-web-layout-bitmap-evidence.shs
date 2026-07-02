@@ -15,6 +15,8 @@ CAPTURED_RAW="$BUILD_DIR/tauri-window.rgba"
 CAPTURED_ARGB="$BUILD_DIR/tauri-argb.json"
 TAURI_OUT="$BUILD_DIR/tauri.out"
 TAURI_ERR="$BUILD_DIR/tauri.err"
+WEBKIT_OUT="$BUILD_DIR/webkit-snapshot.out"
+WEBKIT_ERR="$BUILD_DIR/webkit-snapshot.err"
 TAURI_PROOF="$BUILD_DIR/tauri-proof.json"
 VALIDATED_ENV="$BUILD_DIR/tauri-proof.validation.env"
 VALIDATOR="scripts/check/validate-tauri-simple-web-layout-proof.js"
@@ -23,7 +25,7 @@ XVFB_SESSION_ERR="$BUILD_DIR/xvfb-session.err"
 FRAME_US_PATH="$BUILD_DIR/frame-us.txt"
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
-rm -f "$CAPTURED_PNG" "$CAPTURED_RAW" "$CAPTURED_ARGB" "$TAURI_OUT" "$TAURI_ERR" "$TAURI_PROOF" "$VALIDATED_ENV" "$XVFB_SESSION_OUT" "$XVFB_SESSION_ERR" "$FRAME_US_PATH" "$BUILD_DIR/evidence.env" "$REPORT_PATH"
+rm -f "$CAPTURED_PNG" "$CAPTURED_RAW" "$CAPTURED_ARGB" "$TAURI_OUT" "$TAURI_ERR" "$WEBKIT_OUT" "$WEBKIT_ERR" "$TAURI_PROOF" "$VALIDATED_ENV" "$XVFB_SESSION_OUT" "$XVFB_SESSION_ERR" "$FRAME_US_PATH" "$BUILD_DIR/evidence.env" "$REPORT_PATH"
 
 field_of_json() {
     key="$1"
@@ -146,6 +148,22 @@ require_cmd() {
     fi
 }
 
+HOST_UNAME_S="$(uname -s 2>/dev/null || echo unknown)"
+case "$HOST_UNAME_S" in
+    Darwin)
+        TAURI_CAPTURE_PRODUCER="${TAURI_CAPTURE_PRODUCER:-macos-wkwebview-snapshot}"
+        TAURI_CAPTURE_EXPECTED_PROFILE="${TAURI_CAPTURE_EXPECTED_PROFILE:-wkwebview}"
+        ;;
+    Linux)
+        TAURI_CAPTURE_PRODUCER="${TAURI_CAPTURE_PRODUCER:-tauri-x11-window-screenshot}"
+        TAURI_CAPTURE_EXPECTED_PROFILE="${TAURI_CAPTURE_EXPECTED_PROFILE:-webkitgtk}"
+        ;;
+    *)
+        TAURI_CAPTURE_PRODUCER="${TAURI_CAPTURE_PRODUCER:-tauri-capture-backend-unimplemented}"
+        TAURI_CAPTURE_EXPECTED_PROFILE="${TAURI_CAPTURE_EXPECTED_PROFILE:-none}"
+        ;;
+esac
+
 if [ "$HTML_PATH" = "" ] || [ ! -s "$HTML_PATH" ]; then
     emit_unavailable "missing-layout-html"
     exit 1
@@ -155,19 +173,35 @@ if [ "$EXPECTED_ARGB" = "" ] || [ ! -s "$EXPECTED_ARGB" ]; then
     exit 1
 fi
 
-require_cmd cargo "cargo-unavailable"
-require_cmd xvfb-run "xvfb-run-unavailable"
-require_cmd dbus-run-session "dbus-run-session-unavailable"
-require_cmd xdotool "xdotool-unavailable"
-require_cmd import "imagemagick-import-unavailable"
-require_cmd convert "imagemagick-convert-unavailable"
-require_cmd openbox "openbox-unavailable"
 require_cmd node "node-unavailable"
 
 if [ ! -f "$VALIDATOR" ]; then
     emit_unavailable "missing-tauri-proof-validator"
     exit 1
 fi
+
+case "$HOST_UNAME_S" in
+    Darwin)
+        require_cmd swift "swift-unavailable"
+        if [ ! -f tools/tauri-live-bitmap/capture_snapshot.swift ]; then
+            emit_unavailable "missing-macos-wkwebview-snapshot-backend"
+            exit 1
+        fi
+        ;;
+    Linux)
+        require_cmd cargo "cargo-unavailable"
+        require_cmd xvfb-run "xvfb-run-unavailable"
+        require_cmd dbus-run-session "dbus-run-session-unavailable"
+        require_cmd xdotool "xdotool-unavailable"
+        require_cmd import "imagemagick-import-unavailable"
+        require_cmd convert "imagemagick-convert-unavailable"
+        require_cmd openbox "openbox-unavailable"
+        ;;
+    *)
+        emit_unavailable "tauri-capture-host-backend-unimplemented"
+        exit 1
+        ;;
+esac
 
 HTML_ABS="$(cd "$(dirname -- "$HTML_PATH")" && pwd)/$(basename -- "$HTML_PATH")"
 PNG_ABS="$(cd "$BUILD_DIR" && pwd)/$(basename -- "$CAPTURED_PNG")"
@@ -181,11 +215,22 @@ SCREEN_WIDTH="${TAURI_SCREEN_WIDTH:-1280}"
 SCREEN_HEIGHT="${TAURI_SCREEN_HEIGHT:-1024}"
 WAIT_STEPS="${TAURI_CAPTURE_WAIT_STEPS:-60}"
 
-set +e
-TAURI_URL="$TAURI_URL" PNG_ABS="$PNG_ABS" OUT_ABS="$OUT_ABS" ERR_ABS="$ERR_ABS" FRAME_US_ABS="$FRAME_US_ABS" WIDTH="$WIDTH" HEIGHT="$HEIGHT" WAIT_STEPS="$WAIT_STEPS" \
-GDK_BACKEND=x11 WAYLAND_DISPLAY= WEBKIT_DISABLE_DMABUF_RENDERER=1 GTK_USE_PORTAL=0 GIO_USE_PORTALS=0 \
-SIMPLE_TAURI_CAPTURE_WINDOW=1 SIMPLE_TAURI_CAPTURE_WIDTH="$WIDTH" SIMPLE_TAURI_CAPTURE_HEIGHT="$HEIGHT" \
-    xvfb-run -a -s "-screen 0 ${SCREEN_WIDTH}x${SCREEN_HEIGHT}x24" dbus-run-session -- sh -eu >"$XVFB_SESSION_OUT_ABS" 2>"$XVFB_SESSION_ERR_ABS" <<'CAPTURE'
+if [ "$HOST_UNAME_S" = "Darwin" ]; then
+    set +e
+    WEBKIT_CAPTURE_HTML="$HTML_ABS" \
+    WEBKIT_CAPTURE_WIDTH="$WIDTH" \
+    WEBKIT_CAPTURE_HEIGHT="$HEIGHT" \
+    WEBKIT_CAPTURE_RAW_RGBA="$CAPTURED_RAW" \
+    WEBKIT_CAPTURE_FRAME_US="$FRAME_US_PATH" \
+        swift tools/tauri-live-bitmap/capture_snapshot.swift >"$WEBKIT_OUT" 2>"$WEBKIT_ERR"
+    capture_code=$?
+    set -e
+else
+    set +e
+    TAURI_URL="$TAURI_URL" PNG_ABS="$PNG_ABS" OUT_ABS="$OUT_ABS" ERR_ABS="$ERR_ABS" FRAME_US_ABS="$FRAME_US_ABS" WIDTH="$WIDTH" HEIGHT="$HEIGHT" WAIT_STEPS="$WAIT_STEPS" \
+    GDK_BACKEND=x11 WAYLAND_DISPLAY= WEBKIT_DISABLE_DMABUF_RENDERER=1 GTK_USE_PORTAL=0 GIO_USE_PORTALS=0 \
+    SIMPLE_TAURI_CAPTURE_WINDOW=1 SIMPLE_TAURI_CAPTURE_WIDTH="$WIDTH" SIMPLE_TAURI_CAPTURE_HEIGHT="$HEIGHT" \
+        xvfb-run -a -s "-screen 0 ${SCREEN_WIDTH}x${SCREEN_HEIGHT}x24" dbus-run-session -- sh -eu >"$XVFB_SESSION_OUT_ABS" 2>"$XVFB_SESSION_ERR_ABS" <<'CAPTURE'
 cd tools/tauri-shell
 openbox >/dev/null 2>&1 &
 wm_pid=$!
@@ -249,11 +294,17 @@ kill "$wm_pid" 2>/dev/null || true
 wait "$wm_pid" 2>/dev/null || true
 exit "$code"
 CAPTURE
-capture_code=$?
-set -e
+    capture_code=$?
+    set -e
+fi
 FRAME_US="$(cat "$FRAME_US_PATH" 2>/dev/null || echo 0)"
 
-if [ "$capture_code" -ne 0 ] || [ ! -s "$CAPTURED_PNG" ]; then
+if [ "$HOST_UNAME_S" = "Darwin" ]; then
+    if [ "$capture_code" -ne 0 ] || [ ! -s "$CAPTURED_RAW" ]; then
+        emit_fail "macos-wkwebview-snapshot-failed"
+        exit 1
+    fi
+elif [ "$capture_code" -ne 0 ] || [ ! -s "$CAPTURED_PNG" ]; then
     reason="tauri-window-capture-failed"
     if [ "$capture_code" -eq 22 ]; then
         reason="tauri-xvfb-window-unavailable"
@@ -264,9 +315,11 @@ if [ "$capture_code" -ne 0 ] || [ ! -s "$CAPTURED_PNG" ]; then
     exit 1
 fi
 
-if ! convert "$CAPTURED_PNG" -crop "${WIDTH}x${HEIGHT}+0+0" -alpha set -depth 8 "rgba:$CAPTURED_RAW" >/dev/null 2>&1; then
-    emit_fail "tauri-screenshot-rgba-convert-failed"
-    exit 1
+if [ "$HOST_UNAME_S" != "Darwin" ]; then
+    if ! convert "$CAPTURED_PNG" -crop "${WIDTH}x${HEIGHT}+0+0" -alpha set -depth 8 "rgba:$CAPTURED_RAW" >/dev/null 2>&1; then
+        emit_fail "tauri-screenshot-rgba-convert-failed"
+        exit 1
+    fi
 fi
 
 set +e
@@ -275,7 +328,8 @@ TAURI_CAPTURE_WIDTH="$WIDTH" \
 TAURI_CAPTURE_HEIGHT="$HEIGHT" \
 TAURI_CAPTURE_OUTPUT="$CAPTURED_ARGB" \
 TAURI_CAPTURE_EXPECTED_ARGB_PATH="$EXPECTED_ARGB" \
-TAURI_CAPTURE_EXPECTED_PROFILE="${TAURI_CAPTURE_EXPECTED_PROFILE:-webkitgtk}" \
+TAURI_CAPTURE_EXPECTED_PROFILE="$TAURI_CAPTURE_EXPECTED_PROFILE" \
+TAURI_CAPTURE_PRODUCER="$TAURI_CAPTURE_PRODUCER" \
 TAURI_CAPTURE_PROOF_PATH="$TAURI_PROOF" \
 TAURI_CAPTURE_FRAME_US="$FRAME_US" \
     node tools/tauri-live-bitmap/raw_rgba_to_argb.js >"$BUILD_DIR/tauri-capture.out" 2>&1
@@ -302,7 +356,7 @@ if [ "$proof_code" -ne 0 ]; then
 fi
 
 set +e
-node "$VALIDATOR" "$TAURI_PROOF" >"$VALIDATED_ENV"
+TAURI_SIMPLE_WEB_LAYOUT_EXPECTED_PRODUCER="$TAURI_CAPTURE_PRODUCER" node "$VALIDATOR" "$TAURI_PROOF" >"$VALIDATED_ENV"
 validation_code=$?
 set -e
 
@@ -438,8 +492,14 @@ fi
     echo "## Raw Evidence"
     sed 's/^/- /' "$BUILD_DIR/evidence.env"
     echo
-    echo "## Tauri stderr"
-    sed 's/^/- /' "$TAURI_ERR"
+    if [ -s "$TAURI_ERR" ]; then
+        echo "## Tauri stderr"
+        sed 's/^/- /' "$TAURI_ERR"
+    fi
+    if [ -s "$WEBKIT_ERR" ]; then
+        echo "## WKWebView snapshot stderr"
+        sed 's/^/- /' "$WEBKIT_ERR"
+    fi
 } >"$REPORT_PATH"
 
 cat "$BUILD_DIR/evidence.env"

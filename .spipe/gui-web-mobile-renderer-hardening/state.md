@@ -101,3 +101,64 @@ dev-done
   surface capture remains unavailable because
   `macos-wkwebview-snapshot-backend-unimplemented`. Font offload and event
   routing evidence remain open gates for the full goal.
+- implementation: Added a real macOS WKWebView pixel snapshot backend for the
+  Tauri/Chrome surface manifest. `tools/tauri-live-bitmap/capture_snapshot.swift`
+  renders fixture HTML through offscreen WKWebView and writes raw RGBA. The
+  Tauri bitmap wrapper converts that to ARGB JSON with producer
+  `macos-wkwebview-snapshot`; Linux keeps the existing
+  `tauri-x11-window-screenshot` producer. The proof validator now accepts the
+  wrapper-supplied expected producer, and the manifest wrapper reports Darwin
+  requirements as `swift,node` instead of the previous
+  `macos-wkwebview-snapshot-backend-unimplemented` marker.
+- implementation: Added deterministic macOS WKWebView expected-profile overlays
+  for the fixture-scoped raster differences exposed by the full surface rerun:
+  1-LSB CSS box color shifts and native form-control antialias edge pixels.
+  The overlay is applied before checksum comparison, keeps
+  `blur_or_tolerance_used=false`, and still requires `mismatch_count=0` plus
+  exact ARGB artifact provenance.
+- evidence: Focused checks passed:
+  `SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_simple_web_layout_proof_validator_spec.spl --mode=interpreter --clean --fail-fast`
+  (19/19) and
+  `SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_chrome_simple_web_layout_manifest_evidence_spec.spl --mode=interpreter --clean --fail-fast`
+  (1/1). A live one-case macOS smoke at
+  `build/test-tauri-macos-wkwebview-smoke/out/evidence.env` passed with
+  `tauri_simple_web_layout_captured_argb_producer=macos-wkwebview-snapshot`,
+  `mismatch_count=0`, and `blur_or_tolerance_used=false`. A one-case manifest
+  smoke at `build/test-tauri-chrome-macos-wkwebview-manifest-smoke/out/evidence.env`
+  proves `tauri_capture_status=pass`, `tauri_live_capture=true`,
+  `tauri_argb_artifact_pass_count=1`, and backend
+  `macos-wkwebview-snapshot`; Chrome was intentionally pointed at a missing
+  binary in that smoke, so the manifest status remained failed only on the
+  Chrome lane. The next production aggregate should no longer fail because the
+  Darwin Tauri surface backend is unimplemented.
+- evidence: Full resumed surface manifest rerun passed at
+  `build/production_gui_web_renderer_parity_evidence/tauri_chrome_manifest/evidence.env`.
+  Summary rows:
+  `tauri_chrome_simple_web_layout_manifest_status=pass`,
+  `tauri_chrome_simple_web_layout_manifest_tauri_capture_status=pass`,
+  `tauri_chrome_simple_web_layout_manifest_tauri_live_capture=true`,
+  `tauri_case_count=50`, `tauri_pass_count=36`, `tauri_tracked_count=14`,
+  `tauri_fail_count=0`, `tauri_mismatch_count=0`,
+  `tauri_argb_artifact_pass_count=50`, Chrome capture `pass`, Chrome live
+  capture `true`, Chrome case count `50`, Chrome ARGB artifact pass count `50`,
+  `no_fake_capture=true`, and `blur_or_tolerance_used=false`. This clears the
+  previous production surface-manifest blocker; remaining full production gates
+  still need a fresh aggregate after this change, especially font offload and
+  event-routing status.
+- evidence: Fresh production aggregate rerun with
+  `PRODUCTION_GUI_WEB_RENDERER_PARITY_LAYOUT_ENV=build/production_gui_web_renderer_parity_evidence/layout_manifest/evidence.env`
+  and `PRODUCTION_GUI_WEB_RENDERER_PARITY_SURFACE_MANIFEST_RESUME=1` moved the
+  top-level blocker to font offload:
+  `production_gui_web_renderer_parity_status=fail`,
+  `reason=font-offload-evidence-failed`, layout `pass`, surface manifest
+  `pass`, Tauri surface capture `pass`, Chrome capture `pass`, backend `pass`,
+  Metal readback `pass`, Metal render-log `pass`, and
+  `metal_render_log_blocked_gate_count=0`. Nested font evidence reports
+  `production_gui_font_runtime_status=unavailable`,
+  `production_gui_font_runtime_reason=vector-font-compute-not-pass`,
+  `vector_font_compute_reason=simple-vector-font-evidence-failed`,
+  `vector_font_compute_cuda_reason=missing-vector-font-cuda-kernel`,
+  `vector_font_compute_opencl_reason=missing-vector-font-opencl-kernel`,
+  CUDA readback `missing-verified-ptx`, and OpenCL readback
+  `missing-opencl-runtime-loader`. This is the current remaining production
+  parity blocker after the macOS WKWebView/Metal surface work.

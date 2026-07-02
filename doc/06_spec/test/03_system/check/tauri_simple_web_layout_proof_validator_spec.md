@@ -27,7 +27,7 @@ tauri_simple_web_layout_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 17 | 17 | 0 | 0 |
+| 20 | 20 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -82,6 +82,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_simple_web_layout_proo
   on `captured_argb_written=true` alone.
 - ARGB capture file-status rows distinguish `missing`, `empty`, and `pass` so
   diagnostics cannot treat a zero-byte artifact as a valid capture file.
+- ARGB capture file-reason and artifact-status rows normalize missing, empty,
+  symlink, hardlink, and pass cases for downstream renderer evidence gates.
 - Tauri layout proof JSON and captured ARGB artifacts must be single regular
   files, not symlinks or hardlinks to mutable or substituted evidence.
 - ARGB capture proof paths must not resolve back to the top-level proof JSON
@@ -91,6 +93,12 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_simple_web_layout_proo
   count, and include nonzero pixels.
 - Captured ARGB pixels must be real JSON numeric uint32 values; string,
   fractional, or out-of-range values are not valid screenshot readback proof.
+- The validator accepts a wrapper-supplied expected ARGB producer so macOS
+  WKWebView snapshots and Linux X11 window screenshots can share the same proof
+  contract without relaxing provenance.
+- The raw RGBA converter applies the deterministic macOS WKWebView expected
+  overlay profile for known fixture-scoped WebKit raster differences while
+  keeping blur/tolerance disabled.
 - Checksum proof rows must match the recomputed captured ARGB artifact
   checksum, not only each other.
 - Requested viewport, ARGB readback dimensions, frame timing, overlay counts,
@@ -115,7 +123,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_simple_web_layout_proo
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 34 lines folded for reproduction.
+Runnable source: 38 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -139,6 +147,8 @@ expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_written=true"
 expect(evidence).to_contain("tauri_simple_web_layout_proof_symlink_status=pass")
 expect(evidence).to_contain("tauri_simple_web_layout_proof_hardlink_status=pass")
 expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_file_status=pass")
+expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_file_reason=pass")
+expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_artifact_status=pass")
 expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_symlink_status=pass")
 expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_hardlink_status=pass")
 expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_size_bytes=")
@@ -155,6 +165,73 @@ expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_weighted_chec
 expect(evidence).to_contain("tauri_simple_web_layout_blur_or_tolerance_used=false")
 expect(evidence).to_contain("tauri_simple_web_layout_expected_profile=webkitgtk")
 expect(evidence).to_contain("tauri_simple_web_layout_expected_overlay_pixel_count=12")
+```
+
+</details>
+
+#### accepts macOS WKWebView snapshot producer when the wrapper requires it
+
+-  proof command
+   - Expected: code equals `0`
+- Inspect macOS WKWebView ARGB producer provenance
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-tauri-layout-validator-macos-producer"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_command(root + "/proof.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"captured.json\"),JSON.stringify({width:96,height:64,format:\"argb-u32\",producer:\"macos-wkwebview-snapshot\",pixels:Array(96*64).fill(4294967295)}));p.expected_profile=\"none\";p.expected_overlay_pixel_count=0") +
+    " && TAURI_SIMPLE_WEB_LAYOUT_EXPECTED_PRODUCER=macos-wkwebview-snapshot node scripts/check/validate-tauri-simple-web-layout-proof.js " + root + "/proof.json > " + root + "/evidence.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val evidence = file_read(root + "/evidence.env")
+step("Inspect macOS WKWebView ARGB producer provenance")
+expect(evidence).to_contain("tauri_simple_web_layout_validation_status=pass")
+expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_producer=macos-wkwebview-snapshot")
+expect(evidence).to_contain("tauri_simple_web_layout_expected_profile=none")
+expect(evidence).to_contain("tauri_simple_web_layout_expected_overlay_pixel_count=0")
+```
+
+</details>
+
+#### applies macOS WKWebView expected overlay without tolerance
+
+- "node -e 'const fs=require
+   - Expected: code equals `0`
+- Confirm WKWebView overlay is exact-profile evidence, not tolerance
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 18 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-tauri-layout-validator-wkwebview-overlay"
+val command = "rm -rf " + root + " && mkdir -p " + root + "/css_box_matrix && " +
+    "node -e 'const fs=require(\"fs\");const helper=require(\"./tools/tauri-live-bitmap/webkitgtk_expected_overlays\");const w=96,h=64;const expectedPath=\"" + root + "/css_box_matrix/expected.json\";const base=Array(w*h).fill(4294967295);fs.writeFileSync(expectedPath,JSON.stringify({width:w,height:h,format:\"argb-u32\",producer:\"fixture\",pixels:base}));const pixels=helper.applyTauriExpectedOverlay(expectedPath,base,\"wkwebview\").pixels;const raw=Buffer.alloc(w*h*4);for(let i=0;i<pixels.length;i++){const p=pixels[i]>>>0;raw[i*4]=(p>>>16)&255;raw[i*4+1]=(p>>>8)&255;raw[i*4+2]=p&255;raw[i*4+3]=(p>>>24)&255;}fs.writeFileSync(\"" + root + "/raw.rgba\",raw);' && " +
+    "TAURI_CAPTURE_RAW_RGBA=" + root + "/raw.rgba TAURI_CAPTURE_WIDTH=96 TAURI_CAPTURE_HEIGHT=64 TAURI_CAPTURE_OUTPUT=" + root + "/captured.json TAURI_CAPTURE_EXPECTED_ARGB_PATH=" + root + "/css_box_matrix/expected.json TAURI_CAPTURE_EXPECTED_PROFILE=wkwebview TAURI_CAPTURE_PRODUCER=macos-wkwebview-snapshot TAURI_CAPTURE_PROOF_PATH=" + root + "/proof.json TAURI_CAPTURE_FRAME_US=1250 node tools/tauri-live-bitmap/raw_rgba_to_argb.js > " + root + "/convert.env && " +
+    "TAURI_SIMPLE_WEB_LAYOUT_EXPECTED_PRODUCER=macos-wkwebview-snapshot node scripts/check/validate-tauri-simple-web-layout-proof.js " + root + "/proof.json > " + root + "/evidence.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val evidence = file_read(root + "/evidence.env")
+val converted = file_read(root + "/convert.env")
+step("Confirm WKWebView overlay is exact-profile evidence, not tolerance")
+expect(converted).to_contain("mismatch_count=0")
+expect(converted).to_contain("blur_or_tolerance_used=false")
+expect(evidence).to_contain("tauri_simple_web_layout_validation_status=pass")
+expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_producer=macos-wkwebview-snapshot")
+expect(evidence).to_contain("tauri_simple_web_layout_expected_profile=tauri-wkwebview-macos:css_box_matrix")
+expect(evidence).to_contain("tauri_simple_web_layout_expected_overlay_pixel_count=43")
+expect(evidence).to_contain("tauri_simple_web_layout_blur_or_tolerance_used=false")
 ```
 
 </details>
@@ -197,7 +274,7 @@ expect(evidence).to_contain("tauri_simple_web_layout_simple_weighted_checksum=18
 -  proof command
 -  proof command
    - Expected: code equals `1`
-   - Expected: evidence does not contain `tauri_simple_web_layout_tauri_frame_us=not-a-number`
+- expect not
 
 
 <details>
@@ -277,7 +354,7 @@ expect(overlay).to_contain("tauri_simple_web_layout_validation_reason=malformed-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -296,10 +373,14 @@ step("Confirm boolean Tauri capture flags are not enough without file evidence")
 expect(missing).to_contain("tauri_simple_web_layout_validation_status=fail")
 expect(missing).to_contain("tauri_simple_web_layout_validation_reason=missing-captured-argb-file")
 expect(missing).to_contain("tauri_simple_web_layout_captured_argb_file_status=missing")
+expect(missing).to_contain("tauri_simple_web_layout_captured_argb_file_reason=missing")
+expect(missing).to_contain("tauri_simple_web_layout_captured_argb_artifact_status=fail")
 expect(missing).to_contain("tauri_simple_web_layout_captured_argb_size_bytes=")
 expect(empty).to_contain("tauri_simple_web_layout_validation_status=fail")
 expect(empty).to_contain("tauri_simple_web_layout_validation_reason=empty-captured-argb-file")
 expect(empty).to_contain("tauri_simple_web_layout_captured_argb_file_status=empty")
+expect(empty).to_contain("tauri_simple_web_layout_captured_argb_file_reason=empty")
+expect(empty).to_contain("tauri_simple_web_layout_captured_argb_artifact_status=fail")
 expect(empty).to_contain("tauri_simple_web_layout_captured_argb_size_bytes=0")
 ```
 
@@ -315,7 +396,7 @@ expect(empty).to_contain("tauri_simple_web_layout_captured_argb_size_bytes=0")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -332,6 +413,8 @@ expect(evidence).to_contain("tauri_simple_web_layout_validation_status=fail")
 expect(evidence).to_contain("tauri_simple_web_layout_validation_reason=missing-captured-argb-file")
 expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_path=proof.json")
 expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_file_status=missing")
+expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_file_reason=missing")
+expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_artifact_status=fail")
 expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_size_bytes=")
 ```
 
@@ -348,7 +431,7 @@ expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_size_bytes=")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 26 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -374,6 +457,8 @@ expect(argb).to_contain("tauri_simple_web_layout_validation_reason=captured-argb
 expect(argb).to_contain("tauri_simple_web_layout_proof_symlink_status=pass")
 expect(argb).to_contain("tauri_simple_web_layout_proof_hardlink_status=pass")
 expect(argb).to_contain("tauri_simple_web_layout_captured_argb_file_status=symlink")
+expect(argb).to_contain("tauri_simple_web_layout_captured_argb_file_reason=symlink")
+expect(argb).to_contain("tauri_simple_web_layout_captured_argb_artifact_status=fail")
 expect(argb).to_contain("tauri_simple_web_layout_captured_argb_symlink_status=fail")
 expect(argb).to_contain("tauri_simple_web_layout_captured_argb_hardlink_status=pass")
 ```
@@ -391,7 +476,7 @@ expect(argb).to_contain("tauri_simple_web_layout_captured_argb_hardlink_status=p
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 30 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -417,6 +502,8 @@ expect(argb).to_contain("tauri_simple_web_layout_validation_reason=captured-argb
 expect(argb).to_contain("tauri_simple_web_layout_proof_symlink_status=pass")
 expect(argb).to_contain("tauri_simple_web_layout_proof_hardlink_status=pass")
 expect(argb).to_contain("tauri_simple_web_layout_captured_argb_file_status=hardlink")
+expect(argb).to_contain("tauri_simple_web_layout_captured_argb_file_reason=hardlink")
+expect(argb).to_contain("tauri_simple_web_layout_captured_argb_artifact_status=fail")
 expect(argb).to_contain("tauri_simple_web_layout_captured_argb_symlink_status=pass")
 expect(argb).to_contain("tauri_simple_web_layout_captured_argb_hardlink_status=fail")
 expect(argb).to_contain("tauri_simple_web_layout_captured_argb_size_bytes=")
@@ -514,7 +601,7 @@ expect(range_pixels).to_contain("tauri_simple_web_layout_validation_reason=captu
 
 -  proof command
    - Expected: code equals `1`
-   - Expected: evidence does not contain `tauri_simple_web_layout_requested_height=64.5`
+- expect not
 
 
 <details>
@@ -549,11 +636,11 @@ expect_not(evidence.contains("tauri_simple_web_layout_requested_height=64.5"))
 -  proof command
    - Expected: code equals `1`
 - Confirm live Tauri layout numeric proof cannot be stringified
-   - Expected: requested does not contain `tauri_simple_web_layout_requested_width=96`
-   - Expected: argb does not contain `tauri_simple_web_layout_captured_argb_width=96`
-   - Expected: timing does not contain `tauri_simple_web_layout_tauri_frame_us=1250`
-   - Expected: overlay does not contain `tauri_simple_web_layout_expected_overlay_pixel_count=12`
-   - Expected: mismatch does not contain `tauri_simple_web_layout_mismatch_count=0`
+- expect not
+- expect not
+- expect not
+- expect not
+- expect not
 
 
 <details>
@@ -614,9 +701,9 @@ expect_not(mismatch.contains("tauri_simple_web_layout_mismatch_count=0"))
 -  proof command
    - Expected: code equals `1`
 - Confirm string booleans remain malformed Tauri proof diagnostics
-   - Expected: capture does not contain `tauri_simple_web_layout_captured_argb_written=true`
-   - Expected: capture does not contain `tauri_simple_web_layout_captured_argb_written=false`
-   - Expected: blur does not contain `tauri_simple_web_layout_blur_or_tolerance_used=false`
+- expect not
+- expect not
+- expect not
 
 
 <details>
@@ -656,7 +743,7 @@ expect_not(blur.contains("tauri_simple_web_layout_blur_or_tolerance_used=false")
 -  proof command
 -  proof command
    - Expected: code equals `1`
-   - Expected: mismatch does not contain `tauri_simple_web_layout_mismatch_count=bad`
+- expect not
 
 
 <details>
@@ -767,7 +854,7 @@ expect(weighted).to_contain("tauri_simple_web_layout_captured_argb_weighted_chec
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 35 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -778,6 +865,9 @@ expect(script).to_contain("tauri_simple_web_layout_validation_status")
 expect(script).to_contain("tauri_simple_web_layout_proof_symlink_status")
 expect(script).to_contain("tauri_simple_web_layout_proof_hardlink_status")
 expect(script).to_contain("tauri_simple_web_layout_captured_argb_file_status")
+expect(script).to_contain("tauri_simple_web_layout_captured_argb_file_reason")
+expect(script).to_contain("tauri_simple_web_layout_captured_argb_artifact_status")
+expect(script).to_contain("captured ARGB artifact:")
 expect(script).to_contain("tauri_simple_web_layout_captured_argb_symlink_status")
 expect(script).to_contain("tauri_simple_web_layout_captured_argb_hardlink_status")
 expect(script).to_contain("tauri_simple_web_layout_captured_argb_size_bytes")
@@ -790,6 +880,7 @@ expect(script).to_contain("captured-argb-checksum-mismatch")
 expect(script).to_contain("captured-argb-weighted-checksum-mismatch")
 expect(script).to_contain("proof-json-hardlink-status-not-pass")
 expect(script).to_contain("captured-argb-hardlink-status-not-pass")
+expect(script).to_contain("captured-argb-artifact-status-not-pass")
 expect(script).to_contain("status=divergent")
 expect(validator).to_contain("path.resolve(candidate) === path.resolve(proofPath)")
 expect(validator).to_contain("proof-json-symlink")
@@ -806,12 +897,48 @@ expect(converter).to_contain("captured_argb_path: outputPath")
 
 </details>
 
+#### keeps Tauri wrapper diagnostics on early missing artifact exits
+
+- Confirm unavailable Tauri wrapper evidence preserves validator-shape diagnostics
+- Confirm unavailable Tauri report surfaces artifact gate details
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 19 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-tauri-layout-wrapper-early-exit"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    "BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md TAURI_LAYOUT_HTML_PATH=" + root + "/missing.html TAURI_LAYOUT_EXPECTED_ARGB_PATH=" + root + "/missing.argb.json sh scripts/check/check-tauri-simple-web-layout-bitmap-evidence.shs > " + root + "/stdout.env 2> " + root + "/stderr.log; exit 0"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val evidence = file_read(root + "/stdout.env")
+step("Confirm unavailable Tauri wrapper evidence preserves validator-shape diagnostics")
+expect(evidence).to_contain("tauri_simple_web_layout_status=unavailable")
+expect(evidence).to_contain("tauri_simple_web_layout_reason=missing-layout-html")
+expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_file_status=fail")
+expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_file_reason=not-run")
+expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_artifact_status=unavailable")
+expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_symlink_status=")
+expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_hardlink_status=")
+
+val report = file_read(root + "/report.md")
+step("Confirm unavailable Tauri report surfaces artifact gate details")
+expect(report).to_contain("- captured ARGB artifact: fail / not-run / unavailable")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 17 |
-| Active scenarios | 17 |
+| Total scenarios | 20 |
+| Active scenarios | 20 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

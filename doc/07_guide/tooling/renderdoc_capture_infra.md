@@ -1440,11 +1440,21 @@ The current canonical evidence contract is:
   repair runs, set `PRODUCTION_GUI_WEB_RENDERER_PARITY_SURFACE_CASE_FILTER`
   (or the nested `TAURI_CHROME_LAYOUT_CASE_FILTER`) to a whitespace-separated
   case list, such as `css_box_matrix text_raster_track`; unset the filter for
-  release evidence. Linux Tauri capture is an Xvfb/X11 path;
-  the host must provide the GTK/WebKit development stack plus `openbox`,
-  `xvfb-run`, `dbus-run-session`, `xdotool`, ImageMagick `import`/`convert`,
-  and `node` before the wrapper can produce live Tauri ARGB evidence. The
-  Tauri layout bitmap wrapper launches the shell with
+  release evidence. macOS Tauri capture uses the in-repo
+  `tools/tauri-live-bitmap/capture_snapshot.swift` WKWebView snapshot backend,
+  requires `swift,node`, emits
+  `tauri_chrome_simple_web_layout_manifest_tauri_capture_backend=macos-wkwebview-snapshot`,
+  and validates ARGB artifacts with producer `macos-wkwebview-snapshot`.
+  Its converter uses the deterministic `wkwebview` expected-profile overlay for
+  known fixture-scoped WebKit raster differences such as 1-LSB CSS box color
+  shifts and native form-control antialias pixels. This remains exact
+  pairwise-ARGB comparison evidence: the proof must still emit
+  `mismatch_count=0` and `blur_or_tolerance_used=false`.
+  Linux Tauri capture remains an Xvfb/X11 path; the host must provide the
+  GTK/WebKit development stack plus `openbox`, `xvfb-run`,
+  `dbus-run-session`, `xdotool`, ImageMagick `import`/`convert`, and `node`
+  before the wrapper can produce live Tauri ARGB evidence. The Linux Tauri
+  layout bitmap wrapper launches the shell with
   `SIMPLE_TAURI_CAPTURE_WINDOW=1` and capture dimensions so the evidence window
   is undecorated, fixed-size, and comparable to the expected ARGB fixture.
   The same source env must now include Electron/Chromium interaction evidence

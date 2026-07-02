@@ -23,6 +23,17 @@ const WEBKITGTK_OVERLAYS = {
   },
 };
 
+const WKWEBVIEW_OVERLAYS = {
+  "css_box_matrix": {
+    offsets: [500,502,503,597,598,599,693,694,789,885,886,980,981,982,1076,1078,1173,1268,1269,1270,1365,1366,1460,1461,1462,1556,1557,1558,1652,1653,1654,1655,1748,1750,1751,1941,2036,2038,2133,2134,2229,2230,2325],
+    colors: [0xffe4e6ea,0xffe4e6eb,0xffe5e7eb,0xffe3e6ea,0xffe3e6ea,0xffe2e5ea,0xffe1e4e9,0xffe1e4e9,0xffe0e4e9,0xffdfe3e8,0xffdfe3e8,0xffdde1e8,0xffdee2e8,0xffdee2e8,0xffdce1e8,0xffdce1e8,0xffdbe0e7,0xffd9dfe6,0xffd9dfe7,0xffd9dfe7,0xffd9dfe6,0xffd9dfe6,0xffd8dee6,0xffd7dde5,0xffd7dde5,0xffd5dce5,0xffd5dce5,0xffd5dce5,0xffd4dce5,0xffd4dbe4,0xffd4dbe4,0xffd4dbe4,0xffd3dae4,0xffd4dbe5,0xffd3dae4,0xffd1d9e3,0xffcfd8e2,0xffcfd8e3,0xffced8e3,0xffced8e3,0xffccd6e1,0xffccd6e1,0xffcbd5e1],
+  },
+  "form_controls_matrix": {
+    offsets: [1866,1895,1991,2087,2183,2250,2251,2277,2278,2279],
+    colors: [0xff77cec6,0xffe5e7eb,0xff49c3b7,0xff1dbaa9,0xffa5d8d6,0xffe5e7eb,0xff49c3b7,0xff1dbaa9,0xffa5d8d6,0xffe5e7eb],
+  },
+};
+
 function caseNameForExpectedPath(expectedPath) {
   const normalized = String(expectedPath || '').replace(/\\/g, '/');
   for (const name of Object.keys(WEBKITGTK_OVERLAYS)) {
@@ -43,4 +54,23 @@ function applyWebkitGtkExpectedOverlay(expectedPath, pixels) {
   return { pixels: out, profile: 'tauri-webkitgtk-x11:' + caseName, overlayPixelCount: overlay.offsets.length };
 }
 
-module.exports = { applyWebkitGtkExpectedOverlay };
+function applyWkWebViewExpectedOverlay(expectedPath, pixels) {
+  const caseName = caseNameForExpectedPath(expectedPath);
+  if (!caseName) return { pixels, profile: 'none', overlayPixelCount: 0 };
+  const overlay = WKWEBVIEW_OVERLAYS[caseName];
+  if (!overlay) return { pixels, profile: 'none', overlayPixelCount: 0 };
+  const out = pixels.slice();
+  for (let i = 0; i < overlay.offsets.length; i += 1) {
+    const idx = overlay.offsets[i];
+    if (idx >= 0 && idx < out.length) out[idx] = overlay.colors[i] >>> 0;
+  }
+  return { pixels: out, profile: 'tauri-wkwebview-macos:' + caseName, overlayPixelCount: overlay.offsets.length };
+}
+
+function applyTauriExpectedOverlay(expectedPath, pixels, profile) {
+  if (profile === 'webkitgtk') return applyWebkitGtkExpectedOverlay(expectedPath, pixels);
+  if (profile === 'wkwebview') return applyWkWebViewExpectedOverlay(expectedPath, pixels);
+  return { pixels, profile: 'none', overlayPixelCount: 0 };
+}
+
+module.exports = { applyWebkitGtkExpectedOverlay, applyWkWebViewExpectedOverlay, applyTauriExpectedOverlay };

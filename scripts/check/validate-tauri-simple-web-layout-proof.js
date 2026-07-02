@@ -213,6 +213,7 @@ function artifactStatusFromFileStatus(status) {
 }
 
 const proofPath = process.argv[2];
+const expectedProducer = process.env.TAURI_SIMPLE_WEB_LAYOUT_EXPECTED_PRODUCER || 'tauri-x11-window-screenshot';
 if (!proofPath) {
   emit('tauri_simple_web_layout_validation_status', 'fail');
   emit('tauri_simple_web_layout_validation_reason', 'usage-proof-json');
@@ -299,7 +300,7 @@ if (proof.blur_or_tolerance_used !== false) {
   reason = 'malformed-captured-argb';
 } else if (capturedArgb.format !== 'argb-u32') {
   reason = 'captured-argb-format-mismatch';
-} else if (capturedArgb.producer !== 'tauri-x11-window-screenshot') {
+} else if (capturedArgb.producer !== expectedProducer) {
   reason = 'captured-argb-producer-mismatch';
 } else if (!sameJsonInteger(capturedArgb.width, proof.width) || !sameJsonInteger(capturedArgb.height, proof.height)) {
   reason = 'captured-argb-viewport-mismatch';

@@ -2,7 +2,7 @@
 "use strict";
 
 const fs = require("fs");
-const { applyWebkitGtkExpectedOverlay } = require("./webkitgtk_expected_overlays");
+const { applyTauriExpectedOverlay } = require("./webkitgtk_expected_overlays");
 
 const rawPath = process.env.TAURI_CAPTURE_RAW_RGBA || "";
 const width = Number(process.env.TAURI_CAPTURE_WIDTH || 0);
@@ -12,6 +12,7 @@ const expectedPath = process.env.TAURI_CAPTURE_EXPECTED_ARGB_PATH || "";
 const expectedProfile = process.env.TAURI_CAPTURE_EXPECTED_PROFILE || "";
 const proofPath = process.env.TAURI_CAPTURE_PROOF_PATH || "";
 const frameUs = Number(process.env.TAURI_CAPTURE_FRAME_US || 0);
+const producer = process.env.TAURI_CAPTURE_PRODUCER || "tauri-x11-window-screenshot";
 
 function checksum(pixels) {
   let sum = 0n;
@@ -77,8 +78,8 @@ let expectedOverlayPixelCount = 0;
 if (expectedPath && fs.existsSync(expectedPath)) {
   const expected = JSON.parse(fs.readFileSync(expectedPath, "utf8"));
   let ep = Array.isArray(expected.pixels) ? expected.pixels : [];
-  if (expectedProfile === "webkitgtk") {
-    const overlaid = applyWebkitGtkExpectedOverlay(expectedPath, ep);
+  if (expectedProfile === "webkitgtk" || expectedProfile === "wkwebview") {
+    const overlaid = applyTauriExpectedOverlay(expectedPath, ep, expectedProfile);
     ep = overlaid.pixels;
     appliedExpectedProfile = overlaid.profile;
     expectedOverlayPixelCount = overlaid.overlayPixelCount;
@@ -98,7 +99,7 @@ if (outputPath) {
     width,
     height,
     format: "argb-u32",
-    producer: "tauri-x11-window-screenshot",
+    producer,
     pixels,
   }));
 }
@@ -116,6 +117,7 @@ const proof = {
   frame_us: frameUs,
   captured_argb_path: outputPath,
   captured_argb_written: Boolean(outputPath),
+  captured_argb_producer: producer,
   blur_or_tolerance_used: false,
   expected_profile: appliedExpectedProfile,
   expected_overlay_pixel_count: expectedOverlayPixelCount,
