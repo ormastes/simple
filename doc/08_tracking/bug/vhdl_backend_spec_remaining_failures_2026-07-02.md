@@ -805,3 +805,73 @@ declares and uses `bitfield` types) even once written.
 - `test/01_unit/compiler/backend/vhdl_constraints_spec.spl` — 5/5
 - `test/01_unit/compiler/backend/vhdl_backend_spec.spl` — 40/48 (unchanged
   count; see above for why)
+
+## Follow-on pass (task #68, 2026-07-02): fixed-width integer type tags DONE —
+## uN ports now render unsigned/signed(W-1 downto 0); TWO NEW gaps (not "type
+## width") are the actual remaining blockers for the 7 bitfield text assertions
+
+The "no fixed-width integer type tags in `compiler.core.types`" gap from the
+previous pass is now **implemented and verified end to end** (commit adding
+`TYPE_U8..TYPE_I32`):
+- `10.frontend/core/types.spl`: new tag constants `TYPE_U8/U16/U32/U64/I8/I16/I32`
+  (i64 keeps `TYPE_I64=2`), exported, and mapped in `type_tag_name`
+  (→ "u8".."i32") and `type_tag_to_c` (→ uint8_t..int32_t).
+- `10.frontend/core/parser.spl` (`parser_parse_type`): returns the width-specific
+  tag per uN/iN primitive; non-power-of-8 widths (u7/u3/…) still fall back to
+  `TYPE_I64`.
+- `10.frontend/_FlatAstBridge/convert_nodes.spl` (`convert_flat_type`): bridges
+  each new tag to `TypeKind.Named("u32", [])` etc. The downstream chain already
+  existed and needed **no change**: HIR `types.spl` `case Named("u32")` →
+  `Int(32,false)`, MIR `lower_type` → `MirTypeKind.U32`, VHDL
+  `mir_type_to_vhdl_at`/`VhdlTypeMapper` → `unsigned(31 downto 0)`.
+
+**Verified via the real parse→HIR→MIR→VHDL pipeline** (standalone probe, since
+removed): a `u32` parameter now lowers to MIR `U32` in **both** the function
+signature params and the arg locals, and the emitted entity renders
+`arg2 : in unsigned(31 downto 0)` plus `resize(unsigned(sig(6 downto 0)), 7)`
+slice extraction — i.e. the width facility is correct and live.
+
+**But the suite is STILL 40/48**, because the previous pass's "only the type
+width is lost" diagnosis was incomplete — it verified MIR *instruction shapes*
+(VhdlSlice hi/lo), never the final entity text. The 7 bitfield tests each assert
+on the **parameter name** and on slicing **the parameter directly**, and both of
+those are broken by two separate, pre-existing gaps that fixed-width types
+cannot touch:
+
+- **(A) MIR arg-local parameter names are dropped.** `MirBuilder.begin_function`
+  (`50.mir/mir_data.spl:113`) creates each parameter local as
+  `self.new_local(nil, signature.params[i], LocalKind.Arg(i))` — **name `nil`** —
+  because `MirSignature` carries only `params: [MirType]`, no names. So every
+  real-frontend hardware entity renders its ports as `arg0/arg1/arg2` instead of
+  `clk/reset_n/imem_rdata`. The read test's `imem_rdata : in unsigned(31 downto
+  0);` assertion fails purely on the **name**, not the (now-correct) type. Fixing
+  this means threading param names into `MirSignature`/`begin_function` (or naming
+  the arg locals from the HIR fn params in `_MirLowering/function_lowering.spl`) —
+  a MIR-data/builder change with blast radius across **every** backend, out of
+  scope for a type-tag task and not attempted here.
+- **(B) `val inst = BitfieldType(raw)` introduces an `I64` intermediate signal.**
+  The generated VHDL is `signal sig_3 : signed(63 downto 0); sig_3 <= arg2;` then
+  `sig_4 <= resize(unsigned(sig_3(6 downto 0)), 7)`. The slice reads `sig_3`, but
+  the test asserts `imem_rdata(6 downto 0)` — the `val inst` binding is a distinct
+  I64-typed local, not an alias of the U32 param. `try_lower_bitfield_construct`
+  returns the raw arg's LocalId, but the surrounding `val`-binding still
+  materialises a fresh (default-`I64`) local and copies into it, so the slice
+  never reads the parameter directly.
+
+Net: **task #68's deliverable (fixed-width integer type tags) is complete,
+verified, and regression-free**, but it does **not** by itself move the suite off
+40/48. The last 7 text assertions need (A) MIR param-name propagation and (B)
+bitfield-construct arg aliasing — both distinct follow-ups.
+
+### Regression gate (task #68, all green via `src/compiler_rust/target/bootstrap/simple`)
+- `mir/bitfield_mir_spec.spl` — 2/2
+- `parser/bitfield_pure_simple_spec.spl` — 4/4
+- `backend/vhdl_type_mapper_spec.spl` — 6/6
+- `backend/vhdl_constraints_spec.spl` — 5/5
+- `backend/vhdl_abi_spec.spl` — 5/5
+- `backend/vhdl_builder_spec.spl` — 4/4
+- `backend/vhdl_testbench_spec.spl` — 5/5
+- `target_presets_spec.spl` — 23/23
+- `type_checker/type_inference_executable_spec.spl` — 1/1
+- `backend/vhdl_backend_spec.spl` — 40/48 (all 8 failures now width-correct;
+  remaining blockers are (A) + (B) above)
