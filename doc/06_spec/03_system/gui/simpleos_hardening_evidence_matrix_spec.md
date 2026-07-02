@@ -11,6 +11,7 @@
 @direction LR
 
 simpleos_hardening_evidence_matrix_spec -> std
+simpleos_hardening_evidence_matrix_spec -> app
 ```
 
 </details>
@@ -91,6 +92,8 @@ bitmap evidence, and the latest live QEMU Simple GUI/MDI framebuffer artifact.
 - The latest live QEMU Simple GUI/MDI PPM is parsed directly and must satisfy
   the same probe, header, body, top-lane, and taskbar pixel anchors as the live
   QMP capture spec.
+- The RV64 display-smoke QMP report must prove the 320x240 virtio-gpu
+  framebuffer, nonblack pixels, and all five WM anchor samples.
 
 ## Examples
 
@@ -133,8 +136,9 @@ The wrapper emits these rows:
 - `simpleos_hardening_qemu_host_counterpart_status`
 - `simpleos_hardening_qemu_gui_smf_artifact_status`
 - `simpleos_hardening_qemu_mdi_status`
+- `simpleos_hardening_rv64_display_smoke_qmp_status`
 
-The matrix passes only when all nine rows are `pass` and the required
+The matrix passes only when all ten rows are `pass` and the required
 guest-side QEMU performance release gate is `pass`.
 
 ## Evidence Sources
@@ -151,12 +155,16 @@ guest-side QEMU performance release gate is `pass`.
   `doc/09_report/bun_simple_web_engine2d_js_bitmap_evidence_2026-06-02.md`.
 - Host/QEMU counterpart evidence reads
   `doc/09_report/qemu_gtk_wm_capture_evidence_2026-06-05.md`.
-- Production GUI/WebRenderer parity evidence reads
-  `doc/09_report/production_gui_web_renderer_parity_evidence_2026-06-05.md`.
+- Production GUI/WebRenderer parity evidence reads the latest existing
+  `doc/09_report/production_gui_web_renderer_parity_evidence_*.md` report
+  unless `PRODUCTION_GUI_PARITY_REPORT` is set.
 - QEMU MDI evidence reads the latest
   `build/tmp/gui_entry_engine2d_wm_simple_web_spec_*` capture directory plus
   `test/03_system/gui/gui_entry_engine2d_wm_simple_web_spec.spl` and its generated
   manual.
+- RV64 display-smoke QMP evidence reads
+  `doc/09_report/rv64_display_smoke_qmp_evidence_current_2026-07-02.md` when
+  present, otherwise the date-stamped report for the current run.
 
 ## Scope Notes
 
@@ -203,9 +211,9 @@ guest-side QEMU performance release gate is `pass`.
 #### passes when evidence rows and guest performance are wired
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 36 lines folded for reproduction.
+Runnable source: 40 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -217,7 +225,7 @@ val code = result[2]
 expect(code).to_equal(0)
 expect(stdout).to_contain("simpleos_hardening_matrix_status=pass")
 expect(stdout).to_contain("simpleos_hardening_matrix_reason=pass")
-expect(stdout).to_contain("simpleos_hardening_matrix_passed=9/9")
+expect(stdout).to_contain("simpleos_hardening_matrix_passed=10/10")
 expect(stdout).to_contain("simpleos_hardening_exec_launch_fs_status=pass")
 expect(stdout).to_contain("simpleos_hardening_ssh_smf_exec_status=pass")
 expect(stdout).to_contain("simpleos_hardening_shared_wm_status=pass")
@@ -243,6 +251,10 @@ expect(stdout).to_contain("simpleos_hardening_qemu_host_perf_promotes_qemu_perf=
 expect(stdout).to_contain("simpleos_hardening_qemu_mdi_status=pass")
 expect(stdout).to_contain("simpleos_hardening_qemu_mdi_ppm_anchor_status=pass")
 expect(stdout).to_contain("simpleos_hardening_qemu_mdi_ppm_nonblack=")
+expect(stdout).to_contain("simpleos_hardening_rv64_display_smoke_qmp_status=pass")
+expect(stdout).to_contain("simpleos_hardening_rv64_display_smoke_qmp_width=320")
+expect(stdout).to_contain("simpleos_hardening_rv64_display_smoke_qmp_height=240")
+expect(stdout).to_contain("simpleos_hardening_rv64_display_smoke_qmp_anchor_matches=5")
 expect(stdout).to_contain("simpleos_hardening_gui_entry_capture_ppm_bytes=2359312")
 expect(stdout).to_contain("simpleos_hardening_gui_entry_capture_raw_bytes=3145728")
 ```
@@ -251,14 +263,12 @@ expect(stdout).to_contain("simpleos_hardening_gui_entry_capture_raw_bytes=314572
 
 #### fails closed when live QMP passes but GUI SMF artifact contract is not executed
 
-1. rt process run timeout
-
-2. )) to equal
+- process run timeout
    - Expected: code equals `1`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 41 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -266,8 +276,8 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val run_id = _run_id()
 val qemu_report = _qemu_report_path(run_id)
-rt_process_run_timeout("/bin/sh", ["-c", "mkdir -p " + _build_dir(run_id)], 5000)
-expect(rt_file_write_text(qemu_report,
+process_run_timeout("/bin/sh", ["-c", "mkdir -p " + _build_dir(run_id)], 5000)
+expect(file_write(qemu_report,
     "# QEMU GTK WM Capture Evidence\n\n" +
     "- status: pass\n" +
     "- auto QMP status: pass\n" +
@@ -297,7 +307,7 @@ val code = result[2]
 expect(code).to_equal(1)
 expect(stdout).to_contain("simpleos_hardening_matrix_status=fail")
 expect(stdout).to_contain("simpleos_hardening_matrix_reason=matrix-incomplete")
-expect(stdout).to_contain("simpleos_hardening_matrix_passed=8/9")
+expect(stdout).to_contain("simpleos_hardening_matrix_passed=9/10")
 expect(stdout).to_contain("simpleos_hardening_qemu_host_counterpart_status=pass")
 expect(stdout).to_contain("simpleos_hardening_qemu_gui_smf_artifact_status=fail")
 expect(stdout).to_contain("simpleos_hardening_production_gui_web_renderer_parity_status=pass")
@@ -311,14 +321,12 @@ expect(stdout).to_contain("simpleos_hardening_qemu_guest_perf_release_gate_statu
 
 #### passes the combined GUI SMF artifact row only when QEMU macOS and guest perf evidence all pass
 
-1. rt process run timeout
-
-2. )) to equal
+- process run timeout
    - Expected: code equals `0`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 50 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -326,8 +334,8 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val run_id = _run_id()
 val qemu_report = _qemu_report_path(run_id)
-rt_process_run_timeout("/bin/sh", ["-c", "mkdir -p " + _build_dir(run_id)], 5000)
-expect(rt_file_write_text(qemu_report,
+process_run_timeout("/bin/sh", ["-c", "mkdir -p " + _build_dir(run_id)], 5000)
+expect(file_write(qemu_report,
     "# QEMU GTK WM Capture Evidence\n\n" +
     "- status: pass\n" +
     "- auto QMP status: pass\n" +
@@ -361,7 +369,7 @@ val code = result[2]
 expect(code).to_equal(0)
 expect(stdout).to_contain("simpleos_hardening_matrix_status=pass")
 expect(stdout).to_contain("simpleos_hardening_matrix_reason=pass")
-expect(stdout).to_contain("simpleos_hardening_matrix_passed=9/9")
+expect(stdout).to_contain("simpleos_hardening_matrix_passed=10/10")
 expect(stdout).to_contain("simpleos_hardening_qemu_host_counterpart_status=pass")
 expect(stdout).to_contain("simpleos_hardening_qemu_gui_smf_artifact_status=pass")
 expect(stdout).to_contain("simpleos_hardening_production_gui_web_renderer_parity_status=pass")

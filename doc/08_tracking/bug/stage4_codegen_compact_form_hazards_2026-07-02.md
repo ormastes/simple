@@ -406,3 +406,14 @@ offset. The pure-Simple workarounds advanced the crash 6 stages but cannot
 un-garbage an ANY-mis-extracted enum payload. The `SIMPLE_UNSTUB_HIR` default
 stays the empty-HIR stub (untouched); default `-c`/lint/`--version` remain
 healthy (verified rc=0, no regression). Binaries: `scratchpad/stage4_fix15..19`.
+
+### Iteration 10 addendum — the wall is enum-payload match, not array ANY (commit fdbf/`stage4_fix20`)
+Restructured `lower_hir_block` to capture the trailing expr in-loop from the
+FRESH `lower_hir_stmt` return value (`lowered.kind`) instead of re-indexing the
+`stmts` array. Result: **identical** garbage `block.value = 0x1800000007`
+(masked `0x1800000000`, unmapped). So the mis-extraction is in the
+`case Expr(expr)` enum-payload match on an ANY-erased `HirStmtKind` value — it
+reproduces even off a non-array, freshly-typed function return. Conclusion: no
+`.spl`-level restructuring recovers the payload; the seed must stop erasing
+enum/variant types to ANY (or refuse ambiguous payload offsets). Stops here for
+iteration 10.
