@@ -1,7 +1,7 @@
-# JIT lowering: "Unknown variable: clamp_f while lowering EngineColor.to_rgba8"
+# JIT lowering: nested fn inside impl method unresolvable ("Unknown variable: clamp_f")
 
 Date: 2026-07-02
-Status: open
+Status: open (workaround in place)
 Severity: P3 (silent fallback to interpreter — large perf cliff)
 Related: doc/03_plan/ui/production_readiness_master_plan_2026-07-02.md (W5)
 
@@ -15,9 +15,16 @@ silently falls back to the interpreter:
 error: Unknown variable: clamp_f while lowering EngineColor.to_rgba8
 ```
 
-`clamp_f` resolves fine in interpreter mode, so this is a JIT-lowering-only
-symbol-resolution gap (helper visible to the interpreter but not to HIR
-lowering of the method body).
+`clamp_f` resolves fine in interpreter mode. Root cause: `clamp_f` was a
+**nested `fn` defined inside `to_rgba8` within an `impl` block** — HIR
+lowering does not register nested fns in method bodies, so any nested-fn
+call site fails JIT for the whole program. General bug: applies to every
+nested fn inside an impl method, not just this one.
+
+## Workaround
+
+Hoisted the helper to module level as `_clamp_channel` in
+`src/lib/common/engine/color.spl` (2026-07-02).
 
 ## Impact
 
