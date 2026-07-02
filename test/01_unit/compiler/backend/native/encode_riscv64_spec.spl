@@ -2,14 +2,29 @@ use std.spec.*
 
 use compiler.backend.backend.backend_types.{CodegenTarget}
 use compiler.backend.backend.riscv_target.{riscv_linux_target_contract}
-use compiler.backend.native.{R_RISCV_CALL_PLT}
+use compiler.backend.native.{R_RISCV_CALL_PLT, encode_module_riscv64}
 use compiler.backend.native.encode_riscv64.{encode_li_riscv64}
+use compiler.backend.native.mach_inst.{MachBlock, MachFunction, MachModule, RV_OP_BEQ, RV_OP_JAL, RV_OP_NOP, RV_X1, RV_X2, new_mach_inst, op_label, op_phys}
 use compiler.backend.native.riscv_encoding.{
     riscv_emit_u32_le, riscv_encode_b_type, riscv_encode_i_type, riscv_encode_j_type, riscv_encode_s_type, riscv_encode_u_type,
     emit_rol_riscv64, emit_ror_riscv64,
     emit_clz_riscv64, emit_ctz_riscv64, emit_cpop_riscv64,
     emit_rev8_riscv64, emit_brev8_riscv64
 }
+
+fn rv64_backward_patch_module() -> MachModule:
+    val start = MachBlock(label: "start", insts: [new_mach_inst(RV_OP_NOP, [])], block_id: 0, offset: 0)
+    val back = MachBlock(
+        label: "back",
+        insts: [
+            new_mach_inst(RV_OP_BEQ, [op_phys(RV_X1), op_phys(RV_X2), op_label(0)]),
+            new_mach_inst(RV_OP_JAL, [op_phys(RV_X1), op_label(0)])
+        ],
+        block_id: 1,
+        offset: 0
+    )
+    val func = MachFunction(name: "rv64_backward_patch", blocks: [start, back], frame_size: 0, num_virtual_regs: 0, used_callee_saved: [])
+    MachModule(name: "rv64_backward_patch", functions: [func], data_sections: [], extern_symbols: [])
 
 describe "Encode Riscv64":
     it "shares the Linux call relocation and ABI contract":
@@ -36,6 +51,10 @@ describe "Encode Riscv64":
         expect(riscv_emit_u32_le([], riscv_encode_b_type(-4, 2, 1, 0, 0x63))).to_equal([0xE3, 0x8E, 0x20, 0xFE])
         expect(riscv_emit_u32_le([], riscv_encode_j_type(2048, 1, 0x6F))).to_equal([0xEF, 0x00, 0x10, 0x00])
         expect(riscv_emit_u32_le([], riscv_encode_j_type(-2048, 1, 0x6F))).to_equal([0xEF, 0xF0, 0x1F, 0x80])
+
+    it "patches RV64 backward branch and jump labels":
+        val encoded = encode_module_riscv64(rv64_backward_patch_module())
+        expect(encoded[0].code).to_equal([0x13, 0x00, 0x00, 0x00, 0xE3, 0x8E, 0x20, 0xFE, 0xEF, 0xF0, 0x9F, 0xFF])
 
 describe "Encode Riscv64 scalar bitmanip":
     it "encodes rol":

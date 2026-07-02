@@ -2,8 +2,24 @@ use std.spec.*
 
 use compiler.backend.backend.backend_types.{CodegenTarget}
 use compiler.backend.backend.riscv_target.{riscv_linux_target_contract}
+use compiler.backend.native.{encode_module_rv32}
 use compiler.backend.native.encode_riscv32.{ELF32_EI_CLASS, ELF32_HEADER_SIZE, encode_li_rv32}
+use compiler.backend.native.mach_inst.{MachBlock, MachFunction, MachModule, RV_OP_BEQ, RV_OP_JAL, RV_OP_NOP, RV_X1, RV_X2, new_mach_inst, op_label, op_phys}
 use compiler.backend.native.riscv_encoding.{riscv_emit_u32_le, riscv_encode_b_type, riscv_encode_i_type, riscv_encode_j_type, riscv_encode_s_type, riscv_encode_u_type}
+
+fn rv32_backward_patch_module() -> MachModule:
+    val start = MachBlock(label: "start", insts: [new_mach_inst(RV_OP_NOP, [])], block_id: 0, offset: 0)
+    val back = MachBlock(
+        label: "back",
+        insts: [
+            new_mach_inst(RV_OP_BEQ, [op_phys(RV_X1), op_phys(RV_X2), op_label(0)]),
+            new_mach_inst(RV_OP_JAL, [op_phys(RV_X1), op_label(0)])
+        ],
+        block_id: 1,
+        offset: 0
+    )
+    val func = MachFunction(name: "rv32_backward_patch", blocks: [start, back], frame_size: 0, num_virtual_regs: 0, used_callee_saved: [])
+    MachModule(name: "rv32_backward_patch", functions: [func], data_sections: [], extern_symbols: [])
 
 describe "Encode Riscv32":
     it "retains ELF32 constants for the RV32 Linux lane":
@@ -33,3 +49,7 @@ describe "Encode Riscv32":
         expect(riscv_emit_u32_le([], riscv_encode_b_type(-4, 2, 1, 0, 0x63))).to_equal([0xE3, 0x8E, 0x20, 0xFE])
         expect(riscv_emit_u32_le([], riscv_encode_j_type(2048, 1, 0x6F))).to_equal([0xEF, 0x00, 0x10, 0x00])
         expect(riscv_emit_u32_le([], riscv_encode_j_type(-2048, 1, 0x6F))).to_equal([0xEF, 0xF0, 0x1F, 0x80])
+
+    it "patches RV32 backward branch and jump labels":
+        val encoded = encode_module_rv32(rv32_backward_patch_module())
+        expect(encoded[0].code).to_equal([0x13, 0x00, 0x00, 0x00, 0xE3, 0x8E, 0x20, 0xFE, 0xEF, 0xF0, 0x9F, 0xFF])
