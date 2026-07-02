@@ -35,6 +35,11 @@
 - diagram alpha hits: 5
 - diagram blit hits: 1
 - diagram scroll hits: 3
+- facade draw_image clip/mask spec: test/01_unit/lib/gc_async_mut/gpu/engine2d/engine2d_facade_backend_mutation_spec.spl
+- facade draw_image clip/mask status: pass
+- facade draw_image clip/mask examples: 4
+- facade draw_image clip/mask failures: 0
+- cpu_simd facade draw_image clip/mask status: pass
 - policy: exact bitmap, no blur, no tolerance
 - blur/tolerance used: false
 - x86_status: Initialized
@@ -80,6 +85,11 @@
 - cpu_simd_evidence_diagram_alpha_hits=5
 - cpu_simd_evidence_diagram_blit_hits=1
 - cpu_simd_evidence_diagram_scroll_hits=3
+- cpu_simd_evidence_facade_draw_image_clip_mask_spec=test/01_unit/lib/gc_async_mut/gpu/engine2d/engine2d_facade_backend_mutation_spec.spl
+- cpu_simd_evidence_facade_draw_image_clip_mask_status=pass
+- cpu_simd_evidence_facade_draw_image_clip_mask_examples=4
+- cpu_simd_evidence_facade_draw_image_clip_mask_failures=0
+- cpu_simd_evidence_cpu_simd_facade_draw_image_clip_mask_status=pass
 - cpu_simd_evidence_policy=exact-bitmap-no-blur-no-tolerance
 - cpu_simd_evidence_blur_or_tolerance_used=false
 - cpu_simd_evidence_x86_status=Initialized
