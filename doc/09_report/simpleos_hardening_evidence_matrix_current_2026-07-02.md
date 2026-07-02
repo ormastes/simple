@@ -45,7 +45,7 @@
 - rv64_display_smoke_qmp_anchor_names: top,header,bodyA,bodyB,taskbar
 - simple_web_node_report: doc/09_report/simple_web_engine2d_js_bitmap_evidence_2026-06-02.md
 - simple_web_bun_report: doc/09_report/bun_simple_web_engine2d_js_bitmap_evidence_2026-06-02.md
-- production_gui_parity_report: doc/09_report/production_gui_web_renderer_parity_evidence_2026-07-02.md
+- production_gui_parity_report: doc/09_report/production_gui_web_renderer_parity_evidence_2026-06-29.md
 - simple_web_node_env: build/simple_web_engine2d_js_bitmap_evidence_current/evidence.env
 - simple_web_bun_env: build/bun_simple_web_engine2d_js_bitmap_evidence_current/evidence.env
 - gui_entry_latest_dir: build/tmp/gui_entry_engine2d_wm_simple_web_spec_3406515_1782861032385213

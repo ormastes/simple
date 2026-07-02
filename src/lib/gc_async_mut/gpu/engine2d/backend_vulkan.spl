@@ -23,10 +23,9 @@ use std.gpu.engine2d.glyph.{glyph_height, glyph_advance, render_text_to_buffer}
 use std.gpu.engine2d.helpers_text.{text_blit_buffer}
 use std.gpu.engine2d.backend_vulkan_helpers.{
     _pack_clear_pc, _pack_rect_pc, _pack_line_pc, _pack_circle_pc,
-    _pack_rounded_rect_pc, _pack_triangle_pc, _pack_gradient_pc, _pack_blit_pc,
+    _pack_rounded_rect_pc, _pack_triangle_pc, _pack_gradient_pc,
     _pixels_to_bytes, _bytes_to_pixels, _bytes_to_pixel_array, _i64, _i32_to_u32, _u32_to_u8,
-    _u8_to_u32, _bool_to_i32, vulkan_dispatch_compute,
-    vulkan_dispatch_blit_compute
+    _u8_to_u32, _bool_to_i32, vulkan_dispatch_compute
 }
 use std.gpu.engine2d.backend_vulkan_spirv.{
     spirv_clear, spirv_rect_filled, spirv_noop_storage,
@@ -578,21 +577,35 @@ impl RenderBackend for VulkanBackend:
         self.dirty = true
 
     me draw_image(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
-        # Upload pixel data to a temporary Vulkan storage buffer, then
-        # dispatch a blit compute shader to copy it into the framebuffer
-        val pixel_count = _i64(w) * _i64(h)
-        val byte_size = pixel_count * 4
-        val d_src = vulkan_sffi_alloc_buffer(byte_size, 0x80)
-        if d_src != 0:
-            # Upload source pixels to device buffer
-            val src_bytes = _pixels_to_bytes(pixels, pixel_count)
-            vulkan_sffi_copy_to_buffer(d_src, src_bytes, 0)
-            # Dispatch blit kernel
-            val gx = (_i64(w) + 15) / 16
-            val gy = (_i64(h) + 15) / 16
-            val pc = _pack_blit_pc(x, y, w, h, self.w, self.h)
-            vulkan_dispatch_blit_compute(self.d_framebuffer, self.pipe_blit, d_src, pc, gx, gy, 1)
-            vulkan_sffi_free_buffer(d_src)
+        if self.dirty:
+            val fb_size = _i64(self.w) * _i64(self.h) * 4
+            val fb_bytes = vulkan_sffi_read_buffer_bytes(self.d_framebuffer, fb_size, 0)
+            vulkan_sffi_wait_idle()
+            self.host_buf = _bytes_to_pixel_array(fb_bytes, self.w * self.h)
+
+        val clip_end_x = self.clip_x + self.clip_w
+        val clip_end_y = self.clip_y + self.clip_h
+        val mask_active = self.mask_buf.len() > 0
+        var py = 0
+        while py < h:
+            var px = 0
+            while px < w:
+                val dx = x + px
+                val dy = y + py
+                val src_idx = py * w + px
+                var writable = dx >= 0 and dx < self.w and dy >= 0 and dy < self.h and src_idx < pixels.len()
+                if writable and self.clip_enabled:
+                    writable = dx >= self.clip_x and dx < clip_end_x and dy >= self.clip_y and dy < clip_end_y
+                if writable and mask_active:
+                    val mask_idx = dy * self.mask_w + dx
+                    if mask_idx >= 0 and mask_idx < self.mask_buf.len():
+                        writable = self.mask_buf[mask_idx] != 0u8
+                if writable:
+                    self.host_buf[dy * self.w + dx] = pixels[src_idx]
+                px = px + 1
+            py = py + 1
+        val upload_bytes = _pixels_to_bytes(self.host_buf, _i64(self.w) * _i64(self.h))
+        vulkan_sffi_copy_to_buffer(self.d_framebuffer, upload_bytes, 0)
         self.dirty = true
 
     me set_clip(x: i32, y: i32, w: i32, h: i32):

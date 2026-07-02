@@ -404,6 +404,7 @@ impl RenderBackend for SoftwareBackend:
 
     me draw_image(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
         val pixels_len = pixels.len()
+        val slow_checked = self.clip_enabled or self.mask_buf.len() > 0
         var row = 0
         while row < h:
             val py = y + row
@@ -419,14 +420,20 @@ impl RenderBackend for SoftwareBackend:
                 if start_x + count > self.w:
                     count = self.w - start_x
                 if count > 0 and src_row_base + src_x + count <= pixels_len:
-                    record_simd_copy_hit()
-                    val dst_off = py * self.w + start_x
                     val src_off = src_row_base + src_x
-                    var col = 0
-                    while col < count:
-                        self.buf[dst_off + col] = pixels[src_off + col]
-                        col = col + 1
-                    self.mark_span_dirty(start_x, py, count)
+                    if slow_checked:
+                        var col = 0
+                        while col < count:
+                            self.sw_set_pixel(start_x + col, py, pixels[src_off + col])
+                            col = col + 1
+                    else:
+                        record_simd_copy_hit()
+                        val dst_off = py * self.w + start_x
+                        var col = 0
+                        while col < count:
+                            self.buf[dst_off + col] = pixels[src_off + col]
+                            col = col + 1
+                        self.mark_span_dirty(start_x, py, count)
             row = row + 1
 
     me blit_image(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):

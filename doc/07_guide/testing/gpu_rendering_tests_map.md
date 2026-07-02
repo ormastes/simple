@@ -4,7 +4,7 @@
 
 > **Note**: This guide exists to prevent GPU rendering tests from being missed or recreated. If adding new GPU features, reference this map first.
 >
-> ⚠️ **IMPORTANT:** See `doc/07_guide/testing/gpu_rendering_tests_gap_analysis.md` for honest coverage assessment. **Most tests are validation/audit focused, not functional.** Key gaps: event handling (missing), RenderDoc traces (unavailable), Metal logs (unavailable), DirectX logs (unavailable), GUI item combinations (missing).
+> ⚠️ **IMPORTANT:** See `doc/07_guide/testing/gpu_rendering_tests_gap_analysis.md` for honest coverage assessment. **Most tests are validation/audit focused, not functional.** Current Linux evidence has Simple/Chrome/Electron RenderDoc `.rdc` artifacts with `RDOC` magic in `doc/09_report/linux_renderdoc_simpleos_hardening_evidence_current_2026-07-02.md`; remaining platform gaps include Metal logs (macOS-only), DirectX logs (Windows-only), and broader GUI item combinations.
 
 ## Test Category Legend
 
@@ -45,7 +45,7 @@
 | `gui_renderdoc_aggregate_autodiscovery_spec.spl` | RenderDoc capture discovery | ❌ Audit only — checks evidence file presence |
 | `gui_renderdoc_aggregate_cache_modes_spec.spl` | RenderDoc cache optimization | ❌ Audit only — cache behavior validation |
 | `gui_renderdoc_feature_coverage_fast_gate_spec.spl` | RenderDoc feature gates (fast path) | ❌ Audit only — gate validation |
-| `gui_renderdoc_feature_coverage_status_spec.spl` | RenderDoc coverage status validation | ❌ Audit only — **reports `unavailable` for Vulkan/Metal/DirectX traces** |
+| `gui_renderdoc_feature_coverage_status_spec.spl` | RenderDoc coverage status validation | ❌ Audit only — use `doc/09_report/linux_renderdoc_simpleos_hardening_evidence_current_2026-07-02.md` for current Linux `.rdc` completion; Metal/DirectX remain platform-specific |
 | `gui_color_image_pipeline_8k_simple_bin_spec.spl` | 8K GUI color/image pipeline | ⚠️ Perf measurement only |
 | `gtk_gui_size_speed_simple_binary_spec.spl` | GTK GUI rendering (Linux) | ⚠️ Perf measurement only |
 | `gui_retained_perf_source_freshness_spec.spl` | Perf source artifact freshness | ❌ Audit only |
@@ -101,6 +101,7 @@ src/lib/gc_async_mut/gpu/engine2d/directx_backend.spl
 ### Guides
 - **GPU Rendering Tests Gap Analysis:** `doc/07_guide/testing/gpu_rendering_tests_gap_analysis.md` — **READ THIS FIRST**
 - **RenderDoc Capture Infrastructure:** `doc/07_guide/tooling/renderdoc_capture_infra.md`
+- **Current Linux RenderDoc + SimpleOS hardening evidence:** `doc/09_report/linux_renderdoc_simpleos_hardening_evidence_current_2026-07-02.md`
 - **SPipe Test Template:** `.claude/templates/spipe_template.spl` (includes GPU rendering examples)
 
 ### Plans

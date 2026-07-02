@@ -22,6 +22,17 @@
 - rect mismatches: 0
 - rect expected pixels: build/vulkan-engine2d-readback/rect-expected-u32.json
 - rect actual pixels: build/vulkan-engine2d-readback/rect-actual-u32.json
+- draw_image device readback spec: test/01_unit/lib/gc_async_mut/gpu/engine2d/vulkan_compute_oracle_spec.spl
+- draw_image device readback status: pass
+- draw_image device readback examples: 7
+- draw_image device readback failures: 0
+- draw_image clipped readback status: pass
+- draw_image clip-rect readback status: pass
+- draw_image mask readback status: pass
+- web renderer backend parity spec: test/01_unit/lib/gc_async_mut/gpu/browser_engine/web_renderer_backend_parity_spec.spl
+- web renderer backend parity status: pass
+- web renderer backend parity examples: 10
+- web renderer backend parity failures: 0
 - blur/tolerance used: false
 - vulkan strict exit code: 0
 - cpu/vulkan parity exit code: 0
@@ -49,6 +60,13 @@
 - vulkan_engine2d_readback_rect_mismatches=0
 - vulkan_engine2d_readback_rect_expected_pixels_path=build/vulkan-engine2d-readback/rect-expected-u32.json
 - vulkan_engine2d_readback_rect_actual_pixels_path=build/vulkan-engine2d-readback/rect-actual-u32.json
+- vulkan_engine2d_readback_draw_image_device_spec=test/01_unit/lib/gc_async_mut/gpu/engine2d/vulkan_compute_oracle_spec.spl
+- vulkan_engine2d_readback_draw_image_device_status=pass
+- vulkan_engine2d_readback_draw_image_clipped_status=pass
+- vulkan_engine2d_readback_draw_image_clip_rect_status=pass
+- vulkan_engine2d_readback_draw_image_mask_status=pass
+- vulkan_engine2d_readback_web_renderer_backend_parity_spec=test/01_unit/lib/gc_async_mut/gpu/browser_engine/web_renderer_backend_parity_spec.spl
+- vulkan_engine2d_readback_web_renderer_backend_parity_status=pass
 - vulkan_engine2d_readback_blur_or_tolerance_used=false
 - vulkan_engine2d_readback_vulkan_strict_exit_code=0
 - vulkan_engine2d_readback_cpu_vulkan_parity_exit_code=0

@@ -1,0 +1,48 @@
+<!-- llm-process-gen: managed source=gemini_design_skill source_sha256=a56692bb54b65021a099b4263c47ac757c9eaa8a7a1439e07fd3d465b484071c content_sha256=8cfccffca43681aff1c20711383e2cb4dae656f8148f99f6780c22895bcf18ca -->
+# design
+
+Source: `.gemini/commands/design.toml`
+
+Create architecture, UI design, system tests, and detail design. Self-sufficient — if research/requirements missing, does them first."
+
+the design pipeline for the given feature. Self-sufficient — if prerequisites missing, create them.
+
+Check prerequisites:
+- doc/02_requirements/feature/<feature>.md (if missing, run research first)
+- doc/02_requirements/nfr/<feature>.md (if missing, run research first)
+
+Phase 1: UI Design (if applicable)
+- TUI: doc/05_design/<feature>_tui.md
+- GUI: doc/05_design/<feature>_gui.md
+
+Phase 2: Architecture — doc/04_architecture/<feature>.md
+- For MCP, LSP, and tool servers, include startup path, hot request path, cache or index strategy, invalidation strategy, and perf budgets
+
+Phase 3: System Test Design
+- SPipe BDD tests: test/03_system/app/<app_name>/feature/<feature>_spec.spl
+- Generated/manual SPipe docs: doc/06_spec/03_system/app/<app_name>/feature/<feature>_spec.md
+- Never place executable .spl specs under doc/06_spec; verify `find doc/06_spec -name '*_spec.spl' | wc -l` returns 0
+- Matchers (built-in only): to_equal, to_be, to_be_nil, to_contain, to_start_with, to_end_with, to_be_greater_than, to_be_less_than
+- Every REQ-NNN must have at least one test
+- For broad lanes, record lower-model sidecars to use or merge (Codex Spark,
+  Claude Haiku, Claude Sonnet), or mark N/A. Normal/highest-capability review
+  must accept broad findings, coverage, generated-manual quality, and done marks.
+- First normal/highest-capability pass defines shared interface names and
+  manual step("...") flow helper names, setup/checker helper names, fail-fast
+  placeholders using assert(false) or fail(...), and generated-manual review
+  owner.
+- Generate/read doc/06_spec/... as a scenario manual; revise step text,
+  captures, inline/previous expansion, and visibility until primary flows are
+  understandable without opening the source spec.
+- If design changes workflow/tooling, evidence wrappers, generated spec shape,
+  or verification contracts, update matching doc/07_guide, doc/06_spec,
+  .codex/skills/, .agents/skills/, .claude/skills/, .claude/agents/spipe/,
+  and .gemini/commands/ instructions before implementation handoff.
+
+Phase 4: Detail Design — doc/05_design/<feature>.md
+
+Phase 5: Quality Check — verify SPipe quality, ask user if changes needed.
+
+If another LLM already created artifacts, review and extend — never overwrite.
+Treat full-tree scans, repeated file rereads, and per-request subprocesses as design risks unless explicitly justified.
+"""

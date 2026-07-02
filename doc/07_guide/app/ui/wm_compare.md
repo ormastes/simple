@@ -62,7 +62,12 @@ The wrapper chains the host scene baseline through:
 sh scripts/check/check-gtk-gl-wm-scene-bitmap-evidence.shs
 ```
 
-For the isolated fake-QMP screendump contract, use:
+Current live QMP evidence:
+`doc/09_report/qemu_gtk_wm_capture_evidence_2026-06-05.md` and
+`doc/09_report/rv64_display_smoke_qmp_evidence_current_2026-07-02.md`.
+
+The fake-QMP screendump contract is harness-only fallback evidence. Use it only
+to validate the command/JSON/PPM parsing path without booting QEMU:
 
 ```bash
 REPORT_DATE=2026-07-02 \
@@ -71,13 +76,16 @@ REPORT_DATE=2026-07-02 \
   sh scripts/check/check-qemu-capture-fake-qmp-evidence.shs
 ```
 
-Current fake-QMP evidence:
+Current fake-QMP harness evidence:
 `doc/09_report/qemu_capture_fake_qmp_evidence_current_2026-07-02.md`.
 
 Current passing evidence requires:
 
+- `auto QMP status: pass`
 - `qemu live bitmap status: pass`
+- `qemu live bitmap reason: live-qmp-screendump-pass`
 - `live capture full-scene mismatches: 0`
+- RV64 `wm_anchor_matches: 5`
 - `host GTK GL WM scene status: pass`
 - `host GTK GL WM scene mismatch count: 0`
 - `host GTK GL WM scene blur/tolerance used: false`

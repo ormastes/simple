@@ -249,6 +249,22 @@ loader/tool discovery, `--browser-backing` proves Chromium GPU metadata,
 `--run` proves direct ARGB comparison, and `--renderdoc`/`--renderdoc-simple`
 are the only Linux paths that can produce native `.rdc` completion evidence.
 
+## Current Linux RenderDoc Evidence - 2026-07-02
+
+Current combined evidence is indexed in
+`doc/09_report/linux_renderdoc_simpleos_hardening_evidence_current_2026-07-02.md`.
+For Linux it points at `doc/09_report/linux_vulkan_render_log_compare_2026-06-29.md`,
+which records:
+
+- `linux_vulkan_render_log_compare_blocked_gate_count=0`
+- `linux_vulkan_render_log_compare_renderdoc_gate_status=pass`
+- Simple, Chrome, and Electron artifacts all report `RDOC` magic
+- Vulkan Engine2D readback and CPU SIMD Engine2D reports both pass with zero
+  mismatches
+
+Treat the 2026-06-27 missing-`renderdoccmd` rows as historical host-local
+blockers, not the current Linux completion state.
+
 ## Full Evidence
 
 After SDK tools and browser backing are ready, use:

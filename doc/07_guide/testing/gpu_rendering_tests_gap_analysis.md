@@ -1,18 +1,20 @@
 # GPU Rendering Tests: Gap Analysis & Implementation Status
 
-**Last Updated:** 2026-07-01  
-**Status:** Implemented — Core functional tests complete
+**Last Updated:** 2026-07-02
+**Status:** Implemented — Core functional tests complete; current Linux `.rdc` evidence linked
 
 ## Executive Summary
 
 **48 GPU rendering tests exist and pass** ✅ including **22 new functional tests** with real pixel capture and render log comparison.
+Current Linux RenderDoc/Vulkan evidence is tracked separately in
+`doc/09_report/linux_renderdoc_simpleos_hardening_evidence_current_2026-07-02.md`.
 
 | Aspect | Status | Implementation |
 |--------|--------|-----------------|
 | **Test Files** | ✅ 26+ exist | 22 new functional + 26 prior validation tests |
 | **Image Capture** | ✅ Implemented | Real SoftwareRenderer.get_pixels() pixel capture (9 tests) |
 | **Render Log Capture** | ✅ Implemented | RenderLogCapture class with CPU-Vulkan alignment (8 tests) |
-| **RenderDoc Traces** | ✅ Simulated | Pure-Simple render log comparison with 90% threshold (8 tests) |
+| **RenderDoc Traces** | ✅ Linux evidence | Pure-Simple render log tests exist; current Linux Simple/Chrome/Electron `.rdc` artifacts have `RDOC` magic in the 2026-07-02 combined report |
 | **Event Handling** | ⚠️ Documented | Pattern demonstrated in CPU SIMD tests; event→render→verify chain |
 | **Metal Render Logs** | ❌ Environmental | Unavailable (requires macOS GPU) |
 | **DirectX Render Logs** | ❌ Environmental | Unavailable (requires Windows GPU) |
@@ -82,12 +84,13 @@ These tests **validate the test infrastructure itself**, not the rendering:
 ### GUI RenderDoc Feature Coverage (8+ audit tests passing)
 - **File:** `test/03_system/check/gui_renderdoc_feature_coverage_status_spec.spl`
 - **What it does:** Audits evidence file availability, status flags, platform matrix
-- **Key findings from test assertions:**
-  - `linux_vulkan_render_log_compare_renderdoc_simple_status=unavailable` ❌
-  - `linux_vulkan_render_log_compare_renderdoc_chrome_status=unavailable` ❌
+- **Historical test assertions included:**
+  - `linux_vulkan_render_log_compare_renderdoc_simple_status=unavailable` (superseded on Linux by current report)
+  - `linux_vulkan_render_log_compare_renderdoc_chrome_status=unavailable` (superseded on Linux by current report)
   - `macos_metal_render_log_compare_status=unavailable` ❌
   - `windows_d3d12_render_log_compare_status=unavailable` ❌
-- **Gap:** Audit is comprehensive, but actual capture/compare is not implemented
+- **Current Linux evidence:** `doc/09_report/linux_renderdoc_simpleos_hardening_evidence_current_2026-07-02.md` records blocked gate count 0 and `RDOC` magic for Simple, Chrome, and Electron artifacts.
+- **Gap:** Audit specs are still evidence/status validators; Metal and DirectX capture remain platform-specific gaps.
 
 ### Vulkan Backend (16 tests passing)
 - **File:** `test/01_unit/lib/nogc_sync_mut/engine/render/vulkan_backend3d_spec.spl`
@@ -171,12 +174,13 @@ describe "Event Handling":
 
 ### 3. RenderDoc Trace Capture & Comparison
 
-**Current state:** Infrastructure exists but marked `unavailable` in tests
+**Current state:** Linux external evidence passes; in-spec capture integration remains a future enhancement
 
 **Infrastructure present:**
 - `src/lib/common/renderdoc/renderdoc_diff.spl` — RenderDoc trace comparison library
 - Functions: `compare_renderdoc_traces()`, validation thresholds defined
-- Missing: Actual RenderDoc capture integration
+- Current Linux report: `doc/09_report/linux_renderdoc_simpleos_hardening_evidence_current_2026-07-02.md`
+- Missing: Direct in-spec RenderDoc capture/trace extraction API
 
 **What's needed:**
 ```spl
@@ -189,8 +193,8 @@ describe "RenderDoc Vulkan Capture":
         expect(diff.vulkan_call_parity).to_be_greater_than(0.90)  # Missing
 ```
 
-**Required implementation:**
-1. RenderDoc SDK integration (C FFI layer)
+**Future in-spec implementation:**
+1. RenderDoc SDK/SFFI capture entrypoint for specs
 2. Trace capture start/stop functions
 3. API call extraction from traces
 4. Draw call parity calculation
@@ -285,9 +289,9 @@ describe "Cross-Backend Rendering Alignment":
 
 ### ⏭️ Phase 2 (Backend Traces) — Future
 
-1. **RenderDoc C FFI integration** (optional enhancement)
-   - Current: Pure-Simple simulation with RenderLogCapture
-   - Enhancement: Direct librenderdoc.so trace capture via SFFI
+1. **RenderDoc C FFI/SFFI integration** (optional enhancement)
+   - Current: Pure-Simple RenderLogCapture tests plus external Linux `.rdc` evidence
+   - Enhancement: Direct in-spec `librenderdoc.so` trace capture via SFFI
 
 2. **Metal & DirectX** (environmental blocker)
    - MTL render log capture (requires macOS GPU)
@@ -334,10 +338,9 @@ describe "Cross-Backend Rendering Alignment":
    - Implement one event handling test (click → pixel change)
 
 3. **Document blockers:**
-   - RenderDoc SDK integration path
+   - In-spec RenderDoc SDK/SFFI integration path
    - Metal MTLRenderCommandEncoder tracing
    - DXVK capture API
-   - Missing Electron/Chrome Vulkan proof scripts
 
 ---
 

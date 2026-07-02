@@ -5,7 +5,9 @@
 **Category:** Runtime
 **Status:** Implemented
 **Requirements:** N/A
+**Plan:** doc/03_plan/ui/production_readiness_master_plan_2026-07-02.md
 **Design:** doc/04_architecture/ui/simple_gui_stack.md
+**Research:** doc/09_report/linux_renderdoc_simpleos_hardening_evidence_current_2026-07-02.md
 
 ## Overview
 
@@ -28,6 +30,12 @@ path" check, this proves real GPU output equals the expected pixels.
 ## Related Specifications
 
 - [Web-Render Engine2D Surface](../../ui/web_render_engine2d_surface_spec.md) — the same backends on the web-render API surface
+
+## Syntax
+
+The scenarios use `std.spec` steps and concrete pixel comparisons. Vulkan
+unavailability is not skipped silently: off-host runs must prove the device
+count is zero before returning.
 """
 
 use std.spec.*
@@ -144,10 +152,10 @@ describe "Engine2D Vulkan backend compute matches the reference":
         # Only the kernels bit-exact with the (Metal-bit-exact) SoftwareBackend
         # are checked here: circle_filled, rect_outline, triangle_filled. (gradient
         # is wired too and has its own first-principles `it` below.) circle_outline,
-        # line, rounded_rect and blit stay no-op on Vulkan because their GPU blobs
-        # use algorithm classes that diverge from SoftwareBackend's standard
-        # algorithms (distance-ring vs Bresenham, DDA vs Bresenham, fill vs outline)
-        # — see bug vulkan_raster_kernels_noop_and_divergent.
+        # line and rounded_rect stay no-op on Vulkan because their GPU blobs use
+        # algorithm classes that diverge from SoftwareBackend's standard algorithms
+        # (distance-ring vs Bresenham, DDA vs Bresenham, fill vs outline) — see
+        # bug vulkan_raster_kernels_noop_and_divergent.
         step("circle_filled, rect_outline and triangle_filled match the reference")
         vk.clear(bg)
         sw.clear(bg)
@@ -158,6 +166,91 @@ describe "Engine2D Vulkan backend compute matches the reference":
         vk.draw_triangle_filled(10, 44, 30, 6, 54, 44, fg)
         sw.draw_triangle_filled(10, 44, 30, 6, 54, 44, fg)
         expect(pixel_mismatches(vk.read_pixels(), sw.read_pixels())).to_equal(0)
+
+    it "Vulkan draw_image uploads source pixels into the device framebuffer":
+        val w: i32 = 16
+        val h: i32 = 16
+        val bg: u32 = 0xFF102030u32
+        val src = [
+            0xFF010203u32, 0xFF112233u32,
+            0xFFAABBCCu32, 0xFFDDEEFFu32
+        ]
+
+        step("Create the Vulkan backend; if unavailable, assert zero devices honestly")
+        var vk = VulkanBackend.create()
+        if not vk.init(w, h):
+            expect(rt_vulkan_device_count()).to_equal(0)
+            return
+
+        step("Blit a 2x2 image and verify device readback matches the source")
+        vk.clear(bg)
+        vk.draw_image(8, 8, 2, 2, src)
+        val px = vk.read_pixels()
+        expect(px[8 * w + 8]).to_equal(src[0])
+        expect(px[8 * w + 9]).to_equal(src[1])
+        expect(px[9 * w + 8]).to_equal(src[2])
+        expect(px[9 * w + 9]).to_equal(src[3])
+        expect(px[7 * w + 7]).to_equal(bg)
+
+    it "Vulkan draw_image clipping matches the SoftwareBackend reference":
+        val w: i32 = 6
+        val h: i32 = 5
+        val bg: u32 = 0xFF102030u32
+        val src = [
+            0xFF010203u32, 0xFF112233u32, 0xFF223344u32,
+            0xFFAABBCCu32, 0xFFBBCCDDu32, 0xFFDDEEFFu32
+        ]
+
+        step("Create the Vulkan backend; if unavailable, assert zero devices honestly")
+        var vk = VulkanBackend.create()
+        if not vk.init(w, h):
+            expect(rt_vulkan_device_count()).to_equal(0)
+            return
+
+        step("Render the same partially clipped image through Vulkan and SoftwareBackend")
+        var sw = SoftwareBackend.create()
+        sw.init(w, h)
+        vk.clear(bg)
+        sw.clear(bg)
+        vk.draw_image(-1, 2, 3, 2, src)
+        sw.draw_image(-1, 2, 3, 2, src)
+
+        step("Every readback pixel matches the software clipping contract")
+        expect(pixel_mismatches(vk.read_pixels(), sw.read_pixels())).to_equal(0)
+
+        step("An active Engine2D clip rectangle is also honored")
+        vk.clear(bg)
+        sw.clear(bg)
+        vk.set_clip(1, 2, 1, 1)
+        sw.set_clip(1, 2, 1, 1)
+        vk.draw_image(-1, 2, 3, 2, src)
+        sw.draw_image(-1, 2, 3, 2, src)
+        val clipped = vk.read_pixels()
+        expect(pixel_mismatches(clipped, sw.read_pixels())).to_equal(0)
+        expect(clipped[2 * w + 0]).to_equal(bg)
+        expect(clipped[2 * w + 1]).to_equal(src[2])
+        expect(clipped[3 * w + 1]).to_equal(bg)
+
+        step("An active Engine2D mask is also honored")
+        val mask = [
+            1u8, 1u8, 1u8, 1u8, 1u8, 1u8,
+            1u8, 1u8, 1u8, 1u8, 1u8, 1u8,
+            1u8, 0u8, 1u8, 1u8, 1u8, 1u8,
+            1u8, 1u8, 1u8, 1u8, 1u8, 1u8,
+            1u8, 1u8, 1u8, 1u8, 1u8, 1u8
+        ]
+        vk.clear_clip()
+        sw.clear_clip()
+        vk.set_mask(mask, w, h)
+        sw.set_mask(mask, w, h)
+        vk.clear(bg)
+        sw.clear(bg)
+        vk.draw_image(-1, 2, 3, 2, src)
+        sw.draw_image(-1, 2, 3, 2, src)
+        val masked = vk.read_pixels()
+        expect(pixel_mismatches(masked, sw.read_pixels())).to_equal(0)
+        expect(masked[2 * w + 0]).to_equal(src[1])
+        expect(masked[2 * w + 1]).to_equal(bg)
 
     it "real GPU vertical gradient matches the endpoint-exact first-principles oracle":
         # Reconciliation guard (bug vulkan_raster_kernels_noop_and_divergent):

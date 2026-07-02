@@ -1,0 +1,140 @@
+# Linux RenderDoc + SimpleOS Hardening Evidence
+
+- status: pass
+- scope: linux-renderdoc-web-gui-simpleos-qemu-wm-llvm-port-engine2d-simd-and-qemu-gpu-access
+- evidence_date_local: 2026-07-02
+- linux_renderdoc_source_report: `doc/09_report/linux_vulkan_render_log_compare_2026-06-29.md`
+- vulkan_engine2d_source_report: `doc/09_report/vulkan_engine2d_readback_2026-07-02.md`
+- cpu_simd_engine2d_source_report: `doc/09_report/cpu_simd_engine2d_evidence_current_2026-07-02.md`
+- qemu_gpu_capture_source_report: `doc/09_report/qemu_gtk_wm_capture_evidence_2026-06-05.md`
+- rv64_qmp_capture_source_report: `doc/09_report/rv64_display_smoke_qmp_evidence_current_2026-07-02.md`
+- simpleos_source_report: `doc/09_report/simpleos_hardening_evidence_matrix_current_2026-07-02.md`
+- simpleos_llvm_source_report: `doc/09_report/simpleos_llvm_port_evidence_current_2026-07-02.md`
+
+## Linux RenderDoc/Vulkan
+
+- command: `sh scripts/check/check-linux-vulkan-render-log-compare.shs`
+- status: pass
+- blocked_gate_count: 0
+- simple_vulkan_gate_status: pass
+- browser_backing_gate_status: pass
+- pairwise_gate_status: pass
+- argb_source_gate_status: pass
+- renderdoc_gate_status: pass
+- simple_rdoc_artifact_magic: RDOC
+- chrome_rdoc_artifact_magic: RDOC
+- electron_rdoc_artifact_magic: RDOC
+- simple_rdoc_artifact: `build/renderdoc/canonical-probe/simple/simple_gui_app_capture.rdc`
+- chrome_rdoc_artifact: `build/renderdoc/chrome-implicit-layer-default-autocapture/html/gpu_chrome_capture.rdc`
+- electron_rdoc_artifact: `build/renderdoc/electron-implicit-layer-default-autocapture/electron-html/electron_gpu_capture.rdc`
+
+## Engine2D Vulkan Readback
+
+- report: `doc/09_report/vulkan_engine2d_readback_2026-07-02.md`
+- status: pass
+- backend: vulkan
+- present_exercised: true
+- readback_exercised: true
+- clear_status: pass
+- clear_mismatches: 0
+- rect_status: pass
+- rect_mismatches: 0
+- draw_image_device_readback_spec: `test/01_unit/lib/gc_async_mut/gpu/engine2d/vulkan_compute_oracle_spec.spl`
+- draw_image_device_readback_status: pass
+- draw_image_device_readback_examples: 7
+- draw_image_clipped_readback_status: pass
+- draw_image_clip_rect_readback_status: pass
+- draw_image_mask_readback_status: pass
+- software_facade_draw_image_clip_mask_status: pass
+- cpu_simd_facade_draw_image_clip_mask_status: pass
+- web_renderer_backend_parity_spec: `test/01_unit/lib/gc_async_mut/gpu/browser_engine/web_renderer_backend_parity_spec.spl`
+- web_renderer_backend_parity_status: pass
+- web_renderer_backend_parity_examples: 10
+- web_renderer_backend_parity_failures: 0
+- blur_or_tolerance_used: false
+- vulkan_strict_exit_code: 0
+- cpu_vulkan_parity_exit_code: 0
+
+## CPU SIMD Engine2D Acceleration
+
+- report: `doc/09_report/cpu_simd_engine2d_evidence_current_2026-07-02.md`
+- status: pass
+- arch: x86_64
+- feature: avx2
+- native_simd_executed: true
+- native_simd_bit_exact: true
+- native_simd_hits: 2
+- provider_hits: 17
+- fill_mismatch_count: 0
+- copy_mismatch_count: 0
+- alpha_mismatch_count: 0
+- scroll_mismatch_count: 0
+- diagram_mismatch_count: 0
+- blur_or_tolerance_used: false
+
+## QEMU GPU Capture Access
+
+- live_x86_64_report: `doc/09_report/qemu_gtk_wm_capture_evidence_2026-06-05.md`
+- live_rv64_report: `doc/09_report/rv64_display_smoke_qmp_evidence_current_2026-07-02.md`
+- harness_report: `doc/09_report/qemu_capture_fake_qmp_evidence_current_2026-07-02.md`
+- status: pass
+- backend: qemu_live_vm
+- x86_64_auto_qmp_status: pass
+- x86_64_live_qmp_screendump_status: pass
+- x86_64_live_capture_pixels: 786432
+- x86_64_live_capture_sample_matches: 10
+- x86_64_live_capture_sample_mismatches: 0
+- x86_64_live_capture_full_scene_mismatches: 0
+- qemu_guest_perf_sample_origin: qemu-guest
+- rv64_qmp_screendump_status: pass
+- rv64_qmp_dimensions: 320x240
+- rv64_qmp_nonblack_pixels: 76800
+- rv64_qmp_wm_anchor_matches: 5
+- fake_qmp_harness_status: pass
+- blur_or_tolerance_used: false
+
+## SimpleOS QEMU/WM
+
+- report: `doc/09_report/simpleos_hardening_evidence_matrix_current_2026-07-02.md`
+- status: pass
+- passed: 10/10
+- executable_launch_from_fs: pass
+- ssh_shell_smf_and_exec: pass
+- shared_wm_logic: pass
+- cpu_simd_engine2d_diagram: pass
+- web_renderer_engine2d_bitmap: pass
+- simple_gui_webrenderer_bitmap: pass
+- production_gui_web_renderer_parity: pass
+- qemu_host_counterpart_bitmap: pass
+- qemu_gui_smf_artifact_contract: pass
+- qemu_guest_perf_release_gate_status: pass
+- qemu_guest_perf_harness_sample_origin: qemu-guest
+- qemu_wm_simple_gui_mdi: pass
+- qemu_wm_simple_gui_mdi_ppm_anchors: pass
+- qemu_wm_simple_gui_mdi_input_status: pass
+- rv64_display_smoke_qmp: pass
+- rv64_display_smoke_qmp_width: 320
+- rv64_display_smoke_qmp_height: 240
+- rv64_display_smoke_qmp_anchor_matches: 5
+
+## SimpleOS LLVM Port
+
+- report: `doc/09_report/simpleos_llvm_port_evidence_current_2026-07-02.md`
+- status: pass
+- x86_64_cross_clang_link_status: pass
+- x86_64_cross_clang_driver_link_smoke: pass
+- x86_64_compiler_rt_builtins_status: pass
+- x86_64_lld_link_status: pass
+- aarch64_sysroot_archives_status: pass
+- aarch64_cross_llvm_stage2_status: pass
+- smoke_spec: `test/02_integration/os/port/llvm/smoke_clang_spec.spl`
+- smoke_spec_status: pass
+- smoke_spec_examples: 7
+- smoke_spec_failures: 0
+
+## Scope Boundary
+
+This report proves the Linux RenderDoc/web/gui, Vulkan Engine2D readback, CPU
+SIMD Engine2D acceleration, QEMU screendump/readback access, SimpleOS QEMU/WM
+hardening, and current LLVM-to-SimpleOS cross-toolchain slices only. It does
+not claim macOS, Windows, iOS, Android, or cross-platform freshness completion.

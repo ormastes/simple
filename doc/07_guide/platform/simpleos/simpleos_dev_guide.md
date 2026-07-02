@@ -360,6 +360,10 @@ bin/simple run src/os/port/llvm/test_smoke.spl
 
 Uses fork: `ormastes/llvm-project` (branch: `simpleos`)
 
+Current evidence: `doc/09_report/simpleos_llvm_port_evidence_current_2026-07-02.md`
+records passing x86_64 SimpleOS Clang/LLD link smokes, compiler-rt builtins
+staging, and the aarch64 SimpleOS LLVM stage-2 cross build.
+
 ### 4.5 Rust Cross-Build
 
 **Source:** `src/os/port/rust/`

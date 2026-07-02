@@ -257,6 +257,11 @@ is Xvfb-only by default; `check-gui-low-res-readability.shs` is offscreen
 
 ## Current state (audited 2026-07-02)
 
+Current combined evidence for Linux RenderDoc/Vulkan, Vulkan Engine2D readback,
+CPU SIMD Engine2D acceleration, QEMU screendump/readback access, SimpleOS
+QEMU/WM hardening, and LLVM-to-SimpleOS cross-toolchain status is indexed in
+`doc/09_report/linux_renderdoc_simpleos_hardening_evidence_current_2026-07-02.md`.
+
 ### Vulkan / engine
 
 - Vulkan stack is Simple engine + SFFI (`rt_vulkan_*` / `rt_vk3d_*` in
