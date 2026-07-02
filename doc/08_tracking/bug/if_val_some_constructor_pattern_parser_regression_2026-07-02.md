@@ -10,10 +10,23 @@ fix: src/compiler/10.frontend/core/parser_stmts.spl parse_if_stmt — binding
   parser (G19 only accepted parser_expect(IDENT)); the Rust seed parser
   (compiler_rust/parser/src/stmt_parsing/control_flow.rs,
   parse_optional_let_pattern) always supported it, so call sites accumulated.
-  NOTE: `if val ...` in EXPRESSION position (val r = if val Some(x) = o: ...)
-  is a separate pre-existing gap in parse_if_expr — plain-ident form fails
-  there too (sites: src/lib/common/js/engine/jit.spl:112,
-  src/compiler/80.driver/main.spl:127).
+  UPDATE 2026-07-02: the EXPRESSION-position gap (`val r = if val Some(x) = o:
+  a else: b`, plain-ident form too -- sites: src/lib/common/js/engine/jit.spl:112,
+  src/compiler/80.driver/main.spl:127) is FIXED -- parse_if_expr in
+  src/compiler/10.frontend/core/parser_stmts.spl now mirrors parse_if_stmt's
+  G19 desugar, expression-flavored: plain-ident binding desugars to a block
+  value (bind + if-expr on `!= nil`), and a constructor pattern desugars to
+  an expr-level match (expr_match_expr, evaluated by eval_match_expr, which
+  was already wired into the interpreter but never reached by any parser
+  path before) instead of a match statement, so both branches stay values.
+  Verified via a core_frontend_parse_reset driver run through both
+  `bin/simple run` and `bin/simple check` (both dynamically load and execute
+  the current on-disk pure-Simple parser source, confirmed by A/B: reverting
+  the source reproduces the exact `expected =, got (` / `unexpected token in
+  expression: :` errors, restoring it fixes them) on repros matching the two
+  wild sites above, plus an elif-val chain in expression position. Regression:
+  5 existing parser specs still pass (1 pre-existing unrelated failure in
+  pipe_operator_spec, confirmed present on reverted source too).
 severity: high
 discovered: 2026-07-02
 discovered_by: bin/simple check on src/lib/nogc_async_mut_noalloc/path/baremetal_path.spl

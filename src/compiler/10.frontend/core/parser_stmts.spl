@@ -34,7 +34,7 @@ use compiler.core.ast.{EXPR_INT_LIT, EXPR_FLOAT_LIT, EXPR_STRING_LIT}
 use compiler.core.ast.{EXPR_BOOL_LIT, EXPR_NIL_LIT, EXPR_IDENT}
 use compiler.core.ast.{EXPR_BINARY, EXPR_UNARY, EXPR_CALL, EXPR_ARRAY_LIT}
 use compiler.core.ast.{expr_ident, expr_call, expr_binary, expr_nil_lit, expr_field_access}
-use compiler.core.ast.{expr_if_expr, expr_for_expr, expr_while_expr}
+use compiler.core.ast.{expr_if_expr, expr_for_expr, expr_while_expr, expr_match_expr}
 use compiler.core.ast.{expr_pass, expr_pass_with_msg, expr_pass_todo, expr_pass_do_nothing, expr_pass_dn}
 use compiler.core.ast.{expr_unit, expr_block, expr_lambda}
 use compiler.core.ast.{expr_get_tag, expr_get_str, expr_get_left, expr_get_args}
@@ -984,6 +984,71 @@ fn parse_bind_stmt() -> i64:
 
 fn parse_if_expr() -> i64:
     parser_advance()
+
+    # G_ifval_expr: `if val/var NAME = EXPR: body [elif/else]` in EXPRESSION
+    # position (e.g. `val r = if val Some(x) = o: a else: b`). Mirrors
+    # parse_if_stmt's G19 desugar (statement position, fixed 2026-07-02) but
+    # expression-flavored: both branches must be *values*, not statement
+    # blocks executed for effect. Plain-ident binding desugars to a block
+    # value (bind + if-expr on `!= nil`); a constructor pattern desugars to
+    # an expr-level match (expr_match_expr, evaluated by eval_match_expr)
+    # instead of a match statement, reusing the same arm-construction
+    # machinery as the statement form so matching semantics stay identical.
+    if par_kind_get() == TOK_KW_VAL or par_kind_get() == TOK_KW_VAR:
+        parser_advance()  # consume val/var
+        # Parse the binding pattern below assignment precedence (parse_or),
+        # same as parse_if_stmt: `x` stays an ident and `Some(v)` a call.
+        val pattern_idx = parse_or()
+        if expr_get_tag(pattern_idx) != EXPR_CALL and expr_get_tag(pattern_idx) != EXPR_IDENT:
+            parser_error("expected identifier or constructor pattern after if val/var")
+        parser_expect(100)  # consume =
+        val init_expr = parse_expr()
+        parser_expect(161)  # consume :
+        val then_body = parse_block()
+        val then_expr = expr_block(then_body, -1, 0)
+
+        parser_skip_newlines()
+        var else_expr: i64 = expr_unit(0)
+        if par_kind_get() == 42:
+            else_expr = parse_if_expr()
+        elif par_kind_get() == 41:
+            parser_advance()  # consume else
+            if par_kind_get() == 161:
+                parser_advance()
+                val else_body = parse_block()
+                else_expr = expr_block(else_body, -1, 0)
+            elif par_kind_get() == 40:
+                else_expr = parse_if_expr()
+            else:
+                else_expr = parse_expr()
+
+        if expr_get_tag(pattern_idx) == EXPR_CALL:
+            # Constructor-pattern binding: desugar to an expr-level match.
+            val rationale = extract_wildcard_rationale(pattern_idx)
+            val stored_pattern = normalize_wildcard_pattern(pattern_idx)
+            var arm_indices: [i64] = []
+            var then_arm_body: [i64] = []
+            then_arm_body.push(stmt_expr_stmt(then_expr, 0))
+            arm_indices.push(arm_new_with_binding_and_rationale(stored_pattern, -1, then_arm_body, "", rationale))
+            val wildcard_pattern = expr_ident("_", 0)
+            var wildcard_body: [i64] = []
+            wildcard_body.push(stmt_expr_stmt(else_expr, 0))
+            arm_indices.push(arm_new_with_binding_and_rationale(wildcard_pattern, -1, wildcard_body, "", ""))
+            return expr_match_expr(init_expr, arm_indices, 0)
+
+        # Plain identifier binding.
+        # Desugar: { val NAME = EXPR; if NAME != nil: then_expr else else_expr }
+        val bind_name = expr_get_str(pattern_idx)
+        val bind_stmt = stmt_val_decl(bind_name, 0, init_expr, 0)
+        val name_expr = expr_ident(bind_name, 0)
+        val nil_expr = expr_nil_lit(0)
+        val cond_expr = expr_binary(TOK_NEQ, name_expr, nil_expr, 0)
+        val if_val_expr = expr_if_expr(cond_expr, then_expr, else_expr, 0)
+        var block_stmts: [i64] = []
+        block_stmts.push(bind_stmt)
+        block_stmts.push(stmt_expr_stmt(if_val_expr, 0))
+        return expr_block(block_stmts, -1, 0)
+
     val cond = parse_expr()
     # G42: ternary expression form `if cond then X else Y`.
     # `then` is not a keyword — it arrives as Ident (kind 6). In the block
