@@ -41,10 +41,11 @@ APP_ERR="$BUILD_DIR/app.err"
 FS_PNG="$BUILD_DIR/fullscreen.png"
 FS_FIT_PNG="$BUILD_DIR/fullscreen_fit.png"
 FS_NORES_PNG="$BUILD_DIR/fullscreen_noresize.png"
+FS_WEBENGINE_PNG="$BUILD_DIR/fullscreen_webengine.png"
 APP_DIR="$BUILD_DIR/SimpleGui.app"
 
 mkdir -p "$BUILD_DIR"
-rm -f "$REPORT" "$APP_LOG" "$APP_ERR" "$FS_PNG" "$FS_FIT_PNG" "$FS_NORES_PNG"
+rm -f "$REPORT" "$APP_LOG" "$APP_ERR" "$FS_PNG" "$FS_FIT_PNG" "$FS_NORES_PNG" "$FS_WEBENGINE_PNG"
 
 HOST_OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
 
@@ -79,8 +80,18 @@ PHYSICAL_SIZE=""
 FRONTMOST=false
 FS_NORES_BMP="$BUILD_DIR/fullscreen_noresize.bmp"
 FS_FIT_BMP="$BUILD_DIR/fullscreen_fit.bmp"
+FS_WEBENGINE_BMP="$BUILD_DIR/fullscreen_webengine.bmp"
 FIT_CAP_BLUE=unverified
 FIT_CAP_BLUE_PCT=""
+WEBENGINE_MARKER=missing
+WEBENGINE_DIMS=""
+WEBENGINE_RENDER=""
+WEBENGINE_CAPTURE_STATUS=unverified
+WEBENGINE_CAPTURE_BYTES=0
+WEBENGINE_CAP_BLUE=unverified
+WEBENGINE_CAP_BLUE_PCT=""
+WEBENGINE_BG_CAPTURE=unverified
+WEBENGINE_BG_CAPTURE_HEX=""
 
 write_report() {
     {
@@ -121,6 +132,16 @@ write_report() {
         echo "wm_fullscreen_metal_frontmost=$FRONTMOST"
         echo "wm_fullscreen_metal_fit_capture_blue=$FIT_CAP_BLUE"
         echo "wm_fullscreen_metal_fit_capture_blue_pct=$FIT_CAP_BLUE_PCT"
+        echo "wm_fullscreen_metal_webengine_marker=$WEBENGINE_MARKER"
+        echo "wm_fullscreen_metal_webengine_dims=$WEBENGINE_DIMS"
+        echo "wm_fullscreen_metal_webengine_render=$WEBENGINE_RENDER"
+        echo "wm_fullscreen_metal_webengine_capture_path=$FS_WEBENGINE_PNG"
+        echo "wm_fullscreen_metal_webengine_capture_status=$WEBENGINE_CAPTURE_STATUS"
+        echo "wm_fullscreen_metal_webengine_capture_bytes=$WEBENGINE_CAPTURE_BYTES"
+        echo "wm_fullscreen_metal_webengine_capture_blue=$WEBENGINE_CAP_BLUE"
+        echo "wm_fullscreen_metal_webengine_capture_blue_pct=$WEBENGINE_CAP_BLUE_PCT"
+        echo "wm_fullscreen_metal_webengine_bg_capture=$WEBENGINE_BG_CAPTURE"
+        echo "wm_fullscreen_metal_webengine_bg_capture_hex=$WEBENGINE_BG_CAPTURE_HEX"
         echo "wm_fullscreen_metal_app_log=$APP_LOG"
     } >"$REPORT"
 }
@@ -264,6 +285,7 @@ deadline=$(($(date +%s) + TIMEOUT_SECS))
 captured=0
 captured_fit=0
 captured_nores=0
+captured_webengine=0
 while [ "$(date +%s)" -lt "$deadline" ]; do
     if [ "$captured" -eq 0 ] && grep -q "\[wm-fullscreen\] mode=fullscreen" "$APP_LOG" 2>/dev/null; then
         # Screenshot the full screen during the fullscreen dwell window.
@@ -284,6 +306,13 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
         # BMP is trivial to parse for capture-side corner sampling below.
         screencapture -x -t bmp "$FS_NORES_BMP" >/dev/null 2>&1 || true
         captured_nores=1
+    fi
+    # Capture the web-engine (HTML/CSS-rendered) fullscreen frame during its hold.
+    if [ "$captured_webengine" -eq 0 ] && grep -q "\[wm-fullscreen\] web_engine=presented" "$APP_LOG" 2>/dev/null; then
+        activate_frontmost
+        screencapture -x "$FS_WEBENGINE_PNG" >/dev/null 2>&1 || true
+        screencapture -x -t bmp "$FS_WEBENGINE_BMP" >/dev/null 2>&1 || true
+        captured_webengine=1
     fi
     if grep -q "\[wm-fullscreen\] done\|\[wm-fullscreen\] error=" "$APP_LOG" 2>/dev/null; then
         break
@@ -428,6 +457,79 @@ if [ -f "$FS_FIT_BMP" ] && [ "$(wc -c <"$FS_FIT_BMP" | tr -d ' ')" -gt 1024 ]; t
     fi
 fi
 
+# -------------------------------------------------------------------------
+# Web-engine phase markers: the fullscreen window pixels for this phase are
+# produced by the HTML/CSS layout engine on the fast Metal path (not direct
+# MetalBackend draw calls). Parse the render/present markers and the render dims.
+# -------------------------------------------------------------------------
+WEBENGINE_RENDER="$(grep '\[wm-fullscreen\] web_engine=render ' "$APP_LOG" 2>/dev/null | tail -1)"
+if grep -q "\[wm-fullscreen\] web_engine=presented" "$APP_LOG" 2>/dev/null && [ -n "$WEBENGINE_RENDER" ]; then
+    WEBENGINE_MARKER=present
+elif grep -q "\[wm-fullscreen\] web_engine=unavailable" "$APP_LOG" 2>/dev/null; then
+    WEBENGINE_MARKER=unavailable
+elif grep -q "\[wm-fullscreen\] web_engine=short" "$APP_LOG" 2>/dev/null; then
+    WEBENGINE_MARKER=short
+fi
+WEBENGINE_DIMS="$(grep '\[wm-fullscreen\] web_engine_dims=' "$APP_LOG" 2>/dev/null | tail -1 | sed -n 's/.*web_engine_dims=\([a-z]*\).*/\1/p')"
+
+# Web-engine capture-side pixel evidence. The scene's THREE window titlebars use
+# the theme accent (0xff2563eb) across the upper band; sample a horizontal line
+# through the titlebars and require a large blue fraction (proves the captured
+# frame is the CSS-rendered demo desktop). The far corners must be the dark
+# desktop backdrop (compositor_bg), same navy technique as the no-resize check.
+webengine_pixel_is_blue() {
+    # $1=R $2=G $3=B -> return 0 if within tolerance of accent 25 63 eb (37,99,235).
+    _dr=$(( $1 - 37 )); [ "$_dr" -lt 0 ] && _dr=$((-_dr))
+    _dg=$(( $2 - 99 )); [ "$_dg" -lt 0 ] && _dg=$((-_dg))
+    _db=$(( $3 - 235 )); [ "$_db" -lt 0 ] && _db=$((-_db))
+    [ "$_dr" -le 55 ] && [ "$_dg" -le 55 ] && [ "$_db" -le 70 ] && return 0
+    return 1
+}
+if [ -f "$FS_WEBENGINE_BMP" ] && [ "$(wc -c <"$FS_WEBENGINE_BMP" | tr -d ' ')" -gt 1024 ]; then
+    WEW="$(od -An -t u4 -j 18 -N 4 "$FS_WEBENGINE_BMP" 2>/dev/null | tr -d ' ')"
+    WEHS="$(od -An -t d4 -j 22 -N 4 "$FS_WEBENGINE_BMP" 2>/dev/null | tr -d ' ')"
+    WEH="$WEHS"; [ "$WEHS" -lt 0 ] 2>/dev/null && WEH=$((-WEHS))
+    if [ -n "$WEW" ] && [ -n "$WEH" ] && [ "$WEW" -gt 40 ] && [ "$WEH" -gt 40 ]; then
+        # Titlebars span ~14%..21% down; sample the 18% line across 40 x points.
+        _wliney=$((WEH * 18 / 100))
+        _whits=0
+        _wn=0
+        _wi=0
+        while [ "$_wi" -lt 40 ]; do
+            _wsx=$((WEW * _wi / 40))
+            [ "$_wsx" -ge "$WEW" ] && _wsx=$((WEW - 1))
+            _wp="$(sample_bmp_corner "$FS_WEBENGINE_BMP" "$_wsx" "$_wliney")"
+            if [ -n "$_wp" ]; then
+                _wn=$((_wn + 1))
+                if webengine_pixel_is_blue $_wp; then
+                    _whits=$((_whits + 1))
+                fi
+            fi
+            _wi=$((_wi + 1))
+        done
+        if [ "$_wn" -gt 0 ]; then
+            WEBENGINE_CAP_BLUE_PCT=$((_whits * 100 / _wn))
+            if [ "$WEBENGINE_CAP_BLUE_PCT" -ge 30 ]; then
+                WEBENGINE_CAP_BLUE=ok
+            else
+                WEBENGINE_CAP_BLUE=mismatch
+            fi
+        fi
+        # Desktop backdrop corners must be the dark theme bg (navy).
+        WC_TR="$(sample_bmp_corner "$FS_WEBENGINE_BMP" $((WEW - 2)) 1)"
+        WC_BL="$(sample_bmp_corner "$FS_WEBENGINE_BMP" 1 $((WEH - 2)))"
+        WC_BR="$(sample_bmp_corner "$FS_WEBENGINE_BMP" $((WEW - 2)) $((WEH - 2)))"
+        WEBENGINE_BG_CAPTURE_HEX="tr=$WC_TR;bl=$WC_BL;br=$WC_BR"
+        if [ -n "$WC_TR" ] && [ -n "$WC_BL" ] && [ -n "$WC_BR" ]; then
+            if corner_is_navy $WC_TR && corner_is_navy $WC_BL && corner_is_navy $WC_BR; then
+                WEBENGINE_BG_CAPTURE=ok
+            else
+                WEBENGINE_BG_CAPTURE=mismatch
+            fi
+        fi
+    fi
+fi
+
 # Native-res mode markers.
 FIT_LINE="$(grep '\[wm-fullscreen\] scale_mode=fit ' "$APP_LOG" 2>/dev/null | tail -1)"
 NORES_LINE="$(grep '\[wm-fullscreen\] scale_mode=no-resize ' "$APP_LOG" 2>/dev/null | tail -1)"
@@ -452,6 +554,7 @@ capture_status_for() {
 }
 set -- $(capture_status_for "$FS_FIT_PNG"); FIT_CAPTURE_STATUS="$1"; FIT_CAPTURE_BYTES="$2"
 set -- $(capture_status_for "$FS_NORES_PNG"); NORES_CAPTURE_STATUS="$1"; NORES_CAPTURE_BYTES="$2"
+set -- $(capture_status_for "$FS_WEBENGINE_PNG"); WEBENGINE_CAPTURE_STATUS="$1"; WEBENGINE_CAPTURE_BYTES="$2"
 
 if [ -f "$FS_PNG" ]; then
     CAPTURE_BYTES="$(wc -c <"$FS_PNG" | tr -d ' ')"
@@ -584,8 +687,27 @@ if [ "$NORESIZE_BG_CAPTURE" = "mismatch" ]; then
     fail "no-resize-capture-corners-not-navy-$NORESIZE_BG_CAPTURE_HEX"
 fi
 
+# -------------------------------------------------------------------------
+# Web-engine phase is a hard gate: this fullscreen phase's window pixels must be
+# produced by the HTML/CSS layout engine on the Metal fast path (not direct
+# MetalBackend draw calls). Metal is available on this host (proven by the
+# fit/no-resize phases), so an unavailable/short/missing web_engine phase fails.
+# -------------------------------------------------------------------------
+if [ "$WEBENGINE_MARKER" != "present" ]; then
+    fail "web-engine-phase-not-proven-$WEBENGINE_MARKER"
+fi
+# Capture-side pixel validation for the web-engine frame (binding when the
+# capture yielded real content): the CSS titlebars must show the theme accent
+# blue, and the desktop backdrop corners must be the dark theme bg.
+if [ "$WEBENGINE_CAP_BLUE" = "mismatch" ]; then
+    fail "web-engine-capture-not-accent-blue-pct=$WEBENGINE_CAP_BLUE_PCT-corners=$WEBENGINE_BG_CAPTURE_HEX"
+fi
+if [ "$WEBENGINE_BG_CAPTURE" = "mismatch" ]; then
+    fail "web-engine-capture-corners-not-navy-$WEBENGINE_BG_CAPTURE_HEX"
+fi
+
 STATUS=pass
-REASON="windowed+fullscreen+restored proven; native-res fit=$FIT_CONTENT no-resize=$NORES_CONTENT; gpu_frame_complete=$GFC_COUNT; $WINDOWED_SIZE -> $FULLSCREEN_SIZE"
+REASON="windowed+fullscreen+restored proven; native-res fit=$FIT_CONTENT no-resize=$NORES_CONTENT; web-engine=$WEBENGINE_DIMS; gpu_frame_complete=$GFC_COUNT; $WINDOWED_SIZE -> $FULLSCREEN_SIZE"
 write_report
 echo "wm-fullscreen-metal-evidence: PASS ($WINDOWED_SIZE -> $FULLSCREEN_SIZE, fit=$FIT_CONTENT no-resize=$NORES_CONTENT, gpu_frame_complete=$GFC_COUNT, capture=$CAPTURE_STATUS)"
 cat "$REPORT"

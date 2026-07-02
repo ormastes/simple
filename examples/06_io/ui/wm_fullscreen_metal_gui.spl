@@ -35,6 +35,8 @@ use std.io.window_winit.{WinitLoop, WinitWindow, WinitInput, winit_loop_new, win
 
 use std.io_runtime.{env_get}
 use std.common.string_core.{char_from_code}
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{simple_web_layout_render_html_pixels_engine2d, engine2d_fast_metal_available}
+use std.common.ui.wm_chrome_theme.{wm_chrome_theme}
 
 extern fn rt_time_now_unix_micros() -> i64
 
@@ -230,6 +232,108 @@ fn run_fs_mode(nb: MetalBackend, win: WinitWindow, lp: WinitLoop, mode: text, sw
     hold(lp, 4)
     return ok
 
+# ---------------------------------------------------------------------------
+# Phase 2c: WEB-ENGINE fullscreen. Instead of direct MetalBackend draw calls,
+# this phase expresses a WM desktop as ONE HTML/CSS document and rasterizes it
+# through the real web layout engine on the fast Engine2D Metal path
+# (HTML -> layout -> Draw IR -> Engine2D/Metal GPU -> one-shot readback), then
+# presents those pixels 1:1 in the same on-screen window. This proves the full
+# CSS render chain drives the fullscreen window, visibly distinct from the
+# direct-draw fit/no-resize phases (a 3-window styled desktop).
+# ---------------------------------------------------------------------------
+
+# 24-bit ARGB color -> CSS "#RRGGBB" (alpha dropped; chrome colors are opaque).
+fn css_hex(color: u32) -> text:
+    val rgb = color.to_i64() & 0xFFFFFF
+    "#" + to_hex6(rgb)
+
+# Build a WM-style desktop as a single HTML/CSS document laid out for a `w`x`h`
+# render surface: a full-screen desktop backdrop (compositor_bg) plus THREE
+# windows, each a body panel (host_window_body), an accent titlebar (accent),
+# a title text line and a content text line (text_primary). Every color comes
+# from wm_chrome_theme() rendered to a CSS hex, so an installed theme reskins it.
+# All interpolated values are precomputed into vars (the interpolator only
+# substitutes plain identifiers, not arithmetic/indexing), and the outer <style>
+# uses doubled braces for the literal CSS `{`/`}`.
+fn wm_web_scene_html(w: i32, h: i32) -> text:
+    val theme = wm_chrome_theme()
+    val bg_hex = css_hex(theme.compositor_bg)
+    val body_hex = css_hex(theme.host_window_body)
+    val accent_hex = css_hex(theme.accent)
+    val text_hex = css_hex(theme.text_primary)
+    val win_top = (h.to_f64() * 0.14).to_i32()
+    val title_h = (h.to_f64() * 0.07).to_i32()
+    val win_h = (h.to_f64() * 0.60).to_i32()
+    val margin = (w.to_f64() * 0.04).to_i32()
+    val gap = (w.to_f64() * 0.03).to_i32()
+    val win_w = (w - 2 * margin - 2 * gap) / 3
+    val title_font = (title_h.to_f64() * 0.5).to_i32()
+    val body_font = (h.to_f64() * 0.022).to_i32()
+    val pad = (w.to_f64() * 0.01).to_i32()
+    val titles = ["Terminal", "Files", "Editor"]
+    val lines = ["$ simple build --release", "README.md   main.spl", "fn main -> i64: return 0"]
+    var body = ""
+    var i: i32 = 0
+    while i < 3:
+        val x = margin + i * (win_w + gap)
+        val tx = x + pad
+        val ty = win_top + pad
+        val cy = win_top + title_h + pad
+        val cw = win_w - 2 * pad
+        val t = titles[i]
+        val ln = lines[i]
+        body = body + "<div style='position:absolute;left:{x}px;top:{win_top}px;width:{win_w}px;height:{win_h}px;background:{body_hex}'></div>"
+        body = body + "<div style='position:absolute;left:{x}px;top:{win_top}px;width:{win_w}px;height:{title_h}px;background:{accent_hex}'></div>"
+        body = body + "<div style='position:absolute;left:{tx}px;top:{ty}px;width:{cw}px;height:{title_font}px;color:{text_hex};font:{title_font}px monospace;overflow:hidden;white-space:nowrap'>{t}</div>"
+        body = body + "<div style='position:absolute;left:{tx}px;top:{cy}px;width:{cw}px;height:{body_font}px;color:{text_hex};font:{body_font}px monospace;overflow:hidden;white-space:nowrap'>{ln}</div>"
+        i = i + 1
+    val head = "<!DOCTYPE html><html><head><style>body{{margin:0;width:{w}px;height:{h}px;background:{bg_hex}}}</style></head><body>"
+    head + body + "</body></html>"
+
+# Render the WM web scene through the fast Engine2D Metal web lane and present it
+# 1:1 to the fullscreen window. Renders at PHYSICAL fullscreen dims for crisp
+# Retina pixels; if the physical render overruns the ~90s wall budget it re-renders
+# at logical (half) dims and lets the runtime stretch the present 2x. Emits the
+# web_engine=render / web_engine=presented markers the gate keys on. Returns true
+# only when the GPU-backed CSS render produced a full-surface framebuffer.
+fn run_web_engine_phase(win: WinitWindow, lp: WinitLoop, sw: i64, sh: i64) -> bool:
+    if not engine2d_fast_metal_available():
+        print "[wm-fullscreen] web_engine=unavailable"
+        return false
+    var rw = sw
+    var rh = sh
+    var dims_label = "physical"
+    val html_phys = wm_web_scene_html(sw.to_i32(), sh.to_i32())
+    val t0 = rt_time_now_unix_micros()
+    var pixels = simple_web_layout_render_html_pixels_engine2d(html_phys, sw.to_i32(), sh.to_i32(), "metal")
+    val elapsed = rt_time_now_unix_micros() - t0
+    var html_len = html_phys.len()
+    if elapsed > 90000000:
+        # Physical render exceeded the wall budget; re-render at logical (half)
+        # dims — the runtime nearest-neighbor-stretches the present 2x to physical.
+        val lw = sw / 2
+        val lh = sh / 2
+        val html_log = wm_web_scene_html(lw.to_i32(), lh.to_i32())
+        pixels = simple_web_layout_render_html_pixels_engine2d(html_log, lw.to_i32(), lh.to_i32(), "metal")
+        rw = lw
+        rh = lh
+        html_len = html_log.len()
+        dims_label = "logical"
+    val want = rw * rh
+    if pixels.len() < want:
+        print "[wm-fullscreen] web_engine=short pixels={pixels.len()} want={want}"
+        return false
+    print "[wm-fullscreen] web_engine=render html_len={html_len} screen={rw}x{rh} pixels={pixels.len()}"
+    if dims_label == "logical":
+        print "[wm-fullscreen] web_engine_dims=logical reason=physical-render-exceeded-90s"
+    else:
+        print "[wm-fullscreen] web_engine_dims=physical"
+    val packed = pack(pixels)
+    winit_present_rgba(win, rw, rh, packed)
+    print "[wm-fullscreen] web_engine=presented dims={rw}x{rh} len={packed.len()}"
+    hold(lp, 4)
+    return true
+
 fn main() -> i64:
     print "WM Fullscreen Metal GUI — windowed <-> fullscreen, native-res fit/no-resize"
 
@@ -346,6 +450,16 @@ fn main() -> i64:
     nb.shutdown()
     if not ok:
         print "[wm-fullscreen] error=fullscreen-gpu-frame-incomplete"
+        cleanup(b, win, lp)
+        return 1
+
+    # ---------------------------------------------------------------------
+    # Phase 2c: web-engine fullscreen — render a WM desktop via the HTML/CSS
+    # layout engine on the fast Metal path and present it in the same window.
+    # (nb is already shut down, so only the web lane's own Engine2D is live.)
+    # ---------------------------------------------------------------------
+    if not run_web_engine_phase(win, lp, fs_w, fs_h):
+        print "[wm-fullscreen] error=web-engine-phase-failed"
         cleanup(b, win, lp)
         return 1
 

@@ -380,10 +380,19 @@ impl RenderBackend for MetalBackend:
         self.gpu_frame_complete = false
     me set_clip(x: i32, y: i32, w: i32, h: i32):
         self.mirror.set_clip(x, y, w, h)
-        self.gpu_frame_complete = false
+        # In GPU-only (fast) mode the CPU mirror is shrunk to 1x1, so it cannot
+        # enforce a clip, and the GPU dispatch path does not apply one either —
+        # a clip is a no-op here. Do NOT clear gpu_frame_complete: that would
+        # poison the single-shot GPU readback (read_pixels would drop to the 1x1
+        # mirror) and, via the `and` accumulator on subsequent draw ops, skip
+        # their GPU dispatches entirely. See
+        # doc/08_tracking/bug/engine2d_fast_metal_clip_poisons_gpu_readback_2026-07-03.md
+        if not self._gpu_only_mode():
+            self.gpu_frame_complete = false
     me clear_clip():
         self.mirror.clear_clip()
-        self.gpu_frame_complete = false
+        if not self._gpu_only_mode():
+            self.gpu_frame_complete = false
     me set_mask(mask_pixels: [u8], w: i32, h: i32):
         self.mirror.set_mask(mask_pixels, w, h)
         self.gpu_frame_complete = false
@@ -411,6 +420,12 @@ impl RenderBackend for MetalBackend:
         self.mirror.height()
 
 impl MetalBackend:
+    # True when use_gpu_only() has shrunk the CPU mirror to 1x1 while the GPU
+    # framebuffer still holds the full surface — i.e. the GPU is the sole source
+    # of truth and clip/readback decisions must go through it, not the mirror.
+    fn _gpu_only_mode() -> bool:
+        (self.initialized and self.d_framebuffer != 0 and (self.w * self.h) > 1 and self.mirror.width() <= 1 and self.mirror.height() <= 1)
+
     me read_pixels_gpu_only() -> [u32]:
         if not self.initialized or self.d_framebuffer == 0:
             return []
