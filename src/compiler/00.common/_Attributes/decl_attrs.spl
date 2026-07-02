@@ -218,6 +218,61 @@ struct OptimizationReq:
     level: OptimizationReqLevel
     backend: OptimizationBackend
 
+# ============================================================================
+# Named Argument Extraction Helpers
+# ============================================================================
+
+struct NamedArg:
+    """Extracted named argument from @attr(name=value)."""
+    name: text
+    value: Expr
+
+fn extract_named_args(attr: Attribute) -> {text: Expr}:
+    """Extract all named arguments (name=value) from an attribute into a map.
+
+    Returns a dictionary mapping argument names to their value expressions.
+    Empty map if no named arguments found.
+
+    Example:
+        @driver(class=DriverClass.Block, vendor=0x8086)
+        → {"class": Expr(...), "vendor": Expr(...)}
+    """
+    var result = {}
+    for arg in attr.args:
+        match arg.kind:
+            case Assign(left, op, right):
+                match left.kind:
+                    case Ident(name):
+                        result[name] = right
+                    case _: ()
+            case _: ()
+    result
+
+fn get_named_string_arg(args: {text: Expr}, name: text, default: text) -> text:
+    """Extract a string named argument, returning default if not found or empty."""
+    if args.has(name):
+        val extracted = extract_string_arg(args[name])
+        if extracted.len() > 0:
+            extracted
+    else:
+        default
+
+fn get_named_int_arg(args: {text: Expr}, name: text, default: i64) -> i64:
+    """Extract an i64 named argument, returning default if not found."""
+    if args.has(name):
+        extract_int_arg(args[name]) ?? default
+    else:
+        default
+
+fn get_named_int_array_arg(args: {text: Expr}, name: text) -> [i64]:
+    """Extract an i64 array named argument, returning empty array if not found."""
+    if args.has(name):
+        extract_int_array_arg(args[name])
+    else:
+        []
+
+# ============================================================================
+
 fn backend_from_text(name: text) -> OptimizationBackend:
     """Convert backend name to OptimizationBackend enum."""
     if name == "simd": OptimizationBackend.Simd
@@ -360,23 +415,18 @@ fn parse_driver_manifest_attrs(attrs: [Attribute]) -> DriverManifestAttr?:
                 device_ids = extract_int_array_arg(attr.args[2])
                 version = extract_string_arg(attr.args[3])
 
-            for arg in attr.args:
-                match arg.kind:
-                    case Assign(left, op, right):
-                        match left.kind:
-                            case Ident(name):
-                                if name == "class" or name == "dclass":
-                                    driver_class = extract_int_arg(right) ?? driver_class
-                                elif name == "vendor":
-                                    vendor = extract_int_arg(right) ?? vendor
-                                elif name == "device" or name == "devices":
-                                    device_ids = extract_int_array_arg(right)
-                                elif name == "version":
-                                    val v = extract_string_arg(right)
-                                    if v.len() > 0:
-                                        version = v
-                            case _: ()
-                    case _: ()
+            val named_args = extract_named_args(attr)
+            if named_args.has("class") or named_args.has("dclass"):
+                driver_class = get_named_int_arg(named_args, "class", driver_class)
+                driver_class = get_named_int_arg(named_args, "dclass", driver_class)
+            if named_args.has("vendor"):
+                vendor = get_named_int_arg(named_args, "vendor", vendor)
+            if named_args.has("device") or named_args.has("devices"):
+                device_ids = get_named_int_array_arg(named_args, "device")
+                if device_ids.len() == 0:
+                    device_ids = get_named_int_array_arg(named_args, "devices")
+            if named_args.has("version"):
+                version = get_named_string_arg(named_args, "version", version)
 
             return DriverManifestAttr(
                 kind: DriverManifestAttrKind.Driver,
@@ -397,21 +447,9 @@ fn parse_driver_manifest_attrs(attrs: [Attribute]) -> DriverManifestAttr?:
             if attr.args.len() >= 2:
                 version = extract_string_arg(attr.args[1])
 
-            for arg in attr.args:
-                match arg.kind:
-                    case Assign(left, op, right):
-                        match left.kind:
-                            case Ident(name):
-                                if name == "abi":
-                                    val a = extract_string_arg(right)
-                                    if a.len() > 0:
-                                        abi = a
-                                elif name == "version":
-                                    val v = extract_string_arg(right)
-                                    if v.len() > 0:
-                                        version = v
-                            case _: ()
-                    case _: ()
+            val named_args = extract_named_args(attr)
+            abi = get_named_string_arg(named_args, "abi", abi)
+            version = get_named_string_arg(named_args, "version", version)
 
             return DriverManifestAttr(
                 kind: DriverManifestAttrKind.NativeLib,
@@ -797,20 +835,15 @@ fn parse_gpu_function_attr_args(attr: Attribute) -> GpuFunctionAttrArgs:
         val first = extract_text_arg(attr.args[0])
         if first.len() > 0:
             gpu_target = first
-    for arg in attr.args:
-        match arg.kind:
-            case Assign(left, op, right):
-                match left.kind:
-                    case Ident(name):
-                        val value = extract_text_arg(right)
-                        if name == "target" and value.len() > 0:
-                            gpu_target = value
-                        elif name == "backend" and value.len() > 0:
-                            gpu_target = value
-                        elif name == "backends" and value.len() > 0:
-                            gpu_backends = value
-                    case _: ()
-            case _: ()
+
+    val named_args = extract_named_args(attr)
+    val target_arg = get_named_string_arg(named_args, "target", "")
+    val backend_arg = get_named_string_arg(named_args, "backend", "")
+    if target_arg.len() > 0:
+        gpu_target = target_arg
+    elif backend_arg.len() > 0:
+        gpu_target = backend_arg
+    gpu_backends = get_named_string_arg(named_args, "backends", gpu_backends)
     GpuFunctionAttrArgs(gpu_target: gpu_target, gpu_backends: gpu_backends)
 
 fn extract_fpga_named_or_positional_i64(expr: Expr) -> i64:
