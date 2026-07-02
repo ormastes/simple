@@ -317,12 +317,12 @@ fn build_call_indirect_module(name: text) -> MirModule:
     functions[SymbolId.new(0)] = func
     MirModule(name: name, functions: functions, statics: {}, constants: {}, types: {})
 
-fn build_alloc_cast_module(name: text) -> MirModule:
+fn build_alloc_cast_module_with_type(name: text, alloc_type: MirType) -> MirModule:
     val i64_type = MirType(kind: MirTypeKind.I64)
     val unit_type = MirType(kind: MirTypeKind.Unit)
     val locals = [
         MirLocal(id: LocalId(id: 0), name: Some("_return"), type_: unit_type, kind: LocalKind.Return),
-        MirLocal(id: LocalId(id: 1), name: Some("ptr"), type_: i64_type, kind: LocalKind.Temp),
+        MirLocal(id: LocalId(id: 1), name: Some("ptr"), type_: alloc_type, kind: LocalKind.Temp),
         MirLocal(id: LocalId(id: 2), name: Some("value"), type_: i64_type, kind: LocalKind.Temp),
         MirLocal(id: LocalId(id: 3), name: Some("casted"), type_: i64_type, kind: LocalKind.Temp)
     ]
@@ -330,7 +330,7 @@ fn build_alloc_cast_module(name: text) -> MirModule:
         id: BlockId.new(0),
         label: Some("entry"),
         instructions: [
-            MirInst(kind: MirInstKind.Alloc(LocalId(id: 1), i64_type), span: nil),
+            MirInst(kind: MirInstKind.Alloc(LocalId(id: 1), alloc_type), span: nil),
             MirInst(kind: MirInstKind.Const(LocalId(id: 2), MirConstValue.Int(7), i64_type), span: nil),
             MirInst(kind: MirInstKind.Cast(LocalId(id: 3), MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2))), i64_type), span: nil)
         ],
@@ -352,6 +352,15 @@ fn build_alloc_cast_module(name: text) -> MirModule:
     var functions: Dict<SymbolId, MirFunction> = {}
     functions[SymbolId.new(0)] = func
     MirModule(name: name, functions: functions, statics: {}, constants: {}, types: {})
+
+fn build_alloc_cast_module(name: text) -> MirModule:
+    val i64_type = MirType(kind: MirTypeKind.I64)
+    build_alloc_cast_module_with_type(name, i64_type)
+
+fn build_large_alloc_module(name: text) -> MirModule:
+    val i64_type = MirType(kind: MirTypeKind.I64)
+    val large_type = MirType(kind: MirTypeKind.Array(i64_type, 300))
+    build_alloc_cast_module_with_type(name, large_type)
 
 fn build_nop_inst_module(name: text) -> MirModule:
     val unit_type = MirType(kind: MirTypeKind.Unit)
@@ -1356,6 +1365,12 @@ describe "Isel Riscv64":
         expect(alloc_ptr_base).to_equal(RV_X2)
         expect(cast_dest).to_equal(3)
         expect(cast_source).to_equal(2)
+
+    it "materializes RV64 large stack allocation sizes":
+        val block = entry_block(isel_module_riscv64(build_large_alloc_module("rv64_large_alloc")))
+        expect(has_li_imm(block, -2400)).to_equal(true)
+        expect(nth_dest_reg(block, RV_OP_ADD, 0)).to_equal(RV_X2)
+        expect(nth_operand_reg(block, RV_OP_ADD, 0, 1)).to_equal(RV_X2)
 
     it "selects RV64 NOP for MIR nop instructions":
         val block = entry_block(isel_module_riscv64(build_nop_inst_module("rv64_nop_inst")))
