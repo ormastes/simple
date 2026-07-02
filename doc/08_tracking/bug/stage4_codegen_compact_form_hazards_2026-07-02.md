@@ -519,3 +519,63 @@ Make the ANY/Dict `.get()` lowering honor the `Option<V>` contract. Options:
 Then rebuild stage4 (fast path) and test `SIMPLE_UNSTUB_HIR=1 <stage4> -c "print(1+1)"`.
 `stage4_fix20`/`stage4_fix21` are equivalent for `-c` (both silent; the iteration-10
 `lower_hir_block` annotation was reverted — that function is not on the `-c` path).
+
+## Iteration 12 (2026-07-02) — iteration-11 "Dict.get drops Option" root cause DISPROVEN; real `-c`/run blocker is a SEGV in `SymbolTable.lookup` (stale binary) via bare-`get` collision
+
+**The iteration-11 fix direction (wrap `Dict.get()` in `Option`) is a misattribution
+and would be actively harmful. Do NOT implement it.** Primary evidence:
+
+- `scratchpad/getval3.spl` (seed native-build, the *nil-check* idiom the real `-c`
+  path uses — `val v = d.get("hello"); if v == 42` / `if miss == nil`) prints
+  **GETNIL_OK** + **MISS_NIL_OK**. So the erased/builtin `Dict.get()` **correctly
+  returns the bare value with bare `nil` on miss.** The bare path works.
+- The actual `-c` symbol lookup — `src/compiler/20.hir/hir_types.spl:274`
+  `SymbolTable.lookup` — already uses this working idiom:
+  `val found = scope.symbols.get(name); if found != nil: return found`. It expects
+  `.get()` to return a **bare** value, not `Option`. Wrapping `.get()` in `Option`
+  would make `found` a heap `Some/None` enum that is never `== nil`, so `lookup`
+  returns a garbage enum object as a `SymbolId` → breaks the very path it was
+  meant to fix.
+- Blast radius of an unconditional wrap: **226** bare-assign `.get()` sites
+  (`val x = recv.get(k)`) across src/{compiler,lib,app} vs only **2** `match
+  recv.get(...)` sites — and those 2 are in `src/app/interpreter/expr/__init__.spl`
+  on `RuntimeValue.Dict(d)` (a user/stdlib Dict whose `.get()` is a *real*
+  Option-returning method), NOT the erased builtin Dict and NOT the `-c` path.
+- The SEED's own Rust interpreter *also* prints `GET_WRONG` for `getval2.spl`
+  (`$SEED run getval2.spl`), confirming `.get()` is bare-returning by design in
+  every backend. `getval2.spl`'s `match r: case Some(v)` is simply mismatched
+  usage for a builtin Dict; its `GET_WRONG` is arguably correct behavior. **The
+  getval2 gate itself is invalid — retire it.**
+
+### The real blocker (fresh gdb evidence on `run`)
+`SIMPLE_UNSTUB_HIR` is irrelevant to the symptom. On the stale `scratchpad/stage4_unstub`
+(Jul 2 09:04): `-c "print(1+1)"` is silent (rc 0, no output); `run hello.spl` prints
+`[frontend] parsed` then **SIGSEGV**. gdb backtrace (fork-aware, repo root):
+
+```
+#0 hir__hir_types__SymbolTable_dot_get      <- SEGV (rip +825)
+#1 hir__hir_types__SymbolTable_dot_lookup
+#2 ...HirLowering.lower_function
+#3 ...HirLowering.lower_module
+#4 driver.CompilerDriver.lower_and_check_impl
+#5 driver.CompilerDriver.compile
+```
+
+`scope.symbols.get(name)` (Dict.get, **text** key) mis-dispatched to the
+user-defined `SymbolTable.get(id: SymbolId?)` — the exact bare-`get` name
+collision documented at `hir_types.spl:305-313`. This binary is **stale**: it
+predates the `get`→`get_symbol` rename and/or the `bare_builtin_collection` guard
+(`closures_structs.rs:329-347`, bug #62). Current source has ONLY
+`SymbolTable.get_symbol` (no colliding `get`), and the guard routes bare
+`.get(1-arg)` on an erased receiver to the builtin `rt_index_get` *before* any
+user-method name resolution — so a fresh stage4 build should not hit this SEGV.
+
+### Iteration 13 direction
+1. Do NOT touch `Dict.get()` Option lowering. Retire the getval2 gate; keep getval3
+   (nil-check) as the correct builtin-Dict-get gate.
+2. Rebuild stage4 from CURRENT source (no seed edit needed — seed already has the
+   guard) and re-observe `-c` / `run hello.spl`. If the `SymbolTable.get` SEGV is
+   gone, find the *next* layer with gdb on the fresh binary. If `-c` is still
+   silent, trace whether the print statement reaches codegen/exec at all
+   (frontend parses, but does lower_module complete and does the interpreter/exec
+   run `main`?).
