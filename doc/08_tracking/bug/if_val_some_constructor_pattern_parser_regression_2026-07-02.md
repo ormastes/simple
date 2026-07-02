@@ -1,5 +1,19 @@
 id: if_val_some_constructor_pattern_parser_regression_2026-07-02
-status: OPEN
+status: FIXED (source; deployed binary pending bootstrap — stage2 blocked by unrelated rt_cranelift_new_aot_module extern error)
+fixed: 2026-07-02
+fix: src/compiler/10.frontend/core/parser_stmts.spl parse_if_stmt — binding
+  position now parsed with parse_or (below assignment precedence); a
+  constructor pattern (EXPR_CALL) desugars to the equivalent match stmt
+  (pattern arm + `_` else arm) via arm_new_with_binding_and_rationale /
+  stmt_match_stmt, identical to hand-written match. Plain ident keeps the
+  nil-check desugar. Root cause: never implemented in the pure-Simple
+  parser (G19 only accepted parser_expect(IDENT)); the Rust seed parser
+  (compiler_rust/parser/src/stmt_parsing/control_flow.rs,
+  parse_optional_let_pattern) always supported it, so call sites accumulated.
+  NOTE: `if val ...` in EXPRESSION position (val r = if val Some(x) = o: ...)
+  is a separate pre-existing gap in parse_if_expr — plain-ident form fails
+  there too (sites: src/lib/common/js/engine/jit.spl:112,
+  src/compiler/80.driver/main.spl:127).
 severity: high
 discovered: 2026-07-02
 discovered_by: bin/simple check on src/lib/nogc_async_mut_noalloc/path/baremetal_path.spl
