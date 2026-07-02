@@ -10,7 +10,7 @@ use compiler.backend.native.{RV64_WORD_SIZE}
 use compiler.backend.native.mach_inst.{
     MachModule, MachBlock, MachReg, MachRegKind, Operand, OperandKind,
     RV_OP_ADD, RV_OP_ADDI, RV_OP_AND, RV_OP_AUIPC, RV_OP_BEQ, RV_OP_BNE, RV_OP_DIV, RV_OP_JAL, RV_OP_JALR, RV_OP_LI, RV_OP_MUL, RV_OP_NEG, RV_OP_NOP, RV_OP_NOT, RV_OP_OR, RV_OP_REM, RV_OP_ROL, RV_OP_ROR, RV_OP_CLZ, RV_OP_CTZ, RV_OP_REV8, RV_OP_SEQZ, RV_OP_SLL, RV_OP_SLT, RV_OP_SNEZ, RV_OP_SRA, RV_OP_SUB, RV_OP_XOR,
-    RV_OP_LD, RV_OP_SD, RV_OP_LW, RV_OP_SW, RV_OP_CALL, RV_OP_MV, RV_OP_RET, RV_X10,
+    RV_OP_LD, RV_OP_SD, RV_OP_LW, RV_OP_SW, RV_OP_CALL, RV_OP_MV, RV_OP_RET, RV_X1, RV_X2, RV_X8, RV_X10,
     reg_id, operand_get_reg
 }
 use compiler.common.diagnostics.span.{Span}
@@ -899,6 +899,12 @@ fn build_large_int_const_module(name: text) -> MirModule:
 fn entry_block(module: MachModule) -> MachBlock:
     module.functions[0].blocks[1]
 
+fn prologue_block(module: MachModule) -> MachBlock:
+    module.functions[0].blocks[0]
+
+fn operand_reg_id(op: Operand) -> i64:
+    reg_id(operand_get_reg(op))
+
 fn find_opcode(block: MachBlock, opcode: i64) -> i64:
     for i in 0..block.insts.len():
         if block.insts[i].opcode == opcode:
@@ -974,6 +980,22 @@ describe "Isel Riscv64":
         val contract = riscv_linux_target_contract(CodegenTarget.Riscv64)
         expect(contract.abi_text()).to_equal("lp64d")
         expect(contract.arg_register_count).to_equal(8)
+
+    it "emits RV64 prologue saves for ra and s0":
+        val block = prologue_block(isel_module_riscv64(build_memory_module("rv64_prologue")))
+        expect(block.insts.len()).to_equal(4)
+        expect(block.insts[0].opcode).to_equal(RV_OP_ADDI)
+        expect(operand_reg_id(block.insts[0].operands[0])).to_equal(RV_X2)
+        expect(operand_reg_id(block.insts[0].operands[1])).to_equal(RV_X2)
+        expect(block.insts[1].opcode).to_equal(RV_OP_SD)
+        expect(operand_reg_id(block.insts[1].operands[0])).to_equal(RV_X1)
+        expect(mem_offset(block.insts[1].operands[1])).to_equal(0)
+        expect(block.insts[2].opcode).to_equal(RV_OP_SD)
+        expect(operand_reg_id(block.insts[2].operands[0])).to_equal(RV_X8)
+        expect(mem_offset(block.insts[2].operands[1])).to_equal(0)
+        expect(block.insts[3].opcode).to_equal(RV_OP_ADDI)
+        expect(operand_reg_id(block.insts[3].operands[0])).to_equal(RV_X8)
+        expect(operand_reg_id(block.insts[3].operands[1])).to_equal(RV_X2)
 
     it "uses 64-bit load and store opcodes for RV64 memory":
         val block = entry_block(isel_module_riscv64(build_memory_module("rv64_memory")))

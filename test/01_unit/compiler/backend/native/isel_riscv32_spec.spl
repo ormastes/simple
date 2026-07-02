@@ -5,7 +5,7 @@ use compiler.backend.backend.backend_types.{CodegenTarget}
 use compiler.backend.backend.riscv_target.{riscv_linux_target_contract}
 use compiler.backend.backend.native.isel_riscv32.{isel_module_riscv32}
 use compiler.backend.native.{RV32_WORD_SIZE}
-use compiler.backend.native.mach_inst.{MachModule, MachBlock, Operand, OperandKind, RV_OP_ADD, RV_OP_ADDI, RV_OP_AND, RV_OP_AUIPC, RV_OP_BEQ, RV_OP_BNE, RV_OP_DIV, RV_OP_JAL, RV_OP_JALR, RV_OP_LI, RV_OP_MUL, RV_OP_NEG, RV_OP_NOP, RV_OP_NOT, RV_OP_OR, RV_OP_REM, RV_OP_RET, RV_OP_SEQZ, RV_OP_SLL, RV_OP_SLT, RV_OP_SNEZ, RV_OP_SRA, RV_OP_SUB, RV_OP_XOR, RV_OP_LW, RV_OP_SW, RV_OP_LD, RV_OP_SD, RV_OP_CALL, RV_OP_MV, RV_X10, reg_id, operand_get_reg}
+use compiler.backend.native.mach_inst.{MachModule, MachBlock, Operand, OperandKind, RV_OP_ADD, RV_OP_ADDI, RV_OP_AND, RV_OP_AUIPC, RV_OP_BEQ, RV_OP_BNE, RV_OP_DIV, RV_OP_JAL, RV_OP_JALR, RV_OP_LI, RV_OP_MUL, RV_OP_NEG, RV_OP_NOP, RV_OP_NOT, RV_OP_OR, RV_OP_REM, RV_OP_RET, RV_OP_SEQZ, RV_OP_SLL, RV_OP_SLT, RV_OP_SNEZ, RV_OP_SRA, RV_OP_SUB, RV_OP_XOR, RV_OP_LW, RV_OP_SW, RV_OP_LD, RV_OP_SD, RV_OP_CALL, RV_OP_MV, RV_X1, RV_X2, RV_X8, RV_X10, reg_id, operand_get_reg}
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_types.{SymbolId}
 
@@ -857,6 +857,12 @@ fn build_rv32_32bit_wrapped_const_module() -> MirModule:
 fn entry_block(module: MachModule) -> MachBlock:
     module.functions[0].blocks[1]
 
+fn prologue_block(module: MachModule) -> MachBlock:
+    module.functions[0].blocks[0]
+
+fn operand_reg_id(op: Operand) -> i64:
+    reg_id(operand_get_reg(op))
+
 fn has_opcode(block: MachBlock, opcode: i64) -> bool:
     for inst in block.insts:
         if inst.opcode == opcode:
@@ -930,6 +936,22 @@ describe "Isel Riscv32":
         val contract = riscv_linux_target_contract(CodegenTarget.Riscv32)
         expect(contract.abi_text()).to_equal("ilp32d")
         expect(contract.arg_register_count).to_equal(8)
+
+    it "emits RV32 prologue saves for ra and s0":
+        val block = prologue_block(isel_module_riscv32(build_rv32_memory_module()))
+        expect(block.insts.len()).to_equal(4)
+        expect(block.insts[0].opcode).to_equal(RV_OP_ADDI)
+        expect(operand_reg_id(block.insts[0].operands[0])).to_equal(RV_X2)
+        expect(operand_reg_id(block.insts[0].operands[1])).to_equal(RV_X2)
+        expect(block.insts[1].opcode).to_equal(RV_OP_SW)
+        expect(operand_reg_id(block.insts[1].operands[0])).to_equal(RV_X1)
+        expect(mem_offset(block.insts[1].operands[1])).to_equal(0)
+        expect(block.insts[2].opcode).to_equal(RV_OP_SW)
+        expect(operand_reg_id(block.insts[2].operands[0])).to_equal(RV_X8)
+        expect(mem_offset(block.insts[2].operands[1])).to_equal(0)
+        expect(block.insts[3].opcode).to_equal(RV_OP_ADDI)
+        expect(operand_reg_id(block.insts[3].operands[0])).to_equal(RV_X8)
+        expect(operand_reg_id(block.insts[3].operands[1])).to_equal(RV_X2)
 
     it "uses 32-bit load and store opcodes for RV32 memory":
         val block = entry_block(isel_module_riscv32(build_rv32_memory_module()))
