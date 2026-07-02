@@ -186,6 +186,20 @@ impl Lowerer {
             }
         }
 
+        // `module.Enum.Variant`: the receiver is itself a path segment
+        // (`module.Enum`) whose trailing field names an enum. The seed only
+        // recognises enum-variant access when the *immediate* receiver
+        // identifier names an enum (handled above); module-qualified paths
+        // arrive here as nested field accesses whose leading module segment
+        // lowers to ANY, so without this the whole chain degrades to a
+        // field-access-on-ANY that "cannot infer field type" and stubs out the
+        // enclosing function. Resolve it as a qualified enum-variant reference.
+        if let Expr::FieldAccess { field: mid, .. } = receiver {
+            if let Some(expr) = self.try_lower_qualified_enum_variant(mid, field) {
+                return Ok(expr);
+            }
+        }
+
         let recv_hir = Box::new(self.lower_expr(receiver, ctx)?);
         if self.should_treat_unresolved_field_as_static_variant(receiver, &recv_hir, field) {
             if let Expr::Identifier(recv_name) = receiver {
@@ -397,6 +411,58 @@ impl Lowerer {
             }
             Err(e) => Err(e),
         }
+    }
+
+    /// Resolve a qualified enum-variant reference `EnumName.Variant` where
+    /// `enum_name` is the trailing path segment of the receiver (e.g. the
+    /// `StopReason` in `protocol.StopReason.DataBreakpoint`). Returns the
+    /// variant constructor / unit-variant `Global` only on an exact variant
+    /// match — never a lenient guess — so it stays side-effect free for
+    /// non-enum receivers and cannot hijack ordinary field accesses.
+    fn try_lower_qualified_enum_variant(&mut self, enum_name: &str, field: &str) -> Option<HirExpr> {
+        // Enum registered in the local type registry.
+        if let Some(type_id) = self.module.types.lookup(enum_name) {
+            if let Some(HirType::Enum { variants, .. }) = self.module.types.get(type_id) {
+                if variants.iter().any(|(vname, _)| vname == field) {
+                    return Some(HirExpr {
+                        kind: HirExprKind::Global(format!("{}::{}", enum_name, field)),
+                        ty: type_id,
+                    });
+                }
+                // Named enum but `field` is not one of its variants — not our case.
+                return None;
+            }
+        }
+        // Enum reachable only via `global_enum_defs` (re-export / late registration).
+        if let Some(ref defs) = self.global_enum_defs.clone() {
+            if let Some(variant_summary) = defs.get(enum_name) {
+                if variant_summary.iter().any(|(vname, _)| vname == field) {
+                    let variants: Vec<(String, Option<Vec<TypeId>>)> = variant_summary
+                        .iter()
+                        .map(|(vname, payload_arity)| {
+                            let payload = payload_arity.map(|n| vec![TypeId::ANY; n]);
+                            (vname.clone(), payload)
+                        })
+                        .collect();
+                    let type_id = self.module.types.register_named(
+                        enum_name.to_string(),
+                        HirType::Enum {
+                            name: enum_name.to_string(),
+                            variants,
+                            generic_params: vec![],
+                            is_generic_template: false,
+                            type_bindings: std::collections::HashMap::new(),
+                        },
+                    );
+                    self.globals.insert(enum_name.to_string(), type_id);
+                    return Some(HirExpr {
+                        kind: HirExprKind::Global(format!("{}::{}", enum_name, field)),
+                        ty: type_id,
+                    });
+                }
+            }
+        }
+        None
     }
 
     fn should_treat_unresolved_field_as_static_variant(
