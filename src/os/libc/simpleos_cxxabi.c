@@ -15,6 +15,7 @@
 #include "include/stdlib.h"
 #include "include/string.h"
 #include "include/stdio.h"
+#include "include/stdint.h"
 
 /* ====================================================================
  * 1. DSO handle (required by __cxa_atexit)
@@ -250,7 +251,26 @@ void __assert_fail(const char *expr, const char *file,
 extern int64_t simpleos_syscall(int64_t, int64_t, int64_t, int64_t,
                                  int64_t, int64_t);
 
+static int running_on_linux_host(void) {
+    uint64_t cs;
+    __asm__ volatile ("mov %%cs, %0" : "=r"(cs));
+    return cs == 0x33;
+}
+
+static int64_t linux_syscall1(int64_t id, int64_t a0) {
+    int64_t r;
+    __asm__ volatile (
+        "syscall"
+        : "=a"(r)
+        : "a"(id), "D"(a0)
+        : "rcx", "r11", "memory");
+    return r;
+}
+
 void _Exit(int status) {
+    if (running_on_linux_host()) {
+        linux_syscall1(60, (int64_t)status);
+    }
     simpleos_syscall(0, (int64_t)status, 0, 0, 0, 0);
     __builtin_unreachable();
 }
