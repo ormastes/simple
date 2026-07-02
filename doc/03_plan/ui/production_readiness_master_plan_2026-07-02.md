@@ -1,0 +1,277 @@
+# GUI / Web / Game-Engine Production Readiness — Master Plan
+
+**Date:** 2026-07-02
+**Status:** Active (single source of truth for this lane; supersedes none — consolidates)
+**Related:**
+- [GUI hardening current plan](../../gui/gui_hardening_current_plan_2026-06-01.md)
+- [Pure Simple web renderer Chromium-quality plan](../web_browser/pure_simple_web_renderer_chromium_quality_plan.md)
+- [Game engine 2D/3D unification plan](../graphics/engine/game_engine_2d3d_unification_plan_2026-06-12.md)
+- [Engine2D CPU/Vulkan parity](../graphics/engine/engine2d_cpu_vulkan_parallel_2026-05-29.md)
+
+## Objective (from user directive, made precise)
+
+Bring four product surfaces to production level, all rendering through the
+**pure-Simple 2D/3D engine backed by Vulkan** (single exception: Android GUI,
+which is backed by Tauri 2):
+
+1. **GUI** — the Simple GUI framework, proven via the GUI showcase app.
+2. **Web rendering** — the Simple browser rendering real pages.
+3. **2D game engine + a playable 2D game.**
+4. **3D game engine + a playable 3D game.**
+
+Verification is **evidence-based, not test-log-based**: every claim of
+"works" must be backed by opening the real app, capturing the actual screen,
+and checking rendering quality, resolution behavior (especially low
+resolution), text readability, and interactive behavior (buttons, scrolling,
+other events, animations).
+
+Work is executed by **parallel opus/sonnet/haiku implementation agents whose
+output is reviewed by a higher-tier model** before acceptance.
+
+## Execution model
+
+- Per work item: implementation agent (model chosen by difficulty — haiku for
+  mechanical work, sonnet for standard implementation, opus for hard
+  rendering/engine work) → reviewing agent one tier higher (sonnet reviews
+  haiku, opus reviews sonnet, fable/orchestrator reviews opus). A change is
+  merged only after the reviewer confirms the evidence criteria below.
+- SPipe SSpec (`*_spec.spl`) system tests are the durable form of every
+  verification; screenshots/PPM evidence are their artifacts.
+- Environment: headless Linux host. Real-window checks run under Xvfb
+  (available) with x11 backend; Vulkan runs on the real Intel GPU
+  (`Intel RPL-P`, Vulkan 1.4) with `llvmpipe`/`lavapipe` as the deterministic
+  software fallback for reproducible pixel evidence.
+
+## Success criteria (goal gates)
+
+The goal is met when **every** gate below passes and is reproducible via a
+checked-in SPipe spec or script.
+
+### G1 — GUI production level (Vulkan-backed)
+
+- **G1.1 Real app opens:** GUI showcase app launches as a real window
+  (Xvfb/x11 acceptable) with the rendering path going through the Simple
+  Vulkan-backed engine — not a CPU-only or stub backend. Evidence: capture of
+  the live window (e.g. `xwd`/ffmpeg/import) plus a renderer log line proving
+  the Vulkan device was used.
+- **G1.2 Showcase coverage:** showcase exercises at minimum: buttons, labels,
+  text input, checkbox/toggle, list/table, scroll area, tabs/menu, dialog,
+  image view, themed (glass) surfaces, and an animated element.
+- **G1.3 Low-resolution readability:** at 640×480 and 800×600 (and 1280×720
+  as the nominal case), captured screenshots show all showcase text readable:
+  glyphs ≥ target px height, no clipped/overlapping labels, layout does not
+  overflow the viewport. Verified by an automated text-readability oracle
+  (glyph-region contrast + expected-string OCR/pixel-oracle match) plus
+  archived screenshots.
+- **G1.4 Rendering quality/consistency:** same scene rendered at the three
+  resolutions and across two runs is pixel-stable (deterministic) on the
+  software Vulkan path, and structurally consistent (layout geometry oracle)
+  on the hardware path. No missing glyphs, no uninitialized-memory artifacts.
+- **G1.5 Event system tests:** SPipe system tests drive the real app: button
+  click changes state visibly; scroll surface scrolls (content offset visible
+  in captures); text input receives keystrokes; hover/focus states render.
+  Each assertion is capture-backed (before/after frame differ in the expected
+  region and match oracle).
+- **G1.6 Animation:** at least one animation (e.g. progress/transition) is
+  captured as a frame sequence; frames advance monotonically with expected
+  easing (oracle on sampled positions), no tearing/stalls.
+
+### G2 — Simple browser web rendering production level (Vulkan-backed)
+
+- **G2.1 Real browser opens a page:** Simple browser app launches, loads a
+  local corpus page and at least one real saved page (offline snapshot of a
+  famous site), renders through the same Vulkan-backed engine, captured.
+- **G2.2 Rendering quality:** existing Chromium-comparison harness gates stay
+  green (famous-site corpus 45/45); the tracked production glyph/compositing
+  divergence (`differentPixels: 2717` focused case) is driven down —
+  production gate: focused text case reaches Chrome-like antialiased glyph
+  compositing with different-pixels below the checked-in strict bound, and no
+  regression on the corpus.
+- **G2.3 Text readability at low resolution:** browser rendering of the text
+  corpus at 640×480/800×600 windows passes the same readability oracle as
+  G1.3 (wrapped lines, no clipped glyphs).
+- **G2.4 Interaction:** scroll (wheel + keyboard) over a long page is
+  capture-verified; link click navigation works; back/forward state renders.
+- **G2.5 Consistency:** the browser and the GUI showcase render shared UI
+  chrome (buttons, scrollbars, text) with identical glyph rasterization and
+  theme tokens (cross-app pixel oracle over shared widgets).
+
+### G3 — 2D game engine production level + playable 2D game
+
+- **G3.1 Engine:** game2d stack (sprite batch, texture atlas, canvas, font,
+  input, animation) renders through Vulkan; CPU/Vulkan pixel parity gate
+  stays green.
+- **G3.2 Playable game:** a complete small 2D game (e.g. breakout/platformer)
+  ships in `src/app/`: menu → gameplay → score → game-over loop; ≥60 s
+  automated play session runs without crash.
+- **G3.3 Evidence:** real window capture of gameplay; frame-sequence capture
+  proves sprite motion, collision response, score text updates; input events
+  (keyboard) alter gameplay in captures.
+- **G3.4 Performance:** stable frame pacing at target resolution (frame-time
+  oracle: p95 ≤ 33 ms on software path at 800×600, no monotonic memory
+  growth over the session).
+
+### G4 — 3D game engine production level + playable 3D game
+
+- **G4.1 Engine:** renderer3d + gpu_mesh3d + lighting + camera + game_loop3d
+  render through Vulkan (real device and lavapipe); depth-correct, lit,
+  textured meshes.
+- **G4.2 Playable game:** a complete small 3D game (e.g. rolling-ball
+  obstacle course or first-person collect-the-items) ships: camera movement,
+  object interaction, win/lose condition; ≥60 s automated session, no crash.
+- **G4.3 Evidence:** capture-backed proof of 3D rendering (perspective,
+  depth occlusion oracle: near object occludes far), animation (moving
+  object across frames), and input-driven camera motion.
+- **G4.4 2D-over-3D composition:** HUD (2D engine layer) composites over the
+  3D scene on the same surface (per the unification plan), capture-verified.
+
+### G5 — Android Simple GUI over Tauri 2
+
+- **G5.1 Build:** the Tauri 2 Android target of the Simple GUI builds
+  reproducibly from a checked-in script.
+- **G5.2 Run + capture:** app runs on an Android emulator (or device if
+  available); screen captured via adb; if no emulator can run in this
+  environment, the gate is the checked-in build artifact + a
+  WebView-equivalent rendering proof (Tauri dev-server page capture) and the
+  limitation is recorded, not silently skipped.
+- **G5.3 Consistency:** the Android (Tauri/HTML) rendering of the shared
+  showcase widget set is structurally consistent with the desktop Vulkan
+  rendering (layout geometry + theme-token oracle; pixel-identity is NOT
+  required across backends).
+- **G5.4 Readability:** captures at a low-DPI/small-screen profile pass the
+  text-readability oracle.
+
+### G6 — Cross-cutting
+
+- **G6.1 Pure-Simple rule:** all new implementation is `.spl`/`.shs`;
+  desktop rendering paths have no non-Simple runtime dependency beyond
+  approved SFFI (libvulkan, X11, etc.). Rust seed untouched except bootstrap.
+- **G6.2 All gates are SPipe specs** registered in the test tree and green in
+  `bin/simple test`; no skipped tests without approval.
+- **G6.3 Review chain:** every merged change in this lane has a recorded
+  higher-model review verdict (in the lane report, not git).
+- **G6.4 Evidence archive:** captures/PPMs land under the build/evidence
+  directory with a manifest; the lane report links every gate to its
+  evidence file.
+
+## Phases
+
+- **P0 — Baseline audit (this session):** run existing gates, launch showcase
+  /browser/game demos under Xvfb, capture current screenshots, record which
+  gates already pass. Output: baseline evidence + gap list per gate.
+- **P1 — GUI hardening (G1):** fix gaps found in P0; build/extend showcase;
+  low-res readability oracle; event/animation system tests.
+- **P2 — Browser hardening (G2):** glyph antialias/gamma compositing slice
+  (the known blocker), interaction tests, low-res gates.
+- **P3 — 2D game (G3):** engine gap fixes + game + capture gates.
+- **P4 — 3D game (G4):** engine gap fixes + game + HUD composition.
+- **P5 — Android/Tauri 2 (G5):** build + emulator/capture path.
+- **P6 — Consistency + final sweep (G2.5, G6):** cross-app oracles, full
+  gate run, lane report.
+
+P1–P5 run as parallel agent lanes where files don't overlap; each lane uses
+the impl-model/review-model pairing from the execution model.
+
+## Work breakdown (initial wave, derived from the audit)
+
+| # | Lane | Work item | Impl model | Reviewer |
+|---|------|-----------|-----------|----------|
+| W1 | GUI (P1) | Interactive GUI showcase app: widget tree → layout → Draw-IR → engine2d → winit window, with live event loop (click, scroll, text input, animation) — closes the missing widget→DrawIR converter and the event.spl stub arms | opus | fable |
+| W2 | GUI (P1) | Linux GUI launch + Xvfb capture harness (`scripts/gui/linux-gui-run.shs`) + low-res readability oracle (640×480 / 800×600 / 1280×720) | haiku | sonnet |
+| W3 | Browser (P2) | Glyph antialias/gamma compositing slice toward Chrome parity on the focused text case; no corpus regression | opus | fable |
+| W4 | Browser (P2) | Browser interaction system tests: scroll/link-click/back-forward, capture-backed, low-res gates | sonnet | opus |
+| W5 | Game 2D (P3) | Fix breakout example (`RawHandle` ctor break), file JIT lowering bugs (`clamp_f`, `Game.update` `g`), ship playable 2D game with window + capture + input gates | sonnet | opus |
+| W6 | Game 3D (P4) | engine3d Vulkan present path + small playable 3D game (depth/lighting/camera/HUD-over-3D), capture-backed | opus | fable |
+| W7 | Android (P5) | Run Tauri 2 Android emulator harness end-to-end, adb capture, consistency + readability oracles; record runtime-bundling gap precisely | haiku | sonnet |
+| W8 | Tests (P6) | Event/animation SPipe system specs shared across apps (button/scroll/drag/text/animation frame oracles) | sonnet | opus |
+
+Baseline findings already recorded (2026-07-02): Vulkan engine2d readback gate
+passes live; breakout example fails (`semantic: too many arguments for class
+RawHandle constructor`); JIT falls back on `EngineColor.to_rgba8`
+(`Unknown variable: clamp_f`) and `Game.update` (`Unknown variable: g`).
+
+## Current state (audited 2026-07-02)
+
+### Vulkan / engine
+
+- Vulkan stack is Simple engine + SFFI (`rt_vulkan_*` / `rt_vk3d_*` in
+  `src/lib/nogc_sync_mut/gpu/engine2d/sffi_vulkan.spl`, `engine3d/sffi_vulkan3d.spl`)
+  over the native runtime (`src/compiler_rust/runtime/src/vulkan/`, ash-backed;
+  interpreter has a separate dlopen path). "Pure-Simple backed Vulkan" here
+  means: all engine/render logic in Simple; libvulkan reached via the runtime
+  SFFI boundary — this is the accepted architecture.
+- **Baseline check 2026-07-02:** `scripts/check/check-vulkan-engine2d-readback.shs`
+  passes live on this host — present + readback exercised, clear/rect pixel
+  oracles pass, `vulkan_strict_spec` 18/18, CPU/Vulkan engine2d parity pass.
+- engine2d: ~90 files, real SPIR-V 1.3 raster kernels
+  (`backend_vulkan_spirv_raster_blobs.spl`). engine3d: ~55 files, breadth-first
+  (scene graph/mesh/material/camera present, thin proofs; only `sphere3d_smoke`).
+- **Gaps:** runtime `vulkan` cargo feature off by default; game2d SDL window
+  backend is a stub ("Wave C" unwired) — no live window/present driven from the
+  game path; `game3d_session.spl` is a 2.9KB stub; verification is
+  checksum/manifest/FNV-hash oracles, not reference-image pixel diffs.
+
+### GUI / browser
+
+- Extensive UI lib (`src/lib/common/ui/`): widget/layout/draw-IR/glass theme,
+  x11 backend gate, html/wasm backends, `web_render_api.spl` +
+  `web_render_bitmap_evidence.spl`.
+- Browser: famous-site corpus gate green (45/45) on offline oracle; known
+  production blocker is Chrome-like glyph antialias/gamma/LCD compositing
+  (focused case `differentPixels: 2717`; raw glyph overlays fail closed).
+- Tracked issues: 66 GUI, 44 browser, 16 Vulkan, 6 game bugs in
+  `doc/08_tracking/bug/` (e.g. `gui_web_2d_vulkan_browser_backing_2026-06-23`).
+
+### GUI framework detail (audited)
+
+- Pipeline: `widget.spl` → `layout.spl` → HTML render OR (newer, **not yet
+  wired to the widget tree**) `draw_ir.spl` → engine2d `draw_ir_adv`. The
+  **widget-tree → Draw-IR converter is missing** — the team's own docs call it
+  the preferred next refactor; interactive apps currently hand-roll paths.
+- Real windowing: SDL2 (`src/runtime/runtime_sdl2.c`, real) and winit
+  (`rt_winit_*`, real) exposing raw pixel buffers.
+  `examples/06_io/ui/widget_showcase_gui.spl` opens a real winit window but is
+  a **static scene** that bypasses widget/layout/draw-IR; the 3 canonical GUI
+  check apps are all static/non-interactive.
+- `common/ui/event.spl` hub: Mouse/Scroll/Resize/touch arms are **no-op
+  stubs**; real pointer routing exists only in the WM layer
+  (`window_scene.spl`). Animation support is minimal
+  (`skia/feature/animation/` — 2 files, no timeline/easing framework).
+- Fonts: real stb_truetype SFFI (`runtime_font.c`) + 4-tier fallback
+  rasterizer (`nogc_sync_mut/text_layout/font_rasterizer.spl`); a second
+  independent glyph stack in `src/lib/skia/`. SDL editor bridge still draws
+  placeholder rects for text. DPI/low-res handling is ad hoc.
+- Launch/capture: headless PPM dump (`SHOWCASE_PPM=` etc.) is the canonical
+  oracle; macOS has a GUI launch script, **Linux has none**; QEMU
+  QMP-screendump pixel baselines (786 checked-in PPMs) exist but are opt-in.
+
+### Browser detail (audited)
+
+- Own engine: `src/lib/gc_async_mut/gpu/browser_engine/` (60 files —
+  tokenizer/tree builder/DOM/CSS/selector/layout incl. inline/float/table/
+  paint/text painter/webgpu). App shells: `src/app/ui.browser/` (pure-Simple),
+  `src/app/ui.chromium*/` (hosted Chromium + Acid2 + devtools harnesses).
+- Active blockers: Chrome-like glyph antialias/gamma compositing (focused
+  `differentPixels: 2717`), flex/inline structural geometry mismatches,
+  JS execution not wired (`browser_script_execution_not_wired_2026-05-10`),
+  two unmerged CSS parsers.
+
+### Tauri / Android / test infra
+
+- Tauri 2 shell at `tools/tauri-shell/` with desktop/iOS/Android launchers and
+  `capture-all.command`. iOS lane is HIGH maturity (Metal render + MDI proofs).
+  Android: full gradle project, x86_64/arm64 APKs build, emulator
+  `simple-pixel-8-api36` harness via adb
+  (`scripts/check/check-tauri-android-mobile-renderer-evidence.shs`) — but
+  currently demo-mode: no Android-compatible Simple runtime bundled.
+- Capture tooling: xvfb-run (1280x720x24 typical) for desktop, adb
+  screenshot+logcat for mobile, RenderDoc `.rdc` capture scripts for Vulkan.
+- SPipe: `use std.spec.*`, `@step`/`@capture` decorators, run via
+  `bin/simple test path/to/spec.spl`; docgen must emit 0 stubs. Absolute
+  oracles required (no fixtures-only false-greens).
+
+### Host environment
+
+- Headless (no DISPLAY); Xvfb available. Vulkan 1.3/1.4 loader with Intel
+  RPL-P iGPU (Mesa) + llvmpipe/lavapipe software devices — deterministic
+  software path available for pixel-stable evidence.
