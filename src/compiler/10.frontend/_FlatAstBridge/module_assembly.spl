@@ -116,6 +116,12 @@ fn flat_ast_to_module(path: text) -> Module:
     var di_bindings: [DiBinding] = []
     var arch_rules: [ArchRule] = []
     var bitfields: Dict<text, Bitfield> = {}
+    # Bare top-level statements (parsed as `_expr_N` val bindings). Collected in
+    # source order so they can be wrapped into a synthetic `fn main` when the
+    # module defines none (e.g. `-c "print(1+1)"` snippets / script-style files).
+    var top_level_stmt_names: [text] = []
+    var top_level_stmt_consts: [Const] = []
+    var top_level_stmts: [Stmt] = []
     val span = make_span()
 
     var di = 0
@@ -275,7 +281,7 @@ fn flat_ast_to_module(path: text) -> Module:
                                 pass
                     case _:
                         pass
-            constants[c_name] = Const(
+            val decl_const = Const(
                 name: c_name,
                 has_type_: false,
                 type_: Type(kind: TypeKind.Infer, span: span),
@@ -288,6 +294,15 @@ fn flat_ast_to_module(path: text) -> Module:
                 fixed_address: 0,
                 span: span
             )
+            if c_name.starts_with("_expr_"):
+                # Bare top-level statement: defer. If the module has no `fn main`
+                # these become a synthetic main body; otherwise they are restored
+                # as constants (previous behavior).
+                top_level_stmt_names.push(c_name)
+                top_level_stmt_consts.push(decl_const)
+                top_level_stmts.push(Stmt(kind: StmtKind.Expr(init), span: span))
+            else:
+                constants[c_name] = decl_const
         elif tag_text == "6":
             val module_path = decl_get_name(idx)
             val items_list = decl_get_imports(idx)
@@ -354,6 +369,41 @@ fn flat_ast_to_module(path: text) -> Module:
         di = di + 1
         if flat_bootstrap_enabled() and flat_bridge_trace_enabled():
             eprint("[flat-bridge] decl:done {di}")
+
+    # Synthetic main: wrap bare top-level statements so script-style sources
+    # (`-c` snippets, single files without `fn main`) actually execute instead
+    # of the interpreter backend returning Unit (no `main` found).
+    if top_level_stmts.len() > 0:
+        if not functions.contains("main"):
+            val main_span = make_span()
+            functions["main"] = parser_function_new(
+                "main",
+                [],
+                [],
+                false,
+                Type(kind: TypeKind.Infer, span: main_span),
+                Block(stmts: top_level_stmts, span: main_span),
+                Visibility.Private,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                [],
+                false,
+                "",
+                main_span
+            )
+        else:
+            # Module already defines main: keep previous behavior (store as
+            # `_expr_N` constants) to avoid any semantic change.
+            var tsi = 0
+            while tsi < top_level_stmt_names.len():
+                constants[top_level_stmt_names[tsi]] = top_level_stmt_consts[tsi]
+                tsi = tsi + 1
 
     if flat_bridge_trace_enabled():
         print "[flat-bridge] building frontend module path={path}"

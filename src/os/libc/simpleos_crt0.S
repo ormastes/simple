@@ -4,7 +4,8 @@
  * Called by the kernel's process loader after mapping the ELF.
  * Stack is already set up by the kernel. BSS must be zeroed.
  *
- * Calls main(argc=0, argv=NULL) then exit(retval).
+ * Calls main(argc, argv) then exit(retval). SimpleOS kernels that do not
+ * provide an argc/argv stack still fall back to argc=0, argv=NULL.
  */
 
 .intel_syntax noprefix
@@ -15,6 +16,28 @@
 _start:
     /* Clear direction flag (ABI requirement) */
     cld
+
+    /*
+     * Preserve a conventional process entry stack when present:
+     *   rsp[0] = argc, rsp[1...] = argv, then envp.
+     * This lets the Linux-host smoke artifact run LLVM's InitLLVM path while
+     * retaining the SimpleOS no-arguments fallback for early kernels.
+     */
+    mov     r12, qword ptr [rsp]        /* argc */
+    lea     r13, [rsp + 8]              /* argv */
+    xor     r14d, r14d                  /* envp */
+    test    r12, r12
+    jz      .Lno_initial_args
+    cmp     r12, 4096
+    ja      .Lno_initial_args
+    cmp     qword ptr [r13], 0
+    je      .Lno_initial_args
+    lea     r14, [r13 + r12*8 + 8]
+    jmp     .Largs_done
+.Lno_initial_args:
+    xor     r12d, r12d
+    xor     r13d, r13d
+.Largs_done:
 
     /* Zero BSS segment */
     lea     rdi, [rip + __bss_start]
@@ -28,17 +51,17 @@ _start:
     /* Align stack to 16 bytes (ABI requirement) */
     and     rsp, -16
 
+    /* Publish environ before constructors; host smoke has envp, SimpleOS may not. */
+    lea     rdi, [rip + environ]
+    mov     qword ptr [rdi], r14
+
     /* Initialize C++ constructors and libc (.init_array) */
     call    __libc_init_array
 
-    /* Set environ to NULL (no initial environment from kernel yet) */
-    lea     rdi, [rip + environ]
-    mov     qword ptr [rdi], 0
-
-    /* Call main(argc=0, argv=NULL, envp=NULL) */
-    xor     edi, edi            /* argc = 0 */
-    xor     esi, esi            /* argv = NULL */
-    xor     edx, edx            /* envp = NULL */
+    /* Call main(argc, argv, envp) */
+    mov     edi, r12d
+    mov     rsi, r13
+    mov     rdx, r14
     call    main
 
     /* Exit with main's return value */

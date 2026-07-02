@@ -172,6 +172,32 @@ impl MirLowering:
 
         result
 
+    me try_lower_bitfield_construct(callee: HirExpr, args: [HirCallArg]) -> LocalId?:
+        """Lower `BitfieldType(raw)` construction before generic Call lowering.
+
+        A bitfield construction is an identity pass-through at the value
+        level: the constructed value IS the raw backing value (same bit
+        pattern, same width), so no MIR Call is emitted -- the generic Call
+        path is not synthesizable and the callee has no real function
+        definition to call.
+        """
+        if args.len() != 1:
+            return nil
+        var callee_sym: SymbolId? = nil
+        match callee.kind:
+            case Var(symbol):
+                callee_sym = Some(symbol)
+            case NamedVar(symbol, _):
+                callee_sym = Some(symbol)
+            case _:
+                nil
+        if not callee_sym.?:
+            return nil
+        val sym_id = self.symbol_id_value(callee_sym.unwrap())
+        if not self.bitfield_map.has(sym_id):
+            return nil
+        Some(self.lower_expr(args[0].value))
+
     me try_lower_bitfield_get(base: HirExpr, base_local: LocalId, field_name: text) -> LocalId?:
         """Lower bitfield field reads before generic struct field access."""
         val type_sym = self.expr_type_symbol(base)
@@ -326,6 +352,10 @@ impl MirLowering:
         Handles both direct calls (Var) and indirect calls (closures, function pointers).
         Intercepts GPU intrinsic calls (gpu_global_id, etc.) and emits MIR GPU instructions.
         """
+        val bitfield_construct = self.try_lower_bitfield_construct(callee, args)
+        if val bf_local = bitfield_construct:
+            return bf_local
+
         # Check for GPU intrinsic calls before lowering arguments
         match callee.kind:
             case Var(symbol):
