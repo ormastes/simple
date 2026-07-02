@@ -34,7 +34,7 @@ Focused LLVM-to-SimpleOS port evidence for the current hardening lane.
 | Focused Clang Lex `PPMacroExpansion.cpp` compile | PASS | direct clang++ compile with Ninja flags after replacing `std::stringstream` / `std::locale` / `std::put_time` timestamp formatting with LLVM raw stream + `format` helper -> object builds |
 | SimpleOS libc rebuild | PASS | `make -C src/os/libc` -> rebuilt `libsimpleos_c.a` including the C++ ABI, stdio, string, mman, and libm surfaces needed by the final LLD link |
 | SimpleOS C++/POSIX surface probes | PASS | `clang++ --target=x86_64-unknown-simpleos --sysroot=build/os/sysroot ...` including `<string>`, `<mutex>`, `<shared_mutex>`, `<future>`, `<random>`, `gethostname`, `getsid`, `std::isxdigit`, `sys/resource.h`, `sys/socket.h`, `sys/un.h`, `sys/wait.h`, `pwd.h`, `alarm`, `setsid`, `getpagesize`, and signal flags compiles |
-| Cross clang artifact-gated smoke | FAIL | Corrected smoke now probes canonical `bin/clang` with a 5s timeout and fails the first runtime gate: direct `timeout 5s build/os/llvm/cross-x86_64-unknown-simpleos/bin/clang --print-target-triple` exits 139 and writes 0 bytes; the smoke reports 5 examples, 1 failure on the missing `x86_64-simpleos` triple |
+| Cross clang artifact-gated smoke | FAIL | Corrected smoke now probes canonical `bin/clang` with a 5s timeout and fails the first runtime gate: final direct `timeout 5s build/os/llvm/cross-x86_64-unknown-simpleos/bin/clang --print-target-triple` exits 124 and writes 0 bytes. Interrupt backtrace parks in `simpleos_syscall` via `stat()` -> `llvm::sys::fs::status` -> `clang::driver::Driver::loadDefaultConfigFiles()` |
 
 ## Current Frontier
 
@@ -48,15 +48,19 @@ target.
 
 The canonical cross clang artifact is now present at
 `build/os/llvm/cross-x86_64-unknown-simpleos/bin/clang` as a symlink to
-`clang-20`, but host-running it currently segfaults before printing the target
-triple or resource dir. The artifact-gated smoke now exposes that failure
-instead of skipping it.
+`clang-20`, but host-running it currently times out before printing the target
+triple or resource dir. This session cleared the earlier `_start` BSS crash
+with `__bss_end=_end`, added Linux-host fallback paths for constructor
+allocation/write/exit and `fstat`, and preserved host argc/argv/envp in crt0 so
+LLVM reaches Clang driver config loading. The next concrete blocker is the
+path-based `stat()` host-smoke fallback: `--print-target-triple` now hangs in
+`simpleos_syscall` from `stat()` while `Driver::loadDefaultConfigFiles()` checks
+default config paths.
 
 Compiler-rt staging has advanced through x86_64 builtins compile and archive
-staging. The next focused blocker is the SimpleOS-linked Clang runtime startup:
-the canonical artifact exits 139 before producing target-triple or resource-dir
-output, so broader target rollout and resource-dir integration remain gated on
-debugging that crash.
+staging. Broader target rollout and resource-dir integration remain gated on
+finishing the host-smoke runtime shim far enough for canonical Clang to report
+`x86_64-simpleos` and run the compile/link smoke.
 
 ## Spec Maintenance Completed
 
@@ -176,3 +180,11 @@ debugging that crash.
 - Tightened the Clang artifact smoke with a bounded `--print-target-triple`
   probe, turning the current canonical Clang segfault into a real failure
   instead of an implicit skip.
+- Added `-Wl,--defsym,__bss_end=_end` to the SimpleOS LLVM toolchain so crt0 can
+  clear BSS without a full fixed-address linker script that breaks the
+  host-loadable cross artifact.
+- Added Linux-host fallback paths for `mmap` allocation, `write`, `exit`, and
+  `fstat` after failed SimpleOS syscall probes so the canonical cross artifact
+  can progress under the Linux-host smoke harness.
+- Updated crt0 to preserve a conventional argc/argv/envp entry stack when one is
+  present, while retaining the SimpleOS no-argument fallback for early kernels.

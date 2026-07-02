@@ -69,9 +69,9 @@ struct linux_host_stat {
     long __unused[3];
 };
 
-static int linux_host_fstat(int fd, struct stat *buf) {
+static int linux_host_stat_syscall(int64_t syscall_id, int64_t arg, struct stat *buf) {
     struct linux_host_stat host;
-    int64_t r = linux_syscall2(5, fd, (int64_t)&host);
+    int64_t r = linux_syscall2(syscall_id, arg, (int64_t)&host);
     if (r < 0) { errno = (int)(-r); return -1; }
     memset(buf, 0, sizeof(*buf));
     buf->st_dev = (dev_t)host.st_dev;
@@ -111,6 +111,7 @@ struct __simpleos_FILE {
  * ==================================================================== */
 
 int stat(const char *path, struct stat *buf) {
+    if (running_on_linux_host()) return linux_host_stat_syscall(4, (int64_t)path, buf);
     int64_t r = simpleos_syscall(34, (int64_t)path, (int64_t)strlen(path),
                                   (int64_t)buf, 0, 0);
     if (r < 0) { errno = (int)(-r); return -1; }
@@ -118,7 +119,7 @@ int stat(const char *path, struct stat *buf) {
 }
 
 int fstat(int fd, struct stat *buf) {
-    if (running_on_linux_host()) return linux_host_fstat(fd, buf);
+    if (running_on_linux_host()) return linux_host_stat_syscall(5, fd, buf);
     /* arg3=1 signals fd-mode to the kernel (SimpleOS doesn't distinguish yet) */
     int64_t r = simpleos_syscall(34, (int64_t)fd, 0, (int64_t)buf, 1, 0);
     if (r < 0) { errno = (int)(-r); return -1; }
