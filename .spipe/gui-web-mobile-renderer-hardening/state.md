@@ -85,3 +85,19 @@ dev-done
   `production_gui_web_renderer_parity_metal_render_log_blocked_gate_count=0`,
   but the full production parity status remains failed on the existing
   `electron-layout-manifest-failed` timeout and surface/font evidence gaps.
+- implementation: Split the production GUI/Web parity outer timeout budget so
+  the 49-case Electron/Simple layout manifest gets
+  `PRODUCTION_GUI_WEB_RENDERER_PARITY_LAYOUT_TIMEOUT_SECS` with a 300 second
+  default, while explicit `PRODUCTION_GUI_WEB_RENDERER_PARITY_SUBCHECK_TIMEOUT_SECS`
+  still bounds it for diagnostic timeout tests. This fixes the previous
+  evidence-plumbing failure where all case rows were written but the production
+  wrapper killed the layout manifest before its top-level summary rows.
+- evidence: `BUILD_DIR=build/production_gui_web_renderer_parity_after_layout_timeout_fix`
+  production aggregate now reports
+  `production_gui_web_renderer_parity_layout_manifest_status=pass`, with matrix,
+  backend, raw Metal readback, and Metal render-log also passing. The production
+  reason advanced to `tauri-chrome-layout-manifest-failed`: Chrome live capture
+  passes (`chrome_live_capture=true`, 50 ARGB artifacts pass), while Tauri live
+  surface capture remains unavailable because
+  `macos-wkwebview-snapshot-backend-unimplemented`. Font offload and event
+  routing evidence remain open gates for the full goal.

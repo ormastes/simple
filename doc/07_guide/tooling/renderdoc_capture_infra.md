@@ -1431,6 +1431,9 @@ The current canonical evidence contract is:
   the production-level controls
   `PRODUCTION_GUI_WEB_RENDERER_PARITY_LAYOUT_ENV` to point at a completed
   Electron layout manifest when repairing only the surface lane,
+  `PRODUCTION_GUI_WEB_RENDERER_PARITY_LAYOUT_TIMEOUT_SECS` when the full
+  Electron/Simple layout manifest needs a larger outer budget than other
+  subchecks,
   `PRODUCTION_GUI_WEB_RENDERER_PARITY_SURFACE_MANIFEST_RESUME=1`,
   `PRODUCTION_GUI_WEB_RENDERER_PARITY_SURFACE_TIMEOUT_SECS`, and
   `PRODUCTION_GUI_WEB_RENDERER_PARITY_TAURI_CAPTURE_WAIT_STEPS`. For focused

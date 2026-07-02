@@ -150,6 +150,9 @@ Default timeout contract:
 
 - The wrapper defaults `PRODUCTION_GUI_WEB_RENDERER_PARITY_SUBCHECK_TIMEOUT_SECS`
   to a nonzero value.
+- The 49-case Electron layout manifest gets a larger default outer timeout via
+  `PRODUCTION_GUI_WEB_RENDERER_PARITY_LAYOUT_TIMEOUT_SECS`, while an explicit
+  global subcheck timeout still bounds it for diagnostic runs.
 - Operators can still override the value per run.
 
 Bounded stdout fixture:
@@ -200,7 +203,7 @@ the produced `evidence.env` to validate the final release-blocking contract.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 143 lines folded for reproduction.
+Runnable source: 146 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -338,6 +341,9 @@ expect(script).to_contain("version_text \"$electron_process_version\"")
 expect(script).to_contain("event_browser_engine_final")
 expect(script).to_contain("event_proof_symlink_status_final")
 expect(script).to_contain("PRODUCTION_GUI_WEB_RENDERER_PARITY_SUBCHECK_TIMEOUT_SECS:-180")
+expect(script).to_contain("PRODUCTION_GUI_WEB_RENDERER_PARITY_LAYOUT_TIMEOUT_SECS")
+expect(script).to_contain("PRODUCTION_GUI_WEB_RENDERER_PARITY_SUBCHECK_TIMEOUT_SECS:-300")
+expect(script).to_contain("run_timed_subcheck \"$LAYOUT_SUBCHECK_TIMEOUT_SECS\"")
 expect(script).to_contain("timeout \"$SUBCHECK_TIMEOUT_SECS\" \"$@\"")
 expect(script).to_contain("electron_simple_web_layout_manifest_dependency_status")
 expect(script).to_contain("production_gui_web_renderer_parity_layout_manifest_dependency_status")
