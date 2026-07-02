@@ -42,3 +42,27 @@ dev-done
   `build/tauri_ios_mobile_renderer_after_render_marker`: screenshot artifact,
   WKWebView/Metal render-log, MDI proof, event routing, capture, performance,
   latency, and animation statuses all reported `pass`.
+- implementation: Hardened production/mobile wrapper evidence plumbing on the
+  macOS host. `check-production-gui-web-renderer-parity-evidence.shs` now skips
+  host-incompatible self-hosted Simple binaries during default discovery,
+  classifies an explicit incompatible `SIMPLE_BIN` as
+  `simple-bin-incompatible`, and emits single-line `jj --no-graph` source
+  revisions. The mobile aggregate uses the same single-line source revision
+  contract. SSpec coverage and regenerated manuals were updated for both
+  wrappers.
+- evidence: Live production parity without explicit `SIMPLE_BIN` selected
+  `bin/release/aarch64-apple-darwin-macho/simple` and kept source revision
+  single-line in `build/production_gui_web_renderer_parity_evidence/evidence.env`.
+  The run still fails closed: layout manifest timed out, macOS Tauri/Chrome
+  surface capture remains unavailable
+  (`macos-wkwebview-snapshot-backend-unimplemented`,
+  `chrome-live-capture-configured`), font offload is unavailable, and the
+  macOS Metal render-log compare blocks on
+  `pairwise-argb-diff,argb-source-evidence` even though raw Metal framebuffer
+  readback and Electron/Chrome Metal browser backing pass.
+- evidence: `BUILD_DIR=build/tauri_mobile_renderer_parity_after_mac_fix`
+  mobile aggregate confirms iOS live WKWebView/Metal/MDI evidence passes
+  (render log, screenshot, MDI event/capture/performance/animation all pass),
+  Android is unavailable because `adb` is missing, and the aggregate correctly
+  remains failed with `desktop-production-parity-source-not-pass` until the
+  production parity blockers are resolved.

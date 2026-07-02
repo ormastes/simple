@@ -1336,6 +1336,11 @@ The current canonical evidence contract is:
   `production_gui_backend_simple_bin_source`, and
   `production_gui_backend_simple_bin_status`, and the parent parity evidence
   forwards those as `production_gui_web_renderer_parity_backend_simple_bin*`.
+  When `SIMPLE_BIN` is not set, the parent production wrapper chooses a
+  host-compatible self-hosted Simple binary and skips stale cross-host release
+  artifacts such as Linux ELF binaries on macOS; an explicit incompatible
+  `SIMPLE_BIN` is recorded as `simple-bin-incompatible` instead of being
+  executed by nested GUI probes.
   The nested Metal Engine2D framebuffer readback subcheck rejects the Rust seed
   the same way and records `metal_engine2d_framebuffer_readback_simple_bin`,
   `metal_engine2d_framebuffer_readback_simple_bin_source`, and

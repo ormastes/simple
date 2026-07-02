@@ -1575,11 +1575,12 @@ expect(android).to_contain("tauri_mobile_renderer_parity_android_screenshot_pixe
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 125 lines folded for reproduction.
+Runnable source: 126 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val script = file_read("scripts/check/check-tauri-mobile-renderer-parity-evidence.shs")
+expect(script).to_contain("jj log -r @ --no-pager --no-graph -T 'commit_id.short(12)'")
 expect(script).to_contain("png_file_status")
 expect(script).to_contain("png_file_reason")
 expect(script).to_contain("png-symlink")

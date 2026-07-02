@@ -31,7 +31,7 @@ current_source_revision() {
     if [ "${GUI_WEB_2D_SOURCE_REVISION:-}" != "" ]; then
         echo "$GUI_WEB_2D_SOURCE_REVISION"
     elif command -v jj >/dev/null 2>&1 && jj root >/dev/null 2>&1; then
-        jj log -r @ --no-pager -T 'commit_id.short(12)' 2>/dev/null || echo unknown
+        jj log -r @ --no-pager --no-graph -T 'commit_id.short(12)' 2>/dev/null || echo unknown
     elif command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
         git rev-parse --short=12 HEAD 2>/dev/null || echo unknown
     else
@@ -48,16 +48,43 @@ is_rust_seed_simple() {
     esac
 }
 
+is_host_compatible_simple() {
+    path="$1"
+    [ -x "$path" ] || return 1
+    if ! command -v file >/dev/null 2>&1; then
+        return 0
+    fi
+    description="$(file "$path" 2>/dev/null || true)"
+    case "$(uname -s 2>/dev/null || echo unknown)" in
+        Darwin)
+            case "$description" in
+                *ELF*|*PE32*) return 1 ;;
+            esac
+            ;;
+        Linux|FreeBSD)
+            case "$description" in
+                *Mach-O*|*PE32*) return 1 ;;
+            esac
+            ;;
+        CYGWIN*|MINGW*|MSYS*|Windows_NT)
+            case "$description" in
+                *ELF*|*Mach-O*) return 1 ;;
+            esac
+            ;;
+    esac
+    return 0
+}
+
 if [ -z "${SIMPLE_BIN+x}" ]; then
     SIMPLE_BIN_SOURCE="default-missing"
     for candidate in \
-        "release"/*/simple \
         "bin/release"/*/simple \
         "build/bootstrap/stage3/simple" \
         "bin/simple" \
-        "./bin/simple"
+        "./bin/simple" \
+        "release"/*/simple
     do
-        if [ -x "$candidate" ]; then
+        if is_host_compatible_simple "$candidate"; then
             SIMPLE_BIN="$candidate"
             SIMPLE_BIN_SOURCE="repo-self-hosted-fallback"
             break
@@ -78,6 +105,9 @@ elif is_rust_seed_simple "$SIMPLE_BIN"; then
 elif [ ! -x "$SIMPLE_BIN" ]; then
     SIMPLE_BIN_STATUS=missing
     SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-missing"
+elif ! is_host_compatible_simple "$SIMPLE_BIN"; then
+    SIMPLE_BIN_STATUS=incompatible
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-host-incompatible"
 fi
 export SIMPLE_BIN SIMPLE_BIN_SOURCE SIMPLE_BIN_STATUS
 
