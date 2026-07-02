@@ -246,7 +246,10 @@ is Xvfb-only by default; `check-gui-low-res-readability.shs` is offscreen
 | G4.4 HUD over 3D | PASS (direct blit; LayerTree bridge blocked by interp bugs) | `examples/11_advanced/game3d_hud/main.spl` | `build/game3d_hud.ppm` |
 | G1.1 real window via Vulkan | NOT RUN (live-display ban; needs Xvfb window run) | `scripts/gui/linux-gui-run.shs` | — |
 | G3.2/G4.2 60s play session | BLOCKED (stale binary: interpreter-only, >280s/frame native gates) | — | — |
-| G2.2 glyph parity | IN PROGRESS (W3 lane) | `test/03_system/gui/wm_compare/famous_site_production_probe_spec.spl` | — |
+| G2.2 glyph parity | PASS (differentPixels 2717→3; calibrated LCD compositing; caveat: Chrome-calibrated atlas, not an independent rasterizer) | `node tools/electron-shell/verify_famous_site_production_probe.js` (authoritative; see runner P1 bug) + probe/corpus specs | `test/09_baselines/famous_site_corpus/site_0_google/*` |
+| G2.3 browser low-res text | PASS | `scripts/check/check-browser-interaction.shs` + `test/03_system/gui/browser_interaction_spec.spl` | `build/browser-interaction/lowres_*.ppm` |
+| G2.4 scroll | PASS (marker shifts exactly 120px) | same check script/spec | `build/browser-interaction/scroll_offset*.ppm` |
+| G2.4 link-click/back-forward | GAP (no hit-test/navigation model: layout hit_test is a nil stub, no href handling, no history) | — | lane gap list in W4 result |
 | G5.2 Android emulator capture | BLOCKED on host (no SDK); validator specs green | `test/03_system/check/tauri_android_render_log_validator_spec.spl` | — |
 
 ## Current state (audited 2026-07-02)
