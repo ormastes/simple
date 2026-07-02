@@ -48,6 +48,20 @@ static int64_t linux_syscall2(int64_t id, int64_t a0, int64_t a1) {
 #endif
 }
 
+static int64_t linux_syscall3(int64_t id, int64_t a0, int64_t a1, int64_t a2) {
+#if defined(__x86_64__)
+    long ret;
+    __asm__ volatile("syscall"
+                     : "=a"(ret)
+                     : "a"(id), "D"(a0), "S"(a1), "d"(a2)
+                     : "rcx", "r11", "memory");
+    return ret;
+#else
+    (void)id; (void)a0; (void)a1; (void)a2;
+    return -ENOSYS;
+#endif
+}
+
 struct linux_host_stat {
     unsigned long st_dev;
     unsigned long st_ino;
@@ -416,6 +430,11 @@ int unlink(const char *path) {
  * ==================================================================== */
 
 off_t lseek(int fd, off_t offset, int whence) {
+    if (running_on_linux_host()) {
+        int64_t r = linux_syscall3(8, fd, (int64_t)offset, whence);
+        if (r < 0) { errno = (int)(-r); return (off_t)-1; }
+        return (off_t)r;
+    }
     int64_t r = simpleos_syscall(46, fd, (int64_t)offset, whence, 0, 0);
     if (r < 0) { errno = (int)(-r); return (off_t)-1; }
     return (off_t)r;

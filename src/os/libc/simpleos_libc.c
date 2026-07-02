@@ -50,6 +50,9 @@ typedef long off_t;
 #ifndef O_RDONLY
 #define O_RDONLY 0
 #endif
+#ifndef O_CREAT
+#define O_CREAT 0x0040
+#endif
 
 /* Forward declarations for functions defined in other libc .c files
    or later in this file. Needed because we don't include full headers. */
@@ -75,6 +78,7 @@ extern int simpleos_epoll_close_if_epoll(int fd);
 extern void simpleos_epoll_on_fd_close(int fd);
 extern void simpleos_epoll_on_fd_close_token(int fd, uint64_t ofd_token);
 extern int fcntl(int fd, int cmd, ...);
+extern void __cxa_finalize(void *);
 
 #ifndef F_SIMPLEOS_GET_OFD
 #define F_SIMPLEOS_GET_OFD 0x534F0001
@@ -297,12 +301,29 @@ ssize_t write(int fd, const void *buf, size_t count) {
 }
 
 ssize_t read(int fd, void *buf, size_t count) {
+    if (running_on_linux_host()) {
+        int64_t r = linux_syscall3(0, fd, (int64_t)(uintptr_t)buf, (int64_t)count);
+        if (r < 0) { set_errno(r); return -1; }
+        return (ssize_t)r;
+    }
     int64_t r = simpleos_syscall(31, fd, (int64_t)(uintptr_t)buf, (int64_t)count, 0, 0);
     if (r < 0) { set_errno(r); return -1; }
     return (ssize_t)r;
 }
 
 int open(const char *path, int flags, ...) {
+    int mode = 0666;
+    if (flags & O_CREAT) {
+        va_list ap;
+        va_start(ap, flags);
+        mode = va_arg(ap, int);
+        va_end(ap);
+    }
+    if (running_on_linux_host()) {
+        int64_t r = linux_syscall3(2, (int64_t)(uintptr_t)path, (int64_t)flags, (int64_t)mode);
+        if (r < 0) return set_errno(r);
+        return (int)r;
+    }
     size_t pathlen = strlen(path);
     int64_t r = simpleos_syscall(30, (int64_t)(uintptr_t)path, (int64_t)pathlen,
                                   (int64_t)flags, 0, 0);
@@ -311,6 +332,11 @@ int open(const char *path, int flags, ...) {
 }
 
 int close(int fd) {
+    if (running_on_linux_host()) {
+        int64_t r = linux_syscall3(3, fd, 0, 0);
+        if (r < 0) return set_errno(r);
+        return 0;
+    }
     if (simpleos_epoll_close_if_epoll(fd) == 0) {
         simpleos_epoll_on_fd_close(fd);
         return 0;
@@ -586,10 +612,12 @@ int fputc(int c, FILE *stream) {
  * ==================================================================== */
 
 void exit(int status) {
-    int64_t r = simpleos_syscall(0, (int64_t)status, 0, 0, 0, 0);
-    if (r < 0 && running_on_linux_host()) {
+    __cxa_finalize(0);
+    if (running_on_linux_host()) {
         linux_syscall3(60, (int64_t)status, 0, 0);
     }
+    int64_t r = simpleos_syscall(0, (int64_t)status, 0, 0, 0, 0);
+    (void)r;
     __builtin_unreachable();
 }
 

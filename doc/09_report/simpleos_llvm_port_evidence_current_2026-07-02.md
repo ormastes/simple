@@ -17,7 +17,7 @@ Focused LLVM-to-SimpleOS port evidence for the current hardening lane.
 | Focused x86_64 `bin/lld` cross executable link | PASS | `make -C src/os/libc && SIMPLEOS_TARGET_TRIPLE=x86_64-unknown-simpleos sh src/os/port/llvm/sysroot.shs && ninja -C build/os/llvm/cross-x86_64-unknown-simpleos bin/lld` -> final executable link completes; `build/os/llvm/cross-x86_64-unknown-simpleos/bin/lld` exists and is executable, 64 MB |
 | Focused x86_64 `bin/clang` cross executable link | PASS | `make -C src/os/libc && SIMPLEOS_TARGET_TRIPLE=x86_64-unknown-simpleos sh src/os/port/llvm/sysroot.shs && ninja -C build/os/llvm/cross-x86_64-unknown-simpleos bin/clang` -> final executable link completes; `build/os/llvm/cross-x86_64-unknown-simpleos/bin/clang` symlinks to executable `clang-20`, 125 MB |
 | Cross-build plan scaffolding | PASS | `SIMPLE_LIB=src bin/simple test test/02_integration/os/port/llvm/cross_build_plan_spec.spl --mode=interpreter --clean` -> 18 examples, 0 failures |
-| Per-target compiler-rt/build staging scaffolding | PASS | `SIMPLE_LIB=src bin/simple test test/02_integration/os/port/llvm/per_target_build_spec.spl --mode=interpreter --clean` -> 51 examples, 0 failures |
+| Per-target compiler-rt/build staging scaffolding | PASS | `SIMPLE_LIB=src bin/simple test test/02_integration/os/port/llvm/per_target_build_spec.spl --mode=interpreter --clean` -> 52 examples, 0 failures |
 | Focused x86_64 compiler-rt builtins configure | PASS | `SIMPLEOS_TARGET_TRIPLE=x86_64-unknown-simpleos sh src/os/port/llvm/build.shs compiler-rt` now gets past CMake configure after removing the contradictory `COMPILER_RT_DEFAULT_TARGET_TRIPLE` flag and stale empty `CMAKE_*_FLAGS` cache values |
 | Focused x86_64 compiler-rt builtins compile/stage | PASS | `make -C src/os/libc && SIMPLEOS_TARGET_TRIPLE=x86_64-unknown-simpleos sh src/os/port/llvm/sysroot.shs && SIMPLEOS_TARGET_TRIPLE=x86_64-unknown-simpleos sh src/os/port/llvm/build.shs compiler-rt` -> `builtins` builds 165/165 and stages `libclang_rt.builtins-x86_64.a` under `build/os/sysroot/lib/clang/19/lib/x86_64-unknown-simpleos/`; staged archive is 232 KB |
 | Focused `Path.cpp` compile | PASS | direct clang++ compile with Ninja flags plus `-D__simpleos__=1` -> object builds; only existing futimes/futimens warning remains |
@@ -34,7 +34,9 @@ Focused LLVM-to-SimpleOS port evidence for the current hardening lane.
 | Focused Clang Lex `PPMacroExpansion.cpp` compile | PASS | direct clang++ compile with Ninja flags after replacing `std::stringstream` / `std::locale` / `std::put_time` timestamp formatting with LLVM raw stream + `format` helper -> object builds |
 | SimpleOS libc rebuild | PASS | `make -C src/os/libc` -> rebuilt `libsimpleos_c.a` including the C++ ABI, stdio, string, mman, and libm surfaces needed by the final LLD link |
 | SimpleOS C++/POSIX surface probes | PASS | `clang++ --target=x86_64-unknown-simpleos --sysroot=build/os/sysroot ...` including `<string>`, `<mutex>`, `<shared_mutex>`, `<future>`, `<random>`, `gethostname`, `getsid`, `std::isxdigit`, `sys/resource.h`, `sys/socket.h`, `sys/un.h`, `sys/wait.h`, `pwd.h`, `alarm`, `setsid`, `getpagesize`, and signal flags compiles |
-| Cross clang artifact-gated smoke | FAIL | Corrected smoke now probes canonical `bin/clang` with a 5s timeout and fails the first runtime gate: final direct `timeout 5s build/os/llvm/cross-x86_64-unknown-simpleos/bin/clang --print-target-triple` exits 124 and writes 0 bytes. Interrupt backtrace parks in `simpleos_syscall` via `stat()` -> `llvm::sys::fs::status` -> `clang::driver::Driver::loadDefaultConfigFiles()` |
+| Cross clang target-triple host smoke | PASS | `timeout 5s build/os/llvm/cross-x86_64-unknown-simpleos/bin/clang --print-target-triple` -> exit 0, stdout `x86_64-unknown-simpleos` |
+| Cross clang compile host smoke | PASS | `timeout 10s build/os/llvm/cross-x86_64-unknown-simpleos/bin/clang --target=x86_64-unknown-simpleos -c examples/09_embedded/simpleos_hello_c/hello.c -o /tmp/smoke_clang_hello.o` -> exit 0, object 1056 bytes |
+| Cross object-tool smoke | FAIL | `build/os/llvm/cross-x86_64-unknown-simpleos/bin/llvm-nm /tmp/smoke_clang_hello.o` and `timeout 10s .../bin/ld.lld ...` both exit 139. `gdb --args .../bin/llvm-nm /tmp/smoke_clang_hello.o` stops in Linux dynamic loader `audit_list_add_dynamic_tag` before tool main |
 
 ## Current Frontier
 
@@ -48,19 +50,25 @@ target.
 
 The canonical cross clang artifact is now present at
 `build/os/llvm/cross-x86_64-unknown-simpleos/bin/clang` as a symlink to
-`clang-20`, but host-running it currently times out before printing the target
-triple or resource dir. This session cleared the earlier `_start` BSS crash
+`clang-20`. Host-running it now prints `x86_64-unknown-simpleos` and compiles
+the `hello.c` smoke object. This session cleared the earlier `_start` BSS crash
 with `__bss_end=_end`, added Linux-host fallback paths for constructor
-allocation/write/exit and `fstat`, and preserved host argc/argv/envp in crt0 so
-LLVM reaches Clang driver config loading. The next concrete blocker is the
-path-based `stat()` host-smoke fallback: `--print-target-triple` now hangs in
-`simpleos_syscall` from `stat()` while `Driver::loadDefaultConfigFiles()` checks
-default config paths.
+allocation/write/exit, `stat`/`fstat`, `open`, `read`, `close`, and `lseek`,
+preserved host argc/argv/envp in crt0, and added an explicit Clang driver
+`llvm::outs().flush()` for small target-triple outputs.
+
+The next concrete blocker is the object-tool runtime path: the newly built
+canonical `llvm-nm` and existing `ld.lld` both segfault with exit 139 while
+host-running the smoke object/link step. The captured `llvm-nm` backtrace stops
+inside the Linux dynamic loader `audit_list_add_dynamic_tag` before reaching
+tool main, so the next pass should inspect the dynamic section and
+loader-facing link flags for non-Clang cross tools rather than Clang source
+reading.
 
 Compiler-rt staging has advanced through x86_64 builtins compile and archive
 staging. Broader target rollout and resource-dir integration remain gated on
-finishing the host-smoke runtime shim far enough for canonical Clang to report
-`x86_64-simpleos` and run the compile/link smoke.
+making the canonical object tools host-runnable far enough for `llvm-nm` and
+`ld.lld` to complete the compile/link smoke.
 
 ## Spec Maintenance Completed
 
@@ -188,3 +196,10 @@ finishing the host-smoke runtime shim far enough for canonical Clang to report
   can progress under the Linux-host smoke harness.
 - Updated crt0 to preserve a conventional argc/argv/envp entry stack when one is
   present, while retaining the SimpleOS no-argument fallback for early kernels.
+- Added Linux-host fallback paths for SimpleOS libc `stat`, `open`, `read`,
+  `close`, and `lseek` so canonical Clang host-smoke probes can read config
+  files and source inputs.
+- Updated the smoke spec to expect the normalized `x86_64-unknown-simpleos`
+  target triple used by the current cross-build plan and toolchain.
+- Recorded and applied the Clang driver target-triple flush patch for small
+  `llvm::outs()` outputs in the freestanding cross artifact.
