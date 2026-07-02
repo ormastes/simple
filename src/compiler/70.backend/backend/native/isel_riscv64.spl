@@ -62,7 +62,7 @@ fn rv_lower_const(ctx: ISelContext, value: MirConstValue, type_: MirType) -> Low
         case Zero:
             isel_emit_one(ctx, RV_OP_LI, [op_imm(0)])
         case _:
-            rv_isel_unsupported("constant kind")
+            rv_lower_const_unsupported(ctx, "constant kind")
 
 fn rv_lower_const_int(ctx: ISelContext, v: i64) -> LoweredOperand:
     # RISC-V LI is a pseudo-instruction that the assembler/encoder expands
@@ -70,8 +70,13 @@ fn rv_lower_const_int(ctx: ISelContext, v: i64) -> LoweredOperand:
     # a single LI pseudo and let the encoder handle materialization.
     isel_emit_one(ctx, RV_OP_LI, [op_imm(v)])
 
-fn rv_isel_unsupported(message: text):
+fn rv_isel_unsupported(ctx: ISelContext, message: text) -> ISelInstResult:
     print("RV64 ISel unsupported: {message}")
+    ISelInstResult(insts: [new_mach_inst(RV_OP_NOP, [])], ctx: ctx)
+
+fn rv_lower_const_unsupported(ctx: ISelContext, message: text) -> LoweredOperand:
+    print("RV64 ISel unsupported: {message}")
+    isel_emit_one(ctx, RV_OP_NOP, [])
 
 # ============================================================================
 # Instruction Selection - Core Entry Point
@@ -244,7 +249,7 @@ fn rv_isel_inst(ctx: ISelContext, inst: MirInst) -> ISelInstResult:
         case Nop:
             ISelInstResult(insts: [new_mach_inst(RV_OP_NOP, [])], ctx: ctx)
         case _:
-            rv_isel_unsupported("instruction")
+            rv_isel_unsupported(ctx, "instruction")
 
 fn rv_isel_const(ctx: ISelContext, dest: LocalId, value: MirConstValue, type_: MirType) -> ISelInstResult:
     val lowered = rv_lower_const(ctx, value, type_)
@@ -363,7 +368,7 @@ fn rv_isel_binop(ctx: ISelContext, dest: LocalId, op: MirBinOp, left: MirOperand
             for ai in rv_isel_cmp_ge(dest_op, left_low.result, right_low.result, current_ctx):
                 insts.push(ai)
         case _:
-            rv_isel_unsupported("binary operation")
+            rv_isel_unsupported(ctx, "binary operation")
 
     ISelInstResult(insts: insts, ctx: current_ctx)
 
@@ -422,7 +427,7 @@ fn rv_isel_unaryop(ctx: ISelContext, dest: LocalId, op: MirUnaryOp, operand: Mir
             # Same as Not for integers: XORI rd, rs, -1
             insts.push(new_mach_inst(RV_OP_NOT, [dest_op, low.result]))
         case _:
-            rv_isel_unsupported("unary operation")
+            rv_isel_unsupported(ctx, "unary operation")
 
     ISelInstResult(insts: insts, ctx: low.ctx)
 
@@ -526,7 +531,7 @@ fn rv_isel_call(ctx: ISelContext, dest: LocalId, func_op: MirOperand, args: [Mir
         case Move(local):
             insts.push(new_mach_inst(RV_OP_JALR, [op_phys(RV_X1), local_vreg_op(local.id), op_imm(0)]))
         case _:
-            rv_isel_unsupported("call target")
+            rv_isel_unsupported(ctx, "call target")
 
     # Move return value from a0 (x10)
     match dest:
@@ -555,7 +560,7 @@ fn rv_isel_terminator(ctx: ISelContext, term: MirTerminator) -> ISelInstResult:
         case Unreachable:
             ISelInstResult(insts: [new_mach_inst(RV_OP_NOP, [])], ctx: ctx)
         case _:
-            rv_isel_unsupported("terminator")
+            rv_isel_unsupported(ctx, "terminator")
 
 fn rv_isel_return(ctx: ISelContext, value: MirOperand?) -> ISelInstResult:
     var insts: [MachInst] = []
