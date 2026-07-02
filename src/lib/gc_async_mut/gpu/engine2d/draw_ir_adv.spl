@@ -10,6 +10,7 @@ use common.ui.draw_ir.{
     DRAW_IR_COMMAND_TEXT,
     DrawIrBatch,
     DrawIrComposition,
+    DrawIrStyleProp,
     Simple2dDrawIrCompositionPlan,
     Simple2dDrawIrPlan,
     simple_2d_draw_ir_adv_composition_plan,
@@ -80,6 +81,28 @@ fn _engine2d_draw_ir_result_from_composition_plan(plan: Simple2dDrawIrCompositio
 
 fn _engine2d_draw_ir_supported_command(kind: text) -> bool:
     kind == DRAW_IR_COMMAND_RECT or kind == DRAW_IR_COMMAND_TEXT
+
+# A fully transparent (alpha == 0) fill is a no-op in a real compositor, but the
+# GPU rect kernel stores the raw color word, so a zero-color box reads back as an
+# opaque black bar over whatever it covers. Skip painting those.
+fn _engine2d_draw_ir_opaque(color: u32) -> bool:
+    ((color >> 24) & 0xFFu32) != 0u32
+
+# Recover the pixel font size a text command was laid out with from its computed
+# style (`font-size` is a plain integer string). Falls back to 12 when absent.
+fn _engine2d_draw_ir_text_font_size(style: [DrawIrStyleProp]) -> i32:
+    for prop in style:
+        if prop.key == "font-size":
+            var value = 0
+            var idx: i64 = 0
+            while idx < prop.value.len():
+                val ch = prop.value.char_code_at(idx).to_i32()
+                if ch >= 48 and ch <= 57:
+                    value = value * 10 + (ch - 48)
+                idx = idx + 1
+            if value > 0:
+                return value
+    12
 
 fn engine2d_resolved_draw_ir_image(image_uri: text, width: i32, height: i32, pixels: [u32]) -> Engine2dResolvedDrawIrImage:
     Engine2dResolvedDrawIrImage(image_uri: image_uri, width: width, height: height, pixels: pixels)
@@ -155,10 +178,11 @@ fn engine2d_draw_ir_adv_batch_with_images(engine: Engine2D, batch: DrawIrBatch, 
         val x = batch.embedding.x + command.x
         val y = batch.embedding.y + command.y
         if command.kind == DRAW_IR_COMMAND_RECT:
-            engine.draw_rect_filled(x, y, command.width, command.height, command.color)
+            if _engine2d_draw_ir_opaque(command.color):
+                engine.draw_rect_filled(x, y, command.width, command.height, command.color)
             rendered = rendered + 1
         elif command.kind == DRAW_IR_COMMAND_TEXT:
-            engine.draw_text(x, y, command.text_value, command.color, 12)
+            engine.draw_text(x, y, command.text_value, command.color, _engine2d_draw_ir_text_font_size(command.computed_style))
             rendered = rendered + 1
         elif command.kind == DRAW_IR_COMMAND_IMAGE:
             val image_index = _engine2d_draw_ir_resolved_image_index(images, command.image_uri)
@@ -236,10 +260,11 @@ fn engine2d_draw_ir_adv_composition_with_images(engine: Engine2D, composition: D
             val x = batch.embedding.x + command.x
             val y = batch.embedding.y + command.y
             if command.kind == DRAW_IR_COMMAND_RECT:
-                engine.draw_rect_filled(x, y, command.width, command.height, command.color)
+                if _engine2d_draw_ir_opaque(command.color):
+                    engine.draw_rect_filled(x, y, command.width, command.height, command.color)
                 rendered = rendered + 1
             elif command.kind == DRAW_IR_COMMAND_TEXT:
-                engine.draw_text(x, y, command.text_value, command.color, 12)
+                engine.draw_text(x, y, command.text_value, command.color, _engine2d_draw_ir_text_font_size(command.computed_style))
                 rendered = rendered + 1
             elif command.kind == DRAW_IR_COMMAND_IMAGE:
                 val image_index = _engine2d_draw_ir_resolved_image_index(images, command.image_uri)
