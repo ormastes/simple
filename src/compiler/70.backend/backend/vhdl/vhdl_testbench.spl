@@ -214,7 +214,23 @@ fn _render_vhdl_testbench_suite_unchecked(tb: VhdlTestbenchSuite) -> VhdlTestben
         builder.emit_raw("")
 
     if tb.clock_name != "":
-        _emit_clock_driver(builder, tb.clock_name)
+        # Emitted inline (rather than delegated to a helper fn) because
+        # delegating VhdlBuilder mutation through a separate top-level `fn`
+        # here silently dropped the emitted lines once control returned to
+        # this caller -- see doc/08_tracking/bug/
+        # interp_vhdl_builder_helper_fn_mutation_lost_2026-07-02.md
+        builder.emit_line("clock_driver: process")
+        builder.indent_level = builder.indent_level + 1
+        builder.emit_process_body_begin()
+        builder.emit_line("loop")
+        builder.indent_level = builder.indent_level + 1
+        builder.emit_signal_assign(tb.clock_name, "'0'")
+        builder.emit_line("wait for 5 ns;")
+        builder.emit_signal_assign(tb.clock_name, "'1'")
+        builder.emit_line("wait for 5 ns;")
+        builder.indent_level = builder.indent_level - 1
+        builder.emit_line("end loop;")
+        builder.emit_process_end(Some("clock_driver"))
         builder.emit_raw("")
 
     builder.emit_line("stimulus: process")
@@ -270,20 +286,6 @@ fn _vhdl_testbench_has_port(ports: [VhdlTestbenchPort], name: text) -> bool:
         if port.name == name:
             return true
     false
-
-fn _emit_clock_driver(builder: VhdlBuilder, clock_name: text):
-    builder.emit_line("clock_driver: process")
-    builder.indent_level = builder.indent_level + 1
-    builder.emit_process_body_begin()
-    builder.emit_line("loop")
-    builder.indent_level = builder.indent_level + 1
-    builder.emit_signal_assign(clock_name, "'0'")
-    builder.emit_line("wait for 5 ns;")
-    builder.emit_signal_assign(clock_name, "'1'")
-    builder.emit_line("wait for 5 ns;")
-    builder.indent_level = builder.indent_level - 1
-    builder.emit_line("end loop;")
-    builder.emit_process_end(Some("clock_driver"))
 
 fn _vhdl_default_literal(type_name: text) -> text?:
     val trimmed = type_name.trim()
