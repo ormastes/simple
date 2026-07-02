@@ -177,6 +177,68 @@ fn require_for_surface(policy: CapabilityPolicy, surface_id: text, cap: Capabili
 fn require_for_window(policy: CapabilityPolicy, window_id: u64, cap: Capability) -> Result<bool, NotSupported>:
     return require_capability(policy, cap)
 
+## Parse a CapabilityPolicy for a given window from SDN config text.
+##
+## Expected SDN shape:
+##   window:
+##       id: main
+##       default: deny
+##   granted:
+##       - Notification
+##       - FileSystemRead
+##   denied:
+##       - ShellAccess
+fn parse_capability_config(sdn: text, window_id: text) -> Result<CapabilityPolicy, text>:
+    """
+    Parse a line-based SDN capability config and build a CapabilityPolicy
+    scoped to `window_id`. Returns Err if the window id does not match,
+    or if any listed capability name is unknown.
+    """
+    var found_id = ""
+    var default_deny = true
+    var granted: List<Capability> = []
+    var denied: List<Capability> = []
+    var section = ""
+
+    for raw_line in sdn.split("\n"):
+        val line = raw_line.trim()
+        if line == "":
+            continue
+
+        if not line.starts_with("-"):
+            if line.ends_with(":") and not raw_line.starts_with(" ") and not raw_line.starts_with("\t"):
+                section = line.substring(0, line.len() - 1)
+                continue
+            if line.starts_with("id:"):
+                found_id = line.substring(3, line.len()).trim()
+                continue
+            if line.starts_with("default:"):
+                val default_val = line.substring(8, line.len()).trim()
+                default_deny = default_val != "allow"
+                continue
+
+        if line.starts_with("-"):
+            val cap_name = line.substring(1, line.len()).trim()
+            val parsed = parse_capability(cap_name)
+            match parsed:
+                Ok(cap):
+                    if section == "granted":
+                        granted = granted.push(cap)
+                    elif section == "denied":
+                        denied = denied.push(cap)
+                Err(msg): return Err(msg)
+
+    if found_id != window_id:
+        return Err("window not found: {window_id}")
+
+    Ok(CapabilityPolicy(
+        window_id: window_id,
+        granted: granted,
+        denied: denied,
+        default_deny: default_deny,
+        audit_config: AuditConfig.default()
+    ))
+
 ## Log a capability denial via audit system.
 fn log_denial(policy: CapabilityPolicy, cap_name: text):
     val event = SecurityEvent.CapabilityDenied(
