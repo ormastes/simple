@@ -133,6 +133,9 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
     if trace:
         print "[LLVM-LINK] pid={pid}"
 
+    if is_simpleos_x86_64_link(user_objects, output):
+        return link_simpleos_x86_64(user_objects, output, verbose, options.opt_level)
+
     if is_simpleos_riscv64_link(user_objects, output):
         return link_simpleos_riscv64(user_objects, output, verbose)
 
@@ -212,6 +215,77 @@ fn is_simpleos_riscv64_link(user_objects: [text], output: text) -> bool:
         if obj.contains("simpleos_riscv64") or obj.contains("riscv64"):
             return true
     false
+
+fn is_simpleos_x86_64_link(user_objects: [text], output: text) -> bool:
+    val target = rt_env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
+    if target == "x86_64-unknown-none" or target == "x86_64-unknown-none-elf":
+        return true
+    if output.contains("simpleos_wm_simple_web_check") or output.contains("simpleos_x86_64"):
+        return true
+    false
+
+fn compile_simpleos_x86_64_c(src: text, obj: text, opt_level: i64) -> Result<text, text>:
+    var opt = "-O2"
+    if opt_level <= 0:
+        opt = "-O0"
+    elif opt_level == 1:
+        opt = "-Os"
+    val (_out, err, code) = rt_process_run("cc", [
+        "-c", "-m64", "-ffreestanding", "-fno-pic", "-fno-pie", "-mno-red-zone",
+        "-ffunction-sections", "-fdata-sections", opt,
+        "-I", "examples/09_embedded/simple_os/arch/x86_64/boot",
+        "-o", obj, src
+    ])
+    if code != 0:
+        return Err("SimpleOS x86_64 C compile failed for {src}: {err}")
+    Ok(obj)
+
+fn compile_simpleos_x86_64_asm(src: text, obj: text) -> Result<text, text>:
+    val (_out, err, code) = rt_process_run("cc", [
+        "-c", "-m64", "-ffreestanding", "-fno-pic", "-fno-pie", "-mno-red-zone",
+        "-o", obj, src
+    ])
+    if code != 0:
+        return Err("SimpleOS x86_64 asm compile failed for {src}: {err}")
+    Ok(obj)
+
+fn link_simpleos_x86_64(user_objects: [text], output: text, verbose: bool, opt_level: i64) -> Result<text, text>:
+    val pid = getpid()
+    val crt_o = "build/os/simpleos_x86_64_crt0_{pid}.o"
+    val stubs_o = "build/os/simpleos_x86_64_baremetal_stubs_{pid}.o"
+    val type_o = "build/os/simpleos_x86_64_type_stubs_{pid}.o"
+    val auto_o = "build/os/simpleos_x86_64_auto_stubs_{pid}.o"
+
+    match compile_simpleos_x86_64_asm("examples/09_embedded/simple_os/arch/x86_64/boot/crt0.s", crt_o):
+        case Err(e): return Err(e)
+        case Ok(_): pass
+    match compile_simpleos_x86_64_c("examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c", stubs_o, opt_level):
+        case Err(e): return Err(e)
+        case Ok(_): pass
+    match compile_simpleos_x86_64_c("examples/09_embedded/simple_os/arch/x86_64/boot/type_stubs.c", type_o, opt_level):
+        case Err(e): return Err(e)
+        case Ok(_): pass
+    match compile_simpleos_x86_64_c("examples/09_embedded/simple_os/arch/x86_64/boot/auto_stubs.c", auto_o, opt_level):
+        case Err(e): return Err(e)
+        case Ok(_): pass
+
+    var args: [text] = [
+        "-T", "examples/09_embedded/simple_os/arch/x86_64/linker.ld",
+        "-nostdlib", "--gc-sections", "-o", output,
+        crt_o, stubs_o, type_o, auto_o
+    ]
+    for obj in user_objects:
+        args.push(obj)
+    val (_link_out, link_err, link_code) = rt_process_run("ld.lld", args)
+    rt_file_delete(crt_o)
+    rt_file_delete(stubs_o)
+    rt_file_delete(type_o)
+    rt_file_delete(auto_o)
+    if link_code != 0:
+        return Err("SimpleOS x86_64 freestanding link failed: {link_err}")
+    if verbose:
+        print "[llvm-link] SimpleOS x86_64 freestanding executable: {output}"
+    Ok(output)
 
 fn link_simpleos_riscv64(user_objects: [text], output: text, verbose: bool) -> Result<text, text>:
     var is_smoke_entry = false

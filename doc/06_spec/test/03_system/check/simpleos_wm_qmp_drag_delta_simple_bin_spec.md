@@ -11,6 +11,7 @@
 @direction LR
 
 simpleos_wm_qmp_drag_delta_simple_bin_spec -> std
+simpleos_wm_qmp_drag_delta_simple_bin_spec -> app
 ```
 
 </details>
@@ -47,7 +48,7 @@ The live drag-delta check requires QEMU and a running SimpleOS desktop target, b
 | Design | doc/04_architecture/compiler/graphics/accelerated_shared_ui_backend_architecture.md |
 | Research | doc/01_research/ui/render_path/gui_web_2d_path_assessment_2026-06-12.md |
 | Source | `test/03_system/check/simpleos_wm_qmp_drag_delta_simple_bin_spec.spl` |
-| Updated | 2026-06-27 |
+| Updated | 2026-07-02 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -102,7 +103,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/simpleos_wm_qmp_drag_delta_s
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 29 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -130,6 +131,11 @@ expect(native_build_main).to_contain("env_set(\"SIMPLE_EXECUTION_MODE\", \"inter
 val native_build_worker = file_read("src/app/cli/native_build_worker.spl")
 expect(native_build_worker).to_contain("use app.io._CliCompile.compile_targets.")
 expect(native_build_worker).to_contain("cli_native_build")
+val llvm_native_link = file_read("src/compiler/70.backend/backend/llvm_native_link.spl")
+expect(llvm_native_link).to_contain("is_simpleos_x86_64_link")
+expect(llvm_native_link).to_contain("link_simpleos_x86_64")
+expect(llvm_native_link).to_contain("examples/09_embedded/simple_os/arch/x86_64/linker.ld")
+expect(llvm_native_link).to_contain("examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c")
 ```
 
 </details>

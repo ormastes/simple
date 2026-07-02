@@ -333,8 +333,19 @@ impl InterpreterBackendImpl:
         for stmt in block.stmts:
             self.exec_stmt(stmt, ctx)?
 
+        # Single-file HIR lowering can emit a block with the desugared `has`
+        # flag set true but the `value` HirExpr left nil (observed for the
+        # synthetic `-c` main body, iteration 10). `block.value.?` reduces to the
+        # `has` flag, so it is true, but unwrapping yields a nil HirExpr whose
+        # `.kind` access then traps ("field access on nil receiver"). Guard the
+        # unwrapped expr against nil so a mis-lowered trailing value degrades to
+        # unit instead of crashing.
         val result = if block.value.?:
-            self.eval_expr(block.value.unwrap(), ctx)?
+            val block_value_expr = block.value.unwrap()
+            if block_value_expr != nil:
+                self.eval_expr(block_value_expr, ctx)?
+            else:
+                Value.make_nil()
         else:
             Value.make_nil()
 
