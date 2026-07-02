@@ -41,15 +41,54 @@ val TRACK: u32 = 0xFF2A2A38u32
 
 # ponytail: native rounded-rect emulation crashes in this compiled perf gate; plain rects keep the widget evidence alive.
 
+# Interactive widget state driven by synthetic SHOWCASE_EVENTS (W1/G1.5).
+# Defaults reproduce the historical static frame exactly.
+struct ShowcaseState:
+    button_pressed: bool
+    switch_on: bool
+    progress_pct: i32
+
+fn showcase_state_default() -> ShowcaseState:
+    ShowcaseState(button_pressed: false, switch_on: true, progress_pct: 62)
+
+# Pure reducer: one synthetic event -> new state (widget_interact_model style).
+fn apply_showcase_event(st: ShowcaseState, ev: text) -> ShowcaseState:
+    if ev == "click:button":
+        return ShowcaseState(button_pressed: not st.button_pressed, switch_on: st.switch_on, progress_pct: st.progress_pct)
+    if ev == "toggle:switch":
+        return ShowcaseState(button_pressed: st.button_pressed, switch_on: not st.switch_on, progress_pct: st.progress_pct)
+    if ev == "advance:progress":
+        var pct = st.progress_pct + 20
+        if pct > 100:
+            pct = 100
+        return ShowcaseState(button_pressed: st.button_pressed, switch_on: st.switch_on, progress_pct: pct)
+    print "unknown showcase event: {ev}"
+    st
+
+# Grid cell index of the widget an event targets (-1 = unknown).
+fn showcase_event_cell(ev: text) -> i32:
+    if ev == "click:button":
+        return 0
+    if ev == "toggle:switch":
+        return 1
+    if ev == "advance:progress":
+        return 3
+    -1
+
 # section label above each widget cell
 fn label(b: SoftwareBackend, x: i32, y: i32, name: text):
     b.draw_text(x, y, name, MUTED, 6)
 
-fn w_button(b: SoftwareBackend, x: i32, y: i32):
+fn w_button(b: SoftwareBackend, x: i32, y: i32, pressed: bool):
     label(b, x, y, "Button")
-    b.draw_rect_filled(x, y + 10, 60, 18, ACCENT)
-    b.draw_rect(x, y + 10, 60, 18, ACCENT_D)
-    b.draw_text(x + 16, y + 15, "Run", WHITE, 7)
+    if pressed:
+        b.draw_rect_filled(x, y + 10, 60, 18, ACCENT_D)
+        b.draw_rect(x, y + 10, 60, 18, WHITE)
+        b.draw_text(x + 16, y + 15, "Run", AMBER, 7)
+    else:
+        b.draw_rect_filled(x, y + 10, 60, 18, ACCENT)
+        b.draw_rect(x, y + 10, 60, 18, ACCENT_D)
+        b.draw_text(x + 16, y + 15, "Run", WHITE, 7)
     # secondary (outline)
     b.draw_rect(x + 70, y + 10, 60, 18, MUTED)
     b.draw_text(x + 82, y + 15, "Cancel", FG, 7)
@@ -66,12 +105,16 @@ fn w_checkbox(b: SoftwareBackend, x: i32, y: i32):
     b.draw_circle_filled(x + 100, y + 18, 3, ACCENT)
     b.draw_circle(x + 124, y + 18, 7, MUTED)
 
-fn w_switch(b: SoftwareBackend, x: i32, y: i32):
+fn w_switch(b: SoftwareBackend, x: i32, y: i32, on: bool):
     label(b, x, y, "Toggle switch")
-    # on
-    b.draw_rect_filled(x, y + 12, 34, 16, GREEN)
-    b.draw_circle_filled(x + 26, y + 20, 6, WHITE)
-    # off
+    # first switch reflects state
+    if on:
+        b.draw_rect_filled(x, y + 12, 34, 16, GREEN)
+        b.draw_circle_filled(x + 26, y + 20, 6, WHITE)
+    else:
+        b.draw_rect_filled(x, y + 12, 34, 16, TRACK)
+        b.draw_circle_filled(x + 8, y + 20, 6, MUTED)
+    # second stays off (static reference)
     b.draw_rect_filled(x + 44, y + 12, 34, 16, TRACK)
     b.draw_circle_filled(x + 52, y + 20, 6, MUTED)
 
@@ -92,11 +135,11 @@ fn w_slider(b: SoftwareBackend, x: i32, y: i32):
     b.draw_rect_filled(x, y + 18, 78, 4, ACCENT)
     b.draw_circle_filled(x + 78, y + 20, 6, WHITE)
 
-fn w_progress(b: SoftwareBackend, x: i32, y: i32):
+fn w_progress(b: SoftwareBackend, x: i32, y: i32, pct: i32):
     label(b, x, y, "Progress")
     b.draw_rect_filled(x, y + 14, 130, 10, TRACK)
-    b.draw_rect_filled(x, y + 14, 80, 10, ACCENT)
-    b.draw_text(x + 136, y + 14, "62%", MUTED, 6)
+    b.draw_rect_filled(x, y + 14, 130 * pct / 100, 10, ACCENT)
+    b.draw_text(x + 136, y + 14, "{pct}%", MUTED, 6)
 
 fn w_search(b: SoftwareBackend, x: i32, y: i32):
     label(b, x, y, "Search bar")
@@ -195,7 +238,25 @@ fn cell_pos(i: i32, rows: i32, col_w: i32, header: i32, step: i32) -> (i32, i32)
     val r = i % rows
     (12 + c * col_w, header + r * step)
 
-fn draw_frame(b: SoftwareBackend, w: i32, h: i32):
+# Grid layout constants shared by draw_frame and the event-diff oracle.
+val GRID_HEADER: i32 = 46
+val GRID_FOOTER: i32 = 14
+val GRID_STEP: i32 = 66
+val GRID_CELLS: i32 = 18
+
+# (rows, col_w) for a given viewport — must match draw_frame's grid.
+fn grid_params(w: i32, h: i32) -> (i32, i32):
+    var rows = (h - GRID_HEADER - GRID_FOOTER) / GRID_STEP
+    if rows < 1:
+        rows = 1
+    val ncols = (GRID_CELLS + rows - 1) / rows
+    var col_w = (w - 12) / ncols
+    # ponytail: below ~170px columns widgets overlap; accept clipping there
+    if col_w < 170:
+        col_w = 170
+    (rows, col_w)
+
+fn draw_frame(b: SoftwareBackend, w: i32, h: i32, st: ShowcaseState):
     b.clear(BG)
     # menubar
     b.draw_rect_filled(0, 0, w, 16, CARD)
@@ -206,27 +267,20 @@ fn draw_frame(b: SoftwareBackend, w: i32, h: i32):
 
     # Adaptive grid: 18 cells, rows per column from available height,
     # column count from cell count, column width from viewport width.
-    val header = 46
-    val footer = 14
-    val step = 66
-    val cells = 18
-    var rows = (h - header - footer) / step
-    if rows < 1:
-        rows = 1
-    var ncols = (cells + rows - 1) / rows
-    var col_w = (w - 12) / ncols
-    # ponytail: below ~170px columns widgets overlap; accept clipping there
-    if col_w < 170:
-        col_w = 170
+    val header = GRID_HEADER
+    val step = GRID_STEP
+    val gp = grid_params(w, h)
+    val rows = gp.0
+    val col_w = gp.1
 
     val p0 = cell_pos(0, rows, col_w, header, step)
-    w_button(b, p0.0, p0.1)
+    w_button(b, p0.0, p0.1, st.button_pressed)
     val p1 = cell_pos(1, rows, col_w, header, step)
-    w_switch(b, p1.0, p1.1)
+    w_switch(b, p1.0, p1.1, st.switch_on)
     val p2 = cell_pos(2, rows, col_w, header, step)
     w_dropdown(b, p2.0, p2.1)
     val p3 = cell_pos(3, rows, col_w, header, step)
-    w_progress(b, p3.0, p3.1)
+    w_progress(b, p3.0, p3.1, st.progress_pct)
     val p4 = cell_pos(4, rows, col_w, header, step)
     w_tabs(b, p4.0, p4.1)
     val p5 = cell_pos(5, rows, col_w, header, step)
@@ -262,15 +316,18 @@ fn draw_frame(b: SoftwareBackend, w: i32, h: i32):
     b.draw_text(6, h - 11, "Ready", MUTED, 6)
     b.draw_text(w - 60, h - 11, "Ln 1, Col 1", MUTED, 6)
 
-fn build_frame_sized(w: i32, h: i32) -> [u32]:
+fn build_frame_state(w: i32, h: i32, st: ShowcaseState) -> [u32]:
     var b = SoftwareBackend.create()
     if not b.init(w, h):
         print "CPU backend failed to initialize"
         return []
-    draw_frame(b, w, h)
+    draw_frame(b, w, h, st)
     b.present()
     val pixels = b.read_pixels()
     pixels
+
+fn build_frame_sized(w: i32, h: i32) -> [u32]:
+    build_frame_state(w, h, showcase_state_default())
 
 fn build_frame() -> [u32]:
     build_frame_sized(W, H)
@@ -340,7 +397,7 @@ fn run_widget_showcase_perf_probe(w: i32, h: i32, frames: i64, prefix: text) -> 
         print "{prefix}_status=fail"
         print "{prefix}_reason=cpu-backend-init-failed"
         return 1
-    draw_frame(b, w, h)
+    draw_frame(b, w, h, showcase_state_default())
     val frame_start_us = time_now_micros()
     var frame = 0
     while frame < frames:
@@ -372,6 +429,106 @@ fn run_4k_perf_probe() -> i64:
 fn run_8k_perf_probe() -> i64:
     run_widget_showcase_perf_probe(7680, 4320, 200, "gui_showcase_8k_perf")
 
+fn write_frame_ppm(path: text, pixels: [u32], w: i32, h: i32):
+    if path == "":
+        return
+    val bytes = encode_ppm_p6(w.to_u32(), h.to_u32(), pixels)
+    if file_write_bytes(path, bytes):
+        print "wrote {path} ({w}x{h}, {bytes.len()} bytes)"
+    else:
+        print "failed to write {path}"
+
+# Count differing pixels inside a rect (clamped to the frame).
+fn count_diffs_rect(before: [u32], after: [u32], w: i32, h: i32, rx: i32, ry: i32, rw: i32, rh: i32) -> i64:
+    var x0 = rx
+    if x0 < 0:
+        x0 = 0
+    var y0 = ry
+    if y0 < 0:
+        y0 = 0
+    var x1 = rx + rw
+    if x1 > w:
+        x1 = w
+    var y1 = ry + rh
+    if y1 > h:
+        y1 = h
+    var count = 0i64
+    var y = y0
+    while y < y1:
+        var x = x0
+        while x < x1:
+            if before[y * w + x] != after[y * w + x]:
+                count = count + 1
+            x = x + 1
+        y = y + 1
+    count
+
+fn count_diffs_all(before: [u32], after: [u32]) -> i64:
+    var count = 0i64
+    var i = 0
+    val n = before.len()
+    while i < n:
+        if before[i] != after[i]:
+            count = count + 1
+        i = i + 1
+    count
+
+# Offscreen event-driven mode (W1/G1.5): render a baseline frame, apply each
+# synthetic event with a re-render, then verify the before/after frames differ
+# ONLY inside the targeted widgets' grid cells (region-scoped oracle).
+fn run_showcase_events(w: i32, h: i32, events_raw: text) -> i64:
+    var st = showcase_state_default()
+    val before = build_frame_state(w, h, st)
+    if before.len() < w * h:
+        return 1
+    write_frame_ppm(env_get("SHOWCASE_BEFORE_PPM") ?? "", before, w, h)
+
+    val events = events_raw.split(",")
+    var after: [u32] = before
+    var applied: [text] = []
+    for ev in events:
+        if ev == "":
+            continue
+        st = apply_showcase_event(st, ev)
+        after = build_frame_state(w, h, st)
+        applied.push(ev)
+        print "showcase_event_applied={ev}"
+    write_frame_ppm(env_get("SHOWCASE_AFTER_PPM") ?? "", after, w, h)
+
+    val gp = grid_params(w, h)
+    val rows = gp.0
+    val col_w = gp.1
+    var fails = 0
+    var region_total = 0i64
+    for ev in applied:
+        val idx = showcase_event_cell(ev)
+        if idx < 0:
+            print "FAIL showcase_event={ev} reason=unknown-event"
+            fails = fails + 1
+            continue
+        val p = cell_pos(idx, rows, col_w, GRID_HEADER, GRID_STEP)
+        val rx = p.0
+        val ry = p.1
+        val d = count_diffs_rect(before, after, w, h, rx, ry, col_w, GRID_STEP)
+        region_total = region_total + d
+        if d > 0:
+            print "PASS showcase_event={ev} region=({rx},{ry},{col_w},{GRID_STEP}) diff={d}"
+        else:
+            print "FAIL showcase_event={ev} region=({rx},{ry},{col_w},{GRID_STEP}) diff=0"
+            fails = fails + 1
+    val total = count_diffs_all(before, after)
+    val outside = total - region_total
+    if outside == 0:
+        print "PASS showcase_event_outside diff=0"
+    else:
+        print "FAIL showcase_event_outside diff={outside}"
+        fails = fails + 1
+    if fails == 0:
+        print "PASS showcase_event_overall events={applied.len()}"
+        return 0
+    print "FAIL showcase_event_overall fails={fails}"
+    1
+
 fn pack(src: [u32]) -> [i64]:
     var out: [i64] = []
     var i = 0
@@ -402,6 +559,12 @@ fn main() -> i64:
     val fh0 = (h_raw.parse_i64() ?? H.to_i64()).to_i32()
     val fw = if fw0 < 64: W else: fw0
     val fh = if fh0 < 64: H else: fh0
+
+    # Synthetic event mode: offscreen only, no winit (W1/G1.5).
+    val events_raw = env_get("SHOWCASE_EVENTS") ?? ""
+    if events_raw != "":
+        print "Widget showcase GUI — synthetic event mode {fw}x{fh}"
+        return run_showcase_events(fw, fh, events_raw)
 
     print "Widget showcase GUI — render {fw}x{fh} via Engine2D CPU lane"
     val pixels = build_frame_sized(fw, fh)
