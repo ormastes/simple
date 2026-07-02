@@ -482,6 +482,7 @@ fn rv32_isel_cast(ctx: ISelContext, dest: LocalId, operand: MirOperand, target: 
 fn rv32_isel_call(ctx: ISelContext, dest: LocalId?, func_op: MirOperand, args: [MirOperand]) -> ISelInstResult:
     var insts: [MachInst] = []
     var current_ctx = ctx
+    var did_emit_call = false
 
     # Lower arguments into ABI registers (a0-a7 = x10-x17)
     for i in 0..args.len():
@@ -503,11 +504,14 @@ fn rv32_isel_call(ctx: ISelContext, dest: LocalId?, func_op: MirOperand, args: [
             # Direct call to named function: CALL symbol (pseudo: AUIPC ra + JALR ra)
             current_ctx = isel_add_extern(current_ctx, name)
             insts.push(new_mach_inst(RV_OP_CALL, [op_sym(name)]))
+            did_emit_call = true
         case Copy(local):
             # Indirect call through register: JALR ra, 0(rs)
             insts.push(new_mach_inst(RV_OP_JALR, [op_phys(RV_X1), local_vreg_op(local.id), op_imm(0)]))
+            did_emit_call = true
         case Move(local):
             insts.push(new_mach_inst(RV_OP_JALR, [op_phys(RV_X1), local_vreg_op(local.id), op_imm(0)]))
+            did_emit_call = true
         case _:
             val unsupported = rv32_isel_unsupported(current_ctx, "call target")
             current_ctx = unsupported.ctx
@@ -515,10 +519,11 @@ fn rv32_isel_call(ctx: ISelContext, dest: LocalId?, func_op: MirOperand, args: [
                 insts.push(ai)
 
     # Move return value from a0 (x10)
-    match dest:
-        case Some(d):
-            insts.push(new_mach_inst(RV_OP_MV, [local_vreg_op(d.id), op_phys(RV_X10)]))
-        case None: ()
+    if did_emit_call:
+        match dest:
+            case Some(d):
+                insts.push(new_mach_inst(RV_OP_MV, [local_vreg_op(d.id), op_phys(RV_X10)]))
+            case None: ()
 
     ISelInstResult(insts: insts, ctx: current_ctx)
 
