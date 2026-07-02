@@ -253,7 +253,7 @@ is Xvfb-only by default; `check-gui-low-res-readability.shs` is offscreen
 | G2.4 link-click/back-forward | PASS (lockstep hit-test + history; click→back→forward pixel round-trip A/B pages) | same check script/spec (9/9) | `build/browser-interaction/nav_*.ppm` (4) |
 | G2.5 cross-app glyph consistency | HONEST-GAP gate (47/88 chars diverge, advance 6*scale vs 5*scale; unification blocked by exact-pixel baselines — see bug cross_app_glyph_rasterization_diverges) | `scripts/check/check-cross-app-glyph-consistency.shs` + `test/03_system/check/cross_app_glyph_consistency_spec.spl` (5/5) | `build/cross-app-glyph-consistency/*` |
 | G1.1 showcase Vulkan render | PASS via SIMPLE_GUI_BACKEND=vulkan (spec 6/6 w/ seed); live-window capture leg `unavailable_no_winit` (no rt_winit in current binaries — flips to pass when winit-linked binary deploys) | `scripts/check/check-gui-vulkan-window.shs` + `test/03_system/check/gui_vulkan_window_spec.spl` | `build/gui-window-evidence/*` |
-| G5.2 Android emulator capture | BLOCKED on host (no SDK); validator specs green | `test/03_system/check/tauri_android_render_log_validator_spec.spl` | — |
+| G5.2 Android emulator capture | Emulator leg BLOCKED on host (no SDK/JDK — gap precisely recorded); fallback legs PASS: WebView-equivalent proof renders real Tauri shell UI headlessly at 360x640 (review fixed error-overlay capture + removed python oracle), gradle-artifact gap analysis | `scripts/check/check-tauri-android-webview-proof.shs` + `test/03_system/check/tauri_android_webview_proof_spec.spl` (3/3) | `build/tauri-android-proof/*` |
 
 ## Current state (audited 2026-07-02)
 
