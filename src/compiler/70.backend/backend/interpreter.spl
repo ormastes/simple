@@ -63,7 +63,6 @@ impl InterpreterBackendImpl:
         # struct type so field access resolves the correct index (proven with a
         # minimal field-name-collision repro, iteration 9).
         var has_main = false
-        var main_id: i64 = -1
         # Iterate .values() (not .keys()+re-index) and bind each element to a
         # typed local `val sym: Symbol`. `module.symbols.symbols` is a
         # Dict<i64, Symbol>, but the seed erases Dict<K,V> to ANY, so both
@@ -78,7 +77,6 @@ impl InterpreterBackendImpl:
             ctx.env.define_global(sym.id, Value.Function(FunctionValue(symbol: sym.id, name: sym.name)))
             if sym.name == "main":
                 has_main = true
-                main_id = sym.id.id
 
         for fn_ in module.functions.values():
             val f: HirFunction = fn_
@@ -88,7 +86,13 @@ impl InterpreterBackendImpl:
         if has_main:
             for fn_ in module.functions.values():
                 val f: HirFunction = fn_
-                if f.symbol.id == main_id:
+                # Match main by NAME, not by `f.symbol.id`. HirFunction.symbol is a
+                # SymbolId whose boxed pointer is left nil for the synthetic `-c`
+                # main by single-file HIR lowering, so `f.symbol.id` dereferences
+                # nil and traps ("field access on nil receiver", iteration 10). The
+                # `name` field (a plain text) is populated, and the symbol-table
+                # scan above already confirmed a symbol literally named "main".
+                if f.name == "main":
                     val result = self.call_hir_function(f, [], ctx)?
                     return Ok(BackendResult.Value(result))
             Ok(BackendResult.Unit)

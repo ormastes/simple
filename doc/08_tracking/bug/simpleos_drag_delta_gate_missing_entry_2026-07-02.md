@@ -240,3 +240,16 @@ cannot reach a `pass` end-to-end on this host until the `app.io.cli_ops` /
   reaches real native-build phase markers (`Entry`, `Source dirs`, and
   `Entry closure files: 1`) before timing out, so the current blocker has moved
   past host-JIT startup and into the actual native-build/codegen duration.
+- A single longer verbose probe with `--timeout 180` reached the same
+  `Entry closure files: 1` phase and still timed out before producing a binary.
+  Do not repeat short timeout probes; the next useful step is reducing or
+  accelerating the actual native codegen path for the one-file entry, or running
+  the live path with its configured 870s timeout on a host where that budget is
+  acceptable.
+- The wm-simple-web QEMU target now requests `--opt-level=none` instead of the
+  generic aggressive native-build profile, because this lane only needs a
+  one-file framebuffer/QMP evidence binary. The updated qemu runner unit case
+  passed inside the otherwise-stale `qemu_runner_spec` run, but a direct verbose
+  native-build probe with `--opt-level=none --timeout 210` still timed out after
+  `Entry closure files: 1`. The timeout is therefore in native codegen/linking
+  for the freestanding entry, not MIR optimization level alone.

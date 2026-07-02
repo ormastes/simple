@@ -709,7 +709,7 @@ expect(rt_env_set("SIMPLE_OS_LOG_MODE", "on")).to_equal(true)
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -717,6 +717,7 @@ val target = get_wm_simple_web_check_target()
 val args = os_native_build_args(target, "cranelift")
 expect(args).to_contain("--timeout")
 expect(args).to_contain("870")
+expect(args).to_contain("--opt-level=none")
 expect(os_native_build_sources(target)).to_equal(["examples/09_embedded/simple_os/arch/x86_64"])
 ```
 
