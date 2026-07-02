@@ -717,6 +717,7 @@ val target = get_wm_simple_web_check_target()
 val args = os_native_build_args(target, "cranelift")
 expect(args).to_contain("--timeout")
 expect(args).to_contain("870")
+expect(os_native_build_sources(target)).to_equal(["examples/09_embedded/simple_os/arch/x86_64"])
 ```
 
 </details>

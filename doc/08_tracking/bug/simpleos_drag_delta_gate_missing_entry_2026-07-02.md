@@ -135,3 +135,87 @@ cannot reach a `pass` end-to-end on this host until the `app.io.cli_ops` /
   stopped, and the OS runner now passes `--timeout 870` to this target's
   native-build worker so it should report through `simple native-build` before
   the outer 900s OS build timeout kills the supervisor.
+- The `wm-simple-web` target source roots were narrowed from
+  `build/os/generated`, `src/os`, `src/lib`, and the x86_64 SimpleOS examples
+  directory to `build/os/generated`, `src/os`, and the x86_64 examples
+  directory. The entry and its direct imports do not use `src/lib`, so this
+  avoids loading the broad library tree in the QMP kernel build.
+- The `gui_entry_engine2d.spl` entry also dropped dead Engine2D-object helper
+  functions and unused Simple Web HTML reads. The active QMP evidence path uses
+  direct framebuffer/MMIO panel writers plus the existing serial markers, so
+  this reduces the entry module without changing the drag/fullscreen contract.
+- Typed integer suffix literals in `gui_entry_engine2d.spl` were normalized to
+  plain literals so the self-hosted parser no longer reports local
+  `parser_error` diagnostics for the freestanding entry during `bin/simple
+  check`.
+- A bounded reduced-source native-build probe of the same entry with
+  `--source build/os/generated --source src/os --source
+  examples/09_embedded/simple_os/arch/x86_64`, `--log off`, and `--timeout 120`
+  produced no parser/import/semantic diagnostics before the worker timeout.
+  That keeps the current blocker classified as compile-time cost rather than an
+  immediate source-root or parser break.
+- The Rust-seed rejection system spec now wraps its shell calls with
+  `process_run_timeout` through `app.io.mod`; the focused contract check
+  completed in 7.6s with `2 examples, 0 failures` instead of hanging on a
+  child process.
+- The `gui_entry_engine2d.spl` entry dropped the duplicate full-frame
+  allocation/blit render path (`rt_u32_alloc_filled` +
+  `rt_fb_blit_array32`) and now presents the same scene through the existing
+  direct framebuffer writer only. The entry shrank from 505 to 392 lines.
+- A follow-up reduced-source native-build probe after that trim still timed
+  out at the 120s worker cap with no parser/import/semantic diagnostics:
+  `build/os/simpleos_wm_simple_web_check_direct_fb_probe.err` contains
+  `native-build worker timed out after 120s before producing a binary`. The
+  live blocker remains compiler cost for this freestanding entry, not the
+  removed duplicate framebuffer path.
+- The entry now uses a local QEMU BGA setup (`rt_port_outw` + fixed
+  `0xFD000000`) instead of importing the generic PCI-scanning
+  `bga_init_framebuffer` module. This matches the QMP wrapper's `pmemsave`
+  address and removes boot/memory framebuffer types from the entry closure.
+- A comparable reduced-source native-build probe after the local-BGA change
+  still timed out at the 120s worker cap with no parser/import/semantic
+  diagnostics:
+  `build/os/simpleos_wm_simple_web_check_local_bga_probe.err` contains
+  `native-build worker timed out after 120s before producing a binary`.
+- The entry is now self-contained: it replaced the remaining `os.*` imports
+  (`serial_init`/`serial_writeln`, `mmio_write32`, and
+  `simple_web_qemu_panel`) with local extern-backed helpers and the same tiny
+  QEMU panel math. The wm-simple-web target source roots are now only
+  `build/os/generated` and `examples/09_embedded/simple_os/arch/x86_64`.
+- A self-contained reduced-source native-build probe with those roots still
+  timed out at the 120s worker cap with no parser/import/semantic diagnostics:
+  `build/os/simpleos_wm_simple_web_check_selfcontained_probe.err` contains
+  `native-build worker timed out after 120s before producing a binary`.
+- A comparison native-build of the existing minimal x86_64 GUI entry using
+  only the examples source root completed before the cap and reported a
+  semantic failure (`method has not found on type nil`), which confirms the
+  worker can return diagnostics for small freestanding entries on this host.
+  The remaining wm-simple-web blocker is therefore specific to this scene's
+  compiler/native-build cost, not broad source-root discovery.
+- The scene was reduced to the QMP-required framebuffer evidence only: initial
+  and input-repaint colors in the fixed source region (`320..470 x 140..240`)
+  and target region (`120..300 x 60..190`), plus the existing serial markers
+  and fullscreen cover phase. The PS/2 setup helper chain was also replaced by
+  a minimal `_poll_qemu_mouse_input` hook that consumes one pending controller
+  byte before repainting.
+- The entry is now 249 lines. Bounded probes for both
+  `build/os/generated`+examples and examples-only source roots still timed out
+  at the 120s worker cap with no parser/import/semantic diagnostics:
+  `build/os/simpleos_wm_simple_web_check_minimal_input_probe.err` and
+  `build/os/simpleos_wm_simple_web_check_examples_only_probe.err` both report
+  `native-build worker timed out after 120s before producing a binary`.
+- Because the entry has no imports, the wm-simple-web target source roots are
+  now just `examples/09_embedded/simple_os/arch/x86_64`.
+- Direct worker tracing showed the native-build timeout is dominated before
+  this entry reaches native codegen. The worker reports
+  `[native-build] Entry closure files: 1`, then runs interpreted because JIT
+  compilation of the compiler/CLI path falls back. The original JIT blocker was
+  a W1003 shared-mutable optional in
+  `src/compiler/70.backend/backend/interpreter.spl` (`main_fn_opt`); that code
+  now registers globals first, then scans for `main` without reassigning an
+  optional `HirFunction`.
+- After the W1003 fix, a fresh direct-worker trace no longer reports that
+  specific error, but Cranelift JIT still rejects 58 compiler functions and
+  falls back to the interpreter before native-build work begins. The remaining
+  QMP build timeout is therefore a native-build worker/JIT coverage problem,
+  not remaining source-root or scene-size bloat.

@@ -102,7 +102,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/simpleos_wm_qmp_drag_delta_s
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -119,6 +119,13 @@ expect(script).to_contain("export SIMPLE_BIN SIMPLE_BIN_SOURCE SIMPLE_BIN_STATUS
 expect(script).to_contain("qemu_wm_drag_delta_simple_bin=")
 expect(script).to_contain("qemu_wm_drag_delta_simple_bin_source=")
 expect(script).to_contain("qemu_wm_drag_delta_simple_bin_status=")
+expect(script).to_contain("src/app/test/simpleos_desktop_qmp_launch.spl --mode=interpreter --clean")
+expect(script).to_contain("SIMPLE_OS_LOG_MODE=")
+expect(script).to_contain(":-off")
+expect(script).to_contain("guest-entry-not-reported")
+expect(script).to_contain("wm-simple-web-build-timeout")
+val native_build_main = file_read("src/app/cli/native_build_main.spl")
+expect(native_build_main).to_contain("[\"run\", \"src/app/cli/native_build_worker.spl\", \"--mode=interpreter\"]")
 ```
 
 </details>
@@ -134,7 +141,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val root = "build/test-simpleos-wm-qmp-drag-delta-seed-forbidden"
 val command = "rm -rf " + root + " && mkdir -p " + root + " && SIMPLE_BIN=src/compiler_rust/target/release/simple BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-simpleos-wm-qmp-drag-delta-evidence.shs > " + root + "/stdout.txt 2> " + root + "/stderr.txt || true"
-val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+val (_stdout, _stderr, code) = process_run_timeout("/bin/sh", ["-c", command], 10000)
 expect(code).to_equal(0)
 
 val output = file_read(root + "/stdout.txt")
@@ -146,9 +153,9 @@ expect(output).to_contain("qemu_wm_drag_delta_simple_bin_status=forbidden")
 
 val report = file_read(root + "/report.md")
 expect(report).to_contain("- reason: simple-bin-forbidden")
-val (_launch_out, _launch_err, launch_code) = process_run("/bin/sh", ["-c", "test ! -f " + root + "/out/launch.out"])
+val (_launch_out, _launch_err, launch_code) = process_run_timeout("/bin/sh", ["-c", "test ! -f " + root + "/out/launch.out"], 5000)
 expect(launch_code).to_equal(0)
-val (_drag_out, _drag_err, drag_code) = process_run("/bin/sh", ["-c", "test ! -f " + root + "/out/drag.out"])
+val (_drag_out, _drag_err, drag_code) = process_run_timeout("/bin/sh", ["-c", "test ! -f " + root + "/out/drag.out"], 5000)
 expect(drag_code).to_equal(0)
 ```
 
