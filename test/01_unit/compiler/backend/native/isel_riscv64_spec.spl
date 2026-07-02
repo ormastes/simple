@@ -989,6 +989,17 @@ fn nth_label_id(block: MachBlock, opcode: i64, nth: i64, operand_index: i64) -> 
             seen = seen + 1
     -1
 
+fn nth_operand_imm(block: MachBlock, opcode: i64, nth: i64, operand_index: i64) -> i64:
+    var seen = 0
+    for inst in block.insts:
+        if inst.opcode == opcode:
+            if seen == nth:
+                match inst.operands[operand_index].kind:
+                    case Imm(value): return value
+                    case _: return -999
+            seen = seen + 1
+    -999
+
 describe "Isel Riscv64":
     it "uses the shared LP64D contract word size":
         val contract = riscv_linux_target_contract(CodegenTarget.Riscv64)
@@ -1172,11 +1183,23 @@ describe "Isel Riscv64":
         val block = entry_block(isel_module_riscv64(build_indirect_call_module("rv64_indirect_call")))
         expect(count_opcode(block, RV_OP_JALR)).to_equal(2)
         expect(has_opcode(block, RV_OP_CALL)).to_equal(false)
+        val first_link = nth_dest_reg(block, RV_OP_JALR, 0)
+        val second_link = nth_dest_reg(block, RV_OP_JALR, 1)
+        val first_offset = nth_operand_imm(block, RV_OP_JALR, 0, 2)
+        val second_offset = nth_operand_imm(block, RV_OP_JALR, 1, 2)
+        expect(first_link).to_equal(RV_X1)
+        expect(second_link).to_equal(RV_X1)
+        expect(first_offset).to_equal(0)
+        expect(second_offset).to_equal(0)
 
     it "selects RV64 JALR for MIR CallIndirect instructions":
         val block = entry_block(isel_module_riscv64(build_call_indirect_module("rv64_call_indirect")))
         expect(count_opcode(block, RV_OP_JALR)).to_equal(1)
         expect(has_opcode(block, RV_OP_CALL)).to_equal(false)
+        val link = nth_dest_reg(block, RV_OP_JALR, 0)
+        val offset = nth_operand_imm(block, RV_OP_JALR, 0, 2)
+        expect(link).to_equal(RV_X1)
+        expect(offset).to_equal(0)
 
     it "selects RV64 stack allocation and cast opcodes":
         val block = entry_block(isel_module_riscv64(build_alloc_cast_module("rv64_alloc_cast")))
