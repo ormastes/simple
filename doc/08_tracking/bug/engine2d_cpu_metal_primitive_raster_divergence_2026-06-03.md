@@ -1,12 +1,124 @@
 # BUG: engine2d CPU↔Metal primitive rasterization diverges (line/circle/rounded_rect)
 
-Status: resolved (2026-06-05)
+Status: resolved (2026-06-05); re-verified + rounded_rect_outline fixed (2026-07-02)
 
 - id: engine2d-cpu-metal-primitive-raster-divergence
 - date: 2026-06-03
 - area: rendering / engine2d
 - severity: medium
-- status: resolved (2026-06-05)
+- status: resolved (2026-06-05); re-verified + rounded_rect_outline fixed (2026-07-02)
+
+## Update (2026-07-02): gate was a false-skip; rounded_rect_outline diverged; both fixed
+
+Re-running the parity gate (`scripts/check/check-engine2d-cpu-metal-parity-evidence.shs`)
+on macOS found it was **not actually asserting anything**: it printed
+`pass (not-macos-skipped)` even on real macOS hardware. Root cause was a
+global-symbol collision in the interpreter, not a Metal bug:
+`test/02_integration/rendering/engine2d_cpu_metal_parity_run.spl` explicitly
+imports `is_macos` from `std.nogc_sync_mut.env.platform` (which has a
+`uname -s` fallback), but `backend_metal.spl` transitively imports a
+same-named `is_macos`/`detect_os` from `std.gc_async_mut.env.platform` →
+`std.nogc_async_mut.env.platform` (no `uname -s` fallback, OSTYPE-only). The
+interpreter's symbol table is not properly module-scoped, so whichever
+definition the dependency graph registers first silently wins over the
+file's own explicit import. In a non-interactive shell where `OSTYPE` isn't
+an exported env var, the async `detect_os()` returned `"unknown"` — so
+`is_macos()` returned `false` **both** for the harness's own macOS gate
+*and*, more importantly, inside `MetalBackend` itself (`backend_metal.spl`
+gates real GPU dispatch on `is_macos()` at lines 181/238), which made every
+scene silently fall back to the CPU mirror (`gpu_frame_complete=false`,
+reported as `metal-fell-back-to-cpu-mirror`) — a real, reproducible false
+green/false-skip, not a Metal rendering bug.
+
+Fixed by adding the same `uname -s` fallback already present in
+`std.nogc_sync_mut.env.platform.detect_os()` to
+`src/lib/nogc_async_mut/env/platform.spl::detect_os()` (this file, not
+`backend_metal.spl`, was the actual bug — it's a plain platform-detection gap
+that affects any caller landing on the async family's `is_macos()`). Also
+hardened the harness's own gate (`_harness_is_macos()` in
+`engine2d_cpu_metal_parity_run.spl`) with a locally-named, non-colliding
+implementation so the gate doesn't regress the same way again even if
+another transitive import shadows `is_macos` in the future.
+
+With genuine GPU dispatch restored (`gpu_ok=true` on every scene), a NEW
+divergence surfaced that predates this change: `draw_rounded_rect_outline`
+(the thick, multi-stroke outline variant with a `thickness` parameter,
+distinct from the already-fixed plain `draw_rounded_rect`) mismatched
+110/1024 pixels. Its MSL kernel (`kernel_draw_rounded_rect_outline` in
+`backend_metal_msl.spl`) implemented the corners as a filled-annulus distance
+test (`ri_sq <= dx²+dy² <= ro_sq`), matching a *different*, unused CPU
+function (`emu_draw_rounded_rect_outline` in `backend_emu.spl`). The actual
+CPU reference used by `SoftwareBackend`/`CpuBackend`
+(`backend_software.spl::draw_rounded_rect_outline`) instead loops over each
+of the `thickness` offsets and draws a **thin 1px midpoint-circle ring**
+(`sw_corner_arc`, the same algorithm already used for plain circles) at
+radius `r-off` — a stack of thin rings is not the same shape as one filled
+annulus, especially for small `r` relative to `thickness`. Fixed by
+rewriting the MSL kernel's corner-handling to replay the same midpoint-circle
+recurrence (`_rr_ring_hit` helper) per offset, and added the CPU's
+`if thickness > r+1: thickness = r+1` clamp that the kernel was missing.
+
+### Evidence (2026-07-02, macOS arm64, real hardware, genuine GPU readback)
+
+Before (gate falsely skipping — no real assertion at all):
+```
+engine2d-cpu-metal-parity: pass (not-macos-skipped)
+```
+
+After fixing the `is_macos()` platform-detection bug (GPU dispatch now real,
+`gpu_ok=true` everywhere), but before fixing `rounded_rect_outline`:
+```
+clear: MATCH mismatches=0/1024 gpu_ok=true
+rects: MATCH mismatches=0/1024 gpu_ok=true
+gradient: MATCH mismatches=0/1024 gpu_ok=true
+line: MATCH mismatches=0/1024 gpu_ok=true
+circle: MATCH mismatches=0/1024 gpu_ok=true
+rounded_rect: MATCH mismatches=0/1024 gpu_ok=true
+triangle: MATCH mismatches=0/1024 gpu_ok=true
+rounded_rect_outline: DIVERGE mismatches=110/1024 gpu_ok=true first_idx=3 cpu=4294936576 metal=4278190080
+PARITY: fail failures=1
+```
+
+After fixing `kernel_draw_rounded_rect_outline` (all 8 scenes, official gate):
+```
+$ sh scripts/check/check-engine2d-cpu-metal-parity-evidence.shs
+engine2d-cpu-metal-parity: pass (cpu-metal-bitexact)
+```
+`build/engine2d-cpu-metal-parity-evidence/parity.env`:
+```
+engine2d_cpu_metal_parity_status=pass
+engine2d_cpu_metal_parity_reason=cpu-metal-bitexact
+engine2d_cpu_metal_parity_clear=clear: MATCH mismatches=0/1024 gpu_ok=true
+engine2d_cpu_metal_parity_rects=rects: MATCH mismatches=0/1024 gpu_ok=true
+engine2d_cpu_metal_parity_gradient=gradient: MATCH mismatches=0/1024 gpu_ok=true
+engine2d_cpu_metal_parity_line=line: MATCH mismatches=0/1024 gpu_ok=true
+engine2d_cpu_metal_parity_circle=circle: MATCH mismatches=0/1024 gpu_ok=true
+engine2d_cpu_metal_parity_rounded_rect=rounded_rect: MATCH mismatches=0/1024 gpu_ok=true
+engine2d_cpu_metal_parity_rounded_rect_outline=rounded_rect_outline: MATCH mismatches=0/1024 gpu_ok=true
+engine2d_cpu_metal_parity_triangle=triangle: MATCH mismatches=0/1024 gpu_ok=true
+```
+
+Files changed:
+- `src/lib/nogc_async_mut/env/platform.spl` — added `uname -s` fallback to
+  `detect_os()` (root fix for the false-skip / false-CPU-fallback).
+- `test/02_integration/rendering/engine2d_cpu_metal_parity_run.spl` —
+  replaced the collision-prone `is_macos()` call with a locally-named
+  `_harness_is_macos()` so the gate's own macOS check can't be shadowed by a
+  same-named symbol pulled in transitively.
+- `src/lib/gc_async_mut/gpu/engine2d/backend_metal_msl.spl` — rewrote
+  `kernel_draw_rounded_rect_outline`'s corner test from a filled-annulus
+  distance check to a replayed stacked-thin-ring midpoint-circle test
+  (`_rr_ring_hit`), plus added the missing `thickness > r+1` clamp.
+- `scripts/check/check-engine2d-cpu-metal-parity-evidence.shs` — added the
+  `rounded_rect_outline` scene to the evidence env/report output (the
+  harness already asserted it; the gate script just wasn't surfacing the
+  line).
+
+Not touched (per explicit hand-off constraint — another session was actively
+editing these for an unrelated hi-res text feature): `backend_metal.spl`,
+`backend_metal_runtime_ops.spl`. Neither needed changes for this fix; the
+`is_macos()` calls inside `backend_metal.spl` now resolve correctly purely
+because the async platform module they import from was fixed.
 
 ## Resolution (2026-06-05)
 

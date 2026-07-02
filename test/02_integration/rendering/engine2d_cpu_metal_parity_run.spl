@@ -17,9 +17,32 @@
 
 use std.gc_async_mut.gpu.engine2d.backend_cpu.{CpuBackend}
 use std.gc_async_mut.gpu.engine2d.backend_metal.{MetalBackend}
-use std.nogc_sync_mut.env.platform.{is_macos}
+use std.env.variables.{env_get}
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 
 var _failures = 0
+
+# NOTE: backend_metal.spl transitively imports `is_macos`/`detect_os` from
+# std.gc_async_mut.env.platform (nogc_async_mut, no `uname -s` fallback),
+# which collides with this file's own `use std.nogc_sync_mut.env.platform`
+# import in the interpreter's global (non-module-scoped) symbol table --
+# whichever definition the dependency graph registers first wins, silently
+# shadowing the sync one. That made this harness call the async `is_macos`
+# (OSTYPE-only, no fallback), which returns false whenever OSTYPE isn't an
+# exported env var, and the gate reported a false "skip reason=not-macos"
+# without actually running the parity assertions.
+# Work around it with a locally-named, non-colliding check.
+fn _harness_is_macos() -> bool:
+    val ostype = env_get("OSTYPE").lower()
+    if ostype.contains("darwin") or ostype.contains("mac"):
+        return true
+    val result = rt_process_run("/bin/sh", ["-c", "uname -s"])
+    val stdout = result[0]
+    val code = result[2]
+    if code == 0:
+        return stdout.trim() == "Darwin"
+    false
 
 fn compare(name: text, cpu_px: [u32], metal_px: [u32], gpu_ok: bool):
     if not gpu_ok:
@@ -210,7 +233,7 @@ fn metal_triangles(w: i32, h: i32) -> MetalBackend:
     b
 
 fn main():
-    if not is_macos():
+    if not _harness_is_macos():
         print("PARITY: skip reason=not-macos")
         return
 

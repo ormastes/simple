@@ -385,12 +385,38 @@ kernel void kernel_draw_rounded_rect(
 
 // ---- kernel_draw_rounded_rect_outline ----
 
-// Thick rounded-rect OUTLINE (matches CPU emu_draw_rounded_rect_outline:
-// four straight edge rects of `thickness` width plus four thick corner arcs).
-// 2D dispatch over the [0,w) x [0,h) bounding box; each pixel is set if it is
-// covered by the union of those primitives. Since every primitive writes the
-// same opaque color, the per-pixel union test is bit-exact with the CPU loop
-// (which overwrites covered pixels). Integer arithmetic only — no float/sqrt.
+// Bit-exact membership test for CPU sw_corner_arc(radius=rad) at
+// quadrant-local offset (ax, ay) (both >= 0): replays the same midpoint
+// circle recurrence sw_corner_arc uses and checks whether (ax,ay) or the
+// swapped (ay,ax) point was emitted. sw_corner_arc draws a THIN 1px ring,
+// not a filled disc/annulus, so this cannot be replaced by a distance test.
+inline bool _rr_ring_hit(int rad, int ax, int ay) {
+    if (rad < 0) return false;
+    int px = rad;
+    int py = 0;
+    int d = 1 - rad;
+    while (px >= py) {
+        if ((px == ax && py == ay) || (py == ax && px == ay)) return true;
+        py += 1;
+        if (d <= 0) {
+            d += 2 * py + 1;
+        } else {
+            px -= 1;
+            d += 2 * py - 2 * px + 1;
+        }
+    }
+    return false;
+}
+
+// Thick rounded-rect OUTLINE. Matches CPU
+// SoftwareBackend.draw_rounded_rect_outline: straight edges of `thickness`
+// width/height, plus, for each of the `thickness` offsets, a THIN
+// midpoint-circle corner ring at radius (r-off) (sw_corner_arc) — NOT a
+// filled annulus. 2D dispatch over the [0,w) x [0,h) bounding box; each
+// pixel is set if it is covered by the union of those primitives. Since
+// every primitive writes the same opaque color, the per-pixel union test is
+// bit-exact with the CPU loop (which overwrites covered pixels). Integer
+// arithmetic only — no float/sqrt.
 kernel void kernel_draw_rounded_rect_outline(
     device uint* fb                         [[buffer(0)]],
     constant RoundedRectOutlineParams& p    [[buffer(1)]],
@@ -404,6 +430,7 @@ kernel void kernel_draw_rounded_rect_outline(
     if (r > p.w / 2) r = p.w / 2;
     if (r > p.h / 2) r = p.h / 2;
     int t = p.thickness;
+    if (t > r + 1) t = r + 1;   // CPU clamp: draw_rounded_rect_outline
 
     bool covered = false;
 
@@ -419,51 +446,50 @@ kernel void kernel_draw_rounded_rect_outline(
     // Right edge: rect(x+w-t, y+r, t, span_h) -> cols [w-t, w)
     if (span_h > 0 && lx >= p.w - t && lx < p.w && ly >= r && ly < r + span_h) covered = true;
 
-    // Corner arcs: each fills pixel (cx + dx*ax, cy + dy*ay) for ax,ay in [0, r]
-    // where ri_sq <= ax*ax + ay*ay <= ro_sq.  Corner centers (local coords):
+    // Corner rings: for ax,ay in [0, r] (quadrant-local offset from the
+    // corner center), covered if (ax,ay) is on the sw_corner_arc ring for
+    // ANY of the t radii r, r-1, ..., r-t+1. Corner centers (local coords):
     //   TL = (r, r)            TR = (w-1-r, r)
     //   BL = (r, h-1-r)        BR = (w-1-r, h-1-r)
     if (!covered) {
-        int r_inner = r - t;
-        if (r_inner < 0) r_inner = 0;
-        int ro_sq = r * r;
-        int ri_sq = r_inner * r_inner;
         int tlx = r;
         int tly = r;
         int trx = p.w - 1 - r;
         int bry = p.h - 1 - r;
-        // For a corner with center (ccx, ccy) and signs (dx, dy), pixel (lx,ly)
-        // maps to ax = dx*(lx-ccx), ay = dy*(ly-ccy); valid when ax,ay in [0,r].
-        // top-left (dx=-1, dy=-1): ax = ccx-lx, ay = ccy-ly
-        {
+        // top-left: ax = tlx-lx, ay = tly-ly
+        if (!covered) {
             int ax = tlx - lx; int ay = tly - ly;
             if (ax >= 0 && ax <= r && ay >= 0 && ay <= r) {
-                int d = ax * ax + ay * ay;
-                if (d <= ro_sq && d >= ri_sq) covered = true;
+                for (int off = 0; off < t; off++) {
+                    if (_rr_ring_hit(r - off, ax, ay)) { covered = true; break; }
+                }
             }
         }
-        // top-right (dx=+1, dy=-1): ax = lx-ccx, ay = ccy-ly
-        {
+        // top-right: ax = lx-trx, ay = tly-ly
+        if (!covered) {
             int ax = lx - trx; int ay = tly - ly;
             if (ax >= 0 && ax <= r && ay >= 0 && ay <= r) {
-                int d = ax * ax + ay * ay;
-                if (d <= ro_sq && d >= ri_sq) covered = true;
+                for (int off = 0; off < t; off++) {
+                    if (_rr_ring_hit(r - off, ax, ay)) { covered = true; break; }
+                }
             }
         }
-        // bottom-left (dx=-1, dy=+1): ax = ccx-lx, ay = ly-ccy
-        {
+        // bottom-left: ax = tlx-lx, ay = ly-bry
+        if (!covered) {
             int ax = tlx - lx; int ay = ly - bry;
             if (ax >= 0 && ax <= r && ay >= 0 && ay <= r) {
-                int d = ax * ax + ay * ay;
-                if (d <= ro_sq && d >= ri_sq) covered = true;
+                for (int off = 0; off < t; off++) {
+                    if (_rr_ring_hit(r - off, ax, ay)) { covered = true; break; }
+                }
             }
         }
-        // bottom-right (dx=+1, dy=+1): ax = lx-ccx, ay = ly-ccy
-        {
+        // bottom-right: ax = lx-trx, ay = ly-bry
+        if (!covered) {
             int ax = lx - trx; int ay = ly - bry;
             if (ax >= 0 && ax <= r && ay >= 0 && ay <= r) {
-                int d = ax * ax + ay * ay;
-                if (d <= ro_sq && d >= ri_sq) covered = true;
+                for (int off = 0; off < t; off++) {
+                    if (_rr_ring_hit(r - off, ax, ay)) { covered = true; break; }
+                }
             }
         }
     }
