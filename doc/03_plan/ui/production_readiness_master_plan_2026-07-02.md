@@ -210,9 +210,19 @@ is Xvfb-only by default; `check-gui-low-res-readability.shs` is offscreen
   `bin/simple` predates `rt_len` in the JIT runtime symbol table → still
   interpreter-only (one frame > 280 s). Fix in progress: pure-Simple bootstrap
   redeploy (host cannot rebuild the Rust seed — LLVM Polly missing).
+- **G4 narrowphase fixed:** PhysicsWorld3D never dispatched Sphere-Box;
+  wired the existing `collide_sphere_aabb_3d` for both orderings.
+  physics2 suite 37/37 (also repaired 4 stale specs: RawHandle ctor,
+  wrong raycast import path).
+- **All game2d examples JIT-lowerable:** alias→direct imports, fn→me on
+  mutating methods, real input API in pool/stacking. Every example now
+  reaches the stale-binary wall (missing `rt_len`/`rt_math_sin` in the
+  deployed runtime symbol table) and nothing else.
 - Bugs recorded: `interp_module_alias_time_shadowed_builtin`,
   `jit_lowering_clamp_f_engine_color` (nested-fn root cause),
-  `jit_lowering_module_alias_and_panic`, `parser_step_decorator_string_form`
+  `jit_lowering_module_alias_and_panic`, `parser_step_decorator_string_form`,
+  `bootstrap_pure_simple_stage2_stall_yoon_note`,
+  `physics_world3d_sphere_collision_not_detected` (fixed same day)
   (all 2026-07-02).
 
 ## Current state (audited 2026-07-02)
