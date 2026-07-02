@@ -76,6 +76,11 @@ pub const KNOWN_ATTRIBUTE_NAMES: &[&str] = &[
     // are stored on the owning declaration for FR-DRIVER-0004 to consume.
     "driver",
     "native_lib",
+    // SIMD/GPU optimization requirements (Phase 1 implementation)
+    "must",
+    "prefer",
+    "error_not",
+    "warn_not",
 ];
 
 /// Check if a name is a known attribute (should produce Attribute, not Decorator)
