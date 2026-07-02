@@ -611,3 +611,37 @@ Add a temporary trace in `interpret_pipeline` (driver.spl:~638) printing
 module is absent/renamed after mono, fix the keying at `driver.spl:595`
 (`run_monomorphization` key contract) so the interpret loop finds it. Do NOT
 pursue Dict.get Option wrapping (disproven above).
+
+### Iteration 12 FINAL — mono-rekey DISPROVEN; decisive root: interpreter receives an EMPTY HIR module (functions=0, symbols=0)
+Instrumented `interpret_pipeline` + `InterpreterBackendImpl.process_module`
+(traces since reverted; tree clean) and rebuilt stage4. On `run hello.spl`:
+- `interpret_pipeline`: `idx=0 name=...hello hir_nil=false nkeys=1` — the HIR
+  module **is found** (mono-rekey hypothesis DISPROVEN).
+- `process_module`: `[interp-hasmain] has_main=false nfuncs=0`, and **zero**
+  `[interp-sym]` lines emitted. So `module.functions.len()==0` AND
+  `module.symbols.symbols.values()` iterates **zero** elements. The module
+  object exists but its **functions and symbols are empty** → no `main` → silent
+  `BackendResult.Unit`, `main` never called, no print. **This is THE `-c`/run
+  blocker.**
+- `-c "print(1+1)"` takes a *different* path: exits **rc=1** without reaching
+  `process_module` (no interp traces). Investigate `-c` handling separately from
+  `run`.
+
+Root question for iteration 13: **why is `module.functions` empty when it
+reaches the interpreter?** `module.functions` is `Dict<SymbolId, HirFunction>`
+and `module.symbols.symbols` is `Dict<i64, Symbol>` — both **struct/int-keyed
+Dicts** that `interpreter.spl:47-78`'s own comments flag as ANY-erasure hazards
+(".values() yields ANY-typed elements", "struct-keyed Dict fails to find an
+entry that is present"). Two candidates, distinguish first:
+  (a) The Dict is genuinely empty — HIR lowering never inserted `main` into
+      `module.functions` (e.g. single-file/synthetic-main lowering populates a
+      different field, or lower_function's output isn't stored back on the
+      module). Check where `module.functions[...]=` / symbol insertion happens in
+      `hir_lowering` for the single-file `run` path.
+  (b) The Dict is populated but `.len()`/`.values()` on a struct/int-keyed
+      ANY-erased Dict misreport as empty in seed cranelift codegen (connects to
+      the rep9 / `Dict<SymbolId{id:i64},V>` struct-keyed repros earlier in this
+      doc). Add a trace that inserts a known key then reads `.len()` on the SAME
+      dict instance the interpreter receives.
+Do NOT touch `Dict.get` Option lowering (disproven, iter 12). getval3 (nil-check)
+is the correct builtin-Dict-get gate; getval2 (Option-match) is retired.
