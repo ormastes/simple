@@ -107,7 +107,7 @@ impl HirLowering:
         # Compute effective visibility using filename matching
         val effective_visibility = self.compute_visibility(trait_.name, trait_.visibility)
 
-        HirTrait(
+        val hir_trait = HirTrait(
             symbol: symbol,
             name: trait_.name,
             type_params: type_params,
@@ -124,6 +124,11 @@ impl HirLowering:
             specialization_of: nil,
             type_bindings: {}
         )
+
+        # Stash by name so lower_impl (run later in the same lower_module pass)
+        # can inject un-overridden default methods into the impl's method table.
+        self.lowered_traits[trait_.name] = hir_trait
+        hir_trait
 
     me lower_impl(impl_: Impl) -> HirImpl:
         self.symbols.push_scope(ScopeKind.Impl)
@@ -150,6 +155,22 @@ impl HirLowering:
             methods[name] = hir_fn.symbol
             self.lowered_impl_functions[hir_fn.symbol] = hir_fn
         self.current_method_self_type = previous_self_type
+
+        # Inject trait default methods that this impl does NOT override.
+        # Without this, HirImpl.methods only contains textually-present methods,
+        # so positional dispatch against the trait's full method list aliases the
+        # wrong body (or SIGSEGVs). See task #55.
+        if impl_.trait_.?:
+            match impl_.trait_.kind:
+                case Named(trait_name, _):
+                    if self.lowered_traits.contains_key(trait_name):
+                        val trait_hir = self.lowered_traits[trait_name]
+                        for default_fn in trait_hir.defaults:
+                            if not methods.contains_key(default_fn.name):
+                                methods[default_fn.name] = default_fn.symbol
+                                self.lowered_impl_functions[default_fn.symbol] = default_fn
+                case _:
+                    pass_dn
 
         # Lower associated type implementations
         var assoc_type_impls: [HirAssocTypeImpl] = []
