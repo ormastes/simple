@@ -652,7 +652,10 @@ fn _direct_spawn_app_id_path(app_id: u64) -> text?:
         return nil
     val entry = app_registry_lookup(canonical.unwrap())
     if entry == nil:
-        return nil
+        # Registry not populated (early boot / hosted unit tests): fall back
+        # to the legacy canonical path. Grant checks and executable
+        # resolution still gate the spawn downstream, so nothing is weakened.
+        return canonical
     Some(entry.unwrap().canonical_path)
 
 fn _legacy_app_id_to_name(app_id: u64) -> text?:
@@ -672,7 +675,16 @@ fn _legacy_app_id_to_name(app_id: u64) -> text?:
         case _:
             nil
 
-fn _spawn_from_resolved_bytes_for_arch(path: text, path_bytes: [u8], bytes: [u8], priority_raw: u64, scheduler: Scheduler, klog: KernelLog, arch: Architecture) -> i64:
+pub struct SpawnBinaryDirectState:
+    """Explicit runtime-state threading result for direct SpawnBinary dispatch.
+
+    Scheduler instances have value semantics across call boundaries, so the
+    task created by create_user_task_pid only exists in the callee's copy.
+    Callers must adopt the returned scheduler (mirrors IpcSyscallState)."""
+    pid: i64
+    scheduler: Scheduler
+
+fn _spawn_from_resolved_bytes_for_arch_state(path: text, path_bytes: [u8], bytes: [u8], priority_raw: u64, scheduler: Scheduler, klog: KernelLog, arch: Architecture) -> SpawnBinaryDirectState:
     val _sp_argv: [text] = []
     val _sp_envp: [text] = []
     val _path_bytes = path_bytes
@@ -684,7 +696,7 @@ fn _spawn_from_resolved_bytes_for_arch(path: text, path_bytes: [u8], bytes: [u8]
             val pid = _alloc_x86_64_direct_spawn_pid()
             val pid_value = pid as i64
             log_raw_println("[syscall13] user image handoff ok pid={pid_value}")
-            return pid_value
+            return SpawnBinaryDirectState(pid: pid_value, scheduler: scheduler)
         val priority = _u64_to_priority(priority_raw)
         val caps = CapabilitySet.full()
         var sched = scheduler
@@ -695,23 +707,24 @@ fn _spawn_from_resolved_bytes_for_arch(path: text, path_bytes: [u8], bytes: [u8]
         log_raw_println("[syscall13] pid resolved")
         if pid == 0:
             log_raw_println("[syscall13] create_user_task failed")
-            return -12
+            return SpawnBinaryDirectState(pid: -12, scheduler: sched)
 
         val pid_value = pid as i64
-        log_raw_println("[syscall13] log begin")
-        log_raw_println("[syscall13] log done")
         log_raw_println("[syscall13] user image handoff ok pid={pid_value}")
-        return pid_value
+        return SpawnBinaryDirectState(pid: pid_value, scheduler: sched)
     else:
         log_raw_println("[syscall13] build_user_process_image failed")
 
     var log = klog
     klog_write(log, 3, 1, 0, "spawn_binary rejected invalid executable: {path}")
     log_raw_println("[syscall13] rejected invalid filesystem executable")
-    -8
+    SpawnBinaryDirectState(pid: -8, scheduler: scheduler)
 
-fn _spawn_from_resolved_bytes(path: text, path_bytes: [u8], bytes: [u8], priority_raw: u64, scheduler: Scheduler, klog: KernelLog) -> i64:
-    _spawn_from_resolved_bytes_for_arch(path, path_bytes, bytes, priority_raw, scheduler, klog, CURRENT_EXEC_ARCH)
+fn _spawn_from_resolved_bytes_for_arch(path: text, path_bytes: [u8], bytes: [u8], priority_raw: u64, scheduler: Scheduler, klog: KernelLog, arch: Architecture) -> i64:
+    _spawn_from_resolved_bytes_for_arch_state(path, path_bytes, bytes, priority_raw, scheduler, klog, arch).pid
+
+fn _spawn_from_resolved_bytes_state(path: text, path_bytes: [u8], bytes: [u8], priority_raw: u64, scheduler: Scheduler, klog: KernelLog) -> SpawnBinaryDirectState:
+    _spawn_from_resolved_bytes_for_arch_state(path, path_bytes, bytes, priority_raw, scheduler, klog, CURRENT_EXEC_ARCH)
 
 fn _builtin_binary_path_for_spawn(path: text) -> text:
     if path.ends_with(".smf") and path.len() > 4:
@@ -721,8 +734,12 @@ fn _builtin_binary_path_for_spawn(path: text) -> text:
 fn _is_builtin_binary_path(path: text) -> bool:
     resolve_builtin_binary(_builtin_binary_path_for_spawn(path)) != nil
 
-fn dispatch_spawn_binary_direct(path_ptr: u64, path_len: u64, priority_raw: u64, scheduler: Scheduler, klog: KernelLog) -> i64:
-    """Dedicated SpawnBinary bridge that avoids the generic syscall wrapper."""
+pub fn dispatch_spawn_binary_direct_state(path_ptr: u64, path_len: u64, priority_raw: u64, scheduler: Scheduler, klog: KernelLog) -> SpawnBinaryDirectState:
+    """SpawnBinary bridge returning updated scheduler state for cross-module callers.
+
+    Mirrors syscall_handler_ipc_state: callers outside this module must thread
+    the returned scheduler back into their globals instead of relying on
+    in-place mutation of the passed instance."""
     log_raw_println("[syscall13] dispatch_direct enter")
     if path_len == 0:
         val sentinel_path = _direct_spawn_app_id_path(path_ptr)
@@ -730,29 +747,29 @@ fn dispatch_spawn_binary_direct(path_ptr: u64, path_len: u64, priority_raw: u64,
             val path = sentinel_path.unwrap()
             val grant_errno = _process_grant_errno_for_path(path, klog)
             if grant_errno < 0:
-                return grant_errno
+                return SpawnBinaryDirectState(pid: grant_errno, scheduler: scheduler)
             val bytes_result = resolve_executable_bytes(path, CURRENT_EXEC_ARCH)
             if bytes_result.is_ok():
-                return _spawn_from_resolved_bytes(path, [], bytes_result.unwrap(), priority_raw, scheduler, klog)
+                return _spawn_from_resolved_bytes_state(path, [], bytes_result.unwrap(), priority_raw, scheduler, klog)
             if _is_builtin_binary_path(path):
                 log_raw_println("[syscall13] builtin resident fallback path={path}")
-                return -2
-        return -14
+                return SpawnBinaryDirectState(pid: -2, scheduler: scheduler)
+        return SpawnBinaryDirectState(pid: -14, scheduler: scheduler)
 
     if path_len > MAX_BINARY_PATH_LEN:
         log_raw_println("[syscall13] dispatch_direct path too long")
-        return -14
+        return SpawnBinaryDirectState(pid: -14, scheduler: scheduler)
     val path_bytes_result = _copy_user_bytes(path_ptr, path_len)
     if path_bytes_result.is_err():
         log_raw_println("[syscall13] dispatch_direct path copy failed")
-        return -14
+        return SpawnBinaryDirectState(pid: -14, scheduler: scheduler)
 
     val path_bytes = path_bytes_result.unwrap()
     val path = _path_bytes_to_text(path_bytes)
     log_raw_println("[syscall13] dispatch_direct path-ready len={path_len} path={path}")
     val grant_errno = _process_grant_errno_for_path(path, klog)
     if grant_errno < 0:
-        return grant_errno
+        return SpawnBinaryDirectState(pid: grant_errno, scheduler: scheduler)
     val arch = CURRENT_EXEC_ARCH
     log_raw_println("[syscall13] dispatch_direct arch-ready")
 
@@ -760,15 +777,23 @@ fn dispatch_spawn_binary_direct(path_ptr: u64, path_len: u64, priority_raw: u64,
     log_raw_println("[syscall13] dispatch_direct resolve returned")
     if bytes_result.is_ok():
         log_raw_println("[syscall13] vfs bytes ok; exec handoff active")
-        return _spawn_from_resolved_bytes(path, path_bytes, bytes_result.unwrap(), priority_raw, scheduler, klog)
+        return _spawn_from_resolved_bytes_state(path, path_bytes, bytes_result.unwrap(), priority_raw, scheduler, klog)
 
     if _is_builtin_binary_path(path):
         log_raw_println("[syscall13] builtin resident fallback path={path}")
-        return -2
+        return SpawnBinaryDirectState(pid: -2, scheduler: scheduler)
 
     if bytes_result.is_err():
         var log = klog
         klog_write(log, 3, 1, 0, "spawn_binary rejected unknown binary: {path}")
-        return -2
+        return SpawnBinaryDirectState(pid: -2, scheduler: scheduler)
 
-    -2
+    SpawnBinaryDirectState(pid: -2, scheduler: scheduler)
+
+fn dispatch_spawn_binary_direct(path_ptr: u64, path_len: u64, priority_raw: u64, scheduler: Scheduler, klog: KernelLog) -> i64:
+    """Dedicated SpawnBinary bridge that avoids the generic syscall wrapper.
+
+    Result-only legacy entrypoint: the scheduler mutation is NOT visible to
+    the caller (value semantics). Use dispatch_spawn_binary_direct_state when
+    the spawned task must survive in the caller's scheduler."""
+    dispatch_spawn_binary_direct_state(path_ptr, path_len, priority_raw, scheduler, klog).pid

@@ -19,7 +19,7 @@ use os.kernel.types.syscall_types.{SyscallArgs, SyscallResult, KLogEntry}
 use os.kernel.scheduler.scheduler.{Scheduler}
 use os.kernel.ipc.ipc.{IpcManager}
 use os.kernel.log.klog.{KernelLog}
-use os.kernel.ipc.syscall.{syscall_handler, syscall_handler_ipc_state, dispatch_spawn_binary_direct}
+use os.kernel.ipc.syscall.{syscall_handler, syscall_handler_ipc_state, dispatch_spawn_binary_direct_state}
 use os.kernel.arch.x86_64.user_entry.{dispatch_enter_user_blocking}
 use std.baremetal.x86.io.{outb, inb}
 
@@ -57,7 +57,7 @@ var g_trap_ipc: IpcManager = IpcManager.new()
 var g_trap_klog: KernelLog = KernelLog.new(256)
 
 impl X86Interrupt:
-    fn init():
+    static fn init():
         """Initialize IDT with 256 entries, remap and disable legacy PIC,
         then initialize the Local APIC.
 
@@ -75,31 +75,35 @@ impl X86Interrupt:
         # low-memory trampoline INIT/SIPI sequence to firmware-registered APs.
         x86_start_registered_aps_once()
 
-    fn install_runtime(scheduler: Scheduler, ipc: IpcManager, klog: KernelLog):
+    static fn install_runtime(scheduler: Scheduler, ipc: IpcManager, klog: KernelLog):
         """Install the runtime objects used by trap/syscall dispatch."""
         x86_install_runtime(scheduler, ipc, klog)
 
-    fn install_runtime_bundle(runtime: X86TrapRuntime):
+    static fn install_runtime_bundle(runtime: X86TrapRuntime):
         """Install a precomposed runtime bundle for trap dispatch."""
         x86_install_runtime_bundle(runtime)
 
-    fn install_bootstrap_runtime(log_capacity: u64):
+    static fn install_bootstrap_runtime(log_capacity: u64):
         """Install the minimal early-boot runtime bundle."""
         x86_install_bootstrap_runtime(log_capacity)
 
-    fn runtime_installed() -> bool:
+    static fn runtime_installed() -> bool:
         """Report whether the x86_64 trap runtime has been installed."""
         x86_runtime_installed()
 
-    fn enable():
+    static fn installed_scheduler() -> Scheduler:
+        """Return the scheduler currently installed in the trap bridge."""
+        x86_installed_scheduler()
+
+    static fn enable():
         """Enable maskable interrupts (STI instruction)."""
         sti()
 
-    fn disable():
+    static fn disable():
         """Disable maskable interrupts (CLI instruction)."""
         cli()
 
-    fn register_handler(vector: u64, handler_addr: u64):
+    static fn register_handler(vector: u64, handler_addr: u64):
         """Register an interrupt handler for a given vector number.
 
         Sets the IDT entry so the CPU dispatches to handler_addr when
@@ -108,7 +112,7 @@ impl X86Interrupt:
         """
         idt_set_handler(vector as u32, handler_addr, 0)
 
-    fn unregister_handler(vector: u64):
+    static fn unregister_handler(vector: u64):
         """Remove interrupt handler for a given vector.
 
         Restores the vector to a default no-op handler by installing
@@ -116,7 +120,7 @@ impl X86Interrupt:
         """
         idt_register_handler(vector as u32, _default_unhandled)
 
-    fn send_eoi(vector: u64):
+    static fn send_eoi(vector: u64):
         """Send End-Of-Interrupt for the given vector.
 
         For vectors in the PIC range (32-47), sends EOI to the legacy
@@ -139,7 +143,7 @@ impl X86Interrupt:
         # Always send LAPIC EOI (write 0 to EOI register)
         apic_eoi()
 
-    fn set_irq_mask(irq: u64, masked: bool):
+    static fn set_irq_mask(irq: u64, masked: bool):
         """Mask or unmask a hardware IRQ line on the legacy PIC.
 
         irq: IRQ number 0-15
@@ -168,7 +172,7 @@ impl X86Interrupt:
             # Clear the bit to unmask (enable) the IRQ
             outb(port, current_mask & (bit_mask ^ 0xFF))
 
-    fn acknowledge():
+    static fn acknowledge():
         """Acknowledge the current interrupt by sending EOI to the Local APIC.
 
         This is the generic EOI path used when the specific vector is not
@@ -235,6 +239,10 @@ fn x86_runtime_installed() -> bool:
     """Report whether the x86_64 trap bridge has runtime objects installed."""
     g_trap_runtime_installed
 
+fn x86_installed_scheduler() -> Scheduler:
+    """Return the scheduler currently installed in the x86_64 trap bridge."""
+    g_trap_scheduler
+
 fn x86_read_trap_log(min_level: u8, offset: u64, max_count: u64) -> [KLogEntry]:
     """Read entries from the installed x86_64 trap runtime log buffer."""
     if not g_trap_runtime_installed:
@@ -262,9 +270,12 @@ fn x86_dispatch_installed_syscall(args: SyscallArgs) -> Result<SyscallResult, te
 fn x86_dispatch_installed_syscall_abi(id: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64, arg5: u64) -> i64:
     """C-callable primitive ABI for the installed x86_64 syscall bridge."""
     if id == 13:
-        val pid = dispatch_spawn_binary_direct(arg0, arg1, arg2, g_trap_scheduler, g_trap_klog)
+        # Scheduler has value semantics across call boundaries: adopt the
+        # returned scheduler so the spawned task survives in the trap globals.
+        val spawn_state = dispatch_spawn_binary_direct_state(arg0, arg1, arg2, g_trap_scheduler, g_trap_klog)
+        g_trap_scheduler = spawn_state.scheduler
         _sync_trap_runtime_state()
-        return pid
+        return spawn_state.pid
 
     if id == 14:
         # EnterUserBlocking — noreturn: hands off to ring-3 via iretq.
