@@ -32,3 +32,13 @@ dev-done
 - implementation: Added Tauri mobile MDI proof validation for event routing, viewport capture, performance timer, animation frames, and CSS animation support on iOS and Android lanes.
 - implementation: Added Electron production event-routing performance/animation proof to the live probe, production parity wrapper, non-launching gate, SSpec coverage, and process docs.
 - implementation: Promoted Electron event-routing performance/animation rows through the aggregate GUI RenderDoc coverage audit and refreshed stale retained-performance/Metal production fixtures for the stricter gate.
+- implementation: Hardened the live iOS WKWebView MDI renderer path after sync:
+  delayed inline-shell reinjection now skips once MDI windows have opened,
+  compact iOS logs can satisfy `openWindow` checks through raw JSON
+  `windowId` markers, the iOS renderer wrapper launches the bundled MDI smoke
+  entry, and MDI `openWindow`/`renderWindow` paths emit
+  `[tauri-shell] render, html_len=` rows for the Metal render-log validator.
+  Fresh live evidence passed in
+  `build/tauri_ios_mobile_renderer_after_render_marker`: screenshot artifact,
+  WKWebView/Metal render-log, MDI proof, event routing, capture, performance,
+  latency, and animation statuses all reported `pass`.

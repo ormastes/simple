@@ -11,6 +11,7 @@ esac
 PROBE_HELPER="$ROOT_DIR/scripts/check/ios_mdi_probe_server.spl"
 MDI_PROOF_VALIDATOR="$ROOT_DIR/scripts/check/validate-tauri-mobile-mdi-proof.js"
 IOS_RENDER_LOG_VALIDATOR="$ROOT_DIR/scripts/check/validate-tauri-ios-render-log-proof.js"
+SMOKE_SOURCE="$ROOT_DIR/examples/06_io/ui/tauri_mobile_mdi_smoke.spl"
 SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
 SIMPLE_BIN_STATUS=pass
 is_rust_seed_simple() {
@@ -404,6 +405,7 @@ test -x "$SIMPLE_BIN" || fail "host Simple runtime missing: $SIMPLE_BIN"
 test -f "$PROBE_HELPER" || fail "screenshot validation helper missing: $PROBE_HELPER"
 test -f "$MDI_PROOF_VALIDATOR" || fail "MDI proof validator missing: $MDI_PROOF_VALIDATOR"
 test -f "$IOS_RENDER_LOG_VALIDATOR" || fail "iOS render-log validator missing: $IOS_RENDER_LOG_VALIDATOR"
+test -f "$SMOKE_SOURCE" || fail "mobile MDI smoke source missing: $SMOKE_SOURCE"
 test -f "$ROOT_DIR/tools/tauri-shell/scripts/build-ui-bundle.shs" \
     || fail "UI bundle builder missing: $ROOT_DIR/tools/tauri-shell/scripts/build-ui-bundle.shs"
 
@@ -464,6 +466,9 @@ for (const [runtime, runtimeDevices] of Object.entries(devices)) {
 )"
 
 cd "$TAURI_DIR"
+printf 'mdi-smoke\n' > "$TAURI_DIR/src-tauri/mobile_probe_entry.txt"
+cp "$SMOKE_SOURCE" "$TAURI_DIR/src-tauri/mobile_entry_source.spl"
+rm -f "$TAURI_DIR/src-tauri/mobile_mdi_proof_url.txt"
 sh "$ROOT_DIR/tools/tauri-shell/scripts/build-ui-bundle.shs" > "$BUILD_DIR/ios_build_ui_bundle.log" 2>&1 \
     || fail "UI bundle generation failed; see $BUILD_DIR/ios_build_ui_bundle.log"
 npm run prepare:dist > "$BUILD_DIR/ios_prepare_dist.log" 2>&1 \
@@ -471,6 +476,8 @@ npm run prepare:dist > "$BUILD_DIR/ios_prepare_dist.log" 2>&1 \
 
 xcrun simctl boot "$SIM_UDID" >/dev/null 2>&1 || true
 xcrun simctl bootstatus "$SIM_UDID" -b > "$BUILD_DIR/ios_bootstatus.log" 2>&1
+xcrun simctl terminate "$SIM_UDID" com.simple.ui > "$BUILD_DIR/ios_pre_run_terminate.log" 2>&1 || true
+xcrun simctl uninstall "$SIM_UDID" com.simple.ui > "$BUILD_DIR/ios_pre_run_uninstall.log" 2>&1 || true
 
 : > "$LOG_STREAM"
 xcrun simctl spawn "$SIM_UDID" log stream --style compact \
@@ -485,9 +492,11 @@ cleanup() {
     if [ -n "${IOS_DEV_PID:-}" ]; then
         kill "$IOS_DEV_PID" 2>/dev/null || true
     fi
+    rm -f "$TAURI_DIR/src-tauri/mobile_probe_entry.txt" "$TAURI_DIR/src-tauri/mobile_entry_source.spl" "$TAURI_DIR/src-tauri/mobile_mdi_proof_url.txt"
 }
 trap cleanup EXIT INT TERM
 
+SIMPLE_TAURI_MOBILE_PROBE_ENTRY=mdi-smoke \
 SIMPLE_TAURI_MDI_PROOF_PATH="$MDI_PROOF_JSON" \
     cargo tauri ios dev --no-watch --no-dev-server --no-dev-server-wait "$SIM_DEVICE_NAME" > "$IOS_DEV_LOG" 2>&1 &
 IOS_DEV_PID=$!

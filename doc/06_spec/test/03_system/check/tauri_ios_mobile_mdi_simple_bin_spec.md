@@ -27,7 +27,7 @@ tauri_ios_mobile_mdi_simple_bin_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 2 | 2 | 0 | 0 |
+| 3 | 3 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -47,7 +47,7 @@ The iOS MDI helper is called from the broader Tauri mobile MDI wrapper and can a
 | Design | doc/04_architecture/compiler/graphics/accelerated_shared_ui_backend_architecture.md |
 | Research | doc/01_research/ui/render_path/gui_web_2d_path_assessment_2026-06-12.md |
 | Source | `test/03_system/check/tauri_ios_mobile_mdi_simple_bin_spec.spl` |
-| Updated | 2026-06-27 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -129,6 +129,33 @@ expect(script).to_contain("tauri_ios_mobile_mdi_simple_bin_status=")
 
 </details>
 
+#### preserves live MDI DOM and accepts compact-log raw openWindow markers
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val script = file_read("scripts/check/check-tauri-ios-mobile-mdi-evidence.shs")
+expect(script).to_contain("has_open_window_marker()")
+expect(script).to_contain("grep -q \"openWindow id=$window_id\"")
+expect(script).to_contain("grep -q \"\\\"type\\\":\\\"openWindow\\\",\\\"windowId\\\":\\\"$window_id\\\"\"")
+expect(script).to_contain("has_open_window_marker terminal")
+expect(script).to_contain("has_open_window_marker files")
+expect(script).to_contain("has_open_window_marker tasks")
+expect(script).to_contain("has_open_window_marker settings")
+
+val shell_source = file_read("tools/tauri-shell/src-tauri/src/lib.rs")
+expect(shell_source).to_contain("delayed inline shell eval skipped reason=mdi-opened")
+expect(shell_source).to_contain("MDI_OPEN_WINDOW_COUNT.load(Ordering::SeqCst) > 0")
+expect(shell_source).to_contain("eprintln!(\"[tauri-shell] render, html_len={}\", html.len());")
+expect(shell_source).to_contain("return;")
+```
+
+</details>
+
 #### rejects explicit Rust seed before self-test or simulator work
 
 <details>
@@ -162,8 +189,8 @@ expect(browser_code).to_equal(0)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 2 |
-| Active scenarios | 2 |
+| Total scenarios | 3 |
+| Active scenarios | 3 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

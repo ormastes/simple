@@ -27,7 +27,7 @@ tauri_ios_mobile_renderer_simple_bin_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 2 | 2 | 0 | 0 |
+| 3 | 3 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -47,7 +47,7 @@ The iOS mobile renderer wrapper produces Metal/WKWebView renderer evidence and M
 | Design | doc/04_architecture/compiler/graphics/accelerated_shared_ui_backend_architecture.md |
 | Research | doc/01_research/ui/render_path/gui_web_2d_path_assessment_2026-06-12.md |
 | Source | `test/03_system/check/tauri_ios_mobile_renderer_simple_bin_spec.spl` |
-| Updated | 2026-06-27 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -129,12 +129,39 @@ expect(script).to_contain("tauri_ios_mobile_renderer_simple_bin_status=")
 
 </details>
 
+#### launches the bundled MDI smoke entry for live renderer proof
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val script = file_read("scripts/check/check-tauri-ios-mobile-renderer-evidence.shs")
+expect(script).to_contain("SMOKE_SOURCE=\"$ROOT_DIR/examples/06_io/ui/tauri_mobile_mdi_smoke.spl\"")
+expect(script).to_contain("printf 'mdi-smoke\\n' > \"$TAURI_DIR/src-tauri/mobile_probe_entry.txt\"")
+expect(script).to_contain("cp \"$SMOKE_SOURCE\" \"$TAURI_DIR/src-tauri/mobile_entry_source.spl\"")
+expect(script).to_contain("rm -f \"$TAURI_DIR/src-tauri/mobile_mdi_proof_url.txt\"")
+expect(script).to_contain("SIMPLE_TAURI_MOBILE_PROBE_ENTRY=mdi-smoke")
+expect(script).to_contain("SIMPLE_TAURI_MDI_PROOF_PATH=\"$MDI_PROOF_JSON\"")
+expect(script).to_contain("xcrun simctl terminate \"$SIM_UDID\" com.simple.ui")
+expect(script).to_contain("xcrun simctl uninstall \"$SIM_UDID\" com.simple.ui")
+expect(script).to_contain("echo \"ios_mdi_proof_status=$ios_mdi_proof_status\"")
+expect(script).to_contain("echo \"ios_mdi_event_status=$ios_mdi_event_status\"")
+expect(script).to_contain("echo \"ios_mdi_capture_status=$ios_mdi_capture_status\"")
+expect(script).to_contain("echo \"ios_mdi_performance_status=$ios_mdi_performance_status\"")
+expect(script).to_contain("echo \"ios_mdi_animation_status=$ios_mdi_animation_status\"")
+```
+
+</details>
+
 #### rejects explicit Rust seed before iOS renderer platform work
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -149,6 +176,11 @@ expect(output).to_contain("reason=simple-bin-forbidden")
 expect(output).to_contain("tauri_ios_mobile_renderer_simple_bin=src/compiler_rust/target/release/simple")
 expect(output).to_contain("tauri_ios_mobile_renderer_simple_bin_source=explicit-env-rust-seed-forbidden")
 expect(output).to_contain("tauri_ios_mobile_renderer_simple_bin_status=forbidden")
+expect(output).to_contain("ios_screenshot_actual_size_bytes=")
+expect(output).to_contain("ios_screenshot_file_status=unavailable")
+expect(output).to_contain("ios_screenshot_file_reason=not-run")
+expect(output).to_contain("ios_screenshot_artifact_status=unavailable")
+expect(output).to_contain("ios_screenshot_pixel_diversity_status=unavailable")
 expect(output).to_contain("ios_render_log_status=fail")
 expect(output).to_contain("ios_mdi_proof_status=fail")
 
@@ -164,8 +196,8 @@ expect(stream_code).to_equal(0)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 2 |
-| Active scenarios | 2 |
+| Total scenarios | 3 |
+| Active scenarios | 3 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

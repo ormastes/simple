@@ -1263,6 +1263,7 @@ fn handle_subprocess_message(msg: SubprocessMessage, app: &AppHandle) {
             width,
             height,
         } => {
+            eprintln!("[tauri-shell] render, html_len={}", html.len());
             eprintln!("[tauri-shell] openWindow id={} title={}", window_id, title);
             MDI_OPEN_WINDOW_COUNT.fetch_add(1, Ordering::SeqCst);
             if html.contains("<img") {
@@ -1283,6 +1284,7 @@ fn handle_subprocess_message(msg: SubprocessMessage, app: &AppHandle) {
             maybe_write_tauri_mdi_proof(app);
         }
         SubprocessMessage::RenderWindow { window_id, html } => {
+            eprintln!("[tauri-shell] render, html_len={}", html.len());
             let msg_json = serde_json::json!({
                 "type": "renderWindow",
                 "windowId": window_id,
@@ -2043,6 +2045,12 @@ pub fn run() {
                 let delayed_html = html.clone();
                 thread::spawn(move || {
                     thread::sleep(std::time::Duration::from_millis(1200));
+                    if MDI_OPEN_WINDOW_COUNT.load(Ordering::SeqCst) > 0 {
+                        eprintln!(
+                            "[tauri-shell] delayed inline shell eval skipped reason=mdi-opened"
+                        );
+                        return;
+                    }
                     if let Some(win) = delayed_handle.get_webview_window("main") {
                         let js = inline_shell_document_script(&delayed_html);
                         match win.eval(&js) {
