@@ -139,20 +139,14 @@ impl VhdlBackend:
     fn default_local_name(local: MirLocal) -> text:
         match local.kind:
             case Arg(idx):
-                if local.name.?:
-                    local.name.unwrap()
-                else:
-                    "arg{idx}"
-            case Ret:
+                local.name ?? "arg{idx}"
+            case Return:
                 if self.active_return_abi.is_tuple:
                     "return_value"
                 else:
                     "result_out"
             case Var | Temp:
-                if local.name.?:
-                    local.name.unwrap()
-                else:
-                    "sig_{local.id.id}"
+                local.name ?? "sig_{local.id.id}"
 
     fn local_memory_type_name(local: MirLocal) -> text:
         vhdl_sanitize_identifier("{self.default_local_name(local)}_memory_t")
@@ -161,7 +155,18 @@ impl VhdlBackend:
         self.backend_error("{code}: {message}")
 
     me emit_local_signal_declaration(builder: VhdlBuilder, local: MirLocal, span: Span?) -> Result<(), CompileError>:
-        val name = self.default_local_name(local)
+        # Reuse the name already resolved into active_local_names during
+        # compile_function's initial pass instead of recomputing it via
+        # default_local_name() here. Re-invoking default_local_name() (which
+        # runs its own `match local.kind:`) from inside this call site -- itself
+        # reached through an enclosing `match local.kind: case Var | Temp:` in
+        # the caller's loop -- was observed to resolve to the wrong branch
+        # (Temp locals mis-resolving to "result_out"), corrupting the declared
+        # signal name. See doc/08_tracking/bug/ for the related interpreter
+        # nested-match/enum defects found in this same investigation.
+        val name = match self.local_to_vhdl(local.id):
+            case Ok(result): result
+            case Err(_): self.default_local_name(local)
         match local.type_.kind:
             case Array(element, size):
                 if size <= 0:
