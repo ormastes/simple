@@ -62,3 +62,24 @@ int getrusage(int who, struct rusage *usage) {
     }
     return 0;
 }
+
+int getrlimit(int resource, struct rlimit *rlim) {
+    if (resource != RLIMIT_STACK) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (rlim) {
+        rlim->rlim_cur = RLIM_INFINITY;
+        rlim->rlim_max = RLIM_INFINITY;
+    }
+    return 0;
+}
+
+int setrlimit(int resource, const struct rlimit *rlim) {
+    (void)rlim;
+    if (resource != RLIMIT_STACK) {
+        errno = EINVAL;
+        return -1;
+    }
+    return 0;
+}

@@ -39,6 +39,7 @@ use compiler.core.types.{TYPE_RESULT, TYPE_NAMED_BASE, TYPE_DICT, TYPE_FN, TYPE_
 use compiler.core.types.{TYPE_UNION}
 use compiler.core.types.{int_to_str}
 use compiler.core.types.{named_type_find}
+use compiler.core.types.{primitive_integer_bit_width_from_name}
 use compiler.core.types.{union_type_register}
 use std.string_core.{char_code}
 
@@ -131,14 +132,11 @@ fn parser_token_text_from_offsets(kind: i64) -> text:
     val start = parser_env_i64("SIMPLE_BOOTSTRAP_LEX_TOKEN_START")
     val end = parser_env_i64("SIMPLE_BOOTSTRAP_LEX_TOKEN_END")
     if end <= start:
-        print "[DEBUG2] end<=start start={start} end={end} kind={kind}"
         return ""
     val source = parser_lex_source_cached()
     if source == "":
-        print "[DEBUG2] source empty start={start} end={end}"
         return ""
     if start < 0 or end > source.len():
-        print "[DEBUG2] bounds start={start} end={end} srclen={source.len()}"
         return ""
     var text = source[start:end]
     if kind == 3 and text.len() >= 2:
@@ -440,6 +438,16 @@ fn parser_parse_type() -> i64:
         val sid = named_type_find(type_name)
         if sid >= 0:
             return TYPE_NAMED_BASE + sid
+        # Fixed-width integer primitives (u8/u16/u32/u64/i8/i16/i32/...) have
+        # no dedicated type tag and are never registered as named types, so
+        # without this they fell through to TYPE_VOID -- silently producing
+        # Unit-typed locals/casts/fields/params for perfectly ordinary code
+        # like `x as u32`, `fn f(n: u32)`, or a bitfield's uN-typed fields.
+        # Represent them as the native i64 register type; callers that need
+        # the precise bit width already re-derive it from the type name text
+        # via primitive_integer_bit_width_from_name (see HIR lowering).
+        if primitive_integer_bit_width_from_name(type_name) > 0:
+            return TYPE_I64
         return TYPE_VOID
     if par_kind_get() == 144:
         # Array type: [i64], [text], etc.

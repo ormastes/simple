@@ -77,9 +77,7 @@ use compiler.core.parser_cli.{parse_cli_decl}
 fn parse_bitfield_decl() -> i64:
     # Consume 'bitfield' keyword
     parser_advance()
-    print "[DEBUG] after advance: kind={par_kind_get()} text='{par_text_get()}'"
     val bf_name = par_text_get()
-    print "[DEBUG] bf_name='{bf_name}'"
     parser_expect(6)
     pass_dn
 
@@ -87,15 +85,27 @@ fn parse_bitfield_decl() -> i64:
     val bitfield_type_id = named_type_register(bf_name, [], [])
 
     # Parse backing type: bitfield Name(u32):
+    # Capture the raw backing-type name BEFORE parser_parse_type() consumes
+    # it: uN/iN width names (u8/u16/u32/u64) are not registered anywhere as
+    # named types, so parser_parse_type() falls through its "unknown type"
+    # path and returns TYPE_VOID for them. Round-tripping that tag back to a
+    # name via type_tag_name() then yields "void", which spuriously fails the
+    # u8/u16/u32/u64 backing-type check below even for perfectly valid
+    # backing types. Validate directly against the name we already have.
     parser_expect(140)
-    print "[DEBUG] before parse_type: kind={par_kind_get()} text='{par_text_get()}'"
-    val backing_type = parser_parse_type()
-    print "[DEBUG] backing_type={backing_type}"
+    val backing_type_name = par_text_get()
+    var backing_type = parser_parse_type()
     parser_expect(141)
-    val backing_name = type_tag_name(backing_type)
-    val backing_bits = bitfield_backing_bits_from_name(backing_name)
+    val backing_bits = bitfield_backing_bits_from_name(backing_type_name)
     if backing_bits == 0:
         parser_error("bitfield backing type must be u8, u16, u32, or u64")
+    if backing_type == TYPE_VOID and backing_bits > 0:
+        # uN width names have no dedicated type tag; represent the backing
+        # storage as the native i64 register type (same convention newtype/
+        # newunit use for their wrapped "value" field: the wrapper gets its
+        # own named-type tag, but the field holding the raw value is typed
+        # as its real underlying primitive, never left as TYPE_VOID/Unit).
+        backing_type = TYPE_I64
 
     parser_expect(161)
     parser_skip_newlines()
@@ -133,12 +143,14 @@ fn parse_bitfield_decl() -> i64:
         else:
             parser_expect(6)
         parser_expect(161)
-        val field_type = parser_parse_type()
-        val field_type_name = type_tag_name(field_type)
+        val field_type_name = par_text_get()
+        var field_type = parser_parse_type()
         val bit_count = bitfield_field_bits_from_name(field_type_name)
         if bit_count == 0:
             parser_error("bitfield field type must be bool, uN, or iN")
         used_bits = used_bits + bit_count
+        if field_type == TYPE_VOID and bit_count > 0:
+            field_type = TYPE_I64
 
         # Skip reserved fields (don't add to struct)
         if not is_underscore:

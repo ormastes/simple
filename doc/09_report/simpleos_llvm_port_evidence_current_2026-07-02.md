@@ -14,9 +14,9 @@ Focused LLVM-to-SimpleOS port evidence for the current hardening lane.
 | Cross-build status CLI | PASS | `SIMPLE_LIB=src bin/simple run src/os/port/llvm/build.spl -- --cross --status` -> host-tools BUILT, sysroot READY; cross targets and compiler-rt targets NOT BUILT |
 | Sysroot libc++ header/runtime staging | PASS | `SIMPLEOS_TARGET_TRIPLE=x86_64-unknown-simpleos sh src/os/port/llvm/sysroot.shs` -> staged libc++ under `build/os/sysroot/include/c++/v1`, generated `__config_site`, installed `__assertion_handler`, built `libc++.a`, and staged `crt0.o`, `libsimpleos_c.a`, and `libm.a` |
 | x86_64 cross LLVM configure | PASS | `SIMPLEOS_TARGET_TRIPLE=x86_64-unknown-simpleos SIMPLE_TARGET=x86_64-unknown-simpleos sh src/os/port/llvm/build.shs cross` -> CMake configure/generate complete; build enters LLVM object compilation |
-| Focused x86_64 `bin/lld` cross executable link | FAIL | `ninja -C build/os/llvm/cross-x86_64-unknown-simpleos bin/lld` -> all requested LLD/LLVM objects and static archives build, final executable link is reached, and runtime archives are linked after LLVM archives; remaining failures are missing ABI/libc++/libm entry points |
+| Focused x86_64 `bin/lld` cross executable link | PASS | `make -C src/os/libc && SIMPLEOS_TARGET_TRIPLE=x86_64-unknown-simpleos sh src/os/port/llvm/sysroot.shs && ninja -C build/os/llvm/cross-x86_64-unknown-simpleos bin/lld` -> final executable link completes; `build/os/llvm/cross-x86_64-unknown-simpleos/bin/lld` exists and is executable, 64 MB |
 | Cross-build plan scaffolding | PASS | `SIMPLE_LIB=src bin/simple test test/02_integration/os/port/llvm/cross_build_plan_spec.spl --mode=interpreter --clean` -> 18 examples, 0 failures |
-| Per-target compiler-rt/build staging scaffolding | PASS | `SIMPLE_LIB=src bin/simple test test/02_integration/os/port/llvm/per_target_build_spec.spl --mode=interpreter --clean` -> 43 examples, 0 failures |
+| Per-target compiler-rt/build staging scaffolding | PASS | `SIMPLE_LIB=src bin/simple test test/02_integration/os/port/llvm/per_target_build_spec.spl --mode=interpreter --clean` -> 46 examples, 0 failures |
 | Focused `Path.cpp` compile | PASS | direct clang++ compile with Ninja flags plus `-D__simpleos__=1` -> object builds; only existing futimes/futimens warning remains |
 | Focused `AssignmentTrackingAnalysis.cpp` compile | PASS | direct clang++ compile with Ninja flags after replacing `std::stringstream` with `raw_string_ostream` -> object builds |
 | Focused `MIRFSDiscriminator.cpp` compile | PASS | direct clang++ compile with Ninja flags after replacing `SampleProf.h` `std::ostringstream` use with `raw_string_ostream` -> object builds |
@@ -29,44 +29,24 @@ Focused LLVM-to-SimpleOS port evidence for the current hardening lane.
 | Focused TextAPI `DylibReader.cpp` compile | PASS | direct clang++ compile with Ninja flags after replacing iostream UUID hex formatting with LLVM `format_hex_no_prefix` -> object builds |
 | Focused LLD `ErrorHandler.cpp` compile | PASS | direct clang++ compile with Ninja flags after adding SimpleOS C/ASCII locale fallback declarations/stubs, `wctype.h`, and libc++ default rune table config -> object builds |
 | Focused Clang Lex `PPMacroExpansion.cpp` compile | PASS | direct clang++ compile with Ninja flags after replacing `std::stringstream` / `std::locale` / `std::put_time` timestamp formatting with LLVM raw stream + `format` helper -> object builds |
-| SimpleOS libc rebuild | PASS | `make -C src/os/libc` -> rebuilt `libsimpleos_c.a` including `simpleos_utsname.o` |
+| SimpleOS libc rebuild | PASS | `make -C src/os/libc` -> rebuilt `libsimpleos_c.a` including the C++ ABI, stdio, string, mman, and libm surfaces needed by the final LLD link |
 | SimpleOS C++/POSIX surface probes | PASS | `clang++ --target=x86_64-unknown-simpleos --sysroot=build/os/sysroot ...` including `<string>`, `<mutex>`, `<shared_mutex>`, `<future>`, `<random>`, `gethostname`, `getsid`, `std::isxdigit`, `sys/resource.h`, `sys/socket.h`, `sys/un.h`, `sys/wait.h`, `pwd.h`, `alarm`, `setsid`, `getpagesize`, and signal flags compiles |
 | Cross clang artifact-gated smoke | PASS | `SIMPLE_LIB=src bin/simple test test/02_integration/os/port/llvm/smoke_clang_spec.spl --mode=interpreter --clean` -> 5 examples, 0 failures |
 
 ## Current Blocker
 
-The canonical cross clang artifact is not present at
+The focused x86_64 LLD build now completes through the final `bin/lld`
+executable link. The missing-symbol class for libc++ headers, pthread condition
+variables, `strerror_r`, wide numeric conversion functions, aligned/nothrow C++
+allocation, thread-local destructors, `vfprintf`, `wmemcmp`, `erf`, `logb`,
+`rint`, `mprotect`, libc++ regex/locale pulls, and the SimpleOS C++ entry shim
+is cleared for this target.
+
+The canonical cross clang artifact is still not present at
 `build/os/llvm/cross-x86_64-unknown-simpleos/bin/clang`
-(`test -f ...` exit code 1). Host tblgen tools exist, libc++ headers and a
-minimal libc++ runtime archive are staged into the SimpleOS sysroot, and the
-focused x86_64 LLD build now reaches the final `bin/lld` executable link.
-
-The previous missing-symbol class for libc++ headers, pthread condition
-variables, `strerror_r`, and wide numeric conversion functions is cleared.
-The latest final-link probe fails on the next ABI/runtime surface:
-
-```text
-undefined symbol: main
-undefined symbol: operator new(unsigned long, std::align_val_t)
-undefined symbol: operator delete(void*, unsigned long, std::align_val_t)
-undefined symbol: operator new(unsigned long, std::nothrow_t const&)
-undefined symbol: std::__...::locale::locale()
-undefined symbol: std::__...::ctype<char>::id
-undefined symbol: std::__...::collate<char>::id
-undefined symbol: __cxa_thread_atexit
-undefined symbol: vfprintf
-undefined symbol: wmemcmp
-undefined symbol: erf
-undefined symbol: logb
-undefined symbol: rint
-```
-
-The relocation failures from PIE-style linking are cleared by forwarding
-`-Wl,-no-pie` through the SimpleOS LLVM toolchain. The next focused work should
-add the smallest owned runtime/ABI surface for aligned and nothrow allocation,
-thread-local destructors, missing stdio/wide/m lib functions, and either
-SimpleOS C++ entry handling or an upstream target hook so C++ `main` resolves
-for SimpleOS executables.
+(`test -f ...` exit code 1 from the prior artifact-gated smoke). The next
+focused frontier is building the larger x86_64 SimpleOS `bin/clang` artifact,
+using the now-green LLD link as the baseline.
 
 ## Spec Maintenance Completed
 
@@ -135,6 +115,13 @@ for SimpleOS executables.
 - Recorded and applied Clang Lex patch notes for replacing `std::put_time` and
   `std::stringstream` `__TIMESTAMP__` formatting with LLVM raw streams plus
   fixed C-locale weekday/month names in `PPMacroExpansion.cpp`.
+- Added the final focused LLD link libc/ABI surface: aligned and nothrow C++
+  allocation/delete wrappers, `__cxa_thread_atexit`, weak C `main` forwarding
+  for SimpleOS C++ entry points, `vfprintf`, `mprotect`, `wmemcmp`, `logb`,
+  `erf`, and `rint`.
+- Recorded and applied the LLD `ErrorHandler.cpp` no-regex patch for SimpleOS,
+  keeping normal diagnostics while avoiding libc++ locale/regex runtime pulls
+  under `_LIBCPP_HAS_LOCALIZATION=0`.
 - Added `__simpleos__` as an explicit toolchain macro because Clang does not
   currently predefine one for `*-unknown-simpleos` triples.
 - Pinned `HAVE_GETPAGESIZE`, `HAVE_SYSCONF`, and `HAVE_GETRUSAGE` in the
