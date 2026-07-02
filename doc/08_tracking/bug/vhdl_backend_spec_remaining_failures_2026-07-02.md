@@ -689,6 +689,74 @@ next steps for whoever picks this up:
    `mir_lowering_stmts.spl` (also structurally ready, unverified against real
    parses pending this fix).
 
+## Follow-on pass 2 (task #65 continuation, 2026-07-02): frontend wiring DONE —
+## bitfield reads now produce MIR VhdlSlice end-to-end; remaining gap is
+## fixed-width (uN) type representation + write-path Unit local
+
+All four recommended steps from the previous section are now implemented and
+verified (commit `bc4dfbea69b` + parts absorbed into hourly-sync
+`c69365c2236`):
+
+1. `decl_set_packed` added (`_Ast/decl_nodes.spl`); `parse_bitfield_decl`
+   marks its decl packed and keeps reserved `_: uN` fields as synthetic
+   `_reserved_N` entries (bits preserved) so packed width stays correct.
+2. Bridge is_packed branch fixed (`module_assembly.spl`): skips synthetic
+   `__raw` (index 0), marks `_reserved_`-prefixed names `is_reserved: true`,
+   and attaches a `preserve_order` attribute so HIR keeps declaration order
+   (hardware register layout contract) instead of width-sorting.
+3. `Module.bitfields` now populates (verified count=1 per test module) and
+   `bitfield_map` is non-empty. Three NEW interpreter defects found and
+   worked around en route, all confirmed by instrumentation:
+   - `lower_bitfield` used the pre-declared-`val`-assigned-in-match pattern
+     (interpreter defect #2 above) — rewritten to direct struct field access.
+   - `symbol_id_value`'s `match symbol: case SymbolId(id): id` destructure
+     returns nil in the interpreter → `bitfield_map` was silently keyed by
+     nil (and `Dict.has(nil)` returns true, masking it). Bitfield paths now
+     key by direct `.id` field access.
+   - `case NamedVar(symbol, _):` (underscore for the unused second field)
+     binds `symbol` to nil — both fields must be bound by name.
+4. `@hardware`/`@clocked` attributes were consumed and DISCARDED by the
+   module-body decorator catch-all (`enum_module_body.spl` "Unknown
+   annotation" branch) — they never reached `fn_.attributes`, so
+   `parse_vhdl_hardware_attrs` never saw them; `has_vhdl_metadata` was ALSO
+   never assigned in the HirFunction constructor (now set from
+   `vhdl_metadata.is_hardware`). Threaded through:
+   `decl_is_hardware`/`decl_clocked_args` decl storage +
+   `PENDING_HARDWARE`/`PENDING_CLOCKED_ARGS` parser state (stacked
+   annotations each consume one module-body loop iteration ahead of the fn) +
+   bridge emits `Attribute("hardware")`/`Attribute("clocked", [idents])` in
+   `convert_decl_fn`. Also added `bitfield_value_syms` (MIR local ->
+   bitfield sym) tracking in MirLowering, populated by
+   `try_lower_bitfield_construct` and propagated through `Let` bindings,
+   because this pipeline has no expression type-inference pass
+   (`expr_type_symbol` returns nil for un-annotated `val inst = ...`).
+
+**Verified:** the bitfield-read test's function now lowers through the real
+parse→HIR→MIR pipeline to exactly the expected MIR shape:
+`Copy` + `VhdlSlice(dest, src, 6, 0)` + `Cast` (confirmed via MIR dump).
+The suite count is still **40/48** due to two remaining, precisely-scoped
+gaps:
+
+- **Read test**: MIR is correct; the VHDL text assertions fail because `u32`
+  params/returns are typed `TYPE_I64` by the flat parser (the deliberate
+  fallback documented above — no fixed-width integer type tags exist in
+  `compiler.core.types`), so ports render 64-bit instead of the expected
+  `unsigned(31 downto 0)`. Faithful uN typing through flat parser → bridge →
+  HIR `Int(width, unsigned)` is new type-system infrastructure — a
+  well-defined follow-up, not a bitfield-specific bug.
+- **6 write tests**: still `Unit local signal`. `try_lower_bitfield_set` has
+  the same `bitfield_type_sym_for` fallback wired but the write path was not
+  re-traced after the attribute threading landed; next session should dump
+  the write-test MIR the same way the read path was traced (temp debug spec
+  in the backend test dir printing `inst.kind` per block) to find the stray
+  Unit temp's producer.
+
+Regression gate after this pass (all green, no regressions):
+`vhdl_backend_spec` 40/48 (unchanged count), `bitfield_mir_spec` 2/2,
+`bitfield_pure_simple_spec` 4/4, `frontend/parser_spec` 3/3 (struct-heavy
+decl-bridge regression check), `vhdl_constraints_spec` 5/5,
+`vhdl_abi_spec` 5/5.
+
 ### rv32 decode helpers test: still BLOCKED (missing feature), unchanged
 `RiscvFpgaLane.rv32_default().hardware_source_spl()` still does not exist
 anywhere in the codebase (re-confirmed this pass). Out of scope for a bitfield
