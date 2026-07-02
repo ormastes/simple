@@ -33,9 +33,11 @@ val CLANG_NO_IOSTREAM_PATCH = "src/os/port/llvm/patches/0017-clang-no-iostream-f
 val LLVM_TOOLCHAIN = "src/os/toolchain/llvm/simpleos_cross_toolchain.cmake"
 val CXXABI_C = "src/os/libc/simpleos_cxxabi.c"
 val LIBC_C = "src/os/libc/simpleos_libc.c"
+val DLMALLOC_C = "src/os/libc/simpleos_dlmalloc.c"
 val PROCESS_WAIT_C = "src/os/libc/simpleos_process_wait.c"
 val STRING_EXT_C = "src/os/libc/simpleos_string_ext.c"
 val MATH_EXT_C = "src/os/libc/simpleos_math_ext.c"
+val ASSERT_H = "src/os/libc/include/assert.h"
 val CTYPE_H = "src/os/libc/include/ctype.h"
 val INTTYPES_H = "src/os/libc/include/inttypes.h"
 val LOCALE_H = "src/os/libc/include/locale.h"
@@ -173,6 +175,16 @@ describe "SimpleOS LLVM per-target build (A4/A5)":
         check(!src.contains("-DCOMPILER_RT_DEFAULT_TARGET_TRIPLE"))
         check(src.contains("-DCMAKE_C_COMPILER_TARGET=\"$TRIPLE\""))
 
+    it "compiler-rt preload does not inject an empty sysroot flag":
+        val build = build_shs_src()
+        val cache = rt_cmake_src()
+        check(build.contains("-UCMAKE_C_FLAGS"))
+        check(build.contains("-UCMAKE_CXX_FLAGS"))
+        check(build.contains("-UCMAKE_ASM_FLAGS"))
+        check(!cache.contains("set(CMAKE_C_FLAGS"))
+        check(!cache.contains("set(CMAKE_CXX_FLAGS"))
+        check(!cache.contains("set(CMAKE_ASM_FLAGS"))
+
     it "build.shs maps armv7 to LLVM ARM":
         val src = build_shs_src()
         check(src.contains("armv7-*)"))
@@ -206,9 +218,13 @@ describe "SimpleOS LLVM per-target build (A4/A5)":
         val src = llvm_toolchain_src()
         check(src.contains("include/c++/v1"))
         check(src.contains("-isystem"))
+        check(src.contains("SIMPLEOS_SYSROOT}/include"))
+        check(src.contains("CMAKE_C_FLAGS"))
+        check(src.contains("CMAKE_CXX_FLAGS"))
         check(src.contains("SIMPLEOS_CXX_LINK_RUNTIME"))
         check(src.contains("CMAKE_CXX_STANDARD_LIBRARIES"))
         check(src.contains("crt0.o"))
+        check(src.contains("__bss_end=_end"))
         check(src.contains("-no-pie"))
         check(src.contains("-lc++"))
         check(src.contains("-lsimpleos_c"))
@@ -224,6 +240,7 @@ describe "SimpleOS LLVM per-target build (A4/A5)":
         check(src.contains("HAVE_GETRUSAGE 1"))
 
     it "SimpleOS libc has C++ port support headers":
+        check(regular_file_exists(ASSERT_H))
         check(regular_file_exists(CTYPE_H))
         check(regular_file_exists(INTTYPES_H))
         check(regular_file_exists(LOCALE_H))
@@ -242,6 +259,10 @@ describe "SimpleOS LLVM per-target build (A4/A5)":
         check(regular_file_exists(SYS_STATVFS_H))
         check(regular_file_exists(SYS_UTSNAME_H))
         check(regular_file_exists(WCTYPE_H))
+
+    it "SimpleOS assert header exposes C11 static_assert":
+        val src = process.run("cat", [ASSERT_H]).stdout
+        check(src.contains("#define static_assert _Static_assert"))
 
     it "SimpleOS libc exposes libc++ C-locale fallback declarations":
         val ctype = process.run("cat", [CTYPE_H]).stdout
@@ -318,6 +339,7 @@ describe "SimpleOS LLVM per-target build (A4/A5)":
     it "SimpleOS libc implements final LLD link runtime surface":
         val cxxabi = process.run("cat", [CXXABI_C]).stdout
         val libc = process.run("cat", [LIBC_C]).stdout
+        val dlmalloc = process.run("cat", [DLMALLOC_C]).stdout
         val string_ext = process.run("cat", [STRING_EXT_C]).stdout
         val math_ext = process.run("cat", [MATH_EXT_C]).stdout
         check(cxxabi.contains("__cxa_thread_atexit"))
@@ -326,6 +348,9 @@ describe "SimpleOS LLVM per-target build (A4/A5)":
         check(cxxabi.contains("int main(int argc, char **argv)"))
         check(libc.contains("int vfprintf"))
         check(libc.contains("int mprotect"))
+        check(libc.contains("running_on_linux_host"))
+        check(libc.contains("linux_syscall3"))
+        check(dlmalloc.contains("_linux_host_mmap_pages"))
         check(string_ext.contains("int wmemcmp"))
         check(string_ext.contains("char *strpbrk"))
         check(math_ext.contains("double logb"))
@@ -336,6 +361,8 @@ describe "SimpleOS LLVM per-target build (A4/A5)":
         val src = build_shs_src()
         check(src.contains("RES_LIB_DIR"))
         check(src.contains("lib/clang/"))
+        check(src.contains("ninja -C \"$RT_DIR\" builtins"))
+        check(src.contains("libclang_rt.builtins*.a"))
 
     it "compiler_rt_cmake.cmake exists":
         check(regular_file_exists(RT_CMAKE))

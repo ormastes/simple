@@ -80,6 +80,24 @@ extern int fcntl(int fd, int cmd, ...);
 #define F_SIMPLEOS_GET_OFD 0x534F0001
 #endif
 
+static int running_on_linux_host(void) {
+    return simpleos_syscall(4, 0, 0, 0, 0, 0) < 0;
+}
+
+static int64_t linux_syscall3(int64_t id, int64_t a0, int64_t a1, int64_t a2) {
+#if defined(__x86_64__)
+    long ret;
+    __asm__ volatile("syscall"
+                     : "=a"(ret)
+                     : "a"(id), "D"(a0), "S"(a1), "d"(a2)
+                     : "rcx", "r11", "memory");
+    return ret;
+#else
+    (void)id; (void)a0; (void)a1; (void)a2;
+    return -ENOSYS;
+#endif
+}
+
 /* ====================================================================
  * 2. Errno
  * ==================================================================== */
@@ -260,6 +278,11 @@ FILE *stdout = &_stdout_f;
 FILE *stderr = &_stderr_f;
 
 ssize_t write(int fd, const void *buf, size_t count) {
+    if (running_on_linux_host()) {
+        int64_t r = linux_syscall3(1, fd, (int64_t)(uintptr_t)buf, (int64_t)count);
+        if (r < 0) { set_errno(r); return -1; }
+        return (ssize_t)r;
+    }
     if (fd == 1 || fd == 2) {
         /* Route stdout/stderr through DebugWrite (syscall 60) for serial */
         const char *p = (const char *)buf;
@@ -563,7 +586,10 @@ int fputc(int c, FILE *stream) {
  * ==================================================================== */
 
 void exit(int status) {
-    simpleos_syscall(0, (int64_t)status, 0, 0, 0, 0);
+    int64_t r = simpleos_syscall(0, (int64_t)status, 0, 0, 0, 0);
+    if (r < 0 && running_on_linux_host()) {
+        linux_syscall3(60, (int64_t)status, 0, 0);
+    }
     __builtin_unreachable();
 }
 

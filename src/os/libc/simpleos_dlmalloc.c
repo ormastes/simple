@@ -71,11 +71,36 @@ static int region_count = 0;
  * Internal helpers
  * ==================================================================== */
 
+static int _running_on_linux_host(void) {
+    return simpleos_syscall(4, 0, 0, 0, 0, 0) < 0;
+}
+
+static void *_linux_host_mmap_pages(size_t size) {
+#if defined(__x86_64__)
+    long ret;
+    register long r10 __asm__("r10") = 0x22; /* MAP_PRIVATE|MAP_ANONYMOUS */
+    register long r8 __asm__("r8") = -1;
+    register long r9 __asm__("r9") = 0;
+    __asm__ volatile("syscall"
+                     : "=a"(ret)
+                     : "a"(9), "D"(0), "S"(size), "d"(3), "r"(r10), "r"(r8), "r"(r9)
+                     : "rcx", "r11", "memory");
+    if (ret < 0) return NULL;
+    return (void *)ret;
+#else
+    (void)size;
+    return NULL;
+#endif
+}
+
 static void *_mmap_pages(size_t size) {
     size = (size + HEAP_PAGE_SIZE - 1) & ~(size_t)(HEAP_PAGE_SIZE - 1);
     int64_t addr = simpleos_syscall(10, 0, (int64_t)size,
                                      3 /* PROT_READ|PROT_WRITE */, 0, 0);
-    if (addr <= 0) return NULL;
+    if (addr <= 0) {
+        if (_running_on_linux_host()) return _linux_host_mmap_pages(size);
+        return NULL;
+    }
     return (void *)addr;
 }
 

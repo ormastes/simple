@@ -17,7 +17,9 @@ Focused LLVM-to-SimpleOS port evidence for the current hardening lane.
 | Focused x86_64 `bin/lld` cross executable link | PASS | `make -C src/os/libc && SIMPLEOS_TARGET_TRIPLE=x86_64-unknown-simpleos sh src/os/port/llvm/sysroot.shs && ninja -C build/os/llvm/cross-x86_64-unknown-simpleos bin/lld` -> final executable link completes; `build/os/llvm/cross-x86_64-unknown-simpleos/bin/lld` exists and is executable, 64 MB |
 | Focused x86_64 `bin/clang` cross executable link | PASS | `make -C src/os/libc && SIMPLEOS_TARGET_TRIPLE=x86_64-unknown-simpleos sh src/os/port/llvm/sysroot.shs && ninja -C build/os/llvm/cross-x86_64-unknown-simpleos bin/clang` -> final executable link completes; `build/os/llvm/cross-x86_64-unknown-simpleos/bin/clang` symlinks to executable `clang-20`, 125 MB |
 | Cross-build plan scaffolding | PASS | `SIMPLE_LIB=src bin/simple test test/02_integration/os/port/llvm/cross_build_plan_spec.spl --mode=interpreter --clean` -> 18 examples, 0 failures |
-| Per-target compiler-rt/build staging scaffolding | PASS | `SIMPLE_LIB=src bin/simple test test/02_integration/os/port/llvm/per_target_build_spec.spl --mode=interpreter --clean` -> 48 examples, 0 failures |
+| Per-target compiler-rt/build staging scaffolding | PASS | `SIMPLE_LIB=src bin/simple test test/02_integration/os/port/llvm/per_target_build_spec.spl --mode=interpreter --clean` -> 51 examples, 0 failures |
+| Focused x86_64 compiler-rt builtins configure | PASS | `SIMPLEOS_TARGET_TRIPLE=x86_64-unknown-simpleos sh src/os/port/llvm/build.shs compiler-rt` now gets past CMake configure after removing the contradictory `COMPILER_RT_DEFAULT_TARGET_TRIPLE` flag and stale empty `CMAKE_*_FLAGS` cache values |
+| Focused x86_64 compiler-rt builtins compile/stage | PASS | `make -C src/os/libc && SIMPLEOS_TARGET_TRIPLE=x86_64-unknown-simpleos sh src/os/port/llvm/sysroot.shs && SIMPLEOS_TARGET_TRIPLE=x86_64-unknown-simpleos sh src/os/port/llvm/build.shs compiler-rt` -> `builtins` builds 165/165 and stages `libclang_rt.builtins-x86_64.a` under `build/os/sysroot/lib/clang/19/lib/x86_64-unknown-simpleos/`; staged archive is 232 KB |
 | Focused `Path.cpp` compile | PASS | direct clang++ compile with Ninja flags plus `-D__simpleos__=1` -> object builds; only existing futimes/futimens warning remains |
 | Focused `AssignmentTrackingAnalysis.cpp` compile | PASS | direct clang++ compile with Ninja flags after replacing `std::stringstream` with `raw_string_ostream` -> object builds |
 | Focused `MIRFSDiscriminator.cpp` compile | PASS | direct clang++ compile with Ninja flags after replacing `SampleProf.h` `std::ostringstream` use with `raw_string_ostream` -> object builds |
@@ -32,7 +34,7 @@ Focused LLVM-to-SimpleOS port evidence for the current hardening lane.
 | Focused Clang Lex `PPMacroExpansion.cpp` compile | PASS | direct clang++ compile with Ninja flags after replacing `std::stringstream` / `std::locale` / `std::put_time` timestamp formatting with LLVM raw stream + `format` helper -> object builds |
 | SimpleOS libc rebuild | PASS | `make -C src/os/libc` -> rebuilt `libsimpleos_c.a` including the C++ ABI, stdio, string, mman, and libm surfaces needed by the final LLD link |
 | SimpleOS C++/POSIX surface probes | PASS | `clang++ --target=x86_64-unknown-simpleos --sysroot=build/os/sysroot ...` including `<string>`, `<mutex>`, `<shared_mutex>`, `<future>`, `<random>`, `gethostname`, `getsid`, `std::isxdigit`, `sys/resource.h`, `sys/socket.h`, `sys/un.h`, `sys/wait.h`, `pwd.h`, `alarm`, `setsid`, `getpagesize`, and signal flags compiles |
-| Cross clang artifact-gated smoke | PASS | `SIMPLE_LIB=src bin/simple test test/02_integration/os/port/llvm/smoke_clang_spec.spl --mode=interpreter --clean` -> canonical `bin/clang` exists, reports `x86_64-simpleos`, compiles `hello.c`, `llvm-nm` sees `main`, and `ld.lld` links a SimpleOS ELF; 5 examples, 0 failures |
+| Cross clang artifact-gated smoke | FAIL | Corrected smoke now probes canonical `bin/clang` with a 5s timeout and fails the first runtime gate: direct `timeout 5s build/os/llvm/cross-x86_64-unknown-simpleos/bin/clang --print-target-triple` exits 139 and writes 0 bytes; the smoke reports 5 examples, 1 failure on the missing `x86_64-simpleos` triple |
 
 ## Current Frontier
 
@@ -46,8 +48,15 @@ target.
 
 The canonical cross clang artifact is now present at
 `build/os/llvm/cross-x86_64-unknown-simpleos/bin/clang` as a symlink to
-`clang-20`, and the artifact-gated smoke passes. The next focused frontier is
-advancing compiler-rt/full cross-target staging.
+`clang-20`, but host-running it currently segfaults before printing the target
+triple or resource dir. The artifact-gated smoke now exposes that failure
+instead of skipping it.
+
+Compiler-rt staging has advanced through x86_64 builtins compile and archive
+staging. The next focused blocker is the SimpleOS-linked Clang runtime startup:
+the canonical artifact exits 139 before producing target-triple or resource-dir
+output, so broader target rollout and resource-dir integration remain gated on
+debugging that crash.
 
 ## Spec Maintenance Completed
 
@@ -148,3 +157,22 @@ advancing compiler-rt/full cross-target staging.
 - Guarded smoke execution so absent or non-host-runnable cross artifacts do not
   create false failures, while host-runnable canonical artifacts still compile
   and link the `hello.c` smoke.
+- Fixed compiler-rt stage configure by removing the incompatible
+  `COMPILER_RT_DEFAULT_TARGET_TRIPLE` override when
+  `COMPILER_RT_DEFAULT_TARGET_ONLY=ON`.
+- Removed preload-time `CMAKE_*_FLAGS` sysroot injection from
+  `compiler_rt_cmake.cmake`; the SimpleOS toolchain owns sysroot/freestanding
+  flags, and the wrapper now unsets stale cached flag values.
+- Narrowed compiler-rt stage 3 to `ninja ... builtins` and staged only
+  `libclang_rt.builtins*.a`, avoiding sanitizer_common as an accidental default
+  build dependency.
+- Preserved SimpleOS sysroot include paths in cache-backed toolchain C/CXX
+  flags so compiler-rt builtins see the staged flat libc headers and libc++
+  headers even after CMake cache reuse.
+- Added C11 `static_assert` exposure in SimpleOS `assert.h`, matching
+  compiler-rt builtins expectations without pulling a host assert surface.
+- Completed the focused x86_64 compiler-rt builtins stage and staged
+  `libclang_rt.builtins-x86_64.a` into the SimpleOS Clang resource tree.
+- Tightened the Clang artifact smoke with a bounded `--print-target-triple`
+  probe, turning the current canonical Clang segfault into a real failure
+  instead of an implicit skip.

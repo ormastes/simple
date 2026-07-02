@@ -21,6 +21,7 @@ use std.spec
 val HELLO_C = "examples/09_embedded/simpleos_hello_c/hello.c"
 val OUT_O   = "/tmp/smoke_clang_hello.o"
 val OUT_ELF = "/tmp/smoke_clang_hello.elf"
+val TRIPLE_TXT = "/tmp/smoke_clang_triple.txt"
 val LLVM_BIN = "build/os/llvm/cross-x86_64-unknown-simpleos/bin"
 
 fn sysroot_dir() -> text:
@@ -38,10 +39,21 @@ fn regular_file_exists(path: text) -> bool:
 fn llvm_build_configured() -> bool:
     regular_file_exists(llvm_tool("clang"))
 
+fn clang_probe() -> i64:
+    val clang = llvm_tool("clang")
+    val cmd = "timeout 5s {clang} --print-target-triple > {TRIPLE_TXT}"
+    process.run("sh", ["-c", cmd]).exit_code
+
 fn cross_clang_host_runnable() -> bool:
     if !llvm_build_configured():
         return false
-    process.run(llvm_tool("clang"), ["--print-target-triple"]).exit_code == 0
+    if clang_probe() != 0:
+        return false
+    process.run("cat", [TRIPLE_TXT]).stdout.trim() == "x86_64-simpleos"
+
+fn cross_clang_guest_only() -> bool:
+    val code = clang_probe()
+    code == 126 or code == 127
 
 describe "SimpleOS cross clang smoke":
     """Env-gated checks for a working clang cross-toolchain targeting x86_64-simpleos."""
@@ -53,10 +65,11 @@ describe "SimpleOS cross clang smoke":
 
     it "reports x86_64-simpleos as the target triple":
         """Skip when cross clang is absent or is a SimpleOS guest executable."""
-        if cross_clang_host_runnable():
-            val result = process.run(llvm_tool("clang"), ["--print-target-triple"])
-            expect(result.exit_code).to_equal(0)
-            expect(result.stdout.trim()).to_equal("x86_64-simpleos")
+        if llvm_build_configured() and !cross_clang_guest_only():
+            val code = clang_probe()
+            expect(code).to_equal(0)
+            val triple = process.run("cat", [TRIPLE_TXT]).stdout.trim()
+            expect(triple).to_equal("x86_64-simpleos")
 
     it "compiles hello.c to x86_64-simpleos .o with exit 0":
         """Skip when cross clang is absent or is a SimpleOS guest executable."""

@@ -44,8 +44,5 @@ set(COMPILER_RT_OS_DIR simpleos CACHE STRING "")
 # No tests in the freestanding build — there is no host runner.
 set(COMPILER_RT_INCLUDE_TESTS OFF CACHE BOOL "")
 
-# Point compiles at the SimpleOS sysroot (headers + crt stubs) and run
-# fully freestanding so no host libc is linked in.
-set(CMAKE_C_FLAGS   "--sysroot=${SIMPLEOS_SYSROOT} -ffreestanding" CACHE STRING "")
-set(CMAKE_CXX_FLAGS "--sysroot=${SIMPLEOS_SYSROOT} -ffreestanding" CACHE STRING "")
-set(CMAKE_ASM_FLAGS "--sysroot=${SIMPLEOS_SYSROOT} -ffreestanding" CACHE STRING "")
+# The SimpleOS CMake toolchain owns sysroot/freestanding flags. Keep them out
+# of this preload file because -C is evaluated before later -D sysroot values.
