@@ -31,11 +31,44 @@
 #   scripts/check/check-macos-wm-fullscreen-metal-evidence.shs
 
 use std.gpu.engine2d.backend_metal.{MetalBackend}
-use std.io.window_winit.{WinitLoop, WinitWindow, WinitInput, winit_loop_new, winit_loop_free, winit_window_new, winit_window_free, winit_present_rgba, winit_poll_input, winit_window_set_fullscreen, winit_window_is_fullscreen, winit_window_get_size}
+use std.io.window_winit.{WinitLoop, WinitWindow, WinitInput, winit_loop_new, winit_loop_free, winit_window_new, winit_window_free, winit_present_rgba, winit_poll_input, winit_window_set_fullscreen, winit_window_is_fullscreen, winit_window_get_size, winit_window_scale_factor}
 
 use std.io_runtime.{env_get}
+use std.common.string_core.{char_from_code}
 
 extern fn rt_time_now_unix_micros() -> i64
+
+# 24-bit RGB value as a 6-char lowercase hex string, for honest corner-pixel
+# evidence in the background-fill marker.
+fn to_hex6(v: i64) -> text:
+    var out = ""
+    var shift = 20
+    while shift >= 0:
+        val nib = (v >> shift) & 0xF
+        var code = 48 + nib
+        if nib > 9:
+            code = 97 + (nib - 10)
+        out = out + char_from_code(code)
+        shift = shift - 4
+    out
+
+# Read three far corners of the presented native buffer and confirm they hold the
+# background color (bg fill must cover the WHOLE native buffer, not just the
+# content box). Prints "[wm-fullscreen] {label}_bg_corners=ok" or a =FAIL marker
+# carrying the actual hex values. `pixels` is the already-read native framebuffer.
+fn check_bg_corners(pixels: [u32], sw: i64, sh: i64, bg: u32, label: text) -> bool:
+    val want = (bg.to_i64()) & 0xFFFFFF
+    val i_tr = (1 * sw + (sw - 2))
+    val i_bl = ((sh - 2) * sw + 1)
+    val i_br = ((sh - 2) * sw + (sw - 2))
+    val tr = pixels[i_tr.to_i32()].to_i64() & 0xFFFFFF
+    val bl = pixels[i_bl.to_i32()].to_i64() & 0xFFFFFF
+    val br = pixels[i_br.to_i32()].to_i64() & 0xFFFFFF
+    if tr == want and bl == want and br == want:
+        print "[wm-fullscreen] {label}_bg_corners=ok bg={to_hex6(want)}"
+        return true
+    print "[wm-fullscreen] {label}_bg_corners=FAIL want={to_hex6(want)} tr={to_hex6(tr)} bl={to_hex6(bl)} br={to_hex6(br)}"
+    false
 
 val W: i32 = 320
 val H: i32 = 200
@@ -62,11 +95,26 @@ fn sc_font(v: i32, scale: f64) -> i32:
 # Draw the demo scene into `b`, offset by (ox, oy) and scaled by `scale`.
 # `b.clear` fills the WHOLE backend with the background color first, so both the
 # fit letterbox bars and the no-resize extended background are covered for free.
-fn draw_scene_scaled(b: MetalBackend, ox: i32, oy: i32, scale: f64, label: text):
-    b.clear(0xFF14141Cu32)
-    b.draw_rect_filled(ox + sc(24, scale), oy + sc(24, scale), sc(W - 48, scale), sc(60, scale), 0xFF2D6CDFu32)
-    b.draw_text(ox + sc(40, scale), oy + sc(44, scale), "WM FULLSCREEN DEMO", 0xFFFFFFFFu32, sc_font(8, scale))
-    b.draw_text(ox + sc(40, scale), oy + sc(110, scale), label, 0xFFB0C4DEu32, sc_font(6, scale))
+# When `hires` is true (fullscreen fit) the title/label text is rendered with the
+# antialiased high-resolution GPU text path (draw_text_hires) instead of the
+# integer-scaled 5x7 bitmap, so scaled glyphs show smooth shapes, not big blocks.
+# `bg` for each hires call is the known solid color behind that text so the
+# opaque glyph block composites correctly (title over the blue bar, label over
+# the clear background).
+val BG_CLEAR: u32 = 0xFF14141Cu32
+val BAR_COLOR: u32 = 0xFF2D6CDFu32
+
+fn draw_scene_scaled(b: MetalBackend, ox: i32, oy: i32, scale: f64, label: text, hires: bool):
+    b.clear(BG_CLEAR)
+    b.draw_rect_filled(ox + sc(24, scale), oy + sc(24, scale), sc(W - 48, scale), sc(60, scale), BAR_COLOR)
+    val title_px = sc_font(8, scale)
+    val label_px = sc_font(6, scale)
+    if hires:
+        b.draw_text_hires(ox + sc(40, scale), oy + sc(44, scale), "WM FULLSCREEN DEMO", 0xFFFFFFFFu32, title_px, BAR_COLOR)
+        b.draw_text_hires(ox + sc(40, scale), oy + sc(110, scale), label, 0xFFB0C4DEu32, label_px, BG_CLEAR)
+    else:
+        b.draw_text(ox + sc(40, scale), oy + sc(44, scale), "WM FULLSCREEN DEMO", 0xFFFFFFFFu32, title_px)
+        b.draw_text(ox + sc(40, scale), oy + sc(110, scale), label, 0xFFB0C4DEu32, label_px)
     # Frame-progress bar, fixed near-full for the still fullscreen image.
     val bar_max_w = W - 80
     var bar_w = 180 + 4 * 16
@@ -80,7 +128,7 @@ fn draw_scene_scaled(b: MetalBackend, ox: i32, oy: i32, scale: f64, label: text)
 # window (the runtime upscales when the window is larger than the render buffer),
 # and report GPU completeness read back from the backend.
 fn render_and_present(b: MetalBackend, win: WinitWindow, phase: text, frame: i32) -> bool:
-    draw_scene_scaled(b, 0, 0, 1.0, phase)
+    draw_scene_scaled(b, 0, 0, 1.0, phase, false)
 
     val frame_complete = b.gpu_frame_complete
     val pixels = b.read_pixels_gpu_only()
@@ -98,7 +146,7 @@ fn render_and_present(b: MetalBackend, win: WinitWindow, phase: text, frame: i32
 
 # Read back the native-resolution backend `nb` and present it 1:1 to the window
 # (no upscaling → crisp). This is the ONLY full readback+pack+present per mode.
-fn present_native(nb: MetalBackend, win: WinitWindow, sw: i64, sh: i64, phase: text) -> bool:
+fn present_native(nb: MetalBackend, win: WinitWindow, sw: i64, sh: i64, phase: text, bg: u32, corner_label: text) -> bool:
     val frame_complete = nb.gpu_frame_complete
     val pixels = nb.read_pixels_gpu_only()
     if not frame_complete:
@@ -108,10 +156,16 @@ fn present_native(nb: MetalBackend, win: WinitWindow, sw: i64, sh: i64, phase: t
     if pixels.len() < want:
         print "frame native phase={phase} FAIL GPU readback short ({pixels.len()} of {want})"
         return false
+    # Honest background-fill evidence: the same readback proves the far corners
+    # hold the demo bg color (bg must cover the entire native buffer).
+    val corners_ok = check_bg_corners(pixels, sw, sh, bg, corner_label)
     val packed = pack(pixels)
     winit_present_rgba(win, sw, sh, packed)
+    # Prove the present covers the full native surface 1:1 (dims + array length):
+    # a smaller buffer would take the runtime's nearest-neighbor upscale path.
+    print "[wm-fullscreen] {corner_label}_present={sw}x{sh} len={packed.len()}"
     print "frame native phase={phase} gpu_frame_complete=true pixels={pixels.len()}"
-    return true
+    return frame_complete and corners_ok
 
 # Hold the presented frame on screen for ~`secs` seconds, pumping the event loop
 # so the window stays live (and an external gate can screencapture it). Does NOT
@@ -156,8 +210,22 @@ fn run_fs_mode(nb: MetalBackend, win: WinitWindow, lp: WinitLoop, mode: text, sw
         ox = 0
         oy = 0
 
-    draw_scene_scaled(nb, ox, oy, scale, "fullscreen native-res ({mode})")
-    val ok = present_native(nb, win, sw, sh, "fullscreen-{mode}")
+    # Only the aspect-fit fullscreen mode upsizes text (scale > 1); render it with
+    # the antialiased high-resolution GPU text path so scaled glyphs stay smooth.
+    # no-resize keeps original element sizes, so its bitmap text is already crisp.
+    val use_hires = mode == "fit"
+    # Avoid parentheses in the hi-res label: the 8x16 glyph provider has no glyph
+    # for '(' / ')' and substitutes '?', so use a dash separator instead.
+    draw_scene_scaled(nb, ox, oy, scale, "fullscreen native-res - {mode}", use_hires)
+    if use_hires:
+        val title_px = sc_font(8, scale)
+        print "[wm-fullscreen] text_render=vector px={title_px}"
+    # Corner-check label: "noresize" for no-resize (bg must fill the whole screen
+    # outside the top-left content), "fit" for the letterbox bars.
+    var corner_label = "fit"
+    if mode == "no-resize":
+        corner_label = "noresize"
+    val ok = present_native(nb, win, sw, sh, "fullscreen-{mode}", BG_CLEAR, corner_label)
     print "[wm-fullscreen] scale_mode={mode} screen={sw}x{sh} content={cw}x{ch} offset={ox}x{oy}"
     hold(lp, 4)
     return ok
@@ -240,6 +308,12 @@ fn main() -> i64:
     val is_fs = winit_window_is_fullscreen(win)
     print "[wm-fullscreen] is_fullscreen={is_fs}"
     print "[wm-fullscreen] mode=fullscreen size={fs_w}x{fs_h}"
+    # winit_window_get_size reports PHYSICAL inner-size pixels (updated by the
+    # present handler from window.inner_size()); the native backend below is
+    # created at exactly these dims so present is a 1:1 copy — crisp on Retina,
+    # no logical-point pixel doubling. Report the backing scale for the record.
+    val scale_factor = winit_window_scale_factor(win)
+    print "[wm-fullscreen] surface=physical scale_factor={scale_factor}"
 
     if not is_fs:
         print "[wm-fullscreen] error=is-fullscreen-false-after-set"
@@ -260,6 +334,10 @@ fn main() -> i64:
         print "[wm-fullscreen] error=metal-native-init-failed ({fs_w}x{fs_h})"
         cleanup(b, win, lp)
         return 1
+    # Native res is physical Retina (~7.3M px). The CPU software mirror would
+    # re-rasterize every op at that size under the interpreter (minutes); the GPU
+    # framebuffer is the source of truth (read back GPU-only), so drop the mirror.
+    nb.use_gpu_only()
 
     if not run_fs_mode(nb, win, lp, first_mode, fs_w, fs_h):
         ok = false

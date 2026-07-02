@@ -8,7 +8,7 @@ use std.gpu.engine2d.backend.{RenderBackend, Engine2DExtended, Engine2DReadback,
 use std.gpu.engine2d.backend_software.{SoftwareBackend}
 use std.gpu.engine2d.backend_probe.{BackendProbeResult}
 use std.gpu.engine2d.glyph.{glyph_data, glyph_height, glyph_advance}
-use std.gpu.engine2d.backend_metal_runtime_ops.{metal_buffer_download_ptr, metal_set_bytes_ptr}
+use std.gpu.engine2d.backend_metal_runtime_ops.{metal_buffer_download_ptr, metal_buffer_upload_ptr, metal_set_bytes_ptr}
 use std.common.string_core.{char_from_code}
 use std.gc_async_mut.gpu.engine2d.metal_session.{MetalSession}
 use std.gc_async_mut.env.platform.{is_macos}
@@ -24,6 +24,66 @@ extern fn rt_alloc(size: i64) -> i64
 extern fn rt_free(ptr: i64) -> i64
 extern fn rt_ptr_write_i32(ptr: i64, offset: i64, value: i64) -> i64
 extern fn rt_ptr_read_i64(ptr: i64, offset: i64) -> i64
+
+# High-resolution (antialiased) text uses the VGA 8x16 glyph provider — the same
+# glyph source the shared font rasterizer uses — as a coverage field that is
+# bilinearly upsampled to the target pixel size (smooth glyph edges), instead of
+# the integer-scaled 5x7 bitmap that draw_text emits (blocky at large sizes).
+extern fn rt_gui_get_glyph_8x16(ch: i32) -> [u8]
+
+# 0.0 when the source glyph bit at (sx, sy) is clear, 1.0 when set.
+fn _hires_glyph_bit(rows: [u8], sx: i32, sy: i32) -> f64:
+    if sx < 0 or sx > 7 or sy < 0 or sy > 15:
+        return 0.0
+    val bits = rows[sy] as i32
+    val mask = 0x80 >> sx
+    if (bits & mask) != 0:
+        return 1.0
+    0.0
+
+# Bilinear coverage (0..256) of the 8x16 glyph sampled at destination pixel
+# (dx, dy) inside a cell_w x cell_h target cell. Bilinear interpolation of the
+# binary coverage field yields smooth, non-blocky edges when upscaled.
+fn _hires_glyph_coverage(rows: [u8], dx: i32, dy: i32, cell_w: i32, cell_h: i32) -> i32:
+    if rows.len() < 16:
+        return 0
+    var fx = ((dx.to_f64() + 0.5) / cell_w.to_f64()) * 8.0 - 0.5
+    var fy = ((dy.to_f64() + 0.5) / cell_h.to_f64()) * 16.0 - 0.5
+    if fx < 0.0:
+        fx = 0.0
+    if fy < 0.0:
+        fy = 0.0
+    if fx > 7.0:
+        fx = 7.0
+    if fy > 15.0:
+        fy = 15.0
+    val x0 = fx.to_i32()
+    val y0 = fy.to_i32()
+    var x1 = x0 + 1
+    var y1 = y0 + 1
+    if x1 > 7:
+        x1 = 7
+    if y1 > 15:
+        y1 = 15
+    val tx = fx - x0.to_f64()
+    val ty = fy - y0.to_f64()
+    val p00 = _hires_glyph_bit(rows, x0, y0)
+    val p10 = _hires_glyph_bit(rows, x1, y0)
+    val p01 = _hires_glyph_bit(rows, x0, y1)
+    val p11 = _hires_glyph_bit(rows, x1, y1)
+    val top = p00 * (1.0 - tx) + p10 * tx
+    val bot = p01 * (1.0 - tx) + p11 * tx
+    val cov = top * (1.0 - ty) + bot * ty
+    var out = (cov * 256.0).to_i32()
+    if out < 0:
+        out = 0
+    if out > 256:
+        out = 256
+    out
+
+# fg over bg composite for one 8-bit channel, cov in 0..256.
+fn _hires_blend_channel(fg: i32, bg: i32, cov: i32) -> i32:
+    (fg * cov + bg * (256 - cov)) / 256
 
 fn metal_host_alloc(size: i64) -> i64:
     rt_alloc(size)
@@ -375,6 +435,137 @@ impl MetalBackend:
                 i = i + 1
         metal_host_free(host)
         pixels
+
+    # Shrink the CPU software mirror to 1x1 so it costs nothing. At native Retina
+    # resolution the mirror would re-rasterize millions of pixels per op under the
+    # interpreter (clear/rect fills), which dominates runtime. The GPU framebuffer
+    # is the source of truth here — gpu_frame_complete stays true so readback is
+    # GPU — and SoftwareBackend clamps every fill to its buffer bounds, so a 1x1
+    # mirror makes each mirror op clip to a single pixel without changing GPU
+    # output. Use for offscreen/native backends whose pixels are read back from
+    # the GPU, never presented via the mirror.
+    me use_gpu_only():
+        self.mirror.shutdown()
+        val ok = self.mirror.init(1, 1)
+
+    # Blit a host RGBA pixel block (block_w x block_h, u32/pixel) into the GPU
+    # framebuffer at (x, y) via the kernel_blit_image compute pipeline. One
+    # device buffer + one dispatch: the pixels land in d_framebuffer so the
+    # GPU-only readback shows them (no CPU-mirror dependence).
+    me _dispatch_metal_blit(x: i32, y: i32, block_w: i32, block_h: i32, host_ptr: i64, byte_size: i64) -> bool:
+        if block_w <= 0 or block_h <= 0:
+            return true
+        val src_buf = metal_sffi_alloc_buffer(self.session.device, byte_size)
+        if src_buf == 0:
+            return false
+        if metal_buffer_upload_ptr(src_buf, host_ptr, byte_size) == 0:
+            metal_sffi_free_buffer(src_buf)
+            return false
+        val params = metal_host_alloc(24)
+        if params == 0:
+            metal_sffi_free_buffer(src_buf)
+            return false
+        metal_host_write_i32(params, 0, x as i64)
+        metal_host_write_i32(params, 4, y as i64)
+        metal_host_write_i32(params, 8, block_w as i64)
+        metal_host_write_i32(params, 12, block_h as i64)
+        metal_host_write_i32(params, 16, self.w as i64)
+        metal_host_write_i32(params, 20, self.h as i64)
+        val q = self.command_queue
+        val fb = self.d_framebuffer
+        val pipeline = self.session.pipe_blit
+        val cmd = metal_sffi_create_command_buffer(q)
+        var ok = cmd != 0
+        if ok:
+            val encoder = metal_sffi_create_compute_encoder(cmd)
+            if encoder == 0:
+                ok = false
+            else:
+                metal_sffi_set_buffer(encoder, fb, 0, 0)
+                metal_set_bytes_ptr(encoder, params, 24, 1)
+                metal_sffi_set_buffer(encoder, src_buf, 0, 2)
+                val bx = 16
+                val by = 16
+                val gx = ((_metal_i64(block_w) + bx - 1) / bx) * bx
+                val gy = ((_metal_i64(block_h) + by - 1) / by) * by
+                metal_sffi_dispatch_compute(encoder, pipeline, gx, gy, 1, bx, by, 1)
+                metal_sffi_end_compute_encoder(encoder)
+                metal_sffi_commit_command_buffer(cmd)
+                metal_sffi_wait_completed(cmd)
+        metal_host_free(params)
+        metal_sffi_free_buffer(src_buf)
+        ok
+
+    # Draw antialiased, high-resolution text into the GPU framebuffer. Unlike
+    # draw_text (integer-scaled 5x7 bitmap cells → blocky at large px_size), this
+    # bilinearly upsamples the 8x16 glyph coverage to `px_size` and composites the
+    # text color over `bg` (the known solid background behind the text), so glyph
+    # edges stay smooth. Intended for large sizes; small text should keep draw_text.
+    me draw_text_hires(x: i32, y: i32, text_val: text, color: u32, px_size: i32, bg: u32):
+        var mscale = px_size / 16
+        if mscale < 1:
+            mscale = 1
+        self.mirror.draw_text(x, y, text_val, color, mscale)
+        if not self.initialized or self.d_framebuffer == 0 or self.session.pipe_blit == 0:
+            self.gpu_frame_complete = false
+            return
+        val text_len = text_val.len()
+        if text_len <= 0:
+            return
+        var cell_h = px_size
+        if cell_h < 1:
+            cell_h = 1
+        var cell_w = px_size / 2
+        if cell_w < 1:
+            cell_w = 1
+        val spacing = 1 + cell_w / 8
+        val advance = cell_w + spacing
+        val block_w = advance * text_len.to_i32()
+        val block_h = cell_h
+        val px_count = _metal_i64(block_w) * _metal_i64(block_h)
+        val byte_size = px_count * 4
+        val host = metal_host_alloc(byte_size)
+        if host == 0:
+            self.gpu_frame_complete = false
+            return
+        val fr = ((color >> 16) & 0xFFu32) as i32
+        val fg_c = ((color >> 8) & 0xFFu32) as i32
+        val fb_c = (color & 0xFFu32) as i32
+        val br = ((bg >> 16) & 0xFFu32) as i32
+        val bg_c = ((bg >> 8) & 0xFFu32) as i32
+        val bb_c = (bg & 0xFFu32) as i32
+        val alpha = ((bg >> 24) & 0xFFu32) as i32
+        val bg_word = bg as i64
+        var ci = 0
+        while ci < text_len:
+            val code = text_val.char_code_at(ci)
+            val rows = rt_gui_get_glyph_8x16(code.to_i32())
+            val cell_x0 = ci.to_i32() * advance
+            var dy = 0
+            while dy < cell_h:
+                val row_base = _metal_i64(dy) * _metal_i64(block_w)
+                var dx = 0
+                while dx < advance:
+                    val bx = cell_x0 + dx
+                    val idx = (row_base + _metal_i64(bx)) * 4
+                    if dx >= cell_w:
+                        metal_host_write_i32(host, idx, bg_word)
+                    else:
+                        val cov = _hires_glyph_coverage(rows, dx, dy, cell_w, cell_h)
+                        if cov <= 0:
+                            metal_host_write_i32(host, idx, bg_word)
+                        else:
+                            val rr = _hires_blend_channel(fr, br, cov)
+                            val gg = _hires_blend_channel(fg_c, bg_c, cov)
+                            val bbb = _hires_blend_channel(fb_c, bb_c, cov)
+                            val outc = (alpha.to_i64() << 24) | (rr.to_i64() << 16) | (gg.to_i64() << 8) | bbb.to_i64()
+                            metal_host_write_i32(host, idx, outc)
+                    dx = dx + 1
+                dy = dy + 1
+            ci = ci + 1
+        val ok = self._dispatch_metal_blit(x, y, block_w, block_h, host, byte_size)
+        metal_host_free(host)
+        self.gpu_frame_complete = self.gpu_frame_complete and ok
 
     me _dispatch_metal_clear(color: u32) -> bool:
         val params = metal_host_alloc(12)
