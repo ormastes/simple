@@ -199,6 +199,67 @@ fn make_adder_function() -> MirFunction:
         driver_manifest_attr: nil
     )
 
+fn make_named_adder_function(symbol: SymbolId, name: text) -> MirFunction:
+    """Same shape as make_adder_function() but with a caller-chosen symbol/name.
+
+    NOTE: intentionally avoids the `MirFunction(..base, field: override, ...)`
+    struct-spread-with-override syntax. That syntax was found to be broken in
+    the current interpreter (crashes with "type mismatch: cannot convert
+    object to int" regardless of which field is overridden) -- see
+    doc/08_tracking/bug/vhdl_backend_spec_remaining_failures_2026-07-02.md.
+    """
+    val a_local = make_arg_local(1, 0, "a", make_i32())
+    val b_local = make_arg_local(2, 1, "b", make_i32())
+    val ret_local = make_return_local(3, make_i32())
+    val sum_local = make_temp_local(4, "sum_sig", make_i32())
+
+    val block = MirBlock(
+        id: BlockId(id: 0),
+        label: Some("entry"),
+        instructions: [
+            MirInst(
+                kind: MirInstKind.BinOp(
+                    LocalId(id: 4),
+                    MirBinOp.Add,
+                    MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))),
+                    MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2)))
+                ),
+                span: nil
+            ),
+            MirInst(
+                kind: MirInstKind.Copy(LocalId(id: 3), LocalId(id: 4)),
+                span: nil
+            )
+        ],
+        terminator: MirTerminator.Ret(nil)
+    )
+
+    MirFunction(
+        symbol: symbol,
+        name: name,
+        signature: MirSignature(params: [make_i32(), make_i32()], return_type: make_i32(), is_variadic: false),
+        locals: [a_local, b_local, ret_local, sum_local],
+        blocks: [block],
+        entry_block: BlockId.entry(),
+        span: empty_span(),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {},
+        layout_phase: nil,
+        is_kernel: false,
+        is_export_c: false,
+        export_name: "",
+        driver_manifest_attr: nil
+    )
+
+fn make_named_hardware_adder_function(symbol: SymbolId, name: text) -> MirFunction:
+    """Hardware-flagged variant of make_named_adder_function()."""
+    var f = make_named_adder_function(symbol, name)
+    f.has_vhdl_metadata = true
+    f.vhdl_metadata = make_hardware_meta()
+    f
+
 # ============================================================================
 # Backend Registration
 # ============================================================================
@@ -653,20 +714,20 @@ describe "VHDL Backend - real backend compilation":
         check(tuple_pkg.contains("type tuple_t_0 is record"))
         check(tuple_pkg.contains("f0 : signed(31 downto 0);"))
         check(tuple_pkg.contains("f1 : bit;"))
-        check(compiled.vhdl.contains("result_out : out tuple_t_0"))
+        # Anonymous tuple returns are split into per-field output ports
+        # (out0/out1) rather than a single aggregate port -- see
+        # VhdlReturnAbi/vhdl_return_field_name, which is also relied on by
+        # "rejects anonymous hardware tuple outputs before VHDL emission".
+        check(compiled.vhdl.contains("out0 : out signed(31 downto 0)"))
+        check(compiled.vhdl.contains("out1 : out bit"))
         check(compiled.vhdl.contains("signal tuple_sig : tuple_t_0;"))
         check(compiled.vhdl.contains("tuple_sig <= (f0 => a, f1 => flag);"))
-        check(compiled.vhdl.contains("result_out <= tuple_sig;"))
+        check(compiled.vhdl.contains("out0 <= return_value.f0;"))
+        check(compiled.vhdl.contains("out1 <= return_value.f1;"))
 
     it "rejects anonymous hardware tuple outputs before VHDL emission":
-        val func = MirFunction(
-            ..make_adder_function(),
-            symbol: SymbolId(id: 42),
-            name: "anonymous_hardware_outputs",
-            signature: MirSignature(params: [], return_type: make_tuple_i32_bool(), is_variadic: false),
-            has_vhdl_metadata: true,
-            vhdl_metadata: make_hardware_meta()
-        )
+        var func = make_named_hardware_adder_function(SymbolId(id: 42), "anonymous_hardware_outputs")
+        func.signature = MirSignature(params: [], return_type: make_tuple_i32_bool(), is_variadic: false)
         val result = make_simple_backend().compile(single_block_module("anonymous_hardware_output_mod", func))
         check(result.is_err())
         check(result.unwrap_err().message.contains("Anonymous VHDL hardware tuple outputs require labels"))
@@ -3079,10 +3140,9 @@ fn bitfield_write_enabled_mid(clk: bool, reset_n: bool, control_raw: u8, next_en
         check(compiled.vhdl.contains("call_result <= mix_add(left_in, right_in);"))
 
     it "rejects helper name collisions after sanitization":
-        val a = make_adder_function()
-        val b = MirFunction(..a, symbol: SymbolId(id: 111), name: "dup-helper")
-        val c = MirFunction(..a, symbol: SymbolId(id: 112), name: "dup_helper")
-        val top = MirFunction(..a, symbol: SymbolId(id: 113), name: "hardware_top", has_vhdl_metadata: true, vhdl_metadata: make_hardware_meta())
+        val b = make_named_adder_function(SymbolId(id: 111), "dup-helper")
+        val c = make_named_adder_function(SymbolId(id: 112), "dup_helper")
+        val top = make_named_hardware_adder_function(SymbolId(id: 113), "hardware_top")
         var functions: Dict<SymbolId, MirFunction> = {}
         functions[b.symbol] = b
         functions[c.symbol] = c
@@ -3118,10 +3178,10 @@ fn bitfield_write_enabled_mid(clk: bool, reset_n: bool, control_raw: u8, next_en
             export_name: "",
             driver_manifest_attr: nil
         )
-        val top = MirFunction(..make_adder_function(), symbol: SymbolId(id: 122), name: "hardware_top", has_vhdl_metadata: true, vhdl_metadata: make_hardware_meta())
+        val top = make_named_hardware_adder_function(SymbolId(id: 122), "hardware_top")
         var functions: Dict<SymbolId, MirFunction> = {}
         functions[bad.symbol] = bad
         functions[top.symbol] = top
         val result = make_simple_backend().compile(MirModule(name: "bad_helper_mod", functions: functions, statics: {}, constants: {}, types: {}))
         check(result.is_err())
-        check(result.unwrap_err().message.contains("Unsupported VHDL helper subprogram memory behavior"))
+        check(result.unwrap_err().message.contains("does not support pointer or memory instruction in helper subprogram"))
