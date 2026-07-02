@@ -227,3 +227,60 @@ single payloads of these recursive types (cranelift path:
 and extraction must agree on the payload slot. Use `rep9.spl` as the regression
 gate. A use-site `.spl` fix is not available; this requires a seed codegen fix
 (or isolating and adjusting the offending `parser_types_expr` type definition).
+
+---
+
+## Iteration 8 (2026-07-02) — interpreter reads corrupt `HirFunction` from `Dict<SymbolId,HirFunction>.values()`
+
+Localized exactly why `SIMPLE_UNSTUB_HIR=1 simple -c "print(1+1)"` runs silently
+(rc=0, no `2`). Traced `-c` → `cli_run_code` → self-exec fallback →
+`interpret_file` → `CompileMode.Interpret` → `CompilerDriver.interpret_pipeline`
+→ `InterpreterBackendImpl.process_module` (src/compiler/70.backend/backend/interpreter.spl).
+
+### Ground truth (file-append + `print`/`eprint` probes, cranelift stage4)
+For the synthetic-`main` module built from `print(1+1)`:
+- `module.functions.len()` == **1** (correct count).
+- The symbol table reads **correctly**: iterating `module.symbols.symbols` finds a
+  `Symbol` whose `name == "main"` (`has_main=T`), and `sym.id.id` is readable.
+- But the single `HirFunction` obtained via `for fn_ in module.functions.values()`
+  is **corrupt on field read**:
+  - `fn_.name` → garbage text, `.len()` returns **-1** (so `nm == "main"` never
+    matches → original code sets `has_main=false` → `main` never called → silent).
+  - `fn_.symbol` → **null** (`fn_.symbol.id` traps `field access on nil receiver`).
+  - `fn_.body.stmts.len()` → **0** (real body lost).
+- `Dict<SymbolId,HirFunction>.has(main_sym)` / `[main_sym]` **also fail** to find
+  the present entry (struct-keyed Dict lookup miscompiled), even when `main_sym`
+  is taken from the (correct) symbol table.
+
+### What this rules out
+- NOT monomorphization (returns modules unchanged when no generics — our case).
+- NOT the `main`-detection logic: rewriting `process_module` to locate `main` via
+  the symbol table (`Symbol.name`, authoritative) correctly sets `has_main=T`, but
+  the function's **body is unreadable**, so it cannot be executed.
+- NOT (solely) a struct-name collision: there are duplicate `struct HirFunction`
+  (85.mdsoc `hir_function.spl` `{name,param_count,return_type,body_inst_count}`,
+  30.types `bidir_phase1c.spl`) and duplicate `struct SymbolId`
+  (hir_types `{id:i64}` vs 00.common/dependency `{name:text}`, +lib copies).
+  Renaming the `HirFunction` duplicates to unique names (`MdsocHirFunction`,
+  `Phase1cHirFunction`, matching the existing `BidirHirFunction` precedent) and
+  the `{name:text}` `SymbolId` duplicates (`DepSymbolId`) did **not** change the
+  corruption — `body_stmts` stayed 0. (Incremental builds only recompiled the
+  edited files; a full clean rebuild was not attempted and may still matter if the
+  seed picks a global struct layout — but the read stayed corrupt regardless.)
+
+### Conclusion
+Same seed codegen class as the rep9.spl reproducer above (enum/struct payload
+store/load offset). Here it manifests as **struct-valued `Dict.values()` / struct
+field reads returning a default/empty struct** (null pointer fields, garbage text,
+empty arrays) in the interpreter-backend compilation unit, while the same data
+reads fine in the frontend/symbol-table path. Because the function *body* itself is
+unreadable, there is **no use-site `.spl` workaround** in `process_module` — a
+name-lookup workaround finds `main` but cannot obtain its statements. Requires the
+seed cranelift fix for struct payload/field offsets (see rep9 "Next step").
+
+### Probe idiom that works vs traps
+- `print`/`eprint` of **string literals + integers** work (survive on clean exit;
+  `eprint` unbuffered).
+- Any probe that reads a nested field on a `.values()`-iterated `HirFunction`
+  (`fn_.symbol.id`, `fn_.name` in `+`/interpolation) either returns garbage or
+  traps `field access on nil receiver` — do not build diagnostics on those.
