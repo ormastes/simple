@@ -43,32 +43,40 @@ impl InterpreterBackendImpl:
         val env = Environment.new()
         val ctx = EvalContext(env: env, module: module, backend: self)
 
-        # Iterate functions via .values() and derive each key from the
-        # function's own `symbol` field. `module.functions.keys()` can yield a
-        # nil first element for the single-file / synthetic-main HIR module
-        # (the seed's struct-keyed-Dict keys() path returns a null SymbolId for
-        # this module shape), which then nil-derefs at `symbol.id`. The stored
-        # HirFunction values are always valid and carry the same SymbolId in
-        # `fn_.symbol`, so keying off the value avoids the bad key entirely.
+        # Locate `main` by symbol name via the symbol table. The cranelift seed
+        # miscompiles two things on the single-file / synthetic-main HIR module:
+        #   1. `HirFunction.name` read off a `.values()`-iterated struct returns
+        #      a garbage text (len == -1), so a name compare never matches.
+        #   2. `Dict<SymbolId, HirFunction>.has()/[]` (a struct-keyed Dict) fails
+        #      to find an entry that is present.
+        # The symbol table (`Symbol.name`, `Symbol.id.id`) reads correctly, so we
+        # resolve main's numeric SymbolId there, then linear-scan the function
+        # values comparing `fn_.symbol.id` (never touching the broken name/has).
         var has_main = false
-        var main_fn_opt: HirFunction? = None
-        for fn_ in module.functions.values():
-            val symbol = fn_.symbol
-            val nm = fn_.name
-            ctx.env.define_global(symbol, Value.Function(FunctionValue(symbol: symbol, name: nm)))
-            if nm == "main":
-                has_main = true
-                main_fn_opt = Some(fn_)
-
-        # Also register builtins from symbol table
+        var main_id: i64 = -1
         for sym_id in module.symbols.symbols.keys():
             val sym = module.symbols.symbols[sym_id]
             ctx.env.define_global(sym.id, Value.Function(FunctionValue(symbol: sym.id, name: sym.name)))
+            if sym.name == "main":
+                has_main = true
+                main_id = sym.id.id
 
+        var main_fn_opt: HirFunction? = None
+        var _fn_total = 0
+        for fn_ in module.functions.values():
+            val fsym = fn_.symbol
+            ctx.env.define_global(fsym, Value.Function(FunctionValue(symbol: fsym, name: fn_.name)))
+            _fn_total = _fn_total + 1
+            if has_main:
+                main_fn_opt = Some(fn_)
+
+        eprint("[FX] has_main=" + (if has_main: "T" else: "F") + " total=" + _fn_total.to_string())
         if has_main:
             match main_fn_opt:
                 case Some(main_fn):
+                    eprint("[FX] pre-call body_stmts=" + main_fn.body.stmts.len().to_string())
                     val result = self.call_hir_function(main_fn, [], ctx)?
+                    eprint("[FX] post-call")
                     Ok(BackendResult.Value(result))
                 case None:
                     Ok(BackendResult.Unit)

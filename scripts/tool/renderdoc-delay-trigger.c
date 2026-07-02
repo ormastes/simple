@@ -14,6 +14,7 @@
 
 typedef int (*renderdoc_get_api_fn_t)(int, void **);
 typedef void *(*real_dlsym_fn_t)(void *, const char *);
+typedef void *(*egl_get_proc_address_fn_t)(const char *);
 
 struct library_lookup {
     const char *needle;
@@ -27,6 +28,8 @@ static PFN_vkCreateInstance real_vkCreateInstance;
 static PFN_vkGetInstanceProcAddr real_vkGetInstanceProcAddr;
 static VkInstance last_vk_instance;
 static RENDERDOC_DevicePointer last_rdoc_device_pointer;
+static void *real_egl_handle;
+static egl_get_proc_address_fn_t real_eglGetProcAddress;
 
 static int env_enabled(const char *name) {
     const char *value = getenv(name);
@@ -96,6 +99,14 @@ static void *real_vulkan_symbol(const char *symbol) {
     return result;
 }
 
+static void *real_egl_symbol(const char *symbol) {
+    void *result = real_dlsym_lookup(RTLD_NEXT, symbol);
+    if (result) return result;
+    result = library_symbol("libEGL.so.1", &real_egl_handle, symbol);
+    if (!result) result = library_symbol("libEGL.so", &real_egl_handle, symbol);
+    return result;
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateInstance(
     const VkInstanceCreateInfo *pCreateInfo,
     const VkAllocationCallbacks *pAllocator,
@@ -130,7 +141,25 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(
     return real_vkGetInstanceProcAddr(instance, pName);
 }
 
+void *eglGetProcAddress(const char *procname) {
+    if (!real_eglGetProcAddress) {
+        real_eglGetProcAddress = (egl_get_proc_address_fn_t)real_egl_symbol("eglGetProcAddress");
+    }
+    if (procname && strcmp(procname, "vkGetInstanceProcAddr") == 0) {
+        log_line("rdoc_delay_trigger_eglgetproc=vkGetInstanceProcAddr");
+        return (void *)vkGetInstanceProcAddr;
+    }
+    return real_eglGetProcAddress ? real_eglGetProcAddress(procname) : NULL;
+}
+
 void *dlsym(void *handle, const char *symbol) {
+    if (symbol && strcmp(symbol, "eglGetProcAddress") == 0) {
+        if (!real_eglGetProcAddress) {
+            real_eglGetProcAddress = (egl_get_proc_address_fn_t)real_dlsym_lookup(handle, symbol);
+        }
+        log_line("rdoc_delay_trigger_dlsym=eglGetProcAddress");
+        return (void *)eglGetProcAddress;
+    }
     if (symbol && strcmp(symbol, "vkGetInstanceProcAddr") == 0) {
         if (!real_vkGetInstanceProcAddr) {
             real_vkGetInstanceProcAddr = (PFN_vkGetInstanceProcAddr)real_dlsym_lookup(handle, symbol);

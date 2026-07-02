@@ -491,6 +491,11 @@ diagnostics from the Chrome and Electron evidence envs:
 `linux_vulkan_render_log_compare_renderdoc_chrome_gpu_launcher_clear_renderdoc_layer`,
 `linux_vulkan_render_log_compare_renderdoc_chrome_gpu_launcher_vk_instance_layers`,
 `linux_vulkan_render_log_compare_renderdoc_chrome_autocapture_status`,
+`linux_vulkan_render_log_compare_renderdoc_chrome_autocapture_api`,
+`linux_vulkan_render_log_compare_renderdoc_chrome_autocapture_started`,
+`linux_vulkan_render_log_compare_renderdoc_chrome_autocapture_finished`,
+`linux_vulkan_render_log_compare_renderdoc_chrome_autocapture_start_source`,
+`linux_vulkan_render_log_compare_renderdoc_chrome_autocapture_end_source`,
 `linux_vulkan_render_log_compare_renderdoc_chrome_egl_get_platform_display_count`,
 `linux_vulkan_render_log_compare_renderdoc_chrome_egl_initialize_count`,
 `linux_vulkan_render_log_compare_renderdoc_chrome_egl_initialize_return_count`,
@@ -503,10 +508,11 @@ diagnostics from the Chrome and Electron evidence envs:
 `linux_vulkan_render_log_compare_renderdoc_chrome_vk_enum_instance_extension_count`,
 `linux_vulkan_render_log_compare_renderdoc_chrome_vk_create_instance_count`, and
 `linux_vulkan_render_log_compare_renderdoc_chrome_vk_create_device_count`, with
-matching `...renderdoc_electron...` fields. These fields preserve the current
-Linux diagnosis that browser GPU children can enumerate Vulkan layers and
-extensions, enter `eglInitialize`, and still fail to produce `.rdc` before
-`eglInitialize` returns or `vkCreateInstance` is reached.
+matching `...renderdoc_electron...` fields. These fields preserve whether the
+GPU-process shim reached the RenderDoc API and capture start/end calls, plus
+the current Linux diagnosis that browser GPU children can enumerate Vulkan
+layers and extensions, enter `eglInitialize`, and still fail to produce `.rdc`
+before `eglInitialize` returns or `vkCreateInstance` is reached.
 When this pattern is present, the row emits
 `linux_vulkan_render_log_compare_renderdoc_linux_angle_workaround_status=needed`
 with reason
@@ -827,9 +833,13 @@ RenderDoc statuses for Simple, Chrome, and Electron. It also forwards
 `linux_vulkan_render_log_compare_host_renderdoc_*`,
 `linux_vulkan_render_log_compare_host_chrome_*`, and
 `linux_vulkan_render_log_compare_host_electron_*` rows from the Linux leaf
-wrapper so platform agents can distinguish missing host tools from failed
-capture artifacts. These host-tool rows are readiness diagnostics; real `.rdc`
-artifact status and `RDOC` magic remain the RenderDoc completion proof. macOS
+wrapper, plus browser autocapture lifecycle rows such as
+`linux_vulkan_render_log_compare_renderdoc_chrome_autocapture_api`,
+`..._started`, `..._finished`, `..._start_source`, and `..._end_source`, so
+platform agents can distinguish missing host tools, missing RenderDoc API
+startup, and failed capture artifacts. These host-tool and lifecycle rows are
+readiness diagnostics; real `.rdc` artifact status and `RDOC` magic remain the
+RenderDoc completion proof. macOS
 must report `required_api=metal`, `pairwise_status=pass`, and GPU capture status
 `pass`; Windows must report `required_api=d3d12`, `pairwise_status=pass`, PIX
 status `pass`, zero blocked gates, passing native readback/browser
@@ -1678,13 +1688,29 @@ RDOC_ELECTRON_GPU_AUTOCAPTURE=1 \
 
 Autocapture builds and preloads
 `scripts/tool/renderdoc-vulkan-autocapture.c`, which wraps
-`dlsym`, `vkGetDeviceProcAddr`, `vkGetInstanceProcAddr`, `vkQueueSubmit`,
-`vkQueueSubmit2`, `vkQueueSubmit2KHR`, and `vkQueuePresentKHR` to call
+`dlsym`, `vkGetDeviceProcAddr`, `vkGetInstanceProcAddr`,
+`vkEnumeratePhysicalDevices`, selected physical-device query calls,
+`vkQueueSubmit`, `vkQueueSubmit2`, `vkQueueSubmit2KHR`, and `vkQueuePresentKHR`
+to call
 RenderDoc's in-application capture API from inside the GPU process. Current
 Linux evidence records `rdoc_autocapture_loaded=1` and confirms Chromium asks
-`dlsym` for `vkGetInstanceProcAddr`, but it does not reach the wrapped queue
-hooks before timeout/failure, so this remains diagnostic evidence rather than a
-passing `.rdc` gate. `RDOC_GPU_LAUNCHER_START_ON_DLSYM=1` is an opt-in
+`dlsym` for `vkGetInstanceProcAddr`, enumerates physical devices, and reads
+device properties. If the summary shows
+`vk_get_physical_device_queue_family:0`,
+`vk_enum_device_extension:0`, and `vk_create_device:0`, Chromium stopped before
+logical device selection in the hooked GPU process. If the same run with
+`RDOC_GPU_LAUNCHER_CLEAR_RENDERDOC_LAYER=1` reaches `vk_create_device`,
+submit, and present, the local blocker is the RenderDoc Vulkan layer path, not
+Chromium's Vulkan backing or the shim. Use
+`RDOC_GPU_LAUNCHER_CLEAR_INSTANCE_LAYERS=1` and
+`RDOC_GPU_LAUNCHER_CLEAR_RENDERDOC_ENABLE=1` to isolate explicit-layer versus
+implicit enablement. If either knob alone still blocks and both together reach
+frames, the blocker is layer activation itself. That remains diagnostic
+evidence rather than a passing `.rdc` gate. Clearing both activation knobs and
+setting `RDOC_GPU_LAUNCHER_NO_DLOPEN_FALLBACK=0` can prove late RenderDoc API
+loading without startup crashes, but `rdoc_autocapture_end=... ok=0` still
+means no browser `.rdc` was captured; this has been observed on both Chrome and
+Electron Chromium. `RDOC_GPU_LAUNCHER_START_ON_DLSYM=1` is an opt-in
 diagnostic that starts capture as soon as `vkGetInstanceProcAddr` is resolved;
 on this host it crashes Chrome's GPU process with exit code 139 and still does
 not produce `.rdc`, so keep it off for canonical evidence runs.
@@ -1695,6 +1721,12 @@ log:
 ```text
 rdoc_autocapture_summary=status:<state> api:<0|1> started:<0|1> finished:<0|1> start_source:<hook> end_source:<hook> submit:<n> present:<n> egl_swap:<n> ...
 ```
+
+Chromium may launch multiple short-lived GPU processes into one launcher log.
+The shared evidence helper scores all `rdoc_autocapture_summary` rows and emits
+the most informative one, using line order only to break equal-score ties, so a
+later `status:not-started api:0` restart does not hide an earlier
+`api:1 started:1 finished:1` diagnostic attempt.
 
 Use that row only for blocker triage. `status:not-started api:0` means the shim
 loaded but RenderDoc API discovery did not complete. `api:1 started:0` means the

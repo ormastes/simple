@@ -20,6 +20,16 @@ static PFN_vkQueueSubmit2 real_vkQueueSubmit2;
 static PFN_vkQueueSubmit2KHR real_vkQueueSubmit2KHR;
 static PFN_vkCreateInstance real_vkCreateInstance;
 static PFN_vkCreateDevice real_vkCreateDevice;
+static PFN_vkEnumeratePhysicalDevices real_vkEnumeratePhysicalDevices;
+static PFN_vkGetPhysicalDeviceProperties real_vkGetPhysicalDeviceProperties;
+static PFN_vkGetPhysicalDeviceProperties2 real_vkGetPhysicalDeviceProperties2;
+static PFN_vkGetPhysicalDeviceProperties2KHR real_vkGetPhysicalDeviceProperties2KHR;
+static PFN_vkGetPhysicalDeviceFeatures2 real_vkGetPhysicalDeviceFeatures2;
+static PFN_vkGetPhysicalDeviceFeatures2KHR real_vkGetPhysicalDeviceFeatures2KHR;
+static PFN_vkGetPhysicalDeviceQueueFamilyProperties real_vkGetPhysicalDeviceQueueFamilyProperties;
+static PFN_vkGetPhysicalDeviceQueueFamilyProperties2 real_vkGetPhysicalDeviceQueueFamilyProperties2;
+static PFN_vkGetPhysicalDeviceQueueFamilyProperties2KHR real_vkGetPhysicalDeviceQueueFamilyProperties2KHR;
+static PFN_vkEnumerateDeviceExtensionProperties real_vkEnumerateDeviceExtensionProperties;
 static PFN_vkEnumerateInstanceLayerProperties real_vkEnumerateInstanceLayerProperties;
 static PFN_vkEnumerateInstanceExtensionProperties real_vkEnumerateInstanceExtensionProperties;
 static PFN_vkGetDeviceProcAddr real_vkGetDeviceProcAddr;
@@ -81,6 +91,21 @@ static int egl_initialize_last_error = -1;
 static uint64_t egl_choose_config_count;
 static uint64_t vk_create_instance_count;
 static uint64_t vk_create_device_count;
+static uint64_t vk_enum_physical_device_count;
+static uint64_t vk_enum_physical_device_return_count;
+static int vk_enum_physical_device_last_result = 0;
+static uint32_t vk_enum_physical_device_last_count;
+static uint64_t vk_get_physical_device_properties_count;
+static uint64_t vk_get_physical_device_properties2_count;
+static uint64_t vk_get_physical_device_features2_count;
+static uint64_t vk_get_physical_device_queue_family_count;
+static uint64_t vk_get_physical_device_queue_family2_count;
+static uint32_t vk_get_physical_device_queue_family_last_count;
+static uint32_t vk_get_physical_device_queue_family2_last_count;
+static uint64_t vk_enum_device_extension_count;
+static uint64_t vk_enum_device_extension_return_count;
+static int vk_enum_device_extension_last_result = 0;
+static uint32_t vk_enum_device_extension_last_count;
 static uint64_t vk_enum_instance_layer_count;
 static uint64_t vk_enum_instance_extension_count;
 static uint64_t proc_trace_count;
@@ -88,6 +113,7 @@ static uint64_t proc_trace_count;
 static int env_enabled(const char *name);
 static uint64_t env_u64(const char *name, uint64_t fallback);
 static uintptr_t find_loaded_symbol_no_loader_lock(const char *library_hint, const char *symbol);
+static int is_egl_intercept_symbol(const char *name);
 void eglLockVulkanQueueANGLE(void *display);
 void eglUnlockVulkanQueueANGLE(void *display);
 int eglPrepareSwapBuffersANGLE(void *display, void *surface);
@@ -102,6 +128,16 @@ int eglChooseConfig(void *display, const int *attrib_list, void *configs, int co
 int eglGetError(void);
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateInstance(const VkInstanceCreateInfo *pCreateInfo, const VkAllocationCallbacks *pAllocator, VkInstance *pInstance);
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *pCreateInfo, const VkAllocationCallbacks *pAllocator, VkDevice *pDevice);
+VKAPI_ATTR VkResult VKAPI_CALL vkEnumeratePhysicalDevices(VkInstance instance, uint32_t *pPhysicalDeviceCount, VkPhysicalDevice *pPhysicalDevices);
+VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceProperties(VkPhysicalDevice physicalDevice, VkPhysicalDeviceProperties *pProperties);
+VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceProperties2(VkPhysicalDevice physicalDevice, VkPhysicalDeviceProperties2 *pProperties);
+VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceProperties2KHR(VkPhysicalDevice physicalDevice, VkPhysicalDeviceProperties2 *pProperties);
+VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceFeatures2(VkPhysicalDevice physicalDevice, VkPhysicalDeviceFeatures2 *pFeatures);
+VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceFeatures2KHR(VkPhysicalDevice physicalDevice, VkPhysicalDeviceFeatures2 *pFeatures);
+VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceQueueFamilyProperties(VkPhysicalDevice physicalDevice, uint32_t *pQueueFamilyPropertyCount, VkQueueFamilyProperties *pQueueFamilyProperties);
+VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceQueueFamilyProperties2(VkPhysicalDevice physicalDevice, uint32_t *pQueueFamilyPropertyCount, VkQueueFamilyProperties2 *pQueueFamilyProperties);
+VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceQueueFamilyProperties2KHR(VkPhysicalDevice physicalDevice, uint32_t *pQueueFamilyPropertyCount, VkQueueFamilyProperties2 *pQueueFamilyProperties);
+VKAPI_ATTR VkResult VKAPI_CALL vkEnumerateDeviceExtensionProperties(VkPhysicalDevice physicalDevice, const char *pLayerName, uint32_t *pPropertyCount, VkExtensionProperties *pProperties);
 VKAPI_ATTR VkResult VKAPI_CALL vkEnumerateInstanceLayerProperties(uint32_t *pPropertyCount, VkLayerProperties *pProperties);
 VKAPI_ATTR VkResult VKAPI_CALL vkEnumerateInstanceExtensionProperties(const char *pLayerName, uint32_t *pPropertyCount, VkExtensionProperties *pProperties);
 
@@ -128,6 +164,13 @@ static void trace_proc_name(const char *source, const char *name) {
     char buf[256];
     snprintf(buf, sizeof(buf), "rdoc_autocapture_proc_%s=%s", source, name ? name : "(null)");
     log_line(buf);
+}
+
+static void sanitize_log_value(char *text) {
+    if (!text) return;
+    for (char *p = text; *p; p++) {
+        if (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') *p = '_';
+    }
 }
 
 static void *real_dlsym_lookup(void *handle, const char *symbol) {
@@ -274,9 +317,9 @@ static void log_capture_summary(void) {
     } else if (capture_started) {
         status = "started-not-ended";
     }
-    char buf[1024];
+    char buf[2304];
     snprintf(buf, sizeof(buf),
-        "rdoc_autocapture_summary=status:%s api:%u started:%u finished:%u start_source:%s end_source:%s submit:%llu present:%llu egl_swap:%llu egl_prepare_swap:%llu egl_wait_scheduled:%llu egl_vk_lock:%llu egl_vk_unlock:%llu egl_make_current:%llu egl_create_window_surface:%llu egl_create_platform_window_surface:%llu egl_get_display:%llu egl_get_platform_display:%llu egl_initialize:%llu egl_initialize_return:%llu egl_initialize_success:%llu egl_initialize_fail:%llu egl_initialize_last_result:%d egl_initialize_last_error:%d egl_choose_config:%llu vk_create_instance:%llu vk_create_device:%llu vk_enum_instance_layer:%llu vk_enum_instance_extension:%llu proc_trace:%llu",
+        "rdoc_autocapture_summary=status:%s api:%u started:%u finished:%u start_source:%s end_source:%s submit:%llu present:%llu egl_swap:%llu egl_prepare_swap:%llu egl_wait_scheduled:%llu egl_vk_lock:%llu egl_vk_unlock:%llu egl_make_current:%llu egl_create_window_surface:%llu egl_create_platform_window_surface:%llu egl_get_display:%llu egl_get_platform_display:%llu egl_initialize:%llu egl_initialize_return:%llu egl_initialize_success:%llu egl_initialize_fail:%llu egl_initialize_last_result:%d egl_initialize_last_error:%d egl_choose_config:%llu vk_create_instance:%llu vk_create_device:%llu vk_enum_physical_device:%llu vk_enum_physical_device_return:%llu vk_enum_physical_device_last_result:%d vk_enum_physical_device_last_count:%u vk_get_physical_device_properties:%llu vk_get_physical_device_properties2:%llu vk_get_physical_device_features2:%llu vk_get_physical_device_queue_family:%llu vk_get_physical_device_queue_family2:%llu vk_get_physical_device_queue_family_last_count:%u vk_get_physical_device_queue_family2_last_count:%u vk_enum_device_extension:%llu vk_enum_device_extension_return:%llu vk_enum_device_extension_last_result:%d vk_enum_device_extension_last_count:%u vk_enum_instance_layer:%llu vk_enum_instance_extension:%llu proc_trace:%llu",
         status,
         rdoc_api ? 1u : 0u,
         capture_started ? 1u : 0u,
@@ -304,6 +347,21 @@ static void log_capture_summary(void) {
         (unsigned long long)egl_choose_config_count,
         (unsigned long long)vk_create_instance_count,
         (unsigned long long)vk_create_device_count,
+        (unsigned long long)vk_enum_physical_device_count,
+        (unsigned long long)vk_enum_physical_device_return_count,
+        vk_enum_physical_device_last_result,
+        vk_enum_physical_device_last_count,
+        (unsigned long long)vk_get_physical_device_properties_count,
+        (unsigned long long)vk_get_physical_device_properties2_count,
+        (unsigned long long)vk_get_physical_device_features2_count,
+        (unsigned long long)vk_get_physical_device_queue_family_count,
+        (unsigned long long)vk_get_physical_device_queue_family2_count,
+        vk_get_physical_device_queue_family_last_count,
+        vk_get_physical_device_queue_family2_last_count,
+        (unsigned long long)vk_enum_device_extension_count,
+        (unsigned long long)vk_enum_device_extension_return_count,
+        vk_enum_device_extension_last_result,
+        vk_enum_device_extension_last_count,
         (unsigned long long)vk_enum_instance_layer_count,
         (unsigned long long)vk_enum_instance_extension_count,
         (unsigned long long)proc_trace_count);
@@ -333,6 +391,16 @@ static int env_enabled(const char *name) {
     const char *value = getenv(name);
     if (!value || !*value) return 0;
     return strcmp(value, "1") == 0 || strcmp(value, "true") == 0 || strcmp(value, "yes") == 0;
+}
+
+static int is_egl_intercept_symbol(const char *name) {
+    if (!name) return 0;
+    return strncmp(name, "egl", 3) == 0 ||
+        strncmp(name, "EGL_", 4) == 0 ||
+        strcmp(name, "eglLockVulkanQueueANGLE") == 0 ||
+        strcmp(name, "eglUnlockVulkanQueueANGLE") == 0 ||
+        strcmp(name, "eglPrepareSwapBuffersANGLE") == 0 ||
+        strcmp(name, "eglWaitUntilWorkScheduledANGLE") == 0;
 }
 
 static int find_loaded_library_callback(struct dl_phdr_info *info, size_t size, void *data) {
@@ -581,6 +649,10 @@ void *eglGetProcAddress(const char *procname) {
         real_eglGetProcAddress = (egl_get_proc_address_fn_t)real_next_symbol("eglGetProcAddress");
     }
     trace_proc_name("eglgetproc", procname);
+    if (env_enabled("RDOC_AUTOCAPTURE_DISABLE_EGL_WRAP") &&
+        (!procname || strcmp(procname, "vkGetInstanceProcAddr") != 0)) {
+        return real_eglGetProcAddress ? real_eglGetProcAddress(procname) : NULL;
+    }
     if (procname && (strcmp(procname, "eglSwapBuffers") == 0 || strcmp(procname, "EGL_SwapBuffers") == 0)) {
         if (!real_eglSwapBuffers && real_eglGetProcAddress) {
             real_eglSwapBuffers = (egl_swap_buffers_fn_t)real_eglGetProcAddress(procname);
@@ -850,6 +922,149 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateDevice(
     return real_vkCreateDevice(physicalDevice, pCreateInfo, pAllocator, pDevice);
 }
 
+VKAPI_ATTR VkResult VKAPI_CALL vkEnumeratePhysicalDevices(
+    VkInstance instance,
+    uint32_t *pPhysicalDeviceCount,
+    VkPhysicalDevice *pPhysicalDevices) {
+    if (!real_vkEnumeratePhysicalDevices) {
+        real_vkEnumeratePhysicalDevices = (PFN_vkEnumeratePhysicalDevices)real_next_symbol("vkEnumeratePhysicalDevices");
+    }
+    vk_enum_physical_device_count++;
+    if (!real_vkEnumeratePhysicalDevices) return VK_ERROR_INITIALIZATION_FAILED;
+    VkResult result = real_vkEnumeratePhysicalDevices(instance, pPhysicalDeviceCount, pPhysicalDevices);
+    vk_enum_physical_device_return_count++;
+    vk_enum_physical_device_last_result = (int)result;
+    if (pPhysicalDeviceCount) vk_enum_physical_device_last_count = *pPhysicalDeviceCount;
+    return result;
+}
+
+VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceProperties(
+    VkPhysicalDevice physicalDevice,
+    VkPhysicalDeviceProperties *pProperties) {
+    if (!real_vkGetPhysicalDeviceProperties) {
+        real_vkGetPhysicalDeviceProperties = (PFN_vkGetPhysicalDeviceProperties)real_next_symbol("vkGetPhysicalDeviceProperties");
+    }
+    vk_get_physical_device_properties_count++;
+    if (real_vkGetPhysicalDeviceProperties) {
+        real_vkGetPhysicalDeviceProperties(physicalDevice, pProperties);
+        if (pProperties) {
+            char name[VK_MAX_PHYSICAL_DEVICE_NAME_SIZE];
+            snprintf(name, sizeof(name), "%s", pProperties->deviceName);
+            sanitize_log_value(name);
+            char buf[512];
+            snprintf(buf, sizeof(buf),
+                "rdoc_autocapture_physical_device_properties=index:%llu type:%u vendor:%u device:%u api:%u driver:%u name:%s",
+                (unsigned long long)vk_get_physical_device_properties_count,
+                (unsigned int)pProperties->deviceType,
+                (unsigned int)pProperties->vendorID,
+                (unsigned int)pProperties->deviceID,
+                (unsigned int)pProperties->apiVersion,
+                (unsigned int)pProperties->driverVersion,
+                name);
+            log_line(buf);
+        }
+    }
+}
+
+VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceProperties2(
+    VkPhysicalDevice physicalDevice,
+    VkPhysicalDeviceProperties2 *pProperties) {
+    if (!real_vkGetPhysicalDeviceProperties2) {
+        real_vkGetPhysicalDeviceProperties2 = (PFN_vkGetPhysicalDeviceProperties2)real_next_symbol("vkGetPhysicalDeviceProperties2");
+    }
+    vk_get_physical_device_properties2_count++;
+    if (real_vkGetPhysicalDeviceProperties2) real_vkGetPhysicalDeviceProperties2(physicalDevice, pProperties);
+}
+
+VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceProperties2KHR(
+    VkPhysicalDevice physicalDevice,
+    VkPhysicalDeviceProperties2 *pProperties) {
+    if (!real_vkGetPhysicalDeviceProperties2KHR) {
+        real_vkGetPhysicalDeviceProperties2KHR = (PFN_vkGetPhysicalDeviceProperties2KHR)real_next_symbol("vkGetPhysicalDeviceProperties2KHR");
+    }
+    vk_get_physical_device_properties2_count++;
+    if (real_vkGetPhysicalDeviceProperties2KHR) real_vkGetPhysicalDeviceProperties2KHR(physicalDevice, pProperties);
+}
+
+VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceFeatures2(
+    VkPhysicalDevice physicalDevice,
+    VkPhysicalDeviceFeatures2 *pFeatures) {
+    if (!real_vkGetPhysicalDeviceFeatures2) {
+        real_vkGetPhysicalDeviceFeatures2 = (PFN_vkGetPhysicalDeviceFeatures2)real_next_symbol("vkGetPhysicalDeviceFeatures2");
+    }
+    vk_get_physical_device_features2_count++;
+    if (real_vkGetPhysicalDeviceFeatures2) real_vkGetPhysicalDeviceFeatures2(physicalDevice, pFeatures);
+}
+
+VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceFeatures2KHR(
+    VkPhysicalDevice physicalDevice,
+    VkPhysicalDeviceFeatures2 *pFeatures) {
+    if (!real_vkGetPhysicalDeviceFeatures2KHR) {
+        real_vkGetPhysicalDeviceFeatures2KHR = (PFN_vkGetPhysicalDeviceFeatures2KHR)real_next_symbol("vkGetPhysicalDeviceFeatures2KHR");
+    }
+    vk_get_physical_device_features2_count++;
+    if (real_vkGetPhysicalDeviceFeatures2KHR) real_vkGetPhysicalDeviceFeatures2KHR(physicalDevice, pFeatures);
+}
+
+VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceQueueFamilyProperties(
+    VkPhysicalDevice physicalDevice,
+    uint32_t *pQueueFamilyPropertyCount,
+    VkQueueFamilyProperties *pQueueFamilyProperties) {
+    if (!real_vkGetPhysicalDeviceQueueFamilyProperties) {
+        real_vkGetPhysicalDeviceQueueFamilyProperties = (PFN_vkGetPhysicalDeviceQueueFamilyProperties)real_next_symbol("vkGetPhysicalDeviceQueueFamilyProperties");
+    }
+    vk_get_physical_device_queue_family_count++;
+    if (real_vkGetPhysicalDeviceQueueFamilyProperties) {
+        real_vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, pQueueFamilyPropertyCount, pQueueFamilyProperties);
+        if (pQueueFamilyPropertyCount) vk_get_physical_device_queue_family_last_count = *pQueueFamilyPropertyCount;
+    }
+}
+
+VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceQueueFamilyProperties2(
+    VkPhysicalDevice physicalDevice,
+    uint32_t *pQueueFamilyPropertyCount,
+    VkQueueFamilyProperties2 *pQueueFamilyProperties) {
+    if (!real_vkGetPhysicalDeviceQueueFamilyProperties2) {
+        real_vkGetPhysicalDeviceQueueFamilyProperties2 = (PFN_vkGetPhysicalDeviceQueueFamilyProperties2)real_next_symbol("vkGetPhysicalDeviceQueueFamilyProperties2");
+    }
+    vk_get_physical_device_queue_family2_count++;
+    if (real_vkGetPhysicalDeviceQueueFamilyProperties2) {
+        real_vkGetPhysicalDeviceQueueFamilyProperties2(physicalDevice, pQueueFamilyPropertyCount, pQueueFamilyProperties);
+        if (pQueueFamilyPropertyCount) vk_get_physical_device_queue_family2_last_count = *pQueueFamilyPropertyCount;
+    }
+}
+
+VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceQueueFamilyProperties2KHR(
+    VkPhysicalDevice physicalDevice,
+    uint32_t *pQueueFamilyPropertyCount,
+    VkQueueFamilyProperties2 *pQueueFamilyProperties) {
+    if (!real_vkGetPhysicalDeviceQueueFamilyProperties2KHR) {
+        real_vkGetPhysicalDeviceQueueFamilyProperties2KHR = (PFN_vkGetPhysicalDeviceQueueFamilyProperties2KHR)real_next_symbol("vkGetPhysicalDeviceQueueFamilyProperties2KHR");
+    }
+    vk_get_physical_device_queue_family2_count++;
+    if (real_vkGetPhysicalDeviceQueueFamilyProperties2KHR) {
+        real_vkGetPhysicalDeviceQueueFamilyProperties2KHR(physicalDevice, pQueueFamilyPropertyCount, pQueueFamilyProperties);
+        if (pQueueFamilyPropertyCount) vk_get_physical_device_queue_family2_last_count = *pQueueFamilyPropertyCount;
+    }
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL vkEnumerateDeviceExtensionProperties(
+    VkPhysicalDevice physicalDevice,
+    const char *pLayerName,
+    uint32_t *pPropertyCount,
+    VkExtensionProperties *pProperties) {
+    if (!real_vkEnumerateDeviceExtensionProperties) {
+        real_vkEnumerateDeviceExtensionProperties = (PFN_vkEnumerateDeviceExtensionProperties)real_next_symbol("vkEnumerateDeviceExtensionProperties");
+    }
+    vk_enum_device_extension_count++;
+    if (!real_vkEnumerateDeviceExtensionProperties) return VK_ERROR_INITIALIZATION_FAILED;
+    VkResult result = real_vkEnumerateDeviceExtensionProperties(physicalDevice, pLayerName, pPropertyCount, pProperties);
+    vk_enum_device_extension_return_count++;
+    vk_enum_device_extension_last_result = (int)result;
+    if (pPropertyCount) vk_enum_device_extension_last_count = *pPropertyCount;
+    return result;
+}
+
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(
     VkDevice device,
     const char *pName) {
@@ -923,6 +1138,46 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(
         log_line("rdoc_autocapture_wrap=vkCreateDevice-instance");
         return (PFN_vkVoidFunction)vkCreateDevice;
     }
+    if (pName && strcmp(pName, "vkEnumeratePhysicalDevices") == 0) {
+        log_line("rdoc_autocapture_wrap=vkEnumeratePhysicalDevices");
+        return (PFN_vkVoidFunction)vkEnumeratePhysicalDevices;
+    }
+    if (pName && strcmp(pName, "vkGetPhysicalDeviceProperties") == 0) {
+        log_line("rdoc_autocapture_wrap=vkGetPhysicalDeviceProperties");
+        return (PFN_vkVoidFunction)vkGetPhysicalDeviceProperties;
+    }
+    if (pName && strcmp(pName, "vkGetPhysicalDeviceProperties2") == 0) {
+        log_line("rdoc_autocapture_wrap=vkGetPhysicalDeviceProperties2");
+        return (PFN_vkVoidFunction)vkGetPhysicalDeviceProperties2;
+    }
+    if (pName && strcmp(pName, "vkGetPhysicalDeviceProperties2KHR") == 0) {
+        log_line("rdoc_autocapture_wrap=vkGetPhysicalDeviceProperties2KHR");
+        return (PFN_vkVoidFunction)vkGetPhysicalDeviceProperties2KHR;
+    }
+    if (pName && strcmp(pName, "vkGetPhysicalDeviceFeatures2") == 0) {
+        log_line("rdoc_autocapture_wrap=vkGetPhysicalDeviceFeatures2");
+        return (PFN_vkVoidFunction)vkGetPhysicalDeviceFeatures2;
+    }
+    if (pName && strcmp(pName, "vkGetPhysicalDeviceFeatures2KHR") == 0) {
+        log_line("rdoc_autocapture_wrap=vkGetPhysicalDeviceFeatures2KHR");
+        return (PFN_vkVoidFunction)vkGetPhysicalDeviceFeatures2KHR;
+    }
+    if (pName && strcmp(pName, "vkGetPhysicalDeviceQueueFamilyProperties") == 0) {
+        log_line("rdoc_autocapture_wrap=vkGetPhysicalDeviceQueueFamilyProperties");
+        return (PFN_vkVoidFunction)vkGetPhysicalDeviceQueueFamilyProperties;
+    }
+    if (pName && strcmp(pName, "vkGetPhysicalDeviceQueueFamilyProperties2") == 0) {
+        log_line("rdoc_autocapture_wrap=vkGetPhysicalDeviceQueueFamilyProperties2");
+        return (PFN_vkVoidFunction)vkGetPhysicalDeviceQueueFamilyProperties2;
+    }
+    if (pName && strcmp(pName, "vkGetPhysicalDeviceQueueFamilyProperties2KHR") == 0) {
+        log_line("rdoc_autocapture_wrap=vkGetPhysicalDeviceQueueFamilyProperties2KHR");
+        return (PFN_vkVoidFunction)vkGetPhysicalDeviceQueueFamilyProperties2KHR;
+    }
+    if (pName && strcmp(pName, "vkEnumerateDeviceExtensionProperties") == 0) {
+        log_line("rdoc_autocapture_wrap=vkEnumerateDeviceExtensionProperties");
+        return (PFN_vkVoidFunction)vkEnumerateDeviceExtensionProperties;
+    }
     if (pName && strcmp(pName, "vkQueueSubmit") == 0) {
         log_line("rdoc_autocapture_wrap=vkQueueSubmit-instance");
         return (PFN_vkVoidFunction)vkQueueSubmit;
@@ -946,6 +1201,11 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(
 void *dlsym(void *handle, const char *symbol) {
     trace_proc_name("dlsym", symbol);
     if (env_enabled("RDOC_AUTOCAPTURE_DISABLE_DLSYM_WRAP")) {
+        return real_dlsym_lookup(handle, symbol);
+    }
+    if (env_enabled("RDOC_AUTOCAPTURE_DISABLE_EGL_WRAP") &&
+        is_egl_intercept_symbol(symbol) &&
+        strcmp(symbol, "eglGetProcAddress") != 0) {
         return real_dlsym_lookup(handle, symbol);
     }
     if (symbol && strcmp(symbol, "vkGetInstanceProcAddr") == 0) {
@@ -1095,6 +1355,76 @@ void *dlsym(void *handle, const char *symbol) {
         }
         log_line("rdoc_autocapture_dlsym=vkCreateDevice");
         return (void *)vkCreateDevice;
+    }
+    if (symbol && strcmp(symbol, "vkEnumeratePhysicalDevices") == 0) {
+        if (!real_vkEnumeratePhysicalDevices) {
+            real_vkEnumeratePhysicalDevices = (PFN_vkEnumeratePhysicalDevices)real_dlsym_lookup(handle, symbol);
+        }
+        log_line("rdoc_autocapture_dlsym=vkEnumeratePhysicalDevices");
+        return (void *)vkEnumeratePhysicalDevices;
+    }
+    if (symbol && strcmp(symbol, "vkGetPhysicalDeviceProperties") == 0) {
+        if (!real_vkGetPhysicalDeviceProperties) {
+            real_vkGetPhysicalDeviceProperties = (PFN_vkGetPhysicalDeviceProperties)real_dlsym_lookup(handle, symbol);
+        }
+        log_line("rdoc_autocapture_dlsym=vkGetPhysicalDeviceProperties");
+        return (void *)vkGetPhysicalDeviceProperties;
+    }
+    if (symbol && strcmp(symbol, "vkGetPhysicalDeviceProperties2") == 0) {
+        if (!real_vkGetPhysicalDeviceProperties2) {
+            real_vkGetPhysicalDeviceProperties2 = (PFN_vkGetPhysicalDeviceProperties2)real_dlsym_lookup(handle, symbol);
+        }
+        log_line("rdoc_autocapture_dlsym=vkGetPhysicalDeviceProperties2");
+        return (void *)vkGetPhysicalDeviceProperties2;
+    }
+    if (symbol && strcmp(symbol, "vkGetPhysicalDeviceProperties2KHR") == 0) {
+        if (!real_vkGetPhysicalDeviceProperties2KHR) {
+            real_vkGetPhysicalDeviceProperties2KHR = (PFN_vkGetPhysicalDeviceProperties2KHR)real_dlsym_lookup(handle, symbol);
+        }
+        log_line("rdoc_autocapture_dlsym=vkGetPhysicalDeviceProperties2KHR");
+        return (void *)vkGetPhysicalDeviceProperties2KHR;
+    }
+    if (symbol && strcmp(symbol, "vkGetPhysicalDeviceFeatures2") == 0) {
+        if (!real_vkGetPhysicalDeviceFeatures2) {
+            real_vkGetPhysicalDeviceFeatures2 = (PFN_vkGetPhysicalDeviceFeatures2)real_dlsym_lookup(handle, symbol);
+        }
+        log_line("rdoc_autocapture_dlsym=vkGetPhysicalDeviceFeatures2");
+        return (void *)vkGetPhysicalDeviceFeatures2;
+    }
+    if (symbol && strcmp(symbol, "vkGetPhysicalDeviceFeatures2KHR") == 0) {
+        if (!real_vkGetPhysicalDeviceFeatures2KHR) {
+            real_vkGetPhysicalDeviceFeatures2KHR = (PFN_vkGetPhysicalDeviceFeatures2KHR)real_dlsym_lookup(handle, symbol);
+        }
+        log_line("rdoc_autocapture_dlsym=vkGetPhysicalDeviceFeatures2KHR");
+        return (void *)vkGetPhysicalDeviceFeatures2KHR;
+    }
+    if (symbol && strcmp(symbol, "vkGetPhysicalDeviceQueueFamilyProperties") == 0) {
+        if (!real_vkGetPhysicalDeviceQueueFamilyProperties) {
+            real_vkGetPhysicalDeviceQueueFamilyProperties = (PFN_vkGetPhysicalDeviceQueueFamilyProperties)real_dlsym_lookup(handle, symbol);
+        }
+        log_line("rdoc_autocapture_dlsym=vkGetPhysicalDeviceQueueFamilyProperties");
+        return (void *)vkGetPhysicalDeviceQueueFamilyProperties;
+    }
+    if (symbol && strcmp(symbol, "vkGetPhysicalDeviceQueueFamilyProperties2") == 0) {
+        if (!real_vkGetPhysicalDeviceQueueFamilyProperties2) {
+            real_vkGetPhysicalDeviceQueueFamilyProperties2 = (PFN_vkGetPhysicalDeviceQueueFamilyProperties2)real_dlsym_lookup(handle, symbol);
+        }
+        log_line("rdoc_autocapture_dlsym=vkGetPhysicalDeviceQueueFamilyProperties2");
+        return (void *)vkGetPhysicalDeviceQueueFamilyProperties2;
+    }
+    if (symbol && strcmp(symbol, "vkGetPhysicalDeviceQueueFamilyProperties2KHR") == 0) {
+        if (!real_vkGetPhysicalDeviceQueueFamilyProperties2KHR) {
+            real_vkGetPhysicalDeviceQueueFamilyProperties2KHR = (PFN_vkGetPhysicalDeviceQueueFamilyProperties2KHR)real_dlsym_lookup(handle, symbol);
+        }
+        log_line("rdoc_autocapture_dlsym=vkGetPhysicalDeviceQueueFamilyProperties2KHR");
+        return (void *)vkGetPhysicalDeviceQueueFamilyProperties2KHR;
+    }
+    if (symbol && strcmp(symbol, "vkEnumerateDeviceExtensionProperties") == 0) {
+        if (!real_vkEnumerateDeviceExtensionProperties) {
+            real_vkEnumerateDeviceExtensionProperties = (PFN_vkEnumerateDeviceExtensionProperties)real_dlsym_lookup(handle, symbol);
+        }
+        log_line("rdoc_autocapture_dlsym=vkEnumerateDeviceExtensionProperties");
+        return (void *)vkEnumerateDeviceExtensionProperties;
     }
     if (symbol && strcmp(symbol, "vkQueueSubmit") == 0) {
         if (!real_vkQueueSubmit) {
