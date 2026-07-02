@@ -579,3 +579,35 @@ user-method name resolution — so a fresh stage4 build should not hit this SEGV
    silent, trace whether the print statement reaches codegen/exec at all
    (frontend parses, but does lower_module complete and does the interpreter/exec
    run `main`?).
+
+### Iteration 12 addendum — fresh build clears the SEGV; blocker advanced to phase5 `interpret_pipeline`
+Built `scratchpad/stage4_fix22` from CURRENT source (no seed edit; ~142s,
+3 compiled/985 cached). Results:
+- `run hello.spl` **no longer SEGVs** (the stale-binary `SymbolTable.get`
+  collision is gone in current source). But it still prints nothing and `-c
+  "print(1+1)"` still emits no `2` (both rc 0).
+- `SIMPLE_COMPILER_TRACE=1 stage4_fix22 run hello.spl` shows the pipeline
+  completing phases 1-4 (`load_sources`, `parse`, `hir_typecheck`,
+  `monomorphize` all `:done`) and reaching **`phase5:mode_dispatch:start`**,
+  then exiting rc 0 with no execution.
+- Phase 5 `CompileMode.Interpret` → `self.interpret()` → `interpret_pipeline()`
+  (`src/compiler/80.driver/driver.spl:621-651`). The loop does
+  `val hir_module = self.ctx.hir_modules[name]; if hir_module == nil: continue`
+  keyed on `name = source.module_name`. If that lookup misses, EVERY module is
+  skipped → `has_result` stays false → returns `Success(Unit)` silently, `main`
+  never runs → no print. **This is the live `-c`/run blocker.**
+- Prime suspect: `driver.spl:595` `self.ctx.hir_modules = mono_modules`
+  (also `:436` for the bootstrap effect pass) REPLACES `hir_modules` with the
+  monomorphization output. If `run_monomorphization` re-keys or drops the
+  entry-module key, `hir_modules[source.module_name]` misses in
+  `interpret_pipeline`. NOTE this is a Dict keyed by module-name text — but the
+  `.get()`/index path itself is proven-good (getval3), so the fault is a
+  **key mismatch / missing entry**, not a Dict-runtime defect.
+
+### Iteration 13 concrete next step
+Add a temporary trace in `interpret_pipeline` (driver.spl:~638) printing
+`sources.len()`, each `name`, and whether `hir_modules[name] == nil` plus
+`hir_modules.keys()`; rebuild stage4 and run `run hello.spl`. If the entry
+module is absent/renamed after mono, fix the keying at `driver.spl:595`
+(`run_monomorphization` key contract) so the interpret loop finds it. Do NOT
+pursue Dict.get Option wrapping (disproven above).
