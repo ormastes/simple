@@ -31,28 +31,30 @@ fn run_ssh_probe(lane: text, cmd_parts: [text], timeout_ms: u64) -> (text, text,
         "rm -f \"" + serial_path + "\" \"" + good_path + "\" \"" + bad_path + "\" \"" + session_smf_path + "\" \"" + session_exec_path + "\" \"" + askpass_ok + "\" \"" + askpass_bad + "\" \"" + known_hosts + "\"; " +
         "printf '#!/bin/sh\\necho simpleos\\n' > \"" + askpass_ok + "\"; chmod +x \"" + askpass_ok + "\"; " +
         "printf '#!/bin/sh\\necho wrongpass\\n' > \"" + askpass_bad + "\"; chmod +x \"" + askpass_bad + "\"; " +
+        "setsid_cmd=''; if command -v setsid >/dev/null 2>&1; then setsid_cmd='setsid'; fi; " +
         cmd_parts.join(" ") + " > \"" + serial_path + "\" 2>&1 & qpid=$!; " +
         "echo '[ssh-host] qemu-pid='\"$qpid\"; " +
         "ready=0; for i in $(seq 1 160); do " +
-        "if grep -a -q '\\[sshd\\] SSH daemon listening on port 2222' \"" + serial_path + "\" 2>/dev/null; then ready=1; break; fi; " +
+        "if grep -a -q '\\[sshd\\] accept loop start' \"" + serial_path + "\" 2>/dev/null; then ready=1; break; fi; " +
         "if ! kill -0 \"$qpid\" 2>/dev/null; then break; fi; sleep 0.25; done; " +
-        "echo '[ssh-host] ready='\"$ready\"; " +
+        "echo '[ssh-host] accept-ready='\"$ready\"; " +
         "grep -a -E '\\[sshd\\] (SSH daemon listening|accept loop start|accept wait ticks|accepted client)' \"" + serial_path + "\" 2>/dev/null | tail -20 || true; " +
+        "if [ \"$ready\" = 1 ]; then sleep 1; fi; " +
         "good_exit=1; if [ \"$ready\" = 1 ]; then " +
         "echo '[ssh-host] openssh-good-start'; " +
-        "timeout " + ssh_timeout_seconds + " bash -lc 'SSH_ASKPASS=\"" + askpass_ok + "\" SSH_ASKPASS_REQUIRE=force DISPLAY=none setsid ssh " + ssh_opts + " root@127.0.0.1 true' > \"" + good_path + "\" 2>&1; " +
+        "timeout " + ssh_timeout_seconds + " env SSH_ASKPASS=\"" + askpass_ok + "\" SSH_ASKPASS_REQUIRE=force DISPLAY=none $setsid_cmd ssh " + ssh_opts + " root@127.0.0.1 true > \"" + good_path + "\" 2>&1; " +
         "good_exit=$?; echo '[ssh-host] openssh-good-exit='\"$good_exit\"; fi; " +
         "session_smf_exit=1; if [ \"$ready\" = 1 ]; then " +
         "echo '[ssh-host] session-smf-start'; " +
-        "timeout " + ssh_timeout_seconds + " bash -lc 'SSH_ASKPASS=\"" + askpass_ok + "\" SSH_ASKPASS_REQUIRE=force DISPLAY=none setsid ssh " + ssh_opts + " root@127.0.0.1 \"simple.smf --version\"' > \"" + session_smf_path + "\" 2>&1; " +
+        "timeout " + ssh_timeout_seconds + " env SSH_ASKPASS=\"" + askpass_ok + "\" SSH_ASKPASS_REQUIRE=force DISPLAY=none $setsid_cmd ssh " + ssh_opts + " root@127.0.0.1 \"simple.smf --version\" > \"" + session_smf_path + "\" 2>&1; " +
         "session_smf_exit=$?; echo '[ssh-host] session-smf-exit='\"$session_smf_exit\"; fi; " +
         "session_exec_exit=1; if [ \"$ready\" = 1 ]; then " +
         "echo '[ssh-host] session-exec-start'; " +
-        "timeout " + ssh_timeout_seconds + " bash -lc 'SSH_ASKPASS=\"" + askpass_ok + "\" SSH_ASKPASS_REQUIRE=force DISPLAY=none setsid ssh " + ssh_opts + " root@127.0.0.1 \"simple --check\"' > \"" + session_exec_path + "\" 2>&1; " +
+        "timeout " + ssh_timeout_seconds + " env SSH_ASKPASS=\"" + askpass_ok + "\" SSH_ASKPASS_REQUIRE=force DISPLAY=none $setsid_cmd ssh " + ssh_opts + " root@127.0.0.1 \"simple --check\" > \"" + session_exec_path + "\" 2>&1; " +
         "session_exec_exit=$?; echo '[ssh-host] session-exec-exit='\"$session_exec_exit\"; fi; " +
         "bad_exit=0; if [ \"$ready\" = 1 ]; then " +
         "echo '[ssh-host] openssh-bad-auth-start'; " +
-        "timeout " + ssh_timeout_seconds + " bash -lc 'SSH_ASKPASS=\"" + askpass_bad + "\" SSH_ASKPASS_REQUIRE=force DISPLAY=none setsid ssh " + ssh_opts + " root@127.0.0.1 true' > \"" + bad_path + "\" 2>&1; " +
+        "timeout " + ssh_timeout_seconds + " env SSH_ASKPASS=\"" + askpass_bad + "\" SSH_ASKPASS_REQUIRE=force DISPLAY=none $setsid_cmd ssh " + ssh_opts + " root@127.0.0.1 true > \"" + bad_path + "\" 2>&1; " +
         "bad_exit=$?; echo '[ssh-host] openssh-bad-exit='\"$bad_exit\"; fi; " +
         "good_seen=0; bad_seen=0; session_smf_seen=0; session_exec_seen=0; if [ \"$ready\" = 1 ]; then " +
         "for i in $(seq 1 80); do " +
@@ -93,16 +95,18 @@ fn run_rv64_ssh_single_connection_probe(cmd_parts: [text], timeout_ms: u64) -> (
     val shell_cmd =
         "rm -f \"" + serial_path + "\" \"" + good_path + "\" \"" + askpass_ok + "\" \"" + known_hosts + "\"; " +
         "printf '#!/bin/sh\\necho simpleos\\n' > \"" + askpass_ok + "\"; chmod +x \"" + askpass_ok + "\"; " +
+        "setsid_cmd=''; if command -v setsid >/dev/null 2>&1; then setsid_cmd='setsid'; fi; " +
         cmd_parts.join(" ") + " > \"" + serial_path + "\" 2>&1 & qpid=$!; " +
         "echo '[ssh-host] qemu-pid='\"$qpid\"; " +
         "ready=0; for i in $(seq 1 160); do " +
-        "if grep -a -q '\\[sshd\\] SSH daemon listening on port 2222' \"" + serial_path + "\" 2>/dev/null; then ready=1; break; fi; " +
+        "if grep -a -q '\\[sshd\\] accept loop start' \"" + serial_path + "\" 2>/dev/null; then ready=1; break; fi; " +
         "if ! kill -0 \"$qpid\" 2>/dev/null; then break; fi; sleep 0.25; done; " +
-        "echo '[ssh-host] ready='\"$ready\"; " +
+        "echo '[ssh-host] accept-ready='\"$ready\"; " +
         "grep -a -E '\\[sshd\\] (SSH daemon listening|accept loop start|accepted client)' \"" + serial_path + "\" 2>/dev/null | tail -20 || true; " +
+        "if [ \"$ready\" = 1 ]; then sleep 1; fi; " +
         "good_exit=1; if [ \"$ready\" = 1 ]; then " +
         "echo '[ssh-host] rv64-combined-start'; " +
-        "timeout 180 bash -lc 'SSH_ASKPASS=\"" + askpass_ok + "\" SSH_ASKPASS_REQUIRE=force DISPLAY=none setsid ssh " + ssh_opts + " root@127.0.0.1 \"simple.smf --version; simple --check\"' > \"" + good_path + "\" 2>&1; " +
+        "timeout 180 env SSH_ASKPASS=\"" + askpass_ok + "\" SSH_ASKPASS_REQUIRE=force DISPLAY=none $setsid_cmd ssh " + ssh_opts + " root@127.0.0.1 \"simple.smf --version; simple --check\" > \"" + good_path + "\" 2>&1; " +
         "good_exit=$?; echo '[ssh-host] rv64-combined-exit='\"$good_exit\"; fi; " +
         "good_seen=0; session_smf_seen=0; session_exec_seen=0; if [ \"$ready\" = 1 ]; then " +
         "if grep -a -q '\\[sshd-session\\] auth ok user=root method=password' \"" + serial_path + "\" 2>/dev/null && " +

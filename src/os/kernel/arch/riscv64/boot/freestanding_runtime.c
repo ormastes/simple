@@ -950,7 +950,7 @@ spl_i64 rt_bytes_slice(spl_i64 array_value, spl_i64 start_value, spl_i64 len_val
 
 spl_i64 rt_bytes_u8_at(spl_i64 array_value, spl_i64 index_value) {
     RtArray *array = rt_as_array(array_value);
-    spl_i64 index = index_value;
+    spl_i64 index = rt_index_arg(index_value);
     if (!array) {
         return 0;
     }
@@ -1048,6 +1048,11 @@ static void uart_write_hex_byte(spl_u8 value) {
     static const char hex[] = "0123456789abcdef";
     uart_put_byte((spl_u8)hex[(value >> 4) & 0x0fU]);
     uart_put_byte((spl_u8)hex[value & 0x0fU]);
+}
+
+static void uart_write_hex_u16(spl_u16 value) {
+    uart_write_hex_byte((spl_u8)(value >> 8));
+    uart_write_hex_byte((spl_u8)value);
 }
 
 static void uart_line_tcp_read5(const spl_u8 *data, spl_u64 len) {
@@ -1665,7 +1670,9 @@ static void rt_avail_push(spl_u64 avail_base, spl_u16 qsize, spl_u16 desc_idx) {
     spl_u16 idx = *idxp;
     volatile spl_u16 *slot = (volatile spl_u16 *)(avail_base + 4ULL + ((spl_u64)(idx % qsize) * 2ULL));
     *slot = desc_idx;
+    __sync_synchronize();
     *idxp = idx + 1U;
+    __sync_synchronize();
 }
 
 static spl_i64 rt_setup_virtqueue(spl_u64 bar0, spl_u16 queue, spl_u64 *desc, spl_u64 *avail, spl_u64 *used, spl_u16 *qsize) {
@@ -1799,6 +1806,9 @@ static spl_i64 g_boot_tcp_response_kind = 0;
 static spl_u8 g_boot_tcp_rx_buf[4096];
 static spl_u64 g_boot_tcp_rx_len = 0;
 static spl_u64 g_boot_tcp_rx_off = 0;
+static spl_u64 g_boot_tcp_arp_log_count = 0;
+static spl_u64 g_boot_tcp_ipv4_log_count = 0;
+static spl_u64 g_boot_tcp_tcp_diag_log_count = 0;
 
 spl_i64 rt_boot_tcp_bind_port(spl_i64 port);
 
@@ -1986,6 +1996,13 @@ static void rt_process_tcp(const spl_u8 *frame, spl_u64 len) {
     spl_u64 tcp_hlen;
     spl_u64 payload_len;
     if (len < 54 || ip[9] != 6) {
+        if (g_boot_tcp_tcp_diag_log_count < 8ULL) {
+            uart_write_bytes("BTCP IPP ", 9);
+            uart_write_hex_byte(ip[9]);
+            uart_put_byte(13);
+            uart_put_byte(10);
+            g_boot_tcp_tcp_diag_log_count = g_boot_tcp_tcp_diag_log_count + 1ULL;
+        }
         return;
     }
     ip_hlen = (spl_u64)(ip[0] & 0x0fU) * 4ULL;
@@ -1996,6 +2013,15 @@ static void rt_process_tcp(const spl_u8 *frame, spl_u64 len) {
     tcp = ip + ip_hlen;
     src_port = rt_be16(tcp);
     dst_port = rt_be16(tcp + 2);
+    if (g_boot_tcp_tcp_diag_log_count < 8ULL) {
+        uart_write_bytes("BTCP TCP d=", 11);
+        uart_write_hex_u16(dst_port);
+        uart_write_bytes(" f=", 3);
+        uart_write_hex_byte(tcp[13]);
+        uart_put_byte(13);
+        uart_put_byte(10);
+        g_boot_tcp_tcp_diag_log_count = g_boot_tcp_tcp_diag_log_count + 1ULL;
+    }
     if (dst_port != g_boot_tcp_listen_port) {
         return;
     }
@@ -2082,9 +2108,17 @@ static void rt_process_rx_frame(const spl_u8 *frame, spl_u64 len) {
     if (ethertype == 0x0806U && len >= 42) {
         const spl_u8 *arp = frame + 14;
         if (rt_be16(arp + 6) == 1 && rt_be32(arp + 24) == 0x0a00020fU) {
+            if (g_boot_tcp_arp_log_count < 4ULL) {
+                uart_line("BTCP ARP");
+                g_boot_tcp_arp_log_count = g_boot_tcp_arp_log_count + 1ULL;
+            }
             rt_send_arp_reply(frame);
         }
     } else if (ethertype == 0x0800U) {
+        if (g_boot_tcp_ipv4_log_count < 4ULL) {
+            uart_line("BTCP IPv4");
+            g_boot_tcp_ipv4_log_count = g_boot_tcp_ipv4_log_count + 1ULL;
+        }
         rt_process_tcp(frame, len);
     }
 }
@@ -2101,7 +2135,9 @@ static spl_i64 rt_poll_rx_once(void) {
     if (!g_rt_net_ready || !g_rt_net_rx_ready) {
         return -1;
     }
+    __sync_synchronize();
     used_idx = *used_idxp;
+    __sync_synchronize();
     if (used_idx == g_rt_rx_last_used) {
         return 0;
     }
@@ -2539,6 +2575,9 @@ spl_i64 rt_boot_tcp_bind_port(spl_i64 port) {
     g_boot_tcp_send_next = 0x10203040U;
     g_boot_tcp_rx_len = 0;
     g_boot_tcp_rx_off = 0;
+    g_boot_tcp_arp_log_count = 0;
+    g_boot_tcp_ipv4_log_count = 0;
+    g_boot_tcp_tcp_diag_log_count = 0;
     uart_line("BTCP PORT OK");
     return 100;
 }

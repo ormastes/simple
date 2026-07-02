@@ -1,6 +1,6 @@
 # RV64 Live SSH Login in QEMU Specification
 
-> This Step Base spec restores the RV64 live SSH gate. Static scenarios prove that `rv64-ssh` is a distinct QEMU lane with host port 2222 forwarded to guest port 22 and a production `SshDaemon` RV64 entry. The opt-in live scenario builds the RV64 SSH kernel, boots QEMU, waits for the daemon listening marker, then drives OpenSSH good-password auth/exec and wrong-password fail-closed checks through the shared host-side SSH contract.
+> This Step Base spec restores the RV64 live SSH gate. Static scenarios prove that `rv64-ssh` is a distinct QEMU lane with host port 2222 forwarded to guest port 2222 and a production `SshDaemon` RV64 entry. The opt-in live scenario builds the RV64 SSH kernel, boots QEMU, waits for the daemon accept-loop marker, then drives OpenSSH good-password auth/exec and wrong-password fail-closed checks through the shared host-side SSH contract.
 
 <!-- sdn-diagram:id=rv64_ssh_live_login_in_qemu_spec.arch -->
 <details class="sdn-source">
@@ -35,7 +35,7 @@ rv64_ssh_live_login_in_qemu_spec -> os
 
 # RV64 Live SSH Login in QEMU Specification
 
-This Step Base spec restores the RV64 live SSH gate. Static scenarios prove that `rv64-ssh` is a distinct QEMU lane with host port 2222 forwarded to guest port 22 and a production `SshDaemon` RV64 entry. The opt-in live scenario builds the RV64 SSH kernel, boots QEMU, waits for the daemon listening marker, then drives OpenSSH good-password auth/exec and wrong-password fail-closed checks through the shared host-side SSH contract.
+This Step Base spec restores the RV64 live SSH gate. Static scenarios prove that `rv64-ssh` is a distinct QEMU lane with host port 2222 forwarded to guest port 2222 and a production `SshDaemon` RV64 entry. The opt-in live scenario builds the RV64 SSH kernel, boots QEMU, waits for the daemon accept-loop marker, then drives OpenSSH good-password auth/exec and wrong-password fail-closed checks through the shared host-side SSH contract.
 
 ## At a Glance
 
@@ -56,8 +56,8 @@ This Step Base spec restores the RV64 live SSH gate. Static scenarios prove that
 
 This Step Base spec restores the RV64 live SSH gate. Static scenarios prove that
 `rv64-ssh` is a distinct QEMU lane with host port 2222 forwarded to guest port
-22 and a production `SshDaemon` RV64 entry. The opt-in live scenario builds the
-RV64 SSH kernel, boots QEMU, waits for the daemon listening marker, then drives
+2222 and a production `SshDaemon` RV64 entry. The opt-in live scenario builds the
+RV64 SSH kernel, boots QEMU, waits for the daemon accept-loop marker, then drives
 OpenSSH good-password auth/exec and wrong-password fail-closed checks through
 the shared host-side SSH contract.
 
@@ -155,7 +155,7 @@ complete.
   direct receive return advances from the 17-byte `ssh-userauth` decrypt into
   service accept and auth handling.
 - The opt-in `rv64-ssh` live run must build a current-source RV64 SSH kernel.
-- The shared host probe must see `[sshd] SSH daemon listening on port 2222`.
+- The shared host probe must see `[sshd] accept loop start`.
 - The OpenSSH good-password transcript must exit zero and the serial log must
   include `[sshd-session] auth ok user=root method=password`.
 - The OpenSSH exec transcript must include `[sshd-session] exec command=true`.
@@ -249,24 +249,38 @@ expect(full_networking_runtime.contains("/home/ormastes/dev/pub/simple")).to_be(
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 73 lines folded for reproduction.
+Runnable source: 96 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val runner = rt_file_read_text("src/os/_QemuRunner/scenario_exec.spl")
 val contract = rt_file_read_text("src/os/ssh_qemu_contract.spl")
 val facade = rt_file_read_text("src/os/kernel/net/rt_net_socket_facade.spl")
+val daemon = rt_file_read_text("src/os/apps/sshd/sshd.spl")
 val kex = rt_file_read_text("src/os/apps/sshd/ssh_kex.spl")
 val session = rt_file_read_text("src/os/apps/sshd/ssh_session.spl")
 val helpers = rt_file_read_text("src/os/apps/sshd/ssh_session_helpers.spl")
 val session_kex = rt_file_read_text("src/os/apps/sshd/ssh_session_kex.spl")
+val freestanding_runtime = rt_file_read_text("src/os/kernel/arch/riscv64/boot/freestanding_runtime.c")
 val rv64_aes_helper = rt_file_read_text("examples/09_embedded/simple_os/arch/riscv64/boot/tls13_aes256_gcm_helper.c")
+val build_runner = rt_file_read_text("src/os/_QemuRunner/os_build_run.spl")
 expect(runner.contains("scenario.name == \"rv64-ssh\"")).to_equal(true)
 expect(runner.contains("run_rv64_ssh_probe(cmd_parts, timeout_ms)")).to_equal(true)
+expect(build_runner).to_contain("_is_riscv64_live_helper_target(target) and _simple_binary_supports_backend(\"src/compiler_rust/target/bootstrap/simple\", backend_name)")
+expect(build_runner).to_contain("return \"src/compiler_rust/target/bootstrap/simple\"")
 expect(contract.contains("pub fn run_rv64_ssh_probe")).to_equal(true)
 expect(contract.contains("run_rv64_ssh_single_connection_probe(cmd_parts, timeout_ms)")).to_equal(true)
 expect(contract.contains("extern fn rt_process_run_timeout")).to_equal(true)
-expect(contract.contains("SSH daemon listening on port 2222")).to_equal(true)
+expect(contract).to_contain("\\[sshd\\] accept loop start")
+expect(contract).to_contain("SSH daemon listening|accept loop start")
+expect(contract).to_contain("echo '[ssh-host] accept-ready='")
+expect(contract).to_contain("if [ \"$ready\" = 1 ]; then sleep 1; fi")
+expect(contract).to_contain("setsid_cmd=''; if command -v setsid")
+expect(contract).to_contain("$setsid_cmd ssh")
+expect(contract.contains("setsid ssh")).to_be(false)
+expect(daemon).to_contain("rt_boot_tcp_bind(\"0.0.0.0:")
+expect(daemon).to_contain("self.port")
+expect(daemon.contains("rt_boot_tcp_bind(\"0.0.0.0:22\")")).to_be(false)
 expect(facade).to_contain("\"0.0.0.0:")
 expect(facade).to_contain("port_num")
 expect(facade).to_contain("_rt_net_bound_listener_fd")
@@ -275,6 +289,15 @@ expect(facade).to_contain("os_fd: client_os_fd.to_i32()")
 expect(facade).to_contain("send raw-fast rc")
 expect(facade).to_contain("version recv raw-fast")
 expect(facade.contains("_rt_net_bound_listener_port == 22u16")).to_be(false)
+expect(freestanding_runtime).to_contain("__sync_synchronize();\n    *idxp = idx + 1U;")
+expect(freestanding_runtime).to_contain("uart_line(\"BTCP ARP\")")
+expect(freestanding_runtime).to_contain("uart_line(\"BTCP IPv4\")")
+expect(freestanding_runtime).to_contain("BTCP IPP ")
+expect(freestanding_runtime).to_contain("BTCP TCP d=")
+expect(freestanding_runtime).to_contain("uart_write_hex_u16(dst_port)")
+expect(freestanding_runtime).to_contain("spl_i64 index = rt_index_arg(index_value);")
+expect(freestanding_runtime).to_contain("g_boot_tcp_arp_log_count = 0")
+expect(freestanding_runtime).to_contain("g_boot_tcp_tcp_diag_log_count = 0")
 expect(kex).to_contain("buf = _push_gcm_cipher_pair(buf)")
 expect(kex.contains("buf = _push_aes128_gcm_cipher(buf)")).to_be(false)
 expect(session).to_contain("self.socket_fd as i64 == 200 and msg_type == 20u32")
