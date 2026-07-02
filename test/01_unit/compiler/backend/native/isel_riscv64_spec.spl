@@ -134,28 +134,29 @@ fn build_gep_module(name: text) -> MirModule:
     functions[SymbolId.new(0)] = func
     MirModule(name: name, functions: functions, statics: {}, constants: {}, types: {})
 
-fn build_call_module(name: text) -> MirModule:
+fn build_call_module_with_arg_count(name: text, arg_count: i64) -> MirModule:
     val i64_type = MirType(kind: MirTypeKind.I64)
     val func_type = MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: i64_type, is_variadic: false)))
+    val result_id = arg_count + 1
     var locals = [
         MirLocal(id: LocalId(id: 0), name: Some("_return"), type_: i64_type, kind: LocalKind.Return),
-        MirLocal(id: LocalId(id: 11), name: Some("result"), type_: i64_type, kind: LocalKind.Temp)
+        MirLocal(id: LocalId(id: result_id), name: Some("result"), type_: i64_type, kind: LocalKind.Temp)
     ]
     var instructions: [MirInst] = []
     var args: [MirOperand] = []
-    for i in 0..10:
+    for i in 0..arg_count:
         val id = i + 1
         val local = LocalId(id: id)
         locals.push(MirLocal(id: local, name: Some("arg{id}"), type_: i64_type, kind: LocalKind.Temp))
         instructions.push(MirInst(kind: MirInstKind.Const(local, MirConstValue.Int(id), i64_type), span: nil))
         args.push(MirOperand(kind: MirOperandKind.Copy(local)))
     val func_op = MirOperand(kind: MirOperandKind.Const(MirConstValue.Str("callee"), func_type))
-    instructions.push(MirInst(kind: MirInstKind.Call(Some(LocalId(id: 11)), func_op, args), span: nil))
+    instructions.push(MirInst(kind: MirInstKind.Call(Some(LocalId(id: result_id)), func_op, args), span: nil))
     val entry = MirBlock(
         id: BlockId.new(0),
         label: Some("entry"),
         instructions: instructions,
-        terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 11)))))
+        terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: result_id)))))
     )
     val func = MirFunction(
         symbol: SymbolId.new(0),
@@ -173,6 +174,12 @@ fn build_call_module(name: text) -> MirModule:
     var functions: Dict<SymbolId, MirFunction> = {}
     functions[SymbolId.new(0)] = func
     MirModule(name: name, functions: functions, statics: {}, constants: {}, types: {})
+
+fn build_call_module(name: text) -> MirModule:
+    build_call_module_with_arg_count(name, 10)
+
+fn build_many_arg_call_module(name: text) -> MirModule:
+    build_call_module_with_arg_count(name, 265)
 
 fn build_void_call_module(name: text) -> MirModule:
     val i64_type = MirType(kind: MirTypeKind.I64)
@@ -976,6 +983,16 @@ fn nth_imm(block: MachBlock, opcode: i64, nth: i64) -> i64:
             seen = seen + 1
     -999
 
+fn has_li_imm(block: MachBlock, imm: i64) -> bool:
+    for inst in block.insts:
+        if inst.opcode == RV_OP_LI:
+            match inst.operands[1].kind:
+                case Imm(value):
+                    if value == imm:
+                        return true
+                case _: ()
+    false
+
 fn last_dest_reg(block: MachBlock, opcode: i64) -> i64:
     var found = -1
     for inst in block.insts:
@@ -1274,6 +1291,13 @@ describe "Isel Riscv64":
         val stack1 = nth_mem_offset(block, RV_OP_SD, 1)
         expect(stack0).to_equal(0)
         expect(stack1).to_equal(RV64_WORD_SIZE)
+
+    it "materializes RV64 out-of-range stack argument offsets":
+        val module = isel_module_riscv64(build_many_arg_call_module("rv64_many_arg_call"))
+        val block = entry_block(module)
+        expect(has_li_imm(block, 2048)).to_equal(true)
+        expect(nth_mem_offset(block, RV_OP_SD, 256)).to_equal(0)
+        expect(nth_mem_base_reg(block, RV_OP_SD, 256)).to_be_greater_than(31)
 
     it "does not move a return register for RV64 void calls":
         val module = isel_module_riscv64(build_void_call_module("rv64_void_call"))
