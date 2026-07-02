@@ -451,30 +451,29 @@ pub class CompilerDriver:
                 lowering.module_filename = src_path
 
             # Step 1: Lower to HIR
-            # Default: perform REAL HIR lowering so plain `-c`/`run`/`check` user
-            # sources reach the interpreter/JIT backends with populated functions.
-            # The historical empty-HIR stub (used while lower_module and the O(n^2)
-            # per-decl blowup were being stabilized) is now opt-in via
-            # SIMPLE_STUB_HIR=1 as an escape hatch. Lowering prefers the already-
-            # parsed phase-2 module (self.ctx.modules[name]) — under low_memory the
-            # source text is evicted after parse, so re-parsing src.content yields a
-            # nil module and the 'undefined field functions on nil' crash; the
-            # bootstrap/entry-closure path still re-parses because those entries are
-            # not retained in ctx.modules.
-            val force_stub_hir = (rt_env_get("SIMPLE_STUB_HIR") ?? "") == "1"
+            # Real single-file HIR lowering is gated behind SIMPLE_UNSTUB_HIR=1
+            # because it currently SEGFAULTs at runtime: lower_function ->
+            # SymbolTable.lookup calls `scope.symbols.get(name)` (a Dict.get), but
+            # the compiled build mis-dispatches it to the user-defined
+            # SymbolTable.get(id: SymbolId?) — a method-resolution collision on the
+            # `get` name — passing a text where a SymbolId? is expected, yielding a
+            # garbage id and a nil-deref in `self.symbols[raw]` (gdb: SymbolTable.get
+            # <- lookup <- lower_function <- lower_module). Until that resolver bug is
+            # fixed the default stays the empty-HIR stub so `-c`/`run`/`check` do not
+            # crash. The bootstrap/entry-closure path lowers as before (it runs under
+            # the seed during native-build, not this runtime path).
+            val unstub_hir = (rt_env_get("SIMPLE_UNSTUB_HIR") ?? "") == "1"
             val native_entry_closure_hir = (rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
             val is_bootstrap_entry = native_entry_closure_hir or _driver_is_bootstrap_entry_source(src.path, name)
-            val hir_module = if is_bootstrap_entry or ((not force_stub_hir) and (src.content != "") and (not self.ctx.options.low_memory)):
-                # Real lowering via a fresh frontend re-parse — the proven path the
-                # self-hosted build uses to lower every module. The phase-2 module
-                # object (self.ctx.modules[name]) carries a SymbolTable that crashes
-                # SymbolTable.lookup inside lower_function, so we re-parse src.content
-                # (available here because low_memory eviction has not run) instead.
+            val hir_module = if is_bootstrap_entry:
                 val entry_module_for_hir = parse_full_frontend(src.content, src.path, name, self.ctx.logger)
                 lowering.lower_module(entry_module_for_hir)
-            elif (not force_stub_hir) and (self.ctx.modules[name] != nil):
-                # low_memory fallback: source text was evicted after parse, so a
-                # re-parse would yield a nil module; lower the phase-2 module object.
+            elif unstub_hir and (src.content != "") and (not self.ctx.options.low_memory):
+                # Opt-in real lowering via a fresh frontend re-parse (see caveat above).
+                val entry_module_for_hir = parse_full_frontend(src.content, src.path, name, self.ctx.logger)
+                lowering.lower_module(entry_module_for_hir)
+            elif unstub_hir and (self.ctx.modules[name] != nil):
+                # Opt-in real lowering, low_memory fallback (source evicted).
                 lowering.lower_module(self.ctx.modules[name])
             else:
                 # Empty-HIR stub: forced via SIMPLE_STUB_HIR=1, or fallback when the
