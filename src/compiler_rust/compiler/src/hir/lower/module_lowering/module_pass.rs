@@ -1173,10 +1173,42 @@ impl Lowerer {
                         _ => None,
                     };
                     if let Some(type_name) = type_name {
+                        let impl_method_names: std::collections::HashSet<&str> =
+                            impl_block.methods.iter().map(|m| m.name.as_str()).collect();
                         for method in &impl_block.methods {
                             let ret_ty = self.resolve_type_opt(&method.return_type).unwrap_or(TypeId::ANY);
                             let qualified = format!("{}.{}", type_name, method.name);
                             self.method_return_types.insert(qualified, ret_ty);
+                        }
+
+                        // Also register return types for inherited (non-overridden)
+                        // trait default methods, so calls to them resolve their real
+                        // return type instead of falling back to ANY.
+                        if let Some(ref trait_name) = impl_block.trait_name {
+                            if let Some(trait_def) = ast_module.items.iter().find_map(|item| {
+                                if let Node::Trait(t) = item {
+                                    if &t.name == trait_name {
+                                        Some(t)
+                                    } else {
+                                        None
+                                    }
+                                } else {
+                                    None
+                                }
+                            }) {
+                                for default_method in &trait_def.methods {
+                                    if default_method.is_abstract
+                                        || impl_method_names.contains(default_method.name.as_str())
+                                    {
+                                        continue;
+                                    }
+                                    let ret_ty = self
+                                        .resolve_type_opt(&default_method.return_type)
+                                        .unwrap_or(TypeId::ANY);
+                                    let qualified = format!("{}.{}", type_name, default_method.name);
+                                    self.method_return_types.insert(qualified, ret_ty);
+                                }
+                            }
                         }
                     }
                 }
@@ -1256,15 +1288,53 @@ impl Lowerer {
                         }
 
                         // Record trait impl metadata for vtable emission
-                        if impl_block.trait_name.is_some() {
+                        if let Some(ref trait_name) = impl_block.trait_name {
                             let type_id = self
                                 .resolve_type(&simple_parser::ast::Type::Simple(type_name.clone()))
                                 .unwrap_or(TypeId::ANY);
                             let mut methods_map = HashMap::new();
+                            let impl_method_names: std::collections::HashSet<&str> =
+                                impl_block.methods.iter().map(|m| m.name.as_str()).collect();
                             for method in &impl_block.methods {
                                 let fn_name = format!("{}.{}", type_name, method.name);
                                 methods_map.insert(method.name.clone(), fn_name);
                             }
+
+                            // Merge in trait default method bodies for methods the impl
+                            // doesn't override. Without this, the vtable slot list built
+                            // from `methods_map` silently omits the default method and the
+                            // per-slot function-pointer array ends up short, so calling the
+                            // inherited default through a vtable slot reads out-of-bounds
+                            // memory as a function pointer (crash) instead of dispatching to
+                            // the default body. Each default is lowered fresh per-impl so
+                            // `self` resolves against this impl's concrete type.
+                            if let Some(trait_def) = ast_module.items.iter().find_map(|item| {
+                                if let Node::Trait(t) = item {
+                                    if &t.name == trait_name {
+                                        Some(t)
+                                    } else {
+                                        None
+                                    }
+                                } else {
+                                    None
+                                }
+                            }) {
+                                for default_method in &trait_def.methods {
+                                    if default_method.is_abstract
+                                        || impl_method_names.contains(default_method.name.as_str())
+                                    {
+                                        continue;
+                                    }
+                                    let default_method =
+                                        method_with_impl_driver_attrs(default_method, &impl_block.attributes);
+                                    let hir_func = self.lower_function(&default_method, Some(type_name))?;
+                                    self.module.functions.push(hir_func);
+
+                                    let fn_name = format!("{}.{}", type_name, default_method.name);
+                                    methods_map.insert(default_method.name.clone(), fn_name);
+                                }
+                            }
+
                             self.module.impls.push(crate::hir::HirImpl {
                                 type_id,
                                 trait_id: None, // trait TypeId resolution deferred

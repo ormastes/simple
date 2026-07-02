@@ -2377,9 +2377,11 @@ pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
 /// These functions accept `*const c_char` and the runtime guarantees null termination.
 pub fn text_cstr_arg_indices(func_name: &str) -> Option<&'static [usize]> {
     match func_name {
-        // Native process functions in libsimple_runtime.a use C strings and
-        // SplArray pointers, not Rust RuntimeValue string ptr/len pairs.
-        "rt_process_run" | "rt_process_spawn" | "rt_process_execute" | "rt_process_run_timeout" => Some(&[0]),
+        // NOTE: rt_process_run/rt_process_spawn/rt_process_execute/rt_process_run_timeout
+        // are intentionally NOT listed here — they are handled by
+        // process_c_runtime_arg_indices (checked before this table), which now
+        // expands cmd to a (ptr, len) pair to match the linked runtime's actual
+        // signature (compiler_rust/runtime/src/value/sffi/env_process.rs).
         "rt_file_write_text" | "rt_file_append_text" => Some(&[0, 1]),
         "rt_dir_create" | "rt_dir_create_all" => Some(&[0]),
         "rt_cuda_launch_kernel" => Some(&[1]),
@@ -2469,10 +2471,21 @@ fn expand_process_c_runtime_args<M: Module>(
     cstr_indices: &[usize],
     array_indices: &[usize],
 ) -> Vec<cranelift_codegen::ir::Value> {
-    let mut expanded = expand_text_cstr_args(ctx, builder, arg_vals, cstr_indices);
+    // The cmd argument is a Simple `text` value; the linked native runtime
+    // (compiler_rust/runtime/src/value/sffi/env_process.rs, e.g. rt_process_run)
+    // takes an explicit (ptr, len) pair for it, not a bare null-terminated C
+    // string. Using expand_text_cstr_args here dropped the length argument
+    // entirely, shifting every later argument into the wrong register and
+    // leaving the final register uninitialized — manifesting as an
+    // exit_group(-8) crash on `simple -c` (self-exec-guard shells out via
+    // rt_process_run). Use the normal (ptr, len) expansion instead, then
+    // account for the extra length slot when masking the array argument.
+    let mut expanded = expand_text_args(ctx, builder, arg_vals, cstr_indices);
     let ptr_mask = builder.ins().iconst(types::I64, !7i64);
-    for index in array_indices {
-        if let Some(value) = expanded.get_mut(*index) {
+    for &orig_index in array_indices {
+        let shift = cstr_indices.iter().filter(|&&t| t < orig_index).count();
+        let new_index = orig_index + shift;
+        if let Some(value) = expanded.get_mut(new_index) {
             *value = builder.ins().band(*value, ptr_mask);
         }
     }

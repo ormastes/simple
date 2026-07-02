@@ -660,3 +660,35 @@ Next Linux verification criteria:
 - Browser backing, ARGB source, pairwise diff, and Simple RenderDoc gates must
   remain passing in the same aggregate run; do not treat a browser `.rdc` as a
   full Linux pass if it breaks Vulkan backing or pixel comparison.
+
+2026-07-02 current Linux refresh:
+- Direct GUI/Web/2D Vulkan evidence now exists at
+  `build/gui-web-2d-vulkan-env-run-current/evidence.env` and passes Simple
+  Vulkan, browser backing, ARGB source, and pairwise ARGB diff gates.
+- Simple RenderDoc evidence remains passing with `RDOC` magic at
+  `build/gui-web-2d-vulkan-env-renderdoc-simple/renderdoc/simple/evidence.env`.
+- Canonical browser RenderDoc evidence files now exist but fail the `.rdc`
+  artifact gate:
+  `build/renderdoc/chrome-implicit-layer-default-autocapture/html/evidence.env`
+  and
+  `build/renderdoc/electron-implicit-layer-default-autocapture/electron-html/evidence.env`.
+- Both canonical browser captures report Chromium GPU process exits with code
+  `139` and `rdoc_capture_reason=missing-rdc`. Chrome now records
+  `rdoc_chromium_gpu_process_exit_reason=gpu-process-segv-in-renderdoc` with
+  `rdoc_chromium_gpu_process_exit_renderdoc_stack_status=fail` and stack count
+  `6`; Electron records `gpu-process-exited-unexpectedly` without RenderDoc
+  stack frames in the wrapper log.
+- `RDOC_CHROME_USE_XVFB=1` with the default child hook was tested as a
+  diagnostic at
+  `build/renderdoc/chrome-xvfb-default-hook-diagnostic/html/evidence.env`; it
+  still exits with code `139`, includes `librenderdoc.so` frames, and emits no
+  `.rdc`.
+- `RDOC_RENDERDOC_HOOK_CHILDREN=0` diagnostic runs avoid the GPU-process exit
+  for Chrome and Electron but still produce no `.rdc`; Electron also times out
+  on shutdown with exit `124`. Current diagnostic evidence:
+  `build/renderdoc/chrome-implicit-layer-no-child-hook-diagnostic/html/evidence.env`
+  and
+  `build/renderdoc/electron-implicit-layer-no-child-hook-diagnostic/electron-html/evidence.env`.
+- Current top-level compare remains failed with only
+  `renderdoc-chrome-rdc,renderdoc-electron-rdc` blocked. Evidence:
+  `doc/09_report/linux_vulkan_render_log_compare_current_2026-07-02.md`.

@@ -62,6 +62,18 @@ The wrapper chains the host scene baseline through:
 sh scripts/check/check-gtk-gl-wm-scene-bitmap-evidence.shs
 ```
 
+For the isolated fake-QMP screendump contract, use:
+
+```bash
+REPORT_DATE=2026-07-02 \
+  BUILD_DIR=build/qemu_capture_fake_qmp_evidence-current \
+  REPORT_PATH=doc/09_report/qemu_capture_fake_qmp_evidence_current_2026-07-02.md \
+  sh scripts/check/check-qemu-capture-fake-qmp-evidence.shs
+```
+
+Current fake-QMP evidence:
+`doc/09_report/qemu_capture_fake_qmp_evidence_current_2026-07-02.md`.
+
 Current passing evidence requires:
 
 - `qemu live bitmap status: pass`

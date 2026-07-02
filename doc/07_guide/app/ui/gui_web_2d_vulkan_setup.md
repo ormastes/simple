@@ -77,13 +77,14 @@ Vulkan stays `disabled_off`. Mandatory flag set for **both** Electron and Chrome
 
 ### RenderDoc-capture blocker (Chrome) — record, do not retry blindly
 
-RenderDoc must hook the process doing Vulkan (un-sandboxed, in-process:
-`--in-process-gpu --no-sandbox --disable-gpu-sandbox`). For **Electron** this works
-(`~/electron-vulkan/capture-renderdoc.sh`). For **Chrome**, `--disable-gpu-sandbox`
-crashes the GPU process with `undefined symbol: localtime64_r`, so hooking Chrome's GPU
-process is not currently achievable here. Record
-`gui_web_2d_vulkan_browser_backing_reason=renderdoc-chrome-gpu-sandbox-localtime64_r`
-and leave the Chrome `.rdc` gate open.
+Current Linux evidence shows Chrome and Electron still fail the browser
+RenderDoc `.rdc` gates with Chromium GPU-process exit code `139`. Chrome's log
+now classifies the failure as
+`rdoc_chromium_gpu_process_exit_reason=gpu-process-segv-in-renderdoc` when the
+crash stack includes `librenderdoc.so`; Electron may only expose
+`gpu-process-exited-unexpectedly`. Keep
+`renderdoc-chrome-rdc,renderdoc-electron-rdc` blocked until both capture files
+exist and report `rdoc_capture_magic=RDOC`.
 
 ## Linux Install Commands (Ubuntu/Debian)
 
@@ -248,9 +249,19 @@ are the only Linux paths that can produce native `.rdc` completion evidence.
 After SDK tools and browser backing are ready, use:
 
 ```sh
-scripts/setup/setup-gui-web-2d-vulkan-env.shs --check
-scripts/setup/setup-gui-web-2d-vulkan-env.shs --browser-backing
-scripts/setup/setup-gui-web-2d-vulkan-env.shs --run
+GUI_WEB_2D_VULKAN_BUILD_DIR=build/gui-web-2d-vulkan-env-check-current \
+  scripts/setup/setup-gui-web-2d-vulkan-env.shs --check
+GUI_WEB_2D_VULKAN_BUILD_DIR=build/gui-web-2d-vulkan-env-browser-backing \
+  scripts/setup/setup-gui-web-2d-vulkan-env.shs --browser-backing
+GUI_WEB_2D_VULKAN_BUILD_DIR=build/gui-web-2d-vulkan-env-run-current \
+  scripts/setup/setup-gui-web-2d-vulkan-env.shs --run
+GUI_WEB_2D_VULKAN_BUILD_DIR=build/gui-web-2d-vulkan-env-renderdoc-simple \
+  scripts/setup/setup-gui-web-2d-vulkan-env.shs --renderdoc-simple
+RDOC_OUTPUT_DIR=build/renderdoc/chrome-implicit-layer-default-autocapture \
+  scripts/tool/renderdoc-evidence.shs capture-html
+RDOC_OUTPUT_DIR=build/renderdoc/electron-implicit-layer-default-autocapture \
+  scripts/tool/renderdoc-evidence.shs capture-electron-html
+sh scripts/check/check-linux-vulkan-render-log-compare.shs
 RUN_TOKEN=$(date -u +%Y%m%d%H%M%S)
 GUI_RENDERDOC_AGGREGATE_DISABLE_DEFAULT_STATIC_CACHE=1 \
 GUI_RENDERDOC_AGGREGATE_STATIC_CACHE_DIR=build/gui-web-2d-final-${RUN_TOKEN}/static-cache \

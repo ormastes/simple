@@ -855,7 +855,7 @@ The shared WM runtime supports two host classes:
 | Host class | Modes | Evidence |
 |------------|-------|----------|
 | Windows/macOS/Linux host GUI | Fullscreen and windowed host-WM launch | `scripts/check/check-wm-launch-capture-evidence.shs` host WM package and event-loop checks |
-| SimpleOS host | Fullscreen SimpleOS WM only | QEMU MDI framebuffer evidence in `doc/09_report/simpleos_hardening_evidence_matrix_2026-06-30.md` |
+| SimpleOS host | Fullscreen SimpleOS WM only | QEMU MDI framebuffer and RV64 virtio-gpu QMP evidence in `doc/09_report/simpleos_hardening_evidence_matrix_current_2026-07-02.md` |
 
 SimpleOS does not expose a nested host window mode. It owns the framebuffer, so
 the SimpleOS WM lane stays full mode until a nested compositor protocol is

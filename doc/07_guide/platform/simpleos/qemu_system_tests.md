@@ -156,9 +156,12 @@ RV64 display runtime (`rt_display_init`, `rt_display_flush_wm_anchor_test`) and 
 for QMP capture. Current evidence: `bin/simple os build
 --scenario=riscv64-display-smoke` emits the ELF, direct QEMU serial reaches
 `SIMPLEOS_RISCV_DISPLAY_SMOKE_READY`, and QMP `screendump` captured a nonblack
-320x240 PPM at `build/os/rv64_display_smoke_evidence/screendump.ppm`.
+320x240 PPM at
+`build/os/rv64_display_smoke_evidence-current/screendump.ppm`. Current report:
+`doc/09_report/rv64_display_smoke_qmp_evidence_current_2026-07-02.md`.
 
 This is the RV64 freestanding WM lifecycle gate used by the host configuration
 matrix. The host configuration and hardening matrices report
-`qemu_riscv64_wm_live=pass` when the wrapper sees the WM lifecycle serial
-markers, a nonblack QMP PPM, and all five WM anchor sample pixels.
+`simpleos_hardening_rv64_display_smoke_qmp_status=pass` when the wrapper sees
+the WM lifecycle serial markers, a nonblack QMP PPM, and all five WM anchor
+sample pixels.

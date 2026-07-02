@@ -1201,11 +1201,15 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // =========================================================================
     // Process execution
     // =========================================================================
-    // Native libsimple_runtime.a process functions use C strings and SplArray pointers.
-    RuntimeFuncSpec::new("rt_process_run", &[I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_process_spawn", &[I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_process_execute", &[I64, I64], &[I32]),
-    RuntimeFuncSpec::new("rt_process_run_timeout", &[I64, I64, I64], &[I64]),
+    // Native libsimple_runtime.a process functions take (cmd_ptr, cmd_len, args: SplArray ptr).
+    // These three real signatures are (cmd_ptr: *const u8, cmd_len: u64, args: RuntimeValue) —
+    // the arity here MUST be 3, matching rt_process_spawn_async below, or the cranelift call
+    // site drops cmd_len and shifts args into the wrong register (see bug: exit_group(-8)
+    // crash on `simple -c` when the driver self-exec-guard shells out via rt_process_run).
+    RuntimeFuncSpec::new("rt_process_run", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_process_spawn", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_process_execute", &[I64, I64, I64], &[I32]),
+    RuntimeFuncSpec::new("rt_process_run_timeout", &[I64, I64, I64, I64], &[I64]),
     // rt_process_is_running(pid) -> bool (as i64: 0/1)
     RuntimeFuncSpec::new("rt_process_is_running", &[I64], &[I64]),
     // rt_process_wait(pid, timeout_ms) -> exit_code
