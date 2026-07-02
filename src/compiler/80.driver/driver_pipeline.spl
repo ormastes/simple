@@ -321,6 +321,14 @@ impl CompilerDriver:
             return self.ctx.errors.len() == 0
 
         if self.ctx.sources.len() > 0:
+            # Mirror phase-2 parse_all_impl (driver.spl): under --entry-closure
+            # every source in ctx.sources is a real module reachable from the
+            # entry point (parsed fully in phase 2), not just the bootstrap
+            # main file. Without this flag here, every non-main module fell
+            # through to the empty MirModule stub below, producing "MIR module
+            # has no functions" for the first such module the AOT backend
+            # tried to compile on its own (e.g. std.io_runtime).
+            val native_entry_closure_mir = (rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
             var direct_idx = 0
             var direct_lowering = MirLowering(
                 builder: MirBuilder(
@@ -348,7 +356,7 @@ impl CompilerDriver:
             while direct_idx < self.ctx.sources.len():
                 val src_direct = self.ctx.sources[direct_idx]
                 val name_direct = src_direct.module_name
-                val mir_direct = if _driver_is_bootstrap_entry_source(src_direct.path, name_direct) or (rt_env_get("SIMPLE_UNSTUB_HIR") ?? "") == "1":
+                val mir_direct = if native_entry_closure_mir or _driver_is_bootstrap_entry_source(src_direct.path, name_direct) or (rt_env_get("SIMPLE_UNSTUB_HIR") ?? "") == "1":
                     print "[driver-mir] bootstrap lower:start"
                     val direct_hir = self.ctx.hir_modules[name_direct]
                     direct_lowering.symbols = direct_hir.symbols
