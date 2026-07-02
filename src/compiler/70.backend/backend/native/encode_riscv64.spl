@@ -18,7 +18,7 @@ use compiler.backend.backend.backend_types.{CodegenTarget}
 use compiler.backend.backend.riscv_target.{RiscvTargetContract, riscv_linux_target_contract}
 use compiler.backend.native.operand_utils.{get_phys_reg_id, get_mem_base_id, get_mem_offset, get_imm_value, get_label_id, get_sym_name}
 use compiler.backend.native.encode_common.{encode_module_with}
-use compiler.backend.native.riscv_encoding.{riscv_emit_u32_le, riscv_encode_r_type, riscv_encode_i_type, riscv_encode_s_type, riscv_encode_b_type, riscv_encode_u_type, riscv_encode_j_type, riscv_alu_funct7, riscv_alu_funct3, riscv_branch_funct3, emit_rol_riscv64, emit_ror_riscv64, emit_clz_riscv64, emit_ctz_riscv64, emit_rev8_riscv64, riscv_operand_is_imm, riscv_operand_is_imm_or_sym, riscv_operand_is_mem, riscv_encode_common_inst}
+use compiler.backend.native.riscv_encoding.{riscv_emit_u32_le, riscv_encode_r_type, riscv_encode_i_type, riscv_encode_s_type, riscv_encode_b_type, riscv_encode_u_type, riscv_encode_j_type, riscv_alu_funct7, riscv_alu_funct3, riscv_branch_funct3, emit_rol_riscv64, emit_ror_riscv64, emit_clz_riscv64, emit_ctz_riscv64, emit_rev8_riscv64, riscv_operand_is_imm, riscv_operand_is_imm_or_label, riscv_operand_is_imm_or_sym, riscv_operand_is_label, riscv_operand_is_mem, riscv_encode_common_inst}
 
 # ============================================================================
 # Encode Context
@@ -237,7 +237,7 @@ fn encode_inst_riscv64(ectx: Rv64EncodeContext, inst: MachInst) -> Rv64EncodeCon
 
     elif inst.opcode == RV_OP_JAL:
         # JAL rd, offset: J-type opcode=0x6F
-        if inst.operands.len() < 2:
+        if inst.operands.len() < 2 or not operand_is_reg(inst.operands[0]) or not riscv_operand_is_imm_or_label(inst.operands[1]):
             code = riscv_emit_u32_le(code, 0x00000013)
         else:
             val rd = get_phys_reg_id(inst.operands[0])
@@ -256,7 +256,7 @@ fn encode_inst_riscv64(ectx: Rv64EncodeContext, inst: MachInst) -> Rv64EncodeCon
 
     elif inst.opcode == RV_OP_JALR:
         # JALR rd, rs1, imm12: I-type funct3=0x0, opcode=0x67
-        if inst.operands.len() < 3:
+        if inst.operands.len() < 3 or not operand_is_reg(inst.operands[0]) or not operand_is_reg(inst.operands[1]) or not riscv_operand_is_imm(inst.operands[2]):
             code = riscv_emit_u32_le(code, 0x00000013)
         else:
             val rd = get_phys_reg_id(inst.operands[0])
@@ -267,7 +267,7 @@ fn encode_inst_riscv64(ectx: Rv64EncodeContext, inst: MachInst) -> Rv64EncodeCon
 
     elif inst.opcode == RV_OP_BEQ or inst.opcode == RV_OP_BNE or inst.opcode == RV_OP_BLT or inst.opcode == RV_OP_BGE:
         # B-type branches: BEQ(f3=0), BNE(f3=1), BLT(f3=4), BGE(f3=5)
-        if inst.operands.len() < 3:
+        if inst.operands.len() < 3 or not operand_is_reg(inst.operands[0]) or not operand_is_reg(inst.operands[1]) or not riscv_operand_is_label(inst.operands[2]):
             code = riscv_emit_u32_le(code, 0x00000013)
         else:
             val rs1 = get_phys_reg_id(inst.operands[0])
@@ -279,9 +279,6 @@ fn encode_inst_riscv64(ectx: Rv64EncodeContext, inst: MachInst) -> Rv64EncodeCon
                     val enc = riscv_encode_b_type(0, rs2, rs1, funct3, 0x63)
                     code = riscv_emit_u32_le(code, enc)
                     pending.push(Rv64PendingJump(code_offset: jump_offset, target_block: block_id, jump_kind: JUMP_BRANCH))
-                case _:
-                    val enc = riscv_encode_b_type(0, rs2, rs1, funct3, 0x63)
-                    code = riscv_emit_u32_le(code, enc)
 
     elif inst.opcode == RV_OP_CALL:
         # CALL symbol (pseudo): AUIPC x1, offset_hi; JALR x1, x1, offset_lo
