@@ -45,7 +45,7 @@ use compiler.core.ast.{decl_use_import, decl_export_names, decl_enum_def, decl_s
 use compiler.core.ast.{decl_impl_block}
 use compiler.core.ast.{decl_set_comptime}
 use compiler.core.ast.{decl_set_visibility_text}
-use compiler.core.ast.{decl_is_gpu_kernel, decl_is_simd, decl_is_packed, decl_derives}
+use compiler.core.ast.{decl_is_gpu_kernel, decl_is_simd, decl_is_packed, decl_set_packed, decl_derives}
 use compiler.core.ast.{decl_get_name, decl_get_fields, decl_get_derives, decl_set_derives}
 use compiler.core.ast.{module_set_path, module_add_decl}
 use compiler.frontend.core.lexer.{lex_pos_get, lex_pos_set, lex_line_get, lex_line_set, lex_col_get, lex_col_set}
@@ -152,8 +152,15 @@ fn parse_bitfield_decl() -> i64:
         if field_type == TYPE_VOID and bit_count > 0:
             field_type = TYPE_I64
 
-        # Skip reserved fields (don't add to struct)
-        if not is_underscore:
+        # Reserved (`_: uN`) fields are kept (with a synthetic unique name)
+        # so downstream packed-width/bit-offset computation stays correct;
+        # the flat-AST bridge marks "_reserved_"-prefixed names is_reserved.
+        if is_underscore:
+            field_names.push("_reserved_" + int_to_str(bf_i))
+            field_types.push(field_type)
+            field_defaults.push(-1)
+            field_bits.push(bit_count)
+        else:
             if has_seen_name(seen_names, field_name):
                 parser_error("duplicate bitfield field name: " + field_name)
             seen_names.push(field_name)
@@ -168,7 +175,11 @@ fn parse_bitfield_decl() -> i64:
         parser_error("bitfield '" + bf_name + "' uses " + int_to_str(used_bits) + " bits but backing type allows only " + int_to_str(backing_bits))
 
     named_type_update(bitfield_type_id, field_names, field_types)
-    decl_struct_def(bf_name, field_names, field_types, field_defaults, field_bits, 0)
+    val bf_decl_idx = decl_struct_def(bf_name, field_names, field_types, field_defaults, field_bits, 0)
+    # Route this decl into Module.bitfields (not Module.structs) in the
+    # flat-AST bridge: tag "3" + is_packed is the bitfield marker there.
+    decl_set_packed(bf_decl_idx, 1)
+    bf_decl_idx
 
 # ===== AOP Declaration Parsing =====
 
