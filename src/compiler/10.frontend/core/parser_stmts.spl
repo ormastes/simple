@@ -554,10 +554,13 @@ fn parse_if_stmt() -> i64:
 
     # G19: if val NAME = EXPR: body  (pattern-binding / nil-check form)
     # Also handles: if var NAME = EXPR: body
+    # Also handles: if val Ctor(NAME, ...) = EXPR: body  (constructor-pattern
+    # binding, e.g. `if val Some(x) = opt:`). The binding pattern is parsed
+    # with the same `parse_expr()` used by `match` arm patterns, so a
+    # constructor pattern here parses identically to `match EXPR: Ctor(...):`.
     if par_kind_get() == TOK_KW_VAL or par_kind_get() == TOK_KW_VAR:
         parser_advance()  # consume val/var
-        val bind_name = par_text_get()
-        parser_expect(6)  # consume IDENT
+        val pattern_idx = parse_expr()
         parser_expect(100)  # consume =
         val init_expr = parse_expr()
         parser_expect(161)  # consume :
@@ -577,7 +580,22 @@ fn parse_if_stmt() -> i64:
                 parser_expect(161)
                 else_body = parse_block()
 
+        if expr_get_tag(pattern_idx) == EXPR_CALL:
+            # Constructor-pattern binding: desugar to the equivalent match
+            # statement, reusing the exact arm-construction machinery that
+            # `match EXPR: Ctor(...): then_body  _: else_body` uses, so
+            # matching/binding semantics stay identical to `match`.
+            val rationale = extract_wildcard_rationale(pattern_idx)
+            val stored_pattern = normalize_wildcard_pattern(pattern_idx)
+            var arm_indices: [i64] = []
+            arm_indices.push(arm_new_with_binding_and_rationale(stored_pattern, -1, then_body, "", rationale))
+            val wildcard_pattern = expr_ident("_", 0)
+            arm_indices.push(arm_new_with_binding_and_rationale(wildcard_pattern, -1, else_body, "", ""))
+            return stmt_match_stmt(init_expr, arm_indices, 0)
+
+        # Plain identifier binding.
         # Desugar: val NAME = EXPR; if NAME != nil: then_body [else ...]
+        val bind_name = expr_get_str(pattern_idx)
         val bind_stmt = stmt_val_decl(bind_name, 0, init_expr, 0)
         val name_expr = expr_ident(bind_name, 0)
         val nil_expr = expr_nil_lit(0)
