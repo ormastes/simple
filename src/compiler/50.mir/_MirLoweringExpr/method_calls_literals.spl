@@ -75,8 +75,6 @@ impl MirLowering:
         var wb_receiver: LocalId = 0
         var receiver_type = MirType.i64()
         if val found_receiver_type = receiver.type_:
-            if found_receiver_type == nil:
-                print "[debug-mir3] SITE=method-call-receiver-type"
             receiver_type = self.lower_type(found_receiver_type)
 
         if (method == "len" or method == "length") and args.len() == 0:
@@ -414,11 +412,23 @@ impl MirLowering:
             val local = self.lower_expr(elem)
             operands = operands.push(mir_operand_copy(local))
 
+        # NOTE: `if val first_type = elements[0].type_:` is not sufficient
+        # here -- confirmed by isolated repro that the seed interpreter's
+        # `if val` presence check can still enter the true branch with
+        # `first_type` bound to nil for this indexed+field-chained Option
+        # (elements[0] here is often un-type-inferred the first time this
+        # array/set literal is reached via a fresh, non-entry-closure code
+        # path). A redundant explicit nil re-check on the bound value guards
+        # against calling lower_type(nil), which crashes with "undefined
+        # field 'kind': cannot access field on value of type 'nil'".
         val elem_type = if elements.len() > 0:
-            if val first_type = elements[0].type_:
+            val first_elem = elements[0]
+            val first_elem_type = first_elem.type_
+            if val first_type = first_elem_type:
                 if first_type == nil:
-                    print "[debug-mir3] SITE=array-or-set-lit-first-type"
-                self.lower_type(first_type)
+                    MirType.i64()
+                else:
+                    self.lower_type(first_type)
             else:
                 MirType.i64()
         else:
@@ -440,8 +450,6 @@ impl MirLowering:
             operands = operands.push(mir_operand_copy(local))
             var elem_ty = MirType.i64()
             if val elem_type = elem.type_:
-                if elem_type == nil:
-                    print "[debug-mir3] SITE=tuple-lit-elem-type"
                 elem_ty = self.lower_type(elem_type)
             types = types.push(elem_ty)
 
@@ -458,11 +466,23 @@ impl MirLowering:
         Future optimization: emit direct Set.new() + insert() calls.
         """
         # Infer element type from first element, or default to i64
+        # NOTE: `if val first_type = elements[0].type_:` is not sufficient
+        # here -- confirmed by isolated repro that the seed interpreter's
+        # `if val` presence check can still enter the true branch with
+        # `first_type` bound to nil for this indexed+field-chained Option
+        # (elements[0] here is often un-type-inferred the first time this
+        # array/set literal is reached via a fresh, non-entry-closure code
+        # path). A redundant explicit nil re-check on the bound value guards
+        # against calling lower_type(nil), which crashes with "undefined
+        # field 'kind': cannot access field on value of type 'nil'".
         val elem_type = if elements.len() > 0:
-            if val first_type = elements[0].type_:
+            val first_elem = elements[0]
+            val first_elem_type = first_elem.type_
+            if val first_type = first_elem_type:
                 if first_type == nil:
-                    print "[debug-mir3] SITE=array-or-set-lit-first-type"
-                self.lower_type(first_type)
+                    MirType.i64()
+                else:
+                    self.lower_type(first_type)
             else:
                 MirType.i64()
         else:
