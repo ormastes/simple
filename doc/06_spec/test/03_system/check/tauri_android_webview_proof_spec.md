@@ -44,7 +44,7 @@ Gate G5.2 fallback legs: validates the WebView-equivalent proof when the host la
 | Status | Active |
 | Requirements | G5.2 run+capture fallback leg |
 | Plan | doc/03_plan/ui/production_readiness_master_plan_2026-07-02.md § G5.2 |
-| Source | `/home/yoon/simple/test/03_system/check/tauri_android_webview_proof_spec.spl` |
+| Source | `test/03_system/check/tauri_android_webview_proof_spec.spl` |
 | Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 

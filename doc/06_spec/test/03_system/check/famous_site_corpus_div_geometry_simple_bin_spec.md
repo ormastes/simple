@@ -47,7 +47,7 @@ The wrapper compares stored Chrome metrics against Pure Simple Draw IR in bounde
 | Design | doc/04_architecture/compiler/graphics/accelerated_shared_ui_backend_architecture.md |
 | Research | doc/01_research/ui/render_path/gui_web_2d_path_assessment_2026-06-12.md |
 | Source | `test/03_system/check/famous_site_corpus_div_geometry_simple_bin_spec.spl` |
-| Updated | 2026-06-27 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
