@@ -132,13 +132,13 @@ RV32I RTL helper visibility is fixed for the existing `rv32i_rtl` core path:
 compile now reaches the real remaining blocker: the behavioral core has no
 `@hardware` boundary for `compile --backend=vhdl`.
 
-`scripts/fpga/generate_rv32_vhdl.shs` writes generated RV32 decode/control
-hardware source and compiles it to `build/vhdl/rv32/rv32_core.vhd`, but the
-combined preflight no longer counts that helper as an executable core while
-`soc_top_rv32.vhd` is still a payload-stream/liveness top. RV32 must grow a
-PC-following executor or real boot-marker path before `rv32_fpga_core_executable`
-can pass. `scripts/fpga/build_k26_rv32.shs` now refuses that liveness-only top
-by default; set `ALLOW_RV32_LIVENESS_TOP=1` only for Vivado plumbing diagnostics.
+`scripts/fpga/generate_rv32_vhdl.shs` still writes the generated RV32
+decode/control helper, and now also copies a minimal RV32/C executor template
+into `build/vhdl/rv32/rv32_exec_core.vhd` with a simulation top at
+`soc_top_rv32_sim.vhd` and K26 wrapper at `soc_top_rv32.vhd`. The combined
+preflight now keys `rv32_fpga_core_executable` on that executor rather than the
+old decode helper. `sh scripts/fpga/ghdl_validate_rv32.shs --simulate` reports
+`RV32_UART_TX_ACTIVITY_SEEN` from the preloaded SimpleOS RV32 payload.
 
 `scripts/fpga/generate_rv64_vhdl.shs` now emits `build/vhdl/rv64/rv64gc_core.vhd`
 as a minimal RV64/C early executor instead of a fetch-only placeholder. It

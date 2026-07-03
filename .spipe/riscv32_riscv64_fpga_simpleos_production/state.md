@@ -56,7 +56,7 @@ N/A for this slice: this turn only fixes existing smoke wrappers and records blo
   - PASS: RV32 ELF and bin artifacts exist.
   - PASS: RV32 VHDL template artifacts exist for package/decode/register-file generation.
   - FAIL: RV32 bitstream artifact is absent in this workspace.
-  - FAIL: RV32 FPGA core helper VHDL exists, but the K26 top is still a payload-stream/liveness design rather than a PC-following SimpleOS executor.
+  - PASS: RV32 executable core VHDL exists at `build/vhdl/rv32/rv32_exec_core.vhd` and follows PC/control flow from the preloaded SimpleOS payload to UART MMIO in GHDL.
   - FAIL: RV32 FPGA ELF load/run evidence is absent (`build/fpga/rv32/load_elf_rv32.log` missing).
 
 ## Phase
@@ -94,3 +94,4 @@ dev-in-progress
 - dev: Restored the RV64 GHDL SoC smoke testbench and fixed the executor path enough to see real UART TX activity in simulation: UART Wishbone ack/TX is real, RAM ack is data-valid, execute returns to fetch, unaligned literal loads and cross-word 32-bit fetches work, and CSR reads return hart 0. Full K26 bitgen still passes; physical `/dev/ttyUSB1..3` capture remains zero because it does not observe PMOD H12/E10.
 - dev: Tightened the combined RV32/RV64 preflight so RV32 no longer passes `rv32_fpga_core_executable` for the decode-helper/liveness top. Next RV32 work is a real PC-following executor or a verified boot-marker path.
 - dev: Hardened `scripts/fpga/build_k26_rv32.shs` to refuse the liveness-only RV32 top unless `ALLOW_RV32_LIVENESS_TOP=1` is explicitly set for Vivado plumbing diagnostics.
+- dev: Added a minimal RV32/C executor template plus `soc_top_rv32_sim`; `sh scripts/fpga/ghdl_validate_rv32.shs --simulate` now reports `RV32_UART_TX_ACTIVITY_SEEN` from the preloaded SimpleOS RV32 payload.
