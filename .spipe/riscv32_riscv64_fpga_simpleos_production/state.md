@@ -85,3 +85,4 @@ dev-in-progress
 - dev: Confirmed generated RV32 package/decode/regfile/helper-core VHDL passes `ghdl -a --std=08`; RV32 next needs an FPGA top/bitstream path and payload load evidence.
 - dev: Added a minimal RV32 K26 top/Vivado wrapper around the generated decode helper; `build_k26_rv32.shs --synth-only` passes, and dual-arch preflight now passes `rv32_fpga_synth_logic`.
 - dev: Switched the provisional RV32 K26 top to the Xilinx `STARTUPE3` internal oscillator so only `uart_tx` is a board pin; full Vivado bitgen now passes DRC and writes `build/build/rv32_fpga/gateware/rv32_fpga.bit`. RV32 payload load/run evidence remains open.
+- dev: Added RV32 RTL preload generation from `build/rv32_bringup_check/hello_litex_rv32.bin` into `build/vhdl/rv32/rv32_payload.mem`; the provisional RV32 top reads that memory and dual-arch preflight now passes `rv32_fpga_elf_load_context`. UART/physical SimpleOS run proof remains open.
