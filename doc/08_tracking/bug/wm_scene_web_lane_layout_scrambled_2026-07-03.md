@@ -1,6 +1,17 @@
 # WM scenes through the web-render lane compose visually scrambled layout
 
-- **Status:** OPEN (evidence captured; renderer parity work in flight)
+- **Status:** LARGELY RESOLVED 2026-07-03 — "scrambled" was translucency, not layout.
+  Chrome ground-truth render of the same HTML proved geometry was correct all
+  along. Two-part fix landed: (1) renderer parses solid `background`/
+  `background-color` rgba() alpha-aware and composites via blend_opacity
+  (software lane); (2) Metal MSL `kernel_draw_rect_filled` now does Porter-Duff
+  src-over bit-identical to the CPU `blend()` (engine2d lane; parity harness
+  `rect_blend` scene pins it, 0 mismatches). wm_scene_windows capture after:
+  ink 369k→32k px, max_glyph_run 295→13 (with the stroke-narrow glyph
+  discriminator in the evidence driver). RESIDUAL (still open below):
+  backdrop-filter blur is unimplemented, so translucent window glass reveals
+  sharp detail beneath instead of Chrome's frosted look; host_compositor lane
+  render still exceeds the gate timeout (per-window full CSS render per frame).
 - **Date:** 2026-07-03
 - **Severity:** high for WM-on-web production readiness (text sizing itself is fixed)
 - **Evidence:** `build/wm_gui_window_drawing/wm_scene_css.png`, `build/wm_gui_window_drawing/wm_scene_windows.png` (gate: `scripts/check/check-wm-gui-window-drawing-evidence.shs`)

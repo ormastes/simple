@@ -157,6 +157,29 @@ static inline void plot(device uint* fb, int x, int y, int fb_w, int fb_h, uint 
     }
 }
 
+// Porter-Duff src-over, bit-identical to the CPU reference blend() in
+// engine2d/color.spl (plain truncating integer division, no rounding term).
+// Opaque src returns src unchanged, so all-opaque scenes stay bit-exact
+// with the pre-blend raw-store behavior.
+static inline uint blend_src_over(uint src, uint dst) {
+    uint sa = (src >> 24) & 0xFFu;
+    if (sa == 255u) return src;
+    if (sa == 0u) return dst;
+    uint sr = (src >> 16) & 0xFFu;
+    uint sg = (src >> 8) & 0xFFu;
+    uint sb = src & 0xFFu;
+    uint dr = (dst >> 16) & 0xFFu;
+    uint dg = (dst >> 8) & 0xFFu;
+    uint db = dst & 0xFFu;
+    uint da = (dst >> 24) & 0xFFu;
+    uint inv = 255u - sa;
+    uint r = (sr * sa + dr * inv) / 255u;
+    uint g = (sg * sa + dg * inv) / 255u;
+    uint b = (sb * sa + db * inv) / 255u;
+    uint a = sa + (da * inv) / 255u;
+    return (a << 24) | (r << 16) | (g << 8) | b;
+}
+
 // ---- kernel_clear ----
 
 kernel void kernel_clear(
@@ -185,7 +208,7 @@ kernel void kernel_draw_rect_filled(
     if (px < 0 || px >= p.fb_w || py < 0 || py >= p.fb_h) return;
 
     int idx = py * p.fb_w + px;
-    fb[idx] = p.color;
+    fb[idx] = blend_src_over(p.color, fb[idx]);
 }
 
 // ---- kernel_draw_rect_outline ----

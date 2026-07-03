@@ -88,9 +88,31 @@ fn _measure(pixels: [u32], width: i32, height: i32) -> SceneMetrics:
     var accent: i64 = 0
     var max_run: i64 = 0
     var col_run: [i64] = [0; width]
+    # Glyph-run discriminator: a white pixel only extends a vertical glyph
+    # run if its full contiguous horizontal white span is stroke-narrow.
+    # Solid white PANELS (window content surfaces, input fields, progress
+    # fills) are exact white too and previously registered 200px+ vertical
+    # "glyph" runs; real bitmap glyph strokes at UI sizes are only a few px
+    # wide. Extra right-to-left pass per row keeps everything arithmetic
+    # (no helper calls) per the perf note below.
+    var row_fwd_white: [i64] = [0; width]
     var i: i64 = 0
     var y = 0
     while y < height:
+        var x2 = width - 1
+        var fwd: i64 = 0
+        while x2 >= 0:
+            val p2 = pixels[i + x2.to_i64()]
+            val r2 = ((p2 >> 16u32) & 0xFFu32).to_i64()
+            val g2 = ((p2 >> 8u32) & 0xFFu32).to_i64()
+            val b2 = (p2 & 0xFFu32).to_i64()
+            if r2 == 255 and g2 == 255 and b2 == 255:
+                fwd = fwd + 1
+            else:
+                fwd = 0
+            row_fwd_white[x2] = fwd
+            x2 = x2 - 1
+        var back: i64 = 0
         var x = 0
         while x < width:
             val p = pixels[i]
@@ -103,11 +125,17 @@ fn _measure(pixels: [u32], width: i32, height: i32) -> SceneMetrics:
                 bright = bright + 1
             if r == 255 and g == 255 and b == 255:
                 ink = ink + 1
-                val nr = col_run[x] + 1
-                col_run[x] = nr
-                if nr > max_run:
-                    max_run = nr
+                back = back + 1
+                val h_span = back + row_fwd_white[x] - 1
+                if h_span <= 32:
+                    val nr = col_run[x] + 1
+                    col_run[x] = nr
+                    if nr > max_run:
+                        max_run = nr
+                else:
+                    col_run[x] = 0
             else:
+                back = 0
                 col_run[x] = 0
             var mx = r
             if g > mx:
