@@ -19,16 +19,6 @@ theorem nogc_append (a : List Instr) (b : List Instr) :
   | inl haMem => exact ha _ haMem
   | inr hbMem => exact hb _ hbMem
 
-theorem nogc_append_left (a : List Instr) (b : List Instr) :
-  nogc (append a b) → nogc a := by
-  intro hab i hmem
-  exact hab i (List.mem_append_left b hmem)
-
-theorem nogc_append_right (a : List Instr) (b : List Instr) :
-  nogc (append a b) → nogc b := by
-  intro hab i hmem
-  exact hab i (List.mem_append_right a hmem)
-
 theorem nogc_singleton (i : Instr) (h : i ≠ Instr.gcAlloc) :
   nogc [i] := by
   intro j hj

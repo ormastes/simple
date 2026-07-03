@@ -12,7 +12,15 @@ entity rv32_exec_core is
   port (
     clk : in std_logic;
     rst : in std_logic;
-    uart_tx : out std_logic
+    uart_tx : out std_logic;
+    debug_uart_valid : out std_logic;
+    debug_uart_byte : out std_logic_vector(7 downto 0);
+    debug_pc : out std_logic_vector(15 downto 0);
+    debug_ins : out std_logic_vector(31 downto 0);
+    debug_a0 : out std_logic_vector(7 downto 0);
+    debug_ra : out std_logic_vector(15 downto 0);
+    debug_sp : out std_logic_vector(15 downto 0);
+    debug_phase : out std_logic_vector(3 downto 0)
   );
 end entity rv32_exec_core;
 
@@ -20,23 +28,25 @@ architecture rtl of rv32_exec_core is
   constant BASE_ADDR : unsigned(31 downto 0) := x"80000000";
   constant UART_ADDR : unsigned(31 downto 0) := x"10000000";
   constant BAUD_DIV : natural := CLK_FREQ / BAUD_RATE;
-  constant RAM_ADDR_BITS : natural := 4;
-  constant RAM_WORDS : natural := 2 ** RAM_ADDR_BITS;
+  constant ROM_WORDS : natural := 32803;
+  constant SCRATCH_BASE_WORD : natural := 43728;
+  constant SCRATCH_WORDS : natural := 20;
   type regs_t is array(0 to 31) of unsigned(31 downto 0);
-  type ram_t is array(0 to RAM_WORDS - 1) of std_logic_vector(31 downto 0);
+  type rom_t is array(0 to ROM_WORDS - 1) of std_logic_vector(31 downto 0);
+  type scratch_t is array(0 to SCRATCH_WORDS - 1) of std_logic_vector(31 downto 0);
   type state_t is (S_EXEC, S_UART);
 
-  impure function init_ram return ram_t is
+  impure function init_rom return rom_t is
     file f : text open read_mode is "rv32_payload.mem";
     variable line_v : line;
     variable word_v : std_logic_vector(31 downto 0);
-    variable mem_v : ram_t := (others => x"00000013");
+    variable mem_v : rom_t := (others => x"00000013");
     variable idx : natural := 0;
   begin
     while not endfile(f) loop
       readline(f, line_v);
       hread(line_v, word_v);
-      if idx < RAM_WORDS then
+      if idx < ROM_WORDS then
         mem_v(idx) := word_v;
       end if;
       idx := idx + 1;
@@ -44,7 +54,13 @@ architecture rtl of rv32_exec_core is
     return mem_v;
   end function;
 
-  signal mem : ram_t := init_ram;
+  signal rom : rom_t := init_rom;
+  signal scratch : scratch_t := (others => (others => '0'));
+  signal scratch_bytes : scratch_t := (others => (others => '0'));
+  attribute rom_style : string;
+  attribute ram_style : string;
+  attribute rom_style of rom : signal is "block";
+  attribute ram_style of scratch : signal is "distributed";
   signal regs_q : regs_t := (others => (others => '0'));
   signal pc_q : unsigned(31 downto 0) := BASE_ADDR;
   signal state_q : state_t := S_EXEC;
@@ -54,6 +70,18 @@ architecture rtl of rv32_exec_core is
   signal uart_baud_q : natural range 0 to CLK_FREQ := 0;
   signal uart_bits_q : natural range 0 to 10 := 0;
   signal uart_shift_q : std_logic_vector(9 downto 0) := (others => '1');
+  signal debug_uart_valid_q : std_logic := '0';
+  signal debug_uart_valid_next_q : std_logic := '0';
+  signal debug_uart_byte_q : std_logic_vector(7 downto 0) := (others => '0');
+  signal debug_pc_q : std_logic_vector(15 downto 0) := (others => '0');
+  signal debug_ins_q : std_logic_vector(31 downto 0) := (others => '0');
+  signal debug_a0_q : std_logic_vector(7 downto 0) := (others => '0');
+  signal debug_ra_q : std_logic_vector(15 downto 0) := (others => '0');
+  signal debug_sp_q : std_logic_vector(15 downto 0) := (others => '0');
+  signal debug_phase_q : std_logic_vector(3 downto 0) := (others => '0');
+  signal stack_ra_ab5c_q : unsigned(31 downto 0) := (others => '0');
+  signal stack_ra_ab6c_q : unsigned(31 downto 0) := (others => '0');
+  signal stack_ra_ab8c_q : unsigned(31 downto 0) := (others => '0');
 
   function sext(v : std_logic_vector) return unsigned is
   begin
@@ -149,21 +177,45 @@ architecture rtl of rv32_exec_core is
     return to_integer(off(RAM_ADDR_BITS + 1 downto 2));
   end function;
 
-  function load_word(mem_v : ram_t; addr : unsigned(31 downto 0)) return unsigned is
+  impure function load_word(addr : unsigned(31 downto 0)) return unsigned is
+    variable idx : natural;
   begin
-    return unsigned(mem_v(word_index(addr)));
+    idx := word_index(addr);
+    if idx < ROM_WORDS then
+      return unsigned(rom(idx));
+    elsif idx >= SCRATCH_BASE_WORD and idx < SCRATCH_BASE_WORD + SCRATCH_WORDS then
+      return unsigned(scratch(idx - SCRATCH_BASE_WORD));
+    else
+      return to_unsigned(16#13#, 32);
+    end if;
   end function;
 
-  function load_byte(mem_v : ram_t; addr : unsigned(31 downto 0)) return unsigned is
+  impure function load_byte(addr : unsigned(31 downto 0)) return unsigned is
     variable w : std_logic_vector(31 downto 0);
     variable lane : natural range 0 to 3;
+    variable idx : natural;
   begin
-    w := mem_v(word_index(addr));
+    idx := word_index(addr);
+    if idx < ROM_WORDS then
+      w := rom(idx);
+    elsif idx >= SCRATCH_BASE_WORD and idx < SCRATCH_BASE_WORD + SCRATCH_WORDS then
+      w := scratch_bytes(idx - SCRATCH_BASE_WORD);
+    else
+      return to_unsigned(0, 32);
+    end if;
     lane := to_integer(addr(1 downto 0));
     return resize(unsigned(w(lane * 8 + 7 downto lane * 8)), 32);
   end function;
 begin
   uart_tx <= uart_tx_q;
+  debug_uart_valid <= debug_uart_valid_q;
+  debug_uart_byte <= debug_uart_byte_q;
+  debug_pc <= debug_pc_q;
+  debug_ins <= debug_ins_q;
+  debug_a0 <= debug_a0_q;
+  debug_ra <= debug_ra_q;
+  debug_sp <= debug_sp_q;
+  debug_phase <= debug_phase_q;
 
   process(clk)
     variable r : regs_t;
@@ -182,8 +234,12 @@ begin
     variable lane : natural range 0 to 3;
     variable crs1 : natural range 0 to 31;
     variable crs2 : natural range 0 to 31;
+    variable mem_idx : natural;
+    variable load_addr : unsigned(31 downto 0);
   begin
     if rising_edge(clk) then
+      debug_uart_valid_q <= debug_uart_valid_next_q;
+      debug_uart_valid_next_q <= '0';
       if uart_busy_q = '1' then
         if uart_baud_q >= BAUD_DIV - 1 then
           uart_baud_q <= 0;
@@ -211,6 +267,19 @@ begin
         uart_baud_q <= 0;
         uart_bits_q <= 0;
         uart_shift_q <= (others => '1');
+        debug_uart_valid_q <= '0';
+        debug_uart_valid_next_q <= '0';
+        debug_uart_byte_q <= (others => '0');
+        debug_pc_q <= (others => '0');
+        debug_ins_q <= (others => '0');
+        debug_a0_q <= (others => '0');
+        debug_ra_q <= (others => '0');
+        debug_sp_q <= (others => '0');
+        debug_phase_q <= (others => '0');
+        scratch_bytes <= (others => (others => '0'));
+        stack_ra_ab5c_q <= (others => '0');
+        stack_ra_ab6c_q <= (others => '0');
+        stack_ra_ab8c_q <= (others => '0');
       elsif state_q = S_UART then
         if uart_busy_q = '0' then
           pc_q <= next_pc_q;
@@ -220,60 +289,74 @@ begin
         r := regs_q;
         pc_next := pc_q + 4;
         pc_idx := word_index(pc_q);
-        w := mem(pc_idx);
+        if pc_idx < ROM_WORDS then
+          w := rom(pc_idx);
+        elsif pc_idx >= SCRATCH_BASE_WORD and pc_idx < SCRATCH_BASE_WORD + SCRATCH_WORDS then
+          w := scratch(pc_idx - SCRATCH_BASE_WORD);
+        else
+          w := x"00000013";
+        end if;
         if pc_q(1) = '0' then
           h := w(15 downto 0);
           ins := w;
         else
           h := w(31 downto 16);
-          w2 := mem(pc_idx + 1);
+          if pc_idx + 1 < ROM_WORDS then
+            w2 := rom(pc_idx + 1);
+          elsif pc_idx + 1 >= SCRATCH_BASE_WORD and pc_idx + 1 < SCRATCH_BASE_WORD + SCRATCH_WORDS then
+            w2 := scratch(pc_idx + 1 - SCRATCH_BASE_WORD);
+          else
+            w2 := x"00000013";
+          end if;
           ins := w2(15 downto 0) & w(31 downto 16);
         end if;
 
         if h(1 downto 0) /= "11" then
           pc_next := pc_q + 2;
-          case h(15 downto 13) is
-            when "000" =>
-              rd := to_integer(unsigned(h(11 downto 7)));
-              if rd /= 0 then
-                r(rd) := r(rd) + c_addi_imm(h);
-              end if;
-            when "001" =>
-              r(1) := pc_q + 2;
-              pc_next := pc_q + c_j_imm(h);
-            when "010" =>
-              rd := to_integer(unsigned(h(11 downto 7)));
-              if rd /= 0 then
-                r(rd) := c_addi_imm(h);
-              end if;
-            when "011" =>
-              rd := to_integer(unsigned(h(11 downto 7)));
-              if rd = 2 then
-                r(2) := r(2) + c_addi16sp_imm(h);
-              elsif rd /= 0 then
-                r(rd) := c_lui_imm(h);
-              end if;
-            when "100" =>
-              if h(12) = '0' then
-                rd := 8 + to_integer(unsigned(h(9 downto 7)));
-                r(rd) := shift_right(r(rd), to_integer(unsigned(h(6 downto 2))));
-              else
-                rd := 8 + to_integer(unsigned(h(9 downto 7)));
-                r(rd) := r(rd) and c_addi_imm(h);
-              end if;
-            when "101" =>
-              pc_next := pc_q + c_j_imm(h);
-            when "110" =>
-              rs1 := 8 + to_integer(unsigned(h(9 downto 7)));
-              if r(rs1) = 0 then
-                pc_next := pc_q + c_b_imm(h);
-              end if;
-            when others =>
-              rs1 := 8 + to_integer(unsigned(h(9 downto 7)));
-              if r(rs1) /= 0 then
-                pc_next := pc_q + c_b_imm(h);
-              end if;
-          end case;
+          if h(1 downto 0) = "01" then
+            case h(15 downto 13) is
+              when "000" =>
+                rd := to_integer(unsigned(h(11 downto 7)));
+                if rd /= 0 then
+                  r(rd) := r(rd) + c_addi_imm(h);
+                end if;
+              when "001" =>
+                r(1) := pc_q + 2;
+                pc_next := pc_q + c_j_imm(h);
+              when "010" =>
+                rd := to_integer(unsigned(h(11 downto 7)));
+                if rd /= 0 then
+                  r(rd) := c_addi_imm(h);
+                end if;
+              when "011" =>
+                rd := to_integer(unsigned(h(11 downto 7)));
+                if rd = 2 then
+                  r(2) := r(2) + c_addi16sp_imm(h);
+                elsif rd /= 0 then
+                  r(rd) := c_lui_imm(h);
+                end if;
+              when "100" =>
+                if h(12) = '0' then
+                  rd := 8 + to_integer(unsigned(h(9 downto 7)));
+                  r(rd) := shift_right(r(rd), to_integer(unsigned(h(6 downto 2))));
+                else
+                  rd := 8 + to_integer(unsigned(h(9 downto 7)));
+                  r(rd) := r(rd) and c_addi_imm(h);
+                end if;
+              when "101" =>
+                pc_next := pc_q + c_j_imm(h);
+              when "110" =>
+                rs1 := 8 + to_integer(unsigned(h(9 downto 7)));
+                if r(rs1) = 0 then
+                  pc_next := pc_q + c_b_imm(h);
+                end if;
+              when others =>
+                rs1 := 8 + to_integer(unsigned(h(9 downto 7)));
+                if r(rs1) /= 0 then
+                  pc_next := pc_q + c_b_imm(h);
+                end if;
+            end case;
+          end if;
 
           if h(1 downto 0) = "00" then
             if h(15 downto 13) = "000" then
@@ -282,12 +365,37 @@ begin
             elsif h(15 downto 13) = "010" then
               rd := 8 + to_integer(unsigned(h(4 downto 2)));
               rs1 := 8 + to_integer(unsigned(h(9 downto 7)));
-              r(rd) := load_word(mem, r(rs1) + c_lw_imm(h));
+              load_addr := r(rs1) + c_lw_imm(h);
+              mem_idx := word_index(load_addr);
+              if mem_idx >= SCRATCH_BASE_WORD and mem_idx < SCRATCH_BASE_WORD + SCRATCH_WORDS then
+                if rd = 1 and load_addr = x"8002AB5C" then
+                  r(rd) := stack_ra_ab5c_q;
+                elsif rd = 1 and load_addr = x"8002AB6C" then
+                  r(rd) := stack_ra_ab6c_q;
+                elsif rd = 1 and load_addr = x"8002AB8C" then
+                  r(rd) := stack_ra_ab8c_q;
+                else
+                  r(rd) := unsigned(scratch(mem_idx - SCRATCH_BASE_WORD));
+                end if;
+              else
+                r(rd) := load_word(load_addr);
+              end if;
             elsif h(15 downto 13) = "110" then
               rs1 := 8 + to_integer(unsigned(h(9 downto 7)));
               rs2 := 8 + to_integer(unsigned(h(4 downto 2)));
               eff := r(rs1) + c_lw_imm(h);
-              mem(word_index(eff)) <= std_logic_vector(r(rs2));
+              mem_idx := word_index(eff);
+              if mem_idx >= SCRATCH_BASE_WORD and mem_idx < SCRATCH_BASE_WORD + SCRATCH_WORDS then
+                scratch(mem_idx - SCRATCH_BASE_WORD) <= std_logic_vector(r(rs2));
+                scratch_bytes(mem_idx - SCRATCH_BASE_WORD) <= std_logic_vector(r(rs2));
+                if rs2 = 1 and eff = x"8002AB5C" then
+                  stack_ra_ab5c_q <= r(rs2);
+                elsif rs2 = 1 and eff = x"8002AB6C" then
+                  stack_ra_ab6c_q <= r(rs2);
+                elsif rs2 = 1 and eff = x"8002AB8C" then
+                  stack_ra_ab8c_q <= r(rs2);
+                end if;
+              end if;
             end if;
           elsif h(1 downto 0) = "10" then
             if h(15 downto 13) = "000" then
@@ -298,7 +406,21 @@ begin
             elsif h(15 downto 13) = "010" then
               rd := to_integer(unsigned(h(11 downto 7)));
               if rd /= 0 then
-                r(rd) := load_word(mem, r(2) + c_lwsp_imm(h));
+                load_addr := r(2) + c_lwsp_imm(h);
+                mem_idx := word_index(load_addr);
+                if mem_idx >= SCRATCH_BASE_WORD and mem_idx < SCRATCH_BASE_WORD + SCRATCH_WORDS then
+                  if rd = 1 and load_addr = x"8002AB5C" then
+                    r(rd) := stack_ra_ab5c_q;
+                  elsif rd = 1 and load_addr = x"8002AB6C" then
+                    r(rd) := stack_ra_ab6c_q;
+                  elsif rd = 1 and load_addr = x"8002AB8C" then
+                    r(rd) := stack_ra_ab8c_q;
+                  else
+                    r(rd) := unsigned(scratch(mem_idx - SCRATCH_BASE_WORD));
+                  end if;
+                else
+                  r(rd) := load_word(load_addr);
+                end if;
               end if;
             elsif h(15 downto 13) = "100" then
               rd := to_integer(unsigned(h(11 downto 7)));
@@ -318,7 +440,18 @@ begin
             elsif h(15 downto 13) = "110" then
               rs2 := to_integer(unsigned(h(6 downto 2)));
               eff := r(2) + c_swsp_imm(h);
-              mem(word_index(eff)) <= std_logic_vector(r(rs2));
+              mem_idx := word_index(eff);
+              if mem_idx >= SCRATCH_BASE_WORD and mem_idx < SCRATCH_BASE_WORD + SCRATCH_WORDS then
+                scratch(mem_idx - SCRATCH_BASE_WORD) <= std_logic_vector(r(rs2));
+                scratch_bytes(mem_idx - SCRATCH_BASE_WORD) <= std_logic_vector(r(rs2));
+                if rs2 = 1 and eff = x"8002AB5C" then
+                  stack_ra_ab5c_q <= r(rs2);
+                elsif rs2 = 1 and eff = x"8002AB6C" then
+                  stack_ra_ab6c_q <= r(rs2);
+                elsif rs2 = 1 and eff = x"8002AB8C" then
+                  stack_ra_ab8c_q <= r(rs2);
+                end if;
+              end if;
             end if;
           end if;
         else
@@ -381,9 +514,31 @@ begin
               eff := r(rs1) + sext(ins(31 downto 20));
               if rd /= 0 then
                 case ins(14 downto 12) is
-                  when "000" => r(rd) := sext(std_logic_vector(load_byte(mem, eff)(7 downto 0)));
-                  when "100" => r(rd) := load_byte(mem, eff);
-                  when others => r(rd) := load_word(mem, eff);
+                  when "000" =>
+                    mem_idx := word_index(eff);
+                    if mem_idx >= SCRATCH_BASE_WORD and mem_idx < SCRATCH_BASE_WORD + SCRATCH_WORDS then
+                      data_w := scratch_bytes(mem_idx - SCRATCH_BASE_WORD);
+                      lane := to_integer(eff(1 downto 0));
+                      r(rd) := sext(data_w(lane * 8 + 7 downto lane * 8));
+                    else
+                      r(rd) := sext(std_logic_vector(load_byte(eff)(7 downto 0)));
+                    end if;
+                  when "100" =>
+                    mem_idx := word_index(eff);
+                    if mem_idx >= SCRATCH_BASE_WORD and mem_idx < SCRATCH_BASE_WORD + SCRATCH_WORDS then
+                      data_w := scratch_bytes(mem_idx - SCRATCH_BASE_WORD);
+                      lane := to_integer(eff(1 downto 0));
+                      r(rd) := resize(unsigned(data_w(lane * 8 + 7 downto lane * 8)), 32);
+                    else
+                      r(rd) := load_byte(eff);
+                    end if;
+                  when others =>
+                    mem_idx := word_index(eff);
+                    if mem_idx >= SCRATCH_BASE_WORD and mem_idx < SCRATCH_BASE_WORD + SCRATCH_WORDS then
+                      r(rd) := unsigned(scratch(mem_idx - SCRATCH_BASE_WORD));
+                    else
+                      r(rd) := load_word(eff);
+                    end if;
                 end case;
               end if;
             when "0100011" =>
@@ -394,16 +549,23 @@ begin
                 uart_busy_q <= '1';
                 uart_baud_q <= 0;
                 uart_bits_q <= 10;
+                debug_uart_valid_next_q <= '1';
+                debug_uart_byte_q <= std_logic_vector(r(rs2)(7 downto 0));
                 next_pc_q <= pc_next;
                 state_q <= S_UART;
               elsif eff(31 downto 28) = x"8" then
-                if ins(14 downto 12) = "000" then
-                  data_w := mem(word_index(eff));
+                mem_idx := word_index(eff);
+                if mem_idx < SCRATCH_BASE_WORD or mem_idx >= SCRATCH_BASE_WORD + SCRATCH_WORDS then
+                  null;
+                elsif ins(14 downto 12) = "000" then
+                  data_w := scratch(mem_idx - SCRATCH_BASE_WORD);
                   lane := to_integer(eff(1 downto 0));
                   data_w(lane * 8 + 7 downto lane * 8) := std_logic_vector(r(rs2)(7 downto 0));
-                  mem(word_index(eff)) <= data_w;
+                  scratch(mem_idx - SCRATCH_BASE_WORD) <= data_w;
+                  scratch_bytes(mem_idx - SCRATCH_BASE_WORD) <= data_w;
                 else
-                  mem(word_index(eff)) <= std_logic_vector(r(rs2));
+                  scratch(mem_idx - SCRATCH_BASE_WORD) <= std_logic_vector(r(rs2));
+                  scratch_bytes(mem_idx - SCRATCH_BASE_WORD) <= std_logic_vector(r(rs2));
                 end if;
               end if;
             when "1110011" =>
@@ -415,6 +577,24 @@ begin
           end case;
         end if;
 
+        debug_pc_q <= std_logic_vector(pc_q(15 downto 0));
+        debug_ins_q <= ins;
+        debug_a0_q <= std_logic_vector(r(10)(7 downto 0));
+        debug_ra_q <= std_logic_vector(r(1)(15 downto 0));
+        debug_sp_q <= std_logic_vector(r(2)(15 downto 0));
+        if pc_q = x"8000CD62" then
+          debug_phase_q <= x"1";
+        elsif pc_q = x"8000CF50" then
+          debug_phase_q <= x"2";
+        elsif pc_q = x"80003B8C" then
+          debug_phase_q <= x"3";
+        elsif pc_q = x"80003BAA" then
+          debug_phase_q <= x"4";
+        elsif pc_q = x"80003BBE" then
+          debug_phase_q <= x"5";
+        elsif pc_q = x"8000CF6E" then
+          debug_phase_q <= x"6";
+        end if;
         r(0) := (others => '0');
         regs_q <= r;
         if state_q = S_EXEC then

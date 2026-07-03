@@ -360,7 +360,7 @@ Target output: LiteX BIOS banner, then serialboot prompt. Linux boot requires Op
 | if02 | `/dev/ttyUSB5` | No bytes after PL programming |
 | if03 | `/dev/ttyUSB6` | No bytes after PL programming |
 
-No merged USB channel has been proven to provide PL UART access for this generated image. Use the PMOD adapter path for the PL UART until the carrier routing is changed or the design is rebuilt to target a routed serial channel.
+No merged USB channel has been proven to provide PL UART access for this generated image. Use the PMOD adapter path for the PL UART until the carrier routing is changed or the design is rebuilt to target a routed serial channel. `scripts/fpga/check_kv260_simple_riscv_fpga.shs` now fails fast with `PHYSICAL_RUN_STATUS=blocked reason=pl_uart_adapter_missing` when no non-Xilinx adapter or existing `UART_EXTRA_PORTS` device is present; with `--with-ghdl` it still appends decoded-marker simulation evidence before returning the physical blocker. Set `ALLOW_XILINX_ONLY_UART_CAPTURE=1` only for diagnostic captures of the known-non-PL Xilinx USB ports.
 
 ## 7. Troubleshooting
 

@@ -47,16 +47,48 @@ set_property PACKAGE_PIN H12 [get_ports uart_tx]
 set_property IOSTANDARD LVCMOS33 [get_ports uart_tx]
 XDC
 cat > "$TCL_FILE" <<TCL
+set enable_uart_ila ${ENABLE_UART_ILA:-0}
+set ila_reset_release_count ${ILA_RESET_RELEASE_COUNT:-500000000}
+set ila_data_depth ${ILA_DATA_DEPTH:-4096}
 create_project k26_vexriscv $BUILD_DIR/k26_vexriscv -part xck26-sfvc784-2lv-c -force
 add_files [glob $RTL_DIR/*.vhd]
 add_files -fileset constrs_1 $XDC_FILE
 set_property top soc_top_rv64_k26 [current_fileset]
+if {\$enable_uart_ila} {
+  set_property generic "RESET_RELEASE_COUNT=\$ila_reset_release_count" [current_fileset]
+}
 update_compile_order -fileset sources_1
 launch_runs synth_1
 wait_on_run synth_1
 open_run synth_1
 report_utilization -file $BUILD_DIR/k26_vexriscv/k26_vexriscv.runs/synth_1/soc_top_rv64_k26_utilization_synth.rpt
 report_timing_summary -file $BUILD_DIR/k26_vexriscv/k26_vexriscv.runs/synth_1/soc_top_rv64_k26_timing_summary_synth.rpt
+if {\$enable_uart_ila} {
+  set uart_nets [lsort [get_nets -hier -filter {NAME =~ *uart_ila_probe[*]}]]
+  set clk_nets [get_nets -hier -filter {NAME =~ *cfgmclk*}]
+  if {[llength \$uart_nets] == 0} {
+    puts "ERROR: ENABLE_UART_ILA requested but uart_ila_probe net was not found"
+    exit 4
+  }
+  if {[llength \$clk_nets] == 0} {
+    puts "ERROR: ENABLE_UART_ILA requested but cfgmclk net was not found"
+    exit 4
+  }
+  create_debug_core u_uart_ila ila
+  set_property C_DATA_DEPTH \$ila_data_depth [get_debug_cores u_uart_ila]
+  set_property C_INPUT_PIPE_STAGES 1 [get_debug_cores u_uart_ila]
+  connect_debug_port u_uart_ila/clk [lindex \$clk_nets 0]
+  set bit_index 0
+  foreach uart_net \$uart_nets {
+    if {\$bit_index > 0} {
+      create_debug_port u_uart_ila probe
+    }
+    connect_debug_port u_uart_ila/probe\$bit_index \$uart_net
+    incr bit_index
+  }
+  save_constraints
+  puts "UART_ILA_STATUS=inserted"
+}
 if {[lsearch \$argv synth_only] >= 0} { exit }
 launch_runs impl_1 -to_step write_bitstream
 wait_on_run impl_1

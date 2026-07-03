@@ -33,9 +33,13 @@ check_artifact() {
     fi
 }
 
-check_artifact "artifact_rv32_simpleos_elf" "${RV32_FPGA_ELF:-build/os/simpleos_riscv32_fpga.elf}"
-check_artifact "artifact_rv32_simpleos_bin" "${RV32_FPGA_BIN:-build/rv32_bringup_check/hello_litex_rv32.bin}"
-check_artifact "artifact_rv32_simpleos_bitstream" "${RV32_FPGA_BIT:-build/build/rv32_fpga/gateware/rv32_fpga.bit}"
+rv32_elf="${RV32_FPGA_ELF:-build/os/simpleos_riscv32_fpga.elf}"
+rv32_bin="${RV32_FPGA_BIN:-build/vhdl/rv32/simpleos_riscv32_fpga.bin}"
+rv32_bit="${RV32_FPGA_BIT:-build/build/rv32_fpga/gateware/rv32_fpga.bit}"
+
+check_artifact "artifact_rv32_simpleos_elf" "$rv32_elf"
+check_artifact "artifact_rv32_simpleos_bin" "$rv32_bin"
+check_artifact "artifact_rv32_simpleos_bitstream" "$rv32_bit"
 
 rv32_vhdl_dir="${RV32_VHDL_DIR:-build/vhdl/rv32}"
 if [ -s "$rv32_vhdl_dir/rv32i_pkg.vhd" ] &&
@@ -56,7 +60,26 @@ rv32_synth_util="${RV32_FPGA_SYNTH_UTIL:-build/fpga/k26_rv32/k26_rv32/k26_rv32.r
 rv32_preload_mem="${RV32_FPGA_PRELOAD_MEM:-build/vhdl/rv32/rv32_payload.mem}"
 rv32_top_vhdl="${RV32_FPGA_TOP_VHDL:-build/vhdl/rv32/soc_top_rv32.vhd}"
 rv32_run_log="${RV32_FPGA_RUN_LOG:-build/fpga/rv32/rv32_simpleos_run.log}"
-rv32_run_marker="${RV32_FPGA_RUN_MARKER:-SimpleOS}"
+rv32_ila_text="${RV32_FPGA_ILA_TEXT:-build/fpga/ila_capture/rv32/uart_ila_bytes.txt}"
+rv32_run_marker="${RV32_FPGA_RUN_MARKER:-FPGA-RV32}"
+rv32_ghdl_log="${RV32_FPGA_GHDL_LOG:-build/fpga/rv32/rv32_simpleos_ghdl.log}"
+
+newer_rv32_dep=""
+for dep in "$rv32_preload_mem" "$rv32_exec_core_vhdl" "$rv32_top_vhdl"; do
+    if [ -f "$rv32_bit" ] && [ -f "$dep" ] && [ -n "$(find "$dep" -newer "$rv32_bit" -print -quit 2>/dev/null)" ]; then
+        newer_rv32_dep="$dep"
+        break
+    fi
+done
+if [ -z "$newer_rv32_dep" ] && [ -f "$rv32_bit" ]; then
+    pass "rv32_fpga_bitstream_freshness"
+    info "rv32_fpga_bitstream=$rv32_bit"
+else
+    fail "rv32_fpga_bitstream_freshness"
+    info "rv32_fpga_bitstream=$rv32_bit"
+    info "rv32_fpga_newer_input=$newer_rv32_dep"
+    info "rv32_fpga_bitstream_reason=older-than-generated-input"
+fi
 
 if [ -f "$rv32_exec_core_vhdl" ]; then
     if grep -Eiq 'stub|placeholder' "$rv32_exec_core_vhdl"; then
@@ -98,7 +121,7 @@ fi
 
 if [ -f "$rv32_load_log" ]; then
     if grep -q 'Invalid context' "$rv32_load_log"; then
-        if [ -s "$rv32_preload_mem" ] && grep -q 'rv32_payload.mem' "$rv32_top_vhdl"; then
+        if [ -s "$rv32_preload_mem" ] && grep -q 'rv32_payload.mem' "$rv32_exec_core_vhdl"; then
             pass "rv32_fpga_elf_load_context"
             info "rv32_fpga_load_context=rtl-preload"
             info "rv32_fpga_preload_mem=$rv32_preload_mem"
@@ -113,7 +136,7 @@ if [ -f "$rv32_load_log" ]; then
         pass "rv32_fpga_elf_load_context"
         info "rv32_fpga_load_log=$rv32_load_log"
     fi
-elif [ -s "$rv32_preload_mem" ] && grep -q 'rv32_payload.mem' "$rv32_top_vhdl"; then
+elif [ -s "$rv32_preload_mem" ] && grep -q 'rv32_payload.mem' "$rv32_exec_core_vhdl"; then
     pass "rv32_fpga_elf_load_context"
     info "rv32_fpga_load_context=rtl-preload"
     info "rv32_fpga_preload_mem=$rv32_preload_mem"
@@ -127,11 +150,30 @@ if [ -f "$rv32_run_log" ] && grep -q "$rv32_run_marker" "$rv32_run_log"; then
     pass "rv32_fpga_simpleos_run"
     info "rv32_fpga_run_log=$rv32_run_log"
     info "rv32_fpga_run_marker=$rv32_run_marker"
+elif [ -f "$rv32_ila_text" ] && grep -q "$rv32_run_marker" "$rv32_ila_text"; then
+    pass "rv32_fpga_simpleos_run"
+    info "rv32_fpga_run_context=vivado-ila"
+    info "rv32_fpga_ila_text=$rv32_ila_text"
+    info "rv32_fpga_run_marker=$rv32_run_marker"
 else
     fail "rv32_fpga_simpleos_run"
     info "rv32_fpga_run_log=$rv32_run_log"
+    info "rv32_fpga_ila_text=$rv32_ila_text"
     info "rv32_fpga_run_marker=$rv32_run_marker"
     info "rv32_fpga_run_context=missing-uart-run-marker"
+fi
+
+if [ -f "$rv32_ghdl_log" ] &&
+    grep -q 'RV32_UART_MARKER_SEEN' "$rv32_ghdl_log" &&
+    grep -q 'Simulation PASSED' "$rv32_ghdl_log"; then
+    pass "rv32_fpga_ghdl_marker"
+    info "rv32_fpga_ghdl_log=$rv32_ghdl_log"
+    info "rv32_fpga_ghdl_marker=$rv32_run_marker"
+else
+    fail "rv32_fpga_ghdl_marker"
+    info "rv32_fpga_ghdl_log=$rv32_ghdl_log"
+    info "rv32_fpga_ghdl_marker=$rv32_run_marker"
+    info "rv32_fpga_ghdl_context=missing-decoded-marker"
 fi
 
 info "dual_arch_preflight_complete=true"

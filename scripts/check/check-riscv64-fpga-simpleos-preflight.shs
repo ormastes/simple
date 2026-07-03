@@ -121,7 +121,8 @@ if command -v yosys >/dev/null 2>&1; then
     pass "tool_yosys"
     info "yosys_version=$ver"
 else
-    fail "tool_yosys"
+    info "tool_yosys=not-installed"
+    info "tool_yosys_context=optional; Vivado synthesis/route/DRC/bitgen is the FPGA gate"
 fi
 
 # --- 6. RISC-V cross compilers ---
@@ -143,7 +144,7 @@ fi
 
 # --- 7. Existing SimpleOS RV64 build artifacts ---
 rv64_elf="${RV64_FPGA_ELF:-build/os/simpleos_riscv64_fpga.elf}"
-rv64_bin="${RV64_FPGA_BIN:-build/rv64_bringup_check/hello_litex_rv64.bin}"
+rv64_bin="${RV64_FPGA_BIN:-build/vhdl/rv64/simpleos_riscv64_fpga.bin}"
 rv64_bit="${RV64_FPGA_BIT:-build/build/xilinx_kv260/gateware/xilinx_kv260.bit}"
 rv64_core_vhdl="${RV64_FPGA_CORE_VHDL:-build/vhdl/rv64/rv64gc_core.vhd}"
 rv64_load_log="${RV64_FPGA_LOAD_LOG:-build/fpga/k26/load_elf_k26.log}"
@@ -151,7 +152,9 @@ rv64_preload_mem="${RV64_FPGA_PRELOAD_MEM:-build/vhdl/rv64/rv64_payload.mem}"
 rv64_ram_vhdl="${RV64_FPGA_RAM_VHDL:-build/vhdl/rv64/ram.vhd}"
 rv64_synth_util="${RV64_FPGA_SYNTH_UTIL:-build/fpga/k26/k26_vexriscv/k26_vexriscv.runs/synth_1/soc_top_rv64_k26_utilization_synth.rpt}"
 rv64_run_log="${RV64_FPGA_RUN_LOG:-build/fpga/k26/rv64_simpleos_run.log}"
-rv64_run_marker="${RV64_FPGA_RUN_MARKER:-SimpleOS}"
+rv64_ila_text="${RV64_FPGA_ILA_TEXT:-build/fpga/ila_capture/rv64/uart_ila_bytes.txt}"
+rv64_run_marker="${RV64_FPGA_RUN_MARKER:-SimpleOS RV64 FPGA}"
+rv64_ghdl_log="${RV64_FPGA_GHDL_LOG:-build/fpga/k26/rv64_simpleos_ghdl.log}"
 
 if [ -f "$rv64_elf" ]; then
     sz="$(wc -c <"$rv64_elf" | tr -d ' ')"
@@ -175,6 +178,23 @@ if [ -f "$rv64_bit" ]; then
     info "simpleos_bit_bytes=$sz"
 else
     fail "artifact_simpleos_bitstream"
+fi
+
+newer_rv64_dep=""
+for dep in "$rv64_preload_mem" "$rv64_core_vhdl" "$rv64_ram_vhdl"; do
+    if [ -f "$rv64_bit" ] && [ -f "$dep" ] && [ -n "$(find "$dep" -newer "$rv64_bit" -print -quit 2>/dev/null)" ]; then
+        newer_rv64_dep="$dep"
+        break
+    fi
+done
+if [ -z "$newer_rv64_dep" ] && [ -f "$rv64_bit" ]; then
+    pass "rv64_fpga_bitstream_freshness"
+    info "rv64_fpga_bitstream=$rv64_bit"
+else
+    fail "rv64_fpga_bitstream_freshness"
+    info "rv64_fpga_bitstream=$rv64_bit"
+    info "rv64_fpga_newer_input=$newer_rv64_dep"
+    info "rv64_fpga_bitstream_reason=older-than-generated-input"
 fi
 
 if [ -f "$rv64_core_vhdl" ]; then
@@ -243,11 +263,30 @@ if [ -f "$rv64_run_log" ] && grep -q "$rv64_run_marker" "$rv64_run_log"; then
     pass "rv64_fpga_simpleos_run"
     info "rv64_fpga_run_log=$rv64_run_log"
     info "rv64_fpga_run_marker=$rv64_run_marker"
+elif [ -f "$rv64_ila_text" ] && grep -q "$rv64_run_marker" "$rv64_ila_text"; then
+    pass "rv64_fpga_simpleos_run"
+    info "rv64_fpga_run_context=vivado-ila"
+    info "rv64_fpga_ila_text=$rv64_ila_text"
+    info "rv64_fpga_run_marker=$rv64_run_marker"
 else
     fail "rv64_fpga_simpleos_run"
     info "rv64_fpga_run_log=$rv64_run_log"
+    info "rv64_fpga_ila_text=$rv64_ila_text"
     info "rv64_fpga_run_marker=$rv64_run_marker"
     info "rv64_fpga_run_context=missing-uart-run-marker"
+fi
+
+if [ -f "$rv64_ghdl_log" ] &&
+    grep -q 'RV64_UART_MARKER_SEEN' "$rv64_ghdl_log" &&
+    grep -q 'Simulation PASSED' "$rv64_ghdl_log"; then
+    pass "rv64_fpga_ghdl_marker"
+    info "rv64_fpga_ghdl_log=$rv64_ghdl_log"
+    info "rv64_fpga_ghdl_marker=$rv64_run_marker"
+else
+    fail "rv64_fpga_ghdl_marker"
+    info "rv64_fpga_ghdl_log=$rv64_ghdl_log"
+    info "rv64_fpga_ghdl_marker=$rv64_run_marker"
+    info "rv64_fpga_ghdl_context=missing-decoded-marker"
 fi
 
 # --- 8. Simple binary sanity check ---

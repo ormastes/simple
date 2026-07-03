@@ -91,6 +91,19 @@ that need a simple interchange format; it does not replace the Lean Lake build
 or the RVFI/SymbiYosys RTL lane. The current RISC-V product BYL surface is
 `src/verification/riscv_product/riscv_product.byl`.
 
+## KV260 No-Adapter Marker Capture
+
+When a PMOD UART adapter is not attached, build a Vivado ILA debug bitstream and
+capture the internal UART marker latch:
+
+```bash
+ENABLE_UART_ILA=1 ILA_RESET_RELEASE_COUNT=500000000 SIMPLE_BINARY=bin/release/simple bash scripts/fpga/build_k26_vexriscv.shs
+PROGRAM_TIMEOUT_SECONDS=300 sh scripts/fpga/capture_kv260_uart_ila.shs rv64
+```
+
+Current KV260 evidence reports `ILA_CAPTURE_STATUS=marker_seen` for RV64
+`SimpleOS RV64 FPGA` and RV32 `FPGA-RV32`.
+
 ## What Gets Generated
 
 The generator emits both:
