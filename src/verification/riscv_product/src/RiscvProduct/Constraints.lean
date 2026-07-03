@@ -117,6 +117,15 @@ theorem acquire_none_requires_owner (s : ResourceState) (l : Lane) :
   | some owner =>
       exact ⟨owner, rfl⟩
 
+theorem acquire_none_iff_occupied (s : ResourceState) (l : Lane) :
+    acquire s l = none ↔ ∃ owner, s.owner = some owner := by
+  constructor
+  · exact acquire_none_requires_owner s l
+  · intro h
+    rcases h with ⟨owner, howner⟩
+    unfold acquire
+    rw [howner]
+
 theorem held_resource_rejects_second_owner (s : ResourceState) (owner other : Lane) :
     s.owner = some owner → acquire s other = none := by
   intro h
