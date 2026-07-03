@@ -249,6 +249,23 @@ theorem revocation_complete
   rw [hfind]
   simp
 
+/-- T3_child: After revokeTransitive(rootId), a direct child token whose
+    parentTokenId is rootId no longer passes check. -/
+theorem revocation_complete_direct_child
+    (rootId childId : Nat) (pid : Principal) (kind : CapKind) :
+    (CapState.revokeTransitive
+      ({ records :=
+          [{ pid := pid
+           , caps :=
+              { isFullSet := false
+              , tokens :=
+                  [{ kind := kind, rights := [], generation := 0, owner := pid,
+                     tokenId := childId, parentTokenId := rootId, depth := 0 }] } }]
+       , nextGeneration := 1
+       , nextTokenId := 1 } : CapState)
+      rootId).check pid kind = false := by
+  simp [CapState.revokeTransitive, CapState.check, CapState.findRecord, isDescendant]
+
 -- ============================================================
 -- § T3_direct  revocation_complete_direct (owner-only form)
 -- ============================================================
