@@ -22,19 +22,64 @@ use app.office.sheets.formula.{evaluate_formula}
 fn _span(s: text) -> TextSpan:
     TextSpan(text: s, style: InlineStyle.Normal)
 
+fn _find_marker(s: text, marker: text, from: i32) -> i32:
+    """Index of the next occurrence of marker at or after `from`, or -1."""
+    var i = from
+    val mlen = marker.len()
+    while i + mlen <= s.len():
+        if s.slice(i, i + mlen) == marker:
+            return i
+        i = i + 1
+    -1
+
+fn parse_inline_spans(s: text) -> [TextSpan]:
+    """Parse markdown inline styling — **bold**, *italic*, `code` — into styled
+    spans. Unterminated markers stay literal text."""
+    var spans: [TextSpan] = []
+    var plain = ""
+    var i = 0
+    while i < s.len():
+        var marker = ""
+        var style = InlineStyle.Normal
+        if i + 2 <= s.len() and s.slice(i, i + 2) == "**":
+            marker = "**"
+            style = InlineStyle.Bold
+        elif s.slice(i, i + 1) == "*":
+            marker = "*"
+            style = InlineStyle.Italic
+        elif s.slice(i, i + 1) == "`":
+            marker = "`"
+            style = InlineStyle.Code
+        if marker != "":
+            val close = _find_marker(s, marker, i + marker.len())
+            if close > i + marker.len() - 1:
+                if plain != "":
+                    spans.push(_span(plain))
+                    plain = ""
+                spans.push(TextSpan(text: s.slice(i + marker.len(), close), style: style))
+                i = close + marker.len()
+                continue
+        plain = "{plain}{s.slice(i, i + 1)}"
+        i = i + 1
+    if plain != "":
+        spans.push(_span(plain))
+    if spans.len() == 0:
+        spans.push(_span(""))
+    spans
+
 fn _md_block(line: text) -> DocBlock:
     """Classify a single non-fence, non-blank markdown line into a DocBlock."""
     if line.starts_with("### "):
-        return DocBlock(kind: BlockKind.Heading3, spans: [_span(line.slice(4, line.len()))])
+        return DocBlock(kind: BlockKind.Heading3, spans: parse_inline_spans(line.slice(4, line.len())))
     if line.starts_with("## "):
-        return DocBlock(kind: BlockKind.Heading2, spans: [_span(line.slice(3, line.len()))])
+        return DocBlock(kind: BlockKind.Heading2, spans: parse_inline_spans(line.slice(3, line.len())))
     if line.starts_with("# "):
-        return DocBlock(kind: BlockKind.Heading1, spans: [_span(line.slice(2, line.len()))])
+        return DocBlock(kind: BlockKind.Heading1, spans: parse_inline_spans(line.slice(2, line.len())))
     if line.starts_with("- ") or line.starts_with("* "):
-        return DocBlock(kind: BlockKind.BulletItem, spans: [_span(line.slice(2, line.len()))])
+        return DocBlock(kind: BlockKind.BulletItem, spans: parse_inline_spans(line.slice(2, line.len())))
     if line.starts_with("> "):
-        return DocBlock(kind: BlockKind.Quote, spans: [_span(line.slice(2, line.len()))])
-    DocBlock(kind: BlockKind.Paragraph, spans: [_span(line.trim())])
+        return DocBlock(kind: BlockKind.Quote, spans: parse_inline_spans(line.slice(2, line.len())))
+    DocBlock(kind: BlockKind.Paragraph, spans: parse_inline_spans(line.trim()))
 
 fn parse_markdown_document(content: text, title: text) -> RichDocument:
     """Parse a markdown subset (#/##/### headings, -/* bullets, > quote, ``` code
@@ -63,15 +108,28 @@ fn parse_markdown_document(content: text, title: text) -> RichDocument:
         doc.blocks.push(DocBlock(kind: BlockKind.CodeBlock, spans: [_span(code_buf)]))
     doc
 
+fn _span_to_markdown(span: TextSpan) -> text:
+    match span.style:
+        case Bold: return "**{span.text}**"
+        case Italic: return "*{span.text}*"
+        case Code: return "`{span.text}`"
+        _: return span.text
+
+fn _spans_to_markdown(spans: [TextSpan]) -> text:
+    var out = ""
+    for span in spans:
+        out = "{out}{_span_to_markdown(span)}"
+    out
+
 fn _block_to_markdown(block: DocBlock) -> text:
-    val content = spans_to_plain_text(block.spans)
+    val content = _spans_to_markdown(block.spans)
     match block.kind:
         case Heading1: return "# {content}"
         case Heading2: return "## {content}"
         case Heading3: return "### {content}"
         case BulletItem: return "- {content}"
         case Quote: return "> {content}"
-        case CodeBlock: return "```\n{content}\n```"
+        case CodeBlock: return "```\n{spans_to_plain_text(block.spans)}\n```"
         case Paragraph: return content
 
 fn document_to_markdown(doc: RichDocument) -> text:
