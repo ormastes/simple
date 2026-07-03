@@ -1,6 +1,6 @@
 # Linux RenderDoc + SimpleOS Hardening Evidence
 
-- status: pass_with_tracked_gui_g1_1_gap
+- status: pass
 - scope: linux-renderdoc-web-gui-simpleos-qemu-wm-llvm-port-engine2d-simd-and-qemu-gpu-access
 - evidence_date_local: 2026-07-02
 - linux_renderdoc_source_report: `doc/09_report/linux_vulkan_render_log_compare_2026-06-29.md`
@@ -171,24 +171,29 @@
 
 ## Related GUI Vulkan Window Evidence
 
-- status: partial_failing_widget_content_oracle
+- status: pass
 - wrapper: `scripts/check/check-gui-vulkan-window.shs`
-- wrapper_overall: fail
+- wrapper_overall: pass
 - binary: `src/compiler_rust/target/debug/simple`
-- run: `SIMPLE_GUI_VULKAN_W=96 SIMPLE_GUI_VULKAN_H=72 SIMPLE_GUI_VULKAN_APP_TIMEOUT=150`
+- run: `SIMPLE_BIN=src/compiler_rust/target/debug/simple SIMPLE_LIB=src sh scripts/check/check-gui-vulkan-window.shs`
+- render_size: 200x150
+- compact_mode: `SHOWCASE_G1_1_COMPACT=1`
 - renderer_log_line: `showcase_renderer_backend=vulkan;requested=vulkan;vulkan_device=requested=vulkan;selected=vulkan;status=Initialized;api=vulkan;gate=vulkan_runtime;shader=spirv;compute=true;graphics=true;present=false`
 - render_completed: 1
-- render_wait_secs: 96
-- offscreen_ppm_bytes: 20749
+- render_wait_secs: 52
+- offscreen_ppm_bytes: 90015
+- window_capture_attempts: 9
 - window_capture_status: captured
 - window_distinct_colors: 6
 - assert_vulkan_backend: pass
 - assert_vulkan_frame: pass
 - assert_window_capture: pass
-- assert_widget_content: fail
-- widget_oracle_ink_coverage: 0.0021701388888888395
+- assert_widget_content: pass
+- widget_oracle_ink_coverage: 0.005066666666666664
 - widget_oracle_required_ink_coverage: `> 0.005`
-- blocker: current Vulkan text fallback is still too slow at the 200x150 target (`render_completed=0` after 240s) and the 96x72 completed frame is below the readable-content oracle threshold.
+- spec: `test/03_system/check/gui_vulkan_window_spec.spl`
+- spec_status: pass
+- spec_examples: 6
 
 ## Scope Boundary
 

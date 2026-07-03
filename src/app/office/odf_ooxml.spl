@@ -435,7 +435,61 @@ fn sheet_to_ods_bytes(sheet: Sheet) -> [u8]:
     files.push(zip_text_file("content.xml", content))
     zip_write_stored(files)
 
-val _ODT_MANIFEST = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><manifest:manifest xmlns:manifest=\"urn:oasis:names:tc:opendocument:xmlns:manifest:1.0\" manifest:version=\"1.2\"><manifest:file-entry manifest:full-path=\"/\" manifest:media-type=\"application/vnd.oasis.opendocument.text\"/><manifest:file-entry manifest:full-path=\"content.xml\" manifest:media-type=\"text/xml\"/></manifest:manifest>"
+# =========================================================================
+# Real .docx writer
+# =========================================================================
+
+fn _docx_run(span: TextSpan) -> text:
+    val content = "<w:t xml:space=\"preserve\">{_xml_escape_d(span.text)}</w:t>"
+    match span.style:
+        case Bold: return "<w:r><w:rPr><w:b/></w:rPr>{content}</w:r>"
+        case Italic: return "<w:r><w:rPr><w:i/></w:rPr>{content}</w:r>"
+        _: return "<w:r>{content}</w:r>"
+
+fn _xml_escape_d(s: text) -> text:
+    var r = s
+    r = r.replace("&", "&amp;")
+    r = r.replace("<", "&lt;")
+    r = r.replace(">", "&gt;")
+    r
+
+fn _docx_para(block: DocBlock) -> text:
+    var style = ""
+    match block.kind:
+        case Heading1: style = "<w:pPr><w:pStyle w:val=\"Heading1\"/></w:pPr>"
+        case Heading2: style = "<w:pPr><w:pStyle w:val=\"Heading2\"/></w:pPr>"
+        case Heading3: style = "<w:pPr><w:pStyle w:val=\"Heading3\"/></w:pPr>"
+        case BulletItem: style = "<w:pPr><w:pStyle w:val=\"ListParagraph\"/></w:pPr>"
+        _: style = ""
+    var runs = ""
+    for span in block.spans:
+        runs = "{runs}{_docx_run(span)}"
+    "<w:p>{style}{runs}</w:p>"
+
+fn document_to_docx_bytes(doc: RichDocument) -> [u8]:
+    """Build a genuine .docx: content types, rels, styles (Heading1-3 +
+    ListParagraph), and word/document.xml with styled runs (w:b/w:i)."""
+    var paras = ""
+    for block in doc.blocks:
+        paras = "{paras}{_docx_para(block)}"
+    val ns_w = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    val document = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><w:document xmlns:w=\"{ns_w}\"><w:body>{paras}</w:body></w:document>"
+    var styles = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><w:styles xmlns:w=\"{ns_w}\">"
+    for level in ["1", "2", "3"]:
+        styles = "{styles}<w:style w:type=\"paragraph\" w:styleId=\"Heading{level}\"><w:name w:val=\"heading {level}\"/><w:rPr><w:b/></w:rPr></w:style>"
+    styles = "{styles}<w:style w:type=\"paragraph\" w:styleId=\"ListParagraph\"><w:name w:val=\"List Paragraph\"/></w:style></w:styles>"
+    val types = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/><Default Extension=\"xml\" ContentType=\"application/xml\"/><Override PartName=\"/word/document.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml\"/><Override PartName=\"/word/styles.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml\"/></Types>"
+    val root_rels = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"word/document.xml\"/></Relationships>"
+    val doc_rels = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles\" Target=\"styles.xml\"/></Relationships>"
+    var files: [ZipFile] = []
+    files.push(zip_text_file("[Content_Types].xml", types))
+    files.push(zip_text_file("_rels/.rels", root_rels))
+    files.push(zip_text_file("word/document.xml", document))
+    files.push(zip_text_file("word/_rels/document.xml.rels", doc_rels))
+    files.push(zip_text_file("word/styles.xml", styles))
+    zip_write_stored(files)
+
+val _ODT_MANIFEST ="<?xml version=\"1.0\" encoding=\"UTF-8\"?><manifest:manifest xmlns:manifest=\"urn:oasis:names:tc:opendocument:xmlns:manifest:1.0\" manifest:version=\"1.2\"><manifest:file-entry manifest:full-path=\"/\" manifest:media-type=\"application/vnd.oasis.opendocument.text\"/><manifest:file-entry manifest:full-path=\"content.xml\" manifest:media-type=\"text/xml\"/></manifest:manifest>"
 
 fn document_to_odt_bytes(doc: RichDocument) -> [u8]:
     """Build a genuine zipped .odt: mimetype (stored first, per spec),

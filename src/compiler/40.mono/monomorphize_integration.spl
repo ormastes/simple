@@ -155,14 +155,21 @@ impl MonomorphizationPass:
         self.scan_block(func.body)
 
     me scan_block(block: HirBlock):
-        """Scan a block for generic call sites."""
+        """Scan a block for generic call sites.
+
+        Nil-guarded: freshly single-file-lowered HIR (the -c / SIMPLE_UNSTUB_HIR
+        path) can carry nil sub-blocks where the seed's ANY-erased payloads
+        mis-resolved during lowering; this scan is advisory, so skip instead of
+        trapping (same rationale as the scan_expr nil guard, iteration 10/15).
+        `block.value` is a DESUGARED plain HirExpr field gated by `block.has`
+        (NOT an Option) — Option-matching it mis-evaluates (iteration 14
+        eval_block family), so gate on `has` and pass the plain field."""
+        if block == nil:
+            return
         for stmt in block.stmts:
             self.scan_stmt(stmt)
-        match block.value:
-            Some(value):
-                self.scan_expr(value)
-            nil:
-                pass_do_nothing("block has no trailing value")
+        if block.has:
+            self.scan_expr(block.value)
 
     me scan_stmt(stmt: HirStmt):
         """Scan a statement for generic call sites.
@@ -174,6 +181,8 @@ impl MonomorphizationPass:
         then read as a struct FieldAccess at offset 0 (the enum header) instead of
         rt_enum_payload, yielding a garbage pointer that SIGSEGVs in scan_expr
         (stage4 -c/run chain, iteration 15)."""
+        if stmt == nil:
+            return
         match stmt.kind:
             case HirStmtKind.Expr(e):
                 self.scan_expr(e)

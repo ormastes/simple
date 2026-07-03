@@ -199,18 +199,19 @@ if result.is_ok():
 
 </details>
 
-#### live-window capture status is recorded
+#### live-window capture is nonblank
 
 - print "Loaded evidence with {entries len
    - Exec capture: after_step
-   - Evidence: execution result verified by 1 expected check
+   - Evidence: execution result verified by 2 expected checks
    - Expected: get_env_value(entries, "check") equals `gui_vulkan_window`
+   - Expected: get_env_value(entries, "assert_window_capture") equals `pass`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -222,14 +223,10 @@ else:
     print "Loaded evidence with {entries.len()} entries"
     expect(get_env_value(entries, "check")).to_equal("gui_vulkan_window")
 
-# SOFT on this host: rt_winit is absent from the pure-Simple binaries and
-# the Xvfb virtual display does not expose the window surface to xwd, so
-# the on-screen capture is recorded (unavailable_no_winit / blank_wsi /
-# captured) but not gated. See check-gui-vulkan-window.shs LIMITATION.
 val result = read_evidence_env(EV)
 if result.is_ok():
     val entries = result.unwrap()
-    expect(get_env_value(entries, "window_capture_status")).to_be_truthy()
+    expect(get_env_value(entries, "assert_window_capture")).to_equal("pass")
 ```
 
 </details>

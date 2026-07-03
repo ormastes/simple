@@ -1,13 +1,13 @@
 # Test Specification Index
 
-*Curated lane index: Linux RenderDoc/Vulkan, Engine2D, Breakout, and SimpleOS LLVM evidence.*
+*Curated lane index: Linux RenderDoc/Vulkan, Engine2D, GUI Vulkan window, Breakout, and SimpleOS LLVM evidence.*
 
 ## Quick Stats
 
-- **Total Features:** 9
-- **Complete Documentation:** 9 (100%)
+- **Total Features:** 10
+- **Complete Documentation:** 10 (100%)
 - **Stubs Remaining:** 0
-- **Total Lines:** 3422
+- **Total Lines:** 3694
 - **Warnings:** tracked in individual generated manuals
 
 ---
@@ -19,6 +19,12 @@
 | [Vulkan Compute Oracle](01_unit/lib/gc_async_mut/gpu/engine2d/vulkan_compute_oracle_spec.md) | Complete | 7 | 420 lines |
 | [Engine2D Facade Backend Mutation](test/01_unit/lib/gc_async_mut/gpu/engine2d/engine2d_facade_backend_mutation_spec.md) | Complete | 5 | 266 lines |
 | [Web Renderer Backend Parity](test/01_unit/lib/gc_async_mut/gpu/browser_engine/web_renderer_backend_parity_spec.md) | Complete | 10 | 236 lines |
+
+## GUI Vulkan
+
+| Feature | Status | Tests | Details |
+|---------|--------|------:|---------|
+| [GUI Vulkan Window Verification](test/03_system/check/gui_vulkan_window_spec.md) | Complete | 6 | 272 lines |
 
 ## Game2D Breakout
 
