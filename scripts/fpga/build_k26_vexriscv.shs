@@ -1,12 +1,15 @@
-#!/bin/sh
+#!/usr/bin/env bash
 # Build K26 VexRiscv-SMP bitstream via Vivado 2025.2
 # Usage: sh scripts/fpga/build_k26_vexriscv.shs [--synth-only]
 
-set -e
+set -euo pipefail
 
-VIVADO_SETTINGS="$HOME/Xilinx/2025.2/Vivado/settings64.sh"
+VIVADO_SETTINGS="${VIVADO_SETTINGS:-$HOME/Xilinx/2025.2/Vivado/settings64.sh}"
 BUILD_DIR="build/fpga/k26"
+RTL_DIR="build/vhdl/rv64"
 TCL_FILE="$BUILD_DIR/build_vexriscv.tcl"
+XDC_FILE="$BUILD_DIR/k26_uart.xdc"
+PRELIGHT_BITSTREAM="build/build/xilinx_kv260/gateware/xilinx_kv260.bit"
 
 if [ ! -f "$VIVADO_SETTINGS" ]; then
     echo "ERROR: Vivado not found at $VIVADO_SETTINGS"
@@ -19,14 +22,30 @@ fi
 
 mkdir -p "$BUILD_DIR"
 
-# Generate TCL if not present (use synthesis_wrapper.spl generator)
-if [ ! -f "$TCL_FILE" ]; then
-    echo "Generating Vivado TCL project..."
-    bin/simple scripts/fpga/rv64_vhdl_driver.spl 2>&1 | tail -20
-fi
+echo "Generating RV64 VHDL and Vivado TCL project..."
+bash scripts/fpga/generate_rv64_vhdl.shs
+cat > "$XDC_FILE" <<XDC
+set_property PACKAGE_PIN H12 [get_ports uart_tx]
+set_property IOSTANDARD LVCMOS33 [get_ports uart_tx]
+XDC
+cat > "$TCL_FILE" <<TCL
+create_project k26_vexriscv $BUILD_DIR/k26_vexriscv -part xck26-sfvc784-2lv-c -force
+add_files [glob $RTL_DIR/*.vhd]
+add_files -fileset constrs_1 $XDC_FILE
+set_property top soc_top_rv64 [current_fileset]
+update_compile_order -fileset sources_1
+launch_runs synth_1
+wait_on_run synth_1
+if {[lsearch \$argv synth_only] >= 0} { exit }
+launch_runs impl_1 -to_step write_bitstream
+wait_on_run impl_1
+file copy -force $BUILD_DIR/k26_vexriscv/k26_vexriscv.runs/impl_1/soc_top_rv64.bit $BUILD_DIR/k26_vexriscv.bit
+file mkdir [file dirname $PRELIGHT_BITSTREAM]
+file copy -force $BUILD_DIR/k26_vexriscv.bit $PRELIGHT_BITSTREAM
+TCL
 
 SYNTH_ONLY=""
-if [ "$1" = "--synth-only" ]; then
+if [ "${1:-}" = "--synth-only" ]; then
     SYNTH_ONLY="1"
 fi
 
@@ -38,10 +57,17 @@ if [ -n "$SYNTH_ONLY" ]; then
     echo "Mode:    synthesis only"
     vivado -mode batch -source "$TCL_FILE" -tclargs synth_only \
         -journal "$BUILD_DIR/vivado.jou" -log "$BUILD_DIR/vivado.log" 2>&1 | tail -40
+    vivado_rc="${PIPESTATUS[0]}"
 else
     echo "Mode:    full (synth + impl + bitstream)"
     vivado -mode batch -source "$TCL_FILE" \
         -journal "$BUILD_DIR/vivado.jou" -log "$BUILD_DIR/vivado.log" 2>&1 | tail -40
+    vivado_rc="${PIPESTATUS[0]}"
+fi
+
+if [ "$vivado_rc" -ne 0 ]; then
+    echo "ERROR: Vivado failed (exit $vivado_rc); see $BUILD_DIR/vivado.log"
+    exit "$vivado_rc"
 fi
 
 if [ -f "$BUILD_DIR/k26_vexriscv.bit" ]; then

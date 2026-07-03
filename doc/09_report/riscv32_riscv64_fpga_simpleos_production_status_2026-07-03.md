@@ -13,14 +13,30 @@ either RV32 or RV64.
 `SIMPLE_BINARY=bin/release/simple sh scripts/check/check-riscv64-fpga-simpleos-preflight.shs --local-only`
 
 - PASS: FT4232H USB present.
-- PASS: `/dev/ttyUSB0` through `/dev/ttyUSB3` present.
+- PASS: serial ports present.
+- PASS: JTAG interface is free.
 - PASS: openFPGALoader, OpenOCD, Vivado, `riscv64-unknown-elf-gcc`, and `riscv64-linux-gnu-gcc`.
 - PASS: `build/os/simpleos_riscv64_fpga.elf` exists after `simple os build --scenario=riscv64-fpga-mmode`.
 - PASS: `build/rv64_bringup_check/hello_litex_rv64.bin` is auto-derived from the RV64 ELF.
+- PASS: `build/build/xilinx_kv260/gateware/xilinx_kv260.bit` exists after the K26 Vivado build.
 - PASS: `bin/release/simple` runs `hello_native.spl`.
-- FAIL: JTAG interface is still bound to `ftdi_sio`.
 - FAIL: `yosys` is not installed.
-- FAIL: `build/build/xilinx_kv260/gateware/xilinx_kv260.bit` missing.
+
+`SIMPLE_BINARY=bin/release/simple bash scripts/fpga/build_k26_vexriscv.shs`
+
+- PASS: generates RV64 VHDL with `bin/release/simple`.
+- PASS: Vivado synthesis and implementation complete.
+- PASS: DRC reports 0 errors after constraining `uart_tx` to K26 PMOD H12/LVCMOS33.
+- PASS: bitgen completes and writes `build/fpga/k26/k26_vexriscv.bit` plus `build/build/xilinx_kv260/gateware/xilinx_kv260.bit`.
+
+`SIMPLE_BINARY=bin/release/simple CAPTURE_SECONDS=5 LINUX_TIMEOUT=10 sh scripts/fpga/check_kv260_simple_rv64_linux.shs`
+
+- PASS: RV64 bitstream and ELF artifacts are present.
+- PASS: RV64 ELF header is ELF64 RISC-V.
+- PASS: KV260 bitstream loads through Vivado.
+- PASS: merged USB PS UART responds.
+- PASS: generated RV64 Linux handoff smoke passes.
+- INFO: PL UART on merged USB has no output; current image still requires PMOD UART capture or a routed PL UART to prove SimpleOS payload execution.
 
 `SIMPLE_OS_BUILD_BACKEND=cranelift bin/release/simple os build --arch=riscv64 --scenario=riscv64-fpga-mmode`
 
@@ -76,16 +92,22 @@ both ELF and raw bin payload artifacts. The RV32 lane is wired to the correct
 FPGA entry/linker/output but remains blocked on an LLVM-enabled Simple compiler
 for RV32 codegen in this workspace.
 
+The K26 Vivado wrapper now uses the release Simple binary fallback, regenerates
+the RV64 VHDL/TCL every run, emits a K26 UART XDC constraint, preserves Vivado
+failure status despite tailing logs, and copies the generated bitstream to the
+preflight path.
+
 ## Remaining Production Blockers
 
 1. Install or provide `yosys` if synthesis/formal checks are part of the local
    production gate.
 2. Free the FT4232H JTAG interface before physical FPGA programming.
-3. Produce the current RV64 FPGA bitstream artifact.
-4. Provide an LLVM-enabled Simple compiler and produce RV32 SimpleOS FPGA ELF/bin/bitstream artifacts.
-5. Prove physical UART boot markers and SimpleOS payload execution on the board.
+3. Replace the generated RV64 stub softcore bitstream with a real CPU/debug/load path or prove the current softcore can execute the SimpleOS ELF.
+4. Capture RV64 PL UART boot markers from PMOD H12/E10 or route PL UART to an observable serial channel.
+5. Provide an LLVM-enabled Simple compiler and produce RV32 SimpleOS FPGA ELF/bin/bitstream artifacts.
 
 ## Next Small Step
 
-Install/provide an LLVM-enabled Simple compiler for RV32 and generate both
-bitstreams, then rerun `scripts/check/check-riscv-fpga-simpleos-preflight.shs --local-only`.
+Prove RV64 SimpleOS payload execution on the programmed FPGA: either add a real
+softcore debug/load path for `build/os/simpleos_riscv64_fpga.elf` or capture the
+expected SimpleOS UART markers from the PMOD H12/E10 PL UART.

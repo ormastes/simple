@@ -106,25 +106,20 @@ The testbench (`tb_rv64_wb_soc_smoke.vhd`) drives clock at 100 MHz, asserts/deas
 
 ## 4. Vivado Synthesis
 
-Generate the Vivado TCL script from Simple:
+Build the current generated RV64 K26 bitstream:
 
 ```bash
-bin/simple run -e 'use std.hardware.fpga_linux.synthesis_wrapper.{generate_vivado_tcl_rv64}; print(generate_vivado_tcl_rv64())' > build/vhdl/rv64/synth_rv64.tcl
+SIMPLE_BINARY=bin/release/simple bash scripts/fpga/build_k26_vexriscv.shs
 ```
 
-Generate XDC constraints:
+The wrapper regenerates `build/vhdl/rv64/*.vhd`, writes
+`build/fpga/k26/build_vexriscv.tcl`, constrains `uart_tx` to PMOD H12
+(`LVCMOS33`), runs Vivado synthesis/implementation/bitgen, and copies:
 
-```bash
-bin/simple run -e 'use std.hardware.fpga_k26.k26_xdc.{k26_generate_xdc}; print(k26_generate_xdc())' > build/vhdl/rv64/k26_constraints.xdc
-```
+- `build/fpga/k26/k26_vexriscv.bit`
+- `build/build/xilinx_kv260/gateware/xilinx_kv260.bit`
 
-Run Vivado synthesis:
-
-```bash
-source ~/Xilinx/2025.2/Vivado/settings64.sh
-cd build/vhdl/rv64
-vivado -mode batch -source synth_rv64.tcl
-```
+For synthesis only, pass `--synth-only`.
 
 ## 5. FPGA Programming
 
