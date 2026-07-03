@@ -55,6 +55,10 @@ def RectContains (outer inner : Rect2) : Prop :=
   outer.x ≤ inner.x ∧ inner.right ≤ outer.right ∧
   outer.y ≤ inner.y ∧ inner.bottom ≤ outer.bottom
 
+theorem damage_add_increases_length (r : DamageRegion) (rect : Rect2) :
+    (DamageRegion.add r rect).length = r.length + 1 := by
+  simp [DamageRegion.add]
+
 -- ============================================================
 -- § B  T1 — merge_covers_left
 -- ============================================================
