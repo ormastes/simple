@@ -365,6 +365,38 @@ theorem singleton_unique_write_safe (baseType : String) (loc : Nat) :
   · exact singleton_exclusive_write_safe baseType loc
   · exact singleton_isolated_write_safe baseType loc
 
+theorem singleton_write_safe_iff_same_location_and_unique_cap
+    (baseType : String) (loc other : Nat) (cap : RefCapability) :
+    accessIsSafe
+      { activeRefs :=
+          [(loc,
+            [{ location := loc,
+               refType := { baseType := baseType, capability := cap } }])] }
+      (MemAccess.Write other) = true ↔
+    loc = other ∧ (cap = RefCapability.Exclusive ∨ cap = RefCapability.Isolated) := by
+  constructor
+  · intro h
+    by_cases hloc : loc = other
+    · cases hloc
+      cases cap
+      · simp [accessIsSafe, getActiveRefs, allowsAccess] at h
+        cases h with
+        | inl hfalse => cases hfalse
+        | inr hfalse => cases hfalse
+      · exact ⟨rfl, Or.inl rfl⟩
+      · exact ⟨rfl, Or.inr rfl⟩
+    · cases cap <;> simp [accessIsSafe, getActiveRefs, allowsAccess, hloc] at h
+  · intro h
+    rcases h with ⟨hloc, hcap⟩
+    cases hloc
+    cases hcap with
+    | inl hex =>
+        cases hex
+        exact singleton_exclusive_write_safe baseType loc
+    | inr hiso =>
+        cases hiso
+        exact singleton_isolated_write_safe baseType loc
+
 theorem write_access_implies_unique_cap
     (baseType : String) (loc : Nat) (cap : RefCapability) :
     allowsAccess { location := loc, refType := { baseType := baseType, capability := cap } }
