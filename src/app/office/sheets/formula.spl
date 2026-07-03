@@ -27,6 +27,8 @@ struct DisplayEvalResult:
 # a circular reference always is) returns a circular-reference error.
 val MAX_EVAL_DEPTH = 64
 
+extern fn rt_time_now_unix_micros() -> i64
+
 # =========================================================================
 # Main Entry Point
 # =========================================================================
@@ -382,7 +384,63 @@ fn _eval_primary(tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalResu
 fn _is_text_function(name: text) -> bool:
     (name == "CONCAT" or name == "CONCATENATE" or name == "UPPER" or
      name == "LOWER" or name == "TRIM" or name == "LEN" or name == "LEFT" or
-     name == "RIGHT" or name == "MID" or name == "EXACT")
+     name == "RIGHT" or name == "MID" or name == "EXACT" or
+     name == "IMREAL" or name == "IMAGINARY" or name == "IMABS" or
+     name == "IMSUM" or name == "IMSUB" or name == "IMPRODUCT" or
+     name == "IMCONJUGATE")
+
+fn _fmt_num_trim(v: f64) -> text:
+    val i = v.to_i64()
+    if v - i.to_f64() == 0.0:
+        return "{i}"
+    "{v}"
+
+fn _format_complex(re: f64, im: f64) -> text:
+    """Excel-style complex text: 3+4i, 3-4i, 4i, 3."""
+    if im == 0.0:
+        return _fmt_num_trim(re)
+    val im_abs = if im < 0.0: 0.0 - im else: im
+    val im_txt = "{_fmt_num_trim(im_abs)}i"
+    if re == 0.0:
+        return if im < 0.0: "-{im_txt}" else: im_txt
+    if im < 0.0:
+        return "{_fmt_num_trim(re)}-{im_txt}"
+    "{_fmt_num_trim(re)}+{im_txt}"
+
+fn _parse_complex(s_in: text) -> [f64]:
+    """Parse a+bi / a-bi / bi / a into [re, im]."""
+    val s = s_in.trim()
+    if s == "":
+        return [0.0, 0.0]
+    if not s.ends_with("i"):
+        return [s.to_f64(), 0.0]
+    val body = s.slice(0, s.len() - 1)
+    # find the sign separating re and im (skip index 0)
+    var split = -1
+    var i = body.len() - 1
+    while i > 0:
+        val ch = body.slice(i, i + 1)
+        if ch == "+" or ch == "-":
+            split = i
+            i = 0
+        i = i - 1
+    if split <= 0:
+        # pure imaginary: "i", "-i", "4i"
+        if body == "" or body == "+":
+            return [0.0, 1.0]
+        if body == "-":
+            return [0.0, -1.0]
+        val im_only = body.to_f64()
+        return [0.0, im_only]
+    val re_txt = body.slice(0, split)
+    val re = re_txt.to_f64()
+    val im_txt = body.slice(split, body.len())
+    if im_txt == "+":
+        return [re, 1.0]
+    if im_txt == "-":
+        return [re, -1.0]
+    val im = im_txt.to_f64()
+    [re, im]
 
 fn _eval_text_function(name: text, tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalResult:
     """Evaluate a text function. Args are collected as display strings, so cell
@@ -448,6 +506,40 @@ fn _dispatch_text_function(name: text, args: [text]) -> CellValue:
     if name == "EXACT":
         val other = if args.len() > 1: args[1] else: ""
         return CellValue.BoolVal(value: s == other)
+    if name == "IMREAL":
+        return CellValue.NumberVal(value: _parse_complex(s)[0])
+    if name == "IMAGINARY":
+        return CellValue.NumberVal(value: _parse_complex(s)[1])
+    if name == "IMABS":
+        val z = _parse_complex(s)
+        return CellValue.NumberVal(value: _sqrt_f64(z[0] * z[0] + z[1] * z[1]))
+    if name == "IMCONJUGATE":
+        val z2 = _parse_complex(s)
+        return CellValue.TextVal(value: _format_complex(z2[0], 0.0 - z2[1]))
+    if name == "IMSUM":
+        var re_sum = 0.0
+        var im_sum = 0.0
+        for a in args:
+            val z3 = _parse_complex(a)
+            re_sum = re_sum + z3[0]
+            im_sum = im_sum + z3[1]
+        return CellValue.TextVal(value: _format_complex(re_sum, im_sum))
+    if name == "IMSUB":
+        if args.len() < 2:
+            return CellValue.ErrorVal(message: "IMSUB requires 2 arguments")
+        val za = _parse_complex(args[0])
+        val zb = _parse_complex(args[1])
+        return CellValue.TextVal(value: _format_complex(za[0] - zb[0], za[1] - zb[1]))
+    if name == "IMPRODUCT":
+        var re_p = 1.0
+        var im_p = 0.0
+        for a in args:
+            val z4 = _parse_complex(a)
+            val nr = re_p * z4[0] - im_p * z4[1]
+            val ni = re_p * z4[1] + im_p * z4[0]
+            re_p = nr
+            im_p = ni
+        return CellValue.TextVal(value: _format_complex(re_p, im_p))
     CellValue.ErrorVal(message: "unknown text function {name}")
 
 fn _clamp_i32(v: i32, lo: i32, hi: i32) -> i32:
@@ -1080,6 +1172,19 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                 val d = v - mean
                 dev_sum = dev_sum + (if d < 0.0: 0.0 - d else: d)
             return CellValue.NumberVal(value: dev_sum / flat.len().to_f64())
+        "TODAY":
+            # UTC day; local-timezone offset is a recorded ceiling
+            val micros = rt_time_now_unix_micros()
+            return CellValue.NumberVal(value: (micros / 86400000000 + 25569).to_f64())
+        "NOW":
+            val now_micros = rt_time_now_unix_micros()
+            val day_part = (now_micros / 86400000000).to_f64()
+            val frac = (now_micros % 86400000000).to_f64() / 86400000000.0
+            return CellValue.NumberVal(value: day_part + 25569.0 + frac)
+        "COMPLEX":
+            if args.len() >= 2:
+                return CellValue.TextVal(value: _format_complex(_first_val(args[0]), _first_val(args[1])))
+            return CellValue.ErrorVal(message: "COMPLEX requires re, im")
         "DATE":
             if args.len() >= 3:
                 return CellValue.NumberVal(value: _serial_from_civil(_first_val(args[0]).to_i64(), _first_val(args[1]).to_i64(), _first_val(args[2]).to_i64()))
