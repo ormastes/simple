@@ -129,18 +129,41 @@ fn _docx_para_kind(para_xml: text) -> BlockKind:
 fn _docx_para_text(para_xml: text) -> text:
     """Concatenate every <w:t> run's text within one paragraph."""
     var out = ""
+    for span in _docx_para_spans(para_xml):
+        out = "{out}{span.text}"
+    out
+
+fn _docx_para_spans(para_xml: text) -> [TextSpan]:
+    """One styled span per <w:r> run: w:b -> Bold, w:i -> Italic (bold wins
+    when both are set — the span model carries one style)."""
+    var spans: [TextSpan] = []
     var i = 0
     while i < para_xml.len():
-        val t = _find_from(para_xml, "<w:t", i)
-        if t < 0:
+        val r = _find_from(para_xml, "<w:r>", i)
+        val r2 = _find_from(para_xml, "<w:r ", i)
+        val start = if r >= 0 and (r2 < 0 or r < r2): r else: r2
+        if start < 0:
             break
-        val tag_end = _find_from(para_xml, ">", t)
-        val end_pos = _find_from(para_xml, "</w:t>", t)
-        if tag_end < 0 or end_pos < 0:
+        val end_pos = _find_from(para_xml, "</w:r>", start)
+        if end_pos < 0:
             break
-        out = "{out}{_xml_unescape(para_xml.slice(tag_end + 1, end_pos))}"
+        val run = para_xml.slice(start, end_pos)
+        val t = _find_from(run, "<w:t", 0)
+        if t >= 0:
+            val tag_end = _find_from(run, ">", t)
+            val te = _find_from(run, "</w:t>", t)
+            if tag_end >= 0 and te > tag_end:
+                val content = _xml_unescape(run.slice(tag_end + 1, te))
+                var style = InlineStyle.Normal
+                if run.contains("<w:b/>") or run.contains("<w:b "):
+                    style = InlineStyle.Bold
+                elif run.contains("<w:i/>") or run.contains("<w:i "):
+                    style = InlineStyle.Italic
+                spans.push(TextSpan(text: content, style: style))
         i = end_pos + 6
-    out
+    if spans.len() == 0:
+        spans.push(_span(""))
+    spans
 
 fn docx_document_xml_to_document(document_xml: text, title: text) -> RichDocument:
     """Parse OOXML word/document.xml into a RichDocument."""
@@ -158,7 +181,7 @@ fn docx_document_xml_to_document(document_xml: text, title: text) -> RichDocumen
         val para = document_xml.slice(start, end_pos)
         val content = _docx_para_text(para)
         if content.trim() != "":
-            doc.blocks.push(_plain_block(_docx_para_kind(para), content))
+            doc.blocks.push(DocBlock(kind: _docx_para_kind(para), spans: _docx_para_spans(para)))
         i = end_pos + 6
     doc
 
