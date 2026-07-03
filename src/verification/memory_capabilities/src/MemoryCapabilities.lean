@@ -226,6 +226,13 @@ theorem two_shared_read_safe (baseType : String) (loc : Nat) :
     (MemAccess.Read loc) = true := by
   simp [accessIsSafe, getActiveRefs, allowsAccess]
 
+theorem read_access_implies_same_location
+    (baseType : String) (loc other : Nat) (cap : RefCapability) :
+    allowsAccess { location := loc, refType := { baseType := baseType, capability := cap } }
+      (MemAccess.Read other) = true →
+    loc = other := by
+  cases cap <;> simp [allowsAccess]
+
 theorem exclusive_write_same_loc (baseType : String) (loc : Nat) :
   allowsAccess { location := loc, refType := { baseType := baseType, capability := RefCapability.Exclusive } } (MemAccess.Write loc) = true := by
   simp [allowsAccess]
