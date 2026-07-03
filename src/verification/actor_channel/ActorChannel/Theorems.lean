@@ -523,6 +523,21 @@ theorem send_to_waiter_preserves_open
   have hhead : (tid :: rest).head! = tid := rfl
   simp [greenSend, hopen, hwait, hhead]
 
+/-- T6f1: A waiting receiver takes priority over backpressure even when the
+    buffer is full; the send wakes the waiter and does not alter the buffer. -/
+theorem send_to_waiter_beats_full_buffer
+    (ch : GreenChannel) (v : Val) (tid : TaskId) (rest : List TaskId)
+    (hopen : ch.closed = false)
+    (hwait : ch.waiting_task_ids = tid :: rest)
+    (_hfull : ch.capacity ≤ ch.queued_values.length) :
+    let r := greenSend ch v
+    r.sent = true ∧
+    r.unparked = true ∧
+    r.backpressure = false ∧
+    r.channel.queued_values = ch.queued_values := by
+  have hhead : (tid :: rest).head! = tid := rfl
+  simp [greenSend, hopen, hwait, hhead]
+
 /-- T6g: Buffering a value on an open channel keeps it open. -/
 theorem send_buffered_preserves_open
     (ch : GreenChannel) (v : Val)
