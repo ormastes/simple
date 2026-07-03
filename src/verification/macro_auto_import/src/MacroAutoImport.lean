@@ -97,4 +97,8 @@ theorem empty_auto_import_no_macros (exports : ModuleExports) :
   autoImportedMacros { name := "", autoImports := [] } exports = [] := by
   simp [autoImportedMacros, isAutoImported, List.filter_eq_nil_iff]
 
+theorem empty_auto_import_glob_nonmacros (exports : ModuleExports) :
+  globImport { name := "", autoImports := [] } exports = exports.nonMacros := by
+  simp [globImport, autoImportedMacros, isAutoImported, List.filter_eq_nil_iff]
+
 end MacroAutoImport

@@ -98,6 +98,9 @@
 - module_resolution_formal: pass
 - module_resolution_formal_scope: module resolution is deterministic, well-formed roots cannot resolve as both file and directory, unique resolutions imply the resolved path exists, not-found means neither candidate exists, and simultaneous file/directory candidates resolve to the exact ambiguous result
 - module_resolution_formal_evidence: src/verification/module_resolution/src/ModuleResolution.lean resolve_deterministic + wellformed_not_ambiguous + unique_implies_exists + notfound_means_neither + both_paths_existing_resolves_ambiguous; `cd src/verification/module_resolution && lake build`
+- macro_auto_import_formal: pass
+- macro_auto_import_formal_scope: glob imports include non-macros, include explicitly auto-imported macros, exclude non-auto-imported macros from well-formed exports, and empty auto-import manifests glob exactly non-macro exports
+- macro_auto_import_formal_evidence: src/verification/macro_auto_import/src/MacroAutoImport.lean glob_doesnt_leak_macros_wf + nonmacros_always_globbed + auto_imported_in_glob + glob_subset + empty_auto_import_no_macros + empty_auto_import_glob_nonmacros; `cd src/verification/macro_auto_import && lake build`
 - kernel_capability_depth_formal: pass
 - kernel_capability_depth_formal_scope: capability delegation with exhausted depth is denied
 - kernel_capability_depth_formal_evidence: src/verification/kernel_capabilities/KernelCapabilities/Theorems.lean zero_depth_grant_denied; `cd src/verification/kernel_capabilities && lake build`
