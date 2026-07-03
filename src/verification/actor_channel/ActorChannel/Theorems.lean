@@ -367,6 +367,24 @@ theorem scheduler_error_no_halt (ht : HandlerTable) (ss : SchedulerState)
     -- Use full simp to reduce the match on rOpt and the nested ite
     simp [h, hnotok, halive]
 
+/-- T5b: A handler error on one scheduler tick does not starve the next queued
+    successful message; the next run_once still dispatches it. -/
+theorem scheduler_error_then_next_ok_dispatches
+    (ht : HandlerTable) (ss : SchedulerState)
+    (msg1 msg2 : ActorMessage) (rest : List ActorMessage)
+    (halive : ss.actorState.alive = true)
+    (hmail : ss.actorState.mailbox = msg1 :: msg2 :: rest)
+    (herr : (dispatchMsg ht msg1).isOk = false)
+    (hok : (dispatchMsg ht msg2).isOk = true) :
+    let first := runOnce ht ss
+    let second := runOnce ht first.1
+    second.1.total_errors = ss.total_errors + 1 ∧
+    second.1.total_dispatched = ss.total_dispatched + 1 ∧
+    second.1.actorState.mailbox = rest ∧
+    second.1.actorState.alive = true ∧
+    second.2 = true := by
+  simp [runOnce, processOne, halive, hmail, herr, hok]
+
 -- ============================================================
 -- § F  T6 — no_lost_task
 -- ============================================================
