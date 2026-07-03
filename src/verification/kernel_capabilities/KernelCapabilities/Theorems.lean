@@ -543,6 +543,12 @@ theorem write_request_requires_write_capability
     rwFileAccessAllowed hasRead false requestRead true = false := by
   cases hasRead <;> cases requestRead <;> simp [rwFileAccessAllowed]
 
+/-- A read request is denied without read capability, even if write capability exists. -/
+theorem read_request_requires_read_capability
+    (hasWrite requestWrite : Bool) :
+    rwFileAccessAllowed false hasWrite true requestWrite = false := by
+  cases hasWrite <;> cases requestWrite <;> simp [rwFileAccessAllowed]
+
 /-- A read request is allowed exactly when read capability exists, when no write
     right is requested. -/
 theorem read_request_uses_read_capability
