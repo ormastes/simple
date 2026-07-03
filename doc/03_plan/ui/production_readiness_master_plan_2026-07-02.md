@@ -256,6 +256,19 @@ with it). Recovered facts:
 - Leftover working-copy from the crash (semantic fallback probe spec +
   generated spec docs) committed and pushed (385d5c330f).
 
+Midday update (2026-07-03):
+
+- P1 zombie fix LANDED (reviewed by fable): parent reaps by process exit
+  not pipe EOF; exit-0-without-binary is a hard error at worker funnel and
+  parent. Regression spec 6/6. Bug → fixed-pending-verification.
+- G2.5 CLOSED (reviewed by fable): shared glyph table, strict spec 6/6,
+  browser baselines verified unmoved on main.
+- Stage4 blocker root-cause in progress: worker aborts in COMPILE phase
+  with location-less `cannot parse '<char>' as i64` (operand tracks source
+  content: '\"' then 'n'). int() guards added to parser int-literal paths
+  and type_checker refinement predicates so the next run surfaces a located
+  parser error instead of an abort; guarded rebuild running.
+
 ### Gate → evidence ledger (G6.4, as of 2026-07-02 evening)
 
 | Gate | Status | Reproducer | Evidence |
@@ -268,7 +281,10 @@ with it). Recovered facts:
 | G4.4 HUD over 3D | PASS (direct blit; LayerTree bridge blocked by interp bugs) | `examples/11_advanced/game3d_hud/main.spl` | `build/game3d_hud.ppm` |
 | G1.1 real window via Vulkan | NOT RUN (live-display ban; needs Xvfb window run) | `scripts/gui/linux-gui-run.shs` | — |
 | G4.2 3D game 60s session | PASS on seed binary (rollball: win+lose autopilot, 3600 fixed steps each, 10 gates; PERF-GAP recorded: frame_p95 ≈2.9 s vs 33 ms target — cranelift f32-trig fallback forces interpreted raster) | `scripts/check/check-game3d-rollball.shs` + `test/03_system/game3d/rollball_production_spec.spl` | `build/game3d-rollball/*.ppm` (11) |
-| G3.2/G3.3/G3.4 2D game breakout | IN PROGRESS (combined production spec exists; current runner evidence proves only the first G3.2 scenario before rendered paths exceed the interpreter budget; real-window leg records host block) | `scripts/check/check-game2d-breakout.shs` + `test/03_system/game2d/breakout_*_spec.spl` | `breakout_production_spec.spl` 1/1 observed for G3.2 logic session; `breakout_window_capture_spec.spl` 1/1 recorded host block; `build/game2d-breakout/*` when the full wrapper is run |
-<<<<<<< Conflict 1 of 1
-
 | G3.2/G3.3/G3.4 2D game breakout | IN PROGRESS (G3.2 3600-step logic session passes; G3.4 frame-time records tracked JIT/render gap; real-window leg records host block; G3.3 rendered divergence remains too slow under interpreter) | `scripts/check/check-game2d-breakout.shs` + `test/03_system/game2d/breakout_*_spec.spl` | `breakout_production_spec.spl` 1/1 for G3.2 logic session; `breakout_frame_time_spec.spl` 1/1 tracked-gap gate; `breakout_window_capture_spec.spl` 1/1 recorded host block; `build/game2d-breakout/*` when the full wrapper is run |
+| G2.2 glyph parity | PASS (differentPixels 2717→3; calibrated LCD compositing; caveat: Chrome-calibrated atlas, not an independent rasterizer) | `node tools/electron-shell/verify_famous_site_production_probe.js` + probe/corpus specs | `test/09_baselines/famous_site_corpus/site_0_google/*` |
+| G2.3 browser low-res text | PASS | `scripts/check/check-browser-interaction.shs` + `test/03_system/gui/browser_interaction_spec.spl` | `build/browser-interaction/lowres_*.ppm` |
+| G2.4 scroll + link-click/back-forward | PASS (120px marker shift; click→back→forward pixel round-trip, 9/9) | same check script/spec | `build/browser-interaction/scroll_offset*.ppm`, `nav_*.ppm` |
+| G2.5 cross-app glyph consistency | PASS 2026-07-03 (was HONEST-GAP): shared `common.ui.glyph_bitmap_5x7` table + unified 5*scale advance; 88/88 chars byte-identical, strict spec 6/6; browser baselines unmoved | `scripts/check/check-cross-app-glyph-consistency.shs` + `test/03_system/check/cross_app_glyph_consistency_spec.spl` | `build/cross-app-glyph-consistency/*` |
+| G1.1 showcase Vulkan render | PASS via SIMPLE_GUI_BACKEND=vulkan (spec 6/6 w/ seed); live-window capture leg `unavailable_no_winit` — flips when winit-linked binary deploys (stage4 lane) | `scripts/check/check-gui-vulkan-window.shs` + `test/03_system/check/gui_vulkan_window_spec.spl` | `build/gui-window-evidence/*` |
+| G5.2 Android emulator capture | Emulator leg BLOCKED on host (no SDK/JDK — recorded); fallback legs PASS: WebView-equivalent proof at 360x640 + gradle-artifact gap analysis | `scripts/check/check-tauri-android-webview-proof.shs` + `test/03_system/check/tauri_android_webview_proof_spec.spl` (3/3) | `build/tauri-android-proof/*` |
