@@ -91,6 +91,13 @@ theorem T4_publish_root_requires_wal_flush (t t' : TxnState)
   simp [txnPublishRoot] at hpublish
   exact hpublish.1
 
+/-- T4 publish-root shape: a successful publish marks the root as published. -/
+theorem T4_publish_root_sets_published (t t' : TxnState)
+    (hpublish : txnPublishRoot t = some t') :
+    t'.root_published = true := by
+  simp [txnPublishRoot] at hpublish
+  exact hpublish.2 ▸ rfl
+
 /-- T4 pager-level: write_page succeeds only when flushed_lsn >= page_lsn or page_lsn = 0.
     Models the gate in pager.write_page (E5 fix, 2026-06-11):
       if page_lsn > 0 and wal_flushed_lsn < page_lsn → Err. -/
