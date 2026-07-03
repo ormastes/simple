@@ -22,6 +22,12 @@ def release (s : GcState) (id : Nat) : GcState :=
 def collectSafe (s : GcState) (id : Nat) : GcState :=
   if _h : id ∈ s.borrowed then s else { s with live := s.live.erase id }
 
+theorem allocate_preserves (s : GcState) (id : Nat) (hs : safe s) :
+  safe (allocate s id) := by
+  intro x hx
+  simp only [allocate]
+  exact List.mem_cons_of_mem id (hs x hx)
+
 theorem borrow_preserves (s : GcState) (id : Nat) (hs : safe s) :
   safe (borrow s id) := by
   intro x hx
@@ -33,6 +39,12 @@ theorem borrow_preserves (s : GcState) (id : Nat) (hs : safe s) :
     | tail _ htail => exact hs x htail
   · simp only [hlive, ↓reduceDIte] at hx ⊢
     exact hs x hx
+
+theorem release_preserves (s : GcState) (id : Nat) (hs : safe s) :
+  safe (release s id) := by
+  intro x hx
+  simp only [release] at hx
+  exact hs x (List.mem_of_mem_erase hx)
 
 theorem collect_preserves (s : GcState) (id : Nat) (hs : safe s) :
   safe (collectSafe s id) := by

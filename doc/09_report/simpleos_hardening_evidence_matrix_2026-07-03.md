@@ -68,6 +68,9 @@
 - gc_boundary_formal: pass
 - gc_boundary_formal_scope: alias-free GC/nogc checker acceptance prevents GC-tier values in nogc/noalloc contexts, noalloc-accepted bodies do not allocate, allocation inference joins are monotone, explicit Copy nodes are alias-free, and Copy results are nogc rather than gc
 - gc_boundary_formal_evidence: src/verification/gc_boundary/GcBoundary/Theorems.lean check_sound_wrt_model + noalloc_closed + inference_monotone + inference_join_ge + alloc_join_alloc + copy_alias_free + copy_isolates + copy_result_not_gc; `cd src/verification/gc_boundary && lake build`
+- gc_manual_borrow_formal: pass
+- gc_manual_borrow_formal_scope: manual borrows are modeled as GC pins; allocation, borrow, release, and safe collection preserve the invariant that every borrowed object remains live
+- gc_manual_borrow_formal_evidence: src/verification/gc_manual_borrow/src/GcManualBorrow.lean allocate_preserves + borrow_preserves + release_preserves + collect_preserves; `cd src/verification/gc_manual_borrow && lake build`
 - memory_capabilities_formal: pass
 - memory_capabilities_formal_scope: empty environments allow exclusive and isolated references, empty environments are well-formed, shared references can read but cannot write, and exclusive or isolated references can write the referenced location
 - memory_capabilities_formal_evidence: src/verification/memory_capabilities/src/MemoryCapabilities.lean empty_env_allows_exclusive + empty_env_allows_isolated + empty_env_wellformed + shared_read_same_loc + shared_write_same_loc_denied + exclusive_write_same_loc + isolated_write_same_loc; `cd src/verification/memory_capabilities && lake build`
