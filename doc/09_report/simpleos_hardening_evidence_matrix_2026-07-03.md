@@ -95,6 +95,9 @@
 - type_inference_core_formal: pass
 - type_inference_core_formal_scope: core expression type inference is deterministic and rejects numeric addition with a boolean operand
 - type_inference_core_formal_evidence: src/verification/type_inference_compile/src/TypeInferenceCompile.lean infer_deterministic + infer_add_rejects_bool_operand; `cd src/verification/type_inference_compile && lake build`
+- contract_verification_formal: pass
+- contract_verification_formal_scope: empty function contracts contain no preconditions, invariants, postconditions, or error postconditions
+- contract_verification_formal_evidence: src/verification/type_inference_compile/src/Contracts.lean empty_contract_has_no_preconditions + empty_contract_has_no_postconditions + empty_contract_has_no_clauses; `cd src/verification/type_inference_compile && lake build`
 - type_inference_generics_formal: pass
 - type_inference_generics_formal_scope: empty substitution is identity, single substitution rewrites its target type variable, occurs checks reject primitive non-recursive types and accept the same variable, instantiation/generalization preserve type shape, and literal inference is deterministic
 - type_inference_generics_formal_evidence: src/verification/type_inference_compile/src/Generics.lean applySubst_empty + apply_single_subst_var + occurs_nat_false + occurs_bool_false + occurs_str_false + occurs_var_true + instantiate_preserves_shape + generalize_preserves_type + infer_lit_nat + infer_lit_bool + infer_lit_str; `cd src/verification/type_inference_compile && lake build`

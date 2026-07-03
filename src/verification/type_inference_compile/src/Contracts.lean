@@ -40,4 +40,23 @@ theorem empty_contract_has_no_postconditions (fc : FunctionContract) :
   intro h
   exact h
 
+def emptyContract : FunctionContract :=
+  { preconditions := []
+  , invariants := []
+  , postconditions := []
+  , errorPostconditions := [] }
+
+theorem empty_contract_has_no_clauses :
+  emptyContract.preconditions = [] ∧
+  emptyContract.invariants = [] ∧
+  emptyContract.postconditions = [] ∧
+  emptyContract.errorPostconditions = [] := by
+  constructor
+  · rfl
+  constructor
+  · rfl
+  constructor
+  · rfl
+  · rfl
+
 end Contracts
