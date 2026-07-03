@@ -347,6 +347,32 @@ theorem drf_two_ops_synchronized
     rcases hb with ⟨rfl, rfl⟩
     exact False.elim (hneq rfl)
 
+/-- Concrete single-thread handoff shape: two distinct operations ordered by
+    program order cannot form a data race. -/
+theorem drf_two_ops_program_ordered
+    (id1 id2 : OperationId) (op1 op2 : MemoryOperation)
+    (hneq_ids : id1 ≠ id2) :
+    dataRaceFree
+      { ops := [(id1, op1), (id2, op2)]
+      , programOrder := fun a b => a = id1 ∧ b = id2
+      , synchronizesWith := fun _ _ => False } := by
+  apply drf_when_conflicts_ordered
+  intro a b opa opb ha hb hneq _hconf
+  simp at ha hb
+  rcases ha with ha | ha <;> rcases hb with hb | hb
+  · rcases ha with ⟨rfl, rfl⟩
+    rcases hb with ⟨rfl, rfl⟩
+    exact False.elim (hneq rfl)
+  · rcases ha with ⟨rfl, rfl⟩
+    rcases hb with ⟨rfl, rfl⟩
+    exact Or.inl (Or.inl ⟨rfl, rfl⟩)
+  · rcases ha with ⟨rfl, rfl⟩
+    rcases hb with ⟨rfl, rfl⟩
+    exact Or.inr (Or.inl ⟨rfl, rfl⟩)
+  · rcases ha with ⟨rfl, rfl⟩
+    rcases hb with ⟨rfl, rfl⟩
+    exact False.elim (hneq rfl)
+
 theorem drf_two_synchronized_writes_same_location
     (id1 id2 : OperationId) (loc : LocationId) (tid1 tid2 : ThreadId)
     (hneq_ids : id1 ≠ id2) :
@@ -375,6 +401,46 @@ theorem drf_two_synchronized_write_read_same_location
       , programOrder := fun _ _ => False
       , synchronizesWith := fun a b => a = id1 ∧ b = id2 } :=
   drf_two_ops_synchronized id1 id2
+    (MemoryOperation.Write loc tid1) (MemoryOperation.Read loc tid2) hneq_ids
+
+theorem drf_two_synchronized_lock_release_acquire_same_location
+    (id1 id2 : OperationId) (loc : LocationId) (tid1 tid2 : ThreadId)
+    (hneq_ids : id1 ≠ id2) :
+    dataRaceFree
+      { ops := [(id1, MemoryOperation.LockRelease loc tid1), (id2, MemoryOperation.LockAcquire loc tid2)]
+      , programOrder := fun _ _ => False
+      , synchronizesWith := fun a b => a = id1 ∧ b = id2 } :=
+  drf_two_ops_synchronized id1 id2
+    (MemoryOperation.LockRelease loc tid1) (MemoryOperation.LockAcquire loc tid2) hneq_ids
+
+theorem drf_two_program_ordered_read_write_same_location
+    (id1 id2 : OperationId) (loc : LocationId) (tid1 tid2 : ThreadId)
+    (hneq_ids : id1 ≠ id2) :
+    dataRaceFree
+      { ops := [(id1, MemoryOperation.Read loc tid1), (id2, MemoryOperation.Write loc tid2)]
+      , programOrder := fun a b => a = id1 ∧ b = id2
+      , synchronizesWith := fun _ _ => False } :=
+  drf_two_ops_program_ordered id1 id2
+    (MemoryOperation.Read loc tid1) (MemoryOperation.Write loc tid2) hneq_ids
+
+theorem drf_two_program_ordered_writes_same_location
+    (id1 id2 : OperationId) (loc : LocationId) (tid1 tid2 : ThreadId)
+    (hneq_ids : id1 ≠ id2) :
+    dataRaceFree
+      { ops := [(id1, MemoryOperation.Write loc tid1), (id2, MemoryOperation.Write loc tid2)]
+      , programOrder := fun a b => a = id1 ∧ b = id2
+      , synchronizesWith := fun _ _ => False } :=
+  drf_two_ops_program_ordered id1 id2
+    (MemoryOperation.Write loc tid1) (MemoryOperation.Write loc tid2) hneq_ids
+
+theorem drf_two_program_ordered_write_read_same_location
+    (id1 id2 : OperationId) (loc : LocationId) (tid1 tid2 : ThreadId)
+    (hneq_ids : id1 ≠ id2) :
+    dataRaceFree
+      { ops := [(id1, MemoryOperation.Write loc tid1), (id2, MemoryOperation.Read loc tid2)]
+      , programOrder := fun a b => a = id1 ∧ b = id2
+      , synchronizesWith := fun _ _ => False } :=
+  drf_two_ops_program_ordered id1 id2
     (MemoryOperation.Write loc tid1) (MemoryOperation.Read loc tid2) hneq_ids
 
 theorem scDRF (exec : Execution) :

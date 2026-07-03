@@ -309,6 +309,18 @@ theorem resource_release_preserves_capacity_bound (p : ResourcePool)
   unfold ResourcePool.wf at hrel
   exact ⟨hcap, by simpa [hcap] using hrel⟩
 
+/-- T10f3: acquire preserves capacity and keeps live resources within the
+    original capacity bound for well-formed pools. -/
+theorem resource_acquire_preserves_capacity_bound (p : ResourcePool)
+    (hwf : p.wf) :
+    (p.acquire).pool.capacity = p.capacity ∧ (p.acquire).pool.inUse ≤ p.capacity := by
+  unfold ResourcePool.acquire ResourcePool.wf at *
+  by_cases h : p.inUse < p.capacity
+  · simp [h]
+    omega
+  · simp [h]
+    exact hwf
+
 /-- T10g: successful acquire followed by release returns the pool to its
     original state.  This is the basic no-leak lifecycle roundtrip. -/
 theorem resource_acquire_release_roundtrip (p : ResourcePool)

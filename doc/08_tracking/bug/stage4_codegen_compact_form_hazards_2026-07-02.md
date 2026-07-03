@@ -1242,14 +1242,24 @@ nil-payload Function value. Also made `call_function`'s fallback resolve by name
 - lint src/app/cli/main.spl → rc=0 clean ✓
 - test target_presets_spec.spl → PASS rc=0 ✓
 
-### Remaining SEPARATE pre-existing defects (NOT the #85 multi-fn bug; unstub path)
-- **struct/class-bearing file → SIGSEGV during lowering** (rc=139). `class_only`
-  (a bare class + `fn main(): print(...)`) crashes inside `lower_module` before
-  `[DRV] lowered funcs=` — the class/struct HIR-lowering path was never
-  exercised on the unstub path (all prior iterations tested functions only).
-  Likely a nil-deref in `lower_class`/`lower_struct` (9-field positional
-  `case Class(...)` destructuring + full named `HirClass(...)`, the
-  positional-fill hazard family) or `declare_module_symbols` class define.
+### Fix 3 (committed 855d038b447): struct/class SIGSEGV — typed-rebind Field in lower_field
+A run file containing any struct or class SIGSEGV'd during HIR lowering (rc=139).
+Bracketing probes localised it precisely: `lower_struct` reached
+`[LS-PROBE] field-start` but never `field-done` — the crash is the FIRST field of
+the FIRST struct, inside `lower_field`. (A `class` parses into `module.structs`
+on this frontend — `class_only` showed `classes_count=0 structs_count=1` — so
+both class- and struct-bearing files hit the same `lower_field` path.) Root
+cause: `lower_field` reads `f.type_`/`f.name` off an ANY-erased `Field` (callers
+iterate `for f in struct_fields`/`class_fields` on an ANY-typed `[Field]`),
+hitting the seed's most-fields-wins resolver → wrong field index → nil → SIGSEGV
+inside `lower_type`. Fix: bind `f` to a `Field`-typed local before any field
+access, plus the same typed rebind at both caller loops. Verified: `struct_only`
+(`struct Pt{x,y}; fn main(): print(p.x)`) and `class_only` now lower without the
+SIGSEGV.
+
+### Remaining SEPARATE pre-existing defect (NOT the #85 multi-fn bug; unstub path)
 - **`-c "print(1+1)"` → rc=1, no output** on this fresh build (baseline before
   any it19 edit already showed this — pre-existing, not caused by it19; `-c`
-  does not traverse the modified non-bootstrap functions loop).
+  does not traverse the modified non-bootstrap functions loop — it goes through
+  the `is_bootstrap_entry` branch that calls `lower_module` directly). Left for a
+  follow-up iteration.

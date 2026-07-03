@@ -147,6 +147,11 @@ theorem close_wakes_all_parked (ch : GreenChannel) (tid : TaskId)
     tid ∈ r.woken_task_ids := by
   simp [greenCloseDrain, hmem]
 
+/-- T3a1: close_drain always leaves the channel closed. -/
+theorem close_drain_closes_channel (ch : GreenChannel) :
+    (greenCloseDrain ch).channel.closed = true := by
+  simp [greenCloseDrain]
+
 /-- T3a2: close_drain wakes waiters but preserves buffered values. -/
 theorem close_drain_preserves_buffer (ch : GreenChannel) :
     (greenCloseDrain ch).channel.queued_values = ch.queued_values := by

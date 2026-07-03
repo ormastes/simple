@@ -181,7 +181,15 @@ impl HirLowering:
         Visibility.Private
 
     me lower_type(t: Type) -> HirType:
-        val kind = match t.kind:
+        # Typed rebind before matching. On the stage4 unstub path `t` can arrive
+        # ANY-erased when it comes from a struct/class field's `type_` (extracted
+        # off an ANY-typed [Field]); matching `t.kind` on an ANY receiver
+        # mis-resolves the enum tag/payload -> SIGSEGV in the Named arm (bug:
+        # struct/class run file crash, iteration 19). Binding to a `Type`-typed
+        # local restores the correct discriminant + payload layout.
+        val lt: Type = t
+        val lt_kind: TypeKind = lt.kind
+        val kind = match lt_kind:
             case Named(name, args):
                 val hir_args = self.lower_type_list(args)
 
@@ -204,7 +212,7 @@ impl HirLowering:
                         if hir_args.len() == 2:
                             HirTypeKind.Result(hir_args[0], hir_args[1])
                         else:
-                            self.error("Result type expects 2 type arguments", t.span)
+                            self.error("Result type expects 2 type arguments", lt.span)
                             HirTypeKind.Error
                     case _:
                         val symbol_id = self.symbols.lookup_or_invalid(name)
@@ -213,7 +221,7 @@ impl HirLowering:
                                 custom_primitive_bind_symbol(name, symbol_id.id)
                             HirTypeKind.Named(symbol_id, hir_args)
                         else:
-                            self.error("unresolved type: {name}", t.span)
+                            self.error("unresolved type: {name}", lt.span)
                             HirTypeKind.Error
 
             case Tuple(elements):
@@ -256,7 +264,7 @@ impl HirLowering:
             case Error:
                 HirTypeKind.Error
 
-        HirType(kind: kind, span: t.span)
+        HirType(kind: kind, span: lt.span)
 
     me lower_type_list(types: [Type]) -> [HirType]:
         var result: [HirType] = []

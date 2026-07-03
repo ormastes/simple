@@ -64,6 +64,14 @@ theorem acquire_sets_single_owner (s s' : ResourceState) (l : Lane) :
   | some owner =>
       simp [acquire, howner] at h
 
+theorem acquire_success_requires_empty (s s' : ResourceState) (l : Lane) :
+    acquire s l = some s' → s.owner = none := by
+  intro h
+  cases howner : s.owner with
+  | none => rfl
+  | some owner =>
+      simp [acquire, howner] at h
+
 theorem acquire_empty_never_sets_other_owner (l other : Lane)
     (h : l ≠ other) :
     acquire { owner := none } l ≠ some { owner := some other } := by

@@ -2162,6 +2162,197 @@ fn _norm_inv_std(p: f64) -> f64:
     val denh = (((7.784695709041462e-03 * qh + 3.224671290700398e-01) * qh + 2.445134137142996e+00) * qh + 3.754408661907416e+00) * qh + 1.0
     0.0 - numh / denh
 
+fn _fabs(x: f64) -> f64:
+    """Absolute value of an f64."""
+    if x < 0.0:
+        return 0.0 - x
+    x
+
+fn _betacf(a: f64, b: f64, x: f64) -> f64:
+    """Continued fraction for the incomplete beta function via Lentz (NR §6.4).
+
+    100 iterations, tiny=1e-30, eps=3e-14."""
+    val fpmin = 1e-30
+    val eps = 3e-14
+    val qab = a + b
+    val qap = a + 1.0
+    val qam = a - 1.0
+    var c = 1.0
+    var d = 1.0 - qab * x / qap
+    if _fabs(d) < fpmin:
+        d = fpmin
+    d = 1.0 / d
+    var h = d
+    var m = 1
+    while m <= 100:
+        val fm = m.to_f64()
+        val m2 = 2.0 * fm
+        var aa = fm * (b - fm) * x / ((qam + m2) * (a + m2))
+        d = 1.0 + aa * d
+        if _fabs(d) < fpmin:
+            d = fpmin
+        c = 1.0 + aa / c
+        if _fabs(c) < fpmin:
+            c = fpmin
+        d = 1.0 / d
+        h = h * d * c
+        aa = 0.0 - (a + fm) * (qab + fm) * x / ((a + m2) * (qap + m2))
+        d = 1.0 + aa * d
+        if _fabs(d) < fpmin:
+            d = fpmin
+        c = 1.0 + aa / c
+        if _fabs(c) < fpmin:
+            c = fpmin
+        d = 1.0 / d
+        val del = d * c
+        h = h * del
+        if _fabs(del - 1.0) < eps:
+            break
+        m = m + 1
+    h
+
+fn _betainc(x: f64, a: f64, b: f64) -> f64:
+    """Regularized incomplete beta I_x(a,b) via Lentz continued fractions (NR §6.4).
+
+    Uses the symmetry I_x(a,b)=1-I_{1-x}(b,a) when x>(a+1)/(a+b+2) for convergence."""
+    if x <= 0.0:
+        return 0.0
+    if x >= 1.0:
+        return 1.0
+    val bt = _exp_f64(_gammaln(a + b) - _gammaln(a) - _gammaln(b) + a * _ln_f64(x) + b * _ln_f64(1.0 - x))
+    if x < (a + 1.0) / (a + b + 2.0):
+        return bt * _betacf(a, b, x) / a
+    1.0 - bt * _betacf(b, a, 1.0 - x) / b
+
+fn _gammainc_series(a: f64, x: f64) -> f64:
+    """Lower regularized incomplete gamma P(a,x) via series (NR §6.2), for x < a+1."""
+    val eps = 3e-14
+    val gln = _gammaln(a)
+    var ap = a
+    var sum = 1.0 / a
+    var del = sum
+    var n = 1
+    while n <= 300:
+        ap = ap + 1.0
+        del = del * x / ap
+        sum = sum + del
+        if _fabs(del) < _fabs(sum) * eps:
+            break
+        n = n + 1
+    sum * _exp_f64(0.0 - x + a * _ln_f64(x) - gln)
+
+fn _gammainc_cf(a: f64, x: f64) -> f64:
+    """Upper regularized incomplete gamma Q(a,x) via continued fraction (NR §6.2), x >= a+1."""
+    val fpmin = 1e-30
+    val eps = 3e-14
+    val gln = _gammaln(a)
+    var b = x + 1.0 - a
+    var c = 1.0 / fpmin
+    var d = 1.0 / b
+    var h = d
+    var i = 1
+    while i <= 300:
+        val fi = i.to_f64()
+        val an = 0.0 - fi * (fi - a)
+        b = b + 2.0
+        d = an * d + b
+        if _fabs(d) < fpmin:
+            d = fpmin
+        c = b + an / c
+        if _fabs(c) < fpmin:
+            c = fpmin
+        d = 1.0 / d
+        val del = d * c
+        h = h * del
+        if _fabs(del - 1.0) < eps:
+            break
+        i = i + 1
+    _exp_f64(0.0 - x + a * _ln_f64(x) - gln) * h
+
+fn _gammainc_p(a: f64, x: f64) -> f64:
+    """Regularized lower incomplete gamma P(a,x): series for x<a+1, CF otherwise (NR §6.2)."""
+    if x <= 0.0:
+        return 0.0
+    if x < a + 1.0:
+        return _gammainc_series(a, x)
+    1.0 - _gammainc_cf(a, x)
+
+fn _betainc_inv(p: f64, a: f64, b: f64) -> f64:
+    """Inverse of I_x(a,b) in x by bisection on [0,1], 60 iterations."""
+    var lo = 0.0
+    var hi = 1.0
+    var it = 0
+    while it < 60:
+        val mid = (lo + hi) / 2.0
+        if _betainc(mid, a, b) > p:
+            hi = mid
+        else:
+            lo = mid
+        it = it + 1
+    (lo + hi) / 2.0
+
+fn _gammainc_inv(p: f64, a: f64) -> f64:
+    """Inverse of P(a,x) in x by bracket-expand then bisection, 60 iterations."""
+    var hi = 1.0
+    var guard = 0
+    while _gammainc_p(a, hi) < p and guard < 200:
+        hi = hi * 2.0
+        guard = guard + 1
+    var lo = 0.0
+    var it = 0
+    while it < 60:
+        val mid = (lo + hi) / 2.0
+        if _gammainc_p(a, mid) > p:
+            hi = mid
+        else:
+            lo = mid
+        it = it + 1
+    (lo + hi) / 2.0
+
+fn _t_2t_area(x: f64, df: f64) -> f64:
+    """Two-tailed Student-t area P(|T|>x) = I_{df/(df+x^2)}(df/2, 1/2)."""
+    _betainc(df / (df + x * x), df / 2.0, 0.5)
+
+fn _t_inv_2t(alpha: f64, df: f64) -> f64:
+    """Inverse two-tailed t: x>0 s.t. _t_2t_area(x,df)=alpha (area decreases in x)."""
+    var lo = 0.0
+    var hi = 1.0
+    var guard = 0
+    while _t_2t_area(hi, df) > alpha and guard < 200:
+        hi = hi * 2.0
+        guard = guard + 1
+    var it = 0
+    while it < 60:
+        val mid = (lo + hi) / 2.0
+        if _t_2t_area(mid, df) > alpha:
+            lo = mid
+        else:
+            hi = mid
+        it = it + 1
+    (lo + hi) / 2.0
+
+fn _f_cdf(x: f64, d1: f64, d2: f64) -> f64:
+    """Snedecor F left-tail CDF = I_{d1*x/(d1*x+d2)}(d1/2, d2/2)."""
+    _betainc(d1 * x / (d1 * x + d2), d1 / 2.0, d2 / 2.0)
+
+fn _f_inv_left(p: f64, d1: f64, d2: f64) -> f64:
+    """Inverse of the F left-tail CDF by bracket-expand then bisection, 60 iterations."""
+    var hi = 1.0
+    var guard = 0
+    while _f_cdf(hi, d1, d2) < p and guard < 200:
+        hi = hi * 2.0
+        guard = guard + 1
+    var lo = 0.0
+    var it = 0
+    while it < 60:
+        val mid = (lo + hi) / 2.0
+        if _f_cdf(mid, d1, d2) > p:
+            hi = mid
+        else:
+            lo = mid
+        it = it + 1
+    (lo + hi) / 2.0
+
 fn _binom_pmf(k: i64, n: i64, p: f64) -> f64:
     val c = _fact_i64(n) / (_fact_i64(k) * _fact_i64(n - k))
     c * _pow_f64(p, k.to_f64()) * _pow_f64(1.0 - p, (n - k).to_f64())
@@ -2635,6 +2826,238 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                     return CellValue.ErrorVal(message: "GAMMALN requires x > 0")
                 return CellValue.NumberVal(value: _gammaln(flat[0]))
             return CellValue.ErrorVal(message: "GAMMALN requires x")
+        "BETA.DIST":
+            if args.len() >= 4:
+                val x = _first_val(args[0])
+                val al = _first_val(args[1])
+                val be = _first_val(args[2])
+                val cum = _first_val(args[3])
+                val lo = if args.len() >= 5: _first_val(args[4]) else: 0.0
+                val hi = if args.len() >= 6: _first_val(args[5]) else: 1.0
+                if al <= 0.0 or be <= 0.0 or hi <= lo:
+                    return CellValue.ErrorVal(message: "BETA.DIST domain error")
+                if x < lo or x > hi:
+                    return CellValue.ErrorVal(message: "BETA.DIST x out of range")
+                val y = (x - lo) / (hi - lo)
+                if cum != 0.0:
+                    return CellValue.NumberVal(value: _betainc(y, al, be))
+                if y <= 0.0 or y >= 1.0:
+                    return CellValue.NumberVal(value: 0.0)
+                val lpdf = (al - 1.0) * _ln_f64(y) + (be - 1.0) * _ln_f64(1.0 - y) + _gammaln(al + be) - _gammaln(al) - _gammaln(be)
+                return CellValue.NumberVal(value: _exp_f64(lpdf) / (hi - lo))
+            return CellValue.ErrorVal(message: "BETA.DIST requires x, alpha, beta, cumulative")
+        "BETADIST":
+            if args.len() >= 3:
+                val x = _first_val(args[0])
+                val al = _first_val(args[1])
+                val be = _first_val(args[2])
+                val lo = if args.len() >= 4: _first_val(args[3]) else: 0.0
+                val hi = if args.len() >= 5: _first_val(args[4]) else: 1.0
+                if al <= 0.0 or be <= 0.0 or hi <= lo:
+                    return CellValue.ErrorVal(message: "BETADIST domain error")
+                val y = (x - lo) / (hi - lo)
+                return CellValue.NumberVal(value: _betainc(y, al, be))
+            return CellValue.ErrorVal(message: "BETADIST requires x, alpha, beta")
+        "BETA.INV":
+            if args.len() >= 3:
+                val p = _first_val(args[0])
+                val al = _first_val(args[1])
+                val be = _first_val(args[2])
+                val lo = if args.len() >= 4: _first_val(args[3]) else: 0.0
+                val hi = if args.len() >= 5: _first_val(args[4]) else: 1.0
+                if al <= 0.0 or be <= 0.0 or hi <= lo or p <= 0.0 or p >= 1.0:
+                    return CellValue.ErrorVal(message: "BETA.INV domain error")
+                return CellValue.NumberVal(value: lo + (hi - lo) * _betainc_inv(p, al, be))
+            return CellValue.ErrorVal(message: "BETA.INV requires p, alpha, beta")
+        "GAMMA.DIST":
+            if args.len() >= 4:
+                val x = _first_val(args[0])
+                val al = _first_val(args[1])
+                val be = _first_val(args[2])
+                val cum = _first_val(args[3])
+                if al <= 0.0 or be <= 0.0 or x < 0.0:
+                    return CellValue.ErrorVal(message: "GAMMA.DIST domain error")
+                if cum != 0.0:
+                    return CellValue.NumberVal(value: _gammainc_p(al, x / be))
+                if x <= 0.0:
+                    return CellValue.NumberVal(value: 0.0)
+                val lpdf = (al - 1.0) * _ln_f64(x) - x / be - al * _ln_f64(be) - _gammaln(al)
+                return CellValue.NumberVal(value: _exp_f64(lpdf))
+            return CellValue.ErrorVal(message: "GAMMA.DIST requires x, alpha, beta, cumulative")
+        "GAMMA.INV":
+            if args.len() >= 3:
+                val p = _first_val(args[0])
+                val al = _first_val(args[1])
+                val be = _first_val(args[2])
+                if al <= 0.0 or be <= 0.0 or p <= 0.0 or p >= 1.0:
+                    return CellValue.ErrorVal(message: "GAMMA.INV domain error")
+                return CellValue.NumberVal(value: be * _gammainc_inv(p, al))
+            return CellValue.ErrorVal(message: "GAMMA.INV requires p, alpha, beta")
+        "CHISQ.DIST":
+            if args.len() >= 3:
+                val x = _first_val(args[0])
+                val df = _first_val(args[1])
+                val cum = _first_val(args[2])
+                if df < 1.0 or x < 0.0:
+                    return CellValue.ErrorVal(message: "CHISQ.DIST domain error")
+                if cum != 0.0:
+                    return CellValue.NumberVal(value: _gammainc_p(df / 2.0, x / 2.0))
+                if x <= 0.0:
+                    return CellValue.NumberVal(value: 0.0)
+                val a = df / 2.0
+                val lpdf = (a - 1.0) * _ln_f64(x) - x / 2.0 - a * _LN2 - _gammaln(a)
+                return CellValue.NumberVal(value: _exp_f64(lpdf))
+            return CellValue.ErrorVal(message: "CHISQ.DIST requires x, df, cumulative")
+        "CHISQ.DIST.RT":
+            if args.len() >= 2:
+                val x = _first_val(args[0])
+                val df = _first_val(args[1])
+                if df < 1.0 or x < 0.0:
+                    return CellValue.ErrorVal(message: "CHISQ.DIST.RT domain error")
+                return CellValue.NumberVal(value: 1.0 - _gammainc_p(df / 2.0, x / 2.0))
+            return CellValue.ErrorVal(message: "CHISQ.DIST.RT requires x, df")
+        "CHISQ.INV":
+            if args.len() >= 2:
+                val p = _first_val(args[0])
+                val df = _first_val(args[1])
+                if df < 1.0 or p <= 0.0 or p >= 1.0:
+                    return CellValue.ErrorVal(message: "CHISQ.INV domain error")
+                return CellValue.NumberVal(value: 2.0 * _gammainc_inv(p, df / 2.0))
+            return CellValue.ErrorVal(message: "CHISQ.INV requires p, df")
+        "CHISQ.INV.RT":
+            if args.len() >= 2:
+                val p = _first_val(args[0])
+                val df = _first_val(args[1])
+                if df < 1.0 or p <= 0.0 or p >= 1.0:
+                    return CellValue.ErrorVal(message: "CHISQ.INV.RT domain error")
+                return CellValue.NumberVal(value: 2.0 * _gammainc_inv(1.0 - p, df / 2.0))
+            return CellValue.ErrorVal(message: "CHISQ.INV.RT requires p, df")
+        "T.DIST":
+            if args.len() >= 3:
+                val t = _first_val(args[0])
+                val df = _first_val(args[1])
+                val cum = _first_val(args[2])
+                if df < 1.0:
+                    return CellValue.ErrorVal(message: "T.DIST df must be >= 1")
+                if cum != 0.0:
+                    val ib = _t_2t_area(t, df)
+                    val cdf = if t >= 0.0: 1.0 - 0.5 * ib else: 0.5 * ib
+                    return CellValue.NumberVal(value: cdf)
+                val lpdf = _gammaln((df + 1.0) / 2.0) - _gammaln(df / 2.0) - 0.5 * _ln_f64(df * _PI) - ((df + 1.0) / 2.0) * _ln_f64(1.0 + t * t / df)
+                return CellValue.NumberVal(value: _exp_f64(lpdf))
+            return CellValue.ErrorVal(message: "T.DIST requires x, df, cumulative")
+        "T.DIST.2T":
+            if args.len() >= 2:
+                val x = _first_val(args[0])
+                val df = _first_val(args[1])
+                if df < 1.0 or x < 0.0:
+                    return CellValue.ErrorVal(message: "T.DIST.2T domain error")
+                return CellValue.NumberVal(value: _t_2t_area(x, df))
+            return CellValue.ErrorVal(message: "T.DIST.2T requires x, df")
+        "T.DIST.RT":
+            if args.len() >= 2:
+                val t = _first_val(args[0])
+                val df = _first_val(args[1])
+                if df < 1.0:
+                    return CellValue.ErrorVal(message: "T.DIST.RT df must be >= 1")
+                val ib = _t_2t_area(t, df)
+                val rt = if t >= 0.0: 0.5 * ib else: 1.0 - 0.5 * ib
+                return CellValue.NumberVal(value: rt)
+            return CellValue.ErrorVal(message: "T.DIST.RT requires x, df")
+        "T.INV":
+            if args.len() >= 2:
+                val p = _first_val(args[0])
+                val df = _first_val(args[1])
+                if df < 1.0 or p <= 0.0 or p >= 1.0:
+                    return CellValue.ErrorVal(message: "T.INV domain error")
+                if p == 0.5:
+                    return CellValue.NumberVal(value: 0.0)
+                val q = if p > 0.5: 1.0 - p else: p
+                val tm = _t_inv_2t(2.0 * q, df)
+                val tv = if p > 0.5: tm else: 0.0 - tm
+                return CellValue.NumberVal(value: tv)
+            return CellValue.ErrorVal(message: "T.INV requires p, df")
+        "T.INV.2T":
+            if args.len() >= 2:
+                val p = _first_val(args[0])
+                val df = _first_val(args[1])
+                if df < 1.0 or p <= 0.0 or p > 1.0:
+                    return CellValue.ErrorVal(message: "T.INV.2T domain error")
+                return CellValue.NumberVal(value: _t_inv_2t(p, df))
+            return CellValue.ErrorVal(message: "T.INV.2T requires p, df")
+        "TDIST":
+            if args.len() >= 3:
+                val x = _first_val(args[0])
+                val df = _first_val(args[1])
+                val tails = _first_val(args[2]).to_i64()
+                if df < 1.0 or x < 0.0 or (tails != 1 and tails != 2):
+                    return CellValue.ErrorVal(message: "TDIST domain error")
+                val ib = _t_2t_area(x, df)
+                if tails == 2:
+                    return CellValue.NumberVal(value: ib)
+                return CellValue.NumberVal(value: 0.5 * ib)
+            return CellValue.ErrorVal(message: "TDIST requires x, df, tails")
+        "F.DIST":
+            if args.len() >= 4:
+                val x = _first_val(args[0])
+                val d1 = _first_val(args[1])
+                val d2 = _first_val(args[2])
+                val cum = _first_val(args[3])
+                if d1 < 1.0 or d2 < 1.0 or x < 0.0:
+                    return CellValue.ErrorVal(message: "F.DIST domain error")
+                if cum != 0.0:
+                    return CellValue.NumberVal(value: _f_cdf(x, d1, d2))
+                if x <= 0.0:
+                    return CellValue.NumberVal(value: 0.0)
+                val lpdf = _gammaln((d1 + d2) / 2.0) - _gammaln(d1 / 2.0) - _gammaln(d2 / 2.0) + (d1 / 2.0) * _ln_f64(d1 / d2) + (d1 / 2.0 - 1.0) * _ln_f64(x) - ((d1 + d2) / 2.0) * _ln_f64(1.0 + (d1 / d2) * x)
+                return CellValue.NumberVal(value: _exp_f64(lpdf))
+            return CellValue.ErrorVal(message: "F.DIST requires x, df1, df2, cumulative")
+        "F.DIST.RT":
+            if args.len() >= 3:
+                val x = _first_val(args[0])
+                val d1 = _first_val(args[1])
+                val d2 = _first_val(args[2])
+                if d1 < 1.0 or d2 < 1.0 or x < 0.0:
+                    return CellValue.ErrorVal(message: "F.DIST.RT domain error")
+                return CellValue.NumberVal(value: 1.0 - _f_cdf(x, d1, d2))
+            return CellValue.ErrorVal(message: "F.DIST.RT requires x, df1, df2")
+        "F.INV":
+            if args.len() >= 3:
+                val p = _first_val(args[0])
+                val d1 = _first_val(args[1])
+                val d2 = _first_val(args[2])
+                if d1 < 1.0 or d2 < 1.0 or p <= 0.0 or p >= 1.0:
+                    return CellValue.ErrorVal(message: "F.INV domain error")
+                return CellValue.NumberVal(value: _f_inv_left(p, d1, d2))
+            return CellValue.ErrorVal(message: "F.INV requires p, df1, df2")
+        "F.INV.RT":
+            if args.len() >= 3:
+                val p = _first_val(args[0])
+                val d1 = _first_val(args[1])
+                val d2 = _first_val(args[2])
+                if d1 < 1.0 or d2 < 1.0 or p <= 0.0 or p >= 1.0:
+                    return CellValue.ErrorVal(message: "F.INV.RT domain error")
+                return CellValue.NumberVal(value: _f_inv_left(1.0 - p, d1, d2))
+            return CellValue.ErrorVal(message: "F.INV.RT requires p, df1, df2")
+        "GAMMA":
+            if flat.len() > 0:
+                val x = flat[0]
+                if x > 0.0:
+                    return CellValue.NumberVal(value: _exp_f64(_gammaln(x)))
+                if x == x.to_i64().to_f64():
+                    return CellValue.ErrorVal(message: "GAMMA undefined at nonpositive integer")
+                val s = _sin_f64(_PI * x)
+                return CellValue.NumberVal(value: _PI / (s * _exp_f64(_gammaln(1.0 - x))))
+            return CellValue.ErrorVal(message: "GAMMA requires x")
+        "GAUSS":
+            if flat.len() > 0:
+                return CellValue.NumberVal(value: _norm_cdf(flat[0]) - 0.5)
+            return CellValue.ErrorVal(message: "GAUSS requires z")
+        "PHI":
+            if flat.len() > 0:
+                val z = flat[0]
+                return CellValue.NumberVal(value: _exp_f64(0.0 - z * z / 2.0) / _sqrt_f64(2.0 * _PI))
+            return CellValue.ErrorVal(message: "PHI requires z")
         "WEIBULL":
             if args.len() >= 4:
                 val x = _first_val(args[0])
