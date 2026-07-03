@@ -316,3 +316,112 @@ fn _try_parse_number(s: text) -> f64?:
 fn _is_digit(c: text) -> bool:
     (c == "0" or c == "1" or c == "2" or c == "3" or c == "4" or
      c == "5" or c == "6" or c == "7" or c == "8" or c == "9")
+
+# =========================================================================
+# Find & Replace
+# =========================================================================
+
+fn _cell_is_formula(cell: Cell) -> bool:
+    """True when the cell holds a formula (protected from value replacement)."""
+    match cell.value:
+        CellValue.FormulaVal(expr, cached):
+            true
+        _:
+            false
+
+fn _ci_replace_all(haystack: text, needle: text, replacement: text) -> text:
+    """Case-insensitive replace-all: matches needle ignoring case, substitutes
+    replacement verbatim. Scans left-to-right (no index_of in the runtime)."""
+    if needle.len() == 0:
+        return haystack
+    val nlow = needle.lower()
+    var result = ""
+    var i = 0
+    while i < haystack.len():
+        val window = haystack.slice(i, i + needle.len())
+        if window.len() == needle.len() and window.lower() == nlow:
+            result = "{result}{replacement}"
+            i = i + needle.len()
+        else:
+            result = "{result}{haystack.char_at(i)}"
+            i = i + 1
+    result
+
+fn sheet_find(sheet: Sheet, needle: text, match_case: bool) -> [text]:
+    """A1 refs (row-major over the used range) whose display text contains
+    needle. Case-insensitive unless match_case is true. Empty needle → []."""
+    if needle.len() == 0:
+        return []
+    val range_a1 = sheet.used_range()
+    val range = parse_range(range_a1)
+    if range == nil:
+        return []
+    val rng = range
+    val min_col = _min_i32(rng.start.col, rng.end_ref.col)
+    val max_col = _max_i32(rng.start.col, rng.end_ref.col)
+    val min_row = _min_i32(rng.start.row, rng.end_ref.row)
+    val max_row = _max_i32(rng.start.row, rng.end_ref.row)
+    val nlow = needle.lower()
+
+    var result: [text] = []
+    var r = min_row
+    while r <= max_row:
+        var c = min_col
+        while c <= max_col:
+            val ref = CellRef(col: c, row: r)
+            val ref_str = cell_ref_to_string(ref)
+            val cell = sheet.get_cell(ref_str)
+            val display = cell_display_text(cell)
+            var hit = false
+            if match_case:
+                hit = display.contains(needle)
+            else:
+                hit = display.lower().contains(nlow)
+            if hit:
+                result.push(ref_str)
+            c = c + 1
+        r = r + 1
+    result
+
+fn sheet_replace(sheet: Sheet, needle: text, replacement: text, match_case: bool) -> Sheet:
+    """Replace needle with replacement in the display value of every non-formula
+    cell in the used range (formula cells are left untouched). Returns the
+    mutated sheet (Sheet is a class, but the return preserves the codebase's
+    return-the-object convention)."""
+    var result_sheet = sheet
+    if needle.len() == 0:
+        return result_sheet
+    val range_a1 = result_sheet.used_range()
+    val range = parse_range(range_a1)
+    if range == nil:
+        return result_sheet
+    val rng = range
+    val min_col = _min_i32(rng.start.col, rng.end_ref.col)
+    val max_col = _max_i32(rng.start.col, rng.end_ref.col)
+    val min_row = _min_i32(rng.start.row, rng.end_ref.row)
+    val max_row = _max_i32(rng.start.row, rng.end_ref.row)
+
+    var r = min_row
+    while r <= max_row:
+        var c = min_col
+        while c <= max_col:
+            val ref = CellRef(col: c, row: r)
+            val ref_str = cell_ref_to_string(ref)
+            val cell = result_sheet.get_cell(ref_str)
+            if not _cell_is_formula(cell):
+                val display = cell_display_text(cell)
+                var matched = false
+                if match_case:
+                    matched = display.contains(needle)
+                else:
+                    matched = display.lower().contains(needle.lower())
+                if matched:
+                    var replaced = ""
+                    if match_case:
+                        replaced = display.replace(needle, replacement)
+                    else:
+                        replaced = _ci_replace_all(display, needle, replacement)
+                    result_sheet.set_value(ref_str, replaced)
+            c = c + 1
+        r = r + 1
+    result_sheet
