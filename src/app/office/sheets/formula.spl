@@ -397,7 +397,14 @@ fn _is_text_function(name: text) -> bool:
      name == "RIGHT" or name == "MID" or name == "EXACT" or
      name == "IMREAL" or name == "IMAGINARY" or name == "IMABS" or
      name == "IMSUM" or name == "IMSUB" or name == "IMPRODUCT" or
-     name == "IMCONJUGATE" or name == "DATEVALUE" or name == "TEXT" or
+     name == "IMCONJUGATE" or name == "IMDIV" or name == "IMPOWER" or
+     name == "IMSQRT" or name == "IMEXP" or name == "IMLN" or
+     name == "IMLOG10" or name == "IMLOG2" or name == "IMARGUMENT" or
+     name == "IMSIN" or name == "IMCOS" or name == "IMTAN" or
+     name == "IMSINH" or name == "IMCOSH" or name == "IMCOT" or
+     name == "IMCSC" or name == "IMSEC" or name == "IMCSCH" or
+     name == "IMSECH" or name == "CONVERT" or
+     name == "DATEVALUE" or name == "TEXT" or
      name == "FIXED" or name == "VALUE" or name == "NUMBERVALUE" or
      name == "SUBSTITUTE" or name == "REPLACE" or name == "REPT" or
      name == "SEARCH" or name == "FIND" or name == "CHAR" or
@@ -419,7 +426,9 @@ fn _format_complex(re: f64, im: f64) -> text:
     if im == 0.0:
         return _fmt_num_trim(re)
     val im_abs = if im < 0.0: 0.0 - im else: im
-    val im_txt = "{_fmt_num_trim(im_abs)}i"
+    # Excel omits a unit imaginary coefficient: 8+i, -i, 3-i (never 8+1i)
+    val coeff = if im_abs == 1.0: "" else: _fmt_num_trim(im_abs)
+    val im_txt = "{coeff}i"
     if re == 0.0:
         return if im < 0.0: "-{im_txt}" else: im_txt
     if im < 0.0:
@@ -554,6 +563,60 @@ fn _from_roman(s_in: text) -> i64:
         i = i + 1
     total
 
+fn _convert_lookup(uname: text) -> [f64]:
+    """Return [category_code, to_SI_factor] for a CONVERT unit, or [-1, 0] if
+    unknown. Categories: 0 mass(kg) 1 distance(m) 2 time(s) 3 pressure(Pa)
+    4 energy(J) 5 power(W) 6 liquid(l). Case-sensitive per Excel. Temperature
+    (C/F/K) is affine and handled separately. Parallel arrays are built as
+    locals — never passed as parameters (interpreter reads array params empty)."""
+    val names = ["g", "kg", "lbm", "ozm", "u", "sg",
+                 "m", "km", "cm", "mm", "mi", "in", "ft", "yd", "Nmi",
+                 "sec", "min", "hr", "day", "yr",
+                 "Pa", "atm", "mmHg",
+                 "J", "cal", "eV", "Wh", "BTU",
+                 "W", "HP",
+                 "l", "tsp", "tbs", "oz", "cup", "pt", "qt", "gal"]
+    val cats = [0, 0, 0, 0, 0, 0,
+                1, 1, 1, 1, 1, 1, 1, 1, 1,
+                2, 2, 2, 2, 2,
+                3, 3, 3,
+                4, 4, 4, 4, 4,
+                5, 5,
+                6, 6, 6, 6, 6, 6, 6, 6]
+    val facs = [0.001, 1.0, 0.45359237, 0.028349523125, 1.66053886e-27, 14.5939029,
+                1.0, 1000.0, 0.01, 0.001, 1609.344, 0.0254, 0.3048, 0.9144, 1852.0,
+                1.0, 60.0, 3600.0, 86400.0, 31557600.0,
+                1.0, 101325.0, 133.322,
+                1.0, 4.184, 1.602176634e-19, 3600.0, 1055.05585262,
+                1.0, 745.699871582,
+                1.0, 0.00492892159375, 0.01478676478125, 0.0295735295625,
+                0.2365882365, 0.473176473, 0.946352946, 3.785411784]
+    var i = 0
+    while i < names.len():
+        if names[i] == uname:
+            return [cats[i].to_f64(), facs[i]]
+        i = i + 1
+    [-1.0, 0.0]
+
+fn _is_temp_unit(uname: text) -> bool:
+    uname == "C" or uname == "F" or uname == "K"
+
+fn _temp_to_kelvin(v: f64, uname: text) -> f64:
+    """Affine temperature -> Kelvin. F=K*9/5-459.67, so K=(F+459.67)*5/9."""
+    if uname == "C":
+        return v + 273.15
+    if uname == "F":
+        return (v + 459.67) * 5.0 / 9.0
+    v
+
+fn _temp_from_kelvin(k: f64, uname: text) -> f64:
+    """Kelvin -> affine temperature. C=K-273.15, F=K*9/5-459.67."""
+    if uname == "C":
+        return k - 273.15
+    if uname == "F":
+        return k * 9.0 / 5.0 - 459.67
+    k
+
 fn _dispatch_text_function(name: text, args: [text]) -> CellValue:
     if name == "CONCAT" or name == "CONCATENATE":
         var out = ""
@@ -681,6 +744,145 @@ fn _dispatch_text_function(name: text, args: [text]) -> CellValue:
             re_p = nr
             im_p = ni
         return CellValue.TextVal(value: _format_complex(re_p, im_p))
+    if name == "IMDIV":
+        if args.len() < 2:
+            return CellValue.ErrorVal(message: "IMDIV requires 2 arguments")
+        val zda = _parse_complex(args[0])
+        val zdb = _parse_complex(args[1])
+        if zdb[0] == 0.0 and zdb[1] == 0.0:
+            return CellValue.ErrorVal(message: "IMDIV divide by zero")
+        val qd = _c_div(zda[0], zda[1], zdb[0], zdb[1])
+        return CellValue.TextVal(value: _format_complex(qd[0], qd[1]))
+    if name == "IMPOWER":
+        if args.len() < 2:
+            return CellValue.ErrorVal(message: "IMPOWER requires number and power")
+        val zpw = _parse_complex(s)
+        val pa = zpw[0]
+        val pb = zpw[1]
+        val nf = args[1].to_f64()
+        val ni2 = nf.to_i64()
+        if ni2.to_f64() == nf:
+            # integer exponent: exact repeated multiplication (avoids polar rounding)
+            val expo = if ni2 < 0: 0 - ni2 else: ni2
+            var rr = 1.0
+            var ri = 0.0
+            var kk: i64 = 0
+            while kk < expo:
+                val nrr = rr * pa - ri * pb
+                val nri = rr * pb + ri * pa
+                rr = nrr
+                ri = nri
+                kk = kk + 1
+            if ni2 < 0:
+                val inv = _c_div(1.0, 0.0, rr, ri)
+                return CellValue.TextVal(value: _format_complex(inv[0], inv[1]))
+            return CellValue.TextVal(value: _format_complex(rr, ri))
+        # fractional exponent: polar form r^n * (cos n*theta + i sin n*theta)
+        val rmag = _sqrt_f64(pa * pa + pb * pb)
+        val theta = _atan2_f64(pb, pa)
+        val rn = _powf(rmag, nf)
+        val ang = nf * theta
+        return CellValue.TextVal(value: _format_complex(rn * _cos_f64(ang), rn * _sin_f64(ang)))
+    if name == "IMSQRT":
+        # Closed form: sqrt(a+bi) = sqrt((r+a)/2) + sign(b)*sqrt((r-a)/2) i
+        val zsq = _parse_complex(s)
+        val rq = _sqrt_f64(zsq[0] * zsq[0] + zsq[1] * zsq[1])
+        val sre = _sqrt_f64((rq + zsq[0]) / 2.0)
+        var sim = _sqrt_f64((rq - zsq[0]) / 2.0)
+        if zsq[1] < 0.0:
+            sim = 0.0 - sim
+        return CellValue.TextVal(value: _format_complex(sre, sim))
+    if name == "IMEXP":
+        val zex = _parse_complex(s)
+        val ea = _exp_f64(zex[0])
+        return CellValue.TextVal(value: _format_complex(ea * _cos_f64(zex[1]), ea * _sin_f64(zex[1])))
+    if name == "IMLN":
+        val zln = _parse_complex(s)
+        val rln = _sqrt_f64(zln[0] * zln[0] + zln[1] * zln[1])
+        return CellValue.TextVal(value: _format_complex(_ln_f64(rln), _atan2_f64(zln[1], zln[0])))
+    if name == "IMLOG10":
+        val zl10 = _parse_complex(s)
+        val r10 = _sqrt_f64(zl10[0] * zl10[0] + zl10[1] * zl10[1])
+        val den10 = _ln_f64(10.0)
+        return CellValue.TextVal(value: _format_complex(_ln_f64(r10) / den10, _atan2_f64(zl10[1], zl10[0]) / den10))
+    if name == "IMLOG2":
+        val zl2 = _parse_complex(s)
+        val r2 = _sqrt_f64(zl2[0] * zl2[0] + zl2[1] * zl2[1])
+        val den2 = _ln_f64(2.0)
+        return CellValue.TextVal(value: _format_complex(_ln_f64(r2) / den2, _atan2_f64(zl2[1], zl2[0]) / den2))
+    if name == "IMARGUMENT":
+        val zar = _parse_complex(s)
+        return CellValue.NumberVal(value: _atan2_f64(zar[1], zar[0]))
+    if name == "IMSIN":
+        val zsn = _parse_complex(s)
+        return CellValue.TextVal(value: _format_complex(_sin_f64(zsn[0]) * _cosh_f64(zsn[1]), _cos_f64(zsn[0]) * _sinh_f64(zsn[1])))
+    if name == "IMCOS":
+        val zcs = _parse_complex(s)
+        return CellValue.TextVal(value: _format_complex(_cos_f64(zcs[0]) * _cosh_f64(zcs[1]), 0.0 - _sin_f64(zcs[0]) * _sinh_f64(zcs[1])))
+    if name == "IMTAN":
+        val ztn = _parse_complex(s)
+        val tsr = _sin_f64(ztn[0]) * _cosh_f64(ztn[1])
+        val tsi = _cos_f64(ztn[0]) * _sinh_f64(ztn[1])
+        val tcr = _cos_f64(ztn[0]) * _cosh_f64(ztn[1])
+        val tci = 0.0 - _sin_f64(ztn[0]) * _sinh_f64(ztn[1])
+        val qt = _c_div(tsr, tsi, tcr, tci)
+        return CellValue.TextVal(value: _format_complex(qt[0], qt[1]))
+    if name == "IMCOT":
+        val zct = _parse_complex(s)
+        val ctsr = _sin_f64(zct[0]) * _cosh_f64(zct[1])
+        val ctsi = _cos_f64(zct[0]) * _sinh_f64(zct[1])
+        val ctcr = _cos_f64(zct[0]) * _cosh_f64(zct[1])
+        val ctci = 0.0 - _sin_f64(zct[0]) * _sinh_f64(zct[1])
+        val qc = _c_div(ctcr, ctci, ctsr, ctsi)
+        return CellValue.TextVal(value: _format_complex(qc[0], qc[1]))
+    if name == "IMSEC":
+        val zse = _parse_complex(s)
+        val secr = _cos_f64(zse[0]) * _cosh_f64(zse[1])
+        val seci = 0.0 - _sin_f64(zse[0]) * _sinh_f64(zse[1])
+        val qse = _c_div(1.0, 0.0, secr, seci)
+        return CellValue.TextVal(value: _format_complex(qse[0], qse[1]))
+    if name == "IMCSC":
+        val zcc = _parse_complex(s)
+        val cscr = _sin_f64(zcc[0]) * _cosh_f64(zcc[1])
+        val csci = _cos_f64(zcc[0]) * _sinh_f64(zcc[1])
+        val qcc = _c_div(1.0, 0.0, cscr, csci)
+        return CellValue.TextVal(value: _format_complex(qcc[0], qcc[1]))
+    if name == "IMSINH":
+        val zsh = _parse_complex(s)
+        return CellValue.TextVal(value: _format_complex(_sinh_f64(zsh[0]) * _cos_f64(zsh[1]), _cosh_f64(zsh[0]) * _sin_f64(zsh[1])))
+    if name == "IMCOSH":
+        val zch = _parse_complex(s)
+        return CellValue.TextVal(value: _format_complex(_cosh_f64(zch[0]) * _cos_f64(zch[1]), _sinh_f64(zch[0]) * _sin_f64(zch[1])))
+    if name == "IMSECH":
+        val zsc = _parse_complex(s)
+        val schr = _cosh_f64(zsc[0]) * _cos_f64(zsc[1])
+        val schi = _sinh_f64(zsc[0]) * _sin_f64(zsc[1])
+        val qsc = _c_div(1.0, 0.0, schr, schi)
+        return CellValue.TextVal(value: _format_complex(qsc[0], qsc[1]))
+    if name == "IMCSCH":
+        val zhc = _parse_complex(s)
+        val hcr = _sinh_f64(zhc[0]) * _cos_f64(zhc[1])
+        val hci = _cosh_f64(zhc[0]) * _sin_f64(zhc[1])
+        val qhc = _c_div(1.0, 0.0, hcr, hci)
+        return CellValue.TextVal(value: _format_complex(qhc[0], qhc[1]))
+    if name == "CONVERT":
+        if args.len() < 3:
+            return CellValue.ErrorVal(message: "CONVERT requires number, from, to")
+        val nval = args[0].to_f64()
+        val from_u = args[1]
+        val to_u = args[2]
+        if _is_temp_unit(from_u) or _is_temp_unit(to_u):
+            if not (_is_temp_unit(from_u) and _is_temp_unit(to_u)):
+                return CellValue.ErrorVal(message: "CONVERT unit category mismatch")
+            val kelvin = _temp_to_kelvin(nval, from_u)
+            return CellValue.NumberVal(value: _temp_from_kelvin(kelvin, to_u))
+        val fl = _convert_lookup(from_u)
+        val tl = _convert_lookup(to_u)
+        if fl[0] < 0.0 or tl[0] < 0.0:
+            return CellValue.ErrorVal(message: "CONVERT unknown unit")
+        if fl[0] != tl[0]:
+            return CellValue.ErrorVal(message: "CONVERT unit category mismatch")
+        return CellValue.NumberVal(value: nval * fl[1] / tl[1])
     if name == "REPT":
         val n = _arg_int(args, 1)
         if n < 0:
@@ -1618,6 +1820,8 @@ fn _canonical_name(name: text) -> text:
         "FORECAST.LINEAR": return "FORECAST"
         "NORMINV": return "NORM.INV"
         "NORMSINV": return "NORM.S.INV"
+        "ERF.PRECISE": return "ERF"
+        "ERFC.PRECISE": return "ERFC"
         _: return name
 
 fn _eval_function_call(name: text, tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalResult:
@@ -1756,6 +1960,72 @@ fn _atan_f64(x: f64) -> f64:
         n = n + 1
     sum
 
+fn _atan2_f64(y: f64, x: f64) -> f64:
+    """Two-argument arctangent with full quadrant handling (result in (-pi, pi])."""
+    if x > 0.0:
+        return _atan_f64(y / x)
+    if x < 0.0:
+        if y >= 0.0:
+            return _atan_f64(y / x) + _PI
+        return _atan_f64(y / x) - _PI
+    if y > 0.0:
+        return _PI / 2.0
+    if y < 0.0:
+        return 0.0 - _PI / 2.0
+    0.0
+
+fn _sinh_f64(x: f64) -> f64:
+    """Hyperbolic sine via exp: (e^x - e^-x) / 2."""
+    val ex = _exp_f64(x)
+    (ex - 1.0 / ex) / 2.0
+
+fn _cosh_f64(x: f64) -> f64:
+    """Hyperbolic cosine via exp: (e^x + e^-x) / 2."""
+    val ex = _exp_f64(x)
+    (ex + 1.0 / ex) / 2.0
+
+fn _c_div(ar: f64, ai: f64, br: f64, bi: f64) -> [f64]:
+    """Complex division (ar+ai*i)/(br+bi*i) -> [re, im]. Scalar params only:
+    the interpreter reads array parameters as empty, so complex helpers must
+    take flattened scalars and return a fresh [f64]."""
+    val d = br * br + bi * bi
+    [(ar * br + ai * bi) / d, (ai * br - ar * bi) / d]
+
+fn _besselj(x: f64, n: i64) -> f64:
+    """Bessel function of the first kind, integer order n>=0, ascending series
+    J_n(x)=sum (-1)^k/(k!(n+k)!)(x/2)^(2k+n). Converges to 1e-13 or 40 terms;
+    documented domain |x|<=15 (series loses precision for larger |x|)."""
+    val half = x / 2.0
+    val half2 = half * half
+    var term = _pow_f64(half, n.to_f64()) / _fact_i64(n)
+    var sum = term
+    var k: i64 = 1
+    while k <= 40:
+        term = 0.0 - term * half2 / (k.to_f64() * (n + k).to_f64())
+        sum = sum + term
+        if term < 1e-13 and term > -1e-13:
+            k = 41
+        else:
+            k = k + 1
+    sum
+
+fn _besseli(x: f64, n: i64) -> f64:
+    """Modified Bessel function of the first kind, integer order n>=0, ascending
+    series I_n(x)=sum 1/(k!(n+k)!)(x/2)^(2k+n). Same convergence + |x|<=15 domain."""
+    val half = x / 2.0
+    val half2 = half * half
+    var term = _pow_f64(half, n.to_f64()) / _fact_i64(n)
+    var sum = term
+    var k: i64 = 1
+    while k <= 40:
+        term = term * half2 / (k.to_f64() * (n + k).to_f64())
+        sum = sum + term
+        if term < 1e-13 and term > -1e-13:
+            k = 41
+        else:
+            k = k + 1
+    sum
+
 fn _count_decimals_in_fmt(fmt: text) -> i32:
     """Zeros after the decimal point in an Excel format ('0.00' -> 2)."""
     val dot = _find_marker(fmt, ".", 0)
@@ -1823,14 +2093,27 @@ fn _excel_format(v: f64, fmt_in: text) -> text:
         return _fmt_decimals_grouped(v, decs, grouped)
     _fmt_num_trim(v)
 
-fn _norm_cdf(z: f64) -> f64:
-    """Standard normal CDF via Abramowitz-Stegun 7.1.26 (|err| < 1.5e-7)."""
-    val x = if z < 0.0: 0.0 - z else: z
-    val t = 1.0 / (1.0 + 0.3275911 * x / 1.4142135623730951)
-    val xt = x / 1.4142135623730951
+fn _erf(x: f64) -> f64:
+    """Error function via Abramowitz-Stegun 7.1.26 (|err| < 1.5e-7).
+
+    erf is odd, so negative arguments reflect the |x| computation. This is the
+    exact kernel previously inlined in _norm_cdf (see the identity note there)."""
+    val ax = if x < 0.0: 0.0 - x else: x
+    val t = 1.0 / (1.0 + 0.3275911 * ax)
     val poly = t * (0.254829592 + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))))
-    val erf = 1.0 - poly * _exp_f64(0.0 - xt * xt)
-    val cdf = 0.5 * (1.0 + erf)
+    val e = 1.0 - poly * _exp_f64(0.0 - ax * ax)
+    if x < 0.0:
+        return 0.0 - e
+    e
+
+fn _norm_cdf(z: f64) -> f64:
+    """Standard normal CDF via Abramowitz-Stegun 7.1.26 (|err| < 1.5e-7).
+
+    Delegates to _erf: CDF(z) = 0.5*(1 + erf(|z|/sqrt2)), mirrored for z<0. This
+    keeps the same |z|-based kernel and the 1-cdf reflection as the original
+    inlined form, so results are bit-identical (NORMSDIST regression asserts it)."""
+    val x = if z < 0.0: 0.0 - z else: z
+    val cdf = 0.5 * (1.0 + _erf(x / 1.4142135623730951))
     if z < 0.0:
         return 1.0 - cdf
     cdf
@@ -2422,6 +2705,38 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
             if args.len() >= 2:
                 return CellValue.TextVal(value: _format_complex(_first_val(args[0]), _first_val(args[1])))
             return CellValue.ErrorVal(message: "COMPLEX requires re, im")
+        "ERF":
+            # ERF(x) or ERF(lower, upper) = erf(upper) - erf(lower)
+            if flat.len() >= 2:
+                return CellValue.NumberVal(value: _erf(flat[1]) - _erf(flat[0]))
+            if flat.len() == 1:
+                return CellValue.NumberVal(value: _erf(flat[0]))
+            return CellValue.ErrorVal(message: "ERF requires an argument")
+        "ERFC":
+            if flat.len() >= 1:
+                return CellValue.NumberVal(value: 1.0 - _erf(flat[0]))
+            return CellValue.ErrorVal(message: "ERFC requires an argument")
+        "BESSELJ":
+            # BESSELJ(x, n): integer order n>=0, series domain |x|<=15
+            if flat.len() < 2:
+                return CellValue.ErrorVal(message: "BESSELJ requires x and order n")
+            val jn = flat[1].to_i64()
+            val jx = flat[0]
+            if jn < 0:
+                return CellValue.ErrorVal(message: "BESSELJ order must be >= 0")
+            if jx > 15.0 or jx < -15.0:
+                return CellValue.ErrorVal(message: "BESSELJ domain is |x| <= 15")
+            return CellValue.NumberVal(value: _besselj(jx, jn))
+        "BESSELI":
+            if flat.len() < 2:
+                return CellValue.ErrorVal(message: "BESSELI requires x and order n")
+            val in_ = flat[1].to_i64()
+            val ix = flat[0]
+            if in_ < 0:
+                return CellValue.ErrorVal(message: "BESSELI order must be >= 0")
+            if ix > 15.0 or ix < -15.0:
+                return CellValue.ErrorVal(message: "BESSELI domain is |x| <= 15")
+            return CellValue.NumberVal(value: _besseli(ix, in_))
         "DATE":
             if args.len() >= 3:
                 return CellValue.NumberVal(value: _serial_from_civil(_first_val(args[0]).to_i64(), _first_val(args[1]).to_i64(), _first_val(args[2]).to_i64()))
