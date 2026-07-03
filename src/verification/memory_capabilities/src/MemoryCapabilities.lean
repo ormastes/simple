@@ -444,6 +444,13 @@ theorem empty_env_wellformed :
   intro loc refs h
   cases h
 
+theorem empty_env_wellformed_and_no_access (access : MemAccess) :
+  wellFormed { activeRefs := [] } ∧
+  accessIsSafe { activeRefs := [] } access = false := by
+  constructor
+  · exact empty_env_wellformed
+  · exact empty_env_access_not_safe access
+
 theorem singleton_env_wellformed (baseType : String) (loc : Nat) (cap : RefCapability) :
   wellFormed
     { activeRefs :=
