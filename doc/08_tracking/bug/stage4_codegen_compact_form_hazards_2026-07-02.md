@@ -1008,3 +1008,81 @@ typed payloads (`src/compiler_rust/.../codegen/instr/` match/destructure), OR a
 lowering restructure that keeps the last expr-stmt in `stmts` (evaluated via the
 stmts loop) for functions returning Unit instead of extracting a fragile trailing
 value. All eprint probes removed; binaries scratchpad/stage4_fix27..38.
+
+## Iteration 17 (2026-07-03) — Trap D found; disc probes calibrated (name-hash tags); bare no-payload patterns are IRREFUTABLE; blocker moved from silent-NilLit to mono scan SEGV on a misrouted HostGpuLane
+
+### Trap D — env-GATED eprint probes are MUTE in hir_lowering modules
+`if (hir_*_env_get("SIMPLE_INTERP_TRACE") ?? "") == "1": eprint(...)` never
+fires in 20.hir/hir_lowering/* on stage4 even with the env set, while the SAME
+idiom works in driver.spl/interpreter.spl. Proven by the LMW sentinel
+experiment: an UNGATED eprint + a `hm.name + "+LMW"` suffix both surfaced while
+every gated probe stayed silent. **Iteration 16's "lower_module may not run" is
+DISPROVEN — lower_module always ran; its probes were mute.** For lowering-side
+instrumentation use UNGATED `eprint` only (remove before deploy).
+Consequence: iteration-17 probes in expressions.spl / statements.spl /
+_Items/module_lowering.spl / _FlatAstBridge/convert_nodes.spl are UNGATED and
+still in-tree — they spam stderr on every compile and MUST be removed before
+any deploy.
+
+### Disc calibration — rt_enum_discriminant returns variant-NAME-HASH tags
+`[FBC] call=823890719 nil=3558872348 int=1201078288` (freshly constructed
+ExprKind values). These are NOT garbage: 3558872348 is exactly the tag the
+interpreter reads off a genuine HirExprKind.NilLit. Tags are name hashes shared
+ACROSS enums (ExprKind.NilLit and HirExprKind.NilLit have the SAME tag). All
+prior "garbage disc" readings (823890719 = "Call") were VALID values.
+
+### DECISIVE: bare NO-PAYLOAD patterns compile as IRREFUTABLE BINDINGS
+With a valid Call value (tag 823890719) reaching lower_hir_expr's big match,
+`[LHE-ARM] NilLit` fired: the bare `case NilLit:` arm (variant name exists in
+BOTH ExprKind and HirExprKind) swallowed the Call — every expression lowered to
+HirExprKind.NilLit → whole programs ran as silent no-ops (the exact iteration
+15/16 symptom `[EE] NilLit arm`, rc=0). FIXED by qualifying: `case
+ExprKind.NilLit:` etc. After the fix the pipeline advances past lowering into
+monomorphization.
+
+### Fixes landed (all committed, HEAD lineage vsx/1a7)
+1. driver.spl: unstub branches call uniquely-named `lower_parser_module_unstub`
+   + typed `var lowering: HirLowering` locals (defensive; dispatch was later
+   proven fine, harmless to keep).
+2. _Items/module_lowering.spl: removed rt_file_append probe (Trap A); added
+   `lower_parser_module_unstub` wrapper + ungated [LM] probe.
+3. expressions.spl: qualified ALL arms of lower_hir_expr's big match
+   (`case ExprKind.*`) and the gpu-lane helpers; direct typed `val
+   expr_kind_value: ExprKind = e.kind` instead of `match e: case Expr(k, _)`.
+4. statements.spl: direct typed `val stmt_kind_value: StmtKind = s.kind`; typed
+   payload rebind + [LST]/[LSTP] probes (rt_enum_payload agrees with pattern
+   extraction — both return the same valid value).
+5. interpreter.spl: qualified eval_expr arms (HirExprKind.*), exec_stmt
+   HirStmtKind.Assign + nested HirExprKind.Var.
+6. 40.mono/monomorphize_integration.spl: qualified scan_expr arms
+   (HirExprKind.*) + check_generic_call Var.
+7. convert_nodes.spl: [FBC]/[FBS] construction-time disc probes (ungated).
+
+### REMAINING BLOCKER (rc=139): print(1+1) is misrouted into HostGpuLane; mono scan SEGVs on its garbage body
+Trail: `[LHE] kind_disc=823890719 (Call)` → 2nd `[LHE0]` with disc=2489634455
+(believed "Binary", i.e. the 1+1 arg) WITHOUT `[LHE-ARM] Call` ever printing →
+lowering completes (funcs=1) → SIGSEGV in MonomorphizationPass.scan_block ←
+scan_expr ← scan_stmt (gdb, stage4_it17o). Reading: the big match's Call arm
+never runs because `try_lower_host_gpu_lane_expr` INTERCEPTS the Call first:
+its qualified patterns now match, but the EXTRACTED payloads (callee/args) are
+garbage on stage4 — `name == "host"` passes on a garbage text, `args.len()`
+reads 2, the Lambda arm matches garbage, and it returns
+Some(HostGpuLane(..., body=garbage HirBlock)). The mono scan then walks that
+garbage block → SEGV. KEY INSIGHT for iteration 18: **qualified pattern
+payload EXTRACTION from a matched ExprKind is still garbage in expressions.spl**
+(while the same extraction works in interpreter.spl on HirExprKind). Next
+steps, cheapest first:
+  a. Typed-rebind the extracted payloads in try_lower_host_gpu_lane_expr
+     (`val callee_t: Expr = callee`) before `.kind` reads — the .kind read on
+     the extracted (ANY-ish) Expr is likely the most-fields-wins misread, NOT
+     the extraction itself (LST/LSTP showed extraction returns the right box).
+  b. If (a) fails: make try_lower_host_gpu_lane_expr bail early unless the
+     module actually contains host/gpu lane syntax (text scan), or gate it off
+     for the -c/unstub path; it is an optional fast-path.
+  c. Then expect the SAME extraction hazard inside the big match's Call arm
+     ([LHE-ARM] Call will print, then callee/args handling must be typed-rebound).
+  d. eval_expr side is already qualified; verify with the [EE] trail once
+     lowering emits a real HirExprKind.Call.
+Binaries: scratchpad/stage4_it17{,b..o}; build cmd unchanged (NEVER omit
+--target). PROBE CLEANUP (ungated eprints listed above + [FBC]/[FBS]/[LM]/
+[LBU]/[LHE*]/[LST*]) is a DEPLOY PRECONDITION.
