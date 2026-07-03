@@ -87,6 +87,18 @@ theorem acquire_success_requires_empty (s s' : ResourceState) (l : Lane) :
   | some owner =>
       simp [acquire, howner] at h
 
+theorem acquire_success_deterministic (s s1 s2 : ResourceState) (l : Lane) :
+    acquire s l = some s1 → acquire s l = some s2 → s1 = s2 := by
+  intro h1 h2
+  cases howner : s.owner with
+  | none =>
+      simp [acquire, howner] at h1 h2
+      cases h1
+      cases h2
+      rfl
+  | some owner =>
+      simp [acquire, howner] at h1
+
 theorem acquire_empty_succeeds (l : Lane) :
     acquire { owner := none } l = some { owner := some l } := by
   cases l <;> simp [acquire]
