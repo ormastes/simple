@@ -243,4 +243,24 @@ theorem empty_env_wellformed :
   intro loc refs h
   cases h
 
+theorem singleton_env_wellformed (baseType : String) (loc : Nat) (cap : RefCapability) :
+  wellFormed
+    { activeRefs :=
+        [(loc,
+          [{ location := loc,
+             refType := { baseType := baseType, capability := cap } }])] } := by
+  intro foundLoc refs h
+  simp at h
+  rcases h with ⟨_, hrefs⟩
+  subst refs
+  constructor
+  · unfold countRefsWithCapability
+    exact List.length_filter_le
+      (fun r : Reference => r.refType.capability == RefCapability.Exclusive)
+      ([{ location := loc, refType := { baseType := baseType, capability := cap } }] : List Reference)
+  · unfold countRefsWithCapability
+    exact List.length_filter_le
+      (fun r : Reference => r.refType.capability == RefCapability.Isolated)
+      ([{ location := loc, refType := { baseType := baseType, capability := cap } }] : List Reference)
+
 end MemoryCapabilities
