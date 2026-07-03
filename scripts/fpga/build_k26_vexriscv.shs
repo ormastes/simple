@@ -25,8 +25,13 @@ mkdir -p "$BUILD_DIR"
 echo "Generating RV64 VHDL and Vivado TCL project..."
 bash scripts/fpga/generate_rv64_vhdl.shs
 if [ "${ALLOW_PLACEHOLDER_RTL:-0}" != "1" ] &&
-    grep -Eq 'Stub: behavioral model placeholder|architecture rtl of rv64gc_core is[[:space:]]*$' "$RTL_DIR/rv64gc_core.vhd"; then
+    grep -Eiq 'stub|placeholder' "$RTL_DIR/rv64gc_core.vhd"; then
     echo "ERROR: $RTL_DIR/rv64gc_core.vhd is placeholder RTL; refusing to build a non-executable K26 bitstream." >&2
+    echo "Set ALLOW_PLACEHOLDER_RTL=1 only for Vivado plumbing diagnostics." >&2
+    exit 2
+fi
+if [ "${ALLOW_PLACEHOLDER_RTL:-0}" != "1" ] && ! grep -q '<=' "$RTL_DIR/rv64gc_core.vhd"; then
+    echo "ERROR: $RTL_DIR/rv64gc_core.vhd has no signal assignments; refusing to build a non-executable K26 bitstream." >&2
     echo "Set ALLOW_PLACEHOLDER_RTL=1 only for Vivado plumbing diagnostics." >&2
     exit 2
 fi
@@ -74,6 +79,20 @@ fi
 if [ "$vivado_rc" -ne 0 ]; then
     echo "ERROR: Vivado failed (exit $vivado_rc); see $BUILD_DIR/vivado.log"
     exit "$vivado_rc"
+fi
+
+UTIL_REPORT="$BUILD_DIR/k26_vexriscv/k26_vexriscv.runs/synth_1/soc_top_rv64_utilization_synth.rpt"
+if [ -f "$UTIL_REPORT" ] &&
+    grep -Eq '^\| CLB LUTs\*?[[:space:]]+\|[[:space:]]+0[[:space:]]+\|' "$UTIL_REPORT" &&
+    grep -Eq '^\|[[:space:]]+RAMB36/FIFO\*[[:space:]]+\|[[:space:]]+0[[:space:]]+\|' "$UTIL_REPORT" &&
+    grep -Eq '^\|[[:space:]]+RAMB18[[:space:]]+\|[[:space:]]+0[[:space:]]+\|' "$UTIL_REPORT"; then
+    echo "ERROR: Vivado synthesized no CPU/RAM logic; only trivial IO remains. See $UTIL_REPORT" >&2
+    exit 3
+fi
+
+if [ -n "$SYNTH_ONLY" ]; then
+    echo "SUCCESS: Synthesis checkpoint at $BUILD_DIR/k26_vexriscv/k26_vexriscv.runs/synth_1/soc_top_rv64.dcp"
+    exit 0
 fi
 
 if [ -f "$BUILD_DIR/k26_vexriscv.bit" ]; then

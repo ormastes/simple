@@ -31,6 +31,7 @@ N/A for this slice: this turn only fixes existing smoke wrappers and records blo
   - INFO: `build/fpga/k26/load_elf_k26.log` still records XSDB `dow` failure with `Invalid context`, but XSDB download is no longer the only load context.
 - `SIMPLE_BINARY=bin/release/simple bash scripts/fpga/build_k26_vexriscv.shs`:
   - NOW FAIL-FAST: the wrapper regenerates `build/vhdl/rv64/rv64gc_core.vhd`, detects placeholder RTL, and exits before Vivado unless `ALLOW_PLACEHOLDER_RTL=1` is set for plumbing diagnostics.
+  - CURRENT SYNTH-ONLY FAIL: after the stale placeholder regex was fixed, Vivado synthesis completes but the wrapper exits with `rv64_fpga_synth_reason=vivado-optimized-away-cpu-ram` because the utilization report has 0 LUTs and 0 BRAMs; only trivial IO remains.
   - PRIOR PASS: with placeholder RTL allowed, Vivado synthesis, implementation, DRC, and bitgen completed and copied `build/fpga/k26/k26_vexriscv.bit` plus `build/build/xilinx_kv260/gateware/xilinx_kv260.bit`.
 - `SIMPLE_BINARY=bin/release/simple CAPTURE_SECONDS=5 LINUX_TIMEOUT=10 sh scripts/fpga/check_kv260_simple_rv64_linux.shs`:
   - PASS: RV64 bitstream and ELF artifacts present, ELF header is ELF64 RISC-V, KV260 bitstream loads, merged USB PS UART responds, and generated RV64 Linux handoff passes.
@@ -79,3 +80,4 @@ dev-in-progress
 - dev: Replaced the RV64 constant-zero VHDL core stub with a minimal stateful Wishbone fetch core and fixed the RV64 preflight to reject only placeholder/no-assignment cores; RV64 still lacks ELF load/run evidence.
 - dev: Made the generated RV64 RAM acknowledge/read/write and the generated RV64 Wishbone interconnect decode bootrom/CLINT/PLIC/UART/RAM; GHDL analysis accepts the generated core/RAM/interconnect, but RV64 still lacks payload preload/debug load and UART run evidence.
 - dev: Added RV64 RTL preload generation from `build/rv64_bringup_check/hello_litex_rv64.bin` into `build/vhdl/rv64/rv64_payload.mem`, wired generated RAM to initialize from it, and made preflight accept that as load-context evidence while keeping UART/run proof open.
+- dev: Fixed the K26 wrapper's stale placeholder regex and added a Vivado utilization gate; current synth-only evidence now fails closed because CPU/RAM logic is optimized away.

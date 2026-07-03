@@ -27,8 +27,9 @@ either RV32 or RV64.
 
 `SIMPLE_BINARY=bin/release/simple bash scripts/fpga/build_k26_vexriscv.shs --synth-only`
 
-- FAIL-FAST: regenerates `build/vhdl/rv64/rv64gc_core.vhd`, detects placeholder RTL, and exits before Vivado with `refusing to build a non-executable K26 bitstream`.
-- INFO: set `ALLOW_PLACEHOLDER_RTL=1` only for Vivado plumbing diagnostics.
+- FAIL-FAST: regenerates `build/vhdl/rv64/rv64gc_core.vhd`, runs Vivado synthesis, then rejects the result because the utilization report has 0 LUTs and 0 BRAMs.
+- FAIL reason: `rv64_fpga_synth_reason=vivado-optimized-away-cpu-ram`; the current top leaves only trivial IO and cannot prove SimpleOS execution.
+- INFO: `ALLOW_PLACEHOLDER_RTL=1` remains only for plumbing diagnostics.
 
 Prior diagnostic run with placeholder RTL allowed:
 
@@ -55,6 +56,7 @@ Prior diagnostic run with placeholder RTL allowed:
 
 - PASS: RV64 ELF, raw bin, and bitstream artifacts exist.
 - PASS: `rv64_fpga_core_executable` after RV64 VHDL generation emits a stateful fetch core.
+- FAIL: `rv64_fpga_synth_logic` because Vivado optimizes away CPU/RAM logic.
 - PASS: `rv64_fpga_elf_load_context` via RTL preload (`build/vhdl/rv64/rv64_payload.mem` referenced by `ram.vhd`); stale XSDB `dow` remains invalid and is recorded separately.
 - PASS: RV32 ELF and raw bin artifacts exist after the LLVM-driver build.
 - PASS: RV32 VHDL template generation writes `build/vhdl/rv32/rv32i_pkg.vhd`, `rv32i_decode.vhd`, and `rv32i_regfile.vhd`.
@@ -149,17 +151,19 @@ artifacts.
 The K26 Vivado wrapper now uses the release Simple binary fallback, regenerates
 the RV64 VHDL/TCL every run, emits a K26 UART XDC constraint, preserves Vivado
 failure status despite tailing logs, and refuses to run Vivado on placeholder
-core RTL unless `ALLOW_PLACEHOLDER_RTL=1` is set for plumbing diagnostics. The
-K26 ELF loader now defaults to the current RV64 FPGA ELF and keeps an XSDB
-failure log at `build/fpga/k26/load_elf_k26.log`.
+core RTL unless `ALLOW_PLACEHOLDER_RTL=1` is set for plumbing diagnostics. It
+also fails closed when Vivado synthesis reports 0 LUTs and 0 BRAMs, which is the
+current state. The K26 ELF loader now defaults to the current RV64 FPGA ELF and
+keeps an XSDB failure log at `build/fpga/k26/load_elf_k26.log`.
 
 ## Remaining Production Blockers
 
 1. Install or provide `yosys` if synthesis/formal checks are part of the local
    production gate.
-2. Capture RV64 PL UART boot markers from the preloaded payload; stale XSDB `dow` still fails with `Invalid context`, but the active generated load context is now RTL preload.
-3. Route/observe RV64 PL UART on PMOD H12/E10 or another serial channel.
-4. Produce an RV32 FPGA bitstream with executable-core evidence and prove RV32 SimpleOS payload execution.
+2. Keep RV64 CPU/RAM logic alive through Vivado synthesis; current utilization is 0 LUTs and 0 BRAMs.
+3. Capture RV64 PL UART boot markers from the preloaded payload; stale XSDB `dow` still fails with `Invalid context`, but the active generated load context is now RTL preload.
+4. Route/observe RV64 PL UART on PMOD H12/E10 or another serial channel.
+5. Produce an RV32 FPGA bitstream with executable-core evidence and prove RV32 SimpleOS payload execution.
 
 ## Next Small Step
 
