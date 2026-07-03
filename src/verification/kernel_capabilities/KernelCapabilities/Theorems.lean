@@ -414,6 +414,19 @@ theorem sanitize_init_caps_non_trusted_full_denies_all
   simp [CapState.check, CapState.findRecord, sanitizeInitCaps, CapSet.full,
     CapSet.empty, hne]
 
+/-- A sanitized non-trusted ambient full set is also denied at the syscall
+    authorization gate. -/
+theorem sanitize_init_caps_non_trusted_full_syscall_denies_all
+    (trusted pid : Principal) (kind : CapKind)
+    (hne : pid ≠ trusted) :
+    syscallAuthorize
+      ({ records := [{ pid := pid, caps := sanitizeInitCaps trusted pid CapSet.full }]
+       , nextGeneration := 1
+       , nextTokenId := 1 } : CapState)
+      pid kind = false := by
+  simp [syscallAuthorize, CapState.check, CapState.findRecord, sanitizeInitCaps,
+    CapSet.full, CapSet.empty, hne]
+
 /-- Trusted init/kernel may retain the ambient full-set shape through init. -/
 theorem sanitize_init_caps_trusted_full_stays_full
     (trusted : Principal) :
