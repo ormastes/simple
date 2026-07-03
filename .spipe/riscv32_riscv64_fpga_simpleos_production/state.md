@@ -73,3 +73,4 @@ dev-in-progress
 - dev: Added fail-closed RV32 core/load-context gates so future RV32 bitstreams also need executable-core and payload-load evidence.
 - dev: Made the K26 RV64 bitstream wrapper fail fast on placeholder core RTL so stale/generated bitstreams cannot be refreshed as production evidence.
 - dev: Added RV32 VHDL template generation for package, decoder/ALU-control, and register-file modules using the existing compiler VHDL backend templates.
+- dev: Fixed RV32I LSU helper visibility/imports; direct `compile --backend=vhdl src/lib/hardware/rv32i_rtl/core.spl` now reaches the VHDL eligibility gate and fails because the behavioral core has no `@hardware` boundary.

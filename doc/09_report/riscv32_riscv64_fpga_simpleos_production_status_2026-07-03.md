@@ -114,6 +114,12 @@ RV64 preflight plus RV32 FPGA artifacts, VHDL template generation,
 executable-core evidence, and load/run evidence, so production status cannot
 ignore the 32-bit lane.
 
+RV32I RTL helper visibility is fixed for the existing `rv32i_rtl` core path:
+`src/lib/hardware/rv32i_rtl/lsu.spl` exports the LSU helpers and
+`core.spl` uses the same brace import form as the rest of the lane. Direct VHDL
+compile now reaches the real remaining blocker: the behavioral core has no
+`@hardware` boundary for `compile --backend=vhdl`.
+
 `simple os build --scenario=riscv64-fpga-mmode` and
 `simple os build --scenario=riscv32-fpga-mmode` are now registered. The RV64
 FPGA lane builds with the local Cranelift-capable release compiler and emits
