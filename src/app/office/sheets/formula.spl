@@ -610,6 +610,32 @@ fn _sorted_asc(values: [f64]) -> [f64]:
         out = result
     out
 
+fn _mean(values: [f64]) -> f64:
+    var sum = 0.0
+    for v in values:
+        sum = sum + v
+    sum / values.len().to_f64()
+
+fn _pop_variance(values: [f64]) -> f64:
+    """Population variance (n denominator)."""
+    val m = _mean(values)
+    var sq = 0.0
+    for v in values:
+        val d = v - m
+        sq = sq + d * d
+    sq / values.len().to_f64()
+
+fn _covariance(ys: [f64], xs: [f64]) -> f64:
+    """Population covariance of two equal-length series."""
+    val my = _mean(ys)
+    val mx = _mean(xs)
+    var sum = 0.0
+    var i = 0
+    while i < ys.len():
+        sum = sum + (ys[i] - my) * (xs[i] - mx)
+        i = i + 1
+    sum / ys.len().to_f64()
+
 fn _sample_variance(values: [f64]) -> f64:
     """Sample variance (n-1 denominator), matching Excel VAR/STDEV."""
     val n = values.len()
@@ -821,6 +847,156 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                 val d = v - mean
                 dev_sum = dev_sum + (if d < 0.0: 0.0 - d else: d)
             return CellValue.NumberVal(value: dev_sum / flat.len().to_f64())
+        "ATAN2":
+            if args.len() >= 2:
+                val yy = _first_val(args[0])
+                val xx = _first_val(args[1])
+                if xx > 0.0:
+                    return CellValue.NumberVal(value: _atan_f64(yy / xx))
+                if xx < 0.0 and yy >= 0.0:
+                    return CellValue.NumberVal(value: _atan_f64(yy / xx) + _PI)
+                if xx < 0.0:
+                    return CellValue.NumberVal(value: _atan_f64(yy / xx) - _PI)
+                if yy > 0.0:
+                    return CellValue.NumberVal(value: _PI / 2.0)
+                if yy < 0.0:
+                    return CellValue.NumberVal(value: 0.0 - _PI / 2.0)
+                return CellValue.ErrorVal(message: "ATAN2(0,0) undefined")
+            return CellValue.ErrorVal(message: "ATAN2 requires 2 arguments")
+        "ACOSH":
+            if flat.len() > 0 and flat[0] >= 1.0:
+                val v = flat[0]
+                return CellValue.NumberVal(value: _ln_f64(v + _sqrt_f64(v * v - 1.0)))
+            return CellValue.ErrorVal(message: "ACOSH requires x >= 1")
+        "ASINH":
+            if flat.len() > 0:
+                val v = flat[0]
+                return CellValue.NumberVal(value: _ln_f64(v + _sqrt_f64(v * v + 1.0)))
+            return CellValue.ErrorVal(message: "ASINH requires 1 argument")
+        "ATANH":
+            if flat.len() > 0 and flat[0] > -1.0 and flat[0] < 1.0:
+                return CellValue.NumberVal(value: 0.5 * _ln_f64((1.0 + flat[0]) / (1.0 - flat[0])))
+            return CellValue.ErrorVal(message: "ATANH requires -1 < x < 1")
+        "COT":
+            if flat.len() > 0:
+                val sv = _sin_f64(flat[0])
+                if sv == 0.0:
+                    return CellValue.ErrorVal(message: "COT undefined")
+                return CellValue.NumberVal(value: _cos_f64(flat[0]) / sv)
+            return CellValue.ErrorVal(message: "COT requires 1 argument")
+        "SEC":
+            if flat.len() > 0:
+                val cv2 = _cos_f64(flat[0])
+                if cv2 == 0.0:
+                    return CellValue.ErrorVal(message: "SEC undefined")
+                return CellValue.NumberVal(value: 1.0 / cv2)
+            return CellValue.ErrorVal(message: "SEC requires 1 argument")
+        "CSC":
+            if flat.len() > 0:
+                val sv2 = _sin_f64(flat[0])
+                if sv2 == 0.0:
+                    return CellValue.ErrorVal(message: "CSC undefined")
+                return CellValue.NumberVal(value: 1.0 / sv2)
+            return CellValue.ErrorVal(message: "CSC requires 1 argument")
+        "VARP":
+            if flat.len() == 0:
+                return CellValue.ErrorVal(message: "VARP requires arguments")
+            return CellValue.NumberVal(value: _pop_variance(flat))
+        "STDEVP":
+            if flat.len() == 0:
+                return CellValue.ErrorVal(message: "STDEVP requires arguments")
+            return CellValue.NumberVal(value: _sqrt_f64(_pop_variance(flat)))
+        "DEVSQ":
+            if flat.len() == 0:
+                return CellValue.ErrorVal(message: "DEVSQ requires arguments")
+            return CellValue.NumberVal(value: _pop_variance(flat) * flat.len().to_f64())
+        "CORREL":
+            if args.len() >= 2 and args[0].len() == args[1].len() and args[0].len() > 1:
+                val denom = _sqrt_f64(_pop_variance(args[0]) * _pop_variance(args[1]))
+                if denom == 0.0:
+                    return CellValue.ErrorVal(message: "CORREL zero variance")
+                return CellValue.NumberVal(value: _covariance(args[0], args[1]) / denom)
+            return CellValue.ErrorVal(message: "CORREL requires 2 equal ranges")
+        "COVAR":
+            if args.len() >= 2 and args[0].len() == args[1].len() and args[0].len() > 0:
+                return CellValue.NumberVal(value: _covariance(args[0], args[1]))
+            return CellValue.ErrorVal(message: "COVAR requires 2 equal ranges")
+        "SLOPE":
+            if args.len() >= 2 and args[0].len() == args[1].len() and args[0].len() > 1:
+                val vx = _pop_variance(args[1])
+                if vx == 0.0:
+                    return CellValue.ErrorVal(message: "SLOPE zero x variance")
+                return CellValue.NumberVal(value: _covariance(args[0], args[1]) / vx)
+            return CellValue.ErrorVal(message: "SLOPE requires y then x ranges")
+        "INTERCEPT":
+            if args.len() >= 2 and args[0].len() == args[1].len() and args[0].len() > 1:
+                val vx2 = _pop_variance(args[1])
+                if vx2 == 0.0:
+                    return CellValue.ErrorVal(message: "INTERCEPT zero x variance")
+                val slope = _covariance(args[0], args[1]) / vx2
+                return CellValue.NumberVal(value: _mean(args[0]) - slope * _mean(args[1]))
+            return CellValue.ErrorVal(message: "INTERCEPT requires y then x ranges")
+        "RSQ":
+            if args.len() >= 2 and args[0].len() == args[1].len() and args[0].len() > 1:
+                val d = _pop_variance(args[0]) * _pop_variance(args[1])
+                if d == 0.0:
+                    return CellValue.ErrorVal(message: "RSQ zero variance")
+                val c = _covariance(args[0], args[1])
+                return CellValue.NumberVal(value: c * c / d)
+            return CellValue.ErrorVal(message: "RSQ requires 2 equal ranges")
+        "PMT":
+            if args.len() >= 3:
+                val rate = _first_val(args[0])
+                val nper = _first_val(args[1])
+                val pv = _first_val(args[2])
+                if nper == 0.0:
+                    return CellValue.ErrorVal(message: "PMT nper is zero")
+                if rate == 0.0:
+                    return CellValue.NumberVal(value: 0.0 - pv / nper)
+                val g = _pow_f64(1.0 + rate, nper)
+                return CellValue.NumberVal(value: 0.0 - pv * rate * g / (g - 1.0))
+            return CellValue.ErrorVal(message: "PMT requires rate, nper, pv")
+        "FV":
+            if args.len() >= 3:
+                val rate = _first_val(args[0])
+                val nper = _first_val(args[1])
+                val pmt = _first_val(args[2])
+                if rate == 0.0:
+                    return CellValue.NumberVal(value: 0.0 - pmt * nper)
+                return CellValue.NumberVal(value: 0.0 - pmt * (_pow_f64(1.0 + rate, nper) - 1.0) / rate)
+            return CellValue.ErrorVal(message: "FV requires rate, nper, pmt")
+        "PV":
+            if args.len() >= 3:
+                val rate = _first_val(args[0])
+                val nper = _first_val(args[1])
+                val pmt = _first_val(args[2])
+                if rate == 0.0:
+                    return CellValue.NumberVal(value: 0.0 - pmt * nper)
+                return CellValue.NumberVal(value: 0.0 - pmt * (1.0 - _pow_f64(1.0 + rate, 0.0 - nper)) / rate)
+            return CellValue.ErrorVal(message: "PV requires rate, nper, pmt")
+        "NPV":
+            if args.len() >= 2:
+                val rate = _first_val(args[0])
+                val flows = _flatten_args(args[1:])
+                var npv = 0.0
+                var period = 1
+                for cash in flows:
+                    npv = npv + cash / _pow_f64(1.0 + rate, period.to_f64())
+                    period = period + 1
+                return CellValue.NumberVal(value: npv)
+            return CellValue.ErrorVal(message: "NPV requires rate and flows")
+        "NPER":
+            if args.len() >= 3:
+                val rate = _first_val(args[0])
+                val pmt = _first_val(args[1])
+                val pv = _first_val(args[2])
+                if rate <= 0.0 or pmt == 0.0:
+                    return CellValue.ErrorVal(message: "NPER domain error")
+                val ratio = pmt / (pmt + pv * rate)
+                if ratio <= 0.0:
+                    return CellValue.ErrorVal(message: "NPER domain error")
+                return CellValue.NumberVal(value: _ln_f64(ratio) / _ln_f64(1.0 + rate))
+            return CellValue.ErrorVal(message: "NPER requires rate, pmt, pv")
         "TRUE":
             return CellValue.BoolVal(value: true)
         "FALSE":
