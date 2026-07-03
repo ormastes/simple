@@ -1,0 +1,54 @@
+"""Office macro API spec.
+
+Simple is the suite's macro language: a macro is a plain Simple script that
+drives documents, sheets, and decks through `app.office.office_api`. This spec
+exercises the object model in memory — the same calls a user macro makes.
+"""
+
+use std.spec
+use app.office.office_api.{macro_new_document, macro_add_heading, macro_add_paragraph, macro_add_bullet, macro_new_sheet, macro_set_cell, macro_get_cell, macro_recalc, macro_add_slide}
+use app.office.file_formats.{document_to_markdown}
+use app.office.slides.deck_format.{deck_to_text}
+use app.office.slides.slide.{Slide}
+
+describe "macro API: Writer documents":
+    """Macros build documents block by block and serialize to markdown."""
+
+    it "builds a document with headings, paragraphs and bullets":
+        var doc = macro_new_document("Report")
+        doc = macro_add_heading(doc, 1, "Quarterly Report")
+        doc = macro_add_paragraph(doc, "Revenue grew **12%** this quarter.")
+        doc = macro_add_bullet(doc, "Ship v2")
+        val md = document_to_markdown(doc)
+        expect(md).to_contain("# Quarterly Report")
+        expect(md).to_contain("**12%**")
+        expect(md).to_contain("- Ship v2")
+
+describe "macro API: Calc sheets":
+    """Macros set cells, evaluate formulas, and read computed values."""
+
+    it "sets cells and computes a SUM formula":
+        var sh = macro_new_sheet("m")
+        sh = macro_set_cell(sh, "A1", "10")
+        sh = macro_set_cell(sh, "A2", "32")
+        sh = macro_set_cell(sh, "A3", "=SUM(A1:A2)")
+        sh = macro_recalc(sh)
+        expect(macro_get_cell(sh, "A3")).to_equal("42")
+
+    it "reads plain values back":
+        var sh = macro_new_sheet("m")
+        sh = macro_set_cell(sh, "B2", "hello")
+        expect(macro_get_cell(sh, "B2")).to_equal("hello")
+
+describe "macro API: Impress decks":
+    """Macros append slides and serialize to the deck format."""
+
+    it "builds a two-slide deck":
+        var deck: [Slide] = []
+        deck = macro_add_slide(deck, "Intro", "Welcome")
+        deck = macro_add_slide(deck, "Roadmap", "")
+        expect(deck.len()).to_equal(2)
+        val txt = deck_to_text(deck)
+        expect(txt).to_contain("Intro")
+        expect(txt).to_contain("---")
+        expect(txt).to_contain("Roadmap")
