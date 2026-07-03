@@ -13,6 +13,12 @@
 #   gen tilemap --seed N --w W --h H --out <map.sdn>
 #       Seeded cellular-automata cave (4-5 rule) -> `[[i32]]` grid, emitted
 #       as `tilemap: { cols, rows, cells }` SDN (see cave_ca.spl).
+#   gen wfc --seed N --w W --h H [--tileset file.sdn] --out <map.sdn>
+#       Seeded tiled-model Wave Function Collapse -> `[[i32]]` grid of tile
+#       ids, emitted as the SAME `tilemap: { cols, rows, cells }` SDN shape
+#       (loadable identically). Defaults to a built-in grass/water/coast
+#       demo tileset; `--tileset` overrides with an SDN adjacency-rule file
+#       (see wfc.spl).
 #
 # Scene format: SDN (the project data format — see test/fixtures/model3d/).
 #   scene:
@@ -35,6 +41,7 @@ use std.sdn.{SdnValue, parse}
 use std.common.color.convert.{hex_to_int}
 use std.common.math.noise.{perm_new, fbm2}
 use std.common.cave_ca.{CaveGrid, ca_generate}
+use std.common.wfc.{TileSet, demo_tileset, parse_tileset, wfc_generate}
 use std.gpu.engine3d.engine.{Engine3D}
 use std.gpu.engine3d.types3d.{
     vertex3d_pos_normal, material_unlit,
@@ -443,23 +450,38 @@ fn _gen_heightmap_text(seed: i64, w: i64, d: i64) -> text:
     val eye_z = (d as f64) * 0.8 + 8.0
     "scene:\n  name: \"heightmap_seed{seed}\"\n  background: \"203040\"\n  camera: {{ eye: [0.0, 8.0, {eye_z}], target: [0.0, 0.0, 0.0], fov_deg: 60.0 }}\n  nodes: [{nodes_text}]\n"
 
-fn _gen_tilemap_text(seed: i64, w: i64, h: i64) -> text:
-    val cave = ca_generate(seed, w, h, 0.45, 30)
+# Shared `tilemap: { cols, rows, cells }` SDN serializer — used by both
+# `gen tilemap` (CA cells) and `gen wfc` (WFC-collapsed cells) so the two
+# emit the exact same loadable shape.
+fn _cells_to_tilemap_sdn(cols: i64, rows: i64, cells: [[i32]]) -> text:
     var rows_text = ""
     var y: i64 = 0
-    while y < cave.rows:
+    while y < rows:
         var row_text = ""
         var x: i64 = 0
-        while x < cave.cols:
+        while x < cols:
             if row_text != "":
                 row_text = row_text + ", "
-            row_text = row_text + "{cave.cells[y][x]}"
+            row_text = row_text + "{cells[y][x]}"
             x = x + 1
         if rows_text != "":
             rows_text = rows_text + ", "
         rows_text = rows_text + "[{row_text}]"
         y = y + 1
-    "tilemap:\n  cols: {cave.cols}\n  rows: {cave.rows}\n  cells: [{rows_text}]\n"
+    "tilemap:\n  cols: {cols}\n  rows: {rows}\n  cells: [{rows_text}]\n"
+
+fn _gen_tilemap_text(seed: i64, w: i64, h: i64) -> text:
+    val cave = ca_generate(seed, w, h, 0.45, 30)
+    _cells_to_tilemap_sdn(cave.cols, cave.rows, cave.cells)
+
+fn _gen_wfc_text(seed: i64, w: i64, h: i64, tileset: TileSet) -> Result<text, text>:
+    val r = wfc_generate(tileset, w, h, seed)
+    if val Err(e) = r:
+        return Err(e)
+    var cells: [[i32]] = []
+    if val Ok(c) = r:
+        cells = c
+    Ok(_cells_to_tilemap_sdn(w, h, cells))
 
 fn cmd_gen_heightmap(args: [text]) -> i64:
     var seed_opt: i64? = None
@@ -573,9 +595,85 @@ fn cmd_gen_tilemap(args: [text]) -> i64:
     print "wrote {out_path} ({w}x{h} cells, seed {seed})"
     0
 
+fn cmd_gen_wfc(args: [text]) -> i64:
+    var seed_opt: i64? = None
+    var w: i64 = 0
+    var h: i64 = 0
+    var out_path = ""
+    var tileset_path = ""
+    var i: i64 = 0
+    while i < args.len():
+        val a = args[i]
+        if (a == "--seed" or a == "--w" or a == "--h" or a == "--out" or a == "--tileset"):
+            if i + 1 >= args.len():
+                print "error: {a} requires a value"
+                return 2
+            val v = args[i + 1]
+            if a == "--seed":
+                if val Some(n) = _parse_int(v):
+                    seed_opt = Some(n)
+                else:
+                    print "error: --seed expects a non-negative integer, got \"{v}\""
+                    return 2
+            elif a == "--w":
+                if val Some(n) = _parse_int(v):
+                    w = n
+                else:
+                    print "error: --w expects a positive integer, got \"{v}\""
+                    return 2
+            elif a == "--h":
+                if val Some(n) = _parse_int(v):
+                    h = n
+                else:
+                    print "error: --h expects a positive integer, got \"{v}\""
+                    return 2
+            elif a == "--tileset":
+                tileset_path = v
+            else:
+                out_path = v
+            i = i + 2
+        else:
+            print "error: unknown option {a}"
+            return 2
+    var seed: i64 = 0
+    if val Some(s) = seed_opt:
+        seed = s
+    else:
+        print "error: simple model3d gen wfc --seed N --w W --h H --out <map.sdn> — missing --seed"
+        return 2
+    if (w <= 0 or h <= 0):
+        print "error: --w/--h must be positive integers (got {w}x{h})"
+        return 2
+    if out_path == "":
+        print "error: simple model3d gen wfc --seed N --w W --h H --out <map.sdn> — missing --out"
+        return 2
+    var tileset = demo_tileset()
+    if tileset_path != "":
+        if not file_exists(tileset_path):
+            print "error: tileset file not found: {tileset_path}"
+            return 1
+        val parsed = parse_tileset(file_read(tileset_path))
+        if val Err(e) = parsed:
+            print "error: {tileset_path}: {e}"
+            return 1
+        if val Ok(ts) = parsed:
+            tileset = ts
+    val text_r = _gen_wfc_text(seed, w, h, tileset)
+    if val Err(e) = text_r:
+        print "error: {e}"
+        return 1
+    var map_text = ""
+    if val Ok(t) = text_r:
+        map_text = t
+    if not write_file(out_path, map_text):
+        print "error: failed to write {out_path}"
+        return 1
+    print "wrote {out_path} ({w}x{h} cells, seed {seed})"
+    0
+
 fn cmd_gen(args: [text]) -> i64:
     if args.len() < 1:
-        print "error: simple model3d gen <heightmap|tilemap> [options] — missing gen mode"
+        print "error: simple model3d gen <heightmap|tilemap|wfc> [options] — missing gen mode"
         return 2
     val mode = args[0]
     var rest: [text] = []
@@ -587,7 +685,9 @@ fn cmd_gen(args: [text]) -> i64:
         return cmd_gen_heightmap(rest)
     elif mode == "tilemap":
         return cmd_gen_tilemap(rest)
-    print "error: unknown gen mode: {mode} (supported: heightmap, tilemap)"
+    elif mode == "wfc":
+        return cmd_gen_wfc(rest)
+    print "error: unknown gen mode: {mode} (supported: heightmap, tilemap, wfc)"
     2
 
 fn print_usage():
@@ -600,6 +700,7 @@ fn print_usage():
     print "      [--eye X,Y,Z] [--target X,Y,Z] [--fov DEG]  Override scene camera"
     print "  gen heightmap --seed N --w W --d D --out <scene.sdn>   Seeded fbm2 heightmap -> box-node scene SDN"
     print "  gen tilemap --seed N --w W --h H --out <map.sdn>       Seeded CA cave (4-5 rule) -> [[i32]] tilemap SDN"
+    print "  gen wfc --seed N --w W --h H [--tileset f.sdn] --out <map.sdn>  Seeded WFC -> [[i32]] tilemap SDN"
     print ""
     print "Exit codes: 0 ok, 1 failure, 2 usage error"
 
