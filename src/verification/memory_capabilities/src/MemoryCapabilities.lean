@@ -263,6 +263,17 @@ theorem read_wrong_location_denied
       (MemAccess.Read other) = false := by
   cases cap <;> simp [allowsAccess, hne]
 
+theorem singleton_read_wrong_location_not_safe
+    (baseType : String) (loc other : Nat) (cap : RefCapability)
+    (hne : loc ≠ other) :
+    accessIsSafe
+      { activeRefs :=
+          [(loc,
+            [{ location := loc,
+               refType := { baseType := baseType, capability := cap } }])] }
+      (MemAccess.Read other) = false := by
+  cases cap <;> simp [accessIsSafe, getActiveRefs, allowsAccess, hne]
+
 theorem write_wrong_location_denied
     (baseType : String) (loc other : Nat) (cap : RefCapability)
     (hne : loc ≠ other) :
