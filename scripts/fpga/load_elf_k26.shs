@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+# Load SimpleOS ELF onto K26 FPGA via Vivado XSDB
+# Usage: sh scripts/fpga/load_elf_k26.shs <bitstream.bit> <simpleos.elf>
+#
+# Prerequisites:
+#   - K26 connected via USB (JTAG + UART)
+#   - Vivado 2025.2 installed
+#   - FTDI driver bound to JTAG interface
+
+set -euo pipefail
+
+VIVADO_SETTINGS="${VIVADO_SETTINGS:-$HOME/Xilinx/2025.2/Vivado/settings64.sh}"
+BITSTREAM="${1:-build/fpga/k26/k26_vexriscv.bit}"
+ELF="${2:-build/os/simpleos_riscv64_fpga.elf}"
+UART_DEV="${UART_DEV:-/dev/ttyUSB0}"
+UART_BAUD="${UART_BAUD:-115200}"
+
+if [ ! -f "$VIVADO_SETTINGS" ]; then
+    echo "ERROR: Vivado not found at $VIVADO_SETTINGS"
+    exit 1
+fi
+
+if [ ! -f "$BITSTREAM" ]; then
+    echo "ERROR: Bitstream not found: $BITSTREAM"
+    echo "Run: sh scripts/fpga/build_k26_vexriscv.shs"
+    exit 1
+fi
+
+if [ ! -f "$ELF" ]; then
+    echo "ERROR: ELF not found: $ELF"
+    echo "Build SimpleOS: bin/simple build --target riscv64-fpga"
+    exit 1
+fi
+
+# shellcheck disable=SC1090
+. "$VIVADO_SETTINGS"
+
+echo "=== K26 SimpleOS FPGA Load ==="
+echo "Bitstream: $BITSTREAM"
+echo "ELF:       $ELF"
+echo "UART:      $UART_DEV @ ${UART_BAUD}"
+
+# Generate XSDB script
+XSDB_SCRIPT=$(mktemp /tmp/k26_load_XXXXXX.tcl)
+cat > "$XSDB_SCRIPT" << 'XSDB_EOF'
+# Connect to target
+connect
+after 1000
+
+# Program PL
+puts "Programming PL..."
+targets -set -nocase -filter {name =~ "*PL*"}
+fpga [lindex $argv 0]
+after 2000
+
+# Reset and load ELF to VexRiscv core
+puts "Loading ELF..."
+targets -set -nocase -filter {name =~ "*VexRiscv*" || name =~ "*MicroBlaze*" || name =~ "*APU*"}
+rst
+after 500
+dow [lindex $argv 1]
+after 500
+
+# Set entry point and run
+puts "Starting execution..."
+con
+after 3000
+puts "SimpleOS should be booting — check UART console"
+disconnect
+XSDB_EOF
+
+LOAD_LOG="${LOAD_LOG:-build/fpga/k26/load_elf_k26.log}"
+mkdir -p "$(dirname "$LOAD_LOG")"
+set +e
+xsdb "$XSDB_SCRIPT" "$BITSTREAM" "$ELF" >"$LOAD_LOG" 2>&1
+xsdb_rc=$?
+set -e
+tail -80 "$LOAD_LOG"
+rm -f "$XSDB_SCRIPT"
+
+if [ "$xsdb_rc" -ne 0 ]; then
+    echo "ERROR: XSDB load failed (exit $xsdb_rc); see $LOAD_LOG"
+    exit "$xsdb_rc"
+fi
+
+echo ""
+echo "Monitor UART: screen $UART_DEV $UART_BAUD"
+echo "  or: picocom -b $UART_BAUD $UART_DEV"

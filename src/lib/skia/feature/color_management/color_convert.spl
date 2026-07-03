@@ -1,0 +1,114 @@
+# Color-space bitmap-conversion helpers — mirrors Chromium's SkColorSpaceXformSteps.
+#
+# Provides pixel- and bitmap-level RGB(A) conversion across named color spaces,
+# reusing the transfer-function decoders/encoders and primary matrices defined
+# in tone_map.spl.
+#
+# All floating-point channels are in the closed interval [0.0, 1.0] unless
+# otherwise noted. Alpha is passed through unchanged.
+
+use std.skia.entity.color_space.{
+    SkColorSpace, SkColorSpaceKind, SkTransferFn,
+    srgb
+}
+use std.skia.entity.color.{SkColor4f}
+use std.skia.backend.cpu.raster_prims.{Bitmap}
+use std.skia.feature.color_management.tone_map.{
+    apply_transfer_fn, TransferDirection, rgb_to_rgb
+}
+
+# ============================================================================
+# Private helpers
+# ============================================================================
+
+fn _clamp01(v: f64) -> f64:
+    if v < 0.0:
+        0.0
+    else if v > 1.0:
+        1.0
+    else:
+        v
+
+fn _byte_to_unit(b: u8) -> f64:
+    (b as f64) / 255.0
+
+fn _unit_to_byte(v: f64) -> u8:
+    val clamped = _clamp01(v)
+    val scaled = clamped * 255.0
+    # Round-to-nearest via +0.5 truncation
+    val rounded = scaled + 0.5
+    val ri = rounded as i64
+    if ri < 0:
+        0 as u8
+    else if ri > 255:
+        255 as u8
+    else:
+        ri as u8
+
+# ============================================================================
+# Public conversion API
+# ============================================================================
+
+fn convert_rgba_pixel(r: f64, g: f64, b: f64, a: f64, src: SkColorSpace, dst: SkColorSpace) -> (f64, f64, f64, f64):
+    """Convert a single RGBA pixel from src color space to dst color space.
+
+    Steps mirror SkColorSpaceXformSteps:
+      1. If src.kind == dst.kind, passthrough unchanged.
+      2. Decode src transfer function on each RGB channel (linearize).
+      3. Apply full RGB->RGB primary-matrix conversion via tone_map.rgb_to_rgb.
+      4. Encode dst transfer function on each RGB channel.
+      5. Clamp RGB output to [0,1]. Alpha is preserved as-is.
+    """
+    if src.kind == dst.kind:
+        (r, g, b, a)
+    else:
+        # Wrap in SkColor4f and delegate the full pipeline to rgb_to_rgb,
+        # which already applies decode -> XYZ -> inverse primaries -> encode.
+        val src_color = SkColor4f(r: r, g: g, b: b, a: a)
+        val dst_color = rgb_to_rgb(src_color, src, dst)
+        val r_out = _clamp01(dst_color.r)
+        val g_out = _clamp01(dst_color.g)
+        val b_out = _clamp01(dst_color.b)
+        (r_out, g_out, b_out, a)
+
+fn convert_pixel_to_srgb(r: f64, g: f64, b: f64, a: f64, src: SkColorSpace) -> (f64, f64, f64, f64):
+    """Convenience wrapper: convert a pixel from src to standard sRGB."""
+    val dst = srgb()
+    convert_rgba_pixel(r, g, b, a, src, dst)
+
+fn convert_bitmap(src_bitmap: Bitmap, src_space: SkColorSpace, dst_space: SkColorSpace) -> Bitmap:
+    """Convert a Bitmap's pixel data from src_space to dst_space.
+
+    Returns a freshly allocated Bitmap of the same dimensions. The source
+    bitmap is not modified. Pixel layout is RGBA8888, row-major, matching
+    raster_prims.Bitmap.
+    """
+    val w = src_bitmap.width
+    val h = src_bitmap.height
+    val out = Bitmap.zeros(w, h)
+
+    var y = 0
+    while y < h:
+        var x = 0
+        while x < w:
+            val idx = (y * w + x) * 4
+            val r_in = _byte_to_unit(src_bitmap.pixels[idx])
+            val g_in = _byte_to_unit(src_bitmap.pixels[idx + 1])
+            val b_in = _byte_to_unit(src_bitmap.pixels[idx + 2])
+            val a_in = _byte_to_unit(src_bitmap.pixels[idx + 3])
+
+            val converted = convert_rgba_pixel(r_in, g_in, b_in, a_in, src_space, dst_space)
+            val r_out = converted.0
+            val g_out = converted.1
+            val b_out = converted.2
+            val a_out = converted.3
+
+            out.pixels[idx]     = _unit_to_byte(r_out)
+            out.pixels[idx + 1] = _unit_to_byte(g_out)
+            out.pixels[idx + 2] = _unit_to_byte(b_out)
+            out.pixels[idx + 3] = _unit_to_byte(a_out)
+
+            x = x + 1
+        y = y + 1
+
+    out

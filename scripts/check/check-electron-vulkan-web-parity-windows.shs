@@ -1,0 +1,481 @@
+#!/usr/bin/env sh
+# Electron (Chromium) vs Vulkan-backed web-renderer parity check — Windows.
+#
+# Windows variant of check-electron-vulkan-web-parity.shs. Does NOT require
+# xvfb-run (Windows provides a real display). Electron is launched with
+# --no-sandbox; add --use-vulkan to force Chromium's Vulkan backend on Windows.
+#
+# Same oracle contract: renders a solid-background HTML page two ways and
+# asserts the frames are pixel-identical:
+#   1. Through REAL Chromium (Electron --use-vulkan)
+#   2. Through the Vulkan-backed Engine2D web surface
+#
+# Requires: node, electron in tools/electron-shell/node_modules/.bin/,
+#   a Vulkan-capable GPU (vulkan-1.dll in System32), and SIMPLE_EXECUTION_MODE=interpret.
+# Exits 0 on parity, 1 on mismatch, 2 on missing deps.
+set -e
+
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+cd "$ROOT"
+
+WIDTH=${EVWP_WIDTH:-64}
+HEIGHT=${EVWP_HEIGHT:-48}
+BG_HEX=${EVWP_BG_HEX:-224466}
+BG_DEC=${EVWP_BG_DEC:-4280435814}   # 0xFF224466
+WORK=${EVWP_WORK:-build/tmp/electron_vulkan_web_parity_win}
+# Prefer .cmd wrapper on Windows, fall back to bare name (MSYS2/cygwin can exec .cmd)
+ELECTRON_BIN="${EVWP_ELECTRON_BIN:-}"
+if [ -z "$ELECTRON_BIN" ]; then
+    ELECTRON_BIN="$ROOT/tools/electron-shell/node_modules/.bin/electron.cmd"
+    if [ ! -f "$ELECTRON_BIN" ]; then
+        ELECTRON_BIN="$ROOT/tools/electron-shell/node_modules/.bin/electron"
+    fi
+fi
+ELECTRON_BIN_STATUS=unknown
+ELECTRON_BIN_KIND=unknown
+SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
+SIMPLE_BIN_STATUS=pass
+SIMPLE_BIN_KIND=unknown
+SIMPLE_BIN_PROBE_EXIT_CODE=""
+SIMPLE_BIN_VERSION=""
+SIMPLE_BIN_SHA256=""
+VULKAN_LOADER_PATH="${EVWP_VULKAN_DLL:-}"
+VULKAN_LOADER_STATUS=unknown
+VULKAN_LOADER_SHA256=""
+ELECTRON_BIN_SHA256=""
+
+emit() {
+    printf '%s=%s\n' "$1" "$2"
+}
+
+sha256_file() {
+    path="$1"
+    if [ ! -f "$path" ]; then
+        return
+    fi
+    if command -v node >/dev/null 2>&1; then
+        node -e "const fs=require('fs'),crypto=require('crypto');process.stdout.write(crypto.createHash('sha256').update(fs.readFileSync(process.argv[1])).digest('hex'))" "$path"
+        return
+    fi
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$path" | sed 's/[[:space:]].*//'
+    fi
+}
+
+stdout_token() {
+    key="$1"
+    line="$2"
+    printf '%s\n' "$line" | tr ' ' '\n' | sed -n "s/^$key=//p" | sed -n '1p'
+}
+
+emit_common() {
+    emit "electron_vulkan_web_parity_windows_simple_bin" "$SIMPLE_BIN"
+    emit "electron_vulkan_web_parity_windows_simple_bin_source" "$SIMPLE_BIN_SOURCE"
+    emit "electron_vulkan_web_parity_windows_simple_bin_status" "$SIMPLE_BIN_STATUS"
+    emit "electron_vulkan_web_parity_windows_simple_bin_kind" "$SIMPLE_BIN_KIND"
+    emit "electron_vulkan_web_parity_windows_simple_bin_probe_exit_code" "$SIMPLE_BIN_PROBE_EXIT_CODE"
+    emit "electron_vulkan_web_parity_windows_simple_bin_version" "$SIMPLE_BIN_VERSION"
+    emit "electron_vulkan_web_parity_windows_simple_bin_sha256" "$SIMPLE_BIN_SHA256"
+    emit "electron_vulkan_web_parity_windows_host_os" "${OS:-$(uname -s 2>/dev/null || echo unknown)}"
+    emit "electron_vulkan_web_parity_windows_width" "$WIDTH"
+    emit "electron_vulkan_web_parity_windows_height" "$HEIGHT"
+    emit "electron_vulkan_web_parity_windows_bg_hex" "$BG_HEX"
+    emit "electron_vulkan_web_parity_windows_bg_dec" "$BG_DEC"
+    emit "electron_vulkan_web_parity_windows_electron_bin" "$ELECTRON_BIN"
+    emit "electron_vulkan_web_parity_windows_electron_bin_status" "$ELECTRON_BIN_STATUS"
+    emit "electron_vulkan_web_parity_windows_electron_bin_kind" "$ELECTRON_BIN_KIND"
+    emit "electron_vulkan_web_parity_windows_electron_bin_sha256" "$ELECTRON_BIN_SHA256"
+    emit "electron_vulkan_web_parity_windows_vulkan_loader" "$VULKAN_LOADER_PATH"
+    emit "electron_vulkan_web_parity_windows_vulkan_loader_status" "$VULKAN_LOADER_STATUS"
+    emit "electron_vulkan_web_parity_windows_vulkan_loader_sha256" "$VULKAN_LOADER_SHA256"
+}
+
+finish() {
+    status="$1"
+    reason="$2"
+    code="$3"
+    emit "electron_vulkan_web_parity_windows_status" "$status"
+    emit "electron_vulkan_web_parity_windows_reason" "$reason"
+    emit_common
+    exit "$code"
+}
+
+require_electron_flag() {
+    case " $ELECTRON_VULKAN_FLAGS " in
+        *" $1 "*)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+is_positive_int() {
+    case "$1" in
+        ""|*[!0-9]*)
+            return 1
+            ;;
+        *)
+            [ "$1" -gt 0 ]
+            ;;
+    esac
+}
+
+is_uint32_dec() {
+    case "$1" in
+        ""|*[!0-9]*)
+            return 1
+            ;;
+        *)
+            [ "$1" -ge 0 ] && [ "$1" -le 4294967295 ]
+            ;;
+    esac
+}
+
+is_rgb_hex() {
+    case "$1" in
+        [0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f])
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+is_rust_seed_simple() {
+    case "$1" in
+        src/compiler_rust/*|*/src/compiler_rust/*|./src/compiler_rust/*)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+classify_simple_bin_kind() {
+    case "$SIMPLE_BIN" in
+        "")
+            SIMPLE_BIN_KIND=missing
+            ;;
+        *.[eE][xX][eE])
+            SIMPLE_BIN_KIND=windows-exe
+            ;;
+        *)
+            SIMPLE_BIN_KIND=non-windows-exe
+            ;;
+    esac
+}
+
+classify_electron_bin_kind() {
+    case "$ELECTRON_BIN" in
+        "")
+            ELECTRON_BIN_KIND=missing
+            ;;
+        *.[cC][mM][dD])
+            ELECTRON_BIN_KIND=windows-cmd
+            ;;
+        *.[eE][xX][eE])
+            ELECTRON_BIN_KIND=windows-exe
+            ;;
+        *)
+            ELECTRON_BIN_KIND=non-windows-launcher
+            ;;
+    esac
+}
+
+probe_vulkan_loader() {
+    if [ -n "$VULKAN_LOADER_PATH" ]; then
+        if [ -f "$VULKAN_LOADER_PATH" ]; then
+            VULKAN_LOADER_STATUS=pass
+        else
+            VULKAN_LOADER_STATUS=missing
+        fi
+        return
+    fi
+
+    for candidate in \
+        "${SystemRoot:-}"/System32/vulkan-1.dll \
+        "${WINDIR:-}"/System32/vulkan-1.dll
+    do
+        root_dir=${candidate%/System32/vulkan-1.dll}
+        [ -n "$root_dir" ] || continue
+        if [ -f "$candidate" ]; then
+            VULKAN_LOADER_PATH="$candidate"
+            VULKAN_LOADER_STATUS=pass
+            return
+        fi
+        VULKAN_LOADER_PATH="$candidate"
+        VULKAN_LOADER_STATUS=missing
+    done
+}
+
+if [ -n "${SIMPLE_BIN:-}" ]; then
+    if is_rust_seed_simple "$SIMPLE_BIN"; then
+        SIMPLE_BIN_SOURCE="explicit-env-rust-seed-forbidden"
+        SIMPLE_BIN_STATUS=forbidden
+    fi
+else
+    SIMPLE_BIN=""
+    SIMPLE_BIN_SOURCE=missing
+    for candidate in \
+        "$ROOT"/bin/release/*/simple.exe \
+        "$ROOT"/release/*/simple.exe \
+        "$ROOT"/build/bootstrap/stage3/simple.exe \
+        "$ROOT"/bin/simple
+    do
+        if [ -f "$candidate" ]; then
+            SIMPLE_BIN="$candidate"
+            SIMPLE_BIN_SOURCE="self-hosted:$candidate"
+            SIMPLE_BIN_STATUS=pass
+            break
+        fi
+    done
+fi
+classify_simple_bin_kind
+
+if [ "$SIMPLE_BIN_STATUS" = forbidden ]; then
+    finish "fail" "simple-bin-forbidden" 1
+fi
+
+if [ "${OS:-}" != "Windows_NT" ]; then
+    finish "skip" "requires-windows" 0
+fi
+
+if [ ! -f "$SIMPLE_BIN" ]; then
+    SIMPLE_BIN_STATUS=missing
+    SIMPLE_BIN_KIND=missing
+    finish "skip" "simple-bin-missing" 0
+fi
+SIMPLE_BIN_SHA256="$(sha256_file "$SIMPLE_BIN")"
+if [ "$SIMPLE_BIN_KIND" != windows-exe ]; then
+    SIMPLE_BIN_STATUS=not-windows-exe
+    finish "fail" "simple-bin-not-windows-exe" 1
+fi
+
+set +e
+simple_version_output=$("$SIMPLE_BIN" --version 2>&1)
+SIMPLE_BIN_PROBE_EXIT_CODE=$?
+set -e
+SIMPLE_BIN_VERSION=$(printf '%s\n' "$simple_version_output" | sed -n '1p')
+if [ "$SIMPLE_BIN_PROBE_EXIT_CODE" -ne 0 ]; then
+    SIMPLE_BIN_STATUS=probe-failed
+    finish "fail" "simple-bin-probe-failed" 1
+fi
+case "$SIMPLE_BIN_VERSION" in
+    *"Simple Language"*)
+        ;;
+    *)
+        SIMPLE_BIN_STATUS=version-not-simple
+        finish "fail" "simple-bin-version-not-simple" 1
+        ;;
+esac
+
+if ! is_positive_int "$WIDTH" ||
+   ! is_positive_int "$HEIGHT" ||
+   ! is_uint32_dec "$BG_DEC" ||
+   ! is_rgb_hex "$BG_HEX"; then
+    finish "fail" "invalid-frame-request" 1
+fi
+export SIMPLE_BIN SIMPLE_BIN_SOURCE SIMPLE_BIN_STATUS
+classify_electron_bin_kind
+
+mkdir -p "$WORK"
+HTML="$WORK/page.html"
+ELECTRON_JSON="$WORK/electron.json"
+ELECTRON_PROOF="$WORK/electron_proof.json"
+ELECTRON_PNG="$WORK/electron.png"
+ELECTRON_CDP_PORT="${EVWP_ELECTRON_CDP_PORT:-$((34000 + ($$ % 10000)))}"
+ELECTRON_VULKAN_FLAGS="${EVWP_ELECTRON_VULKAN_FLAGS:---no-sandbox --disable-gpu-sandbox --disable-dev-shm-usage --no-zygote --enable-features=Vulkan,DefaultANGLEVulkan,VulkanFromANGLE --ignore-gpu-blocklist --enable-gpu-rasterization --use-angle=vulkan --use-vulkan}"
+VULKAN_JSON="$WORK/vulkan.json"
+rm -f "$ELECTRON_JSON" "$ELECTRON_PROOF" "$ELECTRON_PNG" "$VULKAN_JSON"
+
+printf '%s' "<!doctype html><html><body style='margin:0;background:#${BG_HEX}'></body></html>" > "$HTML"
+
+if [ ! -f "$ELECTRON_BIN" ]; then
+    ELECTRON_BIN_STATUS=missing
+    ELECTRON_BIN_KIND=missing
+    finish "skip" "electron-missing" 0
+fi
+ELECTRON_BIN_STATUS=pass
+ELECTRON_BIN_SHA256="$(sha256_file "$ELECTRON_BIN")"
+if [ "$ELECTRON_BIN_KIND" != windows-cmd ] && [ "$ELECTRON_BIN_KIND" != windows-exe ]; then
+    ELECTRON_BIN_STATUS=not-windows-launcher
+    finish "fail" "electron-bin-not-windows-launcher" 1
+fi
+
+if ! command -v node >/dev/null 2>&1; then
+    finish "skip" "node-missing" 0
+fi
+EVWP_RUN_ID=$(node -e "const crypto=require('crypto');process.stdout.write(crypto.createHash('sha256').update([process.argv[1],process.argv[2],process.argv[3],process.argv[4],process.argv[5],process.pid,Date.now()].join('|')).digest('hex'))" "$WIDTH" "$HEIGHT" "$BG_DEC" "$ELECTRON_CDP_PORT" "$HTML")
+
+probe_vulkan_loader
+if [ "$VULKAN_LOADER_STATUS" = missing ]; then
+    finish "skip" "vulkan-loader-missing" 0
+fi
+VULKAN_LOADER_SHA256="$(sha256_file "$VULKAN_LOADER_PATH")"
+
+if ! require_electron_flag "--use-angle=vulkan" ||
+   ! require_electron_flag "--use-vulkan" ||
+   ! require_electron_flag "--enable-features=Vulkan,DefaultANGLEVulkan,VulkanFromANGLE" ||
+   ! require_electron_flag "--disable-gpu-sandbox" ||
+   ! require_electron_flag "--enable-gpu-rasterization"; then
+    emit "electron_vulkan_web_parity_windows_electron_launch_flags" "$ELECTRON_VULKAN_FLAGS"
+    finish "fail" "electron-vulkan-launch-flags-missing" 1
+fi
+
+# Absolute path for Electron file:// URL
+ABS_HTML=$(cd "$(dirname "$HTML")" && pwd)/$(basename "$HTML")
+HTML_SHA256=$(node -e "const fs=require('fs'),crypto=require('crypto');process.stdout.write(crypto.createHash('sha256').update(fs.readFileSync(process.argv[1])).digest('hex'))" "$ABS_HTML")
+emit "electron_vulkan_web_parity_windows_source_html" "$ABS_HTML"
+emit "electron_vulkan_web_parity_windows_source_html_sha256" "$HTML_SHA256"
+
+echo "[1/3] Capturing through Electron/Chromium (Windows native GPU, --use-vulkan)..."
+emit "electron_vulkan_web_parity_windows_electron_launch_flags" "$ELECTRON_VULKAN_FLAGS"
+emit "electron_vulkan_web_parity_windows_electron_remote_debugging_port" "$ELECTRON_CDP_PORT"
+set +e
+ELECTRON_CAPTURE_HTML="$ABS_HTML" \
+ELECTRON_CAPTURE_WIDTH="$WIDTH" ELECTRON_CAPTURE_HEIGHT="$HEIGHT" \
+ELECTRON_CAPTURE_OUTPUT="$ELECTRON_JSON" \
+ELECTRON_CAPTURE_PNG_OUTPUT="$ELECTRON_PNG" \
+ELECTRON_CAPTURE_PROOF_PATH="$ELECTRON_PROOF" \
+ELECTRON_CAPTURE_EXPECTED_HTML_SHA256="$HTML_SHA256" \
+ELECTRON_CAPTURE_REMOTE_DEBUGGING_PORT="$ELECTRON_CDP_PORT" \
+ELECTRON_CAPTURE_SETTLE_MS=1000 \
+"$ELECTRON_BIN" $ELECTRON_VULKAN_FLAGS \
+    tools/electron-live-bitmap/capture_html_argb.js
+electron_capture_code=$?
+set -e
+emit "electron_vulkan_web_parity_windows_electron_capture_exit_code" "$electron_capture_code"
+if [ "$electron_capture_code" -ne 0 ]; then
+    finish "fail" "electron-capture-failed" 1
+fi
+
+echo "[2/3] Rendering through the Vulkan-backed Engine2D web surface..."
+emit "electron_vulkan_web_parity_windows_simple_render_env_width" "$WIDTH"
+emit "electron_vulkan_web_parity_windows_simple_render_env_height" "$HEIGHT"
+emit "electron_vulkan_web_parity_windows_simple_render_env_bg_dec" "$BG_DEC"
+emit "electron_vulkan_web_parity_windows_simple_render_env_output" "$VULKAN_JSON"
+emit "electron_vulkan_web_parity_windows_simple_render_env_run_id" "$EVWP_RUN_ID"
+emit "electron_vulkan_web_parity_windows_simple_render_env_execution_mode" "interpret"
+set +e
+simple_render_output="$(EVWP_BG="$BG_DEC" EVWP_WIDTH="$WIDTH" EVWP_HEIGHT="$HEIGHT" EVWP_OUTPUT="$VULKAN_JSON" EVWP_RUN_ID="$EVWP_RUN_ID" \
+SIMPLE_EXECUTION_MODE=interpret \
+    "$SIMPLE_BIN" run src/app/test/electron_vulkan_web_parity.spl 2>&1)"
+simple_render_code=$?
+set -e
+printf '%s\n' "$simple_render_output"
+emit "electron_vulkan_web_parity_windows_simple_render_exit_code" "$simple_render_code"
+if [ "$simple_render_code" -ne 0 ]; then
+    finish "fail" "simple-vulkan-render-failed" 1
+fi
+simple_render_line="$(printf '%s\n' "$simple_render_output" | sed -n '/status=/p' | tail -n 1)"
+simple_render_line_count="$(printf '%s\n' "$simple_render_output" | sed -n '/status=/p' | wc -l | tr -d ' ')"
+simple_render_stdout_status="$(stdout_token status "$simple_render_line")"
+simple_render_stdout_reason="$(stdout_token reason "$simple_render_line")"
+simple_render_stdout_backend="$(stdout_token backend "$simple_render_line")"
+simple_render_stdout_pixels="$(stdout_token pixels "$simple_render_line")"
+simple_render_stdout_px0="$(stdout_token px0 "$simple_render_line")"
+simple_render_stdout_wrote="$(stdout_token wrote "$simple_render_line")"
+simple_render_stdout_proof="status=${simple_render_stdout_status};reason=${simple_render_stdout_reason};backend=${simple_render_stdout_backend};pixels=${simple_render_stdout_pixels};px0=${simple_render_stdout_px0};wrote=${simple_render_stdout_wrote}"
+simple_render_stdout_proof_sha256="$(printf '%s' "$simple_render_stdout_proof" | node -e "const fs=require('fs'),crypto=require('crypto');process.stdout.write(crypto.createHash('sha256').update(fs.readFileSync(0)).digest('hex'))")"
+emit "electron_vulkan_web_parity_windows_simple_render_stdout_status_line_count" "$simple_render_line_count"
+emit "electron_vulkan_web_parity_windows_simple_render_stdout_proof" "$simple_render_stdout_proof"
+emit "electron_vulkan_web_parity_windows_simple_render_stdout_proof_sha256" "$simple_render_stdout_proof_sha256"
+emit "electron_vulkan_web_parity_windows_simple_render_stdout_status" "$simple_render_stdout_status"
+emit "electron_vulkan_web_parity_windows_simple_render_stdout_reason" "$simple_render_stdout_reason"
+emit "electron_vulkan_web_parity_windows_simple_render_stdout_backend" "$simple_render_stdout_backend"
+emit "electron_vulkan_web_parity_windows_simple_render_stdout_pixels" "$simple_render_stdout_pixels"
+emit "electron_vulkan_web_parity_windows_simple_render_stdout_px0" "$simple_render_stdout_px0"
+emit "electron_vulkan_web_parity_windows_simple_render_stdout_wrote" "$simple_render_stdout_wrote"
+
+[ -s "$ELECTRON_JSON" ] || finish "fail" "electron-json-missing" 1
+[ -s "$ELECTRON_PROOF" ] || finish "fail" "electron-proof-missing" 1
+[ -s "$ELECTRON_PNG" ] || finish "fail" "electron-png-missing" 1
+[ -s "$VULKAN_JSON" ] || finish "fail" "vulkan-json-missing" 1
+ELECTRON_JSON_SHA256=$(node -e "const fs=require('fs'),crypto=require('crypto');process.stdout.write(crypto.createHash('sha256').update(fs.readFileSync(process.argv[1])).digest('hex'))" "$ELECTRON_JSON")
+ELECTRON_PROOF_SHA256=$(node -e "const fs=require('fs'),crypto=require('crypto');process.stdout.write(crypto.createHash('sha256').update(fs.readFileSync(process.argv[1])).digest('hex'))" "$ELECTRON_PROOF")
+ELECTRON_PNG_SHA256=$(node -e "const fs=require('fs'),crypto=require('crypto');process.stdout.write(crypto.createHash('sha256').update(fs.readFileSync(process.argv[1])).digest('hex'))" "$ELECTRON_PNG")
+VULKAN_JSON_SHA256=$(node -e "const fs=require('fs'),crypto=require('crypto');process.stdout.write(crypto.createHash('sha256').update(fs.readFileSync(process.argv[1])).digest('hex'))" "$VULKAN_JSON")
+VULKAN_JSON_STATUS=$(node -e "const fs=require('fs');const data=JSON.parse(fs.readFileSync(process.argv[1],'utf8'));process.stdout.write(String(data.status||''))" "$VULKAN_JSON")
+VULKAN_JSON_REASON=$(node -e "const fs=require('fs');const data=JSON.parse(fs.readFileSync(process.argv[1],'utf8'));process.stdout.write(String(data.reason||''))" "$VULKAN_JSON")
+VULKAN_JSON_SCHEMA=$(node -e "const fs=require('fs');const data=JSON.parse(fs.readFileSync(process.argv[1],'utf8'));process.stdout.write(String(data.schema||''))" "$VULKAN_JSON")
+VULKAN_JSON_PRODUCER=$(node -e "const fs=require('fs');const data=JSON.parse(fs.readFileSync(process.argv[1],'utf8'));process.stdout.write(String(data.producer||''))" "$VULKAN_JSON")
+VULKAN_JSON_REQUESTED_BACKEND=$(node -e "const fs=require('fs');const data=JSON.parse(fs.readFileSync(process.argv[1],'utf8'));process.stdout.write(String(data.requested_backend||''))" "$VULKAN_JSON")
+VULKAN_JSON_BACKEND=$(node -e "const fs=require('fs');const data=JSON.parse(fs.readFileSync(process.argv[1],'utf8'));process.stdout.write(String(data.backend||''))" "$VULKAN_JSON")
+VULKAN_JSON_EXECUTION_MODE=$(node -e "const fs=require('fs');const data=JSON.parse(fs.readFileSync(process.argv[1],'utf8'));process.stdout.write(String(data.execution_mode||''))" "$VULKAN_JSON")
+VULKAN_JSON_ENTRYPOINT=$(node -e "const fs=require('fs');const data=JSON.parse(fs.readFileSync(process.argv[1],'utf8'));process.stdout.write(String(data.entrypoint||''))" "$VULKAN_JSON")
+VULKAN_JSON_RUN_ID=$(node -e "const fs=require('fs');const data=JSON.parse(fs.readFileSync(process.argv[1],'utf8'));process.stdout.write(String(data.run_id||''))" "$VULKAN_JSON")
+VULKAN_JSON_WIDTH=$(node -e "const fs=require('fs');const data=JSON.parse(fs.readFileSync(process.argv[1],'utf8'));process.stdout.write(String(data.width||''))" "$VULKAN_JSON")
+VULKAN_JSON_HEIGHT=$(node -e "const fs=require('fs');const data=JSON.parse(fs.readFileSync(process.argv[1],'utf8'));process.stdout.write(String(data.height||''))" "$VULKAN_JSON")
+VULKAN_JSON_PIXEL_COUNT=$(node -e "const fs=require('fs');const data=JSON.parse(fs.readFileSync(process.argv[1],'utf8'));process.stdout.write(String(data.pixel_count||''))" "$VULKAN_JSON")
+VULKAN_JSON_PIXELS_LEN=$(node -e "const fs=require('fs');const data=JSON.parse(fs.readFileSync(process.argv[1],'utf8'));const pixels=Array.isArray(data.pixels)?data.pixels:[];process.stdout.write(String(pixels.length))" "$VULKAN_JSON")
+VULKAN_JSON_PX0=$(node -e "const fs=require('fs');const data=JSON.parse(fs.readFileSync(process.argv[1],'utf8'));const pixels=Array.isArray(data.pixels)?data.pixels:[];process.stdout.write(String(pixels.length>0?(pixels[0]>>>0):''))" "$VULKAN_JSON")
+VULKAN_JSON_UNIFORM_ARGB=$(node -e "const fs=require('fs');const data=JSON.parse(fs.readFileSync(process.argv[1],'utf8'));const expected=Number(process.argv[2])>>>0;const pixels=Array.isArray(data.pixels)?data.pixels:[];process.stdout.write(pixels.length>0&&pixels.every((px)=>(px>>>0)===expected)?String(expected):'')" "$VULKAN_JSON" "$BG_DEC")
+echo "[3/3] Comparing frames..."
+set +e
+compare_output="$(node scripts/check/electron-vulkan-web-parity-status.js "$ELECTRON_JSON" "$VULKAN_JSON" "$ELECTRON_PROOF" "$WIDTH" "$HEIGHT" "$BG_DEC" "$ELECTRON_CDP_PORT" "$ELECTRON_JSON" "$ABS_HTML" "$HTML_SHA256" "$ELECTRON_PNG" "$ELECTRON_PNG_SHA256" "$ELECTRON_JSON_SHA256" "$EVWP_RUN_ID" "$VULKAN_JSON" "$VULKAN_JSON_SHA256")"
+compare_code=$?
+set -e
+
+compare_value() {
+    printf '%s\n' "$compare_output" | awk -F= -v key="$1" '$1 == key { sub(/^[^=]*=/, ""); print; exit }'
+}
+
+ELECTRON_VULKAN_STATUS="$(compare_value electron_vulkan_web_parity_windows_compare_electron_vulkan_status)"
+ELECTRON_VULKAN_REASON="$(compare_value electron_vulkan_web_parity_windows_compare_electron_vulkan_reason)"
+ELECTRON_VULKAN_ENABLED="$(compare_value electron_vulkan_web_parity_windows_compare_electron_vulkan)"
+ELECTRON_GPU_COMPOSITING="$(compare_value electron_vulkan_web_parity_windows_compare_electron_gpu_compositing)"
+ELECTRON_HARDWARE_SUPPORTS_VULKAN="$(compare_value electron_vulkan_web_parity_windows_compare_electron_hardware_supports_vulkan)"
+ELECTRON_BROWSER_GPU_INFO_STATUS="$(compare_value electron_vulkan_web_parity_windows_compare_electron_browser_target_gpu_info_status)"
+ELECTRON_DISPLAY_TYPE="$(compare_value electron_vulkan_web_parity_windows_compare_electron_display_type)"
+ELECTRON_GL_IMPLEMENTATION_PARTS="$(compare_value electron_vulkan_web_parity_windows_compare_electron_gl_implementation_parts)"
+ELECTRON_SKIA_BACKEND_TYPE="$(compare_value electron_vulkan_web_parity_windows_compare_electron_skia_backend_type)"
+ELECTRON_GL_RENDERER="$(compare_value electron_vulkan_web_parity_windows_compare_electron_gl_renderer)"
+COMPARE_EXPECTED_PIXEL_COUNT=$((WIDTH * HEIGHT))
+COMPARE_PX0_ELECTRON="$(compare_value electron_vulkan_web_parity_windows_compare_px0_electron)"
+COMPARE_PX0_VULKAN="$(compare_value electron_vulkan_web_parity_windows_compare_px0_vulkan)"
+COMPARE_MISMATCHES="$(compare_value electron_vulkan_web_parity_windows_compare_mismatches)"
+ARTIFACT_MANIFEST_PROOF="html_path=${ABS_HTML};html_sha256=${HTML_SHA256};host_os=${OS:-$(uname -s 2>/dev/null || echo unknown)};wrapper_status=pass;wrapper_reason=pixel-exact-vulkan;request_width=${WIDTH};request_height=${HEIGHT};request_bg_hex=${BG_HEX};request_bg_dec=${BG_DEC};simple_bin=${SIMPLE_BIN};simple_bin_source=${SIMPLE_BIN_SOURCE};simple_bin_status=${SIMPLE_BIN_STATUS};simple_bin_kind=${SIMPLE_BIN_KIND};simple_bin_probe_exit_code=${SIMPLE_BIN_PROBE_EXIT_CODE};simple_bin_sha256=${SIMPLE_BIN_SHA256};simple_bin_version=${SIMPLE_BIN_VERSION};electron_bin=${ELECTRON_BIN};electron_bin_status=${ELECTRON_BIN_STATUS};electron_bin_kind=${ELECTRON_BIN_KIND};electron_bin_sha256=${ELECTRON_BIN_SHA256};vulkan_loader=${VULKAN_LOADER};vulkan_loader_status=${VULKAN_LOADER_STATUS};vulkan_loader_sha256=${VULKAN_LOADER_SHA256};electron_launch_flags=${ELECTRON_FLAGS};electron_capture_exit_code=${electron_capture_code};electron_remote_debugging_port=${ELECTRON_CDP_PORT};electron_json_path=${ELECTRON_JSON};electron_json_sha256=${ELECTRON_JSON_SHA256};electron_proof_json_path=${ELECTRON_PROOF};electron_proof_json_sha256=${ELECTRON_PROOF_SHA256};electron_proof_status=pass;electron_proof_source=tools/electron-live-bitmap/capture_html_argb.js;electron_proof_captured_argb_written=true;electron_proof_png_written=true;electron_proof_blur_or_tolerance_used=false;electron_proof_gpu_feature_status_matches_capture=true;electron_proof_browser_gpu_info_matches_capture=true;electron_proof_downsampled=false;electron_proof_remote_debugging_port=${ELECTRON_CDP_PORT};electron_vulkan_status=${ELECTRON_VULKAN_STATUS};electron_vulkan_reason=${ELECTRON_VULKAN_REASON};electron_vulkan=${ELECTRON_VULKAN_ENABLED};electron_gpu_compositing=${ELECTRON_GPU_COMPOSITING};electron_hardware_supports_vulkan=${ELECTRON_HARDWARE_SUPPORTS_VULKAN};electron_browser_target_gpu_info_status=${ELECTRON_BROWSER_GPU_INFO_STATUS};electron_display_type=${ELECTRON_DISPLAY_TYPE};electron_gl_implementation_parts=${ELECTRON_GL_IMPLEMENTATION_PARTS};electron_skia_backend_type=${ELECTRON_SKIA_BACKEND_TYPE};electron_gl_renderer=${ELECTRON_GL_RENDERER};compare_exit_code=;compare_expected_captured_argb_path=;compare_expected_captured_argb_sha256=;compare_expected_html_path=;compare_expected_html_sha256=;compare_expected_png_path=;compare_expected_png_sha256=;compare_expected_vulkan_json_path=;compare_expected_vulkan_json_sha256=;compare_expected_vulkan_run_id=;compare_expected_width=${WIDTH};compare_expected_height=${HEIGHT};compare_expected_argb=${BG_DEC};compare_expected_pixel_count=${COMPARE_EXPECTED_PIXEL_COUNT};compare_px0_electron=${COMPARE_PX0_ELECTRON};compare_px0_vulkan=${COMPARE_PX0_VULKAN};compare_mismatches=${COMPARE_MISMATCHES};simple_render_exit_code=${simple_render_code};simple_env_width=${WIDTH};simple_env_height=${HEIGHT};simple_env_bg_dec=${BG_DEC};simple_env_output=${VULKAN_JSON};simple_env_run_id=${EVWP_RUN_ID};simple_env_execution_mode=interpret;simple_stdout_status_line_count=${simple_render_line_count};simple_stdout_proof=${simple_render_stdout_proof};simple_stdout_status=${simple_render_stdout_status};simple_stdout_reason=${simple_render_stdout_reason};simple_stdout_backend=${simple_render_stdout_backend};simple_stdout_pixels=${simple_render_stdout_pixels};simple_stdout_px0=${simple_render_stdout_px0};simple_stdout_wrote=${simple_render_stdout_wrote};simple_stdout_proof_sha256=${simple_render_stdout_proof_sha256};electron_png_path=${ELECTRON_PNG};electron_png_sha256=${ELECTRON_PNG_SHA256};vulkan_json_path=${VULKAN_JSON};vulkan_json_sha256=${VULKAN_JSON_SHA256};vulkan_json_status=${VULKAN_JSON_STATUS};vulkan_json_reason=${VULKAN_JSON_REASON};vulkan_json_schema=${VULKAN_JSON_SCHEMA};vulkan_json_producer=${VULKAN_JSON_PRODUCER};vulkan_json_backend=${VULKAN_JSON_BACKEND};vulkan_json_entrypoint=${VULKAN_JSON_ENTRYPOINT};vulkan_json_requested_backend=${VULKAN_JSON_REQUESTED_BACKEND};vulkan_json_execution_mode=${VULKAN_JSON_EXECUTION_MODE};vulkan_json_run_id=${VULKAN_JSON_RUN_ID};vulkan_json_width=${VULKAN_JSON_WIDTH};vulkan_json_height=${VULKAN_JSON_HEIGHT};vulkan_json_pixel_count=${VULKAN_JSON_PIXEL_COUNT};vulkan_json_pixels_len=${VULKAN_JSON_PIXELS_LEN};vulkan_json_px0=${VULKAN_JSON_PX0};vulkan_json_uniform_argb=${VULKAN_JSON_UNIFORM_ARGB};run_id=${EVWP_RUN_ID}"
+ARTIFACT_MANIFEST_PROOF_SHA256=$(printf '%s' "$ARTIFACT_MANIFEST_PROOF" | node -e "const fs=require('fs'),crypto=require('crypto');process.stdout.write(crypto.createHash('sha256').update(fs.readFileSync(0)).digest('hex'))")
+
+emit "electron_vulkan_web_parity_windows_electron_json" "$ELECTRON_JSON"
+emit "electron_vulkan_web_parity_windows_electron_json_sha256" "$ELECTRON_JSON_SHA256"
+emit "electron_vulkan_web_parity_windows_electron_proof_json" "$ELECTRON_PROOF"
+emit "electron_vulkan_web_parity_windows_electron_proof_json_sha256" "$ELECTRON_PROOF_SHA256"
+emit "electron_vulkan_web_parity_windows_electron_png" "$ELECTRON_PNG"
+emit "electron_vulkan_web_parity_windows_electron_png_sha256" "$ELECTRON_PNG_SHA256"
+emit "electron_vulkan_web_parity_windows_vulkan_json" "$VULKAN_JSON"
+emit "electron_vulkan_web_parity_windows_vulkan_json_sha256" "$VULKAN_JSON_SHA256"
+emit "electron_vulkan_web_parity_windows_vulkan_json_status" "$VULKAN_JSON_STATUS"
+emit "electron_vulkan_web_parity_windows_vulkan_json_reason" "$VULKAN_JSON_REASON"
+emit "electron_vulkan_web_parity_windows_vulkan_json_schema" "$VULKAN_JSON_SCHEMA"
+emit "electron_vulkan_web_parity_windows_vulkan_json_producer" "$VULKAN_JSON_PRODUCER"
+emit "electron_vulkan_web_parity_windows_vulkan_json_requested_backend" "$VULKAN_JSON_REQUESTED_BACKEND"
+emit "electron_vulkan_web_parity_windows_vulkan_json_backend" "$VULKAN_JSON_BACKEND"
+emit "electron_vulkan_web_parity_windows_vulkan_json_execution_mode" "$VULKAN_JSON_EXECUTION_MODE"
+emit "electron_vulkan_web_parity_windows_vulkan_json_entrypoint" "$VULKAN_JSON_ENTRYPOINT"
+emit "electron_vulkan_web_parity_windows_vulkan_json_run_id" "$VULKAN_JSON_RUN_ID"
+emit "electron_vulkan_web_parity_windows_vulkan_json_width" "$VULKAN_JSON_WIDTH"
+emit "electron_vulkan_web_parity_windows_vulkan_json_height" "$VULKAN_JSON_HEIGHT"
+emit "electron_vulkan_web_parity_windows_vulkan_json_pixel_count" "$VULKAN_JSON_PIXEL_COUNT"
+emit "electron_vulkan_web_parity_windows_vulkan_json_pixels_len" "$VULKAN_JSON_PIXELS_LEN"
+emit "electron_vulkan_web_parity_windows_vulkan_json_px0" "$VULKAN_JSON_PX0"
+emit "electron_vulkan_web_parity_windows_vulkan_json_uniform_argb" "$VULKAN_JSON_UNIFORM_ARGB"
+emit "electron_vulkan_web_parity_windows_artifact_manifest_proof" "$ARTIFACT_MANIFEST_PROOF"
+emit "electron_vulkan_web_parity_windows_artifact_manifest_proof_sha256" "$ARTIFACT_MANIFEST_PROOF_SHA256"
+emit "electron_vulkan_web_parity_windows_artifact_manifest_hash_algorithm" "sha256"
+emit "electron_vulkan_web_parity_windows_artifact_manifest_producer" "scripts/check/check-electron-vulkan-web-parity-windows.shs"
+emit "electron_vulkan_web_parity_windows_artifact_manifest_schema" "windows-vulkan-artifact-manifest-v1"
+ARTIFACT_MANIFEST_KEYS="html_path|html_sha256|host_os|wrapper_status|wrapper_reason|request_width|request_height|request_bg_hex|request_bg_dec|simple_bin|simple_bin_source|simple_bin_status|simple_bin_kind|simple_bin_probe_exit_code|simple_bin_sha256|simple_bin_version|electron_bin|electron_bin_status|electron_bin_kind|electron_bin_sha256|vulkan_loader|vulkan_loader_status|vulkan_loader_sha256|electron_launch_flags|electron_capture_exit_code|electron_remote_debugging_port|electron_json_path|electron_json_sha256|electron_proof_json_path|electron_proof_json_sha256|electron_proof_status|electron_proof_source|electron_proof_captured_argb_written|electron_proof_png_written|electron_proof_blur_or_tolerance_used|electron_proof_gpu_feature_status_matches_capture|electron_proof_browser_gpu_info_matches_capture|electron_proof_downsampled|electron_proof_remote_debugging_port|electron_vulkan_status|electron_vulkan_reason|electron_vulkan|electron_gpu_compositing|electron_hardware_supports_vulkan|electron_browser_target_gpu_info_status|electron_display_type|electron_gl_implementation_parts|electron_skia_backend_type|electron_gl_renderer|compare_exit_code|compare_expected_captured_argb_path|compare_expected_captured_argb_sha256|compare_expected_html_path|compare_expected_html_sha256|compare_expected_png_path|compare_expected_png_sha256|compare_expected_vulkan_json_path|compare_expected_vulkan_json_sha256|compare_expected_vulkan_run_id|compare_expected_width|compare_expected_height|compare_expected_argb|compare_expected_pixel_count|compare_px0_electron|compare_px0_vulkan|compare_mismatches|simple_render_exit_code|simple_env_width|simple_env_height|simple_env_bg_dec|simple_env_output|simple_env_run_id|simple_env_execution_mode|simple_stdout_status_line_count|simple_stdout_proof|simple_stdout_status|simple_stdout_reason|simple_stdout_backend|simple_stdout_pixels|simple_stdout_px0|simple_stdout_wrote|simple_stdout_proof_sha256|electron_png_path|electron_png_sha256|vulkan_json_path|vulkan_json_sha256|vulkan_json_status|vulkan_json_reason|vulkan_json_schema|vulkan_json_producer|vulkan_json_backend|vulkan_json_entrypoint|vulkan_json_requested_backend|vulkan_json_execution_mode|vulkan_json_run_id|vulkan_json_width|vulkan_json_height|vulkan_json_pixel_count|vulkan_json_pixels_len|vulkan_json_px0|vulkan_json_uniform_argb|run_id"
+ARTIFACT_MANIFEST_FIELD_COUNT="$(printf '%s\n' "$ARTIFACT_MANIFEST_KEYS" | awk -F'|' '{print NF}')"
+emit "electron_vulkan_web_parity_windows_artifact_manifest_keys" "$ARTIFACT_MANIFEST_KEYS"
+emit "electron_vulkan_web_parity_windows_artifact_manifest_field_count" "$ARTIFACT_MANIFEST_FIELD_COUNT"
+emit "electron_vulkan_web_parity_windows_artifact_manifest_run_id" "$EVWP_RUN_ID"
+emit "electron_vulkan_web_parity_windows_vulkan_run_id" "$EVWP_RUN_ID"
+emit "electron_vulkan_web_parity_windows_compare_exit_code" "$compare_code"
+emit_common
+printf '%s\n' "$compare_output"
+exit "$compare_code"

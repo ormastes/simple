@@ -1,0 +1,125 @@
+# SDN CLI entrypoint.
+# Startup-light CLI surface for source-mode help and readiness probes.
+
+use std.cli.cli_util (get_cli_args)
+use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
+use std.log.{error}
+
+val TOOL_NAME = "SDN CLI"
+val TOOL_VERSION = "0.1.0"
+
+fn main() -> i64:
+    val raw_args = get_cli_args()
+    val log_opts = parse_log_options(raw_args)
+    if not log_opts.valid:
+        error("sdn", log_opts.error)
+        return 1
+
+    val args = sdn_clean_log_args(raw_args)
+    if args.len() > 0 and (args[0] == "--help" or args[0] == "-h"):
+        print_help_with_progress(log_opts.progress)
+        return 0
+    if args.len() > 0 and (args[0] == "--version" or args[0] == "-v"):
+        if log_opts.log_mode == "json":
+            print "{\"command\":\"sdn\",\"status\":\"ok\",\"version\":\"{TOOL_VERSION}\"}"
+        else:
+            print "{TOOL_NAME} v{TOOL_VERSION}"
+        return 0
+
+    if args.len() == 0:
+        if log_opts.log_mode == "json":
+            print "{\"command\":\"sdn\",\"status\":\"ready\",\"tool\":\"{TOOL_NAME}\",\"version\":\"{TOOL_VERSION}\"}"
+        else:
+            val progress = render_progress(log_opts.progress, 1, 1, "sdn")
+            if progress != "":
+                print progress
+            print "{TOOL_NAME} v{TOOL_VERSION}"
+            print "Ready for SDN command planning."
+        return 0
+
+    val op = args[0]
+    if not sdn_is_command(op):
+        val message = "Unknown SDN command: {op}"
+        if log_opts.log_mode == "json":
+            print "{\"command\":\"sdn\",\"status\":\"error\",\"message\":\"{message}\"}"
+        else:
+            error("sdn", message)
+        return 1
+
+    val required = sdn_required_arg_count(op)
+    if args.len() - 1 < required:
+        val message = "Command {op} requires {required} argument(s)"
+        if log_opts.log_mode == "json":
+            print "{\"command\":\"sdn\",\"status\":\"error\",\"message\":\"{message}\"}"
+        else:
+            error("sdn", message)
+        return 1
+
+    if log_opts.log_mode == "json":
+        print "{\"command\":\"sdn\",\"status\":\"planned\",\"operation\":\"{op}\",\"args\":{args.len() - 1}}"
+    else:
+        val progress = render_progress(log_opts.progress, 1, 1, "sdn-plan")
+        if progress != "":
+            print progress
+        print "SDN operation: {op}"
+        print "Argument count: {args.len() - 1}"
+    0
+
+fn print_help():
+    print "{TOOL_NAME} - Simple Data Notation"
+    print ""
+    print "Usage: simple sdn <command> [args]"
+    print ""
+    print "Commands:"
+    print "  check <file>                Validate an SDN file"
+    print "  to-json <file>              Convert SDN to JSON"
+    print "  from-json <file>            Convert JSON to SDN"
+    print "  get <file> <path>           Get a value at path"
+    print "  set <file> <path> <value>   Set a value at path"
+    print "  fmt <file>                  Format an SDN file"
+    print ""
+    print "Options:"
+    print "  -h, --help                  Show this help message"
+    print "  -v, --version               Show version information"
+    print ""
+    print "Shared log options:"
+    for line in log_options_help():
+        print "  {line}"
+
+fn print_help_with_progress(progress_mode: text):
+    val progress = render_progress(progress_mode, 0, 1, "usage")
+    if progress != "":
+        print progress
+    print_help()
+
+fn sdn_is_command(op: text) -> bool:
+    op == "check" or op == "to-json" or op == "from-json" or
+        op == "get" or op == "set" or op == "fmt"
+
+fn sdn_required_arg_count(op: text) -> i64:
+    if op == "get":
+        return 2
+    if op == "set":
+        return 3
+    1
+
+fn sdn_is_log_option(arg: text) -> bool:
+    arg == "--human" or arg == "--llm" or arg == "--json" or
+        arg == "--tui" or arg == "--stdout" or arg == "--quiet" or
+        arg == "--verbose" or arg == "--dots" or arg == "--count" or
+        arg == "--no-progress" or arg == "--log-mode" or arg == "--surface" or
+        arg == "--progress" or arg.starts_with("--log-mode=") or
+        arg.starts_with("--surface=") or arg.starts_with("--progress=")
+
+fn sdn_clean_log_args(args: [text]) -> [text]:
+    var cleaned: [text] = []
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if sdn_is_log_option(arg):
+            if arg == "--log-mode" or arg == "--surface" or arg == "--progress":
+                i = i + 1
+        else:
+            cleaned.push(arg)
+        i = i + 1
+    cleaned

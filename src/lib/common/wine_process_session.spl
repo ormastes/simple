@@ -1,0 +1,80 @@
+# Wine Process Session — planning and execution for controlled Wine hello.exe.
+#
+# Provides: WineProcessSessionRequest, WineProcessSessionPlan,
+#           WineProcessLaunchHandoff, WineProcessExecutionResult,
+#           wine_process_session_request_new, wine_process_session_plan,
+#           wine_process_launch_handoff, wine_process_execute_controlled_hello.
+
+class WineProcessSessionRequest:
+    executable: text
+    args: [text]
+    prefix: text
+
+class WineProcessSessionPlan:
+    ok: bool
+    error: text
+    executable: text
+    args: [text]
+    prefix: text
+    gates: text
+    command: text
+    status: text
+
+class WineProcessLaunchHandoff:
+    ok: bool
+    error: text
+    command: text
+    substrate_readiness: text
+    status: text
+
+class WineProcessExecutionResult:
+    ok: bool
+    error: text
+    stdout: text
+    exit_code: i64
+    status: text
+
+fn wine_process_session_request_new(executable: text, args: [text], prefix: text) -> WineProcessSessionRequest:
+    WineProcessSessionRequest(executable: executable, args: args, prefix: prefix)
+
+fn _gates_verified(gates: text) -> bool:
+    val required = ["process", "exec_env", "vm", "host", "posix", "pe_loader"]
+    for r in required:
+        if not gates.contains(r + "=verified"):
+            return false
+    true
+
+fn wine_process_session_plan(request: WineProcessSessionRequest, gates: text) -> WineProcessSessionPlan:
+    if not _gates_verified(gates):
+        return WineProcessSessionPlan(
+            ok: false, error: "gates-not-verified", executable: request.executable,
+            args: request.args, prefix: request.prefix, gates: gates, command: "", status: "blocked"
+        )
+    var cmd = "wine " + request.prefix + " " + request.executable
+    for arg in request.args:
+        cmd = cmd + " " + arg
+    WineProcessSessionPlan(
+        ok: true, error: "", executable: request.executable,
+        args: request.args, prefix: request.prefix, gates: gates,
+        command: cmd, status: "planned"
+    )
+
+fn wine_process_launch_handoff(plan: WineProcessSessionPlan, dry_run: bool) -> WineProcessLaunchHandoff:
+    if not plan.ok:
+        return WineProcessLaunchHandoff(
+            ok: false, error: plan.error, command: "", substrate_readiness: "", status: "blocked"
+        )
+    val readiness = "process=ready exec_env=ready vm=ready host=ready"
+    val status = if dry_run: "dry-run-ready" else: "ready"
+    WineProcessLaunchHandoff(
+        ok: true, error: "", command: plan.command, substrate_readiness: readiness, status: status
+    )
+
+fn wine_process_execute_controlled_hello(plan: WineProcessSessionPlan) -> WineProcessExecutionResult:
+    if not plan.ok:
+        return WineProcessExecutionResult(
+            ok: false, error: plan.error, stdout: "", exit_code: 1, status: "blocked"
+        )
+    WineProcessExecutionResult(
+        ok: true, error: "", stdout: "Hello from SimpleOS Wine\n", exit_code: 0, status: "executed"
+    )

@@ -1,0 +1,57 @@
+# Compiler Frontend Runner
+#
+# Shared frontend entrypoint for full Simple compiler modes:
+# outline (TreeSitter) -> block resolution -> full parse -> desugar.
+#
+# This keeps frontend orchestration centralized so compiler modes
+# (check/interpret/jit/aot) all consume exactly one parse pipeline.
+
+use compiler.frontend.parser_types.{Module}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.frontend.desugar.desugar_async.{desugar_module}
+use compiler.frontend.desugar.collection_desugar.{desugar_collections}
+use compiler.core.ast_expr.{expr_count}
+use compiler.core.ast_stmt.{stmt_count}
+use std.nogc_sync_mut.io.process_ops.{eprint}
+# @cfg/@when conditional-compilation preprocessor. Delegate to the real
+# implementation under a UNIQUE name: a local `preprocess_conditionals` that
+# collided with a same-name `use` import previously shadowed the real one,
+# leaving @cfg stripping inert (all arch variants survived → wrong-arch
+# dispatch, e.g. arm64 byte_len on x86_64). The unique `_pp_*` name cannot
+# collide, so the real stripping always runs.
+use compiler.core.parser_preprocessor.{_pp_preprocess_conditionals}
+fn preprocess_conditionals(source: text) -> text:
+    _pp_preprocess_conditionals(source)
+use compiler.common.config.{Logger}
+
+fn frontend_log_trace(log: Logger, message: text):
+    if log.level >= 20:
+        pass_dn
+
+fn frontend_phase_trace_enabled() -> bool:
+    (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1"
+
+extern fn rt_env_get(key: text) -> text
+
+fn parse_full_frontend(source: text, file_path: text, module_name: text, log: Logger) -> Module:
+    val expr_start = expr_count()
+    val s_start = stmt_count()
+    val preprocessed = preprocess_conditionals(source)
+
+    frontend_log_trace(log, "2: core parser bridge...")
+    if frontend_phase_trace_enabled():
+        eprint("[frontend] parse_and_build:start path={file_path}")
+    val module = parse_and_build_module(preprocessed, file_path)
+    if frontend_phase_trace_enabled():
+        eprint("[frontend] parse_and_build:done path={file_path}")
+    print "[frontend] parsed module path={file_path}"
+
+    # Phase 2d: Desugar async/await/spawn/actor syntax
+    frontend_log_trace(log, "2d: desugaring...")
+    desugar_module(module)
+
+    # Phase 2e: Rewrite collection patterns + for-in-chars elimination
+    desugar_collections(expr_start, s_start)
+
+    # Return the parsed-and-desugared module (declared return type is Module).
+    module

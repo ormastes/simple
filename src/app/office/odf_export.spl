@@ -1,0 +1,96 @@
+# Flat ODF Export (.fodt / .fods)
+#
+# Real interop with LibreOffice/OpenOffice: flat OpenDocument XML needs no zip
+# container, so pure-Simple string building produces files LibreOffice opens
+# directly — Writer documents as .fodt, Calc sheets as .fods.
+#
+# ponytail: v1 emits plain text content (no text:span character styles, no
+# named paragraph styles); add automatic-styles blocks when styled export
+# matters. Structure follows ODF 1.2 flat-document schema.
+
+use common.rich_text.attributed_text.{RichDocument, DocBlock, BlockKind, spans_to_plain_text}
+use app.office.sheets.spreadsheet.{Sheet}
+use app.office.sheets.cell.{Cell, CellValue, CellRef, cell_display_text, cell_ref_to_string, parse_cell_ref}
+
+fn _xml_escape(s: text) -> text:
+    var r = s
+    r = r.replace("&", "&amp;")
+    r = r.replace("<", "&lt;")
+    r = r.replace(">", "&gt;")
+    r = r.replace("\"", "&quot;")
+    r = r.replace("'", "&apos;")
+    r
+
+val _ODF_NS = "xmlns:office=\"urn:oasis:names:tc:opendocument:xmlns:office:1.0\" xmlns:text=\"urn:oasis:names:tc:opendocument:xmlns:text:1.0\" xmlns:table=\"urn:oasis:names:tc:opendocument:xmlns:table:1.0\" office:version=\"1.2\""
+
+# =========================================================================
+# Writer -> .fodt
+# =========================================================================
+
+fn _block_to_odf(block: DocBlock) -> text:
+    val content = _xml_escape(spans_to_plain_text(block.spans))
+    match block.kind:
+        case Heading1: return "<text:h text:outline-level=\"1\">{content}</text:h>"
+        case Heading2: return "<text:h text:outline-level=\"2\">{content}</text:h>"
+        case Heading3: return "<text:h text:outline-level=\"3\">{content}</text:h>"
+        case BulletItem: return "<text:list><text:list-item><text:p>{content}</text:p></text:list-item></text:list>"
+        case Quote: return "<text:p>{content}</text:p>"
+        case CodeBlock: return "<text:p>{content}</text:p>"
+        case Paragraph: return "<text:p>{content}</text:p>"
+
+fn document_to_fodt(doc: RichDocument) -> text:
+    """Serialize a RichDocument as a flat ODF text document (.fodt) that
+    LibreOffice Writer opens directly."""
+    var body = ""
+    for block in doc.blocks:
+        body = "{body}{_block_to_odf(block)}"
+    var out = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+    out = "{out}<office:document {_ODF_NS} office:mimetype=\"application/vnd.oasis.opendocument.text\">"
+    out = "{out}<office:body><office:text>{body}</office:text></office:body></office:document>"
+    out
+
+# =========================================================================
+# Calc -> .fods
+# =========================================================================
+
+fn _cell_to_odf(sheet: Sheet, ref_str: text) -> text:
+    val cell = sheet.get_cell(ref_str)
+    val display = _xml_escape(cell_display_text(cell))
+    match cell.value:
+        CellValue.NumberVal(value):
+            return "<table:table-cell office:value-type=\"float\" office:value=\"{value}\"><text:p>{display}</text:p></table:table-cell>"
+        CellValue.FormulaVal(expr, cached_display):
+            val formula = _xml_escape("of:={expr}")
+            return "<table:table-cell table:formula=\"{formula}\"><text:p>{display}</text:p></table:table-cell>"
+        CellValue.BoolVal(value):
+            val b = if value: "true" else: "false"
+            return "<table:table-cell office:value-type=\"boolean\" office:boolean-value=\"{b}\"><text:p>{display}</text:p></table:table-cell>"
+        CellValue.Empty:
+            return "<table:table-cell/>"
+        _:
+            return "<table:table-cell office:value-type=\"string\"><text:p>{display}</text:p></table:table-cell>"
+
+fn sheet_to_fods(sheet: Sheet) -> text:
+    """Serialize a Sheet's used range as a flat ODF spreadsheet (.fods) that
+    LibreOffice Calc opens directly — numbers typed, formulas preserved."""
+    val range_str = sheet.used_range()
+    val parts = range_str.split(":")
+    val start = parse_cell_ref(parts[0])
+    val end_ref = parse_cell_ref(parts[1])
+    var rows = ""
+    if start != nil and end_ref != nil:
+        var r = start.row
+        while r <= end_ref.row:
+            var row_xml = ""
+            var c = start.col
+            while c <= end_ref.col:
+                val ref_str = cell_ref_to_string(CellRef(col: c, row: r))
+                row_xml = "{row_xml}{_cell_to_odf(sheet, ref_str)}"
+                c = c + 1
+            rows = "{rows}<table:table-row>{row_xml}</table:table-row>"
+            r = r + 1
+    val name = _xml_escape(sheet.name)
+    var out = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+    out = "{out}<office:document {_ODF_NS} office:mimetype=\"application/vnd.oasis.opendocument.spreadsheet\">"
+    out = "{out}<office:body><office:spreadsheet><table:table table:name=\"{name}\">{rows}</table:table></office:spreadsheet></office:body></office:document>"
+    out

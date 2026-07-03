@@ -1,0 +1,504 @@
+# ODT / DOCX Import + real .odt Writer
+#
+# Reads the two dominant office container formats into the suite's document
+# model, and writes genuine zipped .odt files:
+#   - .odt  (LibreOffice): content.xml   -> text:h / text:p / list items
+#   - .docx (MS Word):     word/document.xml -> w:p paragraphs, Heading styles,
+#     concatenated w:t runs
+#
+# Parsing is a targeted tag scan (find/strip/unescape), not a general XML DOM —
+# enough to import real documents' text structure faithfully.
+# ponytail: character-run styling (bold/italic spans) imports as plain text;
+# add run-property scanning when styled import matters.
+
+use std.common.archive.zip.{zip_extract_text, zip_write_stored, zip_text_file, ZipFile}
+use common.rich_text.attributed_text.{RichDocument, DocBlock, BlockKind, TextSpan, InlineStyle}
+use app.office.odf_export.{document_to_fodt, sheet_to_fods}
+use app.office.file_formats.{parse_inline_spans, recalculate_formula_cells}
+use app.office.sheets.spreadsheet.{Sheet}
+use app.office.sheets.cell.{col_to_letter, parse_cell_ref, CellValue}
+
+# =========================================================================
+# XML helpers
+# =========================================================================
+
+fn _find_from(s: text, needle: text, from: i32) -> i32:
+    var i = from
+    while i + needle.len() <= s.len():
+        if s.slice(i, i + needle.len()) == needle:
+            return i
+        i = i + 1
+    -1
+
+fn _strip_tags(s: text) -> text:
+    """Remove every <...> span, keeping the character data."""
+    var out = ""
+    var i = 0
+    var in_tag = false
+    while i < s.len():
+        val ch = s.slice(i, i + 1)
+        if ch == "<":
+            in_tag = true
+        elif ch == ">":
+            in_tag = false
+        elif not in_tag:
+            out = "{out}{ch}"
+        i = i + 1
+    out
+
+fn _xml_unescape(s: text) -> text:
+    var r = s
+    r = r.replace("&lt;", "<")
+    r = r.replace("&gt;", ">")
+    r = r.replace("&quot;", "\"")
+    r = r.replace("&apos;", "'")
+    r = r.replace("&amp;", "&")
+    r
+
+fn _span(s: text) -> TextSpan:
+    TextSpan(text: s, style: InlineStyle.Normal)
+
+fn _plain_block(kind: BlockKind, content: text) -> DocBlock:
+    DocBlock(kind: kind, spans: [_span(content)])
+
+# =========================================================================
+# ODT import
+# =========================================================================
+
+fn _odf_heading_kind(level_attr: text) -> BlockKind:
+    if level_attr.contains("\"1\""):
+        return BlockKind.Heading1
+    if level_attr.contains("\"2\""):
+        return BlockKind.Heading2
+    BlockKind.Heading3
+
+fn odt_content_to_document(content_xml: text, title: text) -> RichDocument:
+    """Parse ODF content.xml into a RichDocument (headings, paragraphs, lists)."""
+    var doc = RichDocument.new(title)
+    var i = 0
+    while i < content_xml.len():
+        val h = _find_from(content_xml, "<text:h", i)
+        val p = _find_from(content_xml, "<text:p", i)
+        if h < 0 and p < 0:
+            break
+        val is_heading = h >= 0 and (p < 0 or h < p)
+        val start = if is_heading: h else: p
+        val close = if is_heading: "</text:h>" else: "</text:p>"
+        val tag_end = _find_from(content_xml, ">", start)
+        val end_pos = _find_from(content_xml, close, start)
+        if tag_end < 0 or end_pos < 0:
+            break
+        val attrs = content_xml.slice(start, tag_end)
+        val inner = content_xml.slice(tag_end + 1, end_pos)
+        val content = _xml_unescape(_strip_tags(inner))
+        # A text:p inside a list item becomes a bullet
+        val before = content_xml.slice(_max0(start - 40), start)
+        if is_heading:
+            doc.blocks.push(_plain_block(_odf_heading_kind(attrs), content))
+        elif before.contains("<text:list-item>"):
+            doc.blocks.push(_plain_block(BlockKind.BulletItem, content))
+        elif content.trim() != "":
+            doc.blocks.push(_plain_block(BlockKind.Paragraph, content))
+        i = end_pos + close.len()
+    doc
+
+fn _max0(v: i32) -> i32:
+    if v < 0:
+        return 0
+    v
+
+fn odt_bytes_to_document(zip_bytes: [u8], title: text) -> RichDocument:
+    """Import a real .odt file (zip container) into a RichDocument."""
+    odt_content_to_document(zip_extract_text(zip_bytes, "content.xml"), title)
+
+# =========================================================================
+# DOCX import
+# =========================================================================
+
+fn _docx_para_kind(para_xml: text) -> BlockKind:
+    if para_xml.contains("w:val=\"Heading1\""):
+        return BlockKind.Heading1
+    if para_xml.contains("w:val=\"Heading2\""):
+        return BlockKind.Heading2
+    if para_xml.contains("w:val=\"Heading3\""):
+        return BlockKind.Heading3
+    if para_xml.contains("w:val=\"ListParagraph\""):
+        return BlockKind.BulletItem
+    BlockKind.Paragraph
+
+fn _docx_para_text(para_xml: text) -> text:
+    """Concatenate every <w:t> run's text within one paragraph."""
+    var out = ""
+    for span in _docx_para_spans(para_xml):
+        out = "{out}{span.text}"
+    out
+
+fn _docx_para_spans(para_xml: text) -> [TextSpan]:
+    """One styled span per <w:r> run: w:b -> Bold, w:i -> Italic (bold wins
+    when both are set — the span model carries one style)."""
+    var spans: [TextSpan] = []
+    var i = 0
+    while i < para_xml.len():
+        val r = _find_from(para_xml, "<w:r>", i)
+        val r2 = _find_from(para_xml, "<w:r ", i)
+        val start = if r >= 0 and (r2 < 0 or r < r2): r else: r2
+        if start < 0:
+            break
+        val end_pos = _find_from(para_xml, "</w:r>", start)
+        if end_pos < 0:
+            break
+        val run = para_xml.slice(start, end_pos)
+        val t = _find_from(run, "<w:t", 0)
+        if t >= 0:
+            val tag_end = _find_from(run, ">", t)
+            val te = _find_from(run, "</w:t>", t)
+            if tag_end >= 0 and te > tag_end:
+                val content = _xml_unescape(run.slice(tag_end + 1, te))
+                var style = InlineStyle.Normal
+                if run.contains("<w:b/>") or run.contains("<w:b "):
+                    style = InlineStyle.Bold
+                elif run.contains("<w:i/>") or run.contains("<w:i "):
+                    style = InlineStyle.Italic
+                spans.push(TextSpan(text: content, style: style))
+        i = end_pos + 6
+    if spans.len() == 0:
+        spans.push(_span(""))
+    spans
+
+fn docx_document_xml_to_document(document_xml: text, title: text) -> RichDocument:
+    """Parse OOXML word/document.xml into a RichDocument."""
+    var doc = RichDocument.new(title)
+    var i = 0
+    while i < document_xml.len():
+        val p = _find_from(document_xml, "<w:p ", i)
+        val p2 = _find_from(document_xml, "<w:p>", i)
+        val start = if p >= 0 and (p2 < 0 or p < p2): p else: p2
+        if start < 0:
+            break
+        val end_pos = _find_from(document_xml, "</w:p>", start)
+        if end_pos < 0:
+            break
+        val para = document_xml.slice(start, end_pos)
+        val content = _docx_para_text(para)
+        if content.trim() != "":
+            doc.blocks.push(DocBlock(kind: _docx_para_kind(para), spans: _docx_para_spans(para)))
+        i = end_pos + 6
+    doc
+
+fn docx_bytes_to_document(zip_bytes: [u8], title: text) -> RichDocument:
+    """Import a real .docx file (zip container) into a RichDocument."""
+    docx_document_xml_to_document(zip_extract_text(zip_bytes, "word/document.xml"), title)
+
+# =========================================================================
+# Real .odt writer (zip container)
+# =========================================================================
+
+# =========================================================================
+# ODS import (Calc)
+# =========================================================================
+
+fn _ods_cell_value(cell_xml: text) -> text:
+    """The value to store for one table:table-cell — office:value for numbers,
+    formula text if present, else the text:p character data."""
+    val f = _find_from(cell_xml, "table:formula=\"", 0)
+    if f >= 0:
+        val fe = _find_from(cell_xml, "\"", f + 15)
+        if fe > f:
+            var formula = _xml_unescape(cell_xml.slice(f + 15, fe))
+            if formula.starts_with("of:="):
+                formula = "={formula.slice(4, formula.len())}"
+            return formula
+    val v = _find_from(cell_xml, "office:value=\"", 0)
+    if v >= 0:
+        val ve = _find_from(cell_xml, "\"", v + 14)
+        if ve > v:
+            return cell_xml.slice(v + 14, ve)
+    val p = _find_from(cell_xml, "<text:p", 0)
+    if p >= 0:
+        val tag_end = _find_from(cell_xml, ">", p)
+        val pe = _find_from(cell_xml, "</text:p>", p)
+        if tag_end >= 0 and pe > tag_end:
+            return _xml_unescape(_strip_tags(cell_xml.slice(tag_end + 1, pe)))
+    ""
+
+fn ods_content_to_sheet(content_xml: text, name: text) -> Sheet:
+    """Parse ODF spreadsheet content.xml (first table) into a Sheet."""
+    var sheet = Sheet.new(name)
+    var row = 0
+    var i = 0
+    while i < content_xml.len():
+        val r = _find_from(content_xml, "<table:table-row", i)
+        if r < 0:
+            break
+        val r_end = _find_from(content_xml, "</table:table-row>", r)
+        if r_end < 0:
+            break
+        val row_xml = content_xml.slice(r, r_end)
+        var col = 0
+        var j = 0
+        while j < row_xml.len():
+            val c = _find_from(row_xml, "<table:table-cell", j)
+            if c < 0:
+                break
+            val tag_end = _find_from(row_xml, ">", c)
+            if tag_end < 0:
+                break
+            val self_closing = row_xml.slice(tag_end - 1, tag_end) == "/"
+            var cell_xml = row_xml.slice(c, tag_end)
+            var next_j = tag_end + 1
+            if not self_closing:
+                val c_end = _find_from(row_xml, "</table:table-cell>", c)
+                if c_end < 0:
+                    break
+                cell_xml = row_xml.slice(c, c_end)
+                next_j = c_end + 19
+            val value = _ods_cell_value(cell_xml)
+            if value != "":
+                sheet.set_value("{col_to_letter(col)}{row + 1}", value)
+            col = col + 1
+            j = next_j
+        row = row + 1
+        i = r_end + 18
+    recalculate_formula_cells(sheet)
+
+fn ods_bytes_to_sheet(zip_bytes: [u8], name: text) -> Sheet:
+    """Import a real .ods file (zip container) into a Sheet."""
+    ods_content_to_sheet(zip_extract_text(zip_bytes, "content.xml"), name)
+
+# =========================================================================
+# XLSX import (Excel)
+# =========================================================================
+
+fn _xlsx_shared_strings(shared_xml: text) -> [text]:
+    """Collect each <si>'s concatenated <t> runs from sharedStrings.xml."""
+    var strings: [text] = []
+    var i = 0
+    while i < shared_xml.len():
+        val s = _find_from(shared_xml, "<si>", i)
+        if s < 0:
+            break
+        val e = _find_from(shared_xml, "</si>", s)
+        if e < 0:
+            break
+        val si = shared_xml.slice(s, e)
+        var out = ""
+        var j = 0
+        while j < si.len():
+            val t = _find_from(si, "<t", j)
+            if t < 0:
+                break
+            val tag_end = _find_from(si, ">", t)
+            val te = _find_from(si, "</t>", t)
+            if tag_end < 0 or te < 0:
+                break
+            out = "{out}{_xml_unescape(si.slice(tag_end + 1, te))}"
+            j = te + 4
+        strings.push(out)
+        i = e + 5
+    strings
+
+fn xlsx_sheet_xml_to_sheet(sheet_xml: text, shared: [text], name: text) -> Sheet:
+    """Parse one OOXML worksheet: <c r="A1" t="s"><v>idx</v></c> cells."""
+    var sheet = Sheet.new(name)
+    var i = 0
+    while i < sheet_xml.len():
+        val c = _find_from(sheet_xml, "<c ", i)
+        if c < 0:
+            break
+        val tag_end = _find_from(sheet_xml, ">", c)
+        if tag_end < 0:
+            break
+        val attrs = sheet_xml.slice(c, tag_end)
+        # cell ref
+        var ref_str = ""
+        val ra = _find_from(attrs, "r=\"", 0)
+        if ra >= 0:
+            val re = _find_from(attrs, "\"", ra + 3)
+            if re > ra:
+                ref_str = attrs.slice(ra + 3, re)
+        val is_shared = attrs.contains("t=\"s\"")
+        val is_inline = attrs.contains("t=\"inlineStr\"")
+        val c_end = _find_from(sheet_xml, "</c>", c)
+        if is_inline and ref_str != "" and c_end > c:
+            # inline string: <is><t>text</t></is>
+            val cell_xml = sheet_xml.slice(c, c_end)
+            val t = _find_from(cell_xml, "<t", 0)
+            if t >= 0:
+                val t_end = _find_from(cell_xml, ">", t)
+                val te = _find_from(cell_xml, "</t>", t)
+                if t_end >= 0 and te > t_end:
+                    sheet.set_value(ref_str, _xml_unescape(cell_xml.slice(t_end + 1, te)))
+        else:
+            val v = _find_from(sheet_xml, "<v>", tag_end)
+            if ref_str != "" and v >= 0 and c_end > v:
+                val ve = _find_from(sheet_xml, "</v>", v)
+                if ve > v and ve < c_end:
+                    var value = _xml_unescape(sheet_xml.slice(v + 3, ve))
+                    if is_shared:
+                        val idx = value.to_i64().to_i32()
+                        if idx >= 0 and idx < shared.len():
+                            value = shared[idx]
+                    sheet.set_value(ref_str, value)
+        i = if c_end > c: c_end + 4 else: tag_end + 1
+    sheet
+
+fn xlsx_bytes_to_sheet(zip_bytes: [u8], name: text) -> Sheet:
+    """Import a real .xlsx file: worksheet 1 + shared strings."""
+    val shared = _xlsx_shared_strings(zip_extract_text(zip_bytes, "xl/sharedStrings.xml"))
+    xlsx_sheet_xml_to_sheet(zip_extract_text(zip_bytes, "xl/worksheets/sheet1.xml"), shared, name)
+
+# =========================================================================
+# Real .xlsx writer
+# =========================================================================
+
+fn _xml_escape_x(s: text) -> text:
+    var r = s
+    r = r.replace("&", "&amp;")
+    r = r.replace("<", "&lt;")
+    r = r.replace(">", "&gt;")
+    r = r.replace("\"", "&quot;")
+    r
+
+fn _xlsx_cell_xml(sheet: Sheet, ref_str: text) -> text:
+    val cell = sheet.get_cell(ref_str)
+    match cell.value:
+        CellValue.NumberVal(value):
+            return "<c r=\"{ref_str}\"><v>{value}</v></c>"
+        CellValue.FormulaVal(expr, cached_display):
+            val f = _xml_escape_x(expr)
+            return "<c r=\"{ref_str}\"><f>{f}</f><v>{_xml_escape_x(cached_display)}</v></c>"
+        CellValue.BoolVal(value):
+            val b = if value: "1" else: "0"
+            return "<c r=\"{ref_str}\" t=\"b\"><v>{b}</v></c>"
+        CellValue.Empty:
+            return ""
+        _:
+            val display = _xml_escape_x(cell_display_text_of(sheet, ref_str))
+            return "<c r=\"{ref_str}\" t=\"inlineStr\"><is><t>{display}</t></is></c>"
+
+fn cell_display_text_of(sheet: Sheet, ref_str: text) -> text:
+    # tiny indirection to keep _xlsx_cell_xml readable
+    val cell = sheet.get_cell(ref_str)
+    match cell.value:
+        CellValue.TextVal(value):
+            return value
+        _:
+            return ""
+
+fn sheet_to_xlsx_bytes(sheet: Sheet) -> [u8]:
+    """Build a genuine .xlsx: content types, rels, workbook, one worksheet.
+    Text cells use inline strings (no sharedStrings part needed); formulas
+    carry both <f> and their cached <v>."""
+    val range_str = sheet.used_range()
+    val parts = range_str.split(":")
+    val start = parse_cell_ref(parts[0])
+    val end_ref = parse_cell_ref(parts[1])
+    var rows = ""
+    if start != nil and end_ref != nil:
+        var r = start.row
+        while r <= end_ref.row:
+            var cells = ""
+            var c = start.col
+            while c <= end_ref.col:
+                val ref_str = "{col_to_letter(c)}{r + 1}"
+                cells = "{cells}{_xlsx_cell_xml(sheet, ref_str)}"
+                c = c + 1
+            rows = "{rows}<row r=\"{r + 1}\">{cells}</row>"
+            r = r + 1
+    val ws = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><sheetData>{rows}</sheetData></worksheet>"
+    val name = _xml_escape_x(sheet.name)
+    val wb = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><sheets><sheet name=\"{name}\" sheetId=\"1\" r:id=\"rId1\"/></sheets></workbook>"
+    val wb_rels = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" Target=\"worksheets/sheet1.xml\"/></Relationships>"
+    val root_rels = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"xl/workbook.xml\"/></Relationships>"
+    val types = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/><Default Extension=\"xml\" ContentType=\"application/xml\"/><Override PartName=\"/xl/workbook.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml\"/><Override PartName=\"/xl/worksheets/sheet1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/></Types>"
+    var files: [ZipFile] = []
+    files.push(zip_text_file("[Content_Types].xml", types))
+    files.push(zip_text_file("_rels/.rels", root_rels))
+    files.push(zip_text_file("xl/workbook.xml", wb))
+    files.push(zip_text_file("xl/_rels/workbook.xml.rels", wb_rels))
+    files.push(zip_text_file("xl/worksheets/sheet1.xml", ws))
+    zip_write_stored(files)
+
+# =========================================================================
+# Real .ods writer
+# =========================================================================
+
+val _ODS_MANIFEST = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><manifest:manifest xmlns:manifest=\"urn:oasis:names:tc:opendocument:xmlns:manifest:1.0\" manifest:version=\"1.2\"><manifest:file-entry manifest:full-path=\"/\" manifest:media-type=\"application/vnd.oasis.opendocument.spreadsheet\"/><manifest:file-entry manifest:full-path=\"content.xml\" manifest:media-type=\"text/xml\"/></manifest:manifest>"
+
+fn sheet_to_ods_bytes(sheet: Sheet) -> [u8]:
+    """Build a genuine zipped .ods from a Sheet, reusing the flat-ODF body."""
+    val flat = sheet_to_fods(sheet)
+    val content = flat.replace("office:mimetype=\"application/vnd.oasis.opendocument.spreadsheet\"", "")
+    var files: [ZipFile] = []
+    files.push(zip_text_file("mimetype", "application/vnd.oasis.opendocument.spreadsheet"))
+    files.push(zip_text_file("META-INF/manifest.xml", _ODS_MANIFEST))
+    files.push(zip_text_file("content.xml", content))
+    zip_write_stored(files)
+
+# =========================================================================
+# Real .docx writer
+# =========================================================================
+
+fn _docx_run(span: TextSpan) -> text:
+    val content = "<w:t xml:space=\"preserve\">{_xml_escape_d(span.text)}</w:t>"
+    match span.style:
+        case Bold: return "<w:r><w:rPr><w:b/></w:rPr>{content}</w:r>"
+        case Italic: return "<w:r><w:rPr><w:i/></w:rPr>{content}</w:r>"
+        _: return "<w:r>{content}</w:r>"
+
+fn _xml_escape_d(s: text) -> text:
+    var r = s
+    r = r.replace("&", "&amp;")
+    r = r.replace("<", "&lt;")
+    r = r.replace(">", "&gt;")
+    r
+
+fn _docx_para(block: DocBlock) -> text:
+    var style = ""
+    match block.kind:
+        case Heading1: style = "<w:pPr><w:pStyle w:val=\"Heading1\"/></w:pPr>"
+        case Heading2: style = "<w:pPr><w:pStyle w:val=\"Heading2\"/></w:pPr>"
+        case Heading3: style = "<w:pPr><w:pStyle w:val=\"Heading3\"/></w:pPr>"
+        case BulletItem: style = "<w:pPr><w:pStyle w:val=\"ListParagraph\"/></w:pPr>"
+        _: style = ""
+    var runs = ""
+    for span in block.spans:
+        runs = "{runs}{_docx_run(span)}"
+    "<w:p>{style}{runs}</w:p>"
+
+fn document_to_docx_bytes(doc: RichDocument) -> [u8]:
+    """Build a genuine .docx: content types, rels, styles (Heading1-3 +
+    ListParagraph), and word/document.xml with styled runs (w:b/w:i)."""
+    var paras = ""
+    for block in doc.blocks:
+        paras = "{paras}{_docx_para(block)}"
+    val ns_w = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    val document = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><w:document xmlns:w=\"{ns_w}\"><w:body>{paras}</w:body></w:document>"
+    var styles = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><w:styles xmlns:w=\"{ns_w}\">"
+    for level in ["1", "2", "3"]:
+        styles = "{styles}<w:style w:type=\"paragraph\" w:styleId=\"Heading{level}\"><w:name w:val=\"heading {level}\"/><w:rPr><w:b/></w:rPr></w:style>"
+    styles = "{styles}<w:style w:type=\"paragraph\" w:styleId=\"ListParagraph\"><w:name w:val=\"List Paragraph\"/></w:style></w:styles>"
+    val types = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/><Default Extension=\"xml\" ContentType=\"application/xml\"/><Override PartName=\"/word/document.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml\"/><Override PartName=\"/word/styles.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml\"/></Types>"
+    val root_rels = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"word/document.xml\"/></Relationships>"
+    val doc_rels = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles\" Target=\"styles.xml\"/></Relationships>"
+    var files: [ZipFile] = []
+    files.push(zip_text_file("[Content_Types].xml", types))
+    files.push(zip_text_file("_rels/.rels", root_rels))
+    files.push(zip_text_file("word/document.xml", document))
+    files.push(zip_text_file("word/_rels/document.xml.rels", doc_rels))
+    files.push(zip_text_file("word/styles.xml", styles))
+    zip_write_stored(files)
+
+val _ODT_MANIFEST ="<?xml version=\"1.0\" encoding=\"UTF-8\"?><manifest:manifest xmlns:manifest=\"urn:oasis:names:tc:opendocument:xmlns:manifest:1.0\" manifest:version=\"1.2\"><manifest:file-entry manifest:full-path=\"/\" manifest:media-type=\"application/vnd.oasis.opendocument.text\"/><manifest:file-entry manifest:full-path=\"content.xml\" manifest:media-type=\"text/xml\"/></manifest:manifest>"
+
+fn document_to_odt_bytes(doc: RichDocument) -> [u8]:
+    """Build a genuine zipped .odt: mimetype (stored first, per spec),
+    META-INF/manifest.xml, and content.xml reusing the flat-ODF body."""
+    val flat = document_to_fodt(doc)
+    # Reuse the flat document's office:body by re-rooting it as content.xml
+    val content = flat.replace("office:mimetype=\"application/vnd.oasis.opendocument.text\"", "")
+    var files: [ZipFile] = []
+    files.push(zip_text_file("mimetype", "application/vnd.oasis.opendocument.text"))
+    files.push(zip_text_file("META-INF/manifest.xml", _ODT_MANIFEST))
+    files.push(zip_text_file("content.xml", content))
+    zip_write_stored(files)

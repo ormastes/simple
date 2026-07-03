@@ -1,0 +1,426 @@
+# Simple Office Suite
+#
+# Canonical entry point for the office suite CLI command.
+
+use std.sffi.cli (cli_get_args)
+use app.office.launcher.{build_launcher_ui}
+use app.office.word.word_app.{WordApp}
+use app.office.sheets.sheets_app.{SheetsApp}
+use app.office.slides.slides_app.{SlidesApp}
+use app.office.slides.slide.{Slide, slide_count, blank_slide, add_text_box, slide_update_text_checked}
+use app.office.mail.mail_app.{MailApp}
+use app.office.planner.planner_app.{PlannerApp}
+use app.office.counter.{CounterApp}
+use app.office.md_wysiwyg.{build_wysiwyg_view, wysiwyg_source_pane, wysiwyg_update_line_checked}
+use app.office.sheets.spreadsheet.{Sheet}
+use common.office.file_ops.{RecentFileStore}
+use app.office.sheets.cell.{cell_ref_to_string, parse_cell_ref}
+use app.office.render_adapter.{office_render, office_render_source}
+use app.office.file_formats.{parse_markdown_document, document_to_markdown, parse_csv_sheet, sheet_to_csv}
+use app.office.slides.deck_format.{parse_deck, deck_to_text}
+use app.office.odf_export.{document_to_fodt, sheet_to_fods}
+use app.office.pptx_export.{deck_to_pptx_bytes, pptx_bytes_to_deck}
+use app.office.odf_ooxml.{odt_bytes_to_document, docx_bytes_to_document, document_to_odt_bytes, document_to_docx_bytes, ods_bytes_to_sheet, xlsx_bytes_to_sheet, sheet_to_ods_bytes, sheet_to_xlsx_bytes}
+use app.office.interactive.{run_sheet_editor_mode, tui_new_state, tui_apply_key, tui_frame, editor_load_sheet, editor_save_sheet}
+
+extern fn rt_stdin_read_line() -> text
+
+fn _run_sheet_tui(in_path: text) -> i32:
+    """Keystroke-driven full-screen editing: arrow keys (ESC[C etc.) move,
+    typing edits the active cell, Enter commits with live recalculation,
+    s saves, q quits. Each stdin line is fed byte-by-byte through the pure
+    key state machine, then an Enter byte — so piped byte streams and cooked
+    terminals both drive the same editor. (rt_stdin_read_byte is not in the
+    module extern registry — recorded ceiling for true raw-mode keys.)"""
+    var state = tui_new_state(editor_load_sheet(in_path))
+    print tui_frame(state, in_path)
+    while not state.quit:
+        val line = rt_stdin_read_line()
+        if line == nil:
+            state = tui_apply_key(state, -1)
+        else:
+            var i = 0
+            while i < line.len() and not state.quit:
+                val ch = line.char_at(i)
+                state = tui_apply_key(state, ch.char_code_at(0))
+                if state.dirty:
+                    editor_save_sheet(state.sheet, in_path)
+                i = i + 1
+            if not state.quit:
+                state = tui_apply_key(state, 10)
+        if not state.quit and state.pending_esc == 0:
+            print tui_frame(state, in_path)
+    print "bye"
+    0
+use std.nogc_sync_mut.sffi.io.{file_read_bytes, file_write_bytes}
+use app.ui.render.types.{RenderConfig}
+use std.io_runtime.{write_file, read_file, file_exists}
+
+fn main() -> i64:
+    val args = _get_office_cli_args()
+    run_office(args).to_i64()
+
+fn _get_office_cli_args() -> [text]:
+    val all_args = cli_get_args()
+    var args: [text] = []
+    var start_idx = 1
+    var scan_idx = 0
+    while scan_idx < all_args.len():
+        if all_args[scan_idx].ends_with("/app/office/mod.spl") or all_args[scan_idx] == "src/app/office/mod.spl":
+            start_idx = scan_idx + 1
+            scan_idx = all_args.len()
+        else:
+            scan_idx = scan_idx + 1
+    var i = start_idx
+    while i < all_args.len():
+        args.push(all_args[i])
+        i = i + 1
+    if args.len() > 0 and args[0] == "office":
+        return args[1:]
+    args
+
+fn run_office(args: [text]) -> i32:
+    """Dispatch to the requested office app or show the launcher."""
+    val cmd = if args.len() > 0: args[0] else: "launcher"
+    match cmd:
+        "launcher" =>
+            val store = RecentFileStore.new(20)
+            val recent = store.get_recent(10)
+            val ui = build_launcher_ui(recent)
+            print "Simple Office Launcher loaded (root={ui.root_id}, recent={recent.len()})"
+            return 0
+        "word" =>
+            val app = WordApp.new()
+            val ui = app.build_ui()
+            print "Simple Word loaded (root={ui.root_id}, words={app.word_count()}, modified={app.modified})"
+            return 0
+        "sheets" =>
+            val app = SheetsApp.new()
+            val ui = app.build_ui()
+            val active_ref = cell_ref_to_string(app.active_cell)
+            print "Simple Sheets loaded (root={ui.root_id}, sheets={app.workbook.sheets.len()}, active={active_ref})"
+            return 0
+        "slides" =>
+            val app = SlidesApp.new()
+            val ui = app.build_ui()
+            print "Simple Slides loaded (root={ui.root_id}, slides={slide_count(app.presentation)}, modified={app.modified})"
+            return 0
+        "mail" =>
+            val app = MailApp.new()
+            val ui = app.build_ui()
+            print "Simple Mail loaded (root={ui.root_id}, emails={app.emails.len()}, unread={app.unread_count()})"
+            return 0
+        "planner" =>
+            val app = PlannerApp.new()
+            val ui = app.build_ui()
+            print "Simple Planner loaded (root={ui.root_id}, tasks={app.project.tasks.len()}, view={app.active_view})"
+            return 0
+        "counter" =>
+            val app = CounterApp.new()
+            val ui = app.build_ui()
+            print "Simple Counter loaded (root={ui.root_id}, value={app.value}, modified={app.modified})"
+            return 0
+        "render" =>
+            return _run_render_command(args)
+        "edit-sheet" =>
+            if args.len() < 2:
+                print "Usage: simple office edit-sheet <file.csv|.ods|.xlsx> [--screen]"
+                return 1
+            if args.len() > 2 and args[2] == "--tui":
+                return _run_sheet_tui(args[1])
+            val screen_mode = args.len() > 2 and args[2] == "--screen"
+            return run_sheet_editor_mode(args[1], screen_mode)
+        "open" =>
+            return _run_open_command(args)
+        "convert" =>
+            return _run_convert_command(args)
+        "md-edit" =>
+            return _run_markdown_edit_command(args)
+        "sheet-edit" =>
+            return _run_sheet_edit_command(args)
+        "slide-edit" =>
+            return _run_slide_edit_command(args)
+        case _("unsupported office app names show usage"):
+            print "Usage: simple office [launcher|word|sheets|slides|mail|planner|counter|render|open|convert|md-edit|sheet-edit|slide-edit]"
+            return 1
+
+fn _basename(path: text) -> text:
+    val parts = path.split("/")
+    if parts.len() == 0:
+        return path
+    parts[parts.len() - 1]
+
+fn _run_open_command(args: [text]) -> i32:
+    """Open a real document file and render it to a styled HTML page.
+
+    Usage: simple office open <word|sheets|slides> <in-file> [out.html]"""
+    if args.len() < 3:
+        print "Usage: simple office open <word|sheets|slides> <in-file> [out.html]"
+        return 1
+    val surface = args[1]
+    val in_path = args[2]
+    if not file_exists(in_path):
+        print "office-open: rejected (missing-file: {in_path})"
+        return 2
+    val content = read_file(in_path)
+    val result = office_render_source(surface, _basename(in_path), content)
+    print result.text_output
+    if args.len() > 3:
+        val out_path = args[3]
+        if write_file(out_path, result.html_output):
+            print "office-open: wrote {result.html_output.len()} bytes to {out_path}"
+            return 0
+        print "office-open: failed to write {out_path}"
+        return 2
+    return 0
+
+fn _run_convert_command(args: [text]) -> i32:
+    """Round-trip a document through parse+serialize, proving persistence.
+
+    Usage: simple office convert <word|sheets|slides> <in-file> <out-file>"""
+    if args.len() < 4:
+        print "Usage: simple office convert <word|sheets|slides> <in-file> <out-file>"
+        return 1
+    val surface = args[1]
+    val in_path = args[2]
+    val out_path = args[3]
+    if not file_exists(in_path):
+        print "office-convert: rejected (missing-file: {in_path})"
+        return 2
+    var serialized = ""
+    if surface == "word" or surface == "writer":
+        var doc = parse_markdown_document("", _basename(in_path))
+        if in_path.ends_with(".odt") or in_path.ends_with(".docx"):
+            val zip_bytes = file_read_bytes(in_path)
+            if zip_bytes == nil:
+                print "office-convert: rejected (unreadable: {in_path})"
+                return 2
+            if in_path.ends_with(".odt"):
+                doc = odt_bytes_to_document(zip_bytes, _basename(in_path))
+            else:
+                doc = docx_bytes_to_document(zip_bytes, _basename(in_path))
+        else:
+            doc = parse_markdown_document(read_file(in_path), _basename(in_path))
+        if out_path.ends_with(".odt"):
+            val odt = document_to_odt_bytes(doc)
+            if file_write_bytes(out_path, odt):
+                print "office-convert: {surface} {in_path} -> {out_path} ({odt.len()} bytes, odt)"
+                return 0
+            print "office-convert: failed to write {out_path}"
+            return 2
+        if out_path.ends_with(".fodt"):
+            serialized = document_to_fodt(doc)
+        else:
+            serialized = document_to_markdown(doc)
+    elif surface == "sheets" or surface == "calc" or surface == "excel":
+        var sheet = Sheet.new(_basename(in_path))
+        if in_path.ends_with(".ods") or in_path.ends_with(".xlsx"):
+            val zip_bytes = file_read_bytes(in_path)
+            if zip_bytes == nil:
+                print "office-convert: rejected (unreadable: {in_path})"
+                return 2
+            if in_path.ends_with(".ods"):
+                sheet = ods_bytes_to_sheet(zip_bytes, _basename(in_path))
+            else:
+                sheet = xlsx_bytes_to_sheet(zip_bytes, _basename(in_path))
+        else:
+            sheet = parse_csv_sheet(read_file(in_path), _basename(in_path))
+        if out_path.ends_with(".ods") or out_path.ends_with(".xlsx"):
+            val container = if out_path.ends_with(".ods"): sheet_to_ods_bytes(sheet) else: sheet_to_xlsx_bytes(sheet)
+            if file_write_bytes(out_path, container):
+                print "office-convert: {surface} {in_path} -> {out_path} ({container.len()} bytes, zip)"
+                return 0
+            print "office-convert: failed to write {out_path}"
+            return 2
+        if out_path.ends_with(".fods"):
+            serialized = sheet_to_fods(sheet)
+        else:
+            serialized = sheet_to_csv(sheet)
+    elif surface == "slides" or surface == "impress" or surface == "ppt":
+        var deck: [Slide] = []
+        if in_path.ends_with(".pptx"):
+            val zip_bytes = file_read_bytes(in_path)
+            if zip_bytes == nil:
+                print "office-convert: rejected (unreadable: {in_path})"
+                return 2
+            deck = pptx_bytes_to_deck(zip_bytes)
+        else:
+            deck = parse_deck(read_file(in_path))
+        if out_path.ends_with(".pptx"):
+            val pptx = deck_to_pptx_bytes(deck)
+            if file_write_bytes(out_path, pptx):
+                print "office-convert: {surface} {in_path} -> {out_path} ({pptx.len()} bytes, pptx)"
+                return 0
+            print "office-convert: failed to write {out_path}"
+            return 2
+        serialized = deck_to_text(deck)
+    else:
+        print "office-convert: rejected (unsupported-surface: {surface})"
+        return 1
+    if write_file(out_path, serialized):
+        print "office-convert: {surface} {in_path} -> {out_path} ({serialized.len()} bytes)"
+        return 0
+    print "office-convert: failed to write {out_path}"
+    return 2
+
+fn _run_render_command(args: [text]) -> i32:
+    """Render an office surface to a styled HTML page.
+
+    Usage: simple office render [word|sheets|slides|suite] [out.html]"""
+    val surface = if args.len() > 1: args[1] else: "suite"
+    var cfg = RenderConfig.html_export()
+    cfg.adapter_name = surface
+    val result = office_render(cfg)
+    print result.text_output
+    if args.len() > 2:
+        val out_path = args[2]
+        if write_file(out_path, result.html_output):
+            print "office-render: wrote {result.html_output.len()} bytes to {out_path}"
+            return 0
+        print "office-render: failed to write {out_path}"
+        return 2
+    return 0
+
+fn _decode_office_cli_text(value: text) -> text:
+    value.replace("\\n", "\n")
+
+fn _is_office_cli_non_negative_i32_token(value: text) -> bool:
+    if value.len() == 0:
+        return false
+    if value.len() > 9:
+        return false
+    var i = 0
+    while i < value.len():
+        val c = value.char_at(i)
+        val code = c.char_code_at(0)
+        if code < 48 or code > 57:
+            return false
+        i = i + 1
+    true
+
+fn _run_markdown_edit_command(args: [text]) -> i32:
+    if args.len() != 5:
+        print "Usage: simple office md-edit <line> <expected> <new> <source>"
+        return 1
+    if not _is_office_cli_non_negative_i32_token(args[1]):
+        print "office-md-edit: rejected (invalid-line)"
+        print "@@ line {args[1]} @@\nexpected: {args[2]}\nactual: <invalid-line>\nrejected: {args[3]}"
+        return 2
+    val line_no = args[1].to_i32()
+    val expected = _decode_office_cli_text(args[2])
+    val replacement = _decode_office_cli_text(args[3])
+    val source = _decode_office_cli_text(args[4])
+    val view = build_wysiwyg_view(source)
+    val result = wysiwyg_update_line_checked(view, line_no, expected, replacement)
+    if result.accepted:
+        print "office-md-edit: updated"
+        print result.diff
+        print wysiwyg_source_pane(result.view).replace("\n", "\\n")
+        return 0
+    print "office-md-edit: rejected ({result.reason})"
+    print result.diff
+    return 2
+
+fn _load_sheet_cli_source(source: text) -> Sheet:
+    val sheet = Sheet.new("CLI")
+    val decoded = _decode_office_cli_text(source)
+    val entries = decoded.split(";")
+    for entry in entries:
+        val trimmed = entry.trim()
+        if trimmed.len() > 0:
+            val parts = trimmed.split("=")
+            if parts.len() >= 2:
+                val ref_str = parts[0].trim()
+                val value = parts[1:].join("=")
+                if parse_cell_ref(ref_str) != nil:
+                    sheet.set_value(ref_str, value)
+    sheet
+
+fn _sheet_cli_source_error(source: text) -> text:
+    val decoded = _decode_office_cli_text(source)
+    val entries = decoded.split(";")
+    for entry in entries:
+        val trimmed = entry.trim()
+        if trimmed.len() > 0:
+            val parts = trimmed.split("=")
+            if parts.len() < 2:
+                return "malformed-source-entry"
+            val ref_str = parts[0].trim()
+            if parse_cell_ref(ref_str) == nil:
+                return "invalid-source-ref"
+    ""
+
+fn _run_sheet_edit_command(args: [text]) -> i32:
+    if args.len() != 5:
+        print "Usage: simple office sheet-edit <cell> <expected> <new> <sheet-source>"
+        return 1
+    val cell_ref = args[1]
+    val expected = _decode_office_cli_text(args[2])
+    val replacement = _decode_office_cli_text(args[3])
+    val source_error = _sheet_cli_source_error(args[4])
+    if source_error != "":
+        print "office-sheet-edit: rejected ({source_error})"
+        return 2
+    val sheet = _load_sheet_cli_source(args[4])
+    val result = sheet.update_cell_checked(cell_ref, expected, replacement)
+    if result.accepted:
+        print "office-sheet-edit: updated"
+        print result.diff
+        print "{result.cell_ref}={result.new_value}"
+        return 0
+    print "office-sheet-edit: rejected ({result.reason})"
+    print result.diff
+    return 2
+
+fn _slide_cli_source_error(source: text) -> text:
+    val decoded = _decode_office_cli_text(source)
+    val entries = decoded.split(";")
+    for entry in entries:
+        val trimmed = entry.trim()
+        if trimmed.len() > 0:
+            val parts = trimmed.split("=")
+            if parts.len() < 2:
+                return "malformed-source-entry"
+            val element_id = parts[0].trim()
+            if element_id == "":
+                return "missing-element-id"
+    ""
+
+fn _load_slide_cli_source(source: text) -> Slide:
+    var slide = blank_slide("cli_slide")
+    val decoded = _decode_office_cli_text(source)
+    val entries = decoded.split(";")
+    var offset: i32 = 0
+    for entry in entries:
+        val trimmed = entry.trim()
+        if trimmed.len() > 0:
+            val parts = trimmed.split("=")
+            if parts.len() >= 2:
+                val element_id = parts[0].trim()
+                val value = parts[1:].join("=")
+                if element_id != "":
+                    slide = add_text_box(slide, element_id, value, 40, 40 + offset, 840, 60)
+                    offset = offset + 72
+    slide
+
+fn _run_slide_edit_command(args: [text]) -> i32:
+    if args.len() != 5:
+        print "Usage: simple office slide-edit <element-id> <expected> <new> <slide-source>"
+        return 1
+    val element_id = args[1]
+    val expected = _decode_office_cli_text(args[2])
+    val replacement = _decode_office_cli_text(args[3])
+    val source_error = _slide_cli_source_error(args[4])
+    if source_error != "":
+        print "office-slide-edit: rejected ({source_error})"
+        return 2
+    val slide = _load_slide_cli_source(args[4])
+    val result = slide_update_text_checked(slide, element_id, expected, replacement)
+    if result.accepted:
+        print "office-slide-edit: updated"
+        print result.diff
+        print "{result.element_id}={result.new_value}"
+        return 0
+    print "office-slide-edit: rejected ({result.reason})"
+    print result.diff
+    return 2

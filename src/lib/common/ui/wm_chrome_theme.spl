@@ -1,0 +1,70 @@
+# WM chrome theme accessor — single source of truth for window-manager
+# chrome colors (titlebars, borders, desktop/taskbar backgrounds, close
+# button). Previously these were hardcoded color literals scattered across
+# three render pipelines:
+#   - common/ui/window_scene_draw_ir.spl      (Draw IR projection)
+#   - common/ui/window_scene.spl              (chrome background hex)
+#   - os/compositor/host_compositor_entry.spl (direct backend draw)
+#   - os/compositor/wm_scene.spl              (modern theme config)
+#
+# The defaults returned here reproduce those literals byte-for-byte so that
+# all existing bitmap-evidence gates keep passing unchanged. A theme can be
+# installed at runtime via register_wm_chrome_theme(); wm_chrome_theme() then
+# returns the installed colors, which flows into every chrome pipeline.
+#
+# Design: composition + a module-level override var (same idiom as
+# widget_store_ops.spl). No inheritance.
+
+struct WmChromeColors:
+    desktop_bg: u32          # dark desktop backdrop (0xff101418)
+    compositor_bg: u32       # slate desktop backdrop (0xff0f172a)
+    command_lane: u32        # top command lane fill
+    taskbar: u32             # taskbar fill
+    text_primary: u32        # clock / title / label text
+    title_focused: u32       # focused window titlebar
+    title_unfocused: u32     # idle window titlebar
+    window_shadow: u32       # window drop shadow
+    window_body: u32         # window body fill (draw_ir)
+    host_window_body: u32    # window body fill (host compositor)
+    accent: u32              # accent (host titlebar + modern accent)
+    close_button: u32        # window close control
+    background_hex: text     # chrome background as css hex ("#101418")
+
+fn wm_chrome_theme_defaults() -> WmChromeColors:
+    WmChromeColors(
+        desktop_bg: 0xff101418u32,
+        compositor_bg: 0xff0f172au32,
+        command_lane: 0xff182027u32,
+        taskbar: 0xff151a20u32,
+        text_primary: 0xffffffffu32,
+        title_focused: 0xff2f80edu32,
+        title_unfocused: 0xff25313au32,
+        window_shadow: 0x33000000u32,
+        window_body: 0xff20262du32,
+        host_window_body: 0xff1e293bu32,
+        accent: 0xff2563ebu32,
+        close_button: 0xffcc3333u32,
+        background_hex: "#101418"
+    )
+
+# Override slot: empty = use defaults, one element = installed theme.
+# List sentinel (same idiom as widget_store_ops.spl's _widget_registry) — the
+# only module-global shape that round-trips a struct value correctly under the
+# compiled/test interpreter. Reads happen once per scene projection.
+var _wm_chrome_override: [WmChromeColors] = []
+
+fn wm_chrome_theme() -> WmChromeColors:
+    """Return the active WM chrome colors — the installed theme if one is
+    registered, otherwise the byte-identical default literals."""
+    if _wm_chrome_override.len() > 0:
+        return _wm_chrome_override[0]
+    wm_chrome_theme_defaults()
+
+fn register_wm_chrome_theme(colors: WmChromeColors):
+    """Install a WM chrome palette. All chrome pipelines pick it up on the
+    next scene projection / render."""
+    _wm_chrome_override = [colors]
+
+fn reset_wm_chrome_theme():
+    """Restore the byte-identical default palette."""
+    _wm_chrome_override = []

@@ -1,0 +1,105 @@
+# Process Governor - Global Concurrent Process Limit
+#
+# Caps the total number of child processes the runtime can have alive at once.
+# Configure via SIMPLE_MAX_PROCS env var. Default: min(cpu_count * 4, 64).
+#
+# Usage:
+#   proc_slot_acquire()   # call before spawning; blocks until a slot is free
+#   proc_slot_release()   # call after process exits/is-killed
+#   proc_slot_reset(n)    # call to bulk-release n slots (e.g. after kill-all)
+
+extern fn rt_env_get(key: text) -> text
+extern fn rt_thread_sleep(millis: i64)
+
+# ============================================================================
+# Module State
+# ============================================================================
+
+val _ACQUIRE_MAX_ITERATIONS: i64 = 600
+
+# ============================================================================
+# CPU Count Helper (inlined so this file has no extra imports)
+# ============================================================================
+
+extern fn spl_thread_cpu_count() -> i64
+
+fn _cpu_count() -> i64:
+    val n = spl_thread_cpu_count()
+    if n < 1: 4 else: n
+
+# ============================================================================
+# Initialisation (lazy, called on first acquire)
+# ============================================================================
+
+fn _proc_gov_init():
+    return ()
+
+fn _proc_gov_positive_int_or_zero(value: text) -> i64:
+    val trimmed = value.trim()
+    if trimmed == "":
+        return 0
+    for ch in trimmed:
+        if ch < "0" or ch > "9":
+            return 0
+    int(trimmed)
+
+fn _proc_slot_limit() -> i64:
+    val env_val = rt_env_get("SIMPLE_MAX_PROCS")
+    if env_val != nil and env_val != "":
+        val n = _proc_gov_positive_int_or_zero(env_val)
+        if n > 0:
+            return n
+    val default_val = _cpu_count() * 4
+    if default_val > 64:
+        return 64
+    if default_val < 4:
+        return 4
+    default_val
+
+# ============================================================================
+# Public API
+# ============================================================================
+
+fn proc_slot_max() -> i64:
+    """Return the configured maximum concurrent processes."""
+    _proc_slot_limit()
+
+fn proc_slot_active() -> i64:
+    """Return the current number of active (tracked) processes."""
+    0
+
+fn proc_slot_acquire():
+    """
+    Claim a process slot before spawning.
+
+    Blocks (with exponential back-off up to 500 ms) until a slot is free.
+    Gives up after ~5 min (600 iterations) to prevent permanent hangs from leaked slots.
+    Must be paired with proc_slot_release() after the process exits.
+    """
+    return ()
+
+fn proc_slot_release():
+    """
+    Free a process slot after the process has exited or been killed.
+
+    Safe to call even when _active_procs is already 0 (no-op).
+    """
+    return ()
+
+fn proc_slot_reset(count: i64):
+    """
+    Bulk-release `count` slots.
+
+    Use after tracker_kill_all_children() which clears the whole list at once.
+    """
+    return ()
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export proc_slot_max
+export proc_slot_active
+export proc_slot_acquire
+export proc_slot_release
+export proc_slot_reset

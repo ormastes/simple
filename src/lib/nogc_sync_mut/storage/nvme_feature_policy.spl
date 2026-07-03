@@ -1,0 +1,107 @@
+# NVMe feature policy for NVFS/DBFS storage classes.
+#
+# Converts probed namespace facts into conservative backend decisions.
+# This keeps Samsung enterprise devices on the fastest safe conventional path
+# when FDP/ZNS are absent while still using physical-block, discard, and
+# optimal-I/O hints.
+
+use std.storage.storage_class.{StorageClass}
+
+struct NvmeFeatureFacts:
+    model: text
+    logical_block_bytes: i64
+    physical_block_bytes: i64
+    optimal_io_bytes: i64
+    discard_max_bytes: i64
+    write_zeroes_max_bytes: i64
+    zone_append_max_bytes: i64
+    fua_supported: bool
+    write_through: bool
+    fdp_supported: bool
+    zns_supported: bool
+
+struct StorageClassPolicy:
+    class_name: text
+    backend: text
+    io_unit_bytes: i64
+    batch_bytes: i64
+    uses_discard: bool
+    uses_write_zeroes: bool
+    uses_flush: bool
+    placement_id: i64
+
+fn samsung_mzql2960hcjr_sysfs_facts() -> NvmeFeatureFacts:
+    """Facts observed from sysfs for SAMSUNG MZQL2960HCJR-00A07 on this host."""
+    NvmeFeatureFacts(
+        model: "SAMSUNG MZQL2960HCJR-00A07",
+        logical_block_bytes: 512,
+        physical_block_bytes: 4096,
+        optimal_io_bytes: 131072,
+        discard_max_bytes: 2199023255040,
+        write_zeroes_max_bytes: 2097152,
+        zone_append_max_bytes: 0,
+        fua_supported: false,
+        write_through: true,
+        fdp_supported: false,
+        zns_supported: false,
+    )
+
+fn nvme_policy_has_discard(facts: NvmeFeatureFacts) -> bool:
+    facts.discard_max_bytes > 0
+
+fn nvme_policy_has_write_zeroes(facts: NvmeFeatureFacts) -> bool:
+    facts.write_zeroes_max_bytes > 0
+
+fn nvme_policy_io_unit(facts: NvmeFeatureFacts) -> i64:
+    if facts.physical_block_bytes > facts.logical_block_bytes:
+        return facts.physical_block_bytes
+    facts.logical_block_bytes
+
+fn nvme_policy_batch_bytes(facts: NvmeFeatureFacts, class: StorageClass) -> i64:
+    if facts.optimal_io_bytes > 0:
+        match class:
+            case StorageClass.DB_WAL:
+                facts.optimal_io_bytes
+            case StorageClass.MODEL_IMMUTABLE:
+                facts.optimal_io_bytes
+            case StorageClass.CHECKPOINT_SNAPSHOT:
+                facts.optimal_io_bytes
+            case _:
+                nvme_policy_io_unit(facts)
+    else:
+        nvme_policy_io_unit(facts)
+
+fn nvme_policy_backend(facts: NvmeFeatureFacts, class: StorageClass) -> text:
+    if facts.zns_supported and facts.zone_append_max_bytes > 0 and class.is_append_only():
+        return "zns-zone-append"
+    if facts.fdp_supported:
+        return "fdp-placement"
+    "conventional-nvme"
+
+fn nvme_policy_placement_id(class: StorageClass) -> i64:
+    match class:
+        case StorageClass.META_DURABLE: 1
+        case StorageClass.MetaDurable: 1
+        case StorageClass.DB_WAL: 2
+        case StorageClass.DB_TEMP: 3
+        case StorageClass.MODEL_IMMUTABLE: 4
+        case StorageClass.GENERAL_MUTABLE: 5
+        case StorageClass.CHECKPOINT_SNAPSHOT: 6
+
+fn nvme_policy_for_class(facts: NvmeFeatureFacts, class: StorageClass) -> StorageClassPolicy:
+    StorageClassPolicy(
+        class_name: class.to_string(),
+        backend: nvme_policy_backend(facts, class),
+        io_unit_bytes: nvme_policy_io_unit(facts),
+        batch_bytes: nvme_policy_batch_bytes(facts, class),
+        uses_discard: nvme_policy_has_discard(facts),
+        uses_write_zeroes: nvme_policy_has_write_zeroes(facts),
+        uses_flush: facts.write_through or facts.fua_supported,
+        placement_id: nvme_policy_placement_id(class),
+    )
+
+fn nvme_policy_summary(facts: NvmeFeatureFacts) -> text:
+    val zone = if facts.zns_supported: "zns" else: "conventional"
+    val fdp = if facts.fdp_supported: "fdp" else: "no-fdp"
+    val discard = if nvme_policy_has_discard(facts): "discard" else: "no-discard"
+    "{facts.model}:{zone}:{fdp}:{discard}:phys={facts.physical_block_bytes}:opt={facts.optimal_io_bytes}"
