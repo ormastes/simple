@@ -24,6 +24,7 @@ either RV32 or RV64.
 
 `sh scripts/check/check-riscv-rtl-linux-smoke.shs --timeout=10`
 
+- FAIL: missing `examples/09_embedded/fpga_riscv/rtl`.
 - FAIL: missing `examples/09_embedded/fpga_riscv/sw/generated_rv32_smoke.s`.
 - FAIL: missing `examples/09_embedded/fpga_riscv/sw/generated_rv64_linux_handoff_smoke.s`.
 
@@ -37,12 +38,13 @@ of stopping after the first missing artifact.
 
 1. Restore or generate the RV32 and RV64 smoke assembly payloads used by the
    generated RTL Linux smoke runners.
-2. Install or provide `yosys` if synthesis/formal checks are part of the local
+2. Restore or regenerate the `examples/09_embedded/fpga_riscv/rtl` VHDL testbench tree.
+3. Install or provide `yosys` if synthesis/formal checks are part of the local
    production gate.
-3. Free the FT4232H JTAG interface before physical FPGA programming.
-4. Produce current RV64 FPGA SimpleOS ELF/bin/bitstream artifacts.
-5. Add equivalent RV32 SimpleOS FPGA artifact evidence, not only RV64.
-6. Prove physical UART boot markers and SimpleOS payload execution on the board.
+4. Free the FT4232H JTAG interface before physical FPGA programming.
+5. Produce current RV64 FPGA SimpleOS ELF/bin/bitstream artifacts.
+6. Add equivalent RV32 SimpleOS FPGA artifact evidence, not only RV64.
+7. Prove physical UART boot markers and SimpleOS payload execution on the board.
 
 ## Next Small Step
 

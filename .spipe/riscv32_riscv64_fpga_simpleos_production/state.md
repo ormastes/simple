@@ -27,8 +27,8 @@ N/A for this slice: this turn only fixes existing smoke wrappers and records blo
   - PASS: FT4232H USB present, serial ports present, openFPGALoader, OpenOCD, Vivado, RISC-V cross compilers, Simple hello.
   - FAIL: JTAG interface free, yosys, SimpleOS ELF artifact, SimpleOS bin artifact, SimpleOS bitstream artifact.
 - `sh scripts/check/check-riscv-rtl-linux-smoke.shs --timeout=10`:
-  - FAIL `generated_rv32_linux check-tools`: missing `examples/09_embedded/fpga_riscv/sw/generated_rv32_smoke.s`.
-  - FAIL `generated_rv64_linux check-tools`: missing `examples/09_embedded/fpga_riscv/sw/generated_rv64_linux_handoff_smoke.s`.
+  - FAIL `generated_rv32_linux check-tools`: missing `examples/09_embedded/fpga_riscv/rtl` and `examples/09_embedded/fpga_riscv/sw/generated_rv32_smoke.s`.
+  - FAIL `generated_rv64_linux check-tools`: missing `examples/09_embedded/fpga_riscv/rtl` and `examples/09_embedded/fpga_riscv/sw/generated_rv64_linux_handoff_smoke.s`.
 
 ## Phase
 dev-in-progress
