@@ -299,7 +299,8 @@ impl HirLowering:
 
         var fields: [HirField] = []
         for f in class_fields:
-            fields = fields.push(self.lower_field(f))
+            val cf: Field = f
+            fields = fields.push(self.lower_field(cf))
 
         var methods: Dict<text, SymbolId> = {}
         val previous_self_type = self.current_method_self_type
@@ -379,7 +380,8 @@ impl HirLowering:
 
         var fields: [HirField] = []
         for f in struct_fields:
-            fields = fields.push(self.lower_field(f))
+            val sf: Field = f
+            fields = fields.push(self.lower_field(sf))
 
         # Compute effective visibility using filename matching
         val effective_visibility = self.compute_visibility(struct_name, struct_visibility)
@@ -414,27 +416,37 @@ impl HirLowering:
         )
 
     me lower_field(f: Field) -> HirField:
-        val type_ = self.lower_type(f.type_)
-        val symbol = self.symbols.define(f.name, SymbolKind.Field, Some(type_), f.span, f.visibility, false, nil)
+        # Typed rebind before any field access. On the stage4 unstub path the
+        # `f` param arrives ANY-erased (callers iterate `for f in struct_fields`
+        # / `class_fields` on an ANY-typed [Field]); reading `f.type_`/`f.name`
+        # off an ANY receiver hits the seed's most-fields-wins field resolver ->
+        # WRONG field index -> nil -> SIGSEGV inside lower_type. Binding to a
+        # `Field`-typed local restores correct field-index resolution (same
+        # idiom as interpreter process_module; bug: struct/class run file
+        # SIGSEGVs on the unstub path, iteration 19).
+        val fld: Field = f
+        val fld_type = fld.type_
+        val type_ = self.lower_type(fld_type)
+        val symbol = self.symbols.define(fld.name, SymbolKind.Field, Some(type_), fld.span, fld.visibility, false, nil)
 
         # Lower default without closures to avoid bootstrap SSA issues
-        val lowered_default = if f.default.?:
-            Some(self.lower_hir_expr(f.default.unwrap()))
+        val lowered_default = if fld.default.?:
+            Some(self.lower_hir_expr(fld.default.unwrap()))
         else:
             nil
 
         HirField(
             symbol: symbol,
-            name: f.name,
+            name: fld.name,
             type_: type_,
             default: lowered_default,
-            visibility: f.visibility,
-            is_public: f.is_public,
-            is_volatile: f.is_volatile,
-            has_bits_attr: f.has_bits,
-            bits_width: f.bits,
-            fixed_address: f.fixed_address,
-            span: f.span
+            visibility: fld.visibility,
+            is_public: fld.is_public,
+            is_volatile: fld.is_volatile,
+            has_bits_attr: fld.has_bits,
+            bits_width: fld.bits,
+            fixed_address: fld.fixed_address,
+            span: fld.span
         )
 
     me lower_enum(enum_: Enum) -> HirEnum:
