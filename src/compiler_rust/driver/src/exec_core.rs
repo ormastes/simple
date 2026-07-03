@@ -844,7 +844,10 @@ fn source_uses_jit_unsafe_graphics_runtime(path: &Path) -> bool {
     let Ok(source) = std::fs::read_to_string(path) else {
         return false;
     };
-    source.contains("window_winit") || source.contains("gpu.engine2d")
+    // gpu.engine2d sources JIT by default since the cross-module private-symbol
+    // collision fix (cranelift_f32_trig_wrapper_codegen_2026-07-02 Residual).
+    // Escape hatch: SIMPLE_EXECUTION_MODE=interpreter.
+    source.contains("window_winit")
 }
 
 fn panic_payload_to_string(payload: &(dyn std::any::Any + Send)) -> String {
@@ -939,6 +942,20 @@ mod tests {
 
         assert!(source_uses_jit_unsafe_graphics_runtime(&script));
         assert!(should_prefer_interpreter_for_source(&script, "spl"));
+    }
+
+    #[test]
+    fn engine2d_sources_stay_on_jit_path() {
+        let dir = tempdir().unwrap();
+        let script = dir.path().join("game2d.spl");
+        fs::write(
+            &script,
+            "use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}\nfn main():\n    print \"game\"\n",
+        )
+        .unwrap();
+
+        assert!(!source_uses_jit_unsafe_graphics_runtime(&script));
+        assert!(!should_prefer_interpreter_for_source(&script, "spl"));
     }
 
     #[test]

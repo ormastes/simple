@@ -37,3 +37,9 @@ pub use parallel::{
     ParallelMirLowerer,
 };
 pub use simple_parser::Visibility;
+
+/// Sentinel vtable slot for virtual calls through a trait with no
+/// `impl Trait for Type` in the unit (duck-typed dispatch — no object ever
+/// carries that vtable). Codegen emits a named diagnostic + trap instead of
+/// dispatching; see bug jit_game2d_backend_method_dispatch_sigsegv_2026-07-02.
+pub const DUCK_DISPATCH_UNSUPPORTED_SLOT: u32 = u32::MAX;

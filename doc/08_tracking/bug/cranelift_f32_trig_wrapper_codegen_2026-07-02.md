@@ -106,16 +106,71 @@ rejected by the stricter JIT lowering (W1006).
   `float_unit_spec`, `float_edge_spec`, `common/math/math_spec` all PASS.
   (`engine3d_spec` fails identically on the pre-fix seed — pre-existing.)
 
-## Residual (blocks full rollball-under-JIT; separate bugs)
+## Residual — 2026-07-04 update: rollball now FULLY PASSES under JIT
 
-- 150 ms > 33 ms target for even the unlit scene on this loaded host; profile
-  once the host is idle.
-- `simple run` routes any source containing "gpu.engine2d" to the interpreter
-  (`should_prefer_interpreter_for_source`); rollball imports engine2d, so it
-  needs `SIMPLE_EXECUTION_MODE=jit` to JIT at all.
-- Under forced JIT, rollball still crashes: cross-module private-symbol
-  collision `_sin/_cos/_sqrt/_tan` ((f32)->f32 vs (f64)->f64, last-write-wins
-  — the compiler itself warns SIGSEGV) and unresolved `Array.add_static` /
-  `Array.add_dynamic` method calls.
+`GAME3D_ROLLBALL PASS`, all 10 gates (SESSION/WINSTATE/LOSESTATE/DISTINCT/
+MOTION/OCCLUSION/CAMERA/VULKAN/HUD + evidence PPMs), fully JIT-compiled, no
+env override needed. Physics matches the interpreter to ~13 significant
+digits (win final x=9.0554 JIT vs 9.0724 interp — fp reassociation only).
+800x600 perf probe: p95 **12,386.8 ms interpreted → 172.5 ms JIT (~72x)** on
+this loaded 7.4 GiB host (probe reports p95-of-5 only; no p50 output).
+`GAME3D_SMOKE PASS` fully JIT. Specs green under the fixed seed: `math3d`,
+`vec3`, `mat4`, `float_unit`, `float_edge`, `common/math/math_spec`.
+
+Fixed in this pass (all seed-side):
+
+- Cross-module private `_sin/_cos/_sqrt/_tan` f32-vs-f64 collision: colliding
+  bare `_name` defs are emitted as `_name$dupN` and call sites resolve by
+  exact arg-type match (arity-unique → extern → last-def fallback)
+  (`mir/lower/lowering_core.rs`, `lowering_expr_call.rs`).
+- `Array.add_dynamic`/`add_static` unresolved: duplicate `PhysicsWorld3D`
+  class in the flattened unit (physics/world3d.spl pulled simple/world3d.spl
+  just for `Joint3D`) mis-typed `self.bodies` as the other class's array
+  field. Fixed by extracting `simple/joints3d_data.spl` (both nogc trees).
+- `gpu.engine2d` no longer routed to the interpreter by
+  `should_prefer_interpreter_for_source` (`driver/src/exec_core.rs`).
+- Module-level typed f32/f64 globals initialized to 0.0 under codegen:
+  `try_const_eval` had no float path → initializer dropped. Rollball's
+  START_X/GOAL_X/VEL_CAP were all 0.0 (ball "won" at step 1)
+  (`hir/lower/module_lowering/module_pass.rs`).
+- Global const arrays with suffixed literals (`18842895918i64`, the shared
+  5x7 font table) silently dropped → zero glyphs (HUD FAIL) or SIGSEGV via
+  the trusted inline `len` deref of the zero slot; `try_const_eval` now
+  accepts `Expr::TypedInteger`.
+- `x ** 0.5` miscompiled: float Pow used an integer-exponent fmul loop
+  (`fcvt_to_sint(0.5)` = 0 → x**0 = 1.0; broke `math_sqrt`). Now calls
+  `rt_math_pow` (`codegen/instr/core.rs`).
+- Raw f64-bits-in-i64 call args (cross-block floats) were VALUE-converted by
+  `adapt_value_to_type`'s int→float arm — `math_sqrt(dist_sq)` computed
+  sqrt(4.6e18)≈2.14e9 in the physics narrowphase (ball fell through the
+  floor). Args typed F32/F64 in `vreg_types` are now bitcast back to f64
+  before signature adaptation (`codegen/instr/calls.rs`).
+- Statically-typed concrete receivers with their own `Type.method` are
+  devirtualized (direct call) instead of vtable-dispatched — fixes
+  `SoftwareBackend.init` SIGSEGV (`mir/lower/lowering_core.rs`).
+
+Still open (separate bugs):
+
+- 172 ms > 33 ms G4.2 target for the 800x600 probe on this loaded host;
+  profile when idle.
+- Duck-typed trait dispatch (trait with zero `impl Trait for ...`, e.g.
+  game2d `App`/`GameBackend` driving `LoopDriver.step`) has no vtable to
+  dispatch through. Live sites now emit a named runtime diagnostic + trap
+  (sentinel `DUCK_DISPATCH_UNSUPPORTED_SLOT`) instead of silently jumping
+  through field data; dead sites cost nothing. Breakout headless therefore
+  still needs `SIMPLE_EXECUTION_MODE=interpreter` (completes 120 frames) —
+  real fix tracked in jit_game2d_backend_method_dispatch_sigsegv_2026-07-02.
+- `imported_fn(...) ?? default` corrupts the result under JIT (e.g.
+  `env_get("X") ?? "all"` → empty; broke `SIMPLE_ROLLBALL_MODE` routing —
+  perf-only mode falls through to "all"). Direct extern + `??` and local fn
+  + `??` are fine; imported-wrapper + `??` is the failing shape.
+- Untyped module-level float globals (`val A = -9.0`, type ANY) and
+  `arr.len()` results type-inferred as the array's own type (prints "0.0")
+  remain broken under JIT.
 - `InterpCall` f64 result-unbox gap (dest vreg untyped → `rt_value_raw_i64`)
   still exists for any extern that remains genuinely unresolvable.
+- Worktree hazard (tooling, not codegen): for a source file at the worktree
+  ROOT, `resolve_use_to_path`'s parent walk reaches the MAIN checkout's
+  `src/std` (worktrees live under `<repo>/.claude/worktrees/`) before trying
+  the worktree's own `src/`, silently compiling the wrong tree. Files under
+  `<worktree>/src/**` resolve correctly.

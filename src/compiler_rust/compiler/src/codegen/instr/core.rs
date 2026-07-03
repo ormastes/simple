@@ -508,46 +508,28 @@ pub(crate) fn compile_binop<M: Module>(
         }
         BinOp::Pow => {
             if is_float {
-                // Float power: fall back to integer exponent loop with fmul
+                // Float power via libm pow (rt_math_pow, real f64 ABI). The old
+                // integer-exponent fmul loop truncated fractional exponents:
+                // `x ** 0.5` compiled to x**0 == 1.0 (broke math_sqrt under JIT).
                 let rhs_type = builder.func.dfg.value_type(rhs);
-                let rhs_i64 = if rhs_type.is_float() {
-                    builder.ins().fcvt_to_sint(types::I64, rhs)
+                let lhs_f64 = if lhs_type == types::F32 {
+                    builder.ins().fpromote(types::F64, lhs)
                 } else {
-                    ensure_i64(builder, rhs)
+                    lhs
                 };
-                let loop_header = builder.create_block();
-                let loop_body = builder.create_block();
-                let loop_exit = builder.create_block();
-
-                builder.append_block_param(loop_header, lhs_type); // result (float)
-                builder.append_block_param(loop_header, types::I64); // exponent (int)
-                builder.append_block_param(loop_exit, lhs_type); // final result (float)
-
-                let one_f = if lhs_type == types::F32 {
-                    builder.ins().f32const(1.0)
+                let rhs_f64 = if rhs_type == types::F32 {
+                    builder.ins().fpromote(types::F64, rhs)
+                } else if rhs_type.is_float() {
+                    rhs
                 } else {
-                    builder.ins().f64const(1.0)
+                    builder.ins().fcvt_from_sint(types::F64, rhs)
                 };
-                builder.ins().jump(loop_header, &[one_f, rhs_i64]);
-
-                builder.switch_to_block(loop_header);
-                let result_param = builder.block_params(loop_header)[0];
-                let exp_param = builder.block_params(loop_header)[1];
-                let zero = builder.ins().iconst(types::I64, 0);
-                let cond = builder.ins().icmp(IntCC::SignedGreaterThan, exp_param, zero);
-                builder.ins().brif(cond, loop_body, &[], loop_exit, &[result_param]);
-                builder.seal_block(loop_body);
-                builder.seal_block(loop_exit);
-
-                builder.switch_to_block(loop_body);
-                let new_result = builder.ins().fmul(result_param, lhs);
-                let one_i = builder.ins().iconst(types::I64, 1);
-                let new_exp = builder.ins().isub(exp_param, one_i);
-                builder.ins().jump(loop_header, &[new_result, new_exp]);
-                builder.seal_block(loop_header);
-
-                builder.switch_to_block(loop_exit);
-                builder.block_params(loop_exit)[0]
+                let res = call_runtime_2(ctx, builder, "rt_math_pow", lhs_f64, rhs_f64);
+                if lhs_type == types::F32 {
+                    builder.ins().fdemote(types::F32, res)
+                } else {
+                    res
+                }
             } else {
                 let loop_header = builder.create_block();
                 let loop_body = builder.create_block();
@@ -840,7 +822,8 @@ pub(crate) fn compile_interp_call<M: Module>(
         let is_extern_bridge = func_name.starts_with("rt_") || func_name.starts_with("spl_");
         let keep_boxed_result = boxed_result || interp_call_keeps_boxed_result(func_name);
         let value = if !keep_boxed_result
-            && (ctx.vreg_types.get(d).copied() == Some(TypeId::F64) || interp_call_returns_f64(func_name))
+            && (ctx.vreg_types.get(d).copied() == Some(TypeId::F64)
+                || interp_call_returns_f64(func_name))
         {
             call_runtime_1(ctx, builder, "rt_value_as_float", result)
         } else if !keep_boxed_result && (is_extern_bridge || vreg_is_native_equality_scalar(ctx, *d)) {

@@ -19,6 +19,34 @@ use super::helpers::{
 use super::{InstrContext, InstrResult};
 
 /// Check if a function name is a profiler function (to avoid recursive instrumentation)
+/// Bitcast call args that are F32/F64 per MIR `vreg_types` but arrive as
+/// Cranelift I64 (cross-block floats travel as raw f64 bits in i64) back to
+/// f64 before signature adaptation. Without this, `adapt_value_to_type`'s
+/// int→float arm value-converts the raw bits (`math_sqrt(dist_sq)` became
+/// sqrt(4.6e18) in the physics narrowphase). Safe for i64 params too: the
+/// float→i64 adaptation arm bitcasts back, round-tripping the exact bits.
+fn reinterpret_float_bit_args<M: Module>(
+    ctx: &InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    args: &[VReg],
+    arg_vals: Vec<Value>,
+) -> Vec<Value> {
+    arg_vals
+        .into_iter()
+        .enumerate()
+        .map(|(i, v)| {
+            if args.get(i).is_some_and(|vreg| {
+                matches!(ctx.vreg_types.get(vreg).copied(), Some(TypeId::F64) | Some(TypeId::F32))
+            }) && builder.func.dfg.value_type(v) == types::I64
+            {
+                builder.ins().bitcast(types::F64, MemFlags::new(), v)
+            } else {
+                v
+            }
+        })
+        .collect()
+}
+
 fn is_profiler_function(name: &str) -> bool {
     name.starts_with("rt_profiler_")
 }
@@ -2972,6 +3000,7 @@ pub fn compile_call<M: Module>(
             };
             arg_vals.push(val);
         }
+        let arg_vals = reinterpret_float_bit_args(ctx, builder, args, arg_vals);
 
         // Expand text RuntimeValue arguments for C-ABI SFFI calls.
         // Two modes: (ptr, len) for Rust-style APIs, or ptr-only for C-string APIs.
@@ -3037,6 +3066,7 @@ pub fn compile_call<M: Module>(
         }
         let callee_ref = ctx.module.declare_func_in_func(callee_id, builder.func);
         let arg_vals: Vec<_> = args.iter().map(|a| get_vreg_or_default(ctx, builder, a)).collect();
+        let arg_vals = reinterpret_float_bit_args(ctx, builder, args, arg_vals);
         let arg_signed: Vec<Option<bool>> = args.iter().map(|arg| super::core::vreg_is_signed(ctx, *arg)).collect();
         let arg_vals = adapt_args_to_signature_with_signedness(builder, callee_ref, arg_vals, Some(&arg_signed));
         let call = adapted_call(builder, callee_ref, &arg_vals);
@@ -3141,8 +3171,9 @@ pub fn compile_call<M: Module>(
                     ctx.module
                         .declare_function(rt_name, cranelift_module::Linkage::Import, &sig)
                         .ok()
-                        .inspect(|&fid| {
+                        .map(|fid| {
                             ctx.func_ids.insert(rt_name.to_string(), fid);
+                            fid
                         })
                 };
                 if let Some(func_id) = func_id {
@@ -3238,6 +3269,7 @@ pub fn compile_call<M: Module>(
         };
 
         let arg_vals: Vec<_> = args.iter().map(|a| get_vreg_or_default(ctx, builder, a)).collect();
+        let arg_vals = reinterpret_float_bit_args(ctx, builder, args, arg_vals);
         // Strip spurious nil receiver from module-qualified free function calls.
         // HIR→MIR lowers `mod.func(args)` as [nil_receiver, args...]; when
         // fn_arities proves the callee expects fewer params, drop the leading nil.

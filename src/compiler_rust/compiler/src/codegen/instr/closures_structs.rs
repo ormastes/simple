@@ -10,7 +10,7 @@ use crate::mir::VReg;
 use super::super::shared::platform_call_conv;
 use super::super::types_util::type_id_to_cranelift;
 use super::helpers::{
-    adapted_call, call_runtime_1, call_runtime_2, create_string_constant, get_vreg_or_default,
+    adapted_call, call_runtime_1, call_runtime_2, call_runtime_2_void, create_string_constant, get_vreg_or_default,
     indirect_call_with_result, inline_runtime_len_value,
 };
 use super::{InstrContext, InstrResult};
@@ -847,18 +847,9 @@ mod tests {
     #[test]
     fn erased_receiver_ambiguity_falls_through() {
         assert!(erased_receiver_should_fall_through_ambiguous_method(None, "to_string"));
-        assert!(erased_receiver_should_fall_through_ambiguous_method(
-            Some(TypeId::ANY),
-            "to_string"
-        ));
-        assert!(!erased_receiver_should_fall_through_ambiguous_method(
-            Some(TypeId::ANY),
-            "push"
-        ));
-        assert!(!erased_receiver_should_fall_through_ambiguous_method(
-            Some(TypeId::I64),
-            "to_string"
-        ));
+        assert!(erased_receiver_should_fall_through_ambiguous_method(Some(TypeId::ANY), "to_string"));
+        assert!(!erased_receiver_should_fall_through_ambiguous_method(Some(TypeId::ANY), "push"));
+        assert!(!erased_receiver_should_fall_through_ambiguous_method(Some(TypeId::I64), "to_string"));
     }
 }
 
@@ -1337,6 +1328,31 @@ pub(crate) fn compile_method_call_virtual<M: Module>(
     return_type: TypeId,
     args: &[VReg],
 ) {
+    // Duck-typed dispatch sentinel (impl-less trait — no object carries the
+    // vtable): print a named diagnostic and trap instead of jumping through
+    // field data. Dead sites cost nothing; live ones fail loudly (bug
+    // jit_game2d_backend_method_dispatch_sigsegv_2026-07-02).
+    if vtable_slot == crate::mir::DUCK_DISPATCH_UNSUPPORTED_SLOT as usize {
+        if let Ok((msg_ptr, msg_len)) = create_string_constant(
+            ctx,
+            builder,
+            "runtime error: duck-typed virtual method call (trait has no `impl Trait for ...` in unit; no vtable) — \
+             run with SIMPLE_EXECUTION_MODE=interpreter; see bug jit_game2d_backend_method_dispatch_sigsegv_2026-07-02",
+        ) {
+            call_runtime_2_void(ctx, builder, "rt_eprintln_str", msg_ptr, msg_len);
+        }
+        builder.ins().trap(cranelift_codegen::ir::TrapCode::unwrap_user(13));
+        // Unreachable continuation: satisfy the SSA builder with a fresh block.
+        let cont = builder.create_block();
+        builder.switch_to_block(cont);
+        builder.seal_block(cont);
+        if let Some(d) = dest {
+            let nil = builder.ins().iconst(types::I64, 3);
+            ctx.vreg_values.insert(*d, nil);
+        }
+        return;
+    }
+
     let recv_ptr = get_vreg_or_default(ctx, builder, &receiver);
     // The receiver is a tagged heap value (objects are 8-byte aligned; the low
     // 3 bits hold the value tag). Mask the tag off before dereferencing to read

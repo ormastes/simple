@@ -1118,9 +1118,10 @@ fn warn_duplicate_private_signatures(module: &Module) {
         }
         eprintln!(
             "warning: private helper `{}` has {} co-compiled definitions with {} differing \
-             signatures ({}); calls resolve by bare name (last-write-wins) and may dispatch to the \
-             wrong one — silent wrong-result or SIGSEGV. Rename the conflicting helper(s) to a \
-             unique name. [compiler_cross_module_private_symbol_collision]",
+             signatures ({}); JIT call sites resolve by exact arg-type match (mangled `$dupN` \
+             variants), falling back to the last definition when types are ambiguous — a \
+             fallback hit may still dispatch to the wrong one. Rename the conflicting helper(s) \
+             to a unique name. [compiler_cross_module_private_symbol_collision]",
             name,
             sigs.len(),
             distinct.len(),

@@ -6,7 +6,7 @@ use crate::mir::effects::CallTarget;
 use crate::mir::instructions::{MirInst, VReg};
 
 impl<'a> MirLowerer<'a> {
-    pub(super) fn split_enum_qualified_name(name: &str) -> Option<(&str, &str)> {
+    pub(super) fn split_enum_qualified_name<'b>(name: &'b str) -> Option<(&'b str, &'b str)> {
         name.split_once("::")
             .or_else(|| name.split_once('.'))
             .or_else(|| name.split_once("_dot_"))
@@ -452,8 +452,38 @@ impl<'a> MirLowerer<'a> {
 
             self.box_args_for_any_params(callee, args, &mut arg_regs)?;
 
-            let call_target_name = if name == "rt_array_new_with_cap" && self.call_returns_array_of(callee, TypeId::U64)
-            {
+            // Colliding private helpers were emitted under mangled names (see
+            // `private_dup_overloads`): resolve this call site to the variant
+            // whose parameter types exactly match the argument types. No exact
+            // match: prefer an extern decl of the same name (the local defs
+            // demonstrably have different signatures), else the last local
+            // definition — the previous last-write-wins behavior.
+            let dup_resolved: Option<String> = self.private_dup_overloads.get(name.as_str()).and_then(|candidates| {
+                let arg_tys: Vec<TypeId> = args.iter().map(|a| a.ty).collect();
+                let exact = candidates.iter().find(|(param_tys, _)| *param_tys == arg_tys);
+                // No exact type match (args may have inferred as Any): if the
+                // arity singles out one candidate, that is still unambiguous.
+                let by_arity = || {
+                    let mut same_arity = candidates.iter().filter(|(param_tys, _)| param_tys.len() == arg_tys.len());
+                    match (same_arity.next(), same_arity.next()) {
+                        (Some(only), None) => Some(only),
+                        _ => None,
+                    }
+                };
+                exact
+                    .or_else(by_arity)
+                    .map(|(_, mangled)| mangled.clone())
+                    .or_else(|| {
+                        if self.extern_fn_name_set.contains(name.as_str()) {
+                            None // keep bare name → extern import
+                        } else {
+                            candidates.last().map(|(_, mangled)| mangled.clone())
+                        }
+                    })
+            });
+            let call_target_name = if let Some(mangled) = dup_resolved.as_deref() {
+                mangled
+            } else if name == "rt_array_new_with_cap" && self.call_returns_array_of(callee, TypeId::U64) {
                 "rt_array_new_with_cap_u64"
             } else {
                 name

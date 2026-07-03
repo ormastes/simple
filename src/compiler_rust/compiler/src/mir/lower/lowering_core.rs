@@ -275,6 +275,18 @@ pub struct MirLowerer<'a> {
     pub(super) available_functions: HashSet<String>,
     /// Parameter types for direct function calls whose global expression only carries return type.
     pub(super) function_param_types: HashMap<String, Vec<TypeId>>,
+    /// Cross-module private-helper collisions: bare `_name` defined by several
+    /// co-compiled files with differing signatures (import flattening merges
+    /// them; codegen name maps are last-write-wins → wrong-variant dispatch /
+    /// SIGSEGV, e.g. `_sin(f32)` vs `_sin(f64)` in rollball). Maps bare name →
+    /// definitions in lowering order as (param types, mangled name). Defs are
+    /// emitted under the mangled name; call sites resolve by exact arg-type
+    /// match, falling back to the extern decl (if any) then the last def
+    /// (= previous behavior). See
+    /// doc/08_tracking/bug/cranelift_f32_trig_wrapper_codegen_2026-07-02.md.
+    pub(super) private_dup_overloads: HashMap<String, Vec<(Vec<TypeId>, String)>>,
+    /// Extern fn names for the module being lowered (dup-overload fallback).
+    pub(super) extern_fn_name_set: HashSet<String>,
     /// Types of HIR globals, used to recover method calls parsed as `GLOBAL.method`.
     pub(super) global_types: HashMap<String, TypeId>,
     /// Function-typed globals whose calls must load the stored closure value.
@@ -331,6 +343,8 @@ impl<'a> MirLowerer<'a> {
             inject_functions: HashMap::new(),
             available_functions: HashSet::new(),
             function_param_types: HashMap::new(),
+            private_dup_overloads: HashMap::new(),
+            extern_fn_name_set: HashSet::new(),
             global_types: HashMap::new(),
             function_value_globals: HashSet::new(),
             singleton_cache: HashMap::new(),
@@ -367,6 +381,8 @@ impl<'a> MirLowerer<'a> {
             inject_functions: HashMap::new(),
             available_functions: HashSet::new(),
             function_param_types: HashMap::new(),
+            private_dup_overloads: HashMap::new(),
+            extern_fn_name_set: HashSet::new(),
             global_types: HashMap::new(),
             function_value_globals: HashSet::new(),
             singleton_cache: HashMap::new(),
@@ -892,23 +908,7 @@ impl<'a> MirLowerer<'a> {
             .map(|sig| (sig.param_types.clone(), sig.return_type))
     }
 
-    /// Search all trait_infos for the first trait that owns `method_name`.
-    /// Returns `(vtable_slot, param_types, return_type)` if found, else None.
-    /// Used by DispatchMode::Dynamic to emit MethodCallVirtual.
-    pub(super) fn find_trait_for_method(
-        &self,
-        method_name: &str,
-    ) -> Option<(u32, Vec<crate::hir::TypeId>, crate::hir::TypeId)> {
-        let infos = self.trait_infos?;
-        for info in infos.values() {
-            if let Some(sig) = info.get_method(method_name) {
-                return Some((sig.vtable_slot, sig.param_types.clone(), sig.return_type));
-            }
-        }
-        None
-    }
-
-    /// Receiver-aware variant of [`find_trait_for_method`].
+    /// Receiver-aware trait lookup for DispatchMode::Dynamic.
     ///
     /// A name-only trait match mis-lowers `e.name()` on a concrete class that
     /// merely SHARES a method name with some trait: the receiver has no
@@ -916,23 +916,58 @@ impl<'a> MirLowerer<'a> {
     /// segfaults (engine3d Engine3D delegation, 2026-07-03). Take the virtual
     /// path only when the receiver is statically the trait itself, is of
     /// unknown type, or actually implements a trait owning this method.
+    /// Returns the sentinel slot [`crate::mir::DUCK_DISPATCH_UNSUPPORTED_SLOT`]
+    /// when the call would go virtual through a trait that has NO recorded
+    /// `impl Trait for Type` anywhere in the unit (duck-typing only, e.g.
+    /// game2d's `App`/`GameBackend`): no constructor ever writes that vtable,
+    /// so real slot dispatch would read field data as a function pointer and
+    /// jump to garbage. Codegen lowers the sentinel to a named diagnostic +
+    /// trap, so DEAD duck-typed sites cost nothing (unit stays JIT) and LIVE
+    /// ones fail loudly instead of silently (bug
+    /// jit_game2d_backend_method_dispatch_sigsegv_2026-07-02).
     pub(super) fn find_trait_for_method_on_receiver(
         &self,
         method_name: &str,
         receiver_type_name: Option<&str>,
     ) -> Option<(u32, Vec<crate::hir::TypeId>, crate::hir::TypeId)> {
         let infos = self.trait_infos?;
+        let trait_is_implemented = |trait_name: &str| {
+            self.dependency_graph
+                .get_implementations(trait_name)
+                .is_some_and(|impls| !impls.is_empty())
+        };
+        let slot_for = |trait_name: &str, sig: &crate::hir::HirMethodSignature| {
+            if trait_is_implemented(trait_name) {
+                sig.vtable_slot
+            } else {
+                crate::mir::DUCK_DISPATCH_UNSUPPORTED_SLOT
+            }
+        };
         let Some(recv) = receiver_type_name else {
             // Unknown receiver type: legacy name-based virtual dispatch.
-            return self.find_trait_for_method(method_name);
+            for (trait_name, info) in infos {
+                if let Some(sig) = info.get_method(method_name) {
+                    return Some((slot_for(trait_name, sig), sig.param_types.clone(), sig.return_type));
+                }
+            }
+            return None;
         };
         // Receiver statically typed as the trait itself → virtual through it.
         if let Some(info) = infos.get(recv) {
             if let Some(sig) = info.get_method(method_name) {
-                return Some((sig.vtable_slot, sig.param_types.clone(), sig.return_type));
+                return Some((slot_for(recv, sig), sig.param_types.clone(), sig.return_type));
             }
         }
-        // Concrete receiver: virtual only via a trait it is known to implement.
+        // Concrete receiver with its own `Type.method` definition: devirtualize.
+        // The static type is exact, so a direct call is always correct — and it
+        // sidesteps JIT vtable dispatch, which SIGSEGVs for these units (bug
+        // jit_game2d_backend_method_dispatch_sigsegv_2026-07-02: `b.init(...)`
+        // on a statically-typed SoftwareBackend jumped through a bogus vtable).
+        if self.available_functions.contains(&format!("{}.{}", recv, method_name)) {
+            return None;
+        }
+        // Concrete receiver: virtual only via a trait it is known to implement
+        // (e.g. inherited default trait methods with no concrete definition).
         for (trait_name, info) in infos {
             if let Some(sig) = info.get_method(method_name) {
                 let implements = self
@@ -1152,6 +1187,41 @@ impl<'a> MirLowerer<'a> {
             }
         }
 
+        // Detect cross-module private-helper name collisions (see the field doc
+        // on `private_dup_overloads`) and assign each colliding definition a
+        // mangled name. Only bare `_`-prefixed free functions are considered —
+        // methods are `Type.method`-qualified and cannot collide this way.
+        self.extern_fn_name_set = hir.extern_fn_names.iter().cloned().collect();
+        {
+            let mut sigs_by_name: HashMap<&str, Vec<Vec<TypeId>>> = HashMap::new();
+            let mut order: Vec<&str> = Vec::new();
+            for func in &hir.functions {
+                if !func.name.starts_with('_') || func.name.contains('.') {
+                    continue;
+                }
+                let sig: Vec<TypeId> = func.params.iter().filter(|p| p.name != "self").map(|p| p.ty).collect();
+                let entry = sigs_by_name.entry(func.name.as_str()).or_default();
+                if entry.is_empty() {
+                    order.push(func.name.as_str());
+                }
+                entry.push(sig);
+            }
+            for name in order {
+                let sigs = &sigs_by_name[name];
+                if sigs.len() < 2 || sigs.iter().all(|s| s == &sigs[0]) {
+                    // Unique, or all signatures identical: last-write-wins stays
+                    // observably equivalent — leave the name alone.
+                    continue;
+                }
+                let candidates = sigs
+                    .iter()
+                    .enumerate()
+                    .map(|(k, sig)| (sig.clone(), format!("{name}$dup{k}")))
+                    .collect();
+                self.private_dup_overloads.insert(name.to_string(), candidates);
+            }
+        }
+
         let mut module = MirModule::new();
         module.name = hir.name.clone();
         module.type_registry = hir.types.clone();
@@ -1197,8 +1267,17 @@ impl<'a> MirLowerer<'a> {
             module.globals.push((name.clone(), *ty, is_mutable));
         }
 
+        let mut dup_def_counters: HashMap<&str, usize> = HashMap::new();
         for func in &hir.functions {
-            let mir_func = self.lower_function(func)?;
+            let mut mir_func = self.lower_function(func)?;
+            // Emit colliding private-helper definitions under their mangled
+            // names so every variant survives into codegen (instead of
+            // last-write-wins overwriting f32/f64 siblings).
+            if let Some(candidates) = self.private_dup_overloads.get(func.name.as_str()) {
+                let k = dup_def_counters.entry(func.name.as_str()).or_insert(0);
+                mir_func.name = candidates[*k].1.clone();
+                *k += 1;
+            }
             module.functions.push(mir_func);
         }
 

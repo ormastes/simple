@@ -14,6 +14,10 @@ use crate::hir::types::{
 fn try_const_eval(expr: &Expr) -> Option<i64> {
     match expr {
         Expr::Integer(val) => Some(*val),
+        // Suffixed literals (`11i64`, `0xFF_u32`): same constant, typed form.
+        // Without this arm, global initializers using suffixed elements (e.g.
+        // FONT_ROWS_PACKED's `...i64` table) were silently dropped → zero table.
+        Expr::TypedInteger(val, _) => Some(*val),
         Expr::Binary { op, left, right } => {
             let l = try_const_eval(left)?;
             let r = try_const_eval(right)?;
@@ -48,6 +52,31 @@ fn try_const_eval(expr: &Expr) -> Option<i64> {
             match op {
                 ast::UnaryOp::Neg => v.checked_neg(),
                 ast::UnaryOp::BitNot => Some(!v),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Const-eval a float initializer. Globals are stored as i64 RuntimeValues and
+/// floats travel as f64 bits in i64 (see codegen instr/body.rs f32/f64 ABI), so
+/// callers store `result.to_bits()`. Int literals are accepted (`val x: f64 = 3`).
+fn try_const_float_eval(expr: &Expr) -> Option<f64> {
+    match expr {
+        Expr::Float(val) => Some(*val),
+        Expr::TypedFloat(val, _) => Some(*val),
+        Expr::Integer(val) => Some(*val as f64),
+        Expr::TypedInteger(val, _) => Some(*val as f64),
+        Expr::Unary { op: ast::UnaryOp::Neg, operand } => Some(-try_const_float_eval(operand)?),
+        Expr::Binary { op, left, right } => {
+            let l = try_const_float_eval(left)?;
+            let r = try_const_float_eval(right)?;
+            match op {
+                ast::BinOp::Add => Some(l + r),
+                ast::BinOp::Sub => Some(l - r),
+                ast::BinOp::Mul => Some(l * r),
+                ast::BinOp::Div => Some(l / r),
                 _ => None,
             }
         }
@@ -465,8 +494,24 @@ impl Lowerer {
                 if matches!(s.mutability, ast::Mutability::Immutable) {
                     self.immutable_globals.insert(s.name.clone());
                 }
-                // Extract compile-time constant value from initializer
-                if let Some(val) = try_const_eval(&s.value) {
+                // Extract compile-time constant value from initializer.
+                // Float-typed globals first: `val x: f64 = 3` must store f64
+                // bits, not raw int 3 (globals are i64 slots; float loads
+                // reinterpret the bits). Untyped float globals (ty=ANY) are
+                // still zero-initialized — bug cranelift_f32_trig Residual.
+                if matches!(ty, TypeId::F64 | TypeId::F32) {
+                    if let Some(fval) = try_const_float_eval(&s.value) {
+                        // GlobalLoad reads the slot with the cranelift type of the
+                        // global: f64 loads 8 bytes, f32 loads the low 4 — store
+                        // matching raw bits.
+                        let bits = if ty == TypeId::F32 {
+                            (fval as f32).to_bits() as i64
+                        } else {
+                            fval.to_bits() as i64
+                        };
+                        self.global_init_values.insert(s.name.clone(), bits);
+                    }
+                } else if let Some(val) = try_const_eval(&s.value) {
                     self.global_init_values.insert(s.name.clone(), val);
                 } else if let Expr::String(val) = &s.value {
                     self.global_init_strings.insert(s.name.clone(), val.clone());
@@ -515,8 +560,18 @@ impl Lowerer {
                 self.globals.insert(c.name.clone(), ty);
                 self.local_globals.insert(c.name.clone());
                 self.immutable_globals.insert(c.name.clone());
-                // Extract compile-time constant value from initializer
-                if let Some(val) = try_const_eval(&c.value) {
+                // Extract compile-time constant value from initializer.
+                // Float-typed consts store f64 bits (see Static branch above).
+                if matches!(ty, TypeId::F64 | TypeId::F32) {
+                    if let Some(fval) = try_const_float_eval(&c.value) {
+                        let bits = if ty == TypeId::F32 {
+                            (fval as f32).to_bits() as i64
+                        } else {
+                            fval.to_bits() as i64
+                        };
+                        self.global_init_values.insert(c.name.clone(), bits);
+                    }
+                } else if let Some(val) = try_const_eval(&c.value) {
                     self.global_init_values.insert(c.name.clone(), val);
                 } else if let Expr::String(val) = &c.value {
                     self.global_init_strings.insert(c.name.clone(), val.clone());
@@ -568,8 +623,19 @@ impl Lowerer {
                     if matches!(l.mutability, ast::Mutability::Immutable) {
                         self.immutable_globals.insert(n.clone());
                     }
-                    // Extract compile-time constant value from initializer
-                    if let Some(val) = l.value.as_ref().and_then(try_const_eval) {
+                    // Extract compile-time constant value from initializer.
+                    // Float-typed globals first (see Static branch): store raw
+                    // f64/f32 bits matching GlobalLoad's typed load.
+                    if matches!(ty, TypeId::F64 | TypeId::F32) {
+                        if let Some(fval) = l.value.as_ref().and_then(try_const_float_eval) {
+                            let bits = if ty == TypeId::F32 {
+                                (fval as f32).to_bits() as i64
+                            } else {
+                                fval.to_bits() as i64
+                            };
+                            self.global_init_values.insert(n.clone(), bits);
+                        }
+                    } else if let Some(val) = l.value.as_ref().and_then(try_const_eval) {
                         self.global_init_values.insert(n.clone(), val);
                     } else if let Some(Expr::String(val)) = &l.value {
                         self.global_init_strings.insert(n.clone(), val.clone());
