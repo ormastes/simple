@@ -84,6 +84,11 @@ def hasDataRace (exec : Execution) : Prop :=
 def dataRaceFree (exec : Execution) : Prop :=
   ¬hasDataRace exec
 
+theorem hasDataRace_not_dataRaceFree (exec : Execution) :
+    hasDataRace exec → ¬dataRaceFree exec := by
+  intro hRace hDrf
+  exact hDrf hRace
+
 theorem hasDataRace_symmetric (exec : Execution) :
     hasDataRace exec →
     ∃ id1 id2 op1 op2,
