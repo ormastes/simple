@@ -607,4 +607,11 @@ theorem legacy_try_send_closed_no_enqueue (ch : SyncChannel) (v : Val)
     (legacyTrySend ch v).1.queue = ch.queue := by
   simp [legacyTrySend, hclosed]
 
+/-- Legacy recv on a non-empty sync channel returns the head and advances
+    the queue by exactly one element. -/
+theorem legacy_recv_nonempty_dequeues_head (ch : SyncChannel) (v : Val) (rest : List Val)
+    (hqueue : ch.queue = v :: rest) :
+    legacyRecv ch = ({ ch with queue := rest }, some v) := by
+  simp [legacyRecv, hqueue]
+
 end ActorChannel
