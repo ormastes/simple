@@ -79,6 +79,11 @@ pub(super) enum RuntimeCommand {
     RequestRedraw {
         window_id: i64,
     },
+    SetFullscreen {
+        window_id: i64,
+        fullscreen: bool,
+        response: crossbeam::channel::Sender<Result<(u32, u32), String>>,
+    },
     Exit,
 }
 

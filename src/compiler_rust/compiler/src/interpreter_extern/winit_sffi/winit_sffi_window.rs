@@ -4,7 +4,7 @@ use crate::error::CompileError;
 use crate::value::Value;
 
 use super::{
-    get_i64, get_string, get_pixels, int_value, bool_value, tuple_value, unsupported_window_mutation,
+    get_i64, get_bool, get_string, get_pixels, int_value, bool_value, tuple_value, unsupported_window_mutation,
     parse_window_config, set_last_error, WindowConfig, NEXT_EVENT_LOOP_ID, EVENT_LOOPS, WINDOW_STATES, WINDOW_OWNERS,
     RuntimeCommand,
 };
@@ -276,13 +276,66 @@ pub(super) fn dispatch_window(name: &str, args: &[Value]) -> Result<Value, Compi
         | "rt_winit_window_set_resizable"
         | "rt_winit_window_set_minimized"
         | "rt_winit_window_set_maximized"
-        | "rt_winit_window_set_fullscreen"
         | "rt_winit_window_set_decorations"
         | "rt_winit_window_set_always_on_top"
         | "rt_winit_window_focus"
         | "rt_winit_window_set_cursor_visible"
         | "rt_winit_window_set_cursor_grab"
         | "rt_winit_window_set_cursor_position" => Ok(unsupported_window_mutation(name)),
+        "rt_winit_window_set_fullscreen" => {
+            let window_id = get_i64(args, 0, name)?;
+            let fullscreen = get_bool(args, 1, name)?;
+            let event_loop_id = WINDOW_OWNERS.lock().get(&window_id).copied();
+            if let Some(el_id) = event_loop_id {
+                let (response_tx, response_rx) = crossbeam::channel::bounded(1);
+                {
+                    if let Some(handle) = EVENT_LOOPS.lock().get(&el_id) {
+                        handle
+                            .command_tx
+                            .send(RuntimeCommand::SetFullscreen {
+                                window_id,
+                                fullscreen,
+                                response: response_tx,
+                            })
+                            .map_err(|err| {
+                                super::runtime_error(format!("failed to send set_fullscreen request: {err}"))
+                            })?;
+                    } else {
+                        set_last_error(format!("invalid event loop handle: {el_id}"));
+                        return Ok(bool_value(false));
+                    }
+                } // Release EVENT_LOOPS lock before pumping
+
+                // macOS: pump so the mutation runs on the main/event-loop thread.
+                #[cfg(target_os = "macos")]
+                for _ in 0..50 {
+                    macos_pump(el_id);
+                    if let Ok(result) = response_rx.try_recv() {
+                        return match result {
+                            Ok(_) => Ok(bool_value(true)),
+                            Err(err) => {
+                                set_last_error(err);
+                                Ok(bool_value(false))
+                            }
+                        };
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
+
+                return match response_rx.recv_timeout(std::time::Duration::from_secs(2)) {
+                    Ok(Ok(_)) => Ok(bool_value(true)),
+                    Ok(Err(err)) => {
+                        set_last_error(err);
+                        Ok(bool_value(false))
+                    }
+                    Err(err) => Err(super::runtime_error(format!(
+                        "failed to receive set_fullscreen response: {err}"
+                    ))),
+                };
+            }
+            set_last_error(format!("invalid window handle: {window_id}"));
+            Ok(bool_value(false))
+        }
         "rt_winit_window_is_visible" => {
             let window_id = get_i64(args, 0, name)?;
             Ok(bool_value(
