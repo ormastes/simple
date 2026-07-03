@@ -413,6 +413,26 @@ theorem drf_two_synchronized_lock_release_acquire_same_location
   drf_two_ops_synchronized id1 id2
     (MemoryOperation.LockRelease loc tid1) (MemoryOperation.LockAcquire loc tid2) hneq_ids
 
+theorem drf_two_synchronized_lock_acquire_release_same_location
+    (id1 id2 : OperationId) (loc : LocationId) (tid1 tid2 : ThreadId)
+    (hneq_ids : id1 ≠ id2) :
+    dataRaceFree
+      { ops := [(id1, MemoryOperation.LockAcquire loc tid1), (id2, MemoryOperation.LockRelease loc tid2)]
+      , programOrder := fun _ _ => False
+      , synchronizesWith := fun a b => a = id1 ∧ b = id2 } :=
+  drf_two_ops_synchronized id1 id2
+    (MemoryOperation.LockAcquire loc tid1) (MemoryOperation.LockRelease loc tid2) hneq_ids
+
+theorem drf_two_synchronized_lock_releases_same_location
+    (id1 id2 : OperationId) (loc : LocationId) (tid1 tid2 : ThreadId)
+    (hneq_ids : id1 ≠ id2) :
+    dataRaceFree
+      { ops := [(id1, MemoryOperation.LockRelease loc tid1), (id2, MemoryOperation.LockRelease loc tid2)]
+      , programOrder := fun _ _ => False
+      , synchronizesWith := fun a b => a = id1 ∧ b = id2 } :=
+  drf_two_ops_synchronized id1 id2
+    (MemoryOperation.LockRelease loc tid1) (MemoryOperation.LockRelease loc tid2) hneq_ids
+
 theorem drf_two_program_ordered_read_write_same_location
     (id1 id2 : OperationId) (loc : LocationId) (tid1 tid2 : ThreadId)
     (hneq_ids : id1 ≠ id2) :
@@ -442,6 +462,26 @@ theorem drf_two_program_ordered_write_read_same_location
       , synchronizesWith := fun _ _ => False } :=
   drf_two_ops_program_ordered id1 id2
     (MemoryOperation.Write loc tid1) (MemoryOperation.Read loc tid2) hneq_ids
+
+theorem drf_two_program_ordered_lock_release_acquire_same_location
+    (id1 id2 : OperationId) (loc : LocationId) (tid1 tid2 : ThreadId)
+    (hneq_ids : id1 ≠ id2) :
+    dataRaceFree
+      { ops := [(id1, MemoryOperation.LockRelease loc tid1), (id2, MemoryOperation.LockAcquire loc tid2)]
+      , programOrder := fun a b => a = id1 ∧ b = id2
+      , synchronizesWith := fun _ _ => False } :=
+  drf_two_ops_program_ordered id1 id2
+    (MemoryOperation.LockRelease loc tid1) (MemoryOperation.LockAcquire loc tid2) hneq_ids
+
+theorem drf_two_program_ordered_lock_acquire_release_same_location
+    (id1 id2 : OperationId) (loc : LocationId) (tid1 tid2 : ThreadId)
+    (hneq_ids : id1 ≠ id2) :
+    dataRaceFree
+      { ops := [(id1, MemoryOperation.LockAcquire loc tid1), (id2, MemoryOperation.LockRelease loc tid2)]
+      , programOrder := fun a b => a = id1 ∧ b = id2
+      , synchronizesWith := fun _ _ => False } :=
+  drf_two_ops_program_ordered id1 id2
+    (MemoryOperation.LockAcquire loc tid1) (MemoryOperation.LockRelease loc tid2) hneq_ids
 
 theorem scDRF (exec : Execution) :
   dataRaceFree exec → ∃ (_ : SequentiallyConsistent exec), True := by

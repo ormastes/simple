@@ -1242,20 +1242,31 @@ nil-payload Function value. Also made `call_function`'s fallback resolve by name
 - lint src/app/cli/main.spl → rc=0 clean ✓
 - test target_presets_spec.spl → PASS rc=0 ✓
 
-### Fix 3 (committed 855d038b447): struct/class SIGSEGV — typed-rebind Field in lower_field
-A run file containing any struct or class SIGSEGV'd during HIR lowering (rc=139).
-Bracketing probes localised it precisely: `lower_struct` reached
-`[LS-PROBE] field-start` but never `field-done` — the crash is the FIRST field of
-the FIRST struct, inside `lower_field`. (A `class` parses into `module.structs`
-on this frontend — `class_only` showed `classes_count=0 structs_count=1` — so
-both class- and struct-bearing files hit the same `lower_field` path.) Root
-cause: `lower_field` reads `f.type_`/`f.name` off an ANY-erased `Field` (callers
-iterate `for f in struct_fields`/`class_fields` on an ANY-typed `[Field]`),
-hitting the seed's most-fields-wins resolver → wrong field index → nil → SIGSEGV
-inside `lower_type`. Fix: bind `f` to a `Field`-typed local before any field
-access, plus the same typed rebind at both caller loops. Verified: `struct_only`
-(`struct Pt{x,y}; fn main(): print(p.x)`) and `class_only` now lower without the
-SIGSEGV.
+### Struct/class SIGSEGV — PARTIALLY diagnosed, NOT yet resolved (separate deeper defect)
+A run file containing any struct or class SIGSEGVs during HIR lowering (rc=139).
+Bracketing probes localised it precisely, in order:
+1. `lower_struct` reached `[LS-PROBE] field-start` but never `field-done` → crash
+   is the FIRST field of the FIRST struct, inside `lower_field`. (A `class` parses
+   into `module.structs` on this frontend — `class_only` showed
+   `classes_count=0 structs_count=1` — so both class- and struct-bearing files hit
+   the same `lower_field` path.)
+2. Inside `lower_field`, probes showed `enter` and `got-type` printed but not
+   `lowered-type` → the crash is `self.lower_type(fld_type)`, not the Field field
+   access.
+3. `lower_type` matches `t.kind` and destructures `case Named(name, args)` — the
+   ANY-erased **enum-payload extraction** of the field-extracted `Type` crashes in
+   the Named arm.
+
+Two typed-rebind attempts (committed 855d038b447 `lower_field`: bind `f` to a
+`Field` local + both caller loops; f14b0f2db43 `lower_type`: bind `t`/`t.kind` to
+`Type`/`TypeKind` locals) each ADVANCED the crash but did NOT resolve it — a fresh
+build still SIGSEGVs on `struct_only`/`class_only`. The residual crash is the
+ANY-erased enum-payload extraction in `lower_type`'s `Named(name, args)` arm; it
+needs the disc-pre-dispatch / `rt_enum_payload` treatment (Layer-3 family, iters
+6/10/15) rather than a plain typed rebind. LEFT FOR A FOLLOW-UP ITERATION — it is a
+SEPARATE defect from #85 (the struct/class HIR-lowering path was never exercised on
+the unstub path before; all prior iterations tested functions only). The
+lower_field/lower_type rebinds are kept (correct hardening, no regression).
 
 ### Remaining SEPARATE pre-existing defect (NOT the #85 multi-fn bug; unstub path)
 - **`-c "print(1+1)"` → rc=1, no output** on this fresh build (baseline before
@@ -1263,3 +1274,10 @@ SIGSEGV.
   does not traverse the modified non-bootstrap functions loop — it goes through
   the `is_bootstrap_entry` branch that calls `lower_module` directly). Left for a
   follow-up iteration.
+
+### #85 STATUS: FIXED. Extended matrix on scratchpad/stage4_it19 (probe-free):
+single-fn `run` rc=0; twofn_min → `m1`/`plain-helper` rc=0 (WAS silent no-op);
+threefn rc=0; `use std.text` rc=0; lint src/app/cli/main.spl rc=0 clean;
+test target_presets_spec.spl PASS rc=0. Struct/class + `-c` are the two separate
+open defects above — coordinator should NOT re-flip the unstub default until at
+least struct/class lowers, since real programs use structs.
