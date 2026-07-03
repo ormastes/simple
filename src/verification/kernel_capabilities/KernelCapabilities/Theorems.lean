@@ -327,6 +327,16 @@ theorem revocation_complete_direct
   rw [revoke_find_owner s.records tok (by simp only [CapState.findRecord] at hrec; exact hrec)]
   simp
 
+/-- Direct owner-only revoke preserves non-owner capability checks. -/
+theorem revoke_non_owner_check_preserved
+    (tok : CapToken) (rec : PrincipalRecord) (kind : CapKind)
+    (hne : rec.pid ≠ tok.owner) :
+    (CapState.revoke
+      ({ records := [rec], nextGeneration := 1, nextTokenId := 1 } : CapState)
+      tok).check rec.pid kind =
+    ({ records := [rec], nextGeneration := 1, nextTokenId := 1 } : CapState).check rec.pid kind := by
+  simp [CapState.revoke, CapState.check, CapState.findRecord, hne]
+
 -- ============================================================
 -- § T4  gate_sound
 -- ============================================================
