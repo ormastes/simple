@@ -77,6 +77,9 @@
 - tensor_memory_formal: pass
 - tensor_memory_formal_scope: per-component tensor memory min/max bounds compose into total min <= total max, and any actual usage below total max fits when total max fits available device memory
 - tensor_memory_formal_evidence: src/verification/tensor_dimensions/src/TensorMemory.lean training_total_min_le_max + training_fits_if_max_fits; `cd src/verification/tensor_dimensions && lake build`
+- type_inference_generics_formal: pass
+- type_inference_generics_formal_scope: empty substitution is identity, single substitution rewrites its target type variable, occurs checks reject primitive non-recursive types and accept the same variable, instantiation/generalization preserve type shape, and literal inference is deterministic
+- type_inference_generics_formal_evidence: src/verification/type_inference_compile/src/Generics.lean applySubst_empty + apply_single_subst_var + occurs_nat_false + occurs_bool_false + occurs_str_false + occurs_var_true + instantiate_preserves_shape + generalize_preserves_type + infer_lit_nat + infer_lit_bool + infer_lit_str; `cd src/verification/type_inference_compile && lake build`
 - kernel_capability_depth_formal: pass
 - kernel_capability_depth_formal_scope: capability delegation with exhausted depth is denied
 - kernel_capability_depth_formal_evidence: src/verification/kernel_capabilities/KernelCapabilities/Theorems.lean zero_depth_grant_denied; `cd src/verification/kernel_capabilities && lake build`

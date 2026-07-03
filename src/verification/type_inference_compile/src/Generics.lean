@@ -167,6 +167,10 @@ theorem applySubst_empty (t : Ty) :
   | generic1 n a iha => simp [applySubst, iha]
   | generic2 n a b iha ihb => simp [applySubst, iha, ihb]
 
+theorem apply_single_subst_var (v : TyVar) (t : Ty) :
+  applySubst (singleSubst v t) (Ty.var v) = t := by
+  simp [applySubst, singleSubst, substLookup]
+
 theorem occurs_nat_false (v : TyVar) :
   occurs v Ty.nat = false := by
   rfl
