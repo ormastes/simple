@@ -89,6 +89,18 @@ theorem hasDataRace_not_dataRaceFree (exec : Execution) :
   intro hRace hDrf
   exact hDrf hRace
 
+theorem dataRaceFree_excludes_witness (exec : Execution)
+    (hDrf : dataRaceFree exec)
+    (h1 : (id1, op1) ∈ exec.ops)
+    (h2 : (id2, op2) ∈ exec.ops)
+    (hneq : id1 ≠ id2)
+    (hthread : op1.threadId ≠ op2.threadId)
+    (hconf : conflicts op1 op2)
+    (hnot12 : ¬happensBefore exec id1 id2)
+    (hnot21 : ¬happensBefore exec id2 id1) :
+    False := by
+  exact hDrf ⟨id1, id2, op1, op2, h1, h2, hneq, hthread, hconf, hnot12, hnot21⟩
+
 theorem hasDataRace_symmetric (exec : Execution) :
     hasDataRace exec →
     ∃ id1 id2 op1 op2,
