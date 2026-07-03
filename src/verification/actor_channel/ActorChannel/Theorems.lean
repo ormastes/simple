@@ -398,6 +398,23 @@ theorem scheduler_error_then_next_ok_dispatches
     second.2 = true := by
   simp [runOnce, processOne, halive, hmail, herr, hok]
 
+theorem scheduler_two_ok_messages_dispatch_in_two_ticks
+    (ht : HandlerTable) (ss : SchedulerState)
+    (msg1 msg2 : ActorMessage) (rest : List ActorMessage)
+    (halive : ss.actorState.alive = true)
+    (hmail : ss.actorState.mailbox = msg1 :: msg2 :: rest)
+    (hok1 : (dispatchMsg ht msg1).isOk = true)
+    (hok2 : (dispatchMsg ht msg2).isOk = true) :
+    let first := runOnce ht ss
+    let second := runOnce ht first.1
+    second.1.total_dispatched = ss.total_dispatched + 2 ∧
+    second.1.total_errors = ss.total_errors ∧
+    second.1.actorState.mailbox = rest ∧
+    second.1.actorState.alive = true ∧
+    first.2 = true ∧
+    second.2 = true := by
+  simp [runOnce, processOne, halive, hmail, hok1, hok2]
+
 -- ============================================================
 -- § F  T6 — no_lost_task
 -- ============================================================
