@@ -438,6 +438,24 @@ theorem two_shared_env_wellformed (baseType : String) (loc : Nat) :
         ] : List Reference) RefCapability.Isolated = 0 by rfl]
       exact Nat.zero_le 1
 
+theorem shared_alias_create_wellformed (baseType : String) (loc : Nat) :
+  canCreateRef
+    { activeRefs :=
+        [(loc,
+          [{ location := loc,
+             refType := { baseType := baseType, capability := RefCapability.Shared } }])] }
+    loc RefCapability.Shared = true ∧
+  wellFormed
+    { activeRefs :=
+        [(loc,
+          [{ location := loc,
+             refType := { baseType := baseType, capability := RefCapability.Shared } },
+           { location := loc,
+             refType := { baseType := baseType, capability := RefCapability.Shared } }])] } := by
+  constructor
+  · exact existing_shared_allows_shared baseType loc
+  · exact two_shared_env_wellformed baseType loc
+
 theorem two_exclusive_env_not_wellformed (baseType : String) (loc : Nat) :
   ¬ wellFormed
     { activeRefs :=
