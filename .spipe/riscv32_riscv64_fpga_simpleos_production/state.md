@@ -30,9 +30,9 @@ N/A for this slice: this turn only fixes existing smoke wrappers and records blo
   - FAIL: yosys; RV64 UART/run proof still absent.
   - INFO: `build/fpga/k26/load_elf_k26.log` still records XSDB `dow` failure with `Invalid context`, but XSDB download is no longer the only load context.
 - `SIMPLE_BINARY=bin/release/simple bash scripts/fpga/build_k26_vexriscv.shs`:
-  - PASS: `--synth-only` regenerates RV64 VHDL, keeps the generated CPU/RAM logic live, and writes `build/fpga/k26/k26_vexriscv/k26_vexriscv.runs/synth_1/soc_top_rv64.dcp`.
+  - PASS: `--synth-only` regenerates RV64 VHDL, keeps the generated CPU/RAM logic live, and writes `build/fpga/k26/k26_vexriscv/k26_vexriscv.runs/synth_1/soc_top_rv64_k26.dcp`.
   - PASS: current RV64 synthesis reports 128 `RAMB36E2` blocks and 0 synthesis errors after capping the RV64 RAM window to the preloaded payload size.
-  - PRIOR PASS: with placeholder RTL allowed, Vivado synthesis, implementation, DRC, and bitgen completed and copied `build/fpga/k26/k26_vexriscv.bit` plus `build/build/xilinx_kv260/gateware/xilinx_kv260.bit`.
+  - PASS: full Vivado implementation/DRC/bitgen completes for the `soc_top_rv64_k26` wrapper and copies current bitstreams to `build/fpga/k26/k26_vexriscv.bit` plus `build/build/xilinx_kv260/gateware/xilinx_kv260.bit`.
 - `SIMPLE_BINARY=bin/release/simple CAPTURE_SECONDS=5 LINUX_TIMEOUT=10 sh scripts/fpga/check_kv260_simple_rv64_linux.shs`:
   - PASS: RV64 bitstream and ELF artifacts present, ELF header is ELF64 RISC-V, KV260 bitstream loads, merged USB PS UART responds, and generated RV64 Linux handoff passes.
   - INFO: PL UART on merged USB has no output; current generated image still needs PMOD UART capture or a routed UART before SimpleOS payload execution can be proven.
@@ -80,7 +80,7 @@ dev-in-progress
 - dev: Replaced the RV64 constant-zero VHDL core stub with a minimal stateful Wishbone fetch core and fixed the RV64 preflight to reject only placeholder/no-assignment cores; RV64 still lacks ELF load/run evidence.
 - dev: Made the generated RV64 RAM acknowledge/read/write and the generated RV64 Wishbone interconnect decode bootrom/CLINT/PLIC/UART/RAM; GHDL analysis accepts the generated core/RAM/interconnect, but RV64 still lacks payload preload/debug load and UART run evidence.
 - dev: Added RV64 RTL preload generation from `build/rv64_bringup_check/hello_litex_rv64.bin` into `build/vhdl/rv64/rv64_payload.mem`, wired generated RAM to initialize from it, and made preflight accept that as load-context evidence while keeping UART/run proof open.
-- dev: Fixed the K26 wrapper's stale placeholder regex and added a Vivado utilization gate; current synth-only evidence now fails closed because CPU/RAM logic is optimized away.
+- dev: Fixed the K26 wrapper's stale placeholder regex and added a Vivado utilization gate so optimized-away CPU/RAM logic fails closed.
 - dev: Kept the generated RV64 fetch/RAM path observable through synthesis; `build_k26_vexriscv.shs --synth-only` and dual-arch preflight now pass `rv64_fpga_synth_logic`. RV32 still lacks bitstream and ELF load/run evidence.
 - dev: Confirmed generated RV32 package/decode/regfile/helper-core VHDL passes `ghdl -a --std=08`; RV32 next needs an FPGA top/bitstream path and payload load evidence.
 - dev: Added a minimal RV32 K26 top/Vivado wrapper around the generated decode helper; `build_k26_rv32.shs --synth-only` passes, and dual-arch preflight now passes `rv32_fpga_synth_logic`.
@@ -89,3 +89,4 @@ dev-in-progress
 - dev: Added fail-closed RV64/RV32 physical SimpleOS run gates requiring `SIMPLEOS_RV64_FPGA_BOOT_OK` and `SIMPLEOS_RV32_FPGA_BOOT_OK` in UART run logs. Fresh KV260 programming succeeds for both current bitstreams, but UART capture reports zero bytes, so both run gates fail as intended.
 - dev: Fixed RV64 generated core reset PC to use the ELF entry (`0x80008d18`) instead of blindly starting at `0x80000000` (`rt_alloc` in the current payload). GHDL and K26 synth-only still pass; run markers remain absent.
 - dev: Replaced the RV64 fetch-only core with a minimal RV64/C early executor for the current SimpleOS entry path (ADDI/AUIPC/LUI/JAL/JALR/load/store/branch plus the compressed stack ops seen in the UART path), made Vivado accept the generated VHDL, and capped RV64 RAM inference from 16 MiB to 512 KiB so K26 synth-only fits. Dual-arch preflight still fails the RV64/RV32 physical run-marker gates.
+- dev: Added a `soc_top_rv64_k26` STARTUPE3 wrapper so full RV64 bitgen no longer exposes unconstrained `clk`/`rst` board pins. Routed `uart_tx` directly and kept CPU/RAM synthesis live through an internal marked debug signal instead of corrupting UART with liveness XOR. Current bitstream programs successfully; Xilinx USB serial capture still sees zero bytes because the PL UART is routed to PMOD H12/E10 and no PMOD serial adapter is present in `/dev`.

@@ -27,8 +27,9 @@ either RV32 or RV64.
 
 `SIMPLE_BINARY=bin/release/simple bash scripts/fpga/build_k26_vexriscv.shs --synth-only`
 
-- PASS: regenerates `build/vhdl/rv64/rv64gc_core.vhd`, runs Vivado synthesis, and writes `build/fpga/k26/k26_vexriscv/k26_vexriscv.runs/synth_1/soc_top_rv64.dcp`.
+- PASS: regenerates `build/vhdl/rv64/rv64gc_core.vhd`, runs Vivado synthesis, and writes `build/fpga/k26/k26_vexriscv/k26_vexriscv.runs/synth_1/soc_top_rv64_k26.dcp`.
 - PASS: RV64 synthesis keeps CPU/RAM logic live with 128 `RAMB36E2` blocks and 0 synthesis errors after capping generated RAM to 512 KiB.
+- PASS: full implementation/DRC/bitgen completes for the `soc_top_rv64_k26` wrapper and writes current bitstreams under `build/fpga/k26/` and `build/build/xilinx_kv260/gateware/`.
 - INFO: `ALLOW_PLACEHOLDER_RTL=1` remains only for plumbing diagnostics.
 
 Prior diagnostic run with placeholder RTL allowed:
@@ -45,7 +46,7 @@ Prior diagnostic run with placeholder RTL allowed:
 - PASS: KV260 bitstream loads through Vivado.
 - PASS: merged USB PS UART responds.
 - PASS: generated RV64 Linux handoff smoke passes.
-- INFO: PL UART on merged USB has no output; current image still requires PMOD UART capture or a routed PL UART to prove SimpleOS payload execution.
+- INFO: on-board Xilinx USB serial capture sees zero bytes; current image routes PL UART to PMOD H12/E10, so SimpleOS payload execution still needs a PMOD serial adapter or a routed PS-visible UART.
 
 `bash scripts/fpga/load_elf_k26.shs`
 
@@ -163,7 +164,10 @@ failure status despite tailing logs, and refuses to run Vivado on placeholder
 core RTL unless `ALLOW_PLACEHOLDER_RTL=1` is set for plumbing diagnostics. It
 also fails closed when Vivado synthesis reports 0 LUTs and 0 BRAMs. The current
 RV64 generated RAM is capped to 512 KiB so K26 synthesis keeps CPU/RAM logic
-live and fits the device. The K26 ELF loader now defaults to the current RV64 FPGA ELF and
+live and fits the device. The full build now uses `soc_top_rv64_k26`, a
+STARTUPE3 wrapper that supplies internal clock/reset so only `uart_tx` is a
+board pin. UART is routed directly; CPU/RAM retention uses an internal marked
+debug signal instead of XORing liveness onto TX. The K26 ELF loader now defaults to the current RV64 FPGA ELF and
 keeps an XSDB failure log at `build/fpga/k26/load_elf_k26.log`.
 
 ## Remaining Production Blockers
@@ -172,7 +176,7 @@ keeps an XSDB failure log at `build/fpga/k26/load_elf_k26.log`.
    production gate.
 2. Extend RV64 execution past the current early instruction subset until the SimpleOS UART marker is emitted.
 3. Capture RV64 PL UART boot markers from the preloaded payload; stale XSDB `dow` still fails with `Invalid context`, but the active generated load context is now RTL preload.
-4. Route/observe RV64 PL UART on PMOD H12/E10 or another serial channel.
+4. Attach/capture a 3.3V PMOD UART adapter on H12/E10 or route RV64 PL UART to a PS-visible serial channel.
 5. Produce an RV32 FPGA bitstream with executable-core evidence and prove RV32 SimpleOS payload execution.
 
 ## Next Small Step
