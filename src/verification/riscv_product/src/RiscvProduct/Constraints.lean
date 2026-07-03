@@ -37,6 +37,13 @@ theorem product_metadata_override_sets_fields
     (withProductMetadata (profile l) productLevel configurationProfile).lane = (profile l).lane := by
   simp [withProductMetadata]
 
+theorem product_metadata_preserves_formal_gate
+    (l : Lane)
+    (productLevel configurationProfile : String) :
+    (withProductMetadata (profile l) productLevel configurationProfile).formalGate =
+      (profile l).formalGate := by
+  simp [withProductMetadata]
+
 theorem budget_override_sets_fields
     (l : Lane)
     (maxLuts targetMhz : Nat) :
