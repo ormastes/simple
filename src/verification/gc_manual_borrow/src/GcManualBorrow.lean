@@ -32,6 +32,12 @@ theorem collect_unborrowed_decrements_live_count (s : GcState) (id : Nat)
   List.count id (collectSafe s id).live = List.count id s.live - 1 := by
   simp [collectSafe, hborrowed]
 
+theorem collect_preserves_borrowed_list (s : GcState) (id : Nat) :
+  (collectSafe s id).borrowed = s.borrowed := by
+  by_cases hborrowed : id ∈ s.borrowed
+  · simp [collectSafe, hborrowed]
+  · simp [collectSafe, hborrowed]
+
 theorem allocate_preserves (s : GcState) (id : Nat) (hs : safe s) :
   safe (allocate s id) := by
   intro x hx
