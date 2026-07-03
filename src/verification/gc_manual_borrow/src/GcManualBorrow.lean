@@ -51,6 +51,10 @@ theorem release_preserves (s : GcState) (id : Nat) (hs : safe s) :
   simp only [release] at hx
   exact hs x (List.mem_of_mem_erase hx)
 
+theorem release_decrements_borrow_count (s : GcState) (id : Nat) :
+  List.count id (release s id).borrowed = List.count id s.borrowed - 1 := by
+  simp [release]
+
 theorem collect_preserves (s : GcState) (id : Nat) (hs : safe s) :
   safe (collectSafe s id) := by
   intro x hx
