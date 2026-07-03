@@ -7,7 +7,10 @@
 # funnels into framework.gate_write) to prove the routing table wires up to
 # the ONE gate every lane already shares.
 
-use framework.guarded.{Tenant, Actor, Session, WriteResult}
+use framework.guarded.{Tenant, Actor, Session, WriteResult, gate_write_with_approval}
+use kernel.event_log.{EventLog, new_event_log, event_count}
+use kernel.projection.{JournalEntry, account_balance}
+use kernel.posting.{cash_account, journal_for_accepted, post_accepted_write, posting_balanced}
 use lanes.crm.{Lead, submit_lead_write}
 use lanes.reservation.{Reservation, submit_reservation_write}
 use lanes.sale.{Sale, submit_sale_write}
@@ -161,6 +164,38 @@ fn main():
 
     val routes = route_table()
 
+    # Accounting + approval evidence: every accepted lane write posts an event
+    # into the event-sourced ledger and a balanced journal entry; large writes
+    # are held for approval by the guarded gate.
+    var log = new_event_log()
+    log = post_accepted_write(log, "crm.write", 1, 0)
+    log = post_accepted_write(log, "sale.write", 1, 11000)
+    log = post_accepted_write(log, "market.write", 1, 5000)
+    log = post_accepted_write(log, "restaurant.write", 1, 15000)
+    log = post_accepted_write(log, "reservation.write", 1, 2000)
+
+    var entries: [JournalEntry] = []
+    entries.push(journal_for_accepted(1, "USD", 11000))
+    entries.push(journal_for_accepted(2, "USD", 5000))
+    entries.push(journal_for_accepted(3, "USD", 15000))
+    entries.push(journal_for_accepted(4, "USD", 2000))
+    for entry in entries:
+        assert posting_balanced(entry)
+
+    val cash = account_balance(entries, cash_account(), "USD")
+    assert cash.minor == 33000
+
+    val op = operator_actor()
+    val admin = Actor { id: 9, name: "Del", role: "admin" }
+    val op_session = active_session(op.id, tenant.id)
+    val admin_session = active_session(admin.id, tenant.id)
+    var appr_used: [text] = []
+    val held = gate_write_with_approval(op_session, tenant, op, "sale.write", true, "appr-1", appr_used, 999999, 500000, "admin")
+    assert not held.ok
+    assert held.reason == "needs-approval"
+    val cleared = gate_write_with_approval(admin_session, tenant, admin, "sale.write", true, "appr-2", appr_used, 999999, 500000, "admin")
+    assert cleared.ok
+
     print "Business Suite:"
     print "lane=crm status=ok accepted={accepted_count(crm_results)} denied={denied_count(crm_results)}"
     print "lane=reservation status=ok accepted={accepted_count(reservation_results)} denied={denied_count(reservation_results)}"
@@ -168,4 +203,7 @@ fn main():
     print "lane=market status=ok accepted={accepted_count(market_results)} denied={denied_count(market_results)}"
     print "lane=restaurant status=ok accepted={accepted_count(restaurant_results)} denied={denied_count(restaurant_results)}"
     print "routes={routes.length()}"
+    print "ledger_events={event_count(log)}"
+    print "ledger_balanced=true cash={cash.minor}"
+    print "approval=enforced threshold=500000 denied=needs-approval"
     print "framework=guarded-write gates=session+rbac+validation+idempotency"

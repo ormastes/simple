@@ -15,3 +15,7 @@ project root with the seed driver set).
 - market_lane_spec.spl
 - restaurant_lane_spec.spl
 - web_routes_spec.spl
+- framework_approval_spec.spl
+- posting_spec.spl
+- report_spec.spl
+- dashboard_spec.spl

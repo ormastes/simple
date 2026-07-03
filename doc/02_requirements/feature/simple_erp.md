@@ -66,3 +66,14 @@
   denial reasons (invalid-session, forbidden, invalid-record, duplicate-key).
 - REQ-034: An sspec system test shall run the suite entrypoint end-to-end
   exercising both accept and deny paths across all lanes.
+- REQ-035: Accepted writes shall post balanced journal entries to the
+  event-sourced kernel ledger, and balances shall be derivable by projection
+  (no stored counters).
+- REQ-036: The guarded-write gate shall support threshold+role approval; writes
+  at or above a lane threshold without the approver role shall be denied with
+  closed reason needs-approval.
+- REQ-037: A reporting module shall derive per-lane accepted/denied/revenue KPIs
+  and totals from suite data.
+- REQ-038: A dashboard generator shall render a self-contained HTML dashboard
+  (inline CSS, no external assets, HTML-escaped values) with KPI tiles and
+  per-lane status cards, verified by an sspec system test.

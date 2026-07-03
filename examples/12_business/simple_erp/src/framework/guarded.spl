@@ -27,7 +27,7 @@ struct Session:
     val active: bool
 
 # Every gate outcome is explicit. reason is machine-readable and closed-set:
-# accepted | invalid-session | forbidden | invalid-record | duplicate-key
+# accepted | invalid-session | forbidden | invalid-record | duplicate-key | needs-approval
 struct WriteResult:
     val ok: bool
     val reason: text
@@ -70,3 +70,14 @@ fn gate_write(session: Session, tenant: Tenant, user: Actor, action: text, recor
     if key_used(used_keys, idempotency_key):
         return denied("duplicate-key", action)
     return WriteResult { ok: true, reason: "accepted", audit_action: action, ledger_key: idempotency_key }
+
+# Approval overlay on the shared gate. Runs gate_write first; if it already
+# failed, that reason stands. Otherwise a large write (amount >= threshold) by a
+# non-approver (and non-admin) is held for approval rather than accepted.
+fn gate_write_with_approval(session: Session, tenant: Tenant, user: Actor, action: text, record_valid: bool, idempotency_key: text, used_keys: [text], amount_minor: i64, threshold_minor: i64, approver_role: text) -> WriteResult:
+    val base = gate_write(session, tenant, user, action, record_valid, idempotency_key, used_keys)
+    if !base.ok:
+        return base
+    if amount_minor >= threshold_minor and user.role != approver_role and user.role != "admin":
+        return denied("needs-approval", action)
+    return base
