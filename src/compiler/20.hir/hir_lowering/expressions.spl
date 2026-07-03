@@ -20,6 +20,14 @@ fn hir_expr_env_get(key: text) -> text:
 fn hir_expr_kind_disc(k: ExprKind) -> i64:
     rt_enum_discriminant(k)
 
+fn is_interp_builtin_fn(name: text) -> bool:
+    """Free-function builtins dispatched by NAME in the HIR interpreter
+    (70.backend/backend/interpreter_calls.spl lookup_builtin_tag)."""
+    (name == "print" or name == "println" or name == "to_string" or
+     name == "type_of" or name == "clone" or name == "file_exists" or
+     name == "file_read" or name == "file_write" or name == "file_delete" or
+     name == "env_get" or name == "env_set")
+
 # Expression Lowering
 # ============================================================================
 
@@ -102,6 +110,19 @@ impl HirLowering:
                         nil
             case _:
                 nil
+
+    me lower_unresolved_ident(name: text, span: Span) -> HirExprKind:
+        """Unresolved identifier: known interpreter builtins (print, ...) are
+        not in the symbol table on the single-file/-c unstub path — define
+        them on first use and emit NamedVar so the HIR interpreter can
+        dispatch by name (process_module registers every table symbol as a
+        global Function value). Everything else stays an error."""
+        if is_interp_builtin_fn(name):
+            val bsym = self.symbols.define(name, SymbolKind.Function, nil, span, false, false, nil)
+            HirExprKind.NamedVar(bsym, name)
+        else:
+            self.error("unresolved name: {name}", span)
+            HirExprKind.Error
 
     me lower_hir_expr(e: Expr) -> HirExpr:
         # Probes UNGATED: Trap D (iteration 17) — env-gated probes are mute in
@@ -231,13 +252,11 @@ impl HirLowering:
                     # "undefined field 'id': cannot access field on value
                     # of type 'nil'".
                     if found_symbol == nil:
-                        self.error("unresolved name: {ident_name_t}", e.span)
-                        HirExprKind.Error
+                        self.lower_unresolved_ident(ident_name_t, e.span)
                     else:
                         HirExprKind.NamedVar(found_symbol, ident_name_t)
                 else:
-                    self.error("unresolved name: {ident_name_t}", e.span)
-                    HirExprKind.Error
+                    self.lower_unresolved_ident(ident_name_t, e.span)
 
             # NOTE: ExprKind.Field and ExprKind.Block arms are handled by the
             # discriminant pre-dispatch above (seed always-true struct-pattern
