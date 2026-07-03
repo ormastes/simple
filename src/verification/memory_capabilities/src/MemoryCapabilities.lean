@@ -273,6 +273,23 @@ theorem singleton_read_safe_any_cap (baseType : String) (loc : Nat) (cap : RefCa
     (MemAccess.Read loc) = true := by
   cases cap <;> simp [accessIsSafe, getActiveRefs, allowsAccess]
 
+theorem singleton_read_safe_iff_same_location
+    (baseType : String) (loc other : Nat) (cap : RefCapability) :
+    accessIsSafe
+      { activeRefs :=
+          [(loc,
+            [{ location := loc,
+               refType := { baseType := baseType, capability := cap } }])] }
+      (MemAccess.Read other) = true ↔ loc = other := by
+  constructor
+  · intro h
+    by_cases hloc : loc = other
+    · exact hloc
+    · cases cap <;> simp [accessIsSafe, getActiveRefs, allowsAccess, hloc] at h
+  · intro hloc
+    cases hloc
+    exact singleton_read_safe_any_cap baseType loc cap
+
 theorem two_shared_read_safe (baseType : String) (loc : Nat) :
   accessIsSafe
     { activeRefs :=
