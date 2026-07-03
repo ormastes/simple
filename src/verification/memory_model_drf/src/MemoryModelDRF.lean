@@ -731,6 +731,28 @@ theorem drf_when_conflicts_synchronized (exec : Execution)
   | inl sw12 => exact Or.inl (Or.inr sw12)
   | inr sw21 => exact Or.inr (Or.inr sw21)
 
+theorem drf_when_cross_thread_conflicts_program_or_sync_ordered (exec : Execution)
+    (hordered : ∀ id1 id2 op1 op2,
+      (id1, op1) ∈ exec.ops →
+      (id2, op2) ∈ exec.ops →
+      id1 ≠ id2 →
+      op1.threadId ≠ op2.threadId →
+      conflicts op1 op2 →
+      exec.programOrder id1 id2 ∨ exec.synchronizesWith id1 id2 ∨
+      exec.programOrder id2 id1 ∨ exec.synchronizesWith id2 id1) :
+    dataRaceFree exec := by
+  apply drf_when_cross_thread_conflicts_ordered
+  intro id1 id2 op1 op2 h1 h2 hneq hthread hconf
+  cases hordered id1 id2 op1 op2 h1 h2 hneq hthread hconf with
+  | inl po12 => exact Or.inl (Or.inl po12)
+  | inr rest =>
+    cases rest with
+    | inl sw12 => exact Or.inl (Or.inr sw12)
+    | inr rest2 =>
+      cases rest2 with
+      | inl po21 => exact Or.inr (Or.inl po21)
+      | inr sw21 => exact Or.inr (Or.inr sw21)
+
 /-- Host/server lock and channel models usually expose program-order or
     synchronizes-with edges directly.  If every conflict is ordered by one of
     those primitive edges in either direction, the execution is data-race free. -/
