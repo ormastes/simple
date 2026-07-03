@@ -18,6 +18,11 @@ extern fn rt_enum_discriminant(value: HirExprKind) -> i64
 fn mono_expr_disc(k: HirExprKind) -> i64:
     rt_enum_discriminant(k)
 
+fn mono_arg_value(a: HirCallArg) -> HirExpr:
+    """Typed-parameter accessor: forces HirCallArg field-index resolution for
+    .value even when the caller's element is ANY-erased (stage4 hazard)."""
+    a.value
+
 # ============================================================================
 # Monomorphization Pass
 # ============================================================================
@@ -115,9 +120,14 @@ impl MonomorphizationPass:
         BUG-001 fix: Use keys()-based iteration instead of tuple destructuring.
         """
         # Collect generic functions
+        # Typed rebinds (`val func: HirFunction = ...`): Dict values are
+        # ANY-erased by the seed; field reads (func.type_params) on the
+        # untyped value hit the most-fields-wins resolver and misread as
+        # non-nil garbage, making is_generic_function(main) TRUE for a
+        # plain -c module and dragging the whole mono scan in (iteration 18).
         val functions = module.functions
         for sym_id in functions.keys():
-            val func = functions[sym_id]
+            val func: HirFunction = functions[sym_id]
             if is_generic_function(func):
                 self.generic_functions[func.name] = func
                 self.monomorphizer.register_generic_function(func.name, func)
@@ -126,7 +136,7 @@ impl MonomorphizationPass:
         # Collect generic structs
         val structs = module.structs
         for sym_id in structs.keys():
-            val s = structs[sym_id]
+            val s: HirStruct = structs[sym_id]
             if is_generic_struct(s):
                 self.generic_structs[s.name] = s
                 self.monomorphizer.register_generic_struct(s.name, s)
@@ -135,7 +145,7 @@ impl MonomorphizationPass:
         # Collect generic classes
         val classes = module.classes
         for sym_id in classes.keys():
-            val c = classes[sym_id]
+            val c: HirClass = classes[sym_id]
             if is_generic_class(c):
                 self.generic_classes[c.name] = c
                 self.monomorphizer.register_generic_class(c.name, c)
@@ -151,9 +161,10 @@ impl MonomorphizationPass:
         BUG-001 fix: Use keys()-based iteration instead of tuple destructuring.
         """
         # Scan all functions for generic call sites
+        # Typed rebind: see collect_generics (ANY-erased Dict values).
         val functions = module.functions
         for sym_id in functions.keys():
-            val func = functions[sym_id]
+            val func: HirFunction = functions[sym_id]
             self.scan_function_body(func)
 
     me scan_function_body(func: HirFunction):
@@ -196,10 +207,11 @@ impl MonomorphizationPass:
         # Typed rebinds on every extracted payload: consuming an extracted
         # ANY-ish payload directly misreads on stage4 (most-fields-wins /
         # garbage pointer -> SEGV in scan_expr; bug doc iteration 18).
+        # Arm ORDER matters on stage4: `Expr` and `Block` are struct-shadowed
+        # names, so their tests compile ALWAYS-TRUE (iteration 18) — keep the
+        # sound arms (Let/Assign) FIRST so they are not swallowed. Expr then
+        # legitimately takes Expr stmts; Block stays last (shadowed too).
         match stmt.kind:
-            case HirStmtKind.Expr(e):
-                val se_t: HirExpr = e
-                self.scan_expr(se_t)
             case HirStmtKind.Let(_, _, init):
                 val init_t: HirExpr = init
                 self.scan_expr(init_t)
@@ -208,6 +220,9 @@ impl MonomorphizationPass:
                 val value_t: HirExpr = value
                 self.scan_expr(target_t)
                 self.scan_expr(value_t)
+            case HirStmtKind.Expr(e):
+                val se_t: HirExpr = e
+                self.scan_expr(se_t)
             case HirStmtKind.Block(b):
                 val sb_t: HirBlock = b
                 self.scan_block(sb_t)
@@ -222,6 +237,29 @@ impl MonomorphizationPass:
         if expr == nil:
             return
         eprint("[MSE] scan_expr disc={mono_expr_disc(expr.kind)}")
+        # SEED PATTERN HAZARD (bug doc iteration 18): a variant pattern whose
+        # name is shadowed by a struct/class ANYWHERE in the program (`struct
+        # Block`/`struct Field` in the frontend AST) compiles as an ALWAYS-TRUE
+        # struct-pattern test — the Block arm below swallowed a NamedVar and
+        # SEGV'd in scan_block. Pre-dispatch those variants by explicit
+        # discriminant (DefaultHasher(name) u32) and keep them OUT of the match.
+        val mse_disc: i64 = mono_expr_disc(expr.kind)
+        if mse_disc == 1138084884:  # hash("Block")
+            match expr.kind:
+                case HirExprKind.Block(block):
+                    val blk_t: HirBlock = block
+                    self.scan_block(blk_t)
+                case _:
+                    pass
+            return
+        if mse_disc == 21232742:  # hash("Field")
+            match expr.kind:
+                case HirExprKind.Field(base, _, _):
+                    val fld_base_t: HirExpr = base
+                    self.scan_expr(fld_base_t)
+                case _:
+                    pass
+            return
         # Typed rebinds on every extracted payload before use (stage4
         # extracted-ANY-payload misread hazard, bug doc iteration 18).
         match expr.kind:
@@ -230,13 +268,17 @@ impl MonomorphizationPass:
                 eprint("[MSX] Call")
                 val call_callee_t: HirExpr = callee
                 val call_args_t: [HirCallArg] = args
+                eprint("[MSXC] callee_disc={mono_expr_disc(call_callee_t.kind)} args_len={call_args_t.len()}")
                 if type_args.?:
                     self.check_generic_call(call_callee_t, type_args)
                 self.scan_expr(call_callee_t)
                 for arg in call_args_t:
                     val arg_t: HirCallArg = arg
                     val arg_value_t: HirExpr = arg_t.value
-                    self.scan_expr(arg_value_t)
+                    val arg_value_h: HirExpr = mono_arg_value(arg_t)
+                    eprint("[MSXA] helper_disc={mono_expr_disc(arg_value_h.kind)}")
+                    eprint("[MSXA] direct_disc={mono_expr_disc(arg_value_t.kind)}")
+                    self.scan_expr(arg_value_h)
 
             # Method calls (qualified: bare MethodCall collides with the mock
             # verification class of the same name — see scan_stmt docstring)
@@ -298,9 +340,9 @@ impl MonomorphizationPass:
                 eprint("[MSX] Lambda")
                 self.scan_expr(body)
 
-            case HirExprKind.Block(block):
-                eprint("[MSX] Block")
-                self.scan_block(block)
+            # NOTE: HirExprKind.Block and HirExprKind.Field are handled by the
+            # discriminant pre-dispatch above (always-true struct-pattern
+            # hazard) and MUST NOT appear in this match.
 
             # Binary/Unary
             case HirExprKind.Binary(_, left, right):
@@ -332,11 +374,7 @@ impl MonomorphizationPass:
                     self.scan_expr(k)
                     self.scan_expr(v)
 
-            # Field access
-            case HirExprKind.Field(base, _, _):
-                eprint("[MSX] Field")
-                self.scan_expr(base)
-
+            # Field access handled by the discriminant pre-dispatch above.
             case HirExprKind.Index(base, index):
                 eprint("[MSX] Index")
                 self.scan_expr(base)
