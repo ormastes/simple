@@ -129,6 +129,10 @@ theorem await_inference_sound (t : Ty) (inner : Ty) :
   · exact hEq
   · simp [shouldInsertAwait, hEq] at h
 
+theorem await_not_inserted_for_i32 (expected : Ty) :
+  shouldInsertAwait expected Ty.i32 = false := by
+  simp [shouldInsertAwait]
+
 theorem promise_unwrap_correct (inner : Ty) (target : Ty) :
   canUnwrapPromise (Ty.promise inner) target = true → inner = target := by
   intro h
