@@ -59,6 +59,13 @@ theorem T4_wal_before_data (t : TxnState)
   simp [txnCommit] at hcommit
   exact hcommit.1
 
+/-- T4 commit shape: any successful txnCommit returns a committed state. -/
+theorem T4_commit_sets_committed (t t' : TxnState)
+    (hcommit : txnCommit t = some t') :
+    t'.status = TxnStatus.committed := by
+  simp [txnCommit] at hcommit
+  exact hcommit.2 ▸ rfl
+
 /-- T4 corollary: the full D4 chain ensures wal_appended before commit. -/
 theorem T4_wal_appended_before_commit
     (t0 : TxnState)
