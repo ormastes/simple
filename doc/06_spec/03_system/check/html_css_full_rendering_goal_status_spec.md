@@ -75,9 +75,9 @@ sh scripts/check/check-html-css-full-rendering-goal-status.shs
 ## Acceptance
 
 - All 105 HTML tags are rendered in the 50-case fixture manifest.
-- All 269 implemented Simple Web CSS properties are rendered in fixture CSS.
-- The current full CSS inventory is tested as 394 properties, with 132 still
-  unrendered and 132 held in unsupported-inventory ownership.
+- All 270 implemented Simple Web CSS properties are rendered in fixture CSS.
+- The current full CSS inventory is tested as 394 properties, with 131 still
+  unrendered and 131 held in unsupported-inventory ownership.
 - Animation, transition, and transform CSS are reported separately; the current
   implemented subset renders those properties, so that sub-goal is `pass`.
 - Readiness keys explicitly distinguish all HTML elements, the implemented CSS
@@ -97,12 +97,13 @@ sh scripts/check/check-html-css-full-rendering-goal-status.shs
    - Expected: code equals `0`
 - Read the full rendering goal evidence
    - Expected: full_css_total equals `394`
-   - Expected: full_css_rendered equals `262`
-   - Expected: full_css_unrendered equals `132`
-   - Expected: unsupported_inventory equals `132`
-   - Expected: full_css_unrendered_properties.split(",").len() equals `132`
+   - Expected: full_css_rendered equals `263`
+   - Expected: full_css_unrendered equals `131`
+   - Expected: unsupported_inventory equals `131`
+   - Expected: full_css_unrendered_properties.split(",").len() equals `131`
    - Expected: full_css_unrendered_properties does not contain `aspect-ratio`
    - Expected: full_css_unrendered_words does not contain `,accent-color,`
+   - Expected: full_css_unrendered_words does not contain `,background-blend-mode,`
    - Expected: full_css_unrendered_words does not contain `,backface-visibility,`
    - Expected: full_css_unrendered_words does not contain `,border-collapse,`
    - Expected: full_css_unrendered_words does not contain `,border-spacing,`
@@ -214,7 +215,7 @@ sh scripts/check/check-html-css-full-rendering-goal-status.shs
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 180 lines folded for reproduction.
+Runnable source: 179 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -242,14 +243,14 @@ expect(evidence).to_contain("html_css_full_rendering_goal_implemented_css_status
 expect(evidence).to_contain("html_css_full_rendering_goal_all_implemented_css_ready_status=pass")
 expect(evidence).to_contain("html_css_full_rendering_goal_all_implemented_css_ready_reason=pass")
 expect(evidence).to_contain("html_css_full_rendering_goal_implemented_css_scope=implemented-simple-web-css")
-expect(evidence).to_contain("html_css_full_rendering_goal_implemented_css_total_count=269")
-expect(evidence).to_contain("html_css_full_rendering_goal_implemented_css_rendered_count=269")
+expect(evidence).to_contain("html_css_full_rendering_goal_implemented_css_total_count=270")
+expect(evidence).to_contain("html_css_full_rendering_goal_implemented_css_rendered_count=270")
 expect(evidence).to_contain("html_css_full_rendering_goal_implemented_css_missing=")
 expect(evidence).to_contain("html_css_full_rendering_goal_full_css_status=incomplete")
 expect(evidence).to_contain("html_css_full_rendering_goal_all_css_properties_ready_status=incomplete")
 expect(evidence).to_contain("html_css_full_rendering_goal_all_css_properties_ready_reason=full-css-rendering-incomplete")
 expect(evidence).to_contain("html_css_full_rendering_goal_full_css_required_min_count=390")
-expect(evidence).to_contain("html_css_full_rendering_goal_full_css_rendered_count=262")
+expect(evidence).to_contain("html_css_full_rendering_goal_full_css_rendered_count=263")
 expect(evidence).to_contain("html_css_full_rendering_goal_full_css_unrendered_properties=")
 expect(evidence).to_contain("html_css_full_rendering_goal_animation_css_status=pass")
 expect(evidence).to_contain("html_css_full_rendering_goal_animation_css_scope=animation-transition-transform-css")
@@ -257,9 +258,7 @@ expect(evidence).to_contain("html_css_full_rendering_goal_animation_css_total_co
 expect(evidence).to_contain("html_css_full_rendering_goal_animation_css_rendered_count=0")
 expect(evidence).to_contain("html_css_full_rendering_goal_animation_css_unrendered_count=0")
 expect(evidence).to_contain("html_css_full_rendering_goal_animation_css_unrendered_properties=")
-expect(evidence).to_contain("background-blend-mode")
 expect(evidence).to_contain("grid-template-columns")
-expect(evidence).to_contain("background-blend-mode")
 expect(evidence).to_contain("html_css_full_rendering_goal_manifest_case_count=50")
 expect(evidence).to_contain("html_css_full_rendering_goal_manifest_required_case_count=50")
 
@@ -271,12 +270,13 @@ val full_css_unrendered_words = "," + full_css_unrendered_properties + ","
 val animation_css_unrendered_properties = _value_of(evidence, "html_css_full_rendering_goal_animation_css_unrendered_properties")
 val unsupported_inventory = _value_of(evidence, "html_css_full_rendering_goal_unsupported_css_inventory_count")
 expect(full_css_total).to_equal("394")
-expect(full_css_rendered).to_equal("262")
-expect(full_css_unrendered).to_equal("132")
-expect(unsupported_inventory).to_equal("132")
-expect(full_css_unrendered_properties.split(",").len()).to_equal(132)
+expect(full_css_rendered).to_equal("263")
+expect(full_css_unrendered).to_equal("131")
+expect(unsupported_inventory).to_equal("131")
+expect(full_css_unrendered_properties.split(",").len()).to_equal(131)
 expect(full_css_unrendered_properties.contains("aspect-ratio")).to_equal(false)
 expect(full_css_unrendered_words.contains(",accent-color,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",background-blend-mode,")).to_equal(false)
 expect(full_css_unrendered_words.contains(",backface-visibility,")).to_equal(false)
 expect(full_css_unrendered_words.contains(",border-collapse,")).to_equal(false)
 expect(full_css_unrendered_words.contains(",border-spacing,")).to_equal(false)
@@ -395,7 +395,7 @@ expect(report).to_contain("- all HTML elements ready: pass")
 expect(report).to_contain("- implemented CSS ready: pass")
 expect(report).to_contain("- full CSS inventory ready: incomplete")
 expect(report).to_contain("- HTML tags rendered: 105/105")
-expect(report).to_contain("- implemented CSS rendered: 269/269")
+expect(report).to_contain("- implemented CSS rendered: 270/270")
 expect(report).to_contain("- full CSS unrendered:")
 expect(report).to_contain("- animation CSS rendered: 0/0 (pass)")
 ```

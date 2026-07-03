@@ -1085,6 +1085,41 @@ fn _norm_cdf(z: f64) -> f64:
         return 1.0 - cdf
     cdf
 
+fn _gammaln(x: f64) -> f64:
+    """Natural log of the gamma function via the Lanczos g=7 approximation (x > 0)."""
+    val xx = x - 1.0
+    var a = 0.99999999999980993
+    a = a + 676.5203681218851 / (xx + 1.0)
+    a = a - 1259.1392167224028 / (xx + 2.0)
+    a = a + 771.32342877765313 / (xx + 3.0)
+    a = a - 176.61502916214059 / (xx + 4.0)
+    a = a + 12.507343278686905 / (xx + 5.0)
+    a = a - 0.13857109526572012 / (xx + 6.0)
+    a = a + 9.9843695780195716e-6 / (xx + 7.0)
+    a = a + 1.5056327351493116e-7 / (xx + 8.0)
+    val t = xx + 7.5
+    0.5 * _ln_f64(2.0 * _PI) + (xx + 0.5) * _ln_f64(t) - t + _ln_f64(a)
+
+fn _norm_inv_std(p: f64) -> f64:
+    """Inverse standard normal CDF via Acklam's rational approximation (0 < p < 1)."""
+    val plow = 0.02425
+    val phigh = 1.0 - plow
+    if p < plow:
+        val q = _sqrt_f64(0.0 - 2.0 * _ln_f64(p))
+        val num = ((((-7.784894002430293e-03 * q - 3.223964580411365e-01) * q - 2.400758277161838e+00) * q - 2.549732539343734e+00) * q + 4.374664141464968e+00) * q + 2.938163982698783e+00
+        val den = (((7.784695709041462e-03 * q + 3.224671290700398e-01) * q + 2.445134137142996e+00) * q + 3.754408661907416e+00) * q + 1.0
+        return num / den
+    if p <= phigh:
+        val q = p - 0.5
+        val r = q * q
+        val num = (((((-3.969683028665376e+01 * r + 2.209460984245205e+02) * r - 2.759285104469687e+02) * r + 1.383577518672690e+02) * r - 3.066479806614716e+01) * r + 2.506628277459239e+00) * q
+        val den = ((((-5.447609879822406e+01 * r + 1.615858368580409e+02) * r - 1.556989798598866e+02) * r + 6.680131188771972e+01) * r - 1.328068155288572e+01) * r + 1.0
+        return num / den
+    val qh = _sqrt_f64(0.0 - 2.0 * _ln_f64(1.0 - p))
+    val numh = ((((-7.784894002430293e-03 * qh - 3.223964580411365e-01) * qh - 2.400758277161838e+00) * qh - 2.549732539343734e+00) * qh + 4.374664141464968e+00) * qh + 2.938163982698783e+00
+    val denh = (((7.784695709041462e-03 * qh + 3.224671290700398e-01) * qh + 2.445134137142996e+00) * qh + 3.754408661907416e+00) * qh + 1.0
+    0.0 - numh / denh
+
 fn _binom_pmf(k: i64, n: i64, p: f64) -> f64:
     val c = _fact_i64(n) / (_fact_i64(k) * _fact_i64(n - k))
     c * _pow_f64(p, k.to_f64()) * _pow_f64(1.0 - p, (n - k).to_f64())
@@ -1450,6 +1485,78 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                     return CellValue.NumberVal(value: cdf)
                 return CellValue.NumberVal(value: _binom_pmf(k, n, p))
             return CellValue.ErrorVal(message: "BINOMDIST requires k, n, p, cumulative")
+        "GAMMALN":
+            if flat.len() > 0:
+                if flat[0] <= 0.0:
+                    return CellValue.ErrorVal(message: "GAMMALN requires x > 0")
+                return CellValue.NumberVal(value: _gammaln(flat[0]))
+            return CellValue.ErrorVal(message: "GAMMALN requires x")
+        "WEIBULL":
+            if args.len() >= 4:
+                val x = _first_val(args[0])
+                val alpha = _first_val(args[1])
+                val beta = _first_val(args[2])
+                if alpha <= 0.0 or beta <= 0.0 or x < 0.0:
+                    return CellValue.ErrorVal(message: "WEIBULL domain error")
+                val ratio = x / beta
+                val powa = if x == 0.0: 0.0 else: _exp_f64(alpha * _ln_f64(ratio))
+                if _first_val(args[3]) != 0.0:
+                    return CellValue.NumberVal(value: 1.0 - _exp_f64(0.0 - powa))
+                val powa1 = if x == 0.0: 0.0 else: _exp_f64((alpha - 1.0) * _ln_f64(ratio))
+                val pdf = (alpha / beta) * powa1 * _exp_f64(0.0 - powa)
+                return CellValue.NumberVal(value: pdf)
+            return CellValue.ErrorVal(message: "WEIBULL requires x, alpha, beta, cumulative")
+        "LOGNORMDIST":
+            if args.len() >= 3:
+                val x = _first_val(args[0])
+                val mean = _first_val(args[1])
+                val sd = _first_val(args[2])
+                if sd <= 0.0 or x <= 0.0:
+                    return CellValue.ErrorVal(message: "LOGNORMDIST domain error")
+                return CellValue.NumberVal(value: _norm_cdf((_ln_f64(x) - mean) / sd))
+            return CellValue.ErrorVal(message: "LOGNORMDIST requires x, mean, sd")
+        "STANDARDIZE":
+            if args.len() >= 3:
+                val x = _first_val(args[0])
+                val mean = _first_val(args[1])
+                val sd = _first_val(args[2])
+                if sd <= 0.0:
+                    return CellValue.ErrorVal(message: "STANDARDIZE sd must be positive")
+                return CellValue.NumberVal(value: (x - mean) / sd)
+            return CellValue.ErrorVal(message: "STANDARDIZE requires x, mean, sd")
+        "HYPGEOMDIST":
+            if args.len() >= 4:
+                val ss = _first_val(args[0]).to_i64()
+                val ns = _first_val(args[1]).to_i64()
+                val ps = _first_val(args[2]).to_i64()
+                val np = _first_val(args[3]).to_i64()
+                if (ss < 0 or ns < 0 or ps < 0 or np < 0 or ss > ns or ss > ps or ns > np or ps > np or ns - ss > np - ps or np > 170):
+                    return CellValue.ErrorVal(message: "HYPGEOMDIST domain error")
+                val c1 = _fact_i64(ps) / (_fact_i64(ss) * _fact_i64(ps - ss))
+                val c2 = _fact_i64(np - ps) / (_fact_i64(ns - ss) * _fact_i64(np - ps - (ns - ss)))
+                val c3 = _fact_i64(np) / (_fact_i64(ns) * _fact_i64(np - ns))
+                return CellValue.NumberVal(value: c1 * c2 / c3)
+            return CellValue.ErrorVal(message: "HYPGEOMDIST requires sample_s, number_sample, population_s, number_pop")
+        "NEGBINOMDIST":
+            if args.len() >= 3:
+                val nf = _first_val(args[0]).to_i64()
+                val ns = _first_val(args[1]).to_i64()
+                val p = _first_val(args[2])
+                if nf < 0 or ns < 1 or p < 0.0 or p > 1.0 or nf + ns - 1 > 170:
+                    return CellValue.ErrorVal(message: "NEGBINOMDIST domain error")
+                val c = _fact_i64(nf + ns - 1) / (_fact_i64(nf) * _fact_i64(ns - 1))
+                return CellValue.NumberVal(value: c * _pow_f64(p, ns.to_f64()) * _pow_f64(1.0 - p, nf.to_f64()))
+            return CellValue.ErrorVal(message: "NEGBINOMDIST requires number_f, number_s, probability_s")
+        "CONFIDENCE":
+            if args.len() >= 3:
+                val alpha = _first_val(args[0])
+                val sd = _first_val(args[1])
+                val size = _first_val(args[2])
+                if alpha <= 0.0 or alpha >= 1.0 or sd <= 0.0 or size < 1.0:
+                    return CellValue.ErrorVal(message: "CONFIDENCE domain error")
+                val zc = _norm_inv_std(1.0 - alpha / 2.0)
+                return CellValue.NumberVal(value: zc * sd / _sqrt_f64(size))
+            return CellValue.ErrorVal(message: "CONFIDENCE requires alpha, sd, size")
         "TODAY":
             # UTC day; local-timezone offset is a recorded ceiling
             val micros = rt_time_now_unix_micros()
