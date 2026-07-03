@@ -105,6 +105,12 @@ theorem take_exclusive_sets_flag_when_no_shared (s : BorrowState)
     (takeExclusive s).exclusive = true := by
   simp [takeExclusive, hshared]
 
+theorem take_exclusive_valid_has_no_shared (s : BorrowState)
+    (hv : valid s)
+    (hex : (takeExclusive s).exclusive = true) :
+    (takeExclusive s).shared = 0 := by
+  exact valid_exclusive_has_no_shared (takeExclusive s) (exclusive_ok s hv) hex
+
 theorem take_exclusive_no_shared_eq_exclusive (s : BorrowState)
     (hshared : s.shared = 0) :
     takeExclusive s = { exclusive := true, shared := 0 } := by
