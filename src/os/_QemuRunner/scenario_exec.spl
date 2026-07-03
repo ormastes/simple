@@ -462,9 +462,42 @@ fn build_scenario(scenario: QemuScenario) -> bool:
     if not build_os(target):
         print "[scenario][{scenario.name}] phase=build FAILED target={target.output}"
         return false
+    if not _ensure_riscv_fpga_payload_bin(scenario, target):
+        return false
     if scenario.name == "x64-desktop-uefi":
         return ensure_desktop_uefi_boot_image(target.output)
     ensure_arm_fs_exec_kernel_binary(scenario, target)
+
+fn _riscv_fpga_payload_bin_path(scenario: QemuScenario) -> text:
+    if scenario.name == "riscv64-fpga-mmode":
+        return "build/rv64_bringup_check/hello_litex_rv64.bin"
+    if scenario.name == "riscv32-fpga-mmode":
+        return "build/rv32_bringup_check/hello_litex_rv32.bin"
+    ""
+
+fn _ensure_riscv_fpga_payload_bin(scenario: QemuScenario, target: OsTarget) -> bool:
+    val bin_path = _riscv_fpga_payload_bin_path(scenario)
+    if bin_path == "":
+        return true
+    if not rt_file_exists(target.output):
+        print "[scenario][{scenario.name}] phase=objcopy FAILED missing_elf={target.output}"
+        return false
+    val bin_dir = if scenario.name == "riscv64-fpga-mmode": "build/rv64_bringup_check" else: "build/rv32_bringup_check"
+    rt_dir_create_all(bin_dir)
+    val cmd = "if command -v llvm-objcopy >/dev/null 2>&1; then OBJCOPY=llvm-objcopy; " +
+        "elif command -v riscv64-unknown-elf-objcopy >/dev/null 2>&1; then OBJCOPY=riscv64-unknown-elf-objcopy; " +
+        "elif command -v objcopy >/dev/null 2>&1; then OBJCOPY=objcopy; " +
+        "else echo objcopy not found >&2; exit 127; fi; \"$OBJCOPY\" -O binary \"{target.output}\" \"{bin_path}\""
+    val (stdout, stderr, exit_code) = rt_process_run_timeout("/bin/sh", ["-c", cmd], 30000)
+    if stdout != "":
+        print "[scenario][{scenario.name}] objcopy stdout:\n{stdout}"
+    if stderr != "":
+        print "[scenario][{scenario.name}] objcopy stderr:\n{stderr}"
+    if exit_code != 0 or not rt_file_exists(bin_path):
+        print "[scenario][{scenario.name}] phase=objcopy FAILED target={bin_path}"
+        return false
+    print "[scenario][{scenario.name}] phase=objcopy OK target={bin_path}"
+    true
 
 fn run_scenario(scenario: QemuScenario) -> bool:
     _run_scenario_impl(scenario, false)
@@ -782,6 +815,9 @@ fn ensure_scenario_media(scenario: QemuScenario) -> bool:
         return false
     # Workaround: avoid Option<large-struct> nil-check (interpreter crash).
     if _catalog_has_lane_for_scenario(scenario):
+        val lane = _catalog_lane_for_scenario_direct(scenario)
+        if lane.lane_kind != SimpleOsLaneKind.FsExec:
+            return true
         if scenario.arch == Architecture.X86_64:
             return ensure_fs_test_disk_image()
         if scenario.arch == Architecture.X86:

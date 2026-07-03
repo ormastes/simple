@@ -143,6 +143,20 @@ static spl_i64 rt_nil(void) {
     return rt_special(RT_VALUE_SPECIAL_NIL);
 }
 
+spl_i64 rt_function_not_found(const spl_u8 *name, spl_u64 len) {
+    (void)name;
+    (void)len;
+    return rt_nil();
+}
+
+spl_i64 rt_method_not_found(const spl_u8 *type_name, spl_u64 type_len, const spl_u8 *method_name, spl_u64 method_len) {
+    (void)type_name;
+    (void)type_len;
+    (void)method_name;
+    (void)method_len;
+    return rt_nil();
+}
+
 static spl_i64 rt_heap(void *ptr) {
     if (!ptr) {
         return rt_nil();

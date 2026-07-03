@@ -24,8 +24,12 @@ N/A for this slice: this turn only fixes existing smoke wrappers and records blo
 
 ## Evidence 2026-07-03
 - `SIMPLE_BINARY=bin/release/simple sh scripts/check/check-riscv64-fpga-simpleos-preflight.shs --local-only`:
-  - PASS: FT4232H USB present, serial ports present, openFPGALoader, OpenOCD, Vivado, RISC-V cross compilers, Simple hello.
-  - FAIL: JTAG interface free, yosys, SimpleOS ELF artifact, SimpleOS bin artifact, SimpleOS bitstream artifact.
+  - PASS: FT4232H USB present, serial ports present, openFPGALoader, OpenOCD, Vivado, RISC-V cross compilers, RV64 SimpleOS ELF artifact, RV64 SimpleOS bin artifact, Simple hello.
+  - FAIL: JTAG interface free, yosys, RV64 SimpleOS bitstream artifact.
+- `SIMPLE_OS_BUILD_BACKEND=cranelift bin/release/simple os build --arch=riscv64 --scenario=riscv64-fpga-mmode`:
+  - PASS: builds `build/os/simpleos_riscv64_fpga.elf` and auto-objcopies `build/rv64_bringup_check/hello_litex_rv64.bin`.
+- `SIMPLE_OS_BUILD_BACKEND=cranelift bin/release/simple os build --arch=riscv32 --scenario=riscv32-fpga-mmode`:
+  - FAIL: correctly resolves `build/os/simpleos_riscv32_fpga.elf`, but this host's release Simple binary reports `Cranelift native builds do not support hosted riscv32 yet; use --backend llvm for this lane`; no LLVM-enabled Simple binary exists in this workspace.
 - `sh scripts/check/check-riscv-rtl-linux-smoke.shs --timeout=10`:
   - PASS `generated_rv32_linux`: GHDL reports `GENERATED_RV32_LINUX_HANDOFF: PASS`.
   - PASS `generated_rv64_linux`: GHDL reports `GENERATED_RV64_LINUX_HANDOFF: PASS`.
@@ -44,3 +48,4 @@ dev-in-progress
 - dev: Added a minimal bundle generator CLI, routed generated Linux runners through `GEN_DIR/rv32/rtl` and `GEN_DIR/rv64/rtl`, and made the bundle generator fail closed on missing copied RTL sources.
 - dev: Replaced the bundle generator's copied RTL dependency with emitted generated-core bundle artifacts, so bundle generation succeeds without `examples/09_embedded/fpga_riscv/rtl`.
 - dev: Added minimal RV32/RV64 smoke payloads and removed the stale RV64 native-build gate, so the top-level generated RTL Linux smoke passes both lanes.
+- dev: Exposed RV64/RV32 FPGA M-mode lanes through `simple os build --scenario=...`, fixed the RV64 FPGA entry symbol, added freestanding not-found runtime hooks, and auto-derived the RV64 raw FPGA payload bin from the built ELF. RV32 is wired but needs an LLVM-enabled Simple compiler on this host.

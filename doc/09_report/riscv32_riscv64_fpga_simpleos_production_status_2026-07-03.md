@@ -15,12 +15,22 @@ either RV32 or RV64.
 - PASS: FT4232H USB present.
 - PASS: `/dev/ttyUSB0` through `/dev/ttyUSB3` present.
 - PASS: openFPGALoader, OpenOCD, Vivado, `riscv64-unknown-elf-gcc`, and `riscv64-linux-gnu-gcc`.
+- PASS: `build/os/simpleos_riscv64_fpga.elf` exists after `simple os build --scenario=riscv64-fpga-mmode`.
+- PASS: `build/rv64_bringup_check/hello_litex_rv64.bin` is auto-derived from the RV64 ELF.
 - PASS: `bin/release/simple` runs `hello_native.spl`.
 - FAIL: JTAG interface is still bound to `ftdi_sio`.
 - FAIL: `yosys` is not installed.
-- FAIL: `build/os/simpleos_riscv64_fpga.elf` missing.
-- FAIL: `build/rv64_bringup_check/hello_litex_rv64.bin` missing.
 - FAIL: `build/build/xilinx_kv260/gateware/xilinx_kv260.bit` missing.
+
+`SIMPLE_OS_BUILD_BACKEND=cranelift bin/release/simple os build --arch=riscv64 --scenario=riscv64-fpga-mmode`
+
+- PASS: builds `build/os/simpleos_riscv64_fpga.elf`.
+- PASS: auto-runs `llvm-objcopy -O binary` through the scenario build path and writes `build/rv64_bringup_check/hello_litex_rv64.bin`.
+
+`SIMPLE_OS_BUILD_BACKEND=cranelift bin/release/simple os build --arch=riscv32 --scenario=riscv32-fpga-mmode`
+
+- PASS: the scenario is registered and resolves to `build/os/simpleos_riscv32_fpga.elf`.
+- FAIL: local release Simple cannot codegen RV32 with Cranelift (`Cranelift native builds do not support hosted riscv32 yet; use --backend llvm for this lane`), and this workspace does not have an LLVM-enabled Simple binary.
 
 `sh scripts/check/check-riscv-rtl-linux-smoke.shs --timeout=10`
 
@@ -59,16 +69,23 @@ GHDL lane.
 RV64 preflight plus RV32 FPGA artifacts, so production status cannot ignore the
 32-bit lane.
 
+`simple os build --scenario=riscv64-fpga-mmode` and
+`simple os build --scenario=riscv32-fpga-mmode` are now registered. The RV64
+FPGA lane builds with the local Cranelift-capable release compiler and emits
+both ELF and raw bin payload artifacts. The RV32 lane is wired to the correct
+FPGA entry/linker/output but remains blocked on an LLVM-enabled Simple compiler
+for RV32 codegen in this workspace.
+
 ## Remaining Production Blockers
 
 1. Install or provide `yosys` if synthesis/formal checks are part of the local
    production gate.
 2. Free the FT4232H JTAG interface before physical FPGA programming.
-3. Produce current RV64 FPGA SimpleOS ELF/bin/bitstream artifacts.
-4. Add equivalent RV32 SimpleOS FPGA artifact evidence, not only RV64.
+3. Produce the current RV64 FPGA bitstream artifact.
+4. Provide an LLVM-enabled Simple compiler and produce RV32 SimpleOS FPGA ELF/bin/bitstream artifacts.
 5. Prove physical UART boot markers and SimpleOS payload execution on the board.
 
 ## Next Small Step
 
-Produce the missing RV32/RV64 SimpleOS FPGA ELF/bin/bitstream artifacts, then
-rerun `scripts/check/check-riscv-fpga-simpleos-preflight.shs --local-only`.
+Install/provide an LLVM-enabled Simple compiler for RV32 and generate both
+bitstreams, then rerun `scripts/check/check-riscv-fpga-simpleos-preflight.shs --local-only`.
