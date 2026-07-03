@@ -337,4 +337,42 @@ theorem two_exclusive_env_not_wellformed (baseType : String) (loc : Nat) :
   rw [hcount] at hbound
   exact Nat.not_succ_le_self 1 hbound
 
+theorem two_isolated_env_not_wellformed (baseType : String) (loc : Nat) :
+  ¬ wellFormed
+    { activeRefs :=
+        [(loc,
+          [{ location := loc,
+             refType := { baseType := baseType, capability := RefCapability.Isolated } },
+           { location := loc,
+             refType := { baseType := baseType, capability := RefCapability.Isolated } }])] } := by
+  intro hwf
+  have h := hwf loc
+    ([
+      { location := loc, refType := { baseType := baseType, capability := RefCapability.Isolated } },
+      { location := loc, refType := { baseType := baseType, capability := RefCapability.Isolated } }
+    ] : List Reference)
+  have hmem :
+      (loc,
+        ([
+          { location := loc, refType := { baseType := baseType, capability := RefCapability.Isolated } },
+          { location := loc, refType := { baseType := baseType, capability := RefCapability.Isolated } }
+        ] : List Reference)) ∈
+      [(loc,
+        ([
+          { location := loc, refType := { baseType := baseType, capability := RefCapability.Isolated } },
+          { location := loc, refType := { baseType := baseType, capability := RefCapability.Isolated } }
+        ] : List Reference))] := by
+    simp
+  have hbound := (h hmem).right
+  have hcount :
+      countRefsWithCapability
+        ([
+          { location := loc, refType := { baseType := baseType, capability := RefCapability.Isolated } },
+          { location := loc, refType := { baseType := baseType, capability := RefCapability.Isolated } }
+        ] : List Reference)
+        RefCapability.Isolated = 2 := by
+    rfl
+  rw [hcount] at hbound
+  exact Nat.not_succ_le_self 1 hbound
+
 end MemoryCapabilities
