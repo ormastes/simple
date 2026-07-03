@@ -59,6 +59,10 @@ theorem damage_add_increases_length (r : DamageRegion) (rect : Rect2) :
     (DamageRegion.add r rect).length = r.length + 1 := by
   simp [DamageRegion.add]
 
+theorem damage_add_contains_new_rect (r : DamageRegion) (rect : Rect2) :
+    rect ∈ DamageRegion.add r rect := by
+  simp [DamageRegion.add]
+
 -- ============================================================
 -- § B  T1 — merge_covers_left
 -- ============================================================
