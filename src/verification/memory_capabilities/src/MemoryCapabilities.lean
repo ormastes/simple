@@ -111,6 +111,10 @@ theorem shared_to_isolated_denied :
   canConvert RefCapability.Shared RefCapability.Isolated = false := by
   rfl
 
+theorem can_convert_implies_restrictive (srcCap dstCap : RefCapability) :
+  canConvert srcCap dstCap = true → isMoreRestrictive srcCap dstCap := by
+  cases srcCap <;> cases dstCap <;> simp [canConvert, isMoreRestrictive] <;> decide
+
 theorem empty_env_allows_shared (loc : Nat) :
   canCreateRef { activeRefs := [] } loc RefCapability.Shared = true := by
   simp [canCreateRef, getActiveRefs]
