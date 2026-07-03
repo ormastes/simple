@@ -22,6 +22,11 @@ def release (s : GcState) (id : Nat) : GcState :=
 def collectSafe (s : GcState) (id : Nat) : GcState :=
   if _h : id ∈ s.borrowed then s else { s with live := s.live.erase id }
 
+theorem collect_borrowed_noop (s : GcState) (id : Nat)
+    (hborrowed : id ∈ s.borrowed) :
+    collectSafe s id = s := by
+  simp [collectSafe, hborrowed]
+
 theorem allocate_preserves (s : GcState) (id : Nat) (hs : safe s) :
   safe (allocate s id) := by
   intro x hx

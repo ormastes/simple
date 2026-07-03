@@ -78,8 +78,8 @@
 - nogc_compile_formal_scope: nogc instruction lists compose under append and explicitly reject GC allocation instructions
 - nogc_compile_formal_evidence: src/verification/nogc_compile/src/NogcCompile.lean nogc_append + nogc_singleton + gc_alloc_singleton_not_nogc; `cd src/verification/nogc_compile && lake build`
 - gc_manual_borrow_formal: pass
-- gc_manual_borrow_formal_scope: manual borrows are modeled as GC pins; allocation, borrow, release, and safe collection preserve the invariant that every borrowed object remains live
-- gc_manual_borrow_formal_evidence: src/verification/gc_manual_borrow/src/GcManualBorrow.lean allocate_preserves + borrow_preserves + release_preserves + collect_preserves; `cd src/verification/gc_manual_borrow && lake build`
+- gc_manual_borrow_formal_scope: manual borrows are modeled as GC pins; collecting a borrowed object is a no-op, and allocation, borrow, release, and safe collection preserve the invariant that every borrowed object remains live
+- gc_manual_borrow_formal_evidence: src/verification/gc_manual_borrow/src/GcManualBorrow.lean collect_borrowed_noop + allocate_preserves + borrow_preserves + release_preserves + collect_preserves; `cd src/verification/gc_manual_borrow && lake build`
 - memory_capabilities_formal: pass
 - memory_capabilities_formal_scope: empty environments allow exclusive and isolated references, deny all access attempts, are well-formed, shared references can read but cannot write, and exclusive or isolated references can write the referenced location
 - memory_capabilities_formal_evidence: src/verification/memory_capabilities/src/MemoryCapabilities.lean empty_env_allows_exclusive + empty_env_allows_isolated + empty_env_access_not_safe + empty_env_wellformed + shared_read_same_loc + shared_write_same_loc_denied + exclusive_write_same_loc + isolated_write_same_loc; `cd src/verification/memory_capabilities && lake build`
