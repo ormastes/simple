@@ -240,6 +240,13 @@ lane-specific `lake build`, `simple gen-lean verify`, or `simple verify check`
 command beside the evidence so the next regeneration can rerun the exact gate
 without weakening manual proofs.
 
+Regeneration must be append-safe for manual proof work:
+- generated Lean/BYL files may be replaced by the backend;
+- manual theorem files should only import generated names and stay stable;
+- generated manifests must list the exported names consumed by manual proofs;
+- SPipe evidence should cite both the generated artifact and the stable manual
+  theorem entry point checked after regeneration.
+
 ---
 
 ## Verification States

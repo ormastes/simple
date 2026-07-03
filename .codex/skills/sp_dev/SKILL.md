@@ -390,7 +390,11 @@ For Lean or BYL formal-verification lanes, keep generated backend output
 separate from handwritten proof additions. Regeneration should update generated
 obligations without overwriting stable theorem files, and SPipe evidence should
 name the generated artifact plus the durable proof entry points that must still
-check after regeneration.
+check after regeneration. Treat BYL as generated proof-model interchange, not
+as a Lean replacement: claims are proved only by the lane's checked Lean command
+or by the target hardware proof command. If a generator renames or removes an
+export consumed by a manual theorem, update the generator manifest/contract and
+the manual proof in the same lane before handoff.
 
 For MCP/runtime-forwarding or startup-latency work, refresh both the lane state
 file and `doc/07_guide/app/mcp/startup_performance.md` before handoff. Keep the

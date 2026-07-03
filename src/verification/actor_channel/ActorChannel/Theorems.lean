@@ -60,6 +60,17 @@ theorem recv_buffered_preserves_waiters (ch : GreenChannel) (tid : TaskId)
     : (greenRecv ch tid).channel.waiting_task_ids = ch.waiting_task_ids := by
   simp [greenRecv, hne]
 
+/-- Auxiliary: receiving a buffered value returns the exact non-parking result. -/
+theorem recv_buffered_eq_received_result (ch : GreenChannel) (tid : TaskId)
+    (hne : ch.queued_values ≠ []) :
+    greenRecv ch tid =
+      { channel := { ch with queued_values := ch.queued_values.tail }
+      , value := ch.queued_values.head!
+      , received := true
+      , parked := false
+      , channel_closed := false } := by
+  simp [greenRecv, hne]
+
 /-- T1 (canonical): Two values sent into a fresh channel (capacity ≥ 2) are received
     in send order.  This is the FIFO-per-sender property: the first message sent is
     the first one received. -/
@@ -99,6 +110,19 @@ theorem closed_send_no_mutation (ch : GreenChannel) (v : Val)
     (greenSend ch v).channel = ch := by
   simp [greenSend, hclosed]
 
+/-- T2a2a: green_channel_send to a closed channel returns the exact closed
+    failure result. -/
+theorem closed_send_eq_closed_result (ch : GreenChannel) (v : Val)
+    (hclosed : ch.closed = true) :
+    greenSend ch v =
+      { channel := ch
+      , sent := false
+      , unparked := false
+      , receiver_task_id := 0
+      , backpressure := false
+      , channel_closed := true } := by
+  simp [greenSend, hclosed]
+
 /-- T2a3: green_channel_send to a closed channel keeps it closed. -/
 theorem closed_send_preserves_closed (ch : GreenChannel) (v : Val)
     (hclosed : ch.closed = true) :
@@ -119,6 +143,19 @@ theorem closed_empty_recv_no_mutation (ch : GreenChannel) (tid : TaskId)
     (hclosed : ch.closed = true)
     (hempty  : ch.queued_values = []) :
     (greenRecv ch tid).channel = ch := by
+  simp [greenRecv, hclosed, hempty]
+
+/-- T2b2a: green_channel_recv on a closed+empty channel returns the exact
+    terminal no-park result. -/
+theorem closed_empty_recv_eq_closed_result (ch : GreenChannel) (tid : TaskId)
+    (hclosed : ch.closed = true)
+    (hempty  : ch.queued_values = []) :
+    greenRecv ch tid =
+      { channel := ch
+      , value := 0
+      , received := false
+      , parked := false
+      , channel_closed := true } := by
   simp [greenRecv, hclosed, hempty]
 
 /-- T2b2b: green_channel_recv on a closed+empty channel keeps it closed. -/
@@ -377,6 +414,18 @@ theorem no_lost_task_recv_parks (ch : GreenChannel) (tid : TaskId)
     tid ∈ r.channel.waiting_task_ids := by
   simp [greenRecv, hempty, hopen]
 
+/-- T6c1: recv on an open empty channel returns the exact parked result. -/
+theorem recv_open_empty_eq_parked_result (ch : GreenChannel) (tid : TaskId)
+    (hempty  : ch.queued_values = [])
+    (hopen   : ch.closed = false) :
+    greenRecv ch tid =
+      { channel := { ch with waiting_task_ids := ch.waiting_task_ids ++ [tid] }
+      , value := 0
+      , received := false
+      , parked := true
+      , channel_closed := false } := by
+  simp [greenRecv, hempty, hopen]
+
 /-- T6c2: Parking a receiver on an open empty channel keeps it open. -/
 theorem recv_parks_preserves_open (ch : GreenChannel) (tid : TaskId)
     (hempty  : ch.queued_values = [])
@@ -409,6 +458,21 @@ theorem send_to_waiter_wakes_without_buffer_growth
   have hhead : (tid :: rest).head! = tid := rfl
   simp [greenSend, hopen, hwait, hhead]
 
+/-- T6e1: Sending to a waiting receiver returns the exact wake result. -/
+theorem send_to_waiter_eq_wake_result
+    (ch : GreenChannel) (v : Val) (tid : TaskId) (rest : List TaskId)
+    (hopen : ch.closed = false)
+    (hwait : ch.waiting_task_ids = tid :: rest) :
+    greenSend ch v =
+      { channel := { ch with waiting_task_ids := rest }
+      , sent := true
+      , unparked := true
+      , receiver_task_id := tid
+      , backpressure := false
+      , channel_closed := false } := by
+  have hhead : (tid :: rest).head! = tid := rfl
+  simp [greenSend, hopen, hwait, hhead]
+
 /-- T6f: Sending to a waiting receiver on an open channel keeps it open. -/
 theorem send_to_waiter_preserves_open
     (ch : GreenChannel) (v : Val) (tid : TaskId) (rest : List TaskId)
@@ -425,6 +489,22 @@ theorem send_buffered_preserves_open
     (hwait : ch.waiting_task_ids = [])
     (hroom : ch.queued_values.length < ch.capacity) :
     (greenSend ch v).channel.closed = false := by
+  have hnot_wait : ¬ ch.waiting_task_ids ≠ [] := by simp [hwait]
+  simp [greenSend, hopen, hnot_wait, hroom]
+
+/-- T6g1: Sending to open buffer capacity returns the exact buffered result. -/
+theorem send_buffered_eq_sent_result
+    (ch : GreenChannel) (v : Val)
+    (hopen : ch.closed = false)
+    (hwait : ch.waiting_task_ids = [])
+    (hroom : ch.queued_values.length < ch.capacity) :
+    greenSend ch v =
+      { channel := { ch with queued_values := ch.queued_values ++ [v] }
+      , sent := true
+      , unparked := false
+      , receiver_task_id := 0
+      , backpressure := false
+      , channel_closed := false } := by
   have hnot_wait : ¬ ch.waiting_task_ids ≠ [] := by simp [hwait]
   simp [greenSend, hopen, hnot_wait, hroom]
 
