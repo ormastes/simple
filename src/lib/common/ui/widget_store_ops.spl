@@ -87,12 +87,14 @@ fn get_widget_record(id: text) -> WidgetRecord?:
     return nil
 
 fn require_widget_record(id: text) -> WidgetRecord:
-    val found = get_widget_record(id)
-    match found:
-        case Some(record):
-            return record
-        case _:
-            pass
+    # Scan the registry directly instead of unwrapping the Optional from
+    # get_widget_record: Option payload match loses the value under the
+    # self-hosted runtime, which made every widget fall back to a default
+    # "panel" record (empty widget shells / empty text mask).
+    if _widget_registry_ready:
+        for record in _widget_registry:
+            if record.id == id:
+                return record
     val fallback = default_widget_record(id, "panel")
     upsert_widget_record(fallback)
     return fallback
@@ -262,13 +264,13 @@ impl WidgetNode:
         var result: [WidgetNode] = [WidgetNode(id: ""); child_count]
         var write_idx = 0
         for id in child_ids:
-            val child = get_widget(id)
-            match child:
-                case Some(node):
-                    result[write_idx] = node
-                    write_idx = write_idx + 1
-                case _:
-                    pass
+            # WidgetNode is an id handle; construct it directly instead of
+            # unwrapping the Optional (Option payload match loses the value
+            # under the self-hosted runtime, yielding identity-less id:""
+            # children — the empty-widget-shell / empty-text-mask bug).
+            if get_widget(id) != nil:
+                result[write_idx] = WidgetNode(id: id)
+                write_idx = write_idx + 1
         return result
 
     fn child_count() -> i32:
