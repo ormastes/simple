@@ -227,6 +227,34 @@ fixed at source, tag removed.
   not a weakening. All 5 `only-compiled` context tags removed; 33 examples
   pass.
 
+### app_mcp_intensive (item 15) — FIXED (35/35, all 7 tags removed)
+
+Three independent spec bugs, all fixed at source in the spec:
+- **Bare dict-literal keys** (`{ tool: "...", id: i, ... }`) are evaluated as
+  variable-reference key expressions, producing `variable 'tool'/'id'/'name'/
+  'jsonrpc'/'timestamp' not found`. Quoted all literal keys (matching the
+  quoted-key dicts in the same file that already passed).
+- **Exclusive-range off-by-ones**: `for i in 0..99` (etc.) yields N-1
+  iterations vs the asserted N. Bumped all count-driving ranges
+  (0..99→0..100, 0..49→0..50, 0..499→0..500, 0..199→0..200, 0..399→0..400,
+  `0..(batches-1)`→`0..batches`). Also `queue[1..-1]` dropped first AND last
+  element (50 processed vs 100) — replaced with `queue[1..queue.len()]`. The
+  timeout example's `0..100` with `duration = i*10 > 5000` could never fire
+  even inclusively — bumped to 0..1000 to make the assertion reachable.
+- **Tool-set filtering**: the source-mode MCP server now defaults to the
+  filtered "core" advertisement (2 tools), so `tools/list` lacked
+  `debug_create_session`. The spec asserts full advertisement, so
+  `_send_mcp_intensive` now pins `SIMPLE_MCP_TOOL_SET=all` (verified: full
+  list includes debug_create_session with the env set).
+
+### loader_exec_memory (item 16) — GATED (native exec-memory externs interpreter-null)
+
+- Failure: first `assert_true(addr > 0)` — `native_alloc_exec_memory` returns
+  0 under the interpreter (the oversized-allocation example passes only
+  because it expects 0). The spec's own comment states these native exec
+  memory functions require compiled mode. Interpreter/runtime gap; tag
+  restored.
+
 ### Incident note 2 (2026-07-03, batch 2)
 
 The same parallel-snapshot hazard recurred: hourly-sync commit `478a210fd9b`
