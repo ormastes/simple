@@ -93,6 +93,8 @@
 - rv64_qmp_dimensions: 320x240
 - rv64_qmp_nonblack_pixels: 76800
 - rv64_qmp_wm_anchor_matches: 5
+- qemu_virtio_gpu_access: pass
+- qemu_virtio_gpu_access_contract: `src/os/_QemuRunner/scenario_catalog.spl:scenario_riscv64_display_smoke`
 - fake_qmp_harness_status: pass
 - blur_or_tolerance_used: false
 
@@ -100,7 +102,7 @@
 
 - report: `doc/09_report/simpleos_hardening_evidence_matrix_current_2026-07-02.md`
 - status: pass
-- passed: 10/10
+- passed: 11/11
 - executable_launch_from_fs: pass
 - ssh_shell_smf_and_exec: pass
 - shared_wm_logic: pass
@@ -119,6 +121,8 @@
 - rv64_display_smoke_qmp_width: 320
 - rv64_display_smoke_qmp_height: 240
 - rv64_display_smoke_qmp_anchor_matches: 5
+- qemu_virtio_gpu_access: pass
+- qemu_virtio_gpu_access_reason: rv64-qmp-virtio-gpu-display-smoke-pass
 
 ## SimpleOS LLVM Port
 
