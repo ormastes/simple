@@ -115,6 +115,10 @@ theorem can_convert_implies_restrictive (srcCap dstCap : RefCapability) :
   canConvert srcCap dstCap = true → isMoreRestrictive srcCap dstCap := by
   cases srcCap <;> cases dstCap <;> simp [canConvert, isMoreRestrictive] <;> decide
 
+theorem restrictive_implies_can_convert (srcCap dstCap : RefCapability) :
+  isMoreRestrictive srcCap dstCap → canConvert srcCap dstCap = true := by
+  cases srcCap <;> cases dstCap <;> simp [canConvert, isMoreRestrictive] <;> decide
+
 theorem empty_env_allows_shared (loc : Nat) :
   canCreateRef { activeRefs := [] } loc RefCapability.Shared = true := by
   simp [canCreateRef, getActiveRefs]
