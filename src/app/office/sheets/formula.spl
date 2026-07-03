@@ -10,6 +10,7 @@ use app.office.sheets.cell.{CellValue, CellRef, parse_cell_ref, cell_ref_to_stri
 use app.office.sheets.cell_ref.{parse_range, expand_range_refs, CellRange}
 use app.office.sheets.spreadsheet.{Sheet}
 use common.office.number.{office_parse_unsigned_decimal_f64}
+use common.string_core.{char_from_code, str_repeat}
 
 # =========================================================================
 # Types
@@ -388,7 +389,11 @@ fn _is_text_function(name: text) -> bool:
      name == "IMREAL" or name == "IMAGINARY" or name == "IMABS" or
      name == "IMSUM" or name == "IMSUB" or name == "IMPRODUCT" or
      name == "IMCONJUGATE" or name == "DATEVALUE" or name == "TEXT" or
-     name == "FIXED" or name == "VALUE" or name == "NUMBERVALUE")
+     name == "FIXED" or name == "VALUE" or name == "NUMBERVALUE" or
+     name == "SUBSTITUTE" or name == "REPLACE" or name == "REPT" or
+     name == "SEARCH" or name == "FIND" or name == "CHAR" or
+     name == "CODE" or name == "PROPER" or name == "CLEAN" or
+     name == "TEXTJOIN")
 
 fn _fmt_num_trim(v: f64) -> text:
     val i = v.to_i64()
@@ -455,6 +460,15 @@ fn _eval_text_function(name: text, tokens: [text], pos: i32, sheet: Sheet, depth
             # String literal: strip the tokenizer's surrounding quotes
             args.push(tok.slice(1, tok.len() - 1))
             cur_pos = cur_pos + 1
+        elif (_is_cell_ref_token(tok) and next_tok == ":" and
+              cur_pos + 2 < tokens.len() and _is_cell_ref_token(tokens.get(cur_pos + 2))):
+            # Range reference: expand to one display-string arg per cell
+            # (TEXTJOIN/CONCAT accept ranges).
+            val range_val = parse_range("{tok}:{tokens.get(cur_pos + 2)}")
+            if range_val != nil:
+                for ref_str in expand_range_refs(range_val):
+                    args.push(cell_display_text(sheet.get_cell(ref_str)))
+            cur_pos = cur_pos + 3
         elif _is_cell_ref_token(tok) and (next_tok == "," or next_tok == ")"):
             # Bare cell ref: take its display text (text cells stay text —
             # the numeric evaluator would coerce them to 0)

@@ -483,6 +483,42 @@ impl RiscvFpgaLinuxManifest:
             lines = lines.push("")
         lines.join("\n")
 
+    fn product_byl_text() -> text:
+        var lines: [text] = []
+        lines = lines.push("byl_version = \"0.1\"")
+        lines = lines.push("schema = \"simple.riscv_product\"")
+        lines = lines.push("generated_surface = \"byl\"")
+        lines = lines.push("manual_constraints = \"src/RiscvProduct/Constraints.lean\"")
+        lines = lines.push("configurable_fields = \"product_level,configuration_profile,rv32.max_luts,rv64.max_luts,rv32.target_mhz,rv64.target_mhz\"")
+        lines = lines.push("")
+        for lane in self.lanes:
+            val xl = lane.xlen.to_text()
+            val abi = lane.xlen.linux_abi()
+            val mmu = lane.xlen.linux_mmu()
+            val luts = self.product.rtl_size_budget_luts(lane.xlen)
+            val mhz = self.product.perf_target_mhz(lane.xlen)
+            lines = lines.push("lane {xl} {")
+            lines = lines.push("  product_level = \"{self.product.product_level}\"")
+            lines = lines.push("  configuration_profile = \"{self.product.configuration_profile}\"")
+            lines = lines.push("  abi = \"{abi}\"")
+            lines = lines.push("  mmu = \"{mmu}\"")
+            lines = lines.push("  max_luts = {luts}")
+            lines = lines.push("  target_mhz = {mhz}")
+            lines = lines.push("  formal_gate = \"rvfi+sby\"")
+            lines = lines.push("}")
+            lines = lines.push("")
+        lines = lines.push("resource shared_bus {")
+        lines = lines.push("  owner = \"optional_lane\"")
+        lines = lines.push("  acquire = \"single_owner_only\"")
+        lines = lines.push("  release = \"owner_clears\"")
+        lines = lines.push("}")
+        lines = lines.push("")
+        lines = lines.push("scheduler round_robin {")
+        lines = lines.push("  next_lane = \"rv32->rv64,rv64->rv32\"")
+        lines = lines.push("  starvation_bound = 2")
+        lines = lines.push("}")
+        lines.join("\n")
+
 # ============================================================================
 # RTL Bundle
 # ============================================================================
@@ -591,6 +627,12 @@ fn write_boot_products_file(output_dir: text, manifest: RiscvFpgaLinuxManifest) 
     rtl_file_write_text(path, content)
     return path
 
+fn write_product_byl_file(output_dir: text, manifest: RiscvFpgaLinuxManifest) -> text:
+    """Writes the generated product BYL model to disk and returns its path."""
+    val path = "{output_dir}/riscv_product.byl"
+    rtl_file_write_text(path, manifest.product_byl_text())
+    return path
+
 fn write_bundle_readme(output_dir: text) -> text:
     """Writes the bundle README to disk and returns its path."""
     val path = "{output_dir}/README.md"
@@ -603,6 +645,7 @@ fn write_bundle_readme(output_dir: text) -> text:
     lines = lines.push("")
     lines = lines.push("- `manifest.sdn` — machine-readable lane manifest with provenance")
     lines = lines.push("- `board_linux_boot_products.sdn` — per-arch boot products manifest; per-arch boot products manifest: `board_linux_boot_products.sdn`")
+    lines = lines.push("- `riscv_product.byl` — generated product proof-model surface")
     lines = lines.push("- `rv32/rtl/` — generated RV32GC Linux lane RTL plus emitted runner testbenches")
     lines = lines.push("- `rv64/rtl/` — generated RV64GC Linux lane RTL plus emitted runner testbenches")
     lines = lines.push("")
@@ -865,13 +908,14 @@ pub fn generate_default_riscv_fpga_rtl_bundle(output_dir: text) -> Result<RtlBun
             return Err(message)
     val manifest_path = write_manifest_file(output_dir, manifest)
     val products_path = write_boot_products_file(output_dir, manifest)
+    val byl_path = write_product_byl_file(output_dir, manifest)
     val readme_path = write_bundle_readme(output_dir)
     Ok(RtlBundle(
         output_dir: output_dir,
         manifest_path: manifest_path,
         board_linux_boot_products_manifest_path: products_path,
         bundle_readme_path: readme_path,
-        generated_files: generated_files.push(manifest_path).push(products_path).push(readme_path)
+        generated_files: generated_files.push(manifest_path).push(products_path).push(byl_path).push(readme_path)
     ))
 
 pub fn generate_default_riscv_fpga_rtl_bundle_with_profile(output_dir: text, configuration_profile: text) -> Result<RtlBundle, text>:
@@ -887,13 +931,14 @@ pub fn generate_default_riscv_fpga_rtl_bundle_with_profile(output_dir: text, con
             return Err(message)
     val manifest_path = write_manifest_file(output_dir, manifest)
     val products_path = write_boot_products_file(output_dir, manifest)
+    val byl_path = write_product_byl_file(output_dir, manifest)
     val readme_path = write_bundle_readme(output_dir)
     Ok(RtlBundle(
         output_dir: output_dir,
         manifest_path: manifest_path,
         board_linux_boot_products_manifest_path: products_path,
         bundle_readme_path: readme_path,
-        generated_files: generated_files.push(manifest_path).push(products_path).push(readme_path)
+        generated_files: generated_files.push(manifest_path).push(products_path).push(byl_path).push(readme_path)
     ))
 
 # @tag(output_dir=output_dir, board_id=board_id)
@@ -915,13 +960,14 @@ pub fn generate_riscv_fpga_rtl_bundle_for_board(output_dir: text, board_id: text
             return Err(message)
     val manifest_path = write_manifest_file(output_dir, manifest)
     val products_path = write_boot_products_file(output_dir, manifest)
+    val byl_path = write_product_byl_file(output_dir, manifest)
     val readme_path = write_bundle_readme(output_dir)
     Ok(RtlBundle(
         output_dir: output_dir,
         manifest_path: manifest_path,
         board_linux_boot_products_manifest_path: products_path,
         bundle_readme_path: readme_path,
-        generated_files: generated_files.push(manifest_path).push(products_path).push(readme_path)
+        generated_files: generated_files.push(manifest_path).push(products_path).push(byl_path).push(readme_path)
     ))
 
 pub fn generate_riscv_fpga_rtl_bundle_for_board_with_profile(output_dir: text, board_id: text, configuration_profile: text) -> Result<RtlBundle, text>:
@@ -942,13 +988,14 @@ pub fn generate_riscv_fpga_rtl_bundle_for_board_with_profile(output_dir: text, b
             return Err(message)
     val manifest_path = write_manifest_file(output_dir, manifest)
     val products_path = write_boot_products_file(output_dir, manifest)
+    val byl_path = write_product_byl_file(output_dir, manifest)
     val readme_path = write_bundle_readme(output_dir)
     Ok(RtlBundle(
         output_dir: output_dir,
         manifest_path: manifest_path,
         board_linux_boot_products_manifest_path: products_path,
         bundle_readme_path: readme_path,
-        generated_files: generated_files.push(manifest_path).push(products_path).push(readme_path)
+        generated_files: generated_files.push(manifest_path).push(products_path).push(byl_path).push(readme_path)
     ))
 
 pub fn generate_riscv_fpga_rtl_bundle_configured(output_dir: text, board_id: text, product_level: text, configuration_profile: text, rv32_luts: i64, rv64_luts: i64, rv32_mhz: i64, rv64_mhz: i64) -> Result<RtlBundle, text>:
@@ -969,13 +1016,14 @@ pub fn generate_riscv_fpga_rtl_bundle_configured(output_dir: text, board_id: tex
             return Err(message)
     val manifest_path = write_manifest_file(output_dir, manifest)
     val products_path = write_boot_products_file(output_dir, manifest)
+    val byl_path = write_product_byl_file(output_dir, manifest)
     val readme_path = write_bundle_readme(output_dir)
     Ok(RtlBundle(
         output_dir: output_dir,
         manifest_path: manifest_path,
         board_linux_boot_products_manifest_path: products_path,
         bundle_readme_path: readme_path,
-        generated_files: generated_files.push(manifest_path).push(products_path).push(readme_path)
+        generated_files: generated_files.push(manifest_path).push(products_path).push(byl_path).push(readme_path)
     ))
 
 pub fn read_generated_riscv_fpga_rtl_file(path: text) -> text:
