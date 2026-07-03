@@ -9,3 +9,9 @@ project root with the seed driver set).
 - projection_spec.spl
 - commit_loop_spec.spl
 - dimensions_spec.spl
+- crm_lane_spec.spl
+- reservation_lane_spec.spl
+- sale_lane_spec.spl
+- market_lane_spec.spl
+- restaurant_lane_spec.spl
+- web_routes_spec.spl

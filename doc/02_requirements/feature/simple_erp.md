@@ -48,3 +48,21 @@
   identity, RBAC, validation, ledger, recovery, security, and guarded writes.
 - REQ-026: The production core shall expose durable-store readiness separately
   and block production readiness when no durable store is available.
+- REQ-027: A shared guarded-write framework module shall provide session→RBAC→
+  validation→idempotency gates, with a closed-reason set: accepted, invalid-session,
+  forbidden, invalid-record, duplicate-key.
+- REQ-028: CRM, reservation, and sale lanes shall be reimplemented as modules on
+  the guarded-write framework, inheriting all framework gates.
+- REQ-029: A market lane shall support listings, orders, payments, stock depletion,
+  seller payouts, and commission math as framework-gated write operations.
+- REQ-030: A restaurant lane shall support menu items, table orders, kitchen routing,
+  forward-only order state machine (open→kitchen→served→closed), bill split with
+  round-up and tip math as framework-gated operations.
+- REQ-031: A web route table shall map HTTP method+path to lane actions with
+  read/write RBAC distinction and not-found handling.
+- REQ-032: A suite entrypoint shall print per-lane accept/deny evidence with
+  counts for each closed reason.
+- REQ-033: An sspec unit test suite shall cover all four lanes with all four
+  denial reasons (invalid-session, forbidden, invalid-record, duplicate-key).
+- REQ-034: An sspec system test shall run the suite entrypoint end-to-end
+  exercising both accept and deny paths across all lanes.

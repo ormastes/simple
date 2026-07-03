@@ -12,7 +12,8 @@
 
 use common.rich_text.attributed_text.{RichDocument, DocBlock, BlockKind, TextSpan, InlineStyle, spans_to_plain_text}
 use app.office.sheets.spreadsheet.{Sheet}
-use app.office.sheets.cell.{Cell, CellRef, cell_display_text, col_to_letter, cell_ref_to_string, parse_cell_ref}
+use app.office.sheets.cell.{Cell, CellValue, CellRef, cell_display_text, col_to_letter, cell_ref_to_string, parse_cell_ref}
+use app.office.sheets.formula.{evaluate_formula}
 
 # =========================================================================
 # Markdown <-> RichDocument (Writer)
@@ -125,6 +126,45 @@ fn parse_csv_sheet(content: text, name: text) -> Sheet:
                 sheet.set_value(ref_str, value)
             col = col + 1
         row = row + 1
+    recalculate_formula_cells(sheet)
+
+fn recalculate_formula_cells(sheet: Sheet) -> Sheet:
+    """Recalculate every formula cell, caching its display value, so `=A1+B1`
+    shows its computed result instead of the raw formula text. Returns the
+    recalculated sheet — callers must use the return value, because the
+    interpreter can pass aggregates by copy, silently dropping mutations made
+    through a parameter. Keys are snapshotted first because set_cell mutates
+    the Dict being iterated."""
+    var keys: [text] = []
+    for key in sheet.cells.keys():
+        keys.push(key)
+    for key in keys:
+        val cell = sheet.get_cell(key)
+        match cell.value:
+            CellValue.FormulaVal(expr, cached_display):
+                val result = evaluate_formula(expr, sheet)
+                var display = ""
+                match result:
+                    CellValue.NumberVal(value):
+                        val int_val = value.to_i64()
+                        if value - int_val.to_f64() == 0.0:
+                            display = "{int_val}"
+                        else:
+                            display = "{value}"
+                    CellValue.BoolVal(value):
+                        display = if value: "TRUE" else: "FALSE"
+                    CellValue.TextVal(value):
+                        display = value
+                    CellValue.ErrorVal(message):
+                        display = "#ERR: {message}"
+                    _:
+                        display = ""
+                sheet.set_cell(key, Cell(
+                    value: CellValue.FormulaVal(expr: expr, cached_display: display),
+                    style: cell.style
+                ))
+            _:
+                pass_do_nothing("non-formula cells keep their value")
     sheet
 
 fn sheet_to_csv(sheet: Sheet) -> text:
