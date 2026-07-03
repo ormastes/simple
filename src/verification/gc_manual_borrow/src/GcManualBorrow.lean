@@ -27,6 +27,11 @@ theorem collect_borrowed_noop (s : GcState) (id : Nat)
     collectSafe s id = s := by
   simp [collectSafe, hborrowed]
 
+theorem collect_unborrowed_decrements_live_count (s : GcState) (id : Nat)
+    (hborrowed : id ∉ s.borrowed) :
+  List.count id (collectSafe s id).live = List.count id s.live - 1 := by
+  simp [collectSafe, hborrowed]
+
 theorem allocate_preserves (s : GcState) (id : Nat) (hs : safe s) :
   safe (allocate s id) := by
   intro x hx
