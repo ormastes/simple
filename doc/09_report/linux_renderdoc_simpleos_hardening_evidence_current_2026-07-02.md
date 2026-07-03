@@ -169,6 +169,27 @@
 - tracked_jit_render_gap: `doc/08_tracking/bug/jit_game2d_backend_method_dispatch_sigsegv_2026-07-02.md`
 - tracked_window_host_gap: `doc/08_tracking/bug/game2d_no_window_externs_in_host_binaries_2026-07-03.md`
 
+## Related GUI Vulkan Window Evidence
+
+- status: partial_failing_widget_content_oracle
+- wrapper: `scripts/check/check-gui-vulkan-window.shs`
+- wrapper_overall: fail
+- binary: `src/compiler_rust/target/debug/simple`
+- run: `SIMPLE_GUI_VULKAN_W=96 SIMPLE_GUI_VULKAN_H=72 SIMPLE_GUI_VULKAN_APP_TIMEOUT=150`
+- renderer_log_line: `showcase_renderer_backend=vulkan;requested=vulkan;vulkan_device=requested=vulkan;selected=vulkan;status=Initialized;api=vulkan;gate=vulkan_runtime;shader=spirv;compute=true;graphics=true;present=false`
+- render_completed: 1
+- render_wait_secs: 126
+- offscreen_ppm_bytes: 20749
+- window_capture_status: captured
+- window_distinct_colors: 6
+- assert_vulkan_backend: pass
+- assert_vulkan_frame: pass
+- assert_window_capture: pass
+- assert_widget_content: fail
+- widget_oracle_ink_coverage: 0.0021701388888888395
+- widget_oracle_required_ink_coverage: `> 0.005`
+- blocker: current Vulkan text fallback is too slow at the previous 200x150 target and the 96x72 completed frame is below the readable-content oracle threshold.
+
 ## Scope Boundary
 
 This report proves the Linux RenderDoc/web/gui, Vulkan Engine2D readback, CPU

@@ -13,25 +13,27 @@ use framework.registry.{LaneDef, is_registered_write}
 # regardless of `writes_lanes`.
 struct RoleDef:
     val name: text
+    val all_actions: bool
     val writes_lanes: bool
     val extra_actions: [text]
 
 fn role_def(name: text, writes_lanes: bool) -> RoleDef:
     var extra: [text] = []
-    return RoleDef { name: name, writes_lanes: writes_lanes, extra_actions: extra }
+    return RoleDef { name: name, all_actions: false, writes_lanes: writes_lanes, extra_actions: extra }
 
 fn role_def_with(name: text, writes_lanes: bool, extra_actions: [text]) -> RoleDef:
-    return RoleDef { name: name, writes_lanes: writes_lanes, extra_actions: extra_actions }
+    return RoleDef { name: name, all_actions: false, writes_lanes: writes_lanes, extra_actions: extra_actions }
 
-# The stock roles. Mirrors framework/guarded.spl's admin/operator/auditor
-# semantics, expressed as registry data instead of hard-coded branches.
+# A superuser role: every action allowed (the guarded.spl "admin" semantics).
+fn role_def_all(name: text) -> RoleDef:
+    var extra: [text] = []
+    return RoleDef { name: name, all_actions: true, writes_lanes: true, extra_actions: extra }
+
+# The stock roles. THE single source of role policy: framework/guarded.spl's
+# role_can_for delegates here, so these definitions ARE the gate's RBAC.
 fn default_roles() -> [RoleDef]:
     var roles: [RoleDef] = []
-    var admin_extra: [text] = []
-    admin_extra.push("audit.read")
-    admin_extra.push("report.read")
-    admin_extra.push("ledger.close")
-    roles.push(role_def_with("admin", true, admin_extra))
+    roles.push(role_def_all("admin"))
     roles.push(role_def("operator", true))
     var auditor_extra: [text] = []
     auditor_extra.push("audit.read")
@@ -39,12 +41,13 @@ fn default_roles() -> [RoleDef]:
     roles.push(role_def_with("auditor", false, auditor_extra))
     return roles
 
+# First match wins — register each role name once.
 fn find_role(roles: [RoleDef], role: text) -> RoleDef:
     for role_entry in roles:
         if role_entry.name == role:
             return role_entry
     var none: [text] = []
-    return RoleDef { name: "", writes_lanes: false, extra_actions: none }
+    return RoleDef { name: "", all_actions: false, writes_lanes: false, extra_actions: none }
 
 fn action_in(actions: [text], action: text) -> bool:
     for a in actions:
@@ -59,6 +62,8 @@ fn org_role_can(roles: [RoleDef], lanes: [LaneDef], role: text, action: text) ->
     val role_entry = find_role(roles, role)
     if role_entry.name == "":
         return false
+    if role_entry.all_actions:
+        return true
     if role_entry.writes_lanes and is_registered_write(lanes, action):
         return true
     return action_in(role_entry.extra_actions, action)

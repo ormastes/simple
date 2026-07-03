@@ -70,7 +70,10 @@ fn log_checksum(log: EventLog) -> i64:
     var acc = 0
     var pos = 1
     for ev in log.events:
-        val s = "{ev.kind}|{ev.payload}"
+        # escape both fields before joining: "|" cannot appear in an escaped
+        # field, so the join is injective — ("a|b","c") no longer collides
+        # with ("a","b|c").
+        val s = escape_field(ev.kind) + "|" + escape_field(ev.payload)
         acc = acc * 31 + pos * 17 + simple_text_score(s) + ev.entity * 7
         pos = pos + 1
     return acc
@@ -81,8 +84,9 @@ fn serialize_log(log: EventLog) -> text:
     val c = log_checksum(log)
     var out = "ubslog v1 count={n} checksum={c}"
     for ev in log.events:
+        val kind_esc = escape_field(ev.kind)
         val esc = escape_field(ev.payload)
-        out = out + "\n" + "{ev.seq}|{ev.kind}|{ev.entity}|{esc}"
+        out = out + "\n" + "{ev.seq}|" + kind_esc + "|{ev.entity}|" + esc
     return out
 
 # --- parse helpers --------------------------------------------------------
@@ -120,7 +124,7 @@ fn parse_log(content: text) -> EventLog:
         if ln.len() > 0:
             val fields = ln.split("|")
             if fields.length() >= 4:
-                val kind = fields[1]
+                val kind = unescape_field(fields[1])
                 val entity = parse_int_field(fields[2])
                 val payload = unescape_field(fields[3])
                 log = append(log, kind, entity, payload)

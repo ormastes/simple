@@ -1,6 +1,6 @@
 # test
 
-SPipe spec suite. Run with `sh run-tests.shs` (or `simple test test/` from the
+SPipe spec suite. Run with `bin/simple test examples/12_business/simple_erp/ubs_test/ --mode=interpreter` (from the
 project root with the seed driver set).
 
 ## Allowed Entries

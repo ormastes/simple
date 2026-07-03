@@ -939,3 +939,72 @@ fix36 applies the same: `val bv: HirExpr = block.value` then `match bv.kind` +
 `eval_expr(bv)`. If the typed rebind makes the Call case match (probe shows
 `trailing kind=Call`) and print fires, THAT is the fix — the trailing value must
 be passed through a typed local, not the raw ANY-erased `block.value` field.
+
+### fix36 DECISIVE: `match block.value.kind` produces NO output — the field access TRAPS
+fix36 trace: `[EB] evaluating trailing value` then NOTHING — not even the
+`trailing kind=OTHER` catch-all of the `match bv.kind` I added. A match that emits
+nothing for ANY arm (incl `case _:`) means reading `bv.kind` HARD-TRAPS (silent
+abort, rc=0). So `block.value` is a GARBAGE/nil HirExpr and dereferencing its
+`.kind` crashes — the "field access on nil receiver" trap (iteration 10 family).
+The typed rebind at the INTERPRETER (`val bv: HirExpr = block.value`) did NOT help
+because the value was already corrupted upstream.
+
+### TRUE ROOT CAUSE: lower_block stores a garbage trailing value (ANY extraction)
+`lower_block` (20.hir/hir_lowering/expressions.spl:579-585): for a body whose last
+stmt is an expression, `match lowered.kind: case Expr(expr): block_value_expr =
+expr`. The seed erases the `HirStmt` (and the `Expr(expr)` payload) to ANY on the
+single-file/synthetic-main HIR, so the extracted `expr` is a garbage/nil HirExpr
+pointer that is stored as `block.value`. The interpreter later traps reading its
+`.kind`. (This is the exact hazard the pre-existing comment at :562-571 warns about
+for the OLD `.stmts`-reindex approach; it recurs for the direct-return approach in
+stage4.)
+
+### THE LOWERING FIX (fix37): typed rebind of the extracted expr
+expressions.spl lower_block now binds `val lk = lowered.kind` and inside the
+`case Expr(expr)` arm binds `val ve: HirExpr = expr` before `block_value_expr =
+ve`. This restores the concrete HirExpr struct type so the stored trailing value
+is valid (same typed-local ANY-cure idiom used for the `.values()` loops in
+interpreter.spl). ALSO changed `val lowered` → `val lowered: HirStmt` (typed).
+fix37 verifies whether hello-world-42 now prints.
+
+### Applied fixes summary (iteration 14)
+1. driver.spl interpret_pipeline: direct concrete InterpreterBackendImpl call via
+   uniquely-named `interpret_hir_module` (bypasses closure + name-collision).
+2. interpreter.spl eval_block: gate trailing value on `block.has` + `block.value
+   != nil`, eval `block.value` directly (no Option `.?`/`.unwrap()` on the plain
+   desugared field).
+3. expressions.spl lower_block: typed rebind of extracted trailing expr — REVERTED
+   (see fix37 below: it turned the silent no-op into a SIGSEGV, confirming the
+   extracted expr is genuinely a bad pointer from the seed, not fixable by a .spl
+   typed rebind).
+
+### fix37: lowering typed-rebind makes it a SIGSEGV — the blocker is SEED-LEVEL
+With the has-gate (fix #2) + lowering typed-rebind (#3), fix37 gets FURTHER then
+crashes: trace reaches `[PM] calling main via call_hir_function` then rc=139
+(SIGSEGV) inside `eval_block(main.body)` → `eval_expr(block.value)`. Previously
+(garbage-nil) it silently no-op'd (rc=0); the typed rebind changed the bad value
+enough to dereference into a segfault. Either way, **`block.value` is a genuinely
+bad HirExpr pointer produced by the seed's destructuring of `case Expr(expr)` on
+an ANY-erased `HirStmtKind`** at lower_block:581. This is a SEED codegen bug
+(ANY-payload enum-variant destructure), NOT fixable in pure Simple. Reverted the
+lowering change to avoid the segfault regression.
+
+### CONCLUSION (iteration 14) — 2 sound .spl fixes landed; final blocker is seed
+Two real pure-Simple bugs were found and FIXED (they are correct improvements and
+should be kept, even though the end-to-end `run`/`-c` still doesn't print due to
+the deeper seed bug):
+1. Interpreter dispatch: driver now calls a uniquely-named `interpret_hir_module`
+   on a concrete InterpreterBackendImpl (bypasses the closure + the same-signature
+   `process_module` sibling-method collision that returned Ok(Unit) w/o running).
+2. eval_block trailing value: gate on `block.has` + eval `block.value` directly
+   (the field is a desugared plain HirExpr, not an Option; the old `.?`/`.unwrap()`
+   mis-evaluated it).
+REMAINING BLOCKER (for iteration 15): the seed miscompiles destructuring the
+`Expr(expr)` payload of an ANY-erased `HirStmtKind` in `lower_block`
+(20.hir/hir_lowering/expressions.spl:581), so a function body whose last statement
+is an expression (`fn main(): print(...)`) stores a garbage HirExpr as the block's
+trailing value. Fix target: the seed enum-variant destructure codegen for ANY-
+typed payloads (`src/compiler_rust/.../codegen/instr/` match/destructure), OR a
+lowering restructure that keeps the last expr-stmt in `stmts` (evaluated via the
+stmts loop) for functions returning Unit instead of extracting a fragile trailing
+value. All eprint probes removed; binaries scratchpad/stage4_fix27..38.
