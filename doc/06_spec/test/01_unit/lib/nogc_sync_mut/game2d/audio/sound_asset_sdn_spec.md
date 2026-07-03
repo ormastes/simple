@@ -27,7 +27,7 @@ sound_asset_sdn_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 5 | 5 | 0 | 0 |
+| 8 | 8 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -155,6 +155,90 @@ if val Err(e) = r:
 
 </details>
 
+#### reverb effect
+
+<details>
+<summary>Advanced: parses room_size=0.5 and wet=0.3 from effects[0]</summary>
+
+#### parses room_size=0.5 and wet=0.3 from effects[0]
+
+- ok =
+   - Expected: ok is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_write_fixtures()).to_equal(true)
+val r = load_sound_asset(REVERB_PATH)
+var ok = false
+if val Ok(a) = r:
+    ok = (a.effects.len() == 1 and a.effects[0].kind == "reverb" and
+        a.effects[0].room_size == 0.5 and a.effects[0].wet == 0.3)
+expect(ok).to_equal(true)
+```
+
+</details>
+
+
+</details>
+
+<details>
+<summary>Advanced: rejects room_size out of [0,1] with a path-qualified error</summary>
+
+#### rejects room_size out of [0,1] with a path-qualified error
+
+- has marker = e contains
+   - Expected: has_marker is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_write_fixtures()).to_equal(true)
+val r = load_sound_asset(REVERB_BAD_ROOM_PATH)
+var has_marker = false
+if val Err(e) = r:
+    has_marker = e.contains("effects[0].room_size")
+expect(has_marker).to_equal(true)
+```
+
+</details>
+
+
+</details>
+
+#### rejects wet out of [0,1] with a path-qualified error
+
+- has marker = e contains
+   - Expected: has_marker is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_write_fixtures()).to_equal(true)
+val r = load_sound_asset(REVERB_BAD_WET_PATH)
+var has_marker = false
+if val Err(e) = r:
+    has_marker = e.contains("effects[0].wet")
+expect(has_marker).to_equal(true)
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -174,8 +258,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 8 |
+| Active scenarios | 8 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

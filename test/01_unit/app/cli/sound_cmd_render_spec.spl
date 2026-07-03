@@ -57,6 +57,8 @@ val SEQUENCE_SDN = OUT_DIR + "/sequence.sdn"
 val SEQUENCE_MISSING_SDN = OUT_DIR + "/sequence_missing_clip.sdn"
 val KICK_WAV = OUT_DIR + "/kick.wav"
 val SNARE_WAV = OUT_DIR + "/snare.wav"
+val REVERB_SDN = OUT_DIR + "/tone_reverb.sdn"
+val REVERB_BAD_SDN = OUT_DIR + "/tone_reverb_bad_room.sdn"
 
 fn run_cli(args: text) -> ShellResult:
     shell(CLI + " " + args)
@@ -66,6 +68,8 @@ fn _write_fixtures() -> bool:
     var ok = write_file(TONE_SDN, "sound:\n  kind: \"sfx\"\n  sample_rate: 8000\n  source: { type: \"tone\", wave: \"sine\", freq_hz: 1000, duration_ms: 1 }\n")
     ok = ok and write_file(LOWPASS_SDN, "sound:\n  kind: \"sfx\"\n  sample_rate: 8000\n  source: { type: \"tone\", wave: \"sine\", freq_hz: 1000, duration_ms: 1 }\n  effects: [ { type: \"lowpass\", cutoff_hz: 200 } ]\n")
     ok = ok and write_file(BAD_SDN, "not sdn at all {{{\n")
+    ok = ok and write_file(REVERB_SDN, "sound:\n  kind: \"sfx\"\n  sample_rate: 8000\n  source: { type: \"tone\", wave: \"sine\", freq_hz: 1000, duration_ms: 100 }\n  effects: [ { type: \"reverb\", room_size: 0.5, wet: 0.3 } ]\n")
+    ok = ok and write_file(REVERB_BAD_SDN, "sound:\n  kind: \"sfx\"\n  sample_rate: 8000\n  source: { type: \"tone\", wave: \"sine\", freq_hz: 1000, duration_ms: 1 }\n  effects: [ { type: \"reverb\", room_size: 1.5, wet: 0.3 } ]\n")
     ok
 
 fn _write_sequence_fixtures() -> bool:
@@ -146,6 +150,28 @@ describe "simple sound render":
         val filtered_peak_hi = filtered_bytes[49] as i64
         val filtered_peak = filtered_peak_lo + filtered_peak_hi * 256
         expect(filtered_peak).to_be_less_than(plain_peak)
+
+    it "produces byte-identical WAV output across two separate reverb render invocations":
+        step("Render the same reverb-effect SDN twice to two separate files")
+        expect(_write_fixtures()).to_equal(true)
+        val out_a = OUT_DIR + "/reverb_det_a.wav"
+        val out_b = OUT_DIR + "/reverb_det_b.wav"
+        val ra = run_cli("render " + REVERB_SDN + " -o " + out_a)
+        val rb = run_cli("render " + REVERB_SDN + " -o " + out_b)
+
+        step("Then both files hash identically")
+        val ok = (ra.exit_code == 0 and rb.exit_code == 0 and
+            file_hash_sha256(out_a) == file_hash_sha256(out_b))
+        expect(ok).to_equal(true)
+
+    it "exits 1 with a path-qualified error when a reverb effect's room_size is out of [0,1]":
+        step("Render an SDN whose reverb effect has room_size=1.5")
+        expect(_write_fixtures()).to_equal(true)
+        val r = run_cli("render " + REVERB_BAD_SDN + " -o " + OUT_DIR + "/reverb_never.wav")
+
+        step("Then it fails (exit 1) and names the offending field")
+        val ok = (r.exit_code == 1 and r.stdout.contains("effects[0].room_size"))
+        expect(ok).to_equal(true)
 
     it "exits non-zero with a parse error message when given a malformed SDN file":
         step("Render a file that is not valid SDN")

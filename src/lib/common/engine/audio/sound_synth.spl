@@ -7,9 +7,10 @@
 # the same seed always reproduces the same buffer.
 #
 # Deliberately excluded (plan: doc/03_plan/app/game_tools/sound_music_effects_plan.md
-# Step 2): multi-oscillator/FM/wavetable synthesis, reverb/HRTF. Layering is
-# just calling a generator N times and `mix`-ing the buffers — no voice
-# abstraction needed.
+# Step 2): multi-oscillator/FM/wavetable synthesis, HRTF (stays deferred).
+# Layering is just calling a generator N times and `mix`-ing the buffers — no
+# voice abstraction needed. `reverb` (below) is a fixed Schroeder network —
+# see its own docstring for the ceiling/upgrade path.
 
 use std.common.random_pure.{LcgRng, lcg_rng, lcg_advance, lcg_value}
 
@@ -127,7 +128,7 @@ pub fn mix(buffers: [[f64]]) -> [f64]:
     out
 
 # ============================================================================
-# Pure-Simple effects (a few lines each — reverb/HRTF stay deferred, see plan)
+# Pure-Simple effects (a few lines each — HRTF stays deferred, see plan)
 # ============================================================================
 
 pub fn apply_lowpass(samples: [f64], cutoff_hz: f64, sample_rate: i64) -> [f64]:
@@ -168,6 +169,97 @@ pub fn apply_delay(samples: [f64], time_ms: f64, feedback: f64, sample_rate: i64
         var v = samples[i]
         if delay_frames > 0 and i >= delay_frames:
             v = v + feedback * out[i - delay_frames]
+        if v > 1.0:
+            v = 1.0
+        if v < -1.0:
+            v = -1.0
+        out.push(v)
+        i = i + 1
+    out
+
+# ============================================================================
+# Reverb — Schroeder reverberator (4 parallel comb + 2 series allpass)
+# ============================================================================
+#
+# Classic Schroeder/Moorer delay constants (ms), chosen historically to be
+# mutually non-commensurate so the four comb echoes don't line up and cause
+# audible periodicity/coloration: comb delays 29.7/37.1/41.1/43.7 ms, allpass
+# delays 5.0/1.7 ms. Allpass gain is a fixed 0.7 (standard Schroeder value);
+# comb feedback is `room_size` (0..1), applied uniformly to all four combs —
+# one knob, not a per-comb decay-time-normalized gain.
+#
+# Ceiling: this is a fixed 4-comb/2-allpass Schroeder network — no diffusion
+# matrix, no modulation, no early-reflection model. Upgrade path if the tail
+# ever needs to sound less metallic/more diffuse: a Feedback Delay Network
+# (FDN) with a Householder/Hadamard mixing matrix. HRTF stays separately
+# deferred (plan: doc/03_plan/app/game_tools/sound_music_effects_plan.md).
+
+val _REVERB_COMB_MS: [f64] = [29.7, 37.1, 41.1, 43.7]
+val _REVERB_ALLPASS_MS: [f64] = [5.0, 1.7]
+val _REVERB_ALLPASS_GAIN: f64 = 0.7
+
+fn _comb_wet(samples: [f64], delay_frames: i64, feedback: f64) -> [f64]:
+    """Feedback comb filter, wet-only tap. Internal register r[n] = x[n] +
+    feedback*r[n-D] (same recursion as apply_delay); the returned tap is the
+    feedback contribution alone, r[n]-x[n] — exactly 0 for n < D, and exactly
+    `feedback` at n = D for a unit impulse at n = 0."""
+    val n = samples.len()
+    var r: [f64] = []
+    var i: i64 = 0
+    while i < n:
+        var v = samples[i]
+        if delay_frames > 0 and i >= delay_frames:
+            v = v + feedback * r[i - delay_frames]
+        r.push(v)
+        i = i + 1
+    var out: [f64] = []
+    i = 0
+    while i < n:
+        out.push(r[i] - samples[i])
+        i = i + 1
+    out
+
+fn _allpass(samples: [f64], delay_frames: i64, gain: f64) -> [f64]:
+    """Schroeder allpass filter: y[n] = -gain*x[n] + x[n-D] + gain*y[n-D]."""
+    val n = samples.len()
+    var out: [f64] = []
+    var i: i64 = 0
+    while i < n:
+        val x = samples[i]
+        var x_d: f64 = 0.0
+        var y_d: f64 = 0.0
+        if delay_frames > 0 and i >= delay_frames:
+            x_d = samples[i - delay_frames]
+            y_d = out[i - delay_frames]
+        out.push(-gain * x + x_d + gain * y_d)
+        i = i + 1
+    out
+
+pub fn reverb(samples: [f64], sample_rate: i64, room_size: f64, wet: f64) -> [f64]:
+    """Schroeder reverb: 4 parallel combs (feedback = room_size, classic
+    29.7/37.1/41.1/43.7 ms delays) summed, then 2 series allpass filters
+    (fixed gain 0.7, classic 5.0/1.7 ms delays), mixed with the dry signal by
+    `wet` (0.0 = dry only, 1.0 = wet only), clamped to [-1.0, 1.0]. Caller
+    validates room_size/wet in [0,1] — like apply_delay/apply_lowpass, this
+    is an unvalidated pure function."""
+    val n = samples.len()
+    var wet_sig: [f64] = []
+    var i: i64 = 0
+    while i < n:
+        wet_sig.push(0.0)
+        i = i + 1
+    for ms in _REVERB_COMB_MS:
+        val tap = _comb_wet(samples, _frames(ms, sample_rate), room_size)
+        i = 0
+        while i < n:
+            wet_sig[i] = wet_sig[i] + tap[i]
+            i = i + 1
+    for ms in _REVERB_ALLPASS_MS:
+        wet_sig = _allpass(wet_sig, _frames(ms, sample_rate), _REVERB_ALLPASS_GAIN)
+    var out: [f64] = []
+    i = 0
+    while i < n:
+        var v = samples[i] * (1.0 - wet) + wet_sig[i] * wet
         if v > 1.0:
             v = 1.0
         if v < -1.0:

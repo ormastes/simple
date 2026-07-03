@@ -27,7 +27,7 @@ sound_cmd_render_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 12 | 12 | 0 | 0 |
+| 14 | 14 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -212,6 +212,69 @@ val filtered_peak_hi = filtered_bytes[49] as i64
 val filtered_peak = filtered_peak_lo + filtered_peak_hi * 256
 expect(filtered_peak).to_be_less_than(plain_peak)
 ```
+
+</details>
+
+#### produces byte-identical WAV output across two separate reverb render invocations
+
+- Render the same reverb-effect SDN twice to two separate files
+   - Expected: _write_fixtures() is true
+- Then both files hash identically
+- file hash sha256
+   - Expected: ok is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Render the same reverb-effect SDN twice to two separate files")
+expect(_write_fixtures()).to_equal(true)
+val out_a = OUT_DIR + "/reverb_det_a.wav"
+val out_b = OUT_DIR + "/reverb_det_b.wav"
+val ra = run_cli("render " + REVERB_SDN + " -o " + out_a)
+val rb = run_cli("render " + REVERB_SDN + " -o " + out_b)
+
+step("Then both files hash identically")
+val ok = (ra.exit_code == 0 and rb.exit_code == 0 and
+    file_hash_sha256(out_a) == file_hash_sha256(out_b))
+expect(ok).to_equal(true)
+```
+
+</details>
+
+<details>
+<summary>Advanced: exits 1 with a path-qualified error when a reverb effect's room_size is out of [0,1]</summary>
+
+#### exits 1 with a path-qualified error when a reverb effect's room_size is out of [0,1]
+
+- Render an SDN whose reverb effect has room_size=1.5
+   - Expected: _write_fixtures() is true
+- Then it fails (exit 1) and names the offending field
+   - Expected: ok is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Render an SDN whose reverb effect has room_size=1.5")
+expect(_write_fixtures()).to_equal(true)
+val r = run_cli("render " + REVERB_BAD_SDN + " -o " + OUT_DIR + "/reverb_never.wav")
+
+step("Then it fails (exit 1) and names the offending field")
+val ok = (r.exit_code == 1 and r.stdout.contains("effects[0].room_size"))
+expect(ok).to_equal(true)
+```
+
+</details>
+
 
 </details>
 
@@ -449,8 +512,8 @@ expect(r.stdout).to_contain("unknown subcommand: frobnicate")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 12 |
-| Active scenarios | 12 |
+| Total scenarios | 14 |
+| Active scenarios | 14 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

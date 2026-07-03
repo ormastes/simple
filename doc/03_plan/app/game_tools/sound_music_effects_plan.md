@@ -51,11 +51,12 @@ step is independently usable and testable.
 - New `src/app/cli/sound_cmd.spl` with three subcommands, each a thin composition of steps 1–3:
   - `simple sound validate <file.sdn>` — parse + type-check only, exit code + error text.
   - `simple sound render <file.sdn> -o out.wav` — build the sample buffer (steps 2/3), apply
-    `EffectsChain` where feasible in pure Simple (one-pole low/high-pass and delay are a few
-    lines each; reuse `effects.spl`'s data model). Reverb/HRTF offline render stays deferred —
-    if it's ever needed, record the `runtime_need` decision first per the SPipe runtime-boundary
-    rule rather than defaulting to a `runtime_audio.c` sink. Encode via step 1. Must be byte-deterministic given the same SDN input (no wall-clock/random seeds
-    unless an explicit `seed:` field is set).
+    `EffectsChain` where feasible in pure Simple (one-pole low/high-pass, delay, and offline
+    Schroeder reverb — 4 parallel comb + 2 series allpass, `sound_synth.reverb` — are a few
+    lines each; reuse `effects.spl`'s data model). HRTF stays deferred — if it's ever needed,
+    record the `runtime_need` decision first per the SPipe runtime-boundary rule rather than
+    defaulting to a `runtime_audio.c` sink. Encode via step 1. Must be byte-deterministic given
+    the same SDN input (no wall-clock/random seeds unless an explicit `seed:` field is set).
   - `simple sound play <file.sdn>` — render to a temp WAV, then `audio_play` via the existing
     `AudioManager`/`audio_sffi.spl` path. Manual/local use only, not asserted in CI.
 - Explicitly not building: a TUI waveform view, live parameter tweaking, undo/redo. If
