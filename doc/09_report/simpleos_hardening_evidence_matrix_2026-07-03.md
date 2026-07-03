@@ -65,6 +65,9 @@
 - db_storage_btree_formal: pass
 - db_storage_btree_formal_scope: B-tree ordered insertion preserves ordering and contains the inserted key, leaf split halves remain balanced, and split occupancy bounds hold
 - db_storage_btree_formal_evidence: src/verification/db_storage/DbStorage/Theorems.lean T1_btree_ordered + T1_btree_insert_contains_key + T2_btree_balanced_leaf + T3_btree_bounds; src/verification/db_storage/DbStorage/BTree.lean orderedInsert_mem + T2_btree_balanced_internal_split + T3_btree_bounds_insert_nonfull; `cd src/verification/db_storage && lake build`
+- db_storage_recovery_formal: pass
+- db_storage_recovery_formal_scope: checkpoint replay includes only data records at or after the checkpoint whose transaction id has a commit record in the same checkpoint window, and every committed data record in that window appears in replay
+- db_storage_recovery_formal_evidence: src/verification/db_storage/DbStorage/Theorems.lean T6_recovery_equation + T6_replay_requires_committed_txn + T6_recovery_complete; `cd src/verification/db_storage && lake build`
 - nvfs_mount_formal: pass
 - nvfs_mount_formal_scope: successful mount preserves all NVFS invariants and increments mountEpoch exactly once; unmount preserves all invariants
 - nvfs_mount_formal_evidence: src/verification/formal/nvfs/Nvfs/Theorems.lean mount_preserves_all + mount_success_increments_epoch + unmount_preserves_all; `cd src/verification/formal/nvfs && lake build`

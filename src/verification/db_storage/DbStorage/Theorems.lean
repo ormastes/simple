@@ -203,6 +203,14 @@ theorem T6_recovery_equation (w : WalState) (checkpoint_lsn : Nat) :
   obtain ⟨⟨hlsn, htype⟩, hmem⟩ := hbool
   exact ⟨hlsn, htype, hmem⟩
 
+/-- T6 corollary: replay never includes data for a transaction that lacks a
+    commit record in the checkpoint window. -/
+theorem T6_replay_requires_committed_txn (w : WalState) (checkpoint_lsn : Nat)
+    (e : WalEntry)
+    (he : e ∈ replayFromCheckpoint w checkpoint_lsn) :
+    (committedTxns w checkpoint_lsn).contains e.txn_id = true :=
+  (T6_recovery_equation w checkpoint_lsn e he).right.right
+
 /-- T6 soundness: every committed DATA record since checkpoint appears in replay. -/
 theorem T6_recovery_complete (w : WalState) (checkpoint_lsn : Nat)
     (e : WalEntry)
