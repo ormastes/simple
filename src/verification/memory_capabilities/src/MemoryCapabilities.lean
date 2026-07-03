@@ -109,6 +109,15 @@ theorem empty_env_access_not_safe (access : MemAccess) :
   accessIsSafe { activeRefs := [] } access = false := by
   cases access <;> simp [accessIsSafe, getActiveRefs]
 
+theorem existing_exclusive_denies_exclusive (baseType : String) (loc : Nat) :
+  canCreateRef
+    { activeRefs :=
+        [(loc,
+          [{ location := loc,
+             refType := { baseType := baseType, capability := RefCapability.Exclusive } }])] }
+    loc RefCapability.Exclusive = false := by
+  simp [canCreateRef, getActiveRefs]
+
 theorem shared_read_same_loc (baseType : String) (loc : Nat) :
   allowsAccess { location := loc, refType := { baseType := baseType, capability := RefCapability.Shared } } (MemAccess.Read loc) = true := by
   simp [allowsAccess]
