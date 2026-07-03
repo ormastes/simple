@@ -25,8 +25,8 @@ N/A for this slice: this turn only fixes existing smoke wrappers and records blo
 ## Evidence 2026-07-03
 - `SIMPLE_BINARY=bin/release/simple sh scripts/check/check-riscv64-fpga-simpleos-preflight.shs --local-only`:
   - PASS: FT4232H USB present, serial ports present, JTAG interface free, openFPGALoader, OpenOCD, Vivado, RISC-V cross compilers, RV64 SimpleOS ELF artifact, RV64 SimpleOS bin artifact, RV64 bitstream artifact, Simple hello.
-  - FAIL: yosys, RV64 FPGA core executable gate, RV64 FPGA ELF load-context gate.
-  - RV64 core reason: `build/vhdl/rv64/rv64gc_core.vhd` is a placeholder core with no instruction execution or debug/load context.
+  - PASS: RV64 FPGA core executable gate after `scripts/fpga/generate_rv64_vhdl.shs` emits a stateful fetch core at `build/vhdl/rv64/rv64gc_core.vhd`.
+  - FAIL: yosys, RV64 FPGA ELF load-context gate.
   - RV64 load reason: `build/fpga/k26/load_elf_k26.log` records XSDB `dow` failure with `Invalid context`.
 - `SIMPLE_BINARY=bin/release/simple bash scripts/fpga/build_k26_vexriscv.shs`:
   - NOW FAIL-FAST: the wrapper regenerates `build/vhdl/rv64/rv64gc_core.vhd`, detects placeholder RTL, and exits before Vivado unless `ALLOW_PLACEHOLDER_RTL=1` is set for plumbing diagnostics.
@@ -75,3 +75,4 @@ dev-in-progress
 - dev: Added RV32 VHDL template generation for package, decoder/ALU-control, and register-file modules using the existing compiler VHDL backend templates.
 - dev: Fixed RV32I LSU helper visibility/imports; direct `compile --backend=vhdl src/lib/hardware/rv32i_rtl/core.spl` now reaches the VHDL eligibility gate and fails because the behavioral core has no `@hardware` boundary.
 - dev: Added an RV32 generated hardware-source provider and wrapper compile step so `scripts/fpga/generate_rv32_vhdl.shs` emits `build/vhdl/rv32/rv32_core.vhd` with real decode/control helper entities; RV32 still lacks bitstream and ELF load/run evidence.
+- dev: Replaced the RV64 constant-zero VHDL core stub with a minimal stateful Wishbone fetch core and fixed the RV64 preflight to reject only placeholder/no-assignment cores; RV64 still lacks ELF load/run evidence.
