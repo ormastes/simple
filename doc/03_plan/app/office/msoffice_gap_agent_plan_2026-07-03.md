@@ -1,0 +1,253 @@
+# MS-Office Gap — Remaining Work, Agent-Based Execution Plan
+
+**Date:** 2026-07-03
+**Audit (Explore lane, this date):** **231 implemented** vs Excel 365's ~505
+→ **~274 missing**, of which: 21 pure dotted-name aliases of functions we
+HAVE (STDEV→STDEV.S, RANK→RANK.EQ, GAMMALN→GAMMALN.PRECISE, …), ~73 stats
+(34 blocked only on incomplete beta/gamma + inverse root-finder), ~34
+financial securities (blocked only on a day-count-basis engine + solver),
+~33 engineering (18 IM* mechanical), ~23 text/misc, ~82 general mechanical
+(OFFSET/INDIRECT/date-time/math fill-ins), 7 cube + 3 web (out of scope —
+CARD 12). Recommended order: aliasing pack (~40, near-zero math) →
+IM*+ERF (~26) → incomplete beta/gamma core (~34). Full detail:
+session scratchpad `function_gap_audit.md`.
+**Status snapshot:** pure-Simple office suite at **231 verified Calc functions**,
+46 spec files, all green. Shipped this campaign: dynamic arrays w/ spill,
+SUMIFS family, XLOOKUP/XMATCH + array manipulation, financial solvers
+(RATE/IRR Newton), engineering/date/text/logic tails, DEFLATE zip writer,
+xlsx styles.xml round-trip, conditional formatting (engine + render), per-cell
+number formats, charts (bar/line/pie/scatter/area + axes/legends), mail merge,
+TOC, table editing, find/replace/stats, Impress notes+transitions, raw-mode
+termios fix (seed-verified), CLI surfacing (toc/merge/sort-sheet/find/stats/chart),
+Simple-as-macro-language (`office_api.spl`).
+**Honest position:** NOT equal to MS Office. Remaining distance is enumerated
+below as self-contained agent task cards.
+
+**Execution model (proven over 10 rounds):** parallel model lanes
+(opus = algorithmic batches, sonnet = infra/containers/root-cause,
+haiku = mechanical/new-file features) with **disjoint file ownership**;
+the coordinating session (fable) independently re-runs every spec, repairs
+sub-green deliveries at root cause, then verifies durability by
+**symbol-grep against HEAD** (parallel jj sessions sweep the working copy
+continuously — pathspec commits often no-op; the HEAD grep IS the check).
+
+---
+
+## Cross-cutting protocol (include in EVERY agent brief)
+
+### Simple interpreter quirk ledger (violations cost hours)
+- NO inheritance; generics `<>`; `val`/`var`; docstrings on public functions.
+- String interpolation is `"{expr}"` — literal braces in string literals ARE
+  interpolation. Build XML/CSS/`{{placeholders}}` by concatenation.
+- Chained method calls FAIL at runtime (`x.f().g()`) — intermediate `val`s.
+- Aggregates pass by copy — mutating functions RETURN the object; callers
+  reassign (`sheet = recalculate_formula_cells(sheet)`).
+- match-binding an `f64?` does NOT unwrap it — use the `.to_f64()` idiom
+  (see `_criteria_matches` in formula.spl).
+- **Dict-in-struct under copy-return corrupts values 8×** (bug doc
+  `interp_dict_in_struct_copy_corruption_2026-07-03.md`) — use parallel
+  arrays (`keys: [text]`, `specs: [T]`); `class` fields are safe (reference
+  semantics).
+- Struct default-field omission is broken in interpreter mode — always pass
+  every field.
+- Reserved/broken identifiers: `grid`, `unit` (plus keyword list in
+  `.claude/rules/language.md`).
+- Formula empty-string results display as raw `={expr}` — make emptiness
+  observable via `="["&F(x)&"]"` in specs.
+- `examples/`-dir scripts zero f64 payloads + no-op writes (bug doc) —
+  probes go in the session scratchpad.
+- Test runner: directory BATCH runs hang (daemon issue) — run spec files
+  individually. Confirm assertions execute once per new spec via a
+  deliberate-fail probe, then remove it.
+
+### VCS discipline
+- NEVER bare `git commit` — always pathspec form
+  `git commit -m msg -- <paths>` (a bare commit once swept a parallel
+  session's staged 13k-file tree).
+- Back up every touched file to the scratchpad BEFORE any VCS op.
+- After commit: `git show HEAD:<file> | grep <new-symbol>` — nonzero or the
+  work is NOT durable.
+- Fresh `.git/index.lock` with queued sessions → join the queue with a
+  bounded retry loop; delete only if >5 min old with no live holder.
+- Agents: no jj/git commands; leave changes uncommitted for the coordinator.
+
+### Per-batch verification loop (formula work)
+1. Probe every function against hand-computed / Excel-documented values in
+   the scratchpad FIRST. 2. Spec file modeled on the nearest sibling spec.
+3. Per-file spec run + per-file neighbor regressions. 4. Coordinator re-runs,
+   commits pathspec, HEAD-greps. 5. Memory file update.
+
+---
+
+## Task cards — remaining work
+
+### CARD 1 (opus lane) — Compatibility-alias batch  [HIGHEST coverage/effort]
+**Objective:** Excel's modern dotted names for functions we already have:
+RANK.EQ, RANK.AVG, STDEV.S/STDEV.P, VAR.S/VAR.P, MODE.SNGL, QUARTILE.INC,
+PERCENTILE.INC, PERCENTRANK.INC, NORM.DIST/NORM.S.DIST/NORM.INV/NORM.S.INV,
+BINOM.DIST, POISSON.DIST, EXPON.DIST, WEIBULL.DIST, LOGNORM.DIST, T.INV?,
+CONFIDENCE.NORM, COVARIANCE.P, FORECAST.LINEAR, CEILING.MATH/FLOOR.MATH
+(Excel-2013 semantics: negative handling differs from classic — implement,
+don't alias blindly), ISO.CEILING, plus TEXT-family aliases. Exact list:
+take from `scratchpad/function_gap_audit.md` (Explore audit, round 10).
+**Design:** the formula tokenizer must accept `.` inside function names —
+check `_tokenize`/name-lexing FIRST; if dots already lex as part of names,
+aliasing = one dispatch line per name delegating to the existing case
+(normalize name → strip/translate dots at dispatch entry:
+`val fname = raw_name.replace(".", "_DOT_")`-style mapping table or a
+`_canonical_name(name)` translation function — pick the smallest diff).
+If the lexer splits on `.`, fix the lexer for function-name context only and
+spec that separately. RANK.AVG needs real averaging of tied ranks (small new
+logic). CEILING.MATH/FLOOR.MATH: real new semantics — ground truths
+CEILING.MATH(-5.5)=-5, FLOOR.MATH(-5.5)=-6, CEILING.MATH(-5.5,2,1)=-6.
+**Files:** formula.spl + `formula_compat_alias_spec.spl`.
+**Spec musts:** every alias returns the same value as its base on one shared
+input; the genuinely-new semantics (RANK.AVG ties, CEILING.MATH negatives)
+hand-computed; dot-name tokenization proven by a formula mixing dotted and
+plain calls.
+
+### CARD 2 (opus lane) — Continuous-distribution machinery
+**Objective:** BETA.DIST/BETA.INV, GAMMA.DIST/GAMMA.INV, CHISQ.DIST/
+CHISQ.DIST.RT/CHISQ.INV/CHISQ.TEST, T.DIST/T.DIST.2T/T.DIST.RT/T.INV/T.TEST,
+F.DIST/F.DIST.RT/F.INV/F.TEST, GAMMA, GAUSS, PHI.
+**Design:** one new primitive pays for the whole card: the **regularized
+incomplete beta function** `I_x(a,b)` via Lentz continued fractions
+(Numerical Recipes §6.4; symmetry `I_x(a,b)=1-I_{1-x}(b,a)` when
+x>(a+1)/(a+b+2)), plus **regularized incomplete gamma** `P(a,x)` (series for
+x<a+1, continued fraction otherwise, NR §6.2). Existing primitives:
+`_gammaln` (Lanczos), `_exp_f64`, `_ln_f64`, `_powf`, `_norm_cdf`,
+`_norm_inv_std` (Acklam). Then: T CDF = incomplete-beta with
+a=df/2,b=1/2,x=df/(df+t²); F CDF likewise; chi-square = P(df/2, x/2).
+Inverses: bisection on the CDF (50 iters, [lo,hi] expanded until bracketed) —
+do NOT chase Newton stability. Fail closed #ERR on domain violations
+(a,b≤0; df<1; x outside [0,1] for inverses).
+**Ground truths:** BETA.DIST(0.5,2,3,TRUE)=0.6875; GAMMA.DIST(10.00001131,9,2,TRUE)=0.068094;
+CHISQ.DIST(0.5,1,TRUE)=0.520500; T.DIST(1.96,60,TRUE)≈0.972716;
+F.DIST(15.2069,6,4,TRUE)≈0.99; GAMMA(2.5)=1.329340; GAUSS(2)=0.477250;
+PHI(0.75)=0.301137. Verify each against a second source in the probe.
+**Files:** formula.spl + `formula_dist2_spec.spl`.
+
+### CARD 3 (opus lane) — Financial securities batch
+**Objective:** ACCRINT/ACCRINTM, COUPDAYBS/COUPDAYS/COUPDAYSNC/COUPNCD/
+COUPNUM/COUPPCD, PRICE/PRICEDISC/PRICEMAT, YIELD/YIELDDISC/YIELDMAT,
+DISC, INTRATE, RECEIVED, DURATION/MDURATION, TBILLEQ/TBILLPRICE/TBILLYIELD,
+DOLLARDE/DOLLARFR, AMORDEGRC/AMORLINC (French — optional, mark if skipped).
+**Design:** the machinery is **day-count basis** (arg `basis` 0..4):
+implement `_daycount(start_serial, end_serial, basis)` and
+`_coup_dates(settle, maturity, freq)` (roll back from maturity by 12/freq
+months using the existing `_serial_from_civil`/`_civil_from_serial` +
+EOMONTH-style month clamp). US 30/360 (basis 0) day rule: d1=min(d1,30);
+if d1==30 then d2=min(d2,30). YIELD: bisection on PRICE (no closed form).
+DURATION = Macaulay via the standard weighted-PV sum; MDURATION =
+DURATION/(1+yld/freq).
+**Ground truths (Excel docs):** PRICE(DATE(2008,2,15),DATE(2017,11,15),
+0.0575,0.065,100,2,0)=94.634362; YIELD same instrument at price 95.04287
+=0.065; DURATION(DATE(2008,1,1),DATE(2016,1,1),0.08,0.09,2,1)=5.993775;
+DISC(DATE(2007,1,25),DATE(2007,6,15),97.975,100,1)=0.052420;
+TBILLYIELD(DATE(2008,3,31),DATE(2008,6,1),98.45)=0.091417;
+DOLLARDE(1.02,16)=1.125; DOLLARFR(1.125,16)=1.02.
+**Files:** formula.spl + `formula_securities_spec.spl`. Congruence of
+settle<maturity, basis 0..4, freq∈{1,2,4} → else #ERR.
+
+### CARD 4 (opus lane) — Engineering remainder
+**Objective:** ERF/ERFC (we have `_norm_cdf`'s A-S erf — expose + add
+complementary w/ 2-arg ERF(lo,hi)), BESSELJ/BESSELY/BESSELI/BESSELK
+(series for small x, asymptotic/recurrence for large — NR §6.5-6.7; integer
+order only is acceptable Excel-wise for a first pass, document it),
+CONVERT(n, from_unit, to_unit) (unit table: mass g/lbm/kg…, distance
+m/mi/in/ft/yd, time, pressure, force, energy, power, temperature —
+affine!, liquid; implement as a parallel-array table of (name, category,
+to_SI_factor) + special-case temperature offsets), DELTA/GESTEP (exist —
+check), IMSUM/IMSUB/IMPRODUCT/IMDIV/IMPOWER/IMSQRT (extend the existing
+`_parse_complex`/`_format_complex` text path — check which IM* exist first).
+**Ground truths:** ERF(1)=0.842701; ERFC(1)=0.157299; BESSELJ(1.9,2)=0.329926;
+BESSELI(1.5,1)=0.981666; CONVERT(1,"lbm","kg")=0.453592;
+CONVERT(68,"F","C")=20; CONVERT(2.5,"ft","sec")=#ERR (category mismatch);
+IMSUM("3+4i","5-3i")="8+i"; IMPRODUCT("3+4i","5-3i")="27+11i";
+IMSQRT("1+i")≈"1.09868411346781+0.455089860562227i" (prefix-assert).
+**Files:** formula.spl + `formula_eng2_spec.spl`.
+
+### CARD 5 (haiku lane) — Text/misc remainder
+**Objective:** TEXTBEFORE/TEXTAFTER/TEXTSPLIT (TEXTSPLIT is ARRAY-returning —
+row delim + col delim → spill via evaluate_formula_array), NUMBERSTRING?,
+LEN variants done; ARRAYTOTEXT/VALUETOTEXT, LET (defer — needs evaluator
+scoping, mark blocked), LAMBDA (defer — same), FORMULATEXT (needs origin-cell
+formula access — read recalc driver, it caches formula text on the origin
+cell: expose it), ISFORMULA, SHEET/SHEETS (single-sheet model: SHEET()=1,
+SHEETS()=1 — honest stubs are CORRECT here, they match our model),
+ADDRESS(row,col,[abs],[a1]) / ROW([ref]) / COLUMN([ref]) / ROWS(range) /
+COLUMNS(range) — ROW/COLUMN with no arg need the origin cell: the recalc
+driver knows the origin A1 — thread it as an optional context arg to the
+evaluator IF cheap; else implement only the with-arg forms and #ERR bare
+forms with a docstring note (do not fake it).
+**Ground truths:** TEXTBEFORE("red-blue-green","-")="red";
+TEXTAFTER("red-blue-green","-",2)="green" (check Excel: instance 2 →
+after 2nd delim); TEXTSPLIT("a,b;c,d",",",";") spills [[a,b],[c,d]];
+ADDRESS(2,3)="$C$2"; ROWS(A1:B3)=3; COLUMNS(A1:B3)=2.
+**Files:** formula.spl + `formula_text2_spec.spl`. NOTE: this card touches
+formula.spl — serialize AFTER whichever opus card is running, or give it the
+card only when formula.spl is free.
+
+### CARD 6 (sonnet lane) — Deploy swap completion  [IN FLIGHT round 9]
+**Objective:** production `bin/simple` carries the raw-mode termios +
+interpreter-dispatch fixes.
+**Design:** canonical path `bin/simple build bootstrap` (or
+`bootstrap-from-scratch.sh --pure-simple --deploy`); background build with
+log polling; `.bak-rawmode` before swap; atomic `.new`+`mv` to BOTH release
+paths (`bin/release/x86_64-unknown-linux-gnu/` build target AND
+`bin/release/linux-x86_64/` mcp launch path per code-style.md).
+**Acceptance:** (a) interactive_spec passes on new binary; (b)
+`printf 'q' | bin/simple run src/app/office/mod.spl edit-sheet --tui <csv>`
+exits WITHOUT "unknown extern function"; (c) 3 formula specs green on the
+new binary. ANY failure → rollback + re-verify + honest report.
+**If the build fails twice on parallel-session churn:** stop, log tail,
+leave binaries untouched, report — do not force.
+
+### CARD 7 (haiku lane) — ODS styles  [IN FLIGHT round 10]
+As briefed: `sheet_to_fods_formatted` in odf_export.spl mirroring xlsx
+styles (automatic-styles, number/percentage/date styles, bold/bg/fg),
+`fods_styles_spec.spl`, old writer byte-identical, ceiling = structural
+(no LibreOffice locally).
+
+### CARD 8 (opus lane) — Matrix batch  [IN FLIGHT round 10]
+As briefed: MMULT/MINVERSE(Gauss-Jordan)/MDETERM(LU)/MUNIT spill +
+SUMX2MY2/SUMX2PY2/SUMXMY2 + FACTDOUBLE/MULTINOMIAL/SERIESSUM +
+ROMAN/ARABIC. `formula_matrix_spec.spl`.
+
+### CARD 9 (any lane) — Function-gap audit consumption  [audit IN FLIGHT]
+When `scratchpad/function_gap_audit.md` lands: copy it into
+`doc/09_report/office_function_gap_audit_2026-07-03.md`, re-derive CARD 1's
+exact alias list and CARD 2-5 exact membership from it, update THIS plan's
+counts, and re-order remaining cards by coverage-per-effort.
+
+### CARD 10 (sonnet lane) — Desktop render verification  [BLOCKED locally]
+**Objective:** prove .docx/.xlsx/.pptx/.fods open correctly in real
+Office/LibreOffice. **Blocked:** neither installed on this host.
+**Plan:** (a) container route — check `scripts/local-container-test.shs`
+infra for an image with `libreoffice --headless --convert-to pdf` available;
+acceptance = conversion exit 0 + nonzero-page PDF for one file of each
+format; (b) if no container capability, produce a one-command user-side
+check script (`.shs`) + doc, and record the ceiling in
+`doc/08_tracking/test/` as an environment-blocked verification item.
+NEVER claim desktop-verified until (a) or user confirmation.
+
+### CARD 11 (haiku lane) — CLI + macro API catch-up
+After CARDs 1-5 land: extend `office_api.spl` wrappers + mod.spl help for
+any new user-facing surface (formatted xlsx/fods export flags on `convert`:
+`--styles <fmt-spec-file>`? design the smallest flag that exposes
+`sheet_to_xlsx_bytes_formatted`), one E2E grep proof per addition,
+regression on existing dispatch.
+
+### CARD 12 — Cube/OLAP + web functions  [DECLINED, record honestly]
+CUBEVALUE etc. require an OLAP data source; WEBSERVICE/FILTERXML require
+network access inside formulas — both violate the suite's offline pure-Simple
+model. Decision: implement as fail-closed #N/A stubs ONLY if the audit shows
+compatibility value; otherwise document exclusion in the audit report.
+These are excluded from the parity count with rationale, not silently.
+
+---
+
+## Definition of done per card
+Spec green under the COORDINATOR's own run (not just the agent's report) →
+pathspec commit → `git show HEAD:<file> | grep <symbol>` nonzero → memory
+file line appended → honest gap-count decrement in this doc.
