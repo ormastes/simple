@@ -810,6 +810,39 @@ fn _sorted_asc(values: [f64]) -> [f64]:
         out = result
     out
 
+# Civil <-> Excel-serial date conversion (Hinnant's algorithms, pure integer)
+fn _days_from_civil(y_in: i64, m: i64, d: i64) -> i64:
+    """Days since 1970-01-01 for a civil date."""
+    var y = y_in
+    if m <= 2:
+        y = y - 1
+    val era = (if y >= 0: y else: y - 399) / 400
+    val yoe = y - era * 400
+    val mp = if m > 2: m - 3 else: m + 9
+    val doy = (153 * mp + 2) / 5 + d - 1
+    val doe = yoe * 365 + yoe / 4 - yoe / 100 + doy
+    era * 146097 + doe - 719468
+
+fn _civil_from_days(z_in: i64) -> [i64]:
+    """[year, month, day] for days since 1970-01-01."""
+    val z = z_in + 719468
+    val era = (if z >= 0: z else: z - 146096) / 146097
+    val doe = z - era * 146097
+    val yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
+    val doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
+    val mp = (5 * doy + 2) / 153
+    val d = doy - (153 * mp + 2) / 5 + 1
+    val m = if mp < 10: mp + 3 else: mp - 9
+    val y = yoe + era * 400 + (if m <= 2: 1 else: 0)
+    [y, m, d]
+
+fn _serial_from_civil(y: i64, m: i64, d: i64) -> f64:
+    """Excel date serial (1900 system): days since 1899-12-30."""
+    (_days_from_civil(y, m, d) + 25569).to_f64()
+
+fn _civil_from_serial(serial: f64) -> [i64]:
+    _civil_from_days(serial.to_i64() - 25569)
+
 fn _mean(values: [f64]) -> f64:
     var sum = 0.0
     for v in values:
@@ -1047,6 +1080,50 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                 val d = v - mean
                 dev_sum = dev_sum + (if d < 0.0: 0.0 - d else: d)
             return CellValue.NumberVal(value: dev_sum / flat.len().to_f64())
+        "DATE":
+            if args.len() >= 3:
+                return CellValue.NumberVal(value: _serial_from_civil(_first_val(args[0]).to_i64(), _first_val(args[1]).to_i64(), _first_val(args[2]).to_i64()))
+            return CellValue.ErrorVal(message: "DATE requires year, month, day")
+        "YEAR":
+            if flat.len() > 0:
+                return CellValue.NumberVal(value: _civil_from_serial(flat[0])[0].to_f64())
+            return CellValue.ErrorVal(message: "YEAR requires a serial")
+        "MONTH":
+            if flat.len() > 0:
+                return CellValue.NumberVal(value: _civil_from_serial(flat[0])[1].to_f64())
+            return CellValue.ErrorVal(message: "MONTH requires a serial")
+        "DAY":
+            if flat.len() > 0:
+                return CellValue.NumberVal(value: _civil_from_serial(flat[0])[2].to_f64())
+            return CellValue.ErrorVal(message: "DAY requires a serial")
+        "DAYS":
+            if args.len() >= 2:
+                return CellValue.NumberVal(value: _first_val(args[0]) - _first_val(args[1]))
+            return CellValue.ErrorVal(message: "DAYS requires end, start")
+        "WEEKDAY":
+            if flat.len() > 0:
+                # Excel default: 1 = Sunday .. 7 = Saturday; WD = serial mod 7 (0 -> 7)
+                var wd = (flat[0].to_i64() % 7).to_i32()
+                if wd < 0:
+                    wd = wd + 7
+                if wd == 0:
+                    wd = 7
+                return CellValue.NumberVal(value: wd.to_f64())
+            return CellValue.ErrorVal(message: "WEEKDAY requires a serial")
+        "EDATE":
+            if args.len() >= 2:
+                val ymd = _civil_from_serial(_first_val(args[0]))
+                var total = ymd[0] * 12 + (ymd[1] - 1) + _first_val(args[1]).to_i64()
+                val ny = total / 12
+                val nm = total % 12 + 1
+                var nd = ymd[2]
+                if nd > 28:
+                    val next_month = _serial_from_civil(if nm == 12: ny + 1 else: ny, if nm == 12: 1 else: nm + 1, 1)
+                    val last_day = _civil_from_serial(next_month - 1.0)[2]
+                    if nd > last_day:
+                        nd = last_day
+                return CellValue.NumberVal(value: _serial_from_civil(ny, nm, nd))
+            return CellValue.ErrorVal(message: "EDATE requires serial, months")
         "ATAN2":
             if args.len() >= 2:
                 val yy = _first_val(args[0])
