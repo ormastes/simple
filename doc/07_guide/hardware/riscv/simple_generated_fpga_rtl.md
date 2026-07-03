@@ -55,6 +55,9 @@ profile/resource/concurrency contracts such as product metadata consistency,
 starvation/fairness, race-condition, scheduler, channel, lock, or resource
 lifecycle invariants. Do not treat Lean proof of a model as an RTL proof, and
 do not treat RVFI/SymbiYosys readiness as a Lean proof.
+For concurrency lanes such as DRF or scheduler proofs, keep the checked Lean
+entry point named in the hardening evidence matrix so regeneration can update
+generated facts without silently weakening the manual theorem surface.
 
 To run the maintained dual-track gate:
 

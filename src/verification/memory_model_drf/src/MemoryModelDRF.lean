@@ -66,6 +66,11 @@ def conflicts (op1 op2 : MemoryOperation) : Prop :=
   | some loc1, some loc2 => loc1 = loc2 ∧ (op1.isWrite = true ∨ op2.isWrite = true)
   | _, _ => False
 
+theorem conflicts_symmetric (op1 op2 : MemoryOperation) :
+  conflicts op1 op2 → conflicts op2 op1 := by
+  cases op1 <;> cases op2 <;>
+    simp [conflicts, MemoryOperation.locationId?, MemoryOperation.isWrite, eq_comm, Or.comm]
+
 def hasDataRace (exec : Execution) : Prop :=
   ∃ id1 id2 op1 op2,
     (id1, op1) ∈ exec.ops ∧
@@ -77,6 +82,53 @@ def hasDataRace (exec : Execution) : Prop :=
 
 def dataRaceFree (exec : Execution) : Prop :=
   ¬hasDataRace exec
+
+theorem hasDataRace_symmetric (exec : Execution) :
+    hasDataRace exec →
+    ∃ id1 id2 op1 op2,
+      (id1, op1) ∈ exec.ops ∧
+      (id2, op2) ∈ exec.ops ∧
+      id1 ≠ id2 ∧
+      conflicts op1 op2 ∧
+      ¬happensBefore exec id1 id2 ∧
+      ¬happensBefore exec id2 id1 := by
+  intro hRace
+  rcases hRace with ⟨id1, id2, op1, op2, h1, h2, hneq, hconf, hnot12, hnot21⟩
+  exact ⟨id2, id1, op2, op1, h2, h1, fun h => hneq h.symm,
+    conflicts_symmetric op1 op2 hconf, hnot21, hnot12⟩
+
+theorem hasDataRace_has_conflict (exec : Execution) :
+    hasDataRace exec →
+    ∃ id1 id2 op1 op2,
+      (id1, op1) ∈ exec.ops ∧
+      (id2, op2) ∈ exec.ops ∧
+      id1 ≠ id2 ∧
+      conflicts op1 op2 := by
+  intro hRace
+  rcases hRace with ⟨id1, id2, op1, op2, h1, h2, hneq, hconf, _, _⟩
+  exact ⟨id1, id2, op1, op2, h1, h2, hneq, hconf⟩
+
+theorem hasDataRace_unordered (exec : Execution) :
+    hasDataRace exec →
+    ∃ id1 id2 op1 op2,
+      (id1, op1) ∈ exec.ops ∧
+      (id2, op2) ∈ exec.ops ∧
+      id1 ≠ id2 ∧
+      ¬happensBefore exec id1 id2 ∧
+      ¬happensBefore exec id2 id1 := by
+  intro hRace
+  rcases hRace with ⟨id1, id2, op1, op2, h1, h2, hneq, _, hnot12, hnot21⟩
+  exact ⟨id1, id2, op1, op2, h1, h2, hneq, hnot12, hnot21⟩
+
+theorem hasDataRace_has_distinct_ops (exec : Execution) :
+    hasDataRace exec →
+    ∃ id1 id2 op1 op2,
+      (id1, op1) ∈ exec.ops ∧
+      (id2, op2) ∈ exec.ops ∧
+      id1 ≠ id2 := by
+  intro hRace
+  rcases hRace with ⟨id1, id2, op1, op2, h1, h2, hneq, _, _, _⟩
+  exact ⟨id1, id2, op1, op2, h1, h2, hneq⟩
 
 structure SequentiallyConsistent (exec : Execution) where
   witness : OperationId → OperationId → Prop
@@ -104,6 +156,12 @@ theorem read_read_no_conflict (loc : LocationId) (tid1 tid2 : ThreadId) :
   intro h
   simp [conflicts, MemoryOperation.locationId?, MemoryOperation.isWrite] at h
 
+theorem read_read_any_location_no_conflict
+    (loc1 loc2 : LocationId) (tid1 tid2 : ThreadId) :
+  ¬conflicts (MemoryOperation.Read loc1 tid1) (MemoryOperation.Read loc2 tid2) := by
+  intro h
+  simp [conflicts, MemoryOperation.locationId?, MemoryOperation.isWrite] at h
+
 theorem fence_left_no_conflict (ord : MemoryOrdering) (tid : ThreadId) (op : MemoryOperation) :
   ¬conflicts (MemoryOperation.Fence ord tid) op := by
   cases op <;> simp [conflicts, MemoryOperation.locationId?]
@@ -124,6 +182,30 @@ theorem write_read_same_location_conflicts (loc : LocationId) (tid1 tid2 : Threa
   conflicts (MemoryOperation.Write loc tid1) (MemoryOperation.Read loc tid2) := by
   simp [conflicts, MemoryOperation.locationId?, MemoryOperation.isWrite]
 
+theorem write_write_different_location_no_conflict
+    (loc1 loc2 : LocationId) (tid1 tid2 : ThreadId)
+    (h : loc1 ≠ loc2) :
+  ¬conflicts (MemoryOperation.Write loc1 tid1) (MemoryOperation.Write loc2 tid2) := by
+  intro hc
+  simp [conflicts, MemoryOperation.locationId?, MemoryOperation.isWrite] at hc
+  exact h hc
+
+theorem read_write_different_location_no_conflict
+    (loc1 loc2 : LocationId) (tid1 tid2 : ThreadId)
+    (h : loc1 ≠ loc2) :
+  ¬conflicts (MemoryOperation.Read loc1 tid1) (MemoryOperation.Write loc2 tid2) := by
+  intro hc
+  simp [conflicts, MemoryOperation.locationId?, MemoryOperation.isWrite] at hc
+  exact h hc
+
+theorem write_read_different_location_no_conflict
+    (loc1 loc2 : LocationId) (tid1 tid2 : ThreadId)
+    (h : loc1 ≠ loc2) :
+  ¬conflicts (MemoryOperation.Write loc1 tid1) (MemoryOperation.Read loc2 tid2) := by
+  intro hc
+  simp [conflicts, MemoryOperation.locationId?, MemoryOperation.isWrite] at hc
+  exact h hc
+
 theorem lock_acquire_release_same_location_conflicts
     (loc : LocationId) (tid1 tid2 : ThreadId) :
   conflicts (MemoryOperation.LockAcquire loc tid1) (MemoryOperation.LockRelease loc tid2) := by
@@ -142,6 +224,12 @@ theorem lock_release_release_same_location_conflicts
 theorem lock_acquire_acquire_same_location_no_conflict
     (loc : LocationId) (tid1 tid2 : ThreadId) :
   ¬conflicts (MemoryOperation.LockAcquire loc tid1) (MemoryOperation.LockAcquire loc tid2) := by
+  intro h
+  simp [conflicts, MemoryOperation.locationId?, MemoryOperation.isWrite] at h
+
+theorem lock_acquire_acquire_any_location_no_conflict
+    (loc1 loc2 : LocationId) (tid1 tid2 : ThreadId) :
+  ¬conflicts (MemoryOperation.LockAcquire loc1 tid1) (MemoryOperation.LockAcquire loc2 tid2) := by
   intro h
   simp [conflicts, MemoryOperation.locationId?, MemoryOperation.isWrite] at h
 
@@ -185,6 +273,18 @@ theorem drf_empty_execution :
   rcases hRace with ⟨id1, id2, op1, op2, h1, _, _, _, _, _⟩
   cases h1
 
+theorem drf_single_op_execution (id : OperationId) (op : MemoryOperation) :
+  dataRaceFree
+    { ops := [(id, op)]
+    , programOrder := fun _ _ => False
+    , synchronizesWith := fun _ _ => False } := by
+  intro hRace
+  rcases hRace with ⟨id1, id2, op1, op2, h1, h2, hneq, _, _, _⟩
+  simp at h1 h2
+  rcases h1 with ⟨rfl, rfl⟩
+  rcases h2 with ⟨rfl, rfl⟩
+  exact hneq rfl
+
 /-- If an execution has no conflicting operation pairs, it is data-race free. -/
 theorem drf_when_no_conflicts (exec : Execution)
     (hnoconf : ∀ id1 id2 op1 op2,
@@ -197,11 +297,12 @@ theorem drf_when_no_conflicts (exec : Execution)
   rcases hRace with ⟨id1, id2, op1, op2, h1, h2, hneq, hconf, _, _⟩
   exact (hnoconf id1 id2 op1 op2 h1 h2 hneq) hconf
 
-theorem drf_two_reads_same_location
-    (id1 id2 : OperationId) (loc : LocationId) (tid1 tid2 : ThreadId)
-    (hneq_ids : id1 ≠ id2) :
+theorem drf_two_ops_no_conflict
+    (id1 id2 : OperationId) (op1 op2 : MemoryOperation)
+    (hneq_ids : id1 ≠ id2)
+    (hnoconf : ¬conflicts op1 op2) :
     dataRaceFree
-      { ops := [(id1, MemoryOperation.Read loc tid1), (id2, MemoryOperation.Read loc tid2)]
+      { ops := [(id1, op1), (id2, op2)]
       , programOrder := fun _ _ => False
       , synchronizesWith := fun _ _ => False } := by
   apply drf_when_no_conflicts
@@ -213,13 +314,112 @@ theorem drf_two_reads_same_location
     exact False.elim (hneq rfl)
   · rcases ha with ⟨rfl, rfl⟩
     rcases hb with ⟨rfl, rfl⟩
-    exact read_read_no_conflict loc tid1 tid2
+    exact hnoconf
   · rcases ha with ⟨rfl, rfl⟩
     rcases hb with ⟨rfl, rfl⟩
-    exact read_read_no_conflict loc tid2 tid1
+    exact fun hconf => hnoconf (conflicts_symmetric _ _ hconf)
   · rcases ha with ⟨rfl, rfl⟩
     rcases hb with ⟨rfl, rfl⟩
     exact False.elim (hneq rfl)
+
+theorem drf_two_reads_same_location
+    (id1 id2 : OperationId) (loc : LocationId) (tid1 tid2 : ThreadId)
+    (hneq_ids : id1 ≠ id2) :
+    dataRaceFree
+      { ops := [(id1, MemoryOperation.Read loc tid1), (id2, MemoryOperation.Read loc tid2)]
+      , programOrder := fun _ _ => False
+      , synchronizesWith := fun _ _ => False } :=
+  drf_two_ops_no_conflict id1 id2
+    (MemoryOperation.Read loc tid1) (MemoryOperation.Read loc tid2)
+    hneq_ids (read_read_no_conflict loc tid1 tid2)
+
+theorem drf_two_reads_any_location
+    (id1 id2 : OperationId) (loc1 loc2 : LocationId) (tid1 tid2 : ThreadId)
+    (hneq_ids : id1 ≠ id2) :
+    dataRaceFree
+      { ops := [(id1, MemoryOperation.Read loc1 tid1), (id2, MemoryOperation.Read loc2 tid2)]
+      , programOrder := fun _ _ => False
+      , synchronizesWith := fun _ _ => False } :=
+  drf_two_ops_no_conflict id1 id2
+    (MemoryOperation.Read loc1 tid1) (MemoryOperation.Read loc2 tid2)
+    hneq_ids (read_read_any_location_no_conflict loc1 loc2 tid1 tid2)
+
+theorem drf_two_writes_different_location
+    (id1 id2 : OperationId) (loc1 loc2 : LocationId) (tid1 tid2 : ThreadId)
+    (hneq_ids : id1 ≠ id2) (hloc : loc1 ≠ loc2) :
+    dataRaceFree
+      { ops := [(id1, MemoryOperation.Write loc1 tid1), (id2, MemoryOperation.Write loc2 tid2)]
+      , programOrder := fun _ _ => False
+      , synchronizesWith := fun _ _ => False } :=
+  drf_two_ops_no_conflict id1 id2
+    (MemoryOperation.Write loc1 tid1) (MemoryOperation.Write loc2 tid2)
+    hneq_ids (write_write_different_location_no_conflict loc1 loc2 tid1 tid2 hloc)
+
+theorem drf_two_read_write_different_location
+    (id1 id2 : OperationId) (loc1 loc2 : LocationId) (tid1 tid2 : ThreadId)
+    (hneq_ids : id1 ≠ id2) (hloc : loc1 ≠ loc2) :
+    dataRaceFree
+      { ops := [(id1, MemoryOperation.Read loc1 tid1), (id2, MemoryOperation.Write loc2 tid2)]
+      , programOrder := fun _ _ => False
+      , synchronizesWith := fun _ _ => False } :=
+  drf_two_ops_no_conflict id1 id2
+    (MemoryOperation.Read loc1 tid1) (MemoryOperation.Write loc2 tid2)
+    hneq_ids (read_write_different_location_no_conflict loc1 loc2 tid1 tid2 hloc)
+
+theorem drf_two_write_read_different_location
+    (id1 id2 : OperationId) (loc1 loc2 : LocationId) (tid1 tid2 : ThreadId)
+    (hneq_ids : id1 ≠ id2) (hloc : loc1 ≠ loc2) :
+    dataRaceFree
+      { ops := [(id1, MemoryOperation.Write loc1 tid1), (id2, MemoryOperation.Read loc2 tid2)]
+      , programOrder := fun _ _ => False
+      , synchronizesWith := fun _ _ => False } :=
+  drf_two_ops_no_conflict id1 id2
+    (MemoryOperation.Write loc1 tid1) (MemoryOperation.Read loc2 tid2)
+    hneq_ids (write_read_different_location_no_conflict loc1 loc2 tid1 tid2 hloc)
+
+theorem drf_two_lock_acquires_same_location
+    (id1 id2 : OperationId) (loc : LocationId) (tid1 tid2 : ThreadId)
+    (hneq_ids : id1 ≠ id2) :
+    dataRaceFree
+      { ops := [(id1, MemoryOperation.LockAcquire loc tid1), (id2, MemoryOperation.LockAcquire loc tid2)]
+      , programOrder := fun _ _ => False
+      , synchronizesWith := fun _ _ => False } :=
+  drf_two_ops_no_conflict id1 id2
+    (MemoryOperation.LockAcquire loc tid1) (MemoryOperation.LockAcquire loc tid2)
+    hneq_ids (lock_acquire_acquire_same_location_no_conflict loc tid1 tid2)
+
+theorem drf_two_lock_acquires_any_location
+    (id1 id2 : OperationId) (loc1 loc2 : LocationId) (tid1 tid2 : ThreadId)
+    (hneq_ids : id1 ≠ id2) :
+    dataRaceFree
+      { ops := [(id1, MemoryOperation.LockAcquire loc1 tid1), (id2, MemoryOperation.LockAcquire loc2 tid2)]
+      , programOrder := fun _ _ => False
+      , synchronizesWith := fun _ _ => False } :=
+  drf_two_ops_no_conflict id1 id2
+    (MemoryOperation.LockAcquire loc1 tid1) (MemoryOperation.LockAcquire loc2 tid2)
+    hneq_ids (lock_acquire_acquire_any_location_no_conflict loc1 loc2 tid1 tid2)
+
+theorem drf_two_ops_fence_left
+    (id1 id2 : OperationId) (ord : MemoryOrdering) (tid : ThreadId)
+    (other : MemoryOperation) (hneq_ids : id1 ≠ id2) :
+    dataRaceFree
+      { ops := [(id1, MemoryOperation.Fence ord tid), (id2, other)]
+      , programOrder := fun _ _ => False
+      , synchronizesWith := fun _ _ => False } :=
+  drf_two_ops_no_conflict id1 id2
+    (MemoryOperation.Fence ord tid) other hneq_ids
+    (fence_left_no_conflict ord tid other)
+
+theorem drf_two_ops_fence_right
+    (id1 id2 : OperationId) (other : MemoryOperation)
+    (ord : MemoryOrdering) (tid : ThreadId) (hneq_ids : id1 ≠ id2) :
+    dataRaceFree
+      { ops := [(id1, other), (id2, MemoryOperation.Fence ord tid)]
+      , programOrder := fun _ _ => False
+      , synchronizesWith := fun _ _ => False } :=
+  drf_two_ops_no_conflict id1 id2
+    other (MemoryOperation.Fence ord tid) hneq_ids
+    (fence_right_no_conflict other ord tid)
 
 theorem two_unordered_writes_same_location_race
     (id1 id2 : OperationId) (loc : LocationId) (tid1 tid2 : ThreadId)
@@ -281,6 +481,69 @@ theorem two_unordered_write_read_same_location_race
     | inl hpo => exact hpo
     | inr hsw => exact hsw
 
+theorem two_unordered_lock_release_acquire_same_location_race
+    (id1 id2 : OperationId) (loc : LocationId) (tid1 tid2 : ThreadId)
+    (hneq_ids : id1 ≠ id2) :
+    hasDataRace
+      { ops := [(id1, MemoryOperation.LockRelease loc tid1), (id2, MemoryOperation.LockAcquire loc tid2)]
+      , programOrder := fun _ _ => False
+      , synchronizesWith := fun _ _ => False } := by
+  refine ⟨id1, id2, MemoryOperation.LockRelease loc tid1,
+    MemoryOperation.LockAcquire loc tid2, ?_, ?_, hneq_ids, ?_, ?_, ?_⟩
+  · simp
+  · simp
+  · exact lock_release_acquire_same_location_conflicts loc tid1 tid2
+  · intro hb
+    cases hb with
+    | inl hpo => exact hpo
+    | inr hsw => exact hsw
+  · intro hb
+    cases hb with
+    | inl hpo => exact hpo
+    | inr hsw => exact hsw
+
+theorem two_unordered_lock_acquire_release_same_location_race
+    (id1 id2 : OperationId) (loc : LocationId) (tid1 tid2 : ThreadId)
+    (hneq_ids : id1 ≠ id2) :
+    hasDataRace
+      { ops := [(id1, MemoryOperation.LockAcquire loc tid1), (id2, MemoryOperation.LockRelease loc tid2)]
+      , programOrder := fun _ _ => False
+      , synchronizesWith := fun _ _ => False } := by
+  refine ⟨id1, id2, MemoryOperation.LockAcquire loc tid1,
+    MemoryOperation.LockRelease loc tid2, ?_, ?_, hneq_ids, ?_, ?_, ?_⟩
+  · simp
+  · simp
+  · exact lock_acquire_release_same_location_conflicts loc tid1 tid2
+  · intro hb
+    cases hb with
+    | inl hpo => exact hpo
+    | inr hsw => exact hsw
+  · intro hb
+    cases hb with
+    | inl hpo => exact hpo
+    | inr hsw => exact hsw
+
+theorem two_unordered_lock_releases_same_location_race
+    (id1 id2 : OperationId) (loc : LocationId) (tid1 tid2 : ThreadId)
+    (hneq_ids : id1 ≠ id2) :
+    hasDataRace
+      { ops := [(id1, MemoryOperation.LockRelease loc tid1), (id2, MemoryOperation.LockRelease loc tid2)]
+      , programOrder := fun _ _ => False
+      , synchronizesWith := fun _ _ => False } := by
+  refine ⟨id1, id2, MemoryOperation.LockRelease loc tid1,
+    MemoryOperation.LockRelease loc tid2, ?_, ?_, hneq_ids, ?_, ?_, ?_⟩
+  · simp
+  · simp
+  · exact lock_release_release_same_location_conflicts loc tid1 tid2
+  · intro hb
+    cases hb with
+    | inl hpo => exact hpo
+    | inr hsw => exact hsw
+  · intro hb
+    cases hb with
+    | inl hpo => exact hpo
+    | inr hsw => exact hsw
+
 /-- If every conflicting pair of distinct operations is ordered by happens-before
     in at least one direction, the execution is data-race free. -/
 theorem drf_when_conflicts_ordered (exec : Execution)
@@ -296,6 +559,34 @@ theorem drf_when_conflicts_ordered (exec : Execution)
   cases hordered id1 id2 op1 op2 h1 h2 hneq hconf with
   | inl hb12 => exact hnot12 hb12
   | inr hb21 => exact hnot21 hb21
+
+theorem drf_when_conflicts_program_ordered (exec : Execution)
+    (hordered : ∀ id1 id2 op1 op2,
+      (id1, op1) ∈ exec.ops →
+      (id2, op2) ∈ exec.ops →
+      id1 ≠ id2 →
+      conflicts op1 op2 →
+      exec.programOrder id1 id2 ∨ exec.programOrder id2 id1) :
+    dataRaceFree exec := by
+  apply drf_when_conflicts_ordered
+  intro id1 id2 op1 op2 h1 h2 hneq hconf
+  cases hordered id1 id2 op1 op2 h1 h2 hneq hconf with
+  | inl po12 => exact Or.inl (Or.inl po12)
+  | inr po21 => exact Or.inr (Or.inl po21)
+
+theorem drf_when_conflicts_synchronized (exec : Execution)
+    (hordered : ∀ id1 id2 op1 op2,
+      (id1, op1) ∈ exec.ops →
+      (id2, op2) ∈ exec.ops →
+      id1 ≠ id2 →
+      conflicts op1 op2 →
+      exec.synchronizesWith id1 id2 ∨ exec.synchronizesWith id2 id1) :
+    dataRaceFree exec := by
+  apply drf_when_conflicts_ordered
+  intro id1 id2 op1 op2 h1 h2 hneq hconf
+  cases hordered id1 id2 op1 op2 h1 h2 hneq hconf with
+  | inl sw12 => exact Or.inl (Or.inr sw12)
+  | inr sw21 => exact Or.inr (Or.inr sw21)
 
 /-- Host/server lock and channel models usually expose program-order or
     synchronizes-with edges directly.  If every conflict is ordered by one of
@@ -347,6 +638,30 @@ theorem drf_two_ops_synchronized
     rcases hb with ⟨rfl, rfl⟩
     exact False.elim (hneq rfl)
 
+theorem drf_two_ops_synchronized_reverse
+    (id1 id2 : OperationId) (op1 op2 : MemoryOperation)
+    (hneq_ids : id1 ≠ id2) :
+    dataRaceFree
+      { ops := [(id1, op1), (id2, op2)]
+      , programOrder := fun _ _ => False
+      , synchronizesWith := fun a b => a = id2 ∧ b = id1 } := by
+  apply drf_when_conflicts_ordered
+  intro a b opa opb ha hb hneq _hconf
+  simp at ha hb
+  rcases ha with ha | ha <;> rcases hb with hb | hb
+  · rcases ha with ⟨rfl, rfl⟩
+    rcases hb with ⟨rfl, rfl⟩
+    exact False.elim (hneq rfl)
+  · rcases ha with ⟨rfl, rfl⟩
+    rcases hb with ⟨rfl, rfl⟩
+    exact Or.inr (Or.inr ⟨rfl, rfl⟩)
+  · rcases ha with ⟨rfl, rfl⟩
+    rcases hb with ⟨rfl, rfl⟩
+    exact Or.inl (Or.inr ⟨rfl, rfl⟩)
+  · rcases ha with ⟨rfl, rfl⟩
+    rcases hb with ⟨rfl, rfl⟩
+    exact False.elim (hneq rfl)
+
 /-- Concrete single-thread handoff shape: two distinct operations ordered by
     program order cannot form a data race. -/
 theorem drf_two_ops_program_ordered
@@ -369,6 +684,30 @@ theorem drf_two_ops_program_ordered
   · rcases ha with ⟨rfl, rfl⟩
     rcases hb with ⟨rfl, rfl⟩
     exact Or.inr (Or.inl ⟨rfl, rfl⟩)
+  · rcases ha with ⟨rfl, rfl⟩
+    rcases hb with ⟨rfl, rfl⟩
+    exact False.elim (hneq rfl)
+
+theorem drf_two_ops_program_ordered_reverse
+    (id1 id2 : OperationId) (op1 op2 : MemoryOperation)
+    (hneq_ids : id1 ≠ id2) :
+    dataRaceFree
+      { ops := [(id1, op1), (id2, op2)]
+      , programOrder := fun a b => a = id2 ∧ b = id1
+      , synchronizesWith := fun _ _ => False } := by
+  apply drf_when_conflicts_ordered
+  intro a b opa opb ha hb hneq _hconf
+  simp at ha hb
+  rcases ha with ha | ha <;> rcases hb with hb | hb
+  · rcases ha with ⟨rfl, rfl⟩
+    rcases hb with ⟨rfl, rfl⟩
+    exact False.elim (hneq rfl)
+  · rcases ha with ⟨rfl, rfl⟩
+    rcases hb with ⟨rfl, rfl⟩
+    exact Or.inr (Or.inl ⟨rfl, rfl⟩)
+  · rcases ha with ⟨rfl, rfl⟩
+    rcases hb with ⟨rfl, rfl⟩
+    exact Or.inl (Or.inl ⟨rfl, rfl⟩)
   · rcases ha with ⟨rfl, rfl⟩
     rcases hb with ⟨rfl, rfl⟩
     exact False.elim (hneq rfl)
