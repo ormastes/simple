@@ -96,6 +96,14 @@ theorem read_read_no_conflict (loc : LocationId) (tid1 tid2 : ThreadId) :
   intro h
   simp [conflicts, MemoryOperation.locationId?, MemoryOperation.isWrite] at h
 
+theorem fence_left_no_conflict (ord : MemoryOrdering) (tid : ThreadId) (op : MemoryOperation) :
+  ¬conflicts (MemoryOperation.Fence ord tid) op := by
+  cases op <;> simp [conflicts, MemoryOperation.locationId?]
+
+theorem fence_right_no_conflict (op : MemoryOperation) (ord : MemoryOrdering) (tid : ThreadId) :
+  ¬conflicts op (MemoryOperation.Fence ord tid) := by
+  cases op <;> simp [conflicts, MemoryOperation.locationId?]
+
 theorem write_write_same_location_conflicts (loc : LocationId) (tid1 tid2 : ThreadId) :
   conflicts (MemoryOperation.Write loc tid1) (MemoryOperation.Write loc tid2) := by
   simp [conflicts, MemoryOperation.locationId?, MemoryOperation.isWrite]
@@ -107,6 +115,27 @@ theorem read_write_same_location_conflicts (loc : LocationId) (tid1 tid2 : Threa
 theorem write_read_same_location_conflicts (loc : LocationId) (tid1 tid2 : ThreadId) :
   conflicts (MemoryOperation.Write loc tid1) (MemoryOperation.Read loc tid2) := by
   simp [conflicts, MemoryOperation.locationId?, MemoryOperation.isWrite]
+
+theorem lock_acquire_release_same_location_conflicts
+    (loc : LocationId) (tid1 tid2 : ThreadId) :
+  conflicts (MemoryOperation.LockAcquire loc tid1) (MemoryOperation.LockRelease loc tid2) := by
+  simp [conflicts, MemoryOperation.locationId?, MemoryOperation.isWrite]
+
+theorem lock_release_acquire_same_location_conflicts
+    (loc : LocationId) (tid1 tid2 : ThreadId) :
+  conflicts (MemoryOperation.LockRelease loc tid1) (MemoryOperation.LockAcquire loc tid2) := by
+  simp [conflicts, MemoryOperation.locationId?, MemoryOperation.isWrite]
+
+theorem lock_release_release_same_location_conflicts
+    (loc : LocationId) (tid1 tid2 : ThreadId) :
+  conflicts (MemoryOperation.LockRelease loc tid1) (MemoryOperation.LockRelease loc tid2) := by
+  simp [conflicts, MemoryOperation.locationId?, MemoryOperation.isWrite]
+
+theorem lock_acquire_acquire_same_location_no_conflict
+    (loc : LocationId) (tid1 tid2 : ThreadId) :
+  ¬conflicts (MemoryOperation.LockAcquire loc tid1) (MemoryOperation.LockAcquire loc tid2) := by
+  intro h
+  simp [conflicts, MemoryOperation.locationId?, MemoryOperation.isWrite] at h
 
 theorem hb_program_order (exec : Execution) (a : OperationId) (b : OperationId) :
   exec.programOrder a b → happensBefore exec a b := by

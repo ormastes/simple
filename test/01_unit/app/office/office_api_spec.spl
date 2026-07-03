@@ -6,7 +6,10 @@ exercises the object model in memory — the same calls a user macro makes.
 """
 
 use std.spec
-use app.office.office_api.{macro_new_document, macro_add_heading, macro_add_paragraph, macro_add_bullet, macro_new_sheet, macro_set_cell, macro_get_cell, macro_recalc, macro_add_slide, macro_sort_range, macro_filter_rows, macro_find, macro_replace, macro_word_count, macro_character_count, macro_paragraph_count, macro_merge_fields, macro_merge_all_markdown, macro_cond_css}
+use std.process.{run}
+use std.io_runtime.{read_file}
+use app.office.office_api.{macro_new_document, macro_add_heading, macro_add_paragraph, macro_add_bullet, macro_new_sheet, macro_set_cell, macro_get_cell, macro_recalc, macro_add_slide, macro_sort_range, macro_filter_rows, macro_find, macro_replace, macro_word_count, macro_character_count, macro_paragraph_count, macro_merge_fields, macro_merge_all_markdown, macro_cond_css, macro_set_format, macro_parse_formats, macro_save_xlsx_formatted, macro_save_fods_formatted}
+use app.office.sheets.cell_format.{empty_sheet_formats, formats_get}
 use app.office.file_formats.{document_to_markdown}
 use app.office.slides.deck_format.{deck_to_text}
 use app.office.slides.slide.{Slide}
@@ -147,3 +150,53 @@ describe "macro API: Conditional formatting":
         val css = macro_cond_css(sh, [rule], "A1")
         expect(css).to_contain("background")
         expect(css).to_contain("fde7e9")
+
+describe "macro API: cell formats and styled exports":
+    """Macros build SheetFormats and export styled .xlsx/.fods files."""
+
+    it "macro_set_format round-trips through formats_get":
+        var fmts = empty_sheet_formats()
+        fmts = macro_set_format(fmts, "B2", "0.00", true, "#ffe4b5", "#7a2e00")
+        val spec = formats_get(fmts, "B2")
+        expect(spec.num_fmt).to_equal("0.00")
+        assert_true(spec.bold)
+        expect(spec.bg).to_equal("#ffe4b5")
+        expect(spec.fg).to_equal("#7a2e00")
+
+    it "macro_parse_formats parses one-cell-per-line attribute text":
+        val fmts = macro_parse_formats("# comment\nB2 num_fmt=0.00 bold bg=#ffe4b5 fg=#7a2e00\n\nB3 num_fmt=0.0%\n")
+        val b2 = formats_get(fmts, "B2")
+        expect(b2.num_fmt).to_equal("0.00")
+        assert_true(b2.bold)
+        expect(b2.bg).to_equal("#ffe4b5")
+        expect(b2.fg).to_equal("#7a2e00")
+        val b3 = formats_get(fmts, "B3")
+        expect(b3.num_fmt).to_equal("PROBE-WRONG")
+        assert_false(b3.bold)
+
+    it "macro_save_xlsx_formatted writes an xlsx whose styles.xml carries the format":
+        var sh = macro_new_sheet("m")
+        sh = macro_set_cell(sh, "A1", "Val")
+        sh = macro_set_cell(sh, "A2", "12.5")
+        var fmts = empty_sheet_formats()
+        fmts = macro_set_format(fmts, "A2", "0.00", true, "", "")
+        val out_path = "/tmp/claude-1000/-home-ormastes-dev-pub-simple/de80534b-2c68-466d-a211-9ec2529fed18/scratchpad/office_api_macro.xlsx"
+        val wrote = macro_save_xlsx_formatted(sh, fmts, out_path)
+        assert_true(wrote)
+        val print_result = run("unzip", ["-p", out_path, "xl/styles.xml"])
+        expect(print_result.exit_code).to_equal(0)
+        expect(print_result.stdout).to_contain("formatCode=\"0.00\"")
+
+    it "macro_save_fods_formatted writes a fods with an automatic-styles block":
+        var sh = macro_new_sheet("m")
+        sh = macro_set_cell(sh, "A1", "Val")
+        sh = macro_set_cell(sh, "A2", "12.5")
+        var fmts = empty_sheet_formats()
+        fmts = macro_set_format(fmts, "A2", "0.00", true, "#ffe4b5", "")
+        val out_path = "/tmp/claude-1000/-home-ormastes-dev-pub-simple/de80534b-2c68-466d-a211-9ec2529fed18/scratchpad/office_api_macro.fods"
+        val wrote = macro_save_fods_formatted(sh, fmts, out_path)
+        assert_true(wrote)
+        val xml = read_file(out_path)
+        expect(xml.len()).to_be_greater_than(0)
+        expect(xml).to_contain("<office:automatic-styles>")
+        expect(xml).to_contain("fo:font-weight=\"bold\"")

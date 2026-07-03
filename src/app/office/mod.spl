@@ -18,9 +18,10 @@ use app.office.sheets.cell.{cell_ref_to_string, parse_cell_ref, CellRef}
 use app.office.render_adapter.{office_render, office_render_source}
 use app.office.file_formats.{parse_markdown_document, document_to_markdown, parse_csv_sheet, sheet_to_csv}
 use app.office.slides.deck_format.{parse_deck, deck_to_text}
-use app.office.odf_export.{document_to_fodt, sheet_to_fods}
+use app.office.odf_export.{document_to_fodt, sheet_to_fods, sheet_to_fods_formatted}
+use app.office.office_api.{macro_parse_formats}
 use app.office.pptx_export.{deck_to_pptx_bytes, pptx_bytes_to_deck}
-use app.office.odf_ooxml.{odt_bytes_to_document, docx_bytes_to_document, document_to_odt_bytes, document_to_docx_bytes, ods_bytes_to_sheet, xlsx_bytes_to_sheet, sheet_to_ods_bytes, sheet_to_xlsx_bytes}
+use app.office.odf_ooxml.{odt_bytes_to_document, docx_bytes_to_document, document_to_odt_bytes, document_to_docx_bytes, ods_bytes_to_sheet, xlsx_bytes_to_sheet, sheet_to_ods_bytes, sheet_to_xlsx_bytes, sheet_to_xlsx_bytes_formatted}
 use app.office.interactive.{run_sheet_editor_mode, run_sheet_tui_mode}
 use app.office.word.toc.{toc_generate}
 use app.office.word.mail_merge.{merge_all_markdown}
@@ -172,13 +173,30 @@ fn _run_open_command(args: [text]) -> i32:
         return 2
     return 0
 
-fn _run_convert_command(args: [text]) -> i32:
+fn _run_convert_command(args_in: [text]) -> i32:
     """Round-trip a document through parse+serialize, proving persistence.
 
-    Usage: simple office convert <word|sheets|slides> <in-file> <out-file>"""
+    Usage: simple office convert <word|sheets|slides> <in-file> <out-file> [--styles <fmt-file>]
+
+    `--styles` (sheets only, .xlsx/.fods outputs) applies per-cell formats
+    from a plain-text spec file — one cell per line, e.g.
+    `B2 num_fmt=0.00 bold bg=#ffe4b5 fg=#7a2e00` (see macro_parse_formats)."""
+    var args: [text] = []
+    var styles_path = ""
+    var ai = 0
+    while ai < args_in.len():
+        if args_in[ai] == "--styles" and ai + 1 < args_in.len():
+            styles_path = args_in[ai + 1]
+            ai = ai + 2
+        else:
+            args.push(args_in[ai])
+            ai = ai + 1
     if args.len() < 4:
-        print "Usage: simple office convert <word|sheets|slides> <in-file> <out-file>"
+        print "Usage: simple office convert <word|sheets|slides> <in-file> <out-file> [--styles <fmt-file>]"
         return 1
+    if styles_path != "" and not file_exists(styles_path):
+        print "office-convert: rejected (missing-styles: {styles_path})"
+        return 2
     val surface = args[1]
     val in_path = args[2]
     val out_path = args[3]
@@ -224,14 +242,25 @@ fn _run_convert_command(args: [text]) -> i32:
         else:
             sheet = parse_csv_sheet(read_file(in_path), _basename(in_path))
         if out_path.ends_with(".ods") or out_path.ends_with(".xlsx"):
-            val container = if out_path.ends_with(".ods"): sheet_to_ods_bytes(sheet) else: sheet_to_xlsx_bytes(sheet)
+            var container: [u8] = []
+            if out_path.ends_with(".ods"):
+                container = sheet_to_ods_bytes(sheet)
+            elif styles_path != "":
+                val fmts = macro_parse_formats(read_file(styles_path))
+                container = sheet_to_xlsx_bytes_formatted(sheet, fmts)
+            else:
+                container = sheet_to_xlsx_bytes(sheet)
             if file_write_bytes(out_path, container):
                 print "office-convert: {surface} {in_path} -> {out_path} ({container.len()} bytes, zip)"
                 return 0
             print "office-convert: failed to write {out_path}"
             return 2
         if out_path.ends_with(".fods"):
-            serialized = sheet_to_fods(sheet)
+            if styles_path != "":
+                val fmts = macro_parse_formats(read_file(styles_path))
+                serialized = sheet_to_fods_formatted(sheet, fmts)
+            else:
+                serialized = sheet_to_fods(sheet)
         else:
             serialized = sheet_to_csv(sheet)
     elif surface == "slides" or surface == "impress" or surface == "ppt":

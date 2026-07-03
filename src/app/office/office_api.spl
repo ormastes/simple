@@ -33,6 +33,10 @@ use app.office.sheets.data_ops.{sheet_sort_range, sheet_filter_rows}
 use app.office.word.edit_ops.{document_find, document_replace, document_stats, document_word_count_new, document_character_count, document_paragraph_count}
 use app.office.word.mail_merge.{merge_fields, merge_all_markdown}
 use app.office.sheets.cond_format.{CondRule, cond_css_for_cell}
+use app.office.sheets.cell_format.{FormatSpec, SheetFormats, empty_sheet_formats, formats_set}
+use app.office.odf_ooxml.{sheet_to_xlsx_bytes_formatted}
+use app.office.odf_export.{sheet_to_fods_formatted}
+use std.nogc_sync_mut.sffi.io.{file_write_bytes}
 
 # =========================================================================
 # Writer documents (markdown-backed)
@@ -211,6 +215,82 @@ fn macro_merge_all_markdown(doc: RichDocument, sheet: Sheet) -> text:
     Example macro: `merged_text = macro_merge_all_markdown(doc, sheet_data)`
     """
     merge_all_markdown(doc, sheet)
+
+# =========================================================================
+# Cell formats (styled exports)
+# =========================================================================
+
+fn macro_set_format(formats: SheetFormats, cell_a1: text, num_fmt: text, bold: bool, bg: text, fg: text) -> SheetFormats:
+    """Set one cell's display format. Returns the updated container; reassign.
+
+    Pass "" for num_fmt/bg/fg attributes you do not want to set.
+
+    Example macro:
+        var fmts = empty_sheet_formats()
+        fmts = macro_set_format(fmts, "B2", "0.00", true, "#ffe4b5", "#7a2e00")
+    """
+    val spec = FormatSpec(num_fmt: num_fmt, bold: bold, bg: bg, fg: fg)
+    formats_set(formats, cell_a1, spec)
+
+fn macro_parse_formats(spec_text: text) -> SheetFormats:
+    """Parse a plain-text format spec into a SheetFormats container.
+
+    One cell per line: an A1 ref followed by space-separated attributes —
+    `bold`, `num_fmt=<excel-fmt>`, `bg=<#rrggbb>`, `fg=<#rrggbb>`:
+
+        B2 num_fmt=0.00 bold bg=#ffe4b5 fg=#7a2e00
+        B3 num_fmt=0.0%
+
+    Blank lines and lines starting with '#' are skipped; unknown attributes
+    are ignored; a line needs a ref plus at least one attribute. This is the
+    format the CLI's `convert ... --styles <file>` flag reads.
+
+    Example macro: `val fmts = macro_parse_formats(read_file("fmt.txt"))`
+    """
+    var formats = empty_sheet_formats()
+    val lines = spec_text.split("\n")
+    var li = 0
+    while li < lines.len():
+        val line = lines[li].trim()
+        li = li + 1
+        if line != "" and not line.starts_with("#"):
+            val parts = line.split(" ")
+            if parts.len() >= 2:
+                var num_fmt = ""
+                var bold = false
+                var bg = ""
+                var fg = ""
+                var pi = 1
+                while pi < parts.len():
+                    val tok = parts[pi]
+                    if tok == "bold":
+                        bold = true
+                    elif tok.starts_with("num_fmt="):
+                        num_fmt = tok.substring(8)
+                    elif tok.starts_with("bg="):
+                        bg = tok.substring(3)
+                    elif tok.starts_with("fg="):
+                        fg = tok.substring(3)
+                    pi = pi + 1
+                val spec = FormatSpec(num_fmt: num_fmt, bold: bold, bg: bg, fg: fg)
+                formats = formats_set(formats, parts[0], spec)
+    formats
+
+fn macro_save_xlsx_formatted(sheet: Sheet, formats: SheetFormats, path: text) -> bool:
+    """Write the sheet as a styled .xlsx (number formats, bold, colors).
+
+    Example macro: `macro_save_xlsx_formatted(sh, fmts, "out.xlsx")`
+    """
+    val bytes = sheet_to_xlsx_bytes_formatted(sheet, formats)
+    file_write_bytes(path, bytes)
+
+fn macro_save_fods_formatted(sheet: Sheet, formats: SheetFormats, path: text) -> bool:
+    """Write the sheet as a styled flat-ODF .fods (automatic styles + data styles).
+
+    Example macro: `macro_save_fods_formatted(sh, fmts, "out.fods")`
+    """
+    val xml = sheet_to_fods_formatted(sheet, formats)
+    write_file(path, xml)
 
 # =========================================================================
 # Export

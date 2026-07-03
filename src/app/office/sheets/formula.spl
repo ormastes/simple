@@ -152,6 +152,11 @@ fn tokenize_formula(expr: text) -> [text]:
                 if _is_alpha(ch) or _is_digit(ch):
                     word = "{word}{ch}"
                     i = i + 1
+                elif ch == "." and i + 1 < len and _is_alpha(expr.char_at(i + 1)):
+                    # Dotted function name (NORM.DIST, RANK.AVG, NORM.S.DIST) — a dot
+                    # between two alpha runs is part of the name, never an operator here.
+                    word = "{word}{ch}"
+                    i = i + 1
                 else:
                     break
             tokens.push(word)
@@ -348,7 +353,7 @@ fn _eval_primary(tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalResu
         val upper_token = token.upper()
         # Check if this is a function call: NAME(
         if pos + 1 < tokens.len() and tokens.get(pos + 1) == "(":
-            return _eval_function_call(upper_token, tokens, pos + 2, sheet, depth)
+            return _eval_function_call(_canonical_name(upper_token), tokens, pos + 2, sheet, depth)
         # Boolean literals
         if upper_token == "TRUE":
             return EvalResult(value: CellValue.BoolVal(value: true), next_pos: pos + 1)
@@ -1581,6 +1586,40 @@ fn _dispatch_info_function(name: text, args: [CellValue]) -> CellValue:
                 return CellValue.TextVal(value: "")
     CellValue.ErrorVal(message: "unknown info function {name}")
 
+fn _canonical_name(name: text) -> text:
+    """Translate Excel's modern dotted-name aliases to the legacy spelling we implement.
+
+    Only PURE aliases (identical semantics to an existing function) are mapped here.
+    Dotted names with genuinely different behaviour — RANK.AVG, CEILING.MATH,
+    FLOOR.MATH, CEILING.PRECISE, ISO.CEILING, FLOOR.PRECISE, NORM.INV, NORM.S.INV —
+    are NOT mapped; they carry their own dispatch cases in _dispatch_function."""
+    match name:
+        "STDEV.S": return "STDEV"
+        "STDEV.P": return "STDEVP"
+        "VAR.S": return "VAR"
+        "VAR.P": return "VARP"
+        "RANK.EQ": return "RANK"
+        "MODE.SNGL": return "MODE"
+        "QUARTILE.INC": return "QUARTILE"
+        "PERCENTILE.INC": return "PERCENTILE"
+        "PERCENTRANK.INC": return "PERCENTRANK"
+        "NORM.DIST": return "NORMDIST"
+        "NORM.S.DIST": return "NORMSDIST"
+        "BINOM.DIST": return "BINOMDIST"
+        "NEGBINOM.DIST": return "NEGBINOMDIST"
+        "HYPGEOM.DIST": return "HYPGEOMDIST"
+        "POISSON.DIST": return "POISSON"
+        "EXPON.DIST": return "EXPONDIST"
+        "WEIBULL.DIST": return "WEIBULL"
+        "LOGNORM.DIST": return "LOGNORMDIST"
+        "CONFIDENCE.NORM": return "CONFIDENCE"
+        "GAMMALN.PRECISE": return "GAMMALN"
+        "COVARIANCE.P": return "COVAR"
+        "FORECAST.LINEAR": return "FORECAST"
+        "NORMINV": return "NORM.INV"
+        "NORMSINV": return "NORM.S.INV"
+        _: return name
+
 fn _eval_function_call(name: text, tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalResult:
     """Evaluate a function call. pos points to first token after '('."""
     if _is_text_function(name):
@@ -2241,6 +2280,22 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                 val pdf = _exp_f64(0.0 - z * z / 2.0) / (sd * _sqrt_f64(2.0 * _PI))
                 return CellValue.NumberVal(value: pdf)
             return CellValue.ErrorVal(message: "NORMDIST requires x, mean, sd, cumulative")
+        "NORM.S.INV":
+            if flat.len() > 0:
+                val p = flat[0]
+                if p <= 0.0 or p >= 1.0:
+                    return CellValue.ErrorVal(message: "NORM.S.INV requires 0 < p < 1")
+                return CellValue.NumberVal(value: _norm_inv_std(p))
+            return CellValue.ErrorVal(message: "NORM.S.INV requires probability")
+        "NORM.INV":
+            if args.len() >= 3:
+                val p = _first_val(args[0])
+                val mean = _first_val(args[1])
+                val sd = _first_val(args[2])
+                if sd <= 0.0 or p <= 0.0 or p >= 1.0:
+                    return CellValue.ErrorVal(message: "NORM.INV domain error")
+                return CellValue.NumberVal(value: mean + sd * _norm_inv_std(p))
+            return CellValue.ErrorVal(message: "NORM.INV requires p, mean, sd")
         "EXPONDIST":
             if args.len() >= 3:
                 val x = _first_val(args[0])
@@ -2500,6 +2555,16 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                 val slope = _covariance(args[0], args[1]) / vx2
                 return CellValue.NumberVal(value: _mean(args[0]) - slope * _mean(args[1]))
             return CellValue.ErrorVal(message: "INTERCEPT requires y then x ranges")
+        "FORECAST":
+            if args.len() >= 3 and args[1].len() == args[2].len() and args[1].len() > 1:
+                val xf = _first_val(args[0])
+                val vxf = _pop_variance(args[2])
+                if vxf == 0.0:
+                    return CellValue.ErrorVal(message: "FORECAST zero x variance")
+                val slope = _covariance(args[1], args[2]) / vxf
+                val intercept = _mean(args[1]) - slope * _mean(args[2])
+                return CellValue.NumberVal(value: intercept + slope * xf)
+            return CellValue.ErrorVal(message: "FORECAST requires x, known_ys, known_xs")
         "RSQ":
             if args.len() >= 2 and args[0].len() == args[1].len() and args[0].len() > 1:
                 val d = _pop_variance(args[0]) * _pop_variance(args[1])
@@ -2800,6 +2865,23 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                         rank = rank + 1
                 return CellValue.NumberVal(value: rank.to_f64())
             return CellValue.ErrorVal(message: "RANK requires value and range")
+        "RANK.AVG":
+            if args.len() >= 2:
+                val x = _first_val(args[0])
+                val pool = _flatten_args(args[1:])
+                var greater = 0
+                var ties = 0
+                for v in pool:
+                    if v > x:
+                        greater = greater + 1
+                    if v == x:
+                        ties = ties + 1
+                # Descending default (order 0), matching RANK/RANK.EQ. RANK.AVG averages
+                # the ranks that a tie group would otherwise occupy: EQ + (ties-1)/2.
+                val eq_rank = (greater + 1).to_f64()
+                val avg_rank = eq_rank + (ties - 1).to_f64() / 2.0
+                return CellValue.NumberVal(value: avg_rank)
+            return CellValue.ErrorVal(message: "RANK.AVG requires value and range")
         "PERCENTILE":
             if args.len() >= 2:
                 val k = _first_val(args[args.len() - 1])
@@ -3040,6 +3122,66 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
             if flat.len() > 0:
                 return CellValue.NumberVal(value: _ceil_f64(flat[0]))
             return CellValue.ErrorVal(message: "CEILING requires 1 argument")
+        "CEILING.MATH":
+            if flat.len() == 0:
+                return CellValue.ErrorVal(message: "CEILING.MATH requires a number")
+            val num = flat[0]
+            var s = if args.len() >= 2: _first_val(args[1]) else: 1.0
+            if s < 0.0:
+                s = 0.0 - s
+            if s == 0.0:
+                return CellValue.NumberVal(value: 0.0)
+            val mode = if args.len() >= 3: _first_val(args[2]) else: 0.0
+            # Default: round toward +inf. Negative number with nonzero mode: away from zero.
+            if num < 0.0 and mode != 0.0:
+                return CellValue.NumberVal(value: _floor_f64(num / s) * s)
+            return CellValue.NumberVal(value: _ceil_f64(num / s) * s)
+        "FLOOR.MATH":
+            if flat.len() == 0:
+                return CellValue.ErrorVal(message: "FLOOR.MATH requires a number")
+            val num = flat[0]
+            var s = if args.len() >= 2: _first_val(args[1]) else: 1.0
+            if s < 0.0:
+                s = 0.0 - s
+            if s == 0.0:
+                return CellValue.NumberVal(value: 0.0)
+            val mode = if args.len() >= 3: _first_val(args[2]) else: 0.0
+            # Default: round toward -inf. Negative number with nonzero mode: toward zero.
+            if num < 0.0 and mode != 0.0:
+                return CellValue.NumberVal(value: _ceil_f64(num / s) * s)
+            return CellValue.NumberVal(value: _floor_f64(num / s) * s)
+        "CEILING.PRECISE":
+            if flat.len() == 0:
+                return CellValue.ErrorVal(message: "CEILING.PRECISE requires a number")
+            val num = flat[0]
+            var s = if args.len() >= 2: _first_val(args[1]) else: 1.0
+            if s < 0.0:
+                s = 0.0 - s
+            if s == 0.0:
+                return CellValue.NumberVal(value: 0.0)
+            # Always round toward +inf regardless of sign.
+            return CellValue.NumberVal(value: _ceil_f64(num / s) * s)
+        "ISO.CEILING":
+            if flat.len() == 0:
+                return CellValue.ErrorVal(message: "ISO.CEILING requires a number")
+            val num = flat[0]
+            var s = if args.len() >= 2: _first_val(args[1]) else: 1.0
+            if s < 0.0:
+                s = 0.0 - s
+            if s == 0.0:
+                return CellValue.NumberVal(value: 0.0)
+            return CellValue.NumberVal(value: _ceil_f64(num / s) * s)
+        "FLOOR.PRECISE":
+            if flat.len() == 0:
+                return CellValue.ErrorVal(message: "FLOOR.PRECISE requires a number")
+            val num = flat[0]
+            var s = if args.len() >= 2: _first_val(args[1]) else: 1.0
+            if s < 0.0:
+                s = 0.0 - s
+            if s == 0.0:
+                return CellValue.NumberVal(value: 0.0)
+            # Always round toward -inf regardless of sign.
+            return CellValue.NumberVal(value: _floor_f64(num / s) * s)
         "SIGN":
             if flat.len() > 0:
                 val v = flat[0]

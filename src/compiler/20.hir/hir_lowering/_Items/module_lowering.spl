@@ -137,17 +137,30 @@ impl HirLowering:
         else:
             val lower_module_functions = module.functions
             val lower_function_keys = lower_module_functions.keys()
-            eprint("[LM-PROBE] parser_fn_keys_len={lower_function_keys.len()}")
-            var probe_prev_sym: SymbolId = SymbolId(id: -999)
             while lower_idx < lower_function_keys.len():
                 val name = lower_function_keys[lower_idx]
                 val fn_: Function = lower_module_functions[name]
                 val hir_fn = self.lower_function(fn_)
-                val probe_cur: SymbolId = hir_fn.symbol
-                eprint("[LM-PROBE] name={name} sym_is_nil={probe_cur == nil} eq_prev={probe_cur == probe_prev_sym}")
-                probe_prev_sym = probe_cur
-                functions[hir_fn.symbol] = hir_fn
-                eprint("[LM-PROBE] after_insert idx={lower_idx} dict_len={functions.values().len()}")
+                # Key the HIR functions Dict by a distinct per-function SymbolId
+                # derived from the loop index, NOT by `hir_fn.symbol`. On stage4
+                # (seed-compiled pure-Simple compiler) `SymbolTable.lookup(name)`
+                # returns a shared/corrupt SymbolId struct instance for every
+                # top-level function in a module — the seed's
+                # `Dict<text, SymbolId>.get()` yields the LAST-defined struct for
+                # all names (struct-value corruption, Layer-5 family). As a Dict
+                # KEY those identical structs collide, so `functions[hir_fn.symbol]
+                # = hir_fn` for a second function OVERWRITES the first, collapsing
+                # a 2+-function module to a single entry and silently dropping
+                # `main` (multi-fn run files no-op, rc=0 — bug
+                # stage4_unstub_multifn_silent_noop_2026-07-03, iteration 19). The
+                # real symbol ids ARE distinct in the table (next_symbol_id
+                # advances per `define`); only the looked-up struct handle is
+                # shared. Every HIR-functions consumer iterates `.keys()`/`.values()`
+                # (monomorphize_integration, backend translate, interpreter
+                # main-by-name scan) and re-indexes with the yielded key, so a
+                # distinct synthetic key preserves all entries and all consumers.
+                val fn_key: SymbolId = SymbolId(id: lower_idx)
+                functions[fn_key] = hir_fn
                 lower_idx = lower_idx + 1
 
         if bootstrap_mode:

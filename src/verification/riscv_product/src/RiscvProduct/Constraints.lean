@@ -64,6 +64,11 @@ theorem acquire_sets_single_owner (s s' : ResourceState) (l : Lane) :
   | some owner =>
       simp [acquire, howner] at h
 
+theorem acquire_empty_never_sets_other_owner (l other : Lane)
+    (h : l ≠ other) :
+    acquire { owner := none } l ≠ some { owner := some other } := by
+  cases l <;> cases other <;> simp [acquire] at *
+
 theorem held_resource_rejects_second_owner (s : ResourceState) (owner other : Lane) :
     s.owner = some owner → acquire s other = none := by
   intro h
@@ -73,5 +78,18 @@ theorem held_resource_rejects_second_owner (s : ResourceState) (owner other : La
 theorem owner_release_clears_resource (l : Lane) :
     release { owner := some l } l = { owner := none } := by
   cases l <;> simp [release]
+
+theorem acquire_release_roundtrip_empty (l : Lane) :
+    (acquire { owner := none } l).map (fun s => release s l) = some { owner := none } := by
+  cases l <;> simp [acquire, release]
+
+theorem empty_release_noop (l : Lane) :
+    release { owner := none } l = { owner := none } := by
+  cases l <;> simp [release]
+
+theorem non_owner_release_preserves_resource (owner other : Lane)
+    (h : owner ≠ other) :
+    release { owner := some owner } other = { owner := some owner } := by
+  cases owner <;> cases other <;> simp [release] at *
 
 end RiscvProduct

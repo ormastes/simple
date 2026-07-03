@@ -801,56 +801,6 @@ fn parse_color_any(raw: text) -> u32:
         return parse_color(raw.substring(hash, raw.len()))
     0u32
 
-# "0.09", ".5", "1" -> 0..255 alpha
-fn parse_alpha_fraction_range(s: text, start: i32, end: i32) -> i32:
-    var i = start
-    var int_part = 0
-    var frac_num = 0
-    var frac_den = 1
-    var seen_digit = false
-    var in_frac = false
-    while i < end:
-        val c = s.char_at(i)
-        val d = dec_val(c)
-        if d < 10:
-            seen_digit = true
-            if in_frac:
-                if frac_den < 1000:
-                    frac_num = frac_num * 10 + d
-                    frac_den = frac_den * 10
-            else:
-                int_part = int_part * 10 + d
-        elif c == ".":
-            in_frac = true
-        elif seen_digit:
-            break
-        i = i + 1
-    if int_part >= 1:
-        return 255
-    (frac_num * 255 + frac_den / 2) / frac_den
-
-# Alpha-aware CSS color: 0 for none/transparent, else ARGB with true alpha
-# (rgba() keeps its alpha; every other form is opaque like parse_color_any).
-fn parse_color_alpha(raw: text) -> u32:
-    val s = raw.trim().lower()
-    val rgba_at = text_index_of(s, "rgba")
-    if rgba_at >= 0:
-        val lp = find_from(s, "(", rgba_at)
-        val rp = if lp >= 0: find_from(s, ")", lp + 1) else: -1
-        if lp >= 0 and rp > lp:
-            val c1 = find_from(s, ",", lp + 1)
-            val c2 = if c1 >= 0: find_from(s, ",", c1 + 1) else: -1
-            val c3 = if c2 >= 0: find_from(s, ",", c2 + 1) else: -1
-            if c1 >= 0 and c2 >= 0 and c3 >= 0 and c3 < rp:
-                val a255 = parse_alpha_fraction_range(s, c3 + 1, rp)
-                if a255 <= 0:
-                    return 0u32
-                val r = parse_int_range(s, lp + 1, c1)
-                val g = parse_int_range(s, c1 + 1, c2)
-                val b = parse_int_range(s, c2 + 1, c3)
-                return (a255.to_u32() << 24) | ((r.to_u32()) << 16) | ((g.to_u32()) << 8) | b.to_u32()
-    parse_color_any(raw)
-
 fn parse_linear_gradient_color(raw: text, target: i32) -> u32:
     val lower = raw.lower()
     val start = text_index_of(lower, "linear-gradient(")
@@ -2080,13 +2030,13 @@ fn apply_decls(st: Style, decls: text) -> Style:
                     background_gradient_from_v = 0u32
                     background_gradient_to_v = 0u32
                     if bg_layers.base_color == 0u32:
-                        bg_v = parse_color_alpha(bgs)
+                        bg_v = parse_color_any(bgs)
             else:
-                bg_v = parse_color_alpha(bgs)
+                bg_v = parse_color_any(bgs)
                 background_gradient_from_v = 0u32
                 background_gradient_to_v = 0u32
         else:
-            bg_v = parse_color_alpha(bg)
+            bg_v = parse_color(bg)
             background_gradient_from_v = 0u32
             background_gradient_to_v = 0u32
     if bg_image.len() > 0:
@@ -5700,19 +5650,11 @@ fn fb_style_background_opacity_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i3
         image_origin_y = bg_y
         image_origin_w = bg_w
         image_origin_h = bg_h
-    # Fold the solid background color's own alpha (rgba) into the paint
-    # opacity: translucent panels must composite over what's beneath, not
-    # paint as opaque slabs. For alpha=255 colors this is bit-identical to
-    # the old path ((pct*255+127)/255 == pct).
-    val solid_bg_alpha = (((st.bg >> 24) & 255u32) as i32)
-    val solid_bg_opacity = (st.opacity_pct * solid_bg_alpha + 127) / 255
     if st.background_gradient_from == 0u32 or st.background_gradient_to == 0u32:
-        if solid_bg_opacity <= 0:
-            return fb
-        return fb_style_rounded_rect_opacity_clip(fb, fbw, fbh, bg_x, bg_y, bg_w, bg_h, st, st.bg | 0xFF000000u32, solid_bg_opacity, clip)
+        return fb_style_rounded_rect_opacity_clip(fb, fbw, fbh, bg_x, bg_y, bg_w, bg_h, st, st.bg, st.opacity_pct, clip)
     var out = fb
-    if st.bg != 0u32 and solid_bg_opacity > 0:
-        out = fb_style_rounded_rect_opacity_clip(out, fbw, fbh, bg_x, bg_y, bg_w, bg_h, st, st.bg | 0xFF000000u32, solid_bg_opacity, clip)
+    if st.bg != 0u32:
+        out = fb_style_rounded_rect_opacity_clip(out, fbw, fbh, bg_x, bg_y, bg_w, bg_h, st, st.bg, st.opacity_pct, clip)
     val tile_w = if st.background_size_w_px > 0: st.background_size_w_px else: image_origin_w
     val tile_h = if st.background_size_h_px > 0: st.background_size_h_px else: image_origin_h
     val fixed_no_repeat = st.background_attachment == "fixed" and st.background_repeat == "no-repeat"
