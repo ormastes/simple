@@ -92,6 +92,12 @@ theorem T4_pager_wal_gate_blocked (page_lsn : Nat) (wal_flushed_lsn : Nat)
   simp [writePageOk, Bool.or_eq_false_iff]
   exact ⟨hpos, by omega⟩
 
+/-- T4 pager-level converse: if the WAL is flushed far enough, page write is allowed. -/
+theorem T4_pager_wal_gate_allows_flushed (page_lsn : Nat) (wal_flushed_lsn : Nat)
+    (hflushed : wal_flushed_lsn ≥ page_lsn) :
+    writePageOk page_lsn wal_flushed_lsn = true := by
+  simp [writePageOk, hflushed]
+
 -- ===========================================================================
 -- T5 -- snapshot_isolation
 -- ===========================================================================
