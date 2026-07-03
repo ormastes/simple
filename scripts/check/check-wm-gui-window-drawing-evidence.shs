@@ -1,0 +1,263 @@
+#!/bin/sh
+# WM GUI window-drawing capture evidence.
+#
+# Renders three scenes at 1024x768 through both WM lanes and proves each one
+# actually draws desktop chrome, windows/titlebars/taskbar, and
+# correctly-sized text (not a blank frame, and not the giant-text "font:"
+# shorthand regression where CSS weight was parsed as font size):
+#
+#   (a) os.compositor.wm_scene standard_wm_scene           -> wm_scene_css.png
+#   (b) shared_wm_scene_to_chromed_wm_scene, 3 windows +    -> wm_scene_windows.png
+#       taskbar (CSS scene lane)
+#   (c) a real HostCompositor with a headless pixel-capture  -> host_compositor.png
+#       backend, 3 hosted windows, render_frame() via the
+#       CSS fast lane (host_compositor_entry.spl)
+#
+# Driver: src/os/compositor/wm_gui_window_drawing_evidence.spl. It renders,
+# measures (non-background / text-ink / saturated-accent pixel counts, plus a
+# giant-glyph pathology detector), and writes PPM captures. This script
+# converts each PPM to PNG (sips), classifies pass/fail per scene, and writes
+# the fail-closed build/wm_gui_window_drawing/report.md.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/wm_gui_window_drawing}"
+REPORT_PATH="${REPORT_PATH:-$BUILD_DIR/report.md}"
+ENV_PATH="$BUILD_DIR/evidence.env"
+LOG_PATH="$BUILD_DIR/simple.log"
+DRIVER_SRC="src/os/compositor/wm_gui_window_drawing_evidence.spl"
+# wm_scene.scene_to_html() embeds one large (tens-of-KB) WM chrome stylesheet
+# on every render call regardless of scene element count or capture
+# resolution, so under the interpreter a single render_scene_to_backend()
+# call is stylesheet-parse-bound, not pixel-bound, and has been measured to
+# take multiple minutes per scene. Budget generously; do not shrink this to
+# "fail fast" without re-measuring against the current renderer.
+TIMEOUT_SECS="${WM_GUI_WINDOW_DRAWING_TIMEOUT_SECS:-1800}"
+# Regression floor (see driver): legitimate glyphs never produce a vertical
+# ink run this tall. Kept identical to the driver's GIANT_GLYPH_RUN_PX so the
+# report's classification matches the value baked into the pixel metrics.
+GIANT_GLYPH_RUN_PX="${WM_GIANT_GLYPH_RUN_PX:-40}"
+# Sanity floors (measured baseline; see report for actual counts). Loose on
+# purpose: this gate exists to catch "blank frame" / "no text" / "no
+# titlebar" pathologies, not to pin exact coverage. Text presence and the
+# giant-glyph detector use INK (exact-white 255/255/255) pixels, not the
+# near-white "bright" class: the WM glass panels rasterize large near-white
+# gradient areas (a correct standard_wm_scene render measured 220686 bright
+# pixels with a 425px bright vertical run), while glyph text in both lanes is
+# exact white (color:white / theme.text_primary, solid bitmap glyphs, no AA).
+MIN_NON_BG_PIXELS="${WM_MIN_NON_BG_PIXELS:-4000}"
+MIN_INK_PIXELS="${WM_MIN_INK_PIXELS:-50}"
+MIN_ACCENT_PIXELS="${WM_MIN_ACCENT_PIXELS:-200}"
+# Render time above this is REPORTED (render_slow=true) but does not fail the
+# gate: the interpreted stylesheet cost is a known, documented perf finding
+# (~243s measured for standard_wm_scene at 1024x768), not a drawing defect.
+MAX_RENDER_MS="${WM_MAX_RENDER_MS:-120000}"
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+rm -f "$ENV_PATH" "$LOG_PATH" "$REPORT_PATH" "$BUILD_DIR"/*.ppm "$BUILD_DIR"/*.png 2>/dev/null || true
+
+echo "check=wm_gui_window_drawing_evidence"
+
+emit_unavailable() {
+    reason="$1"
+    {
+        echo "wm_gui_window_drawing_status=unavailable"
+        echo "wm_gui_window_drawing_reason=$reason"
+    } >"$ENV_PATH"
+    {
+        echo "# WM GUI Window Drawing Evidence"
+        echo
+        echo "- status: unavailable"
+        echo "- reason: $reason"
+    } >"$REPORT_PATH"
+    cat "$ENV_PATH"
+}
+
+# --- resolve self-hosted Simple binary (Rust seed forbidden by default) ---
+# Escape hatch: WM_ALLOW_SEED_DRIVER=1 permits an explicit rust-seed
+# SIMPLE_BIN and stamps the evidence with rust-seed-opt-in provenance (same
+# opt-in idiom as ALLOW_PATH_SIMPLE_BIN in check-hosted-wm-capture-evidence).
+# Needed while the deployed self-hosted release binary is stale: the 2026-06-05
+# bin/simple lacks the rt_u32s_from_raw extern the current renderer source
+# uses, so it fail-closes with "unknown extern function" before rendering.
+is_rust_seed_simple() {
+    case "$1" in
+        src/compiler_rust/*|*/src/compiler_rust/*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+if [ -z "${SIMPLE_BIN+x}" ]; then
+    for candidate in "bin/simple" "./bin/simple" "release"/*/simple "bin/release"/*/simple "build/bootstrap/stage3/simple"; do
+        if [ -x "$candidate" ]; then SIMPLE_BIN="$candidate"; break; fi
+    done
+fi
+SIMPLE_BIN="${SIMPLE_BIN:-}"
+SIMPLE_BIN_PROVENANCE="self-hosted"
+# Seed-ness is checked BEFORE executability so an explicit rust-seed override
+# is rejected as forbidden even if the path does not exist on this host.
+if [ "$SIMPLE_BIN" != "" ] && is_rust_seed_simple "$SIMPLE_BIN"; then
+    if [ "${WM_ALLOW_SEED_DRIVER:-0}" = "1" ]; then
+        SIMPLE_BIN_PROVENANCE="rust-seed-opt-in"
+    else
+        emit_unavailable "rust-seed-simple-bin-forbidden"; exit 1
+    fi
+fi
+if [ "$SIMPLE_BIN" = "" ] || [ ! -x "$SIMPLE_BIN" ]; then emit_unavailable "missing-self-hosted-simple-bin"; exit 1; fi
+
+have() { command -v "$1" >/dev/null 2>&1; }
+have sips || { emit_unavailable "missing-command:sips"; exit 1; }
+
+run_with_timeout() {
+    secs="$1"; shift
+    if have timeout; then timeout "$secs" "$@"; else "$@"; fi
+}
+
+# One driver process PER SCENE: a renderer crash inside one lane's layout
+# path (e.g. an interpreter semantic abort that only that scene's HTML
+# reaches — "cannot assign to const 'child_styles'" killed the chromed scene
+# while the other two lanes rendered fine) must not erase the other lanes'
+# captures. Each scene appends to the shared log with its driver exit code;
+# a crashed scene has no metric lines and is classified fail per scene.
+: >"$LOG_PATH"
+for scene in wm_scene_css wm_scene_windows host_compositor; do
+    set +e
+    SIMPLE_LIB="${SIMPLE_LIB:-src}" SIMPLE_EXECUTION_MODE=interpret SIMPLE_EXECUTION_LIMIT=0 \
+        OSTYPE=darwin SIMPLE_ONE_CALL_READBACK=1 WM_GUI_WINDOW_DRAWING_OUT_DIR="$BUILD_DIR" \
+        WM_GUI_WINDOW_DRAWING_SCENE="$scene" \
+        run_with_timeout "$TIMEOUT_SECS" "$SIMPLE_BIN" run "$DRIVER_SRC" --mode=interpreter >>"$LOG_PATH" 2>&1
+    scene_code=$?
+    set -e
+    echo "${scene}_driver_exit=$scene_code" >>"$LOG_PATH"
+done
+
+grep -E '^(wm_scene_css|wm_scene_windows|host_compositor)_' "$LOG_PATH" || true
+
+log_field() { sed -n "s/^${1}=//p" "$LOG_PATH" | tail -n 1; }
+
+# --- convert each PPM capture to PNG (sips) ---
+convert_png() {
+    scene="$1"
+    ppm="$BUILD_DIR/${scene}.ppm"
+    png="$BUILD_DIR/${scene}.png"
+    if [ -s "$ppm" ]; then
+        if sips -s format png "$ppm" --out "$png" >/dev/null 2>&1; then
+            echo "pass"
+        else
+            echo "fail"
+        fi
+    else
+        echo "fail"
+    fi
+}
+
+# --- per-scene pass/fail classification, fail-closed ---
+SCENE_CLASS=""
+SCENE_REASON=""
+classify_scene() {
+    scene="$1"
+    write_ok="$(log_field "${scene}_write_ok")"
+    non_bg="$(log_field "${scene}_non_bg_pixels")"
+    ink="$(log_field "${scene}_ink_pixels")"
+    accent="$(log_field "${scene}_accent_pixels")"
+    max_run="$(log_field "${scene}_max_glyph_run_px")"
+    render_ms="$(log_field "${scene}_render_ms")"
+    driver_exit="$(log_field "${scene}_driver_exit")"
+    png_status="$(convert_png "$scene")"
+
+    SCENE_SLOW=false
+    case "$render_ms" in ''|*[!0-9]*) render_ms=0 ;; esac
+    if [ "$render_ms" -gt "$MAX_RENDER_MS" ]; then SCENE_SLOW=true; fi
+
+    if [ "$driver_exit" = "124" ]; then
+        SCENE_CLASS=fail; SCENE_REASON="${scene}:render-timeout(${TIMEOUT_SECS}s)"; return
+    fi
+    if [ "$write_ok" != "true" ]; then
+        if [ "$driver_exit" != "0" ] && [ "$driver_exit" != "" ]; then
+            SCENE_CLASS=fail; SCENE_REASON="${scene}:driver-crashed(exit=$driver_exit)"; return
+        fi
+        SCENE_CLASS=fail; SCENE_REASON="${scene}:ppm-write-failed"; return
+    fi
+    if [ "$png_status" != "pass" ]; then
+        SCENE_CLASS=fail; SCENE_REASON="${scene}:png-conversion-failed"; return
+    fi
+    case "$non_bg" in ''|*[!0-9]*) SCENE_CLASS=fail; SCENE_REASON="${scene}:missing-non-bg-metric"; return ;; esac
+    if [ "$non_bg" -lt "$MIN_NON_BG_PIXELS" ]; then
+        SCENE_CLASS=fail; SCENE_REASON="${scene}:blank-or-near-blank-frame(non_bg=$non_bg)"; return
+    fi
+    case "$ink" in ''|*[!0-9]*) SCENE_CLASS=fail; SCENE_REASON="${scene}:missing-ink-metric"; return ;; esac
+    if [ "$ink" -lt "$MIN_INK_PIXELS" ]; then
+        SCENE_CLASS=fail; SCENE_REASON="${scene}:missing-text-ink(ink=$ink)"; return
+    fi
+    case "$accent" in ''|*[!0-9]*) SCENE_CLASS=fail; SCENE_REASON="${scene}:missing-accent-metric"; return ;; esac
+    if [ "$accent" -lt "$MIN_ACCENT_PIXELS" ]; then
+        SCENE_CLASS=fail; SCENE_REASON="${scene}:missing-titlebar-accent(accent=$accent)"; return
+    fi
+    case "$max_run" in ''|*[!0-9]*) SCENE_CLASS=fail; SCENE_REASON="${scene}:missing-glyph-run-metric"; return ;; esac
+    if [ "$max_run" -ge "$GIANT_GLYPH_RUN_PX" ]; then
+        SCENE_CLASS=fail; SCENE_REASON="${scene}:giant-glyph-pathology(max_glyph_run_px=$max_run)"; return
+    fi
+    SCENE_CLASS=pass; SCENE_REASON="${scene}:pass"
+}
+
+overall=pass
+overall_reason=pass
+slow_scenes=""
+for scene in wm_scene_css wm_scene_windows host_compositor; do
+    classify_scene "$scene"
+    if [ "$SCENE_CLASS" != "pass" ]; then
+        overall=fail
+        if [ "$overall_reason" = "pass" ]; then overall_reason="$SCENE_REASON"; else overall_reason="$overall_reason | $SCENE_REASON"; fi
+    fi
+    if [ "$SCENE_SLOW" = "true" ]; then slow_scenes="$slow_scenes $scene"; fi
+done
+
+{
+    echo "wm_gui_window_drawing_status=$overall"
+    echo "wm_gui_window_drawing_reason=$overall_reason"
+    echo "wm_gui_window_drawing_simple_bin=$SIMPLE_BIN"
+    echo "wm_gui_window_drawing_simple_bin_provenance=$SIMPLE_BIN_PROVENANCE"
+    echo "wm_gui_window_drawing_giant_glyph_run_px_threshold=$GIANT_GLYPH_RUN_PX"
+    echo "wm_gui_window_drawing_min_non_bg_pixels=$MIN_NON_BG_PIXELS"
+    echo "wm_gui_window_drawing_min_ink_pixels=$MIN_INK_PIXELS"
+    echo "wm_gui_window_drawing_min_accent_pixels=$MIN_ACCENT_PIXELS"
+    echo "wm_gui_window_drawing_slow_scenes_over_${MAX_RENDER_MS}ms=${slow_scenes# }"
+    cat "$LOG_PATH" | grep -E '^(wm_scene_css|wm_scene_windows|host_compositor)_' || true
+} >"$ENV_PATH"
+
+{
+    echo "# WM GUI Window Drawing Evidence"
+    echo
+    echo "- status: $overall"
+    echo "- reason: $overall_reason"
+    echo "- simple_bin: $SIMPLE_BIN ($SIMPLE_BIN_PROVENANCE)"
+    echo "- giant-glyph regression floor: max_glyph_run_px < $GIANT_GLYPH_RUN_PX (longest vertical run of exact-white text-ink pixels in any column)"
+    echo "- sanity floors: non_bg >= $MIN_NON_BG_PIXELS, ink(text) >= $MIN_INK_PIXELS, accent >= $MIN_ACCENT_PIXELS"
+    echo "- render time > ${MAX_RENDER_MS}ms is reported (render_slow), not failed: ${slow_scenes:-none}"
+    echo
+    for scene in wm_scene_css wm_scene_windows host_compositor; do
+        echo "## Scene: $scene"
+        echo
+        echo "- PPM: $BUILD_DIR/${scene}.ppm"
+        echo "- PNG: $BUILD_DIR/${scene}.png"
+        echo "- render_ms: $(log_field "${scene}_render_ms")"
+        echo "- pixel_count: $(log_field "${scene}_pixel_count")"
+        echo "- non_bg_pixels: $(log_field "${scene}_non_bg_pixels")"
+        echo "- bright_pixels (near-white, incl. glass panels): $(log_field "${scene}_bright_pixels")"
+        echo "- ink_pixels (exact-white text): $(log_field "${scene}_ink_pixels")"
+        echo "- accent_pixels (saturated / titlebar band): $(log_field "${scene}_accent_pixels")"
+        echo "- max_glyph_run_px: $(log_field "${scene}_max_glyph_run_px")"
+        echo "- driver_exit: $(log_field "${scene}_driver_exit")"
+        echo
+    done
+    echo "## Driver Log Errors (if any)"
+    grep -E "^error|^panic" "$LOG_PATH" | sed 's/^/- /' || echo "- none"
+    echo
+    echo "## Raw Evidence"
+    sed 's/^/- /' "$ENV_PATH"
+} >"$REPORT_PATH"
+
+cat "$ENV_PATH"
+echo "report_path=$REPORT_PATH"
+[ "$overall" = "pass" ]
