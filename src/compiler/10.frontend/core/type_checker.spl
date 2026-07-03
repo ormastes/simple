@@ -254,6 +254,22 @@ fn type_check_refinement(value_id: i64, ref_id: i64) -> bool:
 # Evaluate refinement type predicate expressions
 # Supports simple predicates: "x > 0", "x < 100", "len(s) > 0", etc.
 
+fn _tc_is_int_text(t: text) -> bool:
+    # Guard for predicate operands: int() on a non-numeric string aborts the
+    # whole compile under the seed interpreter (stage4 2026-07-03).
+    var start = 0
+    if t.len() > 1 and t[0:1] == "-":
+        start = 1
+    if t.len() == start:
+        return false
+    var i = start
+    while i < t.len():
+        val c = t[i:i+1]
+        if c < "0" or c > "9":
+            return false
+        i = i + 1
+    true
+
 fn type_check_eval_predicate(value_id: i64, predicate: text) -> bool:
     # Simple predicate parser for common patterns
     # Supports: "x OP value" where OP is >, <, >=, <=, ==, !=
@@ -314,6 +330,8 @@ fn type_check_eval_length_predicate(value_id: i64, predicate: text) -> bool:
     val op_len = operator.len()
     val after_op = predicate[op_pos + op_len + 2:]
     val compare_val = after_op.trim()
+    if not _tc_is_int_text(compare_val):
+        return false  # Non-numeric operand: predicate cannot hold, never abort
     val compare_int = int(compare_val)
     # Perform comparison
     if operator == ">":
@@ -382,6 +400,8 @@ fn type_check_eval_comparison_predicate(value_id: i64, predicate: text) -> bool:
     val compare_str = after_op.trim()
     # Perform comparison
     if is_int:
+        if not _tc_is_int_text(compare_str):
+            return false  # Non-numeric operand: predicate cannot hold, never abort
         val compare_int = int(compare_str)
         if operator == ">":
             return val_int > compare_int
