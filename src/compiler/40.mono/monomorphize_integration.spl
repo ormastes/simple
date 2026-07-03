@@ -11,16 +11,15 @@ use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
 use compiler.monomorphize.engine.*
 use compiler.monomorphize.type_subst.*
-use std.nogc_sync_mut.io.process_ops.{eprint}
-
-# Iteration 18 probes (UNGATED — remove before deploy): stage4 SEGV triage.
+# Discriminant access for the scan_expr Block/Field pre-dispatch (stage4
+# always-true struct-shadow pattern hazard, bug doc iteration 18).
 extern fn rt_enum_discriminant(value: HirExprKind) -> i64
 fn mono_expr_disc(k: HirExprKind) -> i64:
     rt_enum_discriminant(k)
 
 fn mono_arg_value(a: HirCallArg) -> HirExpr:
-    """Typed-parameter accessor: forces HirCallArg field-index resolution for
-    .value even when the caller's element is ANY-erased (stage4 hazard)."""
+    """Typed-parameter accessor for HirCallArg.value (stage4 ANY-erasure
+    hazard, bug doc iteration 18)."""
     a.value
 
 # ============================================================================
@@ -181,10 +180,8 @@ impl MonomorphizationPass:
         `block.value` is a DESUGARED plain HirExpr field gated by `block.has`
         (NOT an Option) — Option-matching it mis-evaluates (iteration 14
         eval_block family), so gate on `has` and pass the plain field."""
-        eprint("[MSB] scan_block enter")
         if block == nil:
             return
-        eprint("[MSB] stmts.len={block.stmts.len()} has={block.has}")
         for stmt in block.stmts:
             val stmt_t: HirStmt = stmt
             self.scan_stmt(stmt_t)
@@ -236,7 +233,6 @@ impl MonomorphizationPass:
         # trapping ("field access on nil receiver", iteration 10).
         if expr == nil:
             return
-        eprint("[MSE] scan_expr disc={mono_expr_disc(expr.kind)}")
         # SEED PATTERN HAZARD (bug doc iteration 18): a variant pattern whose
         # name is shadowed by a struct/class ANYWHERE in the program (`struct
         # Block`/`struct Field` in the frontend AST) compiles as an ALWAYS-TRUE
@@ -265,10 +261,8 @@ impl MonomorphizationPass:
         match expr.kind:
             # Direct function calls with type arguments
             case HirExprKind.Call(callee, args, type_args):
-                eprint("[MSX] Call")
                 val call_callee_t: HirExpr = callee
                 val call_args_t: [HirCallArg] = args
-                eprint("[MSXC] callee_disc={mono_expr_disc(call_callee_t.kind)} args_len={call_args_t.len()}")
                 if type_args.?:
                     self.check_generic_call(call_callee_t, type_args)
                 self.scan_expr(call_callee_t)
@@ -276,14 +270,11 @@ impl MonomorphizationPass:
                     val arg_t: HirCallArg = arg
                     val arg_value_t: HirExpr = arg_t.value
                     val arg_value_h: HirExpr = mono_arg_value(arg_t)
-                    eprint("[MSXA] helper_disc={mono_expr_disc(arg_value_h.kind)}")
-                    eprint("[MSXA] direct_disc={mono_expr_disc(arg_value_t.kind)}")
                     self.scan_expr(arg_value_h)
 
             # Method calls (qualified: bare MethodCall collides with the mock
             # verification class of the same name — see scan_stmt docstring)
             case HirExprKind.MethodCall(receiver, method, args, resolution):
-                eprint("[MSX] MethodCall")
                 val mc_receiver_t: HirExpr = receiver
                 val mc_args_t: [HirCallArg] = args
                 self.scan_expr(mc_receiver_t)
@@ -294,7 +285,6 @@ impl MonomorphizationPass:
 
             # Static calls (e.g., Type.method<T>())
             case HirExprKind.StaticCall(ty, method, args, resolution):
-                eprint("[MSX] StaticCall")
                 val sc_args_t: [HirCallArg] = args
                 for arg in sc_args_t:
                     val sarg_t: HirCallArg = arg
@@ -303,7 +293,6 @@ impl MonomorphizationPass:
 
             # Control flow
             case HirExprKind.If(cond, then_, else_):
-                eprint("[MSX] If")
                 self.scan_expr(cond)
                 self.scan_block(then_)
                 match else_:
@@ -313,7 +302,6 @@ impl MonomorphizationPass:
                         pass_do_nothing("if expression has no else block")
 
             case HirExprKind.MatchCase(scrutinee, arms):
-                eprint("[MSX] MatchCase")
                 self.scan_expr(scrutinee)
                 for arm in arms:
                     val typed_arm: HirMatchArm = arm
@@ -322,22 +310,18 @@ impl MonomorphizationPass:
                     self.scan_block(typed_arm.body)
 
             case HirExprKind.Loop(body, _):
-                eprint("[MSX] Loop")
                 self.scan_block(body)
 
             case HirExprKind.While(cond, body, _):
-                eprint("[MSX] While")
                 self.scan_expr(cond)
                 self.scan_block(body)
 
             case HirExprKind.For(_, iter, body, _):
-                eprint("[MSX] For")
                 self.scan_expr(iter)
                 self.scan_block(body)
 
             # Closures
             case HirExprKind.Lambda(_, body, _):
-                eprint("[MSX] Lambda")
                 self.scan_expr(body)
 
             # NOTE: HirExprKind.Block and HirExprKind.Field are handled by the
@@ -346,43 +330,36 @@ impl MonomorphizationPass:
 
             # Binary/Unary
             case HirExprKind.Binary(_, left, right):
-                eprint("[MSX] Binary")
                 val bin_left_t: HirExpr = left
                 val bin_right_t: HirExpr = right
                 self.scan_expr(bin_left_t)
                 self.scan_expr(bin_right_t)
 
             case HirExprKind.Unary(_, operand):
-                eprint("[MSX] Unary")
                 val un_operand_t: HirExpr = operand
                 self.scan_expr(un_operand_t)
 
             # Collections
             case HirExprKind.ArrayLit(elements, _):
-                eprint("[MSX] ArrayLit")
                 for e in elements:
                     self.scan_expr(e)
 
             case HirExprKind.TupleLit(elements):
-                eprint("[MSX] TupleLit")
                 for e in elements:
                     self.scan_expr(e)
 
             case HirExprKind.DictLit(entries, _, _):
-                eprint("[MSX] DictLit")
                 for (k, v) in entries:
                     self.scan_expr(k)
                     self.scan_expr(v)
 
             # Field access handled by the discriminant pre-dispatch above.
             case HirExprKind.Index(base, index):
-                eprint("[MSX] Index")
                 self.scan_expr(base)
                 self.scan_expr(index)
 
             # Other expressions - scan children as needed
             case HirExprKind.Return(value):
-                eprint("[MSX] Return")
                 match value:
                     Some(return_value):
                         self.scan_expr(return_value)

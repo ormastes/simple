@@ -80,7 +80,6 @@ impl HirLowering:
                 match callee_kind_t:
                     case ExprKind.Ident(name):
                         val name_t: text = name
-                        eprint("[LGL] callee ident name={name_t}")
                         if name_t == "host":
                             lane_code = 1
                         elif name_t == "gpu":
@@ -89,7 +88,6 @@ impl HirLowering:
                         pass
                 if lane_code == 0:
                     return nil
-                eprint("[LGL] lane_code={lane_code} args={args_t.len()}")
                 if args_t.len() != 2:
                     return nil
                 val arg1_t: Expr = args_t[1].value
@@ -127,13 +125,11 @@ impl HirLowering:
     me lower_hir_expr(e: Expr) -> HirExpr:
         # Probes UNGATED: Trap D (iteration 17) — env-gated probes are mute in
         # hir_lowering modules. Remove before deploy.
-        eprint("[LHE0] lower_hir_expr enter")
         # DIRECT typed field read, NOT `match e: case Expr(k, _): k`: the struct
         # pattern "matches" on stage4 but destructures a GARBAGE payload (observed
         # kind_disc=823890719) — and the direct read shows the same garbage, so
         # `e` itself is corrupted upstream (bug doc iteration 17).
         val expr_kind_value: ExprKind = e.kind
-        eprint("[LHE] lower_hir_expr kind_disc={hir_expr_kind_disc(expr_kind_value)}")
         val host_gpu_lane = self.try_lower_host_gpu_lane_expr(e)
         if val lowered_host_gpu_lane = host_gpu_lane:
             return lowered_host_gpu_lane
@@ -167,17 +163,14 @@ impl HirLowering:
                     pass
         val kind = match expr_kind_value:
             case ExprKind.IntLit(value):
-                eprint("[LHE-ARMX] IntLit value={value}")
                 if (hir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
                     eprint("[hir-lower] lower_expr:int")
                 HirExprKind.IntLit(value, nil)
 
             case ExprKind.FloatLit(value):
-                eprint("[LHE-ARMX] FloatLit")
                 HirExprKind.FloatLit(value, nil)
 
             case ExprKind.StringLit(value, interps):
-                eprint("[LHE-ARMX] StringLit")
                 if (hir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
                     eprint("[hir-lower] lower_expr:string")
                 val hir_interps = if (hir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
@@ -189,7 +182,6 @@ impl HirLowering:
                 HirExprKind.StringLit(value, hir_interps)
 
             case ExprKind.BoolLit(value):
-                eprint("[LHE-ARMX] BoolLit")
                 if (hir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
                     eprint("[hir-lower] lower_expr:bool")
                 HirExprKind.BoolLit(value)
@@ -201,12 +193,9 @@ impl HirLowering:
             # all programs silent no-ops (bug doc iteration 17, decisive repro:
             # [FBC] call=823890719 valid, yet [LHE-ARM] NilLit fired).
             case ExprKind.NilLit:
-                eprint("[LHE-ARMX] NilLit")
-                eprint("[LHE-ARM] NilLit")
                 HirExprKind.NilLit
 
             case ExprKind.ArrayLit(elements):
-                eprint("[LHE-ARMX] ArrayLit")
                 val hir_elements = self.lower_expr_list(elements)
                 # For empty arrays, use configured default element type
                 val elem_type = if hir_elements.is_empty():
@@ -220,23 +209,18 @@ impl HirLowering:
                 HirExprKind.ArrayLit(hir_elements, elem_type)
 
             case ExprKind.TupleLit(elements):
-                eprint("[LHE-ARMX] TupleLit")
                 HirExprKind.TupleLit(self.lower_expr_list(elements))
 
             case ExprKind.DictLit(entries):
-                eprint("[LHE-ARMX] DictLit")
                 HirExprKind.DictLit(self.lower_dict_entries(entries), nil, nil)
 
             case ExprKind.SetLit(elements):
-                eprint("[LHE-ARMX] SetLit")
                 HirExprKind.SetLit(self.lower_expr_list(elements), nil)
 
             case ExprKind.Ident(name):
-                eprint("[LHE-ARMX] Ident")
                 # Typed rebind: extracted ANY-ish payload misreads on stage4
                 # when consumed directly (bug doc iteration 18).
                 val ident_name_t: text = name
-                eprint("[LHE-ARM] Ident name={ident_name_t}")
                 val symbol = self.symbols.lookup(ident_name_t)
                 if val found_symbol = symbol:
                     # NOTE: `if val found_symbol = symbol:` is not sufficient
@@ -262,50 +246,39 @@ impl HirLowering:
             # discriminant pre-dispatch above (seed always-true struct-pattern
             # hazard) and MUST NOT appear in this match.
             case ExprKind.Index(base, index):
-                eprint("[LHE-ARMX] Index")
                 HirExprKind.Index(self.lower_hir_expr(base), self.lower_hir_expr(index))
 
             case ExprKind.OptionalChain(base, field):
-                eprint("[LHE-ARMX] OptionalChain")
                 HirExprKind.OptionalChain(self.lower_hir_expr(base), field)
 
             case ExprKind.NullCoalesce(left, right):
-                eprint("[LHE-ARMX] NullCoalesce")
                 HirExprKind.NullCoalesce(self.lower_hir_expr(left), self.lower_hir_expr(right))
 
             case ExprKind.ExistsCheck(base):
-                eprint("[LHE-ARMX] ExistsCheck")
                 HirExprKind.ExistsCheck(self.lower_hir_expr(base))
 
             case ExprKind.ForceUnwrap(base):
-                eprint("[LHE-ARMX] ForceUnwrap")
                 HirExprKind.Unwrap(self.lower_hir_expr(base))
 
             case ExprKind.Cast(operand, target_type):
-                eprint("[LHE-ARMX] Cast")
                 HirExprKind.Cast(self.lower_hir_expr(operand), self.lower_type(target_type))
 
             case ExprKind.Binary(op, left, right):
-                eprint("[LHE-ARMX] Binary")
                 # Typed rebinds: extracted ANY-ish payloads misread on stage4
                 # when consumed directly (bug doc iteration 18).
                 val bin_op_t: BinOp = op
                 val bin_left_t: Expr = left
                 val bin_right_t: Expr = right
                 val hir_op = self.lower_binop(bin_op_t)
-                eprint("[LBO] hir_op_nil={hir_op == nil}")
                 HirExprKind.Binary(hir_op, self.lower_hir_expr(bin_left_t), self.lower_hir_expr(bin_right_t))
 
             case ExprKind.Unary(op, operand):
-                eprint("[LHE-ARMX] Unary")
                 val un_op_t: UnaryOp = op
                 val un_operand_t: Expr = operand
                 val hir_op = self.lower_unaryop(un_op_t)
                 HirExprKind.Unary(hir_op, self.lower_hir_expr(un_operand_t))
 
             case ExprKind.Call(callee, args):
-                eprint("[LHE-ARMX] Call")
-                eprint("[LHE-ARM] Call")
                 # Typed rebinds: extracted ANY-ish payloads misread on stage4
                 # when consumed directly (bug doc iteration 18).
                 val call_callee_t: Expr = callee
@@ -330,7 +303,6 @@ impl HirLowering:
                     HirExprKind.Call(self.lower_hir_expr(call_callee_t), hir_args, [])
 
             case ExprKind.MethodCall(receiver, method, args):
-                eprint("[LHE-ARMX] MethodCall")
                 if (hir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
                     HirExprKind.MethodCall(self.lower_hir_expr(receiver), method, [], MethodResolution.Unresolved)
                 else:
@@ -347,7 +319,6 @@ impl HirLowering:
                     HirExprKind.MethodCall(self.lower_hir_expr(receiver), method, hir_args, MethodResolution.Unresolved)
 
             case ExprKind.If(cond, then_, else_):
-                eprint("[LHE-ARMX] If")
                 val else_block = if else_.?: self.lower_hir_block(else_) else: nil
                 HirExprKind.If(
                     self.lower_hir_expr(cond),
@@ -356,7 +327,6 @@ impl HirLowering:
                 )
 
             case ExprKind.MatchCase(scrutinee, arms):
-                eprint("[LHE-ARMX] MatchCase")
                 var hir_arms: [HirMatchArm] = []
                 for arm in arms:
                     val guard_ = if arm.guard.?: self.lower_hir_expr(arm.guard) else: nil
@@ -369,7 +339,6 @@ impl HirLowering:
                 HirExprKind.MatchCase(self.lower_hir_expr(scrutinee), hir_arms)
 
             case ExprKind.Lambda(params, body):
-                eprint("[LHE-ARMX] Lambda")
                 self.symbols.push_scope(ScopeKind.Function)
                 var hir_params: [HirParam] = []
                 for p in params:
@@ -387,44 +356,35 @@ impl HirLowering:
                 HirExprKind.Lambda(hir_params, hir_body, [])
 
             case ExprKind.Return(value):
-                eprint("[LHE-ARMX] Return")
                 val rv = self.lower_hir_expr(value)
                 HirExprKind.Return(rv)
 
             case ExprKind.Break(label):
-                eprint("[LHE-ARMX] Break")
                 HirExprKind.Break(label, nil)
 
             case ExprKind.Continue(label):
-                eprint("[LHE-ARMX] Continue")
                 HirExprKind.Continue(label)
 
             case ExprKind.Yield(value):
-                eprint("[LHE-ARMX] Yield")
                 val yv = if value.?: self.lower_hir_expr(value) else: nil
                 HirExprKind.Yield(yv)
 
             case ExprKind.Throw(value):
-                eprint("[LHE-ARMX] Throw")
                 HirExprKind.Throw(self.lower_hir_expr(value))
 
             case ExprKind.Await(expr):
-                eprint("[LHE-ARMX] Await")
                 HirExprKind.Await(self.lower_hir_expr(expr))
 
             case ExprKind.Try(expr):
-                eprint("[LHE-ARMX] Try")
                 HirExprKind.Try(self.lower_hir_expr(expr))
 
             case ExprKind.Range(start, end, inclusive, step):
-                eprint("[LHE-ARMX] Range")
                 val rstart = if start.?: self.lower_hir_expr(start) else: nil
                 val rend = if end.?: self.lower_hir_expr(end) else: nil
                 val rstep = if step.?: self.lower_hir_expr(step) else: nil
                 HirExprKind.Range(rstart, rend, inclusive, rstep)
 
             case ExprKind.ListComprehension(expr, clauses):
-                eprint("[LHE-ARMX] ListComprehension")
                 var hir_clauses: [HirCompClause] = []
                 for clause in clauses:
                     val hir_kind = match clause.kind:
@@ -437,7 +397,6 @@ impl HirLowering:
                 HirExprKind.Comprehension(HirComprehensionKind.List, self.lower_hir_expr(expr), hir_clauses)
 
             case ExprKind.StructLit(type_, fields):
-                eprint("[LHE-ARMX] StructLit")
                 var hir_fields: [(text, HirExpr)] = []
                 for (name, value) in fields:
                     hir_fields = hir_fields.push((name, self.lower_hir_expr(value)))
@@ -449,7 +408,6 @@ impl HirLowering:
                 HirExprKind.StructLit(hir_type, hir_fields)
 
             case ExprKind.EnumLit(enum_, variant, payload):
-                eprint("[LHE-ARMX] EnumLit")
                 val symbol = self.symbols.lookup_or_invalid(enum_)
                 val hir_type = if symbol.is_valid():
                     HirType(kind: HirTypeKind.Named(symbol, []), span: e.span)
@@ -471,40 +429,32 @@ impl HirLowering:
 
             # Custom blocks (user-defined: sh{}, sql{}, re{}, etc.)
             case ExprKind.CustomBlock(kind, value):
-                eprint("[LHE-ARMX] CustomBlock")
                 HirExprKind.CustomBlock(kind, value)
 
             # Math/DL blocks with special semantics
             case ExprKind.LossBlock(body):
-                eprint("[LHE-ARMX] LossBlock")
                 HirExprKind.LossBlock(self.lower_hir_block(body))
 
             case ExprKind.NogradBlock(body):
-                eprint("[LHE-ARMX] NogradBlock")
                 HirExprKind.NogradBlock(self.lower_hir_block(body))
 
             # Unsafe block for raw pointer ops, SFFI, inline assembly
             case ExprKind.UnsafeBlock(body):
-                eprint("[LHE-ARMX] UnsafeBlock")
                 HirExprKind.UnsafeBlock(self.lower_hir_block(body))
 
             # Inline assembly
             case ExprKind.AsmBlock(asm):
-                eprint("[LHE-ARMX] AsmBlock")
                 HirExprKind.InlineAsm(self.lower_asm(asm))
 
             # Target-qualified inline assembly
             case ExprKind.AsmMatch(arms):
-                eprint("[LHE-ARMX] AsmMatch")
                 val hir_arms = self.lower_asm_match_arms(arms)
                 HirExprKind.InlineAsmMatch(hir_arms)
 
             case ExprKind.Error:
-                eprint("[LHE-ARMX] Error")
                 HirExprKind.Error
 
             case _:
-                eprint("[LHE-ARM] catch-all")
                 self.error("unsupported expression kind", e.span)
                 HirExprKind.Error
 
@@ -586,7 +536,6 @@ impl HirLowering:
                 # stage4 hazard net (iteration 18): if the qualified arms fail
                 # to match a genuine BinOp on stage4, do NOT return nil (nil op
                 # traps eval_binop). Probe + default to Add.
-                eprint("[LBO] lower_binop FALLTHROUGH")
                 HirBinOp.Add
 
     me lower_unaryop(op: UnaryOp) -> HirUnaryOp:
@@ -779,7 +728,6 @@ impl HirLowering:
             eprint("[hir-lower] lower_block_unit:done")
             return HirBlock(stmts: boot_stmts, has: false, value: HirExpr(kind: HirExprKind.NilLit, type_: nil, span: b.span), span: b.span)
 
-        eprint("[LBU] block_unit:start stmts.len={b.stmts.len()}")
         self.symbols.push_scope(ScopeKind.Block)
         var stmts: [HirStmt] = []
         val stmt_count = b.stmts.len()
@@ -789,7 +737,6 @@ impl HirLowering:
             stmts = stmts.push(lowered)
             stmt_idx = stmt_idx + 1
         self.symbols.pop_scope()
-        eprint("[LBU] block_unit:done out.len={stmts.len()}")
 
         HirBlock(stmts: stmts, has: false, value: HirExpr(kind: HirExprKind.NilLit, type_: nil, span: b.span), span: b.span)
 
