@@ -246,6 +246,17 @@ theorem two_shared_allows_shared (baseType : String) (loc : Nat) :
   simp [canCreateRef, getActiveRefs, countRefsWithCapability]
   exact ⟨rfl, rfl⟩
 
+theorem existing_exclusive_denies_shared (baseType : String) (loc : Nat) :
+  canCreateRef
+    { activeRefs :=
+        [(loc,
+          [{ location := loc,
+             refType := { baseType := baseType, capability := RefCapability.Exclusive } }])] }
+    loc RefCapability.Shared = false := by
+  simp [canCreateRef, getActiveRefs, countRefsWithCapability]
+  intro h
+  cases h
+
 theorem shared_read_same_loc (baseType : String) (loc : Nat) :
   allowsAccess { location := loc, refType := { baseType := baseType, capability := RefCapability.Shared } } (MemAccess.Read loc) = true := by
   simp [allowsAccess]
