@@ -112,6 +112,15 @@ theorem collect_preserves (s : GcState) (id : Nat) (hs : safe s) :
     have hne : x ≠ id := fun heq => hborrowed (heq ▸ hx)
     exact List.mem_erase_of_ne hne |>.mpr hlive
 
+theorem collect_keeps_borrowed_live (s : GcState) (id borrowedId : Nat)
+    (hs : safe s)
+    (hborrowed : borrowedId ∈ s.borrowed) :
+  borrowedId ∈ (collectSafe s id).live := by
+  have hstillBorrowed : borrowedId ∈ (collectSafe s id).borrowed := by
+    rw [collect_preserves_borrowed_list s id]
+    exact hborrowed
+  exact collect_preserves s id hs borrowedId hstillBorrowed
+
 theorem release_then_collect_preserves (s : GcState) (id : Nat) (hs : safe s) :
   safe (collectSafe (release s id) id) :=
   collect_preserves (release s id) id (release_preserves s id hs)
