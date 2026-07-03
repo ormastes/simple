@@ -312,8 +312,33 @@ impl CoreLexer:
                 else:
                     break
 
-        val num_text: text = self.source[start:self.pos]
-        if is_float:
+        var num_text: text = self.source[start:self.pos]
+
+        # Unit/type suffix: `10_u8` (underscore form) or `10u8`/`5ms` (direct
+        # alpha, seed lexer parity — an alpha run glued to a number can only
+        # be a suffix, since identifiers cannot start with a digit). Exponent
+        # forms (`1e5`) were consumed above and never reach here with an
+        # alpha follower. Suffix travels via the CORE_TOKEN_SUFFIX env channel.
+        var suffix: text = ""
+        val nlen: i64 = num_text.len()
+        val next_ch: text = self.peek()
+        if is_alpha(next_ch):
+            if nlen > 0 and num_text[nlen - 1:nlen] == "_":
+                num_text = num_text[0:nlen - 1]
+            var suf_start: i64 = self.pos
+            for i in 0..1000:
+                if is_ident_char(self.peek()):
+                    self.advance()
+                else:
+                    break
+            suffix = self.source[suf_start:self.pos]
+        rt_env_set("SIMPLE_BOOTSTRAP_CORE_TOKEN_SUFFIX", suffix)
+        if suffix != "":
+            if is_float:
+                self.make_token(8, num_text, start_line, start_col)
+            else:
+                self.make_token(7, num_text, start_line, start_col)
+        elif is_float:
             self.make_token(2, num_text, start_line, start_col)
         else:
             self.make_token(1, num_text, start_line, start_col)
