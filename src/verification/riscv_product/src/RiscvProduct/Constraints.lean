@@ -104,6 +104,10 @@ theorem held_resource_rejects_second_owner (s : ResourceState) (owner other : La
   unfold acquire
   rw [h]
 
+theorem held_resource_rejects_reentrant_acquire (owner : Lane) :
+    acquire { owner := some owner } owner = none := by
+  cases owner <;> simp [acquire]
+
 theorem failed_second_acquire_and_release_preserves_owner (owner other : Lane)
     (h : owner ≠ other) :
     acquire { owner := some owner } other = none ∧
