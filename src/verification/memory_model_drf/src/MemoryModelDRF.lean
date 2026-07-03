@@ -175,6 +175,26 @@ theorem hasDataRace_unordered_by_primitives (exec : Execution) :
     (fun h => hnot21 (Or.inl h)),
     (fun h => hnot21 (Or.inr h))⟩
 
+theorem hasDataRace_cross_thread_conflict_without_primitive_order (exec : Execution) :
+    hasDataRace exec →
+    ∃ id1 id2 op1 op2,
+      (id1, op1) ∈ exec.ops ∧
+      (id2, op2) ∈ exec.ops ∧
+      id1 ≠ id2 ∧
+      op1.threadId ≠ op2.threadId ∧
+      conflicts op1 op2 ∧
+      ¬exec.programOrder id1 id2 ∧
+      ¬exec.synchronizesWith id1 id2 ∧
+      ¬exec.programOrder id2 id1 ∧
+      ¬exec.synchronizesWith id2 id1 := by
+  intro hRace
+  rcases hRace with ⟨id1, id2, op1, op2, h1, h2, hneq, hthread, hconf, hnot12, hnot21⟩
+  exact ⟨id1, id2, op1, op2, h1, h2, hneq, hthread, hconf,
+    (fun h => hnot12 (Or.inl h)),
+    (fun h => hnot12 (Or.inr h)),
+    (fun h => hnot21 (Or.inl h)),
+    (fun h => hnot21 (Or.inr h))⟩
+
 theorem hasDataRace_has_distinct_ops (exec : Execution) :
     hasDataRace exec →
     ∃ id1 id2 op1 op2,
