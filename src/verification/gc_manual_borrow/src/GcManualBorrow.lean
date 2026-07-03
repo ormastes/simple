@@ -48,6 +48,12 @@ theorem allocate_makes_live (s : GcState) (id : Nat) :
   id ∈ (allocate s id).live := by
   simp [allocate]
 
+theorem allocate_unborrowed_then_collect_decrements_live_count (s : GcState) (id : Nat)
+    (hborrowed : id ∉ s.borrowed) :
+  List.count id (collectSafe (allocate s id) id).live =
+    List.count id (allocate s id).live - 1 := by
+  exact collect_unborrowed_decrements_live_count (allocate s id) id hborrowed
+
 theorem allocate_then_borrow_records_pin (s : GcState) (id : Nat) :
   id ∈ (borrow (allocate s id) id).borrowed := by
   simp [borrow, allocate]
