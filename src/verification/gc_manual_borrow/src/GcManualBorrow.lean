@@ -78,6 +78,11 @@ theorem release_decrements_borrow_count (s : GcState) (id : Nat) :
   List.count id (release s id).borrowed = List.count id s.borrowed - 1 := by
   simp [release]
 
+theorem release_zero_count_stays_zero (s : GcState) (id : Nat)
+    (hcount : List.count id s.borrowed = 0) :
+  List.count id (release s id).borrowed = 0 := by
+  simp [release, hcount]
+
 theorem collect_preserves (s : GcState) (id : Nat) (hs : safe s) :
   safe (collectSafe s id) := by
   intro x hx
