@@ -114,6 +114,15 @@ theorem T5_snapshot_committed (v : Version) (s : MvccSnapshot)
     (h : snapshotSees v s) :
     v.commit_ts < s.xmax := h.1
 
+/-- T5a2: a version inserted by a still-active transaction is not visible. -/
+theorem T5_snapshot_excludes_active_insert (v : Version) (s : MvccSnapshot)
+    (hactive : s.active.contains v.commit_ts = true) :
+    ¬ snapshotSees v s := by
+  intro h
+  obtain ⟨_, hnotactive, _⟩ := h
+  rw [hactive] at hnotactive
+  simp at hnotactive
+
 /-- T5b: a version committed after the snapshot is not visible. -/
 theorem T5_snapshot_excludes_future (v : Version) (s : MvccSnapshot)
     (hlate : v.commit_ts ≥ s.xmax) :
