@@ -213,9 +213,11 @@ is Xvfb-only by default; `check-gui-low-res-readability.shs` is offscreen
   (`doc/08_tracking/bug/game2d_no_window_externs_in_host_binaries_2026-07-03.md`).
   The wrapper now uses the existing gui-feature Rust driver binary for the
   real-window leg when present; `scripts/check/check-game2d-breakout.shs`
-  passes end-to-end with 160x120 milestone PPMs, low-res rendered divergence,
-  and a 12-frame private-Xvfb real window capture. The 800x600 frame-time
-  target remains a tracked performance gap.
+  passes end-to-end with 160x120 milestone PPMs, low-res rendered divergence
+  (`lowres_frame_time_ms=12` after clipped direct framebuffer writes in
+  `HeadlessBackend._draw_rect_filled`), and a 12-frame private-Xvfb real
+  window capture. The 800x600 frame-time target remains a tracked performance
+  gap.
 - **G4 narrowphase fixed:** PhysicsWorld3D never dispatched Sphere-Box;
   wired the existing `collide_sphere_aabb_3d` for both orderings.
   physics2 suite 37/37 (also repaired 4 stale specs: RawHandle ctor,
@@ -285,7 +287,7 @@ Midday update (2026-07-03):
 | G4.4 HUD over 3D | PASS (direct blit; LayerTree bridge blocked by interp bugs) | `examples/11_advanced/game3d_hud/main.spl` | `build/game3d_hud.ppm` |
 | G1.1 real window via Vulkan | PASS: private Xvfb + gui-feature driver captures the compact top-of-frame widget showcase through the Vulkan backend at 200x150; backend/frame/content/window assertions pass (`render_wait_secs=52`, `window_capture_attempts=9`, `ink_coverage=0.00507`) | `SIMPLE_BIN=src/compiler_rust/target/debug/simple SIMPLE_LIB=src sh scripts/check/check-gui-vulkan-window.shs` + `test/03_system/check/gui_vulkan_window_spec.spl` | `build/gui-window-evidence/evidence.env`, `showcase_vulkan_window.png`, `showcase_vulkan_offscreen.ppm`, `oracle.log`; spec 6/6 |
 | G4.2 3D game 60s session | PASS on seed binary (rollball: win+lose autopilot, 3600 fixed steps each, 10 gates; PERF-GAP recorded: frame_p95 ≈2.9 s vs 33 ms target — cranelift f32-trig fallback forces interpreted raster) | `scripts/check/check-game3d-rollball.shs` + `test/03_system/game3d/rollball_production_spec.spl` | `build/game3d-rollball/*.ppm` (11) |
-| G3.2/G3.3/G3.4 2D game breakout | PASS WITH PERF GAP (wrapper overall pass; G3.2 logic session passes; G3.3 low-res rendered divergence, milestone PPMs, and real-window leg pass; G3.4 records tracked 800x600 JIT/render gap) | `scripts/check/check-game2d-breakout.shs` + `test/03_system/game2d/breakout_*_spec.spl` | `overall=pass`; `breakout_production_spec.spl` 1/1; `breakout_render_oracles_spec.spl` 2/2; `breakout_captures_spec.spl` 1/1, 5 PPMs at 160x120; `breakout_window_capture_spec.spl` 1/1 with `window_frames_presented=12`; `build/game2d-breakout/*` |
+| G3.2/G3.3/G3.4 2D game breakout | PASS WITH PERF GAP (wrapper overall pass; G3.2 logic session passes; G3.3 low-res rendered divergence, milestone PPMs, and real-window leg pass; G3.4 records tracked 800x600 JIT/render gap) | `scripts/check/check-game2d-breakout.shs` + `test/03_system/game2d/breakout_*_spec.spl` | `overall=pass`; `breakout_production_spec.spl` 1/1; `breakout_render_oracles_spec.spl` 2/2, `lowres_frame_time_ms=12`; `breakout_captures_spec.spl` 1/1, 5 PPMs at 160x120; `breakout_window_capture_spec.spl` 1/1 with `window_frames_presented=12`; `build/game2d-breakout/*` |
 | G2.2 glyph parity | PASS (differentPixels 2717→3; calibrated LCD compositing; caveat: Chrome-calibrated atlas, not an independent rasterizer) | `node tools/electron-shell/verify_famous_site_production_probe.js` + probe/corpus specs | `test/09_baselines/famous_site_corpus/site_0_google/*` |
 | G2.3 browser low-res text | PASS | `scripts/check/check-browser-interaction.shs` + `test/03_system/gui/browser_interaction_spec.spl` | `build/browser-interaction/lowres_*.ppm` |
 | G2.4 scroll + link-click/back-forward | PASS (120px marker shift; click→back→forward pixel round-trip, 9/9) | same check script/spec | `build/browser-interaction/scroll_offset*.ppm`, `nav_*.ppm` |

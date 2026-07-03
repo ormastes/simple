@@ -88,11 +88,11 @@ exercises the identical `run_frames` → `driver.step` path and passes green).
 Drive all game2d session/capture/perf logic through **`bin/simple test`**
 (SPipe spec runner, interpreter path) instead of `bin/simple run`. Confirmed
 non-crashing for the full `driver.step` call chain. Trade-off: interpreter
-throughput is far below JIT (~0.4 ms/frame for a no-op app at 64×48; a real
-`Canvas.clear()` + draw at 800×600 is dominated by the O(width×height)
-framebuffer clear in `HeadlessBackend.clear_buffer`, which is prohibitively
-slow interpreted — see `doc/08_tracking/bug/interpreted_engine2d_full_res_render_slow_2026-07-02.md`
-for the same class of problem in engine2d). `test/03_system/game2d/breakout_production_spec.spl`
+throughput is far below JIT (~0.4 ms/frame for a no-op app at 64×48). The
+headless rectangle path now clips once and writes framebuffer rows directly,
+which improved the Breakout rendered smoke to `lowres_frame_time_ms=12`; the
+target 800×600 frame-time budget still requires the JIT/native `LoopDriver.step`
+path to stop crashing. `test/03_system/game2d/breakout_production_spec.spl`
 documents the actual measured frame-time numbers under this constraint rather
 than silently asserting a JIT-only budget.
 

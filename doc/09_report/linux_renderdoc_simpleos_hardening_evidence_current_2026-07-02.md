@@ -152,8 +152,9 @@
 - render_oracles_spec: `test/03_system/game2d/breakout_render_oracles_spec.spl`
 - render_oracles_status: pass
 - render_oracles_examples: 2
-- render_oracles_lowres_frame_time_ms: 271
+- render_oracles_lowres_frame_time_ms: 12
 - render_oracles_target_800x600_budget_met: false
+- headless_filled_rect_optimization: clipped direct framebuffer writes in `HeadlessBackend._draw_rect_filled`
 - captures_spec: `test/03_system/game2d/breakout_captures_spec.spl`
 - captures_status: pass
 - captures_examples: 1
