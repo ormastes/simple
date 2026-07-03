@@ -11,7 +11,7 @@
 # for the full recognised shape and defaults.
 #
 #   sound:
-#     kind: "sfx"                                              # or "sequence"
+#     kind: "sfx"                                              # or "sequence"/"pattern"
 #     sample_rate: 22050
 #     source: { type: "tone", wave: "sine", freq_hz: 440, duration_ms: 200 }
 #     envelope: { attack_ms: 5, decay_ms: 50, sustain: 0.6, release_ms: 100 }
@@ -27,12 +27,21 @@
 # mono — no resampling/downmixing (scope-limited; extend if a real use needs
 # it). Missing/malformed clips fail with a path-qualified Err.
 #
+# Kind "pattern" (tracker-LITE step sequencing) is a pure front-end lowering
+# over "sequence": `sound.pattern.tracks[].steps` is one character per step —
+# `x` = trigger at gain 0.7, `X` = accented trigger at gain 1.0, `.` = rest.
+# Step duration is `60000 / bpm / steps_per_beat` ms; step `i` of repeat `r`
+# fires at `(r * steps.len() + i) * step_ms` (truncated to whole ms). All
+# tracks must share one `steps` length. `_lower_pattern_to_events` below
+# converts a pattern straight into the same `SoundEvent` list "sequence"
+# uses, then reuses `_build_sequence_wav` unchanged — no separate mixing path.
+#
 # Exit codes: 0 success, 1 failure (missing/malformed/invalid sound, write
 # failure, unsupported render shape), 2 usage error.
 
 use std.cli.cli_util.{get_cli_args}
 use std.io_runtime.{file_write_bytes, file_exists, file_read_bytes, getpid}
-use std.nogc_sync_mut.game2d.audio.sound_asset_sdn.{SoundAsset, load_sound_asset}
+use std.nogc_sync_mut.game2d.audio.sound_asset_sdn.{SoundAsset, SoundEvent, SoundPattern, load_sound_asset}
 use std.common.engine.audio.sound_synth.{
     gen_sine, gen_square, gen_white_noise, apply_adsr,
     apply_lowpass, apply_highpass, apply_delay, reverb, mix
@@ -42,10 +51,45 @@ use std.common.audio.wav_decode.{WavAudio, decode_wav}
 use std.nogc_sync_mut.io.audio_sffi.{audio_load_sound, audio_play}
 
 # ============================================================================
+# Pattern lowering — SoundPattern -> flat SoundEvent list (front-end only)
+# ============================================================================
+
+fn _lower_pattern_to_events(pattern: SoundPattern) -> [SoundEvent]:
+    """Step `i` of repeat `r` -> at_ms = trunc((r * steps.len() + i) * step_ms),
+    where step_ms = 60000 / bpm / steps_per_beat. 'x' -> gain 0.7, 'X' -> gain 1.0."""
+    val step_ms = 60000.0 / pattern.bpm / (pattern.steps_per_beat as f64)
+    var events: [SoundEvent] = []
+    for track in pattern.tracks:
+        val pattern_len = track.steps.len()
+        var r: i64 = 0
+        while r < pattern.repeat:
+            var i: i64 = 0
+            while i < pattern_len:
+                val c = track.steps.substring(i, i + 1)
+                if c != ".":
+                    var gain = 0.7
+                    if c == "X":
+                        gain = 1.0
+                    val step_index = r * pattern_len + i
+                    val at_ms = ((step_index as f64) * step_ms) as i64
+                    events.push(SoundEvent(at_ms: at_ms, clip: track.clip, gain: gain))
+                i = i + 1
+            r = r + 1
+    events
+
+# ============================================================================
 # Render pipeline — SoundAsset -> WAV bytes
 # ============================================================================
 
 fn build_wav_bytes(asset: SoundAsset, base_dir: text) -> Result<[u8], text>:
+    if asset.kind == "pattern":
+        val events = _lower_pattern_to_events(asset.pattern)
+        val synthetic = SoundAsset(
+            kind: "sequence", sample_rate: asset.sample_rate, source: asset.source,
+            envelope: asset.envelope, effects: asset.effects, events: events,
+            pattern: SoundPattern.default()
+        )
+        return _build_sequence_wav(synthetic, base_dir)
     if asset.kind == "sequence":
         return _build_sequence_wav(asset, base_dir)
     if asset.source.kind != "tone":
@@ -162,8 +206,10 @@ fn cmd_validate(path: text) -> i64:
         if a.kind == "sfx":
             print "  source: type={a.source.kind} wave={a.source.wave} freq_hz={a.source.freq_hz} duration_ms={a.source.duration_ms}"
             print "  envelope: attack_ms={a.envelope.attack_ms} decay_ms={a.envelope.decay_ms} sustain={a.envelope.sustain} release_ms={a.envelope.release_ms}"
-        else:
+        elif a.kind == "sequence":
             print "  events: {a.events.len()}"
+        else:
+            print "  pattern: bpm={a.pattern.bpm} steps_per_beat={a.pattern.steps_per_beat} tracks={a.pattern.tracks.len()} repeat={a.pattern.repeat}"
         print "  effects: {a.effects.len()}"
     0
 
