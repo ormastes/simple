@@ -41,3 +41,12 @@ Side policy is per-path: paths whose latest truth is local restore from the pre-
 - No leaked markers in previously-conflicted files: `git grep -c '^<<<<<<<' $TIP -- <paths>` must be 0.
 - Stale `.git/index.lock` with no live holder: `find .git/index.lock -mmin +5 -delete`. Check `pgrep -af 'jj (rebase|restore)'` first — a D-state jj may still be progressing (verify via `/proc/PID/io` deltas) and must not be killed.
 - Edit-tool changes are not auto-snapshotted: commit immediately after editing, and re-verify file content (`grep`) after any `workspace update-stale` — a parallel-session reconcile can silently clobber uncommitted edits.
+
+## LLM wiki before commit
+
+Before committing feature work, refresh the related LLM wiki entries so the
+commit ships with current knowledge links: the affected
+`doc/00_llm_process/feature_expert/<feature>/skill.md` and
+`doc/00_llm_process/layer_expert/<layer>/skill.md` (see
+`doc/00_llm_process/llm_wiki_and_auto_research.md`). Commit the wiki update in
+the same change as the work it describes.
