@@ -171,6 +171,17 @@ theorem release_deterministic (s r1 r2 : ResourceState) (l : Lane) :
   intro h1 h2
   rw [←h1, ←h2]
 
+theorem release_empty_iff_unowned_or_owner (s : ResourceState) (requester : Lane) :
+    release s requester = { owner := none } ↔
+      s.owner = none ∨ s.owner = some requester := by
+  cases s with
+  | mk current =>
+      cases current with
+      | none =>
+          simp [release]
+      | some owner =>
+          cases owner <;> cases requester <;> simp [release]
+
 theorem acquire_release_roundtrip_empty (l : Lane) :
     (acquire { owner := none } l).map (fun s => release s l) = some { owner := none } := by
   cases l <;> simp [acquire, release]
