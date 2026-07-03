@@ -553,12 +553,114 @@ fn _eval_criteria_function(name: text, tokens: [text], pos: i32, sheet: Sheet, d
         return EvalResult(value: CellValue.NumberVal(value: total / count.to_f64()), next_pos: cur_pos)
     EvalResult(value: CellValue.NumberVal(value: total), next_pos: cur_pos)
 
+fn _is_lookup_function(name: text) -> bool:
+    name == "VLOOKUP" or name == "HLOOKUP" or name == "INDEX" or name == "MATCH"
+
+struct LookupArg:
+    display: text
+    num: f64
+    next_pos: i32
+
+fn _lookup_value_arg(tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> LookupArg:
+    """One lookup argument: quoted string, bare cell ref, or numeric expr."""
+    val tok = tokens.get(pos)
+    val next_tok = if pos + 1 < tokens.len(): tokens.get(pos + 1) else: ""
+    if tok.starts_with("\""):
+        return LookupArg(display: tok.slice(1, tok.len() - 1), num: 0.0, next_pos: pos + 1)
+    if _is_cell_ref_token(tok) and (next_tok == "," or next_tok == ")"):
+        val cell = sheet.get_cell(tok)
+        return LookupArg(display: cell_display_text(cell), num: _to_number(cell.value), next_pos: pos + 1)
+    val r = _eval_comparison(tokens, pos, sheet, depth)
+    LookupArg(display: _cell_value_to_display(r.value), num: _to_number(r.value), next_pos: r.next_pos)
+
+fn _lookup_eq(needle_display: text, needle_num: f64, cell: Cell) -> bool:
+    val d = cell_display_text(cell)
+    if d.lower() == needle_display.lower():
+        return true
+    match cell.value:
+        CellValue.NumberVal(value):
+            return needle_display != "" and value == needle_num and needle_num != 0.0
+        _:
+            return false
+
+fn _skip_comma(tokens: [text], pos: i32) -> i32:
+    if pos < tokens.len() and tokens.get(pos) == ",":
+        return pos + 1
+    pos
+
+fn _eval_lookup_function(name: text, tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalResult:
+    """VLOOKUP(value, range, col) / HLOOKUP(value, range, row) /
+    INDEX(range, row[, col]) / MATCH(value, range) — exact match semantics."""
+    var cur_pos = pos
+    var needle = LookupArg(display: "", num: 0.0, next_pos: cur_pos)
+    if name != "INDEX":
+        needle = _lookup_value_arg(tokens, cur_pos, sheet, depth)
+        cur_pos = _skip_comma(tokens, needle.next_pos)
+    # range
+    if not (cur_pos + 2 < tokens.len() and tokens.get(cur_pos + 1) == ":"):
+        return EvalResult(value: CellValue.ErrorVal(message: "{name} requires a range"), next_pos: cur_pos)
+    val range_val = parse_range("{tokens.get(cur_pos)}:{tokens.get(cur_pos + 2)}")
+    cur_pos = _skip_comma(tokens, cur_pos + 3)
+    if range_val == nil:
+        return EvalResult(value: CellValue.ErrorVal(message: "{name} invalid range"), next_pos: cur_pos)
+    # trailing numeric args (col/row indexes); ignore an optional FALSE/0 flag
+    var idx1 = 1
+    var idx2 = 1
+    if cur_pos < tokens.len() and tokens.get(cur_pos) != ")":
+        val a1 = _eval_comparison(tokens, cur_pos, sheet, depth)
+        idx1 = _to_number(a1.value).to_i64().to_i32()
+        cur_pos = _skip_comma(tokens, a1.next_pos)
+    if cur_pos < tokens.len() and tokens.get(cur_pos) != ")":
+        val a2 = _eval_comparison(tokens, cur_pos, sheet, depth)
+        idx2 = _to_number(a2.value).to_i64().to_i32()
+        cur_pos = _skip_comma(tokens, a2.next_pos)
+    if cur_pos < tokens.len() and tokens.get(cur_pos) == ")":
+        cur_pos = cur_pos + 1
+    val start = range_val.start
+    val end_ref = range_val.end_ref
+    if name == "MATCH":
+        var mpos = 1
+        for ref_str in expand_range_refs(range_val):
+            if _lookup_eq(needle.display, needle.num, sheet.get_cell(ref_str)):
+                return EvalResult(value: CellValue.NumberVal(value: mpos.to_f64()), next_pos: cur_pos)
+            mpos = mpos + 1
+        return EvalResult(value: CellValue.ErrorVal(message: "MATCH not found"), next_pos: cur_pos)
+    if name == "INDEX":
+        val target = CellRef(col: start.col + idx2 - 1, row: start.row + idx1 - 1)
+        if target.col > end_ref.col or target.row > end_ref.row:
+            return EvalResult(value: CellValue.ErrorVal(message: "INDEX out of range"), next_pos: cur_pos)
+        return EvalResult(value: sheet.get_cell(cell_ref_to_string(target)).value, next_pos: cur_pos)
+    if name == "VLOOKUP":
+        var r = start.row
+        while r <= end_ref.row:
+            val first = cell_ref_to_string(CellRef(col: start.col, row: r))
+            if _lookup_eq(needle.display, needle.num, sheet.get_cell(first)):
+                val target = CellRef(col: start.col + idx1 - 1, row: r)
+                if target.col > end_ref.col:
+                    return EvalResult(value: CellValue.ErrorVal(message: "VLOOKUP col out of range"), next_pos: cur_pos)
+                return EvalResult(value: sheet.get_cell(cell_ref_to_string(target)).value, next_pos: cur_pos)
+            r = r + 1
+        return EvalResult(value: CellValue.ErrorVal(message: "VLOOKUP not found"), next_pos: cur_pos)
+    # HLOOKUP
+    var c = start.col
+    while c <= end_ref.col:
+        val first = cell_ref_to_string(CellRef(col: c, row: start.row))
+        if _lookup_eq(needle.display, needle.num, sheet.get_cell(first)):
+            val target = CellRef(col: c, row: start.row + idx1 - 1)
+            if target.row > end_ref.row:
+                return EvalResult(value: CellValue.ErrorVal(message: "HLOOKUP row out of range"), next_pos: cur_pos)
+            return EvalResult(value: sheet.get_cell(cell_ref_to_string(target)).value, next_pos: cur_pos)
+        c = c + 1
+    EvalResult(value: CellValue.ErrorVal(message: "HLOOKUP not found"), next_pos: cur_pos)
+
 fn _eval_function_call(name: text, tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalResult:
     """Evaluate a function call. pos points to first token after '('."""
     if _is_text_function(name):
         return _eval_text_function(name, tokens, pos, sheet, depth)
     if _is_criteria_function(name):
         return _eval_criteria_function(name, tokens, pos, sheet, depth)
+    if _is_lookup_function(name):
+        return _eval_lookup_function(name, tokens, pos, sheet, depth)
     # Collect arguments separated by commas
     # Each argument can be a range (A1:B3) or an expression
     var args: [[f64]] = []
