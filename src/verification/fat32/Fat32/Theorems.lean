@@ -182,6 +182,13 @@ theorem T6_bad_marker_not_valid_chain :
     isValidChainLink FAT32_BAD = false := by
   simp [isValidChainLink, isBad, FAT32_BAD, FAT32_EOC_LOW]
 
+theorem T6_eoc_not_valid_chain (e : FatEntry)
+    (heoc : isEoc e = true) :
+    isValidChainLink e = false := by
+  simp only [isEoc, Bool.and_eq_true, decide_eq_true_eq] at heoc
+  have hnot : ¬ e < FAT32_EOC_LOW := Nat.not_lt.mpr heoc.1
+  simp [isValidChainLink, hnot]
+
 -- ===========================================================================
 -- T7 — wave-4d allocator: FREE cluster is unreachable from any other chain.
 --
