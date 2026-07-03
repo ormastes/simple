@@ -8,10 +8,11 @@ use std.gpu.engine2d.backend.{RenderBackend, Engine2DExtended, Engine2DReadback,
 use std.gpu.engine2d.backend_software.{SoftwareBackend}
 use std.gpu.engine2d.backend_probe.{BackendProbeResult}
 use std.gpu.engine2d.glyph.{glyph_data, glyph_height, glyph_advance}
-use std.gpu.engine2d.backend_metal_runtime_ops.{metal_buffer_download_ptr, metal_buffer_upload_ptr, metal_set_bytes_ptr}
+use std.gpu.engine2d.backend_metal_runtime_ops.{metal_buffer_download_ptr, metal_buffer_upload_ptr, metal_set_bytes_ptr, metal_u32s_from_ptr}
 use std.common.string_core.{char_from_code}
 use std.gc_async_mut.gpu.engine2d.metal_session.{MetalSession}
 use std.gc_async_mut.env.platform.{is_macos}
+use std.env.variables.{env_get}
 use std.gc_async_mut.io.metal_sffi.{
     metal_sffi_alloc_buffer, metal_sffi_free_buffer,
     metal_sffi_create_command_buffer, metal_sffi_commit_command_buffer,
@@ -96,6 +97,9 @@ fn metal_host_write_i32(ptr: i64, offset: i64, value: i64) -> i64:
 
 fn metal_host_read_i64(ptr: i64, offset: i64) -> i64:
     rt_ptr_read_i64(ptr, offset)
+
+fn _metal_env_flag(name: text) -> bool:
+    (env_get(name) ?? "") == "1"
 
 enum MetalErrorKind:
     NotAvailable
@@ -402,7 +406,15 @@ impl RenderBackend for MetalBackend:
     me present():
         self.mirror.present()
     fn read_pixels() -> [u32]:
-        self.read_pixels_with_source().pixels
+        # Checksum-free: read_pixels_with_source() runs an O(n) interpreted
+        # checksum loop (engine2d_readback_with_handle) — ~8.8s at 1024x768 and
+        # ~80s at Retina physical. Pixel-only callers skip it; evidence rows
+        # that need the checksum call read_pixels_with_source() explicitly.
+        if self.gpu_frame_complete:
+            val gpu_pixels = self.read_pixels_gpu_only()
+            if gpu_pixels.len() == (self.w * self.h):
+                return gpu_pixels
+        self.mirror.read_pixels()
 
     fn read_pixels_with_source() -> Engine2DReadback:
         if self.gpu_frame_complete:
@@ -439,6 +451,20 @@ impl MetalBackend:
         if ok == 0:
             metal_host_free(host)
             return []
+        # One-call fast path: rt_u32s_from_raw builds the whole [u32] Rust-side.
+        # The per-8-byte metal_host_read_i64 loop below costs ~1.4s at 1024x768
+        # and 90s+ at Retina physical resolution (3.67M interpreted FFI
+        # round-trips). The extern only exists in runtimes built >= 2026-07-03,
+        # and unknown externs are a hard error at call time, so it is opt-in via
+        # SIMPLE_ONE_CALL_READBACK=1 (set by gates/apps that pin a modern
+        # driver). Flip to default-on once the self-hosted bin/simple is
+        # redeployed (blocked on the stage-2 bootstrap bug).
+        if _metal_env_flag("SIMPLE_ONE_CALL_READBACK"):
+            val fast_pixels = metal_u32s_from_ptr(host, total_pixels)
+            metal_host_free(host)
+            if fast_pixels.len() != total_i32:
+                return []
+            return fast_pixels
         var pixels: [u32] = [0u32; total_i32]
         var i: i64 = 0
         while i < total_pixels:

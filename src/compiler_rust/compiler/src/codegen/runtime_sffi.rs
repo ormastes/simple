@@ -1558,6 +1558,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_file_append_text", &[I64, I64, I64, I64], &[I8]), // path_ptr, path_len, content_ptr, content_len -> bool
     RuntimeFuncSpec::new("rt_file_read_bytes", &[I64, I64], &[I64]),                  // path -> RuntimeValue (array)
     RuntimeFuncSpec::new("rt_bytes_from_raw", &[I64, I64], &[I64]), // ptr, len -> RuntimeValue (byte array)
+    RuntimeFuncSpec::new("rt_u32s_from_raw", &[I64, I64], &[I64]), // ptr, count -> RuntimeValue (u32 array)
     RuntimeFuncSpec::new("rt_file_write_bytes", &[I64, I64, I64, I64], &[I8]), // path, bytes -> bool
     RuntimeFuncSpec::new("rt_file_wrap_smf_dynlib", &[I64, I64, I64, I64, I64], &[I8]), // input, output, arch -> bool
     RuntimeFuncSpec::new("rt_file_extract_smf_dynlib", &[I64, I64, I64, I64], &[I8]), // input, output -> bool
