@@ -14,6 +14,9 @@ use std.hardware.fpga_linux.riscv_fpga_linux.{compile_to_vhdl_module}
 fn vhdl_header() -> text:
     "library ieee;\nuse ieee.std_logic_1164.all;\nuse ieee.numeric_std.all;\n"
 
+fn vhdl_textio_header() -> text:
+    "library ieee;\nuse ieee.std_logic_1164.all;\nuse ieee.numeric_std.all;\nuse std.textio.all;\nuse ieee.std_logic_textio.all;\n"
+
 fn gen_rv64gc_core() -> text:
     var l = vhdl_header()
     l = l + "\nentity rv64gc_core is\n"
@@ -133,7 +136,7 @@ fn gen_uart_stub() -> text:
     l
 
 fn gen_ram_stub() -> text:
-    var l = vhdl_header()
+    var l = vhdl_textio_header()
     l = l + "\nentity ram is\n"
     l = l + "  generic (\n    ADDR_WIDTH : natural := 24\n  );\n"
     l = l + "  port (\n"
@@ -149,7 +152,24 @@ fn gen_ram_stub() -> text:
     l = l + "architecture rtl of ram is\n"
     l = l + "  constant DEPTH : natural := 2**(ADDR_WIDTH-3);\n"
     l = l + "  type ram_t is array(0 to DEPTH-1) of std_logic_vector(63 downto 0);\n"
-    l = l + "  signal mem : ram_t := (others => (others => '0'));\n"
+    l = l + "  impure function init_ram return ram_t is\n"
+    l = l + "    file f : text open read_mode is \"rv64_payload.mem\";\n"
+    l = l + "    variable line_v : line;\n"
+    l = l + "    variable word_v : std_logic_vector(63 downto 0);\n"
+    l = l + "    variable mem_v : ram_t := (others => (others => '0'));\n"
+    l = l + "    variable idx : natural := 0;\n"
+    l = l + "  begin\n"
+    l = l + "    while not endfile(f) loop\n"
+    l = l + "      readline(f, line_v);\n"
+    l = l + "      hread(line_v, word_v);\n"
+    l = l + "      if idx < DEPTH then\n"
+    l = l + "        mem_v(idx) := word_v;\n"
+    l = l + "      end if;\n"
+    l = l + "      idx := idx + 1;\n"
+    l = l + "    end loop;\n"
+    l = l + "    return mem_v;\n"
+    l = l + "  end function;\n"
+    l = l + "  signal mem : ram_t := init_ram;\n"
     l = l + "  signal ack_q : std_logic := '0';\n"
     l = l + "begin\n"
     l = l + "  wb_ack <= ack_q;\n"

@@ -26,8 +26,9 @@ N/A for this slice: this turn only fixes existing smoke wrappers and records blo
 - `SIMPLE_BINARY=bin/release/simple sh scripts/check/check-riscv64-fpga-simpleos-preflight.shs --local-only`:
   - PASS: FT4232H USB present, serial ports present, JTAG interface free, openFPGALoader, OpenOCD, Vivado, RISC-V cross compilers, RV64 SimpleOS ELF artifact, RV64 SimpleOS bin artifact, RV64 bitstream artifact, Simple hello.
   - PASS: RV64 FPGA core executable gate after `scripts/fpga/generate_rv64_vhdl.shs` emits a stateful fetch core at `build/vhdl/rv64/rv64gc_core.vhd`.
-  - FAIL: yosys, RV64 FPGA ELF load-context gate.
-  - RV64 load reason: `build/fpga/k26/load_elf_k26.log` records XSDB `dow` failure with `Invalid context`.
+  - PASS: RV64 FPGA ELF load-context gate via RTL preload (`build/vhdl/rv64/rv64_payload.mem` referenced by generated `ram.vhd`).
+  - FAIL: yosys; RV64 UART/run proof still absent.
+  - INFO: `build/fpga/k26/load_elf_k26.log` still records XSDB `dow` failure with `Invalid context`, but XSDB download is no longer the only load context.
 - `SIMPLE_BINARY=bin/release/simple bash scripts/fpga/build_k26_vexriscv.shs`:
   - NOW FAIL-FAST: the wrapper regenerates `build/vhdl/rv64/rv64gc_core.vhd`, detects placeholder RTL, and exits before Vivado unless `ALLOW_PLACEHOLDER_RTL=1` is set for plumbing diagnostics.
   - PRIOR PASS: with placeholder RTL allowed, Vivado synthesis, implementation, DRC, and bitgen completed and copied `build/fpga/k26/k26_vexriscv.bit` plus `build/build/xilinx_kv260/gateware/xilinx_kv260.bit`.
@@ -77,3 +78,4 @@ dev-in-progress
 - dev: Added an RV32 generated hardware-source provider and wrapper compile step so `scripts/fpga/generate_rv32_vhdl.shs` emits `build/vhdl/rv32/rv32_core.vhd` with real decode/control helper entities; RV32 still lacks bitstream and ELF load/run evidence.
 - dev: Replaced the RV64 constant-zero VHDL core stub with a minimal stateful Wishbone fetch core and fixed the RV64 preflight to reject only placeholder/no-assignment cores; RV64 still lacks ELF load/run evidence.
 - dev: Made the generated RV64 RAM acknowledge/read/write and the generated RV64 Wishbone interconnect decode bootrom/CLINT/PLIC/UART/RAM; GHDL analysis accepts the generated core/RAM/interconnect, but RV64 still lacks payload preload/debug load and UART run evidence.
+- dev: Added RV64 RTL preload generation from `build/rv64_bringup_check/hello_litex_rv64.bin` into `build/vhdl/rv64/rv64_payload.mem`, wired generated RAM to initialize from it, and made preflight accept that as load-context evidence while keeping UART/run proof open.
