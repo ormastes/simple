@@ -353,6 +353,25 @@ theorem write_access_implies_same_location_and_unique_cap
     intro h _
     exact h
 
+theorem write_access_iff_same_location_and_unique_cap
+    (baseType : String) (loc other : Nat) (cap : RefCapability) :
+    allowsAccess { location := loc, refType := { baseType := baseType, capability := cap } }
+      (MemAccess.Write other) = true ↔
+    loc = other ∧ (cap = RefCapability.Exclusive ∨ cap = RefCapability.Isolated) := by
+  constructor
+  · exact write_access_implies_same_location_and_unique_cap baseType loc other cap
+  · intro h
+    rcases h with ⟨hloc, hcap⟩
+    cases hcap with
+    | inl hex =>
+        cases hloc
+        cases hex
+        exact exclusive_write_same_loc baseType loc
+    | inr hiso =>
+        cases hloc
+        cases hiso
+        exact isolated_write_same_loc baseType loc
+
 theorem access_implies_same_location
     (baseType : String) (loc : Nat) (cap : RefCapability) (access : MemAccess) :
     allowsAccess { location := loc, refType := { baseType := baseType, capability := cap } }
