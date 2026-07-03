@@ -28,11 +28,22 @@ either RV32 or RV64.
 - FAIL: missing `examples/09_embedded/fpga_riscv/sw/generated_rv32_smoke.s`.
 - FAIL: missing `examples/09_embedded/fpga_riscv/sw/generated_rv64_linux_handoff_smoke.s`.
 
+`SIMPLE_BINARY=bin/release/simple sh scripts/check/check-riscv-fpga-simpleos-preflight.shs --local-only`
+
+- Reuses the existing RV64 FPGA SimpleOS preflight.
+- FAIL: `build/os/simpleos_riscv32_fpga.elf` missing.
+- FAIL: `build/rv32_bringup_check/hello_litex_rv32.bin` missing.
+- FAIL: `build/build/rv32_fpga/gateware/rv32_fpga.bit` missing.
+
 ## Change Landed In This Slice
 
 The RTL smoke wrappers now resolve the repository root correctly and the top
 level smoke script reports both RV32 and RV64 lane failures in one run instead
 of stopping after the first missing artifact.
+
+`scripts/check/check-riscv-fpga-simpleos-preflight.shs` now checks the existing
+RV64 preflight plus RV32 FPGA artifacts, so production status cannot ignore the
+32-bit lane.
 
 ## Remaining Production Blockers
 
