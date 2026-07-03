@@ -105,3 +105,59 @@ pub fn native_term_poll(args: &[Value]) -> Result<Value, CompileError> {
     check_effect_violations("native_term_poll")?;
     native_io::native_term_poll(args)
 }
+
+// ---------------------------------------------------------------------------
+// `rt_*` name adapters
+//
+// src/lib/nogc_sync_mut/tui/terminal.spl (and other low-level TUI code)
+// declares `extern fn rt_stdin_read_byte`, `rt_terminal_enable_raw_mode`,
+// `rt_terminal_disable_raw_mode`, `rt_terminal_get_size` directly — these
+// match the SFFI symbol names in
+// src/compiler_rust/runtime/src/value/sffi/env_process.rs, used when a
+// program JIT/AOT-compiles. When compilation instead falls back to this
+// tree-walking interpreter (e.g. an unrelated HIR lowering failure elsewhere
+// in the program), extern calls are dispatched by exact name through
+// init_dispatch_table() in interpreter_extern/mod.rs — which only had the
+// `native_*` names above (a legacy/pre-`rt_`-prefix naming convention), not
+// the `rt_terminal_*`/`rt_stdin_read_byte` names. So a program that JIT-fails
+// for any reason and directly calls these `rt_` externs previously hit
+// "unknown extern function". These adapters close that gap. See
+// doc/08_tracking/bug/raw_mode_extern_registry_2026-07-03.md.
+// ---------------------------------------------------------------------------
+
+/// `rt_stdin_read_byte` — read one byte from stdin (no args). Returns the
+/// byte value (0-255) or -1 at EOF/error.
+pub fn rt_stdin_read_byte(_args: &[Value]) -> Result<Value, CompileError> {
+    use std::io::Read;
+    let mut byte = [0u8; 1];
+    match std::io::stdin().read(&mut byte) {
+        Ok(1) => Ok(Value::Int(byte[0] as i64)),
+        _ => Ok(Value::Int(-1)),
+    }
+}
+
+/// `rt_terminal_enable_raw_mode` — bridges to `native_enable_raw_mode` on
+/// stdin (handle 0), converting its `i64` status code (0 = ok) to the `bool`
+/// the `rt_` extern declares.
+pub fn rt_terminal_enable_raw_mode(_args: &[Value]) -> Result<Value, CompileError> {
+    let result = native_io::native_enable_raw_mode(&[Value::Int(0)])?;
+    Ok(Value::Bool(matches!(result, Value::Int(0))))
+}
+
+/// `rt_terminal_disable_raw_mode` — bridges to `native_disable_raw_mode` on
+/// stdin (handle 0).
+pub fn rt_terminal_disable_raw_mode(_args: &[Value]) -> Result<Value, CompileError> {
+    let result = native_io::native_disable_raw_mode(&[Value::Int(0)])?;
+    Ok(Value::Bool(matches!(result, Value::Int(0))))
+}
+
+/// `rt_terminal_get_size` — bridges to `native_get_term_size` on stdout
+/// (handle 1, matching `fill_terminal_size`'s `STDOUT_FILENO` in
+/// env_process.rs). `native_get_term_size` returns `[rows, cols]`; the `rt_`
+/// extern (and `terminal_get_size()` in terminal.spl) expects `(cols, rows)`.
+pub fn rt_terminal_get_size(_args: &[Value]) -> Result<Value, CompileError> {
+    match native_io::native_get_term_size(&[Value::Int(1)])? {
+        Value::Array(items) if items.len() == 2 => Ok(Value::Tuple(vec![items[1].clone(), items[0].clone()])),
+        _ => Ok(Value::Tuple(vec![Value::Int(80), Value::Int(24)])),
+    }
+}

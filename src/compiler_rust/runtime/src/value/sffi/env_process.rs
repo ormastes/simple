@@ -976,14 +976,66 @@ pub extern "C" fn rt_terminal_get_size() -> RuntimeValue {
     rt_term_get_size()
 }
 
+// Saved termios state for stdin (fd 0), captured by rt_terminal_enable_raw_mode
+// and restored by rt_terminal_disable_raw_mode. Previously these two externs
+// were no-op stubs that always returned true without touching the terminal at
+// all, so callers (e.g. the office Calc TUI) never actually left canonical
+// mode: input stayed line-buffered/echoed even though byte-at-a-time reads
+// via rt_stdin_read_byte worked fine. See
+// doc/08_tracking/bug/raw_mode_extern_registry_2026-07-03.md.
+#[cfg(unix)]
+static SAVED_TERMIOS: std::sync::OnceLock<std::sync::Mutex<Option<nix::sys::termios::Termios>>> =
+    std::sync::OnceLock::new();
+
 #[no_mangle]
 pub extern "C" fn rt_terminal_enable_raw_mode() -> RuntimeValue {
-    RuntimeValue::from_bool(true)
+    #[cfg(unix)]
+    {
+        use nix::sys::termios::{cfmakeraw, tcgetattr, tcsetattr, SetArg};
+        use std::os::fd::BorrowedFd;
+        let fd = unsafe { BorrowedFd::borrow_raw(0) };
+        let orig = match tcgetattr(fd) {
+            Ok(t) => t,
+            Err(_) => return RuntimeValue::from_bool(false),
+        };
+        let mut raw = orig.clone();
+        cfmakeraw(&mut raw);
+        if tcsetattr(fd, SetArg::TCSANOW, &raw).is_err() {
+            return RuntimeValue::from_bool(false);
+        }
+        let slot = SAVED_TERMIOS.get_or_init(|| std::sync::Mutex::new(None));
+        if let Ok(mut guard) = slot.lock() {
+            *guard = Some(orig);
+        }
+        RuntimeValue::from_bool(true)
+    }
+    #[cfg(not(unix))]
+    {
+        RuntimeValue::from_bool(true)
+    }
 }
 
 #[no_mangle]
 pub extern "C" fn rt_terminal_disable_raw_mode() -> RuntimeValue {
-    RuntimeValue::from_bool(true)
+    #[cfg(unix)]
+    {
+        use nix::sys::termios::{tcsetattr, SetArg};
+        use std::os::fd::BorrowedFd;
+        let fd = unsafe { BorrowedFd::borrow_raw(0) };
+        let slot = SAVED_TERMIOS.get_or_init(|| std::sync::Mutex::new(None));
+        let saved = match slot.lock() {
+            Ok(mut guard) => guard.take(),
+            Err(_) => None,
+        };
+        match saved {
+            Some(orig) => RuntimeValue::from_bool(tcsetattr(fd, SetArg::TCSANOW, &orig).is_ok()),
+            None => RuntimeValue::from_bool(true),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        RuntimeValue::from_bool(true)
+    }
 }
 
 #[no_mangle]

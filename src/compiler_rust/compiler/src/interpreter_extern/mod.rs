@@ -306,6 +306,13 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("native_fs_write", filesystem::native_fs_write);
     insert_simple!("native_fs_write_string", filesystem::native_fs_write_string);
     insert_simple!("native_get_term_size", terminal::native_get_term_size);
+    // rt_-prefixed adapters for src/lib/nogc_sync_mut/tui/terminal.spl's raw
+    // extern declarations (were missing from this table entirely — see
+    // doc/08_tracking/bug/raw_mode_extern_registry_2026-07-03.md).
+    insert_simple!("rt_stdin_read_byte", terminal::rt_stdin_read_byte);
+    insert_simple!("rt_terminal_enable_raw_mode", terminal::rt_terminal_enable_raw_mode);
+    insert_simple!("rt_terminal_disable_raw_mode", terminal::rt_terminal_disable_raw_mode);
+    insert_simple!("rt_terminal_get_size", terminal::rt_terminal_get_size);
     insert_simple!("native_http_send", network::native_http_send);
     insert_simple!("rt_http_request", network::rt_http_request);
     insert_simple!("native_is_tty", terminal::native_is_tty);
@@ -737,10 +744,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_cranelift_ireduce", cranelift::rt_cranelift_ireduce);
     insert_simple!("rt_cranelift_ishl", cranelift::rt_cranelift_ishl);
     insert_simple!("rt_cranelift_isub", cranelift::rt_cranelift_isub);
-    insert_simple!(
-        "rt_cranelift_import_function",
-        cranelift::rt_cranelift_import_function
-    );
+    insert_simple!("rt_cranelift_import_function", cranelift::rt_cranelift_import_function);
     insert_simple!("rt_cranelift_jump", cranelift::rt_cranelift_jump);
     insert_simple!("rt_cranelift_load", cranelift::rt_cranelift_load);
     insert_simple!("rt_cranelift_module_new", cranelift::rt_cranelift_module_new);
@@ -1629,8 +1633,14 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_tls13_aes128_gcm_encrypt", simd::rt_tls13_aes128_gcm_encrypt);
     insert_simple!("rt_tls13_aes256_gcm_decrypt", simd::rt_tls13_aes256_gcm_decrypt);
     insert_simple!("rt_tls13_aes256_gcm_encrypt", simd::rt_tls13_aes256_gcm_encrypt);
-    insert_simple!("rt_ssh_aes256_gcm_decrypt_packet", simd::rt_ssh_aes256_gcm_decrypt_packet);
-    insert_simple!("rt_ssh_aes256_gcm_decrypt_packet_payload_len", simd::rt_ssh_aes256_gcm_decrypt_packet_payload_len);
+    insert_simple!(
+        "rt_ssh_aes256_gcm_decrypt_packet",
+        simd::rt_ssh_aes256_gcm_decrypt_packet
+    );
+    insert_simple!(
+        "rt_ssh_aes256_gcm_decrypt_packet_payload_len",
+        simd::rt_ssh_aes256_gcm_decrypt_packet_payload_len
+    );
     insert_simple!("rt_tls13_ed25519_verify", signatures::rt_ed25519_verify);
     insert_simple!("rt_torch_available", torch::rt_torch_available);
     insert_simple!("rt_torch_autograd_backward", torch::rt_torch_autograd_backward);
@@ -1639,10 +1649,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
         "rt_torch_autograd_no_grad_begin",
         torch::rt_torch_autograd_no_grad_begin
     );
-    insert_simple!(
-        "rt_torch_autograd_no_grad_end",
-        torch::rt_torch_autograd_no_grad_end
-    );
+    insert_simple!("rt_torch_autograd_no_grad_end", torch::rt_torch_autograd_no_grad_end);
     insert_simple!(
         "rt_torch_autograd_set_requires_grad",
         torch::rt_torch_autograd_set_requires_grad
