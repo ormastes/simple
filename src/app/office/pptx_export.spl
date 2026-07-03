@@ -9,8 +9,8 @@
 # reader round-trips every part; slide text lands in a:t runs. Full
 # PowerPoint-desktop rendering is untested locally — recorded ceiling.
 
-use std.common.archive.zip.{zip_write_stored, zip_text_file, ZipFile}
-use app.office.slides.slide.{Slide, SlideElement, SlideElementKind}
+use std.common.archive.zip.{zip_write_stored, zip_text_file, ZipFile, zip_extract_text}
+use app.office.slides.slide.{Slide, SlideElement, SlideElementKind, blank_slide, add_text_box}
 
 fn _x(s: text) -> text:
     var r = s
@@ -51,7 +51,65 @@ fn _slide_xml(slide: Slide) -> text:
                 pass_do_nothing("only text boxes export to pptx v1")
     "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><p:sld xmlns:a=\"{_NS_A}\" xmlns:p=\"{_NS_P}\" xmlns:r=\"{_NS_R}\"><p:cSld>{_sp_tree_open()}{shapes}</p:spTree></p:cSld><p:clrMapOvr><a:overrideClrMapping bg1=\"lt1\" tx1=\"dk1\" bg2=\"lt2\" tx2=\"dk2\" accent1=\"accent1\" accent2=\"accent2\" accent3=\"accent3\" accent4=\"accent4\" accent5=\"accent5\" accent6=\"accent6\" hlink=\"hlink\" folHlink=\"folHlink\"/></p:clrMapOvr></p:sld>"
 
-val _SLIDE_RELS = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout\" Target=\"../slideLayouts/slideLayout1.xml\"/></Relationships>"
+# =========================================================================
+# PPTX import
+# =========================================================================
+
+fn _find_at(s: text, needle: text, from: i32) -> i32:
+    var i = from
+    while i + needle.len() <= s.len():
+        if s.slice(i, i + needle.len()) == needle:
+            return i
+        i = i + 1
+    -1
+
+fn _unx(s: text) -> text:
+    var r = s
+    r = r.replace("&lt;", "<")
+    r = r.replace("&gt;", ">")
+    r = r.replace("&quot;", "\"")
+    r = r.replace("&amp;", "&")
+    r
+
+fn pptx_slide_texts(slide_xml: text) -> [text]:
+    """Every a:t run's text, in document order."""
+    var texts: [text] = []
+    var i = 0
+    while i < slide_xml.len():
+        val t = _find_at(slide_xml, "<a:t>", i)
+        if t < 0:
+            break
+        val e = _find_at(slide_xml, "</a:t>", t)
+        if e < 0:
+            break
+        texts.push(_unx(slide_xml.slice(t + 5, e)))
+        i = e + 6
+    texts
+
+fn pptx_bytes_to_deck(zip_bytes: [u8]) -> [Slide]:
+    """Import a real .pptx: each slide part's text runs become a slide with a
+    title box (first run) and body boxes — the same shape parse_deck builds."""
+    var slides: [Slide] = []
+    var n = 1
+    var more = true
+    while more and n <= 500:
+        val xml = zip_extract_text(zip_bytes, "ppt/slides/slide{n}.xml")
+        if xml == "":
+            more = false
+        else:
+            var s = blank_slide("slide{slides.len() + 1}")
+            var bi = 0
+            for content in pptx_slide_texts(xml):
+                if bi == 0:
+                    s = add_text_box(s, "title", content, 60, 60, 840, 120)
+                else:
+                    s = add_text_box(s, "body{bi}", content, 60, 220 + 90 * (bi - 1), 840, 80)
+                bi = bi + 1
+            slides.push(s)
+            n = n + 1
+    slides
+
+val _SLIDE_RELS ="<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout\" Target=\"../slideLayouts/slideLayout1.xml\"/></Relationships>"
 
 fn deck_to_pptx_bytes(slides: [Slide]) -> [u8]:
     """Build a genuine .pptx package from a deck. Text boxes only (v1)."""
