@@ -18,7 +18,7 @@ use std.gc_async_mut.gpu.browser_engine.net.tls {TlsManager, TlsConnection}
 use std.gc_async_mut.gpu.browser_engine.net.entity.tls_types {TlsConfig, TlsVersion}
 
 use std.gc_async_mut.gpu.browser_engine.net.cache.{HttpCache}
-use std.gc_async_mut.gpu.browser_engine.net.cookie_store.{CookieStore}
+use std.gc_async_mut.gpu.browser_engine.net.cookie_store.{CookieStore, parse_set_cookie}
 
 # Default maximum number of HTTP redirects to follow before aborting.
 val DEFAULT_MAX_REDIRECTS = 20
@@ -41,9 +41,9 @@ class FetchEngine:
     static fn new(logger: Logger) -> FetchEngine:
         FetchEngine(
             dns: DnsResolver.new(logger, DEFAULT_DNS_TTL),
-            cache: HttpCache.create(),
-            cookie_store: CookieStore.create(),
-            cors: CorsChecker.new(logger),
+            cache: HttpCache.new(logger, 50),
+            cookie_store: CookieStore.new(),
+            cors: CorsChecker.new(""),
             logger: logger,
             max_redirects: DEFAULT_MAX_REDIRECTS
         )
@@ -98,12 +98,22 @@ class FetchEngine:
         # Step 3d: CORS response validation (for Cors mode)
         match request.mode:
             RequestMode.Cors:
-                self.cors.check(request, response.headers)?
+                val preflight_result = self.cors.validate_preflight(response.headers)
+                match preflight_result:
+                    PreflightResult.Denied(_):
+                        return Err(network_error("CORS response validation failed"))
+                    _:
+                        pass_do_nothing
             _:
                 pass_do_nothing
 
         # Step 3e: Store cookies from Set-Cookie response headers
-        self.cookie_store.store_from_headers(request.url, response.headers)
+        for line in response.headers.split("\r\n"):
+            val lower_line = line.to_lower()
+            if lower_line.starts_with("set-cookie:"):
+                val cookie_value = line.slice(11, line.len()).trim()
+                val cookie = parse_set_cookie(cookie_value)
+                self.cookie_store.store(cookie)
 
         # Step 3f: Handle redirects (301, 302, 303, 307, 308)
         if should_redirect(response.status):
