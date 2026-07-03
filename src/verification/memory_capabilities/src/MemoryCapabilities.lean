@@ -138,6 +138,16 @@ theorem empty_env_allows_isolated (loc : Nat) :
   canCreateRef { activeRefs := [] } loc RefCapability.Isolated = true := by
   simp [canCreateRef, getActiveRefs]
 
+theorem empty_env_allows_all_caps (loc : Nat) :
+  canCreateRef { activeRefs := [] } loc RefCapability.Shared = true ∧
+  canCreateRef { activeRefs := [] } loc RefCapability.Exclusive = true ∧
+  canCreateRef { activeRefs := [] } loc RefCapability.Isolated = true := by
+  constructor
+  · exact empty_env_allows_shared loc
+  · constructor
+    · exact empty_env_allows_exclusive loc
+    · exact empty_env_allows_isolated loc
+
 theorem empty_env_access_not_safe (access : MemAccess) :
   accessIsSafe { activeRefs := [] } access = false := by
   cases access <;> simp [accessIsSafe, getActiveRefs]
