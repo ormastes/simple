@@ -4,7 +4,80 @@
 use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
+use simple_common::target::TargetArch;
+
 use super::{collect_spl_files_recursive, safe_canonicalize, same_file_path, NativeProjectBuilder};
+
+/// Resolve a `@cfg(...)` condition name to an architecture, if it names one.
+///
+/// Mirrors the arch-alias groups in the pure-Simple preprocessor
+/// (`src/compiler/10.frontend/core/parser_preprocessor.spl`
+/// `_pp_cfg_condition_matches`) so a whole-file arch gate is recognized the
+/// same way here as it is by the self-hosted compiler's own `@cfg`
+/// evaluation. Returns `None` for condition names that are not arch aliases
+/// (e.g. `test`, `baremetal`, a bare `not(...)` on a non-arch name, or a
+/// `"key", "value"` pair) -- those are intentionally left ungated by this
+/// discovery-time filter rather than risk excluding a file that should build.
+fn cfg_name_to_arch(name: &str) -> Option<TargetArch> {
+    match name {
+        "x86_64" | "amd64" | "x64" => Some(TargetArch::X86_64),
+        "x86" | "i386" | "i686" => Some(TargetArch::X86),
+        "aarch64" | "arm64" => Some(TargetArch::Aarch64),
+        "arm" | "armv7" | "armv6" | "arm32" => Some(TargetArch::Arm),
+        "riscv64" => Some(TargetArch::Riscv64),
+        "riscv32" => Some(TargetArch::Riscv32),
+        _ => None,
+    }
+}
+
+/// Extract the arch-gating verdict for a `.spl` source, if its first
+/// meaningful line is a whole-file `@cfg(<arch>)` (optionally
+/// `@cfg(not(<arch>))`) decorator.
+///
+/// Returns `Some(true)` if the file should be included for `target_arch`,
+/// `Some(false)` if it should be excluded, and `None` if the file has no
+/// leading arch cfg gate (not `@cfg`-decorated at all, or gated on a
+/// non-arch condition) -- callers should treat `None` as "always include",
+/// matching today's behavior for every file that isn't gated this way.
+///
+/// This intentionally only recognizes a single leading `@cfg(...)` line, not
+/// the full per-declaration preprocessor grammar (multi-line brace tracking,
+/// nested conditions, etc.) -- that full evaluation already exists in
+/// `parser_preprocessor.spl` and is out of scope to reimplement here. The
+/// narrower goal is just to stop native-project discovery from being
+/// completely blind to the common "this whole file is one arch's HAL
+/// implementation" pattern documented in `src/os/kernel/arch/hal.spl`.
+pub(crate) fn file_arch_cfg_gate(source: &str, target_arch: TargetArch) -> Option<bool> {
+    for line in source.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if !trimmed.starts_with("@cfg(") {
+            return None;
+        }
+        let inner = trimmed.strip_prefix("@cfg(")?.trim_end();
+        let inner = inner.strip_suffix(')').unwrap_or(inner);
+        // Skip `"key", "value"` style conditions (e.g. @cfg("target_arch", "arm")) --
+        // not a bare arch alias, leave ungated.
+        if inner.contains(',') || inner.contains('"') {
+            return None;
+        }
+        let (negate, name) = match inner.strip_prefix("not(") {
+            Some(rest) => (true, rest.trim_end_matches(')').trim()),
+            None => (false, inner.trim()),
+        };
+        return cfg_name_to_arch(name).map(|arch| {
+            let matches = arch == target_arch;
+            if negate {
+                !matches
+            } else {
+                matches
+            }
+        });
+    }
+    None
+}
 
 impl NativeProjectBuilder {
     /// Discover all .spl files in source directories.
@@ -34,6 +107,30 @@ impl NativeProjectBuilder {
             }
         }
         files.sort();
+
+        // Drop files whose leading `@cfg(<arch>)` gate does not match the
+        // build's effective target arch (see `file_arch_cfg_gate`). Full-scan
+        // discovery previously ignored `@cfg` entirely, so a cross-arch build
+        // (e.g. --target x86_64 over a source tree containing riscv64-only
+        // HAL files) could pull wrong-arch files into compilation and, via
+        // `collected_inline_asm_blocks()`, wrong-arch inline asm into the
+        // link (see src/os/kernel/arch/hal.spl header). The entry file is
+        // always kept regardless of its own gate, matching entry-closure's
+        // unconditional inclusion of the requested entry point.
+        let target_arch = super::effective_target().arch;
+        let canonical_entry = self.entry_file.as_ref().map(|p| safe_canonicalize(p));
+        files.retain(|path| {
+            if let Some(entry) = &canonical_entry {
+                if same_file_path(path, entry) {
+                    return true;
+                }
+            }
+            let source = match std::fs::read_to_string(path) {
+                Ok(s) => s,
+                Err(_) => return true,
+            };
+            file_arch_cfg_gate(&source, target_arch).unwrap_or(true)
+        });
         files
     }
 

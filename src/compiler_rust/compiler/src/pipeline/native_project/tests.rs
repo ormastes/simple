@@ -2521,3 +2521,124 @@ fn test_incremental_cache_hit_miss_mix_parallel_wide_matrix() {
     let found_count = (0..N).filter(|i| stdout.contains(&format!("wide_cache_mix_probe_{i}"))).count();
     assert_eq!(found_count, N, "expected all {} probe symbols present, found {}", N, found_count);
 }
+
+/// Unit coverage for issue #57's `file_arch_cfg_gate` helper: full-scan
+/// native-project discovery previously ignored `@cfg(arch)` entirely (see
+/// src/os/kernel/arch/hal.spl header), so a cross-arch build could pull
+/// wrong-arch files into compilation. Covers the documented alias groups
+/// (mirroring parser_preprocessor.spl's `_pp_cfg_condition_matches`),
+/// `not(...)` negation, and the "leave ungated" cases (no leading @cfg,
+/// non-arch condition name, `"key", "value"` pairs) that must NOT be
+/// filtered by this discovery-time gate.
+#[test]
+fn test_file_arch_cfg_gate_recognizes_arch_aliases_and_negation() {
+    use super::discovery::file_arch_cfg_gate;
+    use simple_common::target::TargetArch;
+
+    // Bare arch aliases: included only for the matching target.
+    assert_eq!(
+        file_arch_cfg_gate("@cfg(x86_64)\nfn f(): pass\n", TargetArch::X86_64),
+        Some(true)
+    );
+    assert_eq!(
+        file_arch_cfg_gate("@cfg(x86_64)\nfn f(): pass\n", TargetArch::Riscv64),
+        Some(false)
+    );
+    assert_eq!(
+        file_arch_cfg_gate("@cfg(riscv64)\nfn f(): pass\n", TargetArch::X86_64),
+        Some(false)
+    );
+    assert_eq!(
+        file_arch_cfg_gate("@cfg(riscv64)\nfn f(): pass\n", TargetArch::Riscv64),
+        Some(true)
+    );
+
+    // Alias groups from parser_preprocessor.spl.
+    assert_eq!(file_arch_cfg_gate("@cfg(amd64)\n", TargetArch::X86_64), Some(true));
+    assert_eq!(file_arch_cfg_gate("@cfg(arm64)\n", TargetArch::Aarch64), Some(true));
+    assert_eq!(file_arch_cfg_gate("@cfg(aarch64)\n", TargetArch::Aarch64), Some(true));
+    assert_eq!(file_arch_cfg_gate("@cfg(armv7)\n", TargetArch::Arm), Some(true));
+
+    // Negation.
+    assert_eq!(
+        file_arch_cfg_gate("@cfg(not(riscv64))\nfn f(): pass\n", TargetArch::X86_64),
+        Some(true)
+    );
+    assert_eq!(
+        file_arch_cfg_gate("@cfg(not(riscv64))\nfn f(): pass\n", TargetArch::Riscv64),
+        Some(false)
+    );
+
+    // Leading blank lines and comments before the gate are skipped.
+    assert_eq!(
+        file_arch_cfg_gate("\n# a comment\n\n@cfg(x86_64)\nfn f(): pass\n", TargetArch::X86_64),
+        Some(true)
+    );
+
+    // Ungated / non-arch conditions must return None (never filtered out).
+    assert_eq!(file_arch_cfg_gate("fn f(): pass\n", TargetArch::X86_64), None);
+    assert_eq!(file_arch_cfg_gate("@cfg(test)\nfn f(): pass\n", TargetArch::X86_64), None);
+    assert_eq!(file_arch_cfg_gate("@cfg(baremetal)\nfn f(): pass\n", TargetArch::X86_64), None);
+    assert_eq!(
+        file_arch_cfg_gate("@cfg(\"target_arch\", \"arm\")\nfn f(): pass\n", TargetArch::X86_64),
+        None
+    );
+}
+
+/// End-to-end fixture for issue #57: a two-arch source tree with one file
+/// gated `@cfg(x86_64)` and one gated `@cfg(riscv64)`, discovered via
+/// `discover_files_full_scan` (the full-scan path, not entry-closure).
+/// Relies on this test environment's host arch being x86_64 (verified via
+/// `Target::host()`) rather than mutating the process-global
+/// `TARGET_OVERRIDE`, which is a `OnceLock` that other tests in this same
+/// binary must not have set already.
+#[test]
+fn test_discover_files_full_scan_respects_arch_cfg_gate() {
+    use simple_common::target::{Target, TargetArch};
+
+    if Target::host().arch != TargetArch::X86_64 {
+        eprintln!("skipping: this fixture assumes an x86_64 host (matches --target x86_64-unknown-linux-gnu)");
+        return;
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let project_root = temp.path().join("project");
+    let src_dir = project_root.join("src");
+    std::fs::create_dir_all(&src_dir).unwrap();
+
+    std::fs::write(
+        src_dir.join("only_x86_64.spl"),
+        "@cfg(x86_64)\nfn x86_64_only_probe(): pass\n",
+    )
+    .unwrap();
+    std::fs::write(
+        src_dir.join("only_riscv64.spl"),
+        "@cfg(riscv64)\nfn riscv64_only_probe(): pass\n",
+    )
+    .unwrap();
+    std::fs::write(src_dir.join("arch_neutral.spl"), "fn neutral_probe(): pass\n").unwrap();
+
+    let builder = NativeProjectBuilder::new(project_root.clone(), project_root.join("bin/tool")).source_dir(src_dir);
+
+    let files = builder.discover_files().unwrap();
+    let names: Vec<String> = files
+        .iter()
+        .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
+        .collect();
+
+    assert!(
+        names.contains(&"only_x86_64.spl".to_string()),
+        "expected x86_64-gated file to be discovered for an x86_64 target: {:?}",
+        names
+    );
+    assert!(
+        names.contains(&"arch_neutral.spl".to_string()),
+        "expected ungated file to always be discovered: {:?}",
+        names
+    );
+    assert!(
+        !names.contains(&"only_riscv64.spl".to_string()),
+        "riscv64-gated file must NOT be discovered when building for x86_64: {:?}",
+        names
+    );
+}
