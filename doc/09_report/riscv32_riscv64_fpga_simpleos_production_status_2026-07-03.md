@@ -24,9 +24,12 @@ either RV32 or RV64.
 
 `sh scripts/check/check-riscv-rtl-linux-smoke.shs --timeout=10`
 
-- FAIL: missing `examples/09_embedded/fpga_riscv/rtl`.
 - FAIL: missing `examples/09_embedded/fpga_riscv/sw/generated_rv32_smoke.s`.
 - FAIL: missing `examples/09_embedded/fpga_riscv/sw/generated_rv64_linux_handoff_smoke.s`.
+
+`bin/release/simple run src/hardware/fpga_linux/generate_riscv_fpga_bundle.spl /tmp/simple_riscv_bundle_check`
+
+- FAIL: generator now fails closed with `missing RV32 RTL source: examples/09_embedded/fpga_riscv/rtl/rv32i_pkg.vhd`.
 
 `SIMPLE_BINARY=bin/release/simple sh scripts/check/check-riscv-fpga-simpleos-preflight.shs --local-only`
 
@@ -41,6 +44,11 @@ The RTL smoke wrappers now resolve the repository root correctly and the top
 level smoke script reports both RV32 and RV64 lane failures in one run instead
 of stopping after the first missing artifact.
 
+The generated Linux GHDL runners now use per-run generated bundle roots
+(`$GEN_DIR/rv32/rtl` and `$GEN_DIR/rv64/rtl`) instead of directly compiling the
+handwritten example RTL tree. The bundle generator has a small executable
+entrypoint and fails closed if required copied RTL inputs are absent.
+
 `scripts/check/check-riscv-fpga-simpleos-preflight.shs` now checks the existing
 RV64 preflight plus RV32 FPGA artifacts, so production status cannot ignore the
 32-bit lane.
@@ -49,7 +57,9 @@ RV64 preflight plus RV32 FPGA artifacts, so production status cannot ignore the
 
 1. Restore or generate the RV32 and RV64 smoke assembly payloads used by the
    generated RTL Linux smoke runners.
-2. Restore or regenerate the `examples/09_embedded/fpga_riscv/rtl` VHDL testbench tree.
+2. Replace the bundle generator's remaining copied RTL dependency with current
+   generated-core VHDL outputs, or restore the missing copied inputs until that
+   generator path is complete.
 3. Install or provide `yosys` if synthesis/formal checks are part of the local
    production gate.
 4. Free the FT4232H JTAG interface before physical FPGA programming.
