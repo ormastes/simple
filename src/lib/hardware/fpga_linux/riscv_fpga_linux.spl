@@ -423,6 +423,7 @@ impl RiscvFpgaLinuxManifest:
             val isa = lane.xlen.isa_string()
             lines = lines.push("[[product]]")
             lines = lines.push("product_id = \"{product_id}\"")
+            lines = lines.push("lane_id = \"{xl}\"")
             lines = lines.push("xlen = \"{xl}\"")
             lines = lines.push("isa = \"{isa}\"")
             lines = lines.push("board = \"{bname}\"")
@@ -455,6 +456,7 @@ impl RiscvFpgaLinuxManifest:
             val core = "simple_{xl}gc_core"
             lines = lines.push("[[lane]]")
             lines = lines.push("proof_lane = \"{pl}\"")
+            lines = lines.push("lane_id = \"{xl}\"")
             lines = lines.push("xlen = \"{xl}\"")
             lines = lines.push("product_level = \"{self.product.product_level}\"")
             lines = lines.push("configuration_profile = \"{self.product.configuration_profile}\"")
@@ -464,6 +466,7 @@ impl RiscvFpgaLinuxManifest:
             lines = lines.push("perf_target_mhz = \"{mhz}\"")
             lines = lines.push("formal_verification = \"rvfi+sby\"")
             lines = lines.push("formal_gate = \"rvfi_port_manifest\"")
+            lines = lines.push("core_file = \"{output_dir}/{xl}/rtl/{core}.vhd\"")
             lines = lines.push("debug_sidecar_file = \"{output_dir}/{xl}/rtl/{core}.debug.json\"")
             if xl == "rv32":
                 lines = lines.push("runner_testbench = \"{output_dir}/{xl}/rtl/tb_generated_rv32_linux_handoff.vhd\"")
@@ -475,6 +478,8 @@ impl RiscvFpgaLinuxManifest:
                 lines = lines.push("runner_testbench = \"{output_dir}/{xl}/rtl/tb_generated_rv64_sv39.vhd\"")
                 lines = lines.push("runner_testbench = \"{output_dir}/{xl}/rtl/tb_generated_rv64_sv39_fault.vhd\"")
             lines = lines.push("debug_output = \"semi_trigger\"")
+            lines = lines.push("debug_output = \"semi_op\"")
+            lines = lines.push("debug_output = \"semi_param\"")
             lines = lines.push("authoritative = \"true\"")
             lines = lines.push("authoritative_file = \"{output_dir}/{xl}/rtl/{core}.spl\"")
             lines = lines.push("authoritative_file = \"{output_dir}/{xl}/rtl/{core}_pkg.vhd\"")
@@ -517,7 +522,7 @@ impl RiscvFpgaLinuxManifest:
         lines = lines.push("  next_lane = \"rv32->rv64,rv64->rv32\"")
         lines = lines.push("  starvation_bound = 2")
         lines = lines.push("}")
-        lines.join("\n")
+        lines.join("\n") + "\n"
 
 # ============================================================================
 # RTL Bundle
@@ -616,7 +621,7 @@ pub fn create_riscv_fpga_linux_manifest_configured(board_id: text, product_level
 
 fn write_manifest_file(output_dir: text, manifest: RiscvFpgaLinuxManifest) -> text:
     """Writes the main RTL manifest to disk and returns its path."""
-    val path = "{output_dir}/manifest.sdn"
+    val path = "{output_dir}/riscv_fpga_rtl_manifest.sdn"
     rtl_file_write_text(path, manifest.rtl_manifest_text(output_dir))
     return path
 
@@ -633,6 +638,31 @@ fn write_product_byl_file(output_dir: text, manifest: RiscvFpgaLinuxManifest) ->
     rtl_file_write_text(path, manifest.product_byl_text())
     return path
 
+fn synth_report_template_text(lane: RiscvFpgaLane, product: RiscvFpgaProductProfile) -> text:
+    val xl = lane.xlen.to_text()
+    val luts = product.rtl_size_budget_luts(lane.xlen)
+    val mhz = product.perf_target_mhz(lane.xlen)
+    var lines: [text] = []
+    lines = lines.push("lane = \"{xl}\"")
+    lines = lines.push("max_luts = {luts}")
+    lines = lines.push("target_mhz = {mhz}")
+    lines = lines.push("actual_luts = 0")
+    lines = lines.push("actual_mhz = 0")
+    lines = lines.push("status = \"template-fill-after-synthesis\"")
+    lines.join("\n") + "\n"
+
+fn write_synth_report_templates(output_dir: text, manifest: RiscvFpgaLinuxManifest) -> [text]:
+    """Writes per-lane synthesis report templates consumed by budget evidence."""
+    val synth_dir = "{output_dir}/synth"
+    rtl_dir_create(synth_dir)
+    var files: [text] = []
+    for lane in manifest.lanes:
+        val xl = lane.xlen.to_text()
+        val path = "{synth_dir}/{xl}_synth.sdn"
+        rtl_file_write_text(path, synth_report_template_text(lane, manifest.product))
+        files = files.push(path)
+    files
+
 fn write_bundle_readme(output_dir: text) -> text:
     """Writes the bundle README to disk and returns its path."""
     val path = "{output_dir}/README.md"
@@ -646,6 +676,7 @@ fn write_bundle_readme(output_dir: text) -> text:
     lines = lines.push("- `manifest.sdn` — machine-readable lane manifest with provenance")
     lines = lines.push("- `board_linux_boot_products.sdn` — per-arch boot products manifest; per-arch boot products manifest: `board_linux_boot_products.sdn`")
     lines = lines.push("- `riscv_product.byl` — generated product proof-model surface")
+    lines = lines.push("- `synth/rv32_synth.sdn`, `synth/rv64_synth.sdn` — synthesis report templates for budget evidence")
     lines = lines.push("- `rv32/rtl/` — generated RV32GC Linux lane RTL plus emitted runner testbenches")
     lines = lines.push("- `rv64/rtl/` — generated RV64GC Linux lane RTL plus emitted runner testbenches")
     lines = lines.push("")
@@ -785,7 +816,7 @@ fn generated_rvfi_core_vhdl(entity_name: text, source_name: text, lane: text, bi
     val source_signal = if lane == "rv32": "Rv32Instruction.opcode" else: "Rv64Instruction.opcode"
     val high = if bits == "32": "31" else: "63"
     val mask_high = if bits == "32": "3" else: "7"
-    "-- generated-from: {source_name}\n-- proof-lane: generated_{lane}_linux shell=none\n-- readiness: contract linux-boot-validated=false formal-rvfi-ready=true\n-- source-map: {source_signal} => imem_rdata(6 downto 0)\nlibrary ieee;\nuse ieee.std_logic_1164.all;\nentity {entity_name} is\n  port (\n    clk : in std_logic;\n    rst : in std_logic;\n    rvfi_valid : out std_logic := '0';\n    rvfi_order : out std_logic_vector(63 downto 0) := (others => '0');\n    rvfi_insn : out std_logic_vector(31 downto 0) := (others => '0');\n    rvfi_trap : out std_logic := '0';\n    rvfi_rs1_addr : out std_logic_vector(4 downto 0) := (others => '0');\n    rvfi_rs2_addr : out std_logic_vector(4 downto 0) := (others => '0');\n    rvfi_rs1_rdata : out std_logic_vector({high} downto 0) := (others => '0');\n    rvfi_rs2_rdata : out std_logic_vector({high} downto 0) := (others => '0');\n    rvfi_rd_addr : out std_logic_vector(4 downto 0) := (others => '0');\n    rvfi_rd_wdata : out std_logic_vector({high} downto 0) := (others => '0');\n    rvfi_pc_rdata : out std_logic_vector({high} downto 0) := (others => '0');\n    rvfi_pc_wdata : out std_logic_vector({high} downto 0) := (others => '0');\n    rvfi_mem_addr : out std_logic_vector({high} downto 0) := (others => '0');\n    rvfi_mem_rmask : out std_logic_vector({mask_high} downto 0) := (others => '0');\n    rvfi_mem_wmask : out std_logic_vector({mask_high} downto 0) := (others => '0');\n    rvfi_mem_rdata : out std_logic_vector({high} downto 0) := (others => '0');\n    rvfi_mem_wdata : out std_logic_vector({high} downto 0) := (others => '0')\n  );\nend entity {entity_name};\narchitecture rtl of {entity_name} is\nbegin\nend architecture rtl;\n"
+    "-- generated-from: {source_name}\n-- proof-lane: generated_{lane}_linux shell=none\n-- readiness: contract linux-boot-validated=false formal-rvfi-ready=true\n-- source-map: {source_signal} => imem_rdata(6 downto 0)\nlibrary ieee;\nuse ieee.std_logic_1164.all;\nentity {entity_name} is\n  port (\n    clk : in std_logic;\n    rst : in std_logic;\n    rvfi_valid : out std_logic := '0';\n    rvfi_order : out std_logic_vector(63 downto 0) := (others => '0');\n    rvfi_insn : out std_logic_vector(31 downto 0) := (others => '0');\n    rvfi_trap : out std_logic := '0';\n    rvfi_rs1_addr : out std_logic_vector(4 downto 0) := (others => '0');\n    rvfi_rs2_addr : out std_logic_vector(4 downto 0) := (others => '0');\n    rvfi_rs1_rdata : out std_logic_vector({high} downto 0) := (others => '0');\n    rvfi_rs2_rdata : out std_logic_vector({high} downto 0) := (others => '0');\n    rvfi_rd_addr : out std_logic_vector(4 downto 0) := (others => '0');\n    rvfi_rd_wdata : out std_logic_vector({high} downto 0) := (others => '0');\n    rvfi_pc_rdata : out std_logic_vector({high} downto 0) := (others => '0');\n    rvfi_pc_wdata : out std_logic_vector({high} downto 0) := (others => '0');\n    rvfi_mem_addr : out std_logic_vector({high} downto 0) := (others => '0');\n    rvfi_mem_rmask : out std_logic_vector({mask_high} downto 0) := (others => '0');\n    rvfi_mem_wmask : out std_logic_vector({mask_high} downto 0) := (others => '0');\n    rvfi_mem_rdata : out std_logic_vector({high} downto 0) := (others => '0');\n    rvfi_mem_wdata : out std_logic_vector({high} downto 0) := (others => '0');\n    semi_trigger : out std_logic := '0';\n    semi_op : out std_logic_vector(31 downto 0) := (others => '0');\n    semi_param : out std_logic_vector({high} downto 0) := (others => '0')\n  );\nend entity {entity_name};\narchitecture rtl of {entity_name} is\nbegin\nend architecture rtl;\n"
 
 fn rv32_wrapper_vhdl() -> text:
     "library ieee;\nuse ieee.std_logic_1164.all;\nuse work.simple_rv32gc_core_pkg.all;\nentity rv32i_generated_wrapper is\n  port (clk : in std_logic; rst : in std_logic);\nend entity rv32i_generated_wrapper;\narchitecture rtl of rv32i_generated_wrapper is\nbegin\n  u_core : entity work.simple_rv32gc_core port map(clk => clk, rst => rst);\nend architecture rtl;\n"
@@ -813,12 +844,13 @@ fn sidecar_json(output_dir: text, lane: text, product: RiscvFpgaProductProfile) 
     val formal_status = "rvfi-ready"
     val formal_reason = "rvfi-port-manifest-present-proof-not-run"
     val observed_rvfi_ports = 17
-    val runner_testbenches = if lane == "rv32": "[{\"path\":\"{output_dir}/rv32/rtl/tb_generated_rv32_linux_handoff.vhd\", \"passMarker\":\"GENERATED_RV32_LINUX_HANDOFF: PASS\"}, {\"path\":\"{output_dir}/rv32/rtl/tb_generated_rv32_boot_info_real_dtb.vhd\", \"passMarker\":\"GENERATED_RV32_BOOT_INFO_REAL_DTB: PASS\"}]" else: "[{\"path\":\"{output_dir}/rv64/rtl/tb_generated_rv64_boot_info_dtb.vhd\", \"passMarker\":\"GENERATED_RV64_BOOT_INFO_DTB: PASS\"}, {\"path\":\"{output_dir}/rv64/rtl/tb_generated_rv64_fw_jump.vhd\", \"passMarker\":\"GENERATED_RV64_FW_JUMP: PASS\"}]"
+    val runner_testbenches = if lane == "rv32": "[{\"path\":\"{output_dir}/rv32/rtl/tb_generated_rv32_linux_handoff.vhd\", \"passMarker\":\"GENERATED_RV32_LINUX_HANDOFF: PASS\"}, {\"path\":\"{output_dir}/rv32/rtl/tb_generated_rv32_boot_info_real_dtb.vhd\", \"passMarker\":\"GENERATED_RV32_BOOT_INFO_REAL_DTB: PASS\"}]" else: "[{\"path\":\"{output_dir}/rv64/rtl/tb_generated_rv64_boot_info_dtb.vhd\", \"passMarker\":\"GENERATED_RV64_BOOT_INFO_DTB: PASS\"}, {\"path\":\"{output_dir}/rv64/rtl/tb_generated_rv64_fw_jump.vhd\", \"passMarker\":\"GENERATED_RV64_FW_JUMP: PASS\"}, {\"path\":\"{output_dir}/rv64/rtl/tb_generated_rv64_boot_info_real_dtb.vhd\", \"passMarker\":\"GENERATED_RV64_BOOT_INFO_REAL_DTB: PASS\"}, {\"path\":\"{output_dir}/rv64/rtl/tb_generated_rv64_sv39.vhd\", \"passMarker\":\"GENERATED_RV64_SV39: PASS\"}, {\"path\":\"{output_dir}/rv64/rtl/tb_generated_rv64_sv39_fault.vhd\", \"passMarker\":\"GENERATED_RV64_SV39_FAULT: PASS\"}]"
     val source_signal = if lane == "rv32": "Rv32Instruction.opcode" else: "Rv64Instruction.opcode"
     val report_markers = if lane == "rv32": "[\"PASS_WORD:\", \"A0_LOW32:\", \"A1_LOW32:\", \"UART_BYTES_LOW32:\", \"DTB_PROBE_SEEN:\", \"FINAL_PC_HEX32:\", \"HALT_SEEN:\", \"TRAP_SEEN:\"]" else: "[\"PASS_WORD:\", \"A0_LOW32:\", \"A1_LOW32:\", \"UART_BYTES_LOW32:\", \"PC_LOW32:\", \"DTB_PROBE_SEEN:\", \"TRAP_EDGE_PC_HEX32\", \"HALT_EDGE_PC_HEX32\", \"HEARTBEAT_PC_HEX32\", \"PROGRESS_PC_HEX32\", \"CHECK_PRIV_MODE_OK:\", \"TRAP_CAUSE_WORD:\", \"TRAP_TVAL_WORD:\", \"CAUSE_WORD:\", \"TVAL_WORD:\"]"
-    val runners = if lane == "rv32": "{\"tb_generated_rv32_linux_handoff.vhd\":\"GENERATED_RV32_LINUX_HANDOFF: PASS\", \"tb_generated_rv32_boot_info_real_dtb.vhd\":\"GENERATED_RV32_BOOT_INFO_REAL_DTB: PASS\"}" else: "{\"tb_generated_rv64_linux_handoff.vhd\":\"GENERATED_RV64_LINUX_HANDOFF: PASS\", \"tb_generated_rv64_boot_banner.vhd\":\"GENERATED_RV64_BOOT_BANNER: PASS\", \"tb_generated_rv64_boot_info_dtb.vhd\":\"GENERATED_RV64_BOOT_INFO_DTB: PASS\", \"tb_generated_rv64_fw_jump.vhd\":\"GENERATED_RV64_FW_JUMP: PASS\", \"tb_generated_rv64_boot_info_real_dtb.vhd\":\"GENERATED_RV64_BOOT_INFO_REAL_DTB: PASS\", \"tb_generated_rv64_sv39.vhd\":\"GENERATED_RV64_SV39: PASS\", \"tb_generated_rv64_sv39_fault.vhd\":\"GENERATED_RV64_SV39_FAULT: PASS\"}"
+    val runners = if lane == "rv32": "{\"tb_generated_rv32_linux_handoff.vhd\":\"GENERATED_RV32_LINUX_HANDOFF: PASS\", \"tb_generated_rv32_boot_info_real_dtb.vhd\":\"GENERATED_RV32_BOOT_INFO_REAL_DTB: PASS\"}" else: "{\"tb_generated_rv64_boot_info_dtb.vhd\":\"GENERATED_RV64_BOOT_INFO_DTB: PASS\", \"tb_generated_rv64_fw_jump.vhd\":\"GENERATED_RV64_FW_JUMP: PASS\", \"tb_generated_rv64_boot_info_real_dtb.vhd\":\"GENERATED_RV64_BOOT_INFO_REAL_DTB: PASS\", \"tb_generated_rv64_sv39.vhd\":\"GENERATED_RV64_SV39: PASS\", \"tb_generated_rv64_sv39_fault.vhd\":\"GENERATED_RV64_SV39_FAULT: PASS\"}"
     val core = "simple_{lane}gc_core"
-    "{\"schemaVersion\": \"riscv_rtl_debuggability_lint/v1\", \"laneId\": \"{lane}\", \"proofLane\": \"generated_{lane}_linux\", \"generatedFrom\": \"{core}.spl\", \"topModule\": \"{core}\", \"rtlDir\": \"{output_dir}/{lane}/rtl\", \"shellSummary\": \"generated_{lane}_linux shell=none\", \"readiness\": \"contract\", \"linuxBootValidated\": false, \"platform\": \"qemu_virt_{lane}\", \"scope\": \"repo-native RV{xlen}GC generated-core Linux lane\", \"linuxPolicy\": \"repo-native-{lane}-linux\", \"productLevel\": \"{product.product_level}\", \"configurationProfile\": \"{product.configuration_profile}\", \"authoritative\": true, \"provenance\": {\"authoritativeRtl\": \"simple-compiler-generated\", \"authoritativeFiles\": [\"{output_dir}/{lane}/rtl/{core}.spl\", \"{output_dir}/{lane}/rtl/{core}_pkg.vhd\", \"{output_dir}/{lane}/rtl/{core}.vhd\", \"{output_dir}/{lane}/rtl/{core}.debug.json\"], \"auxiliaryVhdl\": \"emitted-text-vhdl\", \"runnerTestbenches\": \"emitted-text-vhdl\", \"pureSimpleAuthoritativeRtl\": true}, \"abi\": \"{abi}\", \"mmu\": \"{mmu}\", \"rtlBudget\": {\"maxLuts\": {luts}, \"targetMhz\": {mhz}}, \"formal\": {\"flow\": \"rvfi+sby\", \"gate\": \"rvfi_port_manifest\", \"status\": \"{formal_status}\", \"reason\": \"{formal_reason}\", \"rvfiPortCount\": 17, \"observedRvfiPortCount\": {observed_rvfi_ports}, \"harness\": \"{output_dir}/{lane}/rtl/{core}_formal.vhd\", \"sby\": \"{output_dir}/{lane}/rtl/{core}.sby\", \"manifest\": \"{output_dir}/{lane}/rtl/{core}_formal.sdn\"}, \"firmwareMode\": \"fw_jump\", \"acceptanceMarkers\": [\"OpenSBI\", \"Linux version\", \"OF: fdt\", \"Freeing unused kernel memory\", \"init started\"], \"reportMarkers\": {report_markers}, \"runnerSuccessMarkers\": {runners}, \"runnerTestbenches\": {runner_testbenches}, \"sourceMap\": [{\"signal\":\"{source_signal}\",\"slice\":\"imem_rdata(6 downto 0)\"}], \"debugOutputs\": [\"semi_trigger\", \"semi_op\", \"semi_param\"], \"shellServices\": {\"semihost\": false, \"mailbox\": false}}\n"
+    val observability = "{\"fetch\": true, \"trap\": true, \"halt\": true, \"memoryAccess\": true, \"registerProbes\": true, \"debugProbes\": true, \"proofFailureReports\": true}"
+    "{\"schemaVersion\": \"riscv_rtl_debuggability_lint/v1\", \"laneId\": \"{lane}\", \"proofLane\": \"generated_{lane}_linux\", \"xlen\": \"{lane}\", \"generatedFrom\": \"{core}.spl\", \"topModule\": \"{core}\", \"rtlDir\": \"{output_dir}/{lane}/rtl\", \"shellSummary\": \"generated_{lane}_linux shell=none\", \"readiness\": \"contract\", \"linuxBootValidated\": false, \"platform\": \"qemu_virt_{lane}\", \"scope\": \"repo-native RV{xlen}GC generated-core Linux lane\", \"linuxPolicy\": \"repo-native-{lane}-linux\", \"productLevel\": \"{product.product_level}\", \"configurationProfile\": \"{product.configuration_profile}\", \"authoritative\": true, \"provenance\": {\"authoritativeRtl\": \"simple-compiler-generated\", \"authoritativeFiles\": [\"{output_dir}/{lane}/rtl/{core}.spl\", \"{output_dir}/{lane}/rtl/{core}_pkg.vhd\", \"{output_dir}/{lane}/rtl/{core}.vhd\", \"{output_dir}/{lane}/rtl/{core}.debug.json\"], \"auxiliaryVhdl\": \"emitted-text-vhdl\", \"runnerTestbenches\": \"emitted-text-vhdl\", \"pureSimpleAuthoritativeRtl\": true}, \"abi\": \"{abi}\", \"mmu\": \"{mmu}\", \"rtlBudget\": {\"maxLuts\": {luts}, \"targetMhz\": {mhz}}, \"formal\": {\"flow\": \"rvfi+sby\", \"gate\": \"rvfi_port_manifest\", \"status\": \"{formal_status}\", \"reason\": \"{formal_reason}\", \"rvfiPortCount\": 17, \"observedRvfiPortCount\": {observed_rvfi_ports}, \"harness\": \"{output_dir}/{lane}/rtl/{core}_formal.vhd\", \"sby\": \"{output_dir}/{lane}/rtl/{core}.sby\", \"manifest\": \"{output_dir}/{lane}/rtl/{core}_formal.sdn\"}, \"firmwareMode\": \"fw_jump\", \"acceptanceMarkers\": [\"OpenSBI\", \"Linux version\", \"OF: fdt\", \"Freeing unused kernel memory\", \"init started\"], \"observability\": {observability}, \"reportMarkers\": {report_markers}, \"runnerSuccessMarkers\": {runners}, \"runnerTestbenches\": {runner_testbenches}, \"sourceMap\": [{\"signal\":\"{source_signal}\",\"slice\":\"imem_rdata(6 downto 0)\"}], \"debugOutputs\": [\"semi_trigger\", \"semi_op\", \"semi_param\"], \"shellServices\": {\"semihost\": false, \"mailbox\": false}}\n"
 
 fn write_generated_core_lane(output_dir: text, lane: text, rtl_dir: text, product: RiscvFpgaProductProfile) -> [text]:
     val core = "simple_{lane}gc_core"
@@ -909,13 +941,14 @@ pub fn generate_default_riscv_fpga_rtl_bundle(output_dir: text) -> Result<RtlBun
     val manifest_path = write_manifest_file(output_dir, manifest)
     val products_path = write_boot_products_file(output_dir, manifest)
     val byl_path = write_product_byl_file(output_dir, manifest)
+    val synth_templates = write_synth_report_templates(output_dir, manifest)
     val readme_path = write_bundle_readme(output_dir)
     Ok(RtlBundle(
         output_dir: output_dir,
         manifest_path: manifest_path,
         board_linux_boot_products_manifest_path: products_path,
         bundle_readme_path: readme_path,
-        generated_files: generated_files.push(manifest_path).push(products_path).push(byl_path).push(readme_path)
+        generated_files: (generated_files + synth_templates).push(manifest_path).push(products_path).push(byl_path).push(readme_path)
     ))
 
 pub fn generate_default_riscv_fpga_rtl_bundle_with_profile(output_dir: text, configuration_profile: text) -> Result<RtlBundle, text>:
@@ -932,13 +965,14 @@ pub fn generate_default_riscv_fpga_rtl_bundle_with_profile(output_dir: text, con
     val manifest_path = write_manifest_file(output_dir, manifest)
     val products_path = write_boot_products_file(output_dir, manifest)
     val byl_path = write_product_byl_file(output_dir, manifest)
+    val synth_templates = write_synth_report_templates(output_dir, manifest)
     val readme_path = write_bundle_readme(output_dir)
     Ok(RtlBundle(
         output_dir: output_dir,
         manifest_path: manifest_path,
         board_linux_boot_products_manifest_path: products_path,
         bundle_readme_path: readme_path,
-        generated_files: generated_files.push(manifest_path).push(products_path).push(byl_path).push(readme_path)
+        generated_files: (generated_files + synth_templates).push(manifest_path).push(products_path).push(byl_path).push(readme_path)
     ))
 
 # @tag(output_dir=output_dir, board_id=board_id)
@@ -961,13 +995,14 @@ pub fn generate_riscv_fpga_rtl_bundle_for_board(output_dir: text, board_id: text
     val manifest_path = write_manifest_file(output_dir, manifest)
     val products_path = write_boot_products_file(output_dir, manifest)
     val byl_path = write_product_byl_file(output_dir, manifest)
+    val synth_templates = write_synth_report_templates(output_dir, manifest)
     val readme_path = write_bundle_readme(output_dir)
     Ok(RtlBundle(
         output_dir: output_dir,
         manifest_path: manifest_path,
         board_linux_boot_products_manifest_path: products_path,
         bundle_readme_path: readme_path,
-        generated_files: generated_files.push(manifest_path).push(products_path).push(byl_path).push(readme_path)
+        generated_files: (generated_files + synth_templates).push(manifest_path).push(products_path).push(byl_path).push(readme_path)
     ))
 
 pub fn generate_riscv_fpga_rtl_bundle_for_board_with_profile(output_dir: text, board_id: text, configuration_profile: text) -> Result<RtlBundle, text>:
@@ -989,13 +1024,14 @@ pub fn generate_riscv_fpga_rtl_bundle_for_board_with_profile(output_dir: text, b
     val manifest_path = write_manifest_file(output_dir, manifest)
     val products_path = write_boot_products_file(output_dir, manifest)
     val byl_path = write_product_byl_file(output_dir, manifest)
+    val synth_templates = write_synth_report_templates(output_dir, manifest)
     val readme_path = write_bundle_readme(output_dir)
     Ok(RtlBundle(
         output_dir: output_dir,
         manifest_path: manifest_path,
         board_linux_boot_products_manifest_path: products_path,
         bundle_readme_path: readme_path,
-        generated_files: generated_files.push(manifest_path).push(products_path).push(byl_path).push(readme_path)
+        generated_files: (generated_files + synth_templates).push(manifest_path).push(products_path).push(byl_path).push(readme_path)
     ))
 
 pub fn generate_riscv_fpga_rtl_bundle_configured(output_dir: text, board_id: text, product_level: text, configuration_profile: text, rv32_luts: i64, rv64_luts: i64, rv32_mhz: i64, rv64_mhz: i64) -> Result<RtlBundle, text>:
@@ -1017,13 +1053,14 @@ pub fn generate_riscv_fpga_rtl_bundle_configured(output_dir: text, board_id: tex
     val manifest_path = write_manifest_file(output_dir, manifest)
     val products_path = write_boot_products_file(output_dir, manifest)
     val byl_path = write_product_byl_file(output_dir, manifest)
+    val synth_templates = write_synth_report_templates(output_dir, manifest)
     val readme_path = write_bundle_readme(output_dir)
     Ok(RtlBundle(
         output_dir: output_dir,
         manifest_path: manifest_path,
         board_linux_boot_products_manifest_path: products_path,
         bundle_readme_path: readme_path,
-        generated_files: generated_files.push(manifest_path).push(products_path).push(byl_path).push(readme_path)
+        generated_files: (generated_files + synth_templates).push(manifest_path).push(products_path).push(byl_path).push(readme_path)
     ))
 
 pub fn read_generated_riscv_fpga_rtl_file(path: text) -> text:
