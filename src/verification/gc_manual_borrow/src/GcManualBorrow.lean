@@ -46,6 +46,11 @@ theorem borrow_live_records_pin (s : GcState) (id : Nat)
   id ∈ (borrow s id).borrowed := by
   simp [borrow, hlive]
 
+theorem borrow_live_then_collect_noop (s : GcState) (id : Nat)
+    (hlive : id ∈ s.live) :
+  collectSafe (borrow s id) id = borrow s id := by
+  exact collect_borrowed_noop (borrow s id) id (borrow_live_records_pin s id hlive)
+
 theorem borrow_preserves (s : GcState) (id : Nat) (hs : safe s) :
   safe (borrow s id) := by
   intro x hx
