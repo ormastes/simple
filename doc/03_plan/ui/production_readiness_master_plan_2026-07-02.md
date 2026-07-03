@@ -236,6 +236,26 @@ is Xvfb-only by default; `check-gui-low-res-readability.shs` is offscreen
   `cranelift_f32_trig_wrapper_codegen`, `interp_for_over_list_generic`
   (all 2026-07-02).
 
+### Recovery session 2 status (2026-07-03 morning)
+
+Session b9f6bda6 crashed 04:30 mid-turn (overnight stage4 + final sweep died
+with it). Recovered facts:
+
+- The "silent no-op" it was investigating at crash time was a false alarm:
+  `time setsid cmd` measures only the setsid fork-parent (~0.02 s); the
+  detached child completes and logs normally. No runner bug.
+- Final sweep was killed at 7/10 — the 7 that ran all passed
+  (low-res readability, vulkan window, draw-IR pipeline, showcase events,
+  browser interaction, cross-app glyph, game2d replay). breakout, rollball,
+  tauri-proof re-verification pending on the freshly deployed binary.
+- Stage4 redeploy restarted 2026-07-03 09:03 via the bug workaround
+  (direct `native_build_main.spl` run, bypassing the zombie-prone wrapper).
+- Parallel lanes running: P1 native-build zombie/hang root fix (sonnet,
+  worktree); G2.5 glyph unification — Engine2D adopts browser table +
+  5*scale advance, browser baselines stay byte-identical (opus, worktree).
+- Leftover working-copy from the crash (semantic fallback probe spec +
+  generated spec docs) committed and pushed (385d5c330f).
+
 ### Gate → evidence ledger (G6.4, as of 2026-07-02 evening)
 
 | Gate | Status | Reproducer | Evidence |
