@@ -78,3 +78,14 @@
 - REQ-038: A dashboard generator shall render a self-contained HTML dashboard
   (inline CSS, no external assets, HTML-escaped values) with KPI tiles and
   per-lane status cards, verified by an sspec system test.
+- REQ-039: The kernel shall persist the event log to a durable file with a
+  content checksum, and load shall fail closed (empty log) on any header, count,
+  or checksum mismatch.
+- REQ-040: Ledger balances shall support materialized snapshots such that
+  snapshot-plus-tail equals a full projection replay.
+- REQ-041: Idempotency keys shall be checkable through a bucketed key index
+  rather than full-list scans.
+- REQ-042: Multi-tenant writes shall drain through a per-tenant FIFO commit
+  queue that commits atomically and preserves cross-tenant ordering guarantees.
+- REQ-043: Roles and ordered approval chains shall be registry data
+  (RoleDef/ApprovalChain), so org policy changes require no framework edits.

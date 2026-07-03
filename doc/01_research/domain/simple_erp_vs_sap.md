@@ -34,11 +34,10 @@ incumbents *at this scope*, and which gaps we close vs. defer.
 
 ## Where SAP (and Odoo/ERPNext) remain ahead — deferred, not hidden
 
-- Localization/compliance (tax regimes, e-invoicing, GAAP/IFRS close), HR,
-  manufacturing (MRP), warehouse logistics, BW-scale analytics, ecosystem/ISVs.
-- Live durable store (simple_db integration is the known blocker), live
-  identity/secret backends, deployed backup service.
-- Concurrency/scale hardening beyond in-memory example scope.
+- Live deployment concerns (HA/DR, monitoring, upgrades) and the
+  compliance/localization content moat (tax regimes, e-invoicing, GAAP/IFRS
+  close, HR, MRP, warehouse logistics, BW-scale analytics, ecosystem/ISVs)
+  remain SAP territory.
 
 ## Gap-closing work in this pass
 
@@ -57,3 +56,15 @@ incumbents *at this scope*, and which gaps we close vs. defer.
 4. **Look** — `src/web/dashboard.spl` renders a self-contained HTML dashboard
    (KPI tiles, lane cards, status colors) written in pure Simple; system test
    asserts on the generated markup.
+
+## Big-business mechanics closed in the follow-up pass
+
+| Aspect | Implementation |
+|--------|---|
+| Durability | file-persisted event log, checksum, fail-closed load — REQ-039 |
+| Volume | materialized balance snapshots + bucketed key index — REQ-040/041 |
+| Concurrency | per-tenant FIFO commit queue, atomic drain, single-writer property — REQ-042 |
+| Org complexity | roles + ordered approval chains as registry data — REQ-043 |
+| Proof | bigbiz_demo.spl entrypoint + simple_erp_bigbiz_spec.spl system test |
+
+These are example-scope mechanics proving the architecture, not a deployed HA cluster.

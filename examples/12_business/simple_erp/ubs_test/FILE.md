@@ -20,3 +20,8 @@ project root with the seed driver set).
 - report_spec.spl
 - dashboard_spec.spl
 - registry_spec.spl
+- durable_log_spec.spl
+- snapshot_spec.spl
+- key_index_spec.spl
+- commit_queue_spec.spl
+- org_spec.spl
