@@ -365,6 +365,25 @@ theorem singleton_write_wrong_location_not_safe
       (MemAccess.Write other) = false := by
   cases cap <;> simp [accessIsSafe, getActiveRefs, allowsAccess, hne]
 
+theorem singleton_access_wrong_location_not_safe
+    (baseType : String) (loc other : Nat) (cap : RefCapability)
+    (hne : loc ≠ other) :
+    accessIsSafe
+      { activeRefs :=
+          [(loc,
+            [{ location := loc,
+               refType := { baseType := baseType, capability := cap } }])] }
+      (MemAccess.Read other) = false ∧
+    accessIsSafe
+      { activeRefs :=
+          [(loc,
+            [{ location := loc,
+               refType := { baseType := baseType, capability := cap } }])] }
+      (MemAccess.Write other) = false := by
+  constructor
+  · exact singleton_read_wrong_location_not_safe baseType loc other cap hne
+  · exact singleton_write_wrong_location_not_safe baseType loc other cap hne
+
 theorem empty_env_wellformed :
   wellFormed { activeRefs := [] } := by
   intro loc refs h
