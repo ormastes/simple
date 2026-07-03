@@ -145,6 +145,20 @@ parsed as size), not a general WM feature area.
   arithmetic directly in the loop body (no helper calls, no `y*width+x`
   multiply — a running flat index instead). See `_measure()` in the driver.
   Any future per-pixel analysis added to this driver must stay inlined.
+- **WM theme shares the GUI (CSS) theme (2026-07-04)**: `SimpleTheme` (the
+  widget CSS token source) projects onto `WmChromeColors` via
+  `apply_simple_theme_to_wm_chrome(theme)` /
+  `wm_chrome_colors_from_simple_theme` (common/ui/simple_theme.spl), built
+  on the token-string mapper `wm_chrome_colors_from_gui_tokens`
+  (common/ui/wm_chrome_theme.spl). Token map: --ui-bg→desktop/compositor
+  bg, --ui-fg→text, --ui-accent→accent+focused titlebar, --app-surface→
+  taskbar/command lane/window bodies, --app-surface-hover→unfocused
+  titlebar, --ui-error→close button. Per-field fallback to the
+  byte-identical defaults keeps this gate's pixel expectations valid until
+  a theme is actually applied. Contract: wm_chrome_theme_spec "WM chrome
+  shares the GUI (CSS) theme" (10/10). The spec pins the direct-rect
+  fallback via `wm_scene_direct_rect_pixels` (its own entry point) because
+  whether render_scene_to_backend reaches that lane is environment-dependent.
 - Metric definitions (`non_bg` / `bright` / `accent` via channel-spread,
   background literal `r=15,g=23,b=42` = `0xFF0F172A` /
   `wm_chrome_theme().compositor_bg`) intentionally mirror
