@@ -20,18 +20,11 @@ set -eu
 # because the X display is virtual — deterministic and acceptable; the exact
 # device string is recorded in the renderer log.
 #
-# LIMITATION (recorded, not faked): VulkanBackend.draw_text falls back to a
-# CPU glyph raster that reads back AND re-uploads the WHOLE framebuffer per
-# call (see TODO in backend_vulkan_helpers.spl _gpu_draw_text_fallback). Because
-# the showcase interleaves shape draws (which mark the buffer dirty) with ~40
-# text labels, render cost is O(canvas_area * text_calls). Under llvmpipe that
-# is ~100s at 200x150 and blows up to minutes above ~256px. This is a
-# pre-existing VulkanBackend perf defect, NOT a correctness issue (pixels are
-# bit-exact vs CPU — see check-vulkan-engine2d-readback.shs). The gate therefore
-# renders at a capped resolution (default 200x150) that shows the top-of-frame
-# showcase widgets — menubar, title, the Button widget, and statusbar — and
-# proves the Vulkan device rendered them. Raise SIMPLE_GUI_VULKAN_W/H once the
-# glyph fast-path lands.
+# LIMITATION (recorded, not faked): the full 18-widget showcase is still too
+# slow under the Vulkan text fallback on llvmpipe at this gate size. This G1.1
+# wrapper asks the app for its compact top-of-frame showcase mode: menubar,
+# title, Button widget, and statusbar. Wider widget coverage remains in the
+# G1.2/G1.3/G1.5 specs.
 #
 # Env:
 #   SIMPLE_BIN                     compiler binary (default: bin/simple; use the
@@ -121,6 +114,7 @@ trap cleanup EXIT INT TERM
     SIMPLE_GUI=1 \
     SIMPLE_GUI_BACKEND=vulkan \
     SIMPLE_TIMEOUT_SECONDS="$APP_TIMEOUT" \
+    SHOWCASE_G1_1_COMPACT=1 \
     SHOWCASE_PPM="$OFFSCREEN_PPM" \
     SHOWCASE_W="$RENDER_W" \
     SHOWCASE_H="$RENDER_H" \
@@ -144,12 +138,24 @@ trap cleanup EXIT INT TERM
     # winit window, so the Vulkan-rendered frame is captured even if winit is
     # unavailable in this binary. Give the present loop a moment, then try to
     # capture the live X window from the PRIVATE Xvfb root.
-    sleep 4
-    if xwd -display "$DISPLAY" -root -out "$WORK_DIR/root.xwd" 2>/dev/null; then
-        convert "$WORK_DIR/root.xwd" "$WIN_PNG" 2>/dev/null || true
-        convert "$WORK_DIR/root.xwd" "$WIN_PPM" 2>/dev/null || true
-        rm -f "$WORK_DIR/root.xwd"
-    fi
+    capture_attempt=1
+    last_capture_attempt=0
+    win_colors=0
+    while [ "$capture_attempt" -le 10 ]; do
+        last_capture_attempt=$capture_attempt
+        sleep 2
+        if xwd -display "$DISPLAY" -root -out "$WORK_DIR/root.xwd" 2>/dev/null; then
+            convert "$WORK_DIR/root.xwd" "$WIN_PNG" 2>/dev/null || true
+            convert "$WORK_DIR/root.xwd" "$WIN_PPM" 2>/dev/null || true
+            rm -f "$WORK_DIR/root.xwd"
+            if [ -f "$WIN_PPM" ]; then
+                win_colors=$(convert "$WIN_PPM" -format "%k" info: 2>/dev/null || echo 0)
+                [ "${win_colors:-0}" -ge 3 ] && break
+            fi
+        fi
+        capture_attempt=$((capture_attempt + 1))
+    done
+    echo "window_capture_attempts=$last_capture_attempt"
 
     cleanup; app_pid=""; vfb_pid=""
 
@@ -163,10 +169,6 @@ trap cleanup EXIT INT TERM
     echo "offscreen_ppm_bytes=$off_bytes"
     echo "renderer_log=$RENDER_LOG"
 
-    win_colors=0
-    if [ -f "$WIN_PPM" ]; then
-        win_colors=$(convert "$WIN_PPM" -format "%k" info: 2>/dev/null || echo 0)
-    fi
     echo "window_distinct_colors=$win_colors"
 
     # Live-window capture status (recorded honestly; see LIMITATION at top).

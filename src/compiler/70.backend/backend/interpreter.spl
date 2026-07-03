@@ -211,7 +211,12 @@ impl InterpreterBackendImpl:
                     arg_values = arg_values.push(v)
                 self.call_function(fn_value, arg_values, ctx, expr.span)
 
-            case MethodCall(receiver, method_name, args, resolution):
+            # Qualified pattern: bare `MethodCall` collides with a global class of
+            # the same name; the seed's unqualified-pattern heuristic would then
+            # extract the payload as a struct FieldAccess at offset 0 (garbage)
+            # instead of rt_enum_payload (stage4 iteration 15). Same for the
+            # Block/Expr arms below.
+            case HirExprKind.MethodCall(receiver, method_name, args, resolution):
                 match resolution:
                     case StaticMethod(_, method_id):
                         # Static method: ClassName.method(args) - no receiver needed
@@ -282,7 +287,7 @@ impl InterpreterBackendImpl:
                     captures: captures
                 )))
 
-            case Block(block):
+            case HirExprKind.Block(block):
                 self.eval_block(block, ctx)
 
             case HostGpuLane(lane_code, payload_size, marker, body):
@@ -299,11 +304,11 @@ impl InterpreterBackendImpl:
 
     fn exec_stmt(stmt: HirStmt, ctx: EvalContext) -> Result<(), BackendError>:
         match stmt.kind:
-            case Expr(expr):
+            case HirStmtKind.Expr(expr):
                 self.eval_expr(expr, ctx)?
                 Ok(())
 
-            case Let(symbol, _, init):
+            case HirStmtKind.Let(symbol, _, init):
                 val value = self.eval_expr(init, ctx)?
                 ctx.env.define(symbol, value)
                 Ok(())
@@ -324,7 +329,7 @@ impl InterpreterBackendImpl:
                     case _:
                         Err(BackendError.not_implemented("assignment target not implemented"))
 
-            case Block(block):
+            case HirStmtKind.Block(block):
                 self.eval_block(block, ctx)?
                 Ok(())
 

@@ -165,16 +165,24 @@ impl MonomorphizationPass:
                 pass_do_nothing("block has no trailing value")
 
     me scan_stmt(stmt: HirStmt):
-        """Scan a statement for generic call sites."""
+        """Scan a statement for generic call sites.
+
+        Patterns MUST be qualified (HirStmtKind.Expr, not bare Expr): the seed's
+        unqualified-pattern heuristic (stmt_lowering.rs build_pattern_binding_stmts,
+        enum_name == "_") looks the variant name up as a TYPE, and `Expr`/`Block`
+        collide with the frontend AST structs of the same name — the payload is
+        then read as a struct FieldAccess at offset 0 (the enum header) instead of
+        rt_enum_payload, yielding a garbage pointer that SIGSEGVs in scan_expr
+        (stage4 -c/run chain, iteration 15)."""
         match stmt.kind:
-            case Expr(e):
+            case HirStmtKind.Expr(e):
                 self.scan_expr(e)
-            case Let(_, _, init):
+            case HirStmtKind.Let(_, _, init):
                 self.scan_expr(init)
-            case Assign(target, _, value):
+            case HirStmtKind.Assign(target, _, value):
                 self.scan_expr(target)
                 self.scan_expr(value)
-            case Block(b):
+            case HirStmtKind.Block(b):
                 self.scan_block(b)
 
     me scan_expr(expr: HirExpr):
@@ -195,8 +203,9 @@ impl MonomorphizationPass:
                 for arg in args:
                     self.scan_expr(arg.value)
 
-            # Method calls
-            case MethodCall(receiver, method, args, resolution):
+            # Method calls (qualified: bare MethodCall collides with the mock
+            # verification class of the same name — see scan_stmt docstring)
+            case HirExprKind.MethodCall(receiver, method, args, resolution):
                 self.scan_expr(receiver)
                 for arg in args:
                     self.scan_expr(arg.value)
@@ -216,7 +225,7 @@ impl MonomorphizationPass:
                     nil:
                         pass_do_nothing("if expression has no else block")
 
-            case MatchCase(scrutinee, arms):
+            case HirExprKind.MatchCase(scrutinee, arms):
                 self.scan_expr(scrutinee)
                 for arm in arms:
                     val typed_arm: HirMatchArm = arm
@@ -239,7 +248,7 @@ impl MonomorphizationPass:
             case Lambda(_, body, _):
                 self.scan_expr(body)
 
-            case Block(block):
+            case HirExprKind.Block(block):
                 self.scan_block(block)
 
             # Binary/Unary
