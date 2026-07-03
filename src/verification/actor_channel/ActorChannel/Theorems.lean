@@ -461,6 +461,17 @@ theorem recv_then_close_wakes_parked (ch : GreenChannel) (tid : TaskId)
     tid ∈ closed.woken_task_ids ∧ closed.channel.waiting_task_ids = [] := by
   simp [greenRecv, greenCloseDrain, hempty, hopen]
 
+/-- T6d1: Closing after recv parks a receiver wakes exactly the previous
+    waiters plus the newly parked receiver, with no waiter left behind. -/
+theorem recv_then_close_exact_woken_waiters (ch : GreenChannel) (tid : TaskId)
+    (hempty  : ch.queued_values = [])
+    (hopen   : ch.closed = false) :
+    let recv := greenRecv ch tid
+    let closed := greenCloseDrain recv.channel
+    closed.woken_task_ids = ch.waiting_task_ids ++ [tid] ∧
+    closed.channel.waiting_task_ids = [] := by
+  simp [greenRecv, greenCloseDrain, hempty, hopen]
+
 /-- T6e: Sending to a channel with a waiting receiver wakes the head waiter
     directly and does not grow the buffered queue. -/
 theorem send_to_waiter_wakes_without_buffer_growth
