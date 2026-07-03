@@ -91,6 +91,14 @@ theorem write_is_write (loc : LocationId) (tid : ThreadId) :
   MemoryOperation.isWrite (MemoryOperation.Write loc tid) = true := by
   rfl
 
+theorem lock_acquire_is_not_write (loc : LocationId) (tid : ThreadId) :
+  MemoryOperation.isWrite (MemoryOperation.LockAcquire loc tid) = false := by
+  rfl
+
+theorem lock_release_is_write (loc : LocationId) (tid : ThreadId) :
+  MemoryOperation.isWrite (MemoryOperation.LockRelease loc tid) = true := by
+  rfl
+
 theorem read_read_no_conflict (loc : LocationId) (tid1 tid2 : ThreadId) :
   ¬conflicts (MemoryOperation.Read loc tid1) (MemoryOperation.Read loc tid2) := by
   intro h
@@ -136,6 +144,30 @@ theorem lock_acquire_acquire_same_location_no_conflict
   ¬conflicts (MemoryOperation.LockAcquire loc tid1) (MemoryOperation.LockAcquire loc tid2) := by
   intro h
   simp [conflicts, MemoryOperation.locationId?, MemoryOperation.isWrite] at h
+
+theorem lock_acquire_release_different_location_no_conflict
+    (loc1 loc2 : LocationId) (tid1 tid2 : ThreadId)
+    (h : loc1 ≠ loc2) :
+  ¬conflicts (MemoryOperation.LockAcquire loc1 tid1) (MemoryOperation.LockRelease loc2 tid2) := by
+  intro hc
+  simp [conflicts, MemoryOperation.locationId?, MemoryOperation.isWrite] at hc
+  exact h hc
+
+theorem lock_release_acquire_different_location_no_conflict
+    (loc1 loc2 : LocationId) (tid1 tid2 : ThreadId)
+    (h : loc1 ≠ loc2) :
+  ¬conflicts (MemoryOperation.LockRelease loc1 tid1) (MemoryOperation.LockAcquire loc2 tid2) := by
+  intro hc
+  simp [conflicts, MemoryOperation.locationId?, MemoryOperation.isWrite] at hc
+  exact h hc
+
+theorem lock_release_release_different_location_no_conflict
+    (loc1 loc2 : LocationId) (tid1 tid2 : ThreadId)
+    (h : loc1 ≠ loc2) :
+  ¬conflicts (MemoryOperation.LockRelease loc1 tid1) (MemoryOperation.LockRelease loc2 tid2) := by
+  intro hc
+  simp [conflicts, MemoryOperation.locationId?, MemoryOperation.isWrite] at hc
+  exact h hc
 
 theorem hb_program_order (exec : Execution) (a : OperationId) (b : OperationId) :
   exec.programOrder a b → happensBefore exec a b := by
@@ -314,6 +346,36 @@ theorem drf_two_ops_synchronized
   · rcases ha with ⟨rfl, rfl⟩
     rcases hb with ⟨rfl, rfl⟩
     exact False.elim (hneq rfl)
+
+theorem drf_two_synchronized_writes_same_location
+    (id1 id2 : OperationId) (loc : LocationId) (tid1 tid2 : ThreadId)
+    (hneq_ids : id1 ≠ id2) :
+    dataRaceFree
+      { ops := [(id1, MemoryOperation.Write loc tid1), (id2, MemoryOperation.Write loc tid2)]
+      , programOrder := fun _ _ => False
+      , synchronizesWith := fun a b => a = id1 ∧ b = id2 } :=
+  drf_two_ops_synchronized id1 id2
+    (MemoryOperation.Write loc tid1) (MemoryOperation.Write loc tid2) hneq_ids
+
+theorem drf_two_synchronized_read_write_same_location
+    (id1 id2 : OperationId) (loc : LocationId) (tid1 tid2 : ThreadId)
+    (hneq_ids : id1 ≠ id2) :
+    dataRaceFree
+      { ops := [(id1, MemoryOperation.Read loc tid1), (id2, MemoryOperation.Write loc tid2)]
+      , programOrder := fun _ _ => False
+      , synchronizesWith := fun a b => a = id1 ∧ b = id2 } :=
+  drf_two_ops_synchronized id1 id2
+    (MemoryOperation.Read loc tid1) (MemoryOperation.Write loc tid2) hneq_ids
+
+theorem drf_two_synchronized_write_read_same_location
+    (id1 id2 : OperationId) (loc : LocationId) (tid1 tid2 : ThreadId)
+    (hneq_ids : id1 ≠ id2) :
+    dataRaceFree
+      { ops := [(id1, MemoryOperation.Write loc tid1), (id2, MemoryOperation.Read loc tid2)]
+      , programOrder := fun _ _ => False
+      , synchronizesWith := fun a b => a = id1 ∧ b = id2 } :=
+  drf_two_ops_synchronized id1 id2
+    (MemoryOperation.Write loc tid1) (MemoryOperation.Read loc tid2) hneq_ids
 
 theorem scDRF (exec : Execution) :
   dataRaceFree exec → ∃ (_ : SequentiallyConsistent exec), True := by

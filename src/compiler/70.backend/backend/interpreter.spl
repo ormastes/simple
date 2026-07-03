@@ -287,6 +287,21 @@ impl InterpreterBackendImpl:
                         val builtin_result = self.try_call_builtin(cname_t, arg_values)
                         if builtin_result.?:
                             return builtin_result.unwrap()
+                        # User-defined function fast-path keyed on the callee NAME.
+                        # The `Value.Function` payload channel loses its
+                        # FunctionValue on stage4 (env-hit yields f_nil=true, so
+                        # call_function's `f_t.name` nil-derefs — iteration 18/19).
+                        # Resolve the HirFunction straight from the module by name
+                        # (same robust idiom process_module uses for `main`) and
+                        # call it directly, bypassing the nil-payload Function value.
+                        var cf_named: HirFunction? = nil
+                        for cf_fn2_ in ctx.module.functions.values():
+                            val cf_f2: HirFunction = cf_fn2_
+                            if cf_f2.name == cname_t:
+                                cf_named = Some(cf_f2)
+                        if cf_named.?:
+                            itrace("[EE] Call user-fn fast-path name={cname_t}")
+                            return self.call_hir_function(cf_named.unwrap(), arg_values, ctx)
                     case _:
                         pass
                 val fn_value = self.eval_expr(call_callee_t, ctx)?

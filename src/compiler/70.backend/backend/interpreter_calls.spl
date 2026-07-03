@@ -116,12 +116,24 @@ impl InterpreterBackendImpl:
                 if builtin_result.?:
                     return builtin_result.unwrap()
 
-                # Look up function in module
-                if not ctx.module.functions.has(f_t.symbol):
-                    return Err(BackendError.runtime_error("function '{f_t.name}' not found", Some(span)))
-
-                val fn_: HirFunction = ctx.module.functions[f_t.symbol]
-                self.call_hir_function(fn_, args, ctx)
+                # Resolve the HirFunction by NAME, not by symbol key. The HIR
+                # `functions` Dict is keyed by a synthetic per-index SymbolId
+                # (module_lowering iteration 19: the real per-function SymbolId
+                # returned by SymbolTable.lookup is a shared/corrupt struct on
+                # stage4, so struct-keyed insert collapses 2+ functions). The
+                # Function value carries the same corrupt `symbol`, so a
+                # symbol-keyed `.has()/[]` here would miss or nil-deref. Iterate
+                # `.values()` and match on the populated `name` text instead —
+                # the same robust idiom process_module uses to find `main`.
+                var cf_target: HirFunction? = nil
+                for cf_fn_ in ctx.module.functions.values():
+                    val cf_f: HirFunction = cf_fn_
+                    if cf_f.name == f_t.name:
+                        cf_target = Some(cf_f)
+                if cf_target.?:
+                    self.call_hir_function(cf_target.unwrap(), args, ctx)
+                else:
+                    Err(BackendError.runtime_error("function '{f_t.name}' not found", Some(span)))
 
             case Value.Closure(c):
                 itrace("[CF] Closure arm")
