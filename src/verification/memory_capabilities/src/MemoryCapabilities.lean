@@ -99,6 +99,10 @@ theorem isolated_to_shared :
   canConvert RefCapability.Isolated RefCapability.Shared = true := by
   rfl
 
+theorem shared_to_exclusive_denied :
+  canConvert RefCapability.Shared RefCapability.Exclusive = false := by
+  rfl
+
 theorem empty_env_allows_shared (loc : Nat) :
   canCreateRef { activeRefs := [] } loc RefCapability.Shared = true := by
   simp [canCreateRef, getActiveRefs]
