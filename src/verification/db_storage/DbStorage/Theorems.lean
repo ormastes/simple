@@ -29,6 +29,10 @@ theorem T1_btree_ordered (ks : List Nat) (k : Nat) (h : keysOrdered ks)
     keysOrdered (orderedInsert k ks) :=
   DbStorage.BTree.T1_btree_ordered ks k h hfresh
 
+theorem T1_btree_insert_contains_key (ks : List Nat) (k : Nat) :
+    k ∈ orderedInsert k ks :=
+  DbStorage.BTree.orderedInsert_mem k ks
+
 -- ===========================================================================
 -- T2 -- btree_balanced
 -- ===========================================================================
