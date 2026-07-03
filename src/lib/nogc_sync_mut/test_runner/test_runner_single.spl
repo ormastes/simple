@@ -103,24 +103,33 @@ fn print_summary(path: text, passed: i64, failed: i64, skipped: i64, pending: i6
         print "FAIL {path}"
 
 fn bdd_summary_counts(output: text) -> (i64, i64):
-    var pos = 0
+    # Sum across ALL per-describe "N examples, M failures" lines. Last-wins
+    # here previously let a passing final describe erase earlier failures
+    # (file summary "Failed: 0" + PASS + exit 0 on a red spec).
+    #
+    # Uses split("\n") instead of index_of(needle, pos) scanning, and
+    # intermediate vars instead of chained .replace() calls: both the 2-arg
+    # index_of start offset and chained method calls are broken under the
+    # interpreter `run` path this file executes on.
     var passed = -1
     var failed = -1
-    while pos <= output.len():
-        val next = output.index_of("\n", pos) ?? -1
-        val line = if next >= 0: output[pos:next] else: output[pos:]
-        val clean = line.replace("\x1b[32m", "").replace("\x1b[31m", "").replace("\x1b[0m", "").trim()
+    val lines = output.split("\n")
+    for line in lines:
+        var clean = line.replace("\x1b[32m", "")
+        clean = clean.replace("\x1b[31m", "")
+        clean = clean.replace("\x1b[0m", "")
+        clean = clean.trim()
         if clean.contains("example") and clean.contains("failure"):
             val comma = clean.index_of(",") ?? -1
             if comma > 0:
                 val total = to_int(clean[0:comma].trim().split(" ")[0])
                 val rest = clean[comma + 1:].trim()
                 val failures = to_int(rest.split(" ")[0])
-                passed = total - failures
-                failed = failures
-        if next < 0:
-            break
-        pos = next + 1
+                if passed < 0:
+                    passed = 0
+                    failed = 0
+                passed = passed + (total - failures)
+                failed = failed + failures
     (passed, failed)
 
 fn main() -> i64:
