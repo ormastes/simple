@@ -2,7 +2,26 @@
 
 This guide shows the current repo-native path for generating FPGA RTL artifacts from Simple source.
 
-## Current Evidence - 2026-06-01
+## Current Evidence - 2026-07-03
+
+Product-level RV32/RV64 evidence is maintained by:
+
+```bash
+sh scripts/check/check-riscv-product-level-evidence.shs
+SYNTH_REPORT_DIR=build/riscv_synth_reports sh scripts/check/check-riscv-budget-evidence.shs --require-vivado
+```
+
+Current Vivado-derived synthesis evidence in `build/riscv_synth_reports`:
+
+- RV32: `actual_luts = 11649`, `actual_mhz = 147`, `wns_ns = 13.228`
+- RV64: `actual_luts = 4281`, `actual_mhz = 190`, `wns_ns = 14.745`
+
+The RV32/RV64 synth-only wrappers use direct Vivado `synth_design` for the
+release evidence path and convert utilization/timing reports into
+`rv32_synth.sdn` and `rv64_synth.sdn`. `--require-vivado` must be used when
+claiming product-level size/performance evidence.
+
+## Current Generated RTL Smoke - 2026-06-01
 
 The public generated RISC-V RTL smoke gate now runs both generated lanes by default:
 

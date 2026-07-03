@@ -10,6 +10,18 @@ either RV32 or RV64.
 
 ## Fresh Evidence
 
+`SYNTH_REPORT_DIR=build/riscv_synth_reports sh scripts/check/check-riscv-budget-evidence.shs --require-vivado`
+
+- PASS: RV32 Vivado-derived synthesis evidence: 11649 LUTs, 147 MHz, WNS 13.228 ns.
+- PASS: RV64 Vivado-derived synthesis evidence: 4281 LUTs, 190 MHz, WNS 14.745 ns.
+- PASS: both reports declare `source = "vivado"` and satisfy the configured product budgets.
+
+`SYNTH_REPORT_DIR=build/riscv_synth_reports sh scripts/check/check-riscv-product-level-evidence.shs`
+
+- PASS: RISC-V FPGA SSpec configurability checks.
+- PASS: Lean/BYL dual-track formal gate.
+- PASS: budget evidence selfcheck and Vivado-backed budget evidence gate.
+
 `SIMPLE_BINARY=bin/release/simple sh scripts/check/check-riscv64-fpga-simpleos-preflight.shs --local-only`
 
 - PASS: FT4232H USB present.

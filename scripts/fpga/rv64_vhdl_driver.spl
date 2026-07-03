@@ -7,9 +7,11 @@
 
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_dir_create(path: text) -> bool
+extern fn rt_exit(code: i32) -> void
 
 use std.hardware.fpga_linux._SocVhdlGen.top_testbench.{generate_soc_top_vhdl_rv64}
 use std.hardware.fpga_linux.riscv_fpga_linux.{compile_to_vhdl_module}
+use compiler.backend.vhdl.{render_rv32i_opcode_package}
 
 fn vhdl_header() -> text:
     "library ieee;\nuse ieee.std_logic_1164.all;\nuse ieee.numeric_std.all;\n"
@@ -418,34 +420,22 @@ fn gen_k26_top() -> text:
     var l = "library ieee;\nuse ieee.std_logic_1164.all;\nuse ieee.numeric_std.all;\nlibrary unisim;\nuse unisim.vcomponents.all;\n\n"
     l = l + "entity soc_top_rv64_k26 is\n"
     l = l + "  port (\n"
+    l = l + "    clk     : in  std_logic;\n"
     l = l + "    uart_tx : out std_logic\n"
     l = l + "  );\n"
     l = l + "end entity soc_top_rv64_k26;\n\n"
     l = l + "architecture rtl of soc_top_rv64_k26 is\n"
-    l = l + "  signal cfgclk  : std_logic;\n"
-    l = l + "  signal cfgmclk : std_logic;\n"
-    l = l + "  signal di      : std_logic_vector(3 downto 0);\n"
-    l = l + "  signal eos     : std_logic;\n"
-    l = l + "  signal preq    : std_logic;\n"
     l = l + "  signal rst_q   : std_logic := '1';\n"
     l = l + "  signal rst_cnt : unsigned(7 downto 0) := (others => '0');\n"
     l = l + "begin\n"
-    l = l + "  u_startup : STARTUPE3\n"
-    l = l + "    generic map (PROG_USR => \"FALSE\", SIM_CCLK_FREQ => 0.0)\n"
-    l = l + "    port map (\n"
-    l = l + "      CFGCLK => cfgclk, CFGMCLK => cfgmclk, DI => di, EOS => eos, PREQ => preq,\n"
-    l = l + "      DO => \"0000\", DTS => \"1111\", FCSBO => '1', FCSBTS => '1', GSR => '0', GTS => '0',\n"
-    l = l + "      KEYCLEARB => '1', PACK => '0', USRCCLKO => '0', USRCCLKTS => '1',\n"
-    l = l + "      USRDONEO => '1', USRDONETS => '1'\n"
-    l = l + "    );\n\n"
-    l = l + "  process(cfgmclk)\n"
+    l = l + "  process(clk)\n"
     l = l + "  begin\n"
-    l = l + "    if rising_edge(cfgmclk) then\n"
+    l = l + "    if rising_edge(clk) then\n"
     l = l + "      if rst_cnt /= x\"ff\" then rst_cnt <= rst_cnt + 1; rst_q <= '1'; else rst_q <= '0'; end if;\n"
     l = l + "    end if;\n"
     l = l + "  end process;\n\n"
     l = l + "  u_soc : entity work.soc_top_rv64\n"
-    l = l + "    port map (clk => cfgmclk, rst => rst_q, uart_tx => uart_tx, uart_rx => '1');\n"
+    l = l + "    port map (clk => clk, rst => rst_q, uart_tx => uart_tx, uart_rx => '1');\n"
     l = l + "end architecture rtl;\n"
     l
 
@@ -533,12 +523,17 @@ fn write_vhd(out_dir: text, name: text, content: text) -> bool:
 fn main():
     val out_dir = "build/vhdl/rv64"
     rt_dir_create(out_dir)
+    # ponytail: interpreter links rt_file_write_text through this backend path today; remove when direct extern writes work alone.
+    val _write_anchor = render_rv32i_opcode_package().length()
+    var ok = true
 
     # Generate SoC top-level
     print("Generating soc_top_rv64.vhd...")
     val soc_top = generate_soc_top_vhdl_rv64()
-    write_vhd(out_dir, "soc_top_rv64", soc_top)
-    write_vhd(out_dir, "soc_top_rv64_k26", gen_k26_top())
+    if not write_vhd(out_dir, "soc_top_rv64", soc_top):
+        ok = false
+    if not write_vhd(out_dir, "soc_top_rv64_k26", gen_k26_top()):
+        ok = false
 
     # Generate per-module VHDL stubs for each RTL module
     print("Generating RTL module stubs...")
@@ -551,21 +546,31 @@ fn main():
     for mod_name in modules:
         val src_path = "src/lib/hardware/rv64gc_rtl/{mod_name}.spl"
         val vhdl = compile_to_vhdl_module(src_path)
-        write_vhd(out_dir, mod_name, vhdl)
+        if not write_vhd(out_dir, mod_name, vhdl):
+            ok = false
         count = count + 1
 
     # Generate rv64gc_core executor (entity name matches soc_top port map)
     print("Generating rv64gc_core executor...")
-    write_vhd(out_dir, "rv64gc_core", gen_rv64gc_core())
+    if not write_vhd(out_dir, "rv64gc_core", gen_rv64gc_core()):
+        ok = false
 
     # Generate peripheral stubs
     print("Generating peripheral stubs...")
-    write_vhd(out_dir, "clint", gen_clint_stub())
-    write_vhd(out_dir, "plic", gen_plic_stub())
-    write_vhd(out_dir, "uart", gen_uart_stub())
-    write_vhd(out_dir, "ram", gen_ram_stub())
-    write_vhd(out_dir, "bootrom", gen_bootrom_stub())
-    write_vhd(out_dir, "wb_interconnect", gen_wb_interconnect_stub())
+    if not write_vhd(out_dir, "clint", gen_clint_stub()):
+        ok = false
+    if not write_vhd(out_dir, "plic", gen_plic_stub()):
+        ok = false
+    if not write_vhd(out_dir, "uart", gen_uart_stub()):
+        ok = false
+    if not write_vhd(out_dir, "ram", gen_ram_stub()):
+        ok = false
+    if not write_vhd(out_dir, "bootrom", gen_bootrom_stub()):
+        ok = false
+    if not write_vhd(out_dir, "wb_interconnect", gen_wb_interconnect_stub()):
+        ok = false
 
     print("")
     print("Generated {count + 9} VHDL files total")
+    if not ok:
+        rt_exit(1)
