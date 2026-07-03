@@ -58,6 +58,7 @@ Prior diagnostic run with placeholder RTL allowed:
 - PASS: `rv64_fpga_core_executable` after RV64 VHDL generation emits a stateful fetch core.
 - PASS: `rv64_fpga_synth_logic`; synth-only Vivado retains generated CPU/RAM logic.
 - PASS: `rv64_fpga_elf_load_context` via RTL preload (`build/vhdl/rv64/rv64_payload.mem` referenced by `ram.vhd`); stale XSDB `dow` remains invalid and is recorded separately.
+- PASS: RV64 fetch-core reset PC is derived from the ELF entry (`0x80008d18`) instead of starting at `0x80000000`.
 - PASS: RV32 ELF and raw bin artifacts exist after the LLVM-driver build.
 - PASS: RV32 VHDL template generation writes `build/vhdl/rv32/rv32i_pkg.vhd`, `rv32i_decode.vhd`, and `rv32i_regfile.vhd`.
 - PASS: `build/build/rv32_fpga/gateware/rv32_fpga.bit` exists after `scripts/fpga/build_k26_rv32.shs`.
@@ -68,6 +69,7 @@ Prior diagnostic run with placeholder RTL allowed:
 - FAIL: `rv64_fpga_simpleos_run` requires `SIMPLEOS_RV64_FPGA_BOOT_OK` in `build/fpga/k26/rv64_simpleos_run.log`.
 - FAIL: `rv32_fpga_simpleos_run` requires `SIMPLEOS_RV32_FPGA_BOOT_OK` in `build/fpga/rv32/rv32_simpleos_run.log`.
 - INFO: fresh KV260 programming completed for both current bitstreams, but UART captures on `/dev/ttyUSB1..3` saw zero bytes.
+- INFO: current RV64 RTL fetches from the correct entry but still does not execute instructions or perform UART MMIO writes.
 
 `SIMPLE_OS_BUILD_BACKEND=cranelift bin/release/simple os build --arch=riscv64 --scenario=riscv64-fpga-mmode`
 
