@@ -28,4 +28,10 @@ theorem wait_detected (e : Effect) :
   have hw : is_async e = true := h _ (by simp)
   cases e <;> simp_all [is_async]
 
+theorem wait_pipeline_not_safe :
+  ¬ pipelineSafe [Effect.wait] := by
+  intro h
+  have hw : is_async Effect.wait = true := h _ (by simp)
+  simp [is_async] at hw
+
 end AsyncCompile
