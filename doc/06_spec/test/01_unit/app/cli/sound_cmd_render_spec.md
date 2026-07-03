@@ -1,6 +1,6 @@
 # sound CLI render
 
-> `simple sound render <file.sdn> -o out.wav` synthesizes a tone from an SDN sound description and encodes it to a byte-deterministic 16-bit PCM WAV. `validate` type-checks only; `render` is the authoring loop under test here.
+> `simple sound render <file.sdn> -o out.wav` synthesizes a tone (kind `sfx`) or mixes a clip-trigger timeline (kind `sequence`) from an SDN sound description, and encodes it to a byte-deterministic 16-bit PCM WAV. `validate` type-checks only; `render` is the authoring loop under test here.
 
 <!-- sdn-diagram:id=sound_cmd_render_spec.arch -->
 <details class="sdn-source">
@@ -27,14 +27,14 @@ sound_cmd_render_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 9 | 9 | 0 | 0 |
+| 12 | 12 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
 
 # sound CLI render
 
-`simple sound render <file.sdn> -o out.wav` synthesizes a tone from an SDN sound description and encodes it to a byte-deterministic 16-bit PCM WAV. `validate` type-checks only; `render` is the authoring loop under test here.
+`simple sound render <file.sdn> -o out.wav` synthesizes a tone (kind `sfx`) or mixes a clip-trigger timeline (kind `sequence`) from an SDN sound description, and encodes it to a byte-deterministic 16-bit PCM WAV. `validate` type-checks only; `render` is the authoring loop under test here.
 
 ## At a Glance
 
@@ -53,18 +53,20 @@ sound_cmd_render_spec -> std
 
 ## Overview
 
-`simple sound render <file.sdn> -o out.wav` synthesizes a tone from an SDN
-sound description and encodes it to a byte-deterministic 16-bit PCM WAV.
-`validate` type-checks only; `render` is the authoring loop under test here.
+`simple sound render <file.sdn> -o out.wav` synthesizes a tone (kind `sfx`) or
+mixes a clip-trigger timeline (kind `sequence`) from an SDN sound description,
+and encodes it to a byte-deterministic 16-bit PCM WAV. `validate` type-checks
+only; `render` is the authoring loop under test here.
 
 ## Key Concepts
 
 | Concept | Description |
 |---------|-------------|
-| Sound SDN | `sound:` block with `kind`, `sample_rate`, `source`, `envelope`, `effects` |
-| Exit codes | 0 success, 1 failure (bad/missing sound, unsupported render shape), 2 usage error |
+| Sound SDN | `sound:` block with `kind`, `sample_rate`, `source`, `envelope`, `effects` (`sfx`) or `events` (`sequence`) |
+| Exit codes | 0 success, 1 failure (bad/missing sound, missing clip, unsupported render shape), 2 usage error |
 | Sample oracle | PCM16 bytes at offset 44+ match trunc(sin(...)*32768) exactly |
 | Determinism | Two renders of the same SDN are byte-identical |
+| Sequence clips | `events[].clip` resolves next to the .sdn file — `.wav` (decoded) or `.sdn` (rendered recursively) — mixed at `at_ms` with `gain` |
 
 ## Syntax
 
@@ -259,6 +261,100 @@ expect(r.stdout).to_contain("missing -o/--out")
 
 </details>
 
+### simple sound render (sequence)
+
+#### mixes 2 clip events onto the timeline sample-accurately with gain — clip A alone, then A+B overlap, then B alone
+
+- Write kick.wav (0.5 x3 @1000Hz), snare.wav (0.25 x2 @1000Hz), and a sequence.sdn referencing both
+   - Expected: _write_sequence_fixtures() is true
+- Render the sequence: kick at_ms=0 gain=1.0, snare at_ms=2 gain=0.5
+   - Expected: r.exit_code equals `0`
+- Then the decoded samples are exactly [0.5, 0.5, kick[2]+0.5*snare[0]=0.625, 0.5*snare[1]=0.125]
+   - Expected: samples equals `[0.5, 0.5, 0.625, 0.125]`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Write kick.wav (0.5 x3 @1000Hz), snare.wav (0.25 x2 @1000Hz), and a sequence.sdn referencing both")
+expect(_write_sequence_fixtures()).to_equal(true)
+
+step("Render the sequence: kick at_ms=0 gain=1.0, snare at_ms=2 gain=0.5")
+val out = OUT_DIR + "/sequence.wav"
+val r = run_cli("render " + SEQUENCE_SDN + " -o " + out)
+expect(r.exit_code).to_equal(0)
+
+step("Then the decoded samples are exactly [0.5, 0.5, kick[2]+0.5*snare[0]=0.625, 0.5*snare[1]=0.125]")
+val decoded = decode_wav(file_read_bytes(out))
+var samples: [f32] = []
+if val Ok(a) = decoded:
+    samples = a.samples
+expect(samples).to_equal([0.5, 0.5, 0.625, 0.125])
+```
+
+</details>
+
+#### produces byte-identical WAV output across two separate sequence render invocations
+
+- Render the same sequence SDN twice to two separate files
+   - Expected: _write_sequence_fixtures() is true
+- Then both files hash identically
+- file hash sha256
+   - Expected: ok is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Render the same sequence SDN twice to two separate files")
+expect(_write_sequence_fixtures()).to_equal(true)
+val out_a = OUT_DIR + "/sequence_det_a.wav"
+val out_b = OUT_DIR + "/sequence_det_b.wav"
+val ra = run_cli("render " + SEQUENCE_SDN + " -o " + out_a)
+val rb = run_cli("render " + SEQUENCE_SDN + " -o " + out_b)
+
+step("Then both files hash identically")
+val ok = (ra.exit_code == 0 and rb.exit_code == 0 and
+    file_hash_sha256(out_a) == file_hash_sha256(out_b))
+expect(ok).to_equal(true)
+```
+
+</details>
+
+#### exits 1 with a path-qualified error when an event references a missing clip
+
+- Render a sequence whose only event clip does not exist next to the SDN file
+   - Expected: _write_sequence_fixtures() is true
+- Then it fails (exit 1) and names the resolved clip path
+   - Expected: ok is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Render a sequence whose only event clip does not exist next to the SDN file")
+expect(_write_sequence_fixtures()).to_equal(true)
+val r = run_cli("render " + SEQUENCE_MISSING_SDN + " -o " + OUT_DIR + "/sequence_never.wav")
+
+step("Then it fails (exit 1) and names the resolved clip path")
+val ok = (r.exit_code == 1 and r.stdout.contains(OUT_DIR + "/does_not_exist.wav"))
+expect(ok).to_equal(true)
+```
+
+</details>
+
 ### simple sound validate
 
 #### prints an ok summary and exits 0 for a well-formed sound.sdn
@@ -353,8 +449,8 @@ expect(r.stdout).to_contain("unknown subcommand: frobnicate")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 9 |
-| Active scenarios | 9 |
+| Total scenarios | 12 |
+| Active scenarios | 12 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

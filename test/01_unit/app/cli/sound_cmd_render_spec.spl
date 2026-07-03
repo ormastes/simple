@@ -8,18 +8,20 @@
 
 ## Overview
 
-`simple sound render <file.sdn> -o out.wav` synthesizes a tone from an SDN
-sound description and encodes it to a byte-deterministic 16-bit PCM WAV.
-`validate` type-checks only; `render` is the authoring loop under test here.
+`simple sound render <file.sdn> -o out.wav` synthesizes a tone (kind `sfx`) or
+mixes a clip-trigger timeline (kind `sequence`) from an SDN sound description,
+and encodes it to a byte-deterministic 16-bit PCM WAV. `validate` type-checks
+only; `render` is the authoring loop under test here.
 
 ## Key Concepts
 
 | Concept | Description |
 |---------|-------------|
-| Sound SDN | `sound:` block with `kind`, `sample_rate`, `source`, `envelope`, `effects` |
-| Exit codes | 0 success, 1 failure (bad/missing sound, unsupported render shape), 2 usage error |
+| Sound SDN | `sound:` block with `kind`, `sample_rate`, `source`, `envelope`, `effects` (`sfx`) or `events` (`sequence`) |
+| Exit codes | 0 success, 1 failure (bad/missing sound, missing clip, unsupported render shape), 2 usage error |
 | Sample oracle | PCM16 bytes at offset 44+ match trunc(sin(...)*32768) exactly |
 | Determinism | Two renders of the same SDN are byte-identical |
+| Sequence clips | `events[].clip` resolves next to the .sdn file — `.wav` (decoded) or `.sdn` (rendered recursively) — mixed at `at_ms` with `gain` |
 
 ## Syntax
 
@@ -42,13 +44,19 @@ wrote mysfx.wav (60 bytes, 8000 Hz)
 """
 
 use std.spec.*
-use std.io_runtime.{shell, ShellResult, file_read_bytes, file_hash_sha256, write_file, mkdir_p}
+use std.io_runtime.{shell, ShellResult, file_read_bytes, file_write_bytes, file_hash_sha256, write_file, mkdir_p}
+use std.common.audio.wav_encode.{encode_wav_pcm16}
+use std.common.audio.wav_decode.{decode_wav}
 
 val CLI = "bin/simple src/app/sound/main.spl"
 val OUT_DIR = "build/test-artifacts/sound_cmd"
 val TONE_SDN = OUT_DIR + "/tone.sdn"
 val LOWPASS_SDN = OUT_DIR + "/tone_lowpass.sdn"
 val BAD_SDN = OUT_DIR + "/malformed.sdn"
+val SEQUENCE_SDN = OUT_DIR + "/sequence.sdn"
+val SEQUENCE_MISSING_SDN = OUT_DIR + "/sequence_missing_clip.sdn"
+val KICK_WAV = OUT_DIR + "/kick.wav"
+val SNARE_WAV = OUT_DIR + "/snare.wav"
 
 fn run_cli(args: text) -> ShellResult:
     shell(CLI + " " + args)
@@ -58,6 +66,21 @@ fn _write_fixtures() -> bool:
     var ok = write_file(TONE_SDN, "sound:\n  kind: \"sfx\"\n  sample_rate: 8000\n  source: { type: \"tone\", wave: \"sine\", freq_hz: 1000, duration_ms: 1 }\n")
     ok = ok and write_file(LOWPASS_SDN, "sound:\n  kind: \"sfx\"\n  sample_rate: 8000\n  source: { type: \"tone\", wave: \"sine\", freq_hz: 1000, duration_ms: 1 }\n  effects: [ { type: \"lowpass\", cutoff_hz: 200 } ]\n")
     ok = ok and write_file(BAD_SDN, "not sdn at all {{{\n")
+    ok
+
+fn _write_sequence_fixtures() -> bool:
+    mkdir_p(OUT_DIR)
+    # kick.wav: 3 samples @ 0.5, snare.wav: 2 samples @ 0.25, both mono @ 1000 Hz
+    # (encoder already pinned by wav_encode_spec.spl — reused here only as a
+    # deterministic clip source, not re-testing the encoder itself).
+    val kick: [f32] = [0.5, 0.5, 0.5]
+    val snare: [f32] = [0.25, 0.25]
+    var ok = file_write_bytes(KICK_WAV, encode_wav_pcm16(kick, 1, 1000))
+    ok = ok and file_write_bytes(SNARE_WAV, encode_wav_pcm16(snare, 1, 1000))
+    # kick at at_ms=0 (frames 0..2, gain 1.0), snare at at_ms=2 (frames 2..3,
+    # gain 0.5) -> frame2 overlaps both clips.
+    ok = ok and write_file(SEQUENCE_SDN, "sound:\n  kind: \"sequence\"\n  sample_rate: 1000\n  events: [ { at_ms: 0, clip: \"kick.wav\", gain: 1.0 }, { at_ms: 2, clip: \"snare.wav\", gain: 0.5 } ]\n")
+    ok = ok and write_file(SEQUENCE_MISSING_SDN, "sound:\n  kind: \"sequence\"\n  sample_rate: 1000\n  events: [ { at_ms: 0, clip: \"does_not_exist.wav\", gain: 1.0 } ]\n")
     ok
 
 describe "simple sound render":
@@ -137,6 +160,49 @@ describe "simple sound render":
         val r = run_cli("render " + TONE_SDN)
         expect(r.exit_code).to_equal(2)
         expect(r.stdout).to_contain("missing -o/--out")
+
+
+describe "simple sound render (sequence)":
+    # One `expect` per `it` below (interpreter test-runner file-summary
+    # last-expect-wins caveat — see wav_decode_spec.spl header).
+
+    it "mixes 2 clip events onto the timeline sample-accurately with gain — clip A alone, then A+B overlap, then B alone":
+        step("Write kick.wav (0.5 x3 @1000Hz), snare.wav (0.25 x2 @1000Hz), and a sequence.sdn referencing both")
+        expect(_write_sequence_fixtures()).to_equal(true)
+
+        step("Render the sequence: kick at_ms=0 gain=1.0, snare at_ms=2 gain=0.5")
+        val out = OUT_DIR + "/sequence.wav"
+        val r = run_cli("render " + SEQUENCE_SDN + " -o " + out)
+        expect(r.exit_code).to_equal(0)
+
+        step("Then the decoded samples are exactly [0.5, 0.5, kick[2]+0.5*snare[0]=0.625, 0.5*snare[1]=0.125]")
+        val decoded = decode_wav(file_read_bytes(out))
+        var samples: [f32] = []
+        if val Ok(a) = decoded:
+            samples = a.samples
+        expect(samples).to_equal([0.5, 0.5, 0.625, 0.125])
+
+    it "produces byte-identical WAV output across two separate sequence render invocations":
+        step("Render the same sequence SDN twice to two separate files")
+        expect(_write_sequence_fixtures()).to_equal(true)
+        val out_a = OUT_DIR + "/sequence_det_a.wav"
+        val out_b = OUT_DIR + "/sequence_det_b.wav"
+        val ra = run_cli("render " + SEQUENCE_SDN + " -o " + out_a)
+        val rb = run_cli("render " + SEQUENCE_SDN + " -o " + out_b)
+
+        step("Then both files hash identically")
+        val ok = (ra.exit_code == 0 and rb.exit_code == 0 and
+            file_hash_sha256(out_a) == file_hash_sha256(out_b))
+        expect(ok).to_equal(true)
+
+    it "exits 1 with a path-qualified error when an event references a missing clip":
+        step("Render a sequence whose only event clip does not exist next to the SDN file")
+        expect(_write_sequence_fixtures()).to_equal(true)
+        val r = run_cli("render " + SEQUENCE_MISSING_SDN + " -o " + OUT_DIR + "/sequence_never.wav")
+
+        step("Then it fails (exit 1) and names the resolved clip path")
+        val ok = (r.exit_code == 1 and r.stdout.contains(OUT_DIR + "/does_not_exist.wav"))
+        expect(ok).to_equal(true)
 
 
 describe "simple sound validate":
