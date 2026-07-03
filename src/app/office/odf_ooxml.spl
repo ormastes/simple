@@ -13,8 +13,10 @@
 
 use std.common.archive.zip.{zip_extract_text, zip_write_stored, zip_text_file, ZipFile}
 use common.rich_text.attributed_text.{RichDocument, DocBlock, BlockKind, TextSpan, InlineStyle}
-use app.office.odf_export.{document_to_fodt}
-use app.office.file_formats.{parse_inline_spans}
+use app.office.odf_export.{document_to_fodt, sheet_to_fods}
+use app.office.file_formats.{parse_inline_spans, recalculate_formula_cells}
+use app.office.sheets.spreadsheet.{Sheet}
+use app.office.sheets.cell.{col_to_letter}
 
 # =========================================================================
 # XML helpers
@@ -167,6 +169,166 @@ fn docx_bytes_to_document(zip_bytes: [u8], title: text) -> RichDocument:
 # =========================================================================
 # Real .odt writer (zip container)
 # =========================================================================
+
+# =========================================================================
+# ODS import (Calc)
+# =========================================================================
+
+fn _ods_cell_value(cell_xml: text) -> text:
+    """The value to store for one table:table-cell — office:value for numbers,
+    formula text if present, else the text:p character data."""
+    val f = _find_from(cell_xml, "table:formula=\"", 0)
+    if f >= 0:
+        val fe = _find_from(cell_xml, "\"", f + 15)
+        if fe > f:
+            var formula = _xml_unescape(cell_xml.slice(f + 15, fe))
+            if formula.starts_with("of:="):
+                formula = "={formula.slice(4, formula.len())}"
+            return formula
+    val v = _find_from(cell_xml, "office:value=\"", 0)
+    if v >= 0:
+        val ve = _find_from(cell_xml, "\"", v + 14)
+        if ve > v:
+            return cell_xml.slice(v + 14, ve)
+    val p = _find_from(cell_xml, "<text:p", 0)
+    if p >= 0:
+        val tag_end = _find_from(cell_xml, ">", p)
+        val pe = _find_from(cell_xml, "</text:p>", p)
+        if tag_end >= 0 and pe > tag_end:
+            return _xml_unescape(_strip_tags(cell_xml.slice(tag_end + 1, pe)))
+    ""
+
+fn ods_content_to_sheet(content_xml: text, name: text) -> Sheet:
+    """Parse ODF spreadsheet content.xml (first table) into a Sheet."""
+    var sheet = Sheet.new(name)
+    var row = 0
+    var i = 0
+    while i < content_xml.len():
+        val r = _find_from(content_xml, "<table:table-row", i)
+        if r < 0:
+            break
+        val r_end = _find_from(content_xml, "</table:table-row>", r)
+        if r_end < 0:
+            break
+        val row_xml = content_xml.slice(r, r_end)
+        var col = 0
+        var j = 0
+        while j < row_xml.len():
+            val c = _find_from(row_xml, "<table:table-cell", j)
+            if c < 0:
+                break
+            val tag_end = _find_from(row_xml, ">", c)
+            if tag_end < 0:
+                break
+            val self_closing = row_xml.slice(tag_end - 1, tag_end) == "/"
+            var cell_xml = row_xml.slice(c, tag_end)
+            var next_j = tag_end + 1
+            if not self_closing:
+                val c_end = _find_from(row_xml, "</table:table-cell>", c)
+                if c_end < 0:
+                    break
+                cell_xml = row_xml.slice(c, c_end)
+                next_j = c_end + 19
+            val value = _ods_cell_value(cell_xml)
+            if value != "":
+                sheet.set_value("{col_to_letter(col)}{row + 1}", value)
+            col = col + 1
+            j = next_j
+        row = row + 1
+        i = r_end + 18
+    recalculate_formula_cells(sheet)
+
+fn ods_bytes_to_sheet(zip_bytes: [u8], name: text) -> Sheet:
+    """Import a real .ods file (zip container) into a Sheet."""
+    ods_content_to_sheet(zip_extract_text(zip_bytes, "content.xml"), name)
+
+# =========================================================================
+# XLSX import (Excel)
+# =========================================================================
+
+fn _xlsx_shared_strings(shared_xml: text) -> [text]:
+    """Collect each <si>'s concatenated <t> runs from sharedStrings.xml."""
+    var strings: [text] = []
+    var i = 0
+    while i < shared_xml.len():
+        val s = _find_from(shared_xml, "<si>", i)
+        if s < 0:
+            break
+        val e = _find_from(shared_xml, "</si>", s)
+        if e < 0:
+            break
+        val si = shared_xml.slice(s, e)
+        var out = ""
+        var j = 0
+        while j < si.len():
+            val t = _find_from(si, "<t", j)
+            if t < 0:
+                break
+            val tag_end = _find_from(si, ">", t)
+            val te = _find_from(si, "</t>", t)
+            if tag_end < 0 or te < 0:
+                break
+            out = "{out}{_xml_unescape(si.slice(tag_end + 1, te))}"
+            j = te + 4
+        strings.push(out)
+        i = e + 5
+    strings
+
+fn xlsx_sheet_xml_to_sheet(sheet_xml: text, shared: [text], name: text) -> Sheet:
+    """Parse one OOXML worksheet: <c r="A1" t="s"><v>idx</v></c> cells."""
+    var sheet = Sheet.new(name)
+    var i = 0
+    while i < sheet_xml.len():
+        val c = _find_from(sheet_xml, "<c ", i)
+        if c < 0:
+            break
+        val tag_end = _find_from(sheet_xml, ">", c)
+        if tag_end < 0:
+            break
+        val attrs = sheet_xml.slice(c, tag_end)
+        # cell ref
+        var ref_str = ""
+        val ra = _find_from(attrs, "r=\"", 0)
+        if ra >= 0:
+            val re = _find_from(attrs, "\"", ra + 3)
+            if re > ra:
+                ref_str = attrs.slice(ra + 3, re)
+        val is_shared = attrs.contains("t=\"s\"")
+        # value
+        val v = _find_from(sheet_xml, "<v>", tag_end)
+        val c_end = _find_from(sheet_xml, "</c>", c)
+        if ref_str != "" and v >= 0 and c_end > v:
+            val ve = _find_from(sheet_xml, "</v>", v)
+            if ve > v and ve < c_end:
+                var value = _xml_unescape(sheet_xml.slice(v + 3, ve))
+                if is_shared:
+                    val idx = value.to_i64().to_i32()
+                    if idx >= 0 and idx < shared.len():
+                        value = shared[idx]
+                sheet.set_value(ref_str, value)
+        i = if c_end > c: c_end + 4 else: tag_end + 1
+    sheet
+
+fn xlsx_bytes_to_sheet(zip_bytes: [u8], name: text) -> Sheet:
+    """Import a real .xlsx file: worksheet 1 + shared strings."""
+    val shared = _xlsx_shared_strings(zip_extract_text(zip_bytes, "xl/sharedStrings.xml"))
+    xlsx_sheet_xml_to_sheet(zip_extract_text(zip_bytes, "xl/worksheets/sheet1.xml"), shared, name)
+
+# =========================================================================
+# Real .ods writer
+# =========================================================================
+
+val _ODS_MANIFEST = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><manifest:manifest xmlns:manifest=\"urn:oasis:names:tc:opendocument:xmlns:manifest:1.0\" manifest:version=\"1.2\"><manifest:file-entry manifest:full-path=\"/\" manifest:media-type=\"application/vnd.oasis.opendocument.spreadsheet\"/><manifest:file-entry manifest:full-path=\"content.xml\" manifest:media-type=\"text/xml\"/></manifest:manifest>"
+
+fn sheet_to_ods_bytes(sheet: Sheet) -> [u8]:
+    """Build a genuine zipped .ods from a Sheet, reusing the flat-ODF body."""
+    val flat = sheet_to_fods(sheet)
+    val content = flat.replace("office:mimetype=\"application/vnd.oasis.opendocument.spreadsheet\"", "")
+    var files: [ZipFile] = []
+    files.push(zip_text_file("mimetype", "application/vnd.oasis.opendocument.spreadsheet"))
+    files.push(zip_text_file("META-INF/manifest.xml", _ODS_MANIFEST))
+    files.push(zip_text_file("content.xml", content))
+    zip_write_stored(files)
 
 val _ODT_MANIFEST = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><manifest:manifest xmlns:manifest=\"urn:oasis:names:tc:opendocument:xmlns:manifest:1.0\" manifest:version=\"1.2\"><manifest:file-entry manifest:full-path=\"/\" manifest:media-type=\"application/vnd.oasis.opendocument.text\"/><manifest:file-entry manifest:full-path=\"content.xml\" manifest:media-type=\"text/xml\"/></manifest:manifest>"
 

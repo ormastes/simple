@@ -7,8 +7,9 @@ OOXML word/document.xml parses headings and concatenated w:t runs.
 
 use std.spec
 use std.common.archive.zip.{zip_write_stored, zip_entries, zip_extract_text, zip_text_file, ZipFile}
-use app.office.odf_ooxml.{odt_bytes_to_document, docx_document_xml_to_document, document_to_odt_bytes, odt_content_to_document}
-use app.office.file_formats.{parse_markdown_document, document_to_markdown}
+use app.office.odf_ooxml.{odt_bytes_to_document, docx_document_xml_to_document, document_to_odt_bytes, odt_content_to_document, ods_bytes_to_sheet, sheet_to_ods_bytes, xlsx_sheet_xml_to_sheet, _xlsx_shared_strings}
+use app.office.file_formats.{parse_markdown_document, document_to_markdown, parse_csv_sheet}
+use app.office.sheets.cell.{cell_display_text}
 
 describe "zip: stored write + read round-trip":
     it "writes a zip our reader and the central directory agree on":
@@ -40,6 +41,25 @@ describe "ODT: real container round-trip":
         val xml = "<office:text><text:p>a &amp; b &lt;c&gt;</text:p></office:text>"
         val doc = odt_content_to_document(xml, "t")
         expect(document_to_markdown(doc)).to_contain("a & b <c>")
+
+describe "ODS: spreadsheet container round-trip":
+    it "writes .ods bytes our importer reads back with values and formulas":
+        val sheet = parse_csv_sheet("Item,42\nRevenue,1200\nProfit,=B2-100", "s")
+        val ods = sheet_to_ods_bytes(sheet)
+        val sheet2 = ods_bytes_to_sheet(ods, "s2")
+        expect(cell_display_text(sheet2.get_cell("A1"))).to_equal("Item")
+        expect(cell_display_text(sheet2.get_cell("B2"))).to_equal("1200")
+        expect(cell_display_text(sheet2.get_cell("B3"))).to_equal("1100")
+
+describe "XLSX: worksheet import":
+    it "resolves shared strings and numeric cells":
+        val shared = _xlsx_shared_strings("<sst><si><t>Item</t></si><si><t>Revenue</t></si></sst>")
+        expect(shared.len()).to_equal(2)
+        val xml = "<sheetData><row><c r=\"A1\" t=\"s\"><v>0</v></c><c r=\"B1\"><v>99</v></c></row><row><c r=\"A2\" t=\"s\"><v>1</v></c><c r=\"B2\"><v>1200</v></c></row></sheetData>"
+        val sheet = xlsx_sheet_xml_to_sheet(xml, shared, "x")
+        expect(cell_display_text(sheet.get_cell("A1"))).to_equal("Item")
+        expect(cell_display_text(sheet.get_cell("A2"))).to_equal("Revenue")
+        expect(cell_display_text(sheet.get_cell("B2"))).to_equal("1200")
 
 describe "DOCX: OOXML paragraph import":
     it "parses Heading1 styles and concatenates w:t runs":
