@@ -654,4 +654,11 @@ theorem resource_denied_acquire_then_release_eq_release (p : ResourcePool)
   have hn : ¬ p.inUse < p.capacity := by omega
   simp [ResourcePool.acquire, hn]
 
+/-- T10i: after a successful acquire/release roundtrip, an extra release is
+    exactly the same as releasing the original pool. -/
+theorem resource_acquire_release_release_eq_release (p : ResourcePool)
+    (h : p.inUse < p.capacity) :
+    (p.acquire).pool.release.release = p.release := by
+  rw [resource_acquire_release_roundtrip p h]
+
 end KernelScheduler
