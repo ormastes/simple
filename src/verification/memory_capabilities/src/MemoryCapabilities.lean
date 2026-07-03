@@ -375,4 +375,40 @@ theorem two_isolated_env_not_wellformed (baseType : String) (loc : Nat) :
   rw [hcount] at hbound
   exact Nat.not_succ_le_self 1 hbound
 
+theorem mixed_exclusive_isolated_env_wellformed_gap (baseType : String) (loc : Nat) :
+  wellFormed
+    { activeRefs :=
+        [(loc,
+          [{ location := loc,
+             refType := { baseType := baseType, capability := RefCapability.Exclusive } },
+           { location := loc,
+             refType := { baseType := baseType, capability := RefCapability.Isolated } }])] } := by
+  intro foundLoc refs h
+  simp at h
+  rcases h with ⟨_, hrefs⟩
+  subst refs
+  constructor
+  · change countRefsWithCapability
+      ([
+        { location := loc, refType := { baseType := baseType, capability := RefCapability.Exclusive } },
+        { location := loc, refType := { baseType := baseType, capability := RefCapability.Isolated } }
+      ] : List Reference) RefCapability.Exclusive ≤ 1
+    rw [show countRefsWithCapability
+      ([
+        { location := loc, refType := { baseType := baseType, capability := RefCapability.Exclusive } },
+        { location := loc, refType := { baseType := baseType, capability := RefCapability.Isolated } }
+      ] : List Reference) RefCapability.Exclusive = 1 by rfl]
+    exact Nat.le_refl 1
+  · change countRefsWithCapability
+      ([
+        { location := loc, refType := { baseType := baseType, capability := RefCapability.Exclusive } },
+        { location := loc, refType := { baseType := baseType, capability := RefCapability.Isolated } }
+      ] : List Reference) RefCapability.Isolated ≤ 1
+    rw [show countRefsWithCapability
+      ([
+        { location := loc, refType := { baseType := baseType, capability := RefCapability.Exclusive } },
+        { location := loc, refType := { baseType := baseType, capability := RefCapability.Isolated } }
+      ] : List Reference) RefCapability.Isolated = 1 by rfl]
+    exact Nat.le_refl 1
+
 end MemoryCapabilities
