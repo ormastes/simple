@@ -101,6 +101,9 @@
 - macro_auto_import_formal: pass
 - macro_auto_import_formal_scope: glob imports include non-macros, include explicitly auto-imported macros, exclude non-auto-imported macros from well-formed exports, and empty auto-import manifests glob exactly non-macro exports
 - macro_auto_import_formal_evidence: src/verification/macro_auto_import/src/MacroAutoImport.lean glob_doesnt_leak_macros_wf + nonmacros_always_globbed + auto_imported_in_glob + glob_subset + empty_auto_import_no_macros + empty_auto_import_glob_nonmacros; `cd src/verification/macro_auto_import && lake build`
+- aop_weaver_formal: pass
+- aop_weaver_formal_scope: aspect selection is sorted and stable in the model, no-match wrapping preserves target execution, denying advice skips the target and increments denial count, denial counts are monotone, and well-formed around chains execute the target at most once
+- aop_weaver_formal_evidence: src/verification/aop_weaver/src/AopWeaver/Model.lean T1_selection_sorted + T2_selection_stable + T3_no_match_preserves + deny_increments + T4_deny_skips_target + T5_deny_monotone + T6_proceed_linear; `cd src/verification/aop_weaver && lake build`
 - kernel_capability_depth_formal: pass
 - kernel_capability_depth_formal_scope: capability delegation with exhausted depth is denied
 - kernel_capability_depth_formal_evidence: src/verification/kernel_capabilities/KernelCapabilities/Theorems.lean zero_depth_grant_denied; `cd src/verification/kernel_capabilities && lake build`
