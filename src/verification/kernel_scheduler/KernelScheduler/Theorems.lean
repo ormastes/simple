@@ -480,6 +480,12 @@ theorem resource_acquire_below_capacity_increases (p : ResourcePool)
   have hgrant := resource_acquire_below_capacity_grants p h
   omega
 
+/-- T10a2: acquire never decreases live resources. -/
+theorem resource_acquire_never_decreases (p : ResourcePool) :
+    p.inUse ≤ (p.acquire).pool.inUse := by
+  unfold ResourcePool.acquire
+  by_cases h : p.inUse < p.capacity <;> simp [h]
+
 /-- T10b: acquire at capacity is a no-op and reports denial. -/
 theorem resource_acquire_full_noop (p : ResourcePool)
     (h : p.capacity ≤ p.inUse) :
