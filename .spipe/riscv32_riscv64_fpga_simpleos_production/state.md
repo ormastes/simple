@@ -25,9 +25,10 @@ N/A for this slice: this turn only fixes existing smoke wrappers and records blo
 ## Evidence 2026-07-03
 - `SIMPLE_BINARY=bin/release/simple sh scripts/check/check-riscv64-fpga-simpleos-preflight.shs --local-only`:
   - PASS: FT4232H USB present, serial ports present, JTAG interface free, openFPGALoader, OpenOCD, Vivado, RISC-V cross compilers, RV64 SimpleOS ELF artifact, RV64 SimpleOS bin artifact, RV64 bitstream artifact, Simple hello.
-  - PASS: RV64 FPGA core executable gate after `scripts/fpga/generate_rv64_vhdl.shs` emits a stateful fetch core at `build/vhdl/rv64/rv64gc_core.vhd`.
+  - PASS: RV64 FPGA core executable gate after `scripts/fpga/generate_rv64_vhdl.shs` emits an early executor at `build/vhdl/rv64/rv64gc_core.vhd`.
   - PASS: RV64 FPGA ELF load-context gate via RTL preload (`build/vhdl/rv64/rv64_payload.mem` referenced by generated `ram.vhd`).
-  - FAIL: yosys; RV64 UART/run proof still absent.
+  - PASS: `sh scripts/fpga/ghdl_validate_rv64.shs --simulate` observes RV64 UART TX activity from the preloaded SimpleOS payload.
+  - FAIL: yosys; physical RV64 run marker still absent.
   - INFO: `build/fpga/k26/load_elf_k26.log` still records XSDB `dow` failure with `Invalid context`, but XSDB download is no longer the only load context.
 - `SIMPLE_BINARY=bin/release/simple bash scripts/fpga/build_k26_vexriscv.shs`:
   - PASS: `--synth-only` regenerates RV64 VHDL, keeps the generated CPU/RAM logic live, and writes `build/fpga/k26/k26_vexriscv/k26_vexriscv.runs/synth_1/soc_top_rv64_k26.dcp`.
@@ -90,3 +91,4 @@ dev-in-progress
 - dev: Fixed RV64 generated core reset PC to use the ELF entry (`0x80008d18`) instead of blindly starting at `0x80000000` (`rt_alloc` in the current payload). GHDL and K26 synth-only still pass; run markers remain absent.
 - dev: Replaced the RV64 fetch-only core with a minimal RV64/C early executor for the current SimpleOS entry path (ADDI/AUIPC/LUI/JAL/JALR/load/store/branch plus the compressed stack ops seen in the UART path), made Vivado accept the generated VHDL, and capped RV64 RAM inference from 16 MiB to 512 KiB so K26 synth-only fits. Dual-arch preflight still fails the RV64/RV32 physical run-marker gates.
 - dev: Added a `soc_top_rv64_k26` STARTUPE3 wrapper so full RV64 bitgen no longer exposes unconstrained `clk`/`rst` board pins. Routed `uart_tx` directly and kept CPU/RAM synthesis live through an internal marked debug signal instead of corrupting UART with liveness XOR. Current bitstream programs successfully; Xilinx USB serial capture still sees zero bytes because the PL UART is routed to PMOD H12/E10 and no PMOD serial adapter is present in `/dev`.
+- dev: Restored the RV64 GHDL SoC smoke testbench and fixed the executor path enough to see real UART TX activity in simulation: UART Wishbone ack/TX is real, RAM ack is data-valid, execute returns to fetch, unaligned literal loads and cross-word 32-bit fetches work, and CSR reads return hart 0. Full K26 bitgen still passes; physical `/dev/ttyUSB1..3` capture remains zero because it does not observe PMOD H12/E10.

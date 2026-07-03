@@ -56,10 +56,11 @@ Prior diagnostic run with placeholder RTL allowed:
 `SIMPLE_BINARY=bin/release/simple sh scripts/check/check-riscv-fpga-simpleos-preflight.shs --local-only`
 
 - PASS: RV64 ELF, raw bin, and bitstream artifacts exist.
-- PASS: `rv64_fpga_core_executable` after RV64 VHDL generation emits a stateful fetch core.
+- PASS: `rv64_fpga_core_executable` after RV64 VHDL generation emits an early executor.
 - PASS: `rv64_fpga_synth_logic`; synth-only Vivado retains generated CPU/RAM logic.
 - PASS: `rv64_fpga_elf_load_context` via RTL preload (`build/vhdl/rv64/rv64_payload.mem` referenced by `ram.vhd`); stale XSDB `dow` remains invalid and is recorded separately.
 - PASS: RV64 fetch-core reset PC is derived from the ELF entry (`0x80008d18`) instead of starting at `0x80000000`.
+- PASS: `sh scripts/fpga/ghdl_validate_rv64.shs --simulate` observes `RV64_UART_TX_ACTIVITY_SEEN` from the preloaded SimpleOS payload.
 - PASS: RV32 ELF and raw bin artifacts exist after the LLVM-driver build.
 - PASS: RV32 VHDL template generation writes `build/vhdl/rv32/rv32i_pkg.vhd`, `rv32i_decode.vhd`, and `rv32i_regfile.vhd`.
 - PASS: `build/build/rv32_fpga/gateware/rv32_fpga.bit` exists after `scripts/fpga/build_k26_rv32.shs`.
@@ -139,10 +140,12 @@ bitstream and ELF load/run evidence.
 
 `scripts/fpga/generate_rv64_vhdl.shs` now emits `build/vhdl/rv64/rv64gc_core.vhd`
 as a minimal RV64/C early executor instead of a fetch-only placeholder. It
-handles the current entry/UART path instruction subset and leaves broader ISA
-coverage out until the next failing instruction is proven. The dual-arch
-preflight now passes `rv64_fpga_core_executable` while still failing RV64
-physical run evidence.
+handles the current entry/UART path instruction subset, including CSR hart-id
+reads, unaligned literal loads, cross-word 32-bit fetches, and synchronous RAM
+ack timing. `scripts/fpga/ghdl_validate_rv64.shs --simulate` now restores the
+RV64 SoC smoke testbench and proves UART TX activity from the preloaded
+SimpleOS payload. The dual-arch preflight still fails RV64 physical run evidence
+because the required boot marker is not captured from hardware.
 
 The generated RV64 `ram.vhd` now acknowledges Wishbone reads/writes and
 `wb_interconnect.vhd` decodes bootrom, CLINT, PLIC, UART, and RAM targets.
