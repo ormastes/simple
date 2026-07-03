@@ -33,6 +33,10 @@ theorem allocate_preserves (s : GcState) (id : Nat) (hs : safe s) :
   simp only [allocate]
   exact List.mem_cons_of_mem id (hs x hx)
 
+theorem allocate_makes_live (s : GcState) (id : Nat) :
+  id ∈ (allocate s id).live := by
+  simp [allocate]
+
 theorem borrow_preserves (s : GcState) (id : Nat) (hs : safe s) :
   safe (borrow s id) := by
   intro x hx
