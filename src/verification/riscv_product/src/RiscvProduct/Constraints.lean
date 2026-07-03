@@ -57,6 +57,10 @@ theorem round_robin_no_starvation (start target : Lane) :
     servedWithinTwo start target := by
   cases start <;> cases target <;> simp [servedWithinTwo, nextLane]
 
+theorem round_robin_two_steps_returns_start (start : Lane) :
+    nextLane (nextLane start) = start := by
+  cases start <;> simp [nextLane]
+
 theorem acquire_sets_single_owner (s s' : ResourceState) (l : Lane) :
     acquire s l = some s' → s'.owner = some l := by
   intro h
@@ -99,6 +103,12 @@ theorem held_resource_rejects_second_owner (s : ResourceState) (owner other : La
   intro h
   unfold acquire
   rw [h]
+
+theorem failed_second_acquire_and_release_preserves_owner (owner other : Lane)
+    (h : owner ≠ other) :
+    acquire { owner := some owner } other = none ∧
+      release { owner := some owner } other = { owner := some owner } := by
+  cases owner <;> cases other <;> simp [acquire, release] at *
 
 theorem owner_release_clears_resource (l : Lane) :
     release { owner := some l } l = { owner := none } := by
