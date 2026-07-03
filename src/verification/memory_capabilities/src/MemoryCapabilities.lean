@@ -287,6 +287,21 @@ theorem write_access_implies_same_location_and_unique_cap
     intro h _
     exact h
 
+theorem access_implies_same_location
+    (baseType : String) (loc : Nat) (cap : RefCapability) (access : MemAccess) :
+    allowsAccess { location := loc, refType := { baseType := baseType, capability := cap } }
+      access = true →
+    match access with
+    | MemAccess.Read target => loc = target
+    | MemAccess.Write target => loc = target := by
+  cases access with
+  | Read target =>
+      intro h
+      exact read_access_implies_same_location baseType loc target cap h
+  | Write target =>
+      intro h
+      exact (write_access_implies_same_location_and_unique_cap baseType loc target cap h).left
+
 theorem shared_write_same_loc_denied (baseType : String) (loc : Nat) :
   allowsAccess { location := loc, refType := { baseType := baseType, capability := RefCapability.Shared } } (MemAccess.Write loc) = false := by
   simp [allowsAccess]
