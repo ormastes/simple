@@ -62,6 +62,9 @@
 - nvfs_mount_formal: pass
 - nvfs_mount_formal_scope: successful mount preserves all NVFS invariants and increments mountEpoch exactly once; unmount preserves all invariants
 - nvfs_mount_formal_evidence: src/verification/formal/nvfs/Nvfs/Theorems.lean mount_preserves_all + mount_success_increments_epoch + unmount_preserves_all; `cd src/verification/formal/nvfs && lake build`
+- fat32_chain_formal: pass
+- fat32_chain_formal_scope: guarded FAT32 chain walks are fuel bounded, zero fuel returns the empty chain, cluster-to-LBA mapping is monotone and injective for well-formed geometry, cluster counts cover file size, EOC and FREE markers are exclusive, FREE entries are not valid links, and a newly allocated free singleton is disjoint from existing chains before predecessor linking
+- fat32_chain_formal_evidence: src/verification/fat32/Fat32/Theorems.lean T1_chain_length_bound + T1_zero_fuel_empty + T2_lba_monotone + T3_lba_injective + T5_cluster_count_covers + T6_eoc_not_free + T6_free_not_valid_chain + T7a_valid_link_ge2 + T7b_free_not_in_chain + T7c_alloc_step2_new_chain_disjoint; `cd src/verification/fat32 && lake build`
 - kernel_capability_depth_formal: pass
 - kernel_capability_depth_formal_scope: capability delegation with exhausted depth is denied
 - kernel_capability_depth_formal_evidence: src/verification/kernel_capabilities/KernelCapabilities/Theorems.lean zero_depth_grant_denied; `cd src/verification/kernel_capabilities && lake build`

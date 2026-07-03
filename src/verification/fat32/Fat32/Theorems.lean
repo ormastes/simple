@@ -56,6 +56,10 @@ theorem T1_chain_length_bound (fat : FatTable) (start : ClusterIdx) (fuel : Nat)
         · -- neither: returns [], length = 0
           simp
 
+theorem T1_zero_fuel_empty (fat : FatTable) (start : ClusterIdx) :
+    chainWalkGuarded fat start 0 = [] := by
+  simp [chainWalkGuarded]
+
 -- ===========================================================================
 -- T2 — lba_monotone
 -- For a well-formed BPB, clusterToLba is strictly monotone in cluster number.
