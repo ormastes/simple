@@ -51,6 +51,7 @@ N/A for this slice: this turn only fixes existing smoke wrappers and records blo
 - `SIMPLE_BINARY=bin/release/simple sh scripts/check/check-riscv-fpga-simpleos-preflight.shs --local-only`:
   - Reuses the RV64 preflight and additionally reports RV32 ELF, bin, and bitstream artifact status.
   - PASS: RV32 ELF and bin artifacts exist.
+  - PASS: RV32 VHDL template artifacts exist for package/decode/register-file generation.
   - FAIL: RV32 bitstream artifact is absent in this workspace.
   - FAIL: RV32 FPGA core executable evidence is absent (`build/vhdl/rv32/rv32_core.vhd` missing).
   - FAIL: RV32 FPGA ELF load/run evidence is absent (`build/fpga/rv32/load_elf_rv32.log` missing).
@@ -71,3 +72,4 @@ dev-in-progress
 - dev: Built RV32 SimpleOS FPGA ELF/bin with the local LLVM-enabled Rust Simple driver; RV32 remains blocked on a real bitstream.
 - dev: Added fail-closed RV32 core/load-context gates so future RV32 bitstreams also need executable-core and payload-load evidence.
 - dev: Made the K26 RV64 bitstream wrapper fail fast on placeholder core RTL so stale/generated bitstreams cannot be refreshed as production evidence.
+- dev: Added RV32 VHDL template generation for package, decoder/ALU-control, and register-file modules using the existing compiler VHDL backend templates.

@@ -54,6 +54,7 @@ Prior diagnostic run with placeholder RTL allowed:
 
 - PASS: RV64 ELF, raw bin, and bitstream artifacts exist.
 - PASS: RV32 ELF and raw bin artifacts exist after the LLVM-driver build.
+- PASS: RV32 VHDL template generation writes `build/vhdl/rv32/rv32i_pkg.vhd`, `rv32i_decode.vhd`, and `rv32i_regfile.vhd`.
 - FAIL: `rv64_fpga_core_executable` because the generated active core is a placeholder.
 - FAIL: `rv64_fpga_elf_load_context` because the last XSDB load log reports `xsdb-dow-invalid-context`.
 - FAIL: `build/build/rv32_fpga/gateware/rv32_fpga.bit` is still missing.
@@ -109,8 +110,9 @@ longer requires an unrelated native-build-capable compiler before running the
 GHDL lane.
 
 `scripts/check/check-riscv-fpga-simpleos-preflight.shs` now checks the existing
-RV64 preflight plus RV32 FPGA artifacts, executable-core evidence, and load/run
-evidence, so production status cannot ignore the 32-bit lane.
+RV64 preflight plus RV32 FPGA artifacts, VHDL template generation,
+executable-core evidence, and load/run evidence, so production status cannot
+ignore the 32-bit lane.
 
 `simple os build --scenario=riscv64-fpga-mmode` and
 `simple os build --scenario=riscv32-fpga-mmode` are now registered. The RV64
