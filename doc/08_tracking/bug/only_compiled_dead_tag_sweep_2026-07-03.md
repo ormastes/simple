@@ -203,6 +203,30 @@ fixed at source, tag removed.
   Fix is in the interpreter extern dispatch (forbidden path) and/or requires a
   bootstrap rebuild+redeploy (see memory: extern additions need bootstrap).
 
+### llvm_parity (item 8) — GATED (native LLVM abort), call-site drift FIXED
+
+- First failure layer (fixed): all 7 examples failed with `function expects
+  argument for parameter 'opt_level_i64', but none was provided` — the spec
+  still called `compile_module_with_backend(name, module, is_release)` with 3
+  args after the signature grew a mandatory `opt_level_i64`. Spec call sites
+  updated (release → 2/Speed, debug → 0/None_), kept in the file.
+- Second failure layer (blocker): with correct calls, the run aborts with
+  `LLVM ERROR: not a number, or does not fit in an unsigned int` and dumps
+  core inside the native LLVM backend while compiling the spec's minimal MIR
+  module. Process-killing engine crash in the llvm/llvm-lib lowering — needs
+  backend root-causing, out of sweep scope. Tag restored.
+
+### llvm_backend_spec (item 14) — FIXED (33/33, tags removed)
+
+- Failure was a single stale expectation: `compatibility_build(X86_64)`
+  returns `x86-64-v1` (the documented 2003+/no-AVX baseline in
+  `src/compiler/70.backend/backend/llvm_target.spl`), while the spec still
+  expected pre-baseline `x86-64`. `llvm_backend_tools.spl` normalizes
+  v1 → `x86-64` only at the llc command line, so the config-level value is
+  intentionally `x86-64-v1`. Expectation updated to the documented value —
+  not a weakening. All 5 `only-compiled` context tags removed; 33 examples
+  pass.
+
 ### Incident note 2 (2026-07-03, batch 2)
 
 The same parallel-snapshot hazard recurred: hourly-sync commit `478a210fd9b`
