@@ -226,6 +226,16 @@ theorem unpark_nonparked_eq_noop_decision (t : GreenTask) (waker_cpu : Nat)
       , should_enqueue := false } := by
   simp [GreenTask.unpark, if_neg hnot_parked]
 
+/-- T4e: A completed task cannot be woken back onto a ready queue. -/
+theorem unpark_done_no_enqueue (t : GreenTask) (waker_cpu : Nat)
+    (hdone : t.state = .done) :
+    (t.unpark waker_cpu).should_enqueue = false ∧ (t.unpark waker_cpu).task = t := by
+  have hnot : t.state ≠ .parked := by
+    intro hparked
+    rw [hdone] at hparked
+    cases hparked
+  simp [GreenTask.unpark, if_neg hnot]
+
 -- ============================================================
 -- § E  T5 — complete
 -- ============================================================
