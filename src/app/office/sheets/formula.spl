@@ -1077,6 +1077,11 @@ fn _eval_count_range_function(name: text, tokens: [text], pos: i32, sheet: Sheet
 fn _is_lookup_function(name: text) -> bool:
     name == "VLOOKUP" or name == "HLOOKUP" or name == "INDEX" or name == "MATCH"
 
+fn _is_x_lookup_function(name: text) -> bool:
+    """Excel-365 vector lookups that use two independent vectors (or one, for
+    XMATCH): XLOOKUP/XMATCH exact-match, LOOKUP sorted largest-<=."""
+    name == "XLOOKUP" or name == "XMATCH" or name == "LOOKUP"
+
 struct LookupArg:
     display: text
     num: f64
@@ -1173,6 +1178,85 @@ fn _eval_lookup_function(name: text, tokens: [text], pos: i32, sheet: Sheet, dep
             return EvalResult(value: sheet.get_cell(cell_ref_to_string(target)).value, next_pos: cur_pos)
         c = c + 1
     EvalResult(value: CellValue.ErrorVal(message: "HLOOKUP not found"), next_pos: cur_pos)
+
+fn _x_lookup_le(cell: Cell, needle: LookupArg) -> bool:
+    """cell value <= needle for LOOKUP's sorted search: numeric when both look
+    numeric, else lexicographic on display text."""
+    val d = cell_display_text(cell)
+    if _arr_is_number(d) and _arr_is_number(needle.display):
+        return d.to_f64() <= needle.num
+    not _arr_text_lt(needle.display, d)
+
+fn _eval_x_lookup(name: text, tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalResult:
+    """XLOOKUP(needle, lookup_range, return_range, [if_not_found]) — exact match,
+    returns the aligned cell of return_range, else if_not_found (or #ERR).
+    XMATCH(needle, range) — exact match, 1-based position, #ERR if absent.
+    LOOKUP(needle, lookup_vector, result_vector) — vector form on a SORTED
+    lookup_vector: the aligned result of the largest value <= needle, #ERR when
+    needle precedes the first value. Ranges align by expand_range_refs order."""
+    var cur_pos = pos
+    val needle = _lookup_value_arg(tokens, cur_pos, sheet, depth)
+    cur_pos = _skip_comma(tokens, needle.next_pos)
+    # lookup_range / lookup_vector (required)
+    if not (cur_pos + 2 < tokens.len() and tokens.get(cur_pos + 1) == ":"):
+        return EvalResult(value: CellValue.ErrorVal(message: "{name} requires a range"), next_pos: cur_pos)
+    val range1 = parse_range("{tokens.get(cur_pos)}:{tokens.get(cur_pos + 2)}")
+    cur_pos = _skip_comma(tokens, cur_pos + 3)
+    if range1 == nil:
+        return EvalResult(value: CellValue.ErrorVal(message: "{name} invalid range"), next_pos: cur_pos)
+    val refs1 = expand_range_refs(range1)
+    # XMATCH ends after the single lookup range.
+    if name == "XMATCH":
+        if cur_pos < tokens.len() and tokens.get(cur_pos) == ")":
+            cur_pos = cur_pos + 1
+        var mpos = 1
+        for ref_str in refs1:
+            if _lookup_eq(needle.display, needle.num, sheet.get_cell(ref_str)):
+                return EvalResult(value: CellValue.NumberVal(value: mpos.to_f64()), next_pos: cur_pos)
+            mpos = mpos + 1
+        return EvalResult(value: CellValue.ErrorVal(message: "XMATCH not found"), next_pos: cur_pos)
+    # return_range / result_vector (required for XLOOKUP and LOOKUP)
+    if not (cur_pos + 2 < tokens.len() and tokens.get(cur_pos + 1) == ":"):
+        return EvalResult(value: CellValue.ErrorVal(message: "{name} requires a return range"), next_pos: cur_pos)
+    val range2 = parse_range("{tokens.get(cur_pos)}:{tokens.get(cur_pos + 2)}")
+    cur_pos = _skip_comma(tokens, cur_pos + 3)
+    if range2 == nil:
+        return EvalResult(value: CellValue.ErrorVal(message: "{name} invalid return range"), next_pos: cur_pos)
+    val refs2 = expand_range_refs(range2)
+    # optional if_not_found (XLOOKUP only)
+    var default_val = CellValue.ErrorVal(message: "{name} not found")
+    if name == "XLOOKUP" and cur_pos < tokens.len() and tokens.get(cur_pos) != ")":
+        val dtok = tokens.get(cur_pos)
+        if dtok.starts_with("\""):
+            default_val = CellValue.TextVal(value: dtok.slice(1, dtok.len() - 1))
+            cur_pos = _skip_comma(tokens, cur_pos + 1)
+        else:
+            val dr = _eval_comparison(tokens, cur_pos, sheet, depth)
+            default_val = dr.value
+            cur_pos = _skip_comma(tokens, dr.next_pos)
+    if cur_pos < tokens.len() and tokens.get(cur_pos) == ")":
+        cur_pos = cur_pos + 1
+    if name == "XLOOKUP":
+        var i = 0
+        while i < refs1.len():
+            if _lookup_eq(needle.display, needle.num, sheet.get_cell(refs1[i])):
+                if i < refs2.len():
+                    return EvalResult(value: sheet.get_cell(refs2[i]).value, next_pos: cur_pos)
+                return EvalResult(value: CellValue.ErrorVal(message: "XLOOKUP return range too small"), next_pos: cur_pos)
+            i = i + 1
+        return EvalResult(value: default_val, next_pos: cur_pos)
+    # LOOKUP: largest lookup value <= needle (assumes ascending sort)
+    var best_idx = -1
+    var j = 0
+    while j < refs1.len():
+        if _x_lookup_le(sheet.get_cell(refs1[j]), needle):
+            best_idx = j
+        j = j + 1
+    if best_idx < 0:
+        return EvalResult(value: CellValue.ErrorVal(message: "LOOKUP value too small"), next_pos: cur_pos)
+    if best_idx < refs2.len():
+        return EvalResult(value: sheet.get_cell(refs2[best_idx]).value, next_pos: cur_pos)
+    EvalResult(value: CellValue.ErrorVal(message: "LOOKUP result range too small"), next_pos: cur_pos)
 
 fn _is_db_function(name: text) -> bool:
     (name == "DSUM" or name == "DCOUNT" or name == "DAVERAGE" or
@@ -1450,6 +1534,8 @@ fn _eval_function_call(name: text, tokens: [text], pos: i32, sheet: Sheet, depth
         return _eval_count_range_function(name, tokens, pos, sheet, depth)
     if _is_lookup_function(name):
         return _eval_lookup_function(name, tokens, pos, sheet, depth)
+    if _is_x_lookup_function(name):
+        return _eval_x_lookup(name, tokens, pos, sheet, depth)
     if _is_db_function(name):
         return _eval_db_function(name, tokens, pos, sheet, depth)
     if _is_info_function(name):
@@ -2986,6 +3072,22 @@ fn evaluate_formula_array(expr: text, sheet: Sheet) -> [[text]]:
         return _array_sort(tokens, 2, sheet)
     if name == "FILTER":
         return _array_filter(tokens, 2, sheet)
+    if name == "CHOOSECOLS":
+        return _array_choose_cols(tokens, 2, sheet)
+    if name == "CHOOSEROWS":
+        return _array_choose_rows(tokens, 2, sheet)
+    if name == "TAKE":
+        return _array_take(tokens, 2, sheet)
+    if name == "DROP":
+        return _array_drop(tokens, 2, sheet)
+    if name == "VSTACK":
+        return _array_vstack(tokens, 2, sheet)
+    if name == "HSTACK":
+        return _array_hstack(tokens, 2, sheet)
+    if name == "TOCOL":
+        return _array_tocol(tokens, 2, sheet)
+    if name == "TOROW":
+        return _array_torow(tokens, 2, sheet)
     []
 
 fn _read_array_range_str(tokens: [text], pos: i32) -> text:
@@ -3237,6 +3339,264 @@ fn _array_filter(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
     if out.len() == 0:
         return [["#CALC!"]]
     out
+
+fn _array_abs_i32(n: i32) -> i32:
+    if n < 0:
+        return 0 - n
+    n
+
+fn _array_collect_nums(tokens: [text], pos: i32, sheet: Sheet) -> [i32]:
+    """Collect the trailing comma-separated scalar integer args (indices/counts)
+    starting at pos, stopping at ')' or end. Empty tokens are skipped to keep
+    the scan making progress."""
+    var out: [i32] = []
+    var cur = pos
+    while cur < tokens.len() and tokens.get(cur) != ")":
+        val a = _read_array_num_arg(tokens, cur, sheet)
+        if a.present:
+            out.push(a.value.to_i64().to_i32())
+            cur = _skip_comma(tokens, a.next_pos)
+        else:
+            cur = _skip_comma(tokens, cur + 1)
+    out
+
+fn _array_read_grid(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
+    """Read the leading range argument at pos into a row-major grid, or [] if
+    the argument is not a range."""
+    val rs = _read_array_range_str(tokens, pos)
+    if rs == "":
+        return []
+    val rng = parse_range(rs)
+    if rng == nil:
+        return []
+    _array_range_grid(rng, sheet)
+
+fn _array_choose_cols(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
+    """CHOOSECOLS(range, c1, [c2...]) -> the named columns in order (1-based;
+    negative counts from the end). Out-of-range or index 0 -> #ERR."""
+    val src = _array_read_grid(tokens, pos, sheet)
+    if src.len() == 0:
+        return []
+    val ncols = src[0].len()
+    val want = _array_collect_nums(tokens, _skip_comma(tokens, pos + 3), sheet)
+    if want.len() == 0:
+        return [["#ERR"]]
+    var idxs: [i32] = []
+    for ci in want:
+        var real = ci
+        if real < 0:
+            real = ncols + real + 1
+        if real < 1 or real > ncols:
+            return [["#ERR"]]
+        idxs.push(real - 1)
+    var out: [[text]] = []
+    var r = 0
+    while r < src.len():
+        var row: [text] = []
+        for ix in idxs:
+            row.push(src[r][ix])
+        out.push(row)
+        r = r + 1
+    out
+
+fn _array_choose_rows(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
+    """CHOOSEROWS(range, r1, [r2...]) -> the named rows in order (1-based;
+    negative counts from the end). Out-of-range or index 0 -> #ERR."""
+    val src = _array_read_grid(tokens, pos, sheet)
+    if src.len() == 0:
+        return []
+    val nrows = src.len()
+    val want = _array_collect_nums(tokens, _skip_comma(tokens, pos + 3), sheet)
+    if want.len() == 0:
+        return [["#ERR"]]
+    var out: [[text]] = []
+    for ri in want:
+        var real = ri
+        if real < 0:
+            real = nrows + real + 1
+        if real < 1 or real > nrows:
+            return [["#ERR"]]
+        var row: [text] = []
+        for c in src[real - 1]:
+            row.push(c)
+        out.push(row)
+    out
+
+fn _array_take(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
+    """TAKE(range, rows, [cols]) -> the first (or last, if negative) `rows` rows
+    and, when given, `cols` columns. A 0 count or a count exceeding the size
+    fails closed with #ERR; an omitted cols count keeps all columns."""
+    val src = _array_read_grid(tokens, pos, sheet)
+    if src.len() == 0:
+        return []
+    val nrows = src.len()
+    val ncols = src[0].len()
+    val nums = _array_collect_nums(tokens, _skip_comma(tokens, pos + 3), sheet)
+    if nums.len() == 0:
+        return [["#ERR"]]
+    val rn = nums[0]
+    if rn == 0 or _array_abs_i32(rn) > nrows:
+        return [["#ERR"]]
+    val take_rows = _array_abs_i32(rn)
+    val row_start = if rn > 0: 0 else: nrows - take_rows
+    var col_start = 0
+    var take_cols = ncols
+    if nums.len() >= 2:
+        val cn = nums[1]
+        if cn == 0 or _array_abs_i32(cn) > ncols:
+            return [["#ERR"]]
+        take_cols = _array_abs_i32(cn)
+        col_start = if cn > 0: 0 else: ncols - take_cols
+    var out: [[text]] = []
+    var r = row_start
+    while r < row_start + take_rows:
+        var row: [text] = []
+        var c = col_start
+        while c < col_start + take_cols:
+            row.push(src[r][c])
+            c = c + 1
+        out.push(row)
+        r = r + 1
+    out
+
+fn _array_drop(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
+    """DROP(range, rows, [cols]) -> the range with the first (or last, if
+    negative) `rows` rows and optional `cols` columns removed. A 0 count or a
+    count that would remove everything fails closed with #ERR."""
+    val src = _array_read_grid(tokens, pos, sheet)
+    if src.len() == 0:
+        return []
+    val nrows = src.len()
+    val ncols = src[0].len()
+    val nums = _array_collect_nums(tokens, _skip_comma(tokens, pos + 3), sheet)
+    if nums.len() == 0:
+        return [["#ERR"]]
+    val rn = nums[0]
+    if rn == 0 or _array_abs_i32(rn) >= nrows:
+        return [["#ERR"]]
+    val drop_rows = _array_abs_i32(rn)
+    val row_start = if rn > 0: drop_rows else: 0
+    val row_end = if rn > 0: nrows else: nrows - drop_rows
+    var col_start = 0
+    var col_end = ncols
+    if nums.len() >= 2:
+        val cn = nums[1]
+        if cn == 0 or _array_abs_i32(cn) >= ncols:
+            return [["#ERR"]]
+        val drop_cols = _array_abs_i32(cn)
+        col_start = if cn > 0: drop_cols else: 0
+        col_end = if cn > 0: ncols else: ncols - drop_cols
+    var out: [[text]] = []
+    var r = row_start
+    while r < row_end:
+        var row: [text] = []
+        var c = col_start
+        while c < col_end:
+            row.push(src[r][c])
+            c = c + 1
+        out.push(row)
+        r = r + 1
+    out
+
+fn _array_stack_grids(tokens: [text], pos: i32, sheet: Sheet) -> [[[text]]]:
+    """Read the variadic range/cell arguments of VSTACK/HSTACK into a list of
+    grids, in order."""
+    var grids: [[[text]]] = []
+    var cur = pos
+    while cur < tokens.len() and tokens.get(cur) != ")":
+        val rs = _read_array_range_str(tokens, cur)
+        if rs != "":
+            val rng = parse_range(rs)
+            if rng != nil:
+                grids.push(_array_range_grid(rng, sheet))
+            cur = _skip_comma(tokens, cur + 3)
+        else:
+            val tok = tokens.get(cur)
+            val next_tok = if cur + 1 < tokens.len(): tokens.get(cur + 1) else: ""
+            if _is_cell_ref_token(tok) and (next_tok == "," or next_tok == ")"):
+                grids.push([[cell_display_text(sheet.get_cell(tok))]])
+                cur = _skip_comma(tokens, cur + 1)
+            else:
+                cur = _skip_comma(tokens, cur + 1)
+    grids
+
+fn _array_vstack(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
+    """VSTACK(range1, range2, ...) -> the grids stacked top-to-bottom. Ragged
+    widths are right-padded with #N/A to the widest row (Excel semantics)."""
+    val grids = _array_stack_grids(tokens, pos, sheet)
+    var maxw = 0
+    for g in grids:
+        for row in g:
+            if row.len() > maxw:
+                maxw = row.len()
+    if maxw == 0:
+        return [["#ERR"]]
+    var out: [[text]] = []
+    for g in grids:
+        for row in g:
+            var padded: [text] = []
+            for c in row:
+                padded.push(c)
+            while padded.len() < maxw:
+                padded.push("#N/A")
+            out.push(padded)
+    out
+
+fn _array_hstack(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
+    """HSTACK(range1, range2, ...) -> the grids placed side-by-side. Ragged
+    heights are bottom-padded with #N/A to the tallest grid (Excel semantics)."""
+    val grids = _array_stack_grids(tokens, pos, sheet)
+    var maxh = 0
+    for g in grids:
+        if g.len() > maxh:
+            maxh = g.len()
+    if maxh == 0:
+        return [["#ERR"]]
+    var out: [[text]] = []
+    var r = 0
+    while r < maxh:
+        var row: [text] = []
+        for g in grids:
+            var w = 0
+            if g.len() > 0:
+                w = g[0].len()
+            if r < g.len():
+                for c in g[r]:
+                    row.push(c)
+            else:
+                var k = 0
+                while k < w:
+                    row.push("#N/A")
+                    k = k + 1
+        out.push(row)
+        r = r + 1
+    out
+
+fn _array_tocol(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
+    """TOCOL(range) -> the range flattened row-major into a single column."""
+    val src = _array_read_grid(tokens, pos, sheet)
+    if src.len() == 0:
+        return []
+    var out: [[text]] = []
+    for row in src:
+        for c in row:
+            out.push([c])
+    if out.len() == 0:
+        return [["#ERR"]]
+    out
+
+fn _array_torow(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
+    """TOROW(range) -> the range flattened row-major into a single row."""
+    val src = _array_read_grid(tokens, pos, sheet)
+    if src.len() == 0:
+        return []
+    var row: [text] = []
+    for r in src:
+        for c in r:
+            row.push(c)
+    if row.len() == 0:
+        return [["#ERR"]]
+    [row]
 
 # =========================================================================
 # Cell Resolution
