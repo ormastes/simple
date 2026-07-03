@@ -217,8 +217,26 @@ impl CoreLexer:
                         self.advance()
                     else:
                         break
-                val num_text: text = self.source[start:self.pos]
-                self.make_token(1, num_text, start_line, start_col)
+                var num_text: text = self.source[start:self.pos]
+                # Type suffix: 0x10000000u64 / 0x1234_u64 (decimal parity;
+                # the hex-digit loop already stopped at the non-hex alpha).
+                var hex_suffix: text = ""
+                val hxlen: i64 = num_text.len()
+                if is_alpha(self.peek()):
+                    if hxlen > 0 and num_text[hxlen - 1:hxlen] == "_":
+                        num_text = num_text[0:hxlen - 1]
+                    var hsuf_start: i64 = self.pos
+                    for si in 0..1000:
+                        if is_ident_char(self.peek()):
+                            self.advance()
+                        else:
+                            break
+                    hex_suffix = self.source[hsuf_start:self.pos]
+                rt_env_set("SIMPLE_BOOTSTRAP_CORE_TOKEN_SUFFIX", hex_suffix)
+                if hex_suffix != "":
+                    self.make_token(7, num_text, start_line, start_col)
+                else:
+                    self.make_token(1, num_text, start_line, start_col)
                 self.cur_text = num_text
                 rt_env_set("SIMPLE_BOOTSTRAP_CORE_TOKEN_TEXT", num_text)
                 return
@@ -670,6 +688,13 @@ impl CoreLexer:
 
         self.at_line_start = false
 
+        # Leading-dot method-chain / leading-pipe pattern-alternative
+        # continuation: a line starting with `.` or `|` continues the
+        # previous expression — suppress Indent/Dedent.
+        if next_c == "." or next_c == "|":
+            self.scan_token()
+            return
+
         # Inside parentheses/brackets: suppress Indent/Dedent tokens entirely.
         # The indent stack is left unchanged so it remains valid after the closing bracket.
         if self.paren_depth > 0:
@@ -681,7 +706,7 @@ impl CoreLexer:
         val hi_is_binop = (hi_lk == 55 or hi_lk == 56 or
             hi_lk == 60 or hi_lk == 61 or hi_lk == 62 or hi_lk == 63 or
             hi_lk == 80 or hi_lk == 81 or hi_lk == 160 or
-            hi_lk == 120 or hi_lk == 121)
+            hi_lk == 120 or hi_lk == 121 or hi_lk == 100)
         if hi_is_binop:
             self.scan_token()
             return
@@ -722,6 +747,13 @@ impl CoreLexer:
 
     # ----- Main Token Scanner -----
 
+    # ponytail: trampoline — the Rust seed interpreter cannot dispatch a
+    # self-recursive `me` call (Function 'CoreLexer.scan_token' not found);
+    # routing the rescan through this second method makes every hop a
+    # cross-method call, which the seed resolves fine.
+    me scan_token_rescan():
+        self.scan_token()
+
     me scan_token():
         # Skip spaces (not newlines) - but NOT at line start (indentation needs them)
         if not self.at_line_start:
@@ -753,16 +785,29 @@ impl CoreLexer:
             self.at_line_start = true
             if self.paren_depth > 0:
                 # Inside parens: suppress newline, scan next token
-                self.scan_token()
+                self.scan_token_rescan()
                 return
             # G27: trailing binary operator — suppress newline (line continuation)
             val lk = self.cur_kind
             val g27_is_binop = (lk == 55 or lk == 56 or
                 lk == 60 or lk == 61 or lk == 62 or lk == 63 or
                 lk == 80 or lk == 81 or lk == 160 or
-                lk == 120 or lk == 121)
+                lk == 120 or lk == 121 or lk == 100)
             if g27_is_binop:
-                self.scan_token()
+                self.scan_token_rescan()
+                return
+            # Leading-dot / leading-pipe continuation: if the next line's first
+            # non-blank char is `.` or `|`, suppress the newline (continuation).
+            var dot_la: i64 = self.pos
+            for _di in 0..100000:
+                val dc: text = self.source[dot_la:dot_la + 1]
+                if dc == " " or dc == "\t":
+                    dot_la = dot_la + 1
+                else:
+                    break
+            val la_c: text = self.source[dot_la:dot_la + 1]
+            if la_c == "." or la_c == "|":
+                self.scan_token_rescan()
                 return
             self.make_token(180, _NL, start_line, start_col)
             return
@@ -784,7 +829,7 @@ impl CoreLexer:
                     break
                 self.advance()
             # Recurse to get next real token
-            self.scan_token()
+            self.scan_token_rescan()
             return
 
         # String literal
@@ -926,6 +971,9 @@ impl CoreLexer:
             if self.match_char("&"):
                 # G32: `&&` is logical-and — same kind as keyword `and`
                 self.make_token(55, "&&", start_line, start_col)
+            elif self.match_char(":"):
+                # `&:method` method-reference sigil (AmpColon, seed parity)
+                self.make_token(210, "&:", start_line, start_col)
             else:
                 self.make_token(120, "&", start_line, start_col)
             return

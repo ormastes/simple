@@ -303,6 +303,28 @@ fn parse_comparison() -> i64:
             parser_advance()
             val right = parse_null_coalesce()
             left = expr_binary(85, left, right, 0)
+        elif par_kind_get() == 50:
+            # `a in b` → b.contains(a)
+            parser_advance()
+            val in_right = parse_null_coalesce()
+            left = expr_method_call(in_right, "contains", [left], 0)
+        elif par_kind_get() == 57 and par_text_get() == "not":
+            # `a not in b` → not b.contains(a). Postfix `!` shares kind 57
+            # but has text "!". Textual `not` after an operand is only
+            # `not in` when the NEXT token is `in` — otherwise it belongs
+            # to an outer context (e.g. `assert not x` with `assert`
+            # parsed as an ident), so backtrack and break.
+            val (nn_snap_nums, nn_snap_txts) = lex_snapshot_save()
+            val (nn_tok_nums, nn_tok_text) = parser_tok_save()
+            parser_advance()
+            if par_kind_get() != 50:
+                lex_snapshot_restore(nn_snap_nums, nn_snap_txts)
+                parser_tok_restore(nn_tok_nums, nn_tok_text)
+                break
+            parser_advance()
+            val ni_right = parse_null_coalesce()
+            val ni_contains = expr_method_call(ni_right, "contains", [left], 0)
+            left = expr_unary(57, ni_contains, 0)
         else:
             break
     left
@@ -536,7 +558,20 @@ fn parse_binary_from(base: i64) -> i64:
         elif par_kind_get() == 50:
             parser_advance()
             val right = parse_null_coalesce()
-            left = expr_method_call(right, "contains", [], 0)
+            left = expr_method_call(right, "contains", [left], 0)
+        elif par_kind_get() == 57 and par_text_get() == "not":
+            # `a not in b` — only when the next token is `in`; see parse_comparison.
+            val (nb_snap_nums, nb_snap_txts) = lex_snapshot_save()
+            val (nb_tok_nums, nb_tok_text) = parser_tok_save()
+            parser_advance()
+            if par_kind_get() != 50:
+                lex_snapshot_restore(nb_snap_nums, nb_snap_txts)
+                parser_tok_restore(nb_tok_nums, nb_tok_text)
+                break
+            parser_advance()
+            val ni_right = parse_null_coalesce()
+            val ni_contains = expr_method_call(ni_right, "contains", [left], 0)
+            left = expr_unary(57, ni_contains, 0)
         elif par_kind_get() == 39:
             parser_advance()
             val cast_type = parser_parse_type()
@@ -934,12 +969,14 @@ fn parse_postfix_on(base_expr: i64) -> i64:
             # Standalone existence check: expr.?
             parser_advance()
             base = expr_exists_check(base, 0)
-        elif par_kind_get() == 57:
+        elif par_kind_get() == 57 and par_text_get() == "!":
             # G44: postfix `!` force-unwrap (expr!, expr!.field). Pervasive
             # (loc!./func!. etc.). In postfix position a `!` after a primary is
             # always force-unwrap (prefix-not is handled before the primary).
             # Distinct EXPR_FORCE_UNWRAP node (panic-on-nil) vs .? exists-check
             # (nil-on-absent); lowers to HirExprKind.Unwrap. Panic codegen = M12.
+            # Text guard: kind 57 is shared with textual `not` (e.g. `a not in b`),
+            # which must be left for the comparison layer.
             parser_advance()
             base = expr_force_unwrap(base, 0)
         else:
@@ -1104,7 +1141,7 @@ fn parse_postfix() -> i64:
             # Try/unwrap operator: expr? — propagate Err / None
             parser_advance()
             base = expr_exists_check(base, 0)
-        elif par_kind_get() == 57:
+        elif par_kind_get() == 57 and par_text_get() == "!":
             # G44: postfix `!` force-unwrap (expr!, expr!.field) — see parse_postfix.
             parser_advance()
             base = expr_force_unwrap(base, 0)

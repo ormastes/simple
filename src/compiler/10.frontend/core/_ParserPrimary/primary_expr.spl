@@ -129,6 +129,71 @@ fn parse_fn_lambda_after_kw() -> i64:
         fn_lam_stmts.push(fn_body_e)
     expr_lambda(fn_param_names, fn_lam_stmts, 0)
 
+# Integer literal token text -> value, supporting _ separators and
+# 0x/0b/0o prefixes. Shared by plain (kind 1) and suffixed (kind 7) ints
+# (suffixed hex like 0x10000000u64 previously hit the decimal-only path).
+fn parse_int_literal_text(int_text: text) -> i64:
+    if int_text.len() > 2:
+        val prefix = int_text[0:2]
+        if prefix == "0x":
+            # Hex literal: parse digit by digit. int(hc) cannot be used for
+            # letters: int("a") numeric-parses and errors ("cannot parse 'a'
+            # as i64"), which broke const-eval of any hex literal with an
+            # a-f digit (e.g. kernel 0xc... constants).
+            val hex_digits = int_text[2:]
+            var hex_val = 0
+            var hi = 0
+            while hi < hex_digits.len():
+                val hc = hex_digits[hi:hi+1]
+                if hc != "_":
+                    var hd = 0
+                    val lower = "0123456789abcdef"
+                    val upper = "0123456789ABCDEF"
+                    var k = 0
+                    while k < 16:
+                        if lower[k:k+1] == hc or upper[k:k+1] == hc:
+                            hd = k
+                        k = k + 1
+                    hex_val = hex_val * 16 + hd
+                hi = hi + 1
+            return hex_val
+        if prefix == "0b":
+            # Binary literal: parse digit by digit
+            val bin_digits = int_text[2:]
+            var bin_val = 0
+            var bi = 0
+            while bi < bin_digits.len():
+                val bc = bin_digits[bi:bi+1]
+                if bc == "1":
+                    bin_val = bin_val * 2 + 1
+                elif bc == "0":
+                    bin_val = bin_val * 2
+                bi = bi + 1
+            return bin_val
+        if prefix == "0o":
+            # Octal literal: parse digit by digit
+            val oct_digits = int_text[2:]
+            var oct_val = 0
+            var oi = 0
+            while oi < oct_digits.len():
+                val oc = oct_digits[oi:oi+1]
+                if oc != "_":
+                    oct_val = oct_val * 8 + int(oc)
+                oi = oi + 1
+            return oct_val
+    # Decimal -- strip _ separators then parse
+    var stripped: text = ""
+    var si = 0
+    while si < int_text.len():
+        val sc = int_text[si:si+1]
+        if sc != "_":
+            stripped = stripped + sc
+        si = si + 1
+    var int_val = 0
+    if stripped.len() > 0:
+        int_val = parser_guarded_int_text(stripped)
+    int_val
+
 fn parse_primary_expr() -> i64:
     if parser_primary_trace_line_enabled():
         eprint("[parser-primary] start kind={par_kind_get()} text={par_text_get()} line={par_line_get()} col={par_col_get()}")
@@ -253,74 +318,18 @@ fn parse_primary_expr() -> i64:
             val raw_asm = parse_raw_asm_braced_payload()
             return expr_asm(raw_asm, 0)
 
+        if par_kind_get() == 164:
+            # `asm` used as a plain identifier (e.g. `asm.constraints`);
+            # the postfix layer parses the field access.
+            return expr_ident("asm", 0)
+
         parser_error("expected string literal, ':' block, or '{...}' after 'asm'")
         return expr_asm("", 0)
 
     if par_kind_get() == 1:
         val int_text = par_text_get()
         parser_advance()
-        # Parse integer from text (supporting _ separators and 0x/0b/0o prefixes)
-        var int_val = 0
-        if int_text.len() > 2:
-            val prefix = int_text[0:2]
-            if prefix == "0x":
-                # Hex literal: parse digit by digit
-                val hex_digits = int_text[2:]
-                var hex_val = 0
-                var hi = 0
-                while hi < hex_digits.len():
-                    val hc = hex_digits[hi:hi+1]
-                    if hc != "_":
-                        # Map hex digit -> value via lookup. int(hc) cannot be used
-                        # for letters: int("a") numeric-parses and errors ("cannot
-                        # parse 'a' as i64"), which broke const-eval of any hex
-                        # literal with an a-f digit (e.g. kernel 0xc... constants).
-                        var hd = 0
-                        val lower = "0123456789abcdef"
-                        val upper = "0123456789ABCDEF"
-                        var k = 0
-                        while k < 16:
-                            if lower[k:k+1] == hc or upper[k:k+1] == hc:
-                                hd = k
-                            k = k + 1
-                        hex_val = hex_val * 16 + hd
-                    hi = hi + 1
-                return expr_int_lit(hex_val, 0)
-            if prefix == "0b":
-                # Binary literal: parse digit by digit
-                val bin_digits = int_text[2:]
-                var bin_val = 0
-                var bi = 0
-                while bi < bin_digits.len():
-                    val bc = bin_digits[bi:bi+1]
-                    if bc == "1":
-                        bin_val = bin_val * 2 + 1
-                    elif bc == "0":
-                        bin_val = bin_val * 2
-                    bi = bi + 1
-                return expr_int_lit(bin_val, 0)
-            if prefix == "0o":
-                # Octal literal: parse digit by digit
-                val oct_digits = int_text[2:]
-                var oct_val = 0
-                var oi = 0
-                while oi < oct_digits.len():
-                    val oc = oct_digits[oi:oi+1]
-                    if oc != "_":
-                        oct_val = oct_val * 8 + int(oc)
-                    oi = oi + 1
-                return expr_int_lit(oct_val, 0)
-        # Decimal -- strip _ separators then parse
-        var stripped: text = ""
-        var si = 0
-        while si < int_text.len():
-            val sc = int_text[si:si+1]
-            if sc != "_":
-                stripped = stripped + sc
-            si = si + 1
-        if stripped.len() > 0:
-            int_val = parser_guarded_int_text(stripped)
-        return expr_int_lit(int_val, 0)
+        return expr_int_lit(parse_int_literal_text(int_text), 0)
 
     if par_kind_get() == 2:
         val float_text = par_text_get()
@@ -332,8 +341,7 @@ fn parse_primary_expr() -> i64:
         val suf_name = lex_cur_suffix_get()
         parser_advance()
         parser_validate_unit_suffix(suf_name)
-        val int_val = parser_guarded_int_text(suf_text)
-        return expr_suffixed_int(int_val, suf_name, 0)
+        return expr_suffixed_int(parse_int_literal_text(suf_text), suf_name, 0)
 
     if par_kind_get() == 8:
         val suf_text = par_text_get()

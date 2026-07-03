@@ -45,6 +45,7 @@ use compiler.core.ast.{STMT_STATIC_FOR, stmt_static_for_stmt}
 use compiler.core.ast.{STMT_COMPTIME, stmt_comptime_block, decl_set_comptime}
 use compiler.core.ast.{STMT_RECEIVE, stmt_receive_stmt, STMT_BIND, stmt_bind_stmt}
 use compiler.core.ast.{stmt_defer_stmt, stmt_errdefer_stmt}
+use compiler.core.ast.{decl_extern_fn}
 use compiler.core.ast.{STMT_GPU_LAUNCH, stmt_gpu_launch}
 use compiler.core.ast.{arm_new, arm_new_with_binding, arm_new_with_binding_and_rationale}
 use compiler.core.ast.{elif_new}
@@ -60,6 +61,8 @@ use std.nogc_sync_mut.io.process_ops.{eprint}
 
 # Import expression parsing
 use compiler.frontend.core.parser_expr.{parse_expr, parse_or, parse_postfix_on, parse_binary_from}
+use compiler.frontend.core.lexer.{lex_snapshot_save, lex_snapshot_restore}
+use compiler.core.parser.{parser_tok_save, parser_tok_restore}
 use compiler.core.ast.{expr_assign, expr_compound_assign}
 extern fn rt_env_get(key: text) -> text
 
@@ -235,6 +238,40 @@ fn parse_use_stmt_inline() -> i64:
             parser_advance()
     stmt_expr_stmt(expr_pass(0), 0)
 
+# extern fn declaration inside a function body: register the signature
+# globally (same as a top-level extern) and emit a no-op statement.
+# Inlined here (like parse_use_stmt_inline) to avoid a circular dep with
+# the decl-parsing modules, which import parse_block from this file.
+fn parse_extern_fn_stmt_inline() -> i64:
+    parser_advance()  # consume 'extern'
+    parser_expect(20)
+    val ef_name = par_text_get()
+    parser_expect(6)
+    parser_expect(140)
+    var ef_pnames: [text] = []
+    var ef_ptypes: [i64] = []
+    for _ei in 0..100:
+        if par_kind_get() == 141 or par_kind_get() == 190:
+            break
+        val ef_pn = par_text_get()
+        parser_advance()  # param name (ident or keyword)
+        var ef_pt = 0
+        if par_kind_get() == 161:
+            parser_advance()
+            ef_pt = parser_parse_type()
+        ef_pnames.push(ef_pn)
+        ef_ptypes.push(ef_pt)
+        if par_kind_get() == 160:
+            parser_advance()
+    parser_expect(141)
+    var ef_ret = TYPE_VOID
+    if par_kind_get() == 167:
+        parser_advance()
+        ef_ret = parser_parse_type()
+    val ef_tparams: [text] = []
+    decl_extern_fn(ef_name, ef_pnames, ef_ptypes, ef_ret, ef_tparams, 0)
+    stmt_expr_stmt(expr_pass(0), 0)
+
 fn parse_statement() -> i64:
     if par_kind_get() == 21:
         return parse_val_decl_stmt()
@@ -250,6 +287,10 @@ fn parse_statement() -> i64:
     # Avoids circular dep with parser_decls_use.spl (which imports parse_block from here).
     if par_kind_get() == 27:
         return parse_use_stmt_inline()
+
+    # extern fn declaration inside a function body
+    if par_kind_get() == 25:
+        return parse_extern_fn_stmt_inline()
 
     if par_kind_get() == 49:
         parser_advance()
@@ -430,6 +471,36 @@ fn parse_statement() -> i64:
             args1.push(print_arg)
             val call1 = expr_call(callee1, args1, 0)
             return stmt_expr_stmt(call1, 0)
+
+    # `assert cond [, msg]` — `assert` lexes as a plain Ident in the stage4
+    # CoreLexer, so without this the optional `, msg` tail derails the
+    # enclosing arm/statement. Cond becomes an expression statement; the
+    # message is parsed and dropped (no assert node at this stage).
+    if par_kind_get() == TOK_IDENT and par_text_get() == "assert":
+        parser_advance()
+        val assert_cond = parse_expr()
+        if par_kind_get() == 160:
+            parser_advance()
+            val _assert_msg = parse_expr()
+        return stmt_expr_stmt(assert_cond, 0)
+
+    # `me NAME(...) [-> T]: body` in statement position (a class's methods
+    # written at fn-body indent, e.g. semantics/resolve.spl) — same desugar
+    # as the named nested fn below: `val NAME = fn(...): body`.
+    # Only when an identifier follows: `me` is also the self-alias in
+    # expressions (`me.backend.move_cursor(...)` in office/editor code),
+    # which must fall through to the expression path — backtrack then.
+    if par_kind_get() == 34:
+        val (me_snap_nums, me_snap_txts) = lex_snapshot_save()
+        val (me_tok_nums, me_tok_text) = parser_tok_save()
+        parser_advance()  # consume me
+        if par_kind_get() == TOK_IDENT:
+            val me_stmt_name = par_text_get()
+            parser_advance()
+            val me_stmt_lambda = parse_fn_lambda_after_kw()
+            return stmt_val_decl(me_stmt_name, 0, me_stmt_lambda, 0)
+        lex_snapshot_restore(me_snap_nums, me_snap_txts)
+        parser_tok_restore(me_tok_nums, me_tok_text)
 
     # G_named_nested_fn: `fn NAME(...): body` as a STATEMENT — a named nested
     # fn declared inside another fn's body (only anonymous `fn(...): ...`
@@ -728,6 +799,10 @@ fn parse_for_stmt() -> i64:
             ni = ni + 1
         joined = joined + ")"
         iter_name = joined
+    elif par_kind_get() == 169:
+        # Wildcard binding: for _ in xs:
+        iter_name = "_"
+        parser_advance()
     else:
         iter_name = par_text_get()
         parser_expect(6)
@@ -1076,6 +1151,23 @@ fn parse_if_expr() -> i64:
     # `else` is keyword kind 41 (same as block form); parse_expr for the cond
     # stops at `then` (Ident, not an operator) and the then-branch stops at
     # `else` (kw 41). Bridge else/elif fidelity is tracked under M12.
+    # Brace-form if expression: `if cond { X } else { Y }` (Rust-style braces).
+    if par_kind_get() == 142:
+        parser_advance()
+        val br_then = parse_expr()
+        parser_expect(143)
+        var br_else: i64 = expr_unit(0)
+        if par_kind_get() == 41:
+            parser_advance()
+            if par_kind_get() == 40:
+                br_else = parse_if_expr()
+            elif par_kind_get() == 142:
+                parser_advance()
+                br_else = parse_expr()
+                parser_expect(143)
+            else:
+                br_else = parse_expr()
+        return expr_if_expr(cond, br_then, br_else, 0)
     if par_kind_get() == 6:
         parser_advance()
         # G45: optional `:` after `then` (`then: X` variant)
