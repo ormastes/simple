@@ -30,7 +30,10 @@
 # Usage: bin/simple run src/app/test/cross_app_glyph_capture.spl [out_dir]
 
 use std.gpu.engine2d.backend_software.{SoftwareBackend}
+use std.gpu.engine2d.glyph.{glyph_data, glyph_advance}
 use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_html_to_pixels_with_engine2d_backend}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{text_advance}
+use common.ui.glyph_bitmap_5x7.{FONT_CHARSET, glyph_row_bits, glyph_index_for_char_code}
 use common.image.ppm_decode.{encode_ppm_p6}
 use std.nogc_sync_mut.sffi.io.{file_write_bytes}
 use std.sffi.cli.{cli_get_args}
@@ -108,6 +111,39 @@ fn ink_at(pixels: [u32], w: i32, bg: u32, bx: i32, by: i32, bw: i32, bh: i32, dx
     if dx >= bw or dy >= bh:
         return false
     pixels[(by + dy) * w + (bx + dx)] != bg
+
+# @step: Source-level strict comparison over the full 88-char charset.
+# Compares the Engine2D paint lookup (glyph_data) against the browser paint
+# lookup (glyph_row_bits o glyph_index_for_char_code) row-by-row, bit-by-bit.
+# Returns (chars_compared, mismatched_chars, mismatched_pixels).
+fn strict_table_compare() -> (i32, i32, i32):
+    var chars = 0
+    var bad_chars = 0
+    var bad_px = 0
+    var i = 0
+    while i < FONT_CHARSET.len():
+        val ch = FONT_CHARSET.char_at(i)
+        val e2d = glyph_data(ch)
+        val gi = glyph_index_for_char_code(ch.char_code_at(0))
+        var char_bad = false
+        var row = 0
+        while row < 7:
+            val browser_row = glyph_row_bits(gi, row)
+            val e2d_row = e2d[row]
+            var col = 0
+            while col < 5:
+                val bb = (browser_row >> (4 - col)) & 1
+                val eb = (e2d_row >> (4 - col)) & 1
+                if bb != eb:
+                    bad_px = bad_px + 1
+                    char_bad = true
+                col = col + 1
+            row = row + 1
+        if char_bad:
+            bad_chars = bad_chars + 1
+        chars = chars + 1
+        i = i + 1
+    (chars, bad_chars, bad_px)
 
 fn main() -> i64:
     val args = cli_get_args()
@@ -203,7 +239,21 @@ fn main() -> i64:
     if total_pixels > 0:
         val matching_pct = ((total_pixels - total_mismatched) as f64) / (total_pixels as f64) * 100.0
         print "matching_pct={matching_pct}"
-    val glyph_consistency_status = if total_mismatched == 0: "identical" else: "diverges"
+
+    # ---- Full-charset source-level strict identity + advance check ---------
+    val (strict_chars, strict_bad_chars, strict_bad_px) = strict_table_compare()
+    print "strict_charset_count={strict_chars}"
+    print "strict_mismatched_chars={strict_bad_chars}"
+    print "strict_mismatched_pixels={strict_bad_px}"
+    val adv_e2d = glyph_advance(2)
+    val adv_browser = text_advance(16)
+    print "advance_engine2d={adv_e2d}"
+    print "advance_browser={adv_browser}"
+    val advance_match = if adv_e2d == adv_browser: "true" else: "false"
+    print "advance_match={advance_match}"
+
+    val tables_identical = strict_bad_px == 0 and adv_e2d == adv_browser
+    val glyph_consistency_status = if total_mismatched == 0 and tables_identical: "identical" else: "diverges"
     print "glyph_consistency_status={glyph_consistency_status}"
 
     if all_pass:

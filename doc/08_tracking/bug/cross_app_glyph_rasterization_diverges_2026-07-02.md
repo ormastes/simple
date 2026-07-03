@@ -1,9 +1,58 @@
 # Browser and GUI showcase use independently authored 5x7 glyph tables that diverge for most letters
 
 Date: 2026-07-02
-Status: open
+Status: fixed (2026-07-03) — shared 5x7 table; both paths byte-identical; advance unified at 5*scale
 Severity: P2 (visual-parity gate, not a crash/data-loss bug)
 Found by: W-G2.5 lane agent (source-verified, then confirmed with a rendered pixel oracle)
+
+## Resolution (2026-07-03)
+
+The browser side is pinned by checked-in exact-pixel baselines, so the browser
+table is the source of truth. The fix:
+
+- Extracted the browser's 5x7 table + lookups into ONE shared module,
+  `src/lib/common/ui/glyph_bitmap_5x7.spl` (`FONT_ROWS_PACKED`,
+  `FONT_UNKNOWN_PACKED`, `glyph_row_bits`, `glyph_index_for_char_code`,
+  `glyph_index_for_char`, plus `glyph_rows_for_char` for Engine2D). The data is
+  the browser's original array verbatim.
+- `simple_web_html_layout_renderer.spl` now imports `glyph_row_bits` /
+  `glyph_index_for_char_code` from the shared module (dead `FONT_CHARSET`,
+  `_glyph_charset_index_of`, `glyph_index_for_char` removed).
+- `std.gpu.engine2d.glyph.glyph_data()` delegates to
+  `glyph_rows_for_char()`; the old `GLYPH_ROWS_PRINTABLE_ASCII` table and its
+  helpers are deleted. Characters outside the shared 88-char charset now resolve
+  to the shared box-outline unknown glyph (previously a solid block).
+- Advance unified: Engine2D `glyph_advance(scale)` changed 6*scale -> 5*scale to
+  match the browser paint advance (`text_advance = 5*glyph_scale`).
+
+Verification (`scripts/check/check-cross-app-glyph-consistency.shs`): rendered
+per-char oracle over `AEFHSVXYZ` = 0/1260 mismatched pixels; source-level
+comparison over all 88 charset chars = 0 mismatched pixels, 0 mismatched chars;
+`advance_engine2d=10 == advance_browser=10`; `glyph_consistency_status=identical`.
+Browser exact-pixel baselines unchanged (html_compat, famous_site_corpus,
+web_html_input, design_effects_compat specs all still pass).
+
+### `char_w` left as-is (deliberate)
+
+The task asked to also unify the browser's own internal wrap estimate
+(`char_w(fs) = 6*glyph_scale`) with its paint advance (`text_advance =
+5*glyph_scale`). `char_w` feeds line-wrap width estimates that set per-line
+`x:` / `width:` in the checked-in exact-pixel html baselines; changing it moves
+wrap points and dirties those baselines. Constraint 4 (browser pixels must not
+move) overrides the char_w unification, so `char_w` stays `6*glyph_scale`. The
+browser's internal wrap-vs-paint inconsistency therefore remains and is folded
+into the stb_truetype convergence below.
+
+### Residual (long-term convergence, no TODO)
+
+Two items remain, both subsumed by the deferred stb_truetype migration:
+(1) the browser's `char_w` wrap estimate (6*scale) vs paint advance (5*scale)
+self-inconsistency, above; and (2) the integer scale formulas still differ
+(Engine2D `font_size/7`, browser `font_size/8`) so cross-app identity is exact
+at font-size 16 (both scale 2, the gate's size) but can diverge at other sizes.
+Migrating both `draw_text` paths onto the shared `FontRenderer` /
+`font_rasterizer.spl` (stb_truetype) stack closes both; until then the shared
+5x7 table keeps the two paths byte-identical at the gated size.
 
 ## Summary
 

@@ -1,6 +1,6 @@
 # Cross-App Glyph Consistency (Browser vs GUI Showcase)
 
-> Verifies (and honestly reports the gap in) gate G2.5: "the browser and the GUI showcase render shared UI chrome ... with identical glyph rasterization and theme tokens (cross-app pixel oracle over shared widgets)."
+> Verifies gate G2.5: "the browser and the GUI showcase render shared UI chrome ... with identical glyph rasterization and theme tokens (cross-app pixel oracle over shared widgets)."
 
 <!-- sdn-diagram:id=cross_app_glyph_consistency_spec.arch -->
 <details class="sdn-source">
@@ -27,14 +27,14 @@ cross_app_glyph_consistency_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 5 | 5 | 0 | 0 |
+| 6 | 6 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
 
 # Cross-App Glyph Consistency (Browser vs GUI Showcase)
 
-Verifies (and honestly reports the gap in) gate G2.5: "the browser and the GUI showcase render shared UI chrome ... with identical glyph rasterization and theme tokens (cross-app pixel oracle over shared widgets)."
+Verifies gate G2.5: "the browser and the GUI showcase render shared UI chrome ... with identical glyph rasterization and theme tokens (cross-app pixel oracle over shared widgets)."
 
 ## At a Glance
 
@@ -42,7 +42,7 @@ Verifies (and honestly reports the gap in) gate G2.5: "the browser and the GUI s
 |-------|-------|
 | Feature IDs | G2.5 |
 | Category | Testing \| Infrastructure \| GUI |
-| Status | In Progress |
+| Status | Done |
 | Requirements | doc/03_plan/ui/production_readiness_master_plan_2026-07-02.md (G2.5) |
 | Design | N/A |
 | Source | `test/03_system/check/cross_app_glyph_consistency_spec.spl` |
@@ -51,34 +51,32 @@ Verifies (and honestly reports the gap in) gate G2.5: "the browser and the GUI s
 
 ## Overview
 
-Verifies (and honestly reports the gap in) gate G2.5: "the browser and the
-GUI showcase render shared UI chrome ... with identical glyph rasterization
-and theme tokens (cross-app pixel oracle over shared widgets)."
+Verifies gate G2.5: "the browser and the GUI showcase render shared UI chrome
+... with identical glyph rasterization and theme tokens (cross-app pixel
+oracle over shared widgets)."
 
-`scripts/check/check-cross-app-glyph-consistency.shs` renders the same
-characters via two independent text paths, offscreen only:
+Both text paths now share ONE 5x7 bitmap table
+(`src/lib/common/ui/glyph_bitmap_5x7.spl`):
 
 1. **GUI showcase path:** `std.gpu.engine2d.backend_software.SoftwareBackend
-   .draw_text()`, backed by `std.gpu.engine2d.glyph.glyph_data()` (a 5x7
-   bitmap table).
+   .draw_text()`, backed by `std.gpu.engine2d.glyph.glyph_data()`, which
+   delegates to the shared table.
 2. **Browser path:** the pure-Simple web layout renderer
-   (`simple_web_html_layout_renderer.spl`), backed by its own, separately
-   authored 5x7 bitmap table (`FONT_ROWS_PACKED`).
+   (`simple_web_html_layout_renderer.spl`), whose `glyph_row_bits` /
+   `glyph_index_for_char_code` are imported from the same shared table.
 
-Each test character is rendered alone on its own canvas per app (avoiding a
-second, unrelated divergence in the two engines' per-character advance
-formula — Engine2D uses `6*scale`px, the browser uses `5*scale`px — from
-confounding the glyph-shape comparison), then each character's own tight ink
-bounding box is pixel-diffed between the two apps.
+`scripts/check/check-cross-app-glyph-consistency.shs` proves identity two ways:
+a rendered per-character pixel oracle over `AEFHSVXYZ` (each char on its own
+canvas per app, tight-ink-box diffed) with zero mismatches, and a source-level
+comparison across the full 88-char charset (`strict_mismatched_pixels=0`). The
+per-character advance is unified at `5*scale` on both sides
+(Engine2D `glyph_advance`, browser `text_advance`).
 
-Source-level comparison of the two bitmap tables (both cover the same 88-char
-charset) found 41/88 characters byte-identical and 47/88 divergent,
-including most of A-Z. The captured character set `AEFHSVXYZ` anchors on 'A'
-and 'Z' (confirmed byte-identical) with 7 characters from the divergent set
-in between, so this spec's "some match, most diverge" assertions reflect the
-real, current state of the codebase, not a contrived worst case. The
-divergence is tracked as
-doc/08_tracking/bug/cross_app_glyph_rasterization_diverges_2026-07-02.md.
+History: the two paths formerly used independently authored tables (41/88
+identical, 47/88 divergent) and differing advances (6*scale vs 5*scale),
+tracked as
+doc/08_tracking/bug/cross_app_glyph_rasterization_diverges_2026-07-02.md
+(now fixed).
 
 Per the test_runner_masks_child_and_expectation_failures bug (see the
 Browser Interaction spec), the authoritative gate is the check script's own
@@ -188,19 +186,19 @@ if result.is_ok():
 
 </details>
 
-#### honestly records the current divergence — this is the open gate, not silently green
+#### G2.5 closed: both paths rasterize byte-identically (no divergence)
 
 - print "Loaded evidence with {entries len
-   - Expected: get_env_value(entries, "glyph_consistency_status") equals `diverges`
-   - Expected: get_env_value(entries, "diverging_chars") equals `7`
+   - Expected: get_env_value(entries, "glyph_consistency_status") equals `identical`
+   - Expected: get_env_value(entries, "diverging_chars") equals `0`
    - Expected: get_env_value(entries, "char_1_glyph") equals `E`
-   - Expected: get_env_value(entries, "char_1_status") equals `diverge`
+   - Expected: get_env_value(entries, "char_1_status") equals `match`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -215,24 +213,20 @@ else:
 val result = read_evidence_env(EVIDENCE_PATH)
 if result.is_ok():
     val entries = result.unwrap()
-    # G2.5 asks for IDENTICAL rasterization; today the two engines use
-    # independently authored 5x7 glyph tables that diverge for most
-    # letters. Asserting "diverges" here (not "identical") is the
-    # honest current-state assertion the task requires — flipping
-    # this to "identical" without fixing the underlying tables would
-    # be a faked pass.
-    expect(get_env_value(entries, "glyph_consistency_status")).to_equal("diverges")
-    expect(get_env_value(entries, "diverging_chars")).to_equal("7")
+    # Both text paths now share one 5x7 table
+    # (common.ui.glyph_bitmap_5x7), so rasterization is identical.
+    expect(get_env_value(entries, "glyph_consistency_status")).to_equal("identical")
+    expect(get_env_value(entries, "diverging_chars")).to_equal("0")
     expect(get_env_value(entries, "char_1_glyph")).to_equal("E")
-    expect(get_env_value(entries, "char_1_status")).to_equal("diverge")
+    expect(get_env_value(entries, "char_1_status")).to_equal("match")
 ```
 
 </details>
 
-#### measures partial pixel-level similarity, not total mismatch
+#### rendered per-char oracle has zero mismatched pixels
 
 - print "Loaded evidence with {entries len
-   - Expected: get_env_value(entries, "total_mismatched_pixels") equals `188`
+   - Expected: get_env_value(entries, "total_mismatched_pixels") equals `0`
    - Expected: get_env_value(entries, "total_pixels_compared") equals `1260`
 
 
@@ -254,8 +248,47 @@ else:
 val result = read_evidence_env(EVIDENCE_PATH)
 if result.is_ok():
     val entries = result.unwrap()
-    expect(get_env_value(entries, "total_mismatched_pixels")).to_equal("188")
+    expect(get_env_value(entries, "total_mismatched_pixels")).to_equal("0")
     expect(get_env_value(entries, "total_pixels_compared")).to_equal("1260")
+```
+
+</details>
+
+#### full 88-char charset is byte-identical and advance is unified at 5*scale
+
+- print "Loaded evidence with {entries len
+   - Expected: get_env_value(entries, "strict_charset_count") equals `88`
+   - Expected: get_env_value(entries, "strict_mismatched_chars") equals `0`
+   - Expected: get_env_value(entries, "strict_mismatched_pixels") equals `0`
+   - Expected: get_env_value(entries, "advance_engine2d") equals `10`
+   - Expected: get_env_value(entries, "advance_browser") equals `10`
+   - Expected: get_env_value(entries, "advance_match") equals `true`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 17 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = read_evidence_env(EVIDENCE_PATH)
+if result.is_err():
+    print "Note: evidence.env not yet generated; run scripts/check/check-cross-app-glyph-consistency.shs"
+else:
+    val entries = result.unwrap()
+    print "Loaded evidence with {entries.len()} entries"
+    expect(get_env_value(entries, "overall")).to_be_truthy()
+
+val result = read_evidence_env(EVIDENCE_PATH)
+if result.is_ok():
+    val entries = result.unwrap()
+    expect(get_env_value(entries, "strict_charset_count")).to_equal("88")
+    expect(get_env_value(entries, "strict_mismatched_chars")).to_equal("0")
+    expect(get_env_value(entries, "strict_mismatched_pixels")).to_equal("0")
+    expect(get_env_value(entries, "advance_engine2d")).to_equal("10")
+    expect(get_env_value(entries, "advance_browser")).to_equal("10")
+    expect(get_env_value(entries, "advance_match")).to_equal("true")
 ```
 
 </details>
@@ -264,8 +297,8 @@ if result.is_ok():
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 6 |
+| Active scenarios | 6 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
