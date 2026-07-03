@@ -84,6 +84,13 @@ theorem T4_wal_appended_before_commit
   obtain ⟨_, rfl⟩ := h3
   simp [txnAppendWal]
 
+/-- T4 publish-root gate: txnPublishRoot succeeds only after WAL flush. -/
+theorem T4_publish_root_requires_wal_flush (t t' : TxnState)
+    (hpublish : txnPublishRoot t = some t') :
+    t.wal_flushed = true := by
+  simp [txnPublishRoot] at hpublish
+  exact hpublish.1
+
 /-- T4 pager-level: write_page succeeds only when flushed_lsn >= page_lsn or page_lsn = 0.
     Models the gate in pager.write_page (E5 fix, 2026-06-11):
       if page_lsn > 0 and wal_flushed_lsn < page_lsn → Err. -/
