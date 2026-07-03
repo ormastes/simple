@@ -17,6 +17,7 @@ use app.office.odf_ooxml.{ods_bytes_to_sheet, xlsx_bytes_to_sheet, sheet_to_ods_
 use app.office.odf_export.{sheet_to_fods}
 use std.io_runtime.{write_file, read_file, file_exists}
 use std.nogc_sync_mut.sffi.io.{file_read_bytes, file_write_bytes}
+use std.common.string_core.{char_from_code}
 
 extern fn rt_stdin_read_line() -> text
 
@@ -143,15 +144,36 @@ fn editor_apply(sheet: Sheet, line: text) -> EditorStep:
         return _step(sheet, "error: could not save {parts[1]}", false)
     _step(sheet, "error: unknown command (try 'help')", false)
 
-fn run_sheet_editor(in_path: text) -> i32:
-    """The interactive loop: prompt, read a line, apply, print, repeat."""
+fn sheet_screen_frame(sheet: Sheet, file_label: text, status: text) -> text:
+    """A full-screen ANSI frame: clear+home, inverse-video title bar, the grid,
+    and a status bar — redrawn after every command in screen mode."""
+    val esc = char_from_code(27)
+    val clear = "{esc}[2J{esc}[H"
+    val title = "{esc}[7m Simple Calc — {file_label} {esc}[0m"
+    val bar = "{esc}[7m {status} {esc}[0m"
+    "{clear}{title}\n\n{sheet_grid_text(sheet)}\n\n{bar}\ncalc> "
+
+fn run_sheet_editor_mode(in_path: text, screen: bool) -> i32:
+    """The interactive loop: draw, read a line, apply, repeat. In screen mode
+    the whole terminal frame is redrawn after every command."""
     var sheet = editor_load_sheet(in_path)
-    print "Simple Calc — editing {in_path} (type 'help' for commands)"
+    if screen:
+        print sheet_screen_frame(sheet, in_path, "Ready — 'help' for commands")
+    else:
+        print "Simple Calc — editing {in_path} (type 'help' for commands)"
     var quit = false
     while not quit:
         val line = rt_stdin_read_line() ?? ""
         val step = editor_apply(sheet, line)
         sheet = step.sheet
         quit = step.quit
-        print step.reply
+        if quit:
+            print step.reply
+        elif screen:
+            print sheet_screen_frame(sheet, in_path, step.reply)
+        else:
+            print step.reply
     0
+
+fn run_sheet_editor(in_path: text) -> i32:
+    run_sheet_editor_mode(in_path, false)
