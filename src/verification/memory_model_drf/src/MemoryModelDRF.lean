@@ -101,6 +101,20 @@ theorem dataRaceFree_excludes_witness (exec : Execution)
     False := by
   exact hDrf ⟨id1, id2, op1, op2, h1, h2, hneq, hthread, hconf, hnot12, hnot21⟩
 
+theorem dataRaceFree_no_witness (exec : Execution) :
+    dataRaceFree exec →
+    ¬∃ id1 id2 op1 op2,
+      (id1, op1) ∈ exec.ops ∧
+      (id2, op2) ∈ exec.ops ∧
+      id1 ≠ id2 ∧
+      op1.threadId ≠ op2.threadId ∧
+      conflicts op1 op2 ∧
+      ¬happensBefore exec id1 id2 ∧
+      ¬happensBefore exec id2 id1 := by
+  intro hDrf hWitness
+  rcases hWitness with ⟨id1, id2, op1, op2, h1, h2, hneq, hthread, hconf, hnot12, hnot21⟩
+  exact dataRaceFree_excludes_witness exec hDrf h1 h2 hneq hthread hconf hnot12 hnot21
+
 theorem hasDataRace_symmetric (exec : Execution) :
     hasDataRace exec →
     ∃ id1 id2 op1 op2,
