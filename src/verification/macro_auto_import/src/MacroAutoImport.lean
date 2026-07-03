@@ -46,6 +46,17 @@ def wellFormedExports (exports : ModuleExports) : Prop :=
   (∀ s ∈ exports.nonMacros, s.kind = SymKind.valueOrType) ∧
   (∀ s ∈ exports.macros, s.kind = SymKind.macro)
 
+theorem auto_import_true_implies_macro (m : DirManifest) (sym : Symbol) :
+  isAutoImported m sym = true → sym.kind = SymKind.macro := by
+  intro h
+  unfold isAutoImported at h
+  rw [Bool.and_eq_true] at h
+  cases hkind : sym.kind
+  · have hf : (SymKind.valueOrType == SymKind.macro) = false := rfl
+    rw [hkind, hf] at h
+    cases h.1
+  · rfl
+
 theorem glob_doesnt_leak_macros_wf (m : DirManifest) (exports : ModuleExports) (hwf : wellFormedExports exports) (sym : Symbol) :
   sym.kind = SymKind.macro → isAutoImported m sym = false → sym ∉ globImport m exports := by
   intro hkind hnotauto hmem
