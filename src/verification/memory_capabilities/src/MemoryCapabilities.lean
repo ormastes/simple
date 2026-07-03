@@ -281,6 +281,17 @@ theorem write_wrong_location_denied
       (MemAccess.Write other) = false := by
   cases cap <;> simp [allowsAccess, hne]
 
+theorem singleton_write_wrong_location_not_safe
+    (baseType : String) (loc other : Nat) (cap : RefCapability)
+    (hne : loc ≠ other) :
+    accessIsSafe
+      { activeRefs :=
+          [(loc,
+            [{ location := loc,
+               refType := { baseType := baseType, capability := cap } }])] }
+      (MemAccess.Write other) = false := by
+  cases cap <;> simp [accessIsSafe, getActiveRefs, allowsAccess, hne]
+
 theorem empty_env_wellformed :
   wellFormed { activeRefs := [] } := by
   intro loc refs h
