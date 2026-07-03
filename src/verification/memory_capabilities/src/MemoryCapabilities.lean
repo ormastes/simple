@@ -131,6 +131,20 @@ theorem capability_upgrades_denied :
     · exact shared_to_isolated_denied
     · exact exclusive_to_isolated_denied
 
+theorem capability_conversion_table_policy :
+  (∀ cap, canConvert cap cap = true) ∧
+  (canConvert RefCapability.Exclusive RefCapability.Shared = true ∧
+   canConvert RefCapability.Isolated RefCapability.Exclusive = true ∧
+   canConvert RefCapability.Isolated RefCapability.Shared = true) ∧
+  (canConvert RefCapability.Shared RefCapability.Exclusive = false ∧
+   canConvert RefCapability.Shared RefCapability.Isolated = false ∧
+   canConvert RefCapability.Exclusive RefCapability.Isolated = false) := by
+  constructor
+  · exact can_convert_refl
+  · constructor
+    · exact capability_downgrades_allowed
+    · exact capability_upgrades_denied
+
 theorem can_convert_implies_restrictive (srcCap dstCap : RefCapability) :
   canConvert srcCap dstCap = true → isMoreRestrictive srcCap dstCap := by
   cases srcCap <;> cases dstCap <;> simp [canConvert, isMoreRestrictive] <;> decide
