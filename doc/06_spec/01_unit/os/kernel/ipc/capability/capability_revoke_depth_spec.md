@@ -28,7 +28,7 @@ capability_revoke_depth_spec -> os
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 9 | 9 | 0 | 0 |
+| 10 | 10 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -204,6 +204,41 @@ var mgr = CapabilityManager.new()
 val unknown = TaskId(id: 999)
 val result = mgr.check(unknown, CapabilityKind.FileRead(path_prefix: ""))
 expect(result).to_equal(false)
+```
+
+</details>
+
+#### revoke_transitive of last unpledged token stays deny-all
+
+- var mgr = CapabilityManager new
+- mgr init task
+   - Expected: mgr.check(task, CapabilityKind.ProcessSpawn) is true
+   - Expected: count equals `1`
+   - Expected: mgr.check(task, CapabilityKind.ProcessSpawn) is false
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 15 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var mgr = CapabilityManager.new()
+val task = TaskId(id: 77)
+val token = CapabilityToken(
+    kind: CapabilityKind.ProcessSpawn,
+    generation: 1u64,
+    owner: 77u64,
+    token_id: 9u64,
+    parent_token_id: 0u64,
+    depth: 1
+)
+mgr.init_task(task, CapabilitySet(caps: [token], is_pledged: false))
+expect(mgr.check(task, CapabilityKind.ProcessSpawn)).to_equal(true)
+val count = mgr.revoke_transitive(9u64)
+expect(count).to_equal(1)
+expect(mgr.check(task, CapabilityKind.ProcessSpawn)).to_equal(false)
 ```
 
 </details>
@@ -408,8 +443,8 @@ expect(t3_check).to_equal(false)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 9 |
-| Active scenarios | 9 |
+| Total scenarios | 10 |
+| Active scenarios | 10 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

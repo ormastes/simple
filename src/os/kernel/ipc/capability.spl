@@ -90,6 +90,27 @@ impl CapabilityManager:
         if record == nil:
             return false
         val rec = record
+        if not _perms_contain("rwxc", perm):
+            return false
+        var requested_cap = false
+        if perm.contains("r"):
+            requested_cap = true
+            if not self.check(task, CapabilityKind.FileRead(path_prefix: path)):
+                return false
+        if perm.contains("w"):
+            requested_cap = true
+            if not self.check(task, CapabilityKind.FileWrite(path_prefix: path)):
+                return false
+        if perm.contains("x"):
+            requested_cap = true
+            if not self.check(task, CapabilityKind.FileExec(path_prefix: path)):
+                return false
+        if perm.contains("c"):
+            requested_cap = true
+            if not self.check(task, CapabilityKind.FileCreate(path_prefix: path)):
+                return false
+        if not requested_cap:
+            return false
         if not rec.is_unveiled:
             # Not unveiled — all paths allowed (capability-only check)
             return true
@@ -184,6 +205,8 @@ impl CapabilityManager:
                     else:
                         new_caps.push(existing)
                 rec.caps.caps = new_caps
+                if new_caps.len() == 0:
+                    rec.caps.is_pledged = true
                 self.records[idx] = rec
                 return true
             idx = idx + 1
@@ -235,6 +258,8 @@ impl CapabilityManager:
                             if not already:
                                 worklist.push(tok.token_id)
                 rec.caps.caps = kept
+                if kept.len() == 0:
+                    rec.caps.is_pledged = true
                 self.records[ri] = rec
                 ri = ri + 1
 
@@ -352,9 +377,12 @@ impl CapabilityManager:
 
     me init_task(task: TaskId, caps: CapabilitySet):
         """Initialize capability record for a new task."""
+        var stored_caps = caps
+        if task.id != 1 and not caps.is_pledged and caps.caps.len() == 0:
+            stored_caps = CapabilitySet.empty()
         val record = TaskCapRecord(
             task_id: task,
-            caps: caps,
+            caps: stored_caps,
             unveil_paths: [],
             is_unveiled: false
         )
@@ -480,7 +508,15 @@ fn _path_starts_with(path: text, prefix: text) -> bool:
     """
     if prefix == "/":
         return true
-    path.starts_with(prefix)
+    if path == prefix:
+        return true
+    if path.len() < prefix.len():
+        return false
+    if path[0:prefix.len()] != prefix:
+        return false
+    if path.len() == prefix.len():
+        return true
+    path[prefix.len()] == "/"
 
 fn _perms_contain(allowed: text, requested: text) -> bool:
     """Check if allowed permissions contain the requested permission.

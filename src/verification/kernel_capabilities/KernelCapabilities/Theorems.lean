@@ -17,6 +17,16 @@
                             — full capability set is a wildcard hazard.
   T8  full_set_syscall_authorizes_any_kind
                             — the wildcard reaches the syscall gate.
+  T9  full_set_owner_is_trusted
+                            — the full-set invariant restricts the wildcard owner.
+  T10 sanitize_init_caps_non_trusted_full_is_empty
+                            — runtime init sanitization lowers non-trusted full sets.
+  T11 file_access_requires_capability
+                            — file access is impossible without the file capability gate.
+  T12 invalid_permission_denies_file_access
+                            — invalid permission strings fail before capability/unveil.
+  T13 path_prefix_without_segment_boundary_denied
+                            — shared string prefix alone is not path authority.
 
   FINDINGS (remaining implementation gaps vs. specification):
   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -365,5 +375,115 @@ theorem full_set_syscall_authorizes_any_kind
     (hrec : s.findRecord pid = some { pid := pid, caps := CapSet.full }) :
     syscallAuthorize s pid kind = true := by
   simp [syscallAuthorize, CapState.check, hrec, CapSet.full]
+
+/-- T9: Under the full-set restriction invariant, any principal holding
+    CapSet.full is exactly the trusted init/kernel principal. -/
+theorem full_set_owner_is_trusted
+    (s : CapState) (trusted pid : Principal)
+    (honly : s.fullSetOnlyFor trusted)
+    (hrec : s.findRecord pid = some { pid := pid, caps := CapSet.full }) :
+    pid = trusted := by
+  exact honly pid hrec
+
+/-- The full-set restriction invariant excludes CapSet.full from every
+    non-trusted principal. -/
+theorem non_trusted_full_set_forbidden
+    (s : CapState) (trusted pid : Principal)
+    (honly : s.fullSetOnlyFor trusted)
+    (hne : pid ≠ trusted) :
+    s.findRecord pid ≠ some { pid := pid, caps := CapSet.full } := by
+  intro hrec
+  exact hne (honly pid hrec)
+
+/-- T10: Runtime init sanitization lowers ambient full-set input for every
+    non-trusted principal to the deny-all empty set. -/
+theorem sanitize_init_caps_non_trusted_full_is_empty
+    (trusted pid : Principal)
+    (hne : pid ≠ trusted) :
+    sanitizeInitCaps trusted pid CapSet.full = CapSet.empty := by
+  simp [sanitizeInitCaps, CapSet.full, CapSet.empty, hne]
+
+/-- Trusted init/kernel may retain the ambient full-set shape through init. -/
+theorem sanitize_init_caps_trusted_full_stays_full
+    (trusted : Principal) :
+    sanitizeInitCaps trusted trusted CapSet.full = CapSet.full := by
+  simp [sanitizeInitCaps, CapSet.full]
+
+/-- T11: File access fails closed when the normal file capability gate fails,
+    regardless of unveil state or path match. -/
+theorem file_access_requires_capability
+    (isUnveiled unveilAllows : Bool) :
+    fileAccessAllowed false isUnveiled unveilAllows = false := by
+  simp [fileAccessAllowed]
+
+/-- When unveiled, file access requires both the file capability and an
+    allowed unveil path. -/
+theorem unveiled_file_access_requires_capability_and_path
+    (hasFileCap unveilAllows : Bool) :
+    fileAccessAllowed hasFileCap true unveilAllows = (hasFileCap && unveilAllows) := by
+  simp [fileAccessAllowed]
+
+/-- Before unveil, file access depends only on the normal file capability gate. -/
+theorem file_access_before_unveil_depends_only_on_capability
+    (hasFileCap unveilAllows : Bool) :
+    fileAccessAllowed hasFileCap false unveilAllows = hasFileCap := by
+  simp [fileAccessAllowed]
+
+/-- T12: Invalid permission strings deny file access regardless of capability
+    or unveil state. -/
+theorem invalid_permission_denies_file_access
+    (hasFileCap isUnveiled unveilAllows : Bool) :
+    fileAccessAllowedWithPerm false hasFileCap isUnveiled unveilAllows = false := by
+  simp [fileAccessAllowedWithPerm]
+
+/-- Valid permission strings preserve the normal file-access gate. -/
+theorem valid_permission_uses_file_access_gate
+    (hasFileCap isUnveiled unveilAllows : Bool) :
+    fileAccessAllowedWithPerm true hasFileCap isUnveiled unveilAllows =
+      fileAccessAllowed hasFileCap isUnveiled unveilAllows := by
+  simp [fileAccessAllowedWithPerm]
+
+/-- T13: A path that only shares a string prefix, without exact/root match or
+    a following path separator, is denied. -/
+theorem path_prefix_without_segment_boundary_denied :
+    segmentPrefixAllowed false false true false = false := by
+  simp [segmentPrefixAllowed]
+
+/-- Root prefix allows every path. -/
+theorem root_path_prefix_allows
+    (isExact hasPrefix hasBoundary : Bool) :
+    segmentPrefixAllowed true isExact hasPrefix hasBoundary = true := by
+  simp [segmentPrefixAllowed]
+
+/-- Exact path prefix allows the path. -/
+theorem exact_path_prefix_allows
+    (isRoot hasPrefix hasBoundary : Bool) :
+    segmentPrefixAllowed isRoot true hasPrefix hasBoundary = true := by
+  cases isRoot <;> simp [segmentPrefixAllowed]
+
+/-- A real prefix followed by a path separator allows the path. -/
+theorem segment_boundary_prefix_allows :
+    segmentPrefixAllowed false false true true = true := by
+  simp [segmentPrefixAllowed]
+
+/-- T14: A write request is denied without write capability, even if read
+    capability exists. -/
+theorem write_request_requires_write_capability
+    (hasRead requestRead : Bool) :
+    rwFileAccessAllowed hasRead false requestRead true = false := by
+  cases hasRead <;> cases requestRead <;> simp [rwFileAccessAllowed]
+
+/-- A read request is allowed exactly when read capability exists, when no write
+    right is requested. -/
+theorem read_request_uses_read_capability
+    (hasRead hasWrite : Bool) :
+    rwFileAccessAllowed hasRead hasWrite true false = hasRead := by
+  cases hasRead <;> cases hasWrite <;> simp [rwFileAccessAllowed]
+
+/-- A combined read/write request requires both read and write capabilities. -/
+theorem read_write_request_requires_both_capabilities
+    (hasRead hasWrite : Bool) :
+    rwFileAccessAllowed hasRead hasWrite true true = (hasRead && hasWrite) := by
+  cases hasRead <;> cases hasWrite <;> simp [rwFileAccessAllowed]
 
 end KernelCapabilities
