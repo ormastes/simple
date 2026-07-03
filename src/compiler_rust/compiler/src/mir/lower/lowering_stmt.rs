@@ -101,7 +101,7 @@ impl<'a> MirLowerer<'a> {
                                 // Use declared_ty here to emit packed byte storage.
                                 let capacity = elements.len() as i64;
                                 // Clone elements to avoid borrowing `self` while calling methods.
-                                let elements: Vec<_> = elements.iter().cloned().collect();
+                                let elements: Vec<_> = elements.to_vec();
                                 let local_idx = *local_index;
                                 let capacity_reg = self.with_func(|func, current_block| {
                                     let reg = func.new_vreg();

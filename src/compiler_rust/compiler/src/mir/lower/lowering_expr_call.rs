@@ -6,7 +6,7 @@ use crate::mir::effects::CallTarget;
 use crate::mir::instructions::{MirInst, VReg};
 
 impl<'a> MirLowerer<'a> {
-    pub(super) fn split_enum_qualified_name<'b>(name: &'b str) -> Option<(&'b str, &'b str)> {
+    pub(super) fn split_enum_qualified_name(name: &str) -> Option<(&str, &str)> {
         name.split_once("::")
             .or_else(|| name.split_once('.'))
             .or_else(|| name.split_once("_dot_"))

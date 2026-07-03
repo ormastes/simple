@@ -167,7 +167,7 @@ impl Lowerer {
                     }
                 }
                 // Bare type names from inference / cross-module signatures.
-                match name.as_ref() {
+                match name {
                     "unit" => return Ok(TypeId::VOID),
                     "list" => {
                         return Ok(self.module.types.register(HirType::Array {

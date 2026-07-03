@@ -672,7 +672,7 @@ pub(crate) fn generate_stub_object(
         if needs_stub.len() > 80 { " ..." } else { "" }
     );
     if let Ok(dump_path) = std::env::var("SIMPLE_DUMP_STUBS") {
-        let mut all: Vec<String> = needs_stub.iter().cloned().collect();
+        let mut all: Vec<String> = needs_stub.to_vec();
         all.sort();
         let _ = std::fs::write(&dump_path, all.join("\n") + "\n");
         eprintln!("Wrote {} unresolved symbols to {}", all.len(), dump_path);

@@ -906,7 +906,6 @@ pub unsafe extern "C" fn rt_bytes_from_raw(ptr: i64, len: i64) -> RuntimeValue {
     bytes_to_runtime_array(slice)
 }
 
-
 /// Create a [u32] array from a raw pointer to `count` little-endian u32 values.
 /// One-call return-value marshalling for GPU framebuffer readbacks: a per-element
 /// FFI read loop costs seconds at 1024x768 and minutes at Retina physical

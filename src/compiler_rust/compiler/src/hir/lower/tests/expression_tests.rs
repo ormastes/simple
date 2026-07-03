@@ -758,9 +758,7 @@ fn test_fn_scope_module_use_does_not_bait_field_guess() {
                     HirExprKind::FieldAccess { receiver, .. } => {
                         matches!(receiver.kind, HirExprKind::Global(ref g) if g == "std") || expr_has(receiver)
                     }
-                    HirExprKind::MethodCall { receiver, args, .. } => {
-                        expr_has(receiver) || args.iter().any(expr_has)
-                    }
+                    HirExprKind::MethodCall { receiver, args, .. } => expr_has(receiver) || args.iter().any(expr_has),
                     HirExprKind::Call { func, args } => expr_has(func) || args.iter().any(expr_has),
                     _ => false,
                 }

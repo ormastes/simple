@@ -244,9 +244,7 @@ pub(super) fn handle_command(
             let result = if let Some(window_state) = state.windows.get(&window_id) {
                 // Window mutations must run on the event-loop/main thread (macOS).
                 if fullscreen {
-                    window_state
-                        .window
-                        .set_fullscreen(Some(Fullscreen::Borderless(None)));
+                    window_state.window.set_fullscreen(Some(Fullscreen::Borderless(None)));
                 } else {
                     window_state.window.set_fullscreen(None);
                 }

@@ -289,18 +289,15 @@ impl<'a> MirLowerer<'a> {
 
         self.with_func(|func, current_block| {
             let boxed = match ty {
-                TypeId::I8
-                | TypeId::I16
-                | TypeId::I32
-                | TypeId::I64
-                | TypeId::U8
-                | TypeId::U16
-                | TypeId::U32 => {
+                TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64 | TypeId::U8 | TypeId::U16 | TypeId::U32 => {
                     let boxed = func.new_vreg();
                     func.block_mut(current_block)
                         .unwrap()
                         .instructions
-                        .push(MirInst::BoxInt { dest: boxed, value: reg });
+                        .push(MirInst::BoxInt {
+                            dest: boxed,
+                            value: reg,
+                        });
                     boxed
                 }
                 TypeId::F32 | TypeId::F64 => {
@@ -308,7 +305,10 @@ impl<'a> MirLowerer<'a> {
                     func.block_mut(current_block)
                         .unwrap()
                         .instructions
-                        .push(MirInst::BoxFloat { dest: boxed, value: reg });
+                        .push(MirInst::BoxFloat {
+                            dest: boxed,
+                            value: reg,
+                        });
                     boxed
                 }
                 TypeId::BOOL => {

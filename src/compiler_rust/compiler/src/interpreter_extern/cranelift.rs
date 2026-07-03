@@ -148,9 +148,7 @@ pub fn rt_cranelift_declare_function(args: &[Value]) -> Result<Value, CompileErr
     let name_len = value_to_i64(&args[2]);
     let sig = value_to_i64(&args[3]);
     let linkage = value_to_i64(&args[4]);
-    let handle = unsafe {
-        cranelift_sffi::rt_cranelift_declare_function(module, name_ptr, name_len, sig, linkage)
-    };
+    let handle = unsafe { cranelift_sffi::rt_cranelift_declare_function(module, name_ptr, name_len, sig, linkage) };
     Ok(Value::Int(handle))
 }
 

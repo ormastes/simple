@@ -454,7 +454,9 @@ pub fn rt_ssh_aes256_gcm_decrypt_packet(args: &[Value]) -> Result<Value, Compile
     };
     let packet = expect_byte_array("rt_ssh_aes256_gcm_decrypt_packet", &args[3])?;
     let payload = ssh_aes256_gcm_decrypt_packet_bytes(&key, &iv, seq, &packet).unwrap_or_default();
-    Ok(Value::array(payload.into_iter().map(|b| Value::Int(b as i64)).collect()))
+    Ok(Value::array(
+        payload.into_iter().map(|b| Value::Int(b as i64)).collect(),
+    ))
 }
 
 pub fn rt_ssh_aes256_gcm_decrypt_packet_payload_len(args: &[Value]) -> Result<Value, CompileError> {

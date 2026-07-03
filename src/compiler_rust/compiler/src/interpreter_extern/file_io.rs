@@ -755,7 +755,6 @@ pub fn rt_bytes_from_raw(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::array(arr))
 }
 
-
 /// Create a [u32] array from a raw pointer to count little-endian u32 values.
 /// One-call return-value marshalling for GPU framebuffer readbacks.
 pub fn rt_u32s_from_raw(args: &[Value]) -> Result<Value, CompileError> {

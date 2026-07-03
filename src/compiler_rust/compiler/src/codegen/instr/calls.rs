@@ -3141,9 +3141,8 @@ pub fn compile_call<M: Module>(
                     ctx.module
                         .declare_function(rt_name, cranelift_module::Linkage::Import, &sig)
                         .ok()
-                        .map(|fid| {
+                        .inspect(|&fid| {
                             ctx.func_ids.insert(rt_name.to_string(), fid);
-                            fid
                         })
                 };
                 if let Some(func_id) = func_id {

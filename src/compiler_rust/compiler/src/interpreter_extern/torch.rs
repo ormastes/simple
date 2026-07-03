@@ -658,9 +658,7 @@ pub fn rt_torch_torchtensor_is_cuda(args: &[Value]) -> Result<Value, CompileErro
 
 pub fn rt_torch_torchtensor_device(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 1 {
-        return Err(CompileError::runtime(
-            "rt_torch_torchtensor_device requires 1 argument",
-        ));
+        return Err(CompileError::runtime("rt_torch_torchtensor_device requires 1 argument"));
     }
     Ok(Value::Int(unsafe {
         torch_call_i64_i32("rt_torch_torchtensor_device", args[0].as_int()?) as i64

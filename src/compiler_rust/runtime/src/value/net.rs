@@ -497,7 +497,13 @@ pub extern "C" fn rt_event_loop_poll(loop_fd: i64, max_events: i64, timeout_ms: 
             return 0;
         }
         let timeout = timeout_ms.clamp(-1, i32::MAX as i64) as libc::c_int;
-        let rc = unsafe { libc::poll(poll_fds.as_mut_ptr() as *mut libc::pollfd, poll_fds.len() as libc::nfds_t, timeout) };
+        let rc = unsafe {
+            libc::poll(
+                poll_fds.as_mut_ptr() as *mut libc::pollfd,
+                poll_fds.len() as libc::nfds_t,
+                timeout,
+            )
+        };
         if rc <= 0 {
             return 0;
         }

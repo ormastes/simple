@@ -889,28 +889,20 @@ impl Lowerer {
         let mut elem_ty = elem_ty;
         if elem_ty == TypeId::ANY {
             if let Expr::FieldAccess { field, .. } = receiver {
-                if let HirExprKind::FieldAccess {
-                    receiver: base_hir, ..
-                } = &recv_hir.kind
-                {
-                    let base_name = self
-                        .module
-                        .types
-                        .get_type_name(base_hir.ty)
-                        .map(|s| s.to_string());
+                if let HirExprKind::FieldAccess { receiver: base_hir, .. } = &recv_hir.kind {
+                    let base_name = self.module.types.get_type_name(base_hir.ty).map(|s| s.to_string());
                     if let Some(base_name) = base_name {
                         let dict_value_ast = self.global_struct_defs.as_ref().and_then(|defs| {
-                            defs.get(&base_name)?
-                                .iter()
-                                .find(|(fname, _)| fname == field)
-                                .and_then(|(_, fty)| match fty {
+                            defs.get(&base_name)?.iter().find(|(fname, _)| fname == field).and_then(
+                                |(_, fty)| match fty {
                                     simple_parser::Type::Generic { name, args }
                                         if name == "Dict" && args.len() == 2 =>
                                     {
                                         Some(args[1].clone())
                                     }
                                     _ => None,
-                                })
+                                },
+                            )
                         });
                         if let Some(value_ast) = dict_value_ast {
                             if let Ok(vty) = self.resolve_type(&value_ast) {

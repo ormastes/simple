@@ -1541,10 +1541,10 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_file_mmap_read_bytes", &[I64, I64], &[I64]), // path_ptr, path_len -> RuntimeValue
     RuntimeFuncSpec::new("rt_file_mmap_read_bytes_rv", &[I64], &[I64]), // RuntimeValue(string) -> RuntimeValue
     RuntimeFuncSpec::new("rt_file_write_text", &[I64, I64, I64, I64], &[I8]), // path_ptr, path_len, content_ptr, content_len -> bool
-    RuntimeFuncSpec::new("rt_file_fsync", &[I64, I64], &[I8]),         // path -> bool
-    RuntimeFuncSpec::new("rt_file_fsync_cached", &[I64, I64], &[I8]),  // path -> bool, prefer write-at cache
-    RuntimeFuncSpec::new("rt_crc32_text", &[I64, I64], &[I64]),        // text -> i64 (CRC32 checksum)
-    RuntimeFuncSpec::new("rt_file_sync", &[I64, I64], &[I8]),          // path -> bool (alias for fsync)
+    RuntimeFuncSpec::new("rt_file_fsync", &[I64, I64], &[I8]),                // path -> bool
+    RuntimeFuncSpec::new("rt_file_fsync_cached", &[I64, I64], &[I8]),         // path -> bool, prefer write-at cache
+    RuntimeFuncSpec::new("rt_crc32_text", &[I64, I64], &[I64]),               // text -> i64 (CRC32 checksum)
+    RuntimeFuncSpec::new("rt_file_sync", &[I64, I64], &[I8]),                 // path -> bool (alias for fsync)
     RuntimeFuncSpec::new("rt_file_create_excl", &[I64, I64, I64, I64], &[I8]), // path, content -> bool (O_EXCL)
     RuntimeFuncSpec::new("rt_file_write_text_at", &[I64, I64, I64], &[I64]), // path RuntimeValue, offset, data RuntimeValue -> bytes written
     RuntimeFuncSpec::new("rt_file_write_text_at_cached", &[I64, I64], &[I64]), // offset, data RuntimeValue -> bytes written on prepared cache
@@ -1556,13 +1556,13 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_file_rename", &[I64, I64, I64, I64], &[I8]),             // old, new -> bool
     RuntimeFuncSpec::new("rt_file_read_lines", &[I64, I64], &[I64]),                  // path -> RuntimeValue (array)
     RuntimeFuncSpec::new("rt_file_append_text", &[I64, I64, I64, I64], &[I8]), // path_ptr, path_len, content_ptr, content_len -> bool
-    RuntimeFuncSpec::new("rt_file_read_bytes", &[I64, I64], &[I64]),                  // path -> RuntimeValue (array)
-    RuntimeFuncSpec::new("rt_bytes_from_raw", &[I64, I64], &[I64]), // ptr, len -> RuntimeValue (byte array)
-    RuntimeFuncSpec::new("rt_u32s_from_raw", &[I64, I64], &[I64]), // ptr, count -> RuntimeValue (u32 array)
+    RuntimeFuncSpec::new("rt_file_read_bytes", &[I64, I64], &[I64]),           // path -> RuntimeValue (array)
+    RuntimeFuncSpec::new("rt_bytes_from_raw", &[I64, I64], &[I64]),            // ptr, len -> RuntimeValue (byte array)
+    RuntimeFuncSpec::new("rt_u32s_from_raw", &[I64, I64], &[I64]),             // ptr, count -> RuntimeValue (u32 array)
     RuntimeFuncSpec::new("rt_file_write_bytes", &[I64, I64, I64, I64], &[I8]), // path, bytes -> bool
     RuntimeFuncSpec::new("rt_file_wrap_smf_dynlib", &[I64, I64, I64, I64, I64], &[I8]), // input, output, arch -> bool
     RuntimeFuncSpec::new("rt_file_extract_smf_dynlib", &[I64, I64, I64, I64], &[I8]), // input, output -> bool
-    RuntimeFuncSpec::new("rt_file_move", &[I64, I64, I64, I64], &[I8]), // src, dest -> bool
+    RuntimeFuncSpec::new("rt_file_move", &[I64, I64, I64, I64], &[I8]),        // src, dest -> bool
     // =========================================================================
     // Directory Operations
     // =========================================================================

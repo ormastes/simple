@@ -484,11 +484,14 @@ pub fn infer_security_coordinate(path: &Path) -> SecurityCoordinate {
 }
 
 fn path_feature_parts(parts: &[String]) -> Vec<String> {
-    let end = parts
+    let end = if parts
         .last()
         .is_some_and(|part| part.rsplit_once('.').is_some())
-        .then_some(parts.len().saturating_sub(1))
-        .unwrap_or(parts.len());
+    {
+        parts.len().saturating_sub(1)
+    } else {
+        parts.len()
+    };
     parts[..end].to_vec()
 }
 
@@ -580,7 +583,7 @@ pub fn source_security_violations_sdn_with_modules(files: &[SecuritySourceFile],
         }
 
         let configured_gate = boundary_gate_for(&boundary_gates, &edge.from_feature, &edge.to_feature);
-        if configured_gate.as_deref().is_some_and(|gate| edge.text.contains(gate)) {
+        if configured_gate.is_some_and(|gate| edge.text.contains(gate)) {
             continue;
         }
 

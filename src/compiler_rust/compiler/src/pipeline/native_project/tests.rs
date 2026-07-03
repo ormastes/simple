@@ -426,7 +426,9 @@ fn test_object_cache_key_includes_compiler_fingerprint() {
     backend.hash(&mut legacy_hasher);
     no_mangle.hash(&mut legacy_hasher);
     module_prefix.hash(&mut legacy_hasher);
-    std::env::var("SIMPLE_NATIVE_CPU").unwrap_or_default().hash(&mut legacy_hasher);
+    std::env::var("SIMPLE_NATIVE_CPU")
+        .unwrap_or_default()
+        .hash(&mut legacy_hasher);
     active_simd_tier_name().hash(&mut legacy_hasher);
     let legacy_key = legacy_hasher.finish();
 
@@ -2405,8 +2407,16 @@ fn cache_mix_probe_b() -> i64:
     }
 
     let stdout1 = archive_symbols(&archive);
-    assert!(stdout1.contains("cache_mix_probe_a"), "build 1 missing probe_a:\n{}", stdout1);
-    assert!(stdout1.contains("cache_mix_probe_b"), "build 1 missing probe_b:\n{}", stdout1);
+    assert!(
+        stdout1.contains("cache_mix_probe_a"),
+        "build 1 missing probe_a:\n{}",
+        stdout1
+    );
+    assert!(
+        stdout1.contains("cache_mix_probe_b"),
+        "build 1 missing probe_b:\n{}",
+        stdout1
+    );
 
     // Touch only module_b so build 2 sees module_a as a cache HIT and
     // module_b as a cache MISS -- the hit/miss mix this test targets.
@@ -2518,8 +2528,14 @@ fn test_incremental_cache_hit_miss_mix_parallel_wide_matrix() {
             stdout
         );
     }
-    let found_count = (0..N).filter(|i| stdout.contains(&format!("wide_cache_mix_probe_{i}"))).count();
-    assert_eq!(found_count, N, "expected all {} probe symbols present, found {}", N, found_count);
+    let found_count = (0..N)
+        .filter(|i| stdout.contains(&format!("wide_cache_mix_probe_{i}")))
+        .count();
+    assert_eq!(
+        found_count, N,
+        "expected all {} probe symbols present, found {}",
+        N, found_count
+    );
 }
 
 /// Unit coverage for issue #57's `file_arch_cfg_gate` helper: full-scan
@@ -2577,8 +2593,14 @@ fn test_file_arch_cfg_gate_recognizes_arch_aliases_and_negation() {
 
     // Ungated / non-arch conditions must return None (never filtered out).
     assert_eq!(file_arch_cfg_gate("fn f(): pass\n", TargetArch::X86_64), None);
-    assert_eq!(file_arch_cfg_gate("@cfg(test)\nfn f(): pass\n", TargetArch::X86_64), None);
-    assert_eq!(file_arch_cfg_gate("@cfg(baremetal)\nfn f(): pass\n", TargetArch::X86_64), None);
+    assert_eq!(
+        file_arch_cfg_gate("@cfg(test)\nfn f(): pass\n", TargetArch::X86_64),
+        None
+    );
+    assert_eq!(
+        file_arch_cfg_gate("@cfg(baremetal)\nfn f(): pass\n", TargetArch::X86_64),
+        None
+    );
     assert_eq!(
         file_arch_cfg_gate("@cfg(\"target_arch\", \"arm\")\nfn f(): pass\n", TargetArch::X86_64),
         None

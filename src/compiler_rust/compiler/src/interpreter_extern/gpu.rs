@@ -2772,38 +2772,28 @@ pub fn rt_vulkan_shutdown_fn(_args: &[Value]) -> Result<Value, CompileError> {
         unsafe {
             let f = &st.fns;
             // Free command buffers
-            for entry in &st.command_buffers {
-                if let Some(e) = entry {
-                    let cmd = e.cmd;
-                    (f.free_command_buffers)(st.device, st.command_pool, 1, &cmd);
-                }
+            for e in st.command_buffers.iter().flatten() {
+                let cmd = e.cmd;
+                (f.free_command_buffers)(st.device, st.command_pool, 1, &cmd);
             }
             // Free descriptor sets (pools)
-            for entry in &st.descriptor_sets {
-                if let Some(e) = entry {
-                    (f.destroy_descriptor_pool)(st.device, e.pool, ptr::null());
-                }
+            for e in st.descriptor_sets.iter().flatten() {
+                (f.destroy_descriptor_pool)(st.device, e.pool, ptr::null());
             }
             // Destroy pipelines
-            for entry in &st.pipelines {
-                if let Some(e) = entry {
-                    (f.destroy_pipeline)(st.device, e.pipeline, ptr::null());
-                    (f.destroy_pipeline_layout)(st.device, e.layout, ptr::null());
-                    (f.destroy_descriptor_set_layout)(st.device, e.dsl, ptr::null());
-                }
+            for e in st.pipelines.iter().flatten() {
+                (f.destroy_pipeline)(st.device, e.pipeline, ptr::null());
+                (f.destroy_pipeline_layout)(st.device, e.layout, ptr::null());
+                (f.destroy_descriptor_set_layout)(st.device, e.dsl, ptr::null());
             }
             // Destroy shader modules
-            for entry in &st.shaders {
-                if let Some(s) = entry {
-                    (f.destroy_shader_module)(st.device, *s, ptr::null());
-                }
+            for s in st.shaders.iter().flatten() {
+                (f.destroy_shader_module)(st.device, *s, ptr::null());
             }
             // Free buffers
-            for entry in &st.buffers {
-                if let Some(e) = entry {
-                    (f.destroy_buffer)(st.device, e.buffer, ptr::null());
-                    (f.free_memory)(st.device, e.memory, ptr::null());
-                }
+            for e in st.buffers.iter().flatten() {
+                (f.destroy_buffer)(st.device, e.buffer, ptr::null());
+                (f.free_memory)(st.device, e.memory, ptr::null());
             }
             (f.destroy_command_pool)(st.device, st.command_pool, ptr::null());
             (f.destroy_device)(st.device, ptr::null());
