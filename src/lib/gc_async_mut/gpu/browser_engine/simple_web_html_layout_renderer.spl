@@ -836,6 +836,70 @@ fn column_rule_synthetic_decls(decls: text) -> text:
     if width_px > 0 and color_text.len() > 0 and not border_style_disables_paint(style_text):
         return "column-gap:{width_px}px;background-color:{color_text}"
     ""
+fn find_matching_paren(s: text, lp: i32) -> i32:
+    var depth = 1
+    var i = lp + 1
+    val n = s.len()
+    while i < n:
+        val c = s.char_at(i)
+        if c == "(":
+            depth = depth + 1
+        elif c == ")":
+            depth = depth - 1
+            if depth == 0:
+                return i
+        i = i + 1
+    -1
+
+# "0.09", ".5", "1" -> 0..255 alpha
+fn parse_alpha_fraction_range(s: text, start: i32, end: i32) -> i32:
+    var i = start
+    var int_part = 0
+    var frac_num = 0
+    var frac_den = 1
+    var seen_digit = false
+    var in_frac = false
+    while i < end:
+        val c = s.char_at(i)
+        val d = dec_val(c)
+        if d < 10:
+            seen_digit = true
+            if in_frac:
+                if frac_den < 1000:
+                    frac_num = frac_num * 10 + d
+                    frac_den = frac_den * 10
+            else:
+                int_part = int_part * 10 + d
+        elif c == ".":
+            in_frac = true
+        elif seen_digit:
+            break
+        i = i + 1
+    if int_part >= 1:
+        return 255
+    (frac_num * 255 + frac_den / 2) / frac_den
+
+# Alpha-aware CSS color: 0 for none/transparent, else ARGB with true alpha
+# (rgba() keeps its alpha; every other form is opaque like parse_color_any).
+fn parse_color_alpha(raw: text) -> u32:
+    val s = raw.trim().lower()
+    val rgba_at = text_index_of(s, "rgba")
+    if rgba_at >= 0:
+        val lp = find_from(s, "(", rgba_at)
+        val rp = if lp >= 0: find_from(s, ")", lp + 1) else: -1
+        if lp >= 0 and rp > lp:
+            val c1 = find_from(s, ",", lp + 1)
+            val c2 = if c1 >= 0: find_from(s, ",", c1 + 1) else: -1
+            val c3 = if c2 >= 0: find_from(s, ",", c2 + 1) else: -1
+            if c1 >= 0 and c2 >= 0 and c3 >= 0 and c3 < rp:
+                val a255 = parse_alpha_fraction_range(s, c3 + 1, rp)
+                if a255 <= 0:
+                    return 0u32
+                val r = parse_int_range(s, lp + 1, c1)
+                val g = parse_int_range(s, c1 + 1, c2)
+                val b = parse_int_range(s, c2 + 1, c3)
+                return (a255.to_u32() << 24) | ((r.to_u32()) << 16) | ((g.to_u32()) << 8) | b.to_u32()
+    parse_color_any(raw)
 
 fn parse_linear_gradient_color(raw: text, target: i32) -> u32:
     val lower = raw.lower()
@@ -843,26 +907,73 @@ fn parse_linear_gradient_color(raw: text, target: i32) -> u32:
     if start < 0:
         return 0u32
     val lp = find_from(raw, "(", start)
-    val rp = find_from(raw, ")", lp + 1)
-    if lp < 0 or rp <= lp:
+    if lp < 0:
+        return 0u32
+    val rp = find_matching_paren(raw, lp)
+    if rp <= lp:
         return 0u32
     val inner = raw.substring(lp + 1, rp)
-    var item_index = 0
-    var pos = 0
+    # split on top-level commas (stop colors may nest rgba(...) parens);
+    # skip direction/angle items; target 0 = first color, else last color.
+    var first_color = 0u32
+    var last_color = 0u32
     val inner_len = inner.len()
-    while pos <= inner_len:
-        val comma = find_from(inner, ",", pos)
-        val end = if comma >= 0: comma else: inner_len
-        val part = inner.substring(pos, end).trim()
-        if part.starts_with("to ") or part == "top" or part == "bottom" or part == "left" or part == "right":
-            item_index = item_index - 1
-        elif item_index == target:
-            return parse_color_any(part)
-        if comma < 0:
-            break
-        item_index = item_index + 1
-        pos = comma + 1
-    0u32
+    var depth = 0
+    var item_start = 0
+    var i = 0
+    while i <= inner_len:
+        var boundary = i == inner_len
+        if not boundary:
+            val c = inner.char_at(i)
+            if c == "(":
+                depth = depth + 1
+            elif c == ")":
+                depth = depth - 1
+            elif c == "," and depth == 0:
+                boundary = true
+        if boundary:
+            val part = inner.substring(item_start, i).trim()
+            val part_lower = part.lower()
+            val is_direction = (part_lower.starts_with("to ") or part_lower == "top" or
+                part_lower == "bottom" or part_lower == "left" or part_lower == "right" or
+                part_lower.ends_with("deg") or part_lower.ends_with("turn") or part_lower.ends_with("rad"))
+            if not is_direction:
+                val cv = parse_color_alpha(part)
+                if cv != 0u32:
+                    if first_color == 0u32:
+                        first_color = cv
+                    last_color = cv
+            item_start = i + 1
+        i = i + 1
+    if target == 0:
+        return first_color
+    last_color
+
+# Final layer of a multi-layer background stack, when it is a plain color
+# (e.g. "linear-gradient(...), #f5f5f5" -> #f5f5f5). 0 when absent.
+fn parse_background_stack_base_color(raw: text) -> u32:
+    val n = raw.len()
+    var depth = 0
+    var layer_start = 0
+    var last_layer = ""
+    var i = 0
+    while i <= n:
+        var boundary = i == n
+        if not boundary:
+            val c = raw.char_at(i)
+            if c == "(":
+                depth = depth + 1
+            elif c == ")":
+                depth = depth - 1
+            elif c == "," and depth == 0:
+                boundary = true
+        if boundary:
+            last_layer = raw.substring(layer_start, i).trim()
+            layer_start = i + 1
+        i = i + 1
+    if last_layer.lower().contains("gradient("):
+        return 0u32
+    parse_color_any(last_layer)
 
 fn parse_int(s: text) -> i32:
     var i = 0
@@ -1800,6 +1911,9 @@ fn apply_decls(st: Style, decls: text) -> Style:
             if gradient_from != 0u32 and gradient_to != 0u32:
                 background_gradient_from_v = gradient_from
                 background_gradient_to_v = gradient_to
+                val stack_base = parse_background_stack_base_color(bgs)
+                if stack_base != 0u32:
+                    bg_v = stack_base
             else:
                 bg_v = parse_color_any(bgs)
                 background_gradient_from_v = 0u32
@@ -3264,7 +3378,7 @@ fn apply_decls(st: Style, decls: text) -> Style:
         else:
             val shadow_x = parse_signed_nth_int(box_shadow_norm, 0)
             val shadow_y = parse_signed_nth_int(box_shadow_norm, 1)
-            val shadow_color = parse_color_any(box_shadow_norm)
+            val shadow_color = parse_color_alpha(box_shadow_norm)
             if shadow_x != -1000000 and shadow_y != -1000000:
                 box_shadow_x_px_v = shadow_x
                 box_shadow_y_px_v = shadow_y
@@ -3798,7 +3912,7 @@ fn class_words_has(words: [text], want: text) -> bool:
     false
 
 fn base_selector_matches(base: text, tag: text, cls: text, class_words: [text], id: text) -> bool:
-    if base.len() == 0:
+    if base.len() == 0 or base == "*":
         return true
     if base.char_at(0) == ".":
         val want = base.substring(1, base.len())
@@ -3902,6 +4016,28 @@ fn _pseudo_list_matches(pseudo: text, arg: text, tag: text, cls: text, class_wor
 
 fn simple_match(sel: text, tag: text, cls: text, class_words: [text], id: text, attrs: text) -> bool:
     if sel.len() == 0:
+        return false
+    # :root (optionally with an attribute condition riding after the pseudo,
+    # e.g. ":root[data-wm-transparency=off]") matches only the html element,
+    # and the attribute expression must actually hold. Without this, the base
+    # is empty and every :root[...] theme-variant rule matched every node.
+    if sel.starts_with(":root"):
+        if tag != "html":
+            return false
+        val root_attr_start = text_index_of(sel, "[")
+        if root_attr_start >= 0:
+            val root_attr_end = text_index_of(sel, "]")
+            if root_attr_end < root_attr_start:
+                return false
+            return attr_selector_matches(attrs, sel.substring(root_attr_start + 1, root_attr_end))
+        return true
+    # Interactive-state pseudo-classes are never active in a static render
+    # (Chromium screenshots carry no hover/focus/active state either).
+    val state_pseudo = _pseudo_name(sel)
+    if (state_pseudo == "hover" or state_pseudo == "active" or state_pseudo == "focus" or
+        state_pseudo == "focus-visible" or state_pseudo == "focus-within" or
+        state_pseudo == "visited" or state_pseudo == "target" or
+        state_pseudo == "disabled" or state_pseudo == "checked"):
         return false
     # Split off the base (before the first colon at depth 0)
     var base = sel
@@ -5389,7 +5525,13 @@ fn mix_color_vertical_centered(a: u32, b: u32, pos: i32, span: i32, px: i32, py:
     val br = (((b >> 16) & 255u32) as i32)
     val bg = (((b >> 8) & 255u32) as i32)
     val bb = ((b & 255u32) as i32)
-    argb(mix_channel_gradient_centered(ar, br, pos, span, px, py), mix_channel_gradient_centered(ag, bg, pos, span, px, py), mix_channel_gradient_centered(ab, bb, pos, span, px, py))
+    val aa = (((a >> 24) & 255u32) as i32)
+    val ba = (((b >> 24) & 255u32) as i32)
+    val ma = mix_channel_gradient_centered(aa, ba, pos, span, px, py)
+    val mr = mix_channel_gradient_centered(ar, br, pos, span, px, py)
+    val mg = mix_channel_gradient_centered(ag, bg, pos, span, px, py)
+    val mb = mix_channel_gradient_centered(ab, bb, pos, span, px, py)
+    (ma.to_u32() << 24) | (mr.to_u32() << 16) | (mg.to_u32() << 8) | mb.to_u32()
 
 fn fb_style_background_opacity_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, st: Style, clip: ClipRect) -> [u32]:
     var bg_x = x
@@ -5452,11 +5594,17 @@ fn fb_style_background_opacity_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i3
             var px = 0
             while px < max_x:
                 val color = mix_color_vertical_centered(st.background_gradient_from, st.background_gradient_to, tile_py, tile_h, px, tile_py)
-                out = fb_rounded_rect_corners_opacity_clip(out, fbw, fbh, image_base_x + px, image_base_y + py, 1, 1, st.border_radius_tl_px, st.border_radius_tr_px, st.border_radius_br_px, st.border_radius_bl_px, color, st.opacity_pct, image_clip)
+                val color_alpha = (((color >> 24) & 255u32) as i32)
+                val color_opacity = (st.opacity_pct * color_alpha + 127) / 255
+                if color_opacity > 0:
+                    out = fb_rounded_rect_corners_opacity_clip(out, fbw, fbh, image_base_x + px, image_base_y + py, 1, 1, st.border_radius_tl_px, st.border_radius_tr_px, st.border_radius_br_px, st.border_radius_bl_px, color | 0xFF000000u32, color_opacity, image_clip)
                 px = px + 1
         else:
             val color = mix_color_vertical_centered(st.background_gradient_from, st.background_gradient_to, tile_py, tile_h, 0, tile_py)
-            out = fb_rounded_rect_corners_opacity_clip(out, fbw, fbh, image_base_x, image_base_y + py, max_x, 1, st.border_radius_tl_px, st.border_radius_tr_px, st.border_radius_br_px, st.border_radius_bl_px, color, st.opacity_pct, image_clip)
+            val color_alpha = (((color >> 24) & 255u32) as i32)
+            val color_opacity = (st.opacity_pct * color_alpha + 127) / 255
+            if color_opacity > 0:
+                out = fb_rounded_rect_corners_opacity_clip(out, fbw, fbh, image_base_x, image_base_y + py, max_x, 1, st.border_radius_tl_px, st.border_radius_tr_px, st.border_radius_br_px, st.border_radius_bl_px, color | 0xFF000000u32, color_opacity, image_clip)
         py = py + 1
     out
 
@@ -7387,19 +7535,19 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
             if paint_shadow or paint_bg or paint_border or paint_outline:
                 val clip = paint_clip_at(clip_cache, i)
                 if paint_shadow:
-                    out = fb_style_rounded_rect_opacity_clip(out, fbw, fbh, x + st.box_shadow_x_px, y + st.box_shadow_y_px, w, h, st, st.box_shadow_color, 100, clip)
+                    out = fb_style_rounded_rect_opacity_clip(out, fbw, fbh, x + st.box_shadow_x_px, y + st.box_shadow_y_px, w, h, st, st.box_shadow_color | 0xFF000000u32, ((((st.box_shadow_color >> 24) & 255u32) as i32) * 100 + 127) / 255, clip)
                 if paint_bg:
                     out = fb_style_background_opacity_clip(out, fbw, fbh, x, y, w, h, st, clip)
                 if paint_border:
                     out = fb_border_sides_clip(out, fbw, fbh, x, y, w, h, st.border_l, st.border_t, st.border_r, st.border_b, st.border_color_l, st.border_color_t, st.border_color_r, st.border_color_b, clip)
                 if paint_outline:
                     out = fb_outline_clip(out, fbw, fbh, x, y, w, h, st.outline_w, st.outline_offset_px, st.outline_color, clip)
-        if normal_flow and non_widget_mode and visible_node and nd.has_widget_panel_class and y < fbh:
+        if normal_flow and non_widget_mode and visible_node and nd.has_widget_panel_class and y < fbh and st.bg == 0u32 and st.background_gradient_from == 0u32:
             val panel_h = if fbh - y > h: fbh - y else: h
             out = fb_rect(out, fbw, fbh, x, y, w, panel_h, argb(245, 245, 245))
             if nd.has_focused_class:
                 out = fb_rect(out, fbw, fbh, x, y, w, 1, argb(0, 102, 204))
-        if normal_flow and non_widget_mode and visible_node and nd.has_widget_button_class and y < fbh:
+        if normal_flow and non_widget_mode and visible_node and nd.has_widget_button_class and y < fbh and st.bg == 0u32 and st.background_gradient_from == 0u32:
             out = fb_rect(out, fbw, fbh, x, y, w, h, argb(203, 213, 225))
         i = i + 1
     i = 0
@@ -7424,19 +7572,19 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
                 if paint_shadow or paint_bg or paint_border or paint_outline:
                     val clip = paint_clip_at(clip_cache, i)
                     if paint_shadow:
-                        out = fb_style_rounded_rect_opacity_clip(out, fbw, fbh, x + st.box_shadow_x_px, y + st.box_shadow_y_px, w, h, st, st.box_shadow_color, 100, clip)
+                        out = fb_style_rounded_rect_opacity_clip(out, fbw, fbh, x + st.box_shadow_x_px, y + st.box_shadow_y_px, w, h, st, st.box_shadow_color | 0xFF000000u32, ((((st.box_shadow_color >> 24) & 255u32) as i32) * 100 + 127) / 255, clip)
                     if paint_bg:
                         out = fb_style_background_opacity_clip(out, fbw, fbh, x, y, w, h, st, clip)
                     if paint_border:
                         out = fb_border_sides_clip(out, fbw, fbh, x, y, w, h, st.border_l, st.border_t, st.border_r, st.border_b, st.border_color_l, st.border_color_t, st.border_color_r, st.border_color_b, clip)
                     if paint_outline:
                         out = fb_outline_clip(out, fbw, fbh, x, y, w, h, st.outline_w, st.outline_offset_px, st.outline_color, clip)
-            if non_widget_mode and visible_node and nd.has_widget_panel_class and y < fbh:
+            if non_widget_mode and visible_node and nd.has_widget_panel_class and y < fbh and st.bg == 0u32 and st.background_gradient_from == 0u32:
                 val panel_h = if fbh - y > h: fbh - y else: h
                 out = fb_rect(out, fbw, fbh, x, y, w, panel_h, argb(245, 245, 245))
                 if nd.has_focused_class:
                     out = fb_rect(out, fbw, fbh, x, y, w, 1, argb(0, 102, 204))
-            if non_widget_mode and visible_node and nd.has_widget_button_class and y < fbh:
+            if non_widget_mode and visible_node and nd.has_widget_button_class and y < fbh and st.bg == 0u32 and st.background_gradient_from == 0u32:
                 out = fb_rect(out, fbw, fbh, x, y, w, h, argb(203, 213, 225))
         i = i + 1
     var positive_z_indices: [i32] = []
@@ -7466,19 +7614,19 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
                     if paint_shadow or paint_bg or paint_border or paint_outline:
                         val clip = paint_clip_at(clip_cache, i)
                         if paint_shadow:
-                            out = fb_style_rounded_rect_opacity_clip(out, fbw, fbh, x + st.box_shadow_x_px, y + st.box_shadow_y_px, w, h, st, st.box_shadow_color, 100, clip)
+                            out = fb_style_rounded_rect_opacity_clip(out, fbw, fbh, x + st.box_shadow_x_px, y + st.box_shadow_y_px, w, h, st, st.box_shadow_color | 0xFF000000u32, ((((st.box_shadow_color >> 24) & 255u32) as i32) * 100 + 127) / 255, clip)
                         if paint_bg:
                             out = fb_style_background_opacity_clip(out, fbw, fbh, x, y, w, h, st, clip)
                         if paint_border:
                             out = fb_border_sides_clip(out, fbw, fbh, x, y, w, h, st.border_l, st.border_t, st.border_r, st.border_b, st.border_color_l, st.border_color_t, st.border_color_r, st.border_color_b, clip)
                         if paint_outline:
                             out = fb_outline_clip(out, fbw, fbh, x, y, w, h, st.outline_w, st.outline_offset_px, st.outline_color, clip)
-                if non_widget_mode and visible_node and nd.has_widget_panel_class and y < fbh:
+                if non_widget_mode and visible_node and nd.has_widget_panel_class and y < fbh and st.bg == 0u32 and st.background_gradient_from == 0u32:
                     val panel_h = if fbh - y > h: fbh - y else: h
                     out = fb_rect(out, fbw, fbh, x, y, w, panel_h, argb(245, 245, 245))
                     if nd.has_focused_class:
                         out = fb_rect(out, fbw, fbh, x, y, w, 1, argb(0, 102, 204))
-                if non_widget_mode and visible_node and nd.has_widget_button_class and y < fbh:
+                if non_widget_mode and visible_node and nd.has_widget_button_class and y < fbh and st.bg == 0u32 and st.background_gradient_from == 0u32:
                     out = fb_rect(out, fbw, fbh, x, y, w, h, argb(203, 213, 225))
             elif st.position_absolute and st.z_index > 0:
                 if positive_z_count == 0 and positive_z_indices.len() == 0:
@@ -7515,19 +7663,19 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
                 if paint_shadow or paint_bg or paint_border or paint_outline:
                     val clip = paint_clip_at(clip_cache, i)
                     if paint_shadow:
-                        out = fb_style_rounded_rect_opacity_clip(out, fbw, fbh, x + st.box_shadow_x_px, y + st.box_shadow_y_px, w, h, st, st.box_shadow_color, 100, clip)
+                        out = fb_style_rounded_rect_opacity_clip(out, fbw, fbh, x + st.box_shadow_x_px, y + st.box_shadow_y_px, w, h, st, st.box_shadow_color | 0xFF000000u32, ((((st.box_shadow_color >> 24) & 255u32) as i32) * 100 + 127) / 255, clip)
                     if paint_bg:
                         out = fb_style_background_opacity_clip(out, fbw, fbh, x, y, w, h, st, clip)
                     if paint_border:
                         out = fb_border_sides_clip(out, fbw, fbh, x, y, w, h, st.border_l, st.border_t, st.border_r, st.border_b, st.border_color_l, st.border_color_t, st.border_color_r, st.border_color_b, clip)
                     if paint_outline:
                         out = fb_outline_clip(out, fbw, fbh, x, y, w, h, st.outline_w, st.outline_offset_px, st.outline_color, clip)
-            if non_widget_mode and visible_node and nd.has_widget_panel_class and y < fbh:
+            if non_widget_mode and visible_node and nd.has_widget_panel_class and y < fbh and st.bg == 0u32 and st.background_gradient_from == 0u32:
                 val panel_h = if fbh - y > h: fbh - y else: h
                 out = fb_rect(out, fbw, fbh, x, y, w, panel_h, argb(245, 245, 245))
                 if nd.has_focused_class:
                     out = fb_rect(out, fbw, fbh, x, y, w, 1, argb(0, 102, 204))
-            if non_widget_mode and visible_node and nd.has_widget_button_class and y < fbh:
+            if non_widget_mode and visible_node and nd.has_widget_button_class and y < fbh and st.bg == 0u32 and st.background_gradient_from == 0u32:
                 out = fb_rect(out, fbw, fbh, x, y, w, h, argb(203, 213, 225))
             positive_z_pos = positive_z_pos + 1
     if widget_mode:
