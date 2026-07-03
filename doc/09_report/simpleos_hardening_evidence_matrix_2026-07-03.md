@@ -65,6 +65,9 @@
 - fat32_chain_formal: pass
 - fat32_chain_formal_scope: guarded FAT32 chain walks are fuel bounded, zero fuel returns the empty chain, cluster-to-LBA mapping is monotone and injective for well-formed geometry, cluster counts cover file size, EOC and FREE markers are exclusive, FREE entries are not valid links, and a newly allocated free singleton is disjoint from existing chains before predecessor linking
 - fat32_chain_formal_evidence: src/verification/fat32/Fat32/Theorems.lean T1_chain_length_bound + T1_zero_fuel_empty + T2_lba_monotone + T3_lba_injective + T5_cluster_count_covers + T6_eoc_not_free + T6_free_not_valid_chain + T7a_valid_link_ge2 + T7b_free_not_in_chain + T7c_alloc_step2_new_chain_disjoint; `cd src/verification/fat32 && lake build`
+- gc_boundary_formal: pass
+- gc_boundary_formal_scope: alias-free GC/nogc checker acceptance prevents GC-tier values in nogc/noalloc contexts, noalloc-accepted bodies do not allocate, allocation inference joins are monotone, explicit Copy nodes are alias-free, and Copy results are nogc rather than gc
+- gc_boundary_formal_evidence: src/verification/gc_boundary/GcBoundary/Theorems.lean check_sound_wrt_model + noalloc_closed + inference_monotone + inference_join_ge + alloc_join_alloc + copy_alias_free + copy_isolates + copy_result_not_gc; `cd src/verification/gc_boundary && lake build`
 - kernel_capability_depth_formal: pass
 - kernel_capability_depth_formal_scope: capability delegation with exhausted depth is denied
 - kernel_capability_depth_formal_evidence: src/verification/kernel_capabilities/KernelCapabilities/Theorems.lean zero_depth_grant_denied; `cd src/verification/kernel_capabilities && lake build`

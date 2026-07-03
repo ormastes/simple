@@ -33,6 +33,10 @@ def AliasFree (env : TierEnv) : Expr → Prop
   | Expr.Call _ as => ∀ a, a ∈ as → AliasFree env a
   | Expr.Seq e1 e2 => AliasFree env e1 ∧ AliasFree env e2
 
+theorem copy_alias_free (env : TierEnv) (e : Expr) :
+    AliasFree env (Expr.Copy e) := by
+  simp [AliasFree]
+
 -- ============================================================
 -- § B  T1 — check_sound_wrt_model
 -- ============================================================
