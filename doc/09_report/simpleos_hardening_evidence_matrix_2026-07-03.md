@@ -74,6 +74,9 @@
 - manual_pointer_borrow_formal: pass
 - manual_pointer_borrow_formal_scope: valid borrow states exclude shared borrows while exclusive, typed valid states are always valid, roundtrip conversion preserves valid states, take/release operations preserve validity
 - manual_pointer_borrow_formal_evidence: src/verification/manual_pointer_borrow/src/ManualPointerBorrow.lean valid_exclusive_has_no_shared + validState_always_valid + toValid_toState + exclusive_ok + shared_ok + release_ok; `cd src/verification/manual_pointer_borrow && lake build`
+- tensor_memory_formal: pass
+- tensor_memory_formal_scope: per-component tensor memory min/max bounds compose into total min <= total max, and any actual usage below total max fits when total max fits available device memory
+- tensor_memory_formal_evidence: src/verification/tensor_dimensions/src/TensorMemory.lean training_total_min_le_max + training_fits_if_max_fits; `cd src/verification/tensor_dimensions && lake build`
 - kernel_capability_depth_formal: pass
 - kernel_capability_depth_formal_scope: capability delegation with exhausted depth is denied
 - kernel_capability_depth_formal_evidence: src/verification/kernel_capabilities/KernelCapabilities/Theorems.lean zero_depth_grant_denied; `cd src/verification/kernel_capabilities && lake build`

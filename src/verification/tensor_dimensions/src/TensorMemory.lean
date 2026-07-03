@@ -22,6 +22,15 @@ def TrainingMemory.totalMin (tm : TrainingMemory) : Nat :=
   tm.parameterBytes.minBytes + tm.gradients.minBytes +
   tm.optimizerState.minBytes + tm.activations.minBytes
 
+theorem training_total_min_le_max (tm : TrainingMemory)
+    (hp : tm.parameterBytes.minBytes ≤ tm.parameterBytes.maxBytes)
+    (hg : tm.gradients.minBytes ≤ tm.gradients.maxBytes)
+    (ho : tm.optimizerState.minBytes ≤ tm.optimizerState.maxBytes)
+    (ha : tm.activations.minBytes ≤ tm.activations.maxBytes) :
+    tm.totalMin ≤ tm.totalMax := by
+  unfold TrainingMemory.totalMin TrainingMemory.totalMax
+  omega
+
 -- If max estimate fits, any actual usage fits.
 theorem training_fits_if_max_fits (tm : TrainingMemory) (device : DeviceMemory) (actual : Nat) :
   tm.totalMax ≤ device.availableBytes → tm.totalMin ≤ actual → actual ≤ tm.totalMax → actual ≤ device.availableBytes := by
