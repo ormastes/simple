@@ -56,12 +56,12 @@ Prior diagnostic run with placeholder RTL allowed:
 
 - PASS: RV64 ELF, raw bin, and bitstream artifacts exist.
 - PASS: `rv64_fpga_core_executable` after RV64 VHDL generation emits a stateful fetch core.
-- FAIL: `rv64_fpga_synth_logic` because Vivado optimizes away CPU/RAM logic.
+- PASS: `rv64_fpga_synth_logic`; synth-only Vivado retains generated CPU/RAM logic.
 - PASS: `rv64_fpga_elf_load_context` via RTL preload (`build/vhdl/rv64/rv64_payload.mem` referenced by `ram.vhd`); stale XSDB `dow` remains invalid and is recorded separately.
 - PASS: RV32 ELF and raw bin artifacts exist after the LLVM-driver build.
 - PASS: RV32 VHDL template generation writes `build/vhdl/rv32/rv32i_pkg.vhd`, `rv32i_decode.vhd`, and `rv32i_regfile.vhd`.
 - FAIL: `build/build/rv32_fpga/gateware/rv32_fpga.bit` is still missing.
-- FAIL: `rv32_fpga_core_executable` because no RV32 executable-core evidence exists at `build/vhdl/rv32/rv32_core.vhd`.
+- PASS: `rv32_fpga_core_executable` for the generated decode/control helper RTL at `build/vhdl/rv32/rv32_core.vhd`.
 - FAIL: `rv32_fpga_elf_load_context` because no RV32 load/run evidence exists at `build/fpga/rv32/load_elf_rv32.log`.
 
 `SIMPLE_OS_BUILD_BACKEND=cranelift bin/release/simple os build --arch=riscv64 --scenario=riscv64-fpga-mmode`

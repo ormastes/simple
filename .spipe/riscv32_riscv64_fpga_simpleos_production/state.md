@@ -81,3 +81,4 @@ dev-in-progress
 - dev: Made the generated RV64 RAM acknowledge/read/write and the generated RV64 Wishbone interconnect decode bootrom/CLINT/PLIC/UART/RAM; GHDL analysis accepts the generated core/RAM/interconnect, but RV64 still lacks payload preload/debug load and UART run evidence.
 - dev: Added RV64 RTL preload generation from `build/rv64_bringup_check/hello_litex_rv64.bin` into `build/vhdl/rv64/rv64_payload.mem`, wired generated RAM to initialize from it, and made preflight accept that as load-context evidence while keeping UART/run proof open.
 - dev: Fixed the K26 wrapper's stale placeholder regex and added a Vivado utilization gate; current synth-only evidence now fails closed because CPU/RAM logic is optimized away.
+- dev: Kept the generated RV64 fetch/RAM path observable through synthesis; `build_k26_vexriscv.shs --synth-only` and dual-arch preflight now pass `rv64_fpga_synth_logic`. RV32 still lacks bitstream and ELF load/run evidence.
