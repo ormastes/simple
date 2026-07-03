@@ -133,6 +133,16 @@ The helper defaults to `build/fpga/k26/k26_vexriscv.bit` and
 the bitstream programmed successfully but does not expose a CPU/debug target
 that can accept `dow`.
 
+The production preflight separates these states:
+
+```bash
+SIMPLE_BINARY=bin/release/simple sh scripts/check/check-riscv-fpga-simpleos-preflight.shs --local-only
+```
+
+- `artifact_simpleos_bitstream` only proves the `.bit` file exists.
+- `rv64_fpga_core_executable` must pass before treating the bitstream as a real SimpleOS-capable core.
+- `rv64_fpga_elf_load_context` must pass before treating XSDB ELF download as proven.
+
 ## 5. FPGA Programming
 
 Connect KV260 via USB (FTDI FT4232H — ch0=JTAG). Only Vivado hw_server works; openocd/openFPGALoader are incompatible with this carrier's proprietary FT4232H JTAG.

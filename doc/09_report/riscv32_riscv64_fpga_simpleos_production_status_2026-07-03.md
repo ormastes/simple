@@ -21,6 +21,8 @@ either RV32 or RV64.
 - PASS: `build/build/xilinx_kv260/gateware/xilinx_kv260.bit` exists after the K26 Vivado build.
 - PASS: `bin/release/simple` runs `hello_native.spl`.
 - FAIL: `yosys` is not installed.
+- FAIL: `build/vhdl/rv64/rv64gc_core.vhd` is a placeholder core with no instruction execution or debug/load context.
+- FAIL: `build/fpga/k26/load_elf_k26.log` records XSDB `dow` failure with `Invalid context`.
 
 `SIMPLE_BINARY=bin/release/simple bash scripts/fpga/build_k26_vexriscv.shs`
 
@@ -42,6 +44,12 @@ either RV32 or RV64.
 
 - PASS: programs the generated K26 bitstream through XSDB.
 - FAIL: `dow build/os/simpleos_riscv64_fpga.elf` returns XSDB `Invalid context`; the generated bitstream does not expose a usable CPU/debug context for ELF download.
+
+`SIMPLE_BINARY=bin/release/simple sh scripts/check/check-riscv-fpga-simpleos-preflight.shs --local-only`
+
+- PASS: RV64 ELF, raw bin, and bitstream artifacts exist.
+- FAIL: `rv64_fpga_core_executable` because the generated active core is a placeholder.
+- FAIL: `rv64_fpga_elf_load_context` because the last XSDB load log reports `xsdb-dow-invalid-context`.
 
 `SIMPLE_OS_BUILD_BACKEND=cranelift bin/release/simple os build --arch=riscv64 --scenario=riscv64-fpga-mmode`
 

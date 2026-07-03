@@ -25,7 +25,9 @@ N/A for this slice: this turn only fixes existing smoke wrappers and records blo
 ## Evidence 2026-07-03
 - `SIMPLE_BINARY=bin/release/simple sh scripts/check/check-riscv64-fpga-simpleos-preflight.shs --local-only`:
   - PASS: FT4232H USB present, serial ports present, JTAG interface free, openFPGALoader, OpenOCD, Vivado, RISC-V cross compilers, RV64 SimpleOS ELF artifact, RV64 SimpleOS bin artifact, RV64 bitstream artifact, Simple hello.
-  - FAIL: yosys.
+  - FAIL: yosys, RV64 FPGA core executable gate, RV64 FPGA ELF load-context gate.
+  - RV64 core reason: `build/vhdl/rv64/rv64gc_core.vhd` is a placeholder core with no instruction execution or debug/load context.
+  - RV64 load reason: `build/fpga/k26/load_elf_k26.log` records XSDB `dow` failure with `Invalid context`.
 - `SIMPLE_BINARY=bin/release/simple bash scripts/fpga/build_k26_vexriscv.shs`:
   - PASS: Vivado synthesis, implementation, DRC, and bitgen complete; copies `build/fpga/k26/k26_vexriscv.bit` and `build/build/xilinx_kv260/gateware/xilinx_kv260.bit`.
 - `SIMPLE_BINARY=bin/release/simple CAPTURE_SECONDS=5 LINUX_TIMEOUT=10 sh scripts/fpga/check_kv260_simple_rv64_linux.shs`:
@@ -59,3 +61,4 @@ dev-in-progress
 - dev: Exposed RV64/RV32 FPGA M-mode lanes through `simple os build --scenario=...`, fixed the RV64 FPGA entry symbol, added freestanding not-found runtime hooks, and auto-derived the RV64 raw FPGA payload bin from the built ELF. RV32 is wired but needs an LLVM-enabled Simple compiler on this host.
 - dev: Repaired the K26 RV64 VHDL/Vivado wrapper, generated and programmed a current KV260 bitstream, and recorded that physical programming now passes while SimpleOS softcore UART execution remains unproven.
 - dev: Updated the K26 ELF load helper to use the current RV64 FPGA ELF and preserve XSDB logs; current physical load is blocked by missing CPU/debug context in the generated bitstream.
+- dev: Added fail-closed RV64 core/load-context gates to FPGA preflight so a present-but-placeholder bitstream cannot satisfy production readiness.
