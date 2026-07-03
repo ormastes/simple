@@ -403,6 +403,17 @@ theorem sanitize_init_caps_non_trusted_full_is_empty
     sanitizeInitCaps trusted pid CapSet.full = CapSet.empty := by
   simp [sanitizeInitCaps, CapSet.full, CapSet.empty, hne]
 
+/-- A sanitized non-trusted ambient full set becomes an explicit deny-all
+    record for every capability-kind check. -/
+theorem sanitize_init_caps_non_trusted_full_denies_all
+    (trusted pid : Principal) (kind : CapKind)
+    (hne : pid ≠ trusted) :
+    ({ records := [{ pid := pid, caps := sanitizeInitCaps trusted pid CapSet.full }]
+     , nextGeneration := 1
+     , nextTokenId := 1 } : CapState).check pid kind = false := by
+  simp [CapState.check, CapState.findRecord, sanitizeInitCaps, CapSet.full,
+    CapSet.empty, hne]
+
 /-- Trusted init/kernel may retain the ambient full-set shape through init. -/
 theorem sanitize_init_caps_trusted_full_stays_full
     (trusted : Principal) :
