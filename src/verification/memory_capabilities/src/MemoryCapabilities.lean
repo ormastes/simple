@@ -119,6 +119,16 @@ theorem existing_ref_denies_exclusive
       loc RefCapability.Exclusive = false := by
   cases cap <;> simp [canCreateRef, getActiveRefs]
 
+theorem existing_ref_denies_isolated
+    (baseType : String) (loc : Nat) (cap : RefCapability) :
+    canCreateRef
+      { activeRefs :=
+          [(loc,
+            [{ location := loc,
+               refType := { baseType := baseType, capability := cap } }])] }
+      loc RefCapability.Isolated = false := by
+  cases cap <;> simp [canCreateRef, getActiveRefs]
+
 theorem existing_exclusive_denies_exclusive (baseType : String) (loc : Nat) :
   canCreateRef
     { activeRefs :=
