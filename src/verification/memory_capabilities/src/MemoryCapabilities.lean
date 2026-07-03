@@ -461,6 +461,20 @@ theorem empty_env_wellformed_and_no_access (access : MemAccess) :
   · exact empty_env_wellformed
   · exact empty_env_access_not_safe access
 
+theorem empty_env_complete_policy (loc : Nat) (access : MemAccess) :
+  canCreateRef { activeRefs := [] } loc RefCapability.Shared = true ∧
+  canCreateRef { activeRefs := [] } loc RefCapability.Exclusive = true ∧
+  canCreateRef { activeRefs := [] } loc RefCapability.Isolated = true ∧
+  wellFormed { activeRefs := [] } ∧
+  accessIsSafe { activeRefs := [] } access = false := by
+  constructor
+  · exact empty_env_allows_shared loc
+  · constructor
+    · exact empty_env_allows_exclusive loc
+    · constructor
+      · exact empty_env_allows_isolated loc
+      · exact empty_env_wellformed_and_no_access access
+
 theorem singleton_env_wellformed (baseType : String) (loc : Nat) (cap : RefCapability) :
   wellFormed
     { activeRefs :=
