@@ -227,6 +227,18 @@ theorem singleton_shared_write_not_safe (baseType : String) (loc : Nat) :
   simp [accessIsSafe, getActiveRefs, allowsAccess]
   exact ⟨rfl, rfl⟩
 
+theorem two_shared_write_not_safe (baseType : String) (loc : Nat) :
+  accessIsSafe
+    { activeRefs :=
+        [(loc,
+          [{ location := loc,
+             refType := { baseType := baseType, capability := RefCapability.Shared } },
+           { location := loc,
+             refType := { baseType := baseType, capability := RefCapability.Shared } }])] }
+    (MemAccess.Write loc) = false := by
+  simp [accessIsSafe, getActiveRefs, allowsAccess]
+  exact ⟨rfl, rfl⟩
+
 theorem read_wrong_location_denied
     (baseType : String) (loc other : Nat) (cap : RefCapability)
     (hne : loc ≠ other) :
