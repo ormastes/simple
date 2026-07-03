@@ -78,14 +78,15 @@ gui_web_2d_vulkan_renderdoc_status=unavailable
 gui_web_2d_vulkan_renderdoc_reason=missing-renderdoccmd-in-search-paths
 ```
 
-The aggregate therefore remains incomplete. Later Linux refresh evidence proves
-browser backing, direct Electron/Chrome/Simple ARGB artifacts, pairwise pixel
-equivalence, Web WM evidence, and current-source 4K/8K retained performance; do
+The aggregate was incomplete at this 2026-06-27 capture point. Later Linux
+refresh evidence proves browser backing, direct Electron/Chrome/Simple ARGB
+artifacts, pairwise pixel equivalence, Web WM evidence, current-source 4K/8K
+retained performance, and Simple/Chrome/Electron RenderDoc `RDOC` artifacts; do
 not reopen those rows from this older report.
 
-The remaining blockers for the Linux lane are valid Simple/Chrome/Electron and
-widget `.rdc` captures with `RDOC` magic, strict Linux render-log comparison
-using those native captures, platform render-log comparison on macOS/Windows,
-and full CSS coverage beyond the implemented Simple Web subset. Older reports
-that found RenderDoc tooling are dated diagnostics; current proof requires fresh
-host discovery plus actual `.rdc` artifacts.
+The Simple/Chrome/Electron Linux RenderDoc blockers in this report are
+superseded by `doc/09_report/linux_renderdoc_simpleos_hardening_evidence_current_2026-07-02.md`
+and `doc/09_report/linux_vulkan_render_log_compare_current_2026-07-02.md`.
+Widget `.rdc` captures, platform render-log comparison on macOS/Windows, and
+full CSS coverage beyond the implemented Simple Web subset remain separate
+evidence lanes.

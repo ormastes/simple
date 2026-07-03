@@ -7,7 +7,7 @@
 # circular references resolve to an error instead of overflowing the stack.
 
 use app.office.sheets.cell.{CellValue, CellRef, parse_cell_ref, cell_ref_to_string, cell_display_text}
-use app.office.sheets.cell_ref.{parse_range, expand_range_refs}
+use app.office.sheets.cell_ref.{parse_range, expand_range_refs, CellRange}
 use app.office.sheets.spreadsheet.{Sheet}
 use common.office.number.{office_parse_unsigned_decimal_f64}
 
@@ -745,6 +745,103 @@ fn _eval_lookup_function(name: text, tokens: [text], pos: i32, sheet: Sheet, dep
         c = c + 1
     EvalResult(value: CellValue.ErrorVal(message: "HLOOKUP not found"), next_pos: cur_pos)
 
+fn _is_db_function(name: text) -> bool:
+    (name == "DSUM" or name == "DCOUNT" or name == "DAVERAGE" or
+     name == "DMAX" or name == "DMIN" or name == "DGET")
+
+fn _db_cell(sheet: Sheet, col: i32, row: i32) -> Cell:
+    sheet.get_cell(cell_ref_to_string(CellRef(col: col, row: row)))
+
+fn _db_header_col(sheet: Sheet, range_val: CellRange, header: text) -> i32:
+    """Column index of a header name in a range's first row, or -1."""
+    var c = range_val.start.col
+    while c <= range_val.end_ref.col:
+        val d = cell_display_text(_db_cell(sheet, c, range_val.start.row))
+        if d.lower() == header.lower():
+            return c
+        c = c + 1
+    -1
+
+fn _eval_db_function(name: text, tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalResult:
+    """DSUM/DCOUNT/DAVERAGE/DMAX/DMIN/DGET(database, field, criteria).
+    Database and criteria ranges carry header rows; field is a quoted header
+    name or 1-based column number; conditions AND across criteria columns."""
+    if not (pos + 2 < tokens.len() and tokens.get(pos + 1) == ":"):
+        return EvalResult(value: CellValue.ErrorVal(message: "{name} requires a database range"), next_pos: pos)
+    val db = parse_range("{tokens.get(pos)}:{tokens.get(pos + 2)}")
+    var cur_pos = _skip_comma(tokens, pos + 3)
+    if db == nil:
+        return EvalResult(value: CellValue.ErrorVal(message: "{name} invalid database"), next_pos: cur_pos)
+    # field: quoted header name or numeric 1-based index
+    var field_col = -1
+    val ftok = tokens.get(cur_pos)
+    if ftok.starts_with("\""):
+        field_col = _db_header_col(sheet, db, ftok.slice(1, ftok.len() - 1))
+        cur_pos = _skip_comma(tokens, cur_pos + 1)
+    else:
+        val fr = _eval_comparison(tokens, cur_pos, sheet, depth)
+        field_col = db.start.col + _to_number(fr.value).to_i64().to_i32() - 1
+        cur_pos = _skip_comma(tokens, fr.next_pos)
+    if field_col < db.start.col or field_col > db.end_ref.col:
+        return EvalResult(value: CellValue.ErrorVal(message: "{name} unknown field"), next_pos: cur_pos)
+    if not (cur_pos + 2 < tokens.len() and tokens.get(cur_pos + 1) == ":"):
+        return EvalResult(value: CellValue.ErrorVal(message: "{name} requires a criteria range"), next_pos: cur_pos)
+    val crit = parse_range("{tokens.get(cur_pos)}:{tokens.get(cur_pos + 2)}")
+    cur_pos = cur_pos + 3
+    if cur_pos < tokens.len() and tokens.get(cur_pos) == ")":
+        cur_pos = cur_pos + 1
+    if crit == nil:
+        return EvalResult(value: CellValue.ErrorVal(message: "{name} invalid criteria"), next_pos: cur_pos)
+    var count = 0
+    var total = 0.0
+    var best = 0.0
+    var got_text = ""
+    var r = db.start.row + 1
+    while r <= db.end_ref.row:
+        var matches = true
+        var cc = crit.start.col
+        while cc <= crit.end_ref.col:
+            val header = cell_display_text(_db_cell(sheet, cc, crit.start.row))
+            var cr = crit.start.row + 1
+            while cr <= crit.end_ref.row:
+                val cond = cell_display_text(_db_cell(sheet, cc, cr))
+                if cond != "" and header != "":
+                    val dbc = _db_header_col(sheet, db, header)
+                    if dbc < 0:
+                        matches = false
+                    else:
+                        val cell = _db_cell(sheet, dbc, r)
+                        if not _criteria_matches(cell_display_text(cell), _to_number(cell.value), cond):
+                            matches = false
+                cr = cr + 1
+            cc = cc + 1
+        if matches:
+            val target = _db_cell(sheet, field_col, r)
+            val v = _to_number(target.value)
+            if count == 0:
+                best = v
+            elif name == "DMAX" and v > best:
+                best = v
+            elif name == "DMIN" and v < best:
+                best = v
+            total = total + v
+            got_text = cell_display_text(target)
+            count = count + 1
+        r = r + 1
+    if name == "DCOUNT":
+        return EvalResult(value: CellValue.NumberVal(value: count.to_f64()), next_pos: cur_pos)
+    if count == 0:
+        return EvalResult(value: CellValue.ErrorVal(message: "{name} no matches"), next_pos: cur_pos)
+    if name == "DSUM":
+        return EvalResult(value: CellValue.NumberVal(value: total), next_pos: cur_pos)
+    if name == "DAVERAGE":
+        return EvalResult(value: CellValue.NumberVal(value: total / count.to_f64()), next_pos: cur_pos)
+    if name == "DMAX" or name == "DMIN":
+        return EvalResult(value: CellValue.NumberVal(value: best), next_pos: cur_pos)
+    if count != 1:
+        return EvalResult(value: CellValue.ErrorVal(message: "DGET matched {count} rows"), next_pos: cur_pos)
+    EvalResult(value: CellValue.TextVal(value: got_text), next_pos: cur_pos)
+
 fn _eval_function_call(name: text, tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalResult:
     """Evaluate a function call. pos points to first token after '('."""
     if _is_text_function(name):
@@ -753,6 +850,8 @@ fn _eval_function_call(name: text, tokens: [text], pos: i32, sheet: Sheet, depth
         return _eval_criteria_function(name, tokens, pos, sheet, depth)
     if _is_lookup_function(name):
         return _eval_lookup_function(name, tokens, pos, sheet, depth)
+    if _is_db_function(name):
+        return _eval_db_function(name, tokens, pos, sheet, depth)
     # Collect arguments separated by commas
     # Each argument can be a range (A1:B3) or an expression
     var args: [[f64]] = []

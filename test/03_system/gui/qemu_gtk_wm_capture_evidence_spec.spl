@@ -104,6 +104,21 @@ fn _run_forced_live_guest_perf_without_acceptance_evidence(run_id: text) -> (tex
         120000
     )
 
+fn _run_guest_perf_marker_without_qmp(run_id: text) -> (text, text, i32):
+    process_run_timeout("/bin/sh", ["-c", "mkdir -p build/tmp"], 5000)
+    expect(file_write(_guest_serial_path(run_id), "[desktop-e2e] qemu-perf sample_origin=qemu-guest simple_frame_cycles=2000 iterations=7 timing_unit=tsc\n")).to_be(true)
+    process_run_timeout(
+        "/bin/sh",
+        [
+            "-c",
+            "SIMPLE_BIN=release/x86_64-unknown-linux-gnu/simple SIMPLE_LIB=src GTK_GL_WM_SCENE_ITERATIONS=1 QEMU_HOST_GTK_SCENE_EVIDENCE=0 QEMU_GTK_WM_HOST_SMOKE=0 QEMU_GTK_WM_GUI_SMF_ARTIFACT_CONTRACT=0 QEMU_GUEST_SERIAL_LOG=" + _guest_serial_path(run_id) +
+                " BUILD_DIR=" + _build_dir(run_id) +
+                " REPORT_PATH=" + _report_path(run_id) +
+                " sh scripts/check/check-qemu-gtk-wm-capture-evidence.shs"
+        ],
+        120000
+    )
+
 fn _extract_field(output: text, prefix: text) -> text:
     val lines = output.split("\n")
     var i = 0
@@ -276,6 +291,38 @@ describe "QEMU GTK WM capture evidence":
         expect(report).to_contain("qemu-side perf release blocker: forced-live-host-perf-for-test-not-release-evidence")
         expect(report).to_contain("host perf baseline status: pass")
         expect(report).to_contain("host perf baseline promotes QEMU perf: false")
+
+    slow_it "preserves real guest perf marker while QMP remains missing":
+        val run_id = _run_id()
+        val result = _run_guest_perf_marker_without_qmp(run_id)
+        val stdout = result[0]
+        val stderr = result[1]
+        val code = result[2]
+        if code != 1:
+            print "qemu guest perf marker stdout: " + stdout
+            print "qemu guest perf marker stderr: " + stderr
+        expect(code).to_equal(1)
+        val evidence = file_read_text(_evidence_env_path(run_id))
+        expect(evidence).to_contain("qemu_gtk_wm_capture_status=unavailable")
+        expect(evidence).to_contain("qemu_gtk_wm_capture_reason=missing-qmp-socket")
+        expect(evidence).to_contain("qemu_gtk_wm_capture_perf_status=unavailable")
+        expect(evidence).to_contain("qemu_gtk_wm_capture_perf_reason=missing-qmp-socket")
+        expect(evidence).to_contain("qemu_gtk_wm_capture_perf_release_blocker=missing-qmp-socket")
+        expect(evidence).to_contain("qemu_gtk_wm_capture_qemu_perf_harness_status=pass")
+        expect(evidence).to_contain("qemu_gtk_wm_capture_qemu_perf_harness_reason=pass")
+        expect(evidence).to_contain("qemu_gtk_wm_capture_qemu_perf_harness_sample_origin=qemu-guest")
+        expect(evidence).to_contain("qemu_gtk_wm_capture_qemu_perf_harness_marker_line=[desktop-e2e] qemu-perf sample_origin=qemu-guest simple_frame_cycles=2000 iterations=7 timing_unit=tsc")
+        expect(evidence).to_contain("qemu_gtk_wm_capture_perf_simple_frame_cycles=2000")
+        expect(evidence).to_contain("qemu_gtk_wm_capture_perf_iterations=7")
+        expect(evidence).to_contain("qemu_gtk_wm_capture_perf_timing_unit=tsc")
+
+        val report = file_read_text(_report_path(run_id))
+        expect(report).to_contain("qemu-side perf harness status: pass")
+        expect(report).to_contain("qemu-side perf harness reason: pass")
+        expect(report).to_contain("qemu-side perf harness sample origin: qemu-guest")
+        expect(report).to_contain("qemu-side perf simple frame cycles: 2000")
+        expect(report).to_contain("qemu-side perf iterations: 7")
+        expect(report).to_contain("qemu-side perf release blocker: missing-qmp-socket")
 
     slow_it "does not accept forced live guest perf markers by default":
         val run_id = _run_id()

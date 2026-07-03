@@ -1,6 +1,6 @@
 # Bug: GUI widget RenderDoc goal blockers remain
 
-Status: open
+Status: resolved on Linux 2026-07-03
 Date: 2026-06-23
 Area: GUI widget RenderDoc evidence
 
@@ -36,6 +36,27 @@ evidence.
 
 ## Current Linux Evidence
 
+Resolved on 2026-07-03:
+
+- `sh scripts/check/check-gui-widget-renderdoc-goal-status.shs` reports
+  `gui_widget_renderdoc_goal_status=pass`,
+  `gui_widget_renderdoc_goal_widget_feature_covered_count=43`,
+  `gui_widget_renderdoc_goal_simple_gate_status=pass`,
+  `gui_widget_renderdoc_goal_electron_gate_status=pass`, and
+  `gui_widget_renderdoc_goal_blocked_gate_count=0`.
+- Simple widget capture:
+  `build/renderdoc/widget-probe-small/simple/simple_gui_app_capture.rdc` with
+  `RDOC` magic.
+- Electron Chromium widget capture:
+  `build/renderdoc/electron-implicit-layer-default-autocapture/electron-html/electron_gpu_capture.rdc`
+  with `RDOC` magic.
+- The Electron RenderDoc capture-specific ARGB file remains absent, but the gate
+  is satisfied by the direct Electron Vulkan ARGB proof from
+  `build/gui-web-2d-vulkan-env-run-current/evidence.env`.
+- Evidence reports:
+  `doc/09_report/gui_widget_renderdoc_goal_status_2026-07-03.md` and
+  `doc/09_report/gui_renderdoc_feature_coverage_status_2026-07-03.md`.
+
 Resolved on 2026-06-26:
 
 - Simple GUI widget RenderDoc evidence now passes with `RDOC` magic using
@@ -51,7 +72,7 @@ Resolved on 2026-06-26:
 - Gate report:
   `doc/09_report/gui_widget_renderdoc_goal_status_2026-06-26.md`
 
-Still blocked:
+Historical Electron blocker before the 2026-07-03 pass:
 
 - Electron Chromium-on-Vulkan widget `.rdc` capture. The ARGB proof is now
   present, so the remaining widget gate is the missing RenderDoc capture file.

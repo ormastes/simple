@@ -74,6 +74,8 @@ REPORT_PATH="${REPORT_PATH:-doc/09_report/cpu_simd_engine2d_evidence_$(date -u +
 EVIDENCE_SRC="$WORK_DIR/cpu_simd_engine2d_evidence.spl"
 EVIDENCE_LOG="$WORK_DIR/evidence.log"
 ENV_PATH="$WORK_DIR/evidence.env"
+FACADE_SPEC="test/01_unit/lib/gc_async_mut/gpu/engine2d/engine2d_facade_backend_mutation_spec.spl"
+FACADE_LOG="$WORK_DIR/facade_draw_image_clip_mask.log"
 
 have() {
     command -v "$1" >/dev/null 2>&1
@@ -148,6 +150,11 @@ emit_report() {
         echo "cpu_simd_evidence_diagram_alpha_hits=${DIAGRAM_ALPHA_HITS:-0}"
         echo "cpu_simd_evidence_diagram_blit_hits=${DIAGRAM_BLIT_HITS:-0}"
         echo "cpu_simd_evidence_diagram_scroll_hits=${DIAGRAM_SCROLL_HITS:-0}"
+        echo "cpu_simd_evidence_facade_draw_image_clip_mask_spec=$FACADE_SPEC"
+        echo "cpu_simd_evidence_facade_draw_image_clip_mask_status=${FACADE_STATUS:-unknown}"
+        echo "cpu_simd_evidence_facade_draw_image_clip_mask_examples=${FACADE_EXAMPLES:-0}"
+        echo "cpu_simd_evidence_facade_draw_image_clip_mask_failures=${FACADE_FAILURES:-0}"
+        echo "cpu_simd_evidence_cpu_simd_facade_draw_image_clip_mask_status=${FACADE_STATUS:-unknown}"
         echo "cpu_simd_evidence_policy=exact-bitmap-no-blur-no-tolerance"
         echo "cpu_simd_evidence_blur_or_tolerance_used=false"
         echo "cpu_simd_evidence_x86_status=${X86_STATUS:-unknown}"
@@ -195,6 +202,11 @@ emit_report() {
         echo "- diagram alpha hits: ${DIAGRAM_ALPHA_HITS:-0}"
         echo "- diagram blit hits: ${DIAGRAM_BLIT_HITS:-0}"
         echo "- diagram scroll hits: ${DIAGRAM_SCROLL_HITS:-0}"
+        echo "- facade draw_image clip/mask spec: $FACADE_SPEC"
+        echo "- facade draw_image clip/mask status: ${FACADE_STATUS:-unknown}"
+        echo "- facade draw_image clip/mask examples: ${FACADE_EXAMPLES:-0}"
+        echo "- facade draw_image clip/mask failures: ${FACADE_FAILURES:-0}"
+        echo "- cpu_simd facade draw_image clip/mask status: ${FACADE_STATUS:-unknown}"
         echo "- policy: exact bitmap, no blur, no tolerance"
         echo "- blur/tolerance used: false"
         echo "- x86_status: ${X86_STATUS:-unknown}"
@@ -576,10 +588,13 @@ set +e
 # engine3d readback gate).
 SIMPLE_EXECUTION_MODE="${SIMPLE_EXECUTION_MODE:-interpret}" SIMPLE_LIB="${SIMPLE_LIB:-src}" run_with_timeout "$SIMPLE_BIN" run "$EVIDENCE_SRC" --mode=interpreter --clean >"$EVIDENCE_LOG" 2>&1
 EVIDENCE_CODE=$?
+SIMPLE_LIB="${SIMPLE_LIB:-src}" run_with_timeout "$SIMPLE_BIN" test --no-session-daemon "$FACADE_SPEC" --mode=interpreter --clean >"$FACADE_LOG" 2>&1
+FACADE_CODE=$?
 set -e
 
 cat "$EVIDENCE_LOG"
 echo "evidence_exit_code=$EVIDENCE_CODE"
+echo "facade_draw_image_clip_mask_exit_code=$FACADE_CODE"
 
 ARCH="$(value_of cpu_simd_arch)"
 FEATURE="$(value_of cpu_simd_feature)"
@@ -617,6 +632,14 @@ OVERALL="$(value_of overall)"
 NATIVE_SIMD_EXECUTED="$(value_of cpu_simd_native_simd_executed)"
 NATIVE_SIMD_BIT_EXACT="$(value_of cpu_simd_native_simd_bit_exact)"
 NATIVE_SIMD_HITS="$(value_of cpu_simd_native_simd_hits)"
+FACADE_EXAMPLES="$(grep -o 'Passed: *[0-9][0-9]*' "$FACADE_LOG" | sed 's/.*: *//' | tail -n 1)"
+FACADE_FAILURES="$(grep -o 'Failed: *[0-9][0-9]*' "$FACADE_LOG" | sed 's/.*: *//' | tail -n 1)"
+FACADE_EXAMPLES="${FACADE_EXAMPLES:-0}"
+FACADE_FAILURES="${FACADE_FAILURES:-0}"
+FACADE_STATUS=fail
+if [ "$FACADE_CODE" -eq 0 ] && [ "$FACADE_FAILURES" = "0" ]; then
+    FACADE_STATUS=pass
+fi
 
 STATUS=pass
 REASON=runtime-evidence-verified
@@ -624,6 +647,9 @@ REASON=runtime-evidence-verified
 if [ "$EVIDENCE_CODE" -ne 0 ] || [ "$OVERALL" != "pass" ]; then
     STATUS=fail
     REASON=simple-evidence-program-failed
+elif [ "$FACADE_STATUS" != "pass" ]; then
+    STATUS=fail
+    REASON=facade-draw-image-clip-mask-spec-failed
 elif [ "$EXECUTED_ALL" != "true" ]; then
     STATUS=fail
     REASON=simd-kernels-not-executed

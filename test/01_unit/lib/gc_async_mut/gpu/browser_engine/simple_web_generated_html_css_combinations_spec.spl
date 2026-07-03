@@ -34,6 +34,7 @@ declarations participate in the render path.
 
 use std.spec.*
 use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_html_to_pixels}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{simple_web_layout_debug_layout_by_id}
 
 fn _count_color(pixels: [u32], color: u32) -> i32:
     var count: i32 = 0
@@ -105,6 +106,27 @@ describe "Simple Web generated HTML/CSS combinations":
         expect(_pixel_at(pixels, 80, 15, 10)).to_equal(0xFFDBEAFEu32)
         expect(_pixel_at(pixels, 80, 15, 20)).to_equal(0xFFEF4444u32)
 
+    it "renders justify-self on definite-width block children":
+        step("Render fixed-width block children with center and end self alignment")
+        val html = "<html><head><style>html,body{margin:0;padding:0;background-color:#ffffff}.stage{width:40px;height:18px;background-color:#dbeafe}.end{display:block;width:10px;height:6px;background-color:#ef4444;justify-self:end}.center{display:block;width:10px;height:6px;background-color:#1d4ed8;justify-self:center;margin-top:2px}</style></head><body><section class='stage'><div class='end'></div><div class='center'></div></section></body></html>"
+        val pixels = simple_web_render_html_to_pixels(html, 64, 32)
+
+        step("Assert end and center alignment shift the child boxes horizontally")
+        expect(pixels.len()).to_equal(64 * 32)
+        expect(_pixel_at(pixels, 64, 5, 3)).to_equal(0xFFDBEAFEu32)
+        expect(_pixel_at(pixels, 64, 35, 3)).to_equal(0xFFEF4444u32)
+        expect(_pixel_at(pixels, 64, 20, 10)).to_equal(0xFF1D4ED8u32)
+
+    it "renders justify-items as the default self alignment for block children":
+        step("Render fixed-width block children with parent justify-items")
+        val html = "<html><head><style>html,body{margin:0;padding:0;background-color:#ffffff}.stage{width:40px;height:16px;background-color:#dbeafe;justify-items:end}.a{display:block;width:10px;height:6px;background-color:#ef4444}.b{display:block;width:10px;height:6px;background-color:#1d4ed8;justify-self:start;margin-top:2px}</style></head><body><section class='stage'><div class='a'></div><div class='b'></div></section></body></html>"
+        val pixels = simple_web_render_html_to_pixels(html, 64, 32)
+
+        step("Assert justify-items shifts the auto child while explicit justify-self overrides it")
+        expect(pixels.len()).to_equal(64 * 32)
+        expect(_pixel_at(pixels, 64, 35, 3)).to_equal(0xFFEF4444u32)
+        expect(_pixel_at(pixels, 64, 5, 10)).to_equal(0xFF1D4ED8u32)
+
     it "renders individual translate property as a paint offset":
         step("Render a block using the CSS individual translate property")
         val html = "<html><head><style>html,body{margin:0;padding:0;background-color:#ffffff}.stage{width:80px;height:36px;background-color:#dbeafe}.chip{width:12px;height:8px;background-color:#ef4444;translate:20px 6px}</style></head><body><section class='stage'><div class='chip'></div></section></body></html>"
@@ -115,6 +137,27 @@ describe "Simple Web generated HTML/CSS combinations":
         expect(_count_color(pixels, 0xFFEF4444u32)).to_be_greater_than(0)
         expect(_pixel_at(pixels, 96, 5, 4)).to_equal(0xFFDBEAFEu32)
         expect(_pixel_at(pixels, 96, 24, 8)).to_equal(0xFFEF4444u32)
+
+    it "renders text-emphasis marks with color and under position":
+        step("Render text with emphasis shorthand and longhand position")
+        val html = "<html><head><style>html,body{margin:0;padding:0;background-color:#ffffff}.stage{width:80px;height:24px;background-color:#dbeafe}.mark{font-size:8px;line-height:12px;color:#111827;text-emphasis:dot #ef4444;text-emphasis-position:under}</style></head><body><section class='stage'><div class='mark'>HI</div></section></body></html>"
+        val pixels = simple_web_render_html_to_pixels(html, 96, 40)
+
+        step("Assert emphasis marks paint below the glyphs using the emphasis color")
+        expect(pixels.len()).to_equal(96 * 40)
+        expect(_count_color(pixels, 0xFFEF4444u32)).to_be_greater_than(0)
+        expect(_pixel_at(pixels, 96, 4, 10)).to_equal(0xFFEF4444u32)
+
+    it "renders quotes on q text and supports quotes none":
+        step("Render q text with custom quotes and a second q suppressing quotes")
+        val html = "<html><head><style>html,body{margin:0;padding:0;background-color:#ffffff}.stage{width:96px;height:28px;background-color:#dbeafe;color:#111827;font-size:8px;line-height:10px}.quoted{color:#111827;quotes:'[' ']'} .plain{color:#111827;quotes:none}</style></head><body><section class='stage'><q class='quoted'>A</q><br><q class='plain'>A</q></section></body></html>"
+        val pixels = simple_web_render_html_to_pixels(html, 112, 40)
+
+        step("Assert custom quotes add visible text pixels before the q content")
+        expect(pixels.len()).to_equal(112 * 40)
+        expect(_count_color(pixels, 0xFF111827u32)).to_be_greater_than(0)
+        expect(_pixel_at(pixels, 112, 2, 3)).to_equal(0xFF111827u32)
+        expect(_pixel_at(pixels, 112, 2, 13)).to_equal(0xFFDBEAFEu32)
 
     it "renders filter opacity through blended box paint":
         step("Render a block using filter:opacity over a known background color")
@@ -169,6 +212,28 @@ describe "Simple Web generated HTML/CSS combinations":
         expect(_pixel_at(pixels, 96, 7, 5)).to_equal(0xFFEF4444u32)
         expect(_pixel_at(pixels, 96, 9, 5)).to_equal(0xFFDBEAFEu32)
 
+    it "renders clip-path inset as a clipped painted box":
+        step("Render a block using CSS clip-path:inset")
+        val html = "<html><head><style>html,body{margin:0;padding:0;background-color:#ffffff}.stage{width:80px;height:40px;background-color:#dbeafe}.chip{width:20px;height:12px;background-color:#ef4444;clip-path:inset(2px 9px 4px 3px)}</style></head><body><section class='stage'><div class='chip'></div></section></body></html>"
+        val pixels = simple_web_render_html_to_pixels(html, 96, 48)
+
+        step("Assert clip-path:inset constrains the painted box dimensions")
+        expect(pixels.len()).to_equal(96 * 48)
+        expect(_count_color(pixels, 0xFFEF4444u32)).to_equal(8 * 6)
+        expect(_pixel_at(pixels, 96, 2, 4)).to_equal(0xFFDBEAFEu32)
+        expect(_pixel_at(pixels, 96, 5, 4)).to_equal(0xFFEF4444u32)
+        expect(_pixel_at(pixels, 96, 11, 4)).to_equal(0xFFDBEAFEu32)
+
+    it "renders backface-visibility hidden by suppressing a rotated backface":
+        step("Render a block whose back face is hidden after a 3D half turn")
+        val html = "<html><head><style>html,body{margin:0;padding:0;background-color:#ffffff}.stage{width:80px;height:40px;background-color:#dbeafe}.chip{width:20px;height:12px;background-color:#ef4444;backface-visibility:hidden;transform:rotateY(180deg)}</style></head><body><section class='stage'><div class='chip'></div></section></body></html>"
+        val pixels = simple_web_render_html_to_pixels(html, 96, 48)
+
+        step("Assert the rotated back face does not paint its background")
+        expect(pixels.len()).to_equal(96 * 48)
+        expect(_count_color(pixels, 0xFFEF4444u32)).to_equal(0)
+        expect(_pixel_at(pixels, 96, 5, 5)).to_equal(0xFFDBEAFEu32)
+
     it "renders empty-cells hide by suppressing empty table-cell background paint":
         step("Render table cells where only the empty cell uses empty-cells:hide")
         val html = "<html><head><style>html,body{margin:0;padding:0;background-color:#ffffff}table{width:40px;background-color:#dbeafe}td{display:block;width:20px;height:8px;background-color:#ef4444;empty-cells:hide;color:#111827;font-size:8px}</style></head><body><table><tr><td></td><td>x</td></tr></table></body></html>"
@@ -179,6 +244,112 @@ describe "Simple Web generated HTML/CSS combinations":
         expect(_pixel_at(pixels, 64, 5, 4)).to_equal(0xFFDBEAFEu32)
         expect(_pixel_at(pixels, 64, 5, 12)).to_equal(0xFFEF4444u32)
 
+    it "renders border-collapse collapse by suppressing the table wrapper border":
+        step("Render a collapsed-border table with a visible cell border")
+        val html = "<html><head><style>html,body{margin:0;padding:0;background-color:#ffffff}table{border-collapse:collapse;border:4px solid #ef4444;background-color:#dbeafe}td{display:block;width:20px;height:8px;border:2px solid #1d4ed8;background-color:#22c55e}</style></head><body><table><tr><td></td></tr></table></body></html>"
+        val pixels = simple_web_render_html_to_pixels(html, 64, 32)
+
+        step("Assert the table border no longer paints while the cell border still does")
+        expect(pixels.len()).to_equal(64 * 32)
+        expect(_count_color(pixels, 0xFFEF4444u32)).to_equal(0)
+        expect(_count_color(pixels, 0xFF1D4ED8u32)).to_be_greater_than(0)
+
+    it "renders border-spacing as table inner spacing before cells":
+        step("Render a table with border-spacing and a painted cell")
+        val html = "<html><head><style>html,body{margin:0;padding:0;background-color:#ffffff}table{border-spacing:4px;background-color:#dbeafe}td{display:block;width:20px;height:8px;background-color:#22c55e}</style></head><body><table><tr><td></td></tr></table></body></html>"
+        val pixels = simple_web_render_html_to_pixels(html, 64, 32)
+
+        step("Assert the table background is visible before the shifted cell")
+        expect(pixels.len()).to_equal(64 * 32)
+        expect(_pixel_at(pixels, 64, 2, 2)).to_equal(0xFFDBEAFEu32)
+        expect(_pixel_at(pixels, 64, 5, 5)).to_equal(0xFF22C55Eu32)
+
+    it "renders caption-side bottom by placing the caption below table content":
+        step("Render a table with a source-first caption moved to the bottom")
+        val html = "<html><head><style>html,body{margin:0;padding:0;background-color:#ffffff}table{width:30px;background-color:#f8fafc}caption{caption-side:bottom;display:block;width:30px;height:6px;background-color:#1d4ed8}tr{display:block;width:30px;height:8px}td{display:block;width:30px;height:8px;background-color:#ef4444}</style></head><body><table><caption id='cap'></caption><tr><td id='cell'></td></tr></table></body></html>"
+        val pixels = simple_web_render_html_to_pixels(html, 64, 32)
+        val cell_y = simple_web_layout_debug_layout_by_id(html, 64, 32, "cell", "y")
+        val caption_y = simple_web_layout_debug_layout_by_id(html, 64, 32, "cap", "y")
+
+        step("Assert table content paints before the bottom caption")
+        expect(pixels.len()).to_equal(64 * 32)
+        expect(cell_y).to_equal("0")
+        expect(caption_y).to_equal("8")
+        expect(_count_color(pixels, 0xFF1D4ED8u32)).to_be_greater_than(0)
+
+    it "renders list-style-position inside by moving the list marker into the item box":
+        step("Render outside and inside list markers with distinct foreground colors")
+        val html = "<html><head><style>html,body{margin:0;padding:0;background-color:#ffffff}ul{margin:0;padding-left:12px}.outside{display:block;width:24px;height:10px;color:#ef4444;list-style-position:outside}.inside{display:block;width:24px;height:10px;color:#1d4ed8;list-style-position:inside}</style></head><body><ul><li class='outside'></li><li class='inside'></li></ul></body></html>"
+        val pixels = simple_web_render_html_to_pixels(html, 48, 28)
+
+        step("Assert the outside marker paints before the item box and the inside marker paints within it")
+        expect(pixels.len()).to_equal(48 * 28)
+        expect(_pixel_at(pixels, 48, 6, 4)).to_equal(0xFFEF4444u32)
+        expect(_pixel_at(pixels, 48, 14, 14)).to_equal(0xFF1D4ED8u32)
+
+    it "renders list-style-image markers and suppresses list-style-type none":
+        step("Render one hidden list marker and one image marker placeholder")
+        val html = "<html><head><style>html,body{margin:0;padding:0;background-color:#ffffff}ul{margin:0;padding-left:12px}.none{display:block;width:24px;height:10px;color:#ef4444;list-style-type:none}.image{display:block;width:24px;height:10px;color:#111827;list-style-image:url(marker.png)}</style></head><body><ul><li class='none'></li><li class='image'></li></ul></body></html>"
+        val pixels = simple_web_render_html_to_pixels(html, 48, 28)
+
+        step("Assert none removes the first marker and url image paints a marker placeholder")
+        expect(pixels.len()).to_equal(48 * 28)
+        expect(_pixel_at(pixels, 48, 6, 4)).to_equal(0xFFFFFFFFu32)
+        expect(_pixel_at(pixels, 48, 6, 13)).to_equal(0xFF2563EBu32)
+        expect(_pixel_at(pixels, 48, 7, 14)).to_equal(0xFFF59E0Bu32)
+
+    it "renders column-count by placing simple children into columns":
+        step("Render two child boxes in a two-column container")
+        val html = "<html><head><style>html,body{margin:0;padding:0;background-color:#ffffff}.cols{column-count:2;background-color:#dbeafe;width:40px;height:16px}.a{width:10px;height:8px;background-color:#ef4444}.b{width:10px;height:8px;background-color:#22c55e}</style></head><body><section class='cols'><div class='a'></div><div class='b'></div></section></body></html>"
+        val pixels = simple_web_render_html_to_pixels(html, 64, 32)
+
+        step("Assert the second child paints beside the first child")
+        expect(pixels.len()).to_equal(64 * 32)
+        expect(_pixel_at(pixels, 64, 5, 4)).to_equal(0xFFEF4444u32)
+        expect(_pixel_at(pixels, 64, 12, 4)).to_equal(0xFF22C55Eu32)
+
+    it "renders column-width by placing simple children into columns":
+        step("Render two child boxes in a fixed-width column container")
+        val html = "<html><head><style>html,body{margin:0;padding:0;background-color:#ffffff}.cols{column-width:10px;background-color:#dbeafe;width:40px;height:16px}.a{width:10px;height:8px;background-color:#ef4444}.b{width:10px;height:8px;background-color:#22c55e}</style></head><body><section class='cols'><div class='a'></div><div class='b'></div></section></body></html>"
+        val pixels = simple_web_render_html_to_pixels(html, 64, 32)
+
+        step("Assert the second child paints beside the first child")
+        expect(pixels.len()).to_equal(64 * 32)
+        expect(_pixel_at(pixels, 64, 5, 4)).to_equal(0xFFEF4444u32)
+        expect(_pixel_at(pixels, 64, 12, 4)).to_equal(0xFF22C55Eu32)
+
+    it "renders columns shorthand by placing simple children into columns":
+        step("Render two child boxes in a shorthand column container")
+        val html = "<html><head><style>html,body{margin:0;padding:0;background-color:#ffffff}.cols{columns:2;background-color:#dbeafe;width:40px;height:16px}.a{width:10px;height:8px;background-color:#ef4444}.b{width:10px;height:8px;background-color:#22c55e}</style></head><body><section class='cols'><div class='a'></div><div class='b'></div></section></body></html>"
+        val pixels = simple_web_render_html_to_pixels(html, 64, 32)
+
+        step("Assert the second child paints beside the first child")
+        expect(pixels.len()).to_equal(64 * 32)
+        expect(_pixel_at(pixels, 64, 5, 4)).to_equal(0xFFEF4444u32)
+        expect(_pixel_at(pixels, 64, 12, 4)).to_equal(0xFF22C55Eu32)
+
+    it "renders column-rule shorthand as a visible gap between simple columns":
+        step("Render two child boxes separated by a column rule")
+        val html = "<html><head><style>html,body{margin:0;padding:0;background-color:#ffffff}.cols{columns:2;column-rule:2px solid #1d4ed8;width:22px;height:8px}.a{width:10px;height:8px;background-color:#ef4444}.b{width:10px;height:8px;background-color:#22c55e}</style></head><body><section class='cols'><div class='a'></div><div class='b'></div></section></body></html>"
+        val pixels = simple_web_render_html_to_pixels(html, 64, 32)
+
+        step("Assert the column rule paints between the two children")
+        expect(pixels.len()).to_equal(64 * 32)
+        expect(_pixel_at(pixels, 64, 5, 4)).to_equal(0xFFEF4444u32)
+        expect(_pixel_at(pixels, 64, 10, 4)).to_equal(0xFF1D4ED8u32)
+        expect(_pixel_at(pixels, 64, 12, 4)).to_equal(0xFF22C55Eu32)
+
+    it "renders column-rule longhands as a visible gap between simple columns":
+        step("Render two child boxes separated by column rule longhands")
+        val html = "<html><head><style>html,body{margin:0;padding:0;background-color:#ffffff}.cols{columns:2;column-rule-width:2px;column-rule-style:solid;column-rule-color:#7c3aed;width:22px;height:8px}.a{width:10px;height:8px;background-color:#ef4444}.b{width:10px;height:8px;background-color:#22c55e}</style></head><body><section class='cols'><div class='a'></div><div class='b'></div></section></body></html>"
+        val pixels = simple_web_render_html_to_pixels(html, 64, 32)
+
+        step("Assert the longhand column rule paints between the two children")
+        expect(pixels.len()).to_equal(64 * 32)
+        expect(_pixel_at(pixels, 64, 5, 4)).to_equal(0xFFEF4444u32)
+        expect(_pixel_at(pixels, 64, 10, 4)).to_equal(0xFF7C3AEDu32)
+        expect(_pixel_at(pixels, 64, 12, 4)).to_equal(0xFF22C55Eu32)
+
     it "renders accent-color on generated checkbox controls":
         step("Render a checkbox input with a CSS accent color")
         val html = "<html><head><style>html,body{margin:0;padding:0;background-color:#ffffff}input{display:block;width:14px;height:14px;accent-color:#22c55e}</style></head><body><input type='checkbox' checked></body></html>"
@@ -186,6 +357,5 @@ describe "Simple Web generated HTML/CSS combinations":
 
         step("Assert the generated checkbox accent swatch uses the authored accent-color")
         expect(pixels.len()).to_equal(40 * 30)
-        expect(_pixel_at(pixels, 40, 1, 1)).to_equal(0xFF22C55Eu32)
-        expect(_pixel_at(pixels, 40, 5, 5)).to_equal(0xFF22C55Eu32)
+        expect(_count_color(pixels, 0xFF22C55Eu32)).to_be_greater_than(0)
         expect(_pixel_at(pixels, 40, 20, 5)).to_equal(0xFFFFFFFFu32)

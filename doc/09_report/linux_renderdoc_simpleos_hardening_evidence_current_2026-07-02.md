@@ -138,7 +138,7 @@
 - aarch64_cross_llvm_stage2_status: pass
 - smoke_spec: `test/02_integration/os/port/llvm/smoke_clang_spec.spl`
 - smoke_spec_status: pass
-- smoke_spec_examples: 7
+- smoke_spec_examples: 8
 - smoke_spec_failures: 0
 
 ## Related Game2D Breakout Evidence
@@ -169,6 +169,30 @@
 - window_capture_binary: `src/compiler_rust/target/debug/simple`
 - tracked_jit_render_gap: `doc/08_tracking/bug/jit_game2d_backend_method_dispatch_sigsegv_2026-07-02.md`
 - tracked_window_host_gap: `doc/08_tracking/bug/game2d_no_window_externs_in_host_binaries_2026-07-03.md`
+
+## Related Game3D Rollball Evidence
+
+- status: pass_with_tracked_800x600_perf_gap
+- wrapper: `scripts/check/check-game3d-rollball.shs`
+- wrapper_overall: pass
+- driver: `src/app/game.rollball/game.spl`
+- session_status: pass
+- win_session_steps: 3600
+- lose_session_steps: 3600
+- win_state_status: pass
+- lose_state_status: pass
+- distinct_terminal_frames_status: pass
+- motion_status: pass
+- occlusion_status: pass
+- camera_status: pass
+- vulkan_backend_status: pass
+- hud_status: pass
+- ppm_count: 11
+- perf_gap_status: tracked
+- frame_p95_ms: not_measured_operation_limit
+- frame_p95_target_ms: 33.0
+- tracked_perf_gap: `doc/08_tracking/bug/cranelift_f32_trig_wrapper_codegen_2026-07-02.md`
+- software_backend_unlit_fast_path: `SoftwareBackend3D.submit_triangle` skips world-space normal/lighting work for `MATERIAL_UNLIT`
 
 ## Related GUI Vulkan Window Evidence
 

@@ -13,7 +13,7 @@ sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
 
 ## Result
 
-The aggregate status remains incomplete:
+This 2026-06-26 aggregate status was incomplete at the time of capture:
 
 - `gui_renderdoc_feature_coverage_status=incomplete`
 - `gui_renderdoc_feature_coverage_reason=missing-simple-widget-renderdoc`
@@ -27,8 +27,11 @@ binary provenance through the aggregate:
 | 4K 200fps | pass (`met-200fps`) | 50025012 | 19990 | 19990 | current | path-opt-in |
 | 8K perf | pass (`met-target-fps`) | 13452613 | 74335 | 74335 | current | path-opt-in |
 
-Remaining blockers are RenderDoc/browser/platform parity gates, not the retained
-4K/8K perf rows. The blocker list includes Simple Vulkan Engine2D `.rdc`,
-Chrome-on-Vulkan `.rdc`, Electron Chromium-on-Vulkan `.rdc`, widget RenderDoc,
-browser Vulkan proof, native Linux/macOS/Windows render-log comparison,
-production parity/font/readback evidence, and full CSS coverage.
+Remaining blockers in this report were RenderDoc/browser/platform parity gates,
+not the retained 4K/8K perf rows. The Linux Simple/Chrome/Electron RenderDoc and
+browser-backing blockers are superseded by
+`doc/09_report/linux_renderdoc_simpleos_hardening_evidence_current_2026-07-02.md`
+and `doc/09_report/linux_vulkan_render_log_compare_current_2026-07-02.md`, which
+record zero blocked Linux RenderDoc gates with `RDOC` artifacts. Widget
+RenderDoc, macOS/Windows render-log comparison, production parity/font/readback
+evidence, and full CSS coverage remain separate evidence lanes.

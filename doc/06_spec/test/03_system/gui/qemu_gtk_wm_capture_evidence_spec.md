@@ -28,7 +28,7 @@ qemu_gtk_wm_capture_evidence_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 4 | 4 | 0 | 0 |
+| 5 | 5 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -272,6 +272,55 @@ expect(report).to_contain("host perf baseline promotes QEMU perf: false")
 </details>
 
 <details>
+<summary>Advanced: preserves real guest perf marker while QMP remains missing</summary>
+
+#### preserves real guest perf marker while QMP remains missing _(slow)_
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 30 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val run_id = _run_id()
+val result = _run_guest_perf_marker_without_qmp(run_id)
+val stdout = result[0]
+val stderr = result[1]
+val code = result[2]
+if code != 1:
+    print "qemu guest perf marker stdout: " + stdout
+    print "qemu guest perf marker stderr: " + stderr
+expect(code).to_equal(1)
+val evidence = file_read_text(_evidence_env_path(run_id))
+expect(evidence).to_contain("qemu_gtk_wm_capture_status=unavailable")
+expect(evidence).to_contain("qemu_gtk_wm_capture_reason=missing-qmp-socket")
+expect(evidence).to_contain("qemu_gtk_wm_capture_perf_status=unavailable")
+expect(evidence).to_contain("qemu_gtk_wm_capture_perf_reason=missing-qmp-socket")
+expect(evidence).to_contain("qemu_gtk_wm_capture_perf_release_blocker=missing-qmp-socket")
+expect(evidence).to_contain("qemu_gtk_wm_capture_qemu_perf_harness_status=pass")
+expect(evidence).to_contain("qemu_gtk_wm_capture_qemu_perf_harness_reason=pass")
+expect(evidence).to_contain("qemu_gtk_wm_capture_qemu_perf_harness_sample_origin=qemu-guest")
+expect(evidence).to_contain("qemu_gtk_wm_capture_qemu_perf_harness_marker_line=[desktop-e2e] qemu-perf sample_origin=qemu-guest simple_frame_cycles=2000 iterations=7 timing_unit=tsc")
+expect(evidence).to_contain("qemu_gtk_wm_capture_perf_simple_frame_cycles=2000")
+expect(evidence).to_contain("qemu_gtk_wm_capture_perf_iterations=7")
+expect(evidence).to_contain("qemu_gtk_wm_capture_perf_timing_unit=tsc")
+
+val report = file_read_text(_report_path(run_id))
+expect(report).to_contain("qemu-side perf harness status: pass")
+expect(report).to_contain("qemu-side perf harness reason: pass")
+expect(report).to_contain("qemu-side perf harness sample origin: qemu-guest")
+expect(report).to_contain("qemu-side perf simple frame cycles: 2000")
+expect(report).to_contain("qemu-side perf iterations: 7")
+expect(report).to_contain("qemu-side perf release blocker: missing-qmp-socket")
+```
+
+</details>
+
+
+</details>
+
+<details>
 <summary>Advanced: does not accept forced live guest perf markers by default</summary>
 
 #### does not accept forced live guest perf markers by default _(slow)_
@@ -364,9 +413,9 @@ expect(report).to_contain("host perf baseline promotes QEMU perf: false")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
-| Slow scenarios | 4 |
+| Total scenarios | 5 |
+| Active scenarios | 5 |
+| Slow scenarios | 5 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
 

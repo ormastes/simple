@@ -1,6 +1,6 @@
 # Smoke Clang Specification
 
-> _Env-gated checks for a working clang cross-toolchain targeting x86_64-simpleos._
+> _Env-gated checks for a working clang cross-toolchain targeting x86_64-unknown-simpleos._
 
 <!-- sdn-diagram:id=smoke_clang_spec.arch -->
 <details class="sdn-source">
@@ -27,13 +27,7 @@ smoke_clang_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 7 | 7 | 0 | 0 |
-
-Operator note: sysroot link scenarios assert
-`build/os/sysroot/share/simpleos/target-triple.txt` equals
-`x86_64-unknown-simpleos` before linking, so a sysroot last staged for another
-target fails with an explicit target-marker mismatch instead of an opaque linker
-architecture error.
+| 8 | 8 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -43,9 +37,27 @@ architecture error.
 ## Scenarios
 
 ### SimpleOS cross clang smoke
-_Env-gated checks for a working clang cross-toolchain targeting x86_64-simpleos._
+_Env-gated checks for a working clang cross-toolchain targeting x86_64-unknown-simpleos._
 
-#### cross clang binary exists at $LLVM_BUILD/bin/clang
+#### cross clang binary exists at canonical build path
+
+- check
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+if llvm_build_configured():
+    check(regular_file_exists(llvm_tool("clang")))
+```
+
+</details>
+
+#### reports x86_64-unknown-simpleos as the target triple
 
 <details>
 <summary>Executable SSpec</summary>
@@ -54,113 +66,162 @@ Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val lb = llvm_build()
-if lb == "":
-    return "skip: LLVM_BUILD not set"
-val clang = "{lb}/bin/clang"
-fs.exists(clang).to_equal(true)
+if llvm_build_configured() and !cross_clang_guest_only():
+    val code = clang_probe()
+    expect(code).to_equal(0)
+    val triple = process.run("cat", [TRIPLE_TXT]).stdout.trim()
+    expect(triple).to_equal("x86_64-unknown-simpleos")
 ```
 
 </details>
 
-#### reports x86_64-simpleos as the target triple
+#### compiles hello.c to x86_64-unknown-simpleos .o with exit 0
+
+- check
+
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val lb = llvm_build()
-if lb == "":
-    return "skip: LLVM_BUILD not set"
-val clang = "{lb}/bin/clang"
-val (out, err, code) = process.run(clang, ["--print-target-triple"])
-code.to_equal(0)
-out.trim().to_equal("x86_64-simpleos")
-```
-
-</details>
-
-#### compiles hello.c to x86_64-simpleos .o with exit 0
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 13 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val lb = llvm_build()
-if lb == "":
-    return "skip: LLVM_BUILD not set"
-val clang = "{lb}/bin/clang"
-val (out, err, code) = process.run(clang, [
-    "--target=x86_64-simpleos",
-    "-c",
-    HELLO_C,
-    "-o",
-    OUT_O,
-])
-code.to_equal(0)
-fs.exists(OUT_O).to_equal(true)
+if cross_clang_host_runnable():
+    val result = process.run(llvm_tool("clang"), [
+        "--target=x86_64-unknown-simpleos",
+        "-c",
+        HELLO_C,
+        "-o",
+        OUT_O,
+    ])
+    expect(result.exit_code).to_equal(0)
+    check(regular_file_exists(OUT_O))
 ```
 
 </details>
 
 #### llvm-nm on the .o shows 'main' symbol
 
+- check
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val lb = llvm_build()
-if lb == "":
-    return "skip: LLVM_BUILD not set"
-val nm = "{lb}/bin/llvm-nm"
-val (out, err, code) = process.run(nm, [OUT_O])
-code.to_equal(0)
-out.contains("main").to_equal(true)
+if cross_clang_host_runnable():
+    val result = process.run(llvm_tool("llvm-nm"), [OUT_O])
+    expect(result.exit_code).to_equal(0)
+    check(result.stdout.contains("main"))
 ```
 
 </details>
 
 #### links the object into a SimpleOS ELF when the sysroot is available
 
+- check
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val lb = llvm_build()
-if lb == "":
-    return "skip: LLVM_BUILD not set"
-val sysroot = sysroot_dir()
-if not fs.exists("{sysroot}/share/simpleos/simpleos.ld"):
-    return "skip: SimpleOS sysroot not built"
-sysroot_target_triple().to_equal("x86_64-unknown-simpleos")
-val lld = "{lb}/bin/ld.lld"
-val (out, err, code) = process.run(lld, [
-    "-T", "{sysroot}/share/simpleos/simpleos.ld",
-    "{sysroot}/lib/crt0.o",
-    OUT_O,
-    "-L", "{sysroot}/lib",
-    "-lsimpleos_c",
-    "-o", OUT_ELF,
-])
-code.to_equal(0)
-fs.exists(OUT_ELF).to_equal(true)
+if cross_clang_host_runnable():
+    val sysroot = sysroot_dir()
+    if regular_file_exists("{sysroot}/share/simpleos/simpleos.ld"):
+        expect(sysroot_target_triple()).to_equal("x86_64-unknown-simpleos")
+        val stale = process.run("sh", ["-c", "printf stale > {OUT_ELF}"])
+        expect(stale.exit_code).to_equal(0)
+        val result = process.run(llvm_tool("ld.lld"), [
+            "-T", "{sysroot}/share/simpleos/simpleos.ld",
+            "{sysroot}/lib/crt0.o",
+            OUT_O,
+            "-L", "{sysroot}/lib",
+            "-lsimpleos_c",
+            "-o", OUT_ELF,
+        ])
+        expect(result.exit_code).to_equal(0)
+        check(regular_file_exists(OUT_ELF))
 ```
 
 </details>
 
 #### driver compiles and links hello.c through canonical clang
+
+- check
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+if cross_clang_host_runnable():
+    val sysroot = sysroot_dir()
+    if regular_file_exists("{sysroot}/share/simpleos/simpleos.ld"):
+        expect(sysroot_target_triple()).to_equal("x86_64-unknown-simpleos")
+        val result = process.run(llvm_tool("clang"), [
+            "--target=x86_64-unknown-simpleos",
+            HELLO_C,
+            "-o", DRIVER_ELF,
+        ])
+        expect(result.exit_code).to_equal(0)
+        check(regular_file_exists(DRIVER_ELF))
+```
+
+</details>
+
+#### driver links compiler-rt builtins from the staged resource dir
+
+- check
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+if cross_clang_host_runnable():
+    val sysroot = sysroot_dir()
+    if regular_file_exists("{sysroot}/share/simpleos/simpleos.ld"):
+        expect(sysroot_target_triple()).to_equal("x86_64-unknown-simpleos")
+        val source = "__int128 div128(__int128 a,__int128 b){return a/b;} int main(void){return (int)div128(((__int128)1<<80),3);}"
+        val write = process.run("sh", ["-c", "printf '%s\n' '{source}' > {BUILTINS_C}"])
+        expect(write.exit_code).to_equal(0)
+        val result = process.run(llvm_tool("clang"), [
+            "--target=x86_64-unknown-simpleos",
+            BUILTINS_C,
+            "-o", BUILTINS_ELF,
+        ])
+        expect(result.exit_code).to_equal(0)
+        check(regular_file_exists(BUILTINS_ELF))
+```
+
+</details>
+
+#### aarch64 stage 2 artifacts and seeded builtins are present when built
+
+- check
+- check
+   - Expected: clang_file.exit_code equals `0`
+   - Expected: lld_file.exit_code equals `0`
+- check
+- check
+- check
+   - Expected: builtins_file.exit_code equals `0`
+- check
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -169,51 +230,21 @@ Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val lb = llvm_build()
-if lb == "":
-    return "skip: LLVM_BUILD not set"
-val sysroot = sysroot_dir()
-if not fs.exists("{sysroot}/share/simpleos/simpleos.ld"):
-    return "skip: SimpleOS sysroot not built"
-sysroot_target_triple().to_equal("x86_64-unknown-simpleos")
-val clang = "{lb}/bin/clang"
-val (out, err, code) = process.run(clang, [
-    "--target=x86_64-unknown-simpleos",
-    HELLO_C,
-    "-o", DRIVER_ELF,
-])
-code.to_equal(0)
-fs.exists(DRIVER_ELF).to_equal(true)
-```
+if regular_file_exists(aarch64_llvm_tool("clang-20")):
+    check(regular_file_exists(aarch64_llvm_tool("clang")))
+    check(regular_file_exists(aarch64_llvm_tool("lld")))
+    val clang_file = process.run("file", [aarch64_llvm_tool("clang-20")])
+    val lld_file = process.run("file", [aarch64_llvm_tool("lld")])
+    expect(clang_file.exit_code).to_equal(0)
+    expect(lld_file.exit_code).to_equal(0)
+    check(clang_file.stdout.contains("ARM aarch64"))
+    check(lld_file.stdout.contains("ARM aarch64"))
 
-</details>
-
-#### driver links compiler-rt builtins from the staged resource dir
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 17 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val lb = llvm_build()
-if lb == "":
-    return "skip: LLVM_BUILD not set"
-val sysroot = sysroot_dir()
-if not fs.exists("{sysroot}/share/simpleos/simpleos.ld"):
-    return "skip: SimpleOS sysroot not built"
-sysroot_target_triple().to_equal("x86_64-unknown-simpleos")
-val source = "__int128 div128(__int128 a,__int128 b){return a/b;} int main(void){return (int)div128(((__int128)1<<80),3);}"
-process.run("sh", ["-c", "printf '%s\n' '{source}' > {BUILTINS_C}"])
-val clang = "{lb}/bin/clang"
-val (out, err, code) = process.run(clang, [
-    "--target=x86_64-unknown-simpleos",
-    BUILTINS_C,
-    "-o", BUILTINS_ELF,
-])
-code.to_equal(0)
-fs.exists(BUILTINS_ELF).to_equal(true)
+    val builtins = "{sysroot_dir()}/lib/libclang_rt.builtins-aarch64.a"
+    check(regular_file_exists(builtins))
+    val builtins_file = process.run("file", [builtins])
+    expect(builtins_file.exit_code).to_equal(0)
+    check(builtins_file.stdout.contains("current ar archive"))
 ```
 
 </details>
@@ -237,8 +268,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 7 |
-| Active scenarios | 7 |
+| Total scenarios | 8 |
+| Active scenarios | 8 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

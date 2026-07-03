@@ -75,9 +75,9 @@ sh scripts/check/check-html-css-full-rendering-goal-status.shs
 ## Acceptance
 
 - All 105 HTML tags are rendered in the 50-case fixture manifest.
-- All 133 implemented Simple Web CSS properties are rendered in fixture CSS.
-- The current full CSS inventory is tested as 394 properties, with 261 still
-  unrendered and 268 held in unsupported-inventory ownership.
+- All 269 implemented Simple Web CSS properties are rendered in fixture CSS.
+- The current full CSS inventory is tested as 394 properties, with 132 still
+  unrendered and 132 held in unsupported-inventory ownership.
 - Animation, transition, and transform CSS are reported separately; the current
   implemented subset renders those properties, so that sub-goal is `pass`.
 - Readiness keys explicitly distinguish all HTML elements, the implemented CSS
@@ -97,21 +97,124 @@ sh scripts/check/check-html-css-full-rendering-goal-status.shs
    - Expected: code equals `0`
 - Read the full rendering goal evidence
    - Expected: full_css_total equals `394`
-   - Expected: full_css_rendered equals `134`
-   - Expected: full_css_unrendered equals `260`
-   - Expected: unsupported_inventory equals `267`
-   - Expected: full_css_unrendered_properties.split(",").len() equals `260`
+   - Expected: full_css_rendered equals `262`
+   - Expected: full_css_unrendered equals `132`
+   - Expected: unsupported_inventory equals `132`
+   - Expected: full_css_unrendered_properties.split(",").len() equals `132`
    - Expected: full_css_unrendered_properties does not contain `aspect-ratio`
+   - Expected: full_css_unrendered_words does not contain `,accent-color,`
+   - Expected: full_css_unrendered_words does not contain `,backface-visibility,`
+   - Expected: full_css_unrendered_words does not contain `,border-collapse,`
+   - Expected: full_css_unrendered_words does not contain `,border-spacing,`
+   - Expected: full_css_unrendered_words does not contain `,caption-side,`
+   - Expected: full_css_unrendered_words does not contain `,column-count,`
+   - Expected: full_css_unrendered_words does not contain `,column-width,`
+   - Expected: full_css_unrendered_words does not contain `,columns,`
+   - Expected: full_css_unrendered_words does not contain `,column-rule,`
+   - Expected: full_css_unrendered_words does not contain `,column-rule-color,`
+   - Expected: full_css_unrendered_words does not contain `,list-style-image,`
+   - Expected: full_css_unrendered_words does not contain `,justify-items,`
+   - Expected: full_css_unrendered_words does not contain `,justify-self,`
+   - Expected: full_css_unrendered_words does not contain `,text-emphasis,`
+   - Expected: full_css_unrendered_words does not contain `,text-emphasis-color,`
+   - Expected: full_css_unrendered_words does not contain `,text-emphasis-position,`
+   - Expected: full_css_unrendered_words does not contain `,text-emphasis-style,`
+   - Expected: full_css_unrendered_words does not contain `,list-style-position,`
+   - Expected: full_css_unrendered_words does not contain `,column-rule-style,`
+   - Expected: full_css_unrendered_words does not contain `,column-rule-width,`
    - Expected: full_css_unrendered_properties does not contain `object-fit`
    - Expected: full_css_unrendered_properties does not contain `object-position`
+   - Expected: full_css_unrendered_words does not contain `,clip,`
+   - Expected: full_css_unrendered_words does not contain `,clip-path,`
+   - Expected: full_css_unrendered_words does not contain `,color-scheme,`
+   - Expected: full_css_unrendered_words does not contain `,color-adjust,`
+   - Expected: full_css_unrendered_words does not contain `,forced-color-adjust,`
+   - Expected: full_css_unrendered_words does not contain `,print-color-adjust,`
+   - Expected: full_css_unrendered_words does not contain `,orphans,`
+   - Expected: full_css_unrendered_words does not contain `,widows,`
+   - Expected: full_css_unrendered_words does not contain `,empty-cells,`
+   - Expected: full_css_unrendered_words does not contain `,filter,`
+   - Expected: full_css_unrendered_words does not contain `,place-content,`
+   - Expected: full_css_unrendered_words does not contain `,place-items,`
+   - Expected: full_css_unrendered_words does not contain `,place-self,`
+   - Expected: full_css_unrendered_words does not contain `,rotate,`
+   - Expected: full_css_unrendered_words does not contain `,scale,`
+   - Expected: full_css_unrendered_words does not contain `,translate,`
+   - Expected: full_css_unrendered_words does not contain `,background-attachment,`
+   - Expected: full_css_unrendered_words does not contain `,margin-block,`
+   - Expected: full_css_unrendered_words does not contain `,padding-block,`
+   - Expected: full_css_unrendered_words does not contain `,block-size,`
+   - Expected: full_css_unrendered_words does not contain `,inline-size,`
+   - Expected: full_css_unrendered_words does not contain `,min-block-size,`
+   - Expected: full_css_unrendered_words does not contain `,min-inline-size,`
+   - Expected: full_css_unrendered_words does not contain `,max-block-size,`
+   - Expected: full_css_unrendered_words does not contain `,max-inline-size,`
+   - Expected: full_css_unrendered_words does not contain `,inset,`
+   - Expected: full_css_unrendered_words does not contain `,inset-block,`
+   - Expected: full_css_unrendered_words does not contain `,inset-block-start,`
+   - Expected: full_css_unrendered_words does not contain `,inset-block-end,`
+   - Expected: full_css_unrendered_words does not contain `,inset-inline,`
+   - Expected: full_css_unrendered_words does not contain `,inset-inline-start,`
+   - Expected: full_css_unrendered_words does not contain `,inset-inline-end,`
+   - Expected: full_css_unrendered_words does not contain `,border-block,`
+   - Expected: full_css_unrendered_words does not contain `,border-block-start,`
+   - Expected: full_css_unrendered_words does not contain `,border-block-end,`
+   - Expected: full_css_unrendered_words does not contain `,border-inline,`
+   - Expected: full_css_unrendered_words does not contain `,border-inline-start,`
+   - Expected: full_css_unrendered_words does not contain `,border-inline-end,`
+   - Expected: full_css_unrendered_words does not contain `,clear,`
+   - Expected: full_css_unrendered_words does not contain `,content,`
+   - Expected: full_css_unrendered_words does not contain `,content-visibility,`
+   - Expected: full_css_unrendered_words does not contain `,contain,`
+   - Expected: full_css_unrendered_words does not contain `,float,`
+   - Expected: full_css_unrendered_words does not contain `,font-family,`
+- expect not
+- expect not
+- expect not
+- expect not
+- expect not
+- expect not
+- expect not
+- expect not
+- expect not
+- expect not
+- expect not
+   - Expected: full_css_unrendered_words does not contain `,font-kerning,`
+   - Expected: full_css_unrendered_words does not contain `,font-optical-sizing,`
+- expect not
+- expect not
+- expect not
+- expect not
+   - Expected: full_css_unrendered_words does not contain `,font-synthesis,`
+- expect not
+- expect not
+- expect not
+   - Expected: full_css_unrendered_words does not contain `,font-synthesis-weight,`
+   - Expected: full_css_unrendered_words does not contain `,image-rendering,`
+   - Expected: full_css_unrendered_words does not contain `,line-break,`
+   - Expected: full_css_unrendered_words does not contain `,hyphens,`
+   - Expected: full_css_unrendered_words does not contain `,text-align-all,`
+   - Expected: full_css_unrendered_words does not contain `,text-justify,`
+   - Expected: full_css_unrendered_words does not contain `,writing-mode,`
+   - Expected: full_css_unrendered_words does not contain `,text-combine-upright,`
+   - Expected: full_css_unrendered_words does not contain `,text-orientation,`
+   - Expected: full_css_unrendered_words does not contain `,list-style,`
+   - Expected: full_css_unrendered_words does not contain `,list-style-type,`
+   - Expected: full_css_unrendered_words does not contain `,scrollbar-color,`
+   - Expected: full_css_unrendered_words does not contain `,scrollbar-width,`
+   - Expected: full_css_unrendered_words does not contain `,table-layout,`
+   - Expected: full_css_unrendered_words does not contain `,vertical-align,`
+   - Expected: full_css_unrendered_words does not contain `,quotes,`
    - Expected: animation_css_unrendered_properties equals ``
+   - Expected: full_css_unrendered_properties does not contain `accent-color`
+   - Expected: full_css_unrendered_words does not contain `,will-change,`
 - Verify the operator report names the full CSS gap
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 64 lines folded for reproduction.
+Runnable source: 180 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -139,14 +242,14 @@ expect(evidence).to_contain("html_css_full_rendering_goal_implemented_css_status
 expect(evidence).to_contain("html_css_full_rendering_goal_all_implemented_css_ready_status=pass")
 expect(evidence).to_contain("html_css_full_rendering_goal_all_implemented_css_ready_reason=pass")
 expect(evidence).to_contain("html_css_full_rendering_goal_implemented_css_scope=implemented-simple-web-css")
-expect(evidence).to_contain("html_css_full_rendering_goal_implemented_css_total_count=134")
-expect(evidence).to_contain("html_css_full_rendering_goal_implemented_css_rendered_count=134")
+expect(evidence).to_contain("html_css_full_rendering_goal_implemented_css_total_count=269")
+expect(evidence).to_contain("html_css_full_rendering_goal_implemented_css_rendered_count=269")
 expect(evidence).to_contain("html_css_full_rendering_goal_implemented_css_missing=")
 expect(evidence).to_contain("html_css_full_rendering_goal_full_css_status=incomplete")
 expect(evidence).to_contain("html_css_full_rendering_goal_all_css_properties_ready_status=incomplete")
 expect(evidence).to_contain("html_css_full_rendering_goal_all_css_properties_ready_reason=full-css-rendering-incomplete")
 expect(evidence).to_contain("html_css_full_rendering_goal_full_css_required_min_count=390")
-expect(evidence).to_contain("html_css_full_rendering_goal_full_css_rendered_count=133")
+expect(evidence).to_contain("html_css_full_rendering_goal_full_css_rendered_count=262")
 expect(evidence).to_contain("html_css_full_rendering_goal_full_css_unrendered_properties=")
 expect(evidence).to_contain("html_css_full_rendering_goal_animation_css_status=pass")
 expect(evidence).to_contain("html_css_full_rendering_goal_animation_css_scope=animation-transition-transform-css")
@@ -154,9 +257,9 @@ expect(evidence).to_contain("html_css_full_rendering_goal_animation_css_total_co
 expect(evidence).to_contain("html_css_full_rendering_goal_animation_css_rendered_count=0")
 expect(evidence).to_contain("html_css_full_rendering_goal_animation_css_unrendered_count=0")
 expect(evidence).to_contain("html_css_full_rendering_goal_animation_css_unrendered_properties=")
-expect(evidence).to_contain("accent-color")
+expect(evidence).to_contain("background-blend-mode")
 expect(evidence).to_contain("grid-template-columns")
-expect(evidence).to_contain("writing-mode")
+expect(evidence).to_contain("background-blend-mode")
 expect(evidence).to_contain("html_css_full_rendering_goal_manifest_case_count=50")
 expect(evidence).to_contain("html_css_full_rendering_goal_manifest_required_case_count=50")
 
@@ -164,23 +267,125 @@ val full_css_total = _value_of(evidence, "html_css_full_rendering_goal_full_css_
 val full_css_rendered = _value_of(evidence, "html_css_full_rendering_goal_full_css_rendered_count")
 val full_css_unrendered = _value_of(evidence, "html_css_full_rendering_goal_full_css_unrendered_count")
 val full_css_unrendered_properties = _value_of(evidence, "html_css_full_rendering_goal_full_css_unrendered_properties")
+val full_css_unrendered_words = "," + full_css_unrendered_properties + ","
 val animation_css_unrendered_properties = _value_of(evidence, "html_css_full_rendering_goal_animation_css_unrendered_properties")
 val unsupported_inventory = _value_of(evidence, "html_css_full_rendering_goal_unsupported_css_inventory_count")
 expect(full_css_total).to_equal("394")
-expect(full_css_rendered).to_equal("134")
-expect(full_css_unrendered).to_equal("260")
-expect(unsupported_inventory).to_equal("267")
-expect(full_css_unrendered_properties.split(",").len()).to_equal(260)
+expect(full_css_rendered).to_equal("262")
+expect(full_css_unrendered).to_equal("132")
+expect(unsupported_inventory).to_equal("132")
+expect(full_css_unrendered_properties.split(",").len()).to_equal(132)
 expect(full_css_unrendered_properties.contains("aspect-ratio")).to_equal(false)
+expect(full_css_unrendered_words.contains(",accent-color,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",backface-visibility,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",border-collapse,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",border-spacing,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",caption-side,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",column-count,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",column-width,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",columns,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",column-rule,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",column-rule-color,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",list-style-image,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",justify-items,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",justify-self,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",text-emphasis,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",text-emphasis-color,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",text-emphasis-position,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",text-emphasis-style,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",list-style-position,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",column-rule-style,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",column-rule-width,")).to_equal(false)
 expect(full_css_unrendered_properties.contains("object-fit")).to_equal(false)
 expect(full_css_unrendered_properties.contains("object-position")).to_equal(false)
+expect(full_css_unrendered_words.contains(",clip,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",clip-path,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",color-scheme,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",color-adjust,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",forced-color-adjust,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",print-color-adjust,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",orphans,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",widows,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",empty-cells,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",filter,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",place-content,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",place-items,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",place-self,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",rotate,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",scale,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",translate,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",background-attachment,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",margin-block,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",padding-block,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",block-size,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",inline-size,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",min-block-size,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",min-inline-size,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",max-block-size,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",max-inline-size,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",inset,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",inset-block,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",inset-block-start,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",inset-block-end,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",inset-inline,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",inset-inline-start,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",inset-inline-end,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",border-block,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",border-block-start,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",border-block-end,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",border-inline,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",border-inline-start,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",border-inline-end,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",clear,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",content,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",content-visibility,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",contain,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",float,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",font-family,")).to_equal(false)
+expect_not(full_css_unrendered_words.contains(",font-feature-settings,"))
+expect_not(full_css_unrendered_words.contains(",font-language-override,"))
+expect_not(full_css_unrendered_words.contains(",font-variation-settings,"))
+expect_not(full_css_unrendered_words.contains(",font-variant,"))
+expect_not(full_css_unrendered_words.contains(",font-variant-caps,"))
+expect_not(full_css_unrendered_words.contains(",font-variant-alternates,"))
+expect_not(full_css_unrendered_words.contains(",font-variant-east-asian,"))
+expect_not(full_css_unrendered_words.contains(",font-variant-emoji,"))
+expect_not(full_css_unrendered_words.contains(",font-variant-ligatures,"))
+expect_not(full_css_unrendered_words.contains(",font-variant-numeric,"))
+expect_not(full_css_unrendered_words.contains(",font-variant-position,"))
+expect(full_css_unrendered_words.contains(",font-kerning,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",font-optical-sizing,")).to_equal(false)
+expect_not(full_css_unrendered_words.contains(",font-palette,"))
+expect_not(full_css_unrendered_words.contains(",font-stretch,"))
+expect_not(full_css_unrendered_words.contains(",font-width,"))
+expect_not(full_css_unrendered_words.contains(",font-size-adjust,"))
+expect(full_css_unrendered_words.contains(",font-synthesis,")).to_equal(false)
+expect_not(full_css_unrendered_words.contains(",font-synthesis-small-caps,"))
+expect_not(full_css_unrendered_words.contains(",font-synthesis-position,"))
+expect_not(full_css_unrendered_words.contains(",font-synthesis-style,"))
+expect(full_css_unrendered_words.contains(",font-synthesis-weight,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",image-rendering,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",line-break,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",hyphens,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",text-align-all,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",text-justify,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",writing-mode,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",text-combine-upright,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",text-orientation,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",list-style,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",list-style-type,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",scrollbar-color,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",scrollbar-width,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",table-layout,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",vertical-align,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",quotes,")).to_equal(false)
 expect(animation_css_unrendered_properties).to_equal("")
-expect(full_css_unrendered_properties).to_contain("accent-color")
+expect(full_css_unrendered_properties.contains("accent-color")).to_equal(false)
 expect(full_css_unrendered_properties).to_contain("border-image-source")
 expect(full_css_unrendered_properties).to_contain("grid-template-columns")
 expect(full_css_unrendered_properties).to_contain("scroll-padding-inline-start")
 expect(full_css_unrendered_properties).to_contain("view-transition-name")
-expect(full_css_unrendered_properties).to_contain("writing-mode")
+expect(full_css_unrendered_words.contains(",will-change,")).to_equal(false)
 
 step("Verify the operator report names the full CSS gap")
 val report = file_read("build/test-html-css-full-rendering-goal-status/report.md")
@@ -190,7 +395,7 @@ expect(report).to_contain("- all HTML elements ready: pass")
 expect(report).to_contain("- implemented CSS ready: pass")
 expect(report).to_contain("- full CSS inventory ready: incomplete")
 expect(report).to_contain("- HTML tags rendered: 105/105")
-expect(report).to_contain("- implemented CSS rendered: 133/133")
+expect(report).to_contain("- implemented CSS rendered: 269/269")
 expect(report).to_contain("- full CSS unrendered:")
 expect(report).to_contain("- animation CSS rendered: 0/0 (pass)")
 ```
@@ -201,7 +406,7 @@ expect(report).to_contain("- animation CSS rendered: 0/0 (pass)")
 
 - Run the same gate in strict mode
    - Expected: code equals `1`
-- Assert strict mode still writes inspectable evidence
+- Assert strict mode still emits inspectable evidence
 
 
 <details>
@@ -213,11 +418,11 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 step("Run the same gate in strict mode")
 val command = "rm -rf build/test-html-css-full-rendering-goal-status-strict && BUILD_DIR=build/test-html-css-full-rendering-goal-status-strict REPORT_PATH=build/test-html-css-full-rendering-goal-status-strict/report.md HTML_CSS_RENDERING_MANIFEST_FETCH=0 sh scripts/check/check-html-css-full-rendering-goal-status.shs --strict"
-val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+val (stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(1)
 
-step("Assert strict mode still writes inspectable evidence")
-val evidence = file_read("build/test-html-css-full-rendering-goal-status-strict/evidence.env")
+step("Assert strict mode still emits inspectable evidence")
+val evidence = stdout
 expect(evidence).to_contain("html_css_full_rendering_goal_status=incomplete")
 expect(evidence).to_contain("html_css_full_rendering_goal_full_css_status=incomplete")
 expect(evidence).to_contain("html_css_full_rendering_goal_animation_css_status=pass")

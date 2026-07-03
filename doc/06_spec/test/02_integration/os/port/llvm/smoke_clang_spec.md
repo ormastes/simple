@@ -27,7 +27,7 @@ smoke_clang_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 7 | 7 | 0 | 0 |
+| 8 | 8 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -210,6 +210,45 @@ if cross_clang_host_runnable():
 
 </details>
 
+#### aarch64 stage 2 artifacts and seeded builtins are present when built
+
+- check
+- check
+   - Expected: clang_file.exit_code equals `0`
+   - Expected: lld_file.exit_code equals `0`
+- check
+- check
+- check
+   - Expected: builtins_file.exit_code equals `0`
+- check
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 15 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+if regular_file_exists(aarch64_llvm_tool("clang-20")):
+    check(regular_file_exists(aarch64_llvm_tool("clang")))
+    check(regular_file_exists(aarch64_llvm_tool("lld")))
+    val clang_file = process.run("file", [aarch64_llvm_tool("clang-20")])
+    val lld_file = process.run("file", [aarch64_llvm_tool("lld")])
+    expect(clang_file.exit_code).to_equal(0)
+    expect(lld_file.exit_code).to_equal(0)
+    check(clang_file.stdout.contains("ARM aarch64"))
+    check(lld_file.stdout.contains("ARM aarch64"))
+
+    val builtins = "{sysroot_dir()}/lib/libclang_rt.builtins-aarch64.a"
+    check(regular_file_exists(builtins))
+    val builtins_file = process.run("file", [builtins])
+    expect(builtins_file.exit_code).to_equal(0)
+    check(builtins_file.stdout.contains("current ar archive"))
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -229,8 +268,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 7 |
-| Active scenarios | 7 |
+| Total scenarios | 8 |
+| Active scenarios | 8 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

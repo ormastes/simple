@@ -30,7 +30,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/linux_vulkan_renderdoc_reaso
   `linux_vulkan_render_log_compare_blocked_gates`, so a top-level report can
   identify whether Linux is blocked on Chrome RDOC, Electron RDOC, browser
   backing, ARGB source evidence, or another native-render-log gate.
-- The current report records the actionable Chrome and Electron blockers.
+- The current hardening report records zero Linux RenderDoc blockers and RDOC
+  magic for Simple, Chrome, and Electron capture artifacts.
 
 ## Why This Exists
 
@@ -73,10 +74,10 @@ The aggregate output must include:
 - `linux_vulkan_render_log_compare_renderdoc_chrome_reason`
 - `linux_vulkan_render_log_compare_renderdoc_electron_reason`
 
-For the current Linux host, Simple RenderDoc evidence can pass while Chrome and
-Electron browser `.rdc` evidence remains missing or crashed under RenderDoc.
-That state is incomplete, but it is actionable only when the blocked gate list
-is visible at aggregate level.
+Historical Linux hosts can have passing Simple RenderDoc evidence while Chrome
+and Electron browser `.rdc` evidence remains missing or crashed under RenderDoc.
+That incomplete state is actionable only when the blocked gate list is visible
+at aggregate level.
 
 ## Completion Criteria
 
@@ -94,8 +95,9 @@ run to be judged correctly. Goal completion still requires:
 
 If Chrome or Electron browser capture fails under RenderDoc, keep the aggregate
 status incomplete and use the forwarded blocked gates to decide the next action.
-Do not replace the missing `.rdc` proof with ARGB bitmap proof, browser backing
-metadata, or cached log text.
+Do not replace missing `.rdc` proof with ARGB bitmap proof, browser backing
+metadata, or cached log text. When all three artifacts have `RDOC` magic in the
+current hardening report, keep the blocker record superseded by that aggregate.
 
 ## Failure Interpretation
 
@@ -123,8 +125,10 @@ describe "Linux Vulkan RenderDoc reason forwarding":
         step("Read the Linux comparison wrapper")
         val linux_compare = file_read("scripts/check/check-linux-vulkan-render-log-compare.shs")
 
-        step("Assert Chrome raw capture reason is preferred over the generic gate reason")
-        expect(linux_compare).to_contain("render_log_reason_from_rdoc_env \"$RDOC_HTML_EVIDENCE_ENV\" rdoc_external_host_capture_reason_raw rdoc_external_host_gate_reason")
+        step("Assert Chrome raw capture reason is preferred before generic fallbacks")
+        expect(linux_compare).to_contain("chrome_rdoc_reason=\"$(render_log_value_of rdoc_external_host_capture_reason_raw \"$RDOC_HTML_EVIDENCE_ENV\")\"")
+        expect(linux_compare).to_contain("chrome_rdoc_reason=\"$(render_log_value_of rdoc_capture_reason \"$RDOC_HTML_EVIDENCE_ENV\")\"")
+        expect(linux_compare).to_contain("render_log_reason_from_rdoc_env \"$RDOC_HTML_EVIDENCE_ENV\" rdoc_external_host_gate_reason rdoc_external_host_capture_reason_raw")
 
         step("Read the GUI RenderDoc aggregate wrapper")
         val aggregate = file_read("scripts/check/check-gui-renderdoc-feature-coverage-status.shs")
@@ -141,7 +145,19 @@ describe "Linux Vulkan RenderDoc reason forwarding":
         expect(aggregate).to_contain("emit(\"linux_vulkan_render_log_compare_renderdoc_chrome_reason\", linux_vulkan_render_log_renderdoc_chrome_reason)")
         expect(aggregate).to_contain("emit(\"linux_vulkan_render_log_compare_renderdoc_electron_reason\", linux_vulkan_render_log_renderdoc_electron_reason)")
 
-        step("Assert the current report exposes actionable browser blocker reasons")
-        val report = file_read("doc/09_report/gui_renderdoc_feature_coverage_status_2026-06-27.md")
-        expect(report).to_contain("linux_vulkan_render_log_compare_renderdoc_chrome_reason=chromium-gpu-process-crashed-under-renderdoc")
-        expect(report).to_contain("linux_vulkan_render_log_compare_renderdoc_electron_reason=missing-rdc")
+    it "records the current Linux RenderDoc aggregate as unblocked with RDOC artifacts":
+        step("Read the current Linux RenderDoc hardening report")
+        val report = file_read("doc/09_report/linux_renderdoc_simpleos_hardening_evidence_current_2026-07-02.md")
+
+        step("Assert the current aggregate reports a passing RenderDoc gate")
+        expect(report).to_contain("- status: pass")
+        expect(report).to_contain("- blocked_gate_count: 0")
+        expect(report).to_contain("- renderdoc_gate_status: pass")
+
+        step("Assert all three RenderDoc artifacts are verified as RDOC captures")
+        expect(report).to_contain("- simple_rdoc_artifact_magic: RDOC")
+        expect(report).to_contain("- chrome_rdoc_artifact_magic: RDOC")
+        expect(report).to_contain("- electron_rdoc_artifact_magic: RDOC")
+        expect(report).to_contain("build/renderdoc/canonical-probe/simple/simple_gui_app_capture.rdc")
+        expect(report).to_contain("build/renderdoc/chrome-implicit-layer-default-autocapture/html/gpu_chrome_capture.rdc")
+        expect(report).to_contain("build/renderdoc/electron-implicit-layer-default-autocapture/electron-html/electron_gpu_capture.rdc")

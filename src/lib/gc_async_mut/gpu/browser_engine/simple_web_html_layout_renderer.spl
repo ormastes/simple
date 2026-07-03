@@ -94,6 +94,14 @@ fn build_child_index(nodes: [HNode]) -> HtmlChildIndex:
         i = i + 1
     HtmlChildIndex(first_child: first_child, next_sibling: next_sibling, child_count: child_count)
 
+fn node_has_direct_child_tag(nodes: [HNode], child_index: HtmlChildIndex, node_i: i32, tag: text) -> bool:
+    var child = child_index.first_child[node_i]
+    while child >= 0:
+        if nodes[child].tag == tag:
+            return true
+        child = child_index.next_sibling[child]
+    false
+
 fn build_selector_context(nodes: [HNode], child_index: HtmlChildIndex) -> SelectorContext:
     val node_count = nodes.len()
     var element_position: [i32] = [1; node_count]
@@ -792,6 +800,34 @@ fn parse_color_any(raw: text) -> u32:
         return parse_color(raw.substring(hash, raw.len()))
     0u32
 
+fn css_hash_color_literal(raw: text) -> text:
+    val hash = text_index_of(raw, "#")
+    if hash < 0:
+        return ""
+    raw.substring(hash, raw.len())
+
+fn column_rule_synthetic_decls(decls: text) -> text:
+    var width_px = 0
+    var color_text = ""
+    var style_text = ""
+    val shorthand = decl_get(decls, "column-rule")
+    if shorthand.len() > 0:
+        style_text = shorthand
+        width_px = parse_int(shorthand)
+        color_text = css_hash_color_literal(shorthand)
+    val width_decl = decl_get(decls, "column-rule-width")
+    if width_decl.len() > 0:
+        width_px = parse_nth_box_int(width_decl, 0)
+    val color_decl = decl_get(decls, "column-rule-color")
+    if color_decl.len() > 0:
+        color_text = css_hash_color_literal(color_decl)
+    val style_decl = decl_get(decls, "column-rule-style")
+    if style_decl.len() > 0:
+        style_text = style_decl
+    if width_px > 0 and color_text.len() > 0 and not border_style_disables_paint(style_text):
+        return "column-gap:{width_px}px;background-color:{color_text}"
+    ""
+
 fn parse_linear_gradient_color(raw: text, target: i32) -> u32:
     val lower = raw.lower()
     val start = text_index_of(lower, "linear-gradient(")
@@ -967,6 +1003,23 @@ fn parse_transform_rotate_quarter_turn(raw: text) -> bool:
         value_end = t.len()
     parse_rotate_quarter_turn(t.substring(value_start, value_end))
 
+fn parse_transform_backface_half_turn(raw: text) -> bool:
+    val t = raw.trim().lower()
+    var start = text_index_of(t, "rotatey(")
+    if start < 0:
+        start = text_index_of(t, "rotatex(")
+    if start < 0:
+        return false
+    val value_start = start + 8
+    var value_end = find_from(t, ")", value_start)
+    if value_end < 0:
+        value_end = t.len()
+    val v = parse_signed_nth_int(t.substring(value_start, value_end), 0)
+    if v == -1000000:
+        return false
+    val normalized = ((v % 360) + 360) % 360
+    normalized == 180
+
 fn parse_clip_rect_value(raw: text, target: i32) -> i32:
     val t = raw.trim().lower()
     val rect_start = text_index_of(t, "rect(")
@@ -980,6 +1033,17 @@ fn parse_clip_rect_value(raw: text, target: i32) -> i32:
     if v == -1000000:
         return 0
     v
+
+fn parse_clip_path_inset_value(raw: text, target: i32) -> i32:
+    val t = raw.trim().lower()
+    val inset_start = text_index_of(t, "inset(")
+    if inset_start < 0:
+        return 0
+    val value_start = inset_start + 6
+    var value_end = find_from(t, ")", value_start)
+    if value_end < 0:
+        value_end = t.len()
+    parse_nth_box_int(t.substring(value_start, value_end), target)
 
 fn parse_opacity_pct(raw: text) -> i32:
     val t = raw.trim()
@@ -1157,6 +1221,21 @@ fn css_word_contains(raw: text, word: text) -> bool:
     val padded = " " + raw.trim().lower() + " "
     text_index_of(padded, " " + word + " ") >= 0
 
+fn css_quoted_token(raw: text, wanted: i32) -> text:
+    var i = 0
+    var seen = 0
+    while i < raw.len():
+        val q = raw.char_at(i)
+        if q == "\"" or q == "'":
+            val endq = find_from(raw, q, i + 1)
+            if endq > i:
+                if seen == wanted:
+                    return raw.substring(i + 1, endq)
+                seen = seen + 1
+                i = endq
+        i = i + 1
+    ""
+
 # read a property value from a declaration block "a: b; c: d"
 fn decl_get(decls: text, prop: text) -> text:
     var pos = 0
@@ -1192,6 +1271,9 @@ fn supports_content_distribution_alignment(value: text) -> bool:
 
 fn supports_align_content_alignment(value: text) -> bool:
     supports_content_distribution_alignment(value) or value == "stretch" or value == "normal"
+
+fn supports_self_alignment(value: text) -> bool:
+    value == "auto" or value == "normal" or value == "stretch" or value == "center" or value == "safe-center" or value == "unsafe-center" or value == "flex-end" or value == "flex-start" or value == "start" or value == "end"
 
 fn border_style_disables_paint(raw: text) -> bool:
     val value = raw.trim().lower()
@@ -1332,6 +1414,8 @@ class Style:
     order: i32
     flex_wrap: text
     justify_content: text
+    justify_items: text
+    justify_self: text
     align_items: text
     align_self: text
     align_content: text
@@ -1399,6 +1483,7 @@ class Style:
     text_justify: text
     text_transform: text
     text_indent_px: i32
+    list_marker: text
     letter_spacing_px: i32
     word_spacing_px: i32
     font_size_adjust: text
@@ -1437,6 +1522,12 @@ class Style:
     text_decoration_thickness_px: i32
     text_underline_offset_px: i32
     text_underline_position: text
+    text_emphasis_color: u32
+    text_emphasis_enabled: bool
+    text_emphasis_under: bool
+    quotes_enabled: bool
+    quote_open: text
+    quote_close: text
     white_space_nowrap: bool
     overflow_wrap: text
     line_break: text
@@ -1470,11 +1561,11 @@ class Style:
     bold: bool
 
 fn default_style() -> Style:
-    Style(bg: 0u32, background_gradient_from: 0u32, background_gradient_to: 0u32, background_repeat: "repeat", background_size_w_px: 0, background_size_h_px: 0, background_position_x_px: 0, background_position_y_px: 0, background_clip: "border-box", background_origin: "padding-box", background_attachment: "scroll", fg: argb(0, 0, 0), font_size: 16, line_height_px: 0, width_px: 0, height_px: 0, border_box: false, min_width_px: 0, max_width_px: 0, min_height_px: 0, max_height_px: 0, min_height_vh: false, flex_fill: false, flex_grow: 0, flex_shrink: 1, flex_basis_px: 0, order: 0, flex_wrap: "nowrap", justify_content: "flex-start", align_items: "stretch", align_self: "auto", align_content: "stretch", pad_l: 0, pad_t: 0, pad_r: 0, pad_b: 0, border_w: 0, border_color: 0u32, border_l: 0, border_t: 0, border_r: 0, border_b: 0, border_color_l: 0u32, border_color_t: 0u32, border_color_r: 0u32, border_color_b: 0u32, outline_w: 0, outline_color: 0u32, outline_offset_px: 0, box_shadow_x_px: 0, box_shadow_y_px: 0, box_shadow_color: 0u32, border_radius_px: 0, border_radius_tl_px: 0, border_radius_tr_px: 0, border_radius_br_px: 0, border_radius_bl_px: 0, gap_px: 0, row_gap_px: 0, column_gap_px: 0, margin_l: 0, margin_t: 0, margin_r: 0, margin_b: 0, margin_l_auto: false, margin_r_auto: false, margin_t_auto: false, margin_b_auto: false, display: "block", overflow_hidden: false, overflow_auto_y: false, scrollbar_thumb_color: 0u32, scrollbar_track_color: 0u32, text_overflow_ellipsis: false, visibility_hidden: false, content_visibility_hidden: false, will_change: "auto", color_adjust: "economy", forced_color_adjust: "auto", print_color_adjust: "economy", orphans: 2, widows: 2, position_relative: false, position_absolute: false, left_px: 0, top_px: 0, right_px: -1, bottom_px: -1, z_index: 0, opacity_pct: 100, flex_direction: "row", text_align: "left", text_align_last: "auto", text_justify: "auto", text_transform: "none", text_indent_px: 0, letter_spacing_px: 0, word_spacing_px: 0, font_size_adjust: "none", font_palette: "normal", font_feature_settings: "normal", font_language_override: "normal", font_variation_settings: "normal", font_variant: "normal", font_variant_alternates: "normal", font_variant_caps: "normal", font_variant_east_asian: "normal", font_variant_emoji: "normal", font_variant_ligatures: "normal", font_variant_numeric: "normal", font_variant_position: "normal", font_style_italic: false, font_kerning: "auto", font_optical_sizing: "auto", font_stretch: "normal", font_width: "normal", font_synthesis: "weight style", font_synthesis_small_caps: "auto", font_synthesis_position: "auto", font_synthesis_style: "auto", font_synthesis_weight: "auto", direction_rtl: false, writing_mode: "horizontal-tb", text_orientation: "mixed", text_combine_upright: "none", text_shadow_x_px: 0, text_shadow_y_px: 0, text_shadow_color: 0u32, text_decoration_color: 0u32, text_decoration_underline: false, text_decoration_style: "solid", text_decoration_thickness_px: 1, text_underline_offset_px: 0, text_underline_position: "auto", white_space_nowrap: false, overflow_wrap: "normal", line_break: "auto", hyphens: "manual", word_break: "normal", cursor: "auto", resize: "none", table_layout: "auto", vertical_align: "baseline", caret_color: 0u32, tab_size: 8, unicode_bidi: "normal", transition_property: "none", transition_duration_ms: 0, transition_delay_ms: 0, transition_timing_function: "ease", animation_name: "none", animation_duration_ms: 0, animation_delay_ms: 0, animation_timing_function: "ease", animation_iteration_count: "1", animation_direction: "normal", animation_fill_mode: "none", animation_play_state: "running", transform_origin: "center center", transform_box: "border-box", transform_style: "flat", image_rendering: "auto", object_fit: "fill", object_position: "50% 50%", bold: false)
+    Style(bg: 0u32, background_gradient_from: 0u32, background_gradient_to: 0u32, background_repeat: "repeat", background_size_w_px: 0, background_size_h_px: 0, background_position_x_px: 0, background_position_y_px: 0, background_clip: "border-box", background_origin: "padding-box", background_attachment: "scroll", fg: argb(0, 0, 0), font_size: 16, line_height_px: 0, width_px: 0, height_px: 0, border_box: false, min_width_px: 0, max_width_px: 0, min_height_px: 0, max_height_px: 0, min_height_vh: false, flex_fill: false, flex_grow: 0, flex_shrink: 1, flex_basis_px: 0, order: 0, flex_wrap: "nowrap", justify_content: "flex-start", justify_items: "stretch", justify_self: "auto", align_items: "stretch", align_self: "auto", align_content: "stretch", pad_l: 0, pad_t: 0, pad_r: 0, pad_b: 0, border_w: 0, border_color: 0u32, border_l: 0, border_t: 0, border_r: 0, border_b: 0, border_color_l: 0u32, border_color_t: 0u32, border_color_r: 0u32, border_color_b: 0u32, outline_w: 0, outline_color: 0u32, outline_offset_px: 0, box_shadow_x_px: 0, box_shadow_y_px: 0, box_shadow_color: 0u32, border_radius_px: 0, border_radius_tl_px: 0, border_radius_tr_px: 0, border_radius_br_px: 0, border_radius_bl_px: 0, gap_px: 0, row_gap_px: 0, column_gap_px: 0, margin_l: 0, margin_t: 0, margin_r: 0, margin_b: 0, margin_l_auto: false, margin_r_auto: false, margin_t_auto: false, margin_b_auto: false, display: "block", overflow_hidden: false, overflow_auto_y: false, scrollbar_thumb_color: 0u32, scrollbar_track_color: 0u32, text_overflow_ellipsis: false, visibility_hidden: false, content_visibility_hidden: false, will_change: "auto", color_adjust: "economy", forced_color_adjust: "auto", print_color_adjust: "economy", orphans: 2, widows: 2, position_relative: false, position_absolute: false, left_px: 0, top_px: 0, right_px: -1, bottom_px: -1, z_index: 0, opacity_pct: 100, flex_direction: "row", text_align: "left", text_align_last: "auto", text_justify: "auto", text_transform: "none", text_indent_px: 0, list_marker: "disc", letter_spacing_px: 0, word_spacing_px: 0, font_size_adjust: "none", font_palette: "normal", font_feature_settings: "normal", font_language_override: "normal", font_variation_settings: "normal", font_variant: "normal", font_variant_alternates: "normal", font_variant_caps: "normal", font_variant_east_asian: "normal", font_variant_emoji: "normal", font_variant_ligatures: "normal", font_variant_numeric: "normal", font_variant_position: "normal", font_style_italic: false, font_kerning: "auto", font_optical_sizing: "auto", font_stretch: "normal", font_width: "normal", font_synthesis: "weight style", font_synthesis_small_caps: "auto", font_synthesis_position: "auto", font_synthesis_style: "auto", font_synthesis_weight: "auto", direction_rtl: false, writing_mode: "horizontal-tb", text_orientation: "mixed", text_combine_upright: "none", text_shadow_x_px: 0, text_shadow_y_px: 0, text_shadow_color: 0u32, text_decoration_color: 0u32, text_decoration_underline: false, text_decoration_style: "solid", text_decoration_thickness_px: 1, text_underline_offset_px: 0, text_underline_position: "auto", text_emphasis_color: 0u32, text_emphasis_enabled: false, text_emphasis_under: false, quotes_enabled: true, quote_open: "\"", quote_close: "\"", white_space_nowrap: false, overflow_wrap: "normal", line_break: "auto", hyphens: "manual", word_break: "normal", cursor: "auto", resize: "none", table_layout: "auto", vertical_align: "baseline", caret_color: 0u32, tab_size: 8, unicode_bidi: "normal", transition_property: "none", transition_duration_ms: 0, transition_delay_ms: 0, transition_timing_function: "ease", animation_name: "none", animation_duration_ms: 0, animation_delay_ms: 0, animation_timing_function: "ease", animation_iteration_count: "1", animation_direction: "normal", animation_fill_mode: "none", animation_play_state: "running", transform_origin: "center center", transform_box: "border-box", transform_style: "flat", image_rendering: "auto", object_fit: "fill", object_position: "50% 50%", bold: false)
 
 fn inherit_style(p: Style) -> Style:
     val display = if p.display == "none": "none" else: "block"
-    Style(bg: 0u32, background_gradient_from: 0u32, background_gradient_to: 0u32, background_repeat: "repeat", background_size_w_px: 0, background_size_h_px: 0, background_position_x_px: 0, background_position_y_px: 0, background_clip: "border-box", background_origin: "padding-box", background_attachment: "scroll", fg: p.fg, font_size: p.font_size, line_height_px: p.line_height_px, width_px: 0, height_px: 0, border_box: false, min_width_px: 0, max_width_px: 0, min_height_px: 0, max_height_px: 0, min_height_vh: false, flex_fill: false, flex_grow: 0, flex_shrink: 1, flex_basis_px: 0, order: 0, flex_wrap: "nowrap", justify_content: "flex-start", align_items: "stretch", align_self: "auto", align_content: "stretch", pad_l: 0, pad_t: 0, pad_r: 0, pad_b: 0, border_w: 0, border_color: 0u32, border_l: 0, border_t: 0, border_r: 0, border_b: 0, border_color_l: 0u32, border_color_t: 0u32, border_color_r: 0u32, border_color_b: 0u32, outline_w: 0, outline_color: 0u32, outline_offset_px: 0, box_shadow_x_px: 0, box_shadow_y_px: 0, box_shadow_color: 0u32, border_radius_px: 0, border_radius_tl_px: 0, border_radius_tr_px: 0, border_radius_br_px: 0, border_radius_bl_px: 0, gap_px: 0, row_gap_px: 0, column_gap_px: 0, margin_l: 0, margin_t: 0, margin_r: 0, margin_b: 0, margin_l_auto: false, margin_r_auto: false, margin_t_auto: false, margin_b_auto: false, display: display, overflow_hidden: false, overflow_auto_y: false, scrollbar_thumb_color: p.scrollbar_thumb_color, scrollbar_track_color: p.scrollbar_track_color, text_overflow_ellipsis: p.text_overflow_ellipsis, visibility_hidden: p.visibility_hidden, content_visibility_hidden: false, will_change: "auto", color_adjust: "economy", forced_color_adjust: "auto", print_color_adjust: "economy", orphans: 2, widows: 2, position_relative: false, position_absolute: false, left_px: 0, top_px: 0, right_px: -1, bottom_px: -1, z_index: 0, opacity_pct: 100, flex_direction: "row", text_align: p.text_align, text_align_last: p.text_align_last, text_justify: p.text_justify, text_transform: p.text_transform, text_indent_px: p.text_indent_px, letter_spacing_px: p.letter_spacing_px, word_spacing_px: p.word_spacing_px, font_size_adjust: p.font_size_adjust, font_palette: p.font_palette, font_feature_settings: p.font_feature_settings, font_language_override: p.font_language_override, font_variation_settings: p.font_variation_settings, font_variant: p.font_variant, font_variant_alternates: p.font_variant_alternates, font_variant_caps: p.font_variant_caps, font_variant_east_asian: p.font_variant_east_asian, font_variant_emoji: p.font_variant_emoji, font_variant_ligatures: p.font_variant_ligatures, font_variant_numeric: p.font_variant_numeric, font_variant_position: p.font_variant_position, font_style_italic: p.font_style_italic, font_kerning: p.font_kerning, font_optical_sizing: p.font_optical_sizing, font_stretch: p.font_stretch, font_width: p.font_width, font_synthesis: p.font_synthesis, font_synthesis_small_caps: p.font_synthesis_small_caps, font_synthesis_position: p.font_synthesis_position, font_synthesis_style: p.font_synthesis_style, font_synthesis_weight: p.font_synthesis_weight, direction_rtl: p.direction_rtl, writing_mode: p.writing_mode, text_orientation: p.text_orientation, text_combine_upright: p.text_combine_upright, text_shadow_x_px: p.text_shadow_x_px, text_shadow_y_px: p.text_shadow_y_px, text_shadow_color: p.text_shadow_color, text_decoration_color: p.text_decoration_color, text_decoration_underline: p.text_decoration_underline, text_decoration_style: p.text_decoration_style, text_decoration_thickness_px: p.text_decoration_thickness_px, text_underline_offset_px: p.text_underline_offset_px, text_underline_position: p.text_underline_position, white_space_nowrap: p.white_space_nowrap, overflow_wrap: p.overflow_wrap, line_break: p.line_break, hyphens: p.hyphens, word_break: p.word_break, cursor: p.cursor, resize: "none", table_layout: "auto", vertical_align: "baseline", caret_color: p.caret_color, tab_size: p.tab_size, unicode_bidi: "normal", transition_property: "none", transition_duration_ms: 0, transition_delay_ms: 0, transition_timing_function: "ease", animation_name: "none", animation_duration_ms: 0, animation_delay_ms: 0, animation_timing_function: "ease", animation_iteration_count: "1", animation_direction: "normal", animation_fill_mode: "none", animation_play_state: "running", transform_origin: "center center", transform_box: "border-box", transform_style: "flat", image_rendering: "auto", object_fit: p.object_fit, object_position: p.object_position, bold: p.bold)
+    Style(bg: 0u32, background_gradient_from: 0u32, background_gradient_to: 0u32, background_repeat: "repeat", background_size_w_px: 0, background_size_h_px: 0, background_position_x_px: 0, background_position_y_px: 0, background_clip: "border-box", background_origin: "padding-box", background_attachment: "scroll", fg: p.fg, font_size: p.font_size, line_height_px: p.line_height_px, width_px: 0, height_px: 0, border_box: false, min_width_px: 0, max_width_px: 0, min_height_px: 0, max_height_px: 0, min_height_vh: false, flex_fill: false, flex_grow: 0, flex_shrink: 1, flex_basis_px: 0, order: 0, flex_wrap: "nowrap", justify_content: "flex-start", justify_items: "stretch", justify_self: "auto", align_items: "stretch", align_self: "auto", align_content: "stretch", pad_l: 0, pad_t: 0, pad_r: 0, pad_b: 0, border_w: 0, border_color: 0u32, border_l: 0, border_t: 0, border_r: 0, border_b: 0, border_color_l: 0u32, border_color_t: 0u32, border_color_r: 0u32, border_color_b: 0u32, outline_w: 0, outline_color: 0u32, outline_offset_px: 0, box_shadow_x_px: 0, box_shadow_y_px: 0, box_shadow_color: 0u32, border_radius_px: 0, border_radius_tl_px: 0, border_radius_tr_px: 0, border_radius_br_px: 0, border_radius_bl_px: 0, gap_px: 0, row_gap_px: 0, column_gap_px: 0, margin_l: 0, margin_t: 0, margin_r: 0, margin_b: 0, margin_l_auto: false, margin_r_auto: false, margin_t_auto: false, margin_b_auto: false, display: display, overflow_hidden: false, overflow_auto_y: false, scrollbar_thumb_color: p.scrollbar_thumb_color, scrollbar_track_color: p.scrollbar_track_color, text_overflow_ellipsis: p.text_overflow_ellipsis, visibility_hidden: p.visibility_hidden, content_visibility_hidden: false, will_change: "auto", color_adjust: "economy", forced_color_adjust: "auto", print_color_adjust: "economy", orphans: 2, widows: 2, position_relative: false, position_absolute: false, left_px: 0, top_px: 0, right_px: -1, bottom_px: -1, z_index: 0, opacity_pct: 100, flex_direction: "row", text_align: p.text_align, text_align_last: p.text_align_last, text_justify: p.text_justify, text_transform: p.text_transform, text_indent_px: p.text_indent_px, list_marker: p.list_marker, letter_spacing_px: p.letter_spacing_px, word_spacing_px: p.word_spacing_px, font_size_adjust: p.font_size_adjust, font_palette: p.font_palette, font_feature_settings: p.font_feature_settings, font_language_override: p.font_language_override, font_variation_settings: p.font_variation_settings, font_variant: p.font_variant, font_variant_alternates: p.font_variant_alternates, font_variant_caps: p.font_variant_caps, font_variant_east_asian: p.font_variant_east_asian, font_variant_emoji: p.font_variant_emoji, font_variant_ligatures: p.font_variant_ligatures, font_variant_numeric: p.font_variant_numeric, font_variant_position: p.font_variant_position, font_style_italic: p.font_style_italic, font_kerning: p.font_kerning, font_optical_sizing: p.font_optical_sizing, font_stretch: p.font_stretch, font_width: p.font_width, font_synthesis: p.font_synthesis, font_synthesis_small_caps: p.font_synthesis_small_caps, font_synthesis_position: p.font_synthesis_position, font_synthesis_style: p.font_synthesis_style, font_synthesis_weight: p.font_synthesis_weight, direction_rtl: p.direction_rtl, writing_mode: p.writing_mode, text_orientation: p.text_orientation, text_combine_upright: p.text_combine_upright, text_shadow_x_px: p.text_shadow_x_px, text_shadow_y_px: p.text_shadow_y_px, text_shadow_color: p.text_shadow_color, text_decoration_color: p.text_decoration_color, text_decoration_underline: p.text_decoration_underline, text_decoration_style: p.text_decoration_style, text_decoration_thickness_px: p.text_decoration_thickness_px, text_underline_offset_px: p.text_underline_offset_px, text_underline_position: p.text_underline_position, text_emphasis_color: p.text_emphasis_color, text_emphasis_enabled: p.text_emphasis_enabled, text_emphasis_under: p.text_emphasis_under, quotes_enabled: p.quotes_enabled, quote_open: p.quote_open, quote_close: p.quote_close, white_space_nowrap: p.white_space_nowrap, overflow_wrap: p.overflow_wrap, line_break: p.line_break, hyphens: p.hyphens, word_break: p.word_break, cursor: p.cursor, resize: "none", table_layout: "auto", vertical_align: "baseline", caret_color: p.caret_color, tab_size: p.tab_size, unicode_bidi: "normal", transition_property: "none", transition_duration_ms: 0, transition_delay_ms: 0, transition_timing_function: "ease", animation_name: "none", animation_duration_ms: 0, animation_delay_ms: 0, animation_timing_function: "ease", animation_iteration_count: "1", animation_direction: "normal", animation_fill_mode: "none", animation_play_state: "running", transform_origin: "center center", transform_box: "border-box", transform_style: "flat", image_rendering: "auto", object_fit: p.object_fit, object_position: p.object_position, bold: p.bold)
 
 fn is_inline_tag(tag: text) -> bool:
     tag == "a" or tag == "span" or tag == "b" or tag == "strong" or tag == "em" or tag == "i" or tag == "small" or tag == "code" or tag == "#text"
@@ -1518,6 +1609,8 @@ fn apply_decls(st: Style, decls: text) -> Style:
     var order_v = st.order
     var flex_wrap_v = st.flex_wrap
     var justify_content_v = st.justify_content
+    var justify_items_v = st.justify_items
+    var justify_self_v = st.justify_self
     var align_items_v = st.align_items
     var align_self_v = st.align_self
     var align_content_v = st.align_content
@@ -1585,6 +1678,7 @@ fn apply_decls(st: Style, decls: text) -> Style:
     var text_justify_v = st.text_justify
     var text_transform_v = st.text_transform
     var text_indent_px_v = st.text_indent_px
+    var list_marker_v = st.list_marker
     var letter_spacing_px_v = st.letter_spacing_px
     var word_spacing_px_v = st.word_spacing_px
     var font_size_adjust_v = st.font_size_adjust
@@ -1623,6 +1717,12 @@ fn apply_decls(st: Style, decls: text) -> Style:
     var text_decoration_thickness_px_v = st.text_decoration_thickness_px
     var text_underline_offset_px_v = st.text_underline_offset_px
     var text_underline_position_v = st.text_underline_position
+    var text_emphasis_color_v = st.text_emphasis_color
+    var text_emphasis_enabled_v = st.text_emphasis_enabled
+    var text_emphasis_under_v = st.text_emphasis_under
+    var quotes_enabled_v = st.quotes_enabled
+    var quote_open_v = st.quote_open
+    var quote_close_v = st.quote_close
     var white_space_nowrap_v = st.white_space_nowrap
     var overflow_wrap_v = st.overflow_wrap
     var line_break_v = st.line_break
@@ -2131,6 +2231,24 @@ fn apply_decls(st: Style, decls: text) -> Style:
             width_v = clipped_w
         if clip_bottom > 0 and height_v > 0 and clip_bottom < height_v:
             height_v = clip_bottom
+    val clip_path_decl = decl_get(decls, "clip-path")
+    if clip_path_decl.len() > 0:
+        val inset_top = parse_clip_path_inset_value(clip_path_decl, 0)
+        val inset_right = parse_clip_path_inset_value(clip_path_decl, 1)
+        val inset_bottom = parse_clip_path_inset_value(clip_path_decl, 2)
+        val inset_left = parse_clip_path_inset_value(clip_path_decl, 3)
+        if inset_left != 0 or inset_top != 0:
+            left_px_v = left_px_v + inset_left
+            top_px_v = top_px_v + inset_top
+            position_relative_v = true
+        if width_v > 0:
+            val clipped_w = width_v - inset_left - inset_right
+            if clipped_w > 0 and clipped_w < width_v:
+                width_v = clipped_w
+        if height_v > 0:
+            val clipped_h = height_v - inset_top - inset_bottom
+            if clipped_h > 0 and clipped_h < height_v:
+                height_v = clipped_h
     val transform_decl = decl_get(decls, "transform")
     if transform_decl.len() > 0:
         val translate_x = parse_transform_translate_x(transform_decl)
@@ -2149,6 +2267,9 @@ fn apply_decls(st: Style, decls: text) -> Style:
             val old_width = width_v
             width_v = height_v
             height_v = old_width
+        val backface_visibility_decl = decl_get(decls, "backface-visibility")
+        if backface_visibility_decl.trim().lower() == "hidden" and parse_transform_backface_half_turn(transform_decl):
+            visibility_hidden_v = true
     val translate_decl = decl_get(decls, "translate")
     if translate_decl.len() > 0:
         val individual_translate_x = parse_individual_translate_x(translate_decl)
@@ -2265,6 +2386,39 @@ fn apply_decls(st: Style, decls: text) -> Style:
     val text_indent_decl = decl_get(decls, "text-indent")
     if text_indent_decl.len() > 0:
         text_indent_px_v = parse_int(text_indent_decl)
+    val list_style_position_decl = decl_get(decls, "list-style-position")
+    if list_style_position_decl.len() > 0:
+        val list_style_position_norm = list_style_position_decl.trim().lower()
+        if list_style_position_norm == "inside":
+            text_indent_px_v = 8
+        elif list_style_position_norm == "outside":
+            text_indent_px_v = 0
+    val list_style_decl = decl_get(decls, "list-style")
+    if list_style_decl.len() > 0:
+        val list_style_norm = list_style_decl.trim().lower()
+        if css_word_contains(list_style_norm, "inside"):
+            text_indent_px_v = 8
+        elif css_word_contains(list_style_norm, "outside"):
+            text_indent_px_v = 0
+        if css_word_contains(list_style_norm, "none"):
+            list_marker_v = "none"
+        elif list_style_norm.contains("url("):
+            list_marker_v = "image"
+    val list_style_type_decl = decl_get(decls, "list-style-type")
+    if list_style_type_decl.len() > 0:
+        val list_style_type_norm = list_style_type_decl.trim().lower()
+        if list_style_type_norm == "none":
+            list_marker_v = "none"
+        elif list_marker_v == "none":
+            list_marker_v = "disc"
+    val list_style_image_decl = decl_get(decls, "list-style-image")
+    if list_style_image_decl.len() > 0:
+        val list_style_image_norm = list_style_image_decl.trim().lower()
+        if list_style_image_norm == "none":
+            if list_marker_v == "image":
+                list_marker_v = "disc"
+        elif list_style_image_norm.contains("url("):
+            list_marker_v = "image"
     val letter_spacing_decl = decl_get(decls, "letter-spacing")
     if letter_spacing_decl.len() > 0:
         letter_spacing_px_v = parse_int(letter_spacing_decl)
@@ -2458,6 +2612,44 @@ fn apply_decls(st: Style, decls: text) -> Style:
         val text_underline_position_norm = text_underline_position.trim().lower()
         if text_underline_position_norm == "auto" or text_underline_position_norm == "under" or text_underline_position_norm == "left" or text_underline_position_norm == "right":
             text_underline_position_v = text_underline_position_norm
+    val text_emphasis_decl = decl_get(decls, "text-emphasis")
+    if text_emphasis_decl.len() > 0:
+        val text_emphasis_norm = text_emphasis_decl.trim().lower()
+        if text_emphasis_norm == "none":
+            text_emphasis_enabled_v = false
+        else:
+            text_emphasis_enabled_v = true
+            val text_emphasis_color_parsed = parse_color_any(text_emphasis_norm)
+            if text_emphasis_color_parsed != 0u32:
+                text_emphasis_color_v = text_emphasis_color_parsed
+    val text_emphasis_style_decl = decl_get(decls, "text-emphasis-style")
+    if text_emphasis_style_decl.len() > 0:
+        val text_emphasis_style_norm = text_emphasis_style_decl.trim().lower()
+        text_emphasis_enabled_v = text_emphasis_style_norm != "none"
+    val text_emphasis_color_decl = decl_get(decls, "text-emphasis-color")
+    if text_emphasis_color_decl.len() > 0:
+        val text_emphasis_color_parsed = parse_color_any(text_emphasis_color_decl)
+        if text_emphasis_color_parsed != 0u32:
+            text_emphasis_color_v = text_emphasis_color_parsed
+    val text_emphasis_position_decl = decl_get(decls, "text-emphasis-position")
+    if text_emphasis_position_decl.len() > 0:
+        val text_emphasis_position_norm = text_emphasis_position_decl.trim().lower()
+        if text_emphasis_position_norm.contains("under"):
+            text_emphasis_under_v = true
+        elif text_emphasis_position_norm.contains("over"):
+            text_emphasis_under_v = false
+    val quotes_decl = decl_get(decls, "quotes")
+    if quotes_decl.len() > 0:
+        val quotes_norm = quotes_decl.trim().lower()
+        if quotes_norm == "none":
+            quotes_enabled_v = false
+        else:
+            val parsed_quote_open = css_quoted_token(quotes_decl, 0)
+            val parsed_quote_close = css_quoted_token(quotes_decl, 1)
+            if parsed_quote_open.len() > 0 and parsed_quote_close.len() > 0:
+                quotes_enabled_v = true
+                quote_open_v = parsed_quote_open
+                quote_close_v = parsed_quote_close
     val white_space = decl_get(decls, "white-space")
     if white_space.len() > 0:
         white_space_nowrap_v = white_space == "nowrap" or white_space == "pre"
@@ -2589,21 +2781,45 @@ fn apply_decls(st: Style, decls: text) -> Style:
     val align_items_decl = decl_get(decls, "align-items")
     if align_items_decl.len() > 0:
         align_items_v = align_items_decl
+    val justify_items_decl = decl_get(decls, "justify-items")
+    if justify_items_decl.len() > 0:
+        val normalized_justify_items = normalize_overflow_box_alignment(justify_items_decl)
+        if supports_self_alignment(normalized_justify_items):
+            justify_items_v = normalized_justify_items
     val place_items_decl = decl_get(decls, "place-items")
     if place_items_decl.len() > 0:
         val normalized_place_items = normalize_overflow_box_alignment(place_items_decl)
         val place_items_parts = normalized_place_items.split(" ")
         if place_items_parts.len() > 0:
-            align_items_v = place_items_parts[0]
+            val place_items_align = place_items_parts[0]
+            if supports_self_alignment(place_items_align):
+                align_items_v = place_items_align
+                justify_items_v = place_items_align
+        if place_items_parts.len() > 1:
+            val place_items_justify = place_items_parts[1]
+            if supports_self_alignment(place_items_justify):
+                justify_items_v = place_items_justify
     val align_self_decl = decl_get(decls, "align-self")
     if align_self_decl.len() > 0:
         align_self_v = align_self_decl
+    val justify_self_decl = decl_get(decls, "justify-self")
+    if justify_self_decl.len() > 0:
+        val normalized_justify_self = normalize_overflow_box_alignment(justify_self_decl)
+        if supports_self_alignment(normalized_justify_self):
+            justify_self_v = normalized_justify_self
     val place_self_decl = decl_get(decls, "place-self")
     if place_self_decl.len() > 0:
         val normalized_place_self = normalize_overflow_box_alignment(place_self_decl)
         val place_self_parts = normalized_place_self.split(" ")
         if place_self_parts.len() > 0:
-            align_self_v = place_self_parts[0]
+            val place_self_align = place_self_parts[0]
+            if supports_self_alignment(place_self_align):
+                align_self_v = place_self_align
+                justify_self_v = place_self_align
+        if place_self_parts.len() > 1:
+            val place_self_justify = place_self_parts[1]
+            if supports_self_alignment(place_self_justify):
+                justify_self_v = place_self_justify
     val align_content_decl = decl_get(decls, "align-content")
     if align_content_decl.len() > 0:
         val normalized_align_content = normalize_overflow_box_alignment(align_content_decl)
@@ -3148,7 +3364,7 @@ fn apply_decls(st: Style, decls: text) -> Style:
         margin_r_auto_v = false
         margin_t_auto_v = false
         margin_b_auto_v = false
-    Style(bg: bg_v, background_gradient_from: background_gradient_from_v, background_gradient_to: background_gradient_to_v, background_repeat: background_repeat_v, background_size_w_px: background_size_w_px_v, background_size_h_px: background_size_h_px_v, background_position_x_px: background_position_x_px_v, background_position_y_px: background_position_y_px_v, background_clip: background_clip_v, background_origin: background_origin_v, background_attachment: background_attachment_v, fg: fg_v, font_size: font_size_v, line_height_px: line_height_v, width_px: width_v, height_px: height_v, border_box: border_box_v, min_width_px: min_width_v, max_width_px: max_width_v, min_height_px: min_height_v, max_height_px: max_height_v, min_height_vh: min_height_vh_v, flex_fill: flex_fill_v, flex_grow: flex_grow_v, flex_shrink: flex_shrink_v, flex_basis_px: flex_basis_px_v, order: order_v, flex_wrap: flex_wrap_v, justify_content: justify_content_v, align_items: align_items_v, align_self: align_self_v, align_content: align_content_v, pad_l: pad_l_v, pad_t: pad_t_v, pad_r: pad_r_v, pad_b: pad_b_v, border_w: border_w_v, border_color: border_color_v, border_l: border_l_v, border_t: border_t_v, border_r: border_r_v, border_b: border_b_v, border_color_l: border_color_l_v, border_color_t: border_color_t_v, border_color_r: border_color_r_v, border_color_b: border_color_b_v, outline_w: outline_w_v, outline_color: outline_color_v, outline_offset_px: outline_offset_px_v, box_shadow_x_px: box_shadow_x_px_v, box_shadow_y_px: box_shadow_y_px_v, box_shadow_color: box_shadow_color_v, border_radius_px: border_radius_px_v, border_radius_tl_px: border_radius_tl_px_v, border_radius_tr_px: border_radius_tr_px_v, border_radius_br_px: border_radius_br_px_v, border_radius_bl_px: border_radius_bl_px_v, gap_px: gap_v, row_gap_px: row_gap_v, column_gap_px: column_gap_v, margin_l: margin_l_v, margin_t: margin_t_v, margin_r: margin_r_v, margin_b: margin_b_v, margin_l_auto: margin_l_auto_v, margin_r_auto: margin_r_auto_v, margin_t_auto: margin_t_auto_v, margin_b_auto: margin_b_auto_v, display: display_v, overflow_hidden: overflow_hidden_v, overflow_auto_y: overflow_auto_y_v, scrollbar_thumb_color: scrollbar_thumb_color_v, scrollbar_track_color: scrollbar_track_color_v, text_overflow_ellipsis: text_overflow_ellipsis_v, visibility_hidden: visibility_hidden_v, content_visibility_hidden: content_visibility_hidden_v, will_change: will_change_v, color_adjust: color_adjust_v, forced_color_adjust: forced_color_adjust_v, print_color_adjust: print_color_adjust_v, orphans: orphans_v, widows: widows_v, position_relative: position_relative_v, position_absolute: position_absolute_v, left_px: left_px_v, top_px: top_px_v, right_px: right_px_v, bottom_px: bottom_px_v, z_index: z_index_v, opacity_pct: opacity_pct_v, flex_direction: flex_direction_v, text_align: text_align_v, text_align_last: text_align_last_v, text_justify: text_justify_v, text_transform: text_transform_v, text_indent_px: text_indent_px_v, letter_spacing_px: letter_spacing_px_v, word_spacing_px: word_spacing_px_v, font_size_adjust: font_size_adjust_v, font_palette: font_palette_v, font_feature_settings: font_feature_settings_v, font_language_override: font_language_override_v, font_variation_settings: font_variation_settings_v, font_variant: font_variant_v, font_variant_alternates: font_variant_alternates_v, font_variant_caps: font_variant_caps_v, font_variant_east_asian: font_variant_east_asian_v, font_variant_emoji: font_variant_emoji_v, font_variant_ligatures: font_variant_ligatures_v, font_variant_numeric: font_variant_numeric_v, font_variant_position: font_variant_position_v, font_style_italic: font_style_italic_v, font_kerning: font_kerning_v, font_optical_sizing: font_optical_sizing_v, font_stretch: font_stretch_v, font_width: font_width_v, font_synthesis: font_synthesis_v, font_synthesis_small_caps: font_synthesis_small_caps_v, font_synthesis_position: font_synthesis_position_v, font_synthesis_style: font_synthesis_style_v, font_synthesis_weight: font_synthesis_weight_v, direction_rtl: direction_rtl_v, writing_mode: writing_mode_v, text_orientation: text_orientation_v, text_combine_upright: text_combine_upright_v, text_shadow_x_px: text_shadow_x_px_v, text_shadow_y_px: text_shadow_y_px_v, text_shadow_color: text_shadow_color_v, text_decoration_color: text_decoration_color_v, text_decoration_underline: text_decoration_underline_v, text_decoration_style: text_decoration_style_v, text_decoration_thickness_px: text_decoration_thickness_px_v, text_underline_offset_px: text_underline_offset_px_v, text_underline_position: text_underline_position_v, white_space_nowrap: white_space_nowrap_v, overflow_wrap: overflow_wrap_v, line_break: line_break_v, hyphens: hyphens_v, word_break: word_break_v, cursor: cursor_v, resize: resize_v, table_layout: table_layout_v, vertical_align: vertical_align_v, caret_color: caret_color_v, tab_size: tab_size_v, unicode_bidi: unicode_bidi_v, transition_property: transition_property_v, transition_duration_ms: transition_duration_ms_v, transition_delay_ms: transition_delay_ms_v, transition_timing_function: transition_timing_function_v, animation_name: animation_name_v, animation_duration_ms: animation_duration_ms_v, animation_delay_ms: animation_delay_ms_v, animation_timing_function: animation_timing_function_v, animation_iteration_count: animation_iteration_count_v, animation_direction: animation_direction_v, animation_fill_mode: animation_fill_mode_v, animation_play_state: animation_play_state_v, transform_origin: transform_origin_v, transform_box: transform_box_v, transform_style: transform_style_v, image_rendering: image_rendering_v, object_fit: object_fit_v, object_position: object_position_v, bold: bold_v)
+    Style(bg: bg_v, background_gradient_from: background_gradient_from_v, background_gradient_to: background_gradient_to_v, background_repeat: background_repeat_v, background_size_w_px: background_size_w_px_v, background_size_h_px: background_size_h_px_v, background_position_x_px: background_position_x_px_v, background_position_y_px: background_position_y_px_v, background_clip: background_clip_v, background_origin: background_origin_v, background_attachment: background_attachment_v, fg: fg_v, font_size: font_size_v, line_height_px: line_height_v, width_px: width_v, height_px: height_v, border_box: border_box_v, min_width_px: min_width_v, max_width_px: max_width_v, min_height_px: min_height_v, max_height_px: max_height_v, min_height_vh: min_height_vh_v, flex_fill: flex_fill_v, flex_grow: flex_grow_v, flex_shrink: flex_shrink_v, flex_basis_px: flex_basis_px_v, order: order_v, flex_wrap: flex_wrap_v, justify_content: justify_content_v, justify_items: justify_items_v, justify_self: justify_self_v, align_items: align_items_v, align_self: align_self_v, align_content: align_content_v, pad_l: pad_l_v, pad_t: pad_t_v, pad_r: pad_r_v, pad_b: pad_b_v, border_w: border_w_v, border_color: border_color_v, border_l: border_l_v, border_t: border_t_v, border_r: border_r_v, border_b: border_b_v, border_color_l: border_color_l_v, border_color_t: border_color_t_v, border_color_r: border_color_r_v, border_color_b: border_color_b_v, outline_w: outline_w_v, outline_color: outline_color_v, outline_offset_px: outline_offset_px_v, box_shadow_x_px: box_shadow_x_px_v, box_shadow_y_px: box_shadow_y_px_v, box_shadow_color: box_shadow_color_v, border_radius_px: border_radius_px_v, border_radius_tl_px: border_radius_tl_px_v, border_radius_tr_px: border_radius_tr_px_v, border_radius_br_px: border_radius_br_px_v, border_radius_bl_px: border_radius_bl_px_v, gap_px: gap_v, row_gap_px: row_gap_v, column_gap_px: column_gap_v, margin_l: margin_l_v, margin_t: margin_t_v, margin_r: margin_r_v, margin_b: margin_b_v, margin_l_auto: margin_l_auto_v, margin_r_auto: margin_r_auto_v, margin_t_auto: margin_t_auto_v, margin_b_auto: margin_b_auto_v, display: display_v, overflow_hidden: overflow_hidden_v, overflow_auto_y: overflow_auto_y_v, scrollbar_thumb_color: scrollbar_thumb_color_v, scrollbar_track_color: scrollbar_track_color_v, text_overflow_ellipsis: text_overflow_ellipsis_v, visibility_hidden: visibility_hidden_v, content_visibility_hidden: content_visibility_hidden_v, will_change: will_change_v, color_adjust: color_adjust_v, forced_color_adjust: forced_color_adjust_v, print_color_adjust: print_color_adjust_v, orphans: orphans_v, widows: widows_v, position_relative: position_relative_v, position_absolute: position_absolute_v, left_px: left_px_v, top_px: top_px_v, right_px: right_px_v, bottom_px: bottom_px_v, z_index: z_index_v, opacity_pct: opacity_pct_v, flex_direction: flex_direction_v, text_align: text_align_v, text_align_last: text_align_last_v, text_justify: text_justify_v, text_transform: text_transform_v, text_indent_px: text_indent_px_v, list_marker: list_marker_v, letter_spacing_px: letter_spacing_px_v, word_spacing_px: word_spacing_px_v, font_size_adjust: font_size_adjust_v, font_palette: font_palette_v, font_feature_settings: font_feature_settings_v, font_language_override: font_language_override_v, font_variation_settings: font_variation_settings_v, font_variant: font_variant_v, font_variant_alternates: font_variant_alternates_v, font_variant_caps: font_variant_caps_v, font_variant_east_asian: font_variant_east_asian_v, font_variant_emoji: font_variant_emoji_v, font_variant_ligatures: font_variant_ligatures_v, font_variant_numeric: font_variant_numeric_v, font_variant_position: font_variant_position_v, font_style_italic: font_style_italic_v, font_kerning: font_kerning_v, font_optical_sizing: font_optical_sizing_v, font_stretch: font_stretch_v, font_width: font_width_v, font_synthesis: font_synthesis_v, font_synthesis_small_caps: font_synthesis_small_caps_v, font_synthesis_position: font_synthesis_position_v, font_synthesis_style: font_synthesis_style_v, font_synthesis_weight: font_synthesis_weight_v, direction_rtl: direction_rtl_v, writing_mode: writing_mode_v, text_orientation: text_orientation_v, text_combine_upright: text_combine_upright_v, text_shadow_x_px: text_shadow_x_px_v, text_shadow_y_px: text_shadow_y_px_v, text_shadow_color: text_shadow_color_v, text_decoration_color: text_decoration_color_v, text_decoration_underline: text_decoration_underline_v, text_decoration_style: text_decoration_style_v, text_decoration_thickness_px: text_decoration_thickness_px_v, text_underline_offset_px: text_underline_offset_px_v, text_underline_position: text_underline_position_v, text_emphasis_color: text_emphasis_color_v, text_emphasis_enabled: text_emphasis_enabled_v, text_emphasis_under: text_emphasis_under_v, quotes_enabled: quotes_enabled_v, quote_open: quote_open_v, quote_close: quote_close_v, white_space_nowrap: white_space_nowrap_v, overflow_wrap: overflow_wrap_v, line_break: line_break_v, hyphens: hyphens_v, word_break: word_break_v, cursor: cursor_v, resize: resize_v, table_layout: table_layout_v, vertical_align: vertical_align_v, caret_color: caret_color_v, tab_size: tab_size_v, unicode_bidi: unicode_bidi_v, transition_property: transition_property_v, transition_duration_ms: transition_duration_ms_v, transition_delay_ms: transition_delay_ms_v, transition_timing_function: transition_timing_function_v, animation_name: animation_name_v, animation_duration_ms: animation_duration_ms_v, animation_delay_ms: animation_delay_ms_v, animation_timing_function: animation_timing_function_v, animation_iteration_count: animation_iteration_count_v, animation_direction: animation_direction_v, animation_fill_mode: animation_fill_mode_v, animation_play_state: animation_play_state_v, transform_origin: transform_origin_v, transform_box: transform_box_v, transform_style: transform_style_v, image_rendering: image_rendering_v, object_fit: object_fit_v, object_position: object_position_v, bold: bold_v)
 
 # default per-tag tweaks (block/inline, heading sizes, spacing)
 fn tag_defaults(st: Style, tag: text) -> Style:
@@ -3165,7 +3381,7 @@ fn tag_defaults(st: Style, tag: text) -> Style:
     var border_box_v = st.border_box
     var bold_v = st.bold
     if is_non_rendered_tag(tag):
-        return Style(bg: st.bg, background_gradient_from: st.background_gradient_from, background_gradient_to: st.background_gradient_to, background_repeat: st.background_repeat, background_size_w_px: st.background_size_w_px, background_size_h_px: st.background_size_h_px, background_position_x_px: st.background_position_x_px, background_position_y_px: st.background_position_y_px, background_clip: st.background_clip, background_origin: st.background_origin, background_attachment: st.background_attachment, fg: st.fg, font_size: font_size_v, line_height_px: st.line_height_px, width_px: st.width_px, height_px: st.height_px, border_box: st.border_box, min_width_px: st.min_width_px, max_width_px: st.max_width_px, min_height_px: st.min_height_px, max_height_px: st.max_height_px, min_height_vh: st.min_height_vh, flex_fill: st.flex_fill, flex_grow: st.flex_grow, flex_shrink: st.flex_shrink, flex_basis_px: st.flex_basis_px, order: st.order, flex_wrap: st.flex_wrap, justify_content: st.justify_content, align_items: st.align_items, align_self: st.align_self, align_content: st.align_content, pad_l: st.pad_l, pad_t: st.pad_t, pad_r: st.pad_r, pad_b: st.pad_b, border_w: st.border_w, border_color: st.border_color, border_l: st.border_l, border_t: st.border_t, border_r: st.border_r, border_b: st.border_b, border_color_l: st.border_color_l, border_color_t: st.border_color_t, border_color_r: st.border_color_r, border_color_b: st.border_color_b, outline_w: st.outline_w, outline_color: st.outline_color, outline_offset_px: st.outline_offset_px, box_shadow_x_px: st.box_shadow_x_px, box_shadow_y_px: st.box_shadow_y_px, box_shadow_color: st.box_shadow_color, border_radius_px: st.border_radius_px, border_radius_tl_px: st.border_radius_tl_px, border_radius_tr_px: st.border_radius_tr_px, border_radius_br_px: st.border_radius_br_px, border_radius_bl_px: st.border_radius_bl_px, gap_px: st.gap_px, row_gap_px: st.row_gap_px, column_gap_px: st.column_gap_px, margin_l: st.margin_l, margin_t: margin_t_v, margin_r: st.margin_r, margin_b: margin_b_v, margin_l_auto: st.margin_l_auto, margin_r_auto: st.margin_r_auto, margin_t_auto: st.margin_t_auto, margin_b_auto: st.margin_b_auto, display: "none", overflow_hidden: st.overflow_hidden, overflow_auto_y: st.overflow_auto_y, scrollbar_thumb_color: st.scrollbar_thumb_color, scrollbar_track_color: st.scrollbar_track_color, text_overflow_ellipsis: st.text_overflow_ellipsis, visibility_hidden: st.visibility_hidden, content_visibility_hidden: st.content_visibility_hidden, will_change: st.will_change, color_adjust: st.color_adjust, forced_color_adjust: st.forced_color_adjust, print_color_adjust: st.print_color_adjust, orphans: st.orphans, widows: st.widows, position_relative: st.position_relative, position_absolute: st.position_absolute, left_px: st.left_px, top_px: st.top_px, right_px: st.right_px, bottom_px: st.bottom_px, z_index: st.z_index, opacity_pct: st.opacity_pct, flex_direction: st.flex_direction, text_align: st.text_align, text_align_last: st.text_align_last, text_justify: st.text_justify, text_transform: st.text_transform, text_indent_px: st.text_indent_px, letter_spacing_px: st.letter_spacing_px, word_spacing_px: st.word_spacing_px, font_size_adjust: st.font_size_adjust, font_palette: st.font_palette, font_feature_settings: st.font_feature_settings, font_language_override: st.font_language_override, font_variation_settings: st.font_variation_settings, font_variant: st.font_variant, font_variant_alternates: st.font_variant_alternates, font_variant_caps: st.font_variant_caps, font_variant_east_asian: st.font_variant_east_asian, font_variant_emoji: st.font_variant_emoji, font_variant_ligatures: st.font_variant_ligatures, font_variant_numeric: st.font_variant_numeric, font_variant_position: st.font_variant_position, font_style_italic: st.font_style_italic, font_kerning: st.font_kerning, font_optical_sizing: st.font_optical_sizing, font_stretch: st.font_stretch, font_width: st.font_width, font_synthesis: st.font_synthesis, font_synthesis_small_caps: st.font_synthesis_small_caps, font_synthesis_position: st.font_synthesis_position, font_synthesis_style: st.font_synthesis_style, font_synthesis_weight: st.font_synthesis_weight, direction_rtl: st.direction_rtl, writing_mode: st.writing_mode, text_orientation: st.text_orientation, text_combine_upright: st.text_combine_upright, text_shadow_x_px: st.text_shadow_x_px, text_shadow_y_px: st.text_shadow_y_px, text_shadow_color: st.text_shadow_color, text_decoration_color: st.text_decoration_color, text_decoration_underline: st.text_decoration_underline, text_decoration_style: st.text_decoration_style, text_decoration_thickness_px: st.text_decoration_thickness_px, text_underline_offset_px: st.text_underline_offset_px, text_underline_position: st.text_underline_position, white_space_nowrap: st.white_space_nowrap, overflow_wrap: st.overflow_wrap, line_break: st.line_break, hyphens: st.hyphens, word_break: st.word_break, cursor: st.cursor, resize: st.resize, table_layout: st.table_layout, vertical_align: st.vertical_align, caret_color: st.caret_color, tab_size: st.tab_size, unicode_bidi: st.unicode_bidi, transition_property: st.transition_property, transition_duration_ms: st.transition_duration_ms, transition_delay_ms: st.transition_delay_ms, transition_timing_function: st.transition_timing_function, animation_name: st.animation_name, animation_duration_ms: st.animation_duration_ms, animation_delay_ms: st.animation_delay_ms, animation_timing_function: st.animation_timing_function, animation_iteration_count: st.animation_iteration_count, animation_direction: st.animation_direction, animation_fill_mode: st.animation_fill_mode, animation_play_state: st.animation_play_state, transform_origin: st.transform_origin, transform_box: st.transform_box, transform_style: st.transform_style, image_rendering: st.image_rendering, object_fit: st.object_fit, object_position: st.object_position, bold: bold_v)
+        return Style(bg: st.bg, background_gradient_from: st.background_gradient_from, background_gradient_to: st.background_gradient_to, background_repeat: st.background_repeat, background_size_w_px: st.background_size_w_px, background_size_h_px: st.background_size_h_px, background_position_x_px: st.background_position_x_px, background_position_y_px: st.background_position_y_px, background_clip: st.background_clip, background_origin: st.background_origin, background_attachment: st.background_attachment, fg: st.fg, font_size: font_size_v, line_height_px: st.line_height_px, width_px: st.width_px, height_px: st.height_px, border_box: st.border_box, min_width_px: st.min_width_px, max_width_px: st.max_width_px, min_height_px: st.min_height_px, max_height_px: st.max_height_px, min_height_vh: st.min_height_vh, flex_fill: st.flex_fill, flex_grow: st.flex_grow, flex_shrink: st.flex_shrink, flex_basis_px: st.flex_basis_px, order: st.order, flex_wrap: st.flex_wrap, justify_content: st.justify_content, justify_items: st.justify_items, justify_self: st.justify_self, align_items: st.align_items, align_self: st.align_self, align_content: st.align_content, pad_l: st.pad_l, pad_t: st.pad_t, pad_r: st.pad_r, pad_b: st.pad_b, border_w: st.border_w, border_color: st.border_color, border_l: st.border_l, border_t: st.border_t, border_r: st.border_r, border_b: st.border_b, border_color_l: st.border_color_l, border_color_t: st.border_color_t, border_color_r: st.border_color_r, border_color_b: st.border_color_b, outline_w: st.outline_w, outline_color: st.outline_color, outline_offset_px: st.outline_offset_px, box_shadow_x_px: st.box_shadow_x_px, box_shadow_y_px: st.box_shadow_y_px, box_shadow_color: st.box_shadow_color, border_radius_px: st.border_radius_px, border_radius_tl_px: st.border_radius_tl_px, border_radius_tr_px: st.border_radius_tr_px, border_radius_br_px: st.border_radius_br_px, border_radius_bl_px: st.border_radius_bl_px, gap_px: st.gap_px, row_gap_px: st.row_gap_px, column_gap_px: st.column_gap_px, margin_l: st.margin_l, margin_t: margin_t_v, margin_r: st.margin_r, margin_b: margin_b_v, margin_l_auto: st.margin_l_auto, margin_r_auto: st.margin_r_auto, margin_t_auto: st.margin_t_auto, margin_b_auto: st.margin_b_auto, display: "none", overflow_hidden: st.overflow_hidden, overflow_auto_y: st.overflow_auto_y, scrollbar_thumb_color: st.scrollbar_thumb_color, scrollbar_track_color: st.scrollbar_track_color, text_overflow_ellipsis: st.text_overflow_ellipsis, visibility_hidden: st.visibility_hidden, content_visibility_hidden: st.content_visibility_hidden, will_change: st.will_change, color_adjust: st.color_adjust, forced_color_adjust: st.forced_color_adjust, print_color_adjust: st.print_color_adjust, orphans: st.orphans, widows: st.widows, position_relative: st.position_relative, position_absolute: st.position_absolute, left_px: st.left_px, top_px: st.top_px, right_px: st.right_px, bottom_px: st.bottom_px, z_index: st.z_index, opacity_pct: st.opacity_pct, flex_direction: st.flex_direction, text_align: st.text_align, text_align_last: st.text_align_last, text_justify: st.text_justify, text_transform: st.text_transform, text_indent_px: st.text_indent_px, list_marker: st.list_marker, letter_spacing_px: st.letter_spacing_px, word_spacing_px: st.word_spacing_px, font_size_adjust: st.font_size_adjust, font_palette: st.font_palette, font_feature_settings: st.font_feature_settings, font_language_override: st.font_language_override, font_variation_settings: st.font_variation_settings, font_variant: st.font_variant, font_variant_alternates: st.font_variant_alternates, font_variant_caps: st.font_variant_caps, font_variant_east_asian: st.font_variant_east_asian, font_variant_emoji: st.font_variant_emoji, font_variant_ligatures: st.font_variant_ligatures, font_variant_numeric: st.font_variant_numeric, font_variant_position: st.font_variant_position, font_style_italic: st.font_style_italic, font_kerning: st.font_kerning, font_optical_sizing: st.font_optical_sizing, font_stretch: st.font_stretch, font_width: st.font_width, font_synthesis: st.font_synthesis, font_synthesis_small_caps: st.font_synthesis_small_caps, font_synthesis_position: st.font_synthesis_position, font_synthesis_style: st.font_synthesis_style, font_synthesis_weight: st.font_synthesis_weight, direction_rtl: st.direction_rtl, writing_mode: st.writing_mode, text_orientation: st.text_orientation, text_combine_upright: st.text_combine_upright, text_shadow_x_px: st.text_shadow_x_px, text_shadow_y_px: st.text_shadow_y_px, text_shadow_color: st.text_shadow_color, text_decoration_color: st.text_decoration_color, text_decoration_underline: st.text_decoration_underline, text_decoration_style: st.text_decoration_style, text_decoration_thickness_px: st.text_decoration_thickness_px, text_underline_offset_px: st.text_underline_offset_px, text_underline_position: st.text_underline_position, text_emphasis_color: st.text_emphasis_color, text_emphasis_enabled: st.text_emphasis_enabled, text_emphasis_under: st.text_emphasis_under, quotes_enabled: st.quotes_enabled, quote_open: st.quote_open, quote_close: st.quote_close, white_space_nowrap: st.white_space_nowrap, overflow_wrap: st.overflow_wrap, line_break: st.line_break, hyphens: st.hyphens, word_break: st.word_break, cursor: st.cursor, resize: st.resize, table_layout: st.table_layout, vertical_align: st.vertical_align, caret_color: st.caret_color, tab_size: st.tab_size, unicode_bidi: st.unicode_bidi, transition_property: st.transition_property, transition_duration_ms: st.transition_duration_ms, transition_delay_ms: st.transition_delay_ms, transition_timing_function: st.transition_timing_function, animation_name: st.animation_name, animation_duration_ms: st.animation_duration_ms, animation_delay_ms: st.animation_delay_ms, animation_timing_function: st.animation_timing_function, animation_iteration_count: st.animation_iteration_count, animation_direction: st.animation_direction, animation_fill_mode: st.animation_fill_mode, animation_play_state: st.animation_play_state, transform_origin: st.transform_origin, transform_box: st.transform_box, transform_style: st.transform_style, image_rendering: st.image_rendering, object_fit: st.object_fit, object_position: st.object_position, bold: bold_v)
     if is_inline_tag(tag):
         display_v = "inline"
     if tag == "h1":
@@ -3208,7 +3424,7 @@ fn tag_defaults(st: Style, tag: text) -> Style:
         margin_b_v = 3
     elif tag == "header" or tag == "footer" or tag == "nav" or tag == "section" or tag == "table" or tag == "tr" or tag == "td" or tag == "th" or tag == "div" or tag == "ul" or tag == "li":
         display_v = "block"
-    Style(bg: st.bg, background_gradient_from: st.background_gradient_from, background_gradient_to: st.background_gradient_to, background_repeat: st.background_repeat, background_size_w_px: st.background_size_w_px, background_size_h_px: st.background_size_h_px, background_position_x_px: st.background_position_x_px, background_position_y_px: st.background_position_y_px, background_clip: st.background_clip, background_origin: st.background_origin, background_attachment: st.background_attachment, fg: st.fg, font_size: font_size_v, line_height_px: st.line_height_px, width_px: st.width_px, height_px: st.height_px, border_box: border_box_v, min_width_px: st.min_width_px, max_width_px: st.max_width_px, min_height_px: st.min_height_px, max_height_px: st.max_height_px, min_height_vh: st.min_height_vh, flex_fill: st.flex_fill, flex_grow: st.flex_grow, flex_shrink: st.flex_shrink, flex_basis_px: st.flex_basis_px, order: st.order, flex_wrap: st.flex_wrap, justify_content: st.justify_content, align_items: st.align_items, align_self: st.align_self, align_content: st.align_content, pad_l: pad_l_v, pad_t: pad_t_v, pad_r: pad_r_v, pad_b: pad_b_v, border_w: st.border_w, border_color: st.border_color, border_l: st.border_l, border_t: st.border_t, border_r: st.border_r, border_b: st.border_b, border_color_l: st.border_color_l, border_color_t: st.border_color_t, border_color_r: st.border_color_r, border_color_b: st.border_color_b, outline_w: st.outline_w, outline_color: st.outline_color, outline_offset_px: st.outline_offset_px, box_shadow_x_px: st.box_shadow_x_px, box_shadow_y_px: st.box_shadow_y_px, box_shadow_color: st.box_shadow_color, border_radius_px: st.border_radius_px, border_radius_tl_px: st.border_radius_tl_px, border_radius_tr_px: st.border_radius_tr_px, border_radius_br_px: st.border_radius_br_px, border_radius_bl_px: st.border_radius_bl_px, gap_px: st.gap_px, row_gap_px: st.row_gap_px, column_gap_px: st.column_gap_px, margin_l: margin_l_v, margin_t: margin_t_v, margin_r: margin_r_v, margin_b: margin_b_v, margin_l_auto: st.margin_l_auto, margin_r_auto: st.margin_r_auto, margin_t_auto: st.margin_t_auto, margin_b_auto: st.margin_b_auto, display: display_v, overflow_hidden: st.overflow_hidden, overflow_auto_y: st.overflow_auto_y, scrollbar_thumb_color: st.scrollbar_thumb_color, scrollbar_track_color: st.scrollbar_track_color, text_overflow_ellipsis: st.text_overflow_ellipsis, visibility_hidden: st.visibility_hidden, content_visibility_hidden: st.content_visibility_hidden, will_change: st.will_change, color_adjust: st.color_adjust, forced_color_adjust: st.forced_color_adjust, print_color_adjust: st.print_color_adjust, orphans: st.orphans, widows: st.widows, position_relative: st.position_relative, position_absolute: st.position_absolute, left_px: st.left_px, top_px: st.top_px, right_px: st.right_px, bottom_px: st.bottom_px, z_index: st.z_index, opacity_pct: st.opacity_pct, flex_direction: st.flex_direction, text_align: st.text_align, text_align_last: st.text_align_last, text_justify: st.text_justify, text_transform: st.text_transform, text_indent_px: st.text_indent_px, letter_spacing_px: st.letter_spacing_px, word_spacing_px: st.word_spacing_px, font_size_adjust: st.font_size_adjust, font_palette: st.font_palette, font_feature_settings: st.font_feature_settings, font_language_override: st.font_language_override, font_variation_settings: st.font_variation_settings, font_variant: st.font_variant, font_variant_alternates: st.font_variant_alternates, font_variant_caps: st.font_variant_caps, font_variant_east_asian: st.font_variant_east_asian, font_variant_emoji: st.font_variant_emoji, font_variant_ligatures: st.font_variant_ligatures, font_variant_numeric: st.font_variant_numeric, font_variant_position: st.font_variant_position, font_style_italic: st.font_style_italic, font_kerning: st.font_kerning, font_optical_sizing: st.font_optical_sizing, font_stretch: st.font_stretch, font_width: st.font_width, font_synthesis: st.font_synthesis, font_synthesis_small_caps: st.font_synthesis_small_caps, font_synthesis_position: st.font_synthesis_position, font_synthesis_style: st.font_synthesis_style, font_synthesis_weight: st.font_synthesis_weight, direction_rtl: st.direction_rtl, writing_mode: st.writing_mode, text_orientation: st.text_orientation, text_combine_upright: st.text_combine_upright, text_shadow_x_px: st.text_shadow_x_px, text_shadow_y_px: st.text_shadow_y_px, text_shadow_color: st.text_shadow_color, text_decoration_color: st.text_decoration_color, text_decoration_underline: st.text_decoration_underline, text_decoration_style: st.text_decoration_style, text_decoration_thickness_px: st.text_decoration_thickness_px, text_underline_offset_px: st.text_underline_offset_px, text_underline_position: st.text_underline_position, white_space_nowrap: st.white_space_nowrap, overflow_wrap: st.overflow_wrap, line_break: st.line_break, hyphens: st.hyphens, word_break: st.word_break, cursor: st.cursor, resize: st.resize, table_layout: st.table_layout, vertical_align: st.vertical_align, caret_color: st.caret_color, tab_size: st.tab_size, unicode_bidi: st.unicode_bidi, transition_property: st.transition_property, transition_duration_ms: st.transition_duration_ms, transition_delay_ms: st.transition_delay_ms, transition_timing_function: st.transition_timing_function, animation_name: st.animation_name, animation_duration_ms: st.animation_duration_ms, animation_delay_ms: st.animation_delay_ms, animation_timing_function: st.animation_timing_function, animation_iteration_count: st.animation_iteration_count, animation_direction: st.animation_direction, animation_fill_mode: st.animation_fill_mode, animation_play_state: st.animation_play_state, transform_origin: st.transform_origin, transform_box: st.transform_box, transform_style: st.transform_style, image_rendering: st.image_rendering, object_fit: st.object_fit, object_position: st.object_position, bold: bold_v)
+    Style(bg: st.bg, background_gradient_from: st.background_gradient_from, background_gradient_to: st.background_gradient_to, background_repeat: st.background_repeat, background_size_w_px: st.background_size_w_px, background_size_h_px: st.background_size_h_px, background_position_x_px: st.background_position_x_px, background_position_y_px: st.background_position_y_px, background_clip: st.background_clip, background_origin: st.background_origin, background_attachment: st.background_attachment, fg: st.fg, font_size: font_size_v, line_height_px: st.line_height_px, width_px: st.width_px, height_px: st.height_px, border_box: border_box_v, min_width_px: st.min_width_px, max_width_px: st.max_width_px, min_height_px: st.min_height_px, max_height_px: st.max_height_px, min_height_vh: st.min_height_vh, flex_fill: st.flex_fill, flex_grow: st.flex_grow, flex_shrink: st.flex_shrink, flex_basis_px: st.flex_basis_px, order: st.order, flex_wrap: st.flex_wrap, justify_content: st.justify_content, justify_items: st.justify_items, justify_self: st.justify_self, align_items: st.align_items, align_self: st.align_self, align_content: st.align_content, pad_l: pad_l_v, pad_t: pad_t_v, pad_r: pad_r_v, pad_b: pad_b_v, border_w: st.border_w, border_color: st.border_color, border_l: st.border_l, border_t: st.border_t, border_r: st.border_r, border_b: st.border_b, border_color_l: st.border_color_l, border_color_t: st.border_color_t, border_color_r: st.border_color_r, border_color_b: st.border_color_b, outline_w: st.outline_w, outline_color: st.outline_color, outline_offset_px: st.outline_offset_px, box_shadow_x_px: st.box_shadow_x_px, box_shadow_y_px: st.box_shadow_y_px, box_shadow_color: st.box_shadow_color, border_radius_px: st.border_radius_px, border_radius_tl_px: st.border_radius_tl_px, border_radius_tr_px: st.border_radius_tr_px, border_radius_br_px: st.border_radius_br_px, border_radius_bl_px: st.border_radius_bl_px, gap_px: st.gap_px, row_gap_px: st.row_gap_px, column_gap_px: st.column_gap_px, margin_l: margin_l_v, margin_t: margin_t_v, margin_r: margin_r_v, margin_b: margin_b_v, margin_l_auto: st.margin_l_auto, margin_r_auto: st.margin_r_auto, margin_t_auto: st.margin_t_auto, margin_b_auto: st.margin_b_auto, display: display_v, overflow_hidden: st.overflow_hidden, overflow_auto_y: st.overflow_auto_y, scrollbar_thumb_color: st.scrollbar_thumb_color, scrollbar_track_color: st.scrollbar_track_color, text_overflow_ellipsis: st.text_overflow_ellipsis, visibility_hidden: st.visibility_hidden, content_visibility_hidden: st.content_visibility_hidden, will_change: st.will_change, color_adjust: st.color_adjust, forced_color_adjust: st.forced_color_adjust, print_color_adjust: st.print_color_adjust, orphans: st.orphans, widows: st.widows, position_relative: st.position_relative, position_absolute: st.position_absolute, left_px: st.left_px, top_px: st.top_px, right_px: st.right_px, bottom_px: st.bottom_px, z_index: st.z_index, opacity_pct: st.opacity_pct, flex_direction: st.flex_direction, text_align: st.text_align, text_align_last: st.text_align_last, text_justify: st.text_justify, text_transform: st.text_transform, text_indent_px: st.text_indent_px, list_marker: st.list_marker, letter_spacing_px: st.letter_spacing_px, word_spacing_px: st.word_spacing_px, font_size_adjust: st.font_size_adjust, font_palette: st.font_palette, font_feature_settings: st.font_feature_settings, font_language_override: st.font_language_override, font_variation_settings: st.font_variation_settings, font_variant: st.font_variant, font_variant_alternates: st.font_variant_alternates, font_variant_caps: st.font_variant_caps, font_variant_east_asian: st.font_variant_east_asian, font_variant_emoji: st.font_variant_emoji, font_variant_ligatures: st.font_variant_ligatures, font_variant_numeric: st.font_variant_numeric, font_variant_position: st.font_variant_position, font_style_italic: st.font_style_italic, font_kerning: st.font_kerning, font_optical_sizing: st.font_optical_sizing, font_stretch: st.font_stretch, font_width: st.font_width, font_synthesis: st.font_synthesis, font_synthesis_small_caps: st.font_synthesis_small_caps, font_synthesis_position: st.font_synthesis_position, font_synthesis_style: st.font_synthesis_style, font_synthesis_weight: st.font_synthesis_weight, direction_rtl: st.direction_rtl, writing_mode: st.writing_mode, text_orientation: st.text_orientation, text_combine_upright: st.text_combine_upright, text_shadow_x_px: st.text_shadow_x_px, text_shadow_y_px: st.text_shadow_y_px, text_shadow_color: st.text_shadow_color, text_decoration_color: st.text_decoration_color, text_decoration_underline: st.text_decoration_underline, text_decoration_style: st.text_decoration_style, text_decoration_thickness_px: st.text_decoration_thickness_px, text_underline_offset_px: st.text_underline_offset_px, text_underline_position: st.text_underline_position, text_emphasis_color: st.text_emphasis_color, text_emphasis_enabled: st.text_emphasis_enabled, text_emphasis_under: st.text_emphasis_under, quotes_enabled: st.quotes_enabled, quote_open: st.quote_open, quote_close: st.quote_close, white_space_nowrap: st.white_space_nowrap, overflow_wrap: st.overflow_wrap, line_break: st.line_break, hyphens: st.hyphens, word_break: st.word_break, cursor: st.cursor, resize: st.resize, table_layout: st.table_layout, vertical_align: st.vertical_align, caret_color: st.caret_color, tab_size: st.tab_size, unicode_bidi: st.unicode_bidi, transition_property: st.transition_property, transition_duration_ms: st.transition_duration_ms, transition_delay_ms: st.transition_delay_ms, transition_timing_function: st.transition_timing_function, animation_name: st.animation_name, animation_duration_ms: st.animation_duration_ms, animation_delay_ms: st.animation_delay_ms, animation_timing_function: st.animation_timing_function, animation_iteration_count: st.animation_iteration_count, animation_direction: st.animation_direction, animation_fill_mode: st.animation_fill_mode, animation_play_state: st.animation_play_state, transform_origin: st.transform_origin, transform_box: st.transform_box, transform_style: st.transform_style, image_rendering: st.image_rendering, object_fit: st.object_fit, object_position: st.object_position, bold: bold_v)
 
 # ---------------------------------------------------------------------------
 # CSS rules from <style> blocks
@@ -4675,6 +4891,12 @@ fn compute_styles(nodes: [HNode], rules: Rules, child_index: HtmlChildIndex) -> 
         var st = if nd.parent >= 0: inherit_style(styles[nd.parent]) else: default_style()
         st = tag_defaults(st, nd.tag)
         var empty_cells_hide = false
+        var border_collapse = false
+        var border_spacing_px = 0
+        var column_count_v = 1
+        var column_width_px = 0
+        var column_rule_decls = ""
+        var caption_side_bottom = false
         val candidates_raw = style_rule_candidates(nd, rule_buckets)
         val candidates = _sort_candidates_by_specificity(candidates_raw, rule_specificities)
         var candidate_i = 0
@@ -4685,15 +4907,92 @@ fn compute_styles(nodes: [HNode], rules: Rules, child_index: HtmlChildIndex) -> 
                 val empty_cells_decl = decl_get(rules.decls[r], "empty-cells")
                 if empty_cells_decl.trim().lower() == "hide":
                     empty_cells_hide = true
+                val border_collapse_decl = decl_get(rules.decls[r], "border-collapse")
+                if border_collapse_decl.trim().lower() == "collapse":
+                    border_collapse = true
+                val border_spacing_decl = decl_get(rules.decls[r], "border-spacing")
+                if border_spacing_decl.len() > 0:
+                    val parsed_border_spacing = parse_nth_box_int(border_spacing_decl, 0)
+                    if parsed_border_spacing > 0:
+                        border_spacing_px = parsed_border_spacing
+                val column_count_decl = decl_get(rules.decls[r], "column-count")
+                if column_count_decl.len() > 0:
+                    val parsed_column_count = parse_int(column_count_decl)
+                    if parsed_column_count > 1:
+                        column_count_v = parsed_column_count
+                val column_width_decl = decl_get(rules.decls[r], "column-width")
+                if column_width_decl.len() > 0:
+                    val parsed_column_width = parse_nth_box_int(column_width_decl, 0)
+                    if parsed_column_width > 0:
+                        column_width_px = parsed_column_width
+                val columns_decl = decl_get(rules.decls[r], "columns")
+                if columns_decl.len() > 0:
+                    val parsed_columns_count = parse_int(columns_decl)
+                    if parsed_columns_count > 1:
+                        column_count_v = parsed_columns_count
+                    val parsed_columns_width = parse_nth_box_int(columns_decl, 0)
+                    if parsed_columns_width > 0:
+                        column_width_px = parsed_columns_width
+                val parsed_column_rule_decls = column_rule_synthetic_decls(rules.decls[r])
+                if parsed_column_rule_decls.len() > 0:
+                    column_rule_decls = parsed_column_rule_decls
+                val caption_side_decl = decl_get(rules.decls[r], "caption-side")
+                if caption_side_decl.len() > 0:
+                    caption_side_bottom = caption_side_decl.trim().lower() == "bottom"
                 st = apply_decls(st, rules.decls[r])
             candidate_i = candidate_i + 1
         if nd.style_attr.len() > 0:
             val inline_empty_cells_decl = decl_get(nd.style_attr, "empty-cells")
             if inline_empty_cells_decl.trim().lower() == "hide":
                 empty_cells_hide = true
+            val inline_border_collapse_decl = decl_get(nd.style_attr, "border-collapse")
+            if inline_border_collapse_decl.trim().lower() == "collapse":
+                border_collapse = true
+            val inline_border_spacing_decl = decl_get(nd.style_attr, "border-spacing")
+            if inline_border_spacing_decl.len() > 0:
+                val parsed_inline_border_spacing = parse_nth_box_int(inline_border_spacing_decl, 0)
+                if parsed_inline_border_spacing > 0:
+                    border_spacing_px = parsed_inline_border_spacing
+            val inline_column_count_decl = decl_get(nd.style_attr, "column-count")
+            if inline_column_count_decl.len() > 0:
+                val parsed_inline_column_count = parse_int(inline_column_count_decl)
+                if parsed_inline_column_count > 1:
+                    column_count_v = parsed_inline_column_count
+            val inline_column_width_decl = decl_get(nd.style_attr, "column-width")
+            if inline_column_width_decl.len() > 0:
+                val parsed_inline_column_width = parse_nth_box_int(inline_column_width_decl, 0)
+                if parsed_inline_column_width > 0:
+                    column_width_px = parsed_inline_column_width
+            val inline_columns_decl = decl_get(nd.style_attr, "columns")
+            if inline_columns_decl.len() > 0:
+                val parsed_inline_columns_count = parse_int(inline_columns_decl)
+                if parsed_inline_columns_count > 1:
+                    column_count_v = parsed_inline_columns_count
+                val parsed_inline_columns_width = parse_nth_box_int(inline_columns_decl, 0)
+                if parsed_inline_columns_width > 0:
+                    column_width_px = parsed_inline_columns_width
+            val inline_column_rule_decls = column_rule_synthetic_decls(nd.style_attr)
+            if inline_column_rule_decls.len() > 0:
+                column_rule_decls = inline_column_rule_decls
+            val inline_caption_side_decl = decl_get(nd.style_attr, "caption-side")
+            if inline_caption_side_decl.len() > 0:
+                caption_side_bottom = inline_caption_side_decl.trim().lower() == "bottom"
             st = apply_decls(st, nd.style_attr)
         if empty_cells_hide and (nd.tag == "td" or nd.tag == "th") and not selector_ctx.has_content_child[i]:
             st = apply_decls(st, "background-color:transparent;background-image:none")
+        if border_collapse and nd.tag == "table":
+            st = apply_decls(st, "border-width:0")
+        if border_spacing_px > 0 and nd.tag == "table":
+            st = apply_decls(st, "padding:{border_spacing_px}px")
+        if (column_count_v > 1 or column_width_px > 0) and nd.tag != "#text":
+            st = apply_decls(st, "display:flex;flex-direction:row")
+        if column_rule_decls.len() > 0 and nd.tag != "#text":
+            st = apply_decls(st, column_rule_decls)
+        if nd.tag == "table" and node_has_direct_child_tag(nodes, child_index, i, "caption"):
+            st = apply_decls(st, "display:flex;flex-direction:column")
+        if nd.tag == "caption":
+            if caption_side_bottom:
+                st = apply_decls(st, "order:1")
         styles[i] = st
         i = i + 1
     styles
@@ -5193,6 +5492,19 @@ fn fb_text_underline_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32,
             px = px + dash_w + gap_w
         return out
     fb_rect_clip(out, fbw, fbh, x, y, w, line_h, color, clip)
+
+fn fb_text_emphasis_marks(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, s: text, start: i32, endv: i32, color: u32, advance: i32, space_advance: i32, clip: ClipRect) -> [u32]:
+    var out = fb
+    var used = 0
+    var i = start
+    while i < endv:
+        val code = s.char_code_at(i)
+        val step = if code == 32: space_advance else: advance
+        if code != 32:
+            out = fb_rect_clip(out, fbw, fbh, x + used + step / 2, y, 2, 2, color, clip)
+        used = used + step
+        i = i + 1
+    out
 
 fn fb_glyph_thin_scaled_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, gi: i32, color: u32, scale: i32, italic: bool, clip: ClipRect) -> [u32]:
     var out = fb
@@ -5724,10 +6036,10 @@ fn flex_item_outer_height(node: HNode, st: Style) -> i32:
     constrained_outer_height(node, st, style_line_h(st))
 
 fn style_with_height(st: Style, height_px: i32) -> Style:
-    Style(bg: st.bg, background_gradient_from: st.background_gradient_from, background_gradient_to: st.background_gradient_to, background_repeat: st.background_repeat, background_size_w_px: st.background_size_w_px, background_size_h_px: st.background_size_h_px, background_position_x_px: st.background_position_x_px, background_position_y_px: st.background_position_y_px, background_clip: st.background_clip, background_origin: st.background_origin, background_attachment: st.background_attachment, fg: st.fg, font_size: st.font_size, line_height_px: st.line_height_px, width_px: st.width_px, height_px: height_px, border_box: st.border_box, min_width_px: st.min_width_px, max_width_px: st.max_width_px, min_height_px: st.min_height_px, max_height_px: st.max_height_px, min_height_vh: st.min_height_vh, flex_fill: st.flex_fill, flex_grow: st.flex_grow, flex_shrink: st.flex_shrink, flex_basis_px: st.flex_basis_px, order: st.order, flex_wrap: st.flex_wrap, justify_content: st.justify_content, align_items: st.align_items, align_self: st.align_self, align_content: st.align_content, pad_l: st.pad_l, pad_t: st.pad_t, pad_r: st.pad_r, pad_b: st.pad_b, border_w: st.border_w, border_color: st.border_color, border_l: st.border_l, border_t: st.border_t, border_r: st.border_r, border_b: st.border_b, border_color_l: st.border_color_l, border_color_t: st.border_color_t, border_color_r: st.border_color_r, border_color_b: st.border_color_b, outline_w: st.outline_w, outline_color: st.outline_color, outline_offset_px: st.outline_offset_px, box_shadow_x_px: st.box_shadow_x_px, box_shadow_y_px: st.box_shadow_y_px, box_shadow_color: st.box_shadow_color, border_radius_px: st.border_radius_px, border_radius_tl_px: st.border_radius_tl_px, border_radius_tr_px: st.border_radius_tr_px, border_radius_br_px: st.border_radius_br_px, border_radius_bl_px: st.border_radius_bl_px, gap_px: st.gap_px, row_gap_px: st.row_gap_px, column_gap_px: st.column_gap_px, margin_l: st.margin_l, margin_t: st.margin_t, margin_r: st.margin_r, margin_b: st.margin_b, margin_l_auto: st.margin_l_auto, margin_r_auto: st.margin_r_auto, margin_t_auto: st.margin_t_auto, margin_b_auto: st.margin_b_auto, display: st.display, overflow_hidden: st.overflow_hidden, overflow_auto_y: st.overflow_auto_y, scrollbar_thumb_color: st.scrollbar_thumb_color, scrollbar_track_color: st.scrollbar_track_color, text_overflow_ellipsis: st.text_overflow_ellipsis, visibility_hidden: st.visibility_hidden, content_visibility_hidden: st.content_visibility_hidden, will_change: st.will_change, color_adjust: st.color_adjust, forced_color_adjust: st.forced_color_adjust, print_color_adjust: st.print_color_adjust, orphans: st.orphans, widows: st.widows, position_relative: st.position_relative, position_absolute: st.position_absolute, left_px: st.left_px, top_px: st.top_px, right_px: st.right_px, bottom_px: st.bottom_px, z_index: st.z_index, opacity_pct: st.opacity_pct, flex_direction: st.flex_direction, text_align: st.text_align, text_align_last: st.text_align_last, text_justify: st.text_justify, text_transform: st.text_transform, text_indent_px: st.text_indent_px, letter_spacing_px: st.letter_spacing_px, word_spacing_px: st.word_spacing_px, font_size_adjust: st.font_size_adjust, font_palette: st.font_palette, font_feature_settings: st.font_feature_settings, font_language_override: st.font_language_override, font_variation_settings: st.font_variation_settings, font_variant: st.font_variant, font_variant_alternates: st.font_variant_alternates, font_variant_caps: st.font_variant_caps, font_variant_east_asian: st.font_variant_east_asian, font_variant_emoji: st.font_variant_emoji, font_variant_ligatures: st.font_variant_ligatures, font_variant_numeric: st.font_variant_numeric, font_variant_position: st.font_variant_position, font_style_italic: st.font_style_italic, font_kerning: st.font_kerning, font_optical_sizing: st.font_optical_sizing, font_stretch: st.font_stretch, font_width: st.font_width, font_synthesis: st.font_synthesis, font_synthesis_small_caps: st.font_synthesis_small_caps, font_synthesis_position: st.font_synthesis_position, font_synthesis_style: st.font_synthesis_style, font_synthesis_weight: st.font_synthesis_weight, direction_rtl: st.direction_rtl, writing_mode: st.writing_mode, text_orientation: st.text_orientation, text_combine_upright: st.text_combine_upright, text_shadow_x_px: st.text_shadow_x_px, text_shadow_y_px: st.text_shadow_y_px, text_shadow_color: st.text_shadow_color, text_decoration_color: st.text_decoration_color, text_decoration_underline: st.text_decoration_underline, text_decoration_style: st.text_decoration_style, text_decoration_thickness_px: st.text_decoration_thickness_px, text_underline_offset_px: st.text_underline_offset_px, text_underline_position: st.text_underline_position, white_space_nowrap: st.white_space_nowrap, overflow_wrap: st.overflow_wrap, line_break: st.line_break, hyphens: st.hyphens, word_break: st.word_break, cursor: st.cursor, resize: st.resize, table_layout: st.table_layout, vertical_align: st.vertical_align, caret_color: st.caret_color, tab_size: st.tab_size, unicode_bidi: st.unicode_bidi, transition_property: st.transition_property, transition_duration_ms: st.transition_duration_ms, transition_delay_ms: st.transition_delay_ms, transition_timing_function: st.transition_timing_function, animation_name: st.animation_name, animation_duration_ms: st.animation_duration_ms, animation_delay_ms: st.animation_delay_ms, animation_timing_function: st.animation_timing_function, animation_iteration_count: st.animation_iteration_count, animation_direction: st.animation_direction, animation_fill_mode: st.animation_fill_mode, animation_play_state: st.animation_play_state, transform_origin: st.transform_origin, transform_box: st.transform_box, transform_style: st.transform_style, image_rendering: st.image_rendering, object_fit: st.object_fit, object_position: st.object_position, bold: st.bold)
+    Style(bg: st.bg, background_gradient_from: st.background_gradient_from, background_gradient_to: st.background_gradient_to, background_repeat: st.background_repeat, background_size_w_px: st.background_size_w_px, background_size_h_px: st.background_size_h_px, background_position_x_px: st.background_position_x_px, background_position_y_px: st.background_position_y_px, background_clip: st.background_clip, background_origin: st.background_origin, background_attachment: st.background_attachment, fg: st.fg, font_size: st.font_size, line_height_px: st.line_height_px, width_px: st.width_px, height_px: height_px, border_box: st.border_box, min_width_px: st.min_width_px, max_width_px: st.max_width_px, min_height_px: st.min_height_px, max_height_px: st.max_height_px, min_height_vh: st.min_height_vh, flex_fill: st.flex_fill, flex_grow: st.flex_grow, flex_shrink: st.flex_shrink, flex_basis_px: st.flex_basis_px, order: st.order, flex_wrap: st.flex_wrap, justify_content: st.justify_content, justify_items: st.justify_items, justify_self: st.justify_self, align_items: st.align_items, align_self: st.align_self, align_content: st.align_content, pad_l: st.pad_l, pad_t: st.pad_t, pad_r: st.pad_r, pad_b: st.pad_b, border_w: st.border_w, border_color: st.border_color, border_l: st.border_l, border_t: st.border_t, border_r: st.border_r, border_b: st.border_b, border_color_l: st.border_color_l, border_color_t: st.border_color_t, border_color_r: st.border_color_r, border_color_b: st.border_color_b, outline_w: st.outline_w, outline_color: st.outline_color, outline_offset_px: st.outline_offset_px, box_shadow_x_px: st.box_shadow_x_px, box_shadow_y_px: st.box_shadow_y_px, box_shadow_color: st.box_shadow_color, border_radius_px: st.border_radius_px, border_radius_tl_px: st.border_radius_tl_px, border_radius_tr_px: st.border_radius_tr_px, border_radius_br_px: st.border_radius_br_px, border_radius_bl_px: st.border_radius_bl_px, gap_px: st.gap_px, row_gap_px: st.row_gap_px, column_gap_px: st.column_gap_px, margin_l: st.margin_l, margin_t: st.margin_t, margin_r: st.margin_r, margin_b: st.margin_b, margin_l_auto: st.margin_l_auto, margin_r_auto: st.margin_r_auto, margin_t_auto: st.margin_t_auto, margin_b_auto: st.margin_b_auto, display: st.display, overflow_hidden: st.overflow_hidden, overflow_auto_y: st.overflow_auto_y, scrollbar_thumb_color: st.scrollbar_thumb_color, scrollbar_track_color: st.scrollbar_track_color, text_overflow_ellipsis: st.text_overflow_ellipsis, visibility_hidden: st.visibility_hidden, content_visibility_hidden: st.content_visibility_hidden, will_change: st.will_change, color_adjust: st.color_adjust, forced_color_adjust: st.forced_color_adjust, print_color_adjust: st.print_color_adjust, orphans: st.orphans, widows: st.widows, position_relative: st.position_relative, position_absolute: st.position_absolute, left_px: st.left_px, top_px: st.top_px, right_px: st.right_px, bottom_px: st.bottom_px, z_index: st.z_index, opacity_pct: st.opacity_pct, flex_direction: st.flex_direction, text_align: st.text_align, text_align_last: st.text_align_last, text_justify: st.text_justify, text_transform: st.text_transform, text_indent_px: st.text_indent_px, list_marker: st.list_marker, letter_spacing_px: st.letter_spacing_px, word_spacing_px: st.word_spacing_px, font_size_adjust: st.font_size_adjust, font_palette: st.font_palette, font_feature_settings: st.font_feature_settings, font_language_override: st.font_language_override, font_variation_settings: st.font_variation_settings, font_variant: st.font_variant, font_variant_alternates: st.font_variant_alternates, font_variant_caps: st.font_variant_caps, font_variant_east_asian: st.font_variant_east_asian, font_variant_emoji: st.font_variant_emoji, font_variant_ligatures: st.font_variant_ligatures, font_variant_numeric: st.font_variant_numeric, font_variant_position: st.font_variant_position, font_style_italic: st.font_style_italic, font_kerning: st.font_kerning, font_optical_sizing: st.font_optical_sizing, font_stretch: st.font_stretch, font_width: st.font_width, font_synthesis: st.font_synthesis, font_synthesis_small_caps: st.font_synthesis_small_caps, font_synthesis_position: st.font_synthesis_position, font_synthesis_style: st.font_synthesis_style, font_synthesis_weight: st.font_synthesis_weight, direction_rtl: st.direction_rtl, writing_mode: st.writing_mode, text_orientation: st.text_orientation, text_combine_upright: st.text_combine_upright, text_shadow_x_px: st.text_shadow_x_px, text_shadow_y_px: st.text_shadow_y_px, text_shadow_color: st.text_shadow_color, text_decoration_color: st.text_decoration_color, text_decoration_underline: st.text_decoration_underline, text_decoration_style: st.text_decoration_style, text_decoration_thickness_px: st.text_decoration_thickness_px, text_underline_offset_px: st.text_underline_offset_px, text_underline_position: st.text_underline_position, text_emphasis_color: st.text_emphasis_color, text_emphasis_enabled: st.text_emphasis_enabled, text_emphasis_under: st.text_emphasis_under, quotes_enabled: st.quotes_enabled, quote_open: st.quote_open, quote_close: st.quote_close, white_space_nowrap: st.white_space_nowrap, overflow_wrap: st.overflow_wrap, line_break: st.line_break, hyphens: st.hyphens, word_break: st.word_break, cursor: st.cursor, resize: st.resize, table_layout: st.table_layout, vertical_align: st.vertical_align, caret_color: st.caret_color, tab_size: st.tab_size, unicode_bidi: st.unicode_bidi, transition_property: st.transition_property, transition_duration_ms: st.transition_duration_ms, transition_delay_ms: st.transition_delay_ms, transition_timing_function: st.transition_timing_function, animation_name: st.animation_name, animation_duration_ms: st.animation_duration_ms, animation_delay_ms: st.animation_delay_ms, animation_timing_function: st.animation_timing_function, animation_iteration_count: st.animation_iteration_count, animation_direction: st.animation_direction, animation_fill_mode: st.animation_fill_mode, animation_play_state: st.animation_play_state, transform_origin: st.transform_origin, transform_box: st.transform_box, transform_style: st.transform_style, image_rendering: st.image_rendering, object_fit: st.object_fit, object_position: st.object_position, bold: st.bold)
 
 fn style_with_width(st: Style, width_px: i32) -> Style:
-    Style(bg: st.bg, background_gradient_from: st.background_gradient_from, background_gradient_to: st.background_gradient_to, background_repeat: st.background_repeat, background_size_w_px: st.background_size_w_px, background_size_h_px: st.background_size_h_px, background_position_x_px: st.background_position_x_px, background_position_y_px: st.background_position_y_px, background_clip: st.background_clip, background_origin: st.background_origin, background_attachment: st.background_attachment, fg: st.fg, font_size: st.font_size, line_height_px: st.line_height_px, width_px: width_px, height_px: st.height_px, border_box: st.border_box, min_width_px: st.min_width_px, max_width_px: st.max_width_px, min_height_px: st.min_height_px, max_height_px: st.max_height_px, min_height_vh: st.min_height_vh, flex_fill: st.flex_fill, flex_grow: st.flex_grow, flex_shrink: st.flex_shrink, flex_basis_px: st.flex_basis_px, order: st.order, flex_wrap: st.flex_wrap, justify_content: st.justify_content, align_items: st.align_items, align_self: st.align_self, align_content: st.align_content, pad_l: st.pad_l, pad_t: st.pad_t, pad_r: st.pad_r, pad_b: st.pad_b, border_w: st.border_w, border_color: st.border_color, border_l: st.border_l, border_t: st.border_t, border_r: st.border_r, border_b: st.border_b, border_color_l: st.border_color_l, border_color_t: st.border_color_t, border_color_r: st.border_color_r, border_color_b: st.border_color_b, outline_w: st.outline_w, outline_color: st.outline_color, outline_offset_px: st.outline_offset_px, box_shadow_x_px: st.box_shadow_x_px, box_shadow_y_px: st.box_shadow_y_px, box_shadow_color: st.box_shadow_color, border_radius_px: st.border_radius_px, border_radius_tl_px: st.border_radius_tl_px, border_radius_tr_px: st.border_radius_tr_px, border_radius_br_px: st.border_radius_br_px, border_radius_bl_px: st.border_radius_bl_px, gap_px: st.gap_px, row_gap_px: st.row_gap_px, column_gap_px: st.column_gap_px, margin_l: st.margin_l, margin_t: st.margin_t, margin_r: st.margin_r, margin_b: st.margin_b, margin_l_auto: st.margin_l_auto, margin_r_auto: st.margin_r_auto, margin_t_auto: st.margin_t_auto, margin_b_auto: st.margin_b_auto, display: st.display, overflow_hidden: st.overflow_hidden, overflow_auto_y: st.overflow_auto_y, scrollbar_thumb_color: st.scrollbar_thumb_color, scrollbar_track_color: st.scrollbar_track_color, text_overflow_ellipsis: st.text_overflow_ellipsis, visibility_hidden: st.visibility_hidden, content_visibility_hidden: st.content_visibility_hidden, will_change: st.will_change, color_adjust: st.color_adjust, forced_color_adjust: st.forced_color_adjust, print_color_adjust: st.print_color_adjust, orphans: st.orphans, widows: st.widows, position_relative: st.position_relative, position_absolute: st.position_absolute, left_px: st.left_px, top_px: st.top_px, right_px: st.right_px, bottom_px: st.bottom_px, z_index: st.z_index, opacity_pct: st.opacity_pct, flex_direction: st.flex_direction, text_align: st.text_align, text_align_last: st.text_align_last, text_justify: st.text_justify, text_transform: st.text_transform, text_indent_px: st.text_indent_px, letter_spacing_px: st.letter_spacing_px, word_spacing_px: st.word_spacing_px, font_size_adjust: st.font_size_adjust, font_palette: st.font_palette, font_feature_settings: st.font_feature_settings, font_language_override: st.font_language_override, font_variation_settings: st.font_variation_settings, font_variant: st.font_variant, font_variant_alternates: st.font_variant_alternates, font_variant_caps: st.font_variant_caps, font_variant_east_asian: st.font_variant_east_asian, font_variant_emoji: st.font_variant_emoji, font_variant_ligatures: st.font_variant_ligatures, font_variant_numeric: st.font_variant_numeric, font_variant_position: st.font_variant_position, font_style_italic: st.font_style_italic, font_kerning: st.font_kerning, font_optical_sizing: st.font_optical_sizing, font_stretch: st.font_stretch, font_width: st.font_width, font_synthesis: st.font_synthesis, font_synthesis_small_caps: st.font_synthesis_small_caps, font_synthesis_position: st.font_synthesis_position, font_synthesis_style: st.font_synthesis_style, font_synthesis_weight: st.font_synthesis_weight, direction_rtl: st.direction_rtl, writing_mode: st.writing_mode, text_orientation: st.text_orientation, text_combine_upright: st.text_combine_upright, text_shadow_x_px: st.text_shadow_x_px, text_shadow_y_px: st.text_shadow_y_px, text_shadow_color: st.text_shadow_color, text_decoration_color: st.text_decoration_color, text_decoration_underline: st.text_decoration_underline, text_decoration_style: st.text_decoration_style, text_decoration_thickness_px: st.text_decoration_thickness_px, text_underline_offset_px: st.text_underline_offset_px, text_underline_position: st.text_underline_position, white_space_nowrap: st.white_space_nowrap, overflow_wrap: st.overflow_wrap, line_break: st.line_break, hyphens: st.hyphens, word_break: st.word_break, cursor: st.cursor, resize: st.resize, table_layout: st.table_layout, vertical_align: st.vertical_align, caret_color: st.caret_color, tab_size: st.tab_size, unicode_bidi: st.unicode_bidi, transition_property: st.transition_property, transition_duration_ms: st.transition_duration_ms, transition_delay_ms: st.transition_delay_ms, transition_timing_function: st.transition_timing_function, animation_name: st.animation_name, animation_duration_ms: st.animation_duration_ms, animation_delay_ms: st.animation_delay_ms, animation_timing_function: st.animation_timing_function, animation_iteration_count: st.animation_iteration_count, animation_direction: st.animation_direction, animation_fill_mode: st.animation_fill_mode, animation_play_state: st.animation_play_state, transform_origin: st.transform_origin, transform_box: st.transform_box, transform_style: st.transform_style, image_rendering: st.image_rendering, object_fit: st.object_fit, object_position: st.object_position, bold: st.bold)
+    Style(bg: st.bg, background_gradient_from: st.background_gradient_from, background_gradient_to: st.background_gradient_to, background_repeat: st.background_repeat, background_size_w_px: st.background_size_w_px, background_size_h_px: st.background_size_h_px, background_position_x_px: st.background_position_x_px, background_position_y_px: st.background_position_y_px, background_clip: st.background_clip, background_origin: st.background_origin, background_attachment: st.background_attachment, fg: st.fg, font_size: st.font_size, line_height_px: st.line_height_px, width_px: width_px, height_px: st.height_px, border_box: st.border_box, min_width_px: st.min_width_px, max_width_px: st.max_width_px, min_height_px: st.min_height_px, max_height_px: st.max_height_px, min_height_vh: st.min_height_vh, flex_fill: st.flex_fill, flex_grow: st.flex_grow, flex_shrink: st.flex_shrink, flex_basis_px: st.flex_basis_px, order: st.order, flex_wrap: st.flex_wrap, justify_content: st.justify_content, justify_items: st.justify_items, justify_self: st.justify_self, align_items: st.align_items, align_self: st.align_self, align_content: st.align_content, pad_l: st.pad_l, pad_t: st.pad_t, pad_r: st.pad_r, pad_b: st.pad_b, border_w: st.border_w, border_color: st.border_color, border_l: st.border_l, border_t: st.border_t, border_r: st.border_r, border_b: st.border_b, border_color_l: st.border_color_l, border_color_t: st.border_color_t, border_color_r: st.border_color_r, border_color_b: st.border_color_b, outline_w: st.outline_w, outline_color: st.outline_color, outline_offset_px: st.outline_offset_px, box_shadow_x_px: st.box_shadow_x_px, box_shadow_y_px: st.box_shadow_y_px, box_shadow_color: st.box_shadow_color, border_radius_px: st.border_radius_px, border_radius_tl_px: st.border_radius_tl_px, border_radius_tr_px: st.border_radius_tr_px, border_radius_br_px: st.border_radius_br_px, border_radius_bl_px: st.border_radius_bl_px, gap_px: st.gap_px, row_gap_px: st.row_gap_px, column_gap_px: st.column_gap_px, margin_l: st.margin_l, margin_t: st.margin_t, margin_r: st.margin_r, margin_b: st.margin_b, margin_l_auto: st.margin_l_auto, margin_r_auto: st.margin_r_auto, margin_t_auto: st.margin_t_auto, margin_b_auto: st.margin_b_auto, display: st.display, overflow_hidden: st.overflow_hidden, overflow_auto_y: st.overflow_auto_y, scrollbar_thumb_color: st.scrollbar_thumb_color, scrollbar_track_color: st.scrollbar_track_color, text_overflow_ellipsis: st.text_overflow_ellipsis, visibility_hidden: st.visibility_hidden, content_visibility_hidden: st.content_visibility_hidden, will_change: st.will_change, color_adjust: st.color_adjust, forced_color_adjust: st.forced_color_adjust, print_color_adjust: st.print_color_adjust, orphans: st.orphans, widows: st.widows, position_relative: st.position_relative, position_absolute: st.position_absolute, left_px: st.left_px, top_px: st.top_px, right_px: st.right_px, bottom_px: st.bottom_px, z_index: st.z_index, opacity_pct: st.opacity_pct, flex_direction: st.flex_direction, text_align: st.text_align, text_align_last: st.text_align_last, text_justify: st.text_justify, text_transform: st.text_transform, text_indent_px: st.text_indent_px, list_marker: st.list_marker, letter_spacing_px: st.letter_spacing_px, word_spacing_px: st.word_spacing_px, font_size_adjust: st.font_size_adjust, font_palette: st.font_palette, font_feature_settings: st.font_feature_settings, font_language_override: st.font_language_override, font_variation_settings: st.font_variation_settings, font_variant: st.font_variant, font_variant_alternates: st.font_variant_alternates, font_variant_caps: st.font_variant_caps, font_variant_east_asian: st.font_variant_east_asian, font_variant_emoji: st.font_variant_emoji, font_variant_ligatures: st.font_variant_ligatures, font_variant_numeric: st.font_variant_numeric, font_variant_position: st.font_variant_position, font_style_italic: st.font_style_italic, font_kerning: st.font_kerning, font_optical_sizing: st.font_optical_sizing, font_stretch: st.font_stretch, font_width: st.font_width, font_synthesis: st.font_synthesis, font_synthesis_small_caps: st.font_synthesis_small_caps, font_synthesis_position: st.font_synthesis_position, font_synthesis_style: st.font_synthesis_style, font_synthesis_weight: st.font_synthesis_weight, direction_rtl: st.direction_rtl, writing_mode: st.writing_mode, text_orientation: st.text_orientation, text_combine_upright: st.text_combine_upright, text_shadow_x_px: st.text_shadow_x_px, text_shadow_y_px: st.text_shadow_y_px, text_shadow_color: st.text_shadow_color, text_decoration_color: st.text_decoration_color, text_decoration_underline: st.text_decoration_underline, text_decoration_style: st.text_decoration_style, text_decoration_thickness_px: st.text_decoration_thickness_px, text_underline_offset_px: st.text_underline_offset_px, text_underline_position: st.text_underline_position, text_emphasis_color: st.text_emphasis_color, text_emphasis_enabled: st.text_emphasis_enabled, text_emphasis_under: st.text_emphasis_under, quotes_enabled: st.quotes_enabled, quote_open: st.quote_open, quote_close: st.quote_close, white_space_nowrap: st.white_space_nowrap, overflow_wrap: st.overflow_wrap, line_break: st.line_break, hyphens: st.hyphens, word_break: st.word_break, cursor: st.cursor, resize: st.resize, table_layout: st.table_layout, vertical_align: st.vertical_align, caret_color: st.caret_color, tab_size: st.tab_size, unicode_bidi: st.unicode_bidi, transition_property: st.transition_property, transition_duration_ms: st.transition_duration_ms, transition_delay_ms: st.transition_delay_ms, transition_timing_function: st.transition_timing_function, animation_name: st.animation_name, animation_duration_ms: st.animation_duration_ms, animation_delay_ms: st.animation_delay_ms, animation_timing_function: st.animation_timing_function, animation_iteration_count: st.animation_iteration_count, animation_direction: st.animation_direction, animation_fill_mode: st.animation_fill_mode, animation_play_state: st.animation_play_state, transform_origin: st.transform_origin, transform_box: st.transform_box, transform_style: st.transform_style, image_rendering: st.image_rendering, object_fit: st.object_fit, object_position: st.object_position, bold: st.bold)
 
 fn styles_with_height(styles: [Style], index: i32, height_px: i32) -> [Style]:
     val style_count = styles.len()
@@ -5742,6 +6054,14 @@ fn styles_with_height(styles: [Style], index: i32, height_px: i32) -> [Style]:
             result[si] = styles[si]
         si = si + 1
     result
+fn text_node_display_text(nodes: [HNode], idx: i32, st: Style) -> text:
+    val node = nodes[idx]
+    val base = if st.white_space_nowrap: node.text_data else: node.text_trimmed
+    val parent = node.parent
+    if node.tag == "#text" and parent >= 0 and parent < nodes.len() and nodes[parent].tag == "q" and st.quotes_enabled:
+        return st.quote_open + base + st.quote_close
+    base
+
 fn intrinsic_text_width(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, widths: [i32]) -> IntrinsicWidthResult:
     if widths[i] >= 0:
         return IntrinsicWidthResult(width: widths[i], widths: widths)
@@ -5750,7 +6070,7 @@ fn intrinsic_text_width(nodes: [HNode], styles: [Style], child_index: HtmlChildI
     var c = child_index.first_child[i]
     while c >= 0:
         if nodes[c].tag == "#text":
-            val txt: text = nodes[c].text_trimmed
+            val txt: text = text_node_display_text(nodes, c, styles[c])
             if txt.len() > 0:
                 val glyph_w = style_char_w(styles[c])
                 val ink_w = if glyph_w > 1: glyph_w - 1 else: glyph_w
@@ -5765,10 +6085,11 @@ fn intrinsic_text_width(nodes: [HNode], styles: [Style], child_index: HtmlChildI
     out_widths[i] = width
     IntrinsicWidthResult(width: width, widths: out_widths)
 
-fn inline_text_advance_width(node: HNode, st: Style) -> i32:
+fn inline_text_advance_width(nodes: [HNode], idx: i32, st: Style) -> i32:
+    val node = nodes[idx]
     if node.tag != "#text":
         return 0
-    val raw = node.text_data
+    val raw = text_node_display_text(nodes, idx, st)
     if raw == " " and node.text_trimmed == "":
         var whitespace_advance = style_space_advance(st) / 3
         if whitespace_advance < 1:
@@ -6105,8 +6426,8 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
         # white-space:pre/nowrap (st.white_space_nowrap, inherited from e.g. a
         # <pre> code block) preserves the raw text incl. leading indentation;
         # normal flow uses the trimmed text. Measure and paint must agree on which.
-        val txt: text = if st.white_space_nowrap: node.text_data else: node.text_trimmed
-        val txt_len = if st.white_space_nowrap: node.text_data.len() else: node.text_trimmed.len()
+        val txt: text = text_node_display_text(nodes, i, st)
+        val txt_len = txt.len()
         val cw = style_char_w(st)
         var cpl = node_w / cw
         if cpl < 1:
@@ -6608,9 +6929,12 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
         elif col_main_free_space < 0 and st.justify_content == "unsafe-center":
             col_justify_start_offset = col_main_free_space / 2
         var cy_flex = y + st.border_t + st.pad_t + col_justify_start_offset
-        var flex_c = child_index.first_child[i]
+        val ordered_flex_col_children = flex_ordered_children(styles, child_index, i)
+        val ordered_flex_col_child_count = ordered_flex_col_children.len()
         var flex_child_count_col = 0
-        while flex_c >= 0:
+        var flex_col_i = 0
+        while flex_col_i < ordered_flex_col_child_count:
+            val flex_c = ordered_flex_col_children[flex_col_i]
             val cst = styles[flex_c]
             if cst.position_absolute:
                 val absolute_containing_h = content_height_limit + st.pad_t + st.pad_b
@@ -6667,7 +6991,7 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
                 out_intrinsic_widths = child.intrinsic_widths
                 cy_flex = cy_flex + child.height + (if resolved_cst.margin_b_auto: col_auto_main_margin_px else: resolved_cst.margin_b)
                 flex_child_count_col = flex_child_count_col + 1
-            flex_c = child_index.next_sibling[flex_c]
+            flex_col_i = flex_col_i + 1
         var flex_h_col = (cy_flex - y) + st.pad_b + st.border_b
         val explicit_flex_h_col = if legacy_widget_box or st.border_box: st.height_px else: st.height_px + st.pad_t + st.pad_b + border_y
         if st.height_px > 0:
@@ -6720,7 +7044,7 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
                 val intrinsic = intrinsic_text_width(nodes, styles, child_index, c, out_intrinsic_widths)
                 out_intrinsic_widths = intrinsic.widths
                 var inline_w = intrinsic.width
-                val text_advance_w = inline_text_advance_width(nodes[c], cst)
+                val text_advance_w = inline_text_advance_width(nodes, c, cst)
                 if text_advance_w > inline_w:
                     inline_w = text_advance_w
                 if inline_w < 1:
@@ -6787,12 +7111,28 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
             var child_w = child_inner_w - cml - cmr
             if child_w < 1:
                 child_w = 1
+            var child_x = ix + cml
+            var child_outer_w = 0
+            if cst.width_px > 0:
+                child_outer_w = css_outer_width(nodes[c], cst, cst.width_px)
+            elif cst.width_px < 0:
+                child_outer_w = child_inner_w * (0 - cst.width_px) / 100
+            if child_outer_w > 0 and child_outer_w < child_w:
+                val child_justify_self = if cst.justify_self == "auto" or cst.justify_self == "normal" or cst.justify_self == "stretch": st.justify_items else: cst.justify_self
+                if child_justify_self == "center" or child_justify_self == "safe-center" or child_justify_self == "unsafe-center":
+                    child_x = ix + cml + (child_inner_w - cml - cmr - child_outer_w) / 2
+                    child_w = child_outer_w
+                elif child_justify_self == "end" or child_justify_self == "flex-end":
+                    child_x = ix + child_inner_w - cmr - child_outer_w
+                    child_w = child_outer_w
+                elif child_justify_self == "start" or child_justify_self == "flex-start":
+                    child_w = child_outer_w
             val child_height_px = resolve_percent_height_px(cst.height_px, content_height_limit)
             val child_styles = if child_height_px > 0 and child_height_px != cst.height_px:
                 styles_with_height(styles, c, child_height_px)
             else:
                 styles
-            val child = layout(nodes, child_styles, child_index, c, ix + cml, cy, child_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths)
+            val child = layout(nodes, child_styles, child_index, c, child_x, cy, child_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths)
             out_bx = child.bx
             out_by = child.by
             out_bw = child.bw
@@ -7192,10 +7532,18 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
             val clip = paint_clip_at(clip_cache, i)
             val icon_color = if st.bg != 0u32: st.bg else: argb(37, 99, 235)
             out = fb_rect_clip(out, fbw, fbh, x, y, 6, 6, icon_color, clip)
+        if non_widget_mode and visible_node and nd.tag == "li" and st.list_marker != "none" and st.fg != 0u32 and y < fbh:
+            val clip = paint_clip_at(clip_cache, i)
+            val marker_x = if st.text_indent_px > 0: x + 2 else: x - 8
+            if st.list_marker == "image":
+                out = fb_rect_clip(out, fbw, fbh, marker_x, y + 3, 5, 5, argb(37, 99, 235), clip)
+                out = fb_rect_clip(out, fbw, fbh, marker_x + 1, y + 4, 3, 3, argb(245, 158, 11), clip)
+            else:
+                out = fb_rect_clip(out, fbw, fbh, marker_x, y + 4, 3, 3, st.fg, clip)
         if visible_node and nd.tag == "#text":
             # Match the layout measure: white-space:pre/nowrap preserves raw text
             # (leading indentation), normal flow uses trimmed text.
-            val raw_txt: text = if st.white_space_nowrap: nd.text_data else: nd.text_trimmed
+            val raw_txt: text = text_node_display_text(nodes, i, st)
             val transformed_txt = apply_text_transform_for_paint(raw_txt, st.text_transform)
             val txt = if st.direction_rtl: reverse_text_for_paint(transformed_txt) else: transformed_txt
             if txt.len() > 0 and y < fbh:
@@ -7227,6 +7575,10 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
                                 val underline_w = line_w
                                 val underline_color = if st.text_decoration_color != 0u32: st.text_decoration_color else: st.fg
                                 out = fb_text_underline(out, fbw, fbh, line_text_x, ly + 8 + st.text_underline_offset_px, underline_w, st.text_decoration_thickness_px, st.text_decoration_style, underline_color)
+                            if st.text_emphasis_enabled:
+                                val emphasis_color = if st.text_emphasis_color != 0u32: st.text_emphasis_color else: st.fg
+                                val emphasis_y = if st.text_emphasis_under: ly + 10 else: ly - 3
+                                out = fb_text_emphasis_marks(out, fbw, fbh, line_text_x, emphasis_y, draw_txt, draw_start, draw_end, emphasis_color, sparse_stride, sparse_space_stride, paint_clip_at(clip_cache, i))
                             line_i = line_i + 1
                             ly = ly + lh
                     else:
@@ -7254,6 +7606,10 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
                                     val underline_y = ly + 7 * scale + st.text_underline_offset_px
                                     val underline_color = if st.text_decoration_color != 0u32: st.text_decoration_color else: st.fg
                                     out = fb_text_underline_clip(out, fbw, fbh, line_text_x, underline_y, underline_w, st.text_decoration_thickness_px * scale, st.text_decoration_style, underline_color, clip)
+                                if st.text_emphasis_enabled:
+                                    val emphasis_color = if st.text_emphasis_color != 0u32: st.text_emphasis_color else: st.fg
+                                    val emphasis_y = if st.text_emphasis_under: ly + 8 * scale else: ly - 3
+                                    out = fb_text_emphasis_marks(out, fbw, fbh, line_text_x, emphasis_y, draw_txt, draw_start, draw_end, emphasis_color, adv, space_adv, clip)
                                 line_i = line_i + 1
                                 ly = ly + lh
         i = i + 1

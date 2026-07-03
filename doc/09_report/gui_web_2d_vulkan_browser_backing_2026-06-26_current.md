@@ -59,8 +59,11 @@ gui_web_2d_vulkan_electron_browser_backing_status=pass
 gui_web_2d_vulkan_chrome_browser_backing_status=pass
 ```
 
-The aggregate remains incomplete because RenderDoc `.rdc` capture gates, Web WM
-Electron interaction evidence, native Linux/macOS/Windows render-log comparison,
-production parity/font/Metal readback evidence, and full CSS coverage are still
-open. This report proves browser Vulkan backing only; it is not a RenderDoc,
-PIX, GPU debugger, or native platform render-log capture.
+This report proves browser Vulkan backing only; it is not a RenderDoc, PIX, GPU
+debugger, or native platform render-log capture. The earlier aggregate-impact
+gap for Linux RenderDoc `.rdc` capture is superseded by
+`doc/09_report/linux_renderdoc_simpleos_hardening_evidence_current_2026-07-02.md`
+and `doc/09_report/linux_vulkan_render_log_compare_current_2026-07-02.md`, which
+record zero blocked Linux RenderDoc gates with Simple, Chrome, and Electron
+`RDOC` artifacts. Cross-platform native render-log capture and broader CSS
+coverage remain separate evidence lanes.

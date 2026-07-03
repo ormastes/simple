@@ -700,3 +700,19 @@ Next Linux verification criteria:
   `linux_vulkan_render_log_compare_renderdoc_chrome_artifact_magic=missing`,
   `linux_vulkan_render_log_compare_renderdoc_electron_gpu_process_exit_codes=139`,
   and `linux_vulkan_render_log_compare_renderdoc_electron_artifact_magic=missing`.
+
+2026-07-03 current aggregate supersedes the 2026-07-02 blocked state:
+- `doc/09_report/linux_renderdoc_simpleos_hardening_evidence_current_2026-07-02.md`
+  reports `status: pass`, `blocked_gate_count: 0`, and
+  `renderdoc_gate_status: pass`.
+- Local artifact magic was rechecked on 2026-07-03 for the canonical Simple,
+  Chrome, and Electron captures:
+  `build/renderdoc/canonical-probe/simple/simple_gui_app_capture.rdc`,
+  `build/renderdoc/chrome-implicit-layer-default-autocapture/html/gpu_chrome_capture.rdc`,
+  and
+  `build/renderdoc/electron-implicit-layer-default-autocapture/electron-html/electron_gpu_capture.rdc`
+  all begin with `RDOC`.
+- The focused contract is covered by
+  `test/03_system/check/linux_vulkan_renderdoc_reason_forwarding_spec.spl`,
+  which now keeps both the forwarding contract and the current unblocked
+  aggregate state pinned.
