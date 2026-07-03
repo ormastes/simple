@@ -263,4 +263,40 @@ theorem singleton_env_wellformed (baseType : String) (loc : Nat) (cap : RefCapab
       (fun r : Reference => r.refType.capability == RefCapability.Isolated)
       ([{ location := loc, refType := { baseType := baseType, capability := cap } }] : List Reference)
 
+theorem two_shared_env_wellformed (baseType : String) (loc : Nat) :
+  wellFormed
+    { activeRefs :=
+        [(loc,
+          [{ location := loc,
+             refType := { baseType := baseType, capability := RefCapability.Shared } },
+           { location := loc,
+             refType := { baseType := baseType, capability := RefCapability.Shared } }])] } := by
+  intro foundLoc refs h
+  simp at h
+  rcases h with ⟨_, hrefs⟩
+  subst refs
+  constructor
+  · change countRefsWithCapability
+      ([
+        { location := loc, refType := { baseType := baseType, capability := RefCapability.Shared } },
+        { location := loc, refType := { baseType := baseType, capability := RefCapability.Shared } }
+      ] : List Reference) RefCapability.Exclusive ≤ 1
+    rw [show countRefsWithCapability
+      ([
+        { location := loc, refType := { baseType := baseType, capability := RefCapability.Shared } },
+        { location := loc, refType := { baseType := baseType, capability := RefCapability.Shared } }
+      ] : List Reference) RefCapability.Exclusive = 0 by rfl]
+    exact Nat.zero_le 1
+  · change countRefsWithCapability
+      ([
+        { location := loc, refType := { baseType := baseType, capability := RefCapability.Shared } },
+        { location := loc, refType := { baseType := baseType, capability := RefCapability.Shared } }
+      ] : List Reference) RefCapability.Isolated ≤ 1
+    rw [show countRefsWithCapability
+      ([
+        { location := loc, refType := { baseType := baseType, capability := RefCapability.Shared } },
+        { location := loc, refType := { baseType := baseType, capability := RefCapability.Shared } }
+      ] : List Reference) RefCapability.Isolated = 0 by rfl]
+    exact Nat.zero_le 1
+
 end MemoryCapabilities
