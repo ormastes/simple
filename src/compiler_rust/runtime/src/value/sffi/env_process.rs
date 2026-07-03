@@ -929,6 +929,22 @@ pub extern "C" fn rt_platform_name() -> RuntimeValue {
     rt_string_new(name.as_ptr(), name.len() as u64)
 }
 
+/// Host target architecture code: 0=x86_64, 1=aarch64, 2=riscv64, -1=other.
+/// Declared and called from .spl (cfg_platform, backend_selector, sffi/system)
+/// but was never implemented — callers crashed on a null indirect call.
+#[no_mangle]
+pub extern "C" fn rt_get_host_target_code() -> i64 {
+    if cfg!(target_arch = "x86_64") {
+        0
+    } else if cfg!(target_arch = "aarch64") {
+        1
+    } else if cfg!(target_arch = "riscv64") {
+        2
+    } else {
+        -1
+    }
+}
+
 /// Enable ANSI virtual terminal processing on Windows console.
 /// No-op on non-Windows platforms.
 /// Callable from Simple as: `rt_term_enable_ansi()`
