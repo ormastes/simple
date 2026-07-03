@@ -154,6 +154,20 @@ theorem T5_snapshot_excludes_deleted (v : Version) (s : MvccSnapshot)
   · -- hact : s.active.contains v.del_ts = true; hactive : = false
     exact absurd hact (hactive ▸ Bool.false_ne_true)
 
+/-- T5d: a delete by a still-active txn does not hide the version. -/
+theorem T5_snapshot_keeps_active_delete (v : Version) (s : MvccSnapshot)
+    (hcommit : v.commit_ts < s.xmax)
+    (hinsert_done : s.active.contains v.commit_ts = false)
+    (hdelete_active : s.active.contains v.del_ts = true) :
+    snapshotSees v s := by
+  unfold snapshotSees
+  constructor
+  · exact hcommit
+  · constructor
+    · rw [hinsert_done]
+      rfl
+    · exact Or.inr (Or.inr hdelete_active)
+
 -- ===========================================================================
 -- T6 -- recovery_equation
 -- ===========================================================================
