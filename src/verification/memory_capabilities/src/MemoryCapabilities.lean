@@ -373,6 +373,13 @@ theorem shared_write_same_loc_denied (baseType : String) (loc : Nat) :
   simp [allowsAccess]
   exact ⟨rfl, rfl⟩
 
+theorem shared_write_any_loc_denied (baseType : String) (loc target : Nat) :
+  allowsAccess { location := loc, refType := { baseType := baseType, capability := RefCapability.Shared } }
+    (MemAccess.Write target) = false := by
+  simp [allowsAccess]
+  intro _
+  exact ⟨rfl, rfl⟩
+
 theorem singleton_shared_write_not_safe (baseType : String) (loc : Nat) :
   accessIsSafe
     { activeRefs :=
