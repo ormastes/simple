@@ -142,6 +142,20 @@ theorem hasDataRace_has_distinct_threads (exec : Execution) :
   rcases hRace with ⟨id1, id2, op1, op2, h1, h2, _, hthread, _, _, _⟩
   exact ⟨id1, id2, op1, op2, h1, h2, hthread⟩
 
+theorem hasDataRace_witness_shape (exec : Execution) :
+    hasDataRace exec →
+    ∃ id1 id2 op1 op2,
+      (id1, op1) ∈ exec.ops ∧
+      (id2, op2) ∈ exec.ops ∧
+      id1 ≠ id2 ∧
+      op1.threadId ≠ op2.threadId ∧
+      conflicts op1 op2 ∧
+      ¬happensBefore exec id1 id2 ∧
+      ¬happensBefore exec id2 id1 := by
+  intro hRace
+  rcases hRace with ⟨id1, id2, op1, op2, h1, h2, hneq, hthread, hconf, hnot12, hnot21⟩
+  exact ⟨id1, id2, op1, op2, h1, h2, hneq, hthread, hconf, hnot12, hnot21⟩
+
 theorem drf_single_thread_execution (exec : Execution) (tid : ThreadId)
     (hsingle : ∀ id op, (id, op) ∈ exec.ops → op.threadId = tid) :
     dataRaceFree exec := by
