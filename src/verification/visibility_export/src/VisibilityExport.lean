@@ -114,4 +114,10 @@ theorem all_public_means_public (path : List Visibility) :
     intro v' hv'
     exact h v' (List.mem_cons_of_mem v hv')
 
+theorem private_symbol_under_public_path_private (path : List Visibility)
+    (hpath : ancestorVisibility path = Visibility.pub) :
+    visibilityMeet Visibility.priv (ancestorVisibility path) = Visibility.priv := by
+  rw [hpath]
+  rfl
+
 end VisibilityExport

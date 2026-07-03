@@ -83,6 +83,9 @@
 - async_effect_inference_formal: pass
 - async_effect_inference_formal_scope: explicit sync declarations reject suspension bodies, async return types are promise-wrapped without double wrapping, await insertion is sound for matching promise inner types, non-promise i32 actual values do not insert await, and promise unwrap succeeds only for matching inner type
 - async_effect_inference_formal_evidence: src/verification/type_inference_compile/src/AsyncEffectInference.lean sync_safety + async_returns_promise + sync_no_promise_wrap + no_double_wrap + await_inference_sound + await_not_inserted_for_i32 + promise_unwrap_correct; src/compiler_rust/lib/std/src/verification/regenerate/async_effect_inference.spl generated theorem source; `cd src/verification/type_inference_compile && lake build`
+- visibility_export_formal: pass
+- visibility_export_formal_scope: visibility meet is commutative and associative, private visibility absorbs from either side, all-public ancestor paths remain public, any private ancestor makes the path private, and a private symbol remains private even under a public ancestor path
+- visibility_export_formal_evidence: src/verification/visibility_export/src/VisibilityExport.lean meet_comm + meet_assoc + meet_private_left + meet_private_right + meet_public_left + meet_public_right + foldl_priv_absorbs + any_private_means_private + all_public_means_public + private_symbol_under_public_path_private; `cd src/verification/visibility_export && lake build`
 - kernel_capability_depth_formal: pass
 - kernel_capability_depth_formal_scope: capability delegation with exhausted depth is denied
 - kernel_capability_depth_formal_evidence: src/verification/kernel_capabilities/KernelCapabilities/Theorems.lean zero_depth_grant_denied; `cd src/verification/kernel_capabilities && lake build`
