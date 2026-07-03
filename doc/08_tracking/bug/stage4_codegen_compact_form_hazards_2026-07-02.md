@@ -645,3 +645,126 @@ entry that is present"). Two candidates, distinguish first:
       dict instance the interpreter receives.
 Do NOT touch `Dict.get` Option lowering (disproven, iter 12). getval3 (nil-check)
 is the correct builtin-Dict-get gate; getval2 (Option-match) is retired.
+
+---
+
+## Iteration 13 (2026-07-03) — TWO methodology traps corrected; probe mechanism + test-file were the real obstacles
+
+Ran the iteration-12 discriminating experiment (probe `lower_module` insert vs
+`process_module` consumer). Two obstacles invalidated the first passes; both are
+now documented so iteration 14 doesn't repeat them:
+
+### Trap A — `rt_file_append_text` file-append probes DO NOT WRITE in this runtime
+Every file-append probe (`rt_file_append_text("/tmp/lm_probe.log", ...)`) produced
+an EMPTY log across builds fix23/fix24, making it look like the instrumented code
+paths never executed. Direct test (`scratchpad probetest2.spl`): `val ok =
+rt_file_append_text(path, s); print(ok)` prints **`false`** under BOTH the seed
+(`$SEED run`) and compiled stage4. The runtime `rt_file_append_text`
+(runtime_native.c:2441) delegates to `rt_file_append`, which returns 0/false here
+(the `/tmp` append is not landing). **Retire file-append probes for stage4
+instrumentation.** Use `eprint` (process_ops, buffered but flushes on clean exit)
+or `rt_eprintln_str(s, s.len())` (unbuffered stderr) — both proven to work.
+Iteration 13's fix25 re-instruments with eprint/rt_eprintln_str.
+
+### Trap B — the `hello.spl` test file was being deleted mid-run by a parallel jj reconcile
+`hello.spl` (untracked, repo root) was silently removed between runs by a
+parallel-session `jj` working-copy snapshot/reconcile → the compiler read
+`content_len 0` → `[load_sources] total 0` → `interpret_pipeline` returned
+`CompileResult.RuntimeError("No source file specified for interpret mode")`
+(driver.spl:631) with garbled spaced-out error text. This is NOT a compiler bug;
+it masqueraded as one. **Always place the `-c`/run test file in `/tmp`
+(e.g. `/tmp/hello.spl`), never repo root**, so parallel VCS ops can't sweep it.
+
+### Confirmed live symptom (fix24, `/tmp/hello.spl` present, content read OK)
+- `SIMPLE_UNSTUB_HIR=1 stage4 run /tmp/hello.spl`: `[frontend] parsed` (x2),
+  reaches `phase5:mode_dispatch:start`, rc=0, silent (no `2`). Matches iter 12.
+- Decisive new datapoint: `stage4 run /tmp/probetest.spl` where probetest's `main`
+  literally does `print(99)` — prints **NOTHING** (no `99`), rc=0. So the compiled
+  interpreter backend does **not execute `main` for an ordinary user file** via
+  the default `run` path either (default = empty-HIR stub, functions={} →
+  process_module finds no main → silent Unit). The seed runs the same file and
+  prints `99` correctly.
+
+### Iteration 13 instrumentation (fix25) — eprint probes at the branch points
+Placed eprint/rt_eprintln_str probes at: driver `lower_and_check_impl` entry
+(`sources.len`/`modules.len`), the `sources<=0` vs sources-loop branch, the
+`is_bootstrap_entry` / `unstub_reparse` / `STUB` branch selector; `lower_module`
+ENTER + else-branch `fnkeys.len` + per-insert `functions.len` + else-done; and
+`process_module` entry. This will finally show, with a working probe mechanism,
+which branch of the discriminating experiment fires:
+  - `[DRV] branch=STUB` → UNSTUB gate not taken (env not seen / content=="" /
+    low_memory) → functions never lowered → interpreter gets empty module.
+  - `[DRV] branch=unstub_reparse` + `[LM] else-branch fnkeys.len=0` → the
+    RE-PARSED module has no functions (parse_full_frontend drops `main`).
+  - `[LM] after-insert functions.len>=1` but `[PM] entry` shows 0 → module copied
+    /rebuilt between lowering and interpret, losing dict contents.
+  - `[PM] entry` never prints → interpreter backend not invoked at all.
+Probes are eprint-only (tree has no rt_file_append probes). Remove before final
+commit. Binaries: scratchpad/stage4_fix23..25.
+
+### Iteration 13 DECISIVE ROOT CAUSE (fix26, full eprint chain) — BackendPort.run_fn closure never dispatches to InterpreterBackendImpl.process_module
+With working eprint probes the ENTIRE `run /tmp/hello.spl` chain is now visible.
+Every producer stage is CORRECT — the "empty module" theory (iter 12 FINAL) is
+DISPROVEN:
+```
+[DRV] lac-entry sources.len=1 modules.len=1
+[DRV] lac-loop name=.tmp.hello content_len=28
+[DRV] branch=unstub_reparse
+[LM] ENTER lower_module name=/tmp/hello.spl
+[LM] else-branch fnkeys.len=1          <- parser module has 1 fn (main)
+[LM] loop name=main
+[LM] after-insert functions.len=1      <- struct-keyed Dict INSERT works, len=1
+[LM] else-done functions.len=1
+[DISP] Interpret case reached
+[IP] interpret_pipeline sources.len=1 backend=interpreter
+[IP] idx=0 name=.tmp.hello hir_nil=false funcs=1   <- module reaches interpret WITH funcs=1
+[IP] calling run_fn
+      <-- [PM] entry NEVER printed; rc=0, silent
+```
+**Which branch of the discriminating experiment fired: NEITHER producer-empty NOR
+consumer-len-0.** `module.functions.len()==1` at the producer (lower_module) AND
+at the consumer boundary (interpret_pipeline, immediately before dispatch). Mono
+does NOT empty it. The blocker is one level deeper: **`backend_port.run_fn(hir_module)`
+is invoked but `InterpreterBackendImpl.process_module`'s body never executes**
+(`[PM] entry` at the very first line of process_module never fires), returning a
+silent default so `main` is never called and nothing prints.
+
+`run_fn` is `run_fn: fn(m): interp_impl.process_module(m)` (driver_types.spl:56),
+a closure stored in the `BackendPort.run_fn` field that captures `interp_impl` and
+calls `.process_module(m)` on it. The empirical fact: `backend_port.run_fn(...)`
+is invoked (`[IP] calling run_fn` prints) but the FIRST line of
+`InterpreterBackendImpl.process_module` (`_probe_pm("[PM] entry...")`) never
+prints, and the pipeline returns a silent Unit.
+
+**Mechanism NOT yet the simple closure pattern.** Minimal seed repros DISPROVE the
+first hypothesis: `scratchpad/clorepro.spl` (closure captures struct instance,
+calls its method) AND `clorepro2.spl` (that closure stored in a `Port` struct
+field `run_fn: fn(i64)->i64`, invoked via `p.run_fn(5)`) BOTH enter the method
+(`INSIDE_METHOD` prints, `RESULT_OK`). So closure-in-field + captured-instance +
+method-call works in isolation. The distinguishing factor in the real case is one
+of: `process_module` returns `Result<BackendResult, BackendError>` (enum return),
+takes a large `HirModule` struct by value, uses `?` internally, or the
+`BackendPort` is built inside a `match options.mode` arm. Iteration 14 must
+narrow the repro by adding these one at a time (Result return type first — most
+likely), then fix. Until then the confirmed blocker is: **run_fn(module funcs=1)
+does not reach process_module's body → silent no-op**.
+
+### Iteration 14 direction (the real fix)
+Confirm + fix the closure-captured method dispatch. Two verification probes:
+(1) put an eprint as the FIRST expr inside the `fn(m): ...` closure body in
+driver_types.spl:56 — if it prints but `[PM] entry` doesn't, the closure runs but
+the `interp_impl.process_module(m)` call is miscompiled. (2) Minimal seed repro:
+`struct S; impl S: fn hi(x:i64)->i64: <eprint>; x`; `val s=S(); val f=fn(m):
+s.hi(m); f(5)` under `seed native-build` — check the impl body runs.
+Candidate fixes, cheapest first:
+  - **`.spl` workaround**: bypass the closure — have `interpret_pipeline` call the
+    concrete backend directly (e.g. store the `InterpreterBackendImpl` on the ctx
+    and call `impl.process_module(module)` inline) instead of through the
+    `BackendPort.run_fn` closure. If the direct call enters process_module, the
+    bug is confined to closure-captured method dispatch and this is a clean fix.
+  - **seed fix** if the direct call also fails: closure/method-dispatch codegen in
+    `src/compiler_rust/.../codegen/instr/{calls.rs,closure*.rs}` — the captured
+    `self`/receiver is likely lost or the method target resolved to a stub.
+Gate: `SIMPLE_UNSTUB_HIR=1 <stage4> run /tmp/hello.spl` must print `2`; then `-c
+"print(1+1)"`. Keep the `/tmp/hello.spl` rule (Trap B) and eprint probes (Trap A).
+Binaries: scratchpad/stage4_fix26 (full-chain probe build).
