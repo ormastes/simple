@@ -62,6 +62,8 @@ Prior diagnostic run with placeholder RTL allowed:
 - PASS: RV32 VHDL template generation writes `build/vhdl/rv32/rv32i_pkg.vhd`, `rv32i_decode.vhd`, and `rv32i_regfile.vhd`.
 - FAIL: `build/build/rv32_fpga/gateware/rv32_fpga.bit` is still missing.
 - PASS: `rv32_fpga_core_executable` for the generated decode/control helper RTL at `build/vhdl/rv32/rv32_core.vhd`.
+- PASS: `rv32_fpga_synth_logic`; `scripts/fpga/build_k26_rv32.shs --synth-only` retains RV32 helper logic.
+- FAIL: full RV32 bitstream generation reaches route/write-bitstream but fails Vivado DRC on unconstrained `clk`, `rst`, and `uart_rx`; no unsafe DRC downgrade is used.
 - FAIL: `rv32_fpga_elf_load_context` because no RV32 load/run evidence exists at `build/fpga/rv32/load_elf_rv32.log`.
 
 `SIMPLE_OS_BUILD_BACKEND=cranelift bin/release/simple os build --arch=riscv64 --scenario=riscv64-fpga-mmode`

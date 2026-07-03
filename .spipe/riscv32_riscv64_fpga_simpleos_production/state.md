@@ -83,3 +83,5 @@ dev-in-progress
 - dev: Fixed the K26 wrapper's stale placeholder regex and added a Vivado utilization gate; current synth-only evidence now fails closed because CPU/RAM logic is optimized away.
 - dev: Kept the generated RV64 fetch/RAM path observable through synthesis; `build_k26_vexriscv.shs --synth-only` and dual-arch preflight now pass `rv64_fpga_synth_logic`. RV32 still lacks bitstream and ELF load/run evidence.
 - dev: Confirmed generated RV32 package/decode/regfile/helper-core VHDL passes `ghdl -a --std=08`; RV32 next needs an FPGA top/bitstream path and payload load evidence.
+- dev: Added a minimal RV32 K26 top/Vivado wrapper around the generated decode helper; GHDL and `build_k26_rv32.shs --synth-only` pass, and dual-arch preflight now passes `rv32_fpga_synth_logic`.
+- dev: Attempted full RV32 bitstream generation; Vivado routes the design but bitgen fails DRC because `clk`, `rst`, and `uart_rx` have no safe board constraints. RV32 bitstream and payload load/run evidence remain open.
