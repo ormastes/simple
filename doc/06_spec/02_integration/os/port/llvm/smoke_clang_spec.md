@@ -27,7 +27,13 @@ smoke_clang_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 5 | 5 | 0 | 0 |
+| 7 | 7 | 0 | 0 |
+
+Operator note: sysroot link scenarios assert
+`build/os/sysroot/share/simpleos/target-triple.txt` equals
+`x86_64-unknown-simpleos` before linking, so a sysroot last staged for another
+target fails with an explicit target-marker mismatch instead of an opaque linker
+architecture error.
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -128,7 +134,7 @@ out.contains("main").to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -138,6 +144,7 @@ if lb == "":
 val sysroot = sysroot_dir()
 if not fs.exists("{sysroot}/share/simpleos/simpleos.ld"):
     return "skip: SimpleOS sysroot not built"
+sysroot_target_triple().to_equal("x86_64-unknown-simpleos")
 val lld = "{lb}/bin/ld.lld"
 val (out, err, code) = process.run(lld, [
     "-T", "{sysroot}/share/simpleos/simpleos.ld",
@@ -149,6 +156,64 @@ val (out, err, code) = process.run(lld, [
 ])
 code.to_equal(0)
 fs.exists(OUT_ELF).to_equal(true)
+```
+
+</details>
+
+#### driver compiles and links hello.c through canonical clang
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 15 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val lb = llvm_build()
+if lb == "":
+    return "skip: LLVM_BUILD not set"
+val sysroot = sysroot_dir()
+if not fs.exists("{sysroot}/share/simpleos/simpleos.ld"):
+    return "skip: SimpleOS sysroot not built"
+sysroot_target_triple().to_equal("x86_64-unknown-simpleos")
+val clang = "{lb}/bin/clang"
+val (out, err, code) = process.run(clang, [
+    "--target=x86_64-unknown-simpleos",
+    HELLO_C,
+    "-o", DRIVER_ELF,
+])
+code.to_equal(0)
+fs.exists(DRIVER_ELF).to_equal(true)
+```
+
+</details>
+
+#### driver links compiler-rt builtins from the staged resource dir
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 17 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val lb = llvm_build()
+if lb == "":
+    return "skip: LLVM_BUILD not set"
+val sysroot = sysroot_dir()
+if not fs.exists("{sysroot}/share/simpleos/simpleos.ld"):
+    return "skip: SimpleOS sysroot not built"
+sysroot_target_triple().to_equal("x86_64-unknown-simpleos")
+val source = "__int128 div128(__int128 a,__int128 b){return a/b;} int main(void){return (int)div128(((__int128)1<<80),3);}"
+process.run("sh", ["-c", "printf '%s\n' '{source}' > {BUILTINS_C}"])
+val clang = "{lb}/bin/clang"
+val (out, err, code) = process.run(clang, [
+    "--target=x86_64-unknown-simpleos",
+    BUILTINS_C,
+    "-o", BUILTINS_ELF,
+])
+code.to_equal(0)
+fs.exists(BUILTINS_ELF).to_equal(true)
 ```
 
 </details>
@@ -172,8 +237,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 7 |
+| Active scenarios | 7 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

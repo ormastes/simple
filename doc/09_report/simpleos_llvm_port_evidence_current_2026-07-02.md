@@ -37,7 +37,7 @@ Focused LLVM-to-SimpleOS port evidence for the current hardening lane.
 | Cross clang target-triple host smoke | PASS | `timeout 5s build/os/llvm/cross-x86_64-unknown-simpleos/bin/clang --print-target-triple` -> exit 0, stdout `x86_64-unknown-simpleos` |
 | Cross clang compile host smoke | PASS | `timeout 10s build/os/llvm/cross-x86_64-unknown-simpleos/bin/clang --target=x86_64-unknown-simpleos -c examples/09_embedded/simpleos_hello_c/hello.c -o /tmp/smoke_clang_hello.o` -> exit 0, object 1056 bytes |
 | Cross object-tool smoke | PASS | `build/os/llvm/cross-x86_64-unknown-simpleos/bin/llvm-nm /tmp/smoke_clang_hello.o` -> exit 0, `0000000000000000 T main`; fresh `timeout 10s .../bin/ld.lld -T build/os/sysroot/share/simpleos/simpleos.ld build/os/sysroot/lib/crt0.o /tmp/smoke_clang_hello.o -L build/os/sysroot/lib -lsimpleos_c -o /tmp/smoke_clang_hello.elf` -> exit 0, ELF 39144 bytes |
-| Cross clang artifact-gated smoke | PASS | `SIMPLE_LIB=src bin/simple test test/02_integration/os/port/llvm/smoke_clang_spec.spl --mode=interpreter --clean` -> 7 examples, 0 failures: canonical artifact exists, target triple prints, hello.c compiles, `llvm-nm` finds `main`, `ld.lld` links a SimpleOS ELF including overwrite of an existing output, canonical `clang hello.c -o hello.elf` drives cc1 plus lld successfully, and a `__int128` division probe links through staged compiler-rt builtins |
+| Cross clang artifact-gated smoke | PASS | `SIMPLEOS_TARGET_TRIPLE=x86_64-unknown-simpleos sh src/os/port/llvm/sysroot.shs`; then `SIMPLE_LIB=src bin/simple test --no-session-daemon test/02_integration/os/port/llvm/smoke_clang_spec.spl --mode=interpreter --clean` -> 7 examples, 0 failures: canonical artifact exists, target triple prints, hello.c compiles, `llvm-nm` finds `main`, `ld.lld` links a SimpleOS ELF including overwrite of an existing output, canonical `clang hello.c -o hello.elf` drives cc1 plus lld successfully, and a `__int128` division probe links through staged compiler-rt builtins. The link scenarios assert `build/os/sysroot/share/simpleos/target-triple.txt` is `x86_64-unknown-simpleos` before using the shared sysroot. |
 | Cross clang driver link smoke | PASS | `timeout 20s build/os/llvm/cross-x86_64-unknown-simpleos/bin/clang --target=x86_64-unknown-simpleos examples/09_embedded/simpleos_hello_c/hello.c -o /tmp/smoke_clang_driver_hello.elf` -> exit 0, ELF 39144 bytes |
 | aarch64 sysroot libc++ runtime staging | PASS | `SIMPLEOS_TARGET_TRIPLE=aarch64-unknown-simpleos sh src/os/port/llvm/sysroot.shs` -> installed 1851 headers, built and staged `libc++.a`, `crt0.o`, `libsimpleos_c.a`, `libm.a`, and linker script for the aarch64 SimpleOS sysroot |
 | aarch64 TargetParser `Host.cpp` compile | PASS | `ninja -C build/os/llvm/cross-aarch64-unknown-simpleos lib/TargetParser/CMakeFiles/LLVMTargetParser.dir/Host.cpp.o` -> object builds after guarding the Linux BPF `syscall(...)` probe for `__simpleos__` |
@@ -91,6 +91,11 @@ resolve during the target-side `bin/lld` and `bin/clang` links.
 Compiler-rt staging has advanced through x86_64 builtins compile and archive
 staging. Broader target rollout and resource-dir integration remain gated on
 repeating the now-green canonical compile/nm/link smoke for non-x86_64 targets.
+
+The shared sysroot can be restaged for different targets during this lane. The
+x86_64 smoke now fails early on a target-marker mismatch instead of reaching
+opaque `ld.lld` architecture errors when `crt0.o` or staged archives were last
+written by another target.
 
 ## Spec Maintenance Completed
 

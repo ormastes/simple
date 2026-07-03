@@ -132,6 +132,8 @@
 - x86_64_cross_clang_driver_link_smoke: pass
 - x86_64_compiler_rt_builtins_status: pass
 - x86_64_lld_link_status: pass
+- x86_64_sysroot_target_marker: `build/os/sysroot/share/simpleos/target-triple.txt`
+- x86_64_sysroot_target_marker_status: pass
 - aarch64_sysroot_archives_status: pass
 - aarch64_cross_llvm_stage2_status: pass
 - smoke_spec: `test/02_integration/os/port/llvm/smoke_clang_spec.spl`

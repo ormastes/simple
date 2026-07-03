@@ -60,9 +60,9 @@
   round-up and tip math as framework-gated operations.
 - REQ-031: A web route table shall map HTTP method+path to lane actions with
   read/write RBAC distinction and not-found handling.
-- REQ-032: A suite entrypoint shall print per-lane accept/deny evidence with
-  counts for each closed reason.
-- REQ-033: An sspec unit test suite shall cover all four lanes with all four
+- REQ-032: A suite entrypoint shall print per-lane accepted and denied counts
+  plus route and framework gate evidence.
+- REQ-033: An sspec unit test suite shall cover all five lanes with all four
   denial reasons (invalid-session, forbidden, invalid-record, duplicate-key).
 - REQ-034: An sspec system test shall run the suite entrypoint end-to-end
   exercising both accept and deny paths across all lanes.

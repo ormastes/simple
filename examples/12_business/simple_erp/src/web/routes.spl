@@ -8,7 +8,7 @@
 # through gate_write so session -> rbac -> validation -> idempotency is
 # enforced exactly once, in exactly one place).
 
-use framework.guarded.{Tenant, Actor, Session, WriteResult, gate_write, role_can}
+use framework.guarded.{Tenant, Actor, Session, WriteResult, gate_write, role_can, session_valid}
 
 struct Route:
     val method: text
@@ -38,14 +38,16 @@ fn find_route(method: text, path: text) -> Route:
     return not_found_route()
 
 # Route a request through the gate. Unknown routes are denied with
-# reason "not-found". Read routes are allowed iff the actor's role can perform
-# the action (no session/idempotency needed for a read). Write routes go
+# reason "not-found". Read routes still require a valid session, then check
+# the actor's role (no idempotency needed for a read). Write routes go
 # through the full framework.gate_write pipeline.
 fn dispatch(session: Session, tenant: Tenant, user: Actor, method: text, path: text, record_valid: bool, key: text, used_keys: [text]) -> WriteResult:
     val route = find_route(method, path)
     if route.action == "":
         return WriteResult { ok: false, reason: "not-found", audit_action: "", ledger_key: "" }
     if not route.requires_write:
+        if !session_valid(session, tenant, user):
+            return WriteResult { ok: false, reason: "invalid-session", audit_action: route.action, ledger_key: "" }
         if role_can(user.role, route.action):
             return WriteResult { ok: true, reason: "accepted", audit_action: route.action, ledger_key: "" }
         return WriteResult { ok: false, reason: "forbidden", audit_action: route.action, ledger_key: "" }
