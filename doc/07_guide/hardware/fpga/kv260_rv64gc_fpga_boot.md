@@ -121,6 +121,18 @@ The wrapper regenerates `build/vhdl/rv64/*.vhd`, writes
 
 For synthesis only, pass `--synth-only`.
 
+Load the current SimpleOS RV64 FPGA ELF after programming:
+
+```bash
+bash scripts/fpga/load_elf_k26.shs
+```
+
+The helper defaults to `build/fpga/k26/k26_vexriscv.bit` and
+`build/os/simpleos_riscv64_fpga.elf`, and writes XSDB output to
+`build/fpga/k26/load_elf_k26.log`. A current `Invalid context` failure means
+the bitstream programmed successfully but does not expose a CPU/debug target
+that can accept `dow`.
+
 ## 5. FPGA Programming
 
 Connect KV260 via USB (FTDI FT4232H — ch0=JTAG). Only Vivado hw_server works; openocd/openFPGALoader are incompatible with this carrier's proprietary FT4232H JTAG.

@@ -31,6 +31,9 @@ N/A for this slice: this turn only fixes existing smoke wrappers and records blo
 - `SIMPLE_BINARY=bin/release/simple CAPTURE_SECONDS=5 LINUX_TIMEOUT=10 sh scripts/fpga/check_kv260_simple_rv64_linux.shs`:
   - PASS: RV64 bitstream and ELF artifacts present, ELF header is ELF64 RISC-V, KV260 bitstream loads, merged USB PS UART responds, and generated RV64 Linux handoff passes.
   - INFO: PL UART on merged USB has no output; current generated image still needs PMOD UART capture or a routed UART before SimpleOS payload execution can be proven.
+- `bash scripts/fpga/load_elf_k26.shs`:
+  - PASS: programs the generated K26 bitstream.
+  - FAIL: XSDB `dow build/os/simpleos_riscv64_fpga.elf` returns `Invalid context`, so the current generated bitstream has no usable CPU/debug context for ELF download.
 - `SIMPLE_OS_BUILD_BACKEND=cranelift bin/release/simple os build --arch=riscv64 --scenario=riscv64-fpga-mmode`:
   - PASS: builds `build/os/simpleos_riscv64_fpga.elf` and auto-objcopies `build/rv64_bringup_check/hello_litex_rv64.bin`.
 - `SIMPLE_OS_BUILD_BACKEND=cranelift bin/release/simple os build --arch=riscv32 --scenario=riscv32-fpga-mmode`:
@@ -55,3 +58,4 @@ dev-in-progress
 - dev: Added minimal RV32/RV64 smoke payloads and removed the stale RV64 native-build gate, so the top-level generated RTL Linux smoke passes both lanes.
 - dev: Exposed RV64/RV32 FPGA M-mode lanes through `simple os build --scenario=...`, fixed the RV64 FPGA entry symbol, added freestanding not-found runtime hooks, and auto-derived the RV64 raw FPGA payload bin from the built ELF. RV32 is wired but needs an LLVM-enabled Simple compiler on this host.
 - dev: Repaired the K26 RV64 VHDL/Vivado wrapper, generated and programmed a current KV260 bitstream, and recorded that physical programming now passes while SimpleOS softcore UART execution remains unproven.
+- dev: Updated the K26 ELF load helper to use the current RV64 FPGA ELF and preserve XSDB logs; current physical load is blocked by missing CPU/debug context in the generated bitstream.

@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/usr/bin/env bash
 # Load SimpleOS ELF onto K26 FPGA via Vivado XSDB
 # Usage: sh scripts/fpga/load_elf_k26.shs <bitstream.bit> <simpleos.elf>
 #
@@ -7,11 +7,11 @@
 #   - Vivado 2025.2 installed
 #   - FTDI driver bound to JTAG interface
 
-set -e
+set -euo pipefail
 
-VIVADO_SETTINGS="$HOME/Xilinx/2025.2/Vivado/settings64.sh"
+VIVADO_SETTINGS="${VIVADO_SETTINGS:-$HOME/Xilinx/2025.2/Vivado/settings64.sh}"
 BITSTREAM="${1:-build/fpga/k26/k26_vexriscv.bit}"
-ELF="${2:-build/os/simpleos_rv64_fpga.elf}"
+ELF="${2:-build/os/simpleos_riscv64_fpga.elf}"
 UART_DEV="${UART_DEV:-/dev/ttyUSB0}"
 UART_BAUD="${UART_BAUD:-115200}"
 
@@ -69,8 +69,19 @@ puts "SimpleOS should be booting — check UART console"
 disconnect
 XSDB_EOF
 
-xsdb "$XSDB_SCRIPT" "$BITSTREAM" "$ELF" 2>&1 | tail -20
+LOAD_LOG="${LOAD_LOG:-build/fpga/k26/load_elf_k26.log}"
+mkdir -p "$(dirname "$LOAD_LOG")"
+set +e
+xsdb "$XSDB_SCRIPT" "$BITSTREAM" "$ELF" >"$LOAD_LOG" 2>&1
+xsdb_rc=$?
+set -e
+tail -80 "$LOAD_LOG"
 rm -f "$XSDB_SCRIPT"
+
+if [ "$xsdb_rc" -ne 0 ]; then
+    echo "ERROR: XSDB load failed (exit $xsdb_rc); see $LOAD_LOG"
+    exit "$xsdb_rc"
+fi
 
 echo ""
 echo "Monitor UART: screen $UART_DEV $UART_BAUD"

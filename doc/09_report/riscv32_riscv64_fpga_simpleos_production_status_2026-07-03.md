@@ -38,6 +38,11 @@ either RV32 or RV64.
 - PASS: generated RV64 Linux handoff smoke passes.
 - INFO: PL UART on merged USB has no output; current image still requires PMOD UART capture or a routed PL UART to prove SimpleOS payload execution.
 
+`bash scripts/fpga/load_elf_k26.shs`
+
+- PASS: programs the generated K26 bitstream through XSDB.
+- FAIL: `dow build/os/simpleos_riscv64_fpga.elf` returns XSDB `Invalid context`; the generated bitstream does not expose a usable CPU/debug context for ELF download.
+
 `SIMPLE_OS_BUILD_BACKEND=cranelift bin/release/simple os build --arch=riscv64 --scenario=riscv64-fpga-mmode`
 
 - PASS: builds `build/os/simpleos_riscv64_fpga.elf`.
@@ -95,14 +100,15 @@ for RV32 codegen in this workspace.
 The K26 Vivado wrapper now uses the release Simple binary fallback, regenerates
 the RV64 VHDL/TCL every run, emits a K26 UART XDC constraint, preserves Vivado
 failure status despite tailing logs, and copies the generated bitstream to the
-preflight path.
+preflight path. The K26 ELF loader now defaults to the current RV64 FPGA ELF and
+keeps an XSDB failure log at `build/fpga/k26/load_elf_k26.log`.
 
 ## Remaining Production Blockers
 
 1. Install or provide `yosys` if synthesis/formal checks are part of the local
    production gate.
 2. Free the FT4232H JTAG interface before physical FPGA programming.
-3. Replace the generated RV64 stub softcore bitstream with a real CPU/debug/load path or prove the current softcore can execute the SimpleOS ELF.
+3. Replace the generated RV64 stub softcore bitstream with a real CPU/debug/load path; current XSDB `dow` fails with `Invalid context`.
 4. Capture RV64 PL UART boot markers from PMOD H12/E10 or route PL UART to an observable serial channel.
 5. Provide an LLVM-enabled Simple compiler and produce RV32 SimpleOS FPGA ELF/bin/bitstream artifacts.
 
