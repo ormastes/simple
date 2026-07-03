@@ -93,6 +93,15 @@ theorem release_exclusive_clears (s : BorrowState) :
     (releaseExclusive s).exclusive = false := by
   simp [releaseExclusive]
 
+theorem release_shared_decreases_when_present (s : BorrowState)
+    (hshared : s.shared ≠ 0) :
+    (releaseShared s).shared < s.shared := by
+  cases s with
+  | mk exclusive shared =>
+      cases shared with
+      | zero => exact False.elim (hshared rfl)
+      | succ n => simp [releaseShared]
+
 theorem release_ok (s : BorrowState) (hv : valid s) :
   valid (releaseShared s) ∧ valid (releaseExclusive s) := by
   unfold releaseShared releaseExclusive valid at *
