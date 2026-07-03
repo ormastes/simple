@@ -24,6 +24,10 @@ struct DisplayEvalResult:
     ok: bool
     value: i64
 
+struct FinSolve:
+    ok: bool
+    value: f64
+
 # Maximum cell-reference resolution depth. A chain longer than this (which
 # a circular reference always is) returns a circular-reference error.
 val MAX_EVAL_DEPTH = 64
@@ -2182,6 +2186,190 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                     return CellValue.ErrorVal(message: "NPER domain error")
                 return CellValue.NumberVal(value: _ln_f64(ratio) / _ln_f64(1.0 + rate))
             return CellValue.ErrorVal(message: "NPER requires rate, pmt, pv")
+        "IPMT":
+            if args.len() >= 4:
+                val rate = _first_val(args[0])
+                val per = _first_val(args[1])
+                val nper = _first_val(args[2])
+                val pv = _first_val(args[3])
+                val fv = if args.len() >= 5: _first_val(args[4]) else: 0.0
+                val typ = if args.len() >= 6: _first_val(args[5]) else: 0.0
+                if nper == 0.0 or per < 1.0 or per > nper:
+                    return CellValue.ErrorVal(message: "IPMT domain error")
+                return CellValue.NumberVal(value: _fin_ipmt(rate, per, nper, pv, fv, typ))
+            return CellValue.ErrorVal(message: "IPMT requires rate, per, nper, pv")
+        "PPMT":
+            if args.len() >= 4:
+                val rate = _first_val(args[0])
+                val per = _first_val(args[1])
+                val nper = _first_val(args[2])
+                val pv = _first_val(args[3])
+                val fv = if args.len() >= 5: _first_val(args[4]) else: 0.0
+                val typ = if args.len() >= 6: _first_val(args[5]) else: 0.0
+                if nper == 0.0 or per < 1.0 or per > nper:
+                    return CellValue.ErrorVal(message: "PPMT domain error")
+                val pmt = _fin_pmt(rate, nper, pv, fv, typ)
+                val ip = _fin_ipmt(rate, per, nper, pv, fv, typ)
+                return CellValue.NumberVal(value: pmt - ip)
+            return CellValue.ErrorVal(message: "PPMT requires rate, per, nper, pv")
+        "CUMIPMT":
+            if args.len() >= 6:
+                val rate = _first_val(args[0])
+                val nper = _first_val(args[1])
+                val pv = _first_val(args[2])
+                val sp = _first_val(args[3])
+                val ep = _first_val(args[4])
+                val typ = _first_val(args[5])
+                if rate <= 0.0 or nper <= 0.0 or pv <= 0.0 or sp < 1.0 or ep < sp or ep > nper:
+                    return CellValue.ErrorVal(message: "CUMIPMT domain error")
+                var total = 0.0
+                var p = sp
+                while p <= ep:
+                    total = total + _fin_ipmt(rate, p, nper, pv, 0.0, typ)
+                    p = p + 1.0
+                return CellValue.NumberVal(value: total)
+            return CellValue.ErrorVal(message: "CUMIPMT requires rate, nper, pv, start, end, type")
+        "CUMPRINC":
+            if args.len() >= 6:
+                val rate = _first_val(args[0])
+                val nper = _first_val(args[1])
+                val pv = _first_val(args[2])
+                val sp = _first_val(args[3])
+                val ep = _first_val(args[4])
+                val typ = _first_val(args[5])
+                if rate <= 0.0 or nper <= 0.0 or pv <= 0.0 or sp < 1.0 or ep < sp or ep > nper:
+                    return CellValue.ErrorVal(message: "CUMPRINC domain error")
+                val pmt = _fin_pmt(rate, nper, pv, 0.0, typ)
+                var total = 0.0
+                var p = sp
+                while p <= ep:
+                    val ip = _fin_ipmt(rate, p, nper, pv, 0.0, typ)
+                    total = total + (pmt - ip)
+                    p = p + 1.0
+                return CellValue.NumberVal(value: total)
+            return CellValue.ErrorVal(message: "CUMPRINC requires rate, nper, pv, start, end, type")
+        "ISPMT":
+            if args.len() >= 4:
+                val rate = _first_val(args[0])
+                val per = _first_val(args[1])
+                val nper = _first_val(args[2])
+                val pv = _first_val(args[3])
+                if nper == 0.0:
+                    return CellValue.ErrorVal(message: "ISPMT nper is zero")
+                return CellValue.NumberVal(value: pv * rate * (per / nper - 1.0))
+            return CellValue.ErrorVal(message: "ISPMT requires rate, per, nper, pv")
+        "RATE":
+            if args.len() >= 3:
+                val nper = _first_val(args[0])
+                val pmt = _first_val(args[1])
+                val pv = _first_val(args[2])
+                val fv = if args.len() >= 4: _first_val(args[3]) else: 0.0
+                val res = _fin_rate(nper, pmt, pv, fv)
+                if res.ok:
+                    return CellValue.NumberVal(value: res.value)
+                return CellValue.ErrorVal(message: "RATE did not converge")
+            return CellValue.ErrorVal(message: "RATE requires nper, pmt, pv")
+        "IRR":
+            if args.len() >= 1 and args[0].len() >= 2:
+                val guess = if args.len() >= 2: _first_val(args[1]) else: 0.1
+                val res = _fin_irr(args[0], guess)
+                if res.ok:
+                    return CellValue.NumberVal(value: res.value)
+                return CellValue.ErrorVal(message: "IRR did not converge")
+            return CellValue.ErrorVal(message: "IRR requires a range of 2+ cashflows")
+        "MIRR":
+            if args.len() >= 3 and args[0].len() >= 2:
+                val flows = args[0]
+                val fin_rate = _first_val(args[1])
+                val rei_rate = _first_val(args[2])
+                val res = _fin_mirr(flows, fin_rate, rei_rate)
+                if res.ok:
+                    return CellValue.NumberVal(value: res.value)
+                return CellValue.ErrorVal(message: "MIRR domain error")
+            return CellValue.ErrorVal(message: "MIRR requires range, finance_rate, reinvest_rate")
+        "SLN":
+            if args.len() >= 3:
+                val cost = _first_val(args[0])
+                val salvage = _first_val(args[1])
+                val life = _first_val(args[2])
+                if life == 0.0:
+                    return CellValue.ErrorVal(message: "SLN life is zero")
+                return CellValue.NumberVal(value: (cost - salvage) / life)
+            return CellValue.ErrorVal(message: "SLN requires cost, salvage, life")
+        "SYD":
+            if args.len() >= 4:
+                val cost = _first_val(args[0])
+                val salvage = _first_val(args[1])
+                val life = _first_val(args[2])
+                val per = _first_val(args[3])
+                if life <= 0.0 or per < 1.0 or per > life:
+                    return CellValue.ErrorVal(message: "SYD domain error")
+                val numer = (cost - salvage) * (life - per + 1.0) * 2.0
+                return CellValue.NumberVal(value: numer / (life * (life + 1.0)))
+            return CellValue.ErrorVal(message: "SYD requires cost, salvage, life, per")
+        "DB":
+            if args.len() >= 4:
+                val cost = _first_val(args[0])
+                val salvage = _first_val(args[1])
+                val life = _first_val(args[2])
+                val period = _first_val(args[3])
+                if cost <= 0.0 or life <= 0.0 or period < 1.0 or period > life:
+                    return CellValue.ErrorVal(message: "DB domain error")
+                return CellValue.NumberVal(value: _fin_db(cost, salvage, life, period))
+            return CellValue.ErrorVal(message: "DB requires cost, salvage, life, period")
+        "DDB":
+            if args.len() >= 4:
+                val cost = _first_val(args[0])
+                val salvage = _first_val(args[1])
+                val life = _first_val(args[2])
+                val period = _first_val(args[3])
+                if life <= 0.0 or period < 1.0 or period > life:
+                    return CellValue.ErrorVal(message: "DDB domain error")
+                return CellValue.NumberVal(value: _fin_ddb(cost, salvage, life, period))
+            return CellValue.ErrorVal(message: "DDB requires cost, salvage, life, period")
+        "EFFECT":
+            if args.len() >= 2:
+                val nominal = _first_val(args[0])
+                val npery = _first_val(args[1])
+                if npery < 1.0:
+                    return CellValue.ErrorVal(message: "EFFECT npery < 1")
+                return CellValue.NumberVal(value: _pow_f64(1.0 + nominal / npery, npery) - 1.0)
+            return CellValue.ErrorVal(message: "EFFECT requires nominal, npery")
+        "NOMINAL":
+            if args.len() >= 2:
+                val effect = _first_val(args[0])
+                val npery = _first_val(args[1])
+                if npery < 1.0 or effect <= -1.0:
+                    return CellValue.ErrorVal(message: "NOMINAL domain error")
+                return CellValue.NumberVal(value: (_powf(1.0 + effect, 1.0 / npery) - 1.0) * npery)
+            return CellValue.ErrorVal(message: "NOMINAL requires effect, npery")
+        "RRI":
+            if args.len() >= 3:
+                val nper = _first_val(args[0])
+                val pv = _first_val(args[1])
+                val fv = _first_val(args[2])
+                if nper <= 0.0 or pv <= 0.0 or fv < 0.0:
+                    return CellValue.ErrorVal(message: "RRI domain error")
+                return CellValue.NumberVal(value: _powf(fv / pv, 1.0 / nper) - 1.0)
+            return CellValue.ErrorVal(message: "RRI requires nper, pv, fv")
+        "PDURATION":
+            if args.len() >= 3:
+                val rate = _first_val(args[0])
+                val pv = _first_val(args[1])
+                val fv = _first_val(args[2])
+                if rate <= 0.0 or pv <= 0.0 or fv <= 0.0:
+                    return CellValue.ErrorVal(message: "PDURATION domain error")
+                return CellValue.NumberVal(value: (_ln_f64(fv) - _ln_f64(pv)) / _ln_f64(1.0 + rate))
+            return CellValue.ErrorVal(message: "PDURATION requires rate, pv, fv")
+        "FVSCHEDULE":
+            if args.len() >= 2:
+                val principal = _first_val(args[0])
+                val rates = _flatten_args(args[1:])
+                var value = principal
+                for r in rates:
+                    value = value * (1.0 + r)
+                return CellValue.NumberVal(value: value)
+            return CellValue.ErrorVal(message: "FVSCHEDULE requires principal and rates")
         "TRUE":
             return CellValue.BoolVal(value: true)
         "FALSE":
@@ -3062,6 +3250,189 @@ fn _first_val(vals: [f64]) -> f64:
     if vals.len() > 0:
         return vals[0]
     0.0
+
+fn _powf(base: f64, exp: f64) -> f64:
+    """base^exp for base > 0 via exp/ln — supports fractional exponents.
+
+    Integer-only _pow_f64 cannot express roots like (salvage/cost)^(1/life),
+    so the depreciation/rate functions route fractional powers through here.
+    """
+    if base <= 0.0:
+        return 0.0
+    _exp_f64(exp * _ln_f64(base))
+
+fn _fin_pmt(rate: f64, nper: f64, pv: f64, fv: f64, typ: f64) -> f64:
+    """Excel PMT closed form including future value and annuity-due (type) term."""
+    if rate == 0.0:
+        return 0.0 - (pv + fv) / nper
+    val g = _pow_f64(1.0 + rate, nper)
+    0.0 - (rate * (pv * g + fv)) / ((1.0 + rate * typ) * (g - 1.0))
+
+fn _fin_fv_bal(rate: f64, n: f64, pmt: f64, pv: f64, typ: f64) -> f64:
+    """Future value / outstanding balance after n periods (money-sign convention)."""
+    if rate == 0.0:
+        return 0.0 - (pv + pmt * n)
+    val g = _pow_f64(1.0 + rate, n)
+    0.0 - (pv * g + pmt * (1.0 + rate * typ) * (g - 1.0) / rate)
+
+fn _fin_ipmt(rate: f64, per: f64, nper: f64, pv: f64, fv: f64, typ: f64) -> f64:
+    """Interest portion of the payment for period `per`.
+
+    Interest = (balance after per-1 payments) * rate; the annuity-due case
+    discounts the first period back by (1 + rate).
+    """
+    val pmt = _fin_pmt(rate, nper, pv, fv, typ)
+    val bal = _fin_fv_bal(rate, per - 1.0, pmt, pv, typ)
+    var ip = bal * rate
+    if typ == 1.0:
+        ip = ip / (1.0 + rate)
+    ip
+
+fn _fin_db(cost: f64, salvage: f64, life: f64, period: f64) -> f64:
+    """Fixed-declining-balance depreciation for `period`.
+
+    Excel rounds the rate = 1 - (salvage/cost)^(1/life) to three decimals.
+    No month argument is supported here: the first year is assumed full (no
+    partial-period proration), matching a DB(...) call with month omitted.
+    """
+    val ratio = salvage / cost
+    val raw_rate = 1.0 - _powf(ratio, 1.0 / life)
+    val rate = _round_half_away(raw_rate, 1000.0)
+    var book = cost
+    var dep = 0.0
+    var i = 1.0
+    while i <= period:
+        dep = book * rate
+        book = book - dep
+        i = i + 1.0
+    dep
+
+fn _fin_ddb(cost: f64, salvage: f64, life: f64, period: f64) -> f64:
+    """Double-declining-balance depreciation for `period`.
+
+    Uses factor 2/life and clamps each period's depreciation so book value
+    never falls below salvage.
+    """
+    val factor = 2.0 / life
+    var book = cost
+    var dep = 0.0
+    var i = 1.0
+    while i <= period:
+        dep = book * factor
+        if book - dep < salvage:
+            dep = book - salvage
+            if dep < 0.0:
+                dep = 0.0
+        book = book - dep
+        i = i + 1.0
+    dep
+
+fn _fin_rate(nper: f64, pmt: f64, pv: f64, fv: f64) -> FinSolve:
+    """Solve the annuity rate via Newton's method (guess 0.1, 100 iterations).
+
+    Fails closed (ok = false) when the iteration diverges or fails to converge,
+    which surfaces as #ERR at the call site.
+    """
+    var r = 0.1
+    var i = 0
+    while i < 100:
+        val f = _fin_rate_f(r, nper, pmt, pv, fv)
+        val h = 0.000001
+        val f2 = _fin_rate_f(r + h, nper, pmt, pv, fv)
+        val d = (f2 - f) / h
+        if d == 0.0:
+            return FinSolve(ok: false, value: 0.0)
+        val rn = r - f / d
+        var diff = rn - r
+        if diff < 0.0:
+            diff = 0.0 - diff
+        if diff < 0.000000001:
+            return FinSolve(ok: true, value: rn)
+        r = rn
+        i = i + 1
+    FinSolve(ok: false, value: 0.0)
+
+fn _fin_rate_f(r: f64, nper: f64, pmt: f64, pv: f64, fv: f64) -> f64:
+    """Residual of the annuity equation at rate r (type 0)."""
+    if r == 0.0:
+        return pv + pmt * nper + fv
+    val g = _pow_f64(1.0 + r, nper)
+    pv * g + pmt * (g - 1.0) / r + fv
+
+fn _fin_npv_at(r: f64, flows: [f64]) -> f64:
+    """NPV of undiscounted-period-0 cashflows at rate r."""
+    var s = 0.0
+    var i = 0
+    while i < flows.len():
+        s = s + flows[i] / _pow_f64(1.0 + r, i.to_f64())
+        i = i + 1
+    s
+
+fn _fin_irr(flows: [f64], guess: f64) -> FinSolve:
+    """Internal rate of return via Newton's method with a bisection fallback."""
+    var r = guess
+    var i = 0
+    while i < 100:
+        val f = _fin_npv_at(r, flows)
+        var d = 0.0
+        var k = 1
+        while k < flows.len():
+            d = d - k.to_f64() * flows[k] / _pow_f64(1.0 + r, (k + 1).to_f64())
+            k = k + 1
+        if d == 0.0:
+            i = 100
+        else:
+            val rn = r - f / d
+            var diff = rn - r
+            if diff < 0.0:
+                diff = 0.0 - diff
+            if diff < 0.000000001:
+                return FinSolve(ok: true, value: rn)
+            r = rn
+            i = i + 1
+    # Bisection fallback over a bracketed rate range.
+    var lo = -0.999999
+    var hi = 10.0
+    var flo = _fin_npv_at(lo, flows)
+    var j = 0
+    while j < 200:
+        val mid = (lo + hi) / 2.0
+        val fm = _fin_npv_at(mid, flows)
+        var afm = fm
+        if afm < 0.0:
+            afm = 0.0 - afm
+        if afm < 0.000000001:
+            return FinSolve(ok: true, value: mid)
+        val same = (flo < 0.0) == (fm < 0.0)
+        if same:
+            lo = mid
+            flo = fm
+        else:
+            hi = mid
+        j = j + 1
+    FinSolve(ok: false, value: 0.0)
+
+fn _fin_mirr(flows: [f64], fin_rate: f64, rei_rate: f64) -> FinSolve:
+    """Modified IRR: finance negative flows at fin_rate, reinvest positives at rei_rate."""
+    val n = flows.len()
+    if n < 2:
+        return FinSolve(ok: false, value: 0.0)
+    var pv_neg = 0.0
+    var fv_pos = 0.0
+    var i = 0
+    while i < n:
+        val cf = flows[i]
+        if cf < 0.0:
+            pv_neg = pv_neg + cf / _pow_f64(1.0 + fin_rate, i.to_f64())
+        else:
+            fv_pos = fv_pos + cf * _pow_f64(1.0 + rei_rate, (n - 1 - i).to_f64())
+        i = i + 1
+    if pv_neg == 0.0:
+        return FinSolve(ok: false, value: 0.0)
+    val ratio = fv_pos / (0.0 - pv_neg)
+    if ratio <= 0.0:
+        return FinSolve(ok: false, value: 0.0)
+    FinSolve(ok: true, value: _powf(ratio, 1.0 / (n - 1).to_f64()) - 1.0)
 
 fn _is_nonneg_int(v: f64) -> bool:
     """True when v is a whole number >= 0 (Excel bitwise-op domain)."""
