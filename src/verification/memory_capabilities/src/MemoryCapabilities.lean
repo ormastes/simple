@@ -548,6 +548,19 @@ theorem empty_create_ref_wellformed (baseType : String) (loc : Nat) (cap : RefCa
     exact ⟨rfl, rfl⟩
   · exact singleton_env_wellformed baseType loc cap
 
+theorem empty_create_all_singletons_wellformed (baseType : String) (loc : Nat) :
+  (canCreateRef { activeRefs := [] } loc RefCapability.Shared = true ∧
+    wellFormed { activeRefs := [(loc, [{ location := loc, refType := { baseType := baseType, capability := RefCapability.Shared } }])] }) ∧
+  (canCreateRef { activeRefs := [] } loc RefCapability.Exclusive = true ∧
+    wellFormed { activeRefs := [(loc, [{ location := loc, refType := { baseType := baseType, capability := RefCapability.Exclusive } }])] }) ∧
+  (canCreateRef { activeRefs := [] } loc RefCapability.Isolated = true ∧
+    wellFormed { activeRefs := [(loc, [{ location := loc, refType := { baseType := baseType, capability := RefCapability.Isolated } }])] }) := by
+  constructor
+  · exact empty_create_ref_wellformed baseType loc RefCapability.Shared
+  · constructor
+    · exact empty_create_ref_wellformed baseType loc RefCapability.Exclusive
+    · exact empty_create_ref_wellformed baseType loc RefCapability.Isolated
+
 theorem two_shared_env_wellformed (baseType : String) (loc : Nat) :
   wellFormed
     { activeRefs :=
