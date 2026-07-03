@@ -115,7 +115,10 @@ SIMPLE_BINARY=bin/release/simple bash scripts/fpga/build_k26_vexriscv.shs
 
 The wrapper regenerates `build/vhdl/rv64/*.vhd`, writes
 `build/fpga/k26/build_vexriscv.tcl`, constrains `uart_tx` to PMOD H12
-(`LVCMOS33`), runs Vivado synthesis/implementation/bitgen, and copies:
+(`LVCMOS33`), and now refuses to run Vivado if `rv64gc_core.vhd` is placeholder
+RTL. Use `ALLOW_PLACEHOLDER_RTL=1` only for Vivado plumbing diagnostics. With
+real executable core RTL, it runs Vivado synthesis/implementation/bitgen and
+copies:
 
 - `build/fpga/k26/k26_vexriscv.bit`
 - `build/build/xilinx_kv260/gateware/xilinx_kv260.bit`

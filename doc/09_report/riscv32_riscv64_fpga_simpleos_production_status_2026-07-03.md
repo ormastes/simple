@@ -24,7 +24,12 @@ either RV32 or RV64.
 - FAIL: `build/vhdl/rv64/rv64gc_core.vhd` is a placeholder core with no instruction execution or debug/load context.
 - FAIL: `build/fpga/k26/load_elf_k26.log` records XSDB `dow` failure with `Invalid context`.
 
-`SIMPLE_BINARY=bin/release/simple bash scripts/fpga/build_k26_vexriscv.shs`
+`SIMPLE_BINARY=bin/release/simple bash scripts/fpga/build_k26_vexriscv.shs --synth-only`
+
+- FAIL-FAST: regenerates `build/vhdl/rv64/rv64gc_core.vhd`, detects placeholder RTL, and exits before Vivado with `refusing to build a non-executable K26 bitstream`.
+- INFO: set `ALLOW_PLACEHOLDER_RTL=1` only for Vivado plumbing diagnostics.
+
+Prior diagnostic run with placeholder RTL allowed:
 
 - PASS: generates RV64 VHDL with `bin/release/simple`.
 - PASS: Vivado synthesis and implementation complete.
@@ -116,9 +121,10 @@ artifacts.
 
 The K26 Vivado wrapper now uses the release Simple binary fallback, regenerates
 the RV64 VHDL/TCL every run, emits a K26 UART XDC constraint, preserves Vivado
-failure status despite tailing logs, and copies the generated bitstream to the
-preflight path. The K26 ELF loader now defaults to the current RV64 FPGA ELF and
-keeps an XSDB failure log at `build/fpga/k26/load_elf_k26.log`.
+failure status despite tailing logs, and refuses to run Vivado on placeholder
+core RTL unless `ALLOW_PLACEHOLDER_RTL=1` is set for plumbing diagnostics. The
+K26 ELF loader now defaults to the current RV64 FPGA ELF and keeps an XSDB
+failure log at `build/fpga/k26/load_elf_k26.log`.
 
 ## Remaining Production Blockers
 

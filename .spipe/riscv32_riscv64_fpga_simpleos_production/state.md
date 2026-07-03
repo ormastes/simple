@@ -29,7 +29,8 @@ N/A for this slice: this turn only fixes existing smoke wrappers and records blo
   - RV64 core reason: `build/vhdl/rv64/rv64gc_core.vhd` is a placeholder core with no instruction execution or debug/load context.
   - RV64 load reason: `build/fpga/k26/load_elf_k26.log` records XSDB `dow` failure with `Invalid context`.
 - `SIMPLE_BINARY=bin/release/simple bash scripts/fpga/build_k26_vexriscv.shs`:
-  - PASS: Vivado synthesis, implementation, DRC, and bitgen complete; copies `build/fpga/k26/k26_vexriscv.bit` and `build/build/xilinx_kv260/gateware/xilinx_kv260.bit`.
+  - NOW FAIL-FAST: the wrapper regenerates `build/vhdl/rv64/rv64gc_core.vhd`, detects placeholder RTL, and exits before Vivado unless `ALLOW_PLACEHOLDER_RTL=1` is set for plumbing diagnostics.
+  - PRIOR PASS: with placeholder RTL allowed, Vivado synthesis, implementation, DRC, and bitgen completed and copied `build/fpga/k26/k26_vexriscv.bit` plus `build/build/xilinx_kv260/gateware/xilinx_kv260.bit`.
 - `SIMPLE_BINARY=bin/release/simple CAPTURE_SECONDS=5 LINUX_TIMEOUT=10 sh scripts/fpga/check_kv260_simple_rv64_linux.shs`:
   - PASS: RV64 bitstream and ELF artifacts present, ELF header is ELF64 RISC-V, KV260 bitstream loads, merged USB PS UART responds, and generated RV64 Linux handoff passes.
   - INFO: PL UART on merged USB has no output; current generated image still needs PMOD UART capture or a routed UART before SimpleOS payload execution can be proven.
@@ -69,3 +70,4 @@ dev-in-progress
 - dev: Added fail-closed RV64 core/load-context gates to FPGA preflight so a present-but-placeholder bitstream cannot satisfy production readiness.
 - dev: Built RV32 SimpleOS FPGA ELF/bin with the local LLVM-enabled Rust Simple driver; RV32 remains blocked on a real bitstream.
 - dev: Added fail-closed RV32 core/load-context gates so future RV32 bitstreams also need executable-core and payload-load evidence.
+- dev: Made the K26 RV64 bitstream wrapper fail fast on placeholder core RTL so stale/generated bitstreams cannot be refreshed as production evidence.
