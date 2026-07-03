@@ -131,6 +131,11 @@ as a minimal stateful Wishbone fetch core instead of a constant-zero placeholder
 The dual-arch preflight now passes `rv64_fpga_core_executable` while still
 failing RV64 ELF load/run evidence.
 
+The generated RV64 `ram.vhd` now acknowledges Wishbone reads/writes and
+`wb_interconnect.vhd` decodes bootrom, CLINT, PLIC, UART, and RAM targets.
+`ghdl -a --std=08 build/vhdl/rv64/rv64gc_core.vhd build/vhdl/rv64/ram.vhd build/vhdl/rv64/wb_interconnect.vhd`
+passes locally.
+
 `simple os build --scenario=riscv64-fpga-mmode` and
 `simple os build --scenario=riscv32-fpga-mmode` are now registered. The RV64
 FPGA lane builds with the local Cranelift-capable release compiler and emits
@@ -149,7 +154,7 @@ failure log at `build/fpga/k26/load_elf_k26.log`.
 
 1. Install or provide `yosys` if synthesis/formal checks are part of the local
    production gate.
-2. Add a real RV64 CPU/debug/load path beyond the minimal fetch core; current XSDB `dow` still fails with `Invalid context`.
+2. Add RV64 payload preload or a real CPU/debug/load path beyond the minimal fetch/bus path; current XSDB `dow` still fails with `Invalid context`.
 3. Capture RV64 PL UART boot markers from PMOD H12/E10 or route PL UART to an observable serial channel.
 4. Produce an RV32 FPGA bitstream with executable-core evidence and prove RV32 SimpleOS payload execution.
 
