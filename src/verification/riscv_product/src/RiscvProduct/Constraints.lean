@@ -108,6 +108,10 @@ theorem held_resource_rejects_reentrant_acquire (owner : Lane) :
     acquire { owner := some owner } owner = none := by
   cases owner <;> simp [acquire]
 
+theorem acquire_then_reentrant_acquire_denied (owner : Lane) :
+    (acquire { owner := none } owner).bind (fun s => acquire s owner) = none := by
+  cases owner <;> simp [acquire]
+
 theorem failed_second_acquire_and_release_preserves_owner (owner other : Lane)
     (h : owner ≠ other) :
     acquire { owner := some owner } other = none ∧
