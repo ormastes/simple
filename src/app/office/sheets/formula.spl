@@ -494,6 +494,67 @@ fn _eval_function_call(name: text, tokens: [text], pos: i32, sheet: Sheet, depth
     val result_val = _dispatch_function(name, args, sheet)
     EvalResult(value: result_val, next_pos: cur_pos)
 
+val _LN2 = 0.6931471805599453
+val _PI = 3.141592653589793
+
+fn _exp_f64(x: f64) -> f64:
+    """e^x via argument halving + Taylor series, squared back up."""
+    var v = x
+    var squarings = 0
+    while v > 0.5 or v < -0.5:
+        v = v / 2.0
+        squarings = squarings + 1
+    # Taylor around 0
+    var term = 1.0
+    var sum = 1.0
+    var n = 1
+    while n <= 18:
+        term = term * v / n.to_f64()
+        sum = sum + term
+        n = n + 1
+    while squarings > 0:
+        sum = sum * sum
+        squarings = squarings - 1
+    sum
+
+fn _ln_f64(x: f64) -> f64:
+    """Natural log via binary normalization + atanh series. x must be > 0."""
+    var m = x
+    var e = 0
+    while m >= 2.0:
+        m = m / 2.0
+        e = e + 1
+    while m < 1.0:
+        m = m * 2.0
+        e = e - 1
+    val z = (m - 1.0) / (m + 1.0)
+    val z2 = z * z
+    var term = z
+    var sum = 0.0
+    var k = 1
+    while k <= 30:
+        sum = sum + term / k.to_f64()
+        term = term * z2
+        k = k + 2
+    e.to_f64() * _LN2 + 2.0 * sum
+
+fn _fact_i64(n: i64) -> f64:
+    var out = 1.0
+    var i: i64 = 2
+    while i <= n:
+        out = out * i.to_f64()
+        i = i + 1
+    out
+
+fn _gcd_i64(a: i64, b: i64) -> i64:
+    var x = if a < 0: -a else: a
+    var y = if b < 0: -b else: b
+    while y != 0:
+        val t = x % y
+        x = y
+        y = t
+    x
+
 fn _sorted_asc(values: [f64]) -> [f64]:
     """Insertion-sorted copy, ascending. ponytail: O(n^2), fine for formula args."""
     var out: [f64] = []
@@ -539,6 +600,91 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
             return CellValue.NumberVal(value: eval_max(flat))
         "PRODUCT":
             return CellValue.NumberVal(value: eval_product(flat))
+        "PI":
+            return CellValue.NumberVal(value: _PI)
+        "EXP":
+            if flat.len() > 0:
+                return CellValue.NumberVal(value: _exp_f64(flat[0]))
+            return CellValue.ErrorVal(message: "EXP requires 1 argument")
+        "LN":
+            if flat.len() > 0 and flat[0] > 0.0:
+                return CellValue.NumberVal(value: _ln_f64(flat[0]))
+            return CellValue.ErrorVal(message: "LN requires a positive argument")
+        "LOG10":
+            if flat.len() > 0 and flat[0] > 0.0:
+                return CellValue.NumberVal(value: _ln_f64(flat[0]) / _ln_f64(10.0))
+            return CellValue.ErrorVal(message: "LOG10 requires a positive argument")
+        "DEGREES":
+            if flat.len() > 0:
+                return CellValue.NumberVal(value: flat[0] * 180.0 / _PI)
+            return CellValue.ErrorVal(message: "DEGREES requires 1 argument")
+        "RADIANS":
+            if flat.len() > 0:
+                return CellValue.NumberVal(value: flat[0] * _PI / 180.0)
+            return CellValue.ErrorVal(message: "RADIANS requires 1 argument")
+        "SUMSQ":
+            var sq_sum = 0.0
+            for v in flat:
+                sq_sum = sq_sum + v * v
+            return CellValue.NumberVal(value: sq_sum)
+        "ROUNDUP":
+            if flat.len() > 0:
+                val v = flat[0]
+                val up = _ceil_f64(if v < 0.0: 0.0 - v else: v)
+                return CellValue.NumberVal(value: if v < 0.0: 0.0 - up else: up)
+            return CellValue.ErrorVal(message: "ROUNDUP requires 1 argument")
+        "ROUNDDOWN":
+            if flat.len() > 0:
+                val v = flat[0]
+                val down = _floor_f64(if v < 0.0: 0.0 - v else: v)
+                return CellValue.NumberVal(value: if v < 0.0: 0.0 - down else: down)
+            return CellValue.ErrorVal(message: "ROUNDDOWN requires 1 argument")
+        "EVEN":
+            if flat.len() > 0:
+                var n = _ceil_f64(flat[0]).to_i64()
+                if n % 2 != 0:
+                    n = n + 1
+                return CellValue.NumberVal(value: n.to_f64())
+            return CellValue.ErrorVal(message: "EVEN requires 1 argument")
+        "ODD":
+            if flat.len() > 0:
+                var n = _ceil_f64(flat[0]).to_i64()
+                if n % 2 == 0:
+                    n = n + 1
+                return CellValue.NumberVal(value: n.to_f64())
+            return CellValue.ErrorVal(message: "ODD requires 1 argument")
+        "FACT":
+            if flat.len() > 0 and flat[0] >= 0.0 and flat[0] <= 170.0:
+                return CellValue.NumberVal(value: _fact_i64(flat[0].to_i64()))
+            return CellValue.ErrorVal(message: "FACT requires 0..170")
+        "GCD":
+            if args.len() >= 2:
+                return CellValue.NumberVal(value: _gcd_i64(_first_val(args[0]).to_i64(), _first_val(args[1]).to_i64()).to_f64())
+            return CellValue.ErrorVal(message: "GCD requires 2 arguments")
+        "LCM":
+            if args.len() >= 2:
+                val a = _first_val(args[0]).to_i64()
+                val b = _first_val(args[1]).to_i64()
+                val g = _gcd_i64(a, b)
+                if g == 0:
+                    return CellValue.NumberVal(value: 0.0)
+                var l = (a / g) * b
+                if l < 0:
+                    l = -l
+                return CellValue.NumberVal(value: l.to_f64())
+            return CellValue.ErrorVal(message: "LCM requires 2 arguments")
+        "AVEDEV":
+            if flat.len() == 0:
+                return CellValue.ErrorVal(message: "AVEDEV requires arguments")
+            var mean_sum = 0.0
+            for v in flat:
+                mean_sum = mean_sum + v
+            val mean = mean_sum / flat.len().to_f64()
+            var dev_sum = 0.0
+            for v in flat:
+                val d = v - mean
+                dev_sum = dev_sum + (if d < 0.0: 0.0 - d else: d)
+            return CellValue.NumberVal(value: dev_sum / flat.len().to_f64())
         "MEDIAN":
             if flat.len() == 0:
                 return CellValue.ErrorVal(message: "MEDIAN requires arguments")

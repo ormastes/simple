@@ -93,3 +93,84 @@ fn render_bar_chart_svg(series: ChartSeries, title: text) -> text:
 fn sheet_bar_chart_svg(sheet: Sheet, label_range: text, value_range: text, title: text) -> text:
     """One-call chart: ranges in, SVG out."""
     render_bar_chart_svg(chart_series_from_ranges(sheet, label_range, value_range), title)
+
+fn render_line_chart_svg(series: ChartSeries, title: text) -> text:
+    """A polyline chart: values plotted left to right, labels on the x axis."""
+    val n = series.values.len()
+    if n == 0:
+        return "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"420\" height=\"40\"><text x=\"10\" y=\"25\" font-size=\"13\">no data</text></svg>"
+    var max_v = 0.0
+    for v in series.values:
+        if v > max_v:
+            max_v = v
+    if max_v <= 0.0:
+        max_v = 1.0
+    val w = 460
+    val h = 260
+    val plot_h = 180
+    val step = if n > 1: (w - 80) / (n - 1) else: 0
+    var points = ""
+    var i = 0
+    while i < n:
+        val x = 40 + i * step
+        val y = 30 + plot_h - ((series.values[i] / max_v) * plot_h.to_f64()).to_i64().to_i32()
+        points = if i == 0: "{x},{y}" else: "{points} {x},{y}"
+        i = i + 1
+    val safe_title = _svg_escape(title)
+    var out = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{w}\" height=\"{h}\" font-family=\"sans-serif\">"
+    out = "{out}<text x=\"10\" y=\"20\" font-size=\"15\" font-weight=\"600\">{safe_title}</text>"
+    out = "{out}<polyline points=\"{points}\" fill=\"none\" stroke=\"#2b579a\" stroke-width=\"2.5\"/>"
+    i = 0
+    while i < n:
+        val x = 40 + i * step
+        val label = _svg_escape(if i < series.labels.len(): series.labels[i] else: "")
+        out = "{out}<text x=\"{x - 10}\" y=\"{h - 12}\" font-size=\"12\" fill=\"#4b5563\">{label}</text>"
+        i = i + 1
+    "{out}</svg>"
+
+val _PIE_COLORS = ["#2b579a", "#217346", "#b7472a", "#c9a000", "#6d2c91", "#0079bf"]
+
+fn render_pie_chart_svg(series: ChartSeries, title: text) -> text:
+    """A pie chart via stroke-dasharray donut segments (no trig needed);
+    legend carries labels and values."""
+    val n = series.values.len()
+    var total = 0.0
+    for v in series.values:
+        if v > 0.0:
+            total = total + v
+    if n == 0 or total <= 0.0:
+        return "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"420\" height=\"40\"><text x=\"10\" y=\"25\" font-size=\"13\">no data</text></svg>"
+    # circumference for r=80
+    val circ = 2.0 * 3.141592653589793 * 80.0
+    val safe_title = _svg_escape(title)
+    var out = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"480\" height=\"260\" font-family=\"sans-serif\">"
+    out = "{out}<text x=\"10\" y=\"20\" font-size=\"15\" font-weight=\"600\">{safe_title}</text>"
+    var offset = 0.0
+    var i = 0
+    while i < n:
+        val v = series.values[i]
+        if v > 0.0:
+            val frac = v / total
+            val seg = frac * circ
+            val gap = circ - seg
+            val color = _PIE_COLORS[i % _PIE_COLORS.len()]
+            out = "{out}<circle cx=\"140\" cy=\"150\" r=\"80\" fill=\"none\" stroke=\"{color}\" stroke-width=\"56\" stroke-dasharray=\"{seg} {gap}\" stroke-dashoffset=\"{0.0 - offset}\" transform=\"rotate(-90 140 150)\"/>"
+            offset = offset + seg
+        i = i + 1
+    # legend
+    var y = 60
+    i = 0
+    while i < n:
+        val label = _svg_escape(if i < series.labels.len(): series.labels[i] else: "")
+        val color = _PIE_COLORS[i % _PIE_COLORS.len()]
+        out = "{out}<rect x=\"270\" y=\"{y - 10}\" width=\"12\" height=\"12\" fill=\"{color}\"/>"
+        out = "{out}<text x=\"290\" y=\"{y}\" font-size=\"13\">{label}: {_fmt_val(series.values[i])}</text>"
+        y = y + 24
+        i = i + 1
+    "{out}</svg>"
+
+fn sheet_line_chart_svg(sheet: Sheet, label_range: text, value_range: text, title: text) -> text:
+    render_line_chart_svg(chart_series_from_ranges(sheet, label_range, value_range), title)
+
+fn sheet_pie_chart_svg(sheet: Sheet, label_range: text, value_range: text, title: text) -> text:
+    render_pie_chart_svg(chart_series_from_ranges(sheet, label_range, value_range), title)
