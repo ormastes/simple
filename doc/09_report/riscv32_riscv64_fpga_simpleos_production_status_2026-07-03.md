@@ -24,8 +24,8 @@ either RV32 or RV64.
 
 `sh scripts/check/check-riscv-rtl-linux-smoke.shs --timeout=10`
 
-- FAIL: missing `examples/09_embedded/fpga_riscv/sw/generated_rv32_smoke.s`.
-- FAIL: missing `examples/09_embedded/fpga_riscv/sw/generated_rv64_linux_handoff_smoke.s`.
+- PASS: generated RV32 Linux handoff smoke reports `GENERATED_RV32_LINUX_HANDOFF: PASS`.
+- PASS: generated RV64 Linux handoff smoke reports `GENERATED_RV64_LINUX_HANDOFF: PASS`.
 
 `bin/release/simple run src/hardware/fpga_linux/generate_riscv_fpga_bundle.spl /tmp/simple_riscv_bundle_check`
 
@@ -50,22 +50,25 @@ handwritten example RTL tree. The bundle generator has a small executable
 entrypoint and no longer depends on the deleted handwritten RTL tree for its
 bundle output.
 
+Minimal RV32 and RV64 smoke assembly payloads are present under
+`examples/09_embedded/fpga_riscv/sw/`, and the RV64 public smoke wrapper no
+longer requires an unrelated native-build-capable compiler before running the
+GHDL lane.
+
 `scripts/check/check-riscv-fpga-simpleos-preflight.shs` now checks the existing
 RV64 preflight plus RV32 FPGA artifacts, so production status cannot ignore the
 32-bit lane.
 
 ## Remaining Production Blockers
 
-1. Restore or generate the RV32 and RV64 smoke assembly payloads used by the
-   generated RTL Linux smoke runners.
-2. Install or provide `yosys` if synthesis/formal checks are part of the local
+1. Install or provide `yosys` if synthesis/formal checks are part of the local
    production gate.
-3. Free the FT4232H JTAG interface before physical FPGA programming.
-4. Produce current RV64 FPGA SimpleOS ELF/bin/bitstream artifacts.
-5. Add equivalent RV32 SimpleOS FPGA artifact evidence, not only RV64.
-6. Prove physical UART boot markers and SimpleOS payload execution on the board.
+2. Free the FT4232H JTAG interface before physical FPGA programming.
+3. Produce current RV64 FPGA SimpleOS ELF/bin/bitstream artifacts.
+4. Add equivalent RV32 SimpleOS FPGA artifact evidence, not only RV64.
+5. Prove physical UART boot markers and SimpleOS payload execution on the board.
 
 ## Next Small Step
 
-Restore the two missing smoke payloads or change the wrappers to point at their
-current generated location, then rerun `scripts/check/check-riscv-rtl-linux-smoke.shs`.
+Produce the missing RV32/RV64 SimpleOS FPGA ELF/bin/bitstream artifacts, then
+rerun `scripts/check/check-riscv-fpga-simpleos-preflight.shs --local-only`.

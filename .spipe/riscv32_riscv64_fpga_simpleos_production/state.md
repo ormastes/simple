@@ -27,8 +27,8 @@ N/A for this slice: this turn only fixes existing smoke wrappers and records blo
   - PASS: FT4232H USB present, serial ports present, openFPGALoader, OpenOCD, Vivado, RISC-V cross compilers, Simple hello.
   - FAIL: JTAG interface free, yosys, SimpleOS ELF artifact, SimpleOS bin artifact, SimpleOS bitstream artifact.
 - `sh scripts/check/check-riscv-rtl-linux-smoke.shs --timeout=10`:
-  - FAIL `generated_rv32_linux check-tools`: missing `examples/09_embedded/fpga_riscv/sw/generated_rv32_smoke.s`.
-  - FAIL `generated_rv64_linux check-tools`: missing `examples/09_embedded/fpga_riscv/sw/generated_rv64_linux_handoff_smoke.s`.
+  - PASS `generated_rv32_linux`: GHDL reports `GENERATED_RV32_LINUX_HANDOFF: PASS`.
+  - PASS `generated_rv64_linux`: GHDL reports `GENERATED_RV64_LINUX_HANDOFF: PASS`.
 - `bin/release/simple run src/hardware/fpga_linux/generate_riscv_fpga_bundle.spl /tmp/simple_riscv_bundle_check`:
   - PASS: emits RV32 and RV64 generated-core bundle files under `rv32/rtl` and `rv64/rtl`, including core source, VHDL package/core, debug sidecar, and Linux handoff testbench artifacts.
 - `SIMPLE_BINARY=bin/release/simple sh scripts/check/check-riscv-fpga-simpleos-preflight.shs --local-only`:
@@ -43,3 +43,4 @@ dev-in-progress
 - dev: Added dual-arch FPGA preflight wrapper so RV32 artifacts are checked beside the existing RV64 preflight.
 - dev: Added a minimal bundle generator CLI, routed generated Linux runners through `GEN_DIR/rv32/rtl` and `GEN_DIR/rv64/rtl`, and made the bundle generator fail closed on missing copied RTL sources.
 - dev: Replaced the bundle generator's copied RTL dependency with emitted generated-core bundle artifacts, so bundle generation succeeds without `examples/09_embedded/fpga_riscv/rtl`.
+- dev: Added minimal RV32/RV64 smoke payloads and removed the stale RV64 native-build gate, so the top-level generated RTL Linux smoke passes both lanes.
