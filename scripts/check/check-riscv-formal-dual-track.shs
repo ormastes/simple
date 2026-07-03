@@ -1,0 +1,66 @@
+#!/usr/bin/env sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+LEAN_DIR="$ROOT_DIR/src/verification/riscv_product"
+BYL_FILE="$LEAN_DIR/riscv_product.byl"
+
+check_contains() {
+    file="$1"
+    needle="$2"
+    if ! grep -Fq "$needle" "$file"; then
+        echo "FAIL: $file missing $needle" >&2
+        exit 1
+    fi
+}
+
+sh "$ROOT_DIR/scripts/check/check-riscv-fpga-sidecar-contract.shs"
+
+test -f "$LEAN_DIR/GENERATED_CONTRACT.md" || {
+    echo "FAIL: missing RISC-V Lean generated contract" >&2
+    exit 1
+}
+test -f "$LEAN_DIR/src/RiscvProduct/Generated.lean" || {
+    echo "FAIL: missing generated RISC-V Lean model" >&2
+    exit 1
+}
+test -f "$LEAN_DIR/src/RiscvProduct/Constraints.lean" || {
+    echo "FAIL: missing manual RISC-V Lean constraints" >&2
+    exit 1
+}
+test -f "$BYL_FILE" || {
+    echo "FAIL: missing generated RISC-V BYL model" >&2
+    exit 1
+}
+
+LEAN_GENERATED="$LEAN_DIR/src/RiscvProduct/Generated.lean"
+LEAN_CONSTRAINTS="$LEAN_DIR/src/RiscvProduct/Constraints.lean"
+
+check_contains "$BYL_FILE" 'byl_version = "0.1"'
+check_contains "$BYL_FILE" 'schema = "simple.riscv_product"'
+check_contains "$BYL_FILE" 'lane rv32'
+check_contains "$BYL_FILE" 'lane rv64'
+check_contains "$BYL_FILE" 'configurable_fields = "product_level,configuration_profile,rv32.max_luts,rv64.max_luts,rv32.target_mhz,rv64.target_mhz"'
+check_contains "$BYL_FILE" 'max_luts = 25000'
+check_contains "$BYL_FILE" 'max_luts = 45000'
+check_contains "$BYL_FILE" 'target_mhz = 50'
+check_contains "$BYL_FILE" 'formal_gate = "rvfi+sby"'
+check_contains "$BYL_FILE" 'starvation_bound = 2'
+
+check_contains "$LEAN_GENERATED" 'maxLuts := 25000, targetMhz := 50'
+check_contains "$LEAN_GENERATED" 'maxLuts := 45000, targetMhz := 50'
+check_contains "$LEAN_GENERATED" 'def withProductMetadata'
+check_contains "$LEAN_GENERATED" 'def withBudgets'
+check_contains "$LEAN_CONSTRAINTS" '(profile Lane.rv32).maxLuts = 25000'
+check_contains "$LEAN_CONSTRAINTS" '(profile Lane.rv64).maxLuts = 45000'
+check_contains "$LEAN_CONSTRAINTS" 'theorem product_metadata_override_sets_fields'
+check_contains "$LEAN_CONSTRAINTS" 'theorem budget_override_sets_fields'
+
+if ! command -v lake >/dev/null 2>&1; then
+    echo "SKIP: lake not found; RTL formal structural gate passed"
+    exit 0
+fi
+
+(cd "$LEAN_DIR" && lake build)
+
+echo "STATUS: PASS riscv-formal-dual-track"

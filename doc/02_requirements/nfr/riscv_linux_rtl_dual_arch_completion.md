@@ -4,3 +4,4 @@
 - NFR-RLD-002: Default FPGA manifest generation must be deterministic across both architectures.
 - NFR-RLD-003: Dual-arch contract tests must run locally without requiring FPGA hardware.
 - NFR-RLD-004: Final acceptance must require generated-only Linux smoke checks for both RV32 and RV64; external RTL Linux smoke checks may run as optional diagnostics but do not gate acceptance.
+- NFR-RLD-005: RTL product metadata must publish deterministic size/performance targets and formal gate names so CI and hardware bring-up can reject over-budget or unproved lanes without parsing generated VHDL.

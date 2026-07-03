@@ -92,6 +92,16 @@
     same-frame backend `device_readback`, a positive backend handle, and
     matching checksum. Synthetic handles, upload-only provenance, and CPU
     mirrors fail.
+16. For formal verification claims, use the matching proof system and require
+    both when the lane spans layers. RTL/hardware claims require
+    RVFI/riscv-formal/SymbiYosys evidence; generated RISC-V RTL uses
+    `scripts/rtl/check-rvfi-formal-readiness.shs` with `CORE_VHDL` and, when
+    present, `FORMAL_HARNESS`, `FORMAL_SBY`, and `FORMAL_MANIFEST`. Missing
+    `sby` is readiness only, not proof pass. Lean claims require
+    `simple gen-lean verify`, `simple verify check`, or a lane-specific Lean
+    wrapper with zero `sorry`/`admit`/untrusted axioms. Starvation, fairness,
+    race-condition, scheduler, channel, lock, or resource-lifecycle changes
+    require a concurrency/resource model check or an explicit blocker.
 16. Compile verification report:
    - Test results (pass/fail counts)
    - Coverage percentage (target: 80%+)

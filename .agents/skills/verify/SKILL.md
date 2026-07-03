@@ -111,6 +111,17 @@ not create, rewrite, or weaken SPipe after verification.
   `sh scripts/audit/direct-env-runtime-guard.shs --staged`.
 - Security: input validation, no secrets
 - Reliability: error handling paths
+- Formal verification boundary:
+  - RTL/hardware claims use RVFI/riscv-formal/SymbiYosys evidence. Generated
+    RISC-V RTL must pass `scripts/rtl/check-rvfi-formal-readiness.shs` with the
+    core VHDL and, when emitted, `FORMAL_HARNESS`, `FORMAL_SBY`, and
+    `FORMAL_MANIFEST`. Missing `sby` means readiness only, not proof pass.
+  - Lean claims use `simple gen-lean verify`, `simple verify check`, or the
+    lane-specific Lean proof wrapper with zero `sorry`/`admit`/untrusted axioms.
+  - Use both when the lane spans RTL plus higher-level Simple/spec behavior.
+    Starvation, fairness, race-condition, scheduler, channel, lock, or resource
+    lifecycle changes require a concurrency/resource model check or an explicit
+    blocker; one interleaving test is not enough for formal verification PASS.
 - Core/MCP regression gate for compiler/core/lib or MCP/LSP changes:
   - `<runtime> check src/compiler`
   - `<runtime> check src/lib`

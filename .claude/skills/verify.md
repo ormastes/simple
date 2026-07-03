@@ -126,6 +126,13 @@ For each source file in scope:
    - **Security:** Check input validation, no secrets in code, proper auth
    - **Observability:** Check logging, metrics, tracing
    - **Compatibility:** Check platform-specific code paths
+   - **Formal verification:** RTL/hardware claims require
+     RVFI/riscv-formal/SymbiYosys evidence; generated RISC-V RTL uses
+     `scripts/rtl/check-rvfi-formal-readiness.shs` with `CORE_VHDL` and, when
+     present, `FORMAL_HARNESS`, `FORMAL_SBY`, and `FORMAL_MANIFEST`. Lean claims
+     require `simple gen-lean verify`, `simple verify check`, or a lane-specific
+     Lean wrapper with zero `sorry`/`admit`/untrusted axioms. Use both proof
+     systems when a lane spans RTL plus higher-level Simple/spec behavior.
 3. Flag NFR targets with no verification mechanism
 4. For GUI/web/2D RenderDoc+Vulkan evidence, start from the macOS top-level
    workflow:
@@ -297,6 +304,8 @@ Treat any of these as **FAIL** when reviewing runtime/concurrency/AOP changes
 - **Fix without pin**: any bug fix shipped without a regression spec that fails
   on the pre-fix behavior (no skip(), no weakened asserts, verified green via
   `bin/simple test`/`run`).
-- **Lean drift**: changes to weaver/scheduler/channel/boundary semantics without
-  rechecking the matching `src/verification/*` model
-  (`scripts/check/check-lean-proofs.shs` must stay green, zero sorry).
+- **Lean/formal drift**: changes to weaver/scheduler/channel/boundary semantics,
+  starvation/fairness behavior, race-condition fixes, locks, or resource
+  lifecycle without rechecking the matching `src/verification/*` model
+  (`scripts/check/check-lean-proofs.shs` must stay green, zero sorry) or
+  recording an explicit model/toolchain blocker.

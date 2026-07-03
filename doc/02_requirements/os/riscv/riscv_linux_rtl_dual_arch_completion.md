@@ -6,3 +6,4 @@
 - REQ-RLD-004: Linux handoff truth shall require `a0 = hartid`, `a1 = dtb`, and `satp = 0`.
 - REQ-RLD-005: FPGA/orchestration status shall report RV32 and RV64 independently and shall not overclaim readiness.
 - REQ-RLD-006: Generated-only RTL Linux smoke lanes for RV32 and RV64 shall remain the mandatory final validation gates; external RTL lanes may remain optional diagnostics only.
+- REQ-RLD-007: Product manifests shall expose per-lane configurable profile, ABI/MMU, RTL size budget, performance target, and RVFI/SymbiYosys formal gate metadata for both RV32 and RV64.

@@ -60,24 +60,39 @@ impl HirLowering:
     me try_lower_host_gpu_lane_expr(e: Expr) -> HirExpr?:
         match e.kind:
             case ExprKind.Call(callee, args):
+                # Typed rebinds of extracted pattern payloads: reading `.kind`
+                # directly off the extracted ANY-ish payload misreads on stage4
+                # (most-fields-wins), making `name == "host"` pass on garbage
+                # and misrouting print(1+1) into HostGpuLane → mono scan SEGV
+                # (bug doc iteration 17/18).
+                val callee_t: Expr = callee
+                val args_t: [CallArg] = args
                 var lane_code: i64 = 0
-                match callee.kind:
+                val callee_kind_t: ExprKind = callee_t.kind
+                match callee_kind_t:
                     case ExprKind.Ident(name):
-                        if name == "host":
+                        val name_t: text = name
+                        eprint("[LGL] callee ident name={name_t}")
+                        if name_t == "host":
                             lane_code = 1
-                        elif name == "gpu":
+                        elif name_t == "gpu":
                             lane_code = 2
                     case _:
                         pass
                 if lane_code == 0:
                     return nil
-                if args.len() != 2:
+                eprint("[LGL] lane_code={lane_code} args={args_t.len()}")
+                if args_t.len() != 2:
                     return nil
-                match args[1].value.kind:
+                val arg1_t: Expr = args_t[1].value
+                val arg1_kind_t: ExprKind = arg1_t.kind
+                match arg1_kind_t:
                     case ExprKind.Lambda(_params, lambda_body):
-                        val marker = self.lower_hir_expr(args[0].value)
-                        val payload_size = self.lower_host_gpu_lane_payload(args[0].value)
-                        val body = self.lower_host_gpu_lane_body(lambda_body)
+                        val lambda_body_t: Expr = lambda_body
+                        val arg0_t: Expr = args_t[0].value
+                        val marker = self.lower_hir_expr(arg0_t)
+                        val payload_size = self.lower_host_gpu_lane_payload(arg0_t)
+                        val body = self.lower_host_gpu_lane_body(lambda_body_t)
                         Some(HirExpr(
                             kind: HirExprKind.HostGpuLane(lane_code, payload_size, marker, body),
                             type_: nil,
@@ -161,9 +176,11 @@ impl HirLowering:
                 HirExprKind.SetLit(self.lower_expr_list(elements), nil)
 
             case ExprKind.Ident(name):
-                if (hir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
-                    eprint("[hir-lower] lower_expr:ident {name}")
-                val symbol = self.symbols.lookup(name)
+                # Typed rebind: extracted ANY-ish payload misreads on stage4
+                # when consumed directly (bug doc iteration 18).
+                val ident_name_t: text = name
+                eprint("[LHE-ARM] Ident name={ident_name_t}")
+                val symbol = self.symbols.lookup(ident_name_t)
                 if val found_symbol = symbol:
                     # NOTE: `if val found_symbol = symbol:` is not sufficient
                     # here -- same class of bug fixed in 413d121a011 for MIR
@@ -178,12 +195,12 @@ impl HirLowering:
                     # "undefined field 'id': cannot access field on value
                     # of type 'nil'".
                     if found_symbol == nil:
-                        self.error("unresolved name: {name}", e.span)
+                        self.error("unresolved name: {ident_name_t}", e.span)
                         HirExprKind.Error
                     else:
-                        HirExprKind.NamedVar(found_symbol, name)
+                        HirExprKind.NamedVar(found_symbol, ident_name_t)
                 else:
-                    self.error("unresolved name: {name}", e.span)
+                    self.error("unresolved name: {ident_name_t}", e.span)
                     HirExprKind.Error
 
             case ExprKind.Field(base, field):
@@ -208,8 +225,12 @@ impl HirLowering:
                 HirExprKind.Cast(self.lower_hir_expr(operand), self.lower_type(target_type))
 
             case ExprKind.Binary(op, left, right):
+                # Typed rebinds: extracted ANY-ish payloads misread on stage4
+                # when consumed directly (bug doc iteration 18).
+                val bin_left_t: Expr = left
+                val bin_right_t: Expr = right
                 val hir_op = self.lower_binop(op)
-                HirExprKind.Binary(hir_op, self.lower_hir_expr(left), self.lower_hir_expr(right))
+                HirExprKind.Binary(hir_op, self.lower_hir_expr(bin_left_t), self.lower_hir_expr(bin_right_t))
 
             case ExprKind.Unary(op, operand):
                 val hir_op = self.lower_unaryop(op)
@@ -217,17 +238,22 @@ impl HirLowering:
 
             case ExprKind.Call(callee, args):
                 eprint("[LHE-ARM] Call")
+                # Typed rebinds: extracted ANY-ish payloads misread on stage4
+                # when consumed directly (bug doc iteration 18).
+                val call_callee_t: Expr = callee
+                val call_args_t: [CallArg] = args
                 if (hir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
-                    HirExprKind.Call(self.lower_hir_expr(callee), [], [])
+                    HirExprKind.Call(self.lower_hir_expr(call_callee_t), [], [])
                 else:
                     var hir_args: [HirCallArg] = []
-                    for arg in args:
+                    for arg in call_args_t:
+                        val arg_t: CallArg = arg
                         hir_args = hir_args.push(HirCallArg(
-                            name: arg.name,
-                            value: self.lower_hir_expr(arg.value),
-                            span: arg.span
+                            name: arg_t.name,
+                            value: self.lower_hir_expr(arg_t.value),
+                            span: arg_t.span
                         ))
-                    HirExprKind.Call(self.lower_hir_expr(callee), hir_args, [])
+                    HirExprKind.Call(self.lower_hir_expr(call_callee_t), hir_args, [])
 
             case ExprKind.MethodCall(receiver, method, args):
                 if (hir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":

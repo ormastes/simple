@@ -7,9 +7,12 @@ page, and that unknown/empty adapter names fall back to the suite index.
 
 use std.spec
 use app.ui.render.types.{RenderConfig}
-use app.office.render_adapter.{office_render, office_render_source, render_sheet_html, office_demo_sheet, office_demo_document, office_demo_slide}
+use app.office.render_adapter.{office_render, office_render_source, render_sheet_html, office_demo_sheet, office_demo_document, office_demo_slide, render_sheet_html_with_rules, render_chart_section_html}
 use app.office.word.html_render.{render_document_html}
 use app.office.slides.html_render.{render_slide_html}
+use app.office.sheets.spreadsheet.{Sheet}
+use app.office.sheets.cond_format.{CondRule}
+use app.office.sheets.chart.{sheet_bar_chart_svg}
 
 fn _render(surface: text) -> text:
     var cfg = RenderConfig.html_export()
@@ -101,3 +104,53 @@ describe "office render adapter: surface renderers reuse real models":
     it "produces a non-empty document and slide from the demo builders":
         expect(render_document_html(office_demo_document())).to_contain("Highlights")
         expect(render_slide_html(office_demo_slide())).to_contain("production-ready")
+
+describe "office render adapter: conditional formatting and charts":
+    """Calc feature modules (cond_format, chart) wired into the sheet grid render."""
+
+    it "merges a matching rule's CSS into that cell's td and leaves non-matching cells unchanged":
+        var sheet = Sheet.new("Demo")
+        sheet.set_value("A1", "50")
+        sheet.set_value("A2", "150")
+        val css = "background:#fde7e9;color:#c00"
+        val rules = [CondRule(range: "A1:A2", kind: "cell_value", criteria: ">100", n: 0, css: css)]
+        val html = render_sheet_html_with_rules(sheet, rules)
+        val cells = html.split("<td")
+        var matched_td = ""
+        var unmatched_td = ""
+        for part in cells:
+            if part.contains(">150<"):
+                matched_td = part
+            if part.contains(">50<"):
+                unmatched_td = part
+        expect(matched_td).to_contain(css)
+        expect(unmatched_td).to_contain("border: 1px solid")
+        assert_false(unmatched_td.contains(css))
+
+    it "renders no CSS on any cell when no rule matches":
+        var sheet = Sheet.new("Demo")
+        sheet.set_value("A1", "5")
+        val rules = [CondRule(range: "A1:A1", kind: "cell_value", criteria: ">100", n: 0, css: "background:#fde7e9")]
+        val html = render_sheet_html_with_rules(sheet, rules)
+        expect(html).to_contain(">5<")
+        assert_false(html.contains("background:#fde7e9"))
+
+    it "embeds a chart SVG below the sheet grid in a titled section":
+        var sheet = Sheet.new("Demo")
+        sheet.set_value("A1", "Q1")
+        sheet.set_value("A2", "Q2")
+        sheet.set_value("B1", "10")
+        sheet.set_value("B2", "20")
+        val svg = sheet_bar_chart_svg(sheet, "A1:A2", "B1:B2", "Quarterly Totals")
+        val section = render_chart_section_html(svg, "Quarterly Totals")
+        expect(section).to_contain("<svg")
+        expect(section).to_contain("Quarterly Totals")
+
+    it "wires conditional formatting and a chart into the Calc surface export":
+        var cfg = RenderConfig.html_export()
+        cfg.adapter_name = "sheets"
+        val result = office_render(cfg)
+        val html = result.html_output
+        expect(html).to_contain("<svg")
+        expect(html).to_contain("Q1 Revenue vs Costs")
+        expect(html).to_contain("background:#d1fae5")

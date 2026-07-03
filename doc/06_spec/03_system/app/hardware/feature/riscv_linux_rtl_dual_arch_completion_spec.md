@@ -28,7 +28,7 @@ riscv_linux_rtl_dual_arch_completion_spec -> hardware
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 2 | 2 | 0 | 0 |
+| 3 | 3 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -37,7 +37,7 @@ riscv_linux_rtl_dual_arch_completion_spec -> hardware
 
 ## Scenarios
 
-### REQ-RLD-001..006
+### REQ-RLD-001..007
 
 #### keeps dual-arch QEMU virt profiles public and deterministic
 
@@ -48,8 +48,8 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(RiscvPlatformProfile.qemu_virt_rv32().name).to_equal("qemu_virt_rv32")
-expect(RiscvPlatformProfile.qemu_virt_rv64().name).to_equal("qemu_virt_rv64")
+expect(qemu_virt_rv32_platform_profile().name).to_equal("qemu_virt_rv32")
+expect(qemu_virt_rv64_platform_profile().name).to_equal("qemu_virt_rv64")
 ```
 
 </details>
@@ -71,6 +71,32 @@ expect(manifest.readiness_summary()).to_contain("rv64:")
 
 </details>
 
+#### publishes product configuration, budget, and formal gates per lane
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val manifest = create_default_riscv_fpga_linux_manifest()
+val text = manifest.rtl_manifest_text("/tmp/riscv_linux_rtl_dual_arch_completion")
+expect(text).to_contain("product_level = \"linux-rtl\"")
+expect(text).to_contain("configuration_profile = \"qemu-virt+fpga-board\"")
+expect(text).to_contain("linux_abi = \"ilp32d\"")
+expect(text).to_contain("linux_abi = \"lp64d\"")
+expect(text).to_contain("linux_mmu = \"sv32\"")
+expect(text).to_contain("linux_mmu = \"sv39\"")
+expect(text).to_contain("rtl_size_budget_luts = \"25000\"")
+expect(text).to_contain("rtl_size_budget_luts = \"45000\"")
+expect(text).to_contain("perf_target_mhz = \"50\"")
+expect(text).to_contain("formal_verification = \"rvfi+sby\"")
+expect(text).to_contain("formal_gate = \"rvfi_port_manifest\"")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -78,20 +104,20 @@ expect(manifest.readiness_summary()).to_contain("rv64:")
 | Category | Application |
 | Status | Active |
 | Source | `test/03_system/app/hardware/feature/riscv_linux_rtl_dual_arch_completion_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-07-03 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
 Tests covering:
-- REQ-RLD-001..006
+- REQ-RLD-001..007
 
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 2 |
-| Active scenarios | 2 |
+| Total scenarios | 3 |
+| Active scenarios | 3 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

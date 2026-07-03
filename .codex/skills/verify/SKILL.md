@@ -137,6 +137,18 @@ Scan for stub patterns — any match is a **FAIL**:
   why generated/native Simple cannot handle the path yet. Prefer stdlib,
   generated Simple, capability records, traits, or direct hardware backends over
   runtime bypasses.
+- **Formal verification boundary:** use the proof system that matches the layer,
+  and use both when the lane spans layers. RTL/hardware claims require
+  RVFI/riscv-formal/SymbiYosys evidence; generated RISC-V RTL must pass
+  `scripts/rtl/check-rvfi-formal-readiness.shs` with the core VHDL and, when
+  emitted, `FORMAL_HARNESS`, `FORMAL_SBY`, and `FORMAL_MANIFEST`. A missing
+  `sby` is readiness-only evidence, not a proof pass. Lean claims require
+  `simple gen-lean verify`, `simple verify check`, or a lane-specific Lean
+  wrapper with zero `sorry`/`admit`/untrusted axioms before claiming the modeled
+  property is proven. Starvation, fairness, race-condition, scheduler, channel,
+  lock, or resource-lifecycle changes require a concurrency/resource model
+  check or an explicit blocker; a single interleaving test is not enough for a
+  formal verification PASS.
 - **GUI/MDI evidence gates:** wrappers that claim live visual/event proof must
   fail when requested evidence is unavailable, times out, or only proves file
   existence. For Electron, Tauri mobile/iOS, hosted WM, QEMU/GTK WM, and pure WM

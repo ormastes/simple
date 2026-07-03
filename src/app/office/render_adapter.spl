@@ -27,6 +27,8 @@ use app.office.slides.deck_format.{parse_deck}
 use common.drawing.vector_shapes.{DrawShape, DrawCanvas, empty_canvas, add_shape, canvas_to_svg}
 use app.office.base_db.{DbTable, new_table, insert_row}
 use app.office.math_editor.{math_to_mathml}
+use app.office.sheets.cond_format.{CondRule, cond_css_for_cell}
+use app.office.sheets.chart.{sheet_bar_chart_svg}
 
 # =========================================================================
 # Accent per surface
@@ -163,6 +165,82 @@ fn render_sheet_html(sheet: Sheet) -> text:
     "{out}</table>"
 
 # =========================================================================
+# Sheet -> HTML table, conditional-formatting variant
+# =========================================================================
+
+fn _sheet_cell_html_with_css(sheet: Sheet, ref_str: text, header: bool, extra_css: text) -> text:
+    """Like `_sheet_cell_html`, but merges `extra_css` into a data cell's
+    inline style when non-empty. Header cells are unaffected."""
+    val display = cell_display_text(sheet.get_cell(ref_str))
+    if header:
+        return "<th style=\"border: 1px solid #d0d7de; padding: 6px 12px; background: #f6f8fa; text-align: left;\">{display}</th>"
+    if extra_css == "":
+        return "<td style=\"border: 1px solid #d0d7de; padding: 6px 12px;\">{display}</td>"
+    "<td style=\"border: 1px solid #d0d7de; padding: 6px 12px; {extra_css}\">{display}</td>"
+
+fn render_sheet_html_with_rules(sheet: Sheet, rules: [CondRule]) -> text:
+    """Like `render_sheet_html`, but evaluates `rules` for every data cell and
+    merges the matching CondRule's CSS into that `<td>`'s inline style.
+
+    Same grid layout (gray column-letter header, row numbers, bold first data
+    row); the default `render_sheet_html` path is unaffected by this variant."""
+    val range_str = sheet.used_range()
+    val parts = range_str.split(":")
+    val start = parse_cell_ref(parts[0])
+    val end_ref = parse_cell_ref(parts[1])
+    if start == nil or end_ref == nil:
+        return "<table></table>"
+    var out = "<table style=\"border-collapse: collapse; font-family: -apple-system, Segoe UI, sans-serif; font-size: 14px;\">"
+    val corner = _grid_chrome_cell("")
+    out = "{out}<tr>{corner}"
+    var hc = start.col
+    while hc <= end_ref.col:
+        val letter_cell = _grid_chrome_cell(col_to_letter(hc))
+        out = "{out}{letter_cell}"
+        hc = hc + 1
+    out = "{out}</tr>"
+    var r = start.row
+    while r <= end_ref.row:
+        val row_label = "{r + 1}"
+        val row_cell = _grid_chrome_cell(row_label)
+        out = "{out}<tr>{row_cell}"
+        var c = start.col
+        while c <= end_ref.col:
+            val ref_str = cell_ref_to_string(CellRef(col: c, row: r))
+            val extra_css = cond_css_for_cell(sheet, rules, ref_str)
+            out = "{out}{_sheet_cell_html_with_css(sheet, ref_str, r == start.row, extra_css)}"
+            c = c + 1
+        out = "{out}</tr>"
+        r = r + 1
+    "{out}</table>"
+
+# =========================================================================
+# Chart embedding
+# =========================================================================
+
+fn render_chart_section_html(svg: text, title: text) -> text:
+    """A titled section embedding a pre-rendered chart SVG (from
+    `app.office.sheets.chart`), meant to sit below a sheet grid in an
+    exported Calc page."""
+    val heading = "<h3 style=\"margin: 0 0 12px 0; font-size: 16px; color: #1f2937;\">{title}</h3>"
+    val frame_open = "<div style=\"padding: 12px; border: 1px solid #d0d7de; border-radius: 6px; background: #fafbfc;\">"
+    "<section style=\"margin: 24px 0 0 0;\">{heading}{frame_open}{svg}</div></section>"
+
+fn _office_demo_cond_rules() -> [CondRule]:
+    """Demo conditional-format rule: highlight revenue/cost cells over 1000."""
+    [CondRule(range: "B2:C3", kind: "cell_value", criteria: ">1000", n: 0, css: "background:#d1fae5;color:#065f46;font-weight:600")]
+
+fn render_sheet_export_html(sheet: Sheet) -> text:
+    """The Calc export body: the conditional-formatted grid plus a demo chart
+    section, showing conditional formatting and chart embedding as visible
+    product features rather than standalone APIs."""
+    val sheet_grid = render_sheet_html_with_rules(sheet, _office_demo_cond_rules())
+    val chart_title = "Q1 Revenue vs Costs"
+    val chart_svg = sheet_bar_chart_svg(sheet, "A2:A3", "B2:B3", chart_title)
+    val chart_section = render_chart_section_html(chart_svg, chart_title)
+    "{sheet_grid}{chart_section}"
+
+# =========================================================================
 # Full-page HTML wrapper
 # =========================================================================
 
@@ -241,7 +319,7 @@ fn _render_body_for(surface: text) -> text:
     if surface == "word":
         return render_document_html(office_demo_document())
     if surface == "sheets":
-        return render_sheet_html(office_demo_sheet())
+        return render_sheet_export_html(office_demo_sheet())
     if surface == "slides":
         return render_slide_html(office_demo_slide())
     if surface == "mail":

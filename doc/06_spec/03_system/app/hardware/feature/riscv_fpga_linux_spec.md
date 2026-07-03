@@ -28,7 +28,7 @@ riscv_fpga_linux_spec -> hardware
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 7 | 7 | 0 | 0 |
+| 9 | 9 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -150,7 +150,7 @@ expect(products).to_contain("validation_kind = \"linux-uart-markers\"")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 48 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -160,8 +160,19 @@ val bundle = result.ok().unwrap()
 val manifest_text = read_generated_riscv_fpga_rtl_file(bundle.manifest_path)
 val products_text = read_generated_riscv_fpga_rtl_file(bundle.board_linux_boot_products_manifest_path)
 val bundle_readme_text = read_generated_riscv_fpga_rtl_file(bundle.bundle_readme_path)
+val rv32_sidecar = read_generated_riscv_fpga_rtl_file("/tmp/simple_riscv_fpga_system_spec/rv32/rtl/simple_rv32gc_core.debug.json")
+val rv64_sidecar = read_generated_riscv_fpga_rtl_file("/tmp/simple_riscv_fpga_system_spec/rv64/rtl/simple_rv64gc_core.debug.json")
+val rv32_core_vhdl = read_generated_riscv_fpga_rtl_file("/tmp/simple_riscv_fpga_system_spec/rv32/rtl/simple_rv32gc_core.vhd")
+val rv64_core_vhdl = read_generated_riscv_fpga_rtl_file("/tmp/simple_riscv_fpga_system_spec/rv64/rtl/simple_rv64gc_core.vhd")
+val rv32_formal_vhdl = read_generated_riscv_fpga_rtl_file("/tmp/simple_riscv_fpga_system_spec/rv32/rtl/simple_rv32gc_core_formal.vhd")
+val rv64_formal_vhdl = read_generated_riscv_fpga_rtl_file("/tmp/simple_riscv_fpga_system_spec/rv64/rtl/simple_rv64gc_core_formal.vhd")
+val rv32_sby = read_generated_riscv_fpga_rtl_file("/tmp/simple_riscv_fpga_system_spec/rv32/rtl/simple_rv32gc_core.sby")
+val rv64_sby = read_generated_riscv_fpga_rtl_file("/tmp/simple_riscv_fpga_system_spec/rv64/rtl/simple_rv64gc_core.sby")
+val rv32_formal_manifest = read_generated_riscv_fpga_rtl_file("/tmp/simple_riscv_fpga_system_spec/rv32/rtl/simple_rv32gc_core_formal.sdn")
+val rv64_formal_manifest = read_generated_riscv_fpga_rtl_file("/tmp/simple_riscv_fpga_system_spec/rv64/rtl/simple_rv64gc_core_formal.sdn")
 expect(manifest_text).to_contain("proof_lane = \"generated_rv32_linux\"")
 expect(manifest_text).to_contain("proof_lane = \"generated_rv64_linux\"")
+expect(manifest_text).to_contain("board = \"xilinx_generic\"")
 expect(manifest_text).to_contain("authoritative_rtl_provenance = \"simple-compiler-generated\"")
 expect(manifest_text).to_contain("authoritative_file = \"/tmp/simple_riscv_fpga_system_spec/rv32/rtl/simple_rv32gc_core.spl\"")
 expect(manifest_text).to_contain("authoritative_file = \"/tmp/simple_riscv_fpga_system_spec/rv64/rtl/simple_rv64gc_core.vhd\"")
@@ -171,6 +182,32 @@ expect(products_text).to_contain("product_id = \"xilinx_generic_rv64_linux\"")
 expect(products_text).to_contain("expected_markers = \"OpenSBI|Linux version|OF: fdt|Freeing unused kernel memory|init started\"")
 expect(bundle_readme_text).to_contain("per-arch boot products manifest: `board_linux_boot_products.sdn`")
 expect(bundle_readme_text).to_contain("The machine-readable authoritative subset is listed explicitly by `authoritative_file` entries in the manifest and `provenance.authoritativeFiles` in the debug sidecar.")
+expect(rv32_sidecar).to_contain("\"productLevel\": \"linux-rtl\"")
+expect(rv64_sidecar).to_contain("\"configurationProfile\": \"qemu-virt+fpga-board\"")
+expect(rv32_sidecar).to_contain("\"rtlBudget\": {\"maxLuts\": 25000, \"targetMhz\": 50}")
+expect(rv64_sidecar).to_contain("\"rtlBudget\": {\"maxLuts\": 45000, \"targetMhz\": 50}")
+expect(rv32_sidecar).to_contain("\"formal\": {\"flow\": \"rvfi+sby\", \"gate\": \"rvfi_port_manifest\", \"status\": \"rvfi-ready\"")
+expect(rv32_sidecar).to_contain("\"harness\": \"/tmp/simple_riscv_fpga_system_spec/rv32/rtl/simple_rv32gc_core_formal.vhd\"")
+expect(rv32_sidecar).to_contain("\"sby\": \"/tmp/simple_riscv_fpga_system_spec/rv32/rtl/simple_rv32gc_core.sby\"")
+expect(rv32_sidecar).to_contain("\"signal\":\"Rv32Instruction.opcode\"")
+expect(rv32_sidecar).to_contain("tb_generated_rv32_linux_handoff.vhd")
+expect(rv32_sidecar).to_contain("GENERATED_RV32_BOOT_INFO_REAL_DTB: PASS")
+expect(rv32_core_vhdl).to_contain("rvfi_valid")
+expect(rv32_core_vhdl).to_contain("rvfi_mem_wdata")
+expect(rv32_formal_vhdl).to_contain("entity simple_rv32gc_core_formal is")
+expect(rv32_sby).to_contain("mode prove")
+expect(rv32_sby).to_contain("smtbmc")
+expect(rv32_formal_manifest).to_contain("runner = \"sby -f simple_rv32gc_core.sby\"")
+expect(rv64_sidecar).to_contain("\"formal\": {\"flow\": \"rvfi+sby\", \"gate\": \"rvfi_port_manifest\", \"status\": \"rvfi-ready\"")
+expect(rv64_sidecar).to_contain("\"harness\": \"/tmp/simple_riscv_fpga_system_spec/rv64/rtl/simple_rv64gc_core_formal.vhd\"")
+expect(rv64_sidecar).to_contain("\"sby\": \"/tmp/simple_riscv_fpga_system_spec/rv64/rtl/simple_rv64gc_core.sby\"")
+expect(rv64_sidecar).to_contain("\"signal\":\"Rv64Instruction.opcode\"")
+expect(rv64_core_vhdl).to_contain("rvfi_valid")
+expect(rv64_core_vhdl).to_contain("rvfi_mem_wdata")
+expect(rv64_formal_vhdl).to_contain("entity simple_rv64gc_core_formal is")
+expect(rv64_sby).to_contain("mode prove")
+expect(rv64_sby).to_contain("smtbmc")
+expect(rv64_formal_manifest).to_contain("runner = \"sby -f simple_rv64gc_core.sby\"")
 ```
 
 </details>
@@ -196,12 +233,62 @@ expect(products_text).to_contain("product_id = \"mlk_s02_100t_rv64_linux\"")
 
 </details>
 
+#### propagates a custom configuration profile into manifest and sidecars
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = generate_riscv_fpga_rtl_bundle_for_board_with_profile("/tmp/simple_riscv_fpga_system_spec_custom_profile", "mlk_s02_100t", "mlk-s02-100t+formal")
+expect(result.is_ok()).to_equal(true)
+val bundle = result.ok().unwrap()
+val manifest_text = read_generated_riscv_fpga_rtl_file(bundle.manifest_path)
+val rv32_sidecar = read_generated_riscv_fpga_rtl_file("/tmp/simple_riscv_fpga_system_spec_custom_profile/rv32/rtl/simple_rv32gc_core.debug.json")
+val rv64_sidecar = read_generated_riscv_fpga_rtl_file("/tmp/simple_riscv_fpga_system_spec_custom_profile/rv64/rtl/simple_rv64gc_core.debug.json")
+expect(manifest_text).to_contain("configuration_profile = \"mlk-s02-100t+formal\"")
+expect(rv32_sidecar).to_contain("\"configurationProfile\": \"mlk-s02-100t+formal\"")
+expect(rv64_sidecar).to_contain("\"configurationProfile\": \"mlk-s02-100t+formal\"")
+```
+
+</details>
+
+#### propagates custom product level, RTL size, and performance budgets into manifest and sidecars
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 17 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = generate_riscv_fpga_rtl_bundle_configured("/tmp/simple_riscv_fpga_system_spec_custom_budget", "mlk_s02_100t", "lab-rtl", "budget-check", 21000, 39000, 75, 80)
+expect(result.is_ok()).to_equal(true)
+val bundle = result.ok().unwrap()
+val manifest_text = read_generated_riscv_fpga_rtl_file(bundle.manifest_path)
+val rv32_sidecar = read_generated_riscv_fpga_rtl_file("/tmp/simple_riscv_fpga_system_spec_custom_budget/rv32/rtl/simple_rv32gc_core.debug.json")
+val rv64_sidecar = read_generated_riscv_fpga_rtl_file("/tmp/simple_riscv_fpga_system_spec_custom_budget/rv64/rtl/simple_rv64gc_core.debug.json")
+expect(manifest_text).to_contain("product_level = \"lab-rtl\"")
+expect(manifest_text).to_contain("rtl_size_budget_luts = \"21000\"")
+expect(manifest_text).to_contain("rtl_size_budget_luts = \"39000\"")
+expect(manifest_text).to_contain("perf_target_mhz = \"75\"")
+expect(manifest_text).to_contain("perf_target_mhz = \"80\"")
+expect(rv32_sidecar).to_contain("\"productLevel\": \"lab-rtl\"")
+expect(rv32_sidecar).to_contain("\"rtlBudget\": {\"maxLuts\": 21000, \"targetMhz\": 75}")
+expect(rv64_sidecar).to_contain("\"productLevel\": \"lab-rtl\"")
+expect(rv64_sidecar).to_contain("\"rtlBudget\": {\"maxLuts\": 39000, \"targetMhz\": 80}")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 7 |
-| Active scenarios | 7 |
+| Total scenarios | 9 |
+| Active scenarios | 9 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

@@ -1,0 +1,90 @@
+#!/usr/bin/env sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+SIMPLE_BIN="${SIMPLE_BIN:-$ROOT_DIR/bin/simple}"
+BUILD_ROOT="${BUILD_ROOT:-$ROOT_DIR/build/riscv_budget_evidence}"
+REPORT_DIR="${SYNTH_REPORT_DIR:-}"
+REQUIRE_SYNTH="${REQUIRE_SYNTH_REPORTS:-0}"
+
+for arg in "$@"; do
+    case "$arg" in
+        --require-synth)
+            REQUIRE_SYNTH=1
+            ;;
+        *)
+            echo "FAIL: unknown argument $arg" >&2
+            exit 1
+            ;;
+    esac
+done
+
+check_contains() {
+    file="$1"
+    needle="$2"
+    if ! grep -Fq "$needle" "$file"; then
+        echo "FAIL: $file missing $needle" >&2
+        exit 1
+    fi
+}
+
+value_for() {
+    file="$1"
+    key="$2"
+    grep -E "^${key}[[:space:]]*=" "$file" | head -n 1 | sed 's/.*=[[:space:]]*//; s/"//g'
+}
+
+check_report() {
+    lane="$1"
+    max_luts="$2"
+    target_mhz="$3"
+    report="$REPORT_DIR/${lane}_synth.sdn"
+
+    test -f "$report" || {
+        echo "FAIL: missing synthesis report $report" >&2
+        exit 1
+    }
+
+    actual_luts="$(value_for "$report" actual_luts)"
+    actual_mhz="$(value_for "$report" actual_mhz)"
+    test -n "$actual_luts" || { echo "FAIL: $report missing actual_luts" >&2; exit 1; }
+    test -n "$actual_mhz" || { echo "FAIL: $report missing actual_mhz" >&2; exit 1; }
+
+    if [ "$actual_luts" -gt "$max_luts" ]; then
+        echo "FAIL: $lane actual_luts=$actual_luts exceeds max_luts=$max_luts" >&2
+        exit 1
+    fi
+    if [ "$actual_mhz" -lt "$target_mhz" ]; then
+        echo "FAIL: $lane actual_mhz=$actual_mhz below target_mhz=$target_mhz" >&2
+        exit 1
+    fi
+}
+
+rm -rf "$BUILD_ROOT"
+mkdir -p "$BUILD_ROOT"
+
+"$SIMPLE_BIN" run "$ROOT_DIR/src/hardware/fpga_linux/generate_riscv_fpga_bundle.spl" "$BUILD_ROOT/default" >/dev/null
+
+manifest="$BUILD_ROOT/default/manifest.sdn"
+rv32="$BUILD_ROOT/default/rv32/rtl/simple_rv32gc_core.debug.json"
+rv64="$BUILD_ROOT/default/rv64/rtl/simple_rv64gc_core.debug.json"
+
+check_contains "$manifest" 'rtl_size_budget_luts = "25000"'
+check_contains "$manifest" 'rtl_size_budget_luts = "45000"'
+check_contains "$manifest" 'perf_target_mhz = "50"'
+check_contains "$rv32" '"rtlBudget": {"maxLuts": 25000, "targetMhz": 50}'
+check_contains "$rv64" '"rtlBudget": {"maxLuts": 45000, "targetMhz": 50}'
+
+if [ -z "$REPORT_DIR" ]; then
+    if [ "$REQUIRE_SYNTH" = "1" ]; then
+        echo "FAIL: SYNTH_REPORT_DIR is required by --require-synth" >&2
+        exit 1
+    fi
+    echo "STATUS: WARN riscv-budget-evidence target-metadata-only"
+    exit 0
+fi
+
+check_report rv32 25000 50
+check_report rv64 45000 50
+
+echo "STATUS: PASS riscv-budget-evidence"
