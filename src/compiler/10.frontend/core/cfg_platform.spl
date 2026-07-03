@@ -6,7 +6,7 @@
 
 extern fn rt_env_get(key: text) -> text
 extern fn rt_platform_name() -> text
-extern fn rt_get_host_target_code() -> i64
+extern fn rt_file_read_text(path: text) -> text
 
 fn cfg_env(key: text) -> text:
     val value = rt_env_get(key)
@@ -174,16 +174,14 @@ fn cfg_detect_arch() -> text:
     if from_cpu != "":
         return from_cpu
 
-    # Native host fallback: env vars are usually not exported to the process,
-    # so consult the runtime directly (host arch, correct for interpretation).
-    # rt_get_host_target_code(): 0=x86_64, 1=aarch64, 2=riscv64.
-    val code = rt_get_host_target_code()
-    if code == 0:
-        return "x86_64"
-    if code == 1:
-        return "aarch64"
-    if code == 2:
-        return "riscv64"
+    # Native host fallback (Linux, kernel >= 6.1): /proc/sys/kernel/arch.
+    # Must not call an extern the runtime does not export — an undefined
+    # extern resolves to null and crashes every @cfg-bearing file.
+    if rt_platform_name() == "linux":
+        val proc_arch_raw = rt_file_read_text("/proc/sys/kernel/arch") ?? ""
+        val proc_arch = cfg_normalize_arch(proc_arch_raw.trim())
+        if proc_arch != "":
+            return proc_arch
 
     "unknown"
 
