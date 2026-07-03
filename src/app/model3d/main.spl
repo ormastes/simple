@@ -6,6 +6,13 @@
 #   render <scene.sdn> --out <ppm>   Render the scene headless to a P3 PPM.
 #       [--width N] [--height N]     Default 256x192, range 8..1024.
 #       [--eye X,Y,Z] [--target X,Y,Z] [--fov DEG]  Override scene camera.
+#   gen heightmap --seed N --w W --d D --out <scene.sdn>
+#       Sample seeded fbm2 per column, emit one box node per column
+#       (height -> size.y, center.y = h/2). Loadable by `inspect`/`render`
+#       unchanged — it is already box-node scene SDN.
+#   gen tilemap --seed N --w W --h H --out <map.sdn>
+#       Seeded cellular-automata cave (4-5 rule) -> `[[i32]]` grid, emitted
+#       as `tilemap: { cols, rows, cells }` SDN (see cave_ca.spl).
 #
 # Scene format: SDN (the project data format — see test/fixtures/model3d/).
 #   scene:
@@ -26,6 +33,8 @@ use std.cli.cli_util.{get_cli_args}
 use std.io_runtime.{file_exists, file_read, write_file}
 use std.sdn.{SdnValue, parse}
 use std.common.color.convert.{hex_to_int}
+use std.common.math.noise.{perm_new, fbm2}
+use std.common.cave_ca.{CaveGrid, ca_generate}
 use std.gpu.engine3d.engine.{Engine3D}
 use std.gpu.engine3d.types3d.{
     vertex3d_pos_normal, material_unlit,
@@ -396,6 +405,191 @@ fn _parse_vec3_arg(s: text) -> Vec3?:
         i = i + 1
     Some(Vec3(x: out[0], y: out[1], z: out[2]))
 
+# ============================================================================
+# gen heightmap / gen tilemap
+# ============================================================================
+
+fn _height_color(h: f64) -> text:
+    if h < 1.0: "2060A0"
+    elif h < 2.0: "40A040"
+    elif h < 2.8: "807040"
+    else: "F0F0F0"
+
+fn _gen_heightmap_text(seed: i64, w: i64, d: i64) -> text:
+    val perm = perm_new(seed)
+    var nodes_text = ""
+    var z: i64 = 0
+    while z < d:
+        var x: i64 = 0
+        while x < w:
+            val fx = (x as f64) * 0.15
+            val fz = (z as f64) * 0.15
+            val raw = fbm2(perm, fx, fz, 4, 2.0, 0.5)
+            val hh = 0.2 + (raw + 1.0) * 0.5 * 3.0
+            val cx = (x as f64) - (w as f64) / 2.0
+            val cz = (z as f64) - (d as f64) / 2.0
+            val cy = hh / 2.0
+            val color = _height_color(hh)
+            if nodes_text != "":
+                nodes_text = nodes_text + ", "
+            # NOTE: literal `{`/`}` (SDN dict syntax) must be doubled to
+            # `{{`/`}}` inside an interpolated string — a single `{ ... }`
+            # containing other `{placeholder}`s is swallowed whole as one
+            # failed placeholder lookup otherwise. See
+            # doc/08_tracking/bug/interp_brace_literal_collides_with_string_interpolation_2026-07-03.md
+            nodes_text = nodes_text + "{{ name: \"col_{x}_{z}\", shape: \"box\", center: [{cx}, {cy}, {cz}], size: [1.0, {hh}, 1.0], color: \"{color}\" }}"
+            x = x + 1
+        z = z + 1
+    val eye_z = (d as f64) * 0.8 + 8.0
+    "scene:\n  name: \"heightmap_seed{seed}\"\n  background: \"203040\"\n  camera: {{ eye: [0.0, 8.0, {eye_z}], target: [0.0, 0.0, 0.0], fov_deg: 60.0 }}\n  nodes: [{nodes_text}]\n"
+
+fn _gen_tilemap_text(seed: i64, w: i64, h: i64) -> text:
+    val cave = ca_generate(seed, w, h, 0.45, 30)
+    var rows_text = ""
+    var y: i64 = 0
+    while y < cave.rows:
+        var row_text = ""
+        var x: i64 = 0
+        while x < cave.cols:
+            if row_text != "":
+                row_text = row_text + ", "
+            row_text = row_text + "{cave.cells[y][x]}"
+            x = x + 1
+        if rows_text != "":
+            rows_text = rows_text + ", "
+        rows_text = rows_text + "[{row_text}]"
+        y = y + 1
+    "tilemap:\n  cols: {cave.cols}\n  rows: {cave.rows}\n  cells: [{rows_text}]\n"
+
+fn cmd_gen_heightmap(args: [text]) -> i64:
+    var seed_opt: i64? = None
+    var w: i64 = 0
+    var d: i64 = 0
+    var out_path = ""
+    var i: i64 = 0
+    while i < args.len():
+        val a = args[i]
+        if (a == "--seed" or a == "--w" or a == "--d" or a == "--out"):
+            if i + 1 >= args.len():
+                print "error: {a} requires a value"
+                return 2
+            val v = args[i + 1]
+            if a == "--seed":
+                if val Some(n) = _parse_int(v):
+                    seed_opt = Some(n)
+                else:
+                    print "error: --seed expects a non-negative integer, got \"{v}\""
+                    return 2
+            elif a == "--w":
+                if val Some(n) = _parse_int(v):
+                    w = n
+                else:
+                    print "error: --w expects a positive integer, got \"{v}\""
+                    return 2
+            elif a == "--d":
+                if val Some(n) = _parse_int(v):
+                    d = n
+                else:
+                    print "error: --d expects a positive integer, got \"{v}\""
+                    return 2
+            else:
+                out_path = v
+            i = i + 2
+        else:
+            print "error: unknown option {a}"
+            return 2
+    var seed: i64 = 0
+    if val Some(s) = seed_opt:
+        seed = s
+    else:
+        print "error: simple model3d gen heightmap --seed N --w W --d D --out <scene.sdn> — missing --seed"
+        return 2
+    if (w <= 0 or d <= 0):
+        print "error: --w/--d must be positive integers (got {w}x{d})"
+        return 2
+    if out_path == "":
+        print "error: simple model3d gen heightmap --seed N --w W --d D --out <scene.sdn> — missing --out"
+        return 2
+    val scene_text = _gen_heightmap_text(seed, w, d)
+    if not write_file(out_path, scene_text):
+        print "error: failed to write {out_path}"
+        return 1
+    print "wrote {out_path} ({w}x{d} columns, seed {seed})"
+    0
+
+fn cmd_gen_tilemap(args: [text]) -> i64:
+    var seed_opt: i64? = None
+    var w: i64 = 0
+    var h: i64 = 0
+    var out_path = ""
+    var i: i64 = 0
+    while i < args.len():
+        val a = args[i]
+        if (a == "--seed" or a == "--w" or a == "--h" or a == "--out"):
+            if i + 1 >= args.len():
+                print "error: {a} requires a value"
+                return 2
+            val v = args[i + 1]
+            if a == "--seed":
+                if val Some(n) = _parse_int(v):
+                    seed_opt = Some(n)
+                else:
+                    print "error: --seed expects a non-negative integer, got \"{v}\""
+                    return 2
+            elif a == "--w":
+                if val Some(n) = _parse_int(v):
+                    w = n
+                else:
+                    print "error: --w expects a positive integer, got \"{v}\""
+                    return 2
+            elif a == "--h":
+                if val Some(n) = _parse_int(v):
+                    h = n
+                else:
+                    print "error: --h expects a positive integer, got \"{v}\""
+                    return 2
+            else:
+                out_path = v
+            i = i + 2
+        else:
+            print "error: unknown option {a}"
+            return 2
+    var seed: i64 = 0
+    if val Some(s) = seed_opt:
+        seed = s
+    else:
+        print "error: simple model3d gen tilemap --seed N --w W --h H --out <map.sdn> — missing --seed"
+        return 2
+    if (w <= 0 or h <= 0):
+        print "error: --w/--h must be positive integers (got {w}x{h})"
+        return 2
+    if out_path == "":
+        print "error: simple model3d gen tilemap --seed N --w W --h H --out <map.sdn> — missing --out"
+        return 2
+    val map_text = _gen_tilemap_text(seed, w, h)
+    if not write_file(out_path, map_text):
+        print "error: failed to write {out_path}"
+        return 1
+    print "wrote {out_path} ({w}x{h} cells, seed {seed})"
+    0
+
+fn cmd_gen(args: [text]) -> i64:
+    if args.len() < 1:
+        print "error: simple model3d gen <heightmap|tilemap> [options] — missing gen mode"
+        return 2
+    val mode = args[0]
+    var rest: [text] = []
+    var i: i64 = 1
+    while i < args.len():
+        rest.push(args[i])
+        i = i + 1
+    if mode == "heightmap":
+        return cmd_gen_heightmap(rest)
+    elif mode == "tilemap":
+        return cmd_gen_tilemap(rest)
+    print "error: unknown gen mode: {mode} (supported: heightmap, tilemap)"
+    2
+
 fn print_usage():
     print "Usage: simple model3d <subcommand> [args]"
     print ""
@@ -404,6 +598,8 @@ fn print_usage():
     print "  render <scene.sdn> --out <ppm>   Render headless to a P3 PPM"
     print "      [--width N] [--height N]     Default 256x192, range {MIN_DIM}..{MAX_DIM}"
     print "      [--eye X,Y,Z] [--target X,Y,Z] [--fov DEG]  Override scene camera"
+    print "  gen heightmap --seed N --w W --d D --out <scene.sdn>   Seeded fbm2 heightmap -> box-node scene SDN"
+    print "  gen tilemap --seed N --w W --h H --out <map.sdn>       Seeded CA cave (4-5 rule) -> [[i32]] tilemap SDN"
     print ""
     print "Exit codes: 0 ok, 1 failure, 2 usage error"
 
@@ -515,6 +711,13 @@ fn main() -> i64:
             rest.push(args[i])
             i = i + 1
         return cmd_render(rest)
+    if sub == "gen":
+        var rest: [text] = []
+        var i: i64 = 1
+        while i < args.len():
+            rest.push(args[i])
+            i = i + 1
+        return cmd_gen(rest)
     print "error: unknown subcommand: {sub}"
     print_usage()
     2
