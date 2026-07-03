@@ -29,7 +29,7 @@ either RV32 or RV64.
 
 `bin/release/simple run src/hardware/fpga_linux/generate_riscv_fpga_bundle.spl /tmp/simple_riscv_bundle_check`
 
-- FAIL: generator now fails closed with `missing RV32 RTL source: examples/09_embedded/fpga_riscv/rtl/rv32i_pkg.vhd`.
+- PASS: emits generated-core RV32 and RV64 bundle files under `rv32/rtl` and `rv64/rtl`, including source, VHDL package/core, debug sidecar, and Linux handoff testbench artifacts.
 
 `SIMPLE_BINARY=bin/release/simple sh scripts/check/check-riscv-fpga-simpleos-preflight.shs --local-only`
 
@@ -47,7 +47,8 @@ of stopping after the first missing artifact.
 The generated Linux GHDL runners now use per-run generated bundle roots
 (`$GEN_DIR/rv32/rtl` and `$GEN_DIR/rv64/rtl`) instead of directly compiling the
 handwritten example RTL tree. The bundle generator has a small executable
-entrypoint and fails closed if required copied RTL inputs are absent.
+entrypoint and no longer depends on the deleted handwritten RTL tree for its
+bundle output.
 
 `scripts/check/check-riscv-fpga-simpleos-preflight.shs` now checks the existing
 RV64 preflight plus RV32 FPGA artifacts, so production status cannot ignore the
@@ -57,15 +58,12 @@ RV64 preflight plus RV32 FPGA artifacts, so production status cannot ignore the
 
 1. Restore or generate the RV32 and RV64 smoke assembly payloads used by the
    generated RTL Linux smoke runners.
-2. Replace the bundle generator's remaining copied RTL dependency with current
-   generated-core VHDL outputs, or restore the missing copied inputs until that
-   generator path is complete.
-3. Install or provide `yosys` if synthesis/formal checks are part of the local
+2. Install or provide `yosys` if synthesis/formal checks are part of the local
    production gate.
-4. Free the FT4232H JTAG interface before physical FPGA programming.
-5. Produce current RV64 FPGA SimpleOS ELF/bin/bitstream artifacts.
-6. Add equivalent RV32 SimpleOS FPGA artifact evidence, not only RV64.
-7. Prove physical UART boot markers and SimpleOS payload execution on the board.
+3. Free the FT4232H JTAG interface before physical FPGA programming.
+4. Produce current RV64 FPGA SimpleOS ELF/bin/bitstream artifacts.
+5. Add equivalent RV32 SimpleOS FPGA artifact evidence, not only RV64.
+6. Prove physical UART boot markers and SimpleOS payload execution on the board.
 
 ## Next Small Step
 

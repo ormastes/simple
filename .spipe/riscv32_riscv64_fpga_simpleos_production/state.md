@@ -30,7 +30,7 @@ N/A for this slice: this turn only fixes existing smoke wrappers and records blo
   - FAIL `generated_rv32_linux check-tools`: missing `examples/09_embedded/fpga_riscv/sw/generated_rv32_smoke.s`.
   - FAIL `generated_rv64_linux check-tools`: missing `examples/09_embedded/fpga_riscv/sw/generated_rv64_linux_handoff_smoke.s`.
 - `bin/release/simple run src/hardware/fpga_linux/generate_riscv_fpga_bundle.spl /tmp/simple_riscv_bundle_check`:
-  - FAIL: generator now fails closed with `missing RV32 RTL source: examples/09_embedded/fpga_riscv/rtl/rv32i_pkg.vhd` instead of returning success with a partial bundle.
+  - PASS: emits RV32 and RV64 generated-core bundle files under `rv32/rtl` and `rv64/rtl`, including core source, VHDL package/core, debug sidecar, and Linux handoff testbench artifacts.
 - `SIMPLE_BINARY=bin/release/simple sh scripts/check/check-riscv-fpga-simpleos-preflight.shs --local-only`:
   - Reuses the RV64 preflight and additionally reports RV32 ELF, bin, and bitstream artifact status.
   - FAIL: RV32 ELF, bin, and bitstream artifacts are absent in this workspace.
@@ -42,3 +42,4 @@ dev-in-progress
 - dev: Created production-readiness lane and fixed existing smoke wrappers to expose both RV32/RV64 missing smoke artifacts.
 - dev: Added dual-arch FPGA preflight wrapper so RV32 artifacts are checked beside the existing RV64 preflight.
 - dev: Added a minimal bundle generator CLI, routed generated Linux runners through `GEN_DIR/rv32/rtl` and `GEN_DIR/rv64/rtl`, and made the bundle generator fail closed on missing copied RTL sources.
+- dev: Replaced the bundle generator's copied RTL dependency with emitted generated-core bundle artifacts, so bundle generation succeeds without `examples/09_embedded/fpga_riscv/rtl`.
