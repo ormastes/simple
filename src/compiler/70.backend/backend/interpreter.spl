@@ -217,7 +217,7 @@ impl InterpreterBackendImpl:
                     val key = self.eval_expr(key_expr, ctx)?
                     val value = self.eval_expr(value_expr, ctx)?
                     match key:
-                        case String(k):
+                        case Value.String(k):
                             dict[k] = value
                         case _:
                             return Err(BackendError.type_error("dict key must be string", Some(expr.span)))
@@ -270,7 +270,7 @@ impl InterpreterBackendImpl:
             # Block/Expr arms below.
             case HirExprKind.MethodCall(receiver, method_name, args, resolution):
                 match resolution:
-                    case StaticMethod(_, method_id):
+                    case MethodResolution.StaticMethod(_, method_id):
                         # Static method: ClassName.method(args) - no receiver needed
                         var arg_values: [Value] = []
                         for arg in args:
@@ -280,7 +280,7 @@ impl InterpreterBackendImpl:
                         # Look up method by symbol ID
                         self.call_function_by_id(method_id, arg_values, ctx, expr.span)
 
-                    case InstanceMethod(_, method_id):
+                    case MethodResolution.InstanceMethod(_, method_id):
                         # Instance method: receiver.method(args)
                         val receiver_val = self.eval_expr(receiver, ctx)?
 
@@ -292,7 +292,7 @@ impl InterpreterBackendImpl:
 
                         self.call_function_by_id(method_id, arg_values, ctx, expr.span)
 
-                    case FreeFunction(func_id):
+                    case MethodResolution.FreeFunction(func_id):
                         # UFCS: receiver.func(args) → func(receiver, args)
                         val receiver_val = self.eval_expr(receiver, ctx)?
 
@@ -304,17 +304,17 @@ impl InterpreterBackendImpl:
 
                         self.call_function_by_id(func_id, arg_values, ctx, expr.span)
 
-                    case TraitMethod(_, _):
+                    case MethodResolution.TraitMethod(_, _):
                         # Trait method - requires dynamic dispatch (not implemented yet)
                         Err(BackendError.not_implemented("trait method calls not yet supported"))
 
-                    case Unresolved:
+                    case MethodResolution.Unresolved:
                         Err(BackendError.runtime_error("unresolved method call: {method_name}", Some(expr.span)))
 
             case HirExprKind.StaticCall(type_, method_name, args, resolution):
                 # Static call: Type.method(args) - similar to StaticMethod variant
                 match resolution:
-                    case StaticMethod(_, method_id):
+                    case MethodResolution.StaticMethod(_, method_id):
                         var arg_values: [Value] = []
                         for arg in args:
                             val v = self.eval_expr(arg.value, ctx)?
@@ -427,15 +427,15 @@ impl InterpreterBackendImpl:
     # Helper functions for comparison operators
     fn eval_gt(left: Value, right: Value, span: Span) -> Result<Value, BackendError>:
         match left:
-            case Int(l):
+            case Value.Int(l):
                 match right:
-                    case Int(r):
+                    case Value.Int(r):
                         Ok(Value.bool(l > r))
                     case _:
                         Err(BackendError.type_error("invalid operands for >", Some(span)))
-            case Float(l):
+            case Value.Float(l):
                 match right:
-                    case Float(r):
+                    case Value.Float(r):
                         Ok(Value.bool(l > r))
                     case _:
                         Err(BackendError.type_error("invalid operands for >", Some(span)))
@@ -444,15 +444,15 @@ impl InterpreterBackendImpl:
 
     fn eval_gteq(left: Value, right: Value, span: Span) -> Result<Value, BackendError>:
         match left:
-            case Int(l):
+            case Value.Int(l):
                 match right:
-                    case Int(r):
+                    case Value.Int(r):
                         Ok(Value.bool(l >= r))
                     case _:
                         Err(BackendError.type_error("invalid operands for >=", Some(span)))
-            case Float(l):
+            case Value.Float(l):
                 match right:
-                    case Float(r):
+                    case Value.Float(r):
                         Ok(Value.bool(l >= r))
                     case _:
                         Err(BackendError.type_error("invalid operands for >=", Some(span)))
@@ -461,92 +461,92 @@ impl InterpreterBackendImpl:
 
     fn eval_binop(op: HirBinOp, left: Value, right: Value, span: Span) -> Result<Value, BackendError>:
         match op:
-            case Add:
+            case HirBinOp.Add:
                 match left:
-                    case Int(l):
+                    case Value.Int(l):
                         match right:
-                            case Int(r):
+                            case Value.Int(r):
                                 Ok(Value.int(l + r))
-                            case Float(r):
+                            case Value.Float(r):
                                 Ok(Value.float(l.to_f64() + r))
                             case _:
                                 Err(BackendError.type_error("invalid operands for +", Some(span)))
-                    case Float(l):
+                    case Value.Float(l):
                         match right:
-                            case Float(r):
+                            case Value.Float(r):
                                 Ok(Value.float(l + r))
-                            case Int(r):
+                            case Value.Int(r):
                                 Ok(Value.float(l + r.to_f64()))
                             case _:
                                 Err(BackendError.type_error("invalid operands for +", Some(span)))
-                    case String(l):
+                    case Value.String(l):
                         match right:
-                            case String(r):
+                            case Value.String(r):
                                 Ok(Value.string(l + r))
                             case _:
                                 Err(BackendError.type_error("invalid operands for +", Some(span)))
                     case _:
                         Err(BackendError.type_error("invalid operands for +", Some(span)))
 
-            case Sub:
+            case HirBinOp.Sub:
                 match left:
-                    case Int(l):
+                    case Value.Int(l):
                         match right:
-                            case Int(r):
+                            case Value.Int(r):
                                 Ok(Value.int(l - r))
                             case _:
                                 Err(BackendError.type_error("invalid operands for -", Some(span)))
-                    case Float(l):
+                    case Value.Float(l):
                         match right:
-                            case Float(r):
+                            case Value.Float(r):
                                 Ok(Value.float(l - r))
                             case _:
                                 Err(BackendError.type_error("invalid operands for -", Some(span)))
                     case _:
                         Err(BackendError.type_error("invalid operands for -", Some(span)))
 
-            case Mul:
+            case HirBinOp.Mul:
                 match left:
-                    case Int(l):
+                    case Value.Int(l):
                         match right:
-                            case Int(r):
+                            case Value.Int(r):
                                 Ok(Value.int(l * r))
                             case _:
                                 Err(BackendError.type_error("invalid operands for *", Some(span)))
-                    case Float(l):
+                    case Value.Float(l):
                         match right:
-                            case Float(r):
+                            case Value.Float(r):
                                 Ok(Value.float(l * r))
                             case _:
                                 Err(BackendError.type_error("invalid operands for *", Some(span)))
                     case _:
                         Err(BackendError.type_error("invalid operands for *", Some(span)))
 
-            case Div:
+            case HirBinOp.Div:
                 match left:
-                    case Int(l):
+                    case Value.Int(l):
                         match right:
-                            case Int(r):
+                            case Value.Int(r):
                                 if r == 0:
                                     Err(BackendError.runtime_error("division by zero", Some(span)))
                                 else:
                                     Ok(Value.int(l / r))
                             case _:
                                 Err(BackendError.type_error("invalid operands for /", Some(span)))
-                    case Float(l):
+                    case Value.Float(l):
                         match right:
-                            case Float(r):
+                            case Value.Float(r):
                                 Ok(Value.float(l / r))
                             case _:
                                 Err(BackendError.type_error("invalid operands for /", Some(span)))
                     case _:
                         Err(BackendError.type_error("invalid operands for /", Some(span)))
 
-            case Mod:
+            case HirBinOp.Mod:
                 match left:
-                    case Int(l):
+                    case Value.Int(l):
                         match right:
-                            case Int(r):
+                            case Value.Int(r):
                                 if r == 0:
                                     Err(BackendError.runtime_error("modulo by zero", Some(span)))
                                 else:
@@ -556,89 +556,89 @@ impl InterpreterBackendImpl:
                     case _:
                         Err(BackendError.type_error("invalid operands for %", Some(span)))
 
-            case Eq:
+            case HirBinOp.Eq:
                 match left:
-                    case Int(l):
+                    case Value.Int(l):
                         match right:
-                            case Int(r):
+                            case Value.Int(r):
                                 Ok(Value.bool(l == r))
                             case _:
                                 Ok(Value.bool(self.values_equal(left, right)))
-                    case Float(l):
+                    case Value.Float(l):
                         match right:
-                            case Float(r):
+                            case Value.Float(r):
                                 Ok(Value.bool(l == r))
                             case _:
                                 Ok(Value.bool(self.values_equal(left, right)))
                     case _:
                         Ok(Value.bool(self.values_equal(left, right)))
 
-            case NotEq:
+            case HirBinOp.NotEq:
                 match left:
-                    case Int(l):
+                    case Value.Int(l):
                         match right:
-                            case Int(r):
+                            case Value.Int(r):
                                 Ok(Value.bool(l != r))
                             case _:
                                 Ok(Value.bool(not self.values_equal(left, right)))
-                    case Float(l):
+                    case Value.Float(l):
                         match right:
-                            case Float(r):
+                            case Value.Float(r):
                                 Ok(Value.bool(l != r))
                             case _:
                                 Ok(Value.bool(not self.values_equal(left, right)))
                     case _:
                         Ok(Value.bool(not self.values_equal(left, right)))
 
-            case Lt:
+            case HirBinOp.Lt:
                 match left:
-                    case Int(l):
+                    case Value.Int(l):
                         match right:
-                            case Int(r):
+                            case Value.Int(r):
                                 Ok(Value.bool(l < r))
                             case _:
                                 Err(BackendError.type_error("invalid operands for <", Some(span)))
-                    case Float(l):
+                    case Value.Float(l):
                         match right:
-                            case Float(r):
+                            case Value.Float(r):
                                 Ok(Value.bool(l < r))
                             case _:
                                 Err(BackendError.type_error("invalid operands for <", Some(span)))
-                    case String(l):
+                    case Value.String(l):
                         match right:
-                            case String(r):
+                            case Value.String(r):
                                 Ok(Value.bool(l < r))
                             case _:
                                 Err(BackendError.type_error("invalid operands for <", Some(span)))
                     case _:
                         Err(BackendError.type_error("invalid operands for <", Some(span)))
 
-            case LtEq:
+            case HirBinOp.LtEq:
                 match left:
-                    case Int(l):
+                    case Value.Int(l):
                         match right:
-                            case Int(r):
+                            case Value.Int(r):
                                 Ok(Value.bool(l <= r))
                             case _:
                                 Err(BackendError.type_error("invalid operands for <=", Some(span)))
-                    case Float(l):
+                    case Value.Float(l):
                         match right:
-                            case Float(r):
+                            case Value.Float(r):
                                 Ok(Value.bool(l <= r))
                             case _:
                                 Err(BackendError.type_error("invalid operands for <=", Some(span)))
                     case _:
                         Err(BackendError.type_error("invalid operands for <=", Some(span)))
 
-            case Gt:
+            case HirBinOp.Gt:
                 self.eval_gt(left, right, span)
-            case GtEq:
+            case HirBinOp.GtEq:
                 self.eval_gteq(left, right, span)
 
-            case And:
+            case HirBinOp.And:
                 Ok(Value.bool(left.is_truthy() and right.is_truthy()))
 
-            case Or:
+            case HirBinOp.Or:
                 Ok(Value.bool(left.is_truthy() or right.is_truthy()))
 
             case _:
@@ -646,13 +646,13 @@ impl InterpreterBackendImpl:
 
     fn eval_unaryop(op: HirUnaryOp, operand: Value, span: Span) -> Result<Value, BackendError>:
         match op:
-            case Neg:
+            case HirUnaryOp.Neg:
                 match operand:
-                    case Int(i): Ok(Value.int(-i))
-                    case Float(f): Ok(Value.float(-f))
+                    case Value.Int(i): Ok(Value.int(-i))
+                    case Value.Float(f): Ok(Value.float(-f))
                     case _: Err(BackendError.type_error("invalid operand for -", Some(span)))
 
-            case Not:
+            case HirUnaryOp.Not:
                 Ok(Value.bool(not operand.is_truthy()))
 
             case _:
@@ -660,25 +660,25 @@ impl InterpreterBackendImpl:
 
     fn values_equal(left: Value, right: Value) -> bool:
         match left:
-            case Nil:
+            case Value.Nil:
                 match right:
-                    case Nil: true
+                    case Value.Nil: true
                     case _: false
-            case Bool(l):
+            case Value.Bool(l):
                 match right:
-                    case Bool(r): l == r
+                    case Value.Bool(r): l == r
                     case _: false
-            case Int(l):
+            case Value.Int(l):
                 match right:
-                    case Int(r): l == r
+                    case Value.Int(r): l == r
                     case _: false
-            case Float(l):
+            case Value.Float(l):
                 match right:
-                    case Float(r): l == r
+                    case Value.Float(r): l == r
                     case _: false
-            case String(l):
+            case Value.String(l):
                 match right:
-                    case String(r): l == r
+                    case Value.String(r): l == r
                     case _: false
             case _:
                 false

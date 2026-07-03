@@ -104,21 +104,24 @@ fn lookup_builtin_tag(name: text) -> BuiltinTag:
 impl InterpreterBackendImpl:
     fn call_function(fn_value: Value, args: [Value], ctx: EvalContext, span: Span) -> Result<Value, BackendError>:
         match fn_value:
-            case Function(f):
+            case Value.Function(f):
+                # Typed rebind (stage4 extracted-payload hazard, iteration 18).
+                val f_t: FunctionValue = f
                 # Check for builtin functions first
-                val builtin_result = self.try_call_builtin(f.name, args)
+                val builtin_result = self.try_call_builtin(f_t.name, args)
                 if builtin_result.?:
                     return builtin_result.unwrap()
 
                 # Look up function in module
-                if not ctx.module.functions.has(f.symbol):
-                    return Err(BackendError.runtime_error("function '{f.name}' not found", Some(span)))
+                if not ctx.module.functions.has(f_t.symbol):
+                    return Err(BackendError.runtime_error("function '{f_t.name}' not found", Some(span)))
 
-                val fn_ = ctx.module.functions[f.symbol]
+                val fn_: HirFunction = ctx.module.functions[f_t.symbol]
                 self.call_hir_function(fn_, args, ctx)
 
-            case Closure(c):
-                self.call_closure(c, args, ctx)
+            case Value.Closure(c):
+                val c_t: ClosureValue = c
+                self.call_closure(c_t, args, ctx)
 
             case _:
                 Err(BackendError.type_error("value is not callable", Some(span)))
@@ -179,11 +182,11 @@ impl InterpreterBackendImpl:
 
     fn apply_assign_op(op: HirAssignOp, left: Value, right: Value, span: Span) -> Result<Value, BackendError>:
         match op:
-            case Add: self.eval_binop(HirBinOp.Add, left, right, span)
-            case Sub: self.eval_binop(HirBinOp.Sub, left, right, span)
-            case Mul: self.eval_binop(HirBinOp.Mul, left, right, span)
-            case Div: self.eval_binop(HirBinOp.Div, left, right, span)
-            case Mod: self.eval_binop(HirBinOp.Mod, left, right, span)
+            case HirAssignOp.Add: self.eval_binop(HirBinOp.Add, left, right, span)
+            case HirAssignOp.Sub: self.eval_binop(HirBinOp.Sub, left, right, span)
+            case HirAssignOp.Mul: self.eval_binop(HirBinOp.Mul, left, right, span)
+            case HirAssignOp.Div: self.eval_binop(HirBinOp.Div, left, right, span)
+            case HirAssignOp.Mod: self.eval_binop(HirBinOp.Mod, left, right, span)
             case _: Err(BackendError.not_implemented("assignment operator not implemented"))
 
     fn try_call_builtin(name: text, args: [Value]) -> Option<Result<Value, BackendError>>:
@@ -200,18 +203,18 @@ impl InterpreterBackendImpl:
                 if args.len() > 0:
                     val arg = args[0]
                     match arg:
-                        case RuntimeValue(ptr):
+                        case Value.RuntimeValue(ptr):
                             rt_value_print(ptr)
-                        case Int(_):
+                        case Value.Int(_):
                             val ptr = self.value_to_runtime_ptr(arg)
                             rt_value_print(ptr)
-                        case Float(_):
+                        case Value.Float(_):
                             val ptr = self.value_to_runtime_ptr(arg)
                             rt_value_print(ptr)
-                        case Bool(_):
+                        case Value.Bool(_):
                             val ptr = self.value_to_runtime_ptr(arg)
                             rt_value_print(ptr)
-                        case Nil:
+                        case Value.Nil:
                             val ptr = self.value_to_runtime_ptr(arg)
                             rt_value_print(ptr)
                         case _:
@@ -224,18 +227,18 @@ impl InterpreterBackendImpl:
                 if args.len() > 0:
                     val arg = args[0]
                     match arg:
-                        case RuntimeValue(ptr):
+                        case Value.RuntimeValue(ptr):
                             rt_value_println(ptr)
-                        case Int(_):
+                        case Value.Int(_):
                             val ptr = self.value_to_runtime_ptr(arg)
                             rt_value_println(ptr)
-                        case Float(_):
+                        case Value.Float(_):
                             val ptr = self.value_to_runtime_ptr(arg)
                             rt_value_println(ptr)
-                        case Bool(_):
+                        case Value.Bool(_):
                             val ptr = self.value_to_runtime_ptr(arg)
                             rt_value_println(ptr)
-                        case Nil:
+                        case Value.Nil:
                             val ptr = self.value_to_runtime_ptr(arg)
                             rt_value_println(ptr)
                         case _:
@@ -254,7 +257,7 @@ impl InterpreterBackendImpl:
                 if args.len() > 0:
                     val arg = args[0]
                     match arg:
-                        case RuntimeValue(ptr):
+                        case Value.RuntimeValue(ptr):
                             val type_tag = rt_value_type(ptr)
                             val type_name = match type_tag:
                                 case ValueType.Nil: "nil"
@@ -277,7 +280,7 @@ impl InterpreterBackendImpl:
                 if args.len() > 0:
                     val arg = args[0]
                     match arg:
-                        case RuntimeValue(ptr):
+                        case Value.RuntimeValue(ptr):
                             # Bootstrap interpreter fallback treats the runtime
                             # pointer as an opaque refcounted handle.
                             Some(Ok(Value.RuntimeValue(ptr)))
@@ -290,7 +293,7 @@ impl InterpreterBackendImpl:
             case BuiltinTag.FileExists:
                 if args.len() > 0:
                     match args[0]:
-                        case String(path):
+                        case Value.String(path):
                             val result = rt_file_exists(path.ptr(), path.len())
                             Some(Ok(Value.bool(result)))
                         case _:
@@ -301,7 +304,7 @@ impl InterpreterBackendImpl:
             case BuiltinTag.FileRead:
                 if args.len() > 0:
                     match args[0]:
-                        case String(path):
+                        case Value.String(path):
                             val ptr = rt_file_read_text(path.ptr(), path.len())
                             if ptr == 0:
                                 Some(Ok(Value.string("")))
@@ -316,9 +319,9 @@ impl InterpreterBackendImpl:
             case BuiltinTag.FileWrite:
                 if args.len() >= 2:
                     match args[0]:
-                        case String(path):
+                        case Value.String(path):
                             match args[1]:
-                                case String(content):
+                                case Value.String(content):
                                     val result = rt_file_write_text(path.ptr(), path.len(), content.ptr(), content.len())
                                     Some(Ok(Value.bool(result)))
                                 case _:
@@ -331,7 +334,7 @@ impl InterpreterBackendImpl:
             case BuiltinTag.FileDelete:
                 if args.len() > 0:
                     match args[0]:
-                        case String(path):
+                        case Value.String(path):
                             val result = rt_file_delete(path.ptr(), path.len())
                             Some(Ok(Value.bool(result)))
                         case _:
@@ -343,7 +346,7 @@ impl InterpreterBackendImpl:
             case BuiltinTag.EnvGet:
                 if args.len() > 0:
                     match args[0]:
-                        case String(name):
+                        case Value.String(name):
                             val ptr = rt_env_get(name.ptr(), name.len())
                             if ptr == 0:
                                 Some(Ok(Value.string("")))
@@ -358,9 +361,9 @@ impl InterpreterBackendImpl:
             case BuiltinTag.EnvSet:
                 if args.len() >= 2:
                     match args[0]:
-                        case String(name):
+                        case Value.String(name):
                             match args[1]:
-                                case String(value):
+                                case Value.String(value):
                                     val result = rt_env_set(name.ptr(), name.len(), value.ptr(), value.len())
                                     Some(Ok(Value.bool(result)))
                                 case _:
@@ -380,12 +383,12 @@ impl InterpreterBackendImpl:
     fn value_to_runtime_ptr(value: Value) -> i64:
         """Convert Simple Value to RuntimeValue pointer for SFFI operations."""
         match value:
-            case Int(i): rt_value_int(i)
-            case Float(f): rt_value_float(f)
-            case Bool(b): rt_value_bool(b)
-            case Nil: rt_value_nil()
-            case RuntimeValue(ptr): ptr  # Already a pointer
-            case String(s):
+            case Value.Int(i): rt_value_int(i)
+            case Value.Float(f): rt_value_float(f)
+            case Value.Bool(b): rt_value_bool(b)
+            case Value.Nil: rt_value_nil()
+            case Value.RuntimeValue(ptr): ptr  # Already a pointer
+            case Value.String(s):
                 rt_value_string(s.ptr(), s.len())
             case _:
                 rt_value_nil()
@@ -409,17 +412,17 @@ impl InterpreterBackendImpl:
     fn value_to_string(value: Value) -> text:
         """Convert a Value to its string representation."""
         match value:
-            case Nil: "nil"
-            case Unit: "()"
-            case Bool(b): if b: "true" else: "false"
-            case Int(i): "{i}"
-            case Float(f): "{f}"
-            case Char(c): "{c}"
-            case String(s): s
-            case Array(elements):
+            case Value.Nil: "nil"
+            case Value.Unit: "()"
+            case Value.Bool(b): if b: "true" else: "false"
+            case Value.Int(i): "{i}"
+            case Value.Float(f): "{f}"
+            case Value.Char(c): "{c}"
+            case Value.String(s): s
+            case Value.Array(elements):
                 var parts: [text] = []
                 for elem in elements:
                     parts = parts.push(self.value_to_string(elem))
                 "[{parts.join(\", \")}]"
-            case RuntimeValue(_): "<runtime_value>"
+            case Value.RuntimeValue(_): "<runtime_value>"
             case _: "<{value.type_name()}>"
