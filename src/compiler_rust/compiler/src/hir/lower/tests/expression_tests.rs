@@ -683,3 +683,100 @@ fn test_await_expr_string_type_propagates() {
         panic!("Expected Let statement with await expression");
     }
 }
+
+/// Task #80 f-path repro (dap dap_handlers.spl / lsp verification.spl): a
+/// module-qualified enum-variant reference `protocol.StopReason.DataBreakpoint`
+/// must resolve via `global_enum_defs` (declared type evidence) even when a
+/// global struct also declares a field named `DataBreakpoint` — the
+/// most-fields-wins struct heuristic must not be consulted first.
+#[test]
+fn test_qualified_enum_variant_beats_struct_field_bait() {
+    let source = "fn pick() -> i64:\n    val r = protocol.StopReason.DataBreakpoint\n    return 0\n";
+    let mut parser = Parser::new(source);
+    let module = parser.parse().expect("parse failed");
+
+    let mut lowerer = Lowerer::new();
+    lowerer.set_global_enum_defs(Arc::new(HashMap::from([(
+        "StopReason".to_string(),
+        vec![
+            ("Step".to_string(), None),
+            ("Breakpoint".to_string(), None),
+            ("DataBreakpoint".to_string(), None),
+        ],
+    )])));
+    // Bait: a struct with a same-named field and many fields (most-fields-wins winner).
+    lowerer.set_global_struct_defs(Arc::new(HashMap::from([(
+        "Decoy".to_string(),
+        vec![
+            ("DataBreakpoint".to_string(), Type::Simple("i64".to_string())),
+            ("a".to_string(), Type::Simple("i64".to_string())),
+            ("b".to_string(), Type::Simple("i64".to_string())),
+            ("c".to_string(), Type::Simple("i64".to_string())),
+        ],
+    )])));
+    let lowered = lowerer.lower_module(&module).expect("lowering must succeed");
+    let func = lowered.functions.iter().find(|f| f.name == "pick").unwrap();
+    let HirStmt::Let {
+        value: Some(ref expr), ..
+    } = func.body[0]
+    else {
+        panic!("Expected val binding");
+    };
+    assert_eq!(
+        expr.kind,
+        HirExprKind::Global("StopReason::DataBreakpoint".to_string()),
+        "qualified enum variant must win over struct field-name bait"
+    );
+}
+
+/// Task #80 f-path repro (gpu_helpers.spl cuda_available): a fn-scope
+/// `use std.io.cuda_sffi` followed by `cuda_sffi.cuda_available()` must not
+/// degrade into a field-access-on-ANY chain where `std.io` is resolved via the
+/// most-fields-wins struct heuristic (bait: a global struct with field `io`).
+#[test]
+fn test_fn_scope_module_use_does_not_bait_field_guess() {
+    let source = "fn cuda_available() -> bool:\n    use std.io.cuda_sffi\n    cuda_sffi.cuda_available()\n";
+    let mut parser = Parser::new(source);
+    let module = parser.parse().expect("parse failed");
+
+    let mut lowerer = Lowerer::new();
+    lowerer.set_global_struct_defs(Arc::new(HashMap::from([(
+        "NvmeFreestandingControllerResources".to_string(),
+        vec![
+            ("io".to_string(), Type::Simple("i64".to_string())),
+            ("admin".to_string(), Type::Simple("i64".to_string())),
+            ("bar0".to_string(), Type::Simple("i64".to_string())),
+        ],
+    )])));
+    match lowerer.lower_module(&module) {
+        Ok(lowered) => {
+            let func = lowered.functions.iter().find(|f| f.name == "cuda_available").unwrap();
+            // The body must not contain a struct FieldAccess for the `std.io`
+            // module path (index baked from the bait struct).
+            fn expr_has(e: &HirExpr) -> bool {
+                match &e.kind {
+                    HirExprKind::FieldAccess { receiver, .. } => {
+                        matches!(receiver.kind, HirExprKind::Global(ref g) if g == "std") || expr_has(receiver)
+                    }
+                    HirExprKind::MethodCall { receiver, args, .. } => {
+                        expr_has(receiver) || args.iter().any(expr_has)
+                    }
+                    HirExprKind::Call { func, args } => expr_has(func) || args.iter().any(expr_has),
+                    _ => false,
+                }
+            }
+            let baited = func.body.iter().any(|s| match s {
+                HirStmt::Expr(e) | HirStmt::Return(Some(e)) => expr_has(e),
+                _ => false,
+            });
+            assert!(!baited, "module path `std.io` must not lower to a struct field access");
+        }
+        Err(e) => {
+            let msg = format!("{e:?}");
+            assert!(
+                !(msg.contains("field") && msg.contains("'io'")),
+                "lowering failed by mis-treating module path `std.io` as field access: {msg}"
+            );
+        }
+    }
+}
