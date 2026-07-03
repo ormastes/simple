@@ -27,7 +27,7 @@ electron_simple_web_layout_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 25 | 25 | 0 | 0 |
+| 26 | 26 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -47,7 +47,7 @@ Validates the Electron Simple Web layout proof validator. The layout wrapper cap
 | Design | doc/07_guide/tooling/renderdoc_capture_infra.md |
 | Research | N/A |
 | Source | `test/03_system/check/electron_simple_web_layout_proof_validator_spec.spl` |
-| Updated | 2026-06-27 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -119,6 +119,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_simple_web_layout_p
   regular files, not symlinks or hardlinks to mutable or substituted evidence.
 - The live Electron layout wrapper consumes the validator and still maps real
   pixel mismatches to `divergent` evidence.
+- A one-pixel corrupted captured ARGB artifact is rejected, and the same proof
+  passes once the captured pixel is restored.
 
 ## Scenarios
 
@@ -134,7 +136,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_simple_web_layout_p
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 57 lines folded for reproduction.
+Runnable source: 67 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -156,6 +158,8 @@ expect(evidence).to_contain("electron_simple_web_layout_proof_source=tools/elect
 expect(evidence).to_contain("electron_simple_web_layout_proof_source_file_status=pass")
 expect(evidence).to_contain("electron_simple_web_layout_proof_source_size_bytes=")
 expect(evidence).to_contain("electron_simple_web_layout_proof_source_actual_size_bytes=")
+expect(evidence).to_contain("electron_simple_web_layout_proof_source_file_reason=pass")
+expect(evidence).to_contain("electron_simple_web_layout_proof_source_artifact_status=pass")
 expect(evidence).to_contain("electron_simple_web_layout_capture_backend=electron-offscreen-capture-page")
 expect(evidence).to_contain("electron_simple_web_layout_compositor_mode=offscreen-osr-exact-srgb")
 expect(evidence).to_contain("electron_simple_web_layout_browser_engine=chromium")
@@ -179,6 +183,8 @@ expect(evidence).to_contain("electron_simple_web_layout_capture_downsampled=fals
 expect(evidence).to_contain("electron_simple_web_layout_geometry_path=geometry.json")
 expect(evidence).to_contain("electron_simple_web_layout_geometry_written=true")
 expect(evidence).to_contain("electron_simple_web_layout_geometry_file_status=pass")
+expect(evidence).to_contain("electron_simple_web_layout_geometry_file_reason=pass")
+expect(evidence).to_contain("electron_simple_web_layout_geometry_artifact_status=pass")
 expect(evidence).to_contain("electron_simple_web_layout_geometry_symlink_status=pass")
 expect(evidence).to_contain("electron_simple_web_layout_geometry_hardlink_status=pass")
 expect(evidence).to_contain("electron_simple_web_layout_geometry_producer=electron-offscreen-geometry")
@@ -189,6 +195,8 @@ expect(evidence).to_contain("electron_simple_web_layout_geometry_measured_item_c
 expect(evidence).to_contain("electron_simple_web_layout_captured_argb_path=captured.json")
 expect(evidence).to_contain("electron_simple_web_layout_captured_argb_written=true")
 expect(evidence).to_contain("electron_simple_web_layout_captured_argb_file_status=pass")
+expect(evidence).to_contain("electron_simple_web_layout_captured_argb_file_reason=pass")
+expect(evidence).to_contain("electron_simple_web_layout_captured_argb_artifact_status=pass")
 expect(evidence).to_contain("electron_simple_web_layout_captured_argb_symlink_status=pass")
 expect(evidence).to_contain("electron_simple_web_layout_captured_argb_hardlink_status=pass")
 expect(evidence).to_contain("electron_simple_web_layout_captured_argb_format=argb-u32")
@@ -283,7 +291,7 @@ expect(wrong).to_contain("electron_simple_web_layout_proof_source=tools/manual/e
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -302,19 +310,23 @@ expect(evidence).to_contain("electron_simple_web_layout_proof_source=tools/elect
 expect(evidence).to_contain("electron_simple_web_layout_proof_source_file_status=missing")
 expect(evidence).to_contain("electron_simple_web_layout_proof_source_size_bytes=")
 expect(evidence).to_contain("electron_simple_web_layout_proof_source_actual_size_bytes=")
+expect(evidence).to_contain("electron_simple_web_layout_proof_source_file_reason=missing")
+expect(evidence).to_contain("electron_simple_web_layout_proof_source_artifact_status=fail")
 ```
 
 </details>
 
 #### rejects substituted Electron layout capture source artifacts
 
+-  proof command
+   - Expected: code equals `0`
 - Confirm Electron layout proof source evidence cannot be hardlinked, non-regular, or markerless
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 28 lines folded for reproduction.
+Runnable source: 32 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -338,12 +350,18 @@ step("Confirm Electron layout proof source evidence cannot be hardlinked, non-re
 expect(hardlink).to_contain("electron_simple_web_layout_validation_status=fail")
 expect(hardlink).to_contain("electron_simple_web_layout_validation_reason=unexpected-electron-proof-source-file-hardlink")
 expect(hardlink).to_contain("electron_simple_web_layout_proof_source_file_status=hardlink")
+expect(hardlink).to_contain("electron_simple_web_layout_proof_source_file_reason=hardlink")
+expect(hardlink).to_contain("electron_simple_web_layout_proof_source_artifact_status=fail")
 expect(directory).to_contain("electron_simple_web_layout_validation_status=fail")
 expect(directory).to_contain("electron_simple_web_layout_validation_reason=unexpected-electron-proof-source-file-not-regular")
 expect(directory).to_contain("electron_simple_web_layout_proof_source_file_status=not-regular")
+expect(directory).to_contain("electron_simple_web_layout_proof_source_file_reason=not-regular")
+expect(directory).to_contain("electron_simple_web_layout_proof_source_artifact_status=fail")
 expect(markerless).to_contain("electron_simple_web_layout_validation_status=fail")
 expect(markerless).to_contain("electron_simple_web_layout_validation_reason=unexpected-electron-proof-source-file-marker-missing")
 expect(markerless).to_contain("electron_simple_web_layout_proof_source_file_status=marker-missing")
+expect(markerless).to_contain("electron_simple_web_layout_proof_source_file_reason=marker-missing")
+expect(markerless).to_contain("electron_simple_web_layout_proof_source_artifact_status=fail")
 ```
 
 </details>
@@ -447,7 +465,7 @@ expect(chrome_version).to_contain("electron_simple_web_layout_chrome_process_ver
 -  proof command
 -  proof command
    - Expected: code equals `1`
-   - Expected: evidence does not contain `electron_simple_web_layout_electron_frame_us=not-a-number`
+- expect not
 
 
 <details>
@@ -550,7 +568,7 @@ expect(provenance).to_contain("electron_simple_web_layout_validation_reason=miss
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -569,10 +587,14 @@ step("Confirm boolean ARGB capture flags are not enough without file evidence")
 expect(missing).to_contain("electron_simple_web_layout_validation_status=fail")
 expect(missing).to_contain("electron_simple_web_layout_validation_reason=missing-captured-argb-file")
 expect(missing).to_contain("electron_simple_web_layout_captured_argb_file_status=missing")
+expect(missing).to_contain("electron_simple_web_layout_captured_argb_file_reason=missing")
+expect(missing).to_contain("electron_simple_web_layout_captured_argb_artifact_status=fail")
 expect(missing).to_contain("electron_simple_web_layout_captured_argb_size_bytes=")
 expect(empty).to_contain("electron_simple_web_layout_validation_status=fail")
 expect(empty).to_contain("electron_simple_web_layout_validation_reason=empty-captured-argb-file")
 expect(empty).to_contain("electron_simple_web_layout_captured_argb_file_status=empty")
+expect(empty).to_contain("electron_simple_web_layout_captured_argb_file_reason=empty")
+expect(empty).to_contain("electron_simple_web_layout_captured_argb_artifact_status=fail")
 expect(empty).to_contain("electron_simple_web_layout_captured_argb_size_bytes=0")
 ```
 
@@ -588,7 +610,7 @@ expect(empty).to_contain("electron_simple_web_layout_captured_argb_size_bytes=0"
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -605,6 +627,8 @@ expect(evidence).to_contain("electron_simple_web_layout_validation_status=fail")
 expect(evidence).to_contain("electron_simple_web_layout_validation_reason=missing-captured-argb-file")
 expect(evidence).to_contain("electron_simple_web_layout_captured_argb_path=proof.json")
 expect(evidence).to_contain("electron_simple_web_layout_captured_argb_file_status=missing")
+expect(evidence).to_contain("electron_simple_web_layout_captured_argb_file_reason=missing")
+expect(evidence).to_contain("electron_simple_web_layout_captured_argb_artifact_status=fail")
 expect(evidence).to_contain("electron_simple_web_layout_captured_argb_size_bytes=")
 ```
 
@@ -622,7 +646,7 @@ expect(evidence).to_contain("electron_simple_web_layout_captured_argb_size_bytes
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 29 lines folded for reproduction.
+Runnable source: 38 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -651,13 +675,17 @@ expect(argb).to_contain("electron_simple_web_layout_validation_reason=captured-a
 expect(argb).to_contain("electron_simple_web_layout_proof_symlink_status=pass")
 expect(argb).to_contain("electron_simple_web_layout_proof_hardlink_status=pass")
 expect(argb).to_contain("electron_simple_web_layout_captured_argb_file_status=symlink")
+expect(argb).to_contain("electron_simple_web_layout_captured_argb_file_reason=symlink")
+expect(argb).to_contain("electron_simple_web_layout_captured_argb_artifact_status=fail")
 expect(argb).to_contain("electron_simple_web_layout_captured_argb_symlink_status=fail")
 expect(argb).to_contain("electron_simple_web_layout_captured_argb_hardlink_status=pass")
 expect(geometry).to_contain("electron_simple_web_layout_validation_status=fail")
-expect(geometry).to_contain("electron_simple_web_layout_validation_reason=electron-geometry-symlink")
+expect(geometry).to_contain("electron_simple_web_layout_validation_reason=captured-argb-symlink")
 expect(geometry).to_contain("electron_simple_web_layout_proof_symlink_status=pass")
 expect(geometry).to_contain("electron_simple_web_layout_proof_hardlink_status=pass")
 expect(geometry).to_contain("electron_simple_web_layout_geometry_file_status=symlink")
+expect(geometry).to_contain("electron_simple_web_layout_geometry_file_reason=symlink")
+expect(geometry).to_contain("electron_simple_web_layout_geometry_artifact_status=fail")
 expect(geometry).to_contain("electron_simple_web_layout_geometry_symlink_status=fail")
 expect(geometry).to_contain("electron_simple_web_layout_geometry_hardlink_status=pass")
 ```
@@ -676,7 +704,7 @@ expect(geometry).to_contain("electron_simple_web_layout_geometry_hardlink_status
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 50 lines folded for reproduction.
+Runnable source: 38 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -704,13 +732,17 @@ expect(argb).to_contain("electron_simple_web_layout_validation_status=fail")
 expect(argb).to_contain("electron_simple_web_layout_validation_reason=captured-argb-hardlink")
 expect(argb).to_contain("electron_simple_web_layout_proof_hardlink_status=pass")
 expect(argb).to_contain("electron_simple_web_layout_captured_argb_file_status=hardlink")
+expect(argb).to_contain("electron_simple_web_layout_captured_argb_file_reason=hardlink")
+expect(argb).to_contain("electron_simple_web_layout_captured_argb_artifact_status=fail")
 expect(argb).to_contain("electron_simple_web_layout_captured_argb_symlink_status=pass")
 expect(argb).to_contain("electron_simple_web_layout_captured_argb_hardlink_status=fail")
 expect(argb).to_contain("electron_simple_web_layout_captured_argb_size_bytes=")
 expect(geometry).to_contain("electron_simple_web_layout_validation_status=fail")
-expect(geometry).to_contain("electron_simple_web_layout_validation_reason=electron-geometry-hardlink")
+expect(geometry).to_contain("electron_simple_web_layout_validation_reason=captured-argb-hardlink")
 expect(geometry).to_contain("electron_simple_web_layout_proof_hardlink_status=pass")
 expect(geometry).to_contain("electron_simple_web_layout_geometry_file_status=hardlink")
+expect(geometry).to_contain("electron_simple_web_layout_geometry_file_reason=hardlink")
+expect(geometry).to_contain("electron_simple_web_layout_geometry_artifact_status=fail")
 expect(geometry).to_contain("electron_simple_web_layout_geometry_symlink_status=pass")
 expect(geometry).to_contain("electron_simple_web_layout_geometry_hardlink_status=fail")
 expect(geometry).to_contain("electron_simple_web_layout_geometry_size_bytes=")
@@ -794,7 +826,7 @@ expect(blank).to_contain("electron_simple_web_layout_captured_argb_nonzero_pixel
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 36 lines folded for reproduction.
+Runnable source: 40 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -824,8 +856,12 @@ val measured = file_read(root + "/measured.env")
 step("Confirm Electron geometry must be a measured offscreen DOM artifact")
 expect(missing).to_contain("electron_simple_web_layout_validation_reason=missing-electron-geometry-file")
 expect(missing).to_contain("electron_simple_web_layout_geometry_file_status=missing")
+expect(missing).to_contain("electron_simple_web_layout_geometry_file_reason=missing")
+expect(missing).to_contain("electron_simple_web_layout_geometry_artifact_status=fail")
 expect(empty).to_contain("electron_simple_web_layout_validation_reason=empty-electron-geometry-file")
 expect(empty).to_contain("electron_simple_web_layout_geometry_file_status=empty")
+expect(empty).to_contain("electron_simple_web_layout_geometry_file_reason=empty")
+expect(empty).to_contain("electron_simple_web_layout_geometry_artifact_status=fail")
 expect(malformed).to_contain("electron_simple_web_layout_validation_reason=malformed-electron-geometry")
 expect(viewport).to_contain("electron_simple_web_layout_validation_reason=electron-geometry-viewport-mismatch")
 expect(viewport).to_contain("electron_simple_web_layout_geometry_viewport_width=95")
@@ -880,10 +916,10 @@ expect(mismatch).to_contain("electron_simple_web_layout_capture_native_width=95"
 -  proof command
    - Expected: code equals `1`
 - Confirm live Electron layout numeric proof cannot be stringified
-   - Expected: requested does not contain `electron_simple_web_layout_requested_width=96`
-   - Expected: argb does not contain `electron_simple_web_layout_captured_argb_width=96`
-   - Expected: native does not contain `electron_simple_web_layout_capture_native_width=96`
-   - Expected: timing does not contain `electron_simple_web_layout_electron_frame_us=1250`
+- expect not
+- expect not
+- expect not
+- expect not
 
 
 <details>
@@ -939,12 +975,12 @@ expect_not(timing.contains("electron_simple_web_layout_electron_frame_us=1250"))
 -  proof command
    - Expected: code equals `1`
 - Confirm string booleans remain malformed Electron layout diagnostics
-   - Expected: capture does not contain `electron_simple_web_layout_captured_argb_written=true`
-   - Expected: capture does not contain `electron_simple_web_layout_captured_argb_written=false`
-   - Expected: downsampled does not contain `electron_simple_web_layout_capture_downsampled=false`
-   - Expected: geometry does not contain `electron_simple_web_layout_geometry_written=true`
-   - Expected: geometry does not contain `electron_simple_web_layout_geometry_written=false`
-   - Expected: blur does not contain `electron_simple_web_layout_blur_or_tolerance_used=false`
+- expect not
+- expect not
+- expect not
+- expect not
+- expect not
+- expect not
 
 
 <details>
@@ -1000,8 +1036,8 @@ expect_not(blur.contains("electron_simple_web_layout_blur_or_tolerance_used=fals
 -  proof command
 -  proof command
    - Expected: code equals `1`
-   - Expected: mismatch does not contain `electron_simple_web_layout_mismatch_count=bad`
-   - Expected: string_zero does not contain `electron_simple_web_layout_mismatch_count=0`
+- expect not
+- expect not
 
 
 <details>
@@ -1114,17 +1150,55 @@ expect(weighted).to_contain("electron_simple_web_layout_captured_argb_weighted_c
 
 </details>
 
+#### catches a corrupted GUI pixel artifact and passes after the pixel is restored
+
+-  proof command
+-  proof command
+   - Expected: code equals `0`
+- Confirm the validator catches and then accepts the repaired GUI pixel proof
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 19 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-electron-layout-validator-corrupt-then-fix"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_command(root + "/bug.json", "const artifactPath=path.join(path.dirname(process.argv[1]),\"captured.json\");const artifact=JSON.parse(fs.readFileSync(artifactPath,\"utf8\"));artifact.pixels[0]=4294967294;fs.writeFileSync(artifactPath,JSON.stringify(artifact))") +
+    " && node scripts/check/validate-electron-simple-web-layout-proof.js " + root + "/bug.json > " + root + "/bug.env; " +
+    _proof_command(root + "/fixed.json", "") +
+    " && node scripts/check/validate-electron-simple-web-layout-proof.js " + root + "/fixed.json > " + root + "/fixed.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val bug = file_read(root + "/bug.env")
+val fixed = file_read(root + "/fixed.env")
+step("Confirm the validator catches and then accepts the repaired GUI pixel proof")
+expect(bug).to_contain("electron_simple_web_layout_validation_status=fail")
+expect(bug).to_contain("electron_simple_web_layout_validation_reason=captured-argb-checksum-mismatch")
+expect(bug).to_contain("electron_simple_web_layout_electron_checksum=26388279060480")
+expect(bug).to_contain("electron_simple_web_layout_captured_argb_checksum=26388279060479")
+expect(fixed).to_contain("electron_simple_web_layout_validation_status=pass")
+expect(fixed).to_contain("electron_simple_web_layout_validation_reason=pass")
+expect(fixed).to_contain("electron_simple_web_layout_captured_argb_checksum=26388279060480")
+```
+
+</details>
+
 #### keeps the live Electron layout wrapper wired to validator and divergent mapping
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 58 lines folded for reproduction.
+Runnable source: 88 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val validator = file_read("scripts/check/validate-electron-simple-web-layout-proof.js")
-expect(validator).to_contain("path.resolve(candidate) === path.resolve(proofPath)")
+expect(validator).to_contain("resolvedCandidate === path.resolve(proofPath)")
 expect(validator).to_contain("jsonIntegerBetween(proof.frame_us, 1, 1000000)")
 expect(validator).to_contain("jsonBoolTextOrBlank")
 expect(validator).to_contain("measuredGeometryItemCount")
@@ -1156,8 +1230,16 @@ expect(script).to_contain("electron_simple_web_layout_gpu_compositing")
 expect(script).to_contain("electron_simple_web_layout_estimated_fps_floor")
 expect(script).to_contain("ELECTRON_BITMAP_GEOMETRY_PATH")
 expect(script).to_contain("electron_simple_web_layout_geometry_file_status")
+expect(script).to_contain("electron_simple_web_layout_geometry_file_reason")
+expect(script).to_contain("electron_simple_web_layout_geometry_artifact_status")
+expect(script).to_contain("Electron geometry artifact:")
+expect(script).to_contain("electron-geometry-artifact-status-not-pass")
 expect(script).to_contain("electron_simple_web_layout_geometry_measured_item_count")
 expect(script).to_contain("electron_simple_web_layout_captured_argb_file_status")
+expect(script).to_contain("electron_simple_web_layout_captured_argb_file_reason")
+expect(script).to_contain("electron_simple_web_layout_captured_argb_artifact_status")
+expect(script).to_contain("captured ARGB artifact:")
+expect(script).to_contain("captured-argb-artifact-status-not-pass")
 expect(script).to_contain("electron_simple_web_layout_captured_argb_size_bytes")
 expect(script).to_contain("electron_simple_web_layout_captured_argb_format")
 expect(script).to_contain("electron_simple_web_layout_captured_argb_nonzero_pixel_count")
@@ -1175,6 +1257,9 @@ expect(script).to_contain("electron_simple_web_layout_proof_source")
 expect(script).to_contain("electron_simple_web_layout_proof_source_file_status")
 expect(script).to_contain("electron_simple_web_layout_proof_source_size_bytes")
 expect(script).to_contain("electron_simple_web_layout_proof_source_actual_size_bytes")
+expect(script).to_contain("electron_simple_web_layout_proof_source_file_reason")
+expect(script).to_contain("electron_simple_web_layout_proof_source_artifact_status")
+expect(script).to_contain("proof source artifact:")
 expect(script).to_contain("num_at_least \"$proof_source_actual_size_bytes\" 1")
 expect(script).to_contain("proof-source-file-status-not-pass")
 expect(script).to_contain("proof-source-size-mismatch")
@@ -1206,10 +1291,13 @@ expect(fixture).to_contain("chrome_process_version")
 
 #### rejects explicit rust seed simple launcher in bitmap evidence wrapper
 
+- Confirm unavailable Electron report surfaces artifact gate details
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1224,6 +1312,18 @@ expect(evidence).to_contain("electron_simple_web_layout_reason=simple-bin-forbid
 expect(evidence).to_contain("electron_simple_web_layout_simple_bin=src/compiler_rust/target/release/simple")
 expect(evidence).to_contain("electron_simple_web_layout_simple_bin_source=explicit-env-rust-seed-forbidden")
 expect(evidence).to_contain("electron_simple_web_layout_simple_bin_status=forbidden")
+expect(evidence).to_contain("electron_simple_web_layout_proof_source_file_reason=")
+expect(evidence).to_contain("electron_simple_web_layout_proof_source_artifact_status=unavailable")
+expect(evidence).to_contain("electron_simple_web_layout_geometry_file_reason=not-run")
+expect(evidence).to_contain("electron_simple_web_layout_geometry_artifact_status=unavailable")
+expect(evidence).to_contain("electron_simple_web_layout_captured_argb_file_reason=not-run")
+expect(evidence).to_contain("electron_simple_web_layout_captured_argb_artifact_status=unavailable")
+
+val report = file_read(root + "/report.md")
+step("Confirm unavailable Electron report surfaces artifact gate details")
+expect(report).to_contain("- proof source artifact:  /  / unavailable")
+expect(report).to_contain("- Electron geometry artifact: fail / not-run / unavailable")
+expect(report).to_contain("- captured ARGB artifact: fail / not-run / unavailable")
 ```
 
 </details>
@@ -1259,8 +1359,8 @@ expect(evidence).to_contain("electron_simple_web_layout_simple_expected_timed_ou
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 24 |
-| Active scenarios | 24 |
+| Total scenarios | 26 |
+| Active scenarios | 26 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

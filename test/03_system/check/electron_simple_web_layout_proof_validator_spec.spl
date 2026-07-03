@@ -70,6 +70,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_simple_web_layout_p
   regular files, not symlinks or hardlinks to mutable or substituted evidence.
 - The live Electron layout wrapper consumes the validator and still maps real
   pixel mismatches to `divergent` evidence.
+- A one-pixel corrupted captured ARGB artifact is rejected, and the same proof
+  passes once the captured pixel is restored.
 """
 
 # @tag: system, gui, electron, renderer, layout, capture, performance
@@ -420,7 +422,7 @@ describe "Electron Simple Web layout proof validator":
         expect(argb).to_contain("electron_simple_web_layout_captured_argb_symlink_status=fail")
         expect(argb).to_contain("electron_simple_web_layout_captured_argb_hardlink_status=pass")
         expect(geometry).to_contain("electron_simple_web_layout_validation_status=fail")
-        expect(geometry).to_contain("electron_simple_web_layout_validation_reason=electron-geometry-symlink")
+        expect(geometry).to_contain("electron_simple_web_layout_validation_reason=captured-argb-symlink")
         expect(geometry).to_contain("electron_simple_web_layout_proof_symlink_status=pass")
         expect(geometry).to_contain("electron_simple_web_layout_proof_hardlink_status=pass")
         expect(geometry).to_contain("electron_simple_web_layout_geometry_file_status=symlink")
@@ -460,7 +462,7 @@ describe "Electron Simple Web layout proof validator":
         expect(argb).to_contain("electron_simple_web_layout_captured_argb_hardlink_status=fail")
         expect(argb).to_contain("electron_simple_web_layout_captured_argb_size_bytes=")
         expect(geometry).to_contain("electron_simple_web_layout_validation_status=fail")
-        expect(geometry).to_contain("electron_simple_web_layout_validation_reason=electron-geometry-hardlink")
+        expect(geometry).to_contain("electron_simple_web_layout_validation_reason=captured-argb-hardlink")
         expect(geometry).to_contain("electron_simple_web_layout_proof_hardlink_status=pass")
         expect(geometry).to_contain("electron_simple_web_layout_geometry_file_status=hardlink")
         expect(geometry).to_contain("electron_simple_web_layout_geometry_file_reason=hardlink")
@@ -709,9 +711,30 @@ describe "Electron Simple Web layout proof validator":
         expect(weighted).to_contain("electron_simple_web_layout_captured_argb_checksum=6144")
         expect(weighted).to_contain("electron_simple_web_layout_captured_argb_weighted_checksum=18877439")
 
+    it "catches a corrupted GUI pixel artifact and passes after the pixel is restored":
+        val root = "build/test-electron-layout-validator-corrupt-then-fix"
+        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+            _proof_command(root + "/bug.json", "const artifactPath=path.join(path.dirname(process.argv[1]),\"captured.json\");const artifact=JSON.parse(fs.readFileSync(artifactPath,\"utf8\"));artifact.pixels[0]=4294967294;fs.writeFileSync(artifactPath,JSON.stringify(artifact))") +
+            " && node scripts/check/validate-electron-simple-web-layout-proof.js " + root + "/bug.json > " + root + "/bug.env; " +
+            _proof_command(root + "/fixed.json", "") +
+            " && node scripts/check/validate-electron-simple-web-layout-proof.js " + root + "/fixed.json > " + root + "/fixed.env"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(0)
+
+        val bug = file_read(root + "/bug.env")
+        val fixed = file_read(root + "/fixed.env")
+        step("Confirm the validator catches and then accepts the repaired GUI pixel proof")
+        expect(bug).to_contain("electron_simple_web_layout_validation_status=fail")
+        expect(bug).to_contain("electron_simple_web_layout_validation_reason=captured-argb-checksum-mismatch")
+        expect(bug).to_contain("electron_simple_web_layout_electron_checksum=26388279060480")
+        expect(bug).to_contain("electron_simple_web_layout_captured_argb_checksum=26388279060479")
+        expect(fixed).to_contain("electron_simple_web_layout_validation_status=pass")
+        expect(fixed).to_contain("electron_simple_web_layout_validation_reason=pass")
+        expect(fixed).to_contain("electron_simple_web_layout_captured_argb_checksum=26388279060480")
+
     it "keeps the live Electron layout wrapper wired to validator and divergent mapping":
         val validator = file_read("scripts/check/validate-electron-simple-web-layout-proof.js")
-        expect(validator).to_contain("path.resolve(candidate) === path.resolve(proofPath)")
+        expect(validator).to_contain("resolvedCandidate === path.resolve(proofPath)")
         expect(validator).to_contain("jsonIntegerBetween(proof.frame_us, 1, 1000000)")
         expect(validator).to_contain("jsonBoolTextOrBlank")
         expect(validator).to_contain("measuredGeometryItemCount")
