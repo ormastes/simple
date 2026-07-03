@@ -271,6 +271,22 @@ theorem write_access_implies_unique_cap
   cases cap <;> simp [allowsAccess]
   exact ⟨rfl, rfl⟩
 
+theorem write_access_implies_same_location_and_unique_cap
+    (baseType : String) (loc other : Nat) (cap : RefCapability) :
+    allowsAccess { location := loc, refType := { baseType := baseType, capability := cap } }
+      (MemAccess.Write other) = true →
+    loc = other ∧ (cap = RefCapability.Exclusive ∨ cap = RefCapability.Isolated) := by
+  cases cap
+  · simp [allowsAccess]
+    intro _
+    exact ⟨rfl, rfl⟩
+  · simp [allowsAccess]
+    intro h _
+    exact h
+  · simp [allowsAccess]
+    intro h _
+    exact h
+
 theorem shared_write_same_loc_denied (baseType : String) (loc : Nat) :
   allowsAccess { location := loc, refType := { baseType := baseType, capability := RefCapability.Shared } } (MemAccess.Write loc) = false := by
   simp [allowsAccess]
