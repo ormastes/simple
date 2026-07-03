@@ -91,6 +91,10 @@ theorem shapesCompatible_refl (s : TensorShape) :
   | nil => rfl
   | cons d s ih => simp [shapesCompatible, dimEq, ih]
 
+theorem shapesCompatible_rank_mismatch_left (d : Dim) (s : TensorShape) :
+  shapesCompatible (d :: s) [] = false := by
+  rfl
+
 theorem unifyDim_success_eq (d1 : Dim) (d2 : Dim) (d : Dim) :
   unifyDim d1 d2 = UnifyResult.success d → d = d := by
   intro h
