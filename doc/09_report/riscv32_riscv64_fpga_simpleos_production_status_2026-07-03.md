@@ -137,7 +137,8 @@ hardware source and compiles it to `build/vhdl/rv32/rv32_core.vhd`, but the
 combined preflight no longer counts that helper as an executable core while
 `soc_top_rv32.vhd` is still a payload-stream/liveness top. RV32 must grow a
 PC-following executor or real boot-marker path before `rv32_fpga_core_executable`
-can pass.
+can pass. `scripts/fpga/build_k26_rv32.shs` now refuses that liveness-only top
+by default; set `ALLOW_RV32_LIVENESS_TOP=1` only for Vivado plumbing diagnostics.
 
 `scripts/fpga/generate_rv64_vhdl.shs` now emits `build/vhdl/rv64/rv64gc_core.vhd`
 as a minimal RV64/C early executor instead of a fetch-only placeholder. It
