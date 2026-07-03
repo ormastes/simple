@@ -58,25 +58,76 @@ fn process_run(cmd: text, args: [text]) -> (text, text, i64):
     result
 
 fn process_run_timeout_unix(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32):
-    """Unix implementation using 'timeout' command"""
+    """Unix implementation: still uses `timeout <secs> <cmd> <args>` to
+    enforce the wall-clock deadline, but spawns it asynchronously with
+    output redirected to temp files and reaps it with a single blocking
+    rt_process_wait, instead of rt_process_run's popen()/fgets() loop.
+
+    That loop reads the child's stdout/stderr through a PIPE and only
+    returns on pipe EOF. If the wrapped command spawned a grandchild (e.g. a
+    helper worker process) that inherited the write end of that pipe and
+    outlived the direct child, the parent hung forever -- `timeout` only
+    kills the process IT launched, not any orphaned grandchildren still
+    holding the pipe open. See
+    doc/08_tracking/bug/native_build_worker_zombie_parent_hang_2026-07-03.md.
+
+    Waiting on the wrapper's actual process exit (rather than pipe EOF)
+    sidesteps this: `timeout` (with --kill-after as a belt-and-suspenders
+    against a SIGTERM-ignoring child) guarantees the wrapper process itself
+    terminates at the deadline regardless of what any descendant is still
+    doing, and reading the redirected output files afterward never blocks
+    on some other process's open file descriptor the way a pipe read would.
+
+    Note: rt_process_wait is called with a timeout of 0 (block until the
+    wrapper exits) rather than passing timeout_ms through -- the interpreter
+    build of rt_process_wait ignores a timeout argument and always blocks
+    until the process exits, so the actual deadline enforcement must come
+    from `timeout` itself, not from rt_process_wait's second parameter.
+    """
     val timeout_secs = if timeout_ms <= 0:
         120
     else:
         val secs = timeout_ms / 1000
         if secs < 1: 1 else: secs
 
-    var timeout_args: [text] = ["{timeout_secs}", cmd]
+    var temp_dir = rt_env_get("TMPDIR")
+    if temp_dir == "" or temp_dir == nil:
+        temp_dir = "/tmp"
+
+    val pid_str = "{rt_getpid()}"
+    val time_str = "{rt_time_now_unix_micros()}"
+    val stdout_file = "{temp_dir}/simple_out_{pid_str}_{time_str}.txt"
+    val stderr_file = "{temp_dir}/simple_err_{pid_str}_{time_str}.txt"
+
+    var quoted_parts: [text] = ["timeout", "--kill-after=5s", "{timeout_secs}s"]
+    val cmd_escaped = cmd.replace("'", "'\\''")
+    quoted_parts.push("'{cmd_escaped}'")
     for arg in args:
-        timeout_args.push(arg)
+        val arg_escaped = arg.replace("'", "'\\''")
+        quoted_parts.push("'{arg_escaped}'")
+    val cmd_line = quoted_parts.join(" ")
+    val redirected_cmd = "{cmd_line} > '{stdout_file}' 2> '{stderr_file}'"
 
     proc_slot_acquire()
-    val (out, err, code) = rt_process_run("timeout", timeout_args)
+    val pid = rt_process_spawn_async("/bin/sh", ["-c", redirected_cmd])
+    val wrapper_code = if pid <= 0: -1 else: rt_process_wait(pid, 0)
     proc_slot_release()
 
-    if code == 124:
-        (out, err + "\n[TIMEOUT: Process killed after {timeout_secs}s]", -1)
+    var stdout = ""
+    var stderr = ""
+    if rt_file_exists(stdout_file):
+        stdout = rt_file_read_text(stdout_file)
+        rt_file_delete(stdout_file)
+    if rt_file_exists(stderr_file):
+        stderr = rt_file_read_text(stderr_file)
+        rt_file_delete(stderr_file)
+
+    if pid <= 0:
+        (stdout, stderr + "\n[ERROR: failed to spawn process '{cmd}']", -1)
+    elif wrapper_code == 124:
+        (stdout, stderr + "\n[TIMEOUT: Process killed after {timeout_secs}s]", -1)
     else:
-        (out, err, code)
+        (stdout, stderr, wrapper_code)
 
 fn process_run_timeout_windows(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32):
     """Windows implementation using async spawn + temp files"""

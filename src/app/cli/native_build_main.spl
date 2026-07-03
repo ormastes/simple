@@ -129,6 +129,23 @@ fn print_bounded(output: text):
     print "[stdout truncated by native-build entry]"
     print output[output.len() - tail_len:output.len()]
 
+# Best-effort extraction of the `-o`/`--output` path from the raw native-build
+# args, so the parent can verify the worker actually produced a binary instead
+# of trusting a bare exit code of 0 (see
+# doc/08_tracking/bug/native_build_worker_zombie_parent_hang_2026-07-03.md).
+fn output_path_arg(args: [text]) -> text:
+    var i = 0
+    while i < args.len():
+        val a = args[i]
+        if (a == "-o" or a == "--output") and i + 1 < args.len():
+            return args[i + 1]
+        elif a.starts_with("--output="):
+            return a.substring(9)
+        elif a.starts_with("-o") and a.len() > 2:
+            return a.substring(2)
+        i = i + 1
+    ""
+
 fn eprint_bounded(output: text):
     if output.len() == 0:
         return
@@ -147,7 +164,7 @@ fn main() -> i64:
         print_help()
         return 0
 
-    var worker_args = ["run", "src/app/cli/native_build_worker.spl", "--mode=interpreter"]
+    var worker_args = ["run", "src/app/cli/native_build_worker.spl"]
     for arg in args:
         worker_args.push(arg)
     val simple_bin = resolve_simple_binary()
@@ -155,11 +172,19 @@ fn main() -> i64:
     # child it spawns) inherit a runnable SIMPLE_BINARY instead of re-deriving
     # an empty one.
     env_set("SIMPLE_BINARY", simple_bin)
-    val old_execution_mode = env_get("SIMPLE_EXECUTION_MODE") ?? ""
-    env_set("SIMPLE_EXECUTION_MODE", "interpret")
     val (stdout, stderr, code) = process_run_timeout(simple_bin, worker_args, native_build_timeout_ms(args))
-    env_set("SIMPLE_EXECUTION_MODE", old_execution_mode)
     print_bounded(stdout)
+    val output_path = output_path_arg(args)
+    if code == 0 and output_path != "" and not rt_file_exists(output_path):
+        # Parent-side belt-and-suspenders: never trust a bare exit code 0. If the
+        # worker chain died in a way that still reports success (an early-exit
+        # helper, a killed sibling, etc.) but left no output file, fail loudly
+        # here immediately instead of letting the caller silently proceed with a
+        # stale/missing binary.
+        eprint_bounded(stderr)
+        eprint "error: native-build worker exited 0 but produced no output binary: {output_path}"
+        eprint "  Treating a successful-looking exit with a missing output file as a hard failure."
+        return 1
     if code != 0:
         eprint_bounded(stderr)
         # Surface the real cause as an explicit final line — it must survive the stderr
