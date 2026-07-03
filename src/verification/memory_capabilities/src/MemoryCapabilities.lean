@@ -111,6 +111,16 @@ theorem shared_to_isolated_denied :
   canConvert RefCapability.Shared RefCapability.Isolated = false := by
   rfl
 
+theorem capability_upgrades_denied :
+  canConvert RefCapability.Shared RefCapability.Exclusive = false ∧
+  canConvert RefCapability.Shared RefCapability.Isolated = false ∧
+  canConvert RefCapability.Exclusive RefCapability.Isolated = false := by
+  constructor
+  · exact shared_to_exclusive_denied
+  · constructor
+    · exact shared_to_isolated_denied
+    · exact exclusive_to_isolated_denied
+
 theorem can_convert_implies_restrictive (srcCap dstCap : RefCapability) :
   canConvert srcCap dstCap = true → isMoreRestrictive srcCap dstCap := by
   cases srcCap <;> cases dstCap <;> simp [canConvert, isMoreRestrictive] <;> decide
