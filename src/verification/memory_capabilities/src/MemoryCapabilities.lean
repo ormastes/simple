@@ -202,6 +202,15 @@ theorem shared_read_same_loc (baseType : String) (loc : Nat) :
   allowsAccess { location := loc, refType := { baseType := baseType, capability := RefCapability.Shared } } (MemAccess.Read loc) = true := by
   simp [allowsAccess]
 
+theorem singleton_shared_read_safe (baseType : String) (loc : Nat) :
+  accessIsSafe
+    { activeRefs :=
+        [(loc,
+          [{ location := loc,
+             refType := { baseType := baseType, capability := RefCapability.Shared } }])] }
+    (MemAccess.Read loc) = true := by
+  simp [accessIsSafe, getActiveRefs, allowsAccess]
+
 theorem exclusive_write_same_loc (baseType : String) (loc : Nat) :
   allowsAccess { location := loc, refType := { baseType := baseType, capability := RefCapability.Exclusive } } (MemAccess.Write loc) = true := by
   simp [allowsAccess]
