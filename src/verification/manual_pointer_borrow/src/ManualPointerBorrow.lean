@@ -30,6 +30,13 @@ def BorrowState.toValid (s : BorrowState) : Option ValidBorrowState :=
 def valid (s : BorrowState) : Prop :=
   if s.exclusive then s.shared = 0 else True
 
+theorem valid_exclusive_has_no_shared (s : BorrowState)
+    (hv : valid s) (hex : s.exclusive = true) :
+    s.shared = 0 := by
+  unfold valid at hv
+  rw [hex] at hv
+  exact hv
+
 def takeExclusive (s : BorrowState) : BorrowState :=
   if s.shared = 0 then { s with exclusive := true } else s
 

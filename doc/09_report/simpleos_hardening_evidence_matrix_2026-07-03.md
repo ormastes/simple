@@ -71,6 +71,9 @@
 - memory_capabilities_formal: pass
 - memory_capabilities_formal_scope: empty environments allow exclusive and isolated references, empty environments are well-formed, shared references can read but cannot write, and exclusive or isolated references can write the referenced location
 - memory_capabilities_formal_evidence: src/verification/memory_capabilities/src/MemoryCapabilities.lean empty_env_allows_exclusive + empty_env_allows_isolated + empty_env_wellformed + shared_read_same_loc + shared_write_same_loc_denied + exclusive_write_same_loc + isolated_write_same_loc; `cd src/verification/memory_capabilities && lake build`
+- manual_pointer_borrow_formal: pass
+- manual_pointer_borrow_formal_scope: valid borrow states exclude shared borrows while exclusive, typed valid states are always valid, roundtrip conversion preserves valid states, take/release operations preserve validity
+- manual_pointer_borrow_formal_evidence: src/verification/manual_pointer_borrow/src/ManualPointerBorrow.lean valid_exclusive_has_no_shared + validState_always_valid + toValid_toState + exclusive_ok + shared_ok + release_ok; `cd src/verification/manual_pointer_borrow && lake build`
 - kernel_capability_depth_formal: pass
 - kernel_capability_depth_formal_scope: capability delegation with exhausted depth is denied
 - kernel_capability_depth_formal_evidence: src/verification/kernel_capabilities/KernelCapabilities/Theorems.lean zero_depth_grant_denied; `cd src/verification/kernel_capabilities && lake build`
