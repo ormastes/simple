@@ -120,6 +120,12 @@ RV32I RTL helper visibility is fixed for the existing `rv32i_rtl` core path:
 compile now reaches the real remaining blocker: the behavioral core has no
 `@hardware` boundary for `compile --backend=vhdl`.
 
+`scripts/fpga/generate_rv32_vhdl.shs` now also writes generated RV32
+decode/control hardware source and compiles it to
+`build/vhdl/rv32/rv32_core.vhd`. The dual-arch preflight now passes
+`rv32_fpga_core_executable` for that helper RTL while still failing RV32
+bitstream and ELF load/run evidence.
+
 `simple os build --scenario=riscv64-fpga-mmode` and
 `simple os build --scenario=riscv32-fpga-mmode` are now registered. The RV64
 FPGA lane builds with the local Cranelift-capable release compiler and emits

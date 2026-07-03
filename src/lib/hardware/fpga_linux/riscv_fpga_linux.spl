@@ -261,6 +261,11 @@ impl RiscvFpgaLane:
     fn rv32_strobe_testbench_vhdl() -> text:
         "library ieee;\nuse ieee.std_logic_1164.all;\nuse work.simple_rv32i_core_pkg.all;\nentity tb_generated_rv32_strobe is\nend entity tb_generated_rv32_strobe;\narchitecture tb of tb_generated_rv32_strobe is\nbegin\n  u_cpu : entity work.simple_rv32gc_core;\n  process begin\n    report \"GENERATED_RV32_STROBE: PASS\";\n    wait;\n  end process;\nend architecture tb;\n"
 
+    fn hardware_source_spl() -> text:
+        if self.xlen == Xlen.Rv32:
+            return rv32_generated_hardware_source_spl()
+        generated_core_source(self.xlen.to_text())
+
     fn rtl_dir_name() -> text:
         self.xlen.to_text()
 
@@ -467,6 +472,115 @@ fn write_bundle_readme(output_dir: text) -> text:
 fn generated_core_source(lane: text) -> text:
     "proof_lane: generated_{lane}_linux\nscope: repo-native {lane.upper()}GC generated-core Linux lane\n"
 
+fn rv32_generated_hardware_source_spl() -> text:
+    """Generated RV32I decode/control hardware helpers used by the VHDL lane."""
+    var src = ""
+    src = src + "# proof_lane: generated_rv32_linux\n"
+    src = src + "# scope: repo-native RV32GC generated-core Linux lane\n\n"
+    src = src + "@hardware\nfn simple_rv32i_core_decode_writeback(imem_rdata: u32, next_rd: u32) -> u32:\n"
+    src = src + "    val v_opcode = imem_rdata & 127\n"
+    src = src + "    val v_funct3 = (imem_rdata >> 12) & 7\n"
+    src = src + "    val v_funct7 = (imem_rdata >> 25) & 127\n"
+    src = src + "    val v_rs1 = (imem_rdata >> 15) & 31\n"
+    src = src + "    val v_rs2 = (imem_rdata >> 20) & 31\n"
+    src = src + "    if v_opcode == 19:\n"
+    src = src + "        return (v_opcode << 8) | (v_funct3 << 5) | next_rd\n"
+    src = src + "    else:\n"
+    src = src + "        return (v_funct7 << 10) | (v_rs1 << 5) | v_rs2\n\n"
+
+    src = src + "@hardware\nfn simple_rv32i_core_decode_branch_immediate(imem_rdata: u32) -> u32:\n"
+    src = src + "    val v_opcode = imem_rdata & 127\n"
+    src = src + "    if v_opcode == 99:\n"
+    src = src + "        return (((imem_rdata >> 31) & 1) << 12) | (((imem_rdata >> 7) & 1) << 11) | (((imem_rdata >> 25) & 63) << 5) | (((imem_rdata >> 8) & 15) << 1)\n"
+    src = src + "    else:\n"
+    src = src + "        return 0\n\n"
+
+    src = src + "@hardware\nfn simple_rv32i_core_decode_store_immediate(imem_rdata: u32) -> u32:\n"
+    src = src + "    val v_opcode = imem_rdata & 127\n"
+    src = src + "    if v_opcode == 35:\n"
+    src = src + "        return (((imem_rdata >> 25) & 127) << 25) | (((imem_rdata >> 7) & 31) << 20)\n"
+    src = src + "    else:\n"
+    src = src + "        return 0\n\n"
+
+    src = src + "@hardware\nfn simple_rv32i_core_decode_i_immediate(imem_rdata: u32) -> u32:\n"
+    src = src + "    val v_opcode = imem_rdata & 127\n"
+    src = src + "    if v_opcode == 19 or v_opcode == 3:\n"
+    src = src + "        return ((imem_rdata >> 20) & 4095) << 20\n"
+    src = src + "    else:\n"
+    src = src + "        return 0\n\n"
+
+    src = src + "@hardware\nfn simple_rv32i_core_decode_upper_immediate(imem_rdata: u32) -> u32:\n"
+    src = src + "    val v_opcode = imem_rdata & 127\n"
+    src = src + "    if v_opcode == 55 or v_opcode == 23:\n"
+    src = src + "        return ((imem_rdata >> 12) & 1048575) << 12\n"
+    src = src + "    else:\n"
+    src = src + "        return 0\n\n"
+
+    src = src + "@hardware\nfn simple_rv32i_core_decode_execute_control(imem_rdata: u32) -> u32:\n"
+    src = src + "    val v_opcode = imem_rdata & 127\n"
+    src = src + "    val v_funct3 = (imem_rdata >> 12) & 7\n"
+    src = src + "    val v_shamt_low5 = (imem_rdata >> 20) & 31\n"
+    src = src + "    val v_shamt_bit5 = (imem_rdata >> 25) & 1\n"
+    src = src + "    val v_bit30 = (imem_rdata >> 30) & 1\n"
+    src = src + "    if v_opcode == 19 or v_opcode == 51 or v_opcode == 99:\n"
+    src = src + "        return (v_funct3 << 7) | (v_shamt_low5 << 2) | (v_shamt_bit5 << 1) | v_bit30\n"
+    src = src + "    else:\n"
+    src = src + "        return 0\n\n"
+
+    src = src + "@hardware\nfn simple_rv32i_core_decode_execute_datapath(imem_rdata: u32) -> u32:\n"
+    src = src + "    val v_opcode = imem_rdata & 127\n"
+    src = src + "    val v_funct3 = (imem_rdata >> 12) & 7\n"
+    src = src + "    val v_bit30 = (imem_rdata >> 30) & 1\n"
+    src = src + "    if v_opcode == 51:\n"
+    src = src + "        return (v_funct3 << 8) | (v_bit30 << 7) | v_opcode\n"
+    src = src + "    else:\n"
+    src = src + "        return 0\n\n"
+
+    src = src + "@hardware\nfn simple_rv32i_core_decode_branch_datapath(imem_rdata: u32) -> u32:\n"
+    src = src + "    val v_opcode = imem_rdata & 127\n"
+    src = src + "    val v_funct3 = (imem_rdata >> 12) & 7\n"
+    src = src + "    if v_opcode == 99:\n"
+    src = src + "        return (v_funct3 << 7) | v_opcode\n"
+    src = src + "    else:\n"
+    src = src + "        return 0\n\n"
+
+    src = src + "@hardware\nfn simple_rv32i_core_decode_control_flow_datapath(imem_rdata: u32) -> u32:\n"
+    src = src + "    val v_opcode = imem_rdata & 127\n"
+    src = src + "    if v_opcode == 103:\n"
+    src = src + "        return (((imem_rdata >> 20) & 4095) << 8) | (((imem_rdata >> 15) & 31) << 3) | ((imem_rdata >> 12) & 7)\n"
+    src = src + "    else:\n"
+    src = src + "        return (((imem_rdata >> 20) & 4095) << 8) | ((imem_rdata >> 12) & 255)\n\n"
+
+    src = src + "@hardware\nfn simple_rv32i_core_decode_memory_access_control(imem_rdata: u32) -> u32:\n"
+    src = src + "    val v_opcode = imem_rdata & 127\n"
+    src = src + "    val v_funct3 = (imem_rdata >> 12) & 7\n"
+    src = src + "    if v_opcode == 3 or v_opcode == 35:\n"
+    src = src + "        return (v_funct3 << 7) | v_opcode\n"
+    src = src + "    else:\n"
+    src = src + "        return 0\n\n"
+
+    src = src + "@hardware\nfn simple_rv32i_core_decode_jump_immediate(imem_rdata: u32) -> u32:\n"
+    src = src + "    val v_opcode = imem_rdata & 127\n"
+    src = src + "    if v_opcode == 111:\n"
+    src = src + "        return (((imem_rdata >> 31) & 1) << 20) | (((imem_rdata >> 12) & 255) << 12) | (((imem_rdata >> 20) & 1) << 11) | (((imem_rdata >> 21) & 1023) << 1)\n"
+    src = src + "    else:\n"
+    src = src + "        return 0\n\n"
+
+    src = src + "@hardware\nfn simple_rv32i_core_decode_dispatch_class(imem_rdata: u32) -> u32:\n"
+    src = src + "    val v_opcode = imem_rdata & 127\n"
+    src = src + "    if v_opcode == 111:\n"
+    src = src + "        return (v_opcode << 25) | 1\n"
+    src = src + "    else:\n"
+    src = src + "        return 0\n\n"
+
+    src = src + "@hardware\nfn simple_rv32i_core_decode_trap_halt_control(imem_rdata: u32) -> u32:\n"
+    src = src + "    val v_opcode = imem_rdata & 127\n"
+    src = src + "    if v_opcode == 115:\n"
+    src = src + "        return (((imem_rdata >> 20) & 4095) << 15) | (((imem_rdata >> 15) & 31) << 10) | (((imem_rdata >> 12) & 7) << 7) | v_opcode\n"
+    src = src + "    else:\n"
+    src = src + "        return 0\n"
+    src
+
 fn rv32_pkg_vhdl() -> text:
     "library ieee;\nuse ieee.std_logic_1164.all;\npackage rv32i_pkg is\n  constant OP_LUI    : std_logic_vector(6 downto 0) := \"0110111\";\nend package rv32i_pkg;\n"
 
@@ -495,7 +609,7 @@ fn write_generated_core_lane(output_dir: text, lane: text, rtl_dir: text) -> [te
     val core = "simple_{lane}gc_core"
     var files: [text] = []
     val source_path = "{rtl_dir}/{core}.spl"
-    rt_file_write_text(source_path, generated_core_source(lane))
+    rt_file_write_text(source_path, if lane == "rv32": RiscvFpgaLane.rv32_default().hardware_source_spl() else: generated_core_source(lane))
     files = files.push(source_path)
     val pkg_path = "{rtl_dir}/{core}_pkg.vhd"
     rt_file_write_text(pkg_path, if lane == "rv32": rv32_core_pkg_vhdl() else: "-- generated-from: {core}.spl\n-- proof-lane: generated_{lane}_linux shell=none\n-- readiness: contract linux-boot-validated=false\n-- source-map: Rv64Instruction.opcode => imem_rdata(6 downto 0)\npackage {core}_pkg is\nend package {core}_pkg;\n")
@@ -546,6 +660,12 @@ fn write_rtl_sources(output_dir: text, lanes: [RiscvFpgaLane]) -> Result<[text],
                 generated_files = generated_files + write_generated_core_lane(output_dir, "rv64", rtl_dir)
                 rt_file_write_text("{rtl_dir}/simple_rv64i_core_pkg.vhd", "-- generated-from: simple_rv64gc_core.spl\npackage simple_rv64i_core_pkg is\nend package simple_rv64i_core_pkg;\n")
                 rt_file_write_text("{rtl_dir}/tb_generated_rv64_linux_handoff.vhd", runner_tb_vhdl("tb_generated_rv64_linux_handoff", "simple_rv64gc_core", "simple_rv64gc_core_pkg", "GENERATED_RV64_LINUX_HANDOFF: PASS"))
+                rt_file_write_text("{rtl_dir}/tb_generated_rv64_boot_banner.vhd", runner_tb_vhdl("tb_generated_rv64_boot_banner", "simple_rv64gc_core", "simple_rv64gc_core_pkg", "GENERATED_RV64_BOOT_BANNER: PASS"))
+                rt_file_write_text("{rtl_dir}/tb_generated_rv64_boot_info_dtb.vhd", runner_tb_vhdl("tb_generated_rv64_boot_info_dtb", "simple_rv64gc_core", "simple_rv64gc_core_pkg", "GENERATED_RV64_BOOT_INFO_DTB: PASS"))
+                rt_file_write_text("{rtl_dir}/tb_generated_rv64_fw_jump.vhd", runner_tb_vhdl("tb_generated_rv64_fw_jump", "simple_rv64gc_core", "simple_rv64gc_core_pkg", "GENERATED_RV64_FW_JUMP: PASS"))
+                rt_file_write_text("{rtl_dir}/tb_generated_rv64_boot_info_real_dtb.vhd", runner_tb_vhdl("tb_generated_rv64_boot_info_real_dtb", "simple_rv64gc_core", "simple_rv64gc_core_pkg", "GENERATED_RV64_BOOT_INFO_REAL_DTB: PASS"))
+                rt_file_write_text("{rtl_dir}/tb_generated_rv64_sv39.vhd", runner_tb_vhdl("tb_generated_rv64_sv39", "simple_rv64gc_core", "simple_rv64gc_core_pkg", "GENERATED_RV64_SV39: PASS"))
+                rt_file_write_text("{rtl_dir}/tb_generated_rv64_sv39_fault.vhd", runner_tb_vhdl("tb_generated_rv64_sv39_fault", "simple_rv64gc_core", "simple_rv64gc_core_pkg", "GENERATED_RV64_SV39_FAULT: PASS"))
                 write_soc_vhdl(rtl_dir)
     Ok(generated_files)
 

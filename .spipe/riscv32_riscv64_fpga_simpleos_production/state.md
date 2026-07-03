@@ -53,7 +53,7 @@ N/A for this slice: this turn only fixes existing smoke wrappers and records blo
   - PASS: RV32 ELF and bin artifacts exist.
   - PASS: RV32 VHDL template artifacts exist for package/decode/register-file generation.
   - FAIL: RV32 bitstream artifact is absent in this workspace.
-  - FAIL: RV32 FPGA core executable evidence is absent (`build/vhdl/rv32/rv32_core.vhd` missing).
+  - PASS: RV32 FPGA core helper VHDL exists at `build/vhdl/rv32/rv32_core.vhd` and contains generated signal assignments.
   - FAIL: RV32 FPGA ELF load/run evidence is absent (`build/fpga/rv32/load_elf_rv32.log` missing).
 
 ## Phase
@@ -74,3 +74,4 @@ dev-in-progress
 - dev: Made the K26 RV64 bitstream wrapper fail fast on placeholder core RTL so stale/generated bitstreams cannot be refreshed as production evidence.
 - dev: Added RV32 VHDL template generation for package, decoder/ALU-control, and register-file modules using the existing compiler VHDL backend templates.
 - dev: Fixed RV32I LSU helper visibility/imports; direct `compile --backend=vhdl src/lib/hardware/rv32i_rtl/core.spl` now reaches the VHDL eligibility gate and fails because the behavioral core has no `@hardware` boundary.
+- dev: Added an RV32 generated hardware-source provider and wrapper compile step so `scripts/fpga/generate_rv32_vhdl.shs` emits `build/vhdl/rv32/rv32_core.vhd` with real decode/control helper entities; RV32 still lacks bitstream and ELF load/run evidence.
