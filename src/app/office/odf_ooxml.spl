@@ -16,7 +16,7 @@ use common.rich_text.attributed_text.{RichDocument, DocBlock, BlockKind, TextSpa
 use app.office.odf_export.{document_to_fodt, sheet_to_fods}
 use app.office.file_formats.{parse_inline_spans, recalculate_formula_cells}
 use app.office.sheets.spreadsheet.{Sheet}
-use app.office.sheets.cell.{col_to_letter}
+use app.office.sheets.cell.{col_to_letter, parse_cell_ref, CellValue}
 
 # =========================================================================
 # XML helpers
@@ -294,18 +294,28 @@ fn xlsx_sheet_xml_to_sheet(sheet_xml: text, shared: [text], name: text) -> Sheet
             if re > ra:
                 ref_str = attrs.slice(ra + 3, re)
         val is_shared = attrs.contains("t=\"s\"")
-        # value
-        val v = _find_from(sheet_xml, "<v>", tag_end)
+        val is_inline = attrs.contains("t=\"inlineStr\"")
         val c_end = _find_from(sheet_xml, "</c>", c)
-        if ref_str != "" and v >= 0 and c_end > v:
-            val ve = _find_from(sheet_xml, "</v>", v)
-            if ve > v and ve < c_end:
-                var value = _xml_unescape(sheet_xml.slice(v + 3, ve))
-                if is_shared:
-                    val idx = value.to_i64().to_i32()
-                    if idx >= 0 and idx < shared.len():
-                        value = shared[idx]
-                sheet.set_value(ref_str, value)
+        if is_inline and ref_str != "" and c_end > c:
+            # inline string: <is><t>text</t></is>
+            val cell_xml = sheet_xml.slice(c, c_end)
+            val t = _find_from(cell_xml, "<t", 0)
+            if t >= 0:
+                val t_end = _find_from(cell_xml, ">", t)
+                val te = _find_from(cell_xml, "</t>", t)
+                if t_end >= 0 and te > t_end:
+                    sheet.set_value(ref_str, _xml_unescape(cell_xml.slice(t_end + 1, te)))
+        else:
+            val v = _find_from(sheet_xml, "<v>", tag_end)
+            if ref_str != "" and v >= 0 and c_end > v:
+                val ve = _find_from(sheet_xml, "</v>", v)
+                if ve > v and ve < c_end:
+                    var value = _xml_unescape(sheet_xml.slice(v + 3, ve))
+                    if is_shared:
+                        val idx = value.to_i64().to_i32()
+                        if idx >= 0 and idx < shared.len():
+                            value = shared[idx]
+                    sheet.set_value(ref_str, value)
         i = if c_end > c: c_end + 4 else: tag_end + 1
     sheet
 
@@ -313,6 +323,78 @@ fn xlsx_bytes_to_sheet(zip_bytes: [u8], name: text) -> Sheet:
     """Import a real .xlsx file: worksheet 1 + shared strings."""
     val shared = _xlsx_shared_strings(zip_extract_text(zip_bytes, "xl/sharedStrings.xml"))
     xlsx_sheet_xml_to_sheet(zip_extract_text(zip_bytes, "xl/worksheets/sheet1.xml"), shared, name)
+
+# =========================================================================
+# Real .xlsx writer
+# =========================================================================
+
+fn _xml_escape_x(s: text) -> text:
+    var r = s
+    r = r.replace("&", "&amp;")
+    r = r.replace("<", "&lt;")
+    r = r.replace(">", "&gt;")
+    r = r.replace("\"", "&quot;")
+    r
+
+fn _xlsx_cell_xml(sheet: Sheet, ref_str: text) -> text:
+    val cell = sheet.get_cell(ref_str)
+    match cell.value:
+        CellValue.NumberVal(value):
+            return "<c r=\"{ref_str}\"><v>{value}</v></c>"
+        CellValue.FormulaVal(expr, cached_display):
+            val f = _xml_escape_x(expr)
+            return "<c r=\"{ref_str}\"><f>{f}</f><v>{_xml_escape_x(cached_display)}</v></c>"
+        CellValue.BoolVal(value):
+            val b = if value: "1" else: "0"
+            return "<c r=\"{ref_str}\" t=\"b\"><v>{b}</v></c>"
+        CellValue.Empty:
+            return ""
+        _:
+            val display = _xml_escape_x(cell_display_text_of(sheet, ref_str))
+            return "<c r=\"{ref_str}\" t=\"inlineStr\"><is><t>{display}</t></is></c>"
+
+fn cell_display_text_of(sheet: Sheet, ref_str: text) -> text:
+    # tiny indirection to keep _xlsx_cell_xml readable
+    val cell = sheet.get_cell(ref_str)
+    match cell.value:
+        CellValue.TextVal(value):
+            return value
+        _:
+            return ""
+
+fn sheet_to_xlsx_bytes(sheet: Sheet) -> [u8]:
+    """Build a genuine .xlsx: content types, rels, workbook, one worksheet.
+    Text cells use inline strings (no sharedStrings part needed); formulas
+    carry both <f> and their cached <v>."""
+    val range_str = sheet.used_range()
+    val parts = range_str.split(":")
+    val start = parse_cell_ref(parts[0])
+    val end_ref = parse_cell_ref(parts[1])
+    var rows = ""
+    if start != nil and end_ref != nil:
+        var r = start.row
+        while r <= end_ref.row:
+            var cells = ""
+            var c = start.col
+            while c <= end_ref.col:
+                val ref_str = "{col_to_letter(c)}{r + 1}"
+                cells = "{cells}{_xlsx_cell_xml(sheet, ref_str)}"
+                c = c + 1
+            rows = "{rows}<row r=\"{r + 1}\">{cells}</row>"
+            r = r + 1
+    val ws = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><sheetData>{rows}</sheetData></worksheet>"
+    val name = _xml_escape_x(sheet.name)
+    val wb = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><sheets><sheet name=\"{name}\" sheetId=\"1\" r:id=\"rId1\"/></sheets></workbook>"
+    val wb_rels = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" Target=\"worksheets/sheet1.xml\"/></Relationships>"
+    val root_rels = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"xl/workbook.xml\"/></Relationships>"
+    val types = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/><Default Extension=\"xml\" ContentType=\"application/xml\"/><Override PartName=\"/xl/workbook.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml\"/><Override PartName=\"/xl/worksheets/sheet1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/></Types>"
+    var files: [ZipFile] = []
+    files.push(zip_text_file("[Content_Types].xml", types))
+    files.push(zip_text_file("_rels/.rels", root_rels))
+    files.push(zip_text_file("xl/workbook.xml", wb))
+    files.push(zip_text_file("xl/_rels/workbook.xml.rels", wb_rels))
+    files.push(zip_text_file("xl/worksheets/sheet1.xml", ws))
+    zip_write_stored(files)
 
 # =========================================================================
 # Real .ods writer
