@@ -71,6 +71,12 @@ extern fn rt_hash_text(s: text) -> i64
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 extern fn rt_env_get(key: text) -> text
 
+# Env-gated driver trace probe. Set SIMPLE_INTERP_TRACE=1 to enable the
+# [DRV]/[BOOTSTRAP-PHASE] loading/lowering probe trail.
+fn dtrace(msg: text) -> ():
+    if (rt_env_get("SIMPLE_INTERP_TRACE") ?? "") == "1":
+        eprint(msg)
+
 class CheckBackendImpl(Backend):
     fn name() -> text:
         "check"
@@ -332,10 +338,10 @@ pub class CompilerDriver:
                 val source = sources[entry_idx]
                 if native_entry_closure or _driver_is_bootstrap_entry_source(source.path, source.module_name):
                     if (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1":
-                        eprint("[BOOTSTRAP-PHASE] phase2:parse:entry {source.path} module={source.module_name}")
+                        dtrace("[BOOTSTRAP-PHASE] phase2:parse:entry {source.path} module={source.module_name}")
                     val entry_module = parse_full_frontend(source.content, source.path, source.module_name, self.ctx.logger)
                     if (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1":
-                        eprint("[BOOTSTRAP-PHASE] phase2:parse:entry:done {source.path}")
+                        dtrace("[BOOTSTRAP-PHASE] phase2:parse:entry:done {source.path}")
                     self.ctx.modules[source.module_name] = entry_module
                     entry_sources.push(source)
                 entry_idx = entry_idx + 1
@@ -416,9 +422,9 @@ pub class CompilerDriver:
             map_src_idx = map_src_idx + 1
 
         log_debug("lowering modules to HIR")
-        eprint("[DRV] lac-entry sources.len={self.ctx.sources.len()} modules.len={self.ctx.modules.len()}")
+        dtrace("[DRV] lac-entry sources.len={self.ctx.sources.len()} modules.len={self.ctx.modules.len()}")
         if self.ctx.sources.len() <= 0:
-            eprint("[DRV] lac-branch=modules-loop (sources<=0)")
+            dtrace("[DRV] lac-branch=modules-loop (sources<=0)")
             for module in self.ctx.modules:
                 val name = module.name
                 log_trace("processing module")
@@ -469,14 +475,14 @@ pub class CompilerDriver:
             val unstub_hir = (rt_env_get("SIMPLE_UNSTUB_HIR") ?? "") == "1"
             val native_entry_closure_hir = (rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
             val is_bootstrap_entry = native_entry_closure_hir or _driver_is_bootstrap_entry_source(src.path, name)
-            eprint("[DRV] lac-loop name={name} content_len={src.content.len()}")
+            dtrace("[DRV] lac-loop name={name} content_len={src.content.len()}")
             val hir_module = if is_bootstrap_entry:
-                eprint("[DRV] branch=bootstrap_entry")
+                dtrace("[DRV] branch=bootstrap_entry")
                 val entry_module_for_hir = parse_full_frontend(src.content, src.path, name, self.ctx.logger)
                 lowering.lower_module(entry_module_for_hir)
             elif unstub_hir and (src.content != "") and (not self.ctx.options.low_memory):
                 # Opt-in real lowering via a fresh frontend re-parse (see caveat above).
-                eprint("[DRV] branch=unstub_reparse")
+                dtrace("[DRV] branch=unstub_reparse")
                 val entry_module_for_hir = parse_full_frontend(src.content, src.path, name, self.ctx.logger)
                 lowering.lower_module(entry_module_for_hir)
             elif unstub_hir and (self.ctx.modules[name] != nil):
@@ -485,7 +491,7 @@ pub class CompilerDriver:
             else:
                 # Empty-HIR stub: forced via SIMPLE_STUB_HIR=1, or fallback when the
                 # phase-2 module was evicted/unavailable (re-parse would be unsafe).
-                eprint("[DRV] branch=STUB (empty HIR)")
+                dtrace("[DRV] branch=STUB (empty HIR)")
                 HirModule(
                     name: name,
                     path: src.path,

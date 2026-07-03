@@ -15,6 +15,13 @@ use std.nogc_sync_mut.io.process_ops.{eprint}
 
 extern fn rt_host_gpu_lane_event(lane_code: i64, phase_code: i64) -> i64
 extern fn rt_host_gpu_queue_emit(lane_code: i64, kind_code: i64, payload_size: i64, backend_handle: i64) -> i64
+extern fn rt_env_get(key: text) -> text
+
+# Env-gated interpreter trace probe. Set SIMPLE_INTERP_TRACE=1 to enable the
+# [EE]/[ES]/[EB] eval probe trail (invaluable for stage4 codegen diagnosis).
+fn itrace(msg: text) -> ():
+    if (rt_env_get("SIMPLE_INTERP_TRACE") ?? "") == "1":
+        eprint(msg)
 
 # ============================================================================
 # Interpreter Backend Implementation
@@ -131,16 +138,17 @@ impl InterpreterBackendImpl:
         Ok(BackendResult.Unit)
 
     fn eval_expr(expr: HirExpr, ctx: EvalContext) -> Result<Value, BackendError>:
-        eprint("[EE] eval_expr entry")
+        itrace("[EE] eval_expr entry")
         match expr.kind:
             case IntLit(value, _):
-                eprint("[EE] IntLit arm")
+                itrace("[EE] IntLit arm")
                 Ok(Value.int(value))
 
             case FloatLit(value, _):
                 Ok(Value.float(value))
 
             case StringLit(value, _):
+                itrace("[EE] StringLit arm")
                 Ok(Value.string(value))
 
             case BoolLit(value):
@@ -153,6 +161,7 @@ impl InterpreterBackendImpl:
                 Ok(Value.make_nil())
 
             case Var(symbol):
+                itrace("[EE] Var arm sym={symbol}")
                 val value = ctx.env.lookup(symbol)
                 if value.?:
                     Ok(value.unwrap())
@@ -189,6 +198,7 @@ impl InterpreterBackendImpl:
                 Ok(Value.Dict(dict))
 
             case Binary(op, left, right):
+                itrace("[EE] Binary arm")
                 val lv = self.eval_expr(left, ctx)?
                 val rv = self.eval_expr(right, ctx)?
                 self.eval_binop(op, lv, rv, expr.span)
@@ -207,7 +217,7 @@ impl InterpreterBackendImpl:
                     Ok(Value.make_nil())
 
             case Call(callee, args, _):
-                eprint("[EE] Call arm")
+                itrace("[EE] Call arm")
                 val fn_value = self.eval_expr(callee, ctx)?
                 var arg_values: [Value] = []
                 for arg in args:
@@ -304,14 +314,14 @@ impl InterpreterBackendImpl:
                 Ok(Value.make_nil())
 
             case _:
-                eprint("[EE] catch-all arm")
+                itrace("[EE] catch-all arm")
                 Err(BackendError.not_implemented("expression kind not implemented"))
 
     fn exec_stmt(stmt: HirStmt, ctx: EvalContext) -> Result<(), BackendError>:
-        eprint("[ES] exec_stmt entry")
+        itrace("[ES] exec_stmt entry")
         match stmt.kind:
             case HirStmtKind.Expr(expr):
-                eprint("[ES] Expr arm")
+                itrace("[ES] Expr arm")
                 self.eval_expr(expr, ctx)?
                 Ok(())
 
@@ -352,7 +362,7 @@ impl InterpreterBackendImpl:
 
 impl InterpreterBackendImpl:
     fn eval_block(block: HirBlock, ctx: EvalContext) -> Result<Value, BackendError>:
-        eprint("[EB] eval_block stmts.len={block.stmts.len()} has={block.has}")
+        itrace("[EB] eval_block stmts.len={block.stmts.len()} has={block.has}")
         ctx.env.push_scope()
 
         for stmt in block.stmts:

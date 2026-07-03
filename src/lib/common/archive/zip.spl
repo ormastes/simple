@@ -4,14 +4,17 @@
 # entries compressed as stored (method 0) or deflate (method 8, via the
 # existing pure inflater). Enough to open .odt/.ods/.docx/.xlsx containers.
 #
-# Writer: builds archives with method 0 (stored) entries — valid zips that
-# LibreOffice/Word open; compression can come later since ODF/OOXML consumers
-# accept stored members.
+# Writer: `zip_write` compresses each entry with DEFLATE (method 8) when the
+# compressed payload is smaller than the original, otherwise falls back to
+# stored (method 0) — matching how Office/LibreOffice size their zip parts.
+# `zip_write_stored` remains available for callers that want stored-only
+# output; both produce valid zips that LibreOffice/Word open.
 #
 # ponytail: no zip64, no encryption, no data-descriptor streaming entries;
 # these formats don't need them for office documents.
 
 use std.common.image.deflate_inflate.{deflate_inflate}
+use std.common.compress.deflate.{deflate_compress}
 use std.common.string_core.{char_from_code}
 
 struct ZipEntry:
@@ -122,7 +125,7 @@ fn zip_extract_text(b: [u8], name: text) -> text:
     _bytes_to_ascii(data, 0, data.len())
 
 # =========================================================================
-# Writer (stored entries)
+# Writer
 # =========================================================================
 
 fn _crc32(data: [u8]) -> i64:
@@ -195,6 +198,79 @@ fn zip_write_stored(files: [ZipFile]) -> [u8]:
         out = _push_u16(out, 0)           # date
         out = _push_u32(out, crcs[idx])
         out = _push_u32(out, f.data.len().to_i64())
+        out = _push_u32(out, f.data.len().to_i64())
+        out = _push_u16(out, name_b.len())
+        out = _push_u16(out, 0)           # extra
+        out = _push_u16(out, 0)           # comment
+        out = _push_u16(out, 0)           # disk
+        out = _push_u16(out, 0)           # internal attrs
+        out = _push_u32(out, 0)           # external attrs
+        out = _push_u32(out, offsets[idx].to_i64())
+        out = _push_all(out, name_b)
+        idx = idx + 1
+    val cd_size = out.len() - cd_start
+    out = _push_u32(out, 0x06054b50)
+    out = _push_u16(out, 0)               # disk
+    out = _push_u16(out, 0)               # cd disk
+    out = _push_u16(out, files.len())
+    out = _push_u16(out, files.len())
+    out = _push_u32(out, cd_size.to_i64())
+    out = _push_u32(out, cd_start.to_i64())
+    out = _push_u16(out, 0)               # comment len
+    out
+
+fn zip_write(files: [ZipFile]) -> [u8]:
+    """Build a zip archive, compressing each entry with DEFLATE (method 8)
+    when that shrinks the payload, otherwise storing it (method 0).
+
+    CRC-32 is always computed over the UNCOMPRESSED data, per the zip spec.
+    """
+    var out: [u8] = []
+    var offsets: [i32] = []
+    var crcs: [i64] = []
+    var methods: [i32] = []
+    var comp_sizes: [i32] = []
+    for f in files:
+        offsets.push(out.len())
+        val crc = _crc32(f.data)
+        crcs.push(crc)
+        val name_b = _ascii_to_bytes(f.name)
+
+        val deflated = deflate_compress(f.data)
+        var method = 0
+        var payload = f.data
+        if deflated.len() < f.data.len():
+            method = 8
+            payload = deflated
+        methods.push(method)
+        comp_sizes.push(payload.len())
+
+        out = _push_u32(out, 0x04034b50)
+        out = _push_u16(out, 20)          # version needed
+        out = _push_u16(out, 0)           # flags
+        out = _push_u16(out, method)      # method: 0 stored / 8 deflate
+        out = _push_u16(out, 0)           # mod time
+        out = _push_u16(out, 0)           # mod date
+        out = _push_u32(out, crc)
+        out = _push_u32(out, payload.len().to_i64())
+        out = _push_u32(out, f.data.len().to_i64())
+        out = _push_u16(out, name_b.len())
+        out = _push_u16(out, 0)           # extra len
+        out = _push_all(out, name_b)
+        out = _push_all(out, payload)
+    val cd_start = out.len()
+    var idx = 0
+    for f in files:
+        val name_b = _ascii_to_bytes(f.name)
+        out = _push_u32(out, 0x02014b50)
+        out = _push_u16(out, 20)          # version made by
+        out = _push_u16(out, 20)          # version needed
+        out = _push_u16(out, 0)           # flags
+        out = _push_u16(out, methods[idx])
+        out = _push_u16(out, 0)           # time
+        out = _push_u16(out, 0)           # date
+        out = _push_u32(out, crcs[idx])
+        out = _push_u32(out, comp_sizes[idx].to_i64())
         out = _push_u32(out, f.data.len().to_i64())
         out = _push_u16(out, name_b.len())
         out = _push_u16(out, 0)           # extra
