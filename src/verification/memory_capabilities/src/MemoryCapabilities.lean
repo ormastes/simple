@@ -134,60 +134,6 @@ theorem existing_ref_denies_isolated
       loc RefCapability.Isolated = false := by
   cases cap <;> simp [canCreateRef, getActiveRefs]
 
-theorem existing_exclusive_denies_exclusive (baseType : String) (loc : Nat) :
-  canCreateRef
-    { activeRefs :=
-        [(loc,
-          [{ location := loc,
-             refType := { baseType := baseType, capability := RefCapability.Exclusive } }])] }
-    loc RefCapability.Exclusive = false := by
-  simp [canCreateRef, getActiveRefs]
-
-theorem existing_exclusive_denies_isolated (baseType : String) (loc : Nat) :
-  canCreateRef
-    { activeRefs :=
-        [(loc,
-          [{ location := loc,
-             refType := { baseType := baseType, capability := RefCapability.Exclusive } }])] }
-    loc RefCapability.Isolated = false := by
-  simp [canCreateRef, getActiveRefs]
-
-theorem existing_isolated_denies_exclusive (baseType : String) (loc : Nat) :
-  canCreateRef
-    { activeRefs :=
-        [(loc,
-          [{ location := loc,
-             refType := { baseType := baseType, capability := RefCapability.Isolated } }])] }
-    loc RefCapability.Exclusive = false := by
-  simp [canCreateRef, getActiveRefs]
-
-theorem existing_isolated_denies_isolated (baseType : String) (loc : Nat) :
-  canCreateRef
-    { activeRefs :=
-        [(loc,
-          [{ location := loc,
-             refType := { baseType := baseType, capability := RefCapability.Isolated } }])] }
-    loc RefCapability.Isolated = false := by
-  simp [canCreateRef, getActiveRefs]
-
-theorem existing_shared_denies_exclusive (baseType : String) (loc : Nat) :
-  canCreateRef
-    { activeRefs :=
-        [(loc,
-          [{ location := loc,
-             refType := { baseType := baseType, capability := RefCapability.Shared } }])] }
-    loc RefCapability.Exclusive = false := by
-  simp [canCreateRef, getActiveRefs]
-
-theorem existing_shared_denies_isolated (baseType : String) (loc : Nat) :
-  canCreateRef
-    { activeRefs :=
-        [(loc,
-          [{ location := loc,
-             refType := { baseType := baseType, capability := RefCapability.Shared } }])] }
-    loc RefCapability.Isolated = false := by
-  simp [canCreateRef, getActiveRefs]
-
 theorem existing_shared_allows_shared (baseType : String) (loc : Nat) :
   canCreateRef
     { activeRefs :=
