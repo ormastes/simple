@@ -68,6 +68,9 @@
 - gc_boundary_formal: pass
 - gc_boundary_formal_scope: alias-free GC/nogc checker acceptance prevents GC-tier values in nogc/noalloc contexts, noalloc-accepted bodies do not allocate, allocation inference joins are monotone, explicit Copy nodes are alias-free, and Copy results are nogc rather than gc
 - gc_boundary_formal_evidence: src/verification/gc_boundary/GcBoundary/Theorems.lean check_sound_wrt_model + noalloc_closed + inference_monotone + inference_join_ge + alloc_join_alloc + copy_alias_free + copy_isolates + copy_result_not_gc; `cd src/verification/gc_boundary && lake build`
+- nogc_compile_formal: pass
+- nogc_compile_formal_scope: nogc instruction lists compose under append and explicitly reject GC allocation instructions
+- nogc_compile_formal_evidence: src/verification/nogc_compile/src/NogcCompile.lean nogc_append + nogc_singleton + gc_alloc_singleton_not_nogc; `cd src/verification/nogc_compile && lake build`
 - gc_manual_borrow_formal: pass
 - gc_manual_borrow_formal_scope: manual borrows are modeled as GC pins; allocation, borrow, release, and safe collection preserve the invariant that every borrowed object remains live
 - gc_manual_borrow_formal_evidence: src/verification/gc_manual_borrow/src/GcManualBorrow.lean allocate_preserves + borrow_preserves + release_preserves + collect_preserves; `cd src/verification/gc_manual_borrow && lake build`

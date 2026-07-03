@@ -26,4 +26,9 @@ theorem nogc_singleton (i : Instr) (h : i ≠ Instr.gcAlloc) :
   subst h'
   exact h
 
+theorem gc_alloc_singleton_not_nogc :
+  ¬ nogc [Instr.gcAlloc] := by
+  intro h
+  exact h Instr.gcAlloc (by simp) rfl
+
 end NogcCompile
