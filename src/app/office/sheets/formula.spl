@@ -414,6 +414,35 @@ fn _eval_function_call(name: text, tokens: [text], pos: i32, sheet: Sheet, depth
     val result_val = _dispatch_function(name, args, sheet)
     EvalResult(value: result_val, next_pos: cur_pos)
 
+fn _sorted_asc(values: [f64]) -> [f64]:
+    """Insertion-sorted copy, ascending. ponytail: O(n^2), fine for formula args."""
+    var out: [f64] = []
+    for v in values:
+        var inserted = false
+        var result: [f64] = []
+        for existing in out:
+            if not inserted and v < existing:
+                result.push(v)
+                inserted = true
+            result.push(existing)
+        if not inserted:
+            result.push(v)
+        out = result
+    out
+
+fn _sample_variance(values: [f64]) -> f64:
+    """Sample variance (n-1 denominator), matching Excel VAR/STDEV."""
+    val n = values.len()
+    var sum = 0.0
+    for v in values:
+        sum = sum + v
+    val mean = sum / n.to_f64()
+    var sq = 0.0
+    for v in values:
+        val d = v - mean
+        sq = sq + d * d
+    sq / (n - 1).to_f64()
+
 fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
     """Dispatch a function call by name to the appropriate implementation."""
     val flat = _flatten_args(args)
@@ -430,6 +459,40 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
             return CellValue.NumberVal(value: eval_max(flat))
         "PRODUCT":
             return CellValue.NumberVal(value: eval_product(flat))
+        "MEDIAN":
+            if flat.len() == 0:
+                return CellValue.ErrorVal(message: "MEDIAN requires arguments")
+            val sorted_m = _sorted_asc(flat)
+            val n = sorted_m.len()
+            if n % 2 == 1:
+                return CellValue.NumberVal(value: sorted_m[n / 2])
+            return CellValue.NumberVal(value: (sorted_m[n / 2 - 1] + sorted_m[n / 2]) / 2.0)
+        "VAR":
+            if flat.len() < 2:
+                return CellValue.ErrorVal(message: "VAR requires 2+ values")
+            return CellValue.NumberVal(value: _sample_variance(flat))
+        "STDEV":
+            if flat.len() < 2:
+                return CellValue.ErrorVal(message: "STDEV requires 2+ values")
+            return CellValue.NumberVal(value: _sqrt_f64(_sample_variance(flat)))
+        "LARGE":
+            if args.len() >= 2:
+                val ks = _first_val(args[args.len() - 1]).to_i64()
+                val pool = _flatten_args(args[0:args.len() - 1])
+                val sorted_l = _sorted_asc(pool)
+                if ks < 1 or ks.to_i32() > sorted_l.len():
+                    return CellValue.ErrorVal(message: "LARGE k out of range")
+                return CellValue.NumberVal(value: sorted_l[sorted_l.len() - ks.to_i32()])
+            return CellValue.ErrorVal(message: "LARGE requires range and k")
+        "SMALL":
+            if args.len() >= 2:
+                val ks = _first_val(args[args.len() - 1]).to_i64()
+                val pool = _flatten_args(args[0:args.len() - 1])
+                val sorted_s = _sorted_asc(pool)
+                if ks < 1 or ks.to_i32() > sorted_s.len():
+                    return CellValue.ErrorVal(message: "SMALL k out of range")
+                return CellValue.NumberVal(value: sorted_s[ks.to_i32() - 1])
+            return CellValue.ErrorVal(message: "SMALL requires range and k")
         "ABS":
             if flat.len() > 0:
                 val v = flat[0]

@@ -60,9 +60,94 @@ fn render_block_html(block: DocBlock) -> text:
     val css = style_to_css_text(style)
     "<div class=\"{tag}\" style=\"{css}\">{content}</div>"
 
+# =========================================================================
+# Markdown tables and images (render-level, model stays lossless Paragraphs)
+# =========================================================================
+
+fn _block_plain(block: DocBlock) -> text:
+    spans_to_plain_text(block.spans)
+
+fn _is_table_row(block: DocBlock) -> bool:
+    """A Paragraph whose text is a markdown table row: |cell|cell|."""
+    val t = _block_plain(block).trim()
+    t.starts_with("|") and t.ends_with("|") and t.len() > 1
+
+fn _is_separator_row(row_text: text) -> bool:
+    """True for |---|---| alignment separator rows."""
+    var i = 0
+    while i < row_text.len():
+        val ch = row_text.slice(i, i + 1)
+        if ch != "|" and ch != "-" and ch != ":" and ch != " ":
+            return false
+        i = i + 1
+    true
+
+fn _table_row_cells(row_text: text) -> [text]:
+    val t = row_text.trim()
+    val inner = t.slice(1, t.len() - 1)
+    var cells: [text] = []
+    for part in inner.split("|"):
+        cells.push(part.trim())
+    cells
+
+fn _render_table_html(rows: [text]) -> text:
+    """Render collected markdown table rows as a styled HTML table. The first
+    row is a header; a |---| separator row is skipped. Cells are escaped."""
+    var out = "<table style=\"border-collapse: collapse; margin: 12px 0; font-size: 14px;\">"
+    var first = true
+    for row_text in rows:
+        if _is_separator_row(row_text):
+            continue
+        out = "{out}<tr>"
+        for cell in _table_row_cells(row_text):
+            val safe = _html_escape(cell)
+            if first:
+                out = "{out}<th style=\"border: 1px solid #d0d7de; padding: 6px 12px; background: #f6f8fa; text-align: left;\">{safe}</th>"
+            else:
+                out = "{out}<td style=\"border: 1px solid #d0d7de; padding: 6px 12px;\">{safe}</td>"
+        out = "{out}</tr>"
+        first = false
+    "{out}</table>"
+
+fn _image_html(block: DocBlock) -> text:
+    """If the block is exactly ![alt](src), an <img> tag; otherwise ""."""
+    val t = _block_plain(block).trim()
+    if not t.starts_with("!["):
+        return ""
+    val close_bracket = _find_in(t, "](")
+    if close_bracket < 0 or not t.ends_with(")"):
+        return ""
+    val alt = t.slice(2, close_bracket)
+    val src = t.slice(close_bracket + 2, t.len() - 1)
+    if src.contains("\"") or src.contains("<") or src.contains(">"):
+        return ""
+    "<img src=\"{src}\" alt=\"{_html_escape(alt)}\" style=\"max-width: 100%; margin: 12px 0;\">"
+
+fn _find_in(s: text, needle: text) -> i32:
+    var i = 0
+    while i + needle.len() <= s.len():
+        if s.slice(i, i + needle.len()) == needle:
+            return i
+        i = i + 1
+    -1
+
 fn render_document_html(doc: RichDocument) -> text:
-    """Render a whole rich-text document as a styled HTML article."""
+    """Render a whole rich-text document as a styled HTML article. Consecutive
+    |cell| paragraphs render as one table; ![alt](src) paragraphs as images."""
     var out = "<article class=\"document\">"
+    var table_rows: [text] = []
     for block in doc.blocks:
-        out = "{out}{render_block_html(block)}"
+        if _is_table_row(block):
+            table_rows.push(_block_plain(block).trim())
+            continue
+        if table_rows.len() > 0:
+            out = "{out}{_render_table_html(table_rows)}"
+            table_rows = []
+        val img = _image_html(block)
+        if img != "":
+            out = "{out}{img}"
+        else:
+            out = "{out}{render_block_html(block)}"
+    if table_rows.len() > 0:
+        out = "{out}{_render_table_html(table_rows)}"
     "{out}</article>"
