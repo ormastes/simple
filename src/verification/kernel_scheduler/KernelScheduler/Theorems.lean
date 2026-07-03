@@ -68,6 +68,18 @@ theorem new_home_eq_assigned (tid home_cpu affinity : Nat) :
     (GreenTask.new tid home_cpu affinity).assigned_cpu := by
   simp [GreenTask.new]
 
+/-- T1c: new returns the exact runnable task record. -/
+theorem new_eq_runnable_record (tid home_cpu affinity : Nat) :
+    GreenTask.new tid home_cpu affinity =
+      { task_id := tid
+      , home_cpu := home_cpu
+      , assigned_cpu := home_cpu
+      , affinity_mask := affinity
+      , state := .runnable
+      , park_reason := ""
+      , result_val := 0 } := by
+  simp [GreenTask.new]
+
 -- ============================================================
 -- § B  T2 — park_preserves_cpu
 -- ============================================================
@@ -86,6 +98,28 @@ theorem park_preserves_assigned_cpu (t : GreenTask) (reason : String) :
 /-- T2c: park transitions state to parked. -/
 theorem park_state (t : GreenTask) (reason : String) :
     (t.park reason).state = .parked := by
+  simp [GreenTask.park]
+
+/-- T2c2: park records the supplied park reason. -/
+theorem park_records_reason (t : GreenTask) (reason : String) :
+    (t.park reason).park_reason = reason := by
+  simp [GreenTask.park]
+
+/-- T2c3: park returns the exact parked task record. -/
+theorem park_eq_parked_record (t : GreenTask) (reason : String) :
+    t.park reason =
+      { task_id := t.task_id
+      , home_cpu := t.home_cpu
+      , assigned_cpu := t.assigned_cpu
+      , affinity_mask := t.affinity_mask
+      , state := .parked
+      , park_reason := reason
+      , result_val := t.result_val } := by
+  simp [GreenTask.park]
+
+/-- T2d: park preserves task identity. -/
+theorem park_preserves_task_id (t : GreenTask) (reason : String) :
+    (t.park reason).task_id = t.task_id := by
   simp [GreenTask.park]
 
 -- ============================================================
@@ -110,6 +144,54 @@ theorem unpark_clears_reason (t : GreenTask) (waker_cpu : Nat)
     (t.unpark waker_cpu).task.park_reason = "" := by
   simp [GreenTask.unpark, hparked]
 
+/-- T3c2: unpark of a parked task assigns it to the waker CPU. -/
+theorem unpark_parked_sets_assigned_cpu (t : GreenTask) (waker_cpu : Nat)
+    (hparked : t.state = .parked) :
+    (t.unpark waker_cpu).task.assigned_cpu = waker_cpu := by
+  simp [GreenTask.unpark, hparked]
+
+/-- T3c3: unpark of a parked task reports the waker CPU placement. -/
+theorem unpark_parked_reports_waker_placement (t : GreenTask) (waker_cpu : Nat)
+    (hparked : t.state = .parked) :
+    (t.unpark waker_cpu).placement.cpu = waker_cpu ∧
+    (t.unpark waker_cpu).placement.reason = "wake_affine_waker_cpu" := by
+  simp [GreenTask.unpark, hparked]
+
+/-- T3c4: unpark of a parked task returns the exact runnable task record. -/
+theorem unpark_parked_task_eq_runnable_record (t : GreenTask) (waker_cpu : Nat)
+    (hparked : t.state = .parked) :
+    (t.unpark waker_cpu).task =
+      { task_id := t.task_id
+      , home_cpu := t.home_cpu
+      , assigned_cpu := waker_cpu
+      , affinity_mask := t.affinity_mask
+      , state := .runnable
+      , park_reason := ""
+      , result_val := t.result_val } := by
+  simp [GreenTask.unpark, hparked]
+
+/-- T3c5: unpark of a parked task returns the exact enqueue wake decision. -/
+theorem unpark_parked_eq_enqueue_decision (t : GreenTask) (waker_cpu : Nat)
+    (hparked : t.state = .parked) :
+    t.unpark waker_cpu =
+      { task :=
+          { task_id := t.task_id
+          , home_cpu := t.home_cpu
+          , assigned_cpu := waker_cpu
+          , affinity_mask := t.affinity_mask
+          , state := .runnable
+          , park_reason := ""
+          , result_val := t.result_val }
+      , placement := { cpu := waker_cpu, reason := "wake_affine_waker_cpu" }
+      , should_enqueue := true } := by
+  simp [GreenTask.unpark, hparked]
+
+/-- T3d: unpark of a parked task preserves task identity. -/
+theorem unpark_parked_preserves_task_id (t : GreenTask) (waker_cpu : Nat)
+    (hparked : t.state = .parked) :
+    (t.unpark waker_cpu).task.task_id = t.task_id := by
+  simp [GreenTask.unpark, hparked]
+
 -- ============================================================
 -- § D  T4 — unpark_nonparked_noop
 -- ============================================================
@@ -126,6 +208,22 @@ theorem unpark_nonparked_noop (t : GreenTask) (waker_cpu : Nat)
 theorem unpark_nonparked_task_id (t : GreenTask) (waker_cpu : Nat)
     (hnot_parked : t.state ≠ .parked) :
     (t.unpark waker_cpu).task = t := by
+  simp [GreenTask.unpark, if_neg hnot_parked]
+
+/-- T4c: unpark of a non-parked task reports no placement move. -/
+theorem unpark_nonparked_reports_no_move (t : GreenTask) (waker_cpu : Nat)
+    (hnot_parked : t.state ≠ .parked) :
+    (t.unpark waker_cpu).placement.cpu = t.assigned_cpu ∧
+    (t.unpark waker_cpu).placement.reason = "not_parked" := by
+  simp [GreenTask.unpark, if_neg hnot_parked]
+
+/-- T4d: unpark of a non-parked task returns the exact no-op wake decision. -/
+theorem unpark_nonparked_eq_noop_decision (t : GreenTask) (waker_cpu : Nat)
+    (hnot_parked : t.state ≠ .parked) :
+    t.unpark waker_cpu =
+      { task := t
+      , placement := { cpu := t.assigned_cpu, reason := "not_parked" }
+      , should_enqueue := false } := by
   simp [GreenTask.unpark, if_neg hnot_parked]
 
 -- ============================================================
@@ -152,6 +250,44 @@ theorem complete_double_safe (t : GreenTask) (r1 r2 : Int) :
   by_cases h : t.state = .done
   · simp [h]
   · simp [h]
+
+/-- T5b0: complete on an already-done task is a no-op. -/
+theorem complete_done_noop (t : GreenTask) (r : Int)
+    (h : t.state = .done) :
+    t.complete r = t := by
+  simp [GreenTask.complete, h]
+
+/-- T5c: complete preserves CPU placement/accounting fields. -/
+theorem complete_preserves_cpu_assignment (t : GreenTask) (r : Int) :
+    (t.complete r).home_cpu = t.home_cpu ∧
+    (t.complete r).assigned_cpu = t.assigned_cpu := by
+  unfold GreenTask.complete
+  by_cases h : t.state = .done <;> simp [h]
+
+/-- T5d: completing a non-done task records the result value. -/
+theorem complete_records_result_when_not_done (t : GreenTask) (r : Int)
+    (h : t.state ≠ .done) :
+    (t.complete r).result_val = r := by
+  simp [GreenTask.complete, h]
+
+/-- T5d2: completing a non-done task returns the exact done-state record. -/
+theorem complete_non_done_eq_done_record (t : GreenTask) (r : Int)
+    (h : t.state ≠ .done) :
+    t.complete r =
+      { task_id := t.task_id
+      , home_cpu := t.home_cpu
+      , assigned_cpu := t.assigned_cpu
+      , affinity_mask := t.affinity_mask
+      , state := .done
+      , park_reason := t.park_reason
+      , result_val := r } := by
+  simp [GreenTask.complete, h]
+
+/-- T5e: complete preserves task identity. -/
+theorem complete_preserves_task_id (t : GreenTask) (r : Int) :
+    (t.complete r).task_id = t.task_id := by
+  unfold GreenTask.complete
+  by_cases h : t.state = .done <;> simp [h]
 
 -- ============================================================
 -- § F  T6 — runBatch terminates and empties the queue
@@ -183,10 +319,45 @@ theorem enqueue_then_runBatch_empty (t : GreenTask) :
     (SchedState.runBatch s1).ready = [] := by
   simp [SchedState.enqueue, SchedState.runBatch]
 
+/-- T7a1: enqueue appends exactly one ready task. -/
+theorem enqueue_increases_ready_length (s : SchedState) (t : GreenTask) :
+    (s.enqueue t).ready.length = s.ready.length + 1 := by
+  simp [SchedState.enqueue]
+
+/-- T7a2: enqueue preserves queue order and appends the task at the tail. -/
+theorem enqueue_ready_eq_append (s : SchedState) (t : GreenTask) :
+    (s.enqueue t).ready = s.ready ++ [t] := by
+  simp [SchedState.enqueue]
+
 /-- T7b: runBatch on an already-empty state is the identity. -/
 theorem runBatch_empty_is_empty :
     (SchedState.runBatch { ready := [] }).ready = [] := by
   simp [SchedState.runBatch]
+
+/-- T7c: popHead on a non-empty queue returns the head and the rest. -/
+theorem popHead_nonempty_returns_head (t : GreenTask) (rest : List GreenTask) :
+    SchedState.popHead { ready := t :: rest } = (some t, { ready := rest }) := by
+  simp [SchedState.popHead]
+
+/-- T7d: popHead on an empty queue reports no task and leaves the queue empty. -/
+theorem popHead_empty_noop :
+    SchedState.popHead { ready := [] } = (none, { ready := [] }) := by
+  simp [SchedState.popHead]
+
+/-- T7e: runOne on an empty queue is identity. -/
+theorem runOne_empty_noop :
+    SchedState.runOne { ready := [] } = { ready := [] } := by
+  simp [SchedState.runOne, SchedState.popHead]
+
+/-- T7f: runOne on a non-empty queue consumes exactly the head. -/
+theorem runOne_nonempty_drops_head (t : GreenTask) (rest : List GreenTask) :
+    SchedState.runOne { ready := t :: rest } = { ready := rest } := by
+  simp [SchedState.runOne, SchedState.popHead]
+
+/-- T7g: runOne on a non-empty queue strictly decreases ready length. -/
+theorem runOne_nonempty_decreases_length (t : GreenTask) (rest : List GreenTask) :
+    (SchedState.runOne { ready := t :: rest }).ready.length < (t :: rest).length := by
+  simp [SchedState.runOne, SchedState.popHead]
 
 -- ============================================================
 -- § H  T8 — cpuAllowed semantics
@@ -212,6 +383,12 @@ theorem cpuAllowed_bit_set (mask cpu : Nat)
     cpuAllowed mask cpu = true := by
   simp [cpuAllowed, hmask, hbit]
 
+/-- T8d: cpuAllowed is exactly unrestricted mask or set CPU bit. -/
+theorem cpuAllowed_true_iff (mask cpu : Nat) :
+    cpuAllowed mask cpu = true ↔ mask = 0 ∨ mask &&& (1 <<< cpu) ≠ 0 := by
+  unfold cpuAllowed
+  by_cases hmask : mask = 0 <;> simp [hmask]
+
 -- ============================================================
 -- § I  T9 — shouldSteal threshold
 -- ============================================================
@@ -223,12 +400,24 @@ theorem steal_fires_above_threshold (local_load remote_load threshold : Nat)
     shouldSteal local_load remote_load threshold = true := by
   simp [shouldSteal, h]
 
+/-- T9a0: shouldSteal is exactly the remote-load threshold gate. -/
+theorem shouldSteal_true_iff (local_load remote_load threshold : Nat) :
+    shouldSteal local_load remote_load threshold = true ↔
+    remote_load > local_load + threshold := by
+  simp [shouldSteal]
+
 /-- T9b: steal does NOT fire when remote load is at or below local + threshold. -/
 theorem steal_does_not_fire_at_threshold (local_load remote_load threshold : Nat)
     (h : remote_load ≤ local_load + threshold) :
     shouldSteal local_load remote_load threshold = false := by
   simp [shouldSteal]
   omega
+
+/-- T9b0: shouldSteal is false exactly at or below the threshold. -/
+theorem shouldSteal_false_iff (local_load remote_load threshold : Nat) :
+    shouldSteal local_load remote_load threshold = false ↔
+    remote_load ≤ local_load + threshold := by
+  simp [shouldSteal]
 
 -- ============================================================
 -- § J  T10 — bounded resource lifecycle safety
@@ -239,6 +428,40 @@ theorem resource_acquire_below_capacity_grants (p : ResourcePool)
     (h : p.inUse < p.capacity) :
     (p.acquire).granted = true ∧ (p.acquire).pool.inUse = p.inUse + 1 := by
   simp [ResourcePool.acquire, h]
+
+/-- T10a0a: successful acquire returns exactly the one-increment pool. -/
+theorem resource_acquire_below_capacity_pool_eq (p : ResourcePool)
+    (h : p.inUse < p.capacity) :
+    (p.acquire).pool = { capacity := p.capacity, inUse := p.inUse + 1 } := by
+  simp [ResourcePool.acquire, h]
+
+/-- T10a0aa: successful acquire returns the exact granted acquire result. -/
+theorem resource_acquire_below_capacity_eq_granted_result (p : ResourcePool)
+    (h : p.inUse < p.capacity) :
+    p.acquire =
+      { pool := { capacity := p.capacity, inUse := p.inUse + 1 }
+      , granted := true } := by
+  simp [ResourcePool.acquire, h]
+
+/-- T10a0b: successful acquire preserves resource capacity. -/
+theorem resource_acquire_below_capacity_preserves_capacity (p : ResourcePool)
+    (h : p.inUse < p.capacity) :
+    (p.acquire).pool.capacity = p.capacity := by
+  simp [ResourcePool.acquire, h]
+
+/-- T10a0c: successful acquire produces a well-formed pool. -/
+theorem resource_acquire_below_capacity_wf (p : ResourcePool)
+    (h : p.inUse < p.capacity) :
+    (p.acquire).pool.wf := by
+  unfold ResourcePool.acquire ResourcePool.wf
+  simp [h]
+  omega
+
+/-- T10a0: acquire grants iff capacity remains. -/
+theorem resource_acquire_granted_iff_below_capacity (p : ResourcePool) :
+    (p.acquire).granted = true ↔ p.inUse < p.capacity := by
+  unfold ResourcePool.acquire
+  by_cases h : p.inUse < p.capacity <;> simp [h]
 
 /-- T10a1: successful acquire strictly increases live resources. -/
 theorem resource_acquire_below_capacity_increases (p : ResourcePool)
@@ -253,6 +476,22 @@ theorem resource_acquire_full_noop (p : ResourcePool)
     (p.acquire).granted = false ∧ (p.acquire).pool = p := by
   have hn : ¬ p.inUse < p.capacity := by omega
   simp [ResourcePool.acquire, hn]
+
+/-- T10b0a: denied acquire returns the exact no-op acquire result. -/
+theorem resource_acquire_full_eq_denied_result (p : ResourcePool)
+    (h : p.capacity ≤ p.inUse) :
+    p.acquire = { pool := p, granted := false } := by
+  have hn : ¬ p.inUse < p.capacity := by omega
+  simp [ResourcePool.acquire, hn]
+
+/-- T10b0: acquire denies iff no capacity remains. -/
+theorem resource_acquire_denied_iff_at_capacity (p : ResourcePool) :
+    (p.acquire).granted = false ↔ p.capacity ≤ p.inUse := by
+  unfold ResourcePool.acquire
+  by_cases h : p.inUse < p.capacity
+  · simp [h]
+  · simp [h]
+    omega
 
 /-- T10b1: failed acquire preserves the live resource count. -/
 theorem resource_acquire_denied_preserves_in_use (p : ResourcePool)
@@ -289,10 +528,37 @@ theorem resource_release_empty_noop (p : ResourcePool)
     p.release = p := by
   simp [ResourcePool.release, h]
 
+/-- T10c0: release is a no-op iff no resources are live. -/
+theorem resource_release_noop_iff_empty (p : ResourcePool) :
+    p.release = p ↔ p.inUse = 0 := by
+  constructor
+  · intro hrel
+    by_cases h : p.inUse = 0
+    · exact h
+    · have hin := congrArg ResourcePool.inUse hrel
+      simp [ResourcePool.release, h] at hin
+      omega
+  · intro h
+    simp [ResourcePool.release, h]
+
+/-- T10c0b: release of a non-empty pool is not a no-op. -/
+theorem resource_release_nonempty_not_noop (p : ResourcePool)
+    (h : p.inUse ≠ 0) :
+    p.release ≠ p := by
+  intro hrel
+  have hempty := (resource_release_noop_iff_empty p).mp hrel
+  exact h hempty
+
 /-- T10c1: release of a non-empty pool preserves capacity. -/
 theorem resource_release_nonempty_preserves_capacity (p : ResourcePool)
     (h : p.inUse ≠ 0) :
     p.release.capacity = p.capacity := by
+  simp [ResourcePool.release, h]
+
+/-- T10c1b: release of a non-empty pool returns exactly the one-decrement pool. -/
+theorem resource_release_nonempty_pool_eq (p : ResourcePool)
+    (h : p.inUse ≠ 0) :
+    p.release = { capacity := p.capacity, inUse := p.inUse - 1 } := by
   simp [ResourcePool.release, h]
 
 /-- T10c2: release of a non-empty pool decrements the live resource count. -/
