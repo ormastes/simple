@@ -43,11 +43,17 @@ fn _dict_path(inner: Dict<text, SdnValue>) -> text:
         ""
 
 
-fn _walk_images_dict(d: Dict<text, SdnValue>, spans: Dict<text, Span>, file: text, out_images: Dict<text, Image>) -> Result<i64, AssetError>:
-    var count: i64 = 0
-    for entry in d.entries():
-        val name = entry.key
-        match entry.value:
+# ponytail: these used to take a mutable `out_*: Dict<...>` parameter and
+# mutate it in place. That mutation never reached the caller across the
+# loader.spl -> table.spl module boundary (see
+# doc/08_tracking/bug/interp_cross_module_dict_out_param_mutation_lost_2026-07-03.md)
+# — a real interpreter bug, not a logic error here. Returning the built dict
+# is the workaround: cross-module *return values* work; cross-module
+# out-parameter mutation does not.
+fn _walk_images_dict(d: Dict<text, SdnValue>, spans: Dict<text, Span>, file: text) -> Result<Dict<text, Image>, AssetError>:
+    var out_images: Dict<text, Image> = {}
+    for (name, entry_value) in d.entries():
+        match entry_value:
             case Dict(inner):
                 val path_str = _dict_path(inner)
                 if path_str.len() > 0 and not rt_file_exists(path_str):
@@ -60,19 +66,17 @@ fn _walk_images_dict(d: Dict<text, SdnValue>, spans: Dict<text, Span>, file: tex
                 match img_result:
                     case Ok(img):
                         out_images[name] = img
-                        count = count + 1
                     case Err(_):
                         out_images[name] = Image.null()
             case _:
                 pass_do_nothing
-    Ok(count)
+    Ok(out_images)
 
 
-fn _walk_sounds_dict(d: Dict<text, SdnValue>, spans: Dict<text, Span>, file: text, out_sounds: Dict<text, Sound>) -> Result<i64, AssetError>:
-    var count: i64 = 0
-    for entry in d.entries():
-        val name = entry.key
-        match entry.value:
+fn _walk_sounds_dict(d: Dict<text, SdnValue>, spans: Dict<text, Span>, file: text) -> Result<Dict<text, Sound>, AssetError>:
+    var out_sounds: Dict<text, Sound> = {}
+    for (name, entry_value) in d.entries():
+        match entry_value:
             case Dict(inner):
                 val path_str = _dict_path(inner)
                 if path_str.len() > 0 and not rt_file_exists(path_str):
@@ -82,20 +86,18 @@ fn _walk_sounds_dict(d: Dict<text, SdnValue>, spans: Dict<text, Span>, file: tex
                 match snd_result:
                     case Ok(snd):
                         out_sounds[name] = snd
-                        count = count + 1
                     case Err(_):
                         out_sounds[name] = Sound.null()
             case _:
                 pass_do_nothing
-    Ok(count)
+    Ok(out_sounds)
 
 
 fn _check_atlas_dict(d: Dict<text, SdnValue>, spans: Dict<text, Span>, file: text) -> Result<i64, AssetError>:
     """Validate atlas regions. Region OOB → GAME-ASSET-014."""
     var count: i64 = 0
-    for entry in d.entries():
-        val name = entry.key
-        match entry.value:
+    for (name, entry_value) in d.entries():
+        match entry_value:
             case Dict(inner):
                 var iw: i64 = 0
                 var ih: i64 = 0
@@ -106,9 +108,8 @@ fn _check_atlas_dict(d: Dict<text, SdnValue>, spans: Dict<text, Span>, file: tex
                 if inner.contains("regions"):
                     match inner["regions"]:
                         case Dict(rmap):
-                            for re in rmap.entries():
-                                val rname = re.key
-                                match re.value:
+                            for (rname, region_value) in rmap.entries():
+                                match region_value:
                                     case Array(coords):
                                         if coords.len() == 4:
                                             val rx = _to_i(coords[0])
