@@ -63,4 +63,8 @@ theorem collect_preserves (s : GcState) (id : Nat) (hs : safe s) :
     have hne : x ≠ id := fun heq => hborrowed (heq ▸ hx)
     exact List.mem_erase_of_ne hne |>.mpr hlive
 
+theorem release_then_collect_preserves (s : GcState) (id : Nat) (hs : safe s) :
+  safe (collectSafe (release s id) id) :=
+  collect_preserves (release s id) id (release_preserves s id hs)
+
 end GcManualBorrow
