@@ -579,6 +579,24 @@ theorem drf_when_conflicts_ordered (exec : Execution)
   | inl hb12 => exact hnot12 hb12
   | inr hb21 => exact hnot21 hb21
 
+theorem drf_when_conflicts_same_thread_or_ordered (exec : Execution)
+    (hcovered : ∀ id1 id2 op1 op2,
+      (id1, op1) ∈ exec.ops →
+      (id2, op2) ∈ exec.ops →
+      id1 ≠ id2 →
+      conflicts op1 op2 →
+      op1.threadId = op2.threadId ∨
+        happensBefore exec id1 id2 ∨ happensBefore exec id2 id1) :
+    dataRaceFree exec := by
+  intro hRace
+  rcases hRace with ⟨id1, id2, op1, op2, h1, h2, hneq, hthread, hconf, hnot12, hnot21⟩
+  cases hcovered id1 id2 op1 op2 h1 h2 hneq hconf with
+  | inl hsame => exact hthread hsame
+  | inr hordered =>
+      cases hordered with
+      | inl hb12 => exact hnot12 hb12
+      | inr hb21 => exact hnot21 hb21
+
 theorem drf_when_conflicts_program_ordered (exec : Execution)
     (hordered : ∀ id1 id2 op1 op2,
       (id1, op1) ∈ exec.ops →
