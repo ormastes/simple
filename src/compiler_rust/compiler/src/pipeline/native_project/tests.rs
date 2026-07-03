@@ -2336,3 +2336,188 @@ fn test_freestanding_qualified_to_bare_alias_bridges_export_symbol() {
         )]
     );
 }
+
+/// Regression test for a suspected cache hit/miss mix bug (issue #64): when an
+/// incremental native-project build has some modules served from the object
+/// cache and others freshly compiled (because only one module's source
+/// changed between builds), every module's object must still make it into
+/// the final link set. Builds a 2-module project twice with the same cache
+/// dir, touching only `module_b.spl` between builds (forcing `module_a.spl`
+/// to be a cache hit on the second build and `module_b.spl` a cache miss),
+/// then asserts both modules' symbols are present in the linked archive.
+#[cfg(target_os = "linux")]
+#[test]
+fn test_incremental_cache_hit_miss_mix_preserves_all_link_inputs() {
+    let temp = tempfile::tempdir().unwrap();
+    let source_dir = temp.path().join("src");
+    std::fs::create_dir_all(&source_dir).unwrap();
+
+    let module_a = source_dir.join("module_a.spl");
+    std::fs::write(
+        &module_a,
+        r#"
+fn cache_mix_probe_a() -> i64:
+    return 101
+"#,
+    )
+    .unwrap();
+
+    let module_b = source_dir.join("module_b.spl");
+    std::fs::write(
+        &module_b,
+        r#"
+fn cache_mix_probe_b() -> i64:
+    return 202
+"#,
+    )
+    .unwrap();
+
+    let cache_dir = temp.path().join(".simple_native_cache");
+    let archive = temp.path().join("libcache_mix.a");
+
+    let make_config = || NativeBuildConfig {
+        emit_archive: true,
+        incremental: true,
+        clean: false,
+        no_mangle: true,
+        cache_dir: Some(cache_dir.clone()),
+        ..NativeBuildConfig::default()
+    };
+
+    // Build 1: both modules are cache misses (cache dir is fresh).
+    let result1 = NativeProjectBuilder::new(temp.path().to_path_buf(), archive.clone())
+        .config(make_config())
+        .source_dir(source_dir.clone())
+        .build()
+        .unwrap();
+    assert_eq!(result1.output, archive);
+    assert!(archive.exists(), "build 1 did not produce an archive");
+
+    fn archive_symbols(archive: &Path) -> String {
+        let symbols = std::process::Command::new("nm")
+            .arg("-g")
+            .arg("--defined-only")
+            .arg(archive)
+            .output()
+            .unwrap();
+        assert!(symbols.status.success(), "nm failed on {}", archive.display());
+        String::from_utf8_lossy(&symbols.stdout).to_string()
+    }
+
+    let stdout1 = archive_symbols(&archive);
+    assert!(stdout1.contains("cache_mix_probe_a"), "build 1 missing probe_a:\n{}", stdout1);
+    assert!(stdout1.contains("cache_mix_probe_b"), "build 1 missing probe_b:\n{}", stdout1);
+
+    // Touch only module_b so build 2 sees module_a as a cache HIT and
+    // module_b as a cache MISS -- the hit/miss mix this test targets.
+    std::fs::write(
+        &module_b,
+        r#"
+fn cache_mix_probe_b() -> i64:
+    return 303
+"#,
+    )
+    .unwrap();
+
+    // Build 2: reuse the same cache dir and output path.
+    let result2 = NativeProjectBuilder::new(temp.path().to_path_buf(), archive.clone())
+        .config(make_config())
+        .source_dir(source_dir.clone())
+        .build()
+        .unwrap();
+    assert_eq!(result2.output, archive);
+    assert!(archive.exists(), "build 2 did not produce an archive");
+
+    let stdout2 = archive_symbols(&archive);
+    assert!(
+        stdout2.contains("cache_mix_probe_a"),
+        "build 2 (cache-hit/miss mix) dropped module_a's symbol -- link inputs lost:\n{}",
+        stdout2
+    );
+    assert!(
+        stdout2.contains("cache_mix_probe_b"),
+        "build 2 (cache-hit/miss mix) dropped module_b's symbol -- link inputs lost:\n{}",
+        stdout2
+    );
+}
+
+/// Widened matrix for issue #64: 6 modules (so rayon's parallel compile path
+/// is exercised, not just the trivial single-file case) with 3 touched and 3
+/// untouched between builds -- a heavier hit/miss mix than the 2-module case
+/// above. Also asserts an exact count of defined probe symbols so a dropped
+/// (not just corrupted) object would be caught even if remaining symbols
+/// happen to overlap.
+#[cfg(target_os = "linux")]
+#[test]
+fn test_incremental_cache_hit_miss_mix_parallel_wide_matrix() {
+    let temp = tempfile::tempdir().unwrap();
+    let source_dir = temp.path().join("src");
+    std::fs::create_dir_all(&source_dir).unwrap();
+
+    const N: usize = 6;
+    for i in 0..N {
+        std::fs::write(
+            source_dir.join(format!("wide_mod_{i}.spl")),
+            format!("fn wide_cache_mix_probe_{i}() -> i64:\n    return {i}\n"),
+        )
+        .unwrap();
+    }
+
+    let cache_dir = temp.path().join(".simple_native_cache_wide");
+    let archive = temp.path().join("libwide_cache_mix.a");
+
+    let make_config = || NativeBuildConfig {
+        emit_archive: true,
+        incremental: true,
+        clean: false,
+        no_mangle: true,
+        parallel: true,
+        cache_dir: Some(cache_dir.clone()),
+        ..NativeBuildConfig::default()
+    };
+
+    NativeProjectBuilder::new(temp.path().to_path_buf(), archive.clone())
+        .config(make_config())
+        .source_dir(source_dir.clone())
+        .build()
+        .unwrap();
+
+    // Touch half the modules (alternating) so build 2 mixes cache hits and
+    // misses across many files under the parallel compile path.
+    for i in 0..N {
+        if i % 2 == 0 {
+            std::fs::write(
+                source_dir.join(format!("wide_mod_{i}.spl")),
+                format!("fn wide_cache_mix_probe_{i}() -> i64:\n    return {}\n", i + 1000),
+            )
+            .unwrap();
+        }
+    }
+
+    NativeProjectBuilder::new(temp.path().to_path_buf(), archive.clone())
+        .config(make_config())
+        .source_dir(source_dir.clone())
+        .build()
+        .unwrap();
+
+    let symbols = std::process::Command::new("nm")
+        .arg("-g")
+        .arg("--defined-only")
+        .arg(&archive)
+        .output()
+        .unwrap();
+    assert!(symbols.status.success(), "nm failed on {}", archive.display());
+    let stdout = String::from_utf8_lossy(&symbols.stdout).to_string();
+
+    for i in 0..N {
+        let sym = format!("wide_cache_mix_probe_{i}");
+        assert!(
+            stdout.contains(&sym),
+            "build 2 (wide hit/miss mix, parallel) dropped {}:\n{}",
+            sym,
+            stdout
+        );
+    }
+    let found_count = (0..N).filter(|i| stdout.contains(&format!("wide_cache_mix_probe_{i}"))).count();
+    assert_eq!(found_count, N, "expected all {} probe symbols present, found {}", N, found_count);
+}
