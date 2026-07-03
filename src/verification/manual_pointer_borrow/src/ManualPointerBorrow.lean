@@ -84,6 +84,11 @@ theorem take_shared_exclusive_noop (s : BorrowState)
     takeShared s = s := by
   simp [takeShared, hex]
 
+theorem take_exclusive_shared_noop (s : BorrowState)
+    (hshared : s.shared ≠ 0) :
+    takeExclusive s = s := by
+  simp [takeExclusive, hshared]
+
 theorem release_ok (s : BorrowState) (hv : valid s) :
   valid (releaseShared s) ∧ valid (releaseExclusive s) := by
   unfold releaseShared releaseExclusive valid at *
