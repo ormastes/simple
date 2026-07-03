@@ -89,6 +89,12 @@ theorem take_shared_increments_when_not_exclusive (s : BorrowState)
     (takeShared s).shared = s.shared + 1 := by
   simp [takeShared, hex]
 
+theorem take_shared_preserves_exclusive (s : BorrowState) :
+    (takeShared s).exclusive = s.exclusive := by
+  cases s with
+  | mk exclusive shared =>
+      cases exclusive <;> simp [takeShared]
+
 theorem take_exclusive_shared_noop (s : BorrowState)
     (hshared : s.shared ≠ 0) :
     takeExclusive s = s := by
