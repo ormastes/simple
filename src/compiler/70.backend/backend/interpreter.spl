@@ -95,14 +95,16 @@ impl InterpreterBackendImpl:
         # resolve correctly (same idiom as the functions.values() loop below).
         for sym_ in module.symbols.symbols.values():
             val sym: Symbol = sym_
-            ctx.env.define_global(sym.id, Value.Function(FunctionValue(symbol: sym.id, name: sym.name)))
+            val g_fv: FunctionValue = FunctionValue(symbol: sym.id, name: sym.name)
+            ctx.env.define_global(sym.id, Value.Function(g_fv))
             if sym.name == "main":
                 has_main = true
 
         for fn_ in module.functions.values():
             val f: HirFunction = fn_
             val fsym = f.symbol
-            ctx.env.define_global(fsym, Value.Function(FunctionValue(symbol: fsym, name: f.name)))
+            val g_fv2: FunctionValue = FunctionValue(symbol: fsym, name: f.name)
+            ctx.env.define_global(fsym, Value.Function(g_fv2))
 
         if has_main:
             for fn_ in module.functions.values():
@@ -183,13 +185,21 @@ impl InterpreterBackendImpl:
                 itrace("[EE] NamedVar arm name={nv_name_t}")
                 val nv_value = ctx.env.lookup(symbol)
                 if nv_value.?:
+                    itrace("[EE] NamedVar env-hit")
                     Ok(nv_value.unwrap())
                 else:
                     # Builtins and module functions are dispatched by NAME in
                     # call_function/try_call_builtin; fall back to a Function
                     # value carrying the name (SymbolId-keyed env lookup can
                     # also miss under the seed's struct-keyed-Dict defect).
-                    Ok(Value.Function(FunctionValue(symbol: symbol, name: nv_name_t)))
+                    # HOISTED nested construction: a struct literal used
+                    # directly as an enum-constructor argument stores a NIL
+                    # payload on stage4 ([CF] f_nil=true, iteration 18).
+                    itrace("[EE] NamedVar fallback")
+                    val nv_fv: FunctionValue = FunctionValue(symbol: symbol, name: nv_name_t)
+                    itrace("[EE] NamedVar fv_nil={nv_fv == nil}")
+                    val nv_fn_value: Value = Value.Function(nv_fv)
+                    Ok(nv_fn_value)
 
             case HirExprKind.ArrayLit(elements, _):
                 itrace("[EE] ArrayLit arm")
