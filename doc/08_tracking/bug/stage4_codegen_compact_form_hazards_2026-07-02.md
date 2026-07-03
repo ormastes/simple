@@ -1190,3 +1190,66 @@ returns a non-zero runtime value even for an unset var) so its probes leaked
 ungated; replaced with an import of interpreter.spl's text-based gated itrace.
 FINAL verified binary: scratchpad/stage4_it18z3 — `-c "print(1+1)"` → stdout
 exactly `2`, stderr EMPTY, rc=0; `run` and `--version` clean.
+
+## Iteration 19 (2026-07-03) — multi-function run files: ROOT CAUSE FOUND + FIXED (dict collapse) + user-fn call fixed
+
+Task #85: any run file with 2+ top-level functions silently no-ops (rc=0, no
+output); single-fn and `-c` worked. Fresh build reproduced (twofn_min: `fn
+helper()->text; fn main(): print("m1"); print(helper())`).
+
+### Root cause (decisive, ungated eprint probes in module_lowering)
+Both functions lower successfully, but `HirModule.functions`
+(`Dict<SymbolId, HirFunction>`) ends with **one** entry. Probe trail:
+```
+name=main   sym_is_nil=false eq_prev=false  after_insert idx=0 dict_len=1
+name=helper sym_is_nil=false eq_prev=TRUE   after_insert idx=1 dict_len=1
+```
+`helper`'s `hir_fn.symbol == main`'s `hir_fn.symbol` (`eq_prev=true`) even though
+the symbol table assigned DISTINCT ids (`next_symbol_id=2` for the 2 fns). So the
+second `functions[hir_fn.symbol]=hir_fn` OVERWRITES the first — `main` is dropped,
+`process_module` finds no `main` in `.values()` (only `helper`), returns Unit,
+nothing runs. Confirmed by a control: keying with a fresh `SymbolId(id: lower_idx)`
+made `dict_len` go 1→2 and `m1` printed.
+
+**Why the keys collide:** `SymbolTable.lookup(name)` returns a **shared/corrupt
+SymbolId struct instance** for every top-level function on stage4 (the seed's
+`Dict<text,SymbolId>.get()` struct-value corruption, Layer-5 family) — the real
+ids are distinct in the table but the looked-up struct HANDLE is shared, so as a
+Dict key they compare equal. Reading `.id` off the looked-up SymbolId
+nil-derefs (ANY-erasure), confirming the handle is degenerate.
+
+### Fix 1 (committed 95f504162fc / 370e379b6a0): distinct synthetic key
+`module_lowering.spl` non-bootstrap loop keys `functions` by
+`SymbolId(id: lower_idx)` instead of `hir_fn.symbol`. Every HIR-functions
+consumer (monomorphize_integration, backend translate, interpreter
+main-by-name scan) iterates `.keys()`/`.values()` and re-indexes with the
+yielded key, so distinct synthetic keys preserve all entries and all consumers.
+
+### Fix 2 (committed 370e379b6a0): user-defined fn calls by name
+After Fix 1, `main` ran and printed `m1`, then `print(helper())` crashed rc=132.
+itrace: `[CF] Function arm f_nil=TRUE` — the env-hit `Value.Function` payload is
+nil on stage4 (iteration-18 payload-loss channel), so `call_function`'s
+`f_t.name` nil-derefs. Added a NamedVar user-fn fast-path in the interpreter
+`Call` arm: after the builtin fast-path misses, resolve the HirFunction by NAME
+from `ctx.module.functions.values()` and call it directly, bypassing the
+nil-payload Function value. Also made `call_function`'s fallback resolve by name.
+
+### Verified (fresh probe-free build scratchpad/stage4_it19)
+- twofn_min → `m1` / `plain-helper`, rc=0 (WAS silent no-op) ✓
+- threefn (3 fns) → `main`, rc=0 ✓
+- single-fn run (hi-single) → rc=0 ✓
+- import `use std.text` → `imports-ok`, rc=0 ✓
+- lint src/app/cli/main.spl → rc=0 clean ✓
+- test target_presets_spec.spl → PASS rc=0 ✓
+
+### Remaining SEPARATE pre-existing defects (NOT the #85 multi-fn bug; unstub path)
+- **struct/class-bearing file → SIGSEGV during lowering** (rc=139). `class_only`
+  (a bare class + `fn main(): print(...)`) crashes inside `lower_module` before
+  `[DRV] lowered funcs=` — the class/struct HIR-lowering path was never
+  exercised on the unstub path (all prior iterations tested functions only).
+  Likely a nil-deref in `lower_class`/`lower_struct` (9-field positional
+  `case Class(...)` destructuring + full named `HirClass(...)`, the
+  positional-fill hazard family) or `declare_module_symbols` class define.
+- **`-c "print(1+1)"` → rc=1, no output** on this fresh build (baseline before
+  any it19 edit already showed this — pre-existing, not caused by it19; `-c`
+  does not traverse the modified non-bootstrap functions loop).
