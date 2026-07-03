@@ -16,6 +16,7 @@ use std.common.engine.units.{KeyCode}
 use std.nogc_sync_mut.game2d.render.canvas.{Canvas}
 use std.nogc_sync_mut.game2d.math.{DrawMode}
 use std.nogc_sync_mut.game2d.input.api.{key_down, key_pressed_this_frame}
+use std.nogc_sync_mut.engine.physics.collision2d.{collide_circle_aabb}
 
 val SCREEN_W: f64 = 800.0
 val SCREEN_H: f64 = 600.0
@@ -164,13 +165,17 @@ impl Game:
             self.ball_y = BALL_R
             self.ball_vy = -self.ball_vy
 
+    # Detection via engine.physics.collision2d (shared narrow-phase); response
+    # math (bounce reflection, contact-offset deflection) stays game-specific.
+    # Uses a plain `!= nil` check rather than `if val` pattern-binding: the
+    # latter mis-matches nil under this file's interpreter-fallback path (a
+    # real Option/`if val` interpreter bug — see
+    # doc/08_tracking/bug/interpreter_if_val_nil_mismatch_option_2026-07-03.md).
     me _update_ball_paddle(self):
-        val hit = (self.ball_vy > 0.0 and
-                   self.ball_y + BALL_R >= PADDLE_Y and
-                   self.ball_y - BALL_R <= PADDLE_Y + PADDLE_H and
-                   self.ball_x >= self.paddle_x - BALL_R and
-                   self.ball_x <= self.paddle_x + PADDLE_W + BALL_R)
-        if hit:
+        val paddle_center = Vec2(x: self.paddle_x + PADDLE_W / 2.0, y: PADDLE_Y + PADDLE_H / 2.0)
+        val contact = collide_circle_aabb(Vec2(x: self.ball_x, y: self.ball_y), BALL_R,
+                                           paddle_center, PADDLE_W / 2.0, PADDLE_H / 2.0)
+        if self.ball_vy > 0.0 and contact != nil:
             self.ball_y = PADDLE_Y - BALL_R
             self.ball_vy = -self.ball_vy
             val center = self.paddle_x + PADDLE_W / 2.0
@@ -184,11 +189,10 @@ impl Game:
         while i < n and hit_idx < 0:
             val br = self.bricks[i as i32]
             if br.alive:
-                val overlap = (self.ball_x + BALL_R >= br.x and
-                               self.ball_x - BALL_R <= br.x + br.w and
-                               self.ball_y + BALL_R >= br.y and
-                               self.ball_y - BALL_R <= br.y + br.h)
-                if overlap:
+                val brick_center = Vec2(x: br.x + br.w / 2.0, y: br.y + br.h / 2.0)
+                val contact = collide_circle_aabb(Vec2(x: self.ball_x, y: self.ball_y), BALL_R,
+                                                   brick_center, br.w / 2.0, br.h / 2.0)
+                if contact != nil:
                     hit_idx = i
             i = i + 1
         if hit_idx >= 0:
