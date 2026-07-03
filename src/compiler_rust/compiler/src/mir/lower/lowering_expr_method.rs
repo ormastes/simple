@@ -576,8 +576,15 @@ impl<'a> MirLowerer<'a> {
         let dispatch_receiver_ty = receiver_local_ty.unwrap_or(receiver.ty);
         match dispatch {
             DispatchMode::Dynamic => {
-                // Try to find the method in a registered trait (vtable dispatch)
-                if let Some((vtable_slot, param_types, return_type)) = self.find_trait_for_method(method) {
+                // Try to find the method in a registered trait (vtable dispatch).
+                // Receiver-aware: `func_name` was qualified as "Type.method" above
+                // whenever the receiver's static type is known — pass that type so
+                // concrete classes that merely share a method name with a trait
+                // get static dispatch instead of a bogus vtable load.
+                let recv_type_name: Option<&str> = func_name.rsplit_once('.').map(|(ty, _)| ty);
+                if let Some((vtable_slot, param_types, return_type)) =
+                    self.find_trait_for_method_on_receiver(method, recv_type_name)
+                {
                     if std::env::var("SIMPLE_DEBUG_METHOD_DISPATCH").is_ok() {
                         eprintln!(
                             "[MIR-METHOD-DISPATCH] '{}' lowered as virtual trait call at slot {}",

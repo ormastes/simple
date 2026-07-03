@@ -35,6 +35,23 @@ fn inline_numeric_arg(builder: &mut FunctionBuilder, value: Value) -> Value {
     builder.ins().select(is_tagged_int, payload, value)
 }
 
+/// Type-aware variant of [`inline_numeric_arg`]: a VReg whose MIR type is a
+/// known scalar integer is a RAW machine integer, so skip the tagged-int
+/// heuristic — it false-positives on any raw value that is a multiple of 8
+/// (e.g. color 0xFF202020 written through `[u32]` set arrived as value>>3,
+/// blanking the engine3d framebuffer clear).
+fn inline_numeric_arg_typed<M: Module>(
+    ctx: &InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    vreg: VReg,
+    value: Value,
+) -> Value {
+    if vreg_is_signed(ctx, vreg).is_some() {
+        return value;
+    }
+    inline_numeric_arg(builder, value)
+}
+
 // create_cstring_constant is now imported from helpers
 
 /// Emit profiler call/return instrumentation around a function call.
@@ -1597,9 +1614,12 @@ fn compile_inline_typed_words_u32_set<M: Module>(
 
     let array = coerce_vreg_to_i64(ctx, builder, args[0]);
     let raw_index = coerce_vreg_to_i64(ctx, builder, args[1]);
-    let index = inline_numeric_arg(builder, raw_index);
-    let raw_value = coerce_vreg_to_i64(ctx, builder, args[2]);
-    let value = inline_numeric_arg(builder, raw_value);
+    let index = inline_numeric_arg_typed(ctx, builder, args[1], raw_index);
+    // The stored value is a raw machine integer in compiled code (user-fn call
+    // results carry no vreg_types entry, so the tagged-int heuristic would
+    // false-positive on any multiple of 8 — e.g. color3d_pack results written
+    // to the engine3d framebuffer arrived as value>>3).
+    let value = coerce_vreg_to_i64(ctx, builder, args[2]);
     let zero = builder.ins().iconst(types::I64, 0);
     let false_value = builder.ins().iconst(types::I8, 0);
     let true_value = builder.ins().iconst(types::I8, 1);
@@ -1824,7 +1844,7 @@ fn compile_inline_array_set_len_known<M: Module>(
     }
     let header_ptr = coerce_vreg_to_i64(ctx, builder, args[0]);
     let raw_len = coerce_vreg_to_i64(ctx, builder, args[1]);
-    let len = inline_numeric_arg(builder, raw_len);
+    let len = inline_numeric_arg_typed(ctx, builder, args[1], raw_len);
     builder.ins().store(MemFlags::new(), len, header_ptr, 8);
     if let Some(dest) = dest {
         let true_value = builder.ins().iconst(types::I8, 1);
@@ -1983,7 +2003,7 @@ fn compile_inline_typed_bytes_le_set_unchecked<M: Module>(
     let array = coerce_vreg_to_i64(ctx, builder, args[0]);
     let index = coerce_vreg_to_i64(ctx, builder, args[1]);
     let raw_value = coerce_vreg_to_i64(ctx, builder, args[2]);
-    let value = inline_numeric_arg(builder, raw_value);
+    let value = inline_numeric_arg_typed(ctx, builder, args[2], raw_value);
     let ptr_mask = builder.ins().iconst(types::I64, !7i64);
     let ptr_bits = builder.ins().band(array, ptr_mask);
     let data_ptr = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 24);
@@ -2296,7 +2316,12 @@ pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         | "rt_file_mmap_len"
         | "rt_file_mmap_read_bytes" => Some(&[0]),
         // File I/O (two text params: path + content, or src + dest)
-        "rt_file_copy"
+        // rt_file_write_text / rt_file_append_text take (ptr,len) PAIRS
+        // (see runtime file_ops.rs); they were wrongly in text_cstr_arg_indices,
+        // which passes ptr-only and made every JIT write_file return false.
+        "rt_file_write_text"
+        | "rt_file_append_text"
+        | "rt_file_copy"
         | "rt_file_rename"
         | "rt_file_move"
         | "rt_file_wrap_smf_dynlib"
@@ -2382,7 +2407,6 @@ pub fn text_cstr_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         // process_c_runtime_arg_indices (checked before this table), which now
         // expands cmd to a (ptr, len) pair to match the linked runtime's actual
         // signature (compiler_rust/runtime/src/value/sffi/env_process.rs).
-        "rt_file_write_text" | "rt_file_append_text" => Some(&[0, 1]),
         "rt_dir_create" | "rt_dir_create_all" => Some(&[0]),
         "rt_cuda_launch_kernel" => Some(&[1]),
         "rt_cuda_module_load_data" => Some(&[0]),

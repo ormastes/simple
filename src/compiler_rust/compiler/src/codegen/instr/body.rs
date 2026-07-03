@@ -484,10 +484,15 @@ pub fn compile_function_body<M: Module>(
         } else if expected_ty.is_int() {
             builder.ins().ireduce(expected_ty, val)
         } else if expected_ty == types::F32 {
-            let as_i32 = builder.ins().ireduce(types::I32, val);
-            builder
+            // Callers marshal f32 args as the bit pattern of the PROMOTED f64
+            // (ensure_i64 / adapt_args_to_signature: fpromote + bitcast.i64).
+            // Mirror that here: reinterpret as f64, then narrow. The previous
+            // ireduce+bitcast.f32 read the low 32 bits of the f64 pattern,
+            // which decoded every f32 parameter as garbage (usually 0.0).
+            let as_f64 = builder
                 .ins()
-                .bitcast(types::F32, cranelift_codegen::ir::MemFlags::new(), as_i32)
+                .bitcast(types::F64, cranelift_codegen::ir::MemFlags::new(), val);
+            builder.ins().fdemote(types::F32, as_f64)
         } else if expected_ty == types::F64 {
             builder
                 .ins()
@@ -932,8 +937,24 @@ pub fn compile_function_body<M: Module>(
                             } else if val_type.is_int() && ret_ty.is_float() {
                                 // Int to float conversion for return value
                                 builder.ins().fcvt_from_sint(ret_ty, rv)
+                            } else if val_type.is_float() && ret_ty == types::I64 {
+                                // Uniform tagged-i64 ABI slot: preserve the float's
+                                // BITS (promote f32 first), matching how callers
+                                // unpack float results (bitcast.f64, see
+                                // compile_store / compile_cast). The previous
+                                // fcvt_to_sint value-converted the float, so every
+                                // float-returning fn came back as a truncated int.
+                                let as_f64 = if val_type == types::F32 {
+                                    builder.ins().fpromote(types::F64, rv)
+                                } else {
+                                    rv
+                                };
+                                builder
+                                    .ins()
+                                    .bitcast(types::I64, cranelift_codegen::ir::MemFlags::new(), as_f64)
                             } else if val_type.is_float() && ret_ty.is_int() {
-                                // Float to int conversion for return value
+                                // Narrow int return slots (runtime-spec fns): real
+                                // value conversion.
                                 builder.ins().fcvt_to_sint(ret_ty, rv)
                             } else if val_type.is_float() && ret_ty.is_float() {
                                 // Float width conversion

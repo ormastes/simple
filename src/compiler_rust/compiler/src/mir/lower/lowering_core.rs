@@ -908,6 +908,45 @@ impl<'a> MirLowerer<'a> {
         None
     }
 
+    /// Receiver-aware variant of [`find_trait_for_method`].
+    ///
+    /// A name-only trait match mis-lowers `e.name()` on a concrete class that
+    /// merely SHARES a method name with some trait: the receiver has no
+    /// vtable, so slot dispatch loads field data as a function pointer and
+    /// segfaults (engine3d Engine3D delegation, 2026-07-03). Take the virtual
+    /// path only when the receiver is statically the trait itself, is of
+    /// unknown type, or actually implements a trait owning this method.
+    pub(super) fn find_trait_for_method_on_receiver(
+        &self,
+        method_name: &str,
+        receiver_type_name: Option<&str>,
+    ) -> Option<(u32, Vec<crate::hir::TypeId>, crate::hir::TypeId)> {
+        let infos = self.trait_infos?;
+        let Some(recv) = receiver_type_name else {
+            // Unknown receiver type: legacy name-based virtual dispatch.
+            return self.find_trait_for_method(method_name);
+        };
+        // Receiver statically typed as the trait itself → virtual through it.
+        if let Some(info) = infos.get(recv) {
+            if let Some(sig) = info.get_method(method_name) {
+                return Some((sig.vtable_slot, sig.param_types.clone(), sig.return_type));
+            }
+        }
+        // Concrete receiver: virtual only via a trait it is known to implement.
+        for (trait_name, info) in infos {
+            if let Some(sig) = info.get_method(method_name) {
+                let implements = self
+                    .dependency_graph
+                    .get_implementations(trait_name)
+                    .is_some_and(|impls| impls.iter().any(|t| t == recv));
+                if implements {
+                    return Some((sig.vtable_slot, sig.param_types.clone(), sig.return_type));
+                }
+            }
+        }
+        None
+    }
+
     /// Get the current contract mode
     pub fn contract_mode(&self) -> ContractMode {
         self.contract_mode

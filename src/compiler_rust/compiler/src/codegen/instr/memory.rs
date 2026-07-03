@@ -135,6 +135,21 @@ pub fn compile_store<M: Module>(
                     } else {
                         v
                     }
+                } else if expected_cl_ty == types::F32 && actual_ty == types::F64 {
+                    // Float literals and cross-function float values are f64;
+                    // narrow to the f32 local instead of zeroing it (the old
+                    // create_default fallback silently turned every
+                    // `val x: f32 = <f64-typed value>` into 0.0).
+                    builder.ins().fdemote(types::F32, v)
+                } else if expected_cl_ty == types::F64 && actual_ty == types::F32 {
+                    builder.ins().fpromote(types::F64, v)
+                } else if expected_cl_ty == types::F32 && actual_ty == types::I64 {
+                    // Tagged-i64 ABI: floats cross calls/blocks as the bit
+                    // pattern of their promoted f64. Reinterpret, then narrow.
+                    let as_f64 = builder
+                        .ins()
+                        .bitcast(types::F64, cranelift_codegen::ir::MemFlags::new(), v);
+                    builder.ins().fdemote(types::F32, as_f64)
                 } else if expected_cl_ty == types::F64 && actual_ty == types::I64 {
                     // A cross-block f64 value is carried through an i64-typed
                     // Cranelift Variable (cross-block VRegs are declared i64 and

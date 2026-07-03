@@ -214,7 +214,13 @@ pub(crate) fn compile_binop<M: Module>(
     // f64 params returned 0). `vreg_types` (built from MIR) still records the
     // true F64 type, so reinterpret the bits back to f64 here before coercion.
     let reinterpret_f64 = |builder: &mut FunctionBuilder, v: cranelift_codegen::ir::Value, vreg: VReg| {
-        if ctx.vreg_types.get(&vreg).copied() == Some(TypeId::F64) && builder.func.dfg.value_type(v) == types::I64 {
+        // F32 included: cross-block f32 values are carried as the bit pattern
+        // of their PROMOTED f64 (see ensure_i64), so the same bitcast applies.
+        if matches!(
+            ctx.vreg_types.get(&vreg).copied(),
+            Some(TypeId::F64) | Some(TypeId::F32)
+        ) && builder.func.dfg.value_type(v) == types::I64
+        {
             builder
                 .ins()
                 .bitcast(types::F64, cranelift_codegen::ir::MemFlags::new(), v)

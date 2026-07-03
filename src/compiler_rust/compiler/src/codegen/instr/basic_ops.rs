@@ -171,11 +171,25 @@ pub fn compile_cast<M: Module>(
             builder.ins().fcvt_from_uint(types::F64, src_val)
         }
     } else if is_from_float && is_to_float {
-        // Float to float (F32 <-> F64)
-        if from_ty == TypeId::F32 {
-            builder.ins().fpromote(types::F64, src_val)
+        // Float to float (F32 <-> F64). Dispatch on the ACTUAL cranelift value
+        // type, not the MIR annotation: values that crossed a block boundary or
+        // arrived through the tagged-i64 ABI are i64 bit patterns of the
+        // promoted f64 (see ensure_i64), so a bare fpromote/fdemote on them
+        // fails the verifier (engine3d mat4_* after the _sin/_cos wrappers
+        // became inlinable, 2026-07-03).
+        let target = if to_ty == TypeId::F32 { types::F32 } else { types::F64 };
+        let as_float = if builder.func.dfg.value_type(src_val) == types::I64 {
+            builder.ins().bitcast(types::F64, MemFlags::new(), src_val)
         } else {
-            builder.ins().fdemote(types::F32, src_val)
+            src_val
+        };
+        let src_float_ty = builder.func.dfg.value_type(as_float);
+        if src_float_ty == target {
+            as_float
+        } else if target == types::F64 {
+            builder.ins().fpromote(types::F64, as_float)
+        } else {
+            builder.ins().fdemote(types::F32, as_float)
         }
     } else if let Some(target_ty) = to_int_width {
         let src_ty = builder.func.dfg.value_type(src_val);
@@ -214,10 +228,20 @@ pub fn compile_unary_op<M: Module>(
     op: UnaryOp,
     operand: VReg,
 ) -> InstrResult<()> {
-    let val = match ctx.vreg_values.get(&operand) {
+    let mut val = match ctx.vreg_values.get(&operand) {
         Some(&v) => v,
         None => return Err(format!("UnaryOp: operand vreg {:?} not found", operand)),
     };
+    // Cross-block float operands arrive as i64 bit patterns of the promoted
+    // f64 (see ensure_i64); reinterpret before classifying, mirroring
+    // compile_binop's reinterpret_f64.
+    if matches!(
+        ctx.vreg_types.get(&operand).copied(),
+        Some(TypeId::F64) | Some(TypeId::F32)
+    ) && builder.func.dfg.value_type(val) == types::I64
+    {
+        val = builder.ins().bitcast(types::F64, MemFlags::new(), val);
+    }
     let val_type = builder.func.dfg.value_type(val);
     let val_is_float = val_type == types::F32 || val_type == types::F64;
     let result = match op {

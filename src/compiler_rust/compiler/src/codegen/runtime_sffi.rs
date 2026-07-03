@@ -430,6 +430,45 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_native_neq", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_value_truthy", &[I64], &[I8]),
     // =========================================================================
+    // Math shims (C ABI: f64 in/out — see runtime/src/value/sffi/math.rs).
+    // Without these specs, extern declarations fall back to the uniform
+    // i64 signature and float call results fail Cranelift verification
+    // (fdemote of an i64), forcing interpreter fallback on hot math paths.
+    // =========================================================================
+    RuntimeFuncSpec::new("rt_math_pow", &[F64, F64], &[F64]),
+    RuntimeFuncSpec::new("rt_math_log", &[F64], &[F64]),
+    RuntimeFuncSpec::new("rt_math_log10", &[F64], &[F64]),
+    RuntimeFuncSpec::new("rt_math_log2", &[F64], &[F64]),
+    RuntimeFuncSpec::new("rt_math_exp", &[F64], &[F64]),
+    RuntimeFuncSpec::new("rt_math_sqrt", &[F64], &[F64]),
+    RuntimeFuncSpec::new("rt_math_cbrt", &[F64], &[F64]),
+    RuntimeFuncSpec::new("rt_math_sin", &[F64], &[F64]),
+    RuntimeFuncSpec::new("rt_math_cos", &[F64], &[F64]),
+    RuntimeFuncSpec::new("rt_math_tan", &[F64], &[F64]),
+    RuntimeFuncSpec::new("rt_math_asin", &[F64], &[F64]),
+    RuntimeFuncSpec::new("rt_math_acos", &[F64], &[F64]),
+    RuntimeFuncSpec::new("rt_math_atan", &[F64], &[F64]),
+    RuntimeFuncSpec::new("rt_math_atan2", &[F64, F64], &[F64]),
+    RuntimeFuncSpec::new("rt_math_sinh", &[F64], &[F64]),
+    RuntimeFuncSpec::new("rt_math_cosh", &[F64], &[F64]),
+    RuntimeFuncSpec::new("rt_math_tanh", &[F64], &[F64]),
+    RuntimeFuncSpec::new("rt_math_floor", &[F64], &[F64]),
+    RuntimeFuncSpec::new("rt_math_ceil", &[F64], &[F64]),
+    RuntimeFuncSpec::new("rt_math_round", &[F64], &[F64]),
+    RuntimeFuncSpec::new("rt_math_trunc", &[F64], &[F64]),
+    RuntimeFuncSpec::new("rt_math_abs", &[F64], &[F64]),
+    RuntimeFuncSpec::new("rt_math_hypot", &[F64, F64], &[F64]),
+    RuntimeFuncSpec::new("rt_math_gcd", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_math_min", &[F64, F64], &[F64]),
+    RuntimeFuncSpec::new("rt_math_max", &[F64, F64], &[F64]),
+    RuntimeFuncSpec::new("rt_math_clamp", &[F64, F64, F64], &[F64]),
+    RuntimeFuncSpec::new("rt_math_fma", &[F64, F64, F64], &[F64]),
+    RuntimeFuncSpec::new("rt_math_nan", &[], &[F64]),
+    RuntimeFuncSpec::new("rt_math_inf", &[], &[F64]),
+    RuntimeFuncSpec::new("rt_math_is_nan", &[F64], &[I8]),
+    RuntimeFuncSpec::new("rt_math_is_inf", &[F64], &[I8]),
+    RuntimeFuncSpec::new("rt_math_is_finite", &[F64], &[I8]),
+    // =========================================================================
     // Object operations
     // =========================================================================
     RuntimeFuncSpec::new("rt_object_new", &[I32, I32], &[I64]),
@@ -1501,7 +1540,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_file_mmap_read_text_rv", &[I64], &[I64]), // RuntimeValue(string) -> RuntimeValue
     RuntimeFuncSpec::new("rt_file_mmap_read_bytes", &[I64, I64], &[I64]), // path_ptr, path_len -> RuntimeValue
     RuntimeFuncSpec::new("rt_file_mmap_read_bytes_rv", &[I64], &[I64]), // RuntimeValue(string) -> RuntimeValue
-    RuntimeFuncSpec::new("rt_file_write_text", &[I64, I64], &[I8]),    // path, content -> bool
+    RuntimeFuncSpec::new("rt_file_write_text", &[I64, I64, I64, I64], &[I8]), // path_ptr, path_len, content_ptr, content_len -> bool
     RuntimeFuncSpec::new("rt_file_fsync", &[I64, I64], &[I8]),         // path -> bool
     RuntimeFuncSpec::new("rt_file_fsync_cached", &[I64, I64], &[I8]),  // path -> bool, prefer write-at cache
     RuntimeFuncSpec::new("rt_crc32_text", &[I64, I64], &[I64]),        // text -> i64 (CRC32 checksum)
@@ -1516,7 +1555,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_file_hash_sha256", &[I64, I64], &[I64]),                 // path -> RuntimeValue
     RuntimeFuncSpec::new("rt_file_rename", &[I64, I64, I64, I64], &[I8]),             // old, new -> bool
     RuntimeFuncSpec::new("rt_file_read_lines", &[I64, I64], &[I64]),                  // path -> RuntimeValue (array)
-    RuntimeFuncSpec::new("rt_file_append_text", &[I64, I64], &[I8]),                  // path, content -> bool
+    RuntimeFuncSpec::new("rt_file_append_text", &[I64, I64, I64, I64], &[I8]), // path_ptr, path_len, content_ptr, content_len -> bool
     RuntimeFuncSpec::new("rt_file_read_bytes", &[I64, I64], &[I64]),                  // path -> RuntimeValue (array)
     RuntimeFuncSpec::new("rt_bytes_from_raw", &[I64, I64], &[I64]), // ptr, len -> RuntimeValue (byte array)
     RuntimeFuncSpec::new("rt_file_write_bytes", &[I64, I64, I64, I64], &[I8]), // path, bytes -> bool
