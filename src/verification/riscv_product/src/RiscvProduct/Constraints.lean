@@ -162,6 +162,17 @@ theorem failed_second_acquire_and_release_preserves_owner (owner other : Lane)
       release { owner := some owner } other = { owner := some owner } := by
   cases owner <;> cases other <;> simp [acquire, release] at *
 
+theorem failed_acquire_then_owner_release_allows_requester
+    (s : ResourceState) (owner requester : Lane)
+    (howner : s.owner = some owner) :
+    acquire s requester = none ∧
+      acquire (release s owner) requester = some { owner := some requester } := by
+  cases s with
+  | mk current =>
+      simp at howner
+      cases howner
+      cases owner <;> cases requester <;> simp [acquire, release]
+
 theorem owner_release_clears_resource (l : Lane) :
     release { owner := some l } l = { owner := none } := by
   cases l <;> simp [release]
