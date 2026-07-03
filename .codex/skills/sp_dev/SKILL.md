@@ -386,6 +386,12 @@ dependencies must miss the interpreter/incremental cache and any SMF/JIT cache
 that could otherwise reuse stale code. Add focused specs near the cache owner
 instead of relying only on broad loader suites.
 
+For Lean or BYL formal-verification lanes, keep generated backend output
+separate from handwritten proof additions. Regeneration should update generated
+obligations without overwriting stable theorem files, and SPipe evidence should
+name the generated artifact plus the durable proof entry points that must still
+check after regeneration.
+
 For MCP/runtime-forwarding or startup-latency work, refresh both the lane state
 file and `doc/07_guide/app/mcp/startup_performance.md` before handoff. Keep the
 guide aligned with the current wrapper contract (native-first, probe-stamped,

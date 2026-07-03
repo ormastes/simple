@@ -54,6 +54,12 @@ Running `simple verify check` invokes Lean/Lake to check these theorems. Unprove
 
 The verification workflow supports a bounded subset of formal verification. All features below are tested and documented. Deferred features are listed in [Known Limitations](#known-limitations).
 
+Maintain generated Lean separately from handwritten proof lemmas. Regeneration
+may replace generated declarations, but durable proof files should import those
+declarations and prove small named invariants such as resource-capacity,
+capability-depth, channel-backpressure, and DRF/race lemmas. This keeps later
+Lean or BYL backend regeneration from breaking manually added proof intent.
+
 ### @verify Attribute
 
 Marks a function for formal verification. The compiler generates Lean proof obligations from the function's contracts.

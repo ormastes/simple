@@ -51,8 +51,8 @@
 - qemu_virtio_gpu_access_reason: rv64-qmp-virtio-gpu-display-smoke-pass
 - qemu_virtio_gpu_access_contract: src/os/_QemuRunner/scenario_catalog.spl:scenario_riscv64_display_smoke
 - kernel_scheduler_resource_formal: pass
-- kernel_scheduler_resource_formal_scope: bounded ResourcePool acquire/release capacity, zero-capacity denial/emptiness, underflow, and acquire-release no-leak roundtrip invariants
-- kernel_scheduler_resource_formal_evidence: src/verification/kernel_scheduler/KernelScheduler/Theorems.lean T10a-T10g plus resource_zero_capacity_acquire_denied + resource_zero_capacity_wf_empty; `cd src/verification/kernel_scheduler && lake build`
+- kernel_scheduler_resource_formal_scope: bounded ResourcePool acquire/release capacity, zero-capacity denial/emptiness, release capacity preservation, underflow, and acquire-release no-leak roundtrip invariants
+- kernel_scheduler_resource_formal_evidence: src/verification/kernel_scheduler/KernelScheduler/Theorems.lean T10a-T10g plus resource_zero_capacity_acquire_denied + resource_zero_capacity_wf_empty + resource_release_preserves_capacity_bound; `cd src/verification/kernel_scheduler && lake build`
 - actor_channel_backpressure_formal: pass
 - actor_channel_backpressure_formal_scope: closed send/closed-empty recv fail without mutation; closed non-empty recv drains buffered values; close_drain preserves buffered values, keeps them receivable, and is idempotent after close; bounded producer/consumer channel cannot overflow when full and no receiver is waiting; receiver parked by recv is woken by close_drain; send to a waiting receiver wakes without buffer growth
 - actor_channel_backpressure_formal_evidence: src/verification/actor_channel/ActorChannel/Theorems.lean T2a2 + T2b2 + T2b3 + T3a2 + T3a3 + T3b + T6d + T6e + T7; `cd src/verification/actor_channel && lake build`
