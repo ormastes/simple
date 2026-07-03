@@ -1,0 +1,50 @@
+"""ODT/DOCX container interop spec.
+
+Pure-Simple zip (reader incl. dynamic-Huffman deflate, stored writer) plus
+document import: real .odt round-trips through our own zip container, and
+OOXML word/document.xml parses headings and concatenated w:t runs.
+"""
+
+use std.spec
+use std.common.archive.zip.{zip_write_stored, zip_entries, zip_extract_text, zip_text_file, ZipFile}
+use app.office.odf_ooxml.{odt_bytes_to_document, docx_document_xml_to_document, document_to_odt_bytes, odt_content_to_document}
+use app.office.file_formats.{parse_markdown_document, document_to_markdown}
+
+describe "zip: stored write + read round-trip":
+    it "writes a zip our reader and the central directory agree on":
+        var files: [ZipFile] = []
+        files.push(zip_text_file("mimetype", "application/x-test"))
+        files.push(zip_text_file("content.xml", "<x>hi</x>"))
+        val bytes = zip_write_stored(files)
+        val entries = zip_entries(bytes)
+        expect(entries.len()).to_equal(2)
+        expect(entries[0].name).to_equal("mimetype")
+        expect(zip_extract_text(bytes, "content.xml")).to_equal("<x>hi</x>")
+
+    it "returns empty for a missing entry":
+        val bytes = zip_write_stored([zip_text_file("a", "1")])
+        expect(zip_extract_text(bytes, "missing")).to_equal("")
+
+describe "ODT: real container round-trip":
+    it "writes .odt bytes our importer reads back with structure intact":
+        val md = "# Annual Report\n\nStrong growth.\n\n- Expand team"
+        val doc = parse_markdown_document(md, "d")
+        val odt = document_to_odt_bytes(doc)
+        val doc2 = odt_bytes_to_document(odt, "d2")
+        val out = document_to_markdown(doc2)
+        expect(out).to_contain("# Annual Report")
+        expect(out).to_contain("Strong growth.")
+        expect(out).to_contain("- Expand team")
+
+    it "unescapes XML entities on import":
+        val xml = "<office:text><text:p>a &amp; b &lt;c&gt;</text:p></office:text>"
+        val doc = odt_content_to_document(xml, "t")
+        expect(document_to_markdown(doc)).to_contain("a & b <c>")
+
+describe "DOCX: OOXML paragraph import":
+    it "parses Heading1 styles and concatenates w:t runs":
+        val xml = "<w:body><w:p><w:pPr><w:pStyle w:val=\"Heading1\"/></w:pPr><w:r><w:t>Title</w:t></w:r></w:p><w:p><w:r><w:t>Hello </w:t></w:r><w:r><w:t>runs.</w:t></w:r></w:p></w:body>"
+        val doc = docx_document_xml_to_document(xml, "t")
+        val out = document_to_markdown(doc)
+        expect(out).to_contain("# Title")
+        expect(out).to_contain("Hello runs.")

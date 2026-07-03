@@ -127,6 +127,230 @@ fn inflate_block_fixed(br):
 
     return [out, cur_br]
 
+# =============================================================================
+# DYNAMIC HUFFMAN BLOCKS (RFC 1951 §3.2.7)
+# =============================================================================
+
+# Build a canonical Huffman decoder from per-symbol code lengths.
+# Returns [counts, symbols]: counts[len] = number of codes of that length,
+# symbols = symbol values sorted by (length, symbol) — the puff layout.
+fn huffman_build(lengths):
+    var counts = []
+    var i = 0
+    loop:
+        if i > 15:
+            break
+        counts.push(0)
+        i = i + 1
+    i = 0
+    loop:
+        if i >= lengths.len():
+            break
+        val l = lengths[i]
+        if l > 0:
+            counts[l] = counts[l] + 1
+        i = i + 1
+    # offsets per length
+    var offs = []
+    i = 0
+    loop:
+        if i > 15:
+            break
+        offs.push(0)
+        i = i + 1
+    var len_i = 1
+    loop:
+        if len_i >= 15:
+            break
+        offs[len_i + 1] = offs[len_i] + counts[len_i]
+        len_i = len_i + 1
+    var symbols = []
+    i = 0
+    loop:
+        if i >= lengths.len():
+            break
+        symbols.push(0)
+        i = i + 1
+    i = 0
+    loop:
+        if i >= lengths.len():
+            break
+        val l = lengths[i]
+        if l > 0:
+            symbols[offs[l]] = i
+            offs[l] = offs[l] + 1
+        i = i + 1
+    return [counts, symbols]
+
+# Decode one symbol with a canonical decoder. Returns [symbol, new_br]; -1 on error.
+fn huffman_decode(br, counts, symbols):
+    var cur_br = br
+    var code = 0
+    var first = 0
+    var index = 0
+    var len_i = 1
+    loop:
+        if len_i > 15:
+            break
+        val bit_ret = bitstream_read_one_bit(cur_br)
+        val bit = bit_ret[0]
+        cur_br = bit_ret[1]
+        if bit < 0:
+            return [-1, cur_br]
+        code = code | bit
+        val count = counts[len_i]
+        if code - first < count:
+            return [symbols[index + code - first], cur_br]
+        index = index + count
+        first = (first + count) << 1
+        code = code << 1
+        len_i = len_i + 1
+    return [-1, cur_br]
+
+# Decompress a dynamic-Huffman block. Returns [output_bytes, new_br] or [nil, br].
+fn inflate_block_dynamic(br):
+    var cur_br = br
+    val hlit_ret = bitstream_read_bits_lsb(cur_br, 5)
+    val hlit = hlit_ret[0] + 257
+    cur_br = hlit_ret[1]
+    val hdist_ret = bitstream_read_bits_lsb(cur_br, 5)
+    val hdist = hdist_ret[0] + 1
+    cur_br = hdist_ret[1]
+    val hclen_ret = bitstream_read_bits_lsb(cur_br, 4)
+    val hclen = hclen_ret[0] + 4
+    cur_br = hclen_ret[1]
+
+    # Code-length alphabet lengths, in the RFC's permuted order
+    val order = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15]
+    var clen_lengths = []
+    var i = 0
+    loop:
+        if i >= 19:
+            break
+        clen_lengths.push(0)
+        i = i + 1
+    i = 0
+    loop:
+        if i >= hclen:
+            break
+        val bits_ret = bitstream_read_bits_lsb(cur_br, 3)
+        clen_lengths[order[i]] = bits_ret[0]
+        cur_br = bits_ret[1]
+        i = i + 1
+    val clen_huff = huffman_build(clen_lengths)
+    val clen_counts = clen_huff[0]
+    val clen_symbols = clen_huff[1]
+
+    # Decode the hlit+hdist literal/length + distance code lengths
+    var lengths = []
+    loop:
+        if lengths.len() >= hlit + hdist:
+            break
+        val sym_ret = huffman_decode(cur_br, clen_counts, clen_symbols)
+        val sym = sym_ret[0]
+        cur_br = sym_ret[1]
+        if sym < 0:
+            return [nil, cur_br]
+        if sym < 16:
+            lengths.push(sym)
+        elif sym == 16:
+            if lengths.len() == 0:
+                return [nil, cur_br]
+            val prev = lengths[lengths.len() - 1]
+            val rep_ret = bitstream_read_bits_lsb(cur_br, 2)
+            var rep = 3 + rep_ret[0]
+            cur_br = rep_ret[1]
+            loop:
+                if rep <= 0:
+                    break
+                lengths.push(prev)
+                rep = rep - 1
+        elif sym == 17:
+            val rep_ret = bitstream_read_bits_lsb(cur_br, 3)
+            var rep = 3 + rep_ret[0]
+            cur_br = rep_ret[1]
+            loop:
+                if rep <= 0:
+                    break
+                lengths.push(0)
+                rep = rep - 1
+        else:
+            val rep_ret = bitstream_read_bits_lsb(cur_br, 7)
+            var rep = 11 + rep_ret[0]
+            cur_br = rep_ret[1]
+            loop:
+                if rep <= 0:
+                    break
+                lengths.push(0)
+                rep = rep - 1
+
+    var litlen_lengths = []
+    i = 0
+    loop:
+        if i >= hlit:
+            break
+        litlen_lengths.push(lengths[i])
+        i = i + 1
+    var dist_lengths = []
+    i = hlit
+    loop:
+        if i >= hlit + hdist:
+            break
+        dist_lengths.push(lengths[i])
+        i = i + 1
+    val litlen_huff = huffman_build(litlen_lengths)
+    val litlen_counts = litlen_huff[0]
+    val litlen_symbols = litlen_huff[1]
+    val dist_huff = huffman_build(dist_lengths)
+    val dist_counts = dist_huff[0]
+    val dist_symbols = dist_huff[1]
+
+    # Decode the block's symbol stream (same LZ77 loop as fixed blocks)
+    var out: [u8] = []
+    loop:
+        val sym_ret = huffman_decode(cur_br, litlen_counts, litlen_symbols)
+        val symbol = sym_ret[0]
+        cur_br = sym_ret[1]
+        if symbol < 0:
+            return [nil, cur_br]
+        if symbol == 256:
+            break
+        if symbol < 256:
+            out.push(symbol.to_u8())
+        else:
+            val len_info = deflate_length_decode_info(symbol)
+            val base_len = len_info[0]
+            val ex_cnt = len_info[1]
+            var length = base_len
+            if ex_cnt > 0:
+                val ex_ret = bitstream_read_bits_lsb(cur_br, ex_cnt)
+                length = base_len + ex_ret[0]
+                cur_br = ex_ret[1]
+            val dc_ret = huffman_decode(cur_br, dist_counts, dist_symbols)
+            val dist_code = dc_ret[0]
+            cur_br = dc_ret[1]
+            if dist_code < 0:
+                return [nil, cur_br]
+            val di_info = deflate_distance_decode_info(dist_code)
+            val base_dist = di_info[0]
+            val dex_cnt = di_info[1]
+            var distance = base_dist
+            if dex_cnt > 0:
+                val dex_ret = bitstream_read_bits_lsb(cur_br, dex_cnt)
+                distance = base_dist + dex_ret[0]
+                cur_br = dex_ret[1]
+            val start_pos = out.len() - distance
+            var j = 0
+            loop:
+                if j >= length:
+                    break
+                val cp = start_pos + j
+                if cp >= 0:
+                    if cp < out.len():
+                        out.push(out[cp])
+                j = j + 1
+    return [out, cur_br]
+
 # Decompress a complete DEFLATE stream (one or more blocks).
 # Returns decompressed [u8] or nil on error.
 fn inflate(input: [u8]) -> [u8]?:
@@ -174,8 +398,17 @@ fn inflate(input: [u8]) -> [u8]?:
                 k = k + 1
 
         if btype == BLOCK_DYNAMIC:
-            # Dynamic Huffman blocks not supported in this commit (separate follow-up)
-            return nil
+            val dr = inflate_block_dynamic(br)
+            val block_out = dr[0]
+            br = dr[1]
+            if block_out == nil:
+                return nil
+            var k = 0
+            loop:
+                if k >= block_out.len():
+                    break
+                out.push(block_out[k])
+                k = k + 1
 
         if bfinal == 1:
             break

@@ -19,6 +19,8 @@ use app.office.render_adapter.{office_render, office_render_source}
 use app.office.file_formats.{parse_markdown_document, document_to_markdown, parse_csv_sheet, sheet_to_csv}
 use app.office.slides.deck_format.{parse_deck, deck_to_text}
 use app.office.odf_export.{document_to_fodt, sheet_to_fods}
+use app.office.odf_ooxml.{odt_bytes_to_document, docx_bytes_to_document, document_to_odt_bytes}
+use std.nogc_sync_mut.sffi.io.{file_read_bytes, file_write_bytes}
 use app.ui.render.types.{RenderConfig}
 use std.io_runtime.{write_file, read_file, file_exists}
 
@@ -145,22 +147,39 @@ fn _run_convert_command(args: [text]) -> i32:
     if not file_exists(in_path):
         print "office-convert: rejected (missing-file: {in_path})"
         return 2
-    val content = read_file(in_path)
     var serialized = ""
     if surface == "word" or surface == "writer":
-        val doc = parse_markdown_document(content, _basename(in_path))
+        var doc = parse_markdown_document("", _basename(in_path))
+        if in_path.ends_with(".odt") or in_path.ends_with(".docx"):
+            val zip_bytes = file_read_bytes(in_path)
+            if zip_bytes == nil:
+                print "office-convert: rejected (unreadable: {in_path})"
+                return 2
+            if in_path.ends_with(".odt"):
+                doc = odt_bytes_to_document(zip_bytes, _basename(in_path))
+            else:
+                doc = docx_bytes_to_document(zip_bytes, _basename(in_path))
+        else:
+            doc = parse_markdown_document(read_file(in_path), _basename(in_path))
+        if out_path.ends_with(".odt"):
+            val odt = document_to_odt_bytes(doc)
+            if file_write_bytes(out_path, odt):
+                print "office-convert: {surface} {in_path} -> {out_path} ({odt.len()} bytes, odt)"
+                return 0
+            print "office-convert: failed to write {out_path}"
+            return 2
         if out_path.ends_with(".fodt"):
             serialized = document_to_fodt(doc)
         else:
             serialized = document_to_markdown(doc)
     elif surface == "sheets" or surface == "calc" or surface == "excel":
-        val sheet = parse_csv_sheet(content, _basename(in_path))
+        val sheet = parse_csv_sheet(read_file(in_path), _basename(in_path))
         if out_path.ends_with(".fods"):
             serialized = sheet_to_fods(sheet)
         else:
             serialized = sheet_to_csv(sheet)
     elif surface == "slides" or surface == "impress" or surface == "ppt":
-        serialized = deck_to_text(parse_deck(content))
+        serialized = deck_to_text(parse_deck(read_file(in_path)))
     else:
         print "office-convert: rejected (unsupported-surface: {surface})"
         return 1

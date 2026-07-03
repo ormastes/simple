@@ -1,0 +1,183 @@
+# ODT / DOCX Import + real .odt Writer
+#
+# Reads the two dominant office container formats into the suite's document
+# model, and writes genuine zipped .odt files:
+#   - .odt  (LibreOffice): content.xml   -> text:h / text:p / list items
+#   - .docx (MS Word):     word/document.xml -> w:p paragraphs, Heading styles,
+#     concatenated w:t runs
+#
+# Parsing is a targeted tag scan (find/strip/unescape), not a general XML DOM —
+# enough to import real documents' text structure faithfully.
+# ponytail: character-run styling (bold/italic spans) imports as plain text;
+# add run-property scanning when styled import matters.
+
+use std.common.archive.zip.{zip_extract_text, zip_write_stored, zip_text_file, ZipFile}
+use common.rich_text.attributed_text.{RichDocument, DocBlock, BlockKind, TextSpan, InlineStyle}
+use app.office.odf_export.{document_to_fodt}
+use app.office.file_formats.{parse_inline_spans}
+
+# =========================================================================
+# XML helpers
+# =========================================================================
+
+fn _find_from(s: text, needle: text, from: i32) -> i32:
+    var i = from
+    while i + needle.len() <= s.len():
+        if s.slice(i, i + needle.len()) == needle:
+            return i
+        i = i + 1
+    -1
+
+fn _strip_tags(s: text) -> text:
+    """Remove every <...> span, keeping the character data."""
+    var out = ""
+    var i = 0
+    var in_tag = false
+    while i < s.len():
+        val ch = s.slice(i, i + 1)
+        if ch == "<":
+            in_tag = true
+        elif ch == ">":
+            in_tag = false
+        elif not in_tag:
+            out = "{out}{ch}"
+        i = i + 1
+    out
+
+fn _xml_unescape(s: text) -> text:
+    var r = s
+    r = r.replace("&lt;", "<")
+    r = r.replace("&gt;", ">")
+    r = r.replace("&quot;", "\"")
+    r = r.replace("&apos;", "'")
+    r = r.replace("&amp;", "&")
+    r
+
+fn _span(s: text) -> TextSpan:
+    TextSpan(text: s, style: InlineStyle.Normal)
+
+fn _plain_block(kind: BlockKind, content: text) -> DocBlock:
+    DocBlock(kind: kind, spans: [_span(content)])
+
+# =========================================================================
+# ODT import
+# =========================================================================
+
+fn _odf_heading_kind(level_attr: text) -> BlockKind:
+    if level_attr.contains("\"1\""):
+        return BlockKind.Heading1
+    if level_attr.contains("\"2\""):
+        return BlockKind.Heading2
+    BlockKind.Heading3
+
+fn odt_content_to_document(content_xml: text, title: text) -> RichDocument:
+    """Parse ODF content.xml into a RichDocument (headings, paragraphs, lists)."""
+    var doc = RichDocument.new(title)
+    var i = 0
+    while i < content_xml.len():
+        val h = _find_from(content_xml, "<text:h", i)
+        val p = _find_from(content_xml, "<text:p", i)
+        if h < 0 and p < 0:
+            break
+        val is_heading = h >= 0 and (p < 0 or h < p)
+        val start = if is_heading: h else: p
+        val close = if is_heading: "</text:h>" else: "</text:p>"
+        val tag_end = _find_from(content_xml, ">", start)
+        val end_pos = _find_from(content_xml, close, start)
+        if tag_end < 0 or end_pos < 0:
+            break
+        val attrs = content_xml.slice(start, tag_end)
+        val inner = content_xml.slice(tag_end + 1, end_pos)
+        val content = _xml_unescape(_strip_tags(inner))
+        # A text:p inside a list item becomes a bullet
+        val before = content_xml.slice(_max0(start - 40), start)
+        if is_heading:
+            doc.blocks.push(_plain_block(_odf_heading_kind(attrs), content))
+        elif before.contains("<text:list-item>"):
+            doc.blocks.push(_plain_block(BlockKind.BulletItem, content))
+        elif content.trim() != "":
+            doc.blocks.push(_plain_block(BlockKind.Paragraph, content))
+        i = end_pos + close.len()
+    doc
+
+fn _max0(v: i32) -> i32:
+    if v < 0:
+        return 0
+    v
+
+fn odt_bytes_to_document(zip_bytes: [u8], title: text) -> RichDocument:
+    """Import a real .odt file (zip container) into a RichDocument."""
+    odt_content_to_document(zip_extract_text(zip_bytes, "content.xml"), title)
+
+# =========================================================================
+# DOCX import
+# =========================================================================
+
+fn _docx_para_kind(para_xml: text) -> BlockKind:
+    if para_xml.contains("w:val=\"Heading1\""):
+        return BlockKind.Heading1
+    if para_xml.contains("w:val=\"Heading2\""):
+        return BlockKind.Heading2
+    if para_xml.contains("w:val=\"Heading3\""):
+        return BlockKind.Heading3
+    if para_xml.contains("w:val=\"ListParagraph\""):
+        return BlockKind.BulletItem
+    BlockKind.Paragraph
+
+fn _docx_para_text(para_xml: text) -> text:
+    """Concatenate every <w:t> run's text within one paragraph."""
+    var out = ""
+    var i = 0
+    while i < para_xml.len():
+        val t = _find_from(para_xml, "<w:t", i)
+        if t < 0:
+            break
+        val tag_end = _find_from(para_xml, ">", t)
+        val end_pos = _find_from(para_xml, "</w:t>", t)
+        if tag_end < 0 or end_pos < 0:
+            break
+        out = "{out}{_xml_unescape(para_xml.slice(tag_end + 1, end_pos))}"
+        i = end_pos + 6
+    out
+
+fn docx_document_xml_to_document(document_xml: text, title: text) -> RichDocument:
+    """Parse OOXML word/document.xml into a RichDocument."""
+    var doc = RichDocument.new(title)
+    var i = 0
+    while i < document_xml.len():
+        val p = _find_from(document_xml, "<w:p ", i)
+        val p2 = _find_from(document_xml, "<w:p>", i)
+        val start = if p >= 0 and (p2 < 0 or p < p2): p else: p2
+        if start < 0:
+            break
+        val end_pos = _find_from(document_xml, "</w:p>", start)
+        if end_pos < 0:
+            break
+        val para = document_xml.slice(start, end_pos)
+        val content = _docx_para_text(para)
+        if content.trim() != "":
+            doc.blocks.push(_plain_block(_docx_para_kind(para), content))
+        i = end_pos + 6
+    doc
+
+fn docx_bytes_to_document(zip_bytes: [u8], title: text) -> RichDocument:
+    """Import a real .docx file (zip container) into a RichDocument."""
+    docx_document_xml_to_document(zip_extract_text(zip_bytes, "word/document.xml"), title)
+
+# =========================================================================
+# Real .odt writer (zip container)
+# =========================================================================
+
+val _ODT_MANIFEST = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><manifest:manifest xmlns:manifest=\"urn:oasis:names:tc:opendocument:xmlns:manifest:1.0\" manifest:version=\"1.2\"><manifest:file-entry manifest:full-path=\"/\" manifest:media-type=\"application/vnd.oasis.opendocument.text\"/><manifest:file-entry manifest:full-path=\"content.xml\" manifest:media-type=\"text/xml\"/></manifest:manifest>"
+
+fn document_to_odt_bytes(doc: RichDocument) -> [u8]:
+    """Build a genuine zipped .odt: mimetype (stored first, per spec),
+    META-INF/manifest.xml, and content.xml reusing the flat-ODF body."""
+    val flat = document_to_fodt(doc)
+    # Reuse the flat document's office:body by re-rooting it as content.xml
+    val content = flat.replace("office:mimetype=\"application/vnd.oasis.opendocument.text\"", "")
+    var files: [ZipFile] = []
+    files.push(zip_text_file("mimetype", "application/vnd.oasis.opendocument.text"))
+    files.push(zip_text_file("META-INF/manifest.xml", _ODT_MANIFEST))
+    files.push(zip_text_file("content.xml", content))
+    zip_write_stored(files)
