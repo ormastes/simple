@@ -892,8 +892,7 @@ theorem arena_clone_range_preserves_all
                   have he2sh : e2.shared = true := by
                     cases hc : e2.shared
                     · exfalso; apply hnoconflict
-                      simp only [List.any_eq_true, Bool.and_eq_true, beq_iff_eq, decide_eq_true_eq,
-                                  Bool.not_eq_true]
+                      simp only [List.any_eq_true, Bool.and_eq_true, beq_iff_eq, decide_eq_true_eq]
                       exact ⟨e2, hm2, ⟨hp.symm, ho.symm⟩, by simp [hc]⟩
                     · rfl
                   exact Or.inr (Or.inr ⟨rfl, he2sh⟩)
@@ -906,8 +905,7 @@ theorem arena_clone_range_preserves_all
                 · have he1sh : e1.shared = true := by
                     cases hc : e1.shared
                     · exfalso; apply hnoconflict
-                      simp only [List.any_eq_true, Bool.and_eq_true, beq_iff_eq, decide_eq_true_eq,
-                                  Bool.not_eq_true]
+                      simp only [List.any_eq_true, Bool.and_eq_true, beq_iff_eq, decide_eq_true_eq]
                       exact ⟨e1, hm1, ⟨hp, ho⟩, by simp [hc]⟩
                     · rfl
                   exact Or.inr (Or.inr ⟨he1sh, rfl⟩)
@@ -1291,6 +1289,17 @@ theorem mount_preserves_all
     exact {
       i1 := h.i1, i2 := h.i2, i3 := h.i3, i4 := h.i4, i5 := h.i5,
       i6 := h.i6, i7 := h.i7, i8 := h.i8, i9 := h.i9, i10 := h.i10 }
+
+theorem mount_success_increments_epoch
+    (s : FsState) (s' : FsState)
+    (hok : mount s = Except.ok s') :
+    s'.mountEpoch = s.mountEpoch + 1 := by
+  unfold mount at hok
+  split at hok
+  · exact absurd hok (by simp)
+  · injection hok with hst
+    subst hst
+    rfl
 
 theorem unmount_preserves_all
     (s : FsState) (s' : FsState)

@@ -59,6 +59,9 @@
 - db_storage_wal_formal: pass
 - db_storage_wal_formal_scope: transaction commit requires WAL flush, WAL append precedes commit on the D4 chain, pager writes are blocked when page LSN is ahead of flushed WAL LSN, and pager writes are allowed once WAL is flushed far enough
 - db_storage_wal_formal_evidence: src/verification/db_storage/DbStorage/Theorems.lean T4_wal_before_data + T4_wal_appended_before_commit + T4_pager_wal_gate + T4_pager_wal_gate_blocked + T4_pager_wal_gate_allows_flushed; `cd src/verification/db_storage && lake build`
+- nvfs_mount_formal: pass
+- nvfs_mount_formal_scope: successful mount preserves all NVFS invariants and increments mountEpoch exactly once; unmount preserves all invariants
+- nvfs_mount_formal_evidence: src/verification/formal/nvfs/Nvfs/Theorems.lean mount_preserves_all + mount_success_increments_epoch + unmount_preserves_all; `cd src/verification/formal/nvfs && lake build`
 - kernel_capability_depth_formal: pass
 - kernel_capability_depth_formal_scope: capability delegation with exhausted depth is denied
 - kernel_capability_depth_formal_evidence: src/verification/kernel_capabilities/KernelCapabilities/Theorems.lean zero_depth_grant_denied; `cd src/verification/kernel_capabilities && lake build`
