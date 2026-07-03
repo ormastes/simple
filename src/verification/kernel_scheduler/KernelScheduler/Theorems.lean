@@ -635,4 +635,13 @@ theorem resource_acquire_release_roundtrip (p : ResourcePool)
   unfold ResourcePool.acquire ResourcePool.release
   simp [h]
 
+/-- T10h: denied acquire is observationally neutral for cleanup: releasing
+    after a full acquire attempt is exactly the same as releasing the original
+    pool. -/
+theorem resource_denied_acquire_then_release_eq_release (p : ResourcePool)
+    (h : p.capacity ≤ p.inUse) :
+    (p.acquire).pool.release = p.release := by
+  have hn : ¬ p.inUse < p.capacity := by omega
+  simp [ResourcePool.acquire, hn]
+
 end KernelScheduler
