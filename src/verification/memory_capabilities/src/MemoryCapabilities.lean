@@ -367,6 +367,18 @@ theorem singleton_env_wellformed (baseType : String) (loc : Nat) (cap : RefCapab
           RefCapability.Isolated = 1 by rfl]
         exact Nat.le_refl 1
 
+theorem empty_create_ref_wellformed (baseType : String) (loc : Nat) (cap : RefCapability) :
+  canCreateRef { activeRefs := [] } loc cap = true ∧
+  wellFormed
+    { activeRefs :=
+        [(loc,
+          [{ location := loc,
+             refType := { baseType := baseType, capability := cap } }])] } := by
+  constructor
+  · cases cap <;> simp [canCreateRef, getActiveRefs]
+    exact ⟨rfl, rfl⟩
+  · exact singleton_env_wellformed baseType loc cap
+
 theorem two_shared_env_wellformed (baseType : String) (loc : Nat) :
   wellFormed
     { activeRefs :=
