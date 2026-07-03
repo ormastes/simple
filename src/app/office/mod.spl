@@ -20,7 +20,37 @@ use app.office.file_formats.{parse_markdown_document, document_to_markdown, pars
 use app.office.slides.deck_format.{parse_deck, deck_to_text}
 use app.office.odf_export.{document_to_fodt, sheet_to_fods}
 use app.office.odf_ooxml.{odt_bytes_to_document, docx_bytes_to_document, document_to_odt_bytes, ods_bytes_to_sheet, xlsx_bytes_to_sheet, sheet_to_ods_bytes, sheet_to_xlsx_bytes}
-use app.office.interactive.{run_sheet_editor_mode, run_sheet_tui}
+use app.office.interactive.{run_sheet_editor_mode, tui_new_state, tui_apply_key, tui_frame, editor_load_sheet, editor_save_sheet}
+
+extern fn rt_stdin_read_line() -> text
+
+fn _run_sheet_tui(in_path: text) -> i32:
+    """Keystroke-driven full-screen editing: arrow keys (ESC[C etc.) move,
+    typing edits the active cell, Enter commits with live recalculation,
+    s saves, q quits. Each stdin line is fed byte-by-byte through the pure
+    key state machine, then an Enter byte — so piped byte streams and cooked
+    terminals both drive the same editor. (rt_stdin_read_byte is not in the
+    module extern registry — recorded ceiling for true raw-mode keys.)"""
+    var state = tui_new_state(editor_load_sheet(in_path))
+    print tui_frame(state, in_path)
+    while not state.quit:
+        val line = rt_stdin_read_line()
+        if line == nil:
+            state = tui_apply_key(state, -1)
+        else:
+            var i = 0
+            while i < line.len() and not state.quit:
+                val ch = line.char_at(i)
+                state = tui_apply_key(state, ch.char_code_at(0))
+                if state.dirty:
+                    editor_save_sheet(state.sheet, in_path)
+                i = i + 1
+            if not state.quit:
+                state = tui_apply_key(state, 10)
+        if not state.quit and state.pending_esc == 0:
+            print tui_frame(state, in_path)
+    print "bye"
+    0
 use std.nogc_sync_mut.sffi.io.{file_read_bytes, file_write_bytes}
 use app.ui.render.types.{RenderConfig}
 use std.io_runtime.{write_file, read_file, file_exists}
@@ -96,7 +126,7 @@ fn run_office(args: [text]) -> i32:
                 print "Usage: simple office edit-sheet <file.csv|.ods|.xlsx> [--screen]"
                 return 1
             if args.len() > 2 and args[2] == "--tui":
-                return run_sheet_tui(args[1])
+                return _run_sheet_tui(args[1])
             val screen_mode = args.len() > 2 and args[2] == "--screen"
             return run_sheet_editor_mode(args[1], screen_mode)
         "open" =>
