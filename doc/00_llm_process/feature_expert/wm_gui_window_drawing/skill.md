@@ -91,6 +91,30 @@ parsed as size), not a general WM feature area.
   fast lane took 243278ms (~4min) under the interpreted seed driver; render
   time >120s is REPORTED (`render_slow`), not failed — a drawing gate should
   not hard-fail on a documented perf finding.
+- **GATE GREEN 2026-07-04** (all 3 scenes, gui/debug seed driver, uncontended):
+  wm_scene_css 32s glyph=7, wm_scene_windows 286s glyph=13, host_compositor
+  22s glyph=14 — `wm_gui_window_drawing_status=pass`. What it took, in order:
+  font-shorthand fix, CONST_NAMES interpreter fix, 28x CSS-parse fix, rgba
+  alpha compositing (software + Metal MSL blend_src_over, parity-pinned),
+  stroke-narrow glyph discriminator, inline compositor span writes (below),
+  and the driver reading `comp.backend.pixels` (a local pre-compositor
+  binding does NOT see mutations made through comp.backend — it captured an
+  all-zero buffer).
+- **put_pixel me->me clone workaround (2026-07-04)**: HeadlessHostCompositor-
+  Backend.fill_rect/blit_pixels write self.pixels inline with once-up-front
+  clamping — a per-pixel `me`->`me` put_pixel call deep-clones the whole
+  framebuffer per write under the interpreter (fill_rect 300x200: >120s ->
+  333ms; host lane scene: >1800s timeout -> 22s). Single-shot me->me calls
+  (draw_text -> fill_rect once) are fine. Interpreter root cause still open:
+  doc/08_tracking/bug/interp_compositor_backend_put_pixel_clones_framebuffer_2026-07-03.md.
+- **Spec fakes must implement the FULL CompositorBackend trait** (incl.
+  blit_pixels) — conformance is lazily checked, so a missing method only
+  aborts when the class is first instantiated. Direct-draw-path assertions
+  must pin `host_wm_force_direct_chrome(true)` around render_frame: on
+  Metal hosts chrome otherwise routes via the CSS fast lane (blit_pixels +
+  present only) and per-element counters never fire; content marker colors
+  (0xFF2050A0 title / 0xFF182230 body) must also be classified in
+  blit_pixels, not only fill_rect.
 - **Host lane is ~8x slower than the scene lane at the same resolution**
   (40+ min vs ~5min at 1024x768 with 3 windows): `HostCompositor.render_frame`
   does the full-frame chrome CSS render PLUS one complete CSS render per
