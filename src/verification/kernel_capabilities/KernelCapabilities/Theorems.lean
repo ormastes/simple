@@ -266,6 +266,25 @@ theorem revocation_complete_direct_child
       rootId).check pid kind = false := by
   simp [CapState.revokeTransitive, CapState.check, CapState.findRecord, isDescendant]
 
+/-- Direct child transitive revocation also denies the syscall authorization gate. -/
+theorem revocation_complete_direct_child_syscall
+    (rootId childId : Nat) (pid : Principal) (kind : CapKind) :
+    syscallAuthorize
+      (CapState.revokeTransitive
+        ({ records :=
+            [{ pid := pid
+             , caps :=
+                { isFullSet := false
+                , tokens :=
+                    [{ kind := kind, rights := [], generation := 0, owner := pid,
+                       tokenId := childId, parentTokenId := rootId, depth := 0 }] } }]
+         , nextGeneration := 1
+         , nextTokenId := 1 } : CapState)
+        rootId)
+      pid kind = false := by
+  simp [syscallAuthorize, CapState.revokeTransitive, CapState.check,
+    CapState.findRecord, isDescendant]
+
 -- ============================================================
 -- § T3_direct  revocation_complete_direct (owner-only form)
 -- ============================================================
