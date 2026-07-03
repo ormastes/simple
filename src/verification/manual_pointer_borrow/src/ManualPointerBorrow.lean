@@ -103,6 +103,10 @@ theorem release_exclusive_clears (s : BorrowState) :
     (releaseExclusive s).exclusive = false := by
   simp [releaseExclusive]
 
+theorem release_shared_preserves_exclusive (s : BorrowState) :
+    (releaseShared s).exclusive = s.exclusive := by
+  simp [releaseShared]
+
 theorem release_shared_decreases_when_present (s : BorrowState)
     (hshared : s.shared ≠ 0) :
     (releaseShared s).shared < s.shared := by
