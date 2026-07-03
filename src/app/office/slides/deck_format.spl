@@ -3,8 +3,17 @@
 # Text format for presentation decks targeting the Slides surface.
 # Format: slides separated by `---`, each slide has a title line
 # followed by body lines. Blank lines are skipped.
+#
+# Two optional directive lines may appear anywhere within a slide section:
+#   @notes: <speaker notes text>
+#   @transition: fade|wipe|push
+# Directive lines are not treated as title/body content. An empty transition
+# (the directive line absent) means "no transition".
 
 use app.office.slides.slide.{Slide, blank_slide, add_text_box, SlideElementKind}
+
+val _NOTES_PREFIX = "@notes:"
+val _TRANSITION_PREFIX = "@transition:"
 
 # =========================================================================
 # Parsing
@@ -27,7 +36,10 @@ fn parse_deck(content: text) -> [Slide]:
     var slide_num = 1
 
     for section in slide_sections:
-        val slide_lines = _extract_slide_lines(section)
+        val all_lines = _extract_slide_lines(section)
+        val notes = _extract_directive(all_lines, _NOTES_PREFIX)
+        val transition = _extract_directive(all_lines, _TRANSITION_PREFIX)
+        val slide_lines = _strip_directives(all_lines)
         if slide_lines.len() > 0:
             val slide_id = "slide{slide_num}"
             var s = blank_slide(slide_id)
@@ -45,6 +57,15 @@ fn parse_deck(content: text) -> [Slide]:
                 body_idx = body_idx + 1
                 line_idx = line_idx + 1
 
+            s = Slide(
+                id: s.id,
+                layout: s.layout,
+                elements: s.elements,
+                notes: notes,
+                background: s.background,
+                transition: transition
+            )
+
             slides.push(s)
             slide_num = slide_num + 1
 
@@ -59,6 +80,23 @@ fn _extract_slide_lines(section: text) -> [text]:
         if trimmed != "":
             lines.push(trimmed)
     lines
+
+fn _extract_directive(lines: [text], prefix: text) -> text:
+    """Return the value of the first line starting with `prefix`, trimmed.
+    Returns "" if no such directive line is present."""
+    for line in lines:
+        if line.starts_with(prefix):
+            return line.slice(prefix.len(), line.len()).trim()
+    ""
+
+fn _strip_directives(lines: [text]) -> [text]:
+    """Remove `@notes:` / `@transition:` directive lines, leaving title/body
+    content lines only."""
+    var out: [text] = []
+    for line in lines:
+        if not (line.starts_with(_NOTES_PREFIX) or line.starts_with(_TRANSITION_PREFIX)):
+            out.push(line)
+    out
 
 # =========================================================================
 # Serialization
@@ -115,5 +153,11 @@ fn _slide_to_lines(slide: Slide) -> [text]:
     # Add bodies in order
     for body in body_texts:
         lines.push(body)
+
+    # Directive lines (notes / transition) come last
+    if slide.notes != "":
+        lines.push("{_NOTES_PREFIX} {slide.notes}")
+    if slide.transition != "":
+        lines.push("{_TRANSITION_PREFIX} {slide.transition}")
 
     lines
