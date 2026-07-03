@@ -699,6 +699,21 @@ theorem drf_two_ops_synchronized_reverse
     rcases hb with ⟨rfl, rfl⟩
     exact False.elim (hneq rfl)
 
+/-- A two-operation execution with a synchronizes-with edge in either selected
+    direction cannot form a data race. -/
+theorem drf_two_ops_synchronized_either_direction
+    (id1 id2 : OperationId) (op1 op2 : MemoryOperation)
+    (hneq_ids : id1 ≠ id2) (forward : Bool) :
+    dataRaceFree
+      { ops := [(id1, op1), (id2, op2)]
+      , programOrder := fun _ _ => False
+      , synchronizesWith :=
+          fun a b =>
+            if forward then a = id1 ∧ b = id2 else a = id2 ∧ b = id1 } := by
+  cases forward
+  · exact drf_two_ops_synchronized_reverse id1 id2 op1 op2 hneq_ids
+  · exact drf_two_ops_synchronized id1 id2 op1 op2 hneq_ids
+
 /-- Concrete single-thread handoff shape: two distinct operations ordered by
     program order cannot form a data race. -/
 theorem drf_two_ops_program_ordered
