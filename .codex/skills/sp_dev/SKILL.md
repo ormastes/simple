@@ -394,7 +394,9 @@ check after regeneration. Treat BYL as generated proof-model interchange, not
 as a Lean replacement: claims are proved only by the lane's checked Lean command
 or by the target hardware proof command. If a generator renames or removes an
 export consumed by a manual theorem, update the generator manifest/contract and
-the manual proof in the same lane before handoff.
+the manual proof in the same lane before handoff. Added proof intent belongs in
+manual theorem/constraint files; generated Lean or BYL files should only gain it
+when the generator contract is updated in the same lane.
 
 For MCP/runtime-forwarding or startup-latency work, refresh both the lane state
 file and `doc/07_guide/app/mcp/startup_performance.md` before handoff. Keep the

@@ -86,6 +86,9 @@
 - visibility_export_formal: pass
 - visibility_export_formal_scope: visibility meet is commutative and associative, private visibility absorbs from either side, all-public ancestor paths remain public, any private ancestor makes the path private, and a private symbol remains private even under a public ancestor path
 - visibility_export_formal_evidence: src/verification/visibility_export/src/VisibilityExport.lean meet_comm + meet_assoc + meet_private_left + meet_private_right + meet_public_left + meet_public_right + foldl_priv_absorbs + any_private_means_private + all_public_means_public + private_symbol_under_public_path_private; `cd src/verification/visibility_export && lake build`
+- module_resolution_formal: pass
+- module_resolution_formal_scope: module resolution is deterministic, well-formed roots cannot resolve as both file and directory, unique resolutions imply the resolved path exists, not-found means neither candidate exists, and simultaneous file/directory candidates resolve to the exact ambiguous result
+- module_resolution_formal_evidence: src/verification/module_resolution/src/ModuleResolution.lean resolve_deterministic + wellformed_not_ambiguous + unique_implies_exists + notfound_means_neither + both_paths_existing_resolves_ambiguous; `cd src/verification/module_resolution && lake build`
 - kernel_capability_depth_formal: pass
 - kernel_capability_depth_formal_scope: capability delegation with exhausted depth is denied
 - kernel_capability_depth_formal_evidence: src/verification/kernel_capabilities/KernelCapabilities/Theorems.lean zero_depth_grant_denied; `cd src/verification/kernel_capabilities && lake build`
