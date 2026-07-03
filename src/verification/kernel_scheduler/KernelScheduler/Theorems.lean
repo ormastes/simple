@@ -374,6 +374,12 @@ theorem runOne_nonempty_decreases_length (t : GreenTask) (rest : List GreenTask)
     (SchedState.runOne { ready := t :: rest }).ready.length < (t :: rest).length := by
   simp [SchedState.runOne, SchedState.popHead]
 
+/-- T7h: a task enqueued into an empty ready queue is consumed by the next
+    scheduler tick. -/
+theorem enqueue_empty_then_runOne_empty (t : GreenTask) :
+    SchedState.runOne (({ ready := [] } : SchedState).enqueue t) = { ready := [] } := by
+  simp [SchedState.enqueue, SchedState.runOne, SchedState.popHead]
+
 -- ============================================================
 -- § H  T8 — cpuAllowed semantics
 -- ============================================================
