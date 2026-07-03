@@ -1991,6 +1991,300 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
             return CellValue.ErrorVal(message: "Unknown function: {name}")
 
 # =========================================================================
+# Dynamic Array Formulas (spill)
+# =========================================================================
+#
+# SEQUENCE / TRANSPOSE / UNIQUE / SORT / FILTER evaluate to a 2D grid of
+# display strings. `evaluate_formula_array` returns that grid (rows of
+# columns); an empty result means the formula is NOT a dynamic-array formula
+# and callers should fall back to the scalar `evaluate_formula` path. The
+# recalc driver (file_formats.recalculate_formula_cells) writes the top-left
+# value into the formula's own cell and spills the rest into the adjacent
+# rectangle.
+
+struct ArrNumArg:
+    value: f64
+    next_pos: i32
+    present: bool
+
+fn evaluate_formula_array(expr: text, sheet: Sheet) -> [[text]]:
+    """Evaluate a dynamic-array formula to a 2D grid of display strings.
+
+    Returns rows of column strings for SEQUENCE/TRANSPOSE/UNIQUE/SORT/FILTER.
+    An empty outer list (len()==0) means the formula is not an array formula;
+    the caller should use the scalar `evaluate_formula` path instead."""
+    var formula = expr.trim()
+    if formula.starts_with("="):
+        formula = formula.substring(1)
+    val tokens = tokenize_formula(formula)
+    if tokens.len() < 2:
+        return []
+    val name = tokens.get(0).upper()
+    if tokens.get(1) != "(":
+        return []
+    if name == "SEQUENCE":
+        return _array_sequence(tokens, 2, sheet)
+    if name == "TRANSPOSE":
+        return _array_transpose(tokens, 2, sheet)
+    if name == "UNIQUE":
+        return _array_unique(tokens, 2, sheet)
+    if name == "SORT":
+        return _array_sort(tokens, 2, sheet)
+    if name == "FILTER":
+        return _array_filter(tokens, 2, sheet)
+    []
+
+fn _read_array_range_str(tokens: [text], pos: i32) -> text:
+    """A range argument REF ':' REF starting at pos, or '' if not a range.
+    Always spans exactly 3 tokens when present."""
+    if (pos + 2 < tokens.len() and tokens.get(pos + 1) == ":" and
+        _is_cell_ref_token(tokens.get(pos)) and _is_cell_ref_token(tokens.get(pos + 2))):
+        return "{tokens.get(pos)}:{tokens.get(pos + 2)}"
+    ""
+
+fn _read_array_num_arg(tokens: [text], pos: i32, sheet: Sheet) -> ArrNumArg:
+    """Read a numeric argument, or mark it absent at ')' / ',' / end."""
+    if pos >= tokens.len() or tokens.get(pos) == ")" or tokens.get(pos) == ",":
+        return ArrNumArg(value: 0.0, next_pos: pos, present: false)
+    val r = _eval_comparison(tokens, pos, sheet, 0)
+    ArrNumArg(value: _to_number(r.value), next_pos: r.next_pos, present: true)
+
+fn _array_range_grid(range: CellRange, sheet: Sheet) -> [[text]]:
+    """Read a range into a row-major grid of display strings."""
+    var rows: [[text]] = []
+    val min_col = if range.start.col < range.end_ref.col: range.start.col else: range.end_ref.col
+    val max_col = if range.start.col > range.end_ref.col: range.start.col else: range.end_ref.col
+    val min_row = if range.start.row < range.end_ref.row: range.start.row else: range.end_ref.row
+    val max_row = if range.start.row > range.end_ref.row: range.start.row else: range.end_ref.row
+    var r = min_row
+    while r <= max_row:
+        var row: [text] = []
+        var c = min_col
+        while c <= max_col:
+            val ref_str = cell_ref_to_string(CellRef(col: c, row: r))
+            row.push(cell_display_text(sheet.get_cell(ref_str)))
+            c = c + 1
+        rows.push(row)
+        r = r + 1
+    rows
+
+fn _array_sequence(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
+    """SEQUENCE(rows, [cols=1], [start=1], [step=1]) -> a rows x cols grid
+    filled row-major with start + n*step."""
+    val a0 = _read_array_num_arg(tokens, pos, sheet)
+    if not a0.present:
+        return []
+    var cur = _skip_comma(tokens, a0.next_pos)
+    val a1 = _read_array_num_arg(tokens, cur, sheet)
+    if a1.present:
+        cur = _skip_comma(tokens, a1.next_pos)
+    val a2 = _read_array_num_arg(tokens, cur, sheet)
+    if a2.present:
+        cur = _skip_comma(tokens, a2.next_pos)
+    val a3 = _read_array_num_arg(tokens, cur, sheet)
+    val rows = a0.value.to_i64().to_i32()
+    val cols = if a1.present: a1.value.to_i64().to_i32() else: 1
+    val start = if a2.present: a2.value else: 1.0
+    val step = if a3.present: a3.value else: 1.0
+    if rows < 1 or cols < 1:
+        return []
+    var agrid: [[text]] = []
+    var i = 0
+    while i < rows:
+        var row: [text] = []
+        var j = 0
+        while j < cols:
+            val n = (i * cols + j).to_f64()
+            row.push(_fmt_num_trim(start + n * step))
+            j = j + 1
+        agrid.push(row)
+        i = i + 1
+    agrid
+
+fn _array_transpose(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
+    """TRANSPOSE(range) -> rows and columns swapped."""
+    val rs = _read_array_range_str(tokens, pos)
+    if rs == "":
+        return []
+    val rng = parse_range(rs)
+    if rng == nil:
+        return []
+    val src = _array_range_grid(rng, sheet)
+    if src.len() == 0:
+        return []
+    val nrows = src.len()
+    val ncols = src[0].len()
+    var out: [[text]] = []
+    var j = 0
+    while j < ncols:
+        var row: [text] = []
+        var i = 0
+        while i < nrows:
+            row.push(src[i][j])
+            i = i + 1
+        out.push(row)
+        j = j + 1
+    out
+
+fn _array_row_key(row: [text]) -> text:
+    """Join a row into a single comparison key (tab-separated)."""
+    row.join("\t")
+
+fn _array_contains(seen: [text], key: text) -> bool:
+    for s in seen:
+        if s == key:
+            return true
+    false
+
+fn _array_unique(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
+    """UNIQUE(range) -> distinct rows in first-seen order (single-column ranges
+    reduce to the distinct list of values)."""
+    val rs = _read_array_range_str(tokens, pos)
+    if rs == "":
+        return []
+    val rng = parse_range(rs)
+    if rng == nil:
+        return []
+    val src = _array_range_grid(rng, sheet)
+    var out: [[text]] = []
+    var seen: [text] = []
+    for row in src:
+        val key = _array_row_key(row)
+        if not _array_contains(seen, key):
+            seen.push(key)
+            out.push(row)
+    out
+
+fn _arr_is_number(s: text) -> bool:
+    """Whether a display string is a plain (optionally signed/decimal) number."""
+    if s.len() == 0:
+        return false
+    var i = 0
+    if s.char_at(0) == "-":
+        if s.len() == 1:
+            return false
+        i = 1
+    var has_digit = false
+    var has_dot = false
+    while i < s.len():
+        val c = s.char_at(i)
+        if c == ".":
+            if has_dot:
+                return false
+            has_dot = true
+        elif _is_digit(c):
+            has_digit = true
+        else:
+            return false
+        i = i + 1
+    has_digit
+
+fn _arr_text_lt(a: text, b: text) -> bool:
+    """Lexicographic less-than by char code."""
+    var i = 0
+    while i < a.len() and i < b.len():
+        val ca = a.char_code_at(i)
+        val cb = b.char_code_at(i)
+        if ca < cb:
+            return true
+        if ca > cb:
+            return false
+        i = i + 1
+    a.len() < b.len()
+
+fn _array_sort_less(a: [text], b: [text], kc: i32, ascending: bool) -> bool:
+    """Whether row a sorts before row b on key column kc. Numeric compare when
+    both keys are numeric, else lexicographic."""
+    val av = if kc >= 0 and kc < a.len(): a[kc] else: ""
+    val bv = if kc >= 0 and kc < b.len(): b[kc] else: ""
+    val both_num = _arr_is_number(av) and _arr_is_number(bv)
+    if ascending:
+        if both_num:
+            return av.to_f64() < bv.to_f64()
+        return _arr_text_lt(av, bv)
+    if both_num:
+        return bv.to_f64() < av.to_f64()
+    _arr_text_lt(bv, av)
+
+fn _array_sort(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
+    """SORT(range, [key_col=1], [ascending=TRUE]) -> rows ordered by key_col
+    (1-based within the range). Stable insertion sort preserves ties."""
+    val rs = _read_array_range_str(tokens, pos)
+    if rs == "":
+        return []
+    val rng = parse_range(rs)
+    if rng == nil:
+        return []
+    val src = _array_range_grid(rng, sheet)
+    var cur = _skip_comma(tokens, pos + 3)
+    val ka = _read_array_num_arg(tokens, cur, sheet)
+    val key_col = if ka.present: ka.value.to_i64().to_i32() else: 1
+    if ka.present:
+        cur = _skip_comma(tokens, ka.next_pos)
+    val asc_a = _read_array_num_arg(tokens, cur, sheet)
+    val ascending = if asc_a.present: asc_a.value != 0.0 else: true
+    val kc = key_col - 1
+    var out: [[text]] = []
+    for row in src:
+        var inserted = false
+        var result: [[text]] = []
+        for existing in out:
+            if not inserted and _array_sort_less(row, existing, kc, ascending):
+                result.push(row)
+                inserted = true
+            result.push(existing)
+        if not inserted:
+            result.push(row)
+        out = result
+    out
+
+fn _array_filter(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
+    """FILTER(range, col_index, "criteria") -> rows whose cell in col_index
+    (1-based within the range) matches the criteria.
+
+    This is a pragmatic adaptation of Excel's boolean-array FILTER: instead of a
+    parallel include-array, it reuses the COUNTIF-style criteria matcher
+    (`_criteria_matches`) against one column of the source range. Returns a 1x1
+    #CALC! grid when nothing matches, mirroring Excel's empty-filter error."""
+    val rs = _read_array_range_str(tokens, pos)
+    if rs == "":
+        return []
+    val rng = parse_range(rs)
+    if rng == nil:
+        return []
+    var cur = _skip_comma(tokens, pos + 3)
+    val col_a = _read_array_num_arg(tokens, cur, sheet)
+    if not col_a.present:
+        return []
+    val col_index = col_a.value.to_i64().to_i32()
+    cur = _skip_comma(tokens, col_a.next_pos)
+    if cur >= tokens.len():
+        return []
+    var criteria = tokens.get(cur)
+    if criteria.starts_with("\""):
+        criteria = criteria.slice(1, criteria.len() - 1)
+    val key_col = rng.start.col + col_index - 1
+    var out: [[text]] = []
+    var r = rng.start.row
+    while r <= rng.end_ref.row:
+        val key_ref = cell_ref_to_string(CellRef(col: key_col, row: r))
+        val key_cell = sheet.get_cell(key_ref)
+        val key_disp = cell_display_text(key_cell)
+        val key_num = _to_number(key_cell.value)
+        if _criteria_matches(key_disp, key_num, criteria):
+            var row: [text] = []
+            var c = rng.start.col
+            while c <= rng.end_ref.col:
+                val ref_str = cell_ref_to_string(CellRef(col: c, row: r))
+                row.push(cell_display_text(sheet.get_cell(ref_str)))
+                c = c + 1
+            out.push(row)
+        r = r + 1
+    if out.len() == 0:
+        return [["#CALC!"]]
+    out
+
+# =========================================================================
 # Cell Resolution
 # =========================================================================
 

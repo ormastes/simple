@@ -75,9 +75,9 @@ sh scripts/check/check-html-css-full-rendering-goal-status.shs
 ## Acceptance
 
 - All 105 HTML tags are rendered in the 50-case fixture manifest.
-- All 277 implemented Simple Web CSS properties are rendered in fixture CSS.
-- The current full CSS inventory is tested as 394 properties, with 124 still
-  unrendered and 124 held in unsupported-inventory ownership.
+- All 284 implemented Simple Web CSS properties are rendered in fixture CSS.
+- The current full CSS inventory is tested as 394 properties, with 117 still
+  unrendered and 117 held in unsupported-inventory ownership.
 - Animation, transition, and transform CSS are reported separately; the current
   implemented subset renders those properties, so that sub-goal is `pass`.
 - Readiness keys explicitly distinguish all HTML elements, the implemented CSS
@@ -97,10 +97,10 @@ sh scripts/check/check-html-css-full-rendering-goal-status.shs
    - Expected: code equals `0`
 - Read the full rendering goal evidence
    - Expected: full_css_total equals `394`
-   - Expected: full_css_rendered equals `270`
-   - Expected: full_css_unrendered equals `124`
-   - Expected: unsupported_inventory equals `124`
-   - Expected: full_css_unrendered_properties.split(",").len() equals `124`
+   - Expected: full_css_rendered equals `277`
+   - Expected: full_css_unrendered equals `117`
+   - Expected: unsupported_inventory equals `117`
+   - Expected: full_css_unrendered_properties.split(",").len() equals `117`
    - Expected: full_css_unrendered_properties does not contain `aspect-ratio`
    - Expected: full_css_unrendered_words does not contain `,accent-color,`
    - Expected: full_css_unrendered_words does not contain `,background-blend-mode,`
@@ -108,9 +108,15 @@ sh scripts/check/check-html-css-full-rendering-goal-status.shs
    - Expected: full_css_unrendered_words does not contain `,grid-gap,`
    - Expected: full_css_unrendered_words does not contain `,grid-row-gap,`
    - Expected: full_css_unrendered_words does not contain `,grid,`
+   - Expected: full_css_unrendered_words does not contain `,grid-area,`
+   - Expected: full_css_unrendered_words does not contain `,grid-auto-flow,`
+   - Expected: full_css_unrendered_words does not contain `,grid-column,`
+   - Expected: full_css_unrendered_words does not contain `,grid-column-start,`
    - Expected: full_css_unrendered_words does not contain `,grid-template,`
    - Expected: full_css_unrendered_words does not contain `,grid-template-columns,`
    - Expected: full_css_unrendered_words does not contain `,grid-template-rows,`
+   - Expected: full_css_unrendered_words does not contain `,grid-row,`
+   - Expected: full_css_unrendered_words does not contain `,grid-row-start,`
    - Expected: full_css_unrendered_words does not contain `,backface-visibility,`
    - Expected: full_css_unrendered_words does not contain `,border-collapse,`
    - Expected: full_css_unrendered_words does not contain `,border-spacing,`
@@ -215,6 +221,7 @@ sh scripts/check/check-html-css-full-rendering-goal-status.shs
    - Expected: full_css_unrendered_words does not contain `,quotes,`
    - Expected: animation_css_unrendered_properties equals ``
    - Expected: full_css_unrendered_properties does not contain `accent-color`
+   - Expected: full_css_unrendered_words does not contain `,grid-template-areas,`
    - Expected: full_css_unrendered_words does not contain `,will-change,`
 - Verify the operator report names the full CSS gap
 
@@ -222,7 +229,7 @@ sh scripts/check/check-html-css-full-rendering-goal-status.shs
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 186 lines folded for reproduction.
+Runnable source: 191 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -250,14 +257,14 @@ expect(evidence).to_contain("html_css_full_rendering_goal_implemented_css_status
 expect(evidence).to_contain("html_css_full_rendering_goal_all_implemented_css_ready_status=pass")
 expect(evidence).to_contain("html_css_full_rendering_goal_all_implemented_css_ready_reason=pass")
 expect(evidence).to_contain("html_css_full_rendering_goal_implemented_css_scope=implemented-simple-web-css")
-expect(evidence).to_contain("html_css_full_rendering_goal_implemented_css_total_count=277")
-expect(evidence).to_contain("html_css_full_rendering_goal_implemented_css_rendered_count=277")
+expect(evidence).to_contain("html_css_full_rendering_goal_implemented_css_total_count=284")
+expect(evidence).to_contain("html_css_full_rendering_goal_implemented_css_rendered_count=284")
 expect(evidence).to_contain("html_css_full_rendering_goal_implemented_css_missing=")
 expect(evidence).to_contain("html_css_full_rendering_goal_full_css_status=incomplete")
 expect(evidence).to_contain("html_css_full_rendering_goal_all_css_properties_ready_status=incomplete")
 expect(evidence).to_contain("html_css_full_rendering_goal_all_css_properties_ready_reason=full-css-rendering-incomplete")
 expect(evidence).to_contain("html_css_full_rendering_goal_full_css_required_min_count=390")
-expect(evidence).to_contain("html_css_full_rendering_goal_full_css_rendered_count=270")
+expect(evidence).to_contain("html_css_full_rendering_goal_full_css_rendered_count=277")
 expect(evidence).to_contain("html_css_full_rendering_goal_full_css_unrendered_properties=")
 expect(evidence).to_contain("html_css_full_rendering_goal_animation_css_status=pass")
 expect(evidence).to_contain("html_css_full_rendering_goal_animation_css_scope=animation-transition-transform-css")
@@ -265,7 +272,6 @@ expect(evidence).to_contain("html_css_full_rendering_goal_animation_css_total_co
 expect(evidence).to_contain("html_css_full_rendering_goal_animation_css_rendered_count=0")
 expect(evidence).to_contain("html_css_full_rendering_goal_animation_css_unrendered_count=0")
 expect(evidence).to_contain("html_css_full_rendering_goal_animation_css_unrendered_properties=")
-expect(evidence).to_contain("grid-template-areas")
 expect(evidence).to_contain("html_css_full_rendering_goal_manifest_case_count=50")
 expect(evidence).to_contain("html_css_full_rendering_goal_manifest_required_case_count=50")
 
@@ -277,10 +283,10 @@ val full_css_unrendered_words = "," + full_css_unrendered_properties + ","
 val animation_css_unrendered_properties = _value_of(evidence, "html_css_full_rendering_goal_animation_css_unrendered_properties")
 val unsupported_inventory = _value_of(evidence, "html_css_full_rendering_goal_unsupported_css_inventory_count")
 expect(full_css_total).to_equal("394")
-expect(full_css_rendered).to_equal("270")
-expect(full_css_unrendered).to_equal("124")
-expect(unsupported_inventory).to_equal("124")
-expect(full_css_unrendered_properties.split(",").len()).to_equal(124)
+expect(full_css_rendered).to_equal("277")
+expect(full_css_unrendered).to_equal("117")
+expect(unsupported_inventory).to_equal("117")
+expect(full_css_unrendered_properties.split(",").len()).to_equal(117)
 expect(full_css_unrendered_properties.contains("aspect-ratio")).to_equal(false)
 expect(full_css_unrendered_words.contains(",accent-color,")).to_equal(false)
 expect(full_css_unrendered_words.contains(",background-blend-mode,")).to_equal(false)
@@ -288,9 +294,15 @@ expect(full_css_unrendered_words.contains(",grid-column-gap,")).to_equal(false)
 expect(full_css_unrendered_words.contains(",grid-gap,")).to_equal(false)
 expect(full_css_unrendered_words.contains(",grid-row-gap,")).to_equal(false)
 expect(full_css_unrendered_words.contains(",grid,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",grid-area,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",grid-auto-flow,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",grid-column,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",grid-column-start,")).to_equal(false)
 expect(full_css_unrendered_words.contains(",grid-template,")).to_equal(false)
 expect(full_css_unrendered_words.contains(",grid-template-columns,")).to_equal(false)
 expect(full_css_unrendered_words.contains(",grid-template-rows,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",grid-row,")).to_equal(false)
+expect(full_css_unrendered_words.contains(",grid-row-start,")).to_equal(false)
 expect(full_css_unrendered_words.contains(",backface-visibility,")).to_equal(false)
 expect(full_css_unrendered_words.contains(",border-collapse,")).to_equal(false)
 expect(full_css_unrendered_words.contains(",border-spacing,")).to_equal(false)
@@ -396,7 +408,7 @@ expect(full_css_unrendered_words.contains(",quotes,")).to_equal(false)
 expect(animation_css_unrendered_properties).to_equal("")
 expect(full_css_unrendered_properties.contains("accent-color")).to_equal(false)
 expect(full_css_unrendered_properties).to_contain("border-image-source")
-expect(full_css_unrendered_properties).to_contain("grid-template-areas")
+expect(full_css_unrendered_words.contains(",grid-template-areas,")).to_equal(false)
 expect(full_css_unrendered_properties).to_contain("scroll-padding-inline-start")
 expect(full_css_unrendered_properties).to_contain("view-transition-name")
 expect(full_css_unrendered_words.contains(",will-change,")).to_equal(false)
@@ -409,7 +421,7 @@ expect(report).to_contain("- all HTML elements ready: pass")
 expect(report).to_contain("- implemented CSS ready: pass")
 expect(report).to_contain("- full CSS inventory ready: incomplete")
 expect(report).to_contain("- HTML tags rendered: 105/105")
-expect(report).to_contain("- implemented CSS rendered: 277/277")
+expect(report).to_contain("- implemented CSS rendered: 284/284")
 expect(report).to_contain("- full CSS unrendered:")
 expect(report).to_contain("- animation CSS rendered: 0/0 (pass)")
 ```

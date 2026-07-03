@@ -12,8 +12,9 @@
 
 use common.rich_text.attributed_text.{RichDocument, DocBlock, BlockKind, TextSpan, InlineStyle, spans_to_plain_text}
 use app.office.sheets.spreadsheet.{Sheet}
-use app.office.sheets.cell.{Cell, CellValue, CellRef, cell_display_text, col_to_letter, cell_ref_to_string, parse_cell_ref}
-use app.office.sheets.formula.{evaluate_formula}
+use app.office.sheets.cell.{Cell, CellStyle, CellValue, CellRef, cell_display_text, col_to_letter, cell_ref_to_string, parse_cell_ref, default_style}
+use app.office.sheets.formula.{evaluate_formula, evaluate_formula_array}
+use common.office.number.{office_parse_signed_decimal_f64}
 
 # =========================================================================
 # Markdown <-> RichDocument (Writer)
@@ -186,44 +187,178 @@ fn parse_csv_sheet(content: text, name: text) -> Sheet:
         row = row + 1
     recalculate_formula_cells(sheet)
 
+struct SpillSpec:
+    origin: text          # origin cell key, e.g. "A1"
+    agrid: [[text]]        # row-major display strings
+    blocked: bool         # true -> origin shows #SPILL!, nothing spills
+
+fn _scalar_display(result: CellValue) -> text:
+    """Render a scalar formula result to its cached display string."""
+    match result:
+        CellValue.NumberVal(value):
+            val int_val = value.to_i64()
+            if value - int_val.to_f64() == 0.0:
+                return "{int_val}"
+            return "{value}"
+        CellValue.BoolVal(value):
+            return if value: "TRUE" else: "FALSE"
+        CellValue.TextVal(value):
+            return value
+        CellValue.ErrorVal(message):
+            return "#ERR: {message}"
+        _:
+            return ""
+
+fn _ff_is_digit(c: text) -> bool:
+    (c == "0" or c == "1" or c == "2" or c == "3" or c == "4" or
+     c == "5" or c == "6" or c == "7" or c == "8" or c == "9")
+
+fn _ff_text_is_number(s: text) -> bool:
+    """Whether a display string is a plain (optionally signed/decimal) number."""
+    if s.len() == 0:
+        return false
+    var i = 0
+    if s.char_at(0) == "-":
+        if s.len() == 1:
+            return false
+        i = 1
+    var has_digit = false
+    var has_dot = false
+    while i < s.len():
+        val c = s.char_at(i)
+        if c == ".":
+            if has_dot:
+                return false
+            has_dot = true
+        elif _ff_is_digit(c):
+            has_digit = true
+        else:
+            return false
+        i = i + 1
+    has_digit
+
+fn _spill_cell_value(display: text) -> CellValue:
+    """Wrap a spilled display string as a numeric cell when it parses as a
+    number, else as text, so downstream numeric formulas still see numbers."""
+    if _ff_text_is_number(display):
+        return CellValue.NumberVal(value: office_parse_signed_decimal_f64(display))
+    CellValue.TextVal(value: display)
+
+fn _spill_blocked(sheet: Sheet, origin_key: text, agrid: [[text]]) -> bool:
+    """A spill is blocked when any target cell (other than the origin) is
+    non-empty AND its current display differs from the value about to be
+    written there. Because a prior spill of the *same* origin writes exactly
+    those values, re-running recalc never blocks a spill against itself — this
+    is what makes recalculation idempotent without persistent provenance."""
+    val origin = parse_cell_ref(origin_key)
+    if origin == nil:
+        return false
+    val rows = agrid.len()
+    if rows == 0:
+        return false
+    val cols = agrid[0].len()
+    var i = 0
+    while i < rows:
+        var j = 0
+        while j < cols:
+            if not (i == 0 and j == 0):
+                val ref_str = cell_ref_to_string(CellRef(col: origin.col + j, row: origin.row + i))
+                val cur = cell_display_text(sheet.get_cell(ref_str))
+                if cur != "" and cur != agrid[i][j]:
+                    return true
+            j = j + 1
+        i = i + 1
+    false
+
+fn _write_spill(sheet: Sheet, origin_key: text, expr: text, agrid: [[text]], style: CellStyle) -> Sheet:
+    """Write the top-left value into the origin (kept as a formula, caching the
+    value) and spill the remaining values into the adjacent rectangle."""
+    var work = sheet
+    val origin = parse_cell_ref(origin_key)
+    if origin == nil:
+        return work
+    val rows = agrid.len()
+    val cols = agrid[0].len()
+    var i = 0
+    while i < rows:
+        var j = 0
+        while j < cols:
+            val disp = agrid[i][j]
+            if i == 0 and j == 0:
+                work.set_cell(origin_key, Cell(
+                    value: CellValue.FormulaVal(expr: expr, cached_display: disp),
+                    style: style
+                ))
+            else:
+                val ref_str = cell_ref_to_string(CellRef(col: origin.col + j, row: origin.row + i))
+                work.set_cell(ref_str, Cell(value: _spill_cell_value(disp), style: default_style()))
+            j = j + 1
+        i = i + 1
+    work
+
 fn recalculate_formula_cells(sheet: Sheet) -> Sheet:
     """Recalculate every formula cell, caching its display value, so `=A1+B1`
     shows its computed result instead of the raw formula text. Returns the
     recalculated sheet — callers must use the return value, because the
     interpreter can pass aggregates by copy, silently dropping mutations made
     through a parameter. Keys are snapshotted first because set_cell mutates
-    the Dict being iterated."""
+    the Dict being iterated.
+
+    Dynamic-array formulas (SEQUENCE/TRANSPOSE/UNIQUE/SORT/FILTER) evaluate to a
+    2D grid: the top-left value stays in the formula's own cell and the rest
+    spills into the adjacent rectangle. If any target cell is occupied by a
+    value that is not the one about to be written, the origin shows #SPILL! and
+    nothing spills. Blockage is decided against the sheet as it stands before
+    any spills are written in this pass, so overlapping spills and the
+    intended-value rule together keep a second recalculation identical to the
+    first (idempotent)."""
+    var work = sheet
     var keys: [text] = []
-    for key in sheet.cells.keys():
+    for key in work.cells.keys():
         keys.push(key)
+
+    # Phase 1: compute array grids and blockage against the pre-spill sheet.
+    var specs: [SpillSpec] = []
     for key in keys:
-        val cell = sheet.get_cell(key)
+        val cell = work.get_cell(key)
         match cell.value:
             CellValue.FormulaVal(expr, cached_display):
-                val result = evaluate_formula(expr, sheet)
-                var display = ""
-                match result:
-                    CellValue.NumberVal(value):
-                        val int_val = value.to_i64()
-                        if value - int_val.to_f64() == 0.0:
-                            display = "{int_val}"
-                        else:
-                            display = "{value}"
-                    CellValue.BoolVal(value):
-                        display = if value: "TRUE" else: "FALSE"
-                    CellValue.TextVal(value):
-                        display = value
-                    CellValue.ErrorVal(message):
-                        display = "#ERR: {message}"
-                    _:
-                        display = ""
-                sheet.set_cell(key, Cell(
-                    value: CellValue.FormulaVal(expr: expr, cached_display: display),
-                    style: cell.style
-                ))
+                val agrid = evaluate_formula_array(expr, work)
+                if agrid.len() > 0 and agrid[0].len() > 0:
+                    val is_blocked = _spill_blocked(work, key, agrid)
+                    specs.push(SpillSpec(origin: key, agrid: agrid, blocked: is_blocked))
+            _:
+                pass_do_nothing("non-formula cells are not array origins")
+
+    # Phase 2: write scalar results and array spills.
+    for key in keys:
+        val cell = work.get_cell(key)
+        match cell.value:
+            CellValue.FormulaVal(expr, cached_display):
+                var spec_idx = -1
+                var si = 0
+                while si < specs.len():
+                    if specs[si].origin == key:
+                        spec_idx = si
+                    si = si + 1
+                if spec_idx >= 0:
+                    val spec = specs[spec_idx]
+                    if spec.blocked:
+                        work.set_cell(key, Cell(
+                            value: CellValue.FormulaVal(expr: expr, cached_display: "#SPILL!"),
+                            style: cell.style
+                        ))
+                    else:
+                        work = _write_spill(work, key, expr, spec.agrid, cell.style)
+                else:
+                    val result = evaluate_formula(expr, work)
+                    work.set_cell(key, Cell(
+                        value: CellValue.FormulaVal(expr: expr, cached_display: _scalar_display(result)),
+                        style: cell.style
+                    ))
             _:
                 pass_do_nothing("non-formula cells keep their value")
-    sheet
+    work
 
 fn sheet_to_csv(sheet: Sheet) -> text:
     """Serialize a Sheet's used range back to CSV text."""

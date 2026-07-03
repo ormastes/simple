@@ -2,12 +2,16 @@
 
 - status: pass
 - reason: pass
-- passed: 11/11
+- passed: 13/13
 - executable_launch_from_fs: pass
 - ssh_shell_smf_and_exec: pass
 - shared_wm_logic: pass
 - cpu_simd_engine2d_diagram: pass
 - cpu_simd_report: doc/09_report/cpu_simd_engine2d_evidence_current_2026-07-02.md
+- llvm_port: pass
+- llvm_port_report: doc/09_report/simpleos_llvm_port_evidence_current_2026-07-02.md
+- gui_renderdoc_vulkan: pass
+- gui_renderdoc_report: doc/09_report/gui_renderdoc_feature_coverage_status_2026-07-03.md
 - web_renderer_engine2d_bitmap: pass
 - simple_gui_webrenderer_bitmap: pass
 - production_gui_web_renderer_parity: pass
