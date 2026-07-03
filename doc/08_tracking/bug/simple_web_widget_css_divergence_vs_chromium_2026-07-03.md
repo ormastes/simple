@@ -187,3 +187,53 @@ and rounded panel gradient are no longer overpainted by flat placeholders.
   inner width (`remaining_w = iw`), stacking the taskbar pills vertically.
   Fixed: placement shrinks %-width items from the same base as the
   measuring loop; taskbar pills now lay out 3-across like Chromium.
+
+## Addendum 4 (2026-07-03): per-region residual map + render-cost blocker
+
+Gate at this pass: window Simple/Chrome = **62.40%**, taskbar = **30.37%**
+(need >= 80%). Per-pixel disagreement was mapped (Chrome DOM text rects masked,
+mismatches histogrammed by row band + rounded color) directly on the saved
+`build/widget_shells_crossengine/*-argb.json`:
+
+- **Window (320x200), 12214/32486 non-text px disagree.** Bands: top body
+  y0-13 (~4100 px, Simple symmetric dark ramp ~218-240 vs Chrome bright
+  230-247 + blue top-right radial); internal y62-71 (~2500 px, ~11 too dark +
+  no blue); nested interior y~100 (Simple 255 vs Chrome 246 = translucent
+  gradient/backdrop tint missing, diff 9); bottom y168-171 (4px band offset +
+  a SPURIOUS wide light-blue 106,164,223 bar at y169 where Chrome is gray 239).
+  Window is already near its measured flat ceiling (~63%).
+- **Taskbar (480x64), 11535/16565 disagree — the anomaly.** Top body band
+  y0-13 is ~6000 px = **36% of all non-text** — Simple ramp ~10-15 too dark +
+  neutral vs Chrome bright + blue top-right; this single band is the dominant
+  gap. Plus pill-top grays ~12 too dark, and the accent buttons composite far
+  too much white (Simple 106,164,223 vs Chrome 41,126,212; taskbar accent
+  count 556 vs 72).
+
+**Structural note:** for these fixtures the `<body>` background (the radial +
+linear gradient that produces Chrome's blue top-right tint) is NEVER painted by
+the Simple lane — `paint`'s `skip_widget_page_bg = has_widget_panel and
+(tag==html or body)` skips it whenever a `.widget-panel` is present. So a
+radial-gradient body-tint fix must ALSO paint the tint on the page/root fill
+(or narrow the skip to non-body-band regions) or it has no effect. The top-band
+darkening that both engines show is the pill's soft box-shadow bleed; Simple's
+single hard `fb_style_rounded_rect` shadow (parsed offset 0,0, white 5%) does
+not reproduce it — residual soft-shadow work remains.
+
+**Blocker this pass (why no verified renderer change landed):** under the
+interpreter (`gui/debug/simple`, `SIMPLE_EXECUTION_MODE=interpret`), a single
+480x64 taskbar render of these ~290 KB themed fixtures costs **40-50+ minutes**
+(CSS-parse/cascade-bound, confirmed by the wm_gui_window_drawing skill's
+stylesheet-bound cost note). Combined with a concurrent agent editing the same
+renderer file (the `parse_font_shorthand_size_px` fix was in-flight/uncommitted
+during this session), the implement->render->measure loop and the mandatory
+bit-exact node-lane re-check could not be safely closed. Shipping unverifiable
+compositing edits into a concurrently-edited renderer risks an undetectable
+node-lane regression, so this pass delivered the measured residual map + LLM
+wiki (`doc/00_llm_process/feature_expert/web_render_css_parity/skill.md`,
+`doc/00_llm_process/layer_expert/browser_engine/skill.md`) instead. The safe
+implementation shape for the next pass: additive paint branches gated on
+`background contains "radial-gradient("` and on a `backdrop-filter` declaration
+(both ABSENT from the pinned node scenes, so bit-exactness holds by
+construction), painting (1) the body radial tint over the page/root fill and
+(2) a translucent panel-interior tint, plus a separable box-blur soft-shadow
+ramp for the pill.
