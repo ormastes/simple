@@ -365,6 +365,18 @@ theorem drf_when_no_conflicts (exec : Execution)
   rcases hRace with ⟨id1, id2, op1, op2, h1, h2, hneq, _, hconf, _, _⟩
   exact (hnoconf id1 id2 op1 op2 h1 h2 hneq) hconf
 
+theorem drf_when_no_cross_thread_conflicts (exec : Execution)
+    (hnoconf : ∀ id1 id2 op1 op2,
+      (id1, op1) ∈ exec.ops →
+      (id2, op2) ∈ exec.ops →
+      id1 ≠ id2 →
+      op1.threadId ≠ op2.threadId →
+      ¬conflicts op1 op2) :
+    dataRaceFree exec := by
+  intro hRace
+  rcases hRace with ⟨id1, id2, op1, op2, h1, h2, hneq, hthread, hconf, _, _⟩
+  exact (hnoconf id1 id2 op1 op2 h1 h2 hneq hthread) hconf
+
 theorem drf_two_ops_no_conflict
     (id1 id2 : OperationId) (op1 op2 : MemoryOperation)
     (hneq_ids : id1 ≠ id2)
