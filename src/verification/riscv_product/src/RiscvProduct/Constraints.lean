@@ -189,6 +189,16 @@ theorem release_clears_only_for_owner (owner requester : Lane) :
     release { owner := some owner } requester = { owner := none } → requester = owner := by
   cases owner <;> cases requester <;> simp [release]
 
+theorem release_clears_occupied_only_for_owner
+    (s : ResourceState) (owner requester : Lane)
+    (howner : s.owner = some owner) :
+    release s requester = { owner := none } → requester = owner := by
+  cases s with
+  | mk current =>
+      simp at howner
+      cases howner
+      exact release_clears_only_for_owner owner requester
+
 theorem occupied_release_noop_implies_non_owner (owner requester : Lane) :
     release { owner := some owner } requester = { owner := some owner } → requester ≠ owner := by
   cases owner <;> cases requester <;> simp [release]
