@@ -457,10 +457,108 @@ fn _clamp_i32(v: i32, lo: i32, hi: i32) -> i32:
         return hi
     v
 
+fn _is_criteria_function(name: text) -> bool:
+    name == "COUNTIF" or name == "SUMIF" or name == "AVERAGEIF"
+
+fn _criteria_matches(display: text, value: f64, criteria: text) -> bool:
+    """Excel-style criteria: >5, >=5, <5, <=5, <>x, =x, or bare equality.
+    Numeric comparisons parse the rhs; equality falls back to case-insensitive
+    text comparison when the rhs is not numeric."""
+    var op = "="
+    var rhs = criteria
+    if criteria.starts_with(">="):
+        op = ">="
+        rhs = criteria.slice(2, criteria.len())
+    elif criteria.starts_with("<="):
+        op = "<="
+        rhs = criteria.slice(2, criteria.len())
+    elif criteria.starts_with("<>"):
+        op = "<>"
+        rhs = criteria.slice(2, criteria.len())
+    elif criteria.starts_with(">"):
+        op = ">"
+        rhs = criteria.slice(1, criteria.len())
+    elif criteria.starts_with("<"):
+        op = "<"
+        rhs = criteria.slice(1, criteria.len())
+    elif criteria.starts_with("="):
+        rhs = criteria.slice(1, criteria.len())
+    val rhs_num = rhs.to_f64()
+    val rhs_is_num = rhs_num != 0.0 or rhs.trim() == "0" or rhs.trim().starts_with("0.")
+    if op == ">":
+        return value > rhs_num
+    if op == ">=":
+        return value >= rhs_num
+    if op == "<":
+        return value < rhs_num
+    if op == "<=":
+        return value <= rhs_num
+    if op == "<>":
+        if rhs_is_num:
+            return value != rhs_num
+        return display.lower() != rhs.lower()
+    if rhs_is_num:
+        return value == rhs_num
+    display.lower() == rhs.lower()
+
+fn _eval_criteria_function(name: text, tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalResult:
+    """COUNTIF/SUMIF/AVERAGEIF: (range, criteria[, sum_range])."""
+    # range
+    if not (pos + 2 < tokens.len() and tokens.get(pos + 1) == ":"):
+        return EvalResult(value: CellValue.ErrorVal(message: "{name} requires a range"), next_pos: pos)
+    val range_str = "{tokens.get(pos)}:{tokens.get(pos + 2)}"
+    var cur_pos = pos + 3
+    if cur_pos < tokens.len() and tokens.get(cur_pos) == ",":
+        cur_pos = cur_pos + 1
+    # criteria: quoted string or number token
+    if cur_pos >= tokens.len():
+        return EvalResult(value: CellValue.ErrorVal(message: "{name} requires criteria"), next_pos: cur_pos)
+    var criteria = tokens.get(cur_pos)
+    if criteria.starts_with("\""):
+        criteria = criteria.slice(1, criteria.len() - 1)
+    cur_pos = cur_pos + 1
+    if cur_pos < tokens.len() and tokens.get(cur_pos) == ",":
+        cur_pos = cur_pos + 1
+    # optional sum range
+    var sum_range = range_str
+    if cur_pos + 2 < tokens.len() and tokens.get(cur_pos + 1) == ":" and _is_cell_ref_token(tokens.get(cur_pos)):
+        sum_range = "{tokens.get(cur_pos)}:{tokens.get(cur_pos + 2)}"
+        cur_pos = cur_pos + 3
+    if cur_pos < tokens.len() and tokens.get(cur_pos) == ")":
+        cur_pos = cur_pos + 1
+    val range_val = parse_range(range_str)
+    val sum_val = parse_range(sum_range)
+    if range_val == nil or sum_val == nil:
+        return EvalResult(value: CellValue.ErrorVal(message: "{name} invalid range"), next_pos: cur_pos)
+    val refs = expand_range_refs(range_val)
+    val sum_refs = expand_range_refs(sum_val)
+    var count = 0
+    var total = 0.0
+    var i = 0
+    while i < refs.len():
+        val cell = sheet.get_cell(refs[i])
+        val display = cell_display_text(cell)
+        val num = _to_number(cell.value)
+        if display != "" and _criteria_matches(display, num, criteria):
+            count = count + 1
+            if i < sum_refs.len():
+                val sum_cell = sheet.get_cell(sum_refs[i])
+                total = total + _to_number(sum_cell.value)
+        i = i + 1
+    if name == "COUNTIF":
+        return EvalResult(value: CellValue.NumberVal(value: count.to_f64()), next_pos: cur_pos)
+    if name == "AVERAGEIF":
+        if count == 0:
+            return EvalResult(value: CellValue.ErrorVal(message: "AVERAGEIF no matches"), next_pos: cur_pos)
+        return EvalResult(value: CellValue.NumberVal(value: total / count.to_f64()), next_pos: cur_pos)
+    EvalResult(value: CellValue.NumberVal(value: total), next_pos: cur_pos)
+
 fn _eval_function_call(name: text, tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalResult:
     """Evaluate a function call. pos points to first token after '('."""
     if _is_text_function(name):
         return _eval_text_function(name, tokens, pos, sheet, depth)
+    if _is_criteria_function(name):
+        return _eval_criteria_function(name, tokens, pos, sheet, depth)
     # Collect arguments separated by commas
     # Each argument can be a range (A1:B3) or an expression
     var args: [[f64]] = []
