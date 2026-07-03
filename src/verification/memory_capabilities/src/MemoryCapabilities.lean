@@ -793,6 +793,42 @@ theorem shared_alias_create_wellformed (baseType : String) (loc : Nat) :
   · exact existing_shared_allows_shared baseType loc
   · exact two_shared_env_wellformed baseType loc
 
+theorem shared_alias_create_read_only_policy (baseType : String) (loc : Nat) :
+  canCreateRef
+    { activeRefs :=
+        [(loc,
+          [{ location := loc,
+             refType := { baseType := baseType, capability := RefCapability.Shared } }])] }
+    loc RefCapability.Shared = true ∧
+  wellFormed
+    { activeRefs :=
+        [(loc,
+          [{ location := loc,
+             refType := { baseType := baseType, capability := RefCapability.Shared } },
+           { location := loc,
+             refType := { baseType := baseType, capability := RefCapability.Shared } }])] } ∧
+  accessIsSafe
+    { activeRefs :=
+        [(loc,
+          [{ location := loc,
+             refType := { baseType := baseType, capability := RefCapability.Shared } },
+           { location := loc,
+             refType := { baseType := baseType, capability := RefCapability.Shared } }])] }
+    (MemAccess.Read loc) = true ∧
+  accessIsSafe
+    { activeRefs :=
+        [(loc,
+          [{ location := loc,
+             refType := { baseType := baseType, capability := RefCapability.Shared } },
+           { location := loc,
+             refType := { baseType := baseType, capability := RefCapability.Shared } }])] }
+    (MemAccess.Write loc) = false := by
+  constructor
+  · exact existing_shared_allows_shared baseType loc
+  · constructor
+    · exact two_shared_env_wellformed baseType loc
+    · exact two_shared_read_only_at_location baseType loc
+
 theorem two_exclusive_env_not_wellformed (baseType : String) (loc : Nat) :
   ¬ wellFormed
     { activeRefs :=
