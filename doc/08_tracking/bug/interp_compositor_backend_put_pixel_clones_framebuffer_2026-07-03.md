@@ -1,7 +1,18 @@
 # Interpreter: CompositorBackend.put_pixel clones the whole framebuffer per pixel
 
 - id: interp_compositor_backend_put_pixel_clones_framebuffer_2026-07-03
-- status: open
+- status: worked around in the compositor (interpreter root cause still open)
+- workaround (2026-07-04): `HeadlessHostCompositorBackend.fill_rect` and
+  `.blit_pixels` now write `self.pixels` inline in their own loops with
+  once-up-front clamping (no per-pixel `me`->`me` delegation). Measured:
+  fill_rect 300x200 went from never-finishing-in-120s to 333ms; the
+  host_compositor gate scene went from >1800s timeout to 23.5s with real
+  content. Single-shot `me`->`me` calls (draw_text -> fill_rect once per
+  call) remain acceptable (one object clone per call, not per pixel).
+  Also fixed while here: the evidence driver read the LOCAL `backend`
+  binding after `comp.render_frame()` — mutations through `comp.backend` do
+  not reflect into the local binding (value-semantics write-back), so it
+  captured an all-zero buffer; it now reads `comp.backend.pixels`.
 - severity: high (makes CPU per-pixel compositor drawing unusable under the interpreter)
 - component: interpreter (CowEnv get_mut / array-field write on nested `me` borrow)
 - found: 2026-07-03, building the WM multi-app taskbar live-capture lane

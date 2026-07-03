@@ -24,6 +24,7 @@ use os.compositor.host_compositor_entry.{
     host_taskbar_item_x,
     host_compositor_left_button,
     host_compositor_pointer_move,
+    host_wm_force_direct_chrome,
     host_wm_surface_failure_reason,
     host_wm_content_renderer_name,
     simpleos_gui_adapter_display_path_name,
@@ -66,6 +67,9 @@ impl CompositorBackend for FakeCompositorBackend:
         _fake_present_count = _fake_present_count
 
     me put_pixel(x: i32, y: i32, color: u32):
+        _fake_present_count = _fake_present_count
+
+    me blit_pixels(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
         _fake_present_count = _fake_present_count
 
     me present():
@@ -118,6 +122,20 @@ impl CompositorBackend for CaptureCompositorBackend:
 
     me put_pixel(x: i32, y: i32, color: u32):
         _capture_present_count = _capture_present_count
+
+    me blit_pixels(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
+        # Window content arrives as a pixel block; classify the same marker
+        # colors fill_rect counts so the engine-content assertions hold on
+        # whichever delivery path the compositor uses.
+        val n = pixels.len()
+        var i = 0
+        while i < n:
+            val c = pixels[i]
+            if c == 0xFF2050A0u32:
+                _capture_engine_title_count = _capture_engine_title_count + 1
+            if c == 0xFF182230u32:
+                _capture_engine_content_count = _capture_engine_content_count + 1
+            i = i + 1
 
     me present():
         _capture_present_count = _capture_present_count + 1
@@ -210,7 +228,9 @@ describe "host surface failure boundaries":
             title: "tui-wm"
         )
         val reason = host_wm_surface_failure_reason(cfg, 10, 20)
-        expect(reason).to_equal("tui host compositor bootstrap is not implemented")
+        # `?? ""` unwrap: the interpreter's Optional-vs-plain equality sink
+        # compares Some(x) != x, so compare the unwrapped text.
+        expect(reason ?? "").to_equal("tui host compositor bootstrap is not implemented")
 
     it "rejects zero-sized host surfaces before SFFI bootstrap":
         val cfg = HostWmConfig(
@@ -219,7 +239,7 @@ describe "host surface failure boundaries":
             title: "bad-size"
         )
         val reason = host_wm_surface_failure_reason(cfg, 10, 20)
-        expect(reason).to_equal("host compositor size must be nonzero")
+        expect(reason ?? "").to_equal("host compositor size must be nonzero")
 
     it "returns nil for TUI without touching host window SFFI":
         val cfg = HostWmConfig(
@@ -290,7 +310,12 @@ describe "HostWmHandle loop behavior":
         val backend = CaptureCompositorBackend.with_color(160, 120, 0xFF000000u32)
         val comp = HostCompositor.new(backend, Size.wh(160, 120))
         comp.apply_bridge_request(1, 77, COMP_CREATE_WINDOW.to_i64(), 0, "Simple Browser", 12, 16, 120, 80, "", 900, "/sys/apps/browser")
+        # These its pin the DIRECT-draw chrome path counters; on Metal-capable
+        # hosts render_frame otherwise routes chrome via the CSS fast lane
+        # (blit_pixels + present only) and no per-element draws happen.
+        host_wm_force_direct_chrome(true)
         comp.render_frame()
+        host_wm_force_direct_chrome(false)
         expect(_capture_present_count).to_equal(1)
         expect(_capture_blue_count).to_be_greater_than(0)
         expect(_capture_white_count).to_be_greater_than(0)
@@ -306,7 +331,9 @@ describe "HostWmHandle loop behavior":
         val backend = CaptureCompositorBackend.with_color(180, 140, 0xFF000000u32)
         val comp = HostCompositor.new(backend, Size.wh(180, 140))
         comp.apply_bridge_request(1, 77, COMP_CREATE_WINDOW.to_i64(), 0, "Terminal", 10, 14, 132, 96, "ready", 901, "/sys/apps/terminal")
+        host_wm_force_direct_chrome(true)
         comp.render_frame()
+        host_wm_force_direct_chrome(false)
 
         expect(_capture_present_count).to_equal(1)
         expect(_capture_blue_count).to_be_greater_than(0)
@@ -531,7 +558,9 @@ describe "SimpleOS GUI adapter proof":
         adapter.deliver_left_button(true)
         adapter.deliver_pointer_move(180, 145)
         adapter.deliver_left_button(false)
+        host_wm_force_direct_chrome(true)
         adapter.render_framebuffer_frame()
+        host_wm_force_direct_chrome(false)
 
         expect(simpleos_gui_adapter_display_path_name(adapter)).to_equal("simpleos-framebuffer")
         expect(simpleos_gui_adapter_content_renderer_name(adapter)).to_equal(WEB_RENDER_TARGET_SIMPLE_WEB)

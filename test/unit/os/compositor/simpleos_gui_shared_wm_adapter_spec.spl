@@ -11,6 +11,7 @@ use common.window_protocol.geometry.{Size}
 use os.compositor.display_backend.{CompositorBackend, CompositorGlassCapable}
 use os.compositor.host_compositor_entry.{
     SimpleOsGuiAdapter,
+    host_wm_force_direct_chrome,
     simpleos_gui_adapter_display_path_name,
     simpleos_gui_adapter_content_renderer_name,
 }
@@ -49,6 +50,9 @@ impl CompositorBackend for AdapterCaptureBackend:
     me put_pixel(x: i32, y: i32, color: u32):
         _adapter_clear_color = _adapter_clear_color
 
+    me blit_pixels(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
+        _adapter_clear_color = _adapter_clear_color
+
     me present():
         _adapter_present_count = _adapter_present_count + 1
 
@@ -68,7 +72,12 @@ describe "SimpleOS GUI adapter shared WM proof":
         val adapter = SimpleOsGuiAdapter.new(backend, Size.wh(240, 180))
 
         adapter.deliver_bridge_request(1, 44, COMP_CREATE_WINDOW.to_i64(), 0, "Terminal", 24, 36, 128, 92, "adapter-ready", 800, "/sys/apps/terminal")
+        # Pin the direct-draw chrome path: on Metal-capable hosts render_frame
+        # otherwise routes chrome via the CSS fast lane (blit + present only)
+        # and the per-element clear/fill counters this it asserts never fire.
+        host_wm_force_direct_chrome(true)
         adapter.render_framebuffer_frame()
+        host_wm_force_direct_chrome(false)
 
         expect(simpleos_gui_adapter_display_path_name(adapter)).to_equal("simpleos-framebuffer")
         expect(simpleos_gui_adapter_content_renderer_name(adapter)).to_equal("simple_web")
