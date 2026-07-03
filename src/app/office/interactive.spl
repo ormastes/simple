@@ -177,3 +177,117 @@ fn run_sheet_editor_mode(in_path: text, screen: bool) -> i32:
 
 fn run_sheet_editor(in_path: text) -> i32:
     run_sheet_editor_mode(in_path, false)
+
+# =========================================================================
+# Keystroke-level TUI (raw mode, arrow keys, live cell editing)
+# =========================================================================
+
+extern fn rt_stdin_read_byte() -> i64
+
+struct TuiState:
+    sheet: Sheet
+    cur: CellRef
+    buffer: text
+    status: text
+    pending_esc: i32   # 0 none, 1 got ESC, 2 got ESC [
+    quit: bool
+    dirty: bool
+
+fn tui_new_state(sheet: Sheet) -> TuiState:
+    TuiState(sheet: sheet, cur: CellRef(col: 0, row: 0), buffer: "", status: "arrows move - type to edit - Enter commits - s saves - q quits", pending_esc: 0, quit: false, dirty: false)
+
+fn _tui_move(state: TuiState, d_col: i32, d_row: i32) -> TuiState:
+    var s = state
+    var c = s.cur.col + d_col
+    var r = s.cur.row + d_row
+    if c < 0:
+        c = 0
+    if r < 0:
+        r = 0
+    s.cur = CellRef(col: c, row: r)
+    s.pending_esc = 0
+    s
+
+fn tui_apply_key(state: TuiState, byte: i64) -> TuiState:
+    """Apply one input byte to the editor state. Pure — the whole keystroke
+    surface, spec-testable without a terminal. Arrow keys arrive as
+    ESC [ A/B/C/D; printable bytes build the cell buffer; Enter commits
+    (formulas recalculate); backspace edits; q quits; s marks save."""
+    var s = state
+    s.dirty = false
+    if byte < 0:
+        s.quit = true
+        return s
+    if s.pending_esc == 1:
+        s.pending_esc = if byte == 91: 2 else: 0
+        return s
+    if s.pending_esc == 2:
+        if byte == 65:
+            return _tui_move(s, 0, -1)
+        if byte == 66:
+            return _tui_move(s, 0, 1)
+        if byte == 67:
+            return _tui_move(s, 1, 0)
+        if byte == 68:
+            return _tui_move(s, -1, 0)
+        s.pending_esc = 0
+        return s
+    if byte == 27:
+        s.pending_esc = 1
+        return s
+    if byte == 10 or byte == 13:
+        # Commit the buffer to the active cell and move down
+        if s.buffer != "":
+            var sh = s.sheet
+            sh.set_value(cell_ref_to_string(s.cur), s.buffer)
+            sh = recalculate_formula_cells(sh)
+            s.sheet = sh
+            s.status = "{cell_ref_to_string(s.cur)} = {cell_display_text(sh.get_cell(cell_ref_to_string(s.cur)))}"
+            s.buffer = ""
+        return _tui_move(s, 0, 1)
+    if byte == 127 or byte == 8:
+        if s.buffer.len() > 0:
+            s.buffer = s.buffer.slice(0, s.buffer.len() - 1)
+        return s
+    if s.buffer == "" and byte == 113:   # q
+        s.quit = true
+        return s
+    if s.buffer == "" and byte == 115:   # s
+        s.dirty = true
+        s.status = "saved"
+        return s
+    if byte >= 32 and byte <= 126:
+        s.buffer = "{s.buffer}{char_from_code(byte)}"
+    s
+
+fn tui_frame(state: TuiState, file_label: text) -> text:
+    """The full-screen frame: title bar, grid with the active cell shown in
+    the formula bar, input buffer, and status bar."""
+    val esc = char_from_code(27)
+    val ref_str = cell_ref_to_string(state.cur)
+    val current = cell_display_text(state.sheet.get_cell(ref_str))
+    val shown = if state.buffer != "": state.buffer else: current
+    val title = "{esc}[7m Simple Calc — {file_label} {esc}[0m"
+    val formula_bar = "[{ref_str}] {shown}"
+    val bar = "{esc}[7m {state.status} {esc}[0m"
+    "{esc}[2J{esc}[H{title}\n{formula_bar}\n\n{sheet_grid_text(state.sheet)}\n\n{bar}"
+
+fn run_sheet_tui(in_path: text) -> i32:
+    """Keystroke-driven full-screen editing: arrow-key navigation,
+    type-to-edit cells, Enter commits with live recalculation.
+
+    Reads raw bytes from stdin. At an interactive terminal run it under
+    `stty raw -echo` (the rt raw-mode extern is not registered in the
+    interpreter runtime yet — recorded ceiling); piped byte streams work
+    as-is, which is also how the E2E test drives it."""
+    var state = tui_new_state(editor_load_sheet(in_path))
+    print tui_frame(state, in_path)
+    while not state.quit:
+        val byte = rt_stdin_read_byte()
+        state = tui_apply_key(state, byte)
+        if state.dirty:
+            editor_save_sheet(state.sheet, in_path)
+        if not state.quit and state.pending_esc == 0:
+            print tui_frame(state, in_path)
+    print "bye"
+    0

@@ -1,10 +1,10 @@
 # Linux RenderDoc + SimpleOS Hardening Evidence
 
-- status: pass
+- status: pass_with_tracked_gui_g1_1_gap
 - scope: linux-renderdoc-web-gui-simpleos-qemu-wm-llvm-port-engine2d-simd-and-qemu-gpu-access
 - evidence_date_local: 2026-07-02
 - linux_renderdoc_source_report: `doc/09_report/linux_vulkan_render_log_compare_2026-06-29.md`
-- vulkan_engine2d_source_report: `doc/09_report/vulkan_engine2d_readback_2026-07-02.md`
+- vulkan_engine2d_source_report: `doc/09_report/vulkan_engine2d_readback_2026-07-03.md`
 - cpu_simd_engine2d_source_report: `doc/09_report/cpu_simd_engine2d_evidence_current_2026-07-02.md`
 - qemu_gpu_capture_source_report: `doc/09_report/qemu_gtk_wm_capture_evidence_2026-06-05.md`
 - rv64_qmp_capture_source_report: `doc/09_report/rv64_display_smoke_qmp_evidence_current_2026-07-02.md`
@@ -30,7 +30,7 @@
 
 ## Engine2D Vulkan Readback
 
-- report: `doc/09_report/vulkan_engine2d_readback_2026-07-02.md`
+- report: `doc/09_report/vulkan_engine2d_readback_2026-07-03.md`
 - status: pass
 - backend: vulkan
 - present_exercised: true
@@ -178,7 +178,7 @@
 - run: `SIMPLE_GUI_VULKAN_W=96 SIMPLE_GUI_VULKAN_H=72 SIMPLE_GUI_VULKAN_APP_TIMEOUT=150`
 - renderer_log_line: `showcase_renderer_backend=vulkan;requested=vulkan;vulkan_device=requested=vulkan;selected=vulkan;status=Initialized;api=vulkan;gate=vulkan_runtime;shader=spirv;compute=true;graphics=true;present=false`
 - render_completed: 1
-- render_wait_secs: 126
+- render_wait_secs: 96
 - offscreen_ppm_bytes: 20749
 - window_capture_status: captured
 - window_distinct_colors: 6
@@ -188,7 +188,7 @@
 - assert_widget_content: fail
 - widget_oracle_ink_coverage: 0.0021701388888888395
 - widget_oracle_required_ink_coverage: `> 0.005`
-- blocker: current Vulkan text fallback is too slow at the previous 200x150 target and the 96x72 completed frame is below the readable-content oracle threshold.
+- blocker: current Vulkan text fallback is still too slow at the 200x150 target (`render_completed=0` after 240s) and the 96x72 completed frame is below the readable-content oracle threshold.
 
 ## Scope Boundary
 

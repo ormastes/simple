@@ -598,6 +598,48 @@ impl HirLowering:
         else:
             HirBlock(stmts: stmts, has: false, value: HirExpr(kind: HirExprKind.NilLit, type_: nil, span: b.span), span: b.span)
 
+    # Lower a block that is NOT in value position (a Unit-returning function body,
+    # e.g. `fn main(): print(...)`). Every statement — INCLUDING a trailing
+    # expression-statement — stays in `stmts`; NO trailing value is extracted and
+    # `has=false`.
+    #
+    # Why a separate path: the value-extracting `lower_hir_block` above destructures
+    # `case Expr(expr)` on the FRESH `lower_hir_stmt` return value to lift the last
+    # expr into `block.value`. On the seed-compiled stage4 the seed erases the
+    # `HirStmtKind` payload to ANY and mis-extracts that `Expr(expr)` payload,
+    # storing a GARBAGE HirExpr as `block.value` (iteration 14: eval_expr on it
+    # silently no-ops with the has-gate, or SIGSEGVs with a typed rebind — a SEED
+    # codegen bug, not fixable by a use-site typed local). For a Unit-returning
+    # body the trailing value is never needed, so we sidestep the fragile
+    # extraction entirely: the trailing `print(...)` stays a statement and is
+    # evaluated by the interpreter's `exec_stmt` statement loop (which destructures
+    # `case Expr(expr)` on a PROPERLY-lowered HirStmt — that path works). The
+    # value-extracting path is preserved for expression-position blocks and
+    # non-Unit returns, where a value is genuinely required (that path keeps the
+    # known ANY-extraction limitation, documented in the bug tracker).
+    me lower_hir_block_unit(b: Block) -> HirBlock:
+        if (hir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+            eprint("[hir-lower] lower_block_unit:start")
+            var boot_stmts: [HirStmt] = []
+            var boot_idx = 0
+            while boot_idx < b.stmts.len():
+                boot_stmts = boot_stmts.push(self.lower_hir_stmt(b.stmts[boot_idx]))
+                boot_idx = boot_idx + 1
+            eprint("[hir-lower] lower_block_unit:done")
+            return HirBlock(stmts: boot_stmts, has: false, value: HirExpr(kind: HirExprKind.NilLit, type_: nil, span: b.span), span: b.span)
+
+        self.symbols.push_scope(ScopeKind.Block)
+        var stmts: [HirStmt] = []
+        val stmt_count = b.stmts.len()
+        var stmt_idx = 0
+        while stmt_idx < stmt_count:
+            val lowered: HirStmt = self.lower_hir_stmt(b.stmts[stmt_idx])
+            stmts = stmts.push(lowered)
+            stmt_idx = stmt_idx + 1
+        self.symbols.pop_scope()
+
+        HirBlock(stmts: stmts, has: false, value: HirExpr(kind: HirExprKind.NilLit, type_: nil, span: b.span), span: b.span)
+
     me lower_asm(asm: AsmExpr) -> HirAsm:
         # Lower all constraint value expressions
         var hir_constraints: [HirAsmConstraint] = []
