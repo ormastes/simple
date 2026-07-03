@@ -643,6 +643,18 @@ theorem resource_acquire_preserves_capacity_bound (p : ResourcePool)
   · simp [h]
     exact hwf
 
+/-- T10f4: releasing a live resource from a well-formed pool reopens exactly
+    one acquire slot; the next acquire grants and restores the original pool. -/
+theorem resource_release_nonempty_then_acquire_eq_granted_original (p : ResourcePool)
+    (hwf : p.wf)
+    (h : p.inUse ≠ 0) :
+    p.release.acquire = { pool := p, granted := true } := by
+  unfold ResourcePool.release ResourcePool.acquire ResourcePool.wf at *
+  have hpos : 0 < p.inUse := Nat.pos_of_ne_zero h
+  have hslot : p.inUse - 1 < p.capacity := by omega
+  have hrestore : p.inUse - 1 + 1 = p.inUse := by omega
+  simp [h, hslot, hrestore]
+
 /-- T10g: successful acquire followed by release returns the pool to its
     original state.  This is the basic no-leak lifecycle roundtrip. -/
 theorem resource_acquire_release_roundtrip (p : ResourcePool)
