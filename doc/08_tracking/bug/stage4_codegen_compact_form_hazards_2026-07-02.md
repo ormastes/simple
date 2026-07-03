@@ -1184,3 +1184,9 @@ header WITH the probe. Final verification on stage4_it18z2 (clean, probe-free):
 `-c "print(1+1)"` → `2` rc=0 (stderr only carries the pre-existing gated-off
 frontend notice), `run /tmp/hello_it15.spl` → hello-world-42 rc=0, `--version`
 → Simple v1.0.0-beta rc=0.
+Second cleanup follow-up: interpreter_calls.spl's local itrace gate
+(`rt_env_get(key.ptr(), key.len()) != 0`) is ALWAYS TRUE (ptr-based env get
+returns a non-zero runtime value even for an unset var) so its probes leaked
+ungated; replaced with an import of interpreter.spl's text-based gated itrace.
+FINAL verified binary: scratchpad/stage4_it18z3 — `-c "print(1+1)"` → stdout
+exactly `2`, stderr EMPTY, rc=0; `run` and `--version` clean.
