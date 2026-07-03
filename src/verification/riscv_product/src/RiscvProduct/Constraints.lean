@@ -142,6 +142,17 @@ theorem acquire_then_owner_release_clears (l : Lane) :
       some { owner := none } := by
   cases l <;> simp [acquire, release]
 
+theorem successful_acquire_then_owner_release_clears (s s' : ResourceState) (l : Lane) :
+    acquire s l = some s' → release s' l = { owner := none } := by
+  intro h
+  cases howner : s.owner with
+  | none =>
+      simp [acquire, howner] at h
+      cases h
+      exact owner_release_clears_resource l
+  | some owner =>
+      simp [acquire, howner] at h
+
 theorem acquire_then_non_owner_release_preserves_owner (owner requester : Lane)
     (h : owner ≠ requester) :
     (acquire { owner := none } owner).map (fun s => release s requester) =
