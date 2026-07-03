@@ -128,6 +128,13 @@ theorem shared_write_same_loc_denied (baseType : String) (loc : Nat) :
   simp [allowsAccess]
   exact ⟨rfl, rfl⟩
 
+theorem read_wrong_location_denied
+    (baseType : String) (loc other : Nat) (cap : RefCapability)
+    (hne : loc ≠ other) :
+    allowsAccess { location := loc, refType := { baseType := baseType, capability := cap } }
+      (MemAccess.Read other) = false := by
+  cases cap <;> simp [allowsAccess, hne]
+
 theorem empty_env_wellformed :
   wellFormed { activeRefs := [] } := by
   intro loc refs h
