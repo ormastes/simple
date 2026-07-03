@@ -393,7 +393,10 @@ fn _is_text_function(name: text) -> bool:
      name == "SUBSTITUTE" or name == "REPLACE" or name == "REPT" or
      name == "SEARCH" or name == "FIND" or name == "CHAR" or
      name == "CODE" or name == "PROPER" or name == "CLEAN" or
-     name == "TEXTJOIN")
+     name == "TEXTJOIN" or
+     name == "DEC2BIN" or name == "BIN2DEC" or name == "DEC2HEX" or
+     name == "HEX2DEC" or name == "DEC2OCT" or name == "OCT2DEC" or
+     name == "BASE" or name == "DECIMAL" or name == "DATEDIF")
 
 fn _fmt_num_trim(v: f64) -> text:
     val i = v.to_i64()
@@ -653,7 +656,113 @@ fn _dispatch_text_function(name: text, args: [text]) -> CellValue:
         return CellValue.TextVal(value: _proper_case(s))
     if name == "CLEAN":
         return CellValue.TextVal(value: _clean_text(s))
+    if name == "DEC2BIN" or name == "DEC2OCT" or name == "DEC2HEX":
+        val v = s.to_f64()
+        if v != v.to_i64().to_f64() or v < 0.0:
+            return CellValue.ErrorVal(message: "{name} requires a non-negative integer")
+        val radix = if name == "DEC2BIN": 2 elif name == "DEC2OCT": 8 else: 16
+        return CellValue.TextVal(value: _to_base(v.to_i64(), radix))
+    if name == "BIN2DEC" or name == "OCT2DEC" or name == "HEX2DEC":
+        val radix = if name == "BIN2DEC": 2 elif name == "OCT2DEC": 8 else: 16
+        if not _base_valid(s, radix):
+            return CellValue.ErrorVal(message: "{name} invalid digits for base {radix}")
+        return CellValue.NumberVal(value: _from_base(s, radix).to_f64())
+    if name == "BASE":
+        if args.len() < 2:
+            return CellValue.ErrorVal(message: "BASE requires number and radix")
+        val v = s.to_f64()
+        val radix = args[1].to_f64().to_i64()
+        if v != v.to_i64().to_f64() or v < 0.0:
+            return CellValue.ErrorVal(message: "BASE requires a non-negative integer")
+        if radix < 2 or radix > 36:
+            return CellValue.ErrorVal(message: "BASE radix must be 2..36")
+        var digits = _to_base(v.to_i64(), radix)
+        val min_len = if args.len() > 2: args[2].to_f64().to_i64() else: 0
+        while digits.len().to_i64() < min_len:
+            digits = "0{digits}"
+        return CellValue.TextVal(value: digits)
+    if name == "DECIMAL":
+        if args.len() < 2:
+            return CellValue.ErrorVal(message: "DECIMAL requires text and radix")
+        val radix = args[1].to_f64().to_i64()
+        if radix < 2 or radix > 36:
+            return CellValue.ErrorVal(message: "DECIMAL radix must be 2..36")
+        if not _base_valid(s, radix):
+            return CellValue.ErrorVal(message: "DECIMAL invalid digits for base {radix}")
+        return CellValue.NumberVal(value: _from_base(s, radix).to_f64())
+    if name == "DATEDIF":
+        if args.len() < 3:
+            return CellValue.ErrorVal(message: "DATEDIF requires start, end, unit")
+        val sv = s.to_f64()
+        val ev = args[1].to_f64()
+        val du = args[2].upper()
+        val sc = _civil_from_serial(sv)
+        val ec = _civil_from_serial(ev)
+        if du == "D":
+            return CellValue.NumberVal(value: ev - sv)
+        if du == "Y":
+            var years = ec[0] - sc[0]
+            if ec[1] < sc[1] or (ec[1] == sc[1] and ec[2] < sc[2]):
+                years = years - 1
+            return CellValue.NumberVal(value: years.to_f64())
+        if du == "M":
+            var months = (ec[0] - sc[0]) * 12 + (ec[1] - sc[1])
+            if ec[2] < sc[2]:
+                months = months - 1
+            return CellValue.NumberVal(value: months.to_f64())
+        return CellValue.ErrorVal(message: "DATEDIF unit must be Y, M, or D")
     CellValue.ErrorVal(message: "unknown text function {name}")
+
+fn _base_digit_char(d: i64) -> text:
+    """Map a base digit 0..35 to its character ('0'..'9','A'..'Z')."""
+    if d < 10:
+        return char_from_code(48 + d)
+    char_from_code(65 + (d - 10))
+
+fn _base_char_val(c: text) -> i64:
+    """Value of a single base digit char, or -1 if not a digit/letter."""
+    val code = c.char_code_at(0)
+    if code >= 48 and code <= 57:
+        return code - 48
+    if code >= 65 and code <= 90:
+        return code - 55
+    if code >= 97 and code <= 122:
+        return code - 87
+    0 - 1
+
+fn _to_base(n_in: i64, radix: i64) -> text:
+    """Render a non-negative integer in the given radix (2..36) as text."""
+    if n_in == 0:
+        return "0"
+    var n = n_in
+    var out = ""
+    while n > 0:
+        val d = n % radix
+        val ch = _base_digit_char(d)
+        out = "{ch}{out}"
+        n = n / radix
+    out
+
+fn _from_base(s: text, radix: i64) -> i64:
+    """Parse a base-`radix` text string into an integer. Assumes valid digits."""
+    var acc: i64 = 0
+    var i = 0
+    while i < s.len():
+        acc = acc * radix + _base_char_val(s.char_at(i))
+        i = i + 1
+    acc
+
+fn _base_valid(s: text, radix: i64) -> bool:
+    """True if `s` is a non-empty string of digits all < radix."""
+    if s.len() == 0:
+        return false
+    var i = 0
+    while i < s.len():
+        val d = _base_char_val(s.char_at(i))
+        if d < 0 or d >= radix:
+            return false
+        i = i + 1
+    true
 
 fn _str_find(hay: text, needle: text, from: i32) -> i32:
     """0-based index of `needle` in `hay` at or after `from`, or -1 if absent.
@@ -2240,14 +2349,35 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                 return CellValue.NumberVal(value: _floor_f64(flat[0]))
             return CellValue.ErrorVal(message: "INT requires 1 argument")
         "TRUNC":
+            if args.len() >= 2:
+                val v = _first_val(args[0])
+                val digits = _first_val(args[1]).to_i64()
+                val factor = _pow10_f64(digits)
+                return CellValue.NumberVal(value: (v * factor).to_i64().to_f64() / factor)
             if flat.len() > 0:
                 return CellValue.NumberVal(value: flat[0].to_i64().to_f64())
             return CellValue.ErrorVal(message: "TRUNC requires 1 argument")
         "FLOOR":
+            if args.len() >= 2:
+                val v = _first_val(args[0])
+                val sig = _first_val(args[1])
+                if sig == 0.0:
+                    return CellValue.NumberVal(value: 0.0)
+                if v > 0.0 and sig < 0.0:
+                    return CellValue.ErrorVal(message: "FLOOR sign mismatch")
+                return CellValue.NumberVal(value: sig * _floor_f64(v / sig))
             if flat.len() > 0:
                 return CellValue.NumberVal(value: _floor_f64(flat[0]))
             return CellValue.ErrorVal(message: "FLOOR requires 1 argument")
         "CEILING":
+            if args.len() >= 2:
+                val v = _first_val(args[0])
+                val sig = _first_val(args[1])
+                if sig == 0.0:
+                    return CellValue.NumberVal(value: 0.0)
+                if v > 0.0 and sig < 0.0:
+                    return CellValue.ErrorVal(message: "CEILING sign mismatch")
+                return CellValue.NumberVal(value: sig * _ceil_f64(v / sig))
             if flat.len() > 0:
                 return CellValue.NumberVal(value: _ceil_f64(flat[0]))
             return CellValue.ErrorVal(message: "CEILING requires 1 argument")
@@ -2296,6 +2426,81 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                     return CellValue.NumberVal(value: _first_val(args[1]))
                 return CellValue.NumberVal(value: _first_val(args[2]))
             return CellValue.ErrorVal(message: "IF requires 3 arguments")
+        "BITAND", "BITOR", "BITXOR":
+            if args.len() < 2:
+                return CellValue.ErrorVal(message: "{name} requires 2 arguments")
+            val a = _first_val(args[0])
+            val b = _first_val(args[1])
+            if not (_is_nonneg_int(a) and _is_nonneg_int(b)):
+                return CellValue.ErrorVal(message: "{name} requires non-negative integers")
+            val kind = if name == "BITAND": 0 elif name == "BITOR": 1 else: 2
+            return CellValue.NumberVal(value: _bit_op(a.to_i64(), b.to_i64(), kind).to_f64())
+        "BITLSHIFT", "BITRSHIFT":
+            if args.len() < 2:
+                return CellValue.ErrorVal(message: "{name} requires 2 arguments")
+            val n = _first_val(args[0])
+            val sh = _first_val(args[1])
+            if not _is_nonneg_int(n):
+                return CellValue.ErrorVal(message: "{name} requires a non-negative integer")
+            if sh != sh.to_i64().to_f64():
+                return CellValue.ErrorVal(message: "{name} shift must be an integer")
+            var shift = sh.to_i64()
+            if name == "BITRSHIFT":
+                shift = 0 - shift
+            # positive shift = left; negative = right (floor toward zero)
+            if shift >= 0:
+                return CellValue.NumberVal(value: (n.to_i64() * _pow2_i64(shift)).to_f64())
+            return CellValue.NumberVal(value: _floor_f64(n / _pow2_i64(0 - shift).to_f64()))
+        "EOMONTH":
+            if args.len() >= 2:
+                val ymd = _civil_from_serial(_first_val(args[0]))
+                val total = ymd[0] * 12 + (ymd[1] - 1) + _first_val(args[1]).to_i64()
+                val ny = total / 12
+                val nm = total % 12 + 1
+                val next_first = _serial_from_civil(if nm == 12: ny + 1 else: ny, if nm == 12: 1 else: nm + 1, 1)
+                return CellValue.NumberVal(value: next_first - 1.0)
+            return CellValue.ErrorVal(message: "EOMONTH requires serial, months")
+        "WEEKNUM":
+            if flat.len() > 0:
+                val ymd = _civil_from_serial(flat[0])
+                val jan1 = _serial_from_civil(ymd[0], 1, 1)
+                var wd = (jan1.to_i64() % 7)
+                if wd == 0:
+                    wd = 7
+                val doy = flat[0].to_i64() - jan1.to_i64()
+                return CellValue.NumberVal(value: ((doy + (wd - 1)) / 7 + 1).to_f64())
+            return CellValue.ErrorVal(message: "WEEKNUM requires a serial")
+        "NETWORKDAYS":
+            if args.len() >= 2:
+                val s0 = _first_val(args[0]).to_i64()
+                val e0 = _first_val(args[1]).to_i64()
+                var lo = s0
+                var hi = e0
+                var sign = 1
+                if e0 < s0:
+                    lo = e0
+                    hi = s0
+                    sign = 0 - 1
+                var count = 0
+                var d = lo
+                while d <= hi:
+                    if _is_weekday(d):
+                        count = count + 1
+                    d = d + 1
+                return CellValue.NumberVal(value: (count * sign).to_f64())
+            return CellValue.ErrorVal(message: "NETWORKDAYS requires start, end")
+        "WORKDAY":
+            if args.len() >= 2:
+                var d = _first_val(args[0]).to_i64()
+                val days = _first_val(args[1]).to_i64()
+                var remaining = if days < 0: 0 - days else: days
+                val step = if days < 0: 0 - 1 else: 1
+                while remaining > 0:
+                    d = d + step
+                    if _is_weekday(d):
+                        remaining = remaining - 1
+                return CellValue.NumberVal(value: d.to_f64())
+            return CellValue.ErrorVal(message: "WORKDAY requires start, days")
         _:
             return CellValue.ErrorVal(message: "Unknown function: {name}")
 
@@ -2857,6 +3062,50 @@ fn _first_val(vals: [f64]) -> f64:
     if vals.len() > 0:
         return vals[0]
     0.0
+
+fn _is_nonneg_int(v: f64) -> bool:
+    """True when v is a whole number >= 0 (Excel bitwise-op domain)."""
+    v >= 0.0 and v == v.to_i64().to_f64()
+
+fn _pow2_i64(exp: i64) -> i64:
+    """2^exp for exp >= 0."""
+    var result: i64 = 1
+    var i: i64 = 0
+    while i < exp:
+        result = result * 2
+        i = i + 1
+    result
+
+fn _bit_op(a_in: i64, b_in: i64, kind: i32) -> i64:
+    """Bitwise op on two non-negative integers. kind: 0=AND, 1=OR, 2=XOR."""
+    var a = a_in
+    var b = b_in
+    var result: i64 = 0
+    var place: i64 = 1
+    while a > 0 or b > 0:
+        val abit = a % 2
+        val bbit = b % 2
+        var rbit: i64 = 0
+        if kind == 0:
+            rbit = if abit == 1 and bbit == 1: 1 else: 0
+        elif kind == 1:
+            rbit = if abit == 1 or bbit == 1: 1 else: 0
+        else:
+            rbit = if abit != bbit: 1 else: 0
+        result = result + rbit * place
+        place = place * 2
+        a = a / 2
+        b = b / 2
+    result
+
+fn _is_weekday(serial: i64) -> bool:
+    """True when the Excel serial falls Mon..Fri (WEEKDAY 2..6, Sunday=1)."""
+    var wd = serial % 7
+    if wd < 0:
+        wd = wd + 7
+    if wd == 0:
+        wd = 7
+    wd >= 2 and wd <= 6
 
 fn _eval_display_sum(tokens: [text], sheet: Sheet, depth: i32) -> DisplayEvalResult:
     var total: i64 = 0
