@@ -1086,3 +1086,90 @@ steps, cheapest first:
 Binaries: scratchpad/stage4_it17{,b..o}; build cmd unchanged (NEVER omit
 --target). PROBE CLEANUP (ungated eprints listed above + [FBC]/[FBS]/[LM]/
 [LBU]/[LHE*]/[LST*]) is a DEPLOY PRECONDITION.
+
+## Iteration 18 (2026-07-03) — GOAL REACHED: `SIMPLE_UNSTUB_HIR=1 <stage4> -c "print(1+1)"` prints `2` (rc=0); `run hello_it15.spl` prints hello-world-42; `--version` OK
+
+### Root causes found and fixed (chain of SEVEN distinct stage4/seed hazards)
+1. **Struct-shadowed variant patterns compile as ALWAYS-TRUE tests.** When a
+   variant pattern's name is also a struct/class name ANYWHERE in the program
+   (`struct Field` parser_types.spl:232, `struct Block` parser_types_expr.spl:427,
+   `struct Expr` parser_types_expr.spl:159), the seed compiles the qualified
+   `case ExprKind.Field(...)` TEST via the struct/tuple fallback in
+   compiler_rust codegen/instr/pattern.rs (`_ => iconst 1`), while payload
+   BINDINGS still extract enum payloads. The Field arm swallowed every Call in
+   lower_hir_expr's big match ([LHE-ARMX] Field on a Call disc); the Block arm
+   swallowed a NamedVar in mono scan_expr. NOTE: the shadow is GLOBAL — mono
+   has no local Field/Block structs. FIX: discriminant PRE-DISPATCH — read
+   `rt_enum_discriminant` (= DefaultHasher(variant name) truncated u32:
+   hash("Field")=21232742, hash("Block")=1138084884) before the match, handle
+   Field/Block in a verified nested match, and REMOVE those arms from the big
+   match (expressions.spl lower_hir_expr; monomorphize_integration.spl
+   scan_expr; scan_stmt reordered Let/Assign before the shadowed Expr arm).
+   Disc constants verified: 823890719=Call, 2489634455=Ident (NOT Binary as
+   it17 believed), 1764299124=Binary, 1201078288=IntLit, 465620071=Add,
+   2735847868=Error, 1337030607=NamedVar. Hash fn: rust DefaultHasher
+   (runtime/src/value/objects.rs hash_variant_discriminant), deterministic.
+2. **try_lower_host_gpu_lane_expr misroute** (it17 blocker): typed rebinds of
+   extracted payloads (`val callee_t: Expr = callee` etc.) fixed the
+   `name == "host"` garbage compare — [LGL] then read name=print correctly.
+3. **Partial named struct construction fills POSITIONALLY.** `HirCallArg(name:,
+   value:, span:)` omitted the hand-desugared `has_name` field; the seed
+   placed `value` in the `name` slot → `arg.value` read the span (disc=-1) in
+   BOTH mono scan and interp. FIX: pass ALL fields in declaration order
+   (expressions.spl Call/MethodCall arms; declaration_lowering.spl
+   lower_function HirFunction ctor gained has_export_attr/
+   has_driver_manifest_attr/has_doc_comment).
+4. **`.?` on a plain (non-optional) empty array is TRUE** → is_generic_function
+   classified `-c main` as generic and dragged the whole mono machinery in
+   (mono scan should never have run). FIX: nil-guarded `.len() > 0` in
+   is_generic_function/struct/class + typed Dict-value rebinds in
+   collect_generics/scan_call_sites.
+5. **Same-name same-shape static methods dispatch to the WRONG type** (it14
+   class): `Value.int(v)` collided with `SdnValue.int(v)` — eval produced a
+   non-Value box so `case Value.Int(l)` never matched. FIX: construct enum
+   variants DIRECTLY (`Value.Int(v)` etc.) throughout interpreter.spl /
+   interpreter_calls.spl.
+6. **Struct payload lost through the Value.Function channel** ([CF] f_nil=true
+   even for a freshly constructed, hoisted FunctionValue) + the
+   rt_value_int→rt_value_print pointer round-trip SEGVs. FIX: builtin
+   fast-path in the interp Call arm dispatches by the callee NamedVar NAME
+   (try_call_builtin) before evaluating the callee as a value; Print's scalar
+   cases print via pure Simple ("{iv}") instead of rt_value_print.
+7. **`int(text)` builtin returns the FIRST character's char code** on stage4
+   (int("1")==49, int("12")==49) → print(1+1) printed 98. FIX: manual decimal
+   accumulation loop in parser_guarded_int_text (10.frontend/core/parser.spl).
+
+### Also fixed / added
+- Ident lowering: unresolved names that are known interpreter builtins are
+  defined into the symbol table and lowered to NamedVar (lower_unresolved_ident
+  + is_interp_builtin_fn in expressions.spl); the HIR interpreter gained a
+  NamedVar eval arm (env lookup, Function-by-name fallback).
+- Qualified ALL bare patterns in interpreter.spl/interpreter_calls.spl
+  (Value.*, HirBinOp.*, HirUnaryOp.*, HirAssignOp.*, MethodResolution.*) and
+  lower_binop/lower_unaryop (BinOp.*/UnaryOp.*, + defensive `case _` net).
+- eval_binop: op nil-guard (kept, harmless).
+- Probe cleanup done (deploy precondition): all ungated [LHE*]/[LGL]/[LBO]/
+  [LBU]/[LST*]/[LM]/[FBC]/[FBS]/[MS*] eprints removed; the `[frontend] parsed
+  module` STDOUT print is now gated behind SIMPLE_COMPILER_TRACE
+  (frontend.spl); interpreter/driver probes remain itrace/dtrace-gated
+  (SIMPLE_INTERP_TRACE=1).
+
+### Verification (stage4_it18z, clean build)
+- `SIMPLE_UNSTUB_HIR=1 <bin> -c "print(1+1)"` → stdout exactly `2`, rc=0.
+- `SIMPLE_UNSTUB_HIR=1 <bin> run /tmp/hello_it15.spl` → `hello-world-42`, rc=0.
+- `<bin> --version` → `Simple v1.0.0-beta`, rc=0.
+
+### Known follow-ups (NOT blockers for the smoke)
+- The `?` operator did not propagate an Err mid-chain in one observed case
+  (flow continued into call_function after eval_binop returned Err) — masked
+  now that the happy path returns Ok end-to-end, but worth its own iteration.
+- `int(text)` builtin lowering (first-char-code result) is a SEED codegen bug;
+  the parser now avoids it, but other int() call sites on stage4 remain
+  suspect.
+- rt_value_int→rt_value_print round-trip SEGV in the compiled interpreter
+  remains unexplained (bypassed via pure-Simple print).
+- Struct-shadowed variant names (Field/Block/Expr) remain hazardous in every
+  OTHER match on stage4; the pre-dispatch idiom in expressions.spl /
+  monomorphize_integration.spl is the template.
+Binaries: scratchpad/stage4_it18{,b..z}. Coordinator: stub-default flip +
+deploy are YOURS; this iteration stops here per instructions.
