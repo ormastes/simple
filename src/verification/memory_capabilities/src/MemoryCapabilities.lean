@@ -79,7 +79,9 @@ def accessIsSafe (env : RefEnv) (access : MemAccess) : Bool :=
 def wellFormed (env : RefEnv) : Prop :=
   ∀ loc refs, (loc, refs) ∈ env.activeRefs →
     countRefsWithCapability refs RefCapability.Exclusive ≤ 1 ∧
-    countRefsWithCapability refs RefCapability.Isolated ≤ 1
+    countRefsWithCapability refs RefCapability.Isolated ≤ 1 ∧
+    countRefsWithCapability refs RefCapability.Exclusive +
+      countRefsWithCapability refs RefCapability.Isolated ≤ 1
 
 theorem can_convert_refl (cap : RefCapability) :
   canConvert cap cap = true := by
@@ -258,10 +260,51 @@ theorem singleton_env_wellformed (baseType : String) (loc : Nat) (cap : RefCapab
     exact List.length_filter_le
       (fun r : Reference => r.refType.capability == RefCapability.Exclusive)
       ([{ location := loc, refType := { baseType := baseType, capability := cap } }] : List Reference)
-  · unfold countRefsWithCapability
-    exact List.length_filter_le
-      (fun r : Reference => r.refType.capability == RefCapability.Isolated)
-      ([{ location := loc, refType := { baseType := baseType, capability := cap } }] : List Reference)
+  · constructor
+    · unfold countRefsWithCapability
+      exact List.length_filter_le
+        (fun r : Reference => r.refType.capability == RefCapability.Isolated)
+        ([{ location := loc, refType := { baseType := baseType, capability := cap } }] : List Reference)
+    · cases cap
+      · change countRefsWithCapability
+          ([{ location := loc, refType := { baseType := baseType, capability := RefCapability.Shared } }] : List Reference)
+          RefCapability.Exclusive +
+          countRefsWithCapability
+          ([{ location := loc, refType := { baseType := baseType, capability := RefCapability.Shared } }] : List Reference)
+          RefCapability.Isolated ≤ 1
+        rw [show countRefsWithCapability
+          ([{ location := loc, refType := { baseType := baseType, capability := RefCapability.Shared } }] : List Reference)
+          RefCapability.Exclusive = 0 by rfl]
+        rw [show countRefsWithCapability
+          ([{ location := loc, refType := { baseType := baseType, capability := RefCapability.Shared } }] : List Reference)
+          RefCapability.Isolated = 0 by rfl]
+        exact Nat.zero_le 1
+      · change countRefsWithCapability
+          ([{ location := loc, refType := { baseType := baseType, capability := RefCapability.Exclusive } }] : List Reference)
+          RefCapability.Exclusive +
+          countRefsWithCapability
+          ([{ location := loc, refType := { baseType := baseType, capability := RefCapability.Exclusive } }] : List Reference)
+          RefCapability.Isolated ≤ 1
+        rw [show countRefsWithCapability
+          ([{ location := loc, refType := { baseType := baseType, capability := RefCapability.Exclusive } }] : List Reference)
+          RefCapability.Exclusive = 1 by rfl]
+        rw [show countRefsWithCapability
+          ([{ location := loc, refType := { baseType := baseType, capability := RefCapability.Exclusive } }] : List Reference)
+          RefCapability.Isolated = 0 by rfl]
+        exact Nat.le_refl 1
+      · change countRefsWithCapability
+          ([{ location := loc, refType := { baseType := baseType, capability := RefCapability.Isolated } }] : List Reference)
+          RefCapability.Exclusive +
+          countRefsWithCapability
+          ([{ location := loc, refType := { baseType := baseType, capability := RefCapability.Isolated } }] : List Reference)
+          RefCapability.Isolated ≤ 1
+        rw [show countRefsWithCapability
+          ([{ location := loc, refType := { baseType := baseType, capability := RefCapability.Isolated } }] : List Reference)
+          RefCapability.Exclusive = 0 by rfl]
+        rw [show countRefsWithCapability
+          ([{ location := loc, refType := { baseType := baseType, capability := RefCapability.Isolated } }] : List Reference)
+          RefCapability.Isolated = 1 by rfl]
+        exact Nat.le_refl 1
 
 theorem two_shared_env_wellformed (baseType : String) (loc : Nat) :
   wellFormed
@@ -287,17 +330,40 @@ theorem two_shared_env_wellformed (baseType : String) (loc : Nat) :
         { location := loc, refType := { baseType := baseType, capability := RefCapability.Shared } }
       ] : List Reference) RefCapability.Exclusive = 0 by rfl]
     exact Nat.zero_le 1
-  · change countRefsWithCapability
-      ([
-        { location := loc, refType := { baseType := baseType, capability := RefCapability.Shared } },
-        { location := loc, refType := { baseType := baseType, capability := RefCapability.Shared } }
-      ] : List Reference) RefCapability.Isolated ≤ 1
-    rw [show countRefsWithCapability
-      ([
-        { location := loc, refType := { baseType := baseType, capability := RefCapability.Shared } },
-        { location := loc, refType := { baseType := baseType, capability := RefCapability.Shared } }
-      ] : List Reference) RefCapability.Isolated = 0 by rfl]
-    exact Nat.zero_le 1
+  · constructor
+    · change countRefsWithCapability
+        ([
+          { location := loc, refType := { baseType := baseType, capability := RefCapability.Shared } },
+          { location := loc, refType := { baseType := baseType, capability := RefCapability.Shared } }
+        ] : List Reference) RefCapability.Isolated ≤ 1
+      rw [show countRefsWithCapability
+        ([
+          { location := loc, refType := { baseType := baseType, capability := RefCapability.Shared } },
+          { location := loc, refType := { baseType := baseType, capability := RefCapability.Shared } }
+        ] : List Reference) RefCapability.Isolated = 0 by rfl]
+      exact Nat.zero_le 1
+    · change
+        countRefsWithCapability
+          ([
+            { location := loc, refType := { baseType := baseType, capability := RefCapability.Shared } },
+            { location := loc, refType := { baseType := baseType, capability := RefCapability.Shared } }
+          ] : List Reference) RefCapability.Exclusive +
+        countRefsWithCapability
+          ([
+            { location := loc, refType := { baseType := baseType, capability := RefCapability.Shared } },
+            { location := loc, refType := { baseType := baseType, capability := RefCapability.Shared } }
+          ] : List Reference) RefCapability.Isolated ≤ 1
+      rw [show countRefsWithCapability
+        ([
+          { location := loc, refType := { baseType := baseType, capability := RefCapability.Shared } },
+          { location := loc, refType := { baseType := baseType, capability := RefCapability.Shared } }
+        ] : List Reference) RefCapability.Exclusive = 0 by rfl]
+      rw [show countRefsWithCapability
+        ([
+          { location := loc, refType := { baseType := baseType, capability := RefCapability.Shared } },
+          { location := loc, refType := { baseType := baseType, capability := RefCapability.Shared } }
+        ] : List Reference) RefCapability.Isolated = 0 by rfl]
+      exact Nat.zero_le 1
 
 theorem two_exclusive_env_not_wellformed (baseType : String) (loc : Nat) :
   ¬ wellFormed
@@ -363,7 +429,7 @@ theorem two_isolated_env_not_wellformed (baseType : String) (loc : Nat) :
           { location := loc, refType := { baseType := baseType, capability := RefCapability.Isolated } }
         ] : List Reference))] := by
     simp
-  have hbound := (h hmem).right
+  have hbound := (h hmem).right.left
   have hcount :
       countRefsWithCapability
         ([
@@ -375,40 +441,46 @@ theorem two_isolated_env_not_wellformed (baseType : String) (loc : Nat) :
   rw [hcount] at hbound
   exact Nat.not_succ_le_self 1 hbound
 
-theorem mixed_exclusive_isolated_env_wellformed_gap (baseType : String) (loc : Nat) :
-  wellFormed
+theorem mixed_exclusive_isolated_env_not_wellformed (baseType : String) (loc : Nat) :
+  ¬ wellFormed
     { activeRefs :=
         [(loc,
           [{ location := loc,
              refType := { baseType := baseType, capability := RefCapability.Exclusive } },
            { location := loc,
              refType := { baseType := baseType, capability := RefCapability.Isolated } }])] } := by
-  intro foundLoc refs h
-  simp at h
-  rcases h with ⟨_, hrefs⟩
-  subst refs
-  constructor
-  · change countRefsWithCapability
+  intro hwf
+  have h := hwf loc
+    ([
+      { location := loc, refType := { baseType := baseType, capability := RefCapability.Exclusive } },
+      { location := loc, refType := { baseType := baseType, capability := RefCapability.Isolated } }
+    ] : List Reference)
+  have hmem :
+      (loc,
+        ([
+          { location := loc, refType := { baseType := baseType, capability := RefCapability.Exclusive } },
+          { location := loc, refType := { baseType := baseType, capability := RefCapability.Isolated } }
+        ] : List Reference)) ∈
+      [(loc,
+        ([
+          { location := loc, refType := { baseType := baseType, capability := RefCapability.Exclusive } },
+          { location := loc, refType := { baseType := baseType, capability := RefCapability.Isolated } }
+        ] : List Reference))] := by
+    simp
+  have hbound := (h hmem).right.right
+  have hcount :
+      countRefsWithCapability
       ([
         { location := loc, refType := { baseType := baseType, capability := RefCapability.Exclusive } },
         { location := loc, refType := { baseType := baseType, capability := RefCapability.Isolated } }
-      ] : List Reference) RefCapability.Exclusive ≤ 1
-    rw [show countRefsWithCapability
+      ] : List Reference) RefCapability.Exclusive +
+      countRefsWithCapability
       ([
         { location := loc, refType := { baseType := baseType, capability := RefCapability.Exclusive } },
         { location := loc, refType := { baseType := baseType, capability := RefCapability.Isolated } }
-      ] : List Reference) RefCapability.Exclusive = 1 by rfl]
-    exact Nat.le_refl 1
-  · change countRefsWithCapability
-      ([
-        { location := loc, refType := { baseType := baseType, capability := RefCapability.Exclusive } },
-        { location := loc, refType := { baseType := baseType, capability := RefCapability.Isolated } }
-      ] : List Reference) RefCapability.Isolated ≤ 1
-    rw [show countRefsWithCapability
-      ([
-        { location := loc, refType := { baseType := baseType, capability := RefCapability.Exclusive } },
-        { location := loc, refType := { baseType := baseType, capability := RefCapability.Isolated } }
-      ] : List Reference) RefCapability.Isolated = 1 by rfl]
-    exact Nat.le_refl 1
+      ] : List Reference) RefCapability.Isolated = 2 := by
+    rfl
+  rw [hcount] at hbound
+  exact Nat.not_succ_le_self 1 hbound
 
 end MemoryCapabilities
