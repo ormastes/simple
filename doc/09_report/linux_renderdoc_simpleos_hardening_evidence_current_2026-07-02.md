@@ -141,9 +141,25 @@
 - smoke_spec_examples: 7
 - smoke_spec_failures: 0
 
+## Related Game2D Breakout Evidence
+
+- status: in_progress
+- wrapper: `scripts/check/check-game2d-breakout.shs`
+- logic_session_spec: `test/03_system/game2d/breakout_production_spec.spl`
+- logic_session_status: pass
+- logic_session_examples: 1
+- render_oracles_spec: `test/03_system/game2d/breakout_render_oracles_spec.spl`
+- render_oracles_status: pass
+- render_oracles_examples: 2
+- window_capture_spec: `test/03_system/game2d/breakout_window_capture_spec.spl`
+- window_capture_status: pass_host_block_recorded
+- tracked_jit_render_gap: `doc/08_tracking/bug/jit_game2d_backend_method_dispatch_sigsegv_2026-07-02.md`
+- tracked_window_host_gap: `doc/08_tracking/bug/game2d_no_window_externs_in_host_binaries_2026-07-03.md`
+
 ## Scope Boundary
 
 This report proves the Linux RenderDoc/web/gui, Vulkan Engine2D readback, CPU
 SIMD Engine2D acceleration, QEMU screendump/readback access, SimpleOS QEMU/WM
 hardening, and current LLVM-to-SimpleOS cross-toolchain slices only. It does
-not claim macOS, Windows, iOS, Android, or cross-platform freshness completion.
+not claim Game2D production completion, macOS, Windows, iOS, Android, or
+cross-platform freshness completion.

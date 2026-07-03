@@ -111,6 +111,22 @@ check_cxx_runtime_headers() {
     fi
 }
 
+sysroot_target_matches() {
+    [ -f "$SYSROOT/share/simpleos/target-triple.txt" ] \
+        && [ "$(cat "$SYSROOT/share/simpleos/target-triple.txt")" = "$TRIPLE" ]
+}
+
+ensure_target_sysroot() {
+    if [ ! -d "$SYSROOT/lib" ] \
+        || [ ! -f "$SYSROOT/include/c++/v1/iosfwd" ] \
+        || [ ! -f "$SYSROOT/include/sys/statvfs.h" ] \
+        || [ ! -f "$SYSROOT/include/sys/utsname.h" ] \
+        || ! sysroot_target_matches; then
+        echo "[llvm] Building sysroot first..."
+        sh "$SCRIPT_DIR/sysroot.shs"
+    fi
+}
+
 # Stage 1: Build host LLVM tools (tblgen, etc.)
 # These run on the host during cross-compilation
 stage1_host_tools() {
@@ -135,14 +151,7 @@ stage1_host_tools() {
 stage2_cross_llvm() {
     echo "[llvm] Stage 2: Cross-compiling LLVM for SimpleOS target $TRIPLE..."
 
-    # Ensure sysroot exists before cross-compile
-    if [ ! -d "$SYSROOT/lib" ] \
-        || [ ! -f "$SYSROOT/include/c++/v1/iosfwd" ] \
-        || [ ! -f "$SYSROOT/include/sys/statvfs.h" ] \
-        || [ ! -f "$SYSROOT/include/sys/utsname.h" ]; then
-        echo "[llvm] Building sysroot first..."
-        sh "$SCRIPT_DIR/sysroot.shs"
-    fi
+    ensure_target_sysroot
     check_cxx_runtime_headers
 
     # Verify host tools are available
@@ -192,6 +201,9 @@ stage3_compiler_rt() {
         echo "[llvm] ERROR: compiler-rt source not found at $LLVM_SRC/compiler-rt"
         exit 1
     fi
+
+    # Direct compiler-rt invocations also need the target-matched shared sysroot.
+    ensure_target_sysroot
 
     # Require the per-target cross clang from stage 2 so builtins link against the
     # same headers / runtime expectations as the rest of the toolchain.

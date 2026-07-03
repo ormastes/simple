@@ -14,6 +14,7 @@ use compiler.backend.backend.interpreter_calls.*
 
 extern fn rt_host_gpu_lane_event(lane_code: i64, phase_code: i64) -> i64
 extern fn rt_host_gpu_queue_emit(lane_code: i64, kind_code: i64, payload_size: i64, backend_handle: i64) -> i64
+extern fn rt_eprintln_str(ptr: i64, len: i64) -> i64  # PROBE_ITER14
 
 # ============================================================================
 # Interpreter Backend Implementation
@@ -38,7 +39,21 @@ impl InterpreterBackendImpl:
     fn kind() -> BackendKind:
         BackendKind.Interpreter
 
+    # Uniquely-named entry point for the interpreter driver path. The seed
+    # miscompiles a direct/closure call to `process_module` on a concrete
+    # InterpreterBackendImpl: because SEVEN structs define an identically-named
+    # and identically-signatured `process_module(HirModule) -> Result<...>`, the
+    # seed's method-name dispatch resolves the call to a stub that returns
+    # Ok(default) WITHOUT running the interpreter body (main never executes,
+    # nothing prints). A uniquely-named method breaks the collision so the call
+    # dispatches to the real body. See doc/08_tracking/bug/
+    # stage4_codegen_compact_form_hazards_2026-07-02.md (Iteration 14).
+    fn interpret_hir_module(module: HirModule) -> Result<BackendResult, BackendError>:
+        self.process_module(module)
+
     fn process_module(module: HirModule) -> Result<BackendResult, BackendError>:
+        val _pm_probe = "[PM] entry process_module\n"  # PROBE_ITER14
+        rt_eprintln_str(_pm_probe.ptr(), _pm_probe.len())  # PROBE_ITER14
         # Create evaluation context
         val env = Environment.new()
         val ctx = EvalContext(env: env, module: module, backend: self)

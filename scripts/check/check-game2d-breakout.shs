@@ -2,8 +2,8 @@
 # check-game2d-breakout.shs — Breakout playable-game evidence gate
 # (W5b, G3.2/G3.3/G3.4 of doc/03_plan/ui/production_readiness_master_plan_2026-07-02.md).
 #
-# Runs the headless production spec (60s session, frame-time oracle, memory,
-# milestone PPM captures, input-divergence oracle) via `bin/simple test`
+# Runs the headless production spec (60s session), rendered-oracles spec
+# (low-res frame-time smoke + input divergence), milestone captures via `bin/simple test`
 # (interpreter path — the Cranelift JIT SIGSEGVs on this call chain, see
 # doc/08_tracking/bug/jit_game2d_backend_method_dispatch_sigsegv_2026-07-02.md),
 # then opens a real SDL2 window under a PRIVATE Xvfb display and captures it
@@ -18,6 +18,7 @@ cd "$ROOT_DIR"
 
 SIMPLE_BIN="${SIMPLE_BIN:-bin/simple}"
 HEADLESS_SPEC="test/03_system/game2d/breakout_production_spec.spl"
+RENDER_ORACLES_SPEC="test/03_system/game2d/breakout_render_oracles_spec.spl"
 CAPTURES_SPEC="test/03_system/game2d/breakout_captures_spec.spl"
 WINDOW_SPEC="test/03_system/game2d/breakout_window_capture_spec.spl"
 HEADLESS_TIMEOUT_SECS="${SIMPLE_BREAKOUT_HEADLESS_TIMEOUT_SECS:-900}"
@@ -61,7 +62,7 @@ all_pass=true
 {
     echo "check=game2d_breakout"
 
-    # ---- Headless: 60s session, frame-time oracle, memory, captures, divergence ----
+    # ---- Headless: 60s session ----
     # `--no-session-daemon` is required: the default light test-daemon path
     # hard-kills the child test process after 120s regardless of --timeout
     # (the request file only carries the test path, not the timeout) — this
@@ -82,6 +83,22 @@ all_pass=true
         all_pass=false
     fi
     emit_file_status "headless_log" "$WORK_DIR/headless.log"
+
+    # ---- Rendered oracles: low-res frame-time smoke + input divergence ----
+    set +e
+    "$SIMPLE_BIN" test --no-session-daemon "$RENDER_ORACLES_SPEC" --timeout "$WINDOW_TIMEOUT_SECS" \
+        >"$WORK_DIR/render_oracles.log" 2>&1
+    render_oracles_exit=$?
+    set -e
+    echo "render_oracles_exit=$render_oracles_exit"
+    grep -E '^(lowres_frame_time_ms|hash_left|left_paddle_x)' "$WORK_DIR/render_oracles.log" || true
+    if [ "$render_oracles_exit" -eq 0 ]; then
+        echo "render_oracles_status=pass"
+    else
+        echo "render_oracles_status=fail"
+        all_pass=false
+    fi
+    emit_file_status "render_oracles_log" "$WORK_DIR/render_oracles.log"
 
     # ---- Milestone captures (G3.3, separate spec: ~7 min at 800x600) ----
     set +e
