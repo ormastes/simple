@@ -298,7 +298,7 @@ theorem process_one_preserves_fifo (ht : HandlerTable) (s : ActorState)
   match h : s.mailbox with
   | []       => exact absurd h hne
   | msg :: t =>
-    simp only [h, List.tail_cons]
+    simp only [List.tail_cons]
     -- The unfolded term still has a residual split on `!s.alive`.
     -- isTrue branch: h✝ : false = true → contradiction.
     -- isFalse branch: the real dispatch; both ok and error leave mailbox = t.
@@ -329,7 +329,7 @@ theorem dispatch_error_no_halt (ht : HandlerTable) (s : ActorState)
     -- Rewrite head! in herr: s.mailbox = msg :: t, so s.mailbox.head! = msg
     have hhead : s.mailbox.head! = msg := h ▸ hd_cons msg t
     rw [hhead] at herr
-    simp only [h, List.tail_cons]
+    simp only [List.tail_cons]
     simp only [DispatchResult.isOk] at herr
     -- The residual `!s.alive` split
     split
@@ -365,7 +365,20 @@ theorem scheduler_error_no_halt (ht : HandlerTable) (ss : SchedulerState)
     -- herr : (dispatchMsg ht msg).isOk = false
     have hnotok : (dispatchMsg ht msg).isOk = false := herr
     -- Use full simp to reduce the match on rOpt and the nested ite
-    simp [h, hnotok, halive]
+    simp [hnotok, halive]
+
+/-- A dead actor has no runnable work: runOnce leaves scheduler state unchanged. -/
+theorem scheduler_dead_actor_no_dispatch (ht : HandlerTable) (ss : SchedulerState)
+    (hdead : ss.actorState.alive = false) :
+    runOnce ht ss = (ss, false) := by
+  simp [runOnce, processOne, hdead]
+
+/-- An alive actor with an empty mailbox has no runnable work: runOnce is idle. -/
+theorem scheduler_empty_mailbox_no_dispatch (ht : HandlerTable) (ss : SchedulerState)
+    (halive : ss.actorState.alive = true)
+    (hempty : ss.actorState.mailbox = []) :
+    runOnce ht ss = (ss, false) := by
+  simp [runOnce, processOne, halive, hempty]
 
 /-- T5b: A handler error on one scheduler tick does not starve the next queued
     successful message; the next run_once still dispatches it. -/
@@ -400,8 +413,7 @@ theorem no_lost_task_send (ch : GreenChannel) (v : Val) (tid : TaskId)
     (hwaiter : ch.waiting_task_ids ≠ []) :
     let r := greenSend ch v
     tid ∈ r.channel.waiting_task_ids ∨ (r.unparked = true ∧ r.receiver_task_id = tid) := by
-  simp only [greenSend, hopen, hwaiter, decide_eq_false_iff_not,
-             not_false_eq_true, ite_true, ite_false]
+  simp only [greenSend, hopen]
   cases h : ch.waiting_task_ids with
   | nil  => exact absurd h hwaiter
   | cons hd tl =>
