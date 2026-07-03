@@ -28,6 +28,14 @@ use compiler.core.types.{TYPE_UNION, TYPE_INTERSECTION, TYPE_REFINEMENT, TYPE_NA
 use compiler.frontend.parser_types.*
 use compiler.frontend.parser_types_expr.*
 use compiler.frontend.parser_types_expr.{ComprehensionClause, ComprehensionKind, GpuLaunchConfig}
+use std.nogc_sync_mut.io.process_ops.{eprint}
+
+# Iteration 17 probe plumbing (UNGATED, Trap D): trace ExprKind discs at
+# construction time to find where the stage4 flat-bridge Expr goes bad.
+extern fn rt_enum_discriminant(value: ExprKind) -> i64
+
+fn flat_bridge_expr_disc(k: ExprKind) -> i64:
+    rt_enum_discriminant(k)
 use compiler.frontend.lexer_types.{Span}
 use compiler.common.dependency.visibility.{Visibility}
 use std.nogc_sync_mut.io.process_ops.{eprint}
@@ -307,7 +315,9 @@ fn convert_flat_expr(idx: i64) -> Expr:
                 span: span
             ))
             ai = ai + 1
-        return Expr(kind: ExprKind.Call(callee, args), span: span)
+        val call_kind: ExprKind = ExprKind.Call(callee, args)
+        eprint("[FBC] built Call disc={flat_bridge_expr_disc(call_kind)} args={args.len()}")
+        return Expr(kind: call_kind, span: span)
     elif tag == EXPR_BINARY:
         val left = convert_flat_expr(expr_get_left(idx))
         val right = convert_flat_expr(expr_get_right(idx))
@@ -505,6 +515,7 @@ fn convert_flat_stmt(idx: i64) -> Stmt:
         return Stmt(kind: StmtKind.Expr(Expr(kind: ExprKind.NilLit, span: span)), span: span)
     if tag == STMT_EXPR:
         val e = convert_flat_expr(stmt_get_expr(idx))
+        eprint("[FBS] stmt-expr disc={flat_bridge_expr_disc(e.kind)}")
         return Stmt(kind: StmtKind.Expr(e), span: span)
     elif tag == STMT_RETURN:
         val ret_idx = stmt_get_expr(idx)
