@@ -167,9 +167,11 @@ impl MonomorphizationPass:
         if block == nil:
             return
         for stmt in block.stmts:
-            self.scan_stmt(stmt)
+            val stmt_t: HirStmt = stmt
+            self.scan_stmt(stmt_t)
         if block.has:
-            self.scan_expr(block.value)
+            val block_value_t: HirExpr = block.value
+            self.scan_expr(block_value_t)
 
     me scan_stmt(stmt: HirStmt):
         """Scan a statement for generic call sites.
@@ -183,16 +185,24 @@ impl MonomorphizationPass:
         (stage4 -c/run chain, iteration 15)."""
         if stmt == nil:
             return
+        # Typed rebinds on every extracted payload: consuming an extracted
+        # ANY-ish payload directly misreads on stage4 (most-fields-wins /
+        # garbage pointer -> SEGV in scan_expr; bug doc iteration 18).
         match stmt.kind:
             case HirStmtKind.Expr(e):
-                self.scan_expr(e)
+                val se_t: HirExpr = e
+                self.scan_expr(se_t)
             case HirStmtKind.Let(_, _, init):
-                self.scan_expr(init)
+                val init_t: HirExpr = init
+                self.scan_expr(init_t)
             case HirStmtKind.Assign(target, _, value):
-                self.scan_expr(target)
-                self.scan_expr(value)
+                val target_t: HirExpr = target
+                val value_t: HirExpr = value
+                self.scan_expr(target_t)
+                self.scan_expr(value_t)
             case HirStmtKind.Block(b):
-                self.scan_block(b)
+                val sb_t: HirBlock = b
+                self.scan_block(sb_t)
 
     me scan_expr(expr: HirExpr):
         """Scan an expression for generic call sites."""
@@ -203,26 +213,39 @@ impl MonomorphizationPass:
         # trapping ("field access on nil receiver", iteration 10).
         if expr == nil:
             return
+        # Typed rebinds on every extracted payload before use (stage4
+        # extracted-ANY-payload misread hazard, bug doc iteration 18).
         match expr.kind:
             # Direct function calls with type arguments
             case HirExprKind.Call(callee, args, type_args):
+                val call_callee_t: HirExpr = callee
+                val call_args_t: [HirCallArg] = args
                 if type_args.?:
-                    self.check_generic_call(callee, type_args)
-                self.scan_expr(callee)
-                for arg in args:
-                    self.scan_expr(arg.value)
+                    self.check_generic_call(call_callee_t, type_args)
+                self.scan_expr(call_callee_t)
+                for arg in call_args_t:
+                    val arg_t: HirCallArg = arg
+                    val arg_value_t: HirExpr = arg_t.value
+                    self.scan_expr(arg_value_t)
 
             # Method calls (qualified: bare MethodCall collides with the mock
             # verification class of the same name — see scan_stmt docstring)
             case HirExprKind.MethodCall(receiver, method, args, resolution):
-                self.scan_expr(receiver)
-                for arg in args:
-                    self.scan_expr(arg.value)
+                val mc_receiver_t: HirExpr = receiver
+                val mc_args_t: [HirCallArg] = args
+                self.scan_expr(mc_receiver_t)
+                for arg in mc_args_t:
+                    val marg_t: HirCallArg = arg
+                    val marg_value_t: HirExpr = marg_t.value
+                    self.scan_expr(marg_value_t)
 
             # Static calls (e.g., Type.method<T>())
             case HirExprKind.StaticCall(ty, method, args, resolution):
-                for arg in args:
-                    self.scan_expr(arg.value)
+                val sc_args_t: [HirCallArg] = args
+                for arg in sc_args_t:
+                    val sarg_t: HirCallArg = arg
+                    val sarg_value_t: HirExpr = sarg_t.value
+                    self.scan_expr(sarg_value_t)
 
             # Control flow
             case HirExprKind.If(cond, then_, else_):
@@ -262,11 +285,14 @@ impl MonomorphizationPass:
 
             # Binary/Unary
             case HirExprKind.Binary(_, left, right):
-                self.scan_expr(left)
-                self.scan_expr(right)
+                val bin_left_t: HirExpr = left
+                val bin_right_t: HirExpr = right
+                self.scan_expr(bin_left_t)
+                self.scan_expr(bin_right_t)
 
             case HirExprKind.Unary(_, operand):
-                self.scan_expr(operand)
+                val un_operand_t: HirExpr = operand
+                self.scan_expr(un_operand_t)
 
             # Collections
             case HirExprKind.ArrayLit(elements, _):

@@ -225,8 +225,11 @@ impl InterpreterBackendImpl:
 
             case HirExprKind.Binary(op, left, right):
                 itrace("[EE] Binary arm")
-                val lv = self.eval_expr(left, ctx)?
-                val rv = self.eval_expr(right, ctx)?
+                # Typed rebinds (stage4 extracted-payload hazard, iteration 18).
+                val bin_left_t: HirExpr = left
+                val bin_right_t: HirExpr = right
+                val lv = self.eval_expr(bin_left_t, ctx)?
+                val rv = self.eval_expr(bin_right_t, ctx)?
                 self.eval_binop(op, lv, rv, expr.span)
 
             case HirExprKind.Unary(op, operand):
@@ -246,10 +249,17 @@ impl InterpreterBackendImpl:
 
             case HirExprKind.Call(callee, args, _):
                 itrace("[EE] Call arm")
-                val fn_value = self.eval_expr(callee, ctx)?
+                # Typed rebinds: extracted ANY-ish payloads misread on stage4
+                # when consumed directly — `arg.value` on the untyped list
+                # element read disc=-1 garbage (bug doc iteration 18).
+                val call_callee_t: HirExpr = callee
+                val call_args_t: [HirCallArg] = args
+                val fn_value = self.eval_expr(call_callee_t, ctx)?
                 var arg_values: [Value] = []
-                for arg in args:
-                    val v = self.eval_expr(arg.value, ctx)?
+                for arg in call_args_t:
+                    val arg_t: HirCallArg = arg
+                    val arg_value_t: HirExpr = arg_t.value
+                    val v = self.eval_expr(arg_value_t, ctx)?
                     arg_values = arg_values.push(v)
                 self.call_function(fn_value, arg_values, ctx, expr.span)
 
