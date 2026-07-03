@@ -268,13 +268,28 @@ impl InterpreterBackendImpl:
                 # element read disc=-1 garbage (bug doc iteration 18).
                 val call_callee_t: HirExpr = callee
                 val call_args_t: [HirCallArg] = args
-                val fn_value = self.eval_expr(call_callee_t, ctx)?
                 var arg_values: [Value] = []
                 for arg in call_args_t:
                     val arg_t: HirCallArg = arg
                     val arg_value_t: HirExpr = arg_t.value
                     val v = self.eval_expr(arg_value_t, ctx)?
                     arg_values = arg_values.push(v)
+                # Builtin fast-path keyed on the callee NAME: the Value.Function
+                # payload channel loses its FunctionValue on stage4 ([CF]
+                # f_nil=true even for a freshly constructed global — enum
+                # construction with a struct payload stores nil), so dispatch
+                # builtins directly from the HIR callee (iteration 18).
+                val callee_kind_v: HirExprKind = call_callee_t.kind
+                match callee_kind_v:
+                    case HirExprKind.NamedVar(_cs, cname):
+                        val cname_t: text = cname
+                        itrace("[EE] Call builtin fast-path name={cname_t}")
+                        val builtin_result = self.try_call_builtin(cname_t, arg_values)
+                        if builtin_result.?:
+                            return builtin_result.unwrap()
+                    case _:
+                        pass
+                val fn_value = self.eval_expr(call_callee_t, ctx)?
                 self.call_function(fn_value, arg_values, ctx, expr.span)
 
             # Qualified pattern: bare `MethodCall` collides with a global class of
