@@ -216,6 +216,16 @@ theorem exclusive_write_same_loc (baseType : String) (loc : Nat) :
   simp [allowsAccess]
   exact Or.inl rfl
 
+theorem singleton_exclusive_write_safe (baseType : String) (loc : Nat) :
+  accessIsSafe
+    { activeRefs :=
+        [(loc,
+          [{ location := loc,
+             refType := { baseType := baseType, capability := RefCapability.Exclusive } }])] }
+    (MemAccess.Write loc) = true := by
+  simp [accessIsSafe, getActiveRefs, allowsAccess]
+  exact Or.inl rfl
+
 theorem isolated_write_same_loc (baseType : String) (loc : Nat) :
   allowsAccess { location := loc, refType := { baseType := baseType, capability := RefCapability.Isolated } } (MemAccess.Write loc) = true := by
   simp [allowsAccess]
