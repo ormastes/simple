@@ -56,7 +56,7 @@ N/A for this slice: this turn only fixes existing smoke wrappers and records blo
   - PASS: RV32 ELF and bin artifacts exist.
   - PASS: RV32 VHDL template artifacts exist for package/decode/register-file generation.
   - FAIL: RV32 bitstream artifact is absent in this workspace.
-  - PASS: RV32 FPGA core helper VHDL exists at `build/vhdl/rv32/rv32_core.vhd` and contains generated signal assignments.
+  - FAIL: RV32 FPGA core helper VHDL exists, but the K26 top is still a payload-stream/liveness design rather than a PC-following SimpleOS executor.
   - FAIL: RV32 FPGA ELF load/run evidence is absent (`build/fpga/rv32/load_elf_rv32.log` missing).
 
 ## Phase
@@ -92,3 +92,4 @@ dev-in-progress
 - dev: Replaced the RV64 fetch-only core with a minimal RV64/C early executor for the current SimpleOS entry path (ADDI/AUIPC/LUI/JAL/JALR/load/store/branch plus the compressed stack ops seen in the UART path), made Vivado accept the generated VHDL, and capped RV64 RAM inference from 16 MiB to 512 KiB so K26 synth-only fits. Dual-arch preflight still fails the RV64/RV32 physical run-marker gates.
 - dev: Added a `soc_top_rv64_k26` STARTUPE3 wrapper so full RV64 bitgen no longer exposes unconstrained `clk`/`rst` board pins. Routed `uart_tx` directly and kept CPU/RAM synthesis live through an internal marked debug signal instead of corrupting UART with liveness XOR. Current bitstream programs successfully; Xilinx USB serial capture still sees zero bytes because the PL UART is routed to PMOD H12/E10 and no PMOD serial adapter is present in `/dev`.
 - dev: Restored the RV64 GHDL SoC smoke testbench and fixed the executor path enough to see real UART TX activity in simulation: UART Wishbone ack/TX is real, RAM ack is data-valid, execute returns to fetch, unaligned literal loads and cross-word 32-bit fetches work, and CSR reads return hart 0. Full K26 bitgen still passes; physical `/dev/ttyUSB1..3` capture remains zero because it does not observe PMOD H12/E10.
+- dev: Tightened the combined RV32/RV64 preflight so RV32 no longer passes `rv32_fpga_core_executable` for the decode-helper/liveness top. Next RV32 work is a real PC-following executor or a verified boot-marker path.

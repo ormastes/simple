@@ -132,11 +132,12 @@ RV32I RTL helper visibility is fixed for the existing `rv32i_rtl` core path:
 compile now reaches the real remaining blocker: the behavioral core has no
 `@hardware` boundary for `compile --backend=vhdl`.
 
-`scripts/fpga/generate_rv32_vhdl.shs` now also writes generated RV32
-decode/control hardware source and compiles it to
-`build/vhdl/rv32/rv32_core.vhd`. The dual-arch preflight now passes
-`rv32_fpga_core_executable` for that helper RTL while still failing RV32
-bitstream and ELF load/run evidence.
+`scripts/fpga/generate_rv32_vhdl.shs` writes generated RV32 decode/control
+hardware source and compiles it to `build/vhdl/rv32/rv32_core.vhd`, but the
+combined preflight no longer counts that helper as an executable core while
+`soc_top_rv32.vhd` is still a payload-stream/liveness top. RV32 must grow a
+PC-following executor or real boot-marker path before `rv32_fpga_core_executable`
+can pass.
 
 `scripts/fpga/generate_rv64_vhdl.shs` now emits `build/vhdl/rv64/rv64gc_core.vhd`
 as a minimal RV64/C early executor instead of a fetch-only placeholder. It
