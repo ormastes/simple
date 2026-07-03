@@ -14,7 +14,7 @@ use app.office.counter.{CounterApp}
 use app.office.md_wysiwyg.{build_wysiwyg_view, wysiwyg_source_pane, wysiwyg_update_line_checked}
 use app.office.sheets.spreadsheet.{Sheet}
 use common.office.file_ops.{RecentFileStore}
-use app.office.sheets.cell.{cell_ref_to_string, parse_cell_ref}
+use app.office.sheets.cell.{cell_ref_to_string, parse_cell_ref, CellRef}
 use app.office.render_adapter.{office_render, office_render_source}
 use app.office.file_formats.{parse_markdown_document, document_to_markdown, parse_csv_sheet, sheet_to_csv}
 use app.office.slides.deck_format.{parse_deck, deck_to_text}
@@ -27,6 +27,7 @@ use app.office.word.mail_merge.{merge_all_markdown}
 use app.office.word.edit_ops.{document_find, document_stats}
 use app.office.sheets.data_ops.{sheet_sort_range}
 use app.office.sheets.cell_ref.{parse_range}
+use app.office.sheets.chart.{sheet_bar_chart_svg, sheet_line_chart_svg, sheet_pie_chart_svg, sheet_scatter_chart_svg, sheet_area_chart_svg}
 
 fn _run_sheet_tui(in_path: text) -> i32:
     """Keystroke-driven full-screen editing: real termios raw mode, arrow
@@ -129,6 +130,8 @@ fn run_office(args: [text]) -> i32:
             return _run_find_command(args)
         "stats" =>
             return _run_stats_command(args)
+        "chart" =>
+            return _run_chart_command(args)
         "md-edit" =>
             return _run_markdown_edit_command(args)
         "sheet-edit" =>
@@ -136,7 +139,7 @@ fn run_office(args: [text]) -> i32:
         "slide-edit" =>
             return _run_slide_edit_command(args)
         case _("unsupported office app names show usage"):
-            print "Usage: simple office [launcher|word|sheets|slides|mail|planner|counter|render|open|convert|toc|merge|sort-sheet|find|stats|md-edit|sheet-edit|slide-edit]"
+            print "Usage: simple office [launcher|word|sheets|slides|mail|planner|counter|render|open|convert|toc|merge|sort-sheet|find|stats|chart|md-edit|sheet-edit|slide-edit]"
             return 1
 
 fn _basename(path: text) -> text:
@@ -405,6 +408,103 @@ fn _run_stats_command(args: [text]) -> i32:
     print "characters: {stats.characters}"
     print "paragraphs: {stats.paragraphs}"
     return 0
+
+fn _office_chart_stem(path: text) -> text:
+    val base = _basename(path)
+    val parts = base.split(".")
+    if parts.len() <= 1:
+        return base
+    parts[0:parts.len() - 1].join(".")
+
+fn _chart_split_columns(range_a1: text) -> [text]:
+    """Split a two-column A1 range into [first-column-range, second-column-range]."""
+    val r = parse_range(range_a1)
+    if r == nil:
+        return []
+    val min_col = if r.start.col < r.end_ref.col: r.start.col else: r.end_ref.col
+    val max_col = if r.start.col > r.end_ref.col: r.start.col else: r.end_ref.col
+    val min_row = if r.start.row < r.end_ref.row: r.start.row else: r.end_ref.row
+    val max_row = if r.start.row > r.end_ref.row: r.start.row else: r.end_ref.row
+    if max_col - min_col != 1:
+        return []
+    val a_top = cell_ref_to_string(CellRef(col: min_col, row: min_row))
+    val a_bot = cell_ref_to_string(CellRef(col: min_col, row: max_row))
+    val b_top = cell_ref_to_string(CellRef(col: max_col, row: min_row))
+    val b_bot = cell_ref_to_string(CellRef(col: max_col, row: max_row))
+    ["{a_top}:{a_bot}", "{b_top}:{b_bot}"]
+
+fn _run_chart_command(args: [text]) -> i32:
+    """Render a chart SVG from a CSV sheet range (labels col 1, values col 2).
+
+    Usage: simple office chart <in.csv> <bar|line|pie|scatter|area> <out.svg> [--title T] [--range A1:B4] [--range2 C1:C4]"""
+    if args.len() < 4:
+        print "Usage: simple office chart <in.csv> <bar|line|pie|scatter|area> <out.svg> [--title T] [--range A1:B4] [--range2 C1:C4]"
+        return 1
+    val in_path = args[1]
+    val chart_type = args[2]
+    val out_path = args[3]
+    if not file_exists(in_path):
+        print "office-chart: rejected (missing-file: {in_path})"
+        return 2
+    if chart_type != "bar" and chart_type != "line" and chart_type != "pie" and chart_type != "scatter" and chart_type != "area":
+        print "office-chart: rejected (unknown-type: {chart_type})"
+        return 1
+    var title = ""
+    var range_a1 = ""
+    var range2_a1 = ""
+    var i = 4
+    while i < args.len():
+        if args[i] == "--title" and i + 1 < args.len():
+            title = args[i + 1]
+            i = i + 2
+        elif args[i] == "--range" and i + 1 < args.len():
+            range_a1 = args[i + 1]
+            i = i + 2
+        elif args[i] == "--range2" and i + 1 < args.len():
+            range2_a1 = args[i + 1]
+            i = i + 2
+        else:
+            print "office-chart: rejected (unknown-option: {args[i]})"
+            return 1
+    val sheet = parse_csv_sheet(read_file(in_path), _basename(in_path))
+    if range_a1 == "":
+        range_a1 = sheet.used_range()
+    if parse_range(range_a1) == nil:
+        print "office-chart: rejected (invalid-range: {range_a1})"
+        return 2
+    if range2_a1 != "" and parse_range(range2_a1) == nil:
+        print "office-chart: rejected (invalid-range: {range2_a1})"
+        return 2
+    var label_range = ""
+    var value_range = ""
+    if range2_a1 != "":
+        label_range = range_a1
+        value_range = range2_a1
+    else:
+        val cols = _chart_split_columns(range_a1)
+        if cols.len() != 2:
+            print "office-chart: rejected (range-needs-two-columns: {range_a1})"
+            return 2
+        label_range = cols[0]
+        value_range = cols[1]
+    if title == "":
+        title = _office_chart_stem(out_path)
+    var svg = ""
+    if chart_type == "bar":
+        svg = sheet_bar_chart_svg(sheet, label_range, value_range, title)
+    elif chart_type == "line":
+        svg = sheet_line_chart_svg(sheet, label_range, value_range, title)
+    elif chart_type == "pie":
+        svg = sheet_pie_chart_svg(sheet, label_range, value_range, title)
+    elif chart_type == "area":
+        svg = sheet_area_chart_svg(sheet, label_range, value_range, title)
+    else:
+        svg = sheet_scatter_chart_svg(sheet, label_range, value_range, title)
+    if write_file(out_path, svg):
+        print "office-chart: {chart_type} {in_path} {range_a1} -> {out_path} ({svg.len()} bytes)"
+        return 0
+    print "office-chart: failed to write {out_path}"
+    return 2
 
 fn _decode_office_cli_text(value: text) -> text:
     value.replace("\\n", "\n")
