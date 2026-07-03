@@ -41,6 +41,11 @@ theorem allocate_then_borrow_records_pin (s : GcState) (id : Nat) :
   id ∈ (borrow (allocate s id) id).borrowed := by
   simp [borrow, allocate]
 
+theorem borrow_live_records_pin (s : GcState) (id : Nat)
+    (hlive : id ∈ s.live) :
+  id ∈ (borrow s id).borrowed := by
+  simp [borrow, hlive]
+
 theorem borrow_preserves (s : GcState) (id : Nat) (hs : safe s) :
   safe (borrow s id) := by
   intro x hx
