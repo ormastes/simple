@@ -99,6 +99,16 @@ theorem isolated_to_shared :
   canConvert RefCapability.Isolated RefCapability.Shared = true := by
   rfl
 
+theorem capability_downgrades_allowed :
+  canConvert RefCapability.Exclusive RefCapability.Shared = true ∧
+  canConvert RefCapability.Isolated RefCapability.Exclusive = true ∧
+  canConvert RefCapability.Isolated RefCapability.Shared = true := by
+  constructor
+  · exact exclusive_to_shared
+  · constructor
+    · exact isolated_to_exclusive
+    · exact isolated_to_shared
+
 theorem shared_to_exclusive_denied :
   canConvert RefCapability.Shared RefCapability.Exclusive = false := by
   rfl
