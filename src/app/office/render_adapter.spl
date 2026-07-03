@@ -19,6 +19,11 @@ use app.office.sheets.cell.{cell_display_text, CellRef, cell_ref_to_string, pars
 use common.rich_text.attributed_text.{RichDocument, DocBlock, BlockKind, TextSpan, InlineStyle}
 use app.office.libreoffice.{libreoffice_apps, libreoffice_suite_name}
 use app.office.file_formats.{parse_markdown_document, parse_csv_sheet, recalculate_formula_cells}
+use app.office.mail.html_render.{render_mailbox_html}
+use app.office.mail.mail_app.{MailApp}
+use app.office.planner.html_render.{render_board_html}
+use app.office.planner.planner_app.{PlannerApp}
+use app.office.slides.deck_format.{parse_deck}
 
 # =========================================================================
 # Accent per surface
@@ -32,6 +37,10 @@ fn _surface_accent(component: text) -> text:
         return "#217346"
     if component == "slides" or component == "ppt" or component == "impress":
         return "#b7472a"
+    if component == "mail":
+        return "#c5221f"
+    if component == "planner":
+        return "#0079bf"
     "#1f2937"
 
 fn _normalize_surface(adapter_name: text) -> text:
@@ -146,6 +155,16 @@ fn _suite_index_body() -> text:
 # Public entry
 # =========================================================================
 
+fn office_demo_planner() -> PlannerApp:
+    """A representative Planner board with tasks spread across all lanes."""
+    var app = PlannerApp.new()
+    app.add_task("Design the launch page")
+    app.add_task("Wire the render pipeline")
+    app.add_task("Ship the office suite")
+    app.move_task("task_1", "In Progress")
+    app.move_task("task_2", "Done")
+    app
+
 fn _render_body_for(surface: text) -> text:
     if surface == "word":
         return render_document_html(office_demo_document())
@@ -153,6 +172,10 @@ fn _render_body_for(surface: text) -> text:
         return render_sheet_html(office_demo_sheet())
     if surface == "slides":
         return render_slide_html(office_demo_slide())
+    if surface == "mail":
+        return render_mailbox_html(MailApp.new())
+    if surface == "planner":
+        return render_board_html(office_demo_planner())
     _suite_index_body()
 
 fn _title_for(surface: text) -> text:
@@ -162,13 +185,18 @@ fn _title_for(surface: text) -> text:
         return "{libreoffice_suite_name()} Calc"
     if surface == "slides":
         return "{libreoffice_suite_name()} Impress"
+    if surface == "mail":
+        return "{libreoffice_suite_name()} Mail"
+    if surface == "planner":
+        return "{libreoffice_suite_name()} Planner"
     "{libreoffice_suite_name()} Suite"
 
 fn _result_for(surface: text, body: text) -> RenderResult:
     val accent = _surface_accent(surface)
     val title = _title_for(surface)
     val page = _html_page(title, accent, body)
-    val label = if surface == "word" or surface == "sheets" or surface == "slides": surface else: "suite"
+    val known = surface == "word" or surface == "sheets" or surface == "slides" or surface == "mail" or surface == "planner"
+    val label = if known: surface else: "suite"
     RenderResult(
         format: "html",
         text_output: "Office render: {title} ({label}, {page.len()} bytes)",
@@ -188,8 +216,8 @@ fn office_render(config: RenderConfig) -> RenderResult:
 fn office_render_source(adapter_name: text, filename: text, content: text) -> RenderResult:
     """Render an actual document's `content` (loaded from disk) to a styled page.
 
-    Writer parses markdown; Calc parses CSV; Impress falls back to the demo
-    slide (no on-disk slide format yet). Unknown surfaces show the suite index."""
+    Writer parses markdown; Calc parses CSV; Impress parses the `---`-separated
+    deck format, rendering every slide. Unknown surfaces show the suite index."""
     val surface = _normalize_surface(adapter_name)
     if surface == "word":
         val doc = parse_markdown_document(content, filename)
@@ -197,4 +225,10 @@ fn office_render_source(adapter_name: text, filename: text, content: text) -> Re
     if surface == "sheets":
         val sheet = parse_csv_sheet(content, filename)
         return _result_for(surface, render_sheet_html(sheet))
+    if surface == "slides":
+        val slides = parse_deck(content)
+        var body = ""
+        for s in slides:
+            body = "{body}<div style=\"margin: 0 0 24px 0;\">{render_slide_html(s)}</div>"
+        return _result_for(surface, body)
     _result_for(surface, _render_body_for(surface))
