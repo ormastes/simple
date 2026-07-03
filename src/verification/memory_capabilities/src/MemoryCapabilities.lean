@@ -105,6 +105,10 @@ theorem empty_env_allows_isolated (loc : Nat) :
   canCreateRef { activeRefs := [] } loc RefCapability.Isolated = true := by
   simp [canCreateRef, getActiveRefs]
 
+theorem empty_env_access_not_safe (access : MemAccess) :
+  accessIsSafe { activeRefs := [] } access = false := by
+  cases access <;> simp [accessIsSafe, getActiveRefs]
+
 theorem shared_read_same_loc (baseType : String) (loc : Nat) :
   allowsAccess { location := loc, refType := { baseType := baseType, capability := RefCapability.Shared } } (MemAccess.Read loc) = true := by
   simp [allowsAccess]
