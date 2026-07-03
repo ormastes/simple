@@ -308,6 +308,8 @@ restores):
 | Gate | Status | Reproducer | Evidence |
 |------|--------|-----------|----------|
 | G1.3 low-res readability | PASS | `scripts/check/check-gui-low-res-readability.shs` + `test/03_system/check/gui_low_res_readability_spec.spl` | `build/gui-low-res-readability/res_*/capture.ppm` |
+| G1.4 software-path determinism | PASS 2026-07-03 (two fresh 640x480 renders byte-identical, `cmp` on capture.ppm) | `scripts/check/check-gui-low-res-readability.shs` run twice + cmp | `build/gui-low-res-readability/res_640x480/capture.ppm` |
+| Sweep re-verification (post-greenwash-fix runner) | PASS 2026-07-03: breakout_production 1/1, rollball_production 11/11, tauri_webview_proof 3/3 — per-describe sums, no Failed:0 masking | capped `bin/simple test --clean` per spec | sweep log in session scratchpad |
 | G1.5 GUI events (showcase) | PASS (synthetic events) | `test/03_system/gui/showcase_event_spec.spl` | before/after PPMs via `SHOWCASE_BEFORE_PPM`/`AFTER_PPM` |
 | G1.5/G1.6 game2d events+animation | PASS (headless replay) | `test/03_system/game2d/game2d_event_replay_spec.spl` | frame_hash oracles in-spec |
 | G4.1 3D depth-correct render | PASS (CPU backend) | `examples/11_advanced/game3d_smoke/main.spl` | `build/game3d_smoke.ppm` |
