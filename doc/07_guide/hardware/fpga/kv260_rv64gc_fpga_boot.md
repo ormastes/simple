@@ -4,12 +4,12 @@ End-to-end guide for generating, validating, synthesizing, and booting an RV64GC
 
 ## Current Validation Status
 
-As of 2026-05-29, the NaxRiscv RV64 SoC bitstream has been synthesized and programmed on a physical KV260/K26 FPGA through the carrier's merged Xilinx USB JTAG interface. The same USB connection exposes FT4232H serial ports. The merged USB UART path is verified through ZynqMP PS UART1, but the loaded RV64 PL image routes its own console to PMOD pins H12/E10 rather than merged USB.
+As of 2026-07-03, the current generated RV64 K26 bitstream can be synthesized and programmed on a physical KV260/K26 FPGA through the carrier's merged Xilinx USB JTAG interface. The same USB connection exposes FT4232H serial ports. The merged USB UART path is verified through ZynqMP PS UART1, but the loaded RV64 PL image routes its own console to PMOD pins H12/E10 rather than merged USB. The active generated core is still a placeholder and XSDB ELF download currently fails with `Invalid context`, so this is not yet SimpleOS execution proof.
 
 Verified on physical hardware:
 
 - Vivado 2025.2 synthesis, implementation, timing closure, and bitstream generation — completed successfully.
-- Bitstream: `build/build/xilinx_kv260/gateware/xilinx_kv260.bit` (4.3 MB, May 21 2026).
+- Bitstream: `build/build/xilinx_kv260/gateware/xilinx_kv260.bit` (7.8 MB, July 3 2026).
 - KV260/K26 FPGA detected via Vivado hw_server as `xck26_0 arm_dap_1` on target `localhost:3121/xilinx_tcf/Xilinx/XFL1OSWWFM2BA`.
 - KV260/K26 FPGA programmed via Vivado hw_server on 2026-05-29 — `End of startup status: HIGH`.
 - Programming log: `build/kv260_uart_program_20260529_124641/kv260_program_20260529_124641.log`.
@@ -19,6 +19,7 @@ Verified on physical hardware:
 - Merged USB UART sampling while programming checked `/dev/ttyUSB4`, `/dev/ttyUSB5`, and `/dev/ttyUSB6` for 30 seconds at 115200 8N1. All captures were zero bytes. Artifacts: `build/kv260_uart_program_20260529_124641/`.
 - Merged USB UART positive path verified with XSDB/JTAG write to ZynqMP PS UART1. The marker `KV260-PS-UART-JTAG` was captured from `/dev/ttyUSB4`. Artifacts: `build/kv260_ps_uart_jtag_probe_20260529_125214/`.
 - 2026-06-01 recheck loaded the current bitstream and passed the combined KV260 RV64 gate. Artifacts: `build/kv260_simple_rv64_linux_check_20260601_084520/`.
+- 2026-07-03 RV32 FPGA SimpleOS payload build passed with the local LLVM-enabled Rust Simple driver: `build/os/simpleos_riscv32_fpga.elf` and `build/rv32_bringup_check/hello_litex_rv32.bin`.
 
 Verified in test workspace:
 

@@ -40,6 +40,8 @@ N/A for this slice: this turn only fixes existing smoke wrappers and records blo
   - PASS: builds `build/os/simpleos_riscv64_fpga.elf` and auto-objcopies `build/rv64_bringup_check/hello_litex_rv64.bin`.
 - `SIMPLE_OS_BUILD_BACKEND=cranelift bin/release/simple os build --arch=riscv32 --scenario=riscv32-fpga-mmode`:
   - FAIL: correctly resolves `build/os/simpleos_riscv32_fpga.elf`, but this host's release Simple binary reports `Cranelift native builds do not support hosted riscv32 yet; use --backend llvm for this lane`; no LLVM-enabled Simple binary exists in this workspace.
+- `env LLVM_SYS_180_PREFIX=/usr SIMPLE_LIB=src SIMPLE_BINARY=src/compiler_rust/target/debug/simple SIMPLE_OS_BUILD_BACKEND=llvm src/compiler_rust/target/debug/simple os build --scenario=riscv32-fpga-mmode`:
+  - PASS: builds `build/os/simpleos_riscv32_fpga.elf` and auto-objcopies `build/rv32_bringup_check/hello_litex_rv32.bin` with the local LLVM-enabled Rust Simple driver.
 - `sh scripts/check/check-riscv-rtl-linux-smoke.shs --timeout=10`:
   - PASS `generated_rv32_linux`: GHDL reports `GENERATED_RV32_LINUX_HANDOFF: PASS`.
   - PASS `generated_rv64_linux`: GHDL reports `GENERATED_RV64_LINUX_HANDOFF: PASS`.
@@ -47,7 +49,8 @@ N/A for this slice: this turn only fixes existing smoke wrappers and records blo
   - PASS: emits RV32 and RV64 generated-core bundle files under `rv32/rtl` and `rv64/rtl`, including core source, VHDL package/core, debug sidecar, and Linux handoff testbench artifacts.
 - `SIMPLE_BINARY=bin/release/simple sh scripts/check/check-riscv-fpga-simpleos-preflight.shs --local-only`:
   - Reuses the RV64 preflight and additionally reports RV32 ELF, bin, and bitstream artifact status.
-  - FAIL: RV32 ELF, bin, and bitstream artifacts are absent in this workspace.
+  - PASS: RV32 ELF and bin artifacts exist.
+  - FAIL: RV32 bitstream artifact is absent in this workspace.
 
 ## Phase
 dev-in-progress
@@ -62,3 +65,4 @@ dev-in-progress
 - dev: Repaired the K26 RV64 VHDL/Vivado wrapper, generated and programmed a current KV260 bitstream, and recorded that physical programming now passes while SimpleOS softcore UART execution remains unproven.
 - dev: Updated the K26 ELF load helper to use the current RV64 FPGA ELF and preserve XSDB logs; current physical load is blocked by missing CPU/debug context in the generated bitstream.
 - dev: Added fail-closed RV64 core/load-context gates to FPGA preflight so a present-but-placeholder bitstream cannot satisfy production readiness.
+- dev: Built RV32 SimpleOS FPGA ELF/bin with the local LLVM-enabled Rust Simple driver; RV32 remains blocked on a real bitstream.
