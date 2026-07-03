@@ -187,3 +187,116 @@ and rounded panel gradient are no longer overpainted by flat placeholders.
   inner width (`remaining_w = iw`), stacking the taskbar pills vertically.
   Fixed: placement shrinks %-width items from the same base as the
   measuring loop; taskbar pills now lay out 3-across like Chromium.
+
+## Addendum 4 (2026-07-03): per-region residual map + render-cost blocker
+
+Gate at this pass: window Simple/Chrome = **62.40%**, taskbar = **30.37%**
+(need >= 80%). Per-pixel disagreement was mapped (Chrome DOM text rects masked,
+mismatches histogrammed by row band + rounded color) directly on the saved
+`build/widget_shells_crossengine/*-argb.json`:
+
+- **Window (320x200), 12214/32486 non-text px disagree.** Bands: top body
+  y0-13 (~4100 px, Simple symmetric dark ramp ~218-240 vs Chrome bright
+  230-247 + blue top-right radial); internal y62-71 (~2500 px, ~11 too dark +
+  no blue); nested interior y~100 (Simple 255 vs Chrome 246 = translucent
+  gradient/backdrop tint missing, diff 9); bottom y168-171 (4px band offset +
+  a SPURIOUS wide light-blue 106,164,223 bar at y169 where Chrome is gray 239).
+  Window is already near its measured flat ceiling (~63%).
+- **Taskbar (480x64), 11535/16565 disagree — the anomaly.** Top body band
+  y0-13 is ~6000 px = **36% of all non-text** — Simple ramp ~10-15 too dark +
+  neutral vs Chrome bright + blue top-right; this single band is the dominant
+  gap. Plus pill-top grays ~12 too dark, and the accent buttons composite far
+  too much white (Simple 106,164,223 vs Chrome 41,126,212; taskbar accent
+  count 556 vs 72).
+
+**Structural note:** for these fixtures the `<body>` background (the radial +
+linear gradient that produces Chrome's blue top-right tint) is NEVER painted by
+the Simple lane — `paint`'s `skip_widget_page_bg = has_widget_panel and
+(tag==html or body)` skips it whenever a `.widget-panel` is present. So a
+radial-gradient body-tint fix must ALSO paint the tint on the page/root fill
+(or narrow the skip to non-body-band regions) or it has no effect. The top-band
+darkening that both engines show is the pill's soft box-shadow bleed; Simple's
+single hard `fb_style_rounded_rect` shadow (parsed offset 0,0, white 5%) does
+not reproduce it — residual soft-shadow work remains.
+
+**Blocker this pass (why no verified renderer change landed):** under the
+interpreter (`gui/debug/simple`, `SIMPLE_EXECUTION_MODE=interpret`), a single
+480x64 taskbar render of these ~290 KB themed fixtures costs **40-50+ minutes**
+(CSS-parse/cascade-bound, confirmed by the wm_gui_window_drawing skill's
+stylesheet-bound cost note). Combined with a concurrent agent editing the same
+renderer file (the `parse_font_shorthand_size_px` fix was in-flight/uncommitted
+during this session), the implement->render->measure loop and the mandatory
+bit-exact node-lane re-check could not be safely closed. Shipping unverifiable
+compositing edits into a concurrently-edited renderer risks an undetectable
+node-lane regression, so this pass delivered the measured residual map + LLM
+wiki (`doc/00_llm_process/feature_expert/web_render_css_parity/skill.md`,
+`doc/00_llm_process/layer_expert/browser_engine/skill.md`) instead. The safe
+implementation shape for the next pass: additive paint branches gated on
+`background contains "radial-gradient("` and on a `backdrop-filter` declaration
+(both ABSENT from the pinned node scenes, so bit-exactness holds by
+construction), painting (1) the body radial tint over the page/root fill and
+(2) a translucent panel-interior tint, plus a separable box-blur soft-shadow
+ramp for the pill.
+
+## Addendum 5 (2026-07-03): the render-cost blocker is FIXED (Phase 1 done)
+
+The 40-50 min render is gone. Root cause was an interpreter-level O(n^2):
+`char_at(i)` is O(i) (`chars().nth`) and `substring` materializes
+`chars().collect()` of the WHOLE string per call, so the renderer's `find_from`
+(a char_at scan loop) and `css_matching_close` were O(n^2) over the ~290 KB
+sheet, and the nested `count_css_rules`/`extract_css` find+match_close pattern
+traversed the sheet ~85x (measured: `count_css_rules` alone = 106 s; a single
+`char_at` scan of 100 KB = 107 s). All fixes are in
+`simple_web_html_layout_renderer.spl`, additive/behavior-identical, and the node
+bitmap lane stayed **bit-exact (mismatch_count=0)**:
+- `find_from`: char_at loop -> native `index_of` + one `substring(pos,len)`
+  offset. O(n) per call. (The file is already byte==char throughout — it uses
+  `.len()` byte counts as char-loop bounds — so native byte search is
+  semantics-preserving for the ASCII HTML/CSS.)
+- Added a one-time `css.bytes()` byte array + O(1) helpers
+  (`css_bytes_find`/`_match_close`/`_first_non_ws`/`_trimmed_eq`);
+  `count_css_rules` and `extract_css` rewritten as a SINGLE linear brace-depth
+  pass that emits each rule at its closing brace (document order preserved so the
+  cascade is identical). `css_matching_close` deleted. `_css_collect_custom_props`
+  moved onto the byte helpers.
+- Measured (`gui/debug/simple`, window 320x200): total ~40 min -> ~85 s (28x);
+  extract_css 275 s -> ~58 s; count_css_rules 106 s -> 1.4 s; parse_html ~5 s;
+  compute_styles ~12 s; paint ~14 s.
+- On the self-hosted `bin/simple` (what the gate uses) extract_css is ~3x the
+  seed (~168 s), so a window+taskbar gate run is ~355 s isolated — under the
+  600 s per-render timeout WHEN THE HOST IS QUIET. Observed one `simple-render-timeout`
+  while another agent saturated the CPU; rerun when idle. Further seed hotspots
+  if margin is needed: extract_css per-rule `substring` (~11 s), paint (~14 s),
+  compute_styles (~12 s).
+
+Phase 2 (the four mapped paint fixes) is UNCHANGED and still open; the ceiling
+analysis above (54-58% with faithful gradients; 80% needs backdrop-filter blur
+this lane cannot do) still stands. The perf fix simply makes the
+implement->render->measure loop practical (minutes, not an hour).
+
+### Concrete Phase-2 leads gathered this pass (static analysis, not yet coded)
+- **Accent over-white (#6) — quantified.** Accent button CSS (generate_css
+  `src/app/ui.web/html.spl:524`): `.widget-button { background:
+  linear-gradient(180deg, rgba(255,255,255,0.18), rgba(255,255,255,0.06)),
+  #0066cc; ... box-shadow: 0 12px 28px rgba(0,0,0,0.20), inset 0 1px 0
+  rgba(255,255,255,0.24); }`. Chrome's (41,126,212) = ~18% white over #0066cc
+  (correct: top stop 0.18 -> (46,130,213)). Simple's (106,164,223) solves to
+  **~40% white == ~2x**. The extra ~24% matches the `inset 0 1px 0
+  rgba(255,255,255,0.24)` inset highlight almost exactly, so the likely culprit
+  is Simple painting that INSET white box-shadow as a broad fill (Simple's
+  box-shadow has no inset support) rather than a 1px top line — NOT a doubled
+  gradient (paint passes are position-mutually-exclusive, a normal button is
+  painted once). Verify by rendering with the inset-shadow layer suppressed.
+- **Body page tint (#3/#4) — exact source.** body CSS: `background:
+  radial-gradient(circle at top left, rgba(255,255,255,0.12), transparent 34%),
+  radial-gradient(circle at top right, rgba(0,102,204,0.16), transparent 28%),
+  radial-gradient(circle at bottom center, rgba(0,102,204,0.10), transparent
+  30%), linear-gradient(180deg, #ffffff 0%, #fafafa 100%)`. The top-right blue
+  radial (rgba(0,102,204,0.16)) is the "blue top-right" Chrome tint. paint's
+  `skip_widget_page_bg` drops it entirely; the fb base is argb(245,245,245) so
+  the top band reads ~10-15 too dark + neutral. Implementation blocker: `paint`
+  has no access to the body's raw `background` string (the multi-layer parser
+  keeps only `background_gradient_from/to` + `bg`; radial layers are recognized
+  and discarded). Painting radials needs either a new `Style` field carrying the
+  radial spec (the giant `Style(...)` constructor at ~3 sites must stay
+  field-consistent) or a re-parse of the body decls in `paint`.

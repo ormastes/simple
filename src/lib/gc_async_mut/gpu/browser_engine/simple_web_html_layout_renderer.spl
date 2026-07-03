@@ -140,18 +140,25 @@ fn text_matches_at(haystack: text, needle: text, offset: i32) -> bool:
     true
 
 fn find_from(s: text, needle: text, pos: i32) -> i32:
-    if needle.len() == 0:
-        return if pos < 0: 0 else: pos
-    if s.len() < needle.len():
+    # O(n) per call via the native byte-search (`index_of`) instead of an
+    # interpreted char_at loop (which is O(n^2): each char_at is O(index)).
+    # The whole renderer is byte==char (it uses `.len()` byte counts as char-loop
+    # bounds), so byte-index native search is semantics-preserving for the ASCII
+    # HTML/CSS these paths handle.
+    val start = if pos < 0: 0 else: pos
+    val nlen = needle.len().to_i32()
+    if nlen == 0:
+        return start
+    val slen = s.len().to_i32()
+    if start >= slen or slen < nlen:
         return -1
-    var i = if pos < 0: 0 else: pos
-    val limit = s.len() - needle.len()
-    val first = needle.char_at(0)
-    while i <= limit:
-        if s.char_at(i) == first and text_matches_at(s, needle, i):
-            return i
-        i = i + 1
-    -1
+    if start <= 0:
+        return s.index_of(needle).to_i32()
+    val tail = s.substring(start, slen)
+    val idx = tail.index_of(needle).to_i32()
+    if idx < 0:
+        return -1
+    start + idx
 
 fn attr_key_index(inner: text, key: text, key_len: i32) -> i32:
     if key_len == 0:
@@ -3574,20 +3581,60 @@ class RuleBuckets:
     tag_rules: [[i32]]
     fallback_rules: [i32]
 
-fn css_matching_close(css: text, open: i64) -> i64:
-    val css_len = css.len()
+# Byte-array CSS structural scanners. The embedded stylesheet is ~290 KB, so
+# char_at-based scanning was O(n^2) (each char_at is O(index) on UTF-8 text).
+# The CSS is ASCII, so a one-time byte array gives O(1) indexed access and turns
+# every structural scan (brace find, matching-close, selector probe) into O(n).
+fn css_bytes_find(cb: [i64], n: i32, ch: i64, from: i32) -> i32:
+    var i = if from < 0: 0 else: from
+    while i < n:
+        if cb[i] == ch:
+            return i
+        i = i + 1
+    -1
+
+fn css_bytes_match_close(cb: [i64], n: i32, open: i32) -> i32:
     var depth = 1
     var i = open + 1
-    while i < css_len:
-        val ch = css.char_at(i)
-        if ch == "{":
+    while i < n:
+        val c = cb[i]
+        if c == 123:
             depth = depth + 1
-        elif ch == "}":
+        elif c == 125:
             depth = depth - 1
             if depth == 0:
                 return i
         i = i + 1
     -1
+
+# Byte index of the first non-whitespace char in [start, end); -1 if all blank.
+fn css_bytes_first_non_ws(cb: [i64], start: i32, end: i32) -> i32:
+    var i = start
+    while i < end:
+        val c = cb[i]
+        if c != 32 and c != 9 and c != 10 and c != 13:
+            return i
+        i = i + 1
+    -1
+
+# True if cb[start, end) trimmed of ASCII whitespace equals `target`.
+fn css_bytes_trimmed_eq(cb: [i64], start: i32, end: i32, target: text) -> bool:
+    var a = start
+    var b = end
+    while a < b and (cb[a] == 32 or cb[a] == 9 or cb[a] == 10 or cb[a] == 13):
+        a = a + 1
+    while b > a and (cb[b - 1] == 32 or cb[b - 1] == 9 or cb[b - 1] == 10 or cb[b - 1] == 13):
+        b = b - 1
+    val tb = target.bytes()
+    val tn = tb.len().to_i32()
+    if b - a != tn:
+        return false
+    var i = 0
+    while i < tn:
+        if cb[a + i] != tb[i]:
+            return false
+        i = i + 1
+    true
 
 fn count_css_rules(html: text) -> i32:
     var count = 0
@@ -3605,61 +3652,66 @@ fn count_css_rules(html: text) -> i32:
         if close < 0:
             break
         val css = html.substring(open + 1, close)
+        val cb = css.bytes()
+        val cbn = cb.len().to_i32()
+        # Single linear pass with a brace-depth tracker (O(n)). A depth-0 non-@
+        # block is a rule; a depth-0 @-block is a wrapper whose depth-1 children
+        # are rules; deeper braces belong to a rule body. Mirrors the emission
+        # in extract_css so counts stay in lockstep.
         var cp = 0
-        val css_len = css.len()
-        while cp < css_len:
-            val brace = find_from(css, "{", cp)
-            if brace < 0:
-                break
-            val sel_raw = css.substring(cp, brace)
-            val sel = sel_raw.trim()
-            if sel.starts_with("@"):
-                val endb_outer = css_matching_close(css, brace)
-                if endb_outer < 0:
-                    break
-                var inner_cp = brace + 1
-                while inner_cp < endb_outer:
-                    val inner_brace = find_from(css, "{", inner_cp)
-                    if inner_brace < 0 or inner_brace >= endb_outer:
-                        break
-                    val inner_endb = css_matching_close(css, inner_brace)
-                    if inner_endb < 0 or inner_endb > endb_outer:
-                        break
-                    val inner_sel_raw = css.substring(inner_cp, inner_brace)
-                    val inner_sel = inner_sel_raw.trim()
-                    if inner_sel.len() > 0:
+        var depth = 0
+        var sel0 = 0
+        var sel1 = 0
+        var cur_at = false
+        while cp < cbn:
+            val c = cb[cp]
+            if c == 123:
+                if depth == 0:
+                    val ss = css_bytes_first_non_ws(cb, sel0, cp)
+                    cur_at = ss >= 0 and cb[ss] == 64
+                    if (not cur_at) and ss >= 0:
                         count = count + 1
-                    inner_cp = inner_endb + 1
-                cp = endb_outer + 1
-            else:
-                val endb = css_matching_close(css, brace)
-                if endb < 0:
-                    break
-                if sel.len() > 0:
-                    count = count + 1
-                cp = endb + 1
+                    depth = 1
+                    sel1 = cp + 1
+                elif depth == 1:
+                    if cur_at:
+                        val ss1 = css_bytes_first_non_ws(cb, sel1, cp)
+                        if ss1 >= 0:
+                            count = count + 1
+                    depth = 2
+                else:
+                    depth = depth + 1
+            elif c == 125:
+                if depth == 1:
+                    depth = 0
+                    sel0 = cp + 1
+                elif depth == 2:
+                    depth = 1
+                    sel1 = cp + 1
+                elif depth > 0:
+                    depth = depth - 1
+            cp = cp + 1
         pos = close + 1
     count
 
 fn _css_collect_custom_props(css: text) -> text:
     # Collect --name: value pairs from :root { } blocks.
     # Returns a compact string of "--name:value\n" entries.
-    val css_len = css.len()
+    val cb = css.bytes()
+    val cbn = cb.len().to_i32()
     var entries: [text] = [""; 200]
     var entry_i = 0
-    var pos: i64 = 0
+    var pos = 0
     var guard = 0
-    while pos < css_len and guard < 200:
+    while pos < cbn and guard < 200:
         guard = guard + 1
-        val brace = find_from(css, "{", pos)
+        val brace = css_bytes_find(cb, cbn, 123, pos)
         if brace < 0:
             break
-        val sel_raw = css.substring(pos, brace)
-        val sel = sel_raw.trim()
-        val close = css_matching_close(css, brace)
+        val close = css_bytes_match_close(cb, cbn, brace)
         if close < 0:
             break
-        if sel == ":root":
+        if css_bytes_trimmed_eq(cb, pos, brace, ":root"):
             val body = css.substring(brace + 1, close)
             val body_len = body.len()
             var bp: i64 = 0
@@ -3785,56 +3837,76 @@ fn extract_css(html: text) -> Rules:
             break
         val css_raw = html.substring(open + 1, close)
         val css = _css_resolve_vars(css_raw, custom_props)
-        # split into "selector { decls }" chunks
+        # split into "selector { decls }" chunks. Structural scanning (brace find,
+        # matching-close, selector-emptiness) runs on a one-time ASCII byte array
+        # so it is O(n); only the matched selector/decl slices are materialized.
         # @-wrapper blocks (@layer, @supports, @media) are skipped at the outer
         # brace level — their inner rules are parsed as if the wrapper were absent.
+        # Single linear pass with a brace-depth tracker (O(n)). Each rule's
+        # selector/decl slice is materialized only at its closing brace, so the
+        # sheet is traversed once. Emission order == document order, matching the
+        # cascade the previous nested-scan produced. Depth-0 non-@ blocks and the
+        # depth-1 children of a depth-0 @-wrapper are rules; deeper braces are a
+        # rule body.
+        val cb = css.bytes()
+        val cbn = cb.len().to_i32()
         var cp = 0
-        val css_len = css.len()
-        while cp < css_len:
-            val brace = find_from(css, "{", cp)
-            if brace < 0:
-                break
-            val sel_raw = css.substring(cp, brace)
-            val sel = sel_raw.trim()
-            # @-rule wrapper: skip the outer brace, recurse into inner content
-            if sel.starts_with("@"):
-                val endb_outer = css_matching_close(css, brace)
-                if endb_outer < 0:
-                    break
-                cp = brace + 1
-                # Reset to parse inner content (outer brace already consumed by cp advance)
-                # Find inner rules by continuing the loop from brace+1 to endb_outer
-                var inner_cp = brace + 1
-                while inner_cp < endb_outer:
-                    val inner_brace = find_from(css, "{", inner_cp)
-                    if inner_brace < 0 or inner_brace >= endb_outer:
-                        break
-                    val inner_endb = css_matching_close(css, inner_brace)
-                    if inner_endb < 0 or inner_endb > endb_outer:
-                        break
-                    val inner_sel_raw = css.substring(inner_cp, inner_brace)
-                    val inner_sel = inner_sel_raw.trim()
-                    val inner_decl_raw = css.substring(inner_brace + 1, inner_endb)
-                    val inner_decl = inner_decl_raw.trim()
-                    if inner_sel.len() > 0 and rule_i < rule_count:
+        var depth = 0
+        var sel0 = 0
+        var sel1 = 0
+        var cur_at = false
+        var p0_sel = 0
+        var p0_brace = 0
+        var p0_emit = false
+        var p1_sel = 0
+        var p1_brace = 0
+        var p1_emit = false
+        while cp < cbn:
+            val c = cb[cp]
+            if c == 123:
+                if depth == 0:
+                    val ss = css_bytes_first_non_ws(cb, sel0, cp)
+                    cur_at = ss >= 0 and cb[ss] == 64
+                    p0_sel = sel0
+                    p0_brace = cp
+                    p0_emit = (not cur_at) and ss >= 0
+                    depth = 1
+                    sel1 = cp + 1
+                elif depth == 1:
+                    if cur_at:
+                        val ss1 = css_bytes_first_non_ws(cb, sel1, cp)
+                        p1_sel = sel1
+                        p1_brace = cp
+                        p1_emit = ss1 >= 0
+                    depth = 2
+                else:
+                    depth = depth + 1
+            elif c == 125:
+                if depth == 1:
+                    if p0_emit and rule_i < rule_count:
+                        val sel = css.substring(p0_sel, p0_brace).trim()
+                        val decl = css.substring(p0_brace + 1, cp).trim()
+                        val rule_groups = split_selector_groups(sel)
+                        group_parts[rule_i] = split_selector_group_parts(rule_groups)
+                        decls[rule_i] = decl
+                        rule_i = rule_i + 1
+                    p0_emit = false
+                    depth = 0
+                    sel0 = cp + 1
+                elif depth == 2:
+                    if cur_at and p1_emit and rule_i < rule_count:
+                        val inner_sel = css.substring(p1_sel, p1_brace).trim()
+                        val inner_decl = css.substring(p1_brace + 1, cp).trim()
                         val rule_groups = split_selector_groups(inner_sel)
                         group_parts[rule_i] = split_selector_group_parts(rule_groups)
                         decls[rule_i] = inner_decl
                         rule_i = rule_i + 1
-                    inner_cp = inner_endb + 1
-                cp = endb_outer + 1
-            else:
-                val endb = css_matching_close(css, brace)
-                if endb < 0:
-                    break
-                val decl_raw = css.substring(brace + 1, endb)
-                val decl = decl_raw.trim()
-                if sel.len() > 0 and rule_i < rule_count:
-                    val rule_groups = split_selector_groups(sel)
-                    group_parts[rule_i] = split_selector_group_parts(rule_groups)
-                    decls[rule_i] = decl
-                    rule_i = rule_i + 1
-                cp = endb + 1
+                    p1_emit = false
+                    depth = 1
+                    sel1 = cp + 1
+                elif depth > 0:
+                    depth = depth - 1
+            cp = cp + 1
         pos = close + 1
     Rules(group_parts: group_parts, decls: decls)
 
