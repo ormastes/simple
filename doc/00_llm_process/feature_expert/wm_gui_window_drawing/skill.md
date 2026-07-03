@@ -140,6 +140,90 @@ parsed as size), not a general WM feature area.
   `build/wm_gui_window_drawing/report.md` for the latest run's actual
   status/pixel counts; this gate is too slow for a fast pre-commit path.
 
+## Multi-App Launch + Working Taskbar (live GPU capture lane)
+
+A sibling, LIVE (on-screen winit + Metal GPU) capture lane proves the Simple WM
+can launch MULTIPLE GUI apps as internal windows and that the TASKBAR works
+(clicking a taskbar item focuses/restores its window). Distinct from the
+headless PPM lanes above — it runs a real fullscreen window and screencaptures
+it.
+
+- Demo: [examples/06_io/ui/wm_multiapp_taskbar_gui.spl](../../../../examples/06_io/ui/wm_multiapp_taskbar_gui.spl)
+  — opens a winit window, `MetalBackend` (engine2d Metal GPU), a `HostCompositor`
+  (state model over `HeadlessHostCompositorBackend`), launches Terminal/Editor/
+  File Manager/Calculator via `apply_bridge_request(COMP_CREATE_WINDOW)`, goes
+  fullscreen, renders each WM frame on the GPU (512x384 buffer, upscaled to the
+  fullscreen window), and drives taskbar interactions on the REAL compositor.
+- Check script: [scripts/check/check-wm-multiapp-taskbar-evidence.shs](../../../../scripts/check/check-wm-multiapp-taskbar-evidence.shs)
+  (output dir `build/wm_multiapp_taskbar/` — distinct from `build/wm_gui_window_drawing/`).
+- Pixel validator: [scripts/check/measure_wm_multiapp_taskbar.spl](../../../../scripts/check/measure_wm_multiapp_taskbar.spl)
+  — locates the WM window in a full-screen BMP via a magenta locator frame,
+  self-calibrates logical->physical scale, checks each window's titlebar band
+  differs from the desktop backdrop and the taskbar shows >= N colored segments,
+  writes per-window crops.
+- Contract spec: [test/03_system/check/wm_multiapp_taskbar_spec.spl](../../../../test/03_system/check/wm_multiapp_taskbar_spec.spl)
+  — exercises the pure compositor state machine (launch grows count; taskbar
+  click focuses a background window; minimize + taskbar-restore) plus the gate's
+  fail-closed contract.
+
+Hard-won lessons for this live lane (each cost hours):
+
+- **Taskbar clicks were not wired into the compositor.** `render_frame()` never
+  drew a taskbar and `host_compositor_left_button_at()` never checked
+  `hit_taskbar()`. Added a taskbar-hit branch at the top of the button handler:
+  a press inside the dock band that lands on an item calls
+  `focus_window(id)` (which also un-minimizes) — so a single taskbar click both
+  focuses a background window and restores a minimized one. This is genuine
+  production behavior now, not demo-only.
+- **`HostCompositor` value semantics.** Class params pass by REFERENCE, so `me`
+  methods called via a param (e.g. `comp.apply_bridge_request(...)` inside a
+  helper) mutate the caller's object. BUT the free functions
+  `host_compositor_left_button_at` / `host_compositor_minimize_focused` do
+  `var out = comp` (a COPY) and return the modified copy — you MUST capture the
+  return (`comp = host_compositor_left_button_at(comp, ...)`), or the mutation is
+  lost. `var comp`, not `val comp`.
+- **CPU per-pixel compositing is unusable under the interpreter.** Any draw
+  routed through `HeadlessHostCompositorBackend.put_pixel` (which
+  `fill_rect`/`draw_text`/`blit_pixels` and `app_content.render_app_content` all
+  use) CLONES the whole framebuffer on EACH pixel — measured ~28ms/pixel at
+  1024x768, i.e. a `fill_rect(300x200)` never finishes inside 120s. The killer is
+  a `me` method calling another `me` method (`fill_rect` -> `put_pixel`): the
+  second `self` borrow forces a Cow clone of the pixel array per call. An inline
+  clear (single method, no sub-call) is O(n). This is why the headless
+  `wm_gui_window_drawing` lane budgets 30-min timeouts. The live lane instead
+  draws on the GPU via `MetalBackend.draw_rect_filled` (one FFI dispatch per
+  rect), then `read_pixels_gpu_only` + pack + `winit_present_rgba`. Filed as a
+  bug (see doc/08_tracking/bug/).
+- **A CPU compose that blocks the winit event loop ~30s gets the app killed by
+  the OS.** Keep frames fast (GPU) and pump `winit_poll_input` around readback/
+  pack. The GPU lane keeps per-frame CPU work to the ~196k-pixel readback+pack.
+- **Capturing the winit window on macOS is the hard part — solved with
+  `screencapture -l<CGWindowID>`.** A background `open -n` app is never the
+  foreground app, so its window lives on a Space that `screencapture -x` (current
+  Space) never shows — every `-x` shot is the desktop wallpaper, and no
+  activation (`set frontmost`, `open`, `AXRaise`, bundle-id `activate`) reliably
+  switches Spaces in this automation context (all empirically produce
+  wallpaper). `AXRaise`/`position of window 1` also fail — winit windows are not
+  AX-enumerable. The robust primitive is `screencapture -l<windowid>`, which
+  captures a window by its CoreGraphics id regardless of Space or foreground and
+  needs NO activation. Get the id from `CGWindowListCopyWindowInfo` via JXA
+  (`osascript -l JavaScript` + ObjC bridge). SELECT BY WINDOW TITLE: winit owns
+  several process windows (a full-width menu-bar window ~1710x34pt, a blank metal
+  helper ~500x500pt, and the content window), and neither max-area nor
+  max-min-dimension picks the content window — match `kCGWindowName` against the
+  exact `winit_window_new` title ("Simple WM — Multi-App") instead. Window names
+  require Screen Recording permission (the driving Terminal already holds it).
+- The WM content is located WITHIN that window capture by a **magenta locator
+  frame** (0xFFFF00FF drawn at the render-buffer edges) — magenta never occurs in
+  normal UI, so the validator finds its bbox and derives the logical->physical
+  scale (self-calibrating, no AX/geometry dependency). Going fullscreen is NOT
+  needed with `-l` capture (and winit fullscreen doesn't even engage for a
+  background app — the inner size never grows).
+- The demo's per-app content is drawn with distinct inline GPU rects (Terminal
+  prompt lines, Editor gutter+text, File Manager sidebar+list, Calculator
+  display+button grid), NOT `app_content.render_app_content` — the latter is the
+  CPU per-pixel path above and is infeasible live under the interpreter.
+
 ## Update Rule
 
 After research, requirements, architecture, design, implementation,
