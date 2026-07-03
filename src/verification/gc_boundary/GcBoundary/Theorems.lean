@@ -138,6 +138,13 @@ theorem noalloc_closed (fc : FnCtx) (e : Expr)
     : ¬ EvalAllocates fc e :=
   noalloc_closed_aux fc e hok
 
+/-- An allocating callee is rejected by the noalloc body checker. -/
+theorem noalloc_rejects_alloc_call (fc : FnCtx) (f : Nat) (args : List Expr)
+    (halloc : fc.allocAnn f = AllocAnn.alloc) :
+    ¬ noallocBodyOk fc (Expr.Call f args) := by
+  intro hok
+  simp [noallocBodyOk, halloc] at hok
+
 -- ============================================================
 -- § D  T3 — inference_monotone
 -- ============================================================
