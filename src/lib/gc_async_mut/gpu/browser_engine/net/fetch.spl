@@ -63,10 +63,10 @@ class FetchEngine:
                 pass_do_nothing
 
         # Step 2: Check the HTTP cache
-        val cached = self.cache.lookup(request)
-        if val response = cached:
+        val cached = self.cache.lookup(request.url.to_text())
+        if val entry = cached:
             self.logger.debug("fetch: cache hit for {request.url.to_text()}")
-            return Ok(response)
+            return Ok(FetchResponse(status: 200, headers: entry.headers, body: entry.body))
 
         # Step 3: Execute the request with redirect support
         self.fetch_with_redirect(request, 0)
@@ -119,19 +119,7 @@ class FetchEngine:
         # Step 3g: Cache the response if eligible
         if is_cacheable(response):
             self.logger.debug("fetch: caching response for {request.url.to_text()}")
-            self.cache.store(request, response)
-
-        # Mark the response as redirected if we followed any redirects
-        if redirect_count > 0:
-            val redirected_response = FetchResponse(
-                status: response.status,
-                status_text: response.status_text,
-                headers: response.headers,
-                body: response.body,
-                url: response.url,
-                redirected: true
-            )
-            return Ok(redirected_response)
+            val _ = self.cache.store(request.url.to_text(), response.body, response.headers)
 
         Ok(response)
 
@@ -152,8 +140,8 @@ class FetchEngine:
         # Send the OPTIONS preflight
         val preflight_response = self.execute_http(preflight_req, target_addr)?
 
-        # Validate the preflight response
-        val result = self.cors.validate_preflight(preflight_response, request)
+        # Validate the preflight response headers (declared raw-text form)
+        val result = self.cors.validate_preflight(preflight_response.headers)
         match result:
             PreflightResult.Allowed:
                 self.logger.debug("fetch: CORS preflight allowed")
@@ -278,12 +266,16 @@ class FetchEngine:
             credentials: original.credentials
         )
 
-    # Extract a header value by name (case-insensitive) from a header list.
-    fn get_header(headers: [Pair<text, text>], name: text) -> text?:
-        val lower_name = name.to_lowercase()
-        for header in headers:
-            if header.first.to_lowercase() == lower_name:
-                return header.second
+    # Extract a header value by name (case-insensitive) from raw response
+    # header text ("Name: value\r\n" lines, the declared FetchResponse form).
+    fn get_header(headers: text, name: text) -> text?:
+        val lower_name = name.to_lower()
+        for line in headers.split("\r\n"):
+            val colon = line.index_of(":")
+            if colon > 0:
+                val hname = line.slice(0, colon).trim().to_lower()
+                if hname == lower_name:
+                    return line.slice(colon + 1, line.len()).trim()
         nil
 
 # -- Module-level functions --
@@ -299,14 +291,17 @@ fn is_cacheable(response: FetchResponse) -> bool:
     if response.status < 200 or response.status >= 300:
         return false
 
-    # Check Cache-Control for no-store directive
-    for header in response.headers:
-        if header.first.to_lowercase() == "cache-control":
-            val value = header.second.to_lowercase()
-            if value.contains("no-store"):
-                return false
-            if value.contains("no-cache"):
-                return false
+    # Check Cache-Control for no-store directive (headers are raw text lines)
+    for line in response.headers.split("\r\n"):
+        val colon = line.index_of(":")
+        if colon > 0:
+            val hname = line.slice(0, colon).trim().to_lower()
+            if hname == "cache-control":
+                val value = line.slice(colon + 1, line.len()).to_lower()
+                if value.contains("no-store"):
+                    return false
+                if value.contains("no-cache"):
+                    return false
 
     # Only cache GET/HEAD responses
     # (we cannot check the method from the response alone, so cache all

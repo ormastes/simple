@@ -24,6 +24,7 @@ extern fn rt_io_tcp_set_nodelay(fd: i64, enabled: bool) -> bool
 extern fn rt_io_tcp_set_read_timeout(fd: i64, ms: i64?) -> bool
 extern fn rt_io_tcp_set_write_timeout(fd: i64, ms: i64?) -> bool
 extern fn rt_bytes_to_text(data: [u8]) -> text
+extern fn rt_text_to_bytes(s: text) -> [u8]
 
 # --- MockResponseRegistry ---
 # Provides canned HTTP responses for testing without real socket I/O.
@@ -168,11 +169,8 @@ class H1Client:
             mock_headers.push(Pair("X-Simple-Browser", "mock-response"))
             return Ok(FetchResponse(
                 status: entry.status,
-                status_text: entry.status_text,
-                headers: mock_headers,
-                body: entry.body,
-                url: req.url,
-                redirected: false
+                headers: serialize_headers(mock_headers),
+                body: rt_text_to_bytes(entry.body)
             ))
 
         # Step 5: No mock — use real transport.
@@ -239,14 +237,7 @@ class H1Client:
         if raw_response.len() == 0:
             return Err(network_error("h1: TCP read returned no response for {conn.host}:{conn.port}"))
         val parsed = parse_http_response(raw_response)?
-        return Ok(FetchResponse(
-            status: parsed.status,
-            status_text: parsed.status_text,
-            headers: parsed.headers,
-            body: parsed.body,
-            url: req.url,
-            redirected: parsed.redirected
-        ))
+        return Ok(parsed)
 
     me execute_tls_http(req: FetchRequest, conn: H1Connection, request_bytes: text) -> Result<FetchResponse>:
         if val tls_conn = conn.tls_conn:
@@ -261,14 +252,7 @@ class H1Client:
                 return Err(network_error("h1: TLS read returned no response for {conn.host}:{conn.port}"))
             match parse_http_response(raw_response):
                 Ok(parsed):
-                    return Ok(FetchResponse(
-                        status: parsed.status,
-                        status_text: parsed.status_text,
-                        headers: parsed.headers,
-                        body: parsed.body,
-                        url: req.url,
-                        redirected: parsed.redirected
-                    ))
+                    return Ok(parsed)
                 Err(e):
                     return Err(e)
         Err(network_error("h1: missing TLS connection for {conn.host}:{conn.port}"))
@@ -388,11 +372,8 @@ fn parse_http_response(raw: text) -> Result<FetchResponse>:
     val body = read_response_body(parts.second, headers)
     return Ok(FetchResponse(
         status: status.first,
-        status_text: status.second,
-        headers: headers,
-        body: body,
-        url: Url.create("http", "", 0, ""),
-        redirected: false
+        headers: raw_headers,
+        body: rt_text_to_bytes(body)
     ))
 
 fn parse_status_line(line: text) -> Result<Pair<i64, text>>:
@@ -519,6 +500,14 @@ fn get_port(url: Url) -> i64:
     if url.scheme == "https":
         return 443
     80
+
+fn serialize_headers(headers: [Pair<text, text>]) -> text:
+    # Serialize a header pair list into the declared FetchResponse raw-text
+    # header form: one "Name: value\r\n" line per header.
+    var out = ""
+    for header in headers:
+        out = out + header.first + ": " + header.second + "\r\n"
+    out
 
 fn find_header(headers: [Pair<text, text>], name: text) -> text?:
     # Find the first header value matching the given name (case-insensitive).
