@@ -329,6 +329,27 @@ theorem two_shared_write_not_safe (baseType : String) (loc : Nat) :
   simp [accessIsSafe, getActiveRefs, allowsAccess]
   exact ⟨rfl, rfl⟩
 
+theorem two_shared_read_only_at_location (baseType : String) (loc : Nat) :
+  accessIsSafe
+    { activeRefs :=
+        [(loc,
+          [{ location := loc,
+             refType := { baseType := baseType, capability := RefCapability.Shared } },
+           { location := loc,
+             refType := { baseType := baseType, capability := RefCapability.Shared } }])] }
+    (MemAccess.Read loc) = true ∧
+  accessIsSafe
+    { activeRefs :=
+        [(loc,
+          [{ location := loc,
+             refType := { baseType := baseType, capability := RefCapability.Shared } },
+           { location := loc,
+             refType := { baseType := baseType, capability := RefCapability.Shared } }])] }
+    (MemAccess.Write loc) = false := by
+  constructor
+  · exact two_shared_read_safe baseType loc
+  · exact two_shared_write_not_safe baseType loc
+
 theorem read_wrong_location_denied
     (baseType : String) (loc other : Nat) (cap : RefCapability)
     (hne : loc ≠ other) :
