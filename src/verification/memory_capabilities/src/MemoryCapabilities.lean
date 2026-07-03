@@ -110,12 +110,19 @@ theorem shared_read_same_loc (baseType : String) (loc : Nat) :
   simp [allowsAccess]
 
 theorem exclusive_write_same_loc (baseType : String) (loc : Nat) :
-  allowsAccess { location := loc, refType := { baseType := baseType, capability := RefCapability.Exclusive } } (MemAccess.Write loc) = allowsAccess { location := loc, refType := { baseType := baseType, capability := RefCapability.Exclusive } } (MemAccess.Write loc) := by
-  rfl
+  allowsAccess { location := loc, refType := { baseType := baseType, capability := RefCapability.Exclusive } } (MemAccess.Write loc) = true := by
+  simp [allowsAccess]
+  exact Or.inl rfl
 
 theorem isolated_write_same_loc (baseType : String) (loc : Nat) :
-  allowsAccess { location := loc, refType := { baseType := baseType, capability := RefCapability.Isolated } } (MemAccess.Write loc) = allowsAccess { location := loc, refType := { baseType := baseType, capability := RefCapability.Isolated } } (MemAccess.Write loc) := by
-  rfl
+  allowsAccess { location := loc, refType := { baseType := baseType, capability := RefCapability.Isolated } } (MemAccess.Write loc) = true := by
+  simp [allowsAccess]
+  exact Or.inr rfl
+
+theorem shared_write_same_loc_denied (baseType : String) (loc : Nat) :
+  allowsAccess { location := loc, refType := { baseType := baseType, capability := RefCapability.Shared } } (MemAccess.Write loc) = false := by
+  simp [allowsAccess]
+  exact ⟨rfl, rfl⟩
 
 theorem empty_env_wellformed :
   wellFormed { activeRefs := [] } := by
