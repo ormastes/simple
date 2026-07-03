@@ -145,6 +145,11 @@ canonical physical run hook: it programs the matching KV260 bitstream, captures
 UART through `program_kv260_with_uart_capture.shs`, writes the run log consumed
 by preflight, and fails until captured UART text contains `SimpleOS`.
 
+`scripts/fpga/program_kv260_with_uart_capture.shs` now auto-adds non-Xilinx
+`/dev/serial/by-id` USB UART adapters to the capture set, so a 3.3V PMOD UART
+adapter wired to H12/E10 is used without requiring `UART_EXTRA_PORTS`. If none
+is attached, it reports `UART_EXTERNAL_PORT_STATUS=missing`.
+
 `scripts/fpga/generate_rv64_vhdl.shs` now emits `build/vhdl/rv64/rv64gc_core.vhd`
 as a minimal RV64/C early executor instead of a fetch-only placeholder. It
 handles the current entry/UART path instruction subset, including CSR hart-id
@@ -186,7 +191,7 @@ keeps an XSDB failure log at `build/fpga/k26/load_elf_k26.log`.
    production gate.
 2. Extend RV64 execution past the current early instruction subset until the SimpleOS UART marker is emitted.
 3. Capture RV64 PL UART boot markers from the preloaded payload; stale XSDB `dow` still fails with `Invalid context`, but the active generated load context is now RTL preload.
-4. Attach/capture a 3.3V PMOD UART adapter on H12/E10 or route RV64 PL UART to a PS-visible serial channel.
+4. Attach/capture a 3.3V PMOD UART adapter on H12/E10 or route RV64 PL UART to a PS-visible serial channel; non-Xilinx USB UART adapters are now auto-detected when present.
 5. Produce an RV32 FPGA bitstream with executable-core evidence and prove RV32 SimpleOS payload execution.
 
 ## Next Small Step
