@@ -1173,3 +1173,14 @@ Binaries: scratchpad/stage4_it17{,b..o}; build cmd unchanged (NEVER omit
   monomorphize_integration.spl is the template.
 Binaries: scratchpad/stage4_it18{,b..z}. Coordinator: stub-default flip +
 deploy are YOURS; this iteration stops here per instructions.
+
+### Iteration 18 addendum — probe-cleanup regression + final verification
+The first cleanup build (it18z) regressed to the silent no-op (funcs=0): two
+[LM] probes lived INSIDE `if (... SIMPLE_INTERP_TRACE ...) == "1":` gates and
+deleting only the eprint lines left ORPHANED if-headers that captured the
+function-lowering `while` loop / `val fn_` as their bodies. Removing the
+orphaned headers fixed it. LESSON: when stripping probes, delete the gate
+header WITH the probe. Final verification on stage4_it18z2 (clean, probe-free):
+`-c "print(1+1)"` → `2` rc=0 (stderr only carries the pre-existing gated-off
+frontend notice), `run /tmp/hello_it15.spl` → hello-world-42 rc=0, `--version`
+→ Simple v1.0.0-beta rc=0.
