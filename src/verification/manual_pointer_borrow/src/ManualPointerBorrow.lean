@@ -107,6 +107,14 @@ theorem release_exclusive_preserves_shared (s : BorrowState) :
     (releaseExclusive s).shared = s.shared := by
   simp [releaseExclusive]
 
+theorem release_exclusive_false_noop (s : BorrowState)
+    (hex : s.exclusive = false) :
+    releaseExclusive s = s := by
+  cases s with
+  | mk exclusive shared =>
+      simp at hex
+      simp [releaseExclusive, hex]
+
 theorem release_shared_preserves_exclusive (s : BorrowState) :
     (releaseShared s).exclusive = s.exclusive := by
   simp [releaseShared]
