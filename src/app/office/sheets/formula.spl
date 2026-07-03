@@ -6,7 +6,7 @@
 # built-in functions. Cell-reference resolution is depth-bounded so
 # circular references resolve to an error instead of overflowing the stack.
 
-use app.office.sheets.cell.{CellValue, CellRef, parse_cell_ref, cell_ref_to_string}
+use app.office.sheets.cell.{CellValue, CellRef, parse_cell_ref, cell_ref_to_string, cell_display_text}
 use app.office.sheets.cell_ref.{parse_range, expand_range_refs}
 use app.office.sheets.spreadsheet.{Sheet}
 use common.office.number.{office_parse_unsigned_decimal_f64}
@@ -379,8 +379,88 @@ fn _eval_primary(tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalResu
 # Function Call Evaluation
 # =========================================================================
 
+fn _is_text_function(name: text) -> bool:
+    (name == "CONCAT" or name == "CONCATENATE" or name == "UPPER" or
+     name == "LOWER" or name == "TRIM" or name == "LEN" or name == "LEFT" or
+     name == "RIGHT" or name == "MID" or name == "EXACT")
+
+fn _eval_text_function(name: text, tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalResult:
+    """Evaluate a text function. Args are collected as display strings, so cell
+    refs, string literals, and numbers all work. pos = first token after '('."""
+    var args: [text] = []
+    var cur_pos = pos
+    while cur_pos < tokens.len() and tokens.get(cur_pos) != ")":
+        val tok = tokens.get(cur_pos)
+        val next_tok = if cur_pos + 1 < tokens.len(): tokens.get(cur_pos + 1) else: ""
+        if tok.starts_with("\""):
+            # String literal: strip the tokenizer's surrounding quotes
+            args.push(tok.slice(1, tok.len() - 1))
+            cur_pos = cur_pos + 1
+        elif _is_cell_ref_token(tok) and (next_tok == "," or next_tok == ")"):
+            # Bare cell ref: take its display text (text cells stay text —
+            # the numeric evaluator would coerce them to 0)
+            args.push(cell_display_text(sheet.get_cell(tok)))
+            cur_pos = cur_pos + 1
+        else:
+            val result = _eval_comparison(tokens, cur_pos, sheet, depth)
+            args.push(_cell_value_to_display(result.value))
+            cur_pos = result.next_pos
+        if cur_pos < tokens.len() and tokens.get(cur_pos) == ",":
+            cur_pos = cur_pos + 1
+    if cur_pos < tokens.len() and tokens.get(cur_pos) == ")":
+        cur_pos = cur_pos + 1
+    EvalResult(value: _dispatch_text_function(name, args), next_pos: cur_pos)
+
+fn _arg_int(args: [text], idx: i32) -> i32:
+    """Numeric argument (e.g. LEFT's count) parsed from its display string."""
+    if idx >= args.len():
+        return 0
+    args[idx].to_f64().to_i64().to_i32()
+
+fn _dispatch_text_function(name: text, args: [text]) -> CellValue:
+    if name == "CONCAT" or name == "CONCATENATE":
+        var out = ""
+        for a in args:
+            out = "{out}{a}"
+        return CellValue.TextVal(value: out)
+    if args.len() == 0:
+        return CellValue.ErrorVal(message: "{name} requires arguments")
+    val s = args[0]
+    if name == "UPPER":
+        return CellValue.TextVal(value: s.upper())
+    if name == "LOWER":
+        return CellValue.TextVal(value: s.lower())
+    if name == "TRIM":
+        return CellValue.TextVal(value: s.trim())
+    if name == "LEN":
+        return CellValue.NumberVal(value: s.len().to_f64())
+    if name == "LEFT":
+        val n = _clamp_i32(_arg_int(args, 1), 0, s.len())
+        return CellValue.TextVal(value: s.slice(0, n))
+    if name == "RIGHT":
+        val n = _clamp_i32(_arg_int(args, 1), 0, s.len())
+        return CellValue.TextVal(value: s.slice(s.len() - n, s.len()))
+    if name == "MID":
+        # 1-based start, length
+        val start = _clamp_i32(_arg_int(args, 1) - 1, 0, s.len())
+        val length = _clamp_i32(_arg_int(args, 2), 0, s.len() - start)
+        return CellValue.TextVal(value: s.slice(start, start + length))
+    if name == "EXACT":
+        val other = if args.len() > 1: args[1] else: ""
+        return CellValue.BoolVal(value: s == other)
+    CellValue.ErrorVal(message: "unknown text function {name}")
+
+fn _clamp_i32(v: i32, lo: i32, hi: i32) -> i32:
+    if v < lo:
+        return lo
+    if v > hi:
+        return hi
+    v
+
 fn _eval_function_call(name: text, tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalResult:
     """Evaluate a function call. pos points to first token after '('."""
+    if _is_text_function(name):
+        return _eval_text_function(name, tokens, pos, sheet, depth)
     # Collect arguments separated by commas
     # Each argument can be a range (A1:B3) or an expression
     var args: [[f64]] = []
