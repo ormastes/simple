@@ -282,6 +282,16 @@ theorem read_access_implies_same_location
     loc = other := by
   cases cap <;> simp [allowsAccess]
 
+theorem read_access_iff_same_location
+    (baseType : String) (loc other : Nat) (cap : RefCapability) :
+    allowsAccess { location := loc, refType := { baseType := baseType, capability := cap } }
+      (MemAccess.Read other) = true ↔ loc = other := by
+  constructor
+  · exact read_access_implies_same_location baseType loc other cap
+  · intro hloc
+    cases hloc
+    exact read_same_loc_any_cap baseType loc cap
+
 theorem exclusive_write_same_loc (baseType : String) (loc : Nat) :
   allowsAccess { location := loc, refType := { baseType := baseType, capability := RefCapability.Exclusive } } (MemAccess.Write loc) = true := by
   simp [allowsAccess]
