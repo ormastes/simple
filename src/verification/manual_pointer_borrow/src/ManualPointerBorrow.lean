@@ -105,6 +105,12 @@ theorem take_exclusive_sets_flag_when_no_shared (s : BorrowState)
     (takeExclusive s).exclusive = true := by
   simp [takeExclusive, hshared]
 
+theorem take_exclusive_preserves_shared (s : BorrowState) :
+    (takeExclusive s).shared = s.shared := by
+  by_cases hshared : s.shared = 0
+  · simp [takeExclusive, hshared]
+  · simp [takeExclusive, hshared]
+
 theorem release_exclusive_clears (s : BorrowState) :
     (releaseExclusive s).exclusive = false := by
   simp [releaseExclusive]
