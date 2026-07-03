@@ -76,6 +76,7 @@ def hasDataRace (exec : Execution) : Prop :=
     (id1, op1) ∈ exec.ops ∧
     (id2, op2) ∈ exec.ops ∧
     id1 ≠ id2 ∧
+    op1.threadId ≠ op2.threadId ∧
     conflicts op1 op2 ∧
     ¬happensBefore exec id1 id2 ∧
     ¬happensBefore exec id2 id1
@@ -89,13 +90,14 @@ theorem hasDataRace_symmetric (exec : Execution) :
       (id1, op1) ∈ exec.ops ∧
       (id2, op2) ∈ exec.ops ∧
       id1 ≠ id2 ∧
+      op1.threadId ≠ op2.threadId ∧
       conflicts op1 op2 ∧
       ¬happensBefore exec id1 id2 ∧
       ¬happensBefore exec id2 id1 := by
   intro hRace
-  rcases hRace with ⟨id1, id2, op1, op2, h1, h2, hneq, hconf, hnot12, hnot21⟩
+  rcases hRace with ⟨id1, id2, op1, op2, h1, h2, hneq, hthread, hconf, hnot12, hnot21⟩
   exact ⟨id2, id1, op2, op1, h2, h1, fun h => hneq h.symm,
-    conflicts_symmetric op1 op2 hconf, hnot21, hnot12⟩
+    fun h => hthread h.symm, conflicts_symmetric op1 op2 hconf, hnot21, hnot12⟩
 
 theorem hasDataRace_has_conflict (exec : Execution) :
     hasDataRace exec →
@@ -105,7 +107,7 @@ theorem hasDataRace_has_conflict (exec : Execution) :
       id1 ≠ id2 ∧
       conflicts op1 op2 := by
   intro hRace
-  rcases hRace with ⟨id1, id2, op1, op2, h1, h2, hneq, hconf, _, _⟩
+  rcases hRace with ⟨id1, id2, op1, op2, h1, h2, hneq, _, hconf, _, _⟩
   exact ⟨id1, id2, op1, op2, h1, h2, hneq, hconf⟩
 
 theorem hasDataRace_unordered (exec : Execution) :
@@ -117,7 +119,7 @@ theorem hasDataRace_unordered (exec : Execution) :
       ¬happensBefore exec id1 id2 ∧
       ¬happensBefore exec id2 id1 := by
   intro hRace
-  rcases hRace with ⟨id1, id2, op1, op2, h1, h2, hneq, _, hnot12, hnot21⟩
+  rcases hRace with ⟨id1, id2, op1, op2, h1, h2, hneq, _, _, hnot12, hnot21⟩
   exact ⟨id1, id2, op1, op2, h1, h2, hneq, hnot12, hnot21⟩
 
 theorem hasDataRace_has_distinct_ops (exec : Execution) :
@@ -127,8 +129,18 @@ theorem hasDataRace_has_distinct_ops (exec : Execution) :
       (id2, op2) ∈ exec.ops ∧
       id1 ≠ id2 := by
   intro hRace
-  rcases hRace with ⟨id1, id2, op1, op2, h1, h2, hneq, _, _, _⟩
+  rcases hRace with ⟨id1, id2, op1, op2, h1, h2, hneq, _, _, _, _⟩
   exact ⟨id1, id2, op1, op2, h1, h2, hneq⟩
+
+theorem hasDataRace_has_distinct_threads (exec : Execution) :
+    hasDataRace exec →
+    ∃ id1 id2 op1 op2,
+      (id1, op1) ∈ exec.ops ∧
+      (id2, op2) ∈ exec.ops ∧
+      op1.threadId ≠ op2.threadId := by
+  intro hRace
+  rcases hRace with ⟨id1, id2, op1, op2, h1, h2, _, hthread, _, _, _⟩
+  exact ⟨id1, id2, op1, op2, h1, h2, hthread⟩
 
 structure SequentiallyConsistent (exec : Execution) where
   witness : OperationId → OperationId → Prop
@@ -270,7 +282,7 @@ theorem hb_sync (exec : Execution) (a : OperationId) (b : OperationId) :
 theorem drf_empty_execution :
   dataRaceFree { ops := [], programOrder := fun _ _ => False, synchronizesWith := fun _ _ => False } := by
   intro hRace
-  rcases hRace with ⟨id1, id2, op1, op2, h1, _, _, _, _, _⟩
+  rcases hRace with ⟨id1, id2, op1, op2, h1, _, _, _, _, _, _⟩
   cases h1
 
 theorem drf_single_op_execution (id : OperationId) (op : MemoryOperation) :
@@ -279,7 +291,7 @@ theorem drf_single_op_execution (id : OperationId) (op : MemoryOperation) :
     , programOrder := fun _ _ => False
     , synchronizesWith := fun _ _ => False } := by
   intro hRace
-  rcases hRace with ⟨id1, id2, op1, op2, h1, h2, hneq, _, _, _⟩
+  rcases hRace with ⟨id1, id2, op1, op2, h1, h2, hneq, _, _, _, _⟩
   simp at h1 h2
   rcases h1 with ⟨rfl, rfl⟩
   rcases h2 with ⟨rfl, rfl⟩
@@ -294,7 +306,7 @@ theorem drf_when_no_conflicts (exec : Execution)
       ¬conflicts op1 op2) :
     dataRaceFree exec := by
   intro hRace
-  rcases hRace with ⟨id1, id2, op1, op2, h1, h2, hneq, hconf, _, _⟩
+  rcases hRace with ⟨id1, id2, op1, op2, h1, h2, hneq, _, hconf, _, _⟩
   exact (hnoconf id1 id2 op1 op2 h1 h2 hneq) hconf
 
 theorem drf_two_ops_no_conflict
@@ -423,12 +435,12 @@ theorem drf_two_ops_fence_right
 
 theorem two_unordered_writes_same_location_race
     (id1 id2 : OperationId) (loc : LocationId) (tid1 tid2 : ThreadId)
-    (hneq_ids : id1 ≠ id2) :
+    (hneq_ids : id1 ≠ id2) (hneq_threads : tid1 ≠ tid2) :
     hasDataRace
       { ops := [(id1, MemoryOperation.Write loc tid1), (id2, MemoryOperation.Write loc tid2)]
       , programOrder := fun _ _ => False
       , synchronizesWith := fun _ _ => False } := by
-  refine ⟨id1, id2, MemoryOperation.Write loc tid1, MemoryOperation.Write loc tid2, ?_, ?_, hneq_ids, ?_, ?_, ?_⟩
+  refine ⟨id1, id2, MemoryOperation.Write loc tid1, MemoryOperation.Write loc tid2, ?_, ?_, hneq_ids, hneq_threads, ?_, ?_, ?_⟩
   · simp
   · simp
   · exact write_write_same_location_conflicts loc tid1 tid2
@@ -443,12 +455,12 @@ theorem two_unordered_writes_same_location_race
 
 theorem two_unordered_read_write_same_location_race
     (id1 id2 : OperationId) (loc : LocationId) (tid1 tid2 : ThreadId)
-    (hneq_ids : id1 ≠ id2) :
+    (hneq_ids : id1 ≠ id2) (hneq_threads : tid1 ≠ tid2) :
     hasDataRace
       { ops := [(id1, MemoryOperation.Read loc tid1), (id2, MemoryOperation.Write loc tid2)]
       , programOrder := fun _ _ => False
       , synchronizesWith := fun _ _ => False } := by
-  refine ⟨id1, id2, MemoryOperation.Read loc tid1, MemoryOperation.Write loc tid2, ?_, ?_, hneq_ids, ?_, ?_, ?_⟩
+  refine ⟨id1, id2, MemoryOperation.Read loc tid1, MemoryOperation.Write loc tid2, ?_, ?_, hneq_ids, hneq_threads, ?_, ?_, ?_⟩
   · simp
   · simp
   · exact read_write_same_location_conflicts loc tid1 tid2
@@ -463,12 +475,12 @@ theorem two_unordered_read_write_same_location_race
 
 theorem two_unordered_write_read_same_location_race
     (id1 id2 : OperationId) (loc : LocationId) (tid1 tid2 : ThreadId)
-    (hneq_ids : id1 ≠ id2) :
+    (hneq_ids : id1 ≠ id2) (hneq_threads : tid1 ≠ tid2) :
     hasDataRace
       { ops := [(id1, MemoryOperation.Write loc tid1), (id2, MemoryOperation.Read loc tid2)]
       , programOrder := fun _ _ => False
       , synchronizesWith := fun _ _ => False } := by
-  refine ⟨id1, id2, MemoryOperation.Write loc tid1, MemoryOperation.Read loc tid2, ?_, ?_, hneq_ids, ?_, ?_, ?_⟩
+  refine ⟨id1, id2, MemoryOperation.Write loc tid1, MemoryOperation.Read loc tid2, ?_, ?_, hneq_ids, hneq_threads, ?_, ?_, ?_⟩
   · simp
   · simp
   · exact write_read_same_location_conflicts loc tid1 tid2
@@ -483,13 +495,13 @@ theorem two_unordered_write_read_same_location_race
 
 theorem two_unordered_lock_release_acquire_same_location_race
     (id1 id2 : OperationId) (loc : LocationId) (tid1 tid2 : ThreadId)
-    (hneq_ids : id1 ≠ id2) :
+    (hneq_ids : id1 ≠ id2) (hneq_threads : tid1 ≠ tid2) :
     hasDataRace
       { ops := [(id1, MemoryOperation.LockRelease loc tid1), (id2, MemoryOperation.LockAcquire loc tid2)]
       , programOrder := fun _ _ => False
       , synchronizesWith := fun _ _ => False } := by
   refine ⟨id1, id2, MemoryOperation.LockRelease loc tid1,
-    MemoryOperation.LockAcquire loc tid2, ?_, ?_, hneq_ids, ?_, ?_, ?_⟩
+    MemoryOperation.LockAcquire loc tid2, ?_, ?_, hneq_ids, hneq_threads, ?_, ?_, ?_⟩
   · simp
   · simp
   · exact lock_release_acquire_same_location_conflicts loc tid1 tid2
@@ -504,13 +516,13 @@ theorem two_unordered_lock_release_acquire_same_location_race
 
 theorem two_unordered_lock_acquire_release_same_location_race
     (id1 id2 : OperationId) (loc : LocationId) (tid1 tid2 : ThreadId)
-    (hneq_ids : id1 ≠ id2) :
+    (hneq_ids : id1 ≠ id2) (hneq_threads : tid1 ≠ tid2) :
     hasDataRace
       { ops := [(id1, MemoryOperation.LockAcquire loc tid1), (id2, MemoryOperation.LockRelease loc tid2)]
       , programOrder := fun _ _ => False
       , synchronizesWith := fun _ _ => False } := by
   refine ⟨id1, id2, MemoryOperation.LockAcquire loc tid1,
-    MemoryOperation.LockRelease loc tid2, ?_, ?_, hneq_ids, ?_, ?_, ?_⟩
+    MemoryOperation.LockRelease loc tid2, ?_, ?_, hneq_ids, hneq_threads, ?_, ?_, ?_⟩
   · simp
   · simp
   · exact lock_acquire_release_same_location_conflicts loc tid1 tid2
@@ -525,13 +537,13 @@ theorem two_unordered_lock_acquire_release_same_location_race
 
 theorem two_unordered_lock_releases_same_location_race
     (id1 id2 : OperationId) (loc : LocationId) (tid1 tid2 : ThreadId)
-    (hneq_ids : id1 ≠ id2) :
+    (hneq_ids : id1 ≠ id2) (hneq_threads : tid1 ≠ tid2) :
     hasDataRace
       { ops := [(id1, MemoryOperation.LockRelease loc tid1), (id2, MemoryOperation.LockRelease loc tid2)]
       , programOrder := fun _ _ => False
       , synchronizesWith := fun _ _ => False } := by
   refine ⟨id1, id2, MemoryOperation.LockRelease loc tid1,
-    MemoryOperation.LockRelease loc tid2, ?_, ?_, hneq_ids, ?_, ?_, ?_⟩
+    MemoryOperation.LockRelease loc tid2, ?_, ?_, hneq_ids, hneq_threads, ?_, ?_, ?_⟩
   · simp
   · simp
   · exact lock_release_release_same_location_conflicts loc tid1 tid2
@@ -555,7 +567,7 @@ theorem drf_when_conflicts_ordered (exec : Execution)
       happensBefore exec id1 id2 ∨ happensBefore exec id2 id1) :
     dataRaceFree exec := by
   intro hRace
-  rcases hRace with ⟨id1, id2, op1, op2, h1, h2, hneq, hconf, hnot12, hnot21⟩
+  rcases hRace with ⟨id1, id2, op1, op2, h1, h2, hneq, _, hconf, hnot12, hnot21⟩
   cases hordered id1 id2 op1 op2 h1 h2 hneq hconf with
   | inl hb12 => exact hnot12 hb12
   | inr hb21 => exact hnot21 hb21
