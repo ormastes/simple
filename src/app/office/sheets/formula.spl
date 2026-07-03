@@ -387,7 +387,8 @@ fn _is_text_function(name: text) -> bool:
      name == "RIGHT" or name == "MID" or name == "EXACT" or
      name == "IMREAL" or name == "IMAGINARY" or name == "IMABS" or
      name == "IMSUM" or name == "IMSUB" or name == "IMPRODUCT" or
-     name == "IMCONJUGATE" or name == "DATEVALUE")
+     name == "IMCONJUGATE" or name == "DATEVALUE" or name == "TEXT" or
+     name == "FIXED" or name == "VALUE" or name == "NUMBERVALUE")
 
 fn _fmt_num_trim(v: f64) -> text:
     val i = v.to_i64()
@@ -506,6 +507,17 @@ fn _dispatch_text_function(name: text, args: [text]) -> CellValue:
     if name == "EXACT":
         val other = if args.len() > 1: args[1] else: ""
         return CellValue.BoolVal(value: s == other)
+    if name == "TEXT":
+        if args.len() < 2:
+            return CellValue.ErrorVal(message: "TEXT requires value and format")
+        val v = s.to_f64()
+        return CellValue.TextVal(value: _excel_format(v, args[1]))
+    if name == "FIXED":
+        val fv = s.to_f64()
+        val fd = if args.len() > 1: _arg_int(args, 1) else: 2
+        return CellValue.TextVal(value: _fmt_decimals_grouped(fv, fd, true))
+    if name == "VALUE" or name == "NUMBERVALUE":
+        return CellValue.NumberVal(value: s.trim().to_f64())
     if name == "DATEVALUE":
         # ISO YYYY-MM-DD or M/D/YYYY
         var sep = "-"
@@ -993,6 +1005,73 @@ fn _atan_f64(x: f64) -> f64:
         mult = mult * (2.0 * k) / (2.0 * k + 1.0) * (x2 / (1.0 + x2))
         n = n + 1
     sum
+
+fn _count_decimals_in_fmt(fmt: text) -> i32:
+    """Zeros after the decimal point in an Excel format ('0.00' -> 2)."""
+    val dot = _find_marker(fmt, ".", 0)
+    if dot < 0:
+        return 0
+    var n = 0
+    var i = dot + 1
+    while i < fmt.len() and fmt.slice(i, i + 1) == "0":
+        n = n + 1
+        i = i + 1
+    n
+
+fn _fmt_decimals_grouped(v_in: f64, decimals: i32, grouped: bool) -> text:
+    """Round to N decimals; optionally group thousands with commas."""
+    var v = v_in
+    val neg = v < 0.0
+    if neg:
+        v = 0.0 - v
+    val scale = _pow_f64(10.0, decimals.to_f64())
+    val scaled = _floor_f64(v * scale + 0.5)
+    var int_part = (scaled / scale).to_i64()
+    val frac_scaled = scaled.to_i64() - int_part * scale.to_i64()
+    var int_txt = "{int_part}"
+    if grouped:
+        var out = ""
+        var count = 0
+        var i = int_txt.len() - 1
+        while i >= 0:
+            out = "{int_txt.slice(i, i + 1)}{out}"
+            count = count + 1
+            if count % 3 == 0 and i > 0:
+                out = ",{out}"
+            i = i - 1
+        int_txt = out
+    var result = int_txt
+    if decimals > 0:
+        var frac_txt = "{frac_scaled}"
+        while frac_txt.len() < decimals:
+            frac_txt = "0{frac_txt}"
+        result = "{int_txt}.{frac_txt}"
+    if neg:
+        return "-{result}"
+    result
+
+fn _pad2(n: i64) -> text:
+    if n < 10:
+        return "0{n}"
+    "{n}"
+
+fn _excel_format(v: f64, fmt_in: text) -> text:
+    """Excel TEXT() format subset: 0 / 0.00 / #,##0[.00] / 0%[.00%] /
+    yyyy-mm-dd / mm/dd/yyyy. Unknown formats fall back to general."""
+    val fmt = fmt_in.lower()
+    if fmt.contains("y") and (fmt.contains("m") or fmt.contains("d")):
+        val ymd = _civil_from_serial(v)
+        if fmt.contains("/"):
+            return "{_pad2(ymd[1])}/{_pad2(ymd[2])}/{ymd[0]}"
+        return "{ymd[0]}-{_pad2(ymd[1])}-{_pad2(ymd[2])}"
+    if fmt.ends_with("%"):
+        val decs = _count_decimals_in_fmt(fmt)
+        return "{_fmt_decimals_grouped(v * 100.0, decs, false)}%"
+    val grouped = fmt.contains(",")
+    val decs = _count_decimals_in_fmt(fmt)
+    if fmt.starts_with("0") or fmt.starts_with("#"):
+        return _fmt_decimals_grouped(v, decs, grouped)
+    _fmt_num_trim(v)
 
 fn _norm_cdf(z: f64) -> f64:
     """Standard normal CDF via Abramowitz-Stegun 7.1.26 (|err| < 1.5e-7)."""
