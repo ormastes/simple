@@ -755,6 +755,27 @@ pub fn rt_bytes_from_raw(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::array(arr))
 }
 
+
+/// Create a [u32] array from a raw pointer to count little-endian u32 values.
+/// One-call return-value marshalling for GPU framebuffer readbacks.
+pub fn rt_u32s_from_raw(args: &[Value]) -> Result<Value, CompileError> {
+    let ptr = match args.first() {
+        Some(Value::Int(n)) => *n,
+        _ => return Ok(Value::array(vec![])),
+    };
+    let count = match args.get(1) {
+        Some(Value::Int(n)) => *n,
+        _ => return Ok(Value::array(vec![])),
+    };
+    if ptr == 0 || count <= 0 {
+        return Ok(Value::array(vec![]));
+    }
+    let src = ptr as usize as *const u32;
+    let slice = unsafe { std::slice::from_raw_parts(src, count as usize) };
+    let arr: Vec<Value> = slice.iter().map(|&v| Value::Int(v as i64)).collect();
+    Ok(Value::array(arr))
+}
+
 /// Write bytes to file
 ///
 /// Handles both `Value::Int(i)` (plain integer byte) and

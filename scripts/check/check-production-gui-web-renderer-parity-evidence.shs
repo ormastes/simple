@@ -17,6 +17,8 @@ MATRIX_SCRIPT="${PRODUCTION_GUI_WEB_RENDERER_PARITY_MATRIX_SCRIPT:-scripts/check
 LAYOUT_SCRIPT="${PRODUCTION_GUI_WEB_RENDERER_PARITY_LAYOUT_SCRIPT:-scripts/check/check-electron-simple-web-layout-manifest-evidence.shs}"
 SURFACE_SCRIPT="${PRODUCTION_GUI_WEB_RENDERER_PARITY_SURFACE_SCRIPT:-scripts/check/check-tauri-chrome-simple-web-layout-manifest-evidence.shs}"
 BACKEND_SCRIPT="${PRODUCTION_GUI_WEB_RENDERER_PARITY_BACKEND_SCRIPT:-scripts/check/check-production-gui-web-backend-executed-evidence.shs}"
+WIDGET_SHELLS_SCRIPT="${PRODUCTION_GUI_WEB_RENDERER_PARITY_WIDGET_SHELLS_SCRIPT:-scripts/check/check-production-gui-window-taskbar-widget-evidence.shs}"
+WIDGET_SHELLS_SUBCHECK_TIMEOUT_SECS="${PRODUCTION_GUI_WEB_RENDERER_PARITY_WIDGET_SHELLS_TIMEOUT_SECS:-900}"
 FONT_OFFLOAD_SCRIPT="${PRODUCTION_GUI_WEB_RENDERER_PARITY_FONT_OFFLOAD_SCRIPT:-scripts/check/check-production-gui-font-offload-evidence.shs}"
 METAL_READBACK_SCRIPT="${PRODUCTION_GUI_WEB_RENDERER_PARITY_METAL_READBACK_SCRIPT:-scripts/check/check-metal-engine2d-framebuffer-readback-evidence.shs}"
 METAL_BROWSER_BACKING_SCRIPT="${PRODUCTION_GUI_WEB_RENDERER_PARITY_METAL_BROWSER_BACKING_SCRIPT:-scripts/check/check-macos-metal-browser-backing-evidence.shs}"
@@ -292,6 +294,9 @@ emit_summary_env() {
         production_gui_web_renderer_parity_surface_manifest_tauri_live_capture \
         production_gui_web_renderer_parity_surface_manifest_chrome_live_capture \
         production_gui_web_renderer_parity_backend_status \
+        production_gui_widget_shells_status \
+        production_gui_window_widget_status \
+        production_gui_taskbar_widget_status \
         production_gui_web_renderer_parity_font_offload_status \
         production_gui_web_renderer_parity_font_offload_vector_readback_status \
         production_gui_web_renderer_parity_font_offload_bitmap_readback_status \
@@ -674,6 +679,84 @@ run_backend() {
         [ "$software_checksum" = "$cpu_simd_checksum" ] && [ "$software_checksum" = "$metal_checksum" ] && \
         { [ "$metal_resolved" != "metal" ] || { [ "$metal_frame" = "true" ] && [ "$backend_readback_source" = "device_readback" ] && num_at_least "$metal_command_queue_handle" 1 && num_positive "$metal_gpu_checksum" && [ "$software_checksum" = "$metal_gpu_checksum" ]; }; } && \
         [ "$tolerance" = "false" ] && [ "$backend_timing_status" = "pass" ]
+}
+
+run_widget_shells() {
+    case_dir="$BUILD_ROOT/widget_shells"
+    mkdir -p "$case_dir"
+    set +e
+    run_timed_subcheck "$WIDGET_SHELLS_SUBCHECK_TIMEOUT_SECS" env BUILD_DIR="$case_dir" REPORT_PATH="$case_dir/report.md" \
+        sh "$WIDGET_SHELLS_SCRIPT" >"$case_dir/stdout.env" 2>"$case_dir/stderr.log"
+    code=$?
+    set -e
+    env_file="$case_dir/evidence.env"
+    shells_status=""
+    shells_reason=""
+    window_status=""
+    taskbar_status=""
+    window_resolved=""
+    taskbar_resolved=""
+    window_routes_pinned=""
+    taskbar_routes_pinned=""
+    if [ -s "$env_file" ]; then
+        shells_status="$(field_of production_gui_widget_shells_status "$env_file")"
+        shells_reason="$(field_of production_gui_widget_shells_reason "$env_file")"
+        window_status="$(field_of production_gui_window_widget_status "$env_file")"
+        taskbar_status="$(field_of production_gui_taskbar_widget_status "$env_file")"
+        window_resolved="$(field_of production_gui_window_widget_resolved_backend "$env_file")"
+        taskbar_resolved="$(field_of production_gui_taskbar_widget_resolved_backend "$env_file")"
+        window_routes_pinned="$(field_of production_gui_window_widget_routes_pinned_stub "$env_file")"
+        taskbar_routes_pinned="$(field_of production_gui_taskbar_widget_routes_pinned_stub "$env_file")"
+    fi
+    if [ "$code" -eq 124 ]; then
+        shells_status=timeout
+        shells_reason=widget-shells-timeout
+    fi
+    {
+        echo "production_gui_web_renderer_parity_widget_shells_exit_code=$code"
+        echo "production_gui_web_renderer_parity_widget_shells_status=$shells_status"
+        echo "production_gui_web_renderer_parity_widget_shells_reason=$shells_reason"
+        echo "production_gui_web_renderer_parity_widget_shells_timed_out=$([ "$code" -eq 124 ] && echo true || echo false)"
+        echo "production_gui_web_renderer_parity_widget_shells_timeout_secs=$WIDGET_SHELLS_SUBCHECK_TIMEOUT_SECS"
+        echo "production_gui_web_renderer_parity_widget_shells_report=$case_dir/report.md"
+        # Re-export the fixture keys under their canonical names so the gate can
+        # require them directly from the top-level evidence.env.
+        for key in \
+            production_gui_widget_shells_status \
+            production_gui_window_widget_status \
+            production_gui_window_widget_reason \
+            production_gui_window_widget_resolved_backend \
+            production_gui_window_widget_pixel_count \
+            production_gui_window_widget_distinct_colors \
+            production_gui_window_widget_bg_pixel_count \
+            production_gui_window_widget_panel_pixel_count \
+            production_gui_window_widget_accent_pixel_count \
+            production_gui_window_widget_themed_pixel_count \
+            production_gui_window_widget_checksum \
+            production_gui_window_widget_has_style_block \
+            production_gui_window_widget_routes_pinned_stub \
+            production_gui_window_widget_render_elapsed_us \
+            production_gui_taskbar_widget_status \
+            production_gui_taskbar_widget_reason \
+            production_gui_taskbar_widget_resolved_backend \
+            production_gui_taskbar_widget_pixel_count \
+            production_gui_taskbar_widget_distinct_colors \
+            production_gui_taskbar_widget_bg_pixel_count \
+            production_gui_taskbar_widget_panel_pixel_count \
+            production_gui_taskbar_widget_accent_pixel_count \
+            production_gui_taskbar_widget_themed_pixel_count \
+            production_gui_taskbar_widget_checksum \
+            production_gui_taskbar_widget_has_style_block \
+            production_gui_taskbar_widget_routes_pinned_stub \
+            production_gui_taskbar_widget_render_elapsed_us
+        do
+            echo "$key=$(field_of "$key" "$env_file")"
+        done
+    } >>"$BUILD_ROOT/evidence.env"
+    [ "$code" -eq 0 ] && [ "$shells_status" = "pass" ] && \
+        [ "$window_status" = "pass" ] && [ "$taskbar_status" = "pass" ] && \
+        [ "$window_routes_pinned" = "false" ] && [ "$taskbar_routes_pinned" = "false" ] && \
+        [ "$window_resolved" != "" ] && [ "$taskbar_resolved" != "" ]
 }
 
 run_font_offload() {
@@ -1273,6 +1356,8 @@ fi
 
 run_backend || remember_failure "backend-executed-parity-failed"
 
+run_widget_shells || remember_failure "widget-shells-render-failed"
+
 run_font_offload || remember_failure "font-offload-evidence-failed"
 
 run_metal_readback || {
@@ -1313,6 +1398,13 @@ surface_chrome_tracked_count_final="$(field_of production_gui_web_renderer_parit
 surface_chrome_fail_count_final="$(field_of production_gui_web_renderer_parity_surface_manifest_chrome_fail_count "$BUILD_ROOT/evidence.env")"
 surface_chrome_argb_artifact_pass_count_final="$(field_of production_gui_web_renderer_parity_surface_manifest_chrome_argb_artifact_pass_count "$BUILD_ROOT/evidence.env")"
 surface_chrome_argb_artifact_fail_count_final="$(field_of production_gui_web_renderer_parity_surface_manifest_chrome_argb_artifact_fail_count "$BUILD_ROOT/evidence.env")"
+widget_shells_status_final="$(field_of production_gui_widget_shells_status "$BUILD_ROOT/evidence.env")"
+widget_window_status_final="$(field_of production_gui_window_widget_status "$BUILD_ROOT/evidence.env")"
+widget_taskbar_status_final="$(field_of production_gui_taskbar_widget_status "$BUILD_ROOT/evidence.env")"
+widget_window_resolved_final="$(field_of production_gui_window_widget_resolved_backend "$BUILD_ROOT/evidence.env")"
+widget_taskbar_resolved_final="$(field_of production_gui_taskbar_widget_resolved_backend "$BUILD_ROOT/evidence.env")"
+widget_window_routes_pinned_final="$(field_of production_gui_window_widget_routes_pinned_stub "$BUILD_ROOT/evidence.env")"
+widget_taskbar_routes_pinned_final="$(field_of production_gui_taskbar_widget_routes_pinned_stub "$BUILD_ROOT/evidence.env")"
 backend_status_final="$(field_of production_gui_web_renderer_parity_backend_status "$BUILD_ROOT/evidence.env")"
 backend_timing_status_final="$(field_of production_gui_web_renderer_parity_backend_timing_status "$BUILD_ROOT/evidence.env")"
 backend_exact_final="$(field_of production_gui_web_renderer_parity_backend_exact "$BUILD_ROOT/evidence.env")"
@@ -1440,6 +1532,12 @@ elif [ "$backend_status_final" != "pass" ] || [ "$backend_timing_status_final" !
     [ "$backend_tolerance_final" != "false" ]; then
     status=fail
     reason=backend-executed-parity-failed
+elif [ "$widget_shells_status_final" != "pass" ] || \
+    [ "$widget_window_status_final" != "pass" ] || [ "$widget_taskbar_status_final" != "pass" ] || \
+    [ "$widget_window_routes_pinned_final" != "false" ] || [ "$widget_taskbar_routes_pinned_final" != "false" ] || \
+    [ "$widget_window_resolved_final" = "" ] || [ "$widget_taskbar_resolved_final" = "" ]; then
+    status=fail
+    reason=widget-shells-render-failed
 elif [ "$font_status_final" != "pass" ] && [ "$metal_status_final" != "pass" ] && [ "$metal_reason_final" != "metal-requires-macos" ]; then
     status=fail
     reason=font-offload-and-metal-framebuffer-readback-failed

@@ -906,6 +906,26 @@ pub unsafe extern "C" fn rt_bytes_from_raw(ptr: i64, len: i64) -> RuntimeValue {
     bytes_to_runtime_array(slice)
 }
 
+
+/// Create a [u32] array from a raw pointer to `count` little-endian u32 values.
+/// One-call return-value marshalling for GPU framebuffer readbacks: a per-element
+/// FFI read loop costs seconds at 1024x768 and minutes at Retina physical
+/// resolution, while this fills the array Rust-side in one call.
+#[no_mangle]
+pub unsafe extern "C" fn rt_u32s_from_raw(ptr: i64, count: i64) -> RuntimeValue {
+    use crate::value::collections::rt_array_set;
+    if ptr == 0 || count <= 0 {
+        return rt_array_new(0);
+    }
+    let src = ptr as usize as *const u32;
+    let slice = std::slice::from_raw_parts(src, count as usize);
+    let array = rt_array_new(count as u64);
+    for (i, v) in slice.iter().enumerate() {
+        rt_array_set(array, i as i64, RuntimeValue::from_int(*v as i64));
+    }
+    array
+}
+
 /// Convert a text RuntimeValue to a byte array ([u8]).
 #[no_mangle]
 pub extern "C" fn rt_text_to_bytes(text: RuntimeValue) -> RuntimeValue {
