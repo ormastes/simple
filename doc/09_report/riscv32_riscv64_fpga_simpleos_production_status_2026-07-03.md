@@ -65,6 +65,9 @@ Prior diagnostic run with placeholder RTL allowed:
 - PASS: `rv32_fpga_synth_logic`; `scripts/fpga/build_k26_rv32.shs --synth-only` retains RV32 helper logic.
 - INFO: the provisional RV32 top uses `STARTUPE3.CFGMCLK` as an internal liveness clock, not a SimpleOS payload clock.
 - PASS: `rv32_fpga_elf_load_context` via RTL preload (`build/vhdl/rv32/rv32_payload.mem` referenced by `soc_top_rv32.vhd`); this is payload inclusion, not UART/physical SimpleOS run proof.
+- FAIL: `rv64_fpga_simpleos_run` requires `SIMPLEOS_RV64_FPGA_BOOT_OK` in `build/fpga/k26/rv64_simpleos_run.log`.
+- FAIL: `rv32_fpga_simpleos_run` requires `SIMPLEOS_RV32_FPGA_BOOT_OK` in `build/fpga/rv32/rv32_simpleos_run.log`.
+- INFO: fresh KV260 programming completed for both current bitstreams, but UART captures on `/dev/ttyUSB1..3` saw zero bytes.
 
 `SIMPLE_OS_BUILD_BACKEND=cranelift bin/release/simple os build --arch=riscv64 --scenario=riscv64-fpga-mmode`
 
