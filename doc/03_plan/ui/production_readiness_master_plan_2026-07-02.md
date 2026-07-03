@@ -275,6 +275,34 @@ Midday update (2026-07-03):
   and type_checker refinement predicates so the next run surfaces a located
   parser error instead of an abort; guarded rebuild running.
 
+Afternoon update (2026-07-03, after two OOM crashes + two origin clobber
+restores):
+
+- Stage4 root cause FOUND and FIXED: parse_primary_expr routed FloatLit
+  through the int-literal branch (dead float branch since the 06-26 tree
+  restore) — every float literal truncated to int by the seed's tolerant
+  int(); non-tolerated texts aborted stage4 location-less. Fixed + same
+  disease in parser_cli. Second parser-parity gap fixed: CoreLexer had no
+  suffixed-literal support (10u8/10_u8) — added with CORE_TOKEN_SUFFIX
+  channel. Both consolidated onto origin.
+- Engine3d JIT fix stack landed (6-defect chain: rt_math_* symbol table +
+  C-ABI specs, f32 param/return/store/binop ABI, receiver-aware trait
+  dispatch, marshalling): game3d_smoke 7 failed bodies → 0 fully-JIT;
+  frame p95 8434ms → 150ms on loaded host. 33ms target pends idle-host
+  rerun on deployed binary.
+- Active fable lanes: (A) zero parser errors across the 245-file stage4
+  parse surface — iterating capped probes + regression baseline; (B) full-
+  JIT rollball/breakout — private _sin/_cos f32/f64 symbol collision,
+  Array.add_static resolution, engine2d interpreter-routing heuristic;
+  seed cranelift rebuild in worktree.
+- Process hardening after incidents: all heavy simple runs under
+  scripts/resource/run_capped.shs with CAP_MEM_MAX=4G (host 7.4G; wrapper
+  default 32G never fires here); jj st pre-commit verification (two mass-
+  clobber commits restored on origin today); fetch + verify src/lib
+  populated before any push.
+- Stage4 rebuild queued on lane A zero-error result; then deploy →
+  G1.1 live-window leg + G3.4/G4.2 frame gates on idle host.
+
 ### Gate → evidence ledger (G6.4, as of 2026-07-02 evening)
 
 | Gate | Status | Reproducer | Evidence |
