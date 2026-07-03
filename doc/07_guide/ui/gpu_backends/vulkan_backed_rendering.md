@@ -83,9 +83,9 @@ its `RDOC` magic). Requires the interpreter binary built WITH these externs
 (`src/compiler_rust/target/release/simple`); it does not replace the
 self-hosted `bin/release/<triple>/simple`.
 
-### macOS-only GUI/web/2D Vulkan comparison
-The top-level GUI/web/2D Vulkan comparison wrapper is macOS-only for now:
-`scripts/setup/setup-gui-web-2d-vulkan-env.shs`. It records host MoltenVK
+### GUI/web/2D Vulkan comparison
+The top-level GUI/web/2D Vulkan comparison wrapper is
+`scripts/setup/setup-gui-web-2d-vulkan-env.shs`. It records host Vulkan
 readiness, direct Electron/Chrome launch evidence, Simple Engine2D Vulkan
 readback, and optional RenderDoc captures in
 `build/gui-web-2d-vulkan-env/evidence.env`:
@@ -96,8 +96,14 @@ scripts/setup/setup-gui-web-2d-vulkan-env.shs --run
 sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
 ```
 
-Do not report Windows or Linux status from this top-level workflow; those
-runbooks are intentionally deferred until they have their own host evidence.
+On Linux, current completion evidence is summarized by
+`doc/09_report/linux_vulkan_render_log_compare_current_2026-07-02.md` and the
+SimpleOS hardening aggregate:
+`BUILD_DIR=build/simpleos_hardening_evidence_matrix_current REPORT_PATH=doc/09_report/simpleos_hardening_evidence_matrix_2026-07-03.md sh scripts/check/check-simpleos-hardening-evidence-matrix.shs`.
+That aggregate must report `simpleos_hardening_matrix_passed=13/13` and
+`simpleos_hardening_gui_renderdoc_vulkan_status=pass` before claiming the
+SimpleOS Vulkan/RenderDoc lane. Windows and macOS still require their
+platform-specific runbooks before claiming native platform closure.
 The aggregate audit reads setup/readiness evidence from `GUI_WEB_2D_VULKAN_ENV`
 and direct runtime comparison evidence from `GUI_WEB_2D_VULKAN_RUN_EVIDENCE_ENV`
 when set, otherwise from existing `build/gui-web-2d-vulkan-env-run-*` evidence.

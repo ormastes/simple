@@ -159,8 +159,8 @@ tested, run `scripts/check/check-gui-widget-renderdoc-goal-status.shs`; require
 `gui_widget_renderdoc_goal_blocked_gate_count=0`. Normal non-Mac runs may report
 `incomplete`, but release or completion claims must use `--strict` with real
 Simple Vulkan Engine2D and Electron Chromium/Vulkan `.rdc` evidence. Defer
-Windows and Linux claims until platform-specific runbooks validate the same
-evidence keys and RDOC gate contract.
+Windows claims until the Windows runbook validates the same evidence keys and
+RDOC gate contract; Linux claims use the Linux render-log comparison below.
 For Linux Vulkan render-log comparison, require the aggregate audit to expose
 `linux_vulkan_render_log_compare_blocked_gate_count`,
 `linux_vulkan_render_log_compare_blocked_gates`,
@@ -177,6 +177,17 @@ that exists without a real `RDOC` artifact remains a blocker. Browser capture
 failures must keep `renderdoc-chrome-rdc` and/or `renderdoc-electron-rdc`
 visible in the blocked-gate list; a summarized reason alone is not enough for a
 completion claim.
+For SimpleOS hardening work that combines Vulkan-over-2D, RenderDoc, LLVM,
+SIMD, and QEMU GPU access, use
+`scripts/check/check-simpleos-hardening-evidence-matrix.shs` as the canonical
+handoff aggregate. Current completion requires
+`simpleos_hardening_matrix_passed=13/13`,
+`simpleos_hardening_gui_renderdoc_vulkan_status=pass`,
+`simpleos_hardening_llvm_port_status=pass`,
+`simpleos_hardening_cpu_simd_status=pass`, and
+`simpleos_hardening_qemu_virtio_gpu_access_status=pass`; update the generated
+manual for `test/03_system/gui/simpleos_hardening_evidence_matrix_spec.spl`
+when that row contract changes.
 
 For Tauri2 mobile renderer parity, use
 `scripts/check/check-tauri-mobile-renderer-parity-evidence.shs`. It must pass
