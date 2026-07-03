@@ -161,32 +161,16 @@ impl<'a> MirLowerer<'a> {
                     .and_then(|tr| tr.get(right.ty))
                     .is_some_and(|ty| matches!(ty, HirType::Array { .. }));
             if is_string_add {
-                // Convert non-string side to string via rt_to_string if needed
+                // Convert non-string side to string. Native scalars must be
+                // boxed first (BoxInt/BoxFloat/rt_value_bool) — passing a raw
+                // i64/f64 to rt_to_string prints "<value:0xN>" (#66).
                 let left_str = if left.ty != TypeId::STRING && left.ty != TypeId::ANY {
-                    self.with_func(|func, current_block| {
-                        let dest = func.new_vreg();
-                        let block = func.block_mut(current_block).unwrap();
-                        block.instructions.push(MirInst::Call {
-                            dest: Some(dest),
-                            target: crate::mir::CallTarget::from_name("rt_to_string"),
-                            args: vec![left_reg],
-                        });
-                        dest
-                    })?
+                    self.emit_to_string(left_reg, left.ty)?
                 } else {
                     left_reg
                 };
                 let right_str = if right.ty != TypeId::STRING && right.ty != TypeId::ANY {
-                    self.with_func(|func, current_block| {
-                        let dest = func.new_vreg();
-                        let block = func.block_mut(current_block).unwrap();
-                        block.instructions.push(MirInst::Call {
-                            dest: Some(dest),
-                            target: crate::mir::CallTarget::from_name("rt_to_string"),
-                            args: vec![right_reg],
-                        });
-                        dest
-                    })?
+                    self.emit_to_string(right_reg, right.ty)?
                 } else {
                     right_reg
                 };
@@ -245,6 +229,14 @@ impl<'a> MirLowerer<'a> {
     pub(super) fn lower_cast_expr(&mut self, inner: &HirExpr, target: TypeId) -> MirLowerResult<VReg> {
         let source_reg = self.lower_expr(inner)?;
 
+        // str(x)/text(x) on a native scalar: MirInst::Cast is a plain value
+        // copy in codegen, so a raw int/float would masquerade as a STRING
+        // pointer — rt_string_concat then sees len=-1 and returns NIL,
+        // dropping the whole concat to empty (#66). Convert for real.
+        if target == TypeId::STRING && Self::is_native_scalar(inner.ty) {
+            return self.emit_to_string(source_reg, inner.ty);
+        }
+
         self.with_func(|func, current_block| {
             let dest = func.new_vreg();
             let block = func.block_mut(current_block).unwrap();
@@ -253,6 +245,89 @@ impl<'a> MirLowerer<'a> {
                 source: source_reg,
                 from_ty: inner.ty,
                 to_ty: target,
+            });
+            dest
+        })
+    }
+
+    /// True for types whose runtime representation is a raw machine scalar
+    /// (not a tagged RuntimeValue).
+    fn is_native_scalar(ty: TypeId) -> bool {
+        matches!(
+            ty,
+            TypeId::I8
+                | TypeId::I16
+                | TypeId::I32
+                | TypeId::I64
+                | TypeId::U8
+                | TypeId::U16
+                | TypeId::U32
+                | TypeId::U64
+                | TypeId::F32
+                | TypeId::F64
+                | TypeId::BOOL
+        )
+    }
+
+    /// Emit a to-string conversion for `reg` of type `ty`, boxing native
+    /// scalars into RuntimeValues first (mirrors the rt_value_to_string
+    /// builtin lowering in lowering_expr_builtin.rs).
+    fn emit_to_string(&mut self, reg: VReg, ty: TypeId) -> MirLowerResult<VReg> {
+        // U64 must not go through BoxInt (sign issues); use the raw helper.
+        if ty == TypeId::U64 {
+            return self.with_func(|func, current_block| {
+                let dest = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::Call {
+                    dest: Some(dest),
+                    target: crate::mir::CallTarget::from_name("rt_raw_u64_to_string"),
+                    args: vec![reg],
+                });
+                dest
+            });
+        }
+
+        self.with_func(|func, current_block| {
+            let boxed = match ty {
+                TypeId::I8
+                | TypeId::I16
+                | TypeId::I32
+                | TypeId::I64
+                | TypeId::U8
+                | TypeId::U16
+                | TypeId::U32 => {
+                    let boxed = func.new_vreg();
+                    func.block_mut(current_block)
+                        .unwrap()
+                        .instructions
+                        .push(MirInst::BoxInt { dest: boxed, value: reg });
+                    boxed
+                }
+                TypeId::F32 | TypeId::F64 => {
+                    let boxed = func.new_vreg();
+                    func.block_mut(current_block)
+                        .unwrap()
+                        .instructions
+                        .push(MirInst::BoxFloat { dest: boxed, value: reg });
+                    boxed
+                }
+                TypeId::BOOL => {
+                    let boxed = func.new_vreg();
+                    func.block_mut(current_block).unwrap().instructions.push(MirInst::Call {
+                        dest: Some(boxed),
+                        target: crate::mir::CallTarget::from_name("rt_value_bool"),
+                        args: vec![reg],
+                    });
+                    boxed
+                }
+                // Heap values (structs, arrays, ...) are already RuntimeValues.
+                _ => reg,
+            };
+            let dest = func.new_vreg();
+            func.block_mut(current_block).unwrap().instructions.push(MirInst::Call {
+                dest: Some(dest),
+                target: crate::mir::CallTarget::from_name("rt_value_to_string"),
+                args: vec![boxed],
             });
             dest
         })

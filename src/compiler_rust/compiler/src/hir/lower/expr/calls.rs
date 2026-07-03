@@ -69,7 +69,29 @@ impl Lowerer {
 
             // Check if this is a class/struct constructor call: ClassName(args)
             // Python-style construction: Service() calls the class constructor
-            if let Some(struct_ty) = self.module.types.lookup(name) {
+            //
+            // Primitive type names (str, text, int, bool, ...) are registered
+            // in the type registry too, but a call on them is a CAST, not a
+            // constructor. Building a StructInit for e.g. `str(5)` produced a
+            // bogus one-field struct typed STRING which rt_string_concat
+            // rejected (len=-1 → NIL), dropping `"x=" + str(5)` to empty (#66).
+            // Skip primitives here so lower_utility_builtin lowers them as Cast.
+            let ctor_ty = self.module.types.lookup(name).filter(|ty_id| {
+                !matches!(
+                    self.module.types.get(*ty_id),
+                    Some(
+                        HirType::Void
+                            | HirType::Bool
+                            | HirType::Any
+                            | HirType::Char
+                            | HirType::Int { .. }
+                            | HirType::Float { .. }
+                            | HirType::String
+                            | HirType::Nil
+                    )
+                )
+            });
+            if let Some(struct_ty) = ctor_ty {
                 if matches!(self.module.types.get(struct_ty), Some(HirType::Bitfield { .. })) {
                     return self.lower_bitfield_constructor(struct_ty, args, ctx);
                 }
