@@ -157,6 +157,59 @@ fixed at source, tag removed.
   module does not exist; additionally interpreter path-call gaps on enum
   variants would block it even if it did.
 
+### tensor_spec (item 22) — GATED (torch SFFI backend not wired + interpreter tensor method gaps)
+
+- Failure (48/54 examples): `semantic: panic: torch SFFI backend not yet wired`
+  (from stubs in `src/lib/nogc_sync_mut/src/tensor.spl` — sum/mean/prod eprint
+  the same message), plus `unknown property or method 'T'/'mean'/'prod' on
+  Array`, `sum` returning 0, transpose `'` operator losing bindings
+  (`variable 'y' not found`).
+- Root cause: the spec exercises tensor runtime ops (`use std.src.{Device,
+  DType, zeros, ones}`) whose backend is explicitly stubbed as unwired; the
+  interpreter also lacks the Array tensor extension methods. No describe block
+  fully passes (checked per-describe), so whole-file tag restored. Needs the
+  torch SFFI backend wiring — engine work, out of sweep scope.
+
+### tensor_bridge (item 21) — GATED (interpreter module-path call gap)
+
+- Failure (all 5 examples): `method 'Vec3' not found on type 'dict'` /
+  `method 'tensor_to_vecs' not found on type 'dict'` — module-object member
+  calls (`math.Vec3(...)`, module-level fn via module value) dispatch against
+  the module dict in the interpreter.
+- Root cause: same interpreter module-path-call gap already documented for
+  actor_model (item 17). Fix lands in interpreter dispatch (forbidden path).
+
+### math_autograd_runtime (item 20) — GATED (API does not exist + backend unwired)
+
+- Failure (7/9 examples): `semantic: unknown static method from_data on class
+  Tensor`.
+- Root cause: spec imports `use std.torch.{Tensor}`
+  (`src/lib/gc_async_mut/torch/mod.spl`), whose Tensor exposes only
+  zeros/ones/randn/from_handle — no `from_data`, no autograd surface
+  (requires_grad/grad/nograd). The API shape the spec wants exists only on the
+  separate pure-autograd Tensor (`src/lib/gc_async_mut/pure/autograd.spl`, and
+  with a different signature — mandatory `shape` arg). Even with `from_data`
+  added, the rt_torch_* backend is the same unwired torch SFFI as item 22.
+  Needs a deliberate API decision (wire std.torch autograd or retarget the
+  spec at pure autograd) — out of sweep scope.
+
+### allow_suppressions (item 29) — GATED (extern missing from deployed interpreter)
+
+- Failure (1/5 examples, rest pass): `semantic: unknown extern function:
+  rt_cli_dispatch_rust` on "AC-2: cli_dispatch_rust accepts named cmd args".
+- Root cause: `rt_cli_dispatch_rust` is declared in
+  `src/lib/nogc_sync_mut/sffi/cli.spl` and exported by the Rust runtime symbol
+  table, but the deployed self-hosted interpreter binary does not register it.
+  Fix is in the interpreter extern dispatch (forbidden path) and/or requires a
+  bootstrap rebuild+redeploy (see memory: extern additions need bootstrap).
+
+### Incident note 2 (2026-07-03, batch 2)
+
+The same parallel-snapshot hazard recurred: hourly-sync commit `478a210fd9b`
+swept this pass's temporarily-untagged batch-2 specs (items 20, 21, 22, 29)
+into HEAD while they were under test. Tags were restored from `2db6c8ab13e`
+and re-committed by this pass immediately after detection.
+
 ### Incident note (2026-07-03, task #76 pass)
 
 While this pass had the four specs above temporarily untagged in the working
