@@ -12,9 +12,13 @@ use compiler.hir.hir_lowering.expressions.*
 use std.nogc_sync_mut.io.process_ops.{eprint}
 
 extern fn rt_env_get(key: text) -> text
+extern fn rt_enum_discriminant(value: ExprKind) -> i64
 
 fn hir_stmt_env_get(key: text) -> text:
     rt_env_get(key)
+
+fn hir_stmt_expr_disc(k: ExprKind) -> i64:
+    rt_enum_discriminant(k)
 
 # Statement Lowering
 # ============================================================================
@@ -54,19 +58,25 @@ impl HirLowering:
     me lower_hir_stmt(s: Stmt) -> HirStmt:
         if (hir_stmt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
             eprint("[hir-lower] lower_stmt:start")
-        val stmt_kind_value = match s:
-            case Stmt(k, _): k
+        # DIRECT typed field read, NOT `match s: case Stmt(k, _): k` — the
+        # struct-pattern destructure hazard (bug doc iteration 17).
+        val stmt_kind_value: StmtKind = s.kind
         if (hir_stmt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
             eprint("[hir-lower] lower_stmt:kind")
         val kind = match stmt_kind_value:
             case StmtKind.Expr(expr):
                 if (hir_stmt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
                     eprint("[hir-lower] lower_stmt:expr")
+                # Typed rebind of the extracted payload (ANY-cure idiom) +
+                # UNGATED probe (Trap D): the expr reaching lower_hir_expr had a
+                # garbage kind disc on stage4 (iteration 17).
+                val expr_t: Expr = expr
+                eprint("[LST] stmt-expr payload disc={hir_stmt_expr_disc(expr_t.kind)}")
                 # The flat parser emits `target = value` as an EXPRESSION
                 # statement (expr_assign), never StmtKind.Assign. Route it
                 # into HirStmtKind.Assign so MIR's assignment lowering
                 # (including bitfield field-write synthesis) sees it.
-                match expr.kind:
+                match expr_t.kind:
                     case ExprKind.Assign(assign_target, assign_op, assign_value):
                         val hir_assign_op = self.lower_hir_assign_op_opt(assign_op)
                         HirStmtKind.Assign(
@@ -75,7 +85,7 @@ impl HirLowering:
                             self.lower_hir_expr(assign_value)
                         )
                     case _:
-                        HirStmtKind.Expr(self.lower_hir_expr(expr))
+                        HirStmtKind.Expr(self.lower_hir_expr(expr_t))
 
             case StmtKind.Val(name, type_, init):
                 if (hir_stmt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
