@@ -1,0 +1,114 @@
+# @cover src/lib/common/engine/audio/sound_synth.spl 85%
+# @tag: audio, synth, adsr, mix
+#
+# Sound Synthesis Primitives Specification
+#
+# Verifies sine/square/noise generators, the linear ADSR envelope, and
+# sample-accurate layered mixing — exact pinned sample values, not "sounds
+# right"/"not silent" checks.
+#
+# Plan: doc/03_plan/app/game_tools/sound_music_effects_plan.md (Step 2)
+
+use std.spec.{describe, context, it, expect}
+use std.common.engine.audio.sound_synth.{
+    gen_sine, gen_square, gen_white_noise, apply_adsr, mix
+}
+
+describe "sound_synth gen_sine":
+
+    context "1kHz tone at 8kHz sample rate, 1ms duration":
+
+        it "returns a buffer of exactly duration_ms * sample_rate / 1000 frames":
+            val s = gen_sine(1000.0, 1.0, 8000)
+            expect(s.len()).to_equal(8)
+
+        it "sample[0] is exactly 0.0 (sin at t=0)":
+            val s = gen_sine(1000.0, 1.0, 8000)
+            expect(s[0]).to_equal(0.0)
+
+        it "sample[2] is exactly 1.0 (peak at the quarter period)":
+            val s = gen_sine(1000.0, 1.0, 8000)
+            expect(s[2]).to_equal(1.0)
+
+        it "sample[1] matches sin(pi/4) to double precision":
+            val s = gen_sine(1000.0, 1.0, 8000)
+            expect(s[1]).to_equal(0.7071067811865475)
+
+        it "sample[6] is exactly -1.0 (trough at three-quarter period)":
+            val s = gen_sine(1000.0, 1.0, 8000)
+            expect(s[6]).to_equal(-1.0)
+
+describe "sound_synth gen_square":
+
+    context "1kHz tone at 8kHz sample rate — sign of the equivalent sine":
+
+        it "is +1.0 for the first half period and -1.0 for the second":
+            val sq = gen_square(1000.0, 1.0, 8000)
+            expect(sq[0]).to_equal(1.0)
+            expect(sq[1]).to_equal(1.0)
+            expect(sq[2]).to_equal(1.0)
+            expect(sq[3]).to_equal(1.0)
+            expect(sq[5]).to_equal(-1.0)
+            expect(sq[6]).to_equal(-1.0)
+            expect(sq[7]).to_equal(-1.0)
+
+describe "sound_synth gen_white_noise":
+
+    context "determinism":
+
+        it "two calls with the same seed produce identical buffers":
+            val n1 = gen_white_noise(2.0, 8000, 42)
+            val n2 = gen_white_noise(2.0, 8000, 42)
+            expect(n1).to_equal(n2)
+
+        it "produces different buffers for different seeds":
+            val n1 = gen_white_noise(2.0, 8000, 42)
+            val n2 = gen_white_noise(2.0, 8000, 7)
+            val differs = n1 != n2
+            expect(differs).to_equal(true)
+
+describe "sound_synth apply_adsr":
+
+    context "attack=2ms, decay=2ms, sustain=0.5, release=2ms, 10 frames @ 1000Hz":
+
+        it "zeroes the first sample when attack_ms > 0":
+            val ones: [f64] = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+            val env = apply_adsr(ones, 2.0, 2.0, 0.5, 2.0, 1000)
+            expect(env[0]).to_equal(0.0)
+
+        it "reaches sustain_level exactly at attack_frames + decay_frames (index 4)":
+            val ones: [f64] = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+            val env = apply_adsr(ones, 2.0, 2.0, 0.5, 2.0, 1000)
+            expect(env[4]).to_equal(0.5)
+
+        it "holds sustain_level flat through the sustain region":
+            val ones: [f64] = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+            val env = apply_adsr(ones, 2.0, 2.0, 0.5, 2.0, 1000)
+            expect(env[5]).to_equal(0.5)
+            expect(env[6]).to_equal(0.5)
+            expect(env[7]).to_equal(0.5)
+
+        it "decays to exactly 0.0 by the last sample (end of release_ms)":
+            val ones: [f64] = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+            val env = apply_adsr(ones, 2.0, 2.0, 0.5, 2.0, 1000)
+            expect(env[9]).to_equal(0.0)
+
+describe "sound_synth mix":
+
+    context "layered voices":
+
+        it "sums buffers sample-accurately at a known offset":
+            val mixed = mix([[0.25, 0.125], [0.25, 0.125], [0.25, 0.125]])
+            expect(mixed[0]).to_equal(0.75)
+            expect(mixed[1]).to_equal(0.375)
+
+        it "clamps the sum to 1.0 when voices overdrive":
+            val mixed = mix([[0.5, 0.5], [0.5, 0.5], [0.5, 0.5]])
+            expect(mixed[0]).to_equal(1.0)
+            expect(mixed[1]).to_equal(1.0)
+
+        it "treats a shorter buffer's missing tail samples as 0":
+            val mixed = mix([[1.0], [0.25, 0.25]])
+            expect(mixed.len()).to_equal(2)
+            expect(mixed[0]).to_equal(1.0)
+            expect(mixed[1]).to_equal(0.25)

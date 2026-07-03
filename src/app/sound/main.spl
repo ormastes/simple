@@ -1,0 +1,228 @@
+# `simple sound <sub>` — sound.sdn authoring CLI (sound_music_effects_plan Step 4).
+#
+# Subcommands:
+#   validate <file.sdn>                Parse + type-check only; print a summary.
+#   render <file.sdn> -o out.wav        Synthesize + encode a byte-deterministic WAV.
+#   play <file.sdn>                     Render to a temp WAV and play it via the
+#                                       existing AudioManager/audio_sffi path.
+#                                       Manual/local use only — not asserted in CI.
+#
+# Sound format: SDN. See src/lib/nogc_sync_mut/game2d/audio/sound_asset_sdn.spl
+# for the full recognised shape and defaults.
+#
+#   sound:
+#     kind: "sfx"                                              # or "sequence"
+#     sample_rate: 22050
+#     source: { type: "tone", wave: "sine", freq_hz: 440, duration_ms: 200 }
+#     envelope: { attack_ms: 5, decay_ms: 50, sustain: 0.6, release_ms: 100 }
+#     effects: [ { type: "lowpass", cutoff_hz: 800 } ]
+#
+# Only kind "sfx" with source.type "tone" is rendered — "sequence" (a flat,
+# timestamped clip-trigger list) validates but does not render: playing back
+# externally-referenced clips needs a WAV *decoder*, which is out of scope
+# for this lane (see the plan's Step 4 priority notes).
+#
+# Exit codes: 0 success, 1 failure (missing/malformed/invalid sound, write
+# failure, unsupported render shape), 2 usage error.
+
+use std.cli.cli_util.{get_cli_args}
+use std.io_runtime.{file_write_bytes, getpid}
+use std.nogc_sync_mut.game2d.audio.sound_asset_sdn.{SoundAsset, load_sound_asset}
+use std.common.engine.audio.sound_synth.{
+    gen_sine, gen_square, gen_white_noise, apply_adsr,
+    apply_lowpass, apply_highpass, apply_delay
+}
+use std.common.audio.wav_encode.{encode_wav_pcm16}
+use std.nogc_sync_mut.io.audio_sffi.{audio_load_sound, audio_play}
+
+# ============================================================================
+# Render pipeline — SoundAsset -> WAV bytes
+# ============================================================================
+
+fn build_wav_bytes(asset: SoundAsset) -> Result<[u8], text>:
+    if asset.kind != "sfx":
+        return Err("kind \"{asset.kind}\" rendering requires an audio decoder for clip playback (not implemented) — use kind: sfx")
+    if asset.source.kind != "tone":
+        return Err("unsupported source.type \"{asset.source.kind}\" for render (supported: tone)")
+
+    var samples: [f64] = []
+    if asset.source.wave == "sine":
+        samples = gen_sine(asset.source.freq_hz, asset.source.duration_ms, asset.sample_rate)
+    elif asset.source.wave == "square":
+        samples = gen_square(asset.source.freq_hz, asset.source.duration_ms, asset.sample_rate)
+    else:
+        samples = gen_white_noise(asset.source.duration_ms, asset.sample_rate, asset.source.seed)
+
+    samples = apply_adsr(
+        samples,
+        asset.envelope.attack_ms, asset.envelope.decay_ms,
+        asset.envelope.sustain, asset.envelope.release_ms,
+        asset.sample_rate
+    )
+
+    for fx in asset.effects:
+        if fx.kind == "lowpass":
+            samples = apply_lowpass(samples, fx.cutoff_hz, asset.sample_rate)
+        elif fx.kind == "highpass":
+            samples = apply_highpass(samples, fx.cutoff_hz, asset.sample_rate)
+        elif fx.kind == "delay":
+            samples = apply_delay(samples, fx.time_ms, fx.feedback, asset.sample_rate)
+
+    var f32_samples: [f32] = []
+    for s in samples:
+        f32_samples.push(s as f32)
+    Ok(encode_wav_pcm16(f32_samples, 1, asset.sample_rate as i32))
+
+# ============================================================================
+# validate
+# ============================================================================
+
+fn cmd_validate(path: text) -> i64:
+    val r = load_sound_asset(path)
+    if val Err(e) = r:
+        print "error: {e}"
+        return 1
+    if val Ok(a) = r:
+        print "ok: {path} (kind={a.kind}, sample_rate={a.sample_rate} Hz)"
+        if a.kind == "sfx":
+            print "  source: type={a.source.kind} wave={a.source.wave} freq_hz={a.source.freq_hz} duration_ms={a.source.duration_ms}"
+            print "  envelope: attack_ms={a.envelope.attack_ms} decay_ms={a.envelope.decay_ms} sustain={a.envelope.sustain} release_ms={a.envelope.release_ms}"
+        else:
+            print "  events: {a.events.len()}"
+        print "  effects: {a.effects.len()}"
+    0
+
+# ============================================================================
+# render
+# ============================================================================
+
+fn cmd_render(args: [text]) -> i64:
+    var sdn_path = ""
+    var out_path = ""
+    var i: i64 = 0
+    while i < args.len():
+        val a = args[i]
+        if (a == "-o" or a == "--out"):
+            if i + 1 >= args.len():
+                print "error: {a} requires a value"
+                return 2
+            out_path = args[i + 1]
+            i = i + 2
+        elif a.starts_with("-"):
+            print "error: unknown option {a}"
+            return 2
+        else:
+            if sdn_path != "":
+                print "error: unexpected extra argument \"{a}\""
+                return 2
+            sdn_path = a
+            i = i + 1
+    if sdn_path == "":
+        print "error: simple sound render <file.sdn> -o out.wav — missing sound file"
+        return 2
+    if out_path == "":
+        print "error: simple sound render <file.sdn> -o out.wav — missing -o/--out"
+        return 2
+    val loaded = load_sound_asset(sdn_path)
+    if val Err(e) = loaded:
+        print "error: {e}"
+        return 1
+    var asset = SoundAsset.default()
+    if val Ok(a) = loaded:
+        asset = a
+    val built = build_wav_bytes(asset)
+    if val Err(e) = built:
+        print "error: {e}"
+        return 1
+    var bytes: [u8] = []
+    if val Ok(b) = built:
+        bytes = b
+    if not file_write_bytes(out_path, bytes):
+        print "error: failed to write {out_path}"
+        return 1
+    print "wrote {out_path} ({bytes.len()} bytes, {asset.sample_rate} Hz)"
+    0
+
+# ============================================================================
+# play — manual/local only, not asserted in CI
+# ============================================================================
+
+fn cmd_play(path: text) -> i64:
+    val loaded = load_sound_asset(path)
+    if val Err(e) = loaded:
+        print "error: {e}"
+        return 1
+    var asset = SoundAsset.default()
+    if val Ok(a) = loaded:
+        asset = a
+    val built = build_wav_bytes(asset)
+    if val Err(e) = built:
+        print "error: {e}"
+        return 1
+    var bytes: [u8] = []
+    if val Ok(b) = built:
+        bytes = b
+    val tmp_path = "/tmp/simple_sound_play_{getpid()}.wav"
+    if not file_write_bytes(tmp_path, bytes):
+        print "error: failed to write temp file {tmp_path}"
+        return 1
+    val source = audio_load_sound(tmp_path)
+    if not source.is_valid:
+        print "error: audio backend could not load {tmp_path}"
+        return 1
+    val playback = audio_play(source)
+    if not playback.is_valid:
+        print "error: audio backend could not start playback"
+        return 1
+    print "playing {path} via {tmp_path}"
+    0
+
+# ============================================================================
+# usage / dispatch
+# ============================================================================
+
+fn print_usage():
+    print "Usage: simple sound <subcommand> [args]"
+    print ""
+    print "Subcommands:"
+    print "  validate <file.sdn>            Parse + type-check only"
+    print "  render <file.sdn> -o out.wav   Synthesize + encode a WAV (byte-deterministic)"
+    print "  play <file.sdn>                Render to a temp WAV and play it (manual/local use)"
+    print ""
+    print "Exit codes: 0 ok, 1 failure, 2 usage error"
+
+fn main() -> i64:
+    val args = get_cli_args()
+    if args.len() < 1:
+        print_usage()
+        return 2
+    val sub = args[0]
+    if (sub == "--help" or sub == "-h" or sub == "help"):
+        print_usage()
+        return 0
+    if sub == "validate":
+        if args.len() < 2:
+            print "error: simple sound validate <file.sdn> — missing sound file"
+            return 2
+        if args.len() > 2:
+            print "error: simple sound validate takes exactly one sound file"
+            return 2
+        return cmd_validate(args[1])
+    if sub == "render":
+        var rest: [text] = []
+        var i: i64 = 1
+        while i < args.len():
+            rest.push(args[i])
+            i = i + 1
+        return cmd_render(rest)
+    if sub == "play":
+        if args.len() < 2:
+            print "error: simple sound play <file.sdn> — missing sound file"
+            return 2
+        if args.len() > 2:
+            print "error: simple sound play takes exactly one sound file"
+            return 2
+        return cmd_play(args[1])
+    print "error: unknown subcommand: {sub}"
+    print_usage()
+    2
