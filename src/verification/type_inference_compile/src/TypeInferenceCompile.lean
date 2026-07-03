@@ -95,4 +95,8 @@ theorem infer_deterministic (e : Expr) (t₁ : Ty) (t₂ : Ty) :
   cases this
   rfl
 
+theorem infer_add_rejects_bool_operand (n : Nat) (b : Bool) :
+  infer (Expr.add (Expr.litNat n) (Expr.litBool b)) = none := by
+  simp [infer]
+
 end TypeInferenceCompile

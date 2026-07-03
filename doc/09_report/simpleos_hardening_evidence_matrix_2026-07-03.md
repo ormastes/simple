@@ -92,6 +92,9 @@
 - tensor_dimensions_formal: pass
 - tensor_dimensions_formal_scope: tensor shape compatibility is reflexive, mismatched ranks are rejected, matmul shape inference is deterministic, and computed min/max element bounds are comparable when both exist
 - tensor_dimensions_formal_evidence: src/verification/tensor_dimensions/src/TensorDimensions.lean shapesCompatible_refl + shapesCompatible_rank_mismatch_left + matmulShape_deterministic + min_le_max_elements; `cd src/verification/tensor_dimensions && lake build`
+- type_inference_core_formal: pass
+- type_inference_core_formal_scope: core expression type inference is deterministic and rejects numeric addition with a boolean operand
+- type_inference_core_formal_evidence: src/verification/type_inference_compile/src/TypeInferenceCompile.lean infer_deterministic + infer_add_rejects_bool_operand; `cd src/verification/type_inference_compile && lake build`
 - type_inference_generics_formal: pass
 - type_inference_generics_formal_scope: empty substitution is identity, single substitution rewrites its target type variable, occurs checks reject primitive non-recursive types and accept the same variable, instantiation/generalization preserve type shape, and literal inference is deterministic
 - type_inference_generics_formal_evidence: src/verification/type_inference_compile/src/Generics.lean applySubst_empty + apply_single_subst_var + occurs_nat_false + occurs_bool_false + occurs_str_false + occurs_var_true + instantiate_preserves_shape + generalize_preserves_type + infer_lit_nat + infer_lit_bool + infer_lit_str; `cd src/verification/type_inference_compile && lake build`
