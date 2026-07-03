@@ -166,6 +166,12 @@ theorem take_shared_then_release_when_not_exclusive (s : BorrowState)
       cases hex
       simp [takeShared, releaseShared]
 
+theorem take_shared_then_exclusive_noop_when_not_exclusive (s : BorrowState)
+    (hex : s.exclusive = false) :
+    takeExclusive (takeShared s) = takeShared s := by
+  apply take_exclusive_shared_noop
+  simp [takeShared, hex]
+
 theorem release_shared_decreases_when_present (s : BorrowState)
     (hshared : s.shared ≠ 0) :
     (releaseShared s).shared < s.shared := by
