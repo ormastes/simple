@@ -1,37 +1,37 @@
 # Test Specification Index
 
-*Generated: 2026-06-01*
+*Curated lane index: Linux RenderDoc/Vulkan, Engine2D, Breakout, and SimpleOS LLVM evidence.*
 
 ## Quick Stats
 
-- **Total Features:** 5
-- **Complete Documentation:** 5 (100%)
+- **Total Features:** 9
+- **Complete Documentation:** 9 (100%)
 - **Stubs Remaining:** 0
-- **Total Lines:** 1528
+- **Total Lines:** 3422
+- **Warnings:** tracked in individual generated manuals
 
 ---
 
-## Runtime (1 features)
+## GPU / Engine2D
 
-| Feature | Status | Difficulty | Tests | Coverage | Details |
-|---------|--------|------------|-------|----------|----------|
-| [Vulkan Compute Oracle](test/01_unit/lib/gc_async_mut/gpu/engine2d/vulkan_compute_oracle_spec.md) | Implemented | N/A | 7 | 20% | 587 lines |
+| Feature | Status | Tests | Details |
+|---------|--------|------:|---------|
+| [Vulkan Compute Oracle](01_unit/lib/gc_async_mut/gpu/engine2d/vulkan_compute_oracle_spec.md) | Complete | 7 | 420 lines |
+| [Engine2D Facade Backend Mutation](test/01_unit/lib/gc_async_mut/gpu/engine2d/engine2d_facade_backend_mutation_spec.md) | Complete | 5 | 266 lines |
+| [Web Renderer Backend Parity](test/01_unit/lib/gc_async_mut/gpu/browser_engine/web_renderer_backend_parity_spec.md) | Complete | 10 | 236 lines |
 
-## Standard Library (2 features)
+## Game2D Breakout
 
-| Feature | Status | Difficulty | Tests | Coverage | Details |
-|---------|--------|------------|-------|----------|----------|
-| [Engine2D Facade Backend Mutation Specification](test/01_unit/lib/gc_async_mut/gpu/engine2d/engine2d_facade_backend_mutation_spec.md) | Active | N/A | 8 | 20% | 266 lines |
-| [Web Renderer Backend Parity Specification](test/01_unit/lib/gc_async_mut/gpu/browser_engine/web_renderer_backend_parity_spec.md) | Minimal | N/A | 10 | 20% | 236 lines |
+| Feature | Status | Tests | Details |
+|---------|--------|------:|---------|
+| [Breakout Production Readiness](test/03_system/game2d/breakout_production_spec.md) | Complete | 1 | 146 lines |
+| [Breakout Render Oracles](test/03_system/game2d/breakout_render_oracles_spec.md) | Complete | 2 | 167 lines |
+| [Breakout Milestone Captures](test/03_system/game2d/breakout_captures_spec.md) | Complete | 1 | 172 lines |
+| [Breakout Window Capture](test/03_system/game2d/breakout_window_capture_spec.md) | Complete | 1 | 156 lines |
 
-## Testing | Runtime | Game2D (1 features)
+## SimpleOS LLVM Port
 
-| Feature | Status | Difficulty | Tests | Coverage | Details |
-|---------|--------|------------|-------|----------|----------|
-| [Breakout Production Readiness (session / frame-time / divergence)](test/03_system/game2d/breakout_production_spec.md) | In Progress | N/A | 3 | 20% | 257 lines |
-
-## Hardware & OS (1 features)
-
-| Feature | Status | Difficulty | Tests | Coverage | Details |
-|---------|--------|------------|-------|----------|----------|
-| [Smoke Clang Specification](02_integration/os/port/llvm/smoke_clang_spec.md) | Partial | N/A | 7 | 40% | 182 lines |
+| Feature | Status | Tests | Details |
+|---------|--------|------:|---------|
+| [Per Target Build](02_integration/os/port/llvm/per_target_build_spec.md) | Complete | 59 | 1612 lines |
+| [Smoke Clang](02_integration/os/port/llvm/smoke_clang_spec.md) | Complete | 7 | 247 lines |

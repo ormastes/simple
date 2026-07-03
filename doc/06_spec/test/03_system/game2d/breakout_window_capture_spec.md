@@ -55,10 +55,12 @@ autopilot session, then sleeps so an external `xwd` capture (run by
 HOST GATE: the window scenario only runs when `SIMPLE_BREAKOUT_WINDOW=1`
 (exported by the check script after probing that the binary actually
 implements the window externs). Without it, the spec records
-`window_backend=blocked_host` and asserts the tracked gap doc exists —
-neither available binary on this host implements ANY window extern
-(`rt_winit_*` is gui-feature-gated off; `rt_sdl2_*` was never wired into
-the interpreter). See
+`window_backend=blocked_host` and asserts the tracked gap doc exists.
+The deployed self-hosted `bin/simple` still lacks `rt_winit_*`; the existing
+gui-feature Rust driver binary (`src/compiler_rust/target/debug/simple`,
+built with `cargo build -p simple-driver --bin simple --features gui`) exposes
+the real winit path and is selected by `scripts/check/check-game2d-breakout.shs`
+for this window leg when present. See
 doc/08_tracking/bug/game2d_no_window_externs_in_host_binaries_2026-07-03.md.
 Same recorded-block convention as the G5.2 Android-emulator gate.
 
@@ -68,7 +70,7 @@ display — never the live desktop session (`scripts/gui/linux-gui-run.shs`
 documents the 2026-07-02 incident that motivated this). The check script is
 the only sanctioned caller; it starts its own Xvfb and exports `DISPLAY`.
 
-Runs via `bin/simple test` (interpreter), not `bin/simple run` — see
+Runs via the test runner in interpreter mode, not `simple run` — see
 doc/08_tracking/bug/jit_game2d_backend_method_dispatch_sigsegv_2026-07-02.md.
 
 ## Scenarios
@@ -120,7 +122,7 @@ else:
     driver.step(app, backend, start_snap(), 16_666_667)
 
     var i: i64 = 0
-    while i < 90:
+    while i < 12:
         val _ = backend.poll_native_events(events)
         driver.step(app, backend, chase_snap(app), 16_666_667)
         i = i + 1

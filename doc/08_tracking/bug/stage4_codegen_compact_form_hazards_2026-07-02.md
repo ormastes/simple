@@ -768,3 +768,174 @@ Candidate fixes, cheapest first:
 Gate: `SIMPLE_UNSTUB_HIR=1 <stage4> run /tmp/hello.spl` must print `2`; then `-c
 "print(1+1)"`. Keep the `/tmp/hello.spl` rule (Trap B) and eprint probes (Trap A).
 Binaries: scratchpad/stage4_fix26 (full-chain probe build).
+
+## Iteration 14 (2026-07-03) — the blocker is NOT the closure; `process_module`'s body is never entered by ANY caller
+
+### DISPROVEN: closure-captured method dispatch is the cause
+Iteration 13 concluded `backend_port.run_fn` (the closure) was the miscompiled
+hop. Iteration 14 tested this directly:
+- **fix27**: `interpret_pipeline` (driver.spl) was changed to bypass the closure
+  entirely — construct a fresh `InterpreterBackendImpl` and call
+  `interp.process_module(hir_module)` DIRECTLY (no closure). Added an eprint
+  `[PM] entry` probe as process_module's FIRST line.
+  Result: `run /tmp/hello.spl` STILL silent, `[PM] entry` STILL never printed.
+  → the direct call ALSO fails to enter the body. Closure is exonerated.
+- **fix28**: added eprint probes at `interpret_pipeline` ENTRY, before the call,
+  and in the Ok arm. Decisive trace:
+  ```
+  [IP] interpret_pipeline ENTRY
+  [IP] before process_module call
+  [IP] process_module OK        <- the call RETURNED Ok(...)
+        <-- [PM] entry NEVER printed, hello-world-42 NEVER printed
+  ```
+  So `interp.process_module(hir_module)` **returns `Ok(...)` without executing
+  process_module's first statement.** The call is dispatched to something that
+  returns `Ok(default)` immediately — a stub or the wrong sibling method — NOT
+  the real interpreter body.
+- **fix29/fix30**: added a uniquely-named wrapper `interpret_hir_module` on
+  InterpreterBackendImpl that just does `self.process_module(module)`, and called
+  THAT from the driver (unique name → no cross-struct `process_module` collision
+  at the driver→wrapper hop). fix30 probes: `[WRAP] interpret_hir_module ENTRY`
+  + `[PM] entry` (both switched to proven-working `eprint`, not rt_eprintln_str).
+  [RESULT PENDING at write time — see run below.]
+
+### Refined root-cause hypothesis (iteration 14)
+InterpreterBackendImpl defines EIGHT `process_*` methods all with signature
+`(HirX) -> Result<BackendResult, BackendError>` (interpreter.spl:42-133); SEVEN
+are one-line `Ok(BackendResult.Unit)` stubs (process_function/class/struct/enum/
+trait/impl). The seed appears to dispatch `interp.process_module(HirModule)` to
+one of these `Ok(BackendResult.Unit)` sibling stubs instead of the real body —
+explaining EXACTLY why the call returns `Ok(Unit)` with no side effects. This is
+the method-dispatch analogue of the documented Dict→ANY "most-fields-wins" family:
+the receiver/return is ANY-erased (BackendResult/HirModule carry Dict fields) so
+the static method-target resolution picks the wrong same-signature sibling.
+
+### Seed repro status — NOT reproducible in isolation (7 variants tried)
+All PASS (correct dispatch) via 1.4s `seed native-build`:
+- clorepro3: closure-in-field + Result<enum> return + big-struct(4-field) by-value
+- clorepro4: + match-arm construction + class-field indirection (`self.ctx.backend`)
+- clorepro5: + two DIFFERENT impl types sharing one `fn` field type
+- clorepro6: + `?` operator inside the method body
+- clorepro7: 4 structs each with identical `process_module(i64)->Result<enum>`
+- crepo (multi-file): duplicate method names across 3 modules, cross-module call
+- sib: ONE struct with 7 sibling `process_*` methods (6 `Ok(Unit)` stubs) + call
+The common miss: all use small concrete param structs. The REAL trigger requires
+the genuine `HirModule` (large struct whose `functions`/`symbols` are `Dict<K,V>`
+erased to ANY by the seed). An isolated repro would need the full compiler HIR
+tree as a dep, exceeding the fast gate. TRIGGER = same-signature `process_*`
+sibling methods on one impl + an ANY-erased `HirModule` by-value arg.
+
+### Fix applied (fix30 CONFIRMS the dispatch fix + reveals Trap C)
+- driver.spl `interpret_pipeline`: bypass `backend_port.run_fn` closure; construct
+  `InterpreterBackendImpl` and call the uniquely-named `interpret_hir_module`.
+- interpreter.spl: added `interpret_hir_module` (unique name) → `self.process_module`.
+
+### Trap C — the `rt_eprintln_str(s.ptr(), s.len())` probe ITSELF silently fails
+fix27/28/29 used `rt_eprintln_str(_probe.ptr(), _probe.len())` as the `[PM] entry`
+probe and it NEVER printed — which falsely looked like process_module's body was
+never entered. fix30 switched the SAME probe location to `eprint(...)` and it
+PRINTS. So the extern `rt_eprintln_str` call (or `.ptr()`/`.len()` arg passing to
+it) is miscompiled/no-op in stage4 — a third silent-probe trap alongside Trap A
+(rt_file_append_text) and buffered-stdout. **For stage4 instrumentation use ONLY
+`eprint(...)`.** With eprint, fix30 shows the full chain runs:
+```
+[IP] interpret_pipeline ENTRY
+[IP] before process_module call
+[WRAP] interpret_hir_module ENTRY   <- unique-named wrapper dispatches correctly
+[PM] entry process_module            <- real process_module body RUNS
+[IP] process_module OK
+```
+So the uniquely-named-method fix WORKS for dispatch. Whether the closure was ever
+the problem is now moot — the direct concrete call + unique name reaches the body.
+
+### REMAINING (fix30): `[PM] entry` runs but `hello-world-42` still not printed
+process_module executes and returns Ok, but `main`'s `print` produces no output.
+Next: probe `has_main`, the `f.name=="main"` loop, and the call_hir_function hop
+(fix31) to see whether main is found+invoked, or invoked-but-print-is-a-no-op.
+
+### fix31: `main` IS found and called — gap is INSIDE main's body / print path
+fix31 probes in process_module's main-dispatch:
+```
+[PM] entry process_module
+[PM] has_main=true
+[PM] loop fn.name=main
+[PM] calling main via call_hir_function
+[PM] main returned          <- call_hir_function(main) completed OK
+```
+So dispatch is fully fixed: main is located and invoked. But `hello-world-42`
+STILL not printed. The gap moved one level deeper: inside
+`call_hir_function(main)` → `eval_block(main.body)` → the `print(...)` statement.
+Either main.body.stmts is empty (body not lowered) or the print builtin path
+(interpreter_calls.spl try_call_builtin BuiltinTag.Print) no-ops. fix32 adds
+eprint probes at Print-builtin entry + the text `case _` to discriminate.
+
+### fix32: the `print` builtin is NEVER invoked — main's trailing print not evaluated
+fix32 trace shows `[PM] main returned` but NO `[BUILTIN] Print reached`. So
+`call_hir_function(main)` runs but the `print("hello-world-42")` inside main's
+body is never executed. ROOT CAUSE FOUND in HIR lowering + interpreter mismatch:
+- `lower_block` (20.hir/hir_lowering/expressions.spl:577-599): for a body whose
+  LAST statement is an expression (main = single `print(...)` stmt), that stmt is
+  extracted as the block's TRAILING VALUE, NOT pushed to `block.stmts`. So
+  `main.body.stmts` is EMPTY and `main.body` = {has: true, value: <print call>}.
+- `HirBlock` (20.hir/hir_definitions.spl:677) is DESUGARED: `value: HirExpr` is a
+  PLAIN field (not Option) gated by a separate `has: bool` flag.
+- BUT the interpreter `eval_block` (interpreter.spl:362) reads it as an Option:
+  `if block.value.?: ... block.value.unwrap()` and NEVER checks `block.has`.
+  On the ANY-erased single-file main HIR this `.?`/`.unwrap()` on a non-Option
+  field mis-evaluates → the trailing `print` expr is never eval'd → silent.
+FIX: `eval_block` must gate on `block.has` and use `block.value` directly (no
+`.?`/`.unwrap()` — value is a plain HirExpr, not Option). fix33 confirms via an
+`[EB] stmts.len / has_value` probe, then apply the has-gated fix.
+
+### fix33 CONFIRMS the root cause
+fix33 trace (with the OLD `block.value.?` probe): `[EB] eval_block stmts.len=0
+has_value=true` then `[PM] main returned` — and NO `[BUILTIN]`. So:
+- `stmts.len=0`: the `print` was extracted by lower_block as the trailing VALUE,
+  not a statement (as predicted).
+- `has_value=true`: `block.value.?` (Option-style non-nil check) returned true.
+- Yet `block.value.unwrap()` → `eval_expr` on the unwrapped value did NOT reach
+  the print builtin. The `.unwrap()` on the DESUGARED plain-`HirExpr` field (which
+  is NOT an Option) is the miscompile: on the ANY-erased single-file main it
+  yields a value that eval_expr silently no-ops on.
+
+### THE FIX (fix34): eval_block gates on `block.has`, evals `block.value` directly
+interpreter.spl eval_block changed from:
+  `if block.value.?: ... self.eval_expr(block.value.unwrap(), ctx)`
+to:
+  `if block.has and block.value != nil: self.eval_expr(block.value, ctx)`
+This matches the desugared HirBlock contract (has: bool gate + plain HirExpr
+value). No `.?`/`.unwrap()` Option semantics on a non-Option field.
+
+Note: `src/compiler/{backend,hir,frontend}` are SYMLINKS to `70.backend`/`20.hir`/
+`10.frontend` (same inode) — editing the numbered tree is canonical, no mirror
+copy to sync.
+
+### fix34 PARTIAL: the has-gated fix reaches eval_expr but Call still not dispatched
+fix34 trace: `[EB] eval_block stmts.len=0 has=true` then `[EB] evaluating trailing
+value` — so the has-gate fix works and `eval_expr(block.value)` is now called.
+BUT still no `[BUILTIN] Print` and no `hello-world`. So `eval_expr` on the
+trailing print-Call expr does NOT reach the print builtin. Two candidates:
+(a) `block.value.kind` mis-matches (ANY-erased kind) so eval_expr falls to its
+`case _:` not_implemented (but no "Interpret error" surfaced, so maybe it matched
+a silent case), or (b) the `Call` case IS matched but call_function's builtin
+routing no-ops. fix35 probes eval_expr `Call` case entry + the catch-all `case _:`
+to discriminate. NOTE: the eval_block has-gate fix is CORRECT and should stay
+regardless — it's a real bug (Option semantics on a plain desugared field); the
+remaining gap is a SEPARATE layer (eval_expr/Call dispatch on the ANY-erased
+trailing expr).
+
+### fix35: eval_expr(block.value) matches NEITHER Call NOR catch-all — ANY-erased kind
+fix35 trace ends at `[EB] evaluating trailing value` — then NOTHING. Not the
+`[EE] Call case` probe, not the `[EE] catch-all` probe, and NOT `[PM] main
+returned`. So `eval_expr(block.value)`'s `match expr.kind` matched an INTERMEDIATE
+case (silently) or read a garbage kind and stalled. This is the ANY-erasure
+signature: `block.value` reaches `eval_expr(expr: HirExpr)` but `expr.kind` is
+read off an ANY-typed receiver → wrong/garbage discriminant.
+
+### fix36 HYPOTHESIS + LIKELY FIX: typed rebind of block.value before matching
+The documented cure for ANY-erased field access in this file is to bind the value
+to a TYPED local (`val f: HirFunction = ...`) so field indices resolve correctly.
+fix36 applies the same: `val bv: HirExpr = block.value` then `match bv.kind` +
+`eval_expr(bv)`. If the typed rebind makes the Call case match (probe shows
+`trailing kind=Call`) and print fires, THAT is the fix — the trailing value must
+be passed through a typed local, not the raw ANY-erased `block.value` field.

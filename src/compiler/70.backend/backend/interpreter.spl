@@ -11,10 +11,10 @@ use compiler.backend.backend_types.*
 use compiler.backend.backend.env.{EvalContext, Environment}
 use compiler.backend.sffi_minimal as sffi  # SFFI wrappers for print/file/env operations
 use compiler.backend.backend.interpreter_calls.*
+use std.nogc_sync_mut.io.process_ops.{eprint}  # PROBE_ITER14
 
 extern fn rt_host_gpu_lane_event(lane_code: i64, phase_code: i64) -> i64
 extern fn rt_host_gpu_queue_emit(lane_code: i64, kind_code: i64, payload_size: i64, backend_handle: i64) -> i64
-extern fn rt_eprintln_str(ptr: i64, len: i64) -> i64  # PROBE_ITER14
 
 # ============================================================================
 # Interpreter Backend Implementation
@@ -49,11 +49,11 @@ impl InterpreterBackendImpl:
     # dispatches to the real body. See doc/08_tracking/bug/
     # stage4_codegen_compact_form_hazards_2026-07-02.md (Iteration 14).
     fn interpret_hir_module(module: HirModule) -> Result<BackendResult, BackendError>:
+        eprint("[WRAP] interpret_hir_module ENTRY\n")  # PROBE_ITER14
         self.process_module(module)
 
     fn process_module(module: HirModule) -> Result<BackendResult, BackendError>:
-        val _pm_probe = "[PM] entry process_module\n"  # PROBE_ITER14
-        rt_eprintln_str(_pm_probe.ptr(), _pm_probe.len())  # PROBE_ITER14
+        eprint("[PM] entry process_module\n")  # PROBE_ITER14
         # Create evaluation context
         val env = Environment.new()
         val ctx = EvalContext(env: env, module: module, backend: self)
@@ -98,9 +98,11 @@ impl InterpreterBackendImpl:
             val fsym = f.symbol
             ctx.env.define_global(fsym, Value.Function(FunctionValue(symbol: fsym, name: f.name)))
 
+        eprint("[PM] has_main={has_main}\n")  # PROBE_ITER14
         if has_main:
             for fn_ in module.functions.values():
                 val f: HirFunction = fn_
+                eprint("[PM] loop fn.name={f.name}\n")  # PROBE_ITER14
                 # Match main by NAME, not by `f.symbol.id`. HirFunction.symbol is a
                 # SymbolId whose boxed pointer is left nil for the synthetic `-c`
                 # main by single-file HIR lowering, so `f.symbol.id` dereferences
@@ -108,7 +110,9 @@ impl InterpreterBackendImpl:
                 # `name` field (a plain text) is populated, and the symbol-table
                 # scan above already confirmed a symbol literally named "main".
                 if f.name == "main":
+                    eprint("[PM] calling main via call_hir_function\n")  # PROBE_ITER14
                     val result = self.call_hir_function(f, [], ctx)?
+                    eprint("[PM] main returned\n")  # PROBE_ITER14
                     return Ok(BackendResult.Value(result))
             Ok(BackendResult.Unit)
         else:
@@ -207,6 +211,7 @@ impl InterpreterBackendImpl:
                     Ok(Value.make_nil())
 
             case Call(callee, args, _):
+                eprint("[EE] Call case reached args.len={args.len()}\n")  # PROBE_ITER14
                 val fn_value = self.eval_expr(callee, ctx)?
                 var arg_values: [Value] = []
                 for arg in args:
@@ -298,6 +303,7 @@ impl InterpreterBackendImpl:
                 Ok(Value.make_nil())
 
             case _:
+                eprint("[EE] eval_expr FELL THROUGH to catch-all (kind unmatched)\n")  # PROBE_ITER14
                 Err(BackendError.not_implemented("expression kind not implemented"))
 
     fn exec_stmt(stmt: HirStmt, ctx: EvalContext) -> Result<(), BackendError>:
@@ -343,24 +349,33 @@ impl InterpreterBackendImpl:
 
 impl InterpreterBackendImpl:
     fn eval_block(block: HirBlock, ctx: EvalContext) -> Result<Value, BackendError>:
+        eprint("[EB] eval_block stmts.len={block.stmts.len()} has={block.has}\n")  # PROBE_ITER14
         ctx.env.push_scope()
 
         for stmt in block.stmts:
+            eprint("[EB] exec stmt\n")  # PROBE_ITER14
             self.exec_stmt(stmt, ctx)?
 
-        # Single-file HIR lowering can emit a block with the desugared `has`
-        # flag set true but the `value` HirExpr left nil (observed for the
-        # synthetic `-c` main body, iteration 10). `block.value.?` reduces to the
-        # `has` flag, so it is true, but unwrapping yields a nil HirExpr whose
-        # `.kind` access then traps ("field access on nil receiver"). Guard the
-        # unwrapped expr against nil so a mis-lowered trailing value degrades to
-        # unit instead of crashing.
-        val result = if block.value.?:
-            val block_value_expr = block.value.unwrap()
-            if block_value_expr != nil:
-                self.eval_expr(block_value_expr, ctx)?
-            else:
-                Value.make_nil()
+        # `HirBlock.value` is a DESUGARED plain `HirExpr` field gated by the
+        # separate `has: bool` flag (hir_definitions.spl:677) — it is NOT an
+        # Option. The previous code used `block.value.?` / `block.value.unwrap()`
+        # (Option semantics), which on the ANY-erased single-file `main` HIR
+        # mis-evaluates so the trailing expression-statement (e.g. the `print(...)`
+        # that `lower_block` extracts as the block value, leaving `stmts` empty)
+        # was never evaluated → `main` ran but produced no output (iteration 14).
+        # Correct: gate on `block.has`, then eval `block.value` directly, guarding
+        # against a nil expr (single-file lowering can set has=true with value nil,
+        # iteration 10).
+        val result = if block.has and block.value != nil:
+            eprint("[EB] evaluating trailing value\n")  # PROBE_ITER14
+            val bv: HirExpr = block.value  # PROBE_ITER14 typed rebind
+            match bv.kind:  # PROBE_ITER14 discriminate the trailing value's kind
+                case Call(_, _, _): eprint("[EB] trailing kind=Call\n")
+                case StringLit(_, _): eprint("[EB] trailing kind=StringLit\n")
+                case Var(_): eprint("[EB] trailing kind=Var\n")
+                case NilLit: eprint("[EB] trailing kind=NilLit\n")
+                case _: eprint("[EB] trailing kind=OTHER\n")
+            self.eval_expr(bv, ctx)?
         else:
             Value.make_nil()
 

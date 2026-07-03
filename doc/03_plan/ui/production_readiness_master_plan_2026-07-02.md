@@ -203,15 +203,19 @@ is Xvfb-only by default; `check-gui-low-res-readability.shs` is offscreen
   Oracle is polarity-aware (dark theme). The G1.3 layout gap is closed:
   the showcase grid is now adaptive (column-major flow, rows from available
   height) and all 18 cells fit unclipped at 640x480 (visually verified).
-- **W5 unblocked, not done:** breakout now has focused production, milestone
-  capture, and window-capture specs under `test/03_system/game2d/`. The old
+- **W5 unblocked, not done:** breakout now has focused production, rendered
+  oracle, milestone capture, and real-window specs under
+  `test/03_system/game2d/`. The old
   stale-`rt_len` note is superseded by the current blockers:
   `bin/simple run` still SIGSEGVs in the Cranelift JIT on `LoopDriver.step`
   (`doc/08_tracking/bug/jit_game2d_backend_method_dispatch_sigsegv_2026-07-02.md`),
-  and this host's available binaries expose no real window externs
+  and deployed `bin/simple` still lacks the gui-feature `rt_winit_*` surface
   (`doc/08_tracking/bug/game2d_no_window_externs_in_host_binaries_2026-07-03.md`).
-  `breakout_window_capture_spec.spl` records the host block cleanly: 1/1 pass
-  on 2026-07-02.
+  The wrapper now uses the existing gui-feature Rust driver binary for the
+  real-window leg when present; `scripts/check/check-game2d-breakout.shs`
+  passes end-to-end with 160x120 milestone PPMs, low-res rendered divergence,
+  and a 12-frame private-Xvfb real window capture. The 800x600 frame-time
+  target remains a tracked performance gap.
 - **G4 narrowphase fixed:** PhysicsWorld3D never dispatched Sphere-Box;
   wired the existing `collide_sphere_aabb_3d` for both orderings.
   physics2 suite 37/37 (also repaired 4 stale specs: RawHandle ctor,
@@ -281,10 +285,10 @@ Midday update (2026-07-03):
 | G4.4 HUD over 3D | PASS (direct blit; LayerTree bridge blocked by interp bugs) | `examples/11_advanced/game3d_hud/main.spl` | `build/game3d_hud.ppm` |
 | G1.1 real window via Vulkan | NOT RUN (live-display ban; needs Xvfb window run) | `scripts/gui/linux-gui-run.shs` | — |
 | G4.2 3D game 60s session | PASS on seed binary (rollball: win+lose autopilot, 3600 fixed steps each, 10 gates; PERF-GAP recorded: frame_p95 ≈2.9 s vs 33 ms target — cranelift f32-trig fallback forces interpreted raster) | `scripts/check/check-game3d-rollball.shs` + `test/03_system/game3d/rollball_production_spec.spl` | `build/game3d-rollball/*.ppm` (11) |
-| G3.2/G3.3/G3.4 2D game breakout | IN PROGRESS (G3.2 3600-step logic session passes; G3.4 frame-time records tracked JIT/render gap; real-window leg records host block; G3.3 rendered divergence remains too slow under interpreter) | `scripts/check/check-game2d-breakout.shs` + `test/03_system/game2d/breakout_*_spec.spl` | `breakout_production_spec.spl` 1/1 for G3.2 logic session; `breakout_frame_time_spec.spl` 1/1 tracked-gap gate; `breakout_window_capture_spec.spl` 1/1 recorded host block; `build/game2d-breakout/*` when the full wrapper is run |
+| G3.2/G3.3/G3.4 2D game breakout | PASS WITH PERF GAP (wrapper overall pass; G3.2 logic session passes; G3.3 low-res rendered divergence, milestone PPMs, and real-window leg pass; G3.4 records tracked 800x600 JIT/render gap) | `scripts/check/check-game2d-breakout.shs` + `test/03_system/game2d/breakout_*_spec.spl` | `overall=pass`; `breakout_production_spec.spl` 1/1; `breakout_render_oracles_spec.spl` 2/2; `breakout_captures_spec.spl` 1/1, 5 PPMs at 160x120; `breakout_window_capture_spec.spl` 1/1 with `window_frames_presented=12`; `build/game2d-breakout/*` |
 | G2.2 glyph parity | PASS (differentPixels 2717→3; calibrated LCD compositing; caveat: Chrome-calibrated atlas, not an independent rasterizer) | `node tools/electron-shell/verify_famous_site_production_probe.js` + probe/corpus specs | `test/09_baselines/famous_site_corpus/site_0_google/*` |
 | G2.3 browser low-res text | PASS | `scripts/check/check-browser-interaction.shs` + `test/03_system/gui/browser_interaction_spec.spl` | `build/browser-interaction/lowres_*.ppm` |
 | G2.4 scroll + link-click/back-forward | PASS (120px marker shift; click→back→forward pixel round-trip, 9/9) | same check script/spec | `build/browser-interaction/scroll_offset*.ppm`, `nav_*.ppm` |
 | G2.5 cross-app glyph consistency | PASS 2026-07-03 (was HONEST-GAP): shared `common.ui.glyph_bitmap_5x7` table + unified 5*scale advance; 88/88 chars byte-identical, strict spec 6/6; browser baselines unmoved | `scripts/check/check-cross-app-glyph-consistency.shs` + `test/03_system/check/cross_app_glyph_consistency_spec.spl` | `build/cross-app-glyph-consistency/*` |
-| G1.1 showcase Vulkan render | PASS via SIMPLE_GUI_BACKEND=vulkan (spec 6/6 w/ seed); live-window capture leg `unavailable_no_winit` — flips when winit-linked binary deploys (stage4 lane) | `scripts/check/check-gui-vulkan-window.shs` + `test/03_system/check/gui_vulkan_window_spec.spl` | `build/gui-window-evidence/*` |
+| G1.1 showcase Vulkan render | PASS via SIMPLE_GUI_BACKEND=vulkan (spec 6/6 w/ seed); live-window capture leg still tied to deployed binary, but gui-feature Rust driver now proves the shared `rt_winit_*` surface can run under Xvfb | `scripts/check/check-gui-vulkan-window.shs` + `test/03_system/check/gui_vulkan_window_spec.spl` | `build/gui-window-evidence/*` |
 | G5.2 Android emulator capture | Emulator leg BLOCKED on host (no SDK/JDK — recorded); fallback legs PASS: WebView-equivalent proof at 360x640 + gradle-artifact gap analysis | `scripts/check/check-tauri-android-webview-proof.shs` + `test/03_system/check/tauri_android_webview_proof_spec.spl` (3/3) | `build/tauri-android-proof/*` |

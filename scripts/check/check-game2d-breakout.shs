@@ -17,6 +17,7 @@ ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 SIMPLE_BIN="${SIMPLE_BIN:-bin/simple}"
+GUI_SIMPLE_BIN="${SIMPLE_BREAKOUT_GUI_SIMPLE_BIN:-src/compiler_rust/target/debug/simple}"
 HEADLESS_SPEC="test/03_system/game2d/breakout_production_spec.spl"
 RENDER_ORACLES_SPEC="test/03_system/game2d/breakout_render_oracles_spec.spl"
 CAPTURES_SPEC="test/03_system/game2d/breakout_captures_spec.spl"
@@ -41,11 +42,27 @@ emit_file_status() {
     fi
 }
 
+probe_winit_externs() {
+    probe_bin="$1"
+    probe_spl="$WORK_DIR/_winit_probe.spl"
+    printf 'extern fn rt_winit_event_loop_new() -> i64\nfn main():\n    val h = rt_winit_event_loop_new()\n    print "el={h}"\n' >"$probe_spl"
+    set +e
+    probe_out=$(env DISPLAY= "$probe_bin" run "$probe_spl" 2>&1)
+    probe_exit=$?
+    set -e
+    rm -f "$probe_spl"
+    if ! printf '%s' "$probe_out" | grep -q "unknown extern function"; then
+        return 0
+    fi
+    return 1
+}
+
 mkdir -p "$WORK_DIR"
 rm -f "$EVIDENCE_LOG" "$ENV_PATH"
 
 echo "check=game2d_breakout"
 echo "simple_bin=$SIMPLE_BIN"
+echo "gui_simple_bin=$GUI_SIMPLE_BIN"
 
 if [ ! -x "$SIMPLE_BIN" ]; then
     echo "overall=fail"
@@ -125,18 +142,16 @@ all_pass=true
     # off-by-default `gui` cargo feature; rt_sdl2_* was never wired into the
     # interpreter). Recorded block, same convention as the G5.2 gate — see
     # doc/08_tracking/bug/game2d_no_window_externs_in_host_binaries_2026-07-03.md.
-    probe_spl="$WORK_DIR/_winit_probe.spl"
-    printf 'extern fn rt_winit_event_loop_new() -> i64\nfn main():\n    val h = rt_winit_event_loop_new()\n    print "el={h}"\n' >"$probe_spl"
-    set +e
-    probe_out=$(env DISPLAY= "$SIMPLE_BIN" run "$probe_spl" 2>&1)
-    set -e
-    rm -f "$probe_spl"
-    if printf '%s' "$probe_out" | grep -q "unknown extern function"; then
-        window_externs_available=false
-    else
+    WINDOW_SIMPLE_BIN="$SIMPLE_BIN"
+    window_externs_available=false
+    if probe_winit_externs "$SIMPLE_BIN"; then
+        window_externs_available=true
+    elif [ -x "$GUI_SIMPLE_BIN" ] && probe_winit_externs "$GUI_SIMPLE_BIN"; then
+        WINDOW_SIMPLE_BIN="$GUI_SIMPLE_BIN"
         window_externs_available=true
     fi
     echo "window_externs_available=$window_externs_available"
+    echo "window_simple_bin=$WINDOW_SIMPLE_BIN"
 
     vfb_pid=""
     cleanup() {
@@ -174,10 +189,10 @@ all_pass=true
 
         set +e
         env DISPLAY="$WIN_DISPLAY" SIMPLE_BREAKOUT_WINDOW=1 \
-            "$SIMPLE_BIN" test --no-session-daemon "$WINDOW_SPEC" --timeout "$WINDOW_TIMEOUT_SECS" \
+            "$WINDOW_SIMPLE_BIN" test --no-session-daemon "$WINDOW_SPEC" --timeout "$WINDOW_TIMEOUT_SECS" \
             >"$WORK_DIR/window.log" 2>&1 &
         window_pid=$!
-        # Let window creation + the 90-frame autopilot session finish, land
+        # Let window creation + the short autopilot session finish, land
         # inside the post-loop `rt_sleep_ms(10000)` hold window before capturing.
         sleep 15
         env DISPLAY="$WIN_DISPLAY" xwd -root -silent -out "$WORK_DIR/window.xwd" 2>>"$WORK_DIR/window.log" || true
