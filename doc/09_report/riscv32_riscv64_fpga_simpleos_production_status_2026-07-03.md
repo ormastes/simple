@@ -52,6 +52,8 @@ either RV32 or RV64.
 - FAIL: `rv64_fpga_core_executable` because the generated active core is a placeholder.
 - FAIL: `rv64_fpga_elf_load_context` because the last XSDB load log reports `xsdb-dow-invalid-context`.
 - FAIL: `build/build/rv32_fpga/gateware/rv32_fpga.bit` is still missing.
+- FAIL: `rv32_fpga_core_executable` because no RV32 executable-core evidence exists at `build/vhdl/rv32/rv32_core.vhd`.
+- FAIL: `rv32_fpga_elf_load_context` because no RV32 load/run evidence exists at `build/fpga/rv32/load_elf_rv32.log`.
 
 `SIMPLE_OS_BUILD_BACKEND=cranelift bin/release/simple os build --arch=riscv64 --scenario=riscv64-fpga-mmode`
 
@@ -102,8 +104,8 @@ longer requires an unrelated native-build-capable compiler before running the
 GHDL lane.
 
 `scripts/check/check-riscv-fpga-simpleos-preflight.shs` now checks the existing
-RV64 preflight plus RV32 FPGA artifacts, so production status cannot ignore the
-32-bit lane.
+RV64 preflight plus RV32 FPGA artifacts, executable-core evidence, and load/run
+evidence, so production status cannot ignore the 32-bit lane.
 
 `simple os build --scenario=riscv64-fpga-mmode` and
 `simple os build --scenario=riscv32-fpga-mmode` are now registered. The RV64
@@ -124,7 +126,7 @@ keeps an XSDB failure log at `build/fpga/k26/load_elf_k26.log`.
    production gate.
 2. Replace the generated RV64 stub softcore bitstream with a real CPU/debug/load path; current XSDB `dow` fails with `Invalid context`.
 3. Capture RV64 PL UART boot markers from PMOD H12/E10 or route PL UART to an observable serial channel.
-4. Produce an RV32 FPGA bitstream and prove RV32 SimpleOS payload execution.
+4. Produce an RV32 FPGA bitstream with executable-core evidence and prove RV32 SimpleOS payload execution.
 
 ## Next Small Step
 

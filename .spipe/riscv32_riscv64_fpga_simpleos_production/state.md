@@ -51,6 +51,8 @@ N/A for this slice: this turn only fixes existing smoke wrappers and records blo
   - Reuses the RV64 preflight and additionally reports RV32 ELF, bin, and bitstream artifact status.
   - PASS: RV32 ELF and bin artifacts exist.
   - FAIL: RV32 bitstream artifact is absent in this workspace.
+  - FAIL: RV32 FPGA core executable evidence is absent (`build/vhdl/rv32/rv32_core.vhd` missing).
+  - FAIL: RV32 FPGA ELF load/run evidence is absent (`build/fpga/rv32/load_elf_rv32.log` missing).
 
 ## Phase
 dev-in-progress
@@ -66,3 +68,4 @@ dev-in-progress
 - dev: Updated the K26 ELF load helper to use the current RV64 FPGA ELF and preserve XSDB logs; current physical load is blocked by missing CPU/debug context in the generated bitstream.
 - dev: Added fail-closed RV64 core/load-context gates to FPGA preflight so a present-but-placeholder bitstream cannot satisfy production readiness.
 - dev: Built RV32 SimpleOS FPGA ELF/bin with the local LLVM-enabled Rust Simple driver; RV32 remains blocked on a real bitstream.
+- dev: Added fail-closed RV32 core/load-context gates so future RV32 bitstreams also need executable-core and payload-load evidence.
