@@ -42,15 +42,28 @@ Web routing via `src/web/routes.spl` maps HTTP method+path to lane actions with 
 
 Reporting module (`src/report/summary.spl`) derives per-lane accepted/denied/revenue KPIs and totals. HTML dashboard generator (`src/web/dashboard.spl`, entry `src/dashboard_main.spl`) renders self-contained output (inline CSS, no external assets, HTML-escaped values) with KPI tiles and per-lane status cards.
 
-See `doc/01_research/domain/simple_erp_vs_sap.md` for comparison research.
+The framework is extensible by registration (`src/framework/registry.spl`): a
+new business is one `LaneDef` + one lane module — RBAC, routes, gating, and
+dashboard cards derive from the registry (proof: `src/extension_demo.spl`,
+clinic lane, zero framework edits). Role policy and ordered approval chains are
+registry data too (`src/framework/org.spl`). Big-business mechanics — durable
+event log with fail-closed load (`src/kernel/durable_log.spl`), materialized
+balance snapshots, bucketed idempotency index, per-tenant FIFO commit queue —
+are proven end-to-end by `src/bigbiz_demo.spl`.
+
+See `doc/01_research/domain/simple_erp_vs_sap.md` for comparison research,
+`doc/05_design/simple_erp_extension.md` for the extension design, and
+`doc/07_guide/app/simple_erp/business_framework.md` for the how-to guide.
 
 Run:
 
 ```bash
-bin/simple test test/03_system/app/simple_erp/feature/simple_erp_catalog_spec.spl --mode=interpreter
+bin/simple test test/03_system/app/simple_erp/feature/ --mode=interpreter      # all 4 system specs
 bin/simple examples/12_business/simple_erp/src/catalog.spl easy
 bin/simple examples/12_business/simple_erp/src/catalog.spl pro
 bin/simple test examples/12_business/simple_erp/ubs_test/ --mode=interpreter   # kernel + lane + report specs
 bin/simple examples/12_business/simple_erp/src/business_suite.spl              # suite evidence
 bin/simple examples/12_business/simple_erp/src/dashboard_main.spl              # HTML dashboard to stdout
+bin/simple examples/12_business/simple_erp/src/extension_demo.spl              # 6th business, zero framework edits
+bin/simple examples/12_business/simple_erp/src/bigbiz_demo.spl                 # durability/snapshot/queue/org evidence
 ```

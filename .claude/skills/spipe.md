@@ -18,6 +18,13 @@ mirrored through SPipe.
 > bug/feature request — don't switch the runner back to the seed. See
 > `.claude/rules/bootstrap.md` § "Default tooling runs on pure-Simple".
 
+> **Interpreter-mode verification caveat.** The file summary can print
+> `Passed: N / Failed: 0` (and `PASS`, exit 0) even when `it` blocks failed —
+> per-block output shows the red `✗` marks the aggregate drops. When verifying
+> spec runs (especially from scripts/agents), grep the output for `✗` or
+> `[1-9][0-9]* failures`, never just `^PASS` or the exit code. Tracked:
+> `doc/08_tracking/bug/test_runner_interpreter_file_summary_greenwash_2026-07-03.md`.
+
 The SPipe dev entrypoint lives at:
 
 **[.claude/agents/spipe/dev.md](../agents/spipe/dev.md)**
