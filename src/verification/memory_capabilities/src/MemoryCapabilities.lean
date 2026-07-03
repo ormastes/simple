@@ -162,6 +162,24 @@ theorem existing_ref_denies_isolated
       loc RefCapability.Isolated = false := by
   cases cap <;> simp [canCreateRef, getActiveRefs]
 
+theorem existing_ref_denies_unique_create
+    (baseType : String) (loc : Nat) (cap : RefCapability) :
+    canCreateRef
+      { activeRefs :=
+          [(loc,
+            [{ location := loc,
+               refType := { baseType := baseType, capability := cap } }])] }
+      loc RefCapability.Exclusive = false ∧
+    canCreateRef
+      { activeRefs :=
+          [(loc,
+            [{ location := loc,
+               refType := { baseType := baseType, capability := cap } }])] }
+      loc RefCapability.Isolated = false := by
+  constructor
+  · exact existing_ref_denies_exclusive baseType loc cap
+  · exact existing_ref_denies_isolated baseType loc cap
+
 theorem existing_shared_allows_shared (baseType : String) (loc : Nat) :
   canCreateRef
     { activeRefs :=
