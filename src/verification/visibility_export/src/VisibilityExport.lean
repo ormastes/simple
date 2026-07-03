@@ -120,4 +120,10 @@ theorem private_symbol_under_public_path_private (path : List Visibility)
   rw [hpath]
   rfl
 
+theorem private_child_decl_not_public (dir child : String) :
+  DirManifest.isChildPublic
+    { name := dir, children := [{ name := child, isPub := false }], exports := [] }
+    child = false := by
+  simp [DirManifest.isChildPublic]
+
 end VisibilityExport
