@@ -108,6 +108,63 @@ Note the treesitter_* cluster (7 files) and host_gpu_lane_* cluster (5 files)
 each look like they share one or two root causes rather than 12 independent
 bugs — worth bisecting together as a follow-up.
 
+## Task #76 follow-up pass (items 8–29, non-treesitter/non-gpu-lane clusters)
+
+Per-cluster triage of the restored-with-failures list. Verdicts:
+**GATED** = tag kept/restored, blocker documented; **FIXED** = root-caused and
+fixed at source, tag removed.
+
+### map_traversal (item 13) — GATED (interpreter engine gap)
+
+- Failure (all 4 examples): `semantic: method 'hash' not found on type 'i64'
+  (receiver value: 1)` from `Map.insert` → `hash_key` → `key.hash()`.
+- Root cause: the interpreter does not resolve `impl Hash for i64` (trait impl
+  on a primitive, defined in `src/lib/nogc_sync_mut/src/hash.spl`) for method
+  dispatch — a direct probe `use lib.nogc_sync_mut.src.hash.{Hash};
+  (5 as i64).hash()` fails identically. The dispatch error is emitted from
+  `src/compiler/80.driver/driver.spl` (forbidden path, other lane). Related:
+  `use std.hash.Hash` from a spec reports `Module "std.hash" does not export
+  'Hash'` (trait not `pub` / re-export gap).
+
+### cmm_v2025 (item 18) — GATED (module unreachable by resolver)
+
+- Failure (all 15 examples): `semantic: function 'config_for_version' not
+  found` etc. — the spec's `use cmm_version.{...}` imports are commented out.
+- Root cause: the implementation lives only at
+  `examples/10_tooling/trace32_tools/cmm_lsp/*.spl`. No import path reaches it:
+  `use examples.trace32_tools.cmm_lsp.cmm_version` → `Cannot resolve module`
+  because the resolver's numbered-dir fallback (`find_numbered_dir`,
+  `src/compiler/99.loader/module_resolver/resolution.spl`) only matches
+  `NN.name`, not `NN_category/name`, and `10_tooling` cannot be spelled as an
+  identifier segment. Sibling cmm specs pass only because they inline private
+  mini-implementations. Fix requires a resolver feature or relocating the
+  cmm_lsp example into an importable tree — out of sweep scope.
+
+### component (item 19) — GATED (module never implemented)
+
+- Failure (all examples): `semantic: variable 'ComponentType' not found` /
+  `unsupported path call: ["ComponentManager", "create"]`.
+- Root cause: spec is aspirational — `use game_engine.component` is commented
+  out with "Module not yet implemented" and no such module exists anywhere in
+  `src/`. Needs the game-engine component module to be written first.
+
+### actor_model (item 17) — GATED (module never implemented)
+
+- Failure (all examples): `method 'Vec3' not found on type 'dict'` (module-path
+  constructor `math.Vec3(...)` in interpreter) and `unsupported path call:
+  ["GameMessage", "Update"]`.
+- Root cause: same as component — `use game_engine.actor_model` commented out,
+  module does not exist; additionally interpreter path-call gaps on enum
+  variants would block it even if it did.
+
+### Incident note (2026-07-03, task #76 pass)
+
+While this pass had the four specs above temporarily untagged in the working
+copy, a parallel session's snapshot swept the edits into its own commit
+(`7e33394e202`, "fix(types): resolve ANY-erased field sites"), briefly leaving
+the four failing specs untagged at HEAD. The tags were re-added and committed
+by this pass immediately after detection.
+
 ## Not yet processed (follow-up)
 
 - 50 legacy-mirror duplicate files under `test/unit/`, `test/integration/`,
