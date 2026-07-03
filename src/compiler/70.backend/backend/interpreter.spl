@@ -141,19 +141,19 @@ impl InterpreterBackendImpl:
     fn eval_expr(expr: HirExpr, ctx: EvalContext) -> Result<Value, BackendError>:
         itrace("[EE] eval_expr entry disc={rt_enum_discriminant(expr.kind)}")
         match expr.kind:
-            case IntLit(value, _):
+            case HirExprKind.IntLit(value, _):
                 itrace("[EE] IntLit arm")
                 Ok(Value.int(value))
 
-            case FloatLit(value, _):
+            case HirExprKind.FloatLit(value, _):
                 itrace("[EE] FloatLit arm")
                 Ok(Value.float(value))
 
-            case StringLit(value, _):
+            case HirExprKind.StringLit(value, _):
                 itrace("[EE] StringLit arm")
                 Ok(Value.string(value))
 
-            case BoolLit(value):
+            case HirExprKind.BoolLit(value):
                 itrace("[EE] BoolLit arm")
                 Ok(Value.bool(value))
 
@@ -169,7 +169,7 @@ impl InterpreterBackendImpl:
                 itrace("[EE] UnitLit arm")
                 Ok(Value.make_nil())
 
-            case Var(symbol):
+            case HirExprKind.Var(symbol):
                 itrace("[EE] Var arm sym={symbol}")
                 val value = ctx.env.lookup(symbol)
                 if value.?:
@@ -177,7 +177,7 @@ impl InterpreterBackendImpl:
                 else:
                     Err(BackendError.runtime_error("undefined variable", Some(expr.span)))
 
-            case ArrayLit(elements, _):
+            case HirExprKind.ArrayLit(elements, _):
                 itrace("[EE] ArrayLit arm")
                 var values: [Value] = []
                 for elem in elements:
@@ -185,7 +185,7 @@ impl InterpreterBackendImpl:
                     values = values.push(v)
                 Ok(Value.Array(values))
 
-            case TupleLit(elements):
+            case HirExprKind.TupleLit(elements):
                 itrace("[EE] TupleLit arm")
                 var values: [Value] = []
                 for elem in elements:
@@ -193,7 +193,7 @@ impl InterpreterBackendImpl:
                     values = values.push(v)
                 Ok(Value.Tuple(values))
 
-            case DictLit(entries, _, _):
+            case HirExprKind.DictLit(entries, _, _):
                 itrace("[EE] DictLit arm")
                 var dict: Dict<text, Value> = {}
                 for i in 0..entries.len():
@@ -209,18 +209,18 @@ impl InterpreterBackendImpl:
                             return Err(BackendError.type_error("dict key must be string", Some(expr.span)))
                 Ok(Value.Dict(dict))
 
-            case Binary(op, left, right):
+            case HirExprKind.Binary(op, left, right):
                 itrace("[EE] Binary arm")
                 val lv = self.eval_expr(left, ctx)?
                 val rv = self.eval_expr(right, ctx)?
                 self.eval_binop(op, lv, rv, expr.span)
 
-            case Unary(op, operand):
+            case HirExprKind.Unary(op, operand):
                 itrace("[EE] Unary arm")
                 val v = self.eval_expr(operand, ctx)?
                 self.eval_unaryop(op, v, expr.span)
 
-            case If(cond, then_, else_):
+            case HirExprKind.If(cond, then_, else_):
                 itrace("[EE] If arm")
                 val cv = self.eval_expr(cond, ctx)?
                 if cv.is_truthy():
@@ -230,7 +230,7 @@ impl InterpreterBackendImpl:
                 else:
                     Ok(Value.make_nil())
 
-            case Call(callee, args, _):
+            case HirExprKind.Call(callee, args, _):
                 itrace("[EE] Call arm")
                 val fn_value = self.eval_expr(callee, ctx)?
                 var arg_values: [Value] = []
@@ -287,7 +287,7 @@ impl InterpreterBackendImpl:
                     case Unresolved:
                         Err(BackendError.runtime_error("unresolved method call: {method_name}", Some(expr.span)))
 
-            case StaticCall(type_, method_name, args, resolution):
+            case HirExprKind.StaticCall(type_, method_name, args, resolution):
                 # Static call: Type.method(args) - similar to StaticMethod variant
                 match resolution:
                     case StaticMethod(_, method_id):
@@ -301,7 +301,7 @@ impl InterpreterBackendImpl:
                     case _:
                         Err(BackendError.runtime_error("invalid static call resolution", Some(expr.span)))
 
-            case Lambda(params, body, _):
+            case HirExprKind.Lambda(params, body, _):
                 # Capture free variables from current scope
                 var captures: Dict<SymbolId, Value> = {}
                 val free_vars = body.free_variables()
@@ -318,7 +318,7 @@ impl InterpreterBackendImpl:
             case HirExprKind.Block(block):
                 self.eval_block(block, ctx)
 
-            case HostGpuLane(lane_code, payload_size, marker, body):
+            case HirExprKind.HostGpuLane(lane_code, payload_size, marker, body):
                 self.eval_expr(marker, ctx)?
                 rt_host_gpu_lane_event(lane_code, 1)
                 if lane_code == 2:
@@ -344,10 +344,10 @@ impl InterpreterBackendImpl:
                 ctx.env.define(symbol, value)
                 Ok(())
 
-            case Assign(target, op, value):
+            case HirStmtKind.Assign(target, op, value):
                 val new_value = self.eval_expr(value, ctx)?
                 match target.kind:
-                    case Var(symbol):
+                    case HirExprKind.Var(symbol):
                         if op.?:
                             val old_value = ctx.env.lookup(symbol)
                             if old_value.is_none():
