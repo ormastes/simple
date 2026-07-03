@@ -11,6 +11,12 @@
   T3_direct                — after revoke(tok), owner no longer passes check (direct form).
   T4  gate_sound           — syscall gate authorizes iff caller holds the kind.
   T5  default_deny         — a principal with no record passes no check.
+  T6  zero_depth_grant_denied
+                            — capability delegation fails when depth is exhausted.
+  T7  full_set_allows_any_kind
+                            — full capability set is a wildcard hazard.
+  T8  full_set_syscall_authorizes_any_kind
+                            — the wildcard reaches the syscall gate.
 
   FINDINGS (remaining implementation gaps vs. specification):
   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -108,6 +114,15 @@ theorem non_escalation
         simp)
     · rfl
   exact (Rights.subsetB_iff _ _).mp hsubset_ok
+
+/-- T6: Delegation depth is a hard gate.  A token with depth=0 cannot be
+    granted even if the grantor otherwise has the capability kind. -/
+theorem zero_depth_grant_denied
+    (s : CapState) (grantor grantee : Principal) (tok : CapToken)
+    (hdepth : tok.depth = 0) :
+    CapState.grant s grantor grantee tok = none := by
+  unfold CapState.grant
+  cases s.check grantor tok.kind <;> simp [hdepth]
 
 -- ============================================================
 -- § T2  attenuation
@@ -314,10 +329,41 @@ theorem default_deny
     s.check pid kind = false := by
   simp [CapState.check, hnorec]
 
+/-- A principal with no record is denied by the syscall gate for every kind. -/
+theorem default_deny_syscall
+    (s : CapState) (pid : Principal)
+    (hnorec : s.findRecord pid = none)
+    (kind : CapKind) :
+    syscallAuthorize s pid kind = false := by
+  simp [syscallAuthorize, CapState.check, hnorec]
+
 theorem empty_set_denies_all
     (s : CapState) (pid : Principal) (kind : CapKind)
     (hrec : s.findRecord pid = some { pid := pid, caps := CapSet.empty }) :
     s.check pid kind = false := by
   simp [CapState.check, hrec, CapSet.empty]
+
+/-- Empty capability sets deny every syscall authorization. -/
+theorem empty_set_syscall_denies_all
+    (s : CapState) (pid : Principal) (kind : CapKind)
+    (hrec : s.findRecord pid = some { pid := pid, caps := CapSet.empty }) :
+    syscallAuthorize s pid kind = false := by
+  simp [syscallAuthorize, CapState.check, hrec, CapSet.empty]
+
+/-- T7: A principal with CapSet.full passes every capability-kind check.
+    This is an explicit hazard theorem, not a safety endorsement: production
+    code must constrain full sets to trusted init/kernel principals. -/
+theorem full_set_allows_any_kind
+    (s : CapState) (pid : Principal) (kind : CapKind)
+    (hrec : s.findRecord pid = some { pid := pid, caps := CapSet.full }) :
+    s.check pid kind = true := by
+  simp [CapState.check, hrec, CapSet.full]
+
+/-- T8: The CapSet.full wildcard reaches the syscall authorization gate. -/
+theorem full_set_syscall_authorizes_any_kind
+    (s : CapState) (pid : Principal) (kind : CapKind)
+    (hrec : s.findRecord pid = some { pid := pid, caps := CapSet.full }) :
+    syscallAuthorize s pid kind = true := by
+  simp [syscallAuthorize, CapState.check, hrec, CapSet.full]
 
 end KernelCapabilities

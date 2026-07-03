@@ -50,6 +50,24 @@
 - qemu_virtio_gpu_access: pass
 - qemu_virtio_gpu_access_reason: rv64-qmp-virtio-gpu-display-smoke-pass
 - qemu_virtio_gpu_access_contract: src/os/_QemuRunner/scenario_catalog.spl:scenario_riscv64_display_smoke
+- kernel_scheduler_resource_formal: pass
+- kernel_scheduler_resource_formal_scope: bounded ResourcePool acquire/release capacity, zero-capacity denial/emptiness, underflow, and acquire-release no-leak roundtrip invariants
+- kernel_scheduler_resource_formal_evidence: src/verification/kernel_scheduler/KernelScheduler/Theorems.lean T10a-T10g plus resource_zero_capacity_acquire_denied + resource_zero_capacity_wf_empty; `cd src/verification/kernel_scheduler && lake build`
+- actor_channel_backpressure_formal: pass
+- actor_channel_backpressure_formal_scope: closed send/closed-empty recv fail without mutation; closed non-empty recv drains buffered values; close_drain preserves buffered values, keeps them receivable, and is idempotent after close; bounded producer/consumer channel cannot overflow when full and no receiver is waiting; receiver parked by recv is woken by close_drain; send to a waiting receiver wakes without buffer growth
+- actor_channel_backpressure_formal_evidence: src/verification/actor_channel/ActorChannel/Theorems.lean T2a2 + T2b2 + T2b3 + T3a2 + T3a3 + T3b + T6d + T6e + T7; `cd src/verification/actor_channel && lake build`
+- kernel_capability_depth_formal: pass
+- kernel_capability_depth_formal_scope: capability delegation with exhausted depth is denied
+- kernel_capability_depth_formal_evidence: src/verification/kernel_capabilities/KernelCapabilities/Theorems.lean zero_depth_grant_denied; `cd src/verification/kernel_capabilities && lake build`
+- kernel_capability_empty_set_formal: pass
+- kernel_capability_empty_set_formal_scope: no capability record and CapSet.empty deny every direct check and syscall authorization
+- kernel_capability_empty_set_formal_evidence: src/verification/kernel_capabilities/KernelCapabilities/Theorems.lean default_deny + default_deny_syscall + empty_set_denies_all + empty_set_syscall_denies_all; `cd src/verification/kernel_capabilities && lake build`
+- kernel_capability_full_set_hazard_formal: pass
+- kernel_capability_full_set_hazard_scope: CapSet.full is formally verified to allow any capability kind through direct checks and syscall authorization, and must remain restricted to trusted init/kernel principals
+- kernel_capability_full_set_hazard_evidence: src/verification/kernel_capabilities/KernelCapabilities/Theorems.lean full_set_allows_any_kind + full_set_syscall_authorizes_any_kind; `cd src/verification/kernel_capabilities && lake build`
+- memory_model_drf_formal: pass
+- memory_model_drf_formal_scope: multithread executions with no conflicts, read-only same-location sharing, or with all conflicting operations ordered by happens-before, program-order, or synchronizes-with, are data-race free; same-location write/write and read/write pairs are formally classified as conflicts; unordered same-location write/write and read/write pairs are formally data races
+- memory_model_drf_formal_evidence: src/verification/memory_model_drf/src/MemoryModelDRF.lean drf_when_no_conflicts + drf_two_reads_same_location + drf_when_conflicts_ordered + drf_when_conflicts_program_or_sync_ordered + drf_two_ops_synchronized + write_write_same_location_conflicts + read_write_same_location_conflicts + write_read_same_location_conflicts + two_unordered_writes_same_location_race + two_unordered_read_write_same_location_race + two_unordered_write_read_same_location_race; `cd src/verification/memory_model_drf && lake build`
 - simple_web_node_report: doc/09_report/simple_web_engine2d_js_bitmap_evidence_2026-06-02.md
 - simple_web_bun_report: doc/09_report/bun_simple_web_engine2d_js_bitmap_evidence_2026-06-02.md
 - production_gui_parity_report: doc/09_report/production_gui_web_renderer_parity_evidence_2026-06-29.md

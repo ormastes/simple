@@ -27,6 +27,8 @@ This layer owns the strongest claims in scope:
 - syscall register marshalling and return write-back
 - capability and grant authorization requirements
 - scheduler lifecycle invariants
+- bounded resource lifecycle invariants for kernel/server handles
+- multithread data-race-freedom criteria for host/server execution models
 - VM isolation requirements
 
 Primary artifacts:
@@ -89,6 +91,8 @@ Rules:
 - syscall ABI defined in `doc/04_architecture/os/simpleos/kernel/simpleos_interfaces.md`
 - trap/runtime seam defined in `doc/04_architecture/hardware/riscv/rv64_user_mode_exec.md`
 - Lean verification contract defined in `doc/04_architecture/infra/misc/lean_verification_contract.md`
+- scheduler/resource proof model at `src/verification/kernel_scheduler/KernelScheduler/`
+- memory-model DRF proof at `src/verification/memory_model_drf/src/MemoryModelDRF.lean`
 
 ### Desktop-session public boundaries
 

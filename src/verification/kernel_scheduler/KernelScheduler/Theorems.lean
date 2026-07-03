@@ -45,6 +45,7 @@
   T7  enqueue_then_runBatch    — an enqueued task is consumed by runBatch
   T8  cpuAllowed_zero_mask     — mask=0 allows every non-negative cpu index
   T9  steal_threshold_correct  — steal iff remote − local > threshold
+  T10 resource_pool_safe       — acquire/release preserve capacity and never underflow
 -/
 
 import KernelScheduler.Basic
@@ -228,5 +229,80 @@ theorem steal_does_not_fire_at_threshold (local_load remote_load threshold : Nat
     shouldSteal local_load remote_load threshold = false := by
   simp [shouldSteal]
   omega
+
+-- ============================================================
+-- § J  T10 — bounded resource lifecycle safety
+-- ============================================================
+
+/-- T10a: acquire below capacity grants exactly one additional live resource. -/
+theorem resource_acquire_below_capacity_grants (p : ResourcePool)
+    (h : p.inUse < p.capacity) :
+    (p.acquire).granted = true ∧ (p.acquire).pool.inUse = p.inUse + 1 := by
+  simp [ResourcePool.acquire, h]
+
+/-- T10b: acquire at capacity is a no-op and reports denial. -/
+theorem resource_acquire_full_noop (p : ResourcePool)
+    (h : p.capacity ≤ p.inUse) :
+    (p.acquire).granted = false ∧ (p.acquire).pool = p := by
+  have hn : ¬ p.inUse < p.capacity := by omega
+  simp [ResourcePool.acquire, hn]
+
+/-- T10b2: a zero-capacity resource pool never grants acquisition. -/
+theorem resource_zero_capacity_acquire_denied (p : ResourcePool)
+    (hcap : p.capacity = 0) :
+    (p.acquire).granted = false ∧ (p.acquire).pool = p := by
+  apply resource_acquire_full_noop
+  omega
+
+/-- T10b3: a well-formed zero-capacity pool has no live resources. -/
+theorem resource_zero_capacity_wf_empty (p : ResourcePool)
+    (hcap : p.capacity = 0)
+    (hwf : p.wf) :
+    p.inUse = 0 := by
+  unfold ResourcePool.wf at hwf
+  omega
+
+/-- T10c: release of an empty pool is a no-op. -/
+theorem resource_release_empty_noop (p : ResourcePool)
+    (h : p.inUse = 0) :
+    p.release = p := by
+  simp [ResourcePool.release, h]
+
+/-- T10d: release never increases live resources, so it cannot underflow. -/
+theorem resource_release_never_underflows (p : ResourcePool) :
+    p.release.inUse ≤ p.inUse := by
+  unfold ResourcePool.release
+  by_cases h : p.inUse = 0
+  · simp [h]
+  · simp [h]
+
+/-- T10e: acquire preserves the bounded-resource invariant. -/
+theorem resource_acquire_preserves_wf (p : ResourcePool)
+    (hwf : p.wf) :
+    (p.acquire).pool.wf := by
+  unfold ResourcePool.acquire ResourcePool.wf at *
+  by_cases h : p.inUse < p.capacity
+  · simp [h]
+    omega
+  · simp [h]
+    exact hwf
+
+/-- T10f: release preserves the bounded-resource invariant. -/
+theorem resource_release_preserves_wf (p : ResourcePool)
+    (hwf : p.wf) :
+    p.release.wf := by
+  unfold ResourcePool.release ResourcePool.wf at *
+  by_cases h : p.inUse = 0
+  · simp [h]
+  · simp [h]
+    omega
+
+/-- T10g: successful acquire followed by release returns the pool to its
+    original state.  This is the basic no-leak lifecycle roundtrip. -/
+theorem resource_acquire_release_roundtrip (p : ResourcePool)
+    (h : p.inUse < p.capacity) :
+    (p.acquire).pool.release = p := by
+  unfold ResourcePool.acquire ResourcePool.release
+  simp [h]
 
 end KernelScheduler

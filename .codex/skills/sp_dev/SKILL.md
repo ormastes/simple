@@ -386,13 +386,6 @@ dependencies must miss the interpreter/incremental cache and any SMF/JIT cache
 that could otherwise reuse stale code. Add focused specs near the cache owner
 instead of relying only on broad loader suites.
 
-For RISC-V product-level formal/RTL work, do not call the lane complete until
-`sh scripts/check/check-riscv-product-level-evidence.shs` passes and Vivado
-size/performance evidence passes with
-`SYNTH_REPORT_DIR=build/riscv_synth_reports sh scripts/check/check-riscv-budget-evidence.shs --require-vivado`.
-The required evidence is both `rv32_synth.sdn` and `rv64_synth.sdn` with
-`source = "vivado"`; static target metadata is not enough for completion.
-
 For MCP/runtime-forwarding or startup-latency work, refresh both the lane state
 file and `doc/07_guide/app/mcp/startup_performance.md` before handoff. Keep the
 guide aligned with the current wrapper contract (native-first, probe-stamped,

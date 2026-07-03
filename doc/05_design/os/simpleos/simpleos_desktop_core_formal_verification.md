@@ -18,11 +18,16 @@ The first proof/spec slice is built from deterministic and pure surfaces:
 3. syscall register marshalling
 4. syscall result write-back
 5. capability/grant/scheduler invariants documented as contracts and referenced by later proof units
+6. bounded resource acquire/release invariants for kernel/server handle pools
+7. DRF criteria for multithread host/server executions using happens-before ordering
 
 Immediate executable evidence:
 
 - `rv64_user_mode_exec_spec.spl`
 - new `simpleos_desktop_core_formal_verification_spec.spl`
+- Lean project `src/verification/kernel_scheduler` proves scheduler lifecycle and bounded resource-pool invariants with no `sorry`/`admit`
+- Lean project `src/verification/kernel_capabilities` proves capability attenuation, revocation, no-record/empty-set default deny through direct checks and syscalls, gate soundness, zero-depth delegation denial, and the CapSet.full direct-check/syscall-gate wildcard hazard
+- Lean project `src/verification/memory_model_drf` proves ordered conflicting operations and two-operation synchronized handoffs imply data-race freedom
 
 ### Desktop-contract slice
 
@@ -97,6 +102,7 @@ Those checks are part of the later verification-bearing phase, not the current p
 
 1. repair `bin/simple verify status`
 2. formalize capability/grant invariants in proof-bearing form
-3. formalize scheduler lifecycle invariants in proof-bearing form
+3. extend scheduler/resource proofs from bounded pools to concrete per-subsystem handle tables
+4. connect concrete host/server lock and channel APIs to the DRF ordering predicate
 4. strengthen desktop-session provenance and readiness system specs
 5. add later architecture-specific proof lanes only after the current claim package is stable

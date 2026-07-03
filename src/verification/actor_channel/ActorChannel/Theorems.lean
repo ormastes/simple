@@ -12,6 +12,8 @@
                                   last_error, and does NOT stop further dispatches
   T6  no_lost_task              — a task parked on a channel is either still parked,
                                   woken by a send, or woken by close — never dropped
+  T7  bounded_channel_backpressure
+                                — full open channel with no waiters cannot grow
 
   T-fact: legacy_send_closed_noop
                                 — channel.spl send() to closed channel enqueues anyway
@@ -78,6 +80,12 @@ theorem closed_send_reports_failure (ch : GreenChannel) (v : Val)
     r.channel_closed = true ∧ r.sent = false := by
   simp [greenSend, hclosed]
 
+/-- T2a2: green_channel_send to a closed channel leaves channel state unchanged. -/
+theorem closed_send_no_mutation (ch : GreenChannel) (v : Val)
+    (hclosed : ch.closed = true) :
+    (greenSend ch v).channel = ch := by
+  simp [greenSend, hclosed]
+
 /-- T2b: green_channel_recv on a closed+empty channel returns immediately:
     channel_closed=true, parked=false (no park). -/
 theorem closed_empty_recv_no_park (ch : GreenChannel) (tid : TaskId)
@@ -86,6 +94,28 @@ theorem closed_empty_recv_no_park (ch : GreenChannel) (tid : TaskId)
     let r := greenRecv ch tid
     r.channel_closed = true ∧ r.parked = false := by
   simp [greenRecv, hclosed, hempty]
+
+/-- T2b2: green_channel_recv on a closed+empty channel leaves channel state unchanged. -/
+theorem closed_empty_recv_no_mutation (ch : GreenChannel) (tid : TaskId)
+    (hclosed : ch.closed = true)
+    (hempty  : ch.queued_values = []) :
+    (greenRecv ch tid).channel = ch := by
+  simp [greenRecv, hclosed, hempty]
+
+/-- T2b3: green_channel_recv on a closed non-empty channel drains a buffered
+    value instead of reporting terminal channel_closed. -/
+theorem closed_buffered_recv_drains_value
+    (ch : GreenChannel) (tid : TaskId) (v : Val) (rest : List Val)
+    (hclosed : ch.closed = true)
+    (hqueue : ch.queued_values = v :: rest) :
+    let r := greenRecv ch tid
+    r.received = true ∧
+    r.value = v ∧
+    r.channel_closed = false ∧
+    r.parked = false ∧
+    r.channel.queued_values = rest := by
+  have hhead : (v :: rest).head! = v := rfl
+  simp [greenRecv, hclosed, hqueue, hhead]
 
 /-- T2c (legacy sync channel): try_send on a closed channel returns false
     and does NOT enqueue the value. -/
@@ -116,6 +146,32 @@ theorem close_wakes_all_parked (ch : GreenChannel) (tid : TaskId)
     let r := greenCloseDrain ch
     tid ∈ r.woken_task_ids := by
   simp [greenCloseDrain, hmem]
+
+/-- T3a2: close_drain wakes waiters but preserves buffered values. -/
+theorem close_drain_preserves_buffer (ch : GreenChannel) :
+    (greenCloseDrain ch).channel.queued_values = ch.queued_values := by
+  simp [greenCloseDrain]
+
+/-- T3a3: buffered values remain receivable after close_drain. -/
+theorem close_then_recv_buffered_value
+    (ch : GreenChannel) (tid : TaskId) (v : Val) (rest : List Val)
+    (hqueue : ch.queued_values = v :: rest) :
+    let closed := greenCloseDrain ch
+    let recv := greenRecv closed.channel tid
+    recv.received = true ∧
+    recv.value = v ∧
+    recv.parked = false ∧
+    recv.channel.queued_values = rest := by
+  have hhead : (v :: rest).head! = v := rfl
+  simp [greenCloseDrain, greenRecv, hqueue, hhead]
+
+/-- T3b: close_drain is idempotent after the first close: a second close wakes
+    no tasks and leaves the already-closed channel unchanged. -/
+theorem close_drain_idempotent_after_close (ch : GreenChannel) :
+    let first := greenCloseDrain ch
+    let second := greenCloseDrain first.channel
+    second.channel = first.channel ∧ second.woken_task_ids = [] := by
+  simp [greenCloseDrain]
 
 -- ============================================================
 -- § D  T4 — actor_sequential
@@ -266,8 +322,51 @@ theorem no_lost_task_recv_parks (ch : GreenChannel) (tid : TaskId)
     tid ∈ r.channel.waiting_task_ids := by
   simp [greenRecv, hempty, hopen]
 
+/-- T6d: A receiver parked by recv is woken by a later close_drain, and the
+    closed channel has no remaining parked receivers. -/
+theorem recv_then_close_wakes_parked (ch : GreenChannel) (tid : TaskId)
+    (hempty  : ch.queued_values = [])
+    (hopen   : ch.closed = false) :
+    let recv := greenRecv ch tid
+    let closed := greenCloseDrain recv.channel
+    tid ∈ closed.woken_task_ids ∧ closed.channel.waiting_task_ids = [] := by
+  simp [greenRecv, greenCloseDrain, hempty, hopen]
+
+/-- T6e: Sending to a channel with a waiting receiver wakes the head waiter
+    directly and does not grow the buffered queue. -/
+theorem send_to_waiter_wakes_without_buffer_growth
+    (ch : GreenChannel) (v : Val) (tid : TaskId) (rest : List TaskId)
+    (hopen : ch.closed = false)
+    (hwait : ch.waiting_task_ids = tid :: rest) :
+    let r := greenSend ch v
+    r.sent = true ∧
+    r.unparked = true ∧
+    r.receiver_task_id = tid ∧
+    r.channel.waiting_task_ids = rest ∧
+    r.channel.queued_values = ch.queued_values := by
+  have hhead : (tid :: rest).head! = tid := rfl
+  simp [greenSend, hopen, hwait, hhead]
+
 -- ============================================================
--- § G  T-fact: legacy_send_closed_noop
+-- § G  T7 — bounded channel backpressure
+-- ============================================================
+
+/-- T7: A full, open channel with no waiting receiver reports backpressure and
+    leaves the channel unchanged.  This is the bounded-buffer race/resource
+    invariant: send cannot overflow capacity when producers outrun consumers. -/
+theorem bounded_channel_backpressure_no_overflow
+    (ch : GreenChannel) (v : Val)
+    (hopen : ch.closed = false)
+    (hwait : ch.waiting_task_ids = [])
+    (hfull : ch.capacity ≤ ch.queued_values.length) :
+    let r := greenSend ch v
+    r.backpressure = true ∧ r.sent = false ∧ r.channel = ch := by
+  have hnot_wait : ¬ ch.waiting_task_ids ≠ [] := by simp [hwait]
+  have hnot_room : ¬ ch.queued_values.length < ch.capacity := by omega
+  simp [greenSend, hopen, hnot_wait, hnot_room]
+
+-- ============================================================
+-- § H  T-fact: legacy_send_closed_noop
 -- ============================================================
 
 /-- Fact (not a violation): channel.spl's `send()` has no closed-flag check.

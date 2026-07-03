@@ -400,7 +400,8 @@ fn _is_text_function(name: text) -> bool:
      name == "TEXTJOIN" or
      name == "DEC2BIN" or name == "BIN2DEC" or name == "DEC2HEX" or
      name == "HEX2DEC" or name == "DEC2OCT" or name == "OCT2DEC" or
-     name == "BASE" or name == "DECIMAL" or name == "DATEDIF")
+     name == "BASE" or name == "DECIMAL" or name == "DATEDIF" or
+     name == "ROMAN" or name == "ARABIC")
 
 fn _fmt_num_trim(v: f64) -> text:
     val i = v.to_i64()
@@ -497,6 +498,57 @@ fn _arg_int(args: [text], idx: i32) -> i32:
         return 0
     args[idx].to_f64().to_i64().to_i32()
 
+fn _to_roman(n_in: i64) -> text:
+    """Classic (subtractive) Roman numeral for 1..3999."""
+    var n = n_in
+    val vals = [1000, 900, 500, 400, 100, 90, 50, 40, 10, 9, 5, 4, 1]
+    val syms = ["M", "CM", "D", "CD", "C", "XC", "L", "XL", "X", "IX", "V", "IV", "I"]
+    var out = ""
+    var i = 0
+    while i < vals.len():
+        val v = vals[i].to_i64()
+        while n >= v:
+            out = "{out}{syms[i]}"
+            n = n - v
+        i = i + 1
+    out
+
+fn _roman_char_val(ch: text) -> i64:
+    """Value of a single (upper-case) Roman digit, or 0 if not a Roman digit."""
+    if ch == "M":
+        return 1000
+    if ch == "D":
+        return 500
+    if ch == "C":
+        return 100
+    if ch == "L":
+        return 50
+    if ch == "X":
+        return 10
+    if ch == "V":
+        return 5
+    if ch == "I":
+        return 1
+    0
+
+fn _from_roman(s_in: text) -> i64:
+    """Parse a Roman numeral to its integer value (case-insensitive). A smaller
+    digit before a larger one subtracts."""
+    val s = s_in.trim().upper()
+    var total: i64 = 0
+    var i = 0
+    while i < s.len():
+        val cur = _roman_char_val(s.char_at(i))
+        var nextv: i64 = 0
+        if i + 1 < s.len():
+            nextv = _roman_char_val(s.char_at(i + 1))
+        if cur < nextv:
+            total = total - cur
+        else:
+            total = total + cur
+        i = i + 1
+    total
+
 fn _dispatch_text_function(name: text, args: [text]) -> CellValue:
     if name == "CONCAT" or name == "CONCATENATE":
         var out = ""
@@ -524,6 +576,13 @@ fn _dispatch_text_function(name: text, args: [text]) -> CellValue:
     if args.len() == 0:
         return CellValue.ErrorVal(message: "{name} requires arguments")
     val s = args[0]
+    if name == "ROMAN":
+        val rn = s.to_f64().to_i64()
+        if rn < 1 or rn > 3999:
+            return CellValue.ErrorVal(message: "ROMAN requires 1..3999")
+        return CellValue.TextVal(value: _to_roman(rn))
+    if name == "ARABIC":
+        return CellValue.NumberVal(value: _from_roman(s).to_f64())
     if name == "UPPER":
         return CellValue.TextVal(value: s.upper())
     if name == "LOWER":
@@ -1540,6 +1599,8 @@ fn _eval_function_call(name: text, tokens: [text], pos: i32, sheet: Sheet, depth
         return _eval_db_function(name, tokens, pos, sheet, depth)
     if _is_info_function(name):
         return _eval_info_function(name, tokens, pos, sheet, depth)
+    if name == "MDETERM":
+        return _eval_mdeterm(tokens, pos, sheet)
     # Collect arguments separated by commas
     # Each argument can be a range (A1:B3) or an expression
     var args: [[f64]] = []
@@ -2063,6 +2124,78 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
             if flat.len() > 0 and flat[0] >= 0.0 and flat[0] <= 170.0:
                 return CellValue.NumberVal(value: _fact_i64(flat[0].to_i64()))
             return CellValue.ErrorVal(message: "FACT requires 0..170")
+        "FACTDOUBLE":
+            if flat.len() == 0:
+                return CellValue.ErrorVal(message: "FACTDOUBLE requires 1 argument")
+            val nf = flat[0]
+            if nf < 0.0 or nf != nf.to_i64().to_f64():
+                return CellValue.ErrorVal(message: "FACTDOUBLE requires a non-negative integer")
+            var dn = nf.to_i64()
+            var dacc = 1.0
+            while dn > 1:
+                dacc = dacc * dn.to_f64()
+                dn = dn - 2
+            return CellValue.NumberVal(value: dacc)
+        "MULTINOMIAL":
+            if flat.len() == 0:
+                return CellValue.ErrorVal(message: "MULTINOMIAL requires arguments")
+            var mtotal = 0
+            var mdenom = 1.0
+            for mv in flat:
+                if mv < 0.0 or mv != mv.to_i64().to_f64():
+                    return CellValue.ErrorVal(message: "MULTINOMIAL requires non-negative integers")
+                val miv = mv.to_i64()
+                mtotal = mtotal + miv.to_i32()
+                mdenom = mdenom * _fact_i64(miv)
+            if mtotal > 170:
+                return CellValue.ErrorVal(message: "MULTINOMIAL overflow")
+            return CellValue.NumberVal(value: _fact_i64(mtotal.to_i64()) / mdenom)
+        "SERIESSUM":
+            if args.len() < 4:
+                return CellValue.ErrorVal(message: "SERIESSUM requires x, n, m, coefficients")
+            val sx = _first_val(args[0])
+            val sn = _first_val(args[1])
+            val sm = _first_val(args[2])
+            val coeffs = args[3]
+            var stotal = 0.0
+            var si = 0
+            while si < coeffs.len():
+                val expo = sn + si.to_f64() * sm
+                stotal = stotal + coeffs[si] * _pow_f64(sx, expo)
+                si = si + 1
+            return CellValue.NumberVal(value: stotal)
+        "SUMX2MY2":
+            if args.len() < 2 or args[0].len() != args[1].len():
+                return CellValue.ErrorVal(message: "SUMX2MY2 requires two equal-length ranges")
+            var s2my2 = 0.0
+            var i2my2 = 0
+            while i2my2 < args[0].len():
+                val xv = args[0][i2my2]
+                val yv = args[1][i2my2]
+                s2my2 = s2my2 + (xv * xv - yv * yv)
+                i2my2 = i2my2 + 1
+            return CellValue.NumberVal(value: s2my2)
+        "SUMX2PY2":
+            if args.len() < 2 or args[0].len() != args[1].len():
+                return CellValue.ErrorVal(message: "SUMX2PY2 requires two equal-length ranges")
+            var s2py2 = 0.0
+            var i2py2 = 0
+            while i2py2 < args[0].len():
+                val xv = args[0][i2py2]
+                val yv = args[1][i2py2]
+                s2py2 = s2py2 + (xv * xv + yv * yv)
+                i2py2 = i2py2 + 1
+            return CellValue.NumberVal(value: s2py2)
+        "SUMXMY2":
+            if args.len() < 2 or args[0].len() != args[1].len():
+                return CellValue.ErrorVal(message: "SUMXMY2 requires two equal-length ranges")
+            var sxmy2 = 0.0
+            var ixmy2 = 0
+            while ixmy2 < args[0].len():
+                val d = args[0][ixmy2] - args[1][ixmy2]
+                sxmy2 = sxmy2 + d * d
+                ixmy2 = ixmy2 + 1
+            return CellValue.NumberVal(value: sxmy2)
         "GCD":
             if args.len() >= 2:
                 return CellValue.NumberVal(value: _gcd_i64(_first_val(args[0]).to_i64(), _first_val(args[1]).to_i64()).to_f64())
@@ -3088,6 +3221,12 @@ fn evaluate_formula_array(expr: text, sheet: Sheet) -> [[text]]:
         return _array_tocol(tokens, 2, sheet)
     if name == "TOROW":
         return _array_torow(tokens, 2, sheet)
+    if name == "MMULT":
+        return _array_mmult(tokens, 2, sheet)
+    if name == "MINVERSE":
+        return _array_minverse(tokens, 2, sheet)
+    if name == "MUNIT":
+        return _array_munit(tokens, 2, sheet)
     []
 
 fn _read_array_range_str(tokens: [text], pos: i32) -> text:
@@ -3597,6 +3736,235 @@ fn _array_torow(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
     if row.len() == 0:
         return [["#ERR"]]
     [row]
+
+# =========================================================================
+# Matrix functions (MMULT / MINVERSE / MUNIT / MDETERM)
+# =========================================================================
+
+# The matrix operations keep every numeric array as a LOCAL flat [f64] indexed
+# as row*cols+col. This avoids two interpreter limitations proven during
+# development: (1) indexing/iterating a `[[text]]` PARAMETER misparses, and
+# (2) variable-indexing an array passed as a parameter reads 0. So each function
+# reads its range into a local grid, flattens into local arrays, and does all
+# math inline on locals — no struct or array parameters cross a call boundary.
+
+fn _mat_abs(v: f64) -> f64:
+    if v < 0.0:
+        return 0.0 - v
+    v
+
+fn _mat_snap(v: f64) -> f64:
+    """Round to 1e-9 so LU/Gauss-Jordan round-off (e.g. 0.6000000001) prints as
+    the clean value; integer results become exact so `general` formatting trims
+    them to integer form."""
+    var scaled = v * 1000000000.0
+    if scaled < 0.0:
+        scaled = scaled - 0.5
+    else:
+        scaled = scaled + 0.5
+    scaled.to_i64().to_f64() / 1000000000.0
+
+fn _eval_mdeterm(tokens: [text], pos: i32, sheet: Sheet) -> EvalResult:
+    """MDETERM(range) -> determinant of a square range via LU decomposition with
+    partial pivoting (det = signed product of pivots; a zero pivot column means
+    the matrix is singular, det = 0). Scalar result routed through the raw-range
+    path so the 2D shape survives the flattened scalar-arg path."""
+    val grid = _array_read_grid(tokens, pos, sheet)
+    var np = pos
+    while np < tokens.len() and tokens.get(np) != ")":
+        np = np + 1
+    if np < tokens.len():
+        np = np + 1
+    val nrows = grid.len()
+    if nrows == 0:
+        return EvalResult(value: CellValue.ErrorVal(message: "MDETERM requires a range"), next_pos: np)
+    var ncols = 0
+    for grow in grid:
+        ncols = grow.len()
+    if ncols != nrows:
+        return EvalResult(value: CellValue.ErrorVal(message: "MDETERM requires a square matrix"), next_pos: np)
+    val n = nrows
+    var d: [f64] = []
+    for grow2 in grid:
+        for gcell in grow2:
+            d.push(gcell.to_f64())
+    var det = 1.0
+    var i = 0
+    while i < n:
+        var piv = i
+        var maxv = _mat_abs(d[i * n + i])
+        var r = i + 1
+        while r < n:
+            val v = _mat_abs(d[r * n + i])
+            if v > maxv:
+                maxv = v
+                piv = r
+            r = r + 1
+        if maxv == 0.0:
+            return EvalResult(value: CellValue.NumberVal(value: 0.0), next_pos: np)
+        if piv != i:
+            var c = 0
+            while c < n:
+                val tmp = d[i * n + c]
+                d[i * n + c] = d[piv * n + c]
+                d[piv * n + c] = tmp
+                c = c + 1
+            det = 0.0 - det
+        val pivot = d[i * n + i]
+        det = det * pivot
+        var rr = i + 1
+        while rr < n:
+            val factor = d[rr * n + i] / pivot
+            var cc = i
+            while cc < n:
+                d[rr * n + cc] = d[rr * n + cc] - factor * d[i * n + cc]
+                cc = cc + 1
+            rr = rr + 1
+        i = i + 1
+    EvalResult(value: CellValue.NumberVal(value: _mat_snap(det)), next_pos: np)
+
+fn _array_mmult(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
+    """MMULT(range1, range2) -> matrix product. cols(A) must equal rows(B),
+    else a 1x1 #ERR grid."""
+    val g1 = _array_read_grid(tokens, pos, sheet)
+    if g1.len() == 0:
+        return []
+    val g2 = _array_read_grid(tokens, pos + 4, sheet)
+    if g2.len() == 0:
+        return [["#ERR"]]
+    val arows = g1.len()
+    var acols = 0
+    for r1 in g1:
+        acols = r1.len()
+    var af: [f64] = []
+    for r1b in g1:
+        for c1 in r1b:
+            af.push(c1.to_f64())
+    val brows = g2.len()
+    var bcols = 0
+    for r2 in g2:
+        bcols = r2.len()
+    var bf: [f64] = []
+    for r2b in g2:
+        for c2 in r2b:
+            bf.push(c2.to_f64())
+    if acols != brows or acols == 0:
+        return [["#ERR"]]
+    var out: [[text]] = []
+    var i = 0
+    while i < arows:
+        var row: [text] = []
+        var j = 0
+        while j < bcols:
+            var s = 0.0
+            var k = 0
+            while k < acols:
+                s = s + af[i * acols + k] * bf[k * bcols + j]
+                k = k + 1
+            row.push(_fmt_num_trim(_mat_snap(s)))
+            j = j + 1
+        out.push(row)
+        i = i + 1
+    out
+
+fn _array_minverse(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
+    """MINVERSE(range) -> inverse via Gauss-Jordan elimination on [A|I] with
+    partial pivoting; a singular matrix yields a 1x1 #ERR grid."""
+    val g = _array_read_grid(tokens, pos, sheet)
+    if g.len() == 0:
+        return []
+    val n = g.len()
+    var ncols = 0
+    for grow in g:
+        ncols = grow.len()
+    if ncols != n:
+        return [["#ERR"]]
+    val w = 2 * n
+    # Build the augmented [A|I] as a local flat n x 2n array.
+    var a: [f64] = []
+    var rb = 0
+    for grow2 in g:
+        var cb = 0
+        for gcell in grow2:
+            a.push(gcell.to_f64())
+            cb = cb + 1
+        var ci = 0
+        while ci < n:
+            if ci == rb:
+                a.push(1.0)
+            else:
+                a.push(0.0)
+            ci = ci + 1
+        rb = rb + 1
+    var i = 0
+    while i < n:
+        var piv = i
+        var maxv = _mat_abs(a[i * w + i])
+        var rr = i + 1
+        while rr < n:
+            val v = _mat_abs(a[rr * w + i])
+            if v > maxv:
+                maxv = v
+                piv = rr
+            rr = rr + 1
+        if maxv == 0.0:
+            return [["#ERR"]]
+        if piv != i:
+            var c = 0
+            while c < w:
+                val tmp = a[i * w + c]
+                a[i * w + c] = a[piv * w + c]
+                a[piv * w + c] = tmp
+                c = c + 1
+        val pv = a[i * w + i]
+        var cn = 0
+        while cn < w:
+            a[i * w + cn] = a[i * w + cn] / pv
+            cn = cn + 1
+        var er = 0
+        while er < n:
+            if er != i:
+                val f = a[er * w + i]
+                var ec = 0
+                while ec < w:
+                    a[er * w + ec] = a[er * w + ec] - f * a[i * w + ec]
+                    ec = ec + 1
+            er = er + 1
+        i = i + 1
+    var out: [[text]] = []
+    var ro = 0
+    while ro < n:
+        var row: [text] = []
+        var co = n
+        while co < w:
+            row.push(_fmt_num_trim(_mat_snap(a[ro * w + co])))
+            co = co + 1
+        out.push(row)
+        ro = ro + 1
+    out
+
+fn _array_munit(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
+    """MUNIT(n) -> the n x n identity matrix."""
+    val a0 = _read_array_num_arg(tokens, pos, sheet)
+    if not a0.present:
+        return []
+    val n = a0.value.to_i64().to_i32()
+    if n < 1:
+        return [["#ERR"]]
+    var out: [[text]] = []
+    var r = 0
+    while r < n:
+        var row: [text] = []
+        var c = 0
+        while c < n:
+            if c == r:
+                row.push("1")
+            else:
+                row.push("0")
+            c = c + 1
+        out.push(row)
+        r = r + 1
+    out
 
 # =========================================================================
 # Cell Resolution
