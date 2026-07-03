@@ -142,6 +142,13 @@ theorem hasDataRace_has_distinct_threads (exec : Execution) :
   rcases hRace with ⟨id1, id2, op1, op2, h1, h2, _, hthread, _, _, _⟩
   exact ⟨id1, id2, op1, op2, h1, h2, hthread⟩
 
+theorem drf_single_thread_execution (exec : Execution) (tid : ThreadId)
+    (hsingle : ∀ id op, (id, op) ∈ exec.ops → op.threadId = tid) :
+    dataRaceFree exec := by
+  intro hRace
+  rcases hRace with ⟨id1, id2, op1, op2, h1, h2, _, hthread, _, _, _⟩
+  exact hthread ((hsingle id1 op1 h1).trans (hsingle id2 op2 h2).symm)
+
 structure SequentiallyConsistent (exec : Execution) where
   witness : OperationId → OperationId → Prop
   respectsProgramOrder : ∀ a b, exec.programOrder a b → witness a b
