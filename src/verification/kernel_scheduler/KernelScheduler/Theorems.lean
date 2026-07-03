@@ -261,6 +261,11 @@ theorem complete_double_safe (t : GreenTask) (r1 r2 : Int) :
   · simp [h]
   · simp [h]
 
+/-- T5b1: a second completion cannot overwrite the first completion result. -/
+theorem complete_double_preserves_first_result (t : GreenTask) (r1 r2 : Int) :
+    ((t.complete r1).complete r2).result_val = (t.complete r1).result_val := by
+  rw [complete_double_safe t r1 r2]
+
 /-- T5b0: complete on an already-done task is a no-op. -/
 theorem complete_done_noop (t : GreenTask) (r : Int)
     (h : t.state = .done) :
