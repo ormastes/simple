@@ -1,0 +1,52 @@
+"""Calc chart spec.
+
+SVG bar charts from sheet ranges: labels from one range, values (including
+computed formula results) from another; bars scale to the max; labels escaped.
+"""
+
+use std.spec
+use app.office.sheets.spreadsheet.{Sheet}
+use app.office.sheets.chart.{chart_series_from_ranges, render_bar_chart_svg, sheet_bar_chart_svg}
+use app.office.file_formats.{recalculate_formula_cells}
+
+fn _chart_sheet() -> Sheet:
+    var sh = Sheet.new("c")
+    sh.set_value("A1", "Revenue")
+    sh.set_value("B1", "1200")
+    sh.set_value("A2", "Costs")
+    sh.set_value("B2", "800")
+    sh.set_value("A3", "Profit")
+    sh.set_value("B3", "=B1-B2")
+    recalculate_formula_cells(sh)
+
+describe "Calc charts: series and SVG":
+    it "collects labels and values, including computed formulas":
+        val sh = _chart_sheet()
+        val series = chart_series_from_ranges(sh, "A1:A3", "B1:B3")
+        expect(series.labels.len()).to_equal(3)
+        expect(series.labels[2]).to_equal("Profit")
+        expect(series.values[0]).to_equal(1200.0)
+        expect(series.values[2]).to_equal(400.0)
+
+    it "renders a self-contained SVG with a bar and value per row":
+        val sh = _chart_sheet()
+        val svg = sheet_bar_chart_svg(sh, "A1:A3", "B1:B3", "Q1 Budget")
+        expect(svg).to_start_with("<svg xmlns=")
+        expect(svg).to_contain("Q1 Budget")
+        expect(svg).to_contain("<rect")
+        expect(svg).to_contain(">Profit</text>")
+        expect(svg).to_contain(">400</text>")
+
+    it "escapes hostile labels and titles":
+        var sh = Sheet.new("c")
+        sh.set_value("A1", "<b>bad</b>")
+        sh.set_value("B1", "5")
+        val svg = sheet_bar_chart_svg(sh, "A1:A1", "B1:B1", "T<i>")
+        expect(svg).to_contain("&lt;b&gt;bad&lt;/b&gt;")
+        expect(svg).to_contain("T&lt;i&gt;")
+        expect(svg.contains("<b>")).to_be(false)
+
+    it "renders a no-data placeholder for empty ranges":
+        val sh = Sheet.new("c")
+        val svg = sheet_bar_chart_svg(sh, "A1:A1", "B1:B1", "Empty")
+        expect(svg).to_contain("<svg")
