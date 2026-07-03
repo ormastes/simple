@@ -6,6 +6,7 @@ set -euo pipefail
 
 VIVADO_SETTINGS="${VIVADO_SETTINGS:-$HOME/Xilinx/2025.2/Vivado/settings64.sh}"
 BUILD_DIR="build/fpga/k26_rv32"
+LOCK_DIR="$BUILD_DIR.lock"
 RTL_DIR="build/vhdl/rv32"
 TCL_FILE="$BUILD_DIR/build_rv32.tcl"
 XDC_FILE="$BUILD_DIR/k26_uart.xdc"
@@ -14,6 +15,12 @@ SYNTH_ONLY=0
 if [ "${1:-}" = "--synth-only" ]; then
     SYNTH_ONLY=1
 fi
+
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+    echo "ERROR: RV32 K26 Vivado build already running ($LOCK_DIR)" >&2
+    exit 75
+fi
+trap 'rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT
 
 if [ ! -f "$VIVADO_SETTINGS" ]; then
     echo "ERROR: Vivado not found at $VIVADO_SETTINGS"
@@ -44,6 +51,7 @@ fi
 cat > "$XDC_FILE" <<XDC
 set_property PACKAGE_PIN H12 [get_ports uart_tx]
 set_property IOSTANDARD LVCMOS33 [get_ports uart_tx]
+create_clock -period 20.000 [get_nets cfgmclk]
 XDC
 
 cat > "$TCL_FILE" <<TCL
@@ -55,6 +63,9 @@ set_property top soc_top_rv32 [current_fileset]
 update_compile_order -fileset sources_1
 launch_runs synth_1
 wait_on_run synth_1
+open_run synth_1
+report_utilization -file $BUILD_DIR/k26_rv32/k26_rv32.runs/synth_1/soc_top_rv32_utilization_synth.rpt
+report_timing_summary -file $BUILD_DIR/k26_rv32/k26_rv32.runs/synth_1/soc_top_rv32_timing_summary_synth.rpt
 if {\$simple_synth_only} { exit }
 launch_runs impl_1 -to_step write_bitstream
 wait_on_run impl_1
@@ -72,6 +83,11 @@ if [ "$vivado_rc" -ne 0 ]; then
 fi
 
 if [ "$SYNTH_ONLY" = "1" ]; then
+    sh scripts/check/convert-riscv-vivado-reports.shs rv32 \
+        "$BUILD_DIR/k26_rv32/k26_rv32.runs/synth_1/soc_top_rv32_utilization_synth.rpt" \
+        "$BUILD_DIR/k26_rv32/k26_rv32.runs/synth_1/soc_top_rv32_timing_summary_synth.rpt" \
+        "${RISCV_RV32_MHZ:-50}" \
+        "${RISCV_SYNTH_REPORT_DIR:-build/riscv_synth_reports}"
     echo "SUCCESS: RV32 synthesis checkpoint at $BUILD_DIR/k26_rv32/k26_rv32.runs/synth_1/soc_top_rv32.dcp"
 else
     test -f "$OUT_BIT"

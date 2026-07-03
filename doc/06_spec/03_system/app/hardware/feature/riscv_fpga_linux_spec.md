@@ -150,7 +150,7 @@ expect(products).to_contain("validation_kind = \"linux-uart-markers\"")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 48 lines folded for reproduction.
+Runnable source: 62 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -159,6 +159,9 @@ expect(result.is_ok()).to_equal(true)
 val bundle = result.ok().unwrap()
 val manifest_text = read_generated_riscv_fpga_rtl_file(bundle.manifest_path)
 val products_text = read_generated_riscv_fpga_rtl_file(bundle.board_linux_boot_products_manifest_path)
+val byl_text = read_generated_riscv_fpga_rtl_file("/tmp/simple_riscv_fpga_system_spec/riscv_product.byl")
+val rv32_synth_template = read_generated_riscv_fpga_rtl_file("/tmp/simple_riscv_fpga_system_spec/synth/rv32_synth.sdn")
+val rv64_synth_template = read_generated_riscv_fpga_rtl_file("/tmp/simple_riscv_fpga_system_spec/synth/rv64_synth.sdn")
 val bundle_readme_text = read_generated_riscv_fpga_rtl_file(bundle.bundle_readme_path)
 val rv32_sidecar = read_generated_riscv_fpga_rtl_file("/tmp/simple_riscv_fpga_system_spec/rv32/rtl/simple_rv32gc_core.debug.json")
 val rv64_sidecar = read_generated_riscv_fpga_rtl_file("/tmp/simple_riscv_fpga_system_spec/rv64/rtl/simple_rv64gc_core.debug.json")
@@ -180,7 +183,18 @@ expect(manifest_text).to_contain("pure_simple_authoritative_rtl = \"true\"")
 expect(products_text).to_contain("product_id = \"xilinx_generic_rv32_linux\"")
 expect(products_text).to_contain("product_id = \"xilinx_generic_rv64_linux\"")
 expect(products_text).to_contain("expected_markers = \"OpenSBI|Linux version|OF: fdt|Freeing unused kernel memory|init started\"")
+expect(byl_text).to_contain("schema = \"simple.riscv_product\"")
+expect(byl_text).to_contain("lane rv32")
+expect(byl_text).to_contain("max_luts = 25000")
+expect(byl_text).to_contain("target_mhz = 50")
+expect(rv32_synth_template).to_contain("max_luts = 25000")
+expect(rv32_synth_template).to_contain("target_mhz = 50")
+expect(rv32_synth_template).to_contain("actual_luts = 0")
+expect(rv64_synth_template).to_contain("max_luts = 45000")
+expect(rv64_synth_template).to_contain("target_mhz = 50")
 expect(bundle_readme_text).to_contain("per-arch boot products manifest: `board_linux_boot_products.sdn`")
+expect(bundle_readme_text).to_contain("`riscv_product.byl`")
+expect(bundle_readme_text).to_contain("`synth/rv32_synth.sdn`, `synth/rv64_synth.sdn`")
 expect(bundle_readme_text).to_contain("The machine-readable authoritative subset is listed explicitly by `authoritative_file` entries in the manifest and `provenance.authoritativeFiles` in the debug sidecar.")
 expect(rv32_sidecar).to_contain("\"productLevel\": \"linux-rtl\"")
 expect(rv64_sidecar).to_contain("\"configurationProfile\": \"qemu-virt+fpga-board\"")
@@ -260,7 +274,7 @@ expect(rv64_sidecar).to_contain("\"configurationProfile\": \"mlk-s02-100t+formal
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 28 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -268,6 +282,9 @@ val result = generate_riscv_fpga_rtl_bundle_configured("/tmp/simple_riscv_fpga_s
 expect(result.is_ok()).to_equal(true)
 val bundle = result.ok().unwrap()
 val manifest_text = read_generated_riscv_fpga_rtl_file(bundle.manifest_path)
+val byl_text = read_generated_riscv_fpga_rtl_file("/tmp/simple_riscv_fpga_system_spec_custom_budget/riscv_product.byl")
+val rv32_synth_template = read_generated_riscv_fpga_rtl_file("/tmp/simple_riscv_fpga_system_spec_custom_budget/synth/rv32_synth.sdn")
+val rv64_synth_template = read_generated_riscv_fpga_rtl_file("/tmp/simple_riscv_fpga_system_spec_custom_budget/synth/rv64_synth.sdn")
 val rv32_sidecar = read_generated_riscv_fpga_rtl_file("/tmp/simple_riscv_fpga_system_spec_custom_budget/rv32/rtl/simple_rv32gc_core.debug.json")
 val rv64_sidecar = read_generated_riscv_fpga_rtl_file("/tmp/simple_riscv_fpga_system_spec_custom_budget/rv64/rtl/simple_rv64gc_core.debug.json")
 expect(manifest_text).to_contain("product_level = \"lab-rtl\"")
@@ -275,6 +292,14 @@ expect(manifest_text).to_contain("rtl_size_budget_luts = \"21000\"")
 expect(manifest_text).to_contain("rtl_size_budget_luts = \"39000\"")
 expect(manifest_text).to_contain("perf_target_mhz = \"75\"")
 expect(manifest_text).to_contain("perf_target_mhz = \"80\"")
+expect(byl_text).to_contain("product_level = \"lab-rtl\"")
+expect(byl_text).to_contain("configuration_profile = \"budget-check\"")
+expect(byl_text).to_contain("max_luts = 21000")
+expect(byl_text).to_contain("target_mhz = 80")
+expect(rv32_synth_template).to_contain("max_luts = 21000")
+expect(rv32_synth_template).to_contain("target_mhz = 75")
+expect(rv64_synth_template).to_contain("max_luts = 39000")
+expect(rv64_synth_template).to_contain("target_mhz = 80")
 expect(rv32_sidecar).to_contain("\"productLevel\": \"lab-rtl\"")
 expect(rv32_sidecar).to_contain("\"rtlBudget\": {\"maxLuts\": 21000, \"targetMhz\": 75}")
 expect(rv64_sidecar).to_contain("\"productLevel\": \"lab-rtl\"")

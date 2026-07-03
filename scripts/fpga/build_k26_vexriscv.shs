@@ -6,6 +6,7 @@ set -euo pipefail
 
 VIVADO_SETTINGS="${VIVADO_SETTINGS:-$HOME/Xilinx/2025.2/Vivado/settings64.sh}"
 BUILD_DIR="build/fpga/k26"
+LOCK_DIR="$BUILD_DIR.lock"
 RTL_DIR="build/vhdl/rv64"
 TCL_FILE="$BUILD_DIR/build_vexriscv.tcl"
 XDC_FILE="$BUILD_DIR/k26_uart.xdc"
@@ -16,6 +17,12 @@ if [ ! -f "$VIVADO_SETTINGS" ]; then
     echo "Install Vivado 2025.2 or set VIVADO_SETTINGS env var"
     exit 1
 fi
+
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+    echo "ERROR: RV64 K26 Vivado build already running ($LOCK_DIR)" >&2
+    exit 75
+fi
+trap 'rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT
 
 # shellcheck disable=SC1090
 . "$VIVADO_SETTINGS"
@@ -47,6 +54,9 @@ set_property top soc_top_rv64_k26 [current_fileset]
 update_compile_order -fileset sources_1
 launch_runs synth_1
 wait_on_run synth_1
+open_run synth_1
+report_utilization -file $BUILD_DIR/k26_vexriscv/k26_vexriscv.runs/synth_1/soc_top_rv64_k26_utilization_synth.rpt
+report_timing_summary -file $BUILD_DIR/k26_vexriscv/k26_vexriscv.runs/synth_1/soc_top_rv64_k26_timing_summary_synth.rpt
 if {[lsearch \$argv synth_only] >= 0} { exit }
 launch_runs impl_1 -to_step write_bitstream
 wait_on_run impl_1
@@ -91,6 +101,11 @@ if [ -f "$UTIL_REPORT" ] &&
 fi
 
 if [ -n "$SYNTH_ONLY" ]; then
+    sh scripts/check/convert-riscv-vivado-reports.shs rv64 \
+        "$BUILD_DIR/k26_vexriscv/k26_vexriscv.runs/synth_1/soc_top_rv64_k26_utilization_synth.rpt" \
+        "$BUILD_DIR/k26_vexriscv/k26_vexriscv.runs/synth_1/soc_top_rv64_k26_timing_summary_synth.rpt" \
+        "${RISCV_RV64_MHZ:-50}" \
+        "${RISCV_SYNTH_REPORT_DIR:-build/riscv_synth_reports}"
     echo "SUCCESS: Synthesis checkpoint at $BUILD_DIR/k26_vexriscv/k26_vexriscv.runs/synth_1/soc_top_rv64_k26.dcp"
     exit 0
 fi

@@ -20,8 +20,10 @@ architecture rtl of rv32_exec_core is
   constant BASE_ADDR : unsigned(31 downto 0) := x"80000000";
   constant UART_ADDR : unsigned(31 downto 0) := x"10000000";
   constant BAUD_DIV : natural := CLK_FREQ / BAUD_RATE;
+  constant RAM_ADDR_BITS : natural := 4;
+  constant RAM_WORDS : natural := 2 ** RAM_ADDR_BITS;
   type regs_t is array(0 to 31) of unsigned(31 downto 0);
-  type ram_t is array(0 to 65535) of std_logic_vector(31 downto 0);
+  type ram_t is array(0 to RAM_WORDS - 1) of std_logic_vector(31 downto 0);
   type state_t is (S_EXEC, S_UART);
 
   impure function init_ram return ram_t is
@@ -34,7 +36,7 @@ architecture rtl of rv32_exec_core is
     while not endfile(f) loop
       readline(f, line_v);
       hread(line_v, word_v);
-      if idx < 65536 then
+      if idx < RAM_WORDS then
         mem_v(idx) := word_v;
       end if;
       idx := idx + 1;
@@ -144,7 +146,7 @@ architecture rtl of rv32_exec_core is
     variable off : unsigned(31 downto 0);
   begin
     off := addr - BASE_ADDR;
-    return to_integer(off(17 downto 2));
+    return to_integer(off(RAM_ADDR_BITS + 1 downto 2));
   end function;
 
   function load_word(mem_v : ram_t; addr : unsigned(31 downto 0)) return unsigned is

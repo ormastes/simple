@@ -41,7 +41,28 @@ fi
 
 if [ -f "$RV32_PAYLOAD_BIN" ]; then
     od -An -v -tx4 -w4 "$RV32_PAYLOAD_BIN" | tr -d ' ' | awk 'NF { print }' >"$OUT_DIR/rv32_payload.mem"
-    printf 'rv32_payload_mem=%s words=%s\n' "$OUT_DIR/rv32_payload.mem" "$(wc -l <"$OUT_DIR/rv32_payload.mem" | tr -d ' ')"
+    payload_words="$(wc -l <"$OUT_DIR/rv32_payload.mem" | tr -d ' ')"
+    printf 'rv32_payload_mem=%s words=%s\n' "$OUT_DIR/rv32_payload.mem" "$payload_words"
 else
-    printf 'WARNING: RV32 payload binary missing, preload not generated: %s\n' "$RV32_PAYLOAD_BIN" >&2
+    printf '00000013\n' >"$OUT_DIR/rv32_payload.mem"
+    payload_words=1
+    printf 'rv32_payload_mem=%s words=1 source=default_nop\n' "$OUT_DIR/rv32_payload.mem"
 fi
+
+payload_path="$ROOT_DIR/$OUT_DIR/rv32_payload.mem"
+ram_words="${RV32_SYNTH_RAM_WORDS:-16}"
+if [ "$payload_words" -gt "$ram_words" ]; then
+    ram_words="$payload_words"
+fi
+ram_addr_bits=0
+ram_capacity=1
+while [ "$ram_capacity" -lt "$ram_words" ]; do
+    ram_addr_bits=$((ram_addr_bits + 1))
+    ram_capacity=$((ram_capacity * 2))
+done
+tmp_core="$OUT_DIR/rv32_exec_core.vhd.tmp"
+sed \
+    -e "s|\"rv32_payload.mem\"|\"$payload_path\"|" \
+    -e "s|constant RAM_ADDR_BITS : natural := 4;|constant RAM_ADDR_BITS : natural := $ram_addr_bits;|" \
+    "$OUT_DIR/rv32_exec_core.vhd" >"$tmp_core"
+mv "$tmp_core" "$OUT_DIR/rv32_exec_core.vhd"

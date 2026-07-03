@@ -22,6 +22,11 @@ use app.office.odf_export.{document_to_fodt, sheet_to_fods}
 use app.office.pptx_export.{deck_to_pptx_bytes, pptx_bytes_to_deck}
 use app.office.odf_ooxml.{odt_bytes_to_document, docx_bytes_to_document, document_to_odt_bytes, document_to_docx_bytes, ods_bytes_to_sheet, xlsx_bytes_to_sheet, sheet_to_ods_bytes, sheet_to_xlsx_bytes}
 use app.office.interactive.{run_sheet_editor_mode, run_sheet_tui_mode}
+use app.office.word.toc.{toc_generate}
+use app.office.word.mail_merge.{merge_all_markdown}
+use app.office.word.edit_ops.{document_find, document_stats}
+use app.office.sheets.data_ops.{sheet_sort_range}
+use app.office.sheets.cell_ref.{parse_range}
 
 fn _run_sheet_tui(in_path: text) -> i32:
     """Keystroke-driven full-screen editing: real termios raw mode, arrow
@@ -114,6 +119,16 @@ fn run_office(args: [text]) -> i32:
             return _run_open_command(args)
         "convert" =>
             return _run_convert_command(args)
+        "toc" =>
+            return _run_toc_command(args)
+        "merge" =>
+            return _run_merge_command(args)
+        "sort-sheet" =>
+            return _run_sort_sheet_command(args)
+        "find" =>
+            return _run_find_command(args)
+        "stats" =>
+            return _run_stats_command(args)
         "md-edit" =>
             return _run_markdown_edit_command(args)
         "sheet-edit" =>
@@ -121,7 +136,7 @@ fn run_office(args: [text]) -> i32:
         "slide-edit" =>
             return _run_slide_edit_command(args)
         case _("unsupported office app names show usage"):
-            print "Usage: simple office [launcher|word|sheets|slides|mail|planner|counter|render|open|convert|md-edit|sheet-edit|slide-edit]"
+            print "Usage: simple office [launcher|word|sheets|slides|mail|planner|counter|render|open|convert|toc|merge|sort-sheet|find|stats|md-edit|sheet-edit|slide-edit]"
             return 1
 
 fn _basename(path: text) -> text:
@@ -259,6 +274,136 @@ fn _run_render_command(args: [text]) -> i32:
             return 0
         print "office-render: failed to write {out_path}"
         return 2
+    return 0
+
+fn _run_toc_command(args: [text]) -> i32:
+    """Insert a numbered table of contents at the top of a markdown document.
+
+    Usage: simple office toc <in.md> <out.md> [--depth N]"""
+    if args.len() < 3:
+        print "Usage: simple office toc <in.md> <out.md> [--depth N]"
+        return 1
+    val in_path = args[1]
+    val out_path = args[2]
+    if not file_exists(in_path):
+        print "office-toc: rejected (missing-file: {in_path})"
+        return 2
+    var depth: i32 = 3
+    if args.len() > 3:
+        if args[3] != "--depth" or args.len() < 5 or not _is_office_cli_non_negative_i32_token(args[4]):
+            print "office-toc: rejected (invalid-option; expected --depth N)"
+            return 1
+        depth = args[4].to_i32()
+    val doc = parse_markdown_document(read_file(in_path), _basename(in_path))
+    val with_toc = toc_generate(doc, depth, "Contents")
+    val serialized = document_to_markdown(with_toc)
+    if write_file(out_path, serialized):
+        print "office-toc: {in_path} -> {out_path} (depth={depth}, {serialized.len()} bytes)"
+        return 0
+    print "office-toc: failed to write {out_path}"
+    return 2
+
+fn _run_merge_command(args: [text]) -> i32:
+    """Mail-merge a markdown template against CSV data rows (header row 1).
+
+    Usage: simple office merge <template.md> <data.csv> <out.md>"""
+    if args.len() < 4:
+        print "Usage: simple office merge <template.md> <data.csv> <out.md>"
+        return 1
+    val template_path = args[1]
+    val data_path = args[2]
+    val out_path = args[3]
+    if not file_exists(template_path):
+        print "office-merge: rejected (missing-file: {template_path})"
+        return 2
+    if not file_exists(data_path):
+        print "office-merge: rejected (missing-file: {data_path})"
+        return 2
+    val doc = parse_markdown_document(read_file(template_path), _basename(template_path))
+    val sheet = parse_csv_sheet(read_file(data_path), _basename(data_path))
+    val merged = merge_all_markdown(doc, sheet)
+    if write_file(out_path, merged):
+        print "office-merge: {template_path} + {data_path} -> {out_path} ({merged.len()} bytes)"
+        return 0
+    print "office-merge: failed to write {out_path}"
+    return 2
+
+fn _run_sort_sheet_command(args: [text]) -> i32:
+    """Sort a CSV range by a key column and write the sorted sheet back out.
+
+    Usage: simple office sort-sheet <in.csv> <range> <key_col> <out.csv> [--desc] [--header]"""
+    if args.len() < 5:
+        print "Usage: simple office sort-sheet <in.csv> <range> <key_col> <out.csv> [--desc] [--header]"
+        return 1
+    val in_path = args[1]
+    val range_a1 = args[2]
+    val key_col_token = args[3]
+    val out_path = args[4]
+    if not file_exists(in_path):
+        print "office-sort-sheet: rejected (missing-file: {in_path})"
+        return 2
+    if parse_range(range_a1) == nil:
+        print "office-sort-sheet: rejected (invalid-range: {range_a1})"
+        return 2
+    if not _is_office_cli_non_negative_i32_token(key_col_token):
+        print "office-sort-sheet: rejected (invalid-key-col: {key_col_token})"
+        return 2
+    val key_col = key_col_token.to_i32()
+    var ascending = true
+    var has_header = false
+    var i = 5
+    while i < args.len():
+        if args[i] == "--desc":
+            ascending = false
+        elif args[i] == "--header":
+            has_header = true
+        else:
+            print "office-sort-sheet: rejected (unknown-option: {args[i]})"
+            return 1
+        i = i + 1
+    val sheet = parse_csv_sheet(read_file(in_path), _basename(in_path))
+    val sorted = sheet_sort_range(sheet, range_a1, key_col, ascending, has_header)
+    val serialized = sheet_to_csv(sorted)
+    if write_file(out_path, serialized):
+        print "office-sort-sheet: {in_path} {range_a1} col={key_col} -> {out_path} ({serialized.len()} bytes)"
+        return 0
+    print "office-sort-sheet: failed to write {out_path}"
+    return 2
+
+fn _run_find_command(args: [text]) -> i32:
+    """Print document_find hits as blockIndex:charOffset, one per line.
+
+    Usage: simple office find <in.md> <needle>"""
+    if args.len() < 3:
+        print "Usage: simple office find <in.md> <needle>"
+        return 1
+    val in_path = args[1]
+    val needle = args[2]
+    if not file_exists(in_path):
+        print "office-find: rejected (missing-file: {in_path})"
+        return 2
+    val doc = parse_markdown_document(read_file(in_path), _basename(in_path))
+    val hits = document_find(doc, needle)
+    for hit in hits:
+        print hit
+    return 0
+
+fn _run_stats_command(args: [text]) -> i32:
+    """Print word/character/paragraph counts for a markdown document.
+
+    Usage: simple office stats <in.md>"""
+    if args.len() < 2:
+        print "Usage: simple office stats <in.md>"
+        return 1
+    val in_path = args[1]
+    if not file_exists(in_path):
+        print "office-stats: rejected (missing-file: {in_path})"
+        return 2
+    val doc = parse_markdown_document(read_file(in_path), _basename(in_path))
+    val stats = document_stats(doc)
+    print "words: {stats.words}"
+    print "characters: {stats.characters}"
+    print "paragraphs: {stats.paragraphs}"
     return 0
 
 fn _decode_office_cli_text(value: text) -> text:

@@ -36,7 +36,8 @@ sh scripts/check/check-riscv-product-level-evidence.shs
 ```
 
 That wrapper runs the RISC-V FPGA SSpec configurability check, the dual-track
-formal gate, and the RTL budget evidence gate.
+formal gate, the RTL budget evidence selfcheck, and the RTL budget evidence
+gate.
 
 For an isolated RVFI structural check against a generated RV32 core and its
 formal runner artifacts:
@@ -134,8 +135,9 @@ bin/simple run src/hardware/fpga_linux/generate_riscv_fpga_bundle.spl -- --rv32-
 ```
 
 Inspect:
-- `/tmp/simple_fpga_bundle/manifest.sdn`
+- `/tmp/simple_fpga_bundle/riscv_fpga_rtl_manifest.sdn`
 - `/tmp/simple_fpga_bundle/board_linux_boot_products.sdn`
+- `/tmp/simple_fpga_bundle/riscv_product.byl`
 - `/tmp/simple_fpga_bundle/README.md`
 - `/tmp/simple_fpga_bundle/rv32/rtl/simple_rv32gc_core.debug.json`
 - `/tmp/simple_fpga_bundle/rv32/rtl/simple_rv32gc_core_formal.vhd`
@@ -167,18 +169,34 @@ reports when a toolchain run has produced them:
 
 ```bash
 sh scripts/check/check-riscv-budget-evidence.shs
+sh scripts/check/check-riscv-vivado-synth-evidence.shs
+sh scripts/fpga/build_k26_rv32.shs --synth-only
+sh scripts/fpga/build_k26_vexriscv.shs --synth-only
+SYNTH_REPORT_DIR=build/riscv_synth_reports sh scripts/check/check-riscv-budget-evidence.shs --require-vivado
+sh scripts/check/convert-riscv-vivado-reports.shs rv32 path/to/rv32_util.rpt path/to/rv32_timing.rpt 50 /path/to/reports
+sh scripts/check/convert-riscv-vivado-reports.shs rv64 path/to/rv64_util.rpt path/to/rv64_timing.rpt 50 /path/to/reports
 SYNTH_REPORT_DIR=/path/to/reports sh scripts/check/check-riscv-budget-evidence.shs
-SYNTH_REPORT_DIR=/path/to/reports sh scripts/check/check-riscv-product-level-evidence.shs --require-synth
+SYNTH_REPORT_DIR=/path/to/reports sh scripts/check/check-riscv-product-level-evidence.shs --require-vivado
+sh scripts/check/check-riscv-budget-evidence-selfcheck.shs
 ```
 
 When `SYNTH_REPORT_DIR` is set, the directory must contain `rv32_synth.sdn` and
 `rv64_synth.sdn` with `actual_luts = <n>` and `actual_mhz = <n>`. The gate fails
 if LUTs exceed the configured max or MHz falls below the target. Use
-`--require-synth` when measured reports are release-blocking.
+`--require-vivado` when Vivado-derived reports are release-blocking.
+The aggregate product gate auto-uses `build/riscv_synth_reports` when both lane
+reports exist there.
+
+The budget evidence gate accepts the same product knobs through environment
+variables: `RISCV_BOARD_ID`, `RISCV_PRODUCT_LEVEL`, `RISCV_CONFIG_PROFILE`,
+`RISCV_RV32_LUTS`, `RISCV_RV64_LUTS`, `RISCV_RV32_MHZ`, and `RISCV_RV64_MHZ`.
+The selfcheck verifies that the gate accepts in-budget reports and rejects
+over-LUT or under-MHz reports.
 
 Inspect:
-- `/tmp/mlk_s02_100t_bundle/manifest.sdn`
+- `/tmp/mlk_s02_100t_bundle/riscv_fpga_rtl_manifest.sdn`
 - `/tmp/mlk_s02_100t_bundle/board_linux_boot_products.sdn`
+- `/tmp/mlk_s02_100t_bundle/riscv_product.byl`
 - `/tmp/mlk_s02_100t_bundle/README.md`
 - `/tmp/mlk_s02_100t_bundle/rv32/rtl/simple_rv32gc_core.debug.json`
 - `/tmp/mlk_s02_100t_bundle/rv32/rtl/simple_rv32gc_core_formal.vhd`

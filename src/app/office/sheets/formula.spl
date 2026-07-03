@@ -936,6 +936,144 @@ fn _eval_criteria_function(name: text, tokens: [text], pos: i32, sheet: Sheet, d
         return EvalResult(value: CellValue.NumberVal(value: total / count.to_f64()), next_pos: cur_pos)
     EvalResult(value: CellValue.NumberVal(value: total), next_pos: cur_pos)
 
+fn _is_ifs_function(name: text) -> bool:
+    (name == "SUMIFS" or name == "COUNTIFS" or name == "AVERAGEIFS" or
+     name == "MAXIFS" or name == "MINIFS")
+
+fn _is_count_range_function(name: text) -> bool:
+    name == "COUNTA" or name == "COUNTBLANK"
+
+fn _eval_ifs_function(name: text, tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalResult:
+    """Plural-criteria aggregation with multi-range AND semantics.
+
+    Excel argument order: the aggregate variants place the value range FIRST
+    (SUMIFS(sum_range, crit_range1, crit1, ...)), unlike singular SUMIF whose
+    sum range comes last; COUNTIFS omits the value range. A row qualifies only
+    when EVERY (crit_range_j[i], crit_j) pair matches via `_criteria_matches`.
+    All criteria ranges (and the value range) must be congruent else #ERR."""
+    var cur_pos = pos
+    val has_value = name != "COUNTIFS"
+    var value_refs: [text] = []
+    if has_value:
+        if not (cur_pos + 2 < tokens.len() and tokens.get(cur_pos + 1) == ":"):
+            return EvalResult(value: CellValue.ErrorVal(message: "{name} requires a value range"), next_pos: cur_pos)
+        val vr = "{tokens.get(cur_pos)}:{tokens.get(cur_pos + 2)}"
+        val vrange = parse_range(vr)
+        if vrange == nil:
+            return EvalResult(value: CellValue.ErrorVal(message: "{name} invalid range"), next_pos: cur_pos)
+        value_refs = expand_range_refs(vrange)
+        cur_pos = cur_pos + 3
+        if cur_pos < tokens.len() and tokens.get(cur_pos) == ",":
+            cur_pos = cur_pos + 1
+    var crit_ranges: [[text]] = []
+    var criterias: [text] = []
+    while cur_pos < tokens.len() and tokens.get(cur_pos) != ")":
+        if not (cur_pos + 2 < tokens.len() and tokens.get(cur_pos + 1) == ":"):
+            return EvalResult(value: CellValue.ErrorVal(message: "{name} requires a criteria range"), next_pos: cur_pos)
+        val cr = "{tokens.get(cur_pos)}:{tokens.get(cur_pos + 2)}"
+        val crange = parse_range(cr)
+        if crange == nil:
+            return EvalResult(value: CellValue.ErrorVal(message: "{name} invalid range"), next_pos: cur_pos)
+        crit_ranges.push(expand_range_refs(crange))
+        cur_pos = cur_pos + 3
+        if cur_pos < tokens.len() and tokens.get(cur_pos) == ",":
+            cur_pos = cur_pos + 1
+        if cur_pos >= tokens.len() or tokens.get(cur_pos) == ")":
+            return EvalResult(value: CellValue.ErrorVal(message: "{name} requires criteria"), next_pos: cur_pos)
+        var crit = tokens.get(cur_pos)
+        if crit.starts_with("\""):
+            crit = crit.slice(1, crit.len() - 1)
+        criterias.push(crit)
+        cur_pos = cur_pos + 1
+        if cur_pos < tokens.len() and tokens.get(cur_pos) == ",":
+            cur_pos = cur_pos + 1
+    if cur_pos < tokens.len() and tokens.get(cur_pos) == ")":
+        cur_pos = cur_pos + 1
+    if crit_ranges.len() == 0:
+        return EvalResult(value: CellValue.ErrorVal(message: "{name} requires criteria"), next_pos: cur_pos)
+    val first_col = crit_ranges[0]
+    val nrows = first_col.len()
+    var j = 0
+    while j < crit_ranges.len():
+        val colj = crit_ranges[j]
+        if colj.len() != nrows:
+            return EvalResult(value: CellValue.ErrorVal(message: "{name} ranges incongruent"), next_pos: cur_pos)
+        j = j + 1
+    if has_value and value_refs.len() != nrows:
+        return EvalResult(value: CellValue.ErrorVal(message: "{name} ranges incongruent"), next_pos: cur_pos)
+    var count = 0
+    var total = 0.0
+    var maxv = 0.0
+    var minv = 0.0
+    var found = false
+    var i = 0
+    while i < nrows:
+        var ok = true
+        var jj = 0
+        while jj < crit_ranges.len():
+            val colj = crit_ranges[jj]
+            val cell = sheet.get_cell(colj[i])
+            val disp = cell_display_text(cell)
+            val num = _to_number(cell.value)
+            if not (disp != "" and _criteria_matches(disp, num, criterias[jj])):
+                ok = false
+            jj = jj + 1
+        if ok:
+            count = count + 1
+            if has_value:
+                val vcell = sheet.get_cell(value_refs[i])
+                val vnum = _to_number(vcell.value)
+                total = total + vnum
+                if not found:
+                    maxv = vnum
+                    minv = vnum
+                    found = true
+                else:
+                    if vnum > maxv:
+                        maxv = vnum
+                    if vnum < minv:
+                        minv = vnum
+        i = i + 1
+    if name == "COUNTIFS":
+        return EvalResult(value: CellValue.NumberVal(value: count.to_f64()), next_pos: cur_pos)
+    if name == "SUMIFS":
+        return EvalResult(value: CellValue.NumberVal(value: total), next_pos: cur_pos)
+    if name == "AVERAGEIFS":
+        if count == 0:
+            return EvalResult(value: CellValue.ErrorVal(message: "AVERAGEIFS no matches"), next_pos: cur_pos)
+        return EvalResult(value: CellValue.NumberVal(value: total / count.to_f64()), next_pos: cur_pos)
+    if name == "MAXIFS":
+        return EvalResult(value: CellValue.NumberVal(value: if found: maxv else: 0.0), next_pos: cur_pos)
+    EvalResult(value: CellValue.NumberVal(value: if found: minv else: 0.0), next_pos: cur_pos)
+
+fn _eval_count_range_function(name: text, tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalResult:
+    """COUNTA counts non-empty cells; COUNTBLANK counts empty cells in a range."""
+    if not (pos + 2 < tokens.len() and tokens.get(pos + 1) == ":"):
+        return EvalResult(value: CellValue.ErrorVal(message: "{name} requires a range"), next_pos: pos)
+    val rs = "{tokens.get(pos)}:{tokens.get(pos + 2)}"
+    var cur_pos = pos + 3
+    val rng = parse_range(rs)
+    if rng == nil:
+        return EvalResult(value: CellValue.ErrorVal(message: "{name} invalid range"), next_pos: cur_pos)
+    val refs = expand_range_refs(rng)
+    if cur_pos < tokens.len() and tokens.get(cur_pos) == ",":
+        cur_pos = cur_pos + 1
+    if cur_pos < tokens.len() and tokens.get(cur_pos) == ")":
+        cur_pos = cur_pos + 1
+    var count = 0
+    var i = 0
+    while i < refs.len():
+        val cell = sheet.get_cell(refs[i])
+        val disp = cell_display_text(cell)
+        if name == "COUNTA":
+            if disp != "":
+                count = count + 1
+        else:
+            if disp == "":
+                count = count + 1
+        i = i + 1
+    EvalResult(value: CellValue.NumberVal(value: count.to_f64()), next_pos: cur_pos)
+
 fn _is_lookup_function(name: text) -> bool:
     name == "VLOOKUP" or name == "HLOOKUP" or name == "INDEX" or name == "MATCH"
 
@@ -1306,6 +1444,10 @@ fn _eval_function_call(name: text, tokens: [text], pos: i32, sheet: Sheet, depth
         return _eval_text_function(name, tokens, pos, sheet, depth)
     if _is_criteria_function(name):
         return _eval_criteria_function(name, tokens, pos, sheet, depth)
+    if _is_ifs_function(name):
+        return _eval_ifs_function(name, tokens, pos, sheet, depth)
+    if _is_count_range_function(name):
+        return _eval_count_range_function(name, tokens, pos, sheet, depth)
     if _is_lookup_function(name):
         return _eval_lookup_function(name, tokens, pos, sheet, depth)
     if _is_db_function(name):
@@ -1650,6 +1792,20 @@ fn _sample_variance(values: [f64]) -> f64:
         val d = v - mean
         sq = sq + d * d
     sq / (n - 1).to_f64()
+
+fn _trunc_sig3(v: f64) -> f64:
+    """Truncate a non-negative fraction to 3 significant digits (Excel PERCENTRANK)."""
+    if v <= 0.0:
+        return 0.0
+    var t = v
+    var scale = 1.0
+    while t < 100.0:
+        t = t * 10.0
+        scale = scale * 10.0
+    while t >= 1000.0:
+        t = t / 10.0
+        scale = scale / 10.0
+    _floor_f64(t) / scale
 
 fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
     """Dispatch a function call by name to the appropriate implementation."""
