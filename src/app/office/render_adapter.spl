@@ -15,9 +15,10 @@ use app.office.word.html_render.{render_document_html}
 use app.office.slides.html_render.{render_slide_html}
 use app.office.slides.slide.{Slide, blank_slide, add_text_box}
 use app.office.sheets.spreadsheet.{Sheet}
-use app.office.sheets.cell.{cell_display_text}
+use app.office.sheets.cell.{cell_display_text, CellRef, cell_ref_to_string, parse_cell_ref}
 use common.rich_text.attributed_text.{RichDocument, DocBlock, BlockKind, TextSpan, InlineStyle}
 use app.office.libreoffice.{libreoffice_apps, libreoffice_suite_name}
+use app.office.file_formats.{parse_markdown_document, parse_csv_sheet}
 
 # =========================================================================
 # Accent per surface
@@ -103,17 +104,25 @@ fn _sheet_cell_html(sheet: Sheet, ref_str: text, header: bool) -> text:
     "<td style=\"border: 1px solid #d0d7de; padding: 6px 12px;\">{display}</td>"
 
 fn render_sheet_html(sheet: Sheet) -> text:
-    """Render a fixed 3-column x 4-row demo grid as a styled HTML table."""
-    val cols = ["A", "B", "C"]
+    """Render a sheet's used range as a styled HTML table. The first row is
+    treated as a header. Works for any sheet size (demo grids or real CSVs)."""
+    val range_str = sheet.used_range()
+    val parts = range_str.split(":")
+    val start = parse_cell_ref(parts[0])
+    val end_ref = parse_cell_ref(parts[1])
+    if start == nil or end_ref == nil:
+        return "<table></table>"
     var out = "<table style=\"border-collapse: collapse; font-family: -apple-system, Segoe UI, sans-serif; font-size: 14px;\">"
-    var row = 1
-    while row <= 4:
+    var r = start.row
+    while r <= end_ref.row:
         out = "{out}<tr>"
-        for col in cols:
-            val ref_str = "{col}{row}"
-            out = "{out}{_sheet_cell_html(sheet, ref_str, row == 1)}"
+        var c = start.col
+        while c <= end_ref.col:
+            val ref_str = cell_ref_to_string(CellRef(col: c, row: r))
+            out = "{out}{_sheet_cell_html(sheet, ref_str, r == start.row)}"
+            c = c + 1
         out = "{out}</tr>"
-        row = row + 1
+        r = r + 1
     "{out}</table>"
 
 # =========================================================================
@@ -155,14 +164,8 @@ fn _title_for(surface: text) -> text:
         return "{libreoffice_suite_name()} Impress"
     "{libreoffice_suite_name()} Suite"
 
-fn office_render(config: RenderConfig) -> RenderResult:
-    """Render the requested office surface to a complete, styled HTML page.
-
-    Routes by `config.adapter_name`; empty/unknown names render the suite index.
-    `text_output` carries a one-line summary; `html_output` carries the page."""
-    val surface = _normalize_surface(config.adapter_name)
+fn _result_for(surface: text, body: text) -> RenderResult:
     val accent = _surface_accent(surface)
-    val body = _render_body_for(surface)
     val title = _title_for(surface)
     val page = _html_page(title, accent, body)
     val label = if surface == "word" or surface == "sheets" or surface == "slides": surface else: "suite"
@@ -173,3 +176,25 @@ fn office_render(config: RenderConfig) -> RenderResult:
         metadata: {},
         warnings: []
     )
+
+fn office_render(config: RenderConfig) -> RenderResult:
+    """Render the requested office surface to a complete, styled HTML page.
+
+    Routes by `config.adapter_name`; empty/unknown names render the suite index.
+    `text_output` carries a one-line summary; `html_output` carries the page."""
+    val surface = _normalize_surface(config.adapter_name)
+    _result_for(surface, _render_body_for(surface))
+
+fn office_render_source(adapter_name: text, filename: text, content: text) -> RenderResult:
+    """Render an actual document's `content` (loaded from disk) to a styled page.
+
+    Writer parses markdown; Calc parses CSV; Impress falls back to the demo
+    slide (no on-disk slide format yet). Unknown surfaces show the suite index."""
+    val surface = _normalize_surface(adapter_name)
+    if surface == "word":
+        val doc = parse_markdown_document(content, filename)
+        return _result_for(surface, render_document_html(doc))
+    if surface == "sheets":
+        val sheet = parse_csv_sheet(content, filename)
+        return _result_for(surface, render_sheet_html(sheet))
+    _result_for(surface, _render_body_for(surface))

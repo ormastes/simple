@@ -1,0 +1,150 @@
+# Office File Formats
+#
+# Real open/save round-trip for the office surfaces, targeting the *current*
+# document models the HTML renderers consume:
+#   - Writer  <-> Markdown  (attributed_text.RichDocument, BlockKind enum)
+#   - Calc    <-> CSV        (spreadsheet.Sheet)
+#
+# These turn the suite's demos into genuine documents: open a file from disk,
+# edit/render it, save it back. Parsers mirror the markdown subset the WYSIWYG
+# and word surfaces already speak, but produce the BlockKind model (not the
+# stale word_app DocBlock variant), so parsed docs feed render_document_html.
+
+use common.rich_text.attributed_text.{RichDocument, DocBlock, BlockKind, TextSpan, InlineStyle, spans_to_plain_text}
+use app.office.sheets.spreadsheet.{Sheet}
+use app.office.sheets.cell.{Cell, CellRef, cell_display_text, col_to_letter, cell_ref_to_string, parse_cell_ref}
+
+# =========================================================================
+# Markdown <-> RichDocument (Writer)
+# =========================================================================
+
+fn _span(s: text) -> TextSpan:
+    TextSpan(text: s, style: InlineStyle.Normal)
+
+fn _md_block(line: text) -> DocBlock:
+    """Classify a single non-fence, non-blank markdown line into a DocBlock."""
+    if line.starts_with("### "):
+        return DocBlock(kind: BlockKind.Heading3, spans: [_span(line.slice(4, line.len()))])
+    if line.starts_with("## "):
+        return DocBlock(kind: BlockKind.Heading2, spans: [_span(line.slice(3, line.len()))])
+    if line.starts_with("# "):
+        return DocBlock(kind: BlockKind.Heading1, spans: [_span(line.slice(2, line.len()))])
+    if line.starts_with("- ") or line.starts_with("* "):
+        return DocBlock(kind: BlockKind.BulletItem, spans: [_span(line.slice(2, line.len()))])
+    if line.starts_with("> "):
+        return DocBlock(kind: BlockKind.Quote, spans: [_span(line.slice(2, line.len()))])
+    DocBlock(kind: BlockKind.Paragraph, spans: [_span(line.trim())])
+
+fn parse_markdown_document(content: text, title: text) -> RichDocument:
+    """Parse a markdown subset (#/##/### headings, -/* bullets, > quote, ``` code
+    fences, paragraphs) into a RichDocument the HTML renderer can style."""
+    var doc = RichDocument.new(title)
+    val lines = content.split("\n")
+    var in_code = false
+    var code_buf = ""
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("```"):
+            if in_code:
+                doc.blocks.push(DocBlock(kind: BlockKind.CodeBlock, spans: [_span(code_buf)]))
+                code_buf = ""
+                in_code = false
+            else:
+                in_code = true
+            continue
+        if in_code:
+            code_buf = if code_buf == "": line else: "{code_buf}\n{line}"
+            continue
+        if trimmed == "":
+            continue
+        doc.blocks.push(_md_block(trimmed))
+    if in_code:
+        doc.blocks.push(DocBlock(kind: BlockKind.CodeBlock, spans: [_span(code_buf)]))
+    doc
+
+fn _block_to_markdown(block: DocBlock) -> text:
+    val content = spans_to_plain_text(block.spans)
+    match block.kind:
+        case Heading1: return "# {content}"
+        case Heading2: return "## {content}"
+        case Heading3: return "### {content}"
+        case BulletItem: return "- {content}"
+        case Quote: return "> {content}"
+        case CodeBlock: return "```\n{content}\n```"
+        case Paragraph: return content
+
+fn document_to_markdown(doc: RichDocument) -> text:
+    """Serialize a RichDocument back to markdown text for saving."""
+    var out = ""
+    var first = true
+    for block in doc.blocks:
+        val line = _block_to_markdown(block)
+        out = if first: line else: "{out}\n\n{line}"
+        first = false
+    out
+
+# =========================================================================
+# CSV <-> Sheet (Calc)
+# =========================================================================
+
+fn _split_csv_line(line: text) -> [text]:
+    """Split one CSV line into fields, honoring double-quoted fields with commas.
+    ponytail: no escaped-quote ("") unescaping; add if real CSV files need it."""
+    var fields: [text] = []
+    var cur = ""
+    var in_quotes = false
+    var i = 0
+    while i < line.len():
+        val ch = line.slice(i, i + 1)
+        if ch == "\"":
+            in_quotes = not in_quotes
+        elif ch == "," and not in_quotes:
+            fields.push(cur)
+            cur = ""
+        else:
+            cur = "{cur}{ch}"
+        i = i + 1
+    fields.push(cur)
+    fields
+
+fn parse_csv_sheet(content: text, name: text) -> Sheet:
+    """Parse CSV text into a Sheet, one row per line, cells left-to-right."""
+    var sheet = Sheet.new(name)
+    val lines = content.split("\n")
+    var row = 0
+    for line in lines:
+        if line.trim() == "" and row >= lines.len() - 1:
+            row = row + 1
+            continue
+        val fields = _split_csv_line(line)
+        var col = 0
+        for field in fields:
+            val value = field.trim()
+            if value != "":
+                val ref_str = "{col_to_letter(col)}{row + 1}"
+                sheet.set_value(ref_str, value)
+            col = col + 1
+        row = row + 1
+    sheet
+
+fn sheet_to_csv(sheet: Sheet) -> text:
+    """Serialize a Sheet's used range back to CSV text."""
+    val range_str = sheet.used_range()
+    val parts = range_str.split(":")
+    val start = parse_cell_ref(parts[0])
+    val end_ref = parse_cell_ref(parts[1])
+    if start == nil or end_ref == nil:
+        return ""
+    var out = ""
+    var r = start.row
+    while r <= end_ref.row:
+        var cells: [text] = []
+        var c = start.col
+        while c <= end_ref.col:
+            val ref_str = cell_ref_to_string(CellRef(col: c, row: r))
+            cells.push(cell_display_text(sheet.get_cell(ref_str)))
+            c = c + 1
+        val line = cells.join(",")
+        out = if r == start.row: line else: "{out}\n{line}"
+        r = r + 1
+    out

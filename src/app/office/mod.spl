@@ -15,9 +15,10 @@ use app.office.md_wysiwyg.{build_wysiwyg_view, wysiwyg_source_pane, wysiwyg_upda
 use app.office.sheets.spreadsheet.{Sheet}
 use common.office.file_ops.{RecentFileStore}
 use app.office.sheets.cell.{cell_ref_to_string, parse_cell_ref}
-use app.office.render_adapter.{office_render}
+use app.office.render_adapter.{office_render, office_render_source}
+use app.office.file_formats.{parse_markdown_document, document_to_markdown, parse_csv_sheet, sheet_to_csv}
 use app.ui.render.types.{RenderConfig}
-use std.io_runtime.{write_file}
+use std.io_runtime.{write_file, read_file, file_exists}
 
 fn main() -> i64:
     val args = _get_office_cli_args()
@@ -85,6 +86,10 @@ fn run_office(args: [text]) -> i32:
             return 0
         "render" =>
             return _run_render_command(args)
+        "open" =>
+            return _run_open_command(args)
+        "convert" =>
+            return _run_convert_command(args)
         "md-edit" =>
             return _run_markdown_edit_command(args)
         "sheet-edit" =>
@@ -92,8 +97,66 @@ fn run_office(args: [text]) -> i32:
         "slide-edit" =>
             return _run_slide_edit_command(args)
         case _("unsupported office app names show usage"):
-            print "Usage: simple office [launcher|word|sheets|slides|mail|planner|counter|render|md-edit|sheet-edit|slide-edit]"
+            print "Usage: simple office [launcher|word|sheets|slides|mail|planner|counter|render|open|convert|md-edit|sheet-edit|slide-edit]"
             return 1
+
+fn _basename(path: text) -> text:
+    val parts = path.split("/")
+    if parts.len() == 0:
+        return path
+    parts[parts.len() - 1]
+
+fn _run_open_command(args: [text]) -> i32:
+    """Open a real document file and render it to a styled HTML page.
+
+    Usage: simple office open <word|sheets> <in-file> [out.html]"""
+    if args.len() < 3:
+        print "Usage: simple office open <word|sheets> <in-file> [out.html]"
+        return 1
+    val surface = args[1]
+    val in_path = args[2]
+    if not file_exists(in_path):
+        print "office-open: rejected (missing-file: {in_path})"
+        return 2
+    val content = read_file(in_path)
+    val result = office_render_source(surface, _basename(in_path), content)
+    print result.text_output
+    if args.len() > 3:
+        val out_path = args[3]
+        if write_file(out_path, result.html_output):
+            print "office-open: wrote {result.html_output.len()} bytes to {out_path}"
+            return 0
+        print "office-open: failed to write {out_path}"
+        return 2
+    return 0
+
+fn _run_convert_command(args: [text]) -> i32:
+    """Round-trip a document through parse+serialize, proving persistence.
+
+    Usage: simple office convert <word|sheets> <in-file> <out-file>"""
+    if args.len() < 4:
+        print "Usage: simple office convert <word|sheets> <in-file> <out-file>"
+        return 1
+    val surface = args[1]
+    val in_path = args[2]
+    val out_path = args[3]
+    if not file_exists(in_path):
+        print "office-convert: rejected (missing-file: {in_path})"
+        return 2
+    val content = read_file(in_path)
+    var serialized = ""
+    if surface == "word" or surface == "writer":
+        serialized = document_to_markdown(parse_markdown_document(content, _basename(in_path)))
+    elif surface == "sheets" or surface == "calc" or surface == "excel":
+        serialized = sheet_to_csv(parse_csv_sheet(content, _basename(in_path)))
+    else:
+        print "office-convert: rejected (unsupported-surface: {surface})"
+        return 1
+    if write_file(out_path, serialized):
+        print "office-convert: {surface} {in_path} -> {out_path} ({serialized.len()} bytes)"
+        return 0
+    print "office-convert: failed to write {out_path}"
+    return 2
 
 fn _run_render_command(args: [text]) -> i32:
     """Render an office surface to a styled HTML page.
