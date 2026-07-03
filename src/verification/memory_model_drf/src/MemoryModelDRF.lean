@@ -157,6 +157,24 @@ theorem hasDataRace_unordered (exec : Execution) :
   rcases hRace with ⟨id1, id2, op1, op2, h1, h2, hneq, _, _, hnot12, hnot21⟩
   exact ⟨id1, id2, op1, op2, h1, h2, hneq, hnot12, hnot21⟩
 
+theorem hasDataRace_unordered_by_primitives (exec : Execution) :
+    hasDataRace exec →
+    ∃ id1 id2 op1 op2,
+      (id1, op1) ∈ exec.ops ∧
+      (id2, op2) ∈ exec.ops ∧
+      id1 ≠ id2 ∧
+      ¬exec.programOrder id1 id2 ∧
+      ¬exec.synchronizesWith id1 id2 ∧
+      ¬exec.programOrder id2 id1 ∧
+      ¬exec.synchronizesWith id2 id1 := by
+  intro hRace
+  rcases hRace with ⟨id1, id2, op1, op2, h1, h2, hneq, _, _, hnot12, hnot21⟩
+  exact ⟨id1, id2, op1, op2, h1, h2, hneq,
+    (fun h => hnot12 (Or.inl h)),
+    (fun h => hnot12 (Or.inr h)),
+    (fun h => hnot21 (Or.inl h)),
+    (fun h => hnot21 (Or.inr h))⟩
+
 theorem hasDataRace_has_distinct_ops (exec : Execution) :
     hasDataRace exec →
     ∃ id1 id2 op1 op2,
