@@ -1,0 +1,29 @@
+"""PPTX export spec.
+
+Decks build complete OPC packages: presentation + slide master/layout/theme
+trio + one slide part per deck slide, with positioned text boxes in EMU and
+escaped a:t runs. Validated through our own zip reader.
+"""
+
+use std.spec
+use std.common.archive.zip.{zip_entries, zip_extract_text}
+use app.office.pptx_export.{deck_to_pptx_bytes}
+use app.office.slides.deck_format.{parse_deck}
+
+describe "PPTX: deck export":
+    it "packages all required OPC parts":
+        val deck = parse_deck("Intro\nWelcome\n---\nRoadmap")
+        val pptx = deck_to_pptx_bytes(deck)
+        val names = zip_entries(pptx)
+        expect(names.len()).to_equal(13)
+        expect(zip_extract_text(pptx, "[Content_Types].xml")).to_contain("presentationml.slide+xml")
+        expect(zip_extract_text(pptx, "ppt/presentation.xml")).to_contain("<p:sldIdLst>")
+        expect(zip_extract_text(pptx, "ppt/theme/theme1.xml")).to_contain("<a:clrScheme")
+
+    it "puts slide text into positioned a:t runs, escaped":
+        val deck = parse_deck("Title <1>\nBody & more")
+        val pptx = deck_to_pptx_bytes(deck)
+        val slide = zip_extract_text(pptx, "ppt/slides/slide1.xml")
+        expect(slide).to_contain("<a:t>Title &lt;1&gt;</a:t>")
+        expect(slide).to_contain("<a:t>Body &amp; more</a:t>")
+        expect(slide).to_contain("<a:off x=\"571500\"")
