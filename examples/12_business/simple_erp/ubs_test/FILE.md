@@ -19,3 +19,4 @@ project root with the seed driver set).
 - posting_spec.spl
 - report_spec.spl
 - dashboard_spec.spl
+- registry_spec.spl

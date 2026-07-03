@@ -66,9 +66,10 @@
   denial reasons (invalid-session, forbidden, invalid-record, duplicate-key).
 - REQ-034: An sspec system test shall run the suite entrypoint end-to-end
   exercising both accept and deny paths across all lanes.
-- REQ-035: Accepted writes shall post balanced journal entries to the
-  event-sourced kernel ledger, and balances shall be derivable by projection
-  (no stored counters).
+- REQ-035: A posting bridge shall turn accepted writes into accounting events
+  plus balanced journal entries on the event-sourced kernel ledger, with
+  balances derivable by projection (no stored counters); the suite entrypoint
+  shall demonstrate the flow.
 - REQ-036: The guarded-write gate shall support threshold+role approval; writes
   at or above a lane threshold without the approver role shall be denied with
   closed reason needs-approval.

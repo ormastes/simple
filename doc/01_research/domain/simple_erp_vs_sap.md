@@ -11,10 +11,10 @@ incumbents *at this scope*, and which gaps we close vs. defer.
 | Dimension | SAP S/4 + CRM | Odoo / ERPNext | This suite (before) | This suite (after this pass) |
 |---|---|---|---|---|
 | Write governance | authorizations + workflow | per-model ACL | ONE guarded gate, closed reasons, all 5 lanes | same (already stronger: 4 denial reasons spec-pinned per lane) |
-| Accounting core | FI/CO, universal journal | double-entry ledger | UBS kernel ledger existed but **unwired** | accepted writes post **balanced journal entries** to event-sourced ledger |
-| Approval workflow | release strategies | approval rules | dimension existed, unwired | threshold+role approval wired into the gate (`needs-approval` reason) |
+| Accounting core | FI/CO, universal journal | double-entry ledger | UBS kernel ledger existed but **unwired** | posting bridge (events + balanced journal entries), exercised by the suite with demo amounts |
+| Approval workflow | release strategies | approval rules | dimension existed, unwired | `gate_write_with_approval` overlay (`needs-approval`), thresholds registered per LaneDef |
 | Audit | change documents | chattel logging | tamper-evident chain + event log | same, ledger drill-down from balance to event |
-| Reporting | embedded analytics/BW | dashboards | text dashboards only | per-lane KPI report + financial summary from ledger projection |
+| Reporting | embedded analytics/BW | dashboards | text dashboards only | per-lane KPI report + totals (ledger balances proven separately by projection specs) |
 | Look/UI | Fiori | web UI | none (CLI text) | generated HTML dashboard (KPI tiles, per-lane cards), pure Simple |
 | CRM pipeline | Sales Cloud stages | kanban CRM | stages, quotes, next actions | same + approval threshold on high-value writes |
 | POS/restaurant | add-on partners | Odoo POS | menu/table/kitchen/split/tips | same |
@@ -42,12 +42,16 @@ incumbents *at this scope*, and which gaps we close vs. defer.
 
 ## Gap-closing work in this pass
 
-1. **Accounting integration** — `post_accepted_write` builds a balanced
-   JournalEntry (cash/revenue or deposit lines) per accepted lane write and
-   appends it to the UBS kernel event log; projection proves balances.
-2. **Approval workflow** — `gate_write_with_approval` extends the gate:
-   amounts at/over the lane threshold require the approver role, else
-   `needs-approval` (closed reason set grows by one, spec-pinned).
+1. **Accounting integration** — `kernel/posting.spl` provides the bridge:
+   `post_accepted_write` appends an accounting event per accepted write and
+   `journal_for_accepted` builds the balanced cash/revenue JournalEntry;
+   projection proves balances. The suite demonstrates the flow with demo
+   amounts; lanes do not yet auto-post (durable-store wiring is the tracked
+   next step).
+2. **Approval workflow** — `gate_write_with_approval` overlays the gate:
+   amounts at/over a threshold require the approver role, else
+   `needs-approval` (closed reason set grows by one, spec-pinned). Thresholds
+   are LaneDef registration data.
 3. **Reporting** — `src/report/summary.spl` derives per-lane KPIs +
    ledger-backed financial totals.
 4. **Look** — `src/web/dashboard.spl` renders a self-contained HTML dashboard

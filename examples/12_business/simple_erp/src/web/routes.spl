@@ -8,7 +8,8 @@
 # through gate_write so session -> rbac -> validation -> idempotency is
 # enforced exactly once, in exactly one place).
 
-use framework.guarded.{Tenant, Actor, Session, WriteResult, gate_write, role_can, session_valid}
+use framework.guarded.{Tenant, Actor, Session, WriteResult, gate_write_for, role_can_for, session_valid}
+use framework.registry.{LaneDef, default_lanes}
 
 struct Route:
     val method: text
@@ -16,39 +17,48 @@ struct Route:
     val action: text
     val requires_write: bool
 
-fn route_table() -> [Route]:
+# The route table DERIVES from the lane registry: one POST write route per
+# registered lane plus the fixed read surfaces. A new business gets its route
+# by registering a LaneDef — this file never changes.
+fn routes_for(lanes: [LaneDef]) -> [Route]:
     var routes: [Route] = []
-    routes.push(Route { method: "POST", path: "/api/crm/leads", action: "crm.write", requires_write: true })
-    routes.push(Route { method: "POST", path: "/api/reservations", action: "reservation.write", requires_write: true })
-    routes.push(Route { method: "POST", path: "/api/sales", action: "sale.write", requires_write: true })
-    routes.push(Route { method: "POST", path: "/api/market/listings", action: "market.write", requires_write: true })
-    routes.push(Route { method: "POST", path: "/api/restaurant/orders", action: "restaurant.write", requires_write: true })
+    for l in lanes:
+        routes.push(Route { method: "POST", path: l.write_path, action: l.write_action, requires_write: true })
     routes.push(Route { method: "GET", path: "/api/audit", action: "audit.read", requires_write: false })
     routes.push(Route { method: "GET", path: "/api/reports/summary", action: "report.read", requires_write: false })
     return routes
+
+fn route_table() -> [Route]:
+    return routes_for(default_lanes())
 
 # Sentinel returned by find_route on a miss: an empty action marks "no route".
 fn not_found_route() -> Route:
     return Route { method: "", path: "", action: "", requires_write: false }
 
-fn find_route(method: text, path: text) -> Route:
-    for route in route_table():
+fn find_route_in(routes: [Route], method: text, path: text) -> Route:
+    for route in routes:
         if route.method == method and route.path == path:
             return route
     return not_found_route()
 
-# Route a request through the gate. Unknown routes are denied with
-# reason "not-found". Read routes still require a valid session, then check
-# the actor's role (no idempotency needed for a read). Write routes go
-# through the full framework.gate_write pipeline.
-fn dispatch(session: Session, tenant: Tenant, user: Actor, method: text, path: text, record_valid: bool, key: text, used_keys: [text]) -> WriteResult:
-    val route = find_route(method, path)
+fn find_route(method: text, path: text) -> Route:
+    return find_route_in(route_table(), method, path)
+
+# Route a request through the gate, against the app's lane registry. Unknown
+# routes are denied with reason "not-found". Read routes still require a valid
+# session, then check the actor's role (no idempotency needed for a read).
+# Write routes go through the full framework gate pipeline.
+fn dispatch_for(lanes: [LaneDef], session: Session, tenant: Tenant, user: Actor, method: text, path: text, record_valid: bool, key: text, used_keys: [text]) -> WriteResult:
+    val route = find_route_in(routes_for(lanes), method, path)
     if route.action == "":
         return WriteResult { ok: false, reason: "not-found", audit_action: "", ledger_key: "" }
     if not route.requires_write:
         if !session_valid(session, tenant, user):
             return WriteResult { ok: false, reason: "invalid-session", audit_action: route.action, ledger_key: "" }
-        if role_can(user.role, route.action):
+        if role_can_for(lanes, user.role, route.action):
             return WriteResult { ok: true, reason: "accepted", audit_action: route.action, ledger_key: "" }
         return WriteResult { ok: false, reason: "forbidden", audit_action: route.action, ledger_key: "" }
-    return gate_write(session, tenant, user, route.action, record_valid, key, used_keys)
+    return gate_write_for(lanes, session, tenant, user, route.action, record_valid, key, used_keys)
+
+fn dispatch(session: Session, tenant: Tenant, user: Actor, method: text, path: text, record_valid: bool, key: text, used_keys: [text]) -> WriteResult:
+    return dispatch_for(default_lanes(), session, tenant, user, method, path, record_valid, key, used_keys)
