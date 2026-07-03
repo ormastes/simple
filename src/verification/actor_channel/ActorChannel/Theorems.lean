@@ -47,6 +47,19 @@ theorem recv_advances_tail (ch : GreenChannel) (tid : TaskId)
     : (greenRecv ch tid).channel.queued_values = ch.queued_values.tail := by
   simp [greenRecv, hne]
 
+/-- Auxiliary: receiving a buffered value from an open channel keeps it open. -/
+theorem recv_buffered_preserves_open (ch : GreenChannel) (tid : TaskId)
+    (hne : ch.queued_values ≠ [])
+    (hopen : ch.closed = false)
+    : (greenRecv ch tid).channel.closed = false := by
+  simp [greenRecv, hne, hopen]
+
+/-- Auxiliary: receiving a buffered value does not park or reorder waiters. -/
+theorem recv_buffered_preserves_waiters (ch : GreenChannel) (tid : TaskId)
+    (hne : ch.queued_values ≠ [])
+    : (greenRecv ch tid).channel.waiting_task_ids = ch.waiting_task_ids := by
+  simp [greenRecv, hne]
+
 /-- T1 (canonical): Two values sent into a fresh channel (capacity ≥ 2) are received
     in send order.  This is the FIFO-per-sender property: the first message sent is
     the first one received. -/
@@ -86,6 +99,12 @@ theorem closed_send_no_mutation (ch : GreenChannel) (v : Val)
     (greenSend ch v).channel = ch := by
   simp [greenSend, hclosed]
 
+/-- T2a3: green_channel_send to a closed channel keeps it closed. -/
+theorem closed_send_preserves_closed (ch : GreenChannel) (v : Val)
+    (hclosed : ch.closed = true) :
+    (greenSend ch v).channel.closed = true := by
+  simp [greenSend, hclosed]
+
 /-- T2b: green_channel_recv on a closed+empty channel returns immediately:
     channel_closed=true, parked=false (no park). -/
 theorem closed_empty_recv_no_park (ch : GreenChannel) (tid : TaskId)
@@ -102,6 +121,13 @@ theorem closed_empty_recv_no_mutation (ch : GreenChannel) (tid : TaskId)
     (greenRecv ch tid).channel = ch := by
   simp [greenRecv, hclosed, hempty]
 
+/-- T2b2b: green_channel_recv on a closed+empty channel keeps it closed. -/
+theorem closed_empty_recv_preserves_closed (ch : GreenChannel) (tid : TaskId)
+    (hclosed : ch.closed = true)
+    (hempty  : ch.queued_values = []) :
+    (greenRecv ch tid).channel.closed = true := by
+  simp [greenRecv, hclosed, hempty]
+
 /-- T2b3: green_channel_recv on a closed non-empty channel drains a buffered
     value instead of reporting terminal channel_closed. -/
 theorem closed_buffered_recv_drains_value
@@ -116,6 +142,14 @@ theorem closed_buffered_recv_drains_value
     r.channel.queued_values = rest := by
   have hhead : (v :: rest).head! = v := rfl
   simp [greenRecv, hclosed, hqueue, hhead]
+
+/-- T2b4: draining a buffered value from a closed channel keeps it closed. -/
+theorem closed_buffered_recv_preserves_closed
+    (ch : GreenChannel) (tid : TaskId) (v : Val) (rest : List Val)
+    (hclosed : ch.closed = true)
+    (hqueue : ch.queued_values = v :: rest) :
+    (greenRecv ch tid).channel.closed = true := by
+  simp [greenRecv, hclosed, hqueue]
 
 /-- T2c (legacy sync channel): try_send on a closed channel returns false
     and does NOT enqueue the value. -/
@@ -146,6 +180,22 @@ theorem close_wakes_all_parked (ch : GreenChannel) (tid : TaskId)
     let r := greenCloseDrain ch
     tid ∈ r.woken_task_ids := by
   simp [greenCloseDrain, hmem]
+
+/-- T3a0: close_drain wakes nobody when no receiver is parked. -/
+theorem close_drain_no_waiters_no_wake (ch : GreenChannel)
+    (hwait : ch.waiting_task_ids = []) :
+    (greenCloseDrain ch).woken_task_ids = [] := by
+  simp [greenCloseDrain, hwait]
+
+/-- T3a0b: close_drain clears every parked receiver from the channel state. -/
+theorem close_drain_clears_waiters (ch : GreenChannel) :
+    (greenCloseDrain ch).channel.waiting_task_ids = [] := by
+  simp [greenCloseDrain]
+
+/-- T3a0c: close_drain wakes exactly the tasks that were parked. -/
+theorem close_drain_woken_eq_waiters (ch : GreenChannel) :
+    (greenCloseDrain ch).woken_task_ids = ch.waiting_task_ids := by
+  simp [greenCloseDrain]
 
 /-- T3a1: close_drain always leaves the channel closed. -/
 theorem close_drain_closes_channel (ch : GreenChannel) :
@@ -327,6 +377,13 @@ theorem no_lost_task_recv_parks (ch : GreenChannel) (tid : TaskId)
     tid ∈ r.channel.waiting_task_ids := by
   simp [greenRecv, hempty, hopen]
 
+/-- T6c2: Parking a receiver on an open empty channel keeps it open. -/
+theorem recv_parks_preserves_open (ch : GreenChannel) (tid : TaskId)
+    (hempty  : ch.queued_values = [])
+    (hopen   : ch.closed = false) :
+    (greenRecv ch tid).channel.closed = false := by
+  simp [greenRecv, hempty, hopen]
+
 /-- T6d: A receiver parked by recv is woken by a later close_drain, and the
     closed channel has no remaining parked receivers. -/
 theorem recv_then_close_wakes_parked (ch : GreenChannel) (tid : TaskId)
@@ -352,6 +409,25 @@ theorem send_to_waiter_wakes_without_buffer_growth
   have hhead : (tid :: rest).head! = tid := rfl
   simp [greenSend, hopen, hwait, hhead]
 
+/-- T6f: Sending to a waiting receiver on an open channel keeps it open. -/
+theorem send_to_waiter_preserves_open
+    (ch : GreenChannel) (v : Val) (tid : TaskId) (rest : List TaskId)
+    (hopen : ch.closed = false)
+    (hwait : ch.waiting_task_ids = tid :: rest) :
+    (greenSend ch v).channel.closed = false := by
+  have hhead : (tid :: rest).head! = tid := rfl
+  simp [greenSend, hopen, hwait, hhead]
+
+/-- T6g: Buffering a value on an open channel keeps it open. -/
+theorem send_buffered_preserves_open
+    (ch : GreenChannel) (v : Val)
+    (hopen : ch.closed = false)
+    (hwait : ch.waiting_task_ids = [])
+    (hroom : ch.queued_values.length < ch.capacity) :
+    (greenSend ch v).channel.closed = false := by
+  have hnot_wait : ¬ ch.waiting_task_ids ≠ [] := by simp [hwait]
+  simp [greenSend, hopen, hnot_wait, hroom]
+
 -- ============================================================
 -- § G  T7 — bounded channel backpressure
 -- ============================================================
@@ -366,6 +442,17 @@ theorem bounded_channel_backpressure_no_overflow
     (hfull : ch.capacity ≤ ch.queued_values.length) :
     let r := greenSend ch v
     r.backpressure = true ∧ r.sent = false ∧ r.channel = ch := by
+  have hnot_wait : ¬ ch.waiting_task_ids ≠ [] := by simp [hwait]
+  have hnot_room : ¬ ch.queued_values.length < ch.capacity := by omega
+  simp [greenSend, hopen, hnot_wait, hnot_room]
+
+/-- T7b: Backpressure on an open full channel keeps it open. -/
+theorem bounded_channel_backpressure_preserves_open
+    (ch : GreenChannel) (v : Val)
+    (hopen : ch.closed = false)
+    (hwait : ch.waiting_task_ids = [])
+    (hfull : ch.capacity ≤ ch.queued_values.length) :
+    (greenSend ch v).channel.closed = false := by
   have hnot_wait : ¬ ch.waiting_task_ids ≠ [] := by simp [hwait]
   have hnot_room : ¬ ch.queued_values.length < ch.capacity := by omega
   simp [greenSend, hopen, hnot_wait, hnot_room]

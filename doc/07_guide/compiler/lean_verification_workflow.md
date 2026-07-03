@@ -234,7 +234,11 @@ Recommended layout:
 BYL is not a replacement for Lean. Treat BYL as a generated proof-model
 interchange format and Lean as the checked proof surface. If regeneration
 renames a definition used by `Constraints.lean`, update the generated contract
-and the manual proof layer in the same change, then run Lake.
+and the manual proof layer in the same change, then run Lake. When formal
+evidence is referenced from a SPipe scenario or hardening report, record the
+lane-specific `lake build`, `simple gen-lean verify`, or `simple verify check`
+command beside the evidence so the next regeneration can rerun the exact gate
+without weakening manual proofs.
 
 ---
 

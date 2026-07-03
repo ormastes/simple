@@ -99,6 +99,12 @@ describe "<Feature Name>":
   primary scenarios visible, reusable setup hidden with `@inline` and expanded
   by `@prev`/`@include`, advanced/edge/matrix/stress details folded or skipped
   by policy, and executable SSpec folded below the manual flow.
+- If a scenario claims formal verification coverage, include the formal
+  evidence path and exact proof command in the test plan or generated/manual
+  doc. Lean evidence must point at a checked proof lane with no `sorry` or
+  `admit`; RVFI/SymbiYosys evidence must distinguish readiness from an actual
+  `sby` proof pass. Do not let regenerated SPipe docs replace the manual
+  Lean/BYL proof layer.
 - For broad lanes with shared interfaces, the primary/best model must define
   shared interface names, manual `step("...")` flow helper names, and
   setup/checker helper names before lower-model sidecars such as Codex Spark,

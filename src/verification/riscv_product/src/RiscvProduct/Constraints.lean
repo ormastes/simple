@@ -49,6 +49,10 @@ theorem profiles_are_dual_arch :
     (profile Lane.rv32).lane ≠ (profile Lane.rv64).lane := by
   simp [profile]
 
+theorem next_lane_alternates (l : Lane) :
+    nextLane l ≠ l := by
+  cases l <;> simp [nextLane]
+
 theorem round_robin_no_starvation (start target : Lane) :
     servedWithinTwo start target := by
   cases start <;> cases target <;> simp [servedWithinTwo, nextLane]
@@ -72,10 +76,23 @@ theorem acquire_success_requires_empty (s s' : ResourceState) (l : Lane) :
   | some owner =>
       simp [acquire, howner] at h
 
+theorem acquire_empty_succeeds (l : Lane) :
+    acquire { owner := none } l = some { owner := some l } := by
+  cases l <;> simp [acquire]
+
 theorem acquire_empty_never_sets_other_owner (l other : Lane)
     (h : l ≠ other) :
     acquire { owner := none } l ≠ some { owner := some other } := by
   cases l <;> cases other <;> simp [acquire] at *
+
+theorem acquire_none_requires_owner (s : ResourceState) (l : Lane) :
+    acquire s l = none → ∃ owner, s.owner = some owner := by
+  intro h
+  cases howner : s.owner with
+  | none =>
+      simp [acquire, howner] at h
+  | some owner =>
+      exact ⟨owner, rfl⟩
 
 theorem held_resource_rejects_second_owner (s : ResourceState) (owner other : Lane) :
     s.owner = some owner → acquire s other = none := by
@@ -91,6 +108,17 @@ theorem acquire_release_roundtrip_empty (l : Lane) :
     (acquire { owner := none } l).map (fun s => release s l) = some { owner := none } := by
   cases l <;> simp [acquire, release]
 
+theorem acquire_then_owner_release_clears (l : Lane) :
+    (acquire { owner := none } l).map (fun s => release s l) =
+      some { owner := none } := by
+  cases l <;> simp [acquire, release]
+
+theorem acquire_then_non_owner_release_preserves_owner (owner requester : Lane)
+    (h : owner ≠ requester) :
+    (acquire { owner := none } owner).map (fun s => release s requester) =
+      some { owner := some owner } := by
+  cases owner <;> cases requester <;> simp [acquire, release] at *
+
 theorem empty_release_noop (l : Lane) :
     release { owner := none } l = { owner := none } := by
   cases l <;> simp [release]
@@ -99,5 +127,13 @@ theorem non_owner_release_preserves_resource (owner other : Lane)
     (h : owner ≠ other) :
     release { owner := some owner } other = { owner := some owner } := by
   cases owner <;> cases other <;> simp [release] at *
+
+theorem release_clears_only_for_owner (owner requester : Lane) :
+    release { owner := some owner } requester = { owner := none } → requester = owner := by
+  cases owner <;> cases requester <;> simp [release]
+
+theorem occupied_release_noop_implies_non_owner (owner requester : Lane) :
+    release { owner := some owner } requester = { owner := some owner } → requester ≠ owner := by
+  cases owner <;> cases requester <;> simp [release]
 
 end RiscvProduct

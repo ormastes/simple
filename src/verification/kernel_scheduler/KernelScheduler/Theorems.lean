@@ -240,12 +240,33 @@ theorem resource_acquire_below_capacity_grants (p : ResourcePool)
     (p.acquire).granted = true ∧ (p.acquire).pool.inUse = p.inUse + 1 := by
   simp [ResourcePool.acquire, h]
 
+/-- T10a1: successful acquire strictly increases live resources. -/
+theorem resource_acquire_below_capacity_increases (p : ResourcePool)
+    (h : p.inUse < p.capacity) :
+    p.inUse < (p.acquire).pool.inUse := by
+  have hgrant := resource_acquire_below_capacity_grants p h
+  omega
+
 /-- T10b: acquire at capacity is a no-op and reports denial. -/
 theorem resource_acquire_full_noop (p : ResourcePool)
     (h : p.capacity ≤ p.inUse) :
     (p.acquire).granted = false ∧ (p.acquire).pool = p := by
   have hn : ¬ p.inUse < p.capacity := by omega
   simp [ResourcePool.acquire, hn]
+
+/-- T10b1: failed acquire preserves the live resource count. -/
+theorem resource_acquire_denied_preserves_in_use (p : ResourcePool)
+    (h : p.capacity ≤ p.inUse) :
+    (p.acquire).pool.inUse = p.inUse := by
+  have hnoop := resource_acquire_full_noop p h
+  exact congrArg ResourcePool.inUse hnoop.2
+
+/-- T10b1b: failed acquire preserves the resource capacity. -/
+theorem resource_acquire_denied_preserves_capacity (p : ResourcePool)
+    (h : p.capacity ≤ p.inUse) :
+    (p.acquire).pool.capacity = p.capacity := by
+  have hnoop := resource_acquire_full_noop p h
+  exact congrArg ResourcePool.capacity hnoop.2
 
 /-- T10b2: a zero-capacity resource pool never grants acquisition. -/
 theorem resource_zero_capacity_acquire_denied (p : ResourcePool)
@@ -267,6 +288,25 @@ theorem resource_release_empty_noop (p : ResourcePool)
     (h : p.inUse = 0) :
     p.release = p := by
   simp [ResourcePool.release, h]
+
+/-- T10c1: release of a non-empty pool preserves capacity. -/
+theorem resource_release_nonempty_preserves_capacity (p : ResourcePool)
+    (h : p.inUse ≠ 0) :
+    p.release.capacity = p.capacity := by
+  simp [ResourcePool.release, h]
+
+/-- T10c2: release of a non-empty pool decrements the live resource count. -/
+theorem resource_release_nonempty_decrements (p : ResourcePool)
+    (h : p.inUse ≠ 0) :
+    p.release.inUse = p.inUse - 1 := by
+  simp [ResourcePool.release, h]
+
+/-- T10c3: release of a non-empty pool strictly reduces live resources. -/
+theorem resource_release_nonempty_decreases (p : ResourcePool)
+    (h : p.inUse ≠ 0) :
+    p.release.inUse < p.inUse := by
+  have hdec := resource_release_nonempty_decrements p h
+  omega
 
 /-- T10d: release never increases live resources, so it cannot underflow. -/
 theorem resource_release_never_underflows (p : ResourcePool) :
