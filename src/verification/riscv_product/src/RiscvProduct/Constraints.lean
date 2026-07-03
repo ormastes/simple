@@ -166,6 +166,11 @@ theorem owner_release_clears_resource (l : Lane) :
     release { owner := some l } l = { owner := none } := by
   cases l <;> simp [release]
 
+theorem owner_release_then_any_lane_acquires (owner requester : Lane) :
+    acquire (release { owner := some owner } owner) requester =
+      some { owner := some requester } := by
+  cases owner <;> cases requester <;> simp [acquire, release]
+
 theorem release_deterministic (s r1 r2 : ResourceState) (l : Lane) :
     release s l = r1 → release s l = r2 → r1 = r2 := by
   intro h1 h2
