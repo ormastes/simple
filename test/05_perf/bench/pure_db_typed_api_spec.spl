@@ -1,0 +1,156 @@
+# test/perf/bench/pure_db_typed_api_spec.spl — Direct API + hash index benchmarks.
+#
+# Tests Phase 1 (typed storage), Phase 2 (hash index), Phase 3 (direct API).
+# Compares SQL path vs direct typed API on identical workloads.
+#
+# Run: bin/simple test test/perf/bench/pure_db_typed_api_spec.spl
+
+use std.spec
+use std.io_runtime.{file_delete, getpid, time_now_unix_micros}
+use std.database.sql.types.{DbValue, DbRow}
+use nogc_sync_mut.database.pure_sql.database.{PureDatabase}
+use test.perf.bench.lib.timing.{bench_now_ns}
+
+fn tmp_path(tag: text) -> text:
+    "/tmp/pure_db_typed_" + tag + "_" + getpid().to_text() + "_" + time_now_unix_micros().to_text() + ".sdb"
+
+fn elapsed_ms(start_ns: i64, end_ns: i64) -> i64:
+    (end_ns - start_ns) / 1000000
+
+fn make_row3(a: i64, b: text, c: i64) -> [DbValue]:
+    var r: [DbValue] = []
+    r.push(DbValue.Integer(value: a))
+    r.push(DbValue.Text(value: b))
+    r.push(DbValue.Integer(value: c))
+    r
+
+fn make_row2(a: i64, b: text) -> [DbValue]:
+    var r: [DbValue] = []
+    r.push(DbValue.Integer(value: a))
+    r.push(DbValue.Text(value: b))
+    r
+
+describe "Direct Typed API Benchmarks":
+    describe "W7: put() 200 rows (direct API, no SQL parse)":
+        it "inserts 200 rows via put() and measures time":
+            var db = PureDatabase.memory_deferred().unwrap()
+            db.exec_sql("CREATE TABLE w7 (id INTEGER PRIMARY KEY, name TEXT, score INTEGER)").unwrap()
+
+            val t0 = bench_now_ns()
+            var i = 0
+            while i < 200:
+                val row = make_row3(i as i64, "user_" + i.to_text(), (i * 10) as i64)
+                db.put("w7", row).unwrap()
+                i = i + 1
+            db.checkpoint().unwrap()
+            val t1 = bench_now_ns()
+
+            print("[W7] put() 200 rows (direct API): " + elapsed_ms(t0, t1).to_text() + " ms")
+
+            val rows = db.scan_all("w7").unwrap()
+            expect(rows.len()).to_be_greater_than(0)
+            db.close().unwrap()
+
+    describe "W8: get() point lookup by PK (hash index)":
+        it "looks up single row by PK 100 times":
+            var db = PureDatabase.memory_deferred().unwrap()
+            db.exec_sql("CREATE TABLE w8 (id INTEGER PRIMARY KEY, name TEXT)").unwrap()
+            var i = 0
+            while i < 200:
+                val row = make_row2(i as i64, "row_" + i.to_text())
+                db.put("w8", row).unwrap()
+                i = i + 1
+            db.checkpoint().unwrap()
+
+            val t0 = bench_now_ns()
+            var j = 0
+            while j < 100:
+                val idx = j * 2
+                val result = db.get("w8", "id", DbValue.Integer(value: idx as i64)).unwrap()
+                expect(result.?).to_equal(true)
+                j = j + 1
+            val t1 = bench_now_ns()
+
+            print("[W8] get() by PK x100 (hash index): " + elapsed_ms(t0, t1).to_text() + " ms")
+            db.close().unwrap()
+
+    describe "W9: scan_all() full table scan":
+        it "scans all rows 100 times":
+            var db = PureDatabase.memory_deferred().unwrap()
+            db.exec_sql("CREATE TABLE w9 (id INTEGER PRIMARY KEY, name TEXT, score INTEGER)").unwrap()
+            var i = 0
+            while i < 200:
+                val row = make_row3(i as i64, "item_" + i.to_text(), (i * 5) as i64)
+                db.put("w9", row).unwrap()
+                i = i + 1
+            db.checkpoint().unwrap()
+
+            val t0 = bench_now_ns()
+            var j = 0
+            while j < 100:
+                val rows = db.scan_all("w9").unwrap()
+                expect(rows.len()).to_be_greater_than(0)
+                j = j + 1
+            val t1 = bench_now_ns()
+
+            print("[W9] scan_all() x100 (typed): " + elapsed_ms(t0, t1).to_text() + " ms")
+            db.close().unwrap()
+
+    describe "W10: SQL point SELECT with PRIMARY KEY":
+        it "compares SQL SELECT vs get() on PK column":
+            var db = PureDatabase.memory_deferred().unwrap()
+            db.exec_sql("CREATE TABLE w10 (id INTEGER PRIMARY KEY, name TEXT)").unwrap()
+            var i = 0
+            while i < 200:
+                db.exec_sql("INSERT INTO w10 (id, name) VALUES (" + i.to_text() + ", 'user_" + i.to_text() + "')").unwrap()
+                i = i + 1
+            db.checkpoint().unwrap()
+
+            val t0_sql = bench_now_ns()
+            var j = 0
+            while j < 100:
+                val idx = j * 2
+                val rs = db.query("SELECT id, name FROM w10 WHERE id = " + idx.to_text(), []).unwrap()
+                expect(rs.len()).to_be_greater_than(0)
+                j = j + 1
+            val t1_sql = bench_now_ns()
+
+            val t0_api = bench_now_ns()
+            var k = 0
+            while k < 100:
+                val idx2 = k * 2
+                val result = db.get("w10", "id", DbValue.Integer(value: idx2 as i64)).unwrap()
+                expect(result.?).to_equal(true)
+                k = k + 1
+            val t1_api = bench_now_ns()
+
+            val sql_ms = elapsed_ms(t0_sql, t1_sql)
+            val api_ms = elapsed_ms(t0_api, t1_api)
+            print("[W10] SQL SELECT x100: " + sql_ms.to_text() + " ms")
+            print("[W10] get() API x100: " + api_ms.to_text() + " ms")
+            print("[W10] Speedup: " + (sql_ms / (api_ms + 1)).to_text() + "x")
+            db.close().unwrap()
+
+    describe "W11: delete_by_key()":
+        it "deletes rows by key 50 times":
+            var db = PureDatabase.memory_deferred().unwrap()
+            db.exec_sql("CREATE TABLE w11 (id INTEGER PRIMARY KEY, name TEXT)").unwrap()
+            var i = 0
+            while i < 200:
+                val row = make_row2(i as i64, "del_" + i.to_text())
+                db.put("w11", row).unwrap()
+                i = i + 1
+            db.checkpoint().unwrap()
+
+            val t0 = bench_now_ns()
+            var j = 0
+            while j < 50:
+                db.delete_by_key("w11", "id", DbValue.Integer(value: j as i64)).unwrap()
+                j = j + 1
+            val t1 = bench_now_ns()
+
+            print("[W11] delete_by_key() x50: " + elapsed_ms(t0, t1).to_text() + " ms")
+
+            val remaining = db.scan_all("w11").unwrap()
+            expect(remaining.len()).to_equal(150)
+            db.close().unwrap()
