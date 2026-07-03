@@ -111,6 +111,11 @@ theorem release_shared_preserves_exclusive (s : BorrowState) :
     (releaseShared s).exclusive = s.exclusive := by
   simp [releaseShared]
 
+theorem release_shared_zero_noop (s : BorrowState)
+    (hshared : s.shared = 0) :
+    (releaseShared s).shared = 0 := by
+  simp [releaseShared, hshared]
+
 theorem release_shared_decreases_when_present (s : BorrowState)
     (hshared : s.shared ≠ 0) :
     (releaseShared s).shared < s.shared := by
