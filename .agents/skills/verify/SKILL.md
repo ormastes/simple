@@ -125,6 +125,10 @@ not create, rewrite, or weaken SPipe after verification.
     Starvation, fairness, race-condition, scheduler, channel, lock, or resource
     lifecycle changes require a concurrency/resource model check or an explicit
     blocker; one interleaving test is not enough for formal verification PASS.
+  - SimpleOS mission-critical release verification must run
+    `sh scripts/check/check-simpleos-mission-critical-release.shs`; matrix
+    readiness is not release completion while that gate reports blocked or
+    failed.
 - Core/MCP regression gate for compiler/core/lib or MCP/LSP changes:
   - `<runtime> check src/compiler`
   - `<runtime> check src/lib`

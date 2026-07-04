@@ -73,6 +73,17 @@ that the default RV32/RV64 budget facts stay synchronized across generated RTL
 metadata, BYL, and Lean.
 The wrapper first runs the sidecar contract self-test so the aggregate gate
 fails if the Rust-seed rejection and repo-local Simple binary resolution guards
+are weakened.
+
+Mission-critical SimpleOS release uses a stricter aggregate gate:
+
+```bash
+sh scripts/check/check-simpleos-mission-critical-release.shs
+```
+
+That gate fails while `scripts/check/check-riscv-rtl-sby-proof.shs` is blocked
+or failing. A hardening matrix readiness pass is not a mission-critical release
+pass until the strict SymbiYosys proof gate passes too.
 stop protecting the normal sidecar contract.
 
 The RISC-V product Lean model is split so code changes are maintainable:
