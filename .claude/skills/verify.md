@@ -136,7 +136,9 @@ For each source file in scope:
      SimpleOS mission-critical release verification must run
      `sh scripts/check/check-simpleos-mission-critical-release.shs`; matrix
      readiness is not release completion while that gate reports blocked or
-     failed.
+     failed. If blocked, run
+     `sh scripts/check/check-simpleos-mission-critical-prereqs.shs` for the host
+     dependency list.
 3. Flag NFR targets with no verification mechanism
 4. For GUI/web/2D RenderDoc+Vulkan evidence, start from the macOS top-level
    workflow:

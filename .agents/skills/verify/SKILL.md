@@ -128,7 +128,9 @@ not create, rewrite, or weaken SPipe after verification.
   - SimpleOS mission-critical release verification must run
     `sh scripts/check/check-simpleos-mission-critical-release.shs`; matrix
     readiness is not release completion while that gate reports blocked or
-    failed.
+    failed. If blocked, run
+    `sh scripts/check/check-simpleos-mission-critical-prereqs.shs` for the host
+    dependency list.
 - Core/MCP regression gate for compiler/core/lib or MCP/LSP changes:
   - `<runtime> check src/compiler`
   - `<runtime> check src/lib`
