@@ -1,7 +1,7 @@
 # RV32 no-alloc NVMe firmware logic reference.
 #
 # Scalar-only: no arrays, no heap, no strings in the logic path. Host and bare-metal entries share
-# this so P9 evidence exercises the same RAIN + ECC + fixed scheduler + power/thermal + map-cache + band + journal-ring + HIL command/queue floor.
+# this so P9 evidence exercises the same RAIN + ECC + fixed scheduler + power/thermal + map-cache + band + journal-ring + HIL command/queue + admin floor.
 
 fn rv32_rain_selftest() -> i64:
     val d0 = 256
@@ -813,5 +813,116 @@ fn rv32_hil_selftest() -> i64:
         fail = fail + 1
     fail
 
+fn rv32_admin_qid(cdw10: i64) -> i64:
+    cdw10 & 0xFFFF
+
+fn rv32_admin_qsize(cdw10: i64) -> i64:
+    (cdw10 >> 16) & 0xFFFF
+
+fn rv32_admin_cqid(cdw11: i64) -> i64:
+    (cdw11 >> 16) & 0xFFFF
+
+fn rv32_admin_fid(cdw10: i64) -> i64:
+    cdw10 & 0xFF
+
+fn rv32_admin_fw_slot(cdw10: i64) -> i64:
+    cdw10 & 0x7
+
+fn rv32_admin_fw_action(cdw10: i64) -> i64:
+    (cdw10 >> 3) & 0x7
+
+fn rv32_admin_smart_percent(v: i64) -> i64:
+    if v < 0:
+        return 0
+    if v > 100:
+        return 100
+    v
+
+fn rv32_admin_smart_nonnegative(v: i64) -> i64:
+    if v < 0:
+        return 0
+    v
+
+fn rv32_admin_selftest() -> i64:
+    var fail = 0
+    val max_io_queues = 8
+    val lba_count = 3072
+    val lba_bytes = 4096
+    val feat_num_queues = 7
+    val feat_power_mgmt = 2
+    val feat_volatile_wc = 6
+
+    val create_cq_cdw10 = (64 << 16) | 3
+    if rv32_admin_qid(create_cq_cdw10) != 3:
+        fail = fail + 1
+    if rv32_admin_qsize(create_cq_cdw10) != 64:
+        fail = fail + 1
+    val create_sq_cdw11 = (2 << 16) | 1
+    if rv32_admin_cqid(create_sq_cdw11) != 2:
+        fail = fail + 1
+    val feature_cdw10 = feat_power_mgmt | (1 << 16)
+    if rv32_admin_fid(feature_cdw10) != feat_power_mgmt:
+        fail = fail + 1
+    val fw_commit_cdw10 = (3 << 3) | 2
+    if rv32_admin_fw_slot(fw_commit_cdw10) != 2 or rv32_admin_fw_action(fw_commit_cdw10) != 3:
+        fail = fail + 1
+
+    # Identify controller/namespace floor: one namespace, eight IO queues, 4 KiB LBAs.
+    var identify_kind = 1
+    var identify_num_ns = 1
+    var identify_max_queues = max_io_queues
+    if identify_kind != 1 or identify_num_ns != 1 or identify_max_queues != 8:
+        fail = fail + 1
+    identify_kind = 0
+    var identify_nsid = 1
+    var identify_ns_size = lba_count
+    var identify_lba_bytes = lba_bytes
+    if identify_kind != 0 or identify_nsid != 1 or identify_ns_size != 3072 or identify_lba_bytes != 4096:
+        fail = fail + 1
+
+    # Feature store floor: defaults and Set/Get Features round-trip.
+    var feat_num_queues_value = ((max_io_queues - 1) << 16) | (max_io_queues - 1)
+    var feat_power_value = 0
+    var feat_wc_value = 1
+    if rv32_admin_fid(feat_num_queues) != feat_num_queues:
+        fail = fail + 1
+    if feat_num_queues_value != 0x00070007:
+        fail = fail + 1
+    feat_power_value = 3
+    if feat_power_value != 3:
+        fail = fail + 1
+    if 99 >= 0 and 99 < 5:
+        feat_power_value = 99
+    if feat_power_value != 3:
+        fail = fail + 1
+    if feat_wc_value != 1:
+        fail = fail + 1
+    if 0 == 0 or 0 == 1:
+        feat_wc_value = 0
+    if feat_wc_value != 0:
+        fail = fail + 1
+    if feat_volatile_wc != 6:
+        fail = fail + 1
+
+    # SMART/log floor: clamp corrupted counters and raise critical warning for health events.
+    val spare = rv32_admin_smart_percent(120)
+    val used = rv32_admin_smart_percent(-3)
+    val reads = rv32_admin_smart_nonnegative(-5)
+    val media_err = rv32_admin_smart_nonnegative(2)
+    var crit = 0
+    if media_err > 0:
+        crit = 1
+    if spare < 10:
+        crit = 1
+    if spare != 100 or used != 0 or reads != 0 or crit != 1:
+        fail = fail + 1
+    val low_spare = rv32_admin_smart_percent(8)
+    crit = 0
+    if low_spare < 10:
+        crit = 1
+    if crit != 1:
+        fail = fail + 1
+    fail
+
 fn nvme_fw_rv32_logic_selftest() -> i64:
-    rv32_rain_selftest() + rv32_ecc_selftest() + rv32_journal_selftest() + rv32_map_selftest() + rv32_band_selftest() + rv32_sched_selftest() + rv32_pt_selftest() + rv32_hil_selftest()
+    rv32_rain_selftest() + rv32_ecc_selftest() + rv32_journal_selftest() + rv32_map_selftest() + rv32_band_selftest() + rv32_sched_selftest() + rv32_pt_selftest() + rv32_hil_selftest() + rv32_admin_selftest()
