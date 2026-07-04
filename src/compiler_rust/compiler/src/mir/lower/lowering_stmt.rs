@@ -473,20 +473,59 @@ impl<'a> MirLowerer<'a> {
                                 }
                             };
 
+                            // Derive the receiver's element/value type. For a
+                            // Dict<K, V> whose value type V is a heap type
+                            // (struct/enum/string/array), the value operand is
+                            // ALREADY a heap RuntimeValue; boxing it with BoxInt
+                            // would wrap the heap pointer as a boxed-int and
+                            // destroy its tag (task #117 / #107: env
+                            // `Dict<text, Value>` round-trip → disc -1). Only box
+                            // when the destination slot expects a raw scalar.
+                            let recv_elem_ty: Option<TypeId> = self
+                                .type_registry
+                                .and_then(|tr| tr.get(receiver.ty))
+                                .and_then(|ty| match ty {
+                                    HirType::Array { element, .. } => Some(*element),
+                                    HirType::Dict { value, .. } => Some(*value),
+                                    _ => None,
+                                });
+                            let elem_is_heap = matches!(
+                                recv_elem_ty,
+                                Some(t)
+                                    if t != TypeId::ANY
+                                        && !matches!(
+                                            t,
+                                            TypeId::I8
+                                                | TypeId::I16
+                                                | TypeId::I32
+                                                | TypeId::I64
+                                                | TypeId::U8
+                                                | TypeId::U16
+                                                | TypeId::U32
+                                                | TypeId::U64
+                                                | TypeId::F32
+                                                | TypeId::F64
+                                                | TypeId::BOOL
+                                        )
+                            );
+
                             // Box value if it's a native type
                             let boxed_val = {
-                                let needs_int_boxing = matches!(
-                                    value.ty,
-                                    TypeId::I16
-                                        | TypeId::I32
-                                        | TypeId::I64
-                                        | TypeId::U8
-                                        | TypeId::U16
-                                        | TypeId::U32
-                                        | TypeId::U64
-                                );
-                                let needs_float_boxing = matches!(value.ty, TypeId::F32 | TypeId::F64);
-                                let needs_bool_boxing = value.ty == TypeId::BOOL || value.ty == TypeId::I8;
+                                let needs_int_boxing = !elem_is_heap
+                                    && matches!(
+                                        value.ty,
+                                        TypeId::I16
+                                            | TypeId::I32
+                                            | TypeId::I64
+                                            | TypeId::U8
+                                            | TypeId::U16
+                                            | TypeId::U32
+                                            | TypeId::U64
+                                    );
+                                let needs_float_boxing =
+                                    !elem_is_heap && matches!(value.ty, TypeId::F32 | TypeId::F64);
+                                let needs_bool_boxing =
+                                    !elem_is_heap && (value.ty == TypeId::BOOL || value.ty == TypeId::I8);
                                 if needs_int_boxing {
                                     self.with_func(|func, current_block| {
                                         let boxed = func.new_vreg();

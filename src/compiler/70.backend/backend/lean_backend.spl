@@ -19,7 +19,8 @@ use compiler.mir.mir_instructions.{MirModule, MirFunction}
 use compiler.backend.backend_api.*
 use compiler.backend.codegen_types.{Codegen, CodegenOutput, CodegenOutputKind}
 use compiler.backend.verification_codegen_types.{VerificationCodegen}
-use compiler.backend.lean_mir_translate.{translate_mir_body, mir_type_to_lean}
+use compiler.backend.lean_mir_translate.{translate_mir_body, mir_type_to_lean, sort_mir_functions_by_name}
+use compiler.backend.backend.backend_types.{compileerror_backend_error}
 
 # ============================================================================
 # Verification Level
@@ -296,9 +297,13 @@ class LeanBackend:
         # Export type definitions
         self.export_types(builder, module)
 
-        # Export functions
-        for name, body in module.functions:
-            self.export_function(builder, name, body)
+        # Export functions in deterministic (name-sorted) order.
+        var fns: [MirFunction] = []
+        for symbol in module.functions.keys():
+            fns = fns.push(module.functions[symbol])
+        for mir_fn in sort_mir_functions_by_name(fns):
+            val body = MirBody.from_function(mir_fn)
+            self.export_function(builder, mir_fn.name, body)?
 
         # Generate proof obligations
         if self.generate_proofs:
@@ -324,8 +329,12 @@ class LeanBackend:
         builder.add_import("Mathlib.Data.Array.Basic")
         builder.begin_namespace("{self.module_prefix}.{module.name}")
         self.export_types(builder, module)
-        for name, body in module.functions:
-            self.export_function(builder, name, body)
+        var fns: [MirFunction] = []
+        for symbol in module.functions.keys():
+            fns = fns.push(module.functions[symbol])
+        for mir_fn in sort_mir_functions_by_name(fns):
+            val body = MirBody.from_function(mir_fn)
+            self.export_function(builder, mir_fn.name, body)?
         builder.end_namespace("{self.module_prefix}.{module.name}")
         Ok(LeanExportResult(
             module_name: "{module.name}.Generated",
