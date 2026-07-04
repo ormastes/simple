@@ -1,7 +1,8 @@
 """Office sheets conditional formatting spec.
 
 Comprehensive tests for conditional formatting rules.
-Tests cell_value criteria, top_n highlighting, and color scale interpolation.
+Tests cell_value criteria, top_n highlighting, color scale interpolation,
+data bars, above/below average matching, and unique/duplicate matching.
 """
 
 use std.spec
@@ -292,6 +293,227 @@ describe "cond_css_for_cell: color_scale":
 
         val result = cond_css_for_cell(sheet, [rule], "A1")
         expect(result).to_equal("")
+
+describe "cond_css_for_cell: data_bar, above/below average, unique/duplicate":
+    """Excel-style data bars, average matchers, and text occurrence matchers."""
+
+    it "data_bar computes proportional bar percentage over the range":
+        var sheet = Sheet.new("S1")
+        sheet.set_value("A1", "10")
+        sheet.set_value("A2", "20")
+        sheet.set_value("A3", "30")
+        sheet.set_value("A4", "40")
+
+        val rule = CondRule(
+            range: "A1:A4",
+            kind: "data_bar",
+            criteria: "",
+            n: 0,
+            css: ""  # CSS is computed per value, not static
+        )
+
+        # P = (value - min) / (max - min) * 100, rounded to integer.
+        # A3: (30-10)/30*100 = 66.67 -> 67
+        val a3 = cond_css_for_cell(sheet, [rule], "A3")
+        expect(a3).to_equal("background:linear-gradient(to right, #638ec6 67%, transparent 67%)")
+        expect(a3).to_contain("67%")
+        # A1 is the minimum -> 0%
+        expect(cond_css_for_cell(sheet, [rule], "A1")).to_contain(" 0%")
+        # A4 is the maximum -> 100%
+        expect(cond_css_for_cell(sheet, [rule], "A4")).to_contain("100%")
+        # A2: (20-10)/30*100 = 33.33 -> 33
+        expect(cond_css_for_cell(sheet, [rule], "A2")).to_contain("33%")
+
+    it "data_bar gives a full bar to a degenerate single-value range":
+        var sheet = Sheet.new("S1")
+        sheet.set_value("A1", "42")
+
+        val rule = CondRule(
+            range: "A1:A1",
+            kind: "data_bar",
+            criteria: "",
+            n: 0,
+            css: ""
+        )
+
+        # Degenerate range (max == min): documented as full bar, P = 100,
+        # mirroring color_scale's degenerate max-color rule.
+        val result = cond_css_for_cell(sheet, [rule], "A1")
+        expect(result).to_equal("background:linear-gradient(to right, #638ec6 100%, transparent 100%)")
+
+    it "data_bar returns empty for non-numeric cells":
+        var sheet = Sheet.new("S1")
+        sheet.set_value("A1", "text")
+        sheet.set_value("A2", "10")
+
+        val rule = CondRule(
+            range: "A1:A4",
+            kind: "data_bar",
+            criteria: "",
+            n: 0,
+            css: ""
+        )
+
+        expect(cond_css_for_cell(sheet, [rule], "A1")).to_equal("")
+        # Empty cell in range also gets no bar
+        expect(cond_css_for_cell(sheet, [rule], "A3")).to_equal("")
+
+    it "keeps first-match-wins ordering with a data_bar rule":
+        var sheet = Sheet.new("S1")
+        sheet.set_value("A1", "10")
+        sheet.set_value("A2", "40")
+
+        val rule1 = CondRule(
+            range: "A1:A2",
+            kind: "cell_value",
+            criteria: ">30",
+            n: 0,
+            css: "background:#fde7e9"
+        )
+        val rule2 = CondRule(
+            range: "A1:A2",
+            kind: "data_bar",
+            criteria: "",
+            n: 0,
+            css: ""
+        )
+
+        # A2 matches the earlier cell_value rule -> its static css wins
+        expect(cond_css_for_cell(sheet, [rule1, rule2], "A2")).to_equal("background:#fde7e9")
+        # A1 falls through to the data_bar rule
+        expect(cond_css_for_cell(sheet, [rule1, rule2], "A1")).to_contain("linear-gradient")
+
+    it "above_average matches values strictly above the mean":
+        var sheet = Sheet.new("S1")
+        # Mean of 10, 20, 30, 40 is 25
+        sheet.set_value("A1", "10")
+        sheet.set_value("A2", "20")
+        sheet.set_value("A3", "30")
+        sheet.set_value("A4", "40")
+
+        val rule = CondRule(
+            range: "A1:A4",
+            kind: "above_average",
+            criteria: "",
+            n: 0,
+            css: "background:#c6efce"
+        )
+
+        expect(cond_css_for_cell(sheet, [rule], "A3")).to_equal("background:#c6efce")
+        expect(cond_css_for_cell(sheet, [rule], "A4")).to_equal("background:#c6efce")
+        expect(cond_css_for_cell(sheet, [rule], "A1")).to_equal("")
+        expect(cond_css_for_cell(sheet, [rule], "A2")).to_equal("")
+
+    it "below_average matches values strictly below the mean":
+        var sheet = Sheet.new("S1")
+        sheet.set_value("A1", "10")
+        sheet.set_value("A2", "20")
+        sheet.set_value("A3", "30")
+        sheet.set_value("A4", "40")
+
+        val rule = CondRule(
+            range: "A1:A4",
+            kind: "below_average",
+            criteria: "",
+            n: 0,
+            css: "background:#fde7e9"
+        )
+
+        expect(cond_css_for_cell(sheet, [rule], "A1")).to_equal("background:#fde7e9")
+        expect(cond_css_for_cell(sheet, [rule], "A2")).to_equal("background:#fde7e9")
+        expect(cond_css_for_cell(sheet, [rule], "A3")).to_equal("")
+        expect(cond_css_for_cell(sheet, [rule], "A4")).to_equal("")
+
+    it "value equal to the mean matches neither above nor below":
+        var sheet = Sheet.new("S1")
+        # Mean of 10, 20, 30 is exactly 20
+        sheet.set_value("A1", "10")
+        sheet.set_value("A2", "20")
+        sheet.set_value("A3", "30")
+
+        val above = CondRule(
+            range: "A1:A3",
+            kind: "above_average",
+            criteria: "",
+            n: 0,
+            css: "background:#c6efce"
+        )
+        val below = CondRule(
+            range: "A1:A3",
+            kind: "below_average",
+            criteria: "",
+            n: 0,
+            css: "background:#fde7e9"
+        )
+
+        expect(cond_css_for_cell(sheet, [above], "A2")).to_equal("")
+        expect(cond_css_for_cell(sheet, [below], "A2")).to_equal("")
+
+    it "excludes empty and non-numeric cells from the mean":
+        var sheet = Sheet.new("S1")
+        # Range A1:A6: numbers 10, 20, 30, 40 (mean 25); A5 empty, A6 text.
+        sheet.set_value("A1", "10")
+        sheet.set_value("A2", "20")
+        sheet.set_value("A3", "30")
+        sheet.set_value("A4", "40")
+        sheet.set_value("A6", "note")
+
+        val rule = CondRule(
+            range: "A1:A6",
+            kind: "above_average",
+            criteria: "",
+            n: 0,
+            css: "background:#c6efce"
+        )
+
+        # If empty/text counted, the mean would drop and 20 would match.
+        expect(cond_css_for_cell(sheet, [rule], "A2")).to_equal("")
+        expect(cond_css_for_cell(sheet, [rule], "A3")).to_equal("background:#c6efce")
+        # Non-numeric and empty cells never match themselves
+        expect(cond_css_for_cell(sheet, [rule], "A5")).to_equal("")
+        expect(cond_css_for_cell(sheet, [rule], "A6")).to_equal("")
+
+    it "duplicate matches display texts occurring more than once (case-insensitive)":
+        var sheet = Sheet.new("S1")
+        sheet.set_value("A1", "a")
+        sheet.set_value("A2", "B")
+        sheet.set_value("A3", "A")
+        sheet.set_value("A4", "c")
+
+        val rule = CondRule(
+            range: "A1:A4",
+            kind: "duplicate",
+            criteria: "",
+            n: 0,
+            css: "background:#ffc7ce"
+        )
+
+        expect(cond_css_for_cell(sheet, [rule], "A1")).to_equal("background:#ffc7ce")
+        expect(cond_css_for_cell(sheet, [rule], "A3")).to_equal("background:#ffc7ce")
+        expect(cond_css_for_cell(sheet, [rule], "A2")).to_equal("")
+        expect(cond_css_for_cell(sheet, [rule], "A4")).to_equal("")
+
+    it "unique matches display texts occurring exactly once (case-insensitive)":
+        var sheet = Sheet.new("S1")
+        sheet.set_value("A1", "a")
+        sheet.set_value("A2", "B")
+        sheet.set_value("A3", "A")
+        sheet.set_value("A4", "c")
+
+        val rule = CondRule(
+            range: "A1:A5",
+            kind: "unique",
+            criteria: "",
+            n: 0,
+            css: "background:#c6efce"
+        )
+
+        expect(cond_css_for_cell(sheet, [rule], "A2")).to_equal("background:#c6efce")
+        expect(cond_css_for_cell(sheet, [rule], "A4")).to_equal("background:#c6efce")
+        expect(cond_css_for_cell(sheet, [rule], "A1")).to_equal("")
+        expect(cond_css_for_cell(sheet, [rule], "A3")).to_equal("")
+        # Empty cell in range never matches unique
+        expect(cond_css_for_cell(sheet, [rule], "A5")).to_equal("")
 
 describe "cond_css_for_cell: unknown rule kind":
     """Unknown rule kinds should not match."""

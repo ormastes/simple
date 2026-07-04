@@ -1,7 +1,8 @@
 # Conditional Formatting
 #
 # Rule-based cell formatting with CSS generation.
-# Supports cell_value criteria matching, top_n highlighting, and color scales.
+# Supports cell_value criteria matching, top_n highlighting, color scales,
+# data bars, above/below average matching, and unique/duplicate matching.
 
 use app.office.sheets.spreadsheet.{Sheet}
 use app.office.sheets.cell.{CellValue, CellRef, cell_ref_to_string, cell_display_text, empty_cell, number_cell}
@@ -16,7 +17,8 @@ struct CondRule:
 
     Fields:
         range: A1-notation range (e.g., "A1:C10") to which this rule applies
-        kind: Rule type ("cell_value", "top_n", "color_scale")
+        kind: Rule type ("cell_value", "top_n", "color_scale", "data_bar",
+              "above_average", "below_average", "unique", "duplicate")
         criteria: COUNTIF-style criteria (e.g., ">100", "<=50", "<>x", bare text for equality)
         n: Top N count (used when kind="top_n")
         css: Inline CSS to apply on match (e.g., "background:#fde7e9;color:#c00")
@@ -48,6 +50,10 @@ fn cond_css_for_cell(sheet: Sheet, rules: [CondRule], cell_a1: text) -> text:
             val scale_css = _color_scale_css(sheet, rule, cell_a1)
             if scale_css != "":
                 return scale_css
+        elif rule.kind == "data_bar":
+            val bar_css = _data_bar_css(sheet, rule, cell_a1)
+            if bar_css != "":
+                return bar_css
         elif _cell_matches_rule(sheet, rule, cell_a1):
             return rule.css
         i = i + 1
@@ -108,6 +114,14 @@ fn _cell_matches_rule(sheet: Sheet, rule: CondRule, cell_a1: text) -> bool:
             return _cell_matches_criteria(cell.value, rule.criteria)
         "top_n":
             return _cell_is_in_top_n(sheet, cell.value, rule.range, rule.n)
+        "above_average":
+            return _cell_vs_average(sheet, cell.value, rule.range, true)
+        "below_average":
+            return _cell_vs_average(sheet, cell.value, rule.range, false)
+        "unique":
+            return _cell_text_occurrence_match(sheet, cell.value, rule.range, true)
+        "duplicate":
+            return _cell_text_occurrence_match(sheet, cell.value, rule.range, false)
         _:
             return false
 
@@ -298,6 +312,139 @@ fn _color_scale_css(sheet: Sheet, rule: CondRule, cell_a1: text) -> text:
         r = r + 1
 
     _interpolate_color(lo, hi, cell_num)
+
+fn _data_bar_css(sheet: Sheet, rule: CondRule, cell_a1: text) -> text:
+    """Computed data-bar css: a proportional left-to-right bar where
+    P = (value - min) / (max - min) * 100 over the rule range, rounded to
+    integer (half up). Degenerate single-value range (max == min) gets a
+    full bar (P = 100), mirroring the color_scale degenerate max-color rule.
+    Non-numeric or out-of-range cells get ""."""
+    if not _cell_in_range(cell_a1, rule.range):
+        return ""
+    val cell = sheet.get_cell(cell_a1)
+    var cell_num = 0.0
+    var is_number = false
+    match cell.value:
+        CellValue.NumberVal(v):
+            cell_num = v
+            is_number = true
+        _:
+            pass
+    if not is_number:
+        return ""
+
+    val values = _collect_range_numbers(sheet, rule.range)
+    var lo = cell_num
+    var hi = cell_num
+    var i = 0
+    while i < values.len():
+        val v = values[i]
+        if v < lo:
+            lo = v
+        if v > hi:
+            hi = v
+        i = i + 1
+
+    var p = 100i64
+    if hi != lo:
+        val ratio = (cell_num - lo) / (hi - lo)
+        p = (ratio * 100.0 + 0.5).to_i64()
+    "background:linear-gradient(to right, #638ec6 {p}%, transparent {p}%)"
+
+fn _cell_vs_average(sheet: Sheet, cell: CellValue, range_str: text, above: bool) -> bool:
+    """Check if a cell's numeric value is strictly above (or below) the mean
+    of the numeric cells in the range. Empty and non-numeric cells are
+    excluded from the mean; non-numeric cells never match."""
+    var cell_num = 0.0
+    var is_number = false
+    match cell:
+        CellValue.NumberVal(v):
+            cell_num = v
+            is_number = true
+        _:
+            pass
+    if not is_number:
+        return false
+
+    val values = _collect_range_numbers(sheet, range_str)
+    if values.len() == 0:
+        return false
+    var sum = 0.0
+    var i = 0
+    while i < values.len():
+        sum = sum + values[i]
+        i = i + 1
+    val count = values.len()
+    val mean = sum / count.to_f64()
+    if above:
+        return cell_num > mean
+    cell_num < mean
+
+fn _cell_text_occurrence_match(sheet: Sheet, cell: CellValue, range_str: text, unique: bool) -> bool:
+    """Check if a cell's display text occurs exactly once (unique=true) or
+    more than once (unique=false) within the range, case-insensitive.
+    Empty cells are excluded and never match."""
+    val display = _cell_display_text(cell)
+    if display == "":
+        return false
+    val needle = display.lower()
+
+    val range = parse_range(range_str)
+    if range == nil:
+        return false
+    val rng = range
+    val min_col = _min_i32(rng.start.col, rng.end_ref.col)
+    val max_col = _max_i32(rng.start.col, rng.end_ref.col)
+    val min_row = _min_i32(rng.start.row, rng.end_ref.row)
+    val max_row = _max_i32(rng.start.row, rng.end_ref.row)
+
+    var count = 0
+    var r = min_row
+    while r <= max_row:
+        var c = min_col
+        while c <= max_col:
+            val ref = CellRef(col: c, row: r)
+            val ref_str = cell_ref_to_string(ref)
+            val other = sheet.get_cell(ref_str)
+            val other_display = _cell_display_text(other.value)
+            if other_display != "":
+                val other_lower = other_display.lower()
+                if other_lower == needle:
+                    count = count + 1
+            c = c + 1
+        r = r + 1
+
+    if unique:
+        return count == 1
+    count > 1
+
+fn _collect_range_numbers(sheet: Sheet, range_str: text) -> [f64]:
+    """Collect all numeric cell values in a range (row scan order)."""
+    var values: [f64] = []
+    val range = parse_range(range_str)
+    if range == nil:
+        return values
+    val rng = range
+    val min_col = _min_i32(rng.start.col, rng.end_ref.col)
+    val max_col = _max_i32(rng.start.col, rng.end_ref.col)
+    val min_row = _min_i32(rng.start.row, rng.end_ref.row)
+    val max_row = _max_i32(rng.start.row, rng.end_ref.row)
+
+    var r = min_row
+    while r <= max_row:
+        var c = min_col
+        while c <= max_col:
+            val ref = CellRef(col: c, row: r)
+            val ref_str = cell_ref_to_string(ref)
+            val cell_val = sheet.get_cell(ref_str)
+            match cell_val.value:
+                CellValue.NumberVal(v):
+                    values.push(v)
+                _:
+                    pass
+            c = c + 1
+        r = r + 1
+    values
 
 fn _cell_display_text(cell_val: CellValue) -> text:
     """Get display text for a cell value."""
