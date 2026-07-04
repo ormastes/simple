@@ -31,8 +31,11 @@
 
 use common.ui.widget.{UITree}
 use common.ui.state.{init_state}
+use common.ui.builder.{column, table_widget, build_tree_with_title}
 use app.ui.render.html_widgets.{render_html_tree}
 use app.office.counter.{CounterApp}
+use app.office.sheets.spreadsheet.{Sheet}
+use app.office.sheets.cell.{cell_display_text, col_to_letter}
 use std.gc_async_mut.gpu.browser_engine.simple_web_engine2d_renderer.{simple_web_engine2d_render_html_pixels}
 
 # Matches BrowserApp's viewport (src/app/ui.browser/app.spl uses width=96,
@@ -77,6 +80,64 @@ fn office_gui_minimal_css() -> text:
     ".status-left{flex:1;color:#333333;}" +
     ".status-right{color:#999999;}" +
     ".focused{border:1px solid #0066cc;}"
+
+fn office_gui_sheet_minimal_css() -> text:
+    """Curated stylesheet covering the sheet grid's widget classes (table/
+    th/td/filter-input) on top of office_gui_minimal_css's base panel/layout
+    classes. Same fallback-knob rationale as office_gui_minimal_css above:
+    a small curated sheet, not the full ~300KB theme CSS."""
+    office_gui_minimal_css() +
+    ".table-filter{padding:2px 4px;border:1px solid #cccccc;}" +
+    ".widget-table{border-collapse:collapse;width:100%;}" +
+    ".widget-table th{padding:2px 4px;border:1px solid #cccccc;background:#e8e8e8;text-align:left;}" +
+    ".widget-table td{padding:2px 4px;border:1px solid #cccccc;}"
+
+struct SheetGuiView:
+    tree: UITree
+    text_dump: text
+
+fn sheet_gui_view(sheet: Sheet, max_rows: i32, max_cols: i32) -> SheetGuiView:
+    """Build a spreadsheet grid view of `sheet`: column headers A,B,C.. across
+    the top, 1-based row numbers down the left, and each visible cell's
+    display text (formulas show their cached computed value via
+    cell_display_text). Rows in sheet.hidden_rows are skipped entirely so a
+    filtered sheet renders filtered. Returns both a UITree (for real pixel
+    rendering through the browser engine) and a plain-text pipe-separated
+    grid dump (for testability without parsing HTML/widget trees) --
+    the header line first, then one line per rendered row."""
+    var headers: [text] = [""]
+    var c = 0
+    while c < max_cols:
+        headers.push(col_to_letter(c))
+        c = c + 1
+
+    var rows_out: [[text]] = []
+    var dump_lines: [text] = [headers.join("|")]
+    var r = 1
+    while r <= max_rows:
+        if not sheet.is_row_hidden(r.to_i64()):
+            var row_cells: [text] = ["{r}"]
+            var rc = 0
+            while rc < max_cols:
+                val ref_str = "{col_to_letter(rc)}{r}"
+                row_cells.push(cell_display_text(sheet.get_cell(ref_str)))
+                rc = rc + 1
+            rows_out.push(row_cells)
+            dump_lines.push(row_cells.join("|"))
+        r = r + 1
+
+    val table_node = table_widget("sheet_grid", headers, rows_out)
+    val root = column("sheet_gui_root", [table_node])
+    val tree = build_tree_with_title(root, "Simple Sheet", "light")
+    SheetGuiView(tree: tree, text_dump: dump_lines.join("\n"))
+
+fn office_gui_sheet_pixels(view: SheetGuiView) -> [u32]:
+    """Render a SheetGuiView's tree to ARGB pixels via the same real
+    layout/paint pixel path office_gui_frame uses."""
+    val state = init_state(view.tree)
+    val body = render_html_tree(view.tree.root_node(), state)
+    val html = "<html><head><style>" + office_gui_sheet_minimal_css() + "</style></head><body>" + body + "</body></html>"
+    simple_web_engine2d_render_html_pixels(html, OFFICE_GUI_FRAME_WIDTH, OFFICE_GUI_FRAME_HEIGHT, "software")
 
 fn office_gui_frame(app_name: text) -> [u32]:
     """Render ONE frame of the named office app through the real browser
