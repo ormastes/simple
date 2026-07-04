@@ -77,11 +77,15 @@ fn rain_channel_valid(channel: i64) -> bool:
 
 # Physical page number for a (group, channel, page) cell.
 fn rain_ppn(group: i64, channel: i64, page: i64) -> i64:
+    if group < 0 or group >= rain_num_groups() or not rain_channel_valid(channel) or page < 0 or page >= PAGES_PER_BLOCK:
+        return UNMAP
     val blk: i64 = group * NUM_CHANNELS + channel
     blk * PAGES_PER_BLOCK + page
 
 # The stripe index a physical page belongs to.
 fn rain_stripe_idx(ppn: i64) -> i64:
+    if not ppn_in_range(ppn):
+        return UNMAP
     val blk: i64 = ppn_block(ppn)
     val group: i64 = blk / NUM_CHANNELS
     group * PAGES_PER_BLOCK + ppn_page(ppn)
@@ -117,6 +121,11 @@ fn rain_selftest() -> i64:
     # channel of a stripe maps back to the same stripe index (the layout is a clean grid).
     val ppn_a: i64 = rain_ppn(2, 5, 11)
     fail = fail + expect_eq(rain_stripe_idx(ppn_a), 2 * PAGES_PER_BLOCK + 11, "rain: ppn → stripe index")
+    fail = fail + expect_eq(rain_ppn(-1, 0, 0), UNMAP, "rain: negative group fails closed")
+    fail = fail + expect_eq(rain_ppn(rain_num_groups(), 0, 0), UNMAP, "rain: oversized group fails closed")
+    fail = fail + expect_eq(rain_ppn(0, -1, PAGES_PER_BLOCK), UNMAP, "rain: invalid channel/page cannot alias ppn 0")
+    fail = fail + expect_eq(rain_ppn(0, 0, PAGES_PER_BLOCK), UNMAP, "rain: oversized page fails closed")
+    fail = fail + expect_eq(rain_stripe_idx(NUM_PAGES), UNMAP, "rain: invalid ppn stripe fails closed")
     var c2: i64 = 0
     var same: i64 = 1
     while c2 < NUM_CHANNELS:
