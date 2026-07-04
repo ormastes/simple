@@ -64,7 +64,7 @@ Plus `src/compiler_rust/lib/std/src` (std proofs project, same gate).
 |---|---|---|---|
 | THREADS: lifecycle, join/detach | **COVERED (NEW)** | `thread_lifecycle` — result write-once, exactly-once join delivery, no double-join, detach/join mutual exclusion, wf preservation | P0 |
 | THREADS: DRF / happens-before | COVERED | `memory_model_drf` (90 thm; parallel stream actively extending) | P0 |
-| THREADS: TLS isolation | MISSING — propose: per-thread store independence (write to T1's slot invisible to T2) | — | P2 |
+| THREADS: TLS isolation | **COVERED (NEW)** | `tls_isolation` — per-thread store independence: read-own, cross-thread write invisible (`tls_thread_isolated`), cross-key isolation (`tls_key_isolated`), distinct-thread writes commute | P2 |
 | PROCESS: spawn/exit/wait, zombie-freedom | **COVERED (NEW)** | `process_lifecycle` — Created→Running→Exited→Reaped machine; wait returns only Exited (`wait_returns_only_exited`, blocks on live), no double-reap (`no_double_reap`, `reaped_terminal`), no zombie persistence (`no_zombie_persist`), orphan reparent-to-init no-leak (`orphan_exited_reaped`, `adopt_reparents`), lifecycle monotone (`exit_advances`/`reap_advances`) | P1 |
 | PROCESS: signal safety | MISSING | — | P2 |
 | GC: boundary/tier inference | COVERED | `gc_boundary` | P0 |
@@ -86,9 +86,11 @@ Plus `src/compiler_rust/lib/std/src` (std proofs project, same gate).
 | KERNEL: capabilities | COVERED | `kernel_capabilities`, `memory_capabilities` | P0 |
 | HARDWARE: RISC-V RVFI | COVERED | `riscv_product` (stream) | P1 |
 
-Summary: **17 covered** (4 newly landed this pass), **1 partial**, **4 missing**
-(P1: process lifecycle, FFI contract; P2: TLS, signals), **2 open obligations**
-inside otherwise-green GC domains (documented above, never sorry-admitted).
+Summary: **20 covered** (3 newly landed this session — process lifecycle, FFI
+contract, TLS isolation — atop 4 from the prior #114 pass), **1 partial**,
+**1 missing** (P2: signal safety, deferred: needs deeper OS/async-signal
+modeling), **2 open obligations** inside otherwise-green GC domains (documented
+above, never sorry-admitted).
 
 ## Items created this pass (all zero-sorry, build verified)
 
@@ -102,6 +104,24 @@ inside otherwise-green GC domains (documented above, never sorry-admitted).
 3. `src/verification/thread_lifecycle/` — 14 theorems.
    Key: `no_double_join`, `detach_excludes_join`, `join_excludes_detach`,
    `finish_write_once`, `join_finished_yields_value`, four `*_preserves_wf`.
+
+## Items created 2026-07-04 (task #120; all zero-sorry, `lake build` verified)
+
+4. `src/verification/process_lifecycle/` — 18 theorems (P1).
+   Created→Running→Exited→Reaped machine grounded in `runtime_fork.c` waitpid
+   reaping + `rt_process_run`/`rt_process_spawn_async`. Key:
+   `wait_returns_only_exited`, `no_double_reap`, `reaped_terminal`,
+   `no_zombie_persist`, `orphan_exited_reaped`, `adopt_reparents`,
+   `exit_advances`/`reap_advances` (lifecycle monotone, no resurrection).
+5. `src/verification/ffi_contract/` — 14 theorems (P1).
+   (a) #97 link guard grounded in `elf/macho_undefined_symbols`: `no_null_call`,
+   `undefined_rejects`, `accept_extend_defined`. (b) #117 tag/box mirroring
+   `runtime_value.h`: `int_roundtrip`, `heap_roundtrip` (box∘unbox=id),
+   `no_double_untag`, `unbox_result_not_reboxable` (one box level per op),
+   `int_never_heap` (scalar XOR heap).
+6. `src/verification/tls_isolation/` — 4 theorems (P2).
+   `tls_read_own`, `tls_thread_isolated`, `tls_key_isolated`,
+   `tls_writes_commute`.
 
 ## How to verify
 

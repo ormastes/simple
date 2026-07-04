@@ -106,23 +106,33 @@ pub fn compile_cast<M: Module>(
         // the result (e.g. int("42") == 52, the ASCII code of '4') instead of
         // parsing the decimal digits. Task #100 — Rust-side sibling of task
         // #94's `cranelift_codegen_adapter.spl` fix (`cl_translate_cast`):
-        // route through the same runtime parser the interpreter uses
-        // (`rt_string_to_int`, strtoll-based, returns 0 on parse failure) so
-        // int("42") == 42 instead of 52. This strtoll-based leading-digit-run
-        // parse (stop at first non-digit, e.g. "4.2" -> 4; 0 if no digits at
-        // all, e.g. "abc"/"" -> 0) is also the task #118 canonical `int(text)`
-        // semantics — matches eval_builtins.spl's `eval_int_parse_lenient` and
-        // interpreter_call/builtins.rs's `parse_int_lenient`; no change needed
-        // here, this path was already the reference implementation.
-        // `src_val` here is already the boxed
+        // route through a runtime parser instead.
+        //
+        // Task #118 correction: this used to call `rt_string_to_int`, which
+        // was believed (per stale comments here and in
+        // `cranelift_codegen_adapter.spl`) to be strtoll-based/leading-prefix
+        // lenient like its C (`runtime_native.c`) and self-hosted
+        // (`simple_core/core_string.spl`) namesakes. It is NOT: the Rust-native
+        // `simple-runtime` crate's `rt_string_to_int` (runtime/src/value/collections.rs)
+        // does a *strict whole-string* `str::parse::<i64>()` and returns 0 on
+        // any partial match, so `int("4.2")` silently produced 0 instead of 4.
+        // `rt_string_to_int` is left strict on purpose — it also backs
+        // `.to_int()`/`.parse_int()`/`to_i64()` method calls (see
+        // closures_structs.rs / calls.rs), which reject partial matches.
+        // `int(text_expr)` now routes through the sibling
+        // `rt_string_to_int_lenient` (added for task #118), which does the
+        // canonical leading-digit-run parse ("4.2" -> 4, "abc"/"" -> 0),
+        // matching eval_builtins.spl's `eval_int_parse_lenient` (flat-AST
+        // interpreter) and interpreter_call/builtins.rs's `parse_int_lenient`
+        // (seed tree-walk interpreter). `src_val` here is already the boxed
         // string RuntimeValue, so no rt_string_new re-boxing is needed.
-        // Not every JIT compilation pre-populates `rt_string_to_int` in
+        // Not every JIT compilation pre-populates `rt_string_to_int_lenient` in
         // `ctx.runtime_funcs` (unlike `rt_string_len`/`rt_string_data` used
         // below) — fall back to declaring it fresh, mirroring the existing
         // `.to_int()` method-call lowering in closures_structs.rs.
-        let string_to_int_id = if let Some(&fid) = ctx.runtime_funcs.get("rt_string_to_int") {
+        let string_to_int_id = if let Some(&fid) = ctx.runtime_funcs.get("rt_string_to_int_lenient") {
             fid
-        } else if let Some(&fid) = ctx.func_ids.get("rt_string_to_int") {
+        } else if let Some(&fid) = ctx.func_ids.get("rt_string_to_int_lenient") {
             fid
         } else {
             let mut sig = cranelift_codegen::ir::Signature::new(crate::codegen::shared::platform_call_conv());
@@ -130,9 +140,9 @@ pub fn compile_cast<M: Module>(
             sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I64));
             let fid = ctx
                 .module
-                .declare_function("rt_string_to_int", cranelift_module::Linkage::Import, &sig)
+                .declare_function("rt_string_to_int_lenient", cranelift_module::Linkage::Import, &sig)
                 .map_err(|e| e.to_string())?;
-            ctx.func_ids.insert("rt_string_to_int".to_string(), fid);
+            ctx.func_ids.insert("rt_string_to_int_lenient".to_string(), fid);
             fid
         };
         let string_to_int_ref = ctx.module.declare_func_in_func(string_to_int_id, builder.func);

@@ -613,8 +613,11 @@ pub(crate) fn compile_builtin_io_call<M: Module>(
             Ok(Some(nil))
         }
         "int" | "i64" => {
-            // Convert string to integer: calls rt_string_to_int (returns raw i64),
-            // then re-box as RuntimeValue via rt_value_int
+            // Convert string to integer: calls rt_string_to_int_lenient (returns
+            // raw i64), then re-box as RuntimeValue via rt_value_int. Task #118:
+            // the generic int(x) builtin is a TOTAL, non-erroring, leading-digit
+            // -prefix parse ("4.2" -> 4, "abc"/"" -> 0) — distinct from the
+            // stricter whole-string rt_string_to_int used by .to_int()/.parse_int().
             if args.is_empty() {
                 let zero = builder.ins().iconst(types::I64, 0);
                 return Ok(Some(zero));
@@ -623,8 +626,8 @@ pub(crate) fn compile_builtin_io_call<M: Module>(
                 Some(&v) => v,
                 None => builder.ins().iconst(types::I64, 0),
             };
-            // Call rt_string_to_int to get raw i64
-            if let Some(&to_int_id) = ctx.runtime_funcs.get("rt_string_to_int") {
+            // Call rt_string_to_int_lenient to get raw i64
+            if let Some(&to_int_id) = ctx.runtime_funcs.get("rt_string_to_int_lenient") {
                 let to_int_ref = ctx.module.declare_func_in_func(to_int_id, builder.func);
                 let call = adapted_call(builder, to_int_ref, &[arg_val]);
                 let raw_int = builder.inst_results(call)[0];
