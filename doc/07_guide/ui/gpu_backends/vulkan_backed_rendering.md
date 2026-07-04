@@ -100,10 +100,11 @@ On Linux, current completion evidence is summarized by
 `doc/09_report/linux_vulkan_render_log_compare_current_2026-07-02.md` and the
 SimpleOS hardening aggregate:
 `BUILD_DIR=build/simpleos_hardening_evidence_matrix_current REPORT_PATH=doc/09_report/simpleos_hardening_evidence_matrix_2026-07-03.md sh scripts/check/check-simpleos-hardening-evidence-matrix.shs`.
-That aggregate must report `simpleos_hardening_matrix_passed=15/15` and
+That aggregate must report `simpleos_hardening_matrix_passed=16/16` and
 `simpleos_hardening_gui_renderdoc_vulkan_status=pass` plus
 `simpleos_hardening_formal_lean_proofs_status=pass` plus
-`simpleos_hardening_formal_riscv_dual_track_status=pass` before claiming the
+`simpleos_hardening_formal_riscv_dual_track_status=pass` plus
+`simpleos_hardening_formal_critical_concurrency_status=pass` before claiming the
 SimpleOS Vulkan/RenderDoc lane. Windows and macOS still require their
 platform-specific runbooks before claiming native platform closure.
 The aggregate audit reads setup/readiness evidence from `GUI_WEB_2D_VULKAN_ENV`
