@@ -65,7 +65,7 @@ Plus `src/compiler_rust/lib/std/src` (std proofs project, same gate).
 | THREADS: lifecycle, join/detach | **COVERED (NEW)** | `thread_lifecycle` — result write-once, exactly-once join delivery, no double-join, detach/join mutual exclusion, wf preservation | P0 |
 | THREADS: DRF / happens-before | COVERED | `memory_model_drf` (90 thm; parallel stream actively extending) | P0 |
 | THREADS: TLS isolation | MISSING — propose: per-thread store independence (write to T1's slot invisible to T2) | — | P2 |
-| PROCESS: spawn/exit/wait, zombie-freedom | MISSING — propose: process table machine; every exited pid is waited or reparented; no wait on live pid returns | — | P1 |
+| PROCESS: spawn/exit/wait, zombie-freedom | **COVERED (NEW)** | `process_lifecycle` — Created→Running→Exited→Reaped machine; wait returns only Exited (`wait_returns_only_exited`, blocks on live), no double-reap (`no_double_reap`, `reaped_terminal`), no zombie persistence (`no_zombie_persist`), orphan reparent-to-init no-leak (`orphan_exited_reaped`, `adopt_reparents`), lifecycle monotone (`exit_advances`/`reap_advances`) | P1 |
 | PROCESS: signal safety | MISSING | — | P2 |
 | GC: boundary/tier inference | COVERED | `gc_boundary` | P0 |
 | GC: borrow pinning across collect | COVERED | `gc_manual_borrow` (+ parallel stream: collection keeps borrows live) | P0 |

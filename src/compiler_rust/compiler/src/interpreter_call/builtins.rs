@@ -623,23 +623,17 @@ pub(super) fn eval_builtin(
             match val {
                 Value::Int(n) => Ok(Some(Value::Int(n))),
                 Value::Float(f) => Ok(Some(Value::Int(f as i64))),
-                Value::Str(s) => match s.trim().parse::<i64>() {
-                    Ok(n) => Ok(Some(Value::Int(n))),
-                    // Tolerate float-form numeric strings ("0.0") by truncating,
-                    // consistent with int(float) above. Only a non-numeric string errors.
-                    Err(_) => match s.trim().parse::<f64>() {
-                        Ok(f) => Ok(Some(Value::Int(f as i64))),
-                        Err(_) => {
-                            let ctx = ErrorContext::new()
-                                .with_code(codes::TYPE_MISMATCH)
-                                .with_help("string must contain a valid integer");
-                            Err(CompileError::semantic_with_context(
-                                format!("cannot parse '{}' as i64", s),
-                                ctx,
-                            ))
-                        }
-                    },
-                },
+                // Task #118: int(text) is a TOTAL function everywhere — it never
+                // errors. Parse the longest leading run of decimal digits (after
+                // optional whitespace + sign) and stop at the first non-digit, so
+                // "4.2" -> 4 (truncates at '.'); "abc"/"" -> 0. This mirrors the C
+                // runtime's strtoll-based rt_string_to_int() used by both compiled
+                // backends (cranelift_codegen_adapter.spl and codegen/instr/basic_ops.rs),
+                // so interpret mode and compiled mode agree. See
+                // doc/07_guide/quick_reference/syntax_quick_reference.md
+                // "int(text) semantics" and `.parse_int()` (Option-returning) for
+                // the checked alternative.
+                Value::Str(s) => Ok(Some(Value::Int(parse_int_lenient(&s)))),
                 Value::Bool(b) => Ok(Some(Value::Int(if b { 1 } else { 0 }))),
                 _ => {
                     let ctx = ErrorContext::new()
@@ -703,5 +697,44 @@ pub(super) fn eval_builtin(
         // pass_todo, pass_do_nothing, pass_dn, todo: no-op builtins (accept optional rationale)
         "pass_todo" | "pass_do_nothing" | "pass_dn" | "todo" => Ok(Some(Value::Nil)),
         _ => Ok(None),
+    }
+}
+
+/// Task #118 canonical `int(text)` semantics: a TOTAL, non-erroring parse.
+/// Skips leading whitespace, an optional `+`/`-` sign, then reads the longest
+/// run of leading ASCII decimal digits and stops at the first non-digit (so
+/// "4.2" -> 4, truncating at '.'). Returns 0 if no digits are found at all
+/// ("abc", ""). Mirrors the C runtime's strtoll-based `rt_string_to_int()`
+/// used by both compiled backends, so this seed interpreter agrees with
+/// compiled mode and with the pure-Simple flat-AST interpreter
+/// (eval_builtins.spl's `eval_int_parse_lenient`).
+fn parse_int_lenient(s: &str) -> i64 {
+    let t = s.trim();
+    let mut chars = t.chars().peekable();
+    let mut negative = false;
+    if let Some(&c) = chars.peek() {
+        if c == '-' || c == '+' {
+            negative = c == '-';
+            chars.next();
+        }
+    }
+    let mut result: i64 = 0;
+    let mut any_digit = false;
+    for c in chars {
+        match c.to_digit(10) {
+            Some(d) => {
+                any_digit = true;
+                result = result.saturating_mul(10).saturating_add(d as i64);
+            }
+            None => break,
+        }
+    }
+    if !any_digit {
+        return 0;
+    }
+    if negative {
+        -result
+    } else {
+        result
     }
 }

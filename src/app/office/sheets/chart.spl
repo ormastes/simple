@@ -477,3 +477,233 @@ fn render_pie_chart_svg(series: ChartSeries, title: text) -> text:
 
 fn sheet_pie_chart_svg(sheet: Sheet, label_range: text, value_range: text, title: text) -> text:
     render_pie_chart_svg(chart_series_from_ranges(sheet, label_range, value_range), title)
+
+# ---------------------------------------------------------------------------
+# Stacked column chart — one segment per series per category, stacked
+# bottom-up; Y axis scales to the max stacked total.
+# ---------------------------------------------------------------------------
+
+fn sheet_stacked_bar_chart_svg(sheet: Sheet, label_range: text, value_ranges: text, title: text) -> text:
+    """Stacked column chart. value_ranges is a comma-separated list of A1
+    ranges, one per series (e.g. "B1:B2,C1:C2"). Each category's segments
+    stack bottom-up in series order, one palette color per series; the Y axis
+    gets nice ticks up to the max stacked total, and each series gets a
+    legend entry."""
+    var labels: [text] = []
+    val lr = parse_range(label_range)
+    if lr != nil:
+        for ref_str in expand_range_refs(lr):
+            labels.push(cell_display_text(sheet.get_cell(ref_str)))
+    val n_cats = labels.len()
+    # Flat row-major values: vals[s * n_cats + c] (local array only; no
+    # array params cross call boundaries).
+    var vals: [f64] = []
+    var n_series = 0
+    val range_parts = value_ranges.split(",")
+    for range_str in range_parts:
+        val rtrim = range_str.trim()
+        val vr = parse_range(rtrim)
+        if vr != nil and n_cats > 0:
+            var col = 0
+            for ref_str in expand_range_refs(vr):
+                if col < n_cats:
+                    vals.push(_cell_number(sheet, ref_str))
+                    col = col + 1
+            while col < n_cats:
+                vals.push(0.0)
+                col = col + 1
+            n_series = n_series + 1
+    if n_cats == 0 or n_series == 0:
+        return _no_data_svg()
+    # Y axis scales to the max stacked TOTAL across categories.
+    var max_total = 0.0
+    var c = 0
+    while c < n_cats:
+        var tot = 0.0
+        var s = 0
+        while s < n_series:
+            val v = vals[s * n_cats + c]
+            if v > 0.0:
+                tot = tot + v
+            s = s + 1
+        if tot > max_total:
+            max_total = tot
+        c = c + 1
+    val ticks = _axis_ticks(0.0, max_total)
+    var axis_max = ticks[ticks.len() - 1]
+    if axis_max <= 0.0:
+        axis_max = 1.0
+    val w = 460
+    val h = 300
+    val ml = 50
+    val mr = 110
+    val mt = 34
+    val mb = 44
+    val plot_w = w - ml - mr
+    val plot_h = h - mt - mb
+    val baseline = mt + plot_h
+    val safe_title = _svg_escape(title)
+    var out = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{w}\" height=\"{h}\" font-family=\"sans-serif\">"
+    out = "{out}<text x=\"10\" y=\"22\" font-size=\"15\" font-weight=\"600\">{safe_title}</text>"
+    out = "{out}{_y_axis_svg(ml, plot_w, baseline, plot_h, axis_max, ticks)}"
+    val axis_right = ml + plot_w
+    out = "{out}<line x1=\"{ml}\" y1=\"{baseline}\" x2=\"{axis_right}\" y2=\"{baseline}\" stroke=\"#9ca3af\" stroke-width=\"1\"/>"
+    out = "{out}<line x1=\"{ml}\" y1=\"{mt}\" x2=\"{ml}\" y2=\"{baseline}\" stroke=\"#9ca3af\" stroke-width=\"1\"/>"
+    val slot = plot_w / n_cats
+    val bar_w = slot * 55 / 100
+    c = 0
+    while c < n_cats:
+        val cx = ml + c * slot + slot / 2
+        val bar_x = cx - bar_w / 2
+        var cursor = baseline
+        var s = 0
+        while s < n_series:
+            val v = vals[s * n_cats + c]
+            if v > 0.0:
+                val seg_h = ((v / axis_max) * plot_h.to_f64()).to_i64()
+                val seg_y = cursor - seg_h
+                val color = _PIE_COLORS[s % _PIE_COLORS.len()]
+                out = "{out}<rect class=\"seg\" x=\"{bar_x}\" y=\"{seg_y}\" width=\"{bar_w}\" height=\"{seg_h}\" fill=\"{color}\" rx=\"1\"/>"
+                cursor = seg_y
+            s = s + 1
+        val label = _svg_escape(labels[c])
+        val cy_lab = baseline + 16
+        out = "{out}<text x=\"{cx}\" y=\"{cy_lab}\" font-size=\"12\" fill=\"#4b5563\" text-anchor=\"middle\">{label}</text>"
+        c = c + 1
+    # One legend entry per series.
+    val lx = w - mr + 8
+    var ly = mt
+    var s2 = 0
+    while s2 < n_series:
+        val color = _PIE_COLORS[s2 % _PIE_COLORS.len()]
+        val ser_no = s2 + 1
+        val ser_name = "Series {ser_no}"
+        out = "{out}{_legend_svg(ser_name, color, lx, ly)}"
+        ly = ly + 20
+        s2 = s2 + 1
+    "{out}</svg>"
+
+# ---------------------------------------------------------------------------
+# Horizontal bar chart — bars grow rightward, category labels on the left,
+# numeric X axis with value ticks.
+# ---------------------------------------------------------------------------
+
+fn render_hbar_chart_svg(series: ChartSeries, title: text) -> text:
+    """Horizontal bar chart: one bar per category growing rightward from the
+    left margin, category labels left of the axis, nice numeric ticks along
+    the bottom X axis, and a series legend."""
+    val n = series.values.len()
+    if n == 0:
+        return _no_data_svg()
+    var max_v = 0.0
+    for v in series.values:
+        if v > max_v:
+            max_v = v
+    val ticks = _axis_ticks(0.0, max_v)
+    var axis_max = ticks[ticks.len() - 1]
+    if axis_max <= 0.0:
+        axis_max = 1.0
+    val w = 460
+    val h = 300
+    val ml = 95
+    val mr = 110
+    val mt = 34
+    val mb = 44
+    val plot_w = w - ml - mr
+    val plot_h = h - mt - mb
+    val baseline = mt + plot_h
+    val safe_title = _svg_escape(title)
+    var out = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{w}\" height=\"{h}\" font-family=\"sans-serif\">"
+    out = "{out}<text x=\"10\" y=\"22\" font-size=\"15\" font-weight=\"600\">{safe_title}</text>"
+    # Value ticks run along the X axis: vertical gridlines + bottom labels.
+    for t in ticks:
+        val frac = t / axis_max
+        val px = ml + (frac * plot_w.to_f64()).to_i64()
+        out = "{out}<line x1=\"{px}\" y1=\"{mt}\" x2=\"{px}\" y2=\"{baseline}\" stroke=\"#e5e7eb\" stroke-width=\"1\"/>"
+        val ty = baseline + 16
+        val lab = _fmt_val(t)
+        out = "{out}<text x=\"{px}\" y=\"{ty}\" font-size=\"11\" fill=\"#6b7280\" text-anchor=\"middle\">{lab}</text>"
+    val axis_right = ml + plot_w
+    out = "{out}<line x1=\"{ml}\" y1=\"{baseline}\" x2=\"{axis_right}\" y2=\"{baseline}\" stroke=\"#9ca3af\" stroke-width=\"1\"/>"
+    out = "{out}<line x1=\"{ml}\" y1=\"{mt}\" x2=\"{ml}\" y2=\"{baseline}\" stroke=\"#9ca3af\" stroke-width=\"1\"/>"
+    val slot = plot_h / n
+    val bar_h = slot * 55 / 100
+    val color = _PIE_COLORS[0]
+    var i = 0
+    while i < n:
+        val v = series.values[i]
+        val cy = mt + i * slot + slot / 2
+        val bar_y = cy - bar_h / 2
+        val bw = ((v / axis_max) * plot_w.to_f64()).to_i64()
+        out = "{out}<rect class=\"hbar\" x=\"{ml}\" y=\"{bar_y}\" width=\"{bw}\" height=\"{bar_h}\" fill=\"{color}\" rx=\"2\"/>"
+        val vlab = _fmt_val(v)
+        val vx = ml + bw + 4
+        val vy = cy + 4
+        out = "{out}<text x=\"{vx}\" y=\"{vy}\" font-size=\"12\" fill=\"#4b5563\" text-anchor=\"start\">{vlab}</text>"
+        val label = _svg_escape(if i < series.labels.len(): series.labels[i] else: "")
+        val lx_cat = ml - 6
+        out = "{out}<text x=\"{lx_cat}\" y=\"{vy}\" font-size=\"12\" fill=\"#4b5563\" text-anchor=\"end\">{label}</text>"
+        i = i + 1
+    val lx = w - mr + 8
+    out = "{out}{_legend_svg(series.name, color, lx, mt)}"
+    "{out}</svg>"
+
+fn sheet_hbar_chart_svg(sheet: Sheet, label_range: text, value_range: text, title: text) -> text:
+    """One-call horizontal bar chart: ranges in, SVG out."""
+    render_hbar_chart_svg(chart_series_from_ranges(sheet, label_range, value_range), title)
+
+# ---------------------------------------------------------------------------
+# Donut chart — pie's dasharray technique with a thinner stroke (larger
+# inner radius) and the grand total in the center.
+# ---------------------------------------------------------------------------
+
+fn render_donut_chart_svg(series: ChartSeries, title: text) -> text:
+    """Donut chart: stroke-dasharray ring segments like the pie but with a
+    thin stroke (large hole); the center shows the grand total. Legend
+    carries labels and values."""
+    val n = series.values.len()
+    var total = 0.0
+    for v in series.values:
+        if v > 0.0:
+            total = total + v
+    if n == 0 or total <= 0.0:
+        return _no_data_svg()
+    # circumference for r=80; stroke 30 leaves a 65px-radius hole
+    val circ = 2.0 * 3.141592653589793 * 80.0
+    val safe_title = _svg_escape(title)
+    var out = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"480\" height=\"260\" font-family=\"sans-serif\">"
+    out = "{out}<text x=\"10\" y=\"20\" font-size=\"15\" font-weight=\"600\">{safe_title}</text>"
+    var offset = 0.0
+    var i = 0
+    while i < n:
+        val v = series.values[i]
+        if v > 0.0:
+            val frac = v / total
+            val seg = frac * circ
+            val gap = circ - seg
+            val color = _PIE_COLORS[i % _PIE_COLORS.len()]
+            out = "{out}<circle cx=\"140\" cy=\"150\" r=\"80\" fill=\"none\" stroke=\"{color}\" stroke-width=\"30\" stroke-dasharray=\"{seg} {gap}\" stroke-dashoffset=\"{0.0 - offset}\" transform=\"rotate(-90 140 150)\"/>"
+            offset = offset + seg
+        i = i + 1
+    # grand total in the donut hole
+    val tot_lab = _fmt_val(total)
+    out = "{out}<text x=\"140\" y=\"157\" font-size=\"22\" font-weight=\"600\" fill=\"#111827\" text-anchor=\"middle\">{tot_lab}</text>"
+    # legend
+    out = "{out}<g class=\"legend\">"
+    var y = 60
+    i = 0
+    while i < n:
+        val label = _svg_escape(if i < series.labels.len(): series.labels[i] else: "")
+        val color = _PIE_COLORS[i % _PIE_COLORS.len()]
+        val ry = y - 10
+        out = "{out}<rect x=\"270\" y=\"{ry}\" width=\"12\" height=\"12\" fill=\"{color}\"/>"
+        val vlab = _fmt_val(series.values[i])
+        out = "{out}<text x=\"290\" y=\"{y}\" font-size=\"13\">{label}: {vlab}</text>"
+        y = y + 24
+        i = i + 1
+    out = "{out}</g>"
+    "{out}</svg>"
+
+fn sheet_donut_chart_svg(sheet: Sheet, label_range: text, value_range: text, title: text) -> text:
+    """One-call donut chart: ranges in, SVG out."""
+    render_donut_chart_svg(chart_series_from_ranges(sheet, label_range, value_range), title)

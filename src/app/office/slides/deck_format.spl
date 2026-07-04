@@ -198,13 +198,33 @@ fn parse_deck(content: text) -> [Slide]:
       (max level 2), stored as id "bullet<level>_<n>"
     - Body lines wholly of the form `![alt](path)` become image elements
       (id "image<n>", kind ImageEl) in the same body slot geometry
+    - A `| a | b |` row followed by a `|---|---|` separator starts a table;
+      the run of table lines becomes ONE table element (id "table<n>",
+      kind TableEl) in a single body slot, rows stored canonically
     - Blank lines skipped within slides
     - Empty slides skipped
 
     Returns list of slides with auto-generated ids "slide1", "slide2", etc.
     """
     var slides: [Slide] = []
-    val slide_sections = content.split("---")
+    # Slide separators are LINES that are exactly `---` (the documented
+    # format). A substring split would shatter table separator rows
+    # (`| --- | --- |`) and any body line containing `---`.
+    var slide_sections: [text] = []
+    var section_acc = ""
+    var section_started = false
+    val content_lines = content.split("\n")
+    for content_line in content_lines:
+        if content_line.trim() == "---":
+            slide_sections.push(section_acc)
+            section_acc = ""
+            section_started = false
+        elif section_started:
+            section_acc = "{section_acc}\n{content_line}"
+        else:
+            section_acc = content_line
+            section_started = true
+    slide_sections.push(section_acc)
     var slide_num = 1
 
     for section in slide_sections:
@@ -352,8 +372,9 @@ fn deck_to_text(slides: [Slide]) -> text:
     Returns text with one title line, followed by body lines per slide,
     with slides separated by blank lines and `---`. Bullet elements are
     re-indented (2 spaces per level) with a `- ` marker; image elements emit
-    their `![alt](path)` line; non-default layouts emit an `@layout:`
-    directive line before `@notes:`/`@transition:`.
+    their `![alt](path)` line; table elements emit their canonical markdown
+    rows (one line each); non-default layouts emit an `@layout:` directive
+    line before `@notes:`/`@transition:`.
     """
     var out = ""
     var first_slide = true

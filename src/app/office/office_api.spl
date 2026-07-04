@@ -40,6 +40,7 @@ use app.office.sheets.cell_format.{FormatSpec, SheetFormats, empty_sheet_formats
 use app.office.odf_ooxml.{sheet_to_xlsx_bytes_formatted}
 use app.office.odf_export.{sheet_to_fods_formatted}
 use std.nogc_sync_mut.sffi.io.{file_write_bytes}
+use app.office.erp_bridge.{erp_records_to_sheet, erp_invoice_from_sheet, default_invoice_template}
 
 # =========================================================================
 # Writer documents (markdown-backed)
@@ -336,3 +337,35 @@ fn macro_export_html(surface: text, in_path: text, out_path: text) -> bool:
         return false
     val result = office_render_source(surface, in_path, read_file(in_path))
     write_file(out_path, result.html_output)
+
+# =========================================================================
+# Simple-ERP bridge
+# =========================================================================
+
+fn macro_erp_to_sheet(records_text: text, name: text) -> Sheet:
+    """Parse a Simple-ERP ubslog v1 records file (sale.write events) into a
+    Calc Sheet (header id/channel/subtotal/tax/paid/status/audit_note) so the
+    full sheet toolchain (formulas, pivot, charts, xlsx/fods export, sort/
+    find) applies. See app.office.erp_bridge module docstring for the ERP
+    schema/format findings this bridge is based on.
+
+    Example macro:
+        val records_text = read_file("erp_sales.ubslog")
+        var sh = macro_erp_to_sheet(records_text, "sales")
+        sh = macro_recalc(sh)
+    """
+    erp_records_to_sheet(records_text, name)
+
+fn macro_erp_invoice_md(sheet: Sheet, row: i32) -> text:
+    """Render one ERP Sale row (1-based data row; row 1 reads sheet row 2)
+    from a Sheet built by macro_erp_to_sheet into invoice markdown, using the
+    bridge's default_invoice_template and the mail-merge machinery. Returns
+    markdown ready for macro_save_document or the .docx/.odt converters.
+
+    Example macro:
+        val sh = macro_erp_to_sheet(records_text, "sales")
+        val invoice_md = macro_erp_invoice_md(sh, 1)
+        write_file("invoice_1.md", invoice_md)
+    """
+    val doc = erp_invoice_from_sheet(sheet, row, default_invoice_template())
+    document_to_markdown(doc)
