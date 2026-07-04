@@ -6858,6 +6858,14 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                     return CellValue.ErrorVal(message: "PROB probabilities must sum to 1")
                 return CellValue.NumberVal(value: p_match)
             return CellValue.ErrorVal(message: "PROB requires 3+ arguments")
+        "PERCENTOF":
+            if args.len() >= 2:
+                val subset_sum = eval_sum(args[0])
+                val all_sum = eval_sum(args[1])
+                if all_sum == 0.0:
+                    return CellValue.ErrorVal(message: "PERCENTOF division by zero")
+                return CellValue.NumberVal(value: subset_sum / all_sum)
+            return CellValue.ErrorVal(message: "PERCENTOF requires 2 arguments")
         _:
             return CellValue.ErrorVal(message: "Unknown function: {name}")
 
@@ -6961,6 +6969,10 @@ fn evaluate_formula_array(expr: text, sheet: Sheet) -> [[text]]:
         return _array_bycol(tokens, 2, sheet)
     if name == "MAKEARRAY":
         return _array_makearray(tokens, 2, sheet)
+    if name == "GROUPBY":
+        return _array_groupby(tokens, 2, sheet)
+    if name == "PIVOTBY":
+        return _array_pivotby(tokens, 2, sheet)
     []
 
 fn _read_array_range_str(tokens: [text], pos: i32) -> text:
@@ -6982,6 +6994,19 @@ struct ArrTextArg:
     value: text
     next_pos: i32
     present: bool
+
+fn _read_fn_name_arg(tokens: [text], pos: i32) -> ArrTextArg:
+    """Read a bare aggregate-function-name argument (SUM, AVERAGE, COUNT, MAX,
+    MIN as an unquoted identifier token) or a quoted string naming the same.
+    Unlike _read_array_text_arg this never evaluates the token as an
+    expression -- a bare identifier like SUM has no defined value and would
+    otherwise round-trip through the sheet's expression evaluator as #ERR."""
+    if pos >= tokens.len() or tokens.get(pos) == ")" or tokens.get(pos) == ",":
+        return ArrTextArg(value: "", next_pos: pos, present: false)
+    val tok = tokens.get(pos)
+    if tok.starts_with("\""):
+        return ArrTextArg(value: tok.slice(1, tok.len() - 1), next_pos: pos + 1, present: true)
+    ArrTextArg(value: tok, next_pos: pos + 1, present: true)
 
 fn _read_array_text_arg(tokens: [text], pos: i32, sheet: Sheet) -> ArrTextArg:
     """Read a text argument as a display string: a quoted literal, a single cell
@@ -9224,3 +9249,226 @@ fn _parse_i64_text(s: text) -> DisplayEvalResult:
     if negative:
         return DisplayEvalResult(ok: true, value: 0 - value)
     DisplayEvalResult(ok: true, value: value)
+
+fn _agg_apply(fname: text, vals: [f64]) -> f64:
+    """Apply one of the GROUPBY/PIVOTBY aggregate functions to a flat value
+    list. Caller must have already validated fname is one of the five
+    supported names; unsupported names fall through to 0.0."""
+    if fname == "SUM":
+        return eval_sum(vals)
+    if fname == "AVERAGE":
+        return eval_average(vals)
+    if fname == "COUNT":
+        return vals.len().to_f64()
+    if fname == "MAX":
+        return eval_max(vals)
+    if fname == "MIN":
+        return eval_min(vals)
+    0.0
+
+fn _is_supported_agg_fn(fname: text) -> bool:
+    """True for the five GROUPBY/PIVOTBY aggregate function names."""
+    (fname == "SUM" or fname == "AVERAGE" or fname == "COUNT" or
+     fname == "MAX" or fname == "MIN")
+
+fn _array_groupby(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
+    """GROUPBY(row_fields, values, function_name) -> groups rows by key,
+    aggregates values per group, spills [key, aggregate] rows + [Total, grand_total]."""
+    val row_fields_src = _array_read_grid(tokens, pos, sheet)
+    if row_fields_src.len() == 0:
+        return [["#ERR"]]
+    var row_keys: [text] = []
+    for r in row_fields_src:
+        if r.len() > 0:
+            row_keys.push(r[0])
+        else:
+            row_keys.push("")
+    var cur = _skip_comma(tokens, pos + 3)
+    val values_src = _array_read_grid(tokens, cur, sheet)
+    if values_src.len() == 0:
+        return [["#ERR"]]
+    var values: [f64] = []
+    for r in values_src:
+        if r.len() > 0:
+            val v = r[0]
+            if _arr_is_number(v):
+                values.push(v.to_f64())
+            else:
+                values.push(0.0)
+        else:
+            values.push(0.0)
+    if values.len() != row_keys.len():
+        return [["#ERR"]]
+    cur = _skip_comma(tokens, cur + 3)
+    val fname_a = _read_fn_name_arg(tokens, cur)
+    if not fname_a.present:
+        return [["#ERR"]]
+    val fname_txt = fname_a.value
+    val fname = fname_txt.upper()
+    var unique_keys: [text] = []
+    var key_indices: [[i32]] = []
+    var ki = 0
+    while ki < row_keys.len():
+        val key = row_keys[ki]
+        var found_idx = -1
+        var uki = 0
+        while uki < unique_keys.len():
+            if unique_keys[uki] == key:
+                found_idx = uki
+            uki = uki + 1
+        if found_idx >= 0:
+            key_indices[found_idx].push(ki)
+        else:
+            unique_keys.push(key)
+            var new_indices: [i32] = []
+            new_indices.push(ki)
+            key_indices.push(new_indices)
+        ki = ki + 1
+    if not _is_supported_agg_fn(fname):
+        return [["#ERR"]]
+    var aggregates: [f64] = []
+    var uki = 0
+    while uki < unique_keys.len():
+        val indices = key_indices[uki]
+        var agg_values: [f64] = []
+        for idx in indices:
+            agg_values.push(values[idx])
+        val agg = _agg_apply(fname, agg_values)
+        aggregates.push(agg)
+        uki = uki + 1
+    val aggregate_sum = _agg_apply(fname, values)
+    var out: [[text]] = []
+    var ri = 0
+    while ri < unique_keys.len():
+        val key = unique_keys[ri]
+        val agg = aggregates[ri]
+        out.push([key, _fmt_num_trim(agg)])
+        ri = ri + 1
+    out.push(["Total", _fmt_num_trim(aggregate_sum)])
+    out
+
+fn _array_pivotby(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
+    """PIVOTBY(row_fields, col_fields, values, function_name) -> pivot table grid
+    with row totals, column totals, and grand total."""
+    val row_fields_src = _array_read_grid(tokens, pos, sheet)
+    if row_fields_src.len() == 0:
+        return [["#ERR"]]
+    var row_keys: [text] = []
+    for r in row_fields_src:
+        if r.len() > 0:
+            row_keys.push(r[0])
+        else:
+            row_keys.push("")
+    var cur = _skip_comma(tokens, pos + 3)
+    val col_fields_src = _array_read_grid(tokens, cur, sheet)
+    if col_fields_src.len() == 0:
+        return [["#ERR"]]
+    var col_keys: [text] = []
+    for r in col_fields_src:
+        if r.len() > 0:
+            col_keys.push(r[0])
+        else:
+            col_keys.push("")
+    if col_keys.len() != row_keys.len():
+        return [["#ERR"]]
+    cur = _skip_comma(tokens, cur + 3)
+    val values_src = _array_read_grid(tokens, cur, sheet)
+    if values_src.len() == 0:
+        return [["#ERR"]]
+    var values: [f64] = []
+    for r in values_src:
+        if r.len() > 0:
+            val v = r[0]
+            if _arr_is_number(v):
+                values.push(v.to_f64())
+            else:
+                values.push(0.0)
+        else:
+            values.push(0.0)
+    if values.len() != row_keys.len():
+        return [["#ERR"]]
+    cur = _skip_comma(tokens, cur + 3)
+    val fname_a = _read_fn_name_arg(tokens, cur)
+    if not fname_a.present:
+        return [["#ERR"]]
+    val fname_txt = fname_a.value
+    val fname = fname_txt.upper()
+    if not _is_supported_agg_fn(fname):
+        return [["#ERR"]]
+    var unique_rows: [text] = []
+    var unique_cols: [text] = []
+    var i = 0
+    while i < row_keys.len():
+        val rk = row_keys[i]
+        var found = false
+        for ur in unique_rows:
+            if ur == rk:
+                found = true
+        if not found:
+            unique_rows.push(rk)
+        val ck = col_keys[i]
+        var found_c = false
+        for uc in unique_cols:
+            if uc == ck:
+                found_c = true
+        if not found_c:
+            unique_cols.push(ck)
+        i = i + 1
+    var nrows = unique_rows.len()
+    var ncols = unique_cols.len()
+    var pgrid: [[f64]] = []
+    var ri = 0
+    while ri < nrows:
+        val rk = unique_rows[ri]
+        var row: [f64] = []
+        var ci = 0
+        while ci < ncols:
+            val ck = unique_cols[ci]
+            var cell_values: [f64] = []
+            var ii = 0
+            while ii < row_keys.len():
+                if row_keys[ii] == rk and col_keys[ii] == ck:
+                    cell_values.push(values[ii])
+                ii = ii + 1
+            row.push(_agg_apply(fname, cell_values))
+            ci = ci + 1
+        pgrid.push(row)
+        ri = ri + 1
+    # No header row: the spill origin must never cache an empty display (an
+    # empty cached_display makes cell_display_text fall back to the raw
+    # formula text), so the grid starts directly at the first row key.
+    var out: [[text]] = []
+    var rri = 0
+    while rri < nrows:
+        val rk = unique_rows[rri]
+        var row_out: [text] = []
+        row_out.push(rk)
+        var cci = 0
+        while cci < ncols:
+            row_out.push(_fmt_num_trim(pgrid[rri][cci]))
+            cci = cci + 1
+        var row_values: [f64] = []
+        var jj = 0
+        while jj < row_keys.len():
+            if row_keys[jj] == rk:
+                row_values.push(values[jj])
+            jj = jj + 1
+        row_out.push(_fmt_num_trim(_agg_apply(fname, row_values)))
+        out.push(row_out)
+        rri = rri + 1
+    var totals: [text] = []
+    totals.push("Total")
+    var cii = 0
+    while cii < ncols:
+        val ck = unique_cols[cii]
+        var col_values: [f64] = []
+        var kk = 0
+        while kk < col_keys.len():
+            if col_keys[kk] == ck:
+                col_values.push(values[kk])
+            kk = kk + 1
+        totals.push(_fmt_num_trim(_agg_apply(fname, col_values)))
+        cii = cii + 1
+    totals.push(_fmt_num_trim(_agg_apply(fname, values)))
+    out.push(totals)
+    out
