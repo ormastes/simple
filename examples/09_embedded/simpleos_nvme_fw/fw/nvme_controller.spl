@@ -115,6 +115,9 @@ impl NvmeController:
                 val tt_status: i64 = me.pt.set_temperature_threshold(cmd.cdw11)
                 if tt_status != SC_SUCCESS:
                     return AdminResult(status: tt_status, data: 0, post: true)
+            if admin_fid(cmd.cdw10) == FEAT_VOLATILE_WC:
+                if cmd.cdw11 < 0 or cmd.cdw11 > 1:
+                    return AdminResult(status: SC_INVALID_FIELD, data: 0, post: true)
             if not me.features.set(admin_fid(cmd.cdw10), cmd.cdw11):
                 return AdminResult(status: SC_INVALID_FIELD, data: 0, post: true)
             return AdminResult(status: SC_SUCCESS, data: cmd.cdw11, post: true)
@@ -288,7 +291,11 @@ impl NvmeController:
                 me.pool.release(h)
                 me.writes = me.writes + 1
                 if status == SC_SUCCESS:
-                    me.dirty_since_checkpoint = true
+                    if me.features.get(FEAT_VOLATILE_WC) == 0:
+                        me.ftl.checkpoint()
+                        me.dirty_since_checkpoint = false
+                    else:
+                        me.dirty_since_checkpoint = true
                 me.pt.tick(2)   # a program burns more energy than a read
             else:
                 if cmd_is_read(cmd):
@@ -474,6 +481,26 @@ fn nvme_controller_selftest() -> i64:
     c.admin_process()
     val p0: NvmeCpl = c.admin_reap()
     fail = fail + expect_eq(p0.status, SC_SUCCESS, "restore power state 0 for high-load checks")
+    c.admin_submit(admin_set_feature_cmd(15, FEAT_VOLATILE_WC, 2))
+    c.admin_process()
+    val bwc: NvmeCpl = c.admin_reap()
+    fail = fail + expect_eq(bwc.status, SC_INVALID_FIELD, "set invalid volatile-write-cache value rejected")
+    c.checkpoint()
+    c.admin_submit(admin_set_feature_cmd(16, FEAT_VOLATILE_WC, 0))
+    c.admin_process()
+    val dwc: NvmeCpl = c.admin_reap()
+    fail = fail + expect_eq(dwc.status, SC_SUCCESS, "disable volatile write cache")
+    c.io_submit(1, cmd_make(124, OP_WRITE, 13, 1, 0x6B))
+    c.io_process()
+    c.io_reap(1)
+    c.power_cycle()
+    c.admin_submit(admin_get_log_cmd(46, LOG_SMART))
+    c.admin_process()
+    c.admin_reap()
+    fail = fail + expect_eq(c.last_smart().unsafe_shutdowns, 0, "write-cache disabled write is checkpointed before power loss")
+    c.admin_submit(admin_set_feature_cmd(17, FEAT_VOLATILE_WC, 1))
+    c.admin_process()
+    c.admin_reap()
 
     # Abort (best-effort): completes; the synchronous target is already done.
     c.admin_submit(admin_abort_cmd(30, 1, 100))
