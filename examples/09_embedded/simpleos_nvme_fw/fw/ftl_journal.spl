@@ -7,6 +7,8 @@ generation counter. All durability is simulated in memory; no actual storage I/O
 
 use nvme_types.*
 
+val JOURNAL_CAP: i64 = 512
+
 # ── Journal struct ────────────────────────────────────────────────────────────
 
 struct Journal:
@@ -28,7 +30,7 @@ fn ftl_journal_new() -> Journal:
     var wal_old: [i64] = []
     var wal_new: [i64] = []
     var wal_seq: [i64] = []
-    val cap: i64 = 512
+    val cap: i64 = JOURNAL_CAP
     var i: i64 = 0
     while i < cap:
         wal_lba.push(UNMAP)
@@ -50,7 +52,11 @@ impl Journal:
     # args start at position 2. Single-param me methods are unaffected; the clean fix for
     # new code is a single struct param (see fw/CONVENTIONS.md).
     me append(_p0: i64, map_lba: i64, old_ppn: i64, new_ppn: i64, map_seq: i64) -> i64:
+        if me.wal_count < 0:
+            return me.wal_count
         if me.wal_count >= me.cap:
+            return me.wal_count
+        if me.wal_count >= JOURNAL_CAP:
             return me.wal_count
         val slot: i64 = me.wal_count
         me.wal_lba[slot] = map_lba
@@ -75,21 +81,27 @@ impl Journal:
     # must checkpoint (flush durable + truncate) before appending so no record is
     # ever silently lost (and a write acked to the host whose record went missing).
     me is_full() -> bool:
-        me.wal_count >= me.cap
+        me.wal_count >= me.cap or me.wal_count >= JOURNAL_CAP
 
     # Accessors for WAL replay.
     me record_lba(ridx: i64) -> i64:
         if ridx < 0 or ridx >= me.wal_count:
+            return UNMAP
+        if ridx >= JOURNAL_CAP:
             return UNMAP
         me.wal_lba[ridx]
 
     me record_new(ridx: i64) -> i64:
         if ridx < 0 or ridx >= me.wal_count:
             return UNMAP
+        if ridx >= JOURNAL_CAP:
+            return UNMAP
         me.wal_new[ridx]
 
     me record_seq(ridx: i64) -> i64:
         if ridx < 0 or ridx >= me.wal_count:
+            return 0
+        if ridx >= JOURNAL_CAP:
             return 0
         me.wal_seq[ridx]
 
@@ -102,7 +114,7 @@ impl Journal:
         var new_seq: [i64] = []
         var kept: i64 = 0
         var i: i64 = 0
-        while i < me.wal_count:
+        while i < me.wal_count and i < JOURNAL_CAP:
             if me.wal_seq[i] > me.ckpt_seq:
                 new_addr.push(me.wal_lba[i])
                 new_old.push(me.wal_old[i])
@@ -112,7 +124,7 @@ impl Journal:
             i = i + 1
         # Pad to cap with sentinels so the arrays stay pre-sized.
         var j: i64 = kept
-        while j < me.cap:
+        while j < me.cap and j < JOURNAL_CAP:
             new_addr.push(UNMAP)
             new_old.push(UNMAP)
             new_new.push(UNMAP)
@@ -148,6 +160,15 @@ fn ftl_journal_selftest() -> i64:
     fail = fail + expect_eq(j.record_lba(-1), UNMAP, "negative WAL read fails closed")
     fail = fail + expect_eq(j.record_new(j.wal_len()), UNMAP, "past-end WAL ppn read fails closed")
     fail = fail + expect_eq(j.record_seq(j.wal_len()), 0, "past-end WAL seq read fails closed")
+    j.wal_count = JOURNAL_CAP + 1
+    fail = fail + expect_eq(j.record_lba(JOURNAL_CAP), UNMAP, "corrupt oversized WAL count lba read fails closed")
+    fail = fail + expect_eq(j.record_seq(JOURNAL_CAP), 0, "corrupt oversized WAL count seq read fails closed")
+    j.wal_count = JOURNAL_CAP
+    j.cap = JOURNAL_CAP + 1
+    fail = fail + expect_eq(j.append(0, 200, 30, 40, 4), JOURNAL_CAP, "corrupt oversized WAL cap append fails closed")
+    fail = fail + expect_eq(j.wal_len(), JOURNAL_CAP, "corrupt oversized WAL cap leaves count unchanged")
+    j.wal_count = 3
+    j.cap = JOURNAL_CAP
 
     # Checkpoint at seq=2 — records 1 and 2 become durable.
     j.checkpoint(2)
