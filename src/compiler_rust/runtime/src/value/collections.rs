@@ -1992,6 +1992,62 @@ pub extern "C" fn rt_string_to_int(string: RuntimeValue) -> i64 {
     }
 }
 
+/// Task #118 canonical `int(text)` semantics: a TOTAL, non-erroring,
+/// leading-numeric-prefix parse — never fails. Skips leading whitespace, an
+/// optional `+`/`-` sign, then reads the longest run of leading ASCII
+/// decimal digits and stops at the first non-digit (so "4.2" -> 4,
+/// truncating at '.'; "4x2" -> 4). Returns 0 if no digits are found at all
+/// ("abc", ""). This mirrors the C runtime's strtoll-based
+/// `rt_string_to_int()` (src/runtime/runtime_native.c and
+/// src/runtime/simple_core/core_string.spl) — those two implementations
+/// already had the correct lenient semantics; this Rust-native crate's
+/// `rt_string_to_int` above is strict (whole-string `str::parse`) because it
+/// backs `.to_int()`/`.parse_int()`/`to_i64()` method calls, which are meant
+/// to reject partial matches. `int(text_expr)` / `int(x)` casts route through
+/// this sibling function instead so the generic `int()` builtin agrees with
+/// the flat-AST interpreter (`eval_int_parse_lenient` in eval_builtins.spl)
+/// and the seed's tree-walk interpreter (`parse_int_lenient` in
+/// interpreter_call/builtins.rs). See
+/// doc/07_guide/quick_reference/syntax_quick_reference.md "int(text)
+/// Semantics" for the full matrix.
+#[no_mangle]
+pub extern "C" fn rt_string_to_int_lenient(string: RuntimeValue) -> i64 {
+    let len = rt_string_len(string);
+    if len <= 0 {
+        return 0;
+    }
+    let data = rt_string_data(string);
+    let s = unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, len as usize)) };
+    let t = s.trim();
+    let mut chars = t.chars().peekable();
+    let mut negative = false;
+    if let Some(&c) = chars.peek() {
+        if c == '-' || c == '+' {
+            negative = c == '-';
+            chars.next();
+        }
+    }
+    let mut result: i64 = 0;
+    let mut any_digit = false;
+    for c in chars {
+        match c.to_digit(10) {
+            Some(d) => {
+                any_digit = true;
+                result = result.saturating_mul(10).saturating_add(d as i64);
+            }
+            None => break,
+        }
+    }
+    if !any_digit {
+        return 0;
+    }
+    if negative {
+        -result
+    } else {
+        result
+    }
+}
+
 /// Convert a string to a float (f64), returns the float as RuntimeValue.
 /// Returns the float RuntimeValue on success, RuntimeValue::NIL on failure.
 /// Callers can check `result != nil` to distinguish success from failure.
