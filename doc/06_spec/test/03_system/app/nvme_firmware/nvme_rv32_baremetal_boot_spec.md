@@ -135,7 +135,7 @@ provides the strong exported hook that prints the firmware PASS marker.
 
 #### runs the rv32 no-alloc logic reference and proves the boot hook is wired
 
-- The array-free rv32 RAIN+ECC+scheduler+power-thermal+map-cache+band+journal+HIL reference typechecks
+- The array-free rv32 RAIN+ECC+scheduler+power-thermal+map-cache+band+journal+HIL+admin reference typechecks
    - Expected: check_code equals `0`
 - The host-runnable scalar logic reference passes
    - Expected: logic_code equals `0`
