@@ -2276,11 +2276,14 @@ fn _ref_target_value(ref_str: text, sheet: Sheet, depth: i32) -> CellValue:
 
 fn _eval_offset(tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalResult:
     """OFFSET(ref, rows, cols, [height=1], [width=1]) — scalar path: the value
-    of the single cell at ref's top-left shifted by rows/cols. height/width > 1
-    is array-context-only (evaluate_formula_array spills the grid); in scalar
-    context — e.g. nested inside SUM, whose argument collector only accepts
-    literal REF:REF tokens or scalar expressions — a >1 height/width fails
-    closed with #ERR rather than silently returning the top-left value.
+    of the single cell at ref's top-left shifted by rows/cols. A height/width
+    > 1 grid only spills through evaluate_formula_array (array context); in
+    scalar context the same call yields the grid's TOP-LEFT value (implicit-
+    intersection-like). This keeps SUM over a spilled range correct — the
+    numeric argument collector re-evaluates the origin cell through this
+    scalar path — but means a grid-OFFSET nested directly inside SUM
+    degrades to its top-left cell (Excel would consume the whole grid; the
+    collector only accepts literal REF:REF tokens or scalar expressions).
     #ERR on: bad ref, missing rows/cols, height/width < 1, or a shifted
     coordinate falling above row 1 / left of column A."""
     if pos >= tokens.len() or not _is_cell_ref_token(tokens.get(pos)):
@@ -2325,8 +2328,6 @@ fn _eval_offset(tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalResul
     val wi = width.to_i64().to_i32()
     if hi < 1 or wi < 1:
         return EvalResult(value: CellValue.ErrorVal(message: "OFFSET height/width must be >= 1"), next_pos: cur)
-    if hi > 1 or wi > 1:
-        return EvalResult(value: CellValue.ErrorVal(message: "OFFSET with height/width > 1 needs array context"), next_pos: cur)
     val trow = ref.row + _to_number(rr.value).to_i64().to_i32()
     val tcol = ref.col + _to_number(cc.value).to_i64().to_i32()
     if trow < 0 or tcol < 0:
@@ -2334,17 +2335,32 @@ fn _eval_offset(tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalResul
     val target = cell_ref_to_string(CellRef(col: tcol, row: trow))
     EvalResult(value: _ref_target_value(target, sheet, depth), next_pos: cur)
 
+fn _read_ref_text_arg(tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> ArrTextArg:
+    """Read INDIRECT's reference-text argument as a display string: a quoted
+    literal, a bare cell ref's display text, or an evaluated expression at the
+    CONCAT level (so \"A\"&\"1\" builds \"A1\" — '&' binds above comparison)."""
+    if pos >= tokens.len() or tokens.get(pos) == ")" or tokens.get(pos) == ",":
+        return ArrTextArg(value: "", next_pos: pos, present: false)
+    val tok = tokens.get(pos)
+    val next_tok = if pos + 1 < tokens.len(): tokens.get(pos + 1) else: ""
+    if tok.starts_with("\"") and (next_tok == "," or next_tok == ")"):
+        return ArrTextArg(value: tok.slice(1, tok.len() - 1), next_pos: pos + 1, present: true)
+    if _is_cell_ref_token(tok) and (next_tok == "," or next_tok == ")"):
+        return ArrTextArg(value: cell_display_text(sheet.get_cell(tok)), next_pos: pos + 1, present: true)
+    val r = _eval_concat(tokens, pos, sheet, depth)
+    ArrTextArg(value: _cell_value_to_display(r.value), next_pos: r.next_pos, present: true)
+
 fn _eval_indirect(tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalResult:
     """INDIRECT(ref_text) — scalar path: the argument is an evaluated STRING
     (literal or built by concatenation) naming a single cell in A1 form; the
     named cell's value is returned. The range form \"A1:B2\" is array-context-
     only (evaluate_formula_array spills its grid). The R1C1 reference style is
     UNSUPPORTED — only A1 notation parses. #ERR on unparseable text."""
-    val r = _eval_comparison(tokens, pos, sheet, depth)
-    var cur = r.next_pos
+    val arg = _read_ref_text_arg(tokens, pos, sheet, depth)
+    var cur = arg.next_pos
     if cur < tokens.len() and tokens.get(cur) == ")":
         cur = cur + 1
-    val ref_text = _cell_value_to_display(r.value)
+    val ref_text = arg.value
     val ref_up = ref_text.trim()
     if ref_up.contains(":"):
         val rng = parse_range(ref_up)
@@ -5873,7 +5889,7 @@ fn _array_indirect(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
     the referenced rectangle. Single-cell text (and anything unparseable)
     returns [] so the scalar path yields the value or the precise #ERR.
     R1C1 style is unsupported (A1 notation only)."""
-    val a0 = _read_array_text_arg(tokens, pos, sheet)
+    val a0 = _read_ref_text_arg(tokens, pos, sheet, 0)
     if not a0.present:
         return []
     val trimmed = a0.value.trim()
