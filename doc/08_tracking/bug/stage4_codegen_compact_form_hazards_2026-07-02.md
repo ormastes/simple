@@ -1812,3 +1812,87 @@ task117 state). Repros: `scratchpad/{payload_check,p1_valscalar,p2_add,m4,
 b_unwrap,b_some,enumdict,enumdict2,enumdict3}.spl`. Diagnostic binaries (isolated
 cache): `scratchpad/stage4_ctrl117` (healthy baseline), `scratchpad/stage4_probeA`.
 Seed with reverted source: rebuild from HEAD or reuse task117.
+
+## Task #122 (2026-07-04) — atomic tag/box convention change is CORRECT at seed level (payload_check 42/42, -c=2); self-host recompile OVER-TAGS by <<6 through ANY-erasure channels — scalar convention and DEFECT-A ANY channel are ENTANGLED
+
+Successor to #121, the culmination of #104→#107→#117→#121. Seed change committed
+(git `8c52af0ece0`, isolated worktree `scratchpad/wt_t122`; NOT on main — coordinator
+to land). Built fresh seed `scratchpad/t122_cargo/bootstrap/simple` and clean stage4
+`scratchpad/stage4_t122` (993 compiled, 0 cached, isolated cache `scratchpad/t122_cache`).
+
+### The atomic change (one coherent commit) — the FULL matched-pair reconciliation
+Prior tasks localized pieces; #122 mapped the COMPLETE construct/extract site set and
+why every one-sided fix regresses. The convention: enum payload slots hold RuntimeValues
+(native int/bool TAGGED `value<<3`, heap raw-tagged ptr); extraction untags iff the
+consumer is a native scalar.
+- CONSTRUCT (tag native int/bool): `codegen/instr/result.rs create_enum_value`
+  (Option/Result — was RAW, #121 finding), `codegen/instr/pattern.rs compile_enum_with`
+  (general `Variant(x)` — was RAW). `codegen/instr/calls.rs` already tagged (#117).
+- EXTRACT (untag when dest is native scalar, keyed on `ctx.vreg_types[dest]`):
+  `codegen/instr/pattern.rs compile_pattern_bind` (match-binding — was RAW, the site that
+  made #121's one-sided create_enum_value tag regress), `codegen/instr/result.rs
+  compile_try_unwrap`, `codegen/instr/enum_union.rs compile_enum_payload`. The `?`/unwrap
+  builtin path (`mir/lower/lowering_expr_builtin.rs`) already untagged concrete scalars.
+- Shared helpers `tag_enum_payload`/`untag_enum_payload_for`/`is_tagged_scalar_type` in
+  `codegen/instr/helpers.rs`. Unions left raw+raw (self-consistent pair, untouched).
+
+### DECISIVE new evidence #1 — the change is CORRECT (fixes DEFECT B at the seed level)
+`$FRESH run payload_check.spl` → `payload=42` + `42` (was 5 in #121). This exercises BOTH
+extraction paths: `case Ok(v): print("payload={v}")` (match-binding, now untags) AND
+`r.unwrap()` (builtin untag) — both recover 42 against the now-tagged construct. `$FRESH -c
+'print(1+1)'` → 2 (no seed-JIT regression). So the coordinated tag(construct)+untag(extract)
+is self-consistent for pure user code, and #121's "tagging create_enum_value alone regressed"
+is fully explained: the pervasive `case Ok(v)`/`case Some(x)` match-binding sites extract RAW,
+so tagging construct without untagging match-binding breaks them.
+
+### DECISIVE new evidence #2 — the WALL: stage4 self-host OVER-TAGS by exactly <<6
+`stage4_t122` (self-host COMPILED BY the fixed seed) is NOT silent (unlike #121) but wrong:
+`-c print(1)`→64 (1<<6), `print(5)`→320 (5<<6), `print(100)`→6400 (100<<6), `print(0)`→0,
+`print(1+1)`→1024. Every scalar is over-tagged by exactly TWO tag levels (<<6). The seed JIT
+is correct; only the RECOMPILED self-host over-tags. A single concretely-typed Value.Int
+round-trip (compile_enum_with tag + compile_pattern_bind untag) cancels correctly — so the
++2 tags come from the interpreter passing Values through **ANY-erasure channels** (env
+`Dict<text,Value>`, generic containers): construct sees the payload as concrete `i64` and
+TAGS it, but the matching extract sees an ANY-typed binding and does NOT untag, so the tagged
+scalar leaks and is RE-tagged on the next Value.Int construct. Two such asymmetric passes in
+the literal→env→print path = <<6.
+
+### Root conclusion — the scalar convention and DEFECT-A (ANY channel) are ENTANGLED
+The uniform tagged-scalar convention CANNOT be cleanly applied while the self-host retains
+ANY-erasure channels (Dict→ANY, generic→ANY): under the OLD raw convention an ANY round-trip
+was merely lossy (raw scalar in, raw scalar out — worked by accident); under the tagged
+convention the same asymmetric ANY round-trip ACCUMULATES tags (tag on construct, no untag on
+ANY extract, re-tag next construct). So tagging strictly worsens the ANY channel it doesn't
+also fix. This is precisely why every prior point-fix regressed and why this is "the final
+wall": the true fix must land the scalar tag/box convention (#122 seed change, proven correct
+in isolation) TOGETHER WITH the ANY-erasure elimination (typed `HirType::Dict{K,V}` from #104
+threaded through `.values()/.get()/[]` AND generic monomorphization so every enum
+construct/extract sees a matching concrete type) — never one without the other.
+
+### Next increment (concrete)
+1. Instrument (SIMPLE_DUMP_MIR on `$FRESH run` of the interpreter's literal-eval + print
+   builtin) to name the exact two ANY-typed Value round-trips that skip untag; confirm each
+   is a Dict/generic ANY channel.
+2. Either (a) make the ANY container extract path untag scalars using the RUNTIME tag bit
+   (rt_enum_payload / dict-get inspect low 3 bits and shift if `TAG_INT`, independent of static
+   type) so ANY extracts self-correct, or (b) finish typed-Dict/generic threading so ANY never
+   appears for Value channels. Then rebuild seed+stage4 and re-run the 14-check gate.
+3. Gate parity target: `stage4_ctrl117` (task117 seed) currently FAILS 9/14 (these DEFECTs are
+   open in the healthy self-host too); the #122 gate goal is ALL 14 pass.
+
+### Gate table (stage4_t122, isolated 993/0 build)
+| gate | ctrl117 (baseline) | t122 (this change) |
+|---|---|---|
+| build 993/0 | PASS | PASS |
+| `-c "print(1+1)"` | 2 | **1024 (over-tag <<)** |
+| twofn | PASS | PASS |
+| lint main.spl | PASS | PASS |
+| import std.text | PASS | PASS |
+| payload_check (stage4 run) | (crash) | silent/[] (ANY channel) |
+| p1/p2/struct/r70/cfg/qmark | FAIL (DEFECT A open) | FAIL (DEFECT A open) |
+| `$FRESH run payload_check` (seed JIT) | 5 (DEFECT B) | **42/42 (FIXED)** |
+
+Net: seed change proven CORRECT in isolation (first time DEFECT B is fixed without one-sided
+regression); NOT deployable yet (stage4 over-tags via entangled ANY channel). Do NOT deploy.
+Artifacts: seed `scratchpad/t122_cargo/bootstrap/simple`, stage4 `scratchpad/stage4_t122`,
+worktree `scratchpad/wt_t122` @ git `8c52af0ece0`.
