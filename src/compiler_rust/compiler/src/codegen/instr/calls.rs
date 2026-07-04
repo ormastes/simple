@@ -2215,7 +2215,7 @@ fn tag_int_as_runtime_value(
     builder.ins().ishl(value, three)
 }
 
-fn runtime_payload_value<M: Module>(
+pub(crate) fn runtime_payload_value<M: Module>(
     ctx: &InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     arg: VReg,
