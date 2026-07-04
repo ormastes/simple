@@ -3,7 +3,7 @@
 # Sort ranges and filter rows in spreadsheets.
 
 use app.office.sheets.spreadsheet.{Sheet}
-use app.office.sheets.cell.{Cell, CellValue, CellRef, CellStyle, parse_cell_ref, cell_ref_to_string, cell_display_text, empty_cell, text_cell, number_cell, default_style}
+use app.office.sheets.cell.{Cell, CellValue, CellRef, CellStyle, parse_cell_ref, cell_ref_to_string, cell_display_text, empty_cell, text_cell, number_cell, default_style, letter_to_col}
 use app.office.sheets.cell_ref.{CellRange, parse_range}
 use common.office.number.{office_parse_signed_decimal_f64}
 
@@ -138,6 +138,51 @@ fn sheet_filter_rows(sheet: Sheet, range_a1: text, col: i32, criteria: text) -> 
         r = r + 1
 
     result
+
+# =========================================================================
+# AutoFilter
+# =========================================================================
+
+fn sheet_autofilter(sheet: Sheet, header_row: i64, col_letter: text, criteria_text: text) -> Sheet:
+    """Excel-style AutoFilter over one column. header_row is the 1-based row
+    holding the column headers (never hidden). Every data row below it whose
+    cell in col_letter does not match criteria_text is hidden via
+    Sheet.hide_row; matching rows are explicitly unhidden via
+    Sheet.unhide_row, so re-running with a different criteria updates
+    cleanly without a prior sheet_clear_filter. The data extent is the
+    contiguous run of non-empty cells in col_letter starting at
+    header_row+1 (stops at the first blank cell) — a single blank row ends
+    the table, matching how Excel detects a filter's data range.
+
+    Criteria semantics reuse _cell_matches_criteria — the SAME matcher
+    sheet_filter_rows uses (">n"/"<n"/">=n"/"<=n"/"<>x"/bare
+    case-insensitive text equality) — so AutoFilter and manual row-filter
+    agree on what "matches" means.
+
+    Composes with SUBTOTAL 101-111 / AGGREGATE options 5/7: those skip rows
+    Sheet.is_row_hidden reports hidden, so SUBTOTAL(109,...) over a
+    filtered range returns the visible-only aggregate."""
+    val col = letter_to_col(col_letter)
+    val max_r = sheet.row_count.to_i64()
+    var r = header_row + 1
+    while r <= max_r:
+        val ref = CellRef(col: col, row: (r - 1).to_i32())
+        val cell = sheet.get_cell(cell_ref_to_string(ref))
+        if cell_display_text(cell) == "":
+            r = max_r + 1
+        else:
+            if _cell_matches_criteria(cell, criteria_text):
+                sheet.unhide_row(r)
+            else:
+                sheet.hide_row(r)
+            r = r + 1
+    sheet
+
+fn sheet_clear_filter(sheet: Sheet) -> Sheet:
+    """Unhide every row — clears any AutoFilter (or manual hide_row/
+    hide_rows) applied to the sheet."""
+    sheet.unhide_all_rows()
+    sheet
 
 # =========================================================================
 # Internal Helpers
