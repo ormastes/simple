@@ -107,12 +107,18 @@ impl NvmeController:
         if cmd.opcode == ADMIN_IDENTIFY:
             return AdminResult(status: me.do_identify(cmd), data: 0, post: true)
         if cmd.opcode == ADMIN_SET_FEATURES:
+            if admin_fid(cmd.cdw10) == FEAT_POWER_MGMT:
+                val ps_status: i64 = me.pt.set_power_state(cmd.cdw11)
+                if ps_status != SC_SUCCESS:
+                    return AdminResult(status: ps_status, data: 0, post: true)
             if not me.features.set(admin_fid(cmd.cdw10), cmd.cdw11):
                 return AdminResult(status: SC_INVALID_FIELD, data: 0, post: true)
             return AdminResult(status: SC_SUCCESS, data: cmd.cdw11, post: true)
         if cmd.opcode == ADMIN_GET_FEATURES:
             if admin_fid(cmd.cdw10) < 0 or admin_fid(cmd.cdw10) >= FEAT_MAX:
                 return AdminResult(status: SC_INVALID_FIELD, data: 0, post: true)
+            if admin_fid(cmd.cdw10) == FEAT_POWER_MGMT:
+                return AdminResult(status: SC_SUCCESS, data: me.pt.get_power_state(), post: true)
             return AdminResult(status: SC_SUCCESS, data: me.features.get(admin_fid(cmd.cdw10)), post: true)
         if cmd.opcode == ADMIN_GET_LOG:
             return me.do_get_log(cmd)
@@ -437,6 +443,24 @@ fn nvme_controller_selftest() -> i64:
     val badgf: NvmeCpl = c.admin_reap()
     fail = fail + expect_eq(badsf.status, SC_INVALID_FIELD, "set invalid feature rejected")
     fail = fail + expect_eq(badgf.status, SC_INVALID_FIELD, "get invalid feature rejected")
+    c.admin_submit(admin_set_feature_cmd(8, FEAT_POWER_MGMT, 3))
+    c.admin_submit(admin_get_feature_cmd(9, FEAT_POWER_MGMT))
+    c.admin_process()
+    val spm: NvmeCpl = c.admin_reap()
+    val gpm: NvmeCpl = c.admin_reap()
+    fail = fail + expect_eq(spm.status, SC_SUCCESS, "set power-management feature ok")
+    fail = fail + expect_eq(gpm.data, 3, "get power-management reads live power state")
+    c.admin_submit(admin_set_feature_cmd(10, FEAT_POWER_MGMT, 99))
+    c.admin_submit(admin_get_feature_cmd(11, FEAT_POWER_MGMT))
+    c.admin_process()
+    val bpm: NvmeCpl = c.admin_reap()
+    val rpm: NvmeCpl = c.admin_reap()
+    fail = fail + expect_eq(bpm.status, SC_INVALID_FIELD, "set invalid power state rejected")
+    fail = fail + expect_eq(rpm.data, 3, "invalid power state leaves previous state unchanged")
+    c.admin_submit(admin_set_feature_cmd(12, FEAT_POWER_MGMT, 0))
+    c.admin_process()
+    val p0: NvmeCpl = c.admin_reap()
+    fail = fail + expect_eq(p0.status, SC_SUCCESS, "restore power state 0 for high-load checks")
 
     # Abort (best-effort): completes; the synchronous target is already done.
     c.admin_submit(admin_abort_cmd(30, 1, 100))
