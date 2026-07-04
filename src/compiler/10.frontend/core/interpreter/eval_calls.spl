@@ -343,6 +343,40 @@ fn eval_function_call(decl_id: i64, arg_eids: [i64]) -> i64:
     eval_current_decl_id = prev_decl_id
     last_val
 
+# ===== Struct (value type) vs Class (reference type) param-copy support (#108) =====
+#
+# The interpreter has one runtime value kind (VAL_STRUCT) for both `struct`
+# and `class` instances. The discriminator lives on the DECLARATION: parsing
+# tags class-origin struct decls via decl_set_is_value_type(id, 0) (see
+# parse_struct_decl in _ParserDecls/fn_struct_decls.spl), defaulting to 1
+# (value type) for plain `struct` decls. Lookup failures (builtin pseudo
+# structs like Option/File/Class that never went through struct_table_register)
+# default to "not a value type" so their existing shared-reference behavior is
+# unchanged — only confirmed user `struct` decls get copied.
+fn interp_struct_is_value_type(vid: i64) -> bool:
+    val name = val_get_struct_name(vid)
+    val decl_id = struct_table_lookup(name)
+    if decl_id < 0:
+        return false
+    decl_get(decl_id).is_value_type
+
+fn val_struct_deep_copy(vid: i64) -> i64:
+    """Deep-copy a struct value for value-type param binding. Nested fields
+    that are themselves value-type structs are copied recursively (struct-in-
+    struct). Class-typed (reference) fields and all other value kinds keep
+    the same value_id, so a class field embedded in a struct still shares its
+    identity with the caller after the struct itself is copied."""
+    val name = val_get_struct_name(vid)
+    val fields = val_get_struct_fields(vid)
+    val values = val_get_struct_values(vid)
+    var new_values: [i64] = []
+    for fv in values:
+        if val_is_struct(fv) and interp_struct_is_value_type(fv):
+            new_values.push(val_struct_deep_copy(fv))
+        else:
+            new_values.push(fv)
+    val_make_struct(name, fields, new_values)
+
 fn eval_struct_constructor(name: text, decl_id: i64, arg_eids: [i64]) -> i64:
     val d_node = decl_get(decl_id)
     val field_names = d_node.field_names
