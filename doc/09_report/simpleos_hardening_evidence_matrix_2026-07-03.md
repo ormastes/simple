@@ -9,6 +9,9 @@
 - lean_package_build_audit: pass
 - lean_package_build_audit_scope: all 21 Lean package roots under `src/verification` build through their stable `lake build` entry point
 - lean_package_build_audit_evidence: `for d in $(find src/verification -name lakefile.toml -printf '%h\n' | sort); do (cd "$d" && lake build) || exit 1; done` passed for actor_channel, aop_weaver, async_compile, db_storage, fat32, formal/nvfs, gc_boundary, gc_manual_borrow, kernel_capabilities, kernel_scheduler, macro_auto_import, manual_pointer_borrow, memory_capabilities, memory_model_drf, module_resolution, nogc_compile, riscv_product, tensor_dimensions, type_inference_compile, ui_compositor, and visibility_export
+- lean_trust_surface_audit: pass
+- lean_trust_surface_audit_scope: Lean verification sources under `src/verification` contain no `sorry`, `admit`, `axiom`, `constant`, `opaque`, `unsafe`, `set_option autoImplicit true`, or `set_option maxHeartbeats 0` trust-surface bypasses
+- lean_trust_surface_audit_evidence: `rg -n '^\s*(axiom|constant|opaque|unsafe|set_option\s+autoImplicit\s+true|set_option\s+maxHeartbeats\s+0)\b' src/verification --glob '*.lean' --glob '!.lake/**'` and `rg -n '^\s*(sorry|admit)\b' src/verification --glob '*.lean' --glob '!.lake/**'` both produced no hits
 - executable_launch_from_fs: pass
 - ssh_shell_smf_and_exec: pass
 - shared_wm_logic: pass
