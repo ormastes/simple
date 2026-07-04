@@ -152,6 +152,10 @@ Scan for stub patterns — any match is a **FAIL**:
   Generated Lean/BYL artifacts are not sufficient by themselves when manual
   constraints or theorem files exist; verify the stable manual proof entry
   point after regeneration and cite that exact gate in SPipe/report evidence.
+  SimpleOS mission-critical release verification must run
+  `sh scripts/check/check-simpleos-mission-critical-release.shs`; the hardening
+  matrix readiness pass is not release completion while that gate reports
+  blocked or failed.
 - **GUI/MDI evidence gates:** wrappers that claim live visual/event proof must
   fail when requested evidence is unavailable, times out, or only proves file
   existence. For Electron, Tauri mobile/iOS, hosted WM, QEMU/GTK WM, and pure WM
