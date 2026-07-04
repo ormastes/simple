@@ -97,6 +97,9 @@ impl DramWriteBuffer:
         if slot < 0 or slot >= me.cap:
             me.overflows = me.overflows + 1
             return SC_NS_NOT_READY
+        if me.used_slots[slot] == 0:
+            me.overflows = me.overflows + 1
+            return SC_NS_NOT_READY
         me.data[slot] = byte & 0xFF
         if slot + 1 > me.count:
             me.count = slot + 1
@@ -111,6 +114,8 @@ impl DramWriteBuffer:
             return 0
         val slot: i64 = span.base + index
         if slot < 0 or slot >= me.cap:
+            return 0
+        if me.used_slots[slot] == 0:
             return 0
         me.data[slot]
 
@@ -133,6 +138,9 @@ fn dram_selftest() -> i64:
     fail = fail + expect_eq(b.used(), 2, "used count")
     fail = fail + expect_eq(b.stage(s, 2, 1), SC_NS_NOT_READY, "over-span stage fails")
     fail = fail + expect_eq(b.overflow_count(), 1, "overflow counted")
+    val forged: DramSpan = DramSpan(base: 5, len: 1, ok: true)
+    fail = fail + expect_eq(b.stage(forged, 0, 0xAA), SC_NS_NOT_READY, "forged unallocated span stage fails")
+    fail = fail + expect_eq(b.byte(forged, 0), 0, "forged unallocated span read returns zero")
     b.release(DramSpan(base: -1, len: 3, ok: true))
     fail = fail + expect_eq(b.used(), 2, "forged negative release leaves live slots")
     b.release(DramSpan(base: 1, len: WRITE_BUFFER_CAP_BLOCKS, ok: true))
@@ -144,7 +152,7 @@ fn dram_selftest() -> i64:
     fail = fail + expect_eq(b.used(), WRITE_BUFFER_CAP_BLOCKS, "full alloc tracks live usage")
     val over: DramSpan = b.alloc(1)
     fail = fail + expect_eq(if over.ok: 1 else: 0, 0, "over-budget alloc fails")
-    fail = fail + expect_eq(b.overflow_count(), 2, "alloc overflow counted")
+    fail = fail + expect_eq(b.overflow_count(), 3, "alloc overflow counted")
     b.release(full)
     fail = fail + expect_eq(b.used(), 0, "full release resets live usage")
     fail
