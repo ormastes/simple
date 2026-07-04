@@ -329,6 +329,7 @@ impl DeferredMonomorphizer {
                     is_generic_template: true,
                     specialization_of: None,
                     type_bindings: HashMap::new(),
+                    is_value_type: false,
                 };
                 Ok(GenericTemplate::Class(class_def))
             }

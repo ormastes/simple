@@ -449,6 +449,7 @@ impl Lowerer {
                     is_generic_template: false,
                     specialization_of: None,
                     type_bindings: std::collections::HashMap::new(),
+                    is_value_type: false,
                     invariant: None,
                     macro_invocations: vec![],
                     mixins: vec![],

@@ -245,7 +245,10 @@ impl NvmeController:
             if cmd_is_write(cmd):
                 val h: Handle = me.pool.acquire(cmd.cid, cmd.lba, cmd.nblocks, cmd.data)
                 me.pool.set_phase(h, PH_PROGRAM)
-                status = me.ftl.write(cmd.lba, cmd.data)
+                var i: i64 = 0
+                while i < cmd.nblocks and status == SC_SUCCESS:
+                    status = me.ftl.write(cmd.lba + i, prp_byte(cmd, i))
+                    i = i + 1
                 me.pool.set_status(h, status)
                 me.pool.set_phase(h, PH_DONE)
                 me.pool.release(h)
@@ -347,6 +350,21 @@ fn nvme_controller_selftest() -> i64:
     c.io_process()
     val r: NvmeCpl = c.io_reap(1)
     fail = fail + expect_eq(r.data, 0x55, "IO read returns written byte")
+
+    c.io_submit(1, cmd_make(102, OP_WRITE, 20, 3, 0x60))
+    c.io_process()
+    val wm: NvmeCpl = c.io_reap(1)
+    fail = fail + expect_eq(wm.status, SC_SUCCESS, "multi-block IO write completed")
+    c.io_submit(1, cmd_make(103, OP_READ, 20, 1, 0))
+    c.io_submit(1, cmd_make(104, OP_READ, 21, 1, 0))
+    c.io_submit(1, cmd_make(105, OP_READ, 22, 1, 0))
+    c.io_process()
+    val r0: NvmeCpl = c.io_reap(1)
+    val r1: NvmeCpl = c.io_reap(1)
+    val r2: NvmeCpl = c.io_reap(1)
+    fail = fail + expect_eq(r0.data, 0x60, "multi-block IO read byte 0")
+    fail = fail + expect_eq(r1.data, 0x61, "multi-block IO read byte 1")
+    fail = fail + expect_eq(r2.data, 0x62, "multi-block IO read byte 2")
 
     # Get/Set Features through the admin path
     c.admin_submit(admin_set_feature_cmd(4, FEAT_TEMP_THRESH, 345))

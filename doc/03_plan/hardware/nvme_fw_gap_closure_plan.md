@@ -47,12 +47,14 @@ the firmware":
 | Phase | Module | Live caller | Status |
 |-------|--------|-------------|--------|
 | P1 | `fil_fmc` | `fil.spl` (every program/read/erase routes through the FMC handshake) | **wired** |
+| P3 | `fil_ecc` + NAND OOB ECC latch | `fil.spl` reads stored ECC through `fil_fmc` and fails silent payload corruption | **wired floor** — stored-ECC simulation, not full BCH/LDPC |
+| P4 | `hil_command.prp_byte` | HIL + multi-queue NVMe writes program each LBA from a block-indexed host byte stream | **wired floor** — no HostMem/PRP list yet |
 | P7 | `power_thermal` | `nvme_controller` (IO path ticks it; SMART reports its temperature) | **wired** |
 | P8 | `rain` | `ftl` (`rain_seal` / `rain_recover_channel`: a failed channel is rebuilt inside the live FTL, verified end-to-end through the normal read path) | **wired** |
 | P2 | `fil_scheduler` | none (the host-runnable sim executes ops synchronously — channel-level parallelism is a model the single-threaded sim cannot itself exhibit) | shelf — verified model, not load-bearing |
 | P9 | `fw_rv32/entry.spl` | bare-metal rv32 ISA (re-expresses the RAIN reconstruct array-free; `check`-clean + host-verified) | started — **build-blocked (environmental)**: rv32 LLVM native-build broken here (proven OS recipe also exits 255); boot not observed |
 
-Adding more standalone modules (P3–P6) widens the shelf without closing the gap. Prefer
+Adding more standalone modules (full P4 HostMem/PRP lists, P5–P6, or full BCH/LDPC beyond the P3 floor) widens the shelf without closing the gap. Prefer
 wiring an existing verified module into the live path over landing a new disconnected one.
 
 ## Test discipline (applies to every phase)
@@ -134,7 +136,12 @@ band allocation becomes **channel-striped** so sequential writes spread across c
 **Silicon ceiling.** Real per-channel NAND bus timing/contention is modeled as step counts,
 not nanoseconds.
 
-## P3 — Real ECC codec (BCH)  *(G3)*
+## P3 — Real ECC codec (BCH)  *(G3)* — PARTIAL WIRED FLOOR (2026-07-04)
+
+> Landed floor: NAND now stores an ECC word in OOB/spare-area state at program time, the ONFI
+> device and FMC latch that stored value on read, and `fil.read` verifies against it. Silent
+> payload corruption now returns `NAND_ECC_FAIL`; injected one-bit/two-bit read errors still drive
+> `NAND_ECC_FIXED`/`NAND_ECC_FAIL`. Full BCH/LDPC encode/decode remains open below.
 
 **Goal.** Replace checksum+injected-flip with a real **BCH** codec: correct up to *t* bit
 errors per codeword, detect beyond *t*.
@@ -155,7 +162,12 @@ Chien search (or a bounded *t*=2 BCH for tractability). Keep `inject_read_bitfli
 **Silicon ceiling.** Commercial NAND uses hardware **LDPC** with soft-decision reads; BCH is a
 faithful, partially-provable step, not the production code.
 
-## P4 — DMA / host data transport (byte-accurate)  *(G4)*
+## P4 — DMA / host data transport (byte-accurate)  *(G4)* — PARTIAL WIRED FLOOR (2026-07-04)
+
+> Landed floor: `hil_command.prp_byte` now produces a block-indexed byte stream and both the
+> legacy HIL and multi-queue NVMe controller write every LBA in `nblocks`, not just the first.
+> The command `data` field remains the host-buffer base byte; full HostMem/PRP/SGL descriptors
+> remain open below.
 
 **Goal.** Move real **bytes** between a modeled host memory and the device via a
 PRP/SGL scatter-gather descriptor, replacing `i64`-value data.

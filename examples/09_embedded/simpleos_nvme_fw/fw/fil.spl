@@ -46,15 +46,13 @@ impl Fil:
             return NAND_PROG_FAIL
         res.code
 
-    # Read one page and verify ECC. `code` reflects the injected bit-error count:
-    # 0 flips -> NAND_OK, 1 -> NAND_ECC_FIXED, >=2 -> NAND_ECC_FAIL.
+    # Read one page and verify against the ECC stored in NAND OOB at program time.
     me read(ppn: i64) -> FilRead:
         me.fmc.load(fmc_cmd(FMC_OP_READ, ppn, 0, 0, 0))
         me.fmc.issue()
         val res: FmcResult = me.fmc.out()
         me.fmc.ack()
-        val stored: i64 = ecc_compute(res.data, res.lba, res.seq)
-        val code: i64 = ecc_check(res.data, res.lba, res.seq, stored, res.err)
+        val code: i64 = ecc_check(res.data, res.lba, res.seq, res.ecc, res.err)
         FilRead(data: res.data, lba: res.lba, seq: res.seq, code: code)
 
     # Erase one block. Retires the block on erase failure.
@@ -91,6 +89,9 @@ impl Fil:
     me inject_read_bitflip(ppn: i64, n: i64):
         me.fmc.inject_read_bitflip(ppn, n)
 
+    me corrupt_page_data(ppn: i64, data: i64):
+        me.fmc.corrupt_page_data(ppn, data)
+
 # ── Self-test ─────────────────────────────────────────────────────────────────
 
 fn fil_selftest() -> i64:
@@ -116,6 +117,10 @@ fn fil_selftest() -> i64:
     fil.inject_read_bitflip(ppn, 2)
     val r2: FilRead = fil.read(ppn)
     fail = fail + expect_eq(r2.code, NAND_ECC_FAIL, "2 flips -> ECC_FAIL")
+    fil.inject_read_bitflip(ppn, 0)
+    fil.corrupt_page_data(ppn, 0xAC)
+    val rc: FilRead = fil.read(ppn)
+    fail = fail + expect_eq(rc.code, NAND_ECC_FAIL, "silent payload corruption -> ECC_FAIL")
 
     # erase clears the page OOB and bumps the erase count
     val ec0: i64 = fil.erase_count(2)

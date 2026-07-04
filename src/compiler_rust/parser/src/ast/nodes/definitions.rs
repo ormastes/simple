@@ -386,6 +386,12 @@ pub struct ClassDef {
     pub macro_invocations: Vec<MacroInvocation>,
     /// Mixin applications: use MixinName
     pub mixins: Vec<MixinRef>,
+    /// True if this ClassDef was synthesized from a `struct` declaration.
+    /// Structs are VALUE types (deep-copied on parameter passing / assignment);
+    /// real `class` declarations are REFERENCE types (mutations leak to caller).
+    /// Used by the interpreter to gate the Bug #19 mutable-param write-back so
+    /// value-type struct params do NOT propagate callee mutations to the caller.
+    pub is_value_type: bool,
 }
 
 impl ClassDef {

@@ -404,6 +404,7 @@ pub(crate) fn exec_node(
                     is_generic_template: false,
                     specialization_of: None,
                     type_bindings: std::collections::HashMap::new(),
+                    is_value_type: true,
                 }),
             );
             // Register static methods as mangled free functions (StructName__method)
@@ -485,6 +486,7 @@ pub(crate) fn exec_node(
                 is_generic_template: false,
                 specialization_of: None,
                 type_bindings: std::collections::HashMap::new(),
+                is_value_type: false,
             };
             classes.insert(nt.name.clone(), Arc::new(synth_class));
             env.insert(

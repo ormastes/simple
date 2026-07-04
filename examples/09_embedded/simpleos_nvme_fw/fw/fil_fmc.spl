@@ -14,6 +14,7 @@ interpreter gotcha and satisfies the "3+ params → struct" rule (see CONVENTION
 use nvme_types.*
 use fil_nand.*          # NandRead
 use fil_nand_device.*   # NandDevice
+use fil_ecc.*
 
 # ── FMC command opcodes (the CMD register) ────────────────────────────────────
 val FMC_OP_NONE:    i64 = 0
@@ -44,10 +45,11 @@ struct FmcResult:
     data: i64
     lba:  i64
     seq:  i64
+    ecc:  i64
     err:  i64      # injected bit-error count on a READ
 
 fn fmc_result_empty() -> FmcResult:
-    FmcResult(code: NAND_OK, data: 0, lba: 0, seq: 0, err: 0)
+    FmcResult(code: NAND_OK, data: 0, lba: 0, seq: 0, ecc: 0, err: 0)
 
 # ── The controller ────────────────────────────────────────────────────────────
 struct Fmc:
@@ -73,15 +75,15 @@ impl Fmc:
             return me.status
         if me.cmd.op == FMC_OP_PROGRAM:
             val code: i64 = me.nand.program(me.cmd.ppn, me.cmd.lba, me.cmd.seq, me.cmd.data)
-            me.result = FmcResult(code: code, data: 0, lba: 0, seq: 0, err: 0)
+            me.result = FmcResult(code: code, data: 0, lba: 0, seq: 0, ecc: 0, err: 0)
             me.status = fmc_status_for(code)
         elif me.cmd.op == FMC_OP_READ:
             val rd: NandRead = me.nand.read_page(me.cmd.ppn)
-            me.result = FmcResult(code: NAND_OK, data: rd.data, lba: rd.lba, seq: rd.seq, err: rd.err)
+            me.result = FmcResult(code: NAND_OK, data: rd.data, lba: rd.lba, seq: rd.seq, ecc: rd.ecc, err: rd.err)
             me.status = FMC_DONE
         elif me.cmd.op == FMC_OP_ERASE:
             val code: i64 = me.nand.erase_block(me.cmd.ppn)
-            me.result = FmcResult(code: code, data: 0, lba: 0, seq: 0, err: 0)
+            me.result = FmcResult(code: code, data: 0, lba: 0, seq: 0, ecc: 0, err: 0)
             me.status = fmc_status_for(code)
         else:
             me.status = FMC_ERR
@@ -113,6 +115,9 @@ impl Fmc:
     me inject_read_bitflip(ppn: i64, n: i64):
         me.nand.inject_read_bitflip(ppn, n)
 
+    me corrupt_page_data(ppn: i64, data: i64):
+        me.nand.corrupt_page_data(ppn, data)
+
 # A NAND op that failed latches ERR (sticky); otherwise DONE.
 fn fmc_status_for(code: i64) -> i64:
     if code == NAND_PROG_FAIL or code == NAND_ERASE_FAIL or code == NAND_BAD_BLOCK:
@@ -143,6 +148,7 @@ fn fil_fmc_selftest() -> i64:
     var rr: FmcResult = fmc.out()
     fail = fail + expect_eq(rr.data, 0xAB, "fmc: read data latched")
     fail = fail + expect_eq(rr.lba, 42, "fmc: read lba latched")
+    fail = fail + expect_eq(rr.ecc, ecc_compute(0xAB, 42, 7), "fmc: read ecc latched")
     fmc.ack()
 
     # Issuing with no command loaded is a no-op (cannot complete an un-issued command).

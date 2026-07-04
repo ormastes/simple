@@ -51,11 +51,18 @@ silicon. The simulation boundary is deliberate and unchanged:
         XOR parity with no logical data loss (`rain_seal`/`rain_recover_channel`;
         `rain_ftl_check.spl` → "RAIN-FTL OK"; `ftl_rain_selftest`; `fw/proofs/Rain.lean`).
 - [x] **Health.** SMART reflects real activity (data units r/w, host cmd counts, power cycles,
-      unsafe shutdowns, media errors, percent-used from erase counts, available spare from bad
-      blocks, critical warning); an error log records failed commands (`nvme_controller_selftest`).
-      The SMART composite temperature is now the **live `PowerThermal` value** (P7; was a hardcoded
-      313 K) with the thermal critical-warning bit ORed in (`thermal_check.spl` → "THERMAL OK",
-      `power_thermal_selftest`, and the two thermal assertions in `nvme_controller_selftest`).
+  unsafe shutdowns, media errors, percent-used from erase counts, available spare from bad
+  blocks, critical warning); an error log records failed commands (`nvme_controller_selftest`).
+  The SMART composite temperature is now the **live `PowerThermal` value** (P7; was a hardcoded
+  313 K) with the thermal critical-warning bit ORed in (`thermal_check.spl` → "THERMAL OK",
+  `power_thermal_selftest`, and the two thermal assertions in `nvme_controller_selftest`).
+- [x] **ECC is stored and checked from NAND OOB.** The sim writes the ECC word at program time
+      into NAND spare-area state and reads it back through the ONFI/FMC latches; FIL now compares
+      against that stored value, so silent payload corruption returns `NAND_ECC_FAIL` instead of
+      being masked by a freshly recomputed checksum (`fil_selftest`).
+- [x] **Multi-block host writes are load-bearing.** HIL and the multi-queue NVMe controller now
+      write every LBA in `nblocks` from a block-indexed simulated PRP byte stream instead of
+      silently programming only the first block (`hil_selftest`, `nvme_controller_selftest`).
 - [x] **Formal (req 6).** `fw/proofs/{Alloc,Recover,Gc,Hooks,Fmc,Rain}.lean` prove the
       allocator/GC-reserve, committed-prefix recovery, GC data-loss-guard, policy-hook, FMC, and
       RAIN cross-channel reconstruction invariants; each checks green with `lean`, and `Rain.lean`
@@ -76,12 +83,14 @@ same as "all gap-closure / production work is done." Per
 `doc/03_plan/hardware/nvme_fw_gap_closure_plan.md` § "Integration status": **P1** (`fil_fmc`), **P7**
 (`power_thermal`), and **P8** (`rain`) are **wired into the live controller/FTL**; **P2**
 (`fil_scheduler`) is **modeled but shelf** (a single-threaded sim cannot exhibit channel-level
-parallelism); **P3–P6** are **not started**; and **P9** (rv32 native build) is **build-blocked**
+parallelism); **P3 has a wired stored-ECC simulation floor** (not full BCH/LDPC); **P4 has a
+wired multi-block host-byte floor** (not full HostMem/PRP/SGL); **P5–P6** are **not started**; and
+**P9** (rv32 native build) is **build-blocked**
 (see the silicon boundary below).
 
-**Silicon boundary (unchanged).** Real BCH/Reed–Solomon hardware ECC (the sim keeps a
-checksum + injected-bit-error model), real register MMIO / PCIe transport, a persistent backing
-store, and multi-channel NAND timing remain out of scope; the bare-metal **rv32** no-alloc port is
+**Silicon boundary (unchanged).** Real BCH/Reed–Solomon/LDPC hardware ECC (the sim keeps a
+stored-ECC + injected-bit-error model), real register MMIO / PCIe transport, full PRP/SGL DMA,
+a persistent backing store, and multi-channel NAND timing remain out of scope; the bare-metal **rv32** no-alloc port is
 **written + host-verified but build-blocked in this environment** — its rv32 LLVM native build exits
 255 silently with no ELF and the boot was not observed (bug filed:
 `doc/08_tracking/bug/native_build_rv32_baremetal_silent_255_2026-06-30.md`; `BUILD_STATUS.md`), so it

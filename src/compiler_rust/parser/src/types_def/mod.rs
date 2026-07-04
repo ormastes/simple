@@ -194,6 +194,7 @@ impl<'a> Parser<'a> {
             is_generic_template: !generic_params.is_empty(),
             specialization_of: None,
             type_bindings: HashMap::new(),
+            is_value_type: false,
         }))
     }
 

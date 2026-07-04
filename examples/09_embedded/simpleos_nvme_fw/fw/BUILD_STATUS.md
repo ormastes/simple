@@ -24,7 +24,7 @@ commit → rebase onto origin/main (adds-only) → non-force SSH push.
 
 ## Integration — COMPLETE (run-green, end-to-end verified, on origin/main)
 
-All layers implemented and verified. `test_fw.spl` now emits **526 `PASS:` self-test assertions**
+All layers implemented and verified. `test_fw.spl` emits the full self-test suite
 (gate name `ALL FIRMWARE SELF-TESTS PASS`); `sim_main.spl` = full single-queue end-to-end (128 writes → read-back → overwrite/GC →
 trim → power-fail + recovery); `nvme_main.spl` = the admin-driven controller e2e (27 asserts) —
 all green via `bin/simple run`.
@@ -68,9 +68,10 @@ The full-controller layer, on top of the FTL/FIL stack (legacy single-queue
 
 **The FIL runs on the ONFI device** (plan phase E3, done): `fil.spl` composes `NandDevice` (not the
 behavioural `fil_nand.Nand`), so every write/read/GC-erase/recovery-OOB-scan in `sim_main` and
-`nvme_main` goes through the real ONFI handshake. `fil_ecc` keeps the FIL-level ECC (the device
-reports the injected bit-flip count; FIL decides OK/FIXED/FAIL). 526 `PASS:` self-test assertions
-green (gate `ALL FIRMWARE SELF-TESTS PASS`).
+`nvme_main` goes through the real ONFI handshake. `fil_ecc` keeps the FIL-level ECC; NAND stores
+the ECC word in spare-area state at program time, the FMC latches it on read, and FIL verifies the
+stored value instead of recomputing from read data. The self-test suite is green (gate
+`ALL FIRMWARE SELF-TESTS PASS`).
 
 Scope note (explicit): "full NVMe SSD fw" here = the host-runnable simulation (run-green).
 P9 — bare-metal **rv32** boot of *this Simple firmware*: `fw_rv32/entry.spl` is written (an
@@ -93,6 +94,10 @@ See `PRODUCTION_STATUS.md` for the acceptance bar. Landed since the initial buil
   persistent bad-block table.
 - **Protocol surface**: overflow-safe command validation (correct `SC_*`, no crash) + the
   mandatory admin set (Abort, Async Event Request, Format NVM, Firmware Download/Commit).
+- **Host data transport floor (P4) — WIRED**: `hil_command.prp_byte` produces a block-indexed
+  simulated host byte stream, and both HIL + multi-queue NVMe controller program every LBA in
+  `nblocks` rather than only the first block. Full HostMem/PRP/SGL descriptors remain out of
+  scope.
 - **Media management**: static wear-leveling (`wear_level_once`) + read-disturb scrub (`scrub_once`).
 - **Health**: SMART wired to real activity (wear, spare, media errors, unsafe shutdowns) + error log.
 - **Live thermal (P7) — WIRED**: `pt: PowerThermal` field ticked in `process_one_io` on every
@@ -119,8 +124,10 @@ Integration status (canonical: `doc/03_plan/hardware/nvme_fw_gap_closure_plan.md
 status", wired-vs-shelf table): P1 `fil_fmc`, P7 `power_thermal`, and P8 `rain` are all **WIRED**
 into the live controller/FTL; P2 `fil_scheduler` **landed but stays SHELF** — channel-level
 parallelism is a model a single-threaded sim cannot exhibit, so it is not flatly deferred but cannot
-be exercised; P3–P6 are **NOT started**; P9 is **build-blocked** (rv32 note above).
+be exercised; P3 has a **wired stored-ECC simulation floor** (full BCH/LDPC remains silicon/out of
+scope); P4 has a **wired multi-block host-byte floor** (full HostMem/PRP/SGL remains out of scope);
+P5–P6 are **NOT started**; P9 is **build-blocked** (rv32 note above).
 
-Silicon-only pieces remain out of scope (real BCH/RS hardware ECC, MMIO/PCIe, persistent backing
+Silicon-only pieces remain out of scope (real BCH/RS/LDPC hardware ECC, MMIO/PCIe, full PRP/SGL DMA, persistent backing
 store) — see `PRODUCTION_STATUS.md` § Silicon boundary. This is a hardware-FAITHFUL **simulation**,
 not a silicon-shippable binary; "production level" in the literal sense is NOT done.

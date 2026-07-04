@@ -42,7 +42,10 @@ impl Hil:
                 # Drive the write behind a generation-handle task context.
                 val h: Handle = me.pool.acquire(cmd.cid, cmd.lba, cmd.nblocks, cmd.data)
                 me.pool.set_phase(h, PH_PROGRAM)
-                status = me.ftl.write(cmd.lba, cmd.data)
+                var i: i64 = 0
+                while i < cmd.nblocks and status == SC_SUCCESS:
+                    status = me.ftl.write(cmd.lba + i, prp_byte(cmd, i))
+                    i = i + 1
                 me.pool.set_status(h, status)
                 me.pool.set_phase(h, PH_DONE)
                 me.pool.release(h)
@@ -120,6 +123,22 @@ fn hil_selftest() -> i64:
     fail = fail + expect_eq(c2.cid, 2, "cpl2 is the read")
     fail = fail + expect_eq(c2.status, SC_SUCCESS, "read completed SC_SUCCESS")
     fail = fail + expect_eq(c2.data, 0x7E, "read returns the written byte")
+
+    # Multi-block write pulls distinct bytes from the simulated PRP stream.
+    hil.submit(cmd_make(21, OP_WRITE, 40, 3, 0x20))
+    hil.run()
+    val c21: NvmeCpl = hil.reap()
+    fail = fail + expect_eq(c21.status, SC_SUCCESS, "multi-block write completed")
+    hil.submit(cmd_make(22, OP_READ, 40, 1, 0))
+    hil.submit(cmd_make(23, OP_READ, 41, 1, 0))
+    hil.submit(cmd_make(24, OP_READ, 42, 1, 0))
+    hil.run()
+    val c22: NvmeCpl = hil.reap()
+    val c23: NvmeCpl = hil.reap()
+    val c24: NvmeCpl = hil.reap()
+    fail = fail + expect_eq(c22.data, 0x20, "multi-block read byte 0")
+    fail = fail + expect_eq(c23.data, 0x21, "multi-block read byte 1")
+    fail = fail + expect_eq(c24.data, 0x22, "multi-block read byte 2")
 
     # out-of-range write is rejected by validation
     hil.submit(cmd_make(3, OP_WRITE, LBA_COUNT + 5, 1, 0))

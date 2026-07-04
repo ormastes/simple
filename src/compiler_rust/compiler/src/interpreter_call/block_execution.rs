@@ -741,6 +741,7 @@ pub(super) fn exec_block_closure_into(
                         is_generic_template: false,
                         specialization_of: None,
                         type_bindings: std::collections::HashMap::new(),
+                        is_value_type: true,
                     }),
                 );
                 // Register static methods as mangled free functions (StructName__method)
@@ -1383,6 +1384,7 @@ fn exec_block_closure_mut(
                         is_generic_template: false,
                         specialization_of: None,
                         type_bindings: std::collections::HashMap::new(),
+                        is_value_type: true,
                     }),
                 );
                 // Register static methods as mangled free functions (StructName__method)

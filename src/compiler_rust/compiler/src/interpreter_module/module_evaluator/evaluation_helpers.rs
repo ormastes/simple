@@ -150,6 +150,7 @@ pub(super) fn register_definitions(
                     is_generic_template: s.is_generic_template,
                     specialization_of: s.specialization_of.clone(),
                     type_bindings: s.type_bindings.clone(),
+                    is_value_type: true,
                 };
                 let arc_class_def = Arc::new(class_def);
                 local_classes.insert(s.name.clone(), Arc::clone(&arc_class_def));

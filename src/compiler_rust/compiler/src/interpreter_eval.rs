@@ -335,6 +335,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                     is_generic_template: false,
                     specialization_of: None,
                     type_bindings: std::collections::HashMap::new(),
+                    is_value_type: true,
                 });
                 classes.insert(s.name.clone(), Arc::clone(&struct_class));
                 CLASS_OVERLOADS.with(|cell| {
@@ -410,6 +411,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                         is_generic_template: false,
                         specialization_of: None,
                         type_bindings: std::collections::HashMap::new(),
+                        is_value_type: false,
                     }),
                 );
             }
@@ -546,6 +548,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                         is_generic_template: false,
                         specialization_of: None,
                         type_bindings: std::collections::HashMap::new(),
+                        is_value_type: true,
                     }),
                 );
                 // Register static methods as mangled free functions (StructName__method)
@@ -875,6 +878,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                         is_generic_template: false,
                         specialization_of: None,
                         type_bindings: std::collections::HashMap::new(),
+                        is_value_type: false,
                     }),
                 );
                 env.insert(
@@ -1382,6 +1386,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                                     is_generic_template: s.is_generic_template,
                                     specialization_of: s.specialization_of.clone(),
                                     type_bindings: s.type_bindings.clone(),
+                                    is_value_type: true,
                                 };
                                 let prefixed_name = format!("{}.{}", mod_decl.name, s.name);
                                 let arc_class_def = Arc::new(class_def);

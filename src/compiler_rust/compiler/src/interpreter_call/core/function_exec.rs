@@ -455,6 +455,16 @@ pub(crate) fn return_type_unwraps_option_some(t: &Type) -> bool {
     }
 }
 
+/// True when `v` is an Object whose class was synthesized from a value-type
+/// `struct` declaration (ClassDef::is_value_type). Structs have VALUE semantics:
+/// callee mutations to a struct parameter must NOT propagate back to the caller,
+/// so such values are excluded from the Bug #19 mutable-param write-back. Real
+/// `class` values (is_value_type == false) keep REFERENCE semantics and ARE
+/// written back. Task #91.
+fn is_value_type_struct(v: &Value, classes: &HashMap<String, Arc<ClassDef>>) -> bool {
+    matches!(v, Value::Object { class, .. } if classes.get(class).is_some_and(|cd| cd.is_value_type))
+}
+
 fn exec_function_inner(
     func: &FunctionDef,
     args: &[Argument],
@@ -629,10 +639,14 @@ fn exec_function_inner(
                         continue;
                     }
                     if let Some(callee_val) = local_env.get(&param_name) {
-                        if matches!(
-                            callee_val,
-                            Value::Array(_) | Value::Dict(_) | Value::Object { .. } | Value::Tuple(_)
-                        ) && outer_env.contains_key(&caller_name)
+                        // Value-type structs (task #91) keep VALUE semantics: never
+                        // write callee mutations back to the caller's binding.
+                        if !is_value_type_struct(callee_val, classes)
+                            && matches!(
+                                callee_val,
+                                Value::Array(_) | Value::Dict(_) | Value::Object { .. } | Value::Tuple(_)
+                            )
+                            && outer_env.contains_key(&caller_name)
                         {
                             let new_val = callee_val.clone();
                             outer_env.insert(caller_name, new_val);
@@ -648,10 +662,14 @@ fn exec_function_inner(
                     // e.g., `write_first(self.values, next)` — after the call,
                     // write the callee's `values` param back into `self.values`.
                     if let Some(callee_val) = local_env.get(&param_name).cloned() {
-                        if matches!(
-                            callee_val,
-                            Value::Array(_) | Value::Dict(_) | Value::Object { .. } | Value::Tuple(_)
-                        ) {
+                        // Value-type structs (task #91) keep VALUE semantics: a
+                        // struct passed as `obj.field` is not mutated back either.
+                        if !is_value_type_struct(&callee_val, classes)
+                            && matches!(
+                                callee_val,
+                                Value::Array(_) | Value::Dict(_) | Value::Object { .. } | Value::Tuple(_)
+                            )
+                        {
                             if let Some(obj_val) = outer_env.get(&obj_name).cloned() {
                                 if let Value::Object { class, mut fields } = obj_val {
                                     Arc::make_mut(&mut fields).insert(field_name, callee_val);
