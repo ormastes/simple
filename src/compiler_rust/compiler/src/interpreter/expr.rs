@@ -478,42 +478,46 @@ pub(crate) fn evaluate_expr(
                 ))
             }
         }
-        // Existence check: expr.? - returns bool indicating if value is present
+        // Existence check: expr.? - returns T? (the value itself if present, nil if absent).
+        // "Present" means: not nil, and (for Option/Result) Some/Ok, and (for
+        // collections/strings) non-empty. See
+        // doc/07_guide/quick_reference/syntax_quick_reference.md "Existence Check (`.?`)".
         Expr::ExistsCheck(inner) => {
             let val = evaluate_expr(inner, env, functions, classes, enums, impl_methods)?;
-            let exists = match &val {
-                // Option: Some is present, None is not
-                Value::Enum { enum_name, variant, .. }
-                    if SpecialEnumType::from_name(enum_name) == Some(SpecialEnumType::Option) =>
-                {
-                    OptionVariant::from_name(variant) == Some(OptionVariant::Some)
-                }
-                // Result: Ok is present, Err is not
-                Value::Enum { enum_name, variant, .. }
-                    if SpecialEnumType::from_name(enum_name) == Some(SpecialEnumType::Result) =>
-                {
-                    ResultVariant::from_name(variant) == Some(ResultVariant::Ok)
-                }
-                // Nil is not present
-                Value::Nil => false,
-                // Empty collections are not present
-                Value::Array(arr) => !arr.is_empty(),
-                Value::Dict(dict) => !dict.is_empty(),
-                // Empty strings are not present
-                Value::Str(s) => !s.is_empty(),
-                // Objects with class "Set" - check if inner items are empty
-                Value::Object { class, fields } if class == "Set" => {
-                    // Set is typically stored with an "items" field containing a Dict
-                    if let Some(Value::Dict(items)) = fields.get("items") {
-                        !items.is_empty()
+            // First unwrap any Option/Result layer (Some/Ok -> payload, None/Err/Nil -> absent).
+            // This also makes `opt.?` a pass-through onto the same nilable representation
+            // used elsewhere in the interpreter (raw value or Value::Nil).
+            let unwrapped = try_unwrap_option_or_result(&val);
+            let result = match unwrapped {
+                Some(v) => {
+                    let is_present = match &v {
+                        Value::Nil => false,
+                        // Empty collections are not present
+                        Value::Array(arr) => !arr.is_empty(),
+                        Value::Dict(dict) => !dict.is_empty(),
+                        // Empty strings are not present
+                        Value::Str(s) => !s.is_empty(),
+                        // Objects with class "Set" - check if inner items are empty
+                        Value::Object { class, fields } if class == "Set" => {
+                            // Set is typically stored with an "items" field containing a Dict
+                            if let Some(Value::Dict(items)) = fields.get("items") {
+                                !items.is_empty()
+                            } else {
+                                true // If no items field, treat as present
+                            }
+                        }
+                        // All other values (numbers, bools, structs, etc.) are present
+                        _ => true,
+                    };
+                    if is_present {
+                        v
                     } else {
-                        true // If no items field, treat as present
+                        Value::Nil
                     }
                 }
-                // All other values (numbers, bools, structs, etc.) are present
-                _ => true,
+                None => Value::Nil,
             };
-            Ok(Value::Bool(exists))
+            Ok(result)
         }
         // Safe unwrap: expr unwrap or: default
         Expr::UnwrapOr { expr: inner, default } => {

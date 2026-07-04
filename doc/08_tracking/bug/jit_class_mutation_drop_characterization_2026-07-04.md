@@ -1,6 +1,6 @@
 # Class-in-array mutation drop in interpret mode — characterization (task #112)
 
-- **Status:** OPEN — root cause is source/binary divergence, not a source-level bug found in `compiler.core.interpreter`; blocked on a healthy bootstrap rebuild to confirm
+- **Status:** SOURCE FIX LANDED (2026-07-04) for the 70.backend `InterpreterBackendImpl` (class reference model, see bottom section) — pending REGATE on a healthy stage4 binary. `compiler.core.interpreter` (flat-AST) was found already-correct for this repro; the observed `42` on the deployed binary is source/binary divergence.
 - **Discovered:** 2026-07-04 (task #112, following up on #108's discriminator work and #35's
   `struct_param_mutation_semantics_2026-07-03.md`)
 - **Area:** interpreter runtime — class/array reference semantics
@@ -177,3 +177,69 @@ markers (matching the file's existing precedent of the still-failing
 "mut-param direct field mutation" case) — not skipped, not marked passing.
 They should be revisited once the bootstrap blocker above is resolved and a
 fresh binary is deployed.
+
+## Source fix landed (2026-07-04, task #112 code portion) — 70.backend class reference model
+
+The 70.backend `InterpreterBackendImpl` (recommendation #3 above) was given a
+real struct-vs-class discriminator via the object-handle model the prior team
+settled on. Classes now have REFERENCE semantics; structs keep VALUE semantics.
+
+### What changed (pure `.spl`, MAIN)
+- **`src/compiler/70.backend/backend/objects.spl`** (new): `ObjectStore` — a
+  shared registry (`records: [ObjectRecord]`, handle = index) with `me alloc`
+  / `get_field` / `me set_field`. Reference-typed (mirrors `Environment`'s
+  `me`-method style) so all `EvalContext` copies that share one `Environment`
+  share one store.
+- **`src/compiler/70.backend/backend_types.spl`**: `ObjectValue` redefined
+  `{class_name: text, handle: i64}` (was the dead `{class_: SymbolId, fields:
+  Dict}`). `Value.Object` now carries only a handle → copying a `Value.Object`
+  copies the int handle → all copies alias one store record (reference sem for
+  free; the exact #112 array-share symptom is fixed by construction).
+- **`src/compiler/70.backend/backend/env.spl`**: `Environment` gains
+  `store: ObjectStore` (init in `new()`).
+- **`src/compiler/70.backend/backend/interpreter.spl`**:
+  - `try_construct_struct` allocates a store record for CLASSES (returns
+    `Value.Object(handle)`); STRUCTS still return `Value.Struct`.
+  - Field access: a `Value.Object` arm dereferences the store. It is placed
+    BEFORE the always-true struct-shadowed `Value.Struct` arm (`Object` is not
+    struct-shadowed, so its test is genuinely refutable and only real Objects
+    take it; Structs fall through).
+  - Field assignment (`c.x = v` / `c.x op= v`): disc-dispatched `Field` target
+    (`hash("Field")=21232742`) mutates the shared store — previously field
+    assignment was `not_implemented` entirely.
+- **`test/01_unit/compiler/interp_object_store_ref_model_spec.spl`** (new):
+  source-driven spec (imports resolve from source, #31/#45) — class-share,
+  struct-isolation, and class-in-array-share asserts driving the store directly.
+
+### Verification honesty (this session could NOT observe the engine run)
+The stage4 binary is corrupted by the concurrent #122/#123 seed work, so `bin/
+simple lint`/`test` cannot execute (`rt_cli_run_lint is not supported in
+interpreter mode`) and the interpreter engine cannot be observed. Substituted
+gate: a seed fast-path `native-build` (isolated `--cache-dir`, `--target
+x86_64-unknown-linux-gnu`) of a probe entry that transitively imports the four
+changed modules + drives the full `ObjectStore`/`Value.Object` API →
+**633 compiled, 0 cached, 0 failed**; the compiled-module set explicitly
+includes `backend__backend__objects`, `backend__backend__backend_types`,
+`backend__backend__env`, `backend__backend__interpreter`. Proves parse + lower +
+typecheck + codegen + link are clean; does NOT prove runtime behavior.
+
+### Post-gate REGATE checklist (run once a healthy stage4 binary is redeployed)
+The coordinator rebuilds from main post-gate; once `bin/simple` runs cleanly:
+1. `bin/simple lint` rc=0 on the four changed files + the new spec (the check
+   that could not run this session).
+2. `bin/simple test test/01_unit/compiler/interp_object_store_ref_model_spec.spl`
+   — all three asserts (class-share / struct-isolation / class-in-array share)
+   pass under the real self-hosted binary.
+3. The standalone #112 repro at the top of this doc under
+   `SIMPLE_EXECUTION_MODE=interpret bin/simple run` prints **777** (was 42).
+   NOTE: confirm FIRST whether `interpret` mode actually routes to the
+   70.backend `InterpreterBackendImpl` (this fix) vs the flat-AST
+   `compiler.core.interpreter` — `GlobalFlags.interpreter_mode` defaults to
+   `"optimized"`. If it routes to the flat-AST engine instead, the repro is
+   governed by #108's `is_value_type` path, not this change; verify both.
+4. Regression: `struct`-typed values still copy by value (no aliasing) — the
+   `interp_value_semantics_b35_spec.spl` struct cases must stay green.
+5. Confirm nothing else consumed the OLD `ObjectValue{class_, fields}` shape
+   (grep was clean this session: only re-exports in `backend.spl`/`__init__.spl`).
+6. Companion defect (array-param `push` leaking to caller, item #4 above) is
+   NOT addressed by this change and remains open.

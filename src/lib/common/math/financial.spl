@@ -24,7 +24,20 @@
 #
 # Import path: use std.math.financial.{annuity_pmt, irr_solve, ...}
 
-use std.math.special.{powf, exp_f64, ln_f64, sqrt_f64}
+use std.math.special.{powf, ln_f64, sqrt_f64}
+
+fn _nan() -> f64:
+    """NaN sentinel for invalid-domain solver results.
+
+    Built as inf - inf: a literal `0.0 / 0.0` is const-folded and rejected
+    by the compiler, and the test-runner interpreter traps even runtime
+    float division by zero ("semantic: division by zero"). Overflow to
+    infinity followed by inf - inf goes through plain IEEE arithmetic and
+    yields NaN in every execution mode.
+    """
+    var big = 1.0e308
+    val inf = big * 10.0
+    inf - inf
 
 # ============================================================================
 # Date Arithmetic (civil <-> Excel serial conversion)
@@ -230,10 +243,10 @@ fn nper_calc(rate: f64, pmt: f64, pv: f64) -> f64:
     Returns NaN on domain error.
     """
     if rate <= 0.0 or pmt == 0.0:
-        return 0.0 / 0.0
+        return _nan()
     val ratio = pmt / (pmt + pv * rate)
     if ratio <= 0.0:
-        return 0.0 / 0.0
+        return _nan()
     ln_f64(ratio) / ln_f64(1.0 + rate)
 
 fn rate_solve(nper: f64, pmt: f64, pv: f64, fv: f64) -> f64:
@@ -251,7 +264,7 @@ fn rate_solve(nper: f64, pmt: f64, pv: f64, fv: f64) -> f64:
         val f2 = _rate_residual(r + h, nper, pmt, pv, fv)
         val d = (f2 - f) / h
         if d == 0.0:
-            return 0.0 / 0.0
+            return _nan()
         val rn = r - f / d
         var diff = rn - r
         if diff < 0.0:
@@ -260,7 +273,7 @@ fn rate_solve(nper: f64, pmt: f64, pv: f64, fv: f64) -> f64:
             return rn
         r = rn
         i = i + 1
-    0.0 / 0.0
+    _nan()
 
 fn _rate_residual(r: f64, nper: f64, pmt: f64, pv: f64, fv: f64) -> f64:
     """Residual of the annuity equation at rate r (type 0)."""
@@ -383,7 +396,7 @@ fn irr_solve(flows: [f64]) -> f64:
     Returns NaN on domain error or non-convergence.
     """
     if flows.len() < 2:
-        return 0.0 / 0.0
+        return _nan()
     var r = 0.1
     var i = 0
     while i < 100:
@@ -425,7 +438,7 @@ fn irr_solve(flows: [f64]) -> f64:
         else:
             hi = mid
         j = j + 1
-    0.0 / 0.0
+    _nan()
 
 fn xirr_solve(flows: [f64], day_offsets: [f64]) -> f64:
     """Dated IRR: the rate where xnpv_at = 0, solved by bisection on
@@ -435,20 +448,20 @@ fn xirr_solve(flows: [f64], day_offsets: [f64]) -> f64:
     and a sign change over the bracket. Returns NaN on domain error.
     """
     if flows.len() < 2 or flows.len() != day_offsets.len():
-        return 0.0 / 0.0
+        return _nan()
     val d0 = day_offsets[0]
     var i = 0
     while i < day_offsets.len():
         val di = day_offsets[i]
         if di < d0:
-            return 0.0 / 0.0
+            return _nan()
         i = i + 1
     var lo = -0.99
     var hi = 10.0
     var flo = xnpv_at(lo, flows, day_offsets)
     val fhi = xnpv_at(hi, flows, day_offsets)
     if (flo < 0.0) == (fhi < 0.0):
-        return 0.0 / 0.0
+        return _nan()
     var j = 0
     while j < 100:
         val mid = (lo + hi) / 2.0
@@ -470,7 +483,7 @@ fn mirr_calc(flows: [f64], fin_rate: f64, rei_rate: f64) -> f64:
     """
     val n = flows.len()
     if n < 2:
-        return 0.0 / 0.0
+        return _nan()
     var pv_neg = 0.0
     var fv_pos = 0.0
     var i = 0
@@ -482,10 +495,10 @@ fn mirr_calc(flows: [f64], fin_rate: f64, rei_rate: f64) -> f64:
             fv_pos = fv_pos + cf * powf(1.0 + rei_rate, (n - 1 - i).to_f64())
         i = i + 1
     if pv_neg == 0.0:
-        return 0.0 / 0.0
+        return _nan()
     val ratio = fv_pos / (0.0 - pv_neg)
     if ratio <= 0.0:
-        return 0.0 / 0.0
+        return _nan()
     powf(ratio, 1.0 / (n - 1).to_f64()) - 1.0
 
 # ============================================================================
