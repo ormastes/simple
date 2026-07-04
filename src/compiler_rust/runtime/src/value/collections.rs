@@ -1,6 +1,7 @@
 //! Collection types: Array, Tuple, String and their SFFI functions.
 //! Dict SFFI functions are in the dict module.
 
+use std::cell::RefCell;
 use std::cmp::Ordering;
 
 use super::byte_kernels::{
@@ -13,6 +14,10 @@ use super::heap::{gc_flags, get_typed_ptr, get_typed_ptr_mut, unregister_heap_pt
 use super::objects::rt_closure_func_ptr;
 use super::primitive_sort;
 use simple_simd::{active_simd_tier, SimdTier};
+
+thread_local! {
+    static U8_ARRAY_SCRATCH: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+}
 
 // ============================================================================
 // Helper macros to reduce SFFI boilerplate
@@ -543,7 +548,27 @@ pub extern "C" fn rt_array_data_ptr_text(array: RuntimeValue) -> i64 {
 
 #[no_mangle]
 pub extern "C" fn rt_array_data_ptr_u8(array: RuntimeValue) -> i64 {
-    rt_array_data_ptr(array)
+    let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, 0);
+    unsafe {
+        if (*arr).is_byte_packed() {
+            return (*arr).data as i64;
+        }
+        let len = (*arr).len as usize;
+        let slice = (*arr).as_slice();
+        U8_ARRAY_SCRATCH.with(|scratch| {
+            let mut bytes = scratch.borrow_mut();
+            bytes.clear();
+            bytes.reserve(len);
+            for value in slice.iter().take(len) {
+                if value.is_int() {
+                    bytes.push((value.as_int() & 0xff) as u8);
+                } else {
+                    bytes.push((value.to_raw() & 0xff) as u8);
+                }
+            }
+            bytes.as_ptr() as i64
+        })
+    }
 }
 
 /// Return the stable array header pointer for proven native fast paths.

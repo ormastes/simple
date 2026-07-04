@@ -359,7 +359,11 @@ else
     stage3_ok=1
     echo "  Stage 3 succeeded"
   else
-    echo "  warning: stage3 self-host failed (exit ${stage3_status}); using seed for stage 4"
+    if [ "${stage3_status}" -eq 0 ]; then
+      echo "  warning: stage3 self-host produced no executable; using seed for stage 4"
+    else
+      echo "  warning: stage3 self-host failed (exit ${stage3_status}); using seed for stage 4"
+    fi
   fi
 fi
 
@@ -420,15 +424,29 @@ echo "Stage 4: compiling full CLI (main.spl) with bootstrap compiler..."
 full_dir="${output_dir}/full/${PLATFORM}"
 mkdir -p "${full_dir}"
 rm -rf .simple/native_cache/
-run_logged stage4-native-build env RUST_LOG="${RUST_LOG:-error}" \
-  LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
-  "${stage_for_build}" native-build \
-  --backend "${stage4_backend}" \
-  --source src/compiler --source src/app --source src/lib \
-  --entry-closure \
-  --entry src/app/cli/main.spl \
-  --runtime-path "$(pwd)/src/compiler_rust/target/bootstrap" \
-  -o "${full_dir}/simple"
+if [ "${stage4_is_seed}" -eq 1 ]; then
+  # ponytail: seed native-build can hang in the worker wrapper; call the same
+  # entrypoint directly until the wrapper path is proven fixed.
+  run_logged stage4-native-build env RUST_LOG="${RUST_LOG:-error}" \
+    LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
+    "${stage_for_build}" run src/app/cli/native_build_main.spl -- \
+    --backend "${stage4_backend}" \
+    --source src/compiler --source src/app --source src/lib \
+    --entry-closure \
+    --entry src/app/cli/main.spl \
+    --runtime-path "$(pwd)/src/compiler_rust/target/bootstrap" \
+    -o "${full_dir}/simple"
+else
+  run_logged stage4-native-build env RUST_LOG="${RUST_LOG:-error}" \
+    LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
+    "${stage_for_build}" native-build \
+    --backend "${stage4_backend}" \
+    --source src/compiler --source src/app --source src/lib \
+    --entry-closure \
+    --entry src/app/cli/main.spl \
+    --runtime-path "$(pwd)/src/compiler_rust/target/bootstrap" \
+    -o "${full_dir}/simple"
+fi
 
 full_bin="${full_dir}/simple"
 if [ ! -x "${full_bin}" ]; then
