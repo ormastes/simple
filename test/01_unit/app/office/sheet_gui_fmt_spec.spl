@@ -1,0 +1,269 @@
+"""Sheet GUI number-format display + data-validation editing spec.
+
+sheet_gui_view_full(session, rules, formats, max_rows, max_cols) is
+sheet_gui_view_with_formats' exact grid (per-cell widgets, selection
+bracket, viewport marker, cf "!<marker>" suffixes) with every cell's
+display text routed through number_format.spl's cell_display_formatted:
+a cell whose FormatSpec carries a num_fmt code renders the FORMATTED
+string in the text_dump (and widget text); cells without a format entry
+fall back to cell_display_text inside cell_display_formatted itself, so
+an empty SheetFormats renders byte-identically to the unformatted views.
+
+session_edit_validated / session_key_validated enforce validation.spl's
+rules at COMMIT time, Excel-style: invalid input leaves the session
+unchanged (cell keeps its value, re-render dumps byte-identically) and
+the returned SheetEditOutcome.last_error carries the rule's message;
+valid input commits exactly like session_edit/session_key.
+
+Hand-verified format ground truth (same values as number_format_spec):
+- format_number(1234.5, "$#,##0.00") = "$1,234.50"
+- format_number(42.0,   "$#,##0.00") = "$42.00"
+- format_number(0.4567, "0.0%")      = "45.7%"
+- format_number(45107.0, "yyyy-mm-dd") = "2023-06-30" (Excel date serial)
+
+Dump line layout (from the session-view functions): lines[0] is the
+"viewport|..." marker, lines[1] the column-letter header, lines[2..] one
+line per visible row ("<rownum>|<cell>|<cell>...").
+"""
+
+use std.spec
+use app.office.sheets.spreadsheet.{Sheet}
+use app.office.sheets.cell.{cell_display_text}
+use app.office.sheets.cond_format.{CondRule}
+use app.office.sheets.cell_format.{empty_sheet_formats, sheet_set_number_format}
+use app.office.sheets.validation.{empty_validation_rules, validation_add}
+use app.office.file_formats.{recalculate_formula_cells}
+use app.office.gui.{session_new, session_edit, session_key, sheet_gui_view_full, sheet_gui_view_with_selection, sheet_gui_view_with_formats, session_edit_validated, session_key_validated}
+
+fn _price_sheet() -> Sheet:
+    """Item/Price grid: B2=10, B3=1234.5 (the "$1,234.50" ground-truth
+    value), used by both the display and the validated-edit groups."""
+    var sheet = Sheet.new("Prices")
+    sheet.set_value("A1", "Item")
+    sheet.set_value("B1", "Price")
+    sheet.set_value("A2", "Widget")
+    sheet.set_value("B2", "10")
+    sheet.set_value("A3", "Gadget")
+    sheet.set_value("B3", "1234.5")
+    sheet
+
+describe "sheet_gui_view_full: formatted display":
+    """Cells with a num_fmt code render cell_display_formatted's string in
+    the text_dump; everything else stays cell_display_text."""
+
+    it "renders a currency-formatted cell as its formatted string ($#,##0.00)":
+        var sheet = Sheet.new("Money")
+        sheet.set_value("A1", "1234.5")
+        var formats = empty_sheet_formats()
+        formats = sheet_set_number_format(formats, "A1", "$#,##0.00")
+        val session = session_new(sheet, "")
+        val no_rules: [CondRule] = []
+        val view = sheet_gui_view_full(session, no_rules, formats, 1, 1)
+        val lines = view.text_dump.split("\n")
+        expect(lines[2]).to_equal("1|$1,234.50")
+
+    it "renders a percent-formatted cell (0.4567 with 0.0% -> 45.7%)":
+        var sheet = Sheet.new("Pct")
+        sheet.set_value("A1", "0.4567")
+        var formats = empty_sheet_formats()
+        formats = sheet_set_number_format(formats, "A1", "0.0%")
+        val session = session_new(sheet, "")
+        val no_rules: [CondRule] = []
+        val view = sheet_gui_view_full(session, no_rules, formats, 1, 1)
+        val lines = view.text_dump.split("\n")
+        expect(lines[2]).to_equal("1|45.7%")
+
+    it "renders a date-code cell from an Excel serial (45107 -> 2023-06-30)":
+        var sheet = Sheet.new("Dates")
+        sheet.set_value("A1", "45107")
+        var formats = empty_sheet_formats()
+        formats = sheet_set_number_format(formats, "A1", "yyyy-mm-dd")
+        val session = session_new(sheet, "")
+        val no_rules: [CondRule] = []
+        val view = sheet_gui_view_full(session, no_rules, formats, 1, 1)
+        val lines = view.text_dump.split("\n")
+        expect(lines[2]).to_equal("1|2023-06-30")
+
+    it "renders byte-identically to sheet_gui_view_with_selection with an empty format container":
+        val sheet = _price_sheet()
+        val session = session_new(sheet, "B2")
+        val no_rules: [CondRule] = []
+        val formats = empty_sheet_formats()
+        val full_view = sheet_gui_view_full(session, no_rules, formats, 3, 2)
+        val plain_view = sheet_gui_view_with_selection(session, 3, 2)
+        expect(full_view.text_dump).to_equal(plain_view.text_dump)
+
+    it "renders byte-identically to sheet_gui_view_with_formats with an empty format container (cf rules active)":
+        val sheet = _price_sheet()
+        val session = session_new(sheet, "")
+        val rules: [CondRule] = [CondRule(range: "B2:B3", kind: "above_average", criteria: "", n: 0, css: "")]
+        val formats = empty_sheet_formats()
+        val full_view = sheet_gui_view_full(session, rules, formats, 3, 2)
+        val cf_view = sheet_gui_view_with_formats(session, rules, 3, 2)
+        expect(full_view.text_dump).to_equal(cf_view.text_dump)
+
+    it "leaves every unformatted cell's dump line identical when only one cell has a format":
+        val sheet = _price_sheet()
+        val session = session_new(sheet, "")
+        val no_rules: [CondRule] = []
+        var formats = empty_sheet_formats()
+        formats = sheet_set_number_format(formats, "B3", "$#,##0.00")
+        val full_view = sheet_gui_view_full(session, no_rules, formats, 3, 2)
+        val plain_view = sheet_gui_view_with_selection(session, 3, 2)
+        val full_lines = full_view.text_dump.split("\n")
+        val plain_lines = plain_view.text_dump.split("\n")
+        expect(full_lines[0]).to_equal(plain_lines[0])
+        expect(full_lines[1]).to_equal(plain_lines[1])
+        expect(full_lines[2]).to_equal(plain_lines[2])
+        expect(full_lines[3]).to_equal(plain_lines[3])
+        expect(full_lines[4]).to_equal("3|Gadget|$1,234.50")
+
+    it "formats a formula cell's numeric result (=A1+A2 -> $42.00)":
+        var sheet = Sheet.new("Formulas")
+        sheet.set_value("A1", "10")
+        sheet.set_value("A2", "32")
+        sheet.set_value("A3", "=A1+A2")
+        sheet = recalculate_formula_cells(sheet)
+        var formats = empty_sheet_formats()
+        formats = sheet_set_number_format(formats, "A3", "$#,##0.00")
+        val session = session_new(sheet, "")
+        val no_rules: [CondRule] = []
+        val view = sheet_gui_view_full(session, no_rules, formats, 3, 1)
+        val lines = view.text_dump.split("\n")
+        expect(lines[4]).to_equal("3|$42.00")
+
+    it "wraps the selection bracket around the FORMATTED text":
+        var sheet = Sheet.new("SelFmt")
+        sheet.set_value("A1", "1234.5")
+        var formats = empty_sheet_formats()
+        formats = sheet_set_number_format(formats, "A1", "$#,##0.00")
+        val session = session_new(sheet, "A1")
+        val no_rules: [CondRule] = []
+        val view = sheet_gui_view_full(session, no_rules, formats, 1, 1)
+        val lines = view.text_dump.split("\n")
+        expect(lines[2]).to_equal("1|[$1,234.50]")
+
+describe "session_edit_validated: validation-enforced editing":
+    """Invalid input rejects Excel-style (session unchanged + message);
+    valid input commits exactly like session_edit."""
+
+    it "commits a valid edit and the grid re-renders it formatted":
+        val sheet = _price_sheet()
+        var formats = empty_sheet_formats()
+        formats = sheet_set_number_format(formats, "B2", "$#,##0.00")
+        var vrules = empty_validation_rules()
+        vrules = validation_add(vrules, "B", "whole_number", "", 1.0, 100.0, "", "Price must be a whole number between 1 and 100")
+        val session = session_new(sheet, "")
+        val outcome = session_edit_validated(session, "B2", "42", vrules)
+        expect(outcome.last_error).to_equal("")
+        val no_rules: [CondRule] = []
+        val view = sheet_gui_view_full(outcome.session, no_rules, formats, 3, 2)
+        val lines = view.text_dump.split("\n")
+        expect(lines[3]).to_equal("2|Widget|$42.00")
+
+    it "rejects an out-of-range value with the rule's message and an unchanged dump":
+        val sheet = _price_sheet()
+        var vrules = empty_validation_rules()
+        vrules = validation_add(vrules, "B", "whole_number", "", 1.0, 100.0, "", "Price must be a whole number between 1 and 100")
+        val session = session_new(sheet, "")
+        val no_rules: [CondRule] = []
+        val formats = empty_sheet_formats()
+        val before_view = sheet_gui_view_full(session, no_rules, formats, 3, 2)
+        val outcome = session_edit_validated(session, "B2", "999", vrules)
+        expect(outcome.last_error).to_equal("Price must be a whole number between 1 and 100")
+        val after_view = sheet_gui_view_full(outcome.session, no_rules, formats, 3, 2)
+        expect(after_view.text_dump).to_equal(before_view.text_dump)
+
+    it "rejects a non-integer for a whole_number rule":
+        val sheet = _price_sheet()
+        var vrules = empty_validation_rules()
+        vrules = validation_add(vrules, "B", "whole_number", "", 1.0, 100.0, "", "Price must be a whole number between 1 and 100")
+        val session = session_new(sheet, "")
+        val outcome = session_edit_validated(session, "B2", "4.5", vrules)
+        expect(outcome.last_error).to_equal("Price must be a whole number between 1 and 100")
+        val out_session = outcome.session
+        val out_sheet = out_session.sheet
+        val out_cell = out_sheet.get_cell("B2")
+        expect(cell_display_text(out_cell)).to_equal("10")
+
+    it "accepts everything with an empty rules container (matches plain session_edit)":
+        val sheet = _price_sheet()
+        val vrules = empty_validation_rules()
+        val session = session_new(sheet, "")
+        val outcome = session_edit_validated(session, "B2", "999", vrules)
+        expect(outcome.last_error).to_equal("")
+        val plain_session = session_edit(session, "B2", "999")
+        val no_rules: [CondRule] = []
+        val formats = empty_sheet_formats()
+        val validated_view = sheet_gui_view_full(outcome.session, no_rules, formats, 3, 2)
+        val plain_view = sheet_gui_view_full(plain_session, no_rules, formats, 3, 2)
+        expect(validated_view.text_dump).to_equal(plain_view.text_dump)
+
+    it "keeps validation and format working on the SAME cell (valid commit reformats, invalid keeps old formatted value)":
+        val sheet = _price_sheet()
+        var formats = empty_sheet_formats()
+        formats = sheet_set_number_format(formats, "B2", "$#,##0.00")
+        var vrules = empty_validation_rules()
+        vrules = validation_add(vrules, "B2", "whole_number", "", 1.0, 100.0, "", "Price must be a whole number between 1 and 100")
+        val session = session_new(sheet, "")
+        val valid_outcome = session_edit_validated(session, "B2", "50", vrules)
+        expect(valid_outcome.last_error).to_equal("")
+        val no_rules: [CondRule] = []
+        val valid_view = sheet_gui_view_full(valid_outcome.session, no_rules, formats, 3, 2)
+        val valid_lines = valid_view.text_dump.split("\n")
+        expect(valid_lines[3]).to_equal("2|Widget|$50.00")
+        val invalid_outcome = session_edit_validated(valid_outcome.session, "B2", "200", vrules)
+        expect(invalid_outcome.last_error).to_equal("Price must be a whole number between 1 and 100")
+        val invalid_view = sheet_gui_view_full(invalid_outcome.session, no_rules, formats, 3, 2)
+        val invalid_lines = invalid_view.text_dump.split("\n")
+        expect(invalid_lines[3]).to_equal("2|Widget|$50.00")
+
+describe "session_key_validated: enter-commit validation":
+    """Only the enter-with-buffer path is gated; invalid entries retain
+    the pending buffer (Excel keeps you in the cell to fix the entry)."""
+
+    it "commits a valid typed buffer on enter":
+        val sheet = _price_sheet()
+        var vrules = empty_validation_rules()
+        vrules = validation_add(vrules, "B", "whole_number", "", 1.0, 100.0, "", "Price must be a whole number between 1 and 100")
+        var session = session_new(sheet, "B2")
+        session = session_key(session, "4", 3, 2, 3, 2)
+        session = session_key(session, "2", 3, 2, 3, 2)
+        val outcome = session_key_validated(session, "enter", 3, 2, 3, 2, vrules)
+        expect(outcome.last_error).to_equal("")
+        val out_session = outcome.session
+        expect(out_session.pending_input).to_equal("")
+        val out_sheet = out_session.sheet
+        val out_cell = out_sheet.get_cell("B2")
+        expect(cell_display_text(out_cell)).to_equal("42")
+
+    it "rejects an invalid typed buffer on enter, retaining the buffer and the mid-typing dump":
+        val sheet = _price_sheet()
+        var vrules = empty_validation_rules()
+        vrules = validation_add(vrules, "B", "whole_number", "", 1.0, 100.0, "", "Price must be a whole number between 1 and 100")
+        var session = session_new(sheet, "B2")
+        session = session_key(session, "9", 3, 2, 3, 2)
+        session = session_key(session, "9", 3, 2, 3, 2)
+        session = session_key(session, "9", 3, 2, 3, 2)
+        val no_rules: [CondRule] = []
+        val formats = empty_sheet_formats()
+        val before_view = sheet_gui_view_full(session, no_rules, formats, 3, 2)
+        val outcome = session_key_validated(session, "enter", 3, 2, 3, 2, vrules)
+        expect(outcome.last_error).to_equal("Price must be a whole number between 1 and 100")
+        val out_session = outcome.session
+        expect(out_session.pending_input).to_equal("999")
+        val out_sheet = out_session.sheet
+        val out_cell = out_sheet.get_cell("B2")
+        expect(cell_display_text(out_cell)).to_equal("10")
+        val after_view = sheet_gui_view_full(out_session, no_rules, formats, 3, 2)
+        expect(after_view.text_dump).to_equal(before_view.text_dump)
+
+    it "passes non-commit keys through untouched (arrow move, no validation)":
+        val sheet = _price_sheet()
+        var vrules = empty_validation_rules()
+        vrules = validation_add(vrules, "B", "whole_number", "", 1.0, 100.0, "", "Price must be a whole number between 1 and 100")
+        val session = session_new(sheet, "B2")
+        val outcome = session_key_validated(session, "down", 3, 2, 3, 2, vrules)
+        expect(outcome.last_error).to_equal("")
+        val out_session = outcome.session
+        expect(out_session.selected_ref).to_equal("B3")
