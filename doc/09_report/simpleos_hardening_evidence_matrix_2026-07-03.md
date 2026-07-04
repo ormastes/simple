@@ -124,7 +124,7 @@
 - aop_weaver_formal_evidence: src/verification/aop_weaver/src/AopWeaver/Model.lean T1_selection_sorted + T2_selection_stable + T3_no_match_preserves + deny_increments + T4_deny_skips_target + T5_deny_monotone + T6_proceed_linear; `cd src/verification/aop_weaver && lake build`
 - ui_compositor_formal: pass
 - ui_compositor_formal_scope: damage additions append exactly one region and retain the newly damaged rect, merged damage covers both inputs, clips stay inside both source rects, z-order sorts preserve all windows, stacking-context sorts preserve all contexts, renormalization preserves relative order, and recursive flattening preserves all tree surfaces
-- ui_compositor_formal_evidence: src/verification/ui_compositor/UiCompositor/Theorems.lean damage_add_increases_length + damage_add_contains_new_rect + merge_covers_left + merge_covers_right + clip_inside_left + clip_inside_right + insertSorted_is_perm + sortStackingContexts_perm + flattenTree_perm_treeSurfaces; `cd src/verification/ui_compositor && lake build`
+- ui_compositor_formal_evidence: src/verification/ui_compositor/UiCompositor/Theorems.lean damage_add_increases_length + damage_add_contains_new_rect + merge_covers_left + merge_covers_right + clip_inside_left + clip_inside_right + insertSorted_is_perm + sortStackingContexts_perm + renorm_order_preserving + flattenTree_perm_treeSurfaces; `cd src/verification/ui_compositor && lake build`
 - kernel_capability_depth_formal: pass
 - kernel_capability_depth_formal_scope: capability delegation with exhausted depth is denied
 - kernel_capability_depth_formal_evidence: src/verification/kernel_capabilities/KernelCapabilities/Theorems.lean zero_depth_grant_denied; `cd src/verification/kernel_capabilities && lake build`
