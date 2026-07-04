@@ -56,6 +56,10 @@ theorem profiles_are_dual_arch :
     (profile Lane.rv32).lane ≠ (profile Lane.rv64).lane := by
   simp [profile]
 
+theorem all_profiles_use_rvfi_sby (l : Lane) :
+    (profile l).formalGate = FormalGate.rvfiSby := by
+  cases l <;> simp [profile]
+
 theorem next_lane_alternates (l : Lane) :
     nextLane l ≠ l := by
   cases l <;> simp [nextLane]
