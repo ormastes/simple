@@ -405,6 +405,10 @@ when the generator contract is updated in the same lane.
 For RISC-V lanes that combine generated RTL sidecars with Lean/BYL proof
 models, cite `sh scripts/check/check-riscv-formal-dual-track.shs` as the
 aggregate SPipe evidence gate after regeneration.
+For SimpleOS mission-critical RISC-V evidence, also cite
+`sh scripts/check/check-riscv-rtl-sby-proof.shs` and
+`sh scripts/check/check-simpleos-mission-critical-release.shs`; a missing
+`sby`, `yosys`, or SMT solver is a blocked prerequisite state, not a proof pass.
 Starvation, fairness, race-condition, scheduler, channel, lock, or
 resource-lifecycle claims require a concurrency/resource model gate or an
 explicit blocker; a single interleaving test is not formal evidence.
