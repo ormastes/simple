@@ -4,6 +4,7 @@ set -eu
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 SETUP="$ROOT_DIR/scripts/setup/setup-simpleos-formal-env.shs"
 PREREQ="$ROOT_DIR/scripts/check/check-simpleos-mission-critical-prereqs.shs"
+RELEASE="$ROOT_DIR/scripts/check/check-simpleos-mission-critical-release.shs"
 
 print_out="$(sh "$SETUP" --print-install)"
 printf '%s\n' "$print_out" | grep -Fq "sudo apt-get install yosys symbiyosys boolector z3" || {
@@ -31,5 +32,23 @@ grep -Fq "scripts/setup/setup-simpleos-formal-env.shs --print-install" "$PREREQ"
     echo "FAIL: prereq doctor missing setup helper next action" >&2
     exit 1
 }
+
+if BUILD_DIR="$ROOT_DIR/build/simpleos_formal_setup_contract/release" \
+    REPORT_PATH="$ROOT_DIR/build/simpleos_formal_setup_contract/release.md" \
+    sh "$RELEASE" >/tmp/simpleos-formal-release-check.out 2>/tmp/simpleos-formal-release-check.err; then
+    grep -Fq "STATUS: PASS simpleos-mission-critical-release" /tmp/simpleos-formal-release-check.out || {
+        echo "FAIL: release gate passed without PASS status" >&2
+        exit 1
+    }
+else
+    grep -Fq "prereq_status=blocked" /tmp/simpleos-formal-release-check.err || {
+        echo "FAIL: release gate failure missing prereq status" >&2
+        exit 1
+    }
+    grep -Fq "prereq_missing=sby,yosys,smt-solver" /tmp/simpleos-formal-release-check.err || {
+        echo "FAIL: release gate failure missing prereq blockers" >&2
+        exit 1
+    }
+fi
 
 echo "STATUS: PASS simpleos-formal-setup-contract"
