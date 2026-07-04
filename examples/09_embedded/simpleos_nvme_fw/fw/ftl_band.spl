@@ -46,10 +46,16 @@ fn ftl_band_new() -> BandAlloc:
 # ── Methods ───────────────────────────────────────────────────────────────────
 
 impl BandAlloc:
+    me block_ready(blk: i64) -> bool:
+        block_in_range(blk) and blk < me.blk_state.len() and blk < me.blk_valid.len()
+
+    me ppn_ready(ppn: i64) -> bool:
+        ppn_in_range(ppn) and ppn < me.valid.len() and me.block_ready(ppn_block(ppn))
+
     me actual_free_blocks() -> i64:
         var fc: i64 = 0
         var b: i64 = 0
-        while b < NUM_BLOCKS:
+        while b < NUM_BLOCKS and b < me.blk_state.len():
             if me.blk_state[b] == BLK_FREE:
                 fc = fc + 1
             b = b + 1
@@ -67,17 +73,17 @@ impl BandAlloc:
     # Opens a fresh block when there is no active block or the current one is full.
     # Returns NO_PPN if no free block is available.
     me alloc_page() -> i64:
-        val no_active: bool = me.active_blk == UNMAP
+        val no_active: bool = me.active_blk == UNMAP or not me.block_ready(me.active_blk) or me.active_wp < 0 or me.active_wp > PAGES_PER_BLOCK
         val blk_full:  bool = me.active_wp == PAGES_PER_BLOCK
         val need_new:  bool = (no_active or blk_full)
         if need_new:
             # Close the current block if one was open.
-            if me.active_blk != UNMAP:
+            if me.block_ready(me.active_blk):
                 me.blk_state[me.active_blk] = BLK_CLOSED
             # Find the first BLK_FREE block.
             var next_blk: i64 = -1
             var b: i64 = 0
-            while b < NUM_BLOCKS:
+            while b < NUM_BLOCKS and b < me.blk_state.len():
                 if me.blk_state[b] == BLK_FREE:
                     next_blk = b
                     b = NUM_BLOCKS
@@ -117,7 +123,7 @@ impl BandAlloc:
 
     # Mark a physical page as holding the current version of its LBA.
     me mark_valid(ppn: i64):
-        if not ppn_in_range(ppn):
+        if not me.ppn_ready(ppn):
             return
         val blk: i64 = ppn_block(ppn)
         if me.blk_state[blk] == BLK_FREE or me.blk_state[blk] == BLK_BAD:
@@ -129,7 +135,7 @@ impl BandAlloc:
     # Mark a physical page as stale (no longer the current version).
     # No-op if the page is already invalid.
     me mark_invalid(ppn: i64):
-        if not ppn_in_range(ppn):
+        if not me.ppn_ready(ppn):
             return
         if me.valid[ppn] == 1:
             me.valid[ppn] = 0
@@ -138,7 +144,7 @@ impl BandAlloc:
 
     # Number of valid (live) pages in the given block.
     me valid_count(blk: i64) -> i64:
-        if not block_in_range(blk):
+        if not me.block_ready(blk):
             return 0
         val count: i64 = me.blk_valid[blk]
         if count < 0:
@@ -149,26 +155,28 @@ impl BandAlloc:
 
     # Whether the given physical page currently holds the live version.
     me is_valid(ppn: i64) -> bool:
-        if not ppn_in_range(ppn):
+        if not me.ppn_ready(ppn):
             return false
         me.valid[ppn] == 1
 
     # Lifecycle state (BLK_FREE/OPEN/CLOSED/BAD) of the given block.
     me block_state(blk: i64) -> i64:
-        if not block_in_range(blk):
+        if not me.block_ready(blk):
             return BLK_BAD
         me.blk_state[blk]
 
     # Return a block to BLK_FREE after the FIL layer has erased it.
     # Resets blk_valid to 0 and increments free_count.
     me free_block(blk: i64):
-        if not block_in_range(blk):
+        if not me.block_ready(blk):
+            return
+        if block_first_ppn(blk) + PAGES_PER_BLOCK > me.valid.len():
             return
         if me.blk_state[blk] == BLK_FREE:
             return
         var p: i64 = block_first_ppn(blk)
         val end: i64 = p + PAGES_PER_BLOCK
-        while p < end:
+        while p < end and p < me.valid.len():
             me.valid[p] = 0
             p = p + 1
         if me.active_blk == blk:
@@ -192,11 +200,11 @@ impl BandAlloc:
     # as FREE until rebuild marks the ones still holding live pages.
     me reset_volatile():
         var i: i64 = 0
-        while i < NUM_PAGES:
+        while i < NUM_PAGES and i < me.valid.len():
             me.valid[i] = 0
             i = i + 1
         i = 0
-        while i < NUM_BLOCKS:
+        while i < NUM_BLOCKS and i < me.blk_state.len() and i < me.blk_valid.len():
             me.blk_state[i] = BLK_FREE
             me.blk_valid[i] = 0
             i = i + 1
@@ -207,7 +215,7 @@ impl BandAlloc:
     # Recovery: mark one physical page live (an L2P entry points at it) and close its
     # block (it holds committed data, so it is not free for allocation).
     me rebuild_mark(ppn: i64):
-        if not ppn_in_range(ppn):
+        if not me.ppn_ready(ppn):
             return
         val blk: i64 = ppn_block(ppn)
         if me.blk_state[blk] == BLK_BAD:
@@ -219,7 +227,9 @@ impl BandAlloc:
 
     # Recovery: retire a persistently-bad block so the allocator never selects it.
     me set_bad(blk: i64):
-        if blk < 0 or blk >= NUM_BLOCKS:
+        if not me.block_ready(blk):
+            return
+        if block_first_ppn(blk) + PAGES_PER_BLOCK > me.valid.len():
             return
         if me.blk_state[blk] == BLK_FREE:
             me.free_count = me.free_count - 1
@@ -228,7 +238,7 @@ impl BandAlloc:
             me.active_wp = 0
         var p: i64 = block_first_ppn(blk)
         val end: i64 = p + PAGES_PER_BLOCK
-        while p < end:
+        while p < end and p < me.valid.len():
             me.valid[p] = 0
             p = p + 1
         me.blk_valid[blk] = 0
@@ -317,6 +327,27 @@ fn ftl_band_selftest() -> i64:
     ba.free_count = -7
     fail = fail + expect_eq(ba.free_blocks(), 0, "corrupted negative free_count clamps to zero")
     ba.free_count = free_before_bad_free
+    ba.valid = []
+    fail = fail + expect_eq(if ba.is_valid(p0): 1 else: 0, 0, "truncated valid bitmap fails closed")
+    ba.mark_valid(p0)
+    ba.mark_invalid(p0)
+    ba.free_block(0)
+    fail = fail + expect_eq(ba.valid_count(0), 0, "truncated valid bitmap leaves counts untouched")
+    ba.valid = ftl_fill(NUM_PAGES, 0)
+    ba.blk_state = []
+    fail = fail + expect_eq(ba.free_blocks(), 0, "truncated block state reports no free blocks")
+    fail = fail + expect_eq(ba.block_state(0), BLK_BAD, "truncated block state fails closed")
+    fail = fail + expect_eq(ba.alloc_page(), NO_PPN, "truncated block state blocks allocation")
+    ba.blk_state = ftl_fill(NUM_BLOCKS, BLK_FREE)
+    ba.blk_valid = []
+    fail = fail + expect_eq(ba.valid_count(0), 0, "truncated block valid count fails closed")
+    ba.blk_valid = ftl_fill(NUM_BLOCKS, 0)
+    ba.valid[p0] = 1
+    ba.blk_state[0] = BLK_CLOSED
+    ba.blk_valid[0] = 1
+    ba.active_blk = UNMAP
+    ba.active_wp = 0
+    ba.free_count = ba.actual_free_blocks()
 
     # 8. free_block raises free_count and resets block state.
     var fc_before: i64 = ba.free_blocks()
