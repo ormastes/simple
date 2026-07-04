@@ -1,0 +1,149 @@
+# Access-style Grouped Report
+#
+# A minimal banded report over table.spl's Table: group header, detail rows,
+# per-group subtotal, and a grand total — the classic Access/Crystal Reports
+# "banded" layout, reduced to its essentials (no speculative report-builder
+# DSL, no per-band styling objects).
+#
+# Grouping strategy: sort by `group_col` first (reusing query.spl's
+# `query_order_by`, ascending) so same-group rows become contiguous, then a
+# single top-to-bottom band scan emits header/detail/subtotal lines. This is
+# simpler than first-seen grouping (query_group_count's approach) because it
+# also gives a deterministic (sorted) group order for free, and it means
+# report.spl adds zero new grouping/storage logic — it only composes
+# table.spl + query.spl.
+#
+# Aggregation is done in i64 space, not f64: `value_col` cells come in as
+# text (table.spl stores everything as text) and this module owns parsing
+# them, so it deliberately uses `to_i64()` instead of `to_f64()` — `to_f64()`
+# silently returns 0.0 for non-numeric text, and even for well-formed numeric
+# text, f64 formatting back to text is not exact-digit-friendly for
+# assertions. i64 sidesteps both problems entirely for whole-number report
+# values (the norm for counts, sums, and totals in this kind of report).
+
+use app.office.database.table.{Table, table_row_count, table_get}
+use app.office.database.query.{query_order_by}
+
+# =========================================================================
+# Internal helpers
+# =========================================================================
+
+fn _aggregate_i64(values: [i64], agg: text) -> text:
+    """Aggregate a list of i64 values per `agg` ("sum"/"count"/"avg"/"max"/
+    "min"), returned as text. "avg" is integer (floor) division of the sum
+    by the count. Unknown `agg` or an empty `values` list yields "0"."""
+    if agg == "count":
+        return "{values.len()}"
+    if values.len() == 0:
+        return "0"
+    var sum: i64 = 0
+    var i = 0
+    while i < values.len():
+        sum = sum + values[i]
+        i = i + 1
+    if agg == "sum":
+        return "{sum}"
+    if agg == "avg":
+        return "{sum / values.len()}"
+    if agg == "max":
+        var m = values[0]
+        i = 1
+        while i < values.len():
+            if values[i] > m:
+                m = values[i]
+            i = i + 1
+        return "{m}"
+    if agg == "min":
+        var lo = values[0]
+        i = 1
+        while i < values.len():
+            if values[i] < lo:
+                lo = values[i]
+            i = i + 1
+        return "{lo}"
+    "0"
+
+fn _html_escape(s: text) -> text:
+    """Escape `&`, `<`, `>`, `"` for safe embedding in an HTML fragment."""
+    var result = s
+    result = result.replace("&", "&amp;")
+    result = result.replace("<", "&lt;")
+    result = result.replace(">", "&gt;")
+    result = result.replace("\"", "&quot;")
+    result
+
+# =========================================================================
+# report_grouped
+# =========================================================================
+
+fn report_grouped(table: Table, group_col: text, value_col: text, agg: text) -> text:
+    """Banded text report: sort `table` by `group_col` (ascending), then for
+    each contiguous run of equal `group_col` values emit a `== <group> ==`
+    header, one `  <group>: <value>` detail line per row, and a
+    `  subtotal: <n>` line aggregating that group's `value_col` cells by
+    `agg`. After all groups, emit a `TOTAL: <n>` line aggregating every row's
+    `value_col` by `agg`. Returned as one multi-line text string."""
+    val sorted = query_order_by(table, group_col, false)
+    val n = table_row_count(sorted)
+    var lines: [text] = []
+    var current_group = ""
+    var group_started = false
+    var group_values: [i64] = []
+    var grand_values: [i64] = []
+    var i = 0
+    while i < n:
+        val g = table_get(sorted, i, group_col)
+        val v = table_get(sorted, i, value_col)
+        if not group_started or g != current_group:
+            if group_started:
+                lines.push("  subtotal: {_aggregate_i64(group_values, agg)}")
+            lines.push("== {g} ==")
+            current_group = g
+            group_started = true
+            group_values = []
+        lines.push("  {g}: {v}")
+        group_values.push(v.to_i64())
+        grand_values.push(v.to_i64())
+        i = i + 1
+    if group_started:
+        lines.push("  subtotal: {_aggregate_i64(group_values, agg)}")
+    lines.push("TOTAL: {_aggregate_i64(grand_values, agg)}")
+    lines.join("\n")
+
+# =========================================================================
+# report_to_html
+# =========================================================================
+
+fn report_to_html(table: Table, group_col: text, value_col: text, agg: text) -> text:
+    """Same banded structure as `report_grouped`, as an HTML fragment: one
+    `<section>` per group with an `<h3>` header, a `<ul>` of escaped detail
+    lines, and a subtotal line, followed by a grand-total footer. Returned
+    as one self-contained text string."""
+    val sorted = query_order_by(table, group_col, false)
+    val n = table_row_count(sorted)
+    var lines: [text] = []
+    var current_group = ""
+    var group_started = false
+    var group_values: [i64] = []
+    var grand_values: [i64] = []
+    var i = 0
+    while i < n:
+        val g = table_get(sorted, i, group_col)
+        val v = table_get(sorted, i, value_col)
+        val esc_g = _html_escape(g)
+        val esc_v = _html_escape(v)
+        if not group_started or g != current_group:
+            if group_started:
+                lines.push("</ul><p class=\"subtotal\">subtotal: {_aggregate_i64(group_values, agg)}</p></section>")
+            lines.push("<section><h3>{esc_g}</h3><ul>")
+            current_group = g
+            group_started = true
+            group_values = []
+        lines.push("<li>{esc_g}: {esc_v}</li>")
+        group_values.push(v.to_i64())
+        grand_values.push(v.to_i64())
+        i = i + 1
+    if group_started:
+        lines.push("</ul><p class=\"subtotal\">subtotal: {_aggregate_i64(group_values, agg)}</p></section>")
+    lines.push("<footer class=\"grand-total\">TOTAL: {_aggregate_i64(grand_values, agg)}</footer>")
+    lines.join("\n")
