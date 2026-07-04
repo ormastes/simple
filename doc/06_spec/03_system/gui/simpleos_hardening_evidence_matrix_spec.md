@@ -147,7 +147,7 @@ The wrapper emits these rows:
 - `simpleos_hardening_rv64_display_smoke_qmp_status`
 - `simpleos_hardening_qemu_virtio_gpu_access_status`
 
-The matrix passes only when all fourteen rows are `pass` and the required
+The matrix passes only when all fifteen rows are `pass` and the required
 guest-side QEMU performance release gate is `pass`.
 
 ## Evidence Sources
@@ -237,10 +237,11 @@ val code = result[2]
 expect(code).to_equal(0)
 expect(stdout).to_contain("simpleos_hardening_matrix_status=pass")
 expect(stdout).to_contain("simpleos_hardening_matrix_reason=pass")
-expect(stdout).to_contain("simpleos_hardening_matrix_passed=14/14")
+expect(stdout).to_contain("simpleos_hardening_matrix_passed=15/15")
 expect(stdout).to_contain("simpleos_hardening_exec_launch_fs_status=pass")
 expect(stdout).to_contain("simpleos_hardening_ssh_smf_exec_status=pass")
 expect(stdout).to_contain("simpleos_hardening_formal_lean_proofs_status=pass")
+expect(stdout).to_contain("simpleos_hardening_formal_riscv_dual_track_status=pass")
 expect(stdout).to_contain("simpleos_hardening_shared_wm_status=pass")
 expect(stdout).to_contain("simpleos_hardening_cpu_simd_status=pass")
 expect(stdout).to_contain("simpleos_hardening_llvm_port_status=pass")
@@ -325,6 +326,7 @@ expect(code).to_equal(1)
 expect(stdout).to_contain("simpleos_hardening_matrix_status=fail")
 expect(stdout).to_contain("simpleos_hardening_matrix_reason=matrix-incomplete")
 expect(stdout).to_contain("simpleos_hardening_formal_lean_proofs_status=pass")
+expect(stdout).to_contain("simpleos_hardening_formal_riscv_dual_track_status=pass")
 expect(stdout).to_contain("simpleos_hardening_qemu_host_counterpart_status=pass")
 expect(stdout).to_contain("simpleos_hardening_qemu_gui_smf_artifact_status=fail")
 expect(stdout).to_contain("simpleos_hardening_production_gui_web_renderer_parity_status=pass")
@@ -386,9 +388,10 @@ val code = result[2]
 expect(code).to_equal(0)
 expect(stdout).to_contain("simpleos_hardening_matrix_status=pass")
 expect(stdout).to_contain("simpleos_hardening_matrix_reason=pass")
-expect(stdout).to_contain("simpleos_hardening_matrix_passed=14/14")
+expect(stdout).to_contain("simpleos_hardening_matrix_passed=15/15")
 expect(stdout).to_contain("simpleos_hardening_qemu_host_counterpart_status=pass")
 expect(stdout).to_contain("simpleos_hardening_formal_lean_proofs_status=pass")
+expect(stdout).to_contain("simpleos_hardening_formal_riscv_dual_track_status=pass")
 expect(stdout).to_contain("simpleos_hardening_qemu_gui_smf_artifact_status=pass")
 expect(stdout).to_contain("simpleos_hardening_production_gui_web_renderer_parity_status=pass")
 expect(stdout).to_contain("simpleos_hardening_qemu_gui_smf_artifact_contract_status=pass")
